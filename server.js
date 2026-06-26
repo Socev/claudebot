@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 /*
- * server.js - asynchrone, bestand-bewuste "Claude-API" voor Olares.
+ * server.js - asynchrone, bestand-bewuste "Claude-API" voor Olares,
+ * met server-side sessiebeheer per chat (geen n8n-static-data nodig).
  *
- *   POST /run     { prompt, session_id?, secret?, files? }  -> { ok, job_id }   (direct)
- *   POST /result  { job_id, secret? }                       -> { found, done, ok, output, session_id, files }
+ *   POST /run     { prompt, chat_id?, session_id?, secret?, files? } -> { ok, job_id }
+ *   POST /result  { job_id, secret? }  -> { found, done, ok, output, session_id, files }
  *   GET  /health
  *
- * Async omdat de Olares-gateway lange synchronе requests na ~60s afkapt.
- * /run start de taak en geeft meteen een job_id terug; n8n pollt /result.
+ * Sessies: per chat_id wordt het laatste Claude-session_id bewaard in
+ * chat_sessions.json (op het persistent volume). Volgende vragen uit dezelfde
+ * chat hervatten automatisch dat gesprek (--resume).
  *
  * Env: VAULT_DIR, PORT, API_SECRET, IO_DIR (default /opt/data/io), MAX_FILE_MB
  */
@@ -17,14 +19,19 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const HOME = process.env.HOME || '/opt/data';
 const VAULT = process.env.VAULT_DIR || '/opt/data/AI_SecondBrain';
 const PORT = process.env.PORT || 8080;
 const SECRET = process.env.API_SECRET || '';
 const IO = process.env.IO_DIR || '/opt/data/io';
 const MAX_FILE = (parseInt(process.env.MAX_FILE_MB || '20', 10)) * 1024 * 1024;
 const TIMEOUT_MS = 15 * 60 * 1000;
+const SESS_FILE = path.join(HOME, 'chat_sessions.json');
 
 const jobs = {};
+let chatSessions = {};
+try { chatSessions = JSON.parse(fs.readFileSync(SESS_FILE, 'utf8')); } catch (e) { chatSessions = {}; }
+function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
 
 function runClaude(prompt, sessionId, outdir) {
   return new Promise(function (resolve) {
@@ -68,7 +75,7 @@ function collectFiles(dir) {
   return res;
 }
 
-async function processJob(jobId, prompt, sessionId, files) {
+async function processJob(jobId, prompt, sessionId, files, chatId) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
   const outdir = path.join(base, 'out');
@@ -88,6 +95,7 @@ async function processJob(jobId, prompt, sessionId, files) {
       '. Sla elk bestand dat je als resultaat oplevert (bijvoorbeeld een .docx) op in de map ' + outdir + '.]';
     const r = await runClaude(fullPrompt, sessionId, outdir);
     r.files = collectFiles(outdir);
+    if (chatId && r.session_id) { chatSessions[chatId] = r.session_id; saveSessions(); }
     jobs[jobId] = { done: true, result: r, created: Date.now() };
   } catch (e) {
     jobs[jobId] = { done: true, result: { ok: false, error: String(e), output: '', files: [] }, created: Date.now() };
@@ -105,7 +113,7 @@ function readBody(req, cb) {
 const server = http.createServer(function (req, res) {
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, service: 'claude-api', vault: VAULT, jobs: Object.keys(jobs).length }));
+    return res.end(JSON.stringify({ ok: true, service: 'claude-api', vault: VAULT, jobs: Object.keys(jobs).length, chats: Object.keys(chatSessions).length }));
   }
 
   if (req.method === 'POST' && req.url === '/run') {
@@ -114,9 +122,11 @@ const server = http.createServer(function (req, res) {
       if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
       const prompt = (d.prompt || '').toString().trim();
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
+      const chatId = (d.chat_id != null && d.chat_id !== '') ? String(d.chat_id) : '';
+      const sessionId = d.session_id || (chatId ? chatSessions[chatId] : '') || '';
       const jobId = crypto.randomBytes(8).toString('hex');
       jobs[jobId] = { done: false, created: Date.now() };
-      processJob(jobId, prompt, d.session_id, d.files);
+      processJob(jobId, prompt, sessionId, d.files, chatId);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, job_id: jobId }));
     });
@@ -136,6 +146,17 @@ const server = http.createServer(function (req, res) {
     });
   }
 
+  if (req.method === 'POST' && req.url === '/reset') {
+    return readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
+      const chatId = (d.chat_id != null) ? String(d.chat_id) : '';
+      if (chatId) { delete chatSessions[chatId]; saveSessions(); }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, reset: chatId }));
+    });
+  }
+
   res.writeHead(404); res.end('not found');
 });
 
@@ -145,5 +166,5 @@ setInterval(function () {
 }, 5 * 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', function () {
-  console.log('claude-api (async) luistert op :' + PORT + ' (vault=' + VAULT + ')');
+  console.log('claude-api (async, chat-sessies) luistert op :' + PORT + ' (vault=' + VAULT + ')');
 });
