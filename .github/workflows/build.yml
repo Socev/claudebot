@@ -21,4 +21,6 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/socev/claudebot:latest
+          tags:
+            ghcr.io/socev/claudebot:latest
+            ghcr.io/socev/claudebot:${{ github.run_number }}
