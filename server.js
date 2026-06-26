@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /*
- * server.js - asynchrone, bestand-bewuste "Claude-API" voor Olares,
- * met server-side sessiebeheer per chat (geen n8n-static-data nodig).
+ * server.js - asynchrone, bestand-bewuste "Claude-API" voor Olares.
+ *   - Server-side sessiebeheer per chat (chat_sessions.json op persistent volume).
+ *   - Per chat worden taken GESERIALISEERD: een nieuwe vraag voor dezelfde chat
+ *     wacht tot de vorige klaar is, zodat de gesprekslijn (memory) altijd klopt.
+ *     Verschillende chats draaien wel parallel.
  *
  *   POST /run     { prompt, chat_id?, session_id?, secret?, files? } -> { ok, job_id }
  *   POST /result  { job_id, secret? }  -> { found, done, ok, output, session_id, files }
+ *   POST /reset   { chat_id, secret? } -> wist het geheugen van een chat
  *   GET  /health
- *
- * Sessies: per chat_id wordt het laatste Claude-session_id bewaard in
- * chat_sessions.json (op het persistent volume). Volgende vragen uit dezelfde
- * chat hervatten automatisch dat gesprek (--resume).
  *
  * Env: VAULT_DIR, PORT, API_SECRET, IO_DIR (default /opt/data/io), MAX_FILE_MB
  */
@@ -29,9 +29,19 @@ const TIMEOUT_MS = 15 * 60 * 1000;
 const SESS_FILE = path.join(HOME, 'chat_sessions.json');
 
 const jobs = {};
+const chatChains = {};
 let chatSessions = {};
 try { chatSessions = JSON.parse(fs.readFileSync(SESS_FILE, 'utf8')); } catch (e) { chatSessions = {}; }
 function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
+
+// Serialiseer per chat: voeg fn toe aan de keten van die chat.
+function enqueue(chatId, fn) {
+  const key = chatId || ('anon-' + crypto.randomBytes(4).toString('hex'));
+  const prev = chatChains[key] || Promise.resolve();
+  const next = prev.then(fn, fn);
+  chatChains[key] = next.catch(function () {});
+  return next;
+}
 
 function runClaude(prompt, sessionId, outdir) {
   return new Promise(function (resolve) {
@@ -75,7 +85,9 @@ function collectFiles(dir) {
   return res;
 }
 
-async function processJob(jobId, prompt, sessionId, files, chatId) {
+// Sessie wordt PAS bij uitvoering opgehaald (na de vorige taak in de keten),
+// zodat een vervolgvraag de bijgewerkte gesprekslijn hervat.
+async function processJob(jobId, prompt, explicitSession, files, chatId) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
   const outdir = path.join(base, 'out');
@@ -90,6 +102,7 @@ async function processJob(jobId, prompt, sessionId, files, chatId) {
         }
       }
     }
+    const sessionId = explicitSession || (chatId ? chatSessions[chatId] : '') || '';
     const fullPrompt = prompt +
       '\n\n[Systeem: invoerbestanden staan in de map ' + indir +
       '. Sla elk bestand dat je als resultaat oplevert (bijvoorbeeld een .docx) op in de map ' + outdir + '.]';
@@ -123,10 +136,9 @@ const server = http.createServer(function (req, res) {
       const prompt = (d.prompt || '').toString().trim();
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
       const chatId = (d.chat_id != null && d.chat_id !== '') ? String(d.chat_id) : '';
-      const sessionId = d.session_id || (chatId ? chatSessions[chatId] : '') || '';
       const jobId = crypto.randomBytes(8).toString('hex');
       jobs[jobId] = { done: false, created: Date.now() };
-      processJob(jobId, prompt, sessionId, d.files, chatId);
+      enqueue(chatId, function () { return processJob(jobId, prompt, d.session_id, d.files, chatId); });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, job_id: jobId }));
     });
@@ -166,5 +178,5 @@ setInterval(function () {
 }, 5 * 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', function () {
-  console.log('claude-api (async, chat-sessies) luistert op :' + PORT + ' (vault=' + VAULT + ')');
+  console.log('claude-api (async, chat-sessies, per-chat seriëel) luistert op :' + PORT + ' (vault=' + VAULT + ')');
 });
