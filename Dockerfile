@@ -11,7 +11,7 @@ RUN curl -fsSL https://rclone.org/install.sh | bash || true
 
 # Non-root gebruiker: 'claude' weigert bypassPermissions als root.
 # HOME = /opt/data (hierop mount Olares het persistent volume).
-RUN useradd -m -u 1000 -d /opt/data claude || true
+RUN id claude 2>/dev/null || useradd -u 1001 -d /opt/data -s /bin/bash claude
 
 ENV HOME=/opt/data
 ENV VAULT_DIR=/opt/data/AI_SecondBrain
