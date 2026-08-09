@@ -1,8 +1,12 @@
 # claude-api — headless Claude CLI als interne Olares-API (+ Drive-sync).
+# Twee workspaces in één pod:
+#   VAULT_DIR = Second Brain (rclone bisync met Google Drive)
+#   REPO_DIR  = git-clone van de GHAWA-website (alleen actief als GIT_REPO_URL is gezet)
 FROM node:20-bookworm-slim
 
+# git is nodig voor de GHAWA-workspace (node:slim bevat 'm niet standaard).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl unzip bash procps tzdata gosu pandoc poppler-utils \
+      ca-certificates curl unzip bash procps tzdata gosu git pandoc poppler-utils \
  && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI (levert 'claude') + rclone
@@ -15,8 +19,10 @@ RUN id claude 2>/dev/null || useradd -u 1001 -d /opt/data -s /bin/bash claude
 
 ENV HOME=/opt/data
 ENV VAULT_DIR=/opt/data/AI_SecondBrain
+ENV REPO_DIR=/opt/data/repo
 ENV PORT=8080
 ENV TZ=Europe/Amsterdam
+# GIT_REPO_URL / GITHUB_PAT bewust NIET hier: die komen uit de deployment-env.
 
 WORKDIR /app
 COPY server.js /app/server.js
