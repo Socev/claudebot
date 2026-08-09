@@ -5,13 +5,20 @@
  *   - Per chat worden taken GESERIALISEERD: een nieuwe vraag voor dezelfde chat
  *     wacht tot de vorige klaar is, zodat de gesprekslijn (memory) altijd klopt.
  *     Verschillende chats draaien wel parallel.
+ *   - MEERDERE WERKMAPPEN ("workspaces") in één pod. De aanroeper kiest met het
+ *     veld `workspace` in welke map Claude draait:
+ *       (leeg) / "vault" -> VAULT_DIR   (Second Brain)
+ *       "ghawa"          -> REPO_DIR    (git-clone van de GHAWA-site)
+ *     Claude laadt per workspace automatisch de CLAUDE.md en .claude/ van die map.
+ *     Sessiegeheugen wordt per workspace apart bijgehouden: dezelfde Telegram
+ *     chat-ID bij twee verschillende bots deelt dus GEEN gesprekslijn.
  *
- *   POST /run     { prompt, chat_id?, session_id?, secret?, files? } -> { ok, job_id }
+ *   POST /run     { prompt, chat_id?, workspace?, session_id?, secret?, files? } -> { ok, job_id, workspace }
  *   POST /result  { job_id, secret? }  -> { found, done, ok, output, session_id, files }
- *   POST /reset   { chat_id, secret? } -> wist het geheugen van een chat
+ *   POST /reset   { chat_id, workspace?, secret? } -> wist het geheugen van een chat
  *   GET  /health
  *
- * Env: VAULT_DIR, PORT, API_SECRET, IO_DIR (default /opt/data/io), MAX_FILE_MB
+ * Env: VAULT_DIR, REPO_DIR, PORT, API_SECRET, IO_DIR (default /opt/data/io), MAX_FILE_MB
  */
 const http = require('http');
 const { spawn } = require('child_process');
@@ -21,6 +28,7 @@ const crypto = require('crypto');
 
 const HOME = process.env.HOME || '/opt/data';
 const VAULT = process.env.VAULT_DIR || '/opt/data/AI_SecondBrain';
+const REPO = process.env.REPO_DIR || '/opt/data/repo';
 const PORT = process.env.PORT || 8080;
 const SECRET = process.env.API_SECRET || '';
 const IO = process.env.IO_DIR || '/opt/data/io';
@@ -28,27 +36,63 @@ const MAX_FILE = (parseInt(process.env.MAX_FILE_MB || '20', 10)) * 1024 * 1024;
 const TIMEOUT_MS = 15 * 60 * 1000;
 const SESS_FILE = path.join(HOME, 'chat_sessions.json');
 
+// ── Workspaces ──────────────────────────────────────────────────────────────
+// 'vault' is de default en houdt zijn oude gedrag én oude sessiesleutels,
+// zodat bestaande chats hun geheugen niet verliezen na deze update.
+const DEFAULT_WS = 'vault';
+const WORKSPACES = {
+  vault: {
+    dir: VAULT,
+    hint: function (indir, outdir) {
+      return '[Systeem: invoerbestanden staan in de map ' + indir +
+        '. Sla elk bestand dat je als resultaat oplevert (bijvoorbeeld een .docx) op in de map ' + outdir + '.]';
+    }
+  },
+  ghawa: {
+    dir: REPO,
+    hint: function (indir, outdir) {
+      return '[Systeem: je werkt in de git-clone van de GHAWA-website. Houd je aan CLAUDE.md in deze repo. ' +
+        'Eventuele meegestuurde bestanden (bv. foto\'s) staan in de map ' + indir +
+        '. Verplaats foto\'s die op de site moeten naar de juiste map in de repo en verwijs ernaar. ' +
+        'Bestanden die je als download wilt teruggeven, zet je in ' + outdir + '.]';
+    }
+  }
+};
+
+function resolveWorkspace(name) {
+  const key = (name == null ? '' : String(name)).trim().toLowerCase();
+  if (!key) return DEFAULT_WS;
+  return Object.prototype.hasOwnProperty.call(WORKSPACES, key) ? key : DEFAULT_WS;
+}
+
+// Sleutel voor sessiegeheugen én voor de per-chat wachtrij.
+// vault houdt de kale chat-ID (backwards compatible), andere workspaces krijgen een prefix.
+function sessionKey(ws, chatId) {
+  if (!chatId) return '';
+  return ws === DEFAULT_WS ? chatId : ws + ':' + chatId;
+}
+
 const jobs = {};
 const chatChains = {};
 let chatSessions = {};
 try { chatSessions = JSON.parse(fs.readFileSync(SESS_FILE, 'utf8')); } catch (e) { chatSessions = {}; }
 function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
 
-// Serialiseer per chat: voeg fn toe aan de keten van die chat.
-function enqueue(chatId, fn) {
-  const key = chatId || ('anon-' + crypto.randomBytes(4).toString('hex'));
-  const prev = chatChains[key] || Promise.resolve();
+// Serialiseer per chat+workspace: voeg fn toe aan de keten van die sleutel.
+function enqueue(key, fn) {
+  const k = key || ('anon-' + crypto.randomBytes(4).toString('hex'));
+  const prev = chatChains[k] || Promise.resolve();
   const next = prev.then(fn, fn);
-  chatChains[key] = next.catch(function () {});
+  chatChains[k] = next.catch(function () {});
   return next;
 }
 
-function runClaude(prompt, sessionId, outdir) {
+function runClaude(prompt, sessionId, outdir, cwd) {
   return new Promise(function (resolve) {
     const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', 'bypassPermissions'];
     if (sessionId) args.push('--resume', sessionId);
     const env = Object.assign({}, process.env, { OUTDIR: outdir });
-    const child = spawn('claude', args, { cwd: VAULT, env: env });
+    const child = spawn('claude', args, { cwd: cwd, env: env });
     let out = '', err = '';
     const t = setTimeout(function () { child.kill('SIGKILL'); resolve({ ok: false, error: 'timeout', output: out }); }, TIMEOUT_MS);
     child.stdout.on('data', function (d) { out += d; });
@@ -87,11 +131,17 @@ function collectFiles(dir) {
 
 // Sessie wordt PAS bij uitvoering opgehaald (na de vorige taak in de keten),
 // zodat een vervolgvraag de bijgewerkte gesprekslijn hervat.
-async function processJob(jobId, prompt, explicitSession, files, chatId) {
+async function processJob(jobId, prompt, explicitSession, files, chatId, ws) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
   const outdir = path.join(base, 'out');
+  const space = WORKSPACES[ws];
+  const key = sessionKey(ws, chatId);
   try {
+    if (!fs.existsSync(space.dir)) {
+      jobs[jobId] = { done: true, result: { ok: false, error: 'workspace-missing', output: 'De werkmap voor workspace "' + ws + '" (' + space.dir + ') bestaat niet in de pod.', files: [] }, created: Date.now() };
+      return;
+    }
     fs.mkdirSync(indir, { recursive: true });
     fs.mkdirSync(outdir, { recursive: true });
     if (Array.isArray(files)) {
@@ -102,13 +152,12 @@ async function processJob(jobId, prompt, explicitSession, files, chatId) {
         }
       }
     }
-    const sessionId = explicitSession || (chatId ? chatSessions[chatId] : '') || '';
-    const fullPrompt = prompt +
-      '\n\n[Systeem: invoerbestanden staan in de map ' + indir +
-      '. Sla elk bestand dat je als resultaat oplevert (bijvoorbeeld een .docx) op in de map ' + outdir + '.]';
-    const r = await runClaude(fullPrompt, sessionId, outdir);
+    const sessionId = explicitSession || (key ? chatSessions[key] : '') || '';
+    const fullPrompt = prompt + '\n\n' + space.hint(indir, outdir);
+    const r = await runClaude(fullPrompt, sessionId, outdir, space.dir);
     r.files = collectFiles(outdir);
-    if (chatId && r.session_id) { chatSessions[chatId] = r.session_id; saveSessions(); }
+    r.workspace = ws;
+    if (key && r.session_id) { chatSessions[key] = r.session_id; saveSessions(); }
     jobs[jobId] = { done: true, result: r, created: Date.now() };
   } catch (e) {
     jobs[jobId] = { done: true, result: { ok: false, error: String(e), output: '', files: [] }, created: Date.now() };
@@ -125,8 +174,10 @@ function readBody(req, cb) {
 
 const server = http.createServer(function (req, res) {
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
+    const spaces = {};
+    for (const k in WORKSPACES) spaces[k] = { dir: WORKSPACES[k].dir, exists: fs.existsSync(WORKSPACES[k].dir) };
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, service: 'claude-api', vault: VAULT, jobs: Object.keys(jobs).length, chats: Object.keys(chatSessions).length }));
+    return res.end(JSON.stringify({ ok: true, service: 'claude-api', vault: VAULT, workspaces: spaces, jobs: Object.keys(jobs).length, chats: Object.keys(chatSessions).length }));
   }
 
   if (req.method === 'POST' && req.url === '/run') {
@@ -136,11 +187,12 @@ const server = http.createServer(function (req, res) {
       const prompt = (d.prompt || '').toString().trim();
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
       const chatId = (d.chat_id != null && d.chat_id !== '') ? String(d.chat_id) : '';
+      const ws = resolveWorkspace(d.workspace);
       const jobId = crypto.randomBytes(8).toString('hex');
       jobs[jobId] = { done: false, created: Date.now() };
-      enqueue(chatId, function () { return processJob(jobId, prompt, d.session_id, d.files, chatId); });
+      enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws); });
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, job_id: jobId }));
+      res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws }));
     });
   }
 
@@ -163,9 +215,11 @@ const server = http.createServer(function (req, res) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
       const chatId = (d.chat_id != null) ? String(d.chat_id) : '';
-      if (chatId) { delete chatSessions[chatId]; saveSessions(); }
+      const ws = resolveWorkspace(d.workspace);
+      const key = sessionKey(ws, chatId);
+      if (key) { delete chatSessions[key]; saveSessions(); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, reset: chatId }));
+      res.end(JSON.stringify({ ok: true, reset: chatId, workspace: ws }));
     });
   }
 
@@ -178,5 +232,6 @@ setInterval(function () {
 }, 5 * 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', function () {
-  console.log('claude-api (async, chat-sessies, per-chat seriëel) luistert op :' + PORT + ' (vault=' + VAULT + ')');
+  console.log('claude-api (async, chat-sessies, per-chat serieel, multi-workspace) luistert op :' + PORT +
+    ' (vault=' + VAULT + ', repo=' + REPO + ')');
 });
