@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run.sh — draait als gebruiker 'claude'. Start + bewaakt:
 #   - de Claude-API (server.js)         altijd
-#   - de Drive-sync (rclone bisync)     altijd
+#   - de vault-sync (rclone bisync)     altijd
 #   - de git-repo van de GHAWA-site     alleen als GIT_REPO_URL is gezet
 #   - de Telegram-bot (telegram-claude-bot.js)  alleen als TG_TOKEN is gezet
 # Zo kun je de in-container bot uitzetten door simpelweg TG_TOKEN leeg te maken
@@ -12,6 +12,13 @@
 #   GITHUB_PAT     fine-grained PAT met contents:write op ALLEEN die repo
 #   REPO_DIR       /opt/data/repo (default)
 #   GIT_USER_NAME / GIT_USER_EMAIL  identiteit voor commits
+#
+# Extra env voor de sync (defaults = het oude gedrag, claudebot merkt niets):
+#   SYNC_ENABLED   1 (default) of 0
+#   SYNC_REMOTE    gdrive (default)      — rclone-remote
+#   SYNC_PATH      AI_SecondBrain (default) — pad binnen die remote
+#   SYNC_INTERVAL  300 (default)         — seconden tussen twee rondes
+#   SYNC_INIT      0 (default)           — 1 = eenmalig een resync toestaan
 set -u
 export HOME=/opt/data
 export PATH=/usr/local/bin:/opt/data/bin:$PATH
@@ -22,19 +29,92 @@ BIN=/opt/data/bin
 mkdir -p "$BIN" "$VAULT"
 log(){ echo "$(date '+%F %T') $*"; }
 
-start_sync(){
-  bash -c '
-    VAULT="'"$VAULT"'"
-    while true; do
-      if rclone listremotes 2>/dev/null | grep -q "^gdrive:"; then
-        rclone bisync "gdrive:AI_SecondBrain" "$VAULT" --create-empty-src-dirs --conflict-resolve newer >> '"$BIN"'/bisync.log 2>&1 \
-        || rclone bisync "gdrive:AI_SecondBrain" "$VAULT" --resync --create-empty-src-dirs >> '"$BIN"'/bisync.log 2>&1
-      else
-        echo "$(date) WACHT: rclone-remote gdrive nog niet geconfigureerd" >> '"$BIN"'/bisync.log
+# ── Sync-instellingen ───────────────────────────────────────────────────────
+SYNC_ENABLED="${SYNC_ENABLED:-1}"
+SYNC_REMOTE="${SYNC_REMOTE:-gdrive}"
+SYNC_PATH="${SYNC_PATH:-AI_SecondBrain}"
+SYNC_INTERVAL="${SYNC_INTERVAL:-300}"
+SYNC_INIT="${SYNC_INIT:-0}"
+BRON="${SYNC_REMOTE}:${SYNC_PATH}"
+MARKER="$VAULT/.sync-id"
+SYNCLOG="$BIN/bisync.log"
+
+# De bisync-toestand blijft op de standaardplek ($HOME/.cache/rclone/bisync).
+# HOME is /opt/data en dat is het persistent volume, dus die overleeft een
+# podherstart. Verplaatsen zou de bestaande vergelijkingslijsten ongeldig maken
+# en daarmee juist een resync afdwingen — precies wat we willen vermijden.
+
+# ── Grendel: een vault die bij een andere bron hoort, koppelen we niet om ────
+# Alleen een variabele is te zwak: één verkeerd gezette env en de speelpod trekt
+# het echte brein binnen. De koppeling ligt daarom vast in de vault zelf.
+if [ -f "$MARKER" ]; then
+  HUIDIG="$(cat "$MARKER" 2>/dev/null || echo '')"
+  if [ "$HUIDIG" != "$BRON" ]; then
+    log "SYNC STOP: $VAULT hoort bij '$HUIDIG', niet bij '$BRON'. Sync uitgezet."
+    log "Klopt dit wel? Verwijder dan met de hand $MARKER."
+    SYNC_ENABLED=0
+  fi
+fi
+
+sync_ronde(){
+  rclone bisync "$BRON" "$VAULT" \
+    --create-empty-src-dirs --conflict-resolve newer >> "$SYNCLOG" 2>&1
+}
+
+sync_lus(){
+  # Uitgezet? Dan blijft dit proces wél leven, anders herstart de supervisor
+  # hem elke 30 seconden opnieuw en loopt het log vol.
+  if [ "$SYNC_ENABLED" != "1" ]; then
+    echo "$(date) sync staat uit (SYNC_ENABLED=$SYNC_ENABLED)" >> "$SYNCLOG"
+    while true; do sleep 3600; done
+  fi
+
+  while ! rclone listremotes 2>/dev/null | grep -q "^${SYNC_REMOTE}:"; do
+    echo "$(date) WACHT: rclone-remote ${SYNC_REMOTE} nog niet geconfigureerd" >> "$SYNCLOG"
+    sleep "$SYNC_INTERVAL"
+  done
+
+  # Allereerste koppeling: bisync heeft nog geen vergelijkingslijsten en weigert.
+  # Die eerste --resync kan bestanden overschrijven, dus die doen we NOOIT
+  # vanzelf. Zet SYNC_INIT=1 als je hem bewust wilt.
+  if [ "$SYNC_INIT" = "1" ] && [ ! -f "$MARKER" ]; then
+    echo "$(date) eerste koppeling met $BRON — resync, nieuwste bestand wint" >> "$SYNCLOG"
+    if rclone bisync "$BRON" "$VAULT" --resync --resync-mode newer \
+         --create-empty-src-dirs >> "$SYNCLOG" 2>&1; then
+      printf '%s' "$BRON" > "$MARKER"
+      echo "$(date) koppeling vastgelegd in .sync-id" >> "$SYNCLOG"
+    else
+      echo "$(date) FOUT: eerste resync mislukt — vault ongemoeid gelaten" >> "$SYNCLOG"
+    fi
+  fi
+
+  FOUTEN=0
+  while true; do
+    if sync_ronde; then
+      FOUTEN=0
+      # Na een geslaagde ronde de koppeling vastleggen als dat nog niet gebeurd is.
+      # Zo krijgt ook een bestaande pod de grendel zonder dat iemand iets doet.
+      [ -f "$MARKER" ] || printf '%s' "$BRON" > "$MARKER"
+    else
+      FOUTEN=$((FOUTEN + 1))
+      echo "$(date) bisync-ronde mislukt ($FOUTEN achter elkaar)" >> "$SYNCLOG"
+      # GEEN automatische --resync meer. De oude terugval deed dat bij ELKE fout,
+      # ook bij een netwerkhapering of een verweesde lock, en liet dan Path1
+      # winnen. Dat wist stilletjes werk. Herstel dat gegevens kan verwijderen
+      # hoort mensenwerk te zijn.
+      if [ "$FOUTEN" -ge 3 ]; then
+        echo "$(date) LET OP: drie mislukte rondes. Waarschijnlijk is met de hand" >> "$SYNCLOG"
+        echo "$(date)   rclone bisync \"$BRON\" \"$VAULT\" --resync --resync-mode newer" >> "$SYNCLOG"
+        echo "$(date) nodig. Draai die eerst met --dry-run." >> "$SYNCLOG"
       fi
-      sleep 300
-    done' &
-  SYNC_PID=$!; log "sync gestart (pid $SYNC_PID)"
+    fi
+    sleep "$SYNC_INTERVAL"
+  done
+}
+
+start_sync(){
+  sync_lus &
+  SYNC_PID=$!; log "sync gestart (pid $SYNC_PID) — $BRON <-> $VAULT, elke ${SYNC_INTERVAL}s"
 }
 start_api(){
   node /app/server.js >> "$BIN/api.log" 2>&1 &
@@ -93,7 +173,7 @@ sync_repo(){
 }
 
 # setup-checks
-rclone listremotes 2>/dev/null | grep -q "^gdrive:" || log "LET OP: rclone 'gdrive' ontbreekt — draai 'rclone config' als gebruiker claude."
+rclone listremotes 2>/dev/null | grep -q "^${SYNC_REMOTE}:" || log "LET OP: rclone-remote '${SYNC_REMOTE}' ontbreekt — draai 'rclone config' als gebruiker claude."
 [ -d /opt/data/.claude ] || log "LET OP: Claude nog niet ingelogd — draai 'claude' als gebruiker claude."
 
 start_sync
