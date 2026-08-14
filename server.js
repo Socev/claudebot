@@ -12,11 +12,15 @@
  *     Claude laadt per workspace automatisch de CLAUDE.md en .claude/ van die map.
  *     Sessiegeheugen wordt per workspace apart bijgehouden: dezelfde Telegram
  *     chat-ID bij twee verschillende bots deelt dus GEEN gesprekslijn.
+ *   - MODELKEUZE per job: het veld `model` in /run kiest via een vaste alias het
+ *     model voor die ene run ("snel", "groot", "lokaal"). Zonder veld geldt de
+ *     ANTHROPIC_MODEL uit de pod-env. Alleen aliassen, geen vrije namen: een
+ *     typefout mag niet stilletjes op een niet-bestaand model uitkomen.
  *
- *   POST /run     { prompt, chat_id?, workspace?, session_id?, secret?, files? } -> { ok, job_id, workspace }
+ *   POST /run     { prompt, chat_id?, workspace?, model?, session_id?, secret?, files? } -> { ok, job_id, workspace, model }
  *   POST /result  { job_id, secret? }  -> { found, done, ok, output, session_id, files }
  *   POST /reset   { chat_id, workspace?, secret? } -> wist het geheugen van een chat
- *   GET  /health
+ *   GET  /health  -> status incl. sync- en inboxinformatie (voor de wachters)
  *
  * Env: VAULT_DIR, REPO_DIR, PORT, API_SECRET, IO_DIR (default /opt/data/io), MAX_FILE_MB
  */
@@ -35,6 +39,20 @@ const IO = process.env.IO_DIR || '/opt/data/io';
 const MAX_FILE = (parseInt(process.env.MAX_FILE_MB || '20', 10)) * 1024 * 1024;
 const TIMEOUT_MS = 15 * 60 * 1000;
 const SESS_FILE = path.join(HOME, 'chat_sessions.json');
+const SYNC_LOG = process.env.SYNC_LOG || '/opt/data/bin/bisync.log';
+
+// ── Modelaliassen ───────────────────────────────────────────────────────────
+// Vaste, korte namen; de echte modelnamen staan maar op één plek (hier + LiteLLM).
+// Bestaat een alias niet, dan valt de job terug op de standaard uit de env.
+const MODEL_ALIASSEN = {
+  snel: 'jimmy-snel',    // DeepSeek V4 Flash via Inceptron — werkpaard
+  groot: 'jimmy-groot',  // GLM 5.2 via Inceptron — controleur / moeilijk werk
+  lokaal: 'jimmy-klein'  // Qwen via Ollama — eigen hardware, gratis
+};
+function resolveModel(name) {
+  const key = (name == null ? '' : String(name)).trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(MODEL_ALIASSEN, key) ? MODEL_ALIASSEN[key] : '';
+}
 
 // ── Workspaces ──────────────────────────────────────────────────────────────
 // 'vault' is de default en houdt zijn oude gedrag én oude sessiesleutels,
@@ -87,11 +105,13 @@ function enqueue(key, fn) {
   return next;
 }
 
-function runClaude(prompt, sessionId, outdir, cwd) {
+function runClaude(prompt, sessionId, outdir, cwd, model) {
   return new Promise(function (resolve) {
     const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', 'bypassPermissions'];
     if (sessionId) args.push('--resume', sessionId);
-    const env = Object.assign({}, process.env, { OUTDIR: outdir });
+    const extra = { OUTDIR: outdir };
+    if (model) extra.ANTHROPIC_MODEL = model;
+    const env = Object.assign({}, process.env, extra);
     const child = spawn('claude', args, { cwd: cwd, env: env });
     let out = '', err = '';
     const t = setTimeout(function () { child.kill('SIGKILL'); resolve({ ok: false, error: 'timeout', output: out }); }, TIMEOUT_MS);
@@ -129,9 +149,80 @@ function collectFiles(dir) {
   return res;
 }
 
-// Sessie wordt PAS bij uitvoering opgehaald (na de vorige taak in de keten),
-// zodat een vervolgvraag de bijgewerkte gesprekslijn hervat.
-async function processJob(jobId, prompt, explicitSession, files, chatId, ws) {
+// ── Informatie voor de wachters (GET /health) ───────────────────────────────
+// n8n kan niet in de pod kijken; /health is het luik. Alles hier is read-only
+// en mag nooit een fout gooien — een kapotte statuspagina is erger dan geen.
+
+// Sync: wanneer schreef de bisync-lus voor het laatst iets, en waar is deze
+// vault aan gekoppeld? De log wordt elke ronde beschreven (ook bij fouten),
+// dus een oude mtime betekent: de lus zelf is stil.
+function syncInfo() {
+  const info = { log_mtime: null, minuten_stil: null, sync_id: null, laatste_ronde_ok: null };
+  try {
+    const st = fs.statSync(SYNC_LOG);
+    info.log_mtime = st.mtimeMs;
+    info.minuten_stil = Math.round((Date.now() - st.mtimeMs) / 60000);
+    // laatste 4 KB nalezen: staat daar nog een geslaagde ronde in?
+    const fd = fs.openSync(SYNC_LOG, 'r');
+    const size = st.size;
+    const len = Math.min(4096, size);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    fs.closeSync(fd);
+    const staart = buf.toString('utf8');
+    info.laatste_ronde_ok = staart.lastIndexOf('Bisync successful') > staart.lastIndexOf('Bisync critical error');
+  } catch (e) {}
+  try { info.sync_id = fs.readFileSync(path.join(VAULT, '.sync-id'), 'utf8').trim(); } catch (e) {}
+  return info;
+}
+
+// Inbox: hoeveel bronnen wachten er, en hoe oud is de oudste?
+// Zoekt mappen die 'raw_input' of '_INBOX' heten, tot drie niveaus diep.
+// Bestanden die met '_' beginnen zijn uitleg, geen bron — die tellen niet mee.
+function inboxInfo() {
+  const info = { telling: 0, oudste_uren: null };
+  let oudste = null;
+  try {
+    const stack = [{ dir: VAULT, diepte: 0 }];
+    while (stack.length) {
+      const cur = stack.pop();
+      let names = [];
+      try { names = fs.readdirSync(cur.dir); } catch (e) { continue; }
+      for (let i = 0; i < names.length; i++) {
+        const naam = names[i];
+        if (naam === '.claude' || naam.indexOf('.') === 0) continue;
+        const fp = path.join(cur.dir, naam);
+        let st;
+        try { st = fs.statSync(fp); } catch (e) { continue; }
+        if (st.isDirectory()) {
+          if (naam === 'raw_input' || naam === '_INBOX') {
+            let inboxNames = [];
+            try { inboxNames = fs.readdirSync(fp); } catch (e) {}
+            for (let j = 0; j < inboxNames.length; j++) {
+              if (inboxNames[j].indexOf('_') === 0) continue;
+              let fst;
+              try { fst = fs.statSync(path.join(fp, inboxNames[j])); } catch (e) { continue; }
+              if (!fst.isFile()) continue;
+              info.telling++;
+              if (oudste === null || fst.mtimeMs < oudste) oudste = fst.mtimeMs;
+            }
+          } else if (cur.diepte < 3) {
+            stack.push({ dir: fp, diepte: cur.diepte + 1 });
+          }
+        }
+      }
+    }
+  } catch (e) {}
+  if (oudste !== null) info.oudste_uren = Math.round((Date.now() - oudste) / 3600000);
+  return info;
+}
+
+// Sessie: hoe groot is het opgeslagen geheugen (aanwijzing voor consolidatie)?
+function sessieInfo() {
+  return { chats: Object.keys(chatSessions).length };
+}
+
+async function processJob(jobId, prompt, explicitSession, files, chatId, ws, model) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
   const outdir = path.join(base, 'out');
@@ -154,9 +245,10 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws) {
     }
     const sessionId = explicitSession || (key ? chatSessions[key] : '') || '';
     const fullPrompt = prompt + '\n\n' + space.hint(indir, outdir);
-    const r = await runClaude(fullPrompt, sessionId, outdir, space.dir);
+    const r = await runClaude(fullPrompt, sessionId, outdir, space.dir, model);
     r.files = collectFiles(outdir);
     r.workspace = ws;
+    if (model) r.model = model;
     if (key && r.session_id) { chatSessions[key] = r.session_id; saveSessions(); }
     jobs[jobId] = { done: true, result: r, created: Date.now() };
   } catch (e) {
@@ -177,7 +269,12 @@ const server = http.createServer(function (req, res) {
     const spaces = {};
     for (const k in WORKSPACES) spaces[k] = { dir: WORKSPACES[k].dir, exists: fs.existsSync(WORKSPACES[k].dir) };
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, service: 'claude-api', vault: VAULT, workspaces: spaces, jobs: Object.keys(jobs).length, chats: Object.keys(chatSessions).length }));
+    return res.end(JSON.stringify({
+      ok: true, service: 'claude-api', vault: VAULT, workspaces: spaces,
+      jobs: Object.keys(jobs).length, chats: Object.keys(chatSessions).length,
+      modellen: Object.keys(MODEL_ALIASSEN),
+      sync: syncInfo(), inbox: inboxInfo(), sessies: sessieInfo()
+    }));
   }
 
   if (req.method === 'POST' && req.url === '/run') {
@@ -188,11 +285,12 @@ const server = http.createServer(function (req, res) {
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
       const chatId = (d.chat_id != null && d.chat_id !== '') ? String(d.chat_id) : '';
       const ws = resolveWorkspace(d.workspace);
+      const model = resolveModel(d.model);
       const jobId = crypto.randomBytes(8).toString('hex');
       jobs[jobId] = { done: false, created: Date.now() };
-      enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws); });
+      enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, model); });
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws }));
+      res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws, model: model || '(default)' }));
     });
   }
 
@@ -232,6 +330,6 @@ setInterval(function () {
 }, 5 * 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', function () {
-  console.log('claude-api (async, chat-sessies, per-chat serieel, multi-workspace) luistert op :' + PORT +
+  console.log('claude-api (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal) luistert op :' + PORT +
     ' (vault=' + VAULT + ', repo=' + REPO + ')');
 });
