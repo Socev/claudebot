@@ -170,9 +170,15 @@ function syncInfo() {
     fs.readSync(fd, buf, 0, len, size - len);
     fs.closeSync(fd);
     const staart = buf.toString('utf8');
-    info.laatste_ronde_ok = staart.lastIndexOf('Bisync successful') > staart.lastIndexOf('Bisync critical error');
+    // Eigen markers uit run.sh — niet afhankelijk van rclone's bewoordingen
+    // of logniveau. 'RONDE OK' wordt na elke geslaagde ronde geschreven.
+    info.laatste_ronde_ok = staart.lastIndexOf('RONDE OK') > staart.lastIndexOf('ronde mislukt');
   } catch (e) {}
   try { info.sync_id = fs.readFileSync(path.join(VAULT, '.sync-id'), 'utf8').trim(); } catch (e) {}
+  try {
+    const zh = fs.statSync('/opt/data/bin/laatste-zelfherstel');
+    info.zelfherstel_uren_geleden = Math.round((Date.now() - zh.mtimeMs) / 3600000);
+  } catch (e) { info.zelfherstel_uren_geleden = null; }
   return info;
 }
 
