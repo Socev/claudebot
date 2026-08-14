@@ -6,7 +6,7 @@ FROM node:20-bookworm-slim
 
 # git is nodig voor de GHAWA-workspace (node:slim bevat 'm niet standaard).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl unzip bash procps tzdata gosu git pandoc poppler-utils \
+      ca-certificates curl unzip bash procps tzdata gosu git pandoc poppler-utils ocrmypdf tesseract-ocr-nld \
  && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI (levert 'claude') + rclone
