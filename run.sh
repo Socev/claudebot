@@ -56,9 +56,54 @@ if [ -f "$MARKER" ]; then
   fi
 fi
 
+# Zelfheling, in twee treden:
+#   1. Elke ronde draait met --resilient --recover --max-lock: daarmee heelt
+#      bisync zelf de meeste breuken (afgebroken ronde, verweesd slot) zonder
+#      dat er gegevens op het spel staan.
+#   2. Is de toestand toch onherstelbaar kapot ("Must run --resync"), dan doet
+#      de lus zelf ÉÉN resync per etmaal, met --resync-mode newer: per bestand
+#      wint het nieuwste, ongeacht de kant, en er wordt niets verwijderd. Het
+#      enige risico is dat een net verwijderd bestand terugkomt — vervelend,
+#      geen verlies. Vaker dan eens per etmaal duidt op een echt defect; dan
+#      stopt de zelfheling en is het mensenwerk (en slaat de wachter alarm).
+ZELFHERSTEL_MARKER="$BIN/laatste-zelfherstel"
+SYNC_AUTO_RESYNC="${SYNC_AUTO_RESYNC:-1}"
+
 sync_ronde(){
-  rclone bisync "$BRON" "$VAULT" \
-    --create-empty-src-dirs --conflict-resolve newer >> "$SYNCLOG" 2>&1
+  if rclone bisync "$BRON" "$VAULT" \
+       --create-empty-src-dirs --conflict-resolve newer \
+       --resilient --recover --max-lock 2m >> "$SYNCLOG" 2>&1; then
+    echo "$(date '+%F %T') RONDE OK" >> "$SYNCLOG"
+    return 0
+  fi
+  return 1
+}
+
+zelfherstel(){
+  # Alleen bij de specifieke "listings kwijt"-breuk, niet bij netwerkfouten.
+  if ! tail -30 "$SYNCLOG" | grep -q 'Must run --resync'; then return 1; fi
+  if [ "$SYNC_AUTO_RESYNC" != "1" ]; then
+    echo "$(date '+%F %T') zelfherstel staat uit (SYNC_AUTO_RESYNC=$SYNC_AUTO_RESYNC)" >> "$SYNCLOG"
+    return 1
+  fi
+  if [ -f "$ZELFHERSTEL_MARKER" ]; then
+    LEEFTIJD=$(( $(date +%s) - $(stat -c %Y "$ZELFHERSTEL_MARKER" 2>/dev/null || echo 0) ))
+    if [ "$LEEFTIJD" -lt 86400 ]; then
+      echo "$(date '+%F %T') zelfherstel al gebruikt in de laatste 24 uur - mensenwerk nodig" >> "$SYNCLOG"
+      return 1
+    fi
+  fi
+  echo "$(date '+%F %T') ZELFHERSTEL: resync met --resync-mode newer (nieuwste wint, niets wordt verwijderd)" >> "$SYNCLOG"
+  if rclone bisync "$BRON" "$VAULT" \
+       --resync --resync-mode newer --create-empty-src-dirs >> "$SYNCLOG" 2>&1; then
+    touch "$ZELFHERSTEL_MARKER"
+    [ -f "$MARKER" ] || printf '%s' "$BRON" > "$MARKER"
+    echo "$(date '+%F %T') ZELFHERSTEL geslaagd - sync loopt weer" >> "$SYNCLOG"
+    echo "$(date '+%F %T') RONDE OK" >> "$SYNCLOG"
+    return 0
+  fi
+  echo "$(date '+%F %T') ZELFHERSTEL mislukt - mensenwerk nodig" >> "$SYNCLOG"
+  return 1
 }
 
 sync_lus(){
@@ -95,17 +140,17 @@ sync_lus(){
       # Na een geslaagde ronde de koppeling vastleggen als dat nog niet gebeurd is.
       # Zo krijgt ook een bestaande pod de grendel zonder dat iemand iets doet.
       [ -f "$MARKER" ] || printf '%s' "$BRON" > "$MARKER"
+    elif zelfherstel; then
+      FOUTEN=0
     else
       FOUTEN=$((FOUTEN + 1))
-      echo "$(date) bisync-ronde mislukt ($FOUTEN achter elkaar)" >> "$SYNCLOG"
-      # GEEN automatische --resync meer. De oude terugval deed dat bij ELKE fout,
-      # ook bij een netwerkhapering of een verweesde lock, en liet dan Path1
-      # winnen. Dat wist stilletjes werk. Herstel dat gegevens kan verwijderen
-      # hoort mensenwerk te zijn.
+      echo "$(date) ronde mislukt ($FOUTEN achter elkaar)" >> "$SYNCLOG"
+      # De oude blinde terugval (resync bij ELKE fout, Path1 wint) is weg.
+      # Zelfheling gebeurt hierboven, gericht en begrensd. Komen we hier, dan
+      # is het iets dat een mens moet zien — en dat meldt de wachter.
       if [ "$FOUTEN" -ge 3 ]; then
-        echo "$(date) LET OP: drie mislukte rondes. Waarschijnlijk is met de hand" >> "$SYNCLOG"
-        echo "$(date)   rclone bisync \"$BRON\" \"$VAULT\" --resync --resync-mode newer" >> "$SYNCLOG"
-        echo "$(date) nodig. Draai die eerst met --dry-run." >> "$SYNCLOG"
+        echo "$(date) LET OP: drie mislukte rondes en zelfherstel kon of mocht niet." >> "$SYNCLOG"
+        echo "$(date) Handmatig: rclone bisync \"$BRON\" \"$VAULT\" --resync --resync-mode newer (eerst --dry-run)" >> "$SYNCLOG"
       fi
     fi
     sleep "$SYNC_INTERVAL"
