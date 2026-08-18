@@ -5,8 +5,9 @@
 FROM node:20-bookworm-slim
 
 # git is nodig voor de GHAWA-workspace (node:slim bevat 'm niet standaard).
+# openssh-client is nodig voor de deploy key van socev.dev (git-over-SSH); 18-8-2026.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl unzip bash procps tzdata gosu git pandoc poppler-utils ocrmypdf tesseract-ocr-nld \
+      ca-certificates curl unzip bash procps tzdata gosu git openssh-client pandoc poppler-utils ocrmypdf tesseract-ocr-nld \
  && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI (levert 'claude') + rclone
