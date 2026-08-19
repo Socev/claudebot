@@ -60,6 +60,23 @@ const DONE_TTL_MS = 2 * 60 * 60 * 1000;
 const KILL_GRACE_MS = 10 * 1000;
 const WATCH_INTERVAL_MS = 30 * 1000;
 
+// ── verharding: grenzen aan wat er in het geheugen blijft ───────────────────
+// Waarom: `jobs` is een gewoon object in het geheugen zonder bovengrens. Een
+// job die nooit wordt opgehaald, of een kindproces dat verdwijnt zonder ooit
+// een eindstatus te zetten, bleef eeuwig staan. De heaplimiet van deze Node is
+// ~2096 MB gemeten; een paar honderd jobs met grote uitvoer halen dat.
+const JOB_MAX_AGE_MS = 24 * 60 * 60 * 1000;  // absolute bovengrens, ook voor 'running'
+const JOBS_MAX = 200;                        // aantalsgrens, naar het voorbeeld van agentsReg
+const OUTPUT_INLINE_MAX = 256 * 1024;        // groter dan dit gaat naar schijf
+const JOBOUT_DIR = process.env.JOBOUT_DIR || '/opt/data/joboutput';
+
+// Een job is 'af' zodra hij niet meer pending of running is. Bewust zo
+// geformuleerd en niet als lijst van eindstatussen: een nieuwe eindstatus die
+// later wordt toegevoegd valt hier automatisch onder en lekt dus niet.
+function isTerminal(status) {
+  return status !== 'pending' && status !== 'running';
+}
+
 // ── v2: achtergrondagents ───────────────────────────────────────────────────
 const AGENTS_FILE = path.join(HOME, 'agent_jobs.json');
 const AGENT_WEBHOOK_URL = process.env.AGENT_WEBHOOK_URL || '';
@@ -189,6 +206,37 @@ function sessionKey(ws, chatId) {
 
 const jobs = {};
 const chatChains = {};
+
+// ── verharding: grote uitvoer naar schijf i.p.v. in het geheugen ────────────
+// Zet uitvoer boven OUTPUT_INLINE_MAX weg in een bestand en laat in de job
+// alleen het pad en de omvang achter. /result leest hem er weer bij op.
+function spillIfLarge(jobId, r) {
+  try {
+    const out = (typeof r.output === 'string') ? r.output : '';
+    r.output_bytes = Buffer.byteLength(out, 'utf8');
+    if (r.output_bytes > OUTPUT_INLINE_MAX) {
+      fs.mkdirSync(JOBOUT_DIR, { recursive: true });
+      const p = path.join(JOBOUT_DIR, jobId + '.txt');
+      fs.writeFileSync(p, out);
+      r.output = '';
+      r.output_file = p;
+    }
+  } catch (e) {
+    // Lukt wegschrijven niet, dan houden we hem inline: een job zonder uitvoer
+    // teruggeven is erger dan tijdelijk wat geheugen.
+    logError('spill', e);
+  }
+  return r;
+}
+
+// Verwijdert een job én het uitvoerbestand dat er eventueel bij hoort.
+function dropJob(id) {
+  const j = jobs[id];
+  if (j && j.result && j.result.output_file) {
+    try { fs.unlinkSync(j.result.output_file); } catch (e) {}
+  }
+  delete jobs[id];
+}
 let chatSessions = {};
 try { chatSessions = JSON.parse(fs.readFileSync(SESS_FILE, 'utf8')); } catch (e) { chatSessions = {}; }
 function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
@@ -546,7 +594,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, mod
     r.workspace = ws;
     if (model) r.model = model;
     if (key && r.session_id) { chatSessions[key] = r.session_id; saveSessions(); }
-    j.status = 'done'; j.done_at = Date.now(); j.result = r;
+    j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
     jobEindLog(jobId, j, ws);
   } catch (e) {
     logError('processJob', e);
@@ -637,10 +685,14 @@ async function processAgent(jobId, prompt, explicitSession, ws, model, maxMs) {
       { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS });
     r.files = collectFiles(outdir);
     r.workspace = ws;
-    j.status = 'done'; j.done_at = Date.now(); j.result = r;
+    // Let op de volgorde: spillIfLarge leegt r.output als die naar schijf gaat,
+    // dus het webhookrapport krijgt de volledige uitvoer apart mee. Anders zou
+    // juist bij een grote agentrun een leeg rapport naar Telegram gaan.
+    const volledigeUitvoer = (typeof r.output === 'string') ? r.output : '';
+    j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
     jobEindLog(jobId, j, ws);
     entry.status = 'done'; entry.ok = !!r.ok; entry.ended = Date.now(); saveAgents();
-    sendReport(entry, r);
+    sendReport(entry, Object.assign({}, r, { output: volledigeUitvoer }));
   } catch (e) {
     logError('processAgent', e);
     const r = { ok: false, error: String(e), output: '', files: [] };
@@ -770,8 +822,22 @@ function handleRequest(req, res) {
           last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0
         }));
       }
-      const payload = Object.assign({ found: true, done: true, status: 'done' }, j.result);
-      delete jobs[d.job_id];
+      // Verharding: ophalen is idempotent. Voorheen werd de job hier gewist,
+      // waardoor een tweede /result (herkansing van de poll-lus, dubbele
+      // n8n-run, netwerkfout na het verzenden) een leeg found:false teruggaf en
+      // het resultaat definitief weg was. De opruimlus onderaan is nu de enige
+      // plek die jobs verwijdert.
+      const payload = Object.assign({ found: true, done: true, status: j.status }, j.result);
+      if (payload.output_file) {
+        try {
+          payload.output = fs.readFileSync(payload.output_file, 'utf8');
+        } catch (e) {
+          logError('result-lees', e);
+          payload.output = '';
+          payload.output_weg = true;
+        }
+        delete payload.output_file;
+      }
       return res.end(JSON.stringify(payload));
     });
   }
@@ -822,13 +888,56 @@ server.on('clientError', function (err, socket) {
 process.on('uncaughtException', function (err) { logError('uncaught', err); });
 process.on('unhandledRejection', function (err) { logError('unhandled', err); });
 
-// v2: opruimen op TOESTAND, niet op leeftijd. pending/running blijven altijd
-// staan; done verdwijnt 2 uur na voltooiing (of direct bij ophalen via /result).
+// ── verharding: opruimen in drie lagen ──────────────────────────────────────
+// v2 ruimde alleen status 'done' op, en /result wiste een job bij het ophalen.
+// Die combinatie liet twee lekken open: een job met een andere eindstatus bleef
+// eeuwig staan, en een job die vastliep in 'running' (kindproces verdwenen,
+// watchdog niet aangeslagen) ook. Nu:
+//   1. elke EINDSTATUS verdwijnt DONE_TTL_MS na afronding;
+//   2. ALLES ouder dan JOB_MAX_AGE_MS verdwijnt, ongeacht status — een
+//      vastgelopen 'running' is geen reden voor een permanent lek;
+//   3. boven JOBS_MAX blijven alleen de nieuwste afgeronde jobs staan.
+// Uitvoerbestanden op schijf gaan met de job mee (dropJob).
 setInterval(function () {
-  const cutoff = Date.now() - DONE_TTL_MS;
+  const nuMs = Date.now();
+  const ttlGrens = nuMs - DONE_TTL_MS;
+  const maxGrens = nuMs - JOB_MAX_AGE_MS;
+
   for (const id in jobs) {
-    if (jobs[id].status === 'done' && (jobs[id].done_at || 0) < cutoff) delete jobs[id];
+    const j = jobs[id];
+    // 1. afgerond en lang genoeg opgehaald kunnen zijn
+    if (isTerminal(j.status) && (j.done_at || 0) < ttlGrens) { dropJob(id); continue; }
+    // 2. absolute bovengrens — ook running/pending
+    if ((j.created || j.started || 0) < maxGrens) {
+      jobLog({ job_id: id, workspace: j.workspace, status: j.status, reden: 'verlopen-24u' });
+      dropJob(id);
+    }
   }
+
+  // 3. aantalsgrens: oudste AFGERONDE jobs eruit, lopende nooit.
+  const ids = Object.keys(jobs);
+  if (ids.length > JOBS_MAX) {
+    const afgerond = ids
+      .filter(function (id) { return isTerminal(jobs[id].status); })
+      .sort(function (a, b) { return (jobs[b].done_at || 0) - (jobs[a].done_at || 0); });
+    for (let i = JOBS_MAX; i < afgerond.length; i++) dropJob(afgerond[i]);
+  }
+
+  // Wezen: uitvoerbestanden zonder job (bv. na een podherstart).
+  try {
+    const levend = {};
+    for (const id in jobs) {
+      if (jobs[id].result && jobs[id].result.output_file) levend[jobs[id].result.output_file] = 1;
+    }
+    const bestanden = fs.existsSync(JOBOUT_DIR) ? fs.readdirSync(JOBOUT_DIR) : [];
+    for (let i = 0; i < bestanden.length; i++) {
+      const p = path.join(JOBOUT_DIR, bestanden[i]);
+      if (levend[p]) continue;
+      let st = null;
+      try { st = fs.statSync(p); } catch (e) { continue; }
+      if (st.mtimeMs < maxGrens) { try { fs.unlinkSync(p); } catch (e) {} }
+    }
+  } catch (e) { logError('opruimen-joboutput', e); }
 }, 5 * 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', function () {
