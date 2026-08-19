@@ -12,6 +12,21 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+
+      # De Telegram-lezer moet ALLEEN kunnen lezen. Dat is geen eigenschap van de
+      # credential - dezelfde MTProto-sessie kan gewoon versturen - maar van de
+      # code. Deze stap is de poort eromheen: komt er ooit een verzend- of
+      # markeerfunctie in telegram-reader.js, dan faalt de build en komt het niet
+      # in een image terecht. koppel-telegram.js valt hier bewust buiten: dat
+      # script moet wel kunnen inloggen (signIn).
+      - name: telegram-reader.js moet alleen-lezen blijven
+        run: |
+          if grep -nE 'sendMessage|forwardMessages|readHistory|markAsRead|sendFile' telegram-reader.js; then
+            echo "::error::telegram-reader.js bevat een verzend- of markeerfunctie. Dit luik is alleen-lezen."
+            exit 1
+          fi
+          echo "telegram-reader.js: geen verzend- of markeerfuncties gevonden."
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
