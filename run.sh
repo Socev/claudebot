@@ -70,8 +70,14 @@ fi
 ZELFHERSTEL_MARKER="$BIN/laatste-zelfherstel"
 SYNC_AUTO_RESYNC="${SYNC_AUTO_RESYNC:-1}"
 
+# Gedeelde grendel tussen de synclus en de vault-snapshot. rclone heeft zijn
+# eigen --max-lock, maar dat beschermt alleen bisync tegen bisync. De tar mag
+# nooit lopen terwijl er gesynct wordt: dan tar je een half doorgevoerde ronde
+# en heb je een backup van een tussentoestand.
+VAULT_LOCK="$BIN/.vault.lock"
+
 sync_ronde(){
-  if rclone bisync "$BRON" "$VAULT" \
+  if flock "$VAULT_LOCK" rclone bisync "$BRON" "$VAULT" \
        --create-empty-src-dirs --conflict-resolve newer \
        --resilient --recover --max-lock 2m >> "$SYNCLOG" 2>&1; then
     echo "$(date '+%F %T') RONDE OK" >> "$SYNCLOG"
@@ -300,6 +306,110 @@ fi
 start_api
 [ -n "${TG_TOKEN:-}" ] && start_bot || log "TG_TOKEN leeg: in-container bot uit (n8n verwacht)."
 
+# ── Vault-snapshot ───────────────────────────────────────────────────────────
+# Waarom dit bestaat: bisync is SYNCHRONISATIE, geen backup. Een verwijdering
+# plant zich voort naar Drive, en dan is hij op beide kanten weg. Dit is de enige
+# plek waar een oude toestand van de vault bewaard blijft.
+BACKUP_DIR="${BACKUP_DIR:-/opt/data/backups}"
+BACKUP_LOG="$BIN/backup.log"
+BACKUP_MARKER="$BIN/laatste-vault-snapshot"
+BACKUP_MAX_LOG=$((5 * 1024 * 1024))
+
+blog(){
+  # Rotatie in het schrijfpad, zoals api.log: eerst toetsen, dan schrijven.
+  if [ -f "$BACKUP_LOG" ] && [ "$(stat -c %s "$BACKUP_LOG" 2>/dev/null || echo 0)" -gt "$BACKUP_MAX_LOG" ]; then
+    mv -f "$BACKUP_LOG" "$BACKUP_LOG.1"
+  fi
+  printf '%s %s\n' "$(date '+%F %T')" "$1" >> "$BACKUP_LOG"
+}
+
+vault_snapshot(){
+  mkdir -p "$BACKUP_DIR"
+  local dag doel vaultkb vrijkb bestanden inhoud marge rc
+  dag="$(date '+%Y-%m-%d')"
+  doel="$BACKUP_DIR/vault-$dag.tgz"
+
+  if [ -f "$doel" ]; then blog "snapshot van $dag bestaat al - overgeslagen"; return 0; fi
+
+  # Ruimtecheck VOORAF. Een tar die halverwege op een volle schijf stukloopt
+  # laat een onbruikbaar bestand achter en kan de pod meeslepen.
+  vaultkb="$(du -sk "$VAULT" 2>/dev/null | awk '{print $1}')"
+  vrijkb="$(df -Pk "$BACKUP_DIR" | awk 'NR==2{print $4}')"
+  if [ -z "$vaultkb" ] || [ -z "$vrijkb" ]; then
+    blog "FOUT: kon vaultgrootte of vrije ruimte niet vaststellen - snapshot overgeslagen"
+    return 1
+  fi
+  if [ "$vrijkb" -lt $(( vaultkb * 2 )) ]; then
+    blog "FOUT: te weinig vrije ruimte (${vrijkb}K vrij, vault ${vaultkb}K, vereist 2x) - snapshot overgeslagen"
+    return 1
+  fi
+
+  blog "start snapshot -> $doel (vault ${vaultkb}K, vrij ${vrijkb}K)"
+
+  # Zelfde grendel als de synclus: nooit tarren tijdens een ronde.
+  flock "$VAULT_LOCK" tar -czf "$doel" -C "$(dirname "$VAULT")" "$(basename "$VAULT")" 2>>"$BACKUP_LOG"
+  rc=$?
+  # tar geeft 1 bij "file changed as we read it". Dat is bij een levende vault
+  # normaal en geen reden om de backup weg te gooien; 2 en hoger wel.
+  if [ "$rc" -ge 2 ]; then
+    blog "FOUT: tar gaf exitcode $rc - onbruikbaar bestand verwijderd"
+    rm -f "$doel"
+    return 1
+  fi
+  [ "$rc" -eq 1 ] && blog "let op: tar gaf 1 (bestand gewijzigd tijdens lezen) - normaal, backup behouden"
+
+  # Inhoudscontrole: een tar die slaagt zegt niets over wat erin zit.
+  bestanden="$(find "$VAULT" -type f | wc -l)"
+  inhoud="$(tar -tzf "$doel" 2>/dev/null | wc -l)"
+  marge=$(( bestanden / 50 ))            # 2 procent
+  [ "$marge" -lt 5 ] && marge=5
+  if [ "$inhoud" -lt $(( bestanden - marge )) ]; then
+    blog "FOUT: inhoudscontrole faalt - $inhoud items in het archief tegen $bestanden bestanden in de vault (marge $marge); bestand verwijderd"
+    rm -f "$doel"
+    return 1
+  fi
+  blog "snapshot klaar: $(du -h "$doel" | awk '{print $1}'), $inhoud items (vault $bestanden bestanden)"
+
+  vault_retentie
+  printf '%s' "$dag" > "$BACKUP_MARKER"
+  return 0
+}
+
+# Retentie: 14 dagelijkse + 8 wekelijkse (zondag) + 6 maandelijkse (de 1e).
+# Een snapshot die aan een van de drie regels voldoet, blijft staan.
+vault_retentie(){
+  local nu bestand dag ts leeftijd dow dom bewaar verwijderd=0
+  nu="$(date +%s)"
+  for bestand in "$BACKUP_DIR"/vault-*.tgz; do
+    [ -e "$bestand" ] || continue
+    dag="$(basename "$bestand" .tgz | sed 's/^vault-//')"
+    ts="$(date -d "$dag" +%s 2>/dev/null)" || continue
+    leeftijd=$(( (nu - ts) / 86400 ))
+    dow="$(date -d "$dag" +%u)"    # 7 = zondag
+    dom="$(date -d "$dag" +%d)"
+    bewaar=0
+    [ "$leeftijd" -le 14 ] && bewaar=1
+    [ "$dow" = "7" ] && [ "$leeftijd" -le 56 ] && bewaar=1
+    [ "$dom" = "01" ] && [ "$leeftijd" -le 186 ] && bewaar=1
+    if [ "$bewaar" -eq 0 ]; then
+      rm -f "$bestand" && verwijderd=$((verwijderd + 1))
+    fi
+  done
+  [ "$verwijderd" -gt 0 ] && blog "retentie: $verwijderd oude snapshot(s) verwijderd"
+  return 0
+}
+
+# Eenmaal per dag, niet bij elke lus-iteratie: het stempelbestand houdt bij
+# welke dag er al gedraaid is.
+vault_snapshot_indien_nodig(){
+  local vandaag gedaan
+  vandaag="$(date '+%Y-%m-%d')"
+  gedaan="$(cat "$BACKUP_MARKER" 2>/dev/null || echo '')"
+  [ "$gedaan" = "$vandaag" ] && return 0
+  vault_snapshot || blog "snapshot van $vandaag niet gelukt - morgen opnieuw"
+  return 0
+}
+
 # supervisor
 GIT_EVERY=300; last_git=$(date +%s)
 while true; do
@@ -312,5 +422,6 @@ while true; do
     now=$(date +%s)
     if [ $(( now - last_git )) -ge "$GIT_EVERY" ]; then sync_repo; last_git=$now; fi
   fi
+  vault_snapshot_indien_nodig
   sleep 30
 done
