@@ -199,6 +199,47 @@ function resolveWorkspace(name) {
   return Object.prototype.hasOwnProperty.call(WORKSPACES, key) ? key : DEFAULT_WS;
 }
 
+// ── verharding: strikte workspace-controle ──────────────────────────────────
+// resolveWorkspace viel bij een onbekende naam STIL terug op DEFAULT_WS. Een
+// typefout in het workspace-veld liet de opdracht dus in de vault landen in
+// plaats van in de GHAWA-repo, zonder melding en zonder spoor - precies het
+// soort stille terugval dat je pas ontdekt als het al gebeurd is.
+//
+// resolveWorkspace zelf werpt bewust NIET: de wachters hebben geen
+// foutafhandeling op hun Start run-node, dus de weigering moet aan de
+// routegrens gebeuren, met een 400, VOORDAT er een job bestaat of een sessie
+// wordt geraakt. Deze functie doet alleen de controle.
+//
+// Leeg blijft de standaard; alleen een NIET-lege onbekende naam is fout.
+function workspaceFout(name) {
+  const ruw = (name == null) ? '' : String(name);
+  const key = ruw.trim().toLowerCase();
+  if (!key) return null;
+  if (Object.prototype.hasOwnProperty.call(WORKSPACES, key)) return null;
+  return {
+    ok: false,
+    error: 'onbekende-workspace',
+    // De body is zelf het leesbare bericht: kaatst hij ooit via een
+    // chatworkflow terug naar Telegram, dan staat er iets bruikbaars.
+    melding: 'onbekende workspace; geldig zijn: ' + Object.keys(WORKSPACES).join(', ') +
+             ' (of leeg voor de standaard)',
+    lengte: ruw.length
+  };
+}
+
+// Weigert aan de routegrens. Logt WEL dat er een ongeldige waarde was en hoe
+// lang die was, maar NOOIT de waarde zelf: een verkeerd ingevuld veld kan van
+// alles bevatten, tot een secret aan toe.
+function weigerWorkspace(res, fout, route) {
+  reqLogExtra(res, { workspace_ongeldig: 1, workspace_lengte: fout.lengte });
+  logError('workspace', { name: 'OnbekendeWorkspace', code: route, status: 400 });
+  res.writeHead(400, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: fout.error, melding: fout.melding }));
+}
+
+// res._log aanvullen zonder eerder gezette velden te verliezen.
+function reqLogExtra(res, o) { res._log = Object.assign({}, res._log || {}, o); }
+
 function sessionKey(ws, chatId) {
   if (!chatId) return '';
   return ws === DEFAULT_WS ? chatId : ws + ':' + chatId;
@@ -742,6 +783,8 @@ function handleRequest(req, res) {
       const prompt = (d.prompt || '').toString().trim();
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
       const chatId = (d.chat_id != null && d.chat_id !== '') ? String(d.chat_id) : '';
+      const wsFout = workspaceFout(d.workspace);
+      if (wsFout) return weigerWorkspace(res, wsFout, '/run');
       const ws = resolveWorkspace(d.workspace);
       const model = resolveModel(d.model);
       const jobId = crypto.randomBytes(8).toString('hex');
@@ -765,6 +808,8 @@ function handleRequest(req, res) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: false, error: 'max-agents', uitleg: 'Er lopen al ' + MAX_AGENTS + ' achtergrondagents; wacht tot er één klaar is.' }));
       }
+      const wsFout = workspaceFout(d.workspace);
+      if (wsFout) return weigerWorkspace(res, wsFout, '/agent');
       const ws = resolveWorkspace(d.workspace);
       if (!fs.existsSync(WORKSPACES[ws].dir)) { res.writeHead(400); return res.end('workspace missing'); }
       const model = resolveModel(d.model);
@@ -847,6 +892,8 @@ function handleRequest(req, res) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
       const chatId = (d.chat_id != null) ? String(d.chat_id) : '';
+      const wsFout = workspaceFout(d.workspace);
+      if (wsFout) return weigerWorkspace(res, wsFout, '/reset');
       const ws = resolveWorkspace(d.workspace);
       const key = sessionKey(ws, chatId);
       res._log = { chat_id: chatId, workspace: ws };
