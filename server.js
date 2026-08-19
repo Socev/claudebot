@@ -326,7 +326,23 @@ function saveAgents() {
 function enqueue(key, fn) {
   const k = key || ('anon-' + crypto.randomBytes(4).toString('hex'));
   const prev = chatChains[k] || Promise.resolve();
-  const next = prev.then(fn, fn);
+  // Verharding: de keten was al deels verdedigd - prev.then(fn, fn) laat fn ook
+  // draaien als de vorige job faalde, en chatChains[k] krijgt een .catch, dus
+  // een rejection wurgt de keten niet. Wat er ONTBRAK: de teruggegeven promise
+  // (`next`) werd nergens afgevangen. /run gebruikt de retourwaarde niet, dus
+  // een werpende fn leverde een UNHANDLED REJECTION op - en dat is sinds Node 15
+  // standaard fataal voor het proces. Vandaar dat fn hier zelf wordt ingepakt:
+  // een falende job blijft een falende job, maar sloopt nooit de server of de
+  // rest van de wachtrij.
+  const veiligeFn = function () {
+    try {
+      return Promise.resolve(fn()).catch(function (e) { logError('job-keten', e); });
+    } catch (e) {
+      logError('job-keten', e);
+      return Promise.resolve();
+    }
+  };
+  const next = prev.then(veiligeFn, veiligeFn);
   chatChains[k] = next.catch(function () {});
   return next;
 }
@@ -610,6 +626,15 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, mod
   const space = WORKSPACES[ws];
   const key = sessionKey(ws, chatId);
   const j = jobs[jobId];
+  // Verharding: de 24-uursopruiming kan een job wissen die nog in de
+  // enqueue-wachtrij staat (lange wachtrij, of een pod die een etmaal
+  // achterloopt). Zonder deze guard werd hieronder j.status gezet op undefined:
+  // een TypeError, waarna de catch ZELF weer j.status aanraakte en dus opnieuw
+  // wierp - een afgewezen promise de keten in.
+  if (!j) {
+    logError('job-verdwenen', { name: 'JobWeg', code: 'processJob' });
+    return;
+  }
   try {
     if (!fs.existsSync(space.dir)) {
       j.status = 'done'; j.done_at = Date.now();
@@ -716,6 +741,21 @@ async function processAgent(jobId, prompt, explicitSession, ws, model, maxMs) {
   const space = WORKSPACES[ws];
   const j = jobs[jobId];
   const entry = agentsReg[jobId];
+  // Zelfde guard als in processJob. Extra hier: het agentregister overleeft een
+  // podherstart, dus een agent die nooit begint zou anders eeuwig op 'pending'
+  // blijven staan - onzichtbaar afgebroken, maar wel een bezet slot van
+  // MAX_AGENTS en een lopende agent in /agents.
+  if (!j) {
+    logError('job-verdwenen', { name: 'JobWeg', code: 'processAgent' });
+    if (entry) {
+      entry.status = 'done';
+      entry.ok = false;
+      entry.ended = Date.now();
+      entry.rapport = 'niet gestart: job was al opgeruimd';
+      saveAgents();
+    }
+    return;
+  }
   try {
     fs.mkdirSync(indir, { recursive: true });
     fs.mkdirSync(outdir, { recursive: true });
@@ -945,7 +985,7 @@ process.on('unhandledRejection', function (err) { logError('unhandled', err); })
 //      vastgelopen 'running' is geen reden voor een permanent lek;
 //   3. boven JOBS_MAX blijven alleen de nieuwste afgeronde jobs staan.
 // Uitvoerbestanden op schijf gaan met de job mee (dropJob).
-setInterval(function () {
+function opruimJobs() {
   const nuMs = Date.now();
   const ttlGrens = nuMs - DONE_TTL_MS;
   const maxGrens = nuMs - JOB_MAX_AGE_MS;
@@ -961,13 +1001,20 @@ setInterval(function () {
     }
   }
 
-  // 3. aantalsgrens: oudste AFGERONDE jobs eruit, lopende nooit.
+  // 3. aantalsgrens op het TOTAAL, niet op het aantal afgeronde jobs. De eerste
+  // opzet begrensde alleen de afgeronde: bij 210 jobs waarvan 15 lopend telde
+  // hij 195 afgeronde, bleef onder JOBS_MAX en ruimde dus niets op terwijl het
+  // totaal er wel overheen was. Nu wordt het overschot berekend op het totaal en
+  // van OUDSTE afgeronde naar nieuwste weggewerkt. Lopende jobs blijven altijd
+  // staan; zijn er zoveel lopende dat het totaal er niet onder komt, dan is dat
+  // zo - een lopende job weggooien is erger dan even boven de grens zitten.
   const ids = Object.keys(jobs);
-  if (ids.length > JOBS_MAX) {
+  let over = ids.length - JOBS_MAX;
+  if (over > 0) {
     const afgerond = ids
       .filter(function (id) { return isTerminal(jobs[id].status); })
-      .sort(function (a, b) { return (jobs[b].done_at || 0) - (jobs[a].done_at || 0); });
-    for (let i = JOBS_MAX; i < afgerond.length; i++) dropJob(afgerond[i]);
+      .sort(function (a, b) { return (jobs[a].done_at || 0) - (jobs[b].done_at || 0); });  // oudste eerst
+    for (let i = 0; i < afgerond.length && over > 0; i++) { dropJob(afgerond[i]); over--; }
   }
 
   // Wezen: uitvoerbestanden zonder job (bv. na een podherstart).
@@ -985,7 +1032,11 @@ setInterval(function () {
       if (st.mtimeMs < maxGrens) { try { fs.unlinkSync(p); } catch (e) {} }
     }
   } catch (e) { logError('opruimen-joboutput', e); }
-}, 5 * 60 * 1000);
+}
+
+// Als benoemde functie i.p.v. een anonieme callback: zo is de opruiming los
+// aanroepbaar in een test, zonder vijf minuten te wachten of de klok te zetten.
+setInterval(opruimJobs, 5 * 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', function () {
   console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents) luistert op :' + PORT +
