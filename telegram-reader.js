@@ -42,6 +42,7 @@ function pakLock() {
       const fd = fs.openSync(LOCK, 'wx');
       fs.writeSync(fd, String(process.pid));
       fs.closeSync(fd);
+      lockVastgehouden = true;
       return true;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
@@ -61,9 +62,39 @@ function pakLock() {
   }
 }
 
+/*
+ * De grendel loslaten - en dat moet gebeuren langs WELK pad het proces ook eindigt.
+ *
+ * DE BUG DIE HIER ZAT (gemeten 19-8-2026). De hoofdlus liet de grendel keurig los in
+ * zijn catch en aan het eind, maar `fout()` roept `process.exit()` aan en dat gooit
+ * geen exception. Elke foutmelding diep in de code - "geen gesprek gevonden", een
+ * ontbrekende omgevingsvariabele, een ingetrokken sessie - sprong dus om die
+ * opruiming heen. Gevolg: één mislukte leespoging liet een grendel achter en de
+ * volgende tien minuten weigerde elke leesopdracht met "reader is bezig". Precies
+ * het soort fout dat zich pas laat zien op het moment dat je het niet kunt gebruiken.
+ *
+ * De opruiming hangt daarom aan `process.on('exit')`, want die loopt óók na
+ * `process.exit()`. De vlag erbij is geen franje maar het gevaarlijke deel: zonder
+ * die vlag zou een proces dat de grendel juist NIET kreeg - het pad "reader is
+ * bezig" - bij zijn eigen afsluiten de grendel van de dráaiende lezer weghalen. Dan
+ * had de reparatie een ergere fout gemaakt dan hij oploste.
+ */
+let lockVastgehouden = false;
+
 function laatLockLos() {
+  if (!lockVastgehouden) return;
+  lockVastgehouden = false;
   try { fs.unlinkSync(LOCK); } catch (e) {}
 }
+
+// Loopt ook na process.exit(). Moet synchroon blijven: asynchroon werk wordt hier
+// niet meer afgemaakt.
+process.on('exit', laatLockLos);
+
+// Een onderbroken lezer hoort zijn grendel net zo goed terug te geven. Deze twee
+// eindigen via process.exit, dus de opruiming hierboven loopt daarna alsnog.
+process.on('SIGINT', function () { process.exit(130); });
+process.on('SIGTERM', function () { process.exit(143); });
 
 // ── Argumenten ──────────────────────────────────────────────────────────────
 function parseArgs(argv) {
