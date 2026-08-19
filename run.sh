@@ -168,9 +168,13 @@ start_sync(){
   sync_lus &
   SYNC_PID=$!; log "sync gestart (pid $SYNC_PID) — $BRON <-> $VAULT, elke ${SYNC_INTERVAL}s"
 }
+# De API draait sinds image :33 NIET meer rechtstreeks uit het image, maar als kind
+# van de supervisor, vanaf /opt/data/app/current. Zo kan de code worden uitgerold
+# zonder image-bouw, en kan de pod een mislukte release zelf terugzetten. Waarom een
+# meebewegende image-tag is afgevallen: zie de kop van supervisor.js.
 start_api(){
-  node /app/server.js >> "$BIN/api.log" 2>&1 &
-  API_PID=$!; log "claude-api gestart (pid $API_PID)"
+  node /app/supervisor.js >> "$BIN/api.log" 2>&1 &
+  API_PID=$!; log "supervisor gestart (pid $API_PID) — API draait vanaf /opt/data/app/current"
 }
 start_bot(){
   node /app/telegram-claude-bot.js >> "$BIN/bot.log" 2>&1 &
@@ -410,9 +414,32 @@ vault_snapshot_indien_nodig(){
   return 0
 }
 
-# supervisor
+# ── Netjes stoppen ──────────────────────────────────────────────────────────
+# Kubernetes stuurt SIGTERM naar PID 1, en dat is dit script (entrypoint.sh,
+# fetch-secrets.sh en gosu exec'en allemaal, dus er komt geen extra proces tussen).
+# Zonder trap negeert bash het signaal tijdens `sleep` en wordt de pod na de
+# genadetijd hard afgeschoten — midden in een lopende job of een vault-snapshot.
+# Het signaal gaat daarom door naar de supervisor, die het op zijn beurt aan het
+# kind doorgeeft. Pas als die weg is, stopt dit script.
+STOPPEN=0
+afsluiten(){
+  [ "$STOPPEN" = "1" ] && return
+  STOPPEN=1
+  log "SIGTERM ontvangen — doorgeven aan de supervisor (pid ${API_PID:-onbekend})"
+  [ -n "${API_PID:-}" ] && kill -TERM "$API_PID" 2>/dev/null
+  for _ in $(seq 1 40); do
+    kill -0 "${API_PID:-0}" 2>/dev/null || { log "supervisor is gestopt — run.sh stopt"; exit 0; }
+    sleep 0.5
+  done
+  log "supervisor stopt niet binnen 20 s — alsnog stoppen"
+  exit 0
+}
+trap afsluiten TERM INT
+
+# bewaker
 GIT_EVERY=300; last_git=$(date +%s)
 while true; do
+  [ "$STOPPEN" = "1" ] && break
   kill -0 "$SYNC_PID" 2>/dev/null || { log "sync herstart"; start_sync; }
   kill -0 "$API_PID"  2>/dev/null || { log "api herstart";  start_api;  }
   if [ -n "${TG_TOKEN:-}" ]; then

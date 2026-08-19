@@ -820,6 +820,15 @@ function handleRequest(req, res) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({
       ok: true, service: 'claude-api', vault: VAULT, workspaces: spaces,
+      // versie = de release die NU draait (de mapnaam onder releases/, gezet door de
+      // supervisor). image_versie = wat er in het image is gebakken. Verschillen de
+      // twee, dan draait er uitgerolde code; zijn ze gelijk, dan draait de
+      // bootstrapkopie uit het image. De uitrolworkflow leest 'versie' terug als
+      // bewijs dat de nieuwe release echt is opgekomen - een geslaagde uitrol die
+      // stilletjes de oude code liet draaien is anders niet van een goede te
+      // onderscheiden.
+      versie: process.env.RELEASE_SHA || process.env.IMAGE_SHA || 'onbekend',
+      image_versie: process.env.IMAGE_SHA || 'onbekend',
       jobs: Object.keys(jobs).length, chats: Object.keys(chatSessions).length,
       modellen: Object.keys(MODEL_ALIASSEN),
       sync: syncInfo(), inbox: inboxInfo(), sessies: sessieInfo(),
