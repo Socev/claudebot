@@ -67,6 +67,83 @@ const AGENT_WEBHOOK_SECRET = process.env.AGENT_WEBHOOK_SECRET || SECRET;
 const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '3', 10);
 const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 
+// ── verharding: logging ─────────────────────────────────────────────────────
+// v2 had één console.log: de opstartregel. Alle 690 regels daarna draaiden
+// stil, dus een vastgelopen job of een afgewezen aanroep liet geen spoor na.
+//
+// Drie ontwerpkeuzes die er hier toe doen:
+//   1. appendFileSync per regel, GEEN createWriteStream. Een stream houdt de
+//      oude inode vast: na een rotatie schrijft het proces gewoon door in het
+//      hernoemde bestand, dat dan ongelimiteerd groeit terwijl api.log leeg
+//      lijkt. Met appendFileSync opent elke regel het pad opnieuw.
+//   2. Rotatie in het schrijfpad zelf, niet op een timer — een timer kan een
+//      uitschieter missen.
+//   3. NOOIT body, headers, query of prompt in het log. Het secret reist in de
+//      body en zou anders op schijf belanden; prompts kunnen persoonsgegevens
+//      bevatten. Daarom ook req.url zonder querystring (zie reqPath).
+const API_LOG = process.env.API_LOG || '/opt/data/bin/api.log';
+const LOG_MAX_BYTES = parseInt(process.env.LOG_MAX_BYTES || String(5 * 1024 * 1024), 10);
+const LOG_STAT_EVERY = 100;   // omvang niet elke regel opvragen, maar elke 100
+
+let logTeller = 0;
+let logOmvang = null;         // gecachete omvang van API_LOG
+
+function roteerIndienNodig(extra) {
+  try {
+    if (logOmvang === null || (logTeller % LOG_STAT_EVERY) === 0) {
+      try { logOmvang = fs.statSync(API_LOG).size; } catch (e) { logOmvang = 0; }
+    }
+    if (logOmvang + extra > LOG_MAX_BYTES) {
+      try { fs.renameSync(API_LOG, API_LOG + '.1'); } catch (e) {}  // bestaande .1 wordt overschreven
+      logOmvang = 0;
+    }
+  } catch (e) { /* logging mag de server nooit omleggen */ }
+}
+
+function schrijfLog(regel) {
+  try {
+    const r = regel + '\n';
+    roteerIndienNodig(Buffer.byteLength(r, 'utf8'));
+    fs.appendFileSync(API_LOG, r);
+    logOmvang += Buffer.byteLength(r, 'utf8');
+    logTeller++;
+  } catch (e) { /* nooit werpen vanuit het logpad */ }
+  try { process.stdout.write(regel + '\n'); } catch (e) {}
+}
+
+function nu() {
+  const d = new Date();
+  function p(n, b) { return String(n).padStart(b || 2, '0'); }
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+    p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+// Bouwt "sleutel=waarde"-paren, slaat lege waardes over.
+function velden(o) {
+  const uit = [];
+  for (const k in o) {
+    const v = o[k];
+    if (v === undefined || v === null || v === '') continue;
+    uit.push(k + '=' + String(v).replace(/\s+/g, '_'));
+  }
+  return uit.join(' ');
+}
+
+// Requestlog: één regel per aanroep. Pad zonder querystring (zie boven).
+function reqLog(o) { schrijfLog(nu() + ' req ' + velden(o)); }
+
+// Joblog: één regel op het moment dat een job zijn eindstatus krijgt.
+// Nadrukkelijk zonder de uitvoer zelf — alleen de omvang ervan.
+function jobLog(o) { schrijfLog(nu() + ' job ' + velden(o)); }
+
+// Foutlog: ALLEEN name, code en status. Bewust niet err.message: fouten van de
+// JSON-parser citeren de request-body letterlijk (en dus mogelijk het secret),
+// en fs-fouten bevatten paden die persoonsgegevens kunnen prijsgeven.
+function logError(waar, err) {
+  const e = err || {};
+  schrijfLog(nu() + ' fout ' + velden({ waar: waar, name: e.name, code: e.code, status: e.status }));
+}
+
 // ── Modelaliassen ───────────────────────────────────────────────────────────
 const MODEL_ALIASSEN = {
   snel: 'jimmy-snel',    // DeepSeek V4 Flash via Inceptron — werkpaard
@@ -280,13 +357,16 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // 'exit' met een korte naloop voor de laatste stdout, en bij een kill éérst
     // proberen of er tóch een compleet resultaat op stdout staat.
     let resolved = false;
+    let laatsteCode = null;   // verharding: exitcode bewaren voor de joblog
     function finish(r) {
       if (resolved) return;
       resolved = true;
       clearInterval(watchdog);
+      if (r && r.exit_code === undefined) r.exit_code = laatsteCode;
       resolve(r);
     }
     function finalize(code) {
+      laatsteCode = code;
       if (resolved) return;
       try {
         const j = JSON.parse(out);
@@ -417,6 +497,23 @@ function agentInfo() {
   return { lopend: lopend, afgerond_24u: afgerond24, mislukt_24u: mislukt24 };
 }
 
+// Eén regel op het moment dat een job zijn eindstatus krijgt. Bewust GEEN
+// uitvoer, alleen de omvang ervan: de uitvoer kan patientgegevens of
+// persoonsgegevens bevatten en hoort niet op schijf in een logbestand.
+function jobEindLog(jobId, j, ws) {
+  const r = j.result || {};
+  const out = (typeof r.output === 'string') ? r.output : '';
+  jobLog({
+    job_id: jobId,
+    workspace: ws,
+    status: j.status,
+    ok: r.ok ? 1 : 0,
+    seconden: Math.round((((j.done_at || Date.now()) - (j.started || j.created || Date.now()))) / 1000),
+    exit_code: (r.exit_code === undefined || r.exit_code === null) ? 'n.v.t.' : r.exit_code,
+    uitvoer_bytes: (r.output_bytes !== undefined) ? r.output_bytes : Buffer.byteLength(out, 'utf8')
+  });
+}
+
 async function processJob(jobId, prompt, explicitSession, files, chatId, ws, model) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
@@ -428,6 +525,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, mod
     if (!fs.existsSync(space.dir)) {
       j.status = 'done'; j.done_at = Date.now();
       j.result = { ok: false, error: 'workspace-missing', output: 'De werkmap voor workspace "' + ws + '" (' + space.dir + ') bestaat niet in de pod.', files: [] };
+      jobEindLog(jobId, j, ws);
       return;
     }
     fs.mkdirSync(indir, { recursive: true });
@@ -449,9 +547,12 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, mod
     if (model) r.model = model;
     if (key && r.session_id) { chatSessions[key] = r.session_id; saveSessions(); }
     j.status = 'done'; j.done_at = Date.now(); j.result = r;
+    jobEindLog(jobId, j, ws);
   } catch (e) {
+    logError('processJob', e);
     j.status = 'done'; j.done_at = Date.now();
     j.result = { ok: false, error: String(e), output: '', files: [] };
+    jobEindLog(jobId, j, ws);
   } finally {
     try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) {}
   }
@@ -537,11 +638,14 @@ async function processAgent(jobId, prompt, explicitSession, ws, model, maxMs) {
     r.files = collectFiles(outdir);
     r.workspace = ws;
     j.status = 'done'; j.done_at = Date.now(); j.result = r;
+    jobEindLog(jobId, j, ws);
     entry.status = 'done'; entry.ok = !!r.ok; entry.ended = Date.now(); saveAgents();
     sendReport(entry, r);
   } catch (e) {
+    logError('processAgent', e);
     const r = { ok: false, error: String(e), output: '', files: [] };
     j.status = 'done'; j.done_at = Date.now(); j.result = r;
+    jobEindLog(jobId, j, ws);
     entry.status = 'done'; entry.ok = false; entry.ended = Date.now(); saveAgents();
     sendReport(entry, r);
   } finally {
@@ -555,7 +659,17 @@ function readBody(req, cb) {
   req.on('end', function () { let d; try { d = JSON.parse(body || '{}'); } catch (e) { d = null; } cb(d); });
 }
 
-const server = http.createServer(function (req, res) {
+// Het pad ZONDER querystring. Dit is een kale http-server, geen Express, dus
+// er is geen req.path; req.url en req.originalUrl bevatten wél de query. Het
+// doel van de review-eis blijft hier onverkort staan: er mag nooit een
+// querystring in het log komen, want daar zou een secret in kunnen staan.
+function reqPath(req) {
+  const u = req.url || '';
+  const i = u.indexOf('?');
+  return i === -1 ? u : u.slice(0, i);
+}
+
+function handleRequest(req, res) {
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
     const spaces = {};
     for (const k in WORKSPACES) spaces[k] = { dir: WORKSPACES[k].dir, exists: fs.existsSync(WORKSPACES[k].dir) };
@@ -579,7 +693,8 @@ const server = http.createServer(function (req, res) {
       const ws = resolveWorkspace(d.workspace);
       const model = resolveModel(d.model);
       const jobId = crypto.randomBytes(8).toString('hex');
-      jobs[jobId] = { status: 'pending', created: Date.now() };
+      jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: chatId };
+      res._log = { job_id: jobId, chat_id: chatId, workspace: ws };
       enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, model); });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws, model: model || '(default)' }));
@@ -603,7 +718,8 @@ const server = http.createServer(function (req, res) {
       const model = resolveModel(d.model);
       const maxMin = Math.min(Math.max(parseInt(d.max_minuten || BG_MAX_DEFAULT_MIN, 10) || BG_MAX_DEFAULT_MIN, 5), BG_MAX_CAP_MIN);
       const jobId = crypto.randomBytes(8).toString('hex');
-      jobs[jobId] = { status: 'pending', created: Date.now(), agent: true };
+      jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '' };
+      res._log = { job_id: jobId, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', workspace: ws, agent: 1 };
       agentsReg[jobId] = {
         job_id: jobId, label: label, status: 'pending',
         chat_id: (d.chat_id != null) ? String(d.chat_id) : '',
@@ -642,6 +758,7 @@ const server = http.createServer(function (req, res) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
       const j = jobs[d.job_id];
+      res._log = { job_id: d.job_id, workspace: j && j.workspace };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (!j) return res.end(JSON.stringify({ found: false, done: false }));
       if (j.status !== 'done') {
@@ -666,6 +783,7 @@ const server = http.createServer(function (req, res) {
       const chatId = (d.chat_id != null) ? String(d.chat_id) : '';
       const ws = resolveWorkspace(d.workspace);
       const key = sessionKey(ws, chatId);
+      res._log = { chat_id: chatId, workspace: ws };
       if (key) { delete chatSessions[key]; saveSessions(); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, reset: chatId, workspace: ws }));
@@ -673,7 +791,36 @@ const server = http.createServer(function (req, res) {
   }
 
   res.writeHead(404); res.end('not found');
+}
+
+const server = http.createServer(function (req, res) {
+  const t0 = Date.now();
+  // Routes vullen res._log met job_id / chat_id / workspace zodra die bekend
+  // zijn (dat is pas ná het lezen van de body, vandaar deze omweg).
+  res._log = {};
+  res.on('finish', function () {
+    reqLog(Object.assign({
+      m: req.method,
+      pad: reqPath(req),
+      status: res.statusCode,
+      ms: Date.now() - t0
+    }, res._log));
+  });
+  try {
+    handleRequest(req, res);
+  } catch (e) {
+    logError('route', e);
+    try { if (!res.headersSent) { res.writeHead(500); res.end('server error'); } } catch (e2) {}
+  }
 });
+
+// Fouten die buiten een route ontstaan mogen niet stil blijven.
+server.on('clientError', function (err, socket) {
+  logError('client', err);
+  try { socket.destroy(); } catch (e) {}
+});
+process.on('uncaughtException', function (err) { logError('uncaught', err); });
+process.on('unhandledRejection', function (err) { logError('unhandled', err); });
 
 // v2: opruimen op TOESTAND, niet op leeftijd. pending/running blijven altijd
 // staan; done verdwijnt 2 uur na voltooiing (of direct bij ophalen via /result).
