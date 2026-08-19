@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// hands-free acceptatietest 2026-08-19
 /*
  * server.js v2 - asynchrone, bestand-bewuste "Claude-API" voor Olares.
  *
