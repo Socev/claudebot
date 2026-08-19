@@ -18,9 +18,29 @@
  *     leesbaar voor elk proces van dezelfde gebruiker.
  *   - Het script verstuurt geen berichten en markeert niets als gelezen.
  *
- * ENV: TELEGRAM_API_ID, TELEGRAM_API_HASH, SUPABASE_URL, SUPABASE_ANON_KEY.
+ * ENV: TELEGRAM_API_ID, TELEGRAM_API_HASH. De Supabase-adressering zit ingebouwd
+ * (zie hieronder) en is met SUPABASE_URL / SUPABASE_ANON_KEY te overschrijven.
  */
 const readline = require('readline');
+
+// Publieke transportsleutel van het Supabase-project. Dit is GEEN geheim: een
+// anon-key is ontworpen om in clientcode te staan, geeft niet meer dan het
+// `anon`-rolniveau, en alle bescherming zit in RLS en in de RPC zelf. Dezelfde
+// twee waardes staan als SUPABASE_URL en SUPABASE_ANON_KEY in de chart-env.
+//
+// WAAROM ZE HIER STAAN. fetch-secrets.sh WIST SUPABASE_ANON_KEY vlak vóór de
+// laatste exec, en dat hoort zo: zonder dat kan iemand met /run-toegang hem uit
+// /proc/self/environ vissen en daarmee de hele kluis opnieuw ophalen, wat elke
+// rotatie zinloos maakt. Gevolg is wel dat juist DIT script de key niet ziet,
+// terwijl het hem nodig heeft om de sessie via sb_secret_toevoegen weg te
+// schrijven. Twee goede regels die elkaar bijten; deze terugval lost dat op
+// zonder het wissen te verzwakken. De omgeving blijft leidend.
+const SUPABASE_URL_STANDAARD = 'https://tiwfbqwttnknnblhqpoo.supabase.co';
+const SUPABASE_ANON_KEY_STANDAARD =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.' +
+  'eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRpd2ZicXd0dG5rbm5ibGhxcG9vIiwicm9sZSI6' +
+  'ImFub24iLCJpYXQiOjE3NzI3NjYxODIsImV4cCI6MjA4ODM0MjE4Mn0.' +
+  'U2aK0ndMWzGu2QLFRYkn07ObjZmnsMz7apKvDpaKQ0g';
 
 // Eenmalige invoercode voor de Vault-RPC. Bewust in de code: hij is één keer
 // bruikbaar, deze koppeling is een eenmalige handeling, en na gebruik hoort hij
@@ -38,9 +58,11 @@ function vraag(rl, tekst) {
 }
 
 async function naarVault(sessie) {
-  const url = process.env.SUPABASE_URL || '';
-  const key = process.env.SUPABASE_ANON_KEY || '';
-  if (!url || !key) throw new Error('SUPABASE_URL of SUPABASE_ANON_KEY ontbreekt in de omgeving.');
+  // Env wint; ontbreekt hij, dan de ingebouwde publieke waarde. Dat laatste is de
+  // normale situatie in de pod, want de wrapper heeft de key dan net gewist.
+  const url = process.env.SUPABASE_URL || SUPABASE_URL_STANDAARD;
+  const key = process.env.SUPABASE_ANON_KEY || SUPABASE_ANON_KEY_STANDAARD;
+  if (!url || !key) throw new Error('Geen Supabase-adres of anon-key beschikbaar.');
 
   const res = await fetch(url + '/rest/v1/rpc/sb_secret_toevoegen', {
     method: 'POST',

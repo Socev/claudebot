@@ -27,7 +27,28 @@ RPC_PAD="/rest/v1/rpc/sb_pod_secrets_lezen"
 POGINGEN=3
 WACHT=(2 5 15)
 
+# ── Wat er geladen wordt: ALLES wat de kluis teruggeeft ─────────────────────
+#
+# Tot 19-8-2026 was VERWACHT ook het FILTER: alleen namen uit die lijst werden
+# geëxporteerd. Dat gaf drie keer dezelfde frictie - bij de Telegram-koppeling, en
+# daarna bij de site-verversing, waar SITE_TELLINGEN_SLEUTEL, SUPABASE_SITE_ANON en
+# N8N_API_KEY netjes in de kluis stonden, netjes op de witte lijst, netjes werden
+# teruggegeven door de RPC, en dan alsnog stilletjes werden weggegooid omdat een
+# hardgecodeerde lijst in dit script ze niet kende. Een nieuw geheim toevoegen
+# vroeg dus om een image-bouw, en dat is de omgekeerde wereld.
+#
+# Nu geldt: de WITTE LIJST IN DE DATABANK bepaalt wat de pod mag zien, dit script
+# voert dat alleen uit. Elke teruggegeven naam wordt geëxporteerd. Dat verplaatst
+# het besluit naar de plek waar het hoort - één tabel, met een auditspoor - in
+# plaats van naar twee plekken die uit elkaar kunnen lopen.
+#
+# De naamvalidatie hieronder is daarmee GEEN formaliteit meer maar de enige rem:
+# zie de controle op ^[a-z0-9_]+$ bij het uitpakken.
+
 # snake_case uit de RPC -> HOOFDLETTERS als env-naam.
+#
+# VERWACHT is sinds 19-8-2026 geen filter meer maar een CONTROLELIJST: deze namen
+# horen er te zijn, en ontbreken ze, dan hoort daar een logregel over te komen.
 VERWACHT="claude_code_oauth_token supabase_mcp_token n8n_mcp_token todoist_mcp_token agent_webhook_secret telegram_api_id telegram_api_hash telegram_sessie"
 
 # Namen die mogen ontbreken zonder dat er iets stuk is. telegram_sessie bestaat
@@ -144,7 +165,11 @@ process.stdin.on("end", () => {
     if (!j || j.ok !== true || !Array.isArray(j.secrets)) return;
     for (const g of j.secrets) {
       if (!g || typeof g.naam !== "string" || typeof g.waarde !== "string") continue;
-      if (!/^[a-z0-9_]+$/.test(g.naam)) continue;           // geen rare namen doorlaten
+      // Rare naam? Niet stil weggooien maar een markeerregel sturen. De shell ziet
+      // het uitroepteken, valt over zijn eigen naamcontrole en logt de weigering.
+      // Stil laten vallen zou betekenen dat een gemanipuleerde kluisnaam spoorloos
+      // verdwijnt - en dan mist juist de melding die je wilt zien.
+      if (!/^[a-z0-9_]+$/.test(g.naam)) { process.stdout.write("!ongeldige_naam -\n"); continue; }
       process.stdout.write(g.naam + " " + Buffer.from(g.waarde, "utf8").toString("base64") + "\n");
     }
   } catch (e) { /* stil: de foutmelding zou de body kunnen citeren */ }
@@ -153,18 +178,45 @@ process.stdin.on("end", () => {
 
   while read -r NAAM B64; do
     [ -n "${NAAM:-}" ] || continue
-    case " $VERWACHT " in
-      *" $NAAM "*) ;;
-      *) log "onbekende naam uit de RPC overgeslagen: $NAAM"; continue ;;
+
+    # DE ENIGE REM. Sinds het laden dynamisch is, bepaalt de witte lijst in de
+    # databank wélke namen hier langskomen - maar niet hoe ze eruitzien. Een naam
+    # als `PATH=x` of `a b` zou via `export` een andere variabele kunnen zetten of
+    # de regel kunnen splitsen. Alles wat niet strikt snake_case is gaat er dus uit,
+    # mét logregel, zodat het opvalt in plaats van stil te mislukken.
+    case "$NAAM" in
+      *[!a-z0-9_]*|'')
+        log "GEWEIGERD: naam uit de RPC voldoet niet aan ^[a-z0-9_]+$ - overgeslagen (naam niet gelogd)"
+        continue ;;
     esac
+
     ENVNAAM="$(printf '%s' "$NAAM" | tr '[:lower:]' '[:upper:]')"
+
+    # TWEEDE REM: namen die het gedrag van de shell zelf sturen. Deze zijn keurig
+    # snake_case en komen dus door de controle hierboven, maar `path` wordt PATH en
+    # `ld_preload` wordt LD_PRELOAD - waarmee een kluisregel de pod niet zijn geheim
+    # geeft maar zijn uitvoering overneemt. Zolang het laden dynamisch is, is dit de
+    # prijs: één regel die zegt wat er nooit uit de kluis mag komen.
+    case " PATH HOME SHELL IFS ENV BASH_ENV LD_PRELOAD LD_LIBRARY_PATH NODE_OPTIONS PYTHONPATH PERL5LIB USER LOGNAME PWD " in
+      *" $ENVNAAM "*)
+        log "GEWEIGERD: $NAAM zou de omgevingsvariabele \$$ENVNAAM overschrijven - overgeslagen"
+        continue ;;
+    esac
     WAARDE="$(printf '%s' "$B64" | base64 -d 2>/dev/null)"
     if [ -z "$WAARDE" ]; then
-      log "lege waarde ontvangen voor $NAAM - niet gezet"
+      # Een lege waarde is meestal een geheim dat wel is aangemaakt maar nog niet
+      # gevuld. Voor de bekende gevallen (telegram_sessie tot de koppeling) is dat
+      # een normale toestand en geen storing; zeg dat dan ook zo.
+      case " $NOG_TE_KOPPELEN " in
+        *" $NAAM "*) log "nog niet beschikbaar: $NAAM staat in de kluis maar is leeg" ;;
+        *)           log "lege waarde ontvangen voor $NAAM - niet gezet" ;;
+      esac
       continue
     fi
+
     export "$ENVNAAM=$WAARDE"
     GELADEN="${GELADEN:+$GELADEN,}$NAAM"
+    # Namen wel, waardes nooit - ook niet afgekapt, ook niet als lengte.
     log "geladen: $NAAM -> \$$ENVNAAM"
   done <<< "$UITPAK"
 fi
