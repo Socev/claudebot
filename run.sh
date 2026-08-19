@@ -197,6 +197,27 @@ setup_git(){
   # Nu krijgt elke repo zijn eigen bestand, en wordt de geerfde keten expliciet
   # gewist met de lege-waarde-truc: git probeert helpers op volgorde, dus zonder
   # die reset zou een globale helper alsnog winnen.
+  # Residu van het oude mechanisme opruimen. De lege-helper-reset hieronder
+  # maskeert de globale helper al, maar een token hoort niet als restant op
+  # schijf te blijven staan - en een volgende beheerder moet niet alsnog op een
+  # globale helper stuiten die er niet meer hoort te zijn.
+  # HOME van claude is /opt/data (uit de passwd-databank), dus dit is
+  # /opt/data/.git-credentials.
+  git config --global --unset-all credential.helper 2>/dev/null || true
+  rm -f "$HOME/.git-credentials"
+
+  # ── Overbrugging: image :29 op chart 0.0.38 ────────────────────────────────
+  # Op een VERS volume bestaat GHAWA_CRED nog niet, en de git-tokens zitten niet
+  # in de secret-RPC. Zonder deze regel zou de GHAWA-sync stilvallen bij precies
+  # de combinatie die tussen twee uitrollen in bestaat: nieuw image, oude chart.
+  # Zolang GITHUB_PAT er nog is, schrijven we het bestand daar eenmalig uit.
+  # VERVALT met chart 0.0.40, wanneer GITHUB_PAT uit de podconfiguratie gaat.
+  if [ ! -f "$GHAWA_CRED" ] && [ -n "${GITHUB_PAT:-}" ]; then
+    printf "https://x-access-token:%s@github.com\n" "$GITHUB_PAT" > "$GHAWA_CRED"
+    chmod 600 "$GHAWA_CRED"
+    log "overbrugging: credentialbestand uit GITHUB_PAT geschreven; vervalt met chart 0.0.40"
+  fi
+
   if [ -d "$REPO_DIR/.git" ]; then
     git -C "$REPO_DIR" config --local --unset-all credential.helper 2>/dev/null || true
     git -C "$REPO_DIR" config --local --add credential.helper ''

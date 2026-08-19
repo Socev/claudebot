@@ -38,6 +38,7 @@ if [ -z "${POD_BOOTSTRAP_SECRET:-}" ]; then
   if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     log "POD_BOOTSTRAP_SECRET leeg, maar CLAUDE_CODE_OAUTH_TOKEN staat in de omgeving -> overgangsmodus, doorstarten op de bestaande env"
     export SECRETS_GELADEN=""
+    unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY   # zie de toelichting bij de laatste exec
     exec "$@"
   fi
   log "FATAAL: geen POD_BOOTSTRAP_SECRET en geen CLAUDE_CODE_OAUTH_TOKEN in de omgeving - de pod kan niet authenticeren"
@@ -49,29 +50,79 @@ if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_ANON_KEY:-}" ]; then
   exit 78
 fi
 
-# ── De RPC aanroepen, met oplopende wachttijd ───────────────────────────────
+# ── De RPC aanroepen ────────────────────────────────────────────────────────
+# De body wordt door node opgebouwd en via stdin aan curl gevoerd (-d @-). Twee
+# redenen, allebei belangrijk:
+#   1. JSON.stringify escapet correct bij ELKE tekenset. Een bootstrapgeheim met
+#      een dubbele quote of een backslash erin sloopte de handgemaakte body.
+#   2. Het geheim staat zo NIET in de commandoregel. Alles in /proc/PID/cmdline
+#      is leesbaar voor elk proces van dezelfde gebruiker - en dit draait op een
+#      pod waar ook opdrachten van buiten worden uitgevoerd.
+bouw_body() {
+  node -e 'process.stdout.write(JSON.stringify({ p_bootstrap: process.env.POD_BOOTSTRAP_SECRET || "" }))'
+}
+
+# Classificeert het antwoord: ok / geweigerd / onparseerbaar.
+klasseer() {
+  node -e '
+let s = "";
+process.stdin.on("data", d => s += d);
+process.stdin.on("end", () => {
+  try {
+    const j = JSON.parse(s);
+    if (j && j.ok === true) return process.stdout.write("ok");
+    if (j && j.ok === false) return process.stdout.write("geweigerd");
+    process.stdout.write("onparseerbaar");
+  } catch (e) { process.stdout.write("onparseerbaar"); }
+});
+' 2>/dev/null
+}
+
 ANTWOORD=""
+GEDAAN=0
 for ((i = 1; i <= POGINGEN; i++)); do
-  ANTWOORD="$(curl -sS -m 20 -X POST "${SUPABASE_URL}${RPC_PAD}" \
+  GEDAAN=$i
+  RUW="$(bouw_body | curl -sS -m 20 -X POST "${SUPABASE_URL}${RPC_PAD}" \
     -H "apikey: ${SUPABASE_ANON_KEY}" \
     -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
     -H 'Content-Type: application/json' \
-    -d "{\"p_bootstrap\":\"${POD_BOOTSTRAP_SECRET}\"}" 2>/dev/null)" || ANTWOORD=""
+    -d @- 2>/dev/null)"
+  CURL_CODE=$?
 
-  if printf '%s' "$ANTWOORD" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
-    log "RPC geslaagd bij poging $i"
-    break
-  fi
-
-  ANTWOORD=""
-  if [ "$i" -lt "$POGINGEN" ]; then
-    W=${WACHT[$((i - 1))]}
-    log "RPC mislukt (poging $i van $POGINGEN), opnieuw over ${W}s"
-    sleep "$W"
+  if [ "$CURL_CODE" -ne 0 ]; then
+    KLASSE="transport"
   else
-    log "RPC mislukt na $POGINGEN pogingen"
+    KLASSE="$(printf '%s' "$RUW" | klasseer)"
   fi
+
+  case "$KLASSE" in
+    ok)
+      ANTWOORD="$RUW"
+      log "RPC geslaagd bij poging $i"
+      break
+      ;;
+    geweigerd)
+      # BEWUST GEEN HERKANSING. Een geldig antwoord met ok:false betekent dat het
+      # bootstrapgeheim is afgewezen; nog twee keer aankloppen verandert daar
+      # niets aan, maar voedt bij elke crashloop-start wel de lockout aan de
+      # andere kant. Dan wordt zelfs een gecorrigeerde chart een uur geweigerd.
+      log "bootstrap geweigerd door de RPC - geen herkansing"
+      REDEN="bootstrap geweigerd"
+      break
+      ;;
+    *)
+      if [ "$i" -lt "$POGINGEN" ]; then
+        W=${WACHT[$((i - 1))]}
+        log "RPC onbereikbaar of onleesbaar antwoord (poging $i van $POGINGEN), opnieuw over ${W}s"
+        sleep "$W"
+      else
+        log "RPC mislukt na $POGINGEN pogingen"
+      fi
+      ;;
+  esac
 done
+RUW=""
+REDEN="${REDEN:-}"
 
 # ── Uitpakken. Waardes gaan base64 door de pijp, zodat ze nooit in een ──────
 # ── logregel, foutmelding of terminalweergave kunnen belanden. ──────────────
@@ -117,7 +168,9 @@ fi
 # zijn - non-zero afsluiten zodat kubelet met backoff herstart - en niet vaag
 # ziek doordraaien. De rest is degradatie: wel starten, wel een logregel.
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-  log "FATAAL: claude_code_oauth_token ontbreekt na $POGINGEN pogingen - afsluiten zodat kubelet herstart"
+  # Het getal in deze regel is het WERKELIJKE aantal pogingen, niet de bovengrens:
+  # bij een geweigerde bootstrap is dat er een, en dat moet het log ook zeggen.
+  log "FATAAL: claude_code_oauth_token ontbreekt (${REDEN:-RPC leverde niets}, $GEDAAN poging(en)) - afsluiten zodat kubelet herstart"
   exit 78
 fi
 
@@ -131,5 +184,11 @@ done
 # Namenlijst voor /health. Uitsluitend namen.
 export SECRETS_GELADEN="$GELADEN"
 log "klaar; via de RPC geladen: ${GELADEN:-(geen)}"
+
+# De sleutels tot de kluis gaan NIET mee de rest van de keten in. server.js en de
+# jobs hebben ze niet nodig, en kubelet levert ze bij elke herstart opnieuw aan.
+# Zonder deze regel kan iemand met /run-toegang ze uit /proc/self/environ vissen -
+# en daarmee alle secrets opnieuw ophalen, wat elke rotatie zinloos maakt.
+unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY
 
 exec "$@"
