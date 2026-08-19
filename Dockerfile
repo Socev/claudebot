@@ -45,7 +45,8 @@ COPY server.js /app/server.js
 COPY telegram-claude-bot.js /app/telegram-claude-bot.js
 COPY run.sh /app/run.sh
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/run.sh /app/entrypoint.sh
+COPY fetch-secrets.sh /app/fetch-secrets.sh
+RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh
 
 EXPOSE 8080
 # entrypoint draait als root (chown volume), zakt dan naar 'claude'
