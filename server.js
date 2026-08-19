@@ -60,12 +60,106 @@ const DONE_TTL_MS = 2 * 60 * 60 * 1000;
 const KILL_GRACE_MS = 10 * 1000;
 const WATCH_INTERVAL_MS = 30 * 1000;
 
+// ── verharding: grenzen aan wat er in het geheugen blijft ───────────────────
+// Waarom: `jobs` is een gewoon object in het geheugen zonder bovengrens. Een
+// job die nooit wordt opgehaald, of een kindproces dat verdwijnt zonder ooit
+// een eindstatus te zetten, bleef eeuwig staan. De heaplimiet van deze Node is
+// ~2096 MB gemeten; een paar honderd jobs met grote uitvoer halen dat.
+const JOB_MAX_AGE_MS = 24 * 60 * 60 * 1000;  // absolute bovengrens, ook voor 'running'
+const JOBS_MAX = 200;                        // aantalsgrens, naar het voorbeeld van agentsReg
+const OUTPUT_INLINE_MAX = 256 * 1024;        // groter dan dit gaat naar schijf
+const JOBOUT_DIR = process.env.JOBOUT_DIR || '/opt/data/joboutput';
+
+// Een job is 'af' zodra hij niet meer pending of running is. Bewust zo
+// geformuleerd en niet als lijst van eindstatussen: een nieuwe eindstatus die
+// later wordt toegevoegd valt hier automatisch onder en lekt dus niet.
+function isTerminal(status) {
+  return status !== 'pending' && status !== 'running';
+}
+
 // ── v2: achtergrondagents ───────────────────────────────────────────────────
 const AGENTS_FILE = path.join(HOME, 'agent_jobs.json');
 const AGENT_WEBHOOK_URL = process.env.AGENT_WEBHOOK_URL || '';
 const AGENT_WEBHOOK_SECRET = process.env.AGENT_WEBHOOK_SECRET || SECRET;
 const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '3', 10);
 const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
+
+// ── verharding: logging ─────────────────────────────────────────────────────
+// v2 had één console.log: de opstartregel. Alle 690 regels daarna draaiden
+// stil, dus een vastgelopen job of een afgewezen aanroep liet geen spoor na.
+//
+// Drie ontwerpkeuzes die er hier toe doen:
+//   1. appendFileSync per regel, GEEN createWriteStream. Een stream houdt de
+//      oude inode vast: na een rotatie schrijft het proces gewoon door in het
+//      hernoemde bestand, dat dan ongelimiteerd groeit terwijl api.log leeg
+//      lijkt. Met appendFileSync opent elke regel het pad opnieuw.
+//   2. Rotatie in het schrijfpad zelf, niet op een timer — een timer kan een
+//      uitschieter missen.
+//   3. NOOIT body, headers, query of prompt in het log. Het secret reist in de
+//      body en zou anders op schijf belanden; prompts kunnen persoonsgegevens
+//      bevatten. Daarom ook req.url zonder querystring (zie reqPath).
+const API_LOG = process.env.API_LOG || '/opt/data/bin/api.log';
+const LOG_MAX_BYTES = parseInt(process.env.LOG_MAX_BYTES || String(5 * 1024 * 1024), 10);
+const LOG_STAT_EVERY = 100;   // omvang niet elke regel opvragen, maar elke 100
+
+let logTeller = 0;
+let logOmvang = null;         // gecachete omvang van API_LOG
+
+function roteerIndienNodig(extra) {
+  try {
+    if (logOmvang === null || (logTeller % LOG_STAT_EVERY) === 0) {
+      try { logOmvang = fs.statSync(API_LOG).size; } catch (e) { logOmvang = 0; }
+    }
+    if (logOmvang + extra > LOG_MAX_BYTES) {
+      try { fs.renameSync(API_LOG, API_LOG + '.1'); } catch (e) {}  // bestaande .1 wordt overschreven
+      logOmvang = 0;
+    }
+  } catch (e) { /* logging mag de server nooit omleggen */ }
+}
+
+function schrijfLog(regel) {
+  try {
+    const r = regel + '\n';
+    roteerIndienNodig(Buffer.byteLength(r, 'utf8'));
+    fs.appendFileSync(API_LOG, r);
+    logOmvang += Buffer.byteLength(r, 'utf8');
+    logTeller++;
+  } catch (e) { /* nooit werpen vanuit het logpad */ }
+  try { process.stdout.write(regel + '\n'); } catch (e) {}
+}
+
+function nu() {
+  const d = new Date();
+  function p(n, b) { return String(n).padStart(b || 2, '0'); }
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+    p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+// Bouwt "sleutel=waarde"-paren, slaat lege waardes over.
+function velden(o) {
+  const uit = [];
+  for (const k in o) {
+    const v = o[k];
+    if (v === undefined || v === null || v === '') continue;
+    uit.push(k + '=' + String(v).replace(/\s+/g, '_'));
+  }
+  return uit.join(' ');
+}
+
+// Requestlog: één regel per aanroep. Pad zonder querystring (zie boven).
+function reqLog(o) { schrijfLog(nu() + ' req ' + velden(o)); }
+
+// Joblog: één regel op het moment dat een job zijn eindstatus krijgt.
+// Nadrukkelijk zonder de uitvoer zelf — alleen de omvang ervan.
+function jobLog(o) { schrijfLog(nu() + ' job ' + velden(o)); }
+
+// Foutlog: ALLEEN name, code en status. Bewust niet err.message: fouten van de
+// JSON-parser citeren de request-body letterlijk (en dus mogelijk het secret),
+// en fs-fouten bevatten paden die persoonsgegevens kunnen prijsgeven.
+function logError(waar, err) {
+  const e = err || {};
+  schrijfLog(nu() + ' fout ' + velden({ waar: waar, name: e.name, code: e.code, status: e.status }));
+}
 
 // ── Modelaliassen ───────────────────────────────────────────────────────────
 const MODEL_ALIASSEN = {
@@ -105,6 +199,47 @@ function resolveWorkspace(name) {
   return Object.prototype.hasOwnProperty.call(WORKSPACES, key) ? key : DEFAULT_WS;
 }
 
+// ── verharding: strikte workspace-controle ──────────────────────────────────
+// resolveWorkspace viel bij een onbekende naam STIL terug op DEFAULT_WS. Een
+// typefout in het workspace-veld liet de opdracht dus in de vault landen in
+// plaats van in de GHAWA-repo, zonder melding en zonder spoor - precies het
+// soort stille terugval dat je pas ontdekt als het al gebeurd is.
+//
+// resolveWorkspace zelf werpt bewust NIET: de wachters hebben geen
+// foutafhandeling op hun Start run-node, dus de weigering moet aan de
+// routegrens gebeuren, met een 400, VOORDAT er een job bestaat of een sessie
+// wordt geraakt. Deze functie doet alleen de controle.
+//
+// Leeg blijft de standaard; alleen een NIET-lege onbekende naam is fout.
+function workspaceFout(name) {
+  const ruw = (name == null) ? '' : String(name);
+  const key = ruw.trim().toLowerCase();
+  if (!key) return null;
+  if (Object.prototype.hasOwnProperty.call(WORKSPACES, key)) return null;
+  return {
+    ok: false,
+    error: 'onbekende-workspace',
+    // De body is zelf het leesbare bericht: kaatst hij ooit via een
+    // chatworkflow terug naar Telegram, dan staat er iets bruikbaars.
+    melding: 'onbekende workspace; geldig zijn: ' + Object.keys(WORKSPACES).join(', ') +
+             ' (of leeg voor de standaard)',
+    lengte: ruw.length
+  };
+}
+
+// Weigert aan de routegrens. Logt WEL dat er een ongeldige waarde was en hoe
+// lang die was, maar NOOIT de waarde zelf: een verkeerd ingevuld veld kan van
+// alles bevatten, tot een secret aan toe.
+function weigerWorkspace(res, fout, route) {
+  reqLogExtra(res, { workspace_ongeldig: 1, workspace_lengte: fout.lengte });
+  logError('workspace', { name: 'OnbekendeWorkspace', code: route, status: 400 });
+  res.writeHead(400, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: fout.error, melding: fout.melding }));
+}
+
+// res._log aanvullen zonder eerder gezette velden te verliezen.
+function reqLogExtra(res, o) { res._log = Object.assign({}, res._log || {}, o); }
+
 function sessionKey(ws, chatId) {
   if (!chatId) return '';
   return ws === DEFAULT_WS ? chatId : ws + ':' + chatId;
@@ -112,6 +247,37 @@ function sessionKey(ws, chatId) {
 
 const jobs = {};
 const chatChains = {};
+
+// ── verharding: grote uitvoer naar schijf i.p.v. in het geheugen ────────────
+// Zet uitvoer boven OUTPUT_INLINE_MAX weg in een bestand en laat in de job
+// alleen het pad en de omvang achter. /result leest hem er weer bij op.
+function spillIfLarge(jobId, r) {
+  try {
+    const out = (typeof r.output === 'string') ? r.output : '';
+    r.output_bytes = Buffer.byteLength(out, 'utf8');
+    if (r.output_bytes > OUTPUT_INLINE_MAX) {
+      fs.mkdirSync(JOBOUT_DIR, { recursive: true });
+      const p = path.join(JOBOUT_DIR, jobId + '.txt');
+      fs.writeFileSync(p, out);
+      r.output = '';
+      r.output_file = p;
+    }
+  } catch (e) {
+    // Lukt wegschrijven niet, dan houden we hem inline: een job zonder uitvoer
+    // teruggeven is erger dan tijdelijk wat geheugen.
+    logError('spill', e);
+  }
+  return r;
+}
+
+// Verwijdert een job én het uitvoerbestand dat er eventueel bij hoort.
+function dropJob(id) {
+  const j = jobs[id];
+  if (j && j.result && j.result.output_file) {
+    try { fs.unlinkSync(j.result.output_file); } catch (e) {}
+  }
+  delete jobs[id];
+}
 let chatSessions = {};
 try { chatSessions = JSON.parse(fs.readFileSync(SESS_FILE, 'utf8')); } catch (e) { chatSessions = {}; }
 function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
@@ -160,7 +326,23 @@ function saveAgents() {
 function enqueue(key, fn) {
   const k = key || ('anon-' + crypto.randomBytes(4).toString('hex'));
   const prev = chatChains[k] || Promise.resolve();
-  const next = prev.then(fn, fn);
+  // Verharding: de keten was al deels verdedigd - prev.then(fn, fn) laat fn ook
+  // draaien als de vorige job faalde, en chatChains[k] krijgt een .catch, dus
+  // een rejection wurgt de keten niet. Wat er ONTBRAK: de teruggegeven promise
+  // (`next`) werd nergens afgevangen. /run gebruikt de retourwaarde niet, dus
+  // een werpende fn leverde een UNHANDLED REJECTION op - en dat is sinds Node 15
+  // standaard fataal voor het proces. Vandaar dat fn hier zelf wordt ingepakt:
+  // een falende job blijft een falende job, maar sloopt nooit de server of de
+  // rest van de wachtrij.
+  const veiligeFn = function () {
+    try {
+      return Promise.resolve(fn()).catch(function (e) { logError('job-keten', e); });
+    } catch (e) {
+      logError('job-keten', e);
+      return Promise.resolve();
+    }
+  };
+  const next = prev.then(veiligeFn, veiligeFn);
   chatChains[k] = next.catch(function () {});
   return next;
 }
@@ -280,13 +462,16 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // 'exit' met een korte naloop voor de laatste stdout, en bij een kill éérst
     // proberen of er tóch een compleet resultaat op stdout staat.
     let resolved = false;
+    let laatsteCode = null;   // verharding: exitcode bewaren voor de joblog
     function finish(r) {
       if (resolved) return;
       resolved = true;
       clearInterval(watchdog);
+      if (r && r.exit_code === undefined) r.exit_code = laatsteCode;
       resolve(r);
     }
     function finalize(code) {
+      laatsteCode = code;
       if (resolved) return;
       try {
         const j = JSON.parse(out);
@@ -417,6 +602,23 @@ function agentInfo() {
   return { lopend: lopend, afgerond_24u: afgerond24, mislukt_24u: mislukt24 };
 }
 
+// Eén regel op het moment dat een job zijn eindstatus krijgt. Bewust GEEN
+// uitvoer, alleen de omvang ervan: de uitvoer kan patientgegevens of
+// persoonsgegevens bevatten en hoort niet op schijf in een logbestand.
+function jobEindLog(jobId, j, ws) {
+  const r = j.result || {};
+  const out = (typeof r.output === 'string') ? r.output : '';
+  jobLog({
+    job_id: jobId,
+    workspace: ws,
+    status: j.status,
+    ok: r.ok ? 1 : 0,
+    seconden: Math.round((((j.done_at || Date.now()) - (j.started || j.created || Date.now()))) / 1000),
+    exit_code: (r.exit_code === undefined || r.exit_code === null) ? 'n.v.t.' : r.exit_code,
+    uitvoer_bytes: (r.output_bytes !== undefined) ? r.output_bytes : Buffer.byteLength(out, 'utf8')
+  });
+}
+
 async function processJob(jobId, prompt, explicitSession, files, chatId, ws, model) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
@@ -424,10 +626,20 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, mod
   const space = WORKSPACES[ws];
   const key = sessionKey(ws, chatId);
   const j = jobs[jobId];
+  // Verharding: de 24-uursopruiming kan een job wissen die nog in de
+  // enqueue-wachtrij staat (lange wachtrij, of een pod die een etmaal
+  // achterloopt). Zonder deze guard werd hieronder j.status gezet op undefined:
+  // een TypeError, waarna de catch ZELF weer j.status aanraakte en dus opnieuw
+  // wierp - een afgewezen promise de keten in.
+  if (!j) {
+    logError('job-verdwenen', { name: 'JobWeg', code: 'processJob' });
+    return;
+  }
   try {
     if (!fs.existsSync(space.dir)) {
       j.status = 'done'; j.done_at = Date.now();
       j.result = { ok: false, error: 'workspace-missing', output: 'De werkmap voor workspace "' + ws + '" (' + space.dir + ') bestaat niet in de pod.', files: [] };
+      jobEindLog(jobId, j, ws);
       return;
     }
     fs.mkdirSync(indir, { recursive: true });
@@ -448,10 +660,13 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, mod
     r.workspace = ws;
     if (model) r.model = model;
     if (key && r.session_id) { chatSessions[key] = r.session_id; saveSessions(); }
-    j.status = 'done'; j.done_at = Date.now(); j.result = r;
+    j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
+    jobEindLog(jobId, j, ws);
   } catch (e) {
+    logError('processJob', e);
     j.status = 'done'; j.done_at = Date.now();
     j.result = { ok: false, error: String(e), output: '', files: [] };
+    jobEindLog(jobId, j, ws);
   } finally {
     try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) {}
   }
@@ -526,6 +741,21 @@ async function processAgent(jobId, prompt, explicitSession, ws, model, maxMs) {
   const space = WORKSPACES[ws];
   const j = jobs[jobId];
   const entry = agentsReg[jobId];
+  // Zelfde guard als in processJob. Extra hier: het agentregister overleeft een
+  // podherstart, dus een agent die nooit begint zou anders eeuwig op 'pending'
+  // blijven staan - onzichtbaar afgebroken, maar wel een bezet slot van
+  // MAX_AGENTS en een lopende agent in /agents.
+  if (!j) {
+    logError('job-verdwenen', { name: 'JobWeg', code: 'processAgent' });
+    if (entry) {
+      entry.status = 'done';
+      entry.ok = false;
+      entry.ended = Date.now();
+      entry.rapport = 'niet gestart: job was al opgeruimd';
+      saveAgents();
+    }
+    return;
+  }
   try {
     fs.mkdirSync(indir, { recursive: true });
     fs.mkdirSync(outdir, { recursive: true });
@@ -536,12 +766,19 @@ async function processAgent(jobId, prompt, explicitSession, ws, model, maxMs) {
       { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS });
     r.files = collectFiles(outdir);
     r.workspace = ws;
-    j.status = 'done'; j.done_at = Date.now(); j.result = r;
+    // Let op de volgorde: spillIfLarge leegt r.output als die naar schijf gaat,
+    // dus het webhookrapport krijgt de volledige uitvoer apart mee. Anders zou
+    // juist bij een grote agentrun een leeg rapport naar Telegram gaan.
+    const volledigeUitvoer = (typeof r.output === 'string') ? r.output : '';
+    j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
+    jobEindLog(jobId, j, ws);
     entry.status = 'done'; entry.ok = !!r.ok; entry.ended = Date.now(); saveAgents();
-    sendReport(entry, r);
+    sendReport(entry, Object.assign({}, r, { output: volledigeUitvoer }));
   } catch (e) {
+    logError('processAgent', e);
     const r = { ok: false, error: String(e), output: '', files: [] };
     j.status = 'done'; j.done_at = Date.now(); j.result = r;
+    jobEindLog(jobId, j, ws);
     entry.status = 'done'; entry.ok = false; entry.ended = Date.now(); saveAgents();
     sendReport(entry, r);
   } finally {
@@ -555,7 +792,17 @@ function readBody(req, cb) {
   req.on('end', function () { let d; try { d = JSON.parse(body || '{}'); } catch (e) { d = null; } cb(d); });
 }
 
-const server = http.createServer(function (req, res) {
+// Het pad ZONDER querystring. Dit is een kale http-server, geen Express, dus
+// er is geen req.path; req.url en req.originalUrl bevatten wél de query. Het
+// doel van de review-eis blijft hier onverkort staan: er mag nooit een
+// querystring in het log komen, want daar zou een secret in kunnen staan.
+function reqPath(req) {
+  const u = req.url || '';
+  const i = u.indexOf('?');
+  return i === -1 ? u : u.slice(0, i);
+}
+
+function handleRequest(req, res) {
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
     const spaces = {};
     for (const k in WORKSPACES) spaces[k] = { dir: WORKSPACES[k].dir, exists: fs.existsSync(WORKSPACES[k].dir) };
@@ -576,10 +823,13 @@ const server = http.createServer(function (req, res) {
       const prompt = (d.prompt || '').toString().trim();
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
       const chatId = (d.chat_id != null && d.chat_id !== '') ? String(d.chat_id) : '';
+      const wsFout = workspaceFout(d.workspace);
+      if (wsFout) return weigerWorkspace(res, wsFout, '/run');
       const ws = resolveWorkspace(d.workspace);
       const model = resolveModel(d.model);
       const jobId = crypto.randomBytes(8).toString('hex');
-      jobs[jobId] = { status: 'pending', created: Date.now() };
+      jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: chatId };
+      res._log = { job_id: jobId, chat_id: chatId, workspace: ws };
       enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, model); });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws, model: model || '(default)' }));
@@ -598,12 +848,15 @@ const server = http.createServer(function (req, res) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: false, error: 'max-agents', uitleg: 'Er lopen al ' + MAX_AGENTS + ' achtergrondagents; wacht tot er één klaar is.' }));
       }
+      const wsFout = workspaceFout(d.workspace);
+      if (wsFout) return weigerWorkspace(res, wsFout, '/agent');
       const ws = resolveWorkspace(d.workspace);
       if (!fs.existsSync(WORKSPACES[ws].dir)) { res.writeHead(400); return res.end('workspace missing'); }
       const model = resolveModel(d.model);
       const maxMin = Math.min(Math.max(parseInt(d.max_minuten || BG_MAX_DEFAULT_MIN, 10) || BG_MAX_DEFAULT_MIN, 5), BG_MAX_CAP_MIN);
       const jobId = crypto.randomBytes(8).toString('hex');
-      jobs[jobId] = { status: 'pending', created: Date.now(), agent: true };
+      jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '' };
+      res._log = { job_id: jobId, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', workspace: ws, agent: 1 };
       agentsReg[jobId] = {
         job_id: jobId, label: label, status: 'pending',
         chat_id: (d.chat_id != null) ? String(d.chat_id) : '',
@@ -642,6 +895,7 @@ const server = http.createServer(function (req, res) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
       const j = jobs[d.job_id];
+      res._log = { job_id: d.job_id, workspace: j && j.workspace };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (!j) return res.end(JSON.stringify({ found: false, done: false }));
       if (j.status !== 'done') {
@@ -653,8 +907,22 @@ const server = http.createServer(function (req, res) {
           last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0
         }));
       }
-      const payload = Object.assign({ found: true, done: true, status: 'done' }, j.result);
-      delete jobs[d.job_id];
+      // Verharding: ophalen is idempotent. Voorheen werd de job hier gewist,
+      // waardoor een tweede /result (herkansing van de poll-lus, dubbele
+      // n8n-run, netwerkfout na het verzenden) een leeg found:false teruggaf en
+      // het resultaat definitief weg was. De opruimlus onderaan is nu de enige
+      // plek die jobs verwijdert.
+      const payload = Object.assign({ found: true, done: true, status: j.status }, j.result);
+      if (payload.output_file) {
+        try {
+          payload.output = fs.readFileSync(payload.output_file, 'utf8');
+        } catch (e) {
+          logError('result-lees', e);
+          payload.output = '';
+          payload.output_weg = true;
+        }
+        delete payload.output_file;
+      }
       return res.end(JSON.stringify(payload));
     });
   }
@@ -664,8 +932,11 @@ const server = http.createServer(function (req, res) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
       const chatId = (d.chat_id != null) ? String(d.chat_id) : '';
+      const wsFout = workspaceFout(d.workspace);
+      if (wsFout) return weigerWorkspace(res, wsFout, '/reset');
       const ws = resolveWorkspace(d.workspace);
       const key = sessionKey(ws, chatId);
+      res._log = { chat_id: chatId, workspace: ws };
       if (key) { delete chatSessions[key]; saveSessions(); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, reset: chatId, workspace: ws }));
@@ -673,16 +944,99 @@ const server = http.createServer(function (req, res) {
   }
 
   res.writeHead(404); res.end('not found');
+}
+
+const server = http.createServer(function (req, res) {
+  const t0 = Date.now();
+  // Routes vullen res._log met job_id / chat_id / workspace zodra die bekend
+  // zijn (dat is pas ná het lezen van de body, vandaar deze omweg).
+  res._log = {};
+  res.on('finish', function () {
+    reqLog(Object.assign({
+      m: req.method,
+      pad: reqPath(req),
+      status: res.statusCode,
+      ms: Date.now() - t0
+    }, res._log));
+  });
+  try {
+    handleRequest(req, res);
+  } catch (e) {
+    logError('route', e);
+    try { if (!res.headersSent) { res.writeHead(500); res.end('server error'); } } catch (e2) {}
+  }
 });
 
-// v2: opruimen op TOESTAND, niet op leeftijd. pending/running blijven altijd
-// staan; done verdwijnt 2 uur na voltooiing (of direct bij ophalen via /result).
-setInterval(function () {
-  const cutoff = Date.now() - DONE_TTL_MS;
+// Fouten die buiten een route ontstaan mogen niet stil blijven.
+server.on('clientError', function (err, socket) {
+  logError('client', err);
+  try { socket.destroy(); } catch (e) {}
+});
+process.on('uncaughtException', function (err) { logError('uncaught', err); });
+process.on('unhandledRejection', function (err) { logError('unhandled', err); });
+
+// ── verharding: opruimen in drie lagen ──────────────────────────────────────
+// v2 ruimde alleen status 'done' op, en /result wiste een job bij het ophalen.
+// Die combinatie liet twee lekken open: een job met een andere eindstatus bleef
+// eeuwig staan, en een job die vastliep in 'running' (kindproces verdwenen,
+// watchdog niet aangeslagen) ook. Nu:
+//   1. elke EINDSTATUS verdwijnt DONE_TTL_MS na afronding;
+//   2. ALLES ouder dan JOB_MAX_AGE_MS verdwijnt, ongeacht status — een
+//      vastgelopen 'running' is geen reden voor een permanent lek;
+//   3. boven JOBS_MAX blijven alleen de nieuwste afgeronde jobs staan.
+// Uitvoerbestanden op schijf gaan met de job mee (dropJob).
+function opruimJobs() {
+  const nuMs = Date.now();
+  const ttlGrens = nuMs - DONE_TTL_MS;
+  const maxGrens = nuMs - JOB_MAX_AGE_MS;
+
   for (const id in jobs) {
-    if (jobs[id].status === 'done' && (jobs[id].done_at || 0) < cutoff) delete jobs[id];
+    const j = jobs[id];
+    // 1. afgerond en lang genoeg opgehaald kunnen zijn
+    if (isTerminal(j.status) && (j.done_at || 0) < ttlGrens) { dropJob(id); continue; }
+    // 2. absolute bovengrens — ook running/pending
+    if ((j.created || j.started || 0) < maxGrens) {
+      jobLog({ job_id: id, workspace: j.workspace, status: j.status, reden: 'verlopen-24u' });
+      dropJob(id);
+    }
   }
-}, 5 * 60 * 1000);
+
+  // 3. aantalsgrens op het TOTAAL, niet op het aantal afgeronde jobs. De eerste
+  // opzet begrensde alleen de afgeronde: bij 210 jobs waarvan 15 lopend telde
+  // hij 195 afgeronde, bleef onder JOBS_MAX en ruimde dus niets op terwijl het
+  // totaal er wel overheen was. Nu wordt het overschot berekend op het totaal en
+  // van OUDSTE afgeronde naar nieuwste weggewerkt. Lopende jobs blijven altijd
+  // staan; zijn er zoveel lopende dat het totaal er niet onder komt, dan is dat
+  // zo - een lopende job weggooien is erger dan even boven de grens zitten.
+  const ids = Object.keys(jobs);
+  let over = ids.length - JOBS_MAX;
+  if (over > 0) {
+    const afgerond = ids
+      .filter(function (id) { return isTerminal(jobs[id].status); })
+      .sort(function (a, b) { return (jobs[a].done_at || 0) - (jobs[b].done_at || 0); });  // oudste eerst
+    for (let i = 0; i < afgerond.length && over > 0; i++) { dropJob(afgerond[i]); over--; }
+  }
+
+  // Wezen: uitvoerbestanden zonder job (bv. na een podherstart).
+  try {
+    const levend = {};
+    for (const id in jobs) {
+      if (jobs[id].result && jobs[id].result.output_file) levend[jobs[id].result.output_file] = 1;
+    }
+    const bestanden = fs.existsSync(JOBOUT_DIR) ? fs.readdirSync(JOBOUT_DIR) : [];
+    for (let i = 0; i < bestanden.length; i++) {
+      const p = path.join(JOBOUT_DIR, bestanden[i]);
+      if (levend[p]) continue;
+      let st = null;
+      try { st = fs.statSync(p); } catch (e) { continue; }
+      if (st.mtimeMs < maxGrens) { try { fs.unlinkSync(p); } catch (e) {} }
+    }
+  } catch (e) { logError('opruimen-joboutput', e); }
+}
+
+// Als benoemde functie i.p.v. een anonieme callback: zo is de opruiming los
+// aanroepbaar in een test, zonder vijf minuten te wachten of de klok te zetten.
+setInterval(opruimJobs, 5 * 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', function () {
   console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents) luistert op :' + PORT +

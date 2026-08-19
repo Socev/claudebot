@@ -174,6 +174,12 @@ start_bot(){
 setup_git(){
   git config --global user.name  "${GIT_USER_NAME:-GHAWA Website Bot}"
   git config --global user.email "${GIT_USER_EMAIL:-bot@ghawa.org}"
+  # LET OP: dit is een GLOBALE helper, dus elke git-repo op dit volume erft hem
+  # en leest $HOME/.git-credentials - ook repo's die er niets mee te maken hebben.
+  # Wil een repo zijn eigen inloggegeven, dan moet die de keten eerst wissen met
+  # de lege-waarde-truc: git config --local --unset-all credential.helper, dan
+  # --add credential.helper '' en pas daarna --add credential.helper 'store --file=...'.
+  # Zonder die reset wint deze globale helper, want git probeert ze op volgorde.
   git config --global credential.helper store
   git config --global init.defaultBranch main
   git config --global pull.rebase false
@@ -190,23 +196,38 @@ setup_git(){
 # Klonen (1e keer) of bijwerken. Raakt NOOIT een vuile werkmap aan: als Claude
 # midden in een wijziging zit, doen we alleen 'fetch' en verder niets.
 sync_repo(){
+  # git.log had geen enkele tijdstempel: 93 regels kale git-uitvoer waaruit niet
+  # op te maken viel wanneer iets faalde of hoe vaak. Vandaar per schrijfmoment
+  # een kopregel; de git-commando's zelf blijven ongemoeid.
+  gitkop(){ printf '%s %s\n' "$(date '+%F %T')" "$1" >> "$BIN/git.log"; }
+  # Rotatie: zonder grens groeit dit bestand ongemerkt door.
+  if [ -f "$BIN/git.log" ] && [ "$(stat -c %s "$BIN/git.log" 2>/dev/null || echo 0)" -gt 2097152 ]; then
+    mv -f "$BIN/git.log" "$BIN/git.log.1"
+    gitkop "== log geroteerd naar git.log.1 =="
+  fi
   if [ ! -d "$REPO_DIR/.git" ]; then
     log "repo klonen -> $REPO_DIR"
+    gitkop "clone $REPO_URL -> $REPO_DIR"
     git clone "$REPO_URL" "$REPO_DIR" >> "$BIN/git.log" 2>&1 || { log "clone MISLUKT (zie git.log)"; return; }
   fi
   cd "$REPO_DIR" || return
+  gitkop "fetch origin"
   git fetch origin >> "$BIN/git.log" 2>&1
   if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
     log "repo heeft niet-gecommitte wijzigingen — sync overgeslagen"
     return
   fi
   # productie-branch up to date houden
+  gitkop "checkout main + pull origin main"
   git checkout main >> "$BIN/git.log" 2>&1 && git pull origin main >> "$BIN/git.log" 2>&1
   # staging-branch garanderen (bestaat op remote? checkout; anders aanmaken vanaf main)
   if git ls-remote --exit-code --heads origin staging >/dev/null 2>&1; then
+    gitkop "checkout staging + pull origin staging"
     git checkout staging >> "$BIN/git.log" 2>&1 && git pull origin staging >> "$BIN/git.log" 2>&1
   else
+    gitkop "staging bestaat niet op de remote: lokaal aanmaken vanaf main"
     git checkout -B staging main >> "$BIN/git.log" 2>&1
+    gitkop "push -u origin staging"
     git push -u origin staging >> "$BIN/git.log" 2>&1 || log "kon staging-branch niet pushen (PAT?)"
   fi
   # node_modules warmhouden zodat 'npm run build' snel is
