@@ -161,6 +161,17 @@ function logError(waar, err) {
   schrijfLog(nu() + ' fout ' + velden({ waar: waar, name: e.name, code: e.code, status: e.status }));
 }
 
+// ── verharding: welke secrets zijn bij het opstarten via de RPC geladen ─────
+// fetch-secrets.sh zet SECRETS_GELADEN als kommalijst van NAMEN. Uitsluitend
+// namen: /health is voor de wachters en de heartbeat, en daar hoort nooit een
+// waarde in te staan. Leeg betekent overgangsmodus (nog op losse env-variabelen)
+// of een RPC die niets opleverde - beide zichtbaar in het opstartlog.
+function secretsGeladen() {
+  const ruw = (process.env.SECRETS_GELADEN || '').trim();
+  if (!ruw) return [];
+  return ruw.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+}
+
 // ── Modelaliassen ───────────────────────────────────────────────────────────
 const MODEL_ALIASSEN = {
   snel: 'jimmy-snel',    // DeepSeek V4 Flash via Inceptron — werkpaard
@@ -812,7 +823,8 @@ function handleRequest(req, res) {
       jobs: Object.keys(jobs).length, chats: Object.keys(chatSessions).length,
       modellen: Object.keys(MODEL_ALIASSEN),
       sync: syncInfo(), inbox: inboxInfo(), sessies: sessieInfo(),
-      agents: agentInfo()
+      agents: agentInfo(),
+      secrets_geladen: secretsGeladen()
     }));
   }
 
