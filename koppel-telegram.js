@@ -80,10 +80,13 @@ async function naarVault(sessie) {
 
   // Lege StringSession = memory-only. Er wordt niets naar schijf geschreven.
   const client = new TelegramClient(new StringSession(''), apiId, apiHash, {
-    connectionRetries: 3,
+    connectionRetries: 5,
     deviceModel: 'Socev reader',
     systemVersion: 'pod',
-    appVersion: '1.0'
+    appVersion: '1.0',
+    // Zie telegram-reader.js: kale MTProto over TCP wordt door de egress
+    // geaccepteerd maar niet doorgelaten; alleen websocket over TLS werkt.
+    useWSS: true
   });
   client.setLogLevel('error');
 
