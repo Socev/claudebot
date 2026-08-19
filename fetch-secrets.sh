@@ -28,7 +28,14 @@ POGINGEN=3
 WACHT=(2 5 15)
 
 # snake_case uit de RPC -> HOOFDLETTERS als env-naam.
-VERWACHT="claude_code_oauth_token supabase_mcp_token n8n_mcp_token todoist_mcp_token agent_webhook_secret"
+VERWACHT="claude_code_oauth_token supabase_mcp_token n8n_mcp_token todoist_mcp_token agent_webhook_secret telegram_api_id telegram_api_hash telegram_sessie"
+
+# Namen die mogen ontbreken zonder dat er iets stuk is. telegram_sessie bestaat
+# pas NA de eenmalige koppeling (koppel-telegram.js), en de twee api-gegevens
+# pas zodra David ze in de kluis heeft gezet. Zonder deze lijst zou het opstartlog
+# elke keer drie regels "dit onderdeel werkt niet" tonen voor een toestand die
+# gewoon nog moet komen - en dan gaat iemand een storing zoeken die er niet is.
+NOG_TE_KOPPELEN="telegram_api_id telegram_api_hash telegram_sessie"
 
 # ── Overgangssituatie: chart nog oud, geen bootstrapgeheim ──────────────────
 # Chart 0.0.40 zet POD_BOOTSTRAP_SECRET. Tot die er is, draait de pod nog op de
@@ -174,11 +181,19 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
   exit 78
 fi
 
+# Alleen het Claude-token is fataal (hierboven afgehandeld). Al het andere dat
+# ontbreekt levert een logregel op en verder niets: de pod start gewoon door.
 for N in $VERWACHT; do
   ENVNAAM="$(printf '%s' "$N" | tr '[:lower:]' '[:upper:]')"
-  if [ -z "$(printenv "$ENVNAAM" || true)" ]; then
-    log "ONTBREEKT: $N (\$$ENVNAAM) - de pod start wel, dit onderdeel werkt niet"
-  fi
+  [ -n "$(printenv "$ENVNAAM" || true)" ] && continue
+  case " $NOG_TE_KOPPELEN " in
+    *" $N "*)
+      log "nog niet gekoppeld: $N (\$$ENVNAAM) - Telegram-lezer is uit tot de koppeling is gedaan"
+      ;;
+    *)
+      log "ONTBREEKT: $N (\$$ENVNAAM) - de pod start wel, dit onderdeel werkt niet"
+      ;;
+  esac
 done
 
 # Namenlijst voor /health. Uitsluitend namen.
