@@ -40,12 +40,39 @@ ENV PORT=8080
 ENV TZ=Europe/Amsterdam
 # GIT_REPO_URL / GITHUB_PAT bewust NIET hier: die komen uit de deployment-env.
 
+# ── Versiestempel ───────────────────────────────────────────────────────────
+# De CI vult GIT_SHA met de commit waaruit dit image is gebouwd. Die waarde is de
+# naam van de bootstrap-release op een vers volume, en verschijnt in /health als
+# image_versie. Zonder stempel is achteraf niet vast te stellen welke code er in
+# een draaiend image zit - en dan is "hij draait" geen bruikbaar antwoord.
+ARG GIT_SHA=onbekend
+ENV IMAGE_SHA=${GIT_SHA}
+ENV APP_ROOT=/opt/data/app
+ENV APP_BOOTSTRAP=/app/release-bootstrap
+
 WORKDIR /app
-COPY server.js /app/server.js
-COPY telegram-claude-bot.js /app/telegram-claude-bot.js
+# Ketenonderdelen: blijven in het image draaien en bewegen dus NIET mee met een
+# uitrol. Dat is bewust - een kapotte supervisor of entrypoint kun je op de pod
+# niet meer repareren, dus die horen bij de image-categorie.
 COPY run.sh /app/run.sh
 COPY entrypoint.sh /app/entrypoint.sh
 COPY fetch-secrets.sh /app/fetch-secrets.sh
+COPY supervisor.js /app/supervisor.js
+COPY uitrol.sh /app/uitrol.sh
+
+# De applicatiecode staat op TWEE plekken. /app/release-bootstrap is de kopie die
+# een vers volume vult; daarna draait de pod uit /opt/data/app/current en raakt
+# deze kopie niet meer aan. De losse /app/*.js blijven staan omdat bestaande
+# aanroepen (koppel-telegram, telegram-reader vanaf de opdrachtregel) ernaar
+# verwijzen; die zijn geen onderdeel van de draaiende API.
+COPY server.js /app/release-bootstrap/server.js
+COPY telegram-claude-bot.js /app/release-bootstrap/telegram-claude-bot.js
+COPY telegram-reader.js /app/release-bootstrap/telegram-reader.js
+COPY koppel-telegram.js /app/release-bootstrap/koppel-telegram.js
+COPY package.json /app/release-bootstrap/package.json
+
+COPY server.js /app/server.js
+COPY telegram-claude-bot.js /app/telegram-claude-bot.js
 COPY telegram-reader.js /app/telegram-reader.js
 COPY koppel-telegram.js /app/koppel-telegram.js
 
@@ -56,7 +83,7 @@ COPY package.json /app/package.json
 RUN npm install --omit=dev --no-audit --no-fund \
  && npm cache clean --force
 
-RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh
+RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh /app/uitrol.sh
 
 EXPOSE 8080
 # entrypoint draait als root (chown volume), zakt dan naar 'claude'
