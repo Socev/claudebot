@@ -141,10 +141,16 @@ async function maakClient() {
   const { StringSession } = require('telegram/sessions');
 
   const client = new TelegramClient(new StringSession(sessie), apiId, apiHash, {
-    connectionRetries: 2,
+    connectionRetries: 4,
     deviceModel: 'Socev reader',
     systemVersion: 'pod',
     appVersion: '1.0',
+    // useWSS: websocket over ECHT TLS. Gemeten op 19-8-2026 vanaf de pod: kale
+    // MTProto over TCP verbindt wel (connect in 7 ms) maar krijgt daarna NUL
+    // bytes terug - de egress accepteert de verbinding en laat het verkeer
+    // vallen. Met useWSS verbindt GramJS in ~1 s. connectionRetries van 2 naar 4
+    // omdat een websocket-opzet meer stappen heeft die los kunnen mislukken.
+    useWSS: true,
     // 0 = nooit zelf slapen op een floodwait. Wachten verbergt het probleem en
     // laat het proces minutenlang hangen; we geven het door als nette fout.
     floodSleepThreshold: 0,
