@@ -9,7 +9,8 @@
 #
 # Extra env voor de GHAWA-website-workspace (in Olares Studio in te stellen):
 #   GIT_REPO_URL   bv. https://github.com/Socev/ghawa-site.git  (leeg = git-deel uit)
-#   GITHUB_PAT     fine-grained PAT met contents:write op ALLEEN die repo
+#   (GITHUB_PAT is per 19-8-2026 vervallen: de GHAWA-clone gebruikt een eigen
+#    credentialbestand, zie GHAWA_CRED verderop)
 #   REPO_DIR       /opt/data/repo (default)
 #   GIT_USER_NAME / GIT_USER_EMAIL  identiteit voor commits
 #
@@ -171,25 +172,60 @@ start_bot(){
 }
 
 # ── Git-workspace (GHAWA-site) — alleen actief als GIT_REPO_URL is gezet ─────
+# Het credentialbestand van de GHAWA-clone. Wordt hier NIET aangemaakt: de
+# git-tokens vallen buiten de secretronde en staan dus (nog) niet in de RPC.
+# Het bestand wordt met de hand gevuld uit het Vault-secret github_pat_ghawa_site.
+GHAWA_CRED="${GHAWA_CRED:-/opt/data/.git-credentials-ghawa}"
+
 setup_git(){
   git config --global user.name  "${GIT_USER_NAME:-GHAWA Website Bot}"
   git config --global user.email "${GIT_USER_EMAIL:-bot@ghawa.org}"
-  # LET OP: dit is een GLOBALE helper, dus elke git-repo op dit volume erft hem
-  # en leest $HOME/.git-credentials - ook repo's die er niets mee te maken hebben.
-  # Wil een repo zijn eigen inloggegeven, dan moet die de keten eerst wissen met
-  # de lege-waarde-truc: git config --local --unset-all credential.helper, dan
-  # --add credential.helper '' en pas daarna --add credential.helper 'store --file=...'.
-  # Zonder die reset wint deze globale helper, want git probeert ze op volgorde.
-  git config --global credential.helper store
   git config --global init.defaultBranch main
   git config --global pull.rebase false
   git config --global --add safe.directory "$REPO_DIR"
-  if [ -n "${GITHUB_PAT:-}" ]; then
-    # https-push zonder interactieve login
-    printf "https://x-access-token:%s@github.com\n" "$GITHUB_PAT" > "$HOME/.git-credentials"
-    chmod 600 "$HOME/.git-credentials"
-  else
-    log "LET OP: GITHUB_PAT leeg — pushen naar GitHub zal mislukken."
+
+  # GEEN globale credential.helper meer, en GEEN $HOME/.git-credentials.
+  #
+  # Wat hier stond schreef GITHUB_PAT naar $HOME/.git-credentials en zette een
+  # GLOBALE `credential.helper store`. Twee problemen tegelijk:
+  #   1. Elke git-repo op dit volume erfde die helper en las dus hetzelfde
+  #      bestand - ook repo's die er niets mee te maken hebben. Op 18-8 kostte
+  #      dat een dag: de socev.dev-token belandde in dat gedeelde bestand en was
+  #      bij de eerstvolgende geauthenticeerde fetch weer overschreven.
+  #   2. Het token stond in platte tekst op schijf, buiten elke kluis om.
+  #
+  # Nu krijgt elke repo zijn eigen bestand, en wordt de geerfde keten expliciet
+  # gewist met de lege-waarde-truc: git probeert helpers op volgorde, dus zonder
+  # die reset zou een globale helper alsnog winnen.
+  # Residu van het oude mechanisme opruimen. De lege-helper-reset hieronder
+  # maskeert de globale helper al, maar een token hoort niet als restant op
+  # schijf te blijven staan - en een volgende beheerder moet niet alsnog op een
+  # globale helper stuiten die er niet meer hoort te zijn.
+  # HOME van claude is /opt/data (uit de passwd-databank), dus dit is
+  # /opt/data/.git-credentials.
+  git config --global --unset-all credential.helper 2>/dev/null || true
+  rm -f "$HOME/.git-credentials"
+
+  # ── Overbrugging: image :29 op chart 0.0.38 ────────────────────────────────
+  # Op een VERS volume bestaat GHAWA_CRED nog niet, en de git-tokens zitten niet
+  # in de secret-RPC. Zonder deze regel zou de GHAWA-sync stilvallen bij precies
+  # de combinatie die tussen twee uitrollen in bestaat: nieuw image, oude chart.
+  # Zolang GITHUB_PAT er nog is, schrijven we het bestand daar eenmalig uit.
+  # VERVALT met chart 0.0.40, wanneer GITHUB_PAT uit de podconfiguratie gaat.
+  if [ ! -f "$GHAWA_CRED" ] && [ -n "${GITHUB_PAT:-}" ]; then
+    printf "https://x-access-token:%s@github.com\n" "$GITHUB_PAT" > "$GHAWA_CRED"
+    chmod 600 "$GHAWA_CRED"
+    log "overbrugging: credentialbestand uit GITHUB_PAT geschreven; vervalt met chart 0.0.40"
+  fi
+
+  if [ -d "$REPO_DIR/.git" ]; then
+    git -C "$REPO_DIR" config --local --unset-all credential.helper 2>/dev/null || true
+    git -C "$REPO_DIR" config --local --add credential.helper ''
+    git -C "$REPO_DIR" config --local --add credential.helper "store --file=$GHAWA_CRED"
+  fi
+
+  if [ ! -f "$GHAWA_CRED" ]; then
+    log "LET OP: $GHAWA_CRED ontbreekt - GHAWA-git werkt niet tot dat bestand er is (vullen uit Vault-secret github_pat_ghawa_site)."
   fi
 }
 
@@ -206,9 +242,20 @@ sync_repo(){
     gitkop "== log geroteerd naar git.log.1 =="
   fi
   if [ ! -d "$REPO_DIR/.git" ]; then
+    # Vers volume zonder credentialbestand: NIET proberen te klonen. Een private
+    # repo geeft dan een 403 die als authenticatiefout in git.log belandt, en de
+    # lus zou dat elke 300 s herhalen. Overslaan met een duidelijke regel is
+    # eerlijker: de rest van de pod werkt gewoon door.
+    if [ ! -f "$GHAWA_CRED" ]; then
+      log "GHAWA-clone overgeslagen: $GHAWA_CRED ontbreekt op dit volume."
+      return
+    fi
     log "repo klonen -> $REPO_DIR"
     gitkop "clone $REPO_URL -> $REPO_DIR"
-    git clone "$REPO_URL" "$REPO_DIR" >> "$BIN/git.log" 2>&1 || { log "clone MISLUKT (zie git.log)"; return; }
+    git clone -c credential.helper= -c "credential.helper=store --file=$GHAWA_CRED" \
+      "$REPO_URL" "$REPO_DIR" >> "$BIN/git.log" 2>&1 || { log "clone MISLUKT (zie git.log)"; return; }
+    # Meteen na de clone de repo-eigen helper vastleggen.
+    setup_git
   fi
   cd "$REPO_DIR" || return
   gitkop "fetch origin"
