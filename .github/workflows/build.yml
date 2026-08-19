@@ -55,37 +55,77 @@ jobs:
       # deze stap zodra de code een NIEUWE variabele nodig heeft - in CI, waar dat
       # niets kost, in plaats van op de pod.
       #
-      # LET OP, DE LIJST HIERONDER MOET GELIJK ZIJN AAN DE CHART. De chart is vanaf
-      # de pod niet in te zien; deze lijst is afgeleid uit de draaiende omgeving.
-      # Wijkt hij af, dan is dit een verkeerd gerichte poort. Dit hoort door David
-      # of de hoofdagent een keer tegen de chart aan gehouden te worden.
+      # DE LIJST IS GEVERIFIEERD TEGEN DE CHART (deployment.yaml), 19-8-2026. Het zijn
+      # exact deze zeventien namen, en niets anders. Geen enkel werktoken zit erbij:
+      # die komen via fetch-secrets uit de Vault en horen hier dus niet.
       #
-      # OVER DE SECRETS. Hier komt GEEN enkele echte waarde aan te pas, en er wordt
-      # dus ook NIETS getest over het laden uit de kluis. POD_BOOTSTRAP_SECRET
-      # blijft bewust leeg: dan valt fetch-secrets.sh in zijn gedocumenteerde
-      # overgangsmodus, en juist dat pad willen we zien opstarten. De assertie op
-      # een LEGE secrets_geladen staat erin zodat niemand later denkt dat deze test
-      # de kluis dekt.
+      # WAAROM TWEE CONTROLES EN NIET EEN. Gemeten op 19-8-2026: met exact de chart-env
+      # en een LEGE POD_BOOTSTRAP_SECRET valt fetch-secrets.sh NIET in overgangsmodus
+      # maar sluit hij af met exit 78. Dat is geen bug maar het ontwerp - overgangsmodus
+      # eist dat CLAUDE_CODE_OAUTH_TOKEN al in de omgeving staat, en die komt uit de
+      # kluis. Met alleen de chart-env kan de volledige keten dus per definitie niet
+      # doorstarten. Een werktoken erbij verzinnen zou die meting wegpoetsen en precies
+      # de indruk wekken die we willen vermijden: dat CI het laden van secrets test.
       #
-      # TWEE BEWUSTE AFWIJKINGEN van de chart, allebei omdat ze netwerk vragen dat
-      # CI niet heeft en niet hoort te hebben:
-      #   SYNC_ENABLED=0   - anders probeert rclone een Drive-sync zonder config
-      #   GIT_REPO_URL weg - de GHAWA-clone is een privérepo; CI hoort daar geen
-      #                      inloggegeven voor te hebben
-      - name: Rooktest - container start en /health antwoordt
+      # Daarom:
+      #   A. de VOLLEDIGE keten met alleen de chart-env moet met 78 afsluiten. Dat
+      #      toetst de fail-hard: de pod hoort te weigeren half-geauthenticeerd te
+      #      draaien, in plaats van vaag ziek door te starten.
+      #   B. dezelfde env, maar de keten begint bij run.sh, zodat supervisor, app en
+      #      /health wel getest worden. Dit stuk zegt niets over secrets - de assertie
+      #      op een LEGE secrets_geladen staat erin zodat niemand later denkt van wel.
+      - name: Rooktest - fail-hard en /health
         env:
           VERWACHTE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           IMAGE=ghcr.io/socev/claudebot:${{ github.run_number }}
-          docker run -d --name rooktest -p 18080:8080 \
-            -e PUID=1001 \
-            -e PGID=1001 \
-            -e API_SECRET='NEP-CI-WAARDE-GEEN-ECHT-SECRET' \
-            -e CLAUDE_CODE_OAUTH_TOKEN='NEP-CI-WAARDE-GEEN-ECHT-TOKEN' \
-            -e SUPABASE_URL='https://nep-ci.invalid' \
-            -e SYNC_ENABLED=0 \
-            "$IMAGE"
+
+          # Exact de zeventien namen uit de chart. Waardes zijn nep en als zodanig
+          # herkenbaar; POD_BOOTSTRAP_SECRET is leeg, zoals de chart hem in CI zou
+          # leveren als er geen kluis is.
+          cat > /tmp/chart.env <<'ENVEOF'
+          PGID=1001
+          PUID=1001
+          TZ=Europe/Amsterdam
+          TG_ALLOWED=NEP-CI-GEEN-ECHTE-CHAT
+          VAULT_DIR=/opt/data/AI_SecondBrain
+          PORT=8080
+          API_SECRET=NEP-CI-WAARDE-GEEN-ECHT-SECRET
+          DISABLE_AUTOUPDATER=1
+          POD_BOOTSTRAP_SECRET=
+          SUPABASE_URL=https://nep-ci.invalid
+          SUPABASE_ANON_KEY=NEP-CI-WAARDE-GEEN-ECHTE-SLEUTEL
+          GIT_REPO_URL=https://nep-ci.invalid/geen-repo.git
+          REPO_DIR=/opt/data/repo
+          GIT_USER_NAME=rooktest
+          GIT_USER_EMAIL=rooktest@nep-ci.invalid
+          AGENT_WEBHOOK_URL=https://nep-ci.invalid/webhook
+          AGENT_WEBHOOK_SECRET=NEP-CI-WAARDE-GEEN-ECHT-SECRET
+          ENVEOF
+          sed -i 's/^          //' /tmp/chart.env
+
+          echo "== A. volledige keten met alleen de chart-env: moet 78 geven =="
+          set +e
+          docker run --name rooktest-keten --env-file /tmp/chart.env "$IMAGE" >/tmp/keten.log 2>&1
+          CODE=$?
+          set -e
+          echo "exitcode: $CODE"; tail -5 /tmp/keten.log || true
+          if [ "$CODE" != "78" ]; then
+            echo "::error::fail-hard werkt niet: verwacht exit 78 zonder bootstrapgeheim, kreeg $CODE"
+            exit 1
+          fi
+          grep -q 'FATAAL' /tmp/keten.log || { echo "::error::exit 78 zonder FATAAL-regel in het log"; exit 1; }
+          echo "  OK    keten weigert te starten zonder kluis, met een leesbare reden"
+
+          echo "== B. supervisor + app + /health, zelfde env, keten vanaf run.sh =="
+          # Dit spiegelt entrypoint.sh (mappen aanmaken + chown) en slaat alleen
+          # fetch-secrets over. Wijzigt entrypoint.sh, dan moet deze regel mee - er is
+          # bewust geen bypass-vlag in fetch-secrets zelf, want dat zou een schakelaar
+          # zijn om het laden van secrets over te slaan.
+          docker run -d --name rooktest -p 18080:8080 --env-file /tmp/chart.env \
+            --entrypoint /bin/bash "$IMAGE" -c \
+            'mkdir -p /opt/data/bin /opt/data/io /opt/data/AI_SecondBrain "${REPO_DIR:-/opt/data/repo}" && chown -R claude:claude /opt/data && exec gosu claude /app/run.sh'
 
           echo "wachten tot /health antwoordt (max 90 s)"
           for i in $(seq 1 90); do
@@ -133,4 +173,6 @@ jobs:
 
       - name: Rooktest opruimen
         if: always()
-        run: docker rm -f rooktest 2>/dev/null || true
+        run: |
+          docker rm -f rooktest rooktest-keten 2>/dev/null || true
+          rm -f /tmp/chart.env /tmp/keten.log /tmp/health.json 2>/dev/null || true
