@@ -46,6 +46,16 @@ COPY telegram-claude-bot.js /app/telegram-claude-bot.js
 COPY run.sh /app/run.sh
 COPY entrypoint.sh /app/entrypoint.sh
 COPY fetch-secrets.sh /app/fetch-secrets.sh
+COPY telegram-reader.js /app/telegram-reader.js
+COPY koppel-telegram.js /app/koppel-telegram.js
+
+# GramJS (pakket 'telegram') voor de Telegram-lezer. Eerst alleen package.json
+# kopieren en installeren: zo hoeft deze laag niet opnieuw te bouwen als er
+# alleen een .js-bestand verandert.
+COPY package.json /app/package.json
+RUN npm install --omit=dev --no-audit --no-fund \
+ && npm cache clean --force
+
 RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh
 
 EXPOSE 8080

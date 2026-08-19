@@ -1,0 +1,10 @@
+{
+  "name": "claudebot-pod",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Runtime-afhankelijkheden van de Claude-pod. GramJS (pakket 'telegram') is nodig voor telegram-reader.js en koppel-telegram.js; de rest van de pod draait op de standaardbibliotheek van Node.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "telegram": "^2.26.22"
+  }
+}
