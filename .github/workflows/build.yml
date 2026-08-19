@@ -36,6 +36,101 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: |
             ghcr.io/socev/claudebot:latest
             ghcr.io/socev/claudebot:${{ github.run_number }}
+
+      # ── Rooktest ─────────────────────────────────────────────────────────
+      #
+      # WAAROM DEZE STAP BESTAAT. Tot nu toe was de eerste keer dat een image echt
+      # startte, de keer dat het op de pod startte. Een tikfout in run.sh of een
+      # supervisor die niet opkomt merkte je pas als de pod al plat lag - en dan is
+      # het gereedschap om het te repareren ook weg.
+      #
+      # WAAROM MET EXACT EN ALLEEN DE CHART-ENV. De verleiding is hier alles in te
+      # vullen wat de container maar zou kunnen willen. Dan slaagt de test altijd
+      # en vertelt hij niets. Door precies te leveren wat de chart levert, faalt
+      # deze stap zodra de code een NIEUWE variabele nodig heeft - in CI, waar dat
+      # niets kost, in plaats van op de pod.
+      #
+      # LET OP, DE LIJST HIERONDER MOET GELIJK ZIJN AAN DE CHART. De chart is vanaf
+      # de pod niet in te zien; deze lijst is afgeleid uit de draaiende omgeving.
+      # Wijkt hij af, dan is dit een verkeerd gerichte poort. Dit hoort door David
+      # of de hoofdagent een keer tegen de chart aan gehouden te worden.
+      #
+      # OVER DE SECRETS. Hier komt GEEN enkele echte waarde aan te pas, en er wordt
+      # dus ook NIETS getest over het laden uit de kluis. POD_BOOTSTRAP_SECRET
+      # blijft bewust leeg: dan valt fetch-secrets.sh in zijn gedocumenteerde
+      # overgangsmodus, en juist dat pad willen we zien opstarten. De assertie op
+      # een LEGE secrets_geladen staat erin zodat niemand later denkt dat deze test
+      # de kluis dekt.
+      #
+      # TWEE BEWUSTE AFWIJKINGEN van de chart, allebei omdat ze netwerk vragen dat
+      # CI niet heeft en niet hoort te hebben:
+      #   SYNC_ENABLED=0   - anders probeert rclone een Drive-sync zonder config
+      #   GIT_REPO_URL weg - de GHAWA-clone is een privérepo; CI hoort daar geen
+      #                      inloggegeven voor te hebben
+      - name: Rooktest - container start en /health antwoordt
+        env:
+          VERWACHTE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          IMAGE=ghcr.io/socev/claudebot:${{ github.run_number }}
+          docker run -d --name rooktest -p 18080:8080 \
+            -e PUID=1001 \
+            -e PGID=1001 \
+            -e API_SECRET='NEP-CI-WAARDE-GEEN-ECHT-SECRET' \
+            -e CLAUDE_CODE_OAUTH_TOKEN='NEP-CI-WAARDE-GEEN-ECHT-TOKEN' \
+            -e SUPABASE_URL='https://nep-ci.invalid' \
+            -e SYNC_ENABLED=0 \
+            "$IMAGE"
+
+          echo "wachten tot /health antwoordt (max 90 s)"
+          for i in $(seq 1 90); do
+            if curl -fsS -m 3 http://127.0.0.1:18080/health -o /tmp/health.json 2>/dev/null; then
+              echo "antwoord na ${i}s"; break
+            fi
+            sleep 1
+          done
+
+          echo "-- containerlog (staart) --"; docker logs rooktest 2>&1 | tail -40
+          echo "-- /health --"; cat /tmp/health.json 2>/dev/null || echo "(geen antwoord)"; echo
+
+          node -e '
+            const fs = require("fs");
+            let j;
+            try { j = JSON.parse(fs.readFileSync("/tmp/health.json", "utf8")); }
+            catch (e) {
+              console.error("::error::/health gaf geen bruikbare JSON - de container is niet gezond opgekomen");
+              process.exit(1);
+            }
+            const eisen = [
+              ["ok is true", j.ok === true],
+              // Een verse container heeft geen releases op het volume. Dat versie
+              // toch gevuld is, kan dus alleen als de supervisor de bootstrapkopie
+              // heeft uitgepakt en current heeft gezet.
+              ["versie is gevuld", !!j.versie && j.versie !== "onbekend"],
+              ["versie == image_versie (vers volume draait de bootstrapkopie)", j.versie === j.image_versie],
+              ["versie == de gebouwde commit", j.versie === process.env.VERWACHTE_SHA],
+              // Zonder bootstrapgeheim hoort er niets uit de kluis te komen. Slaat
+              // dit om, dan test deze stap iets anders dan hij beweert.
+              ["secrets_geladen is leeg (geen kluis in CI)",
+               Array.isArray(j.secrets_geladen) && j.secrets_geladen.length === 0]
+            ];
+            let stuk = 0;
+            for (const [naam, goed] of eisen) {
+              console.log((goed ? "  OK    " : "  FOUT  ") + naam);
+              if (!goed) stuk++;
+            }
+            if (stuk) {
+              console.error("::error::rooktest: " + stuk + " van de " + eisen.length + " eisen niet gehaald");
+              process.exit(1);
+            }
+            console.log("rooktest geslaagd - draaiende versie " + j.versie);
+          '
+
+      - name: Rooktest opruimen
+        if: always()
+        run: docker rm -f rooktest 2>/dev/null || true
