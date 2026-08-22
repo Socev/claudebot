@@ -244,6 +244,44 @@ function terugflip(reden) {
   return true;
 }
 
+/*
+ * Kijk of een net gestart kind gezond opkomt, en flip anders terug.
+ *
+ * DIT IS BEWUST ÉÉN FUNCTIE, gebruikt door zowel de opstart van de supervisor als
+ * de herstartlus. Een tweede implementatie zou op termijn uiteenlopen met de eerste,
+ * en dan heb je twee vangnetten die allebei half werken.
+ *
+ * HET GAT DAT DIT DICHT (gemeten 22-8-2026). `bootZelfcontrole` draaide alleen in
+ * `main()`, dus alleen bij het starten van de SUPERVISOR. Een uitrol doodt echter
+ * alleen het KIND: `uitrol.sh` zet `current` om en stuurt SIGTERM. De herstartlus
+ * bracht het kind dan weer omhoog zónder enige gezondheidscontrole - precies op de
+ * route waar een verse, ongeteste release draait. `uitrol.sh` leunt in zijn eigen
+ * commentaar op dat vangnet ("de supervisor controleert nu zelf of hij gezond
+ * opkomt"), en dat klopte op die route dus niet.
+ *
+ * WAAROM DIT MEER VANGT DAN DE CRASHLUS. `verwerkCrash` telt kinderen die STERVEN.
+ * Een release die opkomt en blijft draaien maar nooit een gezonde `/health` geeft -
+ * hangend bij het opstarten, kapotte configuratie - crasht niet, dus die teller
+ * komt nooit aan zijn grens. Juist dat geval blijft anders stil kapot staan.
+ */
+async function bewaakOpkomst(reden) {
+  const gezond = await bootZelfcontrole();
+  if (gezond) return true;
+  if (!terugflip(reden)) return false;
+
+  log('kind stoppen en opnieuw starten vanaf de teruggezette release');
+  stoppen = true; stopKind('SIGTERM');
+  await wacht(3000);
+  stopKind('SIGKILL');
+  await wacht(500);
+  stoppen = false;
+  kind = startKind();
+  const opnieuw = await bootZelfcontrole();
+  log(opnieuw ? 'teruggezette release is gezond'
+              : 'ook de teruggezette release komt niet gezond op - dit vraagt David');
+  return opnieuw;
+}
+
 function verwerkCrash() {
   const nu = Date.now();
   crashTijden = crashTijden.filter((t) => nu - t < CRASH_VENSTER_MS);
@@ -255,7 +293,14 @@ function verwerkCrash() {
   const ms = BACKOFF_MS[Math.min(herstartTeller, BACKOFF_MS.length - 1)];
   herstartTeller++;
   log('herstart over ' + ms + ' ms');
-  setTimeout(function () { if (!stoppen) kind = startKind(); }, ms);
+  setTimeout(function () {
+    if (stoppen) return;
+    kind = startKind();
+    if (!kind) return;
+    // Fouten hier mogen de supervisor nooit omleggen: hij is het laatste wat nog leeft.
+    bewaakOpkomst('zelfcontrole na herstart mislukt')
+      .catch(function (e) { log('zelfcontrole na herstart faalde: ' + (e && e.message ? e.message : 'onbekend')); });
+  }, ms);
 }
 
 // ── stoppen ─────────────────────────────────────────────────────────────────
@@ -292,19 +337,6 @@ process.on('SIGINT', () => afsluiten('SIGINT'));
     return;
   }
 
-  const gezond = await bootZelfcontrole();
-  if (!gezond) {
-    if (terugflip('boot-zelfcontrole mislukt')) {
-      log('kind stoppen en opnieuw starten vanaf de teruggezette release');
-      stoppen = true; stopKind('SIGTERM');
-      await wacht(3000);
-      stopKind('SIGKILL');
-      await wacht(500);
-      stoppen = false;
-      kind = startKind();
-      const opnieuw = await bootZelfcontrole();
-      log(opnieuw ? 'teruggezette release is gezond' : 'ook de teruggezette release komt niet gezond op - dit vraagt David');
-    }
-  }
+  await bewaakOpkomst('boot-zelfcontrole mislukt');
   log('draait nu release ' + huidigeSha());
 })();
