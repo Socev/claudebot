@@ -58,6 +58,27 @@ VERWACHT="claude_code_oauth_token supabase_mcp_token n8n_mcp_token todoist_mcp_t
 # gewoon nog moet komen - en dan gaat iemand een storing zoeken die er niet is.
 NOG_TE_KOPPELEN="telegram_api_id telegram_api_hash telegram_sessie"
 
+# ── Zonder-kluis-modus: expliciete opt-out voor pods zonder kluistoegang ────
+#
+# WAAROM DIT ER IS. Fail-hard is voor claudebot precies goed: een pod die stilletjes
+# zónder secrets doorstart lijkt te werken en geeft daarna bij elke aanroep een fout
+# waarvan niemand de oorzaak ziet. Maar hetzelfde image draait ook op pods die per
+# ontwerp GEEN kluistoegang hebben - Jimmy praat met LiteLLM en heeft geen
+# claude_code_oauth_token. Voor die pods was de harde stop geen bescherming maar een
+# blokkade: het image kon er domweg niet opstarten.
+#
+# DE STANDAARD BLIJFT FAIL-HARD, en dat is de kern van deze wijziging. De vlag moet
+# EXPLICIET op 1 staan. Staat hij dat niet, dan is dit blok een no-op en verandert er
+# geen letter aan het gedrag hieronder - geen nieuwe terugval, geen stille uitzondering.
+# Wie deze modus aanzet, kiest er bewust voor en ziet dat in het log terug.
+if [ "${POD_ZONDER_KLUIS:-}" = "1" ]; then
+  log "kluis overgeslagen: POD_ZONDER_KLUIS=1 - deze pod draait bewust zonder kluissecrets"
+  export SECRETS_GELADEN=""
+  # Zelfde opruiming als op de andere exec-paden: wat niet nodig is, geven we niet door.
+  unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY 2>/dev/null || true
+  exec "$@"
+fi
+
 # ── Overgangssituatie: chart nog oud, geen bootstrapgeheim ──────────────────
 # Chart 0.0.40 zet POD_BOOTSTRAP_SECRET. Tot die er is, draait de pod nog op de
 # losse env-variabelen. Die situatie mag NIET falen, anders ligt de pod plat op
