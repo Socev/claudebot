@@ -294,17 +294,22 @@ let chatSessions = {};
 try { chatSessions = JSON.parse(fs.readFileSync(SESS_FILE, 'utf8')); } catch (e) { chatSessions = {}; }
 function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
 
-// ── v2: register van achtergrondagents (overleeft een pod-herstart) ─────────
+// ── v2: register van achtergrondagents (overleeft een containerherstart) ───
 let agentsReg = {};
 try { agentsReg = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8')); } catch (e) { agentsReg = {}; }
 // Stond er bij het opstarten nog iets op 'running', dan is dat door de herstart
 // gesneuveld. Niet stil laten verdwijnen: expliciet zo markeren, zodat
 // GET /agents en de heartbeat het kunnen zien.
+// Term gecorrigeerd 25-8-2026 (akkoord David): het was 'afgebroken-podherstart',
+// maar wat hier herstart is het CONTAINERPROCES, niet de pod of de node. Gemeten
+// bij het incident van 25-8 21:16: PID 1 (run.sh) was net gestart terwijl
+// /proc/uptime op ruim zeven dagen stond. De oude term leidde tot een onjuiste
+// melding aan David.
 (function () {
   let dirty = false;
   for (const id in agentsReg) {
     if (agentsReg[id].status === 'running' || agentsReg[id].status === 'pending') {
-      agentsReg[id].status = 'afgebroken-podherstart';
+      agentsReg[id].status = 'afgebroken-containerherstart';
       agentsReg[id].ended = Date.now();
       dirty = true;
     }
@@ -312,7 +317,7 @@ try { agentsReg = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8')); } catch (e) 
     // het rapport anders eeuwig op 'herkansing-N' laten staan — nooit
     // afgeleverd, nooit als mislukt gemarkeerd, dus onzichtbaar voor de skill.
     if (agentsReg[id].rapport && agentsReg[id].rapport.indexOf('herkansing-') === 0) {
-      agentsReg[id].rapport = 'mislukt: podherstart tijdens herkansing';
+      agentsReg[id].rapport = 'mislukt: containerherstart tijdens herkansing';
       dirty = true;
     }
   }
@@ -754,7 +759,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, model, maxMs) {
   const j = jobs[jobId];
   const entry = agentsReg[jobId];
   // Zelfde guard als in processJob. Extra hier: het agentregister overleeft een
-  // podherstart, dus een agent die nooit begint zou anders eeuwig op 'pending'
+  // containerherstart, dus een agent die nooit begint zou anders eeuwig op 'pending'
   // blijven staan - onzichtbaar afgebroken, maar wel een bezet slot van
   // MAX_AGENTS en een lopende agent in /agents.
   if (!j) {
@@ -1039,7 +1044,7 @@ function opruimJobs() {
     for (let i = 0; i < afgerond.length && over > 0; i++) { dropJob(afgerond[i]); over--; }
   }
 
-  // Wezen: uitvoerbestanden zonder job (bv. na een podherstart).
+  // Wezen: uitvoerbestanden zonder job (bv. na een containerherstart).
   try {
     const levend = {};
     for (const id in jobs) {
