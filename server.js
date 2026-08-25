@@ -1067,6 +1067,7 @@ function handleRequest(req, res) {
       sync: syncInfo(), inbox: inboxInfo(), sessies: sessieInfo(),
       agents: agentInfo(),
       geheugen: geheugenInfo(),
+      offsite: offsiteInfo(),
       secrets_geladen: secretsGeladen()
     }));
   }
@@ -1305,6 +1306,160 @@ function opruimJobs() {
 // Als benoemde functie i.p.v. een anonieme callback: zo is de opruiming los
 // aanroepbaar in een test, zonder vijf minuten te wachten of de klok te zetten.
 setInterval(opruimJobs, 5 * 60 * 1000);
+
+// ── wekker voor de offsite-backup ───────────────────────────────────────────
+// Waarom dit bestaat: /opt/data/bin/vault-offsite.sh bestaat en werkt, maar
+// NIETS riep het periodiek aan. Er is geen cron in deze container en run.sh
+// maakt alleen lokale snapshots (vault_snapshot_indien_nodig). De offsite-kopie
+// hing dus aan een handmatige aanroep. Deze wekker geeft hem een hartslag.
+//
+// Het script is zelf idempotent (eigen dagstempel, uur-backoff en een eigen
+// niet-blokkerende flock), dus vaker tikken dan eens per dag is veilig: een
+// overbodige tik is een no-op. Daarom mag het interval kort zijn.
+const OFFSITE_INTERVAL_MIN = parseInt(process.env.OFFSITE_INTERVAL_MIN || '30', 10);
+const OFFSITE_START_DELAY_MIN = parseInt(process.env.OFFSITE_START_DELAY_MIN || '5', 10);
+const OFFSITE_TIMEOUT_MIN = parseInt(process.env.OFFSITE_TIMEOUT_MIN || '15', 10);
+const OFFSITE_SCRIPT = process.env.OFFSITE_SCRIPT || '/opt/data/bin/vault-offsite.sh';
+const OFFSITE_BACKUP_LOG = process.env.OFFSITE_BACKUP_LOG || '/opt/data/bin/backup.log';
+
+const offsite = {
+  actief: false, reden_uit: null, bezig: false, kind: null,
+  laatste_start: null, laatste_einde: null, laatste_duur_s: null,
+  laatste_afloop: null, overgeslagen_bezig: 0, overgeslagen_geheugen: 0,
+  script_gemeld: false
+};
+
+// Grendel tegen twee aanroepers. Zodra run.sh de offsite-ronde zelf doet,
+// exporteert het OFFSITE_DOOR_RUNSH en zet deze timer zichzelf uit. Twee
+// aanroepers zouden elkaar niet stukmaken (het script heeft een eigen flock),
+// maar wel een verwarrend dubbel spoor in backup.log achterlaten.
+// Een opmerking in commentaar is geen grendel; deze drie regels wel.
+function offsiteDoorRunsh() {
+  return process.env.OFFSITE_DOOR_RUNSH !== undefined && process.env.OFFSITE_DOOR_RUNSH !== null;
+}
+
+function offsiteKlaarVoorTik() {
+  if (offsiteDoorRunsh()) return 'run.sh neemt over (OFFSITE_DOOR_RUNSH)';
+  if (offsite.bezig) { offsite.overgeslagen_bezig++; return 'vorige ronde loopt nog'; }
+  // accessSync met X_OK: bestaan is niet genoeg, spawn van een niet-uitvoerbaar
+  // bestand faalt pas op EACCES en dat is een nodeloze foutregel per tik.
+  try {
+    fs.accessSync(OFFSITE_SCRIPT, fs.constants.X_OK);
+  } catch (e) {
+    if (!offsite.script_gemeld) {
+      offsite.script_gemeld = true;
+      schrijfLog(nu() + ' offsite ' + velden({ besluit: 'uit', reden: 'script ontbreekt of niet uitvoerbaar', code: e.code }));
+    }
+    return 'script ontbreekt of is niet uitvoerbaar';
+  }
+  // Rclone met een vault van ~300 GB is niet gratis. Draait de pod al krap,
+  // dan is een backup het werk dat mag wachten - niet het gesprek.
+  const m = leesGeheugen();
+  if (m.status === 'ok') {
+    const effectief = Math.max(0, m.vrij_mib - OPSTART_RESERVE_MB * jongeAgents());
+    if (effectief < MIN_VRIJ_CHAT_MB) {
+      offsite.overgeslagen_geheugen++;
+      return 'te weinig geheugen (' + effectief + ' MiB)';
+    }
+  }
+  return null;
+}
+
+function offsiteTik() {
+  const beletsel = offsiteKlaarVoorTik();
+  if (beletsel) {
+    offsite.actief = false;
+    offsite.reden_uit = beletsel;
+    return;
+  }
+  offsite.actief = true;
+  offsite.reden_uit = null;
+
+  let kind;
+  try {
+    // detached: eigen procesgroep, nodig om straks de HELE groep te kunnen
+    // doden. unref() wordt bewust NIET aangeroepen - het handvat is nodig voor
+    // de timeout, en unref plus een timeout is technisch tegenstrijdig.
+    // stdio 'ignore': het script schrijft zelf naar backup.log; zouden we pipes
+    // openen zonder te lezen, dan groeit de uitvoer in de Node-heap.
+    kind = spawn(OFFSITE_SCRIPT, [], { detached: true, stdio: 'ignore' });
+  } catch (e) {
+    offsite.laatste_afloop = 'spawnfout';
+    logError('offsite-spawn', e);
+    return;
+  }
+  offsite.bezig = true;
+  offsite.kind = kind;
+  offsite.laatste_start = Date.now();
+  offsite.laatste_einde = null;
+
+  let gedood = false;
+  const klok = setTimeout(function () {
+    gedood = true;
+    // De PROCESGROEP, niet het kind: vault-offsite.sh start rclone, en
+    // kind.kill() zou die kleinkinderen laten leven. Zelfde patroon als
+    // killGroup() in processJob.
+    try { process.kill(-kind.pid, 'SIGTERM'); } catch (e) { try { kind.kill('SIGTERM'); } catch (e2) {} }
+    setTimeout(function () {
+      try { process.kill(-kind.pid, 'SIGKILL'); } catch (e) { try { kind.kill('SIGKILL'); } catch (e2) {} }
+    }, KILL_GRACE_MS);
+  }, OFFSITE_TIMEOUT_MIN * 60 * 1000);
+
+  kind.on('error', function (e) {
+    clearTimeout(klok);
+    offsite.bezig = false; offsite.kind = null;
+    offsite.laatste_afloop = 'spawnfout';
+    offsite.laatste_einde = Date.now();
+    logError('offsite-kind', e);
+  });
+
+  // Op 'exit', niet op 'close': met stdio 'ignore' zijn er geen pipes, en zo
+  // blijft de bezig-vlag niet hangen aan een kleinkind dat nog leeft.
+  kind.on('exit', function (code) {
+    clearTimeout(klok);
+    offsite.bezig = false; offsite.kind = null;
+    offsite.laatste_einde = Date.now();
+    offsite.laatste_duur_s = Math.round((offsite.laatste_einde - offsite.laatste_start) / 1000);
+    // De exitcode wordt genegeerd: het script bepaalt zelf of een ronde nodig
+    // was en meldt zijn eigen fouten in backup.log. Wel vastgelegd.
+    offsite.laatste_afloop = gedood ? 'timeout' : 'klaar';
+    schrijfLog(nu() + ' offsite ' + velden({ afloop: offsite.laatste_afloop, duur_s: offsite.laatste_duur_s, code: code }));
+  });
+}
+
+function offsiteInfo() {
+  const info = {
+    actief: offsite.actief, reden_uit: offsite.reden_uit,
+    interval_min: OFFSITE_INTERVAL_MIN,
+    laatste_start_iso: offsite.laatste_start ? new Date(offsite.laatste_start).toISOString() : null,
+    laatste_einde_iso: offsite.laatste_einde ? new Date(offsite.laatste_einde).toISOString() : null,
+    laatste_duur_s: offsite.laatste_duur_s,
+    laatste_afloop: offsite.laatste_afloop,
+    overgeslagen_bezig: offsite.overgeslagen_bezig,
+    overgeslagen_geheugen: offsite.overgeslagen_geheugen,
+    backup_log_minuten_stil: null
+  };
+  // Uit de MTIME, net als syncInfo. De INHOUD wordt bewust niet geparsed: dat
+  // zou server.js koppelen aan de bewoordingen van het backupscript.
+  try {
+    const st = fs.statSync(OFFSITE_BACKUP_LOG);
+    info.backup_log_minuten_stil = Math.round((Date.now() - st.mtimeMs) / 60000);
+  } catch (e) {}
+  return info;
+}
+
+// Eerste tik PAS na de startvertraging, niet op t=0. Zonder die vertraging zou
+// een herstartlus het script elke 40 seconden opnieuw starten en afkappen.
+if (OFFSITE_INTERVAL_MIN > 0 && !offsiteDoorRunsh()) {
+  setTimeout(function () {
+    offsiteTik();
+    setInterval(offsiteTik, OFFSITE_INTERVAL_MIN * 60 * 1000);
+  }, OFFSITE_START_DELAY_MIN * 60 * 1000);
+} else {
+  offsite.reden_uit = offsiteDoorRunsh()
+    ? 'run.sh neemt over (OFFSITE_DOOR_RUNSH)'
+    : 'uitgezet (OFFSITE_INTERVAL_MIN=0)';
+}
 
 server.listen(PORT, '0.0.0.0', function () {
   console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents) luistert op :' + PORT +
