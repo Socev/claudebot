@@ -85,19 +85,6 @@ const AGENT_WEBHOOK_SECRET = process.env.AGENT_WEBHOOK_SECRET || SECRET;
 const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '3', 10);
 const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 
-// ── capaciteitspoort: geheugen ──────────────────────────────────────────────
-// Aanleiding: de pod viel op 25-8-2026 drie keer om met OOMKilled (exit 137)
-// binnen zijn eigen 4Gi-cgroup. dmesg toonde een claude-proces van 2,9 GB
-// anon-rss naast chrome en playwright. Beide keren viel hij om kort nadat er
-// een tweede zware sessie bijkwam. MAX_AGENTS telt kóppen, geen geheugen: drie
-// lichte agents passen, twee zware niet.
-const CGROUP_DIR = process.env.CGROUP_DIR || '/sys/fs/cgroup';
-const MIN_VRIJ_GEHEUGEN_MB = parseInt(process.env.MIN_VRIJ_GEHEUGEN_MB || '2048', 10);
-const MIN_VRIJ_CHAT_MB = parseInt(process.env.MIN_VRIJ_CHAT_MB || '768', 10);
-const OPSTART_RESERVE_MB = parseInt(process.env.OPSTART_RESERVE_MB || '1536', 10);
-const OPSTART_RESERVE_SEC = parseInt(process.env.OPSTART_RESERVE_SEC || '120', 10);
-const MIB = 1024 * 1024;
-
 // ── verharding: logging ─────────────────────────────────────────────────────
 // v2 had één console.log: de opstartregel. Alle 690 regels daarna draaiden
 // stil, dus een vastgelopen job of een afgewezen aanroep liet geen spoor na.
@@ -632,220 +619,6 @@ function agentInfo() {
   return { lopend: lopend, afgerond_24u: afgerond24, mislukt_24u: mislukt24 };
 }
 
-// ── capaciteitspoort: de meting ─────────────────────────────────────────────
-// Read-only en gooit NOOIT: een meetfout mag nooit de reden zijn dat er geen
-// agents meer starten. Uitsluitend cgroup v2; er is bewust GEEN terugval op
-// cgroup v1, want die vertelt iets anders en een stille verkeerde meting is
-// erger dan een eerlijke 'meting-mislukt'.
-//
-// WAAROM NIET memory.current: dat cijfer bevat page cache, en deze pod draait
-// elke 300 s rclone bisync over de hele vault. De cache staat daardoor
-// structureel hoog en is bovendien onder druk gratis opruimbaar. Een poort op
-// memory.current zou dus vrijwel altijd dicht staan zonder dat er ook maar
-// iets aan de hand is. We rekenen daarom met het HARDE gebruik uit memory.stat:
-// anon + shmem + sock + slab_unreclaimable — precies het deel dat de kernel
-// niet zomaar kan weggooien en dat dus tot een OOM leidt.
-let geheugenPiekMib = 0;
-let geheugenCache = null;
-let geheugenCacheTs = 0;
-
-function leesGeheugen() {
-  const nuMs = Date.now();
-  if (geheugenCache && (nuMs - geheugenCacheTs) < 2000) return geheugenCache;
-
-  const r = {
-    status: 'meting-mislukt', limiet_mib: null, hard_gebruikt_mib: null,
-    vrij_mib: null, piek_mib: null, meetfout: null
-  };
-  try {
-    let ruweMax;
-    try {
-      ruweMax = fs.readFileSync(path.join(CGROUP_DIR, 'memory.max'), 'utf8').trim();
-    } catch (e) {
-      r.meetfout = 'memory.max onleesbaar (' + (e.code || 'fout') + ')';
-      geheugenCache = r; geheugenCacheTs = nuMs; return r;
-    }
-    // Geen limiet ingesteld: er valt niets te bewaken, de poort hoort uit.
-    if (ruweMax === 'max') {
-      r.status = 'uit';
-      r.meetfout = null;
-      geheugenCache = r; geheugenCacheTs = nuMs; return r;
-    }
-    const limiet = parseInt(ruweMax, 10);
-    if (!isFinite(limiet) || limiet <= 0) {
-      r.meetfout = 'memory.max onbegrijpelijk';
-      geheugenCache = r; geheugenCacheTs = nuMs; return r;
-    }
-
-    let statRuw;
-    try {
-      statRuw = fs.readFileSync(path.join(CGROUP_DIR, 'memory.stat'), 'utf8');
-    } catch (e) {
-      r.meetfout = 'memory.stat onleesbaar (' + (e.code || 'fout') + ')';
-      geheugenCache = r; geheugenCacheTs = nuMs; return r;
-    }
-    const stat = {};
-    const regels = statRuw.split('\n');
-    for (let i = 0; i < regels.length; i++) {
-      const sp = regels[i].indexOf(' ');
-      if (sp <= 0) continue;
-      const v = parseInt(regels[i].slice(sp + 1), 10);
-      if (isFinite(v)) stat[regels[i].slice(0, sp)] = v;
-    }
-    // Een ontbrekende sleutel telt als 0 — behalve anon. Zonder anon meten we
-    // niet het geheugen maar de rand ervan, en dat is geen meting.
-    if (!isFinite(stat.anon)) {
-      r.meetfout = 'anon ontbreekt in memory.stat';
-      geheugenCache = r; geheugenCacheTs = nuMs; return r;
-    }
-    const hard = stat.anon + (stat.shmem || 0) + (stat.sock || 0) + (stat.slab_unreclaimable || 0);
-
-    r.status = 'ok';
-    r.limiet_mib = Math.round(limiet / MIB);
-    r.hard_gebruikt_mib = Math.round(hard / MIB);
-    r.vrij_mib = Math.round((limiet - hard) / MIB);
-    if (r.vrij_mib < 0) r.vrij_mib = 0;
-
-    if (r.hard_gebruikt_mib > geheugenPiekMib) geheugenPiekMib = r.hard_gebruikt_mib;
-    // memory.peak is de kernel-eigen hoogwatermerk; bestaat niet op elke kernel.
-    try {
-      const p = parseInt(fs.readFileSync(path.join(CGROUP_DIR, 'memory.peak'), 'utf8').trim(), 10);
-      if (isFinite(p)) r.piek_mib = Math.round(p / MIB);
-    } catch (e) { /* optioneel */ }
-    if (r.piek_mib === null) r.piek_mib = geheugenPiekMib;
-  } catch (e) {
-    r.status = 'meting-mislukt';
-    r.meetfout = 'onverwacht (' + (e.code || e.name || 'fout') + ')';
-  }
-  geheugenCache = r; geheugenCacheTs = nuMs;
-  return r;
-}
-
-// Hoeveel agents zijn er zo jong dat ze hun geheugen nog niet hebben opgeëist?
-// Een claude-sessie is bij het spawnen tientallen MB en groeit pas in minuten
-// naar gigabytes. Zonder deze correctie zien twee verzoeken vlak na elkaar
-// allebei dezelfde ruime meting en worden ze allebei toegelaten — precies het
-// patroon waarmee de pod vandaag drie keer omviel.
-function jongeAgents() {
-  let n = 0;
-  const grens = Date.now() - OPSTART_RESERVE_SEC * 1000;
-  for (const id in agentsReg) {
-    const a = agentsReg[id];
-    if ((a.status === 'running' || a.status === 'pending') && (a.started || 0) > grens) n++;
-  }
-  return n;
-}
-
-// De effectieve agentdrempel schaalt mee met de cgroup: max(instelling, 25% van
-// de limiet). Op 4Gi is dat 2048 MiB, op 12Gi 3072 MiB — na een resize hoeft er
-// dus niets te worden bijgesteld.
-function agentDrempelMib(m) {
-  const kwart = (m && m.limiet_mib) ? Math.round(m.limiet_mib * 0.25) : 0;
-  return Math.max(MIN_VRIJ_GEHEUGEN_MB, kwart);
-}
-
-let geweigerdAgents = [];
-let geweigerdChats = [];
-function telWeigering(lijst) {
-  const grens = Date.now() - 24 * 3600 * 1000;
-  lijst.push(Date.now());
-  while (lijst.length && lijst[0] < grens) lijst.shift();
-}
-function tel24u(lijst) {
-  const grens = Date.now() - 24 * 3600 * 1000;
-  while (lijst.length && lijst[0] < grens) lijst.shift();
-  return lijst.length;
-}
-
-// Fail-open-logregel hoogstens eens per 5 minuten: bij een kapotte meting zou
-// elke aanroep anders een regel schrijven.
-let laatsteFailOpenLog = 0;
-
-// De poort zelf. soort is 'agent' of 'chat'.
-//
-// FAIL-OPEN bij 'meting-mislukt' en 'uit'. Reden: de schade van doorlaten is de
-// bekende, zelfbegrenzende OOM die Kubernetes herstelt; de schade van
-// fail-closed is een nieuwe stille storing waarbij één meetfout álle agents
-// blokkeert. Fail-open geldt UITSLUITEND bij een mislukte meting — een
-// geslaagde meting die 'te weinig' zegt weigert gewoon.
-function geheugenPoort(soort) {
-  const m = leesGeheugen();
-  if (MIN_VRIJ_GEHEUGEN_MB === 0) return { toegestaan: true, reden: 'poort-uit' };
-  if (m.status !== 'ok') {
-    const nuMs = Date.now();
-    if (nuMs - laatsteFailOpenLog > 5 * 60 * 1000) {
-      laatsteFailOpenLog = nuMs;
-      schrijfLog(nu() + ' geheugenpoort ' + velden({ soort: soort, status: m.status, meetfout: m.meetfout, besluit: 'doorgelaten' }));
-    }
-    return { toegestaan: true, reden: m.status };
-  }
-  // De opstartreserve geldt alleen voor agents: /run-jobs zijn kort en de
-  // reserve zou een gesprek onnodig blokkeren.
-  const jong = soort === 'agent' ? jongeAgents() : 0;
-  const reserve = soort === 'agent' ? OPSTART_RESERVE_MB : 0;
-  const effectief = Math.max(0, m.vrij_mib - reserve * jong);
-  const drempel = soort === 'agent' ? agentDrempelMib(m) : MIN_VRIJ_CHAT_MB;
-  return {
-    toegestaan: effectief >= drempel,
-    meting: m, vrij_effectief_mib: effectief, drempel_mib: drempel,
-    reserve_mib: reserve, jonge_agents: jong
-  };
-}
-
-// Eén vorm voor beide poorten, zodat /agent en /run hetzelfde antwoord geven.
-// DEZE UITLEG-ZIN GAAT ONGEWIJZIGD NAAR TELEGRAM — niet herformuleren.
-function weigerGeheugen(res, p, soort) {
-  telWeigering(soort === 'agent' ? geweigerdAgents : geweigerdChats);
-  schrijfLog(nu() + ' geheugenpoort ' + velden({
-    soort: soort, besluit: 'geweigerd', vrij: p.vrij_effectief_mib, drempel: p.drempel_mib, jong: p.jonge_agents
-  }));
-  res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '120' });
-  return res.end(JSON.stringify({
-    ok: false,
-    error: 'te-weinig-geheugen',
-    uitleg: 'te weinig geheugen vrij: ' + p.vrij_effectief_mib + ' MiB van ' + p.meting.limiet_mib + ' MiB - probeer later opnieuw',
-    details: {
-      vrij_mib: p.meting.vrij_mib,
-      vrij_effectief_mib: p.vrij_effectief_mib,
-      drempel_mib: p.drempel_mib,
-      reserve_mib: p.reserve_mib,
-      jonge_agents: p.jonge_agents
-    }
-  }));
-}
-
-// Blok voor /health. Mag nooit gooien — de wachters hangen hieraan.
-function geheugenInfo() {
-  try {
-    const m = leesGeheugen();
-    const jong = jongeAgents();
-    const drempel = agentDrempelMib(m);
-    const effectief = (m.status === 'ok') ? Math.max(0, m.vrij_mib - OPSTART_RESERVE_MB * jong) : null;
-    let status = m.status;
-    if (MIN_VRIJ_GEHEUGEN_MB === 0) status = 'uit';
-    // 'krap' zodra het effectief vrije geheugen onder de drempel zakt: zo ziet
-    // de wachter de klem aankomen vóórdat er iets geweigerd wordt.
-    else if (m.status === 'ok') status = (effectief < drempel) ? 'krap' : 'ok';
-    return {
-      status: status,
-      limiet_mib: m.limiet_mib,
-      hard_gebruikt_mib: m.hard_gebruikt_mib,
-      vrij_mib: m.vrij_mib,
-      vrij_effectief_mib: effectief,
-      piek_mib: m.piek_mib,
-      drempel_mib: drempel,
-      chat_drempel_mib: MIN_VRIJ_CHAT_MB,
-      reserve_mib: OPSTART_RESERVE_MB,
-      jonge_agents: jong,
-      geweigerd_agents_24u: tel24u(geweigerdAgents),
-      geweigerd_chats_24u: tel24u(geweigerdChats),
-      meetfout: m.meetfout
-    };
-  } catch (e) {
-    return { status: 'meting-mislukt', meetfout: 'geheugenInfo faalde' };
-  }
-}
-
 // Eén regel op het moment dat een job zijn eindstatus krijgt. Bewust GEEN
 // uitvoer, alleen de omvang ervan: de uitvoer kan patientgegevens of
 // persoonsgegevens bevatten en hoort niet op schijf in een logbestand.
@@ -1066,7 +839,6 @@ function handleRequest(req, res) {
       modellen: Object.keys(MODEL_ALIASSEN),
       sync: syncInfo(), inbox: inboxInfo(), sessies: sessieInfo(),
       agents: agentInfo(),
-      geheugen: geheugenInfo(),
       offsite: offsiteInfo(),
       secrets_geladen: secretsGeladen()
     }));
@@ -1079,14 +851,6 @@ function handleRequest(req, res) {
       const prompt = (d.prompt || '').toString().trim();
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
       const chatId = (d.chat_id != null && d.chat_id !== '') ? String(d.chat_id) : '';
-      // /run had tot nu toe GEEN enkele begrenzing — geen tegenhanger van
-      // MAX_AGENTS — en een /run zonder chat_id krijgt een unieke ketensleutel
-      // en wordt dus met niets geserialiseerd. Daar zat de grootste opening:
-      // ongelimiteerd parallelle zware sessies in één cgroup. Aparte, lagere
-      // vloer (MIN_VRIJ_CHAT_MB) en zonder opstartreserve, want een gesprek is
-      // kort en mag niet blokkeren op een agent die net begon.
-      const poortChat = geheugenPoort('chat');
-      if (!poortChat.toegestaan) return weigerGeheugen(res, poortChat, 'chat');
       const wsFout = workspaceFout(d.workspace);
       if (wsFout) return weigerWorkspace(res, wsFout, '/run');
       const ws = resolveWorkspace(d.workspace);
@@ -1112,11 +876,6 @@ function handleRequest(req, res) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: false, error: 'max-agents', uitleg: 'Er lopen al ' + MAX_AGENTS + ' achtergrondagents; wacht tot er één klaar is.' }));
       }
-      // NA de MAX_AGENTS-controle (429 blijft 429 en wint) en VOOR het aanmaken
-      // van de job en de registratie: een geweigerde aanroep mag geen spoor in
-      // `jobs` of in agentsReg achterlaten.
-      const poort = geheugenPoort('agent');
-      if (!poort.toegestaan) return weigerGeheugen(res, poort, 'agent');
       const wsFout = workspaceFout(d.workspace);
       if (wsFout) return weigerWorkspace(res, wsFout, '/agent');
       const ws = resolveWorkspace(d.workspace);
@@ -1339,7 +1098,11 @@ const offsite = {
   // overgeslagen tik betekent niet dat de wekker uit staat.
   laatste_overslag_reden: null,
   laatste_start: null, laatste_einde: null, laatste_duur_s: null,
-  laatste_afloop: null, overgeslagen_bezig: 0, overgeslagen_geheugen: 0,
+  // overgeslagen_geheugen is vervallen met de capaciteitspoort (26-8-2026):
+  // zonder de geheugenmeting kon die teller nooit meer oplopen, en een veld dat
+  // altijd 0 meldt leest als 'nooit overgeslagen' in plaats van 'wordt niet
+  // gemeten'.
+  laatste_afloop: null, overgeslagen_bezig: 0,
   script_gemeld: false
 };
 
@@ -1366,16 +1129,12 @@ function offsiteKlaarVoorTik() {
     }
     return 'script ontbreekt of is niet uitvoerbaar';
   }
-  // Rclone met een vault van ~300 GB is niet gratis. Draait de pod al krap,
-  // dan is een backup het werk dat mag wachten - niet het gesprek.
-  const m = leesGeheugen();
-  if (m.status === 'ok') {
-    const effectief = Math.max(0, m.vrij_mib - OPSTART_RESERVE_MB * jongeAgents());
-    if (effectief < MIN_VRIJ_CHAT_MB) {
-      offsite.overgeslagen_geheugen++;
-      return 'te weinig geheugen (' + effectief + ' MiB)';
-    }
-  }
+  // Hier stond een vierde afbreekgrond: overslaan als er te weinig geheugen
+  // vrij was. Die leunde op leesGeheugen() uit de capaciteitspoort, en die is
+  // teruggedraaid (26-8-2026, besluit David): de OOM-kills kwamen doordat de pod
+  // maar 4 GiB had, niet doordat er te veel werk binnenkwam. Met 16 GiB is een
+  // mechanisme dat werk kan weigeren geen bescherming meer maar een extra
+  // foutbron. De wekker tikt dus voortaan ongeacht het geheugen.
   return null;
 }
 
@@ -1464,7 +1223,6 @@ function offsiteInfo() {
     laatste_duur_s: offsite.laatste_duur_s,
     laatste_afloop: offsite.laatste_afloop,
     overgeslagen_bezig: offsite.overgeslagen_bezig,
-    overgeslagen_geheugen: offsite.overgeslagen_geheugen,
     backup_log_minuten_stil: null
   };
   // Uit de MTIME, net als syncInfo. De INHOUD wordt bewust niet geparsed: dat
