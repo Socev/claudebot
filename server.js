@@ -1323,7 +1323,21 @@ const OFFSITE_SCRIPT = process.env.OFFSITE_SCRIPT || '/opt/data/bin/vault-offsit
 const OFFSITE_BACKUP_LOG = process.env.OFFSITE_BACKUP_LOG || '/opt/data/bin/backup.log';
 
 const offsite = {
+  // `actief` heeft een verwarrende geschiedenis: het betekent 'er draait op dit
+  // moment een ronde', maar het LEEST als 'de wekker staat aan'. Een wachter die
+  // erop afgaat, meldt een storing zodra een tik wordt overgeslagen. Het veld
+  // blijft staan met precies zijn oude gedrag, maar WACHTERS MOETEN
+  // `wekker_aan` GEBRUIKEN, en `ronde_bezig` voor 'draait er nu iets'.
   actief: false, reden_uit: null, bezig: false, kind: null,
+  // wekker_gepland: de timer is ingepland en de grendel staat niet aan. Blijft
+  // true tijdens de startvertraging en tussen twee rondes door.
+  wekker_gepland: false,
+  // startvertraging_tot: tot dit moment hoort er nog niets gedraaid te hebben.
+  // Zonder dit veld is 'nog nooit gedraaid' niet te onderscheiden van 'stuk'.
+  startvertraging_tot: null,
+  // De reden van de laatste OVERGESLAGEN tik. Hoort niet in reden_uit: een
+  // overgeslagen tik betekent niet dat de wekker uit staat.
+  laatste_overslag_reden: null,
   laatste_start: null, laatste_einde: null, laatste_duur_s: null,
   laatste_afloop: null, overgeslagen_bezig: 0, overgeslagen_geheugen: 0,
   script_gemeld: false
@@ -1368,12 +1382,19 @@ function offsiteKlaarVoorTik() {
 function offsiteTik() {
   const beletsel = offsiteKlaarVoorTik();
   if (beletsel) {
-    offsite.actief = false;
-    offsite.reden_uit = beletsel;
+    offsite.actief = false;              // oude betekenis, bewust ongewijzigd
+    offsite.laatste_overslag_reden = beletsel;
+    // reden_uit blijft voorbehouden aan de ECHTE uit-redenen. Alleen de grendel
+    // zet de wekker daadwerkelijk stil; 'vorige ronde loopt nog' of 'te weinig
+    // geheugen' is een overgeslagen tik, geen uitgeschakelde wekker.
+    if (offsiteDoorRunsh()) {
+      offsite.wekker_gepland = false;
+      offsite.reden_uit = beletsel;
+    }
     return;
   }
   offsite.actief = true;
-  offsite.reden_uit = null;
+  offsite.laatste_overslag_reden = null;
 
   let kind;
   try {
@@ -1429,6 +1450,13 @@ function offsiteTik() {
 
 function offsiteInfo() {
   const info = {
+    // Voor wachters: wekker_aan en ronde_bezig. `actief` staat er alleen nog
+    // voor wie het oude veld al leest — zie de opmerking bij `const offsite`.
+    wekker_aan: offsite.wekker_gepland,
+    ronde_bezig: offsite.bezig,
+    startvertraging_tot_iso: offsite.startvertraging_tot
+      ? new Date(offsite.startvertraging_tot).toISOString() : null,
+    laatste_overslag_reden: offsite.laatste_overslag_reden,
     actief: offsite.actief, reden_uit: offsite.reden_uit,
     interval_min: OFFSITE_INTERVAL_MIN,
     laatste_start_iso: offsite.laatste_start ? new Date(offsite.laatste_start).toISOString() : null,
@@ -1451,7 +1479,13 @@ function offsiteInfo() {
 // Eerste tik PAS na de startvertraging, niet op t=0. Zonder die vertraging zou
 // een herstartlus het script elke 40 seconden opnieuw starten en afkappen.
 if (OFFSITE_INTERVAL_MIN > 0 && !offsiteDoorRunsh()) {
+  // Vanaf hier staat de wekker aan, ook al draait er nog niets: de eerste tik
+  // komt pas na de startvertraging. Een wachter ziet dat aan wekker_aan plus
+  // startvertraging_tot_iso, en hoeft dus niet te raden of hij stuk is.
+  offsite.wekker_gepland = true;
+  offsite.startvertraging_tot = Date.now() + OFFSITE_START_DELAY_MIN * 60 * 1000;
   setTimeout(function () {
+    offsite.startvertraging_tot = null;
     offsiteTik();
     setInterval(offsiteTik, OFFSITE_INTERVAL_MIN * 60 * 1000);
   }, OFFSITE_START_DELAY_MIN * 60 * 1000);
