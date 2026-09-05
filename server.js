@@ -174,7 +174,9 @@ function logError(waar, err) {
 function breinInfo() {
   const stand = leesRuntime();
   let codexAuth = false;
-  try { codexAuth = fs.statSync(path.join(CODEX_HOME, 'auth.json')).isFile(); } catch (e) {}
+  // Leesbaar, niet alleen aanwezig: op 5-9-2026 stond auth.json op root:0600 en zei
+  // /health toch 'ingelogd' terwijl elke Codex-beurt met 401 faalde (vondst machinekamer).
+  try { fs.accessSync(path.join(CODEX_HOME, 'auth.json'), fs.constants.R_OK); codexAuth = true; } catch (e) {}
   return { default: stand.default, fallback: stand.fallback || null, models: stand.models, codex_ingelogd: codexAuth, runtimes: RUNTIMES_LIJST };
 }
 
@@ -193,7 +195,10 @@ const MODEL_ALIASSEN = {
   // meteen de Codex-runtime; wat achter de dubbele punt staat is het model
   // (leeg = de standaard uit runtime.json of config.toml). Zo kan een workflow
   // of David zeggen "model: astra" zonder apart runtime: codex mee te geven.
-  astra: 'codex:gpt-6-astra',
+  astra: 'codex:gpt-6-astra',   // zwaarste: plannen, reviews (slugs: learn.chatgpt.com/docs/models, 5-9-2026)
+  sol: 'codex:gpt-5.6-sol',     // dagelijks brein op de Codex-stand (tegenhanger van Opus)
+  terra: 'codex:gpt-5.6-terra', // sneller, goedkoper in het venster
+  luna: 'codex:gpt-5.6-luna',   // snelste
   codex: 'codex:',
   claude: 'claude:'
 };
