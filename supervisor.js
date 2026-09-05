@@ -72,6 +72,12 @@ let stoppen = false;
 let terugflipGedaan = false;
 let crashTijden = [];
 let herstartTeller = 0;
+// Review-fix 5-9-2026 (B1/B2): één wachtende herstart-timer, en onthouden HOE het
+// laatste kind stopte. Een SIGTERM komt van uitrol.sh of van onszelf en is een
+// gewenste herstart, geen crash - die telt niet mee in de crashlus en mag nooit
+// een gezonde release terugflippen.
+let herstartTimer = null;
+let laatsteExit = null;   // { code, signaal } van het laatst gestopte kind
 
 // Per regel toevoegen, nooit via een stream: na een logrotatie blijft een open
 // stream naar de oude inode schrijven en verdwijnt het log geruisloos.
@@ -183,11 +189,32 @@ function startKind() {
 
   k.on('exit', function (code, signaal) {
     kind = null;
+    laatsteExit = { code: code, signaal: signaal };
     if (stoppen) return;
     log('kind gestopt (code ' + code + ', signaal ' + signaal + ')');
+    // SIGTERM stuurt alleen uitrol.sh (of wijzelf, en dan is `stoppen` al waar):
+    // een gewenste herstart. Een nette exit 0 idem - server.js stopt nooit uit
+    // zichzelf met 0. Niet tellen als crash, niet uitstellen.
+    if (signaal === 'SIGTERM' || code === 0) { herstartNa(500); return; }
     verwerkCrash();
   });
   return k;
+}
+
+// De enige plek die een kind na een stop opnieuw start. Eén timer tegelijk, en
+// nooit een tweede kind naast een levend kind (review-fix B2: twee kinderen op
+// dezelfde poort = EADDRINUSE-crashlus met een onbewaakt gezond kind).
+function herstartNa(ms) {
+  if (herstartTimer) clearTimeout(herstartTimer);
+  herstartTimer = setTimeout(function () {
+    herstartTimer = null;
+    if (stoppen || kind) return;
+    kind = startKind();
+    if (!kind) return;
+    // Fouten hier mogen de supervisor nooit omleggen: hij is het laatste wat nog leeft.
+    bewaakOpkomst('zelfcontrole na herstart mislukt', kind)
+      .catch(function (e) { log('zelfcontrole na herstart faalde: ' + (e && e.message ? e.message : 'onbekend')); });
+  }, ms);
 }
 
 function stopKind(signaal) {
@@ -211,10 +238,11 @@ function health() {
 
 const wacht = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function bootZelfcontrole() {
+async function bootZelfcontrole(k) {
   const grens = Date.now() + BOOT_TIJDSLIMIET_MS;
   while (Date.now() < grens) {
     if (!kind) { log('boot-zelfcontrole: kind is al gestopt'); return false; }
+    if (k && kind !== k) { log('boot-zelfcontrole: kind is inmiddels vervangen - bewaking gaat over op het nieuwe kind'); return false; }
     const j = await health();
     if (j) { log('boot-zelfcontrole geslaagd - /health meldt ok, versie ' + (j.versie || '?')); return true; }
     await wacht(BOOT_POLL_MS);
@@ -264,10 +292,21 @@ function terugflip(reden) {
  * hangend bij het opstarten, kapotte configuratie - crasht niet, dus die teller
  * komt nooit aan zijn grens. Juist dat geval blijft anders stil kapot staan.
  */
-async function bewaakOpkomst(reden) {
-  const gezond = await bootZelfcontrole();
+async function bewaakOpkomst(reden, k) {
+  const gezond = await bootZelfcontrole(k);
   if (gezond) return true;
+  // Review-fix B1: alleen een kind dat LEEFT maar niet gezond wordt is ziek.
+  // Is het kind weg omdat wij stoppen, omdat uitrol.sh het net een SIGTERM gaf,
+  // of omdat het al door een ander kind is vervangen, dan is dat geen oordeel
+  // over de release - en een terugflip zou een gezonde release wegdraaien én de
+  // enige terugflip verbruiken.
+  if (stoppen) { log('geen terugflip (' + reden + '): supervisor is aan het stoppen'); return false; }
+  if (!kind && laatsteExit && (laatsteExit.signaal === 'SIGTERM' || laatsteExit.code === 0)) {
+    log('geen terugflip (' + reden + '): kind is bewust gestopt (SIGTERM/exit 0), niet ziek'); return false;
+  }
+  if (k && kind !== k) { log('geen terugflip (' + reden + '): dit kind is al vervangen'); return false; }
   if (!terugflip(reden)) return false;
+  if (herstartTimer) { clearTimeout(herstartTimer); herstartTimer = null; }
 
   log('kind stoppen en opnieuw starten vanaf de teruggezette release');
   stoppen = true; stopKind('SIGTERM');
@@ -276,7 +315,7 @@ async function bewaakOpkomst(reden) {
   await wacht(500);
   stoppen = false;
   kind = startKind();
-  const opnieuw = await bootZelfcontrole();
+  const opnieuw = await bootZelfcontrole(kind);
   log(opnieuw ? 'teruggezette release is gezond'
               : 'ook de teruggezette release komt niet gezond op - dit vraagt David');
   return opnieuw;
@@ -293,14 +332,7 @@ function verwerkCrash() {
   const ms = BACKOFF_MS[Math.min(herstartTeller, BACKOFF_MS.length - 1)];
   herstartTeller++;
   log('herstart over ' + ms + ' ms');
-  setTimeout(function () {
-    if (stoppen) return;
-    kind = startKind();
-    if (!kind) return;
-    // Fouten hier mogen de supervisor nooit omleggen: hij is het laatste wat nog leeft.
-    bewaakOpkomst('zelfcontrole na herstart mislukt')
-      .catch(function (e) { log('zelfcontrole na herstart faalde: ' + (e && e.message ? e.message : 'onbekend')); });
-  }, ms);
+  herstartNa(ms);
 }
 
 // ── stoppen ─────────────────────────────────────────────────────────────────
@@ -337,6 +369,6 @@ process.on('SIGINT', () => afsluiten('SIGINT'));
     return;
   }
 
-  await bewaakOpkomst('boot-zelfcontrole mislukt');
+  await bewaakOpkomst('boot-zelfcontrole mislukt', kind);
   log('draait nu release ' + huidigeSha());
 })();

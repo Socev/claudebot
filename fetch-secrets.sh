@@ -72,8 +72,17 @@ NOG_TE_KOPPELEN="telegram_api_id telegram_api_hash telegram_sessie"
 # geen letter aan het gedrag hieronder - geen nieuwe terugval, geen stille uitzondering.
 # Wie deze modus aanzet, kiest er bewust voor en ziet dat in het log terug.
 if [ "${POD_ZONDER_KLUIS:-}" = "1" ]; then
+  # Review-fix B5 (5-9-2026): een pod die WEL een bootstrapgeheim heeft, is een
+  # kluispod. Staat de vlag daar per ongeluk bij (verkeerde chart), dan zou hij
+  # gezond opkomen zonder één werktoken en pas bij de eerste /run falen. Dat is
+  # tegenstrijdig, dus fail-hard - precies zoals zonder vlag.
+  if [ -n "${POD_BOOTSTRAP_SECRET:-}" ]; then
+    log "FATAAL: POD_ZONDER_KLUIS=1 en POD_BOOTSTRAP_SECRET allebei gezet - tegenstrijdig; dit is een kluispod, haal de vlag weg"
+    exit 78
+  fi
   log "kluis overgeslagen: POD_ZONDER_KLUIS=1 - deze pod draait bewust zonder kluissecrets"
   export SECRETS_GELADEN=""
+  export KLUIS_OVERGESLAGEN=1   # zichtbaar in /health, zodat de wachters het onderscheid zien
   # Zelfde opruiming als op de andere exec-paden: wat niet nodig is, geven we niet door.
   unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY 2>/dev/null || true
   exec "$@"
