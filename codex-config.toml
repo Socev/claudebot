@@ -16,10 +16,9 @@ sandbox_mode = "danger-full-access"
 # dan de standaard 32 KiB; anders wordt de persona stil afgekapt.
 project_doc_max_bytes = 131072
 
-# Dezelfde vier MCP-servers als in 00_Systeem/pod-mcp-servers.json.
-[mcp_servers.n8n]
-url = "https://5877e26c.primumnonnocere.olares.com/mcp-server/http"
-bearer_token_env_var = "N8N_MCP_TOKEN"
+# Dezelfde vier MCP-servers als in 00_Systeem/pod-mcp-servers.json. De n8n-server
+# staat hier NIET: zijn hostnaam hoort niet in een publieke repo (review-fix A7);
+# entrypoint.sh voegt hem toe uit de omgevingsvariabele N8N_MCP_URL (chart).
 
 [mcp_servers.supabase]
 url = "https://mcp.supabase.com/mcp"

@@ -175,7 +175,7 @@ function breinInfo() {
   const stand = leesRuntime();
   let codexAuth = false;
   try { codexAuth = fs.statSync(path.join(CODEX_HOME, 'auth.json')).isFile(); } catch (e) {}
-  return { default: stand.default, fallback: stand.fallback || null, models: stand.models, codex_ingelogd: codexAuth, runtimes: Object.keys(RUNTIMES) };
+  return { default: stand.default, fallback: stand.fallback || null, models: stand.models, codex_ingelogd: codexAuth, runtimes: RUNTIMES_LIJST };
 }
 
 function secretsGeladen() {
@@ -210,7 +210,9 @@ function resolveModel(name) {
 // 'fallback' staat standaard LEEG: David wil kiezen, niet parallel draaien.
 // Staat hij gevuld, dan neemt het andere brein een beurt over als het eerste
 // een limietfout geeft - zonder sessiegeheugen, met één regel uitleg vooraf.
-const RUNTIMES = { claude: true, codex: true };
+const RUNTIMES_LIJST = ['claude', 'codex'];
+// Review-fix A3: geen gewoon object als lookup (dan komt 'constructor' erdoor).
+const RUNTIMES = Object.create(null); RUNTIMES_LIJST.forEach(function (r) { RUNTIMES[r] = true; });
 const RUNTIME_FILE = process.env.RUNTIME_FILE || path.join(HOME, 'runtime.json');
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
 const CODEX_SESSIONS_DIR = path.join(CODEX_HOME, 'sessions');
@@ -222,12 +224,20 @@ function leesRuntime() {
     if (j && RUNTIMES[j.default]) std.default = j.default;
     if (j && RUNTIMES[j.fallback]) std.fallback = j.fallback;
     if (j && j.models && typeof j.models === 'object') std.models = j.models;
-  } catch (e) { /* geen bestand = de standaard */ }
+  } catch (e) {
+    // Geen bestand = de standaard. Een bestand dat er WEL is maar niet leest, is
+    // een stille terugval op Claude - dat mag niet onopgemerkt (review-fix A5).
+    if (e && e.code !== 'ENOENT') logError('runtime-lezen', e);
+  }
   if (std.fallback === std.default) std.fallback = '';
   return std;
 }
 function schrijfRuntime(r) {
-  fs.writeFileSync(RUNTIME_FILE, JSON.stringify({ default: r.default, fallback: r.fallback || '', models: r.models || {} }, null, 2));
+  // Atomair: eerst een tijdelijk bestand, dan hernoemen. Een half geschreven
+  // runtime.json zou anders bij de volgende beurt stil op Claude terugvallen.
+  const tmp = RUNTIME_FILE + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify({ default: r.default, fallback: r.fallback || '', models: r.models || {} }, null, 2));
+  fs.renameSync(tmp, RUNTIME_FILE);
 }
 
 // Geeft { runtime, model } terug, of { fout } bij een onbekende runtime.
@@ -239,7 +249,7 @@ function resolveKeuze(d) {
   let model = '';
   const ruw = (d && d.runtime != null) ? String(d.runtime).trim().toLowerCase() : '';
   if (ruw) {
-    if (!RUNTIMES[ruw]) return { fout: { error: 'onbekende-runtime', melding: 'onbekende runtime; geldig zijn: ' + Object.keys(RUNTIMES).join(', ') + ' (of leeg voor de standaard)', lengte: ruw.length } };
+    if (!RUNTIMES[ruw]) return { fout: { error: 'onbekende-runtime', melding: 'onbekende runtime; geldig zijn: ' + RUNTIMES_LIJST.join(', ') + ' (of leeg voor de standaard)', lengte: ruw.length } };
     runtime = ruw;
   }
   const alias = resolveModel(d && d.model);
@@ -486,8 +496,11 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   const maxMs = (opts && opts.maxMs) || FG_MAX_MS;
   const progress = (opts && opts.progress) || {};
   return new Promise(function (resolve) {
-    const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', 'bypassPermissions'];
+    // Review-fix A1 (5-9-2026): `--` vóór de prompt, anders wordt een bericht dat
+    // met '-' begint (Telegram-bullet) als vlag gelezen. Getest met claude -p.
+    const args = ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions'];
     if (sessionId) args.push('--resume', sessionId);
+    args.push('--', prompt);
     const extra = { OUTDIR: outdir };
     if (model) extra.ANTHROPIC_MODEL = model;
     const env = Object.assign({}, process.env, extra);
@@ -654,24 +667,31 @@ function runCodex(prompt, threadId, outdir, cwd, model, opts) {
   const progress = (opts && opts.progress) || {};
   const lastFile = (opts && opts.lastFile) || path.join(path.dirname(outdir), 'codex-last.md');
   return new Promise(function (resolve) {
-    const args = threadId ? ['exec', 'resume', threadId] : ['exec'];
-    args.push('--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox',
-              '-C', cwd, '-o', lastFile);
+    // Review-fix A1 (geverifieerd tegen 0.153.4): de opties horen VÓÓR het
+    // subcommando `resume` (clap accepteert ze er niet achter), en `--` vóór de
+    // prompt, anders wordt een prompt die met '-' begint als vlag gelezen.
+    const args = ['exec', '-C', cwd, '--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '-o', lastFile];
     if (model) args.push('-m', model);
-    args.push(prompt);
+    if (threadId) args.push('resume', threadId);
+    args.push('--', prompt);
     const env = Object.assign({}, process.env, { OUTDIR: outdir, CODEX_HOME: CODEX_HOME });
     const child = spawn('codex', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const t0 = Date.now();
     let out = '', err = '', rest = '', lastStdout = t0, killedReason = null;
     let gezienThread = threadId || '', faalTekst = '', usage = null, pinned = null;
+    let turnGefaald = false, geenRollout = false;
 
+    // Review-fix A2: een 'error'-event is bij Codex een niet-fatale melding
+    // ("Reconnecting..."); fataal is alleen turn.failed (of een exitcode <> 0).
+    // De error-tekst bewaren we als detail, meer niet.
     function verwerkRegel(regel) {
-      let ev; try { ev = JSON.parse(regel); } catch (e) { return; }
-      if (!ev || typeof ev !== 'object') return;
+      let ev; try { ev = JSON.parse(regel); } catch (e) { return false; }
+      if (!ev || typeof ev !== 'object') return false;
       if (ev.type === 'thread.started' && ev.thread_id) gezienThread = ev.thread_id;
       else if (ev.type === 'turn.completed' && ev.usage) usage = ev.usage;
-      else if (ev.type === 'turn.failed') faalTekst = (ev.error && ev.error.message) || 'turn.failed';
-      else if (ev.type === 'error' && ev.message && !faalTekst) faalTekst = ev.message;  // laatste 'error' telt tot turn.failed komt
+      else if (ev.type === 'turn.failed') { turnGefaald = true; faalTekst = (ev.error && ev.error.message) || 'turn.failed'; }
+      else if (ev.type === 'error' && ev.message) { if (!faalTekst) faalTekst = ev.message; return false; }
+      return true;   // echte voortgang
     }
 
     function transcriptMtime() {
@@ -720,7 +740,7 @@ function runCodex(prompt, threadId, outdir, cwd, model, opts) {
       let tekst = '';
       try { tekst = fs.readFileSync(lastFile, 'utf8'); } catch (e) {}
       try { fs.unlinkSync(lastFile); } catch (e) {}
-      if (code === 0 && !faalTekst) {
+      if (code === 0 && !turnGefaald) {
         const r = { ok: true, output: tekst, session_id: gezienThread };
         if (usage) r.usage = usage;
         if (killedReason) r.opmerking = 'resultaat was compleet; procesgroep is daarna opgeruimd (' + killedReason + ')';
@@ -735,14 +755,21 @@ function runCodex(prompt, threadId, outdir, cwd, model, opts) {
         return finish({ ok: false, error: 'afgebroken-' + killedReason, output: uitleg, session_id: gezienThread, running_ms: Date.now() - t0 });
       }
       const fout = faalTekst || err.slice(-1000) || ('codex eindigde met code ' + code);
-      finish({ ok: false, error: isLimietFout(fout) ? 'limiet' : 'codex-fout', output: tekst || fout, session_id: gezienThread, detail: fout.slice(0, 1000) });
+      // Review-fix A4: een thread die Codex niet meer kent (opgeruimde sessies,
+      // of een Claude-id dat per ongeluk als thread werd meegegeven) mag de chat
+      // niet vastzetten; de aanroeper wist de sleutel en probeert één keer vers.
+      if (threadId && /no rollout found|not found|unknown (thread|session)/i.test(fout + ' ' + err)) geenRollout = true;
+      finish({ ok: false, error: geenRollout ? 'sessie-onbekend' : (isLimietFout(fout) ? 'limiet' : 'codex-fout'),
+               output: tekst || fout, session_id: geenRollout ? '' : gezienThread, detail: fout.slice(0, 1000) });
     }
 
     child.stdout.on('data', function (d) {
-      lastStdout = Date.now();
       rest += d;
-      let i;
-      while ((i = rest.indexOf('\n')) !== -1) { const regel = rest.slice(0, i).trim(); rest = rest.slice(i + 1); if (regel) verwerkRegel(regel); }
+      let i, voortgang = false;
+      while ((i = rest.indexOf('\n')) !== -1) { const regel = rest.slice(0, i).trim(); rest = rest.slice(i + 1); if (regel && verwerkRegel(regel)) voortgang = true; }
+      // Alleen echte voortgang telt als hartslag; een reeks "Reconnecting..."
+      // mag een beurt niet tot de bovengrens in leven houden (review-fix A2).
+      if (voortgang) lastStdout = Date.now();
       if (out.length < 64 * 1024) out += d;   // alleen voor diagnose; niet het resultaat
     });
     child.stderr.on('data', function (d) { err += d; });
@@ -769,6 +796,12 @@ function runBrein(runtime, prompt, sessionId, outdir, cwd, model, opts) {
 // brein is voor het andere niet leesbaar). Eén regel uitleg gaat mee.
 function runMetFallback(keuze, prompt, sessionId, outdir, cwd, opts) {
   return runBrein(keuze.runtime, prompt, sessionId, outdir, cwd, keuze.model, opts).then(function (r) {
+    if (!r.ok && r.error === 'sessie-onbekend' && sessionId) {
+      // Review-fix A4: sessie kwijt -> één keer vers op hetzelfde brein; de
+      // aanroeper krijgt een nieuw session_id en overschrijft de oude sleutel.
+      schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'sessie-onbekend', runtime: keuze.runtime }));
+      return runBrein(keuze.runtime, prompt, '', outdir, cwd, keuze.model, opts).then(function (r2) { r2.sessie_vernieuwd = true; return r2; });
+    }
     if (r.ok || r.error !== 'limiet' || !keuze.fallback) return r;
     const stand = leesRuntime();
     const fbModel = (stand.models && typeof stand.models[keuze.fallback] === 'string') ? stand.models[keuze.fallback] : '';
@@ -1107,6 +1140,7 @@ function handleRequest(req, res) {
       agents: agentInfo(),
       offsite: offsiteInfo(),
       secrets_geladen: secretsGeladen(),
+      kluis_overgeslagen: process.env.KLUIS_OVERGESLAGEN === '1',
       brein: breinInfo()
     }));
   }
@@ -1127,12 +1161,12 @@ function handleRequest(req, res) {
       const stand = leesRuntime();
       if (d.default != null) {
         const v = String(d.default).trim().toLowerCase();
-        if (!RUNTIMES[v]) return weigerRuntime(res, { error: 'onbekende-runtime', melding: 'onbekende runtime; geldig zijn: ' + Object.keys(RUNTIMES).join(', '), lengte: v.length }, '/runtime');
+        if (!RUNTIMES[v]) return weigerRuntime(res, { error: 'onbekende-runtime', melding: 'onbekende runtime; geldig zijn: ' + RUNTIMES_LIJST.join(', '), lengte: v.length }, '/runtime');
         stand.default = v;
       }
       if (d.fallback != null) {
         const v = String(d.fallback).trim().toLowerCase();
-        if (v && !RUNTIMES[v]) return weigerRuntime(res, { error: 'onbekende-runtime', melding: 'onbekende fallback; geldig zijn: ' + Object.keys(RUNTIMES).join(', ') + ' of leeg', lengte: v.length }, '/runtime');
+        if (v && !RUNTIMES[v]) return weigerRuntime(res, { error: 'onbekende-runtime', melding: 'onbekende fallback; geldig zijn: ' + RUNTIMES_LIJST.join(', ') + ' of leeg', lengte: v.length }, '/runtime');
         stand.fallback = v;
       }
       if (d.models && typeof d.models === 'object') {

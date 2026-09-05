@@ -17,7 +17,13 @@ ln -sfn "$VAULT/.claude/skills" /opt/data/.agents/skills
 #    leest hij daarna zelf, want de vault is zijn werkmap.
 ln -sfn "$VAULT/CLAUDE.md" "$CODEX_HOME/AGENTS.md"
 # 3. config: alleen bootstrappen als er nog geen staat (de pod mag hem daarna zelf beheren).
-[ -f "$CODEX_HOME/config.toml" ] || cp /app/codex-config.toml "$CODEX_HOME/config.toml"
+#    De n8n-MCP-server komt uit N8N_MCP_URL (chart-env), niet uit de repo (review-fix A7).
+if [ ! -f "$CODEX_HOME/config.toml" ]; then
+  cp /app/codex-config.toml "$CODEX_HOME/config.toml"
+  if [ -n "${N8N_MCP_URL:-}" ]; then
+    printf '\n[mcp_servers.n8n]\nurl = "%s"\nbearer_token_env_var = "N8N_MCP_TOKEN"\n' "$N8N_MCP_URL" >> "$CODEX_HOME/config.toml"
+  fi
+fi
 # 4. de schakelaar: standaard Claude, geen fallback (David kiest, niet parallel).
 [ -f /opt/data/runtime.json ] || printf '{ "default": "claude", "fallback": "", "models": { "codex": "gpt-6-astra" } }\n' > /opt/data/runtime.json
 # Volume kan root-owned aangemaakt zijn; geef het aan 'claude'
