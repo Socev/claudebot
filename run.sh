@@ -298,6 +298,7 @@ sync_repo(){
 # setup-checks
 rclone listremotes 2>/dev/null | grep -q "^${SYNC_REMOTE}:" || log "LET OP: rclone-remote '${SYNC_REMOTE}' ontbreekt — draai 'rclone config' als gebruiker claude."
 [ -d /opt/data/.claude ] || log "LET OP: Claude nog niet ingelogd — draai 'claude' als gebruiker claude."
+[ -f "${CODEX_HOME:-/opt/data/.codex}/auth.json" ] || log "LET OP: Codex nog niet ingelogd — draai 'codex login --device-auth' als gebruiker claude (tweede brein blijft tot dan onbruikbaar; Claude draait gewoon)."
 
 start_sync
 if [ -n "$REPO_URL" ]; then

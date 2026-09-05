@@ -1,0 +1,33 @@
+# codex-config.toml — bootstrap voor $CODEX_HOME/config.toml in de claudebot-pod.
+# Wordt door entrypoint.sh alleen gekopieerd als er nog geen config.toml staat.
+# Geen secrets hier: tokens komen als omgevingsvariabele uit de kluis
+# (fetch-secrets.sh) en worden via bearer_token_env_var gelezen.
+
+# Standaardmodel; per beurt te overrulen met runtime.json (models.codex) of
+# een modelalias op /run. Slug geverifieerd 5-9-2026 (learn.chatgpt.com/docs/models).
+model = "gpt-6-astra"
+
+# De container is de sandbox (zelfde redenering als claude --permission-mode
+# bypassPermissions); server.js geeft de bypass-vlag ook nog expliciet mee.
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+# AGENTS.md (23 KB, werkwijze) + CLAUDE.md (9 KB, persona via symlink) is meer
+# dan de standaard 32 KiB; anders wordt de persona stil afgekapt.
+project_doc_max_bytes = 131072
+
+# Dezelfde vier MCP-servers als in 00_Systeem/pod-mcp-servers.json.
+[mcp_servers.n8n]
+url = "https://5877e26c.primumnonnocere.olares.com/mcp-server/http"
+bearer_token_env_var = "N8N_MCP_TOKEN"
+
+[mcp_servers.supabase]
+url = "https://mcp.supabase.com/mcp"
+bearer_token_env_var = "SUPABASE_MCP_TOKEN"
+
+[mcp_servers.todoist]
+url = "https://ai.todoist.net/mcp"
+bearer_token_env_var = "TODOIST_MCP_TOKEN"
+
+[mcp_servers.pubmed]
+url = "https://pubmed.mcp.claude.com/mcp"
