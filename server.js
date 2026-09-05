@@ -22,7 +22,8 @@
  *      (env AGENT_WEBHOOK_URL) die het naar Telegram brengt — geen polling.
  *      GET /agents toont wat er loopt en liep (toezicht voor de hoofd-agent).
  *
- *   POST /run     { prompt, chat_id?, workspace?, model?, session_id?, secret?, files? } -> { ok, job_id, workspace, model }
+ *   POST /run     { prompt, chat_id?, workspace?, runtime?, model?, session_id?, secret?, files? } -> { ok, job_id, workspace, runtime, model }
+ *   GET  /runtime -> stand van de brein-schakelaar;  POST /runtime { default?, fallback?, models?, secret? } zet hem
  *   POST /result  { job_id, secret? }  -> { found, done, status, running_ms?, last_activity_ms?, ... }
  *   POST /agent   { prompt, label, chat_id?, workspace?, model?, session_id?, max_minuten?, secret? } -> { ok, job_id }
  *   GET  /agents  -> registerweergave van achtergrondjobs (labels + status, geen inhoud)
@@ -167,6 +168,16 @@ function logError(waar, err) {
 // namen: /health is voor de wachters en de heartbeat, en daar hoort nooit een
 // waarde in te staan. Leeg betekent overgangsmodus (nog op losse env-variabelen)
 // of een RPC die niets opleverde - beide zichtbaar in het opstartlog.
+// Wat de wachters over de breinen mogen weten: de stand van de schakelaar en
+// of Codex ingelogd is (bestaat auth.json onder CODEX_HOME). Geen tokens,
+// geen inhoud.
+function breinInfo() {
+  const stand = leesRuntime();
+  let codexAuth = false;
+  try { codexAuth = fs.statSync(path.join(CODEX_HOME, 'auth.json')).isFile(); } catch (e) {}
+  return { default: stand.default, fallback: stand.fallback || null, models: stand.models, codex_ingelogd: codexAuth, runtimes: RUNTIMES_LIJST };
+}
+
 function secretsGeladen() {
   const ruw = (process.env.SECRETS_GELADEN || '').trim();
   if (!ruw) return [];
@@ -177,11 +188,89 @@ function secretsGeladen() {
 const MODEL_ALIASSEN = {
   snel: 'jimmy-snel',    // DeepSeek V4 Flash via Inceptron — werkpaard
   groot: 'jimmy-groot',  // GLM 5.2 via Inceptron — controleur / moeilijk werk
-  lokaal: 'jimmy-klein'  // Qwen via Ollama — eigen hardware, gratis
+  lokaal: 'jimmy-klein', // Qwen via Ollama — eigen hardware, gratis
+  // Tweede brein (5-9-2026): een alias met het voorvoegsel 'codex:' kiest
+  // meteen de Codex-runtime; wat achter de dubbele punt staat is het model
+  // (leeg = de standaard uit runtime.json of config.toml). Zo kan een workflow
+  // of David zeggen "model: astra" zonder apart runtime: codex mee te geven.
+  astra: 'codex:gpt-6-astra',
+  codex: 'codex:',
+  claude: 'claude:'
 };
 function resolveModel(name) {
   const key = (name == null ? '' : String(name)).trim().toLowerCase();
   return Object.prototype.hasOwnProperty.call(MODEL_ALIASSEN, key) ? MODEL_ALIASSEN[key] : '';
+}
+
+// ── Tweede brein: runtime-schakelaar (claude | codex) ───────────────────────
+// Eén pod, twee CLI's, één schakelaar. De keuze per beurt komt, in deze
+// volgorde, uit: (1) body.runtime, (2) een modelalias met voorvoegsel,
+// (3) runtime.json op het volume (de maandstand), (4) 'claude'.
+// runtime.json: { "default": "claude", "fallback": "", "models": { "codex": "gpt-6-astra" } }
+// 'fallback' staat standaard LEEG: David wil kiezen, niet parallel draaien.
+// Staat hij gevuld, dan neemt het andere brein een beurt over als het eerste
+// een limietfout geeft - zonder sessiegeheugen, met één regel uitleg vooraf.
+const RUNTIMES_LIJST = ['claude', 'codex'];
+// Review-fix A3: geen gewoon object als lookup (dan komt 'constructor' erdoor).
+const RUNTIMES = Object.create(null); RUNTIMES_LIJST.forEach(function (r) { RUNTIMES[r] = true; });
+const RUNTIME_FILE = process.env.RUNTIME_FILE || path.join(HOME, 'runtime.json');
+const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
+const CODEX_SESSIONS_DIR = path.join(CODEX_HOME, 'sessions');
+
+function leesRuntime() {
+  const std = { default: 'claude', fallback: '', models: {} };
+  try {
+    const j = JSON.parse(fs.readFileSync(RUNTIME_FILE, 'utf8'));
+    if (j && RUNTIMES[j.default]) std.default = j.default;
+    if (j && RUNTIMES[j.fallback]) std.fallback = j.fallback;
+    if (j && j.models && typeof j.models === 'object') std.models = j.models;
+  } catch (e) {
+    // Geen bestand = de standaard. Een bestand dat er WEL is maar niet leest, is
+    // een stille terugval op Claude - dat mag niet onopgemerkt (review-fix A5).
+    if (e && e.code !== 'ENOENT') logError('runtime-lezen', e);
+  }
+  if (std.fallback === std.default) std.fallback = '';
+  return std;
+}
+function schrijfRuntime(r) {
+  // Atomair: eerst een tijdelijk bestand, dan hernoemen. Een half geschreven
+  // runtime.json zou anders bij de volgende beurt stil op Claude terugvallen.
+  const tmp = RUNTIME_FILE + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify({ default: r.default, fallback: r.fallback || '', models: r.models || {} }, null, 2));
+  fs.renameSync(tmp, RUNTIME_FILE);
+}
+
+// Geeft { runtime, model } terug, of { fout } bij een onbekende runtime.
+// 'model' is voor claude de ANTHROPIC_MODEL-waarde (bestaand gedrag), voor
+// codex de waarde achter -m.
+function resolveKeuze(d) {
+  const stand = leesRuntime();
+  let runtime = '';
+  let model = '';
+  const ruw = (d && d.runtime != null) ? String(d.runtime).trim().toLowerCase() : '';
+  if (ruw) {
+    if (!RUNTIMES[ruw]) return { fout: { error: 'onbekende-runtime', melding: 'onbekende runtime; geldig zijn: ' + RUNTIMES_LIJST.join(', ') + ' (of leeg voor de standaard)', lengte: ruw.length } };
+    runtime = ruw;
+  }
+  const alias = resolveModel(d && d.model);
+  const m = /^(claude|codex):(.*)$/.exec(alias);
+  if (m) {
+    if (!runtime) runtime = m[1];
+    if (runtime === m[1]) model = m[2];
+  } else if (alias) {
+    if (!runtime) runtime = 'claude';
+    if (runtime === 'claude') model = alias;
+  }
+  if (!runtime) runtime = stand.default;
+  if (!model && stand.models && typeof stand.models[runtime] === 'string') model = stand.models[runtime];
+  return { runtime: runtime, model: model, fallback: (stand.fallback && stand.fallback !== runtime) ? stand.fallback : '' };
+}
+
+// Sessiegeheugen per brein: dezelfde chat heeft bij Claude een session_id en
+// bij Codex een thread_id; die leven naast elkaar in chat_sessions.json.
+function sessieSleutel(key, runtime) {
+  if (!key) return '';
+  return runtime === 'codex' ? 'codex:' + key : key;
 }
 
 // ── Workspaces ──────────────────────────────────────────────────────────────
@@ -245,6 +334,14 @@ function workspaceFout(name) {
 function weigerWorkspace(res, fout, route) {
   reqLogExtra(res, { workspace_ongeldig: 1, workspace_lengte: fout.lengte });
   logError('workspace', { name: 'OnbekendeWorkspace', code: route, status: 400 });
+  res.writeHead(400, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: fout.error, melding: fout.melding }));
+}
+
+// Zelfde patroon voor een ongeldige runtime: wel loggen dát, nooit wát.
+function weigerRuntime(res, fout, route) {
+  reqLogExtra(res, { runtime_ongeldig: 1, runtime_lengte: fout.lengte });
+  logError('runtime', { name: 'OnbekendeRuntime', code: route, status: 400 });
   res.writeHead(400, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: false, error: fout.error, melding: fout.melding }));
 }
@@ -399,8 +496,11 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   const maxMs = (opts && opts.maxMs) || FG_MAX_MS;
   const progress = (opts && opts.progress) || {};
   return new Promise(function (resolve) {
-    const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', 'bypassPermissions'];
+    // Review-fix A1 (5-9-2026): `--` vóór de prompt, anders wordt een bericht dat
+    // met '-' begint (Telegram-bullet) als vlag gelezen. Getest met claude -p.
+    const args = ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions'];
     if (sessionId) args.push('--resume', sessionId);
+    args.push('--', prompt);
     const extra = { OUTDIR: outdir };
     if (model) extra.ANTHROPIC_MODEL = model;
     const env = Object.assign({}, process.env, extra);
@@ -516,6 +616,204 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       setTimeout(function () { finalize(code); }, 10000);
     });
     child.on('error', function (e) { finish({ ok: false, error: String(e) }); });
+  });
+}
+
+// ── Tweede brein: Codex CLI als tweede runtime ──────────────────────────────
+// Zelfde contract als runClaude: resolvet met { ok, output, session_id, ... }.
+// Aanroep (geverifieerd tegen codex-cli 0.153.4, 5-9-2026):
+//   codex exec [resume <thread_id>] --json --skip-git-repo-check
+//     --dangerously-bypass-approvals-and-sandbox -C <cwd> -o <lastfile> [-m <model>] "<prompt>"
+// - --json geeft JSONL op stdout; de eerste regel is {"type":"thread.started","thread_id":...}
+//   en het einde is turn.completed (met usage) of turn.failed (met error.message).
+// - -o schrijft de laatste agenttekst naar een bestand; dat is robuuster dan de
+//   JSONL zelf uitpluizen. Het bestand staat BUITEN outdir, anders reist het als
+//   resultaatbestand mee naar n8n.
+// - De container is de sandbox; daarom de bypass-vlag, precies zoals bij
+//   claude --permission-mode bypassPermissions.
+// - stdin op 'ignore': codex exec leest anders "additional input from stdin"
+//   en zou op een open pipe kunnen wachten.
+// - Hartslag: het rollout-bestand $CODEX_HOME/sessions/JJJJ/MM/DD/rollout-<ts>-<thread_id>.jsonl
+//   wordt live bijgeschreven; zodra thread.started binnen is pinnen we dat
+//   bestand, tot die tijd het jongste bestand onder sessions/ (fail-open).
+function codexRolloutFor(threadId) {
+  if (!threadId) return null;
+  const stack = [CODEX_SESSIONS_DIR];
+  let seen = 0;
+  try {
+    while (stack.length && seen < 400) {
+      const cur = stack.pop();
+      let names = [];
+      try { names = fs.readdirSync(cur); } catch (e) { continue; }
+      for (let i = 0; i < names.length && seen < 400; i++) {
+        const fp = path.join(cur, names[i]);
+        let st; try { st = fs.statSync(fp); } catch (e) { continue; }
+        seen++;
+        if (st.isDirectory()) stack.push(fp);
+        else if (names[i].indexOf(threadId) !== -1 && names[i].slice(-6) === '.jsonl') return fp;
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+function isLimietFout(tekst) {
+  return /usage limit|rate limit|rate_limit|too many requests|\b429\b|quota|limit reached|weekly limit|resets? (at|in)/i.test(String(tekst || ''));
+}
+
+function runCodex(prompt, threadId, outdir, cwd, model, opts) {
+  const inactMs = (opts && opts.inactMs) || INACT_MS;
+  const maxMs = (opts && opts.maxMs) || FG_MAX_MS;
+  const progress = (opts && opts.progress) || {};
+  const lastFile = (opts && opts.lastFile) || path.join(path.dirname(outdir), 'codex-last.md');
+  return new Promise(function (resolve) {
+    // Review-fix A1 (geverifieerd tegen 0.153.4): de opties horen VÓÓR het
+    // subcommando `resume` (clap accepteert ze er niet achter), en `--` vóór de
+    // prompt, anders wordt een prompt die met '-' begint als vlag gelezen.
+    const args = ['exec', '-C', cwd, '--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '-o', lastFile];
+    if (model) args.push('-m', model);
+    if (threadId) args.push('resume', threadId);
+    args.push('--', prompt);
+    const env = Object.assign({}, process.env, { OUTDIR: outdir, CODEX_HOME: CODEX_HOME });
+    const child = spawn('codex', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const t0 = Date.now();
+    let out = '', err = '', rest = '', lastStdout = t0, killedReason = null;
+    let gezienThread = threadId || '', faalTekst = '', usage = null, pinned = null;
+    let turnGefaald = false, geenRollout = false;
+
+    // Review-fix A2: een 'error'-event is bij Codex een niet-fatale melding
+    // ("Reconnecting..."); fataal is alleen turn.failed (of een exitcode <> 0).
+    // De error-tekst bewaren we als detail, meer niet.
+    function verwerkRegel(regel) {
+      let ev; try { ev = JSON.parse(regel); } catch (e) { return false; }
+      if (!ev || typeof ev !== 'object') return false;
+      if (ev.type === 'thread.started' && ev.thread_id) gezienThread = ev.thread_id;
+      else if (ev.type === 'turn.completed' && ev.usage) usage = ev.usage;
+      else if (ev.type === 'turn.failed') { turnGefaald = true; faalTekst = (ev.error && ev.error.message) || 'turn.failed'; }
+      else if (ev.type === 'error' && ev.message) { if (!faalTekst) faalTekst = ev.message; return false; }
+      return true;   // echte voortgang
+    }
+
+    function transcriptMtime() {
+      try {
+        if (!pinned && gezienThread) pinned = codexRolloutFor(gezienThread);
+        if (pinned) { try { return fs.statSync(pinned).mtimeMs; } catch (e) { return 0; } }
+        return newestMtimeIn(CODEX_SESSIONS_DIR, 200);
+      } catch (e) { return 0; }
+    }
+
+    function killGroup(reason) {
+      if (killedReason) return;
+      killedReason = reason;
+      try { process.kill(-child.pid, 'SIGTERM'); } catch (e) { try { child.kill('SIGTERM'); } catch (e2) {} }
+      setTimeout(function () {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { try { child.kill('SIGKILL'); } catch (e2) {} }
+      }, KILL_GRACE_MS);
+    }
+
+    let transcriptSeen = false;
+    const watchdog = setInterval(function () {
+      const now = Date.now();
+      const tm = transcriptMtime();
+      if (tm > t0) transcriptSeen = true;
+      const act = Math.max(lastStdout, tm, newestMtimeIn(outdir, 50));
+      progress.running_ms = now - t0;
+      progress.last_activity_ms = now - act;
+      if (now - t0 > maxMs) return killGroup('bovengrens');
+      if (transcriptSeen && (now - act > inactMs)) return killGroup('inactief');
+    }, WATCH_INTERVAL_MS);
+
+    let resolved = false;
+    let laatsteCode = null;
+    function finish(r) {
+      if (resolved) return;
+      resolved = true;
+      clearInterval(watchdog);
+      if (r && r.exit_code === undefined) r.exit_code = laatsteCode;
+      r.runtime = 'codex';
+      resolve(r);
+    }
+    function finalize(code) {
+      laatsteCode = code;
+      if (resolved) return;
+      if (rest) { verwerkRegel(rest); rest = ''; }
+      let tekst = '';
+      try { tekst = fs.readFileSync(lastFile, 'utf8'); } catch (e) {}
+      try { fs.unlinkSync(lastFile); } catch (e) {}
+      if (code === 0 && !turnGefaald) {
+        const r = { ok: true, output: tekst, session_id: gezienThread };
+        if (usage) r.usage = usage;
+        if (killedReason) r.opmerking = 'resultaat was compleet; procesgroep is daarna opgeruimd (' + killedReason + ')';
+        return finish(r);
+      }
+      if (killedReason) {
+        const minuten = Math.round((Date.now() - t0) / 60000);
+        const stil = Math.round((progress.last_activity_ms || 0) / 60000);
+        const uitleg = killedReason === 'bovengrens'
+          ? 'De opdracht is afgebroken op de absolute bovengrens: hij liep ' + minuten + ' minuten.'
+          : 'De opdracht is afgebroken wegens inactiviteit: hij liep ' + minuten + ' minuten en de laatste activiteit was ' + stil + ' minuten geleden.';
+        return finish({ ok: false, error: 'afgebroken-' + killedReason, output: uitleg, session_id: gezienThread, running_ms: Date.now() - t0 });
+      }
+      const fout = faalTekst || err.slice(-1000) || ('codex eindigde met code ' + code);
+      // Review-fix A4: een thread die Codex niet meer kent (opgeruimde sessies,
+      // of een Claude-id dat per ongeluk als thread werd meegegeven) mag de chat
+      // niet vastzetten; de aanroeper wist de sleutel en probeert één keer vers.
+      if (threadId && /no rollout found|not found|unknown (thread|session)/i.test(fout + ' ' + err)) geenRollout = true;
+      finish({ ok: false, error: geenRollout ? 'sessie-onbekend' : (isLimietFout(fout) ? 'limiet' : 'codex-fout'),
+               output: tekst || fout, session_id: geenRollout ? '' : gezienThread, detail: fout.slice(0, 1000) });
+    }
+
+    child.stdout.on('data', function (d) {
+      rest += d;
+      let i, voortgang = false;
+      while ((i = rest.indexOf('\n')) !== -1) { const regel = rest.slice(0, i).trim(); rest = rest.slice(i + 1); if (regel && verwerkRegel(regel)) voortgang = true; }
+      // Alleen echte voortgang telt als hartslag; een reeks "Reconnecting..."
+      // mag een beurt niet tot de bovengrens in leven houden (review-fix A2).
+      if (voortgang) lastStdout = Date.now();
+      if (out.length < 64 * 1024) out += d;   // alleen voor diagnose; niet het resultaat
+    });
+    child.stderr.on('data', function (d) { err += d; });
+    child.on('close', function (code) { finalize(code); });
+    child.on('exit', function (code) { setTimeout(function () { finalize(code); }, 10000); });
+    child.on('error', function (e) { finish({ ok: false, error: String(e) }); });
+  });
+}
+
+// Eén ingang voor beide breinen. Bij Claude kijkt de bestaande code naar
+// output/session_id; bij een limietfout markeren we die ook als 'limiet'
+// zodat de fallback in processJob voor beide gelijk werkt.
+function runBrein(runtime, prompt, sessionId, outdir, cwd, model, opts) {
+  if (runtime === 'codex') return runCodex(prompt, sessionId, outdir, cwd, model, opts);
+  return runClaude(prompt, sessionId, outdir, cwd, model, opts).then(function (r) {
+    r.runtime = 'claude';
+    if (r && !r.ok && r.error !== 'limiet' && !/^afgebroken-/.test(String(r.error || '')) && isLimietFout(r.output || r.error)) r.error = 'limiet';
+    return r;
+  });
+}
+
+// Fallback op het andere brein: alleen als runtime.json dat toestaat, alleen
+// bij een limietfout, en altijd zonder sessiegeheugen (de context van het ene
+// brein is voor het andere niet leesbaar). Eén regel uitleg gaat mee.
+function runMetFallback(keuze, prompt, sessionId, outdir, cwd, opts) {
+  return runBrein(keuze.runtime, prompt, sessionId, outdir, cwd, keuze.model, opts).then(function (r) {
+    if (!r.ok && r.error === 'sessie-onbekend' && sessionId) {
+      // Review-fix A4: sessie kwijt -> één keer vers op hetzelfde brein; de
+      // aanroeper krijgt een nieuw session_id en overschrijft de oude sleutel.
+      schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'sessie-onbekend', runtime: keuze.runtime }));
+      return runBrein(keuze.runtime, prompt, '', outdir, cwd, keuze.model, opts).then(function (r2) { r2.sessie_vernieuwd = true; return r2; });
+    }
+    if (r.ok || r.error !== 'limiet' || !keuze.fallback) return r;
+    const stand = leesRuntime();
+    const fbModel = (stand.models && typeof stand.models[keuze.fallback] === 'string') ? stand.models[keuze.fallback] : '';
+    const uitleg = '[Systeem: het brein "' + keuze.runtime + '" zit aan zijn gebruikslimiet; deze beurt draait op "' + keuze.fallback +
+      '" zonder het gespreksgeheugen van vandaag. Werk vanuit 00_Systeem/actueel.md en zeg het als je context mist.]\n\n';
+    schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'fallback', van: keuze.runtime, naar: keuze.fallback }));
+    return runBrein(keuze.fallback, uitleg + prompt, '', outdir, cwd, fbModel, opts).then(function (r2) {
+      r2.fallback_van = keuze.runtime;
+      r2.session_id_fallback = r2.session_id;   // hoort niet in het geheugen van de hoofdchat
+      delete r2.session_id;
+      return r2;
+    });
   });
 }
 
@@ -636,7 +934,7 @@ function jobEindLog(jobId, j, ws) {
   });
 }
 
-async function processJob(jobId, prompt, explicitSession, files, chatId, ws, model) {
+async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keuze) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
   const outdir = path.join(base, 'out');
@@ -669,14 +967,15 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, mod
         }
       }
     }
-    const sessionId = explicitSession || (key ? chatSessions[key] : '') || '';
+    const sKey = sessieSleutel(key, keuze.runtime);
+    const sessionId = explicitSession || (sKey ? chatSessions[sKey] : '') || '';
     const fullPrompt = prompt + '\n\n' + space.hint(indir, outdir);
-    j.status = 'running'; j.started = Date.now(); j.progress = {};
-    const r = await runClaude(fullPrompt, sessionId, outdir, space.dir, model, { progress: j.progress });
+    j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
+    const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, space.dir, { progress: j.progress, lastFile: path.join(base, 'codex-last.md') });
     r.files = collectFiles(outdir);
     r.workspace = ws;
-    if (model) r.model = model;
-    if (key && r.session_id) { chatSessions[key] = r.session_id; saveSessions(); }
+    if (keuze.model && !r.fallback_van) r.model = keuze.model;
+    if (sKey && r.session_id) { chatSessions[sKey] = r.session_id; saveSessions(); }
     j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
     jobEindLog(jobId, j, ws);
   } catch (e) {
@@ -751,7 +1050,7 @@ function sendReport(entry, result, attempt) {
 }
 
 // ── v2: achtergrondagent — niet geserialiseerd, eigen limieten, push aan het eind
-async function processAgent(jobId, prompt, explicitSession, ws, model, maxMs) {
+async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
   const outdir = path.join(base, 'out');
@@ -777,10 +1076,10 @@ async function processAgent(jobId, prompt, explicitSession, ws, model, maxMs) {
     fs.mkdirSync(indir, { recursive: true });
     fs.mkdirSync(outdir, { recursive: true });
     const fullPrompt = prompt + '\n\n' + space.hint(indir, outdir);
-    j.status = 'running'; j.started = Date.now(); j.progress = {};
-    entry.status = 'running'; saveAgents();
-    const r = await runClaude(fullPrompt, explicitSession || '', outdir, space.dir, model,
-      { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS });
+    j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
+    entry.status = 'running'; entry.runtime = keuze.runtime; saveAgents();
+    const r = await runMetFallback(keuze, fullPrompt, explicitSession || '', outdir, space.dir,
+      { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS, lastFile: path.join(base, 'codex-last.md') });
     r.files = collectFiles(outdir);
     r.workspace = ws;
     // Let op de volgorde: spillIfLarge leegt r.output als die naar schijf gaat,
@@ -840,8 +1139,46 @@ function handleRequest(req, res) {
       sync: syncInfo(), inbox: inboxInfo(), sessies: sessieInfo(),
       agents: agentInfo(),
       offsite: offsiteInfo(),
-      secrets_geladen: secretsGeladen()
+      secrets_geladen: secretsGeladen(),
+      kluis_overgeslagen: process.env.KLUIS_OVERGESLAGEN === '1',
+      brein: breinInfo()
     }));
+  }
+
+  // ── Tweede brein: de schakelaar lezen en zetten ───────────────────────────
+  // GET is openbaar op het niveau van /health (alleen de stand, geen inhoud);
+  // POST vraagt het secret. Body: { default, fallback?, models? } - alleen de
+  // meegegeven velden veranderen. Direct van kracht voor de volgende /run;
+  // lopende beurten maken hun brein af.
+  if (req.method === 'GET' && req.url === '/runtime') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(Object.assign({ ok: true }, breinInfo())));
+  }
+  if (req.method === 'POST' && req.url === '/runtime') {
+    return readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
+      const stand = leesRuntime();
+      if (d.default != null) {
+        const v = String(d.default).trim().toLowerCase();
+        if (!RUNTIMES[v]) return weigerRuntime(res, { error: 'onbekende-runtime', melding: 'onbekende runtime; geldig zijn: ' + RUNTIMES_LIJST.join(', '), lengte: v.length }, '/runtime');
+        stand.default = v;
+      }
+      if (d.fallback != null) {
+        const v = String(d.fallback).trim().toLowerCase();
+        if (v && !RUNTIMES[v]) return weigerRuntime(res, { error: 'onbekende-runtime', melding: 'onbekende fallback; geldig zijn: ' + RUNTIMES_LIJST.join(', ') + ' of leeg', lengte: v.length }, '/runtime');
+        stand.fallback = v;
+      }
+      if (d.models && typeof d.models === 'object') {
+        for (const k in d.models) if (RUNTIMES[k]) stand.models[k] = (d.models[k] == null) ? '' : String(d.models[k]).slice(0, 80);
+      }
+      if (stand.fallback === stand.default) stand.fallback = '';
+      try { schrijfRuntime(stand); } catch (e) { logError('runtime-schrijf', e); res.writeHead(500); return res.end('runtime.json niet schrijfbaar'); }
+      schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'runtime-gezet', default: stand.default, fallback: stand.fallback || '-' }));
+      res._log = { runtime_default: stand.default };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(Object.assign({ ok: true }, breinInfo())));
+    });
   }
 
   if (req.method === 'POST' && req.url === '/run') {
@@ -854,13 +1191,15 @@ function handleRequest(req, res) {
       const wsFout = workspaceFout(d.workspace);
       if (wsFout) return weigerWorkspace(res, wsFout, '/run');
       const ws = resolveWorkspace(d.workspace);
-      const model = resolveModel(d.model);
+      const keuze = resolveKeuze(d);
+      if (keuze.fout) return weigerRuntime(res, keuze.fout, '/run');
       const jobId = crypto.randomBytes(8).toString('hex');
-      jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: chatId };
-      res._log = { job_id: jobId, chat_id: chatId, workspace: ws };
-      enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, model); });
+      jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: chatId, runtime: keuze.runtime };
+      res._log = { job_id: jobId, chat_id: chatId, workspace: ws, runtime: keuze.runtime };
+      // Serieel per chat, ongeacht het brein: één gesprek, één beurt tegelijk.
+      enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, keuze); });
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws, model: model || '(default)' }));
+      res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws, runtime: keuze.runtime, model: keuze.model || '(default)' }));
     });
   }
 
@@ -880,7 +1219,8 @@ function handleRequest(req, res) {
       if (wsFout) return weigerWorkspace(res, wsFout, '/agent');
       const ws = resolveWorkspace(d.workspace);
       if (!fs.existsSync(WORKSPACES[ws].dir)) { res.writeHead(400); return res.end('workspace missing'); }
-      const model = resolveModel(d.model);
+      const keuze = resolveKeuze(d);
+      if (keuze.fout) return weigerRuntime(res, keuze.fout, '/agent');
       const maxMin = Math.min(Math.max(parseInt(d.max_minuten || BG_MAX_DEFAULT_MIN, 10) || BG_MAX_DEFAULT_MIN, 5), BG_MAX_CAP_MIN);
       const jobId = crypto.randomBytes(8).toString('hex');
       jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '' };
@@ -889,13 +1229,13 @@ function handleRequest(req, res) {
         job_id: jobId, label: label, status: 'pending',
         chat_id: (d.chat_id != null) ? String(d.chat_id) : '',
         started: Date.now(), ended: null, ok: null, rapport: '-',
-        max_minuten: maxMin, workspace: ws
+        max_minuten: maxMin, workspace: ws, runtime: keuze.runtime
       };
       saveAgents();
       // Bewust NIET in de chat-wachtrij: agents draaien parallel aan het gesprek.
-      processAgent(jobId, prompt, d.session_id, ws, model, maxMin * 60 * 1000);
+      processAgent(jobId, prompt, d.session_id, ws, keuze, maxMin * 60 * 1000);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, job_id: jobId, label: label, max_minuten: maxMin }));
+      res.end(JSON.stringify({ ok: true, job_id: jobId, label: label, max_minuten: maxMin, runtime: keuze.runtime }));
     });
   }
 
@@ -965,7 +1305,8 @@ function handleRequest(req, res) {
       const ws = resolveWorkspace(d.workspace);
       const key = sessionKey(ws, chatId);
       res._log = { chat_id: chatId, workspace: ws };
-      if (key) { delete chatSessions[key]; saveSessions(); }
+      // Beide breinen: een reset is een reset, welk brein er ook aan stond.
+      if (key) { delete chatSessions[key]; delete chatSessions[sessieSleutel(key, 'codex')]; saveSessions(); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, reset: chatId, workspace: ws }));
     });
@@ -1254,6 +1595,6 @@ if (OFFSITE_INTERVAL_MIN > 0 && !offsiteDoorRunsh()) {
 }
 
 server.listen(PORT, '0.0.0.0', function () {
-  console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents) luistert op :' + PORT +
+  console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents, tweede brein claude|codex) luistert op :' + PORT +
     ' (vault=' + VAULT + ', repo=' + REPO + ')');
 });

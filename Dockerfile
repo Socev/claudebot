@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Claude Code CLI (levert 'claude') + rclone
 RUN npm install -g @anthropic-ai/claude-code
+# Tweede brein (5-9-2026): OpenAI Codex CLI (levert 'codex'), gepind zoals de
+# Claude-CLI. Bump bewust: het --json-formaat heet nog 'experimental'.
+RUN npm install -g @openai/codex@0.153.4
 RUN curl -fsSL https://rclone.org/install.sh | bash || true
 
 # ── Chromium-browserbesturing (route C, 16-8-2026) ──────────────────────────
@@ -34,6 +37,8 @@ RUN npm install -g @playwright/mcp \
 RUN id claude 2>/dev/null || useradd -u 1001 -d /opt/data -s /bin/bash claude
 
 ENV HOME=/opt/data
+# Codex: auth.json, config.toml en sessies op het persistente volume, naast /opt/data/.claude.
+ENV CODEX_HOME=/opt/data/.codex
 ENV VAULT_DIR=/opt/data/AI_SecondBrain
 ENV REPO_DIR=/opt/data/repo
 ENV PORT=8080
@@ -59,6 +64,8 @@ COPY entrypoint.sh /app/entrypoint.sh
 COPY fetch-secrets.sh /app/fetch-secrets.sh
 COPY supervisor.js /app/supervisor.js
 COPY uitrol.sh /app/uitrol.sh
+# Bootstrap-config voor Codex; entrypoint kopieert hem alleen als er nog geen staat.
+COPY codex-config.toml /app/codex-config.toml
 
 # De applicatiecode staat op TWEE plekken. /app/release-bootstrap is de kopie die
 # een vers volume vult; daarna draait de pod uit /opt/data/app/current en raakt
