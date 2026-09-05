@@ -43,8 +43,12 @@ mkdir -p "$RELEASES" "$(dirname "$LOG")"
 log "ophalen uit $BRON_REPO"
 git -C "$BRON_REPO" fetch --quiet origin || fout "git fetch mislukt"
 
-SHA="$(git -C "$BRON_REPO" rev-parse --verify --quiet "${REF}^{commit}" \
-       || git -C "$BRON_REPO" rev-parse --verify --quiet "origin/${REF}^{commit}")" \
+# Review-fix 5-9-2026 (vondst machinekamer): een branchnaam eerst op ORIGIN oplossen.
+# De lokale branch 'main' van de kloon wordt door niets bijgewerkt; wie 'main' vroeg
+# kreeg wat de kloon toevallig had, met 'release staat er al' als geruststelling -
+# oude code, groen log. Een sha of tag blijft gewoon werken (tweede poging).
+SHA="$(git -C "$BRON_REPO" rev-parse --verify --quiet "origin/${REF}^{commit}" \
+       || git -C "$BRON_REPO" rev-parse --verify --quiet "${REF}^{commit}")" \
   || fout "kan $REF niet oplossen naar een commit"
 KORT="${SHA:0:12}"
 DOEL="$RELEASES/$KORT"
