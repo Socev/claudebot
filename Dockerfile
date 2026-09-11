@@ -2,7 +2,7 @@
 # Twee workspaces in één pod:
 #   VAULT_DIR = Second Brain (rclone bisync met Google Drive)
 #   REPO_DIR  = git-clone van de GHAWA-website (alleen actief als GIT_REPO_URL is gezet)
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 
 # git is nodig voor de GHAWA-workspace (node:slim bevat 'm niet standaard).
 # openssh-client is nodig voor de deploy key van socev.dev (git-over-SSH); 18-8-2026.
