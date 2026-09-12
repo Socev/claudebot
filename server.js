@@ -1123,6 +1123,117 @@ function reqPath(req) {
   return i === -1 ? u : u.slice(0, i);
 }
 
+// ── De gebruikstank: hoe vol zitten de limietvensters ────────────────────────────────────
+// David, 12-9-2026: "alleen dan pas kunnen we afremmen of gas bijgeven obv hoeveel er nog in
+// de usagetank zit". Hij wil melding bij overschrijding van het dagquotum (100% per 7 dagen,
+// dus 14,3% per dag) EN bij een onverwachte reset, want dan mag er plots veel meer per dag.
+//
+// HOE. Het endpoint claude.ai/api/oauth/usage eist de scope `user:profile` en die heeft ons
+// token niet. Maar dezelfde tellers staan in de RESPONSE-HEADERS van een gewone
+// /v1/messages-call, en die werkt met het token dat we al hebben. Eén Haiku-call met
+// max_tokens 1 kost enkele tokens; dat is verwaarloosbaar tegen ~1,4 miljard per week.
+//
+// WAAROM EEN ENDPOINT EN GEEN CRON (keuze David): een cronjob sneuvelt bij een podupdate,
+// dit endpoint komt met elke nieuwe versie gewoon mee.
+const TANK_CACHE_MS = 5 * 60 * 1000;
+let tankCache = { tijd: 0, data: null };
+
+async function meetTank() {
+  const tok = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (!tok) return { ok: false, fout: 'CLAUDE_CODE_OAUTH_TOKEN ontbreekt' };
+  let r;
+  try {
+    r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer ' + tok,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'oauth-2025-04-20',
+        'content-type': 'application/json',
+        'user-agent': 'claude-cli/2.1.268 (external, cli)',
+      },
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: '.' }] }),
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch (e) {
+    return { ok: false, fout: 'call mislukt: ' + String(e && e.message || e).slice(0, 160) };
+  }
+  const h = (n) => r.headers.get('anthropic-ratelimit-unified-' + n);
+  const getal = (n) => { const v = h(n); return v === null ? null : Number(v); };
+  const moment = (n) => { const v = getal(n); return v ? new Date(v * 1000).toISOString() : null; };
+  // Fail-closed: zonder tellers is er niets te melden, en dan mag dit NIET als volle tank
+  // doorgaan. Een tank die niet te lezen is, is geen volle tank.
+  if (getal('5h-utilization') === null) {
+    return { ok: false, fout: 'geen rate-limit-headers', http: r.status };
+  }
+  const benut7 = getal('7d-utilization');
+  const reset7iso = moment('7d-reset');
+  const uit = {
+    ok: true,
+    gemeten_op: new Date().toISOString(),
+    bron: 'anthropic-ratelimit-unified-* headers op /v1/messages',
+    vijf_uur: { benut: getal('5h-utilization'), status: h('5h-status'), reset: moment('5h-reset') },
+    zeven_dagen: { benut: benut7, status: h('7d-status'), reset: reset7iso },
+    status: h('status'),
+    overage: { status: h('overage-status'), reden_uit: h('overage-disabled-reason') },
+    terugval_bij: getal('fallback-percentage'),
+    representatief: h('representative-claim'),
+  };
+  // Het 7d-venster is VAST (gemeten 12-9-2026: za 21:00Z tot za 21:00Z), dus de start is uit
+  // de reset terug te rekenen. 'per_resterende_dag' is het getal dat stuurt: bij een vroege
+  // reset mag er plots veel meer per dag dan de lineaire 14,3%.
+  if (reset7iso) {
+    const reset = new Date(reset7iso).getTime();
+    const start = reset - 7 * 86400000;
+    const nu = Date.now();
+    const verstreken = Math.max(0, Math.min(1, (nu - start) / (7 * 86400000)));
+    const urenOver = (reset - nu) / 3600000;
+    uit.quotum = {
+      venster_start: new Date(start).toISOString(),
+      verstreken: Math.round(verstreken * 1000) / 1000,
+      voorsprong: Math.round((benut7 - verstreken) * 1000) / 1000,
+      uren_resterend: Math.round(urenOver * 10) / 10,
+      dagquotum_lineair: 0.143,
+      per_resterende_dag: urenOver > 0 ? Math.round(((1 - benut7) / (urenOver / 24)) * 1000) / 1000 : null,
+    };
+  }
+  // Wegschrijven gaat via de RPC, die ook het oordeel en de reset-detectie doet: één
+  // definitie van "te hard" en "reset", niet twee. Mislukt dat, dan is de meting nog geldig.
+  const sbUrl = process.env.SUPABASE_URL;
+  const sbKey = process.env.SUPABASE_SERVICE_ROLE;
+  if (sbUrl && sbKey && reset7iso) {
+    try {
+      const b = await fetch(sbUrl.replace(/\/$/, '') + '/rest/v1/rpc/mk_tank_schrijf', {
+        method: 'POST',
+        headers: { apikey: sbKey, authorization: 'Bearer ' + sbKey, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          p_vijf_uur: uit.vijf_uur.benut, p_zeven_dagen: benut7,
+          p_zeven_dagen_reset: reset7iso, p_vijf_uur_reset: uit.vijf_uur.reset,
+          p_status: uit.status, p_overage: uit.overage.status, p_bindend: uit.representatief,
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const t = await b.text();
+      if (b.ok) {
+        const rij = JSON.parse(t)[0] || {};
+        uit.oordeel = rij.oordeel;
+        uit.reset_gezien = rij.reset_gezien === true;
+        uit.bewaard = true;
+      } else {
+        uit.bewaard = false;
+        uit.bewaarfout = 'http ' + b.status + ' ' + t.slice(0, 120);
+      }
+    } catch (e) {
+      uit.bewaard = false;
+      uit.bewaarfout = String(e && e.message || e).slice(0, 120);
+    }
+  } else {
+    uit.bewaard = false;
+    uit.bewaarfout = 'SUPABASE_URL of SUPABASE_SERVICE_ROLE ontbreekt';
+  }
+  return uit;
+}
+
 function handleRequest(req, res) {
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
     const spaces = {};
@@ -1155,6 +1266,26 @@ function handleRequest(req, res) {
   // POST vraagt het secret. Body: { default, fallback?, models? } - alleen de
   // meegegeven velden veranderen. Direct van kracht voor de volgende /run;
   // lopende beurten maken hun brein af.
+  // Gebruikstank. Gecached op 5 minuten, want elke aanroep is een echte API-call; met
+  // ?verversen=1 forceer je een nieuwe meting. Geen secret nodig: er komt niets gevoeligs uit
+  // en n8n moet hem zonder omhaal kunnen lezen, net als /health.
+  if (req.method === 'GET' && reqPath(req) === '/tank') {
+    const vers = /[?&]verversen=1/.test(req.url || '');
+    const oud = Date.now() - tankCache.tijd;
+    if (!vers && tankCache.data && oud < TANK_CACHE_MS) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(Object.assign({}, tankCache.data, { uit_cache: true, cache_seconden: Math.round(oud / 1000) })));
+    }
+    return meetTank().then(function (d) {
+      if (d.ok) tankCache = { tijd: Date.now(), data: d };
+      res.writeHead(d.ok ? 200 : 503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(Object.assign({}, d, { uit_cache: false })));
+    }).catch(function (e) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, fout: String(e && e.message || e).slice(0, 200) }));
+    });
+  }
+
   if (req.method === 'GET' && req.url === '/runtime') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(Object.assign({ ok: true }, breinInfo())));
