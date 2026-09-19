@@ -939,6 +939,119 @@ function jobEindLog(jobId, j, ws) {
   });
 }
 
+// ── Werklessen op context (19-9-2026, akkoord David: "Ja dat mag") ──────────
+// WAAROM DIT HIER STAAT. CLAUDE.md liet elke sessie `00_Systeem/Werklessen.md`
+// integraal meelezen: 49,6 KB met 67 lessen, waarvan er per taak een handvol van
+// toepassing is. Gemeten met de vaste toetsset in `00_Systeem/Lessen` (30 echte
+// situaties, 37 verwachte lessen): op betekenis ophalen levert 91,9 % van de
+// juiste lessen in de top 5, tegen 51,4 % voor kale woordmatching - en het blok
+// is dan ~2,6 KB in plaats van 49,6 KB.
+// server.js is de enige plek waar ALLE kanalen langskomen: heartbeat, de vier
+// wachters, de briefing, de droomronde, de consolidaties, de chatbeurten en de
+// achtergrondagenten. Elke workflow zijn eigen knoop geven is twaalf plekken die
+// uit elkaar gaan lopen (dezelfde reden waarom de secretpoort van drie greps naar
+// één module ging).
+//
+// FAIL-OPEN, MAAR ZICHTBAAR. Een mislukte lessen-call mag een beurt nooit
+// blokkeren: werk gaat voor, dus bij elke fout gaat de beurt door zonder blok.
+// Wel schrijft elke poging een regel in `machinekamer.luik_log` (actie `lessen`),
+// zodat "nul lessen geleverd" en "geleverd zonder vector" via mk_luik_alarm boven
+// komen in plaats van stil te blijven. Die actie staat in `luik_bron` op
+// telt_items = false: het aantal lessen per nacht schommelt met de drukte en is
+// dus geen gezondheidsmaat - het uitblijven van aanroepen en de foutregels zijn
+// dat wel.
+// NOODREM: LESSEN_INJECTIE=0 in de omgeving zet het uit zonder uitrol.
+const LESSEN_AAN = process.env.LESSEN_INJECTIE !== '0';
+const LESSEN_MAX = parseInt(process.env.LESSEN_MAX || '5', 10);
+const LESSEN_TIMEOUT = parseInt(process.env.LESSEN_TIMEOUT_MS || '6000', 10);
+const LESSEN_CF_ACCOUNT = process.env.CF_ACCOUNT_ID || '23df9b0607bb70f6d7f15a63ec843d6d';
+const LESSEN_EMBED_MODEL = '@cf/baai/bge-m3';   // 1024 dims, meertalig; de lessen zijn Nederlands
+// Welke sessie hoort bij welk domein. Wat hier NIET in staat krijgt geen
+// domeinfilter en dus de lessen uit alle domeinen: een regel of twee te veel is
+// goedkoper dan een gemiste correctie van David.
+const LESSEN_DOMEIN = {
+  '40687': 'pa', 'agenda-wachter': 'pa', 'correspondentie-wachter': 'pa',
+  'actie-bewaker': 'pa', 'personeels-wachter': 'pa', 'nachtconsolidatie': 'pa',
+  'dagplan': 'pa', 'parro': 'pa', 'signal': 'pa', 'cijfermeester': 'pa',
+  'telegram-debug': 'machine', 'structuur-wachter': 'machine', 'werkkamer': 'machine',
+  'vault-concierge': 'machine', 'site-verversing': 'machine', 'kaizen-review': 'machine',
+  'pod-uitrol': 'machine', 'webhook-bewaker': 'machine', 'keten-attest': 'machine'
+};
+
+function lessenDomein(chatId, label) {
+  if (/^machinekamer:/i.test(String(label || ''))) return 'machine';
+  const c = String(chatId || '').trim();
+  return LESSEN_DOMEIN[c] || null;
+}
+
+function lessenSb() {
+  const url = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SERVICE_ROLE || '';
+  return (url && key) ? { url: url, key: key } : null;
+}
+
+// Levensteken, nooit blokkerend: als dit faalt verandert er niets aan de beurt.
+function lessenLog(aantal, fout) {
+  const sb = lessenSb();
+  if (!sb) return;
+  try {
+    fetch(sb.url + '/rest/v1/rpc/mk_luik_log', {
+      method: 'POST',
+      headers: { apikey: sb.key, Authorization: 'Bearer ' + sb.key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_actie: 'lessen', p_aantal: aantal, p_fout: fout || null }),
+      signal: AbortSignal.timeout(LESSEN_TIMEOUT)
+    }).catch(function () {});
+  } catch (e) { /* nooit werpen vanuit het logpad */ }
+}
+
+async function lessenVector(tekst) {
+  const tok = process.env.CLOUDFLARE_API_TOKEN;
+  if (!tok) return null;
+  const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + LESSEN_CF_ACCOUNT +
+                        '/ai/run/' + LESSEN_EMBED_MODEL, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: [String(tekst).slice(0, 4000)] }),
+    signal: AbortSignal.timeout(LESSEN_TIMEOUT)
+  });
+  if (!r.ok) return null;
+  const j = await r.json();
+  const v = j && j.result && j.result.data && j.result.data[0];
+  return (Array.isArray(v) && v.length === 1024) ? v : null;
+}
+
+// Geeft het lessenblok inclusief afsluitende witregels, of '' als er niets is.
+async function lessenBlok(prompt, chatId, label) {
+  if (!LESSEN_AAN) return '';
+  const sb = lessenSb();
+  if (!sb) { lessenLog(0, 'supabase-omgeving ontbreekt'); return ''; }
+  let vec = null;
+  try { vec = await lessenVector(prompt); } catch (e) { vec = null; }
+  try {
+    const r = await fetch(sb.url + '/rest/v1/rpc/mk_lessen_prompt', {
+      method: 'POST',
+      headers: { apikey: sb.key, Authorization: 'Bearer ' + sb.key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        p_context: String(prompt).slice(0, 4000),
+        p_embedding: vec ? JSON.stringify(vec) : null,
+        p_domein: lessenDomein(chatId, label),
+        p_max: LESSEN_MAX
+      }),
+      signal: AbortSignal.timeout(LESSEN_TIMEOUT)
+    });
+    if (!r.ok) { lessenLog(0, 'rpc http ' + r.status); return ''; }
+    const j = await r.json();
+    const tekst = (j && j.tekst) ? String(j.tekst) : '';
+    const n = ((j && j.aantal_grond) || 0) + ((j && j.aantal_taak) || 0);
+    lessenLog(n, vec ? null : 'zonder vector geleverd (woordmatching)');
+    return tekst ? (tekst + '\n\n') : '';
+  } catch (e) {
+    logError('lessen', e);
+    lessenLog(0, (e && e.name) ? String(e.name) : 'onbekend');
+    return '';
+  }
+}
+
 async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keuze) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
@@ -974,7 +1087,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     }
     const sKey = sessieSleutel(key, keuze.runtime);
     const sessionId = explicitSession || (sKey ? chatSessions[sKey] : '') || '';
-    const fullPrompt = prompt + '\n\n' + space.hint(indir, outdir);
+    const lesblok = await lessenBlok(prompt, chatId, '');
+    const fullPrompt = lesblok + prompt + '\n\n' + space.hint(indir, outdir);
     j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
     const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, space.dir, { progress: j.progress, lastFile: path.join(base, 'codex-last.md') });
     r.files = collectFiles(outdir);
@@ -1080,7 +1194,8 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
   try {
     fs.mkdirSync(indir, { recursive: true });
     fs.mkdirSync(outdir, { recursive: true });
-    const fullPrompt = prompt + '\n\n' + space.hint(indir, outdir);
+    const lesblok = await lessenBlok(prompt, (entry && entry.chat_id) || '', (entry && entry.label) || '');
+    const fullPrompt = lesblok + prompt + '\n\n' + space.hint(indir, outdir);
     j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
     entry.status = 'running'; entry.runtime = keuze.runtime; saveAgents();
     const r = await runMetFallback(keuze, fullPrompt, explicitSession || '', outdir, space.dir,
