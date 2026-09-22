@@ -24,6 +24,9 @@
  *
  *   POST /run     { prompt, chat_id?, workspace?, runtime?, model?, session_id?, secret?, files? } -> { ok, job_id, workspace, runtime, model }
  *   GET  /runtime -> stand van de brein-schakelaar;  POST /runtime { default?, fallback?, models?, secret? } zet hem
+ *                  LET OP: `models` wordt per sleutel SAMENGEVOEGD, niet vervangen. Een sleutel wissen
+ *                  doe je met een lege waarde: { models: { claude: "" } }. (Gemeten 22-9-2026: wie de
+ *                  oude map terugstuurt om een wijziging ongedaan te maken, laat de nieuwe sleutel staan.)
  *   POST /result  { job_id, secret? }  -> { found, done, status, running_ms?, last_activity_ms?, ... }
  *   POST /agent   { prompt, label, chat_id?, workspace?, model?, session_id?, max_minuten?, secret? } -> { ok, job_id }
  *   GET  /agents  -> registerweergave van achtergrondjobs (labels + status, geen inhoud)
@@ -200,11 +203,26 @@ const MODEL_ALIASSEN = {
   terra: 'codex:gpt-5.6-terra', // sneller, goedkoper in het venster
   luna: 'codex:gpt-5.6-luna',   // snelste
   codex: 'codex:',
-  claude: 'claude:'
+  claude: 'claude:',
+  // Opus 5.5 (22-9-2026): $4/$20 in plaats van $5/$25, ~40% goedkoper te draaien en ruim 30%
+  // sneller dan Opus 5, en volgens Anthropic terughoudender met moeilijk terug te draaien
+  // handelingen. Vereist Claude Code >= 2.1.280; het image dat die CLI meebrengt is die van 22-9.
+  opus55: 'claude-opus-5-5'
 };
+// Een alias wordt omgezet; een ECHT model-id (claude-…, gpt-…, jimmy-…) gaat onveranderd door;
+// al het andere is een vergissing en moet dat ook zeggen. GEMETEN 22-9-2026: deze functie gaf voor
+// alles buiten de aliaslijst een lege string terug, en dan draaide de beurt gewoon op het
+// standaardmodel. Ik startte die dag een proef met `model: claude-opus-5-5`, kreeg een keurig
+// antwoord, en had bijna gemeld dat het werkte - het enige spoor was `model: (default)` in het
+// antwoord van /run. Een onbekende RUNTIME gaf altijd een nette fout; een onbekend model niet.
+const MODEL_VORM = /^(claude|codex):|^(claude-|gpt-|o\d|jimmy-)/i;
 function resolveModel(name) {
-  const key = (name == null ? '' : String(name)).trim().toLowerCase();
-  return Object.prototype.hasOwnProperty.call(MODEL_ALIASSEN, key) ? MODEL_ALIASSEN[key] : '';
+  const ruw = (name == null ? '' : String(name)).trim();
+  const key = ruw.toLowerCase();
+  if (!ruw) return '';
+  if (Object.prototype.hasOwnProperty.call(MODEL_ALIASSEN, key)) return MODEL_ALIASSEN[key];
+  if (MODEL_VORM.test(ruw)) return ruw;   // doorgeven; bestaat het model niet, dan zegt de CLI dat luid
+  return null;                            // null = onbekend, en dat is een fout (zie resolveKeuze)
 }
 
 // ── Tweede brein: runtime-schakelaar (claude | codex) ───────────────────────
@@ -258,6 +276,11 @@ function resolveKeuze(d) {
     runtime = ruw;
   }
   const alias = resolveModel(d && d.model);
+  if (alias === null) {
+    return { fout: { error: 'onbekend-model', melding: 'onbekend model; geldig zijn de aliassen ' +
+      Object.keys(MODEL_ALIASSEN).join(', ') + ', of een volledig model-id (claude-…, gpt-…). ' +
+      'Laat het veld leeg voor de standaard.', lengte: String((d && d.model) || '').length } };
+  }
   const m = /^(claude|codex):(.*)$/.exec(alias);
   if (m) {
     if (!runtime) runtime = m[1];

@@ -10,8 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip bash procps tzdata gosu git openssh-client pandoc poppler-utils ocrmypdf tesseract-ocr-nld \
  && rm -rf /var/lib/apt/lists/*
 
-# Claude Code CLI (levert 'claude') + rclone
-RUN npm install -g @anthropic-ai/claude-code
+# Claude Code CLI (levert 'claude') + rclone.
+# GEPIND sinds 22-9-2026, en dat was niet cosmetisch: deze regel installeerde "wat er op de
+# bouwdag de nieuwste was", dus image 42 draaide 2.1.268 zonder dat dat ergens stond. Opus 5.5
+# (model-id claude-opus-5-5, uit op 22-9) weigert daarop met "Claude Code 2.1.268 does not
+# support this model; version 2.1.280 or newer is required" - gemeten op de echte pod. Pinnen
+# maakt de eis expliciet en het image reproduceerbaar; bump bewust, zoals bij de Codex-CLI.
+RUN npm install -g @anthropic-ai/claude-code@2.1.280
 # Tweede brein (5-9-2026): OpenAI Codex CLI (levert 'codex'), gepind zoals de
 # Claude-CLI. Bump bewust: het --json-formaat heet nog 'experimental'.
 RUN npm install -g @openai/codex@0.153.4
