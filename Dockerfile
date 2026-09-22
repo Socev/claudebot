@@ -11,16 +11,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI (levert 'claude') + rclone.
-# GEPIND sinds 22-9-2026, en dat was niet cosmetisch: deze regel installeerde "wat er op de
-# bouwdag de nieuwste was", dus image 42 draaide 2.1.268 zonder dat dat ergens stond. Opus 5.5
-# (model-id claude-opus-5-5, uit op 22-9) weigert daarop met "Claude Code 2.1.268 does not
-# support this model; version 2.1.280 or newer is required" - gemeten op de echte pod. Pinnen
-# maakt de eis expliciet en het image reproduceerbaar; bump bewust, zoals bij de Codex-CLI.
-RUN npm install -g @anthropic-ai/claude-code@2.1.280
+# BEWUST NIET GEPIND - opdracht David 22-9-2026: "Je moet hem niet pinnen op een vast nummer, hij
+# moet altijd de laatste pakken." Reden: een nieuw model vraagt regelmatig een nieuwere CLI (Opus
+# 5.5 eiste 2.1.280 terwijl image 42 op 2.1.268 stond), en dan wil je dat een herbouw dat vanzelf
+# meeneemt in plaats van dat er eerst een versienummer moet worden bijgewerkt.
+# Wat dat kost, en hoe dat is opgevangen: welke CLI in een image zit, staat dan niet meer in dit
+# bestand. Daarom schrijft de bouwstap hieronder de geinstalleerde versies weg naar
+# /app/cli-versies.txt en zet ze in het bouwlog, zodat per image naderhand te achterhalen is wat
+# erin zat. (De Codex-CLI blijft wel gepind: daar is het --json-formaat nog experimenteel.)
+RUN npm install -g @anthropic-ai/claude-code
 # Tweede brein (5-9-2026): OpenAI Codex CLI (levert 'codex'), gepind zoals de
 # Claude-CLI. Bump bewust: het --json-formaat heet nog 'experimental'.
 RUN npm install -g @openai/codex@0.153.4
 RUN curl -fsSL https://rclone.org/install.sh | bash || true
+# Welke versies zitten er in DIT image? Zonder pin is dat anders niet te achterhalen.
+RUN mkdir -p /app && { echo "gebouwd: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+      echo "claude-code: $(claude --version 2>/dev/null || echo onbekend)"; \
+      echo "codex: $(codex --version 2>/dev/null || echo onbekend)"; \
+      echo "node: $(node --version)"; } | tee /app/cli-versies.txt
 
 # ── Chromium-browserbesturing (route C, 16-8-2026) ──────────────────────────
 # Systeembibliotheken die headless Chromium nodig heeft (gemeten: 9 ontbraken).
