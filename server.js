@@ -517,6 +517,17 @@ function newestMtimeIn(dir, maxFiles) {
   return newest;
 }
 
+// Denkinspanning, expliciet (23-9-2026, opdracht David: "doe dit alles op denk-inspanning hoog").
+// Opus 5 draaide in de praktijk op effort high. Bij de wissel naar Opus 5.5 op 22-9 zakte dat STIL naar
+// medium op elk kanaal, omdat de CLI voor 5.5 medium als standaard neemt en deze code niets meegaf -
+// gemeten in de transcripten: 1.268 beurten op Opus 5 met effort high, alle beurten op 5.5 met medium.
+// Nu staat het er uitdrukkelijk. CLAUDE_EFFORT in de omgeving overschrijft het zonder uitrol.
+const EFFORT_NIVEAUS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const CLAUDE_EFFORT = (function () {
+  const w = String(process.env.CLAUDE_EFFORT || 'high').trim().toLowerCase();
+  return EFFORT_NIVEAUS.indexOf(w) >= 0 ? w : 'high';
+})();
+
 function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   // opts: { inactMs, maxMs, progress }  — progress wordt live bijgewerkt zodat
   // /result running_ms en last_activity_ms kan teruggeven.
@@ -526,7 +537,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   return new Promise(function (resolve) {
     // Review-fix A1 (5-9-2026): `--` vóór de prompt, anders wordt een bericht dat
     // met '-' begint (Telegram-bullet) als vlag gelezen. Getest met claude -p.
-    const args = ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions'];
+    const args = ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--effort', CLAUDE_EFFORT];
     if (sessionId) args.push('--resume', sessionId);
     args.push('--', prompt);
     const extra = { OUTDIR: outdir };
