@@ -32,10 +32,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Eerst alleen LOKAAL bouwen; pas na de rooktests gaat het image naar ghcr (stap
+      # "Pushen" onderaan). Tot 23-9-2026 werd er eerst gepusht en dan getest, zodat een
+      # image dat de test niet haalde toch al als :latest klaarstond.
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: false
+          load: true
           build-args: |
             GIT_SHA=${{ github.sha }}
           tags: |
@@ -171,8 +175,38 @@ jobs:
             console.log("rooktest geslaagd - draaiende versie " + j.versie);
           '
 
+      # WAAROM DEZE STAP BESTAAT (23-9-2026). De Claude Code-CLI is bewust niet vastgepind:
+      # elk nieuw image pakt de nieuwste. Dat is goed (nieuwe modellen, zoals Opus 5.5 dat
+      # CLI >= 2.1.280 eist), maar een nieuwe CLI kan ook een vlag schrappen of hernoemen
+      # waar server.js op leunt. Dan faalt elke beurt pas op de pod. Hier dus: de versie
+      # mag niet terug, en de vier vlaggen die runClaude gebruikt moeten nog bestaan.
+      - name: Rooktest - Claude Code-CLI
+        run: |
+          set -euo pipefail
+          IMAGE=ghcr.io/socev/claudebot:${{ github.run_number }}
+          MINIMUM=2.1.280
+          VERSIE=$(docker run --rm --entrypoint claude "$IMAGE" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          echo "Claude Code in dit image: ${VERSIE:-onleesbaar}"
+          if [ -z "$VERSIE" ] || [ "$(printf '%s\n%s\n' "$MINIMUM" "$VERSIE" | sort -V | head -1)" != "$MINIMUM" ]; then
+            echo "::error::Claude Code ${VERSIE:-onleesbaar} is ouder dan $MINIMUM (nodig voor Opus 5.5)"; exit 1
+          fi
+          HULP=$(docker run --rm --entrypoint claude "$IMAGE" --help)
+          for vlag in --output-format --permission-mode --resume --effort; do
+            if ! grep -qF -- "$vlag" <<<"$HULP"; then echo "::error::Claude Code kent de vlag $vlag niet meer - runClaude in server.js leunt erop"; exit 1; fi
+            echo "  OK    $vlag"
+          done
+          docker run --rm --entrypoint cat "$IMAGE" /app/cli-versies.txt | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Rooktest opruimen
         if: always()
         run: |
           docker rm -f rooktest rooktest-keten 2>/dev/null || true
           rm -f /tmp/chart.env /tmp/keten.log /tmp/health.json 2>/dev/null || true
+
+      # Pas hier, na geslaagde rooktests, gaat het image naar ghcr. Faalt een test, dan
+      # slaat GitHub deze stap over en blijft :latest het vorige, geteste image.
+      - name: Pushen (alleen na geslaagde rooktests)
+        run: |
+          set -euo pipefail
+          docker push ghcr.io/socev/claudebot:${{ github.run_number }}
+          docker push ghcr.io/socev/claudebot:latest

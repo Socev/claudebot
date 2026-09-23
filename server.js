@@ -180,7 +180,8 @@ function breinInfo() {
   // Leesbaar, niet alleen aanwezig: op 5-9-2026 stond auth.json op root:0600 en zei
   // /health toch 'ingelogd' terwijl elke Codex-beurt met 401 faalde (vondst machinekamer).
   try { fs.accessSync(path.join(CODEX_HOME, 'auth.json'), fs.constants.R_OK); codexAuth = true; } catch (e) {}
-  return { default: stand.default, fallback: stand.fallback || null, models: stand.models, codex_ingelogd: codexAuth, runtimes: RUNTIMES_LIJST };
+  return { default: stand.default, fallback: stand.fallback || null, models: stand.models, codex_ingelogd: codexAuth, runtimes: RUNTIMES_LIJST,
+    models_ongeldig: stand.ongeldig || [], laatste_modelfout: laatsteModelfout };
 }
 
 function secretsGeladen() {
@@ -209,20 +210,32 @@ const MODEL_ALIASSEN = {
   // handelingen. Vereist Claude Code >= 2.1.280; het image dat die CLI meebrengt is die van 22-9.
   opus55: 'claude-opus-5-5'
 };
-// Een alias wordt omgezet; een ECHT model-id (claude-…, gpt-…, jimmy-…) gaat onveranderd door;
-// al het andere is een vergissing en moet dat ook zeggen. GEMETEN 22-9-2026: deze functie gaf voor
-// alles buiten de aliaslijst een lege string terug, en dan draaide de beurt gewoon op het
-// standaardmodel. Ik startte die dag een proef met `model: claude-opus-5-5`, kreeg een keurig
-// antwoord, en had bijna gemeld dat het werkte - het enige spoor was `model: (default)` in het
-// antwoord van /run. Een onbekende RUNTIME gaf altijd een nette fout; een onbekend model niet.
-const MODEL_VORM = /^(claude|codex):|^(claude-|gpt-|o\d|jimmy-)/i;
-function resolveModel(name) {
+// Modelkeuze op ÉÉN plek (review podcode 23-9-2026). Geeft { runtime, model } terug, of null als de naam
+// niet te plaatsen is. runtime is null als de naam niets over de runtime zegt (leeg = de standaard).
+// Geschiedenis: tot 22-9 werd een onbekende naam stil genegeerd (de beurt draaide dan gewoon op het
+// standaardmodel); op 22-9 kwam er een weigering, maar die gold niet voor POST /runtime, en bij een
+// model van de andere runtime viel hij nog stil terug. Nu geldt dezelfde controle overal.
+const MODEL_TEKENS = /^[A-Za-z0-9._:-]{1,80}$/;
+function ontleedModel(name) {
   const ruw = (name == null ? '' : String(name)).trim();
+  if (!ruw) return { runtime: null, model: '' };
   const key = ruw.toLowerCase();
-  if (!ruw) return '';
-  if (Object.prototype.hasOwnProperty.call(MODEL_ALIASSEN, key)) return MODEL_ALIASSEN[key];
-  if (MODEL_VORM.test(ruw)) return ruw;   // doorgeven; bestaat het model niet, dan zegt de CLI dat luid
-  return null;                            // null = onbekend, en dat is een fout (zie resolveKeuze)
+  let doel = Object.prototype.hasOwnProperty.call(MODEL_ALIASSEN, key) ? MODEL_ALIASSEN[key] : ruw;
+  if (!MODEL_TEKENS.test(doel) && doel !== 'claude:' && doel !== 'codex:') return null;
+  const m = /^(claude|codex):(.*)$/.exec(doel);
+  if (m) return { runtime: m[1], model: m[2] };                     // 'claude:' / 'codex:' = standaardmodel van die runtime
+  if (/^claude-.+/i.test(doel)) return { runtime: 'claude', model: doel };
+  if (/^jimmy-.+/i.test(doel)) return { runtime: 'claude', model: doel };
+  if (/^(gpt-.+|o\d.*)$/i.test(doel)) return { runtime: 'codex', model: doel };   // kaal gpt-id hoort bij Codex
+  return null;
+}
+function modelFout(naam, runtime, ont) {
+  if (ont === null) return { error: 'onbekend-model', melding: 'onbekend model; geldig zijn de aliassen ' +
+    Object.keys(MODEL_ALIASSEN).join(', ') + ', of een volledig model-id (claude-…, gpt-…). Laat het veld leeg voor de standaard.',
+    lengte: String(naam || '').length };
+  if (runtime && ont.runtime && ont.runtime !== runtime) return { error: 'model-past-niet-bij-runtime',
+    melding: 'dit model hoort bij runtime ' + ont.runtime + ', niet bij ' + runtime + '. Kies een van de twee, of laat de runtime leeg.' };
+  return null;
 }
 
 // ── Tweede brein: runtime-schakelaar (claude | codex) ───────────────────────
@@ -240,13 +253,26 @@ const RUNTIME_FILE = process.env.RUNTIME_FILE || path.join(HOME, 'runtime.json')
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
 const CODEX_SESSIONS_DIR = path.join(CODEX_HOME, 'sessions');
 
+const AL_GEMELD_ONGELDIG = new Set();   // leesRuntime draait elke beurt; één logregel per foute waarde is genoeg
 function leesRuntime() {
   const std = { default: 'claude', fallback: '', models: {} };
   try {
     const j = JSON.parse(fs.readFileSync(RUNTIME_FILE, 'utf8'));
     if (j && RUNTIMES[j.default]) std.default = j.default;
     if (j && RUNTIMES[j.fallback]) std.fallback = j.fallback;
-    if (j && j.models && typeof j.models === 'object') std.models = j.models;
+    if (j && j.models && typeof j.models === 'object') {
+      // Ook wat er in het bestand staat, wordt getoetst (review 23-9): een ongeldige waarde daar liet
+      // anders élke beurt op een onbestaand model draaien. Die waarde valt weg en komt in /health.
+      for (const k in j.models) {
+        const v = j.models[k] == null ? '' : String(j.models[k]);
+        const ont = RUNTIMES[k] ? ontleedModel(v) : null;
+        if (RUNTIMES[k] && !modelFout(v, k, ont)) std.models[k] = ont.model;
+        else {
+          std.ongeldig = (std.ongeldig || []).concat(k + '=' + v.slice(0, 40));
+          if (!AL_GEMELD_ONGELDIG.has(k + '=' + v)) { AL_GEMELD_ONGELDIG.add(k + '=' + v); logError('runtime-model-ongeldig', { name: 'ModelOngeldig', code: k }); }
+        }
+      }
+    }
   } catch (e) {
     // Geen bestand = de standaard. Een bestand dat er WEL is maar niet leest, is
     // een stille terugval op Claude - dat mag niet onopgemerkt (review-fix A5).
@@ -269,27 +295,16 @@ function schrijfRuntime(r) {
 function resolveKeuze(d) {
   const stand = leesRuntime();
   let runtime = '';
-  let model = '';
   const ruw = (d && d.runtime != null) ? String(d.runtime).trim().toLowerCase() : '';
   if (ruw) {
     if (!RUNTIMES[ruw]) return { fout: { error: 'onbekende-runtime', melding: 'onbekende runtime; geldig zijn: ' + RUNTIMES_LIJST.join(', ') + ' (of leeg voor de standaard)', lengte: ruw.length } };
     runtime = ruw;
   }
-  const alias = resolveModel(d && d.model);
-  if (alias === null) {
-    return { fout: { error: 'onbekend-model', melding: 'onbekend model; geldig zijn de aliassen ' +
-      Object.keys(MODEL_ALIASSEN).join(', ') + ', of een volledig model-id (claude-…, gpt-…). ' +
-      'Laat het veld leeg voor de standaard.', lengte: String((d && d.model) || '').length } };
-  }
-  const m = /^(claude|codex):(.*)$/.exec(alias);
-  if (m) {
-    if (!runtime) runtime = m[1];
-    if (runtime === m[1]) model = m[2];
-  } else if (alias) {
-    if (!runtime) runtime = 'claude';
-    if (runtime === 'claude') model = alias;
-  }
-  if (!runtime) runtime = stand.default;
+  const ont = ontleedModel(d && d.model);
+  const fout = modelFout(d && d.model, runtime, ont);
+  if (fout) return { fout: fout };
+  if (!runtime) runtime = ont.runtime || stand.default;
+  let model = ont.model;
   if (!model && stand.models && typeof stand.models[runtime] === 'string') model = stand.models[runtime];
   return { runtime: runtime, model: model, fallback: (stand.fallback && stand.fallback !== runtime) ? stand.fallback : '' };
 }
@@ -522,6 +537,17 @@ function newestMtimeIn(dir, maxFiles) {
 // medium op elk kanaal, omdat de CLI voor 5.5 medium als standaard neemt en deze code niets meegaf -
 // gemeten in de transcripten: 1.268 beurten op Opus 5 met effort high, alle beurten op 5.5 met medium.
 // Nu staat het er uitdrukkelijk. CLAUDE_EFFORT in de omgeving overschrijft het zonder uitrol.
+// Laatste keer dat de CLI een model weigerde (bv. een oud image met een te oude CLI). Staat in /health.
+let laatsteModelfout = null;
+// Welke CLI-versies zitten er in dit image? De bouwstap schrijft ze naar /app/cli-versies.txt.
+const CLI_VERSIES = (function () {
+  try {
+    const t = fs.readFileSync('/app/cli-versies.txt', 'utf8');
+    const uit = {};
+    t.split('\n').forEach(function (r) { const m = /^([a-z-]+):\s*(.+)$/.exec(r.trim()); if (m) uit[m[1]] = m[2]; });
+    return uit;
+  } catch (e) { return { 'claude-code': 'onbekend - image zonder /app/cli-versies.txt' }; }
+})();
 const EFFORT_NIVEAUS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const CLAUDE_EFFORT = (function () {
   const w = String(process.env.CLAUDE_EFFORT || 'high').trim().toLowerCase();
@@ -632,6 +658,14 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       try {
         const j = JSON.parse(out);
         const r = { ok: code === 0 && !j.is_error, output: (j.result != null ? j.result : ''), session_id: j.session_id };
+        if (j.is_error) {
+          // Een foutklasse, zodat een aanroeper niet in de fouttekst hoeft te zoeken (review 23-9).
+          const tekst = String(j.result || '');
+          if (/does not support this model|unrecognized_model|model.*not (found|available)/i.test(tekst)) {
+            r.error = 'model-niet-ondersteund-door-cli';
+            laatsteModelfout = { tijd: new Date().toISOString(), model: model || '(standaard)', melding: tekst.slice(0, 200) };
+          } else r.error = 'cli-fout';
+        }
         if (killedReason) r.opmerking = 'resultaat was compleet; procesgroep is daarna opgeruimd (' + killedReason + ')';
         return finish(r);
       } catch (e) {}
@@ -1405,6 +1439,7 @@ function handleRequest(req, res) {
       agents: agentInfo(),
       offsite: offsiteInfo(),
       secrets_geladen: secretsGeladen(),
+      cli_versies: CLI_VERSIES, effort: CLAUDE_EFFORT,
       kluis_overgeslagen: process.env.KLUIS_OVERGESLAGEN === '1',
       brein: breinInfo()
     }));
@@ -1455,7 +1490,14 @@ function handleRequest(req, res) {
         stand.fallback = v;
       }
       if (d.models && typeof d.models === 'object') {
-        for (const k in d.models) if (RUNTIMES[k]) stand.models[k] = (d.models[k] == null) ? '' : String(d.models[k]).slice(0, 80);
+        for (const k in d.models) {
+          if (!RUNTIMES[k]) return weigerRuntime(res, { error: 'onbekende-runtime', melding: 'onbekende runtime in models: geldig zijn ' + RUNTIMES_LIJST.join(', '), lengte: String(k).length }, '/runtime');
+          const v = d.models[k] == null ? '' : String(d.models[k]);
+          const ont = ontleedModel(v);
+          const fout = modelFout(v, k, ont);
+          if (fout) return weigerRuntime(res, fout, '/runtime');
+          stand.models[k] = ont.model;   // opgeslagen als volledig model-id, niet als alias
+        }
       }
       if (stand.fallback === stand.default) stand.fallback = '';
       try { schrijfRuntime(stand); } catch (e) { logError('runtime-schrijf', e); res.writeHead(500); return res.end('runtime.json niet schrijfbaar'); }
