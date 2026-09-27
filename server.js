@@ -180,7 +180,11 @@ function breinInfo() {
   // Leesbaar, niet alleen aanwezig: op 5-9-2026 stond auth.json op root:0600 en zei
   // /health toch 'ingelogd' terwijl elke Codex-beurt met 401 faalde (vondst machinekamer).
   try { fs.accessSync(path.join(CODEX_HOME, 'auth.json'), fs.constants.R_OK); codexAuth = true; } catch (e) {}
-  return { default: stand.default, fallback: stand.fallback || null, models: stand.models, codex_ingelogd: codexAuth, runtimes: RUNTIMES_LIJST,
+  // Gemini: het OAuth-tokenbestand van agy moet leesbaar zijn (zelfde les als auth.json hierboven).
+  let geminiAuth = false;
+  try { fs.accessSync(AGY_TOKEN, fs.constants.R_OK); geminiAuth = true; } catch (e) {}
+  return { default: stand.default, fallback: stand.fallback || null, models: stand.models, codex_ingelogd: codexAuth, gemini_ingelogd: geminiAuth,
+    gemini: { cli: AGY_BIN, mcp: geminiStand.mcp, fout: geminiStand.fout }, runtimes: RUNTIMES_LIJST,
     models_ongeldig: stand.ongeldig || [], laatste_modelfout: laatsteModelfout };
 }
 
@@ -205,6 +209,11 @@ const MODEL_ALIASSEN = {
   luna: 'codex:gpt-5.6-luna',   // snelste
   codex: 'codex:',
   claude: 'claude:',
+  // Derde brein (27-9-2026): Gemini via de Antigravity CLI ('agy'). Het model-id draagt zelf het
+  // denkniveau (-high/-medium/-low); 'gemini:' zonder model = Gemini 3.8 Flash op CLAUDE_EFFORT.
+  gemini: 'gemini:',
+  flash: 'gemini:gemini-3.8-flash-high',
+  geminipro: 'gemini:gemini-3.1-pro-high',
   // Opus 5.5 (22-9-2026): $4/$20 in plaats van $5/$25, ~40% goedkoper te draaien en ruim 30%
   // sneller dan Opus 5, en volgens Anthropic terughoudender met moeilijk terug te draaien
   // handelingen. Vereist Claude Code >= 2.1.280; het image dat die CLI meebrengt is die van 22-9.
@@ -221,37 +230,50 @@ function ontleedModel(name) {
   if (!ruw) return { runtime: null, model: '' };
   const key = ruw.toLowerCase();
   let doel = Object.prototype.hasOwnProperty.call(MODEL_ALIASSEN, key) ? MODEL_ALIASSEN[key] : ruw;
-  if (!MODEL_TEKENS.test(doel) && doel !== 'claude:' && doel !== 'codex:') return null;
-  const m = /^(claude|codex):(.*)$/.exec(doel);
-  if (m) return { runtime: m[1], model: m[2] };                     // 'claude:' / 'codex:' = standaardmodel van die runtime
+  if (!MODEL_TEKENS.test(doel)) return null;
+  const m = /^(claude|codex|gemini):(.*)$/.exec(doel);
+  if (m) return { runtime: m[1], model: m[2] };                     // 'claude:' / 'codex:' / 'gemini:' = standaardmodel van die runtime
   if (/^claude-.+/i.test(doel)) return { runtime: 'claude', model: doel };
   if (/^jimmy-.+/i.test(doel)) return { runtime: 'claude', model: doel };
   if (/^(gpt-.+|o\d.*)$/i.test(doel)) return { runtime: 'codex', model: doel };   // kaal gpt-id hoort bij Codex
+  if (/^gemini-.+/i.test(doel)) return { runtime: 'gemini', model: doel };        // kaal gemini-id hoort bij agy
   return null;
 }
 function modelFout(naam, runtime, ont) {
   if (ont === null) return { error: 'onbekend-model', melding: 'onbekend model; geldig zijn de aliassen ' +
-    Object.keys(MODEL_ALIASSEN).join(', ') + ', of een volledig model-id (claude-…, gpt-…). Laat het veld leeg voor de standaard.',
+    Object.keys(MODEL_ALIASSEN).join(', ') + ', of een volledig model-id (claude-…, gpt-…, gemini-…). Laat het veld leeg voor de standaard.',
     lengte: String(naam || '').length };
   if (runtime && ont.runtime && ont.runtime !== runtime) return { error: 'model-past-niet-bij-runtime',
     melding: 'dit model hoort bij runtime ' + ont.runtime + ', niet bij ' + runtime + '. Kies een van de twee, of laat de runtime leeg.' };
   return null;
 }
 
-// ── Tweede brein: runtime-schakelaar (claude | codex) ───────────────────────
-// Eén pod, twee CLI's, één schakelaar. De keuze per beurt komt, in deze
+// ── Tweede/derde brein: runtime-schakelaar (claude | codex | gemini) ────────
+// Eén pod, drie CLI's (claude, codex, agy), één schakelaar. De keuze per beurt komt, in deze
 // volgorde, uit: (1) body.runtime, (2) een modelalias met voorvoegsel,
 // (3) runtime.json op het volume (de maandstand), (4) 'claude'.
 // runtime.json: { "default": "claude", "fallback": "", "models": { "codex": "gpt-6-astra" } }
 // 'fallback' staat standaard LEEG: David wil kiezen, niet parallel draaien.
 // Staat hij gevuld, dan neemt het andere brein een beurt over als het eerste
 // een limietfout geeft - zonder sessiegeheugen, met één regel uitleg vooraf.
-const RUNTIMES_LIJST = ['claude', 'codex'];
+const RUNTIMES_LIJST = ['claude', 'codex', 'gemini'];
 // Review-fix A3: geen gewoon object als lookup (dan komt 'constructor' erdoor).
 const RUNTIMES = Object.create(null); RUNTIMES_LIJST.forEach(function (r) { RUNTIMES[r] = true; });
 const RUNTIME_FILE = process.env.RUNTIME_FILE || path.join(HOME, 'runtime.json');
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
 const CODEX_SESSIONS_DIR = path.join(CODEX_HOME, 'sessions');
+// Derde brein (27-9-2026): Antigravity CLI. Login, gesprekken en config staan op het volume onder
+// ~/.gemini; het binaire bestand komt uit het image (/usr/local/bin) of, tot dat image draait, uit
+// de proefinstallatie op het volume. AGY_BIN in de omgeving gaat voor.
+const GEMINI_HOME = path.join(HOME, '.gemini');
+const AGY_STATE = path.join(GEMINI_HOME, 'antigravity-cli');
+const AGY_CONV_DIR = path.join(AGY_STATE, 'conversations');
+const AGY_TOKEN = path.join(AGY_STATE, 'antigravity-oauth-token');
+const AGY_BIN = (function () {
+  if (process.env.AGY_BIN) return process.env.AGY_BIN;
+  try { fs.accessSync('/usr/local/bin/agy', fs.constants.X_OK); return '/usr/local/bin/agy'; } catch (e) {}
+  return path.join(HOME, '.local', 'bin', 'agy');
+})();
 
 const AL_GEMELD_ONGELDIG = new Set();   // leesRuntime draait elke beurt; één logregel per foute waarde is genoeg
 function leesRuntime() {
@@ -309,11 +331,12 @@ function resolveKeuze(d) {
   return { runtime: runtime, model: model, fallback: (stand.fallback && stand.fallback !== runtime) ? stand.fallback : '' };
 }
 
-// Sessiegeheugen per brein: dezelfde chat heeft bij Claude een session_id en
-// bij Codex een thread_id; die leven naast elkaar in chat_sessions.json.
+// Sessiegeheugen per brein: dezelfde chat heeft bij Claude een session_id, bij
+// Codex een thread_id en bij Gemini een conversation_id; die leven naast elkaar
+// in chat_sessions.json. Claude houdt de kale sleutel (bestaand gedrag).
 function sessieSleutel(key, runtime) {
   if (!key) return '';
-  return runtime === 'codex' ? 'codex:' + key : key;
+  return (runtime && runtime !== 'claude') ? runtime + ':' + key : key;
 }
 
 // ── Workspaces ──────────────────────────────────────────────────────────────
@@ -852,11 +875,293 @@ function runCodex(prompt, threadId, outdir, cwd, model, opts) {
   });
 }
 
-// Eén ingang voor beide breinen. Bij Claude kijkt de bestaande code naar
+// ── Derde brein: Gemini via de Antigravity CLI ('agy') ──────────────────────
+// Zelfde contract als runClaude/runCodex: resolvet met { ok, output, session_id, ... }.
+// Aanroep (gemeten tegen agy 1.2.12, 27-9-2026):
+//   agy --output-format json --dangerously-skip-permissions [--model <id>] [--effort <niveau>]
+//       [--conversation <id>] --print=<prompt>
+// - Eén JSON-object op stdout, pas aan het eind: { conversation_id, status: SUCCESS|ERROR,
+//   response, error, duration_seconds, num_turns, usage }.
+// - De exitcode zegt niets (0 ook bij de meeste fouten, 1 bij een onbekend model): alleen status/error tellen.
+// - De prompt gaat als --print=<prompt> mee, in één argument: zo wordt een prompt die met
+//   '-' begint (Telegram-bullet) niet als vlag gelezen. Gemeten met "- bullet test".
+// - --effort botst met een model-id dat zelf al een niveau draagt (gemini-3.1-pro-low +
+//   --effort high = fout) en wordt voor sommige modellen niet ondersteund. Daarom alleen
+//   meegeven als het model-id geen niveau draagt, en bij die fout één keer zonder.
+// - Een onbekend --conversation-id geeft GEEN fout: agy meldt op stderr "not found" en
+//   begint stil een nieuw gesprek met een ander id. Dat zien we aan het teruggegeven id.
+// - Eén keer gezien (27-9): status ERROR met lege error bij de eerste MCP-load -> één
+//   herkansing, maar ALLEEN als er nog niets gebeurd is (num_turns 0 en geen gespreksactiviteit):
+//   anders zou een beurt die al taken of concepten maakte alles dubbel doen (review 27-9).
+// - Hartslag: agy schrijft elk gesprek live naar conversations/<id>.db(-wal) (SQLite in
+//   WAL-modus; de .db zelf verandert pas bij het afsluiten). Gemeten 27-9.
+const AGY_EFFORT = CLAUDE_EFFORT === 'xhigh' ? 'high' : CLAUDE_EFFORT;   // agy kent low|medium|high|max
+function agyEffortVoor(model) {
+  return (model && /-(low|medium|high|max)$/i.test(model)) ? '' : AGY_EFFORT;
+}
+function agyGesprekMtime(basis) {
+  let m = 0;
+  ['', '-wal'].forEach(function (s) { try { const t = fs.statSync(basis + s).mtimeMs; if (t > m) m = t; } catch (e) {} });
+  return m;
+}
+
+function agyPoging(prompt, conversationId, outdir, cwd, model, effort, opts) {
+  const inactMs = (opts && opts.inactMs) || INACT_MS;
+  const maxMs = (opts && opts.maxMs) || FG_MAX_MS;
+  const progress = (opts && opts.progress) || {};
+  return new Promise(function (resolve) {
+    const args = ['--output-format', 'json', '--dangerously-skip-permissions'];
+    if (model) args.push('--model', model);
+    if (effort) args.push('--effort', effort);
+    if (conversationId) args.push('--conversation', conversationId);
+    // Eigen tijdgrens van agy, één minuut onder de onze (gemeten 27-9): zonder die grens wacht agy na
+    // zijn antwoord op achtergrondprocessen die het model zelf startte (tot 30 min), en is een al klaar
+    // antwoord bij een kill van de watchdog weg. Met de grens ruimt agy die processen op en geeft hij zijn
+    // antwoord. Let op: de grens kapt ook een lopende beurt af - dan staat er op stderr "returning
+    // partial output" en melden wij 'afgebroken-bovengrens', niet ok.
+    args.push('--print-timeout', Math.max(Math.floor((maxMs - 60 * 1000) / 1000), 60) + 's');
+    args.push('--print=' + prompt);
+    // Automatische update uit: een CLI die zichzelf midden in een beurt vervangt, is niet
+    // meer de versie die in /health staat.
+    const env = Object.assign({}, process.env, { OUTDIR: outdir, AGY_CLI_DISABLE_AUTO_UPDATE: '1' });
+    const t0 = Date.now();
+    let child;
+    try {
+      child = spawn(AGY_BIN, args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) { return resolve({ ok: false, error: 'gemini-fout', output: String(e), runtime: 'gemini' }); }
+    let out = '', err = '', lastStdout = t0, killedReason = null;
+
+    // Welk gespreksbestand is van ons? Bij hervatten het bestaande; anders het eerste
+    // bestand dat ná de start verschijnt (net als bij runClaude). Fail-open.
+    const preexisting = {};
+    try { fs.readdirSync(AGY_CONV_DIR).forEach(function (n) { preexisting[n] = true; }); } catch (e) {}
+    let pinned = null;
+    if (conversationId && preexisting[conversationId + '.db']) pinned = path.join(AGY_CONV_DIR, conversationId + '.db');
+    function gespreksMtime() {
+      try {
+        if (pinned) return agyGesprekMtime(pinned);
+        let newest = 0;
+        const names = fs.readdirSync(AGY_CONV_DIR);
+        for (let i = 0; i < names.length; i++) {
+          if (!/\.db(-wal)?$/.test(names[i])) continue;
+          let st; try { st = fs.statSync(path.join(AGY_CONV_DIR, names[i])); } catch (e) { continue; }
+          if (st.mtimeMs <= t0) continue;
+          // Alleen een NIEUWE .db is van ons. Een hervat gesprek van een buurman krijgt ook een
+          // vers -wal-bestand (gesloten gesprekken hebben er geen), maar zijn .db bestond al.
+          const basis = names[i].replace(/-wal$/, '');
+          if (!preexisting[basis]) { pinned = path.join(AGY_CONV_DIR, basis); return st.mtimeMs; }
+          if (st.mtimeMs > newest) newest = st.mtimeMs;
+        }
+        return newest;
+      } catch (e) { return 0; }
+    }
+
+    function killGroup(reason) {
+      if (killedReason) return;
+      killedReason = reason;
+      try { process.kill(-child.pid, 'SIGTERM'); } catch (e) { try { child.kill('SIGTERM'); } catch (e2) {} }
+      setTimeout(function () {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { try { child.kill('SIGKILL'); } catch (e2) {} }
+      }, KILL_GRACE_MS);
+    }
+
+    let transcriptSeen = false;
+    const watchdog = setInterval(function () {
+      const now = Date.now();
+      const tm = gespreksMtime();
+      if (tm > t0) transcriptSeen = true;
+      const act = Math.max(lastStdout, tm, newestMtimeIn(outdir, 50));
+      progress.running_ms = now - t0;
+      progress.last_activity_ms = now - act;
+      if (now - t0 > maxMs) return killGroup('bovengrens');
+      if (transcriptSeen && (now - act > inactMs)) return killGroup('inactief');
+    }, WATCH_INTERVAL_MS);
+
+    let resolved = false;
+    let laatsteCode = null;
+    function finish(r) {
+      if (resolved) return;
+      resolved = true;
+      clearInterval(watchdog);
+      if (r && r.exit_code === undefined) r.exit_code = laatsteCode;
+      r.runtime = 'gemini';
+      resolve(r);
+    }
+    function finalize(code) {
+      laatsteCode = code;
+      if (resolved) return;
+      let j = null;
+      try { j = JSON.parse(out); } catch (e) {
+        // Vangnet: staat er ooit iets anders op stdout, dan de laatste regel die een JSON-object is.
+        const regels = out.split('\n').filter(function (x) { return x.trim().charAt(0) === '{'; });
+        try { if (regels.length) j = JSON.parse(regels[regels.length - 1]); } catch (e2) {}
+      }
+      if (j && typeof j === 'object' && j.status === 'SUCCESS' && /returning partial output/i.test(err)) {
+        const minuten = Math.round((Date.now() - t0) / 60000);
+        const deel = j.response != null ? String(j.response).trim() : '';
+        return finish({ ok: false, error: 'afgebroken-bovengrens', running_ms: Date.now() - t0, session_id: j.conversation_id || conversationId || '',
+          output: 'De opdracht is afgebroken op de absolute bovengrens: hij liep ' + minuten + ' minuten.' + (deel ? '\n\nWat er tot dan toe stond:\n' + deel : '') });
+      }
+      if (j && typeof j === 'object' && j.status === 'SUCCESS') {
+        const r = { ok: true, output: j.response != null ? String(j.response) : '', session_id: j.conversation_id || '' };
+        if (j.usage) r.usage = j.usage;
+        if (killedReason) r.opmerking = 'resultaat was compleet; procesgroep is daarna opgeruimd (' + killedReason + ')';
+        return finish(r);
+      }
+      if (killedReason) {
+        const minuten = Math.round((Date.now() - t0) / 60000);
+        const stil = Math.round((progress.last_activity_ms || 0) / 60000);
+        const uitleg = killedReason === 'bovengrens'
+          ? 'De opdracht is afgebroken op de absolute bovengrens: hij liep ' + minuten + ' minuten.'
+          : 'De opdracht is afgebroken wegens inactiviteit: hij liep ' + minuten + ' minuten en de laatste activiteit was ' + stil + ' minuten geleden.';
+        return finish({ ok: false, error: 'afgebroken-' + killedReason, output: uitleg, session_id: conversationId || '', running_ms: Date.now() - t0 });
+      }
+      const fout = String((j && j.error) || '').trim();
+      if (j && j.status === 'ERROR' && !fout) {
+        const nietsGebeurd = !Number(j.num_turns) && !transcriptSeen;
+        return finish({ ok: false, error: 'gemini-fout', herkans: nietsGebeurd ? 'leeg' : undefined,
+          output: 'Gemini gaf een fout zonder uitleg (status ERROR, lege foutmelding).', session_id: conversationId || j.conversation_id || '' });
+      }
+      const tekst = fout || err.slice(-1000) || out.slice(-1000) || ('agy eindigde met code ' + code + ' zonder JSON');
+      // Bij een fout het bestaande gesprek houden: één foute beurt mag het geheugen van de chat niet
+      // vervangen door een vers id (review 27-9). Was het gesprek echt weg, dan begint agy vanzelf vers.
+      const r = { ok: false, output: tekst, session_id: conversationId || (j && j.conversation_id) || '', detail: tekst.slice(0, 1000) };
+      if (/conflicts with --effort|--effort(=\w+)? is not supported/i.test(tekst)) { r.error = 'gemini-fout'; r.herkans = 'effort'; }
+      else if (/not recognized as a known model|invalid model selection/i.test(tekst)) {
+        r.error = 'model-niet-ondersteund-door-cli';
+        laatsteModelfout = { tijd: new Date().toISOString(), model: model || '(standaard)', melding: tekst.slice(0, 200) };
+      } else r.error = (isLimietFout(tekst) || /resource.?exhausted/i.test(tekst)) ? 'limiet' : 'gemini-fout';
+      finish(r);
+    }
+
+    child.stdout.on('data', function (d) { out += d; lastStdout = Date.now(); });
+    child.stderr.on('data', function (d) { if (err.length < 64 * 1024) err += d; });
+    child.on('close', function (code) { finalize(code); });
+    child.on('exit', function (code) { setTimeout(function () { finalize(code); }, 10000); });
+    child.on('error', function (e) { finish({ ok: false, error: 'gemini-fout', output: String(e) }); });
+  });
+}
+
+async function runGemini(prompt, conversationId, outdir, cwd, model, opts) {
+  const maxMs = (opts && opts.maxMs) || FG_MAX_MS;
+  const t0 = Date.now();
+  let effort = agyEffortVoor(model);
+  let leegGehad = false, effortGehad = false;
+  for (;;) {
+    // Een herkansing krijgt de RESTTIJD, niet opnieuw de volle bovengrens.
+    const rest = Math.max(maxMs - (Date.now() - t0), 60 * 1000);
+    const r = await agyPoging(prompt, conversationId, outdir, cwd, model, effort, Object.assign({}, opts, { maxMs: rest }));
+    if (r.herkans === 'effort' && !effortGehad) { effortGehad = true; effort = ''; continue; }
+    if (r.herkans === 'leeg' && !leegGehad) {
+      leegGehad = true;
+      schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'gemini-herkansing', reden: 'lege-fout' }));
+      continue;
+    }
+    if (r.herkans === 'leeg') r.output = 'Gemini gaf twee keer een fout zonder uitleg (status ERROR, lege foutmelding).';
+    delete r.herkans;
+    if (leegGehad) r.herkanst = true;
+    // Onbekend gesprek: agy begon stil een nieuw gesprek. De aanroeper overschrijft de
+    // sleutel met het nieuwe id; dit veld maakt zichtbaar dat het geheugen weg is.
+    if (r.ok && conversationId && r.session_id && r.session_id !== conversationId) {
+      r.sessie_vernieuwd = true;
+      schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'sessie-onbekend', runtime: 'gemini' }));
+    }
+    return r;
+  }
+}
+
+// Bij het starten: config voor agy klaarzetten (27-9-2026). Drie dingen, elke start opnieuw:
+// 1. MCP. agy vult ${VAR} in headers NIET in (gemeten: supabase en n8n 'Unauthorized'), dus de
+//    tokens moeten er letterlijk in. Dat bestand komt in /tmp (0600, verdwijnt bij een herstart),
+//    en ~/.gemini/config/mcp_config.json wordt een symlink daarnaartoe: geen tokens op het volume.
+//    Staat er een echt bestand (bv. na 'agy mcp add', dat de symlink vervangt), dan nemen we de
+//    servers die we zelf niet beheren daaruit over naar /tmp en vervangen het bestand.
+// 2. Persona: ~/.gemini/GEMINI.md -> CLAUDE.md in de vault (symlink, buiten de vault).
+// 3. Skills: ~/.gemini/config/skills.json bevat de skillsmap van de vault.
+const AGY_MCP_TMP = process.env.AGY_MCP_TMP || '/tmp/agy-mcp_config.json';
+let geminiStand = { mcp: [], fout: null };
+function geminiVoorbereiden() {
+  const fouten = [];
+  const configDir = path.join(GEMINI_HOME, 'config');
+  try { fs.mkdirSync(configDir, { recursive: true }); } catch (e) {}
+  // 1. MCP
+  try {
+    const volumePad = path.join(configDir, 'mcp_config.json');
+    const beheerd = {};
+    const bearer = function (tok) { return { Authorization: 'Bearer ' + tok }; };
+    if (process.env.TODOIST_MCP_TOKEN) beheerd.todoist = { serverUrl: 'https://ai.todoist.net/mcp', headers: bearer(process.env.TODOIST_MCP_TOKEN) };
+    if (process.env.SUPABASE_MCP_TOKEN) beheerd.supabase = { serverUrl: 'https://mcp.supabase.com/mcp', headers: bearer(process.env.SUPABASE_MCP_TOKEN) };
+    if (process.env.N8N_MCP_URL && process.env.N8N_MCP_TOKEN) beheerd.n8n = { serverUrl: process.env.N8N_MCP_URL, headers: bearer(process.env.N8N_MCP_TOKEN) };
+    beheerd.pubmed = { serverUrl: 'https://pubmed.mcp.claude.com/mcp' };
+    let bestaand = {};
+    let lst = null;
+    try { lst = fs.lstatSync(volumePad); } catch (e) {}
+    if (lst) {
+      try { const j = JSON.parse(fs.readFileSync(volumePad, 'utf8')); if (j && j.mcpServers && typeof j.mcpServers === 'object') bestaand = j.mcpServers; } catch (e) {}
+    }
+    const servers = {};
+    // De vier beheerde namen nooit uit het oude bestand overnemen, ook niet als hun token nu in de
+    // omgeving ontbreekt: anders blijft een ingetrokken token uit /tmp stil doorwerken (review 27-9).
+    const BEHEERD = ['todoist', 'supabase', 'n8n', 'pubmed'];
+    for (const k in bestaand) if (BEHEERD.indexOf(k) < 0) servers[k] = bestaand[k];
+    for (const k in beheerd) servers[k] = Object.assign({ disabled: false }, beheerd[k]);
+    const tmp = AGY_MCP_TMP + '.tmp.' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify({ mcpServers: servers }, null, 2), { mode: 0o600 });
+    fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, AGY_MCP_TMP);
+    let klopt = false;
+    try { klopt = lst && lst.isSymbolicLink() && fs.readlinkSync(volumePad) === AGY_MCP_TMP; } catch (e) {}
+    if (!klopt) {
+      const nieuw = volumePad + '.nieuw.' + process.pid;
+      try { fs.unlinkSync(nieuw); } catch (e) {}
+      fs.symlinkSync(AGY_MCP_TMP, nieuw);
+      fs.renameSync(nieuw, volumePad);   // atomisch: vervangt ook een echt bestand met tokens erin
+    }
+    geminiStand.mcp = Object.keys(servers).sort();
+  } catch (e) { fouten.push('mcp: ' + String(e && e.code || e).slice(0, 80)); }
+  // 2. Persona
+  try {
+    const gm = path.join(GEMINI_HOME, 'GEMINI.md');
+    const doel = path.join(VAULT, 'CLAUDE.md');
+    let lst = null; try { lst = fs.lstatSync(gm); } catch (e) {}
+    if (!lst || (lst.isSymbolicLink() && fs.readlinkSync(gm) !== doel)) {
+      const nieuw = gm + '.nieuw.' + process.pid;
+      try { fs.unlinkSync(nieuw); } catch (e) {}
+      fs.symlinkSync(doel, nieuw);
+      fs.renameSync(nieuw, gm);
+    } else if (!lst.isSymbolicLink()) fouten.push('GEMINI.md is een echt bestand, niet overschreven');
+  } catch (e) { fouten.push('persona: ' + String(e && e.code || e).slice(0, 80)); }
+  // 3. Skills
+  try {
+    const sj = path.join(configDir, 'skills.json');
+    const map = path.join(VAULT, '.claude', 'skills');
+    let j = null; try { j = JSON.parse(fs.readFileSync(sj, 'utf8')); } catch (e) {}
+    if (!j || typeof j !== 'object' || Array.isArray(j)) j = {};
+    if (!Array.isArray(j.entries)) j.entries = [];   // overige velden (bv. inherits) blijven staan
+    if (!j.entries.some(function (x) { return x && x.path === map; })) {
+      j.entries.push({ path: map });
+      const tmp = sj + '.tmp.' + process.pid;
+      fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + '\n');
+      fs.renameSync(tmp, sj);
+    }
+  } catch (e) { fouten.push('skills: ' + String(e && e.code || e).slice(0, 80)); }
+  geminiStand.fout = fouten.length ? fouten.join('; ') : null;
+  if (fouten.length) logError('gemini-voorbereiden', { name: 'GeminiConfig', code: fouten.join('; ').slice(0, 200) });
+}
+// De versie van de agy die deze server echt aanroept (kan de proefinstallatie op het volume zijn).
+function agyVersieMeten() {
+  try {
+    require('child_process').execFile(AGY_BIN, ['--version'], { timeout: 20000, env: Object.assign({}, process.env, { AGY_CLI_DISABLE_AUTO_UPDATE: '1' }) },
+      function (e, stdout) { CLI_VERSIES.agy = e ? 'onbekend - ' + String(e.code || e.message || e).slice(0, 60) : String(stdout || '').trim().slice(0, 40); });
+  } catch (e) { CLI_VERSIES.agy = 'onbekend'; }
+}
+
+// Eén ingang voor alle breinen. Bij Claude kijkt de bestaande code naar
 // output/session_id; bij een limietfout markeren we die ook als 'limiet'
 // zodat de fallback in processJob voor beide gelijk werkt.
 function runBrein(runtime, prompt, sessionId, outdir, cwd, model, opts) {
   if (runtime === 'codex') return runCodex(prompt, sessionId, outdir, cwd, model, opts);
+  if (runtime === 'gemini') return runGemini(prompt, sessionId, outdir, cwd, model, opts);
   return runClaude(prompt, sessionId, outdir, cwd, model, opts).then(function (r) {
     r.runtime = 'claude';
     if (r && !r.ok && r.error !== 'limiet' && !/^afgebroken-/.test(String(r.error || '')) && isLimietFout(r.output || r.error)) r.error = 'limiet';
@@ -1632,8 +1937,8 @@ function handleRequest(req, res) {
       const ws = resolveWorkspace(d.workspace);
       const key = sessionKey(ws, chatId);
       res._log = { chat_id: chatId, workspace: ws };
-      // Beide breinen: een reset is een reset, welk brein er ook aan stond.
-      if (key) { delete chatSessions[key]; delete chatSessions[sessieSleutel(key, 'codex')]; saveSessions(); }
+      // Alle breinen: een reset is een reset, welk brein er ook aan stond.
+      if (key) { RUNTIMES_LIJST.forEach(function (rt) { delete chatSessions[sessieSleutel(key, rt)]; }); saveSessions(); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, reset: chatId, workspace: ws }));
     });
@@ -1921,7 +2226,10 @@ if (OFFSITE_INTERVAL_MIN > 0 && !offsiteDoorRunsh()) {
     : 'uitgezet (OFFSITE_INTERVAL_MIN=0)';
 }
 
+try { geminiVoorbereiden(); } catch (e) { logError('gemini-voorbereiden', e); }
+agyVersieMeten();
+
 server.listen(PORT, '0.0.0.0', function () {
-  console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents, tweede brein claude|codex) luistert op :' + PORT +
+  console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents, breinen claude|codex|gemini) luistert op :' + PORT +
     ' (vault=' + VAULT + ', repo=' + REPO + ')');
 });

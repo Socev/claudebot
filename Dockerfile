@@ -24,10 +24,21 @@ RUN npm install -g @anthropic-ai/claude-code
 # Claude-CLI. Bump bewust: het --json-formaat heet nog 'experimental'.
 RUN npm install -g @openai/codex@0.153.4
 RUN curl -fsSL https://rclone.org/install.sh | bash || true
+# Derde brein (27-9-2026): Antigravity CLI (levert 'agy', Gemini op Davids Google AI Pro-login),
+# via het officiele installatiescript naar /usr/local/bin. Het script kent geen versievlag, dus
+# niet gepind - zoals de Claude-CLI; welke versie erin zit, staat in /app/cli-versies.txt.
+# Automatische update UIT: de CLI mag zichzelf niet midden in een beurt vervangen, en /health
+# moet de versie tonen die echt draait. Login en gesprekken staan op het volume (~/.gemini).
+ENV AGY_CLI_DISABLE_AUTO_UPDATE=1
+RUN curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh \
+ && bash /tmp/agy-install.sh --dir /usr/local/bin \
+ && rm -f /tmp/agy-install.sh \
+ && test -x /usr/local/bin/agy && /usr/local/bin/agy --version
 # Welke versies zitten er in DIT image? Zonder pin is dat anders niet te achterhalen.
 RUN mkdir -p /app && { echo "gebouwd: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
       echo "claude-code: $(claude --version 2>/dev/null || echo onbekend)"; \
       echo "codex: $(codex --version 2>/dev/null || echo onbekend)"; \
+      echo "agy: $(agy --version 2>/dev/null || echo onbekend)"; \
       echo "node: $(node --version)"; } | tee /app/cli-versies.txt
 
 # ── Chromium-browserbesturing (route C, 16-8-2026) ──────────────────────────

@@ -197,6 +197,23 @@ jobs:
           done
           docker run --rm --entrypoint cat "$IMAGE" /app/cli-versies.txt | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Derde brein (27-9-2026): de Antigravity CLI ('agy') wordt niet gepind en kan dus
+      # met een nieuw image een vlag verliezen. runGemini in server.js leunt op deze vlaggen;
+      # ontbreekt er een, dan faalt hier de build in plaats van elke Gemini-beurt op de pod.
+      - name: Rooktest - Antigravity CLI (Gemini)
+        run: |
+          set -euo pipefail
+          IMAGE=ghcr.io/socev/claudebot:${{ github.run_number }}
+          docker run --rm --entrypoint test "$IMAGE" -x /usr/local/bin/agy || { echo "::error::/usr/local/bin/agy ontbreekt in het image"; exit 1; }
+          VERSIE=$(docker run --rm --entrypoint agy "$IMAGE" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+          echo "agy in dit image: ${VERSIE:-onleesbaar}"
+          [ -n "$VERSIE" ] || { echo "::error::agy --version gaf geen versienummer"; exit 1; }
+          HULP=$(docker run --rm --entrypoint agy "$IMAGE" --help 2>&1 || true)
+          for vlag in -p --print --output-format --dangerously-skip-permissions --conversation --model --effort; do
+            if ! grep -qE -- "^[[:space:]]+${vlag}([[:space:]]|$)" <<<"$HULP"; then echo "::error::agy kent de vlag $vlag niet meer - runGemini in server.js leunt erop"; exit 1; fi
+            echo "  OK    $vlag"
+          done
+
       - name: Rooktest opruimen
         if: always()
         run: |
