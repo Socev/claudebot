@@ -70,6 +70,27 @@ else
   log "release $KORT klaargezet"
 fi
 
+# ── 2b. wachten tot het rustig is (28-9-2026, akkoord David) ─────────────────
+# Een herstart doodt elke lopende beurt en elk resultaat dat n8n nog niet ophaalde: het antwoord
+# verdwijnt dan stil (27-9 22:42). Wacht daarom tot /health lopend.beurten, lopend.onopgehaald
+# en agents.lopend alle drie 0 zijn. Hooguit UITROL_WACHT_MAX seconden (standaard 1800), daarna
+# toch - met een logregel. UITROL_NU=1 slaat het wachten over (noodgeval).
+if [ "${UITROL_NU:-0}" != "1" ]; then
+  WACHT_MAX="${UITROL_WACHT_MAX:-1800}"; GEWACHT=0; TOCH=0
+  while :; do
+    DRUK="$(curl -s -m 5 "http://127.0.0.1:${PORT:-8080}/health" | python3 -c 'import json,sys
+try:
+  j=json.load(sys.stdin); l=j.get("lopend") or {}; a=j.get("agents") or {}
+  print(int(l.get("beurten",0))+int(l.get("onopgehaald",0))+int(a.get("lopend",0)))
+except Exception: print(0)' 2>/dev/null || echo 0)"
+    [ "${DRUK:-0}" = "0" ] && break
+    if [ "$GEWACHT" -ge "$WACHT_MAX" ]; then log "LET OP: na ${GEWACHT}s nog ${DRUK} lopend - uitrol gaat toch door"; TOCH=1; break; fi
+    if [ "$GEWACHT" = "0" ]; then log "wachten: ${DRUK} beurt(en)/resultaat(en)/agent(s) lopend"; fi
+    sleep 10; GEWACHT=$((GEWACHT+10))
+  done
+  if [ "$GEWACHT" -gt 0 ] && [ "$TOCH" = "0" ]; then log "rustig na ${GEWACHT}s"; fi
+fi
+
 # ── 3. omzetten ─────────────────────────────────────────────────────────────
 HUIDIG="$(readlink "$CURRENT" 2>/dev/null || echo '')"
 if [ "$HUIDIG" = "releases/$KORT" ]; then

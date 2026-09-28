@@ -455,6 +455,15 @@ function dropJob(id) {
 }
 let chatSessions = {};
 try { chatSessions = JSON.parse(fs.readFileSync(SESS_FILE, 'utf8')); } catch (e) { chatSessions = {}; }
+function lopendeJobs() {
+  const nu = Date.now(); let beurten = 0, onopgehaald = 0;
+  for (const id in jobs) {
+    const j = jobs[id];
+    if (j.status === 'pending' || j.status === 'running') beurten++;
+    else if (j.status === 'done' && !j.agent && !j.opgehaald && j.done_at && nu - j.done_at < 10 * 60 * 1000) onopgehaald++;
+  }
+  return { beurten: beurten, onopgehaald: onopgehaald };
+}
 function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
 
 // ── v2: register van achtergrondagents (overleeft een containerherstart) ───
@@ -1739,6 +1748,10 @@ function handleRequest(req, res) {
       versie: process.env.RELEASE_SHA || process.env.IMAGE_SHA || 'onbekend',
       image_versie: process.env.IMAGE_SHA || 'onbekend',
       jobs: Object.keys(jobs).length, chats: Object.keys(chatSessions).length,
+      // Wat een uitrol nu zou afbreken (28-9-2026). Een herstart midden in een beurt, of vlak ná een beurt maar vóór
+      // n8n het resultaat ophaalde, laat het antwoord stil verdwijnen (27-9 22:42, machinekamer-executie 44316).
+      // uitrol.sh wacht tot beide 0 zijn. Een onopgehaald resultaat telt hooguit 10 minuten mee.
+      lopend: lopendeJobs(),
       modellen: Object.keys(MODEL_ALIASSEN),
       sync: syncInfo(), inbox: inboxInfo(), sessies: sessieInfo(),
       agents: agentInfo(),
@@ -1912,6 +1925,7 @@ function handleRequest(req, res) {
       // n8n-run, netwerkfout na het verzenden) een leeg found:false teruggaf en
       // het resultaat definitief weg was. De opruimlus onderaan is nu de enige
       // plek die jobs verwijdert.
+      if (!j.opgehaald) j.opgehaald = Date.now();   // voor /health lopend.onopgehaald: een uitrol wacht tot n8n het resultaat heeft (28-9-2026)
       const payload = Object.assign({ found: true, done: true, status: j.status }, j.result);
       if (payload.output_file) {
         try {
