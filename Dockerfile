@@ -22,7 +22,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g @anthropic-ai/claude-code
 # Tweede brein (5-9-2026): OpenAI Codex CLI (levert 'codex'), gepind zoals de
 # Claude-CLI. Bump bewust: het --json-formaat heet nog 'experimental'.
-RUN npm install -g @openai/codex@0.153.4
+# 2-10-2026 naar 0.160.0, na een naast-elkaar-toets tegen 0.153.4: zelfde events (thread.started,
+# turn.started, item.completed/agent_message, turn.completed), -o en resume <thread> werken,
+# prompt met '-' ok, rollout-bestanden op dezelfde plek.
+RUN npm install -g @openai/codex@0.160.0
 RUN curl -fsSL https://rclone.org/install.sh | bash || true
 # Derde brein (27-9-2026): Antigravity CLI (levert 'agy', Gemini op Davids Google AI Pro-login),
 # via het officiele installatiescript naar /usr/local/bin. Het script kent geen versievlag, dus
