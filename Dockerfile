@@ -44,6 +44,11 @@ RUN mkdir -p /app && { echo "gebouwd: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
       echo "agy: $(agy --version 2>/dev/null || echo onbekend)"; \
       echo "node: $(node --version)"; } | tee /app/cli-versies.txt
 
+# ── PGS-tool (3-10-2026, David: "alles draait mee in de huidige pod") ───────
+# bcftools/samtools/tabix voor genotypering op PGS-posities uit Davids BAM/VCF (01_Ontwikkeling/PGS-tool).
+RUN apt-get update && apt-get install -y --no-install-recommends bcftools samtools tabix \
+ && rm -rf /var/lib/apt/lists/* && bcftools --version | head -1 && samtools --version | head -1
+
 # ── Chromium-browserbesturing (route C, 16-8-2026) ──────────────────────────
 # Systeembibliotheken die headless Chromium nodig heeft (gemeten: 9 ontbraken).
 RUN apt-get update && apt-get install -y --no-install-recommends \
