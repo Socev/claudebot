@@ -1756,6 +1756,7 @@ function handleRequest(req, res) {
       sync: syncInfo(), inbox: inboxInfo(), sessies: sessieInfo(),
       agents: agentInfo(),
       offsite: offsiteInfo(),
+      auto: autoInfo(),
       secrets_geladen: secretsGeladen(),
       cli_versies: CLI_VERSIES, effort: CLAUDE_EFFORT,
       kluis_overgeslagen: process.env.KLUIS_OVERGESLAGEN === '1',
@@ -1975,6 +1976,7 @@ const server = http.createServer(function (req, res) {
     }, res._log));
   });
   try {
+    if (autoIsOtaPad(req)) return autoProxyHttp(req, res);
     handleRequest(req, res);
   } catch (e) {
     logError('route', e);
@@ -2239,6 +2241,245 @@ if (OFFSITE_INTERVAL_MIN > 0 && !offsiteDoorRunsh()) {
     ? 'run.sh neemt over (OFFSITE_DOOR_RUNSH)'
     : 'uitgezet (OFFSITE_INTERVAL_MIN=0)';
 }
+
+// ── Spraakkastje: socev-auto als eigen proces (3-10-2026, besluit David) ─────
+// Waarom hier: "alles draait mee in de huidige pod". socev-auto (/opt/data/socev-auto) voert het gesprek met het
+// spraakkastje in de auto. Het draait als APART PROCES op 127.0.0.1:AUTO_POORT, zodat een fout daar dit proces
+// niet raakt; server.js start en herstart het en proxyt alleen twee paden: /auto/ota(/) (HTTP) en /auto/ws
+// (websocket). Verder verandert er niets aan de routes van de pod.
+// Aan/uit: het proces start alleen als AUTO_CONFIG bestaat en geen regel AUTO_PROCES=uit bevat (bij de volgende
+// start van server.js; AUTO_UIT=1 in dat bestand weigert alle gesprekken bij de volgende start van het kind).
+// Het kind erft NIET de pod-omgeving: alleen een witte lijst, met als enige sleutels CLOUDFLARE_AI_TOKEN_AUTO (een
+// token met alleen Workers AI-rechten; ZONDER dat token start het kind niet - het brede CLOUDFLARE_API_TOKEN gaat
+// bewust nooit naar een proces achter een publiek pad, review Fable 3-10) en ANTHROPIC_API_KEY_AUTO als die bestaat.
+// Valt server.js weg, dan sluit het ipc-kanaal en stopt het kind zelf (geen wees met oude code op de poort).
+// Begrenzing (review 3-10): de pod heeft een quotum van 2 cores en Piper start 24 threads (gemeten). Het kind draait
+// daarom met nice 10 (claude-beurten en server.js gaan voor binnen het quotum), een heap-grens van 512 MB en een
+// RSS-wachter (1 GiB -> kill). Bewust GEEN taskset: op 2 vaste cpu's liep het eerste geluid op van 3,4-4,2 s naar
+// 5,6-7,7 s (gemeten 3-10, 24 Piper-threads op 2 cpu's).
+// Het log gaat via een pijp en roteert op 5 MB. Noodstop zonder uitrol: AUTO_PROCES=uit in AUTO_CONFIG zetten en het
+// kind stoppen (kill <auto.pid uit /health>); server.js start het dan niet opnieuw.
+// Elk Upgrade-verzoek komt sinds deze wijziging hier binnen: alleen /auto/ws wordt doorgegeven, al het andere krijgt
+// 404 (daarvoor behandelde Node een Upgrade-header op bv. /run als gewoon verzoek; geen bekende aanroeper doet dat).
+// Ontwerp: vault 01_Ontwikkeling/Spraakkastje auto - Waveshare naar Socev (ontwerp).md
+const net = require('net');
+const AUTO_DIR = process.env.AUTO_DIR || '/opt/data/socev-auto';
+const AUTO_POORT = parseInt(process.env.AUTO_POORT || '8091', 10);
+const AUTO_CONFIG = process.env.AUTO_CONFIG || '/opt/data/socev-auto-run/auto.env';
+const AUTO_LOG = process.env.AUTO_LOG || '/opt/data/bin/auto.log';
+const AUTO_BACKOFF_MS = [2000, 5000, 15000, 30000, 60000, 120000, 300000];
+const AUTO_MAX_TUNNELS = 8;
+const AUTO_LOG_MAX = 5 * 1024 * 1024;
+const AUTO_RSS_MAX_KB = 1024 * 1024;
+const AUTO_CONFIG_SLEUTEL = /^(AUTO_[A-Z0-9_]+|CF_ACCOUNT_ID|CF_STT_MODEL|CF_LLM_MODEL|ANTHROPIC_MODEL_AUTO|PIPER_BIN|PIPER_MODEL|GEMINI_TTS_MODEL|GEMINI_STEM)$/;
+const auto = { kind: null, starts: 0, herstarts: 0, laatste_start: null, laatste_exit: null, reden_uit: null,
+  timer: null, tunnels: 0, geweigerd_vol: 0, rss_kb: null, laatste_ok: null, gedood_rss: 0 };
+
+function autoLeesConfig() {
+  let tekst;
+  try { tekst = fs.readFileSync(AUTO_CONFIG, 'utf8'); } catch (e) { return null; }
+  const env = {};
+  tekst.split('\n').forEach(function (regel) {
+    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/.exec(regel);
+    if (!m || regel.trim().startsWith('#')) return;
+    // Geen sleutels in dit bestand: die komen uit de pod-omgeving (kluis).
+    if (!AUTO_CONFIG_SLEUTEL.test(m[1]) || /TOKEN|KEY|SECRET/.test(m[1])) return;
+    env[m[1]] = m[2].replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
+  });
+  return env;
+}
+
+function autoStart() {
+  auto.timer = null;
+  if (auto.kind) return;
+  const cfg = autoLeesConfig();
+  if (!cfg) { auto.reden_uit = 'geen config (' + AUTO_CONFIG + ')'; return; }
+  if (cfg.AUTO_PROCES === 'uit') { auto.reden_uit = 'AUTO_PROCES=uit'; return; }
+  const script = path.join(AUTO_DIR, 'src', 'server.js');
+  if (!fs.existsSync(script)) { auto.reden_uit = 'socev-auto ontbreekt (' + script + ')'; return; }
+  if (!process.env.CLOUDFLARE_AI_TOKEN_AUTO) { auto.reden_uit = 'CLOUDFLARE_AI_TOKEN_AUTO ontbreekt (kluisnaam cloudflare_ai_token_auto, daarna podherstart)'; return; }
+  auto.reden_uit = null;
+  const env = Object.assign({
+    PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: HOME, TZ: process.env.TZ || 'Europe/Amsterdam',
+    NODE_ENV: 'production', PIPER_BIN: '/opt/data/piper/piper', PIPER_MODEL: '/opt/data/piper/nl_NL-ronnie-medium.onnx'
+  }, cfg, { PORT: String(AUTO_POORT), AUTO_HOST: '127.0.0.1' });
+  delete env.AUTO_PROCES;
+  env.CF_AI_TOKEN = process.env.CLOUDFLARE_AI_TOKEN_AUTO;
+  if (process.env.ANTHROPIC_API_KEY_AUTO) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY_AUTO;
+  if (!env.CF_ACCOUNT_ID) env.CF_ACCOUNT_ID = LESSEN_CF_ACCOUNT;   // geen geheim; staat ook bij de lessen-injectie
+  let k;
+  try {
+    k = spawn(process.execPath, ['--max-old-space-size=512', script], { cwd: AUTO_DIR, env: env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  } catch (e) {
+    logError('auto-spawn', e);
+    auto.laatste_exit = { code: null, signaal: null, fout: 'spawn', iso: new Date().toISOString() };
+    autoPlanHerstart();
+    return;
+  }
+  auto.kind = k;
+  auto.starts++;
+  auto.laatste_start = Date.now();
+  auto.rss_kb = null; auto.laatste_ok = null;
+  // nice 10: claude-beurten en server.js gaan voor binnen het cpu-quotum. Piper erft dit (start later).
+  if (k.pid) { try { require('os').setPriority(k.pid, 10); } catch (e) { logError('auto-nice', e); } }
+  k.stdout.on('data', autoSchrijfLog); k.stderr.on('data', autoSchrijfLog);
+  k.on('error', function (e) {
+    logError('auto-kind', e);
+    // Een spawnfout geeft 'error' zonder 'exit': anders bleef auto.kind staan en kwam er nooit een herstart.
+    if (!k.pid && auto.kind === k) {
+      auto.kind = null;
+      auto.laatste_exit = { code: null, signaal: null, fout: 'spawn', iso: new Date().toISOString() };
+      autoPlanHerstart();
+    }
+  });
+  // Geen berichten verwacht; een kapot kanaal mag dit proces niet omleggen.
+  k.on('message', function () {});
+  k.on('exit', function (code, signaal) {
+    if (auto.kind === k) auto.kind = null;
+    const liep = Date.now() - (auto.laatste_start || Date.now());
+    auto.laatste_exit = { code: code, signaal: signaal, liep_s: Math.round(liep / 1000), iso: new Date().toISOString() };
+    schrijfLog(nu() + ' auto ' + velden({ gebeurtenis: 'gestopt', code: code, signaal: signaal, liep_s: auto.laatste_exit.liep_s }));
+    if (liep > 5 * 60 * 1000) auto.herstarts = 0;
+    autoPlanHerstart();
+  });
+}
+
+// Log van het kind: per stuk aanvullen, roteren boven AUTO_LOG_MAX (zelfde patroon als het API-log).
+let autoLogOmvang = null;
+function autoSchrijfLog(stuk) {
+  try {
+    if (autoLogOmvang === null) { try { autoLogOmvang = fs.statSync(AUTO_LOG).size; } catch (e) { autoLogOmvang = 0; } }
+    if (autoLogOmvang + stuk.length > AUTO_LOG_MAX) {
+      try { fs.renameSync(AUTO_LOG, AUTO_LOG + '.1'); } catch (e) {}
+      autoLogOmvang = 0;
+    }
+    fs.appendFileSync(AUTO_LOG, stuk);
+    autoLogOmvang += stuk.length;
+  } catch (e) {}
+}
+
+// Elke 30 s: geheugen van het kind (boven 1 GiB stoppen, de herstart pakt het op) en een probe op zijn /health.
+function autoWacht() {
+  const k = auto.kind;
+  if (!k || !k.pid) return;
+  try {
+    const m = /VmRSS:\s+(\d+)/.exec(fs.readFileSync('/proc/' + k.pid + '/status', 'utf8'));
+    auto.rss_kb = m ? parseInt(m[1], 10) : null;
+    if (auto.rss_kb && auto.rss_kb > AUTO_RSS_MAX_KB) {
+      auto.gedood_rss++;
+      schrijfLog(nu() + ' auto ' + velden({ gebeurtenis: 'rss-grens', rss_kb: auto.rss_kb }));
+      try { k.kill('SIGKILL'); } catch (e) {}
+      return;
+    }
+  } catch (e) {}
+  const r = http.get({ host: '127.0.0.1', port: AUTO_POORT, path: '/health', timeout: 3000 }, function (res) {
+    res.resume();
+    if (res.statusCode === 200) auto.laatste_ok = Date.now();
+  });
+  r.on('timeout', function () { r.destroy(); });
+  r.on('error', function () {});
+}
+setInterval(autoWacht, 30000).unref();
+
+function autoPlanHerstart() {
+  if (auto.timer) return;
+  const ms = AUTO_BACKOFF_MS[Math.min(auto.herstarts, AUTO_BACKOFF_MS.length - 1)];
+  auto.herstarts++;
+  auto.timer = setTimeout(autoStart, ms);
+  auto.timer.unref();
+}
+
+function autoInfo() {
+  return {
+    aan: !!auto.kind, pid: auto.kind ? auto.kind.pid : null, poort: AUTO_POORT, reden_uit: auto.reden_uit,
+    starts: auto.starts,
+    laatste_start_iso: auto.laatste_start ? new Date(auto.laatste_start).toISOString() : null,
+    laatste_exit: auto.laatste_exit, tunnels: auto.tunnels, geweigerd_vol: auto.geweigerd_vol,
+    // laatste_ok_iso = laatste geslaagde probe op /health van het kind (elke 30 s); 'aan' zegt alleen dat het leeft.
+    laatste_ok_iso: auto.laatste_ok ? new Date(auto.laatste_ok).toISOString() : null,
+    rss_kb: auto.rss_kb, gedood_rss: auto.gedood_rss
+  };
+}
+
+function autoIsOtaPad(req) { return /^\/auto\/ota\/?$/.test(reqPath(req)); }
+
+function autoXff(req) {
+  const oud = req.headers['x-forwarded-for'];
+  const ip = String((req.socket && req.socket.remoteAddress) || '');
+  return oud ? String(oud) + ', ' + ip : ip;
+}
+
+// HTTP: alleen /auto/ota(/). Body begrensd door socev-auto zelf (32 kB); hier een tijdslimiet.
+function autoProxyHttp(req, res) {
+  res._log = { auto: 'ota' };
+  if (!auto.kind) { res.writeHead(503, { 'Content-Type': 'application/json' }); return res.end('{"error":"auto-uit"}'); }
+  const kop = {};
+  const hop = { connection: 1, 'keep-alive': 1, 'proxy-connection': 1, 'transfer-encoding': 1, upgrade: 1, te: 1, trailer: 1 };
+  for (const h in req.headers) if (!hop[h]) kop[h] = req.headers[h];
+  kop['x-forwarded-for'] = autoXff(req);
+  const p = http.request({ host: '127.0.0.1', port: AUTO_POORT, method: req.method, path: req.url, headers: kop, timeout: 10000 }, function (r) {
+    const terug = {};
+    for (const h in r.headers) if (!hop[h]) terug[h] = r.headers[h];
+    res.writeHead(r.statusCode || 502, terug);
+    r.pipe(res);
+    r.on('error', function () { try { res.destroy(); } catch (e) {} });
+  });
+  p.on('timeout', function () { p.destroy(new Error('timeout')); });
+  p.on('error', function () {
+    if (!res.headersSent) { res.writeHead(502, { 'Content-Type': 'application/json' }); res.end('{"error":"auto-onbereikbaar"}'); }
+    else { try { res.destroy(); } catch (e) {} }
+  });
+  req.on('error', function () { p.destroy(); });
+  req.pipe(p);
+}
+
+// Websocket: alleen /auto/ws, als ruwe tunnel naar socev-auto (dat doet zelf de token- en kastjecontrole).
+function autoProxyUpgrade(req, sock, head) {
+  const weiger = function (code, tekst) {
+    try { sock.end('HTTP/1.1 ' + code + ' ' + tekst + '\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); } catch (e) {}
+    setTimeout(function () { try { sock.destroy(); } catch (e) {} }, 1000).unref();
+  };
+  sock.on('error', function () {});
+  if (reqPath(req) !== '/auto/ws') return weiger(404, 'Not Found');
+  if (!auto.kind) return weiger(503, 'Service Unavailable');
+  if (auto.tunnels >= AUTO_MAX_TUNNELS) { auto.geweigerd_vol++; return weiger(503, 'Service Unavailable'); }
+  auto.tunnels++;
+  let dicht = false;
+  const doel = net.connect(AUTO_POORT, '127.0.0.1');
+  const sluit = function () {
+    if (dicht) return; dicht = true; auto.tunnels--;
+    try { doel.destroy(); } catch (e) {}
+    try { sock.destroy(); } catch (e) {}
+  };
+  sock.setTimeout(0); sock.setNoDelay(true);
+  doel.setNoDelay(true);
+  // Antwoordt het kind niet binnen 10 s op de handdruk, dan de tunnel sluiten (anders blijven de 8 plekken bezet).
+  doel.setTimeout(10000, sluit);
+  doel.once('data', function () { doel.setTimeout(0); });
+  doel.on('error', sluit); sock.on('error', sluit);
+  doel.on('close', sluit); sock.on('close', sluit);
+  doel.on('connect', function () {
+    // Requestregel en headers zoals ze binnenkwamen (Node heeft ze al geparsed en gevalideerd), behalve
+    // X-Forwarded-For, die wij zelf zetten. Geen CR/LF mogelijk: die weigert de parser van Node.
+    let kop = 'GET /auto/ws HTTP/1.1\r\n';
+    const r = req.rawHeaders;
+    for (let i = 0; i + 1 < r.length; i += 2) {
+      if (r[i].toLowerCase() === 'x-forwarded-for') continue;
+      kop += r[i] + ': ' + r[i + 1] + '\r\n';
+    }
+    kop += 'X-Forwarded-For: ' + autoXff(req) + '\r\n\r\n';
+    doel.write(kop);
+    if (head && head.length) doel.write(head);
+    sock.pipe(doel); doel.pipe(sock);
+  });
+}
+
+server.on('upgrade', function (req, sock, head) {
+  try { autoProxyUpgrade(req, sock, head); }
+  catch (e) { logError('auto-upgrade', e); try { sock.destroy(); } catch (e2) {} }
+});
+
+if (process.env.AUTO_UIT_POD !== '1') { try { autoStart(); } catch (e) { logError('auto-start', e); } }
 
 try { geminiVoorbereiden(); } catch (e) { logError('gemini-voorbereiden', e); }
 agyVersieMeten();

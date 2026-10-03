@@ -91,6 +91,13 @@ except Exception: print(0)' 2>/dev/null || echo 0)"
   if [ "$GEWACHT" -gt 0 ] && [ "$TOCH" = "0" ]; then log "rustig na ${GEWACHT}s"; fi
 fi
 
+# Gesprekken met het spraakkastje (socev-auto, 3-10-2026) tellen bewust NIET mee als blokkade: een hangend gesprek
+# zou de uitrol 30 minuten ophouden. Wel een logregel, zodat een afgebroken gesprek te verklaren is.
+TUN="$(curl -s -m 5 "http://127.0.0.1:${PORT:-8080}/health" | python3 -c 'import json,sys
+try: print(int((json.load(sys.stdin).get("auto") or {}).get("tunnels",0)))
+except Exception: print(0)' 2>/dev/null || echo 0)"
+[ "${TUN:-0}" != "0" ] && log "LET OP: ${TUN} gesprek(ken) met het spraakkastje lopen; die breken af bij de herstart"
+
 # ── 3. omzetten ─────────────────────────────────────────────────────────────
 HUIDIG="$(readlink "$CURRENT" 2>/dev/null || echo '')"
 if [ "$HUIDIG" = "releases/$KORT" ]; then
