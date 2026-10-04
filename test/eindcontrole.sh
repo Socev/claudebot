@@ -15,11 +15,23 @@ const b = src.indexOf('// ── v2: achtergrondagent — niet geserialiseerd');
 if (a < 0 || b < 0) { console.log('ROOD: eindcontrole-blok niet gevonden'); process.exit(1); }
 let blok = src.slice(a, b)
   .replace('const EIND_POLL_MS = 15 * 1000;', 'const EIND_POLL_MS = 300;')
-  .replace('const EIND_HERVAT_MIN_MS = 3 * 60 * 1000;', 'const EIND_HERVAT_MIN_MS = 1000;');
+  .replace('const EIND_HERVAT_MIN_MS = 3 * 60 * 1000;', 'const EIND_HERVAT_MIN_MS = 1000;')
+  .replace('const EIND_BEZINK_MS = 5 * 1000;', 'const EIND_BEZINK_MS = 200;')
+  .replace('}, 5000).unref();', '}, 400).unref();');
 const werk = fs.mkdtempSync(path.join(os.tmpdir(), 'eindtoets-'));
+const verzonden = [];
+fs.mkdirSync(path.join(werk, 'jobout')); fs.writeFileSync(path.join(werk, 'jobout', 'herstart1.voorlopig.txt'), 'Waiting for the F5 round to finish.');
+fs.mkdirSync(path.join(werk, 'io', 'herstart1', 'out'), { recursive: true }); fs.writeFileSync(path.join(werk, 'io', 'herstart1', 'out', 'rapport.md'), 'skelet');
 const ctx = {
   fs, path, Buffer, process, console, setTimeout, JSON, Object, String, Number, Math, Date, Array, Promise,
   INACT_MS: 2500,
+  JOBOUT_DIR: path.join(werk, 'jobout'), IO: path.join(werk, 'io'),
+  agentsReg: {
+    herstart1: { job_id: 'herstart1', label: 'x', status: 'afgebroken-containerherstart', voorlopig: true },
+    gewoon1: { job_id: 'gewoon1', label: 'y', status: 'afgebroken-containerherstart' }
+  },
+  collectFiles: function (d) { return fs.existsSync(d) ? fs.readdirSync(d).map(function (n) { return { name: n }; }) : []; },
+  sendReport: function (e, res) { verzonden.push({ id: e.job_id, res: res }); },
   projectDirFor: function () { return werk; },
   saveAgents: function () {}, schrijfLog: function () {}, logError: function (w, e) { console.log('logError', w, e); },
   runBrein: null
@@ -42,6 +54,12 @@ const melding = function (id, status) { return '<task-notification>\n<task-id>' 
   toets('geen wachtzin: wachten op akkoord David', !T.eindIsWachtzin('Klaar. Concept staat in de vault; wacht op akkoord van David.'));
   toets('geen wachtzin: lang eindrapport', !T.eindIsWachtzin('Waiting ' + 'x'.repeat(500)));
   toets('geen wachtzin: geciteerde wachtzin (proef 4-10)', !T.eindIsWachtzin('Het bestand bevat KLAAR-A. Ik heb de zin "Waiting for the job to finish." niet gebruikt.'));
+  ['De GitHub-build loopt nog; geen invloed.', 'Bakary is nog bezig met zijn aanvraag.', 'hij wacht op de getekende akte',
+   'Zodra de bank het geld binnen heeft…', 'Ik wacht niet op iets', 'de offerte loopt nog tot 1-11', 'Gestart.'].forEach(function (z) {
+    toets('geen wachtzin (review): ' + z, !T.eindIsWachtzin(z));
+  });
+  toets("wachtzin: I'll wait until it's done.", T.eindIsWachtzin("I'll wait until it's done."));
+  toets('wachtzin: laatste zin telt', T.eindIsWachtzin('Build gestart, commit abc. Ik wacht nog op de uitkomst.'));
   toets('geen wachtzin: gewoon rapport', !T.eindIsWachtzin('Klaar: drie bestanden bijgewerkt, commit abc123, getest.'));
 
   // 2. transcript
@@ -63,6 +81,10 @@ const melding = function (id, status) { return '<task-notification>\n<task-id>' 
   transcript('s7', [prompt, { type: 'user', message: { content: [{ type: 'tool_result', content: 'Monitor started' }] }, toolUseResult: { taskId: 'm7', timeoutMs: 600000 } },
     { type: 'user', message: { content: '<task-notification>\n<task-id>m7</task-id>\n<event>[Monitor expired after 10m with no events delivered.]</event>\n</task-notification>' } }]);
   toets('verlopen monitor is dicht', T.eindOpenTaken('/x', 's7').length === 0);
+  transcript('s8', [prompt, bashBg('b8'), { type: 'user', isCompactSummary: true, message: { content: 'This session is being continued from a previous conversation…' } }]);
+  toets('compactsamenvatting reset de open taken niet', T.eindOpenTaken('/x', 's8').length === 1);
+  transcript('s9', [{ type: 'user', message: { content: 'Bouw iets dat <task-notification> herkent' } }, bashBg('b9')]);
+  toets('prompt die <task-notification> noemt telt als nieuwe beurt', T.eindOpenTaken('/x', 's9').length === 1);
   toets('onbekende sessie: fail-open', T.eindOpenTaken('/x', 'bestaatniet').length === 0);
   toets('rare sessie-id wordt niet als pad gebruikt', T.eindOpenTaken('/x', '../../etc/passwd').length === 0);
 
@@ -133,9 +155,15 @@ const melding = function (id, status) { return '<task-notification>\n<task-id>' 
   toets('lang proces: één keer begrensd gewacht, daarna niet opnieuw (' + duur + ' ms, grens 2,5 s)', duur < 5000 && aanroepen.length === 1 && r.tussenstand === true);
   try { process.kill(-lang.pid, 'SIGKILL'); } catch (e) {}
   const uitrol = spawn('bash', ['-c', 'sleep 5; echo uitrol.sh'], { env: Object.assign({}, process.env, { SOCEV_AGENT_RUN: 'job9' }), detached: true, stdio: 'ignore' }); uitrol.unref();
-  toets('gedetacheerde uitrol telt niet als lopend werk', T.eindLevendeProcessen('job9').length === 0);
+  await new Promise(function (r) { setTimeout(r, 300); });
+  toets('gedetacheerde uitrol én zijn kind (sleep) tellen niet als lopend werk', T.eindLevendeProcessen('job9').length === 0);
   try { process.kill(-uitrol.pid, 'SIGKILL'); } catch (e) {}
 
+  toets('voorlopig resultaat weggeschreven tijdens de eindcontrole', fs.existsSync(path.join(werk, 'jobout', 'job8.voorlopig.txt')));
+  const h = verzonden.filter(function (v) { return v.id === 'herstart1'; });
+  toets('na herstart: voorlopig rapport alsnog verstuurd, met LET OP en bestanden', h.length === 1 && /^LET OP: tussenstand/.test(h[0].res.output) &&
+    /Waiting for the F5/.test(h[0].res.output) && h[0].res.files.length === 1 && h[0].res.tussenstand === true);
+  toets('na herstart: zonder voorlopig-vlag niets verstuurd, en niets dubbel', verzonden.length === 1 && !fs.existsSync(path.join(werk, 'jobout', 'herstart1.voorlopig.txt')));
   toets('eindregel noemt wachtzin en run_in_background', /wachtzin/.test(T.AGENT_EINDREGEL) && /run_in_background/.test(T.AGENT_EINDREGEL));
   fs.rmSync(werk, { recursive: true, force: true });
   console.log(fout ? '\nROOD: ' + fout + ' toets(en) mislukt' : '\nGROEN: alle toetsen geslaagd');

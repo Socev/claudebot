@@ -1530,7 +1530,8 @@ function sendReport(entry, result, attempt) {
     ok: !!result.ok,
     output: result.output || '',
     error: result.error || '',
-    files: result.files || []
+    files: result.files || [],
+    tussenstand: !!result.tussenstand
   };
   postJson(AGENT_WEBHOOK_URL, payload, function (err) {
     if (!err) {
@@ -1574,7 +1575,9 @@ const EIND_RONDES_MAX = 2;
 const EIND_POLL_MS = 15 * 1000;
 const EIND_HERVAT_MIN_MS = 3 * 60 * 1000;
 const EIND_WACHTZIN_MAX = 400;
+const EIND_BEZINK_MS = 5 * 1000;   // MCP-servers e.d. sluiten vlak na de CLI af: pas na deze pauze telt een proces
 const EIND_LET_OP = 'LET OP: tussenstand — de agent stopte terwijl er nog werk liep.';
+const EIND_LET_OP_HERSTART = 'LET OP: tussenstand — de agent stopte terwijl er nog werk liep, en de pod herstartte tijdens het afwachten daarvan.';
 // Gaat achter elke agentprompt, zodat het ook geldt als de opdrachtgever het vergat.
 const AGENT_EINDREGEL = '[Systeem, eindregel: eindig je beurt nooit met een wachtzin; je laatste antwoord is je eindrapport. ' +
   'Moet je wachten, wacht dan binnen je beurt met een Bash-commando in de VOORGROND: een begrensde lus ' +
@@ -1615,8 +1618,9 @@ function eindOpenTaken(cwd, sessionId) {
       platte = c.map(function (x) { return (x && x.type === 'text') ? x.text : ''; }).join('\n');
     }
     if (platte !== null) {
-      if (platte.indexOf('<task-notification>') !== -1) eindSluitTaken(open, platte);
-      else if (!r.isMeta) open = {};   // nieuwe beurt
+      if (/^\s*<task-notification>/.test(platte)) eindSluitTaken(open, platte);
+      // Nieuwe beurt - maar niet bij een compactsamenvatting midden in een lange beurt (review 4-10).
+      else if (!r.isMeta && !r.isCompactSummary && !r.isVisibleInTranscriptOnly) open = {};
       continue;
     }
     if (tu && typeof tu === 'object') {
@@ -1644,8 +1648,20 @@ function eindSluitTaken(open, tekst) {
   }
 }
 
-// Nog levende processen die van deze agentrun afstammen (ze erven de marker). Een
-// gedetacheerde uitrol telt niet mee: die wacht zelf tot er geen agent meer loopt.
+// Nog levende processen die van deze agentrun afstammen (ze erven de marker). Telt niet mee:
+// een gedetacheerde uitrol en alles daaronder (sleep, curl, git: review 4-10, die erven de
+// marker ook maar hebben zelf geen 'uitrol' in hun cmdline) - die wacht zelf tot er geen
+// agent meer loopt, dus erop wachten is een impasse; en MCP-servers van de CLI.
+function eindProcInfo(p) {
+  let cmd = ''; try { cmd = fs.readFileSync('/proc/' + p + '/cmdline').toString().replace(/\0/g, ' ').trim(); } catch (e) { return null; }
+  let ppid = 0, zombie = false;
+  try {
+    const st = fs.readFileSync('/proc/' + p + '/status', 'utf8');
+    ppid = Number((/^PPid:\s+(\d+)/m.exec(st) || [])[1] || 0);
+    zombie = /^State:\s+Z/m.test(st);
+  } catch (e) { return null; }
+  return { cmd: cmd, ppid: ppid, zombie: zombie };
+}
 function eindLevendeProcessen(jobId) {
   const zoek = Buffer.from(EIND_MARKER + '=' + jobId + '\0');
   const uit = [];
@@ -1656,23 +1672,42 @@ function eindLevendeProcessen(jobId) {
     if (!/^\d+$/.test(p) || Number(p) === process.pid) continue;
     let env; try { env = fs.readFileSync('/proc/' + p + '/environ'); } catch (e) { continue; }
     if (env.indexOf(zoek) === -1) continue;
-    let cmd = ''; try { cmd = fs.readFileSync('/proc/' + p + '/cmdline').toString().replace(/\0/g, ' ').trim(); } catch (e) {}
-    if (!cmd || /uitrol/.test(cmd)) continue;
-    let stat = ''; try { stat = fs.readFileSync('/proc/' + p + '/stat', 'utf8'); } catch (e) {}
-    if (/\)\s+Z\s/.test(stat)) continue;   // zombie: klaar, alleen nog niet opgeruimd
-    uit.push({ pid: Number(p), cmd: cmd.slice(0, 80) });
+    const info = eindProcInfo(p);
+    if (!info || !info.cmd || info.zombie || /mcp/i.test(info.cmd)) continue;
+    // Alleen voorouders die zelf ook de marker dragen (dus van deze run zijn): de cmdline van
+    // een vreemde voorouder (bv. een andere claude met 'uitrol' in zijn prompt) zegt niets.
+    let uitrol = false, q = info, n = 0;
+    while (q && n++ < 30) {
+      if (/uitrol/.test(q.cmd)) { uitrol = true; break; }
+      if (q.ppid <= 1) break;
+      let penv; try { penv = fs.readFileSync('/proc/' + q.ppid + '/environ'); } catch (e) { break; }
+      if (penv.indexOf(zoek) === -1) break;
+      q = eindProcInfo(q.ppid);
+    }
+    if (uitrol) continue;
+    uit.push({ pid: Number(p), cmd: info.cmd.slice(0, 80) });
   }
   return uit;
 }
 
-// Kort en eruitziend als "ik wacht nog": dan is het geen eindrapport.
+// Kort, en de laatste zin is een eerste-persoons wachtzin ("Waiting for …", "ik wacht tot …",
+// "zodra … meld ik me"). Bewust smal (review 4-10): korte eindrapporten zijn hier de norm, en
+// "de build loopt nog" of "hij wacht op de akte" is een feit in een rapport, geen wachtzin.
 function eindIsWachtzin(tekst) {
-  // Geciteerde tekst telt niet mee (proef 4-10: "ik heb de zin \"Waiting …\" niet gebruikt").
-  const t = String(tekst || '').trim().replace(/"[^"]*"|“[^”]*”|'[^']*'|`[^`]*`/g, '');
-  if (!t || String(tekst).trim().length > EIND_WACHTZIN_MAX) return false;
-  // "Klaar; wacht op akkoord van David" is een eindrapport, geen wachtzin.
-  if (/\b(akkoord|goedkeuring|bevestiging|besluit|beslissing|knop|approval|David)\b/i.test(t)) return false;
-  return /\b(waiting|wait(ing)? for|i'?ll wait|i will wait|let me wait|still running|once (it|the|this)\b[^.]*\b(finish|done|complete)|wachten op|wacht(en)? (nog |even )?(op|tot)|ik wacht|zodra\b[^.]*\b(klaar|af|binnen|gereed)|nog bezig|loopt nog)\b/i.test(t);
+  const heel = String(tekst || '').trim();
+  if (!heel || heel.length > EIND_WACHTZIN_MAX) return false;
+  // Geciteerde tekst telt niet mee (proef 4-10: ik heb de zin "Waiting …" niet gebruikt).
+  const zinnen = heel.replace(/"[^"]*"|“[^”]*”|`[^`]*`/g, '').split(/(?<=[.!?…])\s+|\n+/)
+    .map(function (z) { return z.trim(); }).filter(Boolean);
+  const z = zinnen.length ? zinnen[zinnen.length - 1] : '';
+  if (!z) return false;
+  if (/\b(niet|geen|niets|not|nothing|no longer|don'?t|hoef|hoeft)\b/i.test(z)) return false;
+  if (/\b(akkoord|goedkeuring|bevestiging|besluit|beslissing|knop|approval|David)\b/i.test(z)) return false;
+  return /^(still |now )?waiting\b/i.test(z) ||
+    /\b(i'?ll|i will|i am|i'?m|let me|we'?ll|we are|we'?re|ik|we|wij)\b[^.!?]{0,40}\b(wait|waiting|wacht|wachten)\b/i.test(z) ||
+    /\bzodra\b[^.!?]*\b(meld|rapporteer|laat ik|kom ik|ga ik|lever ik)\b/i.test(z) ||
+    /\b(once|when)\b[^.!?]*\b(i'?ll|i will)\b[^.!?]*\b(report|check|continue|follow up|get back)\b/i.test(z) ||
+    /\b(i'?ll|i will)\b[^.!?]*\b(report|check|continue|follow up|get back)\b[^.!?]*\b(once|when)\b/i.test(z);
 }
 
 function eindBevindingen(taken, procs, wachtzin) {
@@ -1696,43 +1731,64 @@ function eindHervatPrompt(taken, procs, wachtzin, gewachtMs) {
     'in het eindformaat van de opdracht. Rond af en geef je eindrapport. Eindig niet met een wachtzin.]';
 }
 
+// Voorlopig resultaat op schijf zolang de eindcontrole loopt: herstart de container intussen,
+// dan stuurt de pod het bij het opstarten alsnog (met LET OP) in plaats van het weg te gooien.
+function eindVoorlopigPad(jobId) { return path.join(JOBOUT_DIR, jobId + '.voorlopig.txt'); }
+function eindBewaarVoorlopig(jobId, tekst, entry) {
+  try {
+    fs.mkdirSync(JOBOUT_DIR, { recursive: true });
+    fs.writeFileSync(eindVoorlopigPad(jobId), String(tekst || ''), { mode: 0o600 });
+    entry.voorlopig = true; saveAgents();
+  } catch (e) { logError('eindcontrole-voorlopig', e); }
+}
+
 // Toetst het resultaat van een agentrun en hervat of markeert zo nodig. Muteert niets
 // buiten r; gooit nooit (fail-open: bij een interne fout het oorspronkelijke resultaat).
+// Slechtste geval (review 4-10): samen hooguit één INACT_MS wachten over alle rondes, en
+// alles binnen t0 + maxMs; daarna heeft runClaude zijn eigen watchdog (+~50 s).
 async function eindcontrole(jobId, keuze, r, outdir, cwd, runOpts, t0, maxMs, entry) {
   const origineel = r;
+  const progress = runOpts.progress || {};
   // Processen die de agent al in een hervatprompt kreeg voorgelegd: liepen die na zijn
-  // eindrapport bewust door (bv. een daemon), dan niet nóg eens een INACT_MS afwachten.
+  // eindrapport bewust door (bv. een daemon), dan niet nóg eens afwachten.
   const bekend = {};
+  function nieuwe() { return eindLevendeProcessen(jobId).filter(function (p) { return !bekend[p.pid]; }); }
+  let wachtBudget = INACT_MS;
   try {
     for (let ronde = 0; ; ronde++) {
       if (!r || !r.ok) return r;   // fouten en afbrekingen houden hun eigen melding
       const taken = (r.runtime === 'claude') ? eindOpenTaken(cwd, r.session_id) : [];
-      let procs = eindLevendeProcessen(jobId).filter(function (p) { return !bekend[p.pid]; });
       const wachtzin = eindIsWachtzin(r.output);
+      let procs = nieuwe();
+      if (procs.length) { await eindSlaap(EIND_BEZINK_MS); procs = nieuwe(); }
       if (!taken.length && !procs.length && !wachtzin) {
         if (ronde > 0) { entry.eindcontrole = 'hervat ' + ronde + 'x, afgerond'; saveAgents(); }
         return r;
       }
       schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'eindcontrole', job_id: jobId, ronde: ronde,
         open_taken: taken.length, processen: procs.length, wachtzin: wachtzin ? 1 : 0 }));
+      eindBewaarVoorlopig(jobId, r.output, entry);
+      // Alleen nog een wachtzin, zonder meetbaar lopend werk, na een hervatting: niet nog eens.
+      const alleenWachtzin = !taken.length && !procs.length;
+      const magHervatten = ronde < EIND_RONDES_MAX && !(alleenWachtzin && ronde > 0) && r.session_id && !r.fallback_van;
+      // Wachten heeft alleen zin als er daarna nog hervat kan worden.
+      if (!magHervatten || t0 + maxMs - Date.now() < EIND_HERVAT_MIN_MS) return eindMarkeer(r, taken, procs, wachtzin, entry, null);
       const procsBijEinde = procs.slice();
       let gewachtMs = 0;
-      if (procs.length) {
+      if (procs.length && wachtBudget > 0) {
         const start = Date.now();
-        const grens = Math.min(t0 + maxMs, start + INACT_MS);
+        const grens = Math.min(t0 + maxMs - EIND_HERVAT_MIN_MS, start + wachtBudget);
         entry.eindcontrole = 'wacht op ' + procs.length + ' proces(sen)'; saveAgents();
         while (procs.length && Date.now() + EIND_POLL_MS <= grens) {
           await eindSlaap(EIND_POLL_MS);
-          procs = eindLevendeProcessen(jobId);
+          procs = nieuwe();
+          progress.running_ms = Date.now() - t0; progress.last_activity_ms = 0;
         }
         gewachtMs = Date.now() - start;
+        wachtBudget -= gewachtMs;
       }
       const rest = t0 + maxMs - Date.now();
-      // Alleen nog een wachtzin, zonder meetbaar lopend werk, na een hervatting: niet nog eens hervatten.
-      const alleenWachtzin = !taken.length && !procs.length;
-      const kanHervatten = ronde < EIND_RONDES_MAX && !(alleenWachtzin && ronde > 0) &&
-        r.session_id && !r.fallback_van && rest >= EIND_HERVAT_MIN_MS;
-      if (!kanHervatten) return eindMarkeer(r, taken, procs, wachtzin, entry, null);
+      if (rest < EIND_HERVAT_MIN_MS) return eindMarkeer(r, taken, procs, wachtzin, entry, null);
       const nogLevend = {};
       procs.forEach(function (p) { nogLevend[p.pid] = true; });
       const procsVoorPrompt = procsBijEinde.map(function (p) { return Object.assign({}, p, { klaar: !nogLevend[p.pid] }); });
@@ -1749,6 +1805,25 @@ async function eindcontrole(jobId, keuze, r, outdir, cwd, runOpts, t0, maxMs, en
     return origineel;
   }
 }
+
+// Na een containerherstart: agents die midden in hun eindcontrole zaten, krijgen alsnog hun
+// rapport (voorlopige tekst + bestanden uit hun outdir), gemarkeerd als tussenstand. Uitgesteld,
+// zodat alle constanten en functies van dit bestand bestaan.
+setTimeout(function () {
+  for (const id in agentsReg) {
+    const a = agentsReg[id];
+    if (!a || !a.voorlopig || a.status !== 'afgebroken-containerherstart') continue;
+    a.voorlopig = false;
+    let tekst = ''; try { tekst = fs.readFileSync(eindVoorlopigPad(id), 'utf8'); } catch (e) {}
+    let files = []; try { files = collectFiles(path.join(IO, id, 'out')); } catch (e) {}
+    try { fs.rmSync(eindVoorlopigPad(id), { force: true }); } catch (e) {}
+    try { fs.rmSync(path.join(IO, id), { recursive: true, force: true }); } catch (e) {}
+    a.eindcontrole = 'tussenstand gemeld na herstart';
+    saveAgents();
+    sendReport(a, { ok: true, tussenstand: true, files: files,
+      output: EIND_LET_OP_HERSTART + '\n\nWat de agent als laatste schreef:\n' + (tekst.trim() || '(geen tekst)') });
+  }
+}, 5000).unref();
 
 function eindMarkeer(r, taken, procs, wachtzin, entry, mislukt) {
   const kop = EIND_LET_OP + '\n' + eindBevindingen(taken, procs, wachtzin).join('\n') +
@@ -1813,6 +1888,8 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     sendReport(entry, r);
   } finally {
     try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) {}
+    try { fs.rmSync(eindVoorlopigPad(jobId), { force: true }); } catch (e) {}
+    if (entry && entry.voorlopig) { entry.voorlopig = false; saveAgents(); }
   }
 }
 
