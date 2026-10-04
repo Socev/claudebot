@@ -3413,6 +3413,25 @@ async function autoInAuto() {
   return { bekend: !!p, in_auto: !!p && p.klasse === 'auto' && Number(p.minuten_geleden) <= AUTO_PLEK_MAX_MIN };
 }
 // Verzoek 'plek' van het kind (review 4-10, punt 2): vlak vóór een aankondiging en vóór het voorlezen opnieuw toetsen.
+// Verzoek 'locatie' van het kind (4-10-2026, David: "Jarvis aan = auto aan"): kastje online buiten het thuisnet =
+// 'auto in', hartslag weg = 'auto uit'. RPC public.sb_kastje_auto schrijft alleen bij een echte wissel (bron
+// 'kastje'). Alleen deze twee vaste waarden; de reden is een kort label, geen inhoud.
+function autoLocatieVerzoek(m, cb) {
+  const actie = m && (m.actie === 'in' || m.actie === 'uit') ? m.actie : null;
+  if (!actie) return cb({ ok: false, fout: 'ongeldig' });
+  const reden = String((m && m.reden) || '').replace(/[^a-z-]/g, '').slice(0, 30);
+  const url = (process.env.SUPABASE_URL || '').replace(/\/$/, ''), key = process.env.SUPABASE_SERVICE_ROLE || '';
+  if (!url || !key) return cb({ ok: false, fout: 'geen-sleutel' });
+  fetch(url + '/rest/v1/rpc/sb_kastje_auto', { method: 'POST',
+    headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ p: { actie: actie, reden: reden } }), signal: AbortSignal.timeout(8000) })
+    .then(function (r) { return r.ok ? r.json() : { ok: false, fout: 'status-' + r.status }; })
+    .then(function (j) {
+      autoPlekCache.t = 0;                       // de plek is net veranderd: niet uit de cache lezen
+      autoLog({ gebeurtenis: 'locatie', actie: actie, reden: reden, ok: !!(j && j.ok), veranderd: !!(j && j.veranderd) });
+      cb({ ok: !!(j && j.ok), veranderd: !!(j && j.veranderd), fout: j && j.fout ? String(j.fout).slice(0, 60) : undefined });
+    }, function (e) { autoLog({ gebeurtenis: 'locatie', actie: actie, ok: false }); cb({ ok: false, fout: 'rpc' }); });
+}
 function autoPlekVerzoek(m, cb) { autoInAuto().then(function (x) { cb({ ok: true, in_auto: x.in_auto }); }, function () { cb({ ok: true, in_auto: false }); }); }
 function autoNaAfloop(jobId, r, label) {
   if (!autoAgentJobs.has(jobId)) {
@@ -3441,7 +3460,7 @@ function autoOpBericht(k, m) {
     if (w) { autoInternWacht.delete(m.id); clearTimeout(w.t); w.cb(m.antwoord); }
     return;
   }
-  const soorten = { agent: autoAgentVerzoek, stop: autoStopVerzoek, terugval: autoTerugvalVerzoek, uitkomst: autoUitkomstVerzoek, plek: autoPlekVerzoek };
+  const soorten = { agent: autoAgentVerzoek, stop: autoStopVerzoek, terugval: autoTerugvalVerzoek, uitkomst: autoUitkomstVerzoek, plek: autoPlekVerzoek, locatie: autoLocatieVerzoek };
   const behandel = typeof m.soort === 'string' && Object.prototype.hasOwnProperty.call(soorten, m.soort) ? soorten[m.soort] : null;
   if (!behandel) { schrijfLog(nu() + ' auto ' + velden({ gebeurtenis: 'ipc-onbekend' })); return; }
   {
