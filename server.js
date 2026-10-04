@@ -64,6 +64,10 @@ const BG_MAX_CAP_MIN = 120;
 const DONE_TTL_MS = 2 * 60 * 60 * 1000;
 const KILL_GRACE_MS = 10 * 1000;
 const WATCH_INTERVAL_MS = 30 * 1000;
+// Achtergrondagents: startspreiding en vroege levenscontrole (4-10-2026, akkoord David "Ja, graag!").
+// Zie processAgent en runClaude voor het waarom.
+const AGENT_START_SPREIDING_MS = 20 * 1000;
+const VROEG_LEVEN_MS = 3 * 60 * 1000;
 
 // ── verharding: grenzen aan wat er in het geheugen blijft ───────────────────
 // Waarom: `jobs` is een gewoon object in het geheugen zonder bovengrens. Een
@@ -586,17 +590,28 @@ const CLAUDE_EFFORT = (function () {
   return EFFORT_NIVEAUS.indexOf(w) >= 0 ? w : 'high';
 })();
 
+// Is de transcriptmeting in dit proces al eens bewezen (ons eigen, exact gepinde transcript groeide)?
+// Zo niet, dan doodt de vroege levenscontrole niets: fail-open als een nieuwe CLI het pad verlegt.
+let transcriptMeterBewezen = false;
+
 function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
-  // opts: { inactMs, maxMs, progress }  — progress wordt live bijgewerkt zodat
-  // /result running_ms en last_activity_ms kan teruggeven.
+  // opts: { inactMs, maxMs, progress, vroegMs }  — progress wordt live bijgewerkt zodat
+  // /result running_ms en last_activity_ms kan teruggeven. vroegMs (alleen achtergrondagents):
+  // geen enkel teken van leven binnen die tijd -> procesgroep stoppen, error 'afgebroken-geen-levensteken'.
   const inactMs = (opts && opts.inactMs) || INACT_MS;
   const maxMs = (opts && opts.maxMs) || FG_MAX_MS;
+  const vroegMs = (opts && opts.vroegMs) || 0;
   const progress = (opts && opts.progress) || {};
   return new Promise(function (resolve) {
     // Review-fix A1 (5-9-2026): `--` vóór de prompt, anders wordt een bericht dat
     // met '-' begint (Telegram-bullet) als vlag gelezen. Getest met claude -p.
     const args = ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--effort', CLAUDE_EFFORT];
+    // Exact pinnen (4-10-2026). Een nieuwe sessie krijgt hier zelf haar id mee; gemeten met
+    // claude 2.1.288: --session-id <uuid> schrijft <uuid>.jsonl en --resume <id> schrijft in
+    // datzelfde <id>.jsonl door. Daarmee weet de watchdog precies welk transcript van ons is.
+    const eigenId = sessionId || crypto.randomUUID();
     if (sessionId) args.push('--resume', sessionId);
+    else args.push('--session-id', eigenId);
     // Beperkte agent (spraakkastje, 4-10-2026): verboden tools gelden ook onder bypassPermissions (gemeten 4-10).
     if (opts && opts.disallowedTools) args.push('--disallowedTools', opts.disallowedTools);
     args.push('--', prompt);
@@ -612,40 +627,19 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     let out = '', err = '', lastStdout = t0, killedReason = null;
     const projDir = projectDirFor(cwd);
 
-    // Review-fix 16-8 (blokkerend #1): `--resume` maakt een NIEUW session_id en
-    // dus een nieuw .jsonl aan; alleen naar het oude <sessionId>.jsonl kijken
-    // meet een bevroren bestand en doodt juist de lange geresumede runs.
-    // Daarom: (a) snapshot bij spawn van de bestaande transcripts; (b) het
-    // eerste .jsonl dat NIEUW verschijnt is ons transcript → vastpinnen
-    // (review-fix niet-blokkerend #3: parallelle runs meten anders elkaar);
-    // (c) zolang er niets gepind is: jongste .jsonl met mtime > t0 als
-    // fallback, en alleen een mtime > t0 telt als "transcript gezien".
-    const preexisting = {};
-    try {
-      const namen = fs.readdirSync(projDir);
-      for (let i = 0; i < namen.length; i++) if (namen[i].slice(-6) === '.jsonl') preexisting[namen[i]] = true;
-    } catch (e) {}
-    let pinned = null;
+    // Incident 4-10 21:39 (cde3fa2108aef3c2, 1e1e03989a58b11f): de oude heuristiek pinde "het
+    // eerste nieuwe .jsonl" en nam zo het transcript van een buurman die in dezelfde tik van 30 s
+    // begon (3502da3f…, een korte sessie die na 10 s stilviel). Beide agents werkten gewoon, maar
+    // werden 20 min later als 'inactief' gedood. Nu: alleen ons eigen <id>.jsonl, plus de submap
+    // <id>/ (transcripts van subagents), zodat een lange synchrone subagent ook als leven telt.
+    const pinned = path.join(projDir, eigenId + '.jsonl');
+    const pinnedDir = path.join(projDir, eigenId);
 
     function transcriptMtime() {
-      try {
-        if (pinned) {
-          try { return fs.statSync(pinned).mtimeMs; } catch (e) { return 0; }
-        }
-        let newest = 0;
-        const names = fs.readdirSync(projDir);
-        for (let i = 0; i < names.length; i++) {
-          if (names[i].slice(-6) !== '.jsonl') continue;
-          let st; try { st = fs.statSync(path.join(projDir, names[i])); } catch (e) { continue; }
-          if (st.mtimeMs <= t0) continue;
-          if (!preexisting[names[i]]) { pinned = path.join(projDir, names[i]); return st.mtimeMs; }
-          if (st.mtimeMs > newest) newest = st.mtimeMs;
-        }
-        // Geen nieuw bestand: jongste ná-spawn-aangeraakte bestaande transcript
-        // (dekt het geval dat een resume tóch in hetzelfde bestand doorschrijft;
-        // kan bij parallelle runs van een buurman zijn — begrensd door maxMs).
-        return newest;
-      } catch (e) { return 0; }
+      let m = 0;
+      try { m = fs.statSync(pinned).mtimeMs; } catch (e) {}
+      if (m > t0) transcriptMeterBewezen = true;
+      return Math.max(m, newestMtimeIn(pinnedDir, 200));
     }
 
     function killGroup(reason) {
@@ -659,7 +653,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // Stop-ingang (fase 2 spraakkastje): de smalle poort mag een opdracht die zij zelf startte afbreken.
     progress.stoppen = function () { killGroup('gestopt'); };
 
-    let transcriptSeen = false;
+    let transcriptSeen = false, levenGezien = false, vroegGemeld = false;
     const watchdog = setInterval(function () {
       const now = Date.now();
       const tm = transcriptMtime();
@@ -667,7 +661,19 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       const act = Math.max(lastStdout, tm, newestMtimeIn(outdir, 50));
       progress.running_ms = now - t0;
       progress.last_activity_ms = now - act;
+      if (act > t0) levenGezien = true;
       if (now - t0 > maxMs) return killGroup('bovengrens');
+      // Vroege levenscontrole: teken van leven = ons transcript (of de submap) groeide, er kwam
+      // stdout, of er verscheen een bestand in OUTDIR. De CLI schrijft zijn transcript binnen
+      // seconden (gemeten 4-10: eerste regel 4 s na de start), dus 3 min zonder iets is geen
+      // trage agent maar een die niet op gang kwam. Alleen doden als de meting bewezen werkt.
+      if (vroegMs && !levenGezien && now - t0 > vroegMs) {
+        if (transcriptMeterBewezen) return killGroup('geen-levensteken');
+        if (!vroegGemeld) {
+          vroegGemeld = true;
+          schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'vroege-levenscontrole-overgeslagen', reden: 'transcriptmeting nog niet bewezen' }));
+        }
+      }
       // Fail-open: zolang er nooit transcript-activiteit ná de spawn is gezien,
       // alleen de absolute bovengrens hanteren — een kapotte hartslagmeter mag
       // geen werk doden.
@@ -712,7 +718,9 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
         const stil = Math.round((progress.last_activity_ms || 0) / 60000);
         const uitleg = killedReason === 'bovengrens'
           ? 'De opdracht is afgebroken op de absolute bovengrens: hij liep ' + minuten + ' minuten.'
-          : 'De opdracht is afgebroken wegens inactiviteit: hij liep ' + minuten + ' minuten en de laatste activiteit was ' + stil + ' minuten geleden.';
+          : killedReason === 'geen-levensteken'
+            ? 'De opdracht kwam niet op gang: binnen ' + Math.round(vroegMs / 60000) + ' minuten geen transcript, geen uitvoer en geen bestand.'
+            : 'De opdracht is afgebroken wegens inactiviteit: hij liep ' + minuten + ' minuten en de laatste activiteit was ' + stil + ' minuten geleden.';
         return finish({ ok: false, error: 'afgebroken-' + killedReason, output: uitleg, running_ms: Date.now() - t0 });
       }
       finish({ ok: code === 0, output: out.trim(), error: err.slice(-1000) });
@@ -1842,6 +1850,22 @@ function eindMarkeer(r, taken, procs, wachtzin, entry, mislukt) {
   return Object.assign({}, r, { output: kop + (String(r.output || '').trim() || '(geen tekst)'), tussenstand: true });
 }
 
+// ── Startspreiding achtergrondagents (4-10-2026) ────────────────────────────
+// Na het incident van 4-10 21:39 (twee agents in dezelfde seconde) start de pod agents nooit
+// meer tegelijk: elke start wacht tot de vorige minstens AGENT_START_SPREIDING_MS geleden is.
+// Het HTTP-antwoord met job_id blijft direct; de agent staat zolang op 'pending' (telt mee
+// voor MAX_AGENTS en voor de uitrolwachter).
+let agentStartKeten = Promise.resolve();
+let laatsteAgentStart = 0;
+function wachtOpStartbeurt() {
+  const beurt = agentStartKeten.then(function () {
+    const wacht = laatsteAgentStart + AGENT_START_SPREIDING_MS - Date.now();
+    return new Promise(function (r) { setTimeout(r, Math.max(0, wacht)); });
+  }).then(function () { laatsteAgentStart = Date.now(); });
+  agentStartKeten = beurt.catch(function () {});
+  return beurt;
+}
+
 // ── v2: achtergrondagent — niet geserialiseerd, eigen limieten, push aan het eind
 async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
   const base = path.join(IO, jobId);
@@ -1870,15 +1894,41 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     fs.mkdirSync(outdir, { recursive: true });
     const lesblok = await lessenBlok(prompt, (entry && entry.chat_id) || '', (entry && entry.label) || '');
     const fullPrompt = lesblok + prompt + '\n\n' + space.hint(indir, outdir) + '\n' + AGENT_EINDREGEL;
+    await wachtOpStartbeurt();
     j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
     entry.status = 'running'; entry.runtime = keuze.runtime; saveAgents();
-    const t0 = Date.now();
+    let t0 = Date.now();
     const runOpts = { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS, lastFile: path.join(base, 'codex-last.md'), env: {} };
     runOpts.env[EIND_MARKER] = jobId;
     if (j.beperkt === 'auto') { runOpts.disallowedTools = AUTO_AGENT_VERBODEN; runOpts.envWeg = AUTO_AGENT_ENV_WEG; }
-    let r = await runMetFallback(keuze, fullPrompt, explicitSession || '', outdir, space.dir, runOpts);
+    // Vroege levenscontrole (alleen de eerste run; hervattingen in de eindcontrole niet): geen
+    // teken van leven binnen VROEG_LEVEN_MS -> procesgroep weg en precies één nieuwe start, weer
+    // via de startspreiding. Komt ook die niet op gang, dan een duidelijke foutmelding.
+    let r = await runMetFallback(keuze, fullPrompt, explicitSession || '', outdir, space.dir, Object.assign({}, runOpts, { vroegMs: VROEG_LEVEN_MS }));
+    let herstartRegel = '';
+    if (r && r.error === 'afgebroken-geen-levensteken') {
+      schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'agent-geen-levensteken', job_id: jobId, poging: 1 }));
+      entry.herstart = 'geen levensteken, opnieuw gestart'; entry.status = 'pending'; saveAgents();
+      await wachtOpStartbeurt();
+      entry.status = 'running'; saveAgents();
+      t0 = Date.now();
+      const restMs = Math.max(maxMs - (t0 - j.started), 5 * 60 * 1000);
+      herstartRegel = '[Pod: de eerste start kwam niet op gang (binnen ' + Math.round(VROEG_LEVEN_MS / 60000) +
+        ' min geen teken van leven) en is om ' + nu().slice(11, 16) + ' automatisch opnieuw gestart.]';
+      r = await runMetFallback(keuze, fullPrompt, explicitSession || '', outdir, space.dir, Object.assign({}, runOpts, { maxMs: restMs, vroegMs: VROEG_LEVEN_MS }));
+      if (r && r.error === 'afgebroken-geen-levensteken') {
+        schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'agent-geen-levensteken', job_id: jobId, poging: 2 }));
+        entry.herstart = 'geen levensteken, ook niet na herstart';
+        r.output = 'De agent kwam niet op gang: twee starts na elkaar gaven binnen ' + Math.round(VROEG_LEVEN_MS / 60000) +
+          ' minuten geen enkel teken van leven (geen transcript, geen uitvoer, geen bestand). Voor zover meetbaar is er niets gedaan. ' +
+          'Start de opdracht opnieuw; gebeurt dit vaker, dan is het iets voor de machinekamer.';
+      } else entry.herstart = 'geen levensteken, herstart liep';
+      saveAgents();
+      maxMs = restMs;
+    }
     // Eindcontrole (4-10-2026): pas als klaar melden als het echt klaar is.
     r = await eindcontrole(jobId, keuze, r, outdir, space.dir, runOpts, t0, maxMs, entry);
+    if (herstartRegel && r && r.error !== 'afgebroken-geen-levensteken') r.output = herstartRegel + '\n\n' + String(r.output || '');
     r.files = collectFiles(outdir);
     r.workspace = ws;
     // Let op de volgorde: spillIfLarge leegt r.output als die naar schijf gaat,
@@ -2200,6 +2250,7 @@ function handleRequest(req, res) {
         geeindigd: a.ended ? new Date(a.ended).toISOString() : null,
         rapport: a.rapport,
         eindcontrole: a.eindcontrole,
+        herstart: a.herstart,
         running_ms: (j && j.progress) ? j.progress.running_ms : undefined,
         last_activity_ms: (j && j.progress) ? j.progress.last_activity_ms : undefined
       };
