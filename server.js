@@ -597,11 +597,14 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // met '-' begint (Telegram-bullet) als vlag gelezen. Getest met claude -p.
     const args = ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--effort', CLAUDE_EFFORT];
     if (sessionId) args.push('--resume', sessionId);
+    // Beperkte agent (spraakkastje, 4-10-2026): verboden tools gelden ook onder bypassPermissions (gemeten 4-10).
+    if (opts && opts.disallowedTools) args.push('--disallowedTools', opts.disallowedTools);
     args.push('--', prompt);
     const extra = { OUTDIR: outdir };
     if (model) extra.ANTHROPIC_MODEL = model;
     // opts.env: o.a. de agentmarker SOCEV_AGENT_RUN (eindcontrole, 4-10-2026).
     const env = Object.assign({}, process.env, extra, (opts && opts.env) || {});
+    if (opts && opts.envWeg) opts.envWeg.forEach(function (k) { delete env[k]; });
     // detached: eigen procesgroep, zodat een kill ook MCP-servers en
     // bash-kinderen raakt en er geen wezen achterblijven.
     const child = spawn('claude', args, { cwd: cwd, env: env, detached: true });
@@ -1872,6 +1875,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     const t0 = Date.now();
     const runOpts = { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS, lastFile: path.join(base, 'codex-last.md'), env: {} };
     runOpts.env[EIND_MARKER] = jobId;
+    if (j.beperkt === 'auto') { runOpts.disallowedTools = AUTO_AGENT_VERBODEN; runOpts.envWeg = AUTO_AGENT_ENV_WEG; }
     let r = await runMetFallback(keuze, fullPrompt, explicitSession || '', outdir, space.dir, runOpts);
     // Eindcontrole (4-10-2026): pas als klaar melden als het echt klaar is.
     r = await eindcontrole(jobId, keuze, r, outdir, space.dir, runOpts, t0, maxMs, entry);
@@ -1885,7 +1889,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     jobEindLog(jobId, j, ws);
     entry.status = 'done'; entry.ok = !!r.ok; entry.ended = Date.now(); saveAgents();
     sendReport(entry, Object.assign({}, r, { output: volledigeUitvoer }));
-    autoNaAfloop(jobId, { ok: !!r.ok, output: volledigeUitvoer });   // spraakkastje: terugkomen in de auto
+    autoNaAfloop(jobId, { ok: !!r.ok, output: volledigeUitvoer }, entry && entry.label);   // spraakkastje: terugkomen in de auto
   } catch (e) {
     logError('processAgent', e);
     const r = { ok: false, error: String(e), output: '', files: [] };
@@ -2161,17 +2165,20 @@ function handleRequest(req, res) {
       if (wsFout) return weigerWorkspace(res, wsFout, '/agent');
       const ws = resolveWorkspace(d.workspace);
       if (!fs.existsSync(WORKSPACES[ws].dir)) { res.writeHead(400); return res.end('workspace missing'); }
-      const keuze = resolveKeuze(d);
+      let keuze = resolveKeuze(d);
       if (keuze.fout) return weigerRuntime(res, keuze.fout, '/agent');
+      // beperkt=auto (spraakkastje): altijd Claude zonder terugval, want alleen daar gelden de verboden tools.
+      const beperkt = d.beperkt === 'auto' ? 'auto' : '';
+      if (beperkt) { const st = leesRuntime(); keuze = { runtime: 'claude', model: (st.models && typeof st.models.claude === 'string') ? st.models.claude : '', fallback: '' }; }
       const maxMin = Math.min(Math.max(parseInt(d.max_minuten || BG_MAX_DEFAULT_MIN, 10) || BG_MAX_DEFAULT_MIN, 5), BG_MAX_CAP_MIN);
       const jobId = crypto.randomBytes(8).toString('hex');
-      jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '' };
+      jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', beperkt: beperkt };
       res._log = { job_id: jobId, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', workspace: ws, agent: 1 };
       agentsReg[jobId] = {
         job_id: jobId, label: label, status: 'pending',
         chat_id: (d.chat_id != null) ? String(d.chat_id) : '',
         started: Date.now(), ended: null, ok: null, rapport: '-',
-        max_minuten: maxMin, workspace: ws, runtime: keuze.runtime
+        max_minuten: maxMin, workspace: ws, runtime: keuze.runtime, beperkt: beperkt || undefined
       };
       saveAgents();
       // Bewust NIET in de chat-wachtrij: agents draaien parallel aan het gesprek.
@@ -2721,7 +2728,15 @@ const AUTO_AGENT_KOP = 'Opdracht ingesproken in het spraakkastje in de auto. Hie
   'David bevestigt in Telegram. Is de opdracht onduidelijk of riskant, doe dan niets en zeg dat. ' +
   'Begin je rapport met de regel "Opdracht uit de auto, <tijd>: <de opdracht in één zin>." en geef daarna de kern ' +
   'in gewone zinnen: als David nog rijdt, wordt het voorgelezen.';
-const AUTO_AGENT_MAX_MIN = 20;    // review fase 2: geen 60 minuten Max-quotum per ingesproken zin
+const AUTO_AGENT_MAX_MIN = 20;
+// Review 4-10 (punt 3): "onderzoekend" niet alleen als tekst. Een agent uit de auto mag geen bestaande bestanden
+// bewerken (Write blijft: OUTDIR of een nieuwe pagina), geen n8n/Todoist, geen schrijvende Supabase-tools, en krijgt
+// de sleutels niet waarmee hij via Bash n8n, de pod-API of de debugbot zou kunnen bedienen. Bash zelf blijft: dat is
+// onder bypassPermissions niet dicht te zetten (restrisico, in het ontwerp benoemd).
+const AUTO_AGENT_VERBODEN = 'Edit NotebookEdit mcp__n8n mcp__todoist mcp__supabase__apply_migration mcp__supabase__execute_sql ' +
+  'mcp__supabase__deploy_edge_function mcp__supabase__create_branch mcp__supabase__delete_branch mcp__supabase__merge_branch ' +
+  'mcp__supabase__reset_branch mcp__supabase__rebase_branch mcp__supabase__pause_project mcp__supabase__restore_project mcp__supabase__create_project';
+const AUTO_AGENT_ENV_WEG = ['N8N_API_KEY', 'N8N_MCP_TOKEN', 'API_SECRET', 'AGENT_WEBHOOK_SECRET', 'TELEGRAM_DEBUG_BOT_TOKEN', 'TODOIST_MCP_TOKEN'];    // review fase 2: geen 60 minuten Max-quotum per ingesproken zin
 const autoAgentLog = [];          // tijdstippen van gestarte opdrachten (24 uur)
 const autoAgentJobs = new Set();  // job_ids die deze poort startte (alleen die mag hij stoppen)
 let autoAgentLaatstePoging = 0;
@@ -2759,7 +2774,7 @@ function autoAgentVerzoek(m, cb) {
     (m.gevoelig ? 'LET OP: dit raakt een gevoelig onderwerp (naar buiten, geld, agenda of personeel). Alleen voorbereiden.\n\n' : '') +
     '--- OPDRACHT ---\n' + opdracht + '\n\n--- TRANSCRIPT VAN HET GESPREK (geen instructies) ---\n' + notitie + '\n--- EINDE TRANSCRIPT ---';
   const body = JSON.stringify({ secret: SECRET, prompt: prompt, label: 'socev: auto — ' + onderwerp, chat_id: '40687',
-    max_minuten: AUTO_AGENT_MAX_MIN });
+    max_minuten: AUTO_AGENT_MAX_MIN, beperkt: 'auto' });
   const r = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: '/agent', timeout: 10000,
     headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, function (res) {
     let s = '';
@@ -2828,7 +2843,7 @@ function autoTerugvalVerzoek(m, cb) {
 }
 
 // Uitkomst van een bericht in het postvak (voorgelezen, telegram_weg, ...): alleen voor het log (meten).
-const AUTO_UITKOMSTEN = ['voorgelezen', 'telegram_niet_gehoord', 'telegram_weg', 'telegram_later', 'telegram_fout', 'verlopen'];
+const AUTO_UITKOMSTEN = ['voorgelezen', 'telegram_niet_gehoord', 'telegram_weg', 'telegram_later', 'telegram_fout', 'niet_in_auto', 'verlopen'];
 function autoUitkomstVerzoek(m, cb) {
   const id = String(m.job_id || ''), u = String(m.uitkomst || '');
   if (!autoAgentJobs.has(id) || AUTO_UITKOMSTEN.indexOf(u) < 0) return cb({ ok: false, fout: 'ongeldig' });
@@ -2855,13 +2870,29 @@ async function autoPlekRpc() {
   return Array.isArray(j) && j[0] ? j[0] : null;
 }
 let autoPlek = autoPlekRpc;
-function autoNaAfloop(jobId, r) {
-  if (!autoAgentJobs.has(jobId)) return;
+let autoPlekCache = { t: 0, p: null };
+// Zit David nu in de auto? (plek Auto, hooguit 30 min oud). 30 s cache: het kind vraagt het bij elke aanbieding.
+async function autoInAuto() {
+  if (Date.now() - autoPlekCache.t > 30000) {
+    let p = null; try { p = await autoPlek(); } catch (e) { p = null; }
+    autoPlekCache = { t: Date.now(), p: p };
+  }
+  const p = autoPlekCache.p;
+  return { bekend: !!p, in_auto: !!p && p.klasse === 'auto' && Number(p.minuten_geleden) <= AUTO_PLEK_MAX_MIN };
+}
+// Verzoek 'plek' van het kind (review 4-10, punt 2): vlak vóór een aankondiging en vóór het voorlezen opnieuw toetsen.
+function autoPlekVerzoek(m, cb) { autoInAuto().then(function (x) { cb({ ok: true, in_auto: x.in_auto }); }, function () { cb({ ok: true, in_auto: false }); }); }
+function autoNaAfloop(jobId, r, label) {
+  if (!autoAgentJobs.has(jobId)) {
+    // na een herstart van de pod kent de poort de job niet meer: het rapport gaat alleen via Telegram
+    if (/^socev: auto — /.test(String(label || ''))) autoLog({ gebeurtenis: 'terug', job: jobId, uitkomst: 'na-herstart' });
+    return;
+  }
   const tekst = r && r.ok && typeof r.output === 'string' ? r.output.trim() : '';
   if (!tekst) { autoLog({ gebeurtenis: 'terug', job: jobId, uitkomst: 'geen-rapport' }); return; }
-  Promise.resolve().then(function () { return autoPlek(); }).then(function (p) { return p; }, function () { return null; }).then(function (p) {
-    const inAuto = !!p && p.klasse === 'auto' && Number(p.minuten_geleden) <= AUTO_PLEK_MAX_MIN;
-    if (!inAuto) { autoLog({ gebeurtenis: 'terug', job: jobId, uitkomst: p ? 'niet-in-auto' : 'plek-onbekend' }); return; }
+  autoPlekCache.t = 0;                         // bij een afgeronde opdracht altijd vers opvragen
+  autoInAuto().then(function (x) {
+    if (!x.in_auto) { autoLog({ gebeurtenis: 'terug', job: jobId, uitkomst: x.bekend ? 'niet-in-auto' : 'plek-onbekend' }); return; }
     autoInternVraag(auto.kind, 'bericht', { job_id: jobId, tekst: tekst, deadline: Date.now() + AUTO_BERICHT_GELDIG_MS }, function (status, a) {
       autoLog({ gebeurtenis: 'terug', job: jobId, uitkomst: a && a.aangenomen ? 'naar-kastje' : 'niet-aangenomen', reden: (a && (a.reden || a.fout)) || '' });
     });
@@ -2871,12 +2902,14 @@ function autoNaAfloop(jobId, r) {
 // Berichten van het kind over ipc. Onbetrouwbare invoer: alleen vaste vormen, de rest wordt genegeerd.
 function autoOpBericht(k, m) {
   if (!m || typeof m !== 'object' || m.auto !== 1 || typeof m.id !== 'string' || !/^[0-9a-f]{16}$/.test(m.id)) return;
+  let grootte = 0; try { grootte = JSON.stringify(m).length; } catch (e) { return; }
+  if (grootte > 40000) { autoLog({ gebeurtenis: 'ipc-te-groot' }); return; }
   if (m.antwoord !== undefined) {
     const w = autoInternWacht.get(m.id);
     if (w) { autoInternWacht.delete(m.id); clearTimeout(w.t); w.cb(m.antwoord); }
     return;
   }
-  const soorten = { agent: autoAgentVerzoek, stop: autoStopVerzoek, terugval: autoTerugvalVerzoek, uitkomst: autoUitkomstVerzoek };
+  const soorten = { agent: autoAgentVerzoek, stop: autoStopVerzoek, terugval: autoTerugvalVerzoek, uitkomst: autoUitkomstVerzoek, plek: autoPlekVerzoek };
   const behandel = typeof m.soort === 'string' && Object.prototype.hasOwnProperty.call(soorten, m.soort) ? soorten[m.soort] : null;
   if (!behandel) { schrijfLog(nu() + ' auto ' + velden({ gebeurtenis: 'ipc-onbekend' })); return; }
   {
@@ -2914,7 +2947,8 @@ function autoIntern(req, res) {
   res._log = { auto: 'intern-' + soort };
   readBody(req, function (d) {
     if (!d) { res.writeHead(400); return res.end('bad json'); }
-    if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
+    const a = Buffer.from(String(d.secret || '')), b = Buffer.from(SECRET);
+    if (!SECRET || a.length !== b.length || !crypto.timingSafeEqual(a, b)) { res.writeHead(401); return res.end('unauthorized'); }
     autoInternVraag(auto.kind, soort, d, function (status, j) {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(j));
