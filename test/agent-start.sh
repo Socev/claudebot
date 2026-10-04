@@ -4,8 +4,8 @@
 # nep-`claude` vooraan in PATH; geen taalmodel, geen pod nodig. De nep-CLI volgt het GEMETEN gedrag
 # van claude 2.1.288: --session-id <uuid> schrijft <projects>/<cwd-mangled>/<uuid>.jsonl, --resume <id>
 # schrijft in datzelfde bestand door.
-# Met OUD=1 draait toets A ook tegen de vorige versie (git HEAD) om het incident van 4-10 21:39 na te
-# bootsen (buurman-transcript gepind -> gezonde agent gedood wegens 'inactiviteit').
+# Toets A draait ook tegen f910c8b (de versie van het incident van 4-10 21:39): daar moet hetzelfde
+# scenario de gezonde agent doden (buurman-transcript gepind -> 'inactiviteit'), anders is A vals groen.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
@@ -127,7 +127,7 @@ function stop(srv) { try { process.kill(-srv.p.pid, 'SIGKILL'); } catch (e) {} }
     const sc = spawns().filter((x) => x.sleutel === 'c1');
     toets('C precies twee starts', sc.length === 2, sc.length + '');
     toets('C hangend eerste proces is gestopt', sc.length >= 1 && !leeft(sc[0].pid));
-    toets('C rapport ok met herstartregel', rc && rc.ok && /^\[Pod: de eerste start kwam niet op gang/.test(rc.output) && /klaar HANG1/.test(rc.output), rc && rc.output.slice(0, 100));
+    toets('C rapport ok met herstartregel achteraan', rc && rc.ok && /^klaar HANG1/.test(rc.output) && /\n\n\[Pod: de eerste start kwam niet op gang[^\]]*\]$/.test(rc.output), rc && rc.output.slice(0, 100));
     toets('C eerste start binnen ~3 s + tik gestopt', sc.length === 2 && sc[1].t - sc[0].t < 3000 + 500 + 1500 + 2500, sc.length === 2 ? (sc[1].t - sc[0].t) + ' ms' : '');
     const lijst = await get(s2, '/agents');
     const ec = lijst.agents.find((x) => x.job_id === c.job_id);
@@ -153,16 +153,17 @@ function stop(srv) { try { process.kill(-srv.p.pid, 'SIGKILL'); } catch (e) {} }
     toets('G gewone agent: ok en geen herstartregel', rg && rg.ok && /^klaar NORMAAL/.test(rg.output), rg && rg.output.slice(0, 60));
     stop(s2);
 
-    // ── Nabootsing van het incident tegen de vorige versie (alleen met OUD=1).
-    if (process.env.OUD === '1') {
-      fs.writeFileSync(path.join(W, 'oud.js'), execSync('git show HEAD:server.js'));
+    // ── Nabootsing van het incident tegen de versie van vóór de wijziging (f910c8b, draaiend op 4-10 21:39):
+    // het scenario moet daar WEL tot een kill leiden, anders bewijst toets A niets.
+    {
+      fs.writeFileSync(path.join(W, 'oud.js'), execSync('git show f910c8b:server.js'));
       const s3 = maakServer(path.join(W, 'oud.js'), 's3', 18613); alle.push(s3); await wachtOp(s3);
       const [o1] = await Promise.all([agent(s3, 'oud lang', 'MODUS:LANG SLEUTEL:o1')]);
       await slaap(200);
       fs.mkdirSync(s3.projDir, { recursive: true });
       fs.writeFileSync(path.join(s3.projDir, '00000000-buurman.jsonl'), '{}\n');
       const ro = await rapportVoor(o1.job_id, 30000);
-      console.log('INFO  oude versie, zelfde scenario: ' + (ro ? (ro.ok ? 'ok' : 'GEDOOD: ' + ro.output) : 'geen rapport'));
+      toets('A scenario is onderscheidend: f910c8b doodt dezelfde gezonde agent', ro && !ro.ok && /inactiviteit/.test(ro.output), ro && ro.output.slice(0, 60));
       stop(s3);
     }
   } catch (e) { console.log('ROOD  uitzondering: ' + (e && e.stack || e)); fout++; }

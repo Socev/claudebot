@@ -591,8 +591,9 @@ const CLAUDE_EFFORT = (function () {
 })();
 
 // Is de transcriptmeting in dit proces al eens bewezen (ons eigen, exact gepinde transcript groeide)?
-// Zo niet, dan doodt de vroege levenscontrole niets: fail-open als een nieuwe CLI het pad verlegt.
-let transcriptMeterBewezen = false;
+// Bijgehouden per projectmap (review 4-10): een bewijs in de vault zegt niets over een andere cwd.
+// Zonder bewijs doodt de vroege levenscontrole niets: fail-open als een nieuwe CLI het pad verlegt.
+const transcriptMeterBewezen = {};
 
 function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   // opts: { inactMs, maxMs, progress, vroegMs }  — progress wordt live bijgewerkt zodat
@@ -638,8 +639,9 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     function transcriptMtime() {
       let m = 0;
       try { m = fs.statSync(pinned).mtimeMs; } catch (e) {}
-      if (m > t0) transcriptMeterBewezen = true;
-      return Math.max(m, newestMtimeIn(pinnedDir, 200));
+      if (m > t0) transcriptMeterBewezen[projDir] = true;
+      // Ruime grens: tool-results/ telt mee in dezelfde loop en mag subagents/ niet wegdrukken.
+      return Math.max(m, newestMtimeIn(pinnedDir, 2000));
     }
 
     function killGroup(reason) {
@@ -668,7 +670,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       // seconden (gemeten 4-10: eerste regel 4 s na de start), dus 3 min zonder iets is geen
       // trage agent maar een die niet op gang kwam. Alleen doden als de meting bewezen werkt.
       if (vroegMs && !levenGezien && now - t0 > vroegMs) {
-        if (transcriptMeterBewezen) return killGroup('geen-levensteken');
+        if (transcriptMeterBewezen[projDir]) return killGroup('geen-levensteken');
         if (!vroegGemeld) {
           vroegGemeld = true;
           schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'vroege-levenscontrole-overgeslagen', reden: 'transcriptmeting nog niet bewezen' }));
@@ -1909,26 +1911,36 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     if (r && r.error === 'afgebroken-geen-levensteken') {
       schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'agent-geen-levensteken', job_id: jobId, poging: 1 }));
       entry.herstart = 'geen levensteken, opnieuw gestart'; entry.status = 'pending'; saveAgents();
+      // De stop-ingang wees nog naar de gedode eerste run; stoppen tijdens het wachten schrapt de herstart.
+      let gestopt = false;
+      j.progress.stoppen = function () { gestopt = true; };
       await wachtOpStartbeurt();
       entry.status = 'running'; saveAgents();
-      t0 = Date.now();
-      const restMs = Math.max(maxMs - (t0 - j.started), 5 * 60 * 1000);
-      herstartRegel = '[Pod: de eerste start kwam niet op gang (binnen ' + Math.round(VROEG_LEVEN_MS / 60000) +
-        ' min geen teken van leven) en is om ' + nu().slice(11, 16) + ' automatisch opnieuw gestart.]';
-      r = await runMetFallback(keuze, fullPrompt, explicitSession || '', outdir, space.dir, Object.assign({}, runOpts, { maxMs: restMs, vroegMs: VROEG_LEVEN_MS }));
-      if (r && r.error === 'afgebroken-geen-levensteken') {
-        schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'agent-geen-levensteken', job_id: jobId, poging: 2 }));
-        entry.herstart = 'geen levensteken, ook niet na herstart';
-        r.output = 'De agent kwam niet op gang: twee starts na elkaar gaven binnen ' + Math.round(VROEG_LEVEN_MS / 60000) +
-          ' minuten geen enkel teken van leven (geen transcript, geen uitvoer, geen bestand). Voor zover meetbaar is er niets gedaan. ' +
-          'Start de opdracht opnieuw; gebeurt dit vaker, dan is het iets voor de machinekamer.';
-      } else entry.herstart = 'geen levensteken, herstart liep';
+      if (gestopt) {
+        entry.herstart = 'geen levensteken, herstart geschrapt (gestopt)';
+        r = { ok: false, error: 'afgebroken-gestopt', output: 'De opdracht kwam niet op gang en is daarna gestopt; er is niet opnieuw gestart.' };
+      } else {
+        t0 = Date.now();
+        const restMs = Math.max(maxMs - (t0 - j.started), 5 * 60 * 1000);
+        herstartRegel = '[Pod: de eerste start kwam niet op gang (binnen ' + Math.round(VROEG_LEVEN_MS / 60000) +
+          ' min geen teken van leven) en is om ' + nu().slice(11, 16) + ' automatisch opnieuw gestart.]';
+        r = await runMetFallback(keuze, fullPrompt, explicitSession || '', outdir, space.dir, Object.assign({}, runOpts, { maxMs: restMs, vroegMs: VROEG_LEVEN_MS }));
+        if (r && r.error === 'afgebroken-geen-levensteken') {
+          schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'agent-geen-levensteken', job_id: jobId, poging: 2 }));
+          entry.herstart = 'geen levensteken, ook niet na herstart';
+          herstartRegel = '';
+          r.output = 'De agent kwam niet op gang: twee starts na elkaar gaven binnen ' + Math.round(VROEG_LEVEN_MS / 60000) +
+            ' minuten geen enkel teken van leven (geen transcript, geen uitvoer, geen bestand). Voor zover meetbaar is er niets gedaan. ' +
+            'Start de opdracht opnieuw; gebeurt dit vaker, dan is het iets voor de machinekamer.';
+        } else entry.herstart = 'geen levensteken, herstart liep';
+        maxMs = restMs;
+      }
       saveAgents();
-      maxMs = restMs;
     }
     // Eindcontrole (4-10-2026): pas als klaar melden als het echt klaar is.
     r = await eindcontrole(jobId, keuze, r, outdir, space.dir, runOpts, t0, maxMs, entry);
-    if (herstartRegel && r && r.error !== 'afgebroken-geen-levensteken') r.output = herstartRegel + '\n\n' + String(r.output || '');
+    // Achteraan, zodat een eventuele "LET OP: tussenstand"-kop van de eindcontrole bovenaan blijft.
+    if (herstartRegel && r) r.output = String(r.output || '').replace(/\s+$/, '') + '\n\n' + herstartRegel;
     r.files = collectFiles(outdir);
     r.workspace = ws;
     // Let op de volgorde: spillIfLarge leegt r.output als die naar schijf gaat,
