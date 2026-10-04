@@ -600,7 +600,8 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     args.push('--', prompt);
     const extra = { OUTDIR: outdir };
     if (model) extra.ANTHROPIC_MODEL = model;
-    const env = Object.assign({}, process.env, extra);
+    // opts.env: o.a. de agentmarker SOCEV_AGENT_RUN (eindcontrole, 4-10-2026).
+    const env = Object.assign({}, process.env, extra, (opts && opts.env) || {});
     // detached: eigen procesgroep, zodat een kill ook MCP-servers en
     // bash-kinderen raakt en er geen wezen achterblijven.
     const child = spawn('claude', args, { cwd: cwd, env: env, detached: true });
@@ -779,7 +780,7 @@ function runCodex(prompt, threadId, outdir, cwd, model, opts) {
     if (model) args.push('-m', model);
     if (threadId) args.push('resume', threadId);
     args.push('--', prompt);
-    const env = Object.assign({}, process.env, { OUTDIR: outdir, CODEX_HOME: CODEX_HOME });
+    const env = Object.assign({}, process.env, { OUTDIR: outdir, CODEX_HOME: CODEX_HOME }, (opts && opts.env) || {});
     const child = spawn('codex', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const t0 = Date.now();
     let out = '', err = '', rest = '', lastStdout = t0, killedReason = null;
@@ -932,7 +933,7 @@ function agyPoging(prompt, conversationId, outdir, cwd, model, effort, opts) {
     args.push('--print=' + prompt);
     // Automatische update uit: een CLI die zichzelf midden in een beurt vervangt, is niet
     // meer de versie die in /health staat.
-    const env = Object.assign({}, process.env, { OUTDIR: outdir, AGY_CLI_DISABLE_AUTO_UPDATE: '1' });
+    const env = Object.assign({}, process.env, { OUTDIR: outdir, AGY_CLI_DISABLE_AUTO_UPDATE: '1' }, (opts && opts.env) || {});
     const t0 = Date.now();
     let child;
     try {
@@ -1550,6 +1551,213 @@ function sendReport(entry, result, attempt) {
   });
 }
 
+// ── Eindcontrole achtergrondagent (4-10-2026, akkoord David: "2. Ja") ────────
+// WAAROM. Op 3-10 22:10 kreeg David van agent bea9ff33b533f9e8 als eindrapport alleen
+// "Waiting for the F5 round to finish." Gemeten in het transcript: de CLI blokkeerde
+// `sleep 100`, de agent zette zijn wachtlus met run_in_background op de achtergrond en
+// eindigde zijn beurt met een wachtzin; `claude -p` stopte (exit 0) en doodde die lus
+// (uitvoerbestand: "[killed]"). Het werk zelf liep door; het rapport was een tussenzin.
+// Gemeten gedrag van claude -p 2.1.288 (proeven 4-10): op achtergrond-SUBAGENTS en
+// MONITORS wacht de CLI zelf; Bash-taken met run_in_background worden bij het einde
+// van de beurt gedood; `nohup … &` overleeft in een eigen sessie (dus NIET in onze
+// procesgroep), maar erft wel de omgeving - daarom de marker SOCEV_AGENT_RUN=<job>.
+// WAT DIT DOET. Na het einde van de agentrun drie toetsen: (1) achtergrondtaken die
+// volgens het transcript nog open stonden, (2) nog levende processen met onze marker,
+// (3) een korte eindtekst die eruitziet als een wachtzin. Is er iets: eerst wachten op
+// de levende processen (hooguit INACT_MS en nooit voorbij de bovengrens van de agent),
+// dan dezelfde sessie hervatten met "rond af en geef je eindrapport" (hooguit
+// EIND_RONDES_MAX keer). Lukt dat niet, dan begint het rapport met EIND_LET_OP.
+// Status blijft 'running' tijdens wachten en hervatten: een containerherstart markeert
+// de agent dan gewoon als afgebroken, en het slot telt eerlijk mee.
+const EIND_MARKER = 'SOCEV_AGENT_RUN';
+const EIND_RONDES_MAX = 2;
+const EIND_POLL_MS = 15 * 1000;
+const EIND_HERVAT_MIN_MS = 3 * 60 * 1000;
+const EIND_WACHTZIN_MAX = 400;
+const EIND_LET_OP = 'LET OP: tussenstand — de agent stopte terwijl er nog werk liep.';
+// Gaat achter elke agentprompt, zodat het ook geldt als de opdrachtgever het vergat.
+const AGENT_EINDREGEL = '[Systeem, eindregel: eindig je beurt nooit met een wachtzin; je laatste antwoord is je eindrapport. ' +
+  'Moet je wachten, wacht dan binnen je beurt met een Bash-commando in de VOORGROND: een begrensde lus ' +
+  '(bv. for i in $(seq 1 35); do <controle> && break; sleep 15; done) met een expliciete timeout tot 600000 ms, zo nodig herhaald. ' +
+  'Gebruik daarvoor geen run_in_background: achtergrondcommando\'s worden gedood zodra je beurt eindigt. ' +
+  'Start subagents met run_in_background: false.]';
+
+function eindSlaap(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+// Open achtergrondtaken aan het eind van de LAATSTE beurt in het transcript. Een nieuwe
+// gewone prompt (ook onze hervatprompt) begint een nieuwe beurt: taken van een vorige
+// `claude -p` zijn bij diens einde al gedood of afgewacht. Fail-open: geen of onleesbaar
+// transcript = niets gevonden (de andere twee toetsen blijven staan).
+function eindOpenTaken(cwd, sessionId) {
+  if (!sessionId || !/^[A-Za-z0-9-]+$/.test(String(sessionId))) return [];
+  let tekst;
+  try { tekst = fs.readFileSync(path.join(projectDirFor(cwd), sessionId + '.jsonl'), 'utf8'); } catch (e) { return []; }
+  let open = {};
+  const regels = tekst.split('\n');
+  for (let i = 0; i < regels.length; i++) {
+    if (!regels[i]) continue;
+    let r; try { r = JSON.parse(regels[i]); } catch (e) { continue; }
+    if (!r || r.isSidechain) continue;
+    // Een taakmelding kan op drie plekken staan (gemeten): als user-bericht, als
+    // queue-operation (enqueue) en als attachment 'queued_command' - die laatste zonder
+    // user-bericht als de melding binnenkwam terwijl de agent nog bezig was.
+    if (r.type === 'queue-operation' || r.type === 'attachment') {
+      const q = (r.type === 'queue-operation') ? r.content : (r.attachment && r.attachment.prompt);
+      if (typeof q === 'string') eindSluitTaken(open, q);
+      continue;
+    }
+    if (r.type !== 'user') continue;
+    const c = r.message && r.message.content;
+    const tu = r.toolUseResult;
+    let platte = null;
+    if (typeof c === 'string') platte = c;
+    else if (Array.isArray(c) && !c.some(function (x) { return x && x.type === 'tool_result'; })) {
+      platte = c.map(function (x) { return (x && x.type === 'text') ? x.text : ''; }).join('\n');
+    }
+    if (platte !== null) {
+      if (platte.indexOf('<task-notification>') !== -1) eindSluitTaken(open, platte);
+      else if (!r.isMeta) open = {};   // nieuwe beurt
+      continue;
+    }
+    if (tu && typeof tu === 'object') {
+      if (tu.backgroundTaskId) open[String(tu.backgroundTaskId)] = 'opdracht';
+      if (tu.isAsync && tu.agentId) open[String(tu.agentId)] = 'subagent';
+      if (tu.resumedAgentId) open[String(tu.resumedAgentId)] = 'subagent';
+      if (tu.taskId && tu.timeoutMs !== undefined) open[String(tu.taskId)] = 'monitor';
+    }
+    // TaskStop: de taak is bewust gestopt (ook als er geen melding meer volgt).
+    if (tu && typeof tu === 'object' && (tu.task_id || tu.shell_id) && !tu.backgroundTaskId) delete open[String(tu.task_id || tu.shell_id)];
+  }
+  return Object.keys(open).map(function (id) { return { id: id, soort: open[id] }; });
+}
+
+// Een taakmelding sluit de taak - behalve een tussentijds Monitor-event.
+function eindSluitTaken(open, tekst) {
+  if (tekst.indexOf('<task-notification>') === -1) return;
+  const re = /<task-notification>([\s\S]*?)<\/task-notification>/g;
+  let m;
+  while ((m = re.exec(tekst))) {
+    const id = (/<task-id>([^<]+)<\/task-id>/.exec(m[1]) || [])[1];
+    if (!id || !open[id]) continue;
+    if (open[id] === 'monitor' && !/<status>/.test(m[1]) && !/expired|ended|stopped|exited/i.test(m[1])) continue;
+    delete open[id];
+  }
+}
+
+// Nog levende processen die van deze agentrun afstammen (ze erven de marker). Een
+// gedetacheerde uitrol telt niet mee: die wacht zelf tot er geen agent meer loopt.
+function eindLevendeProcessen(jobId) {
+  const zoek = Buffer.from(EIND_MARKER + '=' + jobId + '\0');
+  const uit = [];
+  let namen = [];
+  try { namen = fs.readdirSync('/proc'); } catch (e) { return uit; }
+  for (let i = 0; i < namen.length; i++) {
+    const p = namen[i];
+    if (!/^\d+$/.test(p) || Number(p) === process.pid) continue;
+    let env; try { env = fs.readFileSync('/proc/' + p + '/environ'); } catch (e) { continue; }
+    if (env.indexOf(zoek) === -1) continue;
+    let cmd = ''; try { cmd = fs.readFileSync('/proc/' + p + '/cmdline').toString().replace(/\0/g, ' ').trim(); } catch (e) {}
+    if (!cmd || /uitrol/.test(cmd)) continue;
+    let stat = ''; try { stat = fs.readFileSync('/proc/' + p + '/stat', 'utf8'); } catch (e) {}
+    if (/\)\s+Z\s/.test(stat)) continue;   // zombie: klaar, alleen nog niet opgeruimd
+    uit.push({ pid: Number(p), cmd: cmd.slice(0, 80) });
+  }
+  return uit;
+}
+
+// Kort en eruitziend als "ik wacht nog": dan is het geen eindrapport.
+function eindIsWachtzin(tekst) {
+  // Geciteerde tekst telt niet mee (proef 4-10: "ik heb de zin \"Waiting …\" niet gebruikt").
+  const t = String(tekst || '').trim().replace(/"[^"]*"|“[^”]*”|'[^']*'|`[^`]*`/g, '');
+  if (!t || String(tekst).trim().length > EIND_WACHTZIN_MAX) return false;
+  // "Klaar; wacht op akkoord van David" is een eindrapport, geen wachtzin.
+  if (/\b(akkoord|goedkeuring|bevestiging|besluit|beslissing|knop|approval|David)\b/i.test(t)) return false;
+  return /\b(waiting|wait(ing)? for|i'?ll wait|i will wait|let me wait|still running|once (it|the|this)\b[^.]*\b(finish|done|complete)|wachten op|wacht(en)? (nog |even )?(op|tot)|ik wacht|zodra\b[^.]*\b(klaar|af|binnen|gereed)|nog bezig|loopt nog)\b/i.test(t);
+}
+
+function eindBevindingen(taken, procs, wachtzin) {
+  const regels = [];
+  taken.forEach(function (t) {
+    regels.push('- ' + (t.soort === 'opdracht' ? 'achtergrondopdracht ' + t.id + ': gestopt bij het einde van de beurt'
+      : (t.soort === 'subagent' ? 'subagent ' + t.id + ': liep nog' : 'monitor ' + t.id + ': liep nog')));
+  });
+  procs.forEach(function (p) { regels.push('- proces ' + p.pid + ' liep nog' + (p.klaar ? ' bij het einde van je beurt (inmiddels klaar)' : '') + ': ' + p.cmd); });
+  if (wachtzin) regels.push('- de eindtekst is een wachtzin, geen eindrapport');
+  return regels;
+}
+
+function eindHervatPrompt(taken, procs, wachtzin, gewachtMs) {
+  return '[Systeem, eindcontrole van de pod: je beurt eindigde terwijl er nog werk liep, dus je laatste tekst is geen eindrapport.\n' +
+    eindBevindingen(taken, procs, wachtzin).join('\n') + '\n' +
+    (gewachtMs > 0 ? 'De pod heeft ' + Math.round(gewachtMs / 1000) + ' s gewacht op de nog lopende processen.\n' : '') +
+    (taken.some(function (t) { return t.soort === 'opdracht'; }) ? 'Achtergrondopdrachten van je vorige beurt zijn gestopt; hun uitvoer is onvolledig. ' : '') +
+    'Controleer zelf de werkelijke stand ' +
+    '(synchroon, in de voorgrond, geen run_in_background), maak af wat nog nodig is en geef daarna je eindrapport ' +
+    'in het eindformaat van de opdracht. Rond af en geef je eindrapport. Eindig niet met een wachtzin.]';
+}
+
+// Toetst het resultaat van een agentrun en hervat of markeert zo nodig. Muteert niets
+// buiten r; gooit nooit (fail-open: bij een interne fout het oorspronkelijke resultaat).
+async function eindcontrole(jobId, keuze, r, outdir, cwd, runOpts, t0, maxMs, entry) {
+  const origineel = r;
+  // Processen die de agent al in een hervatprompt kreeg voorgelegd: liepen die na zijn
+  // eindrapport bewust door (bv. een daemon), dan niet nóg eens een INACT_MS afwachten.
+  const bekend = {};
+  try {
+    for (let ronde = 0; ; ronde++) {
+      if (!r || !r.ok) return r;   // fouten en afbrekingen houden hun eigen melding
+      const taken = (r.runtime === 'claude') ? eindOpenTaken(cwd, r.session_id) : [];
+      let procs = eindLevendeProcessen(jobId).filter(function (p) { return !bekend[p.pid]; });
+      const wachtzin = eindIsWachtzin(r.output);
+      if (!taken.length && !procs.length && !wachtzin) {
+        if (ronde > 0) { entry.eindcontrole = 'hervat ' + ronde + 'x, afgerond'; saveAgents(); }
+        return r;
+      }
+      schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'eindcontrole', job_id: jobId, ronde: ronde,
+        open_taken: taken.length, processen: procs.length, wachtzin: wachtzin ? 1 : 0 }));
+      const procsBijEinde = procs.slice();
+      let gewachtMs = 0;
+      if (procs.length) {
+        const start = Date.now();
+        const grens = Math.min(t0 + maxMs, start + INACT_MS);
+        entry.eindcontrole = 'wacht op ' + procs.length + ' proces(sen)'; saveAgents();
+        while (procs.length && Date.now() + EIND_POLL_MS <= grens) {
+          await eindSlaap(EIND_POLL_MS);
+          procs = eindLevendeProcessen(jobId);
+        }
+        gewachtMs = Date.now() - start;
+      }
+      const rest = t0 + maxMs - Date.now();
+      // Alleen nog een wachtzin, zonder meetbaar lopend werk, na een hervatting: niet nog eens hervatten.
+      const alleenWachtzin = !taken.length && !procs.length;
+      const kanHervatten = ronde < EIND_RONDES_MAX && !(alleenWachtzin && ronde > 0) &&
+        r.session_id && !r.fallback_van && rest >= EIND_HERVAT_MIN_MS;
+      if (!kanHervatten) return eindMarkeer(r, taken, procs, wachtzin, entry, null);
+      const nogLevend = {};
+      procs.forEach(function (p) { nogLevend[p.pid] = true; });
+      const procsVoorPrompt = procsBijEinde.map(function (p) { return Object.assign({}, p, { klaar: !nogLevend[p.pid] }); });
+      procsBijEinde.forEach(function (p) { bekend[p.pid] = true; });
+      entry.eindcontrole = 'hervat (ronde ' + (ronde + 1) + ')'; saveAgents();
+      const r2 = await runBrein(keuze.runtime, eindHervatPrompt(taken, procsVoorPrompt, wachtzin, gewachtMs), r.session_id,
+        outdir, cwd, keuze.model, Object.assign({}, runOpts, { maxMs: rest }));
+      if (!r2 || !r2.ok || !String(r2.output || '').trim()) return eindMarkeer(r, taken, procs, wachtzin, entry, r2);
+      r2.eindcontrole_rondes = ronde + 1;
+      r = r2;
+    }
+  } catch (e) {
+    logError('eindcontrole', e);
+    return origineel;
+  }
+}
+
+function eindMarkeer(r, taken, procs, wachtzin, entry, mislukt) {
+  const kop = EIND_LET_OP + '\n' + eindBevindingen(taken, procs, wachtzin).join('\n') +
+    (mislukt ? '\n- afronden in dezelfde sessie lukte niet' + (mislukt.error ? ' (' + String(mislukt.error).slice(0, 120) + ')' : '') : '') +
+    '\n\nWat de agent als laatste schreef:\n';
+  entry.eindcontrole = 'tussenstand gemeld'; saveAgents();
+  return Object.assign({}, r, { output: kop + (String(r.output || '').trim() || '(geen tekst)'), tussenstand: true });
+}
+
 // ── v2: achtergrondagent — niet geserialiseerd, eigen limieten, push aan het eind
 async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
   const base = path.join(IO, jobId);
@@ -1577,11 +1785,15 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     fs.mkdirSync(indir, { recursive: true });
     fs.mkdirSync(outdir, { recursive: true });
     const lesblok = await lessenBlok(prompt, (entry && entry.chat_id) || '', (entry && entry.label) || '');
-    const fullPrompt = lesblok + prompt + '\n\n' + space.hint(indir, outdir);
+    const fullPrompt = lesblok + prompt + '\n\n' + space.hint(indir, outdir) + '\n' + AGENT_EINDREGEL;
     j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
     entry.status = 'running'; entry.runtime = keuze.runtime; saveAgents();
-    const r = await runMetFallback(keuze, fullPrompt, explicitSession || '', outdir, space.dir,
-      { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS, lastFile: path.join(base, 'codex-last.md') });
+    const t0 = Date.now();
+    const runOpts = { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS, lastFile: path.join(base, 'codex-last.md'), env: {} };
+    runOpts.env[EIND_MARKER] = jobId;
+    let r = await runMetFallback(keuze, fullPrompt, explicitSession || '', outdir, space.dir, runOpts);
+    // Eindcontrole (4-10-2026): pas als klaar melden als het echt klaar is.
+    r = await eindcontrole(jobId, keuze, r, outdir, space.dir, runOpts, t0, maxMs, entry);
     r.files = collectFiles(outdir);
     r.workspace = ws;
     // Let op de volgorde: spillIfLarge leegt r.output als die naar schijf gaat,
@@ -1896,6 +2108,7 @@ function handleRequest(req, res) {
         gestart: a.started ? new Date(a.started).toISOString() : null,
         geeindigd: a.ended ? new Date(a.ended).toISOString() : null,
         rapport: a.rapport,
+        eindcontrole: a.eindcontrole,
         running_ms: (j && j.progress) ? j.progress.running_ms : undefined,
         last_activity_ms: (j && j.progress) ? j.progress.last_activity_ms : undefined
       };
