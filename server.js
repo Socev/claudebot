@@ -2276,14 +2276,15 @@ function handleRequest(req, res) {
 // - Kluis via RPC's die naast service_role een eigen portaalsleutel eisen (bestand, alleen de hash in de databank);
 //   n8n via PATCH /credentials/{id} met isPartialData (gemeten 4-10: overige velden blijven staan).
 const SP_PAD = '/sleutels';
-const SP_SESSIE_MS = 15 * 60 * 1000;
+const SP_SESSIE_MS = 15 * 60 * 1000;   // inactief; elke aanvraag verlengt
+const SP_SESSIE_MAX_MS = 60 * 60 * 1000; // harde bovengrens vanaf inloggen
 const SP_CODE_MS = 5 * 60 * 1000;
 const SP_CODE_POGINGEN = 5;
 const SP_CODE_INTERVAL_MS = 60 * 1000;
 const SP_CODE_PER_UUR = 6;
 const SP_CODE_PER_DAG = 10;
 const SP_MAX_BODY = 256 * 1024;
-const SP_MAX_VELDEN = 120;
+const SP_MAX_VELDEN = 500;
 const SP_CHAT = process.env.SLEUTELPORTAAL_CHAT || '40687';
 const SP_N8N_UI = 'https://5877e26c.primumnonnocere.olares.com';
 const SP_SLEUTEL_PAD = process.env.SLEUTELPORTAAL_SLEUTEL || '/opt/data/.sleutelportaal/rpc.key';
@@ -2334,6 +2335,7 @@ function spSessie(req) {
   if (Date.now() > s.tot) { spStaat.sessie = null; return null; }
   const c = spCookies(req)[SP_COOKIE];
   if (!c || !/^[0-9a-f]{64}$/.test(c) || !spGelijk(spHash(c), s.idHash)) return null;
+  s.tot = Math.min(s.start + SP_SESSIE_MAX_MS, Date.now() + SP_SESSIE_MS);
   return s;
 }
 
@@ -2342,7 +2344,7 @@ function spOriginOk(req) {
   // Achter de Olares-proxy kan Host herschreven zijn; x-forwarded-host is dan de echte. Een browser kan geen van
   // beide kiezen bij een formulier van een andere site, en Origin moet er exact bij passen.
   const origin = String(req.headers.origin || '');
-  const hosts = [req.headers.host, req.headers['x-forwarded-host']].map(function (h) { return String(h || '').split(',')[0].trim().toLowerCase(); });
+  const hosts = [req.headers.host, req.headers['x-forwarded-host']].map(function (h) { return String(h || '').split(',')[0].trim().toLowerCase().replace(/:443$/, ''); });
   return hosts.some(function (h) { return SP_HOST_RE.test(h) && origin === 'https://' + h; });
 }
 
@@ -2520,16 +2522,16 @@ function spRegelsHtml(regels) {
 
 async function spOverzicht(req, res, sessie, uitkomsten) {
   const meta = spMeta();
-  const mk = meta.kluis || {}, mn = meta.n8n || {}, mh = Array.isArray(meta.handmatig) ? meta.handmatig : [];
+  const mk = (meta.kluis && typeof meta.kluis === 'object') ? meta.kluis : {}, mn = (meta.n8n && typeof meta.n8n === 'object') ? meta.n8n : {}, mh = Array.isArray(meta.handmatig) ? meta.handmatig : [];
   const [kluis, n8n, audit] = await Promise.all([
     spRpc('sb_sleutelportaal_overzicht', {}), spN8nLijst(), spRpc('sb_sleutelportaal_auditlog', { p_aantal: 50 }),
   ]);
   // Veldkoppeling ligt in de sessie: de browser stuurt alleen w<n>; wat w<n> betekent bepaalt de server.
   sessie.velden = {}; let n = 0;
   sessie.formToken = crypto.randomBytes(16).toString('hex');
-  let h = '<h1>Sleutelportaal</h1><p class="klein">Ingelogd tot ' +
+  let h = '<h1>Sleutelportaal</h1><p class="klein">Ingelogd; zonder activiteit uitgelogd om ' +
     spEsc(new Date(sessie.tot).toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' })) +
-    '. Waarden worden nooit getoond; alleen de laatste 4 tekens bij lange sleutels en een vingerafdruk (eerste 6 tekens van de sha256) om te vergelijken.</p>' +
+    ' (uiterlijk een uur na inloggen; sla bij veel sleutels tussentijds op). Waarden worden nooit getoond; alleen de laatste 4 tekens bij lange sleutels en een vingerafdruk (eerste 6 tekens van de sha256) om te vergelijken.</p>' +
     '<form method="post" action="' + SP_PAD + '/uitloggen"><input type="hidden" name="t" value="' + sessie.csrf + '"><button class="licht">Uitloggen</button></form>';
   if (uitkomsten) {
     h += '<h2>Uitkomst</h2><table><tr><th>Sleutel</th><th>Plek</th><th>Uitkomst</th><th>Wat nu</th></tr>' + spRegelsHtml(uitkomsten) + '</table>';
@@ -2542,7 +2544,7 @@ async function spOverzicht(req, res, sessie, uitkomsten) {
   if (!kluis.ok) h += '<p class="fout">Kluis niet te lezen: ' + spEsc(kluis.reden || 'onbekend') + '</p>';
   else {
     h += '<table><tr><th>Naam</th><th>Waarvoor</th><th>Klasse</th><th>Gewijzigd</th><th>Vervangen vóór</th><th>Nu</th><th>Nieuwe waarde</th></tr>';
-    kluis.sleutels.forEach(function (s) {
+    (Array.isArray(kluis.sleutels) ? kluis.sleutels : []).forEach(function (s) {
       const m = mk[s.naam] || {};
       let veld;
       if (s.geweigerd) veld = '<span class="klein">niet via het portaal: ' + spEsc(s.geweigerd) + '</span>';
@@ -2595,7 +2597,7 @@ async function spOverzicht(req, res, sessie, uitkomsten) {
   h += '<div class="balk"><button>Alles opslaan</button> <span class="klein">Alleen ingevulde velden worden opgeslagen.</span></div></form>';
 
   h += '<h2>Handmatig</h2><table><tr><th>Sleutel</th><th>Plek</th><th>Waarvoor</th><th>Klasse</th><th>Vervangen vóór</th><th>Hoe</th></tr>';
-  mh.forEach(function (x) {
+  mh.filter(function (x) { return x && typeof x === 'object'; }).forEach(function (x) {
     h += '<tr><td>' + spEsc(x.naam) + '</td><td>' + spEsc(x.plek) + '</td><td>' + spEsc(x.waarvoor) + '</td><td>' + spEsc(x.klasse || '') + '</td><td>' + spVoor(x.vervangen_voor) + '</td><td>' + spEsc(x.instructie) + '</td></tr>';
   });
   h += '</table>';
@@ -2703,12 +2705,12 @@ function spCodeAanvraag(req, res) {
   const zout = crypto.randomBytes(16).toString('hex');
   spStaat.code = { hash: spHash(zout + code), zout: zout, tot: nu + SP_CODE_MS, pogingen: 0 };
   const via = String(req.headers['x-forwarded-for'] || (req.socket && req.socket.remoteAddress) || '?').split(',')[0].trim().slice(0, 45);
-  spTelegram('Sleutelportaal: code ' + code + ' (5 min geldig). Aangevraagd via ' + via + '. Niet zelf aangevraagd? Niet invullen en meld het de machinekamer.')
+  return spTelegram('Sleutelportaal: code ' + code + ' (5 min geldig). Aangevraagd via ' + via + '. Niet zelf aangevraagd? Niet invullen en meld het de machinekamer.')
     .then(function (ok) {
       spLog(null, 'portaal', null, 'code', ok ? 'verstuurd' : 'mislukt', ok ? 'via ' + via : 'Telegram niet bereikbaar');
-      if (!ok) spStaat.code = null;
+      if (!ok) { spStaat.code = null; return spStuur(res, 502, spInlogPagina('De code kon niet via Telegram worden verstuurd. Probeer het over een minuut opnieuw, of vraag de machinekamer.')); }
+      spStuur(res, 200, spInlogPagina('Code verstuurd naar je Telegram (debug-bot). Vul hem hieronder in.', true));
     });
-  spStuur(res, 200, spInlogPagina('Code verstuurd naar je Telegram (debug-bot). Vul hem hieronder in.', true));
 }
 
 function spInloggen(req, res, velden) {
@@ -2724,12 +2726,21 @@ function spInloggen(req, res, velden) {
   spStaat.code = null;
   const id = crypto.randomBytes(32).toString('hex');
   const kenmerk = spHash(id).slice(0, 8);
-  spStaat.sessie = { idHash: spHash(id), kenmerk: kenmerk, tot: Date.now() + SP_SESSIE_MS, csrf: crypto.randomBytes(24).toString('hex'), velden: {}, formToken: null };
+  spStaat.sessie = { idHash: spHash(id), kenmerk: kenmerk, start: Date.now(), tot: Date.now() + SP_SESSIE_MS, csrf: crypto.randomBytes(24).toString('hex'), velden: {}, formToken: null };
   spLog(spStaat.sessie, 'portaal', null, 'inloggen', 'geslaagd', null);
   spStuur(res, 303, '', {
     Location: SP_PAD,
-    'Set-Cookie': SP_COOKIE + '=' + id + '; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=' + Math.floor(SP_SESSIE_MS / 1000),
+    'Set-Cookie': SP_COOKIE + '=' + id + '; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=' + Math.floor(SP_SESSIE_MAX_MS / 1000),
   });
+}
+
+// Gaat er na het schrijven iets mis bij het opbouwen van de pagina, dan moet David dat zien: er kan al iets
+// opgeslagen zijn, en het auditlog en de Telegram-melding zeggen wat.
+function spFoutNaSchrijven(res) {
+  return function (e) {
+    logError('sleutelportaal', e);
+    if (!res.headersSent) spStuur(res, 500, spPagina('Fout', '<p>Er ging iets mis bij het tonen van de uitkomst. Er kan al iets zijn opgeslagen: kijk in Telegram (melding van de debug-bot) en in het auditlog op <a href="' + SP_PAD + '">het overzicht</a>.</p>'));
+  };
 }
 
 function sleutelportaalIsPad(req) { const p = reqPath(req); return p === SP_PAD || p.indexOf(SP_PAD + '/') === 0; }
@@ -2737,6 +2748,7 @@ function sleutelportaalIsPad(req) { const p = reqPath(req); return p === SP_PAD 
 function sleutelportaal(req, res) {
   const p = reqPath(req);
   res._log = { portaal: 'sleutels' };
+  if (req.method === 'GET' && p === SP_PAD + '/') return spStuur(res, 303, '', { Location: SP_PAD });
   if (req.method === 'GET' && p === SP_PAD) {
     const s = spSessie(req);
     if (!s) return spStuur(res, 200, spInlogPagina(''));
@@ -2772,9 +2784,9 @@ function sleutelportaal(req, res) {
           return spOverzicht(req, res, s, [{ naam: naam, plek: 'kluis', ok: !!r.ok, uitkomst: r.ok ? 'teruggezet (huidige en vorige gewisseld)' : 'mislukt: ' + (r.reden || 'onbekend'),
             nazorg: (r.ok && v.witte_lijst ? ['De pod gebruikt hem pas na een herstart van de claudebot-app; vraag het de machinekamer.'] : [])
               .concat(ookIngevuld ? ['LET OP: de nieuwe waarden die je had ingevuld zijn NIET opgeslagen (je koos terugzetten). Vul ze opnieuw in.'] : []) }]);
-        });
+        }).catch(spFoutNaSchrijven(res));
       }
-      if (p === SP_PAD + '/opslaan') return spOpslaan(req, res, s, velden);
+      if (p === SP_PAD + '/opslaan') return spOpslaan(req, res, s, velden).catch(spFoutNaSchrijven(res));
       return spStuur(res, 404, spPagina('Niet gevonden', '<p>Niet gevonden.</p>'));
     } catch (e) {
       logError('sleutelportaal', e);

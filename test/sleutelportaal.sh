@@ -28,12 +28,13 @@ fs.writeFileSync(path.join(werk, 'vault/00_Systeem/Beveiliging/Sleutelregister -
 
 // ── nagebootste buitenwereld ──
 const telegram = [], rpcs = [], n8nAanroepen = [];
+let telegramStuk = false;
 const kluisNep = { proef_een: { waarde: 'oud-waarde-proef-een-12345678', vorige: null } };
 const echteFetch = global.fetch;
 async function nepFetch(url, opt) {
   url = String(url); opt = opt || {};
   const antw = (status, j) => ({ ok: status < 300, status, json: async () => j, text: async () => JSON.stringify(j) });
-  if (url.startsWith('https://api.telegram.org/')) { telegram.push(JSON.parse(opt.body).text); return antw(200, { ok: true }); }
+  if (url.startsWith('https://api.telegram.org/')) { if (telegramStuk) return antw(502, { ok: false }); telegram.push(JSON.parse(opt.body).text); return antw(200, { ok: true }); }
   if (url.includes('/rest/v1/rpc/')) {
     const fn = url.split('/rpc/')[1], body = JSON.parse(opt.body);
     rpcs.push({ fn, body });
@@ -207,6 +208,28 @@ server.listen(0, '127.0.0.1', async function () {
     // daggrens
     ctx.spStaat.codeTijden = Array.from({ length: 10 }, (_, i) => Date.now() - 7200000 - i * 1000);
     x = await vraag('POST', '/sleutels/code', {}); toets('daggrens 429', x.status === 429);
+    // extra (code-review ronde 2)
+    x = await vraag('GET', '/sleutels/'); toets('/sleutels/ -> 303', x.status === 303 && x.koppen.location === '/sleutels');
+    ctx.spStaat.codeTijden = []; telegramStuk = true;
+    x = await vraag('POST', '/sleutels/code', {}, { host: HOST + ':443', origin: 'https://' + HOST });
+    toets('Host met :443 geaccepteerd en Telegram-fout gemeld (502)', x.status === 502 && /niet via Telegram/.test(x.tekst));
+    toets('na Telegram-fout geen geldige code', ctx.spStaat.code === null);
+    telegramStuk = false;
+    if (!ECHT) {
+      ctx.spStaat.codeTijden = [];
+      await vraag('POST', '/sleutels/code', {});
+      const c2 = (telegram.filter(t => /code \d{8}/.test(t)).pop().match(/code (\d{8})/) || [])[1];
+      const li = await vraag('POST', '/sleutels/inloggen', { c: c2 });
+      const ck = String(li.koppen['set-cookie']).split(';')[0];
+      const pg = await vraag('GET', '/sleutels', null, { cookie: ck });
+      const t6 = (pg.tekst.match(/name="t" value="([0-9a-f]+)"/) || [])[1], f6 = (pg.tekst.match(/name="f" value="([0-9a-f]+)"/) || [])[1];
+      const metaPad = path.join(werk, 'vault/00_Systeem/Beveiliging/Sleutelregister - portaalgegevens.json');
+      fs.writeFileSync(metaPad, JSON.stringify({ kluis: null, n8n: 5, handmatig: [null, 3, { naam: 'ok' }] }));
+      const pe = (pg.tekst.match(/name="(w\d+)" autocomplete="new-password" spellcheck="false" aria-label="nieuwe waarde proef_een"/) || [])[1];
+      const v6 = { t: t6, f: f6 }; v6[pe] = 'Nog-een-waarde-1234567890';
+      const z = await vraag('POST', '/sleutels/opslaan', v6, { cookie: ck });
+      toets('kapotte metagegevens: toch een uitkomst', z.status === 200 && /proef_een<\/td><td>kluis<\/td><td class="ok">opgeslagen/.test(z.tekst));
+    }
     // spSchoon
     toets('spSchoon haalt waarde weg', !ctx.spSchoon('fout bij abcdefghijklmnop', 'abcdefghijklmnop').includes('abcdefghijklmnop') && !ctx.spSchoon('x cdefghij y', 'abcdefghijklmnop').includes('cdefghij'));
     toets('geen waarde in foutlog', !logregels.some(l => l.includes(W1) || l.includes(W2)));
