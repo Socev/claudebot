@@ -2266,6 +2266,524 @@ function handleRequest(req, res) {
   res.writeHead(404); res.end('not found');
 }
 
+// ── Sleutelportaal (4-10-2026, opdracht David: "een portaal waar ik alle sleutels gemaskeerd zie, en er zo een
+// nieuwe in kan voeren, multi indien gewenst") ─────────────────────────────────────────────────────────────────
+// Ontwerp + review: vault 01_Ontwikkeling/Beveiliging/Sleutelportaal (ontwerp).md. Kern:
+// - Olares-inlog (ingang internal) + eigen tweede drempel: code via de debug-bot naar chat 40687. Intern
+//   clusterverkeer komt zonder Olares-inlog binnen, dus de code is de echte grens tegen andere pods.
+// - Beschermt NIET tegen de pod zelf: agents hier hebben dezelfde uid en bredere sleutels (Supabase-MCP).
+// - Nooit een waarde in log, antwoord, foutmelding of Telegram. Foutteksten van buiten worden niet doorgegeven.
+// - Kluis via RPC's die naast service_role een eigen portaalsleutel eisen (bestand, alleen de hash in de databank);
+//   n8n via PATCH /credentials/{id} met isPartialData (gemeten 4-10: overige velden blijven staan).
+const SP_PAD = '/sleutels';
+const SP_SESSIE_MS = 15 * 60 * 1000;
+const SP_CODE_MS = 5 * 60 * 1000;
+const SP_CODE_POGINGEN = 5;
+const SP_CODE_INTERVAL_MS = 60 * 1000;
+const SP_CODE_PER_UUR = 6;
+const SP_CODE_PER_DAG = 10;
+const SP_MAX_BODY = 256 * 1024;
+const SP_MAX_VELDEN = 120;
+const SP_CHAT = process.env.SLEUTELPORTAAL_CHAT || '40687';
+const SP_N8N_UI = 'https://5877e26c.primumnonnocere.olares.com';
+const SP_SLEUTEL_PAD = process.env.SLEUTELPORTAAL_SLEUTEL || '/opt/data/.sleutelportaal/rpc.key';
+const SP_META_PAD = path.join(VAULT, '00_Systeem/Beveiliging/Sleutelregister - portaalgegevens.json');
+const SP_HOST_RE = /^[a-z0-9-]+\.primumnonnocere\.olares\.com$/;
+// Het geheime veld per n8n-credentialtype (gemeten met /credentials/schema/{type} op 4-10). Andere types: handmatig.
+const SP_N8N_VELD = {
+  anthropicApi: 'apiKey', openAiApi: 'apiKey', googlePalmApi: 'apiKey', perplexityApi: 'apiKey', openRouterApi: 'apiKey',
+  n8nApi: 'apiKey', airtableTokenApi: 'accessToken', telegramApi: 'accessToken', openWeatherMapApi: 'accessToken',
+  whatsAppApi: 'accessToken', httpHeaderAuth: 'value', httpBasicAuth: 'password', supabaseApi: 'serviceRole',
+};
+// Sleutels waar het portaal zelf op draait: na vervangen pas de oude intrekken na een pod-herstart.
+const SP_EIGEN = ['supabase_service_role', 'n8n_api_key', 'telegram_debug_bot_token'];
+
+const spStaat = { code: null, codeTijden: [], sessie: null, schemaCache: {} };
+
+function spEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+function spHash(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
+function spGelijk(a, b) {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+function spKoppen(extra) {
+  return Object.assign({
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store, max-age=0', 'Pragma': 'no-cache', 'Expires': '0',
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin',
+  }, extra || {});
+}
+function spCookies(req) {
+  const uit = {};
+  String(req.headers.cookie || '').split(';').forEach(function (d) {
+    const i = d.indexOf('='); if (i > 0) uit[d.slice(0, i).trim()] = d.slice(i + 1).trim();
+  });
+  return uit;
+}
+const SP_COOKIE = '__Host-sleutelportaal';
+
+// Geldige sessie of null. Eén sessie tegelijk; verlopen = weg.
+function spSessie(req) {
+  const s = spStaat.sessie;
+  if (!s) return null;
+  if (Date.now() > s.tot) { spStaat.sessie = null; return null; }
+  const c = spCookies(req)[SP_COOKIE];
+  if (!c || !/^[0-9a-f]{64}$/.test(c) || !spGelijk(spHash(c), s.idHash)) return null;
+  return s;
+}
+
+// POST alleen same-origin vanaf een Olares-host: Origin moet exact https://<Host> zijn. 'null' of afwezig = weg.
+function spOriginOk(req) {
+  // Achter de Olares-proxy kan Host herschreven zijn; x-forwarded-host is dan de echte. Een browser kan geen van
+  // beide kiezen bij een formulier van een andere site, en Origin moet er exact bij passen.
+  const origin = String(req.headers.origin || '');
+  const hosts = [req.headers.host, req.headers['x-forwarded-host']].map(function (h) { return String(h || '').split(',')[0].trim().toLowerCase(); });
+  return hosts.some(function (h) { return SP_HOST_RE.test(h) && origin === 'https://' + h; });
+}
+
+function spBody(req, cb) {
+  const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (ct !== 'application/x-www-form-urlencoded') return cb('soort');
+  const lengte = Number(req.headers['content-length'] || 0);
+  if (lengte > SP_MAX_BODY) { req.resume(); return cb('groot'); }
+  const delen = []; let n = 0, klaar = false;
+  req.on('data', function (c) {
+    if (klaar) return;
+    n += c.length;
+    if (n > SP_MAX_BODY) { klaar = true; delen.length = 0; req.destroy(); return cb('groot'); }
+    delen.push(c);
+  });
+  req.on('error', function () { if (!klaar) { klaar = true; cb('lezen'); } });
+  req.on('end', function () {
+    if (klaar) return; klaar = true;
+    const p = new URLSearchParams(Buffer.concat(delen).toString('utf8'));
+    delen.length = 0;
+    const uit = {}; let aantal = 0;
+    for (const [k, v] of p) { if (++aantal > SP_MAX_VELDEN) return cb('velden'); uit[k] = v; }
+    cb(null, uit);
+  });
+}
+
+function spPortaalsleutel() {
+  try { return fs.readFileSync(SP_SLEUTEL_PAD, 'utf8').trim(); } catch (e) { return ''; }
+}
+
+async function spRpc(fn, args) {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SERVICE_ROLE;
+  const sleutel = spPortaalsleutel();
+  if (!url || !key) return { ok: false, reden: 'Supabase niet ingesteld in de pod' };
+  if (!sleutel) return { ok: false, reden: 'portaalsleutel ontbreekt in de pod' };
+  try {
+    const r = await fetch(url + '/rest/v1/rpc/' + fn, {
+      method: 'POST',
+      headers: { apikey: key, authorization: 'Bearer ' + key, 'content-type': 'application/json' },
+      body: JSON.stringify(Object.assign({ p_sleutel: sleutel }, args || {})),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!r.ok) { await r.text().catch(function () {}); return { ok: false, reden: 'Supabase gaf HTTP ' + r.status }; }
+    const j = await r.json();
+    return j && typeof j === 'object' ? j : { ok: false, reden: 'onverwacht antwoord van Supabase' };
+  } catch (e) {
+    logError('sleutelportaal-rpc', e);
+    return { ok: false, reden: 'Supabase niet bereikbaar' };
+  }
+}
+
+function spLog(sessie, plek, naam, actie, uitkomst, reden) {
+  return spRpc('sb_sleutelportaal_log', {
+    p_sessie: sessie ? sessie.kenmerk : null, p_plek: plek, p_naam: naam || null, p_actie: actie,
+    p_uitkomst: uitkomst, p_reden: reden || null,
+  }).catch(function () {});
+}
+
+function spN8nBasis() {
+  const u = String(process.env.N8N_API_URL || process.env.N8N_MCP_URL || '');
+  const i = u.indexOf('/mcp');
+  return (i > 0 ? u.slice(0, i) : u).replace(/\/$/, '');
+}
+async function spN8n(methode, pad, body) {
+  const basis = spN8nBasis(), key = process.env.N8N_API_KEY;
+  if (!basis || !key) return { status: 0, json: null };
+  try {
+    const r = await fetch(basis + '/api/v1' + pad, {
+      method: methode,
+      headers: { 'X-N8N-API-KEY': key, 'content-type': 'application/json', accept: 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
+    });
+    let j = null; try { j = await r.json(); } catch (e) {}
+    return { status: r.status, json: j };
+  } catch (e) {
+    logError('sleutelportaal-n8n', e);
+    return { status: 0, json: null };
+  }
+}
+async function spN8nLijst() {
+  const alle = []; let cursor = null;
+  for (let i = 0; i < 20; i++) {
+    const r = await spN8n('GET', '/credentials?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+    if (r.status !== 200 || !r.json || !Array.isArray(r.json.data)) return null;
+    r.json.data.forEach(function (c) { alle.push({ id: c.id, naam: c.name, type: c.type, aangemaakt: c.createdAt, gewijzigd: c.updatedAt }); });
+    cursor = r.json.nextCursor; if (!cursor) break;
+  }
+  return alle;
+}
+// Bestaat het geheime veld echt in het schema van dit type? Uur cache. Onbekend = niet schrijven.
+async function spN8nVeld(type) {
+  const veld = SP_N8N_VELD[type];
+  if (!veld) return null;
+  const c = spStaat.schemaCache[type];
+  if (c && Date.now() - c.t < 3600000) return c.ok ? veld : null;
+  const r = await spN8n('GET', '/credentials/schema/' + encodeURIComponent(type));
+  const ok = r.status === 200 && r.json && r.json.properties && Object.prototype.hasOwnProperty.call(r.json.properties, veld);
+  if (r.status === 200) spStaat.schemaCache[type] = { t: Date.now(), ok: !!ok };
+  return ok ? veld : null;
+}
+
+async function spTelegram(tekst) {
+  const tok = process.env.TELEGRAM_DEBUG_BOT_TOKEN;
+  if (!tok) return false;
+  try {
+    const r = await fetch('https://api.telegram.org/bot' + tok + '/sendMessage', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: SP_CHAT, text: tekst, disable_web_page_preview: true }),
+      signal: AbortSignal.timeout(15000),
+    });
+    await r.text().catch(function () {});
+    return r.ok;
+  } catch (e) { logError('sleutelportaal-telegram', { name: e && e.name, code: e && e.code }); return false; }
+}
+
+function spMeta() {
+  try { const j = JSON.parse(fs.readFileSync(SP_META_PAD, 'utf8')); return j && typeof j === 'object' ? j : {}; }
+  catch (e) { return {}; }
+}
+
+function spDatum(iso) {
+  if (!iso) return '';
+  const d = new Date(iso); if (isNaN(d)) return '';
+  return d.toLocaleDateString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', year: 'numeric' });
+}
+function spDagen(iso) {
+  const d = new Date(iso); if (!iso || isNaN(d)) return '';
+  return Math.floor((Date.now() - d.getTime()) / 86400000) + ' d';
+}
+function spVoor(datum) {
+  if (!datum) return '';
+  const d = new Date(datum + 'T23:59:59+02:00'); if (isNaN(d)) return spEsc(datum);
+  const dagen = Math.ceil((d.getTime() - Date.now()) / 86400000);
+  const klasse = dagen < 0 ? 'laat' : dagen <= 14 ? 'bijna' : '';
+  return '<span class="' + klasse + '">' + spEsc(spDatum(d.toISOString())) + (dagen < 0 ? ' (verlopen)' : '') + '</span>';
+}
+
+function spPagina(titel, inhoud) {
+  return '<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<meta name="robots" content="noindex"><title>' + spEsc(titel) + '</title><style>' +
+    'body{font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#f6f7f9;color:#1d2330}' +
+    'main{max-width:1200px;margin:0 auto;padding:20px}h1{font-size:22px}h2{font-size:18px;margin-top:28px}' +
+    'table{border-collapse:collapse;width:100%;background:#fff}th,td{border-bottom:1px solid #e3e6ec;padding:6px 8px;text-align:left;vertical-align:top}' +
+    'th{background:#eef1f5;font-weight:600}code{font-size:13px}.klein{color:#5b6475;font-size:13px}' +
+    '.laat{color:#b00020;font-weight:600}.bijna{color:#a55a00;font-weight:600}.ok{color:#11752f;font-weight:600}.fout{color:#b00020;font-weight:600}' +
+    'input[type=password],input[type=text]{width:100%;box-sizing:border-box;padding:6px;border:1px solid #c5cbd6;border-radius:4px;font:inherit}' +
+    'button{padding:8px 16px;font:inherit;border:0;border-radius:4px;background:#1d4ed8;color:#fff;cursor:pointer}button.licht{background:#e3e6ec;color:#1d2330}' +
+    '.balk{position:sticky;bottom:0;background:#fff;border-top:1px solid #c5cbd6;padding:10px 0;margin-top:16px}' +
+    '.blok{background:#fff;border:1px solid #e3e6ec;border-radius:6px;padding:14px;margin:12px 0}' +
+    ':focus-visible{outline:3px solid #1d4ed8;outline-offset:2px}' +
+    '@media(max-width:800px){td,th{display:block}tr{display:block;border-bottom:2px solid #c5cbd6}th{display:none}}' +
+    '</style></head><body><main>' + inhoud + '</main></body></html>';
+}
+
+function spStuur(res, status, html, koppen) { res.writeHead(status, spKoppen(koppen)); res.end(html); }
+
+function spInlogPagina(melding, codeVerstuurd) {
+  return spPagina('Sleutelportaal', '<h1>Sleutelportaal</h1>' +
+    (melding ? '<p class="blok">' + spEsc(melding) + '</p>' : '') +
+    '<div class="blok"><p>Tweede stap: vraag een code aan. De debug-bot stuurt hem naar je Telegram (5 minuten geldig).</p>' +
+    '<form method="post" action="' + SP_PAD + '/code"><button' + (codeVerstuurd ? ' class="licht"' : '') + '>Stuur code</button></form></div>' +
+    '<div class="blok"><form method="post" action="' + SP_PAD + '/inloggen" autocomplete="off">' +
+    '<label for="c">Code uit Telegram</label><br><input type="text" id="c" name="c" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" autocomplete="one-time-code" style="max-width:12em">' +
+    ' <button>Inloggen</button></form></div>');
+}
+
+function spRegelsHtml(regels) {
+  return regels.map(function (r) {
+    return '<tr><td>' + spEsc(r.naam) + '</td><td>' + spEsc(r.plek) + '</td><td class="' + (r.ok ? 'ok' : 'fout') + '">' + spEsc(r.uitkomst) + '</td><td>' +
+      (r.nazorg || []).map(function (n) { return spEsc(n); }).join('<br>') + '</td></tr>';
+  }).join('');
+}
+
+async function spOverzicht(req, res, sessie, uitkomsten) {
+  const meta = spMeta();
+  const mk = meta.kluis || {}, mn = meta.n8n || {}, mh = Array.isArray(meta.handmatig) ? meta.handmatig : [];
+  const [kluis, n8n, audit] = await Promise.all([
+    spRpc('sb_sleutelportaal_overzicht', {}), spN8nLijst(), spRpc('sb_sleutelportaal_auditlog', { p_aantal: 50 }),
+  ]);
+  // Veldkoppeling ligt in de sessie: de browser stuurt alleen w<n>; wat w<n> betekent bepaalt de server.
+  sessie.velden = {}; let n = 0;
+  sessie.formToken = crypto.randomBytes(16).toString('hex');
+  let h = '<h1>Sleutelportaal</h1><p class="klein">Ingelogd tot ' +
+    spEsc(new Date(sessie.tot).toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' })) +
+    '. Waarden worden nooit getoond; alleen de laatste 4 tekens bij lange sleutels en een vingerafdruk (eerste 6 tekens van de sha256) om te vergelijken.</p>' +
+    '<form method="post" action="' + SP_PAD + '/uitloggen"><input type="hidden" name="t" value="' + sessie.csrf + '"><button class="licht">Uitloggen</button></form>';
+  if (uitkomsten) {
+    h += '<h2>Uitkomst</h2><table><tr><th>Sleutel</th><th>Plek</th><th>Uitkomst</th><th>Wat nu</th></tr>' + spRegelsHtml(uitkomsten) + '</table>';
+  }
+  h += '<form method="post" action="' + SP_PAD + '/opslaan" autocomplete="off"><input type="hidden" name="t" value="' + sessie.csrf + '"><input type="hidden" name="f" value="' + sessie.formToken + '">' +
+    // Enter in een veld neemt de eerste knop van het formulier: dat moet opslaan zijn, niet 'Vorige terugzetten'.
+    '<button style="position:absolute;left:-9999px" tabindex="-1" aria-hidden="true">Alles opslaan</button>';
+
+  h += '<h2>Supabase-kluis</h2>';
+  if (!kluis.ok) h += '<p class="fout">Kluis niet te lezen: ' + spEsc(kluis.reden || 'onbekend') + '</p>';
+  else {
+    h += '<table><tr><th>Naam</th><th>Waarvoor</th><th>Klasse</th><th>Gewijzigd</th><th>Vervangen vóór</th><th>Nu</th><th>Nieuwe waarde</th></tr>';
+    kluis.sleutels.forEach(function (s) {
+      const m = mk[s.naam] || {};
+      let veld;
+      if (s.geweigerd) veld = '<span class="klein">niet via het portaal: ' + spEsc(s.geweigerd) + '</span>';
+      else {
+        const w = 'w' + (++n); sessie.velden[w] = { plek: 'kluis', naam: s.naam, witte_lijst: !!s.witte_lijst };
+        veld = '<input type="password" name="' + w + '" autocomplete="new-password" spellcheck="false" aria-label="nieuwe waarde ' + spEsc(s.naam) + '">';
+        if (s.vorige_van) {
+          veld += '<br><button class="licht" name="terug" value="' + spEsc(s.naam) + '" formaction="' + SP_PAD + '/terugzetten">Vorige terugzetten</button>' +
+            ' <span class="klein">vorige van ' + spEsc(spDatum(s.vorige_van)) + '</span>';
+        }
+      }
+      h += '<tr><td><code>' + spEsc(s.naam) + '</code>' + (s.witte_lijst ? '<br><span class="klein">pod leest hem bij start</span>' : '') + '</td><td>' +
+        spEsc(m.waarvoor || s.omschrijving || '') + (m.klasse === undefined ? '<br><span class="klein">niet in het register</span>' : '') + '</td><td>' + spEsc(m.klasse || '') +
+        '</td><td>' + spEsc(spDatum(s.gewijzigd)) + '<br><span class="klein">' + spEsc(spDagen(s.gewijzigd)) + '</span></td><td>' + spVoor(m.vervangen_voor) +
+        '</td><td><code>' + spEsc(s.gemaskeerd) + '</code>' + (s.vingerafdruk ? '<br><span class="klein">#' + spEsc(s.vingerafdruk) + '</span>' : '') + '</td><td>' + veld + '</td></tr>';
+    });
+    h += '</table>';
+    const nw = 'w' + (++n), nn = 'w' + (++n);
+    sessie.velden[nn] = { plek: 'kluis-nieuw-naam' }; sessie.velden[nw] = { plek: 'kluis-nieuw', naamVeld: nn };
+    h += '<div class="blok"><strong>Nieuwe kluissleutel</strong> <span class="klein">(naam: kleine letters, cijfers, underscores; de pod ziet hem pas als de machinekamer hem op de witte lijst zet)</span><br>' +
+      '<input type="text" name="' + nn + '" placeholder="naam_van_sleutel" pattern="[a-z0-9_]{3,64}" autocomplete="off" spellcheck="false" style="max-width:24em"> ' +
+      '<input type="password" name="' + nw + '" autocomplete="new-password" spellcheck="false" placeholder="waarde" style="max-width:32em"></div>';
+  }
+
+  h += '<h2>n8n-credentials</h2>';
+  if (!n8n) h += '<p class="fout">n8n niet te lezen.</p>';
+  else {
+    h += '<p class="klein">n8n geeft waarden nooit terug; daarom geen maskering. n8n bewaart geen vorige waarde: trek de oude sleutel bij de aanbieder pas in als de test hieronder of een productierun slaagt.</p>' +
+      '<table><tr><th>Naam</th><th>Type</th><th>Klasse</th><th>Gewijzigd</th><th>Vervangen vóór</th><th>Nieuwe waarde</th></tr>';
+    n8n.sort(function (a, b) { return (a.type + a.naam).localeCompare(b.type + b.naam); });
+    const typen = Array.from(new Set(n8n.map(function (c) { return c.type; })));
+    const veldPerType = {};
+    (await Promise.all(typen.map(spN8nVeld))).forEach(function (v, i) { veldPerType[typen[i]] = v; });
+    n8n.forEach(function (c) {
+      const m = mn[c.naam] || {};
+      const veld = veldPerType[c.type];
+      let invoer;
+      if (veld) {
+        const w = 'w' + (++n); sessie.velden[w] = { plek: 'n8n', id: c.id, naam: c.naam, type: c.type, veld: veld };
+        invoer = '<input type="password" name="' + w + '" autocomplete="new-password" spellcheck="false" aria-label="nieuwe waarde ' + spEsc(c.naam) + '">' +
+          '<span class="klein">veld ' + spEsc(veld) + '</span>';
+      } else {
+        invoer = '<a href="' + SP_N8N_UI + '/home/credentials/' + encodeURIComponent(c.id) + '" rel="noreferrer" target="_blank">in n8n zelf</a>';
+      }
+      h += '<tr><td>' + spEsc(c.naam) + (m.waarvoor ? '<br><span class="klein">' + spEsc(m.waarvoor) + '</span>' : '') + '</td><td><code>' + spEsc(c.type) + '</code></td><td>' + spEsc(m.klasse || '') +
+        '</td><td>' + spEsc(spDatum(c.gewijzigd)) + '<br><span class="klein">' + spEsc(spDagen(c.gewijzigd)) + '</span></td><td>' + spVoor(m.vervangen_voor) + '</td><td>' + invoer + '</td></tr>';
+    });
+    h += '</table>';
+  }
+  h += '<div class="balk"><button>Alles opslaan</button> <span class="klein">Alleen ingevulde velden worden opgeslagen.</span></div></form>';
+
+  h += '<h2>Handmatig</h2><table><tr><th>Sleutel</th><th>Plek</th><th>Waarvoor</th><th>Klasse</th><th>Vervangen vóór</th><th>Hoe</th></tr>';
+  mh.forEach(function (x) {
+    h += '<tr><td>' + spEsc(x.naam) + '</td><td>' + spEsc(x.plek) + '</td><td>' + spEsc(x.waarvoor) + '</td><td>' + spEsc(x.klasse || '') + '</td><td>' + spVoor(x.vervangen_voor) + '</td><td>' + spEsc(x.instructie) + '</td></tr>';
+  });
+  h += '</table>';
+
+  h += '<h2>Auditlog</h2>';
+  if (!audit.ok) h += '<p class="fout">Auditlog niet te lezen.</p>';
+  else {
+    h += '<table><tr><th>Tijd</th><th>Sessie</th><th>Plek</th><th>Naam</th><th>Actie</th><th>Uitkomst</th><th>Reden</th></tr>';
+    (audit.regels || []).forEach(function (r) {
+      h += '<tr><td>' + spEsc(new Date(r.tijd).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam' })) + '</td><td><code>' + spEsc(r.sessie || '') + '</code></td><td>' + spEsc(r.plek) +
+        '</td><td>' + spEsc(r.naam || '') + '</td><td>' + spEsc(r.actie) + '</td><td>' + spEsc(r.uitkomst) + '</td><td>' + spEsc(r.reden || '') + '</td></tr>';
+    });
+    h += '</table>';
+  }
+  spStuur(res, 200, spPagina('Sleutelportaal', h));
+}
+
+function spNazorgKluis(v, meta) {
+  const m = (meta.kluis || {})[v.naam] || {};
+  const uit = [];
+  if (v.witte_lijst) uit.push('De pod gebruikt de nieuwe waarde pas na een herstart van de claudebot-app; vraag het de machinekamer (de pod kan zichzelf niet herstarten).');
+  if (SP_EIGEN.indexOf(v.naam) >= 0) uit.push('Het portaal draait zelf op deze sleutel: trek de oude pas in na die herstart.');
+  if (m.nazorg) uit.push(m.nazorg);
+  uit.push('Vorige waarde blijft bewaard: "Vorige terugzetten" draait dit terug.');
+  return uit;
+}
+
+async function spOpslaan(req, res, sessie, velden) {
+  const meta = spMeta();
+  const uitkomsten = [];
+  const kaart = sessie.velden || {};
+  // Eerst alles verzamelen, dan pas schrijven: een fout in veld 3 houdt veld 1 en 2 niet tegen.
+  const taken = [];
+  Object.keys(kaart).forEach(function (w) {
+    const v = kaart[w]; const waarde = typeof velden[w] === 'string' ? velden[w].trim() : '';
+    if (!waarde || v.plek === 'kluis-nieuw-naam') return;
+    if (v.plek === 'kluis-nieuw') {
+      const naam = String(velden[v.naamVeld] || '').trim();
+      taken.push({ plek: 'kluis', naam: naam || '(geen naam)', nieuw: true, waarde: waarde, v: { naam: naam } });
+    } else taken.push({ plek: v.plek, naam: v.naam, waarde: waarde, v: v });
+  });
+  for (const t of taken) {
+    if (t.plek === 'kluis') {
+      const r = await spRpc('sb_sleutelportaal_schrijven', { p_sessie: sessie.kenmerk, p_naam: t.v.naam, p_waarde: t.waarde, p_nieuw: !!t.nieuw });
+      if (r.ok) {
+        const tekst = r.actie === 'ongewijzigd' ? 'ongewijzigd (zelfde waarde)' : r.actie === 'aangemaakt' ? 'aangemaakt' : 'opgeslagen';
+        uitkomsten.push({ naam: t.naam, plek: 'kluis', ok: true, uitkomst: tekst,
+          nazorg: r.actie === 'aangemaakt' ? ['Nieuw in de kluis. Moet de pod hem lezen? Vraag de machinekamer om hem op de witte lijst te zetten.'] : r.actie === 'ongewijzigd' ? [] : spNazorgKluis(t.v, meta) });
+      } else uitkomsten.push({ naam: t.naam, plek: 'kluis', ok: false, uitkomst: 'mislukt: ' + spSchoon(r.reden, t.waarde), nazorg: [] });
+    } else if (t.plek === 'n8n') {
+      const veld = await spN8nVeld(t.v.type);
+      let ok = false, reden = '', test = '';
+      if (!veld || veld !== t.v.veld) reden = 'type niet (meer) ondersteund; doe het in n8n zelf';
+      else {
+        const body = { data: {}, isPartialData: true }; body.data[veld] = t.waarde;
+        const r = await spN8n('PATCH', '/credentials/' + encodeURIComponent(t.v.id), body);
+        ok = r.status === 200;
+        if (!ok) reden = r.status === 404 ? 'credential bestaat niet meer' : r.status === 403 ? 'geen recht (403)' : r.status === 400 ? 'n8n weigerde de invoer (400)' : 'n8n-fout ' + (r.status || 'onbereikbaar');
+        else {
+          const tr = await spN8n('POST', '/credentials/' + encodeURIComponent(t.v.id) + '/test');
+          if (tr.status === 200 && tr.json && tr.json.status === 'OK') test = 'n8n-test: geslaagd';
+          else if (tr.status === 200 && tr.json && /No testing function/i.test(String(tr.json.message || ''))) test = 'n8n-test: dit type is niet te testen; kijk naar de eerstvolgende productierun';
+          else if (tr.status === 200 && tr.json) test = 'n8n-test: MISLUKT (' + spSchoon(String(tr.json.message || 'fout').slice(0, 80), t.waarde) + ') - klopt de sleutel?';
+          else test = 'n8n-test: niet uit te voeren';
+        }
+      }
+      spLog(sessie, 'n8n', t.naam, 'bijwerken', ok ? 'opgeslagen' : 'mislukt', ok ? test.slice(0, 120) : reden);
+      const m = (meta.n8n || {})[t.naam] || {};
+      const nazorg = ok ? [test, 'n8n bewaart geen vorige waarde: oude sleutel pas intrekken als dit goed blijkt.'].concat(m.nazorg ? [m.nazorg] : [])
+        .concat(t.v.type === 'telegramApi' ? ['Controleer of de Telegram-trigger nog berichten ontvangt; zo niet, workflow uit- en aanzetten.'] : []) : [];
+      uitkomsten.push({ naam: t.naam, plek: 'n8n', ok: ok, uitkomst: ok ? 'opgeslagen' : 'mislukt: ' + reden, nazorg: nazorg });
+    }
+  }
+  if (taken.length) {
+    const goed = uitkomsten.filter(function (u) { return u.ok; }).map(function (u) { return u.naam; });
+    const fout = uitkomsten.filter(function (u) { return !u.ok; }).map(function (u) { return u.naam; });
+    spTelegram('Sleutelportaal (sessie ' + sessie.kenmerk + '): ' + goed.length + ' opgeslagen' + (goed.length ? ' (' + goed.join(', ') + ')' : '') +
+      (fout.length ? ', ' + fout.length + ' mislukt (' + fout.join(', ') + ')' : '') + '. Niet door jou gedaan? Meld het direct aan de machinekamer.');
+  } else uitkomsten.push({ naam: '-', plek: '-', ok: false, uitkomst: 'niets ingevuld', nazorg: [] });
+  return spOverzicht(req, res, sessie, uitkomsten);
+}
+
+// Vangnet: een reden van buiten mag de ingevoerde waarde (of een stuk ervan) nooit terugtonen.
+function spSchoon(tekst, waarde) {
+  let t = String(tekst == null ? '' : tekst);
+  if (waarde && waarde.length >= 4) {
+    t = t.split(waarde).join('••••');
+    for (let i = 0; i + 8 <= waarde.length && i < 8192; i++) t = t.split(waarde.slice(i, i + 8)).join('••••');
+  }
+  return t.slice(0, 200);
+}
+
+function spCodeAanvraag(req, res) {
+  const nu = Date.now();
+  spStaat.codeTijden = spStaat.codeTijden.filter(function (t) { return nu - t < 86400000; });
+  const laatste = spStaat.codeTijden[spStaat.codeTijden.length - 1] || 0;
+  const perUur = spStaat.codeTijden.filter(function (t) { return nu - t < 3600000; }).length;
+  if (nu - laatste < SP_CODE_INTERVAL_MS) return spStuur(res, 429, spInlogPagina('Er is net een code verstuurd. Wacht een minuut voor een nieuwe.', true));
+  if (perUur >= SP_CODE_PER_UUR || spStaat.codeTijden.length >= SP_CODE_PER_DAG) {
+    spLog(null, 'portaal', null, 'code', 'geweigerd', 'grens bereikt');
+    return spStuur(res, 429, spInlogPagina('Te veel codes aangevraagd. Probeer het later, of vraag de machinekamer.', true));
+  }
+  spStaat.codeTijden.push(nu);
+  const code = String(crypto.randomInt(0, 100000000)).padStart(8, '0');
+  const zout = crypto.randomBytes(16).toString('hex');
+  spStaat.code = { hash: spHash(zout + code), zout: zout, tot: nu + SP_CODE_MS, pogingen: 0 };
+  const via = String(req.headers['x-forwarded-for'] || (req.socket && req.socket.remoteAddress) || '?').split(',')[0].trim().slice(0, 45);
+  spTelegram('Sleutelportaal: code ' + code + ' (5 min geldig). Aangevraagd via ' + via + '. Niet zelf aangevraagd? Niet invullen en meld het de machinekamer.')
+    .then(function (ok) {
+      spLog(null, 'portaal', null, 'code', ok ? 'verstuurd' : 'mislukt', ok ? 'via ' + via : 'Telegram niet bereikbaar');
+      if (!ok) spStaat.code = null;
+    });
+  spStuur(res, 200, spInlogPagina('Code verstuurd naar je Telegram (debug-bot). Vul hem hieronder in.', true));
+}
+
+function spInloggen(req, res, velden) {
+  const c = spStaat.code;
+  const invoer = String(velden.c || '').trim();
+  if (!c || Date.now() > c.tot) { spStaat.code = null; return spStuur(res, 403, spInlogPagina('Geen geldige code (verlopen of niet aangevraagd). Vraag een nieuwe aan.')); }
+  c.pogingen++;
+  if (!/^[0-9]{8}$/.test(invoer) || !spGelijk(spHash(c.zout + invoer), c.hash)) {
+    const over = SP_CODE_POGINGEN - c.pogingen;
+    if (over <= 0) { spStaat.code = null; spLog(null, 'portaal', null, 'inloggen', 'geweigerd', 'te veel pogingen'); }
+    return spStuur(res, 403, spInlogPagina(over > 0 ? 'Code klopt niet. Nog ' + over + ' poging(en).' : 'Code ongeldig gemaakt na te veel pogingen. Vraag een nieuwe aan.'));
+  }
+  spStaat.code = null;
+  const id = crypto.randomBytes(32).toString('hex');
+  const kenmerk = spHash(id).slice(0, 8);
+  spStaat.sessie = { idHash: spHash(id), kenmerk: kenmerk, tot: Date.now() + SP_SESSIE_MS, csrf: crypto.randomBytes(24).toString('hex'), velden: {}, formToken: null };
+  spLog(spStaat.sessie, 'portaal', null, 'inloggen', 'geslaagd', null);
+  spStuur(res, 303, '', {
+    Location: SP_PAD,
+    'Set-Cookie': SP_COOKIE + '=' + id + '; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=' + Math.floor(SP_SESSIE_MS / 1000),
+  });
+}
+
+function sleutelportaalIsPad(req) { const p = reqPath(req); return p === SP_PAD || p.indexOf(SP_PAD + '/') === 0; }
+
+function sleutelportaal(req, res) {
+  const p = reqPath(req);
+  res._log = { portaal: 'sleutels' };
+  if (req.method === 'GET' && p === SP_PAD) {
+    const s = spSessie(req);
+    if (!s) return spStuur(res, 200, spInlogPagina(''));
+    return spOverzicht(req, res, s).catch(function (e) { logError('sleutelportaal', e); spStuur(res, 500, spPagina('Fout', '<p>Er ging iets mis bij het laden.</p>')); });
+  }
+  if (req.method !== 'POST') return spStuur(res, 405, spPagina('Niet toegestaan', '<p>Niet toegestaan.</p>'), { Allow: 'GET, POST' });
+  if (!spOriginOk(req)) { req.resume(); return spStuur(res, 403, spPagina('Geweigerd', '<p>Geweigerd: verkeerde herkomst.</p>')); }
+  spBody(req, function (fout, velden) {
+    if (fout) return spStuur(res, 400, spPagina('Geweigerd', '<p>Ongeldig verzoek.</p>'));
+    try {
+      if (p === SP_PAD + '/code') return spCodeAanvraag(req, res);
+      if (p === SP_PAD + '/inloggen') return spInloggen(req, res, velden);
+      const s = spSessie(req);
+      if (!s) return spStuur(res, 403, spInlogPagina('Sessie verlopen. Log opnieuw in.'));
+      if (!spGelijk(String(velden.t || ''), s.csrf)) return spStuur(res, 403, spPagina('Geweigerd', '<p>Geweigerd: formulier niet geldig. Herlaad de pagina.</p>'));
+      if (p === SP_PAD + '/uitloggen') {
+        spStaat.sessie = null;
+        return spStuur(res, 303, '', { Location: SP_PAD, 'Set-Cookie': SP_COOKIE + '=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0' });
+      }
+      // Eenmalig formuliertoken: dubbel verzenden of 'vernieuwen' schrijft niets twee keer.
+      if (!s.formToken || !spGelijk(String(velden.f || ''), s.formToken)) {
+        return spStuur(res, 409, spPagina('Al verwerkt', '<p>Dit formulier is al verwerkt of verouderd. <a href="' + SP_PAD + '">Terug naar het overzicht</a>.</p>'));
+      }
+      s.formToken = null;
+      if (p === SP_PAD + '/terugzetten') {
+        const naam = String(velden.terug || '');
+        const bekend = Object.keys(s.velden || {}).some(function (w) { return s.velden[w].plek === 'kluis' && s.velden[w].naam === naam; });
+        if (!bekend) return spOverzicht(req, res, s, [{ naam: naam, plek: 'kluis', ok: false, uitkomst: 'onbekende sleutel', nazorg: [] }]);
+        const ookIngevuld = Object.keys(s.velden || {}).some(function (w) { return typeof velden[w] === 'string' && velden[w].trim() && s.velden[w].plek !== 'kluis-nieuw-naam'; });
+        return spRpc('sb_sleutelportaal_terugzetten', { p_sessie: s.kenmerk, p_naam: naam }).then(function (r) {
+          if (r.ok) spTelegram('Sleutelportaal (sessie ' + s.kenmerk + '): vorige waarde teruggezet voor ' + naam + '.');
+          const v = Object.keys(s.velden).map(function (w) { return s.velden[w]; }).find(function (x) { return x.naam === naam; }) || {};
+          return spOverzicht(req, res, s, [{ naam: naam, plek: 'kluis', ok: !!r.ok, uitkomst: r.ok ? 'teruggezet (huidige en vorige gewisseld)' : 'mislukt: ' + (r.reden || 'onbekend'),
+            nazorg: (r.ok && v.witte_lijst ? ['De pod gebruikt hem pas na een herstart van de claudebot-app; vraag het de machinekamer.'] : [])
+              .concat(ookIngevuld ? ['LET OP: de nieuwe waarden die je had ingevuld zijn NIET opgeslagen (je koos terugzetten). Vul ze opnieuw in.'] : []) }]);
+        });
+      }
+      if (p === SP_PAD + '/opslaan') return spOpslaan(req, res, s, velden);
+      return spStuur(res, 404, spPagina('Niet gevonden', '<p>Niet gevonden.</p>'));
+    } catch (e) {
+      logError('sleutelportaal', e);
+      return spStuur(res, 500, spPagina('Fout', '<p>Er ging iets mis.</p>'));
+    }
+  });
+}
+// ── einde sleutelportaal ─────────────────────────────────────────────────────
+
 const server = http.createServer(function (req, res) {
   const t0 = Date.now();
   // Routes vullen res._log met job_id / chat_id / workspace zodra die bekend
@@ -2282,6 +2800,7 @@ const server = http.createServer(function (req, res) {
   try {
     if (autoIsOtaPad(req)) return autoProxyHttp(req, res);
     if (autoIsInternPad(req)) return autoIntern(req, res);
+    if (sleutelportaalIsPad(req)) return sleutelportaal(req, res);
     handleRequest(req, res);
   } catch (e) {
     logError('route', e);
