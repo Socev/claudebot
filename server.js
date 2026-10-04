@@ -3088,7 +3088,9 @@ if (OFFSITE_INTERVAL_MIN > 0 && !offsiteDoorRunsh()) {
 // start van server.js; AUTO_UIT=1 in dat bestand weigert alle gesprekken bij de volgende start van het kind).
 // Het kind erft NIET de pod-omgeving: alleen een witte lijst, met als enige sleutels CLOUDFLARE_AI_TOKEN_AUTO (een
 // token met alleen Workers AI-rechten; ZONDER dat token start het kind niet - het brede CLOUDFLARE_API_TOKEN gaat
-// bewust nooit naar een proces achter een publiek pad, review Fable 3-10) en ANTHROPIC_API_KEY_AUTO als die bestaat.
+// bewust nooit naar een proces achter een publiek pad, review Fable 3-10), ANTHROPIC_API_KEY_AUTO als die bestaat, en
+// sinds 4-10-2026 avond GEMINI_API_KEY_AUTO als GEMINI_API_KEY (kluisnaam gemini_api_key_auto, eigen sleutel voor de
+// stem van het kastje, David: "dezelfde als de ochtendbriefing"; zonder sleutel spreekt Piper).
 // Valt server.js weg, dan sluit het ipc-kanaal en stopt het kind zelf (geen wees met oude code op de poort).
 // Begrenzing (review 3-10): de pod heeft een quotum van 2 cores en Piper start 24 threads (gemeten). Het kind draait
 // daarom met nice 10 (claude-beurten en server.js gaan voor binnen het quotum), een heap-grens van 512 MB en een
@@ -3143,6 +3145,7 @@ function autoStart() {
   delete env.AUTO_PROCES;
   env.CF_AI_TOKEN = process.env.CLOUDFLARE_AI_TOKEN_AUTO;
   if (process.env.ANTHROPIC_API_KEY_AUTO) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY_AUTO;
+  if (process.env.GEMINI_API_KEY_AUTO) env.GEMINI_API_KEY = process.env.GEMINI_API_KEY_AUTO;
   if (!env.CF_ACCOUNT_ID) env.CF_ACCOUNT_ID = LESSEN_CF_ACCOUNT;   // geen geheim; staat ook bij de lessen-injectie
   let k;
   try {
@@ -3529,7 +3532,10 @@ function autoProxyHttp(req, res) {
   const hop = { connection: 1, 'keep-alive': 1, 'proxy-connection': 1, 'transfer-encoding': 1, upgrade: 1, te: 1, trailer: 1 };
   for (const h in req.headers) if (!hop[h]) kop[h] = req.headers[h];
   kop['x-forwarded-for'] = autoXff(req);
-  const p = http.request({ host: '127.0.0.1', port: AUTO_POORT, method: req.method, path: req.url, headers: kop, timeout: 10000 }, function (r) {
+  // Netwerkupdate (GET /auto/ota/ met Socev-Firmware, ± 2,8 MB): het kastje leest met tegendruk en schrijft per 4 kB
+  // naar flash; de 10 s stilte-grens kon zo'n download afbreken (review 4-10, punt 3). Daarvoor 180 s.
+  const isFirmware = req.method === 'GET' && soort === 'ota' && req.headers['socev-firmware'] !== undefined;
+  const p = http.request({ host: '127.0.0.1', port: AUTO_POORT, method: req.method, path: req.url, headers: kop, timeout: isFirmware ? 180000 : 10000 }, function (r) {
     const terug = {};
     for (const h in r.headers) if (!hop[h]) terug[h] = r.headers[h];
     res.writeHead(r.statusCode || 502, terug);
