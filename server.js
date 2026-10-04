@@ -2728,7 +2728,7 @@ const AUTO_AGENT_KOP = 'Opdracht ingesproken in het spraakkastje in de auto. Hie
   'David bevestigt in Telegram. Is de opdracht onduidelijk of riskant, doe dan niets en zeg dat. ' +
   'Begin je rapport met de regel "Opdracht uit de auto, <tijd>: <de opdracht in één zin>." en geef daarna de kern ' +
   'in gewone zinnen: als David nog rijdt, wordt het voorgelezen.';
-const AUTO_AGENT_MAX_MIN = 20;
+const AUTO_AGENT_MAX_MIN = 20;    // review fase 2: geen 60 minuten Max-quotum per ingesproken zin
 // Review 4-10 (punt 3): "onderzoekend" niet alleen als tekst. Een agent uit de auto mag geen bestaande bestanden
 // bewerken (Write blijft: OUTDIR of een nieuwe pagina), geen n8n/Todoist, geen schrijvende Supabase-tools, en krijgt
 // de sleutels niet waarmee hij via Bash n8n, de pod-API of de debugbot zou kunnen bedienen. Bash zelf blijft: dat is
@@ -2736,7 +2736,8 @@ const AUTO_AGENT_MAX_MIN = 20;
 const AUTO_AGENT_VERBODEN = 'Edit NotebookEdit mcp__n8n mcp__todoist mcp__supabase__apply_migration mcp__supabase__execute_sql ' +
   'mcp__supabase__deploy_edge_function mcp__supabase__create_branch mcp__supabase__delete_branch mcp__supabase__merge_branch ' +
   'mcp__supabase__reset_branch mcp__supabase__rebase_branch mcp__supabase__pause_project mcp__supabase__restore_project mcp__supabase__create_project';
-const AUTO_AGENT_ENV_WEG = ['N8N_API_KEY', 'N8N_MCP_TOKEN', 'API_SECRET', 'AGENT_WEBHOOK_SECRET', 'TELEGRAM_DEBUG_BOT_TOKEN', 'TODOIST_MCP_TOKEN'];    // review fase 2: geen 60 minuten Max-quotum per ingesproken zin
+const AUTO_AGENT_ENV_WEG = ['N8N_API_KEY', 'N8N_MCP_TOKEN', 'API_SECRET', 'AGENT_WEBHOOK_SECRET', 'TELEGRAM_DEBUG_BOT_TOKEN', 'TODOIST_MCP_TOKEN',
+  'SUPABASE_SERVICE_ROLE', 'CLOUDFLARE_API_TOKEN'];   // ook geen schrijfsleutel voor Supabase of Cloudflare (gemeten 4-10)
 const autoAgentLog = [];          // tijdstippen van gestarte opdrachten (24 uur)
 const autoAgentJobs = new Set();  // job_ids die deze poort startte (alleen die mag hij stoppen)
 let autoAgentLaatstePoging = 0;
