@@ -22,7 +22,8 @@
  *      (env AGENT_WEBHOOK_URL) die het naar Telegram brengt — geen polling.
  *      GET /agents toont wat er loopt en liep (toezicht voor de hoofd-agent).
  *
- *   POST /run     { prompt, chat_id?, workspace?, runtime?, model?, session_id?, secret?, files? } -> { ok, job_id, workspace, runtime, model }
+ *   POST /run     { prompt, chat_id?, workspace?, runtime?, model?, session_id?, secret?, files?, gereedschap? } -> { ok, job_id, workspace, runtime, model }
+ *                  gereedschap: 'lezen' = alleen Read/Glob/Grep/Write binnen de eigen jobmap, geen Bash/MCP/vault (zie GEREEDSCHAP_LEZEN)
  *   GET  /runtime -> stand van de brein-schakelaar;  POST /runtime { default?, fallback?, models?, secret? } zet hem
  *                  LET OP: `models` wordt per sleutel SAMENGEVOEGD, niet vervangen. Een sleutel wissen
  *                  doe je met een lege waarde: { models: { claude: "" } }. (Gemeten 22-9-2026: wie de
@@ -595,6 +596,41 @@ const CLAUDE_EFFORT = (function () {
 // Zonder bewijs doodt de vroege levenscontrole niets: fail-open als een nieuwe CLI het pad verlegt.
 const transcriptMeterBewezen = {};
 
+// ── Gereedschap 'lezen' (5-10-2026, akkoord David) ──────────────────────────
+// WAAROM. De Mail Processor stuurt sinds 5-10 mailtekst en pdf's van derden naar /run. Die beurten draaiden met
+// alle gereedschappen van de pod (Bash, MCP, de hele vault), dus een prompt-injectie in een mail kon meer dan een
+// samenvatting teruggeven. Met gereedschap: 'lezen' draait de beurt in de CLI-stand --restricted:
+// - cwd is de eigen jobmap (in/ + out/); --restricted beperkt de bestandstools tot die map (Read buiten de map en
+//   Write buiten de map worden geweigerd - gemeten 5-10 met claude 2.1.288);
+// - --tools laat alleen Read, Glob, Grep en Write over: geen Bash, Edit, WebFetch, Skill of Agent;
+// - --strict-mcp-config zonder --mcp-config: geen MCP-servers; --restricted negeert ook user/project-settings;
+// - --restricted weigert bypassPermissions, dus acceptEdits + --permission-prompts none: wat zou vragen, wordt geweigerd;
+// - geen sessiegeheugen, geen lessenblok, alleen het claude-brein zonder terugval;
+// - de omgeving is een ALLOWLIST (review Fable 5-10): alleen wat de CLI nodig heeft, dus geen enkele sleutel behalve
+//   de eigen inlogtoken - ook niet de Telegram-sessie of het backupwachtwoord, mocht er ooit een leespad bijkomen;
+// - uitvoer begrensd op GEREEDSCHAP_LEZEN_MAX_UIT bytes in totaal (een injectie mag geen 50 bestanden van 19 MB maken);
+// - het transcript (met mailinhoud) wordt na de beurt weggegooid, net als de jobmap zelf.
+// Restpunt buiten deze grens: de uitvoer (samenvatting, pdf-markdown) wordt later door de nachtverwerking gelezen;
+// daar blijft het "gegevens, geen instructies".
+// Standaard (veld leeg) verandert er niets voor andere aanroepers. Elke andere waarde = 400.
+const GEREEDSCHAP_LEZEN_TOOLS = 'Read,Glob,Grep,Write';
+const GEREEDSCHAP_LEZEN_ENV_MAG = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'NODE_VERSION', 'DISABLE_AUTOUPDATER',
+  'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_EFFORT'];
+const GEREEDSCHAP_LEZEN_MAX_UIT = 30 * 1024 * 1024;
+function claudeBasisArgs(opts) {
+  if (opts && opts.gereedschap === 'lezen') {
+    return ['-p', '--output-format', 'json', '--restricted', '--strict-mcp-config', '--tools', GEREEDSCHAP_LEZEN_TOOLS,
+      '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--effort', CLAUDE_EFFORT];
+  }
+  return ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--effort', CLAUDE_EFFORT];
+}
+// '' = standaard, 'lezen' = beperkt; null bij een onbekende waarde.
+function leesGereedschap(w) {
+  if (w == null || w === '') return '';
+  const k = String(w).trim().toLowerCase();
+  return k === 'lezen' ? 'lezen' : null;
+}
+
 function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   // opts: { inactMs, maxMs, progress, vroegMs }  — progress wordt live bijgewerkt zodat
   // /result running_ms en last_activity_ms kan teruggeven. vroegMs (alleen achtergrondagents):
@@ -606,7 +642,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   return new Promise(function (resolve) {
     // Review-fix A1 (5-9-2026): `--` vóór de prompt, anders wordt een bericht dat
     // met '-' begint (Telegram-bullet) als vlag gelezen. Getest met claude -p.
-    const args = ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--effort', CLAUDE_EFFORT];
+    const args = claudeBasisArgs(opts);
     // Exact pinnen (4-10-2026). Een nieuwe sessie krijgt hier zelf haar id mee; gemeten met
     // claude 2.1.288: --session-id <uuid> schrijft <uuid>.jsonl en --resume <id> schrijft in
     // datzelfde <id>.jsonl door. Daarmee weet de watchdog precies welk transcript van ons is.
@@ -619,7 +655,12 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     const extra = { OUTDIR: outdir };
     if (model) extra.ANTHROPIC_MODEL = model;
     // opts.env: o.a. de agentmarker SOCEV_AGENT_RUN (eindcontrole, 4-10-2026).
-    const env = Object.assign({}, process.env, extra, (opts && opts.env) || {});
+    let basisEnv = process.env;
+    if (opts && opts.gereedschap === 'lezen') {
+      basisEnv = {};
+      GEREEDSCHAP_LEZEN_ENV_MAG.forEach(function (k) { if (process.env[k] != null) basisEnv[k] = process.env[k]; });
+    }
+    const env = Object.assign({}, basisEnv, extra, (opts && opts.env) || {});
     if (opts && opts.envWeg) opts.envWeg.forEach(function (k) { delete env[k]; });
     // detached: eigen procesgroep, zodat een kill ook MCP-servers en
     // bash-kinderen raakt en er geen wezen achterblijven.
@@ -1454,7 +1495,7 @@ async function lessenBlok(prompt, chatId, label) {
   }
 }
 
-async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keuze) {
+async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keuze, gereedschap) {
   const base = path.join(IO, jobId);
   const indir = path.join(base, 'in');
   const outdir = path.join(base, 'out');
@@ -1487,13 +1528,25 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
         }
       }
     }
-    const sKey = sessieSleutel(key, keuze.runtime);
-    const sessionId = explicitSession || (sKey ? chatSessions[sKey] : '') || '';
-    const lesblok = await lessenBlok(prompt, chatId, '');
-    const fullPrompt = lesblok + prompt + '\n\n' + space.hint(indir, outdir);
+    const lezen = gereedschap === 'lezen';
+    // Gereedschap 'lezen': geen sessiegeheugen en geen lessenblok (machinale klus); cwd = de eigen jobmap.
+    const sKey = lezen ? '' : sessieSleutel(key, keuze.runtime);
+    const sessionId = lezen ? '' : (explicitSession || (sKey ? chatSessions[sKey] : '') || '');
+    const lesblok = lezen ? '' : await lessenBlok(prompt, chatId, '');
+    // 'lezen' werkt in de jobmap, niet in de workspace: altijd de kale map-hint (de ghawa-hint noemt een repo).
+    const fullPrompt = lesblok + prompt + '\n\n' + (lezen ? WORKSPACES.vault : space).hint(indir, outdir);
     j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
-    const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, space.dir, { progress: j.progress, lastFile: path.join(base, 'codex-last.md') });
+    const runOpts = { progress: j.progress, lastFile: path.join(base, 'codex-last.md') };
+    if (lezen) runOpts.gereedschap = 'lezen';
+    const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, lezen ? base : space.dir, runOpts);
+    if (lezen) r.gereedschap = 'lezen';
     r.files = collectFiles(outdir);
+    if (lezen) {
+      let tot = 0;
+      const voor = r.files.length;
+      r.files = r.files.filter(function (f) { tot += f.size || 0; return tot <= GEREEDSCHAP_LEZEN_MAX_UIT; });
+      if (r.files.length < voor) r.bestanden_weggelaten = voor - r.files.length;
+    }
     r.workspace = ws;
     if (keuze.model && !r.fallback_van) r.model = keuze.model;
     if (sKey && r.session_id) { chatSessions[sKey] = r.session_id; saveSessions(); }
@@ -1506,6 +1559,11 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     jobEindLog(jobId, j, ws);
   } finally {
     try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) {}
+    // Transcript van een 'lezen'-beurt bevat inhoud van derden en hoort bij geen enkel gesprek: weg.
+    if (gereedschap === 'lezen') {
+      try { fs.rmSync(projectDirFor(base), { recursive: true, force: true }); } catch (e) {}
+      delete transcriptMeterBewezen[projectDirFor(base)];
+    }
   }
 }
 
@@ -2205,15 +2263,29 @@ function handleRequest(req, res) {
       const wsFout = workspaceFout(d.workspace);
       if (wsFout) return weigerWorkspace(res, wsFout, '/run');
       const ws = resolveWorkspace(d.workspace);
-      const keuze = resolveKeuze(d);
+      const gereedschap = leesGereedschap(d.gereedschap);
+      if (gereedschap === null) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: false, error: 'onbekend-gereedschap', melding: "onbekend gereedschap; geldig is alleen 'lezen' (of leeg voor de standaard)" }));
+      }
+      // 'lezen' zonder runtime = claude, ook als de brein-schakelaar op iets anders staat.
+      let keuze = resolveKeuze(gereedschap ? Object.assign({}, d, { runtime: d.runtime || 'claude' }) : d);
       if (keuze.fout) return weigerRuntime(res, keuze.fout, '/run');
+      if (gereedschap) {
+        // Alleen het claude-brein kent de beperkte stand; geen stille terugval naar een brein zonder die grens.
+        if (keuze.runtime !== 'claude') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ ok: false, error: 'gereedschap-alleen-claude', melding: "gereedschap 'lezen' kan alleen met runtime claude" }));
+        }
+        keuze = { runtime: 'claude', model: keuze.model, fallback: '' };
+      }
       const jobId = crypto.randomBytes(8).toString('hex');
-      jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: chatId, runtime: keuze.runtime };
-      res._log = { job_id: jobId, chat_id: chatId, workspace: ws, runtime: keuze.runtime };
+      jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: chatId, runtime: keuze.runtime, gereedschap: gereedschap || undefined };
+      res._log = { job_id: jobId, chat_id: chatId, workspace: ws, runtime: keuze.runtime, gereedschap: gereedschap || undefined };
       // Serieel per chat, ongeacht het brein: één gesprek, één beurt tegelijk.
-      enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, keuze); });
+      enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, keuze, gereedschap); });
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws, runtime: keuze.runtime, model: keuze.model || '(default)' }));
+      res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws, runtime: keuze.runtime, model: keuze.model || '(default)', gereedschap: gereedschap || undefined }));
     });
   }
 
