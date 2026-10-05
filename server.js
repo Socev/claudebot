@@ -655,13 +655,15 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     const extra = { OUTDIR: outdir };
     if (model) extra.ANTHROPIC_MODEL = model;
     // opts.env: o.a. de agentmarker SOCEV_AGENT_RUN (eindcontrole, 4-10-2026).
+    // Allowlist (gereedschap 'lezen' en beperkt=auto): alleen de genoemde namen uit de podomgeving; extra en opts.env
+    // (OUTDIR, ANTHROPIC_MODEL, de agentmarker) komen er daarna bij.
     let basisEnv = process.env;
-    if (opts && opts.gereedschap === 'lezen') {
+    const envMag = (opts && opts.gereedschap === 'lezen') ? GEREEDSCHAP_LEZEN_ENV_MAG : (opts && opts.envMag) || null;
+    if (envMag) {
       basisEnv = {};
-      GEREEDSCHAP_LEZEN_ENV_MAG.forEach(function (k) { if (process.env[k] != null) basisEnv[k] = process.env[k]; });
+      envMag.forEach(function (k) { if (process.env[k] != null) basisEnv[k] = process.env[k]; });
     }
     const env = Object.assign({}, basisEnv, extra, (opts && opts.env) || {});
-    if (opts && opts.envWeg) opts.envWeg.forEach(function (k) { delete env[k]; });
     // detached: eigen procesgroep, zodat een kill ook MCP-servers en
     // bash-kinderen raakt en er geen wezen achterblijven.
     const child = spawn('claude', args, { cwd: cwd, env: env, detached: true });
@@ -1964,7 +1966,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     let t0 = Date.now();
     const runOpts = { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS, lastFile: path.join(base, 'codex-last.md'), env: {} };
     runOpts.env[EIND_MARKER] = jobId;
-    if (j.beperkt === 'auto') { runOpts.disallowedTools = AUTO_AGENT_VERBODEN; runOpts.envWeg = AUTO_AGENT_ENV_WEG; }
+    if (j.beperkt === 'auto') { runOpts.disallowedTools = AUTO_AGENT_VERBODEN; runOpts.envMag = AUTO_AGENT_ENV_MAG; }
     // Vroege levenscontrole (alleen de eerste run; hervattingen in de eindcontrole niet): geen
     // teken van leven binnen VROEG_LEVEN_MS -> procesgroep weg en precies één nieuwe start, weer
     // via de startspreiding. Komt ook die niet op gang, dan een duidelijke foutmelding.
@@ -3433,8 +3435,29 @@ const AUTO_AGENT_MAX_MIN = 20;    // review fase 2: geen 60 minuten Max-quotum p
 const AUTO_AGENT_VERBODEN = 'Edit NotebookEdit mcp__n8n mcp__todoist mcp__supabase__apply_migration mcp__supabase__execute_sql ' +
   'mcp__supabase__deploy_edge_function mcp__supabase__create_branch mcp__supabase__delete_branch mcp__supabase__merge_branch ' +
   'mcp__supabase__reset_branch mcp__supabase__rebase_branch mcp__supabase__pause_project mcp__supabase__restore_project mcp__supabase__create_project';
-const AUTO_AGENT_ENV_WEG = ['N8N_API_KEY', 'N8N_MCP_TOKEN', 'API_SECRET', 'AGENT_WEBHOOK_SECRET', 'TELEGRAM_DEBUG_BOT_TOKEN', 'TODOIST_MCP_TOKEN',
-  'SUPABASE_SERVICE_ROLE', 'CLOUDFLARE_API_TOKEN'];   // ook geen schrijfsleutel voor Supabase of Cloudflare (gemeten 4-10)
+// Omgeving op ALLOWLIST (5-10-2026, akkoord David; box 5-10 15:50 voorstel 1). Wat in de auto wordt ingesproken (ook
+// door een passagier of de radio) is half-vertrouwde invoer en de agent heeft Bash: alles in zijn omgeving is leesbaar.
+// De oude denylist liet o.a. TELEGRAM_SESSIE, VAULT_BACKUP_CRYPT_WACHTWOORD en GEMINI_API_KEY_AUTO staan, en elke
+// nieuwe sleutel in de pod kwam er vanzelf bij. Nu: alleen wat de CLI nodig heeft plus de LEESluiken waar een vraag
+// uit de auto om draait (het kastje is een doorgeefluik: "wat staat er morgen", "heeft X gemaild", "nummer van Y").
+// Bewust NIET: N8N_WEBHOOK_SMS (verstuurt sms), N8N_WEBHOOK_SOCEV_AGENDA (agenda schrijven), N8N_WEBHOOK_MAILCONCEPT
+// (concepten + voorlezen naar Davids chat), WERKKAMER_SLEUTEL_POD (forum = publiceren), N8N_WEBHOOK_VERBETERLOG, en
+// alle sleutels: API_SECRET/AGENT_WEBHOOK_* (pod-API), N8N_API_KEY/N8N_MCP_TOKEN, TODOIST_MCP_TOKEN, SUPABASE_* (o.a. de
+// beheertoken van de Supabase-MCP en service role), CLOUDFLARE_*, GEMINI_*, TELEGRAM_*, VAULT_BACKUP_*, GIT_*.
+// MCP-servers waarvan de ${TOKEN} dan leeg is, verbinden niet (todoist, n8n, supabase); pubmed en playwright blijven.
+const AUTO_AGENT_ENV_MAG = [
+  'HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR',   // basis voor CLI, Bash en tijdrekenen (TZ: Europe/Amsterdam)
+  'NODE_VERSION', 'DISABLE_AUTOUPDATER',              // node-image; geen zelf-update van de CLI midden in een run
+  'CLAUDE_CODE_OAUTH_TOKEN',                          // inlogtoken van de CLI zelf (zonder geen run)
+  'CLAUDE_EFFORT',                                    // zelfde denkstand als andere agents
+  'PLAYWRIGHT_BROWSERS_PATH',                         // browser voor de playwright-MCP (opzoeken op het web)
+  'VAULT_DIR',                                        // pad, geen sleutel (systeemrapport/capaciteiten.js)
+  'N8N_WEBHOOK_AGENDA_API',                           // lees-luik agenda + mail (skills agenda-wachter, mailbijlage-ophalen);
+                                                      // schrijfacties daarin geven 400 (David 5-8); restpunt: state_upsert
+  'N8N_WEBHOOK_WERKROOSTER',                          // praktijk-werkrooster, alleen lezen
+  'N8N_WEBHOOK_WHATSAPP',                             // whatsapp-chat-uitlezen, alleen lezen (WAHA read-only)
+  'SUPABASE_RPC_CONTACTEN'                            // contacten-opzoeken, alleen lezen
+];
 const autoAgentLog = [];          // tijdstippen van gestarte opdrachten (24 uur)
 const autoAgentJobs = new Set();  // job_ids die deze poort startte (alleen die mag hij stoppen)
 const autoAgentMk = new Set();    // daarvan: route machinekamer (komt niet terug in de auto)
