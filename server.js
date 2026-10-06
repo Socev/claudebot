@@ -3544,13 +3544,16 @@ const AUTO_AGENT_KOP = 'Opdracht ingesproken in het spraakkastje in de auto. Hie
   'Alles wat naar buiten gaat (mail, apps, berichten), geld, personeel of toezeggingen bereid je alleen voor; ' +
   'David bevestigt in Telegram. Is de opdracht onduidelijk of riskant, doe dan niets en zeg dat. ' +
   'Begin je rapport met de regel "Opdracht uit de auto, <tijd>: <de opdracht in één zin>." en geef daarna de kern ' +
-  'in gewone zinnen: als David nog rijdt, wordt het voorgelezen. Het kastje leest na die eerste regel hooguit 650 ' +
-  'tekens voor (± 45 seconden); houd de kern daarbinnen, compleet en zonder lijstjes. Wat niet hardop hoeft ' +
+  'in gewone zinnen: als David nog rijdt, wordt het voorgelezen. Het kastje leest na die eerste regel hooguit ± 500 ' +
+  'woorden voor (± 4 minuten); houd de kern daarbinnen, compleet en zonder lijstjes. Geen mini-versie: vraagt David ' +
+  'om een voorbereiding of uitleg, dan krijgt hij die volledig; een korte vraag krijgt een kort antwoord. Wat niet hardop hoeft ' +
   '(boodschappenlijst, details, links), zet je daarna onder een eigen regel "Verder in Telegram:"; dat deel staat ' +
   'alleen in Telegram.';
 // 6-10-2026: tot dan kende Socev die grens niet; alle rapporten uit de auto waren 900-1500 tekens en het kastje kapte
 // ze af na 750 (David: "incompleet"). socev-auto (src/voorlees.js) slaat de kopregel over en leest tot de regel
-// "Verder in Telegram:".
+// "Verder in Telegram:". 6-10-2026 17:00 (David: "Als ik vraag om een korte voorbereiding op een vergadering, wil ik
+// niet een mini-versie. Een grens van 500 woorden lijkt mij al beter"): grens 650 tekens -> ± 500 woorden (socev-auto
+// 49278fb: KERN 3300, MAX 3600 tekens; gemeten 3,2 min voor 501 woorden met de Gemini-stem).
 // Route machinekamer (5-10-2026): David vroeg het kastje twee keer iets "aan de machinekamer te melden"; dat ging als
 // socev: naar het hoofdkanaal, waar Socev niets mocht schrijven en NIETS antwoordde. Het kind mag nu precies één
 // andere route vragen (route: 'machinekamer', herkend in socev-auto src/route.js); dan wordt het labelprefix
