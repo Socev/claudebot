@@ -2159,6 +2159,12 @@ async function meetTank() {
 }
 
 function handleRequest(req, res) {
+  // Publieke levenscheck voor de tunnel (socev.huisdokter.dev, uitwijk stap 2). /health zelf noemt sleutelnamen,
+  // chats en modellen en zit achter de Olares-login; via de tunnel mag alleen dit door (ingress-regel bij Cloudflare).
+  if (req.method === 'GET' && reqPath(req) === '/health/publiek') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({ ok: true, dienst: 'claudebot' }));
+  }
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
     const spaces = {};
     for (const k in WORKSPACES) spaces[k] = { dir: WORKSPACES[k].dir, exists: fs.existsSync(WORKSPACES[k].dir) };
@@ -2185,6 +2191,7 @@ function handleRequest(req, res) {
       agents: Object.assign(agentInfo(), { wachtrij_auto: autoWachtrij.length }, { lopend: agentInfo().lopend + autoWachtrij.length }),
       offsite: offsiteInfo(),
       auto: autoInfo(),
+      tunnel: tunnelInfo(),
       secrets_geladen: secretsGeladen(),
       cli_versies: CLI_VERSIES, effort: CLAUDE_EFFORT,
       kluis_overgeslagen: process.env.KLUIS_OVERGESLAGEN === '1',
@@ -3870,7 +3877,149 @@ server.on('upgrade', function (req, sock, head) {
   catch (e) { logError('auto-upgrade', e); try { sock.destroy(); } catch (e2) {} }
 });
 
+// ── Tunnel socev-olares (uitwijk stap 2, 6-10-2026) ─────────────────────────────────────────────────
+// Waarom: vaste adressen n8n.huisdokter.dev en socev.huisdokter.dev die bij een uitwijk naar de VPS kunnen
+// omschakelen (bouwplan uitwijk §4.4). cloudflared draait als KIND van dit proces ("alles in de huidige pod"),
+// net als socev-auto, maar het overleeft een uitrol: stdout/stderr gaan rechtstreeks naar het logbestand (geen pijp,
+// want een Go-programma dat naar een gebroken pijp schrijft sterft aan SIGPIPE) en server.js stopt het niet bij zijn
+// eigen einde. De nieuwe server.js ziet het dan als los proces en start geen tweede; pas als dat weg is (controle
+// met oplopende wachttijd, hooguit 5 min) start hij een eigen kind. Een podherstart neemt alles mee.
+// Wat de tunnel doorlaat staat NIET hier maar in de tunnelconfig bij Cloudflare (remote-managed, gezet door
+// tools/tunnel-inrichten.js): alleen /health/publiek en de kastjepaden naar :8080, alles anders 404.
+// Het kind erft NIET de pod-omgeving: alleen TUNNEL_TOKEN (kluisnaam cloudflare_tunnel_token_olares, komt
+// bij een podstart binnen) plus PATH/HOME/TZ. Het token staat nooit op de commandoregel of op schijf.
+// Aan/uit: zonder token of binary geen start (reden in /health tunnel.reden_uit). Noodstop zonder uitrol: het
+// bestand TUNNEL_UIT_BESTAND aanmaken en het kind stoppen (kill <tunnel.pid uit /health>); bestand weghalen zet
+// hem binnen 5 min weer aan.
+// Draait er al een los cloudflared-tunnelproces (van vóór een uitrol, of de overbrugging tot de eerstvolgende
+// podstart, gestart door tools/tunnel-inrichten.js), dan start hier geen tweede: reden_uit noemt dan het pid.
+const TUNNEL_BIN = process.env.TUNNEL_BIN || '/opt/data/bin/cloudflared';
+const TUNNEL_LOG = process.env.TUNNEL_LOG || '/opt/data/bin/tunnel.log';
+const TUNNEL_UIT_BESTAND = process.env.TUNNEL_UIT_BESTAND || '/opt/data/bin/tunnel-uit';
+const TUNNEL_METRICS_POORT = parseInt(process.env.TUNNEL_METRICS_POORT || '20241', 10);
+const TUNNEL_LOG_MAX = 5 * 1024 * 1024;
+const tunnel = { kind: null, starts: 0, herstarts: 0, laatste_start: null, laatste_exit: null, reden_uit: null,
+  timer: null, verbindingen: null, laatste_ok: null };
+
+// Een cloudflared-tunnelproces dat niet ons kind is (los gestart). Leest alleen /proc/<pid>/cmdline.
+function tunnelLosProces() {
+  let pids = [];
+  try { pids = fs.readdirSync('/proc').filter(function (d) { return /^\d+$/.test(d); }); } catch (e) { return null; }
+  for (const pid of pids) {
+    if (tunnel.kind && String(tunnel.kind.pid) === pid) continue;
+    let cmd = '';
+    try { cmd = fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8'); } catch (e) { continue; }
+    const delen = cmd.split('\0');
+    // [0] is de binary; bij een script met shebang (de toets) is dat de interpreter en staat de naam op [1].
+    // 'tunnel' én 'run': een losse 'cloudflared tunnel list/info' van een agent telt niet (review 6-10).
+    if ((/cloudflared$/.test(delen[0] || '') || /cloudflared$/.test(delen[1] || '')) && delen.indexOf('tunnel') >= 0 && delen.indexOf('run') >= 0) return parseInt(pid, 10);
+  }
+  return null;
+}
+
+function tunnelStart() {
+  tunnel.timer = null;
+  if (tunnel.kind) return;
+  // Blijft pollen (hooguit elke 5 min): bestand weg = tunnel weer aan, zonder herstart (review 6-10).
+  if (fs.existsSync(TUNNEL_UIT_BESTAND)) { tunnel.reden_uit = 'uitgezet (' + TUNNEL_UIT_BESTAND + ')'; tunnelPlanHerstart(); return; }
+  if (!fs.existsSync(TUNNEL_BIN)) { tunnel.reden_uit = 'cloudflared ontbreekt (' + TUNNEL_BIN + ')'; return; }
+  const los = tunnelLosProces();
+  if (los) { tunnel.reden_uit = 'loopt als los proces (pid ' + los + ', van vóór een uitrol of de overbrugging); geen tweede gestart'; tunnelPlanHerstart(); return; }
+  if (!process.env.CLOUDFLARE_TUNNEL_TOKEN_OLARES) {
+    tunnel.reden_uit = 'CLOUDFLARE_TUNNEL_TOKEN_OLARES ontbreekt (kluisnaam cloudflare_tunnel_token_olares, daarna podherstart)';
+    return;
+  }
+  tunnel.reden_uit = null;
+  const env = { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: HOME, TZ: process.env.TZ || 'Europe/Amsterdam',
+    TUNNEL_TOKEN: process.env.CLOUDFLARE_TUNNEL_TOKEN_OLARES };
+  let k, fd = null;
+  try {
+    tunnelRoteerLog();
+    fd = fs.openSync(TUNNEL_LOG, 'a');
+    k = spawn(TUNNEL_BIN, ['tunnel', '--no-autoupdate', '--metrics', '127.0.0.1:' + TUNNEL_METRICS_POORT, 'run'],
+      { cwd: HOME, env: env, stdio: ['ignore', fd, fd] });
+  } catch (e) {
+    if (fd !== null) { try { fs.closeSync(fd); } catch (e2) {} }
+    logError('tunnel-spawn', e);
+    tunnel.laatste_exit = { code: null, signaal: null, fout: 'spawn', iso: new Date().toISOString() };
+    tunnelPlanHerstart();
+    return;
+  }
+  tunnel.kind = k;
+  tunnel.starts++;
+  tunnel.laatste_start = Date.now();
+  tunnel.verbindingen = null; tunnel.laatste_ok = null;
+  try { fs.closeSync(fd); } catch (e) {}   // het kind heeft zijn eigen kopie
+  setTimeout(tunnelWacht, 5000).unref();   // eerste meting kort na de start, niet pas na 30 s
+  k.on('error', function (e) {
+    logError('tunnel-kind', e);
+    if (!k.pid && tunnel.kind === k) {
+      tunnel.kind = null;
+      tunnel.laatste_exit = { code: null, signaal: null, fout: 'spawn', iso: new Date().toISOString() };
+      tunnelPlanHerstart();
+    }
+  });
+  k.on('exit', function (code, signaal) {
+    if (tunnel.kind === k) tunnel.kind = null;
+    const liep = Date.now() - (tunnel.laatste_start || Date.now());
+    tunnel.laatste_exit = { code: code, signaal: signaal, liep_s: Math.round(liep / 1000), iso: new Date().toISOString() };
+    schrijfLog(nu() + ' tunnel ' + velden({ gebeurtenis: 'gestopt', code: code, signaal: signaal, liep_s: tunnel.laatste_exit.liep_s }));
+    if (liep > 5 * 60 * 1000) tunnel.herstarts = 0;
+    tunnelPlanHerstart();
+  });
+}
+
+// Roteren boven TUNNEL_LOG_MAX: kopie naar .1 en het bestand zelf leegmaken. Niet hernoemen: het kind schrijft met
+// O_APPEND in hetzelfde bestand door, en na leegmaken schrijft het gewoon weer vooraan.
+function tunnelRoteerLog() {
+  try {
+    if (fs.statSync(TUNNEL_LOG).size <= TUNNEL_LOG_MAX) return;
+    fs.copyFileSync(TUNNEL_LOG, TUNNEL_LOG + '.1');
+    fs.truncateSync(TUNNEL_LOG, 0);
+  } catch (e) {}
+}
+
+function tunnelPlanHerstart() {
+  if (tunnel.timer) return;
+  const ms = AUTO_BACKOFF_MS[Math.min(tunnel.herstarts, AUTO_BACKOFF_MS.length - 1)];
+  tunnel.herstarts++;
+  tunnel.timer = setTimeout(tunnelStart, ms);
+  tunnel.timer.unref();
+}
+
+// Elke 30 s: /ready van cloudflared (200 + readyConnections zodra er verbinding met Cloudflare is). Ook voor een los
+// proces, want dat luistert op dezelfde metrics-poort.
+function tunnelWacht() {
+  tunnelRoteerLog();
+  const r = http.get({ host: '127.0.0.1', port: TUNNEL_METRICS_POORT, path: '/ready', timeout: 3000 }, function (res) {
+    let s = '';
+    res.setEncoding('utf8');
+    res.on('data', function (d) { if (s.length < 2000) s += d; });
+    res.on('end', function () {
+      let n = null;
+      try { n = JSON.parse(s).readyConnections; } catch (e) {}
+      tunnel.verbindingen = typeof n === 'number' ? n : null;
+      if (res.statusCode === 200) tunnel.laatste_ok = Date.now();
+    });
+  });
+  r.on('timeout', function () { r.destroy(); });
+  r.on('error', function () { tunnel.verbindingen = null; });
+}
+setInterval(tunnelWacht, 30000).unref();
+
+function tunnelInfo() {
+  return {
+    aan: !!tunnel.kind, pid: tunnel.kind ? tunnel.kind.pid : null, reden_uit: tunnel.reden_uit, starts: tunnel.starts,
+    laatste_start_iso: tunnel.laatste_start ? new Date(tunnel.laatste_start).toISOString() : null,
+    laatste_exit: tunnel.laatste_exit,
+    // verbindingen = readyConnections van cloudflared /ready (ook van een los proces); laatste_ok_iso = laatste 200.
+    verbindingen: tunnel.verbindingen,
+    laatste_ok_iso: tunnel.laatste_ok ? new Date(tunnel.laatste_ok).toISOString() : null
+  };
+}
+
 if (process.env.AUTO_UIT_POD !== '1') { try { autoStart(); } catch (e) { logError('auto-start', e); } }
+if (process.env.TUNNEL_UIT_POD !== '1') { try { tunnelStart(); } catch (e) { logError('tunnel-start', e); } }
 
 try { geminiVoorbereiden(); } catch (e) { logError('gemini-voorbereiden', e); }
 agyVersieMeten();
