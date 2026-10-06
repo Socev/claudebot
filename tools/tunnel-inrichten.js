@@ -50,6 +50,9 @@ function ingress(metEditor) {
     { hostname: SOCEV, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
     Object.assign({ hostname: N8N, path: '^/(webhook|form)/' }, n8nOrigin),
     Object.assign({ hostname: N8N, path: '^/healthz/readiness$' }, n8nOrigin),
+    // De Access-bypass op /healthz/readiness geldt ook voor subpaden (gemeten 6-10: /healthz/readiness/x gaf zonder
+    // login de editorpagina). Alles verder onder /healthz is daarom hier al 404, ook met --editor.
+    { hostname: N8N, path: '^/healthz', service: 'http_status:404' },
   ];
   if (metEditor) regels.push(Object.assign({ hostname: N8N }, n8nOrigin));
   else regels.push({ hostname: N8N, service: 'http_status:404' });
@@ -187,14 +190,16 @@ async function toets(metEditor) {
     ['GET', 'https://' + N8N + '/rest/oauth2-credential/callback', function (r) { return r.status === 404 || /cloudflareaccess\.com/.test(r.location); }, 'oauth-callback niet open'],
     ['GET', 'https://' + N8N + '/api/v1/workflows', function (r) { return r.status === 404 || /cloudflareaccess\.com/.test(r.location); }, '/api/v1 niet open'],
     ['GET', 'https://' + N8N + '/mcp-server/http', function (r) { return r.status === 404 || /cloudflareaccess\.com/.test(r.location); }, '/mcp-server niet open'],
-    ['GET', 'https://' + N8N + '/healthz', function (r) { return r.status === 404; }, '/healthz (zonder readiness) dicht'],
+    ['GET', 'https://' + N8N + '/healthz', function (r) { return r.status === 404 || /cloudflareaccess\.com/.test(r.location); }, '/healthz (zonder readiness) niet open'],
+    ['GET', 'https://' + N8N + '/healthz/readiness/x', function (r) { return r.status === 404; }, 'subpad onder readiness dicht (Access-bypass geldt ook daar)'],
     ['GET', 'https://' + SOCEV + '/health/publiek', function (r) { return r.status === 200 && /"ok":true/.test(r.tekst) && !/secrets/.test(r.tekst); }, 'pod /health/publiek 200, klein'],
     ['GET', 'https://' + SOCEV + '/health', function (r) { return r.status === 404; }, 'pod /health dicht'],
     ['POST', 'https://' + SOCEV + '/run', function (r) { return r.status === 404; }, '/run 404'],
     ['GET', 'https://' + SOCEV + '/result/x', function (r) { return r.status === 404; }, '/result 404'],
     ['POST', 'https://' + SOCEV + '/agent', function (r) { return r.status === 404; }, '/agent 404'],
     ['GET', 'https://' + SOCEV + '/agents', function (r) { return r.status === 404; }, '/agents 404'],
-    ['GET', 'https://' + SOCEV + '/sleutels', function (r) { return r.status === 404; }, '/sleutels 404 (nog geen Access)'],
+    // Access-app 'Sleutelportaal socev.huisdokter.dev' staat vóór de tunnel (6-10); de ingress laat /sleutels niet door.
+    ['GET', 'https://' + SOCEV + '/sleutels', function (r) { return r.status === 404 || (r.status === 302 && /cloudflareaccess\.com/.test(r.location)); }, '/sleutels achter Access of 404'],
     ['GET', 'https://' + SOCEV + '/auto/ota', function (r) { return r.status === 403; }, 'kastje-OTA bereikt de pod (403 zonder kastjesleutel, zoals via Olares)'],
     ['GET', 'https://' + SOCEV + '/auto/hartslag', function (r) { return r.status === 405; }, 'kastje-hartslag bereikt de pod (405 op GET)'],
   ];
