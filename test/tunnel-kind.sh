@@ -62,7 +62,7 @@ const nepPids = () => fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).fil
     toets('server start', !!h);
     toets('zonder token geen tunnel', h && h.tunnel && h.tunnel.aan === false && /CLOUDFLARE_TUNNEL_TOKEN_OLARES ontbreekt/.test(h.tunnel.reden_uit || ''), h && JSON.stringify(h.tunnel));
     const pub = await req(a.poort, '/health/publiek');
-    toets('/health/publiek 200 en alleen ok+dienst', pub._status === 200 && pub.ok === true && Object.keys(pub).filter((k) => k !== '_status').sort().join(',') === 'dienst,ok', JSON.stringify(pub));
+    toets('/health/publiek 200 en alleen ok+dienst+kant+rol', pub._status === 200 && pub.ok === true && Object.keys(pub).filter((k) => k !== '_status').sort().join(',') === 'dienst,kant,ok,rol', JSON.stringify(pub));
     const pubq = await req(a.poort, '/health/publiek?x=1');
     toets('/health/publiek met query ook klein', pubq._status === 200 && !('secrets_geladen' in pubq));
     toets('geen nep-start zonder token', starts().length === 0);

@@ -76,6 +76,27 @@ SYNC_AUTO_RESYNC="${SYNC_AUTO_RESYNC:-1}"
 # en heb je een backup van een tussentoestand.
 VAULT_LOCK="$BIN/.vault.lock"
 
+# ── Rolwachter (uitwijk stap 3, 6-10-2026) ──────────────────────────────────
+# Er is altijd maar één actieve kant (olares | vps). server.js leest die elke minuut uit Supabase en schrijft het
+# rolbestand; alleen een VERS bestand met rol=primair laat bisync en de GHAWA-sync draaien. Ontbreekt het, is het
+# oud of zegt het iets anders: niets naar gedeelde opslag (fail-closed). Bouwplan uitwijk §4.2.
+ROL_BESTAND="${ROL_BESTAND:-$BIN/uitwijk-rol}"
+ROL_MAX_LEEFTIJD="${ROL_MAX_LEEFTIJD:-300}"
+rol_veld(){ sed -n "s/^$1=//p" "$ROL_BESTAND" 2>/dev/null | head -1; }
+rol_primair(){
+  local r t g n
+  r="$(rol_veld rol)"; t="$(rol_veld tijd)"; g="$(rol_veld gelezen)"; n="$(date +%s)"
+  [ "$r" = "primair" ] || return 1
+  case "$t" in (*[!0-9]*|'') return 1 ;; esac
+  case "$g" in (*[!0-9]*|'') return 1 ;; esac
+  [ $(( n - t )) -le "$ROL_MAX_LEEFTIJD" ] && [ $(( n - g )) -le "$ROL_MAX_LEEFTIJD" ]
+}
+# Bij elke podstart: een rolbestand van vóór deze start (bv. vlak voor een crash) telt niet (Fable-review #1).
+rol_reset_podstart(){
+  printf 'rol=passief\nkant=%s\ntijd=%s\ngelezen=0\nreden=podstart\n' "${SOCEV_KANT:-olares}" "$(date +%s)" > "$ROL_BESTAND.tmp" \
+    && mv -f "$ROL_BESTAND.tmp" "$ROL_BESTAND"
+}
+
 sync_ronde(){
   if flock "$VAULT_LOCK" rclone bisync "$BRON" "$VAULT" \
        --create-empty-src-dirs --conflict-resolve newer \
@@ -140,8 +161,21 @@ sync_lus(){
     fi
   fi
 
-  FOUTEN=0
+  FOUTEN=0; ROL_VORIG=""; ROL_START="$(date +%s)"; ROL_GEMELD=0
   while true; do
+    if ! rol_primair; then
+      if [ "$ROL_VORIG" != "passief" ]; then
+        echo "$(date '+%F %T') PASSIEF: bisync overgeslagen (rol=$(rol_veld rol), reden: $(rol_veld reden))" >> "$SYNCLOG"
+        ROL_VORIG=passief
+      fi
+      if [ "$ROL_GEMELD" = "0" ] && [ "$(rol_veld reden)" = "podstart" ] && [ $(( $(date +%s) - ROL_START )) -ge 600 ]; then
+        echo "$(date '+%F %T') LET OP: na 10 min schrijft niemand het rolbestand (release zonder rolwachter?) - bisync blijft stil" >> "$SYNCLOG"
+        ROL_GEMELD=1
+      fi
+      sleep 30; continue
+    fi
+    [ "$ROL_VORIG" = "passief" ] && echo "$(date '+%F %T') PRIMAIR: bisync hervat" >> "$SYNCLOG"
+    ROL_VORIG=primair
     if sync_ronde; then
       FOUTEN=0
       # Na een geslaagde ronde de koppeling vastleggen als dat nog niet gebeurd is.
@@ -300,11 +334,13 @@ rclone listremotes 2>/dev/null | grep -q "^${SYNC_REMOTE}:" || log "LET OP: rclo
 [ -d /opt/data/.claude ] || log "LET OP: Claude nog niet ingelogd — draai 'claude' als gebruiker claude."
 [ -f "${CODEX_HOME:-/opt/data/.codex}/auth.json" ] || log "LET OP: Codex nog niet ingelogd — draai 'codex login --device-auth' als gebruiker claude (tweede brein blijft tot dan onbruikbaar; Claude draait gewoon)."
 
+rol_reset_podstart
 start_sync
 if [ -n "$REPO_URL" ]; then
   mkdir -p "$REPO_DIR"
   setup_git
-  sync_repo
+  # Bij de start is de rol nog niet gelezen (passief): de bewakerlus pakt de GHAWA-sync op zodra hij primair is.
+  if rol_primair; then sync_repo; else log "GHAWA-sync wacht op rol primair (uitwijk-rolwachter)"; fi
 else
   log "GIT_REPO_URL leeg: GHAWA-workspace uit."
 fi
@@ -448,7 +484,7 @@ while true; do
   fi
   if [ -n "$REPO_URL" ]; then
     now=$(date +%s)
-    if [ $(( now - last_git )) -ge "$GIT_EVERY" ]; then sync_repo; last_git=$now; fi
+    if [ $(( now - last_git )) -ge "$GIT_EVERY" ]; then rol_primair && sync_repo; last_git=$now; fi
   fi
   vault_snapshot_indien_nodig
   sleep 30

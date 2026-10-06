@@ -1887,8 +1887,12 @@ async function eindcontrole(jobId, keuze, r, outdir, cwd, runOpts, t0, maxMs, en
 
 // Na een containerherstart: agents die midden in hun eindcontrole zaten, krijgen alsnog hun
 // rapport (voorlopige tekst + bestanden uit hun outdir), gemarkeerd als tussenstand. Uitgesteld,
-// zodat alle constanten en functies van dit bestand bestaan.
+// zodat alle constanten en functies van dit bestand bestaan. Passief (uitwijk stap 3): laten liggen; status en
+// 'voorlopig' blijven staan, dus een volgende start als primair levert ze alsnog.
 setTimeout(function () {
+  rolEerste.then(function () { if (rolPrimair()) naHerstartTussenstand(); });
+}, 5000).unref();
+function naHerstartTussenstand() {
   for (const id in agentsReg) {
     const a = agentsReg[id];
     if (!a || !a.voorlopig || a.status !== 'afgebroken-containerherstart') continue;
@@ -1902,7 +1906,7 @@ setTimeout(function () {
     sendReport(a, { ok: true, tussenstand: true, files: files,
       output: EIND_LET_OP_HERSTART + '\n\nWat de agent als laatste schreef:\n' + (tekst.trim() || '(geen tekst)') });
   }
-}, 5000).unref();
+}
 
 function eindMarkeer(r, taken, procs, wachtzin, entry, mislukt) {
   const kop = EIND_LET_OP + '\n' + eindBevindingen(taken, procs, wachtzin).join('\n') +
@@ -2125,7 +2129,7 @@ async function meetTank() {
   // definitie van "te hard" en "reset", niet twee. Mislukt dat, dan is de meting nog geldig.
   const sbUrl = process.env.SUPABASE_URL;
   const sbKey = process.env.SUPABASE_SERVICE_ROLE;
-  if (sbUrl && sbKey && reset7iso) {
+  if (sbUrl && sbKey && reset7iso && rolPrimair()) {   // passief: meten mag, wegschrijven niet (uitwijk stap 3)
     try {
       const b = await fetch(sbUrl.replace(/\/$/, '') + '/rest/v1/rpc/mk_tank_schrijf', {
         method: 'POST',
@@ -2163,7 +2167,7 @@ function handleRequest(req, res) {
   // chats en modellen en zit achter de Olares-login; via de tunnel mag alleen dit door (ingress-regel bij Cloudflare).
   if (req.method === 'GET' && reqPath(req) === '/health/publiek') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify({ ok: true, dienst: 'claudebot' }));
+    return res.end(JSON.stringify({ ok: true, dienst: 'claudebot', kant: ROL_KANT, rol: rol.rol }));
   }
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
     const spaces = {};
@@ -2171,6 +2175,8 @@ function handleRequest(req, res) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({
       ok: true, service: 'claude-api', vault: VAULT, workspaces: spaces,
+      // uitwijk stap 3: ok blijft true als de pod passief is (de supervisor-bootcheck leunt op ok; passief is geen defect)
+      kant: ROL_KANT, rol: rol.rol, uitwijk: rolInfo(),
       // versie = de release die NU draait (de mapnaam onder releases/, gezet door de
       // supervisor). image_versie = wat er in het image is gebakken. Verschillen de
       // twee, dan draait er uitgerolde code; zijn ze gelijk, dan draait de
@@ -2263,7 +2269,7 @@ function handleRequest(req, res) {
   }
 
   if (req.method === 'POST' && req.url === '/run') {
-    return readBody(req, function (d) {
+    return rolPoort(res, function () { readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
       const prompt = (d.prompt || '').toString().trim();
@@ -2295,12 +2301,12 @@ function handleRequest(req, res) {
       enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, keuze, gereedschap); });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws, runtime: keuze.runtime, model: keuze.model || '(default)', gereedschap: gereedschap || undefined }));
-    });
+    }); });
   }
 
   // ── v2: achtergrondagent starten ──────────────────────────────────────────
   if (req.method === 'POST' && req.url === '/agent') {
-    return readBody(req, function (d) {
+    return rolPoort(res, function () { readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
       const prompt = (d.prompt || '').toString().trim();
@@ -2334,7 +2340,7 @@ function handleRequest(req, res) {
       processAgent(jobId, prompt, d.session_id, ws, keuze, maxMin * 60 * 1000);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, job_id: jobId, label: label, max_minuten: maxMin, runtime: keuze.runtime }));
-    });
+    }); });
   }
 
   // ── v2: toezicht — wat loopt er, wat liep er ──────────────────────────────
@@ -2946,6 +2952,120 @@ function sleutelportaal(req, res) {
 }
 // ── einde sleutelportaal ─────────────────────────────────────────────────────
 
+// ── Rolwachter (uitwijk stap 3, 6-10-2026) ─────────────────────────────────────────────────────────
+// Er is altijd maar één actieve kant (olares | vps); die staat in Supabase (machinekamer.uitwijk_stand, RPC
+// uitwijk_stand_lees). Een pod die niet de actieve kant is, is PASSIEF: /run, /agent en de kastjepaden geven 409,
+// en hij schrijft niets naar gedeelde opslag (offsite hier; bisync en GHAWA in run.sh via het rolbestand).
+// Fail-closed: na elke processtart (ook een code-uitrol) passief tot een verse lezing (Fable-review plan #1).
+// Tijdens bedrijf houdt een mislukte lezing de rol hooguit ROL_GRATIE_MS vast, daarna passief: zonder grens bleef
+// een Olares zonder internet "primair" terwijl de VPS al aan stond (review stap 3, #1).
+// Bouwplan: 01_Ontwikkeling/Uitwijk claudebot en n8n - bouwplan (6-10-2026).md §4.2.
+const ROL_BESTAND = process.env.ROL_BESTAND || path.join(HOME, 'bin', 'uitwijk-rol');
+const ROL_KANTEN = ['olares', 'vps'];
+const ROL_KANT = ROL_KANTEN.indexOf(String(process.env.SOCEV_KANT || 'olares')) >= 0 ? String(process.env.SOCEV_KANT || 'olares') : 'onbekend';
+const ROL_INTERVAL_MS = 60 * 1000;        // bij een geslaagde lezing
+const ROL_INTERVAL_FOUT_MS = 15 * 1000;   // na een mislukte lezing (en tot de eerste lukt)
+const ROL_TIMEOUT_MS = 5000;
+const ROL_GRATIE_MS = 180 * 1000;         // zo lang mag een eerder gelezen rol blijven staan zonder verse lezing
+const ROL_START_WACHT_MS = 6000;          // /run en /agent wachten hooguit zo lang op de eerste lezing
+const rol = { rol: 'passief', reden: 'start: nog niet gelezen', actieve_kant: null, stand_sinds: null,
+  sinds_rol: Date.now(), gelezen: 0, laatste_poging: 0, fout: null, fouten_op_rij: 0, wissels: 0, eerste: 0 };
+let rolEersteKlaar = null;
+const rolEerste = new Promise(function (r) { rolEersteKlaar = r; });
+let rolBezig = false, rolTimer = null;
+// Staat de poort ook in run.sh (image)? Zo niet, dan zijn bisync en GHAWA nog niet gegrendeld (tot een nieuw image).
+const ROL_RUNSH_POORT = (function () { try { return /rol_primair/.test(fs.readFileSync('/app/run.sh', 'utf8')); } catch (e) { return null; } })();
+
+function rolPrimair() { return rol.rol === 'primair'; }
+
+function rolSchrijfBestand() {
+  const tekst = 'rol=' + rol.rol + '\nkant=' + ROL_KANT + '\ntijd=' + Math.floor(Date.now() / 1000) +
+    '\ngelezen=' + Math.floor(rol.gelezen / 1000) + '\nreden=' + String(rol.reden).replace(/[\r\n]/g, ' ').slice(0, 200) + '\n';
+  try {
+    fs.mkdirSync(path.dirname(ROL_BESTAND), { recursive: true });
+    const tmp = ROL_BESTAND + '.tmp' + process.pid;
+    fs.writeFileSync(tmp, tekst); fs.renameSync(tmp, ROL_BESTAND);
+  } catch (e) { logError('rol-bestand', e); }
+}
+
+function rolZet(nieuw, reden) {
+  if (nieuw !== rol.rol) {
+    schrijfLog(nu() + ' rol ' + velden({ van: rol.rol, naar: nieuw, kant: ROL_KANT, reden: reden }));
+    rol.rol = nieuw; rol.sinds_rol = Date.now(); rol.wissels++;
+  }
+  rol.reden = reden;
+}
+
+async function rolLeesRpc() {
+  const url = (process.env.SUPABASE_URL || '').replace(/\/$/, ''), key = process.env.SUPABASE_SERVICE_ROLE || '';
+  if (!url || !key) throw new Error('supabase-omgeving ontbreekt');
+  const r = await fetch(url + '/rest/v1/rpc/uitwijk_stand_lees', { method: 'POST',
+    headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: '{}',
+    signal: AbortSignal.timeout(ROL_TIMEOUT_MS) });
+  if (!r.ok) throw new Error('rpc http ' + r.status);
+  const j = await r.json();
+  const k = Array.isArray(j) && j[0] ? j[0].actieve_kant : null;
+  if (ROL_KANTEN.indexOf(k) < 0) throw new Error('ongeldige stand');
+  return { actieve_kant: k, sinds: j[0].sinds || null };
+}
+
+async function rolRonde() {
+  if (rolBezig) return;
+  rolBezig = true;
+  rol.laatste_poging = Date.now();
+  try {
+    const s = await rolLeesRpc();
+    rol.gelezen = Date.now(); rol.fout = null; rol.fouten_op_rij = 0;
+    rol.actieve_kant = s.actieve_kant; rol.stand_sinds = s.sinds;
+    if (ROL_KANT === 'onbekend') rolZet('passief', 'SOCEV_KANT ongeldig');
+    else rolZet(s.actieve_kant === ROL_KANT ? 'primair' : 'passief', 'actieve kant is ' + s.actieve_kant);
+  } catch (e) {
+    rol.fout = String((e && e.name === 'TimeoutError') ? 'timeout' : ((e && e.message) || e)).slice(0, 120);
+    rol.fouten_op_rij++;
+    if (rol.fouten_op_rij === 1 || rol.fouten_op_rij % 40 === 0) schrijfLog(nu() + ' rol ' + velden({ lezing: 'mislukt', fout: rol.fout, op_rij: rol.fouten_op_rij }));
+    if (!rol.gelezen) rolZet('passief', 'start: lezing mislukt (' + rol.fout + ')');
+    else if (Date.now() - rol.gelezen > ROL_GRATIE_MS) {
+      rolZet('passief', 'stand ' + Math.round((Date.now() - rol.gelezen) / 1000) + ' s niet te lezen (' + rol.fout + ')');
+    }
+  } finally {
+    rolBezig = false;
+    rolSchrijfBestand();
+    if (!rol.eerste) { rol.eerste = Date.now(); rolEersteKlaar(); }
+    clearTimeout(rolTimer);
+    rolTimer = setTimeout(rolRonde, rol.fout ? ROL_INTERVAL_FOUT_MS : ROL_INTERVAL_MS);
+    rolTimer.unref();
+  }
+}
+
+function rolWeiger(res) {
+  res._log = Object.assign(res._log || {}, { rol: rol.rol });
+  res.writeHead(409, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: 'passief', kant: ROL_KANT, rol: rol.rol, actieve_kant: rol.actieve_kant, reden: rol.reden }));
+}
+
+// /run en /agent: is de eerste lezing na de start nog bezig, wacht dan hooguit ROL_START_WACHT_MS (eigen grens, los
+// van de fetch-timeout), zodat een code-uitrol geen valse 409's geeft.
+function rolPoort(res, verder) {
+  const beslis = function () { return rolPrimair() ? verder() : rolWeiger(res); };
+  if (rol.eerste) return beslis();
+  let t = null;
+  Promise.race([rolEerste, new Promise(function (r) { t = setTimeout(r, ROL_START_WACHT_MS); })])
+    .then(function () { clearTimeout(t); beslis(); });
+}
+
+function rolInfo() {
+  return { kant: ROL_KANT, rol: rol.rol, reden: rol.reden, actieve_kant: rol.actieve_kant,
+    stand_sinds: rol.stand_sinds, sinds_rol_iso: new Date(rol.sinds_rol).toISOString(),
+    gelezen_iso: rol.gelezen ? new Date(rol.gelezen).toISOString() : null,
+    leeftijd_s: rol.gelezen ? Math.round((Date.now() - rol.gelezen) / 1000) : null,
+    fout: rol.fout, fouten_op_rij: rol.fouten_op_rij, wissels: rol.wissels, runsh_poort: ROL_RUNSH_POORT };
+}
+
+// Direct bij de processtart: het bestand van het vorige proces telt niet meer (review stap 3, #7).
+rolSchrijfBestand();
+rolRonde();
+// ── einde rolwachter ─────────────────────────────────────────────────────────────────────────────────
+
 const server = http.createServer(function (req, res) {
   const t0 = Date.now();
   // Routes vullen res._log met job_id / chat_id / workspace zodra die bekend
@@ -3092,6 +3212,7 @@ function offsiteDoorRunsh() {
 
 function offsiteKlaarVoorTik() {
   if (offsiteDoorRunsh()) return 'run.sh neemt over (OFFSITE_DOOR_RUNSH)';
+  if (!rolPrimair()) return 'passief (' + rol.reden + ')';
   if (offsite.bezig) { offsite.overgeslagen_bezig++; return 'vorige ronde loopt nog'; }
   // accessSync met X_OK: bestaan is niet genoeg, spawn van een niet-uitvoerbaar
   // bestand faalt pas op EACCES en dat is een nodeloze foutregel per tik.
@@ -3137,7 +3258,9 @@ function offsiteTik() {
     // de timeout, en unref plus een timeout is technisch tegenstrijdig.
     // stdio 'ignore': het script schrijft zelf naar backup.log; zouden we pipes
     // openen zonder te lezen, dan groeit de uitvoer in de Node-heap.
-    kind = spawn(OFFSITE_SCRIPT, [], { detached: true, stdio: 'ignore' });
+    // kant en rolbestand mee: de offsite-naam krijgt de kant, en het script toetst de rol zelf nog eens.
+    kind = spawn(OFFSITE_SCRIPT, [], { detached: true, stdio: 'ignore',
+      env: Object.assign({}, process.env, { SOCEV_KANT: ROL_KANT, ROL_BESTAND: ROL_BESTAND }) });
   } catch (e) {
     offsite.laatste_afloop = 'spawnfout';
     logError('offsite-spawn', e);
@@ -3558,7 +3681,7 @@ function autoInRij(item, cb) {
 // de startspreiding van /agent doet de rest).
 let autoWachtBezig = false;
 function autoWachtTik() {
-  if (autoWachtBezig) return;
+  if (autoWachtBezig || !rolPrimair()) return;   // passief: de rij wacht (geen /agent, geen terugval-bericht)
   const t = Date.now();
   while (autoWachtrij.length && t - autoWachtrij[0].sinds > AUTO_WACHT_MAX_MS) autoUitRij(autoWachtrij.shift(), 'wachtrij-verlopen');
   if (!autoWachtrij.length) { clearInterval(autoWachtTimer); autoWachtTimer = null; return; }
@@ -3779,6 +3902,7 @@ function autoIsInternPad(req) { return req.method === 'POST' && /^\/auto-intern\
 function autoIntern(req, res) {
   const soort = reqPath(req).split('/')[2];
   res._log = { auto: 'intern-' + soort };
+  if (!rolPrimair()) return rolWeiger(res);
   readBody(req, function (d) {
     if (!d) { res.writeHead(400); return res.end('bad json'); }
     const a = Buffer.from(String(d.secret || '')), b = Buffer.from(SECRET);
@@ -3804,6 +3928,7 @@ function autoXff(req) {
 function autoProxyHttp(req, res) {
   const soort = reqPath(req).split('/')[2] || 'ota';
   res._log = { auto: soort };
+  if (soort !== 'ota' && !rolPrimair()) return rolWeiger(res);   // passief: alleen de firmware blijft (uitwijk stap 3)
   if ((soort === 'hartslag' && req.method !== 'POST') || (soort === 'bericht' && req.method !== 'GET')) {
     res.writeHead(405, { 'Content-Type': 'application/json' }); return res.end('{"error":"methode"}');
   }
@@ -3839,6 +3964,7 @@ function autoProxyUpgrade(req, sock, head) {
   };
   sock.on('error', function () {});
   if (reqPath(req) !== '/auto/ws') return weiger(404, 'Not Found');
+  if (!rolPrimair()) return weiger(409, 'Conflict');
   if (!auto.kind) return weiger(503, 'Service Unavailable');
   if (auto.tunnels >= AUTO_MAX_TUNNELS) { auto.geweigerd_vol++; return weiger(503, 'Service Unavailable'); }
   auto.tunnels++;

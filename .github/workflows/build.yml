@@ -161,7 +161,11 @@ jobs:
               // Zonder bootstrapgeheim hoort er niets uit de kluis te komen. Slaat
               // dit om, dan test deze stap iets anders dan hij beweert.
               ["secrets_geladen is leeg (geen kluis in CI)",
-               Array.isArray(j.secrets_geladen) && j.secrets_geladen.length === 0]
+               Array.isArray(j.secrets_geladen) && j.secrets_geladen.length === 0],
+              // Uitwijk stap 3: zonder bereikbare Supabase start de pod PASSIEF (fail-closed), en dit image heeft
+              // de rolpoort in run.sh.
+              ["rol passief zonder kluis (fail-closed)", j.rol === "passief" && j.kant === "olares"],
+              ["run.sh in dit image heeft de rolpoort", j.uitwijk && j.uitwijk.runsh_poort === true]
             ];
             let stuk = 0;
             for (const [naam, goed] of eisen) {
