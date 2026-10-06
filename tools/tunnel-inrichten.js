@@ -7,6 +7,7 @@
  * SUPABASE_SERVICE_ROLE uit de pod-omgeving). Alleen namen en uitkomsten in de uitvoer, nooit een waarde.
  *
  *   node tools/tunnel-inrichten.js toets                 alleen de toets van buiten (via de Cloudflare-rand)
+ *   node tools/tunnel-inrichten.js ingress               alleen de ingress opnieuw zetten (zie INGRESS hieronder) + toets
  *   [INVOERCODE=…] node tools/tunnel-inrichten.js inrichten   (zonder INVOERCODE: kluisstap overgeslagen)
  *       1. tunnel socev-olares (remote-managed) zoeken of aanmaken          [token: Cloudflare Tunnel Bewerken]
  *       2. ingress zetten (wat de tunnel doorlaat, zie INGRESS hieronder)
@@ -15,8 +16,7 @@
  *       5. overbrugging: draait er nog geen cloudflared, dan één los proces met alleen TUNNEL_TOKEN in de omgeving
  *          (tot de eerstvolgende podstart; daarna start server.js zelf het kind uit de kluiswaarde)
  *       6. toets
- *   Met --editor: de n8n-editor en /rest gaan ook door de tunnel, MAAR alleen als er een Access-app op
- *   n8n.huisdokter.dev staat (gecontroleerd via de API). Zonder Access blijft de editor 404.
+ *   --editor bestaat niet meer (6-10-2026): geen editor en geen inlogpagina onder huisdokter.dev (phishingvlag Google).
  *
  * Nooit `cloudflared tunnel route dns` (kaapt het record); DNS gaat hier via de API.
  */
@@ -36,29 +36,30 @@ const LOG = '/opt/data/bin/tunnel.log';
 const METRICS = '127.0.0.1:20241';
 
 // Wat de tunnel doorlaat. Volgorde telt: de eerste regel die past wint. Alles wat niet past: 404.
-// n8n: alleen wat nu ook zonder Olares-login van buiten bereikbaar is (/webhook/, /form/), plus readiness (alleen
-// {"status":"ok"}) voor de Worker. /rest/oauth2-credential/callback, /rest, /api/v1, /mcp-server en de editor NIET
-// (die zitten nu achter de Olares-login); de editor alleen met --editor en een Access-app.
-// socev: alleen /health/publiek en de kastjepaden (die nu ook publiek zijn, met hun eigen kastjecontrole).
-function ingress(metEditor) {
+// Sinds 6-10-2026 avond (Google Safe Browsing vlagde heel huisdokter.dev als phishing, 3e keer): onder huisdokter.dev
+// GEEN browser-HTML met invoer of inlog meer. Dus geen editor, geen /form/ (bestandenportaal, secret-invoer, FV2),
+// geen Access-inlog, en ook de webhooks die een HTML-pagina geven (kluisluik, FV2-dashboard, agenda-knop) dicht.
+// Editor, formulieren, kluisluik en sleutelportaal blijven op de Olares-adressen. Bij een uitwijk komen editor en
+// formulieren tijdelijk achter Access op de VPS (bouwplan §6.1), niet via dit script.
+// n8n: alleen /webhook/ (machinepaden, POST/JSON) en readiness (alleen {"status":"ok"}) voor de Worker.
+// socev: alleen /health/publiek en de kastjepaden (met hun eigen kastjecontrole).
+// (?i) en /+: n8n zoekt webhookpaden niet per se hoofdlettergevoelig op en kan dubbele slashes samenvouwen.
+const HTML_WEBHOOKS = '(?i)^/webhook/+(fv2(/|$)|kluis-|agenda-knop-)';
+function ingress() {
   const n8nOrigin = { service: 'https://' + N8N_ORIGIN_HOST, originRequest: { httpHostHeader: N8N_ORIGIN_HOST, originServerName: N8N_ORIGIN_HOST } };
   // Eerst: elk pad met een '..'-segment dicht. cloudflared matcht op het gedecodeerde pad zonder dot-segmenten op te
-  // lossen, dus '/form/../rest/settings' en '/form/%2e%2e/rest' zouden anders op de webhook/form-regel passen en pas
+  // lossen, dus '/webhook/../rest/settings' en '/webhook/%2e%2e/rest' zouden anders op de webhook-regel passen en pas
   // achter de Olares-ingang tot '/rest/...' genormaliseerd worden (review Fable 6-10).
-  const regels = [
+  return { config: { ingress: [
     { hostname: N8N, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
     { hostname: SOCEV, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
-    Object.assign({ hostname: N8N, path: '^/(webhook|form)/' }, n8nOrigin),
+    { hostname: N8N, path: HTML_WEBHOOKS, service: 'http_status:404' },
+    Object.assign({ hostname: N8N, path: '^/webhook/' }, n8nOrigin),
     Object.assign({ hostname: N8N, path: '^/healthz/readiness$' }, n8nOrigin),
-    // De Access-bypass op /healthz/readiness geldt ook voor subpaden (gemeten 6-10: /healthz/readiness/x gaf zonder
-    // login de editorpagina). Alles verder onder /healthz is daarom hier al 404, ook met --editor.
-    { hostname: N8N, path: '^/healthz', service: 'http_status:404' },
-  ];
-  if (metEditor) regels.push(Object.assign({ hostname: N8N }, n8nOrigin));
-  else regels.push({ hostname: N8N, service: 'http_status:404' });
-  regels.push({ hostname: SOCEV, path: '^/(health/publiek|auto/(ota/?|ws|hartslag|bericht/[0-9a-f]{32}/aankondiging))$', service: 'http://localhost:8080' });
-  regels.push({ service: 'http_status:404' });
-  return { config: { ingress: regels } };
+    { hostname: N8N, service: 'http_status:404' },
+    { hostname: SOCEV, path: '^/(health/publiek|auto/(ota/?|ws|hartslag|bericht/[0-9a-f]{32}/aankondiging))$', service: 'http://localhost:8080' },
+    { service: 'http_status:404' },
+  ] } };
 }
 
 async function cf(methode, pad, body) {
@@ -82,23 +83,15 @@ async function tunnelZoekOfMaak() {
   return t.id;
 }
 
-// Een self-hosted Access-app op de HELE host n8n.huisdokter.dev met minstens één allow-beleid en geen bypass/
-// everyone-beleid (review 6-10: een app met alleen bypass beschermt niets). De publieke paden (/webhook/, /form/,
-// readiness) horen in een APARTE bypass-app met die paden; de toets eist dat /webhook/ zonder Access bij n8n komt.
-async function accessOpEditor() {
+// Staat er nog een Access-app op een huisdokter.dev-host? Dan toont die een inlogpagina onder het domein (6-10-2026).
+async function accessOpHuisdokter() {
   const apps = await cf('GET', '/accounts/' + ACC + '/access/apps?per_page=100');
-  return (apps || []).some(function (a) {
-    if (a.type !== 'self_hosted') return false;
+  return (apps || []).filter(function (a) {
     const doelen = [a.domain].concat((a.destinations || []).map(function (d) { return d.uri; })).concat(a.self_hosted_domains || []);
-    if (!doelen.some(function (d) { return String(d || '').replace(/\/$/, '') === N8N; })) return false;
-    const pol = a.policies || [];
-    const allow = pol.some(function (p) { return p.decision === 'allow' && !(p.include || []).some(function (i) { return i.everyone; }); });
-    const open = pol.some(function (p) { return p.decision === 'bypass' || (p.include || []).some(function (i) { return i.everyone; }); });
-    return allow && !open;
-  });
+    return doelen.some(function (d) { return /(^|\.)huisdokter\.dev(\/|$)/.test(String(d || '')); });
+  }).map(function (a) { return a.name; });
 }
 
-// Zonder INVOERCODE (bv. bij een herhaalde run: de code is eenmalig) wordt de kluis overgeslagen.
 async function tokenNaarKluis(token) {
   const code = process.env.INVOERCODE;
   if (!code) { console.log('kluis ' + KLUISNAAM + ': overgeslagen (geen INVOERCODE)'); return; }
@@ -180,31 +173,42 @@ async function http(methode, url) {
   } catch (e) { return { status: 0, tekst: e.name }; }
 }
 
-async function toets(metEditor) {
+async function toets() {
+  const n404 = function (r) { return r.status === 404 && !r.location; };
+  // Dicht in de tunnel = lege 404 van cloudflared; een n8n-404 noemt 'webhook' (dan kwam het verzoek wél bij n8n).
+  const tunnel404 = function (r) { return n404(r) && !/webhook/i.test(r.tekst); };
   const regels = [
     ['GET', 'https://' + N8N + '/healthz/readiness', function (r) { return r.status === 200 && /ok/.test(r.tekst); }, 'readiness 200'],
     ['GET', 'https://' + N8N + '/webhook/socev-wachter-ping', function (r) { return r.status === 404 && /webhook/i.test(r.tekst); }, 'n8n-404 met webhook-JSON (n8n antwoordt zelf)'],
-    ['GET', 'https://' + N8N + '/form/bestaat-niet', function (r) { return r.status > 0 && r.status < 500; }, 'form-pad komt bij n8n'],
-    ['GET', 'https://' + N8N + '/', metEditor ? function (r) { return r.status === 302 && /cloudflareaccess\.com/.test(r.location); } : function (r) { return r.status === 404; }, metEditor ? 'editor -> Access-login' : 'editor dicht (404, geen Access)'],
-    ['GET', 'https://' + N8N + '/rest/settings', metEditor ? function (r) { return r.status === 302 && /cloudflareaccess\.com/.test(r.location); } : function (r) { return r.status === 404; }, '/rest dicht'],
-    ['GET', 'https://' + N8N + '/rest/oauth2-credential/callback', function (r) { return r.status === 404 || /cloudflareaccess\.com/.test(r.location); }, 'oauth-callback niet open'],
-    ['GET', 'https://' + N8N + '/api/v1/workflows', function (r) { return r.status === 404 || /cloudflareaccess\.com/.test(r.location); }, '/api/v1 niet open'],
-    ['GET', 'https://' + N8N + '/mcp-server/http', function (r) { return r.status === 404 || /cloudflareaccess\.com/.test(r.location); }, '/mcp-server niet open'],
-    ['GET', 'https://' + N8N + '/healthz', function (r) { return r.status === 404 || /cloudflareaccess\.com/.test(r.location); }, '/healthz (zonder readiness) niet open'],
-    ['GET', 'https://' + N8N + '/healthz/readiness/x', function (r) { return r.status === 404; }, 'subpad onder readiness dicht (Access-bypass geldt ook daar)'],
+    ['GET', 'https://' + N8N + '/', n404, 'editor dicht (404, geen redirect, geen Access)'],
+    ['GET', 'https://' + N8N + '/signin', n404, 'n8n-inlog dicht'],
+    ['GET', 'https://' + N8N + '/rest/settings', n404, '/rest dicht'],
+    ['GET', 'https://' + N8N + '/form/files', n404, 'bestandenportaal niet via huisdokter.dev'],
+    ['GET', 'https://' + N8N + '/form/secret-invoer', n404, 'secret-invoer niet via huisdokter.dev'],
+    ['GET', 'https://' + N8N + '/form-waiting/1', n404, 'form-waiting dicht'],
+    ['GET', 'https://' + N8N + '/webhook-test/x', n404, 'webhook-test dicht'],
+    ['GET', 'https://' + N8N + '/webhook/kluis-x', tunnel404, 'kluisluik (HTML) dicht'],
+    ['GET', 'https://' + N8N + '/webhook/fv2', tunnel404, 'FV2-dashboard (HTML) dicht'],
+    ['GET', 'https://' + N8N + '/webhook/fv2/status', tunnel404, 'FV2-subpad (HTML) dicht'],
+    ['GET', 'https://' + N8N + '/webhook/agenda-knop-x', tunnel404, 'agenda-knop (HTML) dicht'],
+    ['GET', 'https://' + N8N + '/rest/oauth2-credential/callback', n404, 'oauth-callback dicht'],
+    ['GET', 'https://' + N8N + '/api/v1/workflows', n404, '/api/v1 dicht'],
+    ['GET', 'https://' + N8N + '/mcp-server/http', n404, '/mcp-server dicht'],
+    ['GET', 'https://' + N8N + '/healthz', n404, '/healthz (zonder readiness) dicht'],
+    ['GET', 'https://' + N8N + '/healthz/readiness/x', n404, 'subpad onder readiness dicht'],
     ['GET', 'https://' + SOCEV + '/health/publiek', function (r) { return r.status === 200 && /"ok":true/.test(r.tekst) && !/secrets/.test(r.tekst); }, 'pod /health/publiek 200, klein'],
     ['GET', 'https://' + SOCEV + '/health', function (r) { return r.status === 404; }, 'pod /health dicht'],
     ['POST', 'https://' + SOCEV + '/run', function (r) { return r.status === 404; }, '/run 404'],
     ['GET', 'https://' + SOCEV + '/result/x', function (r) { return r.status === 404; }, '/result 404'],
     ['POST', 'https://' + SOCEV + '/agent', function (r) { return r.status === 404; }, '/agent 404'],
     ['GET', 'https://' + SOCEV + '/agents', function (r) { return r.status === 404; }, '/agents 404'],
-    // Access-app 'Sleutelportaal socev.huisdokter.dev' staat vóór de tunnel (6-10); de ingress laat /sleutels niet door.
-    ['GET', 'https://' + SOCEV + '/sleutels', function (r) { return r.status === 404 || (r.status === 302 && /cloudflareaccess\.com/.test(r.location)); }, '/sleutels achter Access of 404'],
+    ['GET', 'https://' + SOCEV + '/sleutels', function (r) { return r.status === 404 && !r.location; }, '/sleutels 404 (sleutelportaal alleen via Olares)'],
+    ['GET', 'https://' + SOCEV + '/', function (r) { return r.status === 404 && !r.location; }, 'socev / 404'],
     ['GET', 'https://' + SOCEV + '/auto/ota', function (r) { return r.status === 403; }, 'kastje-OTA bereikt de pod (403 zonder kastjesleutel, zoals via Olares)'],
     ['GET', 'https://' + SOCEV + '/auto/hartslag', function (r) { return r.status === 405; }, 'kastje-hartslag bereikt de pod (405 op GET)'],
   ];
-  const dicht = function (r) { return r.status === 404 || r.status === 400 || (r.status === 302 && /cloudflareaccess\.com/.test(r.location)); };
-  const trucs = [[N8N, '/form/../rest/settings'], [N8N, '/form/%2e%2e/rest/settings'], [N8N, '/webhook/..%2Frest/settings'],
+  const dicht = function (r) { return r.status === 404 || r.status === 400; };
+  const trucs = [[N8N, '/webhook/../rest/settings'], [N8N, '/webhook/%2e%2e/form/files'], [N8N, '/webhook/x/../kluis-x'], [N8N, '/WEBHOOK/kluis-x'], [N8N, '/webhook//kluis-x'], [N8N, '/webhook/KLUIS-x'], [N8N, '/webhook/%6Bluis-x'], [N8N, '/webhook/..%2Frest/settings'],
     [N8N, '/webhook/%2E%2E/%2E%2E/rest/login'], [N8N, '/form/..\\rest/settings'], [SOCEV, '/auto/ota/../../health'],
     [SOCEV, '/auto/ota/..%2F..%2Fhealth'], [SOCEV, '/health%2Fpubliek/../../health'], [SOCEV, '/auto/ota/%2e%2e/%2e%2e/run']];
   let fout = 0;
@@ -220,26 +224,35 @@ async function toets(metEditor) {
     if (!goed) fout++;
     console.log((goed ? 'GROEN ' : 'ROOD  ') + 'padtruc dicht  [GET ' + host + pad + ' -> ' + r.status + ']');
   }
+  const apps = await accessOpHuisdokter().catch(function (e) { return ['(niet leesbaar: ' + e.message + ')']; });
+  if (apps.length) fout++;
+  console.log((apps.length ? 'ROOD  ' : 'GROEN ') + 'geen Access-app op huisdokter.dev' + (apps.length ? ' [' + apps.join('; ') + ']' : ''));
   console.log(fout ? fout + ' ROOD' : 'TOETS GROEN');
   return fout;
 }
 
 (async function () {
   const stap = process.argv[2] || 'toets';
-  const metEditor = process.argv.includes('--editor');
   try {
-    if (stap === 'toets') process.exit(await toets(metEditor) ? 1 : 0);
-    if (stap !== 'inrichten') throw new Error('onbekende stap ' + stap + ' (toets | inrichten)');
-    if (metEditor && !(await accessOpEditor())) throw new Error('--editor gevraagd maar er staat geen Access-app op ' + N8N + ' (of het token mag Access niet lezen) - editor blijft dicht');
+    if (process.argv.includes('--editor')) throw new Error('--editor bestaat niet meer: geen editor of inlog onder huisdokter.dev (phishingvlag Google, 6-10-2026); editor via n8n.primumnonnocere.olares.com');
+    if (stap === 'toets') process.exit(await toets() ? 1 : 0);
+    if (stap === 'ingress') {
+      const t = await tunnelZoekOfMaak();
+      await cf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + t + '/configurations', ingress());
+      console.log('ingress gezet');
+      await new Promise(function (r) { setTimeout(r, 15000); });
+      process.exit(await toets() ? 1 : 0);
+    }
+    if (stap !== 'inrichten') throw new Error('onbekende stap ' + stap + ' (toets | ingress | inrichten)');
     const id = await tunnelZoekOfMaak();
-    await cf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + id + '/configurations', ingress(metEditor));
-    console.log('ingress gezet (' + (metEditor ? 'met' : 'zonder') + ' editor)');
+    await cf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + id + '/configurations', ingress());
+    console.log('ingress gezet');
     const token = await cf('GET', '/accounts/' + ACC + '/cfd_tunnel/' + id + '/token');
     await tokenNaarKluis(token);
     await dns(id);
     overbrugging(token);
     await new Promise(function (r) { setTimeout(r, 20000); });
-    process.exit(await toets(metEditor) ? 1 : 0);
+    process.exit(await toets() ? 1 : 0);
   } catch (e) {
     console.error('FOUT: ' + e.message);
     process.exit(2);
