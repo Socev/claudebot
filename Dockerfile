@@ -6,9 +6,16 @@ FROM node:22-bookworm-slim
 
 # git is nodig voor de GHAWA-workspace (node:slim bevat 'm niet standaard).
 # openssh-client is nodig voor de deploy key van socev.dev (git-over-SSH); 18-8-2026.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# apt-get upgrade (CISO 6-10-2026, akkoord David bundel 5): het basisimage loopt achter op de
+# Debian-beveiligingsupdates (trivy: libpcre2, perl); zo neemt elke bouw de openstaande fixes mee.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip bash procps tzdata gosu git openssh-client pandoc poppler-utils ocrmypdf tesseract-ocr-nld \
  && rm -rf /var/lib/apt/lists/*
+
+# npm zelf bijwerken (CISO 6-10-2026): de npm die met node:22 meekomt bevat oude pacote, sigstore,
+# brace-expansion, picomatch en ip-address met bekende lekken. Hoofdversie 11 (werkt op node 22.9+);
+# 12 eist node 22.22.2+ en is een grotere sprong. Vóór de globale installaties hieronder.
+RUN npm install -g npm@11 && npm --version
 
 # Claude Code CLI (levert 'claude') + rclone.
 # BEWUST NIET GEPIND - opdracht David 22-9-2026: "Je moet hem niet pinnen op een vast nummer, hij
