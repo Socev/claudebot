@@ -1420,7 +1420,7 @@ const LESSEN_DOMEIN = {
   'dagplan': 'pa', 'parro': 'pa', 'signal': 'pa', 'cijfermeester': 'pa',
   'telegram-debug': 'machine', 'structuur-wachter': 'machine', 'werkkamer': 'machine',
   'vault-concierge': 'machine', 'site-verversing': 'machine', 'kaizen-review': 'machine',
-  'pod-uitrol': 'machine', 'webhook-bewaker': 'machine', 'keten-attest': 'machine'
+  'pod-uitrol': 'machine', 'webhook-bewaker': 'machine', 'keten-attest': 'machine', 'ciso': 'machine'
 };
 
 function lessenDomein(chatId, label) {
@@ -2442,7 +2442,7 @@ const SP_CODE_PER_DAG = 10;
 const SP_MAX_BODY = 256 * 1024;
 const SP_MAX_VELDEN = 500;
 const SP_CHAT = process.env.SLEUTELPORTAAL_CHAT || '40687';
-const SP_N8N_UI = 'https://5877e26c.primumnonnocere.olares.com';
+const SP_N8N_UI = 'https://n8n.primumnonnocere.olares.com';
 const SP_SLEUTEL_PAD = process.env.SLEUTELPORTAAL_SLEUTEL || '/opt/data/.sleutelportaal/rpc.key';
 const SP_META_PAD = path.join(VAULT, '00_Systeem/Beveiliging/Sleutelregister - portaalgegevens.json');
 const SP_HOST_RE = /^[a-z0-9-]+\.primumnonnocere\.olares\.com$/;
