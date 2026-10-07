@@ -4054,7 +4054,7 @@ function appUitslag(req, res, reg, a, s, d) {
       running_ms: (j.progress && j.progress.running_ms) || 0, last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0 });
   }
   if (!j.opgehaald) j.opgehaald = Date.now();
-  j.app.gezien = Date.now();   // de app haalde het antwoord op: geen seintje nodig (fase 5c)
+  appGezienDoor(id, a.id);   // dit apparaat haalde het antwoord op (fase 5c: seintje alleen als niemand / de vrager niet keek)
   const r = j.result || {};
   const out = appUitvoer(j);
   const vraag = j.app.vraag !== undefined ? j.app.vraag : appVraagUit(out);
@@ -4143,6 +4143,8 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
       vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null } : null,
       bestanden: x.bestanden || [] };
   });
+  // wie de geschiedenis met een afgerond antwoord ophaalt, heeft het gezien (fase 5c, Fable-review wv100 B2)
+  items.forEach(function (x) { if (jobs[x.job_id] && jobs[x.job_id].app && jobs[x.job_id].status === 'done') appGezienDoor(x.job_id, a.id); });
   appStuur(res, 200, { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout });
 }
 
@@ -4600,9 +4602,11 @@ function appWfNaam(n) {
 }
 // Volgorde telt: de eerste die past, geldt.
 const APP_FOUT_UITLEG = [
-  [/ongeldige secret|invalid (secret|token|api.?key)|unauthori[sz]ed|\b401\b|forbidden|\b403\b/i, 'sleutel',
+  [/ongeldige secret|invalid secret/i, 'sleutel',
     'Er kwam een verzoek binnen zonder de juiste sleutel; dat is geweigerd. Eén keer is meestal een proef of een oude link; vaker betekent: sleutel nakijken.'],
-  [/service unavailable|\b503\b|bad gateway|\b502\b/i, 'pod', 'Socev zelf (de pod) gaf even geen antwoord, meestal tijdens een herstart of uitrol.'],
+  [/unauthori[sz]ed|\b401\b|forbidden|\b403\b|invalid (token|api.?key)|access denied/i, 'toegang',
+    'Een dienst die deze automatisering aanroept, weigerde de toegang; meestal is een sleutel of koppeling verlopen of vervangen.'],
+  [/service unavailable|\b503\b|bad gateway|\b502\b/i, 'pod', 'Een dienst die deze automatisering aanroept, gaf even geen antwoord; vaak is dat Socev zelf (de pod) tijdens een herstart of uitrol.'],
   [/rate.?limit|too many requests|\b429\b|quota/i, 'grens', 'Te veel verzoeken achter elkaar; de dienst aan de andere kant hield ons even tegen.'],
   [/timed? ?out|ETIMEDOUT/i, 'traag', 'Een andere dienst antwoordde niet op tijd.'],
   [/connection was aborted|server is offline|ECONNREFUSED|ECONNRESET|socket hang up|ENOTFOUND|EAI_AGAIN|network/i, 'verbinding',
@@ -4627,7 +4631,9 @@ function appFoutmelderLees(tekst) {
   const url = r.find(function (l) { return /\/workflow\/[A-Za-z0-9]+\/executions\//.test(l); }) || '';
   const wf = /\/workflow\/([A-Za-z0-9]{8,32})\/executions\/(\d{1,12})/.exec(url);
   const ex = ei >= 0 ? (/executie (\d{1,12})$/.exec(r[ei]) || [])[1] : null;
-  return { workflow: m ? m[1].trim() : '', knoop: m ? m[2].trim() : '', fout: fout.slice(0, 200), executie: ex || (wf ? wf[2] : null), workflow_id: wf ? wf[1] : null };
+  // links en lange tekenreeksen (tokens) eruit: de app toont dit klein, maar hoeft geen sleutel of adres te tonen (Fable-review wv100 K4)
+  const schoon = fout.replace(/\bhttps?:\/\/\S+/gi, '[link]').replace(/[A-Za-z0-9_\-+/=.]{32,}/g, '[…]');
+  return { workflow: m ? m[1].trim() : '', knoop: m ? m[2].trim() : '', fout: schoon.slice(0, 200), executie: ex || (wf ? wf[2] : null), workflow_id: wf ? wf[1] : null };
 }
 // Stiltewachter-tekst: Aanvoer stil / <naam> is stil sinds <JJJJ-MM-DD UU:MM> - <x> effectieve uren, drempel <y>[, …].
 function appStilLees(tekst) {
@@ -4648,16 +4654,28 @@ function appDagKlok(iso) {
 }
 
 // Liep de automatisering na de laatste melding nog eens, en hoe? (n8n bewaart niet van elke workflow de geslaagde runs.)
+// Bewaart n8n van deze workflow de geslaagde runs? Zo niet (saveDataSuccessExecution 'none'), dan bewijst "de laatste
+// bewaarde run liep mis" niets (Fable-review wv100 B3). Eén uur bewaard.
+async function appWfBewaartGoed(wfId) {
+  const c = appStaat.wfInst = appStaat.wfInst || {};
+  if (c[wfId] && Date.now() - c[wfId].op < 3600000) return c[wfId].goed;
+  let goed = null;
+  try { const w = await appN8n('/workflows/' + encodeURIComponent(wfId)); goed = !(w && w.settings && w.settings.saveDataSuccessExecution === 'none'); } catch (e) { goed = null; }
+  c[wfId] = { op: Date.now(), goed: goed };
+  return goed;
+}
 async function appHerstel(wfId, naExecutie) {
   if (!wfId) return { stand: 'onbekend', op: null, tekst: 'Of hij sindsdien weer goed liep, is niet na te gaan.' };
-  let j;
-  try { j = await appN8n('/executions?workflowId=' + encodeURIComponent(wfId) + '&limit=1'); }
+  let j, goed;
+  try { [j, goed] = await Promise.all([appN8n('/executions?workflowId=' + encodeURIComponent(wfId) + '&limit=5'), appWfBewaartGoed(wfId)]); }
   catch (e) { return { stand: 'onbekend', op: null, tekst: 'Of hij sindsdien weer goed liep, is nu niet na te gaan.' }; }
-  const x = Array.isArray(j && j.data) ? j.data[0] : null;
+  const x = (Array.isArray(j && j.data) ? j.data : []).find(function (e) { return e && ['running', 'waiting', 'new'].indexOf(e.status) < 0; }) || null;
   if (!x) return { stand: 'onbekend', op: null, tekst: 'n8n bewaart van deze automatisering geen gewone runs; of hij weer goed loopt, is niet te zien.' };
-  if (naExecutie && Number(x.id) <= Number(naExecutie)) return { stand: 'onbekend', op: x.startedAt || null, tekst: 'Sindsdien niet meer gedraaid.' };
+  if (naExecutie && Number(x.id) <= Number(naExecutie)) return { stand: 'onbekend', op: x.startedAt || null, tekst: goed === false ? 'n8n bewaart van deze automatisering alleen mislukte runs; sindsdien is er geen meer mislukt.' : 'Sindsdien niet meer gedraaid.' };
   if (x.status === 'success') return { stand: 'weer-goed', op: x.startedAt || null, tekst: 'Sindsdien weer goed gelopen (' + appDagKlok(x.startedAt) + ').' };
-  if (x.status === 'error' || x.status === 'crashed') return { stand: 'nog-fout', op: x.startedAt || null, tekst: 'De laatste bewaarde run liep ook mis (' + appDagKlok(x.startedAt) + ').' };
+  if ((x.status === 'error' || x.status === 'crashed') && goed !== true)
+    return { stand: 'onbekend', op: x.startedAt || null, tekst: 'Liep daarna nog eens mis (' + appDagKlok(x.startedAt) + '); n8n bewaart van deze automatisering geen geslaagde runs, dus of hij nu weer goed loopt, is niet te zien.' };
+  if (x.status === 'error' || x.status === 'crashed') return { stand: 'nog-fout', op: x.startedAt || null, tekst: 'De laatste run liep ook mis (' + appDagKlok(x.startedAt) + ').' };
   return { stand: 'onbekend', op: x.startedAt || null, tekst: 'Laatste run: ' + appDagKlok(x.startedAt) + ' (' + String(x.status || 'onbekend').slice(0, 20) + ').' };
 }
 
@@ -4684,7 +4702,7 @@ async function appMeldingenVerzamel() {
     const f = appFoutmelderLees(x.tekst);
     const u = appFoutUitleg(f.fout);
     const sleutel = (f.workflow_id || f.workflow) + '|' + f.knoop + '|' + u.soort;
-    const g = groepen[sleutel] || (groepen[sleutel] = { id: 'f' + x.id, soort: 'storing', f: f, uitleg: u, aantal: 0, eerste: x.createdAt, laatste: x.createdAt, executies: [], rij: 0 });
+    const g = groepen[sleutel] || (groepen[sleutel] = { id: 'f' + x.id, sleutel: sleutel, soort: 'storing', f: f, uitleg: u, aantal: 0, eerste: x.createdAt, laatste: x.createdAt, executies: [], rij: 0 });
     g.aantal++;
     if (Date.parse(x.createdAt) < Date.parse(g.eerste)) g.eerste = x.createdAt;
     if (Date.parse(x.createdAt) >= Date.parse(g.laatste)) { g.laatste = x.createdAt; g.id = 'f' + x.id; g.f = f; }
@@ -4698,7 +4716,7 @@ async function appMeldingenVerzamel() {
   }));
   const items = lijst.map(function (g, i) {
     const f = g.f;
-    return { id: g.id, rij: g.rij, soort: 'storing', titel: appWfNaam(f.workflow) + ' liep vast', uitleg: g.uitleg.tekst,
+    return { id: g.id, rij: g.rij, kaart: 'k' + appSha(g.sleutel).slice(0, 12), soort: 'storing', titel: appWfNaam(f.workflow) + ' liep vast', uitleg: g.uitleg.tekst,
       wanneer: g.laatste, eerste: g.eerste, aantal: g.aantal, herstel: herstel[i],
       techniek: ['stap: ' + (f.knoop || '?'), f.fout ? 'fout: ' + f.fout : null, g.executies.length ? 'executie ' + g.executies.join(', ') : null].filter(Boolean).join(' · ') };
   });
@@ -4715,7 +4733,7 @@ async function appMeldingenVerzamel() {
       if (st && st.status === 'gezond' && st.laatste_executie && Date.parse(st.laatste_executie) > Date.parse(x.createdAt))
         h = { stand: 'weer-goed', op: st.laatste_executie, tekst: 'Loopt weer (laatste aanvoer ' + appDagKlok(st.laatste_executie) + ').' };
       else if (st && st.status === 'stil') h = { stand: 'nog-fout', op: st.laatste_executie || null, tekst: 'Nog steeds stil' + (st.laatste_executie ? ' (laatste aanvoer ' + appDagKlok(st.laatste_executie) + ').' : '.') };
-      items.push({ id: 's' + x.id + '-' + appSha(s.naam).slice(0, 6), rij: Number(x.id) || 0, soort: 'stil', titel: appWfNaam(s.naam) + ' leverde niets meer aan',
+      items.push({ id: 's' + x.id + '-' + appSha(s.naam).slice(0, 6), rij: Number(x.id) || 0, kaart: 's' + appSha(s.naam).slice(0, 12) + '-' + x.id, soort: 'stil', titel: appWfNaam(s.naam) + ' leverde niets meer aan',
         uitleg: 'Sinds ' + s.sinds + ' kwam er niets binnen (' + s.uren + ' uur; normaal hooguit ' + s.drempel + '). Meestal ligt dat aan de bron (een pc of app die uit stond), soms aan de automatisering zelf.',
         wanneer: x.createdAt, eerste: x.createdAt, aantal: 1, herstel: h, techniek: 'Stiltewachter · drempel ' + s.drempel + ' effectieve uren' });
     });
@@ -4724,8 +4742,8 @@ async function appMeldingenVerzamel() {
   Object.keys(nu).forEach(function (n) {
     const st = nu[n];
     if (st.status !== 'stil' || st.bewaken === 'nee' || stilGezien[n]) return;
-    items.push({ id: 'n' + appSha(n).slice(0, 10), rij: 0, soort: 'stil', titel: appWfNaam(n) + ' leverde niets meer aan',
-      uitleg: 'Volgens de Stiltewachter komt er nu niets binnen.', wanneer: st.gemeld_op || st.laatste_executie || new Date().toISOString(), eerste: st.gemeld_op || null, aantal: 1,
+    items.push({ id: 'n' + appSha(n).slice(0, 10), rij: 0, kaart: null, soort: 'stil', titel: appWfNaam(n) + ' leverde niets meer aan',
+      uitleg: 'Volgens de Stiltewachter komt er nu niets binnen.', wanneer: st.gemeld_op || st.laatste_executie || st.createdAt || '1970-01-01T00:00:00.000Z', eerste: st.gemeld_op || null, aantal: 1,
       herstel: { stand: 'nog-fout', op: st.laatste_executie || null, tekst: st.laatste_executie ? 'Laatste aanvoer ' + appDagKlok(st.laatste_executie) + '.' : '' },
       techniek: 'Stiltewachter · drempel ' + st.drempel_uren + ' effectieve uren' });
   });
@@ -4734,7 +4752,8 @@ async function appMeldingenVerzamel() {
   let aanvoer = null;
   if (stilte) {
     const bewaakt = stilte.filter(function (s) { return s.bewaken !== 'nee'; });
-    aanvoer = { bewaakt: bewaakt.length, stil: bewaakt.filter(function (s) { return s.status === 'stil'; }).map(function (s) { return appWfNaam(s.naam); }) };
+    aanvoer = { bewaakt: bewaakt.length, stil: bewaakt.filter(function (s) { return s.status === 'stil'; }).map(function (s) { return appWfNaam(s.naam); }),
+      onbekend: bewaakt.filter(function (s) { return s.status !== 'stil' && s.status !== 'gezond'; }).map(function (s) { return appWfNaam(s.naam); }) };
   }
   let extern = null;
   if (buiten && typeof buiten === 'object') {
@@ -4745,7 +4764,9 @@ async function appMeldingenVerzamel() {
         : ok ? 'Socev is van buitenaf bereikbaar (laatste controle ' + appKlok(buiten.laatste_ronde) + ').'
           : 'Van buitenaf niet bereikbaar: ' + (weg.join(', ') || 'onbekend') + (buiten.sinds ? ' (sinds ' + appDagKlok(buiten.sinds) + ')' : '') + '.' };
   }
-  return { items: items.slice(0, 100), stand: { aanvoer: aanvoer, extern: extern }, max_rij: maxRij, fouten: fouten, op: Date.now() };
+  // kaarten die (nog) misgaan en een melding in de buffer hebben: daarop geeft het meldingen-seintje een tik
+  const kaarten = items.filter(function (x) { return x.kaart && x.herstel.stand !== 'weer-goed'; }).map(function (x) { return x.kaart; });
+  return { items: items.slice(0, 100), stand: { aanvoer: aanvoer, extern: extern }, max_rij: maxRij, kaarten: kaarten, gelezen: !!rijen.length || !fouten.length, fouten: fouten, op: Date.now() };
 }
 // Eén verversing tegelijk, 60 s bewaard (meerdere apparaten en de seintjes-tik delen hem).
 function appMeldingen() {
@@ -4766,7 +4787,7 @@ async function appMeldingenRoute(req, res, a) {
   const g = gezien ? Date.parse(gezien) : 0;
   let sub = null;
   try { sub = appPushLees().apparaten[a.id] || null; } catch (e) {}
-  appStuur(res, 200, { ok: true, items: m.items.map(function (x) { const y = Object.assign({}, x); delete y.rij; return y; }), stand: m.stand,
+  appStuur(res, 200, { ok: true, items: m.items.map(function (x) { const y = Object.assign({}, x); delete y.rij; delete y.kaart; return y; }), stand: m.stand,
     fouten: m.fouten, bijgewerkt: new Date(m.op).toISOString(), gezien: gezien,
     nieuw: m.items.filter(function (x) { return Date.parse(x.wanneer) > g; }).length,
     seintjes_meldingen: !!(sub && (sub.soorten || []).indexOf('meldingen') >= 0) });
@@ -4794,7 +4815,7 @@ function appPushEndpointOk(ep) {
   if (typeof ep !== 'string' || ep.length > 1024 || /[\s\u0000-\u001f]/.test(ep)) return false;
   let u;
   try { u = new URL(ep); } catch (e) { return false; }
-  return u.protocol === 'https:' && !u.username && !u.password && u.port === '' && APP_PUSH_HOSTS.some(function (re) { return re.test(u.hostname); });
+  return u.protocol === 'https:' && !u.username && !u.password && u.port === '' && !u.hash && ep.indexOf('#') < 0 && APP_PUSH_HOSTS.some(function (re) { return re.test(u.hostname); });
 }
 async function appVapid() {
   const c = appStaat.vapid;
@@ -4810,7 +4831,7 @@ async function appVapid() {
     appStaat.vapid = { key: key, publiek: publiek, op: Date.now() };
     return appStaat.vapid;
   } catch (e) {
-    logError('app-vapid', { message: String(e && e.message || e).slice(0, 80) });
+    logError('app-vapid', { name: 'vapid', code: String(e && e.message || e).replace(/[^a-z0-9 -]/gi, '').slice(0, 60) });
     appStaat.vapid = { fout: String(e && e.message || e).slice(0, 80), op: Date.now() };
     return null;
   }
@@ -4835,18 +4856,23 @@ async function appPushStuur(id, reden) {
   if (!appPushEndpointOk(sub.endpoint)) return { ok: false, reden: 'onbekende pushdienst' };
   const v = await appVapid();
   if (!v) return { ok: false, reden: 'geen pushsleutel' };
+  // Abonnement hoort bij een andere VAPID-sleutel (vervangen via het sleutelportaal): de pushdienst zou 403 geven.
+  // Niet versturen; de app vraagt om seintjes opnieuw aan te zetten (Fable-review wv100 B6).
+  if (sub.sleutel && sub.sleutel !== appSha(v.publiek).slice(0, 16)) return { ok: false, reden: 'sleutel vervangen; zet seintjes opnieuw aan' };
   let status = 0;
   try {
+    // meldingen: kort houdbaar en niet dringend, zodat een telefoon die offline was niet na 22:00 alsnog zoemt (K6)
+    const meld = reden === 'meldingen';
     const r = await fetch(sub.endpoint, { method: 'POST', body: '', redirect: 'manual', signal: AbortSignal.timeout(10000),
-      headers: { TTL: String(APP_PUSH_TTL_S), Urgency: 'high', Topic: 'socev', Authorization: 'vapid t=' + appVapidJwt(v, new URL(sub.endpoint).origin) + ', k=' + v.publiek } });
+      headers: { TTL: String(meld ? 3600 : APP_PUSH_TTL_S), Urgency: meld ? 'normal' : 'high', Topic: 'socev', Authorization: 'vapid t=' + appVapidJwt(v, new URL(sub.endpoint).origin) + ', k=' + v.publiek } });
     status = r.status;
     try { await r.text(); } catch (e) {}
-  } catch (e) { logError('app-push', { message: String(e && e.message || e).slice(0, 80) }); }
+  } catch (e) { logError('app-push', { name: e && e.name, code: e && e.cause && e.cause.code }); }
   const ok = status >= 200 && status < 300;
   // 404/410: het abonnement bestaat niet meer bij de pushdienst (browser opnieuw ingesteld, rechten ingetrokken).
   const weg = status === 404 || status === 410;
-  // 401/403: de pushdienst kent onze sleutel niet (vervangen via het sleutelportaal?) -> bij de volgende keer opnieuw uit de kluis
-  if (status === 401 || status === 403) appStaat.vapid = null;
+  // 401/403: de pushdienst kent onze sleutel niet (vervangen via het sleutelportaal?) -> hooguit eens per 10 min opnieuw uit de kluis
+  if ((status === 401 || status === 403) && Date.now() - (v.op || 0) > 10 * 60000) appStaat.vapid = null;
   try {
     appPushWijzig(function (p) {
       const s = p.apparaten[id];
@@ -4858,26 +4884,39 @@ async function appPushStuur(id, reden) {
   appAudit({ route: 'push', m: 'POST', status: status, apparaat: id, reden: String(reden || '').slice(0, 40) + (weg ? ' (abonnement verlopen, verwijderd)' : '') });
   return { ok: ok, status: status, reden: ok ? 'verstuurd' : weg ? 'abonnement verlopen' : status ? 'pushdienst gaf ' + status : 'pushdienst niet bereikbaar' };
 }
-async function appPushAlle(soort, reden) {
+async function appPushAlle(soort, reden, filter) {
+  if (!(await appRolOk())) return [];   // alleen de actieve kant (uitwijk) geeft seintjes (Fable-review wv100 B7)
   let p;
   try { p = appPushLees(); } catch (e) { logError('app-push', e); return []; }
-  const ids = Object.keys(p.apparaten).filter(function (id) { return (p.apparaten[id].soorten || []).indexOf(soort) >= 0; });
+  const ids = Object.keys(p.apparaten).filter(function (id) { return (p.apparaten[id].soorten || []).indexOf(soort) >= 0 && (!filter || filter(id)); });
   const uit = [];
   for (const id of ids) uit.push(await appPushStuur(id, reden));
   return uit;
 }
 // Na een app-beurt: haalt de app het antwoord niet binnen 20 s op, dan is hij dicht of op de achtergrond -> seintje.
+function appGezienDoor(jobId, apparaatId) {
+  const j = jobs[jobId];
+  if (!j || !j.app) return;
+  (j.app.gezien = j.app.gezien || {})[apparaatId] = Date.now();
+}
+// Keek niemand: alle apparaten. Keek een ander apparaat (laptop thuis open) maar de vrager niet: alleen de vrager.
+// Keek de vrager zelf: niemand (Fable-review wv100 B1).
 function appPushNaBeurt(jobId) {
   const j = jobs[jobId];
   if (!j || !j.app || j.app.noodstop) return;
   const t = setTimeout(function () {
     const k = jobs[jobId];
-    if (!k || !k.app || k.app.gezien) return;
-    appPushAlle('antwoord', 'antwoord ' + k.app.kanaal).catch(function (e) { logError('app-push', e); });
+    if (!k || !k.app || k.app.noodstop) return;
+    const gz = k.app.gezien || {}, iemand = Object.keys(gz).length > 0, vrager = k.app.apparaat;
+    if (iemand && gz[vrager]) return;
+    appPushAlle('antwoord', 'antwoord ' + k.app.kanaal, function (id) { return !iemand || id === vrager; }).catch(function (e) { logError('app-push', e); });
   }, APP_PUSH_WACHT_MS);
   if (t && t.unref) t.unref();
 }
 // Elke 5 min: nieuwe storing of stilgevallen aanvoer -> seintje, alleen voor apparaten die dat aanzetten, 07-22 u, ≤ 1/uur.
+// Seintje alleen bij een NIEUWE kaart (een storing die nog misgaat of een stroom die stilviel), niet elk uur opnieuw voor
+// dezelfde chronische storing (Fable-review wv100 K2). meld_kaarten = de kaarten die dit apparaat al kreeg; null = nulpunt
+// bij de eerstvolgende geslaagde lezing (nooit op een mislukte lezing, B5).
 async function appPushMeldTik() {
   let p;
   try { p = appPushLees(); } catch (e) { return; }
@@ -4885,16 +4924,23 @@ async function appPushMeldTik() {
   if (!ids.length || fs.existsSync(APP_UIT)) return;
   const uur = Number(new Date().toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }));
   if (!(uur >= 7 && uur < 22)) return;
+  if (!(await appRolOk())) return;
   let m;
   try { m = await appMeldingen(); } catch (e) { return; }
-  if (m.fouten.length && !m.max_rij) return;   // niets gelezen: niets beslissen
+  if (!m.gelezen || m.fouten.length) return;   // niet alles gelezen: niets beslissen
   for (const id of ids) {
     const s = appPushLees().apparaten[id];
     if (!s) continue;
-    if (s.meld_rij == null) { appPushWijzig(function (q) { if (q.apparaten[id]) q.apparaten[id].meld_rij = m.max_rij; }); continue; }   // eerste meting = nulpunt
-    if (!(m.max_rij > s.meld_rij) || (s.meld_laatst && Date.now() - s.meld_laatst < APP_PUSH_MELD_MS)) continue;
+    if (!Array.isArray(s.meld_kaarten)) { appPushWijzig(function (q) { if (q.apparaten[id]) q.apparaten[id].meld_kaarten = m.kaarten.slice(0, 200); }); continue; }
+    // opgeloste kaarten vergeten: gaat dezelfde storing later opnieuw mis, dan is dat weer nieuw
+    const bekend = s.meld_kaarten.filter(function (k) { return m.kaarten.indexOf(k) >= 0; });
+    const nieuw = m.kaarten.filter(function (k) { return bekend.indexOf(k) < 0; });
+    if (!nieuw.length || (s.meld_laatst && Date.now() - s.meld_laatst < APP_PUSH_MELD_MS)) {
+      if (bekend.length !== s.meld_kaarten.length) appPushWijzig(function (q) { if (q.apparaten[id]) q.apparaten[id].meld_kaarten = bekend; });
+      continue;
+    }
     const r = await appPushStuur(id, 'meldingen');
-    if (r.ok) appPushWijzig(function (q) { if (q.apparaten[id]) { q.apparaten[id].meld_rij = m.max_rij; q.apparaten[id].meld_laatst = Date.now(); } });
+    if (r.ok) appPushWijzig(function (q) { const x = q.apparaten[id]; if (x) { x.meld_kaarten = m.kaarten.slice(0, 200); x.meld_laatst = Date.now(); } });
   }
 }
 setInterval(function () { appPushMeldTik().catch(function (e) { logError('app-push', e); }); }, APP_PUSH_MELD_TIK_MS).unref();
@@ -4904,13 +4950,14 @@ async function appPushStand(req, res, a) {
   const v = await appVapid();
   let sub = null;
   try { sub = appPushLees().apparaten[a.id] || null; } catch (e) { logError('app-push', e); }
+  const oud = !!(sub && v && sub.sleutel && sub.sleutel !== appSha(v.publiek).slice(0, 16));
   appStuur(res, 200, { ok: true, sleutel: v ? v.publiek : null, uit_reden: v ? null : 'seintjes zijn op de pod nog niet ingericht',
-    aan: !!sub, soorten: sub ? sub.soorten || [] : [], laatst: sub ? sub.laatst || null : null });
+    aan: !!sub && !oud, sleutel_oud: oud, soorten: sub ? sub.soorten || [] : [], laatst: sub ? sub.laatst || null : null });
 }
 async function appPushAbonneer(req, res, a, d) {
   if (!appTeller('push', APP_PUSH_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens push');
-  const ep = String(d.endpoint || '');
-  if (!appPushEndpointOk(ep)) return appWeiger(res, 400, 'dit adres voor seintjes ken ik niet', 'push endpoint');
+  if (!appPushEndpointOk(String(d.endpoint || ''))) return appWeiger(res, 400, 'dit adres voor seintjes ken ik niet', 'push endpoint');
+  const ep = new URL(String(d.endpoint)).href;   // genormaliseerd opslaan (Fable-review wv100 K9)
   const v = await appVapid();
   if (!v) return appWeiger(res, 503, 'seintjes zijn op de pod nog niet ingericht', 'geen pushsleutel');
   if (String(d.sleutel || '') !== v.publiek) return appWeiger(res, 409, 'verouderde sleutel; zet seintjes opnieuw aan', 'push sleutel');
@@ -4921,7 +4968,7 @@ async function appPushAbonneer(req, res, a, d) {
       Object.keys(p.apparaten).forEach(function (id) { if (id !== a.id && p.apparaten[id].endpoint === ep) delete p.apparaten[id]; });
       const oud = p.apparaten[a.id] || {};
       p.apparaten[a.id] = { endpoint: ep, sinds: new Date().toISOString(), soorten: Array.isArray(oud.soorten) && oud.soorten.length ? oud.soorten : ['antwoord'],
-        meld_rij: oud.meld_rij == null ? null : oud.meld_rij, meld_laatst: oud.meld_laatst || 0, laatst: null };
+        meld_kaarten: Array.isArray(oud.meld_kaarten) ? oud.meld_kaarten : null, meld_laatst: oud.meld_laatst || 0, laatst: null, sleutel: appSha(v.publiek).slice(0, 16) };
       return p.apparaten[a.id].soorten;
     });
   } catch (e) { logError('app-push', e); return appWeiger(res, 500, 'opslaan lukte niet', 'push.json schrijven'); }
@@ -4944,7 +4991,11 @@ function appPushSoorten(req, res, a, d) {
       if (!s) return null;
       s.soorten = d.meldingen ? ['antwoord', 'meldingen'] : ['antwoord'];
       // aanzetten = vanaf nu: wat er al lag, geeft geen seintje (nulpunt bij de eerstvolgende tik)
-      if (d.meldingen) { s.meld_rij = appStaat.meld && appStaat.meld.data ? appStaat.meld.data.max_rij : null; s.meld_laatst = 0; }
+      if (d.meldingen) {
+        const md = appStaat.meld && appStaat.meld.data;
+        s.meld_kaarten = md && md.gelezen && !md.fouten.length ? md.kaarten.slice(0, 200) : null;   // anders nulpunt bij de volgende tik (B5)
+        s.meld_laatst = 0;
+      }
       return s.soorten;
     });
   } catch (e) { logError('app-push', e); return appWeiger(res, 500, 'opslaan lukte niet', 'push.json schrijven'); }

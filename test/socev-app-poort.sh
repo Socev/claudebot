@@ -82,7 +82,8 @@ async function nepFetch(url, opt) {
       return antw(200, { data: n8nStaat.buffer.filter((x) => !bronnen || bronnen.includes(x.bron)).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)), nextCursor: null });
     }
     if (u.pathname === '/api/v1/data-tables/MF6DKIGzWVT8FAdy/rows') return antw(200, { data: n8nStaat.stilte, nextCursor: null });
-    if (u.pathname === '/api/v1/executions') { const e = n8nStaat.executies[u.searchParams.get('workflowId')]; return antw(200, { data: e ? [e] : [], nextCursor: null }); }
+    if (u.pathname === '/api/v1/executions') { const e = n8nStaat.executies[u.searchParams.get('workflowId')]; return antw(200, { data: e ? [].concat(e) : [], nextCursor: null }); }
+    if (u.pathname.startsWith('/api/v1/workflows/')) { const w = (n8nStaat.workflows || {})[u.pathname.slice('/api/v1/workflows/'.length)]; return w ? antw(200, w) : antw(404, {}); }
     return antw(404, {});
   }
   if (url === 'https://wachter.toets/stand') return wachterStaat.kapot ? antw(503, {}) : antw(200, wachterStaat.j);
@@ -1149,9 +1150,11 @@ async function bewijs(o) {
       // eenheden: Foutmelder-tekst, uitleg, Stiltewachter-tekst, pushdiensten
       const fm = H.appFoutmelderLees('Workflow mislukt\n\nAI - WhatsApp Chat Reader (webhook) - knoop: (onbekende knoop)\nOngeldige secret [line 2]\n2026-10-06 09:10:25 - executie 52881\nhttps://5877e26c.primumnonnocere.olares.com/workflow/GIuod668nbn9YPXI/executions/52881');
       toets('12 Foutmelder-tekst gelezen (naam, knoop, fout, executie, workflow-id)', fm.workflow === 'AI - WhatsApp Chat Reader (webhook)' && fm.knoop === '(onbekende knoop)' && fm.fout === 'Ongeldige secret [line 2]' && fm.executie === '52881' && fm.workflow_id === 'GIuod668nbn9YPXI', JSON.stringify(fm));
+      const fm3 = H.appFoutmelderLees('Workflow mislukt\n\nX - knoop: Y\nPOST https://api.voorbeeld.nl/v1?key=abc failed: token ' + 'Q'.repeat(40) + '\n2026-10-06 09:10:25 - executie 8');
+      toets('12 fouttekst: links en lange tokens weg', fm3.fout === 'POST [link] failed: token […]', fm3.fout);
       const fm2 = H.appFoutmelderLees('Workflow mislukt\n\nX - knoop: Y\n2026-10-06 09:10:25 - executie 7');
       toets('12 Foutmelder zonder foutregel en zonder link: fout leeg, executie uit de tijdregel', fm2.fout === '' && fm2.executie === '7' && fm2.workflow_id === null, JSON.stringify(fm2));
-      const uitl = { 'Ongeldige secret [line 2]': 'sleutel', 'Service unavailable - try again later': 'pod', 'The connection was aborted, perhaps the server is offline': 'verbinding',
+      const uitl = { 'Ongeldige secret [line 2]': 'sleutel', 'Request failed with status code 401 Unauthorized': 'toegang', 'Forbidden - perhaps check your credentials?': 'toegang', 'Service unavailable - try again later': 'pod', 'The connection was aborted, perhaps the server is offline': 'verbinding',
         'Expected multipart/form-data': 'formulier', 'invalid syntax': 'code', 'The service was not able to process your request': 'dienst', 'iets nieuws': 'anders', 'Request failed with status code 429': 'grens' };
       toets('12 uitleg in gewone taal per soort fout', Object.keys(uitl).every((f) => H.appFoutUitleg(f).soort === uitl[f]), JSON.stringify(Object.keys(uitl).map((f) => H.appFoutUitleg(f).soort)));
       const sl = H.appStilLees('Aanvoer stil\n\nAI - Second Brain - Mail Processor is stil sinds 2026-10-05 13:00 - 14.8 effectieve uren, drempel 9.\nAI - Signal meelezen is stil sinds 2026-10-05 14:30 - 13.3 effectieve uren, drempel 2.');
@@ -1159,7 +1162,7 @@ async function bewijs(o) {
       const eps = { 'https://fcm.googleapis.com/fcm/send/abc:def': true, 'https://wns2-par02p.notify.windows.com/w/?token=x': true, 'https://updates.push.services.mozilla.com/wpush/v2/x': true,
         'https://web.push.apple.com/QK': true, 'http://fcm.googleapis.com/fcm/send/x': false, 'https://fcm.googleapis.com:8443/x': false, 'https://user:pw@fcm.googleapis.com/x': false,
         'https://fcm.googleapis.com.evil.dev/x': false, 'https://evil.dev/fcm.googleapis.com': false, 'https://169.254.169.254/latest': false, 'https://localhost/x': false,
-        'https://a.b.notify.windows.com/x': false, 'https://fcm.googleapis.com/x\ny': false, ['https://fcm.googleapis.com/' + 'x'.repeat(1100)]: false };
+        'https://a.b.notify.windows.com/x': false, 'https://fcm.googleapis.com/x\ny': false, 'https://fcm.googleapis.com/fcm/send/x#y': false, ['https://fcm.googleapis.com/' + 'x'.repeat(1100)]: false };
       toets('12 pushdienst: alleen https op de vaste lijst, geen poort/gebruiker/andere host', Object.keys(eps).every((e) => H.appPushEndpointOk(e) === eps[e]),
         Object.keys(eps).filter((e) => H.appPushEndpointOk(e) !== eps[e]).join(' | ').slice(0, 200));
 
@@ -1174,6 +1177,7 @@ async function bewijs(o) {
         { id: 99, bron: 'stiltewachter', tekst: 'Aanvoer stil\n\nAI - Second Brain - Mail Processor is stil sinds 2026-10-05 13:00 - 14.8 effectieve uren, drempel 9.', createdAt: uur(20) },
         { id: 50, bron: 'foutmelder', tekst: fmt('AI - Oud', 'X', 'Service unavailable', 1, 'OudOudOud1'), createdAt: uur(24 * 20) },
         { id: 104, bron: 'parro', tekst: 'Parro 6c: GEHEIM-PRIVE', createdAt: uur(1) },
+        { id: 101, bron: 'foutmelder', tekst: fmt('AI - Locatie (Tasker)', 'Opslaan', 'The connection was aborted, perhaps the server is offline', 52000, 'LocatieLoc01'), createdAt: uur(6) },
       ];
       n8nStaat.stilte = [
         { naam: 'AI - Second Brain - Mail Processor', status: 'gezond', bewaken: 'ja', laatste_executie: uur(1), drempel_uren: 9 },
@@ -1183,29 +1187,35 @@ async function bewijs(o) {
       n8nStaat.executies = {
         nDj2qyAC5hJL5eUU: { id: '60000', status: 'success', startedAt: uur(1) },
         GIuod668nbn9YPXI: { id: '52881', status: 'error', startedAt: uur(5) },
-        Bl2ZEi8H36CbSu48: { id: '53000', status: 'error', startedAt: uur(1) },
+        Bl2ZEi8H36CbSu48: [{ id: '53100', status: 'running', startedAt: uur(0.1) }, { id: '53000', status: 'error', startedAt: uur(1) }],
+        LocatieLoc01: { id: '52500', status: 'error', startedAt: uur(3) },
       };
+      n8nStaat.workflows = { Bl2ZEi8H36CbSu48: { id: 'Bl2ZEi8H36CbSu48', settings: {} }, nDj2qyAC5hJL5eUU: { settings: {} }, GIuod668nbn9YPXI: { settings: {} },
+        LocatieLoc01: { settings: { saveDataSuccessExecution: 'none' } } };
       wachterStaat.j = { status: 'ok', checks: [{ naam: 'desktop', ok: true }, { naam: 'n8n', ok: true }], laatste_ronde: uur(0.05), wachter_stil: false };
       const nAuditM = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
       r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
       const its = r.j.items || [];
       const per = (t) => its.find((x) => x.titel === t);
-      toets('12 meldingen 200: 3 storingskaarten + 2 stilte-kaarten, nieuwste eerst, niets ouder dan 14 dagen, geen parro', r.status === 200 && its.length === 5 &&
-        its.filter((x) => x.soort === 'storing').length === 3 && its.filter((x) => x.soort === 'stil').length === 2 && !its.some((x) => /Oud|GEHEIM/.test(JSON.stringify(x))) &&
+      toets('12 meldingen 200: 4 storingskaarten + 2 stilte-kaarten, nieuwste eerst, niets ouder dan 14 dagen, geen parro', r.status === 200 && its.length === 6 &&
+        its.filter((x) => x.soort === 'storing').length === 4 && its.filter((x) => x.soort === 'stil').length === 2 && !its.some((x) => /Oud|GEHEIM/.test(JSON.stringify(x))) &&
         its.every((x, i) => i === 0 || Date.parse(its[i - 1].wanneer) >= Date.parse(x.wanneer)), JSON.stringify(its.map((x) => x.titel)));
       const dbg = per('Claude Debug via Telegram liep vast');
       toets('12 twee keer dezelfde storing = één kaart, 2×, weer goed (latere geslaagde run)', dbg && dbg.aantal === 2 && dbg.herstel.stand === 'weer-goed' && /weer goed gelopen/.test(dbg.herstel.tekst) && /pod/.test(dbg.uitleg), JSON.stringify(dbg));
       const wa = per('WhatsApp Chat Reader liep vast');
       toets('12 "(webhook)" en "AI - " weg uit de naam; sleuteluitleg; geen latere run = "niet meer gedraaid"', wa && /juiste sleutel/.test(wa.uitleg) && wa.herstel.stand === 'onbekend' && /niet meer gedraaid/.test(wa.herstel.tekst), JSON.stringify(wa));
       const vl = per('Voorlezen (Gemini-stem) liep vast');
+      const lo = per('Locatie (Tasker) liep vast');
+      toets('12 workflow zonder bewaarde geslaagde runs: latere fout = onbekend (niet "nog-fout"), eerlijke tekst', lo && lo.herstel.stand === 'onbekend' && /geen geslaagde runs/.test(lo.herstel.tekst), JSON.stringify(lo && lo.herstel));
+      toets('12 lopende run overgeslagen bij het nakijken', vl && /De laatste run liep ook mis/.test(vl.herstel.tekst), JSON.stringify(vl && vl.herstel));
       toets('12 latere run liep ook mis = nog-fout; techniek klein met stap en executie', vl && vl.herstel.stand === 'nog-fout' && /stap: Secret correct\? · fout: invalid syntax · executie 52917/.test(vl.techniek), JSON.stringify(vl));
       const ml = per('Second Brain - Mail Processor leverde niets meer aan');
       toets('12 stilgevallen aanvoer in gewone taal, en "loopt weer" uit de stand van nu', ml && /Sinds 5-10 13:00 kwam er niets binnen \(14,8 uur; normaal hooguit 9\)/.test(ml.uitleg) && ml.herstel.stand === 'weer-goed', JSON.stringify(ml));
       const tm = per('Teams meelezen leverde niets meer aan');
       toets('12 nu stil zonder melding in de buffer: toch een kaart (nog-fout); niet-bewaakt (SMS) niet', tm && tm.herstel.stand === 'nog-fout' && !its.some((x) => /SMS/.test(x.titel)), JSON.stringify(tm));
       toets('12 stand: 2 bewaakte stromen, Teams stil; extern bereikbaar', r.j.stand && r.j.stand.aanvoer.bewaakt === 2 && r.j.stand.aanvoer.stil.join() === 'Teams meelezen' && r.j.stand.extern.ok === true && /van buitenaf bereikbaar/.test(r.j.stand.extern.tekst), JSON.stringify(r.j.stand));
-      toets('12 geen links of hostnamen en geen intern rijnummer in het antwoord', !/5877e26c|olares\.com|https?:/.test(JSON.stringify(its)) && its.every((x) => !('rij' in x)), JSON.stringify(its).slice(0, 200));
-      toets('12 nog niets gezien: alle 5 nieuw; n8n met de API-sleutel gelezen', r.j.nieuw === 5 && r.j.gezien === null && n8nStaat.aanroepen.every((x) => x.key === 'nep-n8n'), r.j.nieuw);
+      toets('12 geen links of hostnamen en geen intern rij-/kaartnummer in het antwoord', !/5877e26c|olares\.com|https?:/.test(JSON.stringify(its)) && its.every((x) => !('rij' in x) && !('kaart' in x)), JSON.stringify(its).slice(0, 200));
+      toets('12 nog niets gezien: alle 6 nieuw; n8n met de API-sleutel gelezen', r.j.nieuw === 6 && r.j.gezien === null && n8nStaat.aanroepen.every((x) => x.key === 'nep-n8n'), r.j.nieuw);
       toets('12 GET meldingen (200) schrijft geen auditregel', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAuditM);
       const nAanroep = n8nStaat.aanroepen.length;
       await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
@@ -1296,7 +1306,7 @@ async function bewijs(o) {
       await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
       r = await vraag('POST', '/app/push/soorten', { meldingen: true }, { pot: P.jar });
       const pj3 = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid];
-      toets('12 meldingen aan: nulpunt = hoogste rij van nu (103)', r.status === 200 && pj3.soorten.join() === 'antwoord,meldingen' && pj3.meld_rij === 103, JSON.stringify(pj3));
+      toets('12 meldingen aan: nulpunt = de kaarten die nu (nog) misgaan', r.status === 200 && pj3.soorten.join() === 'antwoord,meldingen' && Array.isArray(pj3.meld_kaarten) && pj3.meld_kaarten.length === 3, JSON.stringify(pj3));
       pushes.length = 0;
       await H.appPushMeldTik();
       toets('12 tik zonder nieuwe melding: geen seintje', pushes.length === 0, pushes.length);
@@ -1305,14 +1315,81 @@ async function bewijs(o) {
       await H.appPushMeldTik();
       toets('12 nieuwe storing om 03:00: geen seintje (07-22 u)', pushes.length === 0, pushes.length);
       toetsUur = 12; H.appStaat.meld = null;
+      rolStub.primair = false;
       await H.appPushMeldTik();
-      toets('12 nieuwe storing overdag: één seintje', pushes.length === 1, pushes.length);
+      toets('12 passieve kant (uitwijk): geen seintje', pushes.length === 0, pushes.length);
+      rolStub.primair = true;
+      await H.appPushMeldTik();
+      toets('12 nieuwe storing overdag: één seintje, kort houdbaar en niet dringend', pushes.length === 1 && pushes[0].h.TTL === '3600' && pushes[0].h.Urgency === 'normal', JSON.stringify(pushes[0] && pushes[0].h).slice(0, 200));
       n8nStaat.buffer.push({ id: 106, bron: 'stiltewachter', tekst: 'Aanvoer stil\n\nAI - Parro meelezen is stil sinds 2026-10-08 10:00 - 30 effectieve uren, drempel 30.', createdAt: uur(0.005) });
       H.appStaat.meld = null;
       await H.appPushMeldTik();
       toets('12 nog een melding binnen het uur: geen tweede seintje', pushes.length === 1, pushes.length);
-      const pj4 = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid];
-      toets('12 nulpunt schoof mee naar 105 (106 wacht op het volgende uur)', pj4.meld_rij === 105, pj4.meld_rij);
+      const zetUurTerug = () => { const q = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')); q.apparaten[pid].meld_laatst = Date.now() - 2 * 3600000; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(q)); };
+      zetUurTerug(); H.appStaat.meld = null;
+      await H.appPushMeldTik();
+      toets('12 een uur later: seintje voor de stilgevallen stroom die bleef liggen', pushes.length === 2, pushes.length);
+      // dezelfde storing nog eens (Foutmelder meldt elk uur): geen nieuwe kaart, geen seintje
+      n8nStaat.buffer.push({ id: 107, bron: 'foutmelder', tekst: fmt('AI - Nieuw', 'Stap', 'Service unavailable', 54100, 'NieuwNieuw01'), createdAt: uur(0.002) });
+      zetUurTerug(); H.appStaat.meld = null;
+      await H.appPushMeldTik();
+      toets('12 chronische storing (zelfde kaart, nieuwe rij): geen seintje', pushes.length === 2, pushes.length);
+      // opgelost en daarna opnieuw mis: wél weer nieuw
+      n8nStaat.executies.NieuwNieuw01 = { id: '54200', status: 'success', startedAt: uur(0.001) };
+      zetUurTerug(); H.appStaat.meld = null; H.appStaat.wfInst = {};
+      await H.appPushMeldTik();
+      toets('12 storing opgelost: geen seintje, kaart vergeten', pushes.length === 2 && JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid].meld_kaarten.length === 4, JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid].meld_kaarten.length);
+      n8nStaat.buffer.push({ id: 108, bron: 'foutmelder', tekst: fmt('AI - Nieuw', 'Stap', 'Service unavailable', 54300, 'NieuwNieuw01'), createdAt: new Date().toISOString() });
+      zetUurTerug(); H.appStaat.meld = null;
+      await H.appPushMeldTik();
+      toets('12 dezelfde storing na herstel opnieuw mis: wél een seintje', pushes.length === 3, pushes.length);
+      // aanzetten terwijl n8n onbereikbaar is: geen nulpunt op een mislukte lezing (Fable-review wv100 B5)
+      await vraag('POST', '/app/push/soorten', { meldingen: false }, { pot: P.jar });
+      H.appStaat.meld = null; n8nStaat.kapot = true;
+      await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      await vraag('POST', '/app/push/soorten', { meldingen: true }, { pot: P.jar });
+      toets('12 meldingen aan tijdens n8n-storing: nulpunt leeg (volgt bij de eerste goede lezing)', JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid].meld_kaarten === null);
+      await H.appPushMeldTik();
+      toets('12 tik tijdens n8n-storing: geen seintje, nulpunt nog leeg', pushes.length === 3 && JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid].meld_kaarten === null, pushes.length);
+      n8nStaat.kapot = false; H.appStaat.meld = null;
+      await H.appPushMeldTik();
+      toets('12 eerste goede lezing: nulpunt gezet, geen seintje voor wat er al lag', pushes.length === 3 && Array.isArray(JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid].meld_kaarten), pushes.length);
+      // tweede apparaat (Fable-review wv100 B1): laptop thuis open keek mee, vraag kwam van de telefoon
+      const regB = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      regB.apparaten.push({ id: 'eeeeeeeeeeeeeeee', naam: 'Laptop thuis', soort: 'reist', actief: true, systeem: 'Windows' });
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regB));
+      const pjB = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8'));
+      pjB.apparaten.eeeeeeeeeeeeeeee = { endpoint: 'https://wns2-par02p.notify.windows.com/w/?token=laptop', soorten: ['antwoord'], sleutel: pjB.apparaten[pid].sleutel };
+      fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pjB));
+      const beurtKlaar = async (tekst, voor) => {
+        H.appStaat.tellers.beurt = [];
+        const rr = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst }, { pot: P.jar });
+        if (!afmaken[rr.j.job_id]) return 'beurt mislukt: ' + JSON.stringify(rr);
+        await slaap(30); pushes.length = 0;
+        afmaken[rr.j.job_id]('ok ' + tekst);
+        await slaap(20);
+        if (voor) await voor(rr.j.job_id);
+        await slaap(900);
+        return pushes.map((x) => /windows/.test(x.url) ? 'laptop' : 'telefoon').sort().join(',');
+      };
+      toets('12 niemand keek: seintje naar telefoon én laptop', (await beurtKlaar('b1-niemand')) === 'laptop,telefoon');
+      toets('12 laptop keek mee, telefoon (vrager) niet: alleen de telefoon', (await beurtKlaar('b1-laptop', async (id) => { jobs[id].app.gezien = { eeeeeeeeeeeeeeee: Date.now() }; })) === 'telefoon');
+      toets('12 telefoon (vrager) haalde de geschiedenis op: niemand (Fable-review wv100 B2)', (await beurtKlaar('b2-geschiedenis', async () => { await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar }); })) === '');
+      toets('12 passieve kant: geen antwoord-seintje', (await beurtKlaar('b7-passief', async () => { rolStub.primair = false; })) === '');
+      rolStub.primair = true;
+      // sleutel vervangen (sleutelportaal): abonnement met een andere vingerafdruk krijgt niets en "zet opnieuw aan" (B6)
+      const pjS = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8'));
+      pjS.apparaten[pid].sleutel = 'andere-sleutel00';
+      fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pjS));
+      pushes.length = 0;
+      rs = await H.appPushStuur(pid, 'proef');
+      r = await vraag('GET', '/app/push', undefined, { pot: P.jar });
+      toets('12 abonnement op een vervangen sleutel: niet versturen; GET push zegt sleutel_oud', rs.ok === false && /sleutel vervangen/.test(rs.reden) && pushes.length === 0 && r.j.aan === false && r.j.sleutel_oud === true, JSON.stringify(rs) + JSON.stringify(r.j));
+      await vraag('POST', '/app/push/abonneer', { endpoint: EP, sleutel: VAPID_PUB }, { pot: P.jar });
+      r = await vraag('GET', '/app/push', undefined, { pot: P.jar });
+      toets('12 opnieuw aangezet: weer aan met de huidige sleutel', r.j.aan === true && r.j.sleutel_oud === false, JSON.stringify(r.j));
+      const pjE = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')); delete pjE.apparaten.eeeeeeeeeeeeeeee; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pjE));
+      regB.apparaten = regB.apparaten.filter((x) => x.id !== 'eeeeeeeeeeeeeeee'); fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regB));
       r = await vraag('POST', '/app/push/soorten', { meldingen: false }, { pot: P.jar });
       toets('12 meldingen uit: alleen antwoord', r.status === 200 && r.j.soorten.join() === 'antwoord');
       // pushdienst zegt: abonnement bestaat niet meer
