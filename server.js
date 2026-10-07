@@ -3051,7 +3051,8 @@ const APP_UITDAGING_MS = 2 * 60 * 1000;
 const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
 const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-apparaat (fase 4)
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
-const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs']);
+const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
+  'POST /app/broedstoof/voorrang']);
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
@@ -3071,7 +3072,7 @@ const APP_LOG_MS = 30 * 24 * 3600 * 1000;
 const APP_AUDIT_VOOR_PER_MIN = 5;
 const APP_TRANSPORTS = ['internal', 'hybrid', 'usb', 'nfc', 'ble', 'smart-card'];
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null };
@@ -3430,7 +3431,10 @@ function appKoppelStand(req, res) {
 // Voor het goedkeurende apparaat: de open aanvraag (alleen ter herkenning; de beslissing hangt aan het id).
 function appAanvraagLijst(req, res) {
   const k = appAanvraagGeldig();
-  appStuur(res, 200, { ok: true, aanvraag: k && k.status === 'open' ? appAanvraagUit(k) : null });
+  const open = !!(k && k.status === 'open');
+  // De app vraagt dit elke minuut (stip op het tandwiel, wv92): zonder open aanvraag geen auditregel (Fable-review wv92 #2).
+  if (!open) res._app.stil = true;
+  appStuur(res, 200, { ok: true, aanvraag: open ? appAanvraagUit(k) : null });
 }
 
 function appKoppelGoedkeur(req, res, reg, a, s, d, afwijzen) {
@@ -3904,6 +3908,131 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
   appStuur(res, 200, { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout });
 }
 
+// ── Broedstoof (wv92, bouwplan § 4.13): ideeënbus + werkvoorraad + agents; voorrang per idee ──
+// Lezen: de tabel bovenaan de ideeënbus (kolommen op kopnaam), RPC mk_broedstoof (werkvoorraadrijen met idee + voorrang,
+// geen prompts) en het agentregister (alleen labels/status). Schrijven: alleen de voorrang (RPC mk_idee_voorrang), die
+// de tikker als eerste sorteersleutel gebruikt; de poort (doorwerk/pro rata/dagmaximum/plekken) blijft ervóór.
+const APP_VOORRANG_PER_UUR = 30;
+function appBusPad() { return process.env.APP_BUS_PAD || path.join(VAULT, '01_Ontwikkeling', 'Ideeënbus David - vibecoden.md'); }
+// Markdown-cel -> platte tekst: [[pad|alias]] -> alias, [[pad]] -> laatste deel, geen ** __ `.
+function appPlat(s) {
+  return String(s || '').replace(/\[\[([^\]|]*)\|([^\]]*)\]\]/g, '$2').replace(/\[\[([^\]]*)\]\]/g, function (m, p) { return p.split('/').pop(); })
+    .replace(/\*\*|__|`/g, '').replace(/\s+/g, ' ').trim();
+}
+// Eén tabelrij splitsen; '|' binnen [[…]] of `…` telt niet (Fable-review wv92 #5).
+function appTabelCellen(regel) {
+  const bewaar = [];
+  const m = regel.replace(/\[\[[^\]]*\]\]|`[^`]*`/g, function (x) { bewaar.push(x); return '\u0000' + (bewaar.length - 1) + '\u0000'; });
+  const delen = m.trim().replace(/^\|/, '').replace(/\|$/, '').split('|');
+  return delen.map(function (c) { return c.replace(/\u0000(\d+)\u0000/g, function (x, i) { return bewaar[Number(i)]; }).trim(); });
+}
+function appBusLees() {
+  const pad = appBusPad();
+  const st = fs.statSync(pad);
+  const c = appStaat.bus;
+  if (c && c.mtime === st.mtimeMs && c.pad === pad) return c.data;
+  const regels = fs.readFileSync(pad, 'utf8').split('\n');
+  let kop = null, i = 0;
+  for (; i < regels.length; i++) {
+    if (!/^\s*\|/.test(regels[i])) continue;
+    const k = appTabelCellen(regels[i]).map(function (x) { return appPlat(x).toLowerCase(); });
+    if (k.indexOf('#') >= 0 && k.indexOf('idee') >= 0) { kop = k; break; }
+  }
+  if (!kop) throw new Error('geen ideeëntabel');
+  const kol = function (n) { return kop.indexOf(n); };
+  const ideeen = [];
+  for (i = i + 1; i < regels.length && /^\s*\|/.test(regels[i]); i++) {
+    const cel = appTabelCellen(regels[i]);
+    const nr = /^\s*(\d{1,3})\s*$/.exec(appPlat(cel[kol('#')]));
+    if (!nr) continue;   // scheidingsregel of rommel
+    let pct = null, bron = null;
+    const pc = kol('%') >= 0 ? /^\**\s*±?\s*(\d{1,3})\s*%?\s*\**$/.exec(String(cel[kol('%')] || '').trim()) : null;
+    if (pc && Number(pc[1]) <= 100) { pct = Number(pc[1]); bron = 'kolom'; }
+    else if (kol('stand') >= 0) {
+      const ps = /±\s*(\d{1,3})\s*%/.exec(cel[kol('stand')] || '');
+      if (ps && Number(ps[1]) <= 100) { pct = Number(ps[1]); bron = 'standtekst'; }
+    }
+    const kort = kol('kort') >= 0 ? appPlat(cel[kol('kort')]).slice(0, 240) : '';
+    ideeen.push({ nr: Number(nr[1]), titel: appPlat(cel[kol('idee')]).slice(0, 160), genre: kol('genre') >= 0 ? appPlat(cel[kol('genre')]).slice(0, 60) : '',
+      pct: pct, pct_bron: bron, kort: kort || null });
+  }
+  const data = { ideeen: ideeen, bijgewerkt: new Date(st.mtimeMs).toISOString() };
+  appStaat.bus = { pad: pad, mtime: st.mtimeMs, data: data };
+  return data;
+}
+async function appSbRpc(fn, body) {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, ''), key = process.env.SUPABASE_SERVICE_ROLE || '';
+  if (!url || !key) throw new Error('supabase-omgeving ontbreekt');
+  const r = await fetch(url + '/rest/v1/rpc/' + fn, { method: 'POST',
+    headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+    signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error('rpc ' + fn + ' http ' + r.status);
+  return r.json();
+}
+function appLabelKort(l) { return String(l || '').replace(/^(machinekamer|socev):\s*/, '').replace(/^wv\d+\s+/, '').slice(0, 120); }
+function appAgentsReg() { return typeof agentsReg !== 'undefined' && agentsReg ? agentsReg : {}; }
+async function appBroedstoof(req, res) {
+  res._app.stil = true;   // elke 30 s per apparaat: geen auditregel bij 200 (Fable-review wv92 #8)
+  let bus;
+  try { bus = appBusLees(); } catch (e) { logError('app-broedstoof', e); return appWeiger(res, 503, 'de ideeënbus is nu niet leesbaar', 'bus onleesbaar'); }
+  let db = null, fout = null;
+  try { db = await appSbRpc('mk_broedstoof', {}); } catch (e) { logError('app-broedstoof', e); fout = 'werkvoorraad nu niet leesbaar; agents en voorrang ontbreken'; }
+  const reg = appAgentsReg();
+  const loopt = function (a) { return a && (a.status === 'pending' || a.status === 'running'); };
+  const items = (db && Array.isArray(db.items)) ? db.items : [];
+  const voorrang = {};
+  ((db && db.voorrang) || []).forEach(function (v) { voorrang[v.idee] = v; });
+  const nu = Date.now();
+  const ideeen = bus.ideeen.map(function (i) {
+    const rijen = items.filter(function (w) { return w.idee === i.nr; });
+    const bezig = [];
+    rijen.forEach(function (w) {
+      // 'starten' telt alleen kort: na 15 min zonder job zet de tikker hem terug (Fable-review wv92 #4)
+      if (w.status === 'starten') { if (!w.bijgewerkt || nu - Date.parse(w.bijgewerkt) < 15 * 60000) bezig.push({ label: appLabelKort(w.label), sinds: null, wv: w.id }); }
+      else if (w.status === 'gestart' && loopt(reg[w.job_id])) bezig.push({ label: appLabelKort(w.label), sinds: w.gestart_op || null, wv: w.id });
+    });
+    // agents buiten de werkvoorraad waarvan het label dit idee noemt
+    Object.keys(reg).forEach(function (id) {
+      const a = reg[id];
+      if (!loopt(a) || rijen.some(function (w) { return w.job_id === id; })) return;
+      const m = /\bidee[ -]?(\d{1,3})\b/i.exec(String(a.label || ''));
+      if (m && Number(m[1]) === i.nr) bezig.push({ label: appLabelKort(a.label), sinds: a.started ? new Date(a.started).toISOString() : null, wv: null });
+    });
+    const open = rijen.filter(function (w) { return w.status === 'open'; });
+    const v = voorrang[i.nr];
+    return { nr: i.nr, titel: i.titel, genre: i.genre, pct: i.pct, pct_bron: i.pct_bron, kort: i.kort,
+      voorrang: v ? v.voorrang : 0, voorrang_sinds: v ? v.bijgewerkt : null,
+      bezig: bezig,
+      in_rij: open.length,
+      // zoals de claim van de tikker: niet_voor voorbij, item:-voorgangers klaar, job-voorgangers niet meer lopend (Fable-review wv92 #5)
+      startklaar: open.filter(function (w) {
+        return (!w.niet_voor || Date.parse(w.niet_voor) <= nu) && !w.wacht_op_item && !(w.wacht_op_job || []).some(function (j) { return loopt(reg[j]); });
+      }).length,
+      wacht_op_david: rijen.filter(function (w) { return w.status === 'geblokkeerd' && /^david/i.test(String(w.geblokkeerd_door || '')); }).length,
+      volgende: open.length ? appLabelKort(open[0].label) : null };
+  });
+  const ru = db && db.ruimte ? { mag: !!db.ruimte.mag, reden: String(db.ruimte.reden || '').slice(0, 160) } : null;
+  // wat de tikker nu echt doet (dagmaximum, uitrol, laatste reden), niet alleen de ruimte (Fable-review wv92 #1)
+  const tk = db && db.tikker ? { aan: db.tikker.aan !== false, reden: String(db.tikker.reden || '').slice(0, 160), laatste_tik: db.tikker.laatste_tik || null,
+    starts_vandaag: Number(db.tikker.starts_vandaag) || 0, max_dag: Number(db.tikker.max_dag) || 0, alleen_doorwerk: db.tikker.alleen_doorwerk === true } : null;
+  appStuur(res, 200, { ok: true, ideeen: ideeen, bus_bijgewerkt: bus.bijgewerkt, ruimte: ru, tikker: tk, fout: fout });
+}
+async function appBroedstoofVoorrang(req, res, reg, a, s, d) {
+  const idee = d.idee, actie = String(d.actie || '');
+  if (typeof idee !== 'number' || !Number.isInteger(idee) || idee < 1 || idee > 999 || ['eerder', 'normaal'].indexOf(actie) < 0) return appWeiger(res, 400, 'ongeldig verzoek', 'voorrang velden');
+  let bus;
+  try { bus = appBusLees(); } catch (e) { logError('app-broedstoof', e); return appWeiger(res, 503, 'de ideeënbus is nu niet leesbaar', 'bus onleesbaar'); }
+  if (!bus.ideeen.some(function (i) { return i.nr === idee; })) return appWeiger(res, 404, 'dit idee staat niet (meer) op de ideeënbus', 'onbekend idee ' + idee);
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+  if (!appTeller('voorrang', APP_VOORRANG_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_VOORRANG_PER_UUR + ')', 'grens voorrang');
+  let r;
+  try { r = await appSbRpc('mk_idee_voorrang', { p_idee: idee, p_actie: actie, p_door: 'app: ' + String(a.naam || '').slice(0, 40), p_apparaat: a.id }); }
+  catch (e) { logError('app-voorrang', e); return appWeiger(res, 502, 'opslaan lukte niet; probeer het zo nog eens', 'rpc voorrang'); }
+  if (!r || r.ok !== true) return appWeiger(res, 502, 'opslaan lukte niet; probeer het zo nog eens', 'rpc voorrang leeg');
+  res._app.reden = 'voorrang idee ' + idee + ' ' + actie + ' ' + r.van + '->' + r.voorrang;
+  appStuur(res, 200, { ok: true, idee: idee, voorrang: r.voorrang, gewijzigd: r.gewijzigd === true });
+}
+
 function appIsPad(req) { const p = reqPath(req); return p === '/app' || p.indexOf('/app/') === 0; }
 
 function handleApp(req, res) {
@@ -3962,6 +4091,8 @@ function handleApp(req, res) {
         if (route === 'POST /app/uitslag') return appUitslag(req, res, reg, a, s, d);
         if (route === 'POST /app/knop') return appKnop(req, res, reg, a, s, d);
         if (route.indexOf('GET /app/geschiedenis/') === 0) return appGeschiedenis(req, res, reg, a, route.slice('GET /app/geschiedenis/'.length));
+        if (route === 'GET /app/broedstoof') return appBroedstoof(req, res);
+        if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
         return appWeiger(res, 404, 'onbekend', 'route');
       };
       Promise.resolve().then(verder).catch(function (e) {

@@ -28,6 +28,13 @@ fs.writeFileSync(path.join(DATA, 'config.json'), JSON.stringify({ access_team: T
 const OMLIJST = fs.readFileSync('/opt/data/socev-app-data/machinekamer-omlijsting.txt', 'utf8');
 fs.writeFileSync(path.join(DATA, 'machinekamer-omlijsting.txt'), OMLIJST);
 const LOGDIR = path.join(W, 'app-log');
+// Broedstoof (wv92): echte ideeënbus als kopie; databank nagebootst
+const BUS = path.join(W, 'bus.md');
+fs.copyFileSync('/opt/data/AI_SecondBrain/01_Ontwikkeling/Ideeënbus David - vibecoden.md', BUS);
+const SB = 'https://sb.toets';
+const sbRpc = [];
+const sbStaat = { voorrang: {}, items: [], kapot: false };
+const agentsReg = {};
 
 // nep-Access: eigen RSA-sleutel met kid 'proef'
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -50,6 +57,21 @@ async function nepFetch(url, opt) {
     return antw(200, { keys: [jwk] }, { date: new Date(Date.now() - klokScheef).toUTCString() });
   }
   if (url.startsWith('https://api.telegram.org/')) { telegram.push(JSON.parse(opt.body).text); return antw(200, { ok: true }); }
+  if (url.startsWith(SB + '/rest/v1/rpc/')) {
+    const fn = url.slice((SB + '/rest/v1/rpc/').length), b = JSON.parse(opt.body || '{}');
+    sbRpc.push({ fn, b, sleutel: opt.headers && opt.headers.apikey });
+    if (sbStaat.kapot) return antw(500, { message: 'kapot' });
+    if (fn === 'mk_broedstoof') return antw(200, { voorrang: Object.keys(sbStaat.voorrang).filter((k) => sbStaat.voorrang[k] > 0).map((k) => ({ idee: Number(k), voorrang: sbStaat.voorrang[k], bijgewerkt: new Date().toISOString(), door: 'x' })),
+      items: sbStaat.items, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' },
+      tikker: { aan: true, reden: 'wacht op ruimte: dagmaximum (42 starts)', laatste_tik: new Date().toISOString(), starts_vandaag: 42, max_dag: 24, alleen_doorwerk: true } });
+    if (fn === 'mk_idee_voorrang') {
+      const van = sbStaat.voorrang[b.p_idee] || 0, max = Math.max(0, ...Object.values(sbStaat.voorrang));
+      const naar = b.p_actie === 'normaal' ? 0 : (van > 0 && van === max ? van : max + 1);
+      sbStaat.voorrang[b.p_idee] = naar;
+      return antw(200, { ok: true, idee: b.p_idee, van, voorrang: naar, gewijzigd: naar !== van });
+    }
+    return antw(404, {});
+  }
   return antw(404, {});
 }
 const logs = [];
@@ -63,7 +85,9 @@ function processJob(jobId, prompt, sess, files, chatId, ws, keuze) {
 }
 const rolStub = { eerste: 1, primair: true };
 const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
-  process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR }, pid: process.pid },
+  process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
+    APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel' }, pid: process.pid },
+  agentsReg,
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
@@ -653,6 +677,117 @@ async function bewijs(o) {
     toets('9 auditlog: beurt/knop/goedkeur-regels zonder berichtinhoud', /"reden":"beurt hoofd [a-f0-9]{16}"/.test(auditAlles) && /"reden":"knop ja/.test(auditAlles) && /goedgekeurd [A-F0-9]{6}/.test(auditAlles) && auditAlles.indexOf('morgen') < 0 && auditAlles.indexOf('accountant') < 0);
     toets('9 geen onverwachte fouten in logError', logs.filter((l) => !/app-telegram|app-register: Expected property|app: Unexpected token .x., "xx"|^app-log:/.test(l)).length === 0, logs.join(' | '));
     for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('opgeruimd');
+
+    // ── 9b. Broedstoof (wv92, bouwplan § 4.13) ──
+    {
+      const sB = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      sB.tot = Date.now() + 10 * 60000;
+      r = await vraag('GET', '/app/broedstoof', undefined, { pot: pot() });
+      toets('9b broedstoof zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      // verwachte percentages, onafhankelijk uit de bus gelezen (kolom %)
+      const busTekst = fs.readFileSync(BUS, 'utf8').split('\n');
+      const kopI = busTekst.findIndex((l) => /^\| # \| Idee \| Genre \| % \| Kort \| Stand \|/.test(l));
+      const verwacht = {};
+      for (let k = kopI + 2; k < busTekst.length && busTekst[k].startsWith('|'); k++) { const m = /^\| (\d+) \| .*? \| .*? \| (\d+) \| /.exec(busTekst[k]); if (m) verwacht[m[1]] = Number(m[2]); }
+      toets('9b toets-vooraf: bus heeft kolom % met 10 ideeën', kopI > 0 && Object.keys(verwacht).length === 10, JSON.stringify(verwacht));
+      Object.assign(agentsReg, {
+        aaaaaaaaaaaaaaa1: { job_id: 'aaaaaaaaaaaaaaa1', label: 'machinekamer:wv92 app layout + broedstoof-tab', status: 'running', started: Date.now() - 60000 },
+        aaaaaaaaaaaaaaa2: { job_id: 'aaaaaaaaaaaaaaa2', label: 'machinekamer: idee 7 schaduwmeting', status: 'running', started: Date.now() - 1000 },
+        aaaaaaaaaaaaaaa3: { job_id: 'aaaaaaaaaaaaaaa3', label: 'machinekamer:wv13 genoom', status: 'done', started: Date.now() - 999999 },
+        aaaaaaaaaaaaaaa4: { job_id: 'aaaaaaaaaaaaaaa4', label: 'socev: idee 70 iets', status: 'running', started: Date.now() } });
+      sbStaat.items = [
+        { id: 92, idee: 9, label: 'machinekamer:app layout + broedstoof-tab', status: 'gestart', job_id: 'aaaaaaaaaaaaaaa1', gestart_op: new Date().toISOString(), wacht_op: [] },
+        { id: 98, idee: 9, label: 'machinekamer:socev-app fase 5a', status: 'open', wacht_op: ['item:92'], wacht_op_item: true, wacht_op_job: [] },
+        { id: 13, idee: 2, label: 'machinekamer:genoom', status: 'gestart', job_id: 'aaaaaaaaaaaaaaa3', wacht_op: [] },
+        { id: 85, idee: 9, label: 'machinekamer:toets', status: 'geblokkeerd', geblokkeerd_door: 'David: app-toets', wacht_op: [] }];
+      const nAuditVoor = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+      const per = {}; (r.j.ideeen || []).forEach((i) => { per[i.nr] = i; });
+      toets('9b broedstoof 200 met alle ideeën van de bus', r.status === 200 && Object.keys(per).length === 10, JSON.stringify(r.j).slice(0, 300));
+      toets('9b percentages gelijk aan kolom % van de bus (alle 10), bron kolom', Object.keys(verwacht).every((n) => per[n] && per[n].pct === verwacht[n] && per[n].pct_bron === 'kolom'), JSON.stringify(Object.values(per).map((i) => [i.nr, i.pct, i.pct_bron])));
+      toets('9b titel en kort plat (geen ** of [[ ]])', per[9] && /Socev-app/.test(per[9].titel) && per[2] && !/\*\*|\[\[/.test(per[2].titel) && per[9].kort && per[9].kort.length <= 240, JSON.stringify(per[2]) + JSON.stringify(per[9]));
+      toets('9b idee 9: agent bezig (werkvoorraadrij + lopende job), 1 in de rij, 1 wacht op David', per[9].bezig.length === 1 && per[9].bezig[0].label === 'app layout + broedstoof-tab' && per[9].bezig[0].wv === 92 && per[9].in_rij === 1 && per[9].startklaar === 0 && per[9].wacht_op_david === 1, JSON.stringify(per[9]));
+      toets('9b idee 7: agent buiten de werkvoorraad via label "idee 7"', per[7].bezig.length === 1 && per[7].bezig[0].wv === null && /schaduwmeting/.test(per[7].bezig[0].label), JSON.stringify(per[7]));
+      toets('9b idee 2: gestarte rij met afgeronde job telt niet als bezig; "idee 70" telt niet voor 7', per[2].bezig.length === 0 && per[7].bezig.length === 1, JSON.stringify(per[2]));
+      toets('9b tikkerstand meegegeven (alleen doorwerk, dagmaximum)', r.j.tikker && r.j.tikker.alleen_doorwerk === true && r.j.tikker.starts_vandaag === 42 && /dagmaximum/.test(r.j.tikker.reden), JSON.stringify(r.j.tikker));
+      // startklaar zoals de claim: item-voorganger klaar = startklaar; job-voorganger nog lopend = niet
+      sbStaat.items.push({ id: 200, idee: 6, label: 'machinekamer:a', status: 'open', wacht_op: ['item:1'], wacht_op_item: false, wacht_op_job: [] },
+        { id: 201, idee: 6, label: 'machinekamer:b', status: 'open', wacht_op: ['aaaaaaaaaaaaaaa1'], wacht_op_item: false, wacht_op_job: ['aaaaaaaaaaaaaaa1'] },
+        { id: 202, idee: 1, label: 'machinekamer:c', status: 'starten', bijgewerkt: new Date(Date.now() - 20 * 60000).toISOString(), wacht_op: [] });
+      const r6 = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+      const i6 = r6.j.ideeen.find((i) => i.nr === 6), i1 = r6.j.ideeen.find((i) => i.nr === 1);
+      toets('9b startklaar: klare item-voorganger telt, lopende job-voorganger niet', i6.in_rij === 2 && i6.startklaar === 1, JSON.stringify(i6));
+      toets('9b "starten" ouder dan 15 min telt niet als bezig', i1.bezig.length === 0, JSON.stringify(i1));
+      sbStaat.items.splice(-3, 3);
+      toets('9b ruimte meegegeven, geen prompts in het antwoord', r.j.ruimte && r.j.ruimte.mag === true && !/"prompt"\s*:/.test(JSON.stringify(r.j)));
+      toets('9b databank met service-sleutel aangeroepen (mk_broedstoof)', sbRpc.some((x) => x.fn === 'mk_broedstoof' && x.sleutel === 'nep-sleutel'));
+      await slaap(30);
+      const nAuditNa = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      toets('9b GET broedstoof (200) schrijft geen auditregel (stil)', nAuditNa === nAuditVoor, nAuditNa - nAuditVoor);
+      // voorrang
+      const tot1 = sB.tot = Date.now() + 60000;
+      const nRpc = sbRpc.length;
+      r = await vraag('POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'eerder' }, { pot: P.jar });
+      const rpcV = sbRpc.slice(nRpc).find((x) => x.fn === 'mk_idee_voorrang');
+      toets('9b voorrang eerder idee 9 -> 200, voorrang 1, gewijzigd', r.status === 200 && r.j.voorrang === 1 && r.j.gewijzigd === true, JSON.stringify(r.j));
+      toets('9b RPC krijgt idee, actie, apparaatnaam en apparaat-id', rpcV && rpcV.b.p_idee === 9 && rpcV.b.p_actie === 'eerder' && rpcV.b.p_door === 'app: Pixel' && /^[a-f0-9]{8,}$/.test(String(rpcV.b.p_apparaat)), JSON.stringify(rpcV));
+      await slaap(30);
+      toets('9b voorrang verlengt de sessie (schrijvend)', sB.tot > tot1, sB.tot - tot1);
+      r = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+      toets('9b daarna toont de broedstoof voorrang 1 bij idee 9', (r.j.ideeen || []).find((i) => i.nr === 9).voorrang === 1);
+      r = await vraag('POST', '/app/broedstoof/voorrang', { idee: 5, actie: 'eerder' }, { pot: P.jar });
+      toets('9b tweede idee eerder -> voorrang 2 (laatst verhoogd bovenaan)', r.status === 200 && r.j.voorrang === 2, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/broedstoof/voorrang', { idee: 5, actie: 'normaal' }, { pot: P.jar });
+      toets('9b normaal -> 0', r.status === 200 && r.j.voorrang === 0, JSON.stringify(r.j));
+      const nRpc2 = sbRpc.length;
+      for (const [body, st, naam] of [[{ idee: 0, actie: 'eerder' }, 400, 'idee 0'], [{ idee: 9, actie: 'omhoog' }, 400, 'onbekende actie'], [{ idee: '9', actie: 'eerder' }, 400, 'idee als tekst'],
+                                      [{ idee: 55, actie: 'eerder' }, 404, 'idee niet op de bus']]) {
+        r = await vraag('POST', '/app/broedstoof/voorrang', body, { pot: P.jar });
+        toets('9b voorrang ' + naam + ' -> ' + st, r.status === st, r.status + ' ' + JSON.stringify(r.j));
+      }
+      toets('9b ongeldige verzoeken raken de databank niet', sbRpc.slice(nRpc2).every((x) => x.fn !== 'mk_idee_voorrang'));
+      r = await vraag('POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'eerder' }, { pot: pot() });
+      toets('9b voorrang zonder sessie -> 401', r.status === 401);
+      rolStub.primair = false;
+      r = await vraag('POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'eerder' }, { pot: P.jar });
+      toets('9b voorrang op de passieve kant -> 409', r.status === 409, r.status);
+      rolStub.primair = true;
+      sbStaat.kapot = true;
+      r = await vraag('POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'normaal' }, { pot: P.jar });
+      toets('9b databank kapot bij voorrang -> 502 met nette tekst', r.status === 502 && /opslaan lukte niet/.test(r.j.fout), JSON.stringify(r.j));
+      r = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+      toets('9b databank kapot bij lezen -> 200 met de bus en een foutregel', r.status === 200 && r.j.ideeen.length === 10 && /niet leesbaar/.test(r.j.fout) && r.j.ideeen.every((i) => i.bezig.length === 0 || i.nr === 7), JSON.stringify(r.j).slice(0, 200));
+      sbStaat.kapot = false;
+      H.appStaat.tellers.voorrang = Array.from({ length: 30 }, () => Date.now());
+      r = await vraag('POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'normaal' }, { pot: P.jar });
+      toets('9b 31e voorrang in een uur -> 429', r.status === 429);
+      H.appStaat.tellers.voorrang = [];
+      // tabelvarianten: '|' in een wikilink-alias, % met sterretjes en ±, geen %-kolom -> standtekst, >100 ongeldig
+      const BUS2 = path.join(W, 'bus2.md');
+      fs.writeFileSync(BUS2, 'tekst\n\n| # | Idee | Genre | % | Kort | Stand |\n|---|---|---|---|---|---|\n' +
+        '| 3 | Titel met [[a/b|alias]] | g | **± 12%** | kort [[x/y|z]] en `a|b` | stand ± 99% |\n' +
+        '| 4 | Vier | g |  | k | eerst ± 44% dan ± 50% |\n| 5 | Vijf | g | 140 | k | geen getal |\n\nna de tabel | 6 | x |\n');
+      ctx.process.env.APP_BUS_PAD = BUS2;
+      r = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+      const p2 = {}; (r.j.ideeen || []).forEach((i) => { p2[i.nr] = i; });
+      toets('9b tabel: | in wikilink en code verschuift niets; ** ± 12% -> 12', p2[3] && p2[3].pct === 12 && p2[3].titel === 'Titel met alias' && p2[3].kort === 'kort z en a|b', JSON.stringify(p2[3]));
+      toets('9b tabel: lege % -> eerste ± NN% uit Stand, gemarkeerd', p2[4] && p2[4].pct === 44 && p2[4].pct_bron === 'standtekst', JSON.stringify(p2[4]));
+      toets('9b tabel: % > 100 en geen standgetal -> geen balk (null), nooit geschat', p2[5] && p2[5].pct === null && p2[5].pct_bron === null && Object.keys(p2).length === 3, JSON.stringify(p2));
+      r = await vraag('POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'eerder' }, { pot: P.jar });
+      toets('9b voorrang op een idee dat niet op (deze) bus staat -> 404', r.status === 404);
+      ctx.process.env.APP_BUS_PAD = path.join(W, 'bestaat-niet.md');
+      r = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+      toets('9b bus onleesbaar -> 503', r.status === 503, r.status);
+      ctx.process.env.APP_BUS_PAD = BUS;
+      const auditB = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+      const nA0 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      H.appStaat.aanvraag = null;
+      r = await vraag('GET', '/app/apparaat/aanvraag', undefined, { pot: P.jar });
+      await slaap(30);
+      toets('9b /apparaat/aanvraag zonder open aanvraag: 200 zonder auditregel (stil)', r.status === 200 && r.j.aanvraag === null && fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nA0);
+      toets('9b auditlog: voorrang-regels met idee, actie en van->naar', /"route":"\/app\/broedstoof\/voorrang".*"reden":"voorrang idee 9 eerder 0->1"/.test(auditB) && /"reden":"voorrang idee 5 normaal 2->0"/.test(auditB), auditB.split('\n').filter((l) => /broedstoof/.test(l)).slice(-3).join(' '));
+      logs.splice(0, logs.length, ...logs.filter((l) => !/^app-broedstoof|^app-voorrang/.test(l)));
+    }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
     {
