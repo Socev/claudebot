@@ -17,7 +17,9 @@ let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (extra && !ok ? '  [' + String(extra).slice(0, 300) + ']' : '')); }
 for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_CODE_INTERVAL_MS = 1000;'],
                       ['const APP_VERS_MS = 2 * 60 * 1000;', 'const APP_VERS_MS = 4000;'],
-                      ['const APP_UPLOAD_TOTAAL_MAX = 300 * 1024 * 1024;', 'const APP_UPLOAD_TOTAAL_MAX = 45 * 1024 * 1024;']]) {
+                      ['const APP_UPLOAD_TOTAAL_MAX = 300 * 1024 * 1024;', 'const APP_UPLOAD_TOTAAL_MAX = 45 * 1024 * 1024;'],
+                      ['const APP_PUSH_WACHT_MS = 20 * 1000;', 'const APP_PUSH_WACHT_MS = 300;'],
+                      ['if (!(uur >= 7 && uur < 22)) return;', 'if (!(TOETSUUR(uur) >= 7 && TOETSUUR(uur) < 22)) return;']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'apptoets-'));
@@ -37,6 +39,17 @@ const sbRpc = [];
 const sbStaat = { voorrang: {}, items: [], kapot: false };
 const agentsReg = {};
 const BEWAAR = path.join(W, 'app-bestanden');   // fase 5a (wv98)
+// fase 5c (wv100): n8n-API, externe wachter, pushdiensten en de kluis nagebootst
+const N8N = 'https://n8n.toets';
+const VAPID = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+const VAPID_W = VAPID.privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64url');
+const VJ = VAPID.publicKey.export({ format: 'jwk' });
+const VAPID_PUB = Buffer.concat([Buffer.from([4]), Buffer.from(VJ.x, 'base64url'), Buffer.from(VJ.y, 'base64url')]).toString('base64url');
+const n8nStaat = { buffer: [], stilte: [], executies: {}, kapot: false, aanroepen: [] };
+const wachterStaat = { j: null, kapot: false };
+const pushes = [];
+const pushStaat = { status: 201 };
+let toetsUur = 12;
 
 // nep-Access: eigen RSA-sleutel met kid 'proef'
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -59,6 +72,24 @@ async function nepFetch(url, opt) {
     return antw(200, { keys: [jwk] }, { date: new Date(Date.now() - klokScheef).toUTCString() });
   }
   if (url.startsWith('https://api.telegram.org/')) { telegram.push(JSON.parse(opt.body).text); return antw(200, { ok: true }); }
+  if (url.startsWith(N8N + '/api/v1/')) {
+    n8nStaat.aanroepen.push({ url, key: opt && opt.headers && opt.headers['X-N8N-API-KEY'] });
+    if (n8nStaat.kapot) return antw(500, {});
+    const u = new URL(url);
+    if (u.pathname === '/api/v1/data-tables/LIclFLTGAaaJOx1w/rows') {
+      const f = JSON.parse(u.searchParams.get('filter') || 'null');
+      const bronnen = f ? f.filters.map((x) => x.value) : null;
+      return antw(200, { data: n8nStaat.buffer.filter((x) => !bronnen || bronnen.includes(x.bron)).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)), nextCursor: null });
+    }
+    if (u.pathname === '/api/v1/data-tables/MF6DKIGzWVT8FAdy/rows') return antw(200, { data: n8nStaat.stilte, nextCursor: null });
+    if (u.pathname === '/api/v1/executions') { const e = n8nStaat.executies[u.searchParams.get('workflowId')]; return antw(200, { data: e ? [e] : [], nextCursor: null }); }
+    return antw(404, {});
+  }
+  if (url === 'https://wachter.toets/stand') return wachterStaat.kapot ? antw(503, {}) : antw(200, wachterStaat.j);
+  if (/^https:\/\/(fcm\.googleapis\.com|[a-z0-9-]+\.notify\.windows\.com)\//.test(url)) {
+    pushes.push({ url, m: opt.method, body: opt.body, h: opt.headers, redirect: opt.redirect });
+    return antw(pushStaat.status, {});
+  }
   if (url.startsWith(SB + '/rest/v1/rpc/')) {
     const fn = url.slice((SB + '/rest/v1/rpc/').length), b = JSON.parse(opt.body || '{}');
     sbRpc.push({ fn, b, sleutel: opt.headers && opt.headers.apikey });
@@ -66,6 +97,7 @@ async function nepFetch(url, opt) {
     if (fn === 'mk_broedstoof') return antw(200, { voorrang: Object.keys(sbStaat.voorrang).filter((k) => sbStaat.voorrang[k] > 0).map((k) => ({ idee: Number(k), voorrang: sbStaat.voorrang[k], bijgewerkt: new Date().toISOString(), door: 'x' })),
       items: sbStaat.items, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' },
       tikker: { aan: true, reden: 'wacht op ruimte: dagmaximum (42 starts)', laatste_tik: new Date().toISOString(), starts_vandaag: 42, max_dag: 24, alleen_doorwerk: true } });
+    if (fn === 'sb_app_vapid_lezen') return sbStaat.geenVapid ? antw(200, null) : antw(200, VAPID_W);
     if (fn === 'mk_werkvoorraad_stand') return antw(200, { items: sbStaat.wvItems || [], stand: { aan: true }, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' } });
     if (fn === 'mk_idee_voorrang') {
       const van = sbStaat.voorrang[b.p_idee] || 0, max = Math.max(0, ...Object.values(sbStaat.voorrang));
@@ -87,15 +119,17 @@ function processJob(jobId, prompt, sess, files, chatId, ws, keuze) {
   return new Promise((r) => { afmaken[jobId] = (uit, ok) => { j.status = 'done'; j.done_at = Date.now(); j.result = { ok: ok !== false, output: ok === false ? '' : uit, error: ok === false ? uit : undefined, files: [] }; r(); }; });
 }
 const rolStub = { eerste: 1, primair: true };
-const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
+const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
-    APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io') }, pid: process.pid },
+    APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
+    N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand' }, pid: process.pid },
+  TOETSUUR: () => toetsUur,
   agentsReg,
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appInfo2: appInfo };', ctx, { filename: 'server.js#app' });
 const H = ctx.__h;
 const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
 
@@ -1101,6 +1135,207 @@ async function bewijs(o) {
       toets('11 processAgent: rapport alleen bij route machinekamer of david', /rapport: \(route === 'machinekamer' \|\| route === 'david'\) \? appRapport : null/.test(volSrc));
       toets('11 appRoute: zonder prefix = socev', H.appRoute('vakantie') === 'socev' && H.appRoute(' Machinekamer: x') === 'machinekamer' && H.appRoute('david:x') === 'david');
       for (const k of Object.keys(agentsReg)) delete agentsReg[k];
+    }
+
+    // ── 12. fase 5c: Meldingen en seintjes (wv100) ──
+    {
+      const sM = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      sM.tot = Date.now() + 10 * 60000;
+      for (const [m, route] of [['GET', '/app/meldingen'], ['POST', '/app/meldingen/gezien'], ['GET', '/app/push'], ['POST', '/app/push/abonneer'],
+        ['POST', '/app/push/opzeggen'], ['POST', '/app/push/soorten'], ['POST', '/app/push/proef']]) {
+        r = await vraag(m, route, m === 'POST' ? {} : undefined, { pot: pot() });
+        toets('12 ' + m + ' ' + route + ' zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      }
+      // eenheden: Foutmelder-tekst, uitleg, Stiltewachter-tekst, pushdiensten
+      const fm = H.appFoutmelderLees('Workflow mislukt\n\nAI - WhatsApp Chat Reader (webhook) - knoop: (onbekende knoop)\nOngeldige secret [line 2]\n2026-10-06 09:10:25 - executie 52881\nhttps://5877e26c.primumnonnocere.olares.com/workflow/GIuod668nbn9YPXI/executions/52881');
+      toets('12 Foutmelder-tekst gelezen (naam, knoop, fout, executie, workflow-id)', fm.workflow === 'AI - WhatsApp Chat Reader (webhook)' && fm.knoop === '(onbekende knoop)' && fm.fout === 'Ongeldige secret [line 2]' && fm.executie === '52881' && fm.workflow_id === 'GIuod668nbn9YPXI', JSON.stringify(fm));
+      const fm2 = H.appFoutmelderLees('Workflow mislukt\n\nX - knoop: Y\n2026-10-06 09:10:25 - executie 7');
+      toets('12 Foutmelder zonder foutregel en zonder link: fout leeg, executie uit de tijdregel', fm2.fout === '' && fm2.executie === '7' && fm2.workflow_id === null, JSON.stringify(fm2));
+      const uitl = { 'Ongeldige secret [line 2]': 'sleutel', 'Service unavailable - try again later': 'pod', 'The connection was aborted, perhaps the server is offline': 'verbinding',
+        'Expected multipart/form-data': 'formulier', 'invalid syntax': 'code', 'The service was not able to process your request': 'dienst', 'iets nieuws': 'anders', 'Request failed with status code 429': 'grens' };
+      toets('12 uitleg in gewone taal per soort fout', Object.keys(uitl).every((f) => H.appFoutUitleg(f).soort === uitl[f]), JSON.stringify(Object.keys(uitl).map((f) => H.appFoutUitleg(f).soort)));
+      const sl = H.appStilLees('Aanvoer stil\n\nAI - Second Brain - Mail Processor is stil sinds 2026-10-05 13:00 - 14.8 effectieve uren, drempel 9.\nAI - Signal meelezen is stil sinds 2026-10-05 14:30 - 13.3 effectieve uren, drempel 2.');
+      toets('12 Stiltewachter-tekst: twee stromen, tijd als 5-10 13:00', sl.length === 2 && sl[0].naam === 'AI - Second Brain - Mail Processor' && sl[0].sinds === '5-10 13:00' && sl[0].uren === '14,8' && sl[1].drempel === '2', JSON.stringify(sl));
+      const eps = { 'https://fcm.googleapis.com/fcm/send/abc:def': true, 'https://wns2-par02p.notify.windows.com/w/?token=x': true, 'https://updates.push.services.mozilla.com/wpush/v2/x': true,
+        'https://web.push.apple.com/QK': true, 'http://fcm.googleapis.com/fcm/send/x': false, 'https://fcm.googleapis.com:8443/x': false, 'https://user:pw@fcm.googleapis.com/x': false,
+        'https://fcm.googleapis.com.evil.dev/x': false, 'https://evil.dev/fcm.googleapis.com': false, 'https://169.254.169.254/latest': false, 'https://localhost/x': false,
+        'https://a.b.notify.windows.com/x': false, 'https://fcm.googleapis.com/x\ny': false, ['https://fcm.googleapis.com/' + 'x'.repeat(1100)]: false };
+      toets('12 pushdienst: alleen https op de vaste lijst, geen poort/gebruiker/andere host', Object.keys(eps).every((e) => H.appPushEndpointOk(e) === eps[e]),
+        Object.keys(eps).filter((e) => H.appPushEndpointOk(e) !== eps[e]).join(' | ').slice(0, 200));
+
+      // meldingen: echte vormen uit de ochtendbuffer (gemeten 8-10), nagebootste n8n
+      const uur = (h) => new Date(Date.now() - h * 3600000).toISOString();
+      const fmt = (naam, knoop, fout, ex, wf) => 'Workflow mislukt\n\n' + naam + ' - knoop: ' + knoop + '\n' + fout + '\n2026-10-06 09:11:41 - executie ' + ex + '\nhttps://5877e26c.primumnonnocere.olares.com/workflow/' + wf + '/executions/' + ex;
+      n8nStaat.buffer = [
+        { id: 103, bron: 'foutmelder', tekst: fmt('AI - Voorlezen (Gemini-stem)', 'Secret correct?', 'invalid syntax', 52917, 'Bl2ZEi8H36CbSu48'), createdAt: uur(2) },
+        { id: 102, bron: 'foutmelder', tekst: fmt('AI - WhatsApp Chat Reader (webhook)', '(onbekende knoop)', 'Ongeldige secret [line 2]', 52881, 'GIuod668nbn9YPXI'), createdAt: uur(5) },
+        { id: 95, bron: 'foutmelder', tekst: fmt('Claude Debug via Telegram', 'Start job', 'Service unavailable - try again later', 50721, 'nDj2qyAC5hJL5eUU'), createdAt: uur(30) },
+        { id: 90, bron: 'foutmelder', tekst: fmt('Claude Debug via Telegram', 'Start job', 'Service unavailable - try again later', 48764, 'nDj2qyAC5hJL5eUU'), createdAt: uur(80) },
+        { id: 99, bron: 'stiltewachter', tekst: 'Aanvoer stil\n\nAI - Second Brain - Mail Processor is stil sinds 2026-10-05 13:00 - 14.8 effectieve uren, drempel 9.', createdAt: uur(20) },
+        { id: 50, bron: 'foutmelder', tekst: fmt('AI - Oud', 'X', 'Service unavailable', 1, 'OudOudOud1'), createdAt: uur(24 * 20) },
+        { id: 104, bron: 'parro', tekst: 'Parro 6c: GEHEIM-PRIVE', createdAt: uur(1) },
+      ];
+      n8nStaat.stilte = [
+        { naam: 'AI - Second Brain - Mail Processor', status: 'gezond', bewaken: 'ja', laatste_executie: uur(1), drempel_uren: 9 },
+        { naam: 'AI - Teams meelezen', status: 'stil', bewaken: 'ja', laatste_executie: uur(40), drempel_uren: 24, gemeld_op: uur(3), updatedAt: uur(0.1) },
+        { naam: 'AI - SMS Gateway', status: 'stil', bewaken: 'nee', laatste_executie: uur(50), drempel_uren: 16 },
+      ];
+      n8nStaat.executies = {
+        nDj2qyAC5hJL5eUU: { id: '60000', status: 'success', startedAt: uur(1) },
+        GIuod668nbn9YPXI: { id: '52881', status: 'error', startedAt: uur(5) },
+        Bl2ZEi8H36CbSu48: { id: '53000', status: 'error', startedAt: uur(1) },
+      };
+      wachterStaat.j = { status: 'ok', checks: [{ naam: 'desktop', ok: true }, { naam: 'n8n', ok: true }], laatste_ronde: uur(0.05), wachter_stil: false };
+      const nAuditM = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      const its = r.j.items || [];
+      const per = (t) => its.find((x) => x.titel === t);
+      toets('12 meldingen 200: 3 storingskaarten + 2 stilte-kaarten, nieuwste eerst, niets ouder dan 14 dagen, geen parro', r.status === 200 && its.length === 5 &&
+        its.filter((x) => x.soort === 'storing').length === 3 && its.filter((x) => x.soort === 'stil').length === 2 && !its.some((x) => /Oud|GEHEIM/.test(JSON.stringify(x))) &&
+        its.every((x, i) => i === 0 || Date.parse(its[i - 1].wanneer) >= Date.parse(x.wanneer)), JSON.stringify(its.map((x) => x.titel)));
+      const dbg = per('Claude Debug via Telegram liep vast');
+      toets('12 twee keer dezelfde storing = één kaart, 2×, weer goed (latere geslaagde run)', dbg && dbg.aantal === 2 && dbg.herstel.stand === 'weer-goed' && /weer goed gelopen/.test(dbg.herstel.tekst) && /pod/.test(dbg.uitleg), JSON.stringify(dbg));
+      const wa = per('WhatsApp Chat Reader liep vast');
+      toets('12 "(webhook)" en "AI - " weg uit de naam; sleuteluitleg; geen latere run = "niet meer gedraaid"', wa && /juiste sleutel/.test(wa.uitleg) && wa.herstel.stand === 'onbekend' && /niet meer gedraaid/.test(wa.herstel.tekst), JSON.stringify(wa));
+      const vl = per('Voorlezen (Gemini-stem) liep vast');
+      toets('12 latere run liep ook mis = nog-fout; techniek klein met stap en executie', vl && vl.herstel.stand === 'nog-fout' && /stap: Secret correct\? · fout: invalid syntax · executie 52917/.test(vl.techniek), JSON.stringify(vl));
+      const ml = per('Second Brain - Mail Processor leverde niets meer aan');
+      toets('12 stilgevallen aanvoer in gewone taal, en "loopt weer" uit de stand van nu', ml && /Sinds 5-10 13:00 kwam er niets binnen \(14,8 uur; normaal hooguit 9\)/.test(ml.uitleg) && ml.herstel.stand === 'weer-goed', JSON.stringify(ml));
+      const tm = per('Teams meelezen leverde niets meer aan');
+      toets('12 nu stil zonder melding in de buffer: toch een kaart (nog-fout); niet-bewaakt (SMS) niet', tm && tm.herstel.stand === 'nog-fout' && !its.some((x) => /SMS/.test(x.titel)), JSON.stringify(tm));
+      toets('12 stand: 2 bewaakte stromen, Teams stil; extern bereikbaar', r.j.stand && r.j.stand.aanvoer.bewaakt === 2 && r.j.stand.aanvoer.stil.join() === 'Teams meelezen' && r.j.stand.extern.ok === true && /van buitenaf bereikbaar/.test(r.j.stand.extern.tekst), JSON.stringify(r.j.stand));
+      toets('12 geen links of hostnamen en geen intern rijnummer in het antwoord', !/5877e26c|olares\.com|https?:/.test(JSON.stringify(its)) && its.every((x) => !('rij' in x)), JSON.stringify(its).slice(0, 200));
+      toets('12 nog niets gezien: alle 5 nieuw; n8n met de API-sleutel gelezen', r.j.nieuw === 5 && r.j.gezien === null && n8nStaat.aanroepen.every((x) => x.key === 'nep-n8n'), r.j.nieuw);
+      toets('12 GET meldingen (200) schrijft geen auditregel', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAuditM);
+      const nAanroep = n8nStaat.aanroepen.length;
+      await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      toets('12 binnen een minuut: uit het geheugen, n8n niet opnieuw gevraagd', n8nStaat.aanroepen.length === nAanroep, n8nStaat.aanroepen.length - nAanroep);
+      r = await vraag('POST', '/app/meldingen/gezien', { tot: new Date(Date.now() + 3600000).toISOString() }, { pot: P.jar });
+      toets('12 gezien in de toekomst -> 400', r.status === 400);
+      r = await vraag('POST', '/app/meldingen/gezien', { tot: 'gisteren' }, { pot: P.jar });
+      toets('12 gezien zonder geldig tijdstip -> 400', r.status === 400);
+      r = await vraag('POST', '/app/meldingen/gezien', { tot: uur(4) }, { pot: P.jar });
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      toets('12 gezien tot 4 uur geleden: 2 nieuw (storing 2 u, Teams stil gemeld 3 u)', r.j.nieuw === 2, r.j.nieuw);
+      await vraag('POST', '/app/meldingen/gezien', { tot: uur(10) }, { pot: P.jar });
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      toets('12 gezien schuift nooit terug', r.j.nieuw === 2, r.j.nieuw);
+      // bronnen weg: toch 200, met de reden in gewone taal
+      H.appStaat.meld = null; n8nStaat.kapot = true; wachterStaat.kapot = true;
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      toets('12 n8n en wachter onbereikbaar: 200, geen kaarten, drie redenen', r.status === 200 && r.j.items.length === 0 && r.j.fouten.length === 3 && r.j.stand.aanvoer === null && r.j.stand.extern === null, JSON.stringify(r.j));
+      n8nStaat.kapot = false; wachterStaat.kapot = false; H.appStaat.meld = null;
+      wachterStaat.j = { status: 'storing', sinds: uur(0.3), checks: [{ naam: 'desktop', ok: false }, { naam: 'n8n', ok: true }], laatste_ronde: uur(0.05), wachter_stil: false };
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      toets('12 externe wachter meldt storing: "niet bereikbaar: desktop (sinds …)"', r.j.stand.extern.ok === false && /niet bereikbaar: desktop \(sinds/.test(r.j.stand.extern.tekst), JSON.stringify(r.j.stand.extern));
+      wachterStaat.j.status = 'ok'; wachterStaat.j.checks[0].ok = true; H.appStaat.meld = null;
+
+      // seintjes
+      const st = await vraag('GET', '/app/status', undefined, { pot: P.jar });
+      const pid = st.j.apparaat.id;
+      r = await vraag('GET', '/app/push', undefined, { pot: P.jar });
+      toets('12 GET push: publieke sleutel uit de kluis, nog niet aan', r.status === 200 && r.j.sleutel === VAPID_PUB && r.j.aan === false, JSON.stringify(r.j));
+      toets('12 kluis gelezen met de service-sleutel (sb_app_vapid_lezen)', sbRpc.some((x) => x.fn === 'sb_app_vapid_lezen' && x.sleutel === 'nep-sleutel'));
+      const EP = 'https://fcm.googleapis.com/fcm/send/proef:abc';
+      r = await vraag('POST', '/app/push/abonneer', { endpoint: 'https://evil.dev/x', sleutel: VAPID_PUB }, { pot: P.jar });
+      toets('12 abonneren op een onbekende pushdienst -> 400', r.status === 400, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/push/abonneer', { endpoint: EP, sleutel: 'oud' }, { pot: P.jar });
+      toets('12 abonneren met een andere sleutel -> 409 (verouderd)', r.status === 409, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/push/proef', {}, { pot: P.jar });
+      toets('12 proef zonder abonnement -> 409', r.status === 409, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/push/abonneer', { endpoint: EP, sleutel: VAPID_PUB, keys: { p256dh: 'GEHEIM-P256', auth: 'GEHEIM-AUTH' } }, { pot: P.jar });
+      const pj = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8'));
+      toets('12 abonneren: 200, alleen endpoint + soort antwoord, geen abonnementssleutels op de pod', r.status === 200 && pj.apparaten[pid].endpoint === EP && pj.apparaten[pid].soorten.join() === 'antwoord' && !/GEHEIM/.test(JSON.stringify(pj)), JSON.stringify(pj));
+      toets('12 push.json alleen voor de eigenaar (0600)', (fs.statSync(path.join(DATA, 'push.json')).mode & 0o777) === 0o600);
+      pushes.length = 0;
+      r = await vraag('POST', '/app/push/proef', {}, { pot: P.jar });
+      const p0 = pushes[0];
+      let jwtOk = false, claims = {};
+      if (p0) {
+        const m = /^vapid t=([^,]+), k=(.+)$/.exec(p0.h.Authorization || '');
+        if (m && m[2] === VAPID_PUB) {
+          const [k, i, sg] = m[1].split('.');
+          claims = JSON.parse(Buffer.from(i, 'base64url').toString());
+          jwtOk = crypto.verify('sha256', Buffer.from(k + '.' + i), { key: VAPID.publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(sg, 'base64url')) &&
+            JSON.parse(Buffer.from(k, 'base64url').toString()).alg === 'ES256';
+        }
+      }
+      toets('12 proef: één POST naar het endpoint, ZONDER inhoud, TTL, Topic', r.status === 200 && r.j.verstuurd === true && pushes.length === 1 && p0.url === EP && p0.m === 'POST' && p0.body === '' && p0.h.TTL === '21600' && p0.h.Topic === 'socev' && p0.redirect === 'manual', JSON.stringify(pushes).slice(0, 300));
+      toets('12 VAPID-JWT: ES256 met de kluissleutel, aud = herkomst van de pushdienst, sub https, exp ≤ 24 u', jwtOk && claims.aud === 'https://fcm.googleapis.com' && /^https:\/\//.test(claims.sub) && claims.exp > Date.now() / 1000 && claims.exp < Date.now() / 1000 + 86400, JSON.stringify(claims));
+      const auditP = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+      toets('12 auditregel "push" met apparaat en reden, geen endpoint', /"route":"push".*"reden":"proef"/.test(auditP) && !/fcm\/send\/proef/.test(auditP));
+      // antwoord klaar, app haalt het niet op -> seintje; wel opgehaald -> geen
+      pushes.length = 0;
+      let rb = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'seintje-proef' }, { pot: P.jar });
+      await slaap(30);
+      afmaken[rb.j.job_id]('Klaar.');
+      await slaap(900);
+      toets('12 antwoord klaar, app dicht (geen uitslag): na de wachttijd één seintje', pushes.length === 1 && pushes[0].url === EP && pushes[0].body === '', pushes.length);
+      pushes.length = 0;
+      rb = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'seintje-proef 2' }, { pot: P.jar });
+      await slaap(30);
+      afmaken[rb.j.job_id]('Klaar 2.');
+      await slaap(50);
+      await vraag('POST', '/app/uitslag', { job_id: rb.j.job_id }, { pot: P.jar });
+      await slaap(900);
+      toets('12 antwoord klaar en door de app opgehaald: geen seintje', pushes.length === 0, pushes.length);
+      // noodstop-bestand: niets
+      fs.writeFileSync(UIT, '');
+      let rs = await H.appPushStuur(pid, 'proef');
+      toets('12 app-uit: geen seintje', rs.ok === false && pushes.length === 0, JSON.stringify(rs));
+      fs.unlinkSync(UIT);
+      // abonnement van een apparaat dat niet (meer) actief is: niets versturen, weghalen
+      const pj2 = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8'));
+      pj2.apparaten.ffffffffffffffff = { endpoint: 'https://fcm.googleapis.com/fcm/send/weg', soorten: ['antwoord'] };
+      fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pj2));
+      rs = await H.appPushStuur('ffffffffffffffff', 'antwoord');
+      toets('12 onbekend/ingetrokken apparaat: geen seintje, abonnement weg', rs.ok === false && pushes.length === 0 && !JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten.ffffffffffffffff, JSON.stringify(rs));
+      // meldingen: aanzetten = vanaf nu; nachts niets; overdag één per uur
+      r = await vraag('POST', '/app/push/soorten', { meldingen: 'ja' }, { pot: P.jar });
+      toets('12 soorten met een niet-boolean -> 400', r.status === 400);
+      await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      r = await vraag('POST', '/app/push/soorten', { meldingen: true }, { pot: P.jar });
+      const pj3 = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid];
+      toets('12 meldingen aan: nulpunt = hoogste rij van nu (103)', r.status === 200 && pj3.soorten.join() === 'antwoord,meldingen' && pj3.meld_rij === 103, JSON.stringify(pj3));
+      pushes.length = 0;
+      await H.appPushMeldTik();
+      toets('12 tik zonder nieuwe melding: geen seintje', pushes.length === 0, pushes.length);
+      n8nStaat.buffer.push({ id: 105, bron: 'foutmelder', tekst: fmt('AI - Nieuw', 'Stap', 'Service unavailable', 54000, 'NieuwNieuw01'), createdAt: uur(0.01) });
+      H.appStaat.meld = null; toetsUur = 3;
+      await H.appPushMeldTik();
+      toets('12 nieuwe storing om 03:00: geen seintje (07-22 u)', pushes.length === 0, pushes.length);
+      toetsUur = 12; H.appStaat.meld = null;
+      await H.appPushMeldTik();
+      toets('12 nieuwe storing overdag: één seintje', pushes.length === 1, pushes.length);
+      n8nStaat.buffer.push({ id: 106, bron: 'stiltewachter', tekst: 'Aanvoer stil\n\nAI - Parro meelezen is stil sinds 2026-10-08 10:00 - 30 effectieve uren, drempel 30.', createdAt: uur(0.005) });
+      H.appStaat.meld = null;
+      await H.appPushMeldTik();
+      toets('12 nog een melding binnen het uur: geen tweede seintje', pushes.length === 1, pushes.length);
+      const pj4 = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid];
+      toets('12 nulpunt schoof mee naar 105 (106 wacht op het volgende uur)', pj4.meld_rij === 105, pj4.meld_rij);
+      r = await vraag('POST', '/app/push/soorten', { meldingen: false }, { pot: P.jar });
+      toets('12 meldingen uit: alleen antwoord', r.status === 200 && r.j.soorten.join() === 'antwoord');
+      // pushdienst zegt: abonnement bestaat niet meer
+      pushStaat.status = 410;
+      rs = await H.appPushStuur(pid, 'proef');
+      toets('12 pushdienst 410: abonnement verwijderd', rs.ok === false && /verlopen/.test(rs.reden) && !JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid], JSON.stringify(rs));
+      pushStaat.status = 201;
+      r = await vraag('GET', '/app/push', undefined, { pot: P.jar });
+      toets('12 daarna: GET push zegt "niet aan"', r.j.aan === false);
+      await vraag('POST', '/app/push/abonneer', { endpoint: EP, sleutel: VAPID_PUB }, { pot: P.jar });
+      r = await vraag('POST', '/app/push/opzeggen', {}, { pot: P.jar });
+      toets('12 opzeggen: weg uit push.json', r.status === 200 && !JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid]);
+      // geen sleutel in de kluis: nette weigering, geen crash
+      H.appStaat.vapid = null; sbStaat.geenVapid = true;
+      r = await vraag('GET', '/app/push', undefined, { pot: P.jar });
+      toets('12 kluis zonder sleutel: sleutel null + reden', r.status === 200 && r.j.sleutel === null && /nog niet ingericht/.test(r.j.uit_reden), JSON.stringify(r.j));
+      r = await vraag('POST', '/app/push/abonneer', { endpoint: EP, sleutel: VAPID_PUB }, { pot: P.jar });
+      toets('12 kluis zonder sleutel: abonneren -> 503', r.status === 503);
+      sbStaat.geenVapid = false; H.appStaat.vapid = null;
+      const info = H.appInfo2();
+      toets('12 /health.app.seintjes: aantallen en sleutelstand, geen endpoint', info.seintjes && info.seintjes.abonnementen === 0 && !/fcm/.test(JSON.stringify(info)), JSON.stringify(info.seintjes));
+      toets('12 geen VAPID-waarde in logs, audit of push.json', !logs.concat([fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8'), fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')]).join('\n').includes(VAPID_W.slice(20, 60)));
+      H.appStaat.tellers.push = []; H.appStaat.tellers.pushproef = [];
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
