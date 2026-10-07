@@ -68,7 +68,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, setIn
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt };', ctx, { filename: 'server.js#app' });
 const H = ctx.__h;
 const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
 
@@ -76,7 +76,7 @@ const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(
 function pot() { return { koppel: '', apparaat: '', sessie: '' }; }
 function vraag(m, pad, body, o) {
   o = o || {};
-  const koppen = { 'content-type': 'application/json', 'x-app-ua': o.ua || 'Mozilla/5.0 (Linux; Android 16; Pixel 9) Chrome/141.0' };
+  const koppen = { 'content-type': 'application/json', 'x-app-ua': o.ua || (o.pot && o.pot.ua) || 'Mozilla/5.0 (Linux; Android 16; Pixel 9) Chrome/141.0' };
   if (o.poort !== false) koppen['x-app-poort'] = o.poort || POORT;
   if (o.jwt !== false) koppen['cf-access-jwt-assertion'] = o.jwt || jwt();
   const p = o.pot;
@@ -125,10 +125,11 @@ async function bewijs(o) {
   const pw = require('/usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright-core');
   const exe = fs.readdirSync('/opt/pw-browsers').filter((d) => /^chromium-\d+$/.test(d)).map((d) => '/opt/pw-browsers/' + d + '/chrome-linux64/chrome').find((f) => fs.existsSync(f));
   const browser = await pw.chromium.launch({ executablePath: exe, headless: true });
-  async function nieuweBrowser(transport) {
+  async function nieuweBrowser(transport, ua) {
     const c = await browser.newContext();
     const p = await c.newPage();
     const jar = pot();
+    if (ua) jar.ua = ua;
     await p.route('https://app.socev.dev/**', async (route) => {
       const u = new URL(route.request().url());
       if (!u.pathname.startsWith('/api/')) return route.fulfill({ status: 200, contentType: 'text/html', body: PAGINA });
@@ -236,6 +237,7 @@ async function bewijs(o) {
     const reg = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
     const regTekst = JSON.stringify(reg);
     toets('3 user-handle per apparaat willekeurig (niet de vaste naam)', opt.j.opties.user.id !== Buffer.from('socev-app-david').toString('base64url') && !(opt.j.opties.excludeCredentials || []).length);
+    toets('3 eerste apparaat (coderoute) is de goedkeurder', reg.apparaten[0].goedkeurder === true && r.j.apparaat.goedkeurder === true, JSON.stringify(reg.apparaten[0]).slice(0, 200));
     toets('3 transports gefilterd op bekende waarden (Fable #9)', JSON.stringify(reg.apparaten[0].credential.transports) === '["hybrid","internal"]', JSON.stringify(reg.apparaten[0].credential.transports));
     toets('3 register: één apparaat, alleen een hash van het cookiegeheim, 0600', reg.apparaten.length === 1 && reg.ooit_gekoppeld === true && regTekst.indexOf(X.jar.apparaat.split('.')[1]) < 0 && (fs.statSync(path.join(DATA, 'apparaten.json')).mode & 0o077) === 0, regTekst.slice(0, 200));
     r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
@@ -407,14 +409,25 @@ async function bewijs(o) {
     r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: 'f'.repeat(16) }, { pot: P.jar });
     toets('8 goedkeuren met een ander aanvraag-id -> 409', r.status === 409, JSON.stringify(r.j));
     {
-      // soort komt uit het register: een 'vast'-apparaat mag niet goedkeuren, ook met verse vingerafdruk
+      // goedkeurrecht komt uit het register (goedkeurder:true), niet uit 'reist'
       const regT = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
-      regT.apparaten.find((x) => x.id === pixelId).soort = 'vast';
+      toets('8 telefoon (coderoute) is goedkeurder; het vorige (ingetrokken) apparaat niet meer', regT.apparaten.find((x) => x.id === pixelId).goedkeurder === true && regT.apparaten.filter((x) => x.goedkeurder).length === 1, JSON.stringify(regT.apparaten.map((x) => [x.id, x.goedkeurder])));
+      regT.apparaten.find((x) => x.id === pixelId).goedkeurder = false;
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regT));
       r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aanvL.id }, { pot: P.jar });
-      toets('8 goedkeuren vanaf een vaste-plek-apparaat (register) -> 403', r.status === 403 && /meereizend/.test(r.j.fout), JSON.stringify(r.j));
-      regT.apparaten.find((x) => x.id === pixelId).soort = 'reist';
+      toets('8 goedkeuren zonder goedkeurder:true (ook reist + vers) -> 403', r.status === 403 && /Telegram-code/.test(r.j.fout), JSON.stringify(r.j));
+      regT.apparaten.find((x) => x.id === pixelId).goedkeurder = true;
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regT));
+    }
+    r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aanvL.id }, { pot: P.jar, ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0' });
+    toets('8 rem: Pixel-cookie + verse sessie maar user-agent Windows -> 403', r.status === 403 && /Pixel/.test(r.j.fout), JSON.stringify(r.j));
+    {
+      const sP = Object.values(H.appStaat.sessies).find((x) => x.apparaat === pixelId);
+      const echt = sP.credential; sP.credential = 'ander-credential';
+      r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aanvL.id }, { pot: P.jar });
+      toets('8 sessie niet geopend met de passkey van dit apparaat -> 403', r.status === 403 && sP.credential === 'ander-credential', JSON.stringify(r.j));
+      sP.credential = echt;
+      toets('8 sessie onthoudt de credential-id van de Pixel', !!echt && echt === JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')).apparaten.find((x) => x.id === pixelId).credential.id);
     }
     r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aanvL.id }, { pot: P.jar });
     toets('8 goedkeuren met verse vingerafdruk en het getoonde id -> 200', r.status === 200 && r.j.aanvraag.status === 'goedgekeurd', JSON.stringify(r.j));
@@ -432,6 +445,7 @@ async function bewijs(o) {
       const regT = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
       const lap = regT.apparaten.find((x) => x.id === laptopId);
       toets('8 register: gekoppeld_via goedkeuring, goedgekeurd_door = telefoon', lap.gekoppeld_via === 'goedkeuring' && lap.goedgekeurd_door === pixelId && lap.soort === 'reist', JSON.stringify(lap).slice(0, 300));
+      toets('8 goedgekeurd apparaat is nooit goedkeurder', lap.goedkeurder === false && r.j.apparaat.goedkeurder === false, JSON.stringify(lap).slice(0, 300));
     }
     r = await vraag('GET', '/app/apparaten', undefined, { pot: L.jar });
     toets('8 laptop werkt (apparatenlijst)', r.status === 200 && r.j.apparaten.filter((x) => x.actief).length === 2);
@@ -455,6 +469,25 @@ async function bewijs(o) {
     await slaap(4200);
     r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: a2.id }, { pot: L.jar });
     toets('8 laptop (reist, maar vingerafdruk niet vers) kan niet goedkeuren', r.status === 403, JSON.stringify(r.j));
+    {
+      // laptop met verse vingerafdruk (eigen passkey): mag niet goedkeuren, ook niet met de goede user-agent
+      o = await L.p.evaluate(() => post('/api/passkey/opties', {}));
+      r = await L.p.evaluate(async (x) => post('/api/passkey/bevestig', { antwoord: await bewijs(x) }), o.j.opties);
+      r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: a2.id }, { pot: L.jar, ua: 'Mozilla/5.0 (Linux; Android 16; Pixel 9) Chrome/141.0' });
+      toets('8 laptop met verse vingerafdruk (en Android-UA) -> 403 geen goedkeurder', r.status === 403 && /Telegram-code/.test(r.j.fout), JSON.stringify(r.j));
+      // 1Password-sync nagebootst: de Pixel-passkey staat ook in de authenticator van de laptop
+      const { credentials } = await P.cdp.send('WebAuthn.getCredentials', { authenticatorId: P.authenticatorId });
+      for (const cr of credentials) await L.cdp.send('WebAuthn.addCredential', { authenticatorId: L.authenticatorId, credential: cr });
+      const regT = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      const pixCred = regT.apparaten.find((x) => x.id === pixelId).credential;
+      o = await L.p.evaluate(() => post('/api/passkey/opties', {}));
+      const metPixel = await L.p.evaluate((x) => bewijs(Object.assign({}, x.o, { allowCredentials: [{ id: x.id, type: 'public-key' }] })).then((b) => b, (e) => 'fout ' + e.name), { o: o.j.opties, id: pixCred.id });
+      toets('8 (sync) laptop kan de Pixel-passkey gebruiken', metPixel && metPixel.id === pixCred.id, JSON.stringify(metPixel).slice(0, 120));
+      r = await L.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), metPixel);
+      toets('8 gesynchroniseerde Pixel-passkey vanaf de laptop (laptopcookie) -> 401, geen Pixel-sessie', r.status === 401 && /hoort niet bij dit apparaat/.test(r.j.fout), JSON.stringify(r.j));
+      r = await vraag('POST', '/app/passkey/opties', {}, { pot: { apparaat: pixelId + '.' + '0'.repeat(64) } });
+      toets('8 als Pixel opgeven zonder het Pixel-cookiegeheim -> 401', r.status === 401);
+    }
     r = await vraag('POST', '/app/koppel/afwijs', { aanvraag_id: a2.id }, { pot: P.jar });
     // ingetrokken laptop -> direct buiten
     o = await P.p.evaluate(() => post('/api/passkey/opties', {}));
@@ -620,6 +653,85 @@ async function bewijs(o) {
     toets('9 auditlog: beurt/knop/goedkeur-regels zonder berichtinhoud', /"reden":"beurt hoofd [a-f0-9]{16}"/.test(auditAlles) && /"reden":"knop ja/.test(auditAlles) && /goedgekeurd [A-F0-9]{6}/.test(auditAlles) && auditAlles.indexOf('morgen') < 0 && auditAlles.indexOf('accountant') < 0);
     toets('9 geen onverwachte fouten in logError', logs.filter((l) => !/app-telegram|app-register: Expected property|app: Unexpected token .x., "xx"|^app-log:/.test(l)).length === 0, logs.join(' | '));
     for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('opgeruimd');
+
+    // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
+    {
+      const regV = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      const actiefV = regV.apparaten.filter((x) => x.actief).length;
+      fs.writeFileSync(path.join(DATA, 'koppel-heropend'), '');
+      await slaap(1100);
+      await vraag('POST', '/app/koppel/aanvraag', { naam: 'Vreemd' }, { pot: pot() });
+      toets('10 vooraf: actieve apparaten, sessies en een open aanvraag', actiefV >= 2 && Object.keys(H.appStaat.sessies).length >= 1 && !!H.appStaat.aanvraag, actiefV);
+      const u = H.appNoodstop('toets');
+      toets('10 noodstop: ok, app-uit, alle actieve ingetrokken, sessies/aanvraag weg, heropend weg', u.ok === true && u.app_uit && fs.existsSync(UIT) && u.ingetrokken.length === actiefV && u.sessies >= 1 && u.aanvraag === true && u.heropend_weg === true
+        && Object.keys(H.appStaat.sessies).length === 0 && !H.appStaat.aanvraag && !H.appStaat.koppel && !fs.existsSync(path.join(DATA, 'koppel-heropend')), JSON.stringify(u));
+      const regN = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      toets('10 register: niemand actief, geen cookie-hash, ingetrokken_door noodstop', regN.apparaten.every((x) => !x.actief && !x.cookie_hash) && regN.apparaten.filter((x) => x.ingetrokken_door === 'noodstop').length === actiefV);
+      r = await vraag('GET', '/app/status', undefined, { pot: P.jar });
+      toets('10 na noodstop: app 503', r.status === 503, r.status);
+      toets('10 tweede noodstop: niets meer in te trekken, wel ok', (() => { const u2 = H.appNoodstop('toets'); return u2.ok && u2.ingetrokken.length === 0 && u2.al_uit === regN.apparaten.length; })());
+      const a = H.appAan('toets');
+      toets('10 app-aan: app-uit weg, 0 actieve apparaten, coderoute dicht', a.ok && a.was_uit === true && !fs.existsSync(UIT) && a.actieve_apparaten === 0 && a.koppelen_open === false, JSON.stringify(a));
+      r = await vraag('GET', '/app/status', undefined, { pot: P.jar });
+      toets('10 na app-aan: Pixel is ontkoppeld (geen apparaat), geen aanvraag mogelijk', r.status === 200 && r.j.apparaat === null && r.j.aanvraag_mogelijk === false && r.j.koppelen_open === false, JSON.stringify(r.j));
+      r = await P.p.evaluate(() => post('/api/passkey/opties', {}));
+      toets('10 oude Pixel-cookie opent niets meer (401)', r.status === 401);
+      // opnieuw koppelen via de coderoute: nieuw apparaat wordt de (enige) goedkeurder
+      fs.writeFileSync(path.join(DATA, 'koppel-heropend'), '');
+      H.appStaat.tellers.koppel = [];
+      fs.writeFileSync(path.join(DATA, 'staat.json'), JSON.stringify({}));
+      const Q = await nieuweBrowser('internal');
+      r = await vraag('POST', '/app/koppel/code', {}, { pot: Q.jar });
+      const cq = codeUit(telegram[telegram.length - 1]);
+      o = await Q.p.evaluate((c) => post('/api/koppel/opties', { code: c }), cq);
+      c2 = await Q.p.evaluate((x) => maak(x), o.j.opties);
+      r = await Q.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: c, naam: 'Pixel nieuw' }), c2);
+      const regQ = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      toets('10 na noodstop opnieuw koppelen via de code: nieuwe goedkeurder, de rest niet', r.status === 200 && regQ.apparaten.filter((x) => x.goedkeurder).length === 1 && regQ.apparaten.find((x) => x.goedkeurder).id === r.j.apparaat.id, JSON.stringify(r.j));
+      toets('10 Telegram meldt dat alleen dit apparaat mag goedkeuren', /Alleen dit apparaat mag voortaan/.test(telegram[telegram.length - 1]), telegram[telegram.length - 1]);
+      const qId = r.j.apparaat.id;
+      // wachtende app-beurt vervalt bij de noodstop (Fable-review wv89 #3): een Telegram-beurt houdt de wachtrij bezet
+      let losLaten; const bezet = new Promise((ok) => { losLaten = ok; });
+      ctx.enqueue('40687', () => bezet);
+      const nStart = gestart.length;
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'na mij de noodstop' }, { pot: Q.jar });
+      const jWacht = r.j.job_id;
+      toets('10 app-beurt staat in de wachtrij (pending)', r.status === 200 && jobs[jWacht] && jobs[jWacht].status === 'pending', JSON.stringify(r.j));
+      const un = H.appNoodstop('toets');
+      toets('10 noodstop telt 1 vervallen beurt', un.beurten_vervallen === 1 && un.beurten_lopend === 0, JSON.stringify(un));
+      H.appAan('toets');   // ook als de app meteen weer aan gaat: de beurt blijft vervallen
+      losLaten(); await slaap(50);
+      toets('10 vervallen beurt start niet en eindigt met "vervallen door de noodstop"', gestart.length === nStart && jobs[jWacht].status === 'done' && jobs[jWacht].result.ok === false && /noodstop/.test(jobs[jWacht].result.error) && jobs[jWacht].opgehaald === true, JSON.stringify(jobs[jWacht]));
+      fs.writeFileSync(UIT, '');
+      const sb = H.appStartBeurt({ id: qId }, 'hoofd', 'x', { soort: 'bericht', tekst: 'x' });
+      toets('10 beurt die na de noodstop pas start -> fout noodstop', sb.fout === 'noodstop', JSON.stringify(sb));
+      fs.unlinkSync(UIT);
+      // coderoute vanaf een laptop: geen goedkeurder; de bestaande (Q) blijft
+      fs.writeFileSync(path.join(DATA, 'koppel-heropend'), '');
+      fs.writeFileSync(path.join(DATA, 'staat.json'), JSON.stringify({}));
+      H.appStaat.tellers.koppel = [];
+      const LW = await nieuweBrowser('internal', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0');
+      r = await vraag('POST', '/app/koppel/code', {}, { pot: LW.jar });
+      const cw = codeUit(telegram[telegram.length - 1]);
+      o = await LW.p.evaluate((c) => post('/api/koppel/opties', { code: c }), cw);
+      c2 = await LW.p.evaluate((x) => maak(x), o.j.opties);
+      r = await LW.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: c, naam: 'Laptop code' }), c2);
+      const regW = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      // (Q is door de noodstop hierboven ingetrokken, dus er is nu geen actieve goedkeurder)
+      toets('10 laptop via de coderoute: gekoppeld maar geen goedkeurder, ook niet als er geen andere is', r.status === 200 && r.j.apparaat.goedkeurder === false && !regW.apparaten.some((x) => x.actief && x.goedkeurder), JSON.stringify(r.j));
+      toets('10 Telegram: geen telefoon, dus geen goedkeurder; koppel je telefoon', /Geen telefoon, dus geen goedkeurder; koppel je telefoon/.test(telegram[telegram.length - 1]), telegram[telegram.length - 1]);
+      r = await vraag('GET', '/app/status', undefined, { pot: LW.jar });
+      toets('10 zonder actieve goedkeurder: geen aanvraag mogelijk', r.j.aanvraag_mogelijk === false && r.j.apparaat.goedkeurder === false, JSON.stringify(r.j));
+      // kapot register: app-uit komt er toch, ok = false met de fout
+      const echt = fs.readFileSync(path.join(DATA, 'apparaten.json'));
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), '{kapot');
+      const uk = H.appNoodstop('toets');
+      toets('10 noodstop bij kapot register: app-uit staat, ok false met fout', uk.app_uit === true && fs.existsSync(UIT) && uk.ok === false && /register/.test(uk.fouten.join()), JSON.stringify(uk));
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), echt);
+      H.appAan('toets');
+      const auditN = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+      toets('10 auditlog: noodstop- en aan-regels', /"route":"noodstop"/.test(auditN) && /"route":"aan"/.test(auditN));
+    }
   } catch (e) { toets('uitzondering: ' + (e && e.stack || e), false); }
   await browser.close();
   srv.close();

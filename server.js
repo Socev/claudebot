@@ -2403,6 +2403,21 @@ function handleRequest(req, res) {
     });
   }
 
+  // Noodknop Socev-app (7-10-2026): n8n "Claude Debug via Telegram" /app-noodstop en /app-aan, zonder LLM-beurt.
+  // Bewust NIET achter rolPrimair: uitzetten mag op elke kant (zie appNoodstop in het app-blok).
+  if (req.method === 'POST' && (req.url === '/app-noodstop' || req.url === '/app-aan')) {
+    return readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      const a = Buffer.from(String(d.secret || '')), b = Buffer.from(SECRET);
+      if (!SECRET || a.length !== b.length || !crypto.timingSafeEqual(a, b)) { res.writeHead(401); return res.end('unauthorized'); }
+      const bron = String(d.bron || 'onbekend').replace(/[^a-z0-9 :._-]/gi, '').slice(0, 40);
+      const uit = req.url === '/app-noodstop' ? appNoodstop(bron) : appAan(bron);
+      res._log = { app: req.url.slice(1) };
+      res.writeHead(uit.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(uit));
+    });
+  }
+
   if (req.method === 'POST' && req.url === '/reset') {
     return readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
@@ -2966,7 +2981,11 @@ function sleutelportaal(req, res) {
 // Wie de Pages-secrets of het Cloudflare-account heeft, komt dus tot en met slot 3, maar praat niet als David.
 // Het eerste apparaat koppelt met een code van 8 cijfers via de debug-bot (gebonden aan de browser die hem vroeg);
 // daarna is die route dicht tot de machinekamer hem heropent (bestand koppel-heropend). Volgende apparaten (fase 2): een
-// aanvraag met een eigen id, goed te keuren in de app op een meereizend apparaat met verse vingerafdruk.
+// aanvraag met een eigen id, goed te keuren in de app op DE GOEDKEURDER (David 7-10: alleen de Pixel, niet de laptop):
+// het ene apparaat met goedkeurder:true, en dat is altijd het laatst via de Telegram-code gekoppelde apparaat. Een
+// goedgekeurd apparaat is nooit goedkeurder; wisselen kan alleen via de coderoute (machinekamer heropent).
+// Noodstop (7-10): /app-noodstop (API_SECRET, n8n "Claude Debug via Telegram") zet app-uit, trekt alle apparaten in en
+// wist sessies, uitdagingen, code en aanvraag; /app-aan haalt alleen app-uit weg (opnieuw koppelen via de coderoute).
 // Fase 3 (gesprek): /app/beurt start een beurt in dezelfde sessie als Telegram (hoofd = 40687, machinekamer = telegram-debug
 // met de omlijsting uit een bestand), /app/uitslag pollt, /app/knop beantwoordt een VRAAG AAN DAVID één keer, en
 // /app/geschiedenis leest het app-log (/opt/data/app-log, alleen app-beurten, asynchroon en fail-open geschreven).
@@ -3208,11 +3227,12 @@ function appSessie(req, apparaat, glijd) {
   if (glijd) appGlijd(s, apparaat);
   return s;
 }
-function appNieuweSessie(apparaat) {
+function appNieuweSessie(apparaat, credentialId) {
   // één sessie per apparaat: een nieuwe vingerafdruk vervangt de vorige
   Object.keys(appStaat.sessies).forEach(function (h) { if (appStaat.sessies[h].apparaat === apparaat.id) delete appStaat.sessies[h]; });
   const id = crypto.randomBytes(32).toString('hex'), nu = Date.now();
-  appStaat.sessies[appSha(id)] = { apparaat: apparaat.id, start: nu, vers_tot: nu + APP_VERS_MS,
+  // credential: met welke passkey deze sessie geopend is (goedkeuren eist die van het apparaat zelf)
+  appStaat.sessies[appSha(id)] = { apparaat: apparaat.id, credential: String(credentialId || ''), start: nu, vers_tot: nu + APP_VERS_MS,
     tot: nu + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS) };
   return { w: id, s: Math.floor(APP_SESSIE_MAX_MS / 1000) };
 }
@@ -3220,10 +3240,14 @@ function appSessiesWeg(apparaatId) {
   Object.keys(appStaat.sessies).forEach(function (h) { if (appStaat.sessies[h].apparaat === apparaatId) delete appStaat.sessies[h]; });
 }
 
-function appBeschrijf(req) {
-  // Alleen ter herkenning (koppelbericht, apparatenlijst); nooit een beslissing op gebaseerd.
+function appSysteem(req) {
   const ua = String(req.headers['x-app-ua'] || '').slice(0, 300);
-  const sys = /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'macOS' : /iPhone|iPad/.test(ua) ? 'iOS' : /Linux/.test(ua) ? 'Linux' : 'onbekend systeem';
+  return /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'macOS' : /iPhone|iPad/.test(ua) ? 'iOS' : /Linux/.test(ua) ? 'Linux' : 'onbekend systeem';
+}
+function appBeschrijf(req) {
+  // Ter herkenning (koppelbericht, apparatenlijst). Alleen het systeemdeel dient bij goedkeuren als extra rem (geen bewijs).
+  const ua = String(req.headers['x-app-ua'] || '').slice(0, 300);
+  const sys = appSysteem(req);
   const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'onbekende browser';
   return br + ' op ' + sys;
 }
@@ -3248,7 +3272,7 @@ async function appStatus(req, res, reg) {
   const s = a ? appSessie(req, a, false) : null;
   const k = a ? null : appAanvraagVan(req);
   appStuur(res, 200, { ok: true, koppelen_open: appKoppelOpen(reg), aanvraag_mogelijk: appAanvraagMogelijk(reg),
-    aanvraag: k ? appAanvraagUit(k) : null, apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort } : null,
+    aanvraag: k ? appAanvraagUit(k) : null, apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort, goedkeurder: a.goedkeurder === true } : null,
     sessie: !!s, sessie_tot: s ? new Date(s.tot).toISOString() : null, passkey_klaar: !!appWebauthn() });
 }
 
@@ -3309,11 +3333,25 @@ function appKoppelCheck(req, res, metCode, d) {
 
 // ── fase 2: volgend apparaat via een aanvraag, goedgekeurd op een meereizend apparaat (Fable-review 7-10 #3) ──
 // Precies één open aanvraag tegelijk, met een eigen willekeurig id; de goedkeuring noemt dat id, dus raakt alleen de
-// aanvraag die de telefoon toonde. Goedkeuren alleen met een vingerafdruk van hooguit 2 min op een apparaat dat in HET
-// REGISTER 'reist' heet. Elke aanvraag geeft een Telegram-melding.
-function appAanvraagMogelijk(reg) {
-  return !!reg.ooit_gekoppeld && reg.apparaten.some(function (a) { return a.actief && a.soort === 'reist'; });
+// aanvraag die de telefoon toonde. Elke aanvraag geeft een Telegram-melding.
+// Goedkeuren (David 7-10: "alleen op mijn Google Pixel, niet op de laptop") eist alle vier:
+//   1. het apparaat (apparaatcookie) heeft in HET REGISTER goedkeurder:true - alleen het via de Telegram-code gekoppelde
+//      apparaat; 'reist' (meereizend, sessieduur) geeft geen goedkeurrecht meer;
+//   2. een vingerafdruk van hooguit 2 min (vers_tot);
+//   3. die sessie is geopend met de passkey van DIT apparaat (credential-id in de sessie = die in het register);
+//   4. rem, geen bewijs: het systeem uit de user-agent is gelijk aan dat bij het koppelen (Pixel = Android).
+// Waarom dat ook een gesynchroniseerde passkey afdekt (Davids passkeys staan in 1Password, ook op de laptop): de passkey
+// alleen is niet genoeg, de sessie hoort bij het apparaatcookie (__Host-, HttpOnly, SameSite=Strict, in de Chrome op de
+// Pixel; cookies synchroniseren niet mee). De laptop kan met de Pixel-passkey dus alleen een sessie openen als hij ook
+// dat cookie heeft. Niet afgedekt: wie de Pixel-browser zelf in handen heeft (toestel ontgrendeld of malware) of het
+// cookie daaruit steelt; de user-agent-rem houdt dan alleen een onoplettende poging tegen.
+function appGoedkeurder(reg) {
+  return reg.apparaten.find(function (a) { return a.actief && a.goedkeurder === true; }) || null;
 }
+function appAanvraagMogelijk(reg) {
+  return !!reg.ooit_gekoppeld && !!appGoedkeurder(reg);
+}
+function appSysteemVan(beschrijving) { const m = / op (.+)$/.exec(String(beschrijving || '')); return m ? m[1] : ''; }
 function appAanvraagGeldig() {
   const k = appStaat.aanvraag;
   if (k && Date.now() > k.tot) { appStaat.aanvraag = null; return null; }
@@ -3327,7 +3365,7 @@ function appAanvraagUit(k) {
 
 async function appKoppelAanvraag(req, res, reg, d) {
   if (!reg.ooit_gekoppeld) return appWeiger(res, 403, 'koppel je eerste apparaat met de code uit Telegram', 'nog geen eerste apparaat');
-  if (!appAanvraagMogelijk(reg)) return appWeiger(res, 403, 'er is geen meereizend apparaat om goed te keuren; vraag de machinekamer de coderoute te heropenen', 'geen goedkeurder');
+  if (!appAanvraagMogelijk(reg)) return appWeiger(res, 403, 'er is geen apparaat dat mag goedkeuren; vraag de machinekamer de coderoute te heropenen', 'geen goedkeurder');
   const k = appAanvraagGeldig();
   if (k && k.status !== 'afgewezen') {
     if (appBindingOk(req, k)) return appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
@@ -3341,7 +3379,7 @@ async function appKoppelAanvraag(req, res, reg, d) {
     sinds: nu, tot: nu + APP_AANVRAAG_MS, status: 'open', door: null, pogingen: 0 };
   appStaat.aanvraag = n;
   const ok = await appTelegram('Socev-app: nieuw apparaat wil koppelen - "' + n.naam + '" (' + n.systeem + '), controlecode ' + n.controle +
-    '. Goedkeuren kan alleen in de app op je telefoon (tab Apparaten), 10 min geldig. Niet jij? Niet goedkeuren en meld het de machinekamer.');
+    '. Goedkeuren kan alleen in de app op "' + appGoedkeurder(reg).naam + '" (tab Apparaten), 10 min geldig. Niet jij? Niet goedkeuren en meld het de machinekamer.');
   if (!ok) { appStaat.aanvraag = null; return appWeiger(res, 502, 'de melding kon niet via Telegram worden verstuurd; probeer het over een minuut opnieuw', 'telegram'); }
   res._app.reden = 'aanvraag ' + n.controle + ' (' + n.systeem + ')';
   appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(n) }, { koppel: { w: binding, s: APP_AANVRAAG_MAX_MS / 1000 } });
@@ -3362,8 +3400,12 @@ function appKoppelGoedkeur(req, res, reg, a, s, d, afwijzen) {
   const id = String(d.aanvraag_id || '');
   const k = appAanvraagGeldig();
   if (!afwijzen) {
-    if (a.soort !== 'reist') return appWeiger(res, 403, 'goedkeuren kan alleen vanaf een meereizend apparaat (je telefoon)', 'geen reist-apparaat');
+    // a komt uit het register (apparaatcookie), s is aan a gebonden (appSessie)
+    if (a.goedkeurder !== true) return appWeiger(res, 403, 'goedkeuren kan alleen op het apparaat dat met de Telegram-code is gekoppeld (je Pixel)', 'geen goedkeurder');
     if (Date.now() > s.vers_tot) return appWeiger(res, 403, 'bevestig eerst opnieuw met je vingerafdruk', 'niet vers');
+    if (!a.credential || !s.credential || !appGelijk(s.credential, a.credential.id)) return appWeiger(res, 403, 'bevestig eerst opnieuw met je vingerafdruk', 'sessie niet met de passkey van dit apparaat');
+    const sysNu = appSysteem(req), sysReg = appSysteemVan(a.systeem);
+    if (!sysReg || sysNu !== sysReg) return appWeiger(res, 403, 'goedkeuren kan alleen op je Pixel (' + (sysReg || 'onbekend') + '); staat Chrome op "desktopsite", zet dat dan uit', 'systeem ' + sysNu + ' != ' + sysReg);
   }
   if (!k || k.status !== 'open' || !/^[a-f0-9]{16}$/.test(id) || !appGelijk(id, k.id))
     return appWeiger(res, 409, 'deze aanvraag bestaat niet (meer); ververs de lijst', 'aanvraag-id klopt niet');
@@ -3450,8 +3492,8 @@ async function appKoppelRegistreer(req, res, reg, d) {
   if (bron.soort === 'code') {
     if (!appKoppelOpen(vers)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht (intussen)');
   } else {
-    // de aanvraag moet nog dezelfde zijn, en wie hem goedkeurde nog een actief meereizend apparaat
-    door = vers.apparaten.find(function (x) { return x.id === k.door && x.actief && x.soort === 'reist'; });
+    // de aanvraag moet nog dezelfde zijn, en wie hem goedkeurde nog de actieve goedkeurder
+    door = vers.apparaten.find(function (x) { return x.id === k.door && x.actief && x.goedkeurder === true; });
     if (appStaat.aanvraag !== k || k.status !== 'goedgekeurd' || !door) return appWeiger(res, 403, 'de goedkeuring geldt niet meer; vraag opnieuw aan', 'goedkeuring vervallen');
   }
   if (vers.apparaten.some(function (a) { return a.credential && a.credential.id === cred.id; })) return fout('deze passkey is al gekoppeld');
@@ -3463,7 +3505,12 @@ async function appKoppelRegistreer(req, res, reg, d) {
     cookie_hash: appSha(geheim), credential: { id: cred.id, publicKey: Buffer.from(cred.publicKey).toString('base64url'), counter: cred.counter || 0,
       transports: appTransports(cred.transports) },
     passkey: { soort: v.registrationInfo.credentialDeviceType, backup: !!v.registrationInfo.credentialBackedUp, aaguid: v.registrationInfo.aaguid },
-    gekoppeld_via: bron.soort === 'code' ? 'telegram-code' : 'goedkeuring', goedgekeurd_door: door ? door.id : undefined };
+    gekoppeld_via: bron.soort === 'code' ? 'telegram-code' : 'goedkeuring', goedgekeurd_door: door ? door.id : undefined,
+    // Alleen de coderoute maakt een goedkeurder, en dan precies één: de vorige verliest het recht (wisselen = machinekamer).
+    // Rem (Fable-review wv89): alleen een telefoon (Android/iOS volgens de user-agent); koppelt de laptop per code, dan
+    // blijft de bestaande goedkeurder staan.
+    goedkeurder: bron.soort === 'code' && /^(Android|iOS)$/.test(appSysteem(req)) };
+  if (apparaat.goedkeurder) vers.apparaten.forEach(function (x) { if (x.goedkeurder) x.goedkeurder = false; });
   vers.apparaten.push(apparaat);
   vers.ooit_gekoppeld = true;
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
@@ -3471,10 +3518,12 @@ async function appKoppelRegistreer(req, res, reg, d) {
   else appStaat.aanvraag = null;
   res._app.apparaat = id; res._app.reden = 'gekoppeld (' + apparaat.systeem + ', ' + apparaat.gekoppeld_via + ')';
   appTelegram(bron.soort === 'code'
-    ? 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '). De koppelroute met code is nu dicht. Niet jij? Meld het direct de machinekamer.'
+    ? 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '). ' + (apparaat.goedkeurder ? 'Alleen dit apparaat mag voortaan nieuwe apparaten goedkeuren.'
+      : 'Geen telefoon, dus geen goedkeurder' + (appGoedkeurder(vers) ? ' (dat blijft "' + appGoedkeurder(vers).naam + '").' : '; koppel je telefoon via de machinekamer.')) +
+      ' De koppelroute met code is nu dicht. Niet jij? /app-noodstop en meld het de machinekamer.'
     : 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '), goedgekeurd vanaf "' + door.naam + '". Niet jij? Trek het in (tab Apparaten) en meld het de machinekamer.');
-  appStuur(res, 200, { ok: true, apparaat: { id: id, naam: naam, soort: apparaat.soort } },
-    { koppel: null, apparaat: { w: id + '.' + geheim, s: APP_APPARAAT_COOKIE_S }, sessie: appNieuweSessie(apparaat) });
+  appStuur(res, 200, { ok: true, apparaat: { id: id, naam: naam, soort: apparaat.soort, goedkeurder: apparaat.goedkeurder } },
+    { koppel: null, apparaat: { w: id + '.' + geheim, s: APP_APPARAAT_COOKIE_S }, sessie: appNieuweSessie(apparaat, cred.id) });
 }
 
 async function appPasskeyOpties(req, res, reg) {
@@ -3516,14 +3565,14 @@ async function appPasskeyBevestig(req, res, reg, d) {
   x.laatst_gezien = new Date().toISOString();
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); }
   res._app.reden = 'bevestigd';
-  appStuur(res, 200, { ok: true, apparaat: { id: x.id, naam: x.naam, soort: x.soort } }, { sessie: appNieuweSessie(x) });
+  appStuur(res, 200, { ok: true, apparaat: { id: x.id, naam: x.naam, soort: x.soort, goedkeurder: x.goedkeurder === true } }, { sessie: appNieuweSessie(x, antw.id) });
 }
 
 function appApparatenLijst(req, res, reg, a) {
   appStuur(res, 200, { ok: true, apparaten: reg.apparaten.map(function (x) {
     return { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, systeem: x.systeem, aangemaakt: x.aangemaakt,
       laatst_gezien: x.laatst_gezien, actief: !!x.actief, ingetrokken_op: x.ingetrokken_op || null, dit_apparaat: x.id === a.id,
-      passkey_gesynchroniseerd: !!(x.passkey && x.passkey.backup), gekoppeld_via: x.gekoppeld_via || null };
+      passkey_gesynchroniseerd: !!(x.passkey && x.passkey.backup), gekoppeld_via: x.gekoppeld_via || null, goedkeurder: x.goedkeurder === true };
   }) });
 }
 
@@ -3645,6 +3694,8 @@ async function appNaBeurt(jobId) {
 }
 
 function appStartBeurt(a, kanaal, promptTekst, meta) {
+  // Een verzoek dat vóór de noodstop door de poort kwam en pas daarna hier aankomt, start niets (Fable-review wv89 #3).
+  if (fs.existsSync(APP_UIT)) return { fout: 'noodstop' };
   const chatId = APP_KANALEN[kanaal];
   let prompt = '[APP] ' + promptTekst;
   if (kanaal === 'machinekamer') {
@@ -3659,6 +3710,13 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
     app: { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, soort: meta.soort, tekst: meta.tekst } };
   // Zelfde wachtrij als /run: een Telegram-bericht en een app-bericht in hetzelfde gesprek lopen na elkaar.
   enqueue(sessionKey(DEFAULT_WS, chatId), function () {
+    // Nog in de wachtrij toen de noodstop kwam: vervalt, ook als de app intussen weer aan staat (Fable-review wv89 #3).
+    const j = jobs[jobId];
+    if (j && (j.app.noodstop || fs.existsSync(APP_UIT))) {
+      j.status = 'done'; j.done_at = Date.now(); j.opgehaald = true;   // opgehaald: houdt een uitrol niet op
+      j.result = { ok: false, error: 'vervallen door de noodstop' };
+      return Promise.resolve();
+    }
     // appNaBeurt NIET teruggeven: een trage schijf mag de volgende beurt (ook uit Telegram) niet ophouden (Fable-review wv56 #3)
     return processJob(jobId, prompt, '', [], chatId, DEFAULT_WS, keuze, '').then(function () {
       appNaBeurt(jobId).catch(function (e) { logError('app-na-beurt', e); });
@@ -3667,6 +3725,7 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
   return { job_id: jobId };
 }
 function appStartFout(res, st) {
+  if (st.fout === 'noodstop') return appWeiger(res, 503, 'de app staat uit (noodstop)', 'app-uit (tijdens het verzoek)');
   if (st.fout === 'omlijsting') return appWeiger(res, 503, 'de machinekamer-omlijsting ontbreekt op de pod; gebruik de debug-bot', 'omlijsting ontbreekt');
   return appWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
 }
@@ -3879,6 +3938,55 @@ function handleApp(req, res) {
   });
 }
 
+// ── noodstop (David 7-10: "via Telegram de apps allemaal kunnen ontkoppelen, in nood") ──
+// Aangeroepen door POST /app-noodstop (API_SECRET; n8n "Claude Debug via Telegram", commando /app-noodstop, zonder
+// LLM-beurt). Volgorde: eerst app-uit (dan is alles 503, ook als de rest hieronder faalt), dan het geheugen (kan niet
+// falen), dan het register. Lopende app-beurten lopen af, maar hun uitslag is zonder sessie niet meer op te halen.
+function appNoodstop(bron) {
+  const uit = { ok: true, app_uit: false, ingetrokken: [], al_uit: 0, sessies: 0, aanvraag: false, koppelcode: false, heropend_weg: false,
+    beurten_vervallen: 0, beurten_lopend: 0, fouten: [] };
+  const nu = new Date().toISOString();
+  try {
+    fs.writeFileSync(APP_UIT, 'noodstop ' + nu + ' via ' + String(bron || 'onbekend').slice(0, 40) + '\n', { mode: 0o600 });
+    uit.app_uit = true;
+  } catch (e) { uit.fouten.push('app-uit: ' + (e && e.code || e)); }
+  uit.sessies = Object.keys(appStaat.sessies).length;
+  appStaat.sessies = {}; appStaat.uitdagingen = {};
+  // App-beurten: wachtend = vervalt (zie appStartBeurt); al lopend = loopt af (een kindproces halverwege stoppen kan
+  // half werk achterlaten), maar de uitslag is zonder sessie niet meer op te halen. Het Telegram-antwoord noemt het aantal.
+  Object.keys(jobs).forEach(function (id) {
+    const j = jobs[id];
+    if (!j.app) return;
+    if (j.status === 'pending') { j.app.noodstop = true; uit.beurten_vervallen++; }
+    else if (j.status === 'running') uit.beurten_lopend++;
+  });
+  uit.aanvraag = !!appStaat.aanvraag; appStaat.aanvraag = null;
+  uit.koppelcode = !!appStaat.koppel; appStaat.koppel = null;
+  try { fs.unlinkSync(APP_HEROPEND); uit.heropend_weg = true; } catch (e) { if (!e || e.code !== 'ENOENT') uit.fouten.push('koppel-heropend: ' + (e && e.code || e)); }
+  try {
+    const reg = appRegister();
+    reg.apparaten.forEach(function (x) {
+      if (!x.actief) { uit.al_uit++; return; }
+      x.actief = false; x.cookie_hash = null; x.ingetrokken_op = nu; x.ingetrokken_door = 'noodstop';
+      uit.ingetrokken.push({ id: x.id, naam: x.naam, systeem: x.systeem });
+    });
+    if (uit.ingetrokken.length) appSchrijfJson(APP_REGISTER, reg);
+  } catch (e) { uit.ingetrokken = []; uit.fouten.push('register: ' + String(e && e.message || e).slice(0, 80)); }
+  uit.ok = uit.app_uit && uit.fouten.length === 0;
+  appAudit({ route: 'noodstop', m: 'POST', status: uit.ok ? 200 : 500, apparaat: null,
+    reden: 'noodstop via ' + String(bron || '').slice(0, 40) + ': ' + uit.ingetrokken.length + ' ingetrokken, ' + uit.sessies + ' sessies' + (uit.fouten.length ? ', fout ' + uit.fouten.join('; ') : '') });
+  return uit;
+}
+// Alleen app-uit weghalen; apparaten blijven ingetrokken (opnieuw koppelen: machinekamer heropent de coderoute).
+function appAan(bron) {
+  const uit = { ok: true, was_uit: fs.existsSync(APP_UIT), actieve_apparaten: null, koppelen_open: null, fouten: [] };
+  try { fs.unlinkSync(APP_UIT); } catch (e) { if (!e || e.code !== 'ENOENT') { uit.ok = false; uit.fouten.push('app-uit: ' + (e && e.code || e)); } }
+  try { const reg = appRegister(); uit.actieve_apparaten = reg.apparaten.filter(function (a) { return a.actief; }).length; uit.koppelen_open = appKoppelOpen(reg); }
+  catch (e) { uit.fouten.push('register: ' + String(e && e.message || e).slice(0, 80)); }
+  appAudit({ route: 'aan', m: 'POST', status: uit.ok ? 200 : 500, apparaat: null, reden: 'app-aan via ' + String(bron || '').slice(0, 40) + (uit.was_uit ? '' : ' (stond al aan)') });
+  return uit;
+}
+
 // Verlopen sessies en uitdagingen opruimen (geheugen); het register zelf blijft.
 setInterval(function () {
   const nu = Date.now();
@@ -3895,6 +4003,7 @@ function appInfo() {
   const afw = k ? Math.round(k.afwijking_ms / 1000) : null;
   return { uit: fs.existsSync(APP_UIT), ingericht: !!(appPoortGeheim() && appConfig().aud && appConfig().clientId),
     apparaten: reg.apparaten.filter(function (a) { return a.actief; }).length, koppelen_open: appKoppelOpen(reg),
+    goedkeurder: (appGoedkeurder(reg) || {}).naam || null,
     aanvraag_open: !!appAanvraagGeldig(), sessies: Object.keys(appStaat.sessies).length,
     beurten_lopend: Object.keys(jobs).filter(function (id) { return jobs[id].app && (jobs[id].status === 'pending' || jobs[id].status === 'running'); }).length,
     omlijsting: !!appOmlijsting(),
