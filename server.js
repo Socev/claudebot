@@ -2965,7 +2965,11 @@ function sleutelportaal(req, res) {
 //      geverifieerd HIER met @simplewebauthn/server) op een geregistreerd apparaat (apparaatcookie).
 // Wie de Pages-secrets of het Cloudflare-account heeft, komt dus tot en met slot 3, maar praat niet als David.
 // Het eerste apparaat koppelt met een code van 8 cijfers via de debug-bot (gebonden aan de browser die hem vroeg);
-// daarna is die route dicht tot de machinekamer hem heropent (bestand koppel-heropend). Volgende apparaten: fase 2.
+// daarna is die route dicht tot de machinekamer hem heropent (bestand koppel-heropend). Volgende apparaten (fase 2): een
+// aanvraag met een eigen id, goed te keuren in de app op een meereizend apparaat met verse vingerafdruk.
+// Fase 3 (gesprek): /app/beurt start een beurt in dezelfde sessie als Telegram (hoofd = 40687, machinekamer = telegram-debug
+// met de omlijsting uit een bestand), /app/uitslag pollt, /app/knop beantwoordt een VRAAG AAN DAVID één keer, en
+// /app/geschiedenis leest het app-log (/opt/data/app-log, alleen app-beurten, asynchroon en fail-open geschreven).
 // Opslag: APP_DATA (/opt/data/socev-app-data; NIET /opt/data/app, dat zijn de server.js-releases). Geen inhoud in het
 // auditlog. Sessies staan alleen in het geheugen: na een herstart is één vingerafdruk genoeg.
 const APP_DATA = process.env.APP_DATA_DIR || '/opt/data/socev-app-data';
@@ -2973,6 +2977,11 @@ const APP_UIT = process.env.APP_UIT_BESTAND || '/opt/data/app-uit';
 const APP_REGISTER = path.join(APP_DATA, 'apparaten.json');
 const APP_STAAT = path.join(APP_DATA, 'staat.json');
 const APP_AUDIT = path.join(APP_DATA, 'audit.jsonl');
+const APP_AUDIT_VOOR = path.join(APP_DATA, 'audit-voor-auth.jsonl'); // weigeringen vóór Access apart (Fable-review 7-10 #4)
+const APP_OMLIJSTING = path.join(APP_DATA, 'machinekamer-omlijsting.txt'); // letterlijk uit n8n "Claude Debug via Telegram" > Prompt bouwen
+const APP_VRAGEN = path.join(APP_DATA, 'vragen.json');           // per app-vraag (job:hash) of en hoe hij beantwoord is; geen inhoud
+const APP_BEURTEN = path.join(APP_DATA, 'beurten.json');         // sha256(beurt_id) -> job (24 u): één beurt per bericht
+const APP_LOG_DIR = process.env.APP_LOG_DIR || '/opt/data/app-log'; // geschiedenis; buiten de vault, 30 dagen
 const APP_CONFIG = path.join(APP_DATA, 'config.json');           // geen geheimen: aud, teamdomein, client-id, herkomst
 const APP_POORT_PAD = path.join(APP_DATA, 'geheim', 'poort.key');
 const APP_HEROPEND = path.join(APP_DATA, 'koppel-heropend');      // machinekamer: eerste-apparaatroute opnieuw open
@@ -2986,7 +2995,7 @@ const APP_UITDAGING_MS = 2 * 60 * 1000;
 const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
 const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-apparaat (fase 4)
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
-const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken']);
+const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs']);
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
@@ -2996,8 +3005,17 @@ const APP_OPENEN_PER_UUR = 120;                // passkey/opties (elke start en 
 const APP_VERZOEKEN_PER_UUR = 1200;            // alles onder /app/
 const APP_AUDIT_MAX = 5 * 1024 * 1024;
 const APP_ROUTE_RE = /^\/app\/[a-z0-9/-]{1,64}$/;
+const APP_KANALEN = { hoofd: '40687', machinekamer: 'telegram-debug' };
+const APP_AANVRAAG_MS = 10 * 60 * 1000;
+const APP_AANVRAAG_PER_DAG = 10;
+const APP_BEURTEN_PER_UUR = 30;
+const APP_TEKST_MAX = 20000;
+const APP_LOG_MS = 30 * 24 * 3600 * 1000;
+const APP_AUDIT_VOOR_PER_MIN = 5;
+const APP_TRANSPORTS = ['internal', 'hybrid', 'usb', 'nfc', 'ble', 'smart-card'];
 
-const appStaat = { koppel: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [] }, certs: null, certsFout: 0,
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [] },
+  certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null };
 
@@ -3051,23 +3069,25 @@ function appWebauthn() {
   catch (e) { appStaat.webauthnFout = String(e && e.code || e).slice(0, 80); return null; }
 }
 
-function appAudit(o, voorAuth) {
-  // Weigeringen vóór de Access-controle (poortgeheim fout, via Olares/cluster): hooguit 30 regels per minuut, de rest
-  // geteld, zodat een vloed de echte sporen niet wegspoelt (review wv55 #7).
-  const va = appStaat.auditVoorAuth, minuut = Math.floor(Date.now() / 60000);
-  if (voorAuth) {
-    if (va.minuut !== minuut) { va.minuut = minuut; va.n = 0; }
-    if (++va.n > 30) { va.overgeslagen++; return; }
-  }
-  if (va.overgeslagen) { o = Object.assign({}, o, { overgeslagen_voor_auth: va.overgeslagen }); va.overgeslagen = 0; }
+function appAuditRegel(f, o) {
+  fs.mkdirSync(APP_DATA, { recursive: true, mode: 0o700 });
   try {
-    fs.mkdirSync(APP_DATA, { recursive: true, mode: 0o700 });
-    try {
-      if (fs.statSync(APP_AUDIT).size > APP_AUDIT_MAX) {
-        for (let i = 3; i >= 1; i--) { try { fs.renameSync(APP_AUDIT + (i > 1 ? '.' + (i - 1) : ''), APP_AUDIT + '.' + i); } catch (e) {} }
-      }
-    } catch (e) {}
-    fs.appendFileSync(APP_AUDIT, JSON.stringify(Object.assign({ t: new Date().toISOString() }, o)) + '\n', { mode: 0o600 });
+    if (fs.statSync(f).size > APP_AUDIT_MAX) {
+      for (let i = 3; i >= 1; i--) { try { fs.renameSync(f + (i > 1 ? '.' + (i - 1) : ''), f + '.' + i); } catch (e) {} }
+    }
+  } catch (e) {}
+  fs.appendFileSync(f, JSON.stringify(Object.assign({ t: new Date().toISOString() }, o)) + '\n', { mode: 0o600 });
+}
+function appAudit(o, voorAuth) {
+  // Weigeringen vóór de Access-controle (poortgeheim fout, via Olares/cluster) gaan naar een eigen bestand, hooguit 5 regels
+  // per minuut, de rest geteld: een vloed spoelt Davids sporen in audit.jsonl dan nooit weg (Fable-review 7-10 #4).
+  try {
+    if (!voorAuth) return appAuditRegel(APP_AUDIT, o);
+    const va = appStaat.auditVoorAuth, minuut = Math.floor(Date.now() / 60000);
+    if (va.minuut !== minuut) { va.minuut = minuut; va.n = 0; }
+    if (++va.n > APP_AUDIT_VOOR_PER_MIN) { va.overgeslagen++; return; }
+    if (va.overgeslagen) { o = Object.assign({}, o, { overgeslagen_voor_auth: va.overgeslagen }); va.overgeslagen = 0; }
+    appAuditRegel(APP_AUDIT_VOOR, o);
   } catch (e) { logError('app-audit', e); }
 }
 
@@ -3091,19 +3111,28 @@ function appWeiger(res, status, fout, reden) {
 }
 
 // ── Access-bewijs (RS256 tegen de certs van het teamdomein) ──
-async function appCerts(cfg, kid) {
+// Eén gedeelde ophaalpoging tegelijk (Fable-review 7-10 #5). De Date-kop van het antwoord meet de podklok: loopt die
+// meer dan 2 minuten mis, dan falen alle Access-bewijzen (exp/nbf) en staat dat in /health.app (#12).
+function appCerts(cfg, kid) {
   const nu = Date.now();
   const c = appStaat.certs;
-  if (c && c.team === cfg.team && nu < c.tot && (c.keys.some(function (k) { return k.kid === kid; }) || nu - c.op < 60000)) return c.keys;
-  if (nu - appStaat.certsFout < 10000) throw new Error('certs kort geleden mislukt');
-  try {
-    const r = await fetch(cfg.team + '/cdn-cgi/access/certs', { signal: AbortSignal.timeout(8000) });
-    if (!r.ok) throw new Error('certs HTTP ' + r.status);
-    const j = await r.json();
-    const keys = Array.isArray(j && j.keys) ? j.keys : [];
-    appStaat.certs = { team: cfg.team, keys: keys, op: nu, tot: nu + 10 * 60 * 1000 };
-    return keys;
-  } catch (e) { appStaat.certsFout = nu; throw e; }
+  if (c && c.team === cfg.team && nu < c.tot && (c.keys.some(function (k) { return k.kid === kid; }) || nu - c.op < 60000)) return Promise.resolve(c.keys);
+  if (appStaat.certsBezig) return appStaat.certsBezig;
+  if (nu - appStaat.certsFout < 10000) return Promise.reject(new Error('certs kort geleden mislukt'));
+  appStaat.certsBezig = (async function () {
+    try {
+      const r = await fetch(cfg.team + '/cdn-cgi/access/certs', { signal: AbortSignal.timeout(8000) });
+      const datum = Date.parse(r.headers && typeof r.headers.get === 'function' ? (r.headers.get('date') || '') : '');
+      if (!isNaN(datum)) appStaat.klok = { afwijking_ms: Date.now() - datum, op: Date.now() };
+      if (!r.ok) throw new Error('certs HTTP ' + r.status);
+      const j = await r.json();
+      const keys = Array.isArray(j && j.keys) ? j.keys : [];
+      appStaat.certs = { team: cfg.team, keys: keys, op: Date.now(), tot: Date.now() + 10 * 60 * 1000 };
+      return keys;
+    } catch (e) { appStaat.certsFout = Date.now(); throw e; }
+    finally { appStaat.certsBezig = null; }
+  })();
+  return appStaat.certsBezig;
 }
 function appB64Json(s) { return JSON.parse(Buffer.from(s, 'base64url').toString('utf8')); }
 async function appAccessOk(req, cfg) {
@@ -3213,21 +3242,40 @@ async function appTelegram(tekst) {
 async function appStatus(req, res, reg) {
   const a = appApparaat(req, reg);
   const s = a ? appSessie(req, a, false) : null;
-  appStuur(res, 200, { ok: true, koppelen_open: appKoppelOpen(reg), apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort } : null,
+  const k = a ? null : appAanvraagVan(req);
+  appStuur(res, 200, { ok: true, koppelen_open: appKoppelOpen(reg), aanvraag_mogelijk: appAanvraagMogelijk(reg),
+    aanvraag: k ? appAanvraagUit(k) : null, apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort } : null,
     sessie: !!s, sessie_tot: s ? new Date(s.tot).toISOString() : null, passkey_klaar: !!appWebauthn() });
+}
+
+function appBindingOk(req, k) {
+  const b = String(req.headers['x-app-koppel'] || '');
+  return !!k && /^[a-f0-9]{64}$/.test(b) && appGelijk(appSha(b), k.binding);
+}
+function appNaam(d, req) { return String(d.naam || '').replace(/[^\p{L}\p{N} ._'()-]/gu, '').trim().slice(0, 40) || appBeschrijf(req); }
+// Dag- en minuutgrens voor alles wat een Telegram-bericht kost (codes, aanvragen); op schijf, kapot = dicht.
+function appTijdslot(res, veld, perDag) {
+  const nu = Date.now();
+  const st = appLeesStreng(APP_STAAT, {});
+  const tijden = (Array.isArray(st[veld]) ? st[veld] : []).filter(function (t) { return nu - t < 86400000; });
+  const laatste = tijden[tijden.length - 1] || 0;
+  if (nu - laatste < APP_CODE_INTERVAL_MS) { appWeiger(res, 429, 'er is net een bericht verstuurd; wacht een minuut', 'binnen de minuut'); return false; }
+  if (tijden.length >= perDag) { appWeiger(res, 429, 'te veel pogingen vandaag; vraag de machinekamer', 'dagGrens'); return false; }
+  tijden.push(nu);
+  st[veld] = tijden;
+  try { appSchrijfJson(APP_STAAT, st); } catch (e) { logError('app-staat', e); appWeiger(res, 500, 'opslag', 'staat niet schrijfbaar'); return false; }
+  return true;
 }
 
 async function appKoppelCode(req, res, reg) {
   if (!appKoppelOpen(reg)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht');
+  // Zolang een code nog geldig is, krijgt alleen dezelfde browser een nieuwe: een ander kan Davids poging niet
+  // overschrijven (Fable-review 7-10 #6).
+  const lopend = appStaat.koppel;
+  if (lopend && Date.now() < lopend.tot && !appBindingOk(req, lopend))
+    return appWeiger(res, 409, 'er loopt al een koppeling vanuit een andere browser; wacht ' + Math.ceil((lopend.tot - Date.now()) / 60000) + ' min', 'koppeling loopt');
+  if (!appTijdslot(res, 'code_tijden', APP_CODE_PER_DAG)) return;   // kapotte staat gooit hier (fail-closed)
   const nu = Date.now();
-  const st = appLeesStreng(APP_STAAT, {});
-  const tijden = (Array.isArray(st.code_tijden) ? st.code_tijden : []).filter(function (t) { return nu - t < 86400000; });
-  const laatste = tijden[tijden.length - 1] || 0;
-  if (nu - laatste < APP_CODE_INTERVAL_MS) return appWeiger(res, 429, 'er is net een code verstuurd; wacht een minuut', 'binnen de minuut');
-  if (tijden.length >= APP_CODE_PER_DAG) return appWeiger(res, 429, 'te veel codes vandaag; vraag de machinekamer', 'dagGrens');
-  tijden.push(nu);
-  st.code_tijden = tijden;
-  try { appSchrijfJson(APP_STAAT, st); } catch (e) { logError('app-staat', e); return appWeiger(res, 500, 'opslag', 'staat niet schrijfbaar'); }
   const code = String(crypto.randomInt(0, 100000000)).padStart(8, '0');
   const binding = crypto.randomBytes(32).toString('hex');
   const zout = crypto.randomBytes(16).toString('hex');
@@ -3239,29 +3287,112 @@ async function appKoppelCode(req, res, reg) {
   appStuur(res, 200, { ok: true, verstuurd: true, geldig_min: APP_CODE_MS / 60000 }, { koppel: { w: binding, s: APP_CODE_MS / 1000 } });
 }
 
-// Gebonden aan de browser (koppelcookie), max 5 pogingen; elke mislukking telt, ook een vreemde browser.
+// Gebonden aan de browser (koppelcookie), max 5 pogingen. Alleen een fout van de JUISTE browser telt: een vreemde browser
+// kan de code toch niet gebruiken en mag Davids poging dus ook niet opmaken (Fable-review 7-10 #6).
 function appKoppelCheck(req, res, metCode, d) {
   const k = appStaat.koppel;
   if (!k || Date.now() > k.tot) { appStaat.koppel = null; appWeiger(res, 403, 'geen geldige code; vraag een nieuwe aan', 'geen code'); return null; }
-  const b = String(req.headers['x-app-koppel'] || '');
-  const bindingOk = /^[a-f0-9]{64}$/.test(b) && appGelijk(appSha(b), k.binding);
+  if (!appBindingOk(req, k)) { appWeiger(res, 403, 'deze code hoort bij een andere browser', 'andere browser'); return null; }
   const codeOk = !metCode || (/^[0-9]{8}$/.test(String(d.code || '')) && appGelijk(appSha(k.zout + String(d.code)), k.code));
-  if (bindingOk && codeOk && (metCode || k.geverifieerd)) return k;
+  if (codeOk && (metCode || k.geverifieerd)) return k;
   k.pogingen++;
   const over = APP_CODE_POGINGEN - k.pogingen;
   if (over <= 0) appStaat.koppel = null;
-  appWeiger(res, 403, over > 0 ? (bindingOk ? 'code klopt niet; nog ' + over + ' poging(en)' : 'deze code hoort bij een andere browser') : 'code ongeldig gemaakt na te veel pogingen; vraag een nieuwe aan',
-    !bindingOk ? 'andere browser' : (metCode ? 'code fout' : 'niet geverifieerd'));
+  appWeiger(res, 403, over > 0 ? 'code klopt niet; nog ' + over + ' poging(en)' : 'code ongeldig gemaakt na te veel pogingen; vraag een nieuwe aan',
+    metCode ? 'code fout' : 'niet geverifieerd');
   return null;
 }
 
+// ── fase 2: volgend apparaat via een aanvraag, goedgekeurd op een meereizend apparaat (Fable-review 7-10 #3) ──
+// Precies één open aanvraag tegelijk, met een eigen willekeurig id; de goedkeuring noemt dat id, dus raakt alleen de
+// aanvraag die de telefoon toonde. Goedkeuren alleen met een vingerafdruk van hooguit 2 min op een apparaat dat in HET
+// REGISTER 'reist' heet. Elke aanvraag geeft een Telegram-melding.
+function appAanvraagMogelijk(reg) {
+  return !!reg.ooit_gekoppeld && reg.apparaten.some(function (a) { return a.actief && a.soort === 'reist'; });
+}
+function appAanvraagGeldig() {
+  const k = appStaat.aanvraag;
+  if (k && Date.now() > k.tot) { appStaat.aanvraag = null; return null; }
+  return k;
+}
+function appAanvraagVan(req) { const k = appAanvraagGeldig(); return k && appBindingOk(req, k) ? k : null; }
+function appAanvraagUit(k) {
+  return { id: k.id, controle: k.controle, naam: k.naam, systeem: k.systeem, status: k.status,
+    sinds: new Date(k.sinds).toISOString(), tot: new Date(k.tot).toISOString() };
+}
+
+async function appKoppelAanvraag(req, res, reg, d) {
+  if (!reg.ooit_gekoppeld) return appWeiger(res, 403, 'koppel je eerste apparaat met de code uit Telegram', 'nog geen eerste apparaat');
+  if (!appAanvraagMogelijk(reg)) return appWeiger(res, 403, 'er is geen meereizend apparaat om goed te keuren; vraag de machinekamer de coderoute te heropenen', 'geen goedkeurder');
+  const k = appAanvraagGeldig();
+  if (k && k.status !== 'afgewezen') {
+    if (appBindingOk(req, k)) return appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
+    return appWeiger(res, 409, 'er loopt al een aanvraag van een ander apparaat; wacht ' + Math.ceil((k.tot - Date.now()) / 60000) + ' min of wijs hem af op je telefoon', 'aanvraag loopt');
+  }
+  if (!appTijdslot(res, 'aanvraag_tijden', APP_AANVRAAG_PER_DAG)) return;
+  const nu = Date.now();
+  const binding = crypto.randomBytes(32).toString('hex');
+  const id = crypto.randomBytes(8).toString('hex');
+  const n = { id: id, controle: id.slice(0, 6).toUpperCase(), binding: appSha(binding), naam: appNaam(d, req), systeem: appBeschrijf(req),
+    sinds: nu, tot: nu + APP_AANVRAAG_MS, status: 'open', door: null, pogingen: 0 };
+  appStaat.aanvraag = n;
+  const ok = await appTelegram('Socev-app: nieuw apparaat wil koppelen - "' + n.naam + '" (' + n.systeem + '), controlecode ' + n.controle +
+    '. Goedkeuren kan alleen in de app op je telefoon (tab Apparaten), 10 min geldig. Niet jij? Niet goedkeuren en meld het de machinekamer.');
+  if (!ok) { appStaat.aanvraag = null; return appWeiger(res, 502, 'de melding kon niet via Telegram worden verstuurd; probeer het over een minuut opnieuw', 'telegram'); }
+  res._app.reden = 'aanvraag ' + n.controle + ' (' + n.systeem + ')';
+  appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(n) }, { koppel: { w: binding, s: APP_AANVRAAG_MS / 1000 } });
+}
+
+function appKoppelStand(req, res) {
+  const k = appAanvraagVan(req);
+  appStuur(res, 200, { ok: true, aanvraag: k ? appAanvraagUit(k) : null });
+}
+
+// Voor het goedkeurende apparaat: de open aanvraag (alleen ter herkenning; de beslissing hangt aan het id).
+function appAanvraagLijst(req, res) {
+  const k = appAanvraagGeldig();
+  appStuur(res, 200, { ok: true, aanvraag: k && k.status === 'open' ? appAanvraagUit(k) : null });
+}
+
+function appKoppelGoedkeur(req, res, reg, a, s, d, afwijzen) {
+  const id = String(d.aanvraag_id || '');
+  const k = appAanvraagGeldig();
+  if (!afwijzen) {
+    if (a.soort !== 'reist') return appWeiger(res, 403, 'goedkeuren kan alleen vanaf een meereizend apparaat (je telefoon)', 'geen reist-apparaat');
+    if (Date.now() > s.vers_tot) return appWeiger(res, 403, 'bevestig eerst opnieuw met je vingerafdruk', 'niet vers');
+  }
+  if (!k || k.status !== 'open' || !/^[a-f0-9]{16}$/.test(id) || !appGelijk(id, k.id))
+    return appWeiger(res, 409, 'deze aanvraag bestaat niet (meer); ververs de lijst', 'aanvraag-id klopt niet');
+  if (afwijzen) {
+    k.status = 'afgewezen';
+    res._app.reden = 'afgewezen ' + k.controle;
+    return appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
+  }
+  k.status = 'goedgekeurd'; k.door = a.id;
+  k.tot = Math.max(k.tot, Date.now() + 5 * 60 * 1000);   // genoeg tijd om de passkey te maken
+  res._app.reden = 'goedgekeurd ' + k.controle + ' (' + k.systeem + ')';
+  appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
+}
+
+// Welke koppeling hoort bij deze browser: een aanvraag (fase 2) of de code (eerste apparaat).
+function appKoppelBron(req, res, reg, d, metCodeVraag) {
+  const aanv = appAanvraagVan(req);
+  if (aanv) {
+    if (aanv.status !== 'goedgekeurd') { appWeiger(res, 403, 'wacht op goedkeuring op je telefoon', 'niet goedgekeurd'); return null; }
+    return { k: aanv, soort: 'aanvraag' };
+  }
+  if (!appKoppelOpen(reg)) { appWeiger(res, 403, 'koppelen dicht', 'route dicht'); return null; }
+  const k = appKoppelCheck(req, res, metCodeVraag ? !(appStaat.koppel && appStaat.koppel.geverifieerd) : false, d);
+  return k ? { k: k, soort: 'code' } : null;
+}
+
 async function appKoppelOpties(req, res, reg, d) {
-  if (!appKoppelOpen(reg)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht');
   const wa = appWebauthn();
   if (!wa) return appWeiger(res, 503, 'passkey-bibliotheek ontbreekt op de pod', 'webauthn ' + appStaat.webauthnFout);
-  const k = appKoppelCheck(req, res, !(appStaat.koppel && appStaat.koppel.geverifieerd), d);
-  if (!k) return;
-  k.geverifieerd = true;   // de code zelf is hierna verbruikt; opnieuw opties halen kan binnen de 10 minuten
+  const bron = appKoppelBron(req, res, reg, d, true);
+  if (!bron) return;
+  const k = bron.k;
+  if (bron.soort === 'code') k.geverifieerd = true;   // de code zelf is hierna verbruikt; opnieuw opties halen kan binnen de 10 minuten
   const cfg = appConfig();
   const opties = await wa.generateRegistrationOptions({
     rpName: 'Socev', rpID: cfg.rpId, userName: 'david', userDisplayName: 'David',
@@ -3275,16 +3406,23 @@ async function appKoppelOpties(req, res, reg, d) {
   appStuur(res, 200, { ok: true, opties: opties });
 }
 
+// Alleen bekende transports opslaan (die gaan later terug naar de browser); 'internal' altijd erbij (Fable-review 7-10 #9).
+function appTransports(t) {
+  const l = (Array.isArray(t) ? t : []).filter(function (x, i, z) { return APP_TRANSPORTS.indexOf(x) >= 0 && z.indexOf(x) === i; });
+  if (l.indexOf('internal') < 0) l.push('internal');
+  return l;
+}
+
 async function appKoppelRegistreer(req, res, reg, d) {
-  if (!appKoppelOpen(reg)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht');
   const wa = appWebauthn();
   if (!wa) return appWeiger(res, 503, 'passkey-bibliotheek ontbreekt op de pod', 'webauthn');
-  const k = appKoppelCheck(req, res, false, d);
-  if (!k) return;
+  const bron = appKoppelBron(req, res, reg, d, false);
+  if (!bron) return;
+  const k = bron.k;
   const antw = d.antwoord;
   const fout = function (reden) {
     k.pogingen++;
-    if (k.pogingen >= APP_CODE_POGINGEN) appStaat.koppel = null;
+    if (k.pogingen >= APP_CODE_POGINGEN) { if (bron.soort === 'code') appStaat.koppel = null; else appStaat.aanvraag = null; }
     appWeiger(res, 403, 'registratie geweigerd: ' + reden, reden);
   };
   const uitdaging = k.uitdaging, geldigTot = k.uitdaging_tot;
@@ -3304,24 +3442,33 @@ async function appKoppelRegistreer(req, res, reg, d) {
   if (!v || !v.verified || !v.registrationInfo || !v.registrationInfo.userVerified) return fout('niet geverifieerd');
   const cred = v.registrationInfo.credential;
   const vers = appRegister();   // opnieuw lezen vlak voor het schrijven
-  if (!appKoppelOpen(vers)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht (intussen)');
+  let door = null;
+  if (bron.soort === 'code') {
+    if (!appKoppelOpen(vers)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht (intussen)');
+  } else {
+    // de aanvraag moet nog dezelfde zijn, en wie hem goedkeurde nog een actief meereizend apparaat
+    door = vers.apparaten.find(function (x) { return x.id === k.door && x.actief && x.soort === 'reist'; });
+    if (appStaat.aanvraag !== k || k.status !== 'goedgekeurd' || !door) return appWeiger(res, 403, 'de goedkeuring geldt niet meer; vraag opnieuw aan', 'goedkeuring vervallen');
+  }
   if (vers.apparaten.some(function (a) { return a.credential && a.credential.id === cred.id; })) return fout('deze passkey is al gekoppeld');
   const id = crypto.randomBytes(8).toString('hex');
   const geheim = crypto.randomBytes(32).toString('hex');
-  const naam = String(d.naam || '').replace(/[^\p{L}\p{N} ._'()-]/gu, '').trim().slice(0, 40) || appBeschrijf(req);
+  const naam = bron.soort === 'aanvraag' ? k.naam : appNaam(d, req);
   const nu = new Date().toISOString();
   const apparaat = { id: id, naam: naam, soort: 'reist', vaste_plek: null, systeem: appBeschrijf(req), aangemaakt: nu, laatst_gezien: nu, actief: true,
     cookie_hash: appSha(geheim), credential: { id: cred.id, publicKey: Buffer.from(cred.publicKey).toString('base64url'), counter: cred.counter || 0,
-      transports: Array.isArray(cred.transports) ? cred.transports.slice(0, 8) : [] },
+      transports: appTransports(cred.transports) },
     passkey: { soort: v.registrationInfo.credentialDeviceType, backup: !!v.registrationInfo.credentialBackedUp, aaguid: v.registrationInfo.aaguid },
-    gekoppeld_via: 'telegram-code' };
+    gekoppeld_via: bron.soort === 'code' ? 'telegram-code' : 'goedkeuring', goedgekeurd_door: door ? door.id : undefined };
   vers.apparaten.push(apparaat);
   vers.ooit_gekoppeld = true;
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
-  try { fs.unlinkSync(APP_HEROPEND); } catch (e) {}
-  appStaat.koppel = null;
-  res._app.apparaat = id; res._app.reden = 'gekoppeld (' + apparaat.systeem + ')';
-  appTelegram('Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '). De koppelroute met code is nu dicht. Niet jij? Meld het direct de machinekamer.');
+  if (bron.soort === 'code') { try { fs.unlinkSync(APP_HEROPEND); } catch (e) {} appStaat.koppel = null; }
+  else appStaat.aanvraag = null;
+  res._app.apparaat = id; res._app.reden = 'gekoppeld (' + apparaat.systeem + ', ' + apparaat.gekoppeld_via + ')';
+  appTelegram(bron.soort === 'code'
+    ? 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '). De koppelroute met code is nu dicht. Niet jij? Meld het direct de machinekamer.'
+    : 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '), goedgekeurd vanaf "' + door.naam + '". Niet jij? Trek het in (tab Apparaten) en meld het de machinekamer.');
   appStuur(res, 200, { ok: true, apparaat: { id: id, naam: naam, soort: apparaat.soort } },
     { koppel: null, apparaat: { w: id + '.' + geheim, s: APP_APPARAAT_COOKIE_S }, sessie: appNieuweSessie(apparaat) });
 }
@@ -3334,7 +3481,7 @@ async function appPasskeyOpties(req, res, reg) {
   res._app.apparaat = a.id;
   const cfg = appConfig();
   const opties = await wa.generateAuthenticationOptions({ rpID: cfg.rpId, userVerification: 'required', timeout: 60000,
-    allowCredentials: [{ id: a.credential.id, transports: a.credential.transports }] });
+    allowCredentials: [{ id: a.credential.id, transports: appTransports(a.credential.transports) }] });
   appStaat.uitdagingen[a.id] = { c: opties.challenge, tot: Date.now() + APP_UITDAGING_MS };
   appStuur(res, 200, { ok: true, opties: opties });
 }
@@ -3355,7 +3502,7 @@ async function appPasskeyBevestig(req, res, reg, d) {
   try {
     v = await wa.verifyAuthenticationResponse({ response: antw, expectedChallenge: u.c, expectedOrigin: cfg.herkomst, expectedRPID: cfg.rpId,
       requireUserVerification: true,
-      credential: { id: a.credential.id, publicKey: Buffer.from(a.credential.publicKey, 'base64url'), counter: a.credential.counter || 0, transports: a.credential.transports } });
+      credential: { id: a.credential.id, publicKey: Buffer.from(a.credential.publicKey, 'base64url'), counter: a.credential.counter || 0, transports: appTransports(a.credential.transports) } });
   } catch (e) { return appWeiger(res, 401, 'bevestiging geweigerd', 'controle: ' + String(e && e.message || e).slice(0, 80)); }
   if (!v || !v.verified || !v.authenticationInfo.userVerified) return appWeiger(res, 401, 'bevestiging geweigerd', 'niet geverifieerd');
   const vers = appRegister();
@@ -3372,7 +3519,7 @@ function appApparatenLijst(req, res, reg, a) {
   appStuur(res, 200, { ok: true, apparaten: reg.apparaten.map(function (x) {
     return { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, systeem: x.systeem, aangemaakt: x.aangemaakt,
       laatst_gezien: x.laatst_gezien, actief: !!x.actief, ingetrokken_op: x.ingetrokken_op || null, dit_apparaat: x.id === a.id,
-      passkey_gesynchroniseerd: !!(x.passkey && x.passkey.backup) };
+      passkey_gesynchroniseerd: !!(x.passkey && x.passkey.backup), gekoppeld_via: x.gekoppeld_via || null };
   }) });
 }
 
@@ -3387,9 +3534,253 @@ function appIntrekken(req, res, reg, a, s, d) {
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
   appSessiesWeg(id);
   delete appStaat.uitdagingen[id];
+  // een goedkeuring van dit apparaat die nog niet tot een koppeling leidde, vervalt mee
+  if (appStaat.aanvraag && appStaat.aanvraag.door === id) appStaat.aanvraag = null;
   res._app.reden = 'ingetrokken ' + id;
   appTelegram('Socev-app: apparaat "' + x.naam + '" ingetrokken (vanaf "' + a.naam + '").');
   appStuur(res, 200, { ok: true }, id === a.id ? { sessie: null, apparaat: null } : null);
+}
+
+// ── fase 3: gesprek (bouwplan § 4.5, § 4.7, § 4.8) ──
+function appOmlijsting() {
+  try { const t = fs.readFileSync(APP_OMLIJSTING, 'utf8').replace(/\s+$/, ''); return t.length > 100 ? t : ''; } catch (e) { return ''; }
+}
+// Zelfde herkenning als de hoofdbot (n8n "Claude via Telegram" > Opmaak): precies één regel VRAAG AAN DAVID:, niet
+// genummerd. Hash = FNV-1a van de vraagregel (zelfde als vraag_id in Telegram).
+function appVraagUit(raw) {
+  raw = String(raw || '');
+  const vq = /^[^\S\n]*[*_]*VRAAG AAN DAVID:[*_]*[^\S\n]*(.+)$/m.exec(raw);
+  if (!vq || (raw.match(/^[^\S\n]*[*_]*VRAAG AAN DAVID:/gm) || []).length !== 1 || /^\(?\d+[.)]/.test(vq[1].replace(/^[*_\s]+/, ''))) return null;
+  let h = 0x811c9dc5;
+  for (const ch of vq[1]) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+  return { hash: h.toString(16).padStart(8, '0'), tekst: vq[1].replace(/[*_]+\s*$/, '').trim() };
+}
+function appUitvoer(j) {
+  const r = (j && j.result) || {};
+  let out = typeof r.output === 'string' ? r.output : '';
+  if (r.output_file) { try { out = fs.readFileSync(r.output_file, 'utf8'); } catch (e) { out = ''; } }
+  return out.trim();
+}
+function appKlok(iso) {
+  try { return new Date(iso || Date.now()).toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' }); }
+  catch (e) { return new Date(iso || Date.now()).toISOString().slice(11, 16); }
+}
+
+function appRolOk() {
+  // Alleen de actieve kant neemt beurten aan (zoals /run via rolPoort); na een processtart hooguit even wachten op de eerste lezing.
+  if (rol.eerste) return Promise.resolve(rolPrimair());
+  let t = null;
+  return Promise.race([rolEerste, new Promise(function (r) { t = setTimeout(r, ROL_START_WACHT_MS); })])
+    .then(function () { clearTimeout(t); return rolPrimair(); });
+}
+function appLopend(kanaal) {
+  return Object.keys(jobs).some(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); });
+}
+
+// beurt_id -> job, 24 u; in het geheugen en (best effort) op schijf, zodat ook een herhaling na een herstart geen tweede beurt geeft.
+function appBeurtIds() {
+  if (!appStaat.beurtIds) appStaat.beurtIds = appLeesJson(APP_BEURTEN, {}) || {};
+  const nu = Date.now(), m = appStaat.beurtIds;
+  Object.keys(m).forEach(function (k) { if (!m[k] || nu - m[k].t > 86400000) delete m[k]; });
+  return m;
+}
+function appVragen() { return appLeesStreng(APP_VRAGEN, {}); }
+function appVragenSchrijf(v) {
+  const nu = Date.now();
+  Object.keys(v).forEach(function (k) { if (!v[k] || nu - Date.parse(v[k].t || 0) > APP_LOG_MS) delete v[k]; });
+  appSchrijfJson(APP_VRAGEN, v);
+}
+
+// Geschiedenis: asynchroon en fail-open. Een schrijffout raakt nooit de beurt of Telegram (bouwplan § 4.7, review #8).
+function appLogPad(kanaal) { return path.join(APP_LOG_DIR, kanaal + '.jsonl'); }
+async function appLogSchrijf(kanaal, o) {
+  try {
+    await fs.promises.mkdir(APP_LOG_DIR, { recursive: true, mode: 0o700 });
+    await fs.promises.appendFile(appLogPad(kanaal), JSON.stringify(o) + '\n', { mode: 0o600 });
+    const dag = new Date().toISOString().slice(0, 10);
+    if (appStaat.logOpgeschoond[kanaal] !== dag) {
+      appStaat.logOpgeschoond[kanaal] = dag;
+      const grens = Date.now() - APP_LOG_MS;
+      const regels = (await fs.promises.readFile(appLogPad(kanaal), 'utf8')).split('\n').filter(Boolean);
+      const blijf = regels.filter(function (l) { try { return Date.parse(JSON.parse(l).t) >= grens; } catch (e) { return false; } });
+      if (blijf.length < regels.length) {
+        const tmp = appLogPad(kanaal) + '.nieuw.' + process.pid;
+        await fs.promises.writeFile(tmp, blijf.map(function (l) { return l + '\n'; }).join(''), { mode: 0o600 });
+        await fs.promises.rename(tmp, appLogPad(kanaal));
+      }
+    }
+    return true;
+  } catch (e) { logError('app-log', e); return false; }
+}
+async function appLogLees(kanaal) {
+  const t = await fs.promises.readFile(appLogPad(kanaal), 'utf8');
+  return t.split('\n').filter(Boolean).map(function (l) { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+}
+
+// Na afloop van een app-beurt: vraag vastleggen (alleen job:hash), antwoord in de geschiedenis, en pas dán "opgehaald"
+// (een dichte app houdt een uitrol dan niet op; § 4.5).
+async function appNaBeurt(jobId) {
+  const j = jobs[jobId];
+  if (!j || !j.app) return;
+  const r = j.result || {};
+  const out = appUitvoer(j);
+  const vraag = appVraagUit(out);
+  if (vraag) {
+    try { const v = appVragen(); v[jobId + ':' + vraag.hash] = { kanaal: j.app.kanaal, t: new Date().toISOString(), antwoord: null }; appVragenSchrijf(v); }
+    catch (e) { logError('app-vragen', e); }
+  }
+  j.app.vraag = vraag;
+  const goed = await appLogSchrijf(j.app.kanaal, { t: new Date().toISOString(), job_id: jobId, beurt_id: j.app.beurt_id, soort: j.app.soort,
+    apparaat: j.app.apparaat, tekst: j.app.tekst, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
+    vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
+  if (goed && !j.opgehaald) j.opgehaald = Date.now();
+}
+
+function appStartBeurt(a, kanaal, promptTekst, meta) {
+  const chatId = APP_KANALEN[kanaal];
+  let prompt = '[APP] ' + promptTekst;
+  if (kanaal === 'machinekamer') {
+    const om = appOmlijsting();
+    if (!om) return { fout: 'omlijsting' };
+    prompt = om + '\n' + prompt;
+  }
+  const keuze = resolveKeuze({});
+  if (keuze.fout) return { fout: 'brein' };
+  const jobId = crypto.randomBytes(8).toString('hex');
+  jobs[jobId] = { status: 'pending', created: Date.now(), workspace: DEFAULT_WS, chat_id: chatId, runtime: keuze.runtime,
+    app: { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, soort: meta.soort, tekst: meta.tekst } };
+  // Zelfde wachtrij als /run: een Telegram-bericht en een app-bericht in hetzelfde gesprek lopen na elkaar.
+  enqueue(sessionKey(DEFAULT_WS, chatId), function () {
+    return processJob(jobId, prompt, '', [], chatId, DEFAULT_WS, keuze, '').then(function () { return appNaBeurt(jobId); });
+  });
+  return { job_id: jobId };
+}
+function appStartFout(res, st) {
+  if (st.fout === 'omlijsting') return appWeiger(res, 503, 'de machinekamer-omlijsting ontbreekt op de pod; gebruik de debug-bot', 'omlijsting ontbreekt');
+  return appWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
+}
+// Gemeenschappelijke voorwaarden voor alles wat een beurt start (bericht, knop).
+async function appMagBeurt(res, kanaal) {
+  if (!(await appRolOk())) { appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik Telegram', 'rol passief'); return false; }
+  if (appLopend(kanaal)) { appWeiger(res, 409, 'Socev is in dit kanaal nog bezig; wacht op het antwoord', 'kanaal bezig'); return false; }
+  if (!appTeller('beurt', APP_BEURTEN_PER_UUR, 3600000)) { appWeiger(res, 429, 'te veel berichten dit uur (max ' + APP_BEURTEN_PER_UUR + '); gebruik Telegram', 'grens beurt'); return false; }
+  return true;
+}
+
+async function appBeurt(req, res, reg, a, s, d) {
+  const kanaal = String(d.kanaal || '');
+  if (!APP_KANALEN[kanaal]) return appWeiger(res, 400, 'onbekend kanaal', 'kanaal');
+  const bid = String(d.beurt_id || '');
+  if (!/^[a-z0-9-]{8,64}$/.test(bid)) return appWeiger(res, 400, 'beurt_id ontbreekt', 'beurt_id');
+  if (Array.isArray(d.bestanden) && d.bestanden.length) return appWeiger(res, 400, 'bestanden sturen kan nog niet in de app; gebruik Telegram of het bestandenportaal', 'bestanden');
+  const tekst = String(d.tekst == null ? '' : d.tekst).replace(/\r\n?/g, '\n').trim();
+  if (!tekst) return appWeiger(res, 400, 'leeg bericht', 'leeg');
+  if (tekst.length > APP_TEKST_MAX) return appWeiger(res, 413, 'bericht te lang (max ' + APP_TEKST_MAX + ' tekens)', 'te lang');
+  const bh = appSha(bid);
+  const eerder = appBeurtIds()[bh];
+  if (eerder) { res._app.reden = 'herhaling ' + eerder.job; return appStuur(res, 200, { ok: true, job_id: eerder.job, al: true }); }
+  if (!(await appMagBeurt(res, kanaal))) return;
+  const ids = appBeurtIds();
+  if (ids[bh]) { res._app.reden = 'herhaling ' + ids[bh].job; return appStuur(res, 200, { ok: true, job_id: ids[bh].job, al: true }); }   // tweede kwam tijdens de rolcheck
+  const st = appStartBeurt(a, kanaal, tekst, { beurt_id: bid, soort: 'bericht', tekst: tekst });
+  if (!st.job_id) return appStartFout(res, st);
+  ids[bh] = { job: st.job_id, t: Date.now() };
+  try { appSchrijfJson(APP_BEURTEN, ids); } catch (e) { logError('app-beurten', e); }
+  res._app.reden = 'beurt ' + kanaal + ' ' + st.job_id;
+  appStuur(res, 200, { ok: true, job_id: st.job_id });
+}
+
+function appBeantwoord(jobId, hash) {
+  try { const v = appVragen()[jobId + ':' + hash]; return v && v.antwoord ? v.antwoord : null; } catch (e) { return null; }
+}
+
+function appUitslag(req, res, reg, a, s, d) {
+  const id = String(d.job_id || '');
+  if (!/^[a-f0-9]{16}$/.test(id)) return appWeiger(res, 400, 'job_id ontbreekt', 'job_id');
+  const j = jobs[id];
+  // Alleen jobs die via /app zijn gestart; van een andere job verraden we niet eens dat hij bestaat.
+  if (!j || !j.app) return appStuur(res, 200, { ok: true, gevonden: false });
+  if (j.status !== 'done') {
+    return appStuur(res, 200, { ok: true, gevonden: true, klaar: false, status: j.status, kanaal: j.app.kanaal,
+      running_ms: (j.progress && j.progress.running_ms) || 0, last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0 });
+  }
+  if (!j.opgehaald) j.opgehaald = Date.now();
+  const r = j.result || {};
+  const out = appUitvoer(j);
+  const vraag = j.app.vraag !== undefined ? j.app.vraag : appVraagUit(out);
+  appStuur(res, 200, { ok: true, gevonden: true, klaar: true, kanaal: j.app.kanaal, job_id: id, gelukt: r.ok !== false,
+    antwoord: out, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : null,
+    vraag: vraag ? { hash: vraag.hash, tekst: vraag.tekst, beantwoord: appBeantwoord(id, vraag.hash) } : null,
+    bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
+}
+
+async function appKnopVraagTekst(jobId, kanaal, hash) {
+  const j = jobs[jobId];
+  if (j && j.app && j.status === 'done') { const v = appVraagUit(appUitvoer(j)); if (v && v.hash === hash) return v.tekst; }
+  try {
+    const l = (await appLogLees(kanaal)).filter(function (x) { return x.job_id === jobId; }).pop();
+    const v = l ? appVraagUit(l.antwoord) : null;
+    if (v && v.hash === hash) return v.tekst;
+  } catch (e) {}
+  return null;
+}
+
+// Eén keer per vraag (job + hash), van welk apparaat ook; de tekst is die van de Telegram-knop (n8n "Vraagknop lezen"),
+// met kanaal "app-knop".
+async function appKnop(req, res, reg, a, s, d) {
+  const jobId = String(d.job_id || ''), hash = String(d.vraag_hash || ''), keuze = String(d.keuze || '');
+  if (!/^[a-f0-9]{16}$/.test(jobId) || !/^[a-f0-9]{8}$/.test(hash) || ['ja', 'nee', 'anders'].indexOf(keuze) < 0) return appWeiger(res, 400, 'ongeldige knop', 'knop velden');
+  const toel = String(d.toelichting == null ? '' : d.toelichting).replace(/\r\n?/g, '\n').trim();
+  if (keuze === 'anders' && !toel) return appWeiger(res, 400, 'typ je toelichting', 'geen toelichting');
+  if (toel.length > 4000) return appWeiger(res, 413, 'toelichting te lang', 'te lang');
+  const sleutel = jobId + ':' + hash;
+  let v;
+  try { v = appVragen(); } catch (e) { logError('app-vragen', e); return appWeiger(res, 503, 'vragenregister onleesbaar; vraag de machinekamer', 'vragen kapot'); }
+  const rij = v[sleutel];
+  if (!rij) return appWeiger(res, 404, 'deze vraag ken ik niet (meer); antwoord gewoon in tekst', 'onbekende vraag');
+  const al = function (x) { return appStuur(res, 409, { ok: false, fout: 'al beantwoord: ' + (x.keuze === 'ja' ? 'Ja' : x.keuze === 'nee' ? 'Nee' : 'Anders') + ' ' + appKlok(x.t), beantwoord: x }); };
+  if (rij.antwoord) { res._app.reden = 'al beantwoord'; return al(rij.antwoord); }
+  const vz = (await appKnopVraagTekst(jobId, rij.kanaal, hash)) || '(vraagzin niet leesbaar in het bericht)';
+  if (!(await appMagBeurt(res, rij.kanaal))) return;
+  // opnieuw lezen ná het wachten: een tweede druk die intussen binnenkwam, wint niet
+  v = appVragen();
+  if (!v[sleutel]) return appWeiger(res, 404, 'deze vraag ken ik niet (meer)', 'onbekende vraag');
+  if (v[sleutel].antwoord) { res._app.reden = 'al beantwoord'; return al(v[sleutel].antwoord); }
+  const tijd = appKlok();
+  const kanaalNaam = rij.kanaal === 'hoofd' ? 'het hoofdkanaal' : 'de machinekamer';
+  const tekst = keuze === 'anders'
+    ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + toel + '\n(Knopdruk in de app (' + kanaalNaam + ') om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
+    : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk in de app (' + kanaalNaam + ') om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)';
+  const antwoord = { keuze: keuze, t: new Date().toISOString(), apparaat: a.id };
+  v[sleutel].antwoord = antwoord;
+  try { appVragenSchrijf(v); } catch (e) { logError('app-vragen', e); return appWeiger(res, 500, 'opslag', 'vragen niet schrijfbaar'); }
+  const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', tekst: (keuze === 'ja' ? '✓ Ja' : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
+  if (!st.job_id) {
+    // niet gestart: de vraag is dan ook niet beantwoord
+    try { const w = appVragen(); if (w[sleutel]) { w[sleutel].antwoord = null; appVragenSchrijf(w); } } catch (e) { logError('app-vragen', e); }
+    return appStartFout(res, st);
+  }
+  res._app.reden = 'knop ' + keuze + ' ' + hash + ' -> ' + st.job_id;
+  appStuur(res, 200, { ok: true, job_id: st.job_id, beantwoord: antwoord });
+}
+
+// Kanaal in het pad (/app/geschiedenis/<kanaal>): het doorgeefluik geeft alleen het pad door, geen querystring.
+async function appGeschiedenis(req, res, reg, a, kanaal) {
+  if (!APP_KANALEN[kanaal]) return appWeiger(res, 400, 'onbekend kanaal', 'kanaal');
+  const max = 100;
+  const lopend = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); })
+    .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, sinds: new Date(j.created).toISOString() }; });
+  let items = [], fout = null;
+  try { items = await appLogLees(kanaal); } catch (e) { if (!(e && e.code === 'ENOENT')) { logError('app-log-lees', e); fout = 'geschiedenis nu niet leesbaar'; } }
+  let vragen = {};
+  try { vragen = appVragen(); } catch (e) {}
+  items = items.slice(-max).map(function (x) {
+    const b = x.vraag_hash && vragen[x.job_id + ':' + x.vraag_hash];
+    return { t: x.t, job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
+      vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null } : null,
+      bestanden: x.bestanden || [] };
+  });
+  appStuur(res, 200, { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout });
 }
 
 function appIsPad(req) { const p = reqPath(req); return p === '/app' || p.indexOf('/app/') === 0; }
@@ -3422,6 +3813,8 @@ function handleApp(req, res) {
       const verder = function () {
         if (route === 'GET /app/status') return appStatus(req, res, reg);
         if (route === 'POST /app/koppel/code') return appKoppelCode(req, res, reg);
+        if (route === 'POST /app/koppel/aanvraag') return appKoppelAanvraag(req, res, reg, d);
+        if (route === 'GET /app/koppel/stand') return appKoppelStand(req, res);
         if (route === 'POST /app/koppel/opties') return appKoppelOpties(req, res, reg, d);
         if (route === 'POST /app/koppel/registreer') return appKoppelRegistreer(req, res, reg, d);
         if (route === 'POST /app/passkey/opties') return appPasskeyOpties(req, res, reg);
@@ -3431,13 +3824,20 @@ function handleApp(req, res) {
           if (/^[a-f0-9]{64}$/.test(c)) delete appStaat.sessies[appSha(c)];
           return appStuur(res, 200, { ok: true }, { sessie: null });
         }
-        // Vanaf hier: alleen met een pod-sessie (vingerafdruk) op een geldig apparaat.
+        // Vanaf hier: alleen met een pod-sessie (vingerafdruk) op een geldig apparaat. Alleen APP_GLIJD_ROUTES verlengen hem.
         const a = appApparaat(req, reg);
         const s = a ? appSessie(req, a, APP_GLIJD_ROUTES.has(route)) : null;
         if (!s) return appWeiger(res, 401, 'bevestig met je vingerafdruk', a ? 'geen sessie' : 'geen apparaat');
         res._app.apparaat = a.id;
         if (route === 'GET /app/apparaten') return appApparatenLijst(req, res, reg, a);
         if (route === 'POST /app/apparaat/intrekken') return appIntrekken(req, res, reg, a, s, d);
+        if (route === 'GET /app/apparaat/aanvraag') return appAanvraagLijst(req, res);
+        if (route === 'POST /app/koppel/goedkeur') return appKoppelGoedkeur(req, res, reg, a, s, d, false);
+        if (route === 'POST /app/koppel/afwijs') return appKoppelGoedkeur(req, res, reg, a, s, d, true);
+        if (route === 'POST /app/beurt') return appBeurt(req, res, reg, a, s, d);
+        if (route === 'POST /app/uitslag') return appUitslag(req, res, reg, a, s, d);
+        if (route === 'POST /app/knop') return appKnop(req, res, reg, a, s, d);
+        if (route.indexOf('GET /app/geschiedenis/') === 0) return appGeschiedenis(req, res, reg, a, route.slice('GET /app/geschiedenis/'.length));
         return appWeiger(res, 404, 'onbekend', 'route');
       };
       Promise.resolve().then(verder).catch(function (e) {
@@ -3457,14 +3857,23 @@ setInterval(function () {
   Object.keys(appStaat.sessies).forEach(function (h) { if (nu > appStaat.sessies[h].tot) delete appStaat.sessies[h]; });
   Object.keys(appStaat.uitdagingen).forEach(function (h) { if (nu > appStaat.uitdagingen[h].tot) delete appStaat.uitdagingen[h]; });
   if (appStaat.koppel && nu > appStaat.koppel.tot) appStaat.koppel = null;
+  if (appStaat.aanvraag && nu > appStaat.aanvraag.tot) appStaat.aanvraag = null;
 }, 60 * 1000).unref();
 
 function appInfo() {
   let reg;
   try { reg = appRegister(); } catch (e) { return { register: 'kapot', uit: fs.existsSync(APP_UIT) }; }
+  const k = appStaat.klok;
+  const afw = k ? Math.round(k.afwijking_ms / 1000) : null;
   return { uit: fs.existsSync(APP_UIT), ingericht: !!(appPoortGeheim() && appConfig().aud && appConfig().clientId),
     apparaten: reg.apparaten.filter(function (a) { return a.actief; }).length, koppelen_open: appKoppelOpen(reg),
-    sessies: Object.keys(appStaat.sessies).length, passkey_bibliotheek: appWebauthn() ? appStaat.webauthnBron : 'ontbreekt' };
+    aanvraag_open: !!appAanvraagGeldig(), sessies: Object.keys(appStaat.sessies).length,
+    beurten_lopend: Object.keys(jobs).filter(function (id) { return jobs[id].app && (jobs[id].status === 'pending' || jobs[id].status === 'running'); }).length,
+    omlijsting: !!appOmlijsting(),
+    passkey_bibliotheek: appWebauthn() ? appStaat.webauthnBron : 'ontbreekt',
+    // podklok tegen de Date-kop van de Access-certs (Fable-review 7-10 #12); > 2 min = alle Access-bewijzen falen
+    klok_afwijking_s: afw, klok_gemeten: k ? new Date(k.op).toISOString() : null,
+    klok_waarschuwing: afw !== null && Math.abs(afw) > 120 ? 'podklok wijkt ' + afw + ' s af; Access-bewijzen falen dan (exp/nbf)' : null };
 }
 // ── einde socev-app poort ─────────────────────────────────────────────────────────────────────────
 

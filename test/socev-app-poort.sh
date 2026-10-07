@@ -25,6 +25,9 @@ fs.symlinkSync('/opt/data/socev-app-data/vendor', path.join(DATA, 'vendor'));   
 const UIT = path.join(W, 'app-uit');
 const TEAM = 'https://huisdokter.cloudflareaccess.com', AUD = 'a'.repeat(64), CLIENT = 'proefclient.access', POORT = 'p'.repeat(64);
 fs.writeFileSync(path.join(DATA, 'config.json'), JSON.stringify({ access_team: TEAM, access_aud: AUD, servicetoken_client_id: CLIENT }));
+const OMLIJST = fs.readFileSync('/opt/data/socev-app-data/machinekamer-omlijsting.txt', 'utf8');
+fs.writeFileSync(path.join(DATA, 'machinekamer-omlijsting.txt'), OMLIJST);
+const LOGDIR = path.join(W, 'app-log');
 
 // nep-Access: eigen RSA-sleutel met kid 'proef'
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -37,16 +40,32 @@ function jwt(over, sleutel, kid) {
   return k + '.' + i + '.' + crypto.sign('RSA-SHA256', Buffer.from(k + '.' + i), sleutel || privateKey).toString('base64url');
 }
 const telegram = [];
+let certsTeller = 0, certsVertraging = 0, klokScheef = 0;
 async function nepFetch(url, opt) {
   url = String(url);
-  const antw = (status, j) => ({ ok: status < 300, status, json: async () => j, text: async () => JSON.stringify(j) });
-  if (url === TEAM + '/cdn-cgi/access/certs') return antw(200, { keys: [jwk] });
+  const antw = (status, j, kop) => ({ ok: status < 300, status, json: async () => j, text: async () => JSON.stringify(j), headers: { get: (n) => (kop || {})[String(n).toLowerCase()] || null } });
+  if (url === TEAM + '/cdn-cgi/access/certs') {
+    certsTeller++;
+    if (certsVertraging) await new Promise((r) => setTimeout(r, certsVertraging));
+    return antw(200, { keys: [jwk] }, { date: new Date(Date.now() - klokScheef).toUTCString() });
+  }
   if (url.startsWith('https://api.telegram.org/')) { telegram.push(JSON.parse(opt.body).text); return antw(200, { ok: true }); }
   return antw(404, {});
 }
 const logs = [];
-const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date,
-  process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT }, pid: process.pid },
+// nagebootste pod rond het blok: jobs, wachtrij per gesprek (zoals enqueue), processJob die de toets zelf afmaakt, rolwachter
+const jobs = {}, ketens = {}, gestart = [], afmaken = {};
+function enqueue(key, fn) { const prev = ketens[key] || Promise.resolve(); const next = prev.then(fn, fn).catch(() => {}); ketens[key] = next; return next; }
+function processJob(jobId, prompt, sess, files, chatId, ws, keuze) {
+  const j = jobs[jobId]; j.status = 'running'; j.started = Date.now(); j.progress = { running_ms: 5, last_activity_ms: 1 };
+  gestart.push({ jobId, prompt, chatId, ws, keuze });
+  return new Promise((r) => { afmaken[jobId] = (uit, ok) => { j.status = 'done'; j.done_at = Date.now(); j.result = { ok: ok !== false, output: ok === false ? '' : uit, error: ok === false ? uit : undefined, files: [] }; r(); }; });
+}
+const rolStub = { eerste: 1, primair: true };
+const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
+  process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR }, pid: process.pid },
+  jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
+  rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
 vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat };', ctx, { filename: 'server.js#app' });
@@ -166,7 +185,14 @@ async function bewijs(o) {
     toets('2 tweede code binnen de minuut -> 429, geen tweede bericht', r.status === 429 && telegram.length === 1, r.status);
     r = await vraag('POST', '/app/koppel/opties', { code: code1 }, { pot: B });
     toets('2 juiste code uit een andere browser -> 403', r.status === 403 && /andere browser/.test(r.j.fout), JSON.stringify(r.j));
+    for (let i = 0; i < 6; i++) r = await vraag('POST', '/app/koppel/opties', { code: code1 }, { pot: B });
+    toets('2 vreemde browser telt niet mee als poging (Fable #6): na 7 keer nog steeds "andere browser"', r.status === 403 && /andere browser/.test(r.j.fout), JSON.stringify(r.j));
+    await slaap(1100);
+    r = await vraag('POST', '/app/koppel/code', {}, { pot: B });
+    toets('2 andere browser kan Davids lopende code niet overschrijven (409)', r.status === 409 && /loopt al/.test(r.j.fout) && telegram.length === 1, JSON.stringify(r.j));
     for (let i = 0; i < 4; i++) r = await vraag('POST', '/app/koppel/opties', { code: code1 === '00000000' ? '11111111' : '00000000' }, { pot: A });
+    toets('2 vierde eigen fout: nog 1 poging', r.status === 403 && /nog 1/.test(r.j.fout), JSON.stringify(r.j));
+    r = await vraag('POST', '/app/koppel/opties', { code: code1 === '00000000' ? '11111111' : '00000000' }, { pot: A });
     toets('2 vijfde mislukte poging maakt de code ongeldig', r.status === 403 && /ongeldig gemaakt/.test(r.j.fout), JSON.stringify(r.j));
     r = await vraag('POST', '/app/koppel/opties', { code: code1 }, { pot: A });
     toets('2 zesde poging (nu met de juiste code) -> 403', r.status === 403, JSON.stringify(r.j));
@@ -204,12 +230,13 @@ async function bewijs(o) {
     opt = await X.p.evaluate(() => post('/api/koppel/opties', {}));
     cred = await X.p.evaluate((o) => maak(o), opt.j.opties);
     // zoals een passkey van Google Wachtwoordbeheer op Android: transports hybrid + internal, attachment platform (review #1)
-    r = await X.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: Object.assign({}, c, { response: Object.assign({}, c.response, { transports: ['hybrid', 'internal'] }) }), naam: 'Pixel <script>' }), cred);
+    r = await X.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: Object.assign({}, c, { response: Object.assign({}, c.response, { transports: ['hybrid', 'internal', 'raar<x>'] }) }), naam: 'Pixel <script>' }), cred);
     toets('3 echte registratie (GPM-achtig: hybrid+internal, platform) -> 200, apparaat + sessie', r.status === 200 && r.j.apparaat && r.j.apparaat.naam === 'Pixel script' && /^[a-f0-9]{16}\.[a-f0-9]{64}$/.test(X.jar.apparaat) && /^[a-f0-9]{64}$/.test(X.jar.sessie) && X.jar.koppel === '', JSON.stringify(r) + JSON.stringify(X.jar));
     toets('3 melding "apparaat gekoppeld" naar Telegram', /apparaat gekoppeld/.test(telegram[telegram.length - 1]));
     const reg = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
     const regTekst = JSON.stringify(reg);
     toets('3 user-handle per apparaat willekeurig (niet de vaste naam)', opt.j.opties.user.id !== Buffer.from('socev-app-david').toString('base64url') && !(opt.j.opties.excludeCredentials || []).length);
+    toets('3 transports gefilterd op bekende waarden (Fable #9)', JSON.stringify(reg.apparaten[0].credential.transports) === '["hybrid","internal"]', JSON.stringify(reg.apparaten[0].credential.transports));
     toets('3 register: één apparaat, alleen een hash van het cookiegeheim, 0600', reg.apparaten.length === 1 && reg.ooit_gekoppeld === true && regTekst.indexOf(X.jar.apparaat.split('.')[1]) < 0 && (fs.statSync(path.join(DATA, 'apparaten.json')).mode & 0o077) === 0, regTekst.slice(0, 200));
     r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
     toets('3 met sessie: apparatenlijst 200', r.status === 200 && r.j.apparaten.length === 1 && r.j.apparaten[0].dit_apparaat === true, JSON.stringify(r.j));
@@ -293,6 +320,7 @@ async function bewijs(o) {
     fs.writeFileSync(path.join(DATA, 'apparaten.json'), echtReg);
     const echtStaat = fs.readFileSync(path.join(DATA, 'staat.json'));
     fs.writeFileSync(path.join(DATA, 'staat.json'), 'xx');
+    H.appStaat.koppel = null;
     const nTel = telegram.length;
     await slaap(1100);
     r = await vraag('POST', '/app/koppel/code', {}, { pot: pot() });
@@ -301,19 +329,286 @@ async function bewijs(o) {
     n429 = 0;
     for (let i = 0; i < 32; i++) { const x = await vraag('POST', '/app/koppel/opties', { code: '12345678' }, { pot: pot() }); if (x.status === 429 && /dit uur/.test(x.j.fout)) n429++; }
     toets('6 koppelgrens 30/uur slaat aan', n429 > 0, n429);
+    const AV = path.join(DATA, 'audit-voor-auth.jsonl');
     const regelsVoor = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+    await slaap(60000 - (Date.now() % 60000) + 50);   // begin van een verse minuut
+    const voorVoor = fs.readFileSync(AV, 'utf8').split('\n').length;
     for (let i = 0; i < 60; i++) await vraag('GET', '/app/status', undefined, { poort: 'z'.repeat(64) });
     const regelsNa = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
-    toets('6 vloed van weigeringen vóór Access: hooguit 30 auditregels per minuut', regelsNa - regelsVoor <= 31, regelsNa - regelsVoor);
-    await vraag('GET', '/app/status');
-    toets('6 overgeslagen weigeringen worden geteld', /"overgeslagen_voor_auth":\d+/.test(fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8')));
-    const audit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+    const voorNa = fs.readFileSync(AV, 'utf8').split('\n').length;
+    toets('6 vloed van weigeringen vóór Access: niets in audit.jsonl, hooguit 5 regels/min in audit-voor-auth (Fable #4)', regelsNa === regelsVoor && voorNa - voorVoor <= 5, (regelsNa - regelsVoor) + ' / ' + (voorNa - voorVoor));
+    await slaap(60000 - (Date.now() % 60000) + 50);
+    await vraag('GET', '/app/status', undefined, { poort: 'z'.repeat(64) });
+    toets('6 overgeslagen weigeringen worden geteld', /"overgeslagen_voor_auth":\d+/.test(fs.readFileSync(AV, 'utf8')));
+    const audit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8') + fs.readFileSync(AV, 'utf8');
     const geheimen = [POORT, code1, code2, X.jar.koppel].filter(Boolean).concat(telegram.map(codeUit).filter(Boolean));
-    toets('6 auditlog: regels met route/status/reden', audit.split('\n').filter(Boolean).length > 50 && /"reden":"access: aud"/.test(audit) && /"reden":"andere browser"/.test(audit) && /gekoppeld/.test(audit));
+    toets('6 auditlog: regels met route/status/reden', audit.split('\n').filter(Boolean).length > 40 && /"reden":"access: aud"/.test(audit) && /"reden":"andere browser"/.test(audit) && /gekoppeld/.test(audit));
     toets('6 auditlog bevat geen codes, geheimen of cookies', geheimen.every((g) => audit.indexOf(g) < 0) && !/[a-f0-9]{64}/.test(audit));
     toets('6 geen onverwachte fouten in logError', logs.filter((l) => !/app-telegram|app-register: Expected property|app: Unexpected token .x., "xx"/.test(l)).length === 0, logs.join(' | '));
     const info = H.appInfo();
     toets('6 appInfo voor /health', info.ingericht === true && info.passkey_bibliotheek === 'brug' && info.apparaten === 0, JSON.stringify(info));
+
+    // ── 7. stap 0c: certs één keer tegelijk, klokafwijking in /health ──
+    {
+      H.appStaat.certs = null; H.appStaat.certsFout = 0; certsTeller = 0; certsVertraging = 300; klokScheef = 5 * 60 * 1000;
+      const rs = await Promise.all(Array.from({ length: 8 }, () => vraag('GET', '/app/status')));
+      certsVertraging = 0;
+      toets('7 acht gelijktijdige verzoeken zonder certs: één ophaalpoging (Fable #5)', certsTeller === 1 && rs.every((x) => x.status === 200), certsTeller + ' / ' + rs.map((x) => x.status));
+      let info = H.appInfo();
+      toets('7 podklok 5 min mis -> waarschuwing in /health.app (Fable #12)', Math.abs(info.klok_afwijking_s - 300) <= 2 && /wijkt/.test(info.klok_waarschuwing || ''), JSON.stringify(info));
+      H.appStaat.certs = null; klokScheef = 0;
+      await vraag('GET', '/app/status');
+      info = H.appInfo();
+      toets('7 klok gelijk -> geen waarschuwing', Math.abs(info.klok_afwijking_s) <= 2 && info.klok_waarschuwing === null && info.omlijsting === true, JSON.stringify(info));
+    }
+
+    // ── 8. fase 2: tweede apparaat met goedkeuring vanaf de telefoon ──
+    H.appStaat.koppel = null;
+    for (const t of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t] = [];
+    fs.writeFileSync(path.join(DATA, 'staat.json'), JSON.stringify({}));
+    fs.writeFileSync(path.join(DATA, 'koppel-heropend'), '');
+    const P = await nieuweBrowser('internal');   // de telefoon
+    r = await vraag('POST', '/app/koppel/code', {}, { pot: P.jar });
+    const codeP = codeUit(telegram[telegram.length - 1]);
+    let o = await P.p.evaluate((c) => post('/api/koppel/opties', { code: c }), codeP);
+    let c2 = await P.p.evaluate((x) => maak(x), o.j.opties);
+    r = await P.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: c, naam: 'Pixel' }), c2);
+    toets('8 telefoon gekoppeld (coderoute heropend)', r.status === 200 && !!P.jar.sessie, JSON.stringify(r));
+    const pixelId = r.j.apparaat.id;
+    const L = await nieuweBrowser('internal');   // de laptop
+    const ua = { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0 Edg/141.0' };
+    r = await vraag('GET', '/app/status', undefined, Object.assign({ pot: L.jar }, ua));
+    toets('8 laptop: koppelen met code dicht, aanvraag mogelijk', r.j.koppelen_open === false && r.j.aanvraag_mogelijk === true && r.j.apparaat === null, JSON.stringify(r.j));
+    r = await L.p.evaluate(() => post('/api/koppel/opties', {}));
+    toets('8 laptop koppelen zonder goedkeuring -> lukt niet (403)', r.status === 403, JSON.stringify(r));
+    const nTel8 = telegram.length;
+    r = await vraag('POST', '/app/koppel/aanvraag', { naam: 'Laptop' }, Object.assign({ pot: L.jar }, ua));
+    const aanvL = r.j.aanvraag;
+    toets('8 aanvraag: 200, eigen id + controlecode, koppelcookie', r.status === 200 && /^[a-f0-9]{16}$/.test(aanvL.id) && aanvL.controle === aanvL.id.slice(0, 6).toUpperCase() && /^[a-f0-9]{64}$/.test(L.jar.koppel), JSON.stringify(r));
+    toets('8 Telegram-melding bij de aanvraag (naam, systeem, controlecode)', telegram.length === nTel8 + 1 && telegram[telegram.length - 1].indexOf(aanvL.controle) > 0 && /Edge op Windows/.test(telegram[telegram.length - 1]), telegram[telegram.length - 1]);
+    r = await L.p.evaluate(() => post('/api/koppel/opties', {}));
+    toets('8 vóór goedkeuring: opties geweigerd (wacht op goedkeuring)', r.status === 403 && /goedkeuring/.test(r.j.fout), JSON.stringify(r));
+    const M = await nieuweBrowser('internal');   // een vreemde browser, kort erna
+    await slaap(1100);
+    r = await vraag('POST', '/app/koppel/aanvraag', { naam: 'Werk-pc' }, { pot: M.jar });
+    toets('8 tweede aanvraag kort erna van een andere browser -> 409 (één open aanvraag)', r.status === 409 && /loopt al/.test(r.j.fout), JSON.stringify(r));
+    r = await vraag('POST', '/app/koppel/aanvraag', { naam: 'Laptop' }, Object.assign({ pot: L.jar }, ua));
+    toets('8 dezelfde browser opnieuw: zelfde aanvraag, geen extra melding', r.status === 200 && r.j.aanvraag.id === aanvL.id && telegram.length === nTel8 + 1, JSON.stringify(r.j));
+    r = await vraag('GET', '/app/apparaat/aanvraag', undefined, { pot: P.jar });
+    toets('8 telefoon ziet precies de open aanvraag (naam, systeem, controle)', r.status === 200 && r.j.aanvraag && r.j.aanvraag.id === aanvL.id && r.j.aanvraag.naam === 'Laptop', JSON.stringify(r.j));
+    r = await vraag('GET', '/app/apparaat/aanvraag', undefined, { pot: L.jar });
+    toets('8 laptop zelf kan de aanvragenlijst niet lezen (geen sessie) -> 401', r.status === 401);
+    await slaap(4200);   // vingerafdruk ouder dan de (verkorte) 2 min
+    r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aanvL.id }, { pot: P.jar });
+    toets('8 goedkeuren met een oude vingerafdruk -> 403', r.status === 403 && /opnieuw/.test(r.j.fout), JSON.stringify(r.j));
+    o = await P.p.evaluate(() => post('/api/passkey/opties', {}));
+    r = await P.p.evaluate(async (x) => post('/api/passkey/bevestig', { antwoord: await bewijs(x) }), o.j.opties);
+    r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: 'f'.repeat(16) }, { pot: P.jar });
+    toets('8 goedkeuren met een ander aanvraag-id -> 409', r.status === 409, JSON.stringify(r.j));
+    {
+      // soort komt uit het register: een 'vast'-apparaat mag niet goedkeuren, ook met verse vingerafdruk
+      const regT = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      regT.apparaten.find((x) => x.id === pixelId).soort = 'vast';
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regT));
+      r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aanvL.id }, { pot: P.jar });
+      toets('8 goedkeuren vanaf een vaste-plek-apparaat (register) -> 403', r.status === 403 && /meereizend/.test(r.j.fout), JSON.stringify(r.j));
+      regT.apparaten.find((x) => x.id === pixelId).soort = 'reist';
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regT));
+    }
+    r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aanvL.id }, { pot: P.jar });
+    toets('8 goedkeuren met verse vingerafdruk en het getoonde id -> 200', r.status === 200 && r.j.aanvraag.status === 'goedgekeurd', JSON.stringify(r.j));
+    r = await M.p.evaluate(() => post('/api/koppel/opties', {}));
+    toets('8 de goedkeuring geldt niet voor de andere browser -> 403', r.status === 403, JSON.stringify(r));
+    r = await vraag('GET', '/app/koppel/stand', undefined, { pot: L.jar });
+    toets('8 laptop ziet "goedgekeurd" (stand)', r.j.aanvraag && r.j.aanvraag.status === 'goedgekeurd', JSON.stringify(r.j));
+    o = await L.p.evaluate(() => post('/api/koppel/opties', {}));
+    c2 = await L.p.evaluate((x) => maak(x), o.j.opties);
+    r = await L.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: c, naam: 'iets anders' }), c2);
+    toets('8 laptop koppelt na goedkeuring -> 200, naam uit de aanvraag', r.status === 200 && r.j.apparaat.naam === 'Laptop' && !!L.jar.sessie && !!L.jar.apparaat, JSON.stringify(r));
+    const laptopId = r.j.apparaat.id;
+    toets('8 Telegram: gekoppeld, goedgekeurd vanaf de telefoon', /gekoppeld.*goedgekeurd vanaf "Pixel"/.test(telegram[telegram.length - 1]), telegram[telegram.length - 1]);
+    {
+      const regT = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      const lap = regT.apparaten.find((x) => x.id === laptopId);
+      toets('8 register: gekoppeld_via goedkeuring, goedgekeurd_door = telefoon', lap.gekoppeld_via === 'goedkeuring' && lap.goedgekeurd_door === pixelId && lap.soort === 'reist', JSON.stringify(lap).slice(0, 300));
+    }
+    r = await vraag('GET', '/app/apparaten', undefined, { pot: L.jar });
+    toets('8 laptop werkt (apparatenlijst)', r.status === 200 && r.j.apparaten.filter((x) => x.actief).length === 2);
+    // twee aanvragen na elkaar: de eerste afgewezen, dan een tweede; goedkeuren met het oude id raakt niets
+    const L2 = await nieuweBrowser('internal');
+    await slaap(1100);
+    r = await vraag('POST', '/app/koppel/aanvraag', { naam: 'Tablet' }, { pot: L2.jar });
+    const a1 = r.j.aanvraag;
+    r = await vraag('POST', '/app/koppel/afwijs', { aanvraag_id: a1.id }, { pot: P.jar });
+    toets('8 afwijzen -> 200', r.status === 200 && r.j.aanvraag.status === 'afgewezen', JSON.stringify(r.j));
+    await slaap(1100);
+    r = await vraag('POST', '/app/koppel/aanvraag', { naam: 'Werk-pc' }, { pot: M.jar });
+    const a2 = r.j.aanvraag;
+    toets('8 na afwijzen: nieuwe aanvraag met een nieuw id', r.status === 200 && a2.id !== a1.id, JSON.stringify(r.j));
+    o = await P.p.evaluate(() => post('/api/passkey/opties', {}));
+    await P.p.evaluate(async (x) => post('/api/passkey/bevestig', { antwoord: await bewijs(x) }), o.j.opties);
+    r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: a1.id }, { pot: P.jar });
+    toets('8 goedkeuren met het id van de afgewezen aanvraag -> 409 (raakt de nieuwe niet)', r.status === 409 && H.appStaat.aanvraag.status === 'open', JSON.stringify(r.j));
+    r = await L2.p.evaluate(() => post('/api/koppel/opties', {}));
+    toets('8 afgewezen browser kan niet koppelen', r.status === 403);
+    await slaap(4200);
+    r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: a2.id }, { pot: L.jar });
+    toets('8 laptop (reist, maar vingerafdruk niet vers) kan niet goedkeuren', r.status === 403, JSON.stringify(r.j));
+    r = await vraag('POST', '/app/koppel/afwijs', { aanvraag_id: a2.id }, { pot: P.jar });
+    // ingetrokken laptop -> direct buiten
+    o = await P.p.evaluate(() => post('/api/passkey/opties', {}));
+    await P.p.evaluate(async (x) => post('/api/passkey/bevestig', { antwoord: await bewijs(x) }), o.j.opties);
+    r = await vraag('POST', '/app/apparaat/intrekken', { id: laptopId }, { pot: P.jar });
+    toets('8 telefoon trekt laptop in (vers) -> 200', r.status === 200, JSON.stringify(r.j));
+    r = await vraag('GET', '/app/apparaten', undefined, { pot: L.jar });
+    const r2b = await L.p.evaluate(() => post('/api/passkey/opties', {}));
+    toets('8 ingetrokken laptop -> direct buiten (401/401)', r.status === 401 && r2b.status === 401, r.status + '/' + r2b.status);
+    // gesynchroniseerde passkey in een vreemde browser zonder apparaatcookie = nieuw apparaat
+    r = await vraag('GET', '/app/status', undefined, { pot: pot() });
+    toets('8 browser zonder apparaatcookie: geen apparaat, alleen een aanvraag mogelijk', r.j.apparaat === null && r.j.aanvraag_mogelijk === true && r.j.koppelen_open === false, JSON.stringify(r.j));
+
+    // ── 9. fase 3: gesprek ──
+    const bid = () => crypto.randomUUID();
+    const gesprekVoor = gestart.length;
+    r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'hoi' }, { pot: pot() });
+    toets('9 beurt zonder sessie -> 401', r.status === 401);
+    const sP = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+    let tot0 = sP.tot = Date.now() + 60000;
+    const b1 = bid();
+    r = await vraag('POST', '/app/beurt', { beurt_id: b1, kanaal: 'hoofd', tekst: 'Wat staat er morgen?' }, { pot: P.jar });
+    const j1 = r.j.job_id;
+    await slaap(30);
+    const g1 = gestart[gestart.length - 1];
+    toets('9 beurt hoofd -> job, prompt "[APP] …", chat 40687, vault', r.status === 200 && /^[a-f0-9]{16}$/.test(j1) && g1 && g1.jobId === j1 && g1.prompt === '[APP] Wat staat er morgen?' && g1.chatId === '40687' && g1.ws === 'vault', JSON.stringify(r.j) + JSON.stringify(g1));
+    toets('9 beurt verlengt de sessie (glijdt)', sP.tot > tot0, sP.tot - tot0);
+    r = await vraag('POST', '/app/beurt', { beurt_id: b1, kanaal: 'hoofd', tekst: 'Wat staat er morgen?' }, { pot: P.jar });
+    await slaap(30);
+    toets('9 dezelfde beurt_id nog eens -> zelfde job, geen tweede beurt', r.status === 200 && r.j.job_id === j1 && r.j.al === true && gestart.length === gesprekVoor + 1, JSON.stringify(r.j));
+    r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'nog iets' }, { pot: P.jar });
+    toets('9 tweede beurt in hetzelfde kanaal terwijl Socev bezig is -> 409', r.status === 409 && /bezig/.test(r.j.fout), JSON.stringify(r.j));
+    tot0 = sP.tot = Date.now() + 60000;
+    r = await vraag('POST', '/app/uitslag', { job_id: j1 }, { pot: P.jar });
+    const rg = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar });
+    await vraag('GET', '/app/status', undefined, { pot: P.jar });
+    toets('9 uitslag tijdens de beurt: niet klaar', r.status === 200 && r.j.gevonden === true && r.j.klaar === false && r.j.status === 'running', JSON.stringify(r.j));
+    toets('9 geschiedenis toont de lopende beurt', rg.status === 200 && rg.j.lopend.length === 1 && rg.j.lopend[0].job_id === j1 && rg.j.lopend[0].tekst === 'Wat staat er morgen?', JSON.stringify(rg.j));
+    toets('9 uitslag/geschiedenis/status verlengen de sessie niet (Fable #1)', sP.tot === tot0, sP.tot - tot0);
+    // machinekamer mag tegelijk (andere sessie), met de omlijsting
+    const bm = bid();
+    r = await vraag('POST', '/app/beurt', { beurt_id: bm, kanaal: 'machinekamer', tekst: 'stand?' }, { pot: P.jar });
+    const jm = r.j.job_id;
+    await slaap(30);
+    const gm = gestart[gestart.length - 1];
+    toets('9 machinekamer: telegram-debug, omlijsting letterlijk + "\\n[APP] "', r.status === 200 && gm.jobId === jm && gm.chatId === 'telegram-debug' && gm.prompt === OMLIJST.replace(/\s+$/, '') + '\n[APP] stand?' && /^\[MACHINEKAMER\]/.test(gm.prompt), JSON.stringify(gm).slice(0, 200));
+    // Telegram en app tegelijk in hetzelfde gesprek -> na elkaar
+    let tgKlaar;
+    enqueue('40687', () => new Promise((res2) => { tgKlaar = res2; }));   // een "Telegram-beurt" die achter j1 aansluit
+    const VRAAG = 'Zal ik de afspraak met de accountant verzetten naar vrijdag?';
+    afmaken[j1]('Morgen staat er niets bijzonders.\n\nVRAAG AAN DAVID: ' + VRAAG);
+    await slaap(80);
+    const nB = gestart.length;
+    r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'na telegram' }, { pot: P.jar });
+    const jna = r.j.job_id;
+    await slaap(50);
+    toets('9 app-beurt terwijl een Telegram-beurt loopt: aangenomen maar wacht (zelfde wachtrij)', r.status === 200 && gestart.length === nB && H.appInfo().beurten_lopend >= 1, gestart.length - nB);
+    tgKlaar();
+    await slaap(50);
+    toets('9 ... en start pas als de Telegram-beurt klaar is', gestart.length === nB + 1 && gestart[gestart.length - 1].jobId === jna);
+    afmaken[jna]('ok');
+    afmaken[jm]('machinekamer: alles groen');
+    await slaap(80);
+    toets('9 na het wegschrijven in de geschiedenis telt hij als opgehaald, nog vóór de app hem ophaalt (uitrol wacht niet op een dichte app)', !!jobs[j1].opgehaald);
+    r = await vraag('POST', '/app/uitslag', { job_id: j1 }, { pot: P.jar });
+    const fnv = (s) => { let h = 0x811c9dc5; for (const ch of s) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); };
+    toets('9 uitslag klaar: antwoord + vraag met dezelfde hash als Telegram', r.j.klaar === true && /niets bijzonders/.test(r.j.antwoord) && r.j.vraag && r.j.vraag.tekst === VRAAG && r.j.vraag.hash === fnv(VRAAG) && r.j.vraag.beantwoord === null, JSON.stringify(r.j));
+    const logH = fs.readFileSync(path.join(LOGDIR, 'hoofd.jsonl'), 'utf8');
+    toets('9 app-log hoofd: tekst + antwoord, 0600', /Wat staat er morgen/.test(logH) && /niets bijzonders/.test(logH) && (fs.statSync(path.join(LOGDIR, 'hoofd.jsonl')).mode & 0o077) === 0);
+    toets('9 app-log machinekamer apart', /alles groen/.test(fs.readFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), 'utf8')) && !/alles groen/.test(logH));
+    // knoppen
+    const hashV = fnv(VRAAG);
+    tot0 = sP.tot = Date.now() + 60000;
+    r = await vraag('POST', '/app/knop', { job_id: j1, vraag_hash: hashV, keuze: 'anders' }, { pot: P.jar });
+    toets('9 Anders zonder toelichting -> 400', r.status === 400);
+    r = await vraag('POST', '/app/knop', { job_id: j1, vraag_hash: 'deadbeef', keuze: 'ja' }, { pot: P.jar });
+    toets('9 knop op een onbekende vraag -> 404', r.status === 404);
+    r = await vraag('POST', '/app/knop', { job_id: j1, vraag_hash: hashV, keuze: 'ja' }, { pot: P.jar });
+    const jk = r.j.job_id;
+    await slaap(30);
+    const gk = gestart[gestart.length - 1];
+    toets('9 JA-knop -> [KNOP]-beurt met de Telegram-tekst', r.status === 200 && gk.jobId === jk && gk.prompt.indexOf('[APP] [KNOP] David drukte JA op de vraag: ' + JSON.stringify(VRAAG) + '\n(Knopdruk in de app (het hoofdkanaal) om ') === 0 && /kanaal "app-knop", en handel af\.\)$/.test(gk.prompt) && gk.prompt.indexOf('vraag-id ' + hashV) > 0, gk.prompt);
+    toets('9 knop verlengt de sessie', sP.tot > tot0);
+    // tweede druk vanaf een ander apparaat: eerst de laptop opnieuw koppelen kan niet meer (ingetrokken); M koppelt als derde apparaat
+    await slaap(1100);
+    r = await vraag('POST', '/app/koppel/aanvraag', { naam: 'Werk-pc' }, { pot: M.jar });
+    o = await P.p.evaluate(() => post('/api/passkey/opties', {}));
+    await P.p.evaluate(async (x) => post('/api/passkey/bevestig', { antwoord: await bewijs(x) }), o.j.opties);
+    await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: r.j.aanvraag.id }, { pot: P.jar });
+    o = await M.p.evaluate(() => post('/api/koppel/opties', {}));
+    c2 = await M.p.evaluate((x) => maak(x), o.j.opties);
+    r = await M.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: c }), c2);
+    toets('9 (tweede apparaat gekoppeld voor de knoptoets)', r.status === 200, JSON.stringify(r));
+    afmaken[jk]('Genoteerd.');
+    await slaap(60);
+    r = await vraag('POST', '/app/knop', { job_id: j1, vraag_hash: hashV, keuze: 'nee' }, { pot: M.jar });
+    toets('9 tweede druk vanaf een ander apparaat -> 409 "al beantwoord: Ja HH:MM"', r.status === 409 && /^al beantwoord: Ja \d\d:\d\d$/.test(r.j.fout), JSON.stringify(r.j));
+    r = await vraag('POST', '/app/uitslag', { job_id: j1 }, { pot: M.jar });
+    toets('9 uitslag toont de vraag als beantwoord (ja)', r.j.vraag && r.j.vraag.beantwoord && r.j.vraag.beantwoord.keuze === 'ja', JSON.stringify(r.j.vraag));
+    r = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: M.jar });
+    const it = r.j.items || [];
+    toets('9 geschiedenis: bericht, antwoord, knopbeurt; vraag beantwoord', r.status === 200 && it.length >= 3 && it.some((x) => x.job_id === j1 && x.vraag && x.vraag.beantwoord && x.vraag.beantwoord.keuze === 'ja') && it.some((x) => x.soort === 'knop' && /^✓ Ja — op de vraag: /.test(x.tekst)), JSON.stringify(it).slice(0, 400));
+    r = await vraag('GET', '/app/geschiedenis/elders', undefined, { pot: M.jar });
+    toets('9 geschiedenis onbekend kanaal -> 400', r.status === 400);
+    // vreemde job / verdwenen job
+    jobs['0123456789abcdef'] = { status: 'done', result: { ok: true, output: 'geheim van /run' } };
+    r = await vraag('POST', '/app/uitslag', { job_id: '0123456789abcdef' }, { pot: M.jar });
+    toets('9 uitslag van een niet-app-job -> gevonden:false (geen inhoud)', r.j.gevonden === false && JSON.stringify(r.j).indexOf('geheim') < 0, JSON.stringify(r.j));
+    r = await vraag('POST', '/app/uitslag', { job_id: 'fedcba9876543210' }, { pot: M.jar });
+    toets('9 uitslag na een uitrol (job weg) -> gevonden:false', r.j.gevonden === false);
+    // invoerfouten en grenzen
+    r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: '   ' }, { pot: M.jar });
+    const rb = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'x', bestanden: [{ name: 'a.txt' }] }, { pot: M.jar });
+    const rk = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: '40687', tekst: 'x' }, { pot: M.jar });
+    const ri = await vraag('POST', '/app/beurt', { kanaal: 'hoofd', tekst: 'x' }, { pot: M.jar });
+    toets('9 leeg / bestanden / onbekend kanaal / zonder beurt_id -> 400', r.status === 400 && rb.status === 400 && /bestandenportaal/.test(rb.j.fout) && rk.status === 400 && ri.status === 400, [r.status, rb.status, rk.status, ri.status].join(','));
+    rolStub.primair = false;
+    r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'x' }, { pot: M.jar });
+    rolStub.primair = true;
+    toets('9 pod passief (uitwijk) -> 409, geen beurt', r.status === 409 && /reservekant/.test(r.j.fout));
+    fs.renameSync(path.join(DATA, 'machinekamer-omlijsting.txt'), path.join(DATA, 'omlijsting.weg'));
+    r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'machinekamer', tekst: 'x' }, { pot: M.jar });
+    fs.renameSync(path.join(DATA, 'omlijsting.weg'), path.join(DATA, 'machinekamer-omlijsting.txt'));
+    toets('9 omlijsting ontbreekt -> machinekamer 503 (nooit zonder omlijsting)', r.status === 503 && /omlijsting/.test(r.j.fout), JSON.stringify(r.j));
+    // app-log onschrijfbaar: beurt werkt door, niets crasht
+    fs.chmodSync(path.join(LOGDIR, 'hoofd.jsonl'), 0o400); fs.chmodSync(LOGDIR, 0o500);
+    r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'log dicht' }, { pot: M.jar });
+    const jl = r.j.job_id;
+    await slaap(30);
+    afmaken[jl]('antwoord bij dicht log');
+    await slaap(80);
+    const ru = await vraag('POST', '/app/uitslag', { job_id: jl }, { pot: M.jar });
+    fs.chmodSync(LOGDIR, 0o700); fs.chmodSync(path.join(LOGDIR, 'hoofd.jsonl'), 0o600);
+    toets('9 app-log onschrijfbaar -> beurt en uitslag werken door (fail-open)', r.status === 200 && ru.j.klaar === true && ru.j.antwoord === 'antwoord bij dicht log' && logs.some((l) => /^app-log/.test(l)), JSON.stringify(ru.j) + logs.slice(-2));
+    toets('9 ... en de opgehaalde uitslag telt dan als opgehaald', !!jobs[jl].opgehaald);
+    // mislukte beurt
+    r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'faal' }, { pot: M.jar });
+    await slaap(30);
+    afmaken[r.j.job_id]('kapot', false);
+    await slaap(60);
+    r = await vraag('POST', '/app/uitslag', { job_id: r.j.job_id }, { pot: M.jar });
+    toets('9 mislukte beurt: gelukt false met foutregel', r.j.klaar === true && r.j.gelukt === false && r.j.fout === 'kapot', JSON.stringify(r.j));
+    // begrenzing 30 per uur
+    H.appStaat.tellers.beurt = Array.from({ length: 30 }, () => Date.now());
+    r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'x' }, { pot: M.jar });
+    toets('9 31e beurt in een uur -> 429', r.status === 429);
+    H.appStaat.tellers.beurt = [];
+    // na een herstart: beurt_id van schijf
+    H.appStaat.beurtIds = null;
+    r = await vraag('POST', '/app/beurt', { beurt_id: b1, kanaal: 'hoofd', tekst: 'Wat staat er morgen?' }, { pot: M.jar });
+    toets('9 beurt_id overleeft een herstart (beurten.json) -> geen tweede beurt', r.j.al === true && r.j.job_id === j1, JSON.stringify(r.j));
+    const auditAlles = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+    toets('9 auditlog: beurt/knop/goedkeur-regels zonder berichtinhoud', /"reden":"beurt hoofd [a-f0-9]{16}"/.test(auditAlles) && /"reden":"knop ja/.test(auditAlles) && /goedgekeurd [A-F0-9]{6}/.test(auditAlles) && auditAlles.indexOf('morgen') < 0 && auditAlles.indexOf('accountant') < 0);
+    toets('9 geen onverwachte fouten in logError', logs.filter((l) => !/app-telegram|app-register: Expected property|app: Unexpected token .x., "xx"|^app-log:/.test(l)).length === 0, logs.join(' | '));
+    for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('opgeruimd');
   } catch (e) { toets('uitzondering: ' + (e && e.stack || e), false); }
   await browser.close();
   srv.close();
