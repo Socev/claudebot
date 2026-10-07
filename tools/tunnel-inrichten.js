@@ -19,6 +19,7 @@
  *   node tools/tunnel-inrichten.js app-pod              Socev-app fase 1 (7-10-2026): pod-ingang app-pod.socev.dev
  *       a. servicetoken "Socev-app Functions" (Access) zoeken of aanmaken -> Pages-secrets APP_POD_CLIENT_ID/_SECRET
  *          + /opt/data/socev-app-data/geheim/servicetoken.json (0600, alleen voor de toets hieronder)
+ *          (na de productietoets client_secret eruit halen: Fable-review 7-10 #10; de stap blijft dan idempotent)
  *       b. poortgeheim: /opt/data/socev-app-data/geheim/poort.key (0600) -> Pages-secret APP_POORT_SECRET
  *       c. Access-app op app-pod.socev.dev die ALLEEN dat servicetoken toelaat (eerst de deur, dan pas DNS)
  *       d. /opt/data/socev-app-data/config.json (aud, teamdomein, client-id; geen geheimen) voor server.js
@@ -356,6 +357,13 @@ async function toetsAppPod(n404) {
   const stTekst = appGeheimLees('servicetoken.json'), poort = (appGeheimLees('poort.key') || '').trim();
   if (!stTekst || !poort) { console.log('LET OP  app-pod nog niet ingericht (geen servicetoken/poortgeheim op de pod): alleen de controle hierboven'); return fout; }
   const st = JSON.parse(stTekst);
+  if (!st.client_secret) {
+    // Na de productietoets is het geheim van het servicetoken van de pod gewist (Fable-review 7-10 #10); alleen Pages kent het nog.
+    const r0 = await http('GET', 'https://' + APP_POD + '/app/status');
+    regel(r0.status === 401 || r0.status === 403 || (r0.status === 302 && /cloudflareaccess/.test(r0.location)), 'app-pod zonder servicetoken: Access weigert', r0, 'GET /app/status');
+    console.log('LET OP  servicetoken-geheim staat niet op de pod (bewust gewist): de app-pod-toetsen met servicetoken lopen niet');
+    return fout;
+  }
   const tok = { 'CF-Access-Client-Id': st.client_id, 'CF-Access-Client-Secret': st.client_secret };
   const metPoort = Object.assign({ 'X-App-Poort': poort }, tok);
   const U = 'https://' + APP_POD;
