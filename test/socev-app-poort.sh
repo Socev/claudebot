@@ -35,6 +35,7 @@ const SB = 'https://sb.toets';
 const sbRpc = [];
 const sbStaat = { voorrang: {}, items: [], kapot: false };
 const agentsReg = {};
+const BEWAAR = path.join(W, 'app-bestanden');   // fase 5a (wv98)
 
 // nep-Access: eigen RSA-sleutel met kid 'proef'
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -64,6 +65,7 @@ async function nepFetch(url, opt) {
     if (fn === 'mk_broedstoof') return antw(200, { voorrang: Object.keys(sbStaat.voorrang).filter((k) => sbStaat.voorrang[k] > 0).map((k) => ({ idee: Number(k), voorrang: sbStaat.voorrang[k], bijgewerkt: new Date().toISOString(), door: 'x' })),
       items: sbStaat.items, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' },
       tikker: { aan: true, reden: 'wacht op ruimte: dagmaximum (42 starts)', laatste_tik: new Date().toISOString(), starts_vandaag: 42, max_dag: 24, alleen_doorwerk: true } });
+    if (fn === 'mk_werkvoorraad_stand') return antw(200, { items: sbStaat.wvItems || [], stand: { aan: true }, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' } });
     if (fn === 'mk_idee_voorrang') {
       const van = sbStaat.voorrang[b.p_idee] || 0, max = Math.max(0, ...Object.values(sbStaat.voorrang));
       const naar = b.p_actie === 'normaal' ? 0 : (van > 0 && van === max ? van : max + 1);
@@ -86,13 +88,13 @@ function processJob(jobId, prompt, sess, files, chatId, ws, keuze) {
 const rolStub = { eerste: 1, primair: true };
 const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
-    APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel' }, pid: process.pid },
+    APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR }, pid: process.pid },
   agentsReg,
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon };', ctx, { filename: 'server.js#app' });
 const H = ctx.__h;
 const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
 
@@ -787,6 +789,148 @@ async function bewijs(o) {
       toets('9b /apparaat/aanvraag zonder open aanvraag: 200 zonder auditregel (stil)', r.status === 200 && r.j.aanvraag === null && fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nA0);
       toets('9b auditlog: voorrang-regels met idee, actie en van->naar', /"route":"\/app\/broedstoof\/voorrang".*"reden":"voorrang idee 9 eerder 0->1"/.test(auditB) && /"reden":"voorrang idee 5 normaal 2->0"/.test(auditB), auditB.split('\n').filter((l) => /broedstoof/.test(l)).slice(-3).join(' '));
       logs.splice(0, logs.length, ...logs.filter((l) => !/^app-broedstoof|^app-voorrang/.test(l)));
+    }
+
+    // ── 11. fase 5a: tabs Agents en Bestanden (wv98) ──
+    {
+      const sB = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      sB.tot = Date.now() + 10 * 60000;
+      for (const route of ['/app/agents', '/app/bestanden', '/app/agent/aaaaaaaaaaaaaab1', '/app/bestand/aaaaaaaaaaaaaab1/1']) {
+        r = await vraag('GET', route, undefined, { pot: pot() });
+        toets('11 ' + route + ' zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      }
+      // agentregister: lopend (met werkvoorraadrij), wachtend, klaar, mislukt, afgebroken, socev-route
+      for (const k of Object.keys(agentsReg)) delete agentsReg[k];
+      const t0 = Date.now();
+      Object.assign(agentsReg, {
+        aaaaaaaaaaaaaab1: { job_id: 'aaaaaaaaaaaaaab1', label: 'machinekamer:wv98 socev-app fase 5a', status: 'running', started: t0 - 120000, rapport: '-' },
+        aaaaaaaaaaaaaab2: { job_id: 'aaaaaaaaaaaaaab2', label: 'vakantie_Gambia-plannen', status: 'pending', started: t0 - 1000, rapport: '-' },
+        aaaaaaaaaaaaaab3: { job_id: 'aaaaaaaaaaaaaab3', label: 'machinekamer:wv92 app layout', status: 'done', ok: true, started: t0 - 9e6, ended: t0 - 8e6, rapport: 'verzonden' },
+        aaaaaaaaaaaaaab4: { job_id: 'aaaaaaaaaaaaaab4', label: 'david: reis uitzoeken', status: 'done', ok: false, started: t0 - 7e6, ended: t0 - 6e6, rapport: 'mislukt: 500' },
+        aaaaaaaaaaaaaab5: { job_id: 'aaaaaaaaaaaaaab5', label: 'socev: mail nalopen', status: 'afgebroken-containerherstart', started: t0 - 5e6, ended: t0 - 4e6, rapport: '-' } });
+      sbStaat.wvItems = [
+        { id: 98, idee: 9, label: 'machinekamer:socev-app fase 5a agents + bestanden', job_id: 'aaaaaaaaaaaaaab1', status: 'gestart', samenvatting: 'In de app: tab met agents en bestanden', bron: 'GEHEIM-BRON', notitie: 'GEHEIME-NOTITIE', doorwerk_opdracht: '"GEHEIME-OPDRACHT"' },
+        { id: 99, idee: 9, label: 'machinekamer:socev-app fase 5b multi-upload', status: 'open', wacht_op: ['item:98', 'aaaaaaaaaaaaaab1'], samenvatting: 'Meerdere bestanden tegelijk', doorwerk_opdracht: 'x', voorrang: 2 },
+        { id: 101, label: 'machinekamer:stille uren', status: 'open', niet_voor: new Date(t0 + 3600000).toISOString(), wacht_op: [], samenvatting: null },
+        { id: 85, label: 'machinekamer:f23-productietoets', status: 'geblokkeerd', geblokkeerd_door: 'David: laptop koppelen en eerste toets', samenvatting: 'Productietoets met jou' },
+        { id: 70, label: 'machinekamer:x', status: 'geblokkeerd', geblokkeerd_door: 'wv3 meting', samenvatting: 'niet voor David' } ];
+      H.appStaat.wvCache = null;
+      const nA0 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+      const ag = r.j;
+      const per = {}; [...(ag.lopend || []), ...(ag.recent || [])].forEach((x) => { per[x.job_id] = x; });
+      toets('11 agents 200: 2 lopend (oudste eerst), 3 recent (jongste eerst)', r.status === 200 && ag.lopend.length === 2 && ag.lopend[0].job_id === 'aaaaaaaaaaaaaab1' && ag.recent.length === 3 && ag.recent[0].job_id === 'aaaaaaaaaaaaaab5', JSON.stringify(ag).slice(0, 400));
+      toets('11 label in gewone taal: samenvatting van de werkvoorraadrij, anders zonder prefix/wv/streepjes', per.aaaaaaaaaaaaaab1.label === 'In de app: tab met agents en bestanden' && per.aaaaaaaaaaaaaab1.wv === 98
+        && per.aaaaaaaaaaaaaab2.label === 'vakantie Gambia plannen' && per.aaaaaaaaaaaaaab3.label === 'app layout' && per.aaaaaaaaaaaaaab4.label === 'reis uitzoeken', JSON.stringify(per));
+      toets('11 status: loopt, wacht, klaar, mislukt, afgebroken; route machinekamer/socev/david', per.aaaaaaaaaaaaaab1.status === 'loopt' && per.aaaaaaaaaaaaaab2.status === 'wacht' && per.aaaaaaaaaaaaaab3.status === 'klaar'
+        && per.aaaaaaaaaaaaaab4.status === 'mislukt' && per.aaaaaaaaaaaaaab5.status === 'afgebroken' && per.aaaaaaaaaaaaaab1.route === 'machinekamer' && per.aaaaaaaaaaaaaab2.route === 'socev' && per.aaaaaaaaaaaaaab4.route === 'david', JSON.stringify(per));
+      toets('11 rapport bezorgd: ja / nee / onbekend', per.aaaaaaaaaaaaaab3.rapport_bezorgd === 'ja' && per.aaaaaaaaaaaaaab4.rapport_bezorgd === 'nee' && per.aaaaaaaaaaaaaab5.rapport_bezorgd === null);
+      toets('11 rij: alleen open rijen in volgorde, met niet-vóór, na wv98/lopende agent, doorwerk en voorrang', ag.rij.length === 2 && ag.rij[0].wv === 99 && ag.rij[0].na.join() === 'wv98,een lopende agent' && ag.rij[0].doorwerk && ag.rij[0].voorrang
+        && ag.rij[1].wv === 101 && !!ag.rij[1].niet_voor && ag.rij[1].label === 'stille uren', JSON.stringify(ag.rij));
+      toets('11 wacht op David: alleen de David-blokkade, zonder "David:"', ag.wacht_op_david.length === 1 && ag.wacht_op_david[0].wv === 85 && ag.wacht_op_david[0].wat === 'laptop koppelen en eerste toets', JSON.stringify(ag.wacht_op_david));
+      toets('11 geen bron, notitie of doorwerk-opdracht in het antwoord', !/GEHEIM/.test(JSON.stringify(ag)));
+      await slaap(30);
+      toets('11 GET agents (200) schrijft geen auditregel (stil)', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nA0);
+      // bewaren: map met twee keer image.jpg (in een submap), een symlink naar buiten, een te groot bestand
+      const OUT = path.join(W, 'io-b1', 'out');
+      fs.mkdirSync(path.join(OUT, 'sub'), { recursive: true });
+      fs.writeFileSync(path.join(OUT, 'image.jpg'), 'beeld-1');
+      fs.writeFileSync(path.join(OUT, 'sub', 'image.jpg'), 'beeld-2');
+      fs.writeFileSync(path.join(OUT, 'Rapport wv98.docx'), Buffer.from([0, 1, 2, 250, 251]));
+      fs.symlinkSync('/etc/hostname', path.join(OUT, 'koppeling.txt'));
+      const groot = fs.openSync(path.join(OUT, 'groot.bin'), 'w'); fs.ftruncateSync(groot, 21 * 1024 * 1024); fs.closeSync(groot);
+      const m1 = H.appBewaar('aaaaaaaaaaaaaab1', OUT, { soort: 'agent', label: 'machinekamer:wv98 socev-app fase 5a', ok: true, rapport: '# Eindrapport\\n\\nAlles **groen**.' });
+      const namen = m1 ? m1.bestanden.map((b) => b.naam).sort().join('|') : '';
+      toets('11 bewaren: 3 bestanden, dubbele naam uniek, symlink en > 20 MB niet', !!m1 && namen === 'Rapport wv98.docx|image (2).jpg|image.jpg' && m1.overgeslagen === 1 && m1.rapport === true, JSON.stringify(m1));
+      toets('11 bewaren: bestanden verplaatst (niet meer in out/), symlink-doel ongemoeid', !fs.existsSync(path.join(OUT, 'image.jpg')) && !fs.existsSync(path.join(OUT, 'Rapport wv98.docx')) && fs.existsSync('/etc/hostname'));
+      const dag = new Date().toISOString().slice(0, 10);
+      const jd = path.join(BEWAAR, dag, 'aaaaaaaaaaaaaab1');
+      toets('11 bewaren: map 0700, bestanden 0600 als b/<n>, geen oorspronkelijke namen op schijf', (fs.statSync(jd).mode & 0o777) === 0o700 && (fs.statSync(path.join(jd, 'b', '1')).mode & 0o777) === 0o600
+        && fs.readdirSync(path.join(jd, 'b')).sort().join() === '1,2,3', fs.readdirSync(path.join(jd, 'b')).join());
+      // agent zonder rapport (route socev) en een beurt met één bestand
+      fs.mkdirSync(path.join(W, 'io-b2', 'out'), { recursive: true });
+      fs.writeFileSync(path.join(W, 'io-b2', 'out', 'plan.md'), '# plan');
+      H.appBewaar('aaaaaaaaaaaaaab2', path.join(W, 'io-b2', 'out'), { soort: 'agent', label: 'vakantie', ok: true, rapport: null });
+      fs.mkdirSync(path.join(W, 'io-c1', 'out'), { recursive: true });
+      fs.writeFileSync(path.join(W, 'io-c1', 'out', 'brief.pdf'), '%PDF-1.4 proef');
+      H.appBewaar('ccccccccccccccc1', path.join(W, 'io-c1', 'out'), { soort: 'beurt', kanaal: 'hoofd', app: true });
+      toets('11 niets te bewaren (geen bestanden, geen rapport) -> geen map', H.appBewaar('ccccccccccccccc2', path.join(W, 'bestaat-niet'), { soort: 'beurt', kanaal: 'hoofd' }) === null && !fs.existsSync(path.join(BEWAAR, dag, 'ccccccccccccccc2')));
+      toets('11 ongeldig job-id -> niets', H.appBewaar('../../x', OUT, { soort: 'beurt', rapport: 'x' }) === null);
+      r = await vraag('GET', '/app/bestanden', undefined, { pot: P.jar });
+      const bi = {}; (r.j.items || []).forEach((x) => { bi[x.job_id] = x; });
+      toets('11 bestanden 200: 3 klussen, beurt met kanaal hoofd, agent met gewone-taallabel, 30 dagen', r.status === 200 && r.j.items.length === 3 && bi.ccccccccccccccc1.soort === 'beurt' && bi.ccccccccccccccc1.kanaal === 'hoofd' && bi.ccccccccccccccc1.app === true
+        && bi.aaaaaaaaaaaaaab1.label === 'In de app: tab met agents en bestanden' && bi.aaaaaaaaaaaaaab1.overgeslagen === 1 && r.j.bewaar_dagen === 30, JSON.stringify(r.j).slice(0, 400));
+      const nr = bi.aaaaaaaaaaaaaab1.bestanden.find((b) => b.naam === 'Rapport wv98.docx').n;
+      const nA1 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('GET', '/app/bestand/aaaaaaaaaaaaaab1/' + nr, undefined, { pot: P.jar });
+      toets('11 download: inhoud bytegelijk (base64), naam, Word-type', r.status === 200 && Buffer.from(r.j.inhoud, 'base64').equals(Buffer.from([0, 1, 2, 250, 251])) && r.j.naam === 'Rapport wv98.docx' && /wordprocessingml/.test(r.j.type), JSON.stringify(r.j).slice(0, 200));
+      await slaap(30);
+      const auditD = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+      toets('11 download staat in het auditlog (job/n, geen naam of inhoud)', auditD.split('\n').length > nA1 && new RegExp('"reden":"bestand aaaaaaaaaaaaaab1/' + nr + '"').test(auditD) && !/Rapport wv98/.test(auditD));
+      r = await vraag('GET', '/app/bestand/aaaaaaaaaaaaaab1/9', undefined, { pot: P.jar });
+      toets('11 onbekend bestandsnummer -> 404', r.status === 404);
+      for (const pad of ['/app/bestand/aaaaaaaaaaaaaab1/../../geheim', '/app/bestand/aaaaaaaaaaaaaab1', '/app/bestand/AAAAAAAAAAAAAAB1/1', '/app/bestand/' + dag + '/aaaaaaaaaaaaaab1']) {
+        r = await vraag('GET', pad, undefined, { pot: P.jar });
+        toets('11 rare paden -> 404: ' + pad, r.status === 404, r.status);
+      }
+      r = await vraag('GET', '/app/agent/aaaaaaaaaaaaaab1', undefined, { pot: P.jar });
+      toets('11 rapport machinekamer-agent: tekst', r.status === 200 && /Alles \*\*groen\*\*/.test(r.j.tekst) && r.j.gelukt === true, JSON.stringify(r.j).slice(0, 200));
+      r = await vraag('GET', '/app/agent/aaaaaaaaaaaaaab2', undefined, { pot: P.jar });
+      toets('11 agent zonder bewaard rapport -> 404 met uitleg', r.status === 404 && /geen rapport/.test(r.j.fout));
+      H.appStaat.wvCache = null;
+      r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+      const pa = {}; [...r.j.lopend, ...r.j.recent].forEach((x) => { pa[x.job_id] = x; });
+      toets('11 agents: rapport-vlag en aantal bestanden uit wat bewaard is', pa.aaaaaaaaaaaaaab1.rapport === true && pa.aaaaaaaaaaaaaab1.bestanden === 3 && pa.aaaaaaaaaaaaaab2.rapport === false && pa.aaaaaaaaaaaaaab2.bestanden === 1);
+      // grens downloads per uur
+      H.appStaat.tellers.bestand = Array.from({ length: 120 }, () => Date.now());
+      r = await vraag('GET', '/app/bestand/aaaaaaaaaaaaaab1/1', undefined, { pot: P.jar });
+      toets('11 121e download in een uur -> 429', r.status === 429);
+      H.appStaat.tellers.bestand = [];
+      // 30 dagen: 31 dagen oud weg, 29 dagen oud blijft; totaal geteld
+      const oudDag = new Date(Date.now() - 31 * 86400000).toISOString().slice(0, 10), jongDag = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+      for (const [d, id, t] of [[oudDag, 'ddddddddddddddd1', Date.now() - 31 * 86400000], [jongDag, 'ddddddddddddddd2', Date.now() - 29 * 86400000]]) {
+        fs.mkdirSync(path.join(BEWAAR, d, id, 'b'), { recursive: true });
+        fs.writeFileSync(path.join(BEWAAR, d, id, 'b', '1'), 'x');
+        fs.writeFileSync(path.join(BEWAAR, d, id, 'meta.json'), JSON.stringify({ job_id: id, soort: 'beurt', kanaal: 'machinekamer', op: new Date(t).toISOString(), bestanden: [{ n: 1, naam: 'x.txt', grootte: 1 }] }));
+      }
+      fs.mkdirSync(path.join(BEWAAR, oudDag, 'zonder-meta'), { recursive: true });
+      const op = H.appBestandenOpruim();
+      toets('11 opruimen: > 30 dagen weg (ook zonder meta), < 30 dagen blijft, lege dagmap weg', !fs.existsSync(path.join(BEWAAR, oudDag)) && fs.existsSync(path.join(BEWAAR, jongDag, 'ddddddddddddddd2', 'b', '1')) && op.weg === 2, JSON.stringify(op));
+      toets('11 opruimen telt het totaal (bytes)', op.totaal === 7 + 7 + 5 + 6 + 14 + 1, op.totaal);
+      r = await vraag('GET', '/app/bestanden', undefined, { pot: P.jar });
+      toets('11 bestanden: nu 4 klussen (jongste eerst)', r.j.items.length === 4 && r.j.items[r.j.items.length - 1].job_id === 'ddddddddddddddd2', r.j.items.map((x) => x.job_id).join());
+      // vol: boven de totaalgrens geen nieuwe bestanden, rapport wel
+      H.appStaat.bestandenTotaal = 3 * 1024 * 1024 * 1024;
+      fs.mkdirSync(path.join(W, 'io-e1', 'out'), { recursive: true });
+      fs.writeFileSync(path.join(W, 'io-e1', 'out', 'a.txt'), 'a');
+      const mv = H.appBewaar('eeeeeeeeeeeeeee1', path.join(W, 'io-e1', 'out'), { soort: 'agent', label: 'machinekamer: vol', ok: true, rapport: 'rapport bij volle schijf' });
+      toets('11 boven 2 GB: geen bestanden bewaard, wel het rapport, vol gemarkeerd', mv && mv.bestanden.length === 0 && mv.overgeslagen === 1 && mv.vol === true && mv.rapport === true, JSON.stringify(mv));
+      H.appBestandenOpruim();
+      // fail-open: bewaarmap onschrijfbaar -> null, geen uitzondering
+      const echtDir = ctx.process.env.APP_BESTANDEN_DIR;
+      const nLog = logs.length;
+      fs.mkdirSync(path.join(W, 'io-f1', 'out'), { recursive: true });
+      fs.writeFileSync(path.join(W, 'io-f1', 'out', 'f.txt'), 'f');
+      fs.writeFileSync(path.join(W, 'geen-map'), '');
+      let mf = 'x', gooide = false;
+      // APP_BESTANDEN_DIR is een const: stel de dagmap onschrijfbaar door er een bestand neer te zetten
+      fs.rmSync(path.join(BEWAAR, dag), { recursive: true, force: true }); fs.writeFileSync(path.join(BEWAAR, dag), 'bezet');
+      try { mf = H.appBewaar('fffffffffffffff1', path.join(W, 'io-f1', 'out'), { soort: 'beurt', kanaal: 'hoofd' }); } catch (e) { gooide = true; }
+      toets('11 schrijffout bij bewaren: null, gelogd, geen uitzondering (fail-open)', mf === null && !gooide && logs.slice(nLog).some((l) => /^app-bewaar/.test(l)), JSON.stringify(logs.slice(nLog)));
+      fs.rmSync(path.join(BEWAAR, dag), { force: true });
+      logs.splice(0, logs.length, ...logs.filter((l) => !/^app-bewaar/.test(l)));
+      // werkvoorraad onbereikbaar: agents geeft toch 200 met fout-tekst
+      sbStaat.kapot = true; H.appStaat.wvCache = null;
+      r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+      toets('11 databank kapot: agents 200 met lopend + fout, rij leeg', r.status === 200 && r.j.lopend.length === 2 && r.j.rij.length === 0 && /werkvoorraad/.test(r.j.fout), JSON.stringify(r.j).slice(0, 200));
+      sbStaat.kapot = false;
+      logs.splice(0, logs.length, ...logs.filter((l) => !/^app-agents/.test(l)));
+      // haakjes in de pod: processJob alleen hoofdkanaal/machinekamer en nooit 'lezen'; processAgent rapport alleen machinekamer/david
+      const volSrc = fs.readFileSync('server.js', 'utf8');
+      toets('11 processJob bewaart alleen 40687/telegram-debug, nooit lezen', /if \(gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT\[chatId\]\) appBewaar\(/.test(volSrc) && /APP_KANAAL_VAN_CHAT = \{ '40687': 'hoofd', 'telegram-debug': 'machinekamer' \}/.test(volSrc));
+      toets('11 processAgent: rapport alleen bij route machinekamer of david', /rapport: \(route === 'machinekamer' \|\| route === 'david'\) \? appRapport : null/.test(volSrc));
+      toets('11 appRoute: zonder prefix = socev', H.appRoute('vakantie') === 'socev' && H.appRoute(' Machinekamer: x') === 'machinekamer' && H.appRoute('david:x') === 'david');
+      for (const k of Object.keys(agentsReg)) delete agentsReg[k];
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──

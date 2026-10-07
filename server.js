@@ -1585,6 +1585,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     j.result = { ok: false, error: String(e), output: '', files: [] };
     jobEindLog(jobId, j, ws);
   } finally {
+    // Socev-app (wv98): wat Socev in out/ zette, 30 dagen voor de tab Bestanden; alleen hoofdkanaal en machinekamer, nooit 'lezen'.
+    if (gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT[chatId]) appBewaar(jobId, outdir, { soort: 'beurt', kanaal: APP_KANAAL_VAN_CHAT[chatId], app: !!(j && j.app) });
     try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) {}
     // Transcript van een 'lezen'-beurt bevat inhoud van derden en hoort bij geen enkel gesprek: weg.
     if (gereedschap === 'lezen') {
@@ -1984,6 +1986,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
   // (5-10-2026, review wachtrij spraakkastje; daarvoor gaf stop 'loopt-niet' en liep de agent gewoon).
   let stopVoorStart = false;
   j.progress = { stoppen: function () { stopVoorStart = true; } };
+  let appRapport = null;   // Socev-app (wv98): eindrapport voor de tab Agents (alleen routes machinekamer: en david:)
   try {
     fs.mkdirSync(indir, { recursive: true });
     fs.mkdirSync(outdir, { recursive: true });
@@ -2041,6 +2044,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     // dus het webhookrapport krijgt de volledige uitvoer apart mee. Anders zou
     // juist bij een grote agentrun een leeg rapport naar Telegram gaan.
     const volledigeUitvoer = (typeof r.output === 'string') ? r.output : '';
+    appRapport = volledigeUitvoer || (r.error ? 'Mislukt: ' + String(r.error) : '');
     j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
     jobEindLog(jobId, j, ws);
     entry.status = 'done'; entry.ok = !!r.ok; entry.ended = Date.now(); saveAgents();
@@ -2049,11 +2053,15 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
   } catch (e) {
     logError('processAgent', e);
     const r = { ok: false, error: String(e), output: '', files: [] };
+    appRapport = 'Mislukt: ' + String(e);
     j.status = 'done'; j.done_at = Date.now(); j.result = r;
     jobEindLog(jobId, j, ws);
     entry.status = 'done'; entry.ok = false; entry.ended = Date.now(); saveAgents();
     sendReport(entry, r);
   } finally {
+    const route = appRoute(entry && entry.label);
+    appBewaar(jobId, outdir, { soort: 'agent', label: entry && entry.label, ok: entry ? entry.ok : null,
+      rapport: (route === 'machinekamer' || route === 'david') ? appRapport : null });
     try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) {}
     try { fs.rmSync(eindVoorlopigPad(jobId), { force: true }); } catch (e) {}
     if (entry && entry.voorlopig) { entry.voorlopig = false; saveAgents(); }
@@ -3072,10 +3080,10 @@ const APP_LOG_MS = 30 * 24 * 3600 * 1000;
 const APP_AUDIT_VOOR_PER_MIN = 5;
 const APP_TRANSPORTS = ['internal', 'hybrid', 'usb', 'nfc', 'ble', 'smart-card'];
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
-  webauthn: null, webauthnFout: null, registerCache: null };
+  webauthn: null, webauthnFout: null, registerCache: null, bestandenTotaal: 0, bestandenIndex: null, wvCache: null };
 
 function appSha(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
 function appGelijk(a, b) { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); }
@@ -4033,6 +4041,255 @@ async function appBroedstoofVoorrang(req, res, reg, a, s, d) {
   appStuur(res, 200, { ok: true, idee: idee, voorrang: r.voorrang, gewijzigd: r.gewijzigd === true });
 }
 
+// ── fase 5a: tabs Agents en Bestanden (wv98, 8-10-2026; bouwplan § 4.7 en § 4.9) ──
+// Bestanden: wat Socev in out/ zet bij een beurt in het hoofdkanaal of de machinekamer (Telegram of app) of bij een
+// achtergrondagent, verhuist vóór het wissen van io/<job> naar APP_BESTANDEN_DIR/<datum>/<job>/ (rename, zelfde schijf),
+// 30 dagen. Inhoud als b/<n> (de naam staat alleen in meta.json: geen paden uit de agent in het bestandssysteem).
+// Agentrapporten: alleen van de routes machinekamer: en david: (die krijgt David toch al ongefilterd); route socev (de
+// default) is bronmateriaal dat Socev eerst weegt (skill achtergrondagent § 3b), dus geen rapport in de app.
+// Alles fail-open: een schrijffout raakt nooit de beurt, de agent of zijn rapport aan n8n.
+const APP_BESTANDEN_DIR = process.env.APP_BESTANDEN_DIR || '/opt/data/app-bestanden';
+const APP_BESTANDEN_MS = 30 * 24 * 3600 * 1000;
+const APP_BESTANDEN_JOB_MAX = 25;                          // bestanden per beurt of agent
+const APP_BESTANDEN_JOB_BYTES = 100 * 1024 * 1024;
+const APP_BESTANDEN_TOTAAL_BYTES = 2 * 1024 * 1024 * 1024; // daarboven bewaart de pod niets nieuws (rapporten wel)
+const APP_BESTAND_MAX = 20 * 1024 * 1024;                  // gelijk aan MAX_FILE; base64 door het doorgeefluik
+const APP_RAPPORT_MAX = 200 * 1024;
+const APP_BESTAND_PER_UUR = 120;
+const APP_KANAAL_VAN_CHAT = { '40687': 'hoofd', 'telegram-debug': 'machinekamer' };
+const APP_JOB_RE = /^[a-f0-9]{16}$/;
+const APP_DAG_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function appRoute(label) {
+  const m = /^\s*(machinekamer|david|socev)\s*:/i.exec(String(label || ''));
+  return m ? m[1].toLowerCase() : 'socev';
+}
+// Label zonder prefix, werkvoorraadnummer en streepjes: "machinekamer:wv92 app-layout" -> "app layout".
+function appLabelGewoon(l) {
+  return String(l || '').replace(/^\s*(machinekamer|socev|david)\s*:\s*/i, '').replace(/^wv\d+[\s:-]+/i, '').replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ').trim().slice(0, 120) || 'naamloze klus';
+}
+function appVeiligeNaam(n, gehad) {
+  let naam = path.basename(String(n || '')).replace(/[\u0000-\u001f\u007f/\\]/g, '').trim().slice(0, 120) || 'bestand';
+  if (naam === '.' || naam === '..') naam = 'bestand';
+  const punt = naam.lastIndexOf('.');
+  const stam = punt > 0 ? naam.slice(0, punt) : naam, ext = punt > 0 ? naam.slice(punt) : '';
+  let kand = naam, i = 2;
+  while (gehad.has(kand.toLowerCase())) kand = stam + ' (' + (i++) + ')' + ext;
+  gehad.add(kand.toLowerCase());
+  return kand;
+}
+function appBewaarKandidaten(outdir) {
+  const uit = [], stapel = [outdir];
+  while (stapel.length && uit.length < 500) {
+    const cur = stapel.pop();
+    let namen;
+    try { namen = fs.readdirSync(cur); } catch (e) { continue; }
+    namen.sort();
+    for (const n of namen) {
+      const fp = path.join(cur, n);
+      let st;
+      try { st = fs.lstatSync(fp); } catch (e) { continue; }
+      if (st.isSymbolicLink()) continue;   // nooit een koppeling volgen (zou een bestand buiten out/ kunnen zijn)
+      if (st.isDirectory()) stapel.push(fp);
+      else if (st.isFile()) uit.push({ pad: fp, naam: n, grootte: st.size });
+    }
+  }
+  return uit;
+}
+// Aangeroepen in de finally van processJob/processAgent, vóór io/<job> wordt gewist. Synchroon (rename is direct).
+function appBewaar(jobId, outdir, meta) {
+  try {
+    if (!APP_JOB_RE.test(String(jobId))) return null;
+    const rapport = (typeof meta.rapport === 'string' && meta.rapport.trim()) ? meta.rapport : null;
+    let kand = appBewaarKandidaten(outdir);
+    let overgeslagen = 0, vol = false;
+    if (kand.length && appStaat.bestandenTotaal > APP_BESTANDEN_TOTAAL_BYTES) { overgeslagen = kand.length; kand = []; vol = true; }
+    if (!kand.length && !rapport) return null;
+    const op = new Date();
+    const dir = path.join(APP_BESTANDEN_DIR, op.toISOString().slice(0, 10), jobId);
+    fs.mkdirSync(path.join(dir, 'b'), { recursive: true, mode: 0o700 });
+    const lijst = [], gehad = new Set();
+    let totaal = 0;
+    for (const k of kand) {
+      if (k.grootte > APP_BESTAND_MAX || lijst.length >= APP_BESTANDEN_JOB_MAX || totaal + k.grootte > APP_BESTANDEN_JOB_BYTES) { overgeslagen++; continue; }
+      const n = lijst.length + 1, doel = path.join(dir, 'b', String(n));
+      try { fs.renameSync(k.pad, doel); }
+      catch (e) { if (e && e.code === 'EXDEV') fs.copyFileSync(k.pad, doel); else { overgeslagen++; logError('app-bewaar', e); continue; } }
+      try { fs.chmodSync(doel, 0o600); } catch (e) {}
+      lijst.push({ n: n, naam: appVeiligeNaam(k.naam, gehad), grootte: k.grootte });
+      totaal += k.grootte;
+    }
+    if (rapport) fs.writeFileSync(path.join(dir, 'rapport.md'), rapport.slice(0, APP_RAPPORT_MAX), { mode: 0o600 });
+    const m = { job_id: jobId, soort: meta.soort === 'agent' ? 'agent' : 'beurt', kanaal: meta.kanaal || null, app: !!meta.app,
+      label: meta.label ? String(meta.label).slice(0, 160) : null, ok: meta.ok === undefined ? null : !!meta.ok, op: op.toISOString(),
+      bestanden: lijst, overgeslagen: overgeslagen, vol: vol, rapport: !!rapport };
+    const tmp = path.join(dir, 'meta.json.nieuw');
+    fs.writeFileSync(tmp, JSON.stringify(m), { mode: 0o600 });
+    fs.renameSync(tmp, path.join(dir, 'meta.json'));
+    appStaat.bestandenTotaal = (appStaat.bestandenTotaal || 0) + totaal;
+    appStaat.bestandenIndex = null;
+    return m;
+  } catch (e) { logError('app-bewaar', e); return null; }
+}
+// Index van wat er bewaard is (jongste eerst); 20 s in het geheugen, leeggemaakt bij elke nieuwe bewaring of opruiming.
+function appBestandenIndex() {
+  const nu = Date.now();
+  if (appStaat.bestandenIndex && nu - appStaat.bestandenIndex.op < 20000) return appStaat.bestandenIndex.items;
+  const items = [];
+  let dagen = [];
+  try { dagen = fs.readdirSync(APP_BESTANDEN_DIR).filter(function (d) { return APP_DAG_RE.test(d); }).sort().reverse(); }
+  catch (e) { if (!(e && e.code === 'ENOENT')) throw e; }
+  for (const d of dagen) {
+    let jobsIn = [];
+    try { jobsIn = fs.readdirSync(path.join(APP_BESTANDEN_DIR, d)).filter(function (j) { return APP_JOB_RE.test(j); }); } catch (e) { continue; }
+    for (const j of jobsIn) {
+      const m = appLeesJson(path.join(APP_BESTANDEN_DIR, d, j, 'meta.json'), null);
+      if (!m || m.job_id !== j || nu - Date.parse(m.op) > APP_BESTANDEN_MS) continue;
+      m.dag = d;
+      items.push(m);
+    }
+  }
+  items.sort(function (a, b) { return String(b.op).localeCompare(String(a.op)); });
+  appStaat.bestandenIndex = { op: nu, items: items };
+  return items;
+}
+function appBewaardVan(jobId) {
+  if (!APP_JOB_RE.test(String(jobId))) return null;
+  return appBestandenIndex().find(function (m) { return m.job_id === jobId; }) || null;
+}
+// Ouder dan 30 dagen weg; telt meteen de totale omvang (voor de bovengrens). Elk uur en kort na de start.
+function appBestandenOpruim(nu) {
+  nu = nu || Date.now();
+  let totaal = 0, weg = 0, dagen = [];
+  try { dagen = fs.readdirSync(APP_BESTANDEN_DIR).filter(function (d) { return APP_DAG_RE.test(d); }); }
+  catch (e) { if (e && e.code === 'ENOENT') { appStaat.bestandenTotaal = 0; return { totaal: 0, weg: 0 }; } logError('app-opruim', e); return null; }
+  for (const d of dagen) {
+    const dagDir = path.join(APP_BESTANDEN_DIR, d);
+    let jobsIn = [];
+    try { jobsIn = fs.readdirSync(dagDir); } catch (e) { continue; }
+    for (const j of jobsIn) {
+      const jd = path.join(dagDir, j);
+      const m = appLeesJson(path.join(jd, 'meta.json'), null);
+      // zonder leesbare meta: naar de map-datum (einde van die dag)
+      const op = m && m.op ? Date.parse(m.op) : Date.parse(d + 'T23:59:59Z');
+      if (!(op > 0) || nu - op > APP_BESTANDEN_MS) {
+        try { fs.rmSync(jd, { recursive: true, force: true }); weg++; } catch (e) { logError('app-opruim', e); }
+        continue;
+      }
+      if (m && Array.isArray(m.bestanden)) m.bestanden.forEach(function (b) { totaal += Number(b.grootte) || 0; });
+    }
+    try { if (!fs.readdirSync(dagDir).length) fs.rmdirSync(dagDir); } catch (e) {}
+  }
+  appStaat.bestandenTotaal = totaal;
+  appStaat.bestandenIndex = null;
+  return { totaal: totaal, weg: weg };
+}
+setTimeout(function () { appBestandenOpruim(); }, 60 * 1000).unref();
+setInterval(function () { appBestandenOpruim(); }, 60 * 60 * 1000).unref();
+
+// Werkvoorraad (alleen nummer, label, samenvatting, wachttoestand; geen opdracht, bron of notitie). 20 s in het geheugen.
+async function appWerkvoorraad() {
+  const c = appStaat.wvCache;
+  if (c && Date.now() - c.op < 20000) return c.d;
+  const d = await appSbRpc('mk_werkvoorraad_stand', {});
+  appStaat.wvCache = { op: Date.now(), d: d };
+  return d;
+}
+const APP_AGENT_STATUS = { pending: 'wacht', running: 'loopt', 'afgebroken-containerherstart': 'afgebroken' };
+async function appAgents(req, res) {
+  res._app.stil = true;   // ververst elke 15 s zolang de tab open is: geen auditregel bij 200
+  let wv = null, fout = null;
+  try { wv = await appWerkvoorraad(); } catch (e) { logError('app-agents', e); fout = 'werkvoorraad nu niet leesbaar; de rij ontbreekt'; }
+  const wvItems = (wv && Array.isArray(wv.items)) ? wv.items : [];
+  const perJob = {};
+  wvItems.forEach(function (w) { if (w.job_id) perJob[w.job_id] = w; });
+  let bewaard = {};
+  try { appBestandenIndex().forEach(function (m) { bewaard[m.job_id] = m; }); } catch (e) { logError('app-agents', e); bewaard = {}; }
+  const reg = appAgentsReg();
+  const nu = Date.now();
+  const agents = Object.keys(reg).map(function (id) {
+    const a = reg[id] || {};
+    const w = perJob[id];
+    const route = appRoute(a.label);
+    const m = bewaard[id];
+    let status = APP_AGENT_STATUS[a.status] || (a.status === 'done' ? (a.ok ? 'klaar' : 'mislukt') : 'onbekend');
+    const rap = String(a.rapport || '-');
+    return { job_id: a.job_id || id,
+      label: (w && w.samenvatting) ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(a.label),
+      label_kort: appLabelGewoon(a.label), wv: w ? w.id : null, route: route, status: status,
+      gestart: a.started ? new Date(a.started).toISOString() : null, geeindigd: a.ended ? new Date(a.ended).toISOString() : null,
+      herstart: a.herstart ? String(a.herstart).slice(0, 80) : null,
+      rapport_bezorgd: rap === 'verzonden' ? 'ja' : rap.indexOf('herkansing-') === 0 ? 'opnieuw' : rap.indexOf('mislukt') === 0 || rap === 'geen-webhook-geconfigureerd' ? 'nee' : null,
+      rapport: !!(m && m.rapport), bestanden: m ? m.bestanden.length : 0 };
+  });
+  const lopend = agents.filter(function (a) { return a.status === 'loopt' || a.status === 'wacht'; })
+    .sort(function (a, b) { return String(a.gestart).localeCompare(String(b.gestart)); });
+  const recent = agents.filter(function (a) { return a.status !== 'loopt' && a.status !== 'wacht'; })
+    .sort(function (a, b) { return String(b.geeindigd || b.gestart).localeCompare(String(a.geeindigd || a.gestart)); }).slice(0, 30);
+  const rij = wvItems.filter(function (w) { return w.status === 'open'; }).slice(0, 40).map(function (w) {
+    return { wv: w.id, label: w.samenvatting ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(w.label), label_kort: appLabelGewoon(w.label),
+      niet_voor: w.niet_voor && Date.parse(w.niet_voor) > nu ? w.niet_voor : null,
+      na: (w.wacht_op || []).map(function (x) { return String(x).replace(/^item:/, 'wv').replace(/^[a-f0-9]{16}$/, 'een lopende agent'); })
+        .filter(function (x, i, l) { return l.indexOf(x) === i; }).slice(0, 4),
+      doorwerk: !!w.doorwerk_opdracht, voorrang: (w.voorrang || 0) > 0 };
+  });
+  const wachtOpDavid = wvItems.filter(function (w) { return w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')); })
+    .slice(0, 20).map(function (w) {
+      return { wv: w.id, label: w.samenvatting ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(w.label),
+        wat: String(w.geblokkeerd_door || '').replace(/^\s*david\s*:?\s*/i, '').slice(0, 200) };
+    });
+  const ru = wv && wv.ruimte ? { mag: !!wv.ruimte.mag, reden: String(wv.ruimte.reden || '').slice(0, 160) } : null;
+  appStuur(res, 200, { ok: true, max: typeof MAX_AGENTS === 'number' ? MAX_AGENTS : null, lopend: lopend, rij: rij, wacht_op_david: wachtOpDavid,
+    recent: recent, ruimte: ru, fout: fout });
+}
+async function appAgentRapport(req, res, jobId) {
+  if (!APP_JOB_RE.test(jobId)) return appWeiger(res, 404, 'onbekend', 'rapport id');
+  const m = appBewaardVan(jobId);
+  if (!m || !m.rapport) return appWeiger(res, 404, 'van deze agent is geen rapport bewaard', 'rapport ' + jobId + ' weg');
+  let tekst;
+  try { tekst = await fs.promises.readFile(path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'rapport.md'), 'utf8'); }
+  catch (e) { logError('app-rapport', e); return appWeiger(res, 404, 'van deze agent is geen rapport bewaard', 'rapport ' + jobId + ' onleesbaar'); }
+  res._app.reden = 'rapport ' + jobId;
+  const a = appAgentsReg()[jobId];
+  appStuur(res, 200, { ok: true, job_id: jobId, label: m.label || (a ? appLabelGewoon(a.label) : null), gelukt: m.ok, op: m.op, tekst: tekst });
+}
+async function appBestanden(req, res) {
+  res._app.stil = true;
+  let items;
+  try { items = appBestandenIndex(); } catch (e) { logError('app-bestanden', e); return appWeiger(res, 503, 'de bestandenlijst is nu niet leesbaar', 'index'); }
+  let perJob = {};
+  try { const wv = await appWerkvoorraad(); ((wv && wv.items) || []).forEach(function (w) { if (w.job_id) perJob[w.job_id] = w; }); } catch (e) { perJob = {}; }
+  const lijst = items.filter(function (m) { return m.bestanden && m.bestanden.length; }).slice(0, 200).map(function (m) {
+    const w = perJob[m.job_id];
+    return { job_id: m.job_id, soort: m.soort, kanaal: m.kanaal, app: m.app, op: m.op,
+      label: m.soort === 'agent' ? ((w && w.samenvatting) ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(m.label)) : null,
+      bestanden: m.bestanden.map(function (b) { return { n: b.n, naam: b.naam, grootte: b.grootte }; }), overgeslagen: m.overgeslagen || 0 };
+  });
+  appStuur(res, 200, { ok: true, items: lijst, bewaar_dagen: Math.round(APP_BESTANDEN_MS / 86400000) });
+}
+const APP_MIME = { pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  md: 'text/markdown', txt: 'text/plain', csv: 'text/csv', json: 'application/json', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+  gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', html: 'text/html', ics: 'text/calendar', zip: 'application/zip', mp3: 'audio/mpeg',
+  ogg: 'audio/ogg', wav: 'audio/wav', mp4: 'video/mp4' };
+async function appBestand(req, res, rest) {
+  const m0 = /^([a-f0-9]{16})\/(\d{1,3})$/.exec(rest);
+  if (!m0) return appWeiger(res, 404, 'onbekend', 'bestand pad');
+  const jobId = m0[1], n = Number(m0[2]);
+  if (!appTeller('bestand', APP_BESTAND_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel downloads dit uur (max ' + APP_BESTAND_PER_UUR + ')', 'grens bestand');
+  const m = appBewaardVan(jobId);
+  const b = m && (m.bestanden || []).find(function (x) { return x.n === n; });
+  if (!b) return appWeiger(res, 404, 'dit bestand is er niet (meer); de pod bewaart bestanden 30 dagen', 'bestand ' + jobId + '/' + n + ' weg');
+  let inhoud;
+  try { inhoud = await fs.promises.readFile(path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'b', String(n))); }
+  catch (e) { logError('app-bestand', e); return appWeiger(res, 404, 'dit bestand is er niet (meer)', 'bestand ' + jobId + '/' + n + ' onleesbaar'); }
+  res._app.reden = 'bestand ' + jobId + '/' + n;
+  const ext = (/\.([a-z0-9]{1,5})$/i.exec(b.naam) || [])[1];
+  appStuur(res, 200, { ok: true, naam: b.naam, type: APP_MIME[String(ext || '').toLowerCase()] || 'application/octet-stream', grootte: inhoud.length,
+    inhoud: inhoud.toString('base64') });
+}
+
 function appIsPad(req) { const p = reqPath(req); return p === '/app' || p.indexOf('/app/') === 0; }
 
 function handleApp(req, res) {
@@ -4093,6 +4350,10 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/geschiedenis/') === 0) return appGeschiedenis(req, res, reg, a, route.slice('GET /app/geschiedenis/'.length));
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res);
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
+        if (route === 'GET /app/agents') return appAgents(req, res);
+        if (route.indexOf('GET /app/agent/') === 0) return appAgentRapport(req, res, route.slice('GET /app/agent/'.length));
+        if (route === 'GET /app/bestanden') return appBestanden(req, res);
+        if (route.indexOf('GET /app/bestand/') === 0) return appBestand(req, res, route.slice('GET /app/bestand/'.length));
         return appWeiger(res, 404, 'onbekend', 'route');
       };
       Promise.resolve().then(verder).catch(function (e) {
@@ -4175,6 +4436,7 @@ function appInfo() {
     aanvraag_open: !!appAanvraagGeldig(), sessies: Object.keys(appStaat.sessies).length,
     beurten_lopend: Object.keys(jobs).filter(function (id) { return jobs[id].app && (jobs[id].status === 'pending' || jobs[id].status === 'running'); }).length,
     omlijsting: !!appOmlijsting(),
+    bestanden_mb: Math.round((appStaat.bestandenTotaal || 0) / 1048576),
     passkey_bibliotheek: appWebauthn() ? appStaat.webauthnBron : 'ontbreekt',
     // podklok tegen de Date-kop van de Access-certs (Fable-review 7-10 #12); > 2 min = alle Access-bewijzen falen
     klok_afwijking_s: afw, klok_gemeten: k ? new Date(k.op).toISOString() : null,
