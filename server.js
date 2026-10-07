@@ -3007,6 +3007,7 @@ const APP_AUDIT_MAX = 5 * 1024 * 1024;
 const APP_ROUTE_RE = /^\/app\/[a-z0-9/-]{1,64}$/;
 const APP_KANALEN = { hoofd: '40687', machinekamer: 'telegram-debug' };
 const APP_AANVRAAG_MS = 10 * 60 * 1000;
+const APP_AANVRAAG_MAX_MS = 15 * 60 * 1000;   // inclusief de verlenging na goedkeuring; zo lang leeft ook het koppelcookie
 const APP_AANVRAAG_PER_DAG = 10;
 const APP_BEURTEN_PER_UUR = 30;
 const APP_TEKST_MAX = 20000;
@@ -3194,6 +3195,9 @@ function appApparaat(req, reg) {
 }
 // Alleen schrijvende, door David gestarte routes schuiven de sessie op (glijd = true); lezen en pollen niet, anders
 // houdt een open app de sessie tot de harde grens in leven en werkt de stilte-time-out niet (Fable-review 7-10 #1).
+function appGlijd(s, apparaat) {
+  s.tot = Math.min(s.start + APP_SESSIE_MAX_MS, Date.now() + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS));
+}
 function appSessie(req, apparaat, glijd) {
   const c = String(req.headers['x-app-sessie'] || '');
   if (!/^[a-f0-9]{64}$/.test(c)) return null;
@@ -3201,7 +3205,7 @@ function appSessie(req, apparaat, glijd) {
   if (!s) return null;
   const nu = Date.now();
   if (nu > s.tot || !apparaat || s.apparaat !== apparaat.id) { if (nu > s.tot) delete appStaat.sessies[h]; return null; }
-  if (glijd) s.tot = Math.min(s.start + APP_SESSIE_MAX_MS, nu + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS));
+  if (glijd) appGlijd(s, apparaat);
   return s;
 }
 function appNieuweSessie(apparaat) {
@@ -3327,7 +3331,7 @@ async function appKoppelAanvraag(req, res, reg, d) {
   const k = appAanvraagGeldig();
   if (k && k.status !== 'afgewezen') {
     if (appBindingOk(req, k)) return appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
-    return appWeiger(res, 409, 'er loopt al een aanvraag van een ander apparaat; wacht ' + Math.ceil((k.tot - Date.now()) / 60000) + ' min of wijs hem af op je telefoon', 'aanvraag loopt');
+    return appWeiger(res, 409, 'er loopt al een aanvraag van een ander apparaat; wacht ' + Math.ceil((k.tot - Date.now()) / 60000) + ' min of wijs hem af op je telefoon. Toont dit scherm geen controlecode, keur die aanvraag dan NIET goed', 'aanvraag loopt');
   }
   if (!appTijdslot(res, 'aanvraag_tijden', APP_AANVRAAG_PER_DAG)) return;
   const nu = Date.now();
@@ -3340,7 +3344,7 @@ async function appKoppelAanvraag(req, res, reg, d) {
     '. Goedkeuren kan alleen in de app op je telefoon (tab Apparaten), 10 min geldig. Niet jij? Niet goedkeuren en meld het de machinekamer.');
   if (!ok) { appStaat.aanvraag = null; return appWeiger(res, 502, 'de melding kon niet via Telegram worden verstuurd; probeer het over een minuut opnieuw', 'telegram'); }
   res._app.reden = 'aanvraag ' + n.controle + ' (' + n.systeem + ')';
-  appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(n) }, { koppel: { w: binding, s: APP_AANVRAAG_MS / 1000 } });
+  appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(n) }, { koppel: { w: binding, s: APP_AANVRAAG_MAX_MS / 1000 } });
 }
 
 function appKoppelStand(req, res) {
@@ -3369,7 +3373,7 @@ function appKoppelGoedkeur(req, res, reg, a, s, d, afwijzen) {
     return appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
   }
   k.status = 'goedgekeurd'; k.door = a.id;
-  k.tot = Math.max(k.tot, Date.now() + 5 * 60 * 1000);   // genoeg tijd om de passkey te maken
+  k.tot = Math.min(k.sinds + APP_AANVRAAG_MAX_MS, Math.max(k.tot, Date.now() + 5 * 60 * 1000));   // tijd voor de passkey, binnen het cookie
   res._app.reden = 'goedgekeurd ' + k.controle + ' (' + k.systeem + ')';
   appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
 }
@@ -3579,7 +3583,10 @@ function appLopend(kanaal) {
 
 // beurt_id -> job, 24 u; in het geheugen en (best effort) op schijf, zodat ook een herhaling na een herstart geen tweede beurt geeft.
 function appBeurtIds() {
-  if (!appStaat.beurtIds) appStaat.beurtIds = appLeesJson(APP_BEURTEN, {}) || {};
+  if (!appStaat.beurtIds) {
+    // kapot bestand: verder met het geheugen (een beurt mag niet blokkeren), maar niet stil (Fable-review wv56 #9)
+    try { appStaat.beurtIds = appLeesStreng(APP_BEURTEN, {}); } catch (e) { logError('app-beurten', e); appStaat.beurtIds = {}; }
+  }
   const nu = Date.now(), m = appStaat.beurtIds;
   Object.keys(m).forEach(function (k) { if (!m[k] || nu - m[k].t > 86400000) delete m[k]; });
   return m;
@@ -3633,6 +3640,7 @@ async function appNaBeurt(jobId) {
   const goed = await appLogSchrijf(j.app.kanaal, { t: new Date().toISOString(), job_id: jobId, beurt_id: j.app.beurt_id, soort: j.app.soort,
     apparaat: j.app.apparaat, tekst: j.app.tekst, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
     vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
+  j.app.gelogd = goed;
   if (goed && !j.opgehaald) j.opgehaald = Date.now();
 }
 
@@ -3651,7 +3659,10 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
     app: { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, soort: meta.soort, tekst: meta.tekst } };
   // Zelfde wachtrij als /run: een Telegram-bericht en een app-bericht in hetzelfde gesprek lopen na elkaar.
   enqueue(sessionKey(DEFAULT_WS, chatId), function () {
-    return processJob(jobId, prompt, '', [], chatId, DEFAULT_WS, keuze, '').then(function () { return appNaBeurt(jobId); });
+    // appNaBeurt NIET teruggeven: een trage schijf mag de volgende beurt (ook uit Telegram) niet ophouden (Fable-review wv56 #3)
+    return processJob(jobId, prompt, '', [], chatId, DEFAULT_WS, keuze, '').then(function () {
+      appNaBeurt(jobId).catch(function (e) { logError('app-na-beurt', e); });
+    });
   });
   return { job_id: jobId };
 }
@@ -3701,6 +3712,7 @@ function appUitslag(req, res, reg, a, s, d) {
   // Alleen jobs die via /app zijn gestart; van een andere job verraden we niet eens dat hij bestaat.
   if (!j || !j.app) return appStuur(res, 200, { ok: true, gevonden: false });
   if (j.status !== 'done') {
+    res._app.stil = true;   // elke 3 s een regel zou de koppelsporen wegspoelen (Fable-review wv56 #7)
     return appStuur(res, 200, { ok: true, gevonden: true, klaar: false, status: j.status, kanaal: j.app.kanaal,
       running_ms: (j.progress && j.progress.running_ms) || 0, last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0 });
   }
@@ -3774,6 +3786,19 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
   try { items = await appLogLees(kanaal); } catch (e) { if (!(e && e.code === 'ENOENT')) { logError('app-log-lees', e); fout = 'geschiedenis nu niet leesbaar'; } }
   let vragen = {};
   try { vragen = appVragen(); } catch (e) {}
+  // Afgerond maar (nog) niet in het log (schrijffout of net klaar): uit het geheugen erbij, anders is het antwoord voor een
+  // app die dicht was onvindbaar (Fable-review wv56 #2).
+  const inLog = {};
+  items.forEach(function (x) { inLog[x.job_id] = 1; });
+  Object.keys(jobs).forEach(function (id) {
+    const j = jobs[id];
+    if (!j.app || j.app.kanaal !== kanaal || j.status !== 'done' || j.app.gelogd === true || inLog[id]) return;
+    const r = j.result || {}, out = appUitvoer(j), v = appVraagUit(out);
+    items.push({ t: new Date(j.done_at || j.created).toISOString(), job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst,
+      antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined, vraag_hash: v ? v.hash : undefined,
+      bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
+  });
+  items.sort(function (a, b) { return String(a.t).localeCompare(String(b.t)); });
   items = items.slice(-max).map(function (x) {
     const b = x.vraag_hash && vragen[x.job_id + ':' + x.vraag_hash];
     return { t: x.t, job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
@@ -3791,6 +3816,7 @@ function handleApp(req, res) {
   res._app = { route: p.slice(0, 64), status: 0, reden: null, apparaat: null, voorAuth: true };
   res.on('finish', function () {
     const o = res._app;
+    if (o.stil && res.statusCode === 200) return;
     appAudit({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden }, o.voorAuth);
   });
   if (fs.existsSync(APP_UIT)) { req.resume(); return appWeiger(res, 503, 'de app staat uit (noodstop)', 'app-uit'); }
@@ -3826,9 +3852,11 @@ function handleApp(req, res) {
         }
         // Vanaf hier: alleen met een pod-sessie (vingerafdruk) op een geldig apparaat. Alleen APP_GLIJD_ROUTES verlengen hem.
         const a = appApparaat(req, reg);
-        const s = a ? appSessie(req, a, APP_GLIJD_ROUTES.has(route)) : null;
+        const s = a ? appSessie(req, a, false) : null;
         if (!s) return appWeiger(res, 401, 'bevestig met je vingerafdruk', a ? 'geen sessie' : 'geen apparaat');
         res._app.apparaat = a.id;
+        // Verlengen pas als de schrijvende route echt lukte; een ongeldig verzoek telt niet als activiteit (Fable-review wv56 #8).
+        if (APP_GLIJD_ROUTES.has(route)) res.on('finish', function () { if (res.statusCode < 300) appGlijd(s, a); });
         if (route === 'GET /app/apparaten') return appApparatenLijst(req, res, reg, a);
         if (route === 'POST /app/apparaat/intrekken') return appIntrekken(req, res, reg, a, s, d);
         if (route === 'GET /app/apparaat/aanvraag') return appAanvraagLijst(req, res);

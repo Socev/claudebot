@@ -384,6 +384,7 @@ async function bewijs(o) {
     const nTel8 = telegram.length;
     r = await vraag('POST', '/app/koppel/aanvraag', { naam: 'Laptop' }, Object.assign({ pot: L.jar }, ua));
     const aanvL = r.j.aanvraag;
+    toets('8 koppelcookie van de aanvraag leeft 15 min (Fable wv56 #4)', r.ck && r.ck.koppel && r.ck.koppel.s === 900, JSON.stringify(r.ck));
     toets('8 aanvraag: 200, eigen id + controlecode, koppelcookie', r.status === 200 && /^[a-f0-9]{16}$/.test(aanvL.id) && aanvL.controle === aanvL.id.slice(0, 6).toUpperCase() && /^[a-f0-9]{64}$/.test(L.jar.koppel), JSON.stringify(r));
     toets('8 Telegram-melding bij de aanvraag (naam, systeem, controlecode)', telegram.length === nTel8 + 1 && telegram[telegram.length - 1].indexOf(aanvL.controle) > 0 && /Edge op Windows/.test(telegram[telegram.length - 1]), telegram[telegram.length - 1]);
     r = await L.p.evaluate(() => post('/api/koppel/opties', {}));
@@ -481,13 +482,21 @@ async function bewijs(o) {
     const g1 = gestart[gestart.length - 1];
     toets('9 beurt hoofd -> job, prompt "[APP] …", chat 40687, vault', r.status === 200 && /^[a-f0-9]{16}$/.test(j1) && g1 && g1.jobId === j1 && g1.prompt === '[APP] Wat staat er morgen?' && g1.chatId === '40687' && g1.ws === 'vault', JSON.stringify(r.j) + JSON.stringify(g1));
     toets('9 beurt verlengt de sessie (glijdt)', sP.tot > tot0, sP.tot - tot0);
+    tot0 = sP.tot = Date.now() + 60000;
+    r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: '' }, { pot: P.jar });
+    await slaap(20);
+    toets('9 ongeldige beurt (400) verlengt de sessie niet (Fable wv56 #8)', r.status === 400 && sP.tot === tot0, sP.tot - tot0);
     r = await vraag('POST', '/app/beurt', { beurt_id: b1, kanaal: 'hoofd', tekst: 'Wat staat er morgen?' }, { pot: P.jar });
     await slaap(30);
     toets('9 dezelfde beurt_id nog eens -> zelfde job, geen tweede beurt', r.status === 200 && r.j.job_id === j1 && r.j.al === true && gestart.length === gesprekVoor + 1, JSON.stringify(r.j));
     r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'nog iets' }, { pot: P.jar });
     toets('9 tweede beurt in hetzelfde kanaal terwijl Socev bezig is -> 409', r.status === 409 && /bezig/.test(r.j.fout), JSON.stringify(r.j));
     tot0 = sP.tot = Date.now() + 60000;
+    const auditRegels = () => fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter((l) => /app\/uitslag/.test(l)).length;
+    const nAudit = auditRegels();
     r = await vraag('POST', '/app/uitslag', { job_id: j1 }, { pot: P.jar });
+    await slaap(20);
+    toets('9 poll "niet klaar" geeft geen auditregel (Fable wv56 #7)', auditRegels() === nAudit, auditRegels() - nAudit);
     const rg = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar });
     await vraag('GET', '/app/status', undefined, { pot: P.jar });
     toets('9 uitslag tijdens de beurt: niet klaar', r.status === 200 && r.j.gevonden === true && r.j.klaar === false && r.j.status === 'running', JSON.stringify(r.j));
@@ -585,6 +594,8 @@ async function bewijs(o) {
     await slaap(30);
     afmaken[jl]('antwoord bij dicht log');
     await slaap(80);
+    const rgl = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: M.jar });
+    toets('9 app-log onschrijfbaar en app dicht: geschiedenis geeft het antwoord uit het geheugen, nog niet opgehaald (Fable wv56 #2)', (rgl.j.items || []).some((x) => x.job_id === jl && x.antwoord === 'antwoord bij dicht log') && !jobs[jl].opgehaald, JSON.stringify((rgl.j.items || []).slice(-1)));
     const ru = await vraag('POST', '/app/uitslag', { job_id: jl }, { pot: M.jar });
     fs.chmodSync(LOGDIR, 0o700); fs.chmodSync(path.join(LOGDIR, 'hoofd.jsonl'), 0o600);
     toets('9 app-log onschrijfbaar -> beurt en uitslag werken door (fail-open)', r.status === 200 && ru.j.klaar === true && ru.j.antwoord === 'antwoord bij dicht log' && logs.some((l) => /^app-log/.test(l)), JSON.stringify(ru.j) + logs.slice(-2));
