@@ -229,6 +229,19 @@ async function bewijs(o) {
     toets('4 vingerafdruk -> sessie', r.status === 200 && /^[a-f0-9]{64}$/.test(X.jar.sessie), JSON.stringify(r));
     r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
     toets('4 met nieuwe sessie: 200', r.status === 200);
+    {
+      // lezen en pollen schuiven de sessie niet op (Fable-review 7-10 #1)
+      const sx = H.appStaat.sessies[crypto.createHash('sha256').update(X.jar.sessie).digest('hex')];
+      const totVoor = Date.now() + 1500; sx.tot = totVoor;
+      for (let i = 0; i < 3; i++) { await vraag('GET', '/app/status', undefined, { pot: X.jar }); await vraag('GET', '/app/apparaten', undefined, { pot: X.jar }); await slaap(300); }
+      toets('4 status/apparaten (lezen) schuiven de sessie niet op', sx.tot === totVoor, sx.tot - totVoor);
+      await slaap(700);
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
+      toets('4 open app die alleen leest: na de stilte-grens -> 401', r.status === 401, r.status);
+      const bew2 = await X.p.evaluate(async () => { const o = await post('/api/passkey/opties', {}); return bewijs(o.j.opties); });
+      r = await X.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bew2);
+      toets('4 opnieuw vingerafdruk -> sessie', r.status === 200 && /^[a-f0-9]{64}$/.test(X.jar.sessie), JSON.stringify(r));
+    }
     const sessieOud = X.jar.sessie;
     r = await X.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bew);
     toets('4 herhaald bewijs (replay) -> 401', r.status === 401, JSON.stringify(r));
@@ -259,7 +272,11 @@ async function bewijs(o) {
     r = await vraag('POST', '/app/koppel/code', {}, { pot: pot() });
     toets('5 alles ingetrokken: coderoute blijft dicht', r.status === 403);
     fs.writeFileSync(path.join(DATA, 'koppel-heropend'), '');
+    { const oud = (Date.now() - 25 * 3600 * 1000) / 1000; fs.utimesSync(path.join(DATA, 'koppel-heropend'), oud, oud); }
     await slaap(1100);
+    r = await vraag('POST', '/app/koppel/code', {}, { pot: pot() });
+    toets('5 koppel-heropend ouder dan 24 u -> dicht (403)', r.status === 403 && /dicht/.test(r.j.fout), JSON.stringify(r.j));
+    fs.writeFileSync(path.join(DATA, 'koppel-heropend'), '');
     r = await vraag('POST', '/app/koppel/code', {}, { pot: pot() });
     toets('5 machinekamer heropent (koppel-heropend) -> code', r.status === 200, JSON.stringify(r.j));
 

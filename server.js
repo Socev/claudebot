@@ -2985,6 +2985,9 @@ const APP_CODE_PER_DAG = 10;
 const APP_UITDAGING_MS = 2 * 60 * 1000;
 const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
 const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-apparaat (fase 4)
+// Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
+const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken']);
+const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
 const APP_APPARAAT_COOKIE_S = 400 * 24 * 3600;
@@ -3034,7 +3037,11 @@ function appRegister() {
   if (!Array.isArray(r.apparaten)) throw new Error('kapot: apparaten.json');
   return r;
 }
-function appKoppelOpen(reg) { return !reg.ooit_gekoppeld || fs.existsSync(APP_HEROPEND); }
+// Heropend door de machinekamer geldt hooguit 24 u; daarna weer dicht (Fable-review 7-10 #8).
+function appKoppelOpen(reg) {
+  if (!reg.ooit_gekoppeld) return true;
+  try { return Date.now() - fs.statSync(APP_HEROPEND).mtimeMs < APP_HEROPEND_MS; } catch (e) { return false; }
+}
 
 // @simplewebauthn/server: eerst uit het image (/app/node_modules), anders uit de brug op het volume.
 function appWebauthn() {
@@ -3156,14 +3163,16 @@ function appApparaat(req, reg) {
   if (!a || !a.actief || !a.cookie_hash || !appGelijk(appSha(m[2]), a.cookie_hash)) return null;
   return a;
 }
-function appSessie(req, apparaat) {
+// Alleen schrijvende, door David gestarte routes schuiven de sessie op (glijd = true); lezen en pollen niet, anders
+// houdt een open app de sessie tot de harde grens in leven en werkt de stilte-time-out niet (Fable-review 7-10 #1).
+function appSessie(req, apparaat, glijd) {
   const c = String(req.headers['x-app-sessie'] || '');
   if (!/^[a-f0-9]{64}$/.test(c)) return null;
   const h = appSha(c), s = appStaat.sessies[h];
   if (!s) return null;
   const nu = Date.now();
   if (nu > s.tot || !apparaat || s.apparaat !== apparaat.id) { if (nu > s.tot) delete appStaat.sessies[h]; return null; }
-  s.tot = Math.min(s.start + APP_SESSIE_MAX_MS, nu + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS));
+  if (glijd) s.tot = Math.min(s.start + APP_SESSIE_MAX_MS, nu + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS));
   return s;
 }
 function appNieuweSessie(apparaat) {
@@ -3203,7 +3212,7 @@ async function appTelegram(tekst) {
 // ── routes ──
 async function appStatus(req, res, reg) {
   const a = appApparaat(req, reg);
-  const s = a ? appSessie(req, a) : null;
+  const s = a ? appSessie(req, a, false) : null;
   appStuur(res, 200, { ok: true, koppelen_open: appKoppelOpen(reg), apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort } : null,
     sessie: !!s, sessie_tot: s ? new Date(s.tot).toISOString() : null, passkey_klaar: !!appWebauthn() });
 }
@@ -3424,7 +3433,7 @@ function handleApp(req, res) {
         }
         // Vanaf hier: alleen met een pod-sessie (vingerafdruk) op een geldig apparaat.
         const a = appApparaat(req, reg);
-        const s = a ? appSessie(req, a) : null;
+        const s = a ? appSessie(req, a, APP_GLIJD_ROUTES.has(route)) : null;
         if (!s) return appWeiger(res, 401, 'bevestig met je vingerafdruk', a ? 'geen sessie' : 'geen apparaat');
         res._app.apparaat = a.id;
         if (route === 'GET /app/apparaten') return appApparatenLijst(req, res, reg, a);
