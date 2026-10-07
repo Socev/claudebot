@@ -2198,6 +2198,7 @@ function handleRequest(req, res) {
       offsite: offsiteInfo(),
       auto: autoInfo(),
       tunnel: tunnelInfo(),
+      app: appInfo(),
       secrets_geladen: secretsGeladen(),
       cli_versies: CLI_VERSIES, effort: CLAUDE_EFFORT,
       kluis_overgeslagen: process.env.KLUIS_OVERGESLAGEN === '1',
@@ -2952,6 +2953,512 @@ function sleutelportaal(req, res) {
 }
 // ── einde sleutelportaal ─────────────────────────────────────────────────────
 
+// ── Socev-app poort (/app/*, fase 1, 7-10-2026) ─────────────────────────────────────────────────
+// De smalle poort van de Socev-app (app.socev.dev) naar de pod. Bouwplan: vault 01_Ontwikkeling/Socev-app -
+// bouwplan (7-10-2026).md § 4.4, § 4.5, § 5. De POD is de rechter: Cloudflare (Access + Pages Functions) is alleen de
+// deur ervoor. Elke /app/-aanvraag moet hier door vier sloten:
+//   1. noodstop: bestaat /opt/data/app-uit, dan 503 op alles (zoals tunnel-uit);
+//   2. poortgeheim (X-App-Poort, eigen geheim, niet API_SECRET) - alleen de app-Functions kennen het;
+//   3. Access-bewijs van de Access-app op app-pod.socev.dev (Cf-Access-Jwt-Assertion: RS256, aud, iss, en
+//      common_name = het servicetoken van de app-Functions) - /app/* is ook via Olares en het cluster te bereiken;
+//   4. behalve op status/koppel/passkey: een pod-sessie, alleen te krijgen met een passkey-bevestiging (WebAuthn,
+//      geverifieerd HIER met @simplewebauthn/server) op een geregistreerd apparaat (apparaatcookie).
+// Wie de Pages-secrets of het Cloudflare-account heeft, komt dus tot en met slot 3, maar praat niet als David.
+// Het eerste apparaat koppelt met een code van 8 cijfers via de debug-bot (gebonden aan de browser die hem vroeg);
+// daarna is die route dicht tot de machinekamer hem heropent (bestand koppel-heropend). Volgende apparaten: fase 2.
+// Opslag: APP_DATA (/opt/data/socev-app-data; NIET /opt/data/app, dat zijn de server.js-releases). Geen inhoud in het
+// auditlog. Sessies staan alleen in het geheugen: na een herstart is één vingerafdruk genoeg.
+const APP_DATA = process.env.APP_DATA_DIR || '/opt/data/socev-app-data';
+const APP_UIT = process.env.APP_UIT_BESTAND || '/opt/data/app-uit';
+const APP_REGISTER = path.join(APP_DATA, 'apparaten.json');
+const APP_STAAT = path.join(APP_DATA, 'staat.json');
+const APP_AUDIT = path.join(APP_DATA, 'audit.jsonl');
+const APP_CONFIG = path.join(APP_DATA, 'config.json');           // geen geheimen: aud, teamdomein, client-id, herkomst
+const APP_POORT_PAD = path.join(APP_DATA, 'geheim', 'poort.key');
+const APP_HEROPEND = path.join(APP_DATA, 'koppel-heropend');      // machinekamer: eerste-apparaatroute opnieuw open
+const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
+const APP_MAX_BODY = 64 * 1024;
+const APP_CODE_MS = 10 * 60 * 1000;
+const APP_CODE_POGINGEN = 5;
+const APP_CODE_INTERVAL_MS = 60 * 1000;
+const APP_CODE_PER_DAG = 10;
+const APP_UITDAGING_MS = 2 * 60 * 1000;
+const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
+const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-apparaat (fase 4)
+const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
+const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
+const APP_APPARAAT_COOKIE_S = 400 * 24 * 3600;
+const APP_KOPPEL_PER_UUR = 30;                 // koppel/* (streng)
+const APP_OPENEN_PER_UUR = 120;                // passkey/opties (elke start en elke terugkeer na 2 min; review wv55 #5)
+const APP_VERZOEKEN_PER_UUR = 1200;            // alles onder /app/
+const APP_AUDIT_MAX = 5 * 1024 * 1024;
+const APP_ROUTE_RE = /^\/app\/[a-z0-9/-]{1,64}$/;
+
+const appStaat = { koppel: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [] }, certs: null, certsFout: 0,
+  auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
+  webauthn: null, webauthnFout: null, registerCache: null };
+
+function appSha(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
+function appGelijk(a, b) { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); }
+function appLeesJson(f, standaard) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return standaard; } }
+// Register en staat: alleen "bestaat niet" geeft de lege stand. Kapot = gooien (fail-closed): een kapot register mag
+// de eerste-apparaatroute nooit heropenen, een kapotte staat de daggrens niet op nul zetten (review wv55 #4).
+function appLeesStreng(f, leeg) {
+  let t;
+  try { t = fs.readFileSync(f, 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return leeg; throw new Error('onleesbaar: ' + path.basename(f)); }
+  const j = JSON.parse(t);
+  if (!j || typeof j !== 'object') throw new Error('kapot: ' + path.basename(f));
+  return j;
+}
+// Atomisch schrijven (tijdelijk bestand + rename), alleen voor de eigenaar leesbaar.
+function appSchrijfJson(f, data) {
+  fs.mkdirSync(path.dirname(f), { recursive: true, mode: 0o700 });
+  const tmp = f + '.nieuw.' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 1), { mode: 0o600 });
+  fs.renameSync(tmp, f);
+}
+function appConfig() {
+  const c = appLeesJson(APP_CONFIG, {}) || {};
+  return {
+    team: String(c.access_team || 'https://huisdokter.cloudflareaccess.com').replace(/\/+$/, ''),
+    aud: String(c.access_aud || ''), clientId: String(c.servicetoken_client_id || ''),
+    herkomst: String(c.herkomst || 'https://app.socev.dev'), rpId: String(c.rp_id || 'app.socev.dev'),
+  };
+}
+function appPoortGeheim() {
+  if (process.env.APP_POORT_SECRET) return process.env.APP_POORT_SECRET;
+  try { return fs.readFileSync(APP_POORT_PAD, 'utf8').trim(); } catch (e) { return ''; }
+}
+function appRegister() {
+  const r = appLeesStreng(APP_REGISTER, { versie: 1, ooit_gekoppeld: false, apparaten: [] });
+  if (!Array.isArray(r.apparaten)) throw new Error('kapot: apparaten.json');
+  return r;
+}
+function appKoppelOpen(reg) { return !reg.ooit_gekoppeld || fs.existsSync(APP_HEROPEND); }
+
+// @simplewebauthn/server: eerst uit het image (/app/node_modules), anders uit de brug op het volume.
+function appWebauthn() {
+  if (appStaat.webauthn) return appStaat.webauthn;
+  try { appStaat.webauthn = require('@simplewebauthn/server'); appStaat.webauthnBron = 'image'; return appStaat.webauthn; } catch (e) {}
+  try { appStaat.webauthn = require('module').createRequire(APP_VENDOR)('@simplewebauthn/server'); appStaat.webauthnBron = 'brug'; return appStaat.webauthn; }
+  catch (e) { appStaat.webauthnFout = String(e && e.code || e).slice(0, 80); return null; }
+}
+
+function appAudit(o, voorAuth) {
+  // Weigeringen vóór de Access-controle (poortgeheim fout, via Olares/cluster): hooguit 30 regels per minuut, de rest
+  // geteld, zodat een vloed de echte sporen niet wegspoelt (review wv55 #7).
+  const va = appStaat.auditVoorAuth, minuut = Math.floor(Date.now() / 60000);
+  if (voorAuth) {
+    if (va.minuut !== minuut) { va.minuut = minuut; va.n = 0; }
+    if (++va.n > 30) { va.overgeslagen++; return; }
+  }
+  if (va.overgeslagen) { o = Object.assign({}, o, { overgeslagen_voor_auth: va.overgeslagen }); va.overgeslagen = 0; }
+  try {
+    fs.mkdirSync(APP_DATA, { recursive: true, mode: 0o700 });
+    try {
+      if (fs.statSync(APP_AUDIT).size > APP_AUDIT_MAX) {
+        for (let i = 3; i >= 1; i--) { try { fs.renameSync(APP_AUDIT + (i > 1 ? '.' + (i - 1) : ''), APP_AUDIT + '.' + i); } catch (e) {} }
+      }
+    } catch (e) {}
+    fs.appendFileSync(APP_AUDIT, JSON.stringify(Object.assign({ t: new Date().toISOString() }, o)) + '\n', { mode: 0o600 });
+  } catch (e) { logError('app-audit', e); }
+}
+
+function appTeller(soort, max, venster) {
+  const nu = Date.now();
+  const l = appStaat.tellers[soort] = appStaat.tellers[soort].filter(function (t) { return nu - t < venster; });
+  if (l.length >= max) return false;
+  l.push(nu); return true;
+}
+
+function appCookieKop(cookies) { return cookies ? { 'X-App-Cookies': JSON.stringify(cookies) } : {}; }
+function appStuur(res, status, obj, cookies) {
+  if (res._app) res._app.status = status;
+  // X-App-Pod: de Function geeft alleen antwoorden door die echt van deze code komen (geen Access-/tunnelpagina's).
+  res.writeHead(status, Object.assign({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-App-Pod': '1' }, appCookieKop(cookies)));
+  res.end(JSON.stringify(obj));
+}
+function appWeiger(res, status, fout, reden) {
+  if (res._app) res._app.reden = reden || fout;
+  appStuur(res, status, { ok: false, fout: fout });
+}
+
+// ── Access-bewijs (RS256 tegen de certs van het teamdomein) ──
+async function appCerts(cfg, kid) {
+  const nu = Date.now();
+  const c = appStaat.certs;
+  if (c && c.team === cfg.team && nu < c.tot && (c.keys.some(function (k) { return k.kid === kid; }) || nu - c.op < 60000)) return c.keys;
+  if (nu - appStaat.certsFout < 10000) throw new Error('certs kort geleden mislukt');
+  try {
+    const r = await fetch(cfg.team + '/cdn-cgi/access/certs', { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) throw new Error('certs HTTP ' + r.status);
+    const j = await r.json();
+    const keys = Array.isArray(j && j.keys) ? j.keys : [];
+    appStaat.certs = { team: cfg.team, keys: keys, op: nu, tot: nu + 10 * 60 * 1000 };
+    return keys;
+  } catch (e) { appStaat.certsFout = nu; throw e; }
+}
+function appB64Json(s) { return JSON.parse(Buffer.from(s, 'base64url').toString('utf8')); }
+async function appAccessOk(req, cfg) {
+  if (!cfg.aud || !cfg.clientId) return 'config';
+  const token = String(req.headers['cf-access-jwt-assertion'] || '');
+  const d = token.split('.');
+  if (d.length !== 3) return 'geen bewijs';
+  let kop, inh;
+  try { kop = appB64Json(d[0]); inh = appB64Json(d[1]); } catch (e) { return 'vorm'; }
+  if (kop.alg !== 'RS256' || typeof kop.kid !== 'string') return 'alg';
+  let keys;
+  try { keys = await appCerts(cfg, kop.kid); } catch (e) { return 'certs'; }
+  const jwk = keys.find(function (k) { return k.kid === kop.kid; });
+  if (!jwk) return 'onbekende sleutel';
+  let geldig = false;
+  try {
+    const sleutel = crypto.createPublicKey({ key: { kty: jwk.kty, n: jwk.n, e: jwk.e }, format: 'jwk' });
+    geldig = crypto.verify('RSA-SHA256', Buffer.from(d[0] + '.' + d[1]), sleutel, Buffer.from(d[2], 'base64url'));
+  } catch (e) { return 'handtekening'; }
+  if (!geldig) return 'handtekening';
+  const nu = Math.floor(Date.now() / 1000);
+  if (typeof inh.exp !== 'number' || inh.exp + 60 < nu) return 'verlopen';
+  if (typeof inh.nbf === 'number' && inh.nbf - 60 > nu) return 'nog niet geldig';
+  if (inh.iss !== cfg.team) return 'iss';
+  if ((Array.isArray(inh.aud) ? inh.aud : [inh.aud]).indexOf(cfg.aud) < 0) return 'aud';
+  // Alleen het servicetoken van de app-Functions; een gebruikersidentiteit (e-mail) hoort hier niet.
+  if (typeof inh.common_name !== 'string' || !appGelijk(inh.common_name, cfg.clientId)) return 'servicetoken';
+  return null;
+}
+
+function appBody(req, cb) {
+  if (req.method !== 'POST') return cb(null, {});
+  const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (ct !== 'application/json') { req.resume(); return cb('soort'); }
+  const delen = []; let n = 0, klaar = false;
+  req.on('data', function (c) {
+    if (klaar) return;
+    n += c.length;
+    if (n > APP_MAX_BODY) { klaar = true; delen.length = 0; req.destroy(); return cb('groot'); }
+    delen.push(c);
+  });
+  req.on('error', function () { if (!klaar) { klaar = true; cb('lezen'); } });
+  req.on('end', function () {
+    if (klaar) return; klaar = true;
+    let d = null; try { d = JSON.parse(Buffer.concat(delen).toString('utf8') || '{}'); } catch (e) {}
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return cb('json');
+    cb(null, d);
+  });
+}
+
+// Apparaatcookie "<id>.<geheim>"; het register kent alleen sha256(geheim).
+function appApparaat(req, reg) {
+  const c = String(req.headers['x-app-apparaat'] || '');
+  const m = /^([a-f0-9]{16})\.([a-f0-9]{64})$/.exec(c);
+  if (!m) return null;
+  const a = reg.apparaten.find(function (x) { return x.id === m[1]; });
+  if (!a || !a.actief || !a.cookie_hash || !appGelijk(appSha(m[2]), a.cookie_hash)) return null;
+  return a;
+}
+function appSessie(req, apparaat) {
+  const c = String(req.headers['x-app-sessie'] || '');
+  if (!/^[a-f0-9]{64}$/.test(c)) return null;
+  const h = appSha(c), s = appStaat.sessies[h];
+  if (!s) return null;
+  const nu = Date.now();
+  if (nu > s.tot || !apparaat || s.apparaat !== apparaat.id) { if (nu > s.tot) delete appStaat.sessies[h]; return null; }
+  s.tot = Math.min(s.start + APP_SESSIE_MAX_MS, nu + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS));
+  return s;
+}
+function appNieuweSessie(apparaat) {
+  // één sessie per apparaat: een nieuwe vingerafdruk vervangt de vorige
+  Object.keys(appStaat.sessies).forEach(function (h) { if (appStaat.sessies[h].apparaat === apparaat.id) delete appStaat.sessies[h]; });
+  const id = crypto.randomBytes(32).toString('hex'), nu = Date.now();
+  appStaat.sessies[appSha(id)] = { apparaat: apparaat.id, start: nu, vers_tot: nu + APP_VERS_MS,
+    tot: nu + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS) };
+  return { w: id, s: Math.floor(APP_SESSIE_MAX_MS / 1000) };
+}
+function appSessiesWeg(apparaatId) {
+  Object.keys(appStaat.sessies).forEach(function (h) { if (appStaat.sessies[h].apparaat === apparaatId) delete appStaat.sessies[h]; });
+}
+
+function appBeschrijf(req) {
+  // Alleen ter herkenning (koppelbericht, apparatenlijst); nooit een beslissing op gebaseerd.
+  const ua = String(req.headers['x-app-ua'] || '').slice(0, 300);
+  const sys = /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'macOS' : /iPhone|iPad/.test(ua) ? 'iOS' : /Linux/.test(ua) ? 'Linux' : 'onbekend systeem';
+  const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'onbekende browser';
+  return br + ' op ' + sys;
+}
+
+async function appTelegram(tekst) {
+  const tok = process.env.TELEGRAM_DEBUG_BOT_TOKEN;
+  if (!tok) return false;
+  try {
+    const r = await fetch('https://api.telegram.org/bot' + tok + '/sendMessage', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: SP_CHAT, text: tekst, disable_web_page_preview: true }),
+      signal: AbortSignal.timeout(15000),
+    });
+    await r.text().catch(function () {});
+    return r.ok;
+  } catch (e) { logError('app-telegram', { name: e && e.name, code: e && e.code }); return false; }
+}
+
+// ── routes ──
+async function appStatus(req, res, reg) {
+  const a = appApparaat(req, reg);
+  const s = a ? appSessie(req, a) : null;
+  appStuur(res, 200, { ok: true, koppelen_open: appKoppelOpen(reg), apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort } : null,
+    sessie: !!s, sessie_tot: s ? new Date(s.tot).toISOString() : null, passkey_klaar: !!appWebauthn() });
+}
+
+async function appKoppelCode(req, res, reg) {
+  if (!appKoppelOpen(reg)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht');
+  const nu = Date.now();
+  const st = appLeesStreng(APP_STAAT, {});
+  const tijden = (Array.isArray(st.code_tijden) ? st.code_tijden : []).filter(function (t) { return nu - t < 86400000; });
+  const laatste = tijden[tijden.length - 1] || 0;
+  if (nu - laatste < APP_CODE_INTERVAL_MS) return appWeiger(res, 429, 'er is net een code verstuurd; wacht een minuut', 'binnen de minuut');
+  if (tijden.length >= APP_CODE_PER_DAG) return appWeiger(res, 429, 'te veel codes vandaag; vraag de machinekamer', 'dagGrens');
+  tijden.push(nu);
+  st.code_tijden = tijden;
+  try { appSchrijfJson(APP_STAAT, st); } catch (e) { logError('app-staat', e); return appWeiger(res, 500, 'opslag', 'staat niet schrijfbaar'); }
+  const code = String(crypto.randomInt(0, 100000000)).padStart(8, '0');
+  const binding = crypto.randomBytes(32).toString('hex');
+  const zout = crypto.randomBytes(16).toString('hex');
+  appStaat.koppel = { binding: appSha(binding), code: appSha(zout + code), zout: zout, tot: nu + APP_CODE_MS, pogingen: 0, geverifieerd: false };
+  const wat = appBeschrijf(req);
+  const ok = await appTelegram('Socev-app: koppelcode ' + code + ' voor je EERSTE apparaat (10 min geldig, alleen in de browser die hem vroeg: ' + wat + '). Niet zelf aangevraagd? Niet invullen en meld het de machinekamer.');
+  if (!ok) { appStaat.koppel = null; return appWeiger(res, 502, 'de code kon niet via Telegram worden verstuurd; probeer het over een minuut opnieuw', 'telegram'); }
+  res._app.reden = 'verstuurd (' + wat + ')';
+  appStuur(res, 200, { ok: true, verstuurd: true, geldig_min: APP_CODE_MS / 60000 }, { koppel: { w: binding, s: APP_CODE_MS / 1000 } });
+}
+
+// Gebonden aan de browser (koppelcookie), max 5 pogingen; elke mislukking telt, ook een vreemde browser.
+function appKoppelCheck(req, res, metCode, d) {
+  const k = appStaat.koppel;
+  if (!k || Date.now() > k.tot) { appStaat.koppel = null; appWeiger(res, 403, 'geen geldige code; vraag een nieuwe aan', 'geen code'); return null; }
+  const b = String(req.headers['x-app-koppel'] || '');
+  const bindingOk = /^[a-f0-9]{64}$/.test(b) && appGelijk(appSha(b), k.binding);
+  const codeOk = !metCode || (/^[0-9]{8}$/.test(String(d.code || '')) && appGelijk(appSha(k.zout + String(d.code)), k.code));
+  if (bindingOk && codeOk && (metCode || k.geverifieerd)) return k;
+  k.pogingen++;
+  const over = APP_CODE_POGINGEN - k.pogingen;
+  if (over <= 0) appStaat.koppel = null;
+  appWeiger(res, 403, over > 0 ? (bindingOk ? 'code klopt niet; nog ' + over + ' poging(en)' : 'deze code hoort bij een andere browser') : 'code ongeldig gemaakt na te veel pogingen; vraag een nieuwe aan',
+    !bindingOk ? 'andere browser' : (metCode ? 'code fout' : 'niet geverifieerd'));
+  return null;
+}
+
+async function appKoppelOpties(req, res, reg, d) {
+  if (!appKoppelOpen(reg)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht');
+  const wa = appWebauthn();
+  if (!wa) return appWeiger(res, 503, 'passkey-bibliotheek ontbreekt op de pod', 'webauthn ' + appStaat.webauthnFout);
+  const k = appKoppelCheck(req, res, !(appStaat.koppel && appStaat.koppel.geverifieerd), d);
+  if (!k) return;
+  k.geverifieerd = true;   // de code zelf is hierna verbruikt; opnieuw opties halen kan binnen de 10 minuten
+  const cfg = appConfig();
+  const opties = await wa.generateRegistrationOptions({
+    rpName: 'Socev', rpID: cfg.rpId, userName: 'david', userDisplayName: 'David',
+    // Eigen user-handle per apparaat en geen excludeCredentials: het apparaatcookie scheidt de apparaten; met één vaste
+    // handle zou een gesynchroniseerde passkey (Google Wachtwoordbeheer) die van een ander apparaat overschrijven (review wv55 #6).
+    userID: crypto.randomBytes(16), attestationType: 'none', timeout: 120000,
+    authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'preferred' },
+  });
+  k.uitdaging = opties.challenge;
+  k.uitdaging_tot = Date.now() + APP_UITDAGING_MS;
+  appStuur(res, 200, { ok: true, opties: opties });
+}
+
+async function appKoppelRegistreer(req, res, reg, d) {
+  if (!appKoppelOpen(reg)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht');
+  const wa = appWebauthn();
+  if (!wa) return appWeiger(res, 503, 'passkey-bibliotheek ontbreekt op de pod', 'webauthn');
+  const k = appKoppelCheck(req, res, false, d);
+  if (!k) return;
+  const antw = d.antwoord;
+  const fout = function (reden) {
+    k.pogingen++;
+    if (k.pogingen >= APP_CODE_POGINGEN) appStaat.koppel = null;
+    appWeiger(res, 403, 'registratie geweigerd: ' + reden, reden);
+  };
+  const uitdaging = k.uitdaging, geldigTot = k.uitdaging_tot;
+  k.uitdaging = null;   // één keer bruikbaar, ook als het antwoord hieronder wordt geweigerd
+  if (!uitdaging || Date.now() > geldigTot) return fout('uitdaging verlopen');
+  if (!antw || typeof antw !== 'object') return fout('geen antwoord');
+  // Alleen een passkey OP dit apparaat: een telefoon-via-QR of beveiligingssleutel meldt 'cross-platform'. NIET op
+  // transports 'hybrid' weigeren: passkeys van Google Wachtwoordbeheer melden ["hybrid","internal"] met 'platform'
+  // (review wv55 #1). Let op: bij attestation 'none' is dit een bewering van de browser, geen bewijs (bouwplan § 7).
+  if (antw.authenticatorAttachment !== 'platform') return fout('alleen een passkey op dit apparaat zelf');
+  const cfg = appConfig();
+  let v;
+  try {
+    v = await wa.verifyRegistrationResponse({ response: antw, expectedChallenge: uitdaging, expectedOrigin: cfg.herkomst,
+      expectedRPID: cfg.rpId, requireUserVerification: true });
+  } catch (e) { return fout('controle: ' + String(e && e.message || e).slice(0, 80)); }
+  if (!v || !v.verified || !v.registrationInfo || !v.registrationInfo.userVerified) return fout('niet geverifieerd');
+  const cred = v.registrationInfo.credential;
+  const vers = appRegister();   // opnieuw lezen vlak voor het schrijven
+  if (!appKoppelOpen(vers)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht (intussen)');
+  if (vers.apparaten.some(function (a) { return a.credential && a.credential.id === cred.id; })) return fout('deze passkey is al gekoppeld');
+  const id = crypto.randomBytes(8).toString('hex');
+  const geheim = crypto.randomBytes(32).toString('hex');
+  const naam = String(d.naam || '').replace(/[^\p{L}\p{N} ._'()-]/gu, '').trim().slice(0, 40) || appBeschrijf(req);
+  const nu = new Date().toISOString();
+  const apparaat = { id: id, naam: naam, soort: 'reist', vaste_plek: null, systeem: appBeschrijf(req), aangemaakt: nu, laatst_gezien: nu, actief: true,
+    cookie_hash: appSha(geheim), credential: { id: cred.id, publicKey: Buffer.from(cred.publicKey).toString('base64url'), counter: cred.counter || 0,
+      transports: Array.isArray(cred.transports) ? cred.transports.slice(0, 8) : [] },
+    passkey: { soort: v.registrationInfo.credentialDeviceType, backup: !!v.registrationInfo.credentialBackedUp, aaguid: v.registrationInfo.aaguid },
+    gekoppeld_via: 'telegram-code' };
+  vers.apparaten.push(apparaat);
+  vers.ooit_gekoppeld = true;
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
+  try { fs.unlinkSync(APP_HEROPEND); } catch (e) {}
+  appStaat.koppel = null;
+  res._app.apparaat = id; res._app.reden = 'gekoppeld (' + apparaat.systeem + ')';
+  appTelegram('Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '). De koppelroute met code is nu dicht. Niet jij? Meld het direct de machinekamer.');
+  appStuur(res, 200, { ok: true, apparaat: { id: id, naam: naam, soort: apparaat.soort } },
+    { koppel: null, apparaat: { w: id + '.' + geheim, s: APP_APPARAAT_COOKIE_S }, sessie: appNieuweSessie(apparaat) });
+}
+
+async function appPasskeyOpties(req, res, reg) {
+  const a = appApparaat(req, reg);
+  if (!a) return appWeiger(res, 401, 'onbekend apparaat', 'geen apparaatcookie');
+  const wa = appWebauthn();
+  if (!wa) return appWeiger(res, 503, 'passkey-bibliotheek ontbreekt op de pod', 'webauthn');
+  res._app.apparaat = a.id;
+  const cfg = appConfig();
+  const opties = await wa.generateAuthenticationOptions({ rpID: cfg.rpId, userVerification: 'required', timeout: 60000,
+    allowCredentials: [{ id: a.credential.id, transports: a.credential.transports }] });
+  appStaat.uitdagingen[a.id] = { c: opties.challenge, tot: Date.now() + APP_UITDAGING_MS };
+  appStuur(res, 200, { ok: true, opties: opties });
+}
+
+async function appPasskeyBevestig(req, res, reg, d) {
+  const a = appApparaat(req, reg);
+  if (!a) return appWeiger(res, 401, 'onbekend apparaat', 'geen apparaatcookie');
+  res._app.apparaat = a.id;
+  const wa = appWebauthn();
+  if (!wa) return appWeiger(res, 503, 'passkey-bibliotheek ontbreekt op de pod', 'webauthn');
+  const u = appStaat.uitdagingen[a.id];
+  delete appStaat.uitdagingen[a.id];   // één poging per uitdaging
+  if (!u || Date.now() > u.tot) return appWeiger(res, 401, 'uitdaging verlopen; probeer opnieuw', 'uitdaging');
+  const antw = d.antwoord;
+  if (!antw || typeof antw !== 'object' || antw.id !== a.credential.id) return appWeiger(res, 401, 'passkey hoort niet bij dit apparaat', 'andere passkey');
+  const cfg = appConfig();
+  let v;
+  try {
+    v = await wa.verifyAuthenticationResponse({ response: antw, expectedChallenge: u.c, expectedOrigin: cfg.herkomst, expectedRPID: cfg.rpId,
+      requireUserVerification: true,
+      credential: { id: a.credential.id, publicKey: Buffer.from(a.credential.publicKey, 'base64url'), counter: a.credential.counter || 0, transports: a.credential.transports } });
+  } catch (e) { return appWeiger(res, 401, 'bevestiging geweigerd', 'controle: ' + String(e && e.message || e).slice(0, 80)); }
+  if (!v || !v.verified || !v.authenticationInfo.userVerified) return appWeiger(res, 401, 'bevestiging geweigerd', 'niet geverifieerd');
+  const vers = appRegister();
+  const x = vers.apparaten.find(function (y) { return y.id === a.id; });
+  if (!x || !x.actief) return appWeiger(res, 401, 'onbekend apparaat', 'intussen ingetrokken');
+  x.credential.counter = v.authenticationInfo.newCounter || 0;
+  x.laatst_gezien = new Date().toISOString();
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); }
+  res._app.reden = 'bevestigd';
+  appStuur(res, 200, { ok: true, apparaat: { id: x.id, naam: x.naam, soort: x.soort } }, { sessie: appNieuweSessie(x) });
+}
+
+function appApparatenLijst(req, res, reg, a) {
+  appStuur(res, 200, { ok: true, apparaten: reg.apparaten.map(function (x) {
+    return { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, systeem: x.systeem, aangemaakt: x.aangemaakt,
+      laatst_gezien: x.laatst_gezien, actief: !!x.actief, ingetrokken_op: x.ingetrokken_op || null, dit_apparaat: x.id === a.id,
+      passkey_gesynchroniseerd: !!(x.passkey && x.passkey.backup) };
+  }) });
+}
+
+function appIntrekken(req, res, reg, a, s, d) {
+  if (Date.now() > s.vers_tot) return appWeiger(res, 403, 'bevestig eerst opnieuw met je vingerafdruk', 'niet vers');
+  const id = String(d.id || '');
+  const vers = appRegister();
+  const x = vers.apparaten.find(function (y) { return y.id === id; });
+  if (!x) return appWeiger(res, 404, 'onbekend apparaat', 'onbekend id');
+  if (!x.actief) return appStuur(res, 200, { ok: true, al: true });
+  x.actief = false; x.cookie_hash = null; x.ingetrokken_op = new Date().toISOString();
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
+  appSessiesWeg(id);
+  delete appStaat.uitdagingen[id];
+  res._app.reden = 'ingetrokken ' + id;
+  appTelegram('Socev-app: apparaat "' + x.naam + '" ingetrokken (vanaf "' + a.naam + '").');
+  appStuur(res, 200, { ok: true }, id === a.id ? { sessie: null, apparaat: null } : null);
+}
+
+function appIsPad(req) { const p = reqPath(req); return p === '/app' || p.indexOf('/app/') === 0; }
+
+function handleApp(req, res) {
+  const p = reqPath(req);
+  res._log = { app: 1 };
+  res._app = { route: p.slice(0, 64), status: 0, reden: null, apparaat: null, voorAuth: true };
+  res.on('finish', function () {
+    const o = res._app;
+    appAudit({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden }, o.voorAuth);
+  });
+  if (fs.existsSync(APP_UIT)) { req.resume(); return appWeiger(res, 503, 'de app staat uit (noodstop)', 'app-uit'); }
+  if (!APP_ROUTE_RE.test(p) || (req.method !== 'GET' && req.method !== 'POST')) { req.resume(); return appWeiger(res, 404, 'onbekend', 'pad/methode'); }
+  const geheim = appPoortGeheim();
+  if (!geheim) { req.resume(); return appWeiger(res, 503, 'niet ingericht', 'geen poortgeheim'); }
+  if (!appGelijk(String(req.headers['x-app-poort'] || ''), geheim)) { req.resume(); return appWeiger(res, 401, 'niet toegestaan', 'poortgeheim'); }
+  const cfg = appConfig();
+  appAccessOk(req, cfg).then(function (afwijzing) {
+    if (afwijzing) { req.resume(); return appWeiger(res, 401, 'niet toegestaan', 'access: ' + afwijzing); }
+    res._app.voorAuth = false;
+    if (!appTeller('alles', APP_VERZOEKEN_PER_UUR, 3600000)) { req.resume(); return appWeiger(res, 429, 'te veel verzoeken', 'grens alles'); }
+    appBody(req, function (fout, d) {
+      if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
+      let reg;
+      try { reg = appRegister(); } catch (e) { logError('app-register', e); return appWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'register kapot'); }
+      const route = req.method + ' ' + p;
+      if (/^POST \/app\/koppel\//.test(route) && !appTeller('koppel', APP_KOPPEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel pogingen dit uur', 'grens koppel');
+      if (route === 'POST /app/passkey/opties' && !appTeller('openen', APP_OPENEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak ontgrendeld dit uur', 'grens openen');
+      const verder = function () {
+        if (route === 'GET /app/status') return appStatus(req, res, reg);
+        if (route === 'POST /app/koppel/code') return appKoppelCode(req, res, reg);
+        if (route === 'POST /app/koppel/opties') return appKoppelOpties(req, res, reg, d);
+        if (route === 'POST /app/koppel/registreer') return appKoppelRegistreer(req, res, reg, d);
+        if (route === 'POST /app/passkey/opties') return appPasskeyOpties(req, res, reg);
+        if (route === 'POST /app/passkey/bevestig') return appPasskeyBevestig(req, res, reg, d);
+        if (route === 'POST /app/uitloggen') {
+          const c = String(req.headers['x-app-sessie'] || '');
+          if (/^[a-f0-9]{64}$/.test(c)) delete appStaat.sessies[appSha(c)];
+          return appStuur(res, 200, { ok: true }, { sessie: null });
+        }
+        // Vanaf hier: alleen met een pod-sessie (vingerafdruk) op een geldig apparaat.
+        const a = appApparaat(req, reg);
+        const s = a ? appSessie(req, a) : null;
+        if (!s) return appWeiger(res, 401, 'bevestig met je vingerafdruk', a ? 'geen sessie' : 'geen apparaat');
+        res._app.apparaat = a.id;
+        if (route === 'GET /app/apparaten') return appApparatenLijst(req, res, reg, a);
+        if (route === 'POST /app/apparaat/intrekken') return appIntrekken(req, res, reg, a, s, d);
+        return appWeiger(res, 404, 'onbekend', 'route');
+      };
+      Promise.resolve().then(verder).catch(function (e) {
+        logError('app', e);
+        if (!res.headersSent) appWeiger(res, 500, 'fout op de pod', 'uitzondering');
+      });
+    });
+  }).catch(function (e) {
+    logError('app-access', e);
+    if (!res.headersSent) appWeiger(res, 500, 'fout op de pod', 'uitzondering access');
+  });
+}
+
+// Verlopen sessies en uitdagingen opruimen (geheugen); het register zelf blijft.
+setInterval(function () {
+  const nu = Date.now();
+  Object.keys(appStaat.sessies).forEach(function (h) { if (nu > appStaat.sessies[h].tot) delete appStaat.sessies[h]; });
+  Object.keys(appStaat.uitdagingen).forEach(function (h) { if (nu > appStaat.uitdagingen[h].tot) delete appStaat.uitdagingen[h]; });
+  if (appStaat.koppel && nu > appStaat.koppel.tot) appStaat.koppel = null;
+}, 60 * 1000).unref();
+
+function appInfo() {
+  let reg;
+  try { reg = appRegister(); } catch (e) { return { register: 'kapot', uit: fs.existsSync(APP_UIT) }; }
+  return { uit: fs.existsSync(APP_UIT), ingericht: !!(appPoortGeheim() && appConfig().aud && appConfig().clientId),
+    apparaten: reg.apparaten.filter(function (a) { return a.actief; }).length, koppelen_open: appKoppelOpen(reg),
+    sessies: Object.keys(appStaat.sessies).length, passkey_bibliotheek: appWebauthn() ? appStaat.webauthnBron : 'ontbreekt' };
+}
+// ── einde socev-app poort ─────────────────────────────────────────────────────────────────────────
+
 // ── Rolwachter (uitwijk stap 3, 6-10-2026) ─────────────────────────────────────────────────────────
 // Er is altijd maar één actieve kant (olares | vps); die staat in Supabase (machinekamer.uitwijk_stand, RPC
 // uitwijk_stand_lees). Een pod die niet de actieve kant is, is PASSIEF: /run, /agent en de kastjepaden geven 409,
@@ -3083,6 +3590,7 @@ const server = http.createServer(function (req, res) {
     if (autoIsOtaPad(req)) return autoProxyHttp(req, res);
     if (autoIsInternPad(req)) return autoIntern(req, res);
     if (sleutelportaalIsPad(req)) return sleutelportaal(req, res);
+    if (appIsPad(req)) return handleApp(req, res);
     handleRequest(req, res);
   } catch (e) {
     logError('route', e);
