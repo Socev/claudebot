@@ -3,6 +3,8 @@
 # hem oppakken. Draait ALS 'claude' op de pod, aangeroepen door de uitrolworkflow.
 #
 # GEBRUIK:  /app/uitrol.sh <git-sha|branch>
+#           omgeving: UITROL_NU=1 (niet wachten), UITROL_WACHT_MAX=<s> (standaard 1800),
+#           UITROL_DROOG=1 (niet omzetten, voor toetsen), UITROL_MARKER=<pad> (standaard /opt/data/uitrol-wacht)
 #
 # WAAROM DIT EEN SCRIPT IS EN GEEN REGEL IN EEN PROMPT. De uitrol bestaat uit
 # symlink-chirurgie op een draaiende pod: `vorige` bijwerken, `current` omzetten,
@@ -75,7 +77,23 @@ fi
 # verdwijnt dan stil (27-9 22:42). Wacht daarom tot /health lopend.beurten, lopend.onopgehaald
 # en agents.lopend alle drie 0 zijn. Hooguit UITROL_WACHT_MAX seconden (standaard 1800), daarna
 # toch - met een logregel. UITROL_NU=1 slaat het wachten over (noodgeval).
+#
+# Uitrolmarker (7-10-2026, wv91, akkoord David): zolang dit script op stilte wacht, staat MARKER er. De
+# werkvoorraad-tikker en POST /agent met een machinekamer:-label starten dan niets nieuws - anders raakt het
+# wachten nooit leeg en drukt het na WACHT_MAX door over een lopende agent heen (7-10 19:26, wv79 afgebroken).
+# Agents voor David starten gewoon. Elke wachtronde ververst de mtime; de pod negeert een marker die 5 min niet
+# ververst is of waarvan het proces weg is (kill -9, containerherstart). De trap wist hem alleen als hij nog van
+# DIT proces is: een tweede uitrol die hem intussen overnam, blijft beschermd (Fable-review wv91 #4, #5).
+# De wikkels in /opt/data/mk-scripts (uitrol-na-agents.sh, uitrol-als-auto-stil.sh) zetten dezelfde marker met
+# hun eigen pid en exec'en dit script: zelfde pid, dus de marker loopt naadloos door.
+MARKER="${UITROL_MARKER:-/opt/data/uitrol-wacht}"
+marker_zet(){ printf '{"sha":"%s","start_iso":"%s","pid":%s}\n' "$KORT" "${MARKER_START:=$(date -Iseconds)}" "$$" > "$MARKER.nieuw.$$" \
+  && mv -f "$MARKER.nieuw.$$" "$MARKER"; }
+marker_weg(){ rm -f "$MARKER.nieuw.$$"; grep -q "\"pid\":$$}" "$MARKER" 2>/dev/null && rm -f "$MARKER"; return 0; }
 if [ "${UITROL_NU:-0}" != "1" ]; then
+  marker_zet || log "LET OP: kon de uitrolmarker $MARKER niet zetten"
+  trap marker_weg EXIT
+  trap 'exit 130' INT TERM HUP
   WACHT_MAX="${UITROL_WACHT_MAX:-1800}"; GEWACHT=0; TOCH=0
   while :; do
     DRUK="$(curl -s -m 5 "http://127.0.0.1:${PORT:-8080}/health" | python3 -c 'import json,sys
@@ -87,9 +105,13 @@ except Exception: print(0)' 2>/dev/null || echo 0)"
     if [ "$GEWACHT" -ge "$WACHT_MAX" ]; then log "LET OP: na ${GEWACHT}s nog ${DRUK} lopend - uitrol gaat toch door"; TOCH=1; break; fi
     if [ "$GEWACHT" = "0" ]; then log "wachten: ${DRUK} beurt(en)/resultaat(en)/agent(s) lopend"; fi
     sleep 10; GEWACHT=$((GEWACHT+10))
+    marker_zet 2>/dev/null || true   # verversen; een overgenomen marker (tweede uitrol) wordt weer van ons - beide wachten
   done
   if [ "$GEWACHT" -gt 0 ] && [ "$TOCH" = "0" ]; then log "rustig na ${GEWACHT}s"; fi
 fi
+
+# UITROL_DROOG=1: alleen ophalen, klaarzetten en wachten (met marker), niet omzetten en niets herstarten. Voor toetsen.
+if [ "${UITROL_DROOG:-0}" = "1" ]; then log "droog: gestopt na het wachten, niets omgezet"; exit 0; fi
 
 # Gesprekken met het spraakkastje (socev-auto, 3-10-2026) tellen bewust NIET mee als blokkade: een hangend gesprek
 # zou de uitrol 30 minuten ophouden. Wel een logregel, zodat een afgebroken gesprek te verklaren is.

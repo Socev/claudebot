@@ -30,6 +30,7 @@
  *                  oude map terugstuurt om een wijziging ongedaan te maken, laat de nieuwe sleutel staan.)
  *   POST /result  { job_id, secret? }  -> { found, done, status, running_ms?, last_activity_ms?, ... }
  *   POST /agent   { prompt, label, chat_id?, workspace?, model?, session_id?, max_minuten?, secret? } -> { ok, job_id }
+ *                 (503 error 'uitrol-wacht' voor een machinekamer:-label zolang een uitrol op stilte wacht)
  *   GET  /agents  -> registerweergave van achtergrondjobs (labels + status, geen inhoud)
  *   POST /reset   { chat_id, workspace?, secret? } -> wist het geheugen van een chat
  *   GET  /health  -> status incl. sync-, inbox- en agentinformatie (voor de wachters)
@@ -1367,6 +1368,30 @@ function agentInfo() {
   return { lopend: lopend, afgerond_24u: afgerond24, mislukt_24u: mislukt24 };
 }
 
+// ── Uitrolmarker (7-10-2026, wv91, akkoord David) ──────────────────────────
+// uitrol.sh zet UITROL_MARKER zolang hij op stilte wacht ({sha, start_iso, pid}). Dan start POST /agent geen nieuwe
+// machinekamer:-agents en de werkvoorraad-tikker niets (hij leest uitrol.wacht uit /health): anders raakt het
+// wachten nooit leeg en drukt de uitrol na 30 min door over een lopende agent heen (7-10 19:26, wv79 afgebroken).
+// Een achtergebleven marker telt niet: PID dood, of 5 min niet ververst (uitrol.sh ververst hem elke wachtronde van
+// 10 s; mtime, zelfde klok als deze pod). Fable-review wv91 #4/#5: een vaste grens van 45 min verviel stil bij een
+// langere UITROL_WACHT_MAX en liet een wees na een containerherstart (pid-hergebruik) te lang blokkeren.
+const UITROL_MARKER = process.env.UITROL_MARKER || '/opt/data/uitrol-wacht';
+const UITROL_MARKER_MAX_MS = 5 * 60 * 1000;
+function uitrolWacht() {
+  let st;
+  try { st = fs.statSync(UITROL_MARKER); } catch (e) { return { wacht: false }; }
+  let m = {};
+  try { m = JSON.parse(fs.readFileSync(UITROL_MARKER, 'utf8')) || {}; } catch (e) {}
+  const sinds = (typeof m.start_iso === 'string' && !isNaN(Date.parse(m.start_iso))) ? new Date(Date.parse(m.start_iso)) : new Date(st.mtimeMs);
+  const info = { wacht: false, wacht_sinds: sinds.toISOString(), ververst: new Date(st.mtimeMs).toISOString(), sha: m.sha || null, pid: m.pid || null };
+  if (Date.now() - st.mtimeMs > UITROL_MARKER_MAX_MS) { info.genegeerd = 'niet ververst (> 5 min)'; return info; }
+  if (m.pid) {
+    try { process.kill(m.pid, 0); } catch (e) { if (e.code === 'ESRCH') { info.genegeerd = 'uitrol-proces weg'; return info; } }
+  }
+  info.wacht = true;   // onleesbare of pid-loze marker: liever even niets starten (hooguit 5 min)
+  return info;
+}
+
 // Eén regel op het moment dat een job zijn eindstatus krijgt. Bewust GEEN
 // uitvoer, alleen de omvang ervan: de uitvoer kan patientgegevens of
 // persoonsgegevens bevatten en hoort niet op schijf in een logbestand.
@@ -2202,7 +2227,9 @@ function handleRequest(req, res) {
       secrets_geladen: secretsGeladen(),
       cli_versies: CLI_VERSIES, effort: CLAUDE_EFFORT,
       kluis_overgeslagen: process.env.KLUIS_OVERGESLAGEN === '1',
-      brein: breinInfo()
+      brein: breinInfo(),
+      // wacht een uitrol op stilte? Dan start de werkvoorraad-tikker niets (wv91, 7-10-2026)
+      uitrol: uitrolWacht()
     }));
   }
 
@@ -2313,6 +2340,16 @@ function handleRequest(req, res) {
       const prompt = (d.prompt || '').toString().trim();
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
       const label = (d.label || '').toString().trim().slice(0, 120) || 'naamloze agent';
+      // Uitrolmarker (wv91): geen nieuwe machinekamer-klus terwijl een uitrol op stilte wacht. Agents voor David en
+      // het spraakkastje (beperkt=auto: David spreekt zelf) starten gewoon.
+      if (/^\s*machinekamer:/i.test(label) && d.beperkt !== 'auto') {
+        const u = uitrolWacht();
+        if (u.wacht) {
+          res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '600' });
+          return res.end(JSON.stringify({ ok: false, error: 'uitrol-wacht', wacht_sinds: u.wacht_sinds, sha: u.sha,
+            uitleg: 'Er wacht een pod-uitrol op stilte; machinekamer-agents starten pas daarna. Probeer het over ~10 min opnieuw of zet het in de werkvoorraad.' }));
+        }
+      }
       if (agentInfo().lopend >= MAX_AGENTS) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: false, error: 'max-agents', uitleg: 'Er lopen al ' + MAX_AGENTS + ' achtergrondagents; wacht tot er één klaar is.' }));
