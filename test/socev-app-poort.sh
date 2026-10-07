@@ -16,7 +16,8 @@ let blok = src.slice(a, b);
 let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (extra && !ok ? '  [' + String(extra).slice(0, 300) + ']' : '')); }
 for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_CODE_INTERVAL_MS = 1000;'],
-                      ['const APP_VERS_MS = 2 * 60 * 1000;', 'const APP_VERS_MS = 4000;']]) {
+                      ['const APP_VERS_MS = 2 * 60 * 1000;', 'const APP_VERS_MS = 4000;'],
+                      ['const APP_UPLOAD_TOTAAL_MAX = 300 * 1024 * 1024;', 'const APP_UPLOAD_TOTAAL_MAX = 45 * 1024 * 1024;']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'apptoets-'));
@@ -88,13 +89,13 @@ function processJob(jobId, prompt, sess, files, chatId, ws, keuze) {
 const rolStub = { eerste: 1, primair: true };
 const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
-    APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR }, pid: process.pid },
+    APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io') }, pid: process.pid },
   agentsReg,
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt };', ctx, { filename: 'server.js#app' });
 const H = ctx.__h;
 const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
 
@@ -119,6 +120,23 @@ function vraag(m, pad, body, o) {
     });
     r.on('error', (e) => ok({ status: 0, j: { fout: e.code } }));
     if (body !== undefined && m === 'POST') r.write(typeof body === 'string' ? body : JSON.stringify(body));
+    r.end();
+  });
+}
+// upload (wv99): ruwe bytes zoals de Pages Function ze doorstroomt; o.chunked = zonder Content-Length
+function upl(pad, buf, naam, o) {
+  o = o || {};
+  const koppen = { 'content-type': o.ct || 'application/octet-stream', 'x-app-poort': POORT, 'cf-access-jwt-assertion': jwt() };
+  if (naam !== null) koppen['x-app-naam'] = o.rauweNaam ? naam : encodeURIComponent(naam);
+  if (!o.chunked) koppen['content-length'] = String(buf.length);
+  const p = o.pot;
+  if (p) { if (p.apparaat) koppen['x-app-apparaat'] = p.apparaat; if (p.sessie) koppen['x-app-sessie'] = p.sessie; }
+  return new Promise((ok) => {
+    const r = http.request({ host: '127.0.0.1', port: srv.address().port, path: pad, method: 'POST', headers: koppen }, (res) => {
+      let t = ''; res.on('data', (c) => t += c); res.on('end', () => { let j = {}; try { j = JSON.parse(t); } catch (e) { j = { raw: t }; } ok({ status: res.statusCode, j }); });
+    });
+    r.on('error', (e) => ok({ status: 0, j: { fout: e.code } }));
+    if (o.chunked) { for (let i = 0; i < buf.length; i += 1 << 20) r.write(buf.subarray(i, i + (1 << 20))); } else r.write(buf);
     r.end();
   });
 }
@@ -634,10 +652,10 @@ async function bewijs(o) {
     toets('9 uitslag na een uitrol (job weg) -> gevonden:false', r.j.gevonden === false);
     // invoerfouten en grenzen
     r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: '   ' }, { pot: M.jar });
-    const rb = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'x', bestanden: [{ name: 'a.txt' }] }, { pot: M.jar });
+    const rb = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'x', bestanden: [{ name: 'a.txt' }] }, { pot: M.jar });   // zonder n (wv99)
     const rk = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: '40687', tekst: 'x' }, { pot: M.jar });
     const ri = await vraag('POST', '/app/beurt', { kanaal: 'hoofd', tekst: 'x' }, { pot: M.jar });
-    toets('9 leeg / bestanden / onbekend kanaal / zonder beurt_id -> 400', r.status === 400 && rb.status === 400 && /bestandenportaal/.test(rb.j.fout) && rk.status === 400 && ri.status === 400, [r.status, rb.status, rk.status, ri.status].join(','));
+    toets('9 leeg / bestanden / onbekend kanaal / zonder beurt_id -> 400', r.status === 400 && rb.status === 400 && /bestandenlijst/.test(rb.j.fout) && rk.status === 400 && ri.status === 400, [r.status, rb.status, rk.status, ri.status].join(','));
     rolStub.primair = false;
     r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'x' }, { pot: M.jar });
     rolStub.primair = true;
@@ -679,6 +697,132 @@ async function bewijs(o) {
     toets('9 auditlog: beurt/knop/goedkeur-regels zonder berichtinhoud', /"reden":"beurt hoofd [a-f0-9]{16}"/.test(auditAlles) && /"reden":"knop ja/.test(auditAlles) && /goedgekeurd [A-F0-9]{6}/.test(auditAlles) && auditAlles.indexOf('morgen') < 0 && auditAlles.indexOf('accountant') < 0);
     toets('9 geen onverwachte fouten in logError', logs.filter((l) => !/app-telegram|app-register: Expected property|app: Unexpected token .x., "xx"|^app-log:/.test(l)).length === 0, logs.join(' | '));
     for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('opgeruimd');
+
+    // ── 9c. bestanden in een beurt (wv99, fase 5b; bouwplan § 4.7) ──
+    {
+      const sM = H.appStaat.sessies[crypto.createHash('sha256').update(M.jar.sessie).digest('hex')];
+      sM.tot = Date.now() + 10 * 60000;
+      const sP9 = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      sP9.tot = Date.now() + 10 * 60000;
+      const UPDIR = path.join(W, 'upload'), IOD = path.join(W, 'io');
+      const inhoud = (s) => Buffer.from(s);
+      const ub = bid();
+      r = await upl('/app/upload/' + ub + '/1', inhoud('foto1'), 'image.jpg', { pot: pot() });
+      toets('9c upload zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      r = await upl('/app/upload/' + ub + '/1', inhoud('{}'), 'image.jpg', { pot: M.jar, ct: 'application/json' });
+      toets('9c upload als JSON -> 415', r.status === 415, r.status);
+      r = await upl('/app/upload/' + ub + '/1', inhoud('x'), null, { pot: M.jar });
+      const rnaam2 = await upl('/app/upload/' + ub + '/1', inhoud('x'), '%E0%A4%A', { pot: M.jar, rauweNaam: true });
+      toets('9c upload zonder of met kapotte naam -> 400', r.status === 400 && rnaam2.status === 400, r.status + '/' + rnaam2.status);
+      const r0 = await upl('/app/upload/' + ub + '/0', inhoud('x'), 'a.txt', { pot: M.jar });
+      const r11 = await upl('/app/upload/' + ub + '/11', inhoud('x'), 'a.txt', { pot: M.jar });
+      const rH = await upl('/app/upload/' + ub.toUpperCase() + '/1', inhoud('x'), 'a.txt', { pot: M.jar });
+      const rL = await upl('/app/upload/' + ub + '/1', Buffer.alloc(0), 'leeg.txt', { pot: M.jar });
+      toets('9c upload n=0 / n=11 -> 400, hoofdletters -> 404, leeg bestand -> 400', r0.status === 400 && r11.status === 400 && rH.status === 404 && rL.status === 400, [r0.status, r11.status, rH.status, rL.status].join(','));
+      const ra = await upl('/app/upload/' + ub + '/1', inhoud('foto-een'), 'image.jpg', { pot: M.jar });
+      const rb2 = await upl('/app/upload/' + ub + '/2', inhoud('eerste poging'), 'image.jpg', { pot: M.jar });
+      const rb3 = await upl('/app/upload/' + ub + '/2', inhoud('foto-twee'), 'image.jpg', { pot: M.jar });   // herhaling na time-out
+      const rc = await upl('/app/upload/' + ub + '/3', inhoud('%PDF-nep'), 'verslag.pdf', { pot: M.jar, chunked: true });
+      toets('9c drie uploads (twee keer image.jpg, één zonder Content-Length) -> 200', [ra, rb2, rb3, rc].every((x) => x.status === 200) && rb3.j.grootte === 9 && rc.j.naam === 'verslag.pdf', JSON.stringify([ra.j, rb3.j, rc.j]));
+      const mapM = path.join(UPDIR, fs.readdirSync(UPDIR)[0]);
+      const sub = fs.readdirSync(mapM)[0];
+      toets('9c klaarstaand: map 0700, bestand 0600, geen naam in het pad, geen half bestand', (fs.statSync(path.join(mapM, sub)).mode & 0o777) === 0o700 && (fs.statSync(path.join(mapM, sub, '1')).mode & 0o777) === 0o600 && fs.readdirSync(path.join(mapM, sub)).every((f) => /^\d+(\.json)?$/.test(f)), fs.readdirSync(path.join(mapM, sub)).join(','));
+      // ander apparaat kan ze niet gebruiken
+      r = await vraag('POST', '/app/beurt', { beurt_id: ub, kanaal: 'hoofd', tekst: '', bestanden: [{ n: 1 }, { n: 2 }, { n: 3 }] }, { pot: P.jar });
+      toets('9c beurt vanaf een ander apparaat met dezelfde beurt_id -> 409 ontbreekt (uploads per apparaat)', r.status === 409 && JSON.stringify(r.j.ontbreekt) === '[1,2,3]', JSON.stringify(r.j));
+      const rbl = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'x', bestanden: [1, 1] }, { pot: M.jar });
+      const rbl2 = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'x', bestanden: 'a' }, { pot: M.jar });
+      const rbl3 = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'x', bestanden: Array.from({ length: 11 }, (_, i) => i + 1) }, { pot: M.jar });
+      toets('9c ongeldige bestandenlijst (dubbel, geen lijst, 11) -> 400', rbl.status === 400 && rbl2.status === 400 && rbl3.status === 400, [rbl.status, rbl2.status, rbl3.status].join(','));
+      const nG = gestart.length;
+      r = await vraag('POST', '/app/beurt', { beurt_id: ub, kanaal: 'hoofd', tekst: '', bestanden: [{ n: 1 }, { n: 2 }, { n: 3 }] }, { pot: M.jar });
+      const jb = r.j.job_id, gb = gestart[gestart.length - 1];
+      toets('9c beurt zonder tekst met 3 bestanden -> één beurt, namen uniek', r.status === 200 && gestart.length === nG + 1 && JSON.stringify(r.j.bestanden) === JSON.stringify(['image.jpg', 'image (2).jpg', 'verslag.pdf']), JSON.stringify(r.j));
+      toets('9c prompt: [APP] + bundel + standaardopdrachten (foto letterlijk, document naar markdown)', gb.prompt.indexOf('[APP] David stuurde via de app 3 bestanden in één bericht: image.jpg, image (2).jpg, verslag.pdf. Ze staan in je invoermap.') === 0 &&
+        gb.prompt.indexOf('Analyseer de bijgevoegde foto (lees alle zichtbare tekst en begrijp de inhoud) en verwerk de relevante informatie direct in mijn Second Brain') > 0 &&
+        gb.prompt.indexOf('(Geldt voor: image.jpg, image (2).jpg.)') > 0 && gb.prompt.indexOf('Zet dit bestand om naar nette markdown: verslag.pdf') > 0 && /één bundel/.test(gb.prompt), gb.prompt);
+      const inD = path.join(IOD, jb, 'in');
+      toets('9c bestanden staan in io/<job>/in met de juiste inhoud (herhaling won)', fs.existsSync(inD) && fs.readFileSync(path.join(inD, 'image.jpg'), 'utf8') === 'foto-een' && fs.readFileSync(path.join(inD, 'image (2).jpg'), 'utf8') === 'foto-twee' && fs.readFileSync(path.join(inD, 'verslag.pdf'), 'utf8') === '%PDF-nep' && fs.readdirSync(inD).length === 3, fs.existsSync(inD) && fs.readdirSync(inD).join(','));
+      toets('9c klaarstaande map is weg na de start', !fs.existsSync(path.join(mapM, sub)));
+      let rg = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: M.jar });
+      toets('9c geschiedenis: lopende beurt toont de bestandsnamen, tekst leeg', rg.j.lopend.length === 1 && rg.j.lopend[0].job_id === jb && JSON.stringify(rg.j.lopend[0].invoer) === JSON.stringify(['image.jpg', 'image (2).jpg', 'verslag.pdf']) && rg.j.lopend[0].tekst === '', JSON.stringify(rg.j.lopend));
+      r = await upl('/app/upload/' + ub + '/4', inhoud('te laat'), 'na.txt', { pot: M.jar });
+      toets('9c upload na het versturen van dat bericht -> 409', r.status === 409, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/beurt', { beurt_id: ub, kanaal: 'hoofd', tekst: '', bestanden: [1, 2, 3] }, { pot: M.jar });
+      toets('9c dezelfde beurt_id nog eens -> zelfde job, geen tweede beurt', r.j.al === true && r.j.job_id === jb && gestart.length === nG + 1, JSON.stringify(r.j));
+      afmaken[jb]('Drie bestanden verwerkt.');
+      await slaap(80);
+      rg = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: M.jar });
+      const itb = (rg.j.items || []).find((x) => x.job_id === jb);
+      toets('9c geschiedenis na afloop: invoer bewaard (alleen namen)', itb && JSON.stringify(itb.invoer) === JSON.stringify(['image.jpg', 'image (2).jpg', 'verslag.pdf']) && itb.antwoord === 'Drie bestanden verwerkt.', JSON.stringify(itb));
+      const logRegel = fs.readFileSync(path.join(LOGDIR, 'hoofd.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((x) => x.job_id === jb);
+      toets('9c app-log: invoer staat erin, inhoud van de bestanden niet', logRegel && logRegel.invoer.length === 3 && JSON.stringify(logRegel).indexOf('foto-twee') < 0, JSON.stringify(logRegel));
+      // bestand ontbreekt
+      r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'kijk', bestanden: [{ n: 1 }] }, { pot: M.jar });
+      toets('9c beurt met bestand dat nooit aankwam -> 409 met ontbreekt, geen beurt', r.status === 409 && JSON.stringify(r.j.ontbreekt) === '[1]' && gestart.length === nG + 1, JSON.stringify(r.j));
+      // tekst + 1 bestand, machinekamer: omlijsting vóór [APP]
+      const ut = bid();
+      await upl('/app/upload/' + ut + '/1', inhoud('log'), 'fout.log', { pot: M.jar });
+      r = await vraag('POST', '/app/beurt', { beurt_id: ut, kanaal: 'machinekamer', tekst: 'Wat zie je hierin?', bestanden: [{ n: 1 }] }, { pot: M.jar });
+      const gt = gestart[gestart.length - 1];
+      toets('9c machinekamer met tekst + 1 bestand: omlijsting, [APP], "Zijn tekst", geen bundelregel, geen standaardopdracht', r.status === 200 && gt.chatId === 'telegram-debug' && gt.prompt.indexOf(OMLIJST) === 0 &&
+        gt.prompt.indexOf('[APP] David stuurde via de app 1 bestand in één bericht: fout.log. Het staat in je invoermap.\n\nZijn tekst:\nWat zie je hierin?') > 0 && !/bundel|standaardopdracht/.test(gt.prompt), gt.prompt.slice(-300));
+      // kanaal bezig: bestanden blijven klaarstaan voor een nieuwe poging
+      const uz = bid();
+      await upl('/app/upload/' + uz + '/1', inhoud('a'), 'a.txt', { pot: M.jar });
+      r = await vraag('POST', '/app/beurt', { beurt_id: uz, kanaal: 'machinekamer', tekst: '', bestanden: [1] }, { pot: M.jar });
+      const nogDaar = fs.existsSync(path.join(UPDIR, fs.readdirSync(UPDIR)[0], crypto.createHash('sha256').update(uz).digest('hex').slice(0, 32), '1'));
+      toets('9c kanaal bezig -> 409, bestanden blijven klaarstaan', r.status === 409 && /bezig/.test(r.j.fout) && nogDaar, JSON.stringify(r.j));
+      afmaken[r.j.job_id || gt.jobId]('ok');
+      await slaap(60);
+      // io onschrijfbaar: fout komt terug, klaarstaand blijft, nieuwe poging met dezelfde beurt_id lukt
+      fs.mkdirSync(IOD, { recursive: true }); fs.chmodSync(IOD, 0o500);
+      r = await vraag('POST', '/app/beurt', { beurt_id: uz, kanaal: 'hoofd', tekst: '', bestanden: [1] }, { pot: M.jar });
+      fs.chmodSync(IOD, 0o700);
+      toets('9c io onschrijfbaar -> 500 "konden niet klaargezet worden", geen beurt, geen beurt_id verbruikt', r.status === 500 && /klaargezet/.test(r.j.fout) && !H.appStaat.beurtIds[crypto.createHash('sha256').update(uz).digest('hex')], JSON.stringify(r.j));
+      r = await vraag('POST', '/app/beurt', { beurt_id: uz, kanaal: 'hoofd', tekst: '', bestanden: [1] }, { pot: M.jar });
+      toets('9c ... nieuwe poging met dezelfde beurt_id lukt', r.status === 200 && /^Zet dit bestand om naar nette markdown: a\.txt$/m.test(gestart[gestart.length - 1].prompt), JSON.stringify(r.j));
+      afmaken[r.j.job_id]('ok');
+      await slaap(60);
+      // grenzen: per bestand, per bericht, alles samen, per uur
+      const MB = 1024 * 1024, g = bid();
+      r = await upl('/app/upload/' + g + '/1', Buffer.alloc(20 * MB + 1, 1), 'groot.bin', { pot: M.jar });
+      const rgs = await upl('/app/upload/' + g + '/1', Buffer.alloc(20 * MB + 1, 1), 'groot.bin', { pot: M.jar, chunked: true });
+      const gMap = path.join(UPDIR, fs.readdirSync(UPDIR)[0], crypto.createHash('sha256').update(g).digest('hex').slice(0, 32));
+      toets('9c bestand > 20 MB -> 413 (met en zonder Content-Length), geen half bestand', r.status === 413 && rgs.status === 413 && /20 MB/.test(rgs.j.fout) && (!fs.existsSync(gMap) || fs.readdirSync(gMap).length === 0), r.status + '/' + rgs.status + ' ' + (fs.existsSync(gMap) ? fs.readdirSync(gMap).join(',') : ''));
+      const g1 = await upl('/app/upload/' + g + '/1', Buffer.alloc(20 * MB, 1), 'a.bin', { pot: M.jar });
+      const g2 = await upl('/app/upload/' + g + '/2', Buffer.alloc(20 * MB, 2), 'b.bin', { pot: M.jar });
+      const g3 = await upl('/app/upload/' + g + '/3', Buffer.alloc(11 * MB, 3), 'c.bin', { pot: M.jar, chunked: true });
+      const g4 = await upl('/app/upload/' + g + '/3', Buffer.alloc(11 * MB, 3), 'c.bin', { pot: M.jar });
+      toets('9c bericht samen > 50 MB -> 413 "samen" (met en zonder Content-Length)', g1.status === 200 && g2.status === 200 && g3.status === 413 && g4.status === 413 && /samen/.test(g3.j.fout + g4.j.fout), [g1.status, g2.status, g3.status, g4.status, g3.j.fout].join(','));
+      const v1 = bid();
+      const v1a = await upl('/app/upload/' + v1 + '/1', Buffer.alloc(6 * MB, 4), 'd.bin', { pot: M.jar });
+      const v1b = await upl('/app/upload/' + v1 + '/2', inhoud('klein'), 'e.txt', { pot: M.jar });
+      toets('9c alles wat klaarstaat boven de pod-grens -> 507', v1a.status === 200 && v1b.status === 507, v1a.status + '/' + v1b.status);
+      // verlopen (ouder dan een uur) en noodstop ruimen op
+      const oud = new Date(Date.now() - 2 * 3600000);
+      fs.utimesSync(gMap, oud, oud);
+      H.appUploadOpruim(false);
+      toets('9c klaarstaand ouder dan een uur -> opgeruimd, jonger blijft', !fs.existsSync(gMap) && fs.existsSync(path.join(UPDIR, fs.readdirSync(UPDIR)[0], crypto.createHash('sha256').update(v1).digest('hex').slice(0, 32))));
+      H.appUploadOpruim(true);
+      toets('9c opruimen bij de noodstop -> niets meer klaar', fs.readdirSync(UPDIR).every((d) => fs.readdirSync(path.join(UPDIR, d)).length === 0));
+      H.appStaat.tellers.upload = Array.from({ length: 60 }, () => Date.now());
+      r = await upl('/app/upload/' + bid() + '/1', inhoud('x'), 'x.txt', { pot: M.jar });
+      toets('9c 61e bestand in een uur -> 429', r.status === 429, r.status);
+      H.appStaat.tellers.upload = [];
+      // namen
+      const N = H.appSchoneNaam;
+      toets('9c naam: pad weg, geen verborgen bestand, geen stuur-/richtingstekens, max 120 tekens met extensie',
+        N('../../etc/passwd').indexOf('/') < 0 && N('a\\b.txt') === 'a_b.txt' && N('.env') === '_env' && N('..') === '' && N('fac‮tuur.pdf') === 'factuur.pdf' && N('x\u0000y') === 'xy' &&
+        Array.from(N('a'.repeat(300) + '.pdf')).length === 120 && N('a'.repeat(300) + '.pdf').endsWith('.pdf') && N('  ') === '', [N('../../etc/passwd'), N('.env'), N('a'.repeat(300) + '.pdf').length].join(' | '));
+      const gh = new Set();
+      toets('9c uniek: Image.JPG na image.jpg -> "Image (2).JPG"; zonder extensie "x (2)"', H.appUniekeNaam('image.jpg', gh) === 'image.jpg' && H.appUniekeNaam('Image.JPG', gh) === 'Image (2).JPG' && H.appUniekeNaam('x', gh) === 'x' && H.appUniekeNaam('x', gh) === 'x (2)');
+      const pf = H.appBestandenPrompt('', ['IMG_1.HEIC']);
+      toets('9c één foto zonder tekst: letterlijke foto-opdracht, geen "Geldt voor", geen bundel', /Analyseer de bijgevoegde foto/.test(pf) && !/Geldt voor|bundel/.test(pf), pf);
+      toets('9c auditlog: upload-regels zonder bestandsnaam', /"reden":"upload 1 \(8 B\)"/.test(fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8')) && fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').indexOf('verslag.pdf') < 0);
+      for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('opgeruimd');
+      await slaap(50);
+    }
 
     // ── 9b. Broedstoof (wv92, bouwplan § 4.13) ──
     {

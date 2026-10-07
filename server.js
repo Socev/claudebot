@@ -1547,11 +1547,17 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     }
     fs.mkdirSync(indir, { recursive: true });
     fs.mkdirSync(outdir, { recursive: true });
+    // Dubbele namen uniek (image.jpg, image (2).jpg) en een schrijffout niet meer stil inslikken: Socev krijgt hem in de
+    // prompt te zien (wv99; bouwplan Socev-app § 4.7, review #19). Telegram en het bestandenportaal komen hier langs.
+    const invoerMis = [];
     if (Array.isArray(files)) {
+      const gehad = new Set();
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         if (f && f.name && f.content_base64) {
-          try { fs.writeFileSync(path.join(indir, path.basename(f.name)), Buffer.from(f.content_base64, 'base64')); } catch (e) {}
+          const naam = appUniekeNaam(path.basename(String(f.name)) || 'bestand', gehad);
+          try { fs.writeFileSync(path.join(indir, naam), Buffer.from(f.content_base64, 'base64')); }
+          catch (e) { logError('job-invoer', e); invoerMis.push(naam); }
         }
       }
     }
@@ -1561,7 +1567,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     const sessionId = lezen ? '' : (explicitSession || (sKey ? chatSessions[sKey] : '') || '');
     const lesblok = lezen ? '' : await lessenBlok(prompt, chatId, '');
     // 'lezen' werkt in de jobmap, niet in de workspace: altijd de kale map-hint (de ghawa-hint noemt een repo).
-    const fullPrompt = lesblok + prompt + '\n\n' + (lezen ? WORKSPACES.vault : space).hint(indir, outdir);
+    const misRegel = invoerMis.length ? '\n\n[Systeem: ' + invoerMis.length + ' meegestuurd(e) bestand(en) kon(den) niet in de invoermap worden gezet: ' + invoerMis.join(', ') + '. Zeg dat tegen David.]' : '';
+    const fullPrompt = lesblok + prompt + misRegel + '\n\n' + (lezen ? WORKSPACES.vault : space).hint(indir, outdir);
     j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
     const runOpts = { progress: j.progress, lastFile: path.join(base, 'codex-last.md') };
     if (lezen) runOpts.gereedschap = 'lezen';
@@ -3076,11 +3083,22 @@ const APP_AANVRAAG_MAX_MS = 15 * 60 * 1000;   // inclusief de verlenging na goed
 const APP_AANVRAAG_PER_DAG = 10;
 const APP_BEURTEN_PER_UUR = 30;
 const APP_TEKST_MAX = 20000;
+// Fase 5b (wv99): bestanden in een beurt. Elk bestand komt los binnen op POST /app/upload/<beurt_id>/<n> (ruwe bytes,
+// rechtstreeks naar schijf gestreamd); de beurt noemt daarna welke n's erbij horen. Een herhaling van één bestand na een
+// time-out is zo onschuldig, en er staat nooit een heel bestand in het geheugen of in JSON/base64.
+const APP_UPLOAD_DIR = process.env.APP_UPLOAD_DIR || path.join(APP_DATA, 'upload');  // klaarstaand, per apparaat + beurt, 1 u
+const APP_IO = process.env.IO_DIR || '/opt/data/io';     // = IO van processJob: de bestanden gaan naar io/<job>/in
+const APP_UPLOAD_MAX_N = 10;                             // bestanden per beurt
+const APP_UPLOAD_BESTAND_MAX = 20 * 1024 * 1024;         // per bestand (gelijk aan MAX_FILE)
+const APP_UPLOAD_BEURT_MAX = 50 * 1024 * 1024;           // per beurt samen
+const APP_UPLOAD_TOTAAL_MAX = 300 * 1024 * 1024;         // alles wat klaarstaat, alle beurten samen
+const APP_UPLOAD_PER_UUR = 60;
+const APP_UPLOAD_MS = 60 * 60 * 1000;                    // klaarstaand maar nooit verstuurd: na een uur weg
 const APP_LOG_MS = 30 * 24 * 3600 * 1000;
 const APP_AUDIT_VOOR_PER_MIN = 5;
 const APP_TRANSPORTS = ['internal', 'hybrid', 'usb', 'nfc', 'ble', 'smart-card'];
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null };
@@ -3736,7 +3754,7 @@ async function appNaBeurt(jobId) {
   }
   j.app.vraag = vraag;
   const goed = await appLogSchrijf(j.app.kanaal, { t: new Date().toISOString(), job_id: jobId, beurt_id: j.app.beurt_id, soort: j.app.soort,
-    apparaat: j.app.apparaat, tekst: j.app.tekst, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
+    apparaat: j.app.apparaat, tekst: j.app.tekst, invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
     vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
   j.app.gelogd = goed;
   if (goed && !j.opgehaald) j.opgehaald = Date.now();
@@ -3755,8 +3773,25 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
   const keuze = resolveKeuze({});
   if (keuze.fout) return { fout: 'brein' };
   const jobId = crypto.randomBytes(8).toString('hex');
+  // Bestanden (wv99): vóór de wachtrij naar io/<job>/in, zodat een schrijffout hier terugkomt in plaats van stil te
+  // verdwijnen (bouwplan § 4.7). Harde koppeling: lukt er één niet, dan staat alles nog klaar voor een nieuwe poging.
+  if (meta.upload) {
+    const indir = path.join(APP_IO, jobId, 'in');
+    try {
+      fs.mkdirSync(indir, { recursive: true, mode: 0o700 });
+      meta.upload.lijst.forEach(function (x) {
+        const van = path.join(meta.upload.dir, String(x.n)), naar = path.join(indir, x.doel);
+        try { fs.linkSync(van, naar); } catch (e) { if (e && e.code === 'EXDEV') fs.copyFileSync(van, naar, fs.constants.COPYFILE_EXCL); else throw e; }
+      });
+    } catch (e) {
+      logError('app-upload-zet', e);
+      try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e2) {}
+      return { fout: 'bestanden' };
+    }
+  }
   jobs[jobId] = { status: 'pending', created: Date.now(), workspace: DEFAULT_WS, chat_id: chatId, runtime: keuze.runtime,
-    app: { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, soort: meta.soort, tekst: meta.tekst } };
+    app: { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, soort: meta.soort, tekst: meta.tekst,
+      invoer: meta.upload ? meta.upload.lijst.map(function (x) { return x.doel; }) : [] } };
   // Zelfde wachtrij als /run: een Telegram-bericht en een app-bericht in hetzelfde gesprek lopen na elkaar.
   enqueue(sessionKey(DEFAULT_WS, chatId), function () {
     // Nog in de wachtrij toen de noodstop kwam: vervalt, ook als de app intussen weer aan staat (Fable-review wv89 #3).
@@ -3764,6 +3799,7 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
     if (j && (j.app.noodstop || fs.existsSync(APP_UIT))) {
       j.status = 'done'; j.done_at = Date.now(); j.opgehaald = true;   // opgehaald: houdt een uitrol niet op
       j.result = { ok: false, error: 'vervallen door de noodstop' };
+      try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {}   // processJob ruimt dan niet op
       return Promise.resolve();
     }
     // appNaBeurt NIET teruggeven: een trage schijf mag de volgende beurt (ook uit Telegram) niet ophouden (Fable-review wv56 #3)
@@ -3771,11 +3807,13 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
       appNaBeurt(jobId).catch(function (e) { logError('app-na-beurt', e); });
     });
   });
+  if (meta.upload) { try { fs.rmSync(meta.upload.dir, { recursive: true, force: true }); } catch (e) { logError('app-upload-weg', e); } }
   return { job_id: jobId };
 }
 function appStartFout(res, st) {
   if (st.fout === 'noodstop') return appWeiger(res, 503, 'de app staat uit (noodstop)', 'app-uit (tijdens het verzoek)');
   if (st.fout === 'omlijsting') return appWeiger(res, 503, 'de machinekamer-omlijsting ontbreekt op de pod; gebruik de debug-bot', 'omlijsting ontbreekt');
+  if (st.fout === 'bestanden') return appWeiger(res, 500, 'de bestanden konden op de pod niet klaargezet worden; probeer het opnieuw', 'bestanden klaarzetten');
   return appWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
 }
 // Gemeenschappelijke voorwaarden voor alles wat een beurt start (bericht, knop).
@@ -3786,27 +3824,197 @@ async function appMagBeurt(res, kanaal) {
   return true;
 }
 
+// ── fase 5b: bestanden (wv99, bouwplan § 4.7) ──
+// Klaarstaand: APP_UPLOAD_DIR/<apparaat>/<sha256(beurt_id) 32>/<n> + <n>.json {naam}. Alleen hetzelfde apparaat kan ze in
+// een beurt gebruiken; na het starten van de beurt (of na een uur, of bij de noodstop) weg.
+function appUploadMap(a, bid) { return path.join(APP_UPLOAD_DIR, a.id, appSha(bid).slice(0, 32)); }
+function appUploadLijst(dir) {
+  let namen;
+  try { namen = fs.readdirSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return []; throw e; }
+  const uit = [];
+  namen.forEach(function (f) {
+    const m = /^([1-9][0-9]?)\.json$/.exec(f);
+    if (!m) return;
+    const meta = appLeesJson(path.join(dir, f), null);
+    if (!meta || typeof meta.naam !== 'string' || !meta.naam) return;
+    let st;
+    try { st = fs.statSync(path.join(dir, m[1])); } catch (e) { return; }
+    if (st.isFile()) uit.push({ n: Number(m[1]), naam: meta.naam, grootte: st.size });
+  });
+  return uit.sort(function (x, y) { return x.n - y.n; });
+}
+// Verlopen klaarstaande mappen weg (alles bij de noodstop); geeft het aantal bytes dat daarna nog klaarstaat.
+function appUploadOpruim(alles) {
+  let bytes = 0;
+  let apparaten = [];
+  try { apparaten = fs.readdirSync(APP_UPLOAD_DIR); } catch (e) { if (!e || e.code !== 'ENOENT') logError('app-upload-opruim', e); return 0; }
+  apparaten.forEach(function (ap) {
+    const ad = path.join(APP_UPLOAD_DIR, ap);
+    let mappen = [];
+    try { mappen = fs.readdirSync(ad); } catch (e) { return; }
+    mappen.forEach(function (m) {
+      const md = path.join(ad, m);
+      try {
+        if (alles || Date.now() - fs.statSync(md).mtimeMs > APP_UPLOAD_MS) return fs.rmSync(md, { recursive: true, force: true });
+        fs.readdirSync(md).forEach(function (f) { try { bytes += fs.statSync(path.join(md, f)).size; } catch (e) {} });
+      } catch (e) { logError('app-upload-opruim', e); }
+    });
+  });
+  return bytes;
+}
+// Bestandsnaam uit de app: alleen het laatste deel, geen stuurtekens of richtingstekens, geen verborgen bestand, ≤ 120 tekens.
+function appSchoneNaam(n) {
+  let s = String(n || '').normalize('NFC').replace(/[\u0000-\u001f\u007f‎‏‪-‮⁦-⁩]/g, '')
+    .replace(/[\/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
+  if (/^\.+$/.test(s)) s = '';
+  if (s.charAt(0) === '.') s = '_' + s.slice(1);
+  const tekens = Array.from(s);
+  if (tekens.length > 120) {
+    const p = s.lastIndexOf('.'), ext = (p > 0 && s.length - p <= 10) ? s.slice(p) : '';
+    s = Array.from(ext ? s.slice(0, p) : s).slice(0, 120 - ext.length).join('') + ext;
+  }
+  return s;
+}
+// Dubbele namen uniek: image.jpg, image (2).jpg, … (hoofdletterongevoelig).
+function appUniekeNaam(naam, gehad) {
+  const p = naam.lastIndexOf('.');
+  const stam = p > 0 ? naam.slice(0, p) : naam, ext = p > 0 ? naam.slice(p) : '';
+  let k = naam, i = 2;
+  while (gehad.has(k.toLowerCase())) k = stam + ' (' + (i++) + ')' + ext;
+  gehad.add(k.toLowerCase());
+  return k;
+}
+const APP_BEELD_RE = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?)$/i;
+// Standaardopdrachten van Telegram, letterlijk (CLAUDE.md § Socev-app; bouwplan § 8 #21).
+const APP_FOTO_OPDRACHT = 'Analyseer de bijgevoegde foto (lees alle zichtbare tekst en begrijp de inhoud) en verwerk de relevante informatie direct in mijn Second Brain volgens de vault-conventies (zie CLAUDE.md, AGENTS.md en de index.md): werk de juiste pagina(s) bij of maak ze aan, met bronvermelding. Geef daarna een korte samenvatting van wat je hebt vastgelegd en op welke pagina(s).';
+function appBestandenPrompt(tekst, namen) {
+  const kop = 'David stuurde via de app ' + (namen.length === 1 ? '1 bestand' : namen.length + ' bestanden') + ' in één bericht: ' +
+    namen.join(', ') + '. ' + (namen.length === 1 ? 'Het staat' : 'Ze staan') + ' in je invoermap.';
+  const bundel = namen.length > 1 ? 'Dit is één bundel, geen losse berichten (zoals het bestandenportaal): doe het met alle bestanden samen en antwoord één keer.' : '';
+  if (tekst) return kop + '\n\nZijn tekst:\n' + tekst + (bundel ? '\n\n' + bundel : '');
+  const fotos = namen.filter(function (n) { return APP_BEELD_RE.test(n); }), docs = namen.filter(function (n) { return !APP_BEELD_RE.test(n); });
+  const delen = [];
+  if (fotos.length) delen.push(APP_FOTO_OPDRACHT + (namen.length > 1 ? ' (Geldt voor: ' + fotos.join(', ') + '.)' : ''));
+  docs.forEach(function (n) { delen.push('Zet dit bestand om naar nette markdown: ' + n); });
+  return kop + '\n\nGeen tekst erbij; de standaardopdracht van Telegram geldt:\n' + delen.join('\n') + (bundel ? '\n\n' + bundel : '');
+}
+
+// POST /app/upload/<beurt_id>/<n>: één bestand, ruwe bytes (application/octet-stream), naam in X-App-Naam (URI-gecodeerd).
+// Hetzelfde n nog eens = vervangen (herhaling na een time-out). Fouten komen terug; een half bestand blijft nooit staan.
+function appUpload(req, res, reg, a, rest) {
+  const weg = function (st, f, r) { req.resume(); return appWeiger(res, st, f, r); };
+  const m = /^([a-z0-9-]{8,64})\/([1-9][0-9]?)$/.exec(rest);
+  if (!m || Number(m[2]) > APP_UPLOAD_MAX_N) return weg(400, 'ongeldig uploadadres', 'upload pad');
+  const bid = m[1], n = Number(m[2]);
+  const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (ct !== 'application/octet-stream') return weg(415, 'alleen ruwe bestandsinhoud', 'upload soort');
+  let naam = '';
+  const kop = String(req.headers['x-app-naam'] || '');
+  if (kop.length <= 1000) { try { naam = appSchoneNaam(decodeURIComponent(kop)); } catch (e) { naam = ''; } }
+  if (!naam) return weg(400, 'bestandsnaam ontbreekt', 'upload naam');
+  const lengte = req.headers['content-length'] !== undefined ? Number(req.headers['content-length']) : null;
+  if (lengte !== null && lengte > APP_UPLOAD_BESTAND_MAX) return weg(413, 'bestand te groot (max ' + (APP_UPLOAD_BESTAND_MAX >> 20) + ' MB per bestand)', 'upload te groot');
+  if (appBeurtIds()[appSha(bid)]) return weg(409, 'dit bericht is al verstuurd', 'upload na beurt');
+  if (!appTeller('upload', APP_UPLOAD_PER_UUR, 3600000)) return weg(429, 'te veel bestanden dit uur (max ' + APP_UPLOAD_PER_UUR + ')', 'grens upload');
+  const dir = appUploadMap(a, bid);
+  let klaar;
+  try { klaar = appUploadLijst(dir); } catch (e) { logError('app-upload', e); return weg(503, 'opslag op de pod onleesbaar', 'upload lijst'); }
+  const anderen = klaar.filter(function (x) { return x.n !== n; });
+  if (anderen.length >= APP_UPLOAD_MAX_N) return weg(413, 'te veel bestanden in één bericht (max ' + APP_UPLOAD_MAX_N + ')', 'upload aantal');
+  if (appUploadOpruim(false) > APP_UPLOAD_TOTAAL_MAX) return weg(507, 'de pod heeft nu geen ruimte voor meer bestanden; probeer het over een uur', 'upload vol');
+  const max = Math.min(APP_UPLOAD_BESTAND_MAX, APP_UPLOAD_BEURT_MAX - anderen.reduce(function (t, x) { return t + x.grootte; }, 0));
+  const teGroot = 'bestanden samen te groot (max ' + (APP_UPLOAD_BEURT_MAX >> 20) + ' MB per bericht)';
+  if (max <= 0 || (lengte !== null && lengte > max)) return weg(413, teGroot, 'upload samen te groot');
+  try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch (e) { logError('app-upload', e); return weg(500, 'opslag op de pod mislukt', 'upload map'); }
+  const deel = path.join(dir, n + '.deel-' + crypto.randomBytes(4).toString('hex'));
+  let ws;
+  try { ws = fs.createWriteStream(deel, { flags: 'wx', mode: 0o600 }); } catch (e) { logError('app-upload', e); return weg(500, 'opslag op de pod mislukt', 'upload open'); }
+  let bytes = 0, af = false;
+  // Eerst het halve bestand weg (pas na 'close': het openen loopt asynchroon), dan pas antwoorden.
+  const mis = function (st, f, r) {
+    if (af) return; af = true;
+    req.resume();
+    const klaar = function () { fs.rm(deel, { force: true }, function () { if (!res.headersSent) appWeiger(res, st, f, r); }); };
+    if (ws.closed) klaar(); else { ws.once('close', klaar); ws.destroy(); }
+  };
+  ws.on('error', function (e) { logError('app-upload', e); mis(500, 'opslag op de pod mislukt', 'upload schrijven'); });
+  req.on('aborted', function () { mis(400, 'upload afgebroken', 'upload afgebroken'); });
+  req.on('error', function () { mis(400, 'upload afgebroken', 'upload afgebroken'); });
+  req.on('data', function (c) {
+    if (af) return;
+    bytes += c.length;
+    if (bytes > max) return mis(413, max < APP_UPLOAD_BESTAND_MAX ? teGroot : 'bestand te groot (max ' + (APP_UPLOAD_BESTAND_MAX >> 20) + ' MB per bestand)', 'upload te groot (stroom)');
+    if (!ws.write(c)) { req.pause(); ws.once('drain', function () { if (!af) req.resume(); }); }
+  });
+  req.on('end', function () {
+    if (af) return;
+    if (!bytes) return mis(400, 'leeg bestand', 'upload leeg');
+    if (lengte !== null && bytes !== lengte) return mis(400, 'upload onvolledig', 'upload lengte');
+    ws.end(function () {
+      if (af) return;
+      try {
+        if (fs.existsSync(APP_UIT)) throw Object.assign(new Error('noodstop'), { noodstop: true });
+        if (appBeurtIds()[appSha(bid)]) throw Object.assign(new Error('al verstuurd'), { al: true });
+        const tmp = path.join(dir, n + '.json.nieuw');
+        fs.writeFileSync(tmp, JSON.stringify({ naam: naam, t: new Date().toISOString() }), { mode: 0o600 });
+        fs.renameSync(deel, path.join(dir, String(n)));
+        fs.renameSync(tmp, path.join(dir, n + '.json'));
+      } catch (e) {
+        if (e && e.noodstop) return mis(503, 'de app staat uit (noodstop)', 'app-uit (tijdens upload)');
+        if (e && e.al) return mis(409, 'dit bericht is al verstuurd', 'upload na beurt');
+        logError('app-upload', e); return mis(500, 'opslag op de pod mislukt', 'upload afronden');
+      }
+      af = true;
+      res._app.reden = 'upload ' + n + ' (' + bytes + ' B)';
+      appStuur(res, 200, { ok: true, n: n, naam: naam, grootte: bytes });
+    });
+  });
+}
+
 async function appBeurt(req, res, reg, a, s, d) {
   const kanaal = String(d.kanaal || '');
   if (!APP_KANALEN[kanaal]) return appWeiger(res, 400, 'onbekend kanaal', 'kanaal');
   const bid = String(d.beurt_id || '');
   if (!/^[a-z0-9-]{8,64}$/.test(bid)) return appWeiger(res, 400, 'beurt_id ontbreekt', 'beurt_id');
-  if (Array.isArray(d.bestanden) && d.bestanden.length) return appWeiger(res, 400, 'bestanden sturen kan nog niet in de app; gebruik Telegram of het bestandenportaal', 'bestanden');
+  // Bestanden (wv99): alleen de nummers van wat dit apparaat voor deze beurt_id al heeft geüpload; naam en grootte komen
+  // van de pod, niet uit dit verzoek.
+  let nrs = [];
+  if (d.bestanden !== undefined && d.bestanden !== null) {
+    if (!Array.isArray(d.bestanden) || d.bestanden.length > APP_UPLOAD_MAX_N) return appWeiger(res, 400, 'ongeldige bestandenlijst', 'bestanden lijst');
+    nrs = d.bestanden.map(function (x) { return Number(x && typeof x === 'object' ? x.n : x); });
+    if (nrs.some(function (x, i) { return !Number.isInteger(x) || x < 1 || x > APP_UPLOAD_MAX_N || nrs.indexOf(x) !== i; })) return appWeiger(res, 400, 'ongeldige bestandenlijst', 'bestanden lijst');
+  }
   const tekst = String(d.tekst == null ? '' : d.tekst).replace(/\r\n?/g, '\n').trim();
-  if (!tekst) return appWeiger(res, 400, 'leeg bericht', 'leeg');
+  if (!tekst && !nrs.length) return appWeiger(res, 400, 'leeg bericht', 'leeg');
   if (tekst.length > APP_TEKST_MAX) return appWeiger(res, 413, 'bericht te lang (max ' + APP_TEKST_MAX + ' tekens)', 'te lang');
   const bh = appSha(bid);
   const eerder = appBeurtIds()[bh];
   if (eerder) { res._app.reden = 'herhaling ' + eerder.job; return appStuur(res, 200, { ok: true, job_id: eerder.job, al: true }); }
+  let upload = null;
+  if (nrs.length) {
+    const dir = appUploadMap(a, bid);
+    let klaar;
+    try { klaar = appUploadLijst(dir); } catch (e) { logError('app-upload', e); return appWeiger(res, 503, 'opslag op de pod onleesbaar', 'upload lijst'); }
+    const ontbreekt = nrs.filter(function (x) { return !klaar.some(function (k) { return k.n === x; }); });
+    if (ontbreekt.length) {
+      res._app.reden = 'bestanden ontbreken ' + ontbreekt.join(',');
+      return appStuur(res, 409, { ok: false, fout: 'niet alle bestanden zijn aangekomen; probeer het opnieuw', ontbreekt: ontbreekt });
+    }
+    const gekozen = klaar.filter(function (k) { return nrs.indexOf(k.n) >= 0; });
+    if (gekozen.reduce(function (t, k) { return t + k.grootte; }, 0) > APP_UPLOAD_BEURT_MAX) return appWeiger(res, 413, 'bestanden samen te groot', 'bestanden samen te groot');
+    const gehad = new Set();
+    upload = { dir: dir, lijst: gekozen.map(function (k) { return { n: k.n, doel: appUniekeNaam(k.naam, gehad), grootte: k.grootte }; }) };
+  }
   if (!(await appMagBeurt(res, kanaal))) return;
   const ids = appBeurtIds();
   if (ids[bh]) { res._app.reden = 'herhaling ' + ids[bh].job; return appStuur(res, 200, { ok: true, job_id: ids[bh].job, al: true }); }   // tweede kwam tijdens de rolcheck
-  const st = appStartBeurt(a, kanaal, tekst, { beurt_id: bid, soort: 'bericht', tekst: tekst });
+  const namen = upload ? upload.lijst.map(function (x) { return x.doel; }) : [];
+  const st = appStartBeurt(a, kanaal, upload ? appBestandenPrompt(tekst, namen) : tekst, { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload });
   if (!st.job_id) return appStartFout(res, st);
   ids[bh] = { job: st.job_id, t: Date.now() };
   try { appSchrijfJson(APP_BEURTEN, ids); } catch (e) { logError('app-beurten', e); }
-  res._app.reden = 'beurt ' + kanaal + ' ' + st.job_id;
-  appStuur(res, 200, { ok: true, job_id: st.job_id });
+  res._app.reden = 'beurt ' + kanaal + ' ' + st.job_id + (namen.length ? ' + ' + namen.length + ' bestand(en)' : '');
+  appStuur(res, 200, { ok: true, job_id: st.job_id, bestanden: namen });
 }
 
 function appBeantwoord(jobId, hash) {
@@ -3889,7 +4097,7 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
   if (!APP_KANALEN[kanaal]) return appWeiger(res, 400, 'onbekend kanaal', 'kanaal');
   const max = 100;
   const lopend = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); })
-    .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, sinds: new Date(j.created).toISOString() }; });
+    .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, invoer: j.app.invoer || [], sinds: new Date(j.created).toISOString() }; });
   let items = [], fout = null;
   try { items = await appLogLees(kanaal); } catch (e) { if (!(e && e.code === 'ENOENT')) { logError('app-log-lees', e); fout = 'geschiedenis nu niet leesbaar'; } }
   let vragen = {};
@@ -3903,13 +4111,13 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
     if (!j.app || j.app.kanaal !== kanaal || j.status !== 'done' || j.app.gelogd === true || inLog[id]) return;
     const r = j.result || {}, out = appUitvoer(j), v = appVraagUit(out);
     items.push({ t: new Date(j.done_at || j.created).toISOString(), job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst,
-      antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined, vraag_hash: v ? v.hash : undefined,
+      invoer: j.app.invoer, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined, vraag_hash: v ? v.hash : undefined,
       bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
   });
   items.sort(function (a, b) { return String(a.t).localeCompare(String(b.t)); });
   items = items.slice(-max).map(function (x) {
     const b = x.vraag_hash && vragen[x.job_id + ':' + x.vraag_hash];
-    return { t: x.t, job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
+    return { t: x.t, job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
       vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null } : null,
       bestanden: x.bestanden || [] };
   });
@@ -4324,7 +4532,11 @@ function handleApp(req, res) {
     if (afwijzing) { req.resume(); return appWeiger(res, 401, 'niet toegestaan', 'access: ' + afwijzing); }
     res._app.voorAuth = false;
     if (!appTeller('alles', APP_VERZOEKEN_PER_UUR, 3600000)) { req.resume(); return appWeiger(res, 429, 'te veel verzoeken', 'grens alles'); }
-    appBody(req, function (fout, d) {
+    // Upload (wv99): ruwe bytes, geen JSON; de route leest de stroom zelf. Wordt hij eerder geweigerd (geen sessie e.d.), dan
+    // de rest van de stroom weggooien zodat de verbinding netjes afloopt.
+    const upload = req.method === 'POST' && p.indexOf('/app/upload/') === 0;
+    if (upload) res.on('finish', function () { if (!req.complete) req.resume(); });
+    (upload ? function (cb) { cb(null, {}); } : function (cb) { appBody(req, cb); })(function (fout, d) {
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
       let reg;
       try { reg = appRegister(); } catch (e) { logError('app-register', e); return appWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'register kapot'); }
@@ -4351,12 +4563,13 @@ function handleApp(req, res) {
         if (!s) return appWeiger(res, 401, 'bevestig met je vingerafdruk', a ? 'geen sessie' : 'geen apparaat');
         res._app.apparaat = a.id;
         // Verlengen pas als de schrijvende route echt lukte; een ongeldig verzoek telt niet als activiteit (Fable-review wv56 #8).
-        if (APP_GLIJD_ROUTES.has(route)) res.on('finish', function () { if (res.statusCode < 300) appGlijd(s, a); });
+        if (APP_GLIJD_ROUTES.has(route) || upload) res.on('finish', function () { if (res.statusCode < 300) appGlijd(s, a); });
         if (route === 'GET /app/apparaten') return appApparatenLijst(req, res, reg, a);
         if (route === 'POST /app/apparaat/intrekken') return appIntrekken(req, res, reg, a, s, d);
         if (route === 'GET /app/apparaat/aanvraag') return appAanvraagLijst(req, res);
         if (route === 'POST /app/koppel/goedkeur') return appKoppelGoedkeur(req, res, reg, a, s, d, false);
         if (route === 'POST /app/koppel/afwijs') return appKoppelGoedkeur(req, res, reg, a, s, d, true);
+        if (upload) return appUpload(req, res, reg, a, route.slice('POST /app/upload/'.length));
         if (route === 'POST /app/beurt') return appBeurt(req, res, reg, a, s, d);
         if (route === 'POST /app/uitslag') return appUitslag(req, res, reg, a, s, d);
         if (route === 'POST /app/knop') return appKnop(req, res, reg, a, s, d);
@@ -4402,6 +4615,7 @@ function appNoodstop(bron) {
     if (j.status === 'pending') { j.app.noodstop = true; uit.beurten_vervallen++; }
     else if (j.status === 'running') uit.beurten_lopend++;
   });
+  try { appUploadOpruim(true); } catch (e) { uit.fouten.push('upload: ' + (e && e.code || e)); }   // klaarstaande bestanden (wv99)
   uit.aanvraag = !!appStaat.aanvraag; appStaat.aanvraag = null;
   uit.koppelcode = !!appStaat.koppel; appStaat.koppel = null;
   try { fs.unlinkSync(APP_HEROPEND); uit.heropend_weg = true; } catch (e) { if (!e || e.code !== 'ENOENT') uit.fouten.push('koppel-heropend: ' + (e && e.code || e)); }
@@ -4436,6 +4650,7 @@ setInterval(function () {
   Object.keys(appStaat.uitdagingen).forEach(function (h) { if (nu > appStaat.uitdagingen[h].tot) delete appStaat.uitdagingen[h]; });
   if (appStaat.koppel && nu > appStaat.koppel.tot) appStaat.koppel = null;
   if (appStaat.aanvraag && nu > appStaat.aanvraag.tot) appStaat.aanvraag = null;
+  if (new Date(nu).getMinutes() % 10 === 0) appUploadOpruim(false);   // klaarstaande bestanden ouder dan een uur (wv99)
 }, 60 * 1000).unref();
 
 function appInfo() {
