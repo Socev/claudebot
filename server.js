@@ -3779,6 +3779,8 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
     const indir = path.join(APP_IO, jobId, 'in');
     try {
       fs.mkdirSync(indir, { recursive: true, mode: 0o700 });
+      // Merkteken: draait deze beurt nooit (herstart, 24-uursopruiming), dan ruimt appIoOpruim de map op (Fable-review wv99 M1).
+      fs.writeFileSync(path.join(APP_IO, jobId, APP_IO_MERK), '', { mode: 0o600 });
       meta.upload.lijst.forEach(function (x) {
         const van = path.join(meta.upload.dir, String(x.n)), naar = path.join(indir, x.doel);
         try { fs.linkSync(van, naar); } catch (e) { if (e && e.code === 'EXDEV') fs.copyFileSync(van, naar, fs.constants.COPYFILE_EXCL); else throw e; }
@@ -3796,7 +3798,8 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
   enqueue(sessionKey(DEFAULT_WS, chatId), function () {
     // Nog in de wachtrij toen de noodstop kwam: vervalt, ook als de app intussen weer aan staat (Fable-review wv89 #3).
     const j = jobs[jobId];
-    if (j && (j.app.noodstop || fs.existsSync(APP_UIT))) {
+    if (!j) { try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {} return Promise.resolve(); }   // al opgeruimd: processJob zou niets wissen
+    if (j.app.noodstop || fs.existsSync(APP_UIT)) {
       j.status = 'done'; j.done_at = Date.now(); j.opgehaald = true;   // opgehaald: houdt een uitrol niet op
       j.result = { ok: false, error: 'vervallen door de noodstop' };
       try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {}   // processJob ruimt dan niet op
@@ -3862,9 +3865,26 @@ function appUploadOpruim(alles) {
   });
   return bytes;
 }
+// io/<job> van app-beurten met bestanden die nooit draaiden (pod herstart, job na 24 u opgeruimd): weg. Alleen mappen met
+// het merkteken; een wachtende of lopende app-beurt blijft staan (Fable-review wv99 M1).
+const APP_IO_MERK = '.app-upload';
+function appIoOpruim() {
+  let n = 0, namen = [];
+  try { namen = fs.readdirSync(APP_IO); } catch (e) { return 0; }
+  namen.forEach(function (id) {
+    if (!/^[a-f0-9]{16}$/.test(id)) return;
+    const j = jobs[id];
+    if (j && (j.status === 'pending' || j.status === 'running')) return;
+    try {
+      if (!fs.existsSync(path.join(APP_IO, id, APP_IO_MERK))) return;
+      fs.rmSync(path.join(APP_IO, id), { recursive: true, force: true }); n++;
+    } catch (e) { logError('app-io-opruim', e); }
+  });
+  return n;
+}
 // Bestandsnaam uit de app: alleen het laatste deel, geen stuurtekens of richtingstekens, geen verborgen bestand, ≤ 120 tekens.
 function appSchoneNaam(n) {
-  let s = String(n || '').normalize('NFC').replace(/[\u0000-\u001f\u007f‎‏‪-‮⁦-⁩]/g, '')
+  let s = String(n || '').normalize('NFC').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g, '')
     .replace(/[\/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
   if (/^\.+$/.test(s)) s = '';
   if (s.charAt(0) === '.') s = '_' + s.slice(1);
@@ -3955,7 +3975,7 @@ function appUpload(req, res, reg, a, rest) {
       try {
         if (fs.existsSync(APP_UIT)) throw Object.assign(new Error('noodstop'), { noodstop: true });
         if (appBeurtIds()[appSha(bid)]) throw Object.assign(new Error('al verstuurd'), { al: true });
-        const tmp = path.join(dir, n + '.json.nieuw');
+        const tmp = deel + '.json';   // uniek per stroom (Fable-review wv99 Z4)
         fs.writeFileSync(tmp, JSON.stringify({ naam: naam, t: new Date().toISOString() }), { mode: 0o600 });
         fs.renameSync(deel, path.join(dir, String(n)));
         fs.renameSync(tmp, path.join(dir, n + '.json'));
@@ -4650,8 +4670,9 @@ setInterval(function () {
   Object.keys(appStaat.uitdagingen).forEach(function (h) { if (nu > appStaat.uitdagingen[h].tot) delete appStaat.uitdagingen[h]; });
   if (appStaat.koppel && nu > appStaat.koppel.tot) appStaat.koppel = null;
   if (appStaat.aanvraag && nu > appStaat.aanvraag.tot) appStaat.aanvraag = null;
-  if (new Date(nu).getMinutes() % 10 === 0) appUploadOpruim(false);   // klaarstaande bestanden ouder dan een uur (wv99)
+  if (new Date(nu).getMinutes() % 10 === 0) { appUploadOpruim(false); appIoOpruim(); }   // klaarstaand > 1 u en weesmappen (wv99)
 }, 60 * 1000).unref();
+setTimeout(function () { appIoOpruim(); }, 30 * 1000).unref();   // na een herstart bestaat geen app-beurt meer: weesmappen weg
 
 function appInfo() {
   let reg;

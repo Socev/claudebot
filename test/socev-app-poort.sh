@@ -95,7 +95,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, setIn
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt };', ctx, { filename: 'server.js#app' });
 const H = ctx.__h;
 const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
 
@@ -699,6 +699,7 @@ async function bewijs(o) {
     for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('opgeruimd');
 
     // ── 9c. bestanden in een beurt (wv99, fase 5b; bouwplan § 4.7) ──
+    let gf9c = null;
     {
       const sM = H.appStaat.sessies[crypto.createHash('sha256').update(M.jar.sessie).digest('hex')];
       sM.tot = Date.now() + 10 * 60000;
@@ -737,6 +738,7 @@ async function bewijs(o) {
       const nG = gestart.length;
       r = await vraag('POST', '/app/beurt', { beurt_id: ub, kanaal: 'hoofd', tekst: '', bestanden: [{ n: 1 }, { n: 2 }, { n: 3 }] }, { pot: M.jar });
       const jb = r.j.job_id, gb = gestart[gestart.length - 1];
+      gf9c = jb;
       toets('9c beurt zonder tekst met 3 bestanden -> één beurt, namen uniek', r.status === 200 && gestart.length === nG + 1 && JSON.stringify(r.j.bestanden) === JSON.stringify(['image.jpg', 'image (2).jpg', 'verslag.pdf']), JSON.stringify(r.j));
       toets('9c prompt: [APP] + bundel + standaardopdrachten (foto letterlijk, document naar markdown)', gb.prompt.indexOf('[APP] David stuurde via de app 3 bestanden in één bericht: image.jpg, image (2).jpg, verslag.pdf. Ze staan in je invoermap.') === 0 &&
         gb.prompt.indexOf('Analyseer de bijgevoegde foto (lees alle zichtbare tekst en begrijp de inhoud) en verwerk de relevante informatie direct in mijn Second Brain') > 0 &&
@@ -815,6 +817,17 @@ async function bewijs(o) {
       toets('9c naam: pad weg, geen verborgen bestand, geen stuur-/richtingstekens, max 120 tekens met extensie',
         N('../../etc/passwd').indexOf('/') < 0 && N('a\\b.txt') === 'a_b.txt' && N('.env') === '_env' && N('..') === '' && N('fac‮tuur.pdf') === 'factuur.pdf' && N('x\u0000y') === 'xy' &&
         Array.from(N('a'.repeat(300) + '.pdf')).length === 120 && N('a'.repeat(300) + '.pdf').endsWith('.pdf') && N('  ') === '', [N('../../etc/passwd'), N('.env'), N('a'.repeat(300) + '.pdf').length].join(' | '));
+      toets('9c naam: ook zero-width, regelscheiders en C1-stuurtekens weg (Fable wv99 Z5)', N('a\u200bb\ufeff.txt') === 'ab.txt' && N('x\u2028y\u2029') === 'xy' && N('\u0085z\u009f') === 'z' && N('\u2066a\u2069') === 'a');
+      // weesmappen (Fable wv99 M1): io/<job> met merkteken zonder lopende app-beurt -> weg; wachtend/lopend blijft
+      const wees = 'abcdefabcdef0001', wacht = 'abcdefabcdef0002', vreemd = 'abcdefabcdef0003';
+      for (const id of [wees, wacht, vreemd]) fs.mkdirSync(path.join(IOD, id, 'in'), { recursive: true });
+      fs.writeFileSync(path.join(IOD, wees, '.app-upload'), ''); fs.writeFileSync(path.join(IOD, wacht, '.app-upload'), '');
+      jobs[wacht] = { status: 'pending', app: { kanaal: 'hoofd' } };
+      const merkVoor = fs.existsSync(path.join(IOD, gf9c, '.app-upload'));
+      const nW = H.appIoOpruim();   // ook de mappen van de (nagebootste, afgeronde) beurten hierboven: processJob ruimt die in het echt zelf op
+      toets('9c weesmap met merkteken weg; wachtende app-beurt en map zonder merkteken (Telegram/agent) blijven', nW >= 1 && !fs.existsSync(path.join(IOD, wees)) && fs.existsSync(path.join(IOD, wacht)) && fs.existsSync(path.join(IOD, vreemd)), nW);
+      delete jobs[wacht];
+      toets('9c merkteken stond in io/<job> van een beurt met bestanden', merkVoor);
       const gh = new Set();
       toets('9c uniek: Image.JPG na image.jpg -> "Image (2).JPG"; zonder extensie "x (2)"', H.appUniekeNaam('image.jpg', gh) === 'image.jpg' && H.appUniekeNaam('Image.JPG', gh) === 'Image (2).JPG' && H.appUniekeNaam('x', gh) === 'x' && H.appUniekeNaam('x', gh) === 'x (2)');
       const pf = H.appBestandenPrompt('', ['IMG_1.HEIC']);
