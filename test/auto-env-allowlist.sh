@@ -37,7 +37,7 @@ const geheim = { GEHEIM_NEP: 'x', TELEGRAM_SESSIE: 'x', VAULT_BACKUP_CRYPT_WACHT
 const mag = { N8N_WEBHOOK_AGENDA_API: 'x', N8N_WEBHOOK_WERKROOSTER: 'x', N8N_WEBHOOK_WHATSAPP: 'x', SUPABASE_RPC_CONTACTEN: 'x',
   TZ: 'Europe/Amsterdam', CLAUDE_CODE_OAUTH_TOKEN: 'nep-inlog' };
 const env = Object.assign({}, process.env, geheim, mag, {
-  HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'),
+  HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'),
   JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),
   RUNTIME_FILE: path.join(d, 'runtime.json'), CODEX_HOME: path.join(d, 'codex'), SLEUTELPORTAAL_SLEUTEL: path.join(d, 'geen.key'),
   OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1', LESSEN_INJECTIE: '0', API_SECRET: 'proef', MAX_AGENTS: '6',

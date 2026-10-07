@@ -3083,7 +3083,7 @@ const APP_TRANSPORTS = ['internal', 'hybrid', 'usb', 'nfc', 'ble', 'smart-card']
 const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
-  webauthn: null, webauthnFout: null, registerCache: null, bestandenTotaal: 0, bestandenIndex: null, wvCache: null };
+  webauthn: null, webauthnFout: null, registerCache: null, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null };
 
 function appSha(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
 function appGelijk(a, b) { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); }
@@ -4102,7 +4102,12 @@ function appBewaar(jobId, outdir, meta) {
   try {
     if (!APP_JOB_RE.test(String(jobId))) return null;
     const rapport = (typeof meta.rapport === 'string' && meta.rapport.trim()) ? meta.rapport : null;
-    let kand = appBewaarKandidaten(outdir);
+    // out/ en zijn ouder moeten echte mappen zijn, geen koppeling: rename zou anders bestanden van elders VERPLAATSEN
+    // (collectFiles kopieerde alleen; Fable-review wv98 B1).
+    let echteMap = false;
+    try { echteMap = fs.lstatSync(outdir).isDirectory() && fs.lstatSync(path.dirname(outdir)).isDirectory(); } catch (e) {}
+    if (!appStaat.bestandenGemeten) appBestandenOpruim();   // totaal pas bekend na de eerste telling (review K5)
+    let kand = echteMap ? appBewaarKandidaten(outdir) : [];
     let overgeslagen = 0, vol = false;
     if (kand.length && appStaat.bestandenTotaal > APP_BESTANDEN_TOTAAL_BYTES) { overgeslagen = kand.length; kand = []; vol = true; }
     if (!kand.length && !rapport) return null;
@@ -4154,6 +4159,11 @@ function appBestandenIndex() {
   appStaat.bestandenIndex = { op: nu, items: items };
   return items;
 }
+// Lezen zonder een koppeling te volgen (defence-in-depth; review K1).
+async function appLeesEcht(p, enc) {
+  const fh = await fs.promises.open(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try { return await fh.readFile(enc ? { encoding: enc } : undefined); } finally { await fh.close(); }
+}
 function appBewaardVan(jobId) {
   if (!APP_JOB_RE.test(String(jobId))) return null;
   return appBestandenIndex().find(function (m) { return m.job_id === jobId; }) || null;
@@ -4163,7 +4173,7 @@ function appBestandenOpruim(nu) {
   nu = nu || Date.now();
   let totaal = 0, weg = 0, dagen = [];
   try { dagen = fs.readdirSync(APP_BESTANDEN_DIR).filter(function (d) { return APP_DAG_RE.test(d); }); }
-  catch (e) { if (e && e.code === 'ENOENT') { appStaat.bestandenTotaal = 0; return { totaal: 0, weg: 0 }; } logError('app-opruim', e); return null; }
+  catch (e) { if (e && e.code === 'ENOENT') { appStaat.bestandenTotaal = 0; appStaat.bestandenGemeten = true; return { totaal: 0, weg: 0 }; } logError('app-opruim', e); return null; }
   for (const d of dagen) {
     const dagDir = path.join(APP_BESTANDEN_DIR, d);
     let jobsIn = [];
@@ -4182,6 +4192,7 @@ function appBestandenOpruim(nu) {
     try { if (!fs.readdirSync(dagDir).length) fs.rmdirSync(dagDir); } catch (e) {}
   }
   appStaat.bestandenTotaal = totaal;
+  appStaat.bestandenGemeten = true;
   appStaat.bestandenIndex = null;
   return { totaal: totaal, weg: weg };
 }
@@ -4248,7 +4259,7 @@ async function appAgentRapport(req, res, jobId) {
   const m = appBewaardVan(jobId);
   if (!m || !m.rapport) return appWeiger(res, 404, 'van deze agent is geen rapport bewaard', 'rapport ' + jobId + ' weg');
   let tekst;
-  try { tekst = await fs.promises.readFile(path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'rapport.md'), 'utf8'); }
+  try { tekst = await appLeesEcht(path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'rapport.md'), 'utf8'); }
   catch (e) { logError('app-rapport', e); return appWeiger(res, 404, 'van deze agent is geen rapport bewaard', 'rapport ' + jobId + ' onleesbaar'); }
   res._app.reden = 'rapport ' + jobId;
   const a = appAgentsReg()[jobId];
@@ -4264,7 +4275,8 @@ async function appBestanden(req, res) {
     const w = perJob[m.job_id];
     return { job_id: m.job_id, soort: m.soort, kanaal: m.kanaal, app: m.app, op: m.op,
       label: m.soort === 'agent' ? ((w && w.samenvatting) ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(m.label)) : null,
-      bestanden: m.bestanden.map(function (b) { return { n: b.n, naam: b.naam, grootte: b.grootte }; }), overgeslagen: m.overgeslagen || 0 };
+      bestanden: m.bestanden.map(function (b) { return { n: b.n, naam: appVeiligeNaam(b.naam, new Set()), grootte: b.grootte }; }),
+      overgeslagen: m.overgeslagen || 0, vol: m.vol === true };
   });
   appStuur(res, 200, { ok: true, items: lijst, bewaar_dagen: Math.round(APP_BESTANDEN_MS / 86400000) });
 }
@@ -4282,11 +4294,12 @@ async function appBestand(req, res, rest) {
   const b = m && (m.bestanden || []).find(function (x) { return x.n === n; });
   if (!b) return appWeiger(res, 404, 'dit bestand is er niet (meer); de pod bewaart bestanden 30 dagen', 'bestand ' + jobId + '/' + n + ' weg');
   let inhoud;
-  try { inhoud = await fs.promises.readFile(path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'b', String(n))); }
+  try { inhoud = await appLeesEcht(path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'b', String(n))); }
   catch (e) { logError('app-bestand', e); return appWeiger(res, 404, 'dit bestand is er niet (meer)', 'bestand ' + jobId + '/' + n + ' onleesbaar'); }
   res._app.reden = 'bestand ' + jobId + '/' + n;
-  const ext = (/\.([a-z0-9]{1,5})$/i.exec(b.naam) || [])[1];
-  appStuur(res, 200, { ok: true, naam: b.naam, type: APP_MIME[String(ext || '').toLowerCase()] || 'application/octet-stream', grootte: inhoud.length,
+  const ext = (/\.([a-z0-9]{1,5})$/i.exec(String(b.naam)) || [])[1];
+  const naam = appVeiligeNaam(b.naam, new Set());
+  appStuur(res, 200, { ok: true, naam: naam, type: APP_MIME[String(ext || '').toLowerCase()] || 'application/octet-stream', grootte: inhoud.length,
     inhoud: inhoud.toString('base64') });
 }
 

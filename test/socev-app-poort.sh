@@ -847,6 +847,15 @@ async function bewijs(o) {
       const jd = path.join(BEWAAR, dag, 'aaaaaaaaaaaaaab1');
       toets('11 bewaren: map 0700, bestanden 0600 als b/<n>, geen oorspronkelijke namen op schijf', (fs.statSync(jd).mode & 0o777) === 0o700 && (fs.statSync(path.join(jd, 'b', '1')).mode & 0o777) === 0o600
         && fs.readdirSync(path.join(jd, 'b')).sort().join() === '1,2,3', fs.readdirSync(path.join(jd, 'b')).join());
+      // out/ als koppeling naar een andere map: niets verplaatsen (Fable-review wv98 B1)
+      const VREEMD = path.join(W, 'vreemd'); fs.mkdirSync(VREEMD); fs.writeFileSync(path.join(VREEMD, 'v.txt'), 'van elders');
+      fs.mkdirSync(path.join(W, 'io-l1'), { recursive: true }); fs.symlinkSync(VREEMD, path.join(W, 'io-l1', 'out'));
+      const ml = H.appBewaar('aaaaaaaaaaaaaab6', path.join(W, 'io-l1', 'out'), { soort: 'agent', label: 'machinekamer: koppeling', ok: true, rapport: 'r' });
+      toets('11 out/ is een koppeling: geen bestanden verplaatst, bron ongemoeid', ml && ml.bestanden.length === 0 && fs.readFileSync(path.join(VREEMD, 'v.txt'), 'utf8') === 'van elders', JSON.stringify(ml));
+      fs.mkdirSync(path.join(W, 'io-l2'), { recursive: true }); fs.symlinkSync(path.join(W, 'io-b1'), path.join(W, 'io-l2', 'via'));
+      fs.writeFileSync(path.join(W, 'io-b1', 'out', 'nog.txt'), 'nog');
+      const ml2 = H.appBewaar('aaaaaaaaaaaaaab7', path.join(W, 'io-l2', 'via', 'out'), { soort: 'beurt', kanaal: 'hoofd' });
+      toets('11 ouder van out/ is een koppeling: niets verplaatst', ml2 === null && fs.existsSync(path.join(W, 'io-b1', 'out', 'nog.txt')), JSON.stringify(ml2));
       // agent zonder rapport (route socev) en een beurt met één bestand
       fs.mkdirSync(path.join(W, 'io-b2', 'out'), { recursive: true });
       fs.writeFileSync(path.join(W, 'io-b2', 'out', 'plan.md'), '# plan');
@@ -867,6 +876,10 @@ async function bewijs(o) {
       await slaap(30);
       const auditD = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
       toets('11 download staat in het auditlog (job/n, geen naam of inhoud)', auditD.split('\n').length > nA1 && new RegExp('"reden":"bestand aaaaaaaaaaaaaab1/' + nr + '"').test(auditD) && !/Rapport wv98/.test(auditD));
+      const kPad = path.join(BEWAAR, dag, 'ccccccccccccccc1', 'b', '1');
+      fs.rmSync(kPad); fs.symlinkSync('/etc/hostname', kPad);
+      r = await vraag('GET', '/app/bestand/ccccccccccccccc1/1', undefined, { pot: P.jar });
+      toets('11 b/<n> vervangen door een koppeling -> 404 (O_NOFOLLOW)', r.status === 404, r.status);
       r = await vraag('GET', '/app/bestand/aaaaaaaaaaaaaab1/9', undefined, { pot: P.jar });
       toets('11 onbekend bestandsnummer -> 404', r.status === 404);
       for (const pad of ['/app/bestand/aaaaaaaaaaaaaab1/../../geheim', '/app/bestand/aaaaaaaaaaaaaab1', '/app/bestand/AAAAAAAAAAAAAAB1/1', '/app/bestand/' + dag + '/aaaaaaaaaaaaaab1']) {
