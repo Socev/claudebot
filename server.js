@@ -3112,7 +3112,7 @@ const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-app
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
-  'POST /app/sleutels/vervang', 'POST /app/concept']);   // wv159: concept bewaren gebeurt alleen als David typt (geen poll)
+  'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie']);   // wv159: concept bewaren gebeurt alleen als David typt (geen poll)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
@@ -5656,17 +5656,19 @@ function appKort(s, n) {
   s = String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   return s.length > n ? s.slice(0, n - 1).replace(/\s+\S*$/, '') + '…' : s;
 }
-// Webhookpad van de Agenda-API uit de workflow zelf (1 uur bewaard; bij een 404 opnieuw).
-async function appAgendaUrl(opnieuw) {
-  const c = appStaat.agendaUrl;
+// Webhookpad uit de workflow zelf (1 uur bewaard; bij een 404 opnieuw), zodat het niet in de code staat. Met naam: alleen die
+// webhookknoop (wv173: AI - Voorwerk-knoppen heeft er twee); zonder naam de eerste.
+async function appWebhookUrl(wf, naam, cacheSleutel, opnieuw) {
+  const c = appStaat[cacheSleutel];
   if (!opnieuw && c && Date.now() - c.op < 3600000) return c.url;
-  const w = await appN8n('/workflows/' + encodeURIComponent(APP_AGENDA_WF));
-  const knoop = ((w && w.nodes) || []).find(function (k) { return k && k.type === 'n8n-nodes-base.webhook' && k.parameters && typeof k.parameters.path === 'string'; });
+  const w = await appN8n('/workflows/' + encodeURIComponent(wf));
+  const knoop = ((w && w.nodes) || []).find(function (k) { return k && k.type === 'n8n-nodes-base.webhook' && k.parameters && typeof k.parameters.path === 'string' && (!naam || k.name === naam); });
   const pad = knoop && knoop.parameters.path;
-  if (!pad || !/^[A-Za-z0-9_-]{4,80}$/.test(pad)) throw new Error('agenda-webhook niet gevonden');
-  appStaat.agendaUrl = { url: appN8nBasis() + '/webhook/' + pad, op: Date.now() };
-  return appStaat.agendaUrl.url;
+  if (!pad || !/^[A-Za-z0-9_-]{4,80}$/.test(pad)) throw new Error('webhook niet gevonden (' + wf + ')');
+  appStaat[cacheSleutel] = { url: appN8nBasis() + '/webhook/' + pad, op: Date.now() };
+  return appStaat[cacheSleutel].url;
 }
+function appAgendaUrl(opnieuw) { return appWebhookUrl(APP_AGENDA_WF, null, 'agendaUrl', opnieuw); }
 async function appAgendaApi(body) {
   const geheim = process.env.N8N_WEBHOOK_AGENDA_API;
   if (!geheim) throw new Error('agenda-luik niet ingericht');
@@ -5710,17 +5712,39 @@ function appAfspraken(events, dag) {
   return uit.slice(0, 40);
 }
 const APP_KEUZE = { gedaan: 'gedaan', later: 'later', laten_vallen: 'laten vallen' };
-function appActies(rijen, vandaag) {
+const APP_TERUG_MS = 60 * 1000;   // ↩️ staat in Telegram een minuut na de keuze (AI - Voorwerk-knoppen, VENSTER); n8n neemt hem tot 2 min
+// Een tik die nog loopt: claim < 2 min oud (zelfde grens als Rij toetsen en Bericht opbouwen in AI - Voorwerk-knoppen).
+function appPortieLopend(r, nu) { return r.status === 'bezig' && nu - Date.parse(r.updatedAt || '') < 120000; }
+function appActies(rijen, vandaag, nu) {
+  nu = nu || Date.now();
   const geldig = (rijen || []).filter(function (r) { return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.datum)) && r.datum <= vandaag; });
   if (!geldig.length) return null;
   const datum = geldig.reduce(function (m, r) { return r.datum > m ? r.datum : m; }, '');
   const deze = geldig.filter(function (r) { return r.datum === datum; }).sort(function (a, b) { return (Number(a.positie) || 0) - (Number(b.positie) || 0); });
   return { datum: datum, items: deze.slice(0, 10).map(function (r) {
     const k = APP_KEUZE[r.keuze] ? r.keuze : null;
+    const verlopen = r.status === 'verlopen' || !(Number(r.verloopt) > nu);
+    // wv173: de stand zoals de knoppen in Telegram hem zien (Bericht opbouwen): een tik die loopt, al afgehandeld (verbruikt)
+    const stand = appPortieLopend(r, nu) ? 'bezig' : k || (r.status === 'klaar' ? 'nog niet verstuurd' : r.status === 'verbruikt' ? 'al afgehandeld' : verlopen ? 'verlopen' : 'open');
+    const terugTot = k && r.herhaal !== true && !verlopen && ['afgehandeld', 'bezig'].indexOf(r.status) >= 0 && Date.parse(r.getikt_op || '') + APP_TERUG_MS > nu
+      ? new Date(Date.parse(r.getikt_op) + APP_TERUG_MS).toISOString() : null;
     return { positie: Number(r.positie) || 0, regel: appKort(String(r.regel || r.titel || '').replace(/^\d+\.\s*/, ''), 220), bron: appKort(r.bron, 30),
-      stand: k || (r.status === 'verlopen' ? 'verlopen' : r.status === 'klaar' ? 'nog niet verstuurd' : 'open'),
+      stand: stand,
       later_tot: k === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(r.later_tot)) ? r.later_tot : null,
-      op: k && r.getikt_op ? String(r.getikt_op).slice(0, 32) : null, blok: !!r.blok_op };
+      op: k && r.getikt_op ? String(r.getikt_op).slice(0, 32) : null, blok: !!r.blok_op,
+      herhaal: r.herhaal === true,
+      knoppen: stand === 'open' && Number(r.message_id) > 0 && /^[0-9a-f]{32}$/.test(String(r.nonce || '')),   // zelfde voorwaarden als Rij toetsen
+      terug_tot: terugTot };
+  }) };
+}
+// Fable wv173 K2: ↩️ rekent de app met de resterende tijd op het moment van dit antwoord (pod-klok), niet met de klok van de
+// telefoon tegen terug_tot; ook als het lijstje uit het 3-minutengeheugen komt.
+function appActiesNu(acties) {
+  if (!acties) return acties;
+  const nu = Date.now();
+  return { datum: acties.datum, items: acties.items.map(function (x) {
+    const rest = x.terug_tot ? Date.parse(x.terug_tot) - nu : 0;
+    return Object.assign({}, x, { terug_ms: rest > 0 ? rest : 0 });
   }) };
 }
 // Wikilinks naar gewone tekst ([[pad|naam]] -> naam, [[pad/Pagina#kop]] -> Pagina); frontmatter eraf.
@@ -5800,8 +5824,73 @@ async function appVandaagRoute(req, res, a) {
   const zonderPrive = function (l) { return l.filter(function (x) { return !APP_AGENDA_PRIVE.test(x.kalender); }); };
   appStuur(res, 200, { ok: true, vandaag: d.vandaag, morgen: d.morgen,
     agenda: d.agenda && vast ? { vandaag: zonderPrive(d.agenda.vandaag), morgen: zonderPrive(d.agenda.morgen) } : d.agenda,
-    acties: d.acties, concepten: vast ? null : d.concepten, voorwerk: d.voorwerk, vaste_plek: vast,
+    acties: appActiesNu(d.acties), concepten: vast ? null : d.concepten, voorwerk: d.voorwerk, vaste_plek: vast,
     fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
+}
+
+// ── Knoppen bij het actielijstje (wv173; bouwplan § 4.9): dezelfde knoppen als onder het ochtendlijstje in Telegram ──
+// ✅ gedaan, ⏭ volgende week, 🗑 laten vallen en ↩️ terugdraaien gaan naar de tweede ingang van *AI - Voorwerk-knoppen* (Knop (app)):
+// dezelfde rij-toets, claim en schrijfstappen (Todoist, actie_state, correspondentie_state) als een tik in Telegram, en het
+// Telegram-bericht wordt daar ook opnieuw getekend. Geen eigen logica op de pod: die zoekt alleen de rij op (datum + positie;
+// nonce en message_id gaan nooit naar de app) en geeft de pop-uptekst van n8n door. Sleutel: die van het Socev-schrijfluik
+// (N8N_WEBHOOK_SOCEV_AGENDA, ook buiten de auto-agents), in n8n alleen als sha256-vingerafdruk. 📅 kan nog niet uit de app (het
+// blokvoorstel komt als agendaknop in Telegram; volgt via de agenda-poort van de app, wv171).
+const APP_VOORWERK_KNOP_WF = process.env.APP_VOORWERK_KNOP_WF || 'SLYiYwqAabFlC8H3';   // AI - Voorwerk-knoppen
+const APP_ACTIE_KEUZE = { gedaan: 'g', later: 'l', laten_vallen: 'w', terug: 'o' };
+const APP_ACTIES_PER_UUR = 60;
+appStaat.tellers.actie = appStaat.tellers.actie || [];
+async function appVoorwerkKnop(body) {
+  const geheim = process.env.N8N_WEBHOOK_SOCEV_AGENDA;
+  if (!geheim) throw new Error('voorwerkknop: sleutel ontbreekt');
+  for (let poging = 0; poging < 2; poging++) {
+    const url = await appWebhookUrl(APP_VOORWERK_KNOP_WF, 'Knop (app)', 'voorwerkKnopUrl', poging > 0);
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json', 'x-socev-sleutel': geheim },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(25000) });
+    if (r.status === 404 && poging === 0) continue;
+    if (!r.ok) throw new Error('voorwerkknop http ' + r.status);
+    return r.json();
+  }
+  throw new Error('voorwerkknop niet gevonden');
+}
+async function appActieRoute(req, res, a, d) {
+  const datum = String(d.datum || ''), positie = typeof d.positie === 'number' ? d.positie : NaN, keuze = String(d.keuze || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 10 || !APP_ACTIE_KEUZE[keuze]) return appWeiger(res, 400, 'ongeldige knop', 'actie velden');
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik de knoppen in Telegram', 'rol passief');
+  if (!appTeller('actie', APP_ACTIES_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_ACTIES_PER_UUR + '); gebruik Telegram', 'grens actie');
+  if (!process.env.N8N_WEBHOOK_SOCEV_AGENDA) return appWeiger(res, 503, 'de knoppen zijn hier nog niet ingericht; gebruik Telegram', 'actie geen sleutel');
+  let rijen;
+  try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-actie', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen; probeer het zo opnieuw', 'actie lezen'); }
+  const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
+  if (!rij || !/^[0-9a-f]{32}$/.test(String(rij.nonce || '')) || !(Number(rij.message_id) > 0)) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'actie onbekend');
+  let j;
+  try { j = await appVoorwerkKnop({ nonce: rij.nonce, keuze: APP_ACTIE_KEUZE[keuze], message_id: Number(rij.message_id) }); } catch (e) {
+    logError('app-actie', e);
+    // Bij een time-out kan de tik toch zijn doorgegaan: niet "mislukt" zeggen, wel laten nakijken
+    // 503, geen 502: de app leest 502/504 als "Socev niet bereikbaar"
+    return appWeiger(res, 503, /timeout|abort/i.test(String(e && (e.name + ' ' + e.message))) ? 'geen antwoord van de knoppen; kijk zo bij Ververs of het gelukt is' : 'de knoppen reageren nu niet; probeer het zo opnieuw of tik in Telegram', 'actie n8n');
+  }
+  // Fable wv173 M1: n8n kent de sleutel niet (geroteerd zonder de vingerafdruk in Voorwerk-knoppen bij te werken) -> niet als
+  // "deze knop ken ik niet" tonen, maar als storing laten zien en in de Foutmelder-route van de pod loggen
+  if (j && j.uitkomst === 'sleutel') {
+    logError('app-actie', new Error('AI - Voorwerk-knoppen weigert de sleutel van het schrijfluik (vingerafdruk in Knop lezen bijwerken?)'));
+    return appWeiger(res, 503, 'de knoppen zijn hier nu niet ingericht; gebruik Telegram', 'actie sleutel');
+  }
+  const uitkomst = ['ok', 'al_afgehandeld', 'weg', 'geweigerd', 'bezig', 'mislukt'].indexOf(j && j.uitkomst) >= 0 ? j.uitkomst : 'onbekend';
+  const melding = appKort(j && j.popup || 'Onbekend antwoord van de knoppen; kijk bij Ververs.', 200);
+  res._app.reden = 'actie ' + keuze + ' ' + datum + '#' + positie + ' -> ' + uitkomst;
+  // Verse stand van het lijstje terug, en het geheugen van Vandaag bijwerken (anders toont Ververs 3 min de oude stand)
+  let acties = null;
+  try {
+    // Fable wv173 K1: loopt er net een verversing, eerst die afwachten; anders overschrijft haar (oudere) stand de onze
+    const lopend = appStaat.vandaag && appStaat.vandaag.bezig;
+    if (lopend) await lopend.catch(function () {});
+    const vers = await appN8nRijen(APP_PORTIE_TABEL, null, 30);
+    const vandaag = appYmd(Date.now());
+    acties = appActies(vers, vandaag);
+    const c = appStaat.vandaag;
+    if (c && c.data && c.data.vandaag === vandaag) c.data.acties = acties;
+  } catch (e) { logError('app-actie', e); if (appStaat.vandaag) appStaat.vandaag.data = null; }
+  appStuur(res, 200, { ok: uitkomst === 'ok', uitkomst: uitkomst, melding: melding, acties: appActiesNu(acties) });
 }
 
 // ── seintjes (web-push zonder inhoud) ──
@@ -6121,6 +6210,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/modellen') return appModellen(req, res);
         if (route === 'POST /app/modellen') return appModellenZet(req, res, reg, a, s, d);
         if (route === 'GET /app/vandaag') return appVandaagRoute(req, res, a);
+        if (route === 'POST /app/actie') return appActieRoute(req, res, a, d);
         if (route === 'GET /app/sleutels') return appSleutels(req, res, a);
         if (route === 'POST /app/sleutels/vervang') return appSleutelVervang(req, res, reg, a, s, d);
         if (route === 'GET /app/push') return appPushStand(req, res, a);

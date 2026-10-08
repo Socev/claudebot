@@ -49,6 +49,7 @@ const n8nStaat = { buffer: [], stilte: [], executies: {}, kapot: false, aanroepe
 const chatlogStaat = { rijen: [], posts: [], deletes: [], kapot: false, mislukt: 0 };   // wv171
 const wachterStaat = { j: null, kapot: false };
 const agendaStaat = { pad: 'agenda-proef-x1', events: [], mails: [], aanroepen: [], kapot: false };   // wv136
+const vkStaat = { pad: 'voorwerk-knop-app-proef1', aanroepen: [], antwoord: null, status: 200, traag: false };   // wv173: AI - Voorwerk-knoppen, ingang Knop (app)
 const VAULT_T = path.join(W, 'vault');
 const pushes = [];
 // wv157 (sleutelluik): portaalsleutel, nagebootste kluis en n8n-credentials; ECHT_SLEUTEL=1 stuurt sb_sleutelportaal_* naar de echte kluis
@@ -113,9 +114,19 @@ async function nepFetch(url, opt) {
     if (u.pathname.startsWith('/api/v1/workflows/')) { const w = (n8nStaat.workflows || {})[u.pathname.slice('/api/v1/workflows/'.length)]; return w ? antw(200, w) : antw(404, {}); }
     return antw(404, {});
   }
+  if (url.startsWith(N8N + '/webhook/voorwerk-')) {   // wv173: AI - Voorwerk-knoppen (Knop (app))
+    const b = JSON.parse(opt.body || '{}');
+    vkStaat.aanroepen.push({ url, sleutel: opt.headers && opt.headers['x-socev-sleutel'], body: b, methode: opt.method });
+    if (url !== N8N + '/webhook/' + vkStaat.pad) return antw(404, {});
+    if (vkStaat.traag) { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; }
+    if (vkStaat.status !== 200) return antw(vkStaat.status, {});
+    if ((opt.headers || {})['x-socev-sleutel'] !== 'nep-schrijfluik') return antw(200, { ok: true, uitkomst: 'geweigerd', popup: 'Deze knop ken ik niet.' });
+    return antw(200, vkStaat.antwoord ? vkStaat.antwoord(b) : { ok: true });
+  }
   if (url.startsWith(N8N + '/webhook/')) {   // wv136: AI - Agenda-Wachter API (alleen de leesacties)
     const b = JSON.parse(opt.body || '{}');
     agendaStaat.aanroepen.push({ url, actie: b.actie, secret: b.secret, body: b });
+    if (agendaStaat.traag) await new Promise((ok) => setTimeout(ok, agendaStaat.traag));   // wv173 K1
     if (url !== N8N + '/webhook/' + agendaStaat.pad) return antw(404, {});
     if (b.secret !== 'nep-agenda') return antw(403, {});
     if (b.actie === 'agenda') return agendaStaat.kapot ? antw(500, {}) : antw(200, { start: b.start, end: b.end, aantal: agendaStaat.events.length, events: agendaStaat.events });
@@ -190,7 +201,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
-    N8N_WEBHOOK_AGENDA_API: 'nep-agenda', APP_VAULT_DIR: VAULT_T, SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
+    N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', APP_VAULT_DIR: VAULT_T, SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
   VAULT: VAULT_T,
   TOETSUUR: () => toetsUur,
   agentsReg,
@@ -1597,7 +1608,7 @@ async function bewijs(o) {
       toets('13 uitslag pollen valt niet onder het slot', r.status !== 423, r.status);
       for (const [m, pad, body] of [['POST', '/app/knop', { job_id: 'f'.repeat(16), vraag_hash: 'x', keuze: 'ja' }], ['POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'eerder' }],
         ['POST', '/app/push/abonneer', { endpoint: 'https://fcm.googleapis.com/fcm/send/x', sleutel: 'y' }],
-        ['GET', '/app/bestand/' + 'a'.repeat(16) + '/1', undefined], ['POST', '/app/nieuwe-route', {}]]) {
+        ['GET', '/app/bestand/' + 'a'.repeat(16) + '/1', undefined], ['POST', '/app/nieuwe-route', {}], ['POST', '/app/actie', { datum: '2026-10-08', positie: 1, keuze: 'gedaan' }]]) {   // wv173: actieknop ook dicht
         r = await vraag(m, pad, body, { pot: WP.jar });
         toets('13 dicht: ' + m + ' ' + pad.replace(/[a-f]{16}/, '<id>') + ' -> 423', r.status === 423, r.status + ' ' + JSON.stringify(r.j));
       }
@@ -2206,7 +2217,7 @@ async function bewijs(o) {
         { kalender: 'David', titel: 'Overmorgen', hele_dag: false, start: plus(V, 2) + 'T08:00:00' + off(V), einde: plus(V, 2) + 'T09:00:00' + off(V), status: 'confirmed' },
       ];
       agendaStaat.mails = [{ id: 'm1', thread_id: 't1', datum: '2026-10-07T08:00:00.000Z', datum_lokaal: '2026-10-07T10:00:00+02:00', van: 'David', aan: 'iemand@voorbeeld.nl', onderwerp: 'Re: offerte', snippet: 'GEHEIM-SNIPPET', labels: ['DRAFT'] }];
-      const pr = (datum, pos, extra) => Object.assign({ nonce: 'NONCE-' + datum + pos, datum, positie: pos, aantal: 3, bron: 'todoist', sleutel: 'SLEUTEL-' + pos, titel: 't', regel: pos + '. Actie ' + pos + ' van ' + datum, status: 'open', keuze: '', later_tot: '', getikt_op: '', blok_op: null, message_id: 9, createdAt: new Date().toISOString() }, extra || {});
+      const pr = (datum, pos, extra) => Object.assign({ nonce: 'NONCE-' + datum + pos, datum, positie: pos, aantal: 3, bron: 'todoist', sleutel: 'SLEUTEL-' + pos, titel: 't', regel: pos + '. Actie ' + pos + ' van ' + datum, status: 'open', keuze: '', later_tot: '', getikt_op: '', blok_op: null, message_id: 9, verloopt: Date.now() + 20 * 3600000, createdAt: new Date().toISOString() }, extra || {});
       n8nStaat.portie = [pr(G, 1, { status: 'verlopen' }), pr(V, 3, { keuze: 'laten_vallen', status: 'afgehandeld', getikt_op: new Date().toISOString() }), pr(V, 1, { keuze: 'later', later_tot: plus(V, 7), status: 'afgehandeld', getikt_op: new Date().toISOString() }), pr(V, 2, { blok_op: new Date().toISOString() }), pr(plus(V, 1), 1)];
       const VW = path.join(VAULT_T, '00_Systeem', 'Voorwerk');
       fs.mkdirSync(VW, { recursive: true });
@@ -2269,6 +2280,120 @@ async function bewijs(o) {
       toets('17 vreemd webhookpad: niet aangeroepen, agenda en concepten met fout', r.status === 200 && agendaStaat.aanroepen.length === nB && r.j.agenda === null && r.j.concepten === null, JSON.stringify(r.j.fouten));
       n8nStaat.workflows.JD0yNxPq79jXk25J.nodes[1].parameters.path = 'agenda-proef-x2';
       H.appStaat.vandaag = null; H.appStaat.agendaUrl = null;
+    }
+
+    // ── 20. wv173: knoppen bij het actielijstje (bouwplan § 4.9): via AI - Voorwerk-knoppen (Knop (app)), geen eigen logica ──
+    {
+      const sA = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      if (sA) sA.tot = Date.now() + 10 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      const ymd = (t) => new Date(t).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
+      const V = ymd(Date.now());
+      const nn = (i) => String(i).repeat(32).slice(0, 32);
+      const morgen = Date.now() + 20 * 3600000;
+      const rij = (pos, extra) => Object.assign({ nonce: nn(pos), datum: V, positie: pos, aantal: 3, bron: 'todoist', sleutel: 'SLEUTEL-' + pos, titel: 't', regel: pos + '. Actie ' + pos, herhaal: false,
+        status: 'open', keuze: '', later_tot: '', getikt_op: '', blok_op: null, message_id: 4242, verloopt: morgen, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, extra || {});
+      n8nStaat.portie = [rij(1), rij(2, { herhaal: true }), rij(3, { message_id: 0 }), rij(4, { status: 'verbruikt', resultaat: 'weg' }), rij(5, { status: 'bezig' }), rij(6, { verloopt: Date.now() - 1000 }), rij(7, { status: 'klaar' })];
+      n8nStaat.workflows.SLYiYwqAabFlC8H3 = { id: 'SLYiYwqAabFlC8H3', nodes: [{ name: 'Knop (tg)', type: 'n8n-nodes-base.webhook', parameters: { path: 'voorwerk-knop-tg-proef' } }, { name: 'Knop (app)', type: 'n8n-nodes-base.webhook', parameters: { path: 'voorwerk-knop-app-proef1' } }] };
+      // n8n naspelen: gedaan/later/laten vallen zetten de rij op afgehandeld, terug zet hem open (zoals Uitkomst + Portielog bijwerken)
+      vkStaat.antwoord = (b) => {
+        const r = n8nStaat.portie.find((x) => x.nonce === b.nonce);
+        if (!r || r.status !== 'open' && b.keuze !== 'o') return { ok: true, uitkomst: 'geweigerd', popup: 'Dit item is al afgehandeld (gedaan).' };
+        const K = { g: 'gedaan', l: 'later', w: 'laten_vallen' };
+        if (b.keuze === 'o') { Object.assign(r, { status: 'open', keuze: '', getikt_op: '' }); return { ok: true, uitkomst: 'ok', popup: 'Teruggedraaid; de actie staat weer open.' }; }
+        Object.assign(r, { status: 'afgehandeld', keuze: K[b.keuze], getikt_op: new Date().toISOString(), later_tot: b.keuze === 'l' ? '2099-01-01' : '' });
+        return { ok: true, uitkomst: 'ok', popup: b.keuze === 'g' ? 'Gedaan: afgevinkt in Todoist.' : 'Volgende week: komt terug op 1-1.' };
+      };
+      vkStaat.aanroepen = [];
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 1, keuze: 'gedaan' }, { pot: pot() });
+      toets('20 POST /app/actie zonder apparaat/sessie -> 401, n8n niet aangeroepen', r.status === 401 && vkStaat.aanroepen.length === 0, r.status);
+      // stand in Vandaag
+      H.appStaat.vandaag = null;
+      r = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
+      const st = (r.j.acties && r.j.acties.items || []).map((x) => x.positie + ':' + x.stand + ':' + (x.knoppen ? 'k' : '-') + (x.herhaal ? 'h' : ''));
+      toets('20 Vandaag: stand en knoppen per actie (open, herhaal, zonder bericht, al afgehandeld, bezig, verlopen, komt nog)', st.join(' ') === '1:open:k 2:open:kh 3:open:- 4:al afgehandeld:- 5:bezig:- 6:verlopen:- 7:nog niet verstuurd:-', st.join(' '));
+      toets('20 Vandaag: nonce, sleutel en message_id niet in het antwoord', !/1111111111|SLEUTEL-|4242|nonce|message_id/.test(JSON.stringify(r.j.acties)), JSON.stringify(r.j.acties).slice(0, 300));
+      const nAgenda = agendaStaat.aanroepen.length;
+      // ongeldig
+      const ong = [];
+      for (const b of [{ datum: V, positie: 1, keuze: 'blok' }, { datum: 'gisteren', positie: 1, keuze: 'gedaan' }, { datum: V, positie: 0, keuze: 'gedaan' }, { datum: V, positie: 1.5, keuze: 'gedaan' }, { datum: V, positie: '1', keuze: 'gedaan' }])
+        ong.push((await vraag('POST', '/app/actie', b, { pot: P.jar })).status);
+      toets('20 ongeldig (📅/blok, datum, positie 0, 1.5, tekst) -> 400', ong.join() === '400,400,400,400,400', ong.join());
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 9, keuze: 'gedaan' }, { pot: P.jar });
+      const r3 = await vraag('POST', '/app/actie', { datum: V, positie: 3, keuze: 'gedaan' }, { pot: P.jar });
+      toets('20 onbekende actie / zonder Telegram-bericht -> 404, n8n niet aangeroepen', r.status === 404 && r3.status === 404 && vkStaat.aanroepen.length === 0, [r.status, r3.status, vkStaat.aanroepen.length].join());
+      // gedaan
+      const nAudit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 1, keuze: 'gedaan' }, { pot: P.jar });
+      const a1 = vkStaat.aanroepen[0] || {};
+      toets('20 ✅ -> 200 met de pop-uptekst van n8n', r.status === 200 && r.j.ok === true && r.j.uitkomst === 'ok' && r.j.melding === 'Gedaan: afgevinkt in Todoist.', JSON.stringify(r.j).slice(0, 300));
+      toets('20 naar de ingang Knop (app) (niet Knop (tg)), met de schrijfluiksleutel als kop, alleen nonce/keuze/message_id', vkStaat.aanroepen.length === 1 && a1.url === N8N + '/webhook/voorwerk-knop-app-proef1' && a1.methode === 'POST' && a1.sleutel === 'nep-schrijfluik'
+        && JSON.stringify(a1.body) === JSON.stringify({ nonce: nn(1), keuze: 'g', message_id: 4242 }), JSON.stringify(a1));
+      const it1 = (r.j.acties && r.j.acties.items || [])[0] || {};
+      toets('20 verse stand terug: gedaan, geen knoppen, ↩️ tot ~1 min na de keuze (terug_ms = rest volgens de pod-klok)', it1.stand === 'gedaan' && it1.knoppen === false && it1.terug_tot && Date.parse(it1.terug_tot) - Date.now() > 50000 && Date.parse(it1.terug_tot) - Date.now() <= 60000
+        && it1.terug_ms > 50000 && it1.terug_ms <= 60000, JSON.stringify(it1));
+      const auditR = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter(Boolean).slice(nAudit - 1);
+      toets('20 auditregel met keuze, datum#positie en uitkomst, zonder actietekst', auditR.some((l) => l.includes('"route":"/app/actie","m":"POST"') && l.includes('actie gedaan ' + V + '#1 -> ok')) && !auditR.some((l) => /Actie 1|SLEUTEL|1111111111/.test(l)), auditR.join('\n').slice(-400));
+      r = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
+      toets('20 Vandaag uit het geheugen toont meteen de nieuwe stand (geen nieuwe agendalezing)', r.j.acties.items[0].stand === 'gedaan' && agendaStaat.aanroepen.length === nAgenda, JSON.stringify(r.j.acties.items[0]));
+      const vrd = H.appStaat.vandaag; const tm = vrd.data.acties.items[0].terug_tot;
+      vrd.data.acties.items[0].terug_tot = new Date(Date.now() + 5000).toISOString();
+      r = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
+      vrd.data.acties.items[0].terug_tot = tm;
+      toets('20 uit het geheugen: terug_ms opnieuw berekend bij elk antwoord (Fable K2)', r.j.acties.items[0].terug_ms > 0 && r.j.acties.items[0].terug_ms <= 5000, JSON.stringify(r.j.acties.items[0]));
+      // ↩️ terug, daarna opnieuw; tweede tik op hetzelfde: n8n weigert, de app krijgt de tekst
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 1, keuze: 'terug' }, { pot: P.jar });
+      toets('20 ↩️ -> keuze o naar n8n, staat weer open met knoppen', r.status === 200 && vkStaat.aanroepen[1].body.keuze === 'o' && r.j.acties.items[0].stand === 'open' && r.j.acties.items[0].knoppen === true, JSON.stringify(r.j).slice(0, 200));
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 1, keuze: 'later' }, { pot: P.jar });
+      const rL = await vraag('POST', '/app/actie', { datum: V, positie: 1, keuze: 'laten_vallen' }, { pot: P.jar });
+      toets('20 ⏭ -> later met datum; daarna 🗑 op hetzelfde -> 200, uitkomst geweigerd met de tekst van n8n', r.j.acties.items[0].stand === 'later' && r.j.acties.items[0].later_tot === '2099-01-01' && vkStaat.aanroepen[2].body.keuze === 'l'
+        && rL.status === 200 && rL.j.ok === false && rL.j.uitkomst === 'geweigerd' && /al afgehandeld/.test(rL.j.melding) && vkStaat.aanroepen[3].body.keuze === 'w', JSON.stringify(rL.j).slice(0, 200));
+      // n8n faalt / time-out / onbekend antwoord / pad gewijzigd
+      vkStaat.antwoord = () => ({ ok: true, uitkomst: 'mislukt', popup: 'Niet gelukt; druk gerust opnieuw.' });
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
+      toets('20 n8n zegt mislukt -> 200, ok false, de tekst van n8n', r.status === 200 && r.j.ok === false && r.j.uitkomst === 'mislukt' && /druk gerust opnieuw/.test(r.j.melding), JSON.stringify(r.j).slice(0, 200));
+      vkStaat.status = 500;
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
+      vkStaat.status = 200; vkStaat.traag = true;
+      const rT = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
+      vkStaat.traag = false;
+      toets('20 n8n 500 -> 503 "reageren nu niet" (geen 502: de app leest dat als pod weg); time-out -> 503 "kijk bij Ververs"', r.status === 503 && /reageren nu niet/.test(r.j.fout) && rT.status === 503 && /Ververs/.test(rT.j.fout), JSON.stringify([r.j, rT.j]));
+      vkStaat.antwoord = () => ({ ok: true, uitkomst: 'sleutel', popup: 'Deze knop ken ik niet.' });
+      const nLog = logs.length;
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
+      toets('20 n8n kent de sleutel niet -> 503 "niet ingericht; gebruik Telegram" en een foutregel (Fable M1)', r.status === 503 && /niet ingericht; gebruik Telegram/.test(r.j.fout) && logs.slice(nLog).some((l) => /app-actie: .*sleutel/.test(l)) && !logs.slice(nLog).some((l) => /nep-schrijfluik/.test(l)), JSON.stringify([r.j, logs.slice(nLog)]));
+      // K1: een verversing die loopt terwijl er getikt wordt, overschrijft de nieuwe stand niet
+      vkStaat.antwoord = (b) => { const x = n8nStaat.portie.find((y) => y.nonce === b.nonce); Object.assign(x, { status: 'afgehandeld', keuze: 'gedaan', getikt_op: new Date().toISOString() }); return { ok: true, uitkomst: 'ok', popup: 'Gedaan.' }; };
+      n8nStaat.portie.find((y) => y.positie === 2).status = 'open';
+      H.appStaat.vandaag = null; agendaStaat.traag = 300;
+      const pV = vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
+      await new Promise((ok) => setTimeout(ok, 50));
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
+      await pV; agendaStaat.traag = 0;
+      const rV = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
+      toets('20 tik tijdens een lopende verversing: Vandaag houdt de nieuwe stand (Fable K1)', r.status === 200 && rV.j.acties.items[1].stand === 'gedaan', JSON.stringify(rV.j.acties && rV.j.acties.items[1]));
+      vkStaat.antwoord = () => ({ ok: true });
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
+      toets('20 antwoord zonder uitkomst -> uitkomst onbekend, ok false', r.status === 200 && r.j.uitkomst === 'onbekend' && r.j.ok === false, JSON.stringify(r.j).slice(0, 200));
+      vkStaat.pad = 'voorwerk-knop-app-proef2'; n8nStaat.workflows.SLYiYwqAabFlC8H3.nodes[1].parameters.path = 'voorwerk-knop-app-proef2';
+      const nV = vkStaat.aanroepen.length;
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
+      toets('20 webhookpad gewijzigd: 404 -> opnieuw opgezocht en één keer opnieuw', r.status === 200 && vkStaat.aanroepen.length === nV + 2 && vkStaat.aanroepen[nV + 1].url.endsWith('proef2'), JSON.stringify(vkStaat.aanroepen.slice(nV).map((x) => x.url)));
+      // sleutel ontbreekt, passief, grens
+      const sk = ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA; delete ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA;
+      const nS = vkStaat.aanroepen.length;
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
+      ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA = sk;
+      toets('20 zonder schrijfluiksleutel -> 503, niets aangeroepen', r.status === 503 && vkStaat.aanroepen.length === nS, JSON.stringify(r.j));
+      rolStub.primair = false;
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
+      rolStub.primair = true;
+      toets('20 pod passief -> 409, niets aangeroepen', r.status === 409 && vkStaat.aanroepen.length === nS, JSON.stringify(r.j));
+      H.appStaat.tellers.actie = Array.from({ length: 60 }, () => Date.now());
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
+      H.appStaat.tellers.actie = [];
+      toets('20 hooguit 60 per uur -> 429', r.status === 429 && vkStaat.aanroepen.length === nS, r.status);
+      vkStaat.antwoord = null; H.appStaat.vandaag = null; delete H.appStaat.voorwerkKnopUrl;
     }
 
     // ── 18. wv157: sleutelluik (fase 6b, bouwplan § 4.9, § 6 fase 6): alleen schrijven, verse vingerafdruk, waarde nooit terug ──
