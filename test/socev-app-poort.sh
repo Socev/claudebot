@@ -287,7 +287,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -295,6 +295,7 @@ const H = ctx.__h;
 const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
 
 // ── de "Pages Function" van deze toets: cookiepot per browser, koppen erbij ──
+let laatsteCookies = '';   // wv205: ruwe X-App-Cookies van het laatste antwoord dat cookies zette
 function pot() { return { koppel: '', apparaat: '', sessie: '' }; }
 function vraag(m, pad, body, o) {
   o = o || {};
@@ -309,6 +310,7 @@ function vraag(m, pad, body, o) {
       let t = ''; res.on('data', (c) => t += c); res.on('end', () => {
         let j = {}; try { j = JSON.parse(t); } catch (e) { j = { raw: t }; }
         const ck = res.headers['x-app-cookies'] ? JSON.parse(res.headers['x-app-cookies']) : null;
+        if (ck) laatsteCookies = res.headers['x-app-cookies'];
         if (ck && p) for (const n of Object.keys(ck)) p[n] = ck[n] ? ck[n].w : '';
         ok({ status: res.statusCode, j, ck });
       });
@@ -514,6 +516,37 @@ async function bewijs(o) {
       const bew2 = await X.p.evaluate(async () => { const o = await post('/api/passkey/opties', {}); return bewijs(o.j.opties); });
       r = await X.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bew2);
       toets('4 opnieuw vingerafdruk -> sessie', r.status === 200 && /^[a-f0-9]{64}$/.test(X.jar.sessie), JSON.stringify(r));
+    }
+    {
+      // wv205 (bouwplan § 4.4e): meereizend één vingerafdruk per dagdeel (max 6 u); vaste plek 5 min glijdend, max 4 u
+      const A = (iso) => Date.parse(iso), R = { soort: 'reist' }, V = { soort: 'vast' };
+      const grens = [['2026-10-08T14:30:00Z', '2026-10-08T16:00:00Z'], ['2026-10-08T04:00:00Z', '2026-10-08T10:00:00Z'], ['2026-10-08T21:59:00Z', '2026-10-08T22:00:00Z'],
+        ['2026-10-24T23:30:00Z', '2026-10-25T05:00:00Z'], ['2026-03-29T00:30:00Z', '2026-03-29T04:00:00Z'], ['2026-12-31T20:00:00Z', '2026-12-31T23:00:00Z'], ['2026-10-08T10:00:00Z', '2026-10-08T16:00:00Z']];
+      toets('4 wv205: dagdeelgrens in Amsterdamse tijd (zomer, winter, wisselnachten, jaarwissel, precies op de grens)', grens.every(([t, e]) => H.appDagdeelEinde(A(t)) === A(e)), JSON.stringify(grens.map(([t]) => new Date(H.appDagdeelEinde(A(t))).toISOString())));
+      const t0 = A('2026-10-08T14:30:00Z');   // 16:30 Amsterdam
+      toets('4 wv205: meereizend om 16:30 open tot 18:00, ook na 1 u stilte', H.appSessieTot(t0, R, t0) === A('2026-10-08T16:00:00Z') && H.appSessieTot(t0, R, t0 + 3600000) === A('2026-10-08T16:00:00Z'));
+      const t1 = A('2026-10-08T09:55:00Z');   // 11:55 Amsterdam: rond de grens niet korter dan de oude 30 min
+      toets('4 wv205: vlak voor de grens (11:55) nog 30 min, glijdend tot hooguit 6 u', H.appSessieTot(t1, R, t1) === t1 + 30 * 60000 && H.appSessieTot(t1, R, t1 + 5.9 * 3600000) === t1 + 6 * 3600000);
+      const t2 = A('2026-10-24T22:30:00Z');   // 00:30 Amsterdam in de nacht van de winterwissel: dagdeel 7 u, sessie max 6 u
+      toets('4 wv205: nooit langer dan 6 u (wisselnacht 00:30 -> 06:30 is 7 u)', H.appSessieTot(t2, R, t2) === t2 + 6 * 3600000);
+      toets('4 wv205: vaste plek ongewijzigd 5 min glijdend, max 4 u', H.appSessieTot(t0, V, t0) === t0 + 5 * 60000 && H.appSessieTot(t0, V, t0 + 3.99 * 3600000) === t0 + 4 * 3600000);
+      // echte vingerafdruk: sessie loopt tot het einde van het dagdeel, antwoord noemt dat moment, cookie 6 u
+      const bw = await X.p.evaluate(async () => { const o = await post('/api/passkey/opties', {}); return bewijs(o.j.opties); });
+      const nu0 = Date.now();
+      r = await X.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bw);
+      const sw = H.appStaat.sessies[crypto.createHash('sha256').update(X.jar.sessie).digest('hex')];
+      const verwacht = H.appSessieTot(sw.start, R, sw.start);
+      toets('4 wv205: vingerafdruk op een meereizend apparaat -> sessie tot het einde van het dagdeel, sessie_tot in het antwoord', r.status === 200 && sw.tot === verwacht && r.j.sessie_tot === new Date(verwacht).toISOString() && sw.tot >= nu0 + 30 * 60000, JSON.stringify(r.j) + ' ' + sw.tot);
+      r = await vraag('GET', '/app/status', undefined, { pot: X.jar });
+      toets('4 wv205: status meldt de sessie en tot wanneer (de app slaat dan de vingerafdruk over)', r.j.sessie === true && r.j.sessie_tot === new Date(verwacht).toISOString() && Math.abs(r.j.sessie_rest_s - (verwacht - Date.now()) / 1000) < 3, JSON.stringify(r.j));
+      toets('4 wv205: sessiecookie 6 u (de Function kapt op 12 u)', /"sessie":\{"w":"[a-f0-9]{64}"/.test(laatsteCookies) && /"s":21600/.test(laatsteCookies), laatsteCookies.slice(0, 200));
+      // een vingerafdruk van het vorige dagdeel: buiten het dagdeel en 30 min stil -> 401
+      sw.start = Date.now() - 5 * 3600000; sw.tot = Date.now() - 1;
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
+      toets('4 wv205: na het dagdeel -> 401 (de pod blijft rechter)', r.status === 401, r.status);
+      const bw2 = await X.p.evaluate(async () => { const o = await post('/api/passkey/opties', {}); return bewijs(o.j.opties); });
+      r = await X.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bw2);
+      toets('4 wv205: nieuwe vingerafdruk -> nieuwe sessie', r.status === 200 && /^[a-f0-9]{64}$/.test(X.jar.sessie), JSON.stringify(r));
     }
     const sessieOud = X.jar.sessie;
     r = await X.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bew);

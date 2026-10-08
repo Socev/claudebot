@@ -3275,7 +3275,11 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak']);   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
-const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
+const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter); vaste plek
+// wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
+// geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; wie rond
+// de grens bezig is, houdt de oude glijdende 30 min. Een vaste plek houdt 5 min glijdend, max 4 u.
+const APP_SESSIE_REIST_MAX_MS = 6 * 60 * 60 * 1000;
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
 // Herstelcode (wv135, bouwplan § 4.4c): één code van 80 bits (16 tekens Crockford-base32), alleen scrypt-hash in het register.
 // Herstelcode én telefoon kwijt: herstel-vervalt; de eis valt pas 24 u NA de eigen waarneming van de pod weg (niet de
@@ -3535,7 +3539,27 @@ function appApparaat(req, reg) {
 // Alleen schrijvende, door David gestarte routes schuiven de sessie op (glijd = true); lezen en pollen niet, anders
 // houdt een open app de sessie tot de harde grens in leven en werkt de stilte-time-out niet (Fable-review 7-10 #1).
 function appGlijd(s, apparaat) {
-  s.tot = Math.min(s.start + APP_SESSIE_MAX_MS, Date.now() + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS));
+  s.tot = appSessieTot(s.start, apparaat, Date.now());
+}
+// Einde van het dagdeel (00–06, 06–12, 12–18, 18–24 Europe/Amsterdam) waarin t valt. De zomertijdwissel (02–03 u) valt
+// nooit op een grens, dus de grens is altijd een bestaand, eenduidig lokaal uur.
+function appDagdeelEinde(t) {
+  const d = {};
+  new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date(t)).forEach(function (p) { d[p.type] = Number(p.value); });
+  const lokaal = Date.UTC(d.year, d.month - 1, d.day, (Math.floor(d.hour / 6) + 1) * 6);   // uur 24 = volgende dag 00:00
+  let utc = lokaal - 2 * 3600000;
+  for (let i = 0; i < 2; i++) {   // verschuiving van Amsterdam op dat moment (1 of 2 u)
+    const q = {};
+    new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+      .formatToParts(new Date(utc)).forEach(function (p) { q[p.type] = Number(p.value); });
+    utc = lokaal - (Date.UTC(q.year, q.month - 1, q.day, q.hour, q.minute) - utc);
+  }
+  return utc;
+}
+function appSessieTot(start, apparaat, nu) {
+  if (apparaat.soort === 'vast') return Math.min(start + APP_SESSIE_MAX_MS, nu + APP_SESSIE_VAST_MS);
+  return Math.min(start + APP_SESSIE_REIST_MAX_MS, Math.max(appDagdeelEinde(start), nu + APP_SESSIE_MS));
 }
 function appSessie(req, apparaat, glijd) {
   const c = String(req.headers['x-app-sessie'] || '');
@@ -3553,8 +3577,8 @@ function appNieuweSessie(apparaat, credentialId) {
   const id = crypto.randomBytes(32).toString('hex'), nu = Date.now();
   // credential: met welke passkey deze sessie geopend is (goedkeuren eist die van het apparaat zelf)
   appStaat.sessies[appSha(id)] = { apparaat: apparaat.id, credential: String(credentialId || ''), start: nu, vers_tot: nu + APP_VERS_MS,
-    tot: nu + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS) };
-  return { w: id, s: Math.floor(APP_SESSIE_MAX_MS / 1000) };
+    tot: appSessieTot(nu, apparaat, nu) };
+  return { w: id, s: Math.floor((apparaat.soort === 'vast' ? APP_SESSIE_MAX_MS : APP_SESSIE_REIST_MAX_MS) / 1000) };
 }
 function appSessiesWeg(apparaatId) {
   Object.keys(appStaat.sessies).forEach(function (h) { if (appStaat.sessies[h].apparaat === apparaatId) delete appStaat.sessies[h]; });
@@ -3594,7 +3618,8 @@ async function appStatus(req, res, reg) {
   appStuur(res, 200, { ok: true, koppelen_open: appKoppelOpen(reg), aanvraag_mogelijk: appAanvraagMogelijk(reg),
     aanvraag: k ? appAanvraagUit(k) : null, apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort, vaste_plek: a.vaste_plek || null, goedkeurder: a.goedkeurder === true } : null,
     herstelcode_nodig: appKoppelOpen(reg) && appHerstelActief(reg),   // wv135: veld naast de koppelcode (alleen telefoon)
-    sessie: !!s, sessie_tot: s ? new Date(s.tot).toISOString() : null, passkey_klaar: !!appWebauthn() });
+    sessie: !!s, sessie_tot: s ? new Date(s.tot).toISOString() : null, passkey_klaar: !!appWebauthn(),
+    sessie_rest_s: s ? Math.max(0, Math.floor((s.tot - Date.now()) / 1000)) : null });   // wv205: resttijd, los van de klok van het apparaat
 }
 
 function appBindingOk(req, k) {
@@ -4051,7 +4076,10 @@ async function appPasskeyBevestig(req, res, reg, d) {
   x.laatst_gezien = new Date().toISOString();
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); }
   res._app.reden = 'bevestigd';
-  appStuur(res, 200, { ok: true, apparaat: { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, goedkeurder: x.goedkeurder === true } }, { sessie: appNieuweSessie(x, antw.id) });
+  const sessie = appNieuweSessie(x, antw.id);
+  // wv205: tot wanneer deze vingerafdruk geldt; de app vraagt hem op een meereizend apparaat pas daarna opnieuw (de pod blijft rechter)
+  appStuur(res, 200, { ok: true, apparaat: { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, goedkeurder: x.goedkeurder === true },
+    sessie_tot: new Date(appStaat.sessies[appSha(sessie.w)].tot).toISOString(), sessie_rest_s: Math.floor((appStaat.sessies[appSha(sessie.w)].tot - Date.now()) / 1000) }, { sessie: sessie });
 }
 
 function appHerstelUit(reg) {
