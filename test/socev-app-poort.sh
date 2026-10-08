@@ -525,8 +525,9 @@ async function bewijs(o) {
       toets('4 wv205: dagdeelgrens in Amsterdamse tijd (zomer, winter, wisselnachten, jaarwissel, precies op de grens)', grens.every(([t, e]) => H.appDagdeelEinde(A(t)) === A(e)), JSON.stringify(grens.map(([t]) => new Date(H.appDagdeelEinde(A(t))).toISOString())));
       const t0 = A('2026-10-08T14:30:00Z');   // 16:30 Amsterdam
       toets('4 wv205: meereizend om 16:30 open tot 18:00, ook na 1 u stilte', H.appSessieTot(t0, R, t0) === A('2026-10-08T16:00:00Z') && H.appSessieTot(t0, R, t0 + 3600000) === A('2026-10-08T16:00:00Z'));
-      const t1 = A('2026-10-08T09:55:00Z');   // 11:55 Amsterdam: rond de grens niet korter dan de oude 30 min
-      toets('4 wv205: vlak voor de grens (11:55) nog 30 min, glijdend tot hooguit 6 u', H.appSessieTot(t1, R, t1) === t1 + 30 * 60000 && H.appSessieTot(t1, R, t1 + 5.9 * 3600000) === t1 + 6 * 3600000);
+      const t1 = A('2026-10-08T09:55:00Z');   // 11:55 Amsterdam: < 30 min voor de grens -> volgend dagdeel erbij, max 6 u (Fable K2)
+      const t1b = A('2026-10-08T09:25:00Z');  // 11:25: precies 35 min over -> gewoon tot 12:00
+      toets('4 wv205: vlak voor de grens (11:55) door tot 17:55 (6 u), om 11:25 tot 12:00 en dan glijdend 30 min', H.appSessieTot(t1, R, t1) === t1 + 6 * 3600000 && H.appSessieTot(t1b, R, t1b) === A('2026-10-08T10:00:00Z') && H.appSessieTot(t1b, R, A('2026-10-08T09:50:00Z')) === A('2026-10-08T10:20:00Z'));
       const t2 = A('2026-10-24T22:30:00Z');   // 00:30 Amsterdam in de nacht van de winterwissel: dagdeel 7 u, sessie max 6 u
       toets('4 wv205: nooit langer dan 6 u (wisselnacht 00:30 -> 06:30 is 7 u)', H.appSessieTot(t2, R, t2) === t2 + 6 * 3600000);
       toets('4 wv205: vaste plek ongewijzigd 5 min glijdend, max 4 u', H.appSessieTot(t0, V, t0) === t0 + 5 * 60000 && H.appSessieTot(t0, V, t0 + 3.99 * 3600000) === t0 + 4 * 3600000);

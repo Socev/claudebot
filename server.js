@@ -3277,8 +3277,9 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter); vaste plek
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
-// geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; wie rond
-// de grens bezig is, houdt de oude glijdende 30 min. Een vaste plek houdt 5 min glijdend, max 4 u.
+// geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
+// een grens (< 30 min) loopt hij door tot het einde van het volgende dagdeel (binnen die 6 u), en wie bezig is houdt de oude
+// glijdende 30 min. Een vaste plek houdt 5 min glijdend, max 4 u.
 const APP_SESSIE_REIST_MAX_MS = 6 * 60 * 60 * 1000;
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
 // Herstelcode (wv135, bouwplan § 4.4c): één code van 80 bits (16 tekens Crockford-base32), alleen scrypt-hash in het register.
@@ -3559,7 +3560,11 @@ function appDagdeelEinde(t) {
 }
 function appSessieTot(start, apparaat, nu) {
   if (apparaat.soort === 'vast') return Math.min(start + APP_SESSIE_MAX_MS, nu + APP_SESSIE_VAST_MS);
-  return Math.min(start + APP_SESSIE_REIST_MAX_MS, Math.max(appDagdeelEinde(start), nu + APP_SESSIE_MS));
+  // Minder dan 30 min van het dagdeel over (23:50): dan telt het volgende dagdeel mee, anders twee keer vragen in een half uur
+  // (Fable-review wv205 K2); de 6 u blijft de grens.
+  let einde = appDagdeelEinde(start);
+  if (einde - start < APP_SESSIE_MS) einde = appDagdeelEinde(einde);
+  return Math.min(start + APP_SESSIE_REIST_MAX_MS, Math.max(einde, nu + APP_SESSIE_MS));
 }
 function appSessie(req, apparaat, glijd) {
   const c = String(req.headers['x-app-sessie'] || '');
