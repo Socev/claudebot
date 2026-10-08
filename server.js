@@ -3112,7 +3112,7 @@ const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-app
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
-  'POST /app/sleutels/vervang']);
+  'POST /app/sleutels/vervang', 'POST /app/concept']);   // wv159: concept bewaren gebeurt alleen als David typt (geen poll)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
@@ -3167,7 +3167,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/sleutels/vervang']);   // wv157: sleutels alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot
 const APP_BSN_TEKST = 'in je bericht staat een getal dat op een BSN lijkt (9 cijfers die de elfproef halen). Patiëntgegevens horen niet in Socev: haal het weg. Gaat het om iets anders, stuur het dan vanaf je telefoon.';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -3924,6 +3924,7 @@ function appIntrekken(req, res, reg, a, s, d) {
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
   appSessiesWeg(id);
   delete appStaat.uitdagingen[id];
+  appConceptWeg(id);   // wv159
   // een goedkeuring van dit apparaat die nog niet tot een koppeling leidde, vervalt mee
   if (appStaat.aanvraag && appStaat.aanvraag.door === id) appStaat.aanvraag = null;
   res._app.reden = 'ingetrokken ' + id;
@@ -4004,6 +4005,7 @@ function appInvoerRoute(route, upload, d, a) {
   if (upload || route.indexOf('GET /app/bestand/') === 0) return true;
   if (route.indexOf('POST ') !== 0 || APP_SLOT_VRIJ.has(route)) return false;
   if (route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id) return false;
+  if (route === 'POST /app/concept' && !String(d.tekst == null ? '' : d.tekst).trim()) return false;   // wv159: concept wissen mag altijd
   return true;
 }
 // BSN-achtig: precies 9 cijfers (los of met spatie/punt/streepje ertussen) die de elfproef halen. Geen naamfilter (§ 4.11).
@@ -4478,6 +4480,7 @@ async function appBeurt(req, res, reg, a, s, d) {
   ids[bh] = { job: st.job_id, t: Date.now() };
   try { appSchrijfJson(APP_BEURTEN, ids); } catch (e) { logError('app-beurten', e); }
   res._app.reden = 'beurt ' + kanaal + ' ' + st.job_id + (namen.length ? ' + ' + namen.length + ' bestand(en)' : '');
+  appConceptWeg(a.id, kanaal);   // wv159: verstuurd = geen concept meer
   appStuur(res, 200, { ok: true, job_id: st.job_id, bestanden: namen });
 }
 
@@ -5376,6 +5379,96 @@ function appNieuwGezien(req, res, a, d) {
   } catch (e) { logError('app-nieuw', e); appWeiger(res, 500, 'opslaan lukte niet', 'gezien schrijven'); }
 }
 
+// ── Concept per kanaal (wv159, bouwplan § 4.11; David 8-10: "ik had hier wat getikt, ging even weg … en mijn getikte tekst
+// was weg. Kunnen we zorgen dat dat blijft staan?") ──
+// Naar de achtergrond = inhoud leeg (§ 4.11), dus de app kan het concept niet zelf vasthouden en de browser mag het niet
+// bewaren. Het ongestuurde concept staat daarom hier, per apparaat en per kanaal, versleuteld (AES-256-GCM) met een sleutel
+// die alleen uit het apparaatcookie te maken is (HMAC van het geheim; het register kent alleen sha256 van dat geheim): op schijf
+// en in een back-up is concepten.json zonder dat apparaat onleesbaar. Dat beschermt alleen de opslag: het geheim reist met elk
+// verzoek mee en de pod ziet de tekst bij bewaren en lezen in zijn geheugen (Fable-review wv159 M2). Hooguit 24 u; weg bij versturen (POST /app/beurt), intrekken,
+// noodstop en voor elk apparaat dat niet meer actief is. Geen inhoud in het auditlog; bewaren en lezen zijn stil (bij elke
+// typpauze een verzoek). Alleen tekst: bijlagen blijven niet staan (een File kan de pod niet terugzetten).
+const APP_CONCEPTEN = path.join(APP_DATA, 'concepten.json');
+const APP_CONCEPT_MS = 24 * 3600 * 1000;
+const APP_CONCEPT_PER_UUR = 600;   // de app bewaart hooguit eens per 2-10 s terwijl David typt
+function appConceptSleutel(req, a) {
+  const m = /^([a-f0-9]{16})\.([a-f0-9]{64})$/.exec(String(req.headers['x-app-apparaat'] || ''));
+  if (!m || m[1] !== a.id) return null;
+  return crypto.createHmac('sha256', Buffer.from(m[2], 'hex')).update('socev-concept-v1').digest();
+}
+// Eén apparaat (en eventueel één kanaal) weghalen; stil bij een fout (het concept is dan nog hooguit 24 u onleesbaar aanwezig).
+function appConceptWeg(id, kanaal) {
+  try {
+    const alle = appLeesStreng(APP_CONCEPTEN, {});
+    if (!alle[id] || (kanaal && !alle[id][kanaal])) return;
+    if (kanaal) delete alle[id][kanaal]; else delete alle[id];
+    if (alle[id] && !Object.keys(alle[id]).length) delete alle[id];
+    appSchrijfJson(APP_CONCEPTEN, alle);
+  } catch (e) { logError('app-concept', e); }
+}
+function appConceptOpruim() {
+  try {
+    if (!fs.existsSync(APP_CONCEPTEN)) return;
+    let alle;
+    try { alle = appLeesStreng(APP_CONCEPTEN, {}); } catch (e) { fs.unlinkSync(APP_CONCEPTEN); logError('app-concept', e); return; }   // kapot = weg (alleen concepten)
+    const act = new Set(appRegister().apparaten.filter(function (x) { return x.actief; }).map(function (x) { return x.id; }));
+    const nu = Date.now();
+    let anders = false;
+    Object.keys(alle).forEach(function (id) {
+      const per = alle[id];
+      if (!act.has(id) || !per || typeof per !== 'object') { delete alle[id]; anders = true; return; }
+      Object.keys(per).forEach(function (k) { if (!APP_KANALEN[k] || !(nu - Date.parse(per[k] && per[k].op) < APP_CONCEPT_MS)) { delete per[k]; anders = true; } });
+      if (!Object.keys(per).length) { delete alle[id]; anders = true; }
+    });
+    if (anders) appSchrijfJson(APP_CONCEPTEN, alle);
+  } catch (e) { logError('app-concept', e); }
+}
+function appConceptRoute(req, res, a, kanaal) {
+  res._app.stil = true;
+  if (!APP_KANALEN[kanaal]) return appWeiger(res, 404, 'onbekend kanaal', 'concept kanaal');
+  let alle;
+  try { alle = appLeesStreng(APP_CONCEPTEN, {}); } catch (e) { logError('app-concept', e); return appStuur(res, 200, { ok: true, concept: null, fout: 'concepten onleesbaar' }); }
+  const c = alle[a.id] && alle[a.id][kanaal];
+  if (!c) return appStuur(res, 200, { ok: true, concept: null });
+  const k = appConceptSleutel(req, a);
+  let tekst = null;
+  if (k && Date.now() - Date.parse(c.op) < APP_CONCEPT_MS) {
+    try {
+      const dc = crypto.createDecipheriv('aes-256-gcm', k, Buffer.from(String(c.iv), 'base64'));
+      dc.setAAD(Buffer.from(a.id + '|' + kanaal));
+      dc.setAuthTag(Buffer.from(String(c.tag), 'base64'));
+      tekst = Buffer.concat([dc.update(Buffer.from(String(c.ct), 'base64')), dc.final()]).toString('utf8');
+    } catch (e) { tekst = null; }
+  }
+  if (tekst === null) { appConceptWeg(a.id, kanaal); return appStuur(res, 200, { ok: true, concept: null }); }   // verlopen of niet te ontsleutelen
+  appStuur(res, 200, { ok: true, concept: { tekst: tekst, op: c.op } });
+}
+function appConceptZet(req, res, a, d) {
+  res._app.stil = true;
+  const kanaal = String(d.kanaal || '');
+  if (!APP_KANALEN[kanaal]) return appWeiger(res, 400, 'onbekend kanaal', 'concept kanaal');
+  if (typeof d.tekst !== 'string') return appWeiger(res, 400, 'tekst ontbreekt', 'concept tekst');
+  if (d.tekst.length > APP_TEKST_MAX) return appWeiger(res, 413, 'concept te lang (max ' + APP_TEKST_MAX + ' tekens)', 'concept te lang');
+  if (!d.tekst.trim()) { appConceptWeg(a.id, kanaal); return appStuur(res, 200, { ok: true, bewaard: false }); }
+  if (!appTeller('concept', APP_CONCEPT_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak bewaard dit uur', 'grens concept');
+  const k = appConceptSleutel(req, a);
+  if (!k) return appWeiger(res, 400, 'apparaatcookie ontbreekt', 'concept sleutel');
+  try {
+    let alle;
+    // kapot bestand (alleen concepten): opnieuw beginnen in plaats van tot de opruimronde te weigeren (Fable-review wv159 K1)
+    try { alle = appLeesStreng(APP_CONCEPTEN, {}); } catch (e) { logError('app-concept', e); alle = {}; }
+    const iv = crypto.randomBytes(12);
+    const ci = crypto.createCipheriv('aes-256-gcm', k, iv);
+    ci.setAAD(Buffer.from(a.id + '|' + kanaal));
+    const ct = Buffer.concat([ci.update(d.tekst, 'utf8'), ci.final()]);
+    const op = new Date().toISOString();
+    alle[a.id] = Object.assign({}, alle[a.id] || {});
+    alle[a.id][kanaal] = { iv: iv.toString('base64'), tag: ci.getAuthTag().toString('base64'), ct: ct.toString('base64'), op: op };
+    appSchrijfJson(APP_CONCEPTEN, alle);
+    appStuur(res, 200, { ok: true, bewaard: true, op: op });
+  } catch (e) { logError('app-concept', e); appWeiger(res, 500, 'bewaren lukte niet', 'concept schrijven'); }
+}
+
 // ── Autokastje (wv137, bouwplan § 4.9b): wat David in de auto insprak, met het antwoord; alleen lezen ──
 // Bron: de smalle poort naar socev-auto (blok auto-relay) meldt hier start, antwoord, terugweg en niet-gestart. Het kastje
 // zelf schrijft niets naar schijf; de pod bewaart NIET wat David letterlijk zei (dat is het veld opdracht van het kastje),
@@ -5866,7 +5959,8 @@ function handleApp(req, res) {
   appAccessOk(req, cfg).then(function (afwijzing) {
     if (afwijzing) { req.resume(); return appWeiger(res, 401, 'niet toegestaan', 'access: ' + afwijzing); }
     res._app.voorAuth = false;
-    if (!appTeller('alles', APP_VERZOEKEN_PER_UUR, 3600000)) { req.resume(); return appWeiger(res, 429, 'te veel verzoeken', 'grens alles'); }
+    // wv159 (Fable K9): concept bewaren heeft een eigen grens (APP_CONCEPT_PER_UUR) en telt niet mee in 'alles'
+    if (!(req.method === 'POST' && p === '/app/concept') && !appTeller('alles', APP_VERZOEKEN_PER_UUR, 3600000)) { req.resume(); return appWeiger(res, 429, 'te veel verzoeken', 'grens alles'); }
     // Upload (wv99): ruwe bytes, geen JSON; de route leest de stroom zelf. Wordt hij eerder geweigerd (geen sessie e.d.), dan
     // de rest van de stroom weggooien zodat de verbinding netjes afloopt.
     const upload = req.method === 'POST' && p.indexOf('/app/upload/') === 0;
@@ -5910,7 +6004,8 @@ function handleApp(req, res) {
           });
         }
         // Verlengen pas als de schrijvende route echt lukte; een ongeldig verzoek telt niet als activiteit (Fable-review wv56 #8).
-        if (APP_GLIJD_ROUTES.has(route) || upload) res.on('finish', function () { if (res.statusCode < 300) appGlijd(s, a); });
+        // wv159 (Fable K5): een concept dat de app na een mislukte poging opnieuw aanbiedt (herstel) is geen activiteit van David
+        if ((APP_GLIJD_ROUTES.has(route) && !(route === 'POST /app/concept' && d.herstel === true)) || upload) res.on('finish', function () { if (res.statusCode < 300) appGlijd(s, a); });
         if (route === 'GET /app/apparaten') return appApparatenLijst(req, res, reg, a);
         if (route === 'POST /app/apparaat/intrekken') return appIntrekken(req, res, reg, a, s, d);
         if (route === 'POST /app/apparaat/wijzig') return appApparaatWijzig(req, res, reg, a, s, d);
@@ -5936,6 +6031,8 @@ function handleApp(req, res) {
         if (route === 'POST /app/meldingen/gezien') return appMeldingenGezien(req, res, a, d);
         if (route === 'GET /app/nieuw') return appNieuwRoute(req, res, a);
         if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);
+        if (route.indexOf('GET /app/concept/') === 0) return appConceptRoute(req, res, a, route.slice('GET /app/concept/'.length));
+        if (route === 'POST /app/concept') return appConceptZet(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
         if (route === 'GET /app/modellen') return appModellen(req, res);
@@ -5984,6 +6081,7 @@ function appNoodstop(bron) {
     else if (j.status === 'running') uit.beurten_lopend++;
   });
   try { appUploadOpruim(true); } catch (e) { uit.fouten.push('upload: ' + (e && e.code || e)); }   // klaarstaande bestanden (wv99)
+  try { fs.unlinkSync(APP_CONCEPTEN); } catch (e) { if (!e || e.code !== 'ENOENT') uit.fouten.push('concepten: ' + (e && e.code || e)); }   // wv159
   uit.aanvraag = !!appStaat.aanvraag; appStaat.aanvraag = null;
   uit.koppelcode = !!appStaat.koppel; appStaat.koppel = null;
   try { fs.unlinkSync(APP_HEROPEND); uit.heropend_weg = true; } catch (e) { if (!e || e.code !== 'ENOENT') uit.fouten.push('koppel-heropend: ' + (e && e.code || e)); }
@@ -6020,7 +6118,7 @@ setInterval(function () {
   Object.keys(appStaat.uitdagingen).forEach(function (h) { if (nu > appStaat.uitdagingen[h].tot) delete appStaat.uitdagingen[h]; });
   if (appStaat.koppel && nu > appStaat.koppel.tot) appStaat.koppel = null;
   if (appStaat.aanvraag && nu > appStaat.aanvraag.tot) appStaat.aanvraag = null;
-  if (new Date(nu).getMinutes() % 10 === 0) { appUploadOpruim(false); appIoOpruim(); }   // klaarstaand > 1 u en weesmappen (wv99)
+  if (new Date(nu).getMinutes() % 10 === 0) { appUploadOpruim(false); appIoOpruim(); appConceptOpruim(); }   // klaarstaand > 1 u en weesmappen (wv99); concepten > 24 u (wv159)
   appHerstelVervaltTik();   // wv135: herstel-vervalt melden of na 48 u opruimen
 }, 60 * 1000).unref();
 setTimeout(function () { appIoOpruim(); }, 30 * 1000).unref();   // na een herstart bestaat geen app-beurt meer: weesmappen weg

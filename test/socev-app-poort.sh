@@ -189,7 +189,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -1589,12 +1589,20 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/meldingen/gezien', { tot: new Date().toISOString() }, { pot: WP.jar });
       const rG = await vraag('POST', '/app/gezien', { tab: 'hoofd', tot: new Date().toISOString() }, { pot: WP.jar });
       toets('13 dicht: meldingen/gezien en gezien (wv137) vallen niet onder het slot', r.status === 200 && rG.status === 200, r.status + ' ' + rG.status);
+      // wv159: concept bewaren is invoer (dicht = 423), concept wissen maakt alleen leger en mag altijd
+      r = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'getikt op de werk-pc' }, { pot: WP.jar });
+      const rCw = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: '' }, { pot: WP.jar });
+      toets('13 dicht: concept bewaren -> 423, concept wissen -> 200 (wv159)', r.status === 423 && rCw.status === 200, r.status + ' ' + rCw.status);
       // David op Groenhouten, vers -> open
       meld('Huisartsenpraktijk Groenhouten', 'werk', 4);
       r = await beurt13(WP, 'nu wel');
       toets('13 David op Groenhouten (4 min): beurt -> 200', r.status === 200 && !!r.j.job_id, JSON.stringify(r.j));
       r = await vraag('GET', '/app/slot', undefined, { pot: WP.jar });
       toets('13 slot open via locatie', r.j.open === true && r.j.via === 'locatie', JSON.stringify(r.j));
+      r = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'bsn 111222333 erin' }, { pot: WP.jar });
+      const rCo = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'gewoon concept' }, { pot: WP.jar });
+      toets('13 open: concept met BSN-achtig getal -> 422 (niet bewaard), gewoon concept -> 200 (wv159)', r.status === 422 && rCo.status === 200 && rCo.j.bewaard === true
+        && !fs.readFileSync(path.join(DATA, 'concepten.json'), 'utf8').includes('111222333'), r.status + ' ' + rCo.status);
       await vers(WP);
       r = await vraag('POST', '/app/apparaat/intrekken', { id: pixelId }, { pot: WP.jar });
       toets('13 vaste pc (slot open, vers) trekt de Pixel in -> 403 (review M1)', r.status === 403 && /vaste plek/.test(r.j.fout) && reg13().apparaten.find((x) => x.id === pixelId).actief === true, JSON.stringify(r.j));
@@ -2364,6 +2372,90 @@ async function bewijs(o) {
       }
     }
 
+    // ── 19. wv159: concept per kanaal op de pod (bouwplan § 4.11): versleuteld per apparaat, 24 u, weg bij versturen ──
+    {
+      const sC = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      if (sC) sC.tot = Date.now() + 10 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      const CF = path.join(DATA, 'concepten.json');
+      const pId = P.jar.apparaat.split('.')[0];
+      r = await vraag('GET', '/app/concept/hoofd', undefined, { pot: pot() });
+      toets('19 GET /app/concept zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      r = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'x' }, { pot: Object.assign(pot(), { apparaat: P.jar.apparaat }) });
+      toets('19 POST /app/concept zonder sessie -> 401', r.status === 401, r.status);
+      await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: '' }, { pot: P.jar });
+      await vraag('POST', '/app/concept', { kanaal: 'machinekamer', tekst: '' }, { pot: P.jar });
+      r = await vraag('GET', '/app/concept/hoofd', undefined, { pot: P.jar });
+      toets('19 zonder concept: concept null', r.status === 200 && r.j.concept === null, JSON.stringify(r.j));
+      const nAudit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      const tekstH = 'Half getikt bericht met €, "aanhalingstekens" en\nnieuwe regel 😀';
+      if (sC) sC.tot = Date.now() + 1000;
+      r = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: tekstH }, { pot: P.jar });
+      toets('19 concept bewaren -> 200 bewaard', r.status === 200 && r.j.bewaard === true && !!r.j.op, JSON.stringify(r.j));
+      toets('19 bewaren verlengt de sessie (David typt)', sC && sC.tot > Date.now() + 20 * 60000, sC && sC.tot - Date.now());
+      await vraag('POST', '/app/concept', { kanaal: 'machinekamer', tekst: 'mk-concept' }, { pot: P.jar });
+      const ruw = fs.readFileSync(CF, 'utf8');
+      toets('19 concepten.json: 0600, geen klare tekst, wel iv/tag/ct per kanaal', (fs.statSync(CF).mode & 0o777) === 0o600 && !ruw.includes('Half getikt') && !ruw.includes('mk-concept')
+        && JSON.parse(ruw)[pId].hoofd.ct && JSON.parse(ruw)[pId].machinekamer.iv, ruw.slice(0, 200));
+      r = await vraag('GET', '/app/concept/hoofd', undefined, { pot: P.jar });
+      const rM = await vraag('GET', '/app/concept/machinekamer', undefined, { pot: P.jar });
+      toets('19 terug per kanaal, letterlijk', r.status === 200 && r.j.concept && r.j.concept.tekst === tekstH && rM.j.concept && rM.j.concept.tekst === 'mk-concept', JSON.stringify([r.j, rM.j]));
+      toets('19 bewaren en lezen zijn stil in het auditlog', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAudit);
+      r = await vraag('GET', '/app/concept/onzin', undefined, { pot: P.jar });
+      const rO = await vraag('POST', '/app/concept', { kanaal: 'onzin', tekst: 'x' }, { pot: P.jar });
+      const rT = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'x'.repeat(20001) }, { pot: P.jar });
+      const rN = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 12 }, { pot: P.jar });
+      toets('19 onbekend kanaal 404/400, te lang 413, geen tekst 400', r.status === 404 && rO.status === 400 && rT.status === 413 && rN.status === 400, [r.status, rO.status, rT.status, rN.status].join(' '));
+      // ander geheim (zelfde id): niet te ontsleutelen -> null en weg (direct aangeroepen; de poort laat een vals cookie niet eens door)
+      const nepC = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
+      const vreemdCookie = pId + '.' + 'e'.repeat(64);
+      H.appConceptRoute({ headers: { 'x-app-apparaat': vreemdCookie } }, nepC, { id: pId }, 'machinekamer');
+      toets('19 ander apparaatgeheim: concept niet leesbaar -> null en verwijderd', nepC.st === 200 && nepC.b.concept === null && !JSON.parse(fs.readFileSync(CF, 'utf8'))[pId].machinekamer, JSON.stringify(nepC.b));
+      const nepC2 = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
+      H.appConceptRoute({ headers: { 'x-app-apparaat': P.jar.apparaat } }, nepC2, { id: 'f'.repeat(16) }, 'hoofd');
+      toets('19 cookie van een ander apparaat-id: niets', nepC2.st === 200 && nepC2.b.concept === null);
+      // versturen haalt het concept van dat kanaal weg
+      await vraag('POST', '/app/concept', { kanaal: 'machinekamer', tekst: 'mk blijft' }, { pot: P.jar });
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'verstuurd' }, { pot: P.jar });
+      const rH = await vraag('GET', '/app/concept/hoofd', undefined, { pot: P.jar });
+      const rM2 = await vraag('GET', '/app/concept/machinekamer', undefined, { pot: P.jar });
+      toets('19 beurt in hoofd: concept hoofd weg, machinekamer blijft', r.status === 200 && rH.j.concept === null && rM2.j.concept && rM2.j.concept.tekst === 'mk blijft', JSON.stringify([r.j, rH.j, rM2.j]));
+      await slaap(20); for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('ok'); await slaap(20);
+      r = await vraag('POST', '/app/concept', { kanaal: 'machinekamer', tekst: '   ' }, { pot: P.jar });
+      toets('19 lege tekst wist het concept', r.status === 200 && r.j.bewaard === false && !JSON.parse(fs.readFileSync(CF, 'utf8'))[pId], fs.readFileSync(CF, 'utf8'));
+      // 24 u: ouder = weg bij lezen en bij opruimen; ingetrokken/onbekend apparaat weg bij opruimen
+      await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'oud' }, { pot: P.jar });
+      await vraag('POST', '/app/concept', { kanaal: 'machinekamer', tekst: 'ook oud' }, { pot: P.jar });
+      let jc = JSON.parse(fs.readFileSync(CF, 'utf8'));
+      jc[pId].hoofd.op = new Date(Date.now() - 25 * 3600000).toISOString();
+      jc['0'.repeat(16)] = { hoofd: { iv: 'a', tag: 'b', ct: 'c', op: new Date().toISOString() } };
+      fs.writeFileSync(CF, JSON.stringify(jc), { mode: 0o600 });
+      r = await vraag('GET', '/app/concept/hoofd', undefined, { pot: P.jar });
+      toets('19 ouder dan 24 u: null en weg', r.j.concept === null && !JSON.parse(fs.readFileSync(CF, 'utf8'))[pId].hoofd, JSON.stringify(r.j));
+      jc = JSON.parse(fs.readFileSync(CF, 'utf8'));
+      jc[pId].machinekamer.op = new Date(Date.now() - 25 * 3600000).toISOString();
+      fs.writeFileSync(CF, JSON.stringify(jc), { mode: 0o600 });
+      H.appConceptOpruim();
+      toets('19 opruimen: verlopen en onbekend apparaat weg', JSON.stringify(JSON.parse(fs.readFileSync(CF, 'utf8'))) === '{}', fs.readFileSync(CF, 'utf8'));
+      fs.writeFileSync(CF, '{kapot');
+      r = await vraag('GET', '/app/concept/hoofd', undefined, { pot: P.jar });
+      const rK = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'na kapot' }, { pot: P.jar });
+      toets('19 kapot bestand: lezen null met fout; bewaren begint opnieuw (Fable K1)', r.status === 200 && r.j.concept === null && !!r.j.fout && rK.status === 200 && JSON.parse(fs.readFileSync(CF, 'utf8'))[pId].hoofd, r.status + ' ' + rK.status);
+      fs.writeFileSync(CF, '{kapot');
+      H.appConceptOpruim();
+      toets('19 opruimen haalt een kapot conceptenbestand weg', !fs.existsSync(CF));
+      // herstel: true (de app biedt na een mislukte poging opnieuw aan) verlengt de sessie niet (Fable K5); gewoon bewaren wel
+      if (sC) sC.tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'opnieuw aangeboden', herstel: true }, { pot: P.jar });
+      toets('19 herstel-bewaren: 200, sessie niet verlengd', r.status === 200 && sC && sC.tot < Date.now() + 2 * 60000, sC && sC.tot - Date.now());
+      // eigen grens, buiten 'alles' (Fable K9)
+      const alles0 = H.appStaat.tellers.alles.length;
+      await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'telt niet mee' }, { pot: P.jar });
+      toets('19 concept bewaren telt niet in de grens alles, wel in concept', H.appStaat.tellers.alles.length === alles0 && H.appStaat.tellers.concept.length > 0);
+      r = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'voor de noodstop' }, { pot: P.jar });
+      toets('19 daarna weer bewaren', r.status === 200 && fs.existsSync(CF), r.status);
+    }
+
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
     {
       const regV = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
@@ -2375,6 +2467,7 @@ async function bewijs(o) {
       fs.writeFileSync(path.join(DATA, 'herstel-vervalt'), '');
       const herstelVoorNood = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')).herstel.hash;
       const u = H.appNoodstop('toets');
+      toets('10 wv159: noodstop haalt de concepten weg', !fs.existsSync(path.join(DATA, 'concepten.json')));
       toets('10 wv135: noodstop haalt herstel-vervalt weg, herstelcode blijft', u.herstel_vervalt_weg === true && !fs.existsSync(path.join(DATA, 'herstel-vervalt')) && JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')).herstel.hash === herstelVoorNood, JSON.stringify(u));
       toets('10 noodstop: ok, app-uit, alle actieve ingetrokken, sessies/aanvraag weg, heropend weg', u.ok === true && u.app_uit && fs.existsSync(UIT) && u.ingetrokken.length === actiefV && u.sessies >= 1 && u.aanvraag === true && u.heropend_weg === true
         && Object.keys(H.appStaat.sessies).length === 0 && !H.appStaat.aanvraag && !H.appStaat.koppel && !fs.existsSync(path.join(DATA, 'koppel-heropend')), JSON.stringify(u));
