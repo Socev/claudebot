@@ -31,45 +31,53 @@ const env = Object.assign({}, process.env, { CLAUDE_CODE_OAUTH_TOKEN: tok }); de
 const proj = path.join(os.homedir(), '.claude', 'projects', werk.replace(/[^a-zA-Z0-9]/g, '-'));
 const basis = ['-p', '--model', 'haiku', '--permission-mode', 'bypassPermissions'];
 const scen = [
-  { naam: 'J', fmt: ['--output-format', 'json'], ouderMs: 4000, stdinSleep: false, woord: 'KLAAR-J',
+  { naam: 'J', fmt: ['--output-format', 'json'], ouderMs: 4000, stdinSleep: false, woord: 'KLAAR-J', tools: 3,
     prompt: 'Voer achter elkaar deze drie Bash-commando\'s uit, elk als aparte tool-aanroep: "sleep 6; echo een", "sleep 6; echo twee", "sleep 6; echo drie". Antwoord daarna alleen met KLAAR-J.' },
-  { naam: 'S', fmt: ['--output-format', 'stream-json', '--verbose'], ouderMs: 4000, stdinSleep: false, woord: 'KLAAR-S',
+  { naam: 'S', fmt: ['--output-format', 'stream-json', '--verbose'], ouderMs: 4000, stdinSleep: false, woord: 'KLAAR-S', tools: 3,
     prompt: 'Voer achter elkaar deze drie Bash-commando\'s uit, elk als aparte tool-aanroep: "sleep 6; echo een", "sleep 6; echo twee", "sleep 6; echo drie". Antwoord daarna alleen met KLAAR-S.' },
-  { naam: 'E', fmt: ['--output-format', 'json'], ouderMs: 1000, stdinSleep: true, woord: 'KLAAR-E',
+  { naam: 'E', fmt: ['--output-format', 'json'], ouderMs: 1000, stdinSleep: true, woord: 'KLAAR-E', tools: 1,
     prompt: 'Voer het Bash-commando "sleep 6; echo x" uit en antwoord daarna alleen met KLAAR-E.' }];
 // Elke ouder is een los node-proces dat claude start zoals server.js (detached, stdout/stderr als pipe) en dan sterft.
 const ouder = `const { spawn } = require('child_process'); const c = JSON.parse(process.argv[1]);
-const k = spawn('sh', ['-c', (c.stdinSleep ? 'sleep 90 | ' : '') + 'claude "$@"; echo $? > ' + c.rc, 'sh'].concat(c.args),
+const k = spawn('sh', ['-c', (c.stdinSleep ? 'sleep 20 | ' : '') + 'claude "$@"; echo $? > ' + c.rc, 'sh'].concat(c.args),
   { cwd: c.werk, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
 k.stdout.on('data', () => {}); k.stderr.on('data', () => {});
-setTimeout(() => process.exit(0), c.ouderMs);`;
+setTimeout(() => { require('fs').writeFileSync(c.dood, String(Date.now())); process.exit(0); }, c.ouderMs);`;
 let fout = 0, geenUitslag = 0;
 (async function () {
   const lopend = scen.map(s => {
-    s.sid = crypto.randomUUID(); s.rc = path.join(W, 'rc-' + s.naam);
+    s.sid = crypto.randomUUID(); s.rc = path.join(W, 'rc-' + s.naam); s.dood = path.join(W, 'dood-' + s.naam);
     const args = basis.concat(s.fmt, ['--session-id', s.sid, '--', s.prompt]);
-    return new Promise(r => spawn(process.execPath, ['-e', ouder, JSON.stringify({ args, werk, rc: s.rc, ouderMs: s.ouderMs, stdinSleep: s.stdinSleep })],
+    return new Promise(r => spawn(process.execPath, ['-e', ouder, JSON.stringify({ args, werk, rc: s.rc, dood: s.dood, ouderMs: s.ouderMs, stdinSleep: s.stdinSleep })],
       { env, stdio: 'inherit' }).on('exit', r));
   });
   await Promise.all(lopend);
   for (let i = 0; i < 120 && !scen.every(s => fs.existsSync(s.rc)); i++) await new Promise(r => setTimeout(r, 1000));
   for (const s of scen) {
     let rc = null; try { rc = fs.readFileSync(s.rc, 'utf8').trim(); } catch (e) {}
-    let eind = false;
+    // Vals groen uitsluiten (Fable-review diff wv216 K6): de slotbeurt moet NA de dood van de ouder vallen en de tools
+    // moeten echt gedraaid hebben, anders was de pipe tijdens de run nooit dicht.
+    let eind = false, tools = 0, naDood = false, dood = 0;
+    try { dood = Number(fs.readFileSync(s.dood, 'utf8')); } catch (e) {}
     try {
       const regels = fs.readFileSync(path.join(proj, s.sid + '.jsonl'), 'utf8').trim().split('\n').map(x => { try { return JSON.parse(x); } catch (e) { return {}; } });
-      eind = regels.some(r => r.type === 'assistant' && r.message && r.message.stop_reason === 'end_turn' &&
+      tools = regels.filter(r => r.type === 'assistant' && r.message && (r.message.content || []).some(b => b.type === 'tool_use')).length;
+      const slot = regels.filter(r => r.type === 'assistant' && r.message && r.message.stop_reason === 'end_turn' &&
         (r.message.content || []).some(b => b.type === 'text' && String(b.text).indexOf(s.woord) >= 0));
+      eind = slot.length > 0;
+      naDood = eind && dood > 0 && Date.parse(slot[slot.length - 1].timestamp) > dood;
     } catch (e) {}
-    const ok = rc === '0' && eind;
-    console.log((ok ? 'GROEN ' : 'ROOD  ') + s.naam + ': ouder dood na ' + s.ouderMs + ' ms -> exitcode ' + rc + ', end_turn met ' + s.woord + ' in transcript: ' + eind);
+    const ok = rc === '0' && eind && naDood && tools >= s.tools;
+    console.log((ok ? 'GROEN ' : 'ROOD  ') + s.naam + ': ouder dood na ' + s.ouderMs + ' ms -> exitcode ' + rc + ', end_turn met ' + s.woord + ': ' + eind +
+      ', na de dood van de ouder: ' + naDood + ', tool-aanroepen ' + tools + ' (min ' + s.tools + ')');
     if (!ok) fout++;
     if (rc === null) geenUitslag++;
   }
   try { fs.rmSync(proj, { recursive: true, force: true }); } catch (e) {}
   fs.rmSync(W, { recursive: true, force: true });
   console.log(!fout ? 'ALLES GROEN (' + versie + ')' : geenUitslag ? 'ROOD: ' + geenUitslag + ' scenario(s) zonder exitcode — de proef zelf liep mis of de CLI stierf (kijk naar de uitvoer hierboven)'
-    : 'ROOD: ' + fout + ' scenario(s) — deze CLI-versie (' + versie + ') overleeft een dode pipe NIET; wees-agents lopen gevaar');
+    : 'ROOD: ' + fout + ' scenario(s) — of deze CLI-versie (' + versie + ') overleeft een dode pipe niet, of de proef liep mis (inlog, model, ' +
+      'geen tool-aanroep). Eerst controleren met een gewone run: claude -p --model haiku -- "zeg PONG"');
   process.exit(fout ? 1 : 0);
 })();
 JS

@@ -165,6 +165,8 @@ hook.listen(0, '127.0.0.1', async () => {
     s2.kill('SIGTERM'); await new Promise(r => s2.on('exit', r));
     // het transcript mag weg zijn (CLI-opruiming): het bevroren rapport moet het dragen (Fable K1)
     fs.rmSync(r2[ids.WEES].transcript, { force: true });
+    // G2: bevroren rapport én transcript weg -> de terugval mag nooit een leeg 'ok'-rapport geven (Fable-review diff K4)
+    fs.rmSync(path.join(d, 'io', ids.GAP, 'wees-rapport.json'), { force: true }); fs.rmSync(r2[ids.GAP].transcript, { force: true });
     s2 = start(); await klaar();
     await slaap(1500);
     lijst = (await vraag('GET', '/agents')).agents;
@@ -187,7 +189,8 @@ hook.listen(0, '127.0.0.1', async () => {
     const D = rap(ids.HANG);
     toets('D: afgerond met afgebroken-bovengrens', D.ok === false && D.error === 'afgebroken-bovengrens' && st(ids.HANG).error === 'afgebroken-bovengrens', JSON.stringify(st(ids.HANG)));
     const G = rap(ids.GAP);
-    toets('G: afgeleverd met eindtekst, ok', G.ok === true && /KLAAR-WEES/.test(G.output || '') && st(ids.GAP).status === 'done' && st(ids.GAP).rapport === 'verzonden', JSON.stringify(st(ids.GAP)));
+    toets('G2: zonder bevroren rapport en zonder transcript -> ok false, wees-zonder-eindtekst (ook in het register)', G.ok === false && G.error === 'wees-zonder-eindtekst' &&
+      st(ids.GAP).ok === false && st(ids.GAP).error === 'wees-zonder-eindtekst' && st(ids.GAP).rapport === 'verzonden', JSON.stringify(st(ids.GAP)) + ' ' + JSON.stringify(G).slice(0, 200));
     toets('elk wees-rapport precies één keer verzonden (A, M, D, G)', rapporten.length === 4 && new Set(rapporten.map(x => x.job_id)).size === 4, rapporten.map(x => x.job_id).join(','));
     // ── L: klaar terwijl de pod primair is -> meteen afgeleverd ──
     toets('L: (opzet) nog running als wees', st(ids.LAAT).status === 'running' && !!st(ids.LAAT).wees, JSON.stringify(st(ids.LAAT)));
@@ -200,8 +203,8 @@ hook.listen(0, '127.0.0.1', async () => {
     toets('nergens een dubbel rapport (5 rapporten, 5 jobs)', rapporten.length === 5 && new Set(rapporten.map(x => x.job_id)).size === 5, rapporten.map(x => x.job_id).join(','));
     const stdinRegels = fs.readFileSync(path.join(W, 'stdin.log'), 'utf8').trim().split('\n');
     toets('S: stdin van elke claude-run is /dev/null', stdinRegels.length >= 7 && stdinRegels.every(x => / \/dev\/null$/.test(x)), stdinRegels.join(' | '));
-    const levend = [ids.WEES, ids.GAP, ids.LAAT].every(id => /KLAAR-WEES/.test(rap(id).output || ''));
-    toets('S: wezen die na de herstart naar stderr en stdout schreven, leverden hun eindtekst (A, G, L)', levend);
+    const levend = [ids.WEES, ids.LAAT].every(id => /KLAAR-WEES/.test(rap(id).output || ''));
+    toets('S: wezen die na de herstart naar stderr en stdout schreven, leverden hun eindtekst (A, L)', levend);
     const h2 = await vraag('GET', '/health');
     toets('/health agents.lopend weer 0, rapport_wacht 0', h2.agents && h2.agents.lopend === 0 && h2.agents.rapport_wacht === 0, JSON.stringify(h2.agents));
   } catch (e) { console.log('ROOD  uitzondering: ' + (e && e.stack || e)); fout++; }

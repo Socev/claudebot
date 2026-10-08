@@ -2280,7 +2280,13 @@ function weesAfleveren(id) {
   const a = agentsReg[id];
   if (!a || !a.wees_rapport_wacht || !rolPrimair()) return;
   let b = null; try { b = JSON.parse(fs.readFileSync(weesRapportPad(id), 'utf8')); } catch (e) {}
-  if (!b || typeof b.output !== 'string') { const fout = a.error || null; b = { fout: fout, output: weesTekst(weesEindtekst(a), fout) }; }
+  if (!b || typeof b.output !== 'string') {
+    // Terugval zonder bevroren rapport: lege tekst is nooit 'ok' (Fable-review diff wv216 K4).
+    const e = weesEindtekst(a);
+    const fout = a.error || (!e.tekst ? 'wees-zonder-eindtekst' : null);
+    if (fout && a.ok) { a.ok = false; a.error = fout; }
+    b = { fout: fout, output: weesTekst(e, fout) };
+  }
   const outdir = path.join(IO, id, 'out');
   // Volgorde (Fable K2): bestanden verzamelen vóór appBewaar (die verplaatst ze uit out/), de jobmap als laatste weg.
   let files = []; try { files = collectFiles(outdir); } catch (err) { logError('wees-bestanden', err); }
@@ -5226,7 +5232,7 @@ async function appAgents(req, res) {
       label_kort: appLabelGewoon(a.label), wv: w ? w.id : null, route: route, status: status,
       gestart: a.started ? new Date(a.started).toISOString() : null, geeindigd: a.ended ? new Date(a.ended).toISOString() : null,
       herstart: a.herstart ? String(a.herstart).slice(0, 80) : null,
-      rapport_bezorgd: rap === 'verzonden' ? 'ja' : rap.indexOf('herkansing-') === 0 ? 'opnieuw' : rap.indexOf('mislukt') === 0 || rap === 'geen-webhook-geconfigureerd' ? 'nee' : null,
+      rapport_bezorgd: rap === 'verzonden' ? 'ja' : (rap.indexOf('herkansing-') === 0 || rap === 'wacht-op-primair') ? 'opnieuw' : rap.indexOf('mislukt') === 0 || rap === 'geen-webhook-geconfigureerd' ? 'nee' : null,
       rapport: !!(m && m.rapport), bestanden: m ? m.bestanden.length : 0 };
   });
   const lopend = agents.filter(function (a) { return a.status === 'loopt' || a.status === 'wacht'; })
