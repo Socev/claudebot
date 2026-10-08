@@ -58,6 +58,44 @@ const SP_SLEUTEL = ECHT_SP ? '/opt/data/.sleutelportaal/rpc.key' : path.join(W, 
 if (!ECHT_SP) fs.writeFileSync(SP_SLEUTEL, 'k'.repeat(64));
 const spNep = { kluis: [], schrijf: [], log: [], creds: [], patch: [], test: [], kapot: false, schrijfReden: null };
 const pushStaat = { status: 201 };
+// wv174 (tab Praktijken): D1 `fin` (Cloudflare-API) en zorgdata (RPC zd_reeks) nagebootst, vorm als de echte (gemeten 8-10)
+const finStaat = { sql: [], auth: [], kapot: false, urls: [] };
+const zdStaat = { kapot: false, aanroepen: [] };
+const finR = (e, r, rij, bron0) => Object.entries(rij).map(([j, b]) => ({ entiteit: e, rubriek: r, jaar: Number(j), bedrag: b, bron_id: typeof bron0 === 'function' ? bron0(Number(j)) : bron0 }));
+const finTG = (j) => (j <= 2020 ? 7 : j === 2021 ? 8 : j === 2022 ? 9 : j === 2023 ? 11 : j === 2024 ? 14 : 18);
+const FIN_REEKS = [].concat(
+  finR('TG', 'omzet_totaal', { 2019: 1009913.4, 2020: 1194403, 2021: 1332615, 2022: 1337190, 2023: 1513896, 2024: 1617071, 2025: 1744616 }, finTG),
+  finR('TG', 'resultaat', { 2019: 220144, 2020: 274229, 2021: 358200, 2022: 19903, 2023: 47721, 2024: 5736, 2025: 43212 }, finTG),
+  finR('TG', 'k_personeel_tot', { 2019: 337988, 2020: 368710, 2021: 367897 }, finTG),
+  finR('TG', 'k_lonen', { 2022: 278553, 2023: 321007, 2024: 359555, 2025: 401639 }, finTG),
+  finR('TG', 'k_soc', { 2022: 95199, 2023: 107691, 2024: 64594, 2025: 69842 }, finTG),
+  finR('TG', 'k_pens', { 2023: 0, 2024: 61752, 2025: 64579 }, finTG),
+  finR('TG', 'k_ovpers', { 2022: 51238, 2023: 56509, 2024: 80921, 2025: 51624 }, finTG),
+  finR('TG', 'liquide', { 2024: 138466, 2025: 137805 }, finTG),
+  finR('GH', 'omzet_totaal', { 2024: 1197097, 2025: 1311053 }, (j) => (j === 2024 ? 15 : 19)),
+  finR('GH', 'resultaat', { 2024: 495659, 2025: 471631 }, (j) => (j === 2024 ? 15 : 19)),
+  finR('GH', 'k_lonen', { 2024: 210030, 2025: 253359 }, (j) => (j === 2024 ? 15 : 19)),
+  finR('GH', 'k_ovpers', { 2024: 39023, 2025: 75152 }, (j) => (j === 2024 ? 15 : 19)),
+  finR('POT', 'k_som_bruto', { 2020: 317636, 2021: 371898, 2024: 595337, 2025: 634736 }, (j) => 39 + (j - 2020)),
+  finR('POT', 'bijdrage_maten', { 2024: -591316, 2025: -631058 }, (j) => 39 + (j - 2020)),
+  finR('POT', 'k_personeel_tot', { 2024: 582541, 2025: 621913 }, (j) => 39 + (j - 2020)),
+  finR('KM', 'k_som_bruto', { 2016: -3904, 2017: 6173, 2025: 42669 }, (j) => (j === 2016 ? 29 : 52)),
+  finR('KM', 'bijdrage_maten', { 2016: -4601, 2017: -6176, 2025: -42913 }, (j) => (j === 2016 ? 29 : 52)),
+  finR('HOLD', 'resultaat', { 2022: 25013, 2023: 105758, 2024: 91731, 2025: 126291 }, (j) => ({ 2022: 10, 2023: 13, 2024: 17, 2025: 21 })[j]),
+  finR('HOLD', 'res_deelnemingen', { 2022: 19903, 2023: 102017, 2024: 75245, 2025: 113928 }, (j) => ({ 2022: 10, 2023: 13, 2024: 17, 2025: 21 })[j]),
+  finR('HOLD', 'res_deelneming_phbv', { 2022: 54295, 2023: 54295, 2024: 69510, 2025: 70716 }, (j) => (j === 2025 ? 21 : 17)),
+  [{ entiteit: 'TG', rubriek: 'omzet_totaal', jaar: 'kapot', bedrag: 1, bron_id: 1 }, { entiteit: 'TG', rubriek: 'resultaat', jaar: 2018, bedrag: null, bron_id: 1 }]);
+const FIN_PAT = [{ entiteit: 'TG', peildatum: '2026-01-01', aantal: 5600, bron_id: 3 }, { entiteit: 'TG', peildatum: '2024-01-01', aantal: 5712.25, bron_id: 4 }, { entiteit: 'TG', peildatum: '2025-01-01', aantal: 5785, bron_id: 5 }, { entiteit: 'TG', peildatum: '2026-01-01', aantal: 5756.67, bron_id: 6 },
+  { entiteit: 'GH', peildatum: '2025-01-01', aantal: 4840.5, bron_id: 2 }];
+const FIN_DECL = [{ entiteit: 'TG', jaar: 2025, tot: '2025-12-31', toegezegd: 1446958.2 }, { entiteit: 'TG', jaar: 2026, tot: '2026-08-12', toegezegd: 1028939.4 }];
+const FIN_BRON = [[2, 'VIP-export 03. Overzicht gedeclareerde prestaties 2025 (Groenhouten)', '2025-12-31'], [3, 'VIP-export oudere 2026 (Tolgaarde)', '2026-05-31'], [4, 'VIP-export 03. Overzicht gedeclareerde prestaties 2024 (Tolgaarde)', '2024-12-31'],
+  [5, 'VIP-export 03. Overzicht gedeclareerde prestaties 2025 (Tolgaarde)', '2025-12-31'], [6, 'VIP-export 03. Overzicht gedeclareerde prestaties 2026 (Tolgaarde)', '2026-08-12'],
+  [7, 'Jaarrekening 2020 Tolgaarde'], [8, 'Jaarrekening 2021 Tolgaarde'], [9, 'Jaarrekening 2022 Tolgaarde'], [11, 'Jaarrekening 2023 Tolgaarde'], [14, 'Jaarrekening 2024 Tolgaarde'], [18, 'Jaarrekening 2025 Tolgaarde'],
+  [15, 'Jaarrekening 2024 Groenhouten'], [19, 'Jaarrekening 2025 Groenhouten'], [10, 'Jaarrekening 2022 Primum Non Nocere Holding'], [13, 'Jaarrekening 2023 Primum Non Nocere Holding'],
+  [17, 'Jaarrekening 2024 Primum Non Nocere Holding'], [21, 'Jaarrekening 2025 Primum Non Nocere Holding'], [29, 'Jaarrekening 2016 Kostenmaatschap POH-GGZ'], [52, 'Jaarrekening 2025 Kostenmaatschap POH-GGZ'],
+  [39, 'Jaarrekening 2020 POT'], [40, 'Jaarrekening 2021 POT'], [43, 'Jaarrekening 2024 POT'], [44, 'Jaarrekening 2025 POT']].map(([id, titel, periode_tot]) => ({ id, titel, periode_tot: periode_tot || null }));
+const ZD = { idx_personeel: [[2021, 0.0201], [2022, 0.0442], [2023, 0.0636], [2024, 0.06], [2025, 0.0518], [2027, 0.0396, 'voorlopig']],
+  normpraktijk_ptn: [[2017, 2168], [2018, 2095], [2024, 2095], [2025, null]], nza_pohggz_uitgaven: [[2020, 204600000], [2021, 217100000], [2024, 331200000]] };
 // wv172: Whisper (Cloudflare Workers AI) en de Gemini-stem nagebootst
 const spraakStaat = { stt: [], sttStatus: 200, sttTekst: 'Zet het werkoverleg op Tolgaarde om tien uur', tts: [], ttsStatus: [], ttsKaal: false };
 function wavMaak(sec, rate) {
@@ -159,6 +197,21 @@ async function nepFetch(url, opt) {
     pushes.push({ url, m: opt.method, body: opt.body, h: opt.headers, redirect: opt.redirect });
     return antw(pushStaat.status, {});
   }
+  if (url.startsWith('https://api.cloudflare.com/client/v4/accounts/') && url.includes('/d1/database/')) {   // wv174: D1 fin
+    finStaat.urls.push(url); finStaat.auth.push(opt.headers && opt.headers.Authorization);
+    const b = JSON.parse(opt.body || '{}'), q = String(b.sql || '');
+    finStaat.sql.push({ q, params: b.params });
+    if (finStaat.kapot) return antw(500, { success: false, errors: [{ message: 'kapot' }] });
+    if (finStaat.halfKapot) return antw(200, { success: false, errors: [{ message: 'D1_ERROR: quota' }], result: [] });
+    if (!/\/d1\/database\/ffcb09ad-fc50-4c83-aa7b-ad6409b44e03\/query$/.test(url)) return antw(404, { success: false });
+    const res = / FROM reeks /.test(q) ? FIN_REEKS : / FROM patienten /.test(q) ? FIN_PAT : / FROM declaratie /.test(q) ? FIN_DECL : / FROM bron /.test(q) ? FIN_BRON : null;
+    return res ? antw(200, { success: true, result: [{ results: res, success: true }] }) : antw(400, { success: false, errors: [{ message: 'onbekende query' }] });
+  }
+  if (url === SB + '/rest/v1/rpc/zd_reeks') {   // wv174: zorgdata
+    const b = JSON.parse(opt.body || '{}'); zdStaat.aanroepen.push(b);
+    if (zdStaat.kapot) return antw(500, { message: 'kapot' });
+    return antw(200, (ZD[b.p_code] || []).map(([jaar, waarde, status]) => ({ jaar, waarde, status: status || 'definitief', bron: b.p_code === 'nza_pohggz_uitgaven' ? 'NZa-dashboard Kerncijfers huisartsenzorg' : jaar <= 2023 ? 'NZa - Indexatiecijfers en tariefonderbouwing (NAC/PKO)' : 'NZa - Prijsindexcijfers personele (OVA) en materiele kosten', opmerking: null })));   // echte bronnamen: lang (bron ≤ 200)
+  }
   if (url.startsWith(SB + '/rest/v1/rpc/')) {
     const fn = url.slice((SB + '/rest/v1/rpc/').length), b = JSON.parse(opt.body || '{}');
     sbRpc.push({ fn, b, sleutel: opt.headers && opt.headers.apikey });
@@ -222,7 +275,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
-    N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
+    N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
   VAULT: VAULT_T,
   TOETSUUR: () => toetsUur,
   agentsReg,
@@ -230,7 +283,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -2421,6 +2474,100 @@ async function bewijs(o) {
       H.appStaat.tellers.actie = [];
       toets('20 hooguit 60 per uur -> 429', r.status === 429 && vkStaat.aanroepen.length === nS, r.status);
       vkStaat.antwoord = null; H.appStaat.vandaag = null; delete H.appStaat.voorwerkKnopUrl;
+    }
+
+    // ── 20. wv174: tab Praktijken (fase 6 rest, bouwplan § 4.9): kerncijfers per entiteit, alleen lezen, bron per cijfer ──
+    {
+      const sN = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      if (sN) sN.tot = Date.now() + 10 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: pot() });
+      toets('20 GET /app/praktijken zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      H.appStaat.praktijken = null; finStaat.sql = []; finStaat.auth = []; zdStaat.aanroepen = [];
+      const dataVoor = fs.readdirSync(DATA).sort().join(',');
+      const nAudit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
+      const j = r.j || {}, E = {};
+      (j.entiteiten || []).forEach((e) => { E[e.code] = e; });
+      toets('20 200, vijf entiteiten in vaste volgorde, geen fouten', r.status === 200 && (j.entiteiten || []).map((e) => e.code).join() === 'TG,GH,POT,KM,HOLD' && j.fouten.length === 0 && j.vaste_plek === false && !!j.bijgewerkt, JSON.stringify(j).slice(0, 300));
+      toets('20 alleen vaste SELECTs naar D1 fin, zonder parameters, met het pod-token', finStaat.sql.length === 4 && finStaat.sql.every((x) => /^SELECT /.test(x.q) && !/;|--|INSERT|UPDATE|DELETE|DROP/i.test(x.q) && Array.isArray(x.params) && x.params.length === 0) && finStaat.auth.every((x) => x === 'Bearer nep-cf'), JSON.stringify(finStaat.sql.map((x) => x.q.slice(0, 50))));
+      const qR = finStaat.sql.find((x) => / FROM reeks /.test(x.q)).q;
+      toets("20 reeks: alleen versie='jaarrekening', maat IS NULL (geen modeluitkomst, geen winstdeel per maat), alleen de vijf entiteiten", /versie='jaarrekening' AND maat IS NULL/.test(qR) && /entiteit IN \('TG','GH','POT','KM','HOLD'\)/.test(qR) && !/PHBV|SLOEL/.test(qR), qR);
+      toets('20 patiënten: alleen totalen (leeftijdsgroep IS NULL), declaraties: verzekeraar totaal', finStaat.sql.some((x) => / FROM patienten /.test(x.q) && /leeftijdsgroep IS NULL/.test(x.q)) && finStaat.sql.some((x) => / FROM declaratie /.test(x.q) && /verzekeraar='totaal'/.test(x.q)));
+      toets('20 zorgdata: drie reeksen via zd_reeks', zdStaat.aanroepen.map((x) => x.p_code).sort().join() === 'idx_personeel,normpraktijk_ptn,nza_pohggz_uitgaven' && zdStaat.aanroepen.every((x) => x.p_norm === 'abs'), JSON.stringify(zdStaat.aanroepen));
+      const kern = (e, label) => (E[e] && E[e].kern || []).find((k) => k.label === label);
+      const graf = (e, re) => (E[e] && E[e].grafieken || []).find((g) => re.test(g.titel));
+      const tgO = kern('TG', 'Omzet');
+      toets('20 TG omzet 2025 met vorig jaar en bron per cijfer', tgO && tgO.jaar === 2025 && tgO.waarde === 1744616 && tgO.vorig.jaar === 2024 && tgO.vorig.waarde === 1617071 && tgO.bron === 'Jaarrekening 2025 Tolgaarde' && tgO.eenheid === '€', JSON.stringify(tgO));
+      const pl = graf('TG', /^Personeel/);
+      const pw = pl && pl.reeksen.find((x) => x.naam === 'Personeelskosten').waarden;
+      toets('20 TG personeelskosten: t/m 2021 het totaal, vanaf 2022 lonen+soc+pensioen+overige (som)', pl && pl.x.join() === '2019,2020,2021,2022,2023,2024,2025' && pw.join() === '337988,368710,367897,424990,485207,566822,587684', JSON.stringify(pl));
+      const ol = graf('TG', /^Omzet en resultaat/);
+      toets('20 TG lijn omzet: hele euro’s, kapotte rijen (jaar/bedrag) genegeerd, bron = jaarrekeningen', ol && ol.reeksen[0].waarden[0] === 1009913 && ol.x[0] === '2019' && /jaarrekeningen 2020–2025, 6 stuks/.test(ol.bron), JSON.stringify(ol));
+      const tp = kern('TG', 'Patiënten (gemiddeld per kwartaal)'), ps = graf('TG', /^Patiënten per jaar/);
+      toets('20 TG patiënten: kern = laatste hele jaar (2025), staaf met lopend jaar "t/m 12-8"', tp && tp.jaar === 2025 && tp.waarde === 5785 && tp.vorig.waarde === 5712 && ps && ps.items.map((x) => x.label).join('|') === '2024|2025|2026 (t/m 12-8)', JSON.stringify([tp, ps]));
+      const dc = graf('TG', /^Declaraties/);
+      toets('20 TG declaraties per jaar, lopend jaar gemarkeerd', dc && dc.soort === 'staaf' && dc.items[1].label === '2026 (t/m 12-8)' && dc.items[1].waarde === 1028939 && /VIP-export/.test(dc.bron), JSON.stringify(dc));
+      const tg = E.TG.sector || { kern: [], grafieken: [] };
+      const npk = tg.kern.find((k) => k.label === 'Praktijkgrootte');
+      toets('20 TG praktijkgrootte berekend: patiënten ÷ normpraktijk van het laatste jaar ervoor (2024), bron zegt "berekend"', npk && npk.waarde === 2.76 && npk.eenheid === 'normpraktijken' && /^berekend: 5\.785 patiënten ÷ 2\.095 per normpraktijk \(NZa-norm 2024/.test(npk.bron), JSON.stringify(npk));
+      const gi = tg.grafieken.find((g) => /^Groei personeelskosten \(prijs én meer\/minder personeel\) tegen NZa-indexatie \(alleen prijs\)$/.test(g.titel));
+      toets('20 TG groei personeelskosten naast NZa-indexatie, alleen jaren met beide', gi && gi.eenheid === '%' && gi.x.join() === '2021,2022,2023,2024,2025' && gi.reeksen[0].waarden.join() === '-0.2,15.5,14.2,16.8,3.7' && gi.reeksen[1].waarden.join() === '2,4.4,6.4,6,5.2' && /^groei berekend uit fin-datahub/.test(gi.bron) && /Cijfer-Meester: NZa - Indexatiecijfers/.test(gi.bron) && /voorlopig/.test(gi.bron) === false, JSON.stringify(gi));
+      const ghG = (E.GH.sector || { kern: [] }).kern.find((k) => k.label === 'Groei personeelskosten (prijs én volume)');
+      toets('20 GH één jaar groei: kern i.p.v. lijn, met NZa-indexatie in de bron', ghG && ghG.jaar === 2025 && ghG.waarde === Math.round((328511 / 249053 - 1) * 1000) / 10 && /NZa-indexatie personeel 2025: 5,2%/.test(ghG.bron), JSON.stringify(ghG));
+      toets('20 GH zonder declaraties: geen declaratiegrafiek; één patiëntjaar: geen staaf', !graf('GH', /^Declaraties/) && !graf('GH', /^Patiënten per jaar/) && kern('GH', 'Patiënten (gemiddeld per kwartaal)').vorig === null);
+      const pb = kern('POT', 'Bijdrage van de deelnemers');
+      toets('20 POT: bijdrage positief getoond (omgekeerd), kosten vóór bijdrage', pb && pb.waarde === 631058 && pb.vorig.waarde === 591316 && kern('POT', 'Kosten vóór bijdrage deelnemers').waarde === 634736, JSON.stringify(pb));
+      const pi = E.POT.sector && E.POT.sector.grafieken[0];
+      toets('20 POT tegen landelijk: index, eerste gezamenlijke jaar = 100, alleen jaren met beide', pi && pi.x.join() === '2020,2021,2024' && pi.reeksen[0].waarden[0] === 100 && pi.reeksen[1].waarden[0] === 100 && pi.reeksen[0].waarden[2] === 187.4 && pi.reeksen[1].waarden[2] === 161.9 && /^index berekend/.test(pi.bron), JSON.stringify(pi));
+      const kl = graf('KM', /^Kosten/);
+      toets('20 KM: 2016 (bijdrage als omzet) weggelaten, lijn vanaf 2017 met gaten als null', kl && kl.x[0] === '2017' && kl.x.length === 9 && kl.reeksen[0].waarden[1] === null && kern('KM', 'Kosten vóór bijdrage deelnemers').vorig.jaar === 2017, JSON.stringify(kl));
+      const hl = graf('HOLD', /^Resultaat, deelnemingen/), hp = kern('HOLD', 'Resultaat deelneming Praktijkhouders B.V.');
+      toets('20 HOLD: lijn met het totaal van de deelnemingen; per deelneming alleen de laatste twee jaren (typefout jaarkop 2024)', hl && hl.reeksen.some((x) => x.naam === 'Resultaat deelnemingen' && x.waarden.join() === '19903,102017,75245,113928') && !hl.reeksen.some((x) => /Praktijkhouders/.test(x.naam)) && hp.waarde === 70716 && hp.vorig.jaar === 2024 && !JSON.stringify(E.HOLD).includes('54295'), JSON.stringify(hl));
+      const alleG = [].concat(...(j.entiteiten || []).map((e) => e.grafieken.concat(e.sector ? e.sector.grafieken : [])));
+      const geldig = (g) => g.bron && g.bron.length <= 200 && (!g.eenheid || g.eenheid.length <= 12) && (g.soort === 'staaf' ? g.items.length >= 1 && g.items.length <= 40 && g.items.every((x) => typeof x.waarde === 'number' && x.label.length <= 80)
+        : g.soort === 'lijn' && g.x.length >= 2 && g.x.length <= 60 && g.reeksen.length >= 1 && g.reeksen.length <= 4 && g.reeksen.every((x) => x.naam.length <= 60 && x.waarden.length === g.x.length && x.waarden.every((v) => v === null || (typeof v === 'number' && isFinite(v)))));
+      toets('20 elke grafiek past in socev-weergave (Opmaak.tsx: grenzen, bron ≤ 200, eenheid ≤ 12)', alleG.length >= 10 && alleG.every(geldig), JSON.stringify(alleG.filter((g) => !geldig(g))).slice(0, 300));
+      const alleK = [].concat(...(j.entiteiten || []).map((e) => e.kern.concat(e.sector ? e.sector.kern : [])));
+      toets('20 elk kerncijfer heeft een bron, jaar en getal', alleK.length >= 20 && alleK.every((k) => k.bron && typeof k.waarde === 'number' && isFinite(k.waarde) && Number.isInteger(k.jaar)), JSON.stringify(alleK.filter((k) => !k.bron)).slice(0, 200));
+      toets('20 geen persoons- of maatniveau in het antwoord', !/leeftijdsgroep|"maat"|Jonker|Van der Wiel|Auping/.test(JSON.stringify(j)));
+      toets('20 GET praktijken (200) schrijft geen auditregel en niets in de datamap', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAudit && fs.readdirSync(DATA).sort().join(',') === dataVoor);
+      const nS = finStaat.sql.length;
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
+      toets('20 tweede keer binnen 30 min uit het geheugen (geen nieuwe D1-aanroep)', r.status === 200 && finStaat.sql.length === nS);
+      const nep = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
+      H.appStaat.praktijken = null; const nV = finStaat.sql.length;
+      await H.appPraktijkenRoute({}, nep, { id: 'x', soort: 'vast' });
+      toets('20 vaste plek: lege lijst en geen D1-aanroep', nep.st === 200 && nep.b.vaste_plek === true && nep.b.entiteiten.length === 0 && finStaat.sql.length === nV, JSON.stringify(nep.b));
+      H.appStaat.praktijken = null; zdStaat.kapot = true;
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
+      toets('20 zorgdata stuk: 200, eigen cijfers wel, sector weg, fout in gewone taal', r.status === 200 && r.j.entiteiten.length === 5 && r.j.entiteiten.every((e) => e.sector === null) && /Cijfer-Meester/.test(r.j.fouten.join()) && r.j.entiteiten[0].kern.length >= 5, JSON.stringify(r.j.fouten));
+      zdStaat.kapot = false; H.appStaat.praktijken = null; finStaat.kapot = true;
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
+      toets('20 datahub stuk: 503 met nette tekst', r.status === 503 && /niet te lezen/.test(r.j.fout), JSON.stringify(r.j));
+      finStaat.kapot = false; H.appStaat.praktijken = null;
+      // Fable-review wv174: M2 declaraties alleen uit de laatste export, M1 null uit zorgdata, M4 oude cijfers / korte bewaartijd, K7 foutdetail
+      const qD = finStaat.sql.filter((x) => / FROM declaratie /.test(x.q)).pop().q;
+      toets('20 M2 declaraties: alleen de rijen van de laatste export per entiteit en jaar (MAX(periode_tot)-join)', /JOIN \(SELECT entiteit, jaar, MAX\(periode_tot\) AS m FROM declaratie/.test(qD) && /x\.m = d\.periode_tot/.test(qD) && /GROUP BY d\.entiteit, d\.jaar, d\.periode_tot/.test(qD), qD);
+      toets('20 M2 patiënten: per jaar alleen de nieuwste export (2026 t/m 12-8, niet de oudere t/m 31-5)', ps.items.length === 3 && ps.items[2].waarde === 5757, JSON.stringify(ps.items));
+      toets('20 M1 null in zorgdata telt niet als 0: normpraktijk van 2024 gebruikt, geen Infinity', npk && isFinite(npk.waarde) && /NZa-norm 2024/.test(npk.bron), JSON.stringify(npk));
+      toets('20 M3 noot volume tegen prijs bij TG en GH', E.TG.noten.some((n) => /alleen de prijs/.test(n)) && E.GH.noten.some((n) => /alleen de prijs/.test(n)));
+      H.appStaat.praktijken = null; finStaat.halfKapot = true; logs.length = 0;
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
+      toets('20 K7 D1 200 met success:false -> 503, foutdetail in de log (geen token)', r.status === 503 && logs.some((l) => /app-praktijken: fin http 200: D1_ERROR: quota/.test(l)) && !logs.some((l) => /nep-cf/.test(l)), JSON.stringify(logs.slice(-3)));
+      finStaat.halfKapot = false;
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
+      const goedOp = r.j.bijgewerkt;
+      H.appStaat.praktijken.data.op = Date.now() - 31 * 60000; finStaat.kapot = true;
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
+      toets('20 M4 vernieuwen mislukt met oude cijfers: 200 met de oude cijfers en een regel erbij', r.status === 200 && r.j.entiteiten.length === 5 && /datahub is nu niet te lezen; dit zijn de cijfers van \d\d:\d\d/.test(r.j.fouten.join()) && r.j.bijgewerkt !== goedOp, JSON.stringify(r.j.fouten));
+      finStaat.kapot = false; H.appStaat.praktijken = null; zdStaat.kapot = true;
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
+      zdStaat.kapot = false; const nZ = finStaat.sql.length;
+      H.appStaat.praktijken.data.op = Date.now() - 3 * 60000;
+      r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
+      toets('20 M4 met een fout hooguit 2 min bewaard: Ververs leest opnieuw en de sector is terug', r.status === 200 && finStaat.sql.length === nZ + 4 && r.j.fouten.length === 0 && r.j.entiteiten[0].sector, finStaat.sql.length - nZ);
+      H.appStaat.praktijken = null;
     }
 
     // ── 18. wv157: sleutelluik (fase 6b, bouwplan § 4.9, § 6 fase 6): alleen schrijven, verse vingerafdruk, waarde nooit terug ──

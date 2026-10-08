@@ -5893,6 +5893,276 @@ async function appActieRoute(req, res, a, d) {
   appStuur(res, 200, { ok: uitkomst === 'ok', uitkomst: uitkomst, melding: melding, acties: appActiesNu(acties) });
 }
 
+// ── Praktijken (fase 6 rest, wv174; bouwplan § 4.9): kerncijfers per entiteit, alleen lezen ──
+// Bronnen: de financiële datahub (Cloudflare D1 `fin`, skill fin-datahub: jaarrekeningreeksen, patiëntaantallen per jaar als
+// kwartaalgemiddelde, declaraties per jaar) en de zorgcijfer-databank (Supabase `zorgdata`, skill cijfer-meester, via RPC zd_reeks:
+// NZa-indexatie, normpraktijk, landelijke POH-GGZ-uitgaven). Vaste SELECT's zonder invoer van de app; alleen werkelijke cijfers
+// (versie `jaarrekening`, nooit modeluitkomsten), alleen totalen (maat IS NULL: geen winstdeel per maat), alleen geaggregeerde
+// aantallen (geen patiëntgegevens). Elk cijfer draagt zijn bron (titel uit `bron`, of de zorgdata-bron met status); wat berekend
+// is, zegt dat. 30 min in het geheugen van de pod, niets op schijf; stil in het auditlog. Op een apparaat met een vaste plek
+// (werk-pc) niets: bedrijfscijfers alleen op de telefoon en meereizende apparaten.
+const APP_PRAKTIJKEN_CACHE_MS = 30 * 60 * 1000;
+const APP_FIN_DB = process.env.APP_FIN_DB || 'ffcb09ad-fc50-4c83-aa7b-ad6409b44e03';   // D1 `fin` (skill fin-datahub)
+const APP_CF_ACCOUNT = process.env.CF_ACCOUNT_ID || '23df9b0607bb70f6d7f15a63ec843d6d';   // = LESSEN_CF_ACCOUNT (buiten dit blok)
+const APP_FIN_LABEL = {
+  omzet_totaal: 'Omzet', resultaat: 'Resultaat', personeel: 'Personeelskosten', uitbesteed: 'Waarneming en uitbesteed werk',
+  k_huisv: 'Huisvesting', liquide: 'Liquide middelen', ev_totaal: 'Eigen vermogen', k_som_bruto: 'Kosten vóór bijdrage deelnemers',
+  bijdrage_maten: 'Bijdrage van de deelnemers', omzet_managementfee: 'Managementvergoeding', res_deelneming_tg: 'Resultaat deelneming Tolgaarde',
+  res_deelneming_phbv: 'Resultaat deelneming Praktijkhouders B.V.', res_deelnemingen: 'Resultaat deelnemingen',
+};
+// Per entiteit wat er getoond wordt; `van` laat jaren weg die niet vergelijkbaar zijn (skill fin-datahub § 3, bekende eigenaardigheden).
+const APP_NOOT_GROEI = 'De groei van de personeelskosten bevat ook meer of minder personeel; de NZa-indexatie is alleen de prijs (loon). Een groter verschil zegt dus niet vanzelf dat personeel duurder werd.';   // Fable-review wv174 M3
+const APP_PRAKTIJKEN = [
+  { code: 'TG', naam: 'Tolgaarde', voluit: 'Huisartsenpraktijk Tolgaarde B.V.', praktijk: true,
+    kern: ['omzet_totaal', 'resultaat', 'personeel', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal'],
+    lijnen: [{ titel: 'Omzet en resultaat', r: ['omzet_totaal', 'resultaat'] }, { titel: 'Personeel en waarneming', r: ['personeel', 'uitbesteed'] }],
+    noten: ['Personeelskosten: t/m 2021 staat alleen het totaal in de jaarrekening; vanaf 2022 opgeteld uit lonen, sociale lasten, pensioen en overige personeelskosten.',
+      'De jaarrekening 2021 is met OCR ingelezen.', APP_NOOT_GROEI] },
+  { code: 'GH', naam: 'Groenhouten', voluit: 'Huisartsenpraktijk Groenhouten (maatschap)', praktijk: true,
+    kern: ['omzet_totaal', 'resultaat', 'personeel', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal'],
+    lijnen: [{ titel: 'Omzet en resultaat', r: ['omzet_totaal', 'resultaat'] }, { titel: 'Personeel en waarneming', r: ['personeel', 'uitbesteed'] }],
+    noten: ['Resultaat = winst van de maatschap, vóór verdeling over de maten.', APP_NOOT_GROEI] },
+  { code: 'POT', naam: 'POT', voluit: 'POT POH-GGZ (Maatschap samenwerkende werkgevers)', pohggz: true,
+    kern: ['k_som_bruto', 'bijdrage_maten', 'personeel', 'liquide'], omkeren: ['bijdrage_maten'],
+    lijnen: [{ titel: 'Wat de POH-GGZ kost', r: ['k_som_bruto', 'personeel'] }],
+    noten: ['Kosten vóór bijdrage = wat de POH-GGZ-constructie werkelijk kost; de deelnemende praktijken dragen dat via hun bijdrage.',
+      '2016 boekte de bijdrage als omzet (2017 herrubriceerde dat).'] },
+  { code: 'KM', naam: 'Kostenmaatschap', voluit: 'Maatschap POH-GGZ Leusden (kostenmaatschap)',
+    kern: ['k_som_bruto', 'bijdrage_maten', 'k_huisv', 'liquide'], omkeren: ['bijdrage_maten'], van: 2017,
+    lijnen: [{ titel: 'Kosten en huisvesting', r: ['k_som_bruto', 'k_huisv'] }],
+    noten: ['2016 boekte de bijdrage als omzet en is daarom weggelaten.', 'De jaarrekening 2025 sluit in het document niet helemaal (2.444 tegen 2.446).'] },
+  { code: 'HOLD', naam: 'Holding', voluit: 'Primum Non Nocere Holding B.V.',
+    kern: ['omzet_managementfee', 'resultaat', 'res_deelnemingen', 'res_deelneming_tg', 'res_deelneming_phbv', 'ev_totaal', 'liquide'],
+    // De lijn neemt het totaal van de deelnemingen: dat komt elk jaar uit de eigen jaarrekening. De splitsing per deelneming
+    // komt voor 2022-2023 uit de vergelijkende cijfers van 2024, waarvan de jaarkop een typefout heeft (2022 i.p.v. 2023):
+    // in de datahub staat 2022 daardoor gelijk aan 2023 (gemeten 8-10, wv174). Per deelneming dus alleen de laatste twee jaren.
+    alleenLaatste: ['res_deelneming_tg', 'res_deelneming_phbv'],
+    lijnen: [{ titel: 'Resultaat, deelnemingen en managementvergoeding', r: ['resultaat', 'res_deelnemingen', 'omzet_managementfee'] }],
+    noten: ['De holding hield t/m 2024 50% van Praktijkhouders B.V.', 'Alleen werkelijke cijfers; de modelprognoses staan hier bewust niet.'] },
+];
+const APP_FIN_RUBRIEKEN = ['omzet_totaal', 'resultaat', 'k_lonen', 'k_soc', 'k_pens', 'k_ovpers', 'k_personeel_tot', 'uitbesteed', 'k_huisv', 'liquide',
+  'ev_totaal', 'k_som_bruto', 'bijdrage_maten', 'omzet_managementfee', 'res_deelneming_tg', 'res_deelneming_phbv', 'res_deelnemingen'];
+const APP_ZD_CODES = ['idx_personeel', 'normpraktijk_ptn', 'nza_pohggz_uitgaven'];
+
+async function appFinSql(sql) {
+  const tok = process.env.CLOUDFLARE_API_TOKEN;
+  if (!tok) throw new Error('fin: geen cloudflare-token');
+  const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + APP_CF_ACCOUNT + '/d1/database/' + APP_FIN_DB + '/query', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql: sql, params: [] }), signal: AbortSignal.timeout(12000) });
+  const j = await r.json().catch(function () { return null; });
+  if (!r.ok || !j || !j.success || !Array.isArray(j.result) || !j.result[0] || !Array.isArray(j.result[0].results))
+    throw new Error('fin http ' + r.status + (j && Array.isArray(j.errors) && j.errors[0] ? ': ' + appKort(j.errors[0].message, 120) : ''));
+  return j.result[0].results;
+}
+const appRondEuro = function (v) { return Math.round(Number(v)); };
+const appIsGetal = function (v) { return typeof v === 'number' && isFinite(v); };
+// { rubriek: { jaar: { w, bron:[ids] } } } voor één entiteit; `personeel` = totaal als dat er is, anders de som van de delen.
+function appFinReeksen(rijen, def) {
+  const r = {};
+  rijen.forEach(function (x) {
+    if (x.entiteit !== def.code || !appIsGetal(x.bedrag) || !appIsGetal(x.jaar)) return;
+    if (def.van && x.jaar < def.van) return;
+    (r[x.rubriek] = r[x.rubriek] || {})[x.jaar] = { w: x.bedrag, bron: [x.bron_id] };
+  });
+  const p = {};
+  const jaren = new Set();
+  ['k_personeel_tot', 'k_lonen'].forEach(function (k) { Object.keys(r[k] || {}).forEach(function (j) { jaren.add(j); }); });
+  jaren.forEach(function (j) {
+    if (r.k_personeel_tot && r.k_personeel_tot[j]) { p[j] = r.k_personeel_tot[j]; return; }
+    let w = 0; const b = [];
+    ['k_lonen', 'k_soc', 'k_pens', 'k_ovpers'].forEach(function (k) { const c = r[k] && r[k][j]; if (c) { w += c.w; b.push.apply(b, c.bron); } });
+    p[j] = { w: w, bron: Array.from(new Set(b)) };
+  });
+  r.personeel = p;
+  (def.alleenLaatste || []).forEach(function (k) {
+    const jaren = Object.keys(r[k] || {}).map(Number).sort(function (a, b) { return b - a; });
+    jaren.slice(2).forEach(function (j) { delete r[k][j]; });
+  });
+  (def.omkeren || []).forEach(function (k) { Object.keys(r[k] || {}).forEach(function (j) { r[k][j] = { w: -r[k][j].w, bron: r[k][j].bron }; }); });
+  return r;
+}
+function appBronTekst(ids, bronnen) {
+  const t = Array.from(new Set(ids)).map(function (i) { return bronnen[i] && bronnen[i].titel; }).filter(Boolean);
+  return t.length ? t.join('; ') : 'fin-datahub';
+}
+// Bron van een lijn: de jaarrekeningen waar de punten uit komen, compact ("fin-datahub: jaarrekeningen 2020–2025, 6 stuks").
+function appBronReeks(ids, bronnen) {
+  const jaren = Array.from(new Set(ids)).map(function (i) { const m = bronnen[i] && /\b(20\d\d)\b/.exec(bronnen[i].titel); return m ? Number(m[1]) : null; }).filter(Boolean).sort();
+  if (!jaren.length) return 'fin-datahub';
+  return 'fin-datahub: jaarrekening' + (jaren.length > 1 ? 'en ' + jaren[0] + '–' + jaren[jaren.length - 1] + ', ' + jaren.length + ' stuks' : ' ' + jaren[0]);
+}
+function appKernCijfer(label, reeks, bronnen, eenheid) {
+  const jaren = Object.keys(reeks || {}).map(Number).sort(function (a, b) { return a - b; });
+  if (!jaren.length) return null;
+  const j = jaren[jaren.length - 1], c = reeks[j];
+  const vj = jaren.length > 1 ? jaren[jaren.length - 2] : null;
+  return { label: label, jaar: j, waarde: appRondEuro(c.w), eenheid: eenheid || '€',
+    vorig: vj !== null ? { jaar: vj, waarde: appRondEuro(reeks[vj].w) } : null, bron: appBronTekst(c.bron, bronnen) };
+}
+function appLijnSpec(titel, namen, reeksen, bronnen, eenheid, opmaak) {
+  const jaren = [];
+  namen.forEach(function (k) { Object.keys(reeksen[k] || {}).forEach(function (j) { jaren.push(Number(j)); }); });
+  if (!jaren.length) return null;
+  const lo = Math.min.apply(null, jaren), hi = Math.max.apply(null, jaren);
+  if (hi - lo < 1 || hi - lo > 59) return null;   // een lijn vraagt minstens twee jaren (Opmaak.tsx: 2 tot 60 punten)
+  const x = [], ids = [];
+  for (let j = lo; j <= hi; j++) x.push(String(j));
+  const lijnen = namen.filter(function (k) { return reeksen[k] && Object.keys(reeksen[k]).length; }).slice(0, 4).map(function (k) {
+    return { naam: APP_FIN_LABEL[k] || k, waarden: x.map(function (j) { const c = reeksen[k][j]; if (!c) return null; ids.push.apply(ids, c.bron || []); return opmaak ? opmaak(c.w) : appRondEuro(c.w); }) };
+  });
+  return { soort: 'lijn', titel: titel, eenheid: eenheid || '€', x: x, reeksen: lijnen, bron: appBronReeks(ids, bronnen) };
+}
+// zorgdata-reeks als { jaar: { w, status, bron } }; ontbreekt hij, dan null (de rest gaat door).
+function appZdMap(rijen) {
+  if (!Array.isArray(rijen)) return null;
+  const m = {};
+  rijen.forEach(function (x) {   // null, '' of true is geen meting (Number(null) = 0; Fable-review wv174 M1)
+    const v = x && (typeof x.waarde === 'number' || (typeof x.waarde === 'string' && x.waarde.trim() !== '')) ? Number(x.waarde) : NaN;
+    if (appIsGetal(x && x.jaar) && appIsGetal(v)) m[x.jaar] = { w: v, status: String(x.status || ''), bron: appKort(x.bron, 120) };
+  });
+  return Object.keys(m).length ? m : null;
+}
+function appZdBron(cellen) {
+  const bronnen = Array.from(new Set(cellen.map(function (c) { return c.bron; })));
+  const voorlopig = cellen.filter(function (c) { return c.status && c.status !== 'definitief'; }).length;
+  return 'Cijfer-Meester: ' + bronnen.join('; ') + (voorlopig ? ' — ' + voorlopig + ' waarde' + (voorlopig > 1 ? 'n' : '') + ' voorlopig' : '');
+}
+const appNl = function (v, d) { return Number(v).toLocaleString('nl-NL', { minimumFractionDigits: d || 0, maximumFractionDigits: d || 0 }); };
+const appDagMaand = function (ymd) { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '')); return m ? Number(m[3]) + '-' + Number(m[2]) : ''; };
+
+// Praktijk (TG/GH): patiënten per jaar (kwartaalgemiddelde uit de VIP-export), declaraties per jaar, praktijkgrootte in
+// normpraktijken en de groei van de personeelskosten naast de NZa-indexatie personeel.
+function appPraktijkExtra(def, f, zd, reeksen) {
+  const kern = [], grafieken = [], sector = { kern: [], grafieken: [] };
+  const pat = f.patienten.filter(function (x) { return x.entiteit === def.code && appIsGetal(x.aantal) && /^\d{4}-01-01$/.test(String(x.peildatum)); })
+    .map(function (x) { const b = f.bronnen[x.bron_id] || {}; const jaar = Number(String(x.peildatum).slice(0, 4));
+      return { jaar: jaar, aantal: x.aantal, bron: b.titel || 'fin-datahub', tot: b.periode_tot || null, lopend: !!(b.periode_tot && b.periode_tot < jaar + '-12-31') }; })
+    .sort(function (a, b) { return a.jaar - b.jaar || String(a.tot).localeCompare(String(b.tot)); })
+    .filter(function (p, i, l) { return !l[i + 1] || l[i + 1].jaar !== p.jaar; });   // per jaar alleen de nieuwste export (zie M2)
+  const heel = pat.filter(function (p) { return !p.lopend; });
+  if (heel.length) {
+    const p = heel[heel.length - 1], v = heel.length > 1 ? heel[heel.length - 2] : null;
+    kern.push({ label: 'Patiënten (gemiddeld per kwartaal)', jaar: p.jaar, waarde: Math.round(p.aantal), eenheid: '',
+      vorig: v ? { jaar: v.jaar, waarde: Math.round(v.aantal) } : null, bron: p.bron });
+  }
+  if (pat.length >= 2) grafieken.push({ soort: 'staaf', titel: 'Patiënten per jaar (gemiddeld per kwartaal)', eenheid: '',
+    items: pat.map(function (p) { return { label: p.lopend ? p.jaar + ' (t/m ' + appDagMaand(p.tot) + ')' : String(p.jaar), waarde: Math.round(p.aantal) }; }),
+    bron: 'fin-datahub: VIP-export Overzicht gedeclareerde prestaties ' + pat[0].jaar + '–' + pat[pat.length - 1].jaar });
+  const decl = f.declaraties.filter(function (x) { return x.entiteit === def.code && appIsGetal(x.toegezegd) && appIsGetal(x.jaar); })
+    .sort(function (a, b) { return a.jaar - b.jaar; });
+  if (decl.length >= 1) grafieken.push({ soort: 'staaf', titel: 'Declaraties per jaar (toegezegd door verzekeraars)', eenheid: '€',
+    items: decl.map(function (d) { const lopend = d.tot && d.tot < d.jaar + '-12-31'; return { label: lopend ? d.jaar + ' (t/m ' + appDagMaand(d.tot) + ')' : String(d.jaar), waarde: appRondEuro(d.toegezegd) }; }),
+    bron: 'fin-datahub: VIP-export Overzicht gedeclareerde prestaties ' + decl[0].jaar + '–' + decl[decl.length - 1].jaar + ', datum van de prestatie' });
+  // Praktijkgrootte: patiënten ÷ normpraktijk van dat jaar (of het laatste bekende jaar ervoor). Berekend, niet opgeslagen.
+  const norm = zd.normpraktijk_ptn;
+  if (heel.length && norm) {
+    const p = heel[heel.length - 1];
+    const nj = Object.keys(norm).map(Number).filter(function (j) { return j <= p.jaar && norm[j].w > 0; }).sort(function (a, b) { return a - b; }).pop();
+    if (nj) sector.kern.push({ label: 'Praktijkgrootte', jaar: p.jaar, waarde: Math.round(p.aantal / norm[nj].w * 100) / 100, eenheid: 'normpraktijken', vorig: null,
+      bron: 'berekend: ' + appNl(Math.round(p.aantal)) + ' patiënten ÷ ' + appNl(norm[nj].w) + ' per normpraktijk (NZa-norm ' + nj + '; ' + appZdBron([norm[nj]]).replace(/^Cijfer-Meester: /, 'Cijfer-Meester, ') + ')' });
+  }
+  // Groei personeelskosten tegen de NZa-indexatie personeel, per jaar in %.
+  const idx = zd.idx_personeel, pers = reeksen.personeel || {};
+  if (idx) {
+    const x = [], groei = [], nza = [], cellen = [], ids = [];
+    Object.keys(pers).map(Number).sort(function (a, b) { return a - b; }).forEach(function (j) {
+      if (!pers[j - 1] || !idx[j] || !pers[j - 1].w) return;
+      x.push(String(j));
+      groei.push(Math.round((pers[j].w / pers[j - 1].w - 1) * 1000) / 10);
+      nza.push(Math.round(idx[j].w * 1000) / 10);
+      cellen.push(idx[j]); ids.push.apply(ids, pers[j].bron.concat(pers[j - 1].bron));
+    });
+    if (x.length >= 2) sector.grafieken.push({ soort: 'lijn', titel: 'Groei personeelskosten (prijs én meer/minder personeel) tegen NZa-indexatie (alleen prijs)', eenheid: '%', x: x,
+      reeksen: [{ naam: 'Groei personeelskosten ' + def.naam, waarden: groei }, { naam: 'NZa-indexatie personeel', waarden: nza }],
+      bron: appKort('groei berekend uit ' + appBronReeks(ids, f.bronnen) + '; ' + appZdBron(cellen), 200) });
+    else if (x.length === 1) sector.kern.push({ label: 'Groei personeelskosten (prijs én volume)', jaar: Number(x[0]), waarde: groei[0], eenheid: '%', vorig: null,
+      bron: 'berekend uit ' + appBronReeks(ids, f.bronnen) + '; NZa-indexatie personeel ' + x[0] + ': ' + appNl(nza[0], 1) + '% (' + appZdBron(cellen) + ')' });
+  }
+  return { kern: kern, grafieken: grafieken, sector: sector };
+}
+// POT: kosten van de POH-GGZ naast de landelijke POH-GGZ-uitgaven (NZa), beide als index (eerste gezamenlijke jaar = 100).
+function appPohggzSector(reeksen, zd, bronnen) {
+  const lan = zd.nza_pohggz_uitgaven, pot = reeksen.k_som_bruto || {};
+  if (!lan) return null;
+  const jaren = Object.keys(lan).map(Number).filter(function (j) { return pot[j]; }).sort(function (a, b) { return a - b; });
+  if (jaren.length < 2) return null;
+  const b0 = jaren[0], ids = [], cellen = [];
+  jaren.forEach(function (j) { ids.push.apply(ids, pot[j].bron); cellen.push(lan[j]); });
+  return { kern: [], grafieken: [{ soort: 'lijn', titel: 'POT tegen landelijke POH-GGZ-uitgaven (index, ' + b0 + ' = 100)', eenheid: '', x: jaren.map(String),
+    reeksen: [{ naam: 'Kosten POT', waarden: jaren.map(function (j) { return Math.round(pot[j].w / pot[b0].w * 1000) / 10; }) },
+      { naam: 'Landelijk (NZa)', waarden: jaren.map(function (j) { return Math.round(lan[j].w / lan[b0].w * 1000) / 10; }) }],
+    bron: appKort('index berekend uit ' + appBronReeks(ids, bronnen) + '; ' + appZdBron(cellen), 200) }] };
+}
+
+async function appPraktijkenVerzamel() {
+  let zdFout = false;
+  const codes = APP_PRAKTIJKEN.map(function (d) { return "'" + d.code + "'"; }).join(',');
+  const rubr = APP_FIN_RUBRIEKEN.map(function (k) { return "'" + k + "'"; }).join(',');
+  const f = {};
+  // Zonder de datahub is er niets te tonen: dan 503. Zorgdata mag ontbreken (dan zonder sectorvergelijking).
+  await Promise.all([
+    appFinSql("SELECT entiteit, rubriek, jaar, bedrag, bron_id FROM reeks WHERE versie='jaarrekening' AND maat IS NULL AND entiteit IN (" + codes + ') AND rubriek IN (' + rubr + ')')
+      .then(function (r) { f.reeks = r; }),
+    appFinSql("SELECT entiteit, peildatum, aantal, bron_id FROM patienten WHERE leeftijdsgroep IS NULL AND soort='declaratie_kwartaalgemiddelde' AND entiteit IN (" + codes + ')')
+      .then(function (r) { f.patienten = r; }),
+    // alleen de laatste export per entiteit en jaar: een nieuwere VIP-export (t/m een latere datum) komt naast de oude te staan
+    // (UNIQUE entiteit, jaar, periode_tot, verzekeraar, code); optellen over beide verdubbelt het jaar (Fable-review wv174 M2)
+    appFinSql("SELECT d.entiteit, d.jaar, d.periode_tot AS tot, SUM(d.toegezegd) AS toegezegd FROM declaratie d JOIN (SELECT entiteit, jaar, MAX(periode_tot) AS m FROM declaratie"
+      + " WHERE verzekeraar='totaal' AND entiteit IN (" + codes + ") GROUP BY entiteit, jaar) x ON x.entiteit = d.entiteit AND x.jaar = d.jaar AND x.m = d.periode_tot"
+      + " WHERE d.verzekeraar='totaal' GROUP BY d.entiteit, d.jaar, d.periode_tot")
+      .then(function (r) { f.declaraties = r; }),
+    appFinSql("SELECT id, titel, periode_tot FROM bron WHERE soort IN ('jaarrekening','vip_export')")
+      .then(function (r) { f.bronnen = {}; r.forEach(function (b) { f.bronnen[b.id] = { titel: appKort(b.titel, 120), periode_tot: b.periode_tot || null }; }); }),
+  ]);
+  const zd = {};
+  await Promise.all(APP_ZD_CODES.map(function (c) {
+    return appSbRpc('zd_reeks', { p_code: c, p_norm: 'abs', p_van: 2015, p_tot: 2035 }).then(function (r) { zd[c] = appZdMap(r); },
+      function (e) { logError('app-praktijken', e); zd[c] = null; zdFout = true; });
+  }));
+  const fouten = zdFout ? ['de sectorcijfers van de Cijfer-Meester zijn nu niet te lezen; alleen de eigen cijfers'] : [];
+  const entiteiten = APP_PRAKTIJKEN.map(function (def) {
+    const reeksen = appFinReeksen(f.reeks, def);
+    const kern = def.kern.map(function (k) { return appKernCijfer(APP_FIN_LABEL[k], reeksen[k], f.bronnen); }).filter(Boolean);
+    const grafieken = def.lijnen.map(function (l) { return appLijnSpec(l.titel, l.r, reeksen, f.bronnen); }).filter(Boolean);
+    let sector = null;
+    if (def.praktijk) {
+      const x = appPraktijkExtra(def, f, zd, reeksen);
+      kern.push.apply(kern, x.kern); grafieken.push.apply(grafieken, x.grafieken);
+      sector = x.sector.kern.length || x.sector.grafieken.length ? x.sector : null;
+    }
+    if (def.pohggz) sector = appPohggzSector(reeksen, zd, f.bronnen);
+    const jaren = [];
+    Object.keys(reeksen).forEach(function (k) { Object.keys(reeksen[k]).forEach(function (j) { jaren.push(Number(j)); }); });
+    return { code: def.code, naam: def.naam, voluit: def.voluit, jaren: jaren.length ? [Math.min.apply(null, jaren), Math.max.apply(null, jaren)] : null,
+      kern: kern, grafieken: grafieken, sector: sector, noten: def.noten || [] };
+  });
+  return { entiteiten: entiteiten, fouten: fouten, op: Date.now() };
+}
+// 30 min bewaard; met een fout (zorgdata weg) hooguit 2 min, zodat Ververs echt opnieuw leest. Mislukt een vernieuwing terwijl er
+// oudere cijfers zijn, dan die cijfers met een regel erbij in plaats van een 503 (Fable-review wv174 M4).
+const APP_PRAKTIJKEN_FOUT_MS = 2 * 60 * 1000;
+function appPraktijken() {
+  const c = appStaat.praktijken;
+  if (c && c.data && Date.now() - c.data.op < (c.data.fouten.length ? APP_PRAKTIJKEN_FOUT_MS : APP_PRAKTIJKEN_CACHE_MS)) return Promise.resolve(c.data);
+  if (c && c.bezig) return c.bezig;
+  const st = appStaat.praktijken = { data: c && c.data, bezig: null };
+  st.bezig = appPraktijkenVerzamel().then(function (d) { st.data = d; st.bezig = null; return d; }, function (e) {
+    st.bezig = null;
+    if (!st.data || st.data.oud) throw e;
+    logError('app-praktijken', e);
+    return Object.assign({}, st.data, { oud: true, fouten: st.data.fouten.concat(['de datahub is nu niet te lezen; dit zijn de cijfers van ' + new Date(st.data.op).toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' })]) });
+  });
+  return st.bezig;
+}
+async function appPraktijkenRoute(req, res, a) {
+  res._app.stil = true;   // de app leest bij openen en op Ververs
+  if (a && a.soort === 'vast') return appStuur(res, 200, { ok: true, vaste_plek: true, entiteiten: [], fouten: [], bijgewerkt: null });
+  let d;
+  try { d = await appPraktijken(); } catch (e) { logError('app-praktijken', e); return appWeiger(res, 503, 'de cijfers zijn nu niet te lezen', 'praktijken fout'); }
+  appStuur(res, 200, { ok: true, vaste_plek: false, entiteiten: d.entiteiten, fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
+}
+
 // ── seintjes (web-push zonder inhoud) ──
 function appPushLees() {
   const p = appLeesStreng(APP_PUSH, { versie: 1, apparaten: {} });
@@ -6214,6 +6484,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/modellen') return appModellen(req, res);
         if (route === 'POST /app/modellen') return appModellenZet(req, res, reg, a, s, d);
         if (route === 'GET /app/vandaag') return appVandaagRoute(req, res, a);
+        if (route === 'GET /app/praktijken') return appPraktijkenRoute(req, res, a);
         if (route === 'POST /app/actie') return appActieRoute(req, res, a, d);
         if (route === 'GET /app/sleutels') return appSleutels(req, res, a);
         if (route === 'POST /app/sleutels/vervang') return appSleutelVervang(req, res, reg, a, s, d);
