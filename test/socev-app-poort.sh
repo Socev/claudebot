@@ -138,7 +138,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems };', ctx, { filename: 'server.js#app' });
 const H = ctx.__h;
 const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
 
@@ -1505,7 +1505,7 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/uitslag', { job_id: 'f'.repeat(16) }, { pot: WP.jar });
       toets('13 uitslag pollen valt niet onder het slot', r.status !== 423, r.status);
       for (const [m, pad, body] of [['POST', '/app/knop', { job_id: 'f'.repeat(16), vraag_hash: 'x', keuze: 'ja' }], ['POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'eerder' }],
-        ['POST', '/app/meldingen/gezien', { tot: new Date().toISOString() }], ['POST', '/app/push/abonneer', { endpoint: 'https://fcm.googleapis.com/fcm/send/x', sleutel: 'y' }],
+        ['POST', '/app/push/abonneer', { endpoint: 'https://fcm.googleapis.com/fcm/send/x', sleutel: 'y' }],
         ['GET', '/app/bestand/' + 'a'.repeat(16) + '/1', undefined], ['POST', '/app/nieuwe-route', {}]]) {
         r = await vraag(m, pad, body, { pot: WP.jar });
         toets('13 dicht: ' + m + ' ' + pad.replace(/[a-f]{16}/, '<id>') + ' -> 423', r.status === 423, r.status + ' ' + JSON.stringify(r.j));
@@ -1514,6 +1514,10 @@ async function bewijs(o) {
       toets('13 dicht: upload -> 423 (stroom netjes afgehandeld)', r.status === 423, JSON.stringify(r));
       r = await vraag('POST', '/app/push/opzeggen', {}, { pot: WP.jar });
       toets('13 seintjes opzeggen mag ook als het dicht is', r.status !== 423, r.status);
+      // wv137: gezien zetten is geen invoer (meldingen en de tab-stippen)
+      r = await vraag('POST', '/app/meldingen/gezien', { tot: new Date().toISOString() }, { pot: WP.jar });
+      const rG = await vraag('POST', '/app/gezien', { tab: 'hoofd', tot: new Date().toISOString() }, { pot: WP.jar });
+      toets('13 dicht: meldingen/gezien en gezien (wv137) vallen niet onder het slot', r.status === 200 && rG.status === 200, r.status + ' ' + rG.status);
       // David op Groenhouten, vers -> open
       meld('Huisartsenpraktijk Groenhouten', 'werk', 4);
       r = await beurt13(WP, 'nu wel');
@@ -1841,6 +1845,106 @@ async function bewijs(o) {
       H.appStaat.koppel = null;
       for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
       fs.writeFileSync(path.join(DATA, 'staat.json'), JSON.stringify({}));
+    }
+
+    // ── 15. wv137: nieuw per tab, seintje -> tab, Autokastje (bouwplan § 4.9a, § 4.9b) ──
+    {
+      const sN = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      if (sN) sN.tot = Date.now() + 10 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      for (const [m, route] of [['GET', '/app/nieuw'], ['POST', '/app/gezien'], ['GET', '/app/autokastje']]) {
+        r = await vraag(m, route, m === 'POST' ? {} : undefined, { pot: pot() });
+        toets('15 ' + m + ' ' + route + ' zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      }
+      const st = await vraag('GET', '/app/status', undefined, { pot: P.jar });
+      const pid = st.j.apparaat.id;
+      const GZ = path.join(DATA, 'gezien.json');
+      try { fs.unlinkSync(GZ); } catch (e) {}
+      const nAudit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      const g0 = JSON.parse(fs.readFileSync(GZ, 'utf8'))[pid] || {};
+      toets('15 eerste keer: nulpunt per tab op nu, niets nieuw (geen stapel oude dingen)', r.status === 200 && ['hoofd', 'machinekamer', 'agents', 'bestanden', 'autokastje'].every((t) => g0[t] && r.j.tabs[t] === 0) && typeof g0.broedstoof_nr === 'number' && r.j.tabs.broedstoof === 0, JSON.stringify(r.j) + JSON.stringify(g0));
+      toets('15 GET nieuw geeft de gezien-tijden mee (geen broedstoof-nummer)', r.j.gezien && r.j.gezien.hoofd === g0.hoofd && !('broedstoof_nr' in r.j.gezien), JSON.stringify(r.j.gezien));
+      toets('15 GET nieuw (200) schrijft geen auditregel', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAudit);
+      toets('15 gezien.json bevat alleen tijden en getallen', Object.values(JSON.parse(fs.readFileSync(GZ, 'utf8'))).every((x) => Object.values(x).every((v) => typeof v === 'number' || /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(v))));
+      // hoofdkanaal: gezien een uur terug -> de app-beurten van sectie 9 tellen
+      const hoofdN = fs.readFileSync(path.join(LOGDIR, 'hoofd.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((x) => Date.parse(x.t) > Date.now() - 3600000).length;
+      const gz = JSON.parse(fs.readFileSync(GZ, 'utf8')); gz[pid].hoofd = new Date(Date.now() - 3600000).toISOString(); gz[pid].broedstoof_nr -= 2; fs.writeFileSync(GZ, JSON.stringify(gz));
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      const hoofdMem = Object.keys(jobs).filter((id) => jobs[id].app && jobs[id].app.kanaal === 'hoofd' && jobs[id].status === 'done' && jobs[id].app.gelogd !== true).length;
+      toets('15 hoofdkanaal: antwoorden na "gezien" tellen (' + hoofdN + ' in het log + ' + hoofdMem + ' alleen in het geheugen), met tijd van de jongste', hoofdN > 0 && r.j.tabs.hoofd === hoofdN + hoofdMem && !!r.j.laatst.hoofd, JSON.stringify(r.j));
+      toets('15 broedstoof: twee ideeën boven het gezien-nummer = 2 nieuw', r.j.tabs.broedstoof === 2, r.j.tabs.broedstoof);
+      const nuP = r.j.nu;
+      r = await vraag('POST', '/app/gezien', { tab: 'hoofd', tot: nuP }, { pot: P.jar });
+      await vraag('POST', '/app/gezien', { tab: 'broedstoof' }, { pot: P.jar });
+      const r2 = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('15 gezien gezet: hoofdkanaal en broedstoof weer 0', r.status === 200 && r2.j.tabs.hoofd === 0 && r2.j.tabs.broedstoof === 0, JSON.stringify(r2.j.tabs));
+      r = await vraag('POST', '/app/gezien', { tab: 'hoofd', tot: new Date(Date.now() - 7200000).toISOString() }, { pot: P.jar });
+      toets('15 gezien schuift nooit terug', r.status === 200 && JSON.parse(fs.readFileSync(GZ, 'utf8'))[pid].hoofd === nuP);
+      r = await vraag('POST', '/app/gezien', { tab: 'geheim', tot: nuP }, { pot: P.jar });
+      toets('15 onbekende tab -> 400', r.status === 400);
+      r = await vraag('POST', '/app/gezien', { tab: 'hoofd', tot: new Date(Date.now() + 3600000).toISOString() }, { pot: P.jar });
+      toets('15 gezien in de toekomst -> 400', r.status === 400);
+      const voorZonder = Date.now();
+      r = await vraag('POST', '/app/gezien', { tab: 'bestanden' }, { pot: P.jar });
+      toets('15 gezien zonder tijdstip: de pod neemt nu (tab verlaten; review #3)', r.status === 200 && Date.parse(JSON.parse(fs.readFileSync(GZ, 'utf8'))[pid].bestanden) >= voorZonder - 5);
+      // seintje -> tab (de push zelf blijft leeg; de app vraagt het hier)
+      const pjN = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8'));
+      pjN.apparaten[pid] = { endpoint: 'https://fcm.googleapis.com/fcm/send/x', soorten: ['antwoord'], laatst: null };
+      fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pjN));
+      pushStaat.status = 201;
+      const rsN = await H.appPushStuur(pid, 'antwoord machinekamer');   // zoals appPushNaBeurt hem echt stuurt
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('15 de pod stuurde een antwoord-seintje (machinekamer) -> seintje.tab machinekamer (reden niet afgekapt; review #2)', rsN.ok && r.j.seintje && r.j.seintje.tab === 'machinekamer', JSON.stringify(rsN) + JSON.stringify(r.j.seintje));
+      pjN.apparaten[pid].laatst = { op: new Date().toISOString(), status: 201, reden: 'proef' }; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pjN));
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      const s1 = r.j.seintje;
+      pjN.apparaten[pid].laatst = { op: new Date().toISOString(), status: 500, reden: 'meldingen' }; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pjN));
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('15 proefseintje of mislukt seintje: geen tab', s1 === null && r.j.seintje === null, JSON.stringify([s1, r.j.seintje]));
+      delete pjN.apparaten[pid]; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pjN));
+      // Autokastje: wat de poort meldt (start, klaar, terug, niet gestart)
+      r = await vraag('GET', '/app/autokastje', undefined, { pot: P.jar });
+      toets('15 autokastje zonder ritten: 200, lege lijst, 30 dagen', r.status === 200 && r.j.items.length === 0 && r.j.bewaar_dagen === 30, JSON.stringify(r.j));
+      const jA = 'a0a0a0a0a0a0a0a1', jB = 'a0a0a0a0a0a0a0a2', jC = 'a0a0a0a0a0a0a0a3';
+      H.appAutoNoteer({ soort: 'start', job_id: jA, onderwerp: 'apotheek', route: 'socev', sinds: new Date(Date.now() - 60000).toISOString() });
+      H.appAutoNoteer({ soort: 'start', job_id: jB, onderwerp: 'kastje', route: 'machinekamer', sinds: new Date(Date.now() - 50000).toISOString() });
+      H.appAutoNoteer({ soort: 'start', job_id: jC, onderwerp: 'oud', route: 'socev', sinds: new Date(Date.now() - 3600000).toISOString() });
+      await slaap(50);
+      H.appAutoNoteer({ soort: 'klaar', job_id: jA, ok: true, antwoord: '**Opdracht uit de auto, 08:40: openingstijden van de apotheek in Leusden.**\n\nDe apotheek is tot 18:00 open.\n\nVerder in Telegram:\nlink' });
+      await slaap(20);
+      H.appAutoNoteer({ soort: 'terug', job_id: jA, uitkomst: 'naar-kastje' });
+      await slaap(20);
+      H.appAutoNoteer({ soort: 'terug', job_id: jA, uitkomst: 'voorgelezen' });
+      H.appAutoNoteer({ soort: 'niet-gestart', id: 'a0a0a0a0a0a0a0a4', onderwerp: 'tafel', route: 'socev', reden: 'alle drie de werkplekken voor achtergrondwerk waren bezet', telegram: false });
+      await slaap(80);
+      r = await vraag('GET', '/app/autokastje', undefined, { pot: P.jar });
+      const per = {}; (r.j.items || []).forEach((x) => { per[x.id] = x; });
+      toets('15 autokastje: vier gesprekken, jongste eerst', r.status === 200 && r.j.items.length === 4 && r.j.items[0].id === 'a0a0a0a0a0a0a0a4', JSON.stringify(r.j).slice(0, 300));
+      toets('15 klaar: kop = Socevs samenvatting uit de kopregel (ook vet), antwoord zonder kopregel, "voorgelezen in de auto"', per[jA].status === 'klaar' && per[jA].antwoord.startsWith('De apotheek is tot 18:00 open.') && per[jA].terug === 'voorgelezen in de auto' && per[jA].opdracht === 'openingstijden van de apotheek in Leusden' && per[jA].onderwerp === 'apotheek', JSON.stringify(per[jA]));
+      toets('15 machinekamer-melding loopt nog (start < 30 min): bezig, route machinekamer', per[jB].status === 'bezig' && per[jB].route === 'machinekamer', JSON.stringify(per[jB]));
+      toets('15 start zonder antwoord en zonder lopende job, > 30 min: onbekend', per[jC].status === 'onbekend', JSON.stringify(per[jC]));
+      toets('15 niet gestart: met reden in gewone taal en of Telegram lukte', per.a0a0a0a0a0a0a0a4.status === 'niet-gestart' && /werkplekken/.test(per.a0a0a0a0a0a0a0a4.reden) && per.a0a0a0a0a0a0a0a4.telegram === false && per.a0a0a0a0a0a0a0a4.onderwerp === 'tafel', JSON.stringify(per.a0a0a0a0a0a0a0a4));
+      toets('15 geen transcript, notitie of opdracht in het log', !/transcript|notitie|"opdracht"/i.test(fs.readFileSync(path.join(LOGDIR, 'autokastje.jsonl'), 'utf8')));
+      // de poort zelf (blok auto-relay) geeft nooit item.opdracht of opdracht door: dat is Davids letterlijke tekst (review #1)
+      const relay = src.slice(src.indexOf('// >>> auto-relay'), src.indexOf('// <<< auto-relay'));
+      const aanroepen = relay.split('appAutoNoteer({').slice(1).map((x) => x.slice(0, x.indexOf('});')));
+      toets('15 auto-relay: ' + aanroepen.length + ' meldingen aan de app, geen enkele met de opdracht (letterlijke tekst)', aanroepen.length === 4 && aanroepen.every((x) => !/opdracht/.test(x)), aanroepen.join(' || ').slice(0, 300));
+      H.appStaat.autoCache = null;
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('15 nieuw: autokastje telt het antwoord en het niet-gestarte (2)', r.j.tabs.autokastje === 2, JSON.stringify(r.j.tabs));
+      // ongeldige regels (geen job-id) worden overgeslagen; schrijffout = fail-open
+      fs.appendFileSync(path.join(LOGDIR, 'autokastje.jsonl'), '{kapot\n' + JSON.stringify({ t: new Date().toISOString(), soort: 'klaar', job_id: '../x', antwoord: 'x' }) + '\n');
+      H.appStaat.autoCache = null;
+      r = await vraag('GET', '/app/autokastje', undefined, { pot: P.jar });
+      toets('15 kapotte of vreemde regels overgeslagen', r.status === 200 && r.j.items.length === 4, r.j.items && r.j.items.length);
+      // kapot gezien.json: GET nieuw geeft 200 en overschrijft het bestand niet
+      fs.writeFileSync(GZ, '{kapot');
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('15 kapot gezien.json: 200 en niet overschreven', r.status === 200 && fs.readFileSync(GZ, 'utf8') === '{kapot', r.status);
+      r = await vraag('POST', '/app/gezien', { tab: 'hoofd', tot: nuP }, { pot: P.jar });
+      toets('15 kapot gezien.json: gezien zetten -> 500, bestand blijft', r.status === 500 && fs.readFileSync(GZ, 'utf8') === '{kapot', r.status);
+      fs.unlinkSync(GZ);
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──

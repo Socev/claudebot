@@ -3140,7 +3140,8 @@ const APP_LOCATIE_VERS_S = 20 * 60;            // melding 0-20 min oud, gemeten 
 const APP_OPEN_MS = 2 * 60 * 60 * 1000;        // tijdelijk openzetten vanaf de telefoon
 const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
-const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen']);
+// gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
+const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien']);
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open']);
@@ -3149,7 +3150,7 @@ const APP_BSN_TEKST = 'in je bericht staat een getal dat op een BSN lijkt (9 cij
 const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
-  webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null };
+  webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
 
 function appSha(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
 function appGelijk(a, b) { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); }
@@ -5239,6 +5240,188 @@ function appMeldingenGezien(req, res, a, d) {
   } catch (e) { logError('app-meldingen', e); appWeiger(res, 500, 'opslaan lukte niet', 'gezien schrijven'); }
 }
 
+// ── Nieuw per tab (wv137, bouwplan § 4.9a): wat er op DIT apparaat nog niet gezien is ──
+// gezien.json: per apparaat per tab een tijdstip (broedstoof: het hoogste ideenummer); alleen tijden en getallen, geen
+// inhoud. Een tab die een apparaat nog nooit zag, begint op "nu" (geen stapel oude dingen als nieuw). Meldingen houdt zijn
+// eigen meldingen-gezien.json (fase 5c). De app vraagt GET /app/nieuw elke minuut en zet met POST /app/gezien de tab die
+// open is. Het seintje zelf blijft zonder inhoud: de app hoort hier voor welke tab het laatste seintje van dit apparaat was.
+const APP_GEZIEN = path.join(APP_DATA, 'gezien.json');
+const APP_NIEUW_TABS = ['hoofd', 'machinekamer', 'agents', 'bestanden', 'autokastje', 'broedstoof'];
+const APP_SEINTJE_TAB_MS = 24 * 3600 * 1000;
+const APP_NIEUW_MELD_MS = 5 * 60 * 1000;   // meldingen voor de teller hooguit zo oud (de n8n-API niet elke minuut per apparaat)
+function appBusMaxNr() { try { return appBusLees().ideeen.reduce(function (m, i) { return Math.max(m, Number(i.nr) || 0); }, 0); } catch (e) { return null; } }
+// Alleen de tijden uit het app-log, bewaard op mtime + grootte: niet elke minuut per apparaat 30 dagen tekst parsen (review #5).
+async function appLogTijden(kanaal) {
+  const st = await fs.promises.stat(appLogPad(kanaal));
+  const c = (appStaat.logTijden = appStaat.logTijden || {})[kanaal];
+  if (c && c.mtime === st.mtimeMs && c.size === st.size) return c.t;
+  const t = (await appLogLees(kanaal)).map(function (x) { return Date.parse(x.t); });
+  appStaat.logTijden[kanaal] = { mtime: st.mtimeMs, size: st.size, t: t };
+  return t;
+}
+// Tijdstippen waarop er per tab iets nieuws kwam (jongste eerst niet nodig); null = bron nu niet leesbaar.
+async function appNieuwBronnen() {
+  const uit = {};
+  for (const k of ['hoofd', 'machinekamer']) {
+    let tijden = [];
+    try { tijden = await appLogTijden(k); } catch (e) { if (!(e && e.code === 'ENOENT')) { uit[k] = null; continue; } }
+    const t = tijden.slice();
+    // afgerond maar (nog) niet in het log: uit het geheugen
+    Object.keys(jobs).forEach(function (id) { const j = jobs[id]; if (j.app && j.app.kanaal === k && j.status === 'done' && j.app.gelogd !== true) t.push(j.done_at || j.created); });
+    uit[k] = t;
+  }
+  let idx = null;
+  try { idx = appBestandenIndex(); } catch (e) { idx = null; }
+  uit.agents = idx ? idx.filter(function (m) { return m.soort === 'agent' && m.rapport; }).map(function (m) { return Date.parse(m.op); }) : null;
+  uit.bestanden = idx ? idx.filter(function (m) { return m.bestanden && m.bestanden.length; }).map(function (m) { return Date.parse(m.op); }) : null;
+  let auto = null;
+  try { auto = await appAutoItems(); } catch (e) { auto = null; }
+  uit.autokastje = auto ? auto.filter(function (x) { return x.klaar_op; }).map(function (x) { return Date.parse(x.klaar_op); }) : null;
+  return uit;
+}
+function appSeintjeTab(id) {
+  let s = null;
+  try { s = appPushLees().apparaten[id] || null; } catch (e) { return null; }
+  const l = s && s.laatst;
+  if (!l || !(l.status >= 200 && l.status < 300) || !(Date.now() - Date.parse(l.op) < APP_SEINTJE_TAB_MS)) return null;
+  const m = /^antwoord (hoofd|machinekamer)$/.exec(String(l.reden || ''));
+  const tab = m ? m[1] : l.reden === 'meldingen' ? 'meldingen' : null;
+  return tab ? { tab: tab, op: l.op } : null;
+}
+async function appNieuwRoute(req, res, a) {
+  res._app.stil = true;   // elke minuut per apparaat: geen auditregel bij 200
+  const nu = Date.now();
+  let alle, nieuwPunt = false;
+  try { alle = appLeesStreng(APP_GEZIEN, {}); } catch (e) { logError('app-nieuw', e); alle = null; }
+  // ingetrokken of verdwenen apparaten eruit (Fable-review wv137 #9)
+  if (alle) { try { const act = new Set(appRegister().apparaten.filter(function (x) { return x.actief; }).map(function (x) { return x.id; }));
+    Object.keys(alle).forEach(function (id) { if (id !== a.id && !act.has(id)) { delete alle[id]; nieuwPunt = true; } }); } catch (e) {} }
+  const g = Object.assign({}, (alle && alle[a.id]) || {});
+  APP_NIEUW_TABS.forEach(function (t) {
+    if (t === 'broedstoof') { if (typeof g.broedstoof_nr !== 'number') { const n = appBusMaxNr(); if (n !== null) { g.broedstoof_nr = n; nieuwPunt = true; } } }
+    else if (!g[t]) { g[t] = new Date(nu).toISOString(); nieuwPunt = true; }
+  });
+  // nulpunt alleen opslaan als het bestand leesbaar was (een kapot bestand niet overschrijven)
+  if (nieuwPunt && alle) { try { alle[a.id] = g; appSchrijfJson(APP_GEZIEN, alle); } catch (e) { logError('app-nieuw', e); } }
+  const bronnen = await appNieuwBronnen();
+  const tabs = {}, laatst = {}, fouten = alle ? [] : ['gezien'];   // kapot gezien.json: zichtbaar in fouten (review #4)
+  Object.keys(bronnen).forEach(function (t) {
+    if (!bronnen[t]) { tabs[t] = 0; fouten.push(t); return; }
+    const grens = Date.parse(g[t] || 0) || nu;
+    const nieuw = bronnen[t].filter(function (x) { return x > grens; });
+    tabs[t] = nieuw.length;
+    if (nieuw.length) laatst[t] = new Date(Math.max.apply(null, nieuw)).toISOString();
+  });
+  const maxNr = appBusMaxNr();
+  if (maxNr === null) { tabs.broedstoof = 0; fouten.push('broedstoof'); }
+  else tabs.broedstoof = Math.max(0, maxNr - (typeof g.broedstoof_nr === 'number' ? g.broedstoof_nr : maxNr));
+  // meldingen: zelfde telling als de tab (fase 5c), uit de gedeelde verversing; niet ouder dan 5 min
+  let m = appStaat.meld && appStaat.meld.data;
+  if (!m || nu - m.op > APP_NIEUW_MELD_MS) { try { m = await appMeldingen(); } catch (e) { m = null; } }
+  if (m) {
+    const gm = Date.parse(appGezien()[a.id] || 0) || 0;
+    const nieuw = m.items.filter(function (x) { return Date.parse(x.wanneer) > gm; });
+    tabs.meldingen = nieuw.length;
+    if (nieuw.length) laatst.meldingen = nieuw[0].wanneer;
+  } else { tabs.meldingen = 0; fouten.push('meldingen'); }
+  const gezien = {};
+  APP_NIEUW_TABS.forEach(function (t) { if (t !== 'broedstoof' && g[t]) gezien[t] = g[t]; });
+  appStuur(res, 200, { ok: true, nu: new Date(nu).toISOString(), tabs: tabs, laatst: laatst, gezien: gezien, seintje: appSeintjeTab(a.id), fouten: fouten });
+}
+// De tab die open is (of net verlaten werd) als gezien zetten: tot nu, of tot een meegegeven tijdstip (nooit terug).
+function appNieuwGezien(req, res, a, d) {
+  res._app.stil = true;
+  const tab = String(d.tab || '');
+  if (APP_NIEUW_TABS.indexOf(tab) < 0) return appWeiger(res, 400, 'onbekende tab', 'gezien tab');
+  // zonder tot: nu (de tab die je net bekeek of verlaat; Fable-review wv137 #3), anders begrensd
+  let t = Date.now();
+  if (tab !== 'broedstoof' && d.tot !== undefined) {
+    t = Date.parse(String(d.tot || ''));
+    if (!isFinite(t) || t > Date.now() + 60000 || t < Date.now() - 365 * 86400000) return appWeiger(res, 400, 'ongeldig tijdstip', 'gezien tot');
+  }
+  try {
+    const alle = appLeesStreng(APP_GEZIEN, {});
+    const g = alle[a.id] = alle[a.id] || {};
+    if (tab === 'broedstoof') { const n = appBusMaxNr(); if (n !== null) g.broedstoof_nr = n; }
+    else if (!g[tab] || Date.parse(g[tab]) < t) g[tab] = new Date(t).toISOString();
+    appSchrijfJson(APP_GEZIEN, alle);
+    appStuur(res, 200, { ok: true });
+  } catch (e) { logError('app-nieuw', e); appWeiger(res, 500, 'opslaan lukte niet', 'gezien schrijven'); }
+}
+
+// ── Autokastje (wv137, bouwplan § 4.9b): wat David in de auto insprak, met het antwoord; alleen lezen ──
+// Bron: de smalle poort naar socev-auto (blok auto-relay) meldt hier start, antwoord, terugweg en niet-gestart. Het kastje
+// zelf schrijft niets naar schijf; de pod bewaart NIET wat David letterlijk zei (dat is het veld opdracht van het kastje),
+// alleen het onderwerp (hooguit 3 woorden, door het keuzemodel) en het rapport van Socev. De kaartkop is de eerste regel van
+// dat rapport ("Opdracht uit de auto, 14:02: <één zin>"): Socevs eigen samenvatting. Het rapport zelf kan Davids woorden
+// citeren (dat gaat ook naar Telegram). In het app-log (/opt/data/app-log/autokastje.jsonl, 30 dagen, buiten de vault),
+// asynchroon en fail-open: een schrijffout raakt nooit de rit of Telegram (Fable-review wv137 #1).
+const APP_AUTO_ANTWOORD_MAX = 20000;
+const APP_AUTO_STIL_MS = 30 * 60 * 1000;   // start zonder antwoord en geen lopende job: na zo lang "geen antwoord bewaard"
+function appAutoNoteer(o) {
+  try {
+    const r = Object.assign({ t: new Date().toISOString() }, o);
+    if (typeof r.antwoord === 'string') r.antwoord = r.antwoord.slice(0, APP_AUTO_ANTWOORD_MAX);
+    appStaat.autoCache = null;
+    appLogSchrijf('autokastje', r).catch(function () {});
+  } catch (e) { logError('app-auto', e); }
+}
+const APP_AUTO_TERUG = { voorgelezen: 'voorgelezen in de auto', 'naar-kastje': 'aangeboden in de auto', machinekamer: 'naar de machinekamer',
+  'niet-in-auto': 'in Telegram (je zat niet meer in de auto)', 'plek-onbekend': 'in Telegram (plek onbekend)', niet_in_auto: 'in Telegram (je zat niet meer in de auto)',
+  telegram_niet_gehoord: 'in Telegram (niet gehoord in de auto)', telegram_weg: 'in Telegram (kastje was weg)', telegram_later: 'in Telegram',
+  telegram_fout: 'in Telegram', verlopen: 'in Telegram (te laat voor de rit)', 'geen-rapport': 'geen antwoord', 'na-herstart': 'alleen in Telegram (pod herstart)',
+  'niet-aangenomen': 'in Telegram (kastje nam het niet aan)' };
+// Kopregel van het rapport ("Opdracht uit de auto, 14:02: <zin>.") = Socevs samenvatting -> kaartkop; de rest = het antwoord.
+const APP_AUTO_KOP_RE = /^\s*(?:\*\*)?(?:Opdracht|Melding) uit de auto(?:,\s*[0-9:.]+)?(?:\s*[:,-]\s*|\s+)([^\n]*)\n*/i;
+function appAutoKern(t) { return String(t || '').replace(APP_AUTO_KOP_RE, '').trim(); }
+function appAutoKop(t) { const m = APP_AUTO_KOP_RE.exec(String(t || '')); return m ? m[1].replace(/\*\*/g, '').replace(/\.\s*$/, '').trim().slice(0, 300) : ''; }
+async function appAutoItems() {
+  const c = appStaat.autoCache;
+  if (c && Date.now() - c.op < 15000) return c.items;
+  let regels = [];
+  try { regels = await appLogLees('autokastje'); } catch (e) { if (!(e && e.code === 'ENOENT')) throw e; }
+  const per = {}, volgorde = [];
+  regels.forEach(function (r) {
+    const id = String(r.job_id || r.id || '');
+    if (!/^[a-f0-9]{16}$/.test(id)) return;
+    let x = per[id];
+    if (!x) { x = per[id] = { id: id, t: r.sinds || r.t, opdracht: '', onderwerp: '', route: 'socev', status: 'bezig', klaar_op: null, antwoord: null, terug: null, reden: null, telegram: null }; volgorde.push(id); }
+    if (r.soort === 'start' || r.soort === 'niet-gestart') {
+      x.onderwerp = String(r.onderwerp || '').slice(0, 80);
+      x.route = r.route === 'machinekamer' ? 'machinekamer' : 'socev'; x.t = r.sinds || r.t;
+      if (r.soort === 'niet-gestart') { x.status = 'niet-gestart'; x.reden = String(r.reden || '').slice(0, 200); x.klaar_op = r.t; x.telegram = r.telegram !== false; }
+    } else if (r.soort === 'klaar') {
+      x.status = r.ok ? 'klaar' : 'mislukt'; x.klaar_op = r.t; x.opdracht = appAutoKop(r.antwoord); x.antwoord = appAutoKern(r.antwoord);
+    } else if (r.soort === 'terug') {
+      x.terug = APP_AUTO_TERUG[r.uitkomst] || null;
+    }
+  });
+  const nu = Date.now();
+  const items = volgorde.map(function (id) {
+    const x = per[id];
+    if (x.status === 'bezig') {
+      const j = jobs[id];
+      const loopt = j && (j.status === 'pending' || j.status === 'running');
+      if (!loopt && nu - Date.parse(x.t) > APP_AUTO_STIL_MS) x.status = 'onbekend';
+    }
+    return x;
+  }).filter(function (x) { return x.onderwerp || x.opdracht || x.antwoord; });
+  // nog in de wachtrij van de poort (alle werkplekken bezet): alleen in het geheugen
+  if (typeof autoWachtrij !== 'undefined' && Array.isArray(autoWachtrij)) autoWachtrij.forEach(function (w) {
+    items.push({ id: String(w.wacht_id), t: new Date(w.sinds).toISOString(), opdracht: '', onderwerp: typeof autoOnderwerp === 'function' ? autoOnderwerp(w.onderwerp_kort) : '',
+      route: w.mk ? 'machinekamer' : 'socev', status: 'wacht', klaar_op: null, antwoord: null, terug: null, reden: null, telegram: null });
+  });
+  items.sort(function (a, b) { return String(b.t).localeCompare(String(a.t)); });
+  appStaat.autoCache = { op: nu, items: items.slice(0, 100) };
+  return appStaat.autoCache.items;
+}
+async function appAutokastje(req, res) {
+  res._app.stil = true;   // ververst elke 30 s zolang de tab open is
+  let items;
+  try { items = await appAutoItems(); } catch (e) { logError('app-auto', e); return appWeiger(res, 503, 'de gesprekken uit de auto zijn nu niet leesbaar', 'autokastje lezen'); }
+  appStuur(res, 200, { ok: true, items: items, bewaar_dagen: Math.round(APP_LOG_MS / 86400000) });
+}
+
 // ── seintjes (web-push zonder inhoud) ──
 function appPushLees() {
   const p = appLeesStreng(APP_PUSH, { versie: 1, apparaten: {} });
@@ -5314,7 +5497,7 @@ async function appPushStuur(id, reden) {
       const s = p.apparaten[id];
       if (!s || s.endpoint !== sub.endpoint) return;
       if (weg) delete p.apparaten[id];
-      else s.laatst = { op: new Date().toISOString(), status: status, reden: String(reden || '').slice(0, 20) };
+      else s.laatst = { op: new Date().toISOString(), status: status, reden: String(reden || '').slice(0, 30) };   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137)
     });
   } catch (e) { logError('app-push', e); }
   appAudit({ route: 'push', m: 'POST', status: status, apparaat: id, reden: String(reden || '').slice(0, 40) + (weg ? ' (abonnement verlopen, verwijderd)' : '') });
@@ -5545,6 +5728,9 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/bestand/') === 0) return appBestand(req, res, route.slice('GET /app/bestand/'.length));
         if (route === 'GET /app/meldingen') return appMeldingenRoute(req, res, a);
         if (route === 'POST /app/meldingen/gezien') return appMeldingenGezien(req, res, a, d);
+        if (route === 'GET /app/nieuw') return appNieuwRoute(req, res, a);
+        if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);
+        if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/push') return appPushStand(req, res, a);
         if (route === 'POST /app/push/abonneer') return appPushAbonneer(req, res, a, d);
         if (route === 'POST /app/push/opzeggen') return appPushOpzeggen(req, res, a);
@@ -6315,7 +6501,12 @@ function autoGrondwet() {
 }
 
 function autoOnderwerp(s) { return autoSchoon(s, 40).replace(/[^\p{L}\p{N} \-]/gu, '').trim() || 'opdracht'; }
-function autoLog(v) { schrijfLog(nu() + ' auto ' + velden(v)); }
+function autoLog(v) {
+  schrijfLog(nu() + ' auto ' + velden(v));
+  // terugweg van een antwoord (pod: 'terug', kastje: 'uitkomst') ook voor de app-tab Autokastje (wv137)
+  if (v && (v.gebeurtenis === 'terug' || v.gebeurtenis === 'uitkomst') && v.job && v.uitkomst && typeof appAutoNoteer === 'function')
+    appAutoNoteer({ soort: 'terug', job_id: String(v.job), uitkomst: String(v.uitkomst).slice(0, 30) });
+}
 
 function autoSchoon(s, max) { return String(s == null ? '' : s).replace(/[\u0000-\u0008\u000b-\u001f\u007f]+/g, ' ').trim().slice(0, max); }
 
@@ -6367,6 +6558,11 @@ function autoPostAgent(item, klaar) {
         autoAgentLog.push(Date.now());
         autoAgentJobs.add(j.job_id);
         if (item.mk) autoAgentMk.add(j.job_id);
+        // Socev-app tab Autokastje (wv137): alleen het onderwerp (hooguit 3 woorden), NOOIT item.opdracht: dat is Davids letterlijke
+        // tekst ("David zei in de auto letterlijk: …") en het kastje zet niets op schijf (Fable-review wv137 #1).
+        // typeof: de toets in socev-auto laadt alleen dit blok.
+        if (typeof appAutoNoteer === 'function') appAutoNoteer({ soort: 'start', job_id: j.job_id,
+          onderwerp: autoOnderwerp(item.onderwerp_kort), route: item.mk ? 'machinekamer' : 'socev', sinds: new Date(item.sinds).toISOString() });
         if (autoAgentJobs.size > 100) { const oud = autoAgentJobs.values().next().value; autoAgentJobs.delete(oud); autoAgentMk.delete(oud); }
         return cb({ ok: true, job_id: j.job_id });
       }
@@ -6482,6 +6678,9 @@ function autoTerugvalVerzoek(m, cb) {
     label: (mk ? 'machinekamer: auto — ' : 'socev: auto — ') + onderwerp + ' (niet gestart)', chat_id: '40687', ok: false, output: output,
     error: 'niet gestart: ' + reden, files: [], tussenstand: false }, function (err) {
     autoLog({ gebeurtenis: 'terugval', reden: reden, ok: !err, route: mk ? 'machinekamer' : 'socev' });
+    // app-tab Autokastje (wv137): alleen onderwerp en reden, niet de opdracht (letterlijke tekst); na de webhook, met of het lukte
+    if (typeof appAutoNoteer === 'function') appAutoNoteer({ soort: 'niet-gestart', id: crypto.randomBytes(8).toString('hex'), onderwerp: onderwerp,
+      route: mk ? 'machinekamer' : 'socev', reden: AUTO_TERUGVAL_UITLEG[reden] || 'het starten mislukte', telegram: !err });
     cb(err ? { ok: false, fout: 'webhook' } : { ok: true });
   });
 }
@@ -6546,6 +6745,8 @@ function autoLocatieVerzoek(m, cb) {
 }
 function autoPlekVerzoek(m, cb) { autoInAuto().then(function (x) { cb({ ok: true, in_auto: x.in_auto }); }, function () { cb({ ok: true, in_auto: false }); }); }
 function autoNaAfloop(jobId, r, label) {
+  if (/^(socev|machinekamer): auto — /.test(String(label || '')) && typeof appAutoNoteer === 'function')
+    appAutoNoteer({ soort: 'klaar', job_id: jobId, ok: !!(r && r.ok), antwoord: r && typeof r.output === 'string' ? r.output.trim() : '' });
   if (!autoAgentJobs.has(jobId)) {
     // na een herstart van de pod kent de poort de job niet meer: het rapport gaat alleen via Telegram
     if (/^(socev|machinekamer): auto — /.test(String(label || ''))) autoLog({ gebeurtenis: 'terug', job: jobId, uitkomst: 'na-herstart' });
