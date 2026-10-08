@@ -3081,6 +3081,7 @@ const APP_LOG_DIR = process.env.APP_LOG_DIR || '/opt/data/app-log'; // geschiede
 const APP_CONFIG = path.join(APP_DATA, 'config.json');           // geen geheimen: aud, teamdomein, client-id, herkomst
 const APP_POORT_PAD = path.join(APP_DATA, 'geheim', 'poort.key');
 const APP_HEROPEND = path.join(APP_DATA, 'koppel-heropend');      // machinekamer: eerste-apparaatroute opnieuw open
+const APP_HERSTEL_VERVALT = path.join(APP_DATA, 'herstel-vervalt'); // machinekamer: herstelcode én telefoon kwijt (bouwplan § 4.4c)
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
 const APP_CODE_MS = 10 * 60 * 1000;
@@ -3093,10 +3094,18 @@ const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-app
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
-  'POST /app/apparaat/wijzig', 'POST /app/apparaat/open']);
+  'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd']);
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
+// Herstelcode (wv135, bouwplan § 4.4c): één code van 80 bits (16 tekens Crockford-base32), alleen scrypt-hash in het register.
+// Herstelcode én telefoon kwijt: herstel-vervalt; de eis valt pas 24 u NA de eigen waarneming van de pod weg (niet de
+// bestandsdatum) en komt na 48 u ongebruikt terug (Fable-ontwerpreview wv135 #1).
+const APP_HERSTEL_ALFABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const APP_HERSTEL_SCRYPT = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+const APP_HERSTEL_WACHT_MS = 24 * 60 * 60 * 1000;
+const APP_HERSTEL_VENSTER_MS = 48 * 60 * 60 * 1000;
+const APP_HERSTEL_PER_DAG = 5;
 const APP_APPARAAT_COOKIE_S = 400 * 24 * 3600;
 const APP_KOPPEL_PER_UUR = 30;                 // koppel/* (streng)
 const APP_OPENEN_PER_UUR = 120;                // passkey/opties (elke start en elke terugkeer na 2 min; review wv55 #5)
@@ -3345,7 +3354,7 @@ function appSessiesWeg(apparaatId) {
 
 function appSysteem(req) {
   const ua = String(req.headers['x-app-ua'] || '').slice(0, 300);
-  return /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'macOS' : /iPhone|iPad/.test(ua) ? 'iOS' : /Linux/.test(ua) ? 'Linux' : 'onbekend systeem';
+  return /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /iPhone|iPad/.test(ua) ? 'iOS' : /Mac OS X|Macintosh/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : 'onbekend systeem';
 }
 function appBeschrijf(req) {
   // Ter herkenning (koppelbericht, apparatenlijst). Alleen het systeemdeel dient bij goedkeuren als extra rem (geen bewijs).
@@ -3376,6 +3385,7 @@ async function appStatus(req, res, reg) {
   const k = a ? null : appAanvraagVan(req);
   appStuur(res, 200, { ok: true, koppelen_open: appKoppelOpen(reg), aanvraag_mogelijk: appAanvraagMogelijk(reg),
     aanvraag: k ? appAanvraagUit(k) : null, apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort, vaste_plek: a.vaste_plek || null, goedkeurder: a.goedkeurder === true } : null,
+    herstelcode_nodig: appKoppelOpen(reg) && appHerstelActief(reg),   // wv135: veld naast de koppelcode (alleen telefoon)
     sessie: !!s, sessie_tot: s ? new Date(s.tot).toISOString() : null, passkey_klaar: !!appWebauthn() });
 }
 
@@ -3432,6 +3442,123 @@ function appKoppelCheck(req, res, metCode, d) {
   appWeiger(res, 403, over > 0 ? 'code klopt niet; nog ' + over + ' poging(en)' : 'code ongeldig gemaakt na te veel pogingen; vraag een nieuwe aan',
     metCode ? 'code fout' : 'niet geverifieerd');
   return null;
+}
+
+// ── herstelcode (wv135, bouwplan § 4.4c; idee Albert van der Veer) ──
+// Zonder herstelcode was Telegram alleen genoeg om goedkeurder te worden (machinekamer heropent, code komt in Telegram).
+// Bestaat er een herstelcode, dan wordt een telefoon via de coderoute alléén goedkeurder met die code erbij. De code staat
+// nergens leesbaar: alleen scrypt(code, zout) in het register, niet in audit, log of Telegram.
+function appTelefoon(req) { return /^(Android|iOS)$/.test(appSysteem(req)); }
+function appHerstelNorm(ruw) {
+  const c = String(ruw == null ? '' : ruw).normalize('NFKC').toUpperCase().replace(/[^0-9A-Z]+/g, '').replace(/[IL]/g, '1').replace(/O/g, '0');
+  return /^[0-9A-HJKMNP-TV-Z]{16}$/.test(c) ? c : null;
+}
+function appHerstelToon(c) { return c.match(/.{4}/g).join('-'); }
+function appScrypt(code, zout) {
+  // asynchroon: scrypt van ~16 MB blokkeert anders de hele pod (ook Telegram) per poging (Fable-ontwerpreview wv135 #9)
+  return new Promise(function (ok, nee) { crypto.scrypt(code, Buffer.from(zout, 'hex'), 32, APP_HERSTEL_SCRYPT, function (e, k) { if (e) nee(e); else ok(k.toString('hex')); }); });
+}
+async function appHerstelMaak(apparaatId) {
+  const b = crypto.randomBytes(10);   // 80 bits = precies 16 tekens van 5 bits
+  let code = '', val = 0, bits = 0;
+  for (const x of b) { val = ((val << 8) | x) & 0xffff; bits += 8; while (bits >= 5) { code += APP_HERSTEL_ALFABET[(val >>> (bits - 5)) & 31]; bits -= 5; } }
+  const zout = crypto.randomBytes(16).toString('hex');
+  return { code: code, rij: { hash: await appScrypt(code, zout), zout: zout, gemaakt: new Date().toISOString(), apparaat: apparaatId || null, bevestigd: false } };
+}
+// Geeft de geraakte code terug ({hash, zout}: de huidige of de vorige) of null.
+async function appHerstelKlopt(reg, ruw) {
+  const c = appHerstelNorm(ruw);
+  if (!c || !reg.herstel || !reg.herstel.hash) return null;
+  if (appGelijk(await appScrypt(c, reg.herstel.zout), reg.herstel.hash)) return { hash: reg.herstel.hash, zout: reg.herstel.zout };
+  // De vorige code blijft geldig tot de nieuwe goedkeurder zich één keer met zijn cookie meldt: viel het antwoord van
+  // koppel/registreer weg (geen cookie, nieuwe code nooit gezien), dan kan David met dezelfde papieren code opnieuw (Fable-review diff wv135 #4).
+  const v = reg.herstel.vorige;
+  return v && v.hash && appGelijk(await appScrypt(c, v.zout), v.hash) ? { hash: v.hash, zout: v.zout } : null;
+}
+// Eerste geslaagde verzoek van de nieuwe goedkeurder (met cookie en sessie): de vorige code vervalt definitief.
+function appHerstelVorigeWeg(reg, a) {
+  if (!reg.herstel || !reg.herstel.vorige || reg.herstel.apparaat !== a.id) return;
+  try {
+    const vers = appRegister();
+    if (vers.herstel && vers.herstel.vorige && vers.herstel.apparaat === a.id) { delete vers.herstel.vorige; appSchrijfJson(APP_REGISTER, vers); }
+  } catch (e) { logError('app-register', e); }
+}
+// herstel-vervalt: de klok start pas als de pod het bestand zelf zag én dat in Telegram kon melden (staat.json); de
+// bestandsdatum telt niet (touch -d). Open = tussen 24 en 48 u daarna.
+function appHerstelVervaltGezien() {
+  if (!fs.existsSync(APP_HERSTEL_VERVALT)) return null;
+  try { const st = appLeesStreng(APP_STAAT, {}); return st.herstel_vervalt && Number(st.herstel_vervalt.gezien) || null; } catch (e) { return null; }
+}
+function appHerstelVervaltOpen() {
+  const g = appHerstelVervaltGezien();
+  if (!g) return false;
+  const d = Date.now() - g;
+  return d >= APP_HERSTEL_WACHT_MS && d <= APP_HERSTEL_VENSTER_MS;
+}
+function appHerstelActief(reg) { return !!(reg.herstel && reg.herstel.hash) && !appHerstelVervaltOpen(); }
+function appHerstelVervaltWeg() {
+  let weg = false;
+  try { fs.unlinkSync(APP_HERSTEL_VERVALT); weg = true; } catch (e) {}
+  try { const st = appLeesStreng(APP_STAAT, {}); if (st.herstel_vervalt) { delete st.herstel_vervalt; appSchrijfJson(APP_STAAT, st); } } catch (e) { logError('app-staat', e); }
+  return weg;
+}
+// Elke minuut (en in de toets direct): melden, of na 48 u ongebruikt opruimen.
+async function appHerstelVervaltTik() {
+  if (appStaat.herstelTikBezig) return;
+  appStaat.herstelTikBezig = true;
+  try {
+    if (!(await appRolOk())) return;   // alleen de actieve kant meldt en ruimt op
+    let st;
+    try { st = appLeesStreng(APP_STAAT, {}); } catch (e) { logError('app-herstel', e); return; }   // kapotte staat: de klok start niet (dicht)
+    if (!fs.existsSync(APP_HERSTEL_VERVALT)) { if (st.herstel_vervalt) appHerstelVervaltWeg(); return; }
+    const g = st.herstel_vervalt && Number(st.herstel_vervalt.gezien);
+    if (!g) {
+      let reg;
+      try { reg = appRegister(); } catch (e) { return; }
+      if (!reg.herstel || !reg.herstel.hash) {   // er is niets te laten vervallen
+        appHerstelVervaltWeg();
+        appAudit({ route: 'herstel-vervalt', m: 'tik', status: 200, apparaat: null, reden: 'geen herstelcode; bestand weggehaald' });
+        return;
+      }
+      const ok = await appTelegram('Socev-app: in de machinekamer is gevraagd je herstelcode te laten vervallen. Over 24 uur kan een telefoon via de Telegram-code goedkeurder worden zonder herstelcode (een dag lang). Niet jij? /app-noodstop en meld het de machinekamer.');
+      if (!ok || !fs.existsSync(APP_HERSTEL_VERVALT)) return;
+      const st2 = appLeesStreng(APP_STAAT, {});
+      st2.herstel_vervalt = { gezien: Date.now() };
+      appSchrijfJson(APP_STAAT, st2);
+      appAudit({ route: 'herstel-vervalt', m: 'tik', status: 200, apparaat: null, reden: 'gezien en gemeld; eis vervalt over 24 u' });
+      return;
+    }
+    if (Date.now() - g > APP_HERSTEL_VENSTER_MS) {
+      appHerstelVervaltWeg();
+      appAudit({ route: 'herstel-vervalt', m: 'tik', status: 200, apparaat: null, reden: 'venster ongebruikt verlopen' });
+      appTelegram('Socev-app: het venster zonder herstelcode is ongebruikt verlopen; je herstelcode geldt weer.');
+    }
+  } catch (e) { logError('app-herstel', e); }
+  finally { appStaat.herstelTikBezig = false; }
+}
+// In de coderoute (koppel/opties): op een telefoon met een geldige herstelcode is de herstelcode nodig om goedkeurder te
+// worden. true = verder, false = geweigerd (antwoord al gestuurd).
+async function appHerstelKoppel(req, res, reg, k, d) {
+  if (!appTelefoon(req) || !appHerstelActief(reg)) return true;   // laptop: speelt geen rol, niet verbruikt
+  const ruw = d.herstelcode;
+  if (ruw === undefined || ruw === null || ruw === '') {
+    if (k.herstel_ok === reg.herstel.gemaakt) return true;          // eerder in deze koppeling al goed
+    if (d.zonder_herstel === true || k.zonder_herstel) { k.zonder_herstel = true; return true; }
+    res._app.reden = 'herstelcode nodig';
+    appStuur(res, 409, { ok: false, fout: 'vul je herstelcode in; zonder herstelcode word je geen goedkeurder', herstelcode_nodig: true });
+    return false;
+  }
+  const goed = await appHerstelKlopt(reg, ruw);
+  if (appStaat.koppel !== k) { appWeiger(res, 403, 'geen geldige code; vraag een nieuwe aan', 'koppeling vervallen'); return false; }
+  if (!goed) {
+    k.pogingen++;
+    const over = APP_CODE_POGINGEN - k.pogingen;
+    if (over <= 0) appStaat.koppel = null;
+    appWeiger(res, 403, over > 0 ? 'herstelcode klopt niet; nog ' + over + ' poging(en)' : 'koppeling ongeldig gemaakt na te veel pogingen; vraag een nieuwe code aan', 'herstelcode fout');
+    return false;
+  }
+  k.herstel_ok = reg.herstel.gemaakt; k.herstel_code = goed; k.zonder_herstel = false;
+  return true;
 }
 
 // ── fase 2: volgend apparaat via een aanvraag, goedgekeurd op een meereizend apparaat (Fable-review 7-10 #3) ──
@@ -3514,6 +3641,14 @@ function appGoedkeurderFout(req, a, s, wat) {
   if (!sysReg || sysNu !== sysReg) return [wat + ' kan alleen op je Pixel (' + (sysReg || 'onbekend') + '); staat Chrome op "desktopsite", zet dat dan uit', 'systeem ' + sysNu + ' != ' + sysReg];
   return null;
 }
+// Verse vingerafdruk (≤ 2 min) met de passkey van dít apparaat (wv135: ook voor een gevoelige Ja).
+function appVersOk(a, s) { return Date.now() <= s.vers_tot && !!a.credential && !!s.credential && appGelijk(s.credential, a.credential.id); }
+// wv135: dezelfde vier eisen voor een nieuwe herstelcode. false = geweigerd, antwoord gestuurd.
+function appGoedkeurderEis(req, res, a, s, wat) {
+  const f = appGoedkeurderFout(req, a, s, wat);
+  if (f) { appWeiger(res, 403, f[0], f[1]); return false; }
+  return true;
+}
 function appKoppelGoedkeur(req, res, reg, a, s, d, afwijzen) {
   const id = String(d.aanvraag_id || '');
   const k = appAanvraagGeldig();
@@ -3556,7 +3691,10 @@ async function appKoppelOpties(req, res, reg, d) {
   const bron = appKoppelBron(req, res, reg, d, true);
   if (!bron) return;
   const k = bron.k;
-  if (bron.soort === 'code') k.geverifieerd = true;   // de code zelf is hierna verbruikt; opnieuw opties halen kan binnen de 10 minuten
+  if (bron.soort === 'code') {
+    k.geverifieerd = true;   // de code zelf is hierna verbruikt; opnieuw opties halen kan binnen de 10 minuten
+    if (!(await appHerstelKoppel(req, res, reg, k, d))) return;   // wv135: op een telefoon de herstelcode erbij
+  }
   const cfg = appConfig();
   const opties = await wa.generateRegistrationOptions({
     rpName: 'Socev', rpID: cfg.rpId, userName: 'david', userDisplayName: 'David',
@@ -3605,10 +3743,15 @@ async function appKoppelRegistreer(req, res, reg, d) {
   } catch (e) { return fout('controle: ' + String(e && e.message || e).slice(0, 80)); }
   if (!v || !v.verified || !v.registrationInfo || !v.registrationInfo.userVerified) return fout('niet geverifieerd');
   const cred = v.registrationInfo.credential;
+  // wv135: kan dit de goedkeurder worden, dan nu al de nieuwe herstelcode maken (scrypt is asynchroon; na het herlezen van
+  // het register hieronder komt geen await meer, zodat code en goedkeurder in één schrijfactie landen).
+  const telefoon = appTelefoon(req);
+  const nieuw = bron.soort === 'code' && telefoon ? await appHerstelMaak(null) : null;
   const vers = appRegister();   // opnieuw lezen vlak voor het schrijven
   let door = null;
   if (bron.soort === 'code') {
     if (!appKoppelOpen(vers)) return appWeiger(res, 403, 'koppelen dicht', 'route dicht (intussen)');
+    if (appStaat.koppel !== k) return appWeiger(res, 403, 'geen geldige code; vraag een nieuwe aan', 'koppeling vervallen (intussen)');
   } else {
     // de aanvraag moet nog dezelfde zijn, en wie hem goedkeurde nog de actieve goedkeurder
     door = vers.apparaten.find(function (x) { return x.id === k.door && x.actief && x.goedkeurder === true; });
@@ -3619,29 +3762,45 @@ async function appKoppelRegistreer(req, res, reg, d) {
   const geheim = crypto.randomBytes(32).toString('hex');
   const naam = bron.soort === 'aanvraag' ? k.naam : appNaam(d, req);
   const nu = new Date().toISOString();
+  // Alleen de coderoute maakt een goedkeurder, alleen op een telefoon, en - als er een herstelcode is - alleen met die code
+  // (of in het venster van herstel-vervalt). Zonder: wel gekoppeld, geen goedkeurder (zoals de laptop).
+  let goedkeurder = bron.soort === 'code' && telefoon, herstelVia = null;
+  if (goedkeurder && vers.herstel && vers.herstel.hash) {
+    if (appHerstelVervaltOpen()) herstelVia = 'vervallen';
+    else if (k.herstel_ok && k.herstel_ok === vers.herstel.gemaakt) herstelVia = 'herstelcode';
+    else goedkeurder = false;
+  }
   const vast = bron.soort === 'aanvraag' && k.soort === 'vast' && !!APP_PLEKKEN[k.vaste_plek];   // fase 4: gekozen bij de goedkeuring
   const apparaat = { id: id, naam: naam, soort: vast ? 'vast' : 'reist', vaste_plek: vast ? k.vaste_plek : null, systeem: appBeschrijf(req), aangemaakt: nu, laatst_gezien: nu, actief: true,
     cookie_hash: appSha(geheim), credential: { id: cred.id, publicKey: Buffer.from(cred.publicKey).toString('base64url'), counter: cred.counter || 0,
       transports: appTransports(cred.transports) },
     passkey: { soort: v.registrationInfo.credentialDeviceType, backup: !!v.registrationInfo.credentialBackedUp, aaguid: v.registrationInfo.aaguid },
     gekoppeld_via: bron.soort === 'code' ? 'telegram-code' : 'goedkeuring', goedgekeurd_door: door ? door.id : undefined,
-    // Alleen de coderoute maakt een goedkeurder, en dan precies één: de vorige verliest het recht (wisselen = machinekamer).
-    // Rem (Fable-review wv89): alleen een telefoon (Android/iOS volgens de user-agent); koppelt de laptop per code, dan
-    // blijft de bestaande goedkeurder staan.
-    goedkeurder: bron.soort === 'code' && /^(Android|iOS)$/.test(appSysteem(req)) };
-  if (apparaat.goedkeurder) vers.apparaten.forEach(function (x) { if (x.goedkeurder) x.goedkeurder = false; });
+    // Precies één goedkeurder: de vorige verliest het recht (wisselen = machinekamer). Rem (Fable-review wv89): alleen een
+    // telefoon (Android/iOS volgens de user-agent; te vervalsen, daarom sinds wv135 ook de herstelcode).
+    goedkeurder: goedkeurder };
+  if (apparaat.goedkeurder) {
+    vers.apparaten.forEach(function (x) { if (x.goedkeurder) x.goedkeurder = false; });
+    nieuw.rij.apparaat = id;
+    if (herstelVia === 'herstelcode' && k.herstel_code) nieuw.rij.vorige = k.herstel_code;   // de papieren code die David net gebruikte
+    vers.herstel = nieuw.rij;   // de oude code is hiermee verbruikt; de nieuwe ziet David één keer in dit antwoord
+  }
   vers.apparaten.push(apparaat);
   vers.ooit_gekoppeld = true;
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
   if (bron.soort === 'code') { try { fs.unlinkSync(APP_HEROPEND); } catch (e) {} appStaat.koppel = null; }
   else appStaat.aanvraag = null;
-  res._app.apparaat = id; res._app.reden = 'gekoppeld (' + apparaat.systeem + ', ' + apparaat.gekoppeld_via + ')';
+  if (apparaat.goedkeurder) appHerstelVervaltWeg();   // een eventueel venster zonder herstelcode is hiermee gebruikt of overbodig
+  res._app.apparaat = id; res._app.reden = 'gekoppeld (' + apparaat.systeem + ', ' + apparaat.gekoppeld_via + (herstelVia ? ', ' + herstelVia : '') + ')';
+  const blijft = appGoedkeurder(vers) ? ' (dat blijft "' + appGoedkeurder(vers).naam + '").' : '; koppel je telefoon via de machinekamer.';
   appTelegram(bron.soort === 'code'
-    ? 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '). ' + (apparaat.goedkeurder ? 'Alleen dit apparaat mag voortaan nieuwe apparaten goedkeuren.'
-      : 'Geen telefoon, dus geen goedkeurder' + (appGoedkeurder(vers) ? ' (dat blijft "' + appGoedkeurder(vers).naam + '").' : '; koppel je telefoon via de machinekamer.')) +
+    ? 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '). ' + (apparaat.goedkeurder ? 'Alleen dit apparaat mag voortaan nieuwe apparaten goedkeuren' +
+      (herstelVia === 'herstelcode' ? ' (met je herstelcode; die is nu verbruikt)' : herstelVia === 'vervallen' ? ' (zonder herstelcode, na de wachttijd)' : '') + '. De app toont daar één keer een nieuwe herstelcode.'
+      : telefoon ? 'Zonder je herstelcode, dus geen goedkeurder' + blijft : 'Geen telefoon, dus geen goedkeurder' + blijft) +
       ' De koppelroute met code is nu dicht. Niet jij? /app-noodstop en meld het de machinekamer.'
     : 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + ', ' + appPlekTekst(apparaat) + '), goedgekeurd vanaf "' + door.naam + '". Niet jij? Trek het in (tab Apparaten) en meld het de machinekamer.');
-  appStuur(res, 200, { ok: true, apparaat: { id: id, naam: naam, soort: apparaat.soort, vaste_plek: apparaat.vaste_plek, goedkeurder: apparaat.goedkeurder } },
+  appStuur(res, 200, { ok: true, apparaat: { id: id, naam: naam, soort: apparaat.soort, vaste_plek: apparaat.vaste_plek, goedkeurder: apparaat.goedkeurder },
+    herstelcode: apparaat.goedkeurder ? appHerstelToon(nieuw.code) : undefined, herstel_gemaakt: apparaat.goedkeurder ? nieuw.rij.gemaakt : undefined },
     { koppel: null, apparaat: { w: id + '.' + geheim, s: APP_APPARAAT_COOKIE_S }, sessie: appNieuweSessie(apparaat, cred.id) });
 }
 
@@ -3687,17 +3846,50 @@ async function appPasskeyBevestig(req, res, reg, d) {
   appStuur(res, 200, { ok: true, apparaat: { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, goedkeurder: x.goedkeurder === true } }, { sessie: appNieuweSessie(x, antw.id) });
 }
 
+function appHerstelUit(reg) {
+  const h = reg.herstel;
+  const g = appHerstelVervaltGezien();
+  return { bestaat: !!(h && h.hash), gemaakt: h && h.gemaakt || null, bevestigd: !!(h && h.bevestigd),
+    vervalt: !fs.existsSync(APP_HERSTEL_VERVALT) ? null : !g ? 'aangevraagd' : appHerstelVervaltOpen() ? 'open' : Date.now() - g < APP_HERSTEL_WACHT_MS ? 'wacht' : 'verlopen',
+    vervalt_vanaf: g ? new Date(g + APP_HERSTEL_WACHT_MS).toISOString() : null };
+}
 async function appApparatenLijst(req, res, reg, a) {
   const sloten = {};
   // fase 4: de telefoon ziet of het slot open is; een ander apparaat alleen zijn eigen slot (de redenen samen zouden verraden waar
   // David is; review wv134 M2)
   for (const x of reg.apparaten) if (x.actief && x.soort === 'vast' && (a.goedkeurder === true || x.id === a.id)) sloten[x.id] = await appSlot(x);
-  appStuur(res, 200, { ok: true, plekken: Object.keys(APP_PLEKKEN), apparaten: reg.apparaten.map(function (x) {
+  appStuur(res, 200, { ok: true, herstel: appHerstelUit(reg), plekken: Object.keys(APP_PLEKKEN), apparaten: reg.apparaten.map(function (x) {
     return { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, systeem: x.systeem, aangemaakt: x.aangemaakt,
       laatst_gezien: x.laatst_gezien, actief: !!x.actief, ingetrokken_op: x.ingetrokken_op || null, dit_apparaat: x.id === a.id,
       passkey_gesynchroniseerd: !!(x.passkey && x.passkey.backup), gekoppeld_via: x.gekoppeld_via || null, goedkeurder: x.goedkeurder === true,
       slot: sloten[x.id] || null };
   }) });
+}
+
+// wv135: nieuwe herstelcode op de goedkeurder (vier eisen van § 4.4a); de oude vervalt. De vingerafdruk is daarna verbruikt.
+async function appHerstelNieuw(req, res, reg, a, s) {
+  if (!appGoedkeurderEis(req, res, a, s, 'een herstelcode maken')) return;
+  if (!appTijdslot(res, 'herstel_tijden', APP_HERSTEL_PER_DAG)) return;   // synchroon: een 429 verbruikt de vingerafdruk niet
+  s.vers_tot = 0;   // verbruikt, vóór de await (twee tabbladen = niet twee codes op één vingerafdruk)
+  const n = await appHerstelMaak(a.id);
+  const vers = appRegister();
+  const x = vers.apparaten.find(function (y) { return y.id === a.id && y.actief && y.goedkeurder === true; });
+  if (!x) return appWeiger(res, 403, 'dit apparaat is (intussen) geen goedkeurder meer', 'geen goedkeurder (intussen)');
+  vers.herstel = n.rij;
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
+  const vervalt = appHerstelVervaltWeg();   // de telefoon is er dus nog: een lopend verzoek tot vervallen is afgebroken
+  res._app.reden = 'nieuwe herstelcode' + (vervalt ? ' (herstel-vervalt afgebroken)' : '');
+  appTelegram('Socev-app: nieuwe herstelcode gemaakt op "' + x.naam + '"; de vorige werkt niet meer.' + (vervalt ? ' Het verzoek om je herstelcode te laten vervallen is daarmee afgebroken.' : '') + ' Niet jij? /app-noodstop en meld het de machinekamer.');
+  appStuur(res, 200, { ok: true, herstelcode: appHerstelToon(n.code), gemaakt: n.rij.gemaakt });
+}
+// David tikte "opgeschreven" (alleen voor de weergave: een code die nooit getoond werd, blijft zichtbaar als open punt).
+function appHerstelBevestigd(req, res, reg, a, d) {
+  const vers = appRegister();
+  if (!vers.herstel || a.goedkeurder !== true || String(d.gemaakt || '') !== vers.herstel.gemaakt) return appWeiger(res, 409, 'deze herstelcode is niet (meer) de geldige', 'herstel bevestigd: andere code');
+  vers.herstel.bevestigd = true;
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
+  res._app.reden = 'herstelcode opgeschreven';
+  appStuur(res, 200, { ok: true, herstel: appHerstelUit(vers) });
 }
 
 function appIntrekken(req, res, reg, a, s, d) {
@@ -3875,6 +4067,34 @@ function appVraagUit(raw) {
   for (const ch of vq[1]) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
   return { hash: h.toString(16).padStart(8, '0'), tekst: vq[1].replace(/[*_]+\s*$/, '').trim() };
 }
+// wv135 (bouwplan § 4.4d, idee Albert van der Veer): een Ja op een vraag over versturen, verwijderen, agenda of geld vraagt in
+// de app een verse vingerafdruk. De pod beslist uit de vraagzin in Socevs eigen antwoord, niet uit wat de browser zegt. Liever
+// een tik te veel dan te weinig; de CLAUDE.md-regel ([APP]) is het tweede slot voor wat de woorden missen.
+const APP_GEVOELIG = [
+  // Stammen zonder \b ervoor (versturen, toesturen, leeggemaakt; Fable-review diff wv135 #1). Tekst is vooraf in kleine letters en
+  // zonder accenten (ë -> e). Regressieset: /opt/data/mk-scripts/wv135/vragen-regressie.txt.
+  ['versturen', /stuur|sturen|zend|mail|\bsms|\bapp(en|je|jes|t)\b|whatsapp|bericht|publice|\bpost(en)?\b|plaats|doorgeef|doorgeven|geef\b[^.?!]*\bdoor\b|\bdeel\b|\bdelen\b|laten weten|laat\b[^.?!]*\bweten\b|informe|reageer|reageren|beantwoord|antwoord\b[^.?!]*\b(aan|naar)\b|uitnodig|nodig\b[^.?!]*\buit\b|meld(?!ing)|inschrijv|uitschrijv|schrijf\b[^.?!]*\b(in|uit)\b|toezeg|zeg\b[^.?!]*\btoe\b|namens|\b(onder)?teken(en|t)?\b|\bbel(len|t)?\b|terugbel|accept|indien|dien\b[^.?!]*\bin\b|aanvra|vraag\b[^.?!]*\baan\b/],
+  ['verwijderen', /verwijder|\bwis(sen)?\b|schrap|\bweg\b|weghal|weggooi|annule|\bzeg\b[^.?!]*\b(af|op)\b|afzeg|opzeg|intrek|trek\b[^.?!]*\bin\b|archive|leeg|opruim|ruim\b[^.?!]*\bop\b|opschon|schoon\b[^.?!]*\bop\b|vernietig|\bstop|beeindig|overschrijf|overschrijv|vervang|afsluit|sluit\b[^.?!]*\baf\b|uitzet|zet\b[^.?!]*\buit\b|reset|herstart|formatte|dichtzet|zet\b[^.?!]*\bdicht\b|ontkoppel|uittrek|inkort|\bkort\b[^.?!]*\bin\b/],
+  ['agenda', /agenda|afspra|inplan|plan\b[^.?!]*\bin\b|verzet|verplaats|reserve|\bboek|verschuif|schuif\b[^.?!]*\bop\b/],
+  ['geld', /betaal|betalen|overmaak|overmaken|maak\b[^.?!]*\bover\b|bestel|\bkoop|kopen|aanschaf|factur|declar|incass|\bgeld\b|€|euro|bedrag|voldoe|abonnement|contract/],
+];
+function appGevoelig(tekst) {
+  const t = String(tekst || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  if (!t.trim()) return 'onleesbaar';   // fail-closed
+  for (const [reden, re] of APP_GEVOELIG) if (re.test(t)) return reden;
+  return null;
+}
+// Getypte tekst mag geen knopdruk of andere herkomstmarkering nabootsen: Socev herkent een bevestigde knop aan een beurt die
+// begint met "[APP] [KNOP] David drukte JA" (Fable-ontwerpreview wv135 #2). Regels die met zo'n markering beginnen krijgen
+// "(getypt) " ervoor; de weergave in de app houdt Davids eigen tekst.
+function appOntmasker(t) {
+  // Eerst normaliseren: onzichtbare opmaaktekens (zero-width, BOM, zachte afbreking, woordverbinder) weg en NFKC (vol-breedte ［ -> [),
+  // anders glipt "​[KNOP]" erdoor (Fable-review diff wv135 #2). Daarna ELKE markering, waar ook in de tekst (ook na "> " of
+  // "**"), en niet alleen aan het begin van een regel.
+  return String(t).replace(/\p{Cf}/gu, '').normalize('NFKC')
+    .replace(/\[(\s*)(KNOP|APP|REPLY OP VRAAG|FILES-PORTAAL|MACHINEKAMER|Systeem|WERKVOORRAAD|HEARTBEAT)\b/gi, '(getypt) [$1$2');
+}
+
 function appUitvoer(j) {
   const r = (j && j.result) || {};
   let out = typeof r.output === 'string' ? r.output : '';
@@ -3949,7 +4169,9 @@ async function appNaBeurt(jobId) {
   const out = appUitvoer(j);
   const vraag = appVraagUit(out);
   if (vraag) {
-    try { const v = appVragen(); v[jobId + ':' + vraag.hash] = { kanaal: j.app.kanaal, t: new Date().toISOString(), antwoord: null }; appVragenSchrijf(v); }
+    // gevoelig één keer bepalen en vastleggen (Fable-ontwerpreview wv135 #6); een rij zonder dit veld (ouder) telt als gevoelig
+    const gev = appGevoelig(vraag.tekst);
+    try { const v = appVragen(); v[jobId + ':' + vraag.hash] = { kanaal: j.app.kanaal, t: new Date().toISOString(), antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined }; appVragenSchrijf(v); }
     catch (e) { logError('app-vragen', e); }
   }
   j.app.vraag = vraag;
@@ -4230,7 +4452,7 @@ async function appBeurt(req, res, reg, a, s, d) {
   const ids = appBeurtIds();
   if (ids[bh]) { res._app.reden = 'herhaling ' + ids[bh].job; return appStuur(res, 200, { ok: true, job_id: ids[bh].job, al: true }); }   // tweede kwam tijdens de rolcheck
   const namen = upload ? upload.lijst.map(function (x) { return x.doel; }) : [];
-  const st = appStartBeurt(a, kanaal, upload ? appBestandenPrompt(tekst, namen) : tekst, { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload });
+  const st = appStartBeurt(a, kanaal, upload ? appBestandenPrompt(appOntmasker(tekst), namen) : appOntmasker(tekst), { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload });
   if (!st.job_id) return appStartFout(res, st);
   ids[bh] = { job: st.job_id, t: Date.now() };
   try { appSchrijfJson(APP_BEURTEN, ids); } catch (e) { logError('app-beurten', e); }
@@ -4240,6 +4462,9 @@ async function appBeurt(req, res, reg, a, s, d) {
 
 function appBeantwoord(jobId, hash) {
   try { const v = appVragen()[jobId + ':' + hash]; return v && v.antwoord ? v.antwoord : null; } catch (e) { return null; }
+}
+function appVraagGevoelig(jobId, hash) {
+  try { const v = appVragen()[jobId + ':' + hash]; return !v || v.gevoelig !== false; } catch (e) { return true; }
 }
 
 function appUitslag(req, res, reg, a, s, d) {
@@ -4260,7 +4485,7 @@ function appUitslag(req, res, reg, a, s, d) {
   const vraag = j.app.vraag !== undefined ? j.app.vraag : appVraagUit(out);
   appStuur(res, 200, { ok: true, gevonden: true, klaar: true, kanaal: j.app.kanaal, job_id: id, gelukt: r.ok !== false,
     antwoord: out, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : null,
-    vraag: vraag ? { hash: vraag.hash, tekst: vraag.tekst, beantwoord: appBeantwoord(id, vraag.hash) } : null,
+    vraag: vraag ? { hash: vraag.hash, tekst: vraag.tekst, beantwoord: appBeantwoord(id, vraag.hash), gevoelig: appVraagGevoelig(id, vraag.hash) } : null,
     bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
 }
 
@@ -4290,27 +4515,38 @@ async function appKnop(req, res, reg, a, s, d) {
   if (!rij) return appWeiger(res, 404, 'deze vraag ken ik niet (meer); antwoord gewoon in tekst', 'onbekende vraag');
   const al = function (x) { return appStuur(res, 409, { ok: false, fout: 'al beantwoord: ' + (x.keuze === 'ja' ? 'Ja' : x.keuze === 'nee' ? 'Nee' : 'Anders') + ' ' + appKlok(x.t), beantwoord: x }); };
   if (rij.antwoord) { res._app.reden = 'al beantwoord'; return al(rij.antwoord); }
+  // wv135 (§ 4.4d): Ja op een gevoelige vraag (versturen, verwijderen, agenda, geld; rij zonder veld = gevoelig) eist een verse
+  // vingerafdruk met de passkey van dit apparaat, en verbruikt hem: controleren én verbruiken vóór de eerste await, zodat twee
+  // tabbladen niet twee gevoelige Ja's op één vingerafdruk krijgen (Fable-ontwerpreview wv135 #5). Start er niets, dan terug.
+  const gevoeligJa = keuze === 'ja' && rij.gevoelig !== false;
+  let versOud = null;
+  if (gevoeligJa) {
+    if (!appVersOk(a, s)) { res._app.reden = 'gevoelig, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig deze Ja met je vingerafdruk', vers_nodig: true }); }
+    versOud = s.vers_tot; s.vers_tot = 0;
+  }
+  const terug = function () { if (versOud !== null && s.vers_tot === 0) s.vers_tot = versOud; };
   const vz = (await appKnopVraagTekst(jobId, rij.kanaal, hash)) || '(vraagzin niet leesbaar in het bericht)';
-  if (!(await appMagBeurt(res, rij.kanaal))) return;
+  if (!(await appMagBeurt(res, rij.kanaal))) return terug();
   // opnieuw lezen ná het wachten: een tweede druk die intussen binnenkwam, wint niet
   v = appVragen();
-  if (!v[sleutel]) return appWeiger(res, 404, 'deze vraag ken ik niet (meer)', 'onbekende vraag');
-  if (v[sleutel].antwoord) { res._app.reden = 'al beantwoord'; return al(v[sleutel].antwoord); }
+  if (!v[sleutel]) { terug(); return appWeiger(res, 404, 'deze vraag ken ik niet (meer)', 'onbekende vraag'); }
+  if (v[sleutel].antwoord) { terug(); res._app.reden = 'al beantwoord'; return al(v[sleutel].antwoord); }
   const tijd = appKlok();
   const kanaalNaam = rij.kanaal === 'hoofd' ? 'het hoofdkanaal' : 'de machinekamer';
   const tekst = keuze === 'anders'
-    ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + toel + '\n(Knopdruk in de app (' + kanaalNaam + ') om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
-    : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk in de app (' + kanaalNaam + ') om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)';
-  const antwoord = { keuze: keuze, t: new Date().toISOString(), apparaat: a.id };
+    ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk in de app (' + kanaalNaam + ') om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
+    : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk in de app (' + kanaalNaam + ') om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)';
+  const antwoord = { keuze: keuze, t: new Date().toISOString(), apparaat: a.id, vingerafdruk: gevoeligJa || undefined };
   v[sleutel].antwoord = antwoord;
-  try { appVragenSchrijf(v); } catch (e) { logError('app-vragen', e); return appWeiger(res, 500, 'opslag', 'vragen niet schrijfbaar'); }
-  const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', tekst: (keuze === 'ja' ? '✓ Ja' : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
+  try { appVragenSchrijf(v); } catch (e) { logError('app-vragen', e); terug(); return appWeiger(res, 500, 'opslag', 'vragen niet schrijfbaar'); }
+  const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', tekst: (keuze === 'ja' ? '✓ Ja' + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
   if (!st.job_id) {
-    // niet gestart: de vraag is dan ook niet beantwoord
+    // niet gestart: de vraag is dan ook niet beantwoord, en de vingerafdruk niet gebruikt
     try { const w = appVragen(); if (w[sleutel]) { w[sleutel].antwoord = null; appVragenSchrijf(w); } } catch (e) { logError('app-vragen', e); }
+    terug();
     return appStartFout(res, st);
   }
-  res._app.reden = 'knop ' + keuze + ' ' + hash + ' -> ' + st.job_id;
+  res._app.reden = 'knop ' + keuze + (gevoeligJa ? ' (vingerafdruk)' : '') + ' ' + hash + ' -> ' + st.job_id;
   appStuur(res, 200, { ok: true, job_id: st.job_id, beantwoord: antwoord });
 }
 
@@ -4340,7 +4576,7 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
   items = items.slice(-max).map(function (x) {
     const b = x.vraag_hash && vragen[x.job_id + ':' + x.vraag_hash];
     return { t: x.t, job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
-      vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null } : null,
+      vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false } : null,
       bestanden: x.bestanden || [] };
   });
   // wie de geschiedenis met een afgerond antwoord ophaalt, heeft het gezien (fase 5c, Fable-review wv100 B2)
@@ -5272,6 +5508,7 @@ function handleApp(req, res) {
         const s = a ? appSessie(req, a, false) : null;
         if (!s) return appWeiger(res, 401, 'bevestig met je vingerafdruk', a ? 'geen sessie' : 'geen apparaat');
         res._app.apparaat = a.id;
+        appHerstelVorigeWeg(reg, a);   // wv135
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en de
         // BSN-weigering (§ 4.11). Daarna verder met slotKlaar = true (apparaat en sessie worden dan opnieuw gecontroleerd).
         if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
@@ -5293,6 +5530,8 @@ function handleApp(req, res) {
         if (route === 'GET /app/apparaat/aanvraag') return appAanvraagLijst(req, res);
         if (route === 'POST /app/koppel/goedkeur') return appKoppelGoedkeur(req, res, reg, a, s, d, false);
         if (route === 'POST /app/koppel/afwijs') return appKoppelGoedkeur(req, res, reg, a, s, d, true);
+        if (route === 'POST /app/herstel/nieuw') return appHerstelNieuw(req, res, reg, a, s);
+        if (route === 'POST /app/herstel/bevestigd') return appHerstelBevestigd(req, res, reg, a, d);
         if (upload) return appUpload(req, res, reg, a, route.slice('POST /app/upload/'.length));
         if (route === 'POST /app/beurt') return appBeurt(req, res, reg, a, s, d);
         if (route === 'POST /app/uitslag') return appUitslag(req, res, reg, a, s, d);
@@ -5350,6 +5589,8 @@ function appNoodstop(bron) {
   uit.aanvraag = !!appStaat.aanvraag; appStaat.aanvraag = null;
   uit.koppelcode = !!appStaat.koppel; appStaat.koppel = null;
   try { fs.unlinkSync(APP_HEROPEND); uit.heropend_weg = true; } catch (e) { if (!e || e.code !== 'ENOENT') uit.fouten.push('koppel-heropend: ' + (e && e.code || e)); }
+  // wv135: een lopend verzoek om de herstelcode te laten vervallen is afgebroken; de herstelcode zelf blijft (bewijs om opnieuw op te bouwen)
+  uit.herstel_vervalt_weg = appHerstelVervaltWeg();
   try {
     const reg = appRegister();
     reg.apparaten.forEach(function (x) {
@@ -5382,6 +5623,7 @@ setInterval(function () {
   if (appStaat.koppel && nu > appStaat.koppel.tot) appStaat.koppel = null;
   if (appStaat.aanvraag && nu > appStaat.aanvraag.tot) appStaat.aanvraag = null;
   if (new Date(nu).getMinutes() % 10 === 0) { appUploadOpruim(false); appIoOpruim(); }   // klaarstaand > 1 u en weesmappen (wv99)
+  appHerstelVervaltTik();   // wv135: herstel-vervalt melden of na 48 u opruimen
 }, 60 * 1000).unref();
 setTimeout(function () { appIoOpruim(); }, 30 * 1000).unref();   // na een herstart bestaat geen app-beurt meer: weesmappen weg
 
@@ -5399,6 +5641,7 @@ function appInfo() {
     bestanden_mb: Math.round((appStaat.bestandenTotaal || 0) / 1048576),
     passkey_bibliotheek: appWebauthn() ? appStaat.webauthnBron : 'ontbreekt',
     seintjes: appPushInfo(),
+    herstel: (function () { const h = appHerstelUit(reg); return { bestaat: h.bestaat, bevestigd: h.bevestigd, vervalt: h.vervalt }; })(),
     // podklok tegen de Date-kop van de Access-certs (Fable-review 7-10 #12); > 2 min = alle Access-bewijzen falen
     klok_afwijking_s: afw, klok_gemeten: k ? new Date(k.op).toISOString() : null,
     klok_waarschuwing: afw !== null && Math.abs(afw) > 120 ? 'podklok wijkt ' + afw + ' s af; Access-bewijzen falen dan (exp/nbf)' : null };
