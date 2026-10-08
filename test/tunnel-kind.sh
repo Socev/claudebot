@@ -2,7 +2,8 @@
 # Toetst (6-10-2026, uitwijk stap 2): de tunnel socev-olares als kind van server.js en de publieke levenscheck.
 # Draait een kopie van de ECHTE server.js op een losse poort met een nep-`cloudflared` die zijn argumenten en de NAMEN
 # in zijn omgeving opschrijft en een nep-/ready serveert. Geen Cloudflare nodig.
-# Let op: draai dit niet op een pod waar al een echte cloudflared-tunnel loopt (dan geldt die als "los proces").
+# Een echte cloudflared op de pod (metrics 20241) stoort niet meer: los proces telt alleen bij dezelfde metrics-poort
+# of zonder --metrics (6d, review #11); de nep draait op 18741. Geval 6 (6d): kant vps/onbekend -> nooit een kind.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
@@ -36,7 +37,7 @@ function server(naam, poort, extraEnv) {
     RUNTIME_FILE: path.join(d, 'runtime.json'), CODEX_HOME: path.join(d, 'codex'), SLEUTELPORTAAL_SLEUTEL: path.join(d, 'geen.key'),
     OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1', LESSEN_INJECTIE: '0', API_SECRET: 'proef', PORT: String(poort),
     TUNNEL_BIN: NEP, TUNNEL_LOG: path.join(d, 'tunnel.log'), TUNNEL_UIT_BESTAND: path.join(d, 'tunnel-uit'),
-    TUNNEL_METRICS_POORT: String(METRICS), GEHEIM_NEP: 'mag-niet-mee' }, extraEnv);
+    TUNNEL_METRICS_POORT: String(METRICS), GEHEIM_NEP: 'mag-niet-mee', SOCEV_KANT: 'olares' }, extraEnv);
   delete env.CLOUDFLARE_TUNNEL_TOKEN_OLARES; delete env.AGENT_WEBHOOK_URL; delete env.SOCEV_AGENT_RUN;
   Object.assign(env, extraEnv);
   const p = spawn(process.execPath, [path.join(d, 'server.js')], { env, detached: true, stdio: ['ignore', fs.openSync(path.join(d, 'stdout.log'), 'a'), fs.openSync(path.join(d, 'stdout.log'), 'a')] });
@@ -114,6 +115,24 @@ const nepPids = () => fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).fil
     await slaap(800);
     toets('uit-bestand: geen start', starts().length === voor5 && /uitgezet/.test(he.tunnel.reden_uit || ''), JSON.stringify(he.tunnel));
     stop(s5);
+
+    // 6. kant vps (uitwijk stap 6d): token + binary aanwezig, toch nooit een kind; ook niet na de herstartwachttijd
+    const voor6 = starts().length;
+    const s6 = server('f', 18655, { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep-token-1234567890', SOCEV_KANT: 'vps' }); servers.push(s6);
+    const hf = await klaar(s6.poort);
+    await slaap(3000);
+    const hf2 = await req(s6.poort, '/health');
+    toets('kant vps: geen kind ondanks token + binary', starts().length === voor6 && hf2.tunnel.aan === false && hf2.tunnel.reden_uit === 'kant vps: geen Olares-tunnel' && hf2.tunnel.starts === 0, hf && JSON.stringify(hf2.tunnel));
+    toets('kant vps: /health kant=vps', hf2.kant === 'vps', String(hf2.kant));
+    toets('kant vps: één logregel "niet gestart"', (fs.readFileSync(path.join(s6.d, 'api.log'), 'utf8').match(/tunnel .*niet_gestart/g) || []).length === 1);
+    stop(s6);
+    // 6b. ongeldige kant -> onbekend -> ook geen kind
+    const s7 = server('g', 18656, { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep', SOCEV_KANT: 'VPS ' }); servers.push(s7);
+    await klaar(s7.poort);
+    await slaap(1500);
+    const hg = await req(s7.poort, '/health');
+    toets('kant ongeldig: onbekend, geen kind', starts().length === voor6 && hg.tunnel.aan === false && hg.tunnel.reden_uit === 'kant onbekend: geen Olares-tunnel', JSON.stringify(hg.tunnel));
+    stop(s7);
   } catch (e) { toets('onverwachte fout', false, e.message); }
   servers.forEach(stop);
   nepPids().forEach((p) => { try { process.kill(p, 'SIGKILL'); } catch (e) {} });

@@ -54,7 +54,7 @@ const TEAM = 'https://huisdokter.cloudflareaccess.com';
 const KLUISNAAM = 'cloudflare_tunnel_token_olares';
 const BIN = '/opt/data/bin/cloudflared';
 const LOG = '/opt/data/bin/tunnel.log';
-const METRICS = '127.0.0.1:20241';
+const METRICS = '127.0.0.1:' + (process.env.TUNNEL_METRICS_POORT || '20241');   // zelfde poort als server.js (los-proces-herkenning)
 
 // Wat de tunnel doorlaat. Volgorde telt: de eerste regel die past wint. Alles wat niet past: 404.
 // Sinds 6-10-2026 avond (Google Safe Browsing vlagde heel huisdokter.dev als phishing, 3e keer): onder huisdokter.dev
@@ -392,6 +392,11 @@ async function toetsAppPod(n404) {
 
 (async function () {
   const stap = process.argv[2] || 'toets';
+  // Uitwijk stap 6d (review 8-10 #2): dit script raakt socev-olares en start zo nodig een cloudflared met een vers
+  // token van de Cloudflare-API. Op de VPS-pod (SOCEV_KANT=vps) zou dat een tweede connector aan de Olares-tunnel
+  // hangen; daar weigert het daarom alles.
+  const kant = process.env.SOCEV_KANT || 'olares';
+  if (kant !== 'olares') { console.error('tunnel-inrichten: kant ' + kant + ': dit script hoort alleen bij Olares (socev-olares); niets gedaan'); process.exit(2); }
   try {
     if (process.argv.includes('--editor')) throw new Error('--editor bestaat niet meer: geen editor of inlog onder huisdokter.dev (phishingvlag Google, 6-10-2026); editor via n8n.primumnonnocere.olares.com');
     if (stap === 'toets') process.exit(await toets() ? 1 : 0);

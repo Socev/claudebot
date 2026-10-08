@@ -5297,7 +5297,10 @@ function rolInfo() {
     stand_sinds: rol.stand_sinds, sinds_rol_iso: new Date(rol.sinds_rol).toISOString(),
     gelezen_iso: rol.gelezen ? new Date(rol.gelezen).toISOString() : null,
     leeftijd_s: rol.gelezen ? Math.round((Date.now() - rol.gelezen) / 1000) : null,
-    fout: rol.fout, fouten_op_rij: rol.fouten_op_rij, wissels: rol.wissels, runsh_poort: ROL_RUNSH_POORT };
+    fout: rol.fout, fouten_op_rij: rol.fouten_op_rij, wissels: rol.wissels, runsh_poort: ROL_RUNSH_POORT,
+    // Kant zoals fetch-secrets.sh (image) hem toepaste; null = image van vóór stap 6d (dan geen n8n-override en het
+    // Olares-tunneltoken nog in de omgeving). naar-vps eist hier 'vps' vóór de eerste beurt (review 6d #5).
+    fetch_secrets_kant: process.env.FETCH_SECRETS_KANT || null };
 }
 
 // Direct bij de processtart: het bestand van het vorige proces telt niet meer (review stap 3, #7).
@@ -6268,6 +6271,9 @@ server.on('upgrade', function (req, sock, head) {
 // hem binnen 5 min weer aan.
 // Draait er al een los cloudflared-tunnelproces (van vóór een uitrol, of de overbrugging tot de eerstvolgende
 // podstart, gestart door tools/tunnel-inrichten.js), dan start hier geen tweede: reden_uit noemt dan het pid.
+// Alleen op kant olares (uitwijk stap 6d, review 7-10 #2): de kluis kent geen kant, dus een pod op de VPS krijgt óók
+// cloudflare_tunnel_token_olares. Zonder deze regel hing die pod als tweede connector aan socev-olares en verdeelde
+// Cloudflare het verkeer over twee kanten. De VPS heeft zijn eigen tunnel (cloudflared-container, socev-vps).
 const TUNNEL_BIN = process.env.TUNNEL_BIN || '/opt/data/bin/cloudflared';
 const TUNNEL_LOG = process.env.TUNNEL_LOG || '/opt/data/bin/tunnel.log';
 const TUNNEL_UIT_BESTAND = process.env.TUNNEL_UIT_BESTAND || '/opt/data/bin/tunnel-uit';
@@ -6287,7 +6293,13 @@ function tunnelLosProces() {
     const delen = cmd.split('\0');
     // [0] is de binary; bij een script met shebang (de toets) is dat de interpreter en staat de naam op [1].
     // 'tunnel' én 'run': een losse 'cloudflared tunnel list/info' van een agent telt niet (review 6-10).
-    if ((/cloudflared$/.test(delen[0] || '') || /cloudflared$/.test(delen[1] || '')) && delen.indexOf('tunnel') >= 0 && delen.indexOf('run') >= 0) return parseInt(pid, 10);
+    if (!((/cloudflared$/.test(delen[0] || '') || /cloudflared$/.test(delen[1] || '')) && delen.indexOf('tunnel') >= 0 && delen.indexOf('run') >= 0)) continue;
+    // Met een ándere metrics-poort dan de onze is het niet onze tunnel (6d, review #11): zo kan de toets naast de
+    // echte tunnel in de pod draaien. Zonder --metrics (of met --metrics=…) telt hij wél. Gevolg: een handmatige
+    // start op Olares moet poort 20241 gebruiken (of geen --metrics), anders start hier een tweede connector.
+    const m = delen.indexOf('--metrics');
+    if (m >= 0 && delen[m + 1] !== '127.0.0.1:' + TUNNEL_METRICS_POORT) continue;
+    return parseInt(pid, 10);
   }
   return null;
 }
@@ -6295,6 +6307,13 @@ function tunnelLosProces() {
 function tunnelStart() {
   tunnel.timer = null;
   if (tunnel.kind) return;
+  // Geen herstartplanning: de kant verandert niet tijdens de levensduur van dit proces.
+  if (ROL_KANT !== 'olares') {
+    const reden = 'kant ' + ROL_KANT + ': geen Olares-tunnel';
+    if (tunnel.reden_uit !== reden) schrijfLog(nu() + ' tunnel ' + velden({ gebeurtenis: 'niet gestart', kant: ROL_KANT }));
+    tunnel.reden_uit = reden;
+    return;
+  }
   // Blijft pollen (hooguit elke 5 min): bestand weg = tunnel weer aan, zonder herstart (review 6-10).
   if (fs.existsSync(TUNNEL_UIT_BESTAND)) { tunnel.reden_uit = 'uitgezet (' + TUNNEL_UIT_BESTAND + ')'; tunnelPlanHerstart(); return; }
   if (!fs.existsSync(TUNNEL_BIN)) { tunnel.reden_uit = 'cloudflared ontbreekt (' + TUNNEL_BIN + ')'; return; }

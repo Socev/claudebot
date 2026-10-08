@@ -23,6 +23,64 @@ set -u
 
 log() { printf '%s fetch-secrets: %s\n' "$(date '+%F %T')" "$1"; }
 
+# ── Kant (uitwijk stap 6d, 8-10-2026) ──────────────────────────────────────
+#
+# WAAROM. De kluis kent geen kant: een pod op de uitwijk-VPS krijgt precies
+# dezelfde secrets als Olares. Twee daarvan horen bij één kant:
+#   - cloudflare_tunnel_token_olares: daarmee hangt een tweede pod als connector
+#     aan de Olares-tunnel en verdeelt Cloudflare het verkeer over twee kanten.
+#     server.js start de tunnel alleen op kant olares; hier gaat het token op de
+#     VPS bovendien uit de omgeving, zodat ook een agent er niets mee kan.
+#   - n8n_mcp_token en n8n_api_key horen bij de Olares-n8n. De verse n8n op de
+#     VPS maakt eigen exemplaren; `uitwijk naar-vps` geeft die mee als
+#     UITWIJK_N8N_MCP_TOKEN / UITWIJK_N8N_API_KEY (env_file op tmpfs). Omdat dit
+#     script de kluiswaarden ÓVER de containeromgeving zet, kan dat alleen hier.
+# Geen extra kluisaanroep, geen bestand: twee vaste namen uit de omgeving.
+# Bouwplan uitwijk §10 stap 6d; review 8-10.
+case "${SOCEV_KANT:-olares}" in
+  olares|vps) KANT="${SOCEV_KANT:-olares}" ;;
+  *)
+    # Een typo (VPS, "vps ") zou hier als Olares gelden en het tunneltoken laten staan,
+    # terwijl server.js op 'onbekend' passief gaat. Liever niet starten.
+    log "FATAAL: SOCEV_KANT is gezet maar niet exact olares of vps - afsluiten (waarde niet gelogd)"
+    exit 78 ;;
+esac
+
+# kant_toepassen: vlak vóór elke exec. Zet FETCH_SECRETS_KANT (in /health, zodat
+# naar-vps kan zien dat het image deze stap kent) en past de kant toe.
+kant_toepassen() {
+  local N W
+  export FETCH_SECRETS_KANT="$KANT"
+  if [ "$KANT" = vps ]; then
+    if [ -n "${CLOUDFLARE_TUNNEL_TOKEN_OLARES:-}" ]; then
+      unset CLOUDFLARE_TUNNEL_TOKEN_OLARES
+      log "kant vps: cloudflare_tunnel_token_olares uit de omgeving gehaald (nooit een connector van socev-olares)"
+    fi
+    GELADEN="$(printf '%s' "${GELADEN:-}" | tr ',' '\n' | grep -vx 'cloudflare_tunnel_token_olares' | paste -sd, -)"
+    for N in N8N_MCP_TOKEN N8N_API_KEY; do
+      W="$(printenv "UITWIJK_$N" || true)"
+      if [ -n "$W" ]; then
+        export "$N=$W"
+        log "kant vps: \$$N uit \$UITWIJK_$N (n8n van de VPS)"
+      else
+        # De kluiswaarde hoort bij de Olares-n8n: liever geen dan een verkeerde.
+        unset "$N"
+        GELADEN="$(printf '%s' "$GELADEN" | tr ',' '\n' | grep -vx "$(printf '%s' "$N" | tr '[:upper:]' '[:lower:]')" | paste -sd, -)"
+        log "kant vps: \$UITWIJK_$N ontbreekt - \$$N leeg gelaten (geen n8n-MCP/-API tot naar-vps hem zet)"
+      fi
+    done
+  else
+    for N in N8N_MCP_TOKEN N8N_API_KEY; do
+      if [ -n "$(printenv "UITWIJK_$N" || true)" ]; then
+        log "kant $KANT: \$UITWIJK_$N genegeerd (alleen op kant vps)"
+      fi
+    done
+  fi
+  W=""
+  unset UITWIJK_N8N_MCP_TOKEN UITWIJK_N8N_API_KEY
+  log "kant=$KANT"
+}
+
 RPC_PAD="/rest/v1/rpc/sb_pod_secrets_lezen"
 POGINGEN=3
 WACHT=(2 5 15)
@@ -85,6 +143,7 @@ if [ "${POD_ZONDER_KLUIS:-}" = "1" ]; then
   export KLUIS_OVERGESLAGEN=1   # zichtbaar in /health, zodat de wachters het onderscheid zien
   # Zelfde opruiming als op de andere exec-paden: wat niet nodig is, geven we niet door.
   unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY 2>/dev/null || true
+  kant_toepassen
   exec "$@"
 fi
 
@@ -97,6 +156,7 @@ if [ -z "${POD_BOOTSTRAP_SECRET:-}" ]; then
     log "POD_BOOTSTRAP_SECRET leeg, maar CLAUDE_CODE_OAUTH_TOKEN staat in de omgeving -> overgangsmodus, doorstarten op de bestaande env"
     export SECRETS_GELADEN=""
     unset POD_BOOTSTRAP_SECRET SUPABASE_ANON_KEY   # zie de toelichting bij de laatste exec
+    kant_toepassen
     exec "$@"
   fi
   log "FATAAL: geen POD_BOOTSTRAP_SECRET en geen CLAUDE_CODE_OAUTH_TOKEN in de omgeving - de pod kan niet authenticeren"
@@ -277,6 +337,9 @@ for N in $VERWACHT; do
       ;;
   esac
 done
+
+# Kant toepassen vóór de namenlijst: op vps valt het Olares-tunneltoken er ook uit.
+kant_toepassen
 
 # Namenlijst voor /health. Uitsluitend namen.
 export SECRETS_GELADEN="$GELADEN"
