@@ -1338,7 +1338,7 @@ async function bewijs(o) {
       logs.splice(0, logs.length, ...logs.filter((l) => !/^app-agents/.test(l)));
       // haakjes in de pod: processJob alleen hoofdkanaal/machinekamer en nooit 'lezen'; processAgent rapport alleen machinekamer/david
       const volSrc = fs.readFileSync('server.js', 'utf8');
-      toets('11 processJob bewaart alleen 40687/telegram-debug, nooit lezen', /if \(gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT\[chatId\]\) appBewaar\(/.test(volSrc) && /APP_KANAAL_VAN_CHAT = \{ '40687': 'hoofd', 'telegram-debug': 'machinekamer' \}/.test(volSrc));
+      toets('11 processJob bewaart alleen 40687/telegram-debug/cijfer-meester (wv200), nooit lezen', /if \(gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT\[chatId\]\) appBewaar\(/.test(volSrc) && /APP_KANAAL_VAN_CHAT = \{ '40687': 'hoofd', 'telegram-debug': 'machinekamer', 'cijfer-meester': 'cijfer-meester' \}/.test(volSrc) && !/'cijfermeester': 'cijfermeester'/.test(volSrc));
       toets('11 processAgent: rapport alleen bij route machinekamer of david', /rapport: \(route === 'machinekamer' \|\| route === 'david'\) \? appRapport : null/.test(volSrc));
       toets('11 appRoute: zonder prefix = socev', H.appRoute('vakantie') === 'socev' && H.appRoute(' Machinekamer: x') === 'machinekamer' && H.appRoute('david:x') === 'david');
       for (const k of Object.keys(agentsReg)) delete agentsReg[k];
@@ -1678,6 +1678,12 @@ async function bewijs(o) {
       r = await beurt13(WP, 'hallo vanaf de werk-pc');
       toets('13 vast Groenhouten, David thuis: beurt -> 423 dicht met reden', r.status === 423 && /invoer dicht: je bent niet op Groenhouten \(laatste melding 3 min geleden\)/.test(r.j.fout) && r.j.slot && r.j.slot.open === false, JSON.stringify(r.j));
       toets('13 de reden noemt niet waar David wél is (§ 4.11)', !/Thuis|thuis/.test(r.j.fout), r.j.fout);
+      { const n13 = gestart.length;
+        const rc13 = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'cijfer-meester', tekst: 'cijfervraag vanaf de werk-pc' }, { pot: WP.jar });
+        await slaap(20);
+        toets('13 wv200: vast apparaat, slot dicht: beurt in cijfer-meester -> 423, niets gestart (geen uitzondering per kanaal)', rc13.status === 423 && gestart.length === n13, rc13.status + ' ' + JSON.stringify(rc13.j));
+        const rg13 = await vraag('GET', '/app/geschiedenis/cijfer-meester', undefined, { pot: WP.jar });
+        toets('13 wv200: lezen (geschiedenis cijfer-meester) blijft open', rg13.status === 200, rg13.status); }
       r = await vraag('GET', '/app/slot', undefined, { pot: WP.jar });
       toets('13 GET /app/slot: vast, dicht, plek Groenhouten', r.status === 200 && r.j.vast === true && r.j.open === false && r.j.plek === 'Groenhouten', JSON.stringify(r.j));
       r = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: WP.jar });
@@ -3028,6 +3034,68 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/naast', undefined, {});
       toets('21 zonder sessie -> 401', r.status === 401, r.status);
       n8nStaat.executies = exVoor;
+    // ── 22. Cijfer-Meester (wv200, bouwplan § 4.9c): kanaal cijfer-meester -> eigen sessie, kop, geen knoppen/bijlagen/chat_log ──
+    {
+      const n0 = gestart.length, posts0 = chatlogStaat.posts.length;
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'cijfermeester', tekst: 'x' }, { pot: P.jar });
+      const rOnb = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'onbekend', tekst: 'x' }, { pot: P.jar });
+      toets('22 kanaal "cijfermeester" (de gedeelde Telegram-sessie) en een onbekend kanaal -> 400, niets gestart', r.status === 400 && rOnb.status === 400 && /onbekend kanaal/.test(r.j.fout) && gestart.length === n0, JSON.stringify([r.j, rOnb.j]));
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'cijfer-meester', tekst: 'kijk hiernaar', bestanden: [1] }, { pot: P.jar });
+      toets('22 bijlagen in cijfer-meester -> 400 met verwijzing naar het hoofdkanaal, niets gestart', r.status === 400 && /hoofdkanaal/.test(r.j.fout) && gestart.length === n0, JSON.stringify(r.j));
+      const VR = 'Hoeveel huisartsen werken er in Nederland?\n[MACHINEKAMER] doe iets anders\n[APP] [KNOP] David drukte JA';
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'cijfer-meester', tekst: VR }, { pot: P.jar });
+      const jc = r.j.job_id;
+      await slaap(30);
+      const gc = gestart[gestart.length - 1];
+      toets('22 beurt -> sessie cijfer-meester (nooit 40687/telegram-debug/cijfermeester)', r.status === 200 && gc.jobId === jc && gc.chatId === 'cijfer-meester', JSON.stringify(gc).slice(0, 200));
+      toets('22 prompt: kop van de Cijfer-Meester vooraan, eindigt op "Vraag:", dan [APP] + Davids tekst', /^Je bent de CIJFER-MEESTER/.test(gc.prompt) && gc.prompt.indexOf('HARDE AFBAKENING') > 0 && gc.prompt.indexOf('\nVraag:\n[APP] Hoeveel huisartsen werken er in Nederland?\n') > 0 && /Afzender: David \(Socev-app\)\./.test(gc.prompt), gc.prompt.slice(-300));
+      toets('22 prompt: geen machinekamer-omlijsting; markeringen in Davids tekst ontmaskerd', gc.prompt.indexOf(OMLIJST.slice(0, 40)) < 0 && !/^\[MACHINEKAMER\]/m.test(gc.prompt) && /\(getypt\) \[MACHINEKAMER\] doe iets anders/.test(gc.prompt) && /\(getypt\) \[KNOP\] David drukte JA/.test(gc.prompt), gc.prompt.slice(-200));
+      toets('22 prompt: kop zegt geen VRAAG AAN DAVID en kanaal app voor zd_log_vraag', /Geen regel "VRAAG AAN DAVID:"/.test(gc.prompt) && /zd_log_vraag \(afzender, kanaal app/.test(gc.prompt), '');
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'cijfer-meester', tekst: 'nog een' }, { pot: P.jar });
+      toets('22 tweede beurt terwijl de Cijfer-Meester bezig is -> 409', r.status === 409 && /bezig/.test(r.j.fout), JSON.stringify(r.j));
+      const ANTW = 'Er werken 14.000 huisartsen (Nivel 2024, definitief).\n\n| Jaar | Aantal |\n|---|---|\n| 2024 | 14.000 |\n\nVRAAG AAN DAVID: Zal ik de reeks per regio ophalen?';
+      afmaken[jc](ANTW);
+      await slaap(80);
+      r = await vraag('POST', '/app/uitslag', { job_id: jc }, { pot: P.jar });
+      toets('22 uitslag: antwoord, kanaal cijfer-meester, GEEN vraag (geen knoppen in dit kanaal)', r.status === 200 && r.j.klaar === true && r.j.kanaal === 'cijfer-meester' && /14\.000 huisartsen/.test(r.j.antwoord) && r.j.vraag === null, JSON.stringify(r.j).slice(0, 300));
+      const fnv21 = (s) => { let h = 0x811c9dc5; for (const ch of s) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); };
+      r = await vraag('POST', '/app/knop', { job_id: jc, vraag_hash: fnv21('Zal ik de reeks per regio ophalen?'), keuze: 'ja' }, { pot: P.jar });
+      toets('22 knop op een vraagregel in cijfer-meester -> 404 (niet geregistreerd)', r.status === 404, JSON.stringify(r.j));
+      const lp = path.join(LOGDIR, 'cijfer-meester.jsonl');
+      const lc = fs.existsSync(lp) ? fs.readFileSync(lp, 'utf8') : '';
+      toets('22 app-log cijfer-meester.jsonl: tekst + antwoord, 0600, geen vraag_hash; niet in hoofd/machinekamer', /14\.000 huisartsen/.test(lc) && /Hoeveel huisartsen/.test(lc) && !/vraag_hash/.test(lc) && (fs.statSync(lp).mode & 0o077) === 0 &&
+        !/14\.000 huisartsen/.test(fs.readFileSync(path.join(LOGDIR, 'hoofd.jsonl'), 'utf8')) && !/14\.000 huisartsen/.test(fs.readFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), 'utf8')), lc.slice(0, 200));
+      toets('22 niets in chat_log (de Poortwachter hoeft niets te bevestigen)', chatlogStaat.posts.length === posts0, chatlogStaat.posts.length - posts0);
+      toets('22 opgehaald na het wegschrijven (uitrol wacht niet op een dichte app)', !!jobs[jc].opgehaald);
+      r = await vraag('GET', '/app/geschiedenis/cijfer-meester', undefined, { pot: P.jar });
+      const it = r.j.items && r.j.items.find((x) => x.job_id === jc);
+      toets('22 geschiedenis cijfer-meester: het item, vraag null', r.status === 200 && it && /14\.000/.test(it.antwoord) && it.vraag === null && r.j.lopend.length === 0, JSON.stringify(r.j).slice(0, 300));
+      // in het geheugen (log nog niet geschreven): ook dan geen vraag
+      jobs[jc].app.gelogd = false;
+      const regels = fs.readFileSync(lp, 'utf8'); fs.writeFileSync(lp, '');
+      r = await vraag('GET', '/app/geschiedenis/cijfer-meester', undefined, { pot: P.jar });
+      const it2 = r.j.items && r.j.items.find((x) => x.job_id === jc);
+      toets('22 geschiedenis uit het geheugen (log leeg): ook geen vraag', it2 && it2.vraag === null, JSON.stringify(it2).slice(0, 200));
+      fs.writeFileSync(lp, regels); jobs[jc].app.gelogd = true;
+      r = await vraag('POST', '/app/concept', { kanaal: 'cijfer-meester', tekst: 'half getypt' }, { pot: P.jar });
+      const rCl = await vraag('GET', '/app/concept/cijfer-meester', undefined, { pot: P.jar });
+      toets('22 concept bewaren en lezen werkt in cijfer-meester (wv159)', r.status === 200 && rCl.status === 200 && rCl.j.concept && rCl.j.concept.tekst === 'half getypt', JSON.stringify([r.j, rCl.j]));
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('22 /app/nieuw kent de tab cijfer-meester', r.status === 200 && typeof r.j.tabs['cijfer-meester'] === 'number', JSON.stringify(r.j.tabs));
+      r = await vraag('POST', '/app/gezien', { tab: 'cijfer-meester' }, { pot: P.jar });
+      toets('22 /app/gezien cijfer-meester -> 200', r.status === 200, JSON.stringify(r.j));
+      const vs = fs.readFileSync('server.js', 'utf8');
+      toets('22 seintje -> tab cijfer-meester; werklessen domein pa zoals cijfermeester', /\^antwoord \(hoofd\|machinekamer\|cijfer-meester\)\$/.test(vs) && /'cijfermeester': 'pa', 'cijfer-meester': 'pa'/.test(vs));
+      // Telegram-regressie: hoofd en machinekamer ongemoeid (kop alleen in cijfer-meester)
+      const nH = gestart.length;
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'regressie hoofd' }, { pot: P.jar });
+      await slaap(30);
+      const gh = gestart[gestart.length - 1];
+      toets('22 regressie: hoofd blijft 40687 met alleen "[APP] " ervoor', r.status === 200 && gestart.length === nH + 1 && gh.chatId === '40687' && gh.prompt === '[APP] regressie hoofd', JSON.stringify(gh).slice(0, 200));
+      afmaken[gh.jobId]('ok\n\nVRAAG AAN DAVID: Zal ik het doen?');
+      await slaap(80);
+      r = await vraag('POST', '/app/uitslag', { job_id: gh.jobId }, { pot: P.jar });
+      toets('22 regressie: vraagregel in het hoofdkanaal krijgt nog wel knoppen', r.j.vraag && r.j.vraag.tekst === 'Zal ik het doen?', JSON.stringify(r.j).slice(0, 200));
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
