@@ -3112,7 +3112,7 @@ const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-app
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
-  'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie']);   // wv159: concept bewaren gebeurt alleen als David typt (geen poll)
+  'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak']);   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
@@ -6136,8 +6136,9 @@ function handleApp(req, res) {
     // Upload (wv99): ruwe bytes, geen JSON; de route leest de stroom zelf. Wordt hij eerder geweigerd (geen sessie e.d.), dan
     // de rest van de stroom weggooien zodat de verbinding netjes afloopt.
     const upload = req.method === 'POST' && p.indexOf('/app/upload/') === 0;
-    if (upload) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (upload ? function (cb) { cb(null, {}); } : function (cb) { appBody(req, cb); })(function (fout, d) {
+    const ruw = upload || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
+    if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
+    (ruw ? function (cb) { cb(null, {}); } : function (cb) { appBody(req, cb); })(function (fout, d) {
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
       let reg;
       try { reg = appRegister(); } catch (e) { logError('app-register', e); return appWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'register kapot'); }
@@ -6171,7 +6172,8 @@ function handleApp(req, res) {
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
-            if (appBsnIn(req, d)) return appWeiger(res, 422, APP_BSN_TEKST, 'bsn-achtig getal');
+            // wv172 (Fable K5): voorlezen stuurt Socevs eigen antwoord terug, geen invoer van David
+            if (route !== 'POST /app/voorlees' && appBsnIn(req, d)) return appWeiger(res, 422, APP_BSN_TEKST, 'bsn-achtig getal');
             return verder(true);
           });
         }
@@ -6205,6 +6207,8 @@ function handleApp(req, res) {
         if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);
         if (route.indexOf('GET /app/concept/') === 0) return appConceptRoute(req, res, a, route.slice('GET /app/concept/'.length));
         if (route === 'POST /app/concept') return appConceptZet(req, res, a, d);
+        if (route === 'POST /app/spraak') return appSpraak(req, res, a);   // wv172
+        if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
         if (route === 'GET /app/modellen') return appModellen(req, res);
@@ -6553,6 +6557,191 @@ async function appSleutelVervang(req, res, reg, a, s, d) {
   // de knop "Vorige terugzetten" bestaat alleen in het portaal
   const nazorg = (u.nazorg || []).map(function (x) { return /Vorige terugzetten/.test(x) ? 'De vorige waarde blijft bewaard; terugzetten kan in het sleutelportaal (/sleutels) of via de machinekamer.' : String(x).slice(0, 400); });
   appStuur(res, 200, { ok: true, naam: t.naam, plek: t.plek, uitkomst: String(u.uitkomst).slice(0, 200), nazorg: nazorg });
+}
+
+// ── wv172: spraak in en uit (microfoonknop en 'voorlezen' in de app, 8-10-2026) ──
+// Gemeten 8-10: het hoofdkanaal in Telegram heeft geen eigen spraaktak (Claude via Telegram leest msg.voice niet). De
+// bestaande routes die we hergebruiken: Whisper via Cloudflare Workers AI (whisper-large-v3-turbo, zoals het spraakkastje
+// in de auto; CLOUDFLARE_AI_TOKEN_AUTO heeft alleen Workers AI-rechten) en de Gemini-stem van het ochtendbericht en de
+// skill voorlezen (gemini-3.8-flash-tts, stem nl-nl-assistant-6; zoals het kastje met GEMINI_API_KEY_AUTO). Bewust niet via
+// n8n: n8n bewaart de binaire data van elke run, en audio hoort nergens bewaard te worden. Audio leeft alleen in het
+// geheugen van dit ene verzoek (geen schijf, geen cache); het auditlog krijgt alleen seconden en tekens, nooit tekst.
+const APP_SPRAAK_MAX_S = 120;
+const APP_SPRAAK_MAX_BYTES = 44 + 16000 * 2 * (APP_SPRAAK_MAX_S + 5);   // WAV 16 kHz mono 16 bit (de app maakt hem), 5 s speling
+const APP_SPRAAK_PER_UUR = 60;
+const APP_VOORLEES_PER_UUR = 240;          // delen, niet antwoorden
+// Dagplafond (Fable K7): de Gemini-sleutel is die van het kastje; een quotum dat op is, maakt het kastje in de auto stil.
+const APP_VOORLEES_PER_DAG = 300;
+const APP_VOORLEES_TEKST_MAX = 16000;
+const APP_VOORLEES_EERSTE = 280;           // eerste deel kort: na ± 8 s geluid
+const APP_VOORLEES_DEEL = 900;             // ± 1 min geluid, ± 25 s inspreken (gemeten 3,3 s + 25 ms per teken)
+// "Zo Kef" gaf bij Gemini een pauze ("Zoo… Kef"); het kastje zegt daarom Zo-kef (AUTO_NAAM_UITSPRAAK, werkles 4-10).
+const APP_NAAM_UITSPRAAK = process.env.APP_NAAM_UITSPRAAK || 'Zo-kef';
+const APP_STT_URL = 'https://api.cloudflare.com/client/v4/accounts/' + (process.env.CF_ACCOUNT_ID || '23df9b0607bb70f6d7f15a63ec843d6d') + '/ai/run/@cf/openai/whisper-large-v3-turbo';
+const APP_TTS_STIJL = 'Rustig en helder, alsof je David even belt: vriendelijk, zakelijk-warm, natuurlijke pauzes tussen de onderwerpen. Vertellend, niet voorlezend.';
+// Bekende spookzinnen van Whisper op stilte of geruis (uit socev-auto src/voorgesprek.js); alleen als de hele opname dat is.
+const APP_SPOOK = /amara\.org|ondertitel|bedankt voor het (kijken|luisteren)|dank (je|u) (wel )?voor het (kijken|luisteren)|abonneer|^\W*(thank you( (very much|for watching))?|thanks for watching|you|bye)\W*$/i;
+appStaat.tellers.spraak = []; appStaat.tellers.voorlees = []; appStaat.tellers.voorleesdag = [];
+
+// Seconden spraak in een WAV zoals de app hem maakt (PCM 16 bit, mono, 16 kHz, kop van 44 bytes); anders null.
+function appWavSeconden(b) {
+  if (b.length < 46 || b.toString('ascii', 0, 4) !== 'RIFF' || b.toString('ascii', 8, 16) !== 'WAVEfmt ' || b.toString('ascii', 36, 40) !== 'data') return null;
+  if (b.readUInt16LE(20) !== 1 || b.readUInt16LE(22) !== 1 || b.readUInt32LE(24) !== 16000 || b.readUInt16LE(34) !== 16) return null;
+  const n = b.readUInt32LE(40);
+  if (n !== b.length - 44 || n % 2) return null;
+  return n / 32000;
+}
+async function appWhisper(wav) {
+  const r = await fetch(APP_STT_URL, { method: 'POST', signal: AbortSignal.timeout(50000),
+    headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_AI_TOKEN_AUTO, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audio: wav.toString('base64'), language: 'nl', vad_filter: true, initial_prompt: 'Socev' }) });
+  const j = await r.json().catch(function () { return {}; });
+  if (!r.ok || !j.success) throw new Error('Whisper ' + r.status);
+  const t = String((j.result && j.result.text) || '').replace(/\s+/g, ' ').trim();
+  // alleen een spookzin als dat de hele opname is: de ondertitel-aftiteling, of een korte zin (Fable K9)
+  const woorden = t.split(/\s+/).length;
+  return (woorden <= 8 && /amara\.org|^ondertitel(ing|d) (door|van)/i.test(t)) || (woorden <= 4 && APP_SPOOK.test(t)) ? '' : t;
+}
+// POST /app/spraak: ruwe WAV (application/octet-stream) -> { tekst }. Invoer: valt onder het invoerslot (vaste plek).
+function appSpraak(req, res, a) {
+  const weg = function (st, f, r) { req.resume(); return appWeiger(res, st, f, r); };
+  if (!process.env.CLOUDFLARE_AI_TOKEN_AUTO) return weg(503, 'inspreken staat nu niet aan op de pod', 'spraak: geen sleutel');
+  const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (ct !== 'application/octet-stream') return weg(415, 'alleen een opname', 'spraak soort');
+  const lengte = Number(req.headers['content-length']);
+  if (!Number.isInteger(lengte) || lengte <= 44) return weg(400, 'geen opname', 'spraak lengte');
+  if (lengte > APP_SPRAAK_MAX_BYTES) return weg(413, 'opname te lang (hooguit ' + APP_SPRAAK_MAX_S / 60 + ' minuten)', 'spraak te lang');
+  if (!appTeller('spraak', APP_SPRAAK_PER_UUR, 3600000)) return weg(429, 'te vaak ingesproken dit uur (max ' + APP_SPRAAK_PER_UUR + ')', 'grens spraak');
+  let stukken = [], n = 0, af = false;
+  const mis = function (st, f, r) { if (af) return; af = true; stukken = []; req.resume(); appWeiger(res, st, f, r); };
+  req.on('aborted', function () { mis(400, 'opname afgebroken', 'spraak afgebroken'); });
+  req.on('error', function () { mis(400, 'opname afgebroken', 'spraak afgebroken'); });
+  req.on('data', function (c) {
+    if (af) return;
+    n += c.length;
+    if (n > lengte) return mis(400, 'opname onvolledig', 'spraak lengte (stroom)');
+    stukken.push(c);
+  });
+  req.on('end', function () {
+    if (af) return;
+    af = true;
+    const wav = Buffer.concat(stukken, n);
+    stukken = [];
+    const s = n === lengte ? appWavSeconden(wav) : null;
+    if (s === null) return appWeiger(res, 400, 'geen geldige opname', 'spraak wav');
+    if (s < 0.3) return appWeiger(res, 400, 'opname te kort', 'spraak te kort');
+    appWhisper(wav).then(function (tekst) {
+      res._app.reden = 'spraak ' + Math.round(s) + ' s -> ' + tekst.length + ' tekens';
+      appStuur(res, 200, { ok: true, tekst: tekst, seconden: Math.round(s) });
+    }, function (e) {
+      logError('app-spraak', e);
+      // geen 502: de app leest dat als 'pod weg'
+      appWeiger(res, 503, 'uitschrijven lukte niet (' + String(e && e.name === 'TimeoutError' ? 'duurde te lang' : e && e.message || e).slice(0, 60) + '); probeer het nog eens', 'spraak: ' + String(e && e.message || e).slice(0, 60));
+    });
+  });
+}
+
+// Antwoord (markdown) -> spreektekst: alle zinnen blijven, alleen wat je niet hardop zegt gaat eruit (tabellen, code,
+// links, opmaak, emoji); "Socev" klinkt fonetisch. Deterministisch, geen model.
+function appSpreektekst(t) {
+  let s = String(t || '').replace(/\r\n?/g, '\n');
+  // Codeblokken in één doorgang. Zonder taal is het meestal een concept om te plakken (WhatsApp, sms): voorlezen; een
+  // grafiek, code of data niet (Fable K4).
+  s = s.replace(/```([^\n`]*)\n?([\s\S]*?)(?:```|$)/g, function (m, taal, inhoud) {
+    taal = taal.trim();
+    return '\n' + (taal === 'socev-weergave' ? 'De grafiek staat in de app.' : taal ? 'Het tekstblok staat in de app.' : inhoud) + '\n';
+  });
+  s = s.replace(/(^|\n)(?:[ \t]*\|[^\n]*(?:\n|$))+/g, '\nDe tabel staat in de app.\n');
+  s = s.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
+  s = s.replace(/\[\[(?:[^\]|]*\|)?([^\]]+)\]\]/g, '$1');
+  s = s.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
+  s = s.replace(/(?:https?:\/\/|www\.)\S+/g, 'een link');
+  s = s.replace(/`([^`\n]*)`/g, '$1');
+  s = s.replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, '').replace(/^[ \t]*>[ \t]?/gm, '');
+  s = s.replace(/^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/gm, '');
+  s = s.replace(/^[ \t]*(?:[-*+•]|\d{1,2}[.)])[ \t]+/gm, '');
+  s = s.replace(/\*\*|__|~~|\*/g, '').replace(/(^|[\s(])_([^_\n]+)_(?=[\s.,;:!?)]|$)/g, '$1$2');
+  s = s.replace(/^VRAAG AAN DAVID:[ \t]*/gm, 'Mijn vraag aan je: ');
+  s = s.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu, '');
+  s = s.split('\n').map(function (r) { return r.replace(/[ \t]+/g, ' ').trim(); }).filter(function (r) { return /[\p{L}\p{N}]/u.test(r); })
+    .map(function (r) { return /[.!?:;…,]$/.test(r) ? r : r + '.'; }).join('\n');
+  s = s.replace(/(De (?:tabel|grafiek) staat in de app\.|Het tekstblok staat in de app\.)(?:\n\1)+/g, '$1');
+  return s.replace(/\bSocev('s|s)?\b/gi, function (m, g) { return APP_NAAM_UITSPRAAK + (g ? "'s" : ''); }).trim();
+}
+// Delen op zinsgrens: het eerste kort (snel geluid), daarna ± 900 tekens. Een te lange zin knipt op een komma of spatie.
+function appVoorleesDelen(s) {
+  const zinnen = String(s || '').match(/(?:[^.!?…\n]|[.!?…](?![\s]|$))+(?:[.!?…]+|\n|$)/g) || [];   // 1.088.000 en 09.00 blijven heel
+  const delen = [];
+  let huidig = '';
+  const grens = function () { return delen.length ? APP_VOORLEES_DEEL : APP_VOORLEES_EERSTE; };
+  zinnen.forEach(function (z) {
+    z = z.trim();
+    if (!z) return;
+    // ook het eerste deel kort houden als de eerste zin al lang is (Fable K3)
+    while (z.length > (delen.length || huidig ? APP_VOORLEES_DEEL : APP_VOORLEES_EERSTE)) {
+      if (huidig) { delen.push(huidig); huidig = ''; }
+      const max = delen.length ? APP_VOORLEES_DEEL : APP_VOORLEES_EERSTE;
+      let i = z.lastIndexOf(', ', max);
+      if (i < max / 2) i = z.lastIndexOf(' ', max);
+      if (i < 1) i = max;
+      delen.push(z.slice(0, i + 1).trim());
+      z = z.slice(i + 1).trim();
+    }
+    if (huidig && huidig.length + 1 + z.length > grens()) { delen.push(huidig); huidig = ''; }
+    huidig = huidig ? huidig + ' ' + z : z;
+  });
+  if (huidig) delen.push(huidig);
+  return delen;
+}
+// Eén deel inspreken met de Gemini-stem; WAV terug. Twee pogingen bij een time-out of serverfout (niet bij 4xx: kosten),
+// samen binnen 55 s (de Function wacht 90 s; ruimte voor slot-check en tunnel, Fable K2).
+async function appGeminiStem(tekst) {
+  const t0 = Date.now(), budget = 55000;
+  const body = JSON.stringify({ model: 'gemini-3.8-flash-tts',
+    input: [{ type: 'user_input', content: [{ type: 'text', text: tekst, annotations: [{ type: 'speech_metadata', style: APP_TTS_STIJL }] }] }],
+    response_format: { type: 'audio' }, generation_config: { speech_config: [{ voice: 'nl-nl-assistant-6' }] } });
+  for (let poging = 1; ; poging++) {
+    try {
+      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST',
+        signal: AbortSignal.timeout(Math.max(1000, Math.min(45000, 8000 + 40 * tekst.length, budget - (Date.now() - t0)))),
+        headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY_AUTO, 'Content-Type': 'application/json' }, body: body });
+      const j = await r.json().catch(function () { return {}; });
+      if (!r.ok) throw Object.assign(new Error('Gemini ' + r.status), { status: r.status });
+      const c = j.steps && j.steps[0] && j.steps[0].content && j.steps[0].content[0];
+      if (!c || !c.data) throw Object.assign(new Error('Gemini: geen audio'), { status: 422 });
+      const raw = Buffer.from(String(c.data).split(',').pop(), 'base64');
+      if (raw.toString('ascii', 0, 4) === 'RIFF') return raw;
+      const kop = Buffer.alloc(44);   // kale PCM (24 kHz mono 16 bit, zoals het kastje meet): WAV-kop erom
+      kop.write('RIFF', 0, 'ascii'); kop.writeUInt32LE(36 + raw.length, 4); kop.write('WAVEfmt ', 8, 'ascii'); kop.writeUInt32LE(16, 16);
+      kop.writeUInt16LE(1, 20); kop.writeUInt16LE(1, 22); kop.writeUInt32LE(24000, 24); kop.writeUInt32LE(48000, 28); kop.writeUInt16LE(2, 32);
+      kop.writeUInt16LE(16, 34); kop.write('data', 36, 'ascii'); kop.writeUInt32LE(raw.length, 40);
+      return Buffer.concat([kop, raw]);
+    } catch (e) {
+      if (!(poging < 2 && (!e.status || e.status >= 500) && budget - (Date.now() - t0) > 15000)) throw e;
+    }
+  }
+}
+// POST /app/voorlees { tekst, deel }: zonder opslag op de pod (elke vraag maakt de delen opnieuw uit dezelfde tekst);
+// de app vraagt deel 1, speelt het af en haalt intussen het volgende. Antwoord: base64-WAV in JSON (de Function geeft
+// alleen JSON van de pod door, zoals bij GET /app/bestand).
+async function appVoorlees(req, res, a, d) {
+  if (!process.env.GEMINI_API_KEY_AUTO) return appWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'voorlees: geen sleutel');
+  if (typeof d.tekst !== 'string' || !d.tekst.trim()) return appWeiger(res, 400, 'geen tekst', 'voorlees leeg');
+  if (d.tekst.length > APP_VOORLEES_TEKST_MAX) return appWeiger(res, 413, 'te lang om voor te lezen (max ' + APP_VOORLEES_TEKST_MAX + ' tekens)', 'voorlees te lang');
+  const deel = d.deel === undefined ? 1 : d.deel;
+  if (!Number.isInteger(deel) || deel < 1 || deel > 99) return appWeiger(res, 400, 'ongeldig deel', 'voorlees deel');
+  const delen = appVoorleesDelen(appSpreektekst(d.tekst));
+  if (!delen.length) return appWeiger(res, 422, 'hier staat niets in om voor te lezen', 'voorlees niets');
+  if (deel > delen.length) return appWeiger(res, 400, 'ongeldig deel', 'voorlees deel te hoog');
+  if (!appTeller('voorlees', APP_VOORLEES_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel voorgelezen dit uur', 'grens voorlees');
+  if (!appTeller('voorleesdag', APP_VOORLEES_PER_DAG, 86400000)) return appWeiger(res, 429, 'genoeg voorgelezen voor vandaag (max ' + APP_VOORLEES_PER_DAG + ' delen per dag)', 'grens voorlees dag');
+  let wav;
+  try { wav = await appGeminiStem(delen[deel - 1]); } catch (e) {
+    logError('app-voorlees', e);
+    return appWeiger(res, 503, 'inspreken lukte niet (' + (e && e.name === 'TimeoutError' ? 'duurde te lang' : String(e && e.message || e).slice(0, 60)) + ')', 'voorlees: ' + String(e && e.message || e).slice(0, 60));
+  }
+  res._app.reden = 'voorlees deel ' + deel + '/' + delen.length + ' (' + delen[deel - 1].length + ' tekens)';
+  appStuur(res, 200, { ok: true, deel: deel, delen: delen.length, type: 'audio/wav', audio: wav.toString('base64') });
 }
 
 function appInfo() {

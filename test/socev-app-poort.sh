@@ -58,6 +58,15 @@ const SP_SLEUTEL = ECHT_SP ? '/opt/data/.sleutelportaal/rpc.key' : path.join(W, 
 if (!ECHT_SP) fs.writeFileSync(SP_SLEUTEL, 'k'.repeat(64));
 const spNep = { kluis: [], schrijf: [], log: [], creds: [], patch: [], test: [], kapot: false, schrijfReden: null };
 const pushStaat = { status: 201 };
+// wv172: Whisper (Cloudflare Workers AI) en de Gemini-stem nagebootst
+const spraakStaat = { stt: [], sttStatus: 200, sttTekst: 'Zet het werkoverleg op Tolgaarde om tien uur', tts: [], ttsStatus: [], ttsKaal: false };
+function wavMaak(sec, rate) {
+  rate = rate || 16000; const n = Math.round(sec * rate), h = Buffer.alloc(44), d = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) d.writeInt16LE(Math.round(3000 * Math.sin(i / 5)), i * 2);
+  h.write('RIFF', 0); h.writeUInt32LE(36 + n * 2, 4); h.write('WAVEfmt ', 8); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22);
+  h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(n * 2, 40);
+  return Buffer.concat([h, d]);
+}
 let toetsUur = 12;
 
 // nep-Access: eigen RSA-sleutel met kid 'proef'
@@ -76,6 +85,18 @@ let certsTeller = 0, certsVertraging = 0, klokScheef = 0;
 async function nepFetch(url, opt) {
   url = String(url);
   const antw = (status, j, kop) => ({ ok: status < 300, status, json: async () => j, text: async () => JSON.stringify(j), headers: { get: (n) => (kop || {})[String(n).toLowerCase()] || null } });
+  if (url === 'https://api.cloudflare.com/client/v4/accounts/23df9b0607bb70f6d7f15a63ec843d6d/ai/run/@cf/openai/whisper-large-v3-turbo') {   // wv172
+    spraakStaat.stt.push({ auth: opt.headers.Authorization, b: JSON.parse(opt.body) });
+    if (spraakStaat.sttStatus !== 200) return antw(spraakStaat.sttStatus, { success: false, errors: [{ message: 'nep' }] });
+    return antw(200, { success: true, result: { text: ' ' + spraakStaat.sttTekst + ' ' } });
+  }
+  if (url === 'https://generativelanguage.googleapis.com/v1beta/interactions') {   // wv172
+    spraakStaat.tts.push({ key: opt.headers['x-goog-api-key'], b: JSON.parse(opt.body) });
+    const st = spraakStaat.ttsStatus.length ? spraakStaat.ttsStatus.shift() : 200;
+    if (st !== 200) return antw(st, { error: { message: 'nep' } });
+    const w = wavMaak(0.5, 24000);
+    return antw(200, { steps: [{ content: [{ type: 'audio', mime_type: 'audio/wav', data: (spraakStaat.ttsKaal ? w.subarray(44) : w).toString('base64') }] }] });
+  }
   if (url === TEAM + '/cdn-cgi/access/certs') {
     certsTeller++;
     if (certsVertraging) await new Promise((r) => setTimeout(r, certsVertraging));
@@ -201,7 +222,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
-    N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', APP_VAULT_DIR: VAULT_T, SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
+    N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
   VAULT: VAULT_T,
   TOETSUUR: () => toetsUur,
   agentsReg,
@@ -209,7 +230,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -1624,6 +1645,10 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'getikt op de werk-pc' }, { pot: WP.jar });
       const rCw = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: '' }, { pot: WP.jar });
       toets('13 dicht: concept bewaren -> 423, concept wissen -> 200 (wv159)', r.status === 423 && rCw.status === 200, r.status + ' ' + rCw.status);
+      const nStt13 = spraakStaat.stt.length;
+      r = await upl('/app/spraak', wavMaak(1), null, { pot: WP.jar });
+      const rV13 = await vraag('POST', '/app/voorlees', { tekst: 'Lees dit voor.' }, { pot: WP.jar });
+      toets('13 dicht: inspreken -> 423 en Whisper niet aangeroepen, voorlezen -> 423 (wv172)', r.status === 423 && spraakStaat.stt.length === nStt13 && rV13.status === 423, r.status + ' ' + rV13.status);
       // David op Groenhouten, vers -> open
       meld('Huisartsenpraktijk Groenhouten', 'werk', 4);
       r = await beurt13(WP, 'nu wel');
@@ -1632,6 +1657,8 @@ async function bewijs(o) {
       toets('13 slot open via locatie', r.j.open === true && r.j.via === 'locatie', JSON.stringify(r.j));
       r = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'bsn 111222333 erin' }, { pot: WP.jar });
       const rCo = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'gewoon concept' }, { pot: WP.jar });
+      const rV13o = await vraag('POST', '/app/voorlees', { tekst: 'Het bedrag was 111.222.333 euro.' }, { pot: WP.jar });
+      toets('13 open: voorlezen van een antwoord met een BSN-achtig getal -> geen 422 (Socevs eigen tekst; wv172 Fable K5)', rV13o.status === 200, rV13o.status + ' ' + JSON.stringify(rV13o.j).slice(0, 80));
       toets('13 open: concept met BSN-achtig getal -> 422 (niet bewaard), gewoon concept -> 200 (wv159)', r.status === 422 && rCo.status === 200 && rCo.j.bewaard === true
         && !fs.readFileSync(path.join(DATA, 'concepten.json'), 'utf8').includes('111222333'), r.status + ' ' + rCo.status);
       await vers(WP);
@@ -2628,6 +2655,113 @@ async function bewijs(o) {
       toets('19 concept bewaren telt niet in de grens alles, wel in concept', H.appStaat.tellers.alles.length === alles0 && H.appStaat.tellers.concept.length > 0);
       r = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'voor de noodstop' }, { pot: P.jar });
       toets('19 daarna weer bewaren', r.status === 200 && fs.existsSync(CF), r.status);
+    }
+
+    // ── 20. wv172: spraak in en uit (microfoon -> Whisper, voorlezen -> Gemini-stem); audio nooit op schijf ──
+    {
+      const sS = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      if (sS) sS.tot = Date.now() + 10 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      const bestandenVoor = (function lijst(d) { let l = []; for (const n of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, n.name); if (n.isDirectory()) l = l.concat(lijst(f)); else l.push(f); } return l; })(W);
+      r = await upl('/app/spraak', wavMaak(2), null, { pot: Object.assign(pot(), { apparaat: P.jar.apparaat }) });
+      toets('20 spraak zonder sessie -> 401, Whisper niet aangeroepen', r.status === 401 && spraakStaat.stt.length === 0, r.status);
+      if (sS) sS.tot = Date.now() + 60000;
+      const w2 = wavMaak(2);
+      r = await upl('/app/spraak', w2, null, { pot: P.jar });
+      const s0 = spraakStaat.stt[0] || { b: {} };
+      toets('20 spraak 2 s -> 200 met de tekst van Whisper (getrimd), seconden 2', r.status === 200 && r.j.tekst === spraakStaat.sttTekst && r.j.seconden === 2, JSON.stringify(r.j));
+      toets('20 Whisper krijgt precies de opname, nl, de Workers-AI-sleutel', spraakStaat.stt.length === 1 && s0.b.audio === w2.toString('base64') && s0.b.language === 'nl' && s0.auth === 'Bearer nep-cf', JSON.stringify(s0.b).slice(0, 80));
+      toets('20 inspreken verlengt de sessie', sS && sS.tot > Date.now() + 20 * 60000, sS && sS.tot - Date.now());
+      r = await upl('/app/spraak', w2, null, { pot: P.jar, ct: 'audio/wav' });
+      toets('20 spraak met ander soort -> 415', r.status === 415, r.status);
+      r = await upl('/app/spraak', wavMaak(2, 44100), null, { pot: P.jar });
+      toets('20 WAV met 44,1 kHz -> 400 geen geldige opname', r.status === 400 && /geen geldige opname/.test(r.j.fout), JSON.stringify(r.j));
+      r = await upl('/app/spraak', Buffer.concat([Buffer.from('OggS'), Buffer.alloc(2000)]), null, { pot: P.jar });
+      toets('20 geen WAV -> 400', r.status === 400, r.status);
+      r = await upl('/app/spraak', wavMaak(0.1), null, { pot: P.jar });
+      toets('20 opname < 0,3 s -> 400 te kort', r.status === 400 && /te kort/.test(r.j.fout), JSON.stringify(r.j));
+      const nStt = spraakStaat.stt.length;
+      r = await upl('/app/spraak', wavMaak(126), null, { pot: P.jar });
+      toets('20 opname > 2 min -> 413 vóór Whisper', r.status === 413 && spraakStaat.stt.length === nStt, JSON.stringify(r.j));
+      r = await upl('/app/spraak', w2, null, { pot: P.jar, chunked: true });
+      toets('20 spraak zonder Content-Length -> 400', r.status === 400, r.status);
+      spraakStaat.sttTekst = 'Ondertiteling door de Amara.org gemeenschap';
+      r = await upl('/app/spraak', w2, null, { pot: P.jar });
+      toets('20 spookzin van Whisper -> lege tekst', r.status === 200 && r.j.tekst === '', JSON.stringify(r.j));
+      spraakStaat.sttTekst = 'Abonneer me op de nieuwsbrief van de LHV';
+      r = await upl('/app/spraak', w2, null, { pot: P.jar });
+      toets('20 gewone zin met "abonneer" blijft staan (Fable K9)', r.status === 200 && r.j.tekst === spraakStaat.sttTekst, JSON.stringify(r.j));
+      spraakStaat.sttTekst = 'Zet het werkoverleg op Tolgaarde om tien uur';
+      spraakStaat.sttStatus = 500;
+      r = await upl('/app/spraak', w2, null, { pot: P.jar });
+      toets('20 Whisper 500 -> 503 (geen 502: dat leest de app als pod weg)', r.status === 503 && /uitschrijven lukte niet/.test(r.j.fout), JSON.stringify(r.j));
+      spraakStaat.sttStatus = 200;
+      const cfSleutel = ctx.process.env.CLOUDFLARE_AI_TOKEN_AUTO;
+      delete ctx.process.env.CLOUDFLARE_AI_TOKEN_AUTO;
+      r = await upl('/app/spraak', w2, null, { pot: P.jar });
+      toets('20 zonder Workers-AI-sleutel -> 503 staat niet aan', r.status === 503 && /niet aan/.test(r.j.fout), JSON.stringify(r.j));
+      ctx.process.env.CLOUDFLARE_AI_TOKEN_AUTO = cfSleutel;
+      H.appStaat.tellers.spraak = Array(60).fill(Date.now());
+      r = await upl('/app/spraak', w2, null, { pot: P.jar });
+      toets('20 grens spraak (60/u) -> 429', r.status === 429, r.status);
+      H.appStaat.tellers.spraak = [];
+      // voorlezen
+      const ANTW = '**Kort:** Socev heeft je agenda bekeken.\n\n- 09:00 werkoverleg op [Tolgaarde](https://x.nl/a)\n- 15:30 de accountant 📞\n\n| Praktijk | Omzet |\n|---|---|\n| Tolgaarde | € 1.088.000 |\n\n```socev-weergave\n{"soort":"staaf"}\n```\n\n'
+        + 'Dit is een vrij lange zin over de jaarrekening van Tolgaarde, met cijfers als € 1.088.000 en 6,4%. '.repeat(20) + '\n\nVRAAG AAN DAVID: Zal ik het overleg verzetten?';
+      const nTts = spraakStaat.tts.length;
+      r = await vraag('POST', '/app/voorlees', { tekst: ANTW }, { pot: P.jar });
+      const t1 = (spraakStaat.tts[nTts] || { b: { input: [{ content: [{}] }] } });
+      const tekst1 = t1.b.input[0].content[0].text || '';
+      const wav1 = r.j.audio ? Buffer.from(r.j.audio, 'base64') : Buffer.alloc(0);
+      toets('20 voorlees deel 1 -> 200, WAV, deel 1 van meer', r.status === 200 && r.j.deel === 1 && r.j.delen >= 3 && r.j.type === 'audio/wav' && wav1.toString('ascii', 0, 4) === 'RIFF', JSON.stringify(Object.assign({}, r.j, { audio: undefined })));
+      toets('20 Gemini: model, stem, sleutel; deel 1 kort (≤ 280) met Zo-kef, zonder opmaak', t1.b.model === 'gemini-3.8-flash-tts' && t1.b.generation_config.speech_config[0].voice === 'nl-nl-assistant-6' && t1.key === 'nep-gemini'
+        && tekst1.length <= 280 && /Zo-kef heeft je agenda/.test(tekst1) && !/Socev|\*|\||https?:|📞/.test(tekst1), tekst1);
+      r = await vraag('POST', '/app/voorlees', { tekst: ANTW, deel: 2 }, { pot: P.jar });
+      const tekst2 = spraakStaat.tts[spraakStaat.tts.length - 1].b.input[0].content[0].text;
+      toets('20 voorlees deel 2: ≤ 900 tekens, getallen heel', r.status === 200 && r.j.deel === 2 && tekst2.length <= 900 && /€ 1\.088\.000/.test(tekst2), tekst2.slice(0, 120));
+      const alle = H.appVoorleesDelen(H.appSpreektekst(ANTW)).join(' ');
+      toets('20 spreektekst: tabel, grafiek en vraag in gewone taal, alle zinnen erin', /De tabel staat in de app\./.test(alle) && /De grafiek staat in de app\./.test(alle) && /Mijn vraag aan je: Zal ik het overleg verzetten\?/.test(alle) && (alle.match(/jaarrekening/g) || []).length === 20, alle.slice(0, 200));
+      const lang1 = H.appVoorleesDelen('Een lange eerste zin zonder punt, ' + 'met bijzinnen over de praktijk, '.repeat(20) + 'tot hier.');
+      toets('20 ook een lange eerste zin geeft een kort eerste deel (Fable K3)', lang1[0].length <= 280 && lang1.slice(1).every((x) => x.length <= 900), lang1.map((x) => x.length).join());
+      const blok = H.appSpreektekst('Concept:\n\n```\nHoi Willem, tot dinsdag.\n```\n\n```json\n{"a":1}\n```\nSocevs advies.');
+      toets('20 codeblok zonder taal (concept) wordt voorgelezen, met taal niet; Socevs -> Zo-kef\'s (Fable K4)', /Hoi Willem, tot dinsdag\./.test(blok) && /Het tekstblok staat in de app\./.test(blok) && !/"a"/.test(blok) && /Zo-kef's advies/.test(blok), blok);
+      r = await vraag('POST', '/app/voorlees', { tekst: ANTW, deel: 99 }, { pot: P.jar });
+      const rD0 = await vraag('POST', '/app/voorlees', { tekst: ANTW, deel: 0 }, { pot: P.jar });
+      const rDs = await vraag('POST', '/app/voorlees', { tekst: ANTW, deel: '1' }, { pot: P.jar });
+      toets('20 ongeldig deel (te hoog, 0, tekst) -> 400', r.status === 400 && rD0.status === 400 && rDs.status === 400, r.status + ' ' + rD0.status + ' ' + rDs.status);
+      r = await vraag('POST', '/app/voorlees', { tekst: '😀 ✓' }, { pot: P.jar });
+      const rL = await vraag('POST', '/app/voorlees', { tekst: '' }, { pot: P.jar });
+      const rG = await vraag('POST', '/app/voorlees', { tekst: 'x'.repeat(16001) }, { pot: P.jar });
+      toets('20 niets voor te lezen -> 422, leeg -> 400, te lang -> 413', r.status === 422 && rL.status === 400 && rG.status === 413, r.status + ' ' + rL.status + ' ' + rG.status);
+      spraakStaat.ttsStatus = [500];
+      let n0 = spraakStaat.tts.length;
+      r = await vraag('POST', '/app/voorlees', { tekst: 'Kort antwoord.' }, { pot: P.jar });
+      toets('20 Gemini 500 -> tweede poging -> 200', r.status === 200 && spraakStaat.tts.length === n0 + 2, r.status + ' ' + (spraakStaat.tts.length - n0));
+      spraakStaat.ttsStatus = [429];
+      n0 = spraakStaat.tts.length;
+      r = await vraag('POST', '/app/voorlees', { tekst: 'Kort antwoord.' }, { pot: P.jar });
+      toets('20 Gemini 429 -> geen tweede poging, 503 inspreken lukte niet', r.status === 503 && spraakStaat.tts.length === n0 + 1 && /inspreken lukte niet/.test(r.j.fout), r.status + ' ' + JSON.stringify(r.j));
+      spraakStaat.ttsStatus = [];
+      spraakStaat.ttsKaal = true;
+      r = await vraag('POST', '/app/voorlees', { tekst: 'Kort antwoord.' }, { pot: P.jar });
+      const wk = r.j.audio ? Buffer.from(r.j.audio, 'base64') : Buffer.alloc(0);
+      toets('20 kale PCM van Gemini krijgt een WAV-kop (24 kHz)', r.status === 200 && wk.toString('ascii', 0, 4) === 'RIFF' && wk.readUInt32LE(24) === 24000 && wk.length === 44 + 24000, wk.length);
+      spraakStaat.ttsKaal = false;
+      const gS = ctx.process.env.GEMINI_API_KEY_AUTO;
+      delete ctx.process.env.GEMINI_API_KEY_AUTO;
+      r = await vraag('POST', '/app/voorlees', { tekst: 'Kort antwoord.' }, { pot: P.jar });
+      toets('20 zonder Gemini-sleutel -> 503 staat niet aan', r.status === 503 && /niet aan/.test(r.j.fout), JSON.stringify(r.j));
+      ctx.process.env.GEMINI_API_KEY_AUTO = gS;
+      H.appStaat.tellers.voorleesdag = Array(300).fill(Date.now() - 3 * 3600000);
+      r = await vraag('POST', '/app/voorlees', { tekst: 'Kort antwoord.' }, { pot: P.jar });
+      toets('20 dagplafond voorlezen (300 delen) -> 429 (Fable K7: sleutel van het kastje)', r.status === 429 && /per dag/.test(r.j.fout), JSON.stringify(r.j));
+      H.appStaat.tellers.voorleesdag = [];
+      // niets op schijf behalve de logs; geen tekst in het auditlog
+      const bestandenNa = (function lijst(d) { let l = []; for (const n of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, n.name); if (n.isDirectory()) l = l.concat(lijst(f)); else l.push(f); } return l; })(W);
+      const nieuw = bestandenNa.filter((f) => !bestandenVoor.includes(f));
+      toets('20 geen nieuw bestand op schijf (audio nooit bewaard)', nieuw.length === 0, nieuw.join(', '));
+      const audit20 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+      toets('20 auditlog: seconden en delen, nooit de tekst', /spraak 2 s -> 44 tekens/.test(audit20) && /voorlees deel 1\/\d+ \(\d+ tekens\)/.test(audit20) && !/werkoverleg|jaarrekening|Zo-kef/.test(audit20), audit20.slice(-300));
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
