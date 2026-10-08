@@ -3034,6 +3034,8 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/naast', undefined, {});
       toets('21 zonder sessie -> 401', r.status === 401, r.status);
       n8nStaat.executies = exVoor;
+    }
+
     // ── 22. Cijfer-Meester (wv200, bouwplan § 4.9c): kanaal cijfer-meester -> eigen sessie, kop, geen knoppen/bijlagen/chat_log ──
     {
       const n0 = gestart.length, posts0 = chatlogStaat.posts.length;
