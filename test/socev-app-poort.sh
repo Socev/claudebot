@@ -160,6 +160,9 @@ async function nepFetch(url, opt) {
       return antw(200, { data: n8nStaat.buffer.filter((x) => !bronnen || bronnen.includes(x.bron)).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)), nextCursor: null });
     }
     if (u.pathname === '/api/v1/data-tables/MF6DKIGzWVT8FAdy/rows') return antw(200, { data: n8nStaat.stilte, nextCursor: null });
+    if (u.pathname === '/api/v1/executions' && n8nStaat.paginas && n8nStaat.paginas[u.searchParams.get('workflowId')]) {   // wv201: paginering
+      const pg = n8nStaat.paginas[u.searchParams.get('workflowId')], i = Number(u.searchParams.get('cursor') || 0);
+      return antw(200, { data: pg[i] || [], nextCursor: i + 1 < pg.length ? String(i + 1) : null }); }
     if (u.pathname === '/api/v1/executions') { const e = n8nStaat.executies[u.searchParams.get('workflowId')]; return antw(200, { data: e ? [].concat(e) : [], nextCursor: null }); }
     if (u.pathname === '/api/v1/data-tables/jTz5tgWWPhkFz9Be/rows') return n8nStaat.portieKapot ? antw(500, {}) : antw(200, { data: (n8nStaat.portie || []).slice().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)), nextCursor: null });
     if (u.pathname === '/api/v1/credentials' && (!opt.method || opt.method === 'GET')) return spNep.kapot ? antw(500, {}) : antw(200, { data: spNep.creds.map((c) => ({ id: c.id, name: c.name, type: c.type, createdAt: '2026-06-09T10:00:00.000Z', updatedAt: c.updatedAt })), nextCursor: null });
@@ -284,7 +287,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -2939,6 +2942,92 @@ async function bewijs(o) {
       toets('20 geen nieuw bestand op schijf (audio nooit bewaard)', nieuw.length === 0, nieuw.join(', '));
       const audit20 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
       toets('20 auditlog: seconden en delen, nooit de tekst', /spraak 2 s -> 44 tekens/.test(audit20) && /voorlees deel 1\/\d+ \(\d+ tekens\)/.test(audit20) && !/werkoverleg|jaarrekening|Zo-kef/.test(audit20), audit20.slice(-300));
+    }
+
+    // ── 21. wv201: app naast Telegram (fase 7, meetpunt 6): alleen tellingen per dag, nooit inhoud ──
+    {
+      const D = '2026-10-07', Z = (h, m) => new Date(Date.UTC(2026, 9, 6, 22 + h, m || 0)).toISOString();   // Z(0) = 7-10 00:00 Amsterdam
+      const jl = (f, rij) => fs.appendFileSync(f, rij.map((x) => JSON.stringify(x)).join('\n') + '\n');
+      const J1 = 'a1a1a1a1a1a1a1a1', J2 = 'b2b2b2b2b2b2b2b2', J3 = 'c3c3c3c3c3c3c3c3';
+      jl(path.join(LOGDIR, 'hoofd.jsonl'), [
+        { t: Z(9), job_id: J1, soort: 'bericht', tekst: 'GEHEIMTEKST hoofd', antwoord: 'GEHEIMANTWOORD', ok: true },
+        { t: Z(9, 5), job_id: J3, soort: 'knop', tekst: 'GEHEIMTEKST knop', ok: true },
+        { t: Z(10), job_id: 'd4d4d4d4d4d4d4d4', soort: 'bericht', tekst: 'x', ok: false },
+        { t: Z(-1), job_id: 'e5e5e5e5e5e5e5e5', soort: 'bericht', tekst: 'gisteren 23:00', ok: true },
+        { t: Z(24, 30), job_id: 'f6f6f6f6f6f6f6f6', soort: 'bericht', tekst: 'morgen 00:30', ok: true }]);
+      jl(path.join(DATA, 'audit.jsonl'), [
+        { t: Z(8, 59), route: '/app/beurt', m: 'POST', status: 200, reden: 'beurt hoofd ' + J1 },
+        { t: Z(0, 30), route: '/app/beurt', m: 'POST', status: 200, reden: 'beurt machinekamer ' + J2 + ' + 1 bestand(en)' },
+        { t: Z(9, 4), route: '/app/knop', m: 'POST', status: 200, reden: 'knop ja (vingerafdruk) a05e98ce -> ' + J3 },
+        { t: Z(0, 31), route: '/app/beurt', m: 'POST', status: 200, reden: 'herhaling ' + J2 },
+        { t: Z(9, 1), route: '/app/spraak', m: 'POST', status: 200, reden: 'spraak 3 s -> 20 tekens' },
+        { t: Z(9, 2), route: '/app/spraak', m: 'POST', status: 200, reden: 'spraak 4 s -> 30 tekens' },
+        { t: Z(11), route: '/app/status', m: 'GET', status: 503, reden: 'app-uit' },
+        { t: Z(-0.5), route: '/app/status', m: 'GET', status: 503, reden: 'buiten de dag' }]);
+      jl(path.join(LOGDIR, 'autokastje.jsonl'), [{ t: Z(12), soort: 'start', job_id: 'k1', onderwerp: 'GEHEIMTEKST' }, { t: Z(12, 1), soort: 'klaar', job_id: 'k1', ok: false },
+        { t: Z(13), soort: 'start', job_id: 'k2' }]);
+      const ex = (id, uur, status, knopen) => ({ id, status, startedAt: Z(uur), data: { resultData: { runData: Object.fromEntries((knopen || []).map((n) => [n, [{ json: { tekst: 'GEHEIMTEKST' } }]])) } } });
+      const exVoor = n8nStaat.executies;
+      n8nStaat.executies = {
+        OfQgM9h4qGY2dFm8: [ex('9', 25, 'success', ['Start job', 'Antwoord sturen']), ex('8', 20, 'success', ['Start job', 'Antwoord sturen', 'Log David']), ex('7', 19, 'success', ['Knop lezen (tg)']),
+          ex('6', 18, 'success', ['Vraagknop lezen', 'Knopbeurt', 'Start job', 'Antwoord sturen']), ex('5', 17, 'success', ['Start job', 'Bezig-bericht']), ex('4', 16, 'error', ['Start job']),
+          ex('3', -2, 'success', ['Start job', 'Antwoord sturen'])],
+        nDj2qyAC5hJL5eUU: [ex('19', 15, 'success', ['Start job', 'Timeout melden', 'Antwoord sturen']), ex('18', 14, 'running', ['Start job']), ex('17', -3, 'success', [])] };
+      const r21 = await H.appNaastDag(D, Date.now());
+      toets('21 app hoofd: 2 berichten (1 fout), 1 knop; grenzen in Amsterdamse tijd', r21.app.hoofd.berichten === 2 && r21.app.hoofd.knoppen === 1 && r21.app.hoofd.fout === 1, JSON.stringify(r21.app));
+      toets('21 gemist: beurt zonder regel in het app-log (machinekamer), met bestand geteld', r21.app.machinekamer.gemist === 1 && r21.app.hoofd.gemist === 0 && r21.app.met_bestand === 1, JSON.stringify(r21.app));
+      toets('21 opnames 2, storing (5xx) 1', r21.app.opnames === 2 && r21.app.storing === 1, JSON.stringify(r21.app));
+      toets('21 kastje: 2 vragen, 1 fout', r21.kastje.vragen === 2 && r21.kastje.fout === 1, JSON.stringify(r21.kastje));
+      const th = r21.telegram.hoofd, td = r21.telegram.debug;
+      toets('21 Telegram hoofd: 3 berichten (ook de mislukte run), 2 knoppen, 2 gemist, 1 storing; buiten de dag niet', th.berichten === 3 && th.knoppen === 2 && th.gemist === 2 && th.storing === 1, JSON.stringify(th));
+      toets('21 Telegram debug: Timeout melden = gemist; lopend apart', td.berichten === 1 && td.gemist === 1 && td.lopend === 1 && !r21.telegram_fout, JSON.stringify(td));
+      toets('21 totalen storingen en gemist (herhaling van dezelfde beurt telt niet dubbel)', r21.storingen === 2 && r21.gemist === 4, JSON.stringify([r21.storingen, r21.gemist]));
+      // paginering: de grensexecutie staat op pagina 2
+      n8nStaat.paginas = { OfQgM9h4qGY2dFm8: [[ex('9', 20, 'success', ['Start job', 'Antwoord sturen'])], [ex('8', 10, 'success', ['Knop lezen (tg)']), ex('3', -2, 'success', [])]] };
+      const r21p = await H.appNaastDag(D, Date.now());
+      toets('21 paginering: twee pagina\'s gevolgd tot vóór het begin van de dag', r21p.telegram.hoofd.berichten === 1 && r21p.telegram.hoofd.knoppen === 1 && !(r21p.telegram_fout || []).some((x) => /hoofd/.test(x)), JSON.stringify(r21p.telegram));
+      n8nStaat.paginas = null;
+      let gooit = false; try { H.appNaastGrenzen('kapot'); } catch (e) { gooit = true; }
+      toets('21 ongeldige dag: fout in plaats van een eindeloze lus', gooit);
+      toets('21 geen inhoud in de dagregel', !/GEHEIM|tekst|antwoord/.test(JSON.stringify(r21)), JSON.stringify(r21));
+      // n8n reikt niet tot het begin van de dag -> fout erbij
+      n8nStaat.executies.nDj2qyAC5hJL5eUU = [ex('19', 15, 'success', ['Start job', 'Antwoord sturen'])];
+      const r21b = await H.appNaastDag(D, Date.now());
+      toets('21 n8n onvolledig -> telegram_fout genoemd', Array.isArray(r21b.telegram_fout) && /debug/.test(r21b.telegram_fout.join()), JSON.stringify(r21b.telegram_fout));
+      // tik: alleen primair, elke afgesloten dag één keer, n8n stuk -> recente dag wacht
+      const NAAST = path.join(DATA, 'naast.jsonl');
+      try { fs.unlinkSync(NAAST); } catch (e) {}
+      n8nStaat.executies.nDj2qyAC5hJL5eUU = [ex('17', -3, 'success', [])];
+      rolStub.primair = false; await H.appNaastTik();
+      toets('21 tik op de passieve kant schrijft niets', !fs.existsSync(NAAST));
+      rolStub.primair = true; n8nStaat.kapot = true; await H.appNaastTik();
+      toets('21 n8n stuk: recente dag wacht (geen regel)', !fs.existsSync(NAAST) || !/2026-10-07/.test(fs.readFileSync(NAAST, 'utf8')));
+      n8nStaat.kapot = false;
+      const dbgVoor = n8nStaat.executies.nDj2qyAC5hJL5eUU;
+      n8nStaat.executies.nDj2qyAC5hJL5eUU = [ex('20', 23.9, 'running', ['Start job']), ex('17', -3, 'success', [])];
+      await H.appNaastTik();
+      toets('21 lopende Telegram-run op de dag: dag wacht nog', !fs.existsSync(NAAST) || !/2026-10-07/.test(fs.readFileSync(NAAST, 'utf8')));
+      n8nStaat.executies.nDj2qyAC5hJL5eUU = dbgVoor;
+      await H.appNaastTik(); await H.appNaastTik();
+      const regels = fs.readFileSync(NAAST, 'utf8').split('\n').filter(Boolean).map((x) => JSON.parse(x));
+      const gister = new Date(Date.now() - 86400000).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
+      toets('21 tik: elke afgesloten dag sinds 7-10 precies één keer, vandaag niet', regels[0].dag === D && regels.filter((x) => x.dag === D).length === 1 && regels[regels.length - 1].dag === gister &&
+        new Set(regels.map((x) => x.dag)).size === regels.length && regels[0].telegram.hoofd.berichten === 3 && regels[0].kant === 'olares', regels.map((x) => x.dag).join());
+      toets('21 naast.jsonl 0600, zonder inhoud', (fs.statSync(NAAST).mode & 0o077) === 0 && !/GEHEIM/.test(fs.readFileSync(NAAST, 'utf8')));
+      // route: stil, met sessie
+      H.appStaat.naastCache = null;
+      const auditVoor = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').length;
+      r = await vraag('GET', '/app/naast', undefined, { pot: P.jar });
+      toets('21 GET /app/naast: dagregels + vandaag (tot nu, Telegram pas na afloop van de dag)', r.status === 200 && r.j.dagen.length === regels.length && r.j.vandaag && r.j.vandaag.tot_nu === true && r.j.start === D &&
+        r.j.vandaag.telegram.hoofd === null && /na afloop/.test(r.j.vandaag.telegram_fout.join()), JSON.stringify(r.j).slice(0, 300));
+      toets('21 GET /app/naast is stil (geen auditregel)', !/\/app\/naast/.test(fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').slice(auditVoor)));
+      const nN = n8nStaat.aanroepen.length;
+      H.appStaat.naastCache = null;
+      await vraag('GET', '/app/naast', undefined, { pot: P.jar });
+      toets('21 GET /app/naast roept n8n niet aan (Fable M2: executies zijn zwaar)', n8nStaat.aanroepen.length === nN, n8nStaat.aanroepen.length - nN);
+      r = await vraag('GET', '/app/naast', undefined, {});
+      toets('21 zonder sessie -> 401', r.status === 401, r.status);
+      n8nStaat.executies = exVoor;
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──

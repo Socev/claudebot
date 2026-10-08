@@ -6486,6 +6486,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
+        if (route === 'GET /app/naast') return appNaastRoute(req, res);   // wv201
         if (route === 'GET /app/modellen') return appModellen(req, res);
         if (route === 'POST /app/modellen') return appModellenZet(req, res, reg, a, s, d);
         if (route === 'GET /app/vandaag') return appVandaagRoute(req, res, a);
@@ -7038,6 +7039,157 @@ function appInfo() {
     // podklok tegen de Date-kop van de Access-certs (Fable-review 7-10 #12); > 2 min = alle Access-bewijzen falen
     klok_afwijking_s: afw, klok_gemeten: k ? new Date(k.op).toISOString() : null,
     klok_waarschuwing: afw !== null && Math.abs(afw) > 120 ? 'podklok wijkt ' + afw + ' s af; Access-bewijzen falen dan (exp/nbf)' : null };
+}
+// ── App naast Telegram (wv201, fase 7 / meetpunt 6; bouwplan § 6 fase 7) ──
+// Twee weken naast Telegram, daarna besluit David. Per dag (Europe/Amsterdam) alleen tellingen, nooit inhoud: app-beurten per
+// kanaal (bericht/knop) uit het app-log, gemist = een /app/beurt of /app/knop met 200 in audit.jsonl zonder regel in het app-log,
+// opnames (microfoon) en 5xx uit audit.jsonl (+ .1-.3), Telegram-beurten uit de n8n-executies van "Claude via Telegram" en
+// "Claude Debug via Telegram" (welke knopen liepen; n8n bewaart ± 7 dagen), het spraakkastje uit autokastje.jsonl. Elk uur schrijft
+// de pod de afgesloten dagen die nog ontbreken (vanaf APP_NAAST_START) als één regel in naast.jsonl; lukt n8n niet, dan wacht de
+// dag een uur, tenzij n8n hem toch al kwijt is (dan telegram null + reden). Een dag sluit pas een uur na middernacht en zonder
+// lopende Telegram-runs. Alleen op de primaire kant. GET /app/naast is stil; vandaag telt daar alleen de app (Telegram 's nachts).
+const APP_NAAST = path.join(APP_DATA, 'naast.jsonl');
+const APP_NAAST_START = /^\d{4}-\d{2}-\d{2}$/.test(String(process.env.APP_NAAST_START || '')) ? process.env.APP_NAAST_START : '2026-10-07';   // eerste app-beurt (7-10 20:24)
+const APP_NAAST_WF = { hoofd: 'OfQgM9h4qGY2dFm8', debug: 'nDj2qyAC5hJL5eUU' };
+const APP_NAAST_N8N_DAGEN = 6;          // ouder dan dit: n8n kan de dag kwijt zijn, dan niet blijven wachten
+const APP_NAAST_CACHE_MS = 60 * 1000;
+const APP_NAAST_GEMIST_MS = 60 * 60 * 1000;   // een beurt zonder regel in het app-log telt pas na een uur als gemist
+const APP_NAAST_ANTWOORD = ['Antwoord sturen', 'Antwoord met knoppen', 'Antwoord plat', 'Vraagbericht plat', 'Document sturen'];
+const APP_NAAST_KNOP = ['Knop lezen (tg)', 'Vraagknop lezen', 'Voorwerkknop doorgeven', 'Knopbeurt'];
+function appNaastGrenzen(dag) {   // [begin, eind) van een Amsterdamse kalenderdag in ms (zomer- en wintertijd)
+  const zoek = function (ymd) {   // begrensd (Fable wv201 M3): een ongeldige datum mag de pod nooit laten hangen
+    let t = Date.parse(ymd + 'T00:00:00Z') - 3 * 3600000;
+    for (let i = 0; i < 200; i++) { if (appYmd(t) === ymd) return t; t += 15 * 60000; }
+    throw new Error('ongeldige dag ' + String(ymd).slice(0, 12));
+  };
+  const volgende = new Date(Date.parse(dag + 'T12:00:00Z') + 86400000).toISOString().slice(0, 10);
+  return [zoek(dag), zoek(volgende)];
+}
+function appNaastJsonl(f) {
+  let t;
+  try { t = fs.readFileSync(f, 'utf8'); } catch (e) { if (e && e.code === 'ENOENT') return []; throw e; }
+  const uit = [];
+  t.split('\n').forEach(function (r) { if (!r) return; try { uit.push(JSON.parse(r)); } catch (e) {} });
+  return uit;
+}
+function appNaastLokaal(dag, nu) {
+  const g = appNaastGrenzen(dag), in_ = function (t) { const x = Date.parse(t); return x >= g[0] && x < g[1]; };
+  const kanaal = function () { return { berichten: 0, knoppen: 0, fout: 0, gemist: 0 }; };
+  const app = { hoofd: kanaal(), machinekamer: kanaal(), opnames: 0, met_bestand: 0, storing: 0 };
+  const gelogd = {};
+  ['hoofd', 'machinekamer'].forEach(function (k) {
+    appNaastJsonl(appLogPad(k)).forEach(function (x) {
+      if (x.job_id) gelogd[x.job_id] = true;
+      if (!in_(x.t)) return;
+      if (x.soort === 'knop') app[k].knoppen++; else app[k].berichten++;
+      if (x.ok === false) app[k].fout++;
+    });
+  });
+  const audit = [];
+  [APP_AUDIT + '.3', APP_AUDIT + '.2', APP_AUDIT + '.1', APP_AUDIT].forEach(function (f) { appNaastJsonl(f).forEach(function (x) { audit.push(x); }); });
+  appNaastJsonl(APP_AUDIT_VOOR).forEach(function (x) { if (x.status >= 500) audit.push(x); });
+  audit.forEach(function (x) {
+    if (!x || !in_(x.t)) return;
+    if (x.status >= 500) app.storing++;
+    if (x.status !== 200) return;
+    if (x.route === '/app/spraak') app.opnames++;
+    if (x.route !== '/app/beurt' && x.route !== '/app/knop') return;
+    if (/^herhaling /.test(String(x.reden || ''))) return;   // dezelfde beurt nog eens (Fable wv201 K1)
+    if (/bestand\(en\)/.test(String(x.reden || ''))) app.met_bestand++;
+    const m = String(x.reden || '').match(/([0-9a-f]{16})(?:\s|$)/g), job = m ? m[m.length - 1].trim() : null;
+    if (!job || gelogd[job] || nu - Date.parse(x.t) < APP_NAAST_GEMIST_MS) return;
+    gelogd[job] = true;   // per job één keer
+    const k = /^beurt machinekamer/.test(String(x.reden || '')) ? 'machinekamer' : 'hoofd';   // knop zonder log: kanaal onbekend, telt bij hoofd
+    app[k].gemist++;
+  });
+  const kastje = { vragen: 0, fout: 0 };
+  appNaastJsonl(appLogPad('autokastje')).forEach(function (x) {
+    if (!in_(x.t)) return;
+    if (x.soort === 'start') kastje.vragen++;
+    if (x.soort === 'klaar' && x.ok === false) kastje.fout++;
+  });
+  return { app: app, kastje: kastje };
+}
+// Telegram: executies van één workflow op één dag. Leest alleen de namen van de knopen die liepen (inhoud blijft in het geheugen
+// van deze aanroep). Volledig = de oudste opgehaalde executie ligt vóór het begin van de dag (anders kan n8n hem kwijt zijn).
+async function appNaastTelegram(wf, dag, nu) {
+  const b = appN8nBasis(), k = process.env.N8N_API_KEY;
+  if (!b || !k) throw new Error('n8n-API niet ingesteld');
+  const g = appNaastGrenzen(dag);
+  const t = { berichten: 0, knoppen: 0, gemist: 0, storing: 0, lopend: 0 };
+  let cursor = null, volledig = false;
+  for (let i = 0; i < 100; i++) {   // ± 1000 executies; een pagina kan > 10 MB zijn (foto's als base64), dus klein (Fable wv201 M2)
+    const r = await fetch(b + '/api/v1/executions?workflowId=' + wf + '&includeData=true&limit=10' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''),
+      { headers: { 'X-N8N-API-KEY': k, accept: 'application/json' }, signal: AbortSignal.timeout(30000) });
+    if (!r.ok) throw new Error('n8n http ' + r.status);
+    const j = await r.json(), rij = Array.isArray(j && j.data) ? j.data : [];
+    rij.forEach(function (e) {
+      const s = Date.parse(e.startedAt);
+      if (s < g[0]) { volledig = true; return; }
+      if (s >= g[1]) return;
+      if (e.status === 'running' || e.status === 'waiting' || e.status === 'new') { t.lopend++; return; }
+      if (e.status === 'error' || e.status === 'crashed') t.storing++;   // en daarna gewoon meetellen (Fable wv201 K3)
+      const rd = (e.data && e.data.resultData && e.data.resultData.runData) || {};
+      const liep = function (n) { return Object.prototype.hasOwnProperty.call(rd, n); };
+      if (APP_NAAST_KNOP.some(liep)) t.knoppen++;
+      else if (liep('Start job')) t.berichten++;
+      if (liep('Start job') && (liep('Timeout melden') || !APP_NAAST_ANTWOORD.some(liep))) t.gemist++;
+    });
+    cursor = j && j.nextCursor;
+    if (volledig || !cursor || !rij.length) break;
+  }
+  return { tel: t, volledig: volledig };
+}
+async function appNaastDag(dag, nu, alleenLokaal) {
+  const regel = Object.assign({ dag: dag, kant: String(process.env.SOCEV_KANT || 'olares').slice(0, 12) }, appNaastLokaal(dag, nu));   // K6: app-log en audit zijn per kant
+  const tg = {}, fouten = [];
+  if (alleenLokaal) { tg.hoofd = null; tg.debug = null; fouten.push('Telegram telt na afloop van de dag'); }
+  else for (const kant of ['hoofd', 'debug']) {
+    try { const x = await appNaastTelegram(APP_NAAST_WF[kant], dag, nu); tg[kant] = x.tel; if (!x.volledig) fouten.push(kant + ': n8n reikt niet tot het begin van de dag'); }
+    catch (e) { tg[kant] = null; fouten.push(kant + ': ' + String(e && e.message || e).slice(0, 80)); }
+  }
+  regel.telegram = tg;
+  regel.telegram_fout = fouten.length ? fouten : undefined;
+  regel.storingen = regel.app.storing + (tg.hoofd ? tg.hoofd.storing : 0) + (tg.debug ? tg.debug.storing : 0);
+  regel.gemist = regel.app.hoofd.gemist + regel.app.machinekamer.gemist + (tg.hoofd ? tg.hoofd.gemist : 0) + (tg.debug ? tg.debug.gemist : 0);
+  return regel;
+}
+let appNaastBezig = false;
+async function appNaastTik() {
+  if (appNaastBezig || !rolPrimair()) return;
+  appNaastBezig = true;
+  try {
+    const nu = Date.now(), vandaag = appYmd(nu), er = {};
+    appNaastJsonl(APP_NAAST).forEach(function (x) { if (x && x.dag) er[x.dag] = true; });
+    for (let d = APP_NAAST_START; d < vandaag; d = new Date(Date.parse(d + 'T12:00:00Z') + 86400000).toISOString().slice(0, 10)) {
+      if (er[d] || nu < appNaastGrenzen(d)[1] + APP_NAAST_GEMIST_MS) continue;   // Fable wv201 M1: na middernacht eerst een uur uitlopen
+      const r = await appNaastDag(d, nu);
+      const oud = (Date.parse(vandaag) - Date.parse(d)) / 86400000 > APP_NAAST_N8N_DAGEN;
+      const lopend = (r.telegram.hoofd && r.telegram.hoofd.lopend) || (r.telegram.debug && r.telegram.debug.lopend);
+      if ((r.telegram_fout || lopend) && !oud) continue;   // n8n even weg of nog bezig: volgend uur opnieuw
+      r.gemaakt = new Date().toISOString();
+      fs.mkdirSync(APP_DATA, { recursive: true, mode: 0o700 });
+      fs.appendFileSync(APP_NAAST, JSON.stringify(r) + '\n', { mode: 0o600 });
+    }
+  } catch (e) { logError('app-naast', e); }
+  finally { appNaastBezig = false; }
+}
+setTimeout(function () { appNaastTik(); }, 3 * 60 * 1000).unref();
+setInterval(function () { appNaastTik(); }, 60 * 60 * 1000).unref();
+async function appNaastRoute(req, res) {
+  res._app.stil = true;   // Verbruik ververst elke 60 s
+  let dagen = [], fout = null;
+  try { dagen = appNaastJsonl(APP_NAAST).filter(function (x) { return x && x.dag; }); }
+  catch (e) { logError('app-naast', e); fout = 'dagregels nu niet leesbaar'; }
+  // Vandaag alleen uit de pod zelf (app-log, audit, kastje): de n8n-executies zijn zwaar (Fable wv201 M2), die telt de nachtregel.
+  const c = appStaat.naastCache, nu = Date.now();
+  let vandaag = null;
+  if (c && nu - c.op < APP_NAAST_CACHE_MS && c.dag === appYmd(nu)) vandaag = c.r;
+  else {
+    try { vandaag = await appNaastDag(appYmd(nu), nu, true); vandaag.tot_nu = true; appStaat.naastCache = { op: nu, dag: appYmd(nu), r: vandaag }; }
+    catch (e) { logError('app-naast', e); }
+  }
+  appStuur(res, 200, { ok: true, start: APP_NAAST_START, dagen: dagen.slice(-60), vandaag: vandaag, fout: fout });
 }
 // ── einde socev-app poort ─────────────────────────────────────────────────────────────────────────
 
