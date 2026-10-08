@@ -5216,17 +5216,25 @@ function appMeldingen() {
   return st.bezig;
 }
 function appGezien() { try { return appLeesStreng(APP_MELD_GEZIEN, {}); } catch (e) { logError('app-meldingen', e); return {}; } }
+// wv144 (David 8-10: "blijven ongelezen … '9+'"): nieuw is wat later kwam dan je op dit apparaat zag, nooit van vóór het
+// koppelen (een nieuw apparaat erfde alle meldingen van 14 dagen: 10 kaarten = "9+") en nooit ouder dan 7 dagen. De kaart
+// zelf blijft onder Eerder staan; het gaat alleen om tellen en het label "nieuw".
+const APP_NIEUW_MAX_MS = 7 * 86400000;
+function appMeldGrens(a, gezien, nu) {
+  return Math.max(Date.parse(gezien || '') || 0, Date.parse(a.aangemaakt || '') || 0, nu - APP_NIEUW_MAX_MS);
+}
+function appMeldNieuw(items, grens) { return items.filter(function (x) { return Date.parse(x.wanneer) > grens; }); }
 async function appMeldingenRoute(req, res, a) {
   res._app.stil = true;   // de app ververst elke paar minuten: geen auditregel bij 200
   let m;
   try { m = await appMeldingen(); } catch (e) { logError('app-meldingen', e); return appWeiger(res, 503, 'meldingen zijn nu niet te lezen', 'meldingen fout'); }
   const gezien = appGezien()[a.id] || null;
-  const g = gezien ? Date.parse(gezien) : 0;
+  const grens = appMeldGrens(a, gezien, Date.now());
   let sub = null;
   try { sub = appPushLees().apparaten[a.id] || null; } catch (e) {}
   appStuur(res, 200, { ok: true, items: m.items.map(function (x) { const y = Object.assign({}, x); delete y.rij; delete y.kaart; return y; }), stand: m.stand,
-    fouten: m.fouten, bijgewerkt: new Date(m.op).toISOString(), gezien: gezien,
-    nieuw: m.items.filter(function (x) { return Date.parse(x.wanneer) > g; }).length,
+    fouten: m.fouten, bijgewerkt: new Date(m.op).toISOString(), gezien: gezien, nieuw_na: new Date(grens).toISOString(),
+    nieuw: appMeldNieuw(m.items, grens).length,
     seintjes_meldingen: !!(sub && (sub.soorten || []).indexOf('meldingen') >= 0) });
 }
 function appMeldingenGezien(req, res, a, d) {
@@ -5307,7 +5315,7 @@ async function appNieuwRoute(req, res, a) {
   const tabs = {}, laatst = {}, fouten = alle ? [] : ['gezien'];   // kapot gezien.json: zichtbaar in fouten (review #4)
   Object.keys(bronnen).forEach(function (t) {
     if (!bronnen[t]) { tabs[t] = 0; fouten.push(t); return; }
-    const grens = Date.parse(g[t] || 0) || nu;
+    const grens = Math.max(Date.parse(g[t] || 0) || nu, nu - APP_NIEUW_MAX_MS);   // wv144: ouder dan 7 dagen telt niet
     const nieuw = bronnen[t].filter(function (x) { return x > grens; });
     tabs[t] = nieuw.length;
     if (nieuw.length) laatst[t] = new Date(Math.max.apply(null, nieuw)).toISOString();
@@ -5319,8 +5327,7 @@ async function appNieuwRoute(req, res, a) {
   let m = appStaat.meld && appStaat.meld.data;
   if (!m || nu - m.op > APP_NIEUW_MELD_MS) { try { m = await appMeldingen(); } catch (e) { m = null; } }
   if (m) {
-    const gm = Date.parse(appGezien()[a.id] || 0) || 0;
-    const nieuw = m.items.filter(function (x) { return Date.parse(x.wanneer) > gm; });
+    const nieuw = appMeldNieuw(m.items, appMeldGrens(a, appGezien()[a.id], nu));
     tabs.meldingen = nieuw.length;
     if (nieuw.length) laatst.meldingen = nieuw[0].wanneer;
   } else { tabs.meldingen = 0; fouten.push('meldingen'); }

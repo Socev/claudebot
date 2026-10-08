@@ -1258,7 +1258,24 @@ async function bewijs(o) {
       toets('12 nu stil zonder melding in de buffer: toch een kaart (nog-fout); niet-bewaakt (SMS) niet', tm && tm.herstel.stand === 'nog-fout' && !its.some((x) => /SMS/.test(x.titel)), JSON.stringify(tm));
       toets('12 stand: 2 bewaakte stromen, Teams stil; extern bereikbaar', r.j.stand && r.j.stand.aanvoer.bewaakt === 2 && r.j.stand.aanvoer.stil.join() === 'Teams meelezen' && r.j.stand.extern.ok === true && /van buitenaf bereikbaar/.test(r.j.stand.extern.tekst), JSON.stringify(r.j.stand));
       toets('12 geen links of hostnamen en geen intern rij-/kaartnummer in het antwoord', !/5877e26c|olares\.com|https?:/.test(JSON.stringify(its)) && its.every((x) => !('rij' in x) && !('kaart' in x)), JSON.stringify(its).slice(0, 200));
-      toets('12 nog niets gezien: alle 6 nieuw; n8n met de API-sleutel gelezen', r.j.nieuw === 6 && r.j.gezien === null && n8nStaat.aanroepen.every((x) => x.key === 'nep-n8n'), r.j.nieuw);
+      // wv144: nieuw = na het koppelen van dit apparaat en niet ouder dan 7 dagen (een nieuw apparaat erfde 10 kaarten = "9+")
+      const regM = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      const apM = regM.apparaten.find((x) => x.actief && x.goedkeurder) || regM.apparaten.find((x) => x.actief);
+      toets('12 nog niets gezien, net gekoppeld: 0 nieuw (nulpunt = koppelen); n8n met de API-sleutel gelezen', r.j.nieuw === 0 && r.j.gezien === null && r.j.nieuw_na === apM.aangemaakt && n8nStaat.aanroepen.every((x) => x.key === 'nep-n8n'), r.j.nieuw + ' ' + r.j.nieuw_na + ' ' + apM.aangemaakt);
+      apM.aangemaakt = uur(24 * 30);
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regM));
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      toets('12 wv144: gekoppeld 30 dagen geleden, nog niets gezien: alle 6 nieuw, nieuw_na = 7 dagen terug', r.j.nieuw === 6 && Math.abs(Date.parse(r.j.nieuw_na) - (Date.now() - 7 * 86400000)) < 120000, r.j.nieuw + ' ' + r.j.nieuw_na);
+      n8nStaat.buffer.push({ id: 60, bron: 'foutmelder', tekst: fmt('AI - Achtdagen', 'Y', 'Service unavailable', 2, 'AchtDagen01'), createdAt: uur(24 * 8) });
+      H.appStaat.meld = null;
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      toets('12 wv144: storing van 8 dagen geleden staat onder de kaarten maar telt niet als nieuw', (r.j.items || []).some((x) => /Achtdagen/.test(x.titel)) && r.j.nieuw === 6, r.j.nieuw + ' ' + (r.j.items || []).map((x) => x.titel).join());
+      const rN = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('12 wv144: /app/nieuw telt Meldingen hetzelfde (6)', rN.status === 200 && rN.j.tabs.meldingen === 6, JSON.stringify(rN.j && rN.j.tabs));
+      n8nStaat.buffer.pop();
+      // aangemaakt blijft 30 dagen terug: de toetsen hieronder zetten gezien op uren geleden (vóór het echte koppelen)
+      H.appStaat.meld = null;
+      await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
       toets('12 GET meldingen (200) schrijft geen auditregel', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAuditM);
       const nAanroep = n8nStaat.aanroepen.length;
       await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
