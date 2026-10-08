@@ -3304,7 +3304,8 @@ function sleutelportaal(req, res) {
 // goedkeurder het 2 u heeft opengezet; anders 423 met de reden. Daar ook geen BSN-achtige getallen (422). Soort en vaste plek
 // stelt alleen de goedkeurder in (bij goedkeuren of via /app/apparaat/wijzig); de goedkeurder zelf blijft altijd meereizend.
 // Opslag: APP_DATA (/opt/data/socev-app-data; NIET /opt/data/app, dat zijn de server.js-releases). Geen inhoud in het
-// auditlog. Sessies staan alleen in het geheugen: na een herstart is één vingerafdruk genoeg.
+// auditlog. Sessies staan in het geheugen en (sinds wv231) als hash in sessies.json: een herstart kost geen vingerafdruk,
+// wel een nieuwe voor de volgende gevoelige handeling (vers_tot gaat niet mee).
 const APP_DATA = process.env.APP_DATA_DIR || '/opt/data/socev-app-data';
 const APP_UIT = process.env.APP_UIT_BESTAND || '/opt/data/app-uit';
 const APP_REGISTER = path.join(APP_DATA, 'apparaten.json');
@@ -3319,6 +3320,7 @@ const APP_CONFIG = path.join(APP_DATA, 'config.json');           // geen geheime
 const APP_POORT_PAD = path.join(APP_DATA, 'geheim', 'poort.key');
 const APP_HEROPEND = path.join(APP_DATA, 'koppel-heropend');      // machinekamer: eerste-apparaatroute opnieuw open
 const APP_HERSTEL_VERVALT = path.join(APP_DATA, 'herstel-vervalt'); // machinekamer: herstelcode én telefoon kwijt (bouwplan § 4.4c)
+const APP_SESSIES = path.join(APP_DATA, 'sessies.json');          // wv231: sessies over een herstart (alleen hash, geen token; § 4.4e)
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
 const APP_CODE_MS = 10 * 60 * 1000;
@@ -3599,7 +3601,9 @@ function appApparaat(req, reg) {
 // Alleen schrijvende, door David gestarte routes schuiven de sessie op (glijd = true); lezen en pollen niet, anders
 // houdt een open app de sessie tot de harde grens in leven en werkt de stilte-time-out niet (Fable-review 7-10 #1).
 function appGlijd(s, apparaat) {
+  const oud = s.tot;
   s.tot = appSessieTot(s.start, apparaat, Date.now());
+  if (s.tot !== oud) appStaat.sessiesVuil = true;   // wv231: verlenging gaat met de minuuttik naar schijf, niet per verzoek
 }
 // Einde van het dagdeel (00–06, 06–12, 12–18, 18–24 Europe/Amsterdam) waarin t valt. De zomertijdwissel (02–03 u) valt
 // nooit op een grens, dus de grens is altijd een bestaand, eenduidig lokaal uur.
@@ -3631,7 +3635,7 @@ function appSessie(req, apparaat, glijd) {
   const h = appSha(c), s = appStaat.sessies[h];
   if (!s) return null;
   const nu = Date.now();
-  if (nu > s.tot || !apparaat || s.apparaat !== apparaat.id) { if (nu > s.tot) delete appStaat.sessies[h]; return null; }
+  if (nu > s.tot || !apparaat || s.apparaat !== apparaat.id) { if (nu > s.tot) { delete appStaat.sessies[h]; appSessiesBewaar(); } return null; }
   if (glijd) appGlijd(s, apparaat);
   return s;
 }
@@ -3642,10 +3646,73 @@ function appNieuweSessie(apparaat, credentialId) {
   // credential: met welke passkey deze sessie geopend is (goedkeuren eist die van het apparaat zelf)
   appStaat.sessies[appSha(id)] = { apparaat: apparaat.id, credential: String(credentialId || ''), start: nu, vers_tot: nu + APP_VERS_MS,
     tot: appSessieTot(nu, apparaat, nu) };
+  appSessiesBewaar();
   return { w: id, s: Math.floor((apparaat.soort === 'vast' ? APP_SESSIE_MAX_MS : APP_SESSIE_REIST_MAX_MS) / 1000) };
 }
 function appSessiesWeg(apparaatId) {
   Object.keys(appStaat.sessies).forEach(function (h) { if (appStaat.sessies[h].apparaat === apparaatId) delete appStaat.sessies[h]; });
+  appSessiesBewaar();
+}
+// ── Sessies over een herstart (wv231, David 8-10 20:59; bouwplan § 4.4e) ──
+// Elke uitrol of crash wiste het geheugen en kostte op elk apparaat een vingerafdruk (8-10: 11 uitrollen). Op schijf staat
+// per sessie alleen sha256(token) + apparaat-id, passkey-id, start en tot; het token zelf nooit, dus het bestand lezen geeft
+// geen toegang (het apparaatcookie is daarnaast nodig). vers_tot gaat niet mee: na een herstart vraagt elke gevoelige
+// handeling (§ 4.4d) weer een verse vingerafdruk. Geschreven na elke nieuwe, vervallen of weggehaalde sessie; een verlenging
+// (glijden) met de minuuttik, dus een herstart kost hooguit een minuut verlenging (te kort, nooit te lang).
+// Lukt schrijven niet, dan gaat het bestand weg (dicht): een uitgelogde of ingetrokken sessie mag na een herstart niet terugkomen.
+function appSessiesBewaar() {
+  appStaat.sessiesVuil = false;
+  const nu = Date.now(), uit = {};
+  Object.keys(appStaat.sessies).forEach(function (h) {
+    const s = appStaat.sessies[h];
+    if (nu <= s.tot) uit[h] = { apparaat: s.apparaat, credential: s.credential, start: s.start, tot: s.tot };
+  });
+  try { appSchrijfJson(APP_SESSIES, { versie: 1, sessies: uit }); }
+  catch (e) {
+    logError('app-sessies', e);
+    // weghalen; lukt ook dat niet (map niet schrijfbaar), dan leegmaken: een leeg bestand is bij laden kapot = dicht (Fable wv231)
+    try { fs.unlinkSync(APP_SESSIES); } catch (e2) {
+      if (e2 && e2.code === 'ENOENT') return;
+      try { fs.truncateSync(APP_SESSIES, 0); } catch (e3) { logError('app-sessies-weg', e3); }
+    }
+  }
+}
+// Bij opstart: alleen sessies die nog lopen, van een actief apparaat in het register, met diens eigen passkey, en nooit
+// langer dan de grens van de soort (vast 4 u, meereizend 6 u vanaf de vingerafdruk). Kapot, onleesbaar, register kapot of
+// app-uit = geen sessies en het bestand weg (dicht). Geeft het aantal herstelde sessies terug.
+function appSessiesLaad() {
+  appStaat.sessies = {};
+  let j, reg;
+  try {   // half geschreven tijdelijke bestanden van een gestopt proces (appSchrijfJson) weg
+    fs.readdirSync(APP_DATA).forEach(function (n) { if (/^sessies\.json\.nieuw\.\d+$/.test(n)) { try { fs.unlinkSync(path.join(APP_DATA, n)); } catch (e) {} } });
+  } catch (e) {}
+  try {
+    if (fs.existsSync(APP_UIT)) throw new Error('app-uit');
+    j = appLeesStreng(APP_SESSIES, null);
+    if (j === null) return { hersteld: 0, vervallen: 0 };
+    if (j.versie !== 1 || !j.sessies || typeof j.sessies !== 'object' || Array.isArray(j.sessies)) throw new Error('kapot: sessies.json');
+    reg = appRegister();
+  } catch (e) {
+    const fout = String(e && e.message || e).slice(0, 80);
+    try { fs.unlinkSync(APP_SESSIES); } catch (e2) {}
+    if (fout === 'app-uit') return { hersteld: 0, vervallen: 0 };   // noodstop: geen sessies, geen storing
+    logError('app-sessies-laad', e);
+    return { hersteld: 0, vervallen: 0, fout: fout };
+  }
+  const nu = Date.now(), uit = { hersteld: 0, vervallen: 0 };
+  Object.keys(j.sessies).forEach(function (h) {
+    const s = j.sessies[h] || {};
+    const x = /^[a-f0-9]{64}$/.test(h) && typeof s.apparaat === 'string' && typeof s.credential === 'string' && s.credential
+      ? reg.apparaten.find(function (y) { return y && y.id === s.apparaat && y.actief; }) : null;
+    // vaste plek: ook nooit meer dan 5 min vooruit (een sessie van vóór een soortwissel naar 'vast' komt zo niet ruim terug; Fable wv231)
+    const max = !x ? 0 : x.soort === 'vast' ? Math.min(s.start + APP_SESSIE_MAX_MS, nu + APP_SESSIE_VAST_MS) : s.start + APP_SESSIE_REIST_MAX_MS;
+    if (!x || !x.credential || !appGelijk(s.credential, String(x.credential.id || '')) || !Number.isFinite(s.start) || !Number.isFinite(s.tot) ||
+        s.start > nu || s.tot > max || nu > s.tot) { uit.vervallen++; return; }
+    appStaat.sessies[h] = { apparaat: s.apparaat, credential: s.credential, start: s.start, vers_tot: 0, tot: s.tot };
+    uit.hersteld++;
+  });
+  if (uit.vervallen) appSessiesBewaar();
+  return uit;
 }
 
 function appSysteem(req) {
@@ -6714,7 +6781,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/passkey/bevestig') return appPasskeyBevestig(req, res, reg, d);
         if (route === 'POST /app/uitloggen') {
           const c = String(req.headers['x-app-sessie'] || '');
-          if (/^[a-f0-9]{64}$/.test(c)) delete appStaat.sessies[appSha(c)];
+          if (/^[a-f0-9]{64}$/.test(c) && appStaat.sessies[appSha(c)]) { delete appStaat.sessies[appSha(c)]; appSessiesBewaar(); }
           return appStuur(res, 200, { ok: true }, { sessie: null });
         }
         // Vanaf hier: alleen met een pod-sessie (vingerafdruk) op een geldig apparaat. Alleen APP_GLIJD_ROUTES verlengen hem.
@@ -6808,7 +6875,8 @@ function appNoodstop(bron) {
     uit.app_uit = true;
   } catch (e) { uit.fouten.push('app-uit: ' + (e && e.code || e)); }
   uit.sessies = Object.keys(appStaat.sessies).length;
-  appStaat.sessies = {}; appStaat.uitdagingen = {};
+  appStaat.sessies = {}; appStaat.uitdagingen = {}; appStaat.sessiesVuil = false;
+  try { fs.unlinkSync(APP_SESSIES); } catch (e) { if (!e || e.code !== 'ENOENT') uit.fouten.push('sessies: ' + (e && e.code || e)); }   // wv231
   // App-beurten: wachtend = vervalt (zie appStartBeurt); al lopend = loopt af (een kindproces halverwege stoppen kan
   // half werk achterlaten), maar de uitslag is zonder sessie niet meer op te halen. Het Telegram-antwoord noemt het aantal.
   Object.keys(jobs).forEach(function (id) {
@@ -6851,7 +6919,9 @@ function appAan(bron) {
 // Verlopen sessies en uitdagingen opruimen (geheugen); het register zelf blijft.
 setInterval(function () {
   const nu = Date.now();
-  Object.keys(appStaat.sessies).forEach(function (h) { if (nu > appStaat.sessies[h].tot) delete appStaat.sessies[h]; });
+  let weg = 0;
+  Object.keys(appStaat.sessies).forEach(function (h) { if (nu > appStaat.sessies[h].tot) { delete appStaat.sessies[h]; weg++; } });
+  if (weg || appStaat.sessiesVuil) appSessiesBewaar();   // wv231
   Object.keys(appStaat.uitdagingen).forEach(function (h) { if (nu > appStaat.uitdagingen[h].tot) delete appStaat.uitdagingen[h]; });
   if (appStaat.koppel && nu > appStaat.koppel.tot) appStaat.koppel = null;
   if (appStaat.aanvraag && nu > appStaat.aanvraag.tot) appStaat.aanvraag = null;
@@ -6859,6 +6929,18 @@ setInterval(function () {
   appHerstelVervaltTik();   // wv135: herstel-vervalt melden of na 48 u opruimen
 }, 60 * 1000).unref();
 setTimeout(function () { appIoOpruim(); }, 30 * 1000).unref();   // na een herstart bestaat geen app-beurt meer: weesmappen weg
+// wv231: sessies van vóór de herstart terug (alleen wat nog loopt, van een actief apparaat); in de audit één regel
+(function () {
+  let r;
+  try { r = appSessiesLaad(); }
+  catch (e) {   // nooit de hele server laten vallen om een sessiebestand (Fable wv231)
+    appStaat.sessies = {}; logError('app-sessies-laad', e);
+    try { fs.unlinkSync(APP_SESSIES); } catch (e2) {}
+    r = { hersteld: 0, vervallen: 0, fout: String(e && e.message || e).slice(0, 80) };
+  }
+  if (r.hersteld || r.vervallen || r.fout) appAudit({ route: 'sessies-herstart', m: 'START', status: r.fout ? 500 : 200, apparaat: null,
+    reden: r.hersteld + ' sessies hersteld, ' + r.vervallen + ' vervallen' + (r.fout ? ', ' + r.fout : '') });
+})();
 
 // ── Verbruik & modellen (wv138; David 8-10: "Usagetracker van Claude, modellenpicker en modelproviderpicker (dus waar ik kan
 // zien waar we momenteel op zitten, en voorkeuren voor modellen geven)"). Bouwplan § 4.14.

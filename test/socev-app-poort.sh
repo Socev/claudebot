@@ -275,7 +275,8 @@ function processJob(jobId, prompt, sess, files, chatId, ws, keuze) {
   return new Promise((r) => { afmaken[jobId] = (uit, ok) => { j.status = 'done'; j.done_at = Date.now(); j.result = { ok: ok !== false, output: ok === false ? '' : uit, error: ok === false ? uit : undefined, files: [] }; r(); }; });
 }
 const rolStub = { eerste: 1, primair: true };
-const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
+// wv231: als functie, zodat de herstarttoets het blok in een tweede, verse context kan laden (zelfde opslag)
+const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, console, URL, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
@@ -286,8 +287,9 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
-  reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd };', ctx, { filename: 'server.js#app' });
+  reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
+const ctx = vm.createContext(ctxGlobals());
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -549,6 +551,105 @@ async function bewijs(o) {
       r = await X.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bw2);
       toets('4 wv205: nieuwe vingerafdruk -> nieuwe sessie', r.status === 200 && /^[a-f0-9]{64}$/.test(X.jar.sessie), JSON.stringify(r));
     }
+    {
+      // wv231 (bouwplan § 4.4e): sessies overleven een herstart; op schijf alleen de hash; verlopen, ingetrokken, kapot = dicht
+      const SF = path.join(DATA, 'sessies.json');
+      const tok = X.jar.sessie, hs = crypto.createHash('sha256').update(tok).digest('hex');
+      const ruw = fs.readFileSync(SF, 'utf8'), sj = JSON.parse(ruw);
+      toets('4 wv231: sessies.json 0600, alleen de hash, geen token en geen vers_tot', (fs.statSync(SF).mode & 0o777) === 0o600 && sj.versie === 1 && !!sj.sessies[hs] && ruw.indexOf(tok) < 0 && !/vers_tot/.test(ruw), ruw.slice(0, 200));
+      // echte herstart: het blok opnieuw in een verse context, zelfde opslag (klokken stil, zodat die context niets terugschrijft)
+      const stil = () => ({ unref() {} });
+      const ctx2 = vm.createContext(ctxGlobals({ setInterval: stil, setTimeout: stil }));
+      vm.runInContext(blok + '\n;globalThis.__h2 = { appStaat };', ctx2, { filename: 'server.js#app-herstart' });
+      const s1 = H.appStaat.sessies[hs], s2 = ctx2.__h2.appStaat.sessies[hs];
+      toets('4 wv231: herstart (blok opnieuw geladen) -> sessie terug met zelfde apparaat, start en tot, vers_tot 0', !!s2 && s2.vers_tot === 0 && s2.tot === s1.tot && s2.start === s1.start && s2.apparaat === s1.apparaat && s2.credential === s1.credential, JSON.stringify(s2));
+      const auditH = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').trim().split('\n').map((x) => JSON.parse(x)).filter((x) => x.route === 'sessies-herstart');
+      toets('4 wv231: herstart staat in de audit (aantal, geen token)', auditH.length === 1 && /^[1-9]\d* sessies hersteld, 0 vervallen$/.test(auditH[0].reden) && auditH[0].status === 200, JSON.stringify(auditH));
+      // daarna in de toetscontext zelf: geheugen weg, opnieuw laden, de app opent zonder vingerafdruk
+      let lr = H.appSessiesLaad();
+      r = await vraag('GET', '/app/status', undefined, { pot: X.jar });
+      toets('4 wv231: na herstart status sessie:true (de app slaat de vingerafdruk over)', lr.hersteld >= 1 && r.j.sessie === true && r.j.sessie_tot === new Date(s1.tot).toISOString(), JSON.stringify(lr) + ' ' + JSON.stringify(r.j));
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
+      toets('4 wv231: na herstart gewone route -> 200', r.status === 200, r.status);
+      r = await vraag('POST', '/app/apparaat/intrekken', { id: 'bestaat-niet' }, { pot: X.jar });
+      toets('4 wv231: na herstart vraagt een gevoelige handeling weer een verse vingerafdruk (403)', r.status === 403 && /opnieuw/.test(r.j.fout), JSON.stringify(r.j));
+      // dicht: elk geval laadt nul sessies, haalt de rij uit het bestand en geeft 401
+      const bewaar = fs.readFileSync(SF, 'utf8');
+      const regBewaar = fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8');
+      const dicht = async (naam, zet, extra) => {
+        if (typeof zet === 'string') fs.writeFileSync(SF, zet, { mode: 0o600 });
+        else { const j = JSON.parse(bewaar); zet(j.sessies[hs], j); fs.writeFileSync(SF, JSON.stringify(j), { mode: 0o600 }); }
+        const terug = extra ? extra() : null;
+        const l = H.appSessiesLaad();
+        if (terug) terug();   // register/app-uit weer gewoon: de 401 komt dan van de lege sessies, niet van een 503
+        X.jar.sessie = tok;
+        const q = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
+        let rij = null; try { rij = JSON.parse(fs.readFileSync(SF, 'utf8')).sessies[hs] || null; } catch (e) { rij = null; }
+        toets('4 wv231: ' + naam + ' -> geen sessie, 401, niet meer in het bestand', q.status === 401 && rij === null && !H.appStaat.sessies[hs], JSON.stringify(l) + ' ' + q.status);
+        fs.writeFileSync(path.join(DATA, 'apparaten.json'), regBewaar, { mode: 0o600 });
+        X.jar.sessie = tok;
+        return l;
+      };
+      await dicht('verlopen sessie', (s) => { s.tot = Date.now() - 1; });
+      await dicht('tot voorbij start + 6 u', (s) => { s.start = Date.now() - 7 * 3600000; s.tot = Date.now() + 3600000; });
+      await dicht('start in de toekomst', (s) => { s.start = Date.now() + 60000; });
+      await dicht('andere passkey dan die van het apparaat', (s) => { s.credential = 'nep-credential'; });
+      await dicht('onbekend apparaat', (s) => { s.apparaat = 'bestaat-niet'; });
+      await dicht('reist-sessie terwijl het apparaat intussen vast is (tot > nu + 5 min)', (s) => { s.tot = Date.now() + 3600000; }, () => { const g = JSON.parse(regBewaar); g.apparaten.forEach((x) => { if (x.id === s1.apparaat) x.soort = 'vast'; }); fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(g), { mode: 0o600 }); return () => fs.writeFileSync(path.join(DATA, 'apparaten.json'), regBewaar, { mode: 0o600 }); });
+      await dicht('ingetrokken apparaat', () => {}, () => { const g = JSON.parse(regBewaar); g.apparaten.forEach((x) => { if (x.id === s1.apparaat) x.actief = false; }); fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(g), { mode: 0o600 }); return () => fs.writeFileSync(path.join(DATA, 'apparaten.json'), regBewaar, { mode: 0o600 }); });
+      let lk = await dicht('kapot bestand', '{kapot');
+      toets('4 wv231: kapot bestand -> fout gemeld en bestand weg', /kapot|JSON|Unexpected/.test(String(lk.fout)) && !fs.existsSync(SF), JSON.stringify(lk));
+      lk = await dicht('onbekende versie', JSON.stringify({ versie: 2, sessies: JSON.parse(bewaar).sessies }));
+      toets('4 wv231: onbekende versie -> fout en bestand weg', !!lk.fout && !fs.existsSync(SF), JSON.stringify(lk));
+      lk = await dicht('kapot register', () => {}, () => { fs.writeFileSync(path.join(DATA, 'apparaten.json'), '{kapot', { mode: 0o600 }); return () => fs.writeFileSync(path.join(DATA, 'apparaten.json'), regBewaar, { mode: 0o600 }); });
+      toets('4 wv231: kapot register -> fout en bestand weg', !!lk.fout && !fs.existsSync(SF), JSON.stringify(lk));
+      lk = await dicht('app-uit (noodstop)', () => {}, () => { fs.writeFileSync(UIT, 'toets'); return () => fs.unlinkSync(UIT); });
+      toets('4 wv231: app-uit -> geen sessies, geen storing, bestand weg', !lk.fout && !fs.existsSync(SF), JSON.stringify(lk));
+      const lsl = logs.filter((l) => /^app-sessies-laad: /.test(l));
+      toets('4 wv231: kapot bestand, versie en register gaan naar logError (3 regels)', lsl.length === 3, lsl.join(' | '));
+      logs.splice(0, logs.length, ...logs.filter((l) => !/^app-sessies-laad: /.test(l)));
+      // terug, en glijden zet de vlag voor de minuuttik
+      fs.writeFileSync(SF, bewaar, { mode: 0o600 });
+      lr = H.appSessiesLaad();
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
+      toets('4 wv231: hersteld bestand -> weer 200', lr.hersteld >= 1 && r.status === 200, JSON.stringify(lr) + ' ' + r.status);
+      H.appStaat.sessiesVuil = false;
+      H.appGlijd({ start: Date.now(), tot: 0 }, { soort: 'reist' });
+      toets('4 wv231: een verlenging markeert de sessies voor de minuuttik', H.appStaat.sessiesVuil === true);
+      H.appStaat.sessies[hs].tot += 1000; H.appSessiesBewaar();
+      toets('4 wv231: de minuuttik schrijft de nieuwe tot weg en wist de vlag', JSON.parse(fs.readFileSync(SF, 'utf8')).sessies[hs].tot === H.appStaat.sessies[hs].tot && H.appStaat.sessiesVuil === false);
+      H.appStaat.sessies[hs].tot -= 1000; H.appSessiesBewaar();
+      // schrijven mislukt (map niet schrijfbaar): dan leeg/weg, nooit de oude inhoud (Fable wv231)
+      if (process.getuid && process.getuid() !== 0) {
+        fs.chmodSync(DATA, 0o500);
+        await vraag('POST', '/app/uitloggen', {}, { pot: X.jar });
+        fs.chmodSync(DATA, 0o700);
+        const na = fs.existsSync(SF) ? fs.readFileSync(SF, 'utf8') : '';
+        const ln = H.appSessiesLaad();
+        toets('4 wv231: uitloggen bij een onschrijfbare map -> bestand leeg, sessie komt niet terug', na === '' && ln.hersteld === 0 && !!ln.fout && !fs.existsSync(SF), JSON.stringify(ln) + ' ' + na.slice(0, 80));
+        toets('4 wv231: schrijffout gaat naar logError', logs.some((l) => /^app-sessies: /.test(l)), logs.join(' | '));
+        logs.splice(0, logs.length, ...logs.filter((l) => !/^app-sessies(-laad)?: /.test(l)));
+        fs.writeFileSync(SF, bewaar, { mode: 0o600 }); H.appSessiesLaad(); X.jar.sessie = tok;
+      } else toets('4 wv231: schrijffouttoets vraagt een gewone gebruiker (niet root)', false);
+      // een verlopen sessie die een verzoek doet, verdwijnt ook uit het bestand
+      H.appStaat.sessies[hs].tot = Date.now() - 1;
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
+      toets('4 wv231: verlopen bij een verzoek -> 401 en uit het bestand', r.status === 401 && !JSON.parse(fs.readFileSync(SF, 'utf8')).sessies[hs], r.status);
+      fs.writeFileSync(SF, bewaar, { mode: 0o600 }); H.appSessiesLaad(); X.jar.sessie = tok;
+      fs.writeFileSync(SF + '.nieuw.4242', 'half');
+      H.appSessiesLaad();
+      toets('4 wv231: half geschreven tijdelijk bestand wordt bij laden opgeruimd', !fs.existsSync(SF + '.nieuw.4242'));
+      // uitloggen ("Nu vergrendelen") haalt hem ook van schijf; daarna een nieuwe vingerafdruk voor de rest van de toets
+      await vraag('POST', '/app/uitloggen', {}, { pot: X.jar });
+      toets('4 wv231: uitloggen haalt de sessie uit sessies.json', !JSON.parse(fs.readFileSync(SF, 'utf8')).sessies[hs]);
+      lr = H.appSessiesLaad();
+      X.jar.sessie = tok;
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
+      toets('4 wv231: uitgelogde sessie komt na een herstart niet terug (401)', !H.appStaat.sessies[hs] && r.status === 401, JSON.stringify(lr) + ' ' + r.status);
+      const bw3 = await X.p.evaluate(async () => { const o = await post('/api/passkey/opties', {}); return bewijs(o.j.opties); });
+      r = await X.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bw3);
+      toets('4 wv231: nieuwe vingerafdruk vervangt de sessie, ook in het bestand (één per apparaat)', r.status === 200 && Object.values(JSON.parse(fs.readFileSync(SF, 'utf8')).sessies).filter((x) => x.apparaat === s1.apparaat).length === 1 && !!JSON.parse(fs.readFileSync(SF, 'utf8')).sessies[crypto.createHash('sha256').update(X.jar.sessie).digest('hex')], JSON.stringify(r));
+    }
     const sessieOud = X.jar.sessie;
     r = await X.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bew);
     toets('4 herhaald bewijs (replay) -> 401', r.status === 401, JSON.stringify(r));
@@ -572,6 +673,7 @@ async function bewijs(o) {
     r = await X.p.evaluate(async (o) => post('/api/passkey/bevestig', { antwoord: await bewijs(o) }), opt.j.opties);
     r = await vraag('POST', '/app/apparaat/intrekken', { id: reg.apparaten[0].id }, { pot: X.jar });
     toets('5 intrekken met verse vingerafdruk -> 200, cookies gewist', r.status === 200 && X.jar.sessie === '' && X.jar.apparaat === '', JSON.stringify(r));
+    toets('5 wv231: intrekken haalt de sessies van dat apparaat ook uit sessies.json', !Object.values(JSON.parse(fs.readFileSync(path.join(DATA, 'sessies.json'), 'utf8')).sessies).some((x) => x.apparaat === reg.apparaten[0].id));
     toets('5 melding "ingetrokken" naar Telegram', /ingetrokken/.test(telegram[telegram.length - 1]));
     const oudApparaat = reg.apparaten[0].id + '.' + 'x';
     r = await X.p.evaluate(() => post('/api/passkey/opties', {}));
@@ -3151,7 +3253,9 @@ async function bewijs(o) {
       toets('10 vooraf: actieve apparaten, sessies en een open aanvraag', actiefV >= 2 && Object.keys(H.appStaat.sessies).length >= 1 && !!H.appStaat.aanvraag, actiefV);
       fs.writeFileSync(path.join(DATA, 'herstel-vervalt'), '');
       const herstelVoorNood = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')).herstel.hash;
+      const sesVoorNood = Object.keys(JSON.parse(fs.readFileSync(path.join(DATA, 'sessies.json'), 'utf8')).sessies).length;
       const u = H.appNoodstop('toets');
+      toets('10 wv231: noodstop haalt sessies.json weg (er stonden sessies in)', sesVoorNood >= 1 && !fs.existsSync(path.join(DATA, 'sessies.json')), sesVoorNood);
       toets('10 wv159: noodstop haalt de concepten weg', !fs.existsSync(path.join(DATA, 'concepten.json')));
       toets('10 wv135: noodstop haalt herstel-vervalt weg, herstelcode blijft', u.herstel_vervalt_weg === true && !fs.existsSync(path.join(DATA, 'herstel-vervalt')) && JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')).herstel.hash === herstelVoorNood, JSON.stringify(u));
       toets('10 noodstop: ok, app-uit, alle actieve ingetrokken, sessies/aanvraag weg, heropend weg', u.ok === true && u.app_uit && fs.existsSync(UIT) && u.ingetrokken.length === actiefV && u.sessies >= 1 && u.aanvraag === true && u.heropend_weg === true
@@ -3162,6 +3266,7 @@ async function bewijs(o) {
       toets('10 na noodstop: app 503', r.status === 503, r.status);
       toets('10 tweede noodstop: niets meer in te trekken, wel ok', (() => { const u2 = H.appNoodstop('toets'); return u2.ok && u2.ingetrokken.length === 0 && u2.al_uit === regN.apparaten.length; })());
       const a = H.appAan('toets');
+      toets('10 wv231: na noodstop + app-aan komt bij een herstart geen sessie terug', H.appSessiesLaad().hersteld === 0 && Object.keys(H.appStaat.sessies).length === 0);
       toets('10 app-aan: app-uit weg, 0 actieve apparaten, coderoute dicht', a.ok && a.was_uit === true && !fs.existsSync(UIT) && a.actieve_apparaten === 0 && a.koppelen_open === false, JSON.stringify(a));
       r = await vraag('GET', '/app/status', undefined, { pot: P.jar });
       toets('10 na app-aan: Pixel is ontkoppeld (geen apparaat), geen aanvraag mogelijk', r.status === 200 && r.j.apparaat === null && r.j.aanvraag_mogelijk === false && r.j.koppelen_open === false, JSON.stringify(r.j));
