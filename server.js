@@ -2879,6 +2879,45 @@ function spNazorgKluis(v, meta) {
   return uit;
 }
 
+// Eén sleutel wegschrijven (kluis of n8n). Gedeeld door het portaal (/sleutels) en het app-luik (POST /app/sleutels/vervang,
+// wv157): één schrijfroute, één auditlog (secondbrain.sleutelportaal_log). Geeft nooit de waarde terug; redenen van buiten
+// gaan door spSchoon. t = { plek: 'kluis'|'n8n', naam, waarde, nieuw?, v: { naam, witte_lijst? | id, type, veld } }.
+async function spSchrijfTaak(kenmerk, t, meta) {
+  if (t.plek === 'kluis') {
+    const r = await spRpc('sb_sleutelportaal_schrijven', { p_sessie: kenmerk, p_naam: t.v.naam, p_waarde: t.waarde, p_nieuw: !!t.nieuw });
+    if (r.ok) {
+      const tekst = r.actie === 'ongewijzigd' ? 'ongewijzigd (zelfde waarde)' : r.actie === 'aangemaakt' ? 'aangemaakt' : 'opgeslagen';
+      return { naam: t.naam, plek: 'kluis', ok: true, uitkomst: tekst, actie: r.actie,
+        nazorg: r.actie === 'aangemaakt' ? ['Nieuw in de kluis. Moet de pod hem lezen? Vraag de machinekamer om hem op de witte lijst te zetten.'] : r.actie === 'ongewijzigd' ? [] : spNazorgKluis(t.v, meta) };
+    }
+    return { naam: t.naam, plek: 'kluis', ok: false, uitkomst: 'mislukt: ' + spSchoon(r.reden, t.waarde), nazorg: [] };
+  }
+  if (t.plek === 'n8n') {
+    const veld = await spN8nVeld(t.v.type);
+    let ok = false, reden = '', test = '';
+    if (!veld || veld !== t.v.veld) reden = 'type niet (meer) ondersteund; doe het in n8n zelf';
+    else {
+      const body = { data: {}, isPartialData: true }; body.data[veld] = t.waarde;
+      const r = await spN8n('PATCH', '/credentials/' + encodeURIComponent(t.v.id), body);
+      ok = r.status === 200;
+      if (!ok) reden = r.status === 404 ? 'credential bestaat niet meer' : r.status === 403 ? 'geen recht (403)' : r.status === 400 ? 'n8n weigerde de invoer (400)' : 'n8n-fout ' + (r.status || 'onbereikbaar');
+      else {
+        const tr = await spN8n('POST', '/credentials/' + encodeURIComponent(t.v.id) + '/test');
+        if (tr.status === 200 && tr.json && tr.json.status === 'OK') test = 'n8n-test: geslaagd';
+        else if (tr.status === 200 && tr.json && /No testing function/i.test(String(tr.json.message || ''))) test = 'n8n-test: dit type is niet te testen; kijk naar de eerstvolgende productierun';
+        else if (tr.status === 200 && tr.json) test = 'n8n-test: MISLUKT (' + spSchoon(String(tr.json.message || 'fout').slice(0, 80), t.waarde) + ') - klopt de sleutel?';
+        else test = 'n8n-test: niet uit te voeren';
+      }
+    }
+    spLog({ kenmerk: kenmerk }, 'n8n', t.naam, 'bijwerken', ok ? 'opgeslagen' : 'mislukt', ok ? test.slice(0, 120) : reden);
+    const m = ((meta && meta.n8n) || {})[t.naam] || {};
+    const nazorg = ok ? [test, 'n8n bewaart geen vorige waarde: oude sleutel pas intrekken als dit goed blijkt.'].concat(m.nazorg ? [m.nazorg] : [])
+      .concat(t.v.type === 'telegramApi' ? ['Controleer of de Telegram-trigger nog berichten ontvangt; zo niet, workflow uit- en aanzetten.'] : []) : [];
+    return { naam: t.naam, plek: 'n8n', ok: ok, uitkomst: ok ? 'opgeslagen' : 'mislukt: ' + reden, nazorg: nazorg };
+  }
+  return { naam: t.naam, plek: String(t.plek), ok: false, uitkomst: 'mislukt: onbekende plek', nazorg: [] };
+}
+
 async function spOpslaan(req, res, sessie, velden) {
   const meta = spMeta();
   const uitkomsten = [];
@@ -2893,38 +2932,7 @@ async function spOpslaan(req, res, sessie, velden) {
       taken.push({ plek: 'kluis', naam: naam || '(geen naam)', nieuw: true, waarde: waarde, v: { naam: naam } });
     } else taken.push({ plek: v.plek, naam: v.naam, waarde: waarde, v: v });
   });
-  for (const t of taken) {
-    if (t.plek === 'kluis') {
-      const r = await spRpc('sb_sleutelportaal_schrijven', { p_sessie: sessie.kenmerk, p_naam: t.v.naam, p_waarde: t.waarde, p_nieuw: !!t.nieuw });
-      if (r.ok) {
-        const tekst = r.actie === 'ongewijzigd' ? 'ongewijzigd (zelfde waarde)' : r.actie === 'aangemaakt' ? 'aangemaakt' : 'opgeslagen';
-        uitkomsten.push({ naam: t.naam, plek: 'kluis', ok: true, uitkomst: tekst,
-          nazorg: r.actie === 'aangemaakt' ? ['Nieuw in de kluis. Moet de pod hem lezen? Vraag de machinekamer om hem op de witte lijst te zetten.'] : r.actie === 'ongewijzigd' ? [] : spNazorgKluis(t.v, meta) });
-      } else uitkomsten.push({ naam: t.naam, plek: 'kluis', ok: false, uitkomst: 'mislukt: ' + spSchoon(r.reden, t.waarde), nazorg: [] });
-    } else if (t.plek === 'n8n') {
-      const veld = await spN8nVeld(t.v.type);
-      let ok = false, reden = '', test = '';
-      if (!veld || veld !== t.v.veld) reden = 'type niet (meer) ondersteund; doe het in n8n zelf';
-      else {
-        const body = { data: {}, isPartialData: true }; body.data[veld] = t.waarde;
-        const r = await spN8n('PATCH', '/credentials/' + encodeURIComponent(t.v.id), body);
-        ok = r.status === 200;
-        if (!ok) reden = r.status === 404 ? 'credential bestaat niet meer' : r.status === 403 ? 'geen recht (403)' : r.status === 400 ? 'n8n weigerde de invoer (400)' : 'n8n-fout ' + (r.status || 'onbereikbaar');
-        else {
-          const tr = await spN8n('POST', '/credentials/' + encodeURIComponent(t.v.id) + '/test');
-          if (tr.status === 200 && tr.json && tr.json.status === 'OK') test = 'n8n-test: geslaagd';
-          else if (tr.status === 200 && tr.json && /No testing function/i.test(String(tr.json.message || ''))) test = 'n8n-test: dit type is niet te testen; kijk naar de eerstvolgende productierun';
-          else if (tr.status === 200 && tr.json) test = 'n8n-test: MISLUKT (' + spSchoon(String(tr.json.message || 'fout').slice(0, 80), t.waarde) + ') - klopt de sleutel?';
-          else test = 'n8n-test: niet uit te voeren';
-        }
-      }
-      spLog(sessie, 'n8n', t.naam, 'bijwerken', ok ? 'opgeslagen' : 'mislukt', ok ? test.slice(0, 120) : reden);
-      const m = (meta.n8n || {})[t.naam] || {};
-      const nazorg = ok ? [test, 'n8n bewaart geen vorige waarde: oude sleutel pas intrekken als dit goed blijkt.'].concat(m.nazorg ? [m.nazorg] : [])
-        .concat(t.v.type === 'telegramApi' ? ['Controleer of de Telegram-trigger nog berichten ontvangt; zo niet, workflow uit- en aanzetten.'] : []) : [];
-      uitkomsten.push({ naam: t.naam, plek: 'n8n', ok: ok, uitkomst: ok ? 'opgeslagen' : 'mislukt: ' + reden, nazorg: nazorg });
-    }
-  }
+  for (const t of taken) uitkomsten.push(await spSchrijfTaak(sessie.kenmerk, t, meta));
   if (taken.length) {
     const goed = uitkomsten.filter(function (u) { return u.ok; }).map(function (u) { return u.naam; });
     const fout = uitkomsten.filter(function (u) { return !u.ok; }).map(function (u) { return u.naam; });
@@ -3103,7 +3111,8 @@ const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-app
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
-  'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen']);
+  'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
+  'POST /app/sleutels/vervang']);
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
@@ -3154,7 +3163,8 @@ const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', '
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
-  'POST /app/modellen']);   // wv138: een runtimewissel raakt alle workflows; nooit vanaf een werk-pc
+  'POST /app/modellen',    // wv138: een runtimewissel raakt alle workflows; nooit vanaf een werk-pc
+  'POST /app/sleutels/vervang']);   // wv157: sleutels alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot
 const APP_BSN_TEKST = 'in je bericht staat een getal dat op een BSN lijkt (9 cijfers die de elfproef halen). Patiëntgegevens horen niet in Socev: haal het weg. Gaat het om iets anders, stuur het dan vanaf je telefoon.';
 
 const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [] },
@@ -5891,7 +5901,7 @@ function handleApp(req, res) {
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en de
         // BSN-weigering (§ 4.11). Daarna verder met slotKlaar = true (apparaat en sessie worden dan opnieuw gecontroleerd).
         if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
-          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
+          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
@@ -5931,6 +5941,8 @@ function handleApp(req, res) {
         if (route === 'GET /app/modellen') return appModellen(req, res);
         if (route === 'POST /app/modellen') return appModellenZet(req, res, reg, a, s, d);
         if (route === 'GET /app/vandaag') return appVandaagRoute(req, res, a);
+        if (route === 'GET /app/sleutels') return appSleutels(req, res, a);
+        if (route === 'POST /app/sleutels/vervang') return appSleutelVervang(req, res, reg, a, s, d);
         if (route === 'GET /app/push') return appPushStand(req, res, a);
         if (route === 'POST /app/push/abonneer') return appPushAbonneer(req, res, a, d);
         if (route === 'POST /app/push/opzeggen') return appPushOpzeggen(req, res, a);
@@ -6166,6 +6178,110 @@ async function appVerbruik(req, res) {
   };
   if (!fouten.length) appStaat.verbruikCache = { op: Date.now(), d: d };
   appStuur(res, 200, d);
+}
+
+// ── Sleutelluik (wv157, fase 6b; bouwplan § 4.9 en § 6 fase 6) ──
+// David (opgave 7-10): "sleutelinvoerluik geïntegreerd" in plaats van het sleutelportaal met Olares-login + Telegram-code.
+// Vervangt een BESTAANDE sleutel via dezelfde schrijfroute als het portaal (spSchrijfTaak: kluis-RPC met de portaalsleutel en
+// een __vorige-kopie; n8n PATCH isPartialData + credential-test) en hetzelfde auditlog (secondbrain.sleutelportaal_log, sessie
+// 'app-<apparaat>'). Alleen schrijven: GET geeft naam, waar gebruikt, klasse, laatst gewijzigd en "vervangen vóór" - nooit de
+// waarde, geen masker, geen vingerafdruk. POST: verse vingerafdruk van dít apparaat (verbruikt vóór de eerste await), nooit
+// vanaf een apparaat met een vaste plek (APP_BEHEER_ROUTES), alleen op de primaire kant, 10 per uur. De waarde komt niet in
+// auditlog, foutlog, Telegram of antwoord. Grens: geen nieuwe namen (het luik maakt niets aan) en geen terugzetten (portaal).
+const APP_SLEUTELS_PER_UUR = 10;
+const APP_SLEUTEL_KLUIS_RE = /^[a-z0-9_]{3,64}$/;
+const APP_SLEUTEL_N8N_RE = /^[A-Za-z0-9_-]{1,64}$/;
+// Fable-review wv157 M1: sleutels waar het alarm (debug-bot), de kluistoegang, de schrijfroute of het brein zelf op draaien,
+// alleen via het sleutelportaal: een typefout of gekaapte app-build zou ze anders bij de volgende herstart uitzetten.
+const APP_SLEUTEL_PORTAAL_KLUIS = new Set(['supabase_service_role', 'n8n_api_key', 'telegram_debug_bot_token', 'claude_code_oauth_token', 'telegram_bot_token']);   // = SP_EIGEN + brein + hoofdbot
+const APP_SLEUTEL_PORTAAL_N8N_TYPEN = new Set(['telegramApi', 'n8nApi', 'supabaseApi']);
+const APP_SLEUTEL_PORTAAL_TEKST = 'alleen via het sleutelportaal: Socev draait er zelf op (alarm, kluis of brein)';
+const appSleutelTekst = function (v, n) { return v == null ? null : String(v).slice(0, n); };
+async function appSleutelLijst() {
+  const meta = spMeta();
+  const mk = (meta.kluis && typeof meta.kluis === 'object') ? meta.kluis : {}, mn = (meta.n8n && typeof meta.n8n === 'object') ? meta.n8n : {};
+  const [kluis, n8n] = await Promise.all([spRpc('sb_sleutelportaal_overzicht', {}), spN8nLijst()]);
+  const fouten = [], uit = [];
+  if (!kluis.ok || !Array.isArray(kluis.sleutels)) fouten.push('kluis');
+  else kluis.sleutels.forEach(function (x) {
+    if (!x || typeof x.naam !== 'string' || /__vorige$/.test(x.naam)) return;
+    const m = mk[x.naam] && typeof mk[x.naam] === 'object' ? mk[x.naam] : {};
+    // Bewust een witte lijst van velden: gemaskeerd en vingerafdruk uit de RPC gaan NIET mee (opdracht: ook geen begin/eind).
+    uit.push({ plek: 'kluis', id: x.naam, naam: x.naam, waarvoor: appSleutelTekst(m.waarvoor || x.omschrijving || '', 200), klasse: appSleutelTekst(m.klasse || '', 4),
+      in_register: m.klasse !== undefined, gewijzigd: x.gewijzigd || null, vervangen_voor: appSleutelTekst(m.vervangen_voor || null, 10),
+      pod_herstart: !!x.witte_lijst, let_op: appSleutelTekst(m.nazorg || null, 400),
+      kan: !x.geweigerd && !APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam),
+      waarom_niet: x.geweigerd ? appSleutelTekst(x.geweigerd, 120) : APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam) ? APP_SLEUTEL_PORTAAL_TEKST : null });
+  });
+  if (!n8n) fouten.push('n8n');
+  else {
+    const typen = Array.from(new Set(n8n.map(function (c) { return c.type; })));
+    const veld = {};
+    (await Promise.all(typen.map(spN8nVeld))).forEach(function (v, i) { veld[typen[i]] = v; });
+    n8n.forEach(function (c) {
+      const m = mn[c.naam] && typeof mn[c.naam] === 'object' ? mn[c.naam] : {};
+      uit.push({ plek: 'n8n', id: String(c.id), naam: appSleutelTekst(c.naam, 120), type: appSleutelTekst(c.type, 60), waarvoor: appSleutelTekst(m.waarvoor || '', 200),
+        klasse: appSleutelTekst(m.klasse || '', 4), in_register: m.klasse !== undefined, gewijzigd: c.gewijzigd || null,
+        vervangen_voor: appSleutelTekst(m.vervangen_voor || null, 10), let_op: appSleutelTekst(m.nazorg || null, 400),
+        kan: !!veld[c.type] && !APP_SLEUTEL_PORTAAL_N8N_TYPEN.has(c.type),
+        waarom_niet: APP_SLEUTEL_PORTAAL_N8N_TYPEN.has(c.type) ? APP_SLEUTEL_PORTAAL_TEKST : veld[c.type] ? null : 'dit soort sleutel kan alleen in n8n zelf' });
+    });
+  }
+  return { sleutels: uit, fouten: fouten };
+}
+async function appSleutels(req, res, a) {
+  // Fable-review wv157 K5: een werk-pc krijgt geen inventaris van sleutelnamen (het portaal eiste daarvoor de Telegram-code)
+  if (a.soort === 'vast') return appStuur(res, 200, { ok: true, sleutels: [], fouten: [], vast: true, primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
+  const l = await appSleutelLijst();
+  appStuur(res, 200, { ok: true, sleutels: l.sleutels, fouten: l.fouten, vast: a.soort === 'vast', primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
+}
+async function appSleutelVervang(req, res, reg, a, s, d) {
+  // De waarde meteen uit het verzoekobject halen; vanaf hier bestaat hij alleen in deze functie.
+  const waarde = typeof d.waarde === 'string' ? d.waarde.trim() : '';
+  d.waarde = undefined;
+  const plek = String(d.plek || ''), id = String(d.id == null ? '' : d.id);
+  if (!rolPrimair()) return appWeiger(res, 409, 'deze kant van Socev is nu passief; vervangen kan alleen op de actieve kant', 'niet primair');
+  if (plek !== 'kluis' && plek !== 'n8n') return appWeiger(res, 400, 'onbekende plek', 'sleutel plek');
+  if (!(plek === 'kluis' ? APP_SLEUTEL_KLUIS_RE.test(id) && !/__vorige$/.test(id) : APP_SLEUTEL_N8N_RE.test(id))) return appWeiger(res, 400, 'onbekende sleutel', 'sleutel id');
+  if (waarde.length < 8 || waarde.length > 8192 || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(waarde))
+    return appWeiger(res, 400, 'de nieuwe waarde moet 8 tot 8192 tekens zijn, op één regel', 'sleutel waarde vorm');
+  // Pas na de vormcontrole (geen vingerafdruk verspillen aan een verzoek dat toch niet mag; vgl. wv138 K2), en vóór de eerste
+  // await verbruikt: één vingerafdruk = één vervanging, ook met twee tabbladen tegelijk.
+  if (!appVersOk(a, s)) { res._app.reden = 'sleutel, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het vervangen met je vingerafdruk', vers_nodig: true }); }
+  appStaat.tellers.sleutels = appStaat.tellers.sleutels || [];
+  if (!appTeller('sleutels', APP_SLEUTELS_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak vervangen dit uur', 'grens sleutels');
+  s.vers_tot = 0;
+  // Welke sleutel het is, beslist de pod uit de actuele lijst (niet uit wat de browser meestuurt).
+  let t = null;
+  if (plek === 'kluis') {
+    const k = await spRpc('sb_sleutelportaal_overzicht', {});
+    if (!k.ok || !Array.isArray(k.sleutels)) return appWeiger(res, 503, 'de kluis is nu niet te lezen; er is niets gewijzigd', 'sleutel kluis lezen');
+    const x = k.sleutels.find(function (y) { return y && y.naam === id; });
+    if (!x) return appWeiger(res, 404, 'deze sleutel bestaat niet (meer); er is niets gewijzigd', 'sleutel onbekend');
+    if (x.geweigerd) return appWeiger(res, 403, 'niet via de app: ' + String(x.geweigerd).slice(0, 120), 'sleutel geweigerd');
+    if (APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam)) return appWeiger(res, 403, APP_SLEUTEL_PORTAAL_TEKST, 'sleutel portaal-only');
+    t = { plek: 'kluis', naam: x.naam, waarde: waarde, v: { naam: x.naam, witte_lijst: !!x.witte_lijst } };
+  } else {
+    const l = await spN8nLijst();
+    if (!l) return appWeiger(res, 503, 'n8n is nu niet te lezen; er is niets gewijzigd', 'sleutel n8n lezen');
+    const c = l.find(function (y) { return String(y.id) === id; });
+    if (!c) return appWeiger(res, 404, 'deze sleutel bestaat niet (meer); er is niets gewijzigd', 'sleutel onbekend');
+    const veld = await spN8nVeld(c.type);
+    if (APP_SLEUTEL_PORTAAL_N8N_TYPEN.has(c.type)) return appWeiger(res, 403, APP_SLEUTEL_PORTAAL_TEKST, 'sleutel portaal-only');
+    if (!veld) return appWeiger(res, 400, 'dit soort sleutel kan alleen in n8n zelf', 'sleutel n8n-type');
+    t = { plek: 'n8n', naam: String(c.naam), waarde: waarde, v: { id: c.id, naam: String(c.naam), type: c.type, veld: veld } };
+  }
+  const u = await spSchrijfTaak('app-' + a.id.slice(0, 12), t, spMeta());
+  t.waarde = undefined;
+  res._app.reden = ('sleutel ' + t.plek + ' ' + t.naam + ': ' + (u.ok ? (u.actie || 'opgeslagen') : 'mislukt')).slice(0, 120);
+  if (!(u.ok && u.actie === 'ongewijzigd')) {
+    appTelegram('Socev-app: sleutel "' + t.naam + '" (' + (t.plek === 'kluis' ? 'Supabase-kluis' : 'n8n') + ') ' + (u.ok ? 'vervangen' : 'NIET vervangen (' + String(u.uitkomst).slice(0, 80) + ')') +
+      ' vanuit de app ("' + a.naam + '"). Niet jij? /app-noodstop en meld het de machinekamer.');
+  }
+  if (!u.ok) return appStuur(res, 422, { ok: false, fout: String(u.uitkomst).slice(0, 200), naam: t.naam, plek: t.plek });   // geen 502: de app leest dat als 'pod weg'
+  // de knop "Vorige terugzetten" bestaat alleen in het portaal
+  const nazorg = (u.nazorg || []).map(function (x) { return /Vorige terugzetten/.test(x) ? 'De vorige waarde blijft bewaard; terugzetten kan in het sleutelportaal (/sleutels) of via de machinekamer.' : String(x).slice(0, 400); });
+  appStuur(res, 200, { ok: true, naam: t.naam, plek: t.plek, uitkomst: String(u.uitkomst).slice(0, 200), nazorg: nazorg });
 }
 
 function appInfo() {

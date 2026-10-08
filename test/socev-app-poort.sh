@@ -50,6 +50,11 @@ const wachterStaat = { j: null, kapot: false };
 const agendaStaat = { pad: 'agenda-proef-x1', events: [], mails: [], aanroepen: [], kapot: false };   // wv136
 const VAULT_T = path.join(W, 'vault');
 const pushes = [];
+// wv157 (sleutelluik): portaalsleutel, nagebootste kluis en n8n-credentials; ECHT_SLEUTEL=1 stuurt sb_sleutelportaal_* naar de echte kluis
+const ECHT_SP = process.env.ECHT_SLEUTEL === '1';
+const SP_SLEUTEL = ECHT_SP ? '/opt/data/.sleutelportaal/rpc.key' : path.join(W, 'rpc.key');
+if (!ECHT_SP) fs.writeFileSync(SP_SLEUTEL, 'k'.repeat(64));
+const spNep = { kluis: [], schrijf: [], log: [], creds: [], patch: [], test: [], kapot: false, schrijfReden: null };
 const pushStaat = { status: 201 };
 let toetsUur = 12;
 
@@ -87,6 +92,15 @@ async function nepFetch(url, opt) {
     if (u.pathname === '/api/v1/data-tables/MF6DKIGzWVT8FAdy/rows') return antw(200, { data: n8nStaat.stilte, nextCursor: null });
     if (u.pathname === '/api/v1/executions') { const e = n8nStaat.executies[u.searchParams.get('workflowId')]; return antw(200, { data: e ? [].concat(e) : [], nextCursor: null }); }
     if (u.pathname === '/api/v1/data-tables/jTz5tgWWPhkFz9Be/rows') return n8nStaat.portieKapot ? antw(500, {}) : antw(200, { data: (n8nStaat.portie || []).slice().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)), nextCursor: null });
+    if (u.pathname === '/api/v1/credentials' && (!opt.method || opt.method === 'GET')) return spNep.kapot ? antw(500, {}) : antw(200, { data: spNep.creds.map((c) => ({ id: c.id, name: c.name, type: c.type, createdAt: '2026-06-09T10:00:00.000Z', updatedAt: c.updatedAt })), nextCursor: null });
+    if (u.pathname.startsWith('/api/v1/credentials/schema/')) { const t = u.pathname.slice('/api/v1/credentials/schema/'.length); return antw(200, { properties: t === 'httpHeaderAuth' ? { name: {}, value: {} } : t === 'anthropicApi' ? { apiKey: {}, url: {} } : { clientId: {}, clientSecret: {} } }); }
+    if (/^\/api\/v1\/credentials\/[^/]+\/test$/.test(u.pathname)) { spNep.test.push(u.pathname); return antw(200, { status: 'Error', message: 'No testing function found for this credential.' }); }
+    if (/^\/api\/v1\/credentials\/[^/]+$/.test(u.pathname) && opt.method === 'PATCH') {
+      const id = u.pathname.split('/').pop(), c = spNep.creds.find((x) => x.id === id);
+      spNep.patch.push({ id, body: JSON.parse(opt.body) });
+      if (!c) return antw(404, { message: 'Credential not found' });
+      c.updatedAt = new Date().toISOString(); return antw(200, { id, name: c.name, type: c.type });
+    }
     if (u.pathname.startsWith('/api/v1/workflows/')) { const w = (n8nStaat.workflows || {})[u.pathname.slice('/api/v1/workflows/'.length)]; return w ? antw(200, w) : antw(404, {}); }
     return antw(404, {});
   }
@@ -118,6 +132,28 @@ async function nepFetch(url, opt) {
         leeftijd_s: L.ontvangen ? Math.round((nu - L.ontvangen) / 1000) : null, toekomst: !!L.toekomst,
         anders_sinds: b.p_sinds ? (sbStaat.meldingen || []).some((m) => m.ontvangen > Date.parse(b.p_sinds) && m.plek !== b.p_plek) : null });
     }
+    if (fn.indexOf('sb_sleutelportaal_') === 0) {
+      if (ECHT_SP) {
+        const r = await fetch(process.env.SUPABASE_URL.replace(/\/$/, '') + '/rest/v1/rpc/' + fn, { method: 'POST', body: opt.body,
+          headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE, 'content-type': 'application/json' } });
+        const j = await r.json().catch(() => null);
+        return antw(r.status, j);
+      }
+      if (b.p_sleutel !== 'k'.repeat(64)) return antw(200, { ok: false, reden: 'portaalsleutel ongeldig' });
+      if (spNep.kapot) return antw(500, { message: 'kapot' });
+      if (fn === 'sb_sleutelportaal_overzicht') return antw(200, { ok: true, sleutels: spNep.kluis });
+      if (fn === 'sb_sleutelportaal_log') { spNep.log.push(b); return antw(200, { ok: true }); }
+      if (fn === 'sb_sleutelportaal_schrijven') {
+        spNep.schrijf.push(b);
+        if (spNep.schrijfReden) return antw(200, { ok: false, reden: spNep.schrijfReden.split('$W').join(b.p_waarde) });
+        const k = spNep.kluis.find((x) => x.naam === b.p_naam);
+        if (!k) return antw(200, { ok: false, reden: 'naam bestaat niet' });
+        if (k.w === b.p_waarde) return antw(200, { ok: true, actie: 'ongewijzigd' });
+        k.w = b.p_waarde; k.gewijzigd = new Date().toISOString();
+        return antw(200, { ok: true, actie: 'bijgewerkt', vorige_bewaard: true });
+      }
+      return antw(404, {});
+    }
     if (fn === 'mk_app_verbruik') return antw(200, sbStaat.verbruik || { nu: new Date().toISOString(), laatste: null, reeks: [] });
     if (fn === 'sb_app_vapid_lezen') return sbStaat.geenVapid ? antw(200, null) : antw(200, VAPID_W);
     if (fn === 'mk_werkvoorraad_stand') return antw(200, { items: sbStaat.wvItems || [], stand: { aan: true }, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' } });
@@ -145,7 +181,8 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
-    N8N_WEBHOOK_AGENDA_API: 'nep-agenda', APP_VAULT_DIR: VAULT_T }, pid: process.pid },
+    N8N_WEBHOOK_AGENDA_API: 'nep-agenda', APP_VAULT_DIR: VAULT_T, SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
+  VAULT: VAULT_T,
   TOETSUUR: () => toetsUur,
   agentsReg,
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
@@ -153,6 +190,9 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
 vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute };', ctx, { filename: 'server.js#app' });
+{ const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
+  if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
+  vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
 const H = ctx.__h;
 const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
 
@@ -2172,6 +2212,156 @@ async function bewijs(o) {
       toets('17 vreemd webhookpad: niet aangeroepen, agenda en concepten met fout', r.status === 200 && agendaStaat.aanroepen.length === nB && r.j.agenda === null && r.j.concepten === null, JSON.stringify(r.j.fouten));
       n8nStaat.workflows.JD0yNxPq79jXk25J.nodes[1].parameters.path = 'agenda-proef-x2';
       H.appStaat.vandaag = null; H.appStaat.agendaUrl = null;
+    }
+
+    // ── 18. wv157: sleutelluik (fase 6b, bouwplan § 4.9, § 6 fase 6): alleen schrijven, verse vingerafdruk, waarde nooit terug ──
+    {
+      const vers = async (B) => { const x = await B.p.evaluate(() => post('/api/passkey/opties', {})); return B.p.evaluate(async (y) => post('/api/passkey/bevestig', { antwoord: await bewijs(y) }), x.j.opties); };
+      const sP = () => H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      if (sP()) sP().tot = Date.now() + 10 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      rolStub.primair = true;
+      const MB = path.join(VAULT_T, '00_Systeem', 'Beveiliging');
+      fs.mkdirSync(MB, { recursive: true });
+      fs.writeFileSync(path.join(MB, 'Sleutelregister - portaalgegevens.json'), JSON.stringify({ kluis: { proef_een: { waarvoor: 'proef <b>vet</b>', klasse: 'A', vervangen_voor: '2026-10-18', nazorg: 'nazorg-proef' } },
+        n8n: { 'Locatie Tasker (header)': { waarvoor: 'Tasker-locatie', klasse: 'A', vervangen_voor: '2026-10-18' } } }));
+      if (!ECHT_SP) {   // nagebootst; met ECHT_SLEUTEL=1 alleen de proef tegen de echte kluis hieronder
+      spNep.kluis = [
+        { naam: 'proef_een', omschrijving: 'x', gewijzigd: '2026-10-01T10:00:00Z', witte_lijst: true, gemaskeerd: '••••Q9Z8', vingerafdruk: 'f00baa', geweigerd: null, w: 'OUDE-WAARDE-proef-een-123456' },
+        { naam: 'pod_bootstrap_secret', omschrijving: 'x', gewijzigd: '2026-10-01T10:00:00Z', witte_lijst: false, gemaskeerd: '••••', geweigerd: 'staat ook in de chart; vervangen = pod start niet meer', w: 'x'.repeat(30) },
+      ];
+      spNep.creds = [{ id: 'TaskerAbc123', name: 'Locatie Tasker (header)', type: 'httpHeaderAuth', updatedAt: '2026-06-09T10:00:00.000Z' },
+        { id: 'OauthXyz789', name: 'Gmail OAuth', type: 'gmailOAuth2', updatedAt: '2026-06-09T10:00:00.000Z' }];
+      const W1 = 'GEHEIM-NIEUW-' + crypto.randomBytes(12).toString('hex'), W2 = 'GEHEIM-N8N-' + crypto.randomBytes(12).toString('hex'), W3 = 'GEHEIM-FOUT-' + crypto.randomBytes(12).toString('hex');
+      r = await vraag('GET', '/app/sleutels', undefined, { pot: pot() });
+      toets('18 GET /app/sleutels zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+      const ls = r.j.sleutels || [];
+      const een = ls.find((x) => x.id === 'proef_een'), boot = ls.find((x) => x.id === 'pod_bootstrap_secret'), tas = ls.find((x) => x.id === 'TaskerAbc123'), oa = ls.find((x) => x.id === 'OauthXyz789');
+      toets('18 lijst: kluis + n8n, waar gebruikt, klasse, gewijzigd, vervangen vóór, pod_herstart', r.status === 200 && ls.length === 4 && een && een.plek === 'kluis' && een.waarvoor === 'proef <b>vet</b>' && een.klasse === 'A'
+        && een.gewijzigd === '2026-10-01T10:00:00Z' && een.vervangen_voor === '2026-10-18' && een.pod_herstart === true && een.kan === true && tas && tas.plek === 'n8n' && tas.kan === true && tas.waarvoor === 'Tasker-locatie', JSON.stringify(r.j).slice(0, 400));
+      toets('18 lijst: geweigerde kluisnaam en OAuth-type niet vervangbaar, met reden', boot && boot.kan === false && /chart/.test(boot.waarom_niet) && oa && oa.kan === false && /n8n zelf/.test(oa.waarom_niet), JSON.stringify([boot, oa]));
+      const lijstTekst = JSON.stringify(r.j);
+      toets('18 lijst: geen waarde, geen masker, geen vingerafdruk (ook geen begin/eind)', !/gemaskeerd|vingerafdruk|Q9Z8|f00baa|OUDE-WAARDE|••••/.test(lijstTekst) && !('w' in een), lijstTekst.slice(0, 300));
+      // zonder verse vingerafdruk: 403 vers_nodig, niets geschreven
+      for (const h of Object.keys(H.appStaat.sessies)) H.appStaat.sessies[h].vers_tot = 0;
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: W1 }, { pot: P.jar });
+      toets('18 vervangen zonder verse vingerafdruk -> 403 vers_nodig, niets geschreven', r.status === 403 && r.j.vers_nodig === true && spNep.schrijf.length === 0, JSON.stringify(r.j));
+      // vormfouten verbruiken de vingerafdruk niet
+      await vers(P);
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: 'kort' }, { pot: P.jar });
+      const r2 = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: 'twee\nregels-langgenoeg' }, { pot: P.jar });
+      const r3 = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een__vorige', waarde: W1 }, { pot: P.jar });
+      const r4 = await vraag('POST', '/app/sleutels/vervang', { plek: 'chart', id: 'x', waarde: W1 }, { pot: P.jar });
+      toets('18 te kort / regeleinde / __vorige / onbekende plek -> 400, niets geschreven', r.status === 400 && r2.status === 400 && r3.status === 400 && r4.status === 400 && spNep.schrijf.length === 0, [r.status, r2.status, r3.status, r4.status].join());
+      // nu echt: kluis
+      const nT = telegram.length;
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: '  ' + W1 + ' ' }, { pot: P.jar });
+      const sc = spNep.schrijf[0] || {};
+      const aId = sP().apparaat;
+      toets('18 kluis: 200, via sb_sleutelportaal_schrijven (portaalsleutel, sessie app-<apparaat>, bestaand, waarde afgeknipt)', r.status === 200 && r.j.ok === true && spNep.schrijf.length === 1 && sc.p_naam === 'proef_een' && sc.p_waarde === W1
+        && sc.p_nieuw === false && sc.p_sessie === 'app-' + aId.slice(0, 12) && spNep.kluis[0].w === W1, JSON.stringify(r.j));
+      toets('18 kluis: antwoord zonder waarde, met nazorg (herstart pod + register-nazorg)', !JSON.stringify(r.j).includes(W1) && r.j.nazorg.some((x) => /herstart/.test(x)) && r.j.nazorg.includes('nazorg-proef'), JSON.stringify(r.j));
+      toets('18 kluis: één Telegram-regel met naam, apparaat en noodstop, zonder waarde', telegram.length === nT + 1 && /sleutel "proef_een" \(Supabase-kluis\) vervangen vanuit de app/.test(telegram[nT]) && /\/app-noodstop/.test(telegram[nT]) && !telegram[nT].includes(W1), telegram[nT]);
+      // dezelfde vingerafdruk is verbruikt
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: W1 + 'x' }, { pot: P.jar });
+      toets('18 tweede vervanging met dezelfde vingerafdruk -> 403 vers_nodig', r.status === 403 && r.j.vers_nodig === true && spNep.schrijf.length === 1, JSON.stringify(r.j));
+      // de pod beslist welke sleutel het is
+      await vers(P);
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'bestaat_niet', waarde: W1 }, { pot: P.jar });
+      toets('18 onbekende kluisnaam -> 404, niets geschreven (het luik maakt niets aan)', r.status === 404 && spNep.schrijf.length === 1, JSON.stringify(r.j));
+      await vers(P);
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'pod_bootstrap_secret', waarde: W1 }, { pot: P.jar });
+      toets('18 geweigerde naam (pod_bootstrap_secret) -> 403 met reden, niets geschreven', r.status === 403 && /chart/.test(r.j.fout) && spNep.schrijf.length === 1, JSON.stringify(r.j));
+      // n8n: alleen het geheime veld, isPartialData, daarna de test
+      await vers(P);
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'n8n', id: 'TaskerAbc123', waarde: W2 }, { pot: P.jar });
+      const pa = spNep.patch[0] || {};
+      toets('18 n8n: PATCH met alleen value + isPartialData, credential-test, 200 zonder waarde', r.status === 200 && spNep.patch.length === 1 && pa.id === 'TaskerAbc123' && JSON.stringify(pa.body) === JSON.stringify({ data: { value: W2 }, isPartialData: true })
+        && spNep.test.length === 1 && /niet te testen/.test(r.j.nazorg[0]) && !JSON.stringify(r.j).includes(W2), JSON.stringify(r.j));
+      toets('18 n8n: auditregel in sleutelportaal_log (sessie app-…, zonder waarde)', spNep.log.some((x) => x.p_plek === 'n8n' && x.p_naam === 'Locatie Tasker (header)' && x.p_sessie === 'app-' + aId.slice(0, 12)) && !JSON.stringify(spNep.log).includes(W2), JSON.stringify(spNep.log).slice(0, 300));
+      await vers(P);
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'n8n', id: 'OauthXyz789', waarde: W2 }, { pot: P.jar });
+      toets('18 n8n OAuth-type -> 400 "kan alleen in n8n zelf", geen PATCH', r.status === 400 && /n8n zelf/.test(r.j.fout) && spNep.patch.length === 1, JSON.stringify(r.j));
+      // reden van buiten met de waarde erin: nooit terug
+      spNep.schrijfReden = 'fout bij $W in de kluis';
+      await vers(P);
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: W3 }, { pot: P.jar });
+      spNep.schrijfReden = null;
+      toets('18 mislukt met de waarde in de reden -> 422, reden geschoond (••••), Telegram zonder waarde', r.status === 422 && r.j.ok === false && !JSON.stringify(r.j).includes(W3) && /••••/.test(r.j.fout)
+        && !telegram[telegram.length - 1].includes(W3) && /NIET vervangen/.test(telegram[telegram.length - 1]), JSON.stringify(r.j) + ' ' + telegram[telegram.length - 1]);
+      // kluis onleesbaar: niets gewijzigd
+      spNep.kapot = true; await vers(P);
+      const nS = spNep.schrijf.length;
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: W1 + 'y' }, { pot: P.jar });
+      spNep.kapot = false;
+      toets('18 kluis onleesbaar -> 503 "er is niets gewijzigd"', r.status === 503 && /niets gewijzigd/.test(r.j.fout) && spNep.schrijf.length === nS, JSON.stringify(r.j));
+      // passieve kant
+      rolStub.primair = false; await vers(P);
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: W1 + 'z' }, { pot: P.jar });
+      rolStub.primair = true;
+      toets('18 passieve kant -> 409, niets geschreven', r.status === 409 && spNep.schrijf.length === nS, JSON.stringify(r.j));
+      // grens 10 per uur
+      H.appStaat.tellers.sleutels = Array(10).fill(Date.now()); await vers(P);
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: W1 + 'g' }, { pot: P.jar });
+      H.appStaat.tellers.sleutels = [];
+      toets('18 grens 10 per uur -> 429', r.status === 429 && spNep.schrijf.length === nS, r.status);
+      // vaste plek: nooit, ook met verse vingerafdruk en open slot
+      const regV = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      const ap = regV.apparaten.find((x) => x.id === aId);
+      ap.soort = 'vast'; ap.vaste_plek = 'Thuis';
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regV));
+      sbStaat.loc = { plek: 'Thuis', klasse: 'thuis', ontvangen: Date.now() - 60000 }; H.appStaat.locatie = {};
+      await vers(P);
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'proef_een', waarde: W1 + 'v' }, { pot: P.jar });
+      const rl = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+      ap.soort = 'reist'; ap.vaste_plek = null;
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regV));
+      toets('18 vaste plek (ook met open slot) -> 403 "sleutels vervangen kan niet …", lijst leeg met vast: true (K5)', r.status === 403 && /sleutels vervangen kan niet vanaf een apparaat met een vaste plek/.test(r.j.fout) && spNep.schrijf.length === nS
+        && rl.status === 200 && rl.j.vast === true && rl.j.sleutels.length === 0, JSON.stringify(r.j) + JSON.stringify(rl.j).slice(0, 200));
+      // Fable-review wv157 M1: waar Socev zelf op draait alleen via het portaal
+      spNep.kluis.push({ naam: 'telegram_debug_bot_token', omschrijving: 'x', gewijzigd: '2026-06-09T10:00:00Z', witte_lijst: true, gemaskeerd: '••••', geweigerd: null, w: 'y'.repeat(40) });
+      spNep.creds.push({ id: 'N8nApi001', name: 'n8n account', type: 'n8nApi', updatedAt: '2026-06-09T10:00:00.000Z' });
+      r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+      const tg = (r.j.sleutels || []).find((x) => x.id === 'telegram_debug_bot_token'), na = (r.j.sleutels || []).find((x) => x.id === 'N8nApi001');
+      toets('18 M1 lijst: debug-bot-token en n8n-API-credential niet vervangbaar, "alleen via het sleutelportaal"', tg && tg.kan === false && /sleutelportaal/.test(tg.waarom_niet) && na && na.kan === false && /sleutelportaal/.test(na.waarom_niet), JSON.stringify([tg, na]));
+      const pr = (r.j.sleutels || []).find((x) => x.id === 'proef_een');
+      toets('18 M1 lijst: nazorg uit het register vooraf zichtbaar (let_op)', pr && pr.let_op === 'nazorg-proef', JSON.stringify(pr));
+      await vers(P);
+      r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: 'telegram_debug_bot_token', waarde: W1 }, { pot: P.jar });
+      await vers(P);
+      const rN = await vraag('POST', '/app/sleutels/vervang', { plek: 'n8n', id: 'N8nApi001', waarde: W1 }, { pot: P.jar });
+      toets('18 M1 vervangen debug-bot-token / n8n-API -> 403, niets geschreven', r.status === 403 && rN.status === 403 && /sleutelportaal/.test(r.j.fout) && spNep.schrijf.length === nS && spNep.patch.length === 1, JSON.stringify([r.j, rN.j]));
+      // de waarden staan nergens: auditlog, app-log, staat, foutlog, Telegram, sleutelportaal_log
+      const alles = [];
+      const loop = (d) => { for (const f of fs.readdirSync(d)) { const pf = path.join(d, f); const st = fs.lstatSync(pf); if (st.isDirectory()) loop(pf); else if (st.isFile()) alles.push(fs.readFileSync(pf, 'latin1')); } };
+      loop(DATA); if (fs.existsSync(LOGDIR)) loop(LOGDIR);
+      const hooi = alles.join('\n') + logs.join('\n') + telegram.join('\n') + JSON.stringify(spNep.log);
+      toets('18 waarden nergens terug: audit, app-log, staat, foutlog, Telegram, auditlog-RPC', ![W1, W2, W3].some((w) => hooi.includes(w) || hooi.includes(w.slice(6))), 'gevonden');
+      const auditS = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+      toets('18 auditlog: apparaat + sleutelnaam + uitkomst per vervanging', /"route":"\/app\/sleutels\/vervang","m":"POST","status":200,"apparaat":"[a-f0-9]{16}","reden":"sleutel kluis proef_een: bijgewerkt"/.test(auditS)
+        && /"reden":"sleutel n8n Locatie Tasker \(header\): opgeslagen"/.test(auditS), auditS.slice(-500));
+      }
+      if (ECHT_SP) {
+        // productieproef tegen de echte kluis met een wegwerpnaam (opruimen doet de aanroeper; nooit een echte sleutel)
+        const naam = 'proef_appluik_' + Date.now();
+        const sl = fs.readFileSync(SP_SLEUTEL, 'utf8').trim();
+        const sb = (fn, b) => fetch(process.env.SUPABASE_URL.replace(/\/$/, '') + '/rest/v1/rpc/' + fn, { method: 'POST', body: JSON.stringify(Object.assign({ p_sleutel: sl }, b)),
+          headers: { apikey: process.env.SUPABASE_SERVICE_ROLE, authorization: 'Bearer ' + process.env.SUPABASE_SERVICE_ROLE, 'content-type': 'application/json' } }).then((x) => x.json());
+        const WE1 = 'proefwaarde-een-' + crypto.randomBytes(16).toString('hex'), WE2 = 'proefwaarde-twee-' + crypto.randomBytes(16).toString('hex');
+        const aan = await sb('sb_sleutelportaal_schrijven', { p_sessie: 'wv157-toets', p_naam: naam, p_waarde: WE1, p_nieuw: true });
+        toets('18E wegwerpsleutel ' + naam + ' aangemaakt (opzet, buiten het luik)', aan && aan.ok === true && aan.actie === 'aangemaakt', JSON.stringify(aan));
+        r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+        const e = (r.j.sleutels || []).find((x) => x.id === naam);
+        toets('18E lijst uit de echte kluis bevat de wegwerpsleutel, zonder masker of waarde', r.status === 200 && e && e.kan === true && !/gemaskeerd|vingerafdruk|••••/.test(JSON.stringify(r.j)) && !JSON.stringify(r.j).includes(WE1.slice(-4)), JSON.stringify(e));
+        await vers(P);
+        r = await vraag('POST', '/app/sleutels/vervang', { plek: 'kluis', id: naam, waarde: WE2 }, { pot: P.jar });
+        toets('18E vervangen via het luik in de echte kluis -> 200 bijgewerkt', r.status === 200 && r.j.ok === true && /opgeslagen/.test(r.j.uitkomst), JSON.stringify(r.j));
+        console.log('ECHT_NAAM=' + naam + ' ECHT_SHA_NIEUW=' + crypto.createHash('sha256').update(WE2).digest('hex') + ' ECHT_SHA_OUD=' + crypto.createHash('sha256').update(WE1).digest('hex'));
+        const al = await sb('sb_sleutelportaal_auditlog', { p_aantal: 10 });
+        const alT = JSON.stringify(al);
+        toets('18E auditlog in de databank: regel met sessie app-…, zonder waarde', al.ok && (al.regels || []).some((x) => x.naam === naam && /^app-/.test(x.sessie || '') && x.uitkomst === 'opgeslagen') && !alT.includes(WE2) && !alT.includes(WE1), alT.slice(0, 300));
+      }
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
