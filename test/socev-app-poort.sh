@@ -2396,9 +2396,9 @@ async function bewijs(o) {
       const nAgenda = agendaStaat.aanroepen.length;
       // ongeldig
       const ong = [];
-      for (const b of [{ datum: V, positie: 1, keuze: 'b' }, { datum: V, positie: 1, keuze: 'constructor' }, { datum: 'gisteren', positie: 1, keuze: 'gedaan' }, { datum: V, positie: 0, keuze: 'gedaan' }, { datum: V, positie: 1.5, keuze: 'gedaan' }, { datum: V, positie: '1', keuze: 'gedaan' }])
+      for (const b of [{ datum: V, positie: 1, keuze: 'b' }, { datum: V, positie: 1, keuze: 'constructor' }, { datum: V, positie: 1, keuze: '__proto__' }, { datum: 'gisteren', positie: 1, keuze: 'gedaan' }, { datum: V, positie: 0, keuze: 'gedaan' }, { datum: V, positie: 1.5, keuze: 'gedaan' }, { datum: V, positie: '1', keuze: 'gedaan' }])
         ong.push((await vraag('POST', '/app/actie', b, { pot: P.jar })).status);
-      toets('20 ongeldig (letter b, constructor, datum, positie 0, 1.5, tekst) -> 400', ong.join() === '400,400,400,400,400,400', ong.join());
+      toets('20 ongeldig (letter b, constructor, __proto__, datum, positie 0, 1.5, tekst) -> 400', ong.join() === '400,400,400,400,400,400,400', ong.join());
       r = await vraag('POST', '/app/actie', { datum: V, positie: 9, keuze: 'gedaan' }, { pot: P.jar });
       const r3 = await vraag('POST', '/app/actie', { datum: V, positie: 3, keuze: 'gedaan' }, { pot: P.jar });
       toets('20 onbekende actie / zonder Telegram-bericht -> 404, n8n niet aangeroepen', r.status === 404 && r3.status === 404 && vkStaat.aanroepen.length === 0, [r.status, r3.status, vkStaat.aanroepen.length].join());
@@ -2435,7 +2435,7 @@ async function bewijs(o) {
         if (b.keuze !== 'b') return blokAntwoord(b);
         if (Date.now() - Date.parse(x.blok_op || '') < 30 * 60000) return { ok: true, uitkomst: 'geweigerd', popup: 'Ik stelde net al een moment voor; het voorstel staat in Telegram.' };
         x.blok_op = new Date().toISOString();
-        return { ok: true, uitkomst: 'ok', blok: true, popup: 'Ik zoek een vrij uur in je agenda; het voorstel komt zo in Telegram, met ✅ om het te plaatsen.' };
+        return { ok: true, uitkomst: 'ok', blok: true, popup: 'Ik zoek een vrij uur in je agenda; het antwoord komt zo in Telegram (een voorstel met ✅, of waarom het niet lukt).' };
       };
       n8nStaat.portie.find((y) => y.positie === 2).blok_op = null;
       const nB = vkStaat.aanroepen.length, nAg = agendaStaat.aanroepen.length;
@@ -2450,6 +2450,9 @@ async function bewijs(o) {
       toets('20 📅 tweede keer binnen 30 min -> n8n weigert, ok false, tekst "staat in Telegram"', r.status === 200 && r.j.ok === false && r.j.uitkomst === 'geweigerd' && /staat in Telegram/.test(r.j.melding), JSON.stringify(r.j).slice(0, 200));
       const nAuB = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter(Boolean);
       toets('20 📅 auditregel "actie blok", zonder actietekst', nAuB.slice(-3).some((l) => l.includes('actie blok ' + V + '#2 -> ')) && !nAuB.slice(-3).some((l) => /Actie 2|SLEUTEL/.test(l)), nAuB.slice(-2).join('\n'));
+      vkStaat.antwoord = () => ({ ok: true, uitkomst: 'bezig', popup: 'Ik ben hier al mee bezig; even geduld.' });
+      r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'blok' }, { pot: P.jar });
+      toets('20 📅 terwijl een tik loopt -> n8n zegt bezig; 200, ok false, uitkomst bezig met de tekst', r.status === 200 && r.j.ok === false && r.j.uitkomst === 'bezig' && /al mee bezig/.test(r.j.melding), JSON.stringify(r.j).slice(0, 200));
       vkStaat.antwoord = blokAntwoord;
       // n8n faalt / time-out / onbekend antwoord / pad gewijzigd
       vkStaat.antwoord = () => ({ ok: true, uitkomst: 'mislukt', popup: 'Niet gelukt; druk gerust opnieuw.' });
