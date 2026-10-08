@@ -5935,12 +5935,13 @@ const APP_PRAKTIJKEN = [
     noten: ['2016 boekte de bijdrage als omzet en is daarom weggelaten.', 'De jaarrekening 2025 sluit in het document niet helemaal (2.444 tegen 2.446).'] },
   { code: 'HOLD', naam: 'Holding', voluit: 'Primum Non Nocere Holding B.V.',
     kern: ['omzet_managementfee', 'resultaat', 'res_deelnemingen', 'res_deelneming_tg', 'res_deelneming_phbv', 'ev_totaal', 'liquide'],
-    // De lijn neemt het totaal van de deelnemingen: dat komt elk jaar uit de eigen jaarrekening. De splitsing per deelneming
-    // komt voor 2022-2023 uit de vergelijkende cijfers van 2024, waarvan de jaarkop een typefout heeft (2022 i.p.v. 2023):
-    // in de datahub staat 2022 daardoor gelijk aan 2023 (gemeten 8-10, wv174). Per deelneming dus alleen de laatste twee jaren.
-    alleenLaatste: ['res_deelneming_tg', 'res_deelneming_phbv'],
-    lijnen: [{ titel: 'Resultaat, deelnemingen en managementvergoeding', r: ['resultaat', 'res_deelnemingen', 'omzet_managementfee'] }],
-    noten: ['De holding hield t/m 2024 50% van Praktijkhouders B.V.', 'Alleen werkelijke cijfers; de modelprognoses staan hier bewust niet.'] },
+    // Splitsing per deelneming sinds het datahubherstel wv186 (8-10) over alle jaren mét splitsing: 2022 heeft alleen het totaal
+    // (bron 10); de vergelijkende kolom van 2023 zet beide deelnemingen op 0 (herrubricering), twee bases in één kolom (Fable wv190).
+    lijnen: [{ titel: 'Resultaat, deelnemingen en managementvergoeding', r: ['resultaat', 'res_deelnemingen', 'omzet_managementfee'] },
+      { titel: 'Resultaat per deelneming', r: ['res_deelneming_tg', 'res_deelneming_phbv', 'res_deelnemingen'], van: 2023 }],
+    noten: ['De holding hield t/m 2024 50% van Praktijkhouders B.V.',
+      '2022: de jaarrekening geeft alleen het totaal van de deelnemingen (het resultaat van Tolgaarde), zonder splitsing; de jaarrekening 2023 telt dat jaar als aandeel derden. Daarom staat de splitsing per deelneming pas vanaf 2023.',
+      'Alleen werkelijke cijfers; de modelprognoses staan hier bewust niet.'] },
 ];
 const APP_FIN_RUBRIEKEN = ['omzet_totaal', 'resultaat', 'k_lonen', 'k_soc', 'k_pens', 'k_ovpers', 'k_personeel_tot', 'uitbesteed', 'k_huisv', 'liquide',
   'ev_totaal', 'k_som_bruto', 'bijdrage_maten', 'omzet_managementfee', 'res_deelneming_tg', 'res_deelneming_phbv', 'res_deelnemingen'];
@@ -5977,11 +5978,13 @@ function appFinReeksen(rijen, def) {
     p[j] = { w: w, bron: Array.from(new Set(b)) };
   });
   r.personeel = p;
-  (def.alleenLaatste || []).forEach(function (k) {
-    const jaren = Object.keys(r[k] || {}).map(Number).sort(function (a, b) { return b - a; });
-    jaren.slice(2).forEach(function (j) { delete r[k][j]; });
-  });
   (def.omkeren || []).forEach(function (k) { Object.keys(r[k] || {}).forEach(function (j) { r[k][j] = { w: -r[k][j].w, bron: r[k][j].bron }; }); });
+  return r;
+}
+// Alleen de jaren vanaf `van` van de genoemde reeksen (een lijn die later begint dan de entiteit, `lijnen[].van`).
+function appVanJaar(reeksen, namen, van) {
+  const r = {};
+  namen.forEach(function (k) { r[k] = {}; Object.keys(reeksen[k] || {}).forEach(function (j) { if (Number(j) >= van) r[k][j] = reeksen[k][j]; }); });
   return r;
 }
 function appBronTekst(ids, bronnen) {
@@ -6126,7 +6129,7 @@ async function appPraktijkenVerzamel() {
   const entiteiten = APP_PRAKTIJKEN.map(function (def) {
     const reeksen = appFinReeksen(f.reeks, def);
     const kern = def.kern.map(function (k) { return appKernCijfer(APP_FIN_LABEL[k], reeksen[k], f.bronnen); }).filter(Boolean);
-    const grafieken = def.lijnen.map(function (l) { return appLijnSpec(l.titel, l.r, reeksen, f.bronnen); }).filter(Boolean);
+    const grafieken = def.lijnen.map(function (l) { return appLijnSpec(l.titel, l.r, l.van ? appVanJaar(reeksen, l.r, l.van) : reeksen, f.bronnen); }).filter(Boolean);
     let sector = null;
     if (def.praktijk) {
       const x = appPraktijkExtra(def, f, zd, reeksen);

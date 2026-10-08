@@ -83,7 +83,8 @@ const FIN_REEKS = [].concat(
   finR('KM', 'bijdrage_maten', { 2016: -4601, 2017: -6176, 2025: -42913 }, (j) => (j === 2016 ? 29 : 52)),
   finR('HOLD', 'resultaat', { 2022: 25013, 2023: 105758, 2024: 91731, 2025: 126291 }, (j) => ({ 2022: 10, 2023: 13, 2024: 17, 2025: 21 })[j]),
   finR('HOLD', 'res_deelnemingen', { 2022: 19903, 2023: 102017, 2024: 75245, 2025: 113928 }, (j) => ({ 2022: 10, 2023: 13, 2024: 17, 2025: 21 })[j]),
-  finR('HOLD', 'res_deelneming_phbv', { 2022: 54295, 2023: 54295, 2024: 69510, 2025: 70716 }, (j) => (j === 2025 ? 21 : 17)),
+  finR('HOLD', 'res_deelneming_phbv', { 2022: 0, 2023: 54295, 2024: 69510, 2025: 70716 }, (j) => ({ 2022: 13, 2023: 13, 2024: 17, 2025: 21 })[j]),
+  finR('HOLD', 'res_deelneming_tg', { 2023: 47722, 2024: 5735, 2025: 43212 }, (j) => (j === 2025 ? 21 : 17)),
   [{ entiteit: 'TG', rubriek: 'omzet_totaal', jaar: 'kapot', bedrag: 1, bron_id: 1 }, { entiteit: 'TG', rubriek: 'resultaat', jaar: 2018, bedrag: null, bron_id: 1 }]);
 const FIN_PAT = [{ entiteit: 'TG', peildatum: '2026-01-01', aantal: 5600, bron_id: 3 }, { entiteit: 'TG', peildatum: '2024-01-01', aantal: 5712.25, bron_id: 4 }, { entiteit: 'TG', peildatum: '2025-01-01', aantal: 5785, bron_id: 5 }, { entiteit: 'TG', peildatum: '2026-01-01', aantal: 5756.67, bron_id: 6 },
   { entiteit: 'GH', peildatum: '2025-01-01', aantal: 4840.5, bron_id: 2 }];
@@ -2548,8 +2549,11 @@ async function bewijs(o) {
       toets('20 POT tegen landelijk: index, eerste gezamenlijke jaar = 100, alleen jaren met beide', pi && pi.x.join() === '2020,2021,2024' && pi.reeksen[0].waarden[0] === 100 && pi.reeksen[1].waarden[0] === 100 && pi.reeksen[0].waarden[2] === 187.4 && pi.reeksen[1].waarden[2] === 161.9 && /^index berekend/.test(pi.bron), JSON.stringify(pi));
       const kl = graf('KM', /^Kosten/);
       toets('20 KM: 2016 (bijdrage als omzet) weggelaten, lijn vanaf 2017 met gaten als null', kl && kl.x[0] === '2017' && kl.x.length === 9 && kl.reeksen[0].waarden[1] === null && kern('KM', 'Kosten vóór bijdrage deelnemers').vorig.jaar === 2017, JSON.stringify(kl));
-      const hl = graf('HOLD', /^Resultaat, deelnemingen/), hp = kern('HOLD', 'Resultaat deelneming Praktijkhouders B.V.');
-      toets('20 HOLD: lijn met het totaal van de deelnemingen; per deelneming alleen de laatste twee jaren (typefout jaarkop 2024)', hl && hl.reeksen.some((x) => x.naam === 'Resultaat deelnemingen' && x.waarden.join() === '19903,102017,75245,113928') && !hl.reeksen.some((x) => /Praktijkhouders/.test(x.naam)) && hp.waarde === 70716 && hp.vorig.jaar === 2024 && !JSON.stringify(E.HOLD).includes('54295'), JSON.stringify(hl));
+      const hl = graf('HOLD', /^Resultaat, deelnemingen/), hd = graf('HOLD', /^Resultaat per deelneming$/), hp = kern('HOLD', 'Resultaat deelneming Praktijkhouders B.V.');
+      const hdW = (n) => ((hd && hd.reeksen.find((x) => x.naam === n)) || { waarden: [] }).waarden;
+      toets('20 HOLD: lijn met het totaal van de deelnemingen vanaf 2022; lijn per deelneming vanaf 2023 (2022 heeft alleen het totaal), met noot', hl && hl.reeksen.some((x) => x.naam === 'Resultaat deelnemingen' && x.waarden.join() === '19903,102017,75245,113928') && !hl.reeksen.some((x) => /Praktijkhouders/.test(x.naam))
+        && hd && hd.x.join() === '2023,2024,2025' && hdW('Resultaat deelneming Tolgaarde').join() === '47722,5735,43212' && hdW('Resultaat deelneming Praktijkhouders B.V.').join() === '54295,69510,70716'
+        && hdW('Resultaat deelnemingen').join() === '102017,75245,113928' && hp.waarde === 70716 && hp.vorig.jaar === 2024 && E.HOLD.jaren.join() === '2022,2025' && E.HOLD.noten.some((n) => /^2022: de jaarrekening geeft alleen het totaal van de deelnemingen/.test(n)), JSON.stringify(hd));
       const alleG = [].concat(...(j.entiteiten || []).map((e) => e.grafieken.concat(e.sector ? e.sector.grafieken : [])));
       const geldig = (g) => g.bron && g.bron.length <= 200 && (!g.eenheid || g.eenheid.length <= 12) && (g.soort === 'staaf' ? g.items.length >= 1 && g.items.length <= 40 && g.items.every((x) => typeof x.waarde === 'number' && x.label.length <= 80)
         : g.soort === 'lijn' && g.x.length >= 2 && g.x.length <= 60 && g.reeksen.length >= 1 && g.reeksen.length <= 4 && g.reeksen.every((x) => x.naam.length <= 60 && x.waarden.length === g.x.length && x.waarden.every((v) => v === null || (typeof v === 'number' && isFinite(v)))));
