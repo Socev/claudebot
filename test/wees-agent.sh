@@ -19,6 +19,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
+const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const { spawn } = require('child_process');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'wees-'));
@@ -80,7 +81,7 @@ hook.listen(0, '127.0.0.1', async () => {
    ['const ROL_INTERVAL_FOUT_MS = 15 * 1000;', 'const ROL_INTERVAL_FOUT_MS = 400;']].forEach(([a, b]) => {
     if (src.indexOf(a) < 0) { console.log('ROOD  vervangregel niet gevonden: ' + a); fout++; } src = src.split(a).join(b); });
   fs.writeFileSync(path.join(d, 'server.js'), src);
-  const poort = 18652;
+  const poort = vrijePoort();
   const env = Object.assign({}, process.env, {
     HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'),
     APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'),

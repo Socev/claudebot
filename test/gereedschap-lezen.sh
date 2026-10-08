@@ -7,6 +7,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
+const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const { spawn } = require('child_process');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'gereedschap-'));
@@ -35,7 +36,7 @@ fs.writeFileSync(path.join(W, 'bin', 'codex'), '#!/bin/sh\necho codex-mocht-niet
 
 const d = path.join(W, 'srv');
 ['home', 'vault', 'repo', 'io', 'jobout'].forEach((m) => fs.mkdirSync(path.join(d, m), { recursive: true }));
-const poort = 18631;
+const poort = vrijePoort();
 const env = Object.assign({}, process.env, {
   HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'),
   JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),

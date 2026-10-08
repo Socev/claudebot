@@ -6,6 +6,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
+const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'stopvoorstart-'));
 let fout = 0;
@@ -30,7 +31,7 @@ hook.listen(0, '127.0.0.1', async () => {
   ['home', 'vault', 'repo', 'io', 'jobout'].forEach(m => fs.mkdirSync(path.join(d, m), { recursive: true }));
   let s = fs.readFileSync('server.js', 'utf8').split('const AGENT_START_SPREIDING_MS = 20 * 1000;').join('const AGENT_START_SPREIDING_MS = 3000;');
   fs.writeFileSync(path.join(d, 'server.js'), s + '\nglobal.__toetsJobs = jobs;\n');
-  const poort = 18631;
+  const poort = vrijePoort();
   Object.assign(process.env, {
     HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'),
     JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),

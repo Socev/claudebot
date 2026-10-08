@@ -3,17 +3,18 @@
 # Draait een kopie van de ECHTE server.js op een losse poort met een nep-`cloudflared` die zijn argumenten en de NAMEN
 # in zijn omgeving opschrijft en een nep-/ready serveert. Geen Cloudflare nodig.
 # Een echte cloudflared op de pod (metrics 20241) stoort niet meer: los proces telt alleen bij dezelfde metrics-poort
-# of zonder --metrics (6d, review #11); de nep draait op 18741. Geval 6 (6d): kant vps/onbekend -> nooit een kind.
+# of zonder --metrics (6d, review #11); de nep draait op een vrije poort (wv229). Geval 6 (6d): kant vps/onbekend -> nooit een kind.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
+const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const { spawn } = require('child_process');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'tunnelkind-'));
 let fout = 0;
 const toets = (naam, ok, extra) => { console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (extra ? '  [' + extra + ']' : '')); if (!ok) fout++; };
 const slaap = (ms) => new Promise((r) => setTimeout(r, ms));
-const METRICS = 18741;
+const METRICS = vrijePoort();
 fs.mkdirSync(path.join(W, 'bin'));
 const NEP = path.join(W, 'bin', 'cloudflared');
 fs.writeFileSync(NEP, `#!/usr/bin/env node
@@ -58,7 +59,7 @@ const nepPids = () => fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).fil
   const servers = [];
   try {
     // 1. zonder token: geen start, reden in /health; /health/publiek is klein
-    const a = server('a', 18651, {}); servers.push(a);
+    const a = server('a', vrijePoort(), {}); servers.push(a);
     const h = await klaar(a.poort);
     toets('server start', !!h);
     toets('zonder token geen tunnel', h && h.tunnel && h.tunnel.aan === false && /CLOUDFLARE_TUNNEL_TOKEN_OLARES ontbreekt/.test(h.tunnel.reden_uit || ''), h && JSON.stringify(h.tunnel));
@@ -70,7 +71,7 @@ const nepPids = () => fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).fil
     stop(a);
 
     // 2. met token: kind start met alleen PATH/HOME/TZ/TUNNEL_TOKEN, token niet in argumenten
-    const b = server('b', 18652, { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep-token-1234567890' }); servers.push(b);
+    const b = server('b', vrijePoort(), { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep-token-1234567890' }); servers.push(b);
     await klaar(b.poort);
     for (let i = 0; i < 25 && starts().length === 0; i++) await slaap(200);
     const s1 = starts()[0];
@@ -97,7 +98,7 @@ const nepPids = () => fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).fil
     let leeft = true; try { process.kill(kindPid, 0); } catch (e) { leeft = false; }
     toets('tunnel overleeft het einde van server.js (en blijft loggen)', leeft);
     const voor = starts().length;
-    const c = server('c', 18653, { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep', TUNNEL_LOG: path.join(b.d, 'tunnel.log') }); servers.push(c);
+    const c = server('c', vrijePoort(), { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep', TUNNEL_LOG: path.join(b.d, 'tunnel.log') }); servers.push(c);
     const hd = await klaar(c.poort);
     await slaap(1000);
     toets('nieuwe server: geen tweede kind naast het losse proces', starts().length === voor && hd.tunnel.aan === false && /los proces \(pid \d+/.test(hd.tunnel.reden_uit || ''), JSON.stringify(hd.tunnel));
@@ -110,7 +111,7 @@ const nepPids = () => fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).fil
     // 5. uit-bestand -> geen start
     const e = path.join(W, 'e'); fs.mkdirSync(e, { recursive: true }); fs.writeFileSync(path.join(e, 'tunnel-uit'), '');
     const voor5 = starts().length;
-    const s5 = server('e', 18654, { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep' }); servers.push(s5);
+    const s5 = server('e', vrijePoort(), { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep' }); servers.push(s5);
     const he = await klaar(s5.poort);
     await slaap(800);
     toets('uit-bestand: geen start', starts().length === voor5 && /uitgezet/.test(he.tunnel.reden_uit || ''), JSON.stringify(he.tunnel));
@@ -118,7 +119,7 @@ const nepPids = () => fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).fil
 
     // 6. kant vps (uitwijk stap 6d): token + binary aanwezig, toch nooit een kind; ook niet na de herstartwachttijd
     const voor6 = starts().length;
-    const s6 = server('f', 18655, { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep-token-1234567890', SOCEV_KANT: 'vps' }); servers.push(s6);
+    const s6 = server('f', vrijePoort(), { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep-token-1234567890', SOCEV_KANT: 'vps' }); servers.push(s6);
     const hf = await klaar(s6.poort);
     await slaap(3000);
     const hf2 = await req(s6.poort, '/health');
@@ -127,7 +128,7 @@ const nepPids = () => fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).fil
     toets('kant vps: één logregel "niet gestart"', (fs.readFileSync(path.join(s6.d, 'api.log'), 'utf8').match(/tunnel .*niet_gestart/g) || []).length === 1);
     stop(s6);
     // 6b. ongeldige kant -> onbekend -> ook geen kind
-    const s7 = server('g', 18656, { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep', SOCEV_KANT: 'VPS ' }); servers.push(s7);
+    const s7 = server('g', vrijePoort(), { CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'nep', SOCEV_KANT: 'VPS ' }); servers.push(s7);
     await klaar(s7.poort);
     await slaap(1500);
     const hg = await req(s7.poort, '/health');

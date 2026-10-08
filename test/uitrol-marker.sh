@@ -8,6 +8,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
+const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const { spawn, execSync } = require('child_process');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'uitrolmarker-'));
@@ -24,7 +25,7 @@ else setTimeout(() => { process.stdout.write(JSON.stringify({ type: 'result', is
 `, { mode: 0o755 });
 const hook = http.createServer((req, res) => { req.resume(); req.on('end', () => res.end('ok')); });
 
-const POORT = 18631;
+const POORT = vrijePoort();
 function maakServer() {
   const d = path.join(W, 's');
   ['home', 'vault', 'repo', 'io', 'jobout'].forEach((m) => fs.mkdirSync(path.join(d, m), { recursive: true }));

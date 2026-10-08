@@ -9,6 +9,7 @@ cd "$(dirname "$0")/.." || exit 1
 OFFSITE_SH="${1:-/opt/data/bin/vault-offsite.sh}"
 FOUT=0
 node - <<'JS' || FOUT=1
+const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http'), net = require('net');
 const { spawn } = require('child_process');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'rolwachter-'));
@@ -91,7 +92,7 @@ const fwGet = (s) => req(s, 'GET', '/auto/ota/', undefined, { 'Device-Id': '02:5
   try {
     // ── 1. olares actief -> primair; poortjes open (401 = voorbij de rolpoort, op de secretcontrole)
     modus = 'olares';
-    const s1 = server('s1', 18771, { OFFSITE_INTERVAL_MIN: '1', OFFSITE_START_DELAY_MIN: '1' }); alle.push(s1); await wacht(s1);
+    const s1 = server('s1', vrijePoort(), { OFFSITE_INTERVAL_MIN: '1', OFFSITE_START_DELAY_MIN: '1' }); alle.push(s1); await wacht(s1);
     let h = await wachtRol(s1, 'primair', 3000), r0;
     toets('1 rol primair bij actieve_kant olares', h.rol === 'primair' && h.kant === 'olares' && h.uitwijk && h.uitwijk.actieve_kant === 'olares', JSON.stringify(h.uitwijk));
     toets('1 /health ok blijft true', h.ok === true);
@@ -161,7 +162,7 @@ const fwGet = (s) => req(s, 'GET', '/auto/ota/', undefined, { 'Device-Id': '02:5
 
     // ── 5. Supabase weg bij de start -> passief; daarna terug -> primair
     modus = '500';
-    const s2 = server('s2', 18772); alle.push(s2); await wacht(s2);
+    const s2 = server('s2', vrijePoort()); alle.push(s2); await wacht(s2);
     await slaap(500);
     h = await req(s2, 'GET', '/health');
     toets('5 start zonder Supabase: passief', h.rol === 'passief' && /start: lezing mislukt/.test(h.uitwijk.reden), h.uitwijk && h.uitwijk.reden);
@@ -174,7 +175,7 @@ const fwGet = (s) => req(s, 'GET', '/auto/ota/', undefined, { 'Device-Id': '02:5
 
     // ── 6. lezing hangt bij de start: /run wacht hooguit de startgrens, dan 409; rolbestand meteen passief
     modus = 'hang';
-    const s3 = server('s3', 18773); alle.push(s3);
+    const s3 = server('s3', vrijePoort()); alle.push(s3);
     for (let i = 0; i < 40 && !lees(s3.rolbestand); i++) await slaap(50);
     toets('6 rolbestand direct bij de start passief', /^rol=passief$/m.test(lees(s3.rolbestand)) && /nog niet gelezen/.test(lees(s3.rolbestand)), lees(s3.rolbestand).replace(/\n/g, ' '));
     await wacht(s3);
@@ -187,7 +188,7 @@ const fwGet = (s) => req(s, 'GET', '/auto/ota/', undefined, { 'Device-Id': '02:5
     // ── 6b. eerste OTA-vraag vlak na de start, stand olares maar traag (450 ms): wacht op de eerste lezing en gaat
     //        dan door (auto-uit), nooit een valse 503 passief door een code-uitrol (stap 9, wv118)
     modus = 'traag';
-    const s6 = server('s6', 18776); alle.push(s6);
+    const s6 = server('s6', vrijePoort()); alle.push(s6);
     let eerste = null;
     for (let i = 0; i < 200 && !eerste; i++) { const x = await ota(s6); if (x._status) eerste = x; else await slaap(25); }
     toets('6b eerste OTA-vraag na de start: door de rolpoort (auto-uit), niet passief', eerste && eerste._status === 503 && eerste.error === 'auto-uit', JSON.stringify(eerste));
@@ -197,11 +198,11 @@ const fwGet = (s) => req(s, 'GET', '/auto/ota/', undefined, { 'Device-Id': '02:5
 
     // ── 7. kant vps leest vps -> primair; ongeldige kant -> passief
     modus = 'vps';
-    const s4 = server('s4', 18774, { SOCEV_KANT: 'vps' }); alle.push(s4); await wacht(s4);
+    const s4 = server('s4', vrijePoort(), { SOCEV_KANT: 'vps' }); alle.push(s4); await wacht(s4);
     h = await wachtRol(s4, 'primair', 2000);
     toets('7 SOCEV_KANT=vps + stand vps -> primair', h.rol === 'primair' && h.kant === 'vps');
     stop(s4);
-    const s5 = server('s5', 18775, { SOCEV_KANT: 'mars' }); alle.push(s5); await wacht(s5);
+    const s5 = server('s5', vrijePoort(), { SOCEV_KANT: 'mars' }); alle.push(s5); await wacht(s5);
     await slaap(800); h = await req(s5, 'GET', '/health');
     toets('7 ongeldige SOCEV_KANT -> passief', h.rol === 'passief' && h.kant === 'onbekend', h.uitwijk && h.uitwijk.reden);
     stop(s5);

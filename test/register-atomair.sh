@@ -11,6 +11,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
+const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const { spawn } = require('child_process');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'regatomair-'));
@@ -45,7 +46,7 @@ hook.listen(0, '127.0.0.1', async () => {
   const d = path.join(W, 'pod'), home = path.join(d, 'home'), REG = path.join(home, 'agent_jobs.json');
   ['home', 'vault', 'repo', 'io', 'jobout'].forEach(m => fs.mkdirSync(path.join(d, m), { recursive: true }));
   fs.writeFileSync(path.join(d, 'server.js'), fs.readFileSync('server.js', 'utf8').split('const AGENT_START_SPREIDING_MS = 20 * 1000;').join('const AGENT_START_SPREIDING_MS = 100;'));
-  const poort = 18671;
+  const poort = vrijePoort();
   const env = Object.assign({}, process.env, {
     HOME: home, VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'),
     APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'),

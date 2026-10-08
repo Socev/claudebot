@@ -9,6 +9,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
+const vrijePoort = require(require('path').resolve('test/vrije-poort.js'));
 const fs = require('fs'), path = require('path'), os = require('os'), http = require('http');
 const { spawn, execSync } = require('child_process');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'agentstart-'));
@@ -104,7 +105,7 @@ function stop(srv) { try { process.kill(-srv.p.pid, 'SIGKILL'); } catch (e) {} }
   const alle = [];
   try {
     // ── F. Fail-open: zolang de transcriptmeting in dit proces niet bewezen is, doodt de vroege controle niets.
-    const s1 = maakServer('server.js', 's1', 18611); alle.push(s1); await wachtOp(s1);
+    const s1 = maakServer('server.js', 's1', vrijePoort()); alle.push(s1); await wachtOp(s1);
     const f = await agent(s1, 'hang zonder bewijs', 'MODUS:HANG SLEUTEL:ff');
     await slaap(5500);
     const fs1 = spawns().filter((x) => x.sleutel === 'ff');
@@ -112,7 +113,7 @@ function stop(srv) { try { process.kill(-srv.p.pid, 'SIGKILL'); } catch (e) {} }
     toets('F fail-open: overslaan staat in het log', /vroege-levenscontrole-overgeslagen/.test(fs.readFileSync(path.join(s1.d, 'api.log'), 'utf8')));
     stop(s1); fs1.forEach((x) => { try { process.kill(x.pid, 'SIGKILL'); } catch (e) {} });
 
-    const s2 = maakServer('server.js', 's2', 18612); alle.push(s2); await wachtOp(s2);
+    const s2 = maakServer('server.js', 's2', vrijePoort()); alle.push(s2); await wachtOp(s2);
     // ── A + B. Twee agents in dezelfde milliseconde, plus een buurman-transcript dat meteen stilvalt (het incident).
     const tA = Date.now();
     const [a1, a2] = await Promise.all([agent(s2, 'lang 1', 'MODUS:LANG SLEUTEL:a1'), agent(s2, 'lang 2', 'MODUS:LANG SLEUTEL:a2')]);
@@ -163,7 +164,7 @@ function stop(srv) { try { process.kill(-srv.p.pid, 'SIGKILL'); } catch (e) {} }
     // het scenario moet daar WEL tot een kill leiden, anders bewijst toets A niets.
     {
       fs.writeFileSync(path.join(W, 'oud.js'), execSync('git show f910c8b:server.js'));
-      const s3 = maakServer(path.join(W, 'oud.js'), 's3', 18613); alle.push(s3); await wachtOp(s3);
+      const s3 = maakServer(path.join(W, 'oud.js'), 's3', vrijePoort()); alle.push(s3); await wachtOp(s3);
       const [o1] = await Promise.all([agent(s3, 'oud lang', 'MODUS:LANG SLEUTEL:o1')]);
       await slaap(200);
       fs.mkdirSync(s3.projDir, { recursive: true });

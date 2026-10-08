@@ -9,7 +9,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 W="$(mktemp -d)"; trap 'kill "$NEP" 2>/dev/null; rm -rf "$W"' EXIT
-POORT=18761
+POORT=$(node test/vrije-poort.js) || exit 1
 fout=0
 toets(){ if [ "$2" = 1 ]; then echo "GROEN $1"; else echo "ROOD  $1${3:+  [$3]}"; fout=$((fout + 1)); fi; }
 h(){ printf '%s' "$1" | sha256sum | cut -c1-12; }
