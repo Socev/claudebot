@@ -593,7 +593,7 @@ function saveAgents() {
   // object, verdwijnt de agent uit /agents en telt hij niet meer mee voor
   // MAX_AGENTS.
   function onaantastbaar(a) {
-    return a.status === 'pending' || a.status === 'running' ||
+    return a.status === 'pending' || a.status === 'running' || a.wees_rapport_wacht ||
       (a.rapport && a.rapport.indexOf('herkansing-') === 0);
   }
   const afgerond = Object.keys(agentsReg).filter(function (id) { return !onaantastbaar(agentsReg[id]); })
@@ -762,7 +762,11 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     const env = Object.assign({}, basisEnv, extra, (opts && opts.env) || {});
     // detached: eigen procesgroep, zodat een kill ook MCP-servers en
     // bash-kinderen raakt en er geen wezen achterblijven.
-    const child = spawn('claude', args, { cwd: cwd, env: env, detached: true });
+    // stdin op 'ignore' (wv216, 8-10-2026): met een open stdin-pipe die nooit schrijft wachtte claude 2.1.291 bij ELKE
+    // run 3 s en schreef dan "no stdin data received in 3s" op stderr (gemeten). Niemand schrijft naar child.stdin.
+    // stdout/stderr blijven pipes: gemeten dat de CLI een dode pipe overleeft (wees na een herstart van server.js, exit 0,
+    // transcript compleet); test/cli-dode-pipe.sh herhaalt die meting bij een nieuwe CLI-versie.
+    const child = spawn('claude', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     weesSpawnMeld(opts, child, eigenId, path.join(projectDirFor(cwd), eigenId + '.jsonl'));
     const t0 = Date.now();
     let out = '', err = '', lastStdout = t0, killedReason = null;
@@ -1453,17 +1457,18 @@ function sessieInfo() {
 
 // ── v2: agentsamenvatting voor /health ──────────────────────────────────────
 function agentInfo() {
-  let lopend = 0, afgerond24 = 0, mislukt24 = 0;
+  let lopend = 0, afgerond24 = 0, mislukt24 = 0, rapportWacht = 0;
   const grens = Date.now() - 24 * 3600 * 1000;
   for (const id in agentsReg) {
     const a = agentsReg[id];
+    if (a.wees_rapport_wacht) rapportWacht++;   // wv216: wees afgerond op een passieve pod, rapport volgt als primair
     if (a.status === 'running' || a.status === 'pending') lopend++;
     else if ((a.ended || 0) > grens) {
       if (a.status === 'done' && a.ok) afgerond24++;
       else mislukt24++;
     }
   }
-  return { lopend: lopend, afgerond_24u: afgerond24, mislukt_24u: mislukt24 };
+  return { lopend: lopend, afgerond_24u: afgerond24, mislukt_24u: mislukt24, rapport_wacht: rapportWacht };
 }
 
 // ── Uitrolmarker (7-10-2026, wv91, akkoord David) ──────────────────────────
@@ -2226,6 +2231,16 @@ function weesStop(a, reden) {
   try { process.kill(-a.pid, 'SIGTERM'); } catch (e) {}
 }
 
+// wv216 (Fable-review diff wv211 K3): afronden en afleveren gescheiden. Vroeger bleef een klare wees op een PASSIEVE pod
+// 'running' tot de pod primair werd: /health agents.lopend bleef bezet en uitrol-na-agents.sh wachtte tot 3 u.
+// (a) weesAfronden: register en jobs op done, ook als passief; het rapport bevroren in IO/<id>/wees-rapport.json (niet in
+//     out/: dat zou als resultaatbestand meereizen) en a.wees_rapport_wacht + a.rapport 'wacht-op-primair'.
+// (b) weesAfleveren: alleen als primair; leest het bevroren rapport (transcript alleen als terugval: de CLI kan het na
+//     dagen opruimen, Fable K1), zodat het ook na een nieuwe herstart van server.js werkt. Geen jobs[id] voor zo'n
+//     entry na een herstart (Fable K4): /result found:false is het veilige pad voor de tikker.
+function weesRapportPad(id) { return path.join(IO, id, 'wees-rapport.json'); }
+function weesTekst(e, fout) { return WEES_KOP + '\n\n' + (fout ? (e.tekst ? e.tekst + '\n\n' : '') + WEES_GEEN_TEKST : e.tekst); }
+
 function weesAfronden(id) {
   const a = agentsReg[id];
   if (!a || !a.wees || a.status !== 'running') return;
@@ -2243,25 +2258,43 @@ function weesAfronden(id) {
     delete jobs[id];
     return;
   }
-  if (!rolPrimair()) return;   // afronden met rapport alleen als primair (Fable B2); de volgende ronde probeert opnieuw
-  const outdir = path.join(IO, id, 'out');
-  let files = []; try { files = collectFiles(outdir); } catch (err) { logError('wees-bestanden', err); }
-  const volledig = WEES_KOP + '\n\n' + (fout ? (e.tekst ? e.tekst + '\n\n' : '') + WEES_GEEN_TEKST : e.tekst);
-  const r = { ok: !fout, error: fout || '', output: volledig, files: files, workspace: a.workspace, runtime: a.runtime, wees: true };
-  // Register eerst en synchroon, dan pas het rapport: de ronde rondt hem zo nooit twee keer af (Fable K1).
-  a.status = 'done'; a.ok = r.ok; a.error = agentFoutcode(fout); a.ended = Date.now(); a.eindcontrole = 'overgeslagen (wees)';
-  a.voorlopig = false;
+  const volledig = weesTekst(e, fout);
+  // Eerst het bevroren rapport, dan het register: na een herstart tussen die twee is hij nog 'running' en doet de ronde
+  // (a) gewoon opnieuw. Lukt wegschrijven niet, dan blijft het transcript de terugval in (b).
+  try { fs.mkdirSync(path.join(IO, id), { recursive: true }); fs.writeFileSync(weesRapportPad(id), JSON.stringify({ fout: fout, output: volledig })); }
+  catch (err) { logError('wees-rapport-bevriezen', err); }
+  // Register eerst en synchroon, dan pas het rapport: de ronde rondt hem zo nooit twee keer af (Fable K1 wv211).
+  a.status = 'done'; a.ok = !fout; a.error = agentFoutcode(fout); a.ended = Date.now(); a.eindcontrole = 'overgeslagen (wees)';
+  a.voorlopig = false; a.wees_rapport_wacht = true; a.rapport = 'wacht-op-primair';
   saveAgents();
   const j = jobs[id] || (jobs[id] = { agent: true, created: a.started || Date.now(), workspace: a.workspace, chat_id: a.chat_id || '' });
   j.status = 'done'; j.done_at = Date.now();
-  // Fable-review diff K2: niets tussen 'register done' en sendReport mag het rapport tegenhouden.
+  const r = { ok: !fout, error: fout || '', output: volledig, workspace: a.workspace, runtime: a.runtime, wees: true };
   try { j.result = spillIfLarge(id, Object.assign({}, r)); } catch (err) { logError('wees-spill', err); j.result = r; }
   try { jobEindLog(id, j, a.workspace); } catch (err) { logError('wees-joblog', err); }
-  schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'wees-afgerond', job_id: id, ok: r.ok, fout: fout }));
+  schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'wees-afgerond', job_id: id, ok: r.ok, fout: fout, primair: rolPrimair() }));
+  weesAfleveren(id);   // als primair meteen; anders in een volgende ronde
+}
+
+function weesAfleveren(id) {
+  const a = agentsReg[id];
+  if (!a || !a.wees_rapport_wacht || !rolPrimair()) return;
+  let b = null; try { b = JSON.parse(fs.readFileSync(weesRapportPad(id), 'utf8')); } catch (e) {}
+  if (!b || typeof b.output !== 'string') { const fout = a.error || null; b = { fout: fout, output: weesTekst(weesEindtekst(a), fout) }; }
+  const outdir = path.join(IO, id, 'out');
+  // Volgorde (Fable K2): bestanden verzamelen vóór appBewaar (die verplaatst ze uit out/), de jobmap als laatste weg.
+  let files = []; try { files = collectFiles(outdir); } catch (err) { logError('wees-bestanden', err); }
+  const r = { ok: !b.fout, error: b.fout || '', output: b.output, files: files, workspace: a.workspace, runtime: a.runtime, wees: true };
+  // Register vóór het rapport: nooit twee keer (een herstart hiertussen verliest dit ene rapport, zoals bij elke agent).
+  delete a.wees_rapport_wacht; a.rapport = '-';
+  saveAgents();
+  const j = jobs[id];
+  if (j && j.result) j.result.files = files;
+  // Fable-review diff K2 wv211: niets tussen 'register' en sendReport mag het rapport tegenhouden.
   sendReport(a, r);
-  try { autoNaAfloop(id, { ok: r.ok, output: volledig }, a.label); } catch (err) { logError('wees-auto', err); }
+  try { autoNaAfloop(id, { ok: r.ok, output: r.output }, a.label); } catch (err) { logError('wees-auto', err); }
   const route = appRoute(a.label);
-  try { appBewaar(id, outdir, { soort: 'agent', label: a.label, ok: r.ok, rapport: (route === 'machinekamer' || route === 'david') ? volledig : null }); }
+  try { appBewaar(id, outdir, { soort: 'agent', label: a.label, ok: r.ok, rapport: (route === 'machinekamer' || route === 'david') ? r.output : null }); }
   catch (err) { logError('wees-appbewaar', err); }
   try { fs.rmSync(path.join(IO, id), { recursive: true, force: true }); } catch (err) {}
   try { fs.rmSync(eindVoorlopigPad(id), { force: true }); } catch (err) {}
@@ -2271,6 +2304,7 @@ function weesRonde() {
   const nu = Date.now();
   for (const id in agentsReg) {
     const a = agentsReg[id];
+    if (a && a.wees_rapport_wacht) { try { weesAfleveren(id); } catch (e) { logError('wees-afleveren', e); } continue; }
     if (!a || !a.wees || a.status !== 'running') continue;
     const j = jobs[id];
     if (j && j.progress) {   // /result en /agents: looptijd en laatste activiteit (Fable K6)
@@ -2284,8 +2318,8 @@ function weesRonde() {
       else if (a.wees_reden && nu - (a.wees_kill_t || 0) > KILL_GRACE_MS) { try { process.kill(-a.pid, 'SIGKILL'); } catch (e) {} }
       continue;
     }
-    // Afronden met rapport alleen als primair (weesAfronden toetst dat per ronde: de rol is na een start eerst passief,
-    // Fable B2); een dode wees zonder eindtekst wordt ook als passief gewoon afgebroken.
+    // Afronden ook als passief (wv216); het rapport gaat alleen als primair de deur uit (weesAfleveren toetst dat per
+    // ronde: de rol is na een start eerst passief, Fable B2 wv211).
     try { weesAfronden(id); } catch (e) { logError('wees-afronden', e); }
   }
 }
@@ -2618,6 +2652,7 @@ function handleRequest(req, res) {
         herstart: a.herstart,
         error: a.error,   // foutcode (wv51); de tikker gebruikt hem als /result kwijt is
         wees: a.wees ? new Date(a.wees).toISOString() : undefined,   // wv211: liep door over een herstart van server.js
+        rapport_wacht: a.wees_rapport_wacht ? true : undefined,       // wv216: rapport volgt zodra de pod primair is
         running_ms: (j && j.progress) ? j.progress.running_ms : undefined,
         last_activity_ms: (j && j.progress) ? j.progress.last_activity_ms : undefined
       };
