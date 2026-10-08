@@ -3062,6 +3062,10 @@ function sleutelportaal(req, res) {
 // Fase 3 (gesprek): /app/beurt start een beurt in dezelfde sessie als Telegram (hoofd = 40687, machinekamer = telegram-debug
 // met de omlijsting uit een bestand), /app/uitslag pollt, /app/knop beantwoordt een VRAAG AAN DAVID één keer, en
 // /app/geschiedenis leest het app-log (/opt/data/app-log, alleen app-beurten, asynchroon en fail-open geschreven).
+// Fase 4 (wv134, invoerslot): een apparaat met soort 'vast' en een vaste plek neemt alleen invoer aan (elke POST behalve
+// APP_SLOT_VRIJ, uploads, downloads) als secondbrain.locatie_nu zegt dat David daar is (0-20 min, op 'ontvangen'), of als de
+// goedkeurder het 2 u heeft opengezet; anders 423 met de reden. Daar ook geen BSN-achtige getallen (422). Soort en vaste plek
+// stelt alleen de goedkeurder in (bij goedkeuren of via /app/apparaat/wijzig); de goedkeurder zelf blijft altijd meereizend.
 // Opslag: APP_DATA (/opt/data/socev-app-data; NIET /opt/data/app, dat zijn de server.js-releases). Geen inhoud in het
 // auditlog. Sessies staan alleen in het geheugen: na een herstart is één vingerafdruk genoeg.
 const APP_DATA = process.env.APP_DATA_DIR || '/opt/data/socev-app-data';
@@ -3088,7 +3092,8 @@ const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
 const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-apparaat (fase 4)
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
-  'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten']);
+  'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
+  'POST /app/apparaat/wijzig', 'POST /app/apparaat/open']);
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
@@ -3118,11 +3123,21 @@ const APP_UPLOAD_MS = 60 * 60 * 1000;                    // klaarstaand maar noo
 const APP_LOG_MS = 30 * 24 * 3600 * 1000;
 const APP_AUDIT_VOOR_PER_MIN = 5;
 const APP_TRANSPORTS = ['internal', 'hybrid', 'usb', 'nfc', 'ble', 'smart-card'];
+// Fase 4 (wv134): invoerslot op locatie (bouwplan § 4.10, § 4.11). Een apparaat met een vaste plek neemt alleen invoer aan als
+// David volgens zijn telefoon (secondbrain.locatie_nu, via RPC sb_app_locatie; geen coördinaten) op die plek is, of als de
+// goedkeurder (de Pixel) het tijdelijk heeft opengezet. Sleutel = wat in het register staat; waarde = de geofence-naam.
+const APP_PLEKKEN = { Tolgaarde: 'Huisartsenpraktijk Tolgaarde', Groenhouten: 'Huisartsenpraktijk Groenhouten', Thuis: 'Thuis' };
+const APP_LOCATIE_VERS_S = 20 * 60;            // melding 0-20 min oud, gemeten op 'ontvangen' met de databankklok
+const APP_OPEN_MS = 2 * 60 * 60 * 1000;        // tijdelijk openzetten vanaf de telefoon
+const APP_LOCATIE_CACHE_MS = 30 * 1000;
+// Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
+const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen']);
+const APP_BSN_TEKST = 'in je bericht staat een getal dat op een BSN lijkt (9 cijfers die de elfproef halen). Patiëntgegevens horen niet in Socev: haal het weg. Gaat het om iets anders, stuur het dan vanaf je telefoon.';
 
 const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
-  webauthn: null, webauthnFout: null, registerCache: null, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null };
+  webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null };
 
 function appSha(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
 function appGelijk(a, b) { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); }
@@ -3357,7 +3372,7 @@ async function appStatus(req, res, reg) {
   const s = a ? appSessie(req, a, false) : null;
   const k = a ? null : appAanvraagVan(req);
   appStuur(res, 200, { ok: true, koppelen_open: appKoppelOpen(reg), aanvraag_mogelijk: appAanvraagMogelijk(reg),
-    aanvraag: k ? appAanvraagUit(k) : null, apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort, goedkeurder: a.goedkeurder === true } : null,
+    aanvraag: k ? appAanvraagUit(k) : null, apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort, vaste_plek: a.vaste_plek || null, goedkeurder: a.goedkeurder === true } : null,
     sessie: !!s, sessie_tot: s ? new Date(s.tot).toISOString() : null, passkey_klaar: !!appWebauthn() });
 }
 
@@ -3445,7 +3460,7 @@ function appAanvraagGeldig() {
 function appAanvraagVan(req) { const k = appAanvraagGeldig(); return k && appBindingOk(req, k) ? k : null; }
 function appAanvraagUit(k) {
   return { id: k.id, controle: k.controle, naam: k.naam, systeem: k.systeem, status: k.status,
-    sinds: new Date(k.sinds).toISOString(), tot: new Date(k.tot).toISOString() };
+    sinds: new Date(k.sinds).toISOString(), tot: new Date(k.tot).toISOString(), soort: k.soort || null, vaste_plek: k.vaste_plek || null };
 }
 
 async function appKoppelAanvraag(req, res, reg, d) {
@@ -3484,16 +3499,28 @@ function appAanvraagLijst(req, res) {
   appStuur(res, 200, { ok: true, aanvraag: open ? appAanvraagUit(k) : null });
 }
 
+// De vier eisen voor goedkeuren én voor apparaatbeheer vanaf de telefoon (soort/vaste plek wijzigen, openzetten): goedkeurder in
+// het register, vingerafdruk hooguit 2 min oud, sessie geopend met de passkey van DIT apparaat (1Password-sync, § 4.4a), en
+// het systeem uit de user-agent gelijk aan dat bij het koppelen (rem, geen bewijs). Geeft [fout, reden] of null.
+function appGoedkeurderFout(req, a, s, wat) {
+  // a komt uit het register (apparaatcookie), s is aan a gebonden (appSessie)
+  if (a.goedkeurder !== true) return [wat + ' kan alleen op het apparaat dat met de Telegram-code is gekoppeld (je Pixel)', 'geen goedkeurder'];
+  if (Date.now() > s.vers_tot) return ['bevestig eerst opnieuw met je vingerafdruk', 'niet vers'];
+  if (!a.credential || !s.credential || !appGelijk(s.credential, a.credential.id)) return ['bevestig eerst opnieuw met je vingerafdruk', 'sessie niet met de passkey van dit apparaat'];
+  const sysNu = appSysteem(req), sysReg = appSysteemVan(a.systeem);
+  if (!sysReg || sysNu !== sysReg) return [wat + ' kan alleen op je Pixel (' + (sysReg || 'onbekend') + '); staat Chrome op "desktopsite", zet dat dan uit', 'systeem ' + sysNu + ' != ' + sysReg];
+  return null;
+}
 function appKoppelGoedkeur(req, res, reg, a, s, d, afwijzen) {
   const id = String(d.aanvraag_id || '');
   const k = appAanvraagGeldig();
+  let keus = null;
   if (!afwijzen) {
-    // a komt uit het register (apparaatcookie), s is aan a gebonden (appSessie)
-    if (a.goedkeurder !== true) return appWeiger(res, 403, 'goedkeuren kan alleen op het apparaat dat met de Telegram-code is gekoppeld (je Pixel)', 'geen goedkeurder');
-    if (Date.now() > s.vers_tot) return appWeiger(res, 403, 'bevestig eerst opnieuw met je vingerafdruk', 'niet vers');
-    if (!a.credential || !s.credential || !appGelijk(s.credential, a.credential.id)) return appWeiger(res, 403, 'bevestig eerst opnieuw met je vingerafdruk', 'sessie niet met de passkey van dit apparaat');
-    const sysNu = appSysteem(req), sysReg = appSysteemVan(a.systeem);
-    if (!sysReg || sysNu !== sysReg) return appWeiger(res, 403, 'goedkeuren kan alleen op je Pixel (' + (sysReg || 'onbekend') + '); staat Chrome op "desktopsite", zet dat dan uit', 'systeem ' + sysNu + ' != ' + sysReg);
+    const f = appGoedkeurderFout(req, a, s, 'goedkeuren');
+    if (f) return appWeiger(res, 403, f[0], f[1]);
+    // fase 4 (wv134): meereizend of vaste plek kies je bij de goedkeuring, op de telefoon
+    keus = appPlekKeus(d);
+    if (keus.fout) return appWeiger(res, 400, keus.fout, 'plek-keus');
   }
   if (!k || k.status !== 'open' || !/^[a-f0-9]{16}$/.test(id) || !appGelijk(id, k.id))
     return appWeiger(res, 409, 'deze aanvraag bestaat niet (meer); ververs de lijst', 'aanvraag-id klopt niet');
@@ -3502,9 +3529,9 @@ function appKoppelGoedkeur(req, res, reg, a, s, d, afwijzen) {
     res._app.reden = 'afgewezen ' + k.controle;
     return appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
   }
-  k.status = 'goedgekeurd'; k.door = a.id;
+  k.status = 'goedgekeurd'; k.door = a.id; k.soort = keus.soort; k.vaste_plek = keus.vaste_plek;
   k.tot = Math.min(k.sinds + APP_AANVRAAG_MAX_MS, Math.max(k.tot, Date.now() + 5 * 60 * 1000));   // tijd voor de passkey, binnen het cookie
-  res._app.reden = 'goedgekeurd ' + k.controle + ' (' + k.systeem + ')';
+  res._app.reden = 'goedgekeurd ' + k.controle + ' (' + k.systeem + ', ' + appPlekTekst(k) + ')';
   appStuur(res, 200, { ok: true, aanvraag: appAanvraagUit(k) });
 }
 
@@ -3589,7 +3616,8 @@ async function appKoppelRegistreer(req, res, reg, d) {
   const geheim = crypto.randomBytes(32).toString('hex');
   const naam = bron.soort === 'aanvraag' ? k.naam : appNaam(d, req);
   const nu = new Date().toISOString();
-  const apparaat = { id: id, naam: naam, soort: 'reist', vaste_plek: null, systeem: appBeschrijf(req), aangemaakt: nu, laatst_gezien: nu, actief: true,
+  const vast = bron.soort === 'aanvraag' && k.soort === 'vast' && !!APP_PLEKKEN[k.vaste_plek];   // fase 4: gekozen bij de goedkeuring
+  const apparaat = { id: id, naam: naam, soort: vast ? 'vast' : 'reist', vaste_plek: vast ? k.vaste_plek : null, systeem: appBeschrijf(req), aangemaakt: nu, laatst_gezien: nu, actief: true,
     cookie_hash: appSha(geheim), credential: { id: cred.id, publicKey: Buffer.from(cred.publicKey).toString('base64url'), counter: cred.counter || 0,
       transports: appTransports(cred.transports) },
     passkey: { soort: v.registrationInfo.credentialDeviceType, backup: !!v.registrationInfo.credentialBackedUp, aaguid: v.registrationInfo.aaguid },
@@ -3609,8 +3637,8 @@ async function appKoppelRegistreer(req, res, reg, d) {
     ? 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '). ' + (apparaat.goedkeurder ? 'Alleen dit apparaat mag voortaan nieuwe apparaten goedkeuren.'
       : 'Geen telefoon, dus geen goedkeurder' + (appGoedkeurder(vers) ? ' (dat blijft "' + appGoedkeurder(vers).naam + '").' : '; koppel je telefoon via de machinekamer.')) +
       ' De koppelroute met code is nu dicht. Niet jij? /app-noodstop en meld het de machinekamer.'
-    : 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + '), goedgekeurd vanaf "' + door.naam + '". Niet jij? Trek het in (tab Apparaten) en meld het de machinekamer.');
-  appStuur(res, 200, { ok: true, apparaat: { id: id, naam: naam, soort: apparaat.soort, goedkeurder: apparaat.goedkeurder } },
+    : 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + ', ' + appPlekTekst(apparaat) + '), goedgekeurd vanaf "' + door.naam + '". Niet jij? Trek het in (tab Apparaten) en meld het de machinekamer.');
+  appStuur(res, 200, { ok: true, apparaat: { id: id, naam: naam, soort: apparaat.soort, vaste_plek: apparaat.vaste_plek, goedkeurder: apparaat.goedkeurder } },
     { koppel: null, apparaat: { w: id + '.' + geheim, s: APP_APPARAAT_COOKIE_S }, sessie: appNieuweSessie(apparaat, cred.id) });
 }
 
@@ -3653,14 +3681,17 @@ async function appPasskeyBevestig(req, res, reg, d) {
   x.laatst_gezien = new Date().toISOString();
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); }
   res._app.reden = 'bevestigd';
-  appStuur(res, 200, { ok: true, apparaat: { id: x.id, naam: x.naam, soort: x.soort, goedkeurder: x.goedkeurder === true } }, { sessie: appNieuweSessie(x, antw.id) });
+  appStuur(res, 200, { ok: true, apparaat: { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, goedkeurder: x.goedkeurder === true } }, { sessie: appNieuweSessie(x, antw.id) });
 }
 
-function appApparatenLijst(req, res, reg, a) {
-  appStuur(res, 200, { ok: true, apparaten: reg.apparaten.map(function (x) {
+async function appApparatenLijst(req, res, reg, a) {
+  const sloten = {};
+  for (const x of reg.apparaten) if (x.actief && x.soort === 'vast') sloten[x.id] = await appSlot(x);   // fase 4: de telefoon ziet of het slot open is
+  appStuur(res, 200, { ok: true, plekken: Object.keys(APP_PLEKKEN), apparaten: reg.apparaten.map(function (x) {
     return { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, systeem: x.systeem, aangemaakt: x.aangemaakt,
       laatst_gezien: x.laatst_gezien, actief: !!x.actief, ingetrokken_op: x.ingetrokken_op || null, dit_apparaat: x.id === a.id,
-      passkey_gesynchroniseerd: !!(x.passkey && x.passkey.backup), gekoppeld_via: x.gekoppeld_via || null, goedkeurder: x.goedkeurder === true };
+      passkey_gesynchroniseerd: !!(x.passkey && x.passkey.backup), gekoppeld_via: x.gekoppeld_via || null, goedkeurder: x.goedkeurder === true,
+      slot: sloten[x.id] || null };
   }) });
 }
 
@@ -3680,6 +3711,144 @@ function appIntrekken(req, res, reg, a, s, d) {
   res._app.reden = 'ingetrokken ' + id;
   appTelegram('Socev-app: apparaat "' + x.naam + '" ingetrokken (vanaf "' + a.naam + '").');
   appStuur(res, 200, { ok: true }, id === a.id ? { sessie: null, apparaat: null } : null);
+}
+
+// ── fase 4: invoerslot op locatie (wv134; bouwplan § 4.10, § 4.11, § 6 fase 4) ──
+function appPlekTekst(x) { return x && x.soort === 'vast' ? 'vaste plek ' + x.vaste_plek : 'reist mee'; }
+// Keuze van de telefoon bij goedkeuren of wijzigen. Zonder soort: meereizend (zoals vóór fase 4).
+function appPlekKeus(d) {
+  const soort = d.soort === undefined || d.soort === null ? 'reist' : d.soort;
+  if (soort === 'reist') return { soort: 'reist', vaste_plek: null };
+  if (soort !== 'vast') return { fout: 'onbekende soort' };
+  const plek = String(d.vaste_plek || '');
+  if (!Object.prototype.hasOwnProperty.call(APP_PLEKKEN, plek)) return { fout: 'kies een vaste plek: ' + Object.keys(APP_PLEKKEN).join(', ') };
+  return { soort: 'vast', vaste_plek: plek };
+}
+// Locatie van de databank (30 s bewaard). sinds/plek: vraagt ook of er na 'sinds' een melding kwam die NIET die plek is.
+// Fout of geen antwoord = null; de aanroeper is dan dicht (fail-closed). Een fout wordt 10 s onthouden (geen stormloop).
+async function appLocatie(sinds, plek) {
+  const nu = Date.now(), sleutel = (sinds || '') + '|' + (plek || '');
+  Object.keys(appStaat.locatie).forEach(function (k) { if (nu - appStaat.locatie[k].op > 5 * 60 * 1000) delete appStaat.locatie[k]; });
+  const c = appStaat.locatie[sleutel];
+  if (c && nu - c.op < (c.l ? APP_LOCATIE_CACHE_MS : 10 * 1000)) return c.l;
+  let l = null;
+  try {
+    l = await appSbRpc('sb_app_locatie', sinds ? { p_sinds: sinds, p_plek: plek } : {});
+    if (!l || typeof l !== 'object' || Array.isArray(l)) l = null;
+  } catch (e) { logError('app-locatie', e); l = null; }
+  appStaat.locatie[sleutel] = { op: Date.now(), l: l };
+  return l;
+}
+// Openzetting weg (verlopen of andere plek gemeld): vers register, alleen als het nog dezelfde openzetting is.
+function appOpenWeg(id, o, waarom) {
+  try {
+    const vers = appRegister();
+    const x = vers.apparaten.find(function (y) { return y.id === id; });
+    if (!x || !x.open || x.open.sinds !== o.sinds) return;
+    x.open = null;
+    appSchrijfJson(APP_REGISTER, vers);
+    appAudit({ route: 'slot', m: '-', status: 200, apparaat: id, reden: 'openzetting weg: ' + waarom });
+  } catch (e) { logError('app-register', e); }
+}
+// Het slot van één apparaat. Meereizend: altijd open. Vaste plek: open als de openzetting van de telefoon loopt (en sindsdien geen
+// melding van een andere plek kwam), of als de laatste melding 0-20 min oud is (op 'ontvangen'), niet 'auto', en plek = de vaste plek.
+// Al het andere is dicht, met de reden in gewone taal. Waar David wél is, staat er niet in (§ 4.11: alleen "op de plek / niet").
+async function appSlot(a) {
+  if (!a || a.soort !== 'vast') return { vast: false, open: true };
+  const uit = { vast: true, plek: a.vaste_plek || null, open: false, via: null, open_tot: null, reden: '' };
+  const naam = Object.prototype.hasOwnProperty.call(APP_PLEKKEN, a.vaste_plek) ? APP_PLEKKEN[a.vaste_plek] : null;
+  if (!naam) { uit.reden = 'dit apparaat heeft geen geldige vaste plek; stel hem in op je telefoon'; return uit; }
+  const o = a.open && Date.parse(a.open.tot) > Date.now() && a.open.sinds ? a.open : null;
+  const l = await appLocatie(o ? o.sinds : null, o ? naam : null);
+  if (o && l && l.anders_sinds === false) {
+    uit.open = true; uit.via = 'open'; uit.open_tot = o.tot;
+    uit.reden = 'tijdelijk opengezet vanaf je telefoon, tot ' + appKlok(o.tot);
+    return uit;
+  }
+  if (o && l && l.anders_sinds === true) appOpenWeg(a.id, o, 'melding van een andere plek');
+  else if (!o && a.open) appOpenWeg(a.id, a.open, 'verlopen');
+  if (!l) { uit.reden = 'je locatie is nu niet te lezen, dus invoer is dicht'; return uit; }
+  const leeftijd = Number(l.leeftijd_s);
+  const min = Math.round(leeftijd / 60);
+  if (l.toekomst === true || leeftijd < 0) uit.reden = 'je laatste locatiemelding heeft een tijd in de toekomst; dicht tot er een gewone melding is';
+  else if (!l.ontvangen || l.leeftijd_s === null || !isFinite(leeftijd)) uit.reden = 'er is geen locatiemelding van je telefoon';
+  else if (leeftijd > APP_LOCATIE_VERS_S) uit.reden = 'je laatste locatiemelding is ' + min + ' min oud (meer dan 20)';
+  else if (l.klasse === 'auto') uit.reden = 'je telefoon meldt dat je onderweg bent';
+  else if (l.plek === naam) { uit.open = true; uit.via = 'locatie'; uit.reden = 'je bent op ' + a.vaste_plek + ' (melding ' + min + ' min geleden)'; }
+  else uit.reden = 'je bent niet op ' + a.vaste_plek + ' (laatste melding ' + min + ' min geleden)';
+  return uit;
+}
+// Valt deze route onder het slot? Alles wat schrijft (POST) behalve APP_SLOT_VRIJ, plus downloaden (op een vaste-plek-pc landt
+// een bestand in Downloads; Fable § 8g K6). Zichzelf intrekken mag altijd: dat maakt alleen dichter.
+function appInvoerRoute(route, upload, d, a) {
+  if (upload || route.indexOf('GET /app/bestand/') === 0) return true;
+  if (route.indexOf('POST ') !== 0 || APP_SLOT_VRIJ.has(route)) return false;
+  if (route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id) return false;
+  return true;
+}
+// BSN-achtig: precies 9 cijfers (los of met spatie/punt/streepje ertussen) die de elfproef halen. Geen naamfilter (§ 4.11).
+function appElfproef(c) {
+  if (!/^\d{9}$/.test(c) || /^0+$/.test(c)) return false;
+  let som = 0;
+  for (let i = 0; i < 8; i++) som += Number(c[i]) * (9 - i);
+  return (som - Number(c[8])) % 11 === 0;
+}
+function appBsnAchtig(t) {
+  const re = /(?<!\d)(?<!\d[ .-])\d(?:[ .-]?\d){8}(?![ .-]?\d)/g;
+  let m;
+  while ((m = re.exec(String(t || '')))) if (appElfproef(m[0].replace(/\D/g, ''))) return true;
+  return false;
+}
+function appBsnIn(req, d) {
+  let naam = '';
+  try { naam = decodeURIComponent(String(req.headers['x-app-naam'] || '')); } catch (e) { naam = String(req.headers['x-app-naam'] || ''); }
+  return [d.tekst, d.toelichting, d.naam, naam].some(function (t) { return typeof t === 'string' && appBsnAchtig(t); });
+}
+async function appSlotRoute(req, res, a) {
+  res._app.stil = true;   // de app vraagt dit elke minuut op een vaste-plek-apparaat
+  appStuur(res, 200, Object.assign({ ok: true }, await appSlot(a)));
+}
+// Soort/vaste plek wijzigen: alleen vanaf de goedkeurder (telefoon), verse vingerafdruk. De telefoon zelf blijft meereizend.
+function appApparaatWijzig(req, res, reg, a, s, d) {
+  const f = appGoedkeurderFout(req, a, s, 'apparaten instellen');
+  if (f) return appWeiger(res, 403, f[0], f[1]);
+  const keus = appPlekKeus(d);
+  if (keus.fout) return appWeiger(res, 400, keus.fout, 'plek-keus');
+  const vers = appRegister();
+  const x = vers.apparaten.find(function (y) { return y.id === String(d.id || ''); });
+  if (!x || !x.actief) return appWeiger(res, 404, 'onbekend apparaat', 'onbekend id');
+  if (x.goedkeurder === true && keus.soort === 'vast') return appWeiger(res, 403, 'je telefoon (die nieuwe apparaten goedkeurt) blijft altijd meereizend', 'goedkeurder vast');
+  if (x.soort === keus.soort && (x.vaste_plek || null) === keus.vaste_plek) return appStuur(res, 200, { ok: true, al: true });
+  const van = appPlekTekst(x);
+  x.soort = keus.soort; x.vaste_plek = keus.vaste_plek; x.open = null;
+  x.plek_gewijzigd_op = new Date().toISOString(); x.plek_gewijzigd_door = a.id;
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
+  if (x.id !== a.id) { appSessiesWeg(x.id); delete appStaat.uitdagingen[x.id]; }   // nieuwe sessieduur (vast: 5 min) vanaf de volgende vingerafdruk
+  res._app.reden = 'gewijzigd ' + x.id + ': ' + van + ' -> ' + appPlekTekst(x);
+  appTelegram('Socev-app: "' + x.naam + '" is nu ' + appPlekTekst(x) + ' (was: ' + van + '), ingesteld vanaf "' + a.naam + '".' +
+    (x.soort === 'vast' ? ' Invoer daar alleen als je telefoon zegt dat je op ' + x.vaste_plek + ' bent.' : ''));
+  appStuur(res, 200, { ok: true, apparaat: { id: x.id, soort: x.soort, vaste_plek: x.vaste_plek } });
+}
+// Tijdelijk openzetten (2 u, eerder dicht bij een melding van een andere plek) of weer dichtzetten; alleen vanaf de telefoon.
+async function appApparaatOpen(req, res, reg, a, s, d) {
+  const f = appGoedkeurderFout(req, a, s, 'openzetten');
+  if (f) return appWeiger(res, 403, f[0], f[1]);
+  const actie = d.actie === 'open' || d.actie === 'dicht' ? d.actie : null;
+  if (!actie) return appWeiger(res, 400, 'ongeldige actie', 'actie');
+  // 'sinds' in de klok van de databank: daarmee vergelijkt sb_app_locatie 'ontvangen' (de podklok kan afwijken).
+  let sinds = new Date().toISOString();
+  if (actie === 'open') {
+    try { const l = await appSbRpc('sb_app_locatie', {}); if (l && l.nu && isFinite(Date.parse(l.nu))) sinds = new Date(Date.parse(l.nu)).toISOString(); }
+    catch (e) { logError('app-locatie', e); }
+  }
+  const vers = appRegister();
+  const x = vers.apparaten.find(function (y) { return y.id === String(d.id || ''); });
+  if (!x || !x.actief) return appWeiger(res, 404, 'onbekend apparaat', 'onbekend id');
+  if (x.soort !== 'vast') return appWeiger(res, 409, 'alleen een apparaat met een vaste plek heeft een slot', 'niet vast');
+  x.open = actie === 'open' ? { sinds: sinds, tot: new Date(Date.now() + APP_OPEN_MS).toISOString(), door: a.id } : null;
+  try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
+  res._app.reden = actie === 'open' ? 'opengezet ' + x.id + ' tot ' + appKlok(x.open.tot) : 'dichtgezet ' + x.id;
+  appStuur(res, 200, { ok: true, open_tot: x.open ? x.open.tot : null, slot: await appSlot(x) });
 }
 
 // ── fase 3: gesprek (bouwplan § 4.5, § 4.7, § 4.8) ──
@@ -5074,7 +5243,7 @@ function handleApp(req, res) {
       const route = req.method + ' ' + p;
       if (/^POST \/app\/koppel\//.test(route) && !appTeller('koppel', APP_KOPPEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel pogingen dit uur', 'grens koppel');
       if (route === 'POST /app/passkey/opties' && !appTeller('openen', APP_OPENEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak ontgrendeld dit uur', 'grens openen');
-      const verder = function () {
+      const verder = function (slotKlaar) {
         if (route === 'GET /app/status') return appStatus(req, res, reg);
         if (route === 'POST /app/koppel/code') return appKoppelCode(req, res, reg);
         if (route === 'POST /app/koppel/aanvraag') return appKoppelAanvraag(req, res, reg, d);
@@ -5093,10 +5262,22 @@ function handleApp(req, res) {
         const s = a ? appSessie(req, a, false) : null;
         if (!s) return appWeiger(res, 401, 'bevestig met je vingerafdruk', a ? 'geen sessie' : 'geen apparaat');
         res._app.apparaat = a.id;
+        // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en de
+        // BSN-weigering (§ 4.11). Daarna verder met slotKlaar = true (apparaat en sessie worden dan opnieuw gecontroleerd).
+        if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
+          return appSlot(a).then(function (sl) {
+            if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
+            if (appBsnIn(req, d)) return appWeiger(res, 422, APP_BSN_TEKST, 'bsn-achtig getal');
+            return verder(true);
+          });
+        }
         // Verlengen pas als de schrijvende route echt lukte; een ongeldig verzoek telt niet als activiteit (Fable-review wv56 #8).
         if (APP_GLIJD_ROUTES.has(route) || upload) res.on('finish', function () { if (res.statusCode < 300) appGlijd(s, a); });
         if (route === 'GET /app/apparaten') return appApparatenLijst(req, res, reg, a);
         if (route === 'POST /app/apparaat/intrekken') return appIntrekken(req, res, reg, a, s, d);
+        if (route === 'POST /app/apparaat/wijzig') return appApparaatWijzig(req, res, reg, a, s, d);
+        if (route === 'POST /app/apparaat/open') return appApparaatOpen(req, res, reg, a, s, d);
+        if (route === 'GET /app/slot') return appSlotRoute(req, res, a);
         if (route === 'GET /app/apparaat/aanvraag') return appAanvraagLijst(req, res);
         if (route === 'POST /app/koppel/goedkeur') return appKoppelGoedkeur(req, res, reg, a, s, d, false);
         if (route === 'POST /app/koppel/afwijs') return appKoppelGoedkeur(req, res, reg, a, s, d, true);
@@ -5120,7 +5301,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/push/proef') return appPushProef(req, res, a);
         return appWeiger(res, 404, 'onbekend', 'route');
       };
-      Promise.resolve().then(verder).catch(function (e) {
+      Promise.resolve().then(function () { return verder(false); }).catch(function (e) {
         logError('app', e);
         if (!res.headersSent) appWeiger(res, 500, 'fout op de pod', 'uitzondering');
       });

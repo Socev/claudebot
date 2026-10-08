@@ -98,6 +98,12 @@ async function nepFetch(url, opt) {
     if (fn === 'mk_broedstoof') return antw(200, { voorrang: Object.keys(sbStaat.voorrang).filter((k) => sbStaat.voorrang[k] > 0).map((k) => ({ idee: Number(k), voorrang: sbStaat.voorrang[k], bijgewerkt: new Date().toISOString(), door: 'x' })),
       items: sbStaat.items, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' },
       tikker: { aan: true, reden: 'wacht op ruimte: dagmaximum (42 starts)', laatste_tik: new Date().toISOString(), starts_vandaag: 42, max_dag: 24, alleen_doorwerk: true } });
+    if (fn === 'sb_app_locatie') {   // wv134: nagebootst zoals de migratie wv134_app_locatie (leeftijd op 'ontvangen')
+      const L = sbStaat.loc || {}, nu = Date.now();
+      return antw(200, { nu: new Date(nu).toISOString(), plek: L.plek || null, klasse: L.klasse || null, ontvangen: L.ontvangen ? new Date(L.ontvangen).toISOString() : null,
+        leeftijd_s: L.ontvangen ? Math.round((nu - L.ontvangen) / 1000) : null, toekomst: !!L.toekomst,
+        anders_sinds: b.p_sinds ? (sbStaat.meldingen || []).some((m) => m.ontvangen > Date.parse(b.p_sinds) && m.plek !== b.p_plek) : null });
+    }
     if (fn === 'sb_app_vapid_lezen') return sbStaat.geenVapid ? antw(200, null) : antw(200, VAPID_W);
     if (fn === 'mk_werkvoorraad_stand') return antw(200, { items: sbStaat.wvItems || [], stand: { aan: true }, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' } });
     if (fn === 'mk_idee_voorrang') {
@@ -130,7 +136,7 @@ const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, 
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appInfo2: appInfo };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo };', ctx, { filename: 'server.js#app' });
 const H = ctx.__h;
 const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
 
@@ -1413,6 +1419,184 @@ async function bewijs(o) {
       toets('12 /health.app.seintjes: aantallen en sleutelstand, geen endpoint', info.seintjes && info.seintjes.abonnementen === 0 && !/fcm/.test(JSON.stringify(info)), JSON.stringify(info.seintjes));
       toets('12 geen VAPID-waarde in logs, audit of push.json', !logs.concat([fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8'), fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')]).join('\n').includes(VAPID_W.slice(20, 60)));
       H.appStaat.tellers.push = []; H.appStaat.tellers.pushproef = [];
+    }
+
+    // ── 13. fase 4: invoerslot op locatie (wv134; bouwplan § 4.10, § 4.11, § 6 fase 4) ──
+    {
+      const nu13 = () => Date.now();
+      sbStaat.meldingen = [];
+      const meld = (plek, klasse, minGeleden, extra) => {
+        const m = Object.assign({ plek, klasse, ontvangen: nu13() - minGeleden * 60000 }, extra || {});
+        sbStaat.meldingen.push(m); sbStaat.loc = m; H.appStaat.locatie = {};   // cache leeg: zoals 30 s later
+      };
+      const vers = async (B) => { const o = await B.p.evaluate(() => post('/api/passkey/opties', {})); return B.p.evaluate(async (x) => post('/api/passkey/bevestig', { antwoord: await bewijs(x) }), o.j.opties); };
+      const afmakenAlles = () => { for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('ok'); };
+      const beurt13 = async (B, tekst) => { const x = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst }, { pot: B.jar }); await slaap(20); afmakenAlles(); await slaap(20); return x; };
+      const reg13 = () => JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      afmakenAlles();
+      for (const t of ['koppel', 'beurt', 'openen', 'voorrang', 'bestand', 'upload']) if (H.appStaat.tellers[t]) H.appStaat.tellers[t] = [];
+      fs.writeFileSync(path.join(DATA, 'staat.json'), JSON.stringify({}));
+      H.appStaat.aanvraag = null;
+      meld('Thuis', 'thuis', 3);
+      // nieuw apparaat (werk-pc) via aanvraag; de Pixel kiest bij het goedkeuren "vast: Groenhouten"
+      const WIN = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0';
+      const WP = await nieuweBrowser('internal', WIN);
+      r = await vraag('POST', '/app/koppel/aanvraag', { naam: 'Werk-pc' }, { pot: WP.jar });
+      const aW = r.j.aanvraag;
+      toets('13 aanvraag werk-pc', r.status === 200 && !!aW, JSON.stringify(r.j));
+      await vers(P);
+      r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aW.id, soort: 'vast', vaste_plek: 'Utrecht' }, { pot: P.jar });
+      toets('13 goedkeuren met een onbekende vaste plek -> 400, aanvraag blijft open', r.status === 400 && /Tolgaarde, Groenhouten, Thuis/.test(r.j.fout) && H.appStaat.aanvraag.status === 'open', JSON.stringify(r.j));
+      r = await vraag('POST', '/app/koppel/goedkeur', { aanvraag_id: aW.id, soort: 'vast', vaste_plek: 'Groenhouten' }, { pot: P.jar });
+      toets('13 goedkeuren als "vast: Groenhouten" -> 200, aanvraag toont de keuze', r.status === 200 && r.j.aanvraag.soort === 'vast' && r.j.aanvraag.vaste_plek === 'Groenhouten', JSON.stringify(r.j));
+      let o13 = await WP.p.evaluate(() => post('/api/koppel/opties', {}));
+      let c13 = await WP.p.evaluate((x) => maak(x), o13.j.opties);
+      r = await WP.p.evaluate((c) => post('/api/koppel/registreer', { antwoord: c }), c13);
+      const wpId = r.j.apparaat && r.j.apparaat.id;
+      toets('13 werk-pc gekoppeld als vaste plek Groenhouten', r.status === 200 && r.j.apparaat.soort === 'vast' && r.j.apparaat.vaste_plek === 'Groenhouten' && r.j.apparaat.goedkeurder === false, JSON.stringify(r.j));
+      toets('13 Telegram noemt de vaste plek', /vaste plek Groenhouten/.test(telegram[telegram.length - 1]), telegram[telegram.length - 1]);
+      const sW = () => Object.values(H.appStaat.sessies).find((x) => x.apparaat === wpId);
+      toets('13 sessie op de vaste plek: hooguit 5 min', sW() && sW().tot - Date.now() <= 5 * 60000 + 1000, sW() && sW().tot - Date.now());
+      // toets plan: laptop "vast: Groenhouten" terwijl David thuis is -> dicht met reden
+      r = await beurt13(WP, 'hallo vanaf de werk-pc');
+      toets('13 vast Groenhouten, David thuis: beurt -> 423 dicht met reden', r.status === 423 && /invoer dicht: je bent niet op Groenhouten \(laatste melding 3 min geleden\)/.test(r.j.fout) && r.j.slot && r.j.slot.open === false, JSON.stringify(r.j));
+      toets('13 de reden noemt niet waar David wél is (§ 4.11)', !/Thuis|thuis/.test(r.j.fout), r.j.fout);
+      r = await vraag('GET', '/app/slot', undefined, { pot: WP.jar });
+      toets('13 GET /app/slot: vast, dicht, plek Groenhouten', r.status === 200 && r.j.vast === true && r.j.open === false && r.j.plek === 'Groenhouten', JSON.stringify(r.j));
+      r = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: WP.jar });
+      toets('13 lezen blijft open (geschiedenis 200)', r.status === 200, r.status);
+      r = await vraag('POST', '/app/uitslag', { job_id: 'f'.repeat(16) }, { pot: WP.jar });
+      toets('13 uitslag pollen valt niet onder het slot', r.status !== 423, r.status);
+      for (const [m, pad, body] of [['POST', '/app/knop', { job_id: 'f'.repeat(16), vraag_hash: 'x', keuze: 'ja' }], ['POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'eerder' }],
+        ['POST', '/app/meldingen/gezien', { tot: new Date().toISOString() }], ['POST', '/app/push/abonneer', { endpoint: 'https://fcm.googleapis.com/fcm/send/x', sleutel: 'y' }],
+        ['POST', '/app/apparaat/intrekken', { id: pixelId }], ['GET', '/app/bestand/' + 'a'.repeat(16) + '/1', undefined], ['POST', '/app/nieuwe-route', {}]]) {
+        r = await vraag(m, pad, body, { pot: WP.jar });
+        toets('13 dicht: ' + m + ' ' + pad.replace(/[a-f]{16}/, '<id>') + ' -> 423', r.status === 423, r.status + ' ' + JSON.stringify(r.j));
+      }
+      r = await upl('/app/upload/' + crypto.randomUUID() + '/1', Buffer.from('x'.repeat(2000)), 'a.txt', { pot: WP.jar });
+      toets('13 dicht: upload -> 423 (stroom netjes afgehandeld)', r.status === 423, JSON.stringify(r));
+      r = await vraag('POST', '/app/push/opzeggen', {}, { pot: WP.jar });
+      toets('13 seintjes opzeggen mag ook als het dicht is', r.status !== 423, r.status);
+      // David op Groenhouten, vers -> open
+      meld('Huisartsenpraktijk Groenhouten', 'werk', 4);
+      r = await beurt13(WP, 'nu wel');
+      toets('13 David op Groenhouten (4 min): beurt -> 200', r.status === 200 && !!r.j.job_id, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/slot', undefined, { pot: WP.jar });
+      toets('13 slot open via locatie', r.j.open === true && r.j.via === 'locatie', JSON.stringify(r.j));
+      // BSN-weigering op de vaste plek, niet op de telefoon
+      r = await beurt13(WP, 'kun je 111.222.333 opzoeken');
+      toets('13 BSN-achtig getal (elfproef, met punten) op de vaste plek -> 422', r.status === 422 && /BSN/.test(r.j.fout), JSON.stringify(r.j));
+      r = await beurt13(WP, 'ordernummer 123456789 en tel 06 12345678 en +31 6 11122233');
+      toets('13 9 cijfers zonder elfproef en telefoonnummers -> doorgelaten', r.status === 200, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/knop', { job_id: 'f'.repeat(16), vraag_hash: 'x', keuze: 'anders', toelichting: 'bsn 111222333' }, { pot: WP.jar });
+      toets('13 BSN in de toelichting van Anders -> 422', r.status === 422, JSON.stringify(r.j));
+      r = await upl('/app/upload/' + crypto.randomUUID() + '/1', Buffer.from('x'), 'scan 111222333.pdf', { pot: WP.jar });
+      toets('13 BSN in een bestandsnaam -> 422', r.status === 422, JSON.stringify(r));
+      toets('13 elfproef: 111222333 ja, 123456789 nee, 000000000 nee', H.appElfproef('111222333') && !H.appElfproef('123456789') && !H.appElfproef('000000000'));
+      // te oud, toekomst, onderweg, databank weg -> dicht (fail-closed)
+      meld('Huisartsenpraktijk Groenhouten', 'werk', 21);
+      r = await beurt13(WP, 'oud');
+      toets('13 melding 21 min oud -> 423', r.status === 423 && /21 min oud/.test(r.j.fout), JSON.stringify(r.j));
+      meld('Huisartsenpraktijk Groenhouten', 'werk', 1, { toekomst: true });
+      r = await beurt13(WP, 'toekomst');
+      toets('13 melding met een tijd in de toekomst -> 423', r.status === 423 && /toekomst/.test(r.j.fout), JSON.stringify(r.j));
+      meld('Huisartsenpraktijk Groenhouten', 'werk', -2);
+      r = await beurt13(WP, 'negatief');
+      toets('13 negatieve leeftijd -> 423', r.status === 423 && /toekomst/.test(r.j.fout), JSON.stringify(r.j));
+      meld(null, 'auto', 1);
+      r = await beurt13(WP, 'auto');
+      toets('13 klasse auto -> 423', r.status === 423 && /onderweg/.test(r.j.fout), JSON.stringify(r.j));
+      meld('Huisartsenpraktijk Groenhouten', 'werk', 1);
+      sbStaat.kapot = true;
+      r = await beurt13(WP, 'kapot');
+      toets('13 databank onbereikbaar -> 423 "niet te lezen"', r.status === 423 && /niet te lezen/.test(r.j.fout), JSON.stringify(r.j));
+      sbStaat.kapot = false; H.appStaat.locatie = {};
+      // laptop zet zichzelf om naar "reist mee" -> geweigerd (open en dicht)
+      r = await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'reist' }, { pot: WP.jar });
+      toets('13 vaste pc zet zichzelf op "reist mee" (slot open) -> 403', r.status === 403 && /Pixel/.test(r.j.fout), JSON.stringify(r.j));
+      meld('Thuis', 'thuis', 2);
+      r = await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'reist' }, { pot: WP.jar });
+      toets('13 vaste pc zet zichzelf op "reist mee" (slot dicht) -> 423', r.status === 423, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/apparaat/open', { id: wpId, actie: 'open' }, { pot: WP.jar });
+      toets('13 vaste pc zet zichzelf open -> geweigerd', r.status === 423 || r.status === 403, r.status);
+      toets('13 register ongewijzigd: nog vast Groenhouten, niet open', reg13().apparaten.find((x) => x.id === wpId).soort === 'vast' && !reg13().apparaten.find((x) => x.id === wpId).open);
+      // de Pixel zelf: nooit vast; zonder verse vingerafdruk niets
+      await vers(P);
+      r = await vraag('POST', '/app/apparaat/wijzig', { id: pixelId, soort: 'vast', vaste_plek: 'Thuis' }, { pot: P.jar });
+      toets('13 de telefoon (goedkeurder) kan geen vaste plek krijgen -> 403', r.status === 403 && /meereizend/.test(r.j.fout), JSON.stringify(r.j));
+      await slaap(4200);
+      r = await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'vast', vaste_plek: 'Thuis' }, { pot: P.jar });
+      toets('13 wijzigen zonder verse vingerafdruk -> 403', r.status === 403 && /opnieuw/.test(r.j.fout), JSON.stringify(r.j));
+      r = await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'vast', vaste_plek: 'Thuis' }, { pot: P.jar, ua: WIN });
+      toets('13 wijzigen met Pixel-cookie maar Windows-UA -> 403', r.status === 403, JSON.stringify(r.j));
+      // toets plan: "vast: Thuis" -> open
+      await vers(P);
+      const nTel13 = telegram.length;
+      r = await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'vast', vaste_plek: 'Thuis' }, { pot: P.jar });
+      toets('13 Pixel zet de pc op "vast: Thuis" -> 200 + Telegram', r.status === 200 && r.j.apparaat.vaste_plek === 'Thuis' && telegram.length === nTel13 + 1 && /"Werk-pc" is nu vaste plek Thuis \(was: vaste plek Groenhouten\)/.test(telegram[telegram.length - 1]), JSON.stringify(r.j) + telegram[telegram.length - 1]);
+      r = await vraag('GET', '/app/slot', undefined, { pot: WP.jar });
+      toets('13 na het wijzigen: sessie van de pc vervallen (401)', r.status === 401, r.status);
+      await vers(WP);
+      r = await beurt13(WP, 'thuis open?');
+      toets('13 "vast: Thuis", David thuis -> 200', r.status === 200, JSON.stringify(r.j));
+      // openzetten vanaf de telefoon (terug naar Groenhouten, David thuis)
+      await vers(P);
+      await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'vast', vaste_plek: 'Groenhouten' }, { pot: P.jar });
+      await vers(WP);
+      r = await beurt13(WP, 'dicht?');
+      toets('13 terug op Groenhouten, David thuis -> 423', r.status === 423, r.status);
+      await vers(P);
+      r = await vraag('POST', '/app/apparaat/open', { id: pixelId, actie: 'open' }, { pot: P.jar });
+      toets('13 openzetten van een meereizend apparaat -> 409', r.status === 409, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/apparaat/open', { id: wpId, actie: 'open' }, { pot: P.jar });
+      const tot13 = Date.parse(r.j.open_tot || '');
+      toets('13 Pixel zet de pc 2 uur open -> 200', r.status === 200 && Math.abs(tot13 - Date.now() - 2 * 3600000) < 60000 && r.j.slot.open === true && r.j.slot.via === 'open', JSON.stringify(r.j));
+      const sinds13 = reg13().apparaten.find((x) => x.id === wpId).open.sinds;
+      toets('13 openzetting: sinds in de klok van de databank (sb_app_locatie.nu)', sbRpc.some((x) => x.fn === 'sb_app_locatie') && Math.abs(Date.parse(sinds13) - Date.now()) < 5000, sinds13);
+      r = await beurt13(WP, 'opengezet');
+      toets('13 opengezet: beurt -> 200', r.status === 200, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar });
+      const wpL = r.j.apparaten.find((x) => x.id === wpId);
+      toets('13 apparatenlijst (Pixel): vaste plek, slot open via de telefoon, plekkenlijst', r.status === 200 && wpL.vaste_plek === 'Groenhouten' && wpL.slot.open === true && wpL.slot.via === 'open' && r.j.plekken.join() === 'Tolgaarde,Groenhouten,Thuis' && r.j.apparaten.find((x) => x.id === pixelId).slot === null, JSON.stringify(wpL));
+      await slaap(30);
+      meld('Huisartsenpraktijk Groenhouten', 'werk', 0);   // melding van de vaste plek zelf: blijft open
+      r = await beurt13(WP, 'nog open');
+      toets('13 verse melding van de vaste plek zelf: blijft open', r.status === 200, JSON.stringify(r.j));
+      meld('Thuis', 'thuis', 0);   // verse melding van een andere plek
+      r = await beurt13(WP, 'en nu?');
+      toets('13 verse melding van een andere plek -> meteen dicht (423)', r.status === 423 && /niet op Groenhouten/.test(r.j.fout), JSON.stringify(r.j));
+      await slaap(30);
+      toets('13 openzetting weg uit het register + auditregel', !reg13().apparaten.find((x) => x.id === wpId).open && /openzetting weg: melding van een andere plek/.test(fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8')));
+      meld('Groenhouten-achtig', 'overig', 0);
+      r = await beurt13(WP, 'blijft dicht');
+      toets('13 daarna blijft het dicht (geen her-openen bij een volgende melding)', r.status === 423, r.status);
+      // na 2 uur dicht
+      await vers(P);
+      await vraag('POST', '/app/apparaat/open', { id: wpId, actie: 'open' }, { pot: P.jar });
+      {
+        const rg = reg13(); rg.apparaten.find((x) => x.id === wpId).open.tot = new Date(Date.now() - 1000).toISOString();
+        fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg));
+      }
+      H.appStaat.locatie = {};
+      r = await beurt13(WP, 'na 2 uur');
+      toets('13 openzetting verlopen (2 u) -> 423 en weg uit het register', r.status === 423 && !reg13().apparaten.find((x) => x.id === wpId).open, JSON.stringify(r.j));
+      // weer openzetten en dan dichtzetten vanaf de telefoon
+      await vers(P);
+      await vraag('POST', '/app/apparaat/open', { id: wpId, actie: 'open' }, { pot: P.jar });
+      r = await vraag('POST', '/app/apparaat/open', { id: wpId, actie: 'dicht' }, { pot: P.jar });
+      toets('13 dichtzetten vanaf de telefoon -> 200, slot dicht', r.status === 200 && r.j.open_tot === null && r.j.slot.open === false, JSON.stringify(r.j));
+      // telefoon overal open, ook met BSN (Davids eigen gegevens mogen; alleen de vaste plek weigert)
+      meld(null, 'auto', 30);
+      r = await beurt13(P, 'onderweg, mijn bsn is 111222333');
+      toets('13 telefoon: overal open (auto, oude melding) en geen BSN-weigering', r.status === 200, JSON.stringify(r.j));
+      // zichzelf intrekken mag ook als het dicht is
+      r = await vraag('POST', '/app/apparaat/intrekken', { id: wpId }, { pot: WP.jar });
+      toets('13 vaste pc trekt zichzelf in terwijl het dicht is -> mag (alleen dichter)', r.status === 200 || (r.status === 403 && /opnieuw/.test(r.j.fout)), JSON.stringify(r.j));
+      if (r.status === 403) { await vers(WP); r = await vraag('POST', '/app/apparaat/intrekken', { id: wpId }, { pot: WP.jar }); toets('13 ... na verse vingerafdruk -> 200', r.status === 200, JSON.stringify(r.j)); }
+      const audit13 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+      toets('13 auditlog: slot-, wijzig- en openregels zonder berichtinhoud', /slot dicht: je bent niet op Groenhouten/.test(audit13) && /gewijzigd [a-f0-9]{16}: vaste plek Groenhouten -> vaste plek Thuis/.test(audit13) && /opengezet [a-f0-9]{16} tot/.test(audit13) && audit13.indexOf('111.222.333') < 0 && audit13.indexOf('opengezet\"') < 0);
+      afmakenAlles();
+      H.appStaat.tellers.beurt = [];
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
