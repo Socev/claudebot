@@ -522,7 +522,18 @@ try { agentsReg = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8')); } catch (e) 
 (function () {
   let dirty = false;
   for (const id in agentsReg) {
-    if (agentsReg[id].status === 'running' || agentsReg[id].status === 'pending') {
+    // wv211 (8-10-2026): een herstart van alleen server.js (uitrol, crash) laat agents in hun eigen procesgroep doorleven.
+    // Leeft de groepsleider nog, dan blijft hij 'running' met de vlag wees (zie weesRonde); anders afgebroken zoals altijd.
+    if (agentsReg[id].status === 'running' && agentsReg[id].pid && weesLeeft(agentsReg[id].pid, id)) {
+      if (!agentsReg[id].wees) agentsReg[id].wees = Date.now();   // bij een tweede herstart de eerste tijd houden
+      dirty = true;
+    } else if (agentsReg[id].status === 'running' && agentsReg[id].transcript && !agentsReg[id].voorlopig) {
+      // Fable-review diff K1: proces al weg, maar misschien rondde hij af terwijl server.js weg was. weesRonde leest het
+      // transcript: een geldige eindtekst wordt gewoon afgeleverd, anders wordt het alsnog afgebroken-containerherstart.
+      if (!agentsReg[id].wees) agentsReg[id].wees = Date.now();
+      agentsReg[id].wees_dood = Date.now();
+      dirty = true;
+    } else if (agentsReg[id].status === 'running' || agentsReg[id].status === 'pending') {
       agentsReg[id].status = 'afgebroken-containerherstart';
       agentsReg[id].ended = Date.now();
       dirty = true;
@@ -537,6 +548,22 @@ try { agentsReg = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8')); } catch (e) 
   }
   if (dirty) saveAgents();
 })();
+// wv211: leeft de groepsleider van agent jobId nog? Fail-closed: niet leesbaar, zombie of zonder onze marker = dood.
+// De marker in zijn omgeving beschermt tegen pid-hergebruik na een echte containerherstart; alleen de groepsleider telt,
+// zodat een losgelaten kleinkind met dezelfde marker (bv. een setsid-uitrolwachter van de agent zelf) hem niet levend houdt.
+// Letterlijke marker: EIND_MARKER (SOCEV_AGENT_RUN) bestaat bij het opstarten nog niet (const verderop).
+function weesLeeft(pid, jobId) {
+  if (!/^\d+$/.test(String(pid))) return false;
+  try {
+    const st = fs.readFileSync('/proc/' + pid + '/status', 'utf8');   // eerst status: een zombie leeft niet (Fable K5)
+    if (/^State:\s+[ZX]/m.test(st)) return false;
+    return fs.readFileSync('/proc/' + pid + '/environ').indexOf(Buffer.from('SOCEV_AGENT_RUN=' + jobId + '\0')) !== -1;
+  } catch (e) { return false; }
+}
+function weesSpawnMeld(opts, child, sessie, transcript) {
+  if (!opts || typeof opts.opSpawn !== 'function' || !child || !child.pid) return;
+  try { opts.opSpawn({ pid: child.pid, sessie: sessie || null, transcript: transcript || null }); } catch (e) { logError('wees-spawn', e); }
+}
 // Foutcode in het register (wv51, 8-10-2026): raakt het /result van een werkvoorraad-job kwijt (containerherstart,
 // ttl 2 u), dan handelt de tikker de fout toch af (limiet -> pauze, afgebroken-gestopt -> vervallen). Alleen korte
 // codes; vrije fouttekst wordt 'overig', want /agents is zonder sleutel leesbaar.
@@ -718,6 +745,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // detached: eigen procesgroep, zodat een kill ook MCP-servers en
     // bash-kinderen raakt en er geen wezen achterblijven.
     const child = spawn('claude', args, { cwd: cwd, env: env, detached: true });
+    weesSpawnMeld(opts, child, eigenId, path.join(projectDirFor(cwd), eigenId + '.jsonl'));
     const t0 = Date.now();
     let out = '', err = '', lastStdout = t0, killedReason = null;
     const projDir = projectDirFor(cwd);
@@ -891,6 +919,7 @@ function runCodex(prompt, threadId, outdir, cwd, model, opts) {
     args.push('--', prompt);
     const env = Object.assign({}, process.env, { OUTDIR: outdir, CODEX_HOME: CODEX_HOME }, (opts && opts.env) || {});
     const child = spawn('codex', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    weesSpawnMeld(opts, child, null, null);
     const t0 = Date.now();
     let out = '', err = '', rest = '', lastStdout = t0, killedReason = null;
     let gezienThread = threadId || '', faalTekst = '', usage = null, pinned = null;
@@ -1050,6 +1079,7 @@ function agyPoging(prompt, conversationId, outdir, cwd, model, effort, opts) {
     try {
       child = spawn(AGY_BIN, args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) { return resolve({ ok: false, error: 'gemini-fout', output: String(e), runtime: 'gemini' }); }
+    weesSpawnMeld(opts, child, null, null);
     let out = '', err = '', lastStdout = t0, killedReason = null;
 
     // Welk gespreksbestand is van ons? Bij hervatten het bestaande; anders het eerste
@@ -2055,6 +2085,9 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     let t0 = Date.now();
     const runOpts = { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS, lastFile: path.join(base, 'codex-last.md'), env: {} };
     runOpts.env[EIND_MARKER] = jobId;
+    // wv211: groepsleider en transcript in het register, zodat een herstart van server.js een doorlevende agent herkent.
+    // Elke (her)start overschrijft ze, ook de codex-terugval (dan transcript null; Fable K2).
+    runOpts.opSpawn = function (i) { entry.pid = i.pid; entry.sessie = i.sessie; entry.transcript = i.transcript; saveAgents(); };
     if (j.beperkt === 'auto') { runOpts.disallowedTools = AUTO_AGENT_VERBODEN; runOpts.envMag = AUTO_AGENT_ENV_MAG; }
     // Vroege levenscontrole (alleen de eerste run; hervattingen in de eindcontrole niet): geen
     // teken van leven binnen VROEG_LEVEN_MS -> procesgroep weg en precies één nieuwe start, weer
@@ -2124,6 +2157,133 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     if (entry && entry.voorlopig) { entry.voorlopig = false; saveAgents(); }
   }
 }
+
+// ── wv211: wees-agents na een herstart van server.js (8-10-2026) ─────────────
+// WAAROM. Een uitrol (of crash) stopt alleen server.js; agents draaien detached in een eigen procesgroep en leven door
+// (gemeten 8-10 17:24: wv200 pid 487959 werkte nog 20 min af). Vroeger zette de opstart ze blind op
+// afgebroken-containerherstart: de tikker startte ze dubbel en /health telde ze niet, dus een uitrol kon midden in hun
+// werk vallen, en hun eindrapport kwam nooit (de stdout-pipe was weg). Nu blijft zo'n agent 'running' met de vlag wees
+// (zie de opstart en weesLeeft). Status 'running' bewust: alle lezers (agentInfo/MAX_AGENTS, saveAgents, de tikker,
+// de uitrolwachters, de app) tellen hem zo al mee. Deze ronde bewaakt zijn bovengrens en levert bij afloop zijn
+// eindtekst uit het transcript af. Een echte containerherstart laat geen proces over: dan blijft het afgebroken.
+const WEES_POLL_MS = 30 * 1000;
+const WEES_KOP = '[Pod: deze agent liep door over een herstart van de pod-software heen; de eindcontrole van de pod is overgeslagen. Hieronder zijn laatste tekst uit de sessie.]';
+const WEES_GEEN_TEKST = '(Geen afgeronde eindtekst in de sessie: de agent stopte midden in zijn werk of met een wachtzin. Het werk is mogelijk deels gedaan; controleer dat voor je het opnieuw start.)';
+
+// Eindtekst uit het transcript (Fable B1): de laatste echte regel moet een assistant-regel van deze run zijn met
+// stop_reason end_turn en tekst; één beurt staat als meerdere regels met hetzelfde message.id (thinking, text, ...).
+// Al het andere (tool_use halverwege, een API-fout, een oude beurt uit een hervatte sessie) is geen eindtekst.
+function weesEindtekst(a) {
+  if (!a.transcript) {
+    if (a.runtime === 'codex') { try { return { tekst: fs.readFileSync(path.join(IO, a.job_id, 'codex-last.md'), 'utf8').trim() }; } catch (e) {} }
+    return { tekst: '' };
+  }
+  let regels; try { regels = fs.readFileSync(a.transcript, 'utf8').split('\n'); } catch (e) { return { tekst: '' }; }
+  let msgId = null; const delen = [];
+  for (let i = regels.length - 1; i >= 0; i--) {
+    if (!regels[i].trim()) continue;
+    let r; try { r = JSON.parse(regels[i]); } catch (e) { continue; }
+    if (r.type !== 'user' && r.type !== 'assistant') continue;   // attachment, last-prompt, cost-state, queue-operation …
+    if (r.isSidechain) continue;
+    const m = r.message || {};
+    if (msgId !== null) {   // nog meer blokken van dezelfde slotbeurt?
+      if (r.type !== 'assistant' || m.id !== msgId) break;
+    } else {
+      if (r.type !== 'assistant') return { tekst: '' };
+      const t0 = (Array.isArray(m.content) ? m.content : []).filter(function (b) { return b && b.type === 'text'; }).map(function (b) { return String(b.text || ''); }).join('\n');
+      if (r.isApiErrorMessage) return { tekst: '', limiet: isLimietFout(t0) };
+      if (m.stop_reason !== 'end_turn' || !(Date.parse(r.timestamp) > (a.started || 0))) return { tekst: '' };
+      msgId = m.id || '';
+    }
+    const t = (Array.isArray(m.content) ? m.content : []).filter(function (b) { return b && b.type === 'text'; }).map(function (b) { return String(b.text || ''); }).join('\n').trim();
+    if (t) delen.unshift(t);
+    if (!msgId) break;   // zonder id geen samenhang te bewijzen: alleen deze regel
+  }
+  return { tekst: delen.join('\n\n').trim() };
+}
+
+function weesStop(a, reden) {
+  // Reden in het register (Fable K1): een tweede herstart tussen SIGTERM en SIGKILL verliest hem anders.
+  a.wees_reden = reden; a.wees_kill_t = Date.now(); saveAgents();
+  try { process.kill(-a.pid, 'SIGTERM'); } catch (e) {}
+}
+
+function weesAfronden(id) {
+  const a = agentsReg[id];
+  if (!a || !a.wees || a.status !== 'running') return;
+  const e = weesEindtekst(a);
+  let fout = null;
+  if (a.wees_reden === 'bovengrens') fout = 'afgebroken-bovengrens';
+  else if (a.wees_reden === 'gestopt') fout = 'afgebroken-gestopt';
+  else if (e.limiet) fout = 'limiet';
+  else if (!e.tekst || eindIsWachtzin(e.tekst)) fout = 'wees-zonder-eindtekst';   // tikker: geblokkeerd, niet opnieuw (K3)
+  if (a.wees_dood && fout === 'wees-zonder-eindtekst') {
+    // Was al dood bij het opstarten en geen geldige eindtekst: hetzelfde als vroeger (afgebroken, geen rapport; de tikker
+    // start opnieuw). Kan ook als passief: er gaat niets naar buiten.
+    a.status = 'afgebroken-containerherstart'; a.ended = Date.now(); delete a.wees; delete a.wees_dood;
+    saveAgents();
+    delete jobs[id];
+    return;
+  }
+  if (!rolPrimair()) return;   // afronden met rapport alleen als primair (Fable B2); de volgende ronde probeert opnieuw
+  const outdir = path.join(IO, id, 'out');
+  let files = []; try { files = collectFiles(outdir); } catch (err) { logError('wees-bestanden', err); }
+  const volledig = WEES_KOP + '\n\n' + (fout ? (e.tekst ? e.tekst + '\n\n' : '') + WEES_GEEN_TEKST : e.tekst);
+  const r = { ok: !fout, error: fout || '', output: volledig, files: files, workspace: a.workspace, runtime: a.runtime, wees: true };
+  // Register eerst en synchroon, dan pas het rapport: de ronde rondt hem zo nooit twee keer af (Fable K1).
+  a.status = 'done'; a.ok = r.ok; a.error = agentFoutcode(fout); a.ended = Date.now(); a.eindcontrole = 'overgeslagen (wees)';
+  a.voorlopig = false;
+  saveAgents();
+  const j = jobs[id] || (jobs[id] = { agent: true, created: a.started || Date.now(), workspace: a.workspace, chat_id: a.chat_id || '' });
+  j.status = 'done'; j.done_at = Date.now();
+  // Fable-review diff K2: niets tussen 'register done' en sendReport mag het rapport tegenhouden.
+  try { j.result = spillIfLarge(id, Object.assign({}, r)); } catch (err) { logError('wees-spill', err); j.result = r; }
+  try { jobEindLog(id, j, a.workspace); } catch (err) { logError('wees-joblog', err); }
+  schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'wees-afgerond', job_id: id, ok: r.ok, fout: fout }));
+  sendReport(a, r);
+  try { autoNaAfloop(id, { ok: r.ok, output: volledig }, a.label); } catch (err) { logError('wees-auto', err); }
+  const route = appRoute(a.label);
+  try { appBewaar(id, outdir, { soort: 'agent', label: a.label, ok: r.ok, rapport: (route === 'machinekamer' || route === 'david') ? volledig : null }); }
+  catch (err) { logError('wees-appbewaar', err); }
+  try { fs.rmSync(path.join(IO, id), { recursive: true, force: true }); } catch (err) {}
+  try { fs.rmSync(eindVoorlopigPad(id), { force: true }); } catch (err) {}
+}
+
+function weesRonde() {
+  const nu = Date.now();
+  for (const id in agentsReg) {
+    const a = agentsReg[id];
+    if (!a || !a.wees || a.status !== 'running') continue;
+    const j = jobs[id];
+    if (j && j.progress) {   // /result en /agents: looptijd en laatste activiteit (Fable K6)
+      j.progress.running_ms = nu - (a.started || nu);
+      let m = 0; try { m = fs.statSync(a.transcript).mtimeMs; } catch (e) {}
+      if (m) j.progress.last_activity_ms = Math.max(0, nu - m);
+    }
+    if (weesLeeft(a.pid, id)) {
+      // De watchdog is met het oude server.js gestorven: zonder deze grens bezet een hangende wees eeuwig een slot.
+      if (!a.wees_reden && a.max_minuten && nu - (a.started || nu) > a.max_minuten * 60 * 1000 + WEES_POLL_MS) weesStop(a, 'bovengrens');
+      else if (a.wees_reden && nu - (a.wees_kill_t || 0) > KILL_GRACE_MS) { try { process.kill(-a.pid, 'SIGKILL'); } catch (e) {} }
+      continue;
+    }
+    // Afronden met rapport alleen als primair (weesAfronden toetst dat per ronde: de rol is na een start eerst passief,
+    // Fable B2); een dode wees zonder eindtekst wordt ook als passief gewoon afgebroken.
+    try { weesAfronden(id); } catch (e) { logError('wees-afronden', e); }
+  }
+}
+
+// Na het opstarten: wezen terug in jobs (zodat /result 'loopt nog' zegt en de stopknop werkt) en de ronde starten.
+(function () {
+  for (const id in agentsReg) {
+    const a = agentsReg[id];
+    if (!a || !a.wees || a.status !== 'running' || jobs[id]) continue;
+    jobs[id] = { status: 'running', created: a.started || Date.now(), started: a.started || Date.now(), agent: true, wees: true,
+      workspace: a.workspace, chat_id: a.chat_id || '', runtime: a.runtime,
+      progress: { stoppen: function () { weesStop(a, 'gestopt'); } } };
+    schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'wees-herkend', job_id: id, pid: a.pid }));
+  }
+  setInterval(function () { try { weesRonde(); } catch (e) { logError('wees-ronde', e); } }, WEES_POLL_MS).unref();
+})();
 
 function readBody(req, cb) {
   let body = '';
@@ -2439,6 +2599,7 @@ function handleRequest(req, res) {
         eindcontrole: a.eindcontrole,
         herstart: a.herstart,
         error: a.error,   // foutcode (wv51); de tikker gebruikt hem als /result kwijt is
+        wees: a.wees ? new Date(a.wees).toISOString() : undefined,   // wv211: liep door over een herstart van server.js
         running_ms: (j && j.progress) ? j.progress.running_ms : undefined,
         last_activity_ms: (j && j.progress) ? j.progress.last_activity_ms : undefined
       };
