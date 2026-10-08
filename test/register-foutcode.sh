@@ -19,7 +19,10 @@ const limiet = sleutel === 'limiet';
 setTimeout(() => { process.stdout.write(JSON.stringify({ type: 'result', is_error: limiet, result: limiet ? 'Claude AI usage limit reached, resets at 5pm' : 'klaar ' + sleutel, session_id: sid })); process.exit(limiet ? 1 : 0); }, 300);
 `, { mode: 0o755 });
 const rapporten = [];
-const hook = http.createServer((q, s) => { let b = ''; q.on('data', c => b += c); q.on('end', () => { try { rapporten.push(JSON.parse(b)); } catch (e) {} s.end('{}'); }); });
+// De hook is ook de nep-Supabase voor de rolwachter (actieve kant olares): de toets hangt zo niet af van de echte stand.
+const hook = http.createServer((q, s) => { let b = ''; q.on('data', c => b += c); q.on('end', () => {
+  if (q.url.indexOf('/rest/v1/rpc/uitwijk_stand_lees') === 0) return s.end(JSON.stringify([{ actieve_kant: 'olares', sinds: null }]));
+  try { rapporten.push(JSON.parse(b)); } catch (e) {} s.end('{}'); }); });
 hook.listen(0, '127.0.0.1', async () => {
   const d = path.join(W, 'pod');
   ['home', 'vault', 'repo', 'io', 'jobout'].forEach(m => fs.mkdirSync(path.join(d, m), { recursive: true }));
@@ -37,10 +40,15 @@ hook.listen(0, '127.0.0.1', async () => {
     HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'),
     JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),
     RUNTIME_FILE: path.join(d, 'runtime.json'), CODEX_HOME: path.join(d, 'codex'), SLEUTELPORTAAL_SLEUTEL: path.join(d, 'geen.key'),
+    // wv202: eigen uitrolmarker en rolbestand. Zonder UITROL_MARKER las de toets de echte /opt/data/uitrol-wacht: zolang
+    // er op de pod een uitrol op stilte wachtte, gaf POST /agent voor het machinekamer:-label 503 uitrol-wacht en waren
+    // de twee limiettoetsen rood (8-10: 14:14-14:34 en 15:54-16:22). Ook de rol kwam uit de echte Supabase.
+    UITROL_MARKER: path.join(d, 'uitrol-wacht'), ROL_BESTAND: path.join(d, 'rol'),
+    SUPABASE_URL: 'http://127.0.0.1:' + hook.address().port, SUPABASE_SERVICE_ROLE: 'proef', SOCEV_KANT: 'olares',
     OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1', LESSEN_INJECTIE: '0', API_SECRET: 'proef', MAX_AGENTS: '6',
     PORT: String(poort), AGENT_WEBHOOK_URL: 'http://127.0.0.1:' + hook.address().port + '/', AGENT_WEBHOOK_SECRET: 'proef',
     PATH: path.join(W, 'bin') + ':' + process.env.PATH });
-  delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  delete process.env.CLAUDE_CODE_OAUTH_TOKEN; delete process.env.SOCEV_AGENT_RUN;
   require(path.join(d, 'server.js'));
   const vraag = (methode, pad, body) => new Promise((ok, nok) => { const r = http.request({ host: '127.0.0.1', port: poort, path: pad, method: methode, headers: { 'content-type': 'application/json' } },
     res => { let b = ''; res.on('data', c => b += c); res.on('end', () => { try { ok(JSON.parse(b)); } catch (e) { ok({ raw: b }); } }); }); r.on('error', nok); r.end(body ? JSON.stringify(body) : undefined); });
@@ -49,6 +57,7 @@ hook.listen(0, '127.0.0.1', async () => {
     const agent = (label, sl) => vraag('POST', '/agent', { secret: 'proef', label: label, prompt: 'SLEUTEL:' + sl, chat_id: '40687', workspace: 'vault', runtime: 'claude' });
     const a1 = await agent('machinekamer:wv902 limietproef', 'limiet');
     const a2 = await agent('socev: goedproef', 'goed');
+    toets('POST /agent neemt beide agents aan', !!(a1 && a1.job_id) && !!(a2 && a2.job_id), JSON.stringify(a1) + ' ' + JSON.stringify(a2));
     const t0 = Date.now(); while (Date.now() - t0 < 20000 && rapporten.length < 2) await slaap(200);
     await slaap(300);
     const lijst = ((await vraag('GET', '/agents')).agents) || [];
