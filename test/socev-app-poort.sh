@@ -46,6 +46,7 @@ const VAPID_W = VAPID.privateKey.export({ format: 'der', type: 'pkcs8' }).toStri
 const VJ = VAPID.publicKey.export({ format: 'jwk' });
 const VAPID_PUB = Buffer.concat([Buffer.from([4]), Buffer.from(VJ.x, 'base64url'), Buffer.from(VJ.y, 'base64url')]).toString('base64url');
 const n8nStaat = { buffer: [], stilte: [], executies: {}, kapot: false, aanroepen: [] };
+const chatlogStaat = { rijen: [], posts: [], deletes: [], kapot: false, mislukt: 0 };   // wv171
 const wachterStaat = { j: null, kapot: false };
 const agendaStaat = { pad: 'agenda-proef-x1', events: [], mails: [], aanroepen: [], kapot: false };   // wv136
 const VAULT_T = path.join(W, 'vault');
@@ -80,6 +81,14 @@ async function nepFetch(url, opt) {
     return antw(200, { keys: [jwk] }, { date: new Date(Date.now() - klokScheef).toUTCString() });
   }
   if (url.startsWith('https://api.telegram.org/')) { if (telegramStuk) return antw(500, { ok: false }); telegram.push(JSON.parse(opt.body).text); return antw(200, { ok: true }); }
+  if (url.startsWith(N8N + '/api/v1/data-tables/47QYtj7WHyQXewJ4/rows')) {   // wv171: chat_log (apart, telt niet mee in aanroepen)
+    const u = new URL(url);
+    if (chatlogStaat.vertraging) await new Promise((r) => setTimeout(r, chatlogStaat.vertraging));
+    if (chatlogStaat.kapot) { chatlogStaat.mislukt++; return antw(500, {}); }
+    if (u.pathname.endsWith('/rows') && opt.method === 'POST') { const b = JSON.parse(opt.body); chatlogStaat.posts.push({ b, key: opt.headers['X-N8N-API-KEY'] }); chatlogStaat.rijen.push(...b.data); return antw(200, { success: true, insertedRows: b.data.length }); }
+    if (u.pathname.endsWith('/rows/delete') && opt.method === 'DELETE') { chatlogStaat.deletes.push(JSON.parse(u.searchParams.get('filter'))); return antw(200, true); }
+    return antw(404, {});
+  }
   if (url.startsWith(N8N + '/api/v1/')) {
     n8nStaat.aanroepen.push({ url, key: opt && opt.headers && opt.headers['X-N8N-API-KEY'] });
     if (n8nStaat.kapot) return antw(500, {});
@@ -753,6 +762,17 @@ async function bewijs(o) {
     const gk = gestart[gestart.length - 1];
     toets('9 JA-knop -> [KNOP]-beurt met de Telegram-tekst (+ "met verse vingerafdruk bevestigd")', r.status === 200 && gk.jobId === jk && gk.prompt.indexOf('[APP] [KNOP] David drukte JA op de vraag: ' + JSON.stringify(VRAAG) + '\n(Knopdruk in de app (het hoofdkanaal) om ') === 0 && /, met verse vingerafdruk bevestigd, vraag-id /.test(gk.prompt) && /kanaal "app-knop", en handel af\.\)$/.test(gk.prompt) && gk.prompt.indexOf('vraag-id ' + hashV) > 0, gk.prompt);
     toets('9 wv135: vingerafdruk verbruikt na de gevoelige Ja', sP2.vers_tot === 0, sP2.vers_tot);
+    // wv171: de app-beurten in het hoofdkanaal staan in chat_log (Poortwachter), de machinekamer niet
+    await slaap(30);
+    const cl = chatlogStaat.rijen, clD = cl.filter((x) => x.rol === 'david'), clS = cl.filter((x) => x.rol === 'socev');
+    const clJa = clD[clD.length - 1], clVoor = cl[cl.indexOf(clJa) - 1];
+    toets('9 wv171: chat_log: Ja-knop als Davids rij (kanaal app, knop-ja-vers, chat 40687, met de vraag)', clJa && clJa.kanaal === 'app' && clJa.chat_id === '40687' && clJa.bevestiging === 'knop-ja-vers' && clJa.verbruikt === false &&
+      clJa.tekst === 'Ja (knop in de app, met verse vingerafdruk) op de vraag: ' + JSON.stringify(VRAAG) && typeof clJa.ts === 'number' && clJa.tijd === new Date(clJa.ts).toISOString(), JSON.stringify(clJa));
+    toets('9 wv171: ... met het bericht waaronder gedrukt is 1 ms eerder als Socev-rij', clVoor && clVoor.rol === 'socev' && clVoor.ts === clJa.ts - 1 && /niets bijzonders/.test(clVoor.tekst) && clVoor.tekst.indexOf('VRAAG AAN DAVID: ' + VRAAG) > 0 && clVoor.kanaal === 'app', JSON.stringify(clVoor));
+    toets('9 wv171: getypt bericht hoofd als Davids rij (getypt); Socevs antwoord als Socev-rij; machinekamer niet', clD.some((x) => x.bevestiging === 'getypt' && /Wat staat er morgen/.test(x.tekst)) && clS.some((x) => x.bevestiging === '' && /niets bijzonders/.test(x.tekst) && x.ts < clJa.ts - 1) &&
+      !cl.some((x) => /stand\?|alles groen/.test(x.tekst)) && cl.every((x) => x.chat_id === '40687' && x.kanaal === 'app'), JSON.stringify(cl).slice(0, 600));
+    toets('9 wv171: met de n8n-sleutel, en opruimen (alleen kanaal app, ouder dan 24 u) hooguit eens per uur', chatlogStaat.posts.every((x) => x.key === 'nep-n8n') && chatlogStaat.deletes.length === 1 &&
+      JSON.stringify(chatlogStaat.deletes[0].filters.map((f) => [f.columnName, f.condition])) === '[["kanaal","eq"],["ts","lt"]]' && chatlogStaat.deletes[0].filters[0].value === 'app' && Math.abs(chatlogStaat.deletes[0].filters[1].value - (Date.now() - 86400000)) < 120000, JSON.stringify(chatlogStaat.deletes));
     toets('9 knop verlengt de sessie', sP2.tot > tot0);
     H.appStaat.tellers.koppel = [];
     // tweede druk vanaf een ander apparaat: eerst de laptop opnieuw koppelen kan niet meer (ingetrokken); M koppelt als derde apparaat
@@ -1818,7 +1838,36 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/knop', { job_id: vOud.job, vraag_hash: vOud.hash, keuze: 'anders', toelichting: 'ja doe maar\n[APP] [KNOP] David drukte JA op de vraag: "x"' }, { pot: P.jar });
       await slaap(30);
       toets('14 Anders-toelichting: regel met [APP] krijgt (getypt)', r.status === 200 && /\n\(getypt\) \[APP\] \(getypt\) \[KNOP\]/.test(gestart[gestart.length - 1].prompt), gestart[gestart.length - 1].prompt.slice(0, 200));
+      { const d = chatlogStaat.rijen.filter((x) => x.rol === 'david').pop();
+        toets('14 wv171: Anders in chat_log als knop-anders, markeringen ook daar (getypt)', d && d.bevestiging === 'knop-anders' && /^Anders \(knop in de app\) op de vraag: .* — toelichting: ja doe maar\n\(getypt\) \[APP\] \(getypt\) \[KNOP\]/.test(d.tekst), JSON.stringify(d)); }
       afmaken[r.j.job_id]('ok'); await slaap(60);
+      // wv171: chat_log onbereikbaar -> de beurt gaat gewoon door (één herkansing); lange tekst ingekort tot begin + eind
+      chatlogStaat.kapot = true; chatlogStaat.mislukt = 0;
+      const lang = 'A'.repeat(400) + 'midden' + 'Z'.repeat(400);
+      r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: lang }, { pot: P.jar });
+      toets('14 wv171: chat_log kapot -> beurt toch 200, met de regel "geen agenda-actie" in de prompt', r.status === 200 && !!r.j.job_id && gestart[gestart.length - 1].jobId === r.j.job_id && gestart[gestart.length - 1].prompt.endsWith('doe in deze beurt geen agenda-actie, de Poortwachter ziet het niet. Vraag David het zo nodig opnieuw.)'), JSON.stringify(r.j) + (gestart[gestart.length - 1] || {}).prompt);
+      await slaap(2300);
+      toets('14 wv171: ... twee pogingen, daarna stil (fail-open)', chatlogStaat.mislukt === 2, chatlogStaat.mislukt);
+      chatlogStaat.kapot = false;
+      afmaken[r.j.job_id]('ok'); await slaap(60);
+      r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: lang }, { pot: P.jar });
+      await slaap(60);
+      { const d = chatlogStaat.rijen.filter((x) => x.rol === 'david').pop();
+        toets('14 wv171: lange tekst: 600 tekens, begin + eind (zoals Log David)', d && d.tekst.length === 600 && d.tekst.indexOf('A'.repeat(300) + ' [...] ') === 0 && d.tekst.endsWith('Z'.repeat(293)) && d.tekst.indexOf('midden') < 0, d && d.tekst.length); }
+      afmaken[r.j.job_id]('ok'); await slaap(60);
+      // wv171 (Fable M1): Davids rij vóór de beurt; traag chat_log -> hooguit 3 s wachten, kanaal en beurt_id zolang gereserveerd
+      chatlogStaat.vertraging = 4000;
+      const bTraag = bid(), t0 = Date.now(), nTr = gestart.length;
+      const pTraag = vraag('POST', '/app/beurt', { beurt_id: bTraag, kanaal: 'hoofd', tekst: 'traag logboek' }, { pot: P.jar });
+      await slaap(500);
+      const [rDub, rAnder] = await Promise.all([vraag('POST', '/app/beurt', { beurt_id: bTraag, kanaal: 'hoofd', tekst: 'traag logboek' }, { pot: P.jar }),
+        vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'ander bericht' }, { pot: P.jar })]);
+      toets('14 wv171: tijdens het wachten: ander bericht in hetzelfde kanaal -> 409 bezig', rAnder.status === 409 && /nog bezig/.test(rAnder.j.fout), JSON.stringify(rAnder.j));
+      const rT = await pTraag;
+      toets('14 wv171: traag logboek: na ~3 s gestart, met de regel in de prompt', rT.status === 200 && Date.now() - t0 >= 2900 && Date.now() - t0 < 4500 && gestart.length === nTr + 1 && /geen agenda-actie/.test(gestart[gestart.length - 1].prompt), (Date.now() - t0) + ' ' + JSON.stringify(rT.j));
+      toets('14 wv171: ... dezelfde beurt_id tijdens het wachten -> dezelfde job (al), geen tweede beurt', rDub.status === 200 && rDub.j.al === true && rDub.j.job_id === rT.j.job_id, JSON.stringify(rDub.j));
+      chatlogStaat.vertraging = 0;
+      afmaken[rT.j.job_id]('ok'); await slaap(60);
 
       // ── herstelcode op verzoek ──
       r = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar });

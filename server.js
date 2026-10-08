@@ -4137,6 +4137,7 @@ function appRolOk() {
     .then(function () { clearTimeout(t); return rolPrimair(); });
 }
 function appLopend(kanaal) {
+  if (appStaat.startend && appStaat.startend[kanaal] > 0) return true;   // wv171: beurt wacht nog op chat_log (appChatLogVoor)
   return Object.keys(jobs).some(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); });
 }
 
@@ -4198,6 +4199,7 @@ async function appNaBeurt(jobId) {
     catch (e) { logError('app-vragen', e); }
   }
   j.app.vraag = vraag;
+  if (r.ok !== false && out) appChatLog(j.app.kanaal, [{ rol: 'socev', ts: Date.now(), tekst: out }]);   // wv171
   const goed = await appLogSchrijf(j.app.kanaal, { t: new Date().toISOString(), job_id: jobId, beurt_id: j.app.beurt_id, soort: j.app.soort,
     apparaat: j.app.apparaat, tekst: j.app.tekst, invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
     vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
@@ -4454,6 +4456,10 @@ async function appBeurt(req, res, reg, a, s, d) {
   if (!tekst && !nrs.length) return appWeiger(res, 400, 'leeg bericht', 'leeg');
   if (tekst.length > APP_TEKST_MAX) return appWeiger(res, 413, 'bericht te lang (max ' + APP_TEKST_MAX + ' tekens)', 'te lang');
   const bh = appSha(bid);
+  if (appStaat.beurtStartend && appStaat.beurtStartend[bh]) {   // wv171: dezelfde beurt_id wacht nog op chat_log
+    const jid = await appStaat.beurtStartend[bh];
+    if (jid) { res._app.reden = 'herhaling ' + jid; return appStuur(res, 200, { ok: true, job_id: jid, al: true }); }
+  }
   const eerder = appBeurtIds()[bh];
   if (eerder) { res._app.reden = 'herhaling ' + eerder.job; return appStuur(res, 200, { ok: true, job_id: eerder.job, al: true }); }
   let upload = null;
@@ -4475,7 +4481,15 @@ async function appBeurt(req, res, reg, a, s, d) {
   const ids = appBeurtIds();
   if (ids[bh]) { res._app.reden = 'herhaling ' + ids[bh].job; return appStuur(res, 200, { ok: true, job_id: ids[bh].job, al: true }); }   // tweede kwam tijdens de rolcheck
   const namen = upload ? upload.lijst.map(function (x) { return x.doel; }) : [];
-  const st = appStartBeurt(a, kanaal, upload ? appBestandenPrompt(appOntmasker(tekst), namen) : appOntmasker(tekst), { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload });
+  // wv171: Davids rij in chat_log vóór de beurt; kanaal en beurt_id zijn zolang gereserveerd (appLopend, herhaling hierboven)
+  let klaarJob = null;
+  appStaat.beurtStartend = appStaat.beurtStartend || {};
+  appStaat.beurtStartend[bh] = new Promise(function (r) { klaarJob = r; });
+  let st;
+  try {
+    const gelogd = await appChatLogStart(kanaal, [{ rol: 'david', ts: Date.now(), bevestiging: 'getypt', tekst: tekst ? appOntmasker(tekst) : '[' + upload.lijst.length + ' bestand(en)]' }]);
+    st = appStartBeurt(a, kanaal, (upload ? appBestandenPrompt(appOntmasker(tekst), namen) : appOntmasker(tekst)) + (gelogd ? '' : APP_CHATLOG_NIET), { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload });
+  } finally { delete appStaat.beurtStartend[bh]; klaarJob(st && st.job_id || null); }
   if (!st.job_id) return appStartFout(res, st);
   ids[bh] = { job: st.job_id, t: Date.now() };
   try { appSchrijfJson(APP_BEURTEN, ids); } catch (e) { logError('app-beurten', e); }
@@ -4513,13 +4527,14 @@ function appUitslag(req, res, reg, a, s, d) {
     bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
 }
 
+// Vraagzin en het hele bericht waaronder gedrukt is (wv171: dat bericht gaat als Socev-rij naar chat_log, net als in Telegram).
 async function appKnopVraagTekst(jobId, kanaal, hash) {
   const j = jobs[jobId];
-  if (j && j.app && j.status === 'done') { const v = appVraagUit(appUitvoer(j)); if (v && v.hash === hash) return v.tekst; }
+  if (j && j.app && j.status === 'done') { const out = appUitvoer(j), v = appVraagUit(out); if (v && v.hash === hash) return { tekst: v.tekst, bericht: out }; }
   try {
     const l = (await appLogLees(kanaal)).filter(function (x) { return x.job_id === jobId; }).pop();
     const v = l ? appVraagUit(l.antwoord) : null;
-    if (v && v.hash === hash) return v.tekst;
+    if (v && v.hash === hash) return { tekst: v.tekst, bericht: String(l.antwoord || '') };
   } catch (e) {}
   return null;
 }
@@ -4549,7 +4564,8 @@ async function appKnop(req, res, reg, a, s, d) {
     versOud = s.vers_tot; s.vers_tot = 0;
   }
   const terug = function () { if (versOud !== null && s.vers_tot === 0) s.vers_tot = versOud; };
-  const vz = (await appKnopVraagTekst(jobId, rij.kanaal, hash)) || '(vraagzin niet leesbaar in het bericht)';
+  const vb = await appKnopVraagTekst(jobId, rij.kanaal, hash);
+  const vz = (vb && vb.tekst) || '(vraagzin niet leesbaar in het bericht)';
   if (!(await appMagBeurt(res, rij.kanaal))) return terug();
   // opnieuw lezen ná het wachten: een tweede druk die intussen binnenkwam, wint niet
   v = appVragen();
@@ -4563,7 +4579,17 @@ async function appKnop(req, res, reg, a, s, d) {
   const antwoord = { keuze: keuze, t: new Date().toISOString(), apparaat: a.id, vingerafdruk: gevoeligJa || undefined };
   v[sleutel].antwoord = antwoord;
   try { appVragenSchrijf(v); } catch (e) { logError('app-vragen', e); terug(); return appWeiger(res, 500, 'opslag', 'vragen niet schrijfbaar'); }
-  const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', tekst: (keuze === 'ja' ? '✓ Ja' + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
+  // wv171: de druk als Davids bericht in chat_log, met het bericht waaronder gedrukt is 1 ms eerder als Socev-rij (zoals
+  // "Claude via Telegram" > Log David voorbereiden), zodat de Poortwachter de druk aan dát voorstel koppelt. Vóór de beurt en
+  // hooguit APP_CHATLOG_WACHT_MS wachten (Fable-review wv171 M1): staat de rij er niet op tijd, dan zegt de prompt dat deze beurt
+  // geen agenda-actie doet (anders ziet de Poortwachter een oudere rij).
+  const nu = Date.now();
+  const gelogd = await appChatLogStart(rij.kanaal, [
+    { rol: 'socev', tekst: vb ? vb.bericht : vz, ts: nu - 1 },
+    { rol: 'david', ts: nu, bevestiging: keuze === 'anders' ? 'knop-anders' : keuze === 'nee' ? 'knop-nee' : gevoeligJa ? 'knop-ja-vers' : 'knop-ja',
+      tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? 'Nee' : 'Ja') + ' (knop in de app' + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
+        (keuze === 'anders' ? ' — toelichting: ' + appOntmasker(toel) : '') }]);
+  const st = appStartBeurt(a, rij.kanaal, tekst + (gelogd ? '' : APP_CHATLOG_NIET), { soort: 'knop', tekst: (keuze === 'ja' ? '✓ Ja' + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
   if (!st.job_id) {
     // niet gestart: de vraag is dan ook niet beantwoord, en de vingerafdruk niet gebruikt
     try { const w = appVragen(); if (w[sleutel]) { w[sleutel].antwoord = null; appVragenSchrijf(w); } } catch (e) { logError('app-vragen', e); }
@@ -5054,6 +5080,63 @@ async function appN8nRijen(tabel, filter, max) {
     if (!cursor) break;
   }
   return uit;
+}
+
+// ── wv171 (fase 5-rest): app-beurten in het hoofdkanaal ook in chat_log ──
+// De Poortwachter (n8n "AI - Poortwachter (Jev)") leest Davids laatste bericht en Socevs bericht daarvóór uit Data Table
+// chat_log. Tot nu toe schreef alleen "Claude via Telegram" daarin, dus een agendavoorstel + Ja uit de app zag hij niet. Nu
+// schrijft de pod voor kanaal hoofd (40687) dezelfde rijen met kanaal 'app' en bevestiging (getypt, knop-ja, knop-ja-vers,
+// knop-nee, knop-anders); de Poortwachter koppelt alleen rijen uit hetzelfde kanaal en geeft op een app-bevestiging voorlopig
+// hooguit oranje (David drukt dan op de knop in Telegram). Vorm als de zijtakken Log David / Log Socev: tekst hooguit 600
+// tekens (begin + eind), weg na 24 u. Fail-open: een schrijffout raakt de beurt niet (één herkansing, dan logError).
+const APP_CHATLOG_TABEL = '47QYtj7WHyQXewJ4';   // n8n Data Table chat_log (bouwplan Poortwachter 27-9-2026)
+const APP_CHATLOG_MS = 24 * 3600 * 1000;
+function appChatKort(s) { s = String(s == null ? '' : s).replace(/\r/g, '').trim(); return s.length > 600 ? s.slice(0, 300) + ' [...] ' + s.slice(-293) : s; }
+async function appN8nZend(methode, pad, body) {
+  const b = appN8nBasis(), k = process.env.N8N_API_KEY;
+  if (!b || !k) throw new Error('n8n-API niet ingesteld');
+  const r = await fetch(b + '/api/v1' + pad, { method: methode, headers: { 'X-N8N-API-KEY': k, accept: 'application/json', 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error('n8n http ' + r.status);
+  return r.json();
+}
+function appChatLog(kanaal, rijen) {
+  if (kanaal !== 'hoofd' || !rijen.length) return Promise.resolve(false);
+  const data = rijen.map(function (x) {
+    return { chat_id: APP_KANALEN.hoofd, rol: x.rol, tekst: appChatKort(x.tekst), ts: x.ts, tijd: new Date(x.ts).toISOString(), verbruikt: false,
+      kanaal: 'app', bevestiging: x.bevestiging || '' };
+  });
+  const poging = function () { return appN8nZend('POST', '/data-tables/' + APP_CHATLOG_TABEL + '/rows', { data: data, returnType: 'count' }); };
+  return poging()
+    .catch(function () { return new Promise(function (r) { setTimeout(r, 2000); }).then(poging); })
+    .then(function () { appChatLogOpruim(); return true; })
+    .catch(function (e) { logError('app-chatlog', e); return false; });
+}
+// Davids rij moet er staan vóór Socev het luik kan aanroepen (zoals Log David in Telegram vóór de pod-aanroep): wacht hooguit
+// APP_CHATLOG_WACHT_MS; de schrijfpoging (met herkansing) loopt daarna gewoon door. Machinekamer: niets te schrijven = goed.
+const APP_CHATLOG_WACHT_MS = 3000;
+const APP_CHATLOG_NIET = '\n(Systeem: dit bericht kon niet tijdig in het logboek van de Poortwachter; doe in deze beurt geen agenda-actie, de Poortwachter ziet het niet. Vraag David het zo nodig opnieuw.)';
+// Zolang er gewacht wordt, telt het kanaal als bezig (appLopend): tussen appMagBeurt en appStartBeurt zat eerst geen await.
+async function appChatLogStart(kanaal, rijen) {
+  appStaat.startend = appStaat.startend || {};
+  appStaat.startend[kanaal] = (appStaat.startend[kanaal] || 0) + 1;
+  try { return await appChatLogVoor(kanaal, rijen); } finally { appStaat.startend[kanaal]--; }
+}
+function appChatLogVoor(kanaal, rijen) {
+  if (kanaal !== 'hoofd') return Promise.resolve(true);
+  let t = null;
+  return Promise.race([appChatLog(kanaal, rijen), new Promise(function (r) { t = setTimeout(function () { r(false); }, APP_CHATLOG_WACHT_MS); })])
+    .then(function (ok) { clearTimeout(t); return ok === true; });
+}
+// "Claude via Telegram" ruimt chat_log op bij elk Telegram-bericht; gebruikt David een dag alleen de app, dan doet de pod het
+// voor de eigen rijen (hooguit eens per uur).
+function appChatLogOpruim() {
+  const nu = Date.now();
+  if (appStaat.chatlogOpgeruimd && nu - appStaat.chatlogOpgeruimd < 3600000) return;
+  appStaat.chatlogOpgeruimd = nu;
+  const f = { type: 'and', filters: [{ columnName: 'kanaal', condition: 'eq', value: 'app' }, { columnName: 'ts', condition: 'lt', value: nu - APP_CHATLOG_MS }] };
+  appN8nZend('DELETE', '/data-tables/' + APP_CHATLOG_TABEL + '/rows/delete?filter=' + encodeURIComponent(JSON.stringify(f)))
+    .catch(function (e) { logError('app-chatlog-opruim', e); });
 }
 
 // ── in gewone taal ──
