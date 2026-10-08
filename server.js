@@ -3132,6 +3132,9 @@ const APP_OPEN_MS = 2 * 60 * 60 * 1000;        // tijdelijk openzetten vanaf de 
 const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
 const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen']);
+// Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
+// anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
+const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open']);
 const APP_BSN_TEKST = 'in je bericht staat een getal dat op een BSN lijkt (9 cijfers die de elfproef halen). Patiëntgegevens horen niet in Socev: haal het weg. Gaat het om iets anders, stuur het dan vanaf je telefoon.';
 
 const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [] },
@@ -3686,7 +3689,9 @@ async function appPasskeyBevestig(req, res, reg, d) {
 
 async function appApparatenLijst(req, res, reg, a) {
   const sloten = {};
-  for (const x of reg.apparaten) if (x.actief && x.soort === 'vast') sloten[x.id] = await appSlot(x);   // fase 4: de telefoon ziet of het slot open is
+  // fase 4: de telefoon ziet of het slot open is; een ander apparaat alleen zijn eigen slot (de redenen samen zouden verraden waar
+  // David is; review wv134 M2)
+  for (const x of reg.apparaten) if (x.actief && x.soort === 'vast' && (a.goedkeurder === true || x.id === a.id)) sloten[x.id] = await appSlot(x);
   appStuur(res, 200, { ok: true, plekken: Object.keys(APP_PLEKKEN), apparaten: reg.apparaten.map(function (x) {
     return { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, systeem: x.systeem, aangemaakt: x.aangemaakt,
       laatst_gezien: x.laatst_gezien, actief: !!x.actief, ingetrokken_op: x.ingetrokken_op || null, dit_apparaat: x.id === a.id,
@@ -3773,7 +3778,9 @@ async function appSlot(a) {
   if (l.toekomst === true || leeftijd < 0) uit.reden = 'je laatste locatiemelding heeft een tijd in de toekomst; dicht tot er een gewone melding is';
   else if (!l.ontvangen || l.leeftijd_s === null || !isFinite(leeftijd)) uit.reden = 'er is geen locatiemelding van je telefoon';
   else if (leeftijd > APP_LOCATIE_VERS_S) uit.reden = 'je laatste locatiemelding is ' + min + ' min oud (meer dan 20)';
-  else if (l.klasse === 'auto') uit.reden = 'je telefoon meldt dat je onderweg bent';
+  else if (!(Date.parse(l.nu) - Date.parse(l.gemeten) <= (APP_LOCATIE_VERS_S + 120) * 1000))   // review wv134 K5 (ook: tijd onleesbaar)
+    uit.reden = 'je laatste locatiemeting is ' + Math.round((Date.parse(l.nu) - Date.parse(l.gemeten)) / 60000) + ' min oud (laat binnengekomen)';
+  else if (l.klasse === 'auto') uit.reden = 'je bent niet op ' + a.vaste_plek + ' (laatste melding ' + min + ' min geleden)';   // § 4.11, niet 'onderweg'
   else if (l.plek === naam) { uit.open = true; uit.via = 'locatie'; uit.reden = 'je bent op ' + a.vaste_plek + ' (melding ' + min + ' min geleden)'; }
   else uit.reden = 'je bent niet op ' + a.vaste_plek + ' (laatste melding ' + min + ' min geleden)';
   return uit;
@@ -3794,15 +3801,18 @@ function appElfproef(c) {
   return (som - Number(c[8])) % 11 === 0;
 }
 function appBsnAchtig(t) {
-  const re = /(?<!\d)(?<!\d[ .-])\d(?:[ .-]?\d){8}(?![ .-]?\d)/g;
+  // Spaties zoals NBSP/smalle spatie/tab (komen mee bij plakken uit HIS of PDF) eerst gewoon maken (review wv134 K4).
+  const re = /(?<!\d)(?<!\d[ .,/-])\d(?:[ .,/-]?\d){8}(?![ .,/-]?\d)/g;
+  const tekst = String(t || '').replace(/[\s\u00a0\u2007\u202f]/g, ' ');
   let m;
-  while ((m = re.exec(String(t || '')))) if (appElfproef(m[0].replace(/\D/g, ''))) return true;
+  while ((m = re.exec(tekst))) if (appElfproef(m[0].replace(/\D/g, ''))) return true;
   return false;
 }
 function appBsnIn(req, d) {
   let naam = '';
   try { naam = decodeURIComponent(String(req.headers['x-app-naam'] || '')); } catch (e) { naam = String(req.headers['x-app-naam'] || ''); }
-  return [d.tekst, d.toelichting, d.naam, naam].some(function (t) { return typeof t === 'string' && appBsnAchtig(t); });
+  // Ook als het geen tekst is (getal, lijst): de routes maken er later zelf een tekst van (review wv134 M3).
+  return [d.tekst, d.toelichting, d.naam, naam].some(function (t) { return t !== undefined && t !== null && appBsnAchtig(typeof t === 'string' ? t : JSON.stringify(t)); });
 }
 async function appSlotRoute(req, res, a) {
   res._app.stil = true;   // de app vraagt dit elke minuut op een vaste-plek-apparaat
@@ -5264,6 +5274,8 @@ function handleApp(req, res) {
         res._app.apparaat = a.id;
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en de
         // BSN-weigering (§ 4.11). Daarna verder met slotKlaar = true (apparaat en sessie worden dan opnieuw gecontroleerd).
+        if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
+          return appWeiger(res, 403, 'apparaten beheren kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }

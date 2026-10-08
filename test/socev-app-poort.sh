@@ -101,6 +101,7 @@ async function nepFetch(url, opt) {
     if (fn === 'sb_app_locatie') {   // wv134: nagebootst zoals de migratie wv134_app_locatie (leeftijd op 'ontvangen')
       const L = sbStaat.loc || {}, nu = Date.now();
       return antw(200, { nu: new Date(nu).toISOString(), plek: L.plek || null, klasse: L.klasse || null, ontvangen: L.ontvangen ? new Date(L.ontvangen).toISOString() : null,
+        gemeten: (L.gemeten || L.ontvangen) ? new Date(L.gemeten || L.ontvangen).toISOString() : null,
         leeftijd_s: L.ontvangen ? Math.round((nu - L.ontvangen) / 1000) : null, toekomst: !!L.toekomst,
         anders_sinds: b.p_sinds ? (sbStaat.meldingen || []).some((m) => m.ontvangen > Date.parse(b.p_sinds) && m.plek !== b.p_plek) : null });
     }
@@ -1469,7 +1470,7 @@ async function bewijs(o) {
       toets('13 uitslag pollen valt niet onder het slot', r.status !== 423, r.status);
       for (const [m, pad, body] of [['POST', '/app/knop', { job_id: 'f'.repeat(16), vraag_hash: 'x', keuze: 'ja' }], ['POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'eerder' }],
         ['POST', '/app/meldingen/gezien', { tot: new Date().toISOString() }], ['POST', '/app/push/abonneer', { endpoint: 'https://fcm.googleapis.com/fcm/send/x', sleutel: 'y' }],
-        ['POST', '/app/apparaat/intrekken', { id: pixelId }], ['GET', '/app/bestand/' + 'a'.repeat(16) + '/1', undefined], ['POST', '/app/nieuwe-route', {}]]) {
+        ['GET', '/app/bestand/' + 'a'.repeat(16) + '/1', undefined], ['POST', '/app/nieuwe-route', {}]]) {
         r = await vraag(m, pad, body, { pot: WP.jar });
         toets('13 dicht: ' + m + ' ' + pad.replace(/[a-f]{16}/, '<id>') + ' -> 423', r.status === 423, r.status + ' ' + JSON.stringify(r.j));
       }
@@ -1483,6 +1484,23 @@ async function bewijs(o) {
       toets('13 David op Groenhouten (4 min): beurt -> 200', r.status === 200 && !!r.j.job_id, JSON.stringify(r.j));
       r = await vraag('GET', '/app/slot', undefined, { pot: WP.jar });
       toets('13 slot open via locatie', r.j.open === true && r.j.via === 'locatie', JSON.stringify(r.j));
+      await vers(WP);
+      r = await vraag('POST', '/app/apparaat/intrekken', { id: pixelId }, { pot: WP.jar });
+      toets('13 vaste pc (slot open, vers) trekt de Pixel in -> 403 (review M1)', r.status === 403 && /vaste plek/.test(r.j.fout) && reg13().apparaten.find((x) => x.id === pixelId).actief === true, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/koppel/afwijs', { aanvraag_id: 'f'.repeat(16) }, { pot: WP.jar });
+      toets('13 vaste pc kan geen aanvraag afwijzen -> 403 (review M1)', r.status === 403 && /vaste plek/.test(r.j.fout), JSON.stringify(r.j));
+      {
+        const rg = reg13(), px = rg.apparaten.find((x) => x.id === pixelId);
+        px.soort = 'vast'; px.vaste_plek = 'Thuis'; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg));
+        r = await vraag('GET', '/app/apparaten', undefined, { pot: WP.jar });
+        toets('13 apparatenlijst op de vaste pc: eigen slot wel, dat van een ander apparaat niet (review M2)', r.status === 200 && r.j.apparaten.find((x) => x.id === wpId).slot && r.j.apparaten.find((x) => x.id === pixelId).slot === null, JSON.stringify(r.j.apparaten.map((x) => [x.id, x.slot])));
+        px.soort = 'reist'; px.vaste_plek = null; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg));
+      }
+      for (const [naam, tekst] of [['getal', 111222333], ['lijst', ['bsn 111222333']], ['NBSP', 'bsn 111\u00a0222\u00a0333'], ['tab', 'bsn 111\t222\t333'], ['schuine streep', '111/222/333']]) {
+        r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst }, { pot: WP.jar });
+        toets('13 BSN als ' + naam + ' -> 422 (review M3/K4)', r.status === 422, JSON.stringify(r.j));
+      }
+      afmakenAlles();
       // BSN-weigering op de vaste plek, niet op de telefoon
       r = await beurt13(WP, 'kun je 111.222.333 opzoeken');
       toets('13 BSN-achtig getal (elfproef, met punten) op de vaste plek -> 422', r.status === 422 && /BSN/.test(r.j.fout), JSON.stringify(r.j));
@@ -1505,7 +1523,10 @@ async function bewijs(o) {
       toets('13 negatieve leeftijd -> 423', r.status === 423 && /toekomst/.test(r.j.fout), JSON.stringify(r.j));
       meld(null, 'auto', 1);
       r = await beurt13(WP, 'auto');
-      toets('13 klasse auto -> 423', r.status === 423 && /onderweg/.test(r.j.fout), JSON.stringify(r.j));
+      toets('13 klasse auto -> 423, zonder "onderweg" (§ 4.11)', r.status === 423 && /niet op Groenhouten/.test(r.j.fout) && !/onderweg/.test(r.j.fout), JSON.stringify(r.j));
+      meld('Huisartsenpraktijk Groenhouten', 'werk', 1, { gemeten: nu13() - 30 * 60000 });
+      r = await beurt13(WP, 'laat');
+      toets('13 verse ontvangst van een meting van 30 min oud -> 423 (review K5)', r.status === 423 && /laat binnengekomen/.test(r.j.fout), JSON.stringify(r.j));
       meld('Huisartsenpraktijk Groenhouten', 'werk', 1);
       sbStaat.kapot = true;
       r = await beurt13(WP, 'kapot');
@@ -1513,10 +1534,10 @@ async function bewijs(o) {
       sbStaat.kapot = false; H.appStaat.locatie = {};
       // laptop zet zichzelf om naar "reist mee" -> geweigerd (open en dicht)
       r = await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'reist' }, { pot: WP.jar });
-      toets('13 vaste pc zet zichzelf op "reist mee" (slot open) -> 403', r.status === 403 && /Pixel/.test(r.j.fout), JSON.stringify(r.j));
+      toets('13 vaste pc zet zichzelf op "reist mee" (slot open) -> 403', r.status === 403 && /vaste plek/.test(r.j.fout), JSON.stringify(r.j));
       meld('Thuis', 'thuis', 2);
       r = await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'reist' }, { pot: WP.jar });
-      toets('13 vaste pc zet zichzelf op "reist mee" (slot dicht) -> 423', r.status === 423, JSON.stringify(r.j));
+      toets('13 vaste pc zet zichzelf op "reist mee" (slot dicht) -> geweigerd', r.status === 403 || r.status === 423, JSON.stringify(r.j));
       r = await vraag('POST', '/app/apparaat/open', { id: wpId, actie: 'open' }, { pot: WP.jar });
       toets('13 vaste pc zet zichzelf open -> geweigerd', r.status === 423 || r.status === 403, r.status);
       toets('13 register ongewijzigd: nog vast Groenhouten, niet open', reg13().apparaten.find((x) => x.id === wpId).soort === 'vast' && !reg13().apparaten.find((x) => x.id === wpId).open);
