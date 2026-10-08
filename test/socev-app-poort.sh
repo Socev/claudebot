@@ -106,6 +106,7 @@ async function nepFetch(url, opt) {
         leeftijd_s: L.ontvangen ? Math.round((nu - L.ontvangen) / 1000) : null, toekomst: !!L.toekomst,
         anders_sinds: b.p_sinds ? (sbStaat.meldingen || []).some((m) => m.ontvangen > Date.parse(b.p_sinds) && m.plek !== b.p_plek) : null });
     }
+    if (fn === 'mk_app_verbruik') return antw(200, sbStaat.verbruik || { nu: new Date().toISOString(), laatste: null, reeks: [] });
     if (fn === 'sb_app_vapid_lezen') return sbStaat.geenVapid ? antw(200, null) : antw(200, VAPID_W);
     if (fn === 'mk_werkvoorraad_stand') return antw(200, { items: sbStaat.wvItems || [], stand: { aan: true }, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' } });
     if (fn === 'mk_idee_voorrang') {
@@ -1962,6 +1963,112 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/gezien', { tab: 'hoofd', tot: nuP }, { pot: P.jar });
       toets('15 kapot gezien.json: gezien zetten -> 500, bestand blijft', r.status === 500 && fs.readFileSync(GZ, 'utf8') === '{kapot', r.status);
       fs.unlinkSync(GZ);
+    }
+
+    // ── 16. Verbruik & modellen (wv138) ──
+    {
+      const vers = async (B) => { const x = await B.p.evaluate(() => post('/api/passkey/opties', {})); return B.p.evaluate(async (y) => post('/api/passkey/bevestig', { antwoord: await bewijs(y) }), x.j.opties); };
+      const geenVers = () => { for (const h of Object.keys(H.appStaat.sessies)) H.appStaat.sessies[h].vers_tot = 0; };
+      // nagebootste brein-schakelaar (in de pod: leesRuntime/breinInfo/runtimeZet rond runtime.json)
+      const rt = { default: 'claude', fallback: '', models: { claude: 'claude-opus-5-5', codex: 'gpt-5.6-sol' } };
+      const brein = { codex: true, gemini: true, zetten: [] };
+      ctx.RUNTIMES_LIJST = ['claude', 'codex', 'gemini'];
+      ctx.RUNTIMES = Object.assign(Object.create(null), { claude: true, codex: true, gemini: true });
+      ctx.leesRuntime = () => JSON.parse(JSON.stringify(rt));
+      ctx.breinInfo = () => ({ default: rt.default, fallback: rt.fallback || null, models: Object.assign({}, rt.models), codex_ingelogd: brein.codex, gemini_ingelogd: brein.gemini,
+        gemini: { fout: null }, models_ongeldig: [], laatste_modelfout: null });
+      ctx.runtimeZet = (d, bron) => { brein.zetten.push({ d, bron }); if (d.default != null) rt.default = d.default; if (d.fallback != null) rt.fallback = d.fallback;
+        if (d.models) Object.assign(rt.models, d.models); if (rt.fallback === rt.default) rt.fallback = ''; return { stand: JSON.parse(JSON.stringify(rt)) }; };
+      ctx.process.env.CLAUDE_CODE_OAUTH_TOKEN = 'nep';
+      let r = await vraag('GET', '/app/modellen', undefined, { pot: P.jar });
+      const rc = r.j.runtimes || [];
+      toets('16 let op bij codex en gemini (skills, tank), niet bij claude', !rc[0].let_op && /skills niet/.test(rc[1].let_op || '') && /Claude-meting/.test(rc[2].let_op || ''), JSON.stringify(rc.map((x) => x.let_op)));
+      toets('16 modellen: 200, standaard claude, drie runtimes met lijst, huidig model in de lijst', r.status === 200 && r.j.standaard === 'claude' && r.j.terugval === '' && rc.length === 3
+        && rc[0].model === 'claude-opus-5-5' && rc[0].model_buiten_lijst === false && rc.every((x) => x.uit === null && x.modellen.length >= 3), JSON.stringify(r.j).slice(0, 300));
+      const telV = telegram.length;
+      geenVers();
+      r = await vraag('POST', '/app/modellen', { wat: 'standaard', runtime: 'codex' }, { pot: P.jar });
+      toets('16 wissel zonder verse vingerafdruk -> 403 vers_nodig, niets gezet', r.status === 403 && r.j.vers_nodig === true && brein.zetten.length === 0 && rt.default === 'claude', JSON.stringify(r.j));
+      r = await vraag('POST', '/app/modellen', { wat: 'standaard', runtime: 'claude' }, { pot: P.jar });
+      toets('16 al-zo-keuze zonder vingerafdruk -> 200 al (eerst de lijst, dan de vingerafdruk; K2)', r.status === 200 && r.j.al === true && brein.zetten.length === 0, JSON.stringify(r.j).slice(0, 100));
+      await vers(P);
+      r = await vraag('POST', '/app/modellen', { wat: 'model', runtime: 'claude', model: 'jimmy-snel' }, { pot: P.jar });
+      toets('16 model buiten de witte lijst -> 400, niets gezet, vingerafdruk niet verbruikt', r.status === 400 && brein.zetten.length === 0 && H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')].vers_tot > 0, JSON.stringify(r.j));
+      for (const [b, naam] of [[{ wat: 'standaard', runtime: 'constructor' }, 'runtime constructor'], [{ wat: 'vrij', runtime: 'claude' }, 'onbekende wat'],
+        [{ wat: 'model', runtime: 'codex', model: 'claude-opus-5-5' }, 'model van een andere runtime'], [{ wat: 'terugval', runtime: 'claude' }, 'terugval = standaard'],
+        [{ wat: 'model', runtime: 'claude', model: '' }, 'leeg model bij claude']]) {
+        r = await vraag('POST', '/app/modellen', b, { pot: P.jar });
+        toets('16 geweigerd (' + naam + ') -> 400', r.status === 400 && brein.zetten.length === 0, r.status + ' ' + JSON.stringify(r.j));
+      }
+      r = await vraag('POST', '/app/modellen', { wat: 'standaard', runtime: 'codex' }, { pot: P.jar });
+      toets('16 wissel standaard -> codex: 200, gezet via runtimeZet met bron app, stand terug', r.status === 200 && r.j.standaard === 'codex' && brein.zetten.length === 1 && brein.zetten[0].d.default === 'codex'
+        && /^app [a-f0-9]+$/.test(brein.zetten[0].bron), JSON.stringify(r.j).slice(0, 200));
+      toets('16 debug-bot: "runtime gewijzigd vanuit de app" met apparaat en nieuwe stand', telegram.length === telV + 1 && /runtime gewijzigd vanuit de app \("Pixel/.test(telegram[telV]) && /standaard claude -> codex/.test(telegram[telV]) && /Nu: standaard codex/.test(telegram[telV]), telegram[telV]);
+      r = await vraag('POST', '/app/modellen', { wat: 'standaard', runtime: 'claude' }, { pot: P.jar });
+      toets('16 tweede wissel op dezelfde vingerafdruk -> 403 vers_nodig', r.status === 403 && r.j.vers_nodig === true && brein.zetten.length === 1, JSON.stringify(r.j));
+      await vers(P);
+      r = await vraag('POST', '/app/modellen', { wat: 'terugval', runtime: 'gemini' }, { pot: P.jar });
+      toets('16 terugval -> gemini', r.status === 200 && r.j.terugval === 'gemini' && brein.zetten[1].d.fallback === 'gemini', JSON.stringify(r.j).slice(0, 200));
+      await vers(P);
+      brein.gemini = false;
+      r = await vraag('POST', '/app/modellen', { wat: 'standaard', runtime: 'gemini' }, { pot: P.jar });
+      toets('16 runtime niet ingelogd -> 409 met reden, en in de stand uitgeschakeld', r.status === 409 && /niet ingelogd/.test(r.j.fout) && brein.zetten.length === 2, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/modellen', { wat: 'model', runtime: 'gemini', model: 'gemini-3.1-pro-high' }, { pot: P.jar });
+      toets('16 model kiezen bij een uitgeschakelde runtime -> 409 (K4)', r.status === 409 && brein.zetten.length === 2, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/modellen', undefined, { pot: P.jar });
+      toets('16 stand: gemini uit met reden', /niet ingelogd/.test(r.j.runtimes[2].uit || ''), JSON.stringify(r.j.runtimes[2]));
+      brein.gemini = true;
+      r = await vraag('POST', '/app/modellen', { wat: 'model', runtime: 'gemini', model: '' }, { pot: P.jar });
+      toets('16 gemini terug naar de CLI-standaard (leeg) mag: al zo -> 200 al', r.status === 200 && r.j.al === true && brein.zetten.length === 2, JSON.stringify(r.j).slice(0, 120));
+      r = await vraag('POST', '/app/modellen', { wat: 'model', runtime: 'claude', model: 'claude-fable-5-1' }, { pot: P.jar });
+      toets('16 model claude -> Fable 5.1 (witte lijst)', r.status === 200 && rt.models.claude === 'claude-fable-5-1' && r.j.runtimes[0].model === 'claude-fable-5-1', JSON.stringify(r.j).slice(0, 160));
+      const ml = fs.readFileSync(path.join(DATA, 'modellen.jsonl'), 'utf8').trim().split('\n').map((x) => JSON.parse(x));
+      toets('16 modellen.jsonl: drie regels met tijd, apparaat en wat', ml.length === 3 && ml.every((x) => x.t && x.apparaat && x.wat) && /claude-opus-5-5 -> claude-fable-5-1/.test(ml[2].wat), JSON.stringify(ml));
+      r = await vraag('GET', '/app/modellen', undefined, { pot: P.jar });
+      toets('16 stand toont de laatste wissels, jongste eerst', r.j.log.length === 3 && /fable/.test(r.j.log[0].wat), JSON.stringify(r.j.log));
+      const auditM = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+      toets('16 auditlog: wissel met reden "runtime: …", GET stil', /"route":"\/app\/modellen","m":"POST","status":200,"apparaat":"[a-f0-9]+","reden":"runtime: standaard claude -> codex/.test(auditM) && !/"route":"\/app\/modellen","m":"GET","status":200/.test(auditM), auditM.slice(-400));
+      // passieve kant: niet wisselen
+      await vers(P);
+      rolStub.primair = false;
+      r = await vraag('POST', '/app/modellen', { wat: 'standaard', runtime: 'claude' }, { pot: P.jar });
+      rolStub.primair = true;
+      toets('16 passieve kant -> 409, niets gezet', r.status === 409 && rt.default === 'codex', JSON.stringify(r.j));
+      // de grens: 10 per uur
+      const t0 = H.appStaat.tellers.modellen.length;
+      H.appStaat.tellers.modellen = Array(10).fill(Date.now());
+      await vers(P);
+      r = await vraag('POST', '/app/modellen', { wat: 'standaard', runtime: 'claude' }, { pot: P.jar });
+      toets('16 grens 10 wissels per uur -> 429', r.status === 429 && rt.default === 'codex', r.status + ' ' + t0);
+      H.appStaat.tellers.modellen = [];
+      // apparaat met een vaste plek: nooit wisselen, ook met verse vingerafdruk
+      const regV = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      const ppId = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')].apparaat;
+      regV.apparaten.find((x) => x.id === ppId).soort = 'vast'; regV.apparaten.find((x) => x.id === ppId).vaste_plek = 'Thuis';
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regV));
+      await vers(P);
+      r = await vraag('POST', '/app/modellen', { wat: 'standaard', runtime: 'claude' }, { pot: P.jar });
+      toets('16 vaste plek -> 403 "modellen wisselen kan niet vanaf een apparaat met een vaste plek"', r.status === 403 && /modellen wisselen kan niet/.test(r.j.fout) && rt.default === 'codex', JSON.stringify(r.j));
+      regV.apparaten.find((x) => x.id === ppId).soort = 'reist'; regV.apparaten.find((x) => x.id === ppId).vaste_plek = null;
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regV));
+      // verbruik: nagebootste tank + werkvoorraad
+      const nuV = Date.now();
+      sbStaat.verbruik = { nu: new Date(nuV).toISOString(), laatste: { gemeten_op: new Date(nuV - 120000).toISOString(), vijf_uur: '0.2600', zeven_dagen: 0.21, vijf_uur_reset: new Date(nuV + 3 * 3600000).toISOString(),
+        zeven_dagen_reset: new Date(nuV + 60 * 3600000).toISOString(), status: 'allowed', verstreken: 0.64, voorsprong: -0.43, per_dag_over: 0.31, oordeel: 'ruimte over', minuten_oud: 2 },
+        reeks: [[new Date(nuV - 3600000).toISOString(), '0.2000', 0.2, 0.63], [new Date(nuV - 120000).toISOString(), 0.26, 0.21, 0.64]] };
+      r = await vraag('GET', '/app/verbruik', undefined, { pot: P.jar });
+      toets('16 verbruik: laatste meting als getallen, reeks, ruimte en tikker, geen fouten', r.status === 200 && r.j.laatste.vijf_uur === 0.26 && r.j.laatste.zeven_dagen === 0.21 && r.j.reeks.length === 2 && r.j.reeks[0][1] === 0.2
+        && r.j.ruimte.mag === true && r.j.tikker.starts_vandaag === 42 && r.j.fouten.length === 0, JSON.stringify(r.j).slice(0, 300));
+      const nRpc = sbRpc.filter((x) => x.fn === 'mk_app_verbruik').length;
+      await vraag('GET', '/app/verbruik', undefined, { pot: P.jar });
+      toets('16 verbruik 60 s in het geheugen (geen tweede RPC)', sbRpc.filter((x) => x.fn === 'mk_app_verbruik').length === nRpc);
+      H.appStaat.verbruikCache = null; H.appStaat.wvCache = null; sbStaat.kapot = true;
+      r = await vraag('GET', '/app/verbruik', undefined, { pot: P.jar });
+      sbStaat.kapot = false;
+      toets('16 databank weg: 200 met fouten tank + werkvoorraad, geen verzonnen getallen, niet gecachet', r.status === 200 && r.j.laatste === null && r.j.reeks.length === 0 && r.j.fouten.includes('tank') && r.j.fouten.includes('tikker') && r.j.fouten.includes('werkvoorraad') && !H.appStaat.verbruikCache, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/verbruik', undefined, {});
+      toets('16 verbruik zonder sessie -> 401', r.status === 401, r.status);
+      rt.default = 'claude'; rt.fallback = ''; rt.models.claude = 'claude-opus-5-5';
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──

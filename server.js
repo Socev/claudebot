@@ -317,6 +317,36 @@ function schrijfRuntime(r) {
   fs.renameSync(tmp, RUNTIME_FILE);
 }
 
+// De schakelaar zetten (POST /runtime en, met een vaste witte lijst ervoor, POST /app/modellen; wv138). Alleen de
+// meegegeven velden veranderen; models wordt per sleutel samengevoegd. Geeft { stand } of { fout } of { schrijffout }.
+function runtimeZet(d, bron) {
+  const stand = leesRuntime();
+  if (d.default != null) {
+    const v = String(d.default).trim().toLowerCase();
+    if (!RUNTIMES[v]) return { fout: { error: 'onbekende-runtime', melding: 'onbekende runtime; geldig zijn: ' + RUNTIMES_LIJST.join(', '), lengte: v.length } };
+    stand.default = v;
+  }
+  if (d.fallback != null) {
+    const v = String(d.fallback).trim().toLowerCase();
+    if (v && !RUNTIMES[v]) return { fout: { error: 'onbekende-runtime', melding: 'onbekende fallback; geldig zijn: ' + RUNTIMES_LIJST.join(', ') + ' of leeg', lengte: v.length } };
+    stand.fallback = v;
+  }
+  if (d.models && typeof d.models === 'object') {
+    for (const k in d.models) {
+      if (!RUNTIMES[k]) return { fout: { error: 'onbekende-runtime', melding: 'onbekende runtime in models: geldig zijn ' + RUNTIMES_LIJST.join(', '), lengte: String(k).length } };
+      const v = d.models[k] == null ? '' : String(d.models[k]);
+      const ont = ontleedModel(v);
+      const fout = modelFout(v, k, ont);
+      if (fout) return { fout: fout };
+      stand.models[k] = ont.model;   // opgeslagen als volledig model-id, niet als alias
+    }
+  }
+  if (stand.fallback === stand.default) stand.fallback = '';
+  try { schrijfRuntime(stand); } catch (e) { logError('runtime-schrijf', e); return { schrijffout: true }; }
+  schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'runtime-gezet', default: stand.default, fallback: stand.fallback || '-', bron: bron || 'api' }));
+  return { stand: stand };
+}
+
 // Geeft { runtime, model } terug, of { fout } bij een onbekende runtime.
 // 'model' is voor claude de ANTHROPIC_MODEL-waarde (bestaand gedrag), voor
 // codex de waarde achter -m.
@@ -2301,31 +2331,10 @@ function handleRequest(req, res) {
     return readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
-      const stand = leesRuntime();
-      if (d.default != null) {
-        const v = String(d.default).trim().toLowerCase();
-        if (!RUNTIMES[v]) return weigerRuntime(res, { error: 'onbekende-runtime', melding: 'onbekende runtime; geldig zijn: ' + RUNTIMES_LIJST.join(', '), lengte: v.length }, '/runtime');
-        stand.default = v;
-      }
-      if (d.fallback != null) {
-        const v = String(d.fallback).trim().toLowerCase();
-        if (v && !RUNTIMES[v]) return weigerRuntime(res, { error: 'onbekende-runtime', melding: 'onbekende fallback; geldig zijn: ' + RUNTIMES_LIJST.join(', ') + ' of leeg', lengte: v.length }, '/runtime');
-        stand.fallback = v;
-      }
-      if (d.models && typeof d.models === 'object') {
-        for (const k in d.models) {
-          if (!RUNTIMES[k]) return weigerRuntime(res, { error: 'onbekende-runtime', melding: 'onbekende runtime in models: geldig zijn ' + RUNTIMES_LIJST.join(', '), lengte: String(k).length }, '/runtime');
-          const v = d.models[k] == null ? '' : String(d.models[k]);
-          const ont = ontleedModel(v);
-          const fout = modelFout(v, k, ont);
-          if (fout) return weigerRuntime(res, fout, '/runtime');
-          stand.models[k] = ont.model;   // opgeslagen als volledig model-id, niet als alias
-        }
-      }
-      if (stand.fallback === stand.default) stand.fallback = '';
-      try { schrijfRuntime(stand); } catch (e) { logError('runtime-schrijf', e); res.writeHead(500); return res.end('runtime.json niet schrijfbaar'); }
-      schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'runtime-gezet', default: stand.default, fallback: stand.fallback || '-' }));
-      res._log = { runtime_default: stand.default };
+      const z = runtimeZet(d, 'api');
+      if (z.fout) return weigerRuntime(res, z.fout, '/runtime');
+      if (z.schrijffout) { res.writeHead(500); return res.end('runtime.json niet schrijfbaar'); }
+      res._log = { runtime_default: z.stand.default };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(Object.assign({ ok: true }, breinInfo())));
     });
@@ -3094,7 +3103,7 @@ const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-app
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
-  'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd']);
+  'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen']);
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter)
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
@@ -3144,7 +3153,8 @@ const APP_LOCATIE_CACHE_MS = 30 * 1000;
 const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien']);
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
-const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open']);
+const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
+  'POST /app/modellen']);   // wv138: een runtimewissel raakt alle workflows; nooit vanaf een werk-pc
 const APP_BSN_TEKST = 'in je bericht staat een getal dat op een BSN lijkt (9 cijfers die de elfproef halen). Patiëntgegevens horen niet in Socev: haal het weg. Gaat het om iets anders, stuur het dan vanaf je telefoon.';
 
 const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [] },
@@ -5702,7 +5712,7 @@ function handleApp(req, res) {
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en de
         // BSN-weigering (§ 4.11). Daarna verder met slotKlaar = true (apparaat en sessie worden dan opnieuw gecontroleerd).
         if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
-          return appWeiger(res, 403, 'apparaten beheren kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
+          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
@@ -5738,6 +5748,9 @@ function handleApp(req, res) {
         if (route === 'GET /app/nieuw') return appNieuwRoute(req, res, a);
         if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
+        if (route === 'GET /app/verbruik') return appVerbruik(req, res);
+        if (route === 'GET /app/modellen') return appModellen(req, res);
+        if (route === 'POST /app/modellen') return appModellenZet(req, res, reg, a, s, d);
         if (route === 'GET /app/push') return appPushStand(req, res, a);
         if (route === 'POST /app/push/abonneer') return appPushAbonneer(req, res, a, d);
         if (route === 'POST /app/push/opzeggen') return appPushOpzeggen(req, res, a);
@@ -5819,6 +5832,161 @@ setInterval(function () {
   appHerstelVervaltTik();   // wv135: herstel-vervalt melden of na 48 u opruimen
 }, 60 * 1000).unref();
 setTimeout(function () { appIoOpruim(); }, 30 * 1000).unref();   // na een herstart bestaat geen app-beurt meer: weesmappen weg
+
+// ── Verbruik & modellen (wv138; David 8-10: "Usagetracker van Claude, modellenpicker en modelproviderpicker (dus waar ik kan
+// zien waar we momenteel op zitten, en voorkeuren voor modellen geven)"). Bouwplan § 4.14.
+// Lezen (GET /app/verbruik, GET /app/modellen; stil): de tankmeting (RPC mk_app_verbruik: laatste meting + reeks 7 d), de
+// ruimte en de tikker van de werkvoorraad (mk_broedstoof, zoals de Broedstoof) en de brein-schakelaar (breinInfo).
+// Schrijven (POST /app/modellen): alleen een keuze uit APP_MODEL_KEUZES (geen vrije invoer), met een verse vingerafdruk van
+// dít apparaat, nooit vanaf een apparaat met een vaste plek (APP_BEHEER_ROUTES), alleen op de primaire kant; daarna
+// hetzelfde pad als POST /runtime (runtimeZet), een regel in modellen.jsonl en een melding in de debug-bot.
+// Een wissel raakt elke beurt zonder eigen runtime/model: ~40 actieve n8n-workflows, de achtergrondagents en de app (§ 4.14).
+const APP_RUNTIME_NAAM = { claude: 'Claude (Anthropic)', codex: 'Codex (OpenAI)', gemini: 'Gemini (Google)' };
+// Elk model hieronder gaf op 8-10-2026 op deze pod een geslaagde proefbeurt (wv138: /run met model, antwoord "OK").
+const APP_MODEL_KEUZES = {
+  claude: [
+    { id: 'claude-opus-5-5', naam: 'Opus 5.5', noot: 'het dagelijkse brein' },
+    { id: 'claude-fable-5-1', naam: 'Fable 5.1', noot: 'zwaarst; voor moeilijk werk' },
+    { id: 'claude-sonnet-5-5', naam: 'Sonnet 5.5', noot: 'sneller en lichter' },
+    { id: 'claude-haiku-4-5-20251001', naam: 'Haiku 4.5', noot: 'snelst; alleen licht werk' },
+  ],
+  codex: [
+    { id: 'gpt-5.6-sol', naam: 'GPT-5.6 Sol', noot: 'dagelijks op de Codex-stand' },
+    { id: 'gpt-6-astra', naam: 'GPT-6 Astra', noot: 'zwaarst; plannen en reviews' },
+    { id: 'gpt-5.6-terra', naam: 'GPT-5.6 Terra', noot: 'sneller' },
+    { id: 'gpt-5.6-luna', naam: 'GPT-5.6 Luna', noot: 'snelst' },
+  ],
+  gemini: [
+    { id: '', naam: 'Gemini 3.8 Flash (standaard)', noot: 'wat de Gemini-CLI zelf kiest' },
+    { id: 'gemini-3.8-flash-high', naam: 'Gemini 3.8 Flash, diep', noot: 'Flash met hoog denkniveau' },
+    { id: 'gemini-3.1-pro-high', naam: 'Gemini 3.1 Pro, diep', noot: 'zwaarder' },
+  ],
+};
+// Wat een wissel naar dit brein betekent (Fable-review wv138 M2); de app toont het op de kaart en in de bevestiging.
+const APP_RUNTIME_LET_OP = {
+  codex: 'Codex leest CLAUDE.md en de MCP-koppelingen, maar kent de Socev-skills niet: nachtelijke routines (nachtconsolidatie, wachters, verwerking) en skills als agenda-schrijven draaien dan zonder hun werkbeschrijving. Het tempo van de werkvoorraad blijft aan de Claude-meting hangen; het Codex-verbruik meet Socev niet.',
+  gemini: 'Gemini laadt de Socev-skills, maar draaide hier tot nu toe alleen proefbeurten; het tempo van de werkvoorraad blijft aan de Claude-meting hangen en het Gemini-verbruik meet Socev niet.',
+};
+const APP_MODELLEN_LOG = path.join(APP_DATA, 'modellen.jsonl');
+const APP_MODELLEN_PER_UUR = 10;
+function appRuntimeUit(info) {
+  return {
+    claude: process.env.CLAUDE_CODE_OAUTH_TOKEN ? null : 'geen Claude-login op de pod',
+    codex: info.codex_ingelogd ? null : 'Codex is niet ingelogd op de pod',
+    gemini: info.gemini_ingelogd ? null : 'Gemini is niet ingelogd op de pod',
+  };
+}
+function appModellenLogLees() {
+  try {
+    return fs.readFileSync(APP_MODELLEN_LOG, 'utf8').split('\n').filter(Boolean).slice(-5).map(function (r) {
+      try { const j = JSON.parse(r); return { t: String(j.t || ''), apparaat: String(j.apparaat || '').slice(0, 60), wat: String(j.wat || '').slice(0, 160) }; } catch (e) { return null; }
+    }).filter(Boolean).reverse();
+  } catch (e) { return []; }
+}
+function appModellenStand() {
+  const info = breinInfo();
+  const uit = appRuntimeUit(info);
+  const runtimes = RUNTIMES_LIJST.map(function (rt) {
+    const huidig = typeof info.models[rt] === 'string' ? info.models[rt] : '';
+    const keuzes = APP_MODEL_KEUZES[rt] || [];
+    return { id: rt, naam: APP_RUNTIME_NAAM[rt] || rt, uit: uit[rt], let_op: APP_RUNTIME_LET_OP[rt] || null, modellen: keuzes, model: huidig,
+      model_buiten_lijst: !keuzes.some(function (k) { return k.id === huidig; }) };
+  });
+  return { ok: true, standaard: info.default, terugval: info.fallback || '', runtimes: runtimes,
+    modelfout: info.laatste_modelfout ? { t: info.laatste_modelfout.tijd, model: info.laatste_modelfout.model } : null,
+    ongeldig: (info.models_ongeldig || []).length, gemini_waarschuwing: info.gemini && info.gemini.fout ? 'Gemini start, maar niet al zijn koppelingen laden' : null,
+    log: appModellenLogLees(), primair: rolPrimair() };
+}
+function appModellen(req, res) {
+  res._app.stil = true;
+  appStuur(res, 200, appModellenStand());
+}
+function appModellenZet(req, res, reg, a, s, d) {
+  if (!rolPrimair()) return appWeiger(res, 409, 'deze kant van Socev is nu passief; wisselen kan alleen op de actieve kant', 'niet primair');
+  const wat = String(d.wat || ''), rt = String(d.runtime == null ? '' : d.runtime);
+  const info = breinInfo(), uit = appRuntimeUit(info);
+  const naam = function (r) { return APP_RUNTIME_NAAM[r] || r; };
+  let zet = null, tekst = '';
+  if (wat === 'standaard') {
+    if (!RUNTIMES[rt]) return appWeiger(res, 400, 'onbekende runtime', 'runtime');
+    if (uit[rt]) return appWeiger(res, 409, naam(rt) + ' kan nu niet: ' + uit[rt], 'runtime uit');
+    if (rt === info.default) return appStuur(res, 200, Object.assign(appModellenStand(), { al: true }));
+    zet = { default: rt };
+    tekst = 'standaard ' + info.default + ' -> ' + rt + (info.fallback === rt ? ' (terugval vervalt)' : '');
+  } else if (wat === 'terugval') {
+    if (rt && !RUNTIMES[rt]) return appWeiger(res, 400, 'onbekende runtime', 'runtime');
+    if (rt && uit[rt]) return appWeiger(res, 409, naam(rt) + ' kan nu niet: ' + uit[rt], 'runtime uit');
+    if (rt && rt === info.default) return appWeiger(res, 400, 'de terugval moet een ander brein zijn dan de standaard', 'terugval = standaard');
+    if (rt === (info.fallback || '')) return appStuur(res, 200, Object.assign(appModellenStand(), { al: true }));
+    zet = { fallback: rt };
+    tekst = 'terugval ' + (info.fallback || 'geen') + ' -> ' + (rt || 'geen');
+  } else if (wat === 'model') {
+    if (!RUNTIMES[rt]) return appWeiger(res, 400, 'onbekende runtime', 'runtime');
+    const m = String(d.model == null ? '' : d.model);
+    const k = (APP_MODEL_KEUZES[rt] || []).find(function (x) { return x.id === m; });
+    if (!k) return appWeiger(res, 400, 'dit model staat niet in de lijst', 'model buiten lijst');
+    if (uit[rt]) return appWeiger(res, 409, naam(rt) + ' kan nu niet: ' + uit[rt], 'runtime uit');
+    const huidig = typeof info.models[rt] === 'string' ? info.models[rt] : '';
+    if (m === huidig) return appStuur(res, 200, Object.assign(appModellenStand(), { al: true }));
+    zet = { models: {} }; zet.models[rt] = m;
+    tekst = 'model ' + rt + ' ' + (huidig || 'standaard') + ' -> ' + (m || 'standaard');
+  } else return appWeiger(res, 400, 'ongeldige keuze', 'wat');
+  // pas na de witte lijst (Fable-review wv138 K2: geen vingerafdruk verspillen aan een keuze die toch niet mag)
+  if (!appVersOk(a, s)) { res._app.reden = 'modellen, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig de wissel met je vingerafdruk', vers_nodig: true }); }
+  // de grens telt alleen echte wissels (een geweigerde of al-zo-keuze niet)
+  appStaat.tellers.modellen = appStaat.tellers.modellen || [];
+  if (!appTeller('modellen', APP_MODELLEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak gewisseld dit uur', 'grens modellen');
+  s.vers_tot = 0;   // één vingerafdruk = één wissel (alles hierboven is synchroon, dus geen tweede tabblad ertussen)
+  const z = runtimeZet(zet, 'app ' + a.id);
+  if (z.fout) return appWeiger(res, 400, 'de pod weigerde de keuze: ' + String(z.fout.melding || z.fout.error).slice(0, 160), 'runtimeZet ' + z.fout.error);
+  if (z.schrijffout) return appWeiger(res, 500, 'opslag', 'runtime.json niet schrijfbaar');
+  res._app.reden = 'runtime: ' + tekst.slice(0, 100);
+  try { fs.appendFileSync(APP_MODELLEN_LOG, JSON.stringify({ t: new Date().toISOString(), apparaat: a.naam, apparaat_id: a.id, wat: tekst }) + '\n', { mode: 0o600 }); }
+  catch (e) { logError('app-modellen-log', e); }
+  const na = leesRuntime();
+  appTelegram('Socev-app: runtime gewijzigd vanuit de app ("' + a.naam + '"): ' + tekst + '. Nu: standaard ' + na.default +
+    (na.fallback ? ', terugval ' + na.fallback : ', geen terugval') + ', modellen ' +
+    RUNTIMES_LIJST.map(function (r) { return r + '=' + (na.models[r] || 'standaard'); }).join(' ') +
+    '. Geldt vanaf de volgende beurt voor alles zonder eigen runtime/model (n8n-workflows, agents, app). Terugzetten: in de app of POST /runtime.');
+  appStuur(res, 200, appModellenStand());
+}
+const APP_VERBRUIK_CACHE_MS = 60 * 1000;
+async function appVerbruik(req, res) {
+  res._app.stil = true;   // ververst elke 60 s zolang het scherm open is
+  const c = appStaat.verbruikCache;
+  if (c && Date.now() - c.op < APP_VERBRUIK_CACHE_MS) return appStuur(res, 200, c.d);
+  const fouten = [];
+  const [tank, wv] = await Promise.all([
+    appSbRpc('mk_app_verbruik', {}).catch(function (e) { logError('app-verbruik', e); fouten.push('tank'); return null; }),
+    appSbRpc('mk_broedstoof', {}).catch(function (e) { logError('app-verbruik', e); fouten.push('tikker'); return null; }),
+  ]);
+  let vrij = null, limieten = null;
+  try {
+    const st = await appWerkvoorraad();
+    const s = st && st.stand ? st.stand : null;
+    if (s && s.max_eigen_vrij != null) {
+      vrij = s.vrij_tot || null;
+      limieten = { vrij: { tegelijk: Number(s.max_eigen_vrij) || 0, per_dag: Number(s.max_starts_dag_vrij) || 0 },
+        normaal: { tegelijk: Number(s.max_eigen_normaal) || 0, per_dag: Number(s.max_starts_dag_normaal) || 0 },
+        vijf_uur_max: s.vijf_uur_max != null ? Number(s.vijf_uur_max) : null, tank_max_leeftijd_min: Number(s.tank_max_leeftijd_min) || null };
+    }
+  } catch (e) { logError('app-verbruik', e); if (fouten.indexOf('werkvoorraad') < 0) fouten.push('werkvoorraad'); }
+  const getal = function (v) { const n = Number(v); return v == null || !isFinite(n) ? null : n; };
+  const l = tank && tank.laatste ? tank.laatste : null;
+  const d = {
+    ok: true,
+    laatste: l ? { gemeten_op: l.gemeten_op, minuten_oud: getal(l.minuten_oud), vijf_uur: getal(l.vijf_uur), zeven_dagen: getal(l.zeven_dagen),
+      vijf_uur_reset: l.vijf_uur_reset || null, zeven_dagen_reset: l.zeven_dagen_reset || null, status: String(l.status || '').slice(0, 30),
+      verstreken: getal(l.verstreken), voorsprong: getal(l.voorsprong), per_dag_over: getal(l.per_dag_over), oordeel: String(l.oordeel || '').slice(0, 60) } : null,
+    reeks: tank && Array.isArray(tank.reeks) ? tank.reeks.map(function (r) { return [r[0], getal(r[1]), getal(r[2]), getal(r[3])]; }) : [],
+    ruimte: wv && wv.ruimte ? { mag: wv.ruimte.mag === true, pad: String(wv.ruimte.pad || '').slice(0, 20), reden: String(wv.ruimte.reden || '').slice(0, 160) } : null,
+    tikker: wv && wv.tikker ? { aan: wv.tikker.aan !== false, reden: String(wv.tikker.reden || '').slice(0, 160), starts_vandaag: Number(wv.tikker.starts_vandaag) || 0,
+      max_dag: Number(wv.tikker.max_dag) || 0, alleen_doorwerk: wv.tikker.alleen_doorwerk === true } : null,
+    vrij_tot: vrij, limieten: limieten, nu: tank && tank.nu ? tank.nu : new Date().toISOString(), fouten: fouten,
+  };
+  if (!fouten.length) appStaat.verbruikCache = { op: Date.now(), d: d };
+  appStuur(res, 200, d);
+}
 
 function appInfo() {
   let reg;
