@@ -34,7 +34,9 @@ const ctx = {
   sendReport: function (e, res) { verzonden.push({ id: e.job_id, res: res }); },
   projectDirFor: function () { return werk; },
   saveAgents: function () {}, schrijfLog: function () {}, logError: function (w, e) { console.log('logError', w, e); },
-  runBrein: null
+  runBrein: null,
+  // rolwachter (uitwijk stap 3): de toets draait als primaire kant
+  rolEerste: Promise.resolve(), rolPrimair: function () { return true; }
 };
 vm.createContext(ctx);
 vm.runInContext(blok + '\nthis.__t = { eindOpenTaken, eindIsWachtzin, eindLevendeProcessen, eindcontrole, EIND_LET_OP, AGENT_EINDREGEL };', ctx);
