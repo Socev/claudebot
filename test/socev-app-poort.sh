@@ -3096,6 +3096,13 @@ async function bewijs(o) {
       await slaap(80);
       r = await vraag('POST', '/app/uitslag', { job_id: gh.jobId }, { pot: P.jar });
       toets('22 regressie: vraagregel in het hoofdkanaal krijgt nog wel knoppen', r.j.vraag && r.j.vraag.tekst === 'Zal ik het doen?', JSON.stringify(r.j).slice(0, 200));
+      const nM = gestart.length;
+      r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'machinekamer', tekst: 'regressie mk' }, { pot: P.jar });
+      await slaap(30);
+      const gmk = gestart[gestart.length - 1];
+      toets('22 regressie: machinekamer blijft telegram-debug met de omlijsting, zonder de kop van de Cijfer-Meester (Fable K5)', r.status === 200 && gestart.length === nM + 1 && gmk.chatId === 'telegram-debug' && gmk.prompt === OMLIJST.replace(/\s+$/, '') + '\n[APP] regressie mk' && !/CIJFER-MEESTER/.test(gmk.prompt), JSON.stringify(gmk).slice(0, 200));
+      afmaken[gmk.jobId]('ok');
+      await slaap(50);
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──

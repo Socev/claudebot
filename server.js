@@ -4602,7 +4602,7 @@ async function appKnop(req, res, reg, a, s, d) {
   if (!v[sleutel]) { terug(); return appWeiger(res, 404, 'deze vraag ken ik niet (meer)', 'onbekende vraag'); }
   if (v[sleutel].antwoord) { terug(); res._app.reden = 'al beantwoord'; return al(v[sleutel].antwoord); }
   const tijd = appKlok();
-  const kanaalNaam = rij.kanaal === 'hoofd' ? 'het hoofdkanaal' : 'de machinekamer';
+  const kanaalNaam = ({ hoofd: 'het hoofdkanaal', machinekamer: 'de machinekamer', 'cijfer-meester': 'de Cijfer-Meester' })[rij.kanaal] || rij.kanaal;   // Fable-review wv200 K1
   const tekst = keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk in de app (' + kanaalNaam + ') om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
     : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk in de app (' + kanaalNaam + ') om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)';
