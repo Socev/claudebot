@@ -2538,7 +2538,7 @@ async function bewijs(o) {
       const nep = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
       H.appStaat.praktijken = null; const nV = finStaat.sql.length;
       await H.appPraktijkenRoute({}, nep, { id: 'x', soort: 'vast' });
-      toets('20 vaste plek: lege lijst en geen D1-aanroep', nep.st === 200 && nep.b.vaste_plek === true && nep.b.entiteiten.length === 0 && finStaat.sql.length === nV, JSON.stringify(nep.b));
+      toets('20 vaste plek: ook gevuld (David 8-10)', nep.st === 200 && nep.b.vaste_plek === false && nep.b.entiteiten.length === 5, JSON.stringify(nep.b).slice(0, 200));
       H.appStaat.praktijken = null; zdStaat.kapot = true;
       r = await vraag('GET', '/app/praktijken', undefined, { pot: P.jar });
       toets('20 zorgdata stuk: 200, eigen cijfers wel, sector weg, fout in gewone taal', r.status === 200 && r.j.entiteiten.length === 5 && r.j.entiteiten.every((e) => e.sector === null) && /Cijfer-Meester/.test(r.j.fouten.join()) && r.j.entiteiten[0].kern.length >= 5, JSON.stringify(r.j.fouten));

@@ -6157,7 +6157,7 @@ function appPraktijken() {
 }
 async function appPraktijkenRoute(req, res, a) {
   res._app.stil = true;   // de app leest bij openen en op Ververs
-  if (a && a.soort === 'vast') return appStuur(res, 200, { ok: true, vaste_plek: true, entiteiten: [], fouten: [], bijgewerkt: null });
+  // David 8-10-2026 (app): "De tab Praktijken mag op alle apparaten zichtbaar en gevuld zijn" — ook op een vaste plek.
   let d;
   try { d = await appPraktijken(); } catch (e) { logError('app-praktijken', e); return appWeiger(res, 503, 'de cijfers zijn nu niet te lezen', 'praktijken fout'); }
   appStuur(res, 200, { ok: true, vaste_plek: false, entiteiten: d.entiteiten, fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
