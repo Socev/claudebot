@@ -5833,10 +5833,12 @@ async function appVandaagRoute(req, res, a) {
 // dezelfde rij-toets, claim en schrijfstappen (Todoist, actie_state, correspondentie_state) als een tik in Telegram, en het
 // Telegram-bericht wordt daar ook opnieuw getekend. Geen eigen logica op de pod: die zoekt alleen de rij op (datum + positie;
 // nonce en message_id gaan nooit naar de app) en geeft de pop-uptekst van n8n door. Sleutel: die van het Socev-schrijfluik
-// (N8N_WEBHOOK_SOCEV_AGENDA, ook buiten de auto-agents), in n8n alleen als sha256-vingerafdruk. 📅 kan nog niet uit de app (het
-// blokvoorstel komt als agendaknop in Telegram; volgt via de agenda-poort van de app, wv171).
+// (N8N_WEBHOOK_SOCEV_AGENDA, ook buiten de auto-agents), in n8n alleen als sha256-vingerafdruk. Sinds wv181 ook 📅 (blok): dezelfde
+// Blok-tak als in Telegram (claim, één voorstel per 30 min per item; AI - Voorwerk-blok zoekt het uur). Het voorstel komt als
+// agendaknop (✅/❌) in Telegram; app en pod schrijven zelf niets in de agenda. Niet via een app-beurt + Poortwachter: Voorwerk-blok
+// slaat de Poortwachter bewust over (Davids ✅ is de bevestiging) en een app-bevestiging gaf toch hooguit oranje = ✅ in Telegram.
 const APP_VOORWERK_KNOP_WF = process.env.APP_VOORWERK_KNOP_WF || 'SLYiYwqAabFlC8H3';   // AI - Voorwerk-knoppen
-const APP_ACTIE_KEUZE = { gedaan: 'g', later: 'l', laten_vallen: 'w', terug: 'o' };
+const APP_ACTIE_KEUZE = { gedaan: 'g', later: 'l', laten_vallen: 'w', terug: 'o', blok: 'b' };
 const APP_ACTIES_PER_UUR = 60;
 appStaat.tellers.actie = appStaat.tellers.actie || [];
 async function appVoorwerkKnop(body) {
@@ -5854,7 +5856,7 @@ async function appVoorwerkKnop(body) {
 }
 async function appActieRoute(req, res, a, d) {
   const datum = String(d.datum || ''), positie = typeof d.positie === 'number' ? d.positie : NaN, keuze = String(d.keuze || '');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 10 || !APP_ACTIE_KEUZE[keuze]) return appWeiger(res, 400, 'ongeldige knop', 'actie velden');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 10 || !Object.hasOwn(APP_ACTIE_KEUZE, keuze)) return appWeiger(res, 400, 'ongeldige knop', 'actie velden');   // hasOwn: geen 'constructor'
   if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik de knoppen in Telegram', 'rol passief');
   if (!appTeller('actie', APP_ACTIES_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_ACTIES_PER_UUR + '); gebruik Telegram', 'grens actie');
   if (!process.env.N8N_WEBHOOK_SOCEV_AGENDA) return appWeiger(res, 503, 'de knoppen zijn hier nog niet ingericht; gebruik Telegram', 'actie geen sleutel');
