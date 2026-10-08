@@ -473,6 +473,12 @@ function lopendeJobs() {
 function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
 
 // ── v2: register van achtergrondagents (overleeft een containerherstart) ───
+// Werkvoorraad-jobs (label <prefix>:wv<id> …) blijven 48 u na afloop buiten de trim van 50: valt er een weg vóór de
+// tikker hem afsloot, dan wordt hij "niet meer te vinden" -> open -> dubbele start (wv51, Fable wv39 K2; 7-10 dekten
+// 50 entries maar ±16 u). Plafond 300 afgeronde entries (±300 B per stuk, dus <100 KB) tegen ongebreidelde groei.
+const AGENTS_WV_LABEL = /^(machinekamer|socev):wv\d+ /;
+const AGENTS_WV_BEWAAR_MS = 48 * 3600 * 1000;
+const AGENTS_PLAFOND = 300;
 let agentsReg = {};
 try { agentsReg = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8')); } catch (e) { agentsReg = {}; }
 // Stond er bij het opstarten nog iets op 'running', dan is dat door de herstart
@@ -501,8 +507,16 @@ try { agentsReg = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8')); } catch (e) 
   }
   if (dirty) saveAgents();
 })();
+// Foutcode in het register (wv51, 8-10-2026): raakt het /result van een werkvoorraad-job kwijt (containerherstart,
+// ttl 2 u), dan handelt de tikker de fout toch af (limiet -> pauze, afgebroken-gestopt -> vervallen). Alleen korte
+// codes; vrije fouttekst wordt 'overig', want /agents is zonder sleutel leesbaar.
+function agentFoutcode(err) {
+  if (!err) return null;
+  const s = String(err);
+  return /^[a-z][a-z0-9-]{0,60}$/.test(s) ? s : 'overig';
+}
 function saveAgents() {
-  // Register klein houden: bewaar de jongste 50 AFGERONDE entries.
+  // Register klein houden: bewaar de jongste 50 AFGERONDE entries (plus verse wv-jobs, zie hierboven).
   // Review-fix 16-8 (#5): lopende of nog-niet-afgerapporteerde entries nooit
   // wegtrimmen — anders schrijft processAgent/sendReport naar een losgekoppeld
   // object, verdwijnt de agent uit /agents en telt hij niet meer mee voor
@@ -513,7 +527,13 @@ function saveAgents() {
   }
   const afgerond = Object.keys(agentsReg).filter(function (id) { return !onaantastbaar(agentsReg[id]); })
     .sort(function (a, b) { return (agentsReg[b].started || 0) - (agentsReg[a].started || 0); });
-  for (let i = 50; i < afgerond.length; i++) delete agentsReg[afgerond[i]];
+  const wvGrens = Date.now() - AGENTS_WV_BEWAAR_MS;
+  let gewoon = 0;
+  afgerond.forEach(function (id, i) {
+    const a = agentsReg[id];
+    const wvVers = AGENTS_WV_LABEL.test(String(a.label || '')) && Math.max(a.ended || 0, a.started || 0) > wvGrens;
+    if (i >= AGENTS_PLAFOND || !(wvVers || gewoon++ < 50)) delete agentsReg[id];
+  });
   try { fs.writeFileSync(AGENTS_FILE, JSON.stringify(agentsReg)); } catch (e) {}
 }
 
@@ -2054,7 +2074,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     appRapport = volledigeUitvoer || (r.error ? 'Mislukt: ' + String(r.error) : '');
     j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
     jobEindLog(jobId, j, ws);
-    entry.status = 'done'; entry.ok = !!r.ok; entry.ended = Date.now(); saveAgents();
+    entry.status = 'done'; entry.ok = !!r.ok; entry.error = agentFoutcode(r.error); entry.ended = Date.now(); saveAgents();
     sendReport(entry, Object.assign({}, r, { output: volledigeUitvoer }));
     autoNaAfloop(jobId, { ok: !!r.ok, output: volledigeUitvoer }, entry && entry.label);   // spraakkastje: terugkomen in de auto
   } catch (e) {
@@ -2063,7 +2083,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     appRapport = 'Mislukt: ' + String(e);
     j.status = 'done'; j.done_at = Date.now(); j.result = r;
     jobEindLog(jobId, j, ws);
-    entry.status = 'done'; entry.ok = false; entry.ended = Date.now(); saveAgents();
+    entry.status = 'done'; entry.ok = false; entry.error = agentFoutcode(r.error); entry.ended = Date.now(); saveAgents();
     sendReport(entry, r);
   } finally {
     const route = appRoute(entry && entry.label);
@@ -2409,6 +2429,7 @@ function handleRequest(req, res) {
         rapport: a.rapport,
         eindcontrole: a.eindcontrole,
         herstart: a.herstart,
+        error: a.error,   // foutcode (wv51); de tikker gebruikt hem als /result kwijt is
         running_ms: (j && j.progress) ? j.progress.running_ms : undefined,
         last_activity_ms: (j && j.progress) ? j.progress.last_activity_ms : undefined
       };
