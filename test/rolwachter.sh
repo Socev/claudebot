@@ -22,6 +22,9 @@ const sb = http.createServer((q, s) => {
   if (q.url !== '/rest/v1/rpc/uitwijk_stand_lees') { s.writeHead(404); return s.end(); }
   lezingen++;
   if (modus === 'hang') return;                       // nooit antwoorden
+  if (modus === 'traag') {                            // olares, maar pas na 450 ms (binnen ROL_TIMEOUT_MS 600)
+    return setTimeout(() => { s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify([{ actieve_kant: 'olares', sinds: '2026-10-06T09:00:00Z' }])); }, 450);
+  }
   if (modus === '500') { s.writeHead(500); return s.end('{}'); }
   s.writeHead(200, { 'content-type': 'application/json' });
   s.end(JSON.stringify([{ actieve_kant: modus, sinds: '2026-10-06T09:00:00Z' }]));
@@ -56,10 +59,10 @@ function server(naam, poort, extraEnv) {
   const p = spawn(process.execPath, [path.join(d, 'server.js')], { env, detached: true, stdio: ['ignore', fs.openSync(path.join(d, 'out.log'), 'a'), fs.openSync(path.join(d, 'out.log'), 'a')] });
   return { p, d, poort, rolbestand: path.join(d, 'home', 'bin', 'uitwijk-rol') };
 }
-function req(srv, m, pad, body) {
+function req(srv, m, pad, body, kop) {
   return new Promise((ok) => {
     const t0 = Date.now();
-    const r = http.request({ host: '127.0.0.1', port: srv.poort, path: pad, method: m, headers: { 'content-type': 'application/json' } }, (res) => {
+    const r = http.request({ host: '127.0.0.1', port: srv.poort, path: pad, method: m, headers: Object.assign({ 'content-type': 'application/json' }, kop || {}) }, (res) => {
       let b = ''; res.on('data', (c) => b += c); res.on('end', () => { let j = {}; try { j = JSON.parse(b); } catch (e) { j = { raw: b }; } j._status = res.statusCode; j._ms = Date.now() - t0; ok(j); });
     });
     r.on('error', (e) => ok({ _status: 0, fout: e.code })); if (body) r.write(JSON.stringify(body)); r.end();
@@ -78,6 +81,9 @@ async function wachtRol(srv, rol, maxMs) { const t = Date.now(); while (Date.now
 const stop = (s) => { try { process.kill(-s.p.pid, 'SIGKILL'); } catch (e) {} };
 const run = (s) => req(s, 'POST', '/run', { secret: 'fout', prompt: 'x' });
 const agent = (s) => req(s, 'POST', '/agent', { secret: 'fout', prompt: 'x' });
+// OTA-vraag zoals de firmware hem stelt (POST, Device-Id, body met de versie), en de firmware-download (GET + Socev-Firmware).
+const ota = (s, m, pad) => req(s, m || 'POST', pad || '/auto/ota/', m === 'GET' ? undefined : { application: { version: '2.5.261008.1' } }, { 'Device-Id': '02:50:c0:ae:00:01', Host: 'socev.huisdokter.dev' });
+const fwGet = (s) => req(s, 'GET', '/auto/ota/', undefined, { 'Device-Id': '02:50:c0:ae:00:01', 'Socev-Firmware': '0'.repeat(64) });
 
 (async () => {
   await new Promise((r) => sb.listen(0, '127.0.0.1', r));
@@ -86,7 +92,7 @@ const agent = (s) => req(s, 'POST', '/agent', { secret: 'fout', prompt: 'x' });
     // ── 1. olares actief -> primair; poortjes open (401 = voorbij de rolpoort, op de secretcontrole)
     modus = 'olares';
     const s1 = server('s1', 18771, { OFFSITE_INTERVAL_MIN: '1', OFFSITE_START_DELAY_MIN: '1' }); alle.push(s1); await wacht(s1);
-    let h = await wachtRol(s1, 'primair', 3000);
+    let h = await wachtRol(s1, 'primair', 3000), r0;
     toets('1 rol primair bij actieve_kant olares', h.rol === 'primair' && h.kant === 'olares' && h.uitwijk && h.uitwijk.actieve_kant === 'olares', JSON.stringify(h.uitwijk));
     toets('1 /health ok blijft true', h.ok === true);
     const pub = await req(s1, 'GET', '/health/publiek');
@@ -95,6 +101,10 @@ const agent = (s) => req(s, 'POST', '/agent', { secret: 'fout', prompt: 'x' });
     toets('1 /run voorbij de rolpoort (401)', (await run(s1))._status === 401);
     toets('1 /agent voorbij de rolpoort (401)', (await agent(s1))._status === 401);
     toets('1 /auto/hartslag voorbij de rolpoort (503 auto-uit)', (await req(s1, 'POST', '/auto/hartslag', {}))._status === 503);
+    r0 = await ota(s1);
+    toets('1 POST /auto/ota/ voorbij de rolpoort (503 auto-uit, niet passief)', r0._status === 503 && r0.error === 'auto-uit', JSON.stringify(r0));
+    r0 = await ota(s1, 'POST', '/auto/ota');
+    toets('1 POST /auto/ota (zonder slash) voorbij de rolpoort', r0._status === 503 && r0.error === 'auto-uit', JSON.stringify(r0));
     await slaap(2600);
     const offPrim = offsiteN();
     toets('1 offsite draait als primair, met kant en rolbestand mee', offPrim >= 1 && /kant=olares bestand=\S+uitwijk-rol/.test(lees(path.join(W, 'offsite.log'))), offPrim + ' x; ' + lees(path.join(W, 'offsite.log')).split('\n')[0]);
@@ -108,7 +118,18 @@ const agent = (s) => req(s, 'POST', '/agent', { secret: 'fout', prompt: 'x' });
     toets('2 /agent 409 passief', (await agent(s1))._status === 409);
     toets('2 /auto/hartslag 409', (await req(s1, 'POST', '/auto/hartslag', {}))._status === 409);
     toets('2 /auto-intern/bericht 409', (await req(s1, 'POST', '/auto-intern/bericht', { secret: 'proef' }))._status === 409);
-    toets('2 /auto/ota blijft open (geen 409)', (await req(s1, 'GET', '/auto/ota/'))._status === 503);
+    // stap 9 (wv118): de OTA-vraag 503 passief, zodat firmware 2.5.261008.1 naar zijn andere vaste adres gaat
+    r0 = await ota(s1);
+    toets('2 POST /auto/ota/ 503 passief (geen OTA-antwoord van de passieve kant)', r0._status === 503 && r0.error === 'passief' && Object.keys(r0).filter((k) => k[0] !== '_').join(',') === 'error', JSON.stringify(r0));
+    r0 = await ota(s1, 'POST', '/auto/ota');
+    toets('2 POST /auto/ota (zonder slash) 503 passief', r0._status === 503 && r0.error === 'passief', JSON.stringify(r0));
+    r0 = await ota(s1, 'GET');
+    toets('2 GET /auto/ota/ zonder Socev-Firmware 503 passief', r0._status === 503 && r0.error === 'passief', JSON.stringify(r0));
+    r0 = await ota(s1);
+    toets('2 passief antwoordt meteen (geen startwacht)', r0._ms < 300, r0._ms + ' ms');
+    r0 = await fwGet(s1);
+    toets('2 firmware-download (GET + Socev-Firmware) blijft open (503 auto-uit)', r0._status === 503 && r0.error === 'auto-uit', JSON.stringify(r0));
+    toets('2 passieve OTA gelogd met rol', /pad=\/auto\/ota\/ status=503 \S+ auto=ota rol=passief/.test(lees(path.join(s1.d, 'api.log'))));
     toets('2 websocket /auto/ws 409', /^HTTP\/1\.1 409/.test(await upgrade(s1)));
     toets('2 /health en /result blijven open', (await req(s1, 'GET', '/health'))._status === 200 && (await req(s1, 'POST', '/result', { secret: 'fout' }))._status === 401);
     toets('2 rolbestand passief', /^rol=passief$/m.test(lees(s1.rolbestand)));
@@ -121,6 +142,8 @@ const agent = (s) => req(s, 'POST', '/agent', { secret: 'fout', prompt: 'x' });
     h = await wachtRol(s1, 'primair', 3000);
     toets('3 terug primair', h.rol === 'primair');
     toets('3 /run weer voorbij de rolpoort', (await run(s1))._status === 401);
+    r0 = await ota(s1);
+    toets('3 POST /auto/ota/ weer voorbij de rolpoort', r0._status === 503 && r0.error === 'auto-uit', JSON.stringify(r0));
     const n1 = offsiteN(); await slaap(2600);
     toets('3 offsite hervat', offsiteN() > n1, n1 + ' -> ' + offsiteN());
 
@@ -157,7 +180,20 @@ const agent = (s) => req(s, 'POST', '/agent', { secret: 'fout', prompt: 'x' });
     await wacht(s3);
     r = await run(s3);
     toets('6 /run tijdens hangende startlezing: 409 binnen de grens', r._status === 409 && r._ms < 2500, r._status + ' na ' + r._ms + ' ms');
+    r = await ota(s3);
+    toets('6 POST /auto/ota/ na mislukte startlezing: 503 passief', r._status === 503 && r.error === 'passief', r._status + ' ' + JSON.stringify(r));
     stop(s3);
+
+    // ── 6b. eerste OTA-vraag vlak na de start, stand olares maar traag (450 ms): wacht op de eerste lezing en gaat
+    //        dan door (auto-uit), nooit een valse 503 passief door een code-uitrol (stap 9, wv118)
+    modus = 'traag';
+    const s6 = server('s6', 18776); alle.push(s6);
+    let eerste = null;
+    for (let i = 0; i < 200 && !eerste; i++) { const x = await ota(s6); if (x._status) eerste = x; else await slaap(25); }
+    toets('6b eerste OTA-vraag na de start: door de rolpoort (auto-uit), niet passief', eerste && eerste._status === 503 && eerste.error === 'auto-uit', JSON.stringify(eerste));
+    toets('6b die vraag wachtte op de lezing (> 100 ms)', eerste && eerste._ms > 100, eerste && (eerste._ms + ' ms'));
+    stop(s6);
+    modus = 'hang';
 
     // ── 7. kant vps leest vps -> primair; ongeldige kant -> passief
     modus = 'vps';

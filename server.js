@@ -5214,8 +5214,8 @@ function appInfo() {
 
 // ── Rolwachter (uitwijk stap 3, 6-10-2026) ─────────────────────────────────────────────────────────
 // Er is altijd maar één actieve kant (olares | vps); die staat in Supabase (machinekamer.uitwijk_stand, RPC
-// uitwijk_stand_lees). Een pod die niet de actieve kant is, is PASSIEF: /run, /agent en de kastjepaden geven 409,
-// en hij schrijft niets naar gedeelde opslag (offsite hier; bisync en GHAWA in run.sh via het rolbestand).
+// uitwijk_stand_lees). Een pod die niet de actieve kant is, is PASSIEF: /run, /agent en de kastjepaden geven 409 (de
+// OTA-vraag 503, stap 9), en hij schrijft niets naar gedeelde opslag (offsite hier; bisync en GHAWA in run.sh via het rolbestand).
 // Fail-closed: na elke processtart (ook een code-uitrol) passief tot een verse lezing (Fable-review plan #1).
 // Tijdens bedrijf houdt een mislukte lezing de rol hooguit ROL_GRATIE_MS vast, daarna passief: zonder grens bleef
 // een Olares zonder internet "primair" terwijl de VPS al aan stond (review stap 3, #1).
@@ -6205,14 +6205,41 @@ function autoProxyHttp(req, res) {
   if ((soort === 'hartslag' && req.method !== 'POST') || (soort === 'bericht' && req.method !== 'GET')) {
     res.writeHead(405, { 'Content-Type': 'application/json' }); return res.end('{"error":"methode"}');
   }
+  // Netwerkupdate (GET /auto/ota/ met Socev-Firmware, ± 2,8 MB): het kastje leest met tegendruk en schrijft per 4 kB
+  // naar flash; de 10 s stilte-grens kon zo'n download afbreken (review 4-10, punt 3). Daarvoor 180 s.
+  const isFirmware = req.method === 'GET' && soort === 'ota' && req.headers['socev-firmware'] !== undefined;
+  // Uitwijk stap 9 (wv118; Fable-review wv16 #5): een PASSIEVE pod geeft geen OTA-antwoord. Dat antwoord noemt de
+  // websocket van deze kant, die passief 409 geeft; met 503 gaat firmware >= 2.5.261008.1 meteen naar zijn andere
+  // vaste OTA-adres (alleen 200 + socev_token_ok telt). Alleen de firmware-download blijft open: die volgt een
+  // aanbod dat deze kant als primair gaf. Net na een processtart wacht de vraag op de eerste rollezing
+  // (hooguit ROL_START_WACHT_MS, zoals /run), zodat een code-uitrol geen valse 503 geeft.
+  if (soort === 'ota' && !isFirmware && !rolPrimair()) {
+    if (rol.eerste) return autoOtaPassief(res);
+    req.on('error', function () {});
+    let t = null;
+    return Promise.race([rolEerste, new Promise(function (r) { t = setTimeout(r, ROL_START_WACHT_MS); })])
+      .then(function () {
+        clearTimeout(t);
+        if (req.destroyed || res.writableEnded || (req.socket && req.socket.destroyed)) return;   // kastje al weg
+        return rolPrimair() ? autoProxyDoor(req, res, isFirmware) : autoOtaPassief(res);
+      })
+      .catch(function (e) { logError('auto-ota', e); try { if (!res.headersSent) res.writeHead(502); res.end(); } catch (x) {} });
+  }
+  autoProxyDoor(req, res, isFirmware);
+}
+
+function autoOtaPassief(res) {
+  res._log = Object.assign(res._log || {}, { rol: rol.rol });
+  res.writeHead(503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end('{"error":"passief"}');
+}
+
+function autoProxyDoor(req, res, isFirmware) {
   if (!auto.kind) { res.writeHead(503, { 'Content-Type': 'application/json' }); return res.end('{"error":"auto-uit"}'); }
   const kop = {};
   const hop = { connection: 1, 'keep-alive': 1, 'proxy-connection': 1, 'transfer-encoding': 1, upgrade: 1, te: 1, trailer: 1 };
   for (const h in req.headers) if (!hop[h]) kop[h] = req.headers[h];
   kop['x-forwarded-for'] = autoXff(req);
-  // Netwerkupdate (GET /auto/ota/ met Socev-Firmware, ± 2,8 MB): het kastje leest met tegendruk en schrijft per 4 kB
-  // naar flash; de 10 s stilte-grens kon zo'n download afbreken (review 4-10, punt 3). Daarvoor 180 s.
-  const isFirmware = req.method === 'GET' && soort === 'ota' && req.headers['socev-firmware'] !== undefined;
   const p = http.request({ host: '127.0.0.1', port: AUTO_POORT, method: req.method, path: req.url, headers: kop, timeout: isFirmware ? 180000 : 10000 }, function (r) {
     const terug = {};
     for (const h in r.headers) if (!hop[h]) terug[h] = r.headers[h];

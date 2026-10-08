@@ -17,7 +17,9 @@ const up = http.createServer((req, res) => {
   setTimeout(() => res.end(Buffer.alloc(1000)), fw ? 11000 : 11000);
 });
 up.listen(0, '127.0.0.1', () => {
-  const ctx = { http, require, Buffer, console, setTimeout, String, Object, JSON, auto: { kind: {} }, AUTO_POORT: up.address().port };
+  const ctx = { http, require, Buffer, console, setTimeout, String, Object, JSON, auto: { kind: {} }, AUTO_POORT: up.address().port,
+    // rolwachter-stubs (uitwijk stap 3/9): primair, eerste lezing gedaan
+    rolPrimair: () => true, rol: { eerste: 1, rol: 'primair' }, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 6000, Promise, logError: () => {} };
   vm.createContext(ctx); vm.runInContext(rp + blok + '\nthis.autoProxyHttp = autoProxyHttp;', ctx);
   const px = http.createServer((req, res) => ctx.autoProxyHttp(req, res));
   px.listen(0, '127.0.0.1', async () => {
