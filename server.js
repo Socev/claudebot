@@ -510,7 +510,21 @@ const AGENTS_WV_LABEL = /^(machinekamer|socev):wv\d+ /;
 const AGENTS_WV_BEWAAR_MS = 48 * 3600 * 1000;
 const AGENTS_PLAFOND = 300;
 let agentsReg = {};
-try { agentsReg = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8')); } catch (e) { agentsReg = {}; }
+// wv223 (8-10-2026): een onleesbaar register begon vroeger stil leeg. Nu een logregel en het oude bestand bewaard
+// (agent_jobs.json.onleesbaar-<ms>), zodat de oorzaak na te gaan is; de eerste saveAgents schrijft daarna een vers register.
+try {
+  const r = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8'));
+  // Fable wv223 K4: een array of kale waarde is ook onleesbaar (een array verliest bij stringify al zijn job-sleutels)
+  if (!r || typeof r !== 'object' || Array.isArray(r)) { const f = new Error('register is geen object'); f.name = 'Vormfout'; throw f; }
+  agentsReg = r;
+} catch (e) {
+  agentsReg = {};
+  if (e.code !== 'ENOENT') {
+    let bewaard = null;
+    try { bewaard = AGENTS_FILE + '.onleesbaar-' + Date.now(); fs.renameSync(AGENTS_FILE, bewaard); } catch (e2) { bewaard = null; }
+    schrijfLog(nu() + ' fout ' + velden({ waar: 'register-onleesbaar', name: e.name, code: e.code, bewaard: bewaard ? path.basename(bewaard) : 'nee' }));
+  }
+}
 // Stond er bij het opstarten nog iets op 'running', dan is dat door de herstart
 // gesneuveld. Niet stil laten verdwijnen: expliciet zo markeren, zodat
 // GET /agents en de heartbeat het kunnen zien.
@@ -591,7 +605,11 @@ function saveAgents() {
     const wvVers = AGENTS_WV_LABEL.test(String(a.label || '')) && Math.max(a.ended || 0, a.started || 0) > wvGrens;
     if (i >= AGENTS_PLAFOND || !(wvVers || gewoon++ < 50)) delete agentsReg[id];
   });
-  try { fs.writeFileSync(AGENTS_FILE, JSON.stringify(agentsReg)); } catch (e) {}
+  // wv223: atomair via tmp + rename (zoals rolSchrijfBestand). In place schrijven liet bij een uitrol/OOM/SIGKILL midden
+  // in de schrijfactie een half register achter, en een gelijktijdige lezer zag soms een halve JSON (wv202).
+  const tmp = AGENTS_FILE + '.tmp' + process.pid;
+  try { fs.writeFileSync(tmp, JSON.stringify(agentsReg)); fs.renameSync(tmp, AGENTS_FILE); }
+  catch (e) { logError('register-schrijven', e); try { fs.unlinkSync(tmp); } catch (e2) {} }
 }
 
 // Serialiseer per chat+workspace: voeg fn toe aan de keten van die sleutel.

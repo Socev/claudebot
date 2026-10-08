@@ -21,7 +21,10 @@ const sid = a.includes('--session-id') ? a[a.indexOf('--session-id') + 1] : 'x';
 setTimeout(() => { process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: 'klaar ' + sleutel, session_id: sid })); process.exit(0); }, 300);
 `, { mode: 0o755 });
 const rapporten = [];
-const hook = http.createServer((q, s) => { let b = ''; q.on('data', c => b += c); q.on('end', () => { try { rapporten.push(JSON.parse(b)); } catch (e) {} s.end('{}'); }); });
+// wv223: de hook is ook de nep-Supabase voor de rolwachter (actieve kant olares), zoals wv202 in register-foutcode.sh.
+const hook = http.createServer((q, s) => { let b = ''; q.on('data', c => b += c); q.on('end', () => {
+  if (q.url.indexOf('/rest/v1/rpc/uitwijk_stand_lees') === 0) return s.end(JSON.stringify([{ actieve_kant: 'olares', sinds: null }]));
+  try { rapporten.push(JSON.parse(b)); } catch (e) {} s.end('{}'); }); });
 hook.listen(0, '127.0.0.1', async () => {
   const d = path.join(W, 'pod');
   ['home', 'vault', 'repo', 'io', 'jobout'].forEach(m => fs.mkdirSync(path.join(d, m), { recursive: true }));
@@ -32,10 +35,13 @@ hook.listen(0, '127.0.0.1', async () => {
     HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'),
     JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),
     RUNTIME_FILE: path.join(d, 'runtime.json'), CODEX_HOME: path.join(d, 'codex'), SLEUTELPORTAAL_SLEUTEL: path.join(d, 'geen.key'),
+    // wv223: eigen uitrolmarker, rolbestand en nep-Supabase; los van de echte /opt/data/uitrol-wacht en de echte rol.
+    UITROL_MARKER: path.join(d, 'uitrol-wacht'), ROL_BESTAND: path.join(d, 'rol'),
+    SUPABASE_URL: 'http://127.0.0.1:' + hook.address().port, SUPABASE_SERVICE_ROLE: 'proef', SOCEV_KANT: 'olares',
     OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1', LESSEN_INJECTIE: '0', API_SECRET: 'proef', MAX_AGENTS: '6',
     PORT: String(poort), AGENT_WEBHOOK_URL: 'http://127.0.0.1:' + hook.address().port + '/', AGENT_WEBHOOK_SECRET: 'proef',
     PATH: path.join(W, 'bin') + ':' + process.env.PATH });
-  delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  delete process.env.CLAUDE_CODE_OAUTH_TOKEN; delete process.env.SOCEV_AGENT_RUN;
   require(path.join(d, 'server.js'));
   const post = body => new Promise((ok, nok) => { const r = http.request({ host: '127.0.0.1', port: poort, path: '/agent', method: 'POST', headers: { 'content-type': 'application/json' } },
     res => { let b = ''; res.on('data', c => b += c); res.on('end', () => { try { ok(JSON.parse(b)); } catch (e) { ok({ raw: b }); } }); }); r.on('error', nok); r.end(JSON.stringify(body)); });

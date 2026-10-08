@@ -48,7 +48,10 @@ else if (modus === 'LANG') {             // 1,5 s stil, dan 10 s lang elke secon
 
 // ── webhook-ontvanger ──
 const rapporten = [];
-const hook = http.createServer((req, res) => { let b = ''; req.on('data', (c) => b += c); req.on('end', () => { try { rapporten.push(JSON.parse(b)); } catch (e) {} res.end('ok'); }); });
+// wv223: de hook is ook de nep-Supabase voor de rolwachter (actieve kant olares), zoals wv202 in register-foutcode.sh.
+const hook = http.createServer((req, res) => { let b = ''; req.on('data', (c) => b += c); req.on('end', () => {
+  if (req.url.indexOf('/rest/v1/rpc/uitwijk_stand_lees') === 0) return res.end(JSON.stringify([{ actieve_kant: 'olares', sinds: null }]));
+  try { rapporten.push(JSON.parse(b)); } catch (e) {} res.end('ok'); }); });
 
 function maakServer(bron, naam, poort) {
   const d = path.join(W, naam);
@@ -69,11 +72,14 @@ function maakServer(bron, naam, poort) {
     HOME: path.join(d, 'home'), VAULT_DIR: path.join(d, 'vault'), REPO_DIR: path.join(d, 'repo'), IO_DIR: path.join(d, 'io'), APP_BESTANDEN_DIR: path.join(d, 'app-bestanden'), APP_LOG_DIR: path.join(d, 'app-log'),
     JOBOUT_DIR: path.join(d, 'jobout'), API_LOG: path.join(d, 'api.log'), SYNC_LOG: path.join(d, 'sync.log'),
     RUNTIME_FILE: path.join(d, 'runtime.json'), CODEX_HOME: path.join(d, 'codex'), SLEUTELPORTAAL_SLEUTEL: path.join(d, 'geen.key'),
+    // wv223: eigen uitrolmarker, rolbestand en nep-Supabase; los van de echte /opt/data/uitrol-wacht en de echte rol.
+    UITROL_MARKER: path.join(d, 'uitrol-wacht'), ROL_BESTAND: path.join(d, 'rol'),
+    SUPABASE_URL: 'http://127.0.0.1:' + hook.address().port, SUPABASE_SERVICE_ROLE: 'proef', SOCEV_KANT: 'olares',
     OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1', LESSEN_INJECTIE: '0', API_SECRET: 'proef', MAX_AGENTS: '6',
     PORT: String(poort), AGENT_WEBHOOK_URL: 'http://127.0.0.1:' + hook.address().port + '/', AGENT_WEBHOOK_SECRET: 'proef',
     PATH: path.join(W, 'bin') + ':' + process.env.PATH
   });
-  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  delete env.CLAUDE_CODE_OAUTH_TOKEN; delete env.SOCEV_AGENT_RUN;
   const p = spawn(process.execPath, [path.join(d, 'server.js')], { env, detached: true, stdio: ['ignore', fs.openSync(path.join(d, 'stdout.log'), 'a'), fs.openSync(path.join(d, 'stdout.log'), 'a')] });
   return { p, d, poort, projDir: path.join(d, 'home', '.claude', 'projects', path.join(d, 'vault').replace(/[^a-zA-Z0-9]/g, '-')) };
 }
