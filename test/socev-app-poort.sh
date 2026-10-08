@@ -47,6 +47,8 @@ const VJ = VAPID.publicKey.export({ format: 'jwk' });
 const VAPID_PUB = Buffer.concat([Buffer.from([4]), Buffer.from(VJ.x, 'base64url'), Buffer.from(VJ.y, 'base64url')]).toString('base64url');
 const n8nStaat = { buffer: [], stilte: [], executies: {}, kapot: false, aanroepen: [] };
 const wachterStaat = { j: null, kapot: false };
+const agendaStaat = { pad: 'agenda-proef-x1', events: [], mails: [], aanroepen: [], kapot: false };   // wv136
+const VAULT_T = path.join(W, 'vault');
 const pushes = [];
 const pushStaat = { status: 201 };
 let toetsUur = 12;
@@ -84,8 +86,18 @@ async function nepFetch(url, opt) {
     }
     if (u.pathname === '/api/v1/data-tables/MF6DKIGzWVT8FAdy/rows') return antw(200, { data: n8nStaat.stilte, nextCursor: null });
     if (u.pathname === '/api/v1/executions') { const e = n8nStaat.executies[u.searchParams.get('workflowId')]; return antw(200, { data: e ? [].concat(e) : [], nextCursor: null }); }
+    if (u.pathname === '/api/v1/data-tables/jTz5tgWWPhkFz9Be/rows') return n8nStaat.portieKapot ? antw(500, {}) : antw(200, { data: (n8nStaat.portie || []).slice().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)), nextCursor: null });
     if (u.pathname.startsWith('/api/v1/workflows/')) { const w = (n8nStaat.workflows || {})[u.pathname.slice('/api/v1/workflows/'.length)]; return w ? antw(200, w) : antw(404, {}); }
     return antw(404, {});
+  }
+  if (url.startsWith(N8N + '/webhook/')) {   // wv136: AI - Agenda-Wachter API (alleen de leesacties)
+    const b = JSON.parse(opt.body || '{}');
+    agendaStaat.aanroepen.push({ url, actie: b.actie, secret: b.secret, body: b });
+    if (url !== N8N + '/webhook/' + agendaStaat.pad) return antw(404, {});
+    if (b.secret !== 'nep-agenda') return antw(403, {});
+    if (b.actie === 'agenda') return agendaStaat.kapot ? antw(500, {}) : antw(200, { start: b.start, end: b.end, aantal: agendaStaat.events.length, events: agendaStaat.events });
+    if (b.actie === 'mail_zoeken') return antw(200, { query: b.query, aantal: agendaStaat.mails.length, mails: agendaStaat.mails });
+    return antw(400, {});
   }
   if (url === 'https://wachter.toets/stand') return wachterStaat.kapot ? antw(503, {}) : antw(200, wachterStaat.j);
   if (/^https:\/\/(fcm\.googleapis\.com|[a-z0-9-]+\.notify\.windows\.com)\//.test(url)) {
@@ -132,14 +144,15 @@ const rolStub = { eerste: 1, primair: true };
 const ctx = vm.createContext({ require, fs, path, crypto, Buffer, console, URL, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
-    N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand' }, pid: process.pid },
+    N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
+    N8N_WEBHOOK_AGENDA_API: 'nep-agenda', APP_VAULT_DIR: VAULT_T }, pid: process.pid },
   TOETSUUR: () => toetsUur,
   agentsReg,
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute };', ctx, { filename: 'server.js#app' });
 const H = ctx.__h;
 const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
 
@@ -2069,6 +2082,96 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/verbruik', undefined, {});
       toets('16 verbruik zonder sessie -> 401', r.status === 401, r.status);
       rt.default = 'claude'; rt.fallback = ''; rt.models.claude = 'claude-opus-5-5';
+    }
+
+    // ── 17. wv136: tab Vandaag (fase 6a, bouwplan § 4.9): alleen lezen uit bestaande bronnen, niets op schijf ──
+    {
+      const sN = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      if (sN) sN.tot = Date.now() + 10 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      r = await vraag('GET', '/app/vandaag', undefined, { pot: pot() });
+      toets('17 GET /app/vandaag zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      const ymd = (t) => new Date(t).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
+      const plus = (d, n) => { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+      const V = ymd(Date.now()), M = plus(V, 1), G = plus(V, -1);
+      const off = (d) => { const u = new Date(d + 'T12:00:00Z'); const l = new Date(u.toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' })); const h = Math.round((l - new Date(u.toLocaleString('en-US', { timeZone: 'UTC' }))) / 3600000); return '+0' + h + ':00'; };
+      n8nStaat.workflows = Object.assign(n8nStaat.workflows || {}, { JD0yNxPq79jXk25J: { id: 'JD0yNxPq79jXk25J', nodes: [{ type: 'n8n-nodes-base.set', parameters: {} }, { type: 'n8n-nodes-base.webhook', parameters: { path: 'agenda-proef-x1' } }] } });
+      agendaStaat.events = [
+        { kalender: 'David', titel: 'Overleg gemeente', omschrijving: 'GEHEIM-OMSCHRIJVING', locatie: 'Teams', hele_dag: false, start: V + 'T16:30:00' + off(V), einde: V + 'T17:00:00' + off(V), status: 'confirmed' },
+        { kalender: 'Gezin', titel: 'Vakantie', hele_dag: true, start: G, einde: plus(V, 3), status: 'confirmed' },
+        { kalender: 'Werk', titel: 'Nachtdienst', hele_dag: false, start: V + 'T22:00:00' + off(V), einde: M + 'T07:00:00' + off(M), status: 'confirmed' },
+        { kalender: 'David', titel: 'Afgezegd', hele_dag: false, start: V + 'T10:00:00' + off(V), einde: V + 'T11:00:00' + off(V), status: 'cancelled' },
+        { kalender: 'David', titel: 'Morgenvroeg', hele_dag: false, start: M + 'T08:00:00' + off(M), einde: M + 'T08:30:00' + off(M), status: 'confirmed' },
+        { kalender: 'Werk', titel: 'Huisbezoek mw. Jansen', locatie: 'Dorpsstraat 1', hele_dag: false, start: V + 'T14:00:00' + off(V), einde: V + 'T14:30:00' + off(V), status: 'confirmed' },
+        { kalender: 'Gezin', titel: 'Bezoek oma', hele_dag: false, start: V + 'T19:00:00' + off(V), einde: V + 'T19:30:00' + off(V), status: 'confirmed' },
+        { kalender: 'Werk', titel: 'Werkoverleg Tolgaarde', hele_dag: false, start: M + 'T12:30:00' + off(M), einde: M + 'T13:30:00' + off(M), status: 'confirmed' },
+        { kalender: 'David', titel: 'Scheef', hele_dag: true, start: V + 'T09:00:00' + off(V), einde: V + 'T09:30:00' + off(V), status: 'confirmed' },
+        { kalender: 'David', titel: 'Overmorgen', hele_dag: false, start: plus(V, 2) + 'T08:00:00' + off(V), einde: plus(V, 2) + 'T09:00:00' + off(V), status: 'confirmed' },
+      ];
+      agendaStaat.mails = [{ id: 'm1', thread_id: 't1', datum: '2026-10-07T08:00:00.000Z', datum_lokaal: '2026-10-07T10:00:00+02:00', van: 'David', aan: 'iemand@voorbeeld.nl', onderwerp: 'Re: offerte', snippet: 'GEHEIM-SNIPPET', labels: ['DRAFT'] }];
+      const pr = (datum, pos, extra) => Object.assign({ nonce: 'NONCE-' + datum + pos, datum, positie: pos, aantal: 3, bron: 'todoist', sleutel: 'SLEUTEL-' + pos, titel: 't', regel: pos + '. Actie ' + pos + ' van ' + datum, status: 'open', keuze: '', later_tot: '', getikt_op: '', blok_op: null, message_id: 9, createdAt: new Date().toISOString() }, extra || {});
+      n8nStaat.portie = [pr(G, 1, { status: 'verlopen' }), pr(V, 3, { keuze: 'laten_vallen', status: 'afgehandeld', getikt_op: new Date().toISOString() }), pr(V, 1, { keuze: 'later', later_tot: plus(V, 7), status: 'afgehandeld', getikt_op: new Date().toISOString() }), pr(V, 2, { blok_op: new Date().toISOString() }), pr(plus(V, 1), 1)];
+      const VW = path.join(VAULT_T, '00_Systeem', 'Voorwerk');
+      fs.mkdirSync(VW, { recursive: true });
+      fs.writeFileSync(path.join(VW, V + ' - Voorwerk.md'), '---\ntype: voorwerk\nvertrouwelijk: true\n---\n# Voorwerk vandaag\n\n## Vergaderingen\n\n### 16:30 Overleg gemeente\n- Zie [[10_Zakelijk/POT_POH_GGZ/jeugd-ggz]] en [[00_Systeem/Deadlines|de deadlines]], § [[x/y#kop]].\n');
+      fs.writeFileSync(path.join(VW, V + ' - Herinneringen.md'), '---\ntype: voorwerk\n---\n# Herinneringen vandaag\n\n## Kooloos — prijs\n\n```\nHoi Bart,\n```\n');
+      fs.writeFileSync(path.join(VW, G + ' - Voorwerk.md'), '# oud\n');
+      fs.writeFileSync(path.join(VW, 'Notitie.md'), '# anders\n');
+      fs.symlinkSync('/etc/hostname', path.join(VW, M + ' - Voorwerk.md'));
+      H.appStaat.vandaag = null; H.appStaat.agendaUrl = null; agendaStaat.aanroepen = [];
+      const dataVoor = fs.readdirSync(DATA).sort().join(',');
+      const nAudit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
+      const j = r.j || {};
+      toets('17 200 met vandaag/morgen, geen fouten', r.status === 200 && j.vandaag === V && j.morgen === M && Array.isArray(j.fouten) && j.fouten.length === 0, JSON.stringify(j).slice(0, 400));
+      const tv = (j.agenda && j.agenda.vandaag || []).map((a) => a.titel), tm = (j.agenda && j.agenda.morgen || []).map((a) => a.titel);
+      toets('17 agenda vandaag: hele dag eerst, afgezegd weg, nachtdienst erbij; scheef hele_dag-veld telt als gewone afspraak', JSON.stringify(tv) === JSON.stringify(['Vakantie', 'Scheef', 'afspraak (titel verborgen)', 'Overleg gemeente', 'Bezoek oma', 'Nachtdienst']), JSON.stringify(tv));
+      toets('17 agenda morgen: meerdaagse vakantie, nachtdienst (geen begintijd), morgenvroeg; overmorgen niet', JSON.stringify(tm) === JSON.stringify(['Vakantie', 'Nachtdienst', 'Morgenvroeg', 'Werkoverleg Tolgaarde']), JSON.stringify(tm));
+      const hb = j.agenda.vandaag[2];
+      toets('17 Werk-afspraak die op patiëntcontact wijst: titel en plek verborgen, tijd blijft; Gezin niet gefilterd (review #2)', hb.verborgen === true && hb.locatie === null && hb.van === '14:00' && !/Jansen|Dorpsstraat/.test(JSON.stringify(j)) && j.agenda.vandaag[4].verborgen === false, JSON.stringify(hb));
+      const ov = j.agenda.vandaag[3], nd = j.agenda.morgen[1];
+      toets('17 tijden lokaal: 16:30-17:00, nachtdienst morgen tot 07:00 zonder begin', ov.van === '16:30' && ov.tot === '17:00' && ov.locatie === 'Teams' && nd.van === null && nd.tot === '07:00' && nd.meerdaags === true && j.agenda.vandaag[0].hele_dag === true && j.agenda.vandaag[0].meerdaags === true, JSON.stringify([ov, nd]));
+      toets('17 geen omschrijving, snippet, nonce of sleutel in het antwoord', !/GEHEIM-OMSCHRIJVING|GEHEIM-SNIPPET|NONCE-|SLEUTEL-|omschrijving|snippet/.test(JSON.stringify(j)));
+      toets('17 webhookpad uit de workflow, met het geheim, alleen agenda + mail_zoeken in:draft', agendaStaat.aanroepen.length === 2 && agendaStaat.aanroepen.every((x) => x.url === N8N + '/webhook/agenda-proef-x1' && x.secret === 'nep-agenda')
+        && agendaStaat.aanroepen.map((x) => x.actie).sort().join() === 'agenda,mail_zoeken' && agendaStaat.aanroepen.find((x) => x.actie === 'mail_zoeken').body.query === 'in:draft'
+        && agendaStaat.aanroepen.find((x) => x.actie === 'agenda').body.start === V, JSON.stringify(agendaStaat.aanroepen.map((x) => [x.url, x.actie])));
+      const ac = j.acties || {};
+      toets('17 actielijstje: alleen vandaag (geen toekomst, niet gisteren), op positie, standen', ac.datum === V && ac.items.length === 3 && ac.items.map((x) => x.positie).join() === '1,2,3'
+        && ac.items[0].stand === 'later' && ac.items[0].later_tot === plus(V, 7) && ac.items[1].stand === 'open' && ac.items[1].blok === true && ac.items[2].stand === 'laten_vallen' && ac.items[0].regel === 'Actie 1 van ' + V, JSON.stringify(ac));
+      toets('17 concepten: onderwerp, aan, tijd + link naar Gmail-concepten', j.concepten && j.concepten.items.length === 1 && j.concepten.items[0].onderwerp === 'Re: offerte' && j.concepten.items[0].aan === 'iemand@voorbeeld.nl' && j.concepten.meer === false && /^https:\/\/mail\.google\.com\//.test(j.concepten.link), JSON.stringify(j.concepten));
+      const vw = j.voorwerk || [];
+      toets('17 voorwerk: herinneringen + voorwerk van vandaag; oud, ander bestand en koppeling niet', vw.length === 2 && vw.map((x) => x.soort).join() === 'herinneringen,voorwerk' && vw[1].titel === 'Voorwerk vandaag' && vw[0].onderdelen[0] === 'Kooloos — prijs', JSON.stringify(vw.map((x) => [x.datum, x.soort, x.titel])));
+      toets('17 voorwerk: frontmatter weg, wikilinks als tekst, kop niet dubbel', !/vertrouwelijk|\[\[|^# /m.test(vw[1].tekst) && /Zie jeugd-ggz en de deadlines, § y\./.test(vw[1].tekst) && /```\nHoi Bart,\n```/.test(vw[0].tekst), vw[1].tekst);
+      toets('17 GET vandaag (200) schrijft geen auditregel en niets in de datamap', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAudit && fs.readdirSync(DATA).sort().join(',') === dataVoor);
+      const nA = agendaStaat.aanroepen.length;
+      r = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
+      toets('17 tweede keer binnen 3 min uit het geheugen (geen nieuwe aanroep)', r.status === 200 && agendaStaat.aanroepen.length === nA);
+      // vaste-plek-apparaat (review #5): geen Gezin/Schapies, geen concepten
+      const nep = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
+      await H.appVandaagRoute({}, nep, { id: 'x', soort: 'vast' });
+      toets('17 vaste plek: geen Gezin-afspraken en geen concepten, wel werk en acties', nep.st === 200 && nep.b.vaste_plek === true && nep.b.concepten === null && nep.b.agenda && !nep.b.agenda.vandaag.some((x) => /^(Gezin|Schapies)$/.test(x.kalender)) && nep.b.agenda.vandaag.length === 4 && nep.b.acties, JSON.stringify(nep.b && nep.b.agenda));
+      const nep2 = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
+      await H.appVandaagRoute({}, nep2, { id: 'y', soort: 'reist' });
+      toets('17 meereizend: alles', nep2.b.vaste_plek === false && nep2.b.concepten && nep2.b.agenda.vandaag.length === 6);
+      // agenda stuk: de rest komt wel, met een fout in gewone taal
+      H.appStaat.vandaag = null; agendaStaat.kapot = true;
+      r = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
+      toets('17 agenda stuk: 200, agenda null, fout in gewone taal, concepten en acties wel', r.status === 200 && r.j.agenda === null && r.j.fouten.includes('je agenda is nu niet te lezen') && r.j.concepten && r.j.acties, JSON.stringify(r.j.fouten));
+      agendaStaat.kapot = false;
+      // webhookpad gewijzigd: 404 -> pad opnieuw uit de workflow
+      agendaStaat.pad = 'agenda-proef-x2';
+      n8nStaat.workflows.JD0yNxPq79jXk25J.nodes[1].parameters.path = 'agenda-proef-x2';
+      H.appStaat.vandaag = null; n8nStaat.portieKapot = true;
+      r = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
+      toets('17 webhookpad gewijzigd: opnieuw opgezocht, agenda weer leesbaar; actielijstje stuk -> fout', r.status === 200 && r.j.agenda && r.j.agenda.vandaag.length === 6 && r.j.acties === null && r.j.fouten.includes('het actielijstje is nu niet te lezen'), JSON.stringify(r.j.fouten));
+      n8nStaat.portieKapot = false;
+      // vreemd webhookpad in de workflow: niet gebruiken
+      n8nStaat.workflows.JD0yNxPq79jXk25J.nodes[1].parameters.path = '../api/v1/x';
+      H.appStaat.vandaag = null; H.appStaat.agendaUrl = null; const nB = agendaStaat.aanroepen.length;
+      r = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
+      toets('17 vreemd webhookpad: niet aangeroepen, agenda en concepten met fout', r.status === 200 && agendaStaat.aanroepen.length === nB && r.j.agenda === null && r.j.concepten === null, JSON.stringify(r.j.fouten));
+      n8nStaat.workflows.JD0yNxPq79jXk25J.nodes[1].parameters.path = 'agenda-proef-x2';
+      H.appStaat.vandaag = null; H.appStaat.agendaUrl = null;
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──

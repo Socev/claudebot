@@ -5439,6 +5439,185 @@ async function appAutokastje(req, res) {
   appStuur(res, 200, { ok: true, items: items, bewaar_dagen: Math.round(APP_LOG_MS / 86400000) });
 }
 
+// ── Vandaag (fase 6a, wv136; bouwplan § 4.9): je dag in één oogopslag, alleen lezen ──
+// Bronnen die er al waren, geen nieuwe schrijfroute: agenda vandaag/morgen en de Gmail-concepten via de leesacties `agenda` en
+// `mail_zoeken` van *AI - Agenda-Wachter API* (de pod zoekt het webhookpad zelf op in n8n, zodat het niet in de code staat),
+// het actielijstje uit Data Table `voorwerk_portie` (de regels zijn daar al door het patiëntvangnet van fase C gegaan) en de
+// voorwerkpagina's uit `00_Systeem/Voorwerk/`. Alles alleen in het geheugen van de pod (3 min, alle apparaten delen het), niets op
+// schijf; de app houdt het alleen in het geheugen (§ 4.11). Omschrijvingen van afspraken en de inhoud van concepten komen niet mee.
+// Titels in de agenda's David en Werk die op patiëntcontact kunnen wijzen, worden verborgen (zelfde norm als de vergaderbriefing,
+// Fable-review wv136 #2); op een apparaat met een vaste plek geen Gezin/Schapies en geen concepten (#5).
+const APP_VANDAAG_CACHE_MS = 3 * 60 * 1000;   // n8n bewaart elke run van de Agenda-API met inhoud (Fable-review wv136 #1): zuinig lezen
+const APP_AGENDA_WF = process.env.APP_AGENDA_WF || 'JD0yNxPq79jXk25J';          // AI - Agenda-Wachter API (alleen lezen)
+const APP_PORTIE_TABEL = process.env.APP_PORTIE_TABEL || 'jTz5tgWWPhkFz9Be';    // n8n Data Table voorwerk_portie
+const APP_VOORWERK_DIR = path.join(process.env.APP_VAULT_DIR || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', '00_Systeem', 'Voorwerk');
+const APP_VOORWERK_MAX = 64 * 1024;
+// Woorden die op een patiëntcontact kunnen wijzen (huisbezoek, visite, mw./dhr., MDO …); alleen in de agenda's David en Werk.
+const APP_PATIENT_RE = /(^|[^a-z])((huis)?bezoek(en)?|visite|pati[eë]nt(en)?|pat\.|consult|mdo|mevr(ouw)?\.?|meneer|mw\.|dhr\.?|fam\.|dossier)([^a-z]|$)/i;
+const APP_AGENDA_WERK = /^(david|werk)$/i;
+const APP_AGENDA_PRIVE = /^(gezin|schapies)$/i;
+const APP_GMAIL_CONCEPTEN = 'https://mail.google.com/mail/?authuser=d.schaap@gmail.com#drafts';
+
+function appYmd(t) {   // lokale kalenderdag (Europe/Amsterdam) als JJJJ-MM-DD
+  return new Date(t).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
+}
+function appYmdPlus(ymd, n) {
+  const d = new Date(ymd + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function appKort(s, n) {
+  s = String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n - 1).replace(/\s+\S*$/, '') + '…' : s;
+}
+// Webhookpad van de Agenda-API uit de workflow zelf (1 uur bewaard; bij een 404 opnieuw).
+async function appAgendaUrl(opnieuw) {
+  const c = appStaat.agendaUrl;
+  if (!opnieuw && c && Date.now() - c.op < 3600000) return c.url;
+  const w = await appN8n('/workflows/' + encodeURIComponent(APP_AGENDA_WF));
+  const knoop = ((w && w.nodes) || []).find(function (k) { return k && k.type === 'n8n-nodes-base.webhook' && k.parameters && typeof k.parameters.path === 'string'; });
+  const pad = knoop && knoop.parameters.path;
+  if (!pad || !/^[A-Za-z0-9_-]{4,80}$/.test(pad)) throw new Error('agenda-webhook niet gevonden');
+  appStaat.agendaUrl = { url: appN8nBasis() + '/webhook/' + pad, op: Date.now() };
+  return appStaat.agendaUrl.url;
+}
+async function appAgendaApi(body) {
+  const geheim = process.env.N8N_WEBHOOK_AGENDA_API;
+  if (!geheim) throw new Error('agenda-luik niet ingericht');
+  for (let poging = 0; poging < 2; poging++) {
+    const url = await appAgendaUrl(poging > 0);
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(Object.assign({ secret: geheim }, body)), signal: AbortSignal.timeout(15000) });
+    if (r.status === 404 && poging === 0) continue;
+    if (!r.ok) throw new Error('agenda-luik http ' + r.status);
+    return r.json();
+  }
+  throw new Error('agenda-luik niet gevonden');
+}
+// Afspraken van één dag: hele dag (start <= dag < einde) of met tijd (overlapt de dag, lokaal gerekend).
+function appAfspraken(events, dag) {
+  const uit = [];
+  (Array.isArray(events) ? events : []).forEach(function (e) {
+    if (!e || e.status === 'cancelled' || typeof e.start !== 'string') return;
+    const hele = /^\d{4}-\d{2}-\d{2}$/.test(e.start);   // alleen op de vorm (Fable-review wv136 #4)
+    let erop, van = null, tot = null, meerdaags = false;
+    if (hele) {
+      const eind = /^\d{4}-\d{2}-\d{2}$/.test(String(e.einde || '')) ? e.einde : appYmdPlus(e.start, 1);
+      erop = e.start <= dag && dag < eind;
+      meerdaags = appYmdPlus(e.start, 1) < eind;
+    } else {
+      const s = Date.parse(e.start), t = Date.parse(e.einde || e.start);
+      if (!isFinite(s)) return;
+      const sd = appYmd(s), td = appYmd(Math.max(s, (isFinite(t) ? t : s) - 1));
+      erop = sd <= dag && dag <= td;
+      meerdaags = sd !== td;
+      van = sd === dag ? appKlok(e.start) : null;               // begon eerder: geen begintijd
+      tot = isFinite(t) && td === dag ? appKlok(e.einde) : null;   // loopt door: geen eindtijd
+    }
+    if (!erop) return;
+    const verborgen = APP_AGENDA_WERK.test(String(e.kalender || '')) && APP_PATIENT_RE.test(String(e.titel || '') + ' ' + String(e.locatie || ''));
+    uit.push({ kalender: appKort(e.kalender, 20), titel: verborgen ? 'afspraak (titel verborgen)' : appKort(e.titel || '(zonder titel)', 200),
+      locatie: e.locatie && !verborgen ? appKort(e.locatie, 120) : null, verborgen: verborgen,
+      hele_dag: hele, meerdaags: meerdaags, start: String(e.start).slice(0, 32), van: van, tot: tot });
+  });
+  uit.sort(function (a, b) { return (a.hele_dag === b.hele_dag ? 0 : a.hele_dag ? -1 : 1) || (Date.parse(a.start) || 0) - (Date.parse(b.start) || 0); });
+  return uit.slice(0, 40);
+}
+const APP_KEUZE = { gedaan: 'gedaan', later: 'later', laten_vallen: 'laten vallen' };
+function appActies(rijen, vandaag) {
+  const geldig = (rijen || []).filter(function (r) { return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.datum)) && r.datum <= vandaag; });
+  if (!geldig.length) return null;
+  const datum = geldig.reduce(function (m, r) { return r.datum > m ? r.datum : m; }, '');
+  const deze = geldig.filter(function (r) { return r.datum === datum; }).sort(function (a, b) { return (Number(a.positie) || 0) - (Number(b.positie) || 0); });
+  return { datum: datum, items: deze.slice(0, 10).map(function (r) {
+    const k = APP_KEUZE[r.keuze] ? r.keuze : null;
+    return { positie: Number(r.positie) || 0, regel: appKort(String(r.regel || r.titel || '').replace(/^\d+\.\s*/, ''), 220), bron: appKort(r.bron, 30),
+      stand: k || (r.status === 'verlopen' ? 'verlopen' : r.status === 'klaar' ? 'nog niet verstuurd' : 'open'),
+      later_tot: k === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(r.later_tot)) ? r.later_tot : null,
+      op: k && r.getikt_op ? String(r.getikt_op).slice(0, 32) : null, blok: !!r.blok_op };
+  }) };
+}
+// Wikilinks naar gewone tekst ([[pad|naam]] -> naam, [[pad/Pagina#kop]] -> Pagina); frontmatter eraf.
+function appVaultTekst(t) {
+  t = String(t).replace(/^﻿?---\n[\s\S]*?\n---\n/, '');
+  return t.replace(/\[\[([^\]\n]{1,300})\]\]/g, function (_, x) {
+    const delen = x.split(/\\?\|/);
+    if (delen.length > 1) return delen[delen.length - 1].trim();
+    return delen[0].split('#')[0].split('/').pop().trim() || x;
+  });
+}
+function appVoorwerk(vandaag) {
+  let namen;
+  try { namen = fs.readdirSync(APP_VOORWERK_DIR); } catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+  const tot = appYmdPlus(vandaag, 3);
+  return namen.map(function (n) { const m = /^(\d{4}-\d{2}-\d{2}) - (Voorwerk|Herinneringen)\.md$/.exec(n); return m && m[1] >= vandaag && m[1] <= tot ? { n: n, datum: m[1], soort: m[2] } : null; })
+    .filter(Boolean).sort(function (a, b) { return a.datum.localeCompare(b.datum) || a.soort.localeCompare(b.soort); }).slice(0, 6)
+    .map(function (x) {
+      const p = path.join(APP_VOORWERK_DIR, x.n);
+      const st = fs.lstatSync(p);
+      if (!st.isFile()) return null;
+      const fd = fs.openSync(p, 'r');
+      let tekst;
+      try { const b = Buffer.alloc(Math.min(st.size, APP_VOORWERK_MAX)); const n = fs.readSync(fd, b, 0, b.length, 0); tekst = b.slice(0, n).toString('utf8'); } finally { fs.closeSync(fd); }
+      tekst = appVaultTekst(tekst).trim();
+      const kop = /^#\s+(.+)$/m.exec(tekst);
+      if (kop) tekst = tekst.replace(kop[0], '').trim();
+      const onderdelen = [];
+      tekst.replace(/^##+\s+(.+)$/gm, function (_, k) { if (onderdelen.length < 12 && !/^(Vergaderingen|Bijgewerkt)/i.test(k)) onderdelen.push(appKort(k, 120)); return _; });
+      return { datum: x.datum, soort: x.soort === 'Herinneringen' ? 'herinneringen' : 'voorwerk', titel: appKort(kop ? kop[1] : x.soort + ' ' + x.datum, 120),
+        onderdelen: onderdelen, tekst: tekst + (st.size > APP_VOORWERK_MAX ? '\n\n…' : ''), bijgewerkt: new Date(st.mtimeMs).toISOString() };
+    }).filter(Boolean);
+}
+async function appVandaagVerzamel() {
+  const fouten = [];
+  const nu = Date.now(), vandaag = appYmd(nu), morgen = appYmdPlus(vandaag, 1);
+  let agenda = null, portie = null, concepten = null, voorwerk = [];
+  await Promise.all([
+    appAgendaApi({ actie: 'agenda', start: vandaag, end: appYmdPlus(vandaag, 2) }).then(function (j) {
+      if (!j || !Array.isArray(j.events)) throw new Error('agenda zonder events');
+      agenda = { vandaag: appAfspraken(j.events, vandaag), morgen: appAfspraken(j.events, morgen) };
+      if (j.fouten && (Array.isArray(j.fouten) ? j.fouten.length : true)) fouten.push('niet alle agenda\'s waren te lezen');
+    }, function (e) { logError('app-vandaag', e); fouten.push('je agenda is nu niet te lezen'); }),
+    appN8nRijen(APP_PORTIE_TABEL, null, 30).then(function (r) { portie = r; },
+      function (e) { logError('app-vandaag', e); fouten.push('het actielijstje is nu niet te lezen'); }),
+    appAgendaApi({ actie: 'mail_zoeken', query: 'in:draft', max: 25 }).then(function (j) {
+      if (!j || !Array.isArray(j.mails)) throw new Error('concepten zonder mails');
+      concepten = j.mails.map(function (m) {
+        return { onderwerp: appKort(m.onderwerp || '(geen onderwerp)', 160), aan: appKort(m.aan || '', 120), op: String(m.datum_lokaal || m.datum || '').slice(0, 32) };
+      }).sort(function (a, b) { return (Date.parse(b.op) || 0) - (Date.parse(a.op) || 0); });
+    }, function (e) { logError('app-vandaag', e); fouten.push('je Gmail-concepten zijn nu niet te lezen'); }),
+    Promise.resolve().then(function () { voorwerk = appVoorwerk(vandaag); },
+      function (e) { logError('app-vandaag', e); fouten.push('het voorwerk is nu niet te lezen'); }),
+  ]);
+  return {
+    vandaag: vandaag, morgen: morgen,
+    agenda: agenda,
+    acties: portie ? appActies(portie, vandaag) : null,
+    concepten: concepten ? { items: concepten, meer: concepten.length >= 25, link: APP_GMAIL_CONCEPTEN } : null,
+    voorwerk: voorwerk, fouten: fouten, op: nu,
+  };
+}
+// Eén verversing tegelijk, 3 min bewaard; na middernacht meteen een nieuwe dag.
+function appVandaag() {
+  const c = appStaat.vandaag;
+  if (c && c.data && Date.now() - c.data.op < APP_VANDAAG_CACHE_MS && c.data.vandaag === appYmd(Date.now())) return Promise.resolve(c.data);
+  if (c && c.bezig) return c.bezig;
+  const st = appStaat.vandaag = { data: c && c.data, bezig: null };
+  st.bezig = appVandaagVerzamel().then(function (d) { st.data = d; st.bezig = null; return d; }, function (e) { st.bezig = null; throw e; });
+  return st.bezig;
+}
+async function appVandaagRoute(req, res, a) {
+  res._app.stil = true;   // de app leest bij openen en op Ververs
+  let d;
+  try { d = await appVandaag(); } catch (e) { logError('app-vandaag', e); return appWeiger(res, 503, 'je dag is nu niet te lezen', 'vandaag fout'); }
+  const vast = !!(a && a.soort === 'vast');
+  const zonderPrive = function (l) { return l.filter(function (x) { return !APP_AGENDA_PRIVE.test(x.kalender); }); };
+  appStuur(res, 200, { ok: true, vandaag: d.vandaag, morgen: d.morgen,
+    agenda: d.agenda && vast ? { vandaag: zonderPrive(d.agenda.vandaag), morgen: zonderPrive(d.agenda.morgen) } : d.agenda,
+    acties: d.acties, concepten: vast ? null : d.concepten, voorwerk: d.voorwerk, vaste_plek: vast,
+    fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
+}
+
 // ── seintjes (web-push zonder inhoud) ──
 function appPushLees() {
   const p = appLeesStreng(APP_PUSH, { versie: 1, apparaten: {} });
@@ -5751,6 +5930,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
         if (route === 'GET /app/modellen') return appModellen(req, res);
         if (route === 'POST /app/modellen') return appModellenZet(req, res, reg, a, s, d);
+        if (route === 'GET /app/vandaag') return appVandaagRoute(req, res, a);
         if (route === 'GET /app/push') return appPushStand(req, res, a);
         if (route === 'POST /app/push/abonneer') return appPushAbonneer(req, res, a, d);
         if (route === 'POST /app/push/opzeggen') return appPushOpzeggen(req, res, a);
