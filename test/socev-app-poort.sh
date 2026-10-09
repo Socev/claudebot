@@ -310,6 +310,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', N8N_WEBHOOK_VERBETERLOG: 'nep-vbl', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
+    APP_BINDING_BESTAND: path.join(W, 'app-binding.json'),   // wv316
     N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
   VAULT: VAULT_T,
   TOETSUUR: () => toetsUur,
@@ -320,7 +321,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -337,6 +338,7 @@ function vraag(m, pad, body, o) {
   if (o.jwt !== false) koppen['cf-access-jwt-assertion'] = o.jwt || jwt();
   const p = o.pot;
   if (p) { if (p.koppel) koppen['x-app-koppel'] = p.koppel; if (p.apparaat) koppen['x-app-apparaat'] = p.apparaat; if (p.sessie) koppen['x-app-sessie'] = p.sessie; }
+  if (o.kop) Object.assign(koppen, o.kop);   // wv316: X-App-Binding e.d.
   return new Promise((ok) => {
     const r = http.request({ host: '127.0.0.1', port: srv.address().port, path: pad, method: m, headers: koppen }, (res) => {
       if (res.headers['x-app-pod'] !== '1') console.log('ROOD  kop X-App-Pod ontbreekt op ' + pad);
@@ -361,6 +363,7 @@ function upl(pad, buf, naam, o) {
   if (!o.chunked) koppen['content-length'] = String(buf.length);
   const p = o.pot;
   if (p) { if (p.apparaat) koppen['x-app-apparaat'] = p.apparaat; if (p.sessie) koppen['x-app-sessie'] = p.sessie; }
+  if (o.kop) Object.assign(koppen, o.kop);   // wv316
   return new Promise((ok) => {
     const r = http.request({ host: '127.0.0.1', port: srv.address().port, path: pad, method: 'POST', headers: koppen }, (res) => {
       let t = ''; res.on('data', (c) => t += c); res.on('end', () => { let j = {}; try { j = JSON.parse(t); } catch (e) { j = { raw: t }; } ok({ status: res.statusCode, j }); });
@@ -4075,6 +4078,173 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/telegram-bezig', undefined, {});
       toets('25 zonder sessie -> geweigerd', r.status === 401 || r.status === 403, r.status);
       Object.keys(tb).forEach((k) => delete jobs[k]);
+    }
+
+    // ── 26. wv316: apparaatsleutel (DPoP-achtig, bouwplan § 4.4f): meten, afdwingen, terugval ──
+    {
+      const MOD = path.join(W, 'app-binding.json'), AUD_F = path.join(DATA, 'audit.jsonl');
+      const zetModus = (j) => { if (j === null) { try { fs.unlinkSync(MOD); } catch (e) {} } else fs.writeFileSync(MOD, typeof j === 'string' ? j : JSON.stringify(j)); if (H.appStaat.bindingModus) H.appStaat.bindingModus.gelezen = 0; };
+      const auditNa = (n0) => fs.readFileSync(AUD_F, 'utf8').split('\n').slice(n0).filter(Boolean).map((x) => JSON.parse(x));
+      const auditN = () => fs.readFileSync(AUD_F, 'utf8').split('\n').length - 1;
+      const BK = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' }), ANDER = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+      const pj = BK.publicKey.export({ format: 'jwk' }), SLEUTEL = { kty: 'EC', crv: 'P-256', x: pj.x, y: pj.y };
+      const thumb = crypto.createHash('sha256').update('{"crv":"P-256","kty":"EC","x":"' + pj.x + '","y":"' + pj.y + '"}').digest();
+      const h64 = (b) => crypto.createHash('sha256').update(b).digest('base64url');
+      // zoals src/binding.ts: v1.<ts>.<nonce>.<sig> over socev-binding-v1 \n METHODE \n /app/<pad> \n ts \n nonce \n lichaam \n naam
+      const teken = (m, pad, lichaam, o) => {
+        o = o || {};
+        const ts = String(o.ts || Date.now()), nonce = o.nonce || crypto.randomBytes(16).toString('base64url');
+        const basis = ['socev-binding-v1', m, pad, ts, nonce, lichaam, o.naam || '-'].join('\n');
+        return 'v1.' + ts + '.' + nonce + '.' + crypto.sign('sha256', Buffer.from(basis), { key: (o.sleutel || BK).privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url');
+      };
+      const G = (pad, o) => vraag('GET', pad, undefined, { pot: P.jar, kop: { 'x-app-binding': teken('GET', pad, '-', o) } });
+      const PO = (pad, body, o) => { const t = JSON.stringify(body); return vraag('POST', pad, t, { pot: P.jar, kop: { 'x-app-binding': teken('POST', (o && o.tekenPad) || pad, h64((o && o.tekenBody) || t), o) } }); };
+      zetModus(null);
+      // 26a ontgrendelen met sleutel (meten)
+      let r = await P.p.evaluate(() => post('/api/passkey/opties', {}));
+      const c0 = Buffer.from(r.j.opties.challenge, 'base64url');
+      toets('26 meten: opties zonder sleutel -> 200, uitdaging 32 bytes, apparaatsleutel false', r.status === 200 && c0.length === 32 && r.j.apparaatsleutel === false, JSON.stringify(r.j).slice(0, 200));
+      r = await P.p.evaluate(() => post('/api/passkey/opties', { apparaatsleutel: { kty: 'EC', crv: 'P-256', x: 'A'.repeat(43), y: 'B'.repeat(43) } }));
+      toets('26 opties met een sleutel die geen punt op de kromme is -> 400', r.status === 400 && /apparaatsleutel/.test(r.j.fout), JSON.stringify(r.j));
+      r = await P.p.evaluate(() => post('/api/passkey/opties', { apparaatsleutel: { kty: 'RSA', n: 'x', e: 'AQAB' } }));
+      toets('26 opties met een RSA-sleutel -> 400', r.status === 400, JSON.stringify(r.j));
+      r = await P.p.evaluate((k) => post('/api/passkey/opties', { apparaatsleutel: k }), SLEUTEL);
+      const c1 = Buffer.from(r.j.opties.challenge, 'base64url');
+      toets('26 opties met sleutel: uitdaging 48 bytes, bytes 16..47 = sha256(RFC 7638-thumbprint)', r.status === 200 && r.j.apparaatsleutel === true && c1.length === 48 && c1.subarray(16).equals(thumb), c1.length);
+      toets('26 elk pod-antwoord draagt nu_ms (podklok)', typeof r.j.nu_ms === 'number' && Math.abs(r.j.nu_ms - Date.now()) < 5000, r.j.nu_ms);
+      let bw = await P.p.evaluate((o) => bewijs(o), r.j.opties);
+      // een sleutel in de bevestig-body wordt genegeerd: de sessie krijgt die uit de eigen uitdaging
+      const ap = ANDER.publicKey.export({ format: 'jwk' });
+      r = await P.p.evaluate(([x, k]) => post('/api/passkey/bevestig', { antwoord: x, apparaatsleutel: k }), [bw, { kty: 'EC', crv: 'P-256', x: ap.x, y: ap.y }]);
+      const sP = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      toets('26 vingerafdruk -> sessie gebonden aan de sleutel uit de uitdaging (niet uit de body)', r.status === 200 && sP && sP.binding && sP.binding.x === pj.x && sP.binding.y === pj.y, JSON.stringify(sP && sP.binding));
+      const sj = fs.readFileSync(path.join(DATA, 'sessies.json'), 'utf8');
+      toets('26 sessies.json bewaart alleen de publieke sleutel (x/y), geen d', sj.includes(pj.x) && !sj.includes(BK.privateKey.export({ format: 'jwk' }).d), sj.slice(0, 120));
+      let n0 = auditN();
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar });
+      toets('26 meten: gebonden sessie zonder kop -> toch 200', r.status === 200, r.status);
+      r = await G('/app/apparaten');
+      toets('26 meten: met juiste kop -> 200', r.status === 200, r.status);
+      let au = auditNa(n0).filter((x) => x.route === '/app/apparaten');
+      toets('26 audit: binding fout:geen-kop en ok, zonder sleutel, nonce of handtekening', au.length === 2 && au[0].binding === 'fout:geen-kop' && au[1].binding === 'ok' && !JSON.stringify(auditNa(n0)).includes(pj.x), JSON.stringify(au));
+      n0 = auditN();
+      for (let i = 0; i < 7; i++) await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      au = auditNa(n0).filter((x) => x.route === '/app/nieuw');
+      toets('26 stille route met binding-fout: wel auditregels, hooguit 5 per minuut per apparaat', au.length === 5 && au.every((x) => x.binding === 'fout:geen-kop'), au.length);
+      r = await G('/app/nieuw');
+      toets('26 stille route met juiste kop: 200', r.status === 200, r.status);
+      r = await G('/app/status');
+      toets('26 status met kop: sessie true, binding null', r.status === 200 && r.j.sessie === true && r.j.binding === null, JSON.stringify(r.j).slice(0, 200));
+      // 26b afdwingen
+      zetModus({ modus: 'afdwingen', reden: 'toets wv316', door: 'toets', op: new Date().toISOString() });
+      const tg0 = telegram.length; n0 = auditN();
+      toets('26 modus uit het bestand: afdwingen (bron bestand)', H.appBindingModus().modus === 'afdwingen' && H.appBindingModus().bron === 'bestand', JSON.stringify(H.appBindingModus()));
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar });
+      toets('26 afdwingen: zonder kop -> 401 binding geen-kop, nette heropening', r.status === 401 && r.j.binding === 'geen-kop' && /vingerafdruk/.test(r.j.fout) && typeof r.j.nu_ms === 'number', JSON.stringify(r.j));
+      toets('26 sessie blijft bestaan na een weigering (een kaper logt David niet uit)', !!H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')]);
+      r = await G('/app/apparaten', { sleutel: ANDER });
+      toets('26 afdwingen: verkeerde handtekening (andere sleutel) -> 401 handtekening', r.status === 401 && r.j.binding === 'handtekening', JSON.stringify(r.j));
+      const vast = teken('GET', '/app/apparaten', '-');
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar, kop: { 'x-app-binding': vast } });
+      const r2 = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar, kop: { 'x-app-binding': vast } });
+      toets('26 afdwingen: dezelfde kop twee keer -> eerste 200, tweede 401 herhaling', r.status === 200 && r2.status === 401 && r2.j.binding === 'herhaling', r.status + '/' + JSON.stringify(r2.j));
+      r = await G('/app/apparaten', { ts: Date.now() - 150000 });
+      const r3 = await G('/app/apparaten', { ts: Date.now() + 150000 });
+      toets('26 afdwingen: klok 2,5 min achter of voor -> 401 klok', r.status === 401 && r.j.binding === 'klok' && r3.status === 401 && r3.j.binding === 'klok', JSON.stringify([r.j, r3.j]));
+      r = await G('/app/apparaten', { ts: Date.now() - 100000 });
+      toets('26 afdwingen: klok 100 s achter (binnen 2 min) -> 200', r.status === 200, JSON.stringify(r.j).slice(0, 100));
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar, kop: { 'x-app-binding': 'v1.123.abc.def' } });
+      toets('26 afdwingen: kop in verkeerde vorm -> 401 vorm', r.status === 401 && r.j.binding === 'vorm', JSON.stringify(r.j));
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar, kop: { 'x-app-binding': teken('GET', '/app/nieuw', '-') } });
+      toets('26 afdwingen: kop getekend voor een ander pad -> 401 handtekening', r.status === 401 && r.j.binding === 'handtekening', JSON.stringify(r.j));
+      r = await vraag('GET', '/app/apparaten', undefined, { pot: P.jar, kop: { 'x-app-binding': teken('POST', '/app/apparaten', '-') } });
+      toets('26 afdwingen: kop getekend voor een andere methode -> 401', r.status === 401 && r.j.binding === 'handtekening', JSON.stringify(r.j));
+      r = await G('/app/apparaten');
+      toets('26 afdwingen: juiste kop -> 200', r.status === 200, JSON.stringify(r.j).slice(0, 100));
+      r = await PO('/app/gezien', { tab: 'agents' });
+      toets('26 afdwingen: POST met getekende body -> 200', r.status === 200, JSON.stringify(r.j));
+      r = await PO('/app/gezien', { tab: 'bestanden' }, { tekenBody: JSON.stringify({ tab: 'agents' }) });
+      toets('26 afdwingen: body verwisseld na het tekenen -> 401 handtekening', r.status === 401 && r.j.binding === 'handtekening', JSON.stringify(r.j));
+      // status
+      r = await G('/app/status');
+      toets('26 afdwingen: status met juiste kop -> sessie true', r.status === 200 && r.j.sessie === true && r.j.binding === null, JSON.stringify(r.j).slice(0, 160));
+      r = await vraag('GET', '/app/status', undefined, { pot: P.jar });
+      toets('26 afdwingen: status zonder kop -> sessie false (meteen vingerafdruk), binding geen-kop', r.status === 200 && r.j.sessie === false && r.j.binding === 'geen-kop' && !!r.j.apparaat, JSON.stringify(r.j).slice(0, 200));
+      r = await G('/app/status', { ts: Date.now() - 200000 });
+      toets('26 afdwingen: status met scheve klok -> binding klok + nu_ms (app tekent opnieuw)', r.j.binding === 'klok' && typeof r.j.nu_ms === 'number', JSON.stringify(r.j).slice(0, 200));
+      // upload: inhoudshash en naam getekend
+      const bidU = 'binding-' + crypto.randomBytes(4).toString('hex'), buf = Buffer.from('bestand voor de sleuteltoets');
+      const uplT = (n, inhoud, naam, tekenNaam, o) => upl('/app/upload/' + bidU + '/' + n, inhoud, naam, { pot: P.jar, kop: Object.assign({ 'x-app-inhoud': (o && o.claim) || h64(inhoud),
+        'x-app-binding': teken('POST', '/app/upload/' + bidU + '/' + n, (o && o.claim) || h64(inhoud), { naam: encodeURIComponent(tekenNaam) }) }, (o && o.zonder) ? { 'x-app-binding': undefined } : {}) });
+      r = await uplT(1, buf, 'a.txt', 'a.txt');
+      toets('26 afdwingen: upload met getekende inhoud en naam -> 200', r.status === 200 && r.j.naam === 'a.txt', JSON.stringify(r.j));
+      r = await uplT(2, buf, 'b.txt', 'b.txt', { claim: h64(Buffer.from('iets anders')) });
+      const dirU = fs.readdirSync(path.join(W, 'upload')).map((d) => path.join(W, 'upload', d)).filter((d) => fs.statSync(d).isDirectory()).flatMap((d) => fs.readdirSync(d).map((x) => path.join(d, x)));
+      toets('26 afdwingen: upload waarvan de inhoud niet bij de getekende hash past -> 401 inhoud, niets bewaard', r.status === 401 && r.j.binding === 'inhoud' && !dirU.some((f) => f.endsWith(path.sep + '2') || /\/2\.deel-/.test(f)), JSON.stringify(r.j) + dirU.join(','));
+      r = await uplT(3, buf, 'kwaad.exe', 'c.txt');
+      toets('26 afdwingen: upload met verwisselde bestandsnaam -> 401 handtekening', r.status === 401 && r.j.binding === 'handtekening', JSON.stringify(r.j));
+      // spraak
+      const wav = wavMaak(1);
+      r = await upl('/app/spraak', wav, null, { pot: P.jar, kop: { 'x-app-inhoud': h64(wav), 'x-app-binding': teken('POST', '/app/spraak', h64(wav)) } });
+      toets('26 afdwingen: spraak met getekende inhoud -> 200', r.status === 200 && typeof r.j.tekst === 'string', JSON.stringify(r.j).slice(0, 120));
+      const wav2 = wavMaak(1.2);
+      r = await upl('/app/spraak', wav2, null, { pot: P.jar, kop: { 'x-app-inhoud': h64(wav), 'x-app-binding': teken('POST', '/app/spraak', h64(wav)) } });
+      toets('26 afdwingen: spraak met andere opname dan getekend -> 401 inhoud', r.status === 401 && r.j.binding === 'inhoud', JSON.stringify(r.j));
+      // uitloggen: alleen getekend wist de sessie
+      const hP = crypto.createHash('sha256').update(P.jar.sessie).digest('hex'), sessieP = P.jar.sessie;
+      r = await vraag('POST', '/app/uitloggen', '{}', { pot: { apparaat: P.jar.apparaat, sessie: sessieP } });
+      toets('26 afdwingen: uitloggen zonder kop -> 200 maar de sessie blijft (geoogst cookie logt David niet uit)', r.status === 200 && !!H.appStaat.sessies[hP], r.status);
+      // herstart: sleutel blijft; een sessie zonder sleutel (van vóór wv316) -> nette heropening
+      H.appSessiesBewaar(); H.appSessiesLaad();
+      r = await G('/app/apparaten');
+      toets('26 na herstart blijft de sessie gebonden: met kop 200', r.status === 200 && H.appStaat.sessies[hP] && H.appStaat.sessies[hP].binding && H.appStaat.sessies[hP].binding.x === pj.x, r.status);
+      const sjs = JSON.parse(fs.readFileSync(path.join(DATA, 'sessies.json'), 'utf8'));
+      const kap = JSON.parse(JSON.stringify(sjs)); kap.sessies[hP].binding = { x: 'kapot', y: pj.y };
+      fs.writeFileSync(path.join(DATA, 'sessies.json'), JSON.stringify(kap));
+      let lr = H.appSessiesLaad();
+      toets('26 kapotte sleutel in sessies.json -> sessie vervalt', !H.appStaat.sessies[hP] && lr.vervallen >= 1, JSON.stringify(lr));
+      delete sjs.sessies[hP].binding; fs.writeFileSync(path.join(DATA, 'sessies.json'), JSON.stringify(sjs));
+      lr = H.appSessiesLaad();
+      r = await G('/app/apparaten');
+      toets('26 afdwingen: oude sessie zonder sleutel na herstart -> 401 ontbreekt (nette heropening, geen lus)', H.appStaat.sessies[hP] && !H.appStaat.sessies[hP].binding && r.status === 401 && r.j.binding === 'ontbreekt', JSON.stringify(r.j));
+      r = await vraag('GET', '/app/status', undefined, { pot: P.jar, kop: { 'x-app-binding': teken('GET', '/app/status', '-') } });
+      toets('26 afdwingen: status met ongebonden sessie -> sessie false, binding ontbreekt', r.j.sessie === false && r.j.binding === 'ontbreekt', JSON.stringify(r.j).slice(0, 160));
+      r = await P.p.evaluate(() => post('/api/passkey/opties', {}));
+      toets('26 afdwingen: opties zonder sleutel -> 400 met uitleg (Chrome/Edge, of app ouder dan pod)', r.status === 400 && /Chrome of Edge/.test(r.j.fout) && /ouder dan de pod/.test(r.j.fout), JSON.stringify(r.j));
+      r = await P.p.evaluate(() => post('/api/koppel/opties', {}));
+      toets('26 afdwingen: koppel-opties zonder sleutel -> 400', r.status === 400 && /apparaatsleutel/.test(r.j.fout), JSON.stringify(r.j));
+      r = await P.p.evaluate((k) => post('/api/passkey/opties', { apparaatsleutel: k }), SLEUTEL);
+      bw = await P.p.evaluate((o) => bewijs(o), r.j.opties);
+      r = await P.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bw);
+      const r4 = await G('/app/apparaten');
+      toets('26 afdwingen: heropenen met sleutel -> nieuwe gebonden sessie, verzoek 200', r.status === 200 && r4.status === 200, r.status + '/' + r4.status);
+      r = await vraag('POST', '/app/uitloggen', '{}', { pot: { apparaat: P.jar.apparaat, sessie: P.jar.sessie }, kop: { 'x-app-binding': teken('POST', '/app/uitloggen', h64('{}')) } });
+      toets('26 afdwingen: getekend uitloggen wist de sessie', r.status === 200 && !H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')], r.status);
+      // modus: wissel gemeld, env alleen 'meten', bestand zonder reden ongeldig
+      const amod = auditNa(n0).filter((x) => x.route === 'binding-modus');
+      toets('26 moduswissel: auditregel WISSEL en precies één regel naar de debug-bot', amod.length === 1 && amod[0].m === 'WISSEL' && /afdwingen/.test(amod[0].reden) && telegram.slice(tg0).filter((t) => /apparaatsleutel-modus is nu "afdwingen"/.test(t)).length === 1, JSON.stringify(amod) + telegram.slice(tg0).join(' | '));
+      ctx.process.env.APP_BINDING_MODUS = 'meten'; ctx.process.env.APP_BINDING_REDEN = 'terugval toets'; H.appStaat.bindingModus.gelezen = 0;
+      toets('26 terugval via env (alleen meten, met reden) wint van het bestand', H.appBindingModus().modus === 'meten' && H.appBindingModus().bron === 'env', JSON.stringify(H.appBindingModus()));
+      ctx.process.env.APP_BINDING_MODUS = 'afdwingen'; zetModus({ modus: 'meten', reden: 'terugval' });
+      toets('26 env afdwingen wordt genegeerd (alleen meten mag)', H.appBindingModus().modus === 'meten' && H.appBindingModus().bron === 'bestand' && /genegeerd/.test(H.appBindingModus().env), JSON.stringify(H.appBindingModus()));
+      delete ctx.process.env.APP_BINDING_MODUS; delete ctx.process.env.APP_BINDING_REDEN;
+      zetModus({ modus: 'afdwingen' });
+      toets('26 bestand zonder reden -> ongeldig, standaard meten', H.appBindingModus().modus === 'meten' && H.appBindingModus().bestand === 'ongeldig', JSON.stringify(H.appBindingModus()));
+      zetModus('{kapot');
+      toets('26 kapot bestand -> standaard meten', H.appBindingModus().modus === 'meten' && H.appBindingModus().bestand === 'ongeldig', JSON.stringify(H.appBindingModus()));
+      zetModus(null);
+      // telling en /health
+      H.appBindingTelBewaar();
+      const tel = fs.readFileSync(path.join(DATA, 'binding-telling.json'), 'utf8'), tj = JSON.parse(tel);
+      const dag = tj.dagen[new Date().toISOString().slice(0, 10)] || {}, px = dag[P.jar.apparaat.split('.')[0]] || {};
+      toets('26 telling: per apparaat ok, ontbreekt, fout per reden en opties met/zonder sleutel; geen sleutelmateriaal', px.ok > 5 && px.ontbreekt >= 1 && px.fout['geen-kop'] >= 1 && px.fout.handtekening >= 1 && px.fout.herhaling === 1 && px.fout.inhoud >= 2 && px.opties_zonder_sleutel >= 2 && px.opties_met_sleutel >= 2
+        && !tel.includes(pj.x) && tj.apparaten[P.jar.apparaat.split('.')[0]].eerste_ok && tj.apparaten[P.jar.apparaat.split('.')[0]].ontbreekt_na_ok >= 1, tel.slice(0, 400));
+      const hi = H.appInfo().binding;
+      toets('26 /health app.binding: modus, bron, telling vandaag, geen apparaat-ids', hi && hi.modus === 'meten' && hi.vandaag.ok > 0 && !JSON.stringify(hi).includes(P.jar.apparaat.split('.')[0]), JSON.stringify(hi));
+      // terug naar de stand van vóór 26: P weer met een (gebonden) sessie voor wat volgt
+      r = await P.p.evaluate((k) => post('/api/passkey/opties', { apparaatsleutel: k }), SLEUTEL);
+      bw = await P.p.evaluate((o) => bewijs(o), r.j.opties);
+      await P.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bw);
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──

@@ -3538,6 +3538,8 @@ function appStuur(res, status, obj, cookies) {
   if (res._app) res._app.status = status;
   // X-App-Pod: de Function geeft alleen antwoorden door die echt van deze code komen (geen Access-/tunnelpagina's).
   res.writeHead(status, Object.assign({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-App-Pod': '1' }, appCookieKop(cookies)));
+  // wv316: podklok in elk antwoord; de app tekent daarmee (ook na een koude start meteen goed; Fable wv316 #3)
+  if (obj && typeof obj === 'object' && !Array.isArray(obj) && obj.nu_ms === undefined) obj = Object.assign({}, obj, { nu_ms: Date.now() });
   res.end(JSON.stringify(obj));
 }
 function appWeiger(res, status, fout, reden) {
@@ -3599,7 +3601,7 @@ async function appAccessOk(req, cfg) {
 }
 
 function appBody(req, cb) {
-  if (req.method !== 'POST') return cb(null, {});
+  if (req.method !== 'POST') return cb(null, {}, '-');
   const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   if (ct !== 'application/json') { req.resume(); return cb('soort'); }
   const delen = []; let n = 0, klaar = false;
@@ -3612,9 +3614,10 @@ function appBody(req, cb) {
   req.on('error', function () { if (!klaar) { klaar = true; cb('lezen'); } });
   req.on('end', function () {
     if (klaar) return; klaar = true;
-    let d = null; try { d = JSON.parse(Buffer.concat(delen).toString('utf8') || '{}'); } catch (e) {}
+    const buf = Buffer.concat(delen);
+    let d = null; try { d = JSON.parse(buf.toString('utf8') || '{}'); } catch (e) {}
     if (!d || typeof d !== 'object' || Array.isArray(d)) return cb('json');
-    cb(null, d);
+    cb(null, d, crypto.createHash('sha256').update(buf).digest('base64url'));   // wv316: de app tekent precies deze bytes
   });
 }
 
@@ -3668,13 +3671,13 @@ function appSessie(req, apparaat, glijd) {
   if (glijd) appGlijd(s, apparaat);
   return s;
 }
-function appNieuweSessie(apparaat, credentialId) {
+function appNieuweSessie(apparaat, credentialId, sleutel) {
   // één sessie per apparaat: een nieuwe vingerafdruk vervangt de vorige
   Object.keys(appStaat.sessies).forEach(function (h) { if (appStaat.sessies[h].apparaat === apparaat.id) delete appStaat.sessies[h]; });
   const id = crypto.randomBytes(32).toString('hex'), nu = Date.now();
   // credential: met welke passkey deze sessie geopend is (goedkeuren eist die van het apparaat zelf)
   appStaat.sessies[appSha(id)] = { apparaat: apparaat.id, credential: String(credentialId || ''), start: nu, vers_tot: nu + APP_VERS_MS,
-    tot: appSessieTot(nu, apparaat, nu) };
+    tot: appSessieTot(nu, apparaat, nu), binding: sleutel ? { x: sleutel.x, y: sleutel.y } : null };   // wv316: publieke apparaatsleutel (§ 4.4f)
   appSessiesBewaar();
   return { w: id, s: Math.floor((apparaat.soort === 'vast' ? APP_SESSIE_MAX_MS : APP_SESSIE_REIST_MAX_MS) / 1000) };
 }
@@ -3694,7 +3697,7 @@ function appSessiesBewaar() {
   const nu = Date.now(), uit = {};
   Object.keys(appStaat.sessies).forEach(function (h) {
     const s = appStaat.sessies[h];
-    if (nu <= s.tot) uit[h] = { apparaat: s.apparaat, credential: s.credential, start: s.start, tot: s.tot };
+    if (nu <= s.tot) uit[h] = { apparaat: s.apparaat, credential: s.credential, start: s.start, tot: s.tot, binding: s.binding || null };   // wv316: publieke sleutel, geen geheim
   });
   try { appSchrijfJson(APP_SESSIES, { versie: 1, sessies: uit }); }
   catch (e) {
@@ -3737,11 +3740,178 @@ function appSessiesLaad() {
     const max = !x ? 0 : x.soort === 'vast' ? Math.min(s.start + APP_SESSIE_MAX_MS, nu + APP_SESSIE_VAST_MS) : s.start + APP_SESSIE_REIST_MAX_MS;
     if (!x || !x.credential || !appGelijk(s.credential, String(x.credential.id || '')) || !Number.isFinite(s.start) || !Number.isFinite(s.tot) ||
         s.start > nu || s.tot > max || nu > s.tot) { uit.vervallen++; return; }
-    appStaat.sessies[h] = { apparaat: s.apparaat, credential: s.credential, start: s.start, vers_tot: 0, tot: s.tot };
+    // wv316: sleutel ontbreekt = ongebonden sessie van vóór de binding (fase B: één nette heropening); kapotte vorm = vervalt
+    let sl = null;
+    if (s.binding !== undefined && s.binding !== null) { sl = appSleutelLees({ kty: 'EC', crv: 'P-256', x: s.binding && s.binding.x, y: s.binding && s.binding.y }); if (!sl) { uit.vervallen++; return; } }
+    appStaat.sessies[h] = { apparaat: s.apparaat, credential: s.credential, start: s.start, vers_tot: 0, tot: s.tot, binding: sl };
     uit.hersteld++;
   });
   if (uit.vervallen) appSessiesBewaar();
   return uit;
+}
+
+// ── Apparaatsleutel (wv316, bouwplan § 4.4f; Fable-review wv69 § 8c "DPoP-achtige binding") ──
+// Waarom: de Function ziet sessie- en apparaatcookie. Wie die oogst (gekaapte Function-code, een log, de tunnel) kon tot het
+// einde van het dagdeel (§ 4.4e) als David beurten doen. Nu draagt elke sessie de publieke helft van een niet-exporteerbare
+// ECDSA-P256-sleutel die alleen in Davids browser (IndexedDB) leeft, en tekent de app elk verzoek: methode, pad, tijd (podklok),
+// nonce, hash van de body (JSON) of van de bestandsinhoud (upload/spraak, kop X-App-Inhoud) en de bestandsnaam. Een geoogste
+// kop is één keer en hooguit 2 min bruikbaar, en alleen voor precies dat verzoek.
+// De sleutel komt in de sessie via de passkey: de WebAuthn-uitdaging is 16 willekeurige bytes + sha256(RFC 7638-thumbprint)
+// van de sleutel, en de app controleert dat vóór de vingerafdruk (een Function die de sleutel verwisselt, valt dan op).
+// Modus 'meten' (fase A): controleren en tellen, niets weigeren. 'afdwingen' (fase B): elk verzoek op een sessie zonder geldige
+// handtekening krijgt 401 met binding:<reden> (de app vraagt dan netjes de vingerafdruk; de sessie zelf blijft bestaan).
+// Bron van de modus: env APP_BINDING_MODUS mag alleen 'meten' forceren (met APP_BINDING_REDEN); anders het bestand
+// /opt/data/app-binding.json {modus, reden, door, op} (reden verplicht; naast app-uit, niet in socev-app-data); anders 'meten'.
+// Buiten de binding: /tel/* (Tasker, eigen sleutel, geen browser), /bericht en andere API_SECRET-routes, routes zonder sessie.
+const APP_BINDING_BESTAND = process.env.APP_BINDING_BESTAND || appStandaard('/opt/data/app-binding.json', 'app-binding.json');
+const APP_BINDING_TELLING = path.join(APP_DATA, 'binding-telling.json');   // per dag per apparaat: ok/ontbreekt/fout; geen sleutelmateriaal
+const APP_BINDING_STANDAARD = 'meten';
+const APP_BINDING_VENSTER_MS = 2 * 60 * 1000;     // |ts - podklok|
+const APP_BINDING_NONCE_MS = 5 * 60 * 1000;       // > 2 x venster
+const APP_BINDING_NONCE_MAX = 5000;               // 1200 verzoeken per uur halen dit in 5 min nooit
+const APP_BINDING_START = Date.now();             // een kop van vóór deze start (nonces weg) is 'klok' (Fable wv316 #9)
+const APP_BINDING_KOP_RE = /^v1\.(\d{13})\.([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{86})$/;
+const APP_BINDING_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
+appStaat.bindingNonces = new Map();
+appStaat.bindingModus = null;
+appStaat.bindingTel = null;
+appStaat.bindingAuditMin = { minuut: 0, n: {} };
+
+// Publieke sleutel uit een verzoek: alleen EC P-256 met x/y van precies 43 tekens die Node als punt op de kromme aanneemt én
+// ongewijzigd terug-exporteert. Geeft {x, y} of null.
+function appSleutelLees(j) {
+  if (!j || typeof j !== 'object' || Array.isArray(j) || j.kty !== 'EC' || j.crv !== 'P-256') return null;
+  const x = String(j.x || ''), y = String(j.y || '');
+  if (!APP_BINDING_HASH_RE.test(x) || !APP_BINDING_HASH_RE.test(y)) return null;
+  try {
+    const t = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: x, y: y }, format: 'jwk' }).export({ format: 'jwk' });
+    return t.x === x && t.y === y ? { x: x, y: y } : null;
+  } catch (e) { return null; }
+}
+// RFC 7638: velden crv, kty, x, y in die volgorde, zonder spaties.
+function appSleutelThumb(k) { return crypto.createHash('sha256').update('{"crv":"P-256","kty":"EC","x":"' + k.x + '","y":"' + k.y + '"}').digest(); }
+// Uitdaging voor koppelen/ontgrendelen: zonder sleutel 32 willekeurige bytes (zoals de bibliotheek), met sleutel 16 + thumbprint.
+function appSleutelUitdaging(k) { return k ? Buffer.concat([crypto.randomBytes(16), appSleutelThumb(k)]) : crypto.randomBytes(32); }
+
+function appBindingModus() {
+  const nu = Date.now(), c = appStaat.bindingModus;
+  if (c && nu - c.gelezen < 5000) return c;
+  let uit = { modus: APP_BINDING_STANDAARD, bron: 'standaard', reden: null, bestand: 'geen' };
+  const em = process.env.APP_BINDING_MODUS, er = String(process.env.APP_BINDING_REDEN || '').trim();
+  if (em === 'meten' && er) uit = { modus: 'meten', bron: 'env', reden: er.slice(0, 200), bestand: 'genegeerd' };
+  else {
+    let t = null;
+    try { t = fs.readFileSync(APP_BINDING_BESTAND, 'utf8'); } catch (e) { if (!e || e.code !== 'ENOENT') uit.bestand = 'onleesbaar'; }
+    if (t !== null) {
+      let j = null; try { j = JSON.parse(t); } catch (e) {}
+      const reden = j && typeof j.reden === 'string' ? j.reden.trim() : '';
+      if (j && (j.modus === 'meten' || j.modus === 'afdwingen') && reden && reden.length <= 200)
+        uit = { modus: j.modus, bron: 'bestand', reden: reden, bestand: 'geldig', op: typeof j.op === 'string' ? j.op.slice(0, 40) : null };
+      else uit.bestand = 'ongeldig';
+    }
+    if (em && em !== 'meten') uit.env = 'genegeerd (alleen meten mag)';
+  }
+  uit.gelezen = nu;
+  // Elke wissel van de werkende modus: auditregel en één regel naar de debug-bot (het bestand is schrijfbaar voor dezelfde uid
+  // als een machinekamer-beurt; Fable wv316 #6). Bij de start alleen als het niet de standaard is.
+  if (c ? c.modus !== uit.modus || c.bron !== uit.bron || c.bestand !== uit.bestand : uit.bron !== 'standaard' || uit.bestand !== 'geen') {
+    if (uit.bestand === 'ongeldig' || uit.bestand === 'onleesbaar') logError('app-binding-modus', new Error('app-binding.json ' + uit.bestand));
+    appAudit({ route: 'binding-modus', m: c ? 'WISSEL' : 'START', status: 200, apparaat: null,
+      reden: 'modus ' + uit.modus + ' (bron ' + uit.bron + ', bestand ' + uit.bestand + ')' + (uit.reden ? ': ' + uit.reden.slice(0, 120) : '') });
+    if (c) appTelegram('Socev-app: apparaatsleutel-modus is nu "' + uit.modus + '" (bron ' + uit.bron + (uit.reden ? ', reden: ' + uit.reden.slice(0, 120) : '') + '). Niet door de machinekamer gedaan? /app-noodstop en meld het.');
+  }
+  appStaat.bindingModus = uit;
+  return uit;
+}
+
+// Controle van de kop X-App-Binding tegen de sleutel van de sessie. lichaam: '-' (GET), sha256 van de JSON-bytes (base64url),
+// of bij een ruwe route de waarde van X-App-Inhoud (de pod vergelijkt die na afloop met wat er echt binnenkwam).
+// Uitslag: { u: 'ok'|'ontbreekt'|'fout', r: reden, klok_s }. Nooit iets van de kop, nonce of sleutel in de uitslag.
+function appBindingCheck(req, s, lichaam) {
+  if (!s || !s.binding) return { u: 'ontbreekt', r: 'sessie zonder sleutel' };
+  const kop = String(req.headers['x-app-binding'] || '');
+  if (!kop) return { u: 'fout', r: 'geen-kop' };
+  const m = APP_BINDING_KOP_RE.exec(kop);
+  if (!m) return { u: 'fout', r: 'vorm' };
+  const ts = Number(m[1]), nu = Date.now();
+  if (Math.abs(ts - nu) > APP_BINDING_VENSTER_MS || ts < APP_BINDING_START) return { u: 'fout', r: 'klok', klok_s: Math.round((ts - nu) / 1000) };
+  const naam = String(req.headers['x-app-naam'] || '') || '-';
+  const basis = ['socev-binding-v1', req.method, reqPath(req), m[1], m[2], lichaam, naam].join('\n');
+  let goed = false;
+  try {
+    // KeyObject per sessie bewaard (niet opsombaar: gaat niet naar sessies.json), opnieuw als de sleutel van de sessie wijzigt
+    if (!s._sleutel || s._sleutel.x !== s.binding.x || s._sleutel.y !== s.binding.y)
+      Object.defineProperty(s, '_sleutel', { value: { x: s.binding.x, y: s.binding.y, ko: crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: s.binding.x, y: s.binding.y }, format: 'jwk' }) },
+        enumerable: false, writable: true, configurable: true });
+    goed = crypto.verify('sha256', Buffer.from(basis), { key: s._sleutel.ko, dsaEncoding: 'ieee-p1363' }, Buffer.from(m[3], 'base64url'));
+  } catch (e) { goed = false; }
+  if (!goed) return { u: 'fout', r: 'handtekening' };
+  const nn = appStaat.bindingNonces;
+  if (nn.has(m[2]) && nn.get(m[2]) > nu) return { u: 'fout', r: 'herhaling' };
+  if (nn.size >= APP_BINDING_NONCE_MAX) {
+    for (const [k, t] of nn) { if (t <= nu) nn.delete(k); }
+    while (nn.size >= APP_BINDING_NONCE_MAX) nn.delete(nn.keys().next().value);
+  }
+  nn.set(m[2], nu + APP_BINDING_NONCE_MS);
+  return { u: 'ok', r: null };
+}
+// wv316: na een ruwe stroom (upload/spraak) de getekende inhoudshash vergelijken. Klopt hij niet: in 'meten' alleen tellen
+// (true), in 'afdwingen' false (de route weigert met 401 en gooit het deel weg).
+function appInhoudKlopt(res, hash) {
+  if (hash.digest('base64url') === res._app.inhoud) return true;
+  res._app.binding = 'fout:inhoud'; res._app.reden = 'binding fout:inhoud';
+  return appBindingModus().modus !== 'afdwingen';
+}
+function appBindingTekst(b) { return b.u === 'fout' ? 'fout:' + b.r : b.u; }
+// 401 in fase B: de app vraagt de vingerafdruk (bij klok/herhaling eerst één keer opnieuw tekenen). De sessie blijft.
+function appBindingWeiger(res, b) {
+  if (res._app) res._app.reden = 'binding ' + appBindingTekst(b);
+  appStuur(res, 401, { ok: false, fout: 'open opnieuw met je vingerafdruk', binding: b.u === 'fout' ? b.r : 'ontbreekt' });
+}
+
+// Telling (per dag, per apparaat). Alleen tellers en tijden; nooit sleutel, nonce of handtekening.
+function appBindingTelling() {
+  if (!appStaat.bindingTel) {
+    const j = appLeesJson(APP_BINDING_TELLING, null);
+    appStaat.bindingTel = j && j.versie === 1 && j.dagen && typeof j.dagen === 'object' ? j : { versie: 1, dagen: {}, apparaten: {} };
+    if (!appStaat.bindingTel.apparaten) appStaat.bindingTel.apparaten = {};
+  }
+  return appStaat.bindingTel;
+}
+function appBindingTel(apparaatId, uitslag, extra) {
+  try {
+    const t = appBindingTelling(), nu = new Date(), iso = nu.toISOString(), dag = iso.slice(0, 10), id = apparaatId || '-';
+    const d = (t.dagen[dag] = t.dagen[dag] || {});
+    const x = (d[id] = d[id] || { ok: 0, ontbreekt: 0, fout: {}, opties_zonder_sleutel: 0, opties_met_sleutel: 0 });
+    const ap = (t.apparaten[id] = t.apparaten[id] || {});
+    if (uitslag === 'ok') { x.ok++; if (!ap.eerste_ok) ap.eerste_ok = iso; ap.laatste_ok = iso; }
+    else if (uitslag === 'ontbreekt') { x.ontbreekt++; ap.laatste_ontbreekt = iso; if (ap.eerste_ok) ap.ontbreekt_na_ok = (ap.ontbreekt_na_ok || 0) + 1; }
+    else if (uitslag === 'opties_zonder_sleutel' || uitslag === 'opties_met_sleutel') { x[uitslag]++; if (uitslag === 'opties_zonder_sleutel') ap.laatste_opties_zonder_sleutel = iso; }
+    else if (uitslag.indexOf('fout:') === 0) {
+      const r = uitslag.slice(5, 30); x.fout[r] = (x.fout[r] || 0) + 1; ap.laatste_fout = iso; ap.laatste_fout_reden = r;
+      if (extra && Number.isFinite(extra.klok_s)) ap.laatste_klok_s = extra.klok_s;
+    }
+    t.vuil = true;
+  } catch (e) { logError('app-binding-tel', e); }
+}
+function appBindingTelBewaar() {
+  const t = appStaat.bindingTel;
+  if (!t || !t.vuil) return;
+  t.vuil = false;
+  const grens = new Date(Date.now() - 8 * 86400000).toISOString().slice(0, 10);
+  Object.keys(t.dagen).forEach(function (d) { if (d < grens) delete t.dagen[d]; });
+  try { appSchrijfJson(APP_BINDING_TELLING, { versie: 1, dagen: t.dagen, apparaten: t.apparaten, bijgewerkt: new Date().toISOString() }); }
+  catch (e) { logError('app-binding-tel', e); }
+}
+function appBindingInfo() {
+  const m = appBindingModus(), t = appBindingTelling(), d = t.dagen[new Date().toISOString().slice(0, 10)] || {};
+  const som = { ok: 0, ontbreekt: 0, fout: 0, opties_zonder_sleutel: 0 };
+  Object.keys(d).forEach(function (id) {
+    const x = d[id]; som.ok += x.ok; som.ontbreekt += x.ontbreekt; som.opties_zonder_sleutel += x.opties_zonder_sleutel || 0;
+    Object.keys(x.fout).forEach(function (r) { som.fout += x.fout[r]; });
+  });
+  return { modus: m.modus, bron: m.bron, bestand: m.bestand, env: m.env || null, reden: m.reden ? m.reden.slice(0, 120) : null, vandaag: som,
+    gebonden_sessies: Object.keys(appStaat.sessies).filter(function (h) { return !!appStaat.sessies[h].binding; }).length };
 }
 
 function appSysteem(req) {
@@ -3771,17 +3941,29 @@ async function appTelegram(tekst) {
 }
 
 // ── routes ──
-async function appStatus(req, res, reg) {
+async function appStatus(req, res, reg, lichaam) {
   const a = appApparaat(req, reg);
-  const s = a ? appSessie(req, a, false) : null;
+  let s = a ? appSessie(req, a, false) : null;
+  // wv316: met een sessie ook de apparaatsleutel. In 'afdwingen' telt een sessie zonder geldige handtekening als geen sessie
+  // (de app vraagt dan meteen de vingerafdruk); bij klok/herhaling tekent de app eerst één keer opnieuw (veld binding).
+  let bu = null;
+  if (s) {
+    res._app.apparaat = a.id;
+    bu = appBindingCheck(req, s, lichaam || '-');
+    res._app.binding = appBindingTekst(bu); res._app.bindingTel = true; res._app.bindingExtra = bu;
+    if (bu.u !== 'ok' && appBindingModus().modus === 'afdwingen') s = null;
+  }
   const k = a ? null : appAanvraagVan(req);
   appStuur(res, 200, { ok: true, koppelen_open: appKoppelOpen(reg), aanvraag_mogelijk: appAanvraagMogelijk(reg),
     aanvraag: k ? appAanvraagUit(k) : null, apparaat: a ? { id: a.id, naam: a.naam, soort: a.soort, vaste_plek: a.vaste_plek || null, goedkeurder: a.goedkeurder === true } : null,
     herstelcode_nodig: appKoppelOpen(reg) && appHerstelActief(reg),   // wv135: veld naast de koppelcode (alleen telefoon)
     sessie: !!s, sessie_tot: s ? new Date(s.tot).toISOString() : null, passkey_klaar: !!appWebauthn(),
-    sessie_rest_s: s ? Math.max(0, Math.floor((s.tot - Date.now()) / 1000)) : null });   // wv205: resttijd, los van de klok van het apparaat
+    sessie_rest_s: s ? Math.max(0, Math.floor((s.tot - Date.now()) / 1000)) : null,   // wv205: resttijd, los van de klok van het apparaat
+    binding: bu && bu.u !== 'ok' ? (bu.u === 'fout' ? bu.r : 'ontbreekt') : null });
 }
 
+// Let op (wv316): dit is de binding van het KOPPELCOOKIE aan een koppelpoging. De apparaatsleutel van een sessie heet
+// s.binding / appBindingCheck / auditveld 'binding' (§ 4.4f); in verzoeken d.apparaatsleutel.
 function appBindingOk(req, k) {
   const b = String(req.headers['x-app-koppel'] || '');
   return !!k && /^[a-f0-9]{64}$/.test(b) && appGelijk(appSha(b), k.binding);
@@ -4081,6 +4263,8 @@ function appKoppelBron(req, res, reg, d, metCodeVraag) {
 async function appKoppelOpties(req, res, reg, d) {
   const wa = appWebauthn();
   if (!wa) return appWeiger(res, 503, 'passkey-bibliotheek ontbreekt op de pod', 'webauthn ' + appStaat.webauthnFout);
+  const sl = appSleutelUitVerzoek(res, d, null);   // wv316: zoals ontgrendelen; vóór de code (een 400 verbruikt niets)
+  if (sl === false) return;
   const bron = appKoppelBron(req, res, reg, d, true);
   if (!bron) return;
   const k = bron.k;
@@ -4090,7 +4274,7 @@ async function appKoppelOpties(req, res, reg, d) {
   }
   const cfg = appConfig();
   const opties = await wa.generateRegistrationOptions({
-    rpName: 'Socev', rpID: cfg.rpId, userName: 'david', userDisplayName: 'David',
+    rpName: 'Socev', rpID: cfg.rpId, userName: 'david', userDisplayName: 'David', challenge: appSleutelUitdaging(sl),
     // Eigen user-handle per apparaat en geen excludeCredentials: het apparaatcookie scheidt de apparaten; met één vaste
     // handle zou een gesynchroniseerde passkey (Google Wachtwoordbeheer) die van een ander apparaat overschrijven (review wv55 #6).
     userID: crypto.randomBytes(16), attestationType: 'none', timeout: 120000,
@@ -4098,7 +4282,8 @@ async function appKoppelOpties(req, res, reg, d) {
   });
   k.uitdaging = opties.challenge;
   k.uitdaging_tot = Date.now() + APP_UITDAGING_MS;
-  appStuur(res, 200, { ok: true, opties: opties });
+  k.uitdaging_sleutel = sl;
+  appStuur(res, 200, { ok: true, opties: opties, apparaatsleutel: !!sl });
 }
 
 // Alleen bekende transports opslaan (die gaan later terug naar de browser); 'internal' altijd erbij (Fable-review 7-10 #9).
@@ -4120,8 +4305,8 @@ async function appKoppelRegistreer(req, res, reg, d) {
     if (k.pogingen >= APP_CODE_POGINGEN) { if (bron.soort === 'code') appStaat.koppel = null; else appStaat.aanvraag = null; }
     appWeiger(res, 403, 'registratie geweigerd: ' + reden, reden);
   };
-  const uitdaging = k.uitdaging, geldigTot = k.uitdaging_tot;
-  k.uitdaging = null;   // één keer bruikbaar, ook als het antwoord hieronder wordt geweigerd
+  const uitdaging = k.uitdaging, geldigTot = k.uitdaging_tot, sleutel = k.uitdaging_sleutel || null;
+  k.uitdaging = null; k.uitdaging_sleutel = null;   // één keer bruikbaar, ook als het antwoord hieronder wordt geweigerd
   if (!uitdaging || Date.now() > geldigTot) return fout('uitdaging verlopen');
   if (!antw || typeof antw !== 'object') return fout('geen antwoord');
   // Alleen een passkey OP dit apparaat: een telefoon-via-QR of beveiligingssleutel meldt 'cross-platform'. NIET op
@@ -4194,20 +4379,39 @@ async function appKoppelRegistreer(req, res, reg, d) {
     : 'Socev-app: apparaat gekoppeld - "' + naam + '" (' + apparaat.systeem + ', ' + appPlekTekst(apparaat) + '), goedgekeurd vanaf "' + door.naam + '". Niet jij? Trek het in (tab Apparaten) en meld het de machinekamer.');
   appStuur(res, 200, { ok: true, apparaat: { id: id, naam: naam, soort: apparaat.soort, vaste_plek: apparaat.vaste_plek, goedkeurder: apparaat.goedkeurder },
     herstelcode: apparaat.goedkeurder ? appHerstelToon(nieuw.code) : undefined, herstel_gemaakt: apparaat.goedkeurder ? nieuw.rij.gemaakt : undefined },
-    { koppel: null, apparaat: { w: id + '.' + geheim, s: APP_APPARAAT_COOKIE_S }, sessie: appNieuweSessie(apparaat, cred.id) });
+    { koppel: null, apparaat: { w: id + '.' + geheim, s: APP_APPARAAT_COOKIE_S }, sessie: appNieuweSessie(apparaat, cred.id, sleutel) });
 }
 
-async function appPasskeyOpties(req, res, reg) {
+async function appPasskeyOpties(req, res, reg, d) {
   const a = appApparaat(req, reg);
   if (!a) return appWeiger(res, 401, 'onbekend apparaat', 'geen apparaatcookie');
   const wa = appWebauthn();
   if (!wa) return appWeiger(res, 503, 'passkey-bibliotheek ontbreekt op de pod', 'webauthn');
   res._app.apparaat = a.id;
+  // wv316: de apparaatsleutel van de browser; de uitdaging bevat zijn thumbprint, de sessie krijgt hem na de vingerafdruk
+  const sl = appSleutelUitVerzoek(res, d, a.id);
+  if (sl === false) return;
   const cfg = appConfig();
   const opties = await wa.generateAuthenticationOptions({ rpID: cfg.rpId, userVerification: 'required', timeout: 60000,
-    allowCredentials: [{ id: a.credential.id, transports: appTransports(a.credential.transports) }] });
-  appStaat.uitdagingen[a.id] = { c: opties.challenge, tot: Date.now() + APP_UITDAGING_MS };
-  appStuur(res, 200, { ok: true, opties: opties });
+    challenge: appSleutelUitdaging(sl), allowCredentials: [{ id: a.credential.id, transports: appTransports(a.credential.transports) }] });
+  appStaat.uitdagingen[a.id] = { c: opties.challenge, tot: Date.now() + APP_UITDAGING_MS, sleutel: sl };
+  appStuur(res, 200, { ok: true, opties: opties, apparaatsleutel: !!sl });
+}
+// wv316: d.apparaatsleutel lezen. null = geen sleutel (mag in 'meten'), false = al geweigerd (400). Telt per apparaat mee.
+function appSleutelUitVerzoek(res, d, apparaatId) {
+  if (d.apparaatsleutel === undefined || d.apparaatsleutel === null) {
+    appBindingTel(apparaatId, 'opties_zonder_sleutel');
+    res._app.binding = 'opties zonder sleutel';
+    if (appBindingModus().modus === 'afdwingen') {
+      appWeiger(res, 400, 'deze browser stuurde geen apparaatsleutel mee: open de app in Chrome of Edge, of de app is ouder dan de pod (herlaad hem). Blijft het, meld het de machinekamer.', 'geen apparaatsleutel (afdwingen)');
+      return false;
+    }
+    return null;
+  }
+  const sl = appSleutelLees(d.apparaatsleutel);
+  if (!sl) { appWeiger(res, 400, 'ongeldige apparaatsleutel; herlaad de app', 'apparaatsleutel ongeldig'); return false; }
+  appBindingTel(apparaatId, 'opties_met_sleutel');
+  return sl;
 }
 
 async function appPasskeyBevestig(req, res, reg, d) {
@@ -4235,8 +4439,8 @@ async function appPasskeyBevestig(req, res, reg, d) {
   x.credential.counter = v.authenticationInfo.newCounter || 0;
   x.laatst_gezien = new Date().toISOString();
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); }
-  res._app.reden = 'bevestigd';
-  const sessie = appNieuweSessie(x, antw.id);
+  res._app.reden = 'bevestigd' + (u.sleutel ? ' (apparaatsleutel)' : ' (zonder apparaatsleutel)');
+  const sessie = appNieuweSessie(x, antw.id, u.sleutel || null);   // wv316: alleen de sleutel uit de eigen uitdaging, nooit uit deze body
   // wv205: tot wanneer deze vingerafdruk geldt; de app vraagt hem op een meereizend apparaat pas daarna opnieuw (de pod blijft rechter)
   appStuur(res, 200, { ok: true, apparaat: { id: x.id, naam: x.naam, soort: x.soort, vaste_plek: x.vaste_plek || null, goedkeurder: x.goedkeurder === true },
     sessie_tot: new Date(appStaat.sessies[appSha(sessie.w)].tot).toISOString(), sessie_rest_s: Math.floor((appStaat.sessies[appSha(sessie.w)].tot - Date.now()) / 1000) }, { sessie: sessie });
@@ -4811,11 +5015,16 @@ function appUpload(req, res, reg, a, rest) {
   let ws;
   try { ws = fs.createWriteStream(deel, { flags: 'wx', mode: 0o600 }); } catch (e) { logError('app-upload', e); return weg(500, 'opslag op de pod mislukt', 'upload open'); }
   let bytes = 0, af = false;
+  const hash = res._app.inhoud ? crypto.createHash('sha256') : null;   // wv316: getekende inhoudshash narekenen
   // Eerst het halve bestand weg (pas na 'close': het openen loopt asynchroon), dan pas antwoorden.
   const mis = function (st, f, r) {
     if (af) return; af = true;
     req.resume();
-    const klaar = function () { fs.rm(deel, { force: true }, function () { if (!res.headersSent) appWeiger(res, st, f, r); }); };
+    const klaar = function () { fs.rm(deel, { force: true }, function () {
+      if (res.headersSent) return;
+      if (st === 401) { res._app.reden = r; return appStuur(res, 401, { ok: false, fout: f, binding: 'inhoud' }); }   // wv316
+      appWeiger(res, st, f, r);
+    }); };
     if (ws.closed) klaar(); else { ws.once('close', klaar); ws.destroy(); }
   };
   ws.on('error', function (e) { logError('app-upload', e); mis(500, 'opslag op de pod mislukt', 'upload schrijven'); });
@@ -4825,12 +5034,14 @@ function appUpload(req, res, reg, a, rest) {
     if (af) return;
     bytes += c.length;
     if (bytes > max) return mis(413, max < APP_UPLOAD_BESTAND_MAX ? teGroot : 'bestand te groot (max ' + (APP_UPLOAD_BESTAND_MAX >> 20) + ' MB per bestand)', 'upload te groot (stroom)');
+    if (hash) hash.update(c);
     if (!ws.write(c)) { req.pause(); ws.once('drain', function () { if (!af) req.resume(); }); }
   });
   req.on('end', function () {
     if (af) return;
     if (!bytes) return mis(400, 'leeg bestand', 'upload leeg');
     if (lengte !== null && bytes !== lengte) return mis(400, 'upload onvolledig', 'upload lengte');
+    if (hash && !appInhoudKlopt(res, hash)) return mis(401, 'open opnieuw met je vingerafdruk', 'binding fout:inhoud');
     ws.end(function () {
       if (af) return;
       try {
@@ -6878,8 +7089,19 @@ function handleApp(req, res) {
   res._app = { route: p.slice(0, 64), status: 0, reden: null, apparaat: null, voorAuth: true };
   res.on('finish', function () {
     const o = res._app;
-    if (o.stil && res.statusCode === 200) return;
-    appAudit({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden }, o.voorAuth);
+    // wv316: uitslag van de apparaatsleutel tellen (ook op stille routes); een fout krijgt ook op een stille route een
+    // auditregel, hooguit 5 per minuut per apparaat (de rest staat in de telling; Fable wv316 #13)
+    const bf = typeof o.binding === 'string' && o.binding.indexOf('fout:') === 0;
+    if (o.bindingTel) appBindingTel(o.apparaat, o.binding, o.bindingExtra);
+    if (o.stil && res.statusCode === 200) {
+      if (!bf) return;
+      const am = appStaat.bindingAuditMin, minuut = Math.floor(Date.now() / 60000);
+      if (am.minuut !== minuut) { am.minuut = minuut; am.n = {}; }
+      am.n[o.apparaat] = (am.n[o.apparaat] || 0) + 1;
+      if (am.n[o.apparaat] > 5) return;
+    }
+    appAudit(Object.assign({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden },
+      o.binding ? { binding: o.binding } : {}, o.bindingExtra && Number.isFinite(o.bindingExtra.klok_s) ? { klok_s: o.bindingExtra.klok_s } : {}), o.voorAuth);
   });
   if (fs.existsSync(APP_UIT)) { req.resume(); return appWeiger(res, 503, 'de app staat uit (noodstop)', 'app-uit'); }
   if (!APP_ROUTE_RE.test(p) || (req.method !== 'GET' && req.method !== 'POST')) { req.resume(); return appWeiger(res, 404, 'onbekend', 'pad/methode'); }
@@ -6897,7 +7119,7 @@ function handleApp(req, res) {
     const upload = req.method === 'POST' && p.indexOf('/app/upload/') === 0;
     const ruw = upload || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (ruw ? function (cb) { cb(null, {}); } : function (cb) { appBody(req, cb); })(function (fout, d) {
+    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb); })(function (fout, d, lichaam) {
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
       let reg;
       try { reg = appRegister(); } catch (e) { logError('app-register', e); return appWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'register kapot'); }
@@ -6905,17 +7127,23 @@ function handleApp(req, res) {
       if (/^POST \/app\/koppel\//.test(route) && !appTeller('koppel', APP_KOPPEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel pogingen dit uur', 'grens koppel');
       if (route === 'POST /app/passkey/opties' && !appTeller('openen', APP_OPENEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak ontgrendeld dit uur', 'grens openen');
       const verder = function (slotKlaar) {
-        if (route === 'GET /app/status') return appStatus(req, res, reg);
+        if (route === 'GET /app/status') return appStatus(req, res, reg, lichaam);
         if (route === 'POST /app/koppel/code') return appKoppelCode(req, res, reg);
         if (route === 'POST /app/koppel/aanvraag') return appKoppelAanvraag(req, res, reg, d);
         if (route === 'GET /app/koppel/stand') return appKoppelStand(req, res);
         if (route === 'POST /app/koppel/opties') return appKoppelOpties(req, res, reg, d);
         if (route === 'POST /app/koppel/registreer') return appKoppelRegistreer(req, res, reg, d);
-        if (route === 'POST /app/passkey/opties') return appPasskeyOpties(req, res, reg);
+        if (route === 'POST /app/passkey/opties') return appPasskeyOpties(req, res, reg, d);
         if (route === 'POST /app/passkey/bevestig') return appPasskeyBevestig(req, res, reg, d);
         if (route === 'POST /app/uitloggen') {
           const c = String(req.headers['x-app-sessie'] || '');
-          if (/^[a-f0-9]{64}$/.test(c) && appStaat.sessies[appSha(c)]) { delete appStaat.sessies[appSha(c)]; appSessiesBewaar(); }
+          const su = /^[a-f0-9]{64}$/.test(c) ? appStaat.sessies[appSha(c)] : null;
+          // wv316 (Fable #17): een gebonden sessie wist alleen een getekend verzoek (een geoogst cookie logt David niet uit);
+          // ongeldig = 200 met de cookie weg, de sessie blijft (geen lus). In 'meten' alleen tellen.
+          const bu = su && su.binding ? appBindingCheck(req, su, lichaam) : null;
+          if (su) res._app.apparaat = su.apparaat;   // telling per apparaat, niet onder '-' (Fable diff #2)
+          if (bu) { res._app.binding = appBindingTekst(bu); res._app.bindingTel = true; res._app.bindingExtra = bu; }
+          if (su && !(bu && bu.u !== 'ok' && appBindingModus().modus === 'afdwingen')) { delete appStaat.sessies[appSha(c)]; appSessiesBewaar(); }
           return appStuur(res, 200, { ok: true }, { sessie: null });
         }
         // Vanaf hier: alleen met een pod-sessie (vingerafdruk) op een geldig apparaat. Alleen APP_GLIJD_ROUTES verlengen hem.
@@ -6923,6 +7151,14 @@ function handleApp(req, res) {
         const s = a ? appSessie(req, a, false) : null;
         if (!s) return appWeiger(res, 401, 'bevestig met je vingerafdruk', a ? 'geen sessie' : 'geen apparaat');
         res._app.apparaat = a.id;
+        // wv316 (§ 4.4f): apparaatsleutel. Ruwe routes tekenen de inhoudshash uit X-App-Inhoud; de route vergelijkt die na afloop.
+        if (!slotKlaar) {
+          const inhoud = String(req.headers['x-app-inhoud'] || '');
+          const bu = appBindingCheck(req, s, ruw ? (APP_BINDING_HASH_RE.test(inhoud) ? inhoud : '-') : lichaam);
+          res._app.binding = appBindingTekst(bu); res._app.bindingTel = true; res._app.bindingExtra = bu;
+          if (bu.u !== 'ok' && appBindingModus().modus === 'afdwingen') return appBindingWeiger(res, bu);
+          if (ruw && bu.u === 'ok') res._app.inhoud = inhoud;
+        }
         appHerstelVorigeWeg(reg, a);   // wv135
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en de
         // BSN-weigering (§ 4.11). Daarna verder met slotKlaar = true (apparaat en sessie worden dan opnieuw gecontroleerd).
@@ -7070,6 +7306,10 @@ setInterval(function () {
   if (appStaat.aanvraag && nu > appStaat.aanvraag.tot) appStaat.aanvraag = null;
   if (new Date(nu).getMinutes() % 10 === 0) { appUploadOpruim(false); appIoOpruim(); appConceptOpruim(); }   // klaarstaand > 1 u en weesmappen (wv99); concepten > 24 u (wv159)
   appHerstelVervaltTik();   // wv135: herstel-vervalt melden of na 48 u opruimen
+  // wv316: nonces opruimen, telling wegschrijven, modus nalezen (een wissel komt zo ook zonder verkeer in audit en debug-bot)
+  appStaat.bindingNonces.forEach(function (t, k) { if (t <= nu) appStaat.bindingNonces.delete(k); });
+  appBindingTelBewaar();
+  try { appBindingModus(); } catch (e) { logError('app-binding-modus', e); }
 }, 60 * 1000).unref();
 setTimeout(function () { appIoOpruim(); }, 30 * 1000).unref();   // na een herstart bestaat geen app-beurt meer: weesmappen weg
 // wv231: sessies van vóór de herstart terug (alleen wat nog loopt, van een actief apparaat); in de audit één regel
@@ -7083,6 +7323,7 @@ setTimeout(function () { appIoOpruim(); }, 30 * 1000).unref();   // na een herst
   }
   if (r.hersteld || r.vervallen || r.fout) appAudit({ route: 'sessies-herstart', m: 'START', status: r.fout ? 500 : 200, apparaat: null,
     reden: r.hersteld + ' sessies hersteld, ' + r.vervallen + ' vervallen' + (r.fout ? ', ' + r.fout : '') });
+  try { appBindingModus(); } catch (e) { logError('app-binding-modus', e); }   // wv316: niet-standaard modus bij de start in de audit
 })();
 
 // ── Verbruik & modellen (wv138; David 8-10: "Usagetracker van Claude, modellenpicker en modelproviderpicker (dus waar ik kan
@@ -7412,6 +7653,7 @@ function appSpraak(req, res, a) {
     af = true;
     const wav = Buffer.concat(stukken, n);
     stukken = [];
+    if (res._app.inhoud && !appInhoudKlopt(res, crypto.createHash('sha256').update(wav))) return appStuur(res, 401, { ok: false, fout: 'open opnieuw met je vingerafdruk', binding: 'inhoud' });   // wv316
     const s = n === lengte ? appWavSeconden(wav) : null;
     if (s === null) return appWeiger(res, 400, 'geen geldige opname', 'spraak wav');
     if (s < 0.3) return appWeiger(res, 400, 'opname te kort', 'spraak te kort');
@@ -7561,6 +7803,7 @@ function appInfo() {
     beurten_lopend: Object.keys(jobs).filter(function (id) { return jobs[id].app && (jobs[id].status === 'pending' || jobs[id].status === 'running'); }).length,
     omlijsting: !!appOmlijsting(),
     tel: telInfo(),   // wv264
+    binding: appBindingInfo(),   // wv316: modus, bron, telling vandaag (geen apparaat-ids)
     bestanden_mb: Math.round((appStaat.bestandenTotaal || 0) / 1048576),
     passkey_bibliotheek: appWebauthn() ? appStaat.webauthnBron : 'ontbreekt',
     seintjes: appPushInfo(),
