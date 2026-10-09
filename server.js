@@ -4507,6 +4507,9 @@ function appBeurtIds() {
   return m;
 }
 function appVragen() { return appLeesStreng(APP_VRAGEN, {}); }
+// wv292 (Fable-review wv263 #6): naar_telegram kan voorlopig zijn (naar_telegram_tot, gezet door /bericht/naar-telegram met voorlopig);
+// bevestigt n8n de Telegram-verzending niet op tijd, dan vervalt hij en heeft de app de knoppen weer (nooit nergens knoppen).
+function appNaarTelegramNu(x, nu) { return !!(x && x.naar_telegram) && !(x.naar_telegram_tot && Date.parse(x.naar_telegram_tot) <= (nu || Date.now())); }
 function appVragenSchrijf(v) {
   const nu = Date.now();
   Object.keys(v).forEach(function (k) { if (!v[k] || nu - Date.parse(v[k].t || 0) > APP_LOG_MS) delete v[k]; });
@@ -4942,7 +4945,7 @@ async function appKnop(req, res, reg, a, s, d) {
   const al = function (x) { return appStuur(res, 409, { ok: false, fout: 'al beantwoord: ' + (x.keuze === 'ja' ? 'Ja' : x.keuze === 'nee' ? 'Nee' : 'Anders') + ' ' + appKlok(x.t), beantwoord: x }); };
   if (rij.antwoord) { res._app.reden = 'al beantwoord'; return al(rij.antwoord); }
   // wv263 (§ 4.3): bericht naar Telegram gegaan met knoppen -> daar antwoorden, niet ook hier (één antwoordplek)
-  if (rij.naar_telegram) { res._app.reden = 'naar telegram'; return appStuur(res, 409, { ok: false, fout: 'deze vraag beantwoord je in Telegram', naar_telegram: true }); }
+  if (appNaarTelegramNu(rij)) { res._app.reden = 'naar telegram'; return appStuur(res, 409, { ok: false, fout: 'deze vraag beantwoord je in Telegram', naar_telegram: true }); }
   // wv135 (§ 4.4d): Ja op een gevoelige vraag (versturen, verwijderen, agenda, geld; rij zonder veld = gevoelig) eist een verse
   // vingerafdruk met de passkey van dit apparaat, en verbruikt hem: controleren én verbruiken vóór de eerste await, zodat twee
   // tabbladen niet twee gevoelige Ja's op één vingerafdruk krijgen (Fable-ontwerpreview wv135 #5). Start er niets, dan terug.
@@ -4960,7 +4963,7 @@ async function appKnop(req, res, reg, a, s, d) {
   v = appVragen();
   if (!v[sleutel]) { terug(); return appWeiger(res, 404, 'deze vraag ken ik niet (meer)', 'onbekende vraag'); }
   if (v[sleutel].antwoord) { terug(); res._app.reden = 'al beantwoord'; return al(v[sleutel].antwoord); }
-  if (v[sleutel].naar_telegram) { terug(); return appStuur(res, 409, { ok: false, fout: 'deze vraag beantwoord je in Telegram', naar_telegram: true }); }
+  if (appNaarTelegramNu(v[sleutel])) { terug(); return appStuur(res, 409, { ok: false, fout: 'deze vraag beantwoord je in Telegram', naar_telegram: true }); }
   const tijd = appKlok();
   const kanaalNaam = ({ hoofd: 'het hoofdkanaal', machinekamer: 'de machinekamer', 'cijfer-meester': 'de Cijfer-Meester' })[rij.kanaal] || rij.kanaal;   // Fable-review wv200 K1
   const tekst = keuze === 'anders'
@@ -5022,7 +5025,7 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
     let bnamen = x.bestanden || [];
     if (bericht) { try { const m = appBewaardVan(x.job_id); bnamen = m ? m.bestanden.map(function (f) { return f.naam; }) : []; } catch (e) { bnamen = []; } }
     return { t: x.t, job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
-      vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, naar_telegram: !!(b && b.naar_telegram) }
+      vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, naar_telegram: appNaarTelegramNu(b) }
         : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true } : null,
       bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined };
   });
@@ -5845,7 +5848,48 @@ async function appNieuwRoute(req, res, a) {
   for (const k of ['hoofd', 'machinekamer']) {
     try { const x = await appLogTijden(k, true); if (x.length) telegram[k] = new Date(Math.max.apply(null, x)).toISOString(); } catch (e) {}
   }
-  appStuur(res, 200, { ok: true, nu: new Date(nu).toISOString(), tabs: tabs, laatst: laatst, gezien: gezien, seintje: appSeintjeTab(a.id), fouten: fouten, telegram: telegram });
+  appStuur(res, 200, { ok: true, nu: new Date(nu).toISOString(), tabs: tabs, laatst: laatst, gezien: gezien, seintje: appSeintjeTab(a.id), fouten: fouten, telegram: telegram,
+    naar_telegram: appNaarTelegramWissels(nu), telegram_bezig: appTelegramBezig() });
+}
+// wv292 (Fable wv263 #14): per gesprek het jongste moment waarop een vraag van Socev naar Telegram ging, terugkwam of zijn voorlopige
+// Telegram-stand verliep; de app herlaadt het open gesprek als dit verandert (anders staan er knoppen die 409 geven, of juist niet).
+function appNaarTelegramWissels(nu) {
+  const uit = {};
+  let v;
+  try { v = appVragen(); } catch (e) { return uit; }
+  Object.keys(v).forEach(function (k) {
+    const r = v[k];
+    if (!r || r.soort !== 'socev' || APP_KNOP_KANALEN[r.kanaal] !== true) return;
+    let w = Date.parse(r.naar_telegram_wissel || '') || 0;
+    const tot = Date.parse(r.naar_telegram_tot || '') || 0;
+    if (r.naar_telegram && tot && tot <= nu) w = Math.max(w, tot);
+    if (w && (!uit[r.kanaal] || w > uit[r.kanaal])) uit[r.kanaal] = w;
+  });
+  Object.keys(uit).forEach(function (k) { uit[k] = new Date(uit[k]).toISOString(); });
+  return uit;
+}
+// wv292 (Fable wv277 spiegel #6): loopt er een Telegram-beurt (bron telegram, zoals appTelegramSpiegel) in hoofd of machinekamer?
+// Alleen of en sinds wanneer, nooit inhoud: wat David in Telegram typte, komt pas na afloop via de spiegel in het app-log.
+function appTelegramBezig() {
+  const uit = { hoofd: null, machinekamer: null };
+  if (fs.existsSync(APP_UIT)) return uit;
+  Object.keys(jobs).forEach(function (id) {
+    const j = jobs[id];
+    if (!j || j.bron !== 'telegram' || j.app || j.gereedschap || j.workspace !== DEFAULT_WS) return;
+    if (j.status !== 'pending' && j.status !== 'running') return;
+    const k = APP_KANAAL_VAN_CHAT[j.chat_id];
+    if (APP_KNOP_KANALEN[k] !== true) return;
+    const sinds = new Date(j.created || Date.now()).toISOString();
+    if (!uit[k]) uit[k] = { sinds: sinds, n: 0 };
+    uit[k].n++;
+    if (sinds < uit[k].sinds) uit[k].sinds = sinds;
+  });
+  return uit;
+}
+// GET /app/telegram-bezig: eigen stille route, alleen gepold zolang /app/nieuw een lopende Telegram-beurt noemde (elke 10 s).
+function appTelegramBezigRoute(req, res) {
+  res._app.stil = true;
+  appStuur(res, 200, { ok: true, bezig: appTelegramBezig() });
 }
 // De tab die open is (of net verlaten werd) als gezien zetten: tot nu, of tot een meegegeven tijdstip (nooit terug).
 function appNieuwGezien(req, res, a, d) {
@@ -6885,6 +6929,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/meldingen') return appMeldingenRoute(req, res, a);
         if (route === 'POST /app/meldingen/gezien') return appMeldingenGezien(req, res, a, d);
         if (route === 'GET /app/nieuw') return appNieuwRoute(req, res, a);
+        if (route === 'GET /app/telegram-bezig') return appTelegramBezigRoute(req, res);   // wv292
         if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);
         if (route === 'POST /app/bericht/getikt') return appBerichtGetikt(req, res, a, d);   // wv263
         if (route.indexOf('GET /app/concept/') === 0) return appConceptRoute(req, res, a, route.slice('GET /app/concept/'.length));
@@ -7657,6 +7702,10 @@ const BERICHT_SEINTJE_ONBEANTWOORD_MS = 2 * 3600 * 1000;   // Fable-review wv263
 const BERICHT_NIEUW_SCHRIJF_MS = 10 * 60 * 1000;
 const BERICHT_GETIKT_MAX = 50;
 const BERICHT_HERPLAN_MS = 30 * 1000;
+const BERICHT_KIJKT_MS = 60 * 1000;          // wv292 (Fable wv263 #13): de app pollt /app/nieuw elke minuut, alleen zichtbaar
+const BERICHT_KIJKT_MARGE_MS = 8 * 1000;     // na de volgende poll heeft de app de tab als gezien gezet (POST /app/gezien)
+const BERICHT_CONTROLE_MARGE_MS = 90 * 1000; // wv292 (Fable wv263 #7): n8n kijkt na een uitgesteld seintje opnieuw (controle_na)
+const BERICHT_VOORLOPIG_MS = 5 * 60 * 1000;  // wv292 (Fable wv263 #6): voorlopig naar Telegram, zonder bevestiging weer knoppen in de app
 const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram))?$/;
 
 function berichtIsPad(req) { return BERICHT_RE.test(reqPath(req)); }
@@ -7766,9 +7815,14 @@ function berichtPushZet(ids, uit) {
   berichtIndexBewaar();
 }
 async function berichtPushNu(kanaal, ids) {
+  // wv292 (Fable wv263 #10): noodstop tussen aankomst en seintje: geen seintje naar een app die uit staat
+  if (fs.existsSync(APP_UIT)) return berichtPushZet(ids, { klaar: true, verstuurd: 0, noodstop: true });
   let uit = [];
   try { uit = await appPushAlle('antwoord', 'antwoord ' + kanaal); } catch (e) { logError('bericht-push', e); }
-  berichtPushZet(ids, { klaar: true, verstuurd: uit.filter(function (r) { return r && r.ok; }).length, pogingen: uit.length });
+  const verstuurd = uit.filter(function (r) { return r && r.ok; }).length;
+  // wv292 (Fable wv263 #7): faalden alle pushdiensten, dan het volgende bericht niet bundelen (n8n ziet het dan na 1 min)
+  berichtPushStaat(kanaal).mislukt = uit.length > 0 && verstuurd === 0;
+  berichtPushZet(ids, { klaar: true, verstuurd: verstuurd, pogingen: uit.length });
 }
 function berichtPlanTimer(kanaal, tot) {
   const k = berichtPushStaat(kanaal);
@@ -7787,6 +7841,7 @@ function berichtBundelAf(kanaal) {
   const ids = k.wachtend.filter(function (id) { return idx[id]; });
   k.wachtend = [];
   if (!ids.length) return;
+  if (fs.existsSync(APP_UIT)) return berichtPushZet(ids, { klaar: true, verstuurd: 0, noodstop: true });   // wv292 (Fable wv263 #10)
   if (berichtStilleUren(kanaal)) { k.wachtend = ids; berichtWachtZet(ids, berichtPlanTimer(kanaal, Date.now() + berichtTot7(Date.now()))); return; }
   const jongste = Math.max.apply(null, ids.map(function (id) { return Date.parse(idx[id].t); }));
   if (berichtGezienPixel(kanaal, jongste)) return berichtPushZet(ids, { klaar: true, verstuurd: 0, overbodig: true });
@@ -7805,7 +7860,14 @@ function berichtPushPlan(id, kanaal, klasse) {
   if (klasse === 'dringend') { berichtWachtZet([id], nu); return { direct: true, uitgesteld: null }; }   // storingsalarmen: direct, ook 23–07 (Fable § 8 #5)
   let tot = 0;
   if (berichtStilleUren(kanaal)) tot = nu + berichtTot7(nu);
+  else if (k.mislukt) tot = 0;   // wv292 (Fable wv263 #7): na een mislukt seintje niet bundelen; direct, zodat n8n het na 1 min ziet
   else if (nu - k.laatst < BERICHT_BUNDEL_MS) tot = k.laatst + BERICHT_BUNDEL_MS;
+  else {
+    // wv292 (Fable wv263 #13): de Pixel heeft de app open (poll < 1 min geleden): wachten tot na zijn volgende poll; zag hij de
+    // tab dan, dan geen seintje (overbodig), anders alsnog (hooguit ± 70 s later). Dringend gaat hierboven al direct.
+    const kijkt = berichtPixelKijkt(nu);
+    if (kijkt) tot = kijkt + BERICHT_KIJKT_MS + BERICHT_KIJKT_MARGE_MS;
+  }
   if (!tot) { k.laatst = nu; berichtWachtZet([id], nu); return { direct: true, uitgesteld: null }; }   // klaar:false vóór het seintje: een herstart ertussen plant het opnieuw (Fable wv263 #3)
   k.wachtend.push(id);
   tot = berichtPlanTimer(kanaal, tot);
@@ -7829,6 +7891,15 @@ function berichtHerplan() {
 }
 setTimeout(berichtHerplan, BERICHT_HERPLAN_MS).unref();
 
+// Laatste GET /app/nieuw van de Pixel als die korter dan een poll-interval geleden was (de app pollt alleen als hij zichtbaar is), anders 0.
+function berichtPixelKijkt(nu) {
+  try {
+    const p = appGoedkeurder(appRegister());
+    if (!p) return 0;
+    const keek = berichtNieuwLaatst()[p.id] || 0;
+    return nu - keek < BERICHT_KIJKT_MS ? keek : 0;
+  } catch (e) { return 0; }
+}
 // gezien_pixel: de goedkeurder (de Pixel) zette de tab als gezien ná het bericht; een ander apparaat telt niet (Fable § 8 #6).
 function berichtGezienPixel(kanaal, t) {
   try {
@@ -7885,7 +7956,7 @@ async function berichtNieuw(res, d) {
     if (vsl) { try { const v = appVragen(); delete v[vsl]; appVragenSchrijf(v); } catch (e) { logError('bericht-vragen', e); } }
     return berichtStuur(res, 500, { ok: false, fout: 'app-log niet schrijfbaar', terugval: true });
   }
-  idx[id] = { t: t, kanaal: kanaal, bron: bron, klasse: klasse, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null };
+  idx[id] = { t: t, kanaal: kanaal, bron: bron, klasse: klasse, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null, knoppen: d.knoppen === true };
   const plan = berichtPushPlan(id, kanaal, klasse);   // bewaart de index
   if (!idx[id].push) berichtIndexBewaar();
   const gewenst = berichtPushGewenst();
@@ -7936,12 +8007,19 @@ function berichtStandVan(id) {
   const b = berichtIndex()[id];
   if (!b) return null;
   let beantwoord = false, vraagNaarTelegram = false;
-  if (b.vraag_hash) { try { const r = appVragen()[id + ':' + b.vraag_hash]; beantwoord = !!(r && r.antwoord); vraagNaarTelegram = !!(r && r.naar_telegram); } catch (e) {} }
+  if (b.vraag_hash) { try { const r = appVragen()[id + ':' + b.vraag_hash]; beantwoord = !!(r && r.antwoord); vraagNaarTelegram = appNaarTelegramNu(r); } catch (e) {} }
   const p = b.push || {};
+  // wv292 (Fable wv263 #10): noodstop = de app staat uit; wat er nog niet uit was, haalt David daar niet. Voor n8n dan: seintje klaar,
+  // 0 bezorgd (en app_uit), zodat de bestaande stap "geen seintje bezorgd" het bericht met knoppen naar Telegram zet.
+  const uit = fs.existsSync(APP_UIT);
+  const klaar = uit || p.klaar === true;
   return { ok: true, id: id, kanaal: b.kanaal, bron: b.bron, klasse: b.klasse, t: b.t,
-    push_klaar: p.klaar === true, verstuurd: p.klaar === true ? (p.verstuurd || 0) : 0, overbodig: p.overbodig === true, uitgesteld_tot: p.klaar === false ? p.uitgesteld_tot || null : null,
+    push_klaar: klaar, verstuurd: uit ? 0 : klaar ? (p.verstuurd || 0) : 0, overbodig: !uit && p.overbodig === true, uitgesteld_tot: !klaar ? p.uitgesteld_tot || null : null,
+    // wv292 (Fable wv263 #7): wanneer n8n opnieuw moet kijken als het seintje nog niet weg is (bundel, stille uren, Pixel kijkt)
+    controle_na: !klaar && p.uitgesteld_tot ? new Date((Date.parse(p.uitgesteld_tot) || Date.now()) + BERICHT_CONTROLE_MARGE_MS).toISOString() : null,
     gezien_pixel: berichtGezienPixel(b.kanaal, Date.parse(b.t)), getikt: !!b.getikt, beantwoord: beantwoord, vraag: !!b.vraag_hash,
-    naar_telegram: !!b.naar_telegram || vraagNaarTelegram, app_actief: berichtAppActief() };
+    naar_telegram: appNaarTelegramNu(b) || vraagNaarTelegram, naar_telegram_voorlopig: !!(b.naar_telegram_tot && appNaarTelegramNu(b)),
+    app_uit: uit, app_actief: !uit && berichtAppActief() };
 }
 function berichtStand(res, d) {
   const id = String(d.id || '');
@@ -7952,29 +8030,56 @@ function berichtStand(res, d) {
 }
 // Terugval 2/3 (§ 4.3): het bericht staat in de app, maar de vraag wordt in Telegram beantwoord (daar mét knoppen). De app toont
 // dan "beantwoord in Telegram" en /app/knop weigert. Al in de app beantwoord: dan niet (n8n stuurt zonder knoppen).
+// wv292 (Fable-review wv263 #6): n8n roept dit aan vóór de Telegram-verzending; faalt die, dan stonden de knoppen nergens. Daarom:
+//   {id}                 definitief (zoals sinds wv263)
+//   {id, voorlopig: true | seconden (30–1800, standaard 300)}  vervalt vanzelf: dan heeft de app de knoppen weer
+//   {id, bevestig: true} na een geslaagde verzending mét knoppen: definitief
+//   {id, terug: true}    verzending mislukt of zonder knoppen: de app krijgt de knoppen terug (niet bij een schaduwvraag, knoppen:false)
+// Elke wissel zet naar_telegram_wissel; /app/nieuw geeft per gesprek de jongste, zodat een open app herlaadt (Fable wv263 #14).
 function berichtNaarTelegram(res, d) {
   const id = String(d.id || '');
   if (!APP_JOB_RE.test(id)) return berichtStuur(res, 400, { ok: false, fout: 'ongeldig id' });
+  const opties = ['voorlopig', 'bevestig', 'terug'].filter(function (x) { return d[x] !== undefined && d[x] !== false; });
+  if (opties.length > 1) return berichtStuur(res, 400, { ok: false, fout: 'kies één van voorlopig, bevestig, terug' });
+  const soort = opties[0] || 'definitief';
+  let duur = BERICHT_VOORLOPIG_MS;
+  if (soort === 'voorlopig' && d.voorlopig !== true) {
+    if (typeof d.voorlopig !== 'number' || !(d.voorlopig >= 30 && d.voorlopig <= 1800)) return berichtStuur(res, 400, { ok: false, fout: 'voorlopig is true of 30–1800 seconden' });
+    duur = Math.round(d.voorlopig * 1000);
+  }
+  if ((soort === 'bevestig' || soort === 'terug') && d[soort] !== true) return berichtStuur(res, 400, { ok: false, fout: soort + ' is true' });
   const idx = berichtIndex(), b = idx[id];
   if (!b) return berichtStuur(res, 404, { ok: false, fout: 'onbekend bericht' });
   const t = new Date().toISOString();
+  // schaduwvraag (knoppen:false): vanaf aankomst in Telegram; terug zou de app een tweede antwoordplek geven
+  if (soort === 'terug' && (b.knoppen === false || (b.knoppen === undefined && b.naar_telegram === b.t))) return berichtStuur(res, 409, { ok: false, fout: 'schaduwvraag: de knoppen blijven in Telegram', schaduw: true });
+  const zet = function (x) {
+    if (soort === 'terug') { if (!x.naar_telegram && !x.naar_telegram_tot) return false; x.naar_telegram = null; delete x.naar_telegram_tot; }
+    else if (soort === 'bevestig') { if (appNaarTelegramNu(x) && !x.naar_telegram_tot) return false; x.naar_telegram = appNaarTelegramNu(x) ? x.naar_telegram : t; delete x.naar_telegram_tot; }
+    else if (soort === 'voorlopig') { if (appNaarTelegramNu(x) && !x.naar_telegram_tot) return false; x.naar_telegram = appNaarTelegramNu(x) ? x.naar_telegram : t; x.naar_telegram_tot = new Date(Date.now() + duur).toISOString(); }
+    else { if (appNaarTelegramNu(x) && !x.naar_telegram_tot) return false; x.naar_telegram = appNaarTelegramNu(x) ? x.naar_telegram : t; delete x.naar_telegram_tot; }
+    x.naar_telegram_wissel = t;
+    return true;
+  };
   if (b.vraag_hash) {
     try {
       const v = appVragen(), r = v[id + ':' + b.vraag_hash];
       if (r && r.antwoord) return berichtStuur(res, 409, { ok: false, fout: 'al beantwoord in de app', al_beantwoord: true });
-      if (r && !r.naar_telegram) { r.naar_telegram = t; appVragenSchrijf(v); }
+      if (r && zet(r)) appVragenSchrijf(v);
     } catch (e) { logError('bericht-vragen', e); return berichtStuur(res, 500, { ok: false, fout: 'vragenregister niet schrijfbaar' }); }
   }
-  if (!b.naar_telegram) { b.naar_telegram = t; berichtIndexBewaar(); }
-  res._log = { bericht: id, naar_telegram: true };
-  berichtStuur(res, 200, { ok: true, id: id, vraag: !!b.vraag_hash });
+  if (zet(b)) berichtIndexBewaar();
+  res._log = { bericht: id, naar_telegram: soort };
+  berichtStuur(res, 200, { ok: true, id: id, vraag: !!b.vraag_hash, naar_telegram: appNaarTelegramNu(b), tot: b.naar_telegram_tot || null });
 }
 
 // Aangeroepen door de server vóór handleRequest. Volgorde van weigeren: methode, noodstop (503), body, geheim (401), rol (409).
 function berichtRoute(req, res) {
   const p = reqPath(req);
   if (req.method !== 'POST') { req.resume(); return berichtStuur(res, 405, { ok: false, fout: 'alleen POST' }); }
-  if (fs.existsSync(APP_UIT)) { req.resume(); return berichtStuur(res, 503, { ok: false, fout: 'app staat uit (noodstop)', terugval: true }); }
+  // wv292 (Fable wv263 #10): stand en naar-telegram ook tijdens de noodstop, zodat n8n wat al in de app stond naar Telegram haalt
+  const naUit = p === '/bericht/stand' || p === '/bericht/naar-telegram';
+  if (!naUit && fs.existsSync(APP_UIT)) { req.resume(); return berichtStuur(res, 503, { ok: false, fout: 'app staat uit (noodstop)', terugval: true }); }
   berichtBody(req, p === '/bericht/bestand' ? BERICHT_BESTAND_BODY_MAX : BERICHT_BODY_MAX, function (fout, d) {
     if (fout === 'afgebroken') return;
     if (fout === 'te-groot') return berichtStuur(res, 413, { ok: false, fout: p === '/bericht/bestand' ? 'bestand groter dan 20 MB' : 'verzoek te groot', terugval: true });
@@ -7982,7 +8087,7 @@ function berichtRoute(req, res) {
     if (!berichtGeheimOk(d)) return berichtStuur(res, 401, { ok: false, fout: 'niet toegestaan' });
     appRolOk().then(function (primair) {
       if (!primair) return berichtStuur(res, 409, { ok: false, error: 'passief', terugval: true });
-      if (fs.existsSync(APP_UIT)) return berichtStuur(res, 503, { ok: false, fout: 'app staat uit (noodstop)', terugval: true });
+      if (!naUit && fs.existsSync(APP_UIT)) return berichtStuur(res, 503, { ok: false, fout: 'app staat uit (noodstop)', terugval: true });
       if (p === '/bericht') return berichtNieuw(res, d);
       if (p === '/bericht/bestand') return berichtBestand(res, d);
       if (p === '/bericht/stand') return berichtStand(res, d);

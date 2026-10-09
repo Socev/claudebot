@@ -21,6 +21,8 @@ for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_COD
                       ['const APP_PUSH_WACHT_MS = 20 * 1000;', 'const APP_PUSH_WACHT_MS = 300;'],
                       ['if (!(uur >= 7 && uur < 22)) return;', 'if (!(TOETSUUR(uur) >= 7 && TOETSUUR(uur) < 22)) return;'],
                       ['const BERICHT_BUNDEL_MS = 10 * 60 * 1000;', 'const BERICHT_BUNDEL_MS = 400;'],   // wv263
+                      ['const BERICHT_KIJKT_MS = 60 * 1000;', 'const BERICHT_KIJKT_MS = 300;'],   // wv292
+                      ['const BERICHT_KIJKT_MARGE_MS = 8 * 1000;', 'const BERICHT_KIJKT_MARGE_MS = 150;'],
                       ['function berichtUur() { return Number(', 'function berichtUur() { if (TOETSBUUR() !== null) return TOETSBUUR(); return Number(']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
@@ -3279,6 +3281,7 @@ async function bewijs(o) {
       fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pj));
       if (fs.existsSync(UIT)) fs.unlinkSync(UIT);
       toetsBUur = 12; pushStaat.status = 201; pushStaat.traag = 0;
+      await slaap(350);   // wv292: de Pixel (P) pollde net in een eerdere sectie; anders wacht het seintje op zijn volgende poll (#13)
 
       // sloten
       r = await bq('/bericht', B({ secret: undefined }));
@@ -3516,6 +3519,112 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
       toets('23 /app/nieuw telt berichten mee in de tab machinekamer', r.status === 200 && typeof r.j.tabs.machinekamer === 'number', JSON.stringify(r.j.tabs));
       toets('23 /health appInfo noemt berichten', H.appInfo().berichten && typeof H.appInfo().berichten.laatste_48u === 'number', JSON.stringify(H.appInfo().berichten));
+
+      // ── wv292: open KAN-punten uit de Fable-review van fase 0+1 (wv263) ──
+      await slaap(BUNDEL23 + 50); H.appStaat.berichtPush = null;
+      const leesVragen = () => JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'));
+      // #13: de Pixel heeft de app open (poll < 1 min) -> geen direct seintje; zag hij de tab na zijn volgende poll, dan geen seintje
+      pushes.length = 0;
+      await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      r = await bq('/bericht', B({ tekst: 'Pixel kijkt (#13)' }));
+      const idK = r.j.id;
+      toets('23 wv292 #13 Pixel pollde net: seintje niet direct, uitgesteld tot na zijn volgende poll', r.status === 200 && r.j.push.gestart === false && !!r.j.uitgesteld && Date.parse(r.j.uitgesteld) - Date.now() < 500, JSON.stringify(r.j));
+      st = await bq('/bericht/stand', { secret: GEH, id: idK });
+      toets('23 wv292 #7 stand uitgesteld noemt controle_na (uitgesteld_tot + 90 s)', st.j.push_klaar === false && Date.parse(st.j.controle_na) === Date.parse(st.j.uitgesteld_tot) + 90000, JSON.stringify(st.j));
+      await slaap(50);
+      await vraag('POST', '/app/gezien', { tab: 'machinekamer' }, { pot: P.jar });
+      await slaap(500);
+      st = await bq('/bericht/stand', { secret: GEH, id: idK });
+      toets('23 wv292 #13 ... de Pixel zette de tab op gezien: geen seintje, overbodig, controle_na leeg', pushes.length === 0 && st.j.push_klaar === true && st.j.overbodig === true && st.j.controle_na === null, JSON.stringify([st.j, pushes.length]));
+      // Pixel pollde, maar keek niet naar deze tab: na de uitsteltijd toch een seintje
+      await slaap(BUNDEL23 + 50); H.appStaat.berichtPush = null;
+      await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      r = await bq('/bericht', B({ tekst: 'Pixel kijkt elders (#13)' }));
+      const idK2 = r.j.id;
+      await slaap(550);
+      st = await bq('/bericht/stand', { secret: GEH, id: idK2 });
+      toets('23 wv292 #13 Pixel open maar tab niet gezien: seintje alsnog (hooguit één poll later)', r.j.push.gestart === false && st.j.push_klaar === true && st.j.verstuurd === (ander ? 2 : 1) && st.j.overbodig === false, JSON.stringify([r.j, st.j]));
+      await slaap(BUNDEL23 + 50); H.appStaat.berichtPush = null;
+      await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      r = await bq('/bericht', B({ klasse: 'dringend', bron: 'foutmelder', tekst: 'storing terwijl de Pixel kijkt' }));
+      toets('23 wv292 #13 dringend blijft direct, ook als de Pixel kijkt', r.j.push.gestart === true, JSON.stringify(r.j));
+      await slaap(350 + 100);
+
+      // #7: alle pushdiensten faalden -> het volgende bericht niet bundelen (n8n ziet de mislukking na 1 min)
+      await slaap(BUNDEL23 + 50); H.appStaat.berichtPush = null;
+      pushStaat.status = 500;
+      r = await bq('/bericht', B({ tekst: 'push faalt (#7)' }));
+      const idF = r.j.id;
+      await slaap(150);
+      st = await bq('/bericht/stand', { secret: GEH, id: idF });
+      pushStaat.status = 201;   // de pushdienst is weer goed, maar de pod weet dat pas na het volgende seintje
+      r = await bq('/bericht', B({ tekst: 'binnen de bundeltijd na een mislukking (#7)' }));
+      toets('23 wv292 #7 seintje faalde (verstuurd 0) -> volgend bericht binnen 10 min niet gebundeld maar direct', st.j.push_klaar === true && st.j.verstuurd === 0 && r.j.push.gestart === true && r.j.uitgesteld === null, JSON.stringify([st.j, r.j]));
+      await slaap(150);
+      const rF3 = await bq('/bericht', B({ tekst: 'gebundeld' }));
+      toets('23 wv292 #7 na een geslaagd seintje weer bundelen', rF3.j.push.gestart === false && !!rF3.j.uitgesteld, JSON.stringify([rF3.j]));
+
+      // #10: noodstop tijdens een lopende bundel
+      pushes.length = 0;
+      fs.writeFileSync(UIT, '');
+      r = await bq('/bericht/stand', { secret: GEH, id: rF3.j.id });
+      toets('23 wv292 #10 noodstop: stand antwoordt (200), app_uit, push klaar met 0 bezorgd (n8n zet het naar Telegram)', r.status === 200 && r.j.app_uit === true && r.j.push_klaar === true && r.j.verstuurd === 0 && r.j.overbodig === false && r.j.controle_na === null && r.j.app_actief === false, JSON.stringify(r.j));
+      const rU = await bq('/bericht', B({ tekst: 'tijdens noodstop' }));
+      toets('23 wv292 #10 noodstop: nieuw bericht blijft 503 terugval', rU.status === 503 && rU.j.terugval === true, JSON.stringify(rU.j));
+      await slaap(BUNDEL23 + 200);
+      toets('23 wv292 #10 einde bundel tijdens de noodstop: geen seintje, gemarkeerd als noodstop', pushes.length === 0 && (H.appStaat.berichten[rF3.j.id].push || {}).noodstop === true, JSON.stringify(H.appStaat.berichten[rF3.j.id].push));
+      r = await bq('/bericht/naar-telegram', { secret: GEH, id: rF3.j.id });
+      toets('23 wv292 #10 naar-telegram werkt tijdens de noodstop', r.status === 200, JSON.stringify(r.j));
+      fs.unlinkSync(UIT);
+      st = await bq('/bericht/stand', { secret: GEH, id: rF3.j.id });
+      toets('23 wv292 #10 na app-aan: stand weer de echte (geen app_uit)', st.j.app_uit === false && st.j.push_klaar === true && st.j.verstuurd === 0, JSON.stringify(st.j));
+
+      // #6: naar-telegram voorlopig / bevestig / terug; #14: /app/nieuw geeft per gesprek de jongste wissel
+      await slaap(BUNDEL23 + 50);
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      const ntVoor = (r.j.naar_telegram || {}).machinekamer || null;
+      r = await bq('/bericht', B({ tekst: 'Voorstel.\n\nVRAAG AAN DAVID: Zal ik de proef herhalen?', knoppen: true }));
+      const idV = r.j.id;
+      r = await bq('/bericht/naar-telegram', { secret: GEH, id: idV, voorlopig: true, terug: true });
+      const rV5 = await bq('/bericht/naar-telegram', { secret: GEH, id: idV, voorlopig: 5 });
+      toets('23 wv292 #6 naar-telegram: twee opties of voorlopig < 30 s -> 400', r.status === 400 && rV5.status === 400, JSON.stringify([r.j, rV5.j]));
+      r = await bq('/bericht/naar-telegram', { secret: GEH, id: idV, voorlopig: true });
+      const totV = Date.parse(r.j.tot);
+      st = await bq('/bericht/stand', { secret: GEH, id: idV });
+      toets('23 wv292 #6 voorlopig: 200, tot ± 5 min, stand naar_telegram + voorlopig', r.status === 200 && r.j.naar_telegram === true && totV - Date.now() > 280000 && totV - Date.now() <= 300000 && st.j.naar_telegram === true && st.j.naar_telegram_voorlopig === true, JSON.stringify([r.j, st.j]));
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      const gV = (r.j.items || []).find((x) => x.job_id === idV);
+      const rKV = await vraag('POST', '/app/knop', { job_id: idV, vraag_hash: gV.vraag.hash, keuze: 'nee' }, { pot: P.jar });
+      toets('23 wv292 #6 voorlopig: app toont "Beantwoord in Telegram", knop 409', gV.vraag.naar_telegram === true && rKV.status === 409 && rKV.j.naar_telegram === true, JSON.stringify([gV.vraag, rKV.j]));
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      const ntNa = (r.j.naar_telegram || {}).machinekamer || null;
+      toets('23 wv292 #14 /app/nieuw: naar_telegram.machinekamer schuift op (de open app herlaadt)', !!ntNa && ntNa !== ntVoor, JSON.stringify([ntVoor, ntNa]));
+      // verloopt zonder bevestiging (Telegram-verzending mislukt, n8n weg): weer knoppen in de app
+      await slaap(120);
+      const vv = leesVragen(); vv[idV + ':' + gV.vraag.hash].naar_telegram_tot = new Date(Date.now() - 20).toISOString(); fs.writeFileSync(path.join(DATA, 'vragen.json'), JSON.stringify(vv));
+      H.appStaat.berichten[idV].naar_telegram_tot = new Date(Date.now() - 20).toISOString();
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      const gV2 = (r.j.items || []).find((x) => x.job_id === idV);
+      st = await bq('/bericht/stand', { secret: GEH, id: idV });
+      const rN2 = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('23 wv292 #6 voorlopig verlopen zonder bevestiging: weer knoppen in de app, stand naar_telegram false', gV2.vraag.naar_telegram === false && st.j.naar_telegram === false, JSON.stringify([gV2.vraag, st.j]));
+      toets('23 wv292 #14 verlopen telt als wissel in /app/nieuw', Date.parse((rN2.j.naar_telegram || {}).machinekamer) > Date.parse(ntNa), JSON.stringify(rN2.j.naar_telegram));
+      // voorlopig -> bevestig: definitief
+      r = await bq('/bericht/naar-telegram', { secret: GEH, id: idV, voorlopig: 60 });
+      const rB = await bq('/bericht/naar-telegram', { secret: GEH, id: idV, bevestig: true });
+      const vb = leesVragen()[idV + ':' + gV.vraag.hash];
+      toets('23 wv292 #6 bevestig: definitief (geen tot meer, vervalt niet)', r.status === 200 && Date.parse(r.j.tot) - Date.now() <= 60000 && rB.status === 200 && rB.j.tot === null && !!vb.naar_telegram && !vb.naar_telegram_tot, JSON.stringify([r.j, rB.j, vb]));
+      // terug: de app krijgt de knoppen terug
+      const rT = await bq('/bericht/naar-telegram', { secret: GEH, id: idV, terug: true });
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      const gV3 = (r.j.items || []).find((x) => x.job_id === idV);
+      toets('23 wv292 #6 terug: knoppen weer in de app', rT.status === 200 && rT.j.naar_telegram === false && gV3.vraag.naar_telegram === false && !leesVragen()[idV + ':' + gV.vraag.hash].naar_telegram, JSON.stringify([rT.j, gV3.vraag]));
+      r = await bq('/bericht/naar-telegram', { secret: GEH, id: idS, terug: true });
+      toets('23 wv292 #6 terug op een schaduwvraag (knoppen:false) -> 409, blijft in Telegram', r.status === 409 && r.j.schaduw === true, JSON.stringify(r.j));
+      r = await bq('/bericht/naar-telegram', { secret: GEH, id: idV, bevestig: 'ja' });
+      toets('23 wv292 #6 bevestig moet true zijn -> 400', r.status === 400, JSON.stringify(r.j));
+      r = await bq('/bericht/naar-telegram', { secret: GEH, id: idV });
+      toets('23 wv292 #6 zonder optie: definitief zoals in wv263', r.status === 200 && r.j.naar_telegram === true && r.j.tot === null, JSON.stringify(r.j));
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), regOrig23);
     }
 
@@ -3544,6 +3653,39 @@ async function bewijs(o) {
       const r2 = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
       toets('24 /app/nieuw: Telegram-beurten tellen niet in de tab (geen badge), wel als jongste tijdstip in telegram', r2.status === 200 && r2.j.telegram && r2.j.telegram.hoofd === nu24
         && !(r2.j.tabs.hoofd > 0 && r2.j.laatst.hoofd === nu24), JSON.stringify([r2.j.tabs.hoofd, r2.j.laatst.hoofd, r2.j.telegram]));
+    }
+
+    // ── 25. wv292 (Fable wv277 spiegel #6): lopende Telegram-beurt als bezig-regel, eigen stille route, zonder inhoud ──
+    {
+      const nu25 = Date.now();
+      const tb = { '8888888888888881': { status: 'running', bron: 'telegram', workspace: 'vault', chat_id: '40687', created: nu25 - 20000, prompt: 'GEHEIM-PROMPT' },
+        '8888888888888882': { status: 'pending', bron: 'telegram', workspace: 'vault', chat_id: '40687', created: nu25 - 5000 },
+        '8888888888888883': { status: 'running', bron: 'telegram', workspace: 'vault', chat_id: '40687', gereedschap: 'lezen', created: nu25 - 90000 },
+        '8888888888888884': { status: 'running', bron: 'telegram', workspace: 'ghawa', chat_id: 'telegram-debug', created: nu25 - 90000 },
+        '8888888888888885': { status: 'running', workspace: 'vault', chat_id: 'telegram-debug', created: nu25 - 90000 },
+        '8888888888888886': { status: 'done', bron: 'telegram', workspace: 'vault', chat_id: 'telegram-debug', created: nu25 - 90000 },
+        '8888888888888887': { status: 'running', bron: 'telegram', workspace: 'vault', chat_id: 'cijfer-meester', created: nu25 - 90000 } };
+      Object.assign(jobs, tb);
+      let r = await vraag('GET', '/app/telegram-bezig', undefined, { pot: P.jar });
+      toets('25 telegram-bezig: hoofd loopt (2, sinds de oudste), machinekamer niet (lezen/ghawa/zonder bron/klaar/cijfer-meester tellen niet)', r.status === 200 && r.j.bezig.hoofd && r.j.bezig.hoofd.n === 2
+        && r.j.bezig.hoofd.sinds === new Date(nu25 - 20000).toISOString() && r.j.bezig.machinekamer === null, JSON.stringify(r.j));
+      toets('25 telegram-bezig geeft geen inhoud (geen prompt, geen job-id)', JSON.stringify(r.j).indexOf('GEHEIM') < 0 && JSON.stringify(r.j).indexOf('888888888888888') < 0, JSON.stringify(r.j));
+      const aud0 = fs.existsSync(path.join(DATA, 'audit.jsonl')) ? fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter((x) => x.indexOf('telegram-bezig') >= 0).length : 0;
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('25 /app/nieuw noemt telegram_bezig (zodat de app pas dan de snelle route pollt)', r.status === 200 && r.j.telegram_bezig && r.j.telegram_bezig.hoofd && r.j.telegram_bezig.hoofd.n === 2, JSON.stringify(r.j.telegram_bezig));
+      const aud1 = fs.existsSync(path.join(DATA, 'audit.jsonl')) ? fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter((x) => x.indexOf('telegram-bezig') >= 0).length : 0;
+      toets('25 telegram-bezig is stil (geen auditregel bij 200)', aud1 === aud0, aud1 + ' vs ' + aud0);
+      jobs['8888888888888881'].status = 'done'; jobs['8888888888888882'].status = 'done';
+      r = await vraag('GET', '/app/telegram-bezig', undefined, { pot: P.jar });
+      toets('25 klaar -> niets meer bezig', r.status === 200 && r.j.bezig.hoofd === null && r.j.bezig.machinekamer === null, JSON.stringify(r.j));
+      jobs['8888888888888881'].status = 'running';
+      fs.writeFileSync(UIT, '');
+      r = await vraag('GET', '/app/telegram-bezig', undefined, { pot: P.jar });
+      fs.unlinkSync(UIT);
+      toets('25 noodstop -> 503 (zoals elke app-route)', r.status === 503, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/telegram-bezig', undefined, {});
+      toets('25 zonder sessie -> geweigerd', r.status === 401 || r.status === 403, r.status);
+      Object.keys(tb).forEach((k) => delete jobs[k]);
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
