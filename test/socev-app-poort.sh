@@ -4540,6 +4540,9 @@ async function bewijs(o) {
       delete jobs[ZG];
       r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'qwzoek' }, { pot: P.jar });
       toets('28 treffer in beide bellen van één item telt apart; Davids bel uit tekst, Socevs uit antwoord', r.status === 200 && r.j.totaal === 3 && r.j.treffers.every((x) => x.bel === (x.job_id === ZA ? 'socev' : 'david')), JSON.stringify(r.j.treffers.map((x) => x.job_id + x.bel)));
+      regel({ t: dagen(1), job_id: 'a35000000000000e', soort: 'bericht', tekst: 'ga naar\n  nu, zei hij', antwoord: 'ok', ok: true, bestanden: [] });
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'naar nu' }, { pot: P.jar });
+      toets('28 Fable #5: witruimte en regelovergangen in de tekst tellen als één spatie', r.status === 200 && r.j.totaal === 1 && r.j.treffers[0].fragment.treffer === 'naar nu', JSON.stringify(r.j.treffers));
       r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'lijst.pdf' }, { pot: P.jar });
       toets('28 ook in bestandsnamen', r.status === 200 && r.j.totaal === 1 && r.j.treffers[0].job_id === ZE, JSON.stringify(r.j).slice(0, 200));
       r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'zzgeenzz' }, { pot: P.jar });
@@ -4577,6 +4580,16 @@ async function bewijs(o) {
       fs.rmdirSync(LOGCM);
       if (cmVoor) fs.writeFileSync(LOGCM, cmVoor, { mode: 0o600 });
       toets('28 onleesbaar log -> 503 in gewone taal', r.status === 503 && /niet leesbaar/.test(r.j.fout), JSON.stringify(r.j));
+      // Fable-diffreview #1: geschiedenis bij een onleesbaar log blijft fail-open (beurten uit het geheugen, wv56 #2)
+      { const JG = 'a35000000000000f';
+        jobs[JG] = { status: 'done', created: Date.now() - 1000, done_at: Date.now() - 500, app: { kanaal: 'cijfer-meester', soort: 'bericht', tekst: 'geheugenvraag', beurt_id: 'b', gelogd: false }, result: { ok: true, output: 'geheugenantwoord' } };
+        if (fs.existsSync(LOGCM)) fs.renameSync(LOGCM, LOGCM + '.weg');
+        fs.mkdirSync(LOGCM);
+        r = await vraag('GET', '/app/geschiedenis/cijfer-meester', undefined, { pot: P.jar });
+        fs.rmdirSync(LOGCM);
+        if (fs.existsSync(LOGCM + '.weg')) fs.renameSync(LOGCM + '.weg', LOGCM);
+        delete jobs[JG];
+        toets('28 Fable #1: onleesbaar log -> geschiedenis 200 met fout én de beurt uit het geheugen', r.status === 200 && /niet leesbaar/.test(r.j.fout) && (r.j.items || []).some((x) => x.job_id === JG && x.antwoord === 'geheugenantwoord'), JSON.stringify(r.j).slice(0, 300)); }
       // anker: venster rond een treffer (10 vóór, 200 erna), meer_nieuw
       for (let i = 0; i < 15; i++) regel({ t: dagen(10.5 - i * 0.01), job_id: 'b350' + String(i).padStart(12, '0'), soort: 'bericht', tekst: 'ervoor ' + i, antwoord: 'a', ok: true, bestanden: [] });
       for (let i = 0; i < 205; i++) regel({ t: dagen(9.9 - i * 0.001), job_id: 'c350' + String(i).padStart(12, '0'), soort: 'bericht', tekst: 'erna ' + i, antwoord: 'a', ok: true, bestanden: [] });
@@ -4604,10 +4617,14 @@ async function bewijs(o) {
       fs.writeFileSync(VR, JSON.stringify(Object.assign({}, vrVoor, { [VA + ':' + vh]: { kanaal: 'machinekamer', t: dagen(4), antwoord: null, gevoelig: true }, [VB + ':' + vh]: { kanaal: 'machinekamer', t: dagen(1), antwoord: null, gevoelig: true } })));
       r = await vraag('GET', '/app/geschiedenis/machinekamer/vanaf/' + VA, undefined, { pot: P.jar });
       const iva = (r.j.items || []).find((x) => x.job_id === VA), ivb = (r.j.items || []).find((x) => x.job_id === VB);
+      regel({ t: dagen(5), job_id: 'a350000000000009', soort: 'telegram', tekst: 'tg', antwoord: vtekst, ok: true, bestanden: [] });
       toets('28 vraag ouder dan 3 dagen: verlopen; jonger: niet', iva && iva.vraag && iva.vraag.verlopen === true && ivb && ivb.vraag && !ivb.vraag.verlopen, JSON.stringify([iva && iva.vraag, ivb && ivb.vraag]));
       const ng = gestart.length;
       r = await vraag('POST', '/app/knop', { job_id: VA, vraag_hash: vh, keuze: 'nee' }, { pot: P.jar });
       toets('28 knop op een verlopen vraag -> 410, start niets', r.status === 410 && r.j.verlopen === true && gestart.length === ng, r.status + ' ' + JSON.stringify(r.j));
+      r = await vraag('GET', '/app/geschiedenis/machinekamer/vanaf/' + VA, undefined, { pot: P.jar });
+      const itg = (r.j.items || []).find((x) => x.job_id === 'a350000000000009');
+      toets('28 Fable #4: Telegram-vraag ouder dan 3 dagen ook verlopen (naar_telegram blijft)', itg && itg.vraag && itg.vraag.verlopen === true && itg.vraag.naar_telegram === true, JSON.stringify(itg && itg.vraag));
       fs.writeFileSync(VR, JSON.stringify(vrVoor));
       // snelheid en leesgrens: ± 3 MB (een vol log) binnen 1 s; > 8 MB -> alleen de staart, afgekapt
       const blok1 = 'z'.repeat(1400);

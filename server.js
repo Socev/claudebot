@@ -5298,10 +5298,11 @@ const APP_ANKER_VOOR = 10, APP_ANKER_NA = 200;
 // meer van); via zoeken komt zo'n oud bericht anders weer met Ja/Nee/Anders in beeld. Zelfde orde als de agendaknoppen (50 u).
 const APP_VRAAG_GELDIG_MS = 72 * 3600 * 1000;
 // Log + afgeronde beurten die (nog) niet in het log staan (schrijffout of net klaar): uit het geheugen erbij, anders is het
-// antwoord voor een app die dicht was onvindbaar (Fable-review wv56 #2). Gesorteerd op tijd. Werpt bij een onleesbaar log.
+// antwoord voor een app die dicht was onvindbaar (Fable-review wv56 #2). Gesorteerd op tijd. Onleesbaar log: fout gezet, de
+// beurten uit het geheugen komen er toch bij (fail-open, Fable-diffreview wv350 #1).
 async function appGeschiedenisRuw(kanaal, lees) {
-  let items = [];
-  try { items = await (lees || appLogLees)(kanaal); } catch (e) { if (!(e && e.code === 'ENOENT')) throw e; }
+  let items = [], fout = null;
+  try { items = await (lees || appLogLees)(kanaal); } catch (e) { if (!(e && e.code === 'ENOENT')) { fout = e; items = []; } }
   const inLog = {};
   items.forEach(function (x) { inLog[x.job_id] = 1; });
   Object.keys(jobs).forEach(function (id) {
@@ -5313,7 +5314,7 @@ async function appGeschiedenisRuw(kanaal, lees) {
       bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
   });
   items.sort(function (a, b) { return String(a.t).localeCompare(String(b.t)); });
-  return items;
+  return { items: items, fout: fout };
 }
 async function appGeschiedenis(req, res, reg, a, pad) {
   const delen = String(pad || '').split('/');
@@ -5326,8 +5327,9 @@ async function appGeschiedenis(req, res, reg, a, pad) {
   }
   const lopend = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); })
     .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, invoer: j.app.invoer || [], sinds: new Date(j.created).toISOString() }; });
-  let items = [], fout = null;
-  try { items = await appGeschiedenisRuw(kanaal); } catch (e) { logError('app-log-lees', e); fout = 'geschiedenis nu niet leesbaar'; }
+  const ruw = await appGeschiedenisRuw(kanaal);
+  let items = ruw.items, fout = null;
+  if (ruw.fout) { logError('app-log-lees', ruw.fout); fout = 'geschiedenis nu niet leesbaar'; }
   let meerNieuw = false;
   if (anker) {
     if (fout) return appWeiger(res, 503, fout, 'app-log');
@@ -5355,7 +5357,7 @@ async function appGeschiedenis(req, res, reg, a, pad) {
     return { t: x.t, job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
       vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, naar_telegram: appNaarTelegramNu(b),
         naar_telegram_onzeker: appNaarTelegramNu(b) && appNaarTelegramVerlopen(b) || undefined, verlopen: verlopen || undefined }
-        : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true } : null,
+        : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true, verlopen: agNu - Date.parse(x.t) > APP_VRAAG_GELDIG_MS || undefined } : null,
       bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined,
       reactie: reacties && reacties[kanaal + ':' + x.job_id] ? reacties[kanaal + ':' + x.job_id].duim : null,
       agenda: agendaKnoppen[x.job_id] && agendaKnoppen[x.job_id].kanaal === kanaal ? appAgendaVorm(agendaKnoppen[x.job_id], agNu) : undefined };
@@ -5388,7 +5390,8 @@ function appVouw(t) {
     let c = t[i];
     const h = t.charCodeAt(i);
     if (h >= 0xd800 && h <= 0xdbff && i + 1 < t.length) { c = t.slice(i, i + 2); }
-    const f = c.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    // witruimte (spatie, regelovergang, tab, opeenvolgend) telt als één spatie, net als in de term (Fable-diffreview #5)
+    const f = /\s/.test(c) ? (v[v.length - 1] === ' ' ? '' : ' ') : c.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     for (let k = 0; k < f.length; k++) { v += f[k]; idx.push(i); }
     if (c.length === 2) i++;
   }
@@ -5448,12 +5451,11 @@ async function appZoek(req, res, a, d) {
   if (termV.length < APP_ZOEK_TERM_MIN) return appWeiger(res, 400, 'typ minstens 2 tekens', 'zoek term kort');
   if (termV.length > APP_ZOEK_TERM_MAX) return appWeiger(res, 400, 'zoekterm te lang (hooguit 100 tekens)', 'zoek term lang');
   if (!appTeller('zoek', APP_ZOEK_PER_UUR, 3600000)) return appWeiger(res, 429, 'even wachten: te veel zoekvragen dit uur', 'grens zoek');
-  let items, afgekapt = false;
-  try {
-    let staart = null;
-    items = await appGeschiedenisRuw(kanaal, async function (k) { staart = await appZoekLogLees(k); return staart.items; });
-    afgekapt = !!(staart && staart.afgekapt);
-  } catch (e) { logError('app-zoek', e); return appWeiger(res, 503, 'geschiedenis nu niet leesbaar', 'app-log'); }
+  let staart = null;
+  const ruw = await appGeschiedenisRuw(kanaal, async function (k) { staart = await appZoekLogLees(k); return staart.items; });
+  if (ruw.fout) { logError('app-zoek', ruw.fout); return appWeiger(res, 503, 'geschiedenis nu niet leesbaar', 'app-log'); }
+  let items = ruw.items;
+  const afgekapt = !!(staart && staart.afgekapt);
   const grens = Date.now() - APP_LOG_MS;
   items = items.filter(function (x) { return Date.parse(x.t) >= grens; });
   const treffers = [];
