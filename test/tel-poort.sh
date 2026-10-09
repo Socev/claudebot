@@ -472,6 +472,7 @@ srv.listen(0, '127.0.0.1', async () => {
     await wacht(1300);
     r = await tel('GET', '/tel/uit');
     toets('8 herhaling na 4 min (verkort): nog één keer aangekondigd', r.j.id === ja1 && r.j.aankondigen === 'ja', r.j);
+    toets('8 uitgifte noemt de resterende houdbaarheid (rest_s, < 10 min)', r.j.rest_s > 500 && r.j.rest_s <= 600, r.j);
     await wacht(1300);
     r = await tel('GET', '/tel/uit');
     toets('8 daarna niet meer aangeboden', !r.j.id, r.j);

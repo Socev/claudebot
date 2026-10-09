@@ -8889,7 +8889,8 @@ function telUitgifte(x) {
   else x.lease_tot = Date.now() + TEL_LEASE_MS;
   x.uitgegeven = (x.uitgegeven || 0) + 1;
   telRijBewaar();
-  return { ok: true, id: x.id, soort: x.soort, onderwerp: x.onderwerp || '', delen: telDelen(x).length, aankondigen: x.aankondiging ? 'ja' : 'nee', bezig: telBezig(x.apparaat) };
+  return { ok: true, id: x.id, soort: x.soort, onderwerp: x.onderwerp || '', delen: telDelen(x).length, aankondigen: x.aankondiging ? 'ja' : 'nee', bezig: telBezig(x.apparaat),
+    rest_s: Math.max(0, Math.round((x.tot - Date.now()) / 1000)) };   // wv275: Tasker laat %SocevWacht zo lang staan (Fable diff 2e ronde A)
 }
 function telWek(apparaat) {
   if (!telStaat.polls[apparaat]) return;
