@@ -727,6 +727,14 @@ function leesGereedschap(w) {
   return k === 'lezen' ? 'lezen' : null;
 }
 
+// wv339: tokens en duur van één claude -p-aanroep (usage, total_cost_usd = lijsttarief-equivalent, géén factuur: de pod
+// draait op het abonnement), zonder inhoud. Gebruikt door de kostenmeting van de telefoon (tel-kosten.jsonl).
+function claudeVerbruik(j) {
+  const u = j.usage || {};
+  return { in: u.input_tokens || 0, cache_lees: u.cache_read_input_tokens || 0, cache_schrijf: u.cache_creation_input_tokens || 0, uit: u.output_tokens || 0,
+    usd_lijst: typeof j.total_cost_usd === 'number' ? Math.round(j.total_cost_usd * 10000) / 10000 : null, ms: j.duration_ms || null, api_ms: j.duration_api_ms || null,
+    calls: j.num_turns || null, modellen: j.modelUsage && typeof j.modelUsage === 'object' ? Object.keys(j.modelUsage) : [] };
+}
 function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   // opts: { inactMs, maxMs, progress, vroegMs }  — progress wordt live bijgewerkt zodat
   // /result running_ms en last_activity_ms kan teruggeven. vroegMs (alleen achtergrondagents):
@@ -848,6 +856,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       try {
         const j = JSON.parse(out);
         const r = { ok: code === 0 && !j.is_error, output: (j.result != null ? j.result : ''), session_id: j.session_id };
+        if (j.usage) r.verbruik = claudeVerbruik(j);
         if (j.is_error) {
           // Een foutklasse, zodat een aanroeper niet in de fouttekst hoeft te zoeken (review 23-9).
           const tekst = String(j.result || '');
@@ -7471,13 +7480,15 @@ function appVoorleesDelen(s) {
 }
 // Eén deel inspreken met de Gemini-stem; WAV terug. Twee pogingen bij een time-out of serverfout (niet bij 4xx: kosten),
 // samen binnen 55 s (de Function wacht 90 s; ruimte voor slot-check en tunnel, Fable K2).
-async function appGeminiStem(tekst) {
+// meet (optioneel, wv339): telt per geslaagde aanroep tekens, tokens (usage van de Interactions-API) en seconden geluid.
+async function appGeminiStem(tekst, meet) {
   const t0 = Date.now(), budget = 55000;
   const body = JSON.stringify({ model: 'gemini-3.8-flash-tts',
     input: [{ type: 'user_input', content: [{ type: 'text', text: tekst, annotations: [{ type: 'speech_metadata', style: APP_TTS_STIJL }] }] }],
     response_format: { type: 'audio' }, generation_config: { speech_config: [{ voice: 'nl-nl-assistant-6' }] } });
   for (let poging = 1; ; poging++) {
     try {
+      if (meet) meet.pogingen = (meet.pogingen || 0) + 1;
       const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST',
         signal: AbortSignal.timeout(Math.max(1000, Math.min(45000, 8000 + 40 * tekst.length, budget - (Date.now() - t0)))),
         headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY_AUTO, 'Content-Type': 'application/json' }, body: body });
@@ -7486,7 +7497,14 @@ async function appGeminiStem(tekst) {
       const c = j.steps && j.steps[0] && j.steps[0].content && j.steps[0].content[0];
       if (!c || !c.data) throw Object.assign(new Error('Gemini: geen audio'), { status: 422 });
       const raw = Buffer.from(String(c.data).split(',').pop(), 'base64');
-      if (raw.toString('ascii', 0, 4) === 'RIFF') return raw;
+      const riff = raw.toString('ascii', 0, 4) === 'RIFF';
+      if (meet) {
+        const u = j.usage || {}, s = riff ? appWavDuur(raw) : raw.length / 48000;
+        meet.ok = (meet.ok || 0) + 1; meet.tekens = (meet.tekens || 0) + tekst.length;
+        meet.tok_in = (meet.tok_in || 0) + (Number(u.total_input_tokens) || 0); meet.tok_uit = (meet.tok_uit || 0) + (Number(u.total_output_tokens) || 0);
+        meet.audio_s = Math.round(((meet.audio_s || 0) + (s || 0)) * 10) / 10;
+      }
+      if (riff) return raw;
       const kop = Buffer.alloc(44);   // kale PCM (24 kHz mono 16 bit, zoals het kastje meet): WAV-kop erom
       kop.write('RIFF', 0, 'ascii'); kop.writeUInt32LE(36 + raw.length, 4); kop.write('WAVEfmt ', 8, 'ascii'); kop.writeUInt32LE(16, 16);
       kop.writeUInt16LE(1, 20); kop.writeUInt16LE(1, 22); kop.writeUInt32LE(24000, 24); kop.writeUInt32LE(48000, 28); kop.writeUInt16LE(2, 32);
@@ -7496,6 +7514,16 @@ async function appGeminiStem(tekst) {
       if (!(poging < 2 && (!e.status || e.status >= 500) && budget - (Date.now() - t0) > 15000)) throw e;
     }
   }
+}
+function appWavDuur(b) {
+  let i = 12, rate = 0;
+  while (i + 8 <= b.length) {
+    const t = b.toString('ascii', i, i + 4), n = b.readUInt32LE(i + 4);
+    if (t === 'fmt ' && n >= 16 && i + 24 <= b.length) rate = b.readUInt32LE(i + 16);
+    if (t === 'data') return rate > 0 ? Math.min(n, b.length - i - 8) / rate : 0;
+    i += 8 + n + (n % 2);
+  }
+  return 0;
 }
 // POST /app/voorlees { tekst, deel }: zonder opslag op de pod (elke vraag maakt de delen opnieuw uit dezelfde tekst);
 // de app vraagt deel 1, speelt het af en haalt intussen het volgende. Antwoord: base64-WAV in JSON (de Function geeft
@@ -8420,6 +8448,10 @@ const TEL_REGISTER = path.join(APP_DATA, 'tel-apparaten.json');
 const TEL_RIJ = path.join(APP_DATA, 'tel-uit.json');
 const TEL_AUDIT = path.join(APP_DATA, 'tel-audit.jsonl');
 const TEL_AUDIT_VOOR = path.join(APP_DATA, 'tel-audit-voor-auth.jsonl');
+// wv339 (kostenmeting 10-16 okt): één regel per beurt zodra zijn item de rij verlaat (gespeeld, verlopen, ingetrokken), zonder
+// inhoud: invoer (soort, seconden, tekens), Claude (tokens, lijsttarief, duur), Gemini (aanroepen, tekens, tokens, seconden).
+// Whisper-seconden van alle beurten (ook 'niets verstaan') staan in tel-audit.jsonl (stt: 1). Rapport: mk-scripts/tel-kosten.py.
+const TEL_KOSTEN = path.join(APP_DATA, 'tel-kosten.jsonl');
 const TEL_CONFIG = path.join(APP_DATA, 'tel-config.json');                 // aud + client-id van de /tel-Access-app; geen geheimen
 const TEL_TOKEN = path.join(APP_DATA, 'geheim', 'tel-servicetoken.json');  // servicetoken tasker-pixel; alleen /tel/koppel geeft het door
 const TEL_UIT = process.env.TEL_UIT_BESTAND || appStandaard('/opt/data/tel-uit', 'tel-uit');
@@ -8472,6 +8504,15 @@ function telAudit(o, voorAuth) {
     if (va.overgeslagen) { o = Object.assign({}, o, { overgeslagen_voor_auth: va.overgeslagen }); va.overgeslagen = 0; }
     appAuditRegel(TEL_AUDIT_VOOR, o);
   } catch (e) { logError('tel-audit', e); }
+}
+function telKostenRegel(x, afloop) {
+  if (!x || !x.k || x.k_gelogd) return;   // zonder k: van vóór de meting (Fable wv339 #7)
+  x.k_gelogd = afloop;
+  try {
+    const k = x.k || {};
+    appAuditRegel(TEL_KOSTEN, { id: x.id, start: x.t_start ? new Date(x.t_start).toISOString() : null, afloop: afloop, soort: x.soort, in: k.in, s: k.s, tekens_in: k.tekens_in, stt_ms: k.stt_ms,
+      claude: k.claude || null, beurt_s: k.beurt_s, spreek_tekens: k.spreek_tekens, delen: k.delen, tts: k.tts || null });
+  } catch (e) { logError('tel-kosten', e); }
 }
 function telStuur(res, status, obj) {
   if (res.headersSent) return;
@@ -8528,7 +8569,7 @@ function telOpruim() {
   // gespeelde items blijven tot hun houdbaarheid (gespeeld is idempotent), maar zonder audio
   const blijf = rij.filter(function (x) { return x.soort === 'bezig' || nu < x.tot; });
   if (blijf.length !== rij.length || om) {
-    rij.forEach(function (x) { if (blijf.indexOf(x) < 0) { delete telStaat.audio[x.id]; delete telStaat.delen[x.id]; } });
+    rij.forEach(function (x) { if (blijf.indexOf(x) < 0) { telKostenRegel(x, x.gespeeld ? 'gespeeld' : 'verlopen'); delete telStaat.audio[x.id]; delete telStaat.delen[x.id]; } });
     telStaat.rij = blijf; telRijBewaar();
   }
 }
@@ -8557,6 +8598,7 @@ function telDelen(x) {
     let d = appVoorleesDelen(x.spreek || TEL_AFZEGGEN);
     if (d.length > TEL_DELEN_MAX) { d = d.slice(0, TEL_DELEN_MAX); d[TEL_DELEN_MAX - 1] += ' De rest staat in de app.'; }
     telStaat.delen[x.id] = d;
+    if (x.soort !== 'bezig') { x.k = x.k || {}; x.k.delen = d.length; }
   }
   return telStaat.delen[x.id];
 }
@@ -8567,7 +8609,8 @@ function telAudio(x, n) {
   const tekst = n === 0 ? x.aankondiging : telDelen(x)[n - 1];
   if (!tekst) return null;
   if (!appTeller('tel-delen', TEL_DELEN_PER_DAG, 86400000)) return Promise.reject(Object.assign(new Error('dagplafond'), { plafond: true }));
-  a[n] = appGeminiStem(tekst);
+  x.k = x.k || {};
+  a[n] = appGeminiStem(tekst, x.k.tts = x.k.tts || {});
   a[n].catch(function () { if (telStaat.audio[x.id] && telStaat.audio[x.id][n]) delete telStaat.audio[x.id][n]; });   // opnieuw proberen mag
   return a[n];
 }
@@ -8600,6 +8643,10 @@ function telNaBeurt(jobId, antwoord, ok) {
   x.soort = ok && antwoord ? 'antwoord' : 'fout';
   x.spreek = x.soort === 'fout' ? TEL_AFZEGGEN : telSpreektekst(antwoord);
   x.t_klaar = nu; x.tot = nu + TEL_TTL_MS; delete telStaat.delen[x.id]; delete telStaat.audio[x.id];
+  const jr = typeof jobs !== 'undefined' && jobs[jobId] && jobs[jobId].result;
+  x.k = x.k || {};
+  x.k.claude = jr && jr.verbruik ? jr.verbruik : null; x.k.beurt_s = x.t_start ? Math.round((nu - x.t_start) / 100) / 10 : null;
+  x.k.spreek_tekens = x.spreek.length;
   const goed = telRijBewaar();
   telWek(x.apparaat);
   // Luistert de telefoon, dan deel 1 alvast maken (snel geluid); anders pas als hij het vraagt.
@@ -8659,7 +8706,7 @@ function handleTel(req, res) {
   res.on('finish', function () {
     const o = res._tel;
     if (o.stil && res.statusCode === 200) return;
-    telAudit({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden, s: o.s, tekens: o.tekens }, o.voorAuth);
+    telAudit({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden, s: o.s, tekens: o.tekens, stt: o.stt }, o.voorAuth);
   });
   const weg = function (st, f, r) { req.resume(); return telWeiger(res, st, f, r); };
   if (telUit()) return weg(503, 'de telefoonkoppeling staat uit (noodstop)', fs.existsSync(TEL_UIT) ? 'tel-uit' : 'app-uit');
@@ -8767,6 +8814,7 @@ function telBeurt(req, res, t) {
     stukken = [];
     (async function () {
       let tekst;
+      const k = { in: tekstSoort ? 'tekst' : null };
       if (tekstSoort) {
         tekst = buf.toString('utf8').replace(/\r\n?/g, '\n').trim();
         if (tekst.length > TEL_TEKST_MAX) return telWeiger(res, 413, 'te lang (hooguit ' + TEL_TEKST_MAX + ' tekens)', 'te lang');
@@ -8778,7 +8826,9 @@ function telBeurt(req, res, t) {
         if (o.s > TEL_MAX_S + 5) return telWeiger(res, 413, 'opname te lang (hooguit 3 minuten)', 'te lang ' + Math.round(o.s) + ' s');
         if (o.s < 0.3) return telWeiger(res, 422, 'ik heb je niet verstaan', 'te kort');
         if (!process.env.CLOUDFLARE_AI_TOKEN_AUTO) return telWeiger(res, 503, 'uitschrijven staat nu niet aan op de pod', 'geen whisper-sleutel');
-        try { tekst = await appWhisper(buf); } catch (e) {
+        k.in = o.soort; k.s = Math.round(o.s * 10) / 10; res._tel.stt = 1;
+        const t0 = Date.now();
+        try { tekst = await appWhisper(buf); k.stt_ms = Date.now() - t0; } catch (e) {
           logError('tel-whisper', e);
           return telWeiger(res, 503, 'uitschrijven lukte niet', 'whisper: ' + String(e && e.message || e).slice(0, 60));
         }
@@ -8792,7 +8842,8 @@ function telBeurt(req, res, t) {
       const st = appStartBeurt({ id: t.app_apparaat || t.id }, 'hoofd', '[AUTO] ' + veilig + (gelogd ? '' : APP_CHATLOG_NIET),
         { beurt_id: null, soort: 'tel', tekst: '[AUTO] ' + tekst, tel: t.id });
       if (!st.job_id) return telWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
-      telRij().push({ id: st.job_id, apparaat: t.id, soort: 'bezig', t_start: Date.now(), tot: Date.now() + TEL_TTL_MS });
+      k.tekens_in = tekst.length;
+      telRij().push({ id: st.job_id, apparaat: t.id, soort: 'bezig', t_start: Date.now(), tot: Date.now() + TEL_TTL_MS, k: k });
       telRijBewaar();
       res._tel.reden = 'beurt ' + st.job_id;
       telStuur(res, 202, { ok: true, id: st.job_id });
@@ -8847,7 +8898,7 @@ function telGespeeld(req, res, t, id) {
   if (!x) return telWeiger(res, 404, 'onbekend', 'onbekend item');
   if (x.soort === 'bezig') return telWeiger(res, 409, 'nog niet klaar', 'gespeeld op een lopende beurt');   // Fable #4
   const al = !!x.gespeeld;
-  if (!al) { x.gespeeld = new Date().toISOString(); telRijBewaar(); }
+  if (!al) { x.gespeeld = new Date().toISOString(); telKostenRegel(x, 'gespeeld'); telRijBewaar(); }
   delete telStaat.audio[x.id];
   res._tel.reden = al ? 'gespeeld (al)' : 'gespeeld';
   res._tel.stil = false;
@@ -8889,6 +8940,7 @@ function telIntrekken(door) {
     if (uit.ingetrokken) appSchrijfJson(TEL_REGISTER, reg);
   } catch (e) { uit.fout = String(e && e.message || e).slice(0, 80); }
   uit.items = telRij().length;
+  telRij().forEach(function (x) { telKostenRegel(x, 'ingetrokken'); });
   telStaat.rij = []; telStaat.audio = {}; telStaat.delen = {}; telStaat.hartslag = {}; telRijBewaar();   // hartslag: Fable #6
   return uit;
 }

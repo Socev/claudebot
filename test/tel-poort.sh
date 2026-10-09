@@ -72,7 +72,7 @@ async function nepFetch(url, opt) {
   if (url === 'https://generativelanguage.googleapis.com/v1beta/interactions') {
     const b = JSON.parse(opt.body); st.tts.push(b.input[0].content[0].text);
     if (st.ttsTraag) await new Promise((r) => setTimeout(r, st.ttsTraag));
-    return antw(200, { steps: [{ content: [{ type: 'audio', data: wavMaak(0.3, 24000).toString('base64') }] }] });
+    return antw(200, { usage: { total_input_tokens: 7, total_output_tokens: 8 }, steps: [{ content: [{ type: 'audio', data: wavMaak(0.3, 24000).toString('base64') }] }] });
   }
   if (url === TEAM + '/cdn-cgi/access/certs') return antw(200, { keys: [jwk] }, { date: new Date().toUTCString() });
   if (url.startsWith('https://api.telegram.org/')) { st.telegram.push(JSON.parse(opt.body).text); return antw(200, { ok: true }); }
@@ -316,6 +316,17 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('4 na de lease (3 min) en zonder gespeeld: opnieuw uitgegeven', r.j.id === id1, r.j);
     r = await tel('POST', '/tel/gespeeld/' + id1);
     toets('4 gespeeld: 200', r.status === 200 && r.j.al === false, r.j);
+    {   // wv339: kostenregel bij gespeeld, zonder inhoud
+      const kr = fs.readFileSync(path.join(DATA, 'tel-kosten.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((x) => x.id === id1);
+      const k1 = kr[0] || {};
+      toets('4k precies één kostenregel na gespeeld', kr.length === 1 && k1.afloop === 'gespeeld', kr);
+      toets('4k invoer: opnamesoort, seconden en tekens', (k1.in === 'mp4' || k1.in === 'wav') && k1.s > 0 && k1.tekens_in > 0 && k1.stt_ms >= 0, k1);
+      toets('4k Gemini: aanroepen, tekens, tokens en seconden geteld', k1.tts && k1.tts.ok >= 1 && k1.tts.tekens > 0 && k1.tts.tok_in === 7 * k1.tts.ok && k1.tts.tok_uit === 8 * k1.tts.ok && Math.abs(k1.tts.audio_s - 0.3 * k1.tts.ok) < 0.11, k1.tts);
+      toets('4k spreektekens en delen; claude-veld aanwezig (hier null: nep-job)', k1.spreek_tekens > 0 && k1.delen >= 1 && k1.claude === null && k1.beurt_s >= 0, k1);
+      toets('4k geen inhoud in de kostenregel', !/Tolgaarde|werkoverleg|Zo-kef/i.test(JSON.stringify(kr)), kr);
+      const au = fs.readFileSync(path.join(DATA, 'tel-audit.jsonl'), 'utf8');
+      toets('4k auditlog: Whisper-aanroep gemarkeerd (stt 1)', /"route":"\/tel\/beurt"[^\n]*"stt":1/.test(au));
+    }
     r = await tel('POST', '/tel/gespeeld/' + id1);
     toets('4 gespeeld is idempotent', r.status === 200 && r.j.al === true, r.j);
     await wacht(1600);
