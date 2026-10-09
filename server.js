@@ -1684,6 +1684,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     j.status = 'running'; j.started = Date.now(); j.progress = {}; j.runtime = keuze.runtime;
     const runOpts = { progress: j.progress, lastFile: path.join(base, 'codex-last.md') };
     if (lezen) runOpts.gereedschap = 'lezen';
+    // wv275: een [AUTO]-beurt van de telefoon draagt zijn id in de omgeving; POST /agent leest hem daar terug (telMerkAgent).
+    if (j.app && j.app.soort === 'tel') runOpts.env = { SOCEV_TEL_BEURT: jobId };
     const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, lezen ? base : space.dir, runOpts);
     if (lezen) r.gereedschap = 'lezen';
     r.files = collectFiles(outdir);
@@ -2597,11 +2599,16 @@ function handleRequest(req, res) {
       // wv277: bron "telegram" (alleen de twee Telegram-workflows) -> na afloop ook in het app-log (appTelegramSpiegel). Elke andere waarde telt niet.
       const spiegel = d.bron === 'telegram';
       jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: chatId, runtime: keuze.runtime, gereedschap: gereedschap || undefined, bron: spiegel ? 'telegram' : undefined };
+      // wv275: Socevs afweging van een agentrapport (AI - Agent-rapport geeft agent_job mee). Kwam de opdracht uit een
+      // [AUTO]-beurt en zit David nog in de auto, dan een regel vooraf en na afloop een aankondiging op de telefoon.
+      let telHint = '';
+      try { telHint = telZelfStart(d.agent_job, jobId); } catch (e) { logError('tel-zelf-start', e); }
       res._log = { job_id: jobId, chat_id: chatId, workspace: ws, runtime: keuze.runtime, gereedschap: gereedschap || undefined, bron: spiegel ? 'telegram' : undefined };
       // Serieel per chat, ongeacht het brein: één gesprek, één beurt tegelijk.
       // De spiegel niet teruggeven: een trage schijf mag de volgende beurt niet ophouden, en een fout raakt de beurt nooit (fail-open).
       enqueue(sessionKey(ws, chatId), function () {
-        return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, keuze, gereedschap).then(function () {
+        return processJob(jobId, telHint + prompt, d.session_id, d.files, chatId, ws, keuze, gereedschap).then(function () {
+          if (telHint) { try { telZelfNaRun(jobId); } catch (e) { logError('tel-zelf-na', e); } }
           if (spiegel) { try { appTelegramSpiegel(jobId, prompt, d.files).catch(function (e) { logError('app-spiegel', e); }); } catch (e) { logError('app-spiegel', e); } }
         });
       });
@@ -2651,6 +2658,8 @@ function handleRequest(req, res) {
         started: Date.now(), ended: null, ok: null, rapport: '-',
         max_minuten: maxMin, workspace: ws, runtime: keuze.runtime, beperkt: beperkt || undefined
       };
+      // wv275: gestart vanuit een [AUTO]-beurt van de telefoon? Synchroon, vóór het antwoord: het verzoekende proces leeft dan nog.
+      try { telMerkAgent(req, jobId, label); } catch (e) { logError('tel-merk', e); }
       saveAgents();
       // Bewust NIET in de chat-wachtrij: agents draaien parallel aan het gesprek.
       processAgent(jobId, prompt, d.session_id, ws, keuze, maxMin * 60 * 1000);
@@ -8721,7 +8730,8 @@ const TEL_AUDIT_VOOR_PER_MIN = 5;
 const TEL_AFZEGGEN = 'Dat is niet gelukt. Kijk even in de app.';
 appStaat.tellers['tel-alles'] = []; appStaat.tellers['tel-beurt'] = []; appStaat.tellers['tel-beurtdag'] = []; appStaat.tellers['tel-koppel'] = [];
 appStaat.tellers['tel-codes'] = []; appStaat.tellers['tel-delen'] = [];
-const telStaat = { code: null, polls: {}, hartslag: {}, audio: {}, delen: {}, rij: null, inBehandeling: 0, voorAuth: { minuut: 0, n: 0, overgeslagen: 0 }, gestopt: false };
+const telStaat = { code: null, polls: {}, hartslag: {}, audio: {}, delen: {}, rij: null, inBehandeling: 0, voorAuth: { minuut: 0, n: 0, overgeslagen: 0 }, gestopt: false,
+  plek: {}, zelf: { merk: 0, merk_mis: 0, hint: 0, items: 0, niet_aanwezig: 0, niets: 0, dubbel: 0 } };   // wv275
 
 function telUit() { return fs.existsSync(TEL_UIT) || fs.existsSync(APP_UIT); }
 function telConfig() {
@@ -8818,14 +8828,20 @@ function telOpruim() {
 }
 function telBezig(apparaat) { return telRij().some(function (x) { return x.apparaat === apparaat && x.soort === 'bezig'; }) ? 'ja' : 'nee'; }
 function telVolgende(apparaat) {
-  const nu = Date.now(), rij = telRij();
+  const nu = Date.now();
+  const open = telRij().filter(function (x) { return x.apparaat === apparaat && x.soort !== 'bezig' && !x.gespeeld && nu < x.tot; });
   // Nooit twee tegelijk (Fable-review diff #1): zolang een uitgegeven item nog speelt (lease loopt, niet gespeeld), wacht de rest.
-  if (rij.some(function (x) { return x.apparaat === apparaat && x.soort !== 'bezig' && !x.gespeeld && nu < x.tot && x.lease_tot > nu; })) return null;
-  return rij.find(function (x) { return x.apparaat === apparaat && x.soort !== 'bezig' && !x.gespeeld && nu < x.tot; }) || null;
+  // Een aankondiging die op een tik wacht, speelt niet: die houdt een eigen antwoord nooit op (wv275, Fable #2).
+  if (open.some(function (x) { return x.lease_tot > nu && (x.soort !== 'zelf' || x.speelt); })) return null;
+  const eigen = open.find(function (x) { return x.soort !== 'zelf'; });
+  if (eigen) return eigen;
+  // uit zichzelf: meteen, dan één herhaling na TEL_ZELF_HERHAAL_MS; daarna alleen nog met een tik af te spelen (deel n)
+  return open.find(function (x) { return (x.aangeboden_n || 0) < 2 && (!x.aangeboden_n || nu - x.aangeboden_t >= TEL_ZELF_HERHAAL_MS); }) || null;
 }
 // Wat hardop gaat: alles tot een regel "Verder in de app:" (of "Verder in Telegram:"), zonder de VRAAG AAN DAVID-regel
 // (daarvoor één zin aan het eind), met de regels van Voorlezen in de app. Deterministisch, geen model.
-function telSpreektekst(antwoord) {
+function telSpreektekst(antwoord, waar) {
+  waar = waar || 'de app';
   let t = String(antwoord || '').replace(/\r\n?/g, '\n');
   const m = /^[^\S\n]*[*_]*Verder in (de app|Telegram)\s*:/im.exec(t);
   if (m) t = t.slice(0, m.index);
@@ -8833,8 +8849,8 @@ function telSpreektekst(antwoord) {
   t = t.replace(/^[^\S\n]*[*_]*VRAAG AAN DAVID:.*$/gm, function () { vraag = true; return ''; });
   let s = appSpreektekst(t);
   if (s.length > APP_VOORLEES_TEKST_MAX) s = s.slice(0, APP_VOORLEES_TEKST_MAX);
-  if (vraag) s = (s ? s + '\n' : '') + 'Ik heb een vraag voor je in de app.';
-  return s || 'Ik heb een antwoord voor je in de app.';
+  if (vraag) s = (s ? s + '\n' : '') + 'Ik heb een vraag voor je in ' + waar + '.';
+  return s || 'Ik heb een antwoord voor je in ' + waar + '.';
 }
 function telDelen(x) {
   if (!telStaat.delen[x.id]) {
@@ -8854,6 +8870,7 @@ function telAudio(x, n) {
   if (!appTeller('tel-delen', TEL_DELEN_PER_DAG, 86400000)) return Promise.reject(Object.assign(new Error('dagplafond'), { plafond: true }));
   x.k = x.k || {};
   a[n] = appGeminiStem(tekst, x.k.tts = x.k.tts || {});
+  if (n === 0 && x.soort === 'zelf') a[n] = a[n].then(telBelletje);   // wv275: belletje vóór de aankondiging
   a[n].catch(function () { if (telStaat.audio[x.id] && telStaat.audio[x.id][n]) delete telStaat.audio[x.id][n]; });   // opnieuw proberen mag
   return a[n];
 }
@@ -8867,7 +8884,9 @@ function telAntwoordPoll(apparaat, obj) {
   telStuur(p.res, 200, obj);
 }
 function telUitgifte(x) {
-  x.lease_tot = Date.now() + TEL_LEASE_MS;
+  // Een aankondiging krijgt geen lease bij de uitgifte (pas als deel >= 1 speelt), wel een teller voor de ene herhaling.
+  if (x.soort === 'zelf') { x.aangeboden_n = (x.aangeboden_n || 0) + 1; x.aangeboden_t = Date.now(); }
+  else x.lease_tot = Date.now() + TEL_LEASE_MS;
   x.uitgegeven = (x.uitgegeven || 0) + 1;
   telRijBewaar();
   return { ok: true, id: x.id, soort: x.soort, onderwerp: x.onderwerp || '', delen: telDelen(x).length, aankondigen: x.aankondiging ? 'ja' : 'nee', bezig: telBezig(x.apparaat) };
@@ -9100,6 +9119,8 @@ function telUitRoute(req, res, t) {
   if (!Number.isInteger(w) || w < 0 || w > TEL_WACHT_MAX_S) return telWeiger(res, 400, 'wacht moet 0 tot ' + TEL_WACHT_MAX_S + ' zijn', 'wacht');
   res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
   telStaat.hartslag[t.id] = Date.now();
+  // wv275: Tasker v6 meldt zijn plek mee (&plek=%SocevPlek); ongezet stuurt Tasker de letterlijke naam = niet Auto
+  if (q.has('plek')) telStaat.plek[t.id] = { t: Date.now(), auto: /^auto$/i.test(String(q.get('plek') || '').trim()) };
   telAntwoordPoll(t.id, { ok: true, bezig: telBezig(t.id), reden: 'vervangen' });   // één open lange vraag per apparaat (vóór het opruimen: Fable #3)
   telOpruim();
   const x = telVolgende(t.id);
@@ -9115,7 +9136,7 @@ async function telDeel(req, res, t, id, n) {
   if (!x || x.soort === 'bezig' || x.gespeeld || Date.now() > x.tot) return telWeiger(res, 404, 'geen deel', 'onbekend item');
   if (!Number.isInteger(n) || n < 0 || (n === 0 && !x.aankondiging) || n > telDelen(x).length) return telWeiger(res, 404, 'geen deel', 'deel ' + n + ' bestaat niet');
   if (!process.env.GEMINI_API_KEY_AUTO) return telWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'geen gemini-sleutel');
-  x.lease_tot = Math.max(x.lease_tot || 0, Date.now() + TEL_LEASE_MS);   // wie afspeelt, houdt het item vast
+  if (n >= 1) { x.lease_tot = Math.max(x.lease_tot || 0, Date.now() + TEL_LEASE_MS); if (x.soort === 'zelf') x.speelt = true; }   // wie afspeelt, houdt het item vast (een aankondiging niet: wv275)
   let wav;
   try {
     const p = telAudio(x, n);
@@ -9201,19 +9222,182 @@ function telInfo() {
   try { rij = telRij(); } catch (e) {}
   return { ingericht: telIngericht(), uit: telUit(), register: kapot ? 'kapot' : 'ok', gekoppeld: !!t, verloopt: t ? t.verloopt : null,
     luistert: t ? telLuistert(t.id) : false, lange_vragen: Object.keys(telStaat.polls).length,
-    beurten_lopend: rij.filter(function (x) { return x.soort === 'bezig'; }).length, items_klaar: rij.filter(function (x) { return x.soort !== 'bezig' && !x.gespeeld; }).length };
+    beurten_lopend: rij.filter(function (x) { return x.soort === 'bezig'; }).length, items_klaar: rij.filter(function (x) { return x.soort !== 'bezig' && !x.gespeeld; }).length,
+    zelf: Object.assign({ aanwezig: (function () { try { const w = telAanwezig(); return w.ok ? 'ja' : w.reden; } catch (e) { return 'fout'; } })() }, telStaat.zelf) };
 }
 // Bij afsluiten (SIGTERM van uitrol.sh of de supervisor): elke open lange vraag een leeg antwoord, dan pas het standaardgedrag.
 function telAfsluiten() {
   telStaat.gestopt = true;
   Object.keys(telStaat.polls).forEach(function (a) { telAntwoordPoll(a, { ok: true, bezig: telBezig(a), reden: 'afsluiten' }); });
 }
-setInterval(function () { try { telOpruim(); if (telStaat.code && Date.now() > telStaat.code.tot) telStaat.code = null; } catch (e) { logError('tel-opruim', e); } }, 60 * 1000).unref();
+setInterval(function () {
+  try { telOpruim(); if (telStaat.code && Date.now() > telStaat.code.tot) telStaat.code = null; Object.keys(telStaat.polls).forEach(telWek); }   // telWek: herhaling van een aankondiging
+  catch (e) { logError('tel-opruim', e); }
+}, 60 * 1000).unref();
 if (typeof process.once === 'function') {
   process.once('SIGTERM', function () {
     try { telAfsluiten(); } catch (e) {}
     setTimeout(function () { process.kill(process.pid, 'SIGTERM'); }, 150);   // daarna het gewone einde (sterven aan SIGTERM)
   });
+}
+
+// ── fase 3 (wv275, 9-10-2026): Socev uit zichzelf naar de telefoon ──
+// Start Socev in een [AUTO]-beurt een achtergrondagent, dan merkt de pod die job (telMerkAgent: het verzoekende proces draagt
+// SOCEV_TEL_BEURT in zijn omgeving). Komt het rapport terug, dan weegt Socev het in 40687 (/run met agent_job uit AI -
+// Agent-rapport); zit David dan nog in de auto (telAanwezig), dan krijgt die beurt één regel vooraf en wordt zijn antwoord
+// een item 'zelf' op de telefoon: belletje + vaste zin, tik = voorlezen; één herhaling na 4 min; daarna alleen Telegram.
+// Telegram verandert niet. Opdrachten uit het kastje blijven bij het kastje (autoNaAfloop), dus nooit twee apparaten.
+// Bouwplan "Spraak via de telefoon (Tasker)" § 13; Fable-review ontwerp verwerkt (10 punten).
+const TEL_ZELF_HERHAAL_MS = 4 * 60 * 1000;
+const TEL_ZELF_TTL_MS = 10 * 60 * 1000;      // daarna alleen het schriftelijke spoor (Telegram)
+const TEL_ZELF_MAX_OPEN = 3;
+const TEL_PLEK_MAX_MS = 3 * 60 * 1000;       // de lus vraagt ± elke minuut; ouder = onbekend
+// Vaste, neutrale zin: een onderwerp uit het label kan in een auto vol passagiers te veel zeggen (Fable #5).
+const TEL_ZELF_AANKONDIGING = 'Ik heb een antwoord op je opdracht van daarnet. Tik op de knop om te luisteren.';
+const TEL_ZELF_HINT = '[AUTO-RAPPORT] David gaf deze opdracht uit de auto en zit daar nog: je antwoord wordt op zijn telefoon ' +
+  'voorgelezen (en gaat zoals altijd ook naar Telegram). Schrijf de kern hardop-geschikt, als tegen een passagier: kort, geen ' +
+  'lijstjes of tabellen, geen getallen om te onthouden, geen markdown. Wat niet hardop hoeft (links, lijstjes, bedragen) zet je ' +
+  'onder een eigen regel "Verder in Telegram:". Antwoord NIETS als dit niets voor David verandert.\n\n';
+
+function telZelfLog(o) { try { appAuditRegel(TEL_AUDIT, Object.assign({ route: 'zelf' }, o)); } catch (e) { logError('tel-zelf-log', e); } }
+function telActief() { try { return telRegister().apparaten.find(function (x) { return x && x.actief; }) || null; } catch (e) { return null; } }
+// Zit David nu met de telefoon in de auto? Alle drie: de lus leeft, de telefoon zelf meldt plek Auto (≤ 3 min), app-sessie dit dagdeel.
+function telAanwezig() {
+  if (telUit()) return { ok: false, reden: 'uit' };
+  const t = telActief();
+  if (!t) return { ok: false, reden: 'niet gekoppeld' };
+  if (!(Date.parse(t.verloopt) > Date.now())) return { ok: false, reden: 'sleutel verlopen' };
+  if (!telLuistert(t.id)) return { ok: false, reden: 'luistert niet' };
+  const p = telStaat.plek[t.id];
+  if (!p || Date.now() - p.t > TEL_PLEK_MAX_MS) return { ok: false, reden: 'plek onbekend' };
+  if (!p.auto) return { ok: false, reden: 'niet in de auto' };
+  if (!telSessieOk(t)) return { ok: false, reden: 'geen app-sessie' };
+  return { ok: true, t: t };
+}
+// Welk proces zit achter deze lokale verbinding? De client-rij in /proc/net/tcp(6) (lokaal = zijn poort, op afstand = onze
+// poort) geeft de socket-inode; het proces met die socket als fd is de aanvrager. Fail-closed: null.
+function telVerbindingProces(req) {
+  const s = req && req.socket;
+  if (!s || !/^(127\.0\.0\.1|::ffff:127\.0\.0\.1|::1)$/.test(String(s.remoteAddress || ''))) return null;
+  const hex = function (n) { return ('0000' + Number(n).toString(16).toUpperCase()).slice(-4); };
+  const zijn = ':' + hex(s.remotePort), onze = ':' + hex(s.localPort);
+  let inode = null;
+  ['/proc/net/tcp', '/proc/net/tcp6'].some(function (f) {
+    let t = ''; try { t = fs.readFileSync(f, 'utf8'); } catch (e) { return false; }
+    return t.split('\n').slice(1).some(function (r) {
+      const k = r.trim().split(/\s+/);
+      if (k.length > 9 && k[1].slice(-5) === zijn && k[2].slice(-5) === onze && k[9] !== '0') { inode = k[9]; return true; }
+      return false;
+    });
+  });
+  if (!inode) return null;
+  const doel = 'socket:[' + inode + ']';
+  let pids = [];
+  try { pids = fs.readdirSync('/proc').filter(function (x) { return /^\d+$/.test(x) && Number(x) !== process.pid; }); } catch (e) { return null; }
+  for (let i = 0; i < pids.length; i++) {
+    let fds = [];
+    try { fds = fs.readdirSync('/proc/' + pids[i] + '/fd'); } catch (e) { continue; }
+    for (let k = 0; k < fds.length; k++) {
+      try { if (fs.readlinkSync('/proc/' + pids[i] + '/fd/' + fds[k]) === doel) return pids[i]; } catch (e) {}
+    }
+  }
+  return null;
+}
+function telBeurtVanVerzoek(req) {
+  const pid = telVerbindingProces(req);
+  if (!pid) return { fout: 'proces niet gevonden' };
+  let env;
+  try { env = fs.readFileSync('/proc/' + pid + '/environ').toString('latin1'); } catch (e) { return { fout: 'omgeving onleesbaar' }; }
+  const m = /(?:^|\0)SOCEV_TEL_BEURT=([0-9a-f]{16})(?:\0|$)/.exec(env);
+  return m ? { beurt: m[1] } : { fout: 'geen tel-beurt' };
+}
+// Vanuit POST /agent, vóór het antwoord. Alleen route socev (david: en machinekamer: krijgen geen afweging in 40687).
+function telMerkAgent(req, jobId, label) {
+  if (/^\s*(david|machinekamer)\s*:/i.test(String(label || ''))) return null;
+  const a = agentsReg[jobId];
+  if (!a) return null;
+  // goedkoop vooraf: alleen zoeken als er nu een [AUTO]-beurt loopt
+  const lopend = Object.keys(jobs).some(function (id) { const j = jobs[id]; return j && j.app && j.app.soort === 'tel' && j.status === 'running'; });
+  if (!lopend) return null;
+  const b = telBeurtVanVerzoek(req);
+  const j = b.beurt ? jobs[b.beurt] : null;
+  if (!j || !j.app || j.app.soort !== 'tel' || j.status !== 'running') {
+    telStaat.zelf.merk_mis++;
+    telZelfLog({ gebeurtenis: 'merk', job: jobId, reden: b.fout || 'beurt loopt niet' });
+    return null;
+  }
+  a.tel = { beurt: b.beurt, t: Date.now() };
+  telStaat.zelf.merk++;
+  telZelfLog({ gebeurtenis: 'merk', job: jobId, beurt: b.beurt, reden: 'gemerkt' });
+  return a.tel;
+}
+// Vanuit POST /run (AI - Agent-rapport, route socev): '' of de regel vooraf. Eén afweging per job (herkansing van sendReport,
+// dubbele n8n-run: Fable #4); niet aanwezig = geen regel en geen item (Fable #9).
+function telZelfStart(agentJob, runJobId) {
+  if (!/^[0-9a-f]{16}$/.test(String(agentJob || ''))) return '';
+  const a = agentsReg[agentJob];
+  if (!a || !a.tel) return '';
+  if (a.tel.gebruikt) { telStaat.zelf.dubbel++; telZelfLog({ gebeurtenis: 'start', job: agentJob, reden: 'al afgewogen' }); return ''; }
+  a.tel.gebruikt = runJobId;
+  if (typeof saveAgents === 'function') saveAgents();
+  const w = telAanwezig();
+  if (!w.ok) { telStaat.zelf.niet_aanwezig++; telZelfLog({ gebeurtenis: 'start', job: agentJob, reden: 'niet aanwezig: ' + w.reden }); return ''; }
+  if (jobs[runJobId]) jobs[runJobId].tel_zelf = agentJob;
+  telStaat.zelf.hint++;
+  telZelfLog({ gebeurtenis: 'start', job: agentJob, reden: 'regel vooraf' });
+  return TEL_ZELF_HINT;
+}
+// Na afloop van die /run: Socevs antwoord als aankondiging op de telefoon, als David er nog zit. Telegram krijgt het hoe dan ook.
+function telZelfNaRun(runJobId) {
+  const j = jobs[runJobId];
+  if (!j || !j.tel_zelf) return null;
+  const id = j.tel_zelf;
+  const out = appUitvoer(j);
+  const klaar = function (reden) { telZelfLog({ gebeurtenis: 'item', job: id, reden: reden }); return null; };
+  if (!j.result || j.result.ok === false || !out) return klaar('beurt mislukt of leeg');
+  if (/^NIETS\.?$/i.test(out)) { telStaat.zelf.niets++; return klaar('NIETS'); }
+  const w = telAanwezig();
+  if (!w.ok) { telStaat.zelf.niet_aanwezig++; return klaar('niet aanwezig: ' + w.reden); }
+  const rij = telRij(), nu = Date.now();
+  if (rij.some(function (x) { return x.id === id; })) { telStaat.zelf.dubbel++; return klaar('al in de rij'); }
+  if (rij.filter(function (x) { return x.soort === 'zelf' && x.apparaat === w.t.id && !x.gespeeld && nu < x.tot; }).length >= TEL_ZELF_MAX_OPEN) return klaar('rij vol');
+  // k_gelogd: buiten de kostenmeting van /tel-beurten (wv339)
+  const x = { id: id, apparaat: w.t.id, soort: 'zelf', spreek: telSpreektekst(out, 'Telegram'), aankondiging: TEL_ZELF_AANKONDIGING,
+    t_start: nu, t_klaar: nu, tot: nu + TEL_ZELF_TTL_MS, k_gelogd: 'nvt' };
+  rij.push(x);
+  telRijBewaar();
+  telStaat.zelf.items++;
+  klaar('aangeboden');
+  telWek(w.t.id);
+  if (!telStaat.gestopt) { const p = telAudio(x, 0); if (p) p.catch(function () {}); }   // aankondiging alvast maken
+  return x;
+}
+// Twee korte tonen vóór de aankondiging (zelfde formaat als de spraak: PCM 16 bit). Niet te lezen: de spraak zonder belletje.
+function telBelletje(wav) {
+  try {
+    if (!Buffer.isBuffer(wav) || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') return wav;
+    let i = 12, rate = 0, kan = 0, bits = 0, data = -1, n = 0;
+    while (i + 8 <= wav.length) {
+      const t = wav.toString('ascii', i, i + 4), len = wav.readUInt32LE(i + 4);
+      if (t === 'fmt ' && len >= 16 && i + 24 <= wav.length) { kan = wav.readUInt16LE(i + 10); rate = wav.readUInt32LE(i + 12); bits = wav.readUInt16LE(i + 22); }
+      if (t === 'data') { data = i + 8; n = Math.min(len, wav.length - data); break; }
+      i += 8 + len + (len % 2);
+    }
+    if (data < 0 || bits !== 16 || !rate || !kan || kan > 2) return wav;
+    const stukken = [[880, 0.12], [0, 0.04], [1320, 0.2], [0, 0.3]].map(function (tn) {
+      const m = Math.round(rate * tn[1]), b = Buffer.alloc(m * 2 * kan);
+      if (tn[0]) for (let k = 0; k < m; k++) {
+        const v = Math.round(Math.sin(2 * Math.PI * tn[0] * k / rate) * Math.min(1, k / (rate * 0.01), (m - k) / (rate * 0.04)) * 9000);
+        for (let c = 0; c < kan; c++) b.writeInt16LE(v, (k * kan + c) * 2);
+      }
+      return b;
+    });
+    const pcm = Buffer.concat(stukken.concat([wav.subarray(data, data + n)])), h = Buffer.alloc(44);
+    h.write('RIFF', 0, 'ascii'); h.writeUInt32LE(36 + pcm.length, 4); h.write('WAVEfmt ', 8, 'ascii'); h.writeUInt32LE(16, 16);
+    h.writeUInt16LE(1, 20); h.writeUInt16LE(kan, 22); h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * kan * 2, 28);
+    h.writeUInt16LE(kan * 2, 32); h.writeUInt16LE(16, 34); h.write('data', 36, 'ascii'); h.writeUInt32LE(pcm.length, 40);
+    return Buffer.concat([h, pcm]);
+  } catch (e) { return wav; }
 }
 // ── einde telefoon-poort ──────────────────────────────────────────────────────────────────────────────
 
