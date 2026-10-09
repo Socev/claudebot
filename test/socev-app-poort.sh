@@ -3625,6 +3625,51 @@ async function bewijs(o) {
       toets('23 wv292 #6 bevestig moet true zijn -> 400', r.status === 400, JSON.stringify(r.j));
       r = await bq('/bericht/naar-telegram', { secret: GEH, id: idV });
       toets('23 wv292 #6 zonder optie: definitief zoals in wv263', r.status === 200 && r.j.naar_telegram === true && r.j.tot === null, JSON.stringify(r.j));
+
+      // Fable-review wv292 #1: gevoelige vraag (versturen): na verloop zonder bevestiging géén knoppen terug, wel "onzeker"
+      r = await bq('/bericht', B({ tekst: 'Concept klaar.\n\nVRAAG AAN DAVID: Zal ik de mail aan de accountant versturen?', knoppen: true }));
+      const idG = r.j.id;
+      await bq('/bericht/naar-telegram', { secret: GEH, id: idG, voorlopig: true });
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      const hG = ((r.j.items || []).find((x) => x.job_id === idG) || {}).vraag || {};
+      const vg = leesVragen(); vg[idG + ':' + hG.hash].naar_telegram_tot = new Date(Date.now() - 20).toISOString(); fs.writeFileSync(path.join(DATA, 'vragen.json'), JSON.stringify(vg));
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      const gG = ((r.j.items || []).find((x) => x.job_id === idG) || {}).vraag || {};
+      const rKG = await vraag('POST', '/app/knop', { job_id: idG, vraag_hash: hG.hash, keuze: 'nee' }, { pot: P.jar });
+      toets('23 wv292 Fable #1 gevoelige vraag: na verloop géén knoppen terug (onzeker), knop 409', vg[idG + ':' + hG.hash].gevoelig !== false && gG.naar_telegram === true && gG.naar_telegram_onzeker === true && rKG.status === 409, JSON.stringify([gG, rKG.j]));
+      r = await bq('/bericht/naar-telegram', { secret: GEH, id: idG, terug: true });
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      const gG2 = ((r.j.items || []).find((x) => x.job_id === idG) || {}).vraag || {};
+      toets('23 wv292 Fable #1 ... een expliciete terug geeft de knoppen wel terug', gG2.naar_telegram === false && !gG2.naar_telegram_onzeker, JSON.stringify(gG2));
+      // Fable-review wv292 #5: terug op een bericht zonder vraag: no-op, geen fout voor n8n
+      r = await bq('/bericht', B({ tekst: 'zonder vraag, schaduw', knoppen: false }));
+      const rT5 = await bq('/bericht/naar-telegram', { secret: GEH, id: r.j.id, terug: true });
+      toets('23 wv292 Fable #5 terug op een bericht zonder vraag -> 200 (no-op)', rT5.status === 200 && rT5.j.vraag === false, JSON.stringify(rT5.j));
+      // Fable-review wv292 #3: tweede bericht nadat de Pixel-poll verouderde terwijl het eerste nog wacht -> één seintje voor beide
+      await slaap(BUNDEL23 + 50); H.appStaat.berichtPush = null;
+      pushes.length = 0;
+      await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      const tK = Date.now();
+      r = await bq('/bericht', B({ tekst: 'A: wacht op de poll' }));
+      const idA3 = r.j.id;
+      await slaap(Math.max(0, 320 - (Date.now() - tK)));
+      r = await bq('/bericht', B({ tekst: 'B: poll is oud' }));
+      const idB3 = r.j.id;
+      await slaap(500);
+      const sA3 = await bq('/bericht/stand', { secret: GEH, id: idA3 }), sB3 = await bq('/bericht/stand', { secret: GEH, id: idB3 });
+      toets('23 wv292 Fable #3 A wachtte op de poll, B kwam erna: één seintje voor beide, geen tweede van de timer', r.j.push.gestart === true && pushes.length === (ander ? 2 : 1) && sA3.j.verstuurd === (ander ? 2 : 1) && sB3.j.verstuurd === (ander ? 2 : 1), JSON.stringify([pushes.length, sA3.j.verstuurd, sB3.j.verstuurd]));
+      // Fable-review wv292 #2: herstart lang na het geplande seintje -> uitgesteld_tot (en controle_na) volgt de nieuwe planning
+      await slaap(BUNDEL23 + 50); H.appStaat.berichtPush = null;
+      await bq('/bericht', B({ tekst: 'eerste van een bundel' }));
+      r = await bq('/bericht', B({ tekst: 'gebundeld, dan een herstart' }));
+      const idH = r.j.id;
+      { const k = H.appStaat.berichtPush.machinekamer; clearTimeout(k.timer); }
+      H.appStaat.berichten[idH].push.uitgesteld_tot = new Date(Date.now() - 5 * 60000).toISOString();   // pod 5 min weg
+      H.appStaat.berichtPush = null;
+      H.berichtHerplan();
+      st = await bq('/bericht/stand', { secret: GEH, id: idH });
+      toets('23 wv292 Fable #2 herstart: controle_na ligt na nu (n8n wacht, geeft niet op)', st.j.push_klaar === false && Date.parse(st.j.controle_na) > Date.now() + 60000, JSON.stringify(st.j));
+      clearTimeout(H.appStaat.berichtPush.machinekamer.timer); H.appStaat.berichtPush = null;
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), regOrig23);
     }
 
@@ -3675,6 +3720,10 @@ async function bewijs(o) {
       toets('25 /app/nieuw noemt telegram_bezig (zodat de app pas dan de snelle route pollt)', r.status === 200 && r.j.telegram_bezig && r.j.telegram_bezig.hoofd && r.j.telegram_bezig.hoofd.n === 2, JSON.stringify(r.j.telegram_bezig));
       const aud1 = fs.existsSync(path.join(DATA, 'audit.jsonl')) ? fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter((x) => x.indexOf('telegram-bezig') >= 0).length : 0;
       toets('25 telegram-bezig is stil (geen auditregel bij 200)', aud1 === aud0, aud1 + ' vs ' + aud0);
+      jobs['8888888888888899'] = { status: 'running', bron: 'telegram', workspace: 'vault', chat_id: 'telegram-debug', created: Date.now() - 61 * 60000 };
+      r = await vraag('GET', '/app/telegram-bezig', undefined, { pot: P.jar });
+      delete jobs['8888888888888899'];
+      toets('25 Fable wv292 #4 een job ouder dan 1 u telt niet (hangende job: geen eeuwige poll)', r.j.bezig.machinekamer === null, JSON.stringify(r.j));
       jobs['8888888888888881'].status = 'done'; jobs['8888888888888882'].status = 'done';
       r = await vraag('GET', '/app/telegram-bezig', undefined, { pot: P.jar });
       toets('25 klaar -> niets meer bezig', r.status === 200 && r.j.bezig.hoofd === null && r.j.bezig.machinekamer === null, JSON.stringify(r.j));
