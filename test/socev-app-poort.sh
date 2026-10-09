@@ -54,6 +54,8 @@ const chatlogStaat = { rijen: [], posts: [], deletes: [], kapot: false, mislukt:
 const wachterStaat = { j: null, kapot: false };
 const agendaStaat = { pad: 'agenda-proef-x1', events: [], mails: [], aanroepen: [], kapot: false };   // wv136
 const vkStaat = { pad: 'voorwerk-knop-app-proef1', aanroepen: [], antwoord: null, status: 200, traag: false };   // wv173: AI - Voorwerk-knoppen, ingang Knop (app)
+const akStaat = { pad: 'agenda-knop-app-aaaaaaaaaaaa', aanroepen: [], antwoord: null, status: 200, traag: false, wacht: null, onleesbaar: false };   // wv315: AI - Agenda-knoppen, ingang Knop (app)
+const apiLogNep = [];   // wv315: wat de pod als res._log in api.log zou zetten (alleen /bericht)
 const VAULT_T = path.join(W, 'vault');
 const pushes = [];
 // wv157 (sleutelluik): portaalsleutel, nagebootste kluis en n8n-credentials; ECHT_SLEUTEL=1 stuurt sb_sleutelportaal_* naar de echte kluis
@@ -182,6 +184,17 @@ async function nepFetch(url, opt) {
     }
     if (u.pathname.startsWith('/api/v1/workflows/')) { const w = (n8nStaat.workflows || {})[u.pathname.slice('/api/v1/workflows/'.length)]; return w ? antw(200, w) : antw(404, {}); }
     return antw(404, {});
+  }
+  if (url.startsWith(N8N + '/webhook/agenda-knop-')) {   // wv315: AI - Agenda-knoppen (Knop (app)), zoals de echte: sleutel als kop, {n, a}
+    const b = JSON.parse(opt.body || '{}');
+    akStaat.aanroepen.push({ url, sleutel: opt.headers && opt.headers['x-socev-sleutel'], body: b, methode: opt.method });
+    if (url !== N8N + '/webhook/' + akStaat.pad) return antw(404, {});
+    if (akStaat.wacht) await akStaat.wacht;
+    if (akStaat.traag) { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; }
+    if (akStaat.status !== 200) return antw(akStaat.status, {});
+    if (akStaat.onleesbaar) return { ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token < in JSON'); } };
+    if ((opt.headers || {})['x-socev-sleutel'] !== 'nep-schrijfluik') return antw(200, { pagina: 'sleutel', tekst: 'Deze knop ken ik niet.' });
+    return antw(200, akStaat.antwoord ? akStaat.antwoord(b) : { pagina: 'onbekend', tekst: '' });
   }
   if (url.startsWith(N8N + '/webhook/voorwerk-')) {   // wv173: AI - Voorwerk-knoppen (Knop (app))
     const b = JSON.parse(opt.body || '{}');
@@ -312,7 +325,7 @@ vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appS
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
 const H = ctx.__h;
-const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); if (H.berichtIsPad(q)) return H.berichtRoute(q, s); s.writeHead(418); s.end(); });
+const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); if (H.berichtIsPad(q)) { s.on('finish', () => apiLogNep.push(JSON.stringify(s._log || {}))); return H.berichtRoute(q, s); } s.writeHead(418); s.end(); });
 
 // ── de "Pages Function" van deze toets: cookiepot per browser, koppen erbij ──
 let laatsteCookies = '';   // wv205: ruwe X-App-Cookies van het laatste antwoord dat cookies zette
@@ -3518,6 +3531,225 @@ async function bewijs(o) {
         fs.writeFileSync(path.join(DATA, 'reacties.json'), echtR);
         r = await vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar });
         toets('23b daarna weer 👍 -> 200, nog steeds één rij voor dit bericht', r.status === 200 && vbl().filter((x) => x.referentie === 'app:machinekamer:' + idT).length === 1 && vbl()[0].signaal === '👍', JSON.stringify(vbl()));
+      }
+
+      // ── 23c. wv315: agenda-✅/↩️ in de app (bouwplan hoofdkanaal § 4.13): /bericht met veld agenda, POST /app/agenda -> AI - Agenda-knoppen (Knop (app)) ──
+      {
+        const vers = async (X) => { const x = await X.p.evaluate(() => post('/api/passkey/opties', {})); return X.p.evaluate(async (y) => post('/api/passkey/bevestig', { antwoord: await bewijs(y) }), x.j.opties); };
+        const sessieVan = (X) => H.appStaat.sessies[crypto.createHash('sha256').update(X.jar.sessie).digest('hex')];
+        const geenVers = () => { for (const h of Object.keys(H.appStaat.sessies)) H.appStaat.sessies[h].vers_tot = 0; };
+        for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+        const AGF = path.join(DATA, 'agenda-knoppen.json');
+        const agf = () => JSON.parse(fs.readFileSync(AGF, 'utf8'));
+        const NONCES = [];
+        const nn = () => { const n = crypto.randomBytes(16).toString('hex'); NONCES.push(n); return n; };   // willekeurig: botst niet met andere toetsdata
+        const antwoorden = [];   // alles wat de app of n8n van de pod terugkreeg (nonce-toets)
+        const app = async (body, pot) => { const x = await vraag('POST', '/app/agenda', body, { pot: pot || P.jar }); antwoorden.push(JSON.stringify(x.j)); return x; };
+        const bqA = async (body) => { const x = await bq('/bericht', body); antwoorden.push(JSON.stringify(x.j)); return x; };
+        const gesch = async (kan) => { const g = await vraag('GET', '/app/geschiedenis/' + (kan || 'hoofd'), undefined, { pot: P.jar }); antwoorden.push(JSON.stringify(g.j)); return g; };
+        const item = async (id, kan) => ((await gesch(kan)).j.items || []).find((x) => x.job_id === id);
+        const nA = () => akStaat.aanroepen.length;
+        n8nStaat.workflows.LeqoYYEvJPhAKPS3 = { id: 'LeqoYYEvJPhAKPS3', nodes: [{ name: 'Knop (tg)', type: 'n8n-nodes-base.webhook', parameters: { path: 'agenda-knop-tg-proef' } },
+          { name: 'Knop (app)', type: 'n8n-nodes-base.webhook', parameters: { path: 'agenda-knop-app-aaaaaaaaaaaa' } }] };
+        const nOng = nn();
+        akStaat.antwoord = () => ({ pagina: 'uitgevoerd', tekst: 'Geplaatst: <b>Tandarts</b> vr 10-10 09:00 (Gezin) &amp; herinnering.', ongedaan_nonce: nOng });
+        const AG = (n, x, ag) => B(Object.assign({ kanaal: 'hoofd', bron: 'agenda', klasse: 'dringend', knoppen: false, sleutel: 'exec-ag:' + n,
+          tekst: 'Zal ik de afspraak Tandarts plaatsen op vr 10-10 09:00 (agenda Gezin)?\n\nVRAAG AAN DAVID: Zal ik de afspraak Tandarts in je agenda zetten?',
+          agenda: Object.assign({ nonce: n, soort: 'uitvoeren', verloopt: Date.now() + 30 * 60000 }, ag || {}) }, x || {}));
+        const D = (id, x) => Object.assign({ kanaal: 'hoofd', job_id: id, knop: 'uitvoeren', keuze: 'ja' }, x || {});
+        // /bericht: veld agenda getoetst
+        const nA1 = nn();
+        const fouten23c = [];
+        for (const [naam, body] of [['andere bron', AG(nA1, { bron: 'agentrapport' })], ['verloopt > nu+48u', AG(nA1, {}, { verloopt: Date.now() + 49 * 3600000 })],
+          ['verloopt < nu-5min', AG(nA1, {}, { verloopt: Date.now() - 6 * 60000 })], ['verloopt als tekst', AG(nA1, {}, { verloopt: String(Date.now() + 60000) })],
+          ['nonce kort', AG('abc', {})], ['soort onbekend', AG(nA1, {}, { soort: 'wissen' })], ['geen object', AG(nA1, { agenda: 'x' })]]) {
+          const x = await bqA(body); if (x.status !== 400) fouten23c.push(naam + ' ' + x.status);
+        }
+        toets('23c /bericht agenda bij een andere bron, verloopt buiten venster (> nu+48u, < nu-5 min, tekst), ongeldige nonce/soort -> 400, niets opgeslagen', fouten23c.length === 0 && !fs.existsSync(AGF), fouten23c.join('; '));
+        const vragenVoor = fs.existsSync(path.join(DATA, 'vragen.json')) ? Object.keys(JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))).length : 0;
+        r = await bqA(AG(nA1));
+        const idA = r.j.id;
+        const vragenNa = Object.keys(JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8')));
+        toets('23c /bericht bron agenda met agenda -> 200, agenda true, geen vraag (ook niet met VRAAG AAN DAVID in de tekst)', r.status === 200 && r.j.agenda === true && r.j.vraag === false && vragenNa.length === vragenVoor && !vragenNa.some((k) => k.startsWith(idA + ':')), JSON.stringify(r.j));
+        toets('23c agenda-knoppen.json 0600 met de knop open', (fs.statSync(AGF).mode & 0o777) === 0o600 && agf()[idA].kanaal === 'hoofd' && agf()[idA].knoppen.uitvoeren.stand === 'open' && agf()[idA].knoppen.uitvoeren.nonce === nA1, JSON.stringify(agf()[idA]));
+        r = await bqA(AG(nA1));
+        toets('23c dubbele sleutel -> zelfde id, dubbel, agenda true, één entry', r.status === 200 && r.j.id === idA && r.j.dubbel === true && r.j.agenda === true && Object.values(agf()).filter((e) => e.knoppen.uitvoeren && e.knoppen.uitvoeren.nonce === nA1).length === 1, JSON.stringify(r.j));
+        let it = await item(idA);
+        toets('23c geschiedenis: agenda.knoppen [uitvoeren open], vraag null, geen nonce', it && it.vraag === null && it.agenda && it.agenda.knoppen.length === 1 && it.agenda.knoppen[0].knop === 'uitvoeren' && it.agenda.knoppen[0].open === true
+          && it.agenda.knoppen[0].pagina === null && it.agenda.knoppen[0].uitkomst === null && Date.parse(it.agenda.knoppen[0].verloopt) > Date.now() && JSON.stringify(it).indexOf(nA1) < 0, JSON.stringify(it && it.agenda));
+        const andere = (((await gesch()).j.items) || []).filter((x) => x.job_id !== idA && x.agenda !== undefined);
+        toets('23c geschiedenis: berichten zonder knop hebben geen veld agenda', andere.length === 0, andere.length);
+        // POST /app/agenda: sloten en velden
+        r = await app(D(idA), { apparaat: P.jar.apparaat });
+        toets('23c zonder sessie -> 401', r.status === 401 && nA() === 0, JSON.stringify(r.j));
+        const ong = [];
+        for (const b of [D(idA, { knop: 'x' }), D(idA, { keuze: 'anders' }), D(idA, { knop: 'ongedaan', keuze: 'nee' }), D('nietgeldig'), D(idA, { kanaal: 'onbekend' }), D(idA, { knop: 'constructor' })]) ong.push((await app(b)).status);
+        toets('23c ongeldig (knop, keuze, ❌ bij ongedaan, job_id, kanaal, constructor) -> 400', ong.join() === '400,400,400,400,400,400' && nA() === 0, ong.join());
+        const r404 = [(await app(D('ffffffffffffffff'))).status, (await app(D(idA, { kanaal: 'machinekamer' }))).status, (await app(D(idA, { knop: 'ongedaan' }))).status];
+        toets('23c onbekend id, id uit een ander kanaal, knop die er niet is -> 404, n8n niet aangeroepen', r404.join() === '404,404,404' && nA() === 0, r404.join());
+        geenVers();
+        r = await app(D(idA));
+        toets('23c ✅ zonder verse vingerafdruk -> 403 vers_nodig, niets aangeroepen, stand open', r.status === 403 && r.j.vers_nodig === true && nA() === 0 && agf()[idA].knoppen.uitvoeren.stand === 'open', JSON.stringify(r.j));
+        // vaste plek: 403, ook met een open slot en een verse vingerafdruk
+        await vers(P);
+        const regVoor = fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8');
+        { const rg = JSON.parse(regVoor); const ap = rg.apparaten.find((x) => x.id === pId); ap.soort = 'vast'; ap.vaste_plek = 'Thuis'; ap.open = { sinds: new Date(Date.now() - 60000).toISOString(), tot: new Date(Date.now() + 3600000).toISOString() }; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg)); }
+        r = await app(D(idA));
+        const rVastNee = await app(D(idA, { keuze: 'nee' }));
+        fs.writeFileSync(path.join(DATA, 'apparaten.json'), regVoor);
+        toets('23c vanaf een vaste plek (open slot, vers) -> 403, ook ❌; niets aangeroepen', r.status === 403 && /vaste plek/.test(r.j.fout) && rVastNee.status === 403 && nA() === 0 && agf()[idA].knoppen.uitvoeren.stand === 'open', JSON.stringify(r.j));
+        // twee drukken tegelijk: één n8n-aanroep, de ander 409 bezig
+        await vers(P);
+        let los; akStaat.wacht = new Promise((ok) => { los = ok; });
+        const pa = app(D(idA)), pb = app(D(idA));
+        await slaap(200);
+        it = await item(idA);
+        toets('23c tijdens de aanroep: geschiedenis open false, pagina bezig', it && it.agenda.knoppen[0].open === false && it.agenda.knoppen[0].pagina === 'bezig', JSON.stringify(it && it.agenda));
+        los(); akStaat.wacht = null;
+        const [ra, rb] = await Promise.all([pa, pb]);
+        const r200 = [ra, rb].find((x) => x.status === 200), r409 = [ra, rb].find((x) => x.status === 409);
+        toets('23c twee drukken tegelijk -> één n8n-aanroep, de ander 409 bezig', !!r200 && !!r409 && r409.j.bezig === true && nA() === 1, [ra.status, rb.status, nA()].join());
+        const a1 = akStaat.aanroepen[0] || {};
+        toets('23c naar Knop (app) van Agenda-knoppen, sleutel als kop, body alleen {n, a}', a1.url === N8N + '/webhook/agenda-knop-app-aaaaaaaaaaaa' && a1.methode === 'POST' && a1.sleutel === 'nep-schrijfluik' && JSON.stringify(a1.body) === JSON.stringify({ n: nA1, a: 'ja' }), JSON.stringify(a1));
+        toets('23c ✅ uitgevoerd -> 200 ok, melding "✅ " + platte tekst, ↩️ erbij (24 u)', r200 && r200.j.ok === true && r200.j.pagina === 'uitgevoerd' && r200.j.melding === '✅ Geplaatst: Tandarts vr 10-10 09:00 (Gezin) & herinnering.'
+          && r200.j.agenda.knoppen.length === 2 && r200.j.agenda.knoppen[0].open === false && r200.j.agenda.knoppen[1].knop === 'ongedaan' && r200.j.agenda.knoppen[1].open === true
+          && Math.abs(Date.parse(r200.j.agenda.knoppen[1].verloopt) - Date.now() - 24 * 3600000) < 60000, JSON.stringify(r200 && r200.j));
+        toets('23c vingerafdruk verbruikt na de ✅', sessieVan(P).vers_tot === 0, sessieVan(P).vers_tot);
+        r = await app(D(idA));
+        toets('23c tweede druk na klaar -> 409 al_afgehandeld met de uitkomst, n8n niet aangeroepen', r.status === 409 && r.j.al_afgehandeld === true && /^Al afgehandeld: ✅ Geplaatst/.test(r.j.melding) && nA() === 1, JSON.stringify(r.j));
+        it = await item(idA);
+        toets('23c geschiedenis na ✅: uitvoeren klaar met uitkomst, ↩️ open, geen nonces', it.agenda.knoppen[0].pagina === 'uitgevoerd' && /^✅/.test(it.agenda.knoppen[0].uitkomst) && it.agenda.knoppen[1].knop === 'ongedaan' && it.agenda.knoppen[1].open === true
+          && JSON.stringify(it).indexOf(nA1) < 0 && JSON.stringify(it).indexOf(nOng) < 0, JSON.stringify(it.agenda));
+        // ↩️ (ongedaan) met vingerafdruk
+        geenVers();
+        r = await app(D(idA, { knop: 'ongedaan' }));
+        toets('23c ↩️ zonder vingerafdruk -> 403 vers_nodig', r.status === 403 && r.j.vers_nodig === true && nA() === 1, JSON.stringify(r.j));
+        await vers(P);
+        akStaat.antwoord = () => ({ pagina: 'uitgevoerd', tekst: 'Teruggedraaid: Tandarts staat niet meer in je agenda.' });
+        r = await app(D(idA, { knop: 'ongedaan' }));
+        toets('23c ↩️ -> n8n krijgt de ongedaan-nonce, 200, ↩️ klaar', r.status === 200 && r.j.ok === true && akStaat.aanroepen[1].body.n === nOng && akStaat.aanroepen[1].body.a === 'ja' && r.j.agenda.knoppen[1].open === false && /^✅ Teruggedraaid/.test(r.j.agenda.knoppen[1].uitkomst), JSON.stringify(r.j));
+        // ❌ zonder vingerafdruk
+        const nB = nn();
+        r = await bqA(AG(nB)); const idB = r.j.id;
+        geenVers();
+        akStaat.antwoord = () => ({ pagina: 'afgewezen', tekst: 'Niet gedaan.' });
+        r = await app(D(idB, { keuze: 'nee' }));
+        toets('23c ❌ zonder vingerafdruk -> 200 afgewezen, "❌ Niet gedaan.", n8n a=nee', r.status === 200 && r.j.ok === true && r.j.pagina === 'afgewezen' && r.j.melding === '❌ Niet gedaan.' && akStaat.aanroepen[nA() - 1].body.a === 'nee' && akStaat.aanroepen[nA() - 1].body.n === nB, JSON.stringify(r.j));
+        // druk nadat David in Telegram al ✅ drukte: n8n zegt gebruikt
+        const nD = nn();
+        r = await bqA(AG(nD)); const idD = r.j.id;
+        await vers(P);
+        akStaat.antwoord = () => ({ pagina: 'gebruikt', tekst: 'Deze knop is al gebruikt.' });
+        r = await app(D(idD));
+        const rD2 = await app(D(idD, { keuze: 'nee' }));
+        toets('23c n8n "gebruikt" (✅ al in Telegram) -> 200 ok false "Al afgehandeld (in Telegram of eerder)…"; daarna 409', r.status === 200 && r.j.ok === false && r.j.pagina === 'gebruikt' && /^Al afgehandeld \(in Telegram of eerder\)/.test(r.j.melding) && rD2.status === 409 && rD2.j.al_afgehandeld === true, JSON.stringify([r.j, rD2.j]));
+        // n8n "verlopen" en "onbekend" -> klaar met de vaste zinnen
+        const nE = nn(), nF = nn();
+        const idE = (await bqA(AG(nE))).j.id, idF = (await bqA(AG(nF))).j.id;
+        akStaat.antwoord = () => ({ pagina: 'verlopen', tekst: '' });
+        const rE = await app(D(idE, { keuze: 'nee' }));
+        akStaat.antwoord = () => ({ pagina: 'onbekend', tekst: '' });
+        const rF = await app(D(idF, { keuze: 'nee' }));
+        toets('23c n8n verlopen / onbekend -> 200 ok false met de vaste zin, klaar', rE.status === 200 && rE.j.melding === '⌛ Verlopen; er is niets gedaan.' && rF.j.melding === 'Deze knop kent de agenda niet (meer); niets gedaan.' && agf()[idF].knoppen.uitvoeren.stand === 'klaar', JSON.stringify([rE.j, rF.j]));
+        // ↩️ ná verloopt + 5 min -> 410 (eigen toets van de pod, vóór de vingerafdruk)
+        const nG = nn(), nGo = nn();
+        const idG = (await bqA(AG(nG))).j.id;
+        { const m = agf(); m[idG].knoppen.ongedaan = { nonce: nGo, verloopt: Date.now() - 5 * 60000 - 2000, stand: 'open', sinds: null, pagina: null, uitkomst: null }; fs.writeFileSync(AGF, JSON.stringify(m)); H.appStaat.agendaKnoppen = null; }
+        geenVers();
+        const nVoorG = nA();
+        r = await app(D(idG, { knop: 'ongedaan' }));
+        it = await item(idG);
+        toets('23c ↩️ na verloopt + 5 min -> 410 verlopen, niets aangeroepen; geschiedenis open false', r.status === 410 && r.j.verlopen === true && r.j.fout === 'Deze knop is verlopen; vraag Socev het opnieuw voor te leggen.' && nA() === nVoorG && it.agenda.knoppen[1].open === false, JSON.stringify(r.j));
+        { const m = agf(); m[idG].knoppen.ongedaan.verloopt = Date.now() - 4 * 60000; fs.writeFileSync(AGF, JSON.stringify(m)); H.appStaat.agendaKnoppen = null; }
+        it = await item(idG);
+        toets('23c ↩️ binnen de marge van 5 min na verloopt: nog open', it.agenda.knoppen[1].open === true, JSON.stringify(it.agenda));
+        // n8n weigert de sleutel -> 503, stand open, logError
+        const nH = nn(); const idH = (await bqA(AG(nH))).j.id;
+        akStaat.antwoord = () => ({ pagina: 'sleutel', tekst: 'Deze knop ken ik niet.' });
+        const nLog = logs.length;
+        r = await app(D(idH, { keuze: 'nee' }));
+        toets('23c n8n "sleutel" -> 503 "niet ingericht", stand open, gemeld via logError', r.status === 503 && /niet ingericht; gebruik Telegram/.test(r.j.fout) && agf()[idH].knoppen.uitvoeren.stand === 'open' && logs.slice(nLog).some((l) => /app-agenda: Agenda-knoppen weigert de sleutel/.test(l)), JSON.stringify([r.j, logs.slice(nLog)]));
+        // time-out -> 503 met de vaste zin, stand open, vingerafdruk verbruikt; daarna gewoon opnieuw
+        await vers(P);
+        akStaat.traag = true;
+        r = await app(D(idH));
+        akStaat.traag = false;
+        const GA = 'Geen antwoord van de agenda; kijk even in je agenda. Opnieuw drukken is veilig — dubbel uitvoeren kan niet.';
+        it = await item(idH);
+        toets('23c n8n time-out -> 503 met "Geen antwoord van de agenda…", stand open, vingerafdruk verbruikt', r.status === 503 && r.j.fout === GA && agf()[idH].knoppen.uitvoeren.stand === 'open' && agf()[idH].knoppen.uitvoeren.uitkomst === GA && sessieVan(P).vers_tot === 0
+          && it.agenda.knoppen[0].open === true && it.agenda.knoppen[0].uitkomst === GA, JSON.stringify([r.j, it.agenda]));
+        akStaat.status = 500; r = await app(D(idH, { keuze: 'nee' })); akStaat.status = 200;
+        akStaat.onleesbaar = true; const rOnl = await app(D(idH, { keuze: 'nee' })); akStaat.onleesbaar = false;
+        akStaat.antwoord = () => ({ pagina: 'raar' }); const rRaar = await app(D(idH, { keuze: 'nee' }));
+        toets('23c n8n 500 / onleesbaar / onbekende pagina -> 503, stand open', [r.status, rOnl.status, rRaar.status].join() === '503,503,503' && agf()[idH].knoppen.uitvoeren.stand === 'open', [r.status, rOnl.status, rRaar.status].join());
+        // bezig: < 60 s (ook na herladen) = 409; ≥ 60 s = weer drukbaar
+        { const m = agf(); Object.assign(m[idH].knoppen.uitvoeren, { stand: 'bezig', sinds: Date.now() - 10000 }); fs.writeFileSync(AGF, JSON.stringify(m)); H.appStaat.agendaKnoppen = null; }
+        const nVoorH = nA();
+        r = await app(D(idH, { keuze: 'nee' }));
+        toets('23c bezig sinds 10 s (na herladen) -> 409 bezig, niets aangeroepen', r.status === 409 && r.j.bezig === true && nA() === nVoorH, JSON.stringify(r.j));
+        { const m = agf(); Object.assign(m[idH].knoppen.uitvoeren, { stand: 'bezig', sinds: Date.now() - 61000 }); fs.writeFileSync(AGF, JSON.stringify(m)); H.appStaat.agendaKnoppen = null; }
+        it = await item(idH);
+        akStaat.antwoord = () => ({ pagina: 'afgewezen', tekst: '' });
+        r = await app(D(idH, { keuze: 'nee' }));
+        toets('23c bezig ouder dan 60 s (na herladen) -> geschiedenis open, weer drukbaar (200)', it.agenda.knoppen[0].open === true && r.status === 200 && r.j.pagina === 'afgewezen' && nA() === nVoorH + 1, JSON.stringify([it.agenda, r.j]));
+        // webhookpad gewijzigd: 404 -> opnieuw opgezocht, één keer opnieuw
+        const nI = nn(); const idI = (await bqA(AG(nI))).j.id;
+        akStaat.pad = 'agenda-knop-app-bbbbbbbbbbbb'; n8nStaat.workflows.LeqoYYEvJPhAKPS3.nodes[1].parameters.path = 'agenda-knop-app-bbbbbbbbbbbb';
+        const nVoorI = nA();
+        r = await app(D(idI, { keuze: 'nee' }));
+        toets('23c webhookpad gewijzigd: 404 -> opnieuw opgezocht en één keer opnieuw', r.status === 200 && nA() === nVoorI + 2 && akStaat.aanroepen[nA() - 1].url.endsWith('bbbbbbbbbbbb'), JSON.stringify(akStaat.aanroepen.slice(nVoorI).map((x) => x.url)));
+        // sleutel ontbreekt, passieve kant, grens: alles terug (stand, vingerafdruk), niets aangeroepen
+        const nJ = nn(); const idJ = (await bqA(AG(nJ))).j.id;
+        const sk = ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA; delete ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA;
+        const nVoorJ = nA();
+        r = await app(D(idJ, { keuze: 'nee' }));
+        ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA = sk;
+        toets('23c zonder schrijfluiksleutel -> 503, stand open, niets aangeroepen', r.status === 503 && agf()[idJ].knoppen.uitvoeren.stand === 'open' && nA() === nVoorJ, JSON.stringify(r.j));
+        await vers(P);
+        const versJ = sessieVan(P).vers_tot, bestandJ = fs.readFileSync(AGF, 'utf8');
+        rolStub.primair = false;
+        r = await app(D(idJ));
+        rolStub.primair = true;
+        toets('23c passieve kant -> 409, niets veranderd (stand, bestand, vingerafdruk), niets aangeroepen', r.status === 409 && fs.readFileSync(AGF, 'utf8') === bestandJ && sessieVan(P).vers_tot === versJ && versJ > 0 && nA() === nVoorJ, JSON.stringify(r.j));
+        H.appStaat.tellers.agenda = Array.from({ length: 30 }, () => Date.now());
+        r = await app(D(idJ, { keuze: 'nee' }));
+        H.appStaat.tellers.agenda = [];
+        toets('23c hooguit 30 per uur -> 429, stand open', r.status === 429 && agf()[idJ].knoppen.uitvoeren.stand === 'open' && nA() === nVoorJ, JSON.stringify(r.j));
+        // machinekamer (test-route van n8n): knop ook daar, niet in het hoofdkanaal te drukken
+        const nK = nn(); r = await bqA(AG(nK, { kanaal: 'machinekamer' })); const idK = r.j.id;
+        const rK1 = await app(D(idK)), itK = await item(idK, 'machinekamer');
+        toets('23c knop in de machinekamer: in geschiedenis machinekamer, via kanaal hoofd 404', r.status === 200 && rK1.status === 404 && itK && itK.agenda.knoppen[0].open === true, JSON.stringify([rK1.j, itK && itK.agenda]));
+        // ongedaan als eerste knop (↩️ na een groene uitvoering via n8n, klasse stil)
+        const nL = nn(); r = await bqA(AG(nL, { klasse: 'stil' }, { soort: 'ongedaan', verloopt: Date.now() + 24 * 3600000 })); const idL = r.j.id;
+        it = await item(idL);
+        toets('23c /bericht met soort ongedaan -> alleen een ↩️-knop, open', r.status === 200 && it.agenda.knoppen.length === 1 && it.agenda.knoppen[0].knop === 'ongedaan' && it.agenda.knoppen[0].open === true, JSON.stringify(it && it.agenda));
+        // kapot agenda-knoppen.json: leeg, gelogd zonder inhoud, geen crash; een nieuw bericht schrijft hem weer heel
+        const nKap = nn();
+        fs.writeFileSync(AGF, '{"kapot": "' + nKap + '"'); H.appStaat.agendaKnoppen = null;
+        const nLog2 = logs.length;
+        const gK = await gesch();
+        const rKap = await app(D(idL, { knop: 'ongedaan' }));
+        toets('23c kapot agenda-knoppen.json -> geschiedenis 200 zonder agenda, druk 404, gelogd zonder inhoud', gK.status === 200 && !(gK.j.items || []).some((x) => x.agenda) && rKap.status === 404
+          && logs.slice(nLog2).some((l) => /agenda-knoppen\.json onleesbaar of kapot/.test(l)) && !logs.slice(nLog2).some((l) => l.indexOf(nKap) >= 0), JSON.stringify(logs.slice(nLog2)));
+        const nM = nn(); r = await bqA(AG(nM));
+        toets('23c na kapot: nieuw bericht met knop -> 200, bestand weer leesbaar', r.status === 200 && r.j.agenda === true && !!agf()[r.j.id], JSON.stringify(r.j));
+        // app-log niet schrijfbaar -> 500 terugval, geen knop achtergebleven
+        const nN = nn();
+        const logPad = path.join(LOGDIR, 'hoofd.jsonl'), logBak = logPad + '.bak23c';
+        fs.renameSync(logPad, logBak); fs.mkdirSync(logPad);
+        r = await bqA(AG(nN));
+        fs.rmdirSync(logPad); fs.renameSync(logBak, logPad);
+        toets('23c app-log niet schrijfbaar -> 500 terugval, knop weer weg', r.status === 500 && r.j.terugval === true && !Object.values(agf()).some((e) => e.knoppen.uitvoeren && e.knoppen.uitvoeren.nonce === nN), JSON.stringify(r.j));
+        // auditreden, en de nonce nergens: antwoorden, audit.jsonl, api.log (res._log), app-log, logError
+        const audit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+        toets('23c auditreden "agenda <knop> <keuze> -> <pagina>"', /"reden":"agenda uitvoeren ja -> uitgevoerd"/.test(audit) && /"reden":"agenda ongedaan ja -> uitgevoerd"/.test(audit) && /"reden":"agenda uitvoeren nee -> afgewezen"/.test(audit));
+        const appLogs = fs.readdirSync(LOGDIR).map((f) => { try { return fs.readFileSync(path.join(LOGDIR, f), 'utf8'); } catch (e) { return ''; } }).join('\n');
+        const plekken = { antwoorden: antwoorden.join('\n'), audit, 'api.log': apiLogNep.join('\n'), 'app-log': appLogs, logError: logs.join('\n'), 'audit-voor-auth': fs.existsSync(path.join(DATA, 'audit-voor-auth.jsonl')) ? fs.readFileSync(path.join(DATA, 'audit-voor-auth.jsonl'), 'utf8') : '' };
+        const lek = [];
+        for (const [waar, t] of Object.entries(plekken)) for (const n of NONCES) if (t.indexOf(n) >= 0) lek.push(waar + ':' + n.slice(0, 4));
+        toets('23c geen nonce in antwoorden, audit.jsonl, api.log, app-log of logError (' + NONCES.length + ' nonces, ' + antwoorden.length + ' antwoorden)', lek.length === 0 && antwoorden.length > 30 && apiLogNep.some((x) => /"agenda":"uitvoeren"/.test(x)), lek.join());
+        akStaat.antwoord = null; delete H.appStaat.agendaKnopUrl; H.appStaat.tellers.agenda = [];
+        await slaap(800);   // seintjes van de dringende agendaberichten (direct en gebundeld) eerst laten aflopen: die schrijven push.json
       }
 
       // dode-mansknop (Fable wv263 #1/#2): alleen de Pixel telt, en pas na een onbeantwoord seintje van overdag
