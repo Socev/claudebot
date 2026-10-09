@@ -3352,7 +3352,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
-  'POST /app/reactie']);   // wv304: een duim is David die leest   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
+  'POST /app/reactie', 'POST /app/agenda']);   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter); vaste plek
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -3436,7 +3436,8 @@ const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', '
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
   'POST /app/modellen',    // wv138: een runtimewissel raakt alle workflows; nooit vanaf een werk-pc
   'POST /app/sleutels/vervang',    // wv157: sleutels alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot
-  'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel']);   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
+  'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
+  'POST /app/agenda']);    // wv315: agenda-✅/↩️ alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot (§ 4.13)
 const APP_BSN_TEKST = 'in je bericht staat een getal dat op een BSN lijkt (9 cijfers die de elfproef halen). Patiëntgegevens horen niet in Socev: haal het weg. Gaat het om iets anders, stuur het dan vanaf je telefoon.';
 
 const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [], reactie: [] },
@@ -5021,6 +5022,7 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
   try { vragen = appVragen(); } catch (e) {}
   let reacties = null;   // wv304: onleesbaar = geen duimpjes tonen (reacties: false), de geschiedenis zelf gaat door
   try { reacties = appReacties(); } catch (e) { logError('app-reacties', e); }
+  const agendaKnoppen = appAgendaKnoppen(), agNu = Date.now();   // wv315: kapot = leeg (gelogd); nooit de nonce naar de app
   // Afgerond maar (nog) niet in het log (schrijffout of net klaar): uit het geheugen erbij, anders is het antwoord voor een
   // app die dicht was onvindbaar (Fable-review wv56 #2).
   const inLog = {};
@@ -5047,7 +5049,8 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
         naar_telegram_onzeker: appNaarTelegramNu(b) && appNaarTelegramVerlopen(b) || undefined }
         : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true } : null,
       bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined,
-      reactie: reacties && reacties[kanaal + ':' + x.job_id] ? reacties[kanaal + ':' + x.job_id].duim : null };
+      reactie: reacties && reacties[kanaal + ':' + x.job_id] ? reacties[kanaal + ':' + x.job_id].duim : null,
+      agenda: agendaKnoppen[x.job_id] && agendaKnoppen[x.job_id].kanaal === kanaal ? appAgendaVorm(agendaKnoppen[x.job_id], agNu) : undefined };
   });
   // wie de geschiedenis met een afgerond antwoord ophaalt, heeft het gezien (fase 5c, Fable-review wv100 B2)
   items.forEach(function (x) { if (jobs[x.job_id] && jobs[x.job_id].app && jobs[x.job_id].status === 'done') appGezienDoor(x.job_id, a.id); });
@@ -6915,7 +6918,7 @@ function handleApp(req, res) {
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en de
         // BSN-weigering (§ 4.11). Daarna verder met slotKlaar = true (apparaat en sessie worden dan opnieuw gecontroleerd).
         if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
-          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
+          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
@@ -6955,6 +6958,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);
         if (route === 'POST /app/bericht/getikt') return appBerichtGetikt(req, res, a, d);   // wv263
         if (route === 'POST /app/reactie') return appReactieRoute(req, res, a, d);   // wv304
+        if (route === 'POST /app/agenda') return appAgendaRoute(req, res, a, s, d);   // wv315
         if (route.indexOf('GET /app/concept/') === 0) return appConceptRoute(req, res, a, route.slice('GET /app/concept/'.length));
         if (route === 'POST /app/concept') return appConceptZet(req, res, a, d);
         if (route === 'POST /app/spraak') return appSpraak(req, res, a);   // wv172
@@ -7958,6 +7962,13 @@ async function berichtNieuw(res, d) {
   if (d.knoppen !== undefined && typeof d.knoppen !== 'boolean') return berichtStuur(res, 400, { ok: false, fout: 'knoppen is true of false' });
   if (d.sleutel !== undefined && (typeof d.sleutel !== 'string' || !d.sleutel || d.sleutel.length > 200)) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige sleutel' });
   if (d.agent_job !== undefined && d.agent_job !== '' && !APP_JOB_RE.test(String(d.agent_job))) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige agent_job' });
+  // wv315 (§ 4.13): een agendaknop (✅ uitvoeren of ↩️ ongedaan) van AI - Agenda-knoppen; alleen bij bron agenda. De nonce blijft hier.
+  let ag = null;
+  if (d.agenda !== undefined) {
+    if (bron !== 'agenda') return berichtStuur(res, 400, { ok: false, fout: 'agenda alleen bij bron agenda' });
+    ag = appAgendaUitBericht(d.agenda, Date.now());
+    if (typeof ag === 'string') return berichtStuur(res, 400, { ok: false, fout: ag });
+  }
   const tekst = d.tekst.replace(/\r\n?/g, '\n');
   const idx = berichtIndex(), nu = Date.now();
   const sl = d.sleutel ? appSha('bericht:' + d.sleutel) : null;
@@ -7965,33 +7976,45 @@ async function berichtNieuw(res, d) {
     const al = Object.keys(idx).find(function (id) { return idx[id].sleutel === sl && nu - Date.parse(idx[id].t) < BERICHT_SLEUTEL_MS; });
     if (al) {
       res._log = { bericht: al, dubbel: true };
-      return berichtStuur(res, 200, { ok: true, id: al, dubbel: true, push: { gewenst: berichtPushGewenst(), gestart: false }, uitgesteld: null, app_actief: berichtAppActief() });
+      // wv315: dubbel = niets nieuws, ook geen tweede agendaknop; agenda true als de eerste er een kreeg
+      const agAl = ag && appAgendaKnoppen()[al] ? true : undefined;
+      return berichtStuur(res, 200, { ok: true, id: al, dubbel: true, push: { gewenst: berichtPushGewenst(), gestart: false }, uitgesteld: null, app_actief: berichtAppActief(), agenda: agAl });
     }
   }
   const id = crypto.randomBytes(8).toString('hex'), t = new Date(nu).toISOString();
   // Vraag eerst (anders staat er een bericht in de app waarvan de knoppen niet werken); dan het log; lukt dat niet, de vraag weg.
   // knoppen:false (schaduwfase, terugval 2): de vraag wél vastleggen, maar met naar_telegram, zodat de app "Beantwoord in Telegram"
   // toont en /app/knop weigert (Fable-review wv263 #8).
-  const vraag = appVraagVan(kanaal, tekst);
+  // wv315: bij een agendaknop geen vraagregistratie, ook niet als de tekst een VRAAG AAN DAVID-regel heeft (de knop is ✅/❌)
+  const vraag = ag ? null : appVraagVan(kanaal, tekst);
   const vsl = vraag ? id + ':' + vraag.hash : null;
   if (vraag) {
     const gev = appGevoelig(vraag.tekst);
     try { const v = appVragen(); v[vsl] = { kanaal: kanaal, t: t, antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined, soort: 'socev', naar_telegram: d.knoppen === true ? undefined : t }; appVragenSchrijf(v); }
     catch (e) { logError('bericht-vragen', e); return berichtStuur(res, 500, { ok: false, fout: 'vragenregister niet schrijfbaar', terugval: true }); }
   }
+  // wv315: eerst de knop, dan het log (zoals de vraag): een bericht in de app waarvan de knop niet werkt, mag er niet staan
+  const agk = ag ? appAgendaKnoppen() : null;
+  if (ag) {
+    agk[id] = { kanaal: kanaal, t: t, knoppen: {} };
+    agk[id].knoppen[ag.soort] = { nonce: ag.nonce, verloopt: ag.verloopt, stand: 'open', sinds: null, pagina: null, uitkomst: null };
+    if (!appAgendaKnoppenBewaar()) { delete agk[id]; return berichtStuur(res, 500, { ok: false, fout: 'agendaknop niet op te slaan', terugval: true }); }
+  }
   const agentJob = d.agent_job ? String(d.agent_job) : undefined;
   const goed = await appLogSchrijf(kanaal, { t: t, job_id: id, soort: 'socev', bron: bron, klasse: klasse, tekst: '', antwoord: tekst, ok: true,
     vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, bestanden: [] });
   if (!goed) {
     if (vsl) { try { const v = appVragen(); delete v[vsl]; appVragenSchrijf(v); } catch (e) { logError('bericht-vragen', e); } }
+    if (ag) { delete agk[id]; appAgendaKnoppenBewaar(); }   // wv315
     return berichtStuur(res, 500, { ok: false, fout: 'app-log niet schrijfbaar', terugval: true });
   }
   idx[id] = { t: t, kanaal: kanaal, bron: bron, klasse: klasse, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null, knoppen: d.knoppen === true };
   const plan = berichtPushPlan(id, kanaal, klasse);   // bewaart de index
   if (!idx[id].push) berichtIndexBewaar();
   const gewenst = berichtPushGewenst();
-  res._log = { bericht: id, kanaal: kanaal, bron: bron, klasse: klasse };
-  berichtStuur(res, 200, { ok: true, id: id, vraag: !!vraag && d.knoppen === true, push: { gewenst: gewenst, gestart: plan.direct }, uitgesteld: plan.uitgesteld, app_actief: berichtAppActief() });
+  res._log = { bericht: id, kanaal: kanaal, bron: bron, klasse: klasse, agenda: ag ? ag.soort : undefined };
+  berichtStuur(res, 200, { ok: true, id: id, vraag: !!vraag && d.knoppen === true, push: { gewenst: gewenst, gestart: plan.direct }, uitgesteld: plan.uitgesteld, app_actief: berichtAppActief(),
+    agenda: ag ? true : undefined });
   if (plan.direct && plan.gebundeld) setTimeout(function () { berichtBundelAf(kanaal); }, 0);   // Fable wv292 #3: met de wachtende mee
   else if (plan.direct) setTimeout(function () { berichtPushNu(kanaal, [id]).catch(function (e) { logError('bericht-push', e); }); }, 0);
 }
@@ -8209,6 +8232,163 @@ async function appReactieZet(kanaal, sl, duim, x) {
     appSchrijfJson(APP_REACTIES, m);
   } catch (e) { logError('app-reactie', e); return { status: 500, fout: 'opgeslagen in de verbeterlog, maar de stand hier niet; tik nog eens', reden: 'reacties.json schrijven' }; }
   return { body: { ok: true, duim: doel } };
+}
+// ── Agenda-✅ en ↩️ in de app (wv315; bouwplan "Socev-app als hoofdkanaal" § 4.13, contract mk-scripts/wv315) ──
+// Tot nu toe bestonden de ✅ (uitvoeren) en ↩️ (ongedaan) van AI - Agenda-knoppen alleen in Telegram. n8n zet zo'n knop nu ook in
+// de app: POST /bericht met bron agenda en veld agenda {nonce, soort: uitvoeren|ongedaan, verloopt (ms)}. De nonce blijft op de pod
+// (agenda-knoppen.json, 0600, 50 u) en gaat nooit naar de app, het app-log, de audit, api.log of logError. Een druk in de app,
+// POST /app/agenda {kanaal, job_id, knop, keuze: ja|nee}, gaat naar de ingang Knop (app) van Agenda-knoppen ({n, a} met de
+// sleutel van het schrijfluik als kop, zoals Voorwerk-knoppen wv173). Daar dezelfde claim in agenda_knoppen als bij een druk in
+// Telegram: wie eerst claimt wint, dubbel uitvoeren kan niet. De Poortwachter verandert niet (Davids druk is de bevestiging).
+// ✅ en ↩️ eisen een verse vingerafdruk van dít apparaat (§ 4.4d), verbruikt vóór de eerste await; ❌ niet. Nooit vanaf een vaste
+// plek (APP_BEHEER_ROUTES). Stand per knop: open -> bezig (tijdens de aanroep, synchroon gezet: twee drukken = één aanroep) -> klaar.
+// Bezig ouder dan 60 s telt weer als open, ook na een herstart (Fable #2): de claim in n8n vangt een tweede druk toch op.
+const APP_AGENDA_KNOPPEN = path.join(APP_DATA, 'agenda-knoppen.json');
+const APP_AGENDA_KNOP_WF = process.env.APP_AGENDA_KNOP_WF || 'LeqoYYEvJPhAKPS3';   // AI - Agenda-knoppen, webhookknoop "Knop (app)"
+const APP_AGENDA_KNOPPEN_MS = 50 * 3600 * 1000;
+const APP_AGENDA_MARGE_MS = 5 * 60 * 1000;          // ruime marge rond verloopt (podklok; Fable #7)
+const APP_AGENDA_VOORUIT_MS = 48 * 3600 * 1000;     // verloopt verder weg = fout van de afzender
+const APP_AGENDA_BEZIG_MS = 120 * 1000;   // Fable-review diff wv315 #4: URL-opzoeken (8 s) + 45 s fetch, bij 404 twee keer
+const APP_AGENDA_ONGEDAAN_MS = 24 * 3600 * 1000;    // ↩️ na een ✅ in de app (zoals de ongedaan-rij in n8n)
+const APP_AGENDA_PER_UUR = 30;
+const APP_AGENDA_N8N_MS = 45 * 1000;
+const APP_AGENDA_NONCE_RE = /^[0-9a-f]{32}$/;
+const APP_AGENDA_SOORTEN = ['uitvoeren', 'ongedaan'];
+const APP_AGENDA_GEEN_ANTWOORD = 'Geen antwoord van de agenda; kijk even in je agenda. Opnieuw drukken is veilig — dubbel uitvoeren kan niet.';
+const APP_AGENDA_VERLOPEN = 'Deze knop is verlopen; vraag Socev het opnieuw voor te leggen.';
+// pagina van n8n -> uitkomst in gewone taal (uitgevoerd en mislukt krijgen de tekst van n8n erachter)
+const APP_AGENDA_UITKOMST = { uitgevoerd: '✅ ', afgewezen: '❌ Niet gedaan.', mislukt: '⚠️ ', verlopen: '⌛ Verlopen; er is niets gedaan.',
+  gebruikt: 'Al afgehandeld (in Telegram of eerder); niets opnieuw gedaan.', onbekend: 'Deze knop kent de agenda niet (meer); niets gedaan.' };
+appStaat.tellers.agenda = appStaat.tellers.agenda || [];
+
+// Veld agenda van POST /bericht toetsen; geeft {nonce, soort, verloopt} of een foutzin (nooit met de nonce erin).
+function appAgendaUitBericht(x, nu) {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return 'agenda is een object';
+  if (typeof x.nonce !== 'string' || !APP_AGENDA_NONCE_RE.test(x.nonce)) return 'agenda.nonce is 32 hex';
+  if (APP_AGENDA_SOORTEN.indexOf(x.soort) < 0) return 'agenda.soort is uitvoeren of ongedaan';
+  if (typeof x.verloopt !== 'number' || !Number.isFinite(x.verloopt)) return 'agenda.verloopt is een tijd in ms';
+  if (x.verloopt < nu - APP_AGENDA_MARGE_MS || x.verloopt > nu + APP_AGENDA_VOORUIT_MS) return 'agenda.verloopt ligt buiten het venster';
+  return { nonce: x.nonce, soort: x.soort, verloopt: Math.round(x.verloopt) };
+}
+// In het geheugen, op schijf na elke wijziging (zoals berichten.json). Kapot = leeg en gelogd, zonder de inhoud: een
+// JSON-fout van Node citeert het bestand, en daar staan nonces in.
+function appAgendaKnoppen() {
+  if (!appStaat.agendaKnoppen) {
+    try { appStaat.agendaKnoppen = appLeesStreng(APP_AGENDA_KNOPPEN, {}); }
+    catch (e) { logError('app-agenda', new Error('agenda-knoppen.json onleesbaar of kapot; verder met leeg')); appStaat.agendaKnoppen = {}; }
+  }
+  const m = appStaat.agendaKnoppen, grens = Date.now() - APP_AGENDA_KNOPPEN_MS;
+  Object.keys(m).forEach(function (k) { if (!m[k] || typeof m[k] !== 'object' || !m[k].knoppen || typeof m[k].knoppen !== 'object' || !(Date.parse(m[k].t) >= grens)) delete m[k]; });
+  return m;
+}
+function appAgendaKnoppenBewaar() {
+  try { appSchrijfJson(APP_AGENDA_KNOPPEN, appStaat.agendaKnoppen || {}); return true; }
+  catch (e) { logError('app-agenda', new Error('agenda-knoppen.json niet schrijfbaar (' + String(e && e.code || 'fout') + ')')); return false; }
+}
+function appAgendaBezig(K, nu) { return K.stand === 'bezig' && Number(K.sinds) > 0 && nu - Number(K.sinds) < APP_AGENDA_BEZIG_MS; }
+function appAgendaKnop(id, knop) {
+  const e = appAgendaKnoppen()[id];
+  const K = e && e.knoppen[knop];
+  return K && typeof K === 'object' ? K : null;
+}
+// Vorm voor de app (geschiedenis en antwoord op een druk): nooit de nonce.
+function appAgendaVorm(e, nu) {
+  nu = nu || Date.now();
+  return { knoppen: APP_AGENDA_SOORTEN.filter(function (k) { return e.knoppen[k] && typeof e.knoppen[k] === 'object'; }).map(function (k) {
+    const K = e.knoppen[k], v = Number(K.verloopt), bezig = appAgendaBezig(K, nu);
+    return { knop: k, open: !bezig && K.stand !== 'klaar' && Number.isFinite(v) && nu < v + APP_AGENDA_MARGE_MS, verloopt: Number.isFinite(v) ? new Date(v).toISOString() : null,
+      pagina: bezig ? 'bezig' : typeof K.pagina === 'string' ? K.pagina : null, uitkomst: typeof K.uitkomst === 'string' ? K.uitkomst : null };
+  }) };
+}
+// Tekst van n8n (zelfde zin als het Telegram-bericht, mogelijk met HTML) als platte regel.
+function appAgendaPlat(t) {
+  return appKort(String(t == null ? '' : t).replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&'), 300);
+}
+async function appAgendaKnopN8n(body) {
+  const geheim = process.env.N8N_WEBHOOK_SOCEV_AGENDA;
+  if (!geheim) throw new Error('agendaknop: sleutel ontbreekt');
+  for (let poging = 0; poging < 2; poging++) {
+    const url = await appWebhookUrl(APP_AGENDA_KNOP_WF, 'Knop (app)', 'agendaKnopUrl', poging > 0);
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json', 'x-socev-sleutel': geheim },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(APP_AGENDA_N8N_MS) });
+    if (r.status === 404 && poging === 0) continue;   // webhookpad gewijzigd: één keer opnieuw opzoeken
+    if (!r.ok) throw new Error('agendaknop http ' + r.status);
+    return r.json();
+  }
+  throw new Error('agendaknop niet gevonden');
+}
+// Volgorde (contract wv315; synchroon tot en met bezig, Fable #11): velden, entry, kanaal, knop, bezig, klaar, verlopen,
+// vingerafdruk (verbruikt), bezig + bewaren, grens, rol, sleutel; dan n8n.
+async function appAgendaRoute(req, res, a, s, d) {
+  const kanaal = String(d.kanaal || ''), id = String(d.job_id || ''), knop = String(d.knop || ''), keuze = String(d.keuze || '');
+  if (!Object.hasOwn(APP_KANALEN, kanaal) || !APP_JOB_RE.test(id) || APP_AGENDA_SOORTEN.indexOf(knop) < 0 || ['ja', 'nee'].indexOf(keuze) < 0) return appWeiger(res, 400, 'ongeldige knop', 'agenda velden');
+  if (keuze === 'nee' && knop !== 'uitvoeren') return appWeiger(res, 400, 'ongedaan maken kent geen ❌', 'agenda nee bij ongedaan');
+  const e = appAgendaKnoppen()[id];
+  if (!e) return appWeiger(res, 404, 'deze knop ken ik niet (meer)', 'agenda onbekend');
+  if (e.kanaal !== kanaal) return appWeiger(res, 404, 'deze knop ken ik niet (meer)', 'agenda ander kanaal');
+  const K = appAgendaKnop(id, knop);
+  if (!K) return appWeiger(res, 404, 'deze knop ken ik niet (meer)', 'agenda geen ' + knop);
+  const nu = Date.now();
+  if (appAgendaBezig(K, nu)) { res._app.reden = 'agenda bezig'; return appStuur(res, 409, { ok: false, fout: 'hier ben ik al mee bezig; even geduld', bezig: true }); }
+  if (K.stand === 'klaar') {
+    res._app.reden = 'agenda al afgehandeld';
+    const t = 'Al afgehandeld: ' + (K.uitkomst || 'zie je agenda');
+    return appStuur(res, 409, { ok: false, fout: t, melding: t, al_afgehandeld: true, agenda: appAgendaVorm(e, nu) });
+  }
+  if (!(nu <= Number(K.verloopt) + APP_AGENDA_MARGE_MS)) { res._app.reden = 'agenda verlopen'; return appStuur(res, 410, { ok: false, fout: APP_AGENDA_VERLOPEN, melding: APP_AGENDA_VERLOPEN, verlopen: true, agenda: appAgendaVorm(e, nu) }); }
+  // ✅ en ↩️: verse vingerafdruk, controleren én verbruiken vóór de eerste await (twee tabbladen = niet twee drukken; wv135 #5)
+  let versOud = null;
+  if (keuze === 'ja') {
+    if (!appVersOk(a, s)) { res._app.reden = 'agenda, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
+    versOud = s.vers_tot; s.vers_tot = 0;
+  }
+  const vorig = { stand: K.stand, sinds: K.sinds === undefined ? null : K.sinds };
+  K.stand = 'bezig'; K.sinds = nu;
+  // Alles terug (stand, vingerafdruk) als er niets naar n8n gaat
+  const terug = function () {
+    const K2 = appAgendaKnop(id, knop);
+    if (K2 && K2.stand === 'bezig' && K2.sinds === nu) { K2.stand = vorig.stand; K2.sinds = vorig.sinds; appAgendaKnoppenBewaar(); }
+    if (versOud !== null && s.vers_tot === 0) s.vers_tot = versOud;
+  };
+  if (!appAgendaKnoppenBewaar()) { terug(); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo opnieuw of gebruik Telegram', 'agenda-knoppen.json'); }
+  if (!appTeller('agenda', APP_AGENDA_PER_UUR, 3600000)) { terug(); return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_AGENDA_PER_UUR + '); gebruik Telegram', 'grens agenda'); }
+  if (!(await appRolOk())) { terug(); return appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik de knoppen in Telegram', 'rol passief'); }
+  if (!process.env.N8N_WEBHOOK_SOCEV_AGENDA) { terug(); return appWeiger(res, 503, 'de agendaknoppen zijn hier nog niet ingericht; gebruik Telegram', 'agenda geen sleutel'); }
+  let j = null, fout = null;
+  try { j = await appAgendaKnopN8n({ n: K.nonce, a: keuze }); } catch (x) { fout = x; }
+  const pagina = j && typeof j.pagina === 'string' ? j.pagina : '';
+  // Opnieuw opzoeken na het wachten (de cache kan intussen herladen zijn); de bezig-stand van déze druk wordt de uitkomst
+  const e2 = appAgendaKnoppen()[id] || e, K2 = appAgendaKnop(id, knop) || K;
+  const open = function (uitkomst) { K2.stand = 'open'; K2.sinds = null; if (uitkomst) K2.uitkomst = uitkomst; appAgendaKnoppenBewaar(); };
+  if (!fout && pagina === 'sleutel') {
+    // Fable wv173 M1: n8n kent de sleutel niet (geroteerd zonder de vingerafdruk in Knop lezen bij te werken) -> storing, geen "onbekend"
+    open(null);
+    logError('app-agenda', new Error('Agenda-knoppen weigert de sleutel van het schrijfluik (vingerafdruk in Knop lezen bijwerken?)'));
+    return appWeiger(res, 503, 'de agendaknoppen zijn hier nu niet ingericht; gebruik Telegram', 'agenda sleutel');
+  }
+  if (fout || !Object.hasOwn(APP_AGENDA_UITKOMST, pagina)) {
+    // Time-out, 5xx of geen leesbaar antwoord: de claim kan al gebeurd zijn. Open laten (n8n weigert een tweede claim) en zeggen
+    // dat opnieuw drukken veilig is; de vingerafdruk blijft verbruikt. 503, geen 502: de app leest 502/504 als "pod weg".
+    open(APP_AGENDA_GEEN_ANTWOORD);
+    const waarom = fout ? (/timeout|abort/i.test(String(fout.name) + ' ' + String(fout.message)) ? 'time-out' : (String(fout.message).match(/http \d{3}|sleutel ontbreekt|niet gevonden/) || ['onleesbaar'])[0]) : 'onbekende pagina';
+    logError('app-agenda', new Error('Agenda-knoppen gaf geen bruikbaar antwoord (' + waarom + ')'));
+    res._app.reden = 'agenda ' + knop + ' ' + keuze + ' -> geen antwoord (' + waarom + ')';
+    return appStuur(res, 503, { ok: false, fout: APP_AGENDA_GEEN_ANTWOORD, melding: APP_AGENDA_GEEN_ANTWOORD, agenda: appAgendaVorm(e2) });
+  }
+  const tekst = appAgendaPlat(j.tekst);
+  const uitkomst = pagina === 'uitgevoerd' ? '✅ ' + (tekst || 'Gedaan.') : pagina === 'mislukt' ? '⚠️ ' + (tekst || 'Niet gelukt.') : APP_AGENDA_UITKOMST[pagina];
+  // Fable-review diff wv315 #4: kwam een eerdere druk intussen terug met "uitgevoerd", dan overschrijft een latere "gebruikt" dat niet
+  if (pagina === 'gebruikt' && K2.stand === 'klaar' && K2.pagina === 'uitgevoerd') {
+    res._app.reden = 'agenda ' + knop + ' ' + keuze + ' -> gebruikt (al uitgevoerd)';
+    return appStuur(res, 409, { ok: false, al_afgehandeld: true, fout: 'Al afgehandeld: ' + K2.uitkomst, melding: 'Al afgehandeld: ' + K2.uitkomst, agenda: appAgendaVorm(e2) });
+  }
+  K2.stand = 'klaar'; K2.sinds = null; K2.pagina = pagina; K2.uitkomst = uitkomst;
+  // Na plaatsen of wijzigen maakt n8n een ongedaan-rij: ↩️ bij hetzelfde bericht, 24 u (ook na een ↩️ die zelf weer een wijziging was)
+  if (typeof j.ongedaan_nonce === 'string' && APP_AGENDA_NONCE_RE.test(j.ongedaan_nonce))
+    e2.knoppen.ongedaan = { nonce: j.ongedaan_nonce, verloopt: Date.now() + APP_AGENDA_ONGEDAAN_MS, stand: 'open', sinds: null, pagina: null, uitkomst: knop === 'ongedaan' ? uitkomst : null };
+  appAgendaKnoppenBewaar();   // mislukt: gelogd; de stand in het geheugen geldt tot een herstart
+  res._app.reden = 'agenda ' + knop + ' ' + keuze + ' -> ' + pagina;
+  appStuur(res, 200, { ok: pagina === 'uitgevoerd' || pagina === 'afgewezen', pagina: pagina, melding: uitkomst, agenda: appAgendaVorm(e2) });
 }
 function berichtInfo() {
   try {
