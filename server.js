@@ -45,12 +45,47 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const HOME = process.env.HOME || '/opt/data';
+// ── wv349: een proefkopie raakt nooit de echte paden ─────────────────────────
+// Alleen de release die de supervisor start (dit bestand ligt in RELEASE_DIR) krijgt de echte paden als standaard.
+// Een proefkopie erft via de agentshell HOME=/opt/data, RELEASE_DIR en PORT=8080, maar ligt elders. Zonder eigen env
+// las en schreef zo'n kopie de échte chat_sessions.json en agent_jobs.json (de weesronde rondt dan echte agents af en
+// wist hun io), ruimde /opt/data/joboutput op, schreef het rolbestand waar run.sh bisync op grendelt, las de echte
+// uitrolmarker (wv202) en herschreef /tmp/agy-mcp_config.json met zijn eigen (vaak gestripte) omgeving. In een proef
+// gaat elk pad hieronder daarom naar /tmp/socev-app-proef-<pid>/<deel>, ook als de env-waarde naar het echte pad wijst
+// (HOME=/opt/data is geërfd, niet gekozen). Fail-closed: valt productie hier op false, dan draait hij in een wegwerpmap;
+// /health toont het (server.echt, server.paden). Dezelfde toets als APP_ECHT in het app-blok (wv318), dat hem overneemt.
+// Bewust NIET omgeleid: VAULT_DIR en REPO_DIR (de werkruimte van de beurten zelf) en alleen-lezen statusbronnen
+// (SYNC_LOG, laatste-zelfherstel, /app/run.sh).
+const SERVER_ECHT = (function () {
+  try { return !!process.env.RELEASE_DIR && fs.realpathSync(__dirname) === fs.realpathSync(process.env.RELEASE_DIR); }
+  catch (e) { return false; }
+})();
+const SERVER_PROEF = SERVER_ECHT ? null : path.join(process.env.TMPDIR || '/tmp', 'socev-app-proef-' + process.pid);
+const SERVER_ECHTE_HOME = '/opt/data';
+const serverPaden = {};   // naam -> gekozen pad, voor /health
+function serverZelfdePlek(a, b) {
+  if (path.resolve(a) === path.resolve(b)) return true;
+  try { return fs.realpathSync(a) === fs.realpathSync(b); } catch (e) { return false; }
+}
+// echt: wat productie zonder env gebruikt; proef: wat een proef krijgt als zijn env-waarde ontbreekt of naar `echt` wijst.
+function serverPad(naam, envWaarde, echt, proef) {
+  let p;
+  if (SERVER_ECHT) p = envWaarde || echt;
+  else if (envWaarde && !serverZelfdePlek(envWaarde, echt)) p = envWaarde;
+  else p = proef;
+  serverPaden[naam] = p;
+  return p;
+}
+function serverProefDeel(deel) { return path.join(SERVER_PROEF || '', deel); }
+if (!SERVER_ECHT) { try { fs.mkdirSync(serverProefDeel('home'), { recursive: true }); } catch (e) {} }
+const HOME = serverPad('home', process.env.HOME, SERVER_ECHTE_HOME, serverProefDeel('home'));
+// Het echte pad onder de echte HOME (productie: zijn eigen HOME; proef: /opt/data), om een geërfde env-waarde te herkennen.
+function serverEchteHome() { return path.join.apply(path, [SERVER_ECHT ? HOME : SERVER_ECHTE_HOME].concat(Array.from(arguments))); }
 const VAULT = process.env.VAULT_DIR || '/opt/data/AI_SecondBrain';
 const REPO = process.env.REPO_DIR || '/opt/data/repo';
 const PORT = process.env.PORT || 8080;
 const SECRET = process.env.API_SECRET || '';
-const IO = process.env.IO_DIR || '/opt/data/io';
+const IO = serverPad('io', process.env.IO_DIR, '/opt/data/io', serverProefDeel('io'));
 const MAX_FILE = (parseInt(process.env.MAX_FILE_MB || '20', 10)) * 1024 * 1024;
 const SESS_FILE = path.join(HOME, 'chat_sessions.json');
 const SYNC_LOG = process.env.SYNC_LOG || '/opt/data/bin/bisync.log';
@@ -79,7 +114,7 @@ const VROEG_LEVEN_MS = 3 * 60 * 1000;
 const JOB_MAX_AGE_MS = 24 * 60 * 60 * 1000;  // absolute bovengrens, ook voor 'running'
 const JOBS_MAX = 200;                        // aantalsgrens, naar het voorbeeld van agentsReg
 const OUTPUT_INLINE_MAX = 256 * 1024;        // groter dan dit gaat naar schijf
-const JOBOUT_DIR = process.env.JOBOUT_DIR || '/opt/data/joboutput';
+const JOBOUT_DIR = serverPad('jobout', process.env.JOBOUT_DIR, '/opt/data/joboutput', serverProefDeel('joboutput'));
 
 // Een job is 'af' zodra hij niet meer pending of running is. Bewust zo
 // geformuleerd en niet als lijst van eindstatussen: een nieuwe eindstatus die
@@ -109,7 +144,7 @@ const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 //   3. NOOIT body, headers, query of prompt in het log. Het secret reist in de
 //      body en zou anders op schijf belanden; prompts kunnen persoonsgegevens
 //      bevatten. Daarom ook req.url zonder querystring (zie reqPath).
-const API_LOG = process.env.API_LOG || '/opt/data/bin/api.log';
+const API_LOG = serverPad('api_log', process.env.API_LOG, '/opt/data/bin/api.log', serverProefDeel('api.log'));
 const LOG_MAX_BYTES = parseInt(process.env.LOG_MAX_BYTES || String(5 * 1024 * 1024), 10);
 const LOG_STAT_EVERY = 100;   // omvang niet elke regel opvragen, maar elke 100
 
@@ -265,8 +300,8 @@ function modelFout(naam, runtime, ont) {
 const RUNTIMES_LIJST = ['claude', 'codex', 'gemini'];
 // Review-fix A3: geen gewoon object als lookup (dan komt 'constructor' erdoor).
 const RUNTIMES = Object.create(null); RUNTIMES_LIJST.forEach(function (r) { RUNTIMES[r] = true; });
-const RUNTIME_FILE = process.env.RUNTIME_FILE || path.join(HOME, 'runtime.json');
-const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
+const RUNTIME_FILE = serverPad('runtime', process.env.RUNTIME_FILE, serverEchteHome('runtime.json'), path.join(HOME, 'runtime.json'));
+const CODEX_HOME = serverPad('codex_home', process.env.CODEX_HOME, serverEchteHome('.codex'), path.join(HOME, '.codex'));
 const CODEX_SESSIONS_DIR = path.join(CODEX_HOME, 'sessions');
 // Derde brein (27-9-2026): Antigravity CLI. Login, gesprekken en config staan op het volume onder
 // ~/.gemini; het binaire bestand komt uit het image (/usr/local/bin) of, tot dat image draait, uit
@@ -1262,7 +1297,7 @@ async function runGemini(prompt, conversationId, outdir, cwd, model, opts) {
 //    servers die we zelf niet beheren daaruit over naar /tmp en vervangen het bestand.
 // 2. Persona: ~/.gemini/GEMINI.md -> CLAUDE.md in de vault (symlink, buiten de vault).
 // 3. Skills: ~/.gemini/config/skills.json bevat de skillsmap van de vault.
-const AGY_MCP_TMP = process.env.AGY_MCP_TMP || '/tmp/agy-mcp_config.json';
+const AGY_MCP_TMP = serverPad('agy_mcp', process.env.AGY_MCP_TMP, '/tmp/agy-mcp_config.json', serverProefDeel('agy-mcp_config.json'));
 let geminiStand = { mcp: [], fout: null };
 function geminiVoorbereiden() {
   const fouten = [];
@@ -1487,7 +1522,7 @@ function agentInfo() {
 // Een achtergebleven marker telt niet: PID dood, of 5 min niet ververst (uitrol.sh ververst hem elke wachtronde van
 // 10 s; mtime, zelfde klok als deze pod). Fable-review wv91 #4/#5: een vaste grens van 45 min verviel stil bij een
 // langere UITROL_WACHT_MAX en liet een wees na een containerherstart (pid-hergebruik) te lang blokkeren.
-const UITROL_MARKER = process.env.UITROL_MARKER || '/opt/data/uitrol-wacht';
+const UITROL_MARKER = serverPad('uitrol_marker', process.env.UITROL_MARKER, '/opt/data/uitrol-wacht', serverProefDeel('uitrol-wacht'));
 const UITROL_MARKER_MAX_MS = 5 * 60 * 1000;
 function uitrolWacht() {
   let st;
@@ -2496,6 +2531,8 @@ function handleRequest(req, res) {
       ok: true, service: 'claude-api', vault: VAULT, workspaces: spaces,
       // uitwijk stap 3: ok blijft true als de pod passief is (de supervisor-bootcheck leunt op ok; passief is geen defect)
       kant: ROL_KANT, rol: rol.rol, uitwijk: rolInfo(),
+      // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
+      server: { echt: SERVER_ECHT, proefmap: SERVER_PROEF, paden: serverPaden },
       // versie = de release die NU draait (de mapnaam onder releases/, gezet door de
       // supervisor). image_versie = wat er in het image is gebakken. Verschillen de
       // twee, dan draait er uitgerolde code; zijn ze gelijk, dan draait de
@@ -2786,7 +2823,10 @@ const SP_MAX_BODY = 256 * 1024;
 const SP_MAX_VELDEN = 500;
 const SP_CHAT = process.env.SLEUTELPORTAAL_CHAT || '40687';
 const SP_N8N_UI = 'https://n8n.primumnonnocere.olares.com';
-const SP_SLEUTEL_PAD = process.env.SLEUTELPORTAAL_SLEUTEL || '/opt/data/.sleutelportaal/rpc.key';
+// wv349: typeof-guard, want sleutelportaal.sh en socev-app-poort.sh knippen dit blok los in een vm (zonder serverPad)
+const SP_SLEUTEL_PAD = typeof serverPad === 'function'
+  ? serverPad('sleutelportaal', process.env.SLEUTELPORTAAL_SLEUTEL, '/opt/data/.sleutelportaal/rpc.key', serverProefDeel('sleutelportaal-rpc.key'))
+  : (process.env.SLEUTELPORTAAL_SLEUTEL || '/opt/data/.sleutelportaal/rpc.key');
 const SP_META_PAD = path.join(VAULT, '00_Systeem/Beveiliging/Sleutelregister - portaalgegevens.json');
 const SP_HOST_RE = /^[a-z0-9-]+\.primumnonnocere\.olares\.com$/;
 // Het geheime veld per n8n-credentialtype (gemeten met /credentials/schema/{type} op 4-10). Andere types: handmatig.
@@ -3335,11 +3375,14 @@ function sleutelportaal(req, res) {
 // standaard. Een proefkopie erft RELEASE_DIR en PORT=8080 via de agentshell, maar ligt elders; zonder eigen
 // APP_DATA_DIR enz. krijgt die een wegwerpmap, zodat een toetsronde nooit sessies.json, de audit of de io van de
 // echte app raakt (9-10: 22 sessies-herstart-regels, één Spreekkamer-sessie geschrapt).
-const APP_ECHT = (function () {
+// wv349: in server.js staat deze toets al bovenaan (SERVER_ECHT); de eigen detectie blijft voor de vm-toetsen die alleen dit
+// blok knippen (socev-app-poort.sh, tel-poort.sh, app-data-afscherming.sh deel A).
+const APP_ECHT = typeof SERVER_ECHT === 'boolean' ? SERVER_ECHT : (function () {
   try { return !!process.env.RELEASE_DIR && fs.realpathSync(__dirname) === fs.realpathSync(process.env.RELEASE_DIR); }
   catch (e) { return false; }
 })();
-const APP_PROEF = APP_ECHT ? null : path.join(process.env.TMPDIR || '/tmp', 'socev-app-proef-' + (process.pid || 'vm-' + Date.now()));
+const APP_PROEF = APP_ECHT ? null : (typeof SERVER_PROEF === 'string' && SERVER_PROEF) ||
+  path.join(process.env.TMPDIR || '/tmp', 'socev-app-proef-' + (process.pid || 'vm-' + Date.now()));
 function appStandaard(echt, deel) { return APP_ECHT ? echt : path.join(APP_PROEF, deel); }
 const APP_DATA = process.env.APP_DATA_DIR || appStandaard('/opt/data/socev-app-data', 'data');
 const APP_UIT = process.env.APP_UIT_BESTAND || appStandaard('/opt/data/app-uit', 'app-uit');
@@ -3429,7 +3472,7 @@ const APP_TEKST_MAX = 20000;
 // rechtstreeks naar schijf gestreamd); de beurt noemt daarna welke n's erbij horen. Een herhaling van één bestand na een
 // time-out is zo onschuldig, en er staat nooit een heel bestand in het geheugen of in JSON/base64.
 const APP_UPLOAD_DIR = process.env.APP_UPLOAD_DIR || path.join(APP_DATA, 'upload');  // klaarstaand, per apparaat + beurt, 1 u
-const APP_IO = process.env.IO_DIR || '/opt/data/io';     // = IO van processJob: de bestanden gaan naar io/<job>/in
+const APP_IO = typeof IO === 'string' ? IO : (process.env.IO_DIR || '/opt/data/io');   // = IO van processJob (io/<job>/in); wv349: ook in een proef
 const APP_UPLOAD_MAX_N = 10;                             // bestanden per beurt
 const APP_UPLOAD_BESTAND_MAX = 20 * 1024 * 1024;         // per bestand (gelijk aan MAX_FILE)
 const APP_UPLOAD_BEURT_MAX = 50 * 1024 * 1024;           // per beurt samen
@@ -9746,7 +9789,7 @@ function telBelletje(wav) {
 // Tijdens bedrijf houdt een mislukte lezing de rol hooguit ROL_GRATIE_MS vast, daarna passief: zonder grens bleef
 // een Olares zonder internet "primair" terwijl de VPS al aan stond (review stap 3, #1).
 // Bouwplan: 01_Ontwikkeling/Uitwijk claudebot en n8n - bouwplan (6-10-2026).md §4.2.
-const ROL_BESTAND = process.env.ROL_BESTAND || path.join(HOME, 'bin', 'uitwijk-rol');
+const ROL_BESTAND = serverPad('rol', process.env.ROL_BESTAND, serverEchteHome('bin', 'uitwijk-rol'), path.join(HOME, 'bin', 'uitwijk-rol'));
 const ROL_KANTEN = ['olares', 'vps'];
 const ROL_KANT = ROL_KANTEN.indexOf(String(process.env.SOCEV_KANT || 'olares')) >= 0 ? String(process.env.SOCEV_KANT || 'olares') : 'onbekend';
 const ROL_INTERVAL_MS = 60 * 1000;        // bij een geslaagde lezing
@@ -9965,8 +10008,8 @@ setInterval(opruimJobs, 5 * 60 * 1000);
 const OFFSITE_INTERVAL_MIN = parseInt(process.env.OFFSITE_INTERVAL_MIN || '30', 10);
 const OFFSITE_START_DELAY_MIN = parseInt(process.env.OFFSITE_START_DELAY_MIN || '5', 10);
 const OFFSITE_TIMEOUT_MIN = parseInt(process.env.OFFSITE_TIMEOUT_MIN || '15', 10);
-const OFFSITE_SCRIPT = process.env.OFFSITE_SCRIPT || '/opt/data/bin/vault-offsite.sh';
-const OFFSITE_BACKUP_LOG = process.env.OFFSITE_BACKUP_LOG || '/opt/data/bin/backup.log';
+const OFFSITE_SCRIPT = serverPad('offsite_script', process.env.OFFSITE_SCRIPT, '/opt/data/bin/vault-offsite.sh', serverProefDeel('vault-offsite.sh'));
+const OFFSITE_BACKUP_LOG = serverPad('offsite_log', process.env.OFFSITE_BACKUP_LOG, '/opt/data/bin/backup.log', serverProefDeel('backup.log'));
 
 const offsite = {
   // `actief` heeft een verwarrende geschiedenis: het betekent 'er draait op dit
@@ -10167,10 +10210,10 @@ if (OFFSITE_INTERVAL_MIN > 0 && !offsiteDoorRunsh()) {
 // 404 (daarvoor behandelde Node een Upgrade-header op bv. /run als gewoon verzoek; geen bekende aanroeper doet dat).
 // Ontwerp: vault 01_Ontwikkeling/Spraakkastje auto - Waveshare naar Socev (ontwerp).md
 const net = require('net');
-const AUTO_DIR = process.env.AUTO_DIR || '/opt/data/socev-auto';
+const AUTO_DIR = serverPad('auto_dir', process.env.AUTO_DIR, '/opt/data/socev-auto', serverProefDeel('socev-auto'));
 const AUTO_POORT = parseInt(process.env.AUTO_POORT || '8091', 10);
-const AUTO_CONFIG = process.env.AUTO_CONFIG || '/opt/data/socev-auto-run/auto.env';
-const AUTO_LOG = process.env.AUTO_LOG || '/opt/data/bin/auto.log';
+const AUTO_CONFIG = serverPad('auto_config', process.env.AUTO_CONFIG, '/opt/data/socev-auto-run/auto.env', serverProefDeel('auto.env'));
+const AUTO_LOG = serverPad('auto_log', process.env.AUTO_LOG, '/opt/data/bin/auto.log', serverProefDeel('auto.log'));
 const AUTO_BACKOFF_MS = [2000, 5000, 15000, 30000, 60000, 120000, 300000];
 const AUTO_MAX_TUNNELS = 8;
 const AUTO_LOG_MAX = 5 * 1024 * 1024;
@@ -10865,9 +10908,9 @@ server.on('upgrade', function (req, sock, head) {
 // Alleen op kant olares (uitwijk stap 6d, review 7-10 #2): de kluis kent geen kant, dus een pod op de VPS krijgt óók
 // cloudflare_tunnel_token_olares. Zonder deze regel hing die pod als tweede connector aan socev-olares en verdeelde
 // Cloudflare het verkeer over twee kanten. De VPS heeft zijn eigen tunnel (cloudflared-container, socev-vps).
-const TUNNEL_BIN = process.env.TUNNEL_BIN || '/opt/data/bin/cloudflared';
-const TUNNEL_LOG = process.env.TUNNEL_LOG || '/opt/data/bin/tunnel.log';
-const TUNNEL_UIT_BESTAND = process.env.TUNNEL_UIT_BESTAND || '/opt/data/bin/tunnel-uit';
+const TUNNEL_BIN = serverPad('tunnel_bin', process.env.TUNNEL_BIN, '/opt/data/bin/cloudflared', serverProefDeel('cloudflared'));
+const TUNNEL_LOG = serverPad('tunnel_log', process.env.TUNNEL_LOG, '/opt/data/bin/tunnel.log', serverProefDeel('tunnel.log'));
+const TUNNEL_UIT_BESTAND = serverPad('tunnel_uit', process.env.TUNNEL_UIT_BESTAND, '/opt/data/bin/tunnel-uit', serverProefDeel('tunnel-uit'));
 const TUNNEL_METRICS_POORT = parseInt(process.env.TUNNEL_METRICS_POORT || '20241', 10);
 const TUNNEL_LOG_MAX = 5 * 1024 * 1024;
 const tunnel = { kind: null, starts: 0, herstarts: 0, laatste_start: null, laatste_exit: null, reden_uit: null,
@@ -11008,6 +11051,24 @@ if (process.env.TUNNEL_UIT_POD !== '1') { try { tunnelStart(); } catch (e) { log
 
 try { geminiVoorbereiden(); } catch (e) { logError('gemini-voorbereiden', e); }
 agyVersieMeten();
+
+if (!SERVER_ECHT) {
+  const omgeleid = Object.keys(serverPaden).filter(function (k) { return serverPaden[k].indexOf(SERVER_PROEF + path.sep) === 0; });
+  // Proefmappen van eerdere proeven waarvan het proces niet meer leeft en die een uur stil staan: weg (toetsen stoppen
+  // hun server met SIGKILL, dus opruimen bij het afsluiten kan niet). Alleen socev-app-proef-<getal> naast de eigen map.
+  let opgeruimd = 0;
+  try {
+    const ouder = path.dirname(SERVER_PROEF);
+    fs.readdirSync(ouder).forEach(function (n) {
+      const m = /^socev-app-proef-(\d+)$/.exec(n);
+      if (!m || Number(m[1]) === process.pid) return;
+      try { process.kill(Number(m[1]), 0); return; } catch (e) { if (!e || e.code !== 'ESRCH') return; }
+      const p = path.join(ouder, n);
+      try { if (Date.now() - fs.lstatSync(p).mtimeMs < 60 * 60 * 1000) return; fs.rmSync(p, { recursive: true, force: true }); opgeruimd++; } catch (e) {}
+    });
+  } catch (e) {}
+  schrijfLog(nu() + ' proefserver ' + velden({ map: SERVER_PROEF, omgeleid: omgeleid.join(',') || 'niets', oude_proefmappen_weg: opgeruimd }));
+}
 
 server.listen(PORT, '0.0.0.0', function () {
   console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents, breinen claude|codex|gemini) luistert op :' + PORT +
