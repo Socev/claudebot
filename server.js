@@ -8156,32 +8156,47 @@ async function appReactieBericht(kanaal, id) {
   }
   return x && x.ok !== false && String(x.antwoord || '').trim() ? x : null;
 }
+// Per bericht één tegelijk (Fable wv304 #1): twee snelle tikken lezen anders allebei de oude stand, en dan meldt de tweede
+// "ongewijzigd" terwijl de eerste nog schrijft.
+const appReactieKeten = {};
 async function appReactieRoute(req, res, a, d) {
   const kanaal = String(d.kanaal || ''), id = String(d.job_id || ''), duim = String(d.duim || '');
   if (!APP_KANALEN[kanaal] || !APP_JOB_RE.test(id) || !Object.prototype.hasOwnProperty.call(APP_REACTIE_SIGNAAL, duim)) return appWeiger(res, 400, 'ongeldig verzoek', 'reactie velden');
-  if (!appTeller('reactie', APP_REACTIE_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel reacties dit uur', 'grens reactie');
   let x;
   try { x = await appReactieBericht(kanaal, id); } catch (e) { logError('app-reactie', e); return appWeiger(res, 503, 'geschiedenis nu niet leesbaar', 'app-log'); }
   if (!x) return appWeiger(res, 404, 'bericht niet gevonden', 'reactie onbekend id');
-  const sl = kanaal + ':' + id, doel = duim === 'weg' ? null : duim;
+  const sl = kanaal + ':' + id;
+  const deze = (appReactieKeten[sl] || Promise.resolve()).then(function () { return appReactieZet(kanaal, sl, duim, x); });
+  const staart = appReactieKeten[sl] = deze.catch(function () {});
+  let uit;
+  try { uit = await deze; } catch (e) { logError('app-reactie', e); uit = { status: 500, fout: 'fout op de pod', reden: 'uitzondering' }; }
+  if (appReactieKeten[sl] === staart) delete appReactieKeten[sl];   // niemand wacht meer achter deze tik
+  if (uit.fout) return appWeiger(res, uit.status, uit.fout, uit.reden);
+  appStuur(res, 200, uit.body);
+}
+async function appReactieZet(kanaal, sl, duim, x) {
+  const doel = duim === 'weg' ? null : duim;
   let m;
-  try { m = appReacties(); } catch (e) { logError('app-reactie', e); return appWeiger(res, 503, 'reacties nu niet leesbaar', 'reacties.json'); }
-  if ((m[sl] ? m[sl].duim : null) === doel) return appStuur(res, 200, { ok: true, duim: doel, ongewijzigd: true });
+  try { m = appReacties(); } catch (e) { logError('app-reactie', e); return { status: 503, fout: 'reacties nu niet leesbaar', reden: 'reacties.json' }; }
+  if ((m[sl] ? m[sl].duim : null) === doel) return { body: { ok: true, duim: doel, ongewijzigd: true } };
+  // de grens telt alleen wat echt naar de databank gaat (Fable wv304 #5); al het andere valt onder 'alles'
+  if (!appTeller('reactie', APP_REACTIE_PER_UUR, 3600000)) return { status: 429, fout: 'te veel reacties dit uur', reden: 'grens reactie' };
   const geheim = process.env.N8N_WEBHOOK_VERBETERLOG || '';
-  if (!geheim) return appWeiger(res, 503, 'verbeterlog niet ingericht', 'geen verbeterlog-geheim');
+  if (!geheim) return { status: 503, fout: 'verbeterlog niet ingericht', reden: 'geen verbeterlog-geheim' };
   const soort = x.soort === 'socev' ? (x.bron || 'socev') : x.soort === 'telegram' ? 'telegram' : 'app';
   let r;
   try {
     r = await appSbRpc('sb_verbeterlog_toevoegen', { p: { secret: geheim, bron: 'app-reactie', soort: 'reactie', outputsoort: (kanaal + '/' + soort).slice(0, 60),
-      referentie: 'app:' + sl, signaal: APP_REACTIE_SIGNAAL[duim], context: 'kanaal ' + kanaal + '; ' + soort + '; bericht ' + String(x.t || '').slice(0, 24) + '; apparaat ' + a.id.slice(0, 8) } });
-  } catch (e) { logError('app-reactie', e); return appWeiger(res, 502, 'verbeterlog nu niet bereikbaar; probeer het straks opnieuw', 'rpc'); }
-  if (!r || r.ok !== true) { logError('app-reactie', new Error('rpc: ' + String(r && r.fout || 'geen antwoord'))); return appWeiger(res, 502, 'verbeterlog weigerde de reactie', 'rpc ' + String(r && r.fout || '').slice(0, 40)); }
+      referentie: 'app:' + sl, signaal: APP_REACTIE_SIGNAAL[duim], context: 'kanaal ' + kanaal + '; ' + soort + '; bericht ' + String(x.t || '').slice(0, 24) } });
+  } catch (e) { logError('app-reactie', e); return { status: 503, fout: 'verbeterlog nu niet bereikbaar; probeer het straks opnieuw', reden: 'rpc' }; }
+  // 503 en niet 502: 502/504 betekent voor de app "pod weg" (Fable wv304 #4)
+  if (!r || r.ok !== true) { logError('app-reactie', new Error('rpc: ' + String(r && r.fout || 'geen antwoord'))); return { status: 503, fout: 'verbeterlog weigerde de reactie', reden: 'rpc ' + String(r && r.fout || '').slice(0, 40) }; }
   try {
-    m = appReacties();   // opnieuw: een andere tik kan intussen geschreven hebben
+    m = appReacties();
     if (doel) m[sl] = { duim: doel, t: new Date().toISOString(), id: r.id }; else delete m[sl];
     appSchrijfJson(APP_REACTIES, m);
-  } catch (e) { logError('app-reactie', e); return appWeiger(res, 500, 'opgeslagen in de verbeterlog, maar de stand hier niet; tik nog eens', 'reacties.json schrijven'); }
-  appStuur(res, 200, { ok: true, duim: doel });
+  } catch (e) { logError('app-reactie', e); return { status: 500, fout: 'opgeslagen in de verbeterlog, maar de stand hier niet; tik nog eens', reden: 'reacties.json schrijven' }; }
+  return { body: { ok: true, duim: doel } };
 }
 function berichtInfo() {
   try {

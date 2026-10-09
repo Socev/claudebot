@@ -3443,7 +3443,7 @@ async function bewijs(o) {
         r = await vraag('POST', '/app/reactie', R(), { pot: P.jar });
         let rij = vbl()[0];
         toets('23b 👍 -> 200, één reactierij met de juiste koppeling', r.status === 200 && r.j.duim === 'up' && vbl().length === 1 && rij.referentie === 'app:machinekamer:' + idT && rij.signaal === '👍' && rij.bron === 'app-reactie' && rij.outputsoort === 'machinekamer/agentrapport', JSON.stringify([r.j, vbl()]));
-        toets('23b geen berichtinhoud in de verbeterlog (context alleen kanaal/soort/tijd)', !/verder bouwen|VRAAG/.test(JSON.stringify(rij)) && /^kanaal machinekamer; agentrapport; bericht 20/.test(rij.context), rij.context);
+        toets('23b geen berichtinhoud en geen apparaat in de verbeterlog (context alleen kanaal/soort/tijd)', !/verder bouwen|VRAAG|apparaat/.test(JSON.stringify(rij)) && /^kanaal machinekamer; agentrapport; bericht 20[0-9T:.Z-]+$/.test(rij.context), rij.context);
         toets('23b databank met de service-sleutel en het verbeterlog-geheim', sbRpc.filter((x) => x.fn === 'sb_verbeterlog_toevoegen').every((x) => x.sleutel === 'nep-sleutel' && x.b.p.secret === 'nep-vbl'));
         const n1 = nRpc();
         r = await vraag('POST', '/app/reactie', R(), { pot: P.jar });
@@ -3476,13 +3476,30 @@ async function bewijs(o) {
         r = await vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar });
         sbStaat.kapot = false;
         const lok = JSON.parse(fs.readFileSync(path.join(DATA, 'reacties.json'), 'utf8'));
-        toets('23b databank kapot -> 502, lokale stand niet gezet', r.status === 502 && !lok['machinekamer:' + idT], JSON.stringify([r.j, lok]));
+        toets('23b databank kapot -> 503 (niet 502: dat is voor de app "pod weg"), lokale stand niet gezet', r.status === 503 && !lok['machinekamer:' + idT], JSON.stringify([r.j, lok]));
         sbStaat.vblWeiger = 'secret';
         r = await vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar });
         sbStaat.vblWeiger = null;
-        toets('23b RPC weigert (ok false) -> 502', r.status === 502 && /weigerde/.test(r.j.fout), JSON.stringify(r.j));
-        // grens
+        toets('23b RPC weigert (ok false) -> 503', r.status === 503 && /weigerde/.test(r.j.fout), JSON.stringify(r.j));
+        // Fable wv304 #1: twee tikken tegelijk worden per bericht na elkaar afgehandeld
+        let nR = nRpc();
+        const [p1, p2] = await Promise.all([vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar }), vraag('POST', '/app/reactie', R({ duim: 'weg' }), { pot: P.jar })]);
+        toets('23b 👍 en intrekken tegelijk -> na elkaar: twee aanroepen, eindstand ingetrokken, één rij', p1.status === 200 && p1.j.duim === 'up' && p2.status === 200 && p2.j.duim === null && nRpc() === nR + 2 && vbl().filter((x) => x.referentie === 'app:machinekamer:' + idT).length === 1 && vbl()[0].signaal === 'ingetrokken', JSON.stringify([p1.j, p2.j, nRpc() - nR, vbl()[0]]));
+        nR = nRpc();
+        const [p3, p4] = await Promise.all([vraag('POST', '/app/reactie', R({ duim: 'down' }), { pot: P.jar }), vraag('POST', '/app/reactie', R({ duim: 'down' }), { pot: P.jar })]);
+        toets('23b twee keer 👎 tegelijk -> één aanroep, de tweede ongewijzigd', p3.status === 200 && p4.status === 200 && nRpc() === nR + 1 && [p3.j, p4.j].filter((x) => x.ongewijzigd).length === 1 && vbl()[0].signaal === '👎', JSON.stringify([p3.j, p4.j, nRpc() - nR]));
+        await vraag('POST', '/app/reactie', R({ duim: 'weg' }), { pot: P.jar });
+        // net klaar, nog niet in het log: het antwoord uit het geheugen telt (zoals de geschiedenis)
+        const idJ = crypto.randomBytes(8).toString('hex');
+        jobs[idJ] = { status: 'done', created: Date.now(), done_at: Date.now(), app: { kanaal: 'hoofd', soort: 'bericht', tekst: 'x' }, result: { ok: true, output: 'Net klaar.', files: [] } };
+        r = await vraag('POST', '/app/reactie', { kanaal: 'hoofd', job_id: idJ, duim: 'up' }, { pot: P.jar });
+        toets('23b reactie op een net afgerond antwoord dat nog niet in het log staat -> 200, outputsoort hoofd/app', r.status === 200 && vbl().some((x) => x.referentie === 'app:hoofd:' + idJ && x.outputsoort === 'hoofd/app'), JSON.stringify([r.j, vbl().slice(-1)]));
+        delete jobs[idJ];
+        // de grens telt alleen wat naar de databank gaat: een no-op komt er altijd door
         H.appStaat.tellers.reactie = Array(120).fill(Date.now());
+        r = await vraag('POST', '/app/reactie', R({ duim: 'weg' }), { pot: P.jar });
+        toets('23b grens vol, maar intrekken van niets is ongewijzigd -> 200', r.status === 200 && r.j.ongewijzigd === true, JSON.stringify(r.j));
+        // grens
         r = await vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar });
         H.appStaat.tellers.reactie = [];
         toets('23b te veel reacties -> 429', r.status === 429, JSON.stringify(r.j));
