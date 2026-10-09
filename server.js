@@ -3361,7 +3361,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
-  'POST /app/reactie', 'POST /app/agenda']);   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
+  'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/keuze']);   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter); vaste plek
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -5569,7 +5569,7 @@ async function appWerkvoorraad() {
   return d;
 }
 const APP_AGENT_STATUS = { pending: 'wacht', running: 'loopt', 'afgebroken-containerherstart': 'afgebroken' };
-async function appAgents(req, res) {
+async function appAgents(req, res, a) {
   res._app.stil = true;   // ververst elke 15 s zolang de tab open is: geen auditregel bij 200
   let wv = null, fout = null;
   try { wv = await appWerkvoorraad(); } catch (e) { logError('app-agents', e); fout = 'werkvoorraad nu niet leesbaar; de rij ontbreekt'; }
@@ -5612,8 +5612,11 @@ async function appAgents(req, res) {
         wat: String(w.geblokkeerd_door || '').replace(/^\s*david\s*:?\s*/i, '').slice(0, 200) };
     });
   const ru = wv && wv.ruimte ? { mag: !!wv.ruimte.mag, reden: String(wv.ruimte.reden || '').slice(0, 160) } : null;
+  // wv335: "Wacht op jou" staat nu als Voor jou in Vandaag; hier alleen het aantal (null = lijst niet leesbaar, de app toont dan de oude lijst)
+  let voorJou = null;
+  try { voorJou = (await appVjTelling(a)).open; } catch (e) { logError('app-agents', e); voorJou = null; }
   appStuur(res, 200, { ok: true, max: typeof MAX_AGENTS === 'number' ? MAX_AGENTS : null, lopend: lopend, rij: rij, wacht_op_david: wachtOpDavid,
-    recent: recent, ruimte: ru, fout: fout });
+    voor_jou: voorJou, recent: recent, ruimte: ru, fout: fout });
 }
 async function appAgentRapport(req, res, jobId) {
   if (!APP_JOB_RE.test(jobId)) return appWeiger(res, 404, 'onbekend', 'rapport id');
@@ -6084,6 +6087,8 @@ async function appNieuwRoute(req, res, a) {
     tabs.meldingen = nieuw.length;
     if (nieuw.length) laatst.meldingen = nieuw[0].wanneer;
   } else { tabs.meldingen = 0; fouten.push('meldingen'); }
+  // wv335 (Voor jou § 2): Vandaag telt alleen punten met een deadline binnen 48 u (geen 'gezien': het getal staat zolang het punt open is)
+  try { tabs.vandaag = (await appVjTelling(a)).dichtbij; } catch (e) { tabs.vandaag = 0; fouten.push('vandaag'); }
   const gezien = {};
   APP_NIEUW_TABS.forEach(function (t) { if (t !== 'broedstoof' && g[t]) gezien[t] = g[t]; });
   // wv277: jongste Telegram-beurt per gesprek (telt niet in tabs; de app herlaadt het gesprek als dit verandert)
@@ -6588,6 +6593,299 @@ async function appActieRoute(req, res, a, d) {
     if (c && c.data && c.data.vandaag === vandaag) c.data.acties = acties;
   } catch (e) { logError('app-actie', e); if (appStaat.vandaag) appStaat.vandaag.data = null; }
   appStuur(res, 200, { ok: uitkomst === 'ok', uitkomst: uitkomst, melding: melding, acties: appActiesNu(acties) });
+}
+
+// ── Voor jou (wv335, idee 11 fase 2; bouwplan "Voor jou - beheerde actielijst" § 2, § 4.4) ──
+// Eén beheerde lijst van wat Socev van David nodig heeft: tabel machinekamer.voor_jou (Supabase), gevuld en gemeten door de
+// beheerronde (07:15/17:15, skill voor-jou-beheer). De app leest de lijst (stil, 60 s in het geheugen, alle apparaten delen het)
+// en per punt de details; een knop zet ALLEEN de status van het punt (gedaan / later / niet meer nodig, ↩️ tot een minuut erna)
+// via mk_voor_jou_status, met compare-and-set op de status die de app zag (Fable M5). Werkvoorraad, register en Todoist raakt de
+// pod niet: de beheerronde opent daarna de werkvoorraadrij met niet_voor +15 min (Fable M4), dus een ↩️ binnen de minuut start
+// nooit een agent. Een besluit krijgt hier geen Ja-knop (M8): de details tonen de vraag en het voorstel, het antwoord gaat via de
+// vraag met knoppen. Privé-punten (kolom prive) niet op een apparaat met een vaste plek (M6). In de lijst geen bewijs, herkomst of
+// meting; die alleen in de details. Teksten staan al gefilterd in de tabel (voor_jou_tekst_ok); de pod filtert de registertekst zelf.
+const APP_VJ_CACHE_MS = 60 * 1000;
+const APP_VJ_PER_UUR = 60;
+const APP_VJ_TERUG_MS = 60 * 1000;   // ↩️ zoals bij het actielijstje
+const APP_VJ_MAX = 40;
+const APP_VJ_WAAR = { pixel: 'op je telefoon', pc: 'op de pc', praktijk: 'op de praktijk', thuis: 'thuis', auto: 'in de auto' };
+const APP_VJ_REGISTER = path.join(process.env.APP_VAULT_DIR || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', '00_Systeem', 'Open vragen aan David.md');
+// Sleutelachtige tekst (zelfde norm als machinekamer.voor_jou_tekst_ok); registertekst gaat niet door de RPC-weigering
+const APP_VJ_SLEUTEL_RE = /(sk-[a-z0-9_-]{16,}|ghp_[a-z0-9]{20,}|github_pat_|xox[abpr]-|eyJ[a-zA-Z0-9_-]{20,}\.|AKIA[A-Z0-9]{12,}|-----BEGIN|[A-Za-z0-9_+=-]{40,})/i;
+const APP_VJ_PATIENT_RE = /(^|[^a-z])(pati[eë]nt(en|e)?|bsn|geboortedatum|huisbezoek(en)?|visite|mevr\.?|dhr\.|mw\.|casus)([^a-z]|$)/i;
+appStaat.tellers.voorjou = appStaat.tellers.voorjou || [];
+appStaat.vjTerug = appStaat.vjTerug || {};
+
+function appVjDag(ymd) { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '')); return m ? Number(m[3]) + '-' + Number(m[2]) : ''; }
+function appVjVeilig(t) { t = String(t == null ? '' : t); return !(APP_VJ_SLEUTEL_RE.test(t) || APP_VJ_PATIENT_RE.test(t) || APP_PATIENT_RE.test(t)); }
+// Grijze regel 2: wanneer · waar · duur (bouwplan § 2)
+function appVjRegel2(p, vandaag) {
+  const delen = [];
+  const dl = /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null;
+  if (dl) delen.push(dl < vandaag ? 'over tijd (' + appVjDag(dl) + ')' : dl === vandaag ? 'vandaag' : dl === appYmdPlus(vandaag, 1) ? 'uiterlijk morgen' : 'uiterlijk ' + appVjDag(dl));
+  else if (p.soort === 'besluit') delen.push('besluit');
+  if (APP_VJ_WAAR[p.waar]) delen.push(APP_VJ_WAAR[p.waar]);
+  const d = Number(p.duur_min);
+  if (d > 0) delen.push(d >= 60 ? '± ' + String(Math.round(d / 30) / 2).replace('.', ',') + ' u' : '± ' + d + ' min');
+  return delen.join(' · ');
+}
+// Zichtbaar = open, of later met een datum die vandaag of eerder is (K5: later -> vanzelf weer open)
+function appVjZichtbaar(p, vandaag) { return p.status === 'open' || (p.status === 'later' && !(String(p.later_tot || '') > vandaag)); }
+function appVjDichtbij(p, vandaag) { return /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) && p.deadline <= appYmdPlus(vandaag, 1); }   // deadline ≤ 48 u: vandaag, morgen of al over tijd
+async function appVjPunten() {
+  const c = appStaat.vjCache;
+  if (c && c.data && Date.now() - c.op < APP_VJ_CACHE_MS) return c.data;
+  if (c && c.bezig) return c.bezig;
+  const st = appStaat.vjCache = { data: c && c.data, op: c ? c.op : 0, bezig: null };
+  st.bezig = appSbRpc('mk_voor_jou_lijst', { p_alles: false }).then(function (j) {
+    if (!j || !Array.isArray(j.punten)) throw new Error('voor_jou zonder punten');
+    st.data = j.punten.filter(function (p) { return p && Number.isInteger(p.id) && p.id > 0; }); st.op = Date.now(); st.bezig = null; return st.data;
+  }, function (e) { st.bezig = null; throw e; });
+  return st.bezig;
+}
+function appVjVoorApparaat(punten, a) { const vast = !!(a && a.soort === 'vast'); return punten.filter(function (p) { return !(vast && p.prive === true); }); }
+function appVjKort(p, vandaag) {
+  return { id: p.id, soort: ['doen', 'besluit', 'proef'].indexOf(p.soort) >= 0 ? p.soort : 'doen', titel: appKort(p.titel, 120), regel2: appVjRegel2(p, vandaag),
+    deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null, dichtbij: appVjDichtbij(p, vandaag),
+    waar: APP_VJ_WAAR[p.waar] || null, duur_min: Number(p.duur_min) > 0 ? Number(p.duur_min) : null, status: p.status,
+    later_tot: p.status === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(p.later_tot || '')) ? p.later_tot : null };
+}
+// Telling voor /app/nieuw en Agents: zichtbare punten (en hoeveel met een deadline binnen 48 u) voor dit apparaat
+async function appVjTelling(a) {
+  const vandaag = appYmd(Date.now());
+  const z = appVjVoorApparaat(await appVjPunten(), a).filter(function (p) { return appVjZichtbaar(p, vandaag); });
+  return { open: z.length, dichtbij: z.filter(function (p) { return appVjDichtbij(p, vandaag); }).length };
+}
+function appVjTerugMs(id, nu) {
+  const t = appStaat.vjTerug[id];
+  return t && t.tot > nu ? t.tot - nu : 0;
+}
+async function appVoorJouRoute(req, res, a) {
+  res._app.stil = true;   // de app leest bij openen van Vandaag en op Ververs
+  let punten;
+  try { punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appStuur(res, 200, { ok: true, punten: [], later: [], meer: 0, fout: 'de lijst is nu niet te lezen' }); }
+  const nu = Date.now(), vandaag = appYmd(nu);
+  const eigen = appVjVoorApparaat(punten, a);
+  const zichtbaar = eigen.filter(function (p) { return appVjZichtbaar(p, vandaag); }).slice(0, APP_VJ_MAX);
+  // Net gekozen (↩️ nog mogelijk): blijft een minuut in de lijst, met de nieuwe stand
+  const net = eigen.filter(function (p) { return !appVjZichtbaar(p, vandaag) && appVjTerugMs(p.id, nu) > 0; });
+  const later = eigen.filter(function (p) { return p.status === 'later' && String(p.later_tot || '') > vandaag && !(appVjTerugMs(p.id, nu) > 0); })
+    .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), later_tot: p.later_tot }; });
+  const lijst = zichtbaar.concat(net).map(function (p) { return Object.assign(appVjKort(p, vandaag), { terug_ms: appVjTerugMs(p.id, nu) }); });
+  appStuur(res, 200, { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: !!(a && a.soort === 'vast'),
+    bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null });
+}
+// Registerrijen (Open vragen aan David.md), op mtime bewaard. Kolommen: gesteld | kanaal | vraag | aanname | status | bewijs
+async function appVjRegister() {
+  const st = await fs.promises.stat(APP_VJ_REGISTER);
+  const c = appStaat.vjRegister;
+  if (c && c.mtime === st.mtimeMs && c.size === st.size) return c.rijen;
+  const tekst = await appLeesEcht(APP_VJ_REGISTER, 'utf8');
+  const rijen = [];
+  tekst.split('\n').forEach(function (r) {
+    if (r.indexOf('| 20') !== 0) return;
+    const k = r.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(function (x) { return x.replace(/\\\|/g, '|').trim(); });   // \| in een wikilink is geen kolomgrens
+    if (k.length < 6) return;
+    rijen.push({ gesteld: k[0], kanaal: k[1], vraag: k[2], aanname: k[3], status: k[4].replace(/\*/g, '') });
+  });
+  appStaat.vjRegister = { mtime: st.mtimeMs, size: st.size, rijen: rijen };
+  return rijen;
+}
+function appVjRegisterMatch(rijen, sl) {   // zelfde regel als voor-jou.py register_match: 'tijd' of 'tijd#kenmerk'
+  const i = String(sl).indexOf('#'), g = i < 0 ? String(sl) : String(sl).slice(0, i), k = i < 0 ? '' : String(sl).slice(i + 1).toLowerCase();
+  return rijen.filter(function (r) { return r.gesteld === g && (!k || (r.kanaal + ' ' + r.vraag).toLowerCase().indexOf(k) >= 0); });
+}
+function appVjTijd(gesteld) { const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2})/.exec(String(gesteld)); return m ? Number(m[3]) + '-' + Number(m[2]) + ' ' + m[4] : String(gesteld).slice(0, 16); }
+function appVjOpmaakWeg(t) { return String(t || '').replace(/\*\*|__|`/g, '').replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, '$2'); }
+// Stap met een commando: tussen backticks, of na "Typ:" (tot een toelichting tussen haakjes) -> kopieerknop in de app
+function appVjStap(s) {
+  s = appKort(s, 400);
+  const bt = /`([^`]{2,300})`/.exec(s);
+  if (bt) return { tekst: s.replace(/`/g, ''), commando: bt[1].trim() };
+  const ty = /^(?:Typ|Voer uit|Commando)\s*:\s*(.+?)(?:\s+\([^)]*\))?\s*$/i.exec(s);
+  return ty ? { tekst: s, commando: ty[1].trim() } : { tekst: s, commando: null };
+}
+async function appVoorJouDetail(req, res, a, idTekst) {
+  res._app.stil = true;
+  if (!/^[1-9]\d{0,8}$/.test(idTekst)) return appWeiger(res, 404, 'onbekend', 'voor-jou id');
+  let punten;
+  try { punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen', 'voor-jou lezen'); }
+  const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === Number(idTekst); });
+  if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'voor-jou ' + idTekst + ' weg');
+  const nu = Date.now(), vandaag = appYmd(nu);
+  const h = p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
+  const herkomst = [];
+  let vraag = null;
+  // werkvoorraad: samenvatting en stand, geen opdracht of notitie
+  const wvIds = (Array.isArray(h.wv) ? h.wv : []).filter(function (x) { return Number.isInteger(Number(x)); }).slice(0, 6);
+  if (wvIds.length) {
+    let items = null;
+    try { const wv = await appWerkvoorraad(); items = (wv && wv.items) || []; } catch (e) { items = null; }
+    wvIds.forEach(function (n) {
+      const w = items && items.find(function (x) { return Number(x.id) === Number(n); });
+      const stand = !w ? (items ? 'afgerond' : null) : w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')) ? 'wacht op jou' : w.status === 'gestart' ? 'loopt' : w.status === 'open' ? 'in de rij' : String(w.status || '');
+      const wat = w ? (w.samenvatting ? String(w.samenvatting) : appLabelGewoon(w.label)) : '';
+      herkomst.push({ soort: 'werkvoorraad', tekst: 'Werkvoorraad wv' + Number(n) + (wat && appVjVeilig(wat) ? ': ' + appKort(wat, 200) : '') + (stand ? ' (' + stand + ')' : '') });
+    });
+  }
+  // register: de vraag zoals hij gesteld is; bij een besluit ook het voorstel
+  const reg = (Array.isArray(h.register) ? h.register : []).map(String).slice(0, 6);
+  if (reg.length) {
+    let rijen = null;
+    try { rijen = await appVjRegister(); } catch (e) { logError('app-voor-jou', e); rijen = null; }
+    reg.forEach(function (sl) {
+      const m = rijen ? appVjRegisterMatch(rijen, sl) : [];
+      const r = m.find(function (x) { return /^(open|deels|wacht|uitgesteld)/i.test(x.status); }) || m[0];
+      const tijd = appVjTijd(sl.split('#')[0]);
+      if (!r) { herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + (rijen ? ' (niet meer in het register)' : '') }); return; }
+      const vt = appVjOpmaakWeg(r.vraag), at = appVjOpmaakWeg(r.aanname), kanaal = appKort(String(r.kanaal).replace(/\s*\(.*$/, ''), 40);
+      const veilig = appVjVeilig(vt) && appVjVeilig(at);
+      herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + (kanaal ? ' (' + kanaal + ')' : '') + ' — ' + appKort(String(r.status).split(/[;—(]/)[0], 60) });
+      if (p.soort === 'besluit' && !vraag) vraag = veilig ? { tekst: appKort(vt, 700), voorstel: at ? appKort(at, 300) : null, gesteld: tijd, kanaal: kanaal || null }
+        : { tekst: 'tekst verborgen', voorstel: null, gesteld: tijd, kanaal: kanaal || null };
+    });
+  }
+  (Array.isArray(h.todoist) ? h.todoist : []).map(String).filter(function (t) { return /^[A-Za-z0-9]{6,40}$/.test(t); }).slice(0, 6).forEach(function (t) {
+    herkomst.push({ soort: 'todoist', tekst: 'Todoist-taak', link: 'https://app.todoist.com/app/task/' + t });
+  });
+  if (typeof h.bericht === 'string' && h.bericht) herkomst.push({ soort: 'bericht', tekst: 'Bericht of rapport van Socev' + (/^[a-f0-9]{16}$/.test(h.bericht) ? ' (' + h.bericht + ')' : '') });
+  const stappen = (Array.isArray(p.stappen) ? p.stappen : []).slice(0, 12).map(appVjStap);
+  appStuur(res, 200, Object.assign(appVjKort(p, vandaag), { ok: true,
+    waarom: p.waarom ? appKort(p.waarom, 600) : null, stappen: stappen, herkomst: herkomst, vraag: vraag,
+    meting: p.meting ? appKort(p.meting, 400) : null, laatst_gemeten: p.laatst_gemeten || null,
+    bewijs: p.bewijs ? appKort(p.bewijs, 400) : null, gesloten_door: p.gesloten_door || null, gesloten_op: p.gesloten_op || null,
+    terug_ms: appVjTerugMs(p.id, nu) }));
+}
+// POST /app/voor-jou/keuze {id, van, keuze: gedaan|later|vervallen|terug, tot?}. Onder het invoerslot (niet in APP_SLOT_VRIJ),
+// sessie glijdt, alleen de primaire kant, 60 per uur, auditregel zonder tekst. ↩️ alleen binnen een minuut na een keuze op deze pod.
+async function appVoorJouKeuze(req, res, a, d) {
+  const id = d.id, keuze = String(d.keuze || ''), van = String(d.van || '');
+  if (!Number.isInteger(id) || id < 1 || id > 999999999 || !Object.hasOwn({ gedaan: 1, later: 1, vervallen: 1, terug: 1 }, keuze)) return appWeiger(res, 400, 'ongeldige keuze', 'voor-jou velden');
+  const nu = Date.now(), vandaag = appYmd(nu);
+  let tot = null;
+  if (keuze === 'later') {
+    tot = String(d.tot || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(tot) || !(tot > vandaag) || tot > appYmdPlus(vandaag, 60)) return appWeiger(res, 400, 'kies een dag na vandaag (hooguit 60 dagen)', 'voor-jou tot');
+  }
+  if (keuze !== 'terug' && ['open', 'later'].indexOf(van) < 0) return appWeiger(res, 400, 'ongeldige keuze', 'voor-jou van');
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het straks', 'rol passief');
+  if (!appTeller('voorjou', APP_VJ_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_VJ_PER_UUR + ')', 'grens voor-jou');
+  let punten;
+  try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
+  const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === id; });
+  if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'voor-jou ' + id + ' weg');
+  let body;
+  const t = appStaat.vjTerug[id];
+  if (keuze === 'terug') {
+    if (!t || t.tot <= nu || t.apparaat !== a.id) return appWeiger(res, 409, 'terugdraaien kan alleen tot een minuut na je keuze', 'voor-jou terug te laat');
+    body = { p_sleutel: p.sleutel, p_van: t.naar, p_naar: t.van, p_door: 'david', p_later_tot: t.van === 'later' ? t.later_tot : null };
+  } else {
+    body = { p_sleutel: p.sleutel, p_van: van, p_naar: keuze, p_door: 'david', p_later_tot: tot };
+  }
+  let r;
+  try { r = await appSbRpc('mk_voor_jou_status', body); } catch (e) { logError('app-voor-jou', e); appStaat.vjCache = null; return appWeiger(res, 503, 'opslaan lukte nu niet; probeer het zo opnieuw', 'voor-jou rpc'); }
+  appStaat.vjCache = null;
+  res._app.reden = 'voor-jou ' + keuze + ' #' + id + ' -> ' + (r && r.ok ? 'ok' : 'conflict');
+  if (!r || r.ok !== true) {
+    if (keuze === 'terug') delete appStaat.vjTerug[id];
+    return appStuur(res, 409, { ok: false, fout: 'dit punt is intussen veranderd; ververs de lijst', nu: r && typeof r.nu === 'string' ? r.nu : null });
+  }
+  if (keuze === 'terug') delete appStaat.vjTerug[id];
+  else appStaat.vjTerug[id] = { van: van, naar: keuze, later_tot: van === 'later' ? (p.later_tot || null) : null, tot: nu + APP_VJ_TERUG_MS, apparaat: a.id };
+  Object.keys(appStaat.vjTerug).forEach(function (k) { if (appStaat.vjTerug[k].tot <= nu) delete appStaat.vjTerug[k]; });
+  const melding = keuze === 'gedaan' ? 'Gedaan. Socev kijkt bij de volgende ronde of het ook zo gemeten wordt.'
+    : keuze === 'later' ? 'Op later gezet tot ' + appVjDag(tot) + '.' : keuze === 'vervallen' ? 'Weggehaald: niet meer nodig.' : 'Teruggedraaid.';
+  const q = r.punt || {};
+  appStuur(res, 200, { ok: true, melding: melding, punt: Object.assign(appVjKort(Object.assign({}, p, { status: q.status || p.status, later_tot: q.later_tot }), vandaag), { terug_ms: appVjTerugMs(id, Date.now()) }) });
+}
+
+// ── Details bij het actielijstje (wv335; bouwplan Voor jou § 2, § 4.4): GET /app/vandaag/actie/<datum>/<positie> ──
+// Uit voorwerk_portie de bron + sleutel van die regel, dan alleen-lezen de bron zelf: de Todoist-taak (inhoud, beschrijving, link),
+// de actie_state-rij (volledige tekst, bronpagina-naam, deadline) of de correspondentie_state-rij (onderwerp, aan, datum, Gmail-link).
+// Een regel die het patiëntvangnet al verborg ("tekst weggelaten") of een brontekst die op patiëntcontact wijst: alleen "tekst
+// verborgen". Op een apparaat met een vaste plek geen privébronnen (Todoist Privé/Inbox, privé-entiteiten, het privé-postvak).
+// Niets op schijf; niet in het geheugen van Vandaag.
+const APP_ACTIE_STATE_TABEL = process.env.APP_ACTIE_STATE_TABEL || 'vNAY2dVRpSx1l3Ri';
+const APP_CORR_STATE_TABEL = process.env.APP_CORR_STATE_TABEL || 'pnX6vvg2iv256HAB';
+const APP_TODOIST_PRIVE = (process.env.APP_TODOIST_PRIVE || '6gH8FwGg4FjJgHcF,6gH864WhmwFwpRjv').split(',');   // Todoist-projecten Privé en Inbox
+const APP_ENTITEIT_PRIVE = /(^|\/|\s)(priv[eé]|gezin|gambia|thuis|persoonlijk)/i;
+// Zoals appKort, maar regels blijven (een Todoist-beschrijving is vaak een lijstje)
+function appVjRegels(s, n) {
+  s = String(s == null ? '' : s).replace(/\r/g, '').replace(/[\u0000-\u0009\u000b-\u001f\u007f]+/g, ' ').replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return s.length > n ? s.slice(0, n - 1).replace(/\s+\S*$/, '') + '…' : s;
+}
+function appBronVerborgen(t) { return /tekst weggelaten/i.test(String(t || '')) || !appVjVeilig(t); }
+async function appTodoistTaak(id) {
+  const tok = process.env.TODOIST_MCP_TOKEN;
+  if (!tok) throw new Error('todoist niet ingericht');
+  const r = await fetch('https://api.todoist.com/api/v1/tasks/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + tok, accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error('todoist http ' + r.status);
+  return r.json();
+}
+async function appVandaagActieDetail(req, res, a, rest) {
+  res._app.stil = true;
+  const m = /^(\d{4}-\d{2}-\d{2})\/([1-9]|10)$/.exec(rest);
+  if (!m) return appWeiger(res, 404, 'onbekend', 'actie-detail pad');
+  const datum = m[1], positie = Number(m[2]), vast = !!(a && a.soort === 'vast');
+  let rijen;
+  try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-actie-detail', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen', 'actie-detail lezen'); }
+  const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
+  if (!rij) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'actie-detail onbekend');
+  const bron = String(rij.bron || ''), sl = String(rij.sleutel || '');
+  const regel = appKort(String(rij.regel || rij.titel || '').replace(/^\d+\.\s*/, ''), 220);
+  const uit = { ok: true, datum: datum, positie: positie, bron: bron === 'todoist' ? 'Todoist' : bron === 'actie_state' ? 'actiepunt (notulen, app-groep of overleg)' : bron === 'correspondentie_state' ? 'mail waarin je iets beloofde of vroeg' : 'onbekend',
+    regel: regel, tekst: null, toelichting: null, verwacht: null, deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(rij.hard || '')) ? rij.hard : null,
+    bronpagina: null, aan: null, onderwerp: null, op: null, link: null, link_tekst: null, verborgen: false, prive: false, fout: null };
+  if (appBronVerborgen(rij.regel) || appBronVerborgen(rij.titel)) { uit.verborgen = true; uit.regel = 'tekst verborgen'; res._app.reden = 'actie-detail verborgen'; return appStuur(res, 200, uit); }
+  try {
+    if (bron === 'todoist' && /^[A-Za-z0-9]{6,40}$/.test(sl)) {
+      const t = await appTodoistTaak(sl);
+      if (!t) uit.fout = 'deze Todoist-taak bestaat niet meer (afgevinkt of verwijderd)';
+      else if (vast && APP_TODOIST_PRIVE.indexOf(String(t.project_id || '')) >= 0) uit.prive = true;
+      else {
+        const tekst = String(t.content || ''), besch = String(t.description || '');
+        if (appBronVerborgen(tekst) || (besch && appBronVerborgen(besch))) uit.verborgen = true;
+        else {
+          uit.tekst = appKort(appVjOpmaakWeg(tekst), 500); uit.toelichting = besch ? appVjRegels(besch, 1500) : null;
+          const due = t.deadline && t.deadline.date ? t.deadline.date : t.due && t.due.date ? String(t.due.date).slice(0, 10) : null;
+          if (due && /^\d{4}-\d{2}-\d{2}$/.test(due)) uit.deadline = due;
+          uit.verwacht = t.checked ? 'al afgevinkt in Todoist' : 'afvinken in Todoist als het gedaan is (of ✅ hier)';
+        }
+        uit.link = 'https://app.todoist.com/app/task/' + sl; uit.link_tekst = 'Open in Todoist';
+      }
+    } else if (bron === 'actie_state' && /^[A-Za-z0-9._-]{3,120}$/.test(sl)) {
+      const r = (await appN8nRijen(APP_ACTIE_STATE_TABEL, { type: 'and', filters: [{ columnName: 'actie_id', condition: 'eq', value: sl }] }, 1))[0];
+      if (!r) uit.fout = 'dit actiepunt staat niet meer in de bewaking';
+      else if (vast && APP_ENTITEIT_PRIVE.test(String(r.entiteit || ''))) uit.prive = true;
+      else if (appBronVerborgen(r.actie)) uit.verborgen = true;
+      else {
+        uit.tekst = appKort(r.actie, 1000);
+        const pg = /([^\/|,]+?)\.md\b/.exec(String(r.bron || ''));
+        uit.bronpagina = pg && appVjVeilig(pg[1]) ? appKort(pg[1].trim(), 160) : null;
+        const dl = [r.deadline, r.uiterlijk].map(String).find(function (x) { return /^\d{4}-\d{2}-\d{2}$/.test(x); });
+        if (dl) uit.deadline = dl;
+        uit.verwacht = (r.eigenaar && !/^david$/i.test(String(r.eigenaar)) ? 'eigenaar ' + appKort(r.eigenaar, 60) + '; ' : '') + 'jij zorgt dat het gebeurt' + (r.entiteit ? ' (' + appKort(r.entiteit, 60) + ')' : '');
+      }
+    } else if (bron === 'correspondentie_state' && /^[a-f0-9]{10,24}$/.test(sl)) {
+      const r = (await appN8nRijen(APP_CORR_STATE_TABEL, { type: 'and', filters: [{ columnName: 'thread_id', condition: 'eq', value: sl }] }, 1))[0];
+      const maten = r && /doktersmaten/i.test(String(r.bron || ''));
+      if (!r) uit.fout = 'deze mail staat niet meer in de bewaking';
+      else if (vast && !maten) uit.prive = true;
+      else if (appBronVerborgen(r.onderwerp)) uit.verborgen = true;
+      else {
+        uit.onderwerp = appKort(r.onderwerp, 300); uit.aan = r.tegenpartij ? appKort(r.tegenpartij, 160) : null;
+        uit.op = /^\d{4}-\d{2}-\d{2}/.test(String(r.verzonden_op || '')) ? String(r.verzonden_op).slice(0, 10) : null;
+        const dl = String(r.uiterlijk || ''); if (/^\d{4}-\d{2}-\d{2}$/.test(dl)) uit.deadline = dl;
+        uit.verwacht = r.type === 'belofte_david' ? 'je beloofde hier iets; afronden of laten weten' : 'je wacht op antwoord; nabellen of laten vallen';
+        uit.link = 'https://mail.google.com/mail/?authuser=' + (maten ? 'doktersmaten@hapleusden.nl' : 'd.schaap@gmail.com') + '#all/' + sl;
+        uit.link_tekst = maten ? 'Open de draad (doktersmaten)' : 'Open de draad in Gmail';
+      }
+    } else uit.fout = 'van deze bron heb ik geen details';
+  } catch (e) { logError('app-actie-detail', e); uit.fout = 'de bron is nu niet te lezen; probeer het zo opnieuw'; }
+  if (uit.prive) { uit.tekst = null; uit.toelichting = null; uit.link = null; uit.link_tekst = null; uit.onderwerp = null; uit.aan = null; }
+  res._app.reden = 'actie-detail ' + datum + '#' + positie + (uit.verborgen ? ' verborgen' : uit.prive ? ' prive' : uit.fout ? ' fout' : '');
+  appStuur(res, 200, uit);
 }
 
 // ── Praktijken (fase 6 rest, wv174; bouwplan § 4.9): kerncijfers per entiteit, alleen lezen ──
@@ -7192,7 +7490,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/geschiedenis/') === 0) return appGeschiedenis(req, res, reg, a, route.slice('GET /app/geschiedenis/'.length));
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res);
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
-        if (route === 'GET /app/agents') return appAgents(req, res);
+        if (route === 'GET /app/agents') return appAgents(req, res, a);
         if (route.indexOf('GET /app/agent/') === 0) return appAgentRapport(req, res, route.slice('GET /app/agent/'.length));
         if (route === 'GET /app/bestanden') return appBestanden(req, res);
         if (route.indexOf('GET /app/bestand/') === 0) return appBestand(req, res, route.slice('GET /app/bestand/'.length));
@@ -7216,6 +7514,10 @@ function handleApp(req, res) {
         if (route === 'GET /app/vandaag') return appVandaagRoute(req, res, a);
         if (route === 'GET /app/praktijken') return appPraktijkenRoute(req, res, a);
         if (route === 'POST /app/actie') return appActieRoute(req, res, a, d);
+        if (route === 'GET /app/voor-jou') return appVoorJouRoute(req, res, a);   // wv335
+        if (route.indexOf('GET /app/voor-jou/') === 0) return appVoorJouDetail(req, res, a, route.slice('GET /app/voor-jou/'.length));
+        if (route === 'POST /app/voor-jou/keuze') return appVoorJouKeuze(req, res, a, d);
+        if (route.indexOf('GET /app/vandaag/actie/') === 0) return appVandaagActieDetail(req, res, a, route.slice('GET /app/vandaag/actie/'.length));
         if (route === 'GET /app/sleutels') return appSleutels(req, res, a);
         if (route === 'POST /app/sleutels/vervang') return appSleutelVervang(req, res, reg, a, s, d);
         if (route === 'GET /app/push') return appPushStand(req, res, a);

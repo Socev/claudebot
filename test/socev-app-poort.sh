@@ -55,6 +55,7 @@ const wachterStaat = { j: null, kapot: false };
 const agendaStaat = { pad: 'agenda-proef-x1', events: [], mails: [], aanroepen: [], kapot: false };   // wv136
 const vkStaat = { pad: 'voorwerk-knop-app-proef1', aanroepen: [], antwoord: null, status: 200, traag: false };   // wv173: AI - Voorwerk-knoppen, ingang Knop (app)
 const akStaat = { pad: 'agenda-knop-app-aaaaaaaaaaaa', aanroepen: [], antwoord: null, status: 200, traag: false, wacht: null, onleesbaar: false };   // wv315: AI - Agenda-knoppen, ingang Knop (app)
+const todoistStaat = { taken: {}, aanroepen: [], kapot: false };   // wv335
 const apiLogNep = [];   // wv315: wat de pod als res._log in api.log zou zetten (alleen /bericht)
 const VAULT_T = path.join(W, 'vault');
 const pushes = [];
@@ -172,6 +173,11 @@ async function nepFetch(url, opt) {
       const pg = n8nStaat.paginas[u.searchParams.get('workflowId')], i = Number(u.searchParams.get('cursor') || 0);
       return antw(200, { data: pg[i] || [], nextCursor: i + 1 < pg.length ? String(i + 1) : null }); }
     if (u.pathname === '/api/v1/executions') { const e = n8nStaat.executies[u.searchParams.get('workflowId')]; return antw(200, { data: e ? [].concat(e) : [], nextCursor: null }); }
+    if (u.pathname === '/api/v1/data-tables/vNAY2dVRpSx1l3Ri/rows' || u.pathname === '/api/v1/data-tables/pnX6vvg2iv256HAB/rows') {   // wv335: actie_state / correspondentie_state
+      const f = JSON.parse(u.searchParams.get('filter') || 'null'), t = u.pathname.includes('vNAY') ? (n8nStaat.actieState || []) : (n8nStaat.corrState || []);
+      (n8nStaat.stateFilters = n8nStaat.stateFilters || []).push(f);
+      return antw(200, { data: t.filter((x) => !f || f.filters.every((y) => y.condition === 'eq' && x[y.columnName] === y.value)), nextCursor: null });
+    }
     if (u.pathname === '/api/v1/data-tables/jTz5tgWWPhkFz9Be/rows') return n8nStaat.portieKapot ? antw(500, {}) : antw(200, { data: (n8nStaat.portie || []).slice().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)), nextCursor: null });
     if (u.pathname === '/api/v1/credentials' && (!opt.method || opt.method === 'GET')) return spNep.kapot ? antw(500, {}) : antw(200, { data: spNep.creds.map((c) => ({ id: c.id, name: c.name, type: c.type, createdAt: '2026-06-09T10:00:00.000Z', updatedAt: c.updatedAt })), nextCursor: null });
     if (u.pathname.startsWith('/api/v1/credentials/schema/')) { const t = u.pathname.slice('/api/v1/credentials/schema/'.length); return antw(200, { properties: t === 'httpHeaderAuth' ? { name: {}, value: {} } : t === 'anthropicApi' ? { apiKey: {}, url: {} } : { clientId: {}, clientSecret: {} } }); }
@@ -214,6 +220,13 @@ async function nepFetch(url, opt) {
     if (b.actie === 'agenda') return agendaStaat.kapot ? antw(500, {}) : antw(200, { start: b.start, end: b.end, aantal: agendaStaat.events.length, events: agendaStaat.events });
     if (b.actie === 'mail_zoeken') return antw(200, { query: b.query, aantal: agendaStaat.mails.length, mails: agendaStaat.mails });
     return antw(400, {});
+  }
+  if (url.startsWith('https://api.todoist.com/api/v1/tasks/')) {   // wv335: alleen lezen
+    const id = decodeURIComponent(url.slice('https://api.todoist.com/api/v1/tasks/'.length));
+    (todoistStaat.aanroepen).push({ id, auth: opt && opt.headers && opt.headers.Authorization, m: opt && opt.method });
+    if (todoistStaat.kapot) return antw(500, {});
+    const t = todoistStaat.taken[id];
+    return t ? antw(200, t) : antw(404, {});
   }
   if (url === 'https://wachter.toets/stand') return wachterStaat.kapot ? antw(503, {}) : antw(200, wachterStaat.j);
   if (/^https:\/\/(fcm\.googleapis\.com|[a-z0-9-]+\.notify\.windows\.com)\//.test(url)) {
@@ -282,6 +295,19 @@ async function nepFetch(url, opt) {
       else { rij = { id: vl.length + 1, bron: q.bron, soort: q.soort, outputsoort: q.outputsoort, referentie: q.referentie, signaal: q.signaal, context: q.context, verwerkt: false, n: 1 }; vl.push(rij); }
       return antw(200, { ok: true, id: rij.id });
     }
+    if (fn === 'mk_voor_jou_lijst') {   // wv335: zoals de echte (open/later + 7 dagen gesloten), volgorde van de tabel
+      if (sbStaat.vjKapot) return antw(500, { message: 'kapot' });
+      return antw(200, { punten: (sbStaat.vj || []).filter((x) => b.p_alles || x.status === 'open' || x.status === 'later' || (x.gesloten_op && Date.now() - Date.parse(x.gesloten_op) < 7 * 86400000)).map((x) => Object.assign({}, x)), op: new Date().toISOString() });
+    }
+    if (fn === 'mk_voor_jou_status') {   // wv335: compare-and-set zoals de echte
+      if (sbStaat.vjKapot) return antw(500, { message: 'kapot' });
+      const x = (sbStaat.vj || []).find((y) => y.sleutel === b.p_sleutel);
+      if (b.p_naar === 'later' && !b.p_later_tot) return antw(400, { message: 'later vraagt een datum' });
+      if (!x || x.status !== b.p_van) return antw(200, { ok: false, fout: 'conflict', nu: x ? x.status : null });
+      Object.assign(x, { status: b.p_naar, later_tot: b.p_naar === 'later' ? b.p_later_tot : null, gesloten_door: ['gedaan', 'vervallen'].includes(b.p_naar) ? b.p_door : null,
+        gesloten_op: ['gedaan', 'vervallen'].includes(b.p_naar) ? new Date().toISOString() : null, bewijs: b.p_bewijs != null ? b.p_bewijs : x.bewijs });
+      return antw(200, { ok: true, punt: Object.assign({}, x) });
+    }
     if (fn === 'mk_app_verbruik') return antw(200, sbStaat.verbruik || { nu: new Date().toISOString(), laatste: null, reeks: [] });
     if (fn === 'sb_app_vapid_lezen') return sbStaat.geenVapid ? antw(200, null) : antw(200, VAPID_W);
     if (fn === 'mk_werkvoorraad_stand') return antw(200, { items: sbStaat.wvItems || [], stand: { aan: true }, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' } });
@@ -311,7 +337,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', N8N_WEBHOOK_VERBETERLOG: 'nep-vbl', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
     APP_BINDING_BESTAND: path.join(W, 'app-binding.json'),   // wv316
-    N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
+    TODOIST_MCP_TOKEN: 'nep-todoist', N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
   VAULT: VAULT_T,
   TOETSUUR: () => toetsUur,
   TOETSBUUR: () => toetsBUur, SECRET: 'g'.repeat(40),
@@ -321,7 +347,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVandaagActieDetail, appInvoerRoute, appVjStap };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -4245,6 +4271,202 @@ async function bewijs(o) {
       r = await P.p.evaluate((k) => post('/api/passkey/opties', { apparaatsleutel: k }), SLEUTEL);
       bw = await P.p.evaluate((o) => bewijs(o), r.j.opties);
       await P.p.evaluate((x) => post('/api/passkey/bevestig', { antwoord: x }), bw);
+    }
+
+    // ── 27. wv335: Voor jou (bouwplan Voor jou § 2, § 4.4) en details bij het actielijstje ──
+    {
+      const sV = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      if (sV) sV.tot = Date.now() + 20 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      rolStub.primair = true;
+      const ymd = (t) => new Date(t).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
+      const plus = (d, n) => { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+      const V = ymd(Date.now()), dm = (d) => Number(d.slice(8)) + '-' + Number(d.slice(5, 7));
+      const pnt = (id, sl, x) => Object.assign({ id, sleutel: sl, soort: 'doen', titel: 'Titel ' + sl, waarom: 'Waarom ' + sl, stappen: [], deadline: null, waar: 'overal', prive: false, duur_min: null,
+        herkomst: { wv: [] }, status: 'open', later_tot: null, bewijs: 'BEWIJS-' + sl, gesloten_door: null, meting: 'METING-' + sl, laatst_gemeten: new Date().toISOString(), volgorde: 100, gesloten_op: null }, x || {});
+      sbStaat.vj = [
+        pnt(1, 'nas-backup', { deadline: plus(V, 9), waar: 'praktijk', duur_min: 15, stappen: ['Open de stappenlijst', 'Typ: n8n export:credentials --all --output=/tmp/c.json (zonder --decrypted)', 'Draai `ls -la /mnt` op de NAS', 'Zeg gedaan'],
+          herkomst: { wv: [62], todoist: ['6hhXcR5c57pp4PXM'], register: ['2026-10-07 13:30'] } }),
+        pnt(2, 'vandaag-punt', { deadline: V, waar: 'pixel', duur_min: 90 }),
+        pnt(3, 'morgen-punt', { deadline: plus(V, 1), waar: 'pc', duur_min: 5 }),
+        pnt(4, 'over-tijd', { deadline: plus(V, -2) }),
+        pnt(5, 'besluit-x', { soort: 'besluit', herkomst: { wv: [325], register: ['2026-10-09 19:55'] } }),
+        pnt(6, 'besluit-pat', { soort: 'besluit', herkomst: { register: ['2026-10-09 19:40#wv318'] } }),
+        pnt(7, 'later-toekomst', { status: 'later', later_tot: plus(V, 3) }),
+        pnt(8, 'later-verlopen', { status: 'later', later_tot: V }),
+        pnt(9, 'bonsai', { soort: 'besluit', prive: true }),
+        pnt(10, 'gesloten', { status: 'gedaan', gesloten_door: 'beheer', gesloten_op: new Date().toISOString() }),
+      ];
+      sbStaat.wvItems = [{ id: 62, label: 'machinekamer:olares-backup-status', samenvatting: 'Back-up van Olares controleren', status: 'geblokkeerd', geblokkeerd_door: 'David: NAS-backup instellen', opdracht: 'GEHEIME-OPDRACHT' },
+        { id: 325, label: 'machinekamer:wv315 agenda-knop', samenvatting: null, status: 'geblokkeerd', geblokkeerd_door: 'David: ja', opdracht: 'X' }];
+      fs.mkdirSync(path.join(VAULT_T, '00_Systeem'), { recursive: true });
+      fs.writeFileSync(path.join(VAULT_T, '00_Systeem', 'Open vragen aan David.md'), '# Open vragen\n\n| Gesteld | Kanaal | Vraag | Mijn aanname | Status | Bewijs |\n|---|---|---|---|---|---|\n'
+        + '| 2026-10-09 19:55 | machinekamer (agentrapport wv315) | **Zal ik de ✅ naar de app verplaatsen?** Wat er verandert: [[00_Systeem/Iets\\|iets]]. | Ja — eerst één proef | open | wv325 |\n'
+        + '| 2026-10-09 19:40 | machinekamer (agentrapport wv255) | Mag de nacontrole lopen? | Ja | beantwoord: JA | x |\n'
+        + '| 2026-10-09 19:40 | machinekamer (agentrapport wv318, VRAAG) | Gaat het om patiënt Jansen, geboortedatum 1-1-1950? | Ja | open | x |\n'
+        + '| 2026-10-07 13:30 | debug | Mag Socev de back-upstatus lezen? | Ja | open | x |\n');
+      H.appStaat.vjCache = null; H.appStaat.vjRegister = null; H.appStaat.vjTerug = {}; H.appStaat.wvCache = null;
+      r = await vraag('GET', '/app/voor-jou', undefined, { pot: pot() });
+      toets('27 GET /app/voor-jou zonder sessie -> 401', r.status === 401, r.status);
+      const nRpc = () => sbRpc.filter((x) => x.fn === 'mk_voor_jou_lijst').length;
+      const nAu = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      const n0 = nRpc();
+      r = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
+      const ids = (r.j.punten || []).map((x) => x.id);
+      toets('27 lijst: open + later-vandaag, zonder later-toekomst en gesloten; volgorde van de tabel; privé wel op de telefoon', r.status === 200 && ids.join() === '1,2,3,4,5,6,8,9' && r.j.zichtbaar === 5 && r.j.meer === 3, JSON.stringify(ids) + ' ' + r.j.meer);
+      toets('27 later-toekomst apart met datum', (r.j.later || []).length === 1 && r.j.later[0].id === 7 && r.j.later[0].later_tot === plus(V, 3), JSON.stringify(r.j.later));
+      const L = Object.fromEntries((r.j.punten || []).map((x) => [x.id, x]));
+      toets('27 regel 2: wanneer · waar · duur', L[1].regel2 === 'uiterlijk ' + dm(plus(V, 9)) + ' · op de praktijk · ± 15 min' && L[2].regel2 === 'vandaag · op je telefoon · ± 1,5 u' && L[3].regel2 === 'uiterlijk morgen · op de pc · ± 5 min'
+        && L[4].regel2 === 'over tijd (' + dm(plus(V, -2)) + ')' && L[5].regel2 === 'besluit', JSON.stringify([L[1].regel2, L[2].regel2, L[3].regel2, L[4].regel2, L[5].regel2]));
+      toets('27 dichtbij (deadline ≤ 48 u): vandaag, morgen en over tijd', [2, 3, 4].every((i) => L[i].dichtbij) && !L[1].dichtbij && !L[5].dichtbij);
+      toets('27 lijst zonder bewijs, herkomst, meting, sleutel of waarom', !/BEWIJS-|METING-|herkomst|sleutel|Waarom /.test(JSON.stringify(r.j)), JSON.stringify(r.j).slice(0, 300));
+      toets('27 GET (200) is stil: geen auditregel', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAu);
+      r = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
+      toets('27 tweede keer binnen 60 s uit het geheugen (één RPC)', r.status === 200 && nRpc() === n0 + 1, nRpc() - n0);
+      const nepRes = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
+      let nr = nepRes();
+      await H.appVoorJouRoute({}, nr, { id: 'x', soort: 'vast' });
+      toets('27 vaste plek: privé-punt niet in de lijst', nr.st === 200 && !nr.b.punten.some((x) => x.id === 9) && nr.b.punten.length === 7 && nr.b.vaste_plek === true, JSON.stringify(nr.b.punten.map((x) => x.id)));
+      // details
+      r = await vraag('GET', '/app/voor-jou/1', undefined, { pot: P.jar });
+      const D = r.j;
+      toets('27 details: waarom, stappen, meting, bewijs', r.status === 200 && D.waarom === 'Waarom nas-backup' && D.stappen.length === 4 && D.meting === 'METING-nas-backup' && D.bewijs === 'BEWIJS-nas-backup', JSON.stringify(D).slice(0, 300));
+      toets('27 stappen: commando na "Typ:" zonder toelichting, en tussen backticks; gewone stap zonder', D.stappen[0].commando === null && D.stappen[1].commando === 'n8n export:credentials --all --output=/tmp/c.json' && D.stappen[2].commando === 'ls -la /mnt' && D.stappen[2].tekst === 'Draai ls -la /mnt op de NAS', JSON.stringify(D.stappen));
+      const hk = D.herkomst.map((x) => x.soort + ':' + x.tekst + (x.link ? ' @' + x.link : ''));
+      toets('27 herkomst in gewone taal: werkvoorraad met samenvatting en stand, vraag met tijd en status, Todoist met link', hk[0] === 'werkvoorraad:Werkvoorraad wv62: Back-up van Olares controleren (wacht op jou)' && hk[1] === 'vraag:Vraag van 7-10 13:30 (debug) — open'
+        && hk[2] === 'todoist:Todoist-taak @https://app.todoist.com/app/task/6hhXcR5c57pp4PXM' && !/GEHEIME-OPDRACHT/.test(JSON.stringify(D)), JSON.stringify(hk));
+      r = await vraag('GET', '/app/voor-jou/5', undefined, { pot: P.jar });
+      toets('27 besluit: vraag en voorstel uit het register, opmaak weg, geen Ja-knop-veld', r.status === 200 && r.j.vraag && r.j.vraag.tekst === 'Zal ik de ✅ naar de app verplaatsen? Wat er verandert: iets.' && r.j.vraag.voorstel === 'Ja — eerst één proef' && r.j.vraag.gesteld === '9-10 19:55'
+        && /^Werkvoorraad wv325: .+ \(wacht op jou\)$/.test(r.j.herkomst[0].tekst), JSON.stringify([r.j.vraag, r.j.herkomst]));
+      r = await vraag('GET', '/app/voor-jou/6', undefined, { pot: P.jar });
+      toets('27 register: kenmerk #wv318 kiest de juiste rij van twee op dezelfde tijd; patiëntachtige tekst verborgen', r.status === 200 && r.j.vraag && r.j.vraag.tekst === 'tekst verborgen' && !/Jansen|1950|nacontrole/.test(JSON.stringify(r.j)), JSON.stringify(r.j.vraag));
+      const st404 = [];
+      for (const q of ['/app/voor-jou/99', '/app/voor-jou/0', '/app/voor-jou/abc', '/app/voor-jou/7x', '/app/voor-jou/10']) st404.push((await vraag('GET', q, undefined, { pot: P.jar })).status);
+      toets('27 details: onbekend, 0, tekst, rommel -> 404; een gesloten punt (≤ 7 d) mag wel', st404.join() === '404,404,404,404,200', st404.join());
+      nr = nepRes();
+      await H.appVoorJouDetail({}, nr, { id: 'x', soort: 'vast' }, '9');
+      toets('27 details privé-punt op een vaste plek -> 404', nr.st === 404, nr.st);
+      // keuze
+      const nS = () => sbRpc.filter((x) => x.fn === 'mk_voor_jou_status');
+      const K = (b) => vraag('POST', '/app/voor-jou/keuze', b, { pot: P.jar });
+      r = await vraag('POST', '/app/voor-jou/keuze', { id: 1, van: 'open', keuze: 'gedaan' }, { pot: pot() });
+      toets('27 keuze zonder sessie -> 401, geen RPC', r.status === 401 && nS().length === 0, r.status);
+      const ong = [];
+      for (const b of [{ id: 1, van: 'open', keuze: 'constructor' }, { id: '1', van: 'open', keuze: 'gedaan' }, { id: 1.5, van: 'open', keuze: 'gedaan' }, { id: 1, van: 'gedaan', keuze: 'gedaan' }, { id: 1, van: 'open', keuze: 'later' },
+        { id: 1, van: 'open', keuze: 'later', tot: V }, { id: 1, van: 'open', keuze: 'later', tot: plus(V, 61) }, { id: 1, van: 'open', keuze: 'later', tot: 'morgen' }, { id: 1, van: 'open', keuze: 'open' }])
+        ong.push((await K(b)).status);
+      toets('27 ongeldig (keuze, id-tekst, id 1.5, van, later zonder/te vroeg/te laat/rommel, keuze open) -> 400, geen RPC', ong.join() === '400,400,400,400,400,400,400,400,400' && nS().length === 0, ong.join());
+      r = await K({ id: 99, van: 'open', keuze: 'gedaan' });
+      toets('27 keuze op onbekend punt -> 404', r.status === 404 && nS().length === 0, r.status);
+      const nAu2 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await K({ id: 2, van: 'open', keuze: 'gedaan' });
+      const s1 = nS()[0] || {};
+      toets('27 Gedaan -> 200; RPC met sleutel, van open, naar gedaan, door david, zonder bewijs', r.status === 200 && r.j.ok === true && /Gedaan/.test(r.j.melding) && r.j.punt.status === 'gedaan' && r.j.punt.terug_ms > 50000
+        && s1.b.p_sleutel === 'vandaag-punt' && s1.b.p_van === 'open' && s1.b.p_naar === 'gedaan' && s1.b.p_door === 'david' && s1.b.p_bewijs === undefined, JSON.stringify([r.j, s1.b]));
+      const au = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter(Boolean).slice(nAu2 - 1);
+      toets('27 auditregel "voor-jou gedaan #2 -> ok", zonder titel of sleutel', au.some((l) => l.includes('"route":"/app/voor-jou/keuze"') && l.includes('voor-jou gedaan #2 -> ok')) && !au.some((l) => /Titel|vandaag-punt/.test(l)), au.join('\n').slice(-300));
+      r = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
+      const p2 = (r.j.punten || []).find((x) => x.id === 2);
+      toets('27 lijst meteen vers: het gedane punt blijft een minuut staan met terug_ms', p2 && p2.status === 'gedaan' && p2.terug_ms > 50000, JSON.stringify(p2));
+      r = await K({ id: 2, van: 'open', keuze: 'gedaan' });
+      toets('27 tweede Gedaan op hetzelfde punt (van klopt niet meer) -> 409 met de stand', r.status === 409 && r.j.nu === 'gedaan', JSON.stringify(r.j));
+      r = await K({ id: 2, keuze: 'terug' });
+      const s2 = nS()[nS().length - 1].b;
+      toets('27 ↩️ binnen de minuut -> van gedaan naar open', r.status === 200 && r.j.punt.status === 'open' && s2.p_van === 'gedaan' && s2.p_naar === 'open' && sbStaat.vj[1].status === 'open', JSON.stringify([r.j, s2]));
+      r = await K({ id: 2, keuze: 'terug' });
+      toets('27 tweede ↩️ -> 409 (alleen tot een minuut na een keuze)', r.status === 409, r.status);
+      r = await K({ id: 8, van: 'later', keuze: 'later', tot: plus(V, 7) });
+      toets('27 Later (volgende week) vanaf later -> later_tot mee', r.status === 200 && r.j.punt.status === 'later' && r.j.punt.later_tot === plus(V, 7) && nS()[nS().length - 1].b.p_later_tot === plus(V, 7), JSON.stringify(r.j));
+      r = await K({ id: 8, keuze: 'terug' });
+      toets('27 ↩️ van later naar later: de oude datum terug', r.status === 200 && sbStaat.vj[7].status === 'later' && sbStaat.vj[7].later_tot === V && nS()[nS().length - 1].b.p_later_tot === V, JSON.stringify(sbStaat.vj[7]));
+      r = await K({ id: 3, van: 'open', keuze: 'vervallen' });
+      toets('27 Niet meer nodig -> vervallen door david', r.status === 200 && sbStaat.vj[2].status === 'vervallen' && sbStaat.vj[2].gesloten_door === 'david', JSON.stringify(sbStaat.vj[2]));
+      H.appStaat.vjTerug[3].tot = Date.now() - 1;
+      r = await K({ id: 3, keuze: 'terug' });
+      toets('27 ↩️ na de minuut -> 409, punt blijft dicht', r.status === 409 && sbStaat.vj[2].status === 'vervallen', r.status);
+      r = await K({ id: 4, van: 'open', keuze: 'later', tot: plus(V, 1) });
+      const bijTerug = H.appStaat.vjTerug[4]; H.appStaat.vjTerug[4] = Object.assign({}, bijTerug, { apparaat: 'ander-apparaat' });
+      const rT = await K({ id: 4, keuze: 'terug' });
+      H.appStaat.vjTerug[4] = bijTerug;
+      toets('27 ↩️ vanaf een ander apparaat dan de keuze -> 409', r.status === 200 && rT.status === 409, rT.status);
+      rolStub.primair = false;
+      r = await K({ id: 5, van: 'open', keuze: 'gedaan' });
+      rolStub.primair = true;
+      toets('27 reservekant -> 409, geen RPC', r.status === 409 && sbStaat.vj[4].status === 'open', r.status);
+      sbStaat.vjKapot = true; H.appStaat.vjCache = null;
+      r = await K({ id: 5, van: 'open', keuze: 'gedaan' });
+      const rl = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
+      const rd = await vraag('GET', '/app/voor-jou/5', undefined, { pot: P.jar });
+      sbStaat.vjKapot = false;
+      toets('27 databank weg: keuze 503, lijst 200 met fout in gewone taal, details 503', r.status === 503 && rl.status === 200 && rl.j.fout === 'de lijst is nu niet te lezen' && rl.j.punten.length === 0 && rd.status === 503, [r.status, rl.status, rd.status].join());
+      nr = nepRes(); nr._app = {};
+      await H.appVoorJouKeuze({}, nr, { id: 'x', soort: 'vast' }, { id: 9, van: 'open', keuze: 'gedaan' });
+      toets('27 keuze op een privé-punt vanaf een vaste plek -> 404', nr.st === 404 && sbStaat.vj[8].status === 'open', nr.st);
+      toets('27 keuze valt onder het invoerslot (vaste plek)', H.appInvoerRoute('POST /app/voor-jou/keuze', false, {}, { id: 'x' }) === true);
+      H.appStaat.tellers.voorjou = Array(60).fill(Date.now());
+      r = await K({ id: 5, van: 'open', keuze: 'gedaan' });
+      H.appStaat.tellers.voorjou = [];
+      toets('27 grens 60 per uur -> 429', r.status === 429, r.status);
+      // teller in /app/nieuw en verwijsregel in Agents
+      H.appStaat.vjCache = null;
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('27 /app/nieuw: tabs.vandaag = punten met deadline ≤ 48 u (vandaag-punt en over-tijd; morgen-punt vervallen, over-tijd later)', r.status === 200 && r.j.tabs.vandaag === 1, JSON.stringify(r.j.tabs));
+      r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+      toets('27 Agents: voor_jou = aantal zichtbare punten; oude lijst blijft voor een oude app', r.status === 200 && r.j.voor_jou === 6 && Array.isArray(r.j.wacht_op_david), JSON.stringify([r.j.voor_jou, (r.j.wacht_op_david || []).length]));
+      // ── details bij het actielijstje ──
+      const ymdP = V;
+      const prt = (pos, extra) => Object.assign({ nonce: String(pos).repeat(32).slice(0, 32), datum: ymdP, positie: pos, aantal: 3, bron: 'todoist', sleutel: 'TAAK' + pos + 'abcdef', titel: 't', regel: pos + '. Actie ' + pos + '… (Todoist)', herhaal: false, hard: '',
+        status: 'afgehandeld', keuze: 'gedaan', message_id: 4242, verloopt: Date.now() + 3600000, createdAt: new Date().toISOString() }, extra || {});
+      n8nStaat.portie = [prt(1), prt(2, { bron: 'actie_state', sleutel: 'tolgaarde-2026-09-21-begeleiding', hard: plus(V, 6) }), prt(3, { bron: 'correspondentie_state', sleutel: '198d200cd455fcc8' }),
+        prt(4, { bron: 'actie_state', sleutel: 'tolgaarde-x', regel: '4. [actie uit Tolgaarde, tekst weggelaten] (Tolgaarde)', titel: '[tekst weggelaten]' }), prt(5, { bron: 'correspondentie_state', sleutel: 'aaaabbbbccccdddd' }),
+        prt(6, { sleutel: 'PRIVEtaak123' }), prt(7, { bron: 'actie_state', sleutel: 'gambia-x' }), prt(8, { sleutel: 'WEGtaak12345' }), prt(9, { bron: 'actie_state', sleutel: 'pat-x' })];
+      todoistStaat.taken = { TAAK1abcdef: { id: 'TAAK1abcdef', content: 'Synology: map en **gebruiker** aanmaken', description: 'Zie de stappenlijst in de vault.', project_id: '6gH8FxmpGHVVg5Gf', due: { date: plus(V, 2) }, checked: false },
+        PRIVEtaak123: { id: 'PRIVEtaak123', content: 'Cadeau kopen', description: '', project_id: '6gH8FwGg4FjJgHcF', due: null } };
+      n8nStaat.actieState = [{ actie_id: 'tolgaarde-2026-09-21-begeleiding', entiteit: 'Tolgaarde', actie: 'Begeleiding regelen voor de VS op elf dagen zonder DS of AL: 21, 23, 26 en 28 oktober', eigenaar: 'David',
+        bron: '10_Zakelijk/Tolgaarde/Conversaties/Teams - Overleg (actueel).md, bericht 21-9 12:05', deadline: plus(V, 12), uiterlijk: plus(V, 6), bevinding: 'GEHEIME-BEVINDING' },
+        { actie_id: 'gambia-x', entiteit: 'Prive/Gambia', actie: 'Toezegging aan Kemo', bron: 'x.md' }, { actie_id: 'pat-x', entiteit: 'Tolgaarde', actie: 'Huisbezoek mw. Jansen inplannen', bron: 'y.md' }];
+      n8nStaat.corrState = [{ thread_id: '198d200cd455fcc8', type: 'belofte_david', tegenpartij: 'Demi (BHV.NL) <d@bhv.nl>', onderwerp: 'Workshop Reanimatie & AED', verzonden_op: '2026-09-15', uiterlijk: '', bron: 'doktersmaten mail 1a0a | HERCHECK met account doktersmaten', bevinding: 'GEHEIME-BEVINDING' },
+        { thread_id: 'aaaabbbbccccdddd', type: 'vraag_david', tegenpartij: 'Iemand', onderwerp: 'Offerte keuken', verzonden_op: '2026-10-01', bron: 'prive mail x' }];
+      todoistStaat.aanroepen = [];
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/1', undefined, { pot: pot() });
+      toets('27 actie-detail zonder sessie -> 401', r.status === 401, r.status);
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/1', undefined, { pot: P.jar });
+      toets('27 actie-detail Todoist: volledige tekst, toelichting, deadline, link; token als Bearer, alleen GET', r.status === 200 && r.j.bron === 'Todoist' && r.j.tekst === 'Synology: map en gebruiker aanmaken' && r.j.toelichting === 'Zie de stappenlijst in de vault.' && r.j.deadline === plus(V, 2)
+        && r.j.link === 'https://app.todoist.com/app/task/TAAK1abcdef' && todoistStaat.aanroepen[0].auth === 'Bearer nep-todoist' && !todoistStaat.aanroepen[0].m, JSON.stringify(r.j));
+      toets('27 actie-detail: geen nonce, message_id of sleutel van de rij', !/1111111111|4242|nonce|message_id/.test(JSON.stringify(r.j)));
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/2', undefined, { pot: P.jar });
+      toets('27 actie-detail actiepunt: volledige tekst, bronpagina-naam, deadline (uiterlijk), geen bevinding; filter op actie_id', r.status === 200 && /^Begeleiding regelen .* 28 oktober$/.test(r.j.tekst) && r.j.bronpagina === 'Teams - Overleg (actueel)' && r.j.deadline === plus(V, 12)
+        && !/GEHEIME-BEVINDING/.test(JSON.stringify(r.j)) && JSON.stringify(n8nStaat.stateFilters[n8nStaat.stateFilters.length - 1]) === JSON.stringify({ type: 'and', filters: [{ columnName: 'actie_id', condition: 'eq', value: 'tolgaarde-2026-09-21-begeleiding' }] }), JSON.stringify(r.j));
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/3', undefined, { pot: P.jar });
+      toets('27 actie-detail mail (doktersmaten): onderwerp, aan, datum, link naar de draad in dat postvak', r.status === 200 && r.j.onderwerp === 'Workshop Reanimatie & AED' && r.j.aan === 'Demi (BHV.NL) <d@bhv.nl>' && r.j.op === '2026-09-15'
+        && r.j.link === 'https://mail.google.com/mail/?authuser=doktersmaten@hapleusden.nl#all/198d200cd455fcc8' && !/GEHEIME/.test(JSON.stringify(r.j)), JSON.stringify(r.j));
+      const nF = n8nStaat.stateFilters.length;
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/4', undefined, { pot: P.jar });
+      toets('27 actie-detail: regel die het vangnet al verborg -> tekst verborgen, bron niet gelezen', r.status === 200 && r.j.verborgen === true && r.j.regel === 'tekst verborgen' && r.j.tekst === null && n8nStaat.stateFilters.length === nF, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/9', undefined, { pot: P.jar });
+      toets('27 actie-detail: brontekst die op patiëntcontact wijst -> verborgen', r.status === 200 && r.j.verborgen === true && !/Jansen|Huisbezoek/.test(JSON.stringify(r.j)), JSON.stringify(r.j));
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/8', undefined, { pot: P.jar });
+      toets('27 actie-detail: Todoist-taak bestaat niet meer -> 200 met uitleg', r.status === 200 && /bestaat niet meer/.test(r.j.fout) && r.j.tekst === null, JSON.stringify(r.j));
+      const vastA = { id: 'x', soort: 'vast' };
+      const dv = async (pos) => { const n = nepRes(); await H.appVandaagActieDetail({}, n, vastA, ymdP + '/' + pos); return n; };
+      const v6 = await dv(6), v7 = await dv(7), v5 = await dv(5), v3 = await dv(3), v1 = await dv(1);
+      toets('27 vaste plek: Todoist Privé, privé-entiteit en het privé-postvak -> prive zonder tekst of link; werk en doktersmaten wel', v6.b.prive === true && v6.b.tekst === null && v6.b.link === null && !/Cadeau/.test(JSON.stringify(v6.b))
+        && v7.b.prive === true && !/Kemo/.test(JSON.stringify(v7.b)) && v5.b.prive === true && !/keuken/.test(JSON.stringify(v5.b)) && v3.b.prive === false && v3.b.onderwerp && v1.b.tekst, JSON.stringify([v6.b, v7.b, v5.b].map((x) => [x.prive, x.tekst, x.onderwerp])));
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/5', undefined, { pot: P.jar });
+      toets('27 meereizend: privé-postvak wel, met link naar d.schaap@gmail.com', r.j.onderwerp === 'Offerte keuken' && r.j.link === 'https://mail.google.com/mail/?authuser=d.schaap@gmail.com#all/aaaabbbbccccdddd', JSON.stringify(r.j));
+      const p404 = [];
+      for (const q of ['/app/vandaag/actie/' + ymdP + '/11', '/app/vandaag/actie/' + ymdP + '/0', '/app/vandaag/actie/gisteren/1', '/app/vandaag/actie/' + ymdP, '/app/vandaag/actie/2020-01-01/1']) p404.push((await vraag('GET', q, undefined, { pot: P.jar })).status);
+      toets('27 actie-detail: positie 11/0, rommeldatum, zonder positie, onbekende dag -> 404', p404.join() === '404,404,404,404,404', p404.join());
+      todoistStaat.kapot = true;
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/1', undefined, { pot: P.jar });
+      todoistStaat.kapot = false;
+      toets('27 Todoist weg -> 200 met fout in gewone taal, geen tekst', r.status === 200 && /niet te lezen/.test(r.j.fout) && r.j.tekst === null, JSON.stringify(r.j));
+      n8nStaat.portieKapot = true;
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/1', undefined, { pot: P.jar });
+      n8nStaat.portieKapot = false;
+      toets('27 actielijstje onleesbaar -> 503', r.status === 503, r.status);
+      toets('27 de pod schrijft niets in Todoist of de tabellen (alleen GET)', todoistStaat.aanroepen.every((x) => !x.m) && !n8nStaat.aanroepen.some((x) => /vNAY2dVRpSx1l3Ri|pnX6vvg2iv256HAB/.test(x.url) && /delete|update|upsert/.test(x.url)));
+      sbStaat.vj = []; H.appStaat.vjCache = null;
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
