@@ -26,6 +26,15 @@
  *       e. DNS app-pod.socev.dev -> tunnel; f. ingress (alleen ^/app/); g. toets
  *       Bouwplan: vault 01_Ontwikkeling/Socev-app - bouwplan (7-10-2026).md § 4.5. Nieuwe Pages-secrets werken pas na
  *       een nieuwe Pages-uitrol (npm run deploy in /opt/data/socev-app).
+ *   node tools/tunnel-inrichten.js tel                  Spraak via de telefoon (Tasker), wv264 9-10-2026: /tel op socev.huisdokter.dev
+ *       a. servicetoken "tasker-pixel" (Access, 1 jaar) zoeken of aanmaken -> /opt/data/socev-app-data/geheim/tel-servicetoken.json
+ *          (0600; de pod geeft het één keer door bij /tel/koppel met een verse code uit de app, daarna staat het alleen in Tasker)
+ *       b. Access-app op socev.huisdokter.dev/tel/{beurt,uit,deel,gespeeld} die ALLEEN dat token toelaat, met
+ *          service_auth_401_redirect (geen inlogpagina onder huisdokter.dev; /tel/koppel valt er bewust buiten)
+ *       c. /opt/data/socev-app-data/tel-config.json (aud, teamdomein, client-id; geen geheimen) voor server.js
+ *       d. ingress (alleen de vijf /tel-paden) + toets. TEL_DIENST=http://localhost:<poort> stuurt /tel tijdelijk naar
+ *          een proefserver (ketentoets vóór de uitrol); daarna 'ingress' zonder TEL_DIENST.
+ *       Bouwplan: vault 01_Ontwikkeling/Spraak via de telefoon (Tasker) - bouwplan (9-10-2026).md § 6 en § 8.
  *   --editor bestaat niet meer (6-10-2026): geen editor en geen inlogpagina onder huisdokter.dev (phishingvlag Google).
  *
  * Nooit `cloudflared tunnel route dns` (kaapt het record); DNS gaat hier via de API.
@@ -52,6 +61,11 @@ const APP_ACCESS_NAAM = 'Socev-app pod-ingang (alleen servicetoken)';
 const APP_PAGES = 'socev-app';
 const TEAM = 'https://huisdokter.cloudflareaccess.com';
 const KLUISNAAM = 'cloudflare_tunnel_token_olares';
+// Spraak via de telefoon (wv264): eigen servicetoken + Access-app, alleen op de /tel-paden van de vaste naam
+const TEL_ST_NAAM = 'tasker-pixel';
+const TEL_ACCESS_NAAM = 'Socev telefoon (Tasker) /tel - alleen servicetoken';
+const TEL_ACCESS_PADEN = ['tel/beurt', 'tel/uit', 'tel/deel', 'tel/gespeeld'];   // /tel/koppel niet: Tasker heeft dan nog geen token
+const TEL_PAD = '^/tel/(koppel|beurt|uit|deel/[0-9a-f]{16}/[0-9]{1,2}|gespeeld/[0-9a-f]{16})$';   // = TEL_ROUTE_RE in server.js
 const BIN = '/opt/data/bin/cloudflared';
 const LOG = '/opt/data/bin/tunnel.log';
 const METRICS = '127.0.0.1:' + (process.env.TUNNEL_METRICS_POORT || '20241');   // zelfde poort als server.js (los-proces-herkenning)
@@ -79,6 +93,9 @@ function ingress() {
     Object.assign({ hostname: N8N, path: '^/healthz/readiness$' }, n8nOrigin),
     { hostname: N8N, service: 'http_status:404' },
     { hostname: SOCEV, path: '^/(health/publiek|auto/(ota/?|ws|hartslag|bericht/[0-9a-f]{32}/aankondiging))$', service: 'http://localhost:8080' },
+    // Telefoon (Tasker, wv264): alleen de vijf /tel-paden; de query (?wacht=50) telt niet mee in het pad. Access-servicetoken
+    // tasker-pixel staat ervóór (behalve /tel/koppel); de pod controleert daarna zelf Access-bewijs, apparaatsleutel en app-sessie.
+    { hostname: SOCEV, path: TEL_PAD, service: /^http:\/\/localhost:\d{2,5}$/.test(process.env.TEL_DIENST || '') ? process.env.TEL_DIENST : 'http://localhost:8080' },
     // Socev-app: alleen /app/<kleine letters, cijfers, / en ->; geen punt, geen procentteken (dus ook geen %2e%2e).
     // Daarvóór al: '..'-segmenten 404. De pod controleert daarna zelf poortgeheim, Access-bewijs en sessie.
     { hostname: APP_POD, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
@@ -114,6 +131,8 @@ async function accessOpHuisdokter() {
   const apps = await cf('GET', '/accounts/' + ACC + '/access/apps?per_page=100');
   return (apps || []).filter(function (a) {
     const doelen = [a.domain].concat((a.destinations || []).map(function (d) { return d.uri; })).concat(a.self_hosted_domains || []);
+    // wv264: de /tel-app van de telefoon is alleen-servicetoken met service_auth_401_redirect: een kale 401, geen inlogpagina
+    if (a.name === TEL_ACCESS_NAAM && a.service_auth_401_redirect === true && doelen.every(function (d) { return !d || /^socev\.huisdokter\.dev\/tel\//.test(String(d)); })) return false;
     return doelen.some(function (d) { return /(^|\.)huisdokter\.dev(\/|$)/.test(String(d || '')); });
   }).map(function (a) { return a.name; });
 }
@@ -242,6 +261,44 @@ async function appPod() {
   console.log('ingress gezet');
 }
 
+// ── Telefoon (Tasker), stap tel (wv264) ──
+async function telServicetoken() {
+  const lijst = await cf('GET', '/accounts/' + ACC + '/access/service_tokens');
+  const bestaand = (lijst || []).find(function (t) { return t.name === TEL_ST_NAAM; });
+  const lokaal = appGeheimLees('tel-servicetoken.json');
+  if (bestaand) {
+    if (!lokaal || JSON.parse(lokaal).client_id !== bestaand.client_id) throw new Error('servicetoken "' + TEL_ST_NAAM + '" bestaat, maar het geheim staat niet (meer) op de pod - vervangen via de machinekamer (rotate), niet blind opnieuw');
+    console.log('servicetoken ' + TEL_ST_NAAM + ' bestaat (verloopt ' + bestaand.expires_at + ')');
+    return { id: bestaand.id, client_id: bestaand.client_id };
+  }
+  const t = await cf('POST', '/accounts/' + ACC + '/access/service_tokens', { name: TEL_ST_NAAM, duration: '8760h' });
+  appGeheimSchrijf('tel-servicetoken.json', JSON.stringify({ id: t.id, client_id: t.client_id, client_secret: t.client_secret, aangemaakt: new Date().toISOString(), verloopt: t.expires_at || null }));
+  console.log('servicetoken ' + TEL_ST_NAAM + ' aangemaakt (verloopt ' + (t.expires_at || '?') + ')');
+  return { id: t.id, client_id: t.client_id };
+}
+async function telAccess(tokenId) {
+  const apps = await cf('GET', '/accounts/' + ACC + '/access/apps?per_page=100');
+  const body = { name: TEL_ACCESS_NAAM, type: 'self_hosted', domain: SOCEV + '/' + TEL_ACCESS_PADEN[0],
+    destinations: TEL_ACCESS_PADEN.map(function (p) { return { type: 'public', uri: SOCEV + '/' + p }; }),
+    session_duration: '24h', app_launcher_visible: false, auto_redirect_to_identity: false, service_auth_401_redirect: true, skip_interstitial: true,
+    policies: [{ name: 'Alleen servicetoken ' + TEL_ST_NAAM, decision: 'non_identity', precedence: 1, include: [{ service_token: { token_id: tokenId } }] }] };
+  const bestaand = (apps || []).find(function (a) { return a.name === TEL_ACCESS_NAAM; });
+  const app = bestaand ? await cf('PUT', '/accounts/' + ACC + '/access/apps/' + bestaand.id, body) : await cf('POST', '/accounts/' + ACC + '/access/apps', body);
+  console.log('access-app ' + TEL_ACCESS_NAAM + ': ' + (bestaand ? 'bijgewerkt' : 'aangemaakt') + ' (' + ((app.destinations || []).map(function (d) { return d.uri; }).join(', ') || app.domain) + ')');
+  return app.aud;
+}
+async function telStap() {
+  const st = await telServicetoken();
+  const aud = await telAccess(st.id);
+  const cfgPad = path.join(APP_DATA, 'tel-config.json');
+  fs.writeFileSync(cfgPad + '.nieuw', JSON.stringify({ access_team: TEAM, access_aud: aud, servicetoken_client_id: st.client_id, bijgewerkt: new Date().toISOString() }, null, 1), { mode: 0o600 });
+  fs.renameSync(cfgPad + '.nieuw', cfgPad);
+  console.log('tel-config.json geschreven (aud ' + aud.slice(0, 8) + '…)');
+  const t = await tunnelZoekOfMaak();
+  await cf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + t + '/configurations', ingress());
+  console.log('ingress gezet' + (process.env.TEL_DIENST ? ' (/tel tijdelijk naar ' + process.env.TEL_DIENST + ')' : ''));
+}
+
 function draaitAl() {
   for (const pid of fs.readdirSync('/proc').filter(function (d) { return /^\d+$/.test(d); })) {
     let cmd = ''; try { cmd = fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8'); } catch (e) { continue; }
@@ -340,6 +397,7 @@ async function toets() {
     console.log((goed ? 'GROEN ' : 'ROOD  ') + 'padtruc dicht  [GET ' + host + pad + ' -> ' + r.status + ']');
   }
   fout += await toetsAppPod(n404);
+  fout += await toetsTel();
   const apps = await accessOpHuisdokter().catch(function (e) { return ['(niet leesbaar: ' + e.message + ')']; });
   if (apps.length) fout++;
   console.log((apps.length ? 'ROOD  ' : 'GROEN ') + 'geen Access-app op huisdokter.dev' + (apps.length ? ' [' + apps.join('; ') + ']' : ''));
@@ -390,6 +448,47 @@ async function toetsAppPod(n404) {
   return fout;
 }
 
+// Telefoon (wv264): zonder servicetoken weigert Access (kale 401, geen inlogpagina) op de vier paden; /tel/koppel bereikt de
+// pod; met het token komt het verzoek bij de pod, die zonder apparaatsleutel 401 geeft. Andere /tel-paden en padtrucs: 404.
+// Een echte apparaatsleutel gebruikt deze toets nooit (dat zou Davids koppeling vervangen); die route toetst test/tel-poort.sh.
+async function toetsTel() {
+  let fout = 0;
+  const regel = function (goed, wat, r, extra) { if (!goed) fout++; console.log((goed ? 'GROEN ' : 'ROOD  ') + wat + '  [' + extra + ' -> ' + r.status + (r.location ? ' ' + r.location.slice(0, 50) : '') + ']'); };
+  const tokTekst = appGeheimLees('tel-servicetoken.json');
+  if (!tokTekst) { console.log('LET OP  /tel nog niet ingericht (geen tel-servicetoken.json): alleen de controle dat /tel dicht is'); }
+  const U = 'https://' + SOCEV, ID = '0123456789abcdef';
+  const paden = [['POST', '/tel/beurt'], ['GET', '/tel/uit?wacht=50'], ['GET', '/tel/deel/' + ID + '/1'], ['POST', '/tel/gespeeld/' + ID]];
+  const geenInlog = function (r) { return !r.location && !/<form|<input|cloudflareaccess\.com\/cdn-cgi\/access\/login/i.test(r.tekst); };
+  for (const [m, p] of paden) {
+    const r = await http(m, U + p);
+    regel(tokTekst ? (r.status === 401 || r.status === 403) && geenInlog(r) : r.status === 404, tokTekst ? 'tel zonder servicetoken: Access weigert, geen inlogpagina' : '/tel nog dicht (404)', r, m + ' ' + p);
+  }
+  try {   // de volledige weigerpagina: geen formulier, invoerveld of inloglink (huisdokter.dev, phishingvlag 6-10)
+    const v = await fetch(U + '/tel/uit', { redirect: 'manual', signal: AbortSignal.timeout(15000) });
+    const h = (await v.text()).replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, '');
+    regel(!/<form|<input|cdn-cgi\/access\/login|<a [^>]*href/i.test(h) && !v.headers.get('location'), 'tel-weigerpagina zonder formulier, invoer of inloglink', { status: v.status }, 'GET /tel/uit (hele pagina)');
+  } catch (e) { regel(false, 'tel-weigerpagina lezen', { status: 0 }, e.name); }
+  if (!tokTekst) return fout;
+  const t = JSON.parse(tokTekst), tok = { 'CF-Access-Client-Id': t.client_id, 'CF-Access-Client-Secret': t.client_secret };
+  let r = await http('POST', U + '/tel/koppel');
+  regel(r.status === 401 && /koppelcode/.test(r.tekst), 'tel/koppel zonder token bereikt de pod (401: geen geldige koppelcode)', r, 'POST /tel/koppel');
+  r = await http('GET', U + '/tel/uit?wacht=50', { 'CF-Access-Client-Id': t.client_id, 'CF-Access-Client-Secret': 'fout' });
+  regel((r.status === 401 || r.status === 403) && !/niet toegestaan/.test(r.tekst), 'tel met fout tokengeheim: Access weigert', r, 'GET /tel/uit');
+  for (const [m, p] of paden) {
+    r = await http(m, U + p, tok);
+    regel(r.status === 401 && /niet toegestaan/.test(r.tekst), 'tel met token, zonder apparaatsleutel: de pod weigert (401)', r, m + ' ' + p);
+  }
+  for (const [m, p] of [['GET', '/tel'], ['GET', '/tel/'], ['GET', '/tel/x'], ['GET', '/tel/deel/' + ID + '/123'], ['POST', '/tel/gespeeld'], ['GET', '/tel/deel/ABCDEF0123456789/1'], ['GET', '/TEL/uit']]) {
+    r = await http(m, U + p, tok);
+    regel(r.status === 404 && !/niet toegestaan/.test(r.tekst), 'ander /tel-pad dicht in de tunnel (404)', r, m + ' ' + p);
+  }
+  for (const p of ['/tel/uit/../../health', '/tel/%2e%2e/health', '/tel/koppel/../beurt', '/tel/koppel%2F..%2Fbeurt', '/tel/deel/' + ID + '/1/../../../run']) {
+    r = await rauw('GET', SOCEV, p, tok);
+    regel(r.status === 404 || r.status === 400, 'tel padtruc dicht', r, 'GET ' + p);
+  }
+  return fout;
+}
+
 (async function () {
   const stap = process.argv[2] || 'toets';
   // Uitwijk stap 6d (review 8-10 #2): dit script raakt socev-olares en start zo nodig een cloudflared met een vers
@@ -412,7 +511,12 @@ async function toetsAppPod(n404) {
       await new Promise(function (r) { setTimeout(r, 20000); });
       process.exit(await toets() ? 1 : 0);
     }
-    if (stap !== 'inrichten') throw new Error('onbekende stap ' + stap + ' (toets | ingress | app-pod | inrichten)');
+    if (stap === 'tel') {
+      await telStap();
+      await new Promise(function (r) { setTimeout(r, 20000); });
+      process.exit(await toets() ? 1 : 0);
+    }
+    if (stap !== 'inrichten') throw new Error('onbekende stap ' + stap + ' (toets | ingress | app-pod | tel | inrichten)');
     const id = await tunnelZoekOfMaak();
     await cf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + id + '/configurations', ingress());
     console.log('ingress gezet');

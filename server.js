@@ -3334,7 +3334,7 @@ const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-app
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
-  'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak']);   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
+  'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel']);   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter); vaste plek
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -3417,7 +3417,8 @@ const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', '
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
   'POST /app/modellen',    // wv138: een runtimewissel raakt alle workflows; nooit vanaf een werk-pc
-  'POST /app/sleutels/vervang']);   // wv157: sleutels alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot
+  'POST /app/sleutels/vervang',    // wv157: sleutels alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot
+  'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel']);   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
 const APP_BSN_TEKST = 'in je bericht staat een getal dat op een BSN lijkt (9 cijfers die de elfproef halen). Patiëntgegevens horen niet in Socev: haal het weg. Gaat het om iets anders, stuur het dan vanaf je telefoon.';
 
 const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [] },
@@ -4456,12 +4457,13 @@ function appGevoelig(tekst) {
 // Getypte tekst mag geen knopdruk of andere herkomstmarkering nabootsen: Socev herkent een bevestigde knop aan een beurt die
 // begint met "[APP] [KNOP] David drukte JA" (Fable-ontwerpreview wv135 #2). Regels die met zo'n markering beginnen krijgen
 // "(getypt) " ervoor; de weergave in de app houdt Davids eigen tekst.
-function appOntmasker(t) {
+// wv264: een beurt van de telefoon (/tel) krijgt "(gesproken)" in plaats van "(getypt)"; [AUTO] kan dus ook niet nagebootst worden.
+function appOntmasker(t, merk) {
   // Eerst normaliseren: onzichtbare opmaaktekens (zero-width, BOM, zachte afbreking, woordverbinder) weg en NFKC (vol-breedte ［ -> [),
   // anders glipt "​[KNOP]" erdoor (Fable-review diff wv135 #2). Daarna ELKE markering, waar ook in de tekst (ook na "> " of
   // "**"), en niet alleen aan het begin van een regel.
   return String(t).replace(/\p{Cf}/gu, '').normalize('NFKC')
-    .replace(/\[(\s*)(KNOP|APP|REPLY OP VRAAG|FILES-PORTAAL|MACHINEKAMER|Systeem|WERKVOORRAAD|HEARTBEAT)\b/gi, '(getypt) [$1$2');
+    .replace(/\[(\s*)(KNOP|APP|AUTO|REPLY OP VRAAG|FILES-PORTAAL|MACHINEKAMER|Systeem|WERKVOORRAAD|HEARTBEAT)\b/gi, '(' + (merk || 'getypt') + ') [$1$2');
 }
 
 function appUitvoer(j) {
@@ -4550,8 +4552,11 @@ async function appNaBeurt(jobId) {
     apparaat: j.app.apparaat, tekst: j.app.tekst, invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
     vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
   j.app.gelogd = goed;
-  if (goed && !j.opgehaald) j.opgehaald = Date.now();
-  appPushNaBeurt(jobId);   // fase 5c: seintje als de app het antwoord niet binnen 20 s ophaalt
+  // wv264: een beurt van de telefoon zet eerst zijn uit-item op schijf; pas dan telt hij als opgehaald (anders gooit een
+  // uitrol het antwoord tussen klaar en bewaard weg). Luistert de telefoon, dan geen seintje: het antwoord klinkt al.
+  const telGoed = j.app.soort === 'tel' ? telNaBeurt(jobId, out, r.ok !== false) : true;
+  if (goed && telGoed && !j.opgehaald) j.opgehaald = Date.now();
+  if (!(j.app.soort === 'tel' && telLuistert(j.app.tel))) appPushNaBeurt(jobId);   // fase 5c: seintje als de app het antwoord niet binnen 20 s ophaalt
 }
 
 function appStartBeurt(a, kanaal, promptTekst, meta) {
@@ -4587,7 +4592,7 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
     }
   }
   jobs[jobId] = { status: 'pending', created: Date.now(), workspace: DEFAULT_WS, chat_id: chatId, runtime: keuze.runtime,
-    app: { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, soort: meta.soort, tekst: meta.tekst,
+    app: { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, soort: meta.soort, tekst: meta.tekst, tel: meta.tel || undefined,
       invoer: meta.upload ? meta.upload.lijst.map(function (x) { return x.doel; }) : [] } };
   // Zelfde wachtrij als /run: een Telegram-bericht en een app-bericht in hetzelfde gesprek lopen na elkaar.
   enqueue(sessionKey(DEFAULT_WS, chatId), function () {
@@ -6858,6 +6863,9 @@ function handleApp(req, res) {
         if (route === 'POST /app/push/opzeggen') return appPushOpzeggen(req, res, a);
         if (route === 'POST /app/push/soorten') return appPushSoorten(req, res, a, d);
         if (route === 'POST /app/push/proef') return appPushProef(req, res, a);
+        if (route === 'GET /app/tel') return telAppStand(req, res, a);                       // wv264: ⚙ → Telefoon
+        if (route === 'POST /app/tel/koppelcode') return telAppKoppelcode(req, res, reg, a, s);
+        if (route === 'POST /app/tel/ontkoppel') return telAppOntkoppel(req, res, a);
         return appWeiger(res, 404, 'onbekend', 'route');
       };
       Promise.resolve().then(function () { return verder(false); }).catch(function (e) {
@@ -6910,6 +6918,8 @@ function appNoodstop(bron) {
     });
     if (uit.ingetrokken.length) appSchrijfJson(APP_REGISTER, reg);
   } catch (e) { uit.ingetrokken = []; uit.fouten.push('register: ' + String(e && e.message || e).slice(0, 80)); }
+  // wv264: ook de telefoon (Tasker) ontkoppelen; opnieuw koppelen in de app na /app-aan
+  try { const tu = telIntrekken('noodstop'); uit.tel_ingetrokken = tu.ingetrokken; if (tu.fout) uit.fouten.push('tel: ' + tu.fout); } catch (e) { uit.fouten.push('tel: ' + String(e && e.message || e).slice(0, 80)); }
   uit.ok = uit.app_uit && uit.fouten.length === 0;
   appAudit({ route: 'noodstop', m: 'POST', status: uit.ok ? 200 : 500, apparaat: null,
     reden: 'noodstop via ' + String(bron || '').slice(0, 40) + ': ' + uit.ingetrokken.length + ' ingetrokken, ' + uit.sessies + ' sessies' + (uit.fouten.length ? ', fout ' + uit.fouten.join('; ') : '') });
@@ -7406,6 +7416,7 @@ function appInfo() {
     aanvraag_open: !!appAanvraagGeldig(), sessies: Object.keys(appStaat.sessies).length,
     beurten_lopend: Object.keys(jobs).filter(function (id) { return jobs[id].app && (jobs[id].status === 'pending' || jobs[id].status === 'running'); }).length,
     omlijsting: !!appOmlijsting(),
+    tel: telInfo(),   // wv264
     bestanden_mb: Math.round((appStaat.bestandenTotaal || 0) / 1048576),
     passkey_bibliotheek: appWebauthn() ? appStaat.webauthnBron : 'ontbreekt',
     seintjes: appPushInfo(),
@@ -7449,7 +7460,7 @@ function appNaastJsonl(f) {
 }
 function appNaastLokaal(dag, nu) {
   const g = appNaastGrenzen(dag), in_ = function (t) { const x = Date.parse(t); return x >= g[0] && x < g[1]; };
-  const kanaal = function () { return { berichten: 0, knoppen: 0, fout: 0, gemist: 0, van_socev: 0, per_bron: {} }; };   // wv263: van_socev = /bericht
+  const kanaal = function () { return { berichten: 0, knoppen: 0, tel: 0, fout: 0, gemist: 0, van_socev: 0, per_bron: {} }; };   // wv263: van_socev = /bericht   // wv264: tel = vanaf de telefoon (Tasker), apart
   const app = { hoofd: kanaal(), machinekamer: kanaal(), opnames: 0, met_bestand: 0, storing: 0 };
   const gelogd = {};
   ['hoofd', 'machinekamer'].forEach(function (k) {
@@ -7457,7 +7468,7 @@ function appNaastLokaal(dag, nu) {
       if (x.job_id) gelogd[x.job_id] = true;
       if (!in_(x.t)) return;
       if (x.soort === 'socev') { app[k].van_socev++; app[k].per_bron[x.bron || '?'] = (app[k].per_bron[x.bron || '?'] || 0) + 1; return; }
-      if (x.soort === 'knop') app[k].knoppen++; else app[k].berichten++;
+      if (x.soort === 'knop') app[k].knoppen++; else if (x.soort === 'tel') app[k].tel++; else app[k].berichten++;
       if (x.ok === false) app[k].fout++;
     });
   });
@@ -7954,6 +7965,526 @@ function berichtInfo() {
       app_actief: berichtAppActief(), gewenst: berichtPushGewenst() };
   } catch (e) { return { fout: String(e && e.message || e).slice(0, 80) }; }
 }
+// ── Telefoon (Tasker) poort (/tel/*, wv264, 9-10-2026) ────────────────────────────────────────────
+// Spraak via de telefoon in de auto: één Tasker-knop op Davids Pixel neemt op, stuurt de opname hierheen, Socev antwoordt
+// in het hoofdkanaal (40687) en Tasker haalt het antwoord als audio op en speelt het af. Bouwplan: vault 01_Ontwikkeling/
+// Spraak via de telefoon (Tasker) - bouwplan (9-10-2026).md § 4-6 en § 8 (Fable-gereviewd, akkoord David 9-10 09:31).
+// Paden (de tunnel laat alleen deze door op socev.huisdokter.dev, tools/tunnel-inrichten.js stap 'tel'):
+//   POST /tel/koppel               eenmalige code uit de app (⚙ → Telefoon) -> apparaatsleutel + servicetoken; ZONDER Access
+//   POST /tel/beurt                opname (audio/mp4, 3gpp, wav) of tekst -> Whisper -> beurt '[APP] [AUTO] …' -> 202 {id}
+//   GET  /tel/uit?wacht=0-50       lange vraag (ook de hartslag): {id, soort, delen, aankondigen, bezig} of {bezig}
+//   GET  /tel/deel/<id>/<n>        WAV van deel n (Gemini-stem, zoals /app/voorlees); n = 0 = alleen de aankondiging
+//   POST /tel/gespeeld/<id>        afgeleverd; idempotent, nooit opnieuw
+// Sloten, in deze volgorde: noodstop (/opt/data/tel-uit of app-uit) -> 503; passieve kant -> 503; Access-bewijs van de
+// eigen Access-app (eigen aud, common_name = client-id van servicetoken "tasker-pixel") -> 403; apparaatsleutel
+// (Authorization: Bearer, alleen sha256 in tel-apparaten.json, 90 dagen) -> 401. /tel/beurt daarnaast alleen als de Pixel
+// waarmee gekoppeld is in dit dagdeel een app-sessie (vingerafdruk) heeft -> 423. Grenzen: 5 MB en 3 min audio of 4000
+// tekens; 30 beurten per uur, 150 per dag; 1 lopend + 2 wachtend; 1 open lange vraag per apparaat (een nieuwe vervangt de
+// oude, die krijgt een leeg antwoord). Een /tel-beurt is NOOIT een knopdruk: markeringen in de tekst krijgen "(gesproken)".
+// De uit-rij (tel-uit.json) staat op schijf vóór de beurt als opgehaald telt (uitrol); een open lange vraag telt niet als
+// lopend en krijgt bij SIGTERM netjes een leeg antwoord. Audio wordt nergens bewaard (alleen in het geheugen, tot gespeeld
+// of verlopen). Auditlog tel-audit.jsonl: tijd, route, apparaat, uitkomst, seconden/tekens; nooit inhoud.
+const TEL_REGISTER = path.join(APP_DATA, 'tel-apparaten.json');
+const TEL_RIJ = path.join(APP_DATA, 'tel-uit.json');
+const TEL_AUDIT = path.join(APP_DATA, 'tel-audit.jsonl');
+const TEL_AUDIT_VOOR = path.join(APP_DATA, 'tel-audit-voor-auth.jsonl');
+const TEL_CONFIG = path.join(APP_DATA, 'tel-config.json');                 // aud + client-id van de /tel-Access-app; geen geheimen
+const TEL_TOKEN = path.join(APP_DATA, 'geheim', 'tel-servicetoken.json');  // servicetoken tasker-pixel; alleen /tel/koppel geeft het door
+const TEL_UIT = process.env.TEL_UIT_BESTAND || '/opt/data/tel-uit';
+const TEL_ROUTE_RE = /^\/tel\/(koppel|beurt|uit|deel\/[0-9a-f]{16}\/[0-9]{1,2}|gespeeld\/[0-9a-f]{16})$/;
+const TEL_SLEUTEL_MS = 90 * 24 * 3600 * 1000;
+const TEL_CODE_MS = 2 * 60 * 1000;
+const TEL_CODE_POGINGEN = 5;
+const TEL_CODES_PER_DAG = 10;
+const TEL_KOPPEL_PER_UUR = 10;
+const TEL_MAX_BYTES = 5 * 1024 * 1024;
+const TEL_MAX_S = 180;
+const TEL_TEKST_MAX = 4000;
+const TEL_BEURTEN_PER_UUR = 30;
+const TEL_BEURTEN_PER_DAG = 150;
+const TEL_LOPEND_MAX = 3;                   // 1 lopend + 2 wachtend
+const TEL_WACHT_MAX_S = 50;                 // Cloudflare kapt na 100 s; gemeten 9-10: 50 en 58 s komen heel door de tunnel
+const TEL_LEASE_MS = 3 * 60 * 1000;
+const TEL_TTL_MS = 20 * 60 * 1000;
+const TEL_HARTSLAG_MS = 90 * 1000;
+const TEL_DELEN_PER_DAG = 200;              // eigen plafond op de Gemini-sleutel van kastje en app (bouwplan § 5)
+const TEL_DELEN_MAX = 8;                    // ± 7 min geluid; de rest staat in de app
+const TEL_VERZOEKEN_PER_UUR = 600;          // lange vraag ± 70/uur + delen
+const TEL_AUDIT_VOOR_PER_MIN = 5;
+const TEL_AFZEGGEN = 'Dat is niet gelukt. Kijk even in de app.';
+appStaat.tellers['tel-alles'] = []; appStaat.tellers['tel-beurt'] = []; appStaat.tellers['tel-beurtdag'] = []; appStaat.tellers['tel-koppel'] = [];
+appStaat.tellers['tel-codes'] = []; appStaat.tellers['tel-delen'] = [];
+const telStaat = { code: null, polls: {}, hartslag: {}, audio: {}, delen: {}, rij: null, inBehandeling: 0, voorAuth: { minuut: 0, n: 0, overgeslagen: 0 }, gestopt: false };
+
+function telUit() { return fs.existsSync(TEL_UIT) || fs.existsSync(APP_UIT); }
+function telConfig() {
+  const c = appLeesJson(TEL_CONFIG, {}) || {};
+  return { team: String(c.access_team || 'https://huisdokter.cloudflareaccess.com').replace(/\/+$/, ''), aud: String(c.access_aud || ''), clientId: String(c.servicetoken_client_id || '') };
+}
+function telToken() {
+  const t = appLeesJson(TEL_TOKEN, null);
+  return t && typeof t.client_id === 'string' && typeof t.client_secret === 'string' && t.client_id && t.client_secret ? t : null;
+}
+function telIngericht() { const c = telConfig(); return !!(c.aud && c.clientId && telToken()); }
+function telRegister() {
+  const r = appLeesStreng(TEL_REGISTER, { versie: 1, apparaten: [] });
+  if (!Array.isArray(r.apparaten)) throw new Error('kapot: tel-apparaten.json');
+  return r;
+}
+function telAudit(o, voorAuth) {
+  try {
+    if (!voorAuth) return appAuditRegel(TEL_AUDIT, o);
+    const va = telStaat.voorAuth, minuut = Math.floor(Date.now() / 60000);
+    if (va.minuut !== minuut) { va.minuut = minuut; va.n = 0; }
+    if (++va.n > TEL_AUDIT_VOOR_PER_MIN) { va.overgeslagen++; return; }
+    if (va.overgeslagen) { o = Object.assign({}, o, { overgeslagen_voor_auth: va.overgeslagen }); va.overgeslagen = 0; }
+    appAuditRegel(TEL_AUDIT_VOOR, o);
+  } catch (e) { logError('tel-audit', e); }
+}
+function telStuur(res, status, obj) {
+  if (res.headersSent) return;
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(obj));
+}
+function telWeiger(res, status, fout, reden) { if (res._tel) res._tel.reden = reden || fout; telStuur(res, status, { ok: false, fout: fout }); }
+// Apparaatsleutel uit "Authorization: Bearer <64 hex>"; het register kent alleen sha256(sleutel).
+function telApparaat(req) {
+  const m = /^Bearer ([a-f0-9]{64})$/.exec(String(req.headers.authorization || '').trim());
+  if (!m) return { fout: 'geen sleutel' };
+  const h = appSha(m[1]);
+  let reg;
+  try { reg = telRegister(); } catch (e) { logError('tel-register', e); return { fout: 'register kapot', kapot: true }; }
+  const t = reg.apparaten.find(function (x) { return x && x.actief && typeof x.sleutel_hash === 'string' && appGelijk(h, x.sleutel_hash); });
+  if (!t) return { fout: 'sleutel onbekend' };
+  if (!(Date.parse(t.verloopt) > Date.now())) return { fout: 'sleutel verlopen', verlopen: true };
+  return { t: t };
+}
+// Persoonsbinding (bouwplan § 6.3): de Pixel waarmee gekoppeld is, heeft in dit dagdeel een app-sessie (vingerafdruk).
+function telSessieOk(t) {
+  const nu = Date.now();
+  return Object.keys(appStaat.sessies).some(function (h) { const s = appStaat.sessies[h]; return s && s.apparaat === t.app_apparaat && nu <= s.tot; });
+}
+function telLuistert(id) { return !!id && Date.now() - (telStaat.hartslag[id] || 0) < TEL_HARTSLAG_MS; }
+
+// ── uit-rij: per beurt één item; op schijf (zonder audio) zodat een herstart geen antwoord kwijtraakt ──
+function telRij() {
+  if (telStaat.rij) return telStaat.rij;
+  let j = null;
+  try { j = appLeesStreng(TEL_RIJ, { versie: 1, items: [] }); } catch (e) { logError('tel-rij', e); j = { versie: 1, items: [] }; }
+  const nu = Date.now();
+  telStaat.rij = (Array.isArray(j.items) ? j.items : []).filter(function (x) { return x && /^[0-9a-f]{16}$/.test(String(x.id)) && typeof x.apparaat === 'string'; });
+  // Wat bij de vorige processtart nog liep, komt nooit meer af (een uitrol wacht erop; dit is dus een crash): fout-item.
+  let om = 0;
+  telStaat.rij.forEach(function (x) { if (x.soort === 'bezig') { x.soort = 'fout'; x.spreek = TEL_AFZEGGEN; x.t_klaar = nu; x.tot = nu + TEL_TTL_MS; om++; } });
+  if (om) telRijBewaar();
+  return telStaat.rij;
+}
+function telRijBewaar() {
+  try { appSchrijfJson(TEL_RIJ, { versie: 1, items: telStaat.rij || [] }); return true; } catch (e) { logError('tel-rij-schrijf', e); return false; }
+}
+function telOpruim() {
+  const nu = Date.now(), rij = telRij();
+  // Een beurt die niet meer loopt maar nooit afkwam (vervallen door de noodstop, job opgeruimd): fout-item, anders blijft
+  // 'bezig' staan en houdt hij de grens van 3 bezet.
+  let om = false;
+  rij.forEach(function (x) {
+    const j = typeof jobs !== 'undefined' ? jobs[x.id] : null;
+    if (x.soort === 'bezig' && (!j || (j.status !== 'pending' && j.status !== 'running' && nu - (j.done_at || 0) > 60000))) {
+      x.soort = 'fout'; x.spreek = TEL_AFZEGGEN; x.t_klaar = nu; x.tot = nu + TEL_TTL_MS; om = true; telWek(x.apparaat);
+    }
+  });
+  // gespeelde items blijven tot hun houdbaarheid (gespeeld is idempotent), maar zonder audio
+  const blijf = rij.filter(function (x) { return x.soort === 'bezig' || nu < x.tot; });
+  if (blijf.length !== rij.length || om) {
+    rij.forEach(function (x) { if (blijf.indexOf(x) < 0) { delete telStaat.audio[x.id]; delete telStaat.delen[x.id]; } });
+    telStaat.rij = blijf; telRijBewaar();
+  }
+}
+function telBezig(apparaat) { return telRij().some(function (x) { return x.apparaat === apparaat && x.soort === 'bezig'; }) ? 'ja' : 'nee'; }
+function telVolgende(apparaat) {
+  const nu = Date.now();
+  return telRij().find(function (x) { return x.apparaat === apparaat && x.soort !== 'bezig' && !x.gespeeld && nu < x.tot && !(x.lease_tot > nu); }) || null;
+}
+// Wat hardop gaat: alles tot een regel "Verder in de app:" (of "Verder in Telegram:"), zonder de VRAAG AAN DAVID-regel
+// (daarvoor één zin aan het eind), met de regels van Voorlezen in de app. Deterministisch, geen model.
+function telSpreektekst(antwoord) {
+  let t = String(antwoord || '').replace(/\r\n?/g, '\n');
+  const m = /^[^\S\n]*[*_]*Verder in (de app|Telegram)\s*:/im.exec(t);
+  if (m) t = t.slice(0, m.index);
+  let vraag = false;
+  t = t.replace(/^[^\S\n]*[*_]*VRAAG AAN DAVID:.*$/gm, function () { vraag = true; return ''; });
+  let s = appSpreektekst(t);
+  if (s.length > APP_VOORLEES_TEKST_MAX) s = s.slice(0, APP_VOORLEES_TEKST_MAX);
+  if (vraag) s = (s ? s + '\n' : '') + 'Ik heb een vraag voor je in de app.';
+  return s || 'Ik heb een antwoord voor je in de app.';
+}
+function telDelen(x) {
+  if (!telStaat.delen[x.id]) {
+    let d = appVoorleesDelen(x.spreek || TEL_AFZEGGEN);
+    if (d.length > TEL_DELEN_MAX) { d = d.slice(0, TEL_DELEN_MAX); d[TEL_DELEN_MAX - 1] += ' De rest staat in de app.'; }
+    telStaat.delen[x.id] = d;
+  }
+  return telStaat.delen[x.id];
+}
+// Audio van deel n (0 = aankondiging): één keer maken, in het geheugen tot gespeeld of verlopen.
+function telAudio(x, n) {
+  const a = telStaat.audio[x.id] = telStaat.audio[x.id] || {};
+  if (a[n]) return a[n];
+  const tekst = n === 0 ? x.aankondiging : telDelen(x)[n - 1];
+  if (!tekst) return null;
+  if (!appTeller('tel-delen', TEL_DELEN_PER_DAG, 86400000)) return Promise.reject(Object.assign(new Error('dagplafond'), { plafond: true }));
+  a[n] = appGeminiStem(tekst);
+  a[n].catch(function () { if (telStaat.audio[x.id] && telStaat.audio[x.id][n]) delete telStaat.audio[x.id][n]; });   // opnieuw proberen mag
+  return a[n];
+}
+function telAntwoordPoll(apparaat, obj) {
+  const p = telStaat.polls[apparaat];
+  if (!p) return;
+  delete telStaat.polls[apparaat];
+  clearTimeout(p.timer);
+  if (p.res._tel) { p.res._tel.reden = obj.id ? 'item ' + obj.soort : 'leeg (' + (obj.reden || 'tijd') + ')'; if (obj.id) p.res._tel.stil = false; }
+  delete obj.reden;
+  telStuur(p.res, 200, obj);
+}
+function telUitgifte(x) {
+  x.lease_tot = Date.now() + TEL_LEASE_MS;
+  x.uitgegeven = (x.uitgegeven || 0) + 1;
+  telRijBewaar();
+  return { ok: true, id: x.id, soort: x.soort, onderwerp: x.onderwerp || '', delen: telDelen(x).length, aankondigen: x.aankondiging ? 'ja' : 'nee', bezig: telBezig(x.apparaat) };
+}
+function telWek(apparaat) {
+  if (!telStaat.polls[apparaat]) return;
+  const x = telVolgende(apparaat);
+  if (x) telAntwoordPoll(apparaat, telUitgifte(x));
+}
+// Na afloop van een /tel-beurt (vanuit appNaBeurt, vóór "opgehaald"): het item klaarzetten en wegschrijven.
+// true = staat op schijf (dan mag de beurt als opgehaald tellen).
+function telNaBeurt(jobId, antwoord, ok) {
+  const x = telRij().find(function (y) { return y.id === jobId; });
+  if (!x) return true;
+  const nu = Date.now();
+  x.soort = ok && antwoord ? 'antwoord' : 'fout';
+  x.spreek = x.soort === 'fout' ? TEL_AFZEGGEN : telSpreektekst(antwoord);
+  x.t_klaar = nu; x.tot = nu + TEL_TTL_MS; delete telStaat.delen[x.id]; delete telStaat.audio[x.id];
+  const goed = telRijBewaar();
+  telWek(x.apparaat);
+  // Luistert de telefoon, dan deel 1 alvast maken (snel geluid); anders pas als hij het vraagt.
+  if (telLuistert(x.apparaat) && !telStaat.gestopt) { const p = telAudio(x, 1); if (p) p.catch(function () {}); }
+  return goed;
+}
+
+// ── opname: soort en lengte, zonder ffmpeg (Whisper slikt MPEG4/AAC, 3GPP/AMR en WAV rechtstreeks; gemeten 9-10) ──
+function telMp4Seconden(b) {
+  if (b.length < 16 || b.toString('ascii', 4, 8) !== 'ftyp') return null;
+  const doos = function (van, tot, soort) {
+    let i = van;
+    while (i + 8 <= tot) {
+      let n = b.readUInt32BE(i), kop = 8;
+      const t = b.toString('ascii', i + 4, i + 8);
+      if (n === 1) { if (i + 16 > tot) return null; n = Number(b.readBigUInt64BE(i + 8)); kop = 16; }
+      else if (n === 0) n = tot - i;
+      if (n < kop || i + n > tot) return null;
+      if (t === soort) return { van: i + kop, tot: i + n };
+      i += n;
+    }
+    return null;
+  };
+  const moov = doos(0, b.length, 'moov');
+  const mvhd = moov && doos(moov.van, moov.tot, 'mvhd');
+  if (!mvhd || mvhd.tot - mvhd.van < 32) return null;
+  const v = b[mvhd.van];
+  const schaal = v === 1 ? b.readUInt32BE(mvhd.van + 20) : b.readUInt32BE(mvhd.van + 12);
+  const duur = v === 1 ? Number(b.readBigUInt64BE(mvhd.van + 24)) : b.readUInt32BE(mvhd.van + 16);
+  return schaal > 0 ? duur / schaal : null;
+}
+function telWavSeconden(b) {
+  if (b.length < 44 || b.toString('ascii', 0, 4) !== 'RIFF' || b.toString('ascii', 8, 12) !== 'WAVE') return null;
+  let i = 12, rate = 0;
+  while (i + 8 <= b.length) {
+    const t = b.toString('ascii', i, i + 4), n = b.readUInt32LE(i + 4);
+    if (t === 'fmt ' && n >= 16 && i + 24 <= b.length) rate = b.readUInt32LE(i + 16);   // byterate
+    if (t === 'data') return rate > 0 ? Math.min(n, b.length - i - 8) / rate : null;
+    i += 8 + n + (n % 2);
+  }
+  return null;
+}
+function telOpname(b) {
+  const mp4 = telMp4Seconden(b);
+  if (mp4 !== null) return { soort: 'mp4', s: mp4 };
+  const wav = telWavSeconden(b);
+  if (wav !== null) return { soort: 'wav', s: wav };
+  return null;
+}
+
+// ── routes ──
+function telIsPad(req) { const p = reqPath(req); return p === '/tel' || p.indexOf('/tel/') === 0; }
+function handleTel(req, res) {
+  const p = reqPath(req);
+  res._log = { tel: 1 };
+  res._tel = { route: p.replace(/\/[0-9a-f]{16}(\/[0-9]{1,2})?$/, '').slice(0, 40), status: 0, reden: null, apparaat: null, voorAuth: true, s: undefined, tekens: undefined };
+  res.on('finish', function () {
+    const o = res._tel;
+    if (o.stil && res.statusCode === 200) return;
+    telAudit({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden, s: o.s, tekens: o.tekens }, o.voorAuth);
+  });
+  const weg = function (st, f, r) { req.resume(); return telWeiger(res, st, f, r); };
+  if (telUit()) return weg(503, 'de telefoonkoppeling staat uit (noodstop)', fs.existsSync(TEL_UIT) ? 'tel-uit' : 'app-uit');
+  const route = req.method + ' ' + p;
+  if (!TEL_ROUTE_RE.test(p) || !/^(GET \/tel\/(uit|deel\/)|POST \/tel\/(koppel|beurt|gespeeld\/))/.test(route)) return weg(404, 'onbekend', 'pad/methode');
+  appRolOk().then(function (primair) {
+    if (!primair) return weg(503, 'Socev draait op de reserve, gebruik Telegram', 'rol passief');
+    if (route === 'POST /tel/koppel') return telKoppel(req, res);
+    const cfg = telConfig();
+    return appAccessOk(req, cfg).then(function (afwijzing) {
+      if (afwijzing) return weg(403, 'niet toegestaan', 'access: ' + afwijzing);
+      const ap = telApparaat(req);
+      if (ap.kapot) return weg(503, 'telefoonregister onleesbaar; vraag de machinekamer', 'register kapot');
+      if (!ap.t) return weg(401, ap.verlopen ? 'sleutel verlopen; koppel de telefoon opnieuw in de app' : 'niet toegestaan', ap.fout);
+      const t = ap.t;
+      res._tel.voorAuth = false; res._tel.apparaat = t.id;
+      if (!appTeller('tel-alles', TEL_VERZOEKEN_PER_UUR, 3600000)) return weg(429, 'te veel verzoeken', 'grens alles');
+      if (route === 'POST /tel/beurt') return telBeurt(req, res, t);
+      req.resume();
+      if (route === 'GET /tel/uit') return telUitRoute(req, res, t);
+      if (route.indexOf('GET /tel/deel/') === 0) { const d = p.split('/'); return telDeel(req, res, t, d[3], Number(d[4])); }
+      if (route.indexOf('POST /tel/gespeeld/') === 0) return telGespeeld(req, res, t, p.split('/')[3]);
+      return telWeiger(res, 404, 'onbekend', 'route');
+    });
+  }).catch(function (e) {
+    logError('tel', e);
+    if (!res.headersSent) { req.resume(); telWeiger(res, 500, 'fout op de pod', 'uitzondering'); }
+  });
+}
+
+// Klein lichaam (koppel): hooguit 256 bytes, elk Content-Type (Tasker stuurt de body zoals hij is).
+function telKlein(req, cb) {
+  const d = []; let n = 0, af = false;
+  req.on('data', function (c) { if (af) return; n += c.length; if (n > 256) { af = true; req.resume(); return cb('groot'); } d.push(c); });
+  req.on('error', function () { if (!af) { af = true; cb('lezen'); } });
+  req.on('end', function () { if (af) return; af = true; cb(null, Buffer.concat(d).toString('utf8')); });
+}
+function telKoppel(req, res) {
+  if (!telIngericht()) { req.resume(); return telWeiger(res, 503, 'niet ingericht', 'niet ingericht'); }
+  if (!appTeller('tel-koppel', TEL_KOPPEL_PER_UUR, 3600000)) { req.resume(); return telWeiger(res, 429, 'te veel pogingen dit uur', 'grens koppel'); }
+  telKlein(req, function (fout, tekst) {
+    if (fout) return telWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
+    let code = '';
+    try { const j = JSON.parse(tekst); code = String(j && typeof j === 'object' ? j.code : j); } catch (e) { code = String(tekst); }
+    code = code.replace(/[\s"'-]/g, '');
+    const k = telStaat.code;
+    if (!k || Date.now() > k.tot) { telStaat.code = null; return telWeiger(res, 401, 'geen geldige koppelcode; maak een nieuwe in de app', 'geen code'); }
+    if (!/^\d{8}$/.test(code) || !appGelijk(appSha(code), k.hash)) {
+      if (++k.pogingen >= TEL_CODE_POGINGEN) telStaat.code = null;
+      return telWeiger(res, 401, 'koppelcode klopt niet', 'code fout (' + k.pogingen + ')');
+    }
+    telStaat.code = null;   // eenmalig
+    const tok = telToken();
+    if (!tok) return telWeiger(res, 503, 'niet ingericht', 'geen servicetoken');
+    const sleutel = crypto.randomBytes(32).toString('hex'), id = crypto.randomBytes(8).toString('hex'), nu = new Date();
+    let reg;
+    try { reg = telRegister(); } catch (e) { logError('tel-register', e); return telWeiger(res, 503, 'telefoonregister onleesbaar; vraag de machinekamer', 'register kapot'); }
+    // één telefoon: opnieuw koppelen maakt elke oude sleutel ongeldig
+    reg.apparaten.forEach(function (x) { if (x.actief) { x.actief = false; x.sleutel_hash = null; x.ingetrokken_op = nu.toISOString(); x.ingetrokken_door = 'opnieuw gekoppeld'; } });
+    reg.apparaten = reg.apparaten.filter(function (x) { return Date.now() - Date.parse(x.ingetrokken_op || x.gekoppeld || 0) < 90 * 86400000; });
+    reg.apparaten.push({ id: id, naam: 'Pixel (Tasker)', sleutel_hash: appSha(sleutel), app_apparaat: k.app_apparaat, gekoppeld: nu.toISOString(),
+      verloopt: new Date(nu.getTime() + TEL_SLEUTEL_MS).toISOString(), actief: true });
+    try { appSchrijfJson(TEL_REGISTER, reg); } catch (e) { logError('tel-register-schrijf', e); return telWeiger(res, 503, 'opslaan op de pod mislukte; probeer het opnieuw', 'register schrijven'); }
+    Object.keys(telStaat.polls).forEach(function (a) { telAntwoordPoll(a, { ok: true, bezig: 'nee', reden: 'opnieuw gekoppeld' }); });
+    res._tel.voorAuth = false; res._tel.apparaat = id; res._tel.reden = 'gekoppeld';
+    appTelegram('Socev-app: Tasker op de telefoon is gekoppeld (spraak in de auto). Niet jij? /app-noodstop en meld het de machinekamer.');
+    telStuur(res, 200, { ok: true, sleutel: sleutel, cf_id: tok.client_id, cf_geheim: tok.client_secret, apparaat: id, verloopt: reg.apparaten[reg.apparaten.length - 1].verloopt });
+  });
+}
+
+function telBeurt(req, res, t) {
+  const weg = function (st, f, r) { req.resume(); return telWeiger(res, st, f, r); };
+  if (!telSessieOk(t)) return weg(423, 'open eerst even de Socev-app', 'geen app-sessie');
+  const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  const tekstSoort = ct === 'text/plain';
+  if (!tekstSoort && !/^(audio\/[a-z0-9.+-]+|video\/3gpp|application\/octet-stream)$/.test(ct)) return weg(415, 'alleen een opname of tekst', 'soort ' + ct.slice(0, 30));
+  const max = tekstSoort ? TEL_TEKST_MAX * 4 : TEL_MAX_BYTES;
+  const lengte = req.headers['content-length'] === undefined ? null : Number(req.headers['content-length']);
+  if (lengte !== null && !(Number.isInteger(lengte) && lengte >= 0)) return weg(400, 'ongeldig verzoek', 'lengte');
+  if (lengte !== null && lengte > max) return weg(413, tekstSoort ? 'te lang (hooguit ' + TEL_TEKST_MAX + ' tekens)' : 'opname te groot (hooguit 5 MB)', 'te groot ' + lengte);
+  const lopend = telRij().filter(function (x) { return x.soort === 'bezig'; }).length + telStaat.inBehandeling;
+  if (lopend >= TEL_LOPEND_MAX) return weg(429, 'Socev is nog bezig met je vorige vragen', 'grens lopend');
+  if (!appTeller('tel-beurt', TEL_BEURTEN_PER_UUR, 3600000)) return weg(429, 'te veel vragen dit uur', 'grens uur');
+  if (!appTeller('tel-beurtdag', TEL_BEURTEN_PER_DAG, 86400000)) return weg(429, 'genoeg vragen voor vandaag', 'grens dag');
+  telStaat.inBehandeling++;
+  let vrij = false;
+  const klaar = function () { if (!vrij) { vrij = true; telStaat.inBehandeling--; } };
+  res.on('close', klaar);
+  let stukken = [], n = 0, af = false;
+  const mis = function (st, f, r) { if (af) return; af = true; stukken = []; klaar(); telWeiger(res, st, f, r); req.resume(); };
+  req.on('aborted', function () { mis(400, 'opname afgebroken', 'afgebroken'); });
+  req.on('error', function () { mis(400, 'opname afgebroken', 'afgebroken'); });
+  req.on('data', function (c) {
+    if (af) return;
+    n += c.length;
+    if (n > max) return mis(413, tekstSoort ? 'te lang (hooguit ' + TEL_TEKST_MAX + ' tekens)' : 'opname te groot (hooguit 5 MB)', 'te groot (stroom)');
+    stukken.push(c);
+  });
+  req.on('end', function () {
+    if (af) return;
+    af = true;
+    const buf = Buffer.concat(stukken, n);
+    stukken = [];
+    (async function () {
+      let tekst;
+      if (tekstSoort) {
+        tekst = buf.toString('utf8').replace(/\r\n?/g, '\n').trim();
+        if (tekst.length > TEL_TEKST_MAX) return telWeiger(res, 413, 'te lang (hooguit ' + TEL_TEKST_MAX + ' tekens)', 'te lang');
+        res._tel.tekens = tekst.length;
+      } else {
+        const o = telOpname(buf);
+        if (!o) return telWeiger(res, 400, 'geen geldige opname (MPEG4/AAC, 3GPP of WAV)', 'opname onbekend');
+        res._tel.s = Math.round(o.s);
+        if (o.s > TEL_MAX_S + 5) return telWeiger(res, 413, 'opname te lang (hooguit 3 minuten)', 'te lang ' + Math.round(o.s) + ' s');
+        if (o.s < 0.3) return telWeiger(res, 422, 'ik heb je niet verstaan', 'te kort');
+        if (!process.env.CLOUDFLARE_AI_TOKEN_AUTO) return telWeiger(res, 503, 'uitschrijven staat nu niet aan op de pod', 'geen whisper-sleutel');
+        try { tekst = await appWhisper(buf); } catch (e) {
+          logError('tel-whisper', e);
+          return telWeiger(res, 503, 'uitschrijven lukte niet', 'whisper: ' + String(e && e.message || e).slice(0, 60));
+        }
+        res._tel.tekens = tekst.length;
+      }
+      if (!tekst || !/[\p{L}\p{N}]/u.test(tekst)) return telWeiger(res, 422, 'ik heb je niet verstaan', 'niets verstaan');
+      if (telUit()) return telWeiger(res, 503, 'de telefoonkoppeling staat uit (noodstop)', 'uit (tijdens het verzoek)');
+      if (!(await appRolOk())) return telWeiger(res, 503, 'Socev draait op de reserve, gebruik Telegram', 'rol passief (tijdens)');
+      const veilig = appOntmasker(tekst, 'gesproken');
+      const gelogd = await appChatLogStart('hoofd', [{ rol: 'david', ts: Date.now(), bevestiging: 'gesproken', tekst: '[AUTO] ' + veilig }]);
+      const st = appStartBeurt({ id: t.app_apparaat || t.id }, 'hoofd', '[AUTO] ' + veilig + (gelogd ? '' : APP_CHATLOG_NIET),
+        { beurt_id: null, soort: 'tel', tekst: '[AUTO] ' + tekst, tel: t.id });
+      if (!st.job_id) return telWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
+      telRij().push({ id: st.job_id, apparaat: t.id, soort: 'bezig', t_start: Date.now(), tot: Date.now() + TEL_TTL_MS });
+      telRijBewaar();
+      res._tel.reden = 'beurt ' + st.job_id;
+      telStuur(res, 202, { ok: true, id: st.job_id });
+    })().catch(function (e) { logError('tel-beurt', e); telWeiger(res, 500, 'fout op de pod', 'uitzondering beurt'); }).finally(klaar);
+  });
+}
+
+function telUitRoute(req, res, t) {
+  const q = new URLSearchParams(String(req.url || '').split('?')[1] || '');
+  const w = q.has('wacht') ? Number(q.get('wacht')) : 0;
+  if (!Number.isInteger(w) || w < 0 || w > TEL_WACHT_MAX_S) return telWeiger(res, 400, 'wacht moet 0 tot ' + TEL_WACHT_MAX_S + ' zijn', 'wacht');
+  res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
+  telStaat.hartslag[t.id] = Date.now();
+  telOpruim();
+  telAntwoordPoll(t.id, { ok: true, bezig: telBezig(t.id), reden: 'vervangen' });   // één open lange vraag per apparaat
+  const x = telVolgende(t.id);
+  if (x) { res._tel.stil = false; res._tel.reden = 'item ' + x.soort; return telStuur(res, 200, telUitgifte(x)); }
+  if (!w || telStaat.gestopt) return telStuur(res, 200, { ok: true, bezig: telBezig(t.id) });
+  const p = { res: res, timer: setTimeout(function () { telAntwoordPoll(t.id, { ok: true, bezig: telBezig(t.id), reden: 'tijd' }); }, w * 1000) };
+  telStaat.polls[t.id] = p;
+  res.on('close', function () { if (telStaat.polls[t.id] === p) { clearTimeout(p.timer); delete telStaat.polls[t.id]; } });
+}
+
+async function telDeel(req, res, t, id, n) {
+  const x = telRij().find(function (y) { return y.id === id && y.apparaat === t.id; });
+  if (!x || x.soort === 'bezig' || x.gespeeld || Date.now() > x.tot) return telWeiger(res, 404, 'geen deel', 'onbekend item');
+  if (!Number.isInteger(n) || n < 0 || (n === 0 && !x.aankondiging) || n > telDelen(x).length) return telWeiger(res, 404, 'geen deel', 'deel ' + n + ' bestaat niet');
+  if (!process.env.GEMINI_API_KEY_AUTO) return telWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'geen gemini-sleutel');
+  x.lease_tot = Math.max(x.lease_tot || 0, Date.now() + TEL_LEASE_MS);   // wie afspeelt, houdt het item vast
+  let wav;
+  try {
+    const p = telAudio(x, n);
+    if (!p) return telWeiger(res, 404, 'geen deel', 'geen tekst');
+    let tm = null;
+    wav = await Promise.race([p, new Promise(function (_, nee) { tm = setTimeout(function () { nee(Object.assign(new Error('duurde te lang'), { traag: true })); }, TEL_WACHT_MAX_S * 1000); })]);
+    clearTimeout(tm);
+  } catch (e) {
+    if (e && e.plafond) return telWeiger(res, 429, 'genoeg voorgelezen voor vandaag', 'grens delen dag');
+    if (!(e && e.traag)) logError('tel-deel', e);
+    return telWeiger(res, 503, 'inspreken lukte niet', 'gemini: ' + String(e && e.message || e).slice(0, 60));
+  }
+  // het volgende deel alvast (zonder op het antwoord te wachten)
+  if (n >= 1 && n < telDelen(x).length) { const v = telAudio(x, n + 1); if (v) v.catch(function () {}); }
+  res._tel.stil = true;
+  if (res.headersSent) return;
+  res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, 'Cache-Control': 'no-store' });
+  res.end(wav);
+}
+
+function telGespeeld(req, res, t, id) {
+  const x = telRij().find(function (y) { return y.id === id && y.apparaat === t.id; });
+  if (!x) return telWeiger(res, 404, 'onbekend', 'onbekend item');
+  const al = !!x.gespeeld;
+  if (!al) { x.gespeeld = new Date().toISOString(); telRijBewaar(); }
+  delete telStaat.audio[x.id];
+  res._tel.reden = al ? 'gespeeld (al)' : 'gespeeld';
+  res._tel.stil = false;
+  telStuur(res, 200, { ok: true, al: al });
+}
+
+// ── in de app: ⚙ → Telefoon (koppelcode alleen op de Pixel met een verse vingerafdruk) ──
+function telAppStand(req, res, a) {
+  let t = null, fout = null;
+  try { t = telRegister().apparaten.find(function (x) { return x.actief; }) || null; } catch (e) { fout = 'register onleesbaar'; }
+  const k = telStaat.code && Date.now() < telStaat.code.tot ? telStaat.code : null;
+  appStuur(res, 200, { ok: true, ingericht: telIngericht(), uit: telUit(), fout: fout,
+    gekoppeld: !!t, sinds: t ? t.gekoppeld : null, verloopt: t ? t.verloopt : null,
+    laatst_gezien: t && telStaat.hartslag[t.id] ? new Date(telStaat.hartslag[t.id]).toISOString() : null, luistert: t ? telLuistert(t.id) : false,
+    code_open: !!k && k.app_apparaat === a.id, code_tot: k && k.app_apparaat === a.id ? new Date(k.tot).toISOString() : null,
+    mag_koppelen: a.goedkeurder === true && appSysteem(req) === 'Android' });
+}
+function telAppKoppelcode(req, res, reg, a, s) {
+  if (!telIngericht()) return appWeiger(res, 503, 'de telefoonkoppeling is op de pod nog niet ingericht', 'tel niet ingericht');
+  if (telUit()) return appWeiger(res, 503, 'de telefoonkoppeling staat uit (noodstop)', 'tel-uit');
+  if (a.goedkeurder !== true) return appWeiger(res, 403, 'een telefoon koppelen kan alleen op je Pixel', 'tel: geen goedkeurder');
+  const sysNu = appSysteem(req), sysReg = appSysteemVan(a.systeem);
+  if (sysNu !== 'Android' || sysNu !== sysReg) return appWeiger(res, 403, 'een telefoon koppelen kan alleen op je Pixel', 'tel: systeem ' + sysNu);
+  if (!appVersOk(a, s)) { res._app.reden = 'tel-code, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
+  if (!appTeller('tel-codes', TEL_CODES_PER_DAG, 86400000)) return appWeiger(res, 429, 'genoeg koppelcodes voor vandaag', 'grens tel-codes');
+  s.vers_tot = 0;   // één vingerafdruk = één code
+  const code = String(crypto.randomInt(0, 100000000)).padStart(8, '0');
+  telStaat.code = { hash: appSha(code), tot: Date.now() + TEL_CODE_MS, pogingen: 0, app_apparaat: a.id };
+  res._app.reden = 'tel-koppelcode gemaakt';
+  appStuur(res, 200, { ok: true, code: code, tot: new Date(telStaat.code.tot).toISOString(), geldig_s: TEL_CODE_MS / 1000 });
+}
+function telIntrekken(door) {
+  const uit = { ingetrokken: 0, items: 0, fout: null };
+  telStaat.code = null;
+  Object.keys(telStaat.polls).forEach(function (a) { telAntwoordPoll(a, { ok: true, bezig: 'nee', reden: 'ingetrokken' }); });
+  try {
+    const reg = telRegister(), nu = new Date().toISOString();
+    reg.apparaten.forEach(function (x) { if (x.actief) { x.actief = false; x.sleutel_hash = null; x.ingetrokken_op = nu; x.ingetrokken_door = door; uit.ingetrokken++; } });
+    if (uit.ingetrokken) appSchrijfJson(TEL_REGISTER, reg);
+  } catch (e) { uit.fout = String(e && e.message || e).slice(0, 80); }
+  uit.items = telRij().length;
+  telStaat.rij = []; telStaat.audio = {}; telStaat.delen = {}; telRijBewaar();
+  return uit;
+}
+function telAppOntkoppel(req, res, a) {
+  const u = telIntrekken('app (' + a.naam + ')');
+  if (u.fout) return appWeiger(res, 503, 'ontkoppelen lukte niet helemaal: ' + u.fout, 'tel ontkoppel fout');
+  res._app.reden = 'tel ontkoppeld (' + u.ingetrokken + ')';
+  if (u.ingetrokken) appTelegram('Socev-app: de telefoon (Tasker) is ontkoppeld vanuit de app ("' + a.naam + '").');
+  appStuur(res, 200, { ok: true, ingetrokken: u.ingetrokken });
+}
+function telInfo() {
+  let t = null, kapot = false;
+  try { t = telRegister().apparaten.find(function (x) { return x.actief; }) || null; } catch (e) { kapot = true; }
+  let rij = [];
+  try { rij = telRij(); } catch (e) {}
+  return { ingericht: telIngericht(), uit: telUit(), register: kapot ? 'kapot' : 'ok', gekoppeld: !!t, verloopt: t ? t.verloopt : null,
+    luistert: t ? telLuistert(t.id) : false, lange_vragen: Object.keys(telStaat.polls).length,
+    beurten_lopend: rij.filter(function (x) { return x.soort === 'bezig'; }).length, items_klaar: rij.filter(function (x) { return x.soort !== 'bezig' && !x.gespeeld; }).length };
+}
+// Bij afsluiten (SIGTERM van uitrol.sh of de supervisor): elke open lange vraag een leeg antwoord, dan pas het standaardgedrag.
+function telAfsluiten() {
+  telStaat.gestopt = true;
+  Object.keys(telStaat.polls).forEach(function (a) { telAntwoordPoll(a, { ok: true, bezig: telBezig(a), reden: 'afsluiten' }); });
+}
+setInterval(function () { try { telOpruim(); if (telStaat.code && Date.now() > telStaat.code.tot) telStaat.code = null; } catch (e) { logError('tel-opruim', e); } }, 60 * 1000).unref();
+if (typeof process.once === 'function') {
+  process.once('SIGTERM', function () {
+    try { telAfsluiten(); } catch (e) {}
+    setTimeout(function () { process.kill(process.pid, 'SIGTERM'); }, 150);   // daarna het gewone einde (sterven aan SIGTERM)
+  });
+}
+// ── einde telefoon-poort ──────────────────────────────────────────────────────────────────────────────
+
 // ── einde socev-app poort ─────────────────────────────────────────────────────────────────────────
 
 // ── Rolwachter (uitwijk stap 3, 6-10-2026) ─────────────────────────────────────────────────────────
@@ -8091,6 +8622,7 @@ const server = http.createServer(function (req, res) {
     if (autoIsInternPad(req)) return autoIntern(req, res);
     if (sleutelportaalIsPad(req)) return sleutelportaal(req, res);
     if (appIsPad(req)) return handleApp(req, res);
+    if (telIsPad(req)) return handleTel(req, res);   // wv264: spraak via de telefoon (Tasker)
     if (berichtIsPad(req)) return berichtRoute(req, res);   // wv263: bericht aan David (intern, API_SECRET)
     handleRequest(req, res);
   } catch (e) {
