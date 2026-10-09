@@ -4569,7 +4569,7 @@ async function appNaBeurt(jobId) {
 // wv277 (hoofdkanaal-bouwplan § 4.8): een beurt uit Telegram (/run met bron "telegram": *Claude via Telegram* en *Claude Debug via
 // Telegram*) ook in het app-log, zodat het gesprek in de app compleet is. Na afloop, asynchroon en fail-open (een schrijffout raakt
 // de Telegram-beurt nooit); geen seintje, geen vraag in vragen.json (de knoppen staan in Telegram), geen chat_log (dat doet n8n al).
-// Alleen hoofdkanaal en machinekamer, nooit 'lezen', niet bij de noodstop. Van de machinekamer alleen Davids deel van de prompt.
+// Alleen hoofdkanaal en machinekamer in de vault-werkmap, nooit 'lezen', niet bij de noodstop. Van de machinekamer alleen Davids deel van de prompt.
 const APP_SPIEGEL_KANAAL = { '40687': 'hoofd', 'telegram-debug': 'machinekamer' };
 const APP_SPIEGEL_MAX = 20000;
 function appSpiegelTekst(kanaal, prompt) {
@@ -4580,7 +4580,7 @@ function appSpiegelTekst(kanaal, prompt) {
 }
 async function appTelegramSpiegel(jobId, prompt, files) {
   const j = jobs[jobId];
-  if (!j || j.bron !== 'telegram' || j.app || j.gereedschap) return false;
+  if (!j || j.bron !== 'telegram' || j.app || j.gereedschap || j.workspace !== DEFAULT_WS) return false;   // GHAWA/Jimmy: eigen werkmap, nooit hier
   const kanaal = APP_SPIEGEL_KANAAL[j.chat_id];
   if (!kanaal || fs.existsSync(APP_UIT)) return false;
   const r = j.result || {};

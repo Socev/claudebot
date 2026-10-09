@@ -94,6 +94,9 @@ const OMLIJST = '[MACHINEKAMER] Dit bericht komt via het debug-kanaal. Lees de b
     toets('D cijfer-meester met bron telegram: geen regel', b.u && b.u.done && regels('cijfer-meester').length === 0 && van('hoofd', b.id).length === 0);
     b = await beurt({ chat_id: '12345', bron: 'telegram', prompt: 'SLEUTEL:d2 ander gesprek' });
     toets('D onbekend gesprek met bron telegram: geen regel', b.u && b.u.done && !fs.readdirSync(LOG).some((f) => fs.readFileSync(path.join(LOG, f), 'utf8').indexOf(b.id) >= 0));
+    fs.mkdirSync(path.join(d, 'ghawa'), { recursive: true });
+    b = await beurt({ chat_id: '40687', bron: 'telegram', workspace: 'ghawa', prompt: 'SLEUTEL:d4 andere werkmap' });
+    toets('D andere werkmap (ghawa) met chat 40687 en bron telegram: geen regel', b.r._status === 200 && van('hoofd', b.id).length === 0, JSON.stringify(b.r));
     b = await beurt({ chat_id: '40687', bron: 'telegram', gereedschap: 'lezen', prompt: 'SLEUTEL:d3 lezen' });
     toets('D gereedschap lezen: geen regel', b.u && b.u.done && van('hoofd', b.id).length === 0);
 
