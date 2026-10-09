@@ -19,7 +19,9 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
 for (const [x, y] of [['const TEL_LEASE_MS = 3 * 60 * 1000;', 'const TEL_LEASE_MS = 1500;'],
                       ['const TEL_BEURTEN_PER_UUR = 30;', 'const TEL_BEURTEN_PER_UUR = 12;'],
                       ['const TEL_KOPPEL_PER_UUR = 10;', 'const TEL_KOPPEL_PER_UUR = 20;'],
-                      ['const TEL_CODES_PER_DAG = 10;', 'const TEL_CODES_PER_DAG = 12;']]) {
+                      ['const TEL_CODES_PER_DAG = 10;', 'const TEL_CODES_PER_DAG = 12;'],
+                      ['const TEL_ZELF_HERHAAL_MS = 4 * 60 * 1000;', 'const TEL_ZELF_HERHAAL_MS = 1200;'],
+                      ['const TEL_ZELF_AANKONDIG_MS = 20 * 1000;', 'const TEL_ZELF_AANKONDIG_MS = 400;']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'teltoets-'));
@@ -100,7 +102,7 @@ const ctxGlobals = () => ({ require, fs, path, crypto, Buffer, console, URL, set
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } });
-const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE };';
+const EXPORT = '\n;globalThis.__h = { handleApp, appIsPad, handleTel, telIsPad, telStaat, appStaat, appNoodstop, appAan, appOntmasker, telAfsluiten, telSpreektekst, telOpname, telInfo, appInfo, telOpruim, TEL_ROUTE_RE, telMerkAgent, telZelfStart, telZelfNaRun, telAanwezig, telBelletje, agentsReg, TEL_ZELF_AANKONDIGING };';
 function laad() { const c = vm.createContext(ctxGlobals()); vm.runInContext(blok + EXPORT, c, { filename: 'server.js#app' }); return c.__h; }
 let H = laad();
 let srv = http.createServer((q, s) => { if (H.telIsPad(q)) return H.handleTel(q, s); if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
@@ -380,6 +382,141 @@ srv.listen(0, '127.0.0.1', async () => {
       if (laatst.status === 429) break;
     }
     toets('4 grens per uur: 429', laatst && laatst.status === 429 && /dit uur/.test(laatst.j.fout), laatst && laatst.j);
+
+    // ── 8. fase 3 (wv275): Socev uit zichzelf naar de telefoon ──
+    H.telStaat.rij.forEach((x) => { x.gespeeld = x.gespeeld || new Date().toISOString(); });
+    H.appStaat.tellers['tel-beurt'] = []; H.appStaat.tellers['tel-beurtdag'] = [];
+    sessie(PIXEL, 'credP', false);
+    const zlog = () => audit().split('\n').filter((l) => /"route":"zelf"/.test(l)).map((l) => JSON.parse(l));
+    // merk: een echte lokale verbinding uit een kindproces met (of zonder) SOCEV_TEL_BEURT in de omgeving
+    const rT = await tel('POST', '/tel/beurt', { ct: 'text/plain', body: 'zoek uit welke offerte goedkoper is' });
+    await tik();
+    const idT = rT.j.id;
+    toets('8 [AUTO]-beurt loopt', rT.status === 202 && jobs[idT] && jobs[idT].status === 'running', jobs[idT]);
+    let merkUit = null;
+    const msrv = http.createServer((q, s2) => { merkUit = H.telMerkAgent(q, q.url.slice(1, 17), decodeURIComponent(q.url.slice(18))); s2.end('ok'); });
+    await new Promise((ok) => msrv.listen(0, '127.0.0.1', ok));
+    const kindVraag = (job, label, env) => new Promise((ok) => {
+      H.agentsReg[job] = { job_id: job, label: label, status: 'pending' }; merkUit = 'niet aangeroepen';
+      const c = require('child_process').spawn(process.execPath, ['-e', `require('http').get({host:'127.0.0.1',port:${msrv.address().port},path:'/${job}/${encodeURIComponent(label)}'},(r)=>{r.resume();r.on('end',()=>process.exit(0));});`],
+        { env: Object.assign({ PATH: process.env.PATH }, env || {}), stdio: 'ignore' });
+      c.on('exit', () => ok(merkUit));
+    });
+    const ja1 = 'a1a1a1a1a1a1a1a1', ja2 = 'a2a2a2a2a2a2a2a2', ja3 = 'a3a3a3a3a3a3a3a3', ja4 = 'a4a4a4a4a4a4a4a4', ja5 = 'a5a5a5a5a5a5a5a5';
+    r = await kindVraag(ja1, 'socev: offertes', { SOCEV_TEL_BEURT: idT });
+    toets('8 merk: proces met SOCEV_TEL_BEURT van de lopende [AUTO]-beurt -> gemerkt', r && r.beurt === idT && H.agentsReg[ja1].tel && H.agentsReg[ja1].tel.beurt === idT, { r, reg: H.agentsReg[ja1] });
+    r = await kindVraag(ja2, 'offertes zonder prefix', {});
+    toets('8 merk: proces zonder die omgeving -> geen merk (wel gelogd)', r === null && !H.agentsReg[ja2].tel && zlog().some((x) => x.job === ja2 && x.reden === 'geen tel-beurt'), zlog().slice(-2));
+    r = await kindVraag(ja3, 'socev: x', { SOCEV_TEL_BEURT: 'ffffffffffffffff' });
+    toets('8 merk: omgeving van een beurt die niet loopt -> geen merk', r === null && !H.agentsReg[ja3].tel);
+    r = await kindVraag('a6a6a6a6a6a6a6a6', 'socev: auto — kastje', { SOCEV_TEL_BEURT: idT });
+    toets('8 merk: opdracht van het kastje (socev: auto — ) -> nooit', r === null && !H.agentsReg['a6a6a6a6a6a6a6a6'].tel);
+    r = await kindVraag(ja4, 'machinekamer: x', { SOCEV_TEL_BEURT: idT });
+    toets('8 merk: label machinekamer: of david: -> nooit', r === null && !H.agentsReg[ja4].tel && (await kindVraag(ja4, 'david: x', { SOCEV_TEL_BEURT: idT })) === null);
+    afmaken[idT]('Ik heb een agent aangestuurd.'); await tik();
+    r = await kindVraag(ja5, 'socev: later', { SOCEV_TEL_BEURT: idT });
+    toets('8 merk: na afloop van de [AUTO]-beurt -> geen merk (en geen /proc-zoektocht)', r === null && !H.agentsReg[ja5].tel);
+    msrv.close();
+    r = await tel('GET', '/tel/uit');   // antwoord op de beurt zelf afhandelen
+    if (r.j.id) await tel('POST', '/tel/gespeeld/' + r.j.id);
+    // aanwezig
+    H.telStaat.hartslag = {}; H.telStaat.plek = {};
+    toets('8 aanwezig: lus leeft niet -> nee', H.telAanwezig().reden === 'luistert niet', H.telAanwezig());
+    await tel('GET', '/tel/uit');
+    toets('8 aanwezig: lus zonder plek (Tasker v5) -> plek onbekend', H.telAanwezig().reden === 'plek onbekend', H.telAanwezig());
+    await tel('GET', '/tel/uit?plek=Thuis');
+    toets('8 aanwezig: plek Thuis -> niet in de auto', H.telAanwezig().reden === 'niet in de auto');
+    r = await tel('GET', '/tel/uit?wacht=0&plek=%SocevPlek');
+    toets('8 aanwezig: ongezette variabele (letterlijk %SocevPlek) -> 200 en niet in de auto', r.status === 200 && H.telAanwezig().reden === 'niet in de auto', { st: r.status, a: H.telAanwezig() });
+    await tel('GET', '/tel/uit?wacht=0&plek=auto%20');
+    toets('8 aanwezig: plek "auto " (hoofdletterongevoelig, spatie) -> ja', H.telAanwezig().ok === true, H.telAanwezig());
+    const tid = Object.keys(H.telStaat.plek)[0];
+    H.telStaat.plek[tid].t = Date.now() - 4 * 60000;
+    toets('8 aanwezig: plek ouder dan 3 min -> onbekend', H.telAanwezig().reden === 'plek onbekend');
+    await tel('GET', '/tel/uit?plek=Auto');
+    Object.keys(H.appStaat.sessies).forEach((h) => delete H.appStaat.sessies[h]);
+    toets('8 aanwezig: geen app-sessie van de Pixel -> nee', H.telAanwezig().reden === 'geen app-sessie');
+    sessie(PIXEL, 'credP', false);
+    toets('8 aanwezig: alle drie -> ja', H.telAanwezig().ok === true);
+    // afweging in 40687 (/run met agent_job)
+    toets('8 start: ongeldig of onbekend agent_job -> geen regel', H.telZelfStart('xyz', 'r0') === '' && H.telZelfStart('0123456789abcdef', 'r0') === '' && H.telZelfStart(ja2, 'r0') === '');
+    const run1 = 'b1b1b1b1b1b1b1b1'; jobs[run1] = { status: 'pending' };
+    const hint = H.telZelfStart(ja1, run1);
+    toets('8 start: gemerkt + aanwezig -> regel vooraf, job gekoppeld', /^\[AUTO-RAPPORT\]/.test(hint) && /Verder in Telegram:/.test(hint) && jobs[run1].tel_zelf === ja1 && H.agentsReg[ja1].tel.gebruikt === run1, hint);
+    toets('8 start: tweede /run met hetzelfde agent_job (herkansing) -> geen regel', H.telZelfStart(ja1, 'b2b2b2b2b2b2b2b2') === '' && H.telStaat.zelf.dubbel >= 1);
+    const nTts0 = st.tts.length;
+    jobs[run1] = Object.assign(jobs[run1], { status: 'done', result: { ok: true, output: 'De tweede offerte is goedkoper, ongeveer **tien procent**. Zie [link](https://x.y).\n\nVRAAG AAN DAVID: Zal ik de leverancier mailen?\n\nVerder in Telegram:\n- bedrag 1\n- bedrag 2' } });
+    const pZ = tel('GET', '/tel/uit?wacht=10&plek=Auto'); await wacht(100);
+    const xz = H.telZelfNaRun(run1);
+    r = await pZ;
+    toets('8 na de afweging: item zelf, meteen naar de open lange vraag, aankondigen ja', xz && r.j.id === ja1 && r.j.soort === 'zelf' && r.j.aankondigen === 'ja', r.j);
+    toets('8 spreektekst: zonder "Verder in Telegram", vraag "in Telegram"', xz && !/bedrag|https|\*\*/.test(xz.spreek) && /Ik heb een vraag voor je in Telegram\.$/.test(xz.spreek), xz && xz.spreek);
+    toets('8 houdbaarheid 10 min, buiten de kostenmeting', Math.abs(xz.tot - Date.now() - 10 * 60000) < 5000 && xz.k_gelogd === 'nvt');
+    r = await tel('GET', '/tel/deel/' + ja1 + '/0');
+    toets('8 deel 0: belletje + vaste zin (WAV langer dan de spraak alleen)', r.status === 200 && r.b.toString('ascii', 0, 4) === 'RIFF' && r.b.length > 44 + 14400 + 24000 && st.tts.slice(nTts0).includes(H.TEL_ZELF_AANKONDIGING), { len: r.b.length, tts: st.tts.slice(nTts0) });
+    toets('8 aankondiging noemt geen onderwerp uit het label', !/offerte/i.test(H.TEL_ZELF_AANKONDIGING));
+    const bel = H.telBelletje(wavMaak(0.3, 24000));
+    toets('8 belletje: geldige WAV-kop, data = kop-lengte', bel.readUInt32LE(40) === bel.length - 44 && bel.readUInt32LE(24) === 24000 && H.telBelletje(Buffer.from('geen wav')).toString() === 'geen wav');
+    r = await tel('GET', '/tel/uit');
+    toets('8 aankondiging gehoord, niet getikt: niet meteen opnieuw', r.status === 200 && !r.j.id, r.j);
+    const rE = await tel('POST', '/tel/beurt', { ct: 'text/plain', body: 'eigen vraag na de aankondiging' }); await tik(); afmaken[rE.j.id]('Eigen antwoord.'); await tik();
+    r = await tel('GET', '/tel/uit');
+    toets('8 tijdens belletje + zin (20 s, verkort) niets anders (Fable diff #4)', !r.j.id, r.j);
+    await wacht(450);
+    r = await tel('GET', '/tel/uit');
+    toets('8 een eigen antwoord gaat voor en wacht niet op de aankondiging (Fable #2)', r.j.id === rE.j.id && r.j.aankondigen === 'nee', r.j);
+    await tel('GET', '/tel/deel/' + rE.j.id + '/1');
+    r = await tel('GET', '/tel/uit');
+    toets('8 zolang het eigen antwoord speelt: niets anders', !r.j.id, r.j);
+    await tel('POST', '/tel/gespeeld/' + rE.j.id);
+    await wacht(1300);
+    r = await tel('GET', '/tel/uit');
+    toets('8 herhaling na 4 min (verkort): nog één keer aangekondigd', r.j.id === ja1 && r.j.aankondigen === 'ja', r.j);
+    toets('8 uitgifte noemt de resterende houdbaarheid (rest_s, < 10 min)', r.j.rest_s > 500 && r.j.rest_s <= 600, r.j);
+    await wacht(1300);
+    r = await tel('GET', '/tel/uit');
+    toets('8 daarna niet meer aangeboden', !r.j.id, r.j);
+    r = await tel('GET', '/tel/deel/' + ja1 + '/1');
+    toets('8 met een tik (%SocevWacht) nog af te spelen', r.status === 200, r.status);
+    const rE2 = await tel('POST', '/tel/beurt', { ct: 'text/plain', body: 'nog een vraag' }); await tik(); afmaken[rE2.j.id]('Antwoord twee.'); await tik();
+    r = await tel('GET', '/tel/uit');
+    toets('8 terwijl het zelf-item speelt (deel 1): eigen antwoord wacht', !r.j.id, r.j);
+    r = await tel('POST', '/tel/gespeeld/' + ja1);
+    toets('8 gespeeld: 200', r.status === 200 && r.j.al === false, r.j);
+    r = await tel('GET', '/tel/uit');
+    toets('8 daarna het eigen antwoord', r.j.id === rE2.j.id, r.j);
+    await tel('POST', '/tel/gespeeld/' + rE2.j.id);
+    toets('8 geen kostenregel voor een zelf-item', !fs.readFileSync(path.join(DATA, 'tel-kosten.jsonl'), 'utf8').includes(ja1));
+    // NIETS, niet aanwezig, dubbel, rij vol
+    const mk = (job, run, uit) => { H.agentsReg[job] = { job_id: job, tel: { beurt: idT, t: Date.now() } }; jobs[run] = { status: 'pending' }; const h = H.telZelfStart(job, run); jobs[run].status = 'done'; jobs[run].result = { ok: true, output: uit }; return h; };
+    await tel('GET', '/tel/uit?plek=Auto');
+    mk('c1c1c1c1c1c1c1c1', 'd1d1d1d1d1d1d1d1', 'NIETS');
+    toets('8 Socev antwoordt NIETS -> geen item', H.telZelfNaRun('d1d1d1d1d1d1d1d1') === null && zlog().some((x) => x.job === 'c1c1c1c1c1c1c1c1' && x.reden === 'NIETS'));
+    mk('c2c2c2c2c2c2c2c2', 'd2d2d2d2d2d2d2d2', 'Iets.');
+    await tel('GET', '/tel/uit?plek=Thuis');
+    toets('8 thuisgekomen voor het antwoord klaar is -> geen item (alleen Telegram)', H.telZelfNaRun('d2d2d2d2d2d2d2d2') === null && zlog().some((x) => x.job === 'c2c2c2c2c2c2c2c2' && /niet aanwezig: niet in de auto/.test(x.reden)));
+    const hThuis = mk('c3c3c3c3c3c3c3c3', 'd3d3d3d3d3d3d3d3', 'Iets.');
+    toets('8 niet aanwezig bij de start -> geen regel vooraf en geen item (Fable #9)', hThuis === '' && H.telZelfNaRun('d3d3d3d3d3d3d3d3') === null);
+    await tel('GET', '/tel/uit?plek=Auto');
+    for (const n of [4, 5, 6]) { mk('c' + n + 'c' + n + 'c' + n + 'c' + n + 'c' + n + 'c' + n + 'c' + n + 'c' + n, 'e' + n + 'e' + n + 'e' + n + 'e' + n + 'e' + n + 'e' + n + 'e' + n + 'e' + n, 'Rapport ' + n + '.'); H.telZelfNaRun('e' + n + 'e' + n + 'e' + n + 'e' + n + 'e' + n + 'e' + n + 'e' + n + 'e' + n); }
+    mk('c7c7c7c7c7c7c7c7', 'e7e7e7e7e7e7e7e7', 'Rapport 7.');
+    toets('8 hooguit 3 open zelf-items', H.telZelfNaRun('e7e7e7e7e7e7e7e7') === null && zlog().some((x) => x.job === 'c7c7c7c7c7c7c7c7' && x.reden === 'rij vol'));
+    jobs['e8e8e8e8e8e8e8e8'] = { status: 'done', result: { ok: true, output: 'x' }, tel_zelf: 'c4c4c4c4c4c4c4c4' };
+    toets('8 hetzelfde agent_job nooit twee items', H.telZelfNaRun('e8e8e8e8e8e8e8e8') === null);
+    {   // herstart van de pod: het merk staat in het register op schijf (ruw JSON), jobs[run] niet
+      const bewaard = JSON.parse(JSON.stringify(H.agentsReg));
+      bewaard['f1f1f1f1f1f1f1f1'] = { job_id: 'f1f1f1f1f1f1f1f1', tel: { beurt: idT, t: Date.now() } };
+      const Houd = H; H = laad(); Object.assign(H.agentsReg, bewaard);
+      sessie(PIXEL, 'credP', false); await tel('GET', '/tel/uit?plek=Auto');
+      jobs['f2f2f2f2f2f2f2f2'] = { status: 'pending' };
+      toets('8 na een herstart: merk uit het register geeft nog de regel vooraf, gebruikt blijft gebruikt', /^\[AUTO-RAPPORT\]/.test(H.telZelfStart('f1f1f1f1f1f1f1f1', 'f2f2f2f2f2f2f2f2')) && H.telZelfStart(ja1, 'f3f3f3f3f3f3f3f3') === '');
+      const rijNa = JSON.parse(fs.readFileSync(path.join(DATA, 'tel-uit.json'), 'utf8')).items.filter((x) => x.soort === 'zelf');
+      toets('8 zelf-items op schijf (overleven een herstart)', rijNa.length >= 3, rijNa.length);
+      H = Houd;
+    }
+    toets('8 /health: tellers zelf en aanwezig', H.appInfo().tel.zelf && H.appInfo().tel.zelf.aanwezig === 'ja' && H.appInfo().tel.zelf.items === 4 && H.appInfo().tel.zelf.merk === 1, H.appInfo().tel.zelf);
+    toets('8 zelf-log zonder inhoud', !/offerte|Rapport|goedkoper/.test(JSON.stringify(zlog())), zlog());
+    H.telStaat.rij.forEach((x) => { x.gespeeld = x.gespeeld || new Date().toISOString(); });
 
     // ── 5. noodstop en passief ──
     rolStub.primair = false;
