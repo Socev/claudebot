@@ -6829,11 +6829,13 @@ async function appVoorJouKeuze(req, res, a, d) {
 // Uit voorwerk_portie de bron + sleutel van die regel, dan alleen-lezen de bron zelf: de Todoist-taak (inhoud, beschrijving, link),
 // de actie_state-rij (volledige tekst, bronpagina-naam, deadline) of de correspondentie_state-rij (onderwerp, aan, datum, Gmail-link).
 // Een regel die het patiëntvangnet al verborg ("tekst weggelaten") of een brontekst die op patiëntcontact wijst: alleen "tekst
-// verborgen". Op een apparaat met een vaste plek geen privébronnen (Todoist Privé/Inbox, privé-entiteiten, het privé-postvak).
+// verborgen". Op een apparaat met een vaste plek geen privébronnen (Todoist-project Privé, privé-entiteiten, het privé-postvak).
 // Niets op schijf; niet in het geheugen van Vandaag.
 const APP_ACTIE_STATE_TABEL = process.env.APP_ACTIE_STATE_TABEL || 'vNAY2dVRpSx1l3Ri';
 const APP_CORR_STATE_TABEL = process.env.APP_CORR_STATE_TABEL || 'pnX6vvg2iv256HAB';
-const APP_TODOIST_PRIVE = (process.env.APP_TODOIST_PRIVE || '6gH8FwGg4FjJgHcF,6gH864WhmwFwpRjv').split(',');   // Todoist-projecten Privé en Inbox
+// Todoist-project Privé. De Inbox niet: daar staan ook de werktaken (label socev; gemeten 10-10), en de regeltekst staat op een vaste
+// plek toch al in het actielijstje
+const APP_TODOIST_PRIVE = (process.env.APP_TODOIST_PRIVE || '6gH8FwGg4FjJgHcF').split(',');
 const APP_ENTITEIT_PRIVE = /(^|[^a-z])(priv[eé]|gezin|gambia|thuis|persoonlijk)/i;   // gemeten 9-10: 'Prive', 'Prive/Gambia', 'Prive/Shizzle'
 // Zoals appKort, maar regels blijven (een Todoist-beschrijving is vaak een lijstje)
 function appVjRegels(s, n) {
