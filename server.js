@@ -3313,8 +3313,18 @@ function sleutelportaal(req, res) {
 // Opslag: APP_DATA (/opt/data/socev-app-data; NIET /opt/data/app, dat zijn de server.js-releases). Geen inhoud in het
 // auditlog. Sessies staan in het geheugen en (sinds wv231) als hash in sessies.json: een herstart kost geen vingerafdruk,
 // wel een nieuwe voor de volgende gevoelige handeling (vers_tot gaat niet mee).
-const APP_DATA = process.env.APP_DATA_DIR || '/opt/data/socev-app-data';
-const APP_UIT = process.env.APP_UIT_BESTAND || '/opt/data/app-uit';
+// wv318: alleen de release die de supervisor start (dit bestand ligt in RELEASE_DIR) krijgt de echte mappen als
+// standaard. Een proefkopie erft RELEASE_DIR en PORT=8080 via de agentshell, maar ligt elders; zonder eigen
+// APP_DATA_DIR enz. krijgt die een wegwerpmap, zodat een toetsronde nooit sessies.json, de audit of de io van de
+// echte app raakt (9-10: 22 sessies-herstart-regels, één Spreekkamer-sessie geschrapt).
+const APP_ECHT = (function () {
+  try { return !!process.env.RELEASE_DIR && fs.realpathSync(__dirname) === fs.realpathSync(process.env.RELEASE_DIR); }
+  catch (e) { return false; }
+})();
+const APP_PROEF = APP_ECHT ? null : path.join(process.env.TMPDIR || '/tmp', 'socev-app-proef-' + (process.pid || 'vm-' + Date.now()));
+function appStandaard(echt, deel) { return APP_ECHT ? echt : path.join(APP_PROEF, deel); }
+const APP_DATA = process.env.APP_DATA_DIR || appStandaard('/opt/data/socev-app-data', 'data');
+const APP_UIT = process.env.APP_UIT_BESTAND || appStandaard('/opt/data/app-uit', 'app-uit');
 const APP_REGISTER = path.join(APP_DATA, 'apparaten.json');
 const APP_STAAT = path.join(APP_DATA, 'staat.json');
 const APP_AUDIT = path.join(APP_DATA, 'audit.jsonl');
@@ -3322,7 +3332,7 @@ const APP_AUDIT_VOOR = path.join(APP_DATA, 'audit-voor-auth.jsonl'); // weigerin
 const APP_OMLIJSTING = path.join(APP_DATA, 'machinekamer-omlijsting.txt'); // letterlijk uit n8n "Claude Debug via Telegram" > Prompt bouwen
 const APP_VRAGEN = path.join(APP_DATA, 'vragen.json');           // per app-vraag (job:hash) of en hoe hij beantwoord is; geen inhoud
 const APP_BEURTEN = path.join(APP_DATA, 'beurten.json');         // sha256(beurt_id) -> job (24 u): één beurt per bericht
-const APP_LOG_DIR = process.env.APP_LOG_DIR || '/opt/data/app-log'; // geschiedenis; buiten de vault, 30 dagen
+const APP_LOG_DIR = process.env.APP_LOG_DIR || appStandaard('/opt/data/app-log', 'app-log'); // geschiedenis; buiten de vault, 30 dagen
 const APP_CONFIG = path.join(APP_DATA, 'config.json');           // geen geheimen: aud, teamdomein, client-id, herkomst
 const APP_POORT_PAD = path.join(APP_DATA, 'geheim', 'poort.key');
 const APP_HEROPEND = path.join(APP_DATA, 'koppel-heropend');      // machinekamer: eerste-apparaatroute opnieuw open
@@ -4710,6 +4720,7 @@ function appUploadOpruim(alles) {
 const APP_IO_MERK = '.app-upload';
 function appIoOpruim() {
   let n = 0, namen = [];
+  if (!APP_ECHT && !process.env.IO_DIR) return 0;   // wv318: een proefserver ruimt nooit de echte io op (andere jobs-lijst)
   try { namen = fs.readdirSync(APP_IO); } catch (e) { return 0; }
   namen.forEach(function (id) {
     if (!/^[a-f0-9]{16}$/.test(id)) return;
@@ -5175,7 +5186,7 @@ async function appBroedstoofVoorrang(req, res, reg, a, s, d) {
 // Agentrapporten: alleen van de routes machinekamer: en david: (die krijgt David toch al ongefilterd); route socev (de
 // default) is bronmateriaal dat Socev eerst weegt (skill achtergrondagent § 3b), dus geen rapport in de app.
 // Alles fail-open: een schrijffout raakt nooit de beurt, de agent of zijn rapport aan n8n.
-const APP_BESTANDEN_DIR = process.env.APP_BESTANDEN_DIR || '/opt/data/app-bestanden';
+const APP_BESTANDEN_DIR = process.env.APP_BESTANDEN_DIR || appStandaard('/opt/data/app-bestanden', 'app-bestanden');
 const APP_BESTANDEN_MS = 30 * 24 * 3600 * 1000;
 const APP_BESTANDEN_JOB_MAX = 25;                          // bestanden per beurt of agent
 const APP_BESTANDEN_JOB_BYTES = 100 * 1024 * 1024;
@@ -7507,10 +7518,11 @@ async function appVoorlees(req, res, a, d) {
 
 function appInfo() {
   let reg;
-  try { reg = appRegister(); } catch (e) { return { register: 'kapot', uit: fs.existsSync(APP_UIT) }; }
+  try { reg = appRegister(); } catch (e) { return { echt: APP_ECHT, data: APP_DATA, register: 'kapot', uit: fs.existsSync(APP_UIT) }; }
   const k = appStaat.klok;
   const afw = k ? Math.round(k.afwijking_ms / 1000) : null;
-  return { uit: fs.existsSync(APP_UIT), ingericht: !!(appPoortGeheim() && appConfig().aud && appConfig().clientId),
+  return { echt: APP_ECHT, data: APP_DATA,   // wv318: valt dit op false of een /tmp-pad, dan draait productie in een wegwerpmap
+    uit: fs.existsSync(APP_UIT), ingericht: !!(appPoortGeheim() && appConfig().aud && appConfig().clientId),
     apparaten: reg.apparaten.filter(function (a) { return a.actief; }).length, koppelen_open: appKoppelOpen(reg),
     goedkeurder: (appGoedkeurder(reg) || {}).naam || null,
     aanvraag_open: !!appAanvraagGeldig(), sessies: Object.keys(appStaat.sessies).length,
@@ -8230,7 +8242,7 @@ const TEL_AUDIT = path.join(APP_DATA, 'tel-audit.jsonl');
 const TEL_AUDIT_VOOR = path.join(APP_DATA, 'tel-audit-voor-auth.jsonl');
 const TEL_CONFIG = path.join(APP_DATA, 'tel-config.json');                 // aud + client-id van de /tel-Access-app; geen geheimen
 const TEL_TOKEN = path.join(APP_DATA, 'geheim', 'tel-servicetoken.json');  // servicetoken tasker-pixel; alleen /tel/koppel geeft het door
-const TEL_UIT = process.env.TEL_UIT_BESTAND || '/opt/data/tel-uit';
+const TEL_UIT = process.env.TEL_UIT_BESTAND || appStandaard('/opt/data/tel-uit', 'tel-uit');
 const TEL_ROUTE_RE = /^\/tel\/(koppel|beurt|uit|deel\/[0-9a-f]{16}\/[0-9]{1,2}|gespeeld\/[0-9a-f]{16})$/;
 const TEL_SLEUTEL_MS = 90 * 24 * 3600 * 1000;
 const TEL_CODE_MS = 2 * 60 * 1000;
