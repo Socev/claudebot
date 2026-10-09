@@ -35,6 +35,18 @@
  *       d. ingress (alleen de vijf /tel-paden) + toets. TEL_DIENST=http://localhost:<poort> stuurt /tel tijdelijk naar
  *          een proefserver (ketentoets vóór de uitrol); daarna 'ingress' zonder TEL_DIENST.
  *       Bouwplan: vault 01_Ontwikkeling/Spraak via de telefoon (Tasker) - bouwplan (9-10-2026).md § 6 en § 8.
+ *   node tools/tunnel-inrichten.js qwen-eemwerk         Briefwijzer route lokaal (wv288, 9-10-2026): Qwen 3.8 op de Olares
+ *       a. servicetoken "eemwerk-worker" (Access, 1 jaar) zoeken of aanmaken; het geheim staat alleen tijdelijk in
+ *          /opt/data/socev-app-data/geheim/eemwerk-servicetoken.json (0600)
+ *       b. Worker-secrets LOKAAL_CF_ID/LOKAAL_CF_GEHEIM van Worker eemwerk via wrangler (waarde alleen via stdin)
+ *       c. Access-app op qwen-eemwerk.socev.dev die ALLEEN dat token toelaat, service_auth_401_redirect (kale 401;
+ *          Fable 9-10 #7); eerst de deur, dan DNS; d. DNS -> tunnel; e. ingress (alleen /v1/chat/completions en /v1/models)
+ *          Tweede slot (Fable 9-10 wv288 #1): de ingressregel eist zelf een geldig Access-bewijs (originRequest.access met de
+ *          aud uit geheim/qwen-config.json); zonder die aud blijft de hostname helemaal 404.
+ *       f. toets; is die volledig groen, dan gaat het tokengeheim van de pod af (Fable 9-10 #9): daarna kent alleen de
+ *          Worker het. Rotatie: `qwen-eemwerk --rotatie` (Cloudflare rotate: zelfde client-id, nieuw geheim -> Worker-secrets
+ *          opnieuw -> toets -> wissen).
+ *       Ontwerp: Socev/eemwerk vervolg/wv286-ontwerp.md; README § Route lokaal.
  *   --editor bestaat niet meer (6-10-2026): geen editor en geen inlogpagina onder huisdokter.dev (phishingvlag Google).
  *
  * Nooit `cloudflared tunnel route dns` (kaapt het record); DNS gaat hier via de API.
@@ -66,6 +78,15 @@ const TEL_ST_NAAM = 'tasker-pixel';
 const TEL_ACCESS_NAAM = 'Socev telefoon (Tasker) /tel - alleen servicetoken';
 const TEL_ACCESS_PADEN = ['tel/beurt', 'tel/uit', 'tel/deel', 'tel/gespeeld'];   // /tel/koppel niet: Tasker heeft dan nog geen token
 const TEL_PAD = '^/tel/(koppel|beurt|uit|deel/[0-9a-f]{16}/[0-9]{1,2}|gespeeld/[0-9a-f]{16})$';   // = TEL_ROUTE_RE in server.js
+// Briefwijzer route lokaal (wv288): de Worker eemwerk bereikt Qwen 3.8 (llama.cpp op de Olares) alleen via deze hostname,
+// achter Access met alleen servicetoken eemwerk-worker. Vanuit de pod is de origin intern (zonder Olares-login) bereikbaar.
+const QWEN = 'qwen-eemwerk.socev.dev';
+const QWEN_ORIGIN_HOST = '366ada1d.primumnonnocere.olares.com';
+const QWEN_ST_NAAM = 'eemwerk-worker';
+const QWEN_ACCESS_NAAM = 'Briefwijzer → eigen server (alleen servicetoken)';
+const QWEN_MODEL = 'unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL';
+const QWEN_GEHEIM = 'eemwerk-servicetoken.json';
+const EEMWERK = '/opt/data/mk-scripts/eemwerk';
 const BIN = '/opt/data/bin/cloudflared';
 const LOG = '/opt/data/bin/tunnel.log';
 const METRICS = '127.0.0.1:' + (process.env.TUNNEL_METRICS_POORT || '20241');   // zelfde poort als server.js (los-proces-herkenning)
@@ -82,6 +103,10 @@ const METRICS = '127.0.0.1:' + (process.env.TUNNEL_METRICS_POORT || '20241');   
 const HTML_WEBHOOKS = '(?i)^/webhook/+(fv2(/|$)|kluis-|agenda-knop-)';
 function ingress() {
   const n8nOrigin = { service: 'https://' + N8N_ORIGIN_HOST, originRequest: { httpHostHeader: N8N_ORIGIN_HOST, originServerName: N8N_ORIGIN_HOST } };
+  // Qwen pas doorlaten als de Access-app er is; cloudflared controleert dan zelf het Access-bewijs (tweede slot, Fable wv288 #1).
+  const qwenAud = (function () { try { return JSON.parse(appGeheimLees('qwen-config.json')).access_aud || ''; } catch (e) { return ''; } })();
+  const qwenOrigin = { service: 'https://' + QWEN_ORIGIN_HOST, originRequest: { httpHostHeader: QWEN_ORIGIN_HOST, originServerName: QWEN_ORIGIN_HOST,
+    access: { required: true, teamName: TEAM.replace(/^https:\/\/|\.cloudflareaccess\.com$/g, ''), audTag: [qwenAud] } } };
   // Eerst: elk pad met een '..'-segment dicht. cloudflared matcht op het gedecodeerde pad zonder dot-segmenten op te
   // lossen, dus '/webhook/../rest/settings' en '/webhook/%2e%2e/rest' zouden anders op de webhook-regel passen en pas
   // achter de Olares-ingang tot '/rest/...' genormaliseerd worden (review Fable 6-10).
@@ -101,8 +126,13 @@ function ingress() {
     { hostname: APP_POD, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
     { hostname: APP_POD, path: '^/app/[a-z0-9/-]{1,64}$', service: 'http://localhost:8080' },
     { hostname: APP_POD, service: 'http_status:404' },
+    // Briefwijzer route lokaal (wv288): alleen de twee OpenAI-paden van Qwen; de rest van de llama.cpp-router (/health,
+    // /slots, /props, /metrics, /upstream, /running, /logs, /unload, de web-UI) blijft dicht. Access-servicetoken ervóór.
+    { hostname: QWEN, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
+  ].concat(qwenAud ? [Object.assign({ hostname: QWEN, path: '^/v1/(chat/completions|models)$' }, qwenOrigin)] : []).concat([
+    { hostname: QWEN, service: 'http_status:404' },
     { service: 'http_status:404' },
-  ] } };
+  ]) } };
 }
 
 async function cf(methode, pad, body) {
@@ -299,6 +329,86 @@ async function telStap() {
   console.log('ingress gezet' + (process.env.TEL_DIENST ? ' (/tel tijdelijk naar ' + process.env.TEL_DIENST + ')' : ''));
 }
 
+// ── Briefwijzer route lokaal, stap qwen-eemwerk (wv288) ──
+function qwenGeheim() { try { return JSON.parse(appGeheimLees(QWEN_GEHEIM) || 'null'); } catch (e) { return null; } }
+// Worker-secret van eemwerk; de waarde alleen via stdin, nooit in argv of uitvoer. Werkmap = de eigen repo (eigen wrangler).
+function workerSecret(naam, waarde) {
+  const r = spawnSync('npx', ['wrangler', 'secret', 'put', naam], {
+    input: waarde, encoding: 'utf8', timeout: 120000, cwd: EEMWERK,
+    env: Object.assign({}, process.env, { CLOUDFLARE_ACCOUNT_ID: ACC, WRANGLER_SEND_METRICS: 'false' }),
+  });
+  const uit = String((r.stdout || '') + (r.stderr || '')).split(waarde).join('••••');
+  if (r.status !== 0) throw new Error('worker-secret ' + naam + ': wrangler exit ' + r.status + ' ' + uit.replace(/\s+/g, ' ').slice(-200));
+  console.log('worker-secret ' + naam + ' (eemwerk): gezet');
+}
+async function qwenServicetoken() {
+  const lijst = await cf('GET', '/accounts/' + ACC + '/access/service_tokens');
+  const bestaand = (lijst || []).find(function (t) { return t.name === QWEN_ST_NAAM; });
+  let g = qwenGeheim();
+  if (bestaand && process.argv.includes('--rotatie')) {
+    if (!g || g.client_id !== bestaand.client_id) throw new Error('rotatie: geheimbestand ontbreekt of hoort niet bij token "' + QWEN_ST_NAAM + '"');
+    const t = await cf('POST', '/accounts/' + ACC + '/access/service_tokens/' + bestaand.id + '/rotate');
+    g = Object.assign({}, g, { client_secret: t.client_secret, geroteerd: new Date().toISOString() });
+    delete g.worker_gezet; delete g.geheim_gewist;
+    appGeheimSchrijf(QWEN_GEHEIM, JSON.stringify(g));
+    console.log('servicetoken ' + QWEN_ST_NAAM + ' geroteerd (nieuw geheim, zelfde client-id)');
+  } else if (bestaand) {
+    if (!g || g.client_id !== bestaand.client_id) throw new Error('servicetoken "' + QWEN_ST_NAAM + '" bestaat, maar het geheimbestand hoort er niet bij - vervangen via de machinekamer (rotate), niet blind opnieuw');
+    if (!g.client_secret && !g.worker_gezet) throw new Error('servicetoken "' + QWEN_ST_NAAM + '": geheim weg en de Worker-secrets nooit gezet - rotate');
+    console.log('servicetoken ' + QWEN_ST_NAAM + ' bestaat (verloopt ' + bestaand.expires_at + ')');
+  } else {
+    if (g) throw new Error('geheimbestand ' + QWEN_GEHEIM + ' zonder token in Cloudflare - eerst met de hand opruimen');
+    const t = await cf('POST', '/accounts/' + ACC + '/access/service_tokens', { name: QWEN_ST_NAAM, duration: '8760h' });
+    g = { id: t.id, client_id: t.client_id, client_secret: t.client_secret, aangemaakt: new Date().toISOString(), verloopt: t.expires_at || null };
+    appGeheimSchrijf(QWEN_GEHEIM, JSON.stringify(g));   // meteen, zodat een fout hierna het geheim niet kwijtmaakt
+    console.log('servicetoken ' + QWEN_ST_NAAM + ' aangemaakt (verloopt ' + (t.expires_at || '?') + ')');
+  }
+  if (!g.worker_gezet) {
+    workerSecret('LOKAAL_CF_ID', g.client_id);
+    workerSecret('LOKAAL_CF_GEHEIM', g.client_secret);
+    g.worker_gezet = new Date().toISOString();
+    appGeheimSchrijf(QWEN_GEHEIM, JSON.stringify(g));
+  } else console.log('worker-secrets staan er al (niet opnieuw gezet)');
+  return { id: g.id || bestaand.id, client_id: g.client_id };
+}
+async function qwenAccess(tokenId) {
+  const apps = await cf('GET', '/accounts/' + ACC + '/access/apps?per_page=100');
+  const body = { name: QWEN_ACCESS_NAAM, domain: QWEN, type: 'self_hosted', session_duration: '24h', app_launcher_visible: false,
+    auto_redirect_to_identity: false, service_auth_401_redirect: true, skip_interstitial: true,
+    policies: [{ name: 'Alleen servicetoken ' + QWEN_ST_NAAM, decision: 'non_identity', precedence: 1, include: [{ service_token: { token_id: tokenId } }] }] };
+  const bestaand = (apps || []).find(function (a) { return a.domain === QWEN; });
+  const app = await (bestaand ? cf('PUT', '/accounts/' + ACC + '/access/apps/' + bestaand.id, body) : cf('POST', '/accounts/' + ACC + '/access/apps', body));
+  console.log('access-app ' + QWEN + ': ' + (bestaand ? 'bijgewerkt' : 'aangemaakt'));
+  if (!app || !/^[0-9a-f]{64}$/.test(app.aud || '')) throw new Error('access-app ' + QWEN + ': geen aud terug');
+  appGeheimSchrijf('qwen-config.json', JSON.stringify({ access_team: TEAM, access_aud: app.aud, bijgewerkt: new Date().toISOString() }));
+  console.log('qwen-config.json geschreven (aud ' + app.aud.slice(0, 8) + '…)');
+}
+async function qwenDns(id) {
+  const doel = id + '.cfargotunnel.com';
+  const bestaand = await cf('GET', '/zones/' + ZONE_SOCEV + '/dns_records?name=' + QWEN);
+  if (bestaand && bestaand.length > 1) throw new Error('dns ' + QWEN + ': ' + bestaand.length + ' records - eerst met de hand opruimen');
+  const body = { type: 'CNAME', name: QWEN, content: doel, proxied: true, comment: 'tunnel ' + NAAM + ' - Briefwijzer route lokaal (wv288, 9-10-2026)' };
+  if (bestaand && bestaand.length && bestaand[0].content === doel) return console.log('dns ' + QWEN + ': staat al goed');
+  if (bestaand && bestaand.length) { await cf('PATCH', '/zones/' + ZONE_SOCEV + '/dns_records/' + bestaand[0].id, body); console.log('dns ' + QWEN + ': vervangen'); }
+  else { await cf('POST', '/zones/' + ZONE_SOCEV + '/dns_records', body); console.log('dns ' + QWEN + ': aangemaakt'); }
+}
+async function qwenStap() {
+  const st = await qwenServicetoken();
+  await qwenAccess(st.id);
+  const t = await tunnelZoekOfMaak();
+  await qwenDns(t);
+  await cf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + t + '/configurations', ingress());
+  console.log('ingress gezet');
+}
+// Na een volledig groene toets: het geheim van de pod af; alleen de Worker kent het nog (Fable 9-10 #9).
+function qwenGeheimWissen() {
+  const g = qwenGeheim();
+  if (!g || !g.client_secret || !g.worker_gezet) return;
+  delete g.client_secret; g.geheim_gewist = new Date().toISOString();
+  appGeheimSchrijf(QWEN_GEHEIM, JSON.stringify(g));
+  console.log('tokengeheim ' + QWEN_ST_NAAM + ' van de pod gewist (alleen nog Worker-secret)');
+}
+
 function draaitAl() {
   for (const pid of fs.readdirSync('/proc').filter(function (d) { return /^\d+$/.test(d); })) {
     let cmd = ''; try { cmd = fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8'); } catch (e) { continue; }
@@ -398,6 +508,7 @@ async function toets() {
   }
   fout += await toetsAppPod(n404);
   fout += await toetsTel();
+  fout += await toetsQwen(n404);
   const apps = await accessOpHuisdokter().catch(function (e) { return ['(niet leesbaar: ' + e.message + ')']; });
   if (apps.length) fout++;
   console.log((apps.length ? 'ROOD  ' : 'GROEN ') + 'geen Access-app op huisdokter.dev' + (apps.length ? ' [' + apps.join('; ') + ']' : ''));
@@ -489,6 +600,58 @@ async function toetsTel() {
   return fout;
 }
 
+// Briefwijzer route lokaal (wv288): zonder of met fout token weigert Access (kale 401/403, geen inlogpagina); met het token
+// (alleen zolang het geheim nog op de pod staat) komen alleen /v1/models en /v1/chat/completions bij Qwen, de rest 404.
+async function toetsQwen(n404) {
+  let fout = 0;
+  const regel = function (goed, wat, r, extra) { if (!goed) fout++; console.log((goed ? 'GROEN ' : 'ROOD  ') + wat + '  [' + extra + ' -> ' + r.status + (r.location ? ' ' + r.location.slice(0, 50) : '') + ']'); };
+  for (const host of [N8N, SOCEV, APP_POD]) { const r = await http('GET', 'https://' + host + '/v1/models'); regel(n404(r) || r.status === 401 || r.status === 403, '/v1/models niet via ' + host, r, 'GET ' + host + '/v1/models'); }
+  const g = qwenGeheim();
+  if (!g) { console.log('LET OP  ' + QWEN + ' nog niet ingericht (geen ' + QWEN_GEHEIM + '): alleen de controle hierboven'); return fout; }
+  const U = 'https://' + QWEN;
+  const geenInlog = function (r) { return !r.location && !/<form|<input|cdn-cgi\/access\/login/i.test(r.tekst); };
+  for (const [m, p] of [['GET', '/v1/models'], ['POST', '/v1/chat/completions'], ['GET', '/health'], ['GET', '/']]) {
+    const r = await http(m, U + p);
+    regel((r.status === 401 || r.status === 403) && geenInlog(r), 'qwen zonder servicetoken: Access weigert, geen inlogpagina', r, m + ' ' + p);
+  }
+  try {   // de volledige weigerpagina: geen formulier, invoerveld of inloglink (Fable wv288 #3)
+    const v = await fetch(U + '/v1/models', { redirect: 'manual', signal: AbortSignal.timeout(15000) });
+    const h = (await v.text()).replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, '');
+    regel(!/<form|<input|cdn-cgi\/access\/login|<a [^>]*href/i.test(h) && !v.headers.get('location'), 'qwen-weigerpagina zonder formulier, invoer of inloglink', { status: v.status }, 'GET /v1/models (hele pagina)');
+  } catch (e) { regel(false, 'qwen-weigerpagina lezen', { status: 0 }, e.name); }
+  let r = await http('GET', U + '/v1/models', { 'CF-Access-Client-Id': g.client_id, 'CF-Access-Client-Secret': 'fout' });
+  regel((r.status === 401 || r.status === 403) && geenInlog(r), 'qwen met fout tokengeheim: Access weigert', r, 'GET /v1/models');
+  if (!g.client_secret) { console.log('LET OP  tokengeheim ' + QWEN_ST_NAAM + ' staat niet op de pod (bewust gewist): de qwen-toetsen met token lopen niet'); return fout; }
+  const tok = { 'CF-Access-Client-Id': g.client_id, 'CF-Access-Client-Secret': g.client_secret };
+  try {
+    const v = await fetch(U + '/v1/models', { headers: tok, redirect: 'manual', signal: AbortSignal.timeout(15000) });
+    const d = await v.json().catch(function () { return null; });
+    regel(v.status === 200 && Array.isArray(d && d.data) && d.data.some(function (x) { return x && x.id === QWEN_MODEL; }), 'qwen met token: /v1/models 200 met ' + QWEN_MODEL, { status: v.status }, 'GET /v1/models');
+  } catch (e) { regel(false, 'qwen /v1/models met token', { status: 0 }, e.name); }
+  try {   // streaming door tunnel en Access: alleen de kop en het eerste stuk lezen, dan afbreken (Qwen stopt dan met genereren)
+    const ac = new AbortController(), klok = setTimeout(function () { ac.abort(); }, 120000);
+    const v = await fetch(U + '/v1/chat/completions', { method: 'POST', redirect: 'manual', signal: ac.signal,
+      headers: Object.assign({ 'content-type': 'application/json' }, tok),
+      body: JSON.stringify({ model: QWEN_MODEL, stream: true, max_tokens: 5, messages: [{ role: 'user', content: 'Zeg ok.' }], chat_template_kwargs: { enable_thinking: false } }) });
+    const soort = v.headers.get('content-type') || '';
+    let eerste = '';
+    if (v.body) { const rd = v.body.getReader(); const s = await rd.read(); eerste = s.value ? Buffer.from(s.value).toString('utf8') : ''; }
+    clearTimeout(klok); ac.abort();
+    regel(v.status === 200 && /text\/event-stream/.test(soort) && /^data:/m.test(eerste), 'qwen met token: chat/completions streamt (text/event-stream)', { status: v.status }, 'POST /v1/chat/completions ' + soort.split(';')[0]);
+  } catch (e) { regel(false, 'qwen chat/completions met token', { status: 0 }, e.name); }
+  for (const [m, p] of [['GET', '/v1/models/x'], ['GET', '/health'], ['GET', '/slots'], ['GET', '/props'], ['GET', '/metrics'], ['GET', '/'],
+    ['GET', '/v1/chat/completions/'], ['GET', '/V1/models'], ['GET', '/v1/completions'], ['GET', '/v1/embeddings'], ['GET', '/upstream/' + encodeURIComponent(QWEN_MODEL) + '/health'],
+    ['GET', '/running'], ['GET', '/logs'], ['GET', '/unload'], ['GET', '/ui']]) {
+    r = await http(m, U + p, tok);
+    regel(n404(r), 'qwen ' + p + ' dicht in de tunnel (404)', r, m + ' ' + p);
+  }
+  for (const p of ['/v1/../health', '/v1/%2e%2e/health', '/v1/%2E%2E/slots', '/v1/models/../../health', '/v1/models%2F..%2F..%2Fhealth', '/v1/chat/completions/../../../props', '/v1/x/..\\health']) {
+    r = await rauw('GET', QWEN, p, tok);
+    regel(r.status === 404 || r.status === 400, 'qwen padtruc dicht', r, 'GET ' + p);
+  }
+  return fout;
+}
+
 (async function () {
   const stap = process.argv[2] || 'toets';
   // Uitwijk stap 6d (review 8-10 #2): dit script raakt socev-olares en start zo nodig een cloudflared met een vers
@@ -516,7 +679,15 @@ async function toetsTel() {
       await new Promise(function (r) { setTimeout(r, 20000); });
       process.exit(await toets() ? 1 : 0);
     }
-    if (stap !== 'inrichten') throw new Error('onbekende stap ' + stap + ' (toets | ingress | app-pod | tel | inrichten)');
+    if (stap === 'qwen-eemwerk') {
+      await qwenStap();
+      await new Promise(function (r) { setTimeout(r, 20000); });
+      const f = await toets();
+      if (!f) qwenGeheimWissen();
+      else console.log('LET OP  toets niet groen: tokengeheim blijft (0600) op de pod tot een groene toets; daarna opnieuw qwen-eemwerk draaien');
+      process.exit(f ? 1 : 0);
+    }
+    if (stap !== 'inrichten') throw new Error('onbekende stap ' + stap + ' (toets | ingress | app-pod | tel | qwen-eemwerk | inrichten)');
     const id = await tunnelZoekOfMaak();
     await cf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + id + '/configurations', ingress());
     console.log('ingress gezet');
