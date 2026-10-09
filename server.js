@@ -5613,10 +5613,17 @@ async function appAgents(req, res, a) {
     });
   const ru = wv && wv.ruimte ? { mag: !!wv.ruimte.mag, reden: String(wv.ruimte.reden || '').slice(0, 160) } : null;
   // wv335: "Wacht op jou" staat nu als Voor jou in Vandaag; hier alleen het aantal (null = lijst niet leesbaar, de app toont dan de oude lijst)
-  let voorJou = null;
-  try { voorJou = (await appVjTelling(a)).open; } catch (e) { logError('app-agents', e); voorJou = null; }
+  let voorJou = null, los = null;
+  try {
+    voorJou = (await appVjTelling(a)).open;
+    // Fable wv335 #11: tot de agents zelf een punt maken (fase 3) komt een nieuwe blokkade pas bij de volgende ronde in Voor jou;
+    // die rijen (aan geen enkel punt gekoppeld) blijven hier zichtbaar
+    const gekoppeld = new Set();
+    (await appVjPunten()).forEach(function (p) { ((p.herkomst && Array.isArray(p.herkomst.wv)) ? p.herkomst.wv : []).forEach(function (n) { gekoppeld.add(Number(n)); }); });
+    los = wachtOpDavid.filter(function (w) { return !gekoppeld.has(Number(w.wv)); });
+  } catch (e) { logError('app-agents', e); voorJou = null; los = null; }
   appStuur(res, 200, { ok: true, max: typeof MAX_AGENTS === 'number' ? MAX_AGENTS : null, lopend: lopend, rij: rij, wacht_op_david: wachtOpDavid,
-    voor_jou: voorJou, recent: recent, ruimte: ru, fout: fout });
+    voor_jou: voorJou, wacht_op_david_los: los, recent: recent, ruimte: ru, fout: fout });
 }
 async function appAgentRapport(req, res, jobId) {
   if (!APP_JOB_RE.test(jobId)) return appWeiger(res, 404, 'onbekend', 'rapport id');
@@ -6608,12 +6615,15 @@ const APP_VJ_CACHE_MS = 60 * 1000;
 const APP_VJ_PER_UUR = 60;
 const APP_VJ_TERUG_MS = 60 * 1000;   // ↩️ zoals bij het actielijstje
 const APP_VJ_MAX = 40;
+const APP_VJ_FOUT_MS = 20 * 1000;
+const APP_VJ_DETAIL_PER_UUR = 300;   // details (lijst en actielijstje samen); elke tik is een n8n- of Todoist-aanroep (Fable wv335 #12)
 const APP_VJ_WAAR = { pixel: 'op je telefoon', pc: 'op de pc', praktijk: 'op de praktijk', thuis: 'thuis', auto: 'in de auto' };
 const APP_VJ_REGISTER = path.join(process.env.APP_VAULT_DIR || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', '00_Systeem', 'Open vragen aan David.md');
 // Sleutelachtige tekst (zelfde norm als machinekamer.voor_jou_tekst_ok); registertekst gaat niet door de RPC-weigering
 const APP_VJ_SLEUTEL_RE = /(sk-[a-z0-9_-]{16,}|ghp_[a-z0-9]{20,}|github_pat_|xox[abpr]-|eyJ[a-zA-Z0-9_-]{20,}\.|AKIA[A-Z0-9]{12,}|-----BEGIN|[A-Za-z0-9_+=-]{40,})/i;
 const APP_VJ_PATIENT_RE = /(^|[^a-z])(pati[eë]nt(en|e)?|bsn|geboortedatum|huisbezoek(en)?|visite|mevr\.?|dhr\.|mw\.|casus)([^a-z]|$)/i;
 appStaat.tellers.voorjou = appStaat.tellers.voorjou || [];
+appStaat.tellers.vjdetail = appStaat.tellers.vjdetail || [];
 appStaat.vjTerug = appStaat.vjTerug || {};
 
 function appVjDag(ymd) { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '')); return m ? Number(m[3]) + '-' + Number(m[2]) : ''; }
@@ -6636,11 +6646,13 @@ async function appVjPunten() {
   const c = appStaat.vjCache;
   if (c && c.data && Date.now() - c.op < APP_VJ_CACHE_MS) return c.data;
   if (c && c.bezig) return c.bezig;
-  const st = appStaat.vjCache = { data: c && c.data, op: c ? c.op : 0, bezig: null };
+  // Fable wv335 #6: na een mislukte lezing 20 s niet opnieuw (anders hangt elke /app/nieuw en /app/agents 8 s aan een dode RPC)
+  if (c && c.foutOp && Date.now() - c.foutOp < APP_VJ_FOUT_MS) return Promise.reject(new Error('voor_jou kort geleden niet leesbaar'));
+  const st = appStaat.vjCache = { data: c && c.data, op: c ? c.op : 0, bezig: null, foutOp: 0 };
   st.bezig = appSbRpc('mk_voor_jou_lijst', { p_alles: false }).then(function (j) {
     if (!j || !Array.isArray(j.punten)) throw new Error('voor_jou zonder punten');
     st.data = j.punten.filter(function (p) { return p && Number.isInteger(p.id) && p.id > 0; }); st.op = Date.now(); st.bezig = null; return st.data;
-  }, function (e) { st.bezig = null; throw e; });
+  }).catch(function (e) { st.bezig = null; st.data = null; st.foutOp = Date.now(); throw e; });
   return st.bezig;
 }
 function appVjVoorApparaat(punten, a) { const vast = !!(a && a.soort === 'vast'); return punten.filter(function (p) { return !(vast && p.prive === true); }); }
@@ -6656,9 +6668,10 @@ async function appVjTelling(a) {
   const z = appVjVoorApparaat(await appVjPunten(), a).filter(function (p) { return appVjZichtbaar(p, vandaag); });
   return { open: z.length, dichtbij: z.filter(function (p) { return appVjDichtbij(p, vandaag); }).length };
 }
-function appVjTerugMs(id, nu) {
+// ↩️ alleen op het apparaat dat koos (Fable wv335 #4): een ander apparaat ziet het punt gewoon als gesloten
+function appVjTerugMs(id, nu, apparaat) {
   const t = appStaat.vjTerug[id];
-  return t && t.tot > nu ? t.tot - nu : 0;
+  return t && t.tot > nu && t.apparaat === apparaat ? t.tot - nu : 0;
 }
 async function appVoorJouRoute(req, res, a) {
   res._app.stil = true;   // de app leest bij openen van Vandaag en op Ververs
@@ -6668,10 +6681,10 @@ async function appVoorJouRoute(req, res, a) {
   const eigen = appVjVoorApparaat(punten, a);
   const zichtbaar = eigen.filter(function (p) { return appVjZichtbaar(p, vandaag); }).slice(0, APP_VJ_MAX);
   // Net gekozen (↩️ nog mogelijk): blijft een minuut in de lijst, met de nieuwe stand
-  const net = eigen.filter(function (p) { return !appVjZichtbaar(p, vandaag) && appVjTerugMs(p.id, nu) > 0; });
-  const later = eigen.filter(function (p) { return p.status === 'later' && String(p.later_tot || '') > vandaag && !(appVjTerugMs(p.id, nu) > 0); })
+  const net = eigen.filter(function (p) { return !appVjZichtbaar(p, vandaag) && appVjTerugMs(p.id, nu, a.id) > 0; });
+  const later = eigen.filter(function (p) { return p.status === 'later' && String(p.later_tot || '') > vandaag && !(appVjTerugMs(p.id, nu, a.id) > 0); })
     .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), later_tot: p.later_tot }; });
-  const lijst = zichtbaar.concat(net).map(function (p) { return Object.assign(appVjKort(p, vandaag), { terug_ms: appVjTerugMs(p.id, nu) }); });
+  const lijst = zichtbaar.concat(net).map(function (p) { return Object.assign(appVjKort(p, vandaag), { terug_ms: appVjTerugMs(p.id, nu, a.id) }); });
   appStuur(res, 200, { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: !!(a && a.soort === 'vast'),
     bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null });
 }
@@ -6708,6 +6721,7 @@ function appVjStap(s) {
 async function appVoorJouDetail(req, res, a, idTekst) {
   res._app.stil = true;
   if (!/^[1-9]\d{0,8}$/.test(idTekst)) return appWeiger(res, 404, 'onbekend', 'voor-jou id');
+  if (!appTeller('vjdetail', APP_VJ_DETAIL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur; probeer het straks', 'grens details');
   let punten;
   try { punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen', 'voor-jou lezen'); }
   const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === Number(idTekst); });
@@ -6738,9 +6752,12 @@ async function appVoorJouDetail(req, res, a, idTekst) {
       const r = m.find(function (x) { return /^(open|deels|wacht|uitgesteld)/i.test(x.status); }) || m[0];
       const tijd = appVjTijd(sl.split('#')[0]);
       if (!r) { herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + (rijen ? ' (niet meer in het register)' : '') }); return; }
-      const vt = appVjOpmaakWeg(r.vraag), at = appVjOpmaakWeg(r.aanname), kanaal = appKort(String(r.kanaal).replace(/\s*\(.*$/, ''), 40);
+      const vt = appVjOpmaakWeg(r.vraag), at = appVjOpmaakWeg(r.aanname);
       const veilig = appVjVeilig(vt) && appVjVeilig(at);
-      herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + (kanaal ? ' (' + kanaal + ')' : '') + ' — ' + appKort(String(r.status).split(/[;—(]/)[0], 60) });
+      // Fable wv335 #2: ook kanaal en status uit het (ongefilterde) register door het filter; bij een treffer alleen de tijd
+      const k0 = appKort(String(r.kanaal).replace(/\s*\(.*$/, ''), 40), s0 = appKort(appVjOpmaakWeg(String(r.status).split(/[;—(]/)[0]), 60);
+      const kanaal = appVjVeilig(k0) ? k0 : '', stand = appVjVeilig(s0) ? s0 : '';
+      herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + (kanaal ? ' (' + kanaal + ')' : '') + (stand ? ' — ' + stand : '') });
       if (p.soort === 'besluit' && !vraag) vraag = veilig ? { tekst: appKort(vt, 700), voorstel: at ? appKort(at, 300) : null, gesteld: tijd, kanaal: kanaal || null }
         : { tekst: 'tekst verborgen', voorstel: null, gesteld: tijd, kanaal: kanaal || null };
     });
@@ -6754,7 +6771,7 @@ async function appVoorJouDetail(req, res, a, idTekst) {
     waarom: p.waarom ? appKort(p.waarom, 600) : null, stappen: stappen, herkomst: herkomst, vraag: vraag,
     meting: p.meting ? appKort(p.meting, 400) : null, laatst_gemeten: p.laatst_gemeten || null,
     bewijs: p.bewijs ? appKort(p.bewijs, 400) : null, gesloten_door: p.gesloten_door || null, gesloten_op: p.gesloten_op || null,
-    terug_ms: appVjTerugMs(p.id, nu) }));
+    terug_ms: appVjTerugMs(p.id, nu, a.id) }));
 }
 // POST /app/voor-jou/keuze {id, van, keuze: gedaan|later|vervallen|terug, tot?}. Onder het invoerslot (niet in APP_SLOT_VRIJ),
 // sessie glijdt, alleen de primaire kant, 60 per uur, auditregel zonder tekst. ↩️ alleen binnen een minuut na een keuze op deze pod.
@@ -6776,14 +6793,23 @@ async function appVoorJouKeuze(req, res, a, d) {
   if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'voor-jou ' + id + ' weg');
   let body;
   const t = appStaat.vjTerug[id];
+  // Fable wv335 #3: elke app-keuze krijgt een herkomstregel als bewijs (geen tekst van David); de beheerronde leest daaraan af
+  // dat David het in de app deed, en bij een besluit ("Al beantwoord") zoekt hij het antwoord zelf in het register.
+  const wat = keuze === 'gedaan' ? (p.soort === 'besluit' ? 'Al beantwoord' : 'Gedaan') : keuze === 'later' ? 'Later tot ' + appVjDag(tot) : keuze === 'vervallen' ? 'Niet meer nodig' : 'Terugdraaien';
+  const bewijs = 'app ' + appVjDag(vandaag) + ' ' + appKlok(new Date(nu).toISOString()) + ': David tikte ' + wat;
   if (keuze === 'terug') {
-    if (!t || t.tot <= nu || t.apparaat !== a.id) return appWeiger(res, 409, 'terugdraaien kan alleen tot een minuut na je keuze', 'voor-jou terug te laat');
-    body = { p_sleutel: p.sleutel, p_van: t.naar, p_naar: t.van, p_door: 'david', p_later_tot: t.van === 'later' ? t.later_tot : null };
+    if (!t || t.apparaat !== a.id) return appWeiger(res, 409, 'terugdraaien kan hier niet (meer); zet het punt zelf goed of zeg het Socev', 'voor-jou terug onbekend');
+    if (t.tot <= nu) return appWeiger(res, 409, 'terugdraaien kan alleen tot een minuut na je keuze', 'voor-jou terug te laat');
+    body = { p_sleutel: p.sleutel, p_van: t.naar, p_naar: t.van, p_door: 'david', p_bewijs: bewijs, p_later_tot: t.van === 'later' ? t.later_tot : null };
   } else {
-    body = { p_sleutel: p.sleutel, p_van: van, p_naar: keuze, p_door: 'david', p_later_tot: tot };
+    body = { p_sleutel: p.sleutel, p_van: van, p_naar: keuze, p_door: 'david', p_bewijs: bewijs, p_later_tot: tot };
   }
   let r;
-  try { r = await appSbRpc('mk_voor_jou_status', body); } catch (e) { logError('app-voor-jou', e); appStaat.vjCache = null; return appWeiger(res, 503, 'opslaan lukte nu niet; probeer het zo opnieuw', 'voor-jou rpc'); }
+  try { r = await appSbRpc('mk_voor_jou_status', body); } catch (e) {
+    logError('app-voor-jou', e); appStaat.vjCache = null;
+    // Fable wv335 #7: bij een time-out kan het toch gelukt zijn
+    return appWeiger(res, 503, /timeout|abort/i.test(String(e && (e.name + ' ' + e.message))) ? 'geen antwoord van de databank; kijk zo bij Ververs of het gelukt is' : 'opslaan lukte nu niet; probeer het zo opnieuw', 'voor-jou rpc');
+  }
   appStaat.vjCache = null;
   res._app.reden = 'voor-jou ' + keuze + ' #' + id + ' -> ' + (r && r.ok ? 'ok' : 'conflict');
   if (!r || r.ok !== true) {
@@ -6796,7 +6822,7 @@ async function appVoorJouKeuze(req, res, a, d) {
   const melding = keuze === 'gedaan' ? 'Gedaan. Socev kijkt bij de volgende ronde of het ook zo gemeten wordt.'
     : keuze === 'later' ? 'Op later gezet tot ' + appVjDag(tot) + '.' : keuze === 'vervallen' ? 'Weggehaald: niet meer nodig.' : 'Teruggedraaid.';
   const q = r.punt || {};
-  appStuur(res, 200, { ok: true, melding: melding, punt: Object.assign(appVjKort(Object.assign({}, p, { status: q.status || p.status, later_tot: q.later_tot }), vandaag), { terug_ms: appVjTerugMs(id, Date.now()) }) });
+  appStuur(res, 200, { ok: true, melding: melding, punt: Object.assign(appVjKort(Object.assign({}, p, { status: q.status || p.status, later_tot: q.later_tot }), vandaag), { terug_ms: appVjTerugMs(id, Date.now(), a.id) }) });
 }
 
 // ── Details bij het actielijstje (wv335; bouwplan Voor jou § 2, § 4.4): GET /app/vandaag/actie/<datum>/<positie> ──
@@ -6808,7 +6834,7 @@ async function appVoorJouKeuze(req, res, a, d) {
 const APP_ACTIE_STATE_TABEL = process.env.APP_ACTIE_STATE_TABEL || 'vNAY2dVRpSx1l3Ri';
 const APP_CORR_STATE_TABEL = process.env.APP_CORR_STATE_TABEL || 'pnX6vvg2iv256HAB';
 const APP_TODOIST_PRIVE = (process.env.APP_TODOIST_PRIVE || '6gH8FwGg4FjJgHcF,6gH864WhmwFwpRjv').split(',');   // Todoist-projecten Privé en Inbox
-const APP_ENTITEIT_PRIVE = /(^|\/|\s)(priv[eé]|gezin|gambia|thuis|persoonlijk)/i;
+const APP_ENTITEIT_PRIVE = /(^|[^a-z])(priv[eé]|gezin|gambia|thuis|persoonlijk)/i;   // gemeten 9-10: 'Prive', 'Prive/Gambia', 'Prive/Shizzle'
 // Zoals appKort, maar regels blijven (een Todoist-beschrijving is vaak een lijstje)
 function appVjRegels(s, n) {
   s = String(s == null ? '' : s).replace(/\r/g, '').replace(/[\u0000-\u0009\u000b-\u001f\u007f]+/g, ' ').replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -6828,6 +6854,7 @@ async function appVandaagActieDetail(req, res, a, rest) {
   const m = /^(\d{4}-\d{2}-\d{2})\/([1-9]|10)$/.exec(rest);
   if (!m) return appWeiger(res, 404, 'onbekend', 'actie-detail pad');
   const datum = m[1], positie = Number(m[2]), vast = !!(a && a.soort === 'vast');
+  if (!appTeller('vjdetail', APP_VJ_DETAIL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur; probeer het straks', 'grens details');
   let rijen;
   try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-actie-detail', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen', 'actie-detail lezen'); }
   const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
@@ -6872,7 +6899,7 @@ async function appVandaagActieDetail(req, res, a, rest) {
       const maten = r && /doktersmaten/i.test(String(r.bron || ''));
       if (!r) uit.fout = 'deze mail staat niet meer in de bewaking';
       else if (vast && !maten) uit.prive = true;
-      else if (appBronVerborgen(r.onderwerp)) uit.verborgen = true;
+      else if (appBronVerborgen(r.onderwerp) || appBronVerborgen(r.tegenpartij)) uit.verborgen = true;   // Fable wv335 #1: ook de naam
       else {
         uit.onderwerp = appKort(r.onderwerp, 300); uit.aan = r.tegenpartij ? appKort(r.tegenpartij, 160) : null;
         uit.op = /^\d{4}-\d{2}-\d{2}/.test(String(r.verzonden_op || '')) ? String(r.verzonden_op).slice(0, 10) : null;

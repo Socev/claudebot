@@ -4296,6 +4296,7 @@ async function bewijs(o) {
         pnt(8, 'later-verlopen', { status: 'later', later_tot: V }),
         pnt(9, 'bonsai', { soort: 'besluit', prive: true }),
         pnt(10, 'gesloten', { status: 'gedaan', gesloten_door: 'beheer', gesloten_op: new Date().toISOString() }),
+        pnt(11, 'reg-pat', { soort: 'besluit', status: 'later', later_tot: plus(V, 20), herkomst: { register: ['2026-10-06 08:00'], wv: [999] } }),
       ];
       sbStaat.wvItems = [{ id: 62, label: 'machinekamer:olares-backup-status', samenvatting: 'Back-up van Olares controleren', status: 'geblokkeerd', geblokkeerd_door: 'David: NAS-backup instellen', opdracht: 'GEHEIME-OPDRACHT' },
         { id: 325, label: 'machinekamer:wv315 agenda-knop', samenvatting: null, status: 'geblokkeerd', geblokkeerd_door: 'David: ja', opdracht: 'X' }];
@@ -4304,7 +4305,8 @@ async function bewijs(o) {
         + '| 2026-10-09 19:55 | machinekamer (agentrapport wv315) | **Zal ik de ✅ naar de app verplaatsen?** Wat er verandert: [[00_Systeem/Iets\\|iets]]. | Ja — eerst één proef | open | wv325 |\n'
         + '| 2026-10-09 19:40 | machinekamer (agentrapport wv255) | Mag de nacontrole lopen? | Ja | beantwoord: JA | x |\n'
         + '| 2026-10-09 19:40 | machinekamer (agentrapport wv318, VRAAG) | Gaat het om patiënt Jansen, geboortedatum 1-1-1950? | Ja | open | x |\n'
-        + '| 2026-10-07 13:30 | debug | Mag Socev de back-upstatus lezen? | Ja | open | x |\n');
+        + '| 2026-10-07 13:30 | debug | Mag Socev de back-upstatus lezen? | Ja | open | x |\n'
+        + '| 2026-10-06 08:00 | mw. Pietersen belde | Mag het? | Ja | beantwoord: bel mw. Jansen terug | x |\n');
       H.appStaat.vjCache = null; H.appStaat.vjRegister = null; H.appStaat.vjTerug = {}; H.appStaat.wvCache = null;
       r = await vraag('GET', '/app/voor-jou', undefined, { pot: pot() });
       toets('27 GET /app/voor-jou zonder sessie -> 401', r.status === 401, r.status);
@@ -4314,7 +4316,8 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
       const ids = (r.j.punten || []).map((x) => x.id);
       toets('27 lijst: open + later-vandaag, zonder later-toekomst en gesloten; volgorde van de tabel; privé wel op de telefoon', r.status === 200 && ids.join() === '1,2,3,4,5,6,8,9' && r.j.zichtbaar === 5 && r.j.meer === 3, JSON.stringify(ids) + ' ' + r.j.meer);
-      toets('27 later-toekomst apart met datum', (r.j.later || []).length === 1 && r.j.later[0].id === 7 && r.j.later[0].later_tot === plus(V, 3), JSON.stringify(r.j.later));
+      toets('27 later-toekomst niet in de lijst (ook het tweede)', !ids.includes(11));
+      toets('27 later-toekomst apart met datum', (r.j.later || []).length === 2 && r.j.later[0].id === 7 && r.j.later[0].later_tot === plus(V, 3), JSON.stringify(r.j.later));
       const L = Object.fromEntries((r.j.punten || []).map((x) => [x.id, x]));
       toets('27 regel 2: wanneer · waar · duur', L[1].regel2 === 'uiterlijk ' + dm(plus(V, 9)) + ' · op de praktijk · ± 15 min' && L[2].regel2 === 'vandaag · op je telefoon · ± 1,5 u' && L[3].regel2 === 'uiterlijk morgen · op de pc · ± 5 min'
         && L[4].regel2 === 'over tijd (' + dm(plus(V, -2)) + ')' && L[5].regel2 === 'besluit', JSON.stringify([L[1].regel2, L[2].regel2, L[3].regel2, L[4].regel2, L[5].regel2]));
@@ -4340,6 +4343,8 @@ async function bewijs(o) {
         && /^Werkvoorraad wv325: .+ \(wacht op jou\)$/.test(r.j.herkomst[0].tekst), JSON.stringify([r.j.vraag, r.j.herkomst]));
       r = await vraag('GET', '/app/voor-jou/6', undefined, { pot: P.jar });
       toets('27 register: kenmerk #wv318 kiest de juiste rij van twee op dezelfde tijd; patiëntachtige tekst verborgen', r.status === 200 && r.j.vraag && r.j.vraag.tekst === 'tekst verborgen' && !/Jansen|1950|nacontrole/.test(JSON.stringify(r.j)), JSON.stringify(r.j.vraag));
+      r = await vraag('GET', '/app/voor-jou/11', undefined, { pot: P.jar });
+      toets('27 register: kanaal en status met patiënttekst niet getoond, alleen de tijd (Fable #2)', r.status === 200 && r.j.herkomst.some((h) => h.tekst === 'Vraag van 6-10 08:00') && !/Pietersen|Jansen/.test(JSON.stringify(r.j)), JSON.stringify(r.j.herkomst));
       const st404 = [];
       for (const q of ['/app/voor-jou/99', '/app/voor-jou/0', '/app/voor-jou/abc', '/app/voor-jou/7x', '/app/voor-jou/10']) st404.push((await vraag('GET', q, undefined, { pot: P.jar })).status);
       toets('27 details: onbekend, 0, tekst, rommel -> 404; een gesloten punt (≤ 7 d) mag wel', st404.join() === '404,404,404,404,200', st404.join());
@@ -4361,13 +4366,16 @@ async function bewijs(o) {
       const nAu2 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
       r = await K({ id: 2, van: 'open', keuze: 'gedaan' });
       const s1 = nS()[0] || {};
-      toets('27 Gedaan -> 200; RPC met sleutel, van open, naar gedaan, door david, zonder bewijs', r.status === 200 && r.j.ok === true && /Gedaan/.test(r.j.melding) && r.j.punt.status === 'gedaan' && r.j.punt.terug_ms > 50000
-        && s1.b.p_sleutel === 'vandaag-punt' && s1.b.p_van === 'open' && s1.b.p_naar === 'gedaan' && s1.b.p_door === 'david' && s1.b.p_bewijs === undefined, JSON.stringify([r.j, s1.b]));
+      toets('27 Gedaan -> 200; RPC met sleutel, van open, naar gedaan, door david, bewijs = herkomstregel zonder tekst (Fable #3)', r.status === 200 && r.j.ok === true && /Gedaan/.test(r.j.melding) && r.j.punt.status === 'gedaan' && r.j.punt.terug_ms > 50000
+        && s1.b.p_sleutel === 'vandaag-punt' && s1.b.p_van === 'open' && s1.b.p_naar === 'gedaan' && s1.b.p_door === 'david' && /^app \d+-\d+ \d\d:\d\d: David tikte Gedaan$/.test(s1.b.p_bewijs), JSON.stringify([r.j, s1.b]));
       const au = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter(Boolean).slice(nAu2 - 1);
       toets('27 auditregel "voor-jou gedaan #2 -> ok", zonder titel of sleutel', au.some((l) => l.includes('"route":"/app/voor-jou/keuze"') && l.includes('voor-jou gedaan #2 -> ok')) && !au.some((l) => /Titel|vandaag-punt/.test(l)), au.join('\n').slice(-300));
       r = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
       const p2 = (r.j.punten || []).find((x) => x.id === 2);
       toets('27 lijst meteen vers: het gedane punt blijft een minuut staan met terug_ms', p2 && p2.status === 'gedaan' && p2.terug_ms > 50000, JSON.stringify(p2));
+      nr = nepRes();
+      await H.appVoorJouRoute({}, nr, { id: 'ander-apparaat', soort: 'reist' });
+      toets('27 een ander apparaat krijgt geen ↩️ en ziet het gedane punt niet meer (Fable #4)', nr.st === 200 && !nr.b.punten.some((x) => x.id === 2), JSON.stringify(nr.b.punten.map((x) => [x.id, x.terug_ms])));
       r = await K({ id: 2, van: 'open', keuze: 'gedaan' });
       toets('27 tweede Gedaan op hetzelfde punt (van klopt niet meer) -> 409 met de stand', r.status === 409 && r.j.nu === 'gedaan', JSON.stringify(r.j));
       r = await K({ id: 2, keuze: 'terug' });
@@ -4389,6 +4397,9 @@ async function bewijs(o) {
       const rT = await K({ id: 4, keuze: 'terug' });
       H.appStaat.vjTerug[4] = bijTerug;
       toets('27 ↩️ vanaf een ander apparaat dan de keuze -> 409', r.status === 200 && rT.status === 409, rT.status);
+      r = await K({ id: 6, van: 'open', keuze: 'gedaan' });
+      toets('27 besluit "Al beantwoord": bewijs zegt dat (de ronde zoekt het antwoord zelf)', r.status === 200 && /David tikte Al beantwoord$/.test(nS()[nS().length - 1].b.p_bewijs), nS()[nS().length - 1].b.p_bewijs);
+      await K({ id: 6, keuze: 'terug' });
       rolStub.primair = false;
       r = await K({ id: 5, van: 'open', keuze: 'gedaan' });
       rolStub.primair = true;
@@ -4397,7 +4408,12 @@ async function bewijs(o) {
       r = await K({ id: 5, van: 'open', keuze: 'gedaan' });
       const rl = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
       const rd = await vraag('GET', '/app/voor-jou/5', undefined, { pot: P.jar });
-      sbStaat.vjKapot = false;
+      const nKapot = sbRpc.filter((x) => x.fn === 'mk_voor_jou_lijst').length, tK = Date.now();
+      const rn = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      const ra = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+      toets('27 databank weg: binnen 20 s geen nieuwe lezing; /app/nieuw (vandaag 0, fout) en Agents (oude lijst) blijven snel (Fable #6)', sbRpc.filter((x) => x.fn === 'mk_voor_jou_lijst').length === nKapot && Date.now() - tK < 2000
+        && rn.status === 200 && rn.j.tabs.vandaag === 0 && rn.j.fouten.includes('vandaag') && ra.status === 200 && ra.j.voor_jou === null && ra.j.wacht_op_david_los === null, JSON.stringify([rn.j.fouten, ra.j.voor_jou]));
+      sbStaat.vjKapot = false; H.appStaat.vjCache = null;
       toets('27 databank weg: keuze 503, lijst 200 met fout in gewone taal, details 503', r.status === 503 && rl.status === 200 && rl.j.fout === 'de lijst is nu niet te lezen' && rl.j.punten.length === 0 && rd.status === 503, [r.status, rl.status, rd.status].join());
       nr = nepRes(); nr._app = {};
       await H.appVoorJouKeuze({}, nr, { id: 'x', soort: 'vast' }, { id: 9, van: 'open', keuze: 'gedaan' });
@@ -4413,6 +4429,11 @@ async function bewijs(o) {
       toets('27 /app/nieuw: tabs.vandaag = punten met deadline ≤ 48 u (vandaag-punt en over-tijd; morgen-punt vervallen, over-tijd later)', r.status === 200 && r.j.tabs.vandaag === 1, JSON.stringify(r.j.tabs));
       r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
       toets('27 Agents: voor_jou = aantal zichtbare punten; oude lijst blijft voor een oude app', r.status === 200 && r.j.voor_jou === 6 && Array.isArray(r.j.wacht_op_david), JSON.stringify([r.j.voor_jou, (r.j.wacht_op_david || []).length]));
+      toets('27 Agents: wacht_op_david_los = blokkades op David die aan geen punt hangen (Fable #11)', JSON.stringify((r.j.wacht_op_david_los || []).map((w) => w.wv)) === JSON.stringify([]) && r.j.wacht_op_david.length === 2, JSON.stringify(r.j.wacht_op_david_los));
+      sbStaat.wvItems.push({ id: 400, label: 'machinekamer:nieuw', samenvatting: 'Nieuwe blokkade', status: 'geblokkeerd', geblokkeerd_door: 'David: iets nieuws' }); H.appStaat.wvCache = null;
+      r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+      toets('27 Agents: een nieuwe blokkade zonder punt staat in wacht_op_david_los', JSON.stringify((r.j.wacht_op_david_los || []).map((w) => w.wv)) === '[400]', JSON.stringify(r.j.wacht_op_david_los));
+      sbStaat.wvItems.pop(); H.appStaat.wvCache = null;
       // ── details bij het actielijstje ──
       const ymdP = V;
       const prt = (pos, extra) => Object.assign({ nonce: String(pos).repeat(32).slice(0, 32), datum: ymdP, positie: pos, aantal: 3, bron: 'todoist', sleutel: 'TAAK' + pos + 'abcdef', titel: 't', regel: pos + '. Actie ' + pos + '… (Todoist)', herhaal: false, hard: '',
@@ -4426,7 +4447,10 @@ async function bewijs(o) {
         bron: '10_Zakelijk/Tolgaarde/Conversaties/Teams - Overleg (actueel).md, bericht 21-9 12:05', deadline: plus(V, 12), uiterlijk: plus(V, 6), bevinding: 'GEHEIME-BEVINDING' },
         { actie_id: 'gambia-x', entiteit: 'Prive/Gambia', actie: 'Toezegging aan Kemo', bron: 'x.md' }, { actie_id: 'pat-x', entiteit: 'Tolgaarde', actie: 'Huisbezoek mw. Jansen inplannen', bron: 'y.md' }];
       n8nStaat.corrState = [{ thread_id: '198d200cd455fcc8', type: 'belofte_david', tegenpartij: 'Demi (BHV.NL) <d@bhv.nl>', onderwerp: 'Workshop Reanimatie & AED', verzonden_op: '2026-09-15', uiterlijk: '', bron: 'doktersmaten mail 1a0a | HERCHECK met account doktersmaten', bevinding: 'GEHEIME-BEVINDING' },
-        { thread_id: 'aaaabbbbccccdddd', type: 'vraag_david', tegenpartij: 'Iemand', onderwerp: 'Offerte keuken', verzonden_op: '2026-10-01', bron: 'prive mail x' }];
+        { thread_id: 'aaaabbbbccccdddd', type: 'wacht_op_antwoord', tegenpartij: 'Iemand', onderwerp: 'Offerte keuken', verzonden_op: '2026-10-01', bron: 'prive mail x' },
+        { thread_id: 'eeeeffff00001111', type: 'belofte_david', tegenpartij: 'Mw. J. de Vries <j@x.nl>', onderwerp: 'Afspraak volgende week', verzonden_op: '2026-10-02', bron: 'doktersmaten mail y' }];
+      n8nStaat.portie.push(prt(10, { bron: 'correspondentie_state', sleutel: 'eeeeffff00001111' }));
+      n8nStaat.actieState.push({ actie_id: 'shizzle-x', entiteit: '20_Prive', actie: 'Fietsen ophalen', bron: 'z.md' });
       todoistStaat.aanroepen = [];
       r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/1', undefined, { pot: pot() });
       toets('27 actie-detail zonder sessie -> 401', r.status === 401, r.status);
@@ -4450,6 +4474,12 @@ async function bewijs(o) {
       const vastA = { id: 'x', soort: 'vast' };
       const dv = async (pos) => { const n = nepRes(); await H.appVandaagActieDetail({}, n, vastA, ymdP + '/' + pos); return n; };
       const v6 = await dv(6), v7 = await dv(7), v5 = await dv(5), v3 = await dv(3), v1 = await dv(1);
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/10', undefined, { pot: P.jar });
+      toets('27 actie-detail: tegenpartij die op een patiënt lijkt -> verborgen (Fable #1)', r.status === 200 && r.j.verborgen === true && !/Vries|Afspraak/.test(JSON.stringify(r.j)), JSON.stringify(r.j));
+      n8nStaat.portie.find((x) => x.positie === 9).sleutel = 'shizzle-x';
+      const v9 = await dv(9);
+      n8nStaat.portie.find((x) => x.positie === 9).sleutel = 'pat-x';
+      toets('27 vaste plek: entiteit 20_Prive telt ook als privé (Fable #8)', v9.b.prive === true && !/Fietsen/.test(JSON.stringify(v9.b)), JSON.stringify(v9.b));
       toets('27 vaste plek: Todoist Privé, privé-entiteit en het privé-postvak -> prive zonder tekst of link; werk en doktersmaten wel', v6.b.prive === true && v6.b.tekst === null && v6.b.link === null && !/Cadeau/.test(JSON.stringify(v6.b))
         && v7.b.prive === true && !/Kemo/.test(JSON.stringify(v7.b)) && v5.b.prive === true && !/keuken/.test(JSON.stringify(v5.b)) && v3.b.prive === false && v3.b.onderwerp && v1.b.tekst, JSON.stringify([v6.b, v7.b, v5.b].map((x) => [x.prive, x.tekst, x.onderwerp])));
       r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/5', undefined, { pot: P.jar });
@@ -4457,6 +4487,10 @@ async function bewijs(o) {
       const p404 = [];
       for (const q of ['/app/vandaag/actie/' + ymdP + '/11', '/app/vandaag/actie/' + ymdP + '/0', '/app/vandaag/actie/gisteren/1', '/app/vandaag/actie/' + ymdP, '/app/vandaag/actie/2020-01-01/1']) p404.push((await vraag('GET', q, undefined, { pot: P.jar })).status);
       toets('27 actie-detail: positie 11/0, rommeldatum, zonder positie, onbekende dag -> 404', p404.join() === '404,404,404,404,404', p404.join());
+      H.appStaat.tellers.vjdetail = Array(300).fill(Date.now());
+      const g1 = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/1', undefined, { pot: P.jar }), g2 = await vraag('GET', '/app/voor-jou/1', undefined, { pot: P.jar });
+      H.appStaat.tellers.vjdetail = [];
+      toets('27 details: grens 300 per uur -> 429 (Fable #12)', g1.status === 429 && g2.status === 429, [g1.status, g2.status].join());
       todoistStaat.kapot = true;
       r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/1', undefined, { pot: P.jar });
       todoistStaat.kapot = false;
