@@ -7598,6 +7598,7 @@ const BERICHT_INDEX_MS = 48 * 3600 * 1000;
 const BERICHT_SLEUTEL_MS = 24 * 3600 * 1000;
 const BERICHT_BUNDEL_MS = 10 * 60 * 1000;
 const BERICHT_DODE_MANS_MS = 12 * 3600 * 1000;
+const BERICHT_SEINTJE_ONBEANTWOORD_MS = 2 * 3600 * 1000;   // Fable-review wv263 #1
 const BERICHT_NIEUW_SCHRIJF_MS = 10 * 60 * 1000;
 const BERICHT_GETIKT_MAX = 50;
 const BERICHT_HERPLAN_MS = 30 * 1000;
@@ -7664,12 +7665,22 @@ function berichtNieuwGezien(apparaatId) {
     if (!(nu - (b[apparaatId] || 0) < BERICHT_NIEUW_SCHRIJF_MS)) { appSchrijfJson(BERICHT_NIEUW_LAATST, m); b[apparaatId] = nu; }
   } catch (e) { logError('bericht-nieuw', e); }
 }
-// true = een actief apparaat keek de laatste 12 u. Register onleesbaar: false (dan liever ook Telegram).
+// Dode-mansknop (§ 4.3-3, Fable-review wv263 #1/#2): alleen de Pixel (de goedkeurder) telt; een laptop die op de praktijk open
+// staat zegt niets over de telefoon. Een stille nacht is geen dode app: pas als de Pixel 12 u niet keek ÉN een seintje van
+// overdag (07–23 u) aan de Pixel na 2 u nog onbeantwoord is (geen GET /app/nieuw erna), dan false -> n8n stuurt ook naar
+// Telegram. Register onleesbaar of geen goedkeurder: false (liever ook Telegram).
 function berichtAppActief() {
-  let act;
-  try { act = appRegister().apparaten.filter(function (x) { return x.actief; }).map(function (x) { return x.id; }); } catch (e) { return false; }
-  const m = berichtNieuwLaatst(), grens = Date.now() - BERICHT_DODE_MANS_MS;
-  return act.some(function (id) { return m[id] > grens; });
+  let p;
+  try { p = appGoedkeurder(appRegister()); } catch (e) { return false; }
+  if (!p) return false;
+  const nu = Date.now(), keek = berichtNieuwLaatst()[p.id] || 0;
+  if (nu - keek < BERICHT_DODE_MANS_MS) return true;
+  let l = null;
+  try { const s = appPushLees().apparaten[p.id]; l = s && s.laatst; } catch (e) { return true; }
+  const op = l ? Date.parse(l.op) : 0;
+  if (!(l && l.status >= 200 && l.status < 300 && op > keek && nu - op > BERICHT_SEINTJE_ONBEANTWOORD_MS)) return true;
+  const uur = Number(new Date(op).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }));
+  return !(uur >= 7 && uur < 23);
 }
 function berichtPushGewenst() {
   try {
@@ -7736,11 +7747,11 @@ function berichtWachtZet(ids, tot) {
 function berichtPushPlan(id, kanaal, klasse) {
   if (klasse === 'stil') { berichtPushZet([id], { klaar: true, verstuurd: 0, overbodig: true, reden: 'stil' }); return { direct: false, uitgesteld: null }; }
   const k = berichtPushStaat(kanaal), nu = Date.now();
-  if (klasse === 'dringend') return { direct: true, uitgesteld: null };   // storingsalarmen: direct, ook 23–07 (Fable § 8 #5)
+  if (klasse === 'dringend') { berichtWachtZet([id], nu); return { direct: true, uitgesteld: null }; }   // storingsalarmen: direct, ook 23–07 (Fable § 8 #5)
   let tot = 0;
   if (berichtStilleUren(kanaal)) tot = nu + berichtTot7(nu);
   else if (nu - k.laatst < BERICHT_BUNDEL_MS) tot = k.laatst + BERICHT_BUNDEL_MS;
-  if (!tot) { k.laatst = nu; return { direct: true, uitgesteld: null }; }
+  if (!tot) { k.laatst = nu; berichtWachtZet([id], nu); return { direct: true, uitgesteld: null }; }   // klaar:false vóór het seintje: een herstart ertussen plant het opnieuw (Fable wv263 #3)
   k.wachtend.push(id);
   tot = berichtPlanTimer(kanaal, tot);
   berichtWachtZet([id], tot);
@@ -7752,7 +7763,9 @@ function berichtHerplan() {
     const idx = berichtIndex(), nu = Date.now();
     Object.keys(idx).forEach(function (id) {
       const b = idx[id];
-      if (!b.push || b.push.klaar !== false || !BERICHT_KANALEN[b.kanaal]) return;
+      if (!b.push || b.push.klaar !== false || !BERICHT_KANALEN[b.kanaal]) return;   // push null kan niet meer: berichtPushPlan zet klaar:false vóór het antwoord
+      // meer dan een uur over tijd (pod lang weg): geen seintje achteraf meer; n8n is allang voorbij zijn controles
+      if (Date.parse(b.push.uitgesteld_tot) < nu - 3600000) { b.push = { klaar: true, verstuurd: 0, verlopen: true }; berichtIndexBewaar(); return; }
       const k = berichtPushStaat(b.kanaal);
       if (k.wachtend.indexOf(id) < 0) k.wachtend.push(id);
       berichtPlanTimer(b.kanaal, Math.max(nu + BERICHT_HERPLAN_MS, Date.parse(b.push.uitgesteld_tot) || 0));
@@ -7801,11 +7814,13 @@ async function berichtNieuw(res, d) {
   }
   const id = crypto.randomBytes(8).toString('hex'), t = new Date(nu).toISOString();
   // Vraag eerst (anders staat er een bericht in de app waarvan de knoppen niet werken); dan het log; lukt dat niet, de vraag weg.
-  const vraag = d.knoppen === true ? appVraagVan(kanaal, tekst) : null;
+  // knoppen:false (schaduwfase, terugval 2): de vraag wél vastleggen, maar met naar_telegram, zodat de app "Beantwoord in Telegram"
+  // toont en /app/knop weigert (Fable-review wv263 #8).
+  const vraag = appVraagVan(kanaal, tekst);
   const vsl = vraag ? id + ':' + vraag.hash : null;
   if (vraag) {
     const gev = appGevoelig(vraag.tekst);
-    try { const v = appVragen(); v[vsl] = { kanaal: kanaal, t: t, antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined, soort: 'socev' }; appVragenSchrijf(v); }
+    try { const v = appVragen(); v[vsl] = { kanaal: kanaal, t: t, antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined, soort: 'socev', naar_telegram: d.knoppen === true ? undefined : t }; appVragenSchrijf(v); }
     catch (e) { logError('bericht-vragen', e); return berichtStuur(res, 500, { ok: false, fout: 'vragenregister niet schrijfbaar', terugval: true }); }
   }
   const agentJob = d.agent_job ? String(d.agent_job) : undefined;
@@ -7815,12 +7830,12 @@ async function berichtNieuw(res, d) {
     if (vsl) { try { const v = appVragen(); delete v[vsl]; appVragenSchrijf(v); } catch (e) { logError('bericht-vragen', e); } }
     return berichtStuur(res, 500, { ok: false, fout: 'app-log niet schrijfbaar', terugval: true });
   }
-  idx[id] = { t: t, kanaal: kanaal, bron: bron, klasse: klasse, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, push: null, getikt: null, naar_telegram: null };
+  idx[id] = { t: t, kanaal: kanaal, bron: bron, klasse: klasse, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null };
   const plan = berichtPushPlan(id, kanaal, klasse);   // bewaart de index
   if (!idx[id].push) berichtIndexBewaar();
   const gewenst = berichtPushGewenst();
   res._log = { bericht: id, kanaal: kanaal, bron: bron, klasse: klasse };
-  berichtStuur(res, 200, { ok: true, id: id, vraag: !!vraag, push: { gewenst: gewenst, gestart: plan.direct }, uitgesteld: plan.uitgesteld, app_actief: berichtAppActief() });
+  berichtStuur(res, 200, { ok: true, id: id, vraag: !!vraag && d.knoppen === true, push: { gewenst: gewenst, gestart: plan.direct }, uitgesteld: plan.uitgesteld, app_actief: berichtAppActief() });
   if (plan.direct) setTimeout(function () { berichtPushNu(kanaal, [id]).catch(function (e) { logError('bericht-push', e); }); }, 0);
 }
 

@@ -3378,7 +3378,9 @@ async function bewijs(o) {
       const idS = r.j.id;
       r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
       const gS = (r.j.items || []).find((x) => x.job_id === idS);
-      toets('23 knoppen:false -> vraag null in de app, geen rij in vragen.json', gS && gS.vraag === null && !Object.keys(JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))).some((k) => k.indexOf(idS) === 0), JSON.stringify(gS).slice(0, 200));
+      toets('23 knoppen:false (schaduw) -> vraag met naar_telegram (app: "Beantwoord in Telegram"), Fable wv263 #8', gS && gS.vraag && gS.vraag.naar_telegram === true && gS.vraag.beantwoord === null, JSON.stringify(gS).slice(0, 200));
+      r = await vraag('POST', '/app/knop', { job_id: idS, vraag_hash: gS.vraag.hash, keuze: 'nee' }, { pot: P.jar });
+      toets('23 knop op de schaduwvraag -> 409 naar_telegram', r.status === 409 && r.j.naar_telegram === true, JSON.stringify(r.j));
       // naar-telegram: de app toont "beantwoord in Telegram", knop weigert
       await slaap(BUNDEL23 + 50);
       r = await bq('/bericht', B({ tekst: 'Vraag.\n\nVRAAG AAN DAVID: Zal ik verder bouwen?', knoppen: true }));
@@ -3407,12 +3409,28 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/bericht/getikt', { ids: [] }, { pot: P.jar });
       toets('23 getikt zonder ids -> 400', r.status === 400, JSON.stringify(r.j));
 
-      // dode-mansknop
-      fs.writeFileSync(path.join(DATA, 'nieuw-laatst.json'), JSON.stringify({ [pId]: Date.now() - 13 * 3600 * 1000 }));
-      H.appStaat.nieuwLaatst = null;
+      // dode-mansknop (Fable wv263 #1/#2): alleen de Pixel telt, en pas na een onbeantwoord seintje van overdag
+      const pjD = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8'));
+      const ams12 = (() => { for (let h = 30; h < 60; h++) { const t = Date.now() - h * 3600000; if (new Date(t).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }) === '12') return t; } })();
+      const ams03 = ams12 - 9 * 3600000;
+      const zetD = (nieuwP, nieuwA, pushOp) => {
+        fs.writeFileSync(path.join(DATA, 'nieuw-laatst.json'), JSON.stringify(Object.assign({ [pId]: nieuwP }, ander ? { [ander.id]: nieuwA } : {})));
+        H.appStaat.nieuwLaatst = null;
+        const q = JSON.parse(JSON.stringify(pjD)); q.apparaten[pId].laatst = pushOp ? { op: new Date(pushOp).toISOString(), status: 201, reden: 'antwoord machinekamer' } : null;
+        fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(q));
+      };
+      zetD(ams12 - 20 * 3600000, Date.now(), ams12);
       r = await bq('/bericht', B({ klasse: 'stil', tekst: 'stil bericht', bron: 'proef' }));
-      toets('23 niemand keek 12 u -> app_actief false', r.status === 200 && r.j.app_actief === false, JSON.stringify(r.j));
+      toets('23 Pixel keek 12 u niet en een seintje van 12:00 bleef onbeantwoord -> app_actief false, ook al pollt een ander apparaat', r.status === 200 && r.j.app_actief === false, JSON.stringify(r.j));
       const idStil = r.j.id;
+      zetD(ams03 - 20 * 3600000, 0, ams03);
+      r = await bq('/bericht/stand', { secret: GEH, id: idStil });
+      toets('23 alleen een onbeantwoord seintje van 03:00 (stille nacht) -> nog actief', r.j.app_actief === true, JSON.stringify(r.j));
+      zetD(Date.now() - 13 * 3600000, 0, null);
+      r = await bq('/bericht/stand', { secret: GEH, id: idStil });
+      toets('23 12 u niet gekeken maar geen onbeantwoord seintje -> nog actief', r.j.app_actief === true, JSON.stringify(r.j));
+      zetD(ams12 - 20 * 3600000, 0, ams12);
+      fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pjD));
       await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
       r = await bq('/bericht/stand', { secret: GEH, id: idStil });
       toets('23 na GET /app/nieuw -> app_actief true, en op schijf (een herstart verliest het niet)', r.j.app_actief === true && JSON.parse(fs.readFileSync(path.join(DATA, 'nieuw-laatst.json'), 'utf8'))[pId] > Date.now() - 60000, JSON.stringify(r.j));
@@ -3461,6 +3479,8 @@ async function bewijs(o) {
       r = await bq('/bericht', B({ kanaal: 'hoofd', bron: 'proef', tekst: 'hoofd 03:00' }));
       await slaap(80);
       toets('23 hoofdkanaal 03:00: geen stille uren', r.j.push.gestart === true || !!r.j.uitgesteld, JSON.stringify(r.j));
+      // Fable wv263 #3: een direct seintje staat vóór het versturen al als klaar:false in de index (herstart ertussen -> opnieuw gepland)
+      toets('23 direct seintje: in de index eerst klaar:false', (() => { const ix = JSON.parse(fs.readFileSync(path.join(DATA, 'berichten.json'), 'utf8')); return Object.values(ix).every((x) => x.push && typeof x.push.klaar === 'boolean'); })(), '');
       // na een herstart: wachtende berichten opnieuw gepland
       const k23 = H.appStaat.berichtPush.machinekamer;
       clearTimeout(k23.timer); H.appStaat.berichtPush = null;
