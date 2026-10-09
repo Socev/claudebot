@@ -8831,8 +8831,8 @@ function telVolgende(apparaat) {
   const nu = Date.now();
   const open = telRij().filter(function (x) { return x.apparaat === apparaat && x.soort !== 'bezig' && !x.gespeeld && nu < x.tot; });
   // Nooit twee tegelijk (Fable-review diff #1): zolang een uitgegeven item nog speelt (lease loopt, niet gespeeld), wacht de rest.
-  // Een aankondiging die op een tik wacht, speelt niet: die houdt een eigen antwoord nooit op (wv275, Fable #2).
-  if (open.some(function (x) { return x.lease_tot > nu && (x.soort !== 'zelf' || x.speelt); })) return null;
+  // Een aankondiging houdt alleen de ± 20 s van belletje + zin vast; het wachten op een tik heeft geen lease (wv275, Fable #2).
+  if (open.some(function (x) { return x.lease_tot > nu; })) return null;
   const eigen = open.find(function (x) { return x.soort !== 'zelf'; });
   if (eigen) return eigen;
   // uit zichzelf: meteen, dan één herhaling na TEL_ZELF_HERHAAL_MS; daarna alleen nog met een tik af te spelen (deel n)
@@ -8884,8 +8884,8 @@ function telAntwoordPoll(apparaat, obj) {
   telStuur(p.res, 200, obj);
 }
 function telUitgifte(x) {
-  // Een aankondiging krijgt geen lease bij de uitgifte (pas als deel >= 1 speelt), wel een teller voor de ene herhaling.
-  if (x.soort === 'zelf') { x.aangeboden_n = (x.aangeboden_n || 0) + 1; x.aangeboden_t = Date.now(); }
+  // Een aankondiging krijgt alleen een korte lease (belletje + zin) en een teller voor de ene herhaling; de volle lease pas bij deel >= 1.
+  if (x.soort === 'zelf') { x.aangeboden_n = (x.aangeboden_n || 0) + 1; x.aangeboden_t = Date.now(); x.lease_tot = Date.now() + TEL_ZELF_AANKONDIG_MS; }
   else x.lease_tot = Date.now() + TEL_LEASE_MS;
   x.uitgegeven = (x.uitgegeven || 0) + 1;
   telRijBewaar();
@@ -9136,7 +9136,7 @@ async function telDeel(req, res, t, id, n) {
   if (!x || x.soort === 'bezig' || x.gespeeld || Date.now() > x.tot) return telWeiger(res, 404, 'geen deel', 'onbekend item');
   if (!Number.isInteger(n) || n < 0 || (n === 0 && !x.aankondiging) || n > telDelen(x).length) return telWeiger(res, 404, 'geen deel', 'deel ' + n + ' bestaat niet');
   if (!process.env.GEMINI_API_KEY_AUTO) return telWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'geen gemini-sleutel');
-  if (n >= 1) { x.lease_tot = Math.max(x.lease_tot || 0, Date.now() + TEL_LEASE_MS); if (x.soort === 'zelf') x.speelt = true; }   // wie afspeelt, houdt het item vast (een aankondiging niet: wv275)
+  if (n >= 1) x.lease_tot = Math.max(x.lease_tot || 0, Date.now() + TEL_LEASE_MS);   // wie afspeelt, houdt het item vast (deel 0 = aankondiging niet: wv275)
   let wav;
   try {
     const p = telAudio(x, n);
@@ -9249,6 +9249,7 @@ if (typeof process.once === 'function') {
 // Telegram verandert niet. Opdrachten uit het kastje blijven bij het kastje (autoNaAfloop), dus nooit twee apparaten.
 // Bouwplan "Spraak via de telefoon (Tasker)" § 13; Fable-review ontwerp verwerkt (10 punten).
 const TEL_ZELF_HERHAAL_MS = 4 * 60 * 1000;
+const TEL_ZELF_AANKONDIG_MS = 20 * 1000;     // lease van belletje + zin: niets anders tegelijk (Fable diff #4)
 const TEL_ZELF_TTL_MS = 10 * 60 * 1000;      // daarna alleen het schriftelijke spoor (Telegram)
 const TEL_ZELF_MAX_OPEN = 3;
 const TEL_PLEK_MAX_MS = 3 * 60 * 1000;       // de lus vraagt ± elke minuut; ouder = onbekend
@@ -9314,6 +9315,8 @@ function telBeurtVanVerzoek(req) {
 // Vanuit POST /agent, vóór het antwoord. Alleen route socev (david: en machinekamer: krijgen geen afweging in 40687).
 function telMerkAgent(req, jobId, label) {
   if (/^\s*(david|machinekamer)\s*:/i.test(String(label || ''))) return null;
+  if (/^\s*socev: auto — /.test(String(label || ''))) return null;   // kastje (via de pod zelf): blijft bij het kastje
+  if (!/^(127\.0\.0\.1|::ffff:127\.0\.0\.1|::1)$/.test(String((req && req.socket && req.socket.remoteAddress) || ''))) return null;   // n8n-tikker e.d.: geen ruis (Fable diff #8)
   const a = agentsReg[jobId];
   if (!a) return null;
   // goedkoop vooraf: alleen zoeken als er nu een [AUTO]-beurt loopt

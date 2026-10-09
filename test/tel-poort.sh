@@ -20,7 +20,8 @@ for (const [x, y] of [['const TEL_LEASE_MS = 3 * 60 * 1000;', 'const TEL_LEASE_M
                       ['const TEL_BEURTEN_PER_UUR = 30;', 'const TEL_BEURTEN_PER_UUR = 12;'],
                       ['const TEL_KOPPEL_PER_UUR = 10;', 'const TEL_KOPPEL_PER_UUR = 20;'],
                       ['const TEL_CODES_PER_DAG = 10;', 'const TEL_CODES_PER_DAG = 12;'],
-                      ['const TEL_ZELF_HERHAAL_MS = 4 * 60 * 1000;', 'const TEL_ZELF_HERHAAL_MS = 1200;']]) {
+                      ['const TEL_ZELF_HERHAAL_MS = 4 * 60 * 1000;', 'const TEL_ZELF_HERHAAL_MS = 1200;'],
+                      ['const TEL_ZELF_AANKONDIG_MS = 20 * 1000;', 'const TEL_ZELF_AANKONDIG_MS = 400;']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'teltoets-'));
@@ -408,6 +409,8 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8 merk: proces zonder die omgeving -> geen merk (wel gelogd)', r === null && !H.agentsReg[ja2].tel && zlog().some((x) => x.job === ja2 && x.reden === 'geen tel-beurt'), zlog().slice(-2));
     r = await kindVraag(ja3, 'socev: x', { SOCEV_TEL_BEURT: 'ffffffffffffffff' });
     toets('8 merk: omgeving van een beurt die niet loopt -> geen merk', r === null && !H.agentsReg[ja3].tel);
+    r = await kindVraag('a6a6a6a6a6a6a6a6', 'socev: auto — kastje', { SOCEV_TEL_BEURT: idT });
+    toets('8 merk: opdracht van het kastje (socev: auto — ) -> nooit', r === null && !H.agentsReg['a6a6a6a6a6a6a6a6'].tel);
     r = await kindVraag(ja4, 'machinekamer: x', { SOCEV_TEL_BEURT: idT });
     toets('8 merk: label machinekamer: of david: -> nooit', r === null && !H.agentsReg[ja4].tel && (await kindVraag(ja4, 'david: x', { SOCEV_TEL_BEURT: idT })) === null);
     afmaken[idT]('Ik heb een agent aangestuurd.'); await tik();
@@ -458,6 +461,9 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8 aankondiging gehoord, niet getikt: niet meteen opnieuw', r.status === 200 && !r.j.id, r.j);
     const rE = await tel('POST', '/tel/beurt', { ct: 'text/plain', body: 'eigen vraag na de aankondiging' }); await tik(); afmaken[rE.j.id]('Eigen antwoord.'); await tik();
     r = await tel('GET', '/tel/uit');
+    toets('8 tijdens belletje + zin (20 s, verkort) niets anders (Fable diff #4)', !r.j.id, r.j);
+    await wacht(450);
+    r = await tel('GET', '/tel/uit');
     toets('8 een eigen antwoord gaat voor en wacht niet op de aankondiging (Fable #2)', r.j.id === rE.j.id && r.j.aankondigen === 'nee', r.j);
     await tel('GET', '/tel/deel/' + rE.j.id + '/1');
     r = await tel('GET', '/tel/uit');
@@ -496,6 +502,17 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8 hooguit 3 open zelf-items', H.telZelfNaRun('e7e7e7e7e7e7e7e7') === null && zlog().some((x) => x.job === 'c7c7c7c7c7c7c7c7' && x.reden === 'rij vol'));
     jobs['e8e8e8e8e8e8e8e8'] = { status: 'done', result: { ok: true, output: 'x' }, tel_zelf: 'c4c4c4c4c4c4c4c4' };
     toets('8 hetzelfde agent_job nooit twee items', H.telZelfNaRun('e8e8e8e8e8e8e8e8') === null);
+    {   // herstart van de pod: het merk staat in het register op schijf (ruw JSON), jobs[run] niet
+      const bewaard = JSON.parse(JSON.stringify(H.agentsReg));
+      bewaard['f1f1f1f1f1f1f1f1'] = { job_id: 'f1f1f1f1f1f1f1f1', tel: { beurt: idT, t: Date.now() } };
+      const Houd = H; H = laad(); Object.assign(H.agentsReg, bewaard);
+      sessie(PIXEL, 'credP', false); await tel('GET', '/tel/uit?plek=Auto');
+      jobs['f2f2f2f2f2f2f2f2'] = { status: 'pending' };
+      toets('8 na een herstart: merk uit het register geeft nog de regel vooraf, gebruikt blijft gebruikt', /^\[AUTO-RAPPORT\]/.test(H.telZelfStart('f1f1f1f1f1f1f1f1', 'f2f2f2f2f2f2f2f2')) && H.telZelfStart(ja1, 'f3f3f3f3f3f3f3f3') === '');
+      const rijNa = JSON.parse(fs.readFileSync(path.join(DATA, 'tel-uit.json'), 'utf8')).items.filter((x) => x.soort === 'zelf');
+      toets('8 zelf-items op schijf (overleven een herstart)', rijNa.length >= 3, rijNa.length);
+      H = Houd;
+    }
     toets('8 /health: tellers zelf en aanwezig', H.appInfo().tel.zelf && H.appInfo().tel.zelf.aanwezig === 'ja' && H.appInfo().tel.zelf.items === 4 && H.appInfo().tel.zelf.merk === 1, H.appInfo().tel.zelf);
     toets('8 zelf-log zonder inhoud', !/offerte|Rapport|goedkoper/.test(JSON.stringify(zlog())), zlog());
     H.telStaat.rij.forEach((x) => { x.gespeeld = x.gespeeld || new Date().toISOString(); });
