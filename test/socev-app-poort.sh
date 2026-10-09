@@ -3519,6 +3519,31 @@ async function bewijs(o) {
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), regOrig23);
     }
 
+    // ── 24. Telegram-spiegel (wv277, hoofdkanaal-bouwplan § 4.8): regel soort telegram in de geschiedenis, zonder knoppen ──
+    {
+      const dag24 = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+      const voor = await H.appNaastDag(dag24, Date.now(), true);
+      const nu24 = new Date().toISOString();
+      const tg1 = '7777777777777777', tg2 = '7777777777777778';
+      fs.appendFileSync(path.join(LOGDIR, 'hoofd.jsonl'), JSON.stringify({ t: nu24, job_id: tg1, soort: 'telegram', tekst: 'via telegram gevraagd', invoer: ['foto.jpg'],
+        antwoord: 'antwoord uit telegram\n\nVRAAG AAN DAVID: Zal ik het vastleggen?', ok: true, bestanden: ['n.md'] }) + '\n');
+      fs.appendFileSync(path.join(LOGDIR, 'hoofd.jsonl'), JSON.stringify({ t: nu24, job_id: tg2, soort: 'telegram', tekst: 'tweede', antwoord: 'zonder vraag', ok: true, bestanden: [] }) + '\n');
+      let r = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar });
+      const i1 = (r.j.items || []).find((x) => x.job_id === tg1), i2 = (r.j.items || []).find((x) => x.job_id === tg2);
+      toets('24 geschiedenis: Telegram-beurt met soort telegram, tekst, invoer en bestanden', r.status === 200 && i1 && i1.soort === 'telegram' && i1.tekst === 'via telegram gevraagd'
+        && JSON.stringify(i1.invoer) === '["foto.jpg"]' && JSON.stringify(i1.bestanden) === '["n.md"]' && i1.bron === undefined, JSON.stringify(i1));
+      toets('24 vraag in een Telegram-beurt: alleen in Telegram te beantwoorden (naar_telegram, geen antwoord)', i1 && i1.vraag && i1.vraag.naar_telegram === true && i1.vraag.beantwoord === null
+        && i1.vraag.tekst === 'Zal ik het vastleggen?', JSON.stringify(i1 && i1.vraag));
+      toets('24 Telegram-beurt zonder vraag: vraag null', i2 && i2.vraag === null, JSON.stringify(i2));
+      r = await vraag('POST', '/app/knop', { job_id: tg1, vraag_hash: i1 ? i1.vraag.hash : '00000000', keuze: 'nee' }, { pot: P.jar });
+      toets('24 knop op een Telegram-vraag in de app: 404, start niets', r.status === 404, JSON.stringify(r.j));
+      const na = await H.appNaastDag(dag24, Date.now(), true);
+      toets('24 meetlat: Telegram-beurten apart (telegram), niet bij Davids app-berichten', na.app.hoofd.telegram === voor.app.hoofd.telegram + 2 && na.app.hoofd.berichten === voor.app.hoofd.berichten
+        && na.app.hoofd.fout === voor.app.hoofd.fout, JSON.stringify([voor.app.hoofd, na.app.hoofd]));
+      toets('24 server.js: /run geeft de spiegel niet terug aan de wachtrij en vangt een fout af', /processJob\(jobId, prompt, d\.session_id, d\.files, chatId, ws, keuze, gereedschap\)\.then\(function \(\) \{\n\s*if \(spiegel\) \{ try \{ appTelegramSpiegel\(jobId, prompt, d\.files\)\.catch\(/.test(src)
+        && /const spiegel = d\.bron === 'telegram';/.test(src), '');
+    }
+
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
     {
       const regV = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));

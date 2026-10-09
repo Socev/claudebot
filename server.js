@@ -2585,10 +2585,17 @@ function handleRequest(req, res) {
         keuze = { runtime: 'claude', model: keuze.model, fallback: '' };
       }
       const jobId = crypto.randomBytes(8).toString('hex');
-      jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: chatId, runtime: keuze.runtime, gereedschap: gereedschap || undefined };
-      res._log = { job_id: jobId, chat_id: chatId, workspace: ws, runtime: keuze.runtime, gereedschap: gereedschap || undefined };
+      // wv277: bron "telegram" (alleen de twee Telegram-workflows) -> na afloop ook in het app-log (appTelegramSpiegel). Elke andere waarde telt niet.
+      const spiegel = d.bron === 'telegram';
+      jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: chatId, runtime: keuze.runtime, gereedschap: gereedschap || undefined, bron: spiegel ? 'telegram' : undefined };
+      res._log = { job_id: jobId, chat_id: chatId, workspace: ws, runtime: keuze.runtime, gereedschap: gereedschap || undefined, bron: spiegel ? 'telegram' : undefined };
       // Serieel per chat, ongeacht het brein: één gesprek, één beurt tegelijk.
-      enqueue(sessionKey(ws, chatId), function () { return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, keuze, gereedschap); });
+      // De spiegel niet teruggeven: een trage schijf mag de volgende beurt niet ophouden, en een fout raakt de beurt nooit (fail-open).
+      enqueue(sessionKey(ws, chatId), function () {
+        return processJob(jobId, prompt, d.session_id, d.files, chatId, ws, keuze, gereedschap).then(function () {
+          if (spiegel) { try { appTelegramSpiegel(jobId, prompt, d.files).catch(function (e) { logError('app-spiegel', e); }); } catch (e) { logError('app-spiegel', e); } }
+        });
+      });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, job_id: jobId, workspace: ws, runtime: keuze.runtime, model: keuze.model || '(default)', gereedschap: gereedschap || undefined }));
     }); });
@@ -3298,7 +3305,7 @@ function sleutelportaal(req, res) {
 // wist sessies, uitdagingen, code en aanvraag; /app-aan haalt alleen app-uit weg (opnieuw koppelen via de coderoute).
 // Fase 3 (gesprek): /app/beurt start een beurt in dezelfde sessie als Telegram (hoofd = 40687, machinekamer = telegram-debug
 // met de omlijsting uit een bestand), /app/uitslag pollt, /app/knop beantwoordt een VRAAG AAN DAVID één keer, en
-// /app/geschiedenis leest het app-log (/opt/data/app-log, alleen app-beurten, asynchroon en fail-open geschreven).
+// /app/geschiedenis leest het app-log (/opt/data/app-log: app-beurten, berichten van Socev (wv263) en Telegram-beurten (wv277), asynchroon en fail-open geschreven).
 // Fase 4 (wv134, invoerslot): een apparaat met soort 'vast' en een vaste plek neemt alleen invoer aan (elke POST behalve
 // APP_SLOT_VRIJ, uploads, downloads) als secondbrain.locatie_nu zegt dat David daar is (0-20 min, op 'ontvangen'), of als de
 // goedkeurder het 2 u heeft opengezet; anders 423 met de reden. Daar ook geen BSN-achtige getallen (422). Soort en vaste plek
@@ -4559,6 +4566,30 @@ async function appNaBeurt(jobId) {
   if (!(j.app.soort === 'tel' && telLuistert(j.app.tel))) appPushNaBeurt(jobId);   // fase 5c: seintje als de app het antwoord niet binnen 20 s ophaalt
 }
 
+// wv277 (hoofdkanaal-bouwplan § 4.8): een beurt uit Telegram (/run met bron "telegram": *Claude via Telegram* en *Claude Debug via
+// Telegram*) ook in het app-log, zodat het gesprek in de app compleet is. Na afloop, asynchroon en fail-open (een schrijffout raakt
+// de Telegram-beurt nooit); geen seintje, geen vraag in vragen.json (de knoppen staan in Telegram), geen chat_log (dat doet n8n al).
+// Alleen hoofdkanaal en machinekamer, nooit 'lezen', niet bij de noodstop. Van de machinekamer alleen Davids deel van de prompt.
+const APP_SPIEGEL_KANAAL = { '40687': 'hoofd', 'telegram-debug': 'machinekamer' };
+const APP_SPIEGEL_MAX = 20000;
+function appSpiegelTekst(kanaal, prompt) {
+  let t = String(prompt || '');
+  const m = '\nDe vraag van David:\n', i = t.indexOf(m);
+  if (kanaal === 'machinekamer' && t.indexOf('[MACHINEKAMER]') === 0 && i >= 0) t = t.slice(i + m.length);
+  return t.length > APP_SPIEGEL_MAX ? t.slice(0, APP_SPIEGEL_MAX) + ' …' : t;
+}
+async function appTelegramSpiegel(jobId, prompt, files) {
+  const j = jobs[jobId];
+  if (!j || j.bron !== 'telegram' || j.app || j.gereedschap) return false;
+  const kanaal = APP_SPIEGEL_KANAAL[j.chat_id];
+  if (!kanaal || fs.existsSync(APP_UIT)) return false;
+  const r = j.result || {};
+  return appLogSchrijf(kanaal, { t: new Date(j.done_at || Date.now()).toISOString(), job_id: jobId, soort: 'telegram', tekst: appSpiegelTekst(kanaal, prompt),
+    invoer: Array.isArray(files) && files.length ? files.map(function (f) { return f && String(f.name || '').slice(0, 200); }).filter(Boolean) : undefined,
+    antwoord: appUitvoer(j), ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
+    bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
+}
+
 function appStartBeurt(a, kanaal, promptTekst, meta) {
   // Een verzoek dat vóór de noodstop door de poort kwam en pas daarna hier aankomt, start niets (Fable-review wv89 #3).
   if (fs.existsSync(APP_UIT)) return { fout: 'noodstop' };
@@ -4983,12 +5014,15 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
   items.sort(function (a, b) { return String(a.t).localeCompare(String(b.t)); });
   items = items.slice(-max).map(function (x) {
     const b = x.vraag_hash && vragen[x.job_id + ':' + x.vraag_hash];
+    // wv277: Telegram-beurt (soort telegram): een vraag erin is alleen in Telegram te beantwoorden (staat niet in vragen.json)
+    const tv = x.soort === 'telegram' && !x.vraag_hash ? appVraagVan(kanaal, x.antwoord) : null;
     // wv263: soort "socev" (n8n via /bericht; "bericht" is al Davids getypte beurt): Socevs bericht zonder vraag van David; bestanden staan in app-bestanden (meta.json)
     const bericht = x.soort === 'socev';
     let bnamen = x.bestanden || [];
     if (bericht) { try { const m = appBewaardVan(x.job_id); bnamen = m ? m.bestanden.map(function (f) { return f.naam; }) : []; } catch (e) { bnamen = []; } }
     return { t: x.t, job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
-      vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, naar_telegram: !!(b && b.naar_telegram) } : null,
+      vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, naar_telegram: !!(b && b.naar_telegram) }
+        : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true } : null,
       bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined };
   });
   // wie de geschiedenis met een afgerond antwoord ophaalt, heeft het gezien (fase 5c, Fable-review wv100 B2)
@@ -7460,13 +7494,14 @@ function appNaastJsonl(f) {
 }
 function appNaastLokaal(dag, nu) {
   const g = appNaastGrenzen(dag), in_ = function (t) { const x = Date.parse(t); return x >= g[0] && x < g[1]; };
-  const kanaal = function () { return { berichten: 0, knoppen: 0, tel: 0, fout: 0, gemist: 0, van_socev: 0, per_bron: {} }; };   // wv263: van_socev = /bericht   // wv264: tel = vanaf de telefoon (Tasker), apart
+  const kanaal = function () { return { berichten: 0, knoppen: 0, tel: 0, fout: 0, gemist: 0, van_socev: 0, per_bron: {}, telegram: 0 }; };   // wv277: telegram = gespiegelde Telegram-beurt, geen app-gebruik   // wv263: van_socev = /bericht   // wv264: tel = vanaf de telefoon (Tasker), apart
   const app = { hoofd: kanaal(), machinekamer: kanaal(), opnames: 0, met_bestand: 0, storing: 0 };
   const gelogd = {};
   ['hoofd', 'machinekamer'].forEach(function (k) {
     appNaastJsonl(appLogPad(k)).forEach(function (x) {
       if (x.job_id) gelogd[x.job_id] = true;
       if (!in_(x.t)) return;
+      if (x.soort === 'telegram') { app[k].telegram++; return; }
       if (x.soort === 'socev') { app[k].van_socev++; app[k].per_bron[x.bron || '?'] = (app[k].per_bron[x.bron || '?'] || 0) + 1; return; }
       if (x.soort === 'knop') app[k].knoppen++; else if (x.soort === 'tel') app[k].tel++; else app[k].berichten++;
       if (x.ok === false) app[k].fout++;
