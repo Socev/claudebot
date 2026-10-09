@@ -3419,7 +3419,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
-  'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/keuze']);   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
+  'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/keuze', 'POST /app/zoek']);   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter); vaste plek
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -3497,7 +3497,7 @@ const APP_OPEN_MS = 2 * 60 * 60 * 1000;        // tijdelijk openzetten vanaf de 
 const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
 // gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
-const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/bericht/getikt']);   // wv263: getikt = gezien
+const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/bericht/getikt', 'POST /app/zoek']);   // wv350: zoeken = lezen   // wv263: getikt = gezien
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
@@ -5239,6 +5239,8 @@ async function appKnop(req, res, reg, a, s, d) {
   if (!rij) return appWeiger(res, 404, 'deze vraag ken ik niet (meer); antwoord gewoon in tekst', 'onbekende vraag');
   const al = function (x) { return appStuur(res, 409, { ok: false, fout: 'al beantwoord: ' + (x.keuze === 'ja' ? 'Ja' : x.keuze === 'nee' ? 'Nee' : 'Anders') + ' ' + appKlok(x.t), beantwoord: x }); };
   if (rij.antwoord) { res._app.reden = 'al beantwoord'; return al(rij.antwoord); }
+  // wv350 (Fable #4): een oude vraag die via zoeken weer in beeld kwam, start geen beurt meer (de sessie weet er niets meer van)
+  if (Date.now() - Date.parse(rij.t || 0) > APP_VRAAG_GELDIG_MS) { res._app.reden = 'vraag verlopen'; return appStuur(res, 410, { ok: false, fout: 'deze vraag is verlopen (ouder dan 3 dagen); typ je antwoord als het nog speelt', verlopen: true }); }
   // wv263 (§ 4.3): bericht naar Telegram gegaan met knoppen -> daar antwoorden, niet ook hier (één antwoordplek)
   if (appNaarTelegramNu(rij)) { res._app.reden = 'naar telegram'; return appStuur(res, 409, { ok: false, fout: 'deze vraag beantwoord je in Telegram', naar_telegram: true }); }
   // wv135 (§ 4.4d): Ja op een gevoelige vraag (versturen, verwijderen, agenda, geld; rij zonder veld = gevoelig) eist een verse
@@ -5289,20 +5291,17 @@ async function appKnop(req, res, reg, a, s, d) {
 }
 
 // Kanaal in het pad (/app/geschiedenis/<kanaal>): het doorgeefluik geeft alleen het pad door, geen querystring.
-async function appGeschiedenis(req, res, reg, a, kanaal) {
-  if (!APP_KANALEN[kanaal]) return appWeiger(res, 400, 'onbekend kanaal', 'kanaal');
-  const max = 300;   // wv277: Telegram-beurten delen het plafond (± 20-60 per dag in de machinekamer; Fable wv277 #3)
-  const lopend = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); })
-    .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, invoer: j.app.invoer || [], sinds: new Date(j.created).toISOString() }; });
-  let items = [], fout = null;
-  try { items = await appLogLees(kanaal); } catch (e) { if (!(e && e.code === 'ENOENT')) { logError('app-log-lees', e); fout = 'geschiedenis nu niet leesbaar'; } }
-  let vragen = {};
-  try { vragen = appVragen(); } catch (e) {}
-  let reacties = null;   // wv304: onleesbaar = geen duimpjes tonen (reacties: false), de geschiedenis zelf gaat door
-  try { reacties = appReacties(); } catch (e) { logError('app-reacties', e); }
-  const agendaKnoppen = appAgendaKnoppen(), agNu = Date.now();   // wv315: kapot = leeg (gelogd); nooit de nonce naar de app
-  // Afgerond maar (nog) niet in het log (schrijffout of net klaar): uit het geheugen erbij, anders is het antwoord voor een
-  // app die dicht was onvindbaar (Fable-review wv56 #2).
+// wv350 (§ 4.15): /app/geschiedenis/<kanaal>/vanaf/<job> = het venster rond een zoektreffer (10 vóór, 200 erna).
+const APP_GESCH_MAX = 300;   // wv277: Telegram-beurten delen het plafond (± 20-60 per dag in de machinekamer; Fable wv277 #3)
+const APP_ANKER_VOOR = 10, APP_ANKER_NA = 200;
+// wv350 (Fable-ontwerpreview #4): een VRAAG AAN DAVID ouder dan 3 dagen krijgt geen knoppen meer (de sessie weet er dan niets
+// meer van); via zoeken komt zo'n oud bericht anders weer met Ja/Nee/Anders in beeld. Zelfde orde als de agendaknoppen (50 u).
+const APP_VRAAG_GELDIG_MS = 72 * 3600 * 1000;
+// Log + afgeronde beurten die (nog) niet in het log staan (schrijffout of net klaar): uit het geheugen erbij, anders is het
+// antwoord voor een app die dicht was onvindbaar (Fable-review wv56 #2). Gesorteerd op tijd. Werpt bij een onleesbaar log.
+async function appGeschiedenisRuw(kanaal, lees) {
+  let items = [];
+  try { items = await (lees || appLogLees)(kanaal); } catch (e) { if (!(e && e.code === 'ENOENT')) throw e; }
   const inLog = {};
   items.forEach(function (x) { inLog[x.job_id] = 1; });
   Object.keys(jobs).forEach(function (id) {
@@ -5314,7 +5313,36 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
       bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
   });
   items.sort(function (a, b) { return String(a.t).localeCompare(String(b.t)); });
-  items = items.slice(-max).map(function (x) {
+  return items;
+}
+async function appGeschiedenis(req, res, reg, a, pad) {
+  const delen = String(pad || '').split('/');
+  const kanaal = delen[0];
+  if (!APP_KANALEN[kanaal]) return appWeiger(res, 400, 'onbekend kanaal', 'kanaal');
+  let anker = null;
+  if (delen.length > 1) {
+    if (delen.length !== 3 || delen[1] !== 'vanaf' || !APP_JOB_RE.test(delen[2])) return appWeiger(res, 404, 'onbekend', 'geschiedenis pad');
+    anker = delen[2];
+  }
+  const lopend = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); })
+    .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, invoer: j.app.invoer || [], sinds: new Date(j.created).toISOString() }; });
+  let items = [], fout = null;
+  try { items = await appGeschiedenisRuw(kanaal); } catch (e) { logError('app-log-lees', e); fout = 'geschiedenis nu niet leesbaar'; }
+  let meerNieuw = false;
+  if (anker) {
+    if (fout) return appWeiger(res, 503, fout, 'app-log');
+    const i = items.findIndex(function (x) { return x.job_id === anker; });
+    if (i < 0) return appWeiger(res, 404, 'dit bericht is niet meer beschikbaar', 'anker onbekend');
+    meerNieuw = items.length > i + 1 + APP_ANKER_NA;
+    items = items.slice(Math.max(0, i - APP_ANKER_VOOR), i + 1 + APP_ANKER_NA);
+    res._app.reden = 'anker ' + items.length + ' items' + (meerNieuw ? ', meer nieuw' : '');
+  } else items = items.slice(-APP_GESCH_MAX);
+  let vragen = {};
+  try { vragen = appVragen(); } catch (e) {}
+  let reacties = null;   // wv304: onleesbaar = geen duimpjes tonen (reacties: false), de geschiedenis zelf gaat door
+  try { reacties = appReacties(); } catch (e) { logError('app-reacties', e); }
+  const agendaKnoppen = appAgendaKnoppen(), agNu = Date.now();   // wv315: kapot = leeg (gelogd); nooit de nonce naar de app
+  items = items.map(function (x) {
     const b = x.vraag_hash && vragen[x.job_id + ':' + x.vraag_hash];
     // wv277: Telegram-beurt (soort telegram): een vraag erin is alleen in Telegram te beantwoorden (staat niet in vragen.json)
     const tv = x.soort === 'telegram' && !x.vraag_hash ? appVraagVan(kanaal, x.antwoord) : null;
@@ -5322,9 +5350,11 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
     const bericht = x.soort === 'socev';
     let bnamen = x.bestanden || [];
     if (bericht) { try { const m = appBewaardVan(x.job_id); bnamen = m ? m.bestanden.map(function (f) { return f.naam; }) : []; } catch (e) { bnamen = []; } }
+    // wv350: onbeantwoord en ouder dan APP_VRAAG_GELDIG_MS (vanaf de registratie, anders het bericht) = verlopen, geen knoppen
+    const verlopen = x.vraag_hash && !(b && b.antwoord) && agNu - Date.parse((b && b.t) || x.t) > APP_VRAAG_GELDIG_MS;
     return { t: x.t, job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
       vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, naar_telegram: appNaarTelegramNu(b),
-        naar_telegram_onzeker: appNaarTelegramNu(b) && appNaarTelegramVerlopen(b) || undefined }
+        naar_telegram_onzeker: appNaarTelegramNu(b) && appNaarTelegramVerlopen(b) || undefined, verlopen: verlopen || undefined }
         : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true } : null,
       bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined,
       reactie: reacties && reacties[kanaal + ':' + x.job_id] ? reacties[kanaal + ':' + x.job_id].duim : null,
@@ -5332,7 +5362,118 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
   });
   // wie de geschiedenis met een afgerond antwoord ophaalt, heeft het gezien (fase 5c, Fable-review wv100 B2)
   items.forEach(function (x) { if (jobs[x.job_id] && jobs[x.job_id].app && jobs[x.job_id].status === 'done') appGezienDoor(x.job_id, a.id); });
-  appStuur(res, 200, { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout, reacties: !!reacties });
+  const uit = { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout, reacties: !!reacties };
+  if (anker) { uit.anker = anker; uit.meer_nieuw = meerNieuw; }
+  appStuur(res, 200, uit);
+}
+
+// ── Zoeken in gesprekken (wv350, bouwplan § 4.15) ──
+// POST /app/zoek {kanaal, term}: de term reist in de body, nooit in een pad (api.log, Access- en Cloudflare-log zien alleen het
+// pad). In APP_SLOT_VRIJ (lezen, zoals de geschiedenis) en in APP_GLIJD_ROUTES (zoeken gebeurt alleen als David typt; op een
+// vaste plek viel hij anders na 5 min uit zijn zoektocht, Fable #5). Audit: alleen kanaal, lengte, aantal en duur — nooit de
+// term of een fragment. Bron = die van de geschiedenis (log + geheugen), alleen de laatste APP_LOG_MS (30 dagen).
+const APP_ZOEK_PER_UUR = 120;
+const APP_ZOEK_MAX = 50;
+const APP_ZOEK_TERM_MIN = 2, APP_ZOEK_TERM_MAX = 100;
+const APP_ZOEK_LEES_MAX = 8 * 1024 * 1024;   // hooguit de staart van het log lezen (Fable #13: echt begrensd, niet readFile)
+const APP_ZOEK_VOOR = 60, APP_ZOEK_NA = 100;
+appStaat.tellers.zoek = [];
+// Gevouwen tekst (per UTF-16-eenheid van het origineel: NFD, accenten weg, kleine letters) met per gevouwen eenheid de index
+// in het origineel, zodat het fragment rond de treffer uit de echte tekst komt (Fable #7b).
+function appVouw(t) {
+  t = String(t || '');
+  let v = '';
+  const idx = [];
+  for (let i = 0; i < t.length; i++) {
+    let c = t[i];
+    const h = t.charCodeAt(i);
+    if (h >= 0xd800 && h <= 0xdbff && i + 1 < t.length) { c = t.slice(i, i + 2); }
+    const f = c.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    for (let k = 0; k < f.length; k++) { v += f[k]; idx.push(i); }
+    if (c.length === 2) i++;
+  }
+  idx.push(t.length);
+  return { v: v, idx: idx };
+}
+// Grens nooit midden in een surrogaatpaar (Fable #7a).
+function appZoekGrens(t, i) {
+  if (i > 0 && i < t.length) { const h = t.charCodeAt(i - 1); if (h >= 0xd800 && h <= 0xdbff) i--; }
+  return Math.max(0, Math.min(t.length, i));
+}
+function appZoekSchoon(t) { return String(t).replace(/\*\*|__|`+|\|/g, ' ').replace(/\s+/g, ' '); }
+// Eén bel doorzoeken: null of {fragment, aantal}. De treffer wordt nooit gesneden; markdown licht weg alleen in voor/na.
+function appZoekBel(tekst, termV) {
+  const g = appVouw(tekst);
+  let p = g.v.indexOf(termV);
+  if (p < 0) return null;
+  let aantal = 0;
+  for (let q = p; q >= 0; q = g.v.indexOf(termV, q + termV.length)) aantal++;
+  const t = String(tekst), b = g.idx[p], e = g.idx[p + termV.length];
+  const vb = appZoekGrens(t, b - APP_ZOEK_VOOR), ne = appZoekGrens(t, e + APP_ZOEK_NA);
+  let voor = appZoekSchoon(t.slice(vb, b)), na = appZoekSchoon(t.slice(e, ne));
+  if (vb > 0) voor = '…' + voor.replace(/^\S*\s/, '');   // geen half woord vooraan
+  if (ne < t.length) na = na.replace(/\s\S*$/, '') + '…';
+  return { fragment: { voor: voor, treffer: t.slice(b, e).replace(/\s+/g, ' '), na: na }, aantal: aantal };
+}
+// Label zoals de app het toont (geen inhoud).
+function appZoekLabel(x, bel) {
+  if (x.soort === 'socev') return x.bron || 'bericht van Socev';
+  if (x.soort === 'telegram') return 'via Telegram';
+  if (x.soort === 'tel') return bel === 'david' ? 'ingesproken' : 'antwoord op ingesproken';
+  if (x.soort === 'knop') return bel === 'david' ? 'knop' : null;
+  return null;
+}
+// Staart van het log (≤ APP_ZOEK_LEES_MAX), vanaf de eerste hele regel; afgekapt als er meer was.
+async function appZoekLogLees(kanaal) {
+  let fh;
+  try { fh = await fs.promises.open(appLogPad(kanaal), 'r'); } catch (e) { if (e && e.code === 'ENOENT') return { items: [], afgekapt: false }; throw e; }
+  try {
+    const st = await fh.stat();
+    const n = Math.min(st.size, APP_ZOEK_LEES_MAX), van = st.size - n;
+    const buf = Buffer.alloc(n);
+    let gelezen = 0;
+    while (gelezen < n) { const r = await fh.read(buf, gelezen, n - gelezen, van + gelezen); if (!r.bytesRead) break; gelezen += r.bytesRead; }
+    let t = buf.slice(0, gelezen).toString('utf8');
+    if (van > 0) { const nl = t.indexOf('\n'); t = nl >= 0 ? t.slice(nl + 1) : ''; }
+    const items = t.split('\n').filter(Boolean).map(function (l) { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+    return { items: items, afgekapt: van > 0 };
+  } finally { await fh.close().catch(function () {}); }
+}
+async function appZoek(req, res, a, d) {
+  const t0 = Date.now();
+  const kanaal = typeof d.kanaal === 'string' ? d.kanaal : '';
+  if (!Object.prototype.hasOwnProperty.call(APP_KANALEN, kanaal)) return appWeiger(res, 404, 'onbekend kanaal', 'zoek kanaal');
+  if (typeof d.term !== 'string') return appWeiger(res, 400, 'typ een zoekterm', 'zoek geen term');
+  const termV = appVouw(d.term.replace(/\s+/g, ' ').trim()).v;   // lengte op de gevouwen tekst (Fable #7c)
+  if (termV.length < APP_ZOEK_TERM_MIN) return appWeiger(res, 400, 'typ minstens 2 tekens', 'zoek term kort');
+  if (termV.length > APP_ZOEK_TERM_MAX) return appWeiger(res, 400, 'zoekterm te lang (hooguit 100 tekens)', 'zoek term lang');
+  if (!appTeller('zoek', APP_ZOEK_PER_UUR, 3600000)) return appWeiger(res, 429, 'even wachten: te veel zoekvragen dit uur', 'grens zoek');
+  let items, afgekapt = false;
+  try {
+    let staart = null;
+    items = await appGeschiedenisRuw(kanaal, async function (k) { staart = await appZoekLogLees(k); return staart.items; });
+    afgekapt = !!(staart && staart.afgekapt);
+  } catch (e) { logError('app-zoek', e); return appWeiger(res, 503, 'geschiedenis nu niet leesbaar', 'app-log'); }
+  const grens = Date.now() - APP_LOG_MS;
+  items = items.filter(function (x) { return Date.parse(x.t) >= grens; });
+  const treffers = [];
+  let totaal = 0;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const x = items[i];
+    // Socevs bel na Davids bel: in de lijst (nieuwste eerst) staat het antwoord boven de vraag.
+    const bellen = [['socev', [x.antwoord].concat(Array.isArray(x.bestanden) ? x.bestanden : []).filter(Boolean).join('\n')],
+      ['david', x.soort === 'socev' ? '' : [x.tekst].concat(Array.isArray(x.invoer) ? x.invoer : []).filter(Boolean).join('\n')]];
+    for (const [bel, tekst] of bellen) {
+      if (!tekst) continue;
+      const z = appZoekBel(tekst, termV);
+      if (!z) continue;
+      totaal++;
+      if (treffers.length < APP_ZOEK_MAX) treffers.push({ t: x.t, job_id: x.job_id, bel: bel, soort: x.soort, label: appZoekLabel(x, bel), fragment: z.fragment, aantal: z.aantal });
+    }
+  }
+  const ms = Date.now() - t0;
+  res._app.reden = 'zoek ' + kanaal + ' lengte ' + termV.length + ' treffers ' + totaal + ' ' + ms + ' ms' + (afgekapt ? ' afgekapt' : '');
+  appStuur(res, 200, { ok: true, kanaal: kanaal, treffers: treffers, totaal: totaal, meer: totaal > treffers.length, sinds: items.length ? items[0].t : null, afgekapt: afgekapt });
 }
 
 // ── Broedstoof (wv92, bouwplan § 4.13): ideeënbus + werkvoorraad + agents; voorrang per idee ──
@@ -7575,6 +7716,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/uitslag') return appUitslag(req, res, reg, a, s, d);
         if (route === 'POST /app/knop') return appKnop(req, res, reg, a, s, d);
         if (route.indexOf('GET /app/geschiedenis/') === 0) return appGeschiedenis(req, res, reg, a, route.slice('GET /app/geschiedenis/'.length));
+        if (route === 'POST /app/zoek') return appZoek(req, res, a, d);   // wv350
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res);
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
         if (route === 'GET /app/agents') return appAgents(req, res, a);

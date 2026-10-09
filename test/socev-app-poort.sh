@@ -347,7 +347,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVandaagActieDetail, appInvoerRoute, appVjStap };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVandaagActieDetail, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -1884,6 +1884,8 @@ async function bewijs(o) {
       toets('13 GET /app/slot: vast, dicht, plek Groenhouten', r.status === 200 && r.j.vast === true && r.j.open === false && r.j.plek === 'Groenhouten', JSON.stringify(r.j));
       r = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: WP.jar });
       toets('13 lezen blijft open (geschiedenis 200)', r.status === 200, r.status);
+      r = await vraag('POST', '/app/zoek', { kanaal: 'hoofd', term: 'xyz' }, { pot: WP.jar });
+      toets('13 wv350: zoeken valt niet onder het slot (lezen; geen 423)', r.status === 200, r.status + ' ' + JSON.stringify(r.j).slice(0, 120));
       r = await vraag('POST', '/app/uitslag', { job_id: 'f'.repeat(16) }, { pot: WP.jar });
       toets('13 uitslag pollen valt niet onder het slot', r.status !== 423, r.status);
       for (const [m, pad, body] of [['POST', '/app/knop', { job_id: 'f'.repeat(16), vraag_hash: 'x', keuze: 'ja' }], ['POST', '/app/broedstoof/voorrang', { idee: 9, actie: 'eerder' }],
@@ -4501,6 +4503,136 @@ async function bewijs(o) {
       toets('27 actielijstje onleesbaar -> 503', r.status === 503, r.status);
       toets('27 de pod schrijft niets in Todoist of de tabellen (alleen GET)', todoistStaat.aanroepen.every((x) => !x.m) && !n8nStaat.aanroepen.some((x) => /vNAY2dVRpSx1l3Ri|pnX6vvg2iv256HAB/.test(x.url) && /delete|update|upsert/.test(x.url)));
       sbStaat.vj = []; H.appStaat.vjCache = null;
+    }
+
+    // ── 28. wv350: zoeken in gesprekken (bouwplan § 4.15) en het anker in de geschiedenis ──
+    {
+      const LOGMK = path.join(LOGDIR, 'machinekamer.jsonl');
+      const mkVoor = fs.existsSync(LOGMK) ? fs.readFileSync(LOGMK, 'utf8') : null;
+      const dagen = (d) => new Date(Date.now() - d * 86400000).toISOString();
+      const regel = (o) => fs.appendFileSync(LOGMK, JSON.stringify(o) + '\n');
+      const AUD_F = path.join(DATA, 'audit.jsonl'), audN = () => fs.readFileSync(AUD_F, 'utf8').split('\n').length - 1;
+      const audNa = (n0) => fs.readFileSync(AUD_F, 'utf8').split('\n').slice(n0).filter(Boolean).map((x) => JSON.parse(x));
+      const ZA = 'a350000000000001', ZB = 'a350000000000002', ZC = 'a350000000000003', ZD = 'a350000000000004', ZE = 'a350000000000005', ZG = 'a350000000000006';
+      regel({ t: dagen(10), job_id: ZA, soort: 'socev', tekst: '', antwoord: 'Kop van het agentrapport. ' + 'x'.repeat(200) + ' Hier staan de **Ideeën** voor qwzoek-week, en nog een keer ideeen. ' + 'y'.repeat(200), ok: true, bron: 'agentrapport', klasse: 'normaal', bestanden: [] });
+      regel({ t: dagen(5), job_id: ZB, soort: 'telegram', tekst: 'Vraag over IDEEEN qwzoek', antwoord: 'iets anders', ok: true, bestanden: [] });
+      regel({ t: dagen(40), job_id: ZC, soort: 'bericht', tekst: 'oud: ideeen qwzoek', antwoord: 'te oud', ok: true, bestanden: [] });
+      regel({ t: dagen(2), job_id: ZD, soort: 'tel', tekst: 'ingesproken qwzoek ideeën', antwoord: 'antwoord op de auto', ok: true, bestanden: [] });
+      regel({ t: dagen(1), job_id: ZE, soort: 'bericht', tekst: 'emoji', antwoord: 'x'.repeat(57) + '😀😀ideeen', ok: true, bestanden: ['ideeen-lijst.pdf'] });
+      // afgerond, nog niet in het log (schrijffout): uit het geheugen, één keer
+      jobs[ZG] = { status: 'done', created: Date.now() - 1000, done_at: Date.now() - 500, app: { kanaal: 'machinekamer', soort: 'bericht', tekst: 'geheugen-ideeen', beurt_id: 'b', gelogd: false }, result: { ok: true, output: 'antw' } };
+      let n0 = audN();
+      let r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'Ideeen' }, { pot: P.jar });
+      const tr = r.j.treffers || [];
+      const ids = tr.map((x) => x.job_id + ':' + x.bel);
+      toets('28 zoek: 200, treffers nieuwste eerst, ook Telegram, ingesproken, agentrapport, geheugen; niet ouder dan 30 dagen', r.status === 200
+        && JSON.stringify(ids) === JSON.stringify([ZG + ':david', ZE + ':socev', ZD + ':david', ZB + ':david', ZA + ':socev']), JSON.stringify(ids));
+      const ta = tr.find((x) => x.job_id === ZA), tb = tr.find((x) => x.job_id === ZB), td = tr.find((x) => x.job_id === ZD), te = tr.find((x) => x.job_id === ZE);
+      toets('28 hoofdletters en accenten tellen niet; treffer uit de echte tekst, aantal in de bel', ta && ta.fragment.treffer === 'Ideeën' && ta.aantal === 2 && tb.fragment.treffer === 'IDEEEN' && td.fragment.treffer === 'ideeën', JSON.stringify([ta, tb, td]).slice(0, 400));
+      toets('28 labels: agentrapport, via Telegram, ingesproken; gewoon bericht zonder label', ta.label === 'agentrapport' && tb.label === 'via Telegram' && td.label === 'ingesproken' && te.label === null, JSON.stringify(tr.map((x) => x.label)));
+      toets('28 fragment: ingekort met …, markdown (**) weg, geen half woord', /^…/.test(ta.fragment.voor) && /…$/.test(ta.fragment.na) && ta.fragment.voor.indexOf('**') < 0 && ta.fragment.voor.length <= 62 && ta.fragment.na.length <= 102, JSON.stringify(ta.fragment));
+      const eenzaam = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+      toets('28 fragment snijdt nooit door een emoji (surrogaatpaar)', !eenzaam.test(te.fragment.voor + te.fragment.treffer + te.fragment.na) && /😀😀$/.test(te.fragment.voor), JSON.stringify(te.fragment));
+      toets('28 antwoord: totaal, meer, sinds (oudste doorzochte), afgekapt false; geen HTML-velden', r.j.totaal === 5 && r.j.meer === false && r.j.afgekapt === false && Date.parse(r.j.sinds) >= Date.now() - 30 * 86400000 - 60000, JSON.stringify(r.j).slice(-200));
+      let au = audNa(n0).filter((x) => x.route === '/app/zoek');
+      toets('28 audit: alleen kanaal, lengte, treffers en duur; nooit de term', au.length === 1 && /^zoek machinekamer lengte 6 treffers 5 \d+ ms$/.test(au[0].reden) && !/ideeen|Ideeen/i.test(fs.readFileSync(AUD_F, 'utf8')), JSON.stringify(au));
+      toets('28 de term staat niet in logError', !logs.join('\n').toLowerCase().includes('ideeen'), logs.slice(-3).join(' | '));
+      delete jobs[ZG];
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'qwzoek' }, { pot: P.jar });
+      toets('28 treffer in beide bellen van één item telt apart; Davids bel uit tekst, Socevs uit antwoord', r.status === 200 && r.j.totaal === 3 && r.j.treffers.every((x) => x.bel === (x.job_id === ZA ? 'socev' : 'david')), JSON.stringify(r.j.treffers.map((x) => x.job_id + x.bel)));
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'lijst.pdf' }, { pot: P.jar });
+      toets('28 ook in bestandsnamen', r.status === 200 && r.j.totaal === 1 && r.j.treffers[0].job_id === ZE, JSON.stringify(r.j).slice(0, 200));
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'zzgeenzz' }, { pot: P.jar });
+      toets('28 niets gevonden: 200, lege lijst, totaal 0', r.status === 200 && r.j.treffers.length === 0 && r.j.totaal === 0, JSON.stringify(r.j));
+      // sloten en invoer
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'ideeen' }, {});
+      toets('28 zonder sessie -> 401', r.status === 401, r.status);
+      for (const [d, st, w] of [[{ kanaal: 'machinekamer', term: 'a' }, 400, '1 teken'], [{ kanaal: 'machinekamer', term: '  é  ' }, 400, '1 teken na trimmen (é)'], [{ kanaal: 'machinekamer' }, 400, 'geen term'],
+        [{ kanaal: 'machinekamer', term: 12 }, 400, 'term geen tekst'], [{ kanaal: 'machinekamer', term: 'q'.repeat(101) }, 400, '101 tekens'], [{ kanaal: 'elders', term: 'ideeen' }, 404, 'onbekend kanaal'],
+        [{ kanaal: 'autokastje', term: 'ideeen' }, 404, 'autokastje is geen gesprek'], [{ kanaal: '__proto__', term: 'ideeen' }, 404, '__proto__'], [{ term: 'ideeen' }, 404, 'geen kanaal']]) {
+        r = await vraag('POST', '/app/zoek', d, { pot: P.jar });
+        toets('28 ' + w + ' -> ' + st, r.status === st, r.status + ' ' + JSON.stringify(r.j));
+      }
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'q'.repeat(100) }, { pot: P.jar });
+      toets('28 100 tekens mag', r.status === 200, r.status);
+      r = await vraag('GET', '/app/zoek', undefined, { pot: P.jar });
+      toets('28 GET /app/zoek bestaat niet (de term hoort nooit in een pad)', r.status === 404, r.status);
+      toets('28 zoeken is geen invoer (slot vrij) en glijdt (APP_GLIJD_ROUTES)', H.appInvoerRoute('POST /app/zoek', false, {}, { soort: 'vast' }) === false && /'POST \/app\/voor-jou\/keuze', 'POST \/app\/zoek'\]\)/.test(src), '');
+      const tz = H.appStaat.tellers.zoek.slice();
+      H.appStaat.tellers.zoek = Array(120).fill(Date.now());
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'ideeen' }, { pot: P.jar });
+      H.appStaat.tellers.zoek = tz;
+      toets('28 grens 120 per uur -> 429 met gewone taal', r.status === 429 && /even wachten/.test(r.j.fout), JSON.stringify(r.j));
+      fs.writeFileSync(UIT, '');
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'ideeen' }, { pot: P.jar });
+      fs.unlinkSync(UIT);
+      toets('28 noodstop -> 503', r.status === 503, r.status);
+      // onleesbaar log -> 503; geen log -> 0 treffers
+      r = await vraag('POST', '/app/zoek', { kanaal: 'cijfer-meester', term: 'ideeen' }, { pot: P.jar });
+      toets('28 cijfer-meester zonder treffers: 200', r.status === 200 && r.j.totaal === 0, JSON.stringify(r.j));
+      const LOGCM = path.join(LOGDIR, 'cijfer-meester.jsonl'), cmVoor = fs.existsSync(LOGCM) ? fs.readFileSync(LOGCM) : null;
+      if (cmVoor) fs.unlinkSync(LOGCM);
+      fs.mkdirSync(LOGCM);
+      r = await vraag('POST', '/app/zoek', { kanaal: 'cijfer-meester', term: 'ideeen' }, { pot: P.jar });
+      fs.rmdirSync(LOGCM);
+      if (cmVoor) fs.writeFileSync(LOGCM, cmVoor, { mode: 0o600 });
+      toets('28 onleesbaar log -> 503 in gewone taal', r.status === 503 && /niet leesbaar/.test(r.j.fout), JSON.stringify(r.j));
+      // anker: venster rond een treffer (10 vóór, 200 erna), meer_nieuw
+      for (let i = 0; i < 15; i++) regel({ t: dagen(10.5 - i * 0.01), job_id: 'b350' + String(i).padStart(12, '0'), soort: 'bericht', tekst: 'ervoor ' + i, antwoord: 'a', ok: true, bestanden: [] });
+      for (let i = 0; i < 205; i++) regel({ t: dagen(9.9 - i * 0.001), job_id: 'c350' + String(i).padStart(12, '0'), soort: 'bericht', tekst: 'erna ' + i, antwoord: 'a', ok: true, bestanden: [] });
+      r = await vraag('GET', '/app/geschiedenis/machinekamer/vanaf/' + ZA, undefined, { pot: P.jar });
+      let it = r.j.items || [];
+      const pa = it.findIndex((x) => x.job_id === ZA);
+      toets('28 anker: 200, 10 items vóór het bericht, 200 erna, anker en meer_nieuw true', r.status === 200 && pa === 10 && it.length === 211 && r.j.anker === ZA && r.j.meer_nieuw === true && it[0].job_id === 'b350000000000005', it.length + ' ' + pa + ' ' + r.j.meer_nieuw + ' ' + (it[0] || {}).job_id);
+      toets('28 anker: zelfde vorm als de geschiedenis (socev-velden, lopend erbij)', it[pa].soort === 'socev' && it[pa].bron === 'agentrapport' && Array.isArray(r.j.lopend), JSON.stringify(it[pa]).slice(0, 200));
+      r = await vraag('GET', '/app/geschiedenis/machinekamer/vanaf/' + ZE, undefined, { pot: P.jar });
+      toets('28 anker vlak bij het eind: meer_nieuw false', r.status === 200 && r.j.meer_nieuw === false && r.j.items[r.j.items.length - 1].job_id !== undefined, JSON.stringify([r.j.meer_nieuw, (r.j.items || []).length]));
+      for (const [pad, w] of [['/app/geschiedenis/machinekamer/vanaf/ffffffffffffffff', 'onbekende job'], ['/app/geschiedenis/machinekamer/vanaf/xyz', 'geen job-id'], ['/app/geschiedenis/machinekamer/tot/' + ZA, 'ander woord'], ['/app/geschiedenis/machinekamer/vanaf/' + ZA + '/x', 'te lang pad']]) {
+        r = await vraag('GET', pad, undefined, { pot: P.jar });
+        toets('28 anker ' + w + ' -> 404', r.status === 404, r.status + ' ' + JSON.stringify(r.j));
+      }
+      r = await vraag('GET', '/app/geschiedenis/elders/vanaf/' + ZA, undefined, { pot: P.jar });
+      toets('28 anker onbekend kanaal -> 400 (zoals de geschiedenis)', r.status === 400, r.status);
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      toets('28 zonder anker: nog steeds de laatste 300, geen anker-velden', r.status === 200 && r.j.items.length <= 300 && r.j.anker === undefined && r.j.meer_nieuw === undefined, r.j.items && r.j.items.length);
+      // verlopen vraag (Fable #4): ouder dan 3 dagen -> geen knoppen, knop 410
+      const VA = 'a350000000000007', VB = 'a350000000000008', vtekst = 'Rapport.\n\nVRAAG AAN DAVID: Zal ik de mail aan X versturen?';
+      const vh = H.appVraagUit(vtekst).hash;
+      regel({ t: dagen(4), job_id: VA, soort: 'socev', tekst: '', antwoord: vtekst, ok: true, bron: 'agentrapport', klasse: 'normaal', vraag_hash: vh, bestanden: [] });
+      regel({ t: dagen(1), job_id: VB, soort: 'socev', tekst: '', antwoord: vtekst, ok: true, bron: 'agentrapport', klasse: 'normaal', vraag_hash: vh, bestanden: [] });
+      const VR = path.join(DATA, 'vragen.json'), vrVoor = fs.existsSync(VR) ? JSON.parse(fs.readFileSync(VR, 'utf8')) : {};
+      fs.writeFileSync(VR, JSON.stringify(Object.assign({}, vrVoor, { [VA + ':' + vh]: { kanaal: 'machinekamer', t: dagen(4), antwoord: null, gevoelig: true }, [VB + ':' + vh]: { kanaal: 'machinekamer', t: dagen(1), antwoord: null, gevoelig: true } })));
+      r = await vraag('GET', '/app/geschiedenis/machinekamer/vanaf/' + VA, undefined, { pot: P.jar });
+      const iva = (r.j.items || []).find((x) => x.job_id === VA), ivb = (r.j.items || []).find((x) => x.job_id === VB);
+      toets('28 vraag ouder dan 3 dagen: verlopen; jonger: niet', iva && iva.vraag && iva.vraag.verlopen === true && ivb && ivb.vraag && !ivb.vraag.verlopen, JSON.stringify([iva && iva.vraag, ivb && ivb.vraag]));
+      const ng = gestart.length;
+      r = await vraag('POST', '/app/knop', { job_id: VA, vraag_hash: vh, keuze: 'nee' }, { pot: P.jar });
+      toets('28 knop op een verlopen vraag -> 410, start niets', r.status === 410 && r.j.verlopen === true && gestart.length === ng, r.status + ' ' + JSON.stringify(r.j));
+      fs.writeFileSync(VR, JSON.stringify(vrVoor));
+      // snelheid en leesgrens: ± 3 MB (een vol log) binnen 1 s; > 8 MB -> alleen de staart, afgekapt
+      const blok1 = 'z'.repeat(1400);
+      let groot = '';
+      for (let i = 0; i < 2100; i++) groot += JSON.stringify({ t: dagen(29 - i * 0.013), job_id: 'd350' + String(i).padStart(12, '0'), soort: i % 3 ? 'socev' : 'bericht', tekst: i % 3 ? '' : 'vraag ' + i, antwoord: blok1 + (i % 500 === 0 ? ' naald ' : ' ') + blok1.slice(0, 50), ok: true, bestanden: [] }) + '\n';
+      fs.writeFileSync(LOGMK, groot);
+      let t0 = Date.now();
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'naald' }, { pot: P.jar });
+      const ms3 = Date.now() - t0;
+      toets('28 ± 3 MB log: ' + (groot.length / 1048576).toFixed(1) + ' MB, ' + ms3 + ' ms (< 1000), 5 treffers', r.status === 200 && r.j.totaal === 5 && ms3 < 1000, ms3 + ' ' + JSON.stringify(r.j).slice(0, 200));
+      fs.writeFileSync(LOGMK, groot + groot + groot);   // ± 9,3 MB
+      t0 = Date.now();
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'naald' }, { pot: P.jar });
+      const ms9 = Date.now() - t0;
+      toets('28 > 8 MB log: alleen de staart, afgekapt true, nog binnen 1 s (' + ms9 + ' ms)', r.status === 200 && r.j.afgekapt === true && ms9 < 1000 && r.j.totaal > 5, JSON.stringify([r.j.totaal, r.j.afgekapt, ms9]));
+      // 60 treffers -> hooguit 50, meer true
+      let veel = '';
+      for (let i = 0; i < 60; i++) veel += JSON.stringify({ t: dagen(3 - i * 0.01), job_id: 'e350' + String(i).padStart(12, '0'), soort: 'socev', tekst: '', antwoord: 'massa ' + i, ok: true, bestanden: [] }) + '\n';
+      fs.writeFileSync(LOGMK, veel);
+      r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'massa' }, { pot: P.jar });
+      toets('28 60 treffers: 50 terug, totaal 60, meer true, nieuwste eerst', r.status === 200 && r.j.treffers.length === 50 && r.j.totaal === 60 && r.j.meer === true && r.j.treffers[0].job_id === 'e350000000000059', JSON.stringify([r.j.treffers.length, r.j.totaal, r.j.meer, r.j.treffers[0].job_id]));
+      // unit: vouwen
+      const v = H.appVouw('\u0130\u00e9\ud83d\ude00\u00c4');
+      toets('28 vouwen: per gevouwen eenheid een index in het origineel (İ en é zonder teken, emoji heel)', v.v === 'ie\ud83d\ude00a' && JSON.stringify(v.idx) === JSON.stringify([0, 1, 2, 2, 4, 5]), JSON.stringify(v));
+      if (mkVoor === null) fs.unlinkSync(LOGMK); else fs.writeFileSync(LOGMK, mkVoor, { mode: 0o600 });
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
