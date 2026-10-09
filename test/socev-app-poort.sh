@@ -3682,16 +3682,16 @@ async function bewijs(o) {
         akStaat.onleesbaar = true; const rOnl = await app(D(idH, { keuze: 'nee' })); akStaat.onleesbaar = false;
         akStaat.antwoord = () => ({ pagina: 'raar' }); const rRaar = await app(D(idH, { keuze: 'nee' }));
         toets('23c n8n 500 / onleesbaar / onbekende pagina -> 503, stand open', [r.status, rOnl.status, rRaar.status].join() === '503,503,503' && agf()[idH].knoppen.uitvoeren.stand === 'open', [r.status, rOnl.status, rRaar.status].join());
-        // bezig: < 60 s (ook na herladen) = 409; ≥ 60 s = weer drukbaar
+        // bezig: < 120 s (ook na herladen) = 409; ≥ 120 s (Fable-review diff #4) = weer drukbaar
         { const m = agf(); Object.assign(m[idH].knoppen.uitvoeren, { stand: 'bezig', sinds: Date.now() - 10000 }); fs.writeFileSync(AGF, JSON.stringify(m)); H.appStaat.agendaKnoppen = null; }
         const nVoorH = nA();
         r = await app(D(idH, { keuze: 'nee' }));
         toets('23c bezig sinds 10 s (na herladen) -> 409 bezig, niets aangeroepen', r.status === 409 && r.j.bezig === true && nA() === nVoorH, JSON.stringify(r.j));
-        { const m = agf(); Object.assign(m[idH].knoppen.uitvoeren, { stand: 'bezig', sinds: Date.now() - 61000 }); fs.writeFileSync(AGF, JSON.stringify(m)); H.appStaat.agendaKnoppen = null; }
+        { const m = agf(); Object.assign(m[idH].knoppen.uitvoeren, { stand: 'bezig', sinds: Date.now() - 121000 }); fs.writeFileSync(AGF, JSON.stringify(m)); H.appStaat.agendaKnoppen = null; }
         it = await item(idH);
         akStaat.antwoord = () => ({ pagina: 'afgewezen', tekst: '' });
         r = await app(D(idH, { keuze: 'nee' }));
-        toets('23c bezig ouder dan 60 s (na herladen) -> geschiedenis open, weer drukbaar (200)', it.agenda.knoppen[0].open === true && r.status === 200 && r.j.pagina === 'afgewezen' && nA() === nVoorH + 1, JSON.stringify([it.agenda, r.j]));
+        toets('23c bezig ouder dan 120 s (na herladen) -> geschiedenis open, weer drukbaar (200)', it.agenda.knoppen[0].open === true && r.status === 200 && r.j.pagina === 'afgewezen' && nA() === nVoorH + 1, JSON.stringify([it.agenda, r.j]));
         // webhookpad gewijzigd: 404 -> opnieuw opgezocht, één keer opnieuw
         const nI = nn(); const idI = (await bqA(AG(nI))).j.id;
         akStaat.pad = 'agenda-knop-app-bbbbbbbbbbbb'; n8nStaat.workflows.LeqoYYEvJPhAKPS3.nodes[1].parameters.path = 'agenda-knop-app-bbbbbbbbbbbb';

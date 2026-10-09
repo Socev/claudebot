@@ -8236,7 +8236,7 @@ const APP_AGENDA_KNOP_WF = process.env.APP_AGENDA_KNOP_WF || 'LeqoYYEvJPhAKPS3';
 const APP_AGENDA_KNOPPEN_MS = 50 * 3600 * 1000;
 const APP_AGENDA_MARGE_MS = 5 * 60 * 1000;          // ruime marge rond verloopt (podklok; Fable #7)
 const APP_AGENDA_VOORUIT_MS = 48 * 3600 * 1000;     // verloopt verder weg = fout van de afzender
-const APP_AGENDA_BEZIG_MS = 60 * 1000;
+const APP_AGENDA_BEZIG_MS = 120 * 1000;   // Fable-review diff wv315 #4: URL-opzoeken (8 s) + 45 s fetch, bij 404 twee keer
 const APP_AGENDA_ONGEDAAN_MS = 24 * 3600 * 1000;    // ↩️ na een ✅ in de app (zoals de ongedaan-rij in n8n)
 const APP_AGENDA_PER_UUR = 30;
 const APP_AGENDA_N8N_MS = 45 * 1000;
@@ -8365,6 +8365,11 @@ async function appAgendaRoute(req, res, a, s, d) {
   }
   const tekst = appAgendaPlat(j.tekst);
   const uitkomst = pagina === 'uitgevoerd' ? '✅ ' + (tekst || 'Gedaan.') : pagina === 'mislukt' ? '⚠️ ' + (tekst || 'Niet gelukt.') : APP_AGENDA_UITKOMST[pagina];
+  // Fable-review diff wv315 #4: kwam een eerdere druk intussen terug met "uitgevoerd", dan overschrijft een latere "gebruikt" dat niet
+  if (pagina === 'gebruikt' && K2.stand === 'klaar' && K2.pagina === 'uitgevoerd') {
+    res._app.reden = 'agenda ' + knop + ' ' + keuze + ' -> gebruikt (al uitgevoerd)';
+    return appStuur(res, 409, { ok: false, al_afgehandeld: true, fout: 'Al afgehandeld: ' + K2.uitkomst, melding: 'Al afgehandeld: ' + K2.uitkomst, agenda: appAgendaVorm(e2) });
+  }
   K2.stand = 'klaar'; K2.sinds = null; K2.pagina = pagina; K2.uitkomst = uitkomst;
   // Na plaatsen of wijzigen maakt n8n een ongedaan-rij: ↩️ bij hetzelfde bericht, 24 u (ook na een ↩️ die zelf weer een wijziging was)
   if (typeof j.ongedaan_nonce === 'string' && APP_AGENDA_NONCE_RE.test(j.ongedaan_nonce))
