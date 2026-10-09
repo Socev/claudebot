@@ -19,7 +19,9 @@ for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_COD
                       ['const APP_VERS_MS = 2 * 60 * 1000;', 'const APP_VERS_MS = 4000;'],
                       ['const APP_UPLOAD_TOTAAL_MAX = 300 * 1024 * 1024;', 'const APP_UPLOAD_TOTAAL_MAX = 45 * 1024 * 1024;'],
                       ['const APP_PUSH_WACHT_MS = 20 * 1000;', 'const APP_PUSH_WACHT_MS = 300;'],
-                      ['if (!(uur >= 7 && uur < 22)) return;', 'if (!(TOETSUUR(uur) >= 7 && TOETSUUR(uur) < 22)) return;']]) {
+                      ['if (!(uur >= 7 && uur < 22)) return;', 'if (!(TOETSUUR(uur) >= 7 && TOETSUUR(uur) < 22)) return;'],
+                      ['const BERICHT_BUNDEL_MS = 10 * 60 * 1000;', 'const BERICHT_BUNDEL_MS = 400;'],   // wv263
+                      ['function berichtUur() { return Number(', 'function berichtUur() { if (TOETSBUUR() !== null) return TOETSBUUR(); return Number(']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'apptoets-'));
@@ -107,6 +109,8 @@ function wavMaak(sec, rate) {
   return Buffer.concat([h, d]);
 }
 let toetsUur = 12;
+let toetsBUur = null;   // wv263: uur voor de stille uren van /bericht (null = echte klok)
+const BUNDEL23 = 400;
 
 // nep-Access: eigen RSA-sleutel met kid 'proef'
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -199,6 +203,7 @@ async function nepFetch(url, opt) {
   if (url === 'https://wachter.toets/stand') return wachterStaat.kapot ? antw(503, {}) : antw(200, wachterStaat.j);
   if (/^https:\/\/(fcm\.googleapis\.com|[a-z0-9-]+\.notify\.windows\.com)\//.test(url)) {
     pushes.push({ url, m: opt.method, body: opt.body, h: opt.headers, redirect: opt.redirect });
+    if (pushStaat.traag) await new Promise((r) => setTimeout(r, pushStaat.traag));   // wv263: trage pushdienst
     return antw(pushStaat.status, {});
   }
   if (url.startsWith('https://api.cloudflare.com/client/v4/accounts/') && url.includes('/d1/database/')) {   // wv174: D1 fin
@@ -283,18 +288,19 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
     N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
   VAULT: VAULT_T,
   TOETSUUR: () => toetsUur,
+  TOETSBUUR: () => toetsBUur, SECRET: 'g'.repeat(40),
   agentsReg,
   jobs, enqueue, processJob, DEFAULT_WS: 'vault', sessionKey: (ws, c) => (ws === 'vault' ? c : ws + ':' + c), resolveKeuze: () => ({ runtime: 'claude', model: '' }),
   rol: rolStub, rolPrimair: () => rolStub.primair, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 100,
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
 const H = ctx.__h;
-const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); s.writeHead(418); s.end(); });
+const srv = http.createServer((q, s) => { if (H.appIsPad(q)) return H.handleApp(q, s); if (H.berichtIsPad(q)) return H.berichtRoute(q, s); s.writeHead(418); s.end(); });
 
 // ── de "Pages Function" van deze toets: cookiepot per browser, koppen erbij ──
 let laatsteCookies = '';   // wv205: ruwe X-App-Cookies van het laatste antwoord dat cookies zette
@@ -3241,6 +3247,256 @@ async function bewijs(o) {
       toets('22 regressie: machinekamer blijft telegram-debug met de omlijsting, zonder de kop van de Cijfer-Meester (Fable K5)', r.status === 200 && gestart.length === nM + 1 && gmk.chatId === 'telegram-debug' && gmk.prompt === OMLIJST.replace(/\s+$/, '') + '\n[APP] regressie mk' && !/CIJFER-MEESTER/.test(gmk.prompt), JSON.stringify(gmk).slice(0, 200));
       afmaken[gmk.jobId]('ok');
       await slaap(50);
+    }
+
+    // ── 23. wv263: bericht aan David (/bericht, bouwplan "Socev-app als hoofdkanaal" § 4.2–4.5, § 5 fase 1) ──
+    {
+      const bq = (pad, body, o) => new Promise((ok) => {
+        o = o || {};
+        const tekst = typeof body === 'string' ? body : JSON.stringify(body);
+        const r0 = http.request({ host: '127.0.0.1', port: srv.address().port, path: pad, method: o.m || 'POST', headers: { 'content-type': 'application/json' } }, (res) => {
+          let t = ''; res.on('data', (c) => t += c); res.on('end', () => { let j = {}; try { j = JSON.parse(t); } catch (e) { j = { raw: t }; } ok({ status: res.statusCode, j, ms: Date.now() - t0 }); });
+        });
+        const t0 = Date.now();
+        r0.on('error', (e) => ok({ status: 0, j: { fout: e.code }, ms: Date.now() - t0 }));
+        if (o.stukken) { for (const s of o.stukken) r0.write(s); } else if (body !== undefined) r0.write(tekst);
+        r0.end();
+      });
+      const GEH = 'g'.repeat(40);
+      const B = (x) => Object.assign({ secret: GEH, kanaal: 'machinekamer', bron: 'agentrapport', klasse: 'normaal', tekst: '🤖 Agentrapport — proef\n\nAlles klaar.' }, x || {});
+      const pId = P.jar.apparaat.split('.')[0];
+      // P (de telefoon uit § 8) speelt hier de Pixel: tijdelijk de goedkeurder in het register, na deze sectie terug
+      const regOrig23 = fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8');
+      { const rg = JSON.parse(regOrig23); rg.apparaten.forEach((x) => { x.goedkeurder = x.id === pId; }); fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg)); }
+      const goedk = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')).apparaten.find((x) => x.actief && x.goedkeurder);
+      toets('23 (P is de goedkeurder)', goedk && goedk.id === pId, goedk && goedk.id);
+      // twee apparaten met seintjes (P en een tweede actief apparaat), beide soort antwoord
+      const reg23 = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+      const ander = reg23.apparaten.find((x) => x.actief && x.id !== pId);
+      const pj = { versie: 1, apparaten: {} };
+      pj.apparaten[pId] = { endpoint: 'https://fcm.googleapis.com/fcm/send/p23', soorten: ['antwoord'], sinds: new Date().toISOString(), sleutel: crypto.createHash('sha256').update(VAPID_PUB).digest('hex').slice(0, 16) };
+      if (ander) pj.apparaten[ander.id] = { endpoint: 'https://fcm.googleapis.com/fcm/send/a23', soorten: ['antwoord'], sinds: new Date().toISOString(), sleutel: pj.apparaten[pId].sleutel };
+      fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pj));
+      if (fs.existsSync(UIT)) fs.unlinkSync(UIT);
+      toetsBUur = 12; pushStaat.status = 201; pushStaat.traag = 0;
+
+      // sloten
+      r = await bq('/bericht', B({ secret: undefined }));
+      toets('23 zonder geheim -> 401', r.status === 401, JSON.stringify(r));
+      r = await bq('/bericht', B({ secret: 'h'.repeat(40) }));
+      toets('23 fout geheim -> 401', r.status === 401, JSON.stringify(r));
+      r = await bq('/bericht', undefined, { m: 'GET' });
+      toets('23 GET -> 405', r.status === 405, JSON.stringify(r));
+      rolStub.primair = false;
+      r = await bq('/bericht', B());
+      rolStub.primair = true;
+      toets('23 passieve kant -> 409 passief, terugval', r.status === 409 && r.j.error === 'passief' && r.j.terugval === true, JSON.stringify(r));
+      fs.writeFileSync(UIT, '');
+      r = await bq('/bericht', B());
+      fs.unlinkSync(UIT);
+      toets('23 noodstop (app-uit) -> 503 terugval', r.status === 503 && r.j.terugval === true, JSON.stringify(r));
+      r = await bq('/bericht', B({ bron: 'zomaar' }));
+      const rKl = await bq('/bericht', B({ klasse: 'heel-dringend' }));
+      const rKa = await bq('/bericht', B({ kanaal: 'cijfer-meester' }));
+      toets('23 onbekende bron / klasse / kanaal -> 400', r.status === 400 && rKl.status === 400 && rKa.status === 400, JSON.stringify([r.j, rKl.j, rKa.j]));
+      r = await bq('/bericht', B({ tekst: 'x'.repeat(60001) }));
+      toets('23 tekst > 60.000 -> 413 terugval', r.status === 413 && r.j.terugval === true, JSON.stringify(r.j));
+      r = await bq('/bericht', '{"secret":"' + GEH + '", "tekst": "' + 'y'.repeat(300 * 1024) + '"}');
+      toets('23 verzoek > 256 kB -> 413 (geen afgebroken verbinding)', r.status === 413, JSON.stringify(r).slice(0, 200));
+
+      // gewoon bericht met vraag, knoppen aan; twee trage pushdiensten -> toch direct antwoord
+      pushes.length = 0; pushStaat.traag = 1500;
+      const nLog0 = fs.readFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), 'utf8').split('\n').filter(Boolean).length;
+      const VR23 = 'Mag ik de oude proefworkflow uitzetten?';
+      const AJ = 'abcdef0123456789';
+      r = await bq('/bericht', B({ tekst: '🤖 Agentrapport — proef\n\nKlaar.\n\nVRAAG AAN DAVID: ' + VR23, knoppen: true, sleutel: 'exec-1:agentrapport', agent_job: AJ }));
+      const id1 = r.j.id;
+      toets('23 bericht -> 200, id 16 hex, vraag geregistreerd, push gewenst 2 en gestart', r.status === 200 && /^[a-f0-9]{16}$/.test(id1) && r.j.vraag === true && r.j.push.gewenst === (ander ? 2 : 1) && r.j.push.gestart === true && r.j.uitgesteld === null, JSON.stringify(r.j));
+      toets('23 antwoord < 1 s ook met twee trage pushdiensten (seintje asynchroon)', r.ms < 1000, r.ms);
+      await slaap(60);
+      let st = await bq('/bericht/stand', { secret: GEH, id: id1 });
+      toets('23 stand direct na het bericht: push nog niet klaar, niet gezien/getikt/beantwoord', st.status === 200 && st.j.push_klaar === false && st.j.gezien_pixel === false && st.j.getikt === false && st.j.beantwoord === false, JSON.stringify(st.j));
+      await slaap((ander ? 2 : 1) * 1500 + 300);
+      st = await bq('/bericht/stand', { secret: GEH, id: id1 });
+      toets('23 na de pushdiensten: verstuurd = 2 (seintjes onder soort antwoord, reden antwoord machinekamer)', st.j.push_klaar === true && st.j.verstuurd === (ander ? 2 : 1) && pushes.length >= (ander ? 2 : 1) && pushes.every((x) => x.body === '') &&
+        JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pId].laatst.reden === 'antwoord machinekamer', JSON.stringify(st.j));
+      pushStaat.traag = 0;
+      const regels = fs.readFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+      const l1 = regels.find((x) => x.job_id === id1);
+      toets('23 app-log machinekamer: één regel soort socev met bron, klasse, agent_job, antwoord = tekst, tekst leeg', regels.length === nLog0 + 1 && l1 && l1.soort === 'socev' && l1.bron === 'agentrapport' && l1.klasse === 'normaal' && l1.agent_job === AJ && /VRAAG AAN DAVID/.test(l1.antwoord) && l1.tekst === '' && l1.vraag_hash, JSON.stringify(l1).slice(0, 300));
+      const vj = JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[id1 + ':' + l1.vraag_hash];
+      toets('23 vragen.json: rij <id>:<hash>, soort socev, gevoelig (uitzetten), geen vraagtekst', vj && vj.kanaal === 'machinekamer' && vj.soort === 'socev' && vj.gevoelig === true && vj.antwoord === null && JSON.stringify(vj).indexOf('proefworkflow') < 0, JSON.stringify(vj));
+      const bj = JSON.parse(fs.readFileSync(path.join(DATA, 'berichten.json'), 'utf8'))[id1];
+      toets('23 berichten.json: alleen tijden/bron/klasse/push, geen inhoud, sleutel als hash', bj && bj.bron === 'agentrapport' && JSON.stringify(bj).indexOf('Klaar') < 0 && JSON.stringify(bj).indexOf('exec-1') < 0 && /^[a-f0-9]{64}$/.test(bj.sleutel), JSON.stringify(bj));
+      // dubbele sleutel
+      r = await bq('/bericht', B({ tekst: 'nog eens', knoppen: true, sleutel: 'exec-1:agentrapport' }));
+      const nLog1 = fs.readFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), 'utf8').split('\n').filter(Boolean).length;
+      toets('23 dubbele sleutel -> zelfde id, dubbel, geen tweede regel', r.status === 200 && r.j.id === id1 && r.j.dubbel === true && nLog1 === nLog0 + 1, JSON.stringify(r.j));
+      // geschiedenis in de app
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      const g1 = (r.j.items || []).find((x) => x.job_id === id1);
+      toets('23 geschiedenis: soort socev, bron, klasse, agent_job, vraag met hash, niet beantwoord', g1 && g1.soort === 'socev' && g1.bron === 'agentrapport' && g1.klasse === 'normaal' && g1.agent_job === AJ && g1.tekst === '' && g1.vraag && g1.vraag.tekst === VR23 && g1.vraag.beantwoord === null && g1.vraag.naar_telegram === false, JSON.stringify(g1).slice(0, 300));
+      // bestand
+      const buf = Buffer.from('%PDF-1.4 proef\n');
+      r = await bq('/bericht/bestand', { secret: GEH, id: id1, naam: '../rapport.pdf', base64: buf.toString('base64') });
+      const rDub = await bq('/bericht/bestand', { secret: GEH, id: id1, naam: 'rapport.pdf', base64: buf.toString('base64') });
+      toets('23 bestand -> 200 n 1, naam zonder pad; herhaling ontdubbeld', r.status === 200 && r.j.n === 1 && r.j.naam === 'rapport.pdf' && rDub.status === 200 && rDub.j.dubbel === true && rDub.j.n === 1, JSON.stringify([r.j, rDub.j]));
+      r = await vraag('GET', '/app/bestand/' + id1 + '/1', undefined, { pot: P.jar });
+      toets('23 /app/bestand/<id>/1 werkt met het 16-hex id', r.status === 200 && Buffer.from(r.j.inhoud, 'base64').equals(buf) && r.j.naam === 'rapport.pdf' && r.j.type === 'application/pdf', JSON.stringify(r.j).slice(0, 200));
+      r = await vraag('GET', '/app/bestanden', undefined, { pot: P.jar });
+      const bi = (r.j.items || []).find((x) => x.job_id === id1);
+      toets('23 tab Bestanden: het bericht met label "bericht · agentrapport"', bi && bi.soort === 'socev' && bi.label === 'bericht · agentrapport' && bi.bestanden.length === 1, JSON.stringify(bi));
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      toets('23 geschiedenis noemt het bestand', ((r.j.items || []).find((x) => x.job_id === id1) || {}).bestanden.join() === 'rapport.pdf', '');
+      const groot = Buffer.alloc(20 * 1024 * 1024 + 10, 1).toString('base64');
+      r = await bq('/bericht/bestand', { secret: GEH, id: id1, naam: 'groot.bin', base64: groot });
+      toets('23 bestand > 20 MB (body ≤ 28 MB) -> 413 voor alleen dat bestand', r.status === 413 && r.j.terugval === true, JSON.stringify(r.j));
+      r = await bq('/bericht/bestand', '{"secret":"' + GEH + '","id":"' + id1 + '","naam":"x","base64":"' + 'A'.repeat(29 * 1024 * 1024) + '"}');
+      toets('23 bestand-verzoek > 28 MB -> 413 (leeggelezen, niet afgebroken)', r.status === 413, JSON.stringify(r.j).slice(0, 120));
+      r = await bq('/bericht/bestand', { secret: GEH, id: 'ffffffffffffffff', naam: 'x', base64: buf.toString('base64') });
+      toets('23 bestand bij een onbekend bericht -> 404 terugval', r.status === 404 && r.j.terugval === true, JSON.stringify(r.j));
+      // knop: [APP] [KNOP]-beurt in de machinekamer; tweede druk al beantwoord
+      o = await P.p.evaluate(() => post('/api/passkey/opties', {}));
+      await P.p.evaluate(async (x) => post('/api/passkey/bevestig', { antwoord: await bewijs(x) }), o.j.opties);
+      const n23 = gestart.length;
+      r = await vraag('POST', '/app/knop', { job_id: id1, vraag_hash: l1.vraag_hash, keuze: 'ja' }, { pot: P.jar });
+      await slaap(40);
+      const gk23 = gestart[gestart.length - 1];
+      toets('23 knop Ja op het bericht -> [APP] [KNOP]-beurt in telegram-debug met de vraagzin en verse vingerafdruk', r.status === 200 && gestart.length === n23 + 1 && gk23.chatId === 'telegram-debug' &&
+        gk23.prompt.indexOf('[APP] [KNOP] David drukte JA op de vraag: ' + JSON.stringify(VR23)) >= 0 && /met verse vingerafdruk bevestigd/.test(gk23.prompt) && /\(de machinekamer\)/.test(gk23.prompt), (gk23 && gk23.prompt || '').slice(-400));
+      afmaken[gk23.jobId]('ok');
+      await slaap(40);
+      r = await vraag('POST', '/app/knop', { job_id: id1, vraag_hash: l1.vraag_hash, keuze: 'nee' }, { pot: P.jar });
+      toets('23 tweede druk -> 409 al beantwoord', r.status === 409 && /^al beantwoord: Ja/.test(r.j.fout), JSON.stringify(r.j));
+      st = await bq('/bericht/stand', { secret: GEH, id: id1 });
+      toets('23 stand: beantwoord', st.j.beantwoord === true, JSON.stringify(st.j));
+      r = await bq('/bericht/naar-telegram', { secret: GEH, id: id1 });
+      toets('23 naar-telegram na een antwoord in de app -> 409 al beantwoord', r.status === 409 && r.j.al_beantwoord === true, JSON.stringify(r.j));
+
+      // knoppen: false (schaduwfase): geen vraagregistratie, geen knoppen in de app
+      r = await bq('/bericht', B({ tekst: 'Schaduw.\n\nVRAAG AAN DAVID: Zal ik dit doen?', knoppen: false }));
+      const idS = r.j.id;
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      const gS = (r.j.items || []).find((x) => x.job_id === idS);
+      toets('23 knoppen:false -> vraag null in de app, geen rij in vragen.json', gS && gS.vraag === null && !Object.keys(JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))).some((k) => k.indexOf(idS) === 0), JSON.stringify(gS).slice(0, 200));
+      // naar-telegram: de app toont "beantwoord in Telegram", knop weigert
+      await slaap(BUNDEL23 + 50);
+      r = await bq('/bericht', B({ tekst: 'Vraag.\n\nVRAAG AAN DAVID: Zal ik verder bouwen?', knoppen: true }));
+      const idT = r.j.id;
+      r = await bq('/bericht/naar-telegram', { secret: GEH, id: idT });
+      toets('23 naar-telegram -> 200', r.status === 200 && r.j.vraag === true, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      const gT = (r.j.items || []).find((x) => x.job_id === idT);
+      toets('23 geschiedenis: vraag.naar_telegram true, niet beantwoord', gT && gT.vraag && gT.vraag.naar_telegram === true && gT.vraag.beantwoord === null, JSON.stringify(gT).slice(0, 200));
+      r = await vraag('POST', '/app/knop', { job_id: idT, vraag_hash: gT.vraag.hash, keuze: 'nee' }, { pot: P.jar });
+      toets('23 knop na naar-telegram -> 409 "beantwoord je in Telegram"', r.status === 409 && r.j.naar_telegram === true, JSON.stringify(r.j));
+
+      // gezien_pixel en getikt
+      st = await bq('/bericht/stand', { secret: GEH, id: idT });
+      const gezAlle = JSON.parse(fs.readFileSync(path.join(DATA, 'gezien.json'), 'utf8'));
+      if (ander) { gezAlle[ander.id] = Object.assign({}, gezAlle[ander.id], { machinekamer: new Date(Date.now() + 1000).toISOString() }); fs.writeFileSync(path.join(DATA, 'gezien.json'), JSON.stringify(gezAlle)); }
+      const st2 = await bq('/bericht/stand', { secret: GEH, id: idT });
+      toets('23 gezien op een ander apparaat telt niet als gezien_pixel', st.j.gezien_pixel === false && st2.j.gezien_pixel === false, JSON.stringify(st2.j));
+      await slaap(20);
+      r = await vraag('POST', '/app/gezien', { tab: 'machinekamer' }, { pot: P.jar });
+      st = await bq('/bericht/stand', { secret: GEH, id: idT });
+      toets('23 gezien op de Pixel (goedkeurder) -> gezien_pixel', r.status === 200 && st.j.gezien_pixel === true, JSON.stringify(st.j));
+      r = await vraag('POST', '/app/bericht/getikt', { ids: [idT, 'nietgeldig', 'ffffffffffffffff'] }, { pot: P.jar });
+      st = await bq('/bericht/stand', { secret: GEH, id: idT });
+      toets('23 /app/bericht/getikt -> getikt (onbekende en ongeldige ids genegeerd)', r.status === 200 && r.j.gezet === 1 && st.j.getikt === true, JSON.stringify([r.j, st.j]));
+      r = await vraag('POST', '/app/bericht/getikt', { ids: [] }, { pot: P.jar });
+      toets('23 getikt zonder ids -> 400', r.status === 400, JSON.stringify(r.j));
+
+      // dode-mansknop
+      fs.writeFileSync(path.join(DATA, 'nieuw-laatst.json'), JSON.stringify({ [pId]: Date.now() - 13 * 3600 * 1000 }));
+      H.appStaat.nieuwLaatst = null;
+      r = await bq('/bericht', B({ klasse: 'stil', tekst: 'stil bericht', bron: 'proef' }));
+      toets('23 niemand keek 12 u -> app_actief false', r.status === 200 && r.j.app_actief === false, JSON.stringify(r.j));
+      const idStil = r.j.id;
+      await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      r = await bq('/bericht/stand', { secret: GEH, id: idStil });
+      toets('23 na GET /app/nieuw -> app_actief true, en op schijf (een herstart verliest het niet)', r.j.app_actief === true && JSON.parse(fs.readFileSync(path.join(DATA, 'nieuw-laatst.json'), 'utf8'))[pId] > Date.now() - 60000, JSON.stringify(r.j));
+      toets('23 klasse stil: geen seintje, push klaar en overbodig', r.j.push_klaar === true && r.j.verstuurd === 0 && r.j.overbodig === true, JSON.stringify(r.j));
+
+      // bundeling: binnen 10 min (verkort) geen tweede seintje; aan het eind één voor beide
+      await slaap(BUNDEL23 + 50);
+      pushes.length = 0;
+      r = await bq('/bericht', B({ tekst: 'eerste' }));
+      const idB1 = r.j.id;
+      r = await bq('/bericht', B({ tekst: 'tweede' }));
+      const idB2 = r.j.id;
+      const rB3 = await bq('/bericht', B({ tekst: 'derde' }));
+      await slaap(100);
+      toets('23 bundel: eerste direct, tweede en derde uitgesteld; één seintje tot nu', r.j.push.gestart === false && !!r.j.uitgesteld && rB3.j.uitgesteld === r.j.uitgesteld && pushes.length === (ander ? 2 : 1), JSON.stringify([r.j, pushes.length]));
+      st = await bq('/bericht/stand', { secret: GEH, id: idB2 });
+      toets('23 stand uitgesteld: push_klaar false met uitgesteld_tot', st.j.push_klaar === false && !!st.j.uitgesteld_tot, JSON.stringify(st.j));
+      await slaap(BUNDEL23 + 200);
+      st = await bq('/bericht/stand', { secret: GEH, id: idB2 });
+      const st3 = await bq('/bericht/stand', { secret: GEH, id: rB3.j.id });
+      toets('23 einde bundel: één gebundeld seintje voor tweede en derde', pushes.length === (ander ? 4 : 2) && st.j.push_klaar === true && st.j.verstuurd === (ander ? 2 : 1) && st3.j.verstuurd === st.j.verstuurd, JSON.stringify([st.j, pushes.length]));
+      // einde bundel terwijl de Pixel al keek: geen seintje (overbodig)
+      await slaap(BUNDEL23 + 50);
+      r = await bq('/bericht', B({ tekst: 'vierde' })); await slaap(30);
+      r = await bq('/bericht', B({ tekst: 'vijfde' }));
+      const id5 = r.j.id;
+      await slaap(30);
+      await vraag('POST', '/app/gezien', { tab: 'machinekamer' }, { pot: P.jar });
+      const nP = pushes.length;
+      await slaap(BUNDEL23 + 200);
+      st = await bq('/bericht/stand', { secret: GEH, id: id5 });
+      toets('23 einde bundel en de Pixel zag het al: geen seintje, overbodig', pushes.length === nP && st.j.push_klaar === true && st.j.overbodig === true, JSON.stringify(st.j));
+
+      // stille uren machinekamer: seintje om 07:00; dringend direct; hoofdkanaal geen stille uren
+      await slaap(BUNDEL23 + 50);
+      toetsBUur = 3;
+      pushes.length = 0;
+      r = await bq('/bericht', B({ tekst: 'nachtrapport' }));
+      const idN = r.j.id;
+      const tot7 = Date.parse(r.j.uitgesteld);
+      const ams = new Date(tot7).toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' });
+      toets('23 machinekamer 03:00 normaal: in de app, seintje uitgesteld (tot ' + ams + ')', r.status === 200 && r.j.push.gestart === false && tot7 > Date.now() && pushes.length === 0, JSON.stringify(r.j));
+      r = await bq('/bericht', B({ klasse: 'dringend', bron: 'foutmelder', tekst: 'storing' }));
+      await slaap(80);
+      toets('23 machinekamer 03:00 dringend (storingsalarm): direct een seintje', r.j.push.gestart === true && pushes.length === (ander ? 2 : 1), JSON.stringify([r.j, pushes.length]));
+      r = await bq('/bericht', B({ kanaal: 'hoofd', bron: 'proef', tekst: 'hoofd 03:00' }));
+      await slaap(80);
+      toets('23 hoofdkanaal 03:00: geen stille uren', r.j.push.gestart === true || !!r.j.uitgesteld, JSON.stringify(r.j));
+      // na een herstart: wachtende berichten opnieuw gepland
+      const k23 = H.appStaat.berichtPush.machinekamer;
+      clearTimeout(k23.timer); H.appStaat.berichtPush = null;
+      H.berichtHerplan();
+      toets('23 na een herstart: het wachtende nachtbericht staat weer gepland', H.appStaat.berichtPush.machinekamer.wachtend.indexOf(idN) >= 0 && !!H.appStaat.berichtPush.machinekamer.timer, JSON.stringify(H.appStaat.berichtPush.machinekamer.wachtend));
+      toetsBUur = 7;
+      pushes.length = 0;
+      H.berichtBundelAf('machinekamer');
+      await slaap(80);
+      st = await bq('/bericht/stand', { secret: GEH, id: idN });
+      toets('23 om 07:00: één seintje voor de nacht', pushes.length === (ander ? 2 : 1) && st.j.push_klaar === true && st.j.verstuurd === (ander ? 2 : 1), JSON.stringify([pushes.length, pushes.map((x) => x.url)]));
+      toetsBUur = 12;
+      H.appStaat.berichtPush = null;
+
+      // geen seintje mogelijk: gewenst 0 (n8n valt dan terug)
+      fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify({ versie: 1, apparaten: {} }));
+      r = await bq('/bericht', B({ tekst: 'zonder seintjes' }));
+      toets('23 geen abonnementen -> push.gewenst 0', r.status === 200 && r.j.push.gewenst === 0, JSON.stringify(r.j));
+      fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pj));
+      // onschrijfbaar app-log -> 500, vraag weer weg
+      const lp23 = path.join(LOGDIR, 'machinekamer.jsonl');
+      fs.renameSync(lp23, lp23 + '.bewaar'); fs.mkdirSync(lp23);
+      const vragen0 = Object.keys(JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))).length;
+      r = await bq('/bericht', B({ tekst: 'x\n\nVRAAG AAN DAVID: Zal ik?', knoppen: true }));
+      fs.rmdirSync(lp23); fs.renameSync(lp23 + '.bewaar', lp23);
+      toets('23 app-log onschrijfbaar -> 500 terugval, geen losse vraag achtergelaten', r.status === 500 && r.j.terugval === true && Object.keys(JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))).length === vragen0, JSON.stringify(r.j));
+      r = await bq('/bericht/stand', { secret: GEH, id: 'ffffffffffffffff' });
+      toets('23 stand van een onbekend bericht -> 404', r.status === 404, JSON.stringify(r.j));
+      // meetlat: berichten van Socev apart, niet als Davids berichten
+      const dag23 = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+      const nd = H.appNaastDag ? (await H.appNaastDag(dag23, Date.now(), true)) : null;
+      toets('23 meetlat: van_socev per bron, niet bij berichten', nd && nd.app.machinekamer.van_socev >= 8 && nd.app.machinekamer.per_bron.agentrapport >= 5 && nd.app.machinekamer.per_bron.foutmelder === 1, JSON.stringify(nd && nd.app.machinekamer));
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('23 /app/nieuw telt berichten mee in de tab machinekamer', r.status === 200 && typeof r.j.tabs.machinekamer === 'number', JSON.stringify(r.j.tabs));
+      toets('23 /health appInfo noemt berichten', H.appInfo().berichten && typeof H.appInfo().berichten.laatste_48u === 'number', JSON.stringify(H.appInfo().berichten));
+      fs.writeFileSync(path.join(DATA, 'apparaten.json'), regOrig23);
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
