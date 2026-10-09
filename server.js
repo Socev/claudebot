@@ -55,7 +55,11 @@ const crypto = require('crypto');
 // (HOME=/opt/data is geërfd, niet gekozen). Fail-closed: valt productie hier op false, dan draait hij in een wegwerpmap;
 // /health toont het (server.echt, server.paden). Dezelfde toets als APP_ECHT in het app-blok (wv318), dat hem overneemt.
 // Bewust NIET omgeleid: VAULT_DIR en REPO_DIR (de werkruimte van de beurten zelf) en alleen-lezen statusbronnen
-// (SYNC_LOG, laatste-zelfherstel, /app/run.sh).
+// (SYNC_LOG, laatste-zelfherstel, /app/run.sh). Ook niet afgeschermd: wat een proef met de volle pod-env extern doet
+// (AGENT_WEBHOOK_URL, SUPABASE_*, N8N_WEBHOOK_*: alleen op verzoek, niet bij de start) en wat claude-kinderen met de
+// echte HOME schrijven (transcripten). En een kopie die vanuit de release-map zelf start (node /opt/data/app/current/
+// server.js) is wél echt: een extra ouder-toets zou productie een nieuwe manier geven om in de wegwerpmap te vallen
+// (Fable wv349 #1, bewust gelaten). De proefregel bij de start gaat via stdout ook naar het log van wie de proef start.
 const SERVER_ECHT = (function () {
   try { return !!process.env.RELEASE_DIR && fs.realpathSync(__dirname) === fs.realpathSync(process.env.RELEASE_DIR); }
   catch (e) { return false; }
@@ -2532,7 +2536,9 @@ function handleRequest(req, res) {
       // uitwijk stap 3: ok blijft true als de pod passief is (de supervisor-bootcheck leunt op ok; passief is geen defect)
       kant: ROL_KANT, rol: rol.rol, uitwijk: rolInfo(),
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
-      server: { echt: SERVER_ECHT, proefmap: SERVER_PROEF, paden: serverPaden },
+      // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
+      server: SERVER_ECHT ? { echt: true, paden: { home: serverPaden.home, io: serverPaden.io, jobout: serverPaden.jobout } }
+        : { echt: false, proefmap: SERVER_PROEF, paden: serverPaden },
       // versie = de release die NU draait (de mapnaam onder releases/, gezet door de
       // supervisor). image_versie = wat er in het image is gebakken. Verschillen de
       // twee, dan draait er uitgerolde code; zijn ze gelijk, dan draait de

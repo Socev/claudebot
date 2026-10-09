@@ -103,9 +103,20 @@ function lijst(map) {   // naam@mtime van elk item op het hoogste niveau (alleen
   try { return fs.readdirSync(map).sort().map((n) => { try { return n + '@' + fs.lstatSync(path.join(map, n)).mtimeMs; } catch (e) { return n + '@weg'; } }); }
   catch (e) { return ['(' + e.code + ')']; }
 }
-function verschil(voor, na) {   // nieuwe items mag productie maken; weg of gewijzigd telt
-  const n = new Set(na); return voor.filter((x) => !n.has(x));
+// Wat er tijdens de proef uit de echte map verdween. Nieuwe items en een gewijzigde mtime maakt productie zelf (lopende
+// jobs); een verdwenen item is alleen verdacht als productie die job niet kent (Fable wv349 #3: anders wisselvallig).
+function verdwenen(voor, na) {
+  const n = new Set(na.map((x) => x.replace(/@[^@]*$/, '')));
+  return voor.map((x) => x.replace(/@[^@]*$/, '')).filter((x) => !n.has(x));
 }
+function productieKent(naam) {
+  return new Promise((ok) => {
+    const r = http.get({ host: '127.0.0.1', port: 8080, path: '/agents', timeout: 3000 }, (res) => { let b = ''; res.on('data', (c) => b += c);
+      res.on('end', () => { try { ok(JSON.parse(b).agents.some((a) => naam.indexOf(a.job_id) === 0)); } catch (e) { ok(false); } }); });
+    r.on('error', () => ok(false)); r.on('timeout', () => { r.destroy(); ok(false); });
+  });
+}
+async function onverklaard(weg) { const uit = []; for (const x of weg) if (!(await productieKent(x))) uit.push(x); return uit; }
 function mt(f) { try { const st = fs.lstatSync(f); return st.size + '@' + st.mtimeMs; } catch (e) { return 'geen'; } }
 function rolRegel() { try { return (/^rol=.*$/m.exec(fs.readFileSync('/opt/data/bin/uitwijk-rol', 'utf8')) || [''])[0]; } catch (e) { return 'geen'; } }
 async function deelC() {
@@ -114,13 +125,15 @@ async function deelC() {
   const poortC = vrijePoort();
   const envC = Object.assign({}, process.env, { HOME: '/opt/data', API_SECRET: 'proef', PORT: String(poortC), LESSEN_INJECTIE: '0',
     RELEASE_DIR: process.env.RELEASE_DIR || '/opt/data/app/current' });
+  delete envC.TMPDIR;   // de proefmap moet in /tmp landen (PC hieronder)
   ['IO_DIR', 'JOBOUT_DIR', 'API_LOG', 'ROL_BESTAND', 'UITROL_MARKER', 'RUNTIME_FILE', 'CODEX_HOME', 'SLEUTELPORTAAL_SLEUTEL', 'AGY_MCP_TMP',
     'OFFSITE_INTERVAL_MIN', 'OFFSITE_SCRIPT', 'OFFSITE_BACKUP_LOG', 'AUTO_UIT_POD', 'AUTO_DIR', 'AUTO_CONFIG', 'AUTO_LOG',
     'TUNNEL_UIT_POD', 'TUNNEL_BIN', 'TUNNEL_LOG', 'TUNNEL_UIT_BESTAND',
     'APP_DATA_DIR', 'APP_LOG_DIR', 'APP_BESTANDEN_DIR', 'APP_UIT_BESTAND', 'TEL_UIT_BESTAND', 'APP_UPLOAD_DIR',
     'AGENT_WEBHOOK_URL', 'SOCEV_AGENT_RUN', 'CLOUDFLARE_TUNNEL_TOKEN_OLARES'].forEach((k) => delete envC[k]);
   Object.keys(envC).filter((k) => /TOKEN|KEY|SECRET|SERVICE_ROLE|SUPABASE|N8N_|TELEGRAM|WACHTWOORD|SLEUTEL|SESSIE|ANON/.test(k) && k !== 'API_SECRET').forEach((k) => delete envC[k]);
-  const echteBestanden = ['/opt/data/chat_sessions.json', '/opt/data/agent_jobs.json', '/opt/data/runtime.json', '/tmp/agy-mcp_config.json',
+  // Alleen bestanden die productie in bedrijf niet zelf herschrijft; chat_sessions.json en agent_jobs.json wel (die dekken C2, C3 en C6).
+  const echteBestanden = ['/opt/data/runtime.json', '/tmp/agy-mcp_config.json',
     '/opt/data/.gemini/GEMINI.md', '/opt/data/.gemini/config/skills.json', '/opt/data/.gemini/config/mcp_config.json'];
   const voorIo = lijst('/opt/data/io'), voorJob = lijst('/opt/data/joboutput'), voorB = echteBestanden.map(mt).join(' '), voorRol = rolRegel();
   // twee mappen van een dode proef: een uur oud (moet weg) en vers (blijft)
@@ -159,10 +172,14 @@ async function deelC() {
     toets('C8 niets in de echte api.log', echtApi.indexOf(PC) < 0);
     toets('C9 rolbestand in de wegwerpmap, het echte gelijk', fs.existsSync(PC + '/home/bin/uitwijk-rol') && rolRegel() === voorRol, voorRol + ' -> ' + rolRegel());
     const naB = echteBestanden.map(mt).join(' ');
-    toets('C10 echte sessies, agents, runtime, agy-mcp en ~/.gemini onaangeroerd', naB === voorB, voorB + ' -> ' + naB);
-    const wegIo = verschil(voorIo, lijst('/opt/data/io')), wegJob = verschil(voorJob, lijst('/opt/data/joboutput'));
-    toets('C11 /opt/data/io: niets weg of gewijzigd (' + voorIo.length + ' items)', wegIo.length === 0, wegIo.join(' '));
-    toets('C12 /opt/data/joboutput: niets weg of gewijzigd (' + voorJob.length + ' items)', wegJob.length === 0, wegJob.join(' '));
+    toets('C10 echte runtime, agy-mcp en ~/.gemini onaangeroerd', naB === voorB, voorB + ' -> ' + naB);
+    const wegIo = verdwenen(voorIo, lijst('/opt/data/io')), wegJob = verdwenen(voorJob, lijst('/opt/data/joboutput'));
+    const raarIo = await onverklaard(wegIo), raarJob = await onverklaard(wegJob);
+    toets('C11 /opt/data/io: niets verdwenen buiten productie om (' + voorIo.length + ' items)', raarIo.length === 0,
+      (raarIo.join(' ') || '') + (wegIo.length ? ' | door productie: ' + wegIo.join(' ') : ''));
+    toets('C12 /opt/data/joboutput: niets verdwenen buiten productie om (' + voorJob.length + ' items)', raarJob.length === 0,
+      (raarJob.join(' ') || '') + (wegJob.length ? ' | door productie: ' + wegJob.join(' ') : ''));
+    toets('C13 de proef noemt de echte io/joboutput nergens in zijn log', !/\/opt\/data\/(io|joboutput)\b/.test(api));
   } finally {
     try { process.kill(-pc.pid, 'SIGKILL'); } catch (e) {}
     await slaap(300);
