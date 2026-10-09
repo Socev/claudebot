@@ -3540,8 +3540,10 @@ async function bewijs(o) {
       const na = await H.appNaastDag(dag24, Date.now(), true);
       toets('24 meetlat: Telegram-beurten apart (telegram), niet bij Davids app-berichten', na.app.hoofd.telegram === voor.app.hoofd.telegram + 2 && na.app.hoofd.berichten === voor.app.hoofd.berichten
         && na.app.hoofd.fout === voor.app.hoofd.fout, JSON.stringify([voor.app.hoofd, na.app.hoofd]));
-      toets('24 server.js: /run geeft de spiegel niet terug aan de wachtrij en vangt een fout af', /processJob\(jobId, prompt, d\.session_id, d\.files, chatId, ws, keuze, gereedschap\)\.then\(function \(\) \{\n\s*if \(spiegel\) \{ try \{ appTelegramSpiegel\(jobId, prompt, d\.files\)\.catch\(/.test(src)
-        && /const spiegel = d\.bron === 'telegram';/.test(src), '');
+      r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      const r2 = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('24 /app/nieuw: Telegram-beurten tellen niet in de tab (geen badge), wel als jongste tijdstip in telegram', r2.status === 200 && r2.j.telegram && r2.j.telegram.hoofd === nu24
+        && !(r2.j.tabs.hoofd > 0 && r2.j.laatst.hoofd === nu24), JSON.stringify([r2.j.tabs.hoofd, r2.j.laatst.hoofd, r2.j.telegram]));
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──

@@ -4570,8 +4570,7 @@ async function appNaBeurt(jobId) {
 // Telegram*) ook in het app-log, zodat het gesprek in de app compleet is. Na afloop, asynchroon en fail-open (een schrijffout raakt
 // de Telegram-beurt nooit); geen seintje, geen vraag in vragen.json (de knoppen staan in Telegram), geen chat_log (dat doet n8n al).
 // Alleen hoofdkanaal en machinekamer in de vault-werkmap, nooit 'lezen', niet bij de noodstop. Van de machinekamer alleen Davids deel van de prompt.
-const APP_SPIEGEL_KANAAL = { '40687': 'hoofd', 'telegram-debug': 'machinekamer' };
-const APP_SPIEGEL_MAX = 20000;
+const APP_SPIEGEL_MAX = 20000, APP_SPIEGEL_ANTWOORD_MAX = 60000;   // antwoord: zelfde grens als /bericht (Fable § 8 #9)
 function appSpiegelTekst(kanaal, prompt) {
   let t = String(prompt || '');
   const m = '\nDe vraag van David:\n', i = t.indexOf(m);
@@ -4581,12 +4580,14 @@ function appSpiegelTekst(kanaal, prompt) {
 async function appTelegramSpiegel(jobId, prompt, files) {
   const j = jobs[jobId];
   if (!j || j.bron !== 'telegram' || j.app || j.gereedschap || j.workspace !== DEFAULT_WS) return false;   // GHAWA/Jimmy: eigen werkmap, nooit hier
-  const kanaal = APP_SPIEGEL_KANAAL[j.chat_id];
-  if (!kanaal || fs.existsSync(APP_UIT)) return false;
+  const kanaal = APP_KANAAL_VAN_CHAT[j.chat_id];
+  if (APP_KNOP_KANALEN[kanaal] !== true || fs.existsSync(APP_UIT)) return false;   // hoofd en machinekamer (Fable wv277 #7)
   const r = j.result || {};
+  let antwoord = appUitvoer(j);
+  if (antwoord.length > APP_SPIEGEL_ANTWOORD_MAX) antwoord = antwoord.slice(0, APP_SPIEGEL_ANTWOORD_MAX) + ' …';
   return appLogSchrijf(kanaal, { t: new Date(j.done_at || Date.now()).toISOString(), job_id: jobId, soort: 'telegram', tekst: appSpiegelTekst(kanaal, prompt),
     invoer: Array.isArray(files) && files.length ? files.map(function (f) { return f && String(f.name || '').slice(0, 200); }).filter(Boolean) : undefined,
-    antwoord: appUitvoer(j), ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
+    antwoord: antwoord, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
     bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
 }
 
@@ -4992,7 +4993,7 @@ async function appKnop(req, res, reg, a, s, d) {
 // Kanaal in het pad (/app/geschiedenis/<kanaal>): het doorgeefluik geeft alleen het pad door, geen querystring.
 async function appGeschiedenis(req, res, reg, a, kanaal) {
   if (!APP_KANALEN[kanaal]) return appWeiger(res, 400, 'onbekend kanaal', 'kanaal');
-  const max = 100;
+  const max = 300;   // wv277: Telegram-beurten delen het plafond (± 20-60 per dag in de machinekamer; Fable wv277 #3)
   const lopend = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); })
     .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, invoer: j.app.invoer || [], sinds: new Date(j.created).toISOString() }; });
   let items = [], fout = null;
@@ -5761,13 +5762,16 @@ const APP_SEINTJE_TAB_MS = 24 * 3600 * 1000;
 const APP_NIEUW_MELD_MS = 5 * 60 * 1000;   // meldingen voor de teller hooguit zo oud (de n8n-API niet elke minuut per apparaat)
 function appBusMaxNr() { try { return appBusLees().ideeen.reduce(function (m, i) { return Math.max(m, Number(i.nr) || 0); }, 0); } catch (e) { return null; } }
 // Alleen de tijden uit het app-log, bewaard op mtime + grootte: niet elke minuut per apparaat 30 dagen tekst parsen (review #5).
-async function appLogTijden(kanaal) {
+// wv277: Telegram-beurten (soort telegram) apart: David zag ze al in Telegram, dus geen teller of app-badge; alleen het jongste
+// tijdstip, zodat een open gesprek herlaadt (Fable wv277 #2). telegram=true geeft die tijden.
+async function appLogTijden(kanaal, telegram) {
   const st = await fs.promises.stat(appLogPad(kanaal));
   const c = (appStaat.logTijden = appStaat.logTijden || {})[kanaal];
-  if (c && c.mtime === st.mtimeMs && c.size === st.size) return c.t;
-  const t = (await appLogLees(kanaal)).map(function (x) { return Date.parse(x.t); });
-  appStaat.logTijden[kanaal] = { mtime: st.mtimeMs, size: st.size, t: t };
-  return t;
+  if (c && c.mtime === st.mtimeMs && c.size === st.size) return telegram ? c.tg : c.t;
+  const t = [], tg = [];
+  (await appLogLees(kanaal)).forEach(function (x) { (x.soort === 'telegram' ? tg : t).push(Date.parse(x.t)); });
+  appStaat.logTijden[kanaal] = { mtime: st.mtimeMs, size: st.size, t: t, tg: tg };
+  return telegram ? tg : t;
 }
 // Tijdstippen waarop er per tab iets nieuws kwam (jongste eerst niet nodig); null = bron nu niet leesbaar.
 async function appNieuwBronnen() {
@@ -5836,7 +5840,12 @@ async function appNieuwRoute(req, res, a) {
   } else { tabs.meldingen = 0; fouten.push('meldingen'); }
   const gezien = {};
   APP_NIEUW_TABS.forEach(function (t) { if (t !== 'broedstoof' && g[t]) gezien[t] = g[t]; });
-  appStuur(res, 200, { ok: true, nu: new Date(nu).toISOString(), tabs: tabs, laatst: laatst, gezien: gezien, seintje: appSeintjeTab(a.id), fouten: fouten });
+  // wv277: jongste Telegram-beurt per gesprek (telt niet in tabs; de app herlaadt het gesprek als dit verandert)
+  const telegram = {};
+  for (const k of ['hoofd', 'machinekamer']) {
+    try { const x = await appLogTijden(k, true); if (x.length) telegram[k] = new Date(Math.max.apply(null, x)).toISOString(); } catch (e) {}
+  }
+  appStuur(res, 200, { ok: true, nu: new Date(nu).toISOString(), tabs: tabs, laatst: laatst, gezien: gezien, seintje: appSeintjeTab(a.id), fouten: fouten, telegram: telegram });
 }
 // De tab die open is (of net verlaten werd) als gezien zetten: tot nu, of tot een meegegeven tijdstip (nooit terug).
 function appNieuwGezien(req, res, a, d) {

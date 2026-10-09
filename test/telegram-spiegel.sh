@@ -26,7 +26,9 @@ fs.mkdirSync(proj, { recursive: true });
 fs.writeFileSync(path.join(proj, sid + '.jsonl'), '{}\\n');
 if (process.env.OUTDIR && /BESTAND/.test(prompt)) fs.writeFileSync(path.join(process.env.OUTDIR, 'notitie-' + sleutel + '.md'), '# proef');
 const vraag = /VRAAG/.test(prompt) ? '\\n\\nVRAAG AAN DAVID: Zal ik dit vastleggen?' : '';
-process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: 'KLAAR ' + sleutel + vraag, session_id: sid }));
+if (/MISLUKT/.test(prompt)) { process.stdout.write(JSON.stringify({ type: 'result', is_error: true, result: 'brein kapot ' + sleutel, session_id: sid })); process.exit(1); }
+const lang = /LANG/.test(prompt) ? 'y'.repeat(300 * 1024) : '';
+process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: 'KLAAR ' + sleutel + vraag + lang, session_id: sid }));
 `, { mode: 0o755 });
 
 const d = path.join(W, 'srv');
@@ -57,6 +59,16 @@ const van = (k, id) => regels(k).filter((x) => x.job_id === id);
 const run = (extra) => req('POST', '/run', Object.assign({ secret: 'proef', workspace: 'vault' }, extra));
 async function beurt(extra) { const r = await run(extra); const u = r.job_id ? await resultaat(r.job_id) : null; await slaap(300); return { r, u, id: r.job_id }; }
 const OMLIJST = '[MACHINEKAMER] Dit bericht komt via het debug-kanaal. Lees de box.\n\nDe vraag van David:';
+// De echte omlijsting uit n8n "Claude Debug via Telegram" > Prompt bouwen (nachtelijke back-up), zodat een gewijzigde omlijsting
+// hier rood wordt in plaats van als instructietekst in Davids bel te belanden (Fable wv277 #4).
+let OMLIJST_ECHT = null;
+try {
+  const wf = JSON.parse(fs.readFileSync('/opt/data/n8n-backup-repo/workflows/nDj2qyAC5hJL5eUU.json', 'utf8'));
+  const pb = wf.nodes.find((n) => n.name === 'Prompt bouwen');
+  const m = /const omlijst = ("(?:[^"\\]|\\.)*");/.exec(pb.parameters.jsCode);
+  OMLIJST_ECHT = JSON.parse(m[1]);
+  if (!/body: \{ chat_id: 'telegram-debug', prompt: omlijst \+ '\\n' \+ tekst \}/.test(pb.parameters.jsCode)) OMLIJST_ECHT = 'VORM-ANDERS';
+} catch (e) { OMLIJST_ECHT = null; }
 
 (async () => {
   try {
@@ -89,6 +101,13 @@ const OMLIJST = '[MACHINEKAMER] Dit bericht komt via het debug-kanaal. Lees de b
     l = van('machinekamer', b.id);
     toets('C machinekamer zonder omlijsting: tekst ongewijzigd', l.length === 1 && l[0].tekst === 'SLEUTEL:c2 zonder omlijsting', JSON.stringify(l));
 
+    toets('C echte omlijsting uit de n8n-back-up gevonden, zelfde vorm (omlijst + "\\n" + tekst)', typeof OMLIJST_ECHT === 'string' && OMLIJST_ECHT !== 'VORM-ANDERS' && /^\[MACHINEKAMER\]/.test(OMLIJST_ECHT), String(OMLIJST_ECHT).slice(0, 80));
+    if (typeof OMLIJST_ECHT === 'string') {
+      b = await beurt({ chat_id: 'telegram-debug', bron: 'telegram', prompt: OMLIJST_ECHT + '\n' + 'SLEUTEL:c3 echte omlijsting' });
+      l = van('machinekamer', b.id);
+      toets('C echte omlijsting: alleen Davids tekst in de app', l.length === 1 && l[0].tekst === 'SLEUTEL:c3 echte omlijsting', JSON.stringify(l).slice(0, 200));
+    }
+
     // D. andere gesprekken en gereedschap lezen: niets
     b = await beurt({ chat_id: 'cijfer-meester', bron: 'telegram', prompt: 'SLEUTEL:d1 cijfers' });
     toets('D cijfer-meester met bron telegram: geen regel', b.u && b.u.done && regels('cijfer-meester').length === 0 && van('hoofd', b.id).length === 0);
@@ -120,6 +139,15 @@ const OMLIJST = '[MACHINEKAMER] Dit bericht komt via het debug-kanaal. Lees de b
     toets('F schrijffout gelogd (app-log), niet stil', /app-log/.test(stdout), stdout.slice(-400));
     b = await beurt({ chat_id: '40687', bron: 'telegram', prompt: 'SLEUTEL:f3 log weer goed' });
     toets('F na herstel weer een regel', van('hoofd', b.id).length === 1);
+
+    // H. mislukte beurt en een lang (gespild) antwoord
+    b = await beurt({ chat_id: '40687', bron: 'telegram', prompt: 'SLEUTEL:h1 MISLUKT' });
+    l = van('hoofd', b.id);
+    toets('H mislukte beurt: regel met ok false en fout', l.length === 1 && l[0].ok === false && typeof l[0].fout === 'string' && l[0].fout.length > 0, JSON.stringify(l).slice(0, 300));
+    b = await beurt({ chat_id: '40687', bron: 'telegram', prompt: 'SLEUTEL:h2 LANG' });
+    l = van('hoofd', b.id);
+    toets('H antwoord > 256 KB (op schijf gespild): gelezen en op 60.000 tekens geknipt', l.length === 1 && /^KLAAR h2y/.test(l[0].antwoord) && l[0].antwoord.length === 60002 && / …$/.test(l[0].antwoord), l[0] && l[0].antwoord.length);
+    toets('H Telegram kreeg het hele antwoord', b.u && ((b.u.output || '').length > 300000 || b.u.output_file || b.u.output_bytes > 300000), JSON.stringify(Object.keys(b.u || {})));
 
     // G. api-log noemt de bron (voor de nameting), niet de inhoud
     const api = fs.existsSync(path.join(d, 'api.log')) ? fs.readFileSync(path.join(d, 'api.log'), 'utf8') : '';
