@@ -8102,8 +8102,10 @@ function telOpruim() {
 }
 function telBezig(apparaat) { return telRij().some(function (x) { return x.apparaat === apparaat && x.soort === 'bezig'; }) ? 'ja' : 'nee'; }
 function telVolgende(apparaat) {
-  const nu = Date.now();
-  return telRij().find(function (x) { return x.apparaat === apparaat && x.soort !== 'bezig' && !x.gespeeld && nu < x.tot && !(x.lease_tot > nu); }) || null;
+  const nu = Date.now(), rij = telRij();
+  // Nooit twee tegelijk (Fable-review diff #1): zolang een uitgegeven item nog speelt (lease loopt, niet gespeeld), wacht de rest.
+  if (rij.some(function (x) { return x.apparaat === apparaat && x.soort !== 'bezig' && !x.gespeeld && nu < x.tot && x.lease_tot > nu; })) return null;
+  return rij.find(function (x) { return x.apparaat === apparaat && x.soort !== 'bezig' && !x.gespeeld && nu < x.tot; }) || null;
 }
 // Wat hardop gaat: alles tot een regel "Verder in de app:" (of "Verder in Telegram:"), zonder de VRAAG AAN DAVID-regel
 // (daarvoor één zin aan het eind), met de regels van Voorlezen in de app. Deterministisch, geen model.
@@ -8265,6 +8267,8 @@ function telKlein(req, cb) {
 }
 function telKoppel(req, res) {
   if (!telIngericht()) { req.resume(); return telWeiger(res, 503, 'niet ingericht', 'niet ingericht'); }
+  // Zonder open code: kale 401 zonder de teller te verbruiken (anders blokkeren 10 kale verzoeken Davids koppelen een uur; Fable #5)
+  if (!telStaat.code || Date.now() > telStaat.code.tot) { telStaat.code = null; req.resume(); return telWeiger(res, 401, 'geen geldige koppelcode; maak een nieuwe in de app', 'geen code'); }
   if (!appTeller('tel-koppel', TEL_KOPPEL_PER_UUR, 3600000)) { req.resume(); return telWeiger(res, 429, 'te veel pogingen dit uur', 'grens koppel'); }
   telKlein(req, function (fout, tekst) {
     if (fout) return telWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
@@ -8370,8 +8374,8 @@ function telUitRoute(req, res, t) {
   if (!Number.isInteger(w) || w < 0 || w > TEL_WACHT_MAX_S) return telWeiger(res, 400, 'wacht moet 0 tot ' + TEL_WACHT_MAX_S + ' zijn', 'wacht');
   res._tel.stil = true;   // de hartslag (± 1 per minuut) niet in het auditlog; alleen weigeringen
   telStaat.hartslag[t.id] = Date.now();
+  telAntwoordPoll(t.id, { ok: true, bezig: telBezig(t.id), reden: 'vervangen' });   // één open lange vraag per apparaat (vóór het opruimen: Fable #3)
   telOpruim();
-  telAntwoordPoll(t.id, { ok: true, bezig: telBezig(t.id), reden: 'vervangen' });   // één open lange vraag per apparaat
   const x = telVolgende(t.id);
   if (x) { res._tel.stil = false; res._tel.reden = 'item ' + x.soort; return telStuur(res, 200, telUitgifte(x)); }
   if (!w || telStaat.gestopt) return telStuur(res, 200, { ok: true, bezig: telBezig(t.id) });
@@ -8409,6 +8413,7 @@ async function telDeel(req, res, t, id, n) {
 function telGespeeld(req, res, t, id) {
   const x = telRij().find(function (y) { return y.id === id && y.apparaat === t.id; });
   if (!x) return telWeiger(res, 404, 'onbekend', 'onbekend item');
+  if (x.soort === 'bezig') return telWeiger(res, 409, 'nog niet klaar', 'gespeeld op een lopende beurt');   // Fable #4
   const al = !!x.gespeeld;
   if (!al) { x.gespeeld = new Date().toISOString(); telRijBewaar(); }
   delete telStaat.audio[x.id];
@@ -8452,7 +8457,7 @@ function telIntrekken(door) {
     if (uit.ingetrokken) appSchrijfJson(TEL_REGISTER, reg);
   } catch (e) { uit.fout = String(e && e.message || e).slice(0, 80); }
   uit.items = telRij().length;
-  telStaat.rij = []; telStaat.audio = {}; telStaat.delen = {}; telRijBewaar();
+  telStaat.rij = []; telStaat.audio = {}; telStaat.delen = {}; telStaat.hartslag = {}; telRijBewaar();   // hartslag: Fable #6
   return uit;
 }
 function telAppOntkoppel(req, res, a) {

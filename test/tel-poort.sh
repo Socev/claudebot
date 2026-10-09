@@ -206,7 +206,13 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('1 oude sleutel na opnieuw koppelen: 401', r.status === 401, r.j);
     let k429 = null;
     for (let i = 0; i < 25 && !k429; i++) { const x = await verzoek('POST', '/tel/koppel', {}, '99999999'); if (x.status === 429) k429 = x; }
-    toets('1 grens koppelpogingen per uur: 429', !!k429 && /te veel/.test(k429.j.fout), k429);
+    toets('1 zonder open code verbruiken kale pogingen de grens niet (Fable #5)', !k429, k429);
+    sP = sessie(PIXEL, 'credP', true);
+    await app('POST', '/app/tel/koppelcode', {}, { apparaat: PIXEL, sessie: sP });
+    for (let i = 0; i < 20; i++) H.appStaat.tellers['tel-koppel'].push(Date.now());
+    k429 = await verzoek('POST', '/tel/koppel', {}, '99999999');
+    toets('1 grens koppelpogingen per uur (met open code): 429', k429.status === 429 && /te veel/.test(k429.j.fout), k429);
+    H.appStaat.tellers['tel-koppel'] = []; H.telStaat.code = null;
 
     // ── 2. buitendeur en binnendeur ──
     r = await tel('GET', '/tel/uit', { jwt: false });
@@ -252,6 +258,8 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('3 auditlog zonder inhoud (transcript niet in tel-audit)', !audit().includes('Hoi Socev') && /"s":4/.test(audit()), audit().slice(-400));
     r = await tel('GET', '/tel/uit');
     toets('3 uit tijdens de beurt: bezig ja', r.j.bezig === 'ja' && !r.j.id, r.j);
+    r = await tel('POST', '/tel/gespeeld/' + id1);
+    toets('3 gespeeld op een lopende beurt: 409 (Fable #4)', r.status === 409, r);
     // grenzen
     r = await tel('POST', '/tel/beurt', { ct: 'audio/mp4', body: 'x', lengte: 5 * 1024 * 1024 + 1 });
     toets('3 te groot (Content-Length > 5 MB): 413', r.status === 413, r.j);
@@ -341,7 +349,19 @@ srv.listen(0, '127.0.0.1', async () => {
     x3.tot = Date.now() - 1;
     r = await tel('GET', '/tel/uit');
     toets('4 houdbaarheid (20 min) voorbij: niet meer voorgelezen', !r.j.id && r.j.bezig === 'nee', r.j);
-    // te veel per uur (grens 12 in de toets; 4 + 2 geweigerde door lopend tellen niet... wel: elke geaccepteerde aanvraag)
+    // nooit twee tegelijk (Fable #1): B wacht tot A gespeeld is
+    const rA = await tel('POST', '/tel/beurt', { ct: 'text/plain', body: 'vraag A' }); await tik(); afmaken[rA.j.id]('Antwoord A.'); await tik();
+    const rB = await tel('POST', '/tel/beurt', { ct: 'text/plain', body: 'vraag B' }); await tik(); afmaken[rB.j.id]('Antwoord B.'); await tik();
+    r = await tel('GET', '/tel/uit');
+    toets('4 twee antwoorden klaar: eerst A', r.j.id === rA.j.id, r.j);
+    const pB = tel('GET', '/tel/uit?wacht=2');
+    r = await pB;
+    toets('4 zolang A speelt (lease) komt B niet, ook niet via de lange vraag', !r.j.id, r.j);
+    await tel('POST', '/tel/gespeeld/' + rA.j.id);
+    r = await tel('GET', '/tel/uit');
+    toets('4 na gespeeld van A: B', r.j.id === rB.j.id, r.j);
+    await tel('POST', '/tel/gespeeld/' + rB.j.id);
+    // te veel per uur (grens 12 in de toets; elke aanvraag die de sessie- en lopend-controle passeert, telt)
     let laatst = null;
     for (let i = 0; i < 14; i++) {
       laatst = await tel('POST', '/tel/beurt', { ct: 'text/plain', body: 'vraag ' + i });
@@ -410,8 +430,11 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('6 na afsluiten: geen nieuwe lange vraag meer open', r.status === 200 && !r.j.id);
     H = laad();
     sP = sessie(PIXEL, 'credP', false);
+    await tel('GET', '/tel/uit');
+    toets('6 hartslag gezet vóór ontkoppelen', Object.keys(H.telStaat.hartslag).length === 1);
     r = await app('POST', '/app/tel/ontkoppel', {}, { apparaat: PIXEL, sessie: sP });
     toets('6 ontkoppelen in de app: 200 en Telegram-melding', r.status === 200 && r.j.ingetrokken === 1 && st.telegram.some((t) => /ontkoppeld/.test(t)), r.j);
+    toets('6 ontkoppelen wist de hartslag (Fable #6)', Object.keys(H.telStaat.hartslag).length === 0, H.telStaat.hartslag);
     r = await tel('GET', '/tel/uit');
     toets('6 na ontkoppelen: 401', r.status === 401);
     toets('6 /health-info zegt niet gekoppeld', H.appInfo().tel && H.appInfo().tel.gekoppeld === false && H.appInfo().tel.ingericht === true, H.appInfo().tel);
