@@ -259,6 +259,16 @@ async function nepFetch(url, opt) {
       }
       return antw(404, {});
     }
+    if (fn === 'sb_verbeterlog_toevoegen') {   // wv304: nagebootst zoals de echte RPC (secret, upsert per referentie bij soort reactie)
+      const q = b.p || {};
+      if (q.secret !== 'nep-vbl') return antw(200, { ok: false, fout: 'secret' });
+      if (sbStaat.vblWeiger) return antw(200, { ok: false, fout: sbStaat.vblWeiger });
+      const vl = sbStaat.verbeterlog = sbStaat.verbeterlog || [];
+      let rij = q.soort === 'reactie' ? vl.find((x) => x.soort === 'reactie' && x.referentie === q.referentie) : null;
+      if (rij) Object.assign(rij, { signaal: q.signaal, context: q.context, verwerkt: false, n: rij.n + 1 });
+      else { rij = { id: vl.length + 1, bron: q.bron, soort: q.soort, outputsoort: q.outputsoort, referentie: q.referentie, signaal: q.signaal, context: q.context, verwerkt: false, n: 1 }; vl.push(rij); }
+      return antw(200, { ok: true, id: rij.id });
+    }
     if (fn === 'mk_app_verbruik') return antw(200, sbStaat.verbruik || { nu: new Date().toISOString(), laatste: null, reeks: [] });
     if (fn === 'sb_app_vapid_lezen') return sbStaat.geenVapid ? antw(200, null) : antw(200, VAPID_W);
     if (fn === 'mk_werkvoorraad_stand') return antw(200, { items: sbStaat.wvItems || [], stand: { aan: true }, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' } });
@@ -285,7 +295,7 @@ const rolStub = { eerste: 1, primair: true };
 // wv231: als functie, zodat de herstarttoets het blok in een tweede, verse context kan laden (zelfde opslag)
 const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, console, URL, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
-    APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
+    APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', N8N_WEBHOOK_VERBETERLOG: 'nep-vbl', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
     N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
   VAULT: VAULT_T,
@@ -3411,6 +3421,87 @@ async function bewijs(o) {
       toets('23 /app/bericht/getikt -> getikt (onbekende en ongeldige ids genegeerd)', r.status === 200 && r.j.gezet === 1 && st.j.getikt === true, JSON.stringify([r.j, st.j]));
       r = await vraag('POST', '/app/bericht/getikt', { ids: [] }, { pot: P.jar });
       toets('23 getikt zonder ids -> 400', r.status === 400, JSON.stringify(r.j));
+
+      // ── 23b. wv304: duimpjes (POST /app/reactie) -> verbeterlog via sb_verbeterlog_toevoegen ──
+      {
+        const vbl = () => (sbStaat.verbeterlog || []).filter((x) => x.soort === 'reactie');
+        const nRpc = () => sbRpc.filter((x) => x.fn === 'sb_verbeterlog_toevoegen').length;
+        const R = (x) => Object.assign({ kanaal: 'machinekamer', job_id: idT, duim: 'up' }, x || {});
+        const zonderSessie = { apparaat: P.jar.apparaat };
+        r = await vraag('POST', '/app/reactie', R(), { pot: zonderSessie });
+        toets('23b reactie zonder sessie -> 401', r.status === 401 && nRpc() === 0, JSON.stringify(r.j));
+        r = await vraag('POST', '/app/reactie', R({ duim: 'hart' }), { pot: P.jar });
+        toets('23b reactie met onbekende duim -> 400', r.status === 400, JSON.stringify(r.j));
+        r = await vraag('POST', '/app/reactie', R({ job_id: 'nietgeldig' }), { pot: P.jar });
+        toets('23b reactie met ongeldig id -> 400', r.status === 400, JSON.stringify(r.j));
+        r = await vraag('POST', '/app/reactie', R({ kanaal: 'onbekend' }), { pot: P.jar });
+        toets('23b reactie in onbekend kanaal -> 400', r.status === 400, JSON.stringify(r.j));
+        r = await vraag('POST', '/app/reactie', R({ job_id: 'ffffffffffffffff' }), { pot: P.jar });
+        toets('23b reactie op onbekend bericht -> 404, geen databank', r.status === 404 && nRpc() === 0, JSON.stringify(r.j));
+        r = await vraag('POST', '/app/reactie', R({ kanaal: 'hoofd' }), { pot: P.jar });
+        toets('23b reactie op een bericht uit een ander kanaal -> 404', r.status === 404 && nRpc() === 0, JSON.stringify(r.j));
+        r = await vraag('POST', '/app/reactie', R(), { pot: P.jar });
+        let rij = vbl()[0];
+        toets('23b 👍 -> 200, één reactierij met de juiste koppeling', r.status === 200 && r.j.duim === 'up' && vbl().length === 1 && rij.referentie === 'app:machinekamer:' + idT && rij.signaal === '👍' && rij.bron === 'app-reactie' && rij.outputsoort === 'machinekamer/agentrapport', JSON.stringify([r.j, vbl()]));
+        toets('23b geen berichtinhoud in de verbeterlog (context alleen kanaal/soort/tijd)', !/verder bouwen|VRAAG/.test(JSON.stringify(rij)) && /^kanaal machinekamer; agentrapport; bericht 20/.test(rij.context), rij.context);
+        toets('23b databank met de service-sleutel en het verbeterlog-geheim', sbRpc.filter((x) => x.fn === 'sb_verbeterlog_toevoegen').every((x) => x.sleutel === 'nep-sleutel' && x.b.p.secret === 'nep-vbl'));
+        const n1 = nRpc();
+        r = await vraag('POST', '/app/reactie', R(), { pot: P.jar });
+        toets('23b dubbele tik 👍 -> 200 ongewijzigd, geen tweede aanroep, één rij', r.status === 200 && r.j.ongewijzigd === true && nRpc() === n1 && vbl().length === 1, JSON.stringify(r.j));
+        r = await vraag('POST', '/app/reactie', R({ duim: 'down' }), { pot: P.jar });
+        toets('23b 👎 daarna -> dezelfde rij bijgewerkt', r.status === 200 && r.j.duim === 'down' && vbl().length === 1 && vbl()[0].signaal === '👎' && vbl()[0].n === 2, JSON.stringify(vbl()));
+        r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+        let gR = (r.j.items || []).find((x) => x.job_id === idT);
+        toets('23b geschiedenis: reacties true en reactie down bij het bericht, null bij een ander', r.j.reacties === true && gR && gR.reactie === 'down' && (r.j.items || []).filter((x) => x.reactie).length === 1, JSON.stringify([r.j.reacties, gR && gR.reactie]));
+        r = await vraag('POST', '/app/reactie', R({ duim: 'weg' }), { pot: P.jar });
+        toets('23b intrekken -> 200, rij blijft één, signaal ingetrokken, verwerkt false', r.status === 200 && r.j.duim === null && vbl().length === 1 && vbl()[0].signaal === 'ingetrokken' && vbl()[0].verwerkt === false, JSON.stringify(vbl()));
+        r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+        gR = (r.j.items || []).find((x) => x.job_id === idT);
+        toets('23b na intrekken: geschiedenis reactie null', gR && gR.reactie === null, JSON.stringify(gR && gR.reactie));
+        const n2 = nRpc();
+        r = await vraag('POST', '/app/reactie', R({ duim: 'weg' }), { pot: P.jar });
+        toets('23b nogmaals intrekken -> ongewijzigd, geen aanroep', r.status === 200 && r.j.ongewijzigd === true && nRpc() === n2, JSON.stringify(r.j));
+        // "via Telegram"-beurt in het hoofdkanaal (spiegel, soort telegram)
+        const idTg = crypto.randomBytes(8).toString('hex');
+        fs.appendFileSync(path.join(LOGDIR, 'hoofd.jsonl'), JSON.stringify({ t: new Date().toISOString(), job_id: idTg, soort: 'telegram', tekst: 'hoi', antwoord: 'Antwoord via Telegram.', ok: true, bestanden: [] }) + '\n');
+        r = await vraag('POST', '/app/reactie', { kanaal: 'hoofd', job_id: idTg, duim: 'up' }, { pot: P.jar });
+        toets('23b 👍 op een "via Telegram"-beurt -> eigen rij, outputsoort hoofd/telegram', r.status === 200 && vbl().length === 2 && vbl()[1].referentie === 'app:hoofd:' + idTg && vbl()[1].outputsoort === 'hoofd/telegram', JSON.stringify(vbl()[1]));
+        // mislukte beurt (ok false) heeft geen Socev-antwoord om te beoordelen
+        const idF = crypto.randomBytes(8).toString('hex');
+        fs.appendFileSync(path.join(LOGDIR, 'hoofd.jsonl'), JSON.stringify({ t: new Date().toISOString(), job_id: idF, soort: 'bericht', tekst: 'x', antwoord: '', ok: false, fout: 'kapot', bestanden: [] }) + '\n');
+        r = await vraag('POST', '/app/reactie', { kanaal: 'hoofd', job_id: idF, duim: 'down' }, { pot: P.jar });
+        toets('23b reactie op een mislukte beurt zonder antwoord -> 404', r.status === 404, JSON.stringify(r.j));
+        // databank weg of weigert: 502, lokale stand blijft
+        sbStaat.kapot = true;
+        r = await vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar });
+        sbStaat.kapot = false;
+        const lok = JSON.parse(fs.readFileSync(path.join(DATA, 'reacties.json'), 'utf8'));
+        toets('23b databank kapot -> 502, lokale stand niet gezet', r.status === 502 && !lok['machinekamer:' + idT], JSON.stringify([r.j, lok]));
+        sbStaat.vblWeiger = 'secret';
+        r = await vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar });
+        sbStaat.vblWeiger = null;
+        toets('23b RPC weigert (ok false) -> 502', r.status === 502 && /weigerde/.test(r.j.fout), JSON.stringify(r.j));
+        // grens
+        H.appStaat.tellers.reactie = Array(120).fill(Date.now());
+        r = await vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar });
+        H.appStaat.tellers.reactie = [];
+        toets('23b te veel reacties -> 429', r.status === 429, JSON.stringify(r.j));
+        // noodstop-bestand -> 503
+        fs.writeFileSync(UIT, '');
+        r = await vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar });
+        fs.unlinkSync(UIT);
+        toets('23b app-uit -> 503', r.status === 503, JSON.stringify(r.j));
+        // kapot reacties.json: geschiedenis gaat door zonder duimpjes, POST 503
+        const echtR = fs.readFileSync(path.join(DATA, 'reacties.json'));
+        fs.writeFileSync(path.join(DATA, 'reacties.json'), '{kapot');
+        r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+        toets('23b kapot reacties.json: geschiedenis 200 met reacties false', r.status === 200 && r.j.reacties === false && (r.j.items || []).length > 0, JSON.stringify([r.status, r.j.reacties]));
+        r = await vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar });
+        toets('23b kapot reacties.json: reactie -> 503', r.status === 503, JSON.stringify(r.j));
+        fs.writeFileSync(path.join(DATA, 'reacties.json'), echtR);
+        r = await vraag('POST', '/app/reactie', R({ duim: 'up' }), { pot: P.jar });
+        toets('23b daarna weer 👍 -> 200, nog steeds één rij voor dit bericht', r.status === 200 && vbl().filter((x) => x.referentie === 'app:machinekamer:' + idT).length === 1 && vbl()[0].signaal === '👍', JSON.stringify(vbl()));
+      }
 
       // dode-mansknop (Fable wv263 #1/#2): alleen de Pixel telt, en pas na een onbeantwoord seintje van overdag
       const pjD = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8'));

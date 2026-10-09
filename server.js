@@ -3341,7 +3341,8 @@ const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-app
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
-  'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel']);   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
+  'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
+  'POST /app/reactie']);   // wv304: een duim is David die leest   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter); vaste plek
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -3428,7 +3429,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel']);   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
 const APP_BSN_TEKST = 'in je bericht staat een getal dat op een BSN lijkt (9 cijfers die de elfproef halen). Patiëntgegevens horen niet in Socev: haal het weg. Gaat het om iets anders, stuur het dan vanaf je telefoon.';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [], reactie: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -5007,6 +5008,8 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
   try { items = await appLogLees(kanaal); } catch (e) { if (!(e && e.code === 'ENOENT')) { logError('app-log-lees', e); fout = 'geschiedenis nu niet leesbaar'; } }
   let vragen = {};
   try { vragen = appVragen(); } catch (e) {}
+  let reacties = null;   // wv304: onleesbaar = geen duimpjes tonen (reacties: false), de geschiedenis zelf gaat door
+  try { reacties = appReacties(); } catch (e) { logError('app-reacties', e); }
   // Afgerond maar (nog) niet in het log (schrijffout of net klaar): uit het geheugen erbij, anders is het antwoord voor een
   // app die dicht was onvindbaar (Fable-review wv56 #2).
   const inLog = {};
@@ -5032,11 +5035,12 @@ async function appGeschiedenis(req, res, reg, a, kanaal) {
       vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, naar_telegram: appNaarTelegramNu(b),
         naar_telegram_onzeker: appNaarTelegramNu(b) && appNaarTelegramVerlopen(b) || undefined }
         : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true } : null,
-      bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined };
+      bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined,
+      reactie: reacties && reacties[kanaal + ':' + x.job_id] ? reacties[kanaal + ':' + x.job_id].duim : null };
   });
   // wie de geschiedenis met een afgerond antwoord ophaalt, heeft het gezien (fase 5c, Fable-review wv100 B2)
   items.forEach(function (x) { if (jobs[x.job_id] && jobs[x.job_id].app && jobs[x.job_id].status === 'done') appGezienDoor(x.job_id, a.id); });
-  appStuur(res, 200, { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout });
+  appStuur(res, 200, { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout, reacties: !!reacties });
 }
 
 // ── Broedstoof (wv92, bouwplan § 4.13): ideeënbus + werkvoorraad + agents; voorrang per idee ──
@@ -6939,6 +6943,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/telegram-bezig') return appTelegramBezigRoute(req, res);   // wv292
         if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);
         if (route === 'POST /app/bericht/getikt') return appBerichtGetikt(req, res, a, d);   // wv263
+        if (route === 'POST /app/reactie') return appReactieRoute(req, res, a, d);   // wv304
         if (route.indexOf('GET /app/concept/') === 0) return appConceptRoute(req, res, a, route.slice('GET /app/concept/'.length));
         if (route === 'POST /app/concept') return appConceptZet(req, res, a, d);
         if (route === 'POST /app/spraak') return appSpraak(req, res, a);   // wv172
@@ -8122,6 +8127,61 @@ function appBerichtGetikt(req, res, a, d) {
   ids.forEach(function (id) { if (idx[id] && !idx[id].getikt) { idx[id].getikt = t; n++; } });
   if (n && !berichtIndexBewaar()) return appWeiger(res, 500, 'opslaan lukte niet', 'berichten.json');
   appStuur(res, 200, { ok: true, gezet: n });
+}
+// ── Duimpjes (wv304; bouwplan "Socev-app als hoofdkanaal" § 3.4 en § 5 fase 5, verbeterloop § 2 "expliciet, micro") ──
+// POST /app/reactie {kanaal, job_id, duim: up|down|weg}: 👍/👎 onder een Socev-bericht in de app (ook een "via Telegram"-beurt
+// en een bericht van n8n). De app stuurt de gewenste stand, geen wissel: twee keer dezelfde tik is één rij. Schrijft naar
+// secondbrain.verbeterlog via de bestaande RPC sb_verbeterlog_toevoegen (de ingang van AI - Verbeterlog; geheim
+// N8N_WEBHOOK_VERBETERLOG, geen nieuwe sleutel). Eén rij per bericht: referentie app:<kanaal>:<job_id>; de RPC werkt een
+// bestaande reactierij bij (unieke index op referentie bij soort reactie). Intrekken = signaal 'ingetrokken': de rij blijft
+// (de kaizen-review ziet dat David van mening veranderde), verwerkt gaat terug op false. Geen berichtinhoud naar de databank:
+// context = alleen kanaal, soort en tijdstip; de tekst staat in het app-log op de pod (30 dagen).
+// Lokaal reacties.json (kanaal:job -> {duim, t, id}) voor de stand van de knoppen in de geschiedenis, 30 dagen.
+const APP_REACTIES = path.join(APP_DATA, 'reacties.json');
+const APP_REACTIE_PER_UUR = 120;
+const APP_REACTIE_SIGNAAL = { up: '\u{1F44D}', down: '\u{1F44E}', weg: 'ingetrokken' };
+function appReacties() {
+  const m = appLeesStreng(APP_REACTIES, {}), grens = Date.now() - APP_LOG_MS;
+  Object.keys(m).forEach(function (k) { if (!m[k] || !(Date.parse(m[k].t) >= grens)) delete m[k]; });
+  return m;
+}
+async function appReactieBericht(kanaal, id) {
+  let items = [];
+  try { items = await appLogLees(kanaal); } catch (e) { if (!(e && e.code === 'ENOENT')) throw e; }
+  let x = null;
+  for (let i = items.length - 1; i >= 0 && !x; i--) if (items[i].job_id === id) x = items[i];
+  if (!x) {   // net klaar, nog niet in het log (zoals appGeschiedenis)
+    const j = jobs[id];
+    if (j && j.app && j.app.kanaal === kanaal && j.status === 'done') x = { t: new Date(j.done_at || j.created).toISOString(), soort: j.app.soort, antwoord: appUitvoer(j), ok: (j.result || {}).ok !== false };
+  }
+  return x && x.ok !== false && String(x.antwoord || '').trim() ? x : null;
+}
+async function appReactieRoute(req, res, a, d) {
+  const kanaal = String(d.kanaal || ''), id = String(d.job_id || ''), duim = String(d.duim || '');
+  if (!APP_KANALEN[kanaal] || !APP_JOB_RE.test(id) || !Object.prototype.hasOwnProperty.call(APP_REACTIE_SIGNAAL, duim)) return appWeiger(res, 400, 'ongeldig verzoek', 'reactie velden');
+  if (!appTeller('reactie', APP_REACTIE_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel reacties dit uur', 'grens reactie');
+  let x;
+  try { x = await appReactieBericht(kanaal, id); } catch (e) { logError('app-reactie', e); return appWeiger(res, 503, 'geschiedenis nu niet leesbaar', 'app-log'); }
+  if (!x) return appWeiger(res, 404, 'bericht niet gevonden', 'reactie onbekend id');
+  const sl = kanaal + ':' + id, doel = duim === 'weg' ? null : duim;
+  let m;
+  try { m = appReacties(); } catch (e) { logError('app-reactie', e); return appWeiger(res, 503, 'reacties nu niet leesbaar', 'reacties.json'); }
+  if ((m[sl] ? m[sl].duim : null) === doel) return appStuur(res, 200, { ok: true, duim: doel, ongewijzigd: true });
+  const geheim = process.env.N8N_WEBHOOK_VERBETERLOG || '';
+  if (!geheim) return appWeiger(res, 503, 'verbeterlog niet ingericht', 'geen verbeterlog-geheim');
+  const soort = x.soort === 'socev' ? (x.bron || 'socev') : x.soort === 'telegram' ? 'telegram' : 'app';
+  let r;
+  try {
+    r = await appSbRpc('sb_verbeterlog_toevoegen', { p: { secret: geheim, bron: 'app-reactie', soort: 'reactie', outputsoort: (kanaal + '/' + soort).slice(0, 60),
+      referentie: 'app:' + sl, signaal: APP_REACTIE_SIGNAAL[duim], context: 'kanaal ' + kanaal + '; ' + soort + '; bericht ' + String(x.t || '').slice(0, 24) + '; apparaat ' + a.id.slice(0, 8) } });
+  } catch (e) { logError('app-reactie', e); return appWeiger(res, 502, 'verbeterlog nu niet bereikbaar; probeer het straks opnieuw', 'rpc'); }
+  if (!r || r.ok !== true) { logError('app-reactie', new Error('rpc: ' + String(r && r.fout || 'geen antwoord'))); return appWeiger(res, 502, 'verbeterlog weigerde de reactie', 'rpc ' + String(r && r.fout || '').slice(0, 40)); }
+  try {
+    m = appReacties();   // opnieuw: een andere tik kan intussen geschreven hebben
+    if (doel) m[sl] = { duim: doel, t: new Date().toISOString(), id: r.id }; else delete m[sl];
+    appSchrijfJson(APP_REACTIES, m);
+  } catch (e) { logError('app-reactie', e); return appWeiger(res, 500, 'opgeslagen in de verbeterlog, maar de stand hier niet; tik nog eens', 'reacties.json schrijven'); }
+  appStuur(res, 200, { ok: true, duim: doel });
 }
 function berichtInfo() {
   try {
