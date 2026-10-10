@@ -3474,7 +3474,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
-  'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/keuze', 'POST /app/zoek']);   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
+  'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter); vaste plek
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -3554,7 +3554,7 @@ const APP_OPEN_MS = 2 * 60 * 60 * 1000;        // tijdelijk openzetten vanaf de 
 const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
 // gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
-const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/bericht/getikt', 'POST /app/zoek']);   // wv350: zoeken = lezen   // wv263: getikt = gezien
+const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
@@ -8086,6 +8086,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/telegram-bezig') return appTelegramBezigRoute(req, res);   // wv292
         if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);
         if (route === 'POST /app/bericht/getikt') return appBerichtGetikt(req, res, a, d);   // wv263
+        if (route === 'POST /app/aanwezig') return appAanwezig(req, res, a, s);   // wv374
         if (route === 'POST /app/reactie') return appReactieRoute(req, res, a, d);   // wv304
         if (route === 'POST /app/agenda') return appAgendaRoute(req, res, a, s, d);   // wv315
         if (route.indexOf('GET /app/concept/') === 0) return appConceptRoute(req, res, a, route.slice('GET /app/concept/'.length));
@@ -9312,6 +9313,16 @@ function berichtRoute(req, res) {
   });
 }
 
+// App: POST /app/aanwezig {} (wv374, gebruiksronde 1). De app stuurt dit hooguit één keer per minuut zolang David in de
+// zichtbare app tikt, scrolt of typt (alleen echte invoer, isTrusted), en één keer bij wegklikken als er sinds de vorige keer
+// invoer was. Gemeten 9-10: op de Spreekkamer-pc (vaste plek, 5 min glijdend) viel de sessie 7 keer dicht terwijl David een
+// antwoord las en daarna ging typen (401-golf, vingerafdruk midden in het werk), want lezen verlengde niets. "5 minuten stilte"
+// (besluit David 7-10, § 4.10) blijft: zonder invoer verlengt niets; de grenzen van appSessieTot (vast max 4 u, meereizend
+// dagdeel/6 u) gelden ongewijzigd. Verlengen doet de dispatcher (APP_GLIJD_ROUTES); stil (geen auditregel bij 200).
+function appAanwezig(req, res, a, s) {
+  res._app.stil = true;
+  appStuur(res, 200, { ok: true, sessie_rest_s: Math.max(0, Math.floor((appSessieTot(s.start, a, Date.now()) - Date.now()) / 1000)) });
+}
 // App: POST /app/bericht/getikt {ids} — het bericht was in beeld en is aangetikt, of de app werd via het seintje geopend.
 function appBerichtGetikt(req, res, a, d) {
   res._app.stil = true;

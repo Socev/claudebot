@@ -978,6 +978,17 @@ async function bewijs(o) {
     r = await vraag('POST', '/app/beurt', { beurt_id: b1, kanaal: 'hoofd', tekst: 'Wat staat er morgen?' }, { pot: P.jar });
     await slaap(30);
     toets('9 dezelfde beurt_id nog eens -> zelfde job, geen tweede beurt', r.status === 200 && r.j.job_id === j1 && r.j.al === true && gestart.length === gesprekVoor + 1, JSON.stringify(r.j));
+    // wv374 (gebruiksronde 1): aanwezig = echte invoer in de zichtbare app; verlengt de sessie, is geen invoer, stil bij 200
+    tot0 = sP.tot = Date.now() + 60000;
+    const aud374 = () => (fs.existsSync(path.join(DATA, 'audit.jsonl')) ? fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length : 0);
+    const nAud374 = aud374();
+    r = await vraag('POST', '/app/aanwezig', {}, { pot: P.jar });
+    await slaap(20);
+    toets('9 wv374: aanwezig glijdt en geeft de resttijd van na het glijden', r.status === 200 && r.j.ok === true && sP.tot > tot0 && typeof r.j.sessie_rest_s === 'number' && Math.abs(r.j.sessie_rest_s - (sP.tot - Date.now()) / 1000) < 3, r.status + ' ' + JSON.stringify(r.j) + ' ' + (sP.tot - tot0));
+    toets('9 wv374: aanwezig schrijft geen auditregel (elke minuut)', aud374() === nAud374, aud374() - nAud374);
+    r = await vraag('POST', '/app/aanwezig', {}, { pot: pot() });
+    toets('9 wv374: aanwezig zonder sessie -> 401 (wekt geen dode sessie)', r.status === 401, r.status);
+    toets('9 wv374: aanwezig is geen invoer (slot vrij) en staat in APP_GLIJD_ROUTES', H.appInvoerRoute('POST /app/aanwezig', false, {}, { soort: 'vast' }) === false && /'POST \/app\/zoek', 'POST \/app\/aanwezig'\]\);   \/\/ wv374: aanwezig = David/.test(src));
     r = await vraag('POST', '/app/beurt', { beurt_id: bid(), kanaal: 'hoofd', tekst: 'nog iets' }, { pot: P.jar });
     toets('9 tweede beurt in hetzelfde kanaal terwijl Socev bezig is -> 409', r.status === 409 && /bezig/.test(r.j.fout), JSON.stringify(r.j));
     tot0 = sP.tot = Date.now() + 60000;
@@ -4562,7 +4573,7 @@ async function bewijs(o) {
       toets('28 100 tekens mag', r.status === 200, r.status);
       r = await vraag('GET', '/app/zoek', undefined, { pot: P.jar });
       toets('28 GET /app/zoek bestaat niet (de term hoort nooit in een pad)', r.status === 404, r.status);
-      toets('28 zoeken is geen invoer (slot vrij) en glijdt (APP_GLIJD_ROUTES)', H.appInvoerRoute('POST /app/zoek', false, {}, { soort: 'vast' }) === false && /'POST \/app\/voor-jou\/keuze', 'POST \/app\/zoek'\]\)/.test(src), '');
+      toets('28 zoeken is geen invoer (slot vrij) en glijdt (APP_GLIJD_ROUTES)', H.appInvoerRoute('POST /app/zoek', false, {}, { soort: 'vast' }) === false && /'POST \/app\/voor-jou\/keuze', 'POST \/app\/zoek'[,\]]/.test(src), '');
       const tz = H.appStaat.tellers.zoek.slice();
       H.appStaat.tellers.zoek = Array(120).fill(Date.now());
       r = await vraag('POST', '/app/zoek', { kanaal: 'machinekamer', term: 'ideeen' }, { pot: P.jar });
