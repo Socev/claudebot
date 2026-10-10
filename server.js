@@ -8878,7 +8878,8 @@ const BERICHT_KLASSEN = { stil: true, normaal: true, dringend: true };
 const BERICHT_BRONNEN = new Set(['agentrapport', 'proef', 'droomronde', 'ideeenmotor', 'ciso', 'research-scout', 'quotumalarm', 'voorwerk',
   'stiltewachter', 'meelezer', 'nachtwerk', 'werkkamer-toegang', 'foutmelder', 'script', 'socev-spreekt', 'heartbeat', 'vergaderbriefing',
   'parro', 'signal', 'teams', 'gambia', 'raw-input', 'files-portaal', 'voorlezen', 'briefing', 'actielijst', 'agenda', 'actie-bewaker',
-  'agenda-wachter', 'correspondentie-wachter', 'dienstwaarschuwer', 'waarnemingzoeker']);
+  'agenda-wachter', 'correspondentie-wachter', 'dienstwaarschuwer', 'waarnemingzoeker',
+  'agentrapport-david', 'stiltewachter-david']);   // wv300: eigen bron per kanaal (agentrapport en stiltewachter dienen ook de machinekamer)
 const BERICHT_TEKST_MAX = 60000;
 const BERICHT_BODY_MAX = 256 * 1024;
 const BERICHT_BESTAND_BODY_MAX = 28 * 1024 * 1024;   // base64 van 20 MB (27,96e6) + JSON; daarboven 413, nooit midden in een verzoek afbreken (Fable § 8 #4)
