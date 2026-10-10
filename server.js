@@ -7506,6 +7506,8 @@ const APP_PROJ_ENT = [
 const APP_PROJ_DICHT = /^(AFGEHANDELD|AFGEROND|VERVALLEN|AFGEZIEN|BETAALD|VERLOPEN|INGEDIEND|AFGELOPEN)\b/;
 const APP_PROJ_STATUS = /^(?:(?:AFGEHANDELD|AFGEROND|VERVALLEN|AFGEZIEN|BETAALD|VERLOPEN|INGEDIEND|AFGELOPEN|GEMETEN|GESEIND|HEROPEND|VERSCHOVEN|BIJGEWERKT|BIJGESTELD|AANGESCHERPT|AANGEVULD|STAND|PRECIES GEWORDEN|DATUM VERVROEGD|GECORRIGEERD|GEWIJZIGD|AANTEKENING|AFWACHTEN|LET OP|OPGELOST|OPGEHELDERD|BEVESTIGD|UITNODIGING|NIET|TIJD BEKEND|STAGE INTERNE IS ROND)\b|\d{1,2}-\d{1,2}(?:-\d{4})?\s*\(|Eerder:)/;
 const APP_PROJ_DAGEN_VOORUIT = 400, APP_PROJ_TERUG = 7, APP_PROJ_MAX = 40;
+// Personeelszaken en gezondheid: op een vaste plek niet (Fable diffreview wv373 #1); woorden in titel en actie, niet in de lange tekst.
+const APP_PROJ_PERSONEEL = /(loondienst|arbeidsovereenkomst|arbeidscontract|(?<![\w-])contract|addendum|aanzeg|inschaling|verlof|detachering|\bCAO\b|salaris|operatie|\bziek|verzuim|functionering|personeelsgesprek)/i;
 const APP_PROJ_SYS = /\b(Tasker|machinekamer|n8n|pod|werkvoorraad|wv\d+)\b/i;   // werk aan Socev: niet in deze tab
 function appProjVault() { return process.env.APP_VAULT_DIR || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain'; }
 // Entiteit uit één deel van de kolom Entiteit (of een woord in een lopende zaak).
@@ -7538,7 +7540,10 @@ function appProjPlat(s) {
 }
 // Een volledige datum d-m-jjjj van ≥ 12 jaar terug lijkt op een geboortedatum: maskeren (Fable wv373 M3).
 function appProjMasker(s, jaar) {
-  return String(s || '').replace(/\b(\d{1,2})[-./](\d{1,2})[-./](\d{4})\b/g, function (m, d, mm, j) { return Number(j) <= jaar - 12 ? '[datum]' : m; });
+  let raak = false;
+  const uit = String(s || '').replace(/\b(\d{1,2})[-./](\d{1,2})[-./](\d{4})\b/g, function (m, d, mm, j) { if (Number(j) <= jaar - 12) { raak = true; return '[datum]'; } return m; });
+  // datum van de regel + "wordt 41" geeft het geboortejaar alsnog (Fable diffreview wv373 #2)
+  return raak ? uit.replace(/\bwordt \d{1,3}\b/g, 'wordt …') : uit;
 }
 function appProjWikiPaden(s) {
   const u = [], re = /\[\[([^\]|\\#]+)/g;
@@ -7592,7 +7597,7 @@ function appProjDeadlines(tekst, vandaag, fouten) {
       actie: appKort(appProjMasker(appProjPlat(c[3]), jaar), 120),
       sein: dagen >= 0 && dagen <= sein,
       bron: { naam: bronPad ? appKort(appProjPlat('[[' + (/\[\[([^\]]+)\]\]/.exec(c[5]) || [null, bronPad])[1] + ']]'), 80) : appKort(appProjPlat(c[5]), 80), pad: bronPad },
-      hr: /\/(Medewerkers|Gesprekken)\//.test(regel) });
+      hr: /\/(Medewerkers|Gesprekken)\//.test(regel) || /^20_Prive\//.test(bronPad || '') || APP_PROJ_PERSONEEL.test(appProjPlat(appProjTitel(wat)) + ' ' + appProjPlat(c[3])) });
   });
   if (scheef) fouten.push(scheef + (scheef === 1 ? ' regel' : ' regels') + ' in het deadline-register kon ik niet lezen (kolommen kloppen niet)');
   return uit.sort(function (a, b) { return a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : 0; });
@@ -7635,11 +7640,12 @@ function appProjLopend(tekst, vandaag, fouten) {
     });
     if (!ents.length) {
       appProjHerken(appProjPlat(ruw).replace(/^/, ' ')).forEach(function (x) { if (ents.indexOf(x) < 0) ents.push(x); });
-      appProjPlat(ruw).split(/[^A-Za-zÀ-ÿ]+/).forEach(function (w) { const c = namen[w]; if (c && c !== 'meer' && ents.indexOf(c) < 0) ents.push(c); });
+      // voornamen (medewerkers, familie) alleen als de woorden niets zakelijks opleverden (Fable diffreview wv373 #7)
+      if (!ents.length) appProjPlat(ruw).split(/[^A-Za-zÀ-ÿ]+/).forEach(function (w) { const c = namen[w]; if (c && c !== 'meer' && ents.indexOf(c) < 0) ents.push(c); });
     }
     const bronPad = paden[0] || null;
     uit.push({ ents: ents.length ? ents : ['OVERIG'], titel: appKort(appProjMasker(titel || rest, jaar), 160),
-      tekst: titel ? appKort(appProjMasker(rest, jaar), 280) : '', bron: bronPad ? { naam: appKort(bronPad.split('/').pop(), 80), pad: bronPad } : null });
+      tekst: titel ? appKort(appProjMasker(rest, jaar), 280) : '', bron: bronPad ? { naam: appKort(appProjPlat((/\[\[[^\]]+\]\]/.exec(ruw) || [''])[0]) || bronPad.split('/').pop(), 80), pad: bronPad } : null });
   });
   return uit;
 }
@@ -7683,9 +7689,12 @@ function appProjDriveVul(mappen) {
   const nodig = mappen.filter(function (m) { const x = D.mappen[m]; return !x || Date.now() - x.op > APP_PROJ_DRIVE_MS; }).slice(0, APP_PROJ_MAPPEN);
   if (!nodig.length) return Promise.resolve();
   D.bezig = (async function () {
+    let mis = 0;
     for (const m of nodig) {
       const r = await appProjLsjson(m);
       if (r === 'weg') { D.uitTot = Date.now() + APP_PROJ_DRIVE_MS; break; }   // geen rclone: een uur niet opnieuw
+      if (r === null && ++mis >= 3) { D.uitTot = Date.now() + APP_PROJ_DRIVE_MS; D.mappen[m] = { op: Date.now(), ids: null }; break; }   // remote stuk: niet 30 x 15 s (Fable #3)
+      if (r !== null) mis = 0;
       D.mappen[m] = { op: Date.now(), ids: r };   // null = fout: ook een uur niet opnieuw (Fable wv373 M5)
     }
   })().finally(function () { D.bezig = null; });
@@ -7713,7 +7722,7 @@ async function appProjectenRoute(req, res, a) {
       if (x.dagen < -APP_PROJ_TERUG) { p.verlopen++; return; }
       if (x.dagen > APP_PROJ_DAGEN_VOORUIT) return;
       if (p.deadlines.length >= APP_PROJ_MAX) { p.later++; return; }
-      p.deadlines.push({ datum: x.datum, dagen: x.dagen, titel: x.titel, actie: x.actie, sein: x.sein, bron: x.bron.pad || x.bron.naam ? { naam: x.bron.naam, pad: x.bron.pad } : null });
+      p.deadlines.push({ datum: x.datum, dagen: x.dagen, titel: x.titel, actie: x.actie, bron: x.bron.pad || x.bron.naam ? { naam: x.bron.naam, pad: x.bron.pad } : null });
     });
   });
   if (!vast) d.lopend.forEach(function (x) { x.ents.forEach(function (e) { per[e].lopend.push({ titel: x.titel, tekst: x.tekst, bron: x.bron }); }); });
@@ -7724,7 +7733,11 @@ async function appProjectenRoute(req, res, a) {
   // Alleen wachten (hooguit 5 s) als er nog bijna niets bekend is; anders vult hij op de achtergrond aan en geldt de volgende Ververs.
   const bekend = mappen.filter(function (m) { return appStaat.projDrive.mappen[m]; }).length;
   const vul = appProjDriveVul(mappen).catch(function (e) { logError('app-projecten-drive', e); });
-  if (bekend * 2 < mappen.length) await Promise.race([vul, new Promise(function (ok) { setTimeout(ok, APP_PROJ_WACHT_MS); })]);
+  if (bekend * 2 < mappen.length) {
+    let klok = null;
+    await Promise.race([vul, new Promise(function (ok) { klok = setTimeout(ok, APP_PROJ_WACHT_MS); })]);
+    clearTimeout(klok);
+  }
   const metLink = function (b) { return b ? { naam: b.naam, link: appProjLink(b.pad) } : null; };
   lijst.forEach(function (e) {
     e.deadlines = e.deadlines.map(function (x) { return Object.assign({}, x, { bron: metLink(x.bron) }); });

@@ -4687,6 +4687,8 @@ async function bewijs(o) {
         rij(plus(V, 15), 'Tolgaarde', '**Contract opmaken** met BSN 111222333 erin', 'David', 0, ''),
         rij(plus(V, 16), 'Tolgaarde', '**Contract en rooster Jacqueline** — NAW/geboortedatum/BSN opvragen', 'David', 0, ''),
         rij(plus(V, 17), 'Privé / Cynthia', '**Cynthia is jarig (21-12-' + (J - 41) + ', wordt 41).**', 'Socev: suggesties', 21, ''),
+        rij(plus(V, 19), 'Tolgaarde', '**Detachering van Belinda beëindigen** — mededeling', 'David: Belinda informeren', 0, '[[10_Zakelijk/Tolgaarde/POH-S dienstverlening\\|POH-S]]'),
+        rij(plus(V, 21), 'Tolgaarde + Groenhouten', '**Waarneming regelen voor zes weken**', 'David: waarnemers zoeken', 0, '[[20_Prive/Gezondheid/Knie\\|Knie]]'),
         rij(plus(V, 18), 'LHV Midden-Nederland', '**28-9 (opgave David): niet meer seinen.** Oud', 'David', 0, ''),
         rij(plus(V, -3), 'Groenhouten', '**Net verlopen**', 'David', 0, ''),
         rij(plus(V, -30), 'Groenhouten', '**Lang verlopen**', 'David', 0, ''),
@@ -4728,10 +4730,10 @@ async function bewijs(o) {
       toets('29 M2 titels: CAHAG (niet "€ 235"), vet woord midden in een zin is geen titel (90941, vervallen), eerste zin niet afgekapt na "max."',
         titels('REGIO').includes('CAHAG-Cursusdag COPD/astma') && titels('GH').includes('In de map staat een factuur onder abonnee 90941, € 255.') && titels('TG').includes('NZa laat de prestaties vervallen — bekostiging herijken') && titels('HOLD').includes('Verantwoording subsidie (max. € 34.071) bij de gemeente.'), JSON.stringify([titels('REGIO'), titels('GH'), titels('HOLD')]));
       toets('29 indeling: kostenmaatschap vóór POT, Holding / Privé onder beide, Systeem nergens, Privé herkend (é), Projecten', titels('KM')[0] === 'Kostenverdeling aanleveren' && !titels('POT').includes('Kostenverdeling aanleveren') && titels('PRIVE').includes('Verantwoording subsidie (max. € 34.071) bij de gemeente.') && !alle.some((t) => /API-key/.test(t)) && titels('PRIVE').includes('Studiedag — leerlingen vrij.') && titels('PROJ')[0] === 'Terugkoppeling aan VEZN', JSON.stringify([titels('KM').slice(0, 2), titels('PRIVE'), titels('PROJ')]));
-      toets('29 M3 vangnet: BSN-rij weg, "geboortedatum opvragen" blijft, oude volledige datum gemaskeerd; "28-9 (opgave …) niet meer seinen" dicht', !alle.some((t) => /Contract opmaken/.test(t)) && titels('TG').includes('Contract en rooster Jacqueline') && titels('PRIVE').includes('Cynthia is jarig ([datum], wordt 41).') && !JSON.stringify(j).includes('21-12-' + (J - 41)) && !titels('REGIO').includes('Oud'), JSON.stringify(titels('PRIVE')));
+      toets('29 M3 vangnet: BSN-rij weg, "geboortedatum opvragen" blijft, oude volledige datum gemaskeerd (en de leeftijd erbij); "28-9 (opgave …) niet meer seinen" dicht', !alle.some((t) => /Contract opmaken/.test(t)) && titels('TG').includes('Contract en rooster Jacqueline') && titels('PRIVE').includes('Cynthia is jarig ([datum], wordt …).') && !JSON.stringify(j).includes('21-12-' + (J - 41)) && !titels('REGIO').includes('Oud'), JSON.stringify(titels('PRIVE')));
       const gh = E.GH || { deadlines: [] };
       toets('29 net verlopen (≤ 7 d) staat erbij met negatieve dagen, ouder telt als verlopen, > 400 d en "2026-09" niet', gh.deadlines.some((x) => x.titel === 'Net verlopen' && x.dagen === -3) && !gh.deadlines.some((x) => /Lang verlopen|Heel ver/.test(x.titel)) && gh.verlopen === 1 && !JSON.stringify(gh).includes('Alleen een maand'), JSON.stringify([gh.verlopen, gh.deadlines.map((x) => x.titel + x.dagen)]));
-      toets('29 gesorteerd op datum, sein binnen de termijn, hooguit 40 per entiteit + later', gh.deadlines.every((x, i, a) => !i || a[i - 1].datum <= x.datum) && gh.deadlines.some((x) => x.titel.startsWith('Roos') && x.sein === false && x.dagen === 3) && E.POT.deadlines.some((x) => x.sein === true) && E.KM.deadlines.length === 40 && E.KM.later === 6, JSON.stringify([E.KM.deadlines.length, E.KM.later]));
+      toets('29 gesorteerd op datum, dagen te gaan, geen sein-veld meer (Fable #4), hooguit 40 per entiteit + later', gh.deadlines.every((x, i, a) => !i || a[i - 1].datum <= x.datum) && gh.deadlines.some((x) => x.titel.startsWith('Roos') && x.dagen === 3) && !JSON.stringify(j).includes('"sein"') && E.KM.deadlines.length === 40 && E.KM.later === 6, JSON.stringify([E.KM.deadlines.length, E.KM.later]));
       const lo = (c) => (E[c] ? E[c].lopend.map((x) => x.titel) : []);
       toets('29 lopend: per wikilinkpad, anders op woorden; Tasker/machinekamer weg; voornaam uit Familie -> Privé; rest Overig', lo('TG').includes('Knietraject') && lo('GH').includes('Glas op de balie Groenhouten') && lo('GH').includes('Tweede voorschot POH-Jeugd Groenhouten') && lo('POT').includes('Tweede voorschot POH-Jeugd Groenhouten') && lo('PRIVE').includes('Ilvy') && lo('OVERIG').includes('Wachtend op anderen') && !JSON.stringify(j).includes('Tasker'), JSON.stringify([lo('TG'), lo('GH'), lo('PRIVE'), lo('OVERIG')]));
       const glas = E.GH.lopend.find((x) => /Glas/.test(x.titel));
@@ -4750,7 +4752,7 @@ async function bewijs(o) {
       const nep = { _app: {}, writeHead(s) { this.st = s; }, end(x) { this.b = JSON.parse(x); } };
       await H.appProjectenRoute({}, nep, { id: 'x', soort: 'vast' });
       const vb = nep.b || {};
-      toets('29 vaste plek: alleen zakelijk, geen medewerkersregel (Roos), geen lopend, vaste_plek true', nep.st === 200 && vb.vaste_plek === true && vb.entiteiten.every((e) => !e.prive && e.lopend.length === 0) && !vb.entiteiten.some((e) => /^(PRIVE|OVERIG)$/.test(e.code)) && !JSON.stringify(vb).includes('Roos') && !JSON.stringify(vb).includes('Cynthia is jarig'), JSON.stringify(vb.entiteiten && vb.entiteiten.map((e) => e.code)));
+      toets('29 vaste plek: alleen zakelijk, geen personeelszaken (Medewerkers-bron of woord: Roos, Detachering, Jacqueline) en geen privébron (Waarneming), geen lopend', nep.st === 200 && vb.vaste_plek === true && vb.entiteiten.every((e) => !e.prive && e.lopend.length === 0) && !vb.entiteiten.some((e) => /^(PRIVE|OVERIG)$/.test(e.code)) && !/Roos|Detachering|Jacqueline|Waarneming|Cynthia is jarig/.test(JSON.stringify(vb)) && JSON.stringify(j).includes('Detachering van Belinda') && JSON.stringify(j).includes('Waarneming regelen'), JSON.stringify(vb.entiteiten && vb.entiteiten.map((e) => e.code)));
       // traag rclone: antwoord binnen ± 5 s zonder link; rclone weg: geen link, geen fout naar de app
       fs.appendFileSync(DL, ''); H.appStaat.projecten = null; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
       fs.writeFileSync(AC, fs.readFileSync(AC, 'utf8').replace('Leveranciers en ICT-contracten]]', 'traag/Leveranciers]]'));
@@ -4770,10 +4772,9 @@ async function bewijs(o) {
       fs.unlinkSync(DL); H.appStaat.projecten = null;
       const nA2 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
       r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
-      toets('29 beide bronnen weg -> 503 in gewone taal', r.status === 503 && /projecten zijn nu niet te lezen/.test(r.j.fout), r.status + ' ' + JSON.stringify(r.j));
+      toets('29 beide bronnen weg -> 503 in gewone taal, mét auditregel (niet stil)', r.status === 503 && /projecten zijn nu niet te lezen/.test(r.j.fout) && fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length > nA2, r.status + ' ' + JSON.stringify(r.j));
       fs.writeFileSync(AC, acBewaar); fs.writeFileSync(DL, dlBewaar); H.appStaat.projecten = null; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
       delete ctx.process.env.APP_RCLONE_BIN; delete ctx.process.env.APP_DRIVE_REMOTE;
-      void nA2;
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
