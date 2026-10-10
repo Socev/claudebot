@@ -1560,6 +1560,49 @@ function jobEindLog(jobId, j, ws) {
   });
 }
 
+// ── wv363: nachtreset van sessies zonder eigen reset (Fable-review wv200 K4) ─────────────────────────────────────────
+// WAAROM. Elke n8n-workflow met een eigen sessie wist die zelf via POST /reset (nachtconsolidatie 40687, de wachters,
+// werkkamer, ciso ...). 'cijfer-meester' (kanaal van de Socev-app, wv200) en 'cijfermeester' (@cijfermeester_bot) hadden
+// geen reset: de context groeide onbeperkt en elke vraag aan de Cijfer-Meester werd duurder en trager (10-10-2026:
+// transcripts van 0,4 en 11,6 MB). Geen n8n-workflow is eigenaar van de app-sessie, dus de reset staat hier.
+// HOE. Elke 10 min: in het uur 04:00-04:59 Europe/Amsterdam (ná de nachtconsolidatie van 03:00), eenmaal per dag per
+// sessie, gaat de wis-actie IN de wachtrij van die sessie (enqueue), niet ernaast: een lopende beurt schrijft na afloop
+// zijn session_id terug (processJob) en zou een reset ernaast ongedaan maken. Wist alle breinen, net als POST /reset.
+// Alleen de koppeling sessie -> transcript verdwijnt: de app toont zijn gesprekken uit het app-log, niet uit de sessie,
+// en het transcriptbestand blijft staan. De dag staat alleen in het geheugen; een herstart in dat uur kan een tweede
+// reset geven, dat is onschadelijk. Een pod die het hele uur plat ligt, slaat die nacht over.
+// NOODREM: NACHTRESET=0 in de omgeving.
+const NACHTRESET_AAN = process.env.NACHTRESET !== '0';
+const NACHTRESET_SESSIES = ['cijfer-meester', 'cijfermeester'];
+const NACHTRESET_UUR = 4;
+const nachtresetGedaan = {};   // sessiesleutel -> JJJJ-MM-DD (Amsterdam)
+function nachtresetTik(tijd) {
+  if (!NACHTRESET_AAN) return [];
+  const t = new Date(tijd || Date.now());
+  const uur = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(t));
+  if (uur !== NACHTRESET_UUR) return [];
+  const dag = t.toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
+  const gezet = [];
+  NACHTRESET_SESSIES.forEach(function (chatId) {
+    const key = sessionKey(DEFAULT_WS, chatId);
+    if (!key || nachtresetGedaan[key] === dag) return;
+    nachtresetGedaan[key] = dag;
+    gezet.push(key);
+    enqueue(key, function () {
+      let had = false;
+      RUNTIMES_LIJST.forEach(function (rt) {
+        const s = sessieSleutel(key, rt);
+        if (chatSessions[s]) { had = true; delete chatSessions[s]; }
+      });
+      if (had) saveSessions();
+      schrijfLog(nu() + ' nachtreset ' + velden({ sessie: key, gewist: had ? 'ja' : 'leeg' }));
+    });
+  });
+  return gezet;
+}
+setInterval(function () { try { nachtresetTik(); } catch (e) { logError('nachtreset', e); } }, 10 * 60 * 1000).unref();
+// ── einde nachtreset ─────────────────────────────────────────────────────────────────────────────────────────────────
+
 // ── Werklessen op context (19-9-2026, akkoord David: "Ja dat mag") ──────────
 // WAAROM DIT HIER STAAT. CLAUDE.md liet elke sessie `00_Systeem/Werklessen.md`
 // integraal meelezen: 49,6 KB met 67 lessen, waarvan er per taak een handvol van
@@ -1590,10 +1633,14 @@ const LESSEN_EMBED_MODEL = '@cf/baai/bge-m3';   // 1024 dims, meertalig; de less
 // Welke sessie hoort bij welk domein. Wat hier NIET in staat krijgt geen
 // domeinfilter en dus de lessen uit alle domeinen: een regel of twee te veel is
 // goedkoper dan een gemiste correctie van David.
+// 'beide' als domein (wv363, Fable-review wv200 K3): mk_lessen_hybride filtert op `domein = p_domein or domein = 'beide'`,
+// dus dan komen ALLEEN de algemene lessen mee (o.a. "een plausibel getal is geen geverifieerd getal"), geen pa- en geen
+// machinelessen. Voor de twee Cijfer-Meester-sessies: die gaan alleen over sectorcijfers, en 'cijfermeester'
+// (@cijfermeester_bot) deelt David met Christof Zwart en Anton - Davids privé- en praktijkcorrecties horen daar niet.
 const LESSEN_DOMEIN = {
   '40687': 'pa', 'agenda-wachter': 'pa', 'correspondentie-wachter': 'pa',
   'actie-bewaker': 'pa', 'personeels-wachter': 'pa', 'nachtconsolidatie': 'pa',
-  'dagplan': 'pa', 'parro': 'pa', 'signal': 'pa', 'cijfermeester': 'pa', 'cijfer-meester': 'pa',
+  'dagplan': 'pa', 'parro': 'pa', 'signal': 'pa', 'cijfermeester': 'beide', 'cijfer-meester': 'beide',
   'telegram-debug': 'machine', 'structuur-wachter': 'machine', 'werkkamer': 'machine',
   'vault-concierge': 'machine', 'site-verversing': 'machine', 'kaizen-review': 'machine',
   'pod-uitrol': 'machine', 'webhook-bewaker': 'machine', 'keten-attest': 'machine', 'ciso': 'machine'

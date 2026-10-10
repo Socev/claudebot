@@ -3285,7 +3285,7 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/gezien', { tab: 'cijfer-meester' }, { pot: P.jar });
       toets('22 /app/gezien cijfer-meester -> 200', r.status === 200, JSON.stringify(r.j));
       const vs = fs.readFileSync('server.js', 'utf8');
-      toets('22 seintje -> tab cijfer-meester; werklessen domein pa zoals cijfermeester', /\^antwoord \(hoofd\|machinekamer\|cijfer-meester\)\$/.test(vs) && /'cijfermeester': 'pa', 'cijfer-meester': 'pa'/.test(vs));
+      toets('22 seintje -> tab cijfer-meester; werklessen domein beide zoals cijfermeester (wv363)', /\^antwoord \(hoofd\|machinekamer\|cijfer-meester\)\$/.test(vs) && /'cijfermeester': 'beide', 'cijfer-meester': 'beide'/.test(vs));
       // Telegram-regressie: hoofd en machinekamer ongemoeid (kop alleen in cijfer-meester)
       const nH = gestart.length;
       r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'regressie hoofd' }, { pot: P.jar });
