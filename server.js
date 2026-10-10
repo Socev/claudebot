@@ -7493,6 +7493,246 @@ async function appPraktijkenRoute(req, res, a) {
   appStuur(res, 200, { ok: true, vaste_plek: false, entiteiten: d.entiteiten, fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
 }
 
+// ── Projecten (wv373, bouwplan § 4.9d): per entiteit de komende deadlines en de lopende zaken, alleen lezen ──
+// Bronnen: 00_Systeem/Deadlines.md (tabel onder "## Actueel") en 00_Systeem/actueel.md (§ Lopende zaken). Deterministisch
+// geparsed, geen taalmodel; in het geheugen op de mtime van beide bestanden + de datum van vandaag. Niets op schijf, stil.
+// Fable-ontwerpreview wv373: M1 pipes in wikilinks, M2 gesloten lijst statuswoorden, M3 oude datum maskeren (woord alleen
+// is geen trigger), M4 vaste plek zonder medewerkersregels en zonder Lopend, M5 rclone één tegelijk met grenzen.
+const APP_PROJ_ENT = [
+  { code: 'TG', naam: 'Tolgaarde' }, { code: 'GH', naam: 'Groenhouten' }, { code: 'POT', naam: 'POT POH-GGZ' },
+  { code: 'KM', naam: 'Kostenmaatschap' }, { code: 'HOLD', naam: 'Holding' }, { code: 'PROJ', naam: 'Projecten' },
+  { code: 'REGIO', naam: 'Regio & beroep' }, { code: 'PRIVE', naam: 'Privé', prive: true }, { code: 'OVERIG', naam: 'Overig', prive: true },
+];
+const APP_PROJ_DICHT = /^(AFGEHANDELD|AFGEROND|VERVALLEN|AFGEZIEN|BETAALD|VERLOPEN|INGEDIEND|AFGELOPEN)\b/;
+const APP_PROJ_STATUS = /^(?:(?:AFGEHANDELD|AFGEROND|VERVALLEN|AFGEZIEN|BETAALD|VERLOPEN|INGEDIEND|AFGELOPEN|GEMETEN|GESEIND|HEROPEND|VERSCHOVEN|BIJGEWERKT|BIJGESTELD|AANGESCHERPT|AANGEVULD|STAND|PRECIES GEWORDEN|DATUM VERVROEGD|GECORRIGEERD|GEWIJZIGD|AANTEKENING|AFWACHTEN|LET OP|OPGELOST|OPGEHELDERD|BEVESTIGD|UITNODIGING|NIET|TIJD BEKEND|STAGE INTERNE IS ROND)\b|\d{1,2}-\d{1,2}(?:-\d{4})?\s*\(|Eerder:)/;
+const APP_PROJ_DAGEN_VOORUIT = 400, APP_PROJ_TERUG = 7, APP_PROJ_MAX = 40;
+const APP_PROJ_SYS = /\b(Tasker|machinekamer|n8n|pod|werkvoorraad|wv\d+)\b/i;   // werk aan Socev: niet in deze tab
+function appProjVault() { return process.env.APP_VAULT_DIR || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain'; }
+// Entiteit uit één deel van de kolom Entiteit (of een woord in een lopende zaak).
+function appProjHerken(s) {
+  const t = String(s || '').trim(), u = [];
+  if (!t) return u;
+  if (/beide praktijken/i.test(t)) u.push('TG', 'GH');
+  if (/tolgaarde/i.test(t)) u.push('TG');
+  if (/groenhouten/i.test(t)) u.push('GH');
+  if (/kostenmaatschap/i.test(t)) u.push('KM');
+  else if (/^POT\b|\bPOT\b|POH-(GGZ|Jeugd)/i.test(t)) u.push('POT');
+  if (/holding/i.test(t)) u.push('HOLD');
+  if (/^projecten\b|\bH&O\b/i.test(t)) u.push('PROJ');
+  if (/\b(HAGRO|DBH|LHV)\b|^David \(/i.test(t)) u.push('REGIO');
+  if (/^(privé|prive|familie)(?![A-Za-zÀ-ÿ])/i.test(t)) u.push('PRIVE');   // geen \b: é telt in JS niet als woordteken
+  return u;
+}
+function appProjEntiteiten(kolom) {
+  if (/^systeem\b/i.test(String(kolom).trim())) return null;   // werk aan Socev: machinekamer
+  const u = [];
+  String(kolom).split(/\s*(?:\/|\+|↔)\s*/).forEach(function (deel) { appProjHerken(deel).forEach(function (c) { if (u.indexOf(c) < 0) u.push(c); }); });
+  if (u.indexOf('KM') >= 0 && u.indexOf('POT') >= 0) u.splice(u.indexOf('POT'), 1);   // "POT / kostenmaatschap": de kostenmaatschap
+  return u.length ? u : ['OVERIG'];
+}
+// Markdown eruit: wikilinks -> alias of laatste padstuk, vet/cursief/doorhaling weg.
+function appProjPlat(s) {
+  return String(s || '').replace(/\[\[([^\]]+?)\]\]/g, function (m, x) {
+    const d = x.split(/\\?\|/); const alias = d[1] ? d[1] : d[0].split('/').pop(); return alias.replace(/#.*$/, '');
+  }).replace(/~~[^~]*~~/g, '').replace(/\*\*|__|\*|`/g, '').replace(/\\\|/g, '|').replace(/\s+/g, ' ').trim();
+}
+// Een volledige datum d-m-jjjj van ≥ 12 jaar terug lijkt op een geboortedatum: maskeren (Fable wv373 M3).
+function appProjMasker(s, jaar) {
+  return String(s || '').replace(/\b(\d{1,2})[-./](\d{1,2})[-./](\d{4})\b/g, function (m, d, mm, j) { return Number(j) <= jaar - 12 ? '[datum]' : m; });
+}
+function appProjWikiPaden(s) {
+  const u = [], re = /\[\[([^\]|\\#]+)/g;
+  let m;
+  while ((m = re.exec(String(s || '')))) u.push(m[1].trim());
+  return u;
+}
+function appProjTitel(wat) {
+  // Een vet blok is de titel als het een zin opent: aan het begin, direct na een statusblok of na een zinseinde. Een vet woord
+  // midden in een zin ("**90941**", "**vervallen**") of na een dubbele punt is nadruk, geen titel.
+  const re = /\*\*([\s\S]+?)\*\*/g;
+  let m, naStatus = 0;
+  while ((m = re.exec(wat))) {
+    const b = appProjPlat(m[1]), voor = wat.slice(0, m.index);
+    if (APP_PROJ_STATUS.test(b)) { naStatus = m.index + m[0].length; continue; }
+    if (b && (/^\s*$/.test(voor) || /^\s*$/.test(wat.slice(naStatus, m.index)) || /[.!?]["')]?\s+$/.test(voor))) return b.replace(/\s*:\s*$/, '');
+  }
+  // geen bruikbaar vet blok: de eerste zin van wat er overblijft na de statusblokken (een zin eindigt vóór een hoofdletter)
+  const rest = appProjPlat(wat.replace(/\*\*([\s\S]+?)\*\*/g, function (x, b) { return APP_PROJ_STATUS.test(appProjPlat(b)) ? ' ' : b; })).replace(/^[\s:;.—-]+/, '');
+  const zin = (/^(.+?[.!?])\s+(?=[A-ZÀ-Ý"'(])/.exec(rest) || [null, rest])[1];
+  return zin.charAt(0).toUpperCase() + zin.slice(1);
+}
+// Eén tabelrij in cellen. Een | binnen [[…]] (alias) is geen kolomscheiding (Fable wv373 M1).
+function appProjCellen(regel) {
+  const r = regel.replace(/\[\[[^\]]*\]\]/g, function (x) { return x.replace(/\|/g, '\u0001'); });
+  const c = r.split(/(?<!\\)\|/).map(function (x) { return x.replace(/\u0001/g, '|').trim(); });
+  return c.slice(1, c.length - 1);
+}
+function appProjDeadlines(tekst, vandaag, fouten) {
+  const sectie = String(tekst).split(/^## Actueel\s*$/m)[1];
+  if (sectie === undefined) { fouten.push('het deadline-register heeft geen sectie Actueel'); return []; }
+  const regels = sectie.split(/^## /m)[0].split('\n'), uit = [], jaar = Number(vandaag.slice(0, 4));
+  let scheef = 0;
+  regels.forEach(function (regel) {
+    if (!/^\|\s*\d{4}-\d{2}/.test(regel)) return;
+    const c = appProjCellen(regel);
+    if (c.length !== 6) { scheef++; return; }
+    const datum = c[0], wat = c[2];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(datum)) return;
+    const eerste = /^\s*\*\*([\s\S]+?)\*\*/.exec(wat);
+    const kop = eerste ? appProjPlat(eerste[1]) : '';
+    if (APP_PROJ_DICHT.test(kop) || /niet meer seinen/i.test(kop) || /^\s*(vervallen|geen actie)/i.test(appProjPlat(c[3]))) return;
+    if (appBsnAchtig(regel)) return;   // vangnet grondwet 3: hele rij weg
+    const ents = appProjEntiteiten(c[1]);
+    if (!ents) return;
+    const dagen = Math.round((Date.parse(datum + 'T12:00:00Z') - Date.parse(vandaag + 'T12:00:00Z')) / 86400000);
+    const sein = Number(String(c[4]).replace(/\D/g, '')) || 0;
+    const bronPad = appProjWikiPaden(c[5])[0] || null;
+    uit.push({ datum: datum, dagen: dagen, ents: ents,
+      titel: appKort(appProjMasker(appProjTitel(wat), jaar), 160) || '(zonder titel)',
+      actie: appKort(appProjMasker(appProjPlat(c[3]), jaar), 120),
+      sein: dagen >= 0 && dagen <= sein,
+      bron: { naam: bronPad ? appKort(appProjPlat('[[' + (/\[\[([^\]]+)\]\]/.exec(c[5]) || [null, bronPad])[1] + ']]'), 80) : appKort(appProjPlat(c[5]), 80), pad: bronPad },
+      hr: /\/(Medewerkers|Gesprekken)\//.test(regel) });
+  });
+  if (scheef) fouten.push(scheef + (scheef === 1 ? ' regel' : ' regels') + ' in het deadline-register kon ik niet lezen (kolommen kloppen niet)');
+  return uit.sort(function (a, b) { return a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : 0; });
+}
+// Voornamen van medewerkers per praktijk (bestandsnamen in Medewerkers/), alleen als ze bij één praktijk horen.
+function appProjNamen() {
+  const v = appProjVault(), n = {};
+  [['TG', 'Tolgaarde'], ['GH', 'Groenhouten']].forEach(function (p) {
+    let l = [];
+    try { l = fs.readdirSync(path.join(v, '10_Zakelijk', p[1], 'Medewerkers')); } catch (e) { return; }
+    l.forEach(function (f) {
+      const m = /^([A-ZÀ-Ý][a-zà-ÿ]{3,})\b/.exec(f);
+      if (m && !/^(Gesprekken|Index|David)$/.test(m[1])) n[m[1]] = n[m[1]] && n[m[1]] !== p[0] ? 'meer' : p[0];
+    });
+  });
+  try {
+    fs.readdirSync(path.join(v, '20_Prive', 'Familie')).forEach(function (f) {
+      const m = /^([A-ZÀ-Ý][a-zà-ÿ]{2,})\b/.exec(f);
+      if (m && !/^(Index|David)$/.test(m[1])) n[m[1]] = n[m[1]] && n[m[1]] !== 'PRIVE' ? 'meer' : 'PRIVE';
+    });
+  } catch (e) {}
+  return n;
+}
+function appProjLopend(tekst, vandaag, fouten) {
+  const sectie = String(tekst).split(/^## Lopende zaken\s*$/m)[1];
+  if (sectie === undefined) { fouten.push('het werkgeheugen heeft geen sectie Lopende zaken'); return []; }
+  const jaar = Number(vandaag.slice(0, 4)), namen = appProjNamen(), uit = [];
+  sectie.split(/^## /m)[0].split('\n').forEach(function (regel) {
+    if (!/^- /.test(regel)) return;
+    const ruw = regel.slice(2);
+    if (appBsnAchtig(ruw) || APP_PROJ_SYS.test(ruw)) return;
+    const vet = /^\s*\*\*([\s\S]+?)\*\*/.exec(ruw);
+    const titel = vet ? appProjPlat(vet[1]).replace(/[.:]\s*$/, '') : '';
+    const rest = appProjPlat(vet ? ruw.slice(vet.index + vet[0].length) : ruw).replace(/^[\s:.—-]+/, '').replace(/\s*→\s*$/, '');
+    let ents = [];
+    const paden = appProjWikiPaden(ruw);
+    paden.forEach(function (p) {
+      const s = p.split('/'), c = s[0] === '20_Prive' ? ['PRIVE'] : s[0] === '10_Zakelijk' ? appProjHerken(s[1] === 'POT_POH_GGZ' ? 'POT' : s[1] === 'DBH' ? 'DBH' : s[1] === 'Projecten' ? 'Projecten' : s[1] || '') : [];
+      c.forEach(function (x) { if (ents.indexOf(x) < 0) ents.push(x); });
+    });
+    if (!ents.length) {
+      appProjHerken(appProjPlat(ruw).replace(/^/, ' ')).forEach(function (x) { if (ents.indexOf(x) < 0) ents.push(x); });
+      appProjPlat(ruw).split(/[^A-Za-zÀ-ÿ]+/).forEach(function (w) { const c = namen[w]; if (c && c !== 'meer' && ents.indexOf(c) < 0) ents.push(c); });
+    }
+    const bronPad = paden[0] || null;
+    uit.push({ ents: ents.length ? ents : ['OVERIG'], titel: appKort(appProjMasker(titel || rest, jaar), 160),
+      tekst: titel ? appKort(appProjMasker(rest, jaar), 280) : '', bron: bronPad ? { naam: appKort(bronPad.split('/').pop(), 80), pad: bronPad } : null });
+  });
+  return uit;
+}
+function appProjMtime(p) { try { return fs.statSync(p).mtimeMs; } catch (e) { return null; } }
+function appProjecten() {
+  const v = appProjVault(), pd = path.join(v, '00_Systeem', 'Deadlines.md'), pa = path.join(v, '00_Systeem', 'actueel.md');
+  const vandaag = appYmd(Date.now()), sleutel = [appProjMtime(pd), appProjMtime(pa), vandaag].join('|');
+  const c = appStaat.projecten;
+  if (c && c.sleutel === sleutel) return c.data;
+  const fouten = [];
+  let dl = null, lo = null;
+  try { dl = appProjDeadlines(fs.readFileSync(pd, 'utf8'), vandaag, fouten); } catch (e) { logError('app-projecten', e); fouten.push('het deadline-register is nu niet te lezen'); }
+  try { lo = appProjLopend(fs.readFileSync(pa, 'utf8'), vandaag, fouten); } catch (e) { logError('app-projecten', e); fouten.push('het werkgeheugen (lopende zaken) is nu niet te lezen'); }
+  if (dl === null && lo === null) throw new Error('projecten: geen bron leesbaar');
+  const data = { vandaag: vandaag, deadlines: dl || [], lopend: lo || [], fouten: fouten, op: Date.now() };
+  appStaat.projecten = { sleutel: sleutel, data: data };
+  return data;
+}
+// ── Drive-link per bronpagina (zoals werkkamer-verversen): rclone lsjson van de map, alleen-lezen, één tegelijk ──
+const APP_PROJ_DRIVE_MS = 60 * 60 * 1000, APP_PROJ_RCLONE_MS = 15000, APP_PROJ_WACHT_MS = 5000, APP_PROJ_MAPPEN = 30;
+appStaat.projDrive = appStaat.projDrive || { mappen: {}, bezig: null, uitTot: 0 };
+function appProjMapOk(m) { return /^(00|01|10|20|30)_[^\0]*$/.test(m) && m.split('/').every(function (s) { return s && s !== '..' && s !== '.' && s[0] !== '-'; }); }
+function appProjLsjson(map) {
+  return new Promise(function (ok) {
+    const remote = (process.env.APP_DRIVE_REMOTE || 'gdrive:AI_SecondBrain') + '/' + map;
+    require('child_process').execFile(process.env.APP_RCLONE_BIN || 'rclone', ['lsjson', '--files-only', '--no-modtime', '--no-mimetype', '--', remote],
+      { timeout: APP_PROJ_RCLONE_MS, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, windowsHide: true }, function (e, uit) {
+        if (e) { logError('app-projecten-drive', e); return ok(e.code === 'ENOENT' ? 'weg' : null); }
+        try {
+          const l = JSON.parse(uit), ids = {};
+          (Array.isArray(l) ? l : []).forEach(function (x) { if (x && typeof x.Name === 'string' && /^[A-Za-z0-9_-]{10,}$/.test(String(x.ID || ''))) ids[x.Name] = x.ID; });
+          ok(ids);
+        } catch (e2) { logError('app-projecten-drive', e2); ok(null); }
+      });
+  });
+}
+function appProjDriveVul(mappen) {
+  const D = appStaat.projDrive;
+  if (D.bezig) return D.bezig;
+  if (Date.now() < D.uitTot) return Promise.resolve();
+  const nodig = mappen.filter(function (m) { const x = D.mappen[m]; return !x || Date.now() - x.op > APP_PROJ_DRIVE_MS; }).slice(0, APP_PROJ_MAPPEN);
+  if (!nodig.length) return Promise.resolve();
+  D.bezig = (async function () {
+    for (const m of nodig) {
+      const r = await appProjLsjson(m);
+      if (r === 'weg') { D.uitTot = Date.now() + APP_PROJ_DRIVE_MS; break; }   // geen rclone: een uur niet opnieuw
+      D.mappen[m] = { op: Date.now(), ids: r };   // null = fout: ook een uur niet opnieuw (Fable wv373 M5)
+    }
+  })().finally(function () { D.bezig = null; });
+  return D.bezig;
+}
+function appProjLink(pad) {
+  if (!pad || pad.indexOf('/') < 0) return null;
+  const map = pad.slice(0, pad.lastIndexOf('/')), naam = pad.slice(pad.lastIndexOf('/') + 1) + '.md';
+  const x = appStaat.projDrive.mappen[map];
+  return x && x.ids && x.ids[naam] ? 'https://drive.google.com/file/d/' + x.ids[naam] + '/view' : null;
+}
+async function appProjectenRoute(req, res, a) {
+  res._app.stil = true;   // de app leest bij openen en op Ververs
+  let d;
+  try { d = appProjecten(); } catch (e) { logError('app-projecten', e); return appWeiger(res, 503, 'de projecten zijn nu niet te lezen', 'projecten fout'); }
+  const vast = !!(a && a.soort === 'vast');
+  const per = {};
+  APP_PROJ_ENT.forEach(function (e) { per[e.code] = { code: e.code, naam: e.naam, prive: !!e.prive, deadlines: [], later: 0, verlopen: 0, lopend: [] }; });
+  const zicht = function (e) { return !(vast && per[e].prive); };
+  d.deadlines.forEach(function (x) {
+    if (vast && x.hr) return;   // Fable wv373 M4: geen medewerkersregels op een praktijk-pc
+    x.ents.forEach(function (e) {
+      if (!zicht(e)) return;
+      const p = per[e];
+      if (x.dagen < -APP_PROJ_TERUG) { p.verlopen++; return; }
+      if (x.dagen > APP_PROJ_DAGEN_VOORUIT) return;
+      if (p.deadlines.length >= APP_PROJ_MAX) { p.later++; return; }
+      p.deadlines.push({ datum: x.datum, dagen: x.dagen, titel: x.titel, actie: x.actie, sein: x.sein, bron: x.bron.pad || x.bron.naam ? { naam: x.bron.naam, pad: x.bron.pad } : null });
+    });
+  });
+  if (!vast) d.lopend.forEach(function (x) { x.ents.forEach(function (e) { per[e].lopend.push({ titel: x.titel, tekst: x.tekst, bron: x.bron }); }); });
+  const lijst = APP_PROJ_ENT.map(function (e) { return per[e.code]; }).filter(function (e) { return zicht(e.code) && (e.deadlines.length || e.lopend.length); });
+  // Drive-links: hooguit 5 s wachten, daarna zonder (de volgende Ververs heeft ze)
+  const mappen = [];
+  lijst.forEach(function (e) { e.deadlines.concat(e.lopend).forEach(function (x) { const p = x.bron && x.bron.pad; if (p && p.indexOf('/') > 0) { const m = p.slice(0, p.lastIndexOf('/')); if (appProjMapOk(m) && mappen.indexOf(m) < 0) mappen.push(m); } }); });
+  // Alleen wachten (hooguit 5 s) als er nog bijna niets bekend is; anders vult hij op de achtergrond aan en geldt de volgende Ververs.
+  const bekend = mappen.filter(function (m) { return appStaat.projDrive.mappen[m]; }).length;
+  const vul = appProjDriveVul(mappen).catch(function (e) { logError('app-projecten-drive', e); });
+  if (bekend * 2 < mappen.length) await Promise.race([vul, new Promise(function (ok) { setTimeout(ok, APP_PROJ_WACHT_MS); })]);
+  const metLink = function (b) { return b ? { naam: b.naam, link: appProjLink(b.pad) } : null; };
+  lijst.forEach(function (e) {
+    e.deadlines = e.deadlines.map(function (x) { return Object.assign({}, x, { bron: metLink(x.bron) }); });
+    e.lopend = e.lopend.map(function (x) { return Object.assign({}, x, { bron: metLink(x.bron) }); });
+  });
+  appStuur(res, 200, { ok: true, vaste_plek: vast, vandaag: d.vandaag, entiteiten: lijst, fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
+}
+
 // ── seintjes (web-push zonder inhoud) ──
 function appPushLees() {
   const p = appLeesStreng(APP_PUSH, { versie: 1, apparaten: {} });
@@ -7846,6 +8086,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/modellen') return appModellenZet(req, res, reg, a, s, d);
         if (route === 'GET /app/vandaag') return appVandaagRoute(req, res, a);
         if (route === 'GET /app/praktijken') return appPraktijkenRoute(req, res, a);
+        if (route === 'GET /app/projecten') return appProjectenRoute(req, res, a);   // wv373
         if (route === 'POST /app/actie') return appActieRoute(req, res, a, d);
         if (route === 'GET /app/voor-jou') return appVoorJouRoute(req, res, a);   // wv335
         if (route.indexOf('GET /app/voor-jou/') === 0) return appVoorJouDetail(req, res, a, route.slice('GET /app/voor-jou/'.length));

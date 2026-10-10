@@ -347,7 +347,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVandaagActieDetail, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVandaagActieDetail, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -4652,6 +4652,128 @@ async function bewijs(o) {
       const v = H.appVouw('\u0130\u00e9\ud83d\ude00\u00c4');
       toets('28 vouwen: per gevouwen eenheid een index in het origineel (İ en é zonder teken, emoji heel)', v.v === 'ie\ud83d\ude00a' && JSON.stringify(v.idx) === JSON.stringify([0, 1, 2, 2, 4, 5]), JSON.stringify(v));
       if (mkVoor === null) fs.unlinkSync(LOGMK); else fs.writeFileSync(LOGMK, mkVoor, { mode: 0o600 });
+    }
+
+    // ── 29. wv373: tab Projecten (bouwplan § 4.9d): deadlines en lopende zaken per entiteit, alleen lezen, deterministisch ──
+    {
+      const sN = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      if (sN) sN.tot = Date.now() + 10 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      r = await vraag('GET', '/app/projecten', undefined, { pot: pot() });
+      toets('29 GET /app/projecten zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      const ymd = (t) => new Date(t).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
+      const plus = (d, n) => { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+      const V = ymd(Date.now()), J = Number(V.slice(0, 4));
+      const SYS = path.join(VAULT_T, '00_Systeem'); fs.mkdirSync(SYS, { recursive: true });
+      const DL = path.join(SYS, 'Deadlines.md'), AC = path.join(SYS, 'actueel.md');
+      const rij = (d, ent, wat, actie, sein, bron) => '| ' + d + ' | ' + ent + ' | ' + wat + ' | ' + actie + ' | ' + sein + ' | ' + bron + ' |';
+      const dlTekst = ['---', 'type: register', '---', '# Deadlines', '', '## Actueel', '', '| Datum | Entiteit | Wat | Actie | Signaleer | Bron |', '|---|---|---|---|---|---|',
+        rij(plus(V, 3), 'Groenhouten', '**Roos — contract bespreken** op de praktijk', 'David: gesprek voeren', 1, '[[10_Zakelijk/Groenhouten/Medewerkers/Roos Evers\\|Roos Evers]]'),
+        // M1: pipe in de wikilink zonder backslash
+        rij(plus(V, 8), 'POT / POH-Jeugd', '**Begroting per praktijk aanleveren** zie [[10_Zakelijk/POT_POH_GGZ/jeugd-ggz|jeugd]] en verder', 'David: naar Berdien', 14, '[[10_Zakelijk/POT_POH_GGZ/Notulen/Overleg|overleg gemeente]]'),
+        // HEROPEND opent een rij, ook al staat er verderop VERVALLEN
+        rij(plus(V, 8), 'POT / beide praktijken', '**HEROPEND 8-10 (overleg): levert de begroting.** Eerder: **VERVALLEN 5-10 (opgave David): niet meer seinen.** GEMETEN 4-10: niets. **Subsidieaanvraag POH-Jeugd indienen — elke praktijk zelf.** Verder.', 'David: indienen', 14, '[[10_Zakelijk/POT_POH_GGZ/jeugd-ggz\\|Jeugd-GGZ]]'),
+        rij(plus(V, 5), 'Tolgaarde', '**AFGEHANDELD 9-10 (opgave David): verstuurd.** **Iets dat klaar is**', 'David', 0, ''),
+        rij(plus(V, 5), 'Tolgaarde', '**Oud ding**', 'vervallen — geen actie', 0, ''),
+        rij(plus(V, 6), 'HAGRO', '**CAHAG-Cursusdag COPD/astma**, Zwolle, **€ 235**. Indeling op volgorde.', 'David of POH-S: inschrijven', 30, '[[10_Zakelijk/HAGRO/index\\|HAGRO]]'),
+        rij(plus(V, 7), 'Groenhouten', '**GEMETEN 3-10 (sein):** in de map staat een factuur onder abonnee **90941**, € 255. Wat is aangevraagd zegt de mail niet.', 'David: navragen', 60, ''),
+        rij(plus(V, 9), 'Tolgaarde/HAGRO (ONTiE)', 'NZa laat de prestaties **vervallen** — bekostiging herijken', 'ONTiE-driehoek', 60, ''),
+        rij(plus(V, 10), 'Holding / Privé', 'Verantwoording subsidie (max. € 34.071) bij de gemeente. Tweede zin.', 'David', 0, ''),
+        rij(plus(V, 11), 'POT / kostenmaatschap', '**Kostenverdeling aanleveren**', 'David', 0, ''),
+        rij(plus(V, 12), 'Privé / Fiore school', '**Studiedag — leerlingen vrij.**', 'David', 0, ''),
+        rij(plus(V, 13), 'Systeem', '**API-key van de pod verloopt**', 'David', 0, ''),
+        rij(plus(V, 14), 'Projecten/H&O Subsidie', '**Terugkoppeling aan VEZN**', 'David', 0, '[[10_Zakelijk/Projecten/H&O_Subsidie/Uren\\|Urenreconstructie]]'),
+        // vangnet: BSN (elfproef) -> rij weg; het woord geboortedatum -> blijft; een oude volledige datum -> gemaskeerd
+        rij(plus(V, 15), 'Tolgaarde', '**Contract opmaken** met BSN 111222333 erin', 'David', 0, ''),
+        rij(plus(V, 16), 'Tolgaarde', '**Contract en rooster Jacqueline** — NAW/geboortedatum/BSN opvragen', 'David', 0, ''),
+        rij(plus(V, 17), 'Privé / Cynthia', '**Cynthia is jarig (21-12-' + (J - 41) + ', wordt 41).**', 'Socev: suggesties', 21, ''),
+        rij(plus(V, 18), 'LHV Midden-Nederland', '**28-9 (opgave David): niet meer seinen.** Oud', 'David', 0, ''),
+        rij(plus(V, -3), 'Groenhouten', '**Net verlopen**', 'David', 0, ''),
+        rij(plus(V, -30), 'Groenhouten', '**Lang verlopen**', 'David', 0, ''),
+        rij(plus(V, 500), 'Groenhouten', '**Heel ver weg**', 'David', 0, ''),
+        rij('2026-09', 'Groenhouten', 'Alleen een maand', 'David', 0, ''),
+        '| ' + plus(V, 20) + ' | Groenhouten | **Scheve rij** | te weinig |',
+        '', '## Kandidaten', '', rij(plus(V, 2), 'Tolgaarde', '**Kandidaat — telt niet**', 'David', 0, ''), ''].join('\n');
+      const veel = [];
+      for (let i = 0; i < 45; i++) veel.push(rij(plus(V, 30 + i), 'Kostenmaatschap', '**Reeks ' + i + '**', 'David', 0, ''));
+      fs.writeFileSync(DL, dlTekst.replace('\n\n## Kandidaten', '\n' + veel.join('\n') + '\n\n## Kandidaten'));
+      fs.writeFileSync(AC, ['---', 'type: werkgeheugen', '---', '# Actueel', '', '## Lopende zaken',
+        '- **Knietraject.** OK di 20-10. → [[10_Zakelijk/Tolgaarde/Medewerkers/Belinda Klinkhamer - POH-S]]',
+        '- **Glas op de balie Groenhouten:** offerte vragen; Todoist ma 12-10. → [[10_Zakelijk/Groenhouten/Leveranciers en ICT-contracten]]',
+        '- **Spraak via de telefoon (Tasker):** werkt sinds 9-10 (machinekamer).',
+        '- **Ilvy:** vraag aan school over PO aardrijkskunde.',
+        '- **Tweede voorschot POH-Jeugd Groenhouten** (€ 17.035,50) nog niet binnen.',
+        '- **Wachtend op anderen:** Kooloos, Meander.',
+        '', '## Komende dagen', '- **Za:** niets', ''].join('\n'));
+      fs.mkdirSync(path.join(VAULT_T, '20_Prive', 'Familie'), { recursive: true }); fs.writeFileSync(path.join(VAULT_T, '20_Prive', 'Familie', 'Ilvy.md'), '# Ilvy\n');
+      // nep-rclone: lsjson van een map -> IDs; 'traag' in de map laat hem 7 s slapen
+      const RC = path.join(W, 'nep-rclone.sh'), RCLOG = path.join(W, 'nep-rclone.log');
+      fs.writeFileSync(RC, '#!/bin/bash\necho "$@" >> ' + RCLOG + '\nm="${@: -1}"\ncase "$m" in *traag*) sleep 7;; esac\ncase "$m" in\n' +
+        '  */10_Zakelijk/POT_POH_GGZ) echo \'[{"Path":"jeugd-ggz.md","Name":"jeugd-ggz.md","ID":"1PotJeugdGgzAbc"}]\';;\n' +
+        '  */10_Zakelijk/Groenhouten) echo \'[{"Path":"Leveranciers en ICT-contracten.md","Name":"Leveranciers en ICT-contracten.md","ID":"1GhLevAbcdef"}]\';;\n' +
+        '  *) echo \'[]\';;\nesac\n', { mode: 0o755 });
+      ctx.process.env.APP_RCLONE_BIN = RC; ctx.process.env.APP_DRIVE_REMOTE = 'nep:AI_SecondBrain';
+      H.appStaat.projecten = null; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
+      const dataVoor = fs.readdirSync(DATA).sort().join(',');
+      const nAudit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
+      const j = r.j || {}, E = {};
+      (j.entiteiten || []).forEach((e) => { E[e.code] = e; });
+      toets('29 200, entiteiten in vaste volgorde, vaste_plek false, vandaag', r.status === 200 && (j.entiteiten || []).map((e) => e.code).join() === 'TG,GH,POT,KM,HOLD,PROJ,REGIO,PRIVE,OVERIG' && j.vaste_plek === false && j.vandaag === V && !!j.bijgewerkt, JSON.stringify((j.entiteiten || []).map((e) => e.code)) + ' ' + JSON.stringify(j.fouten));
+      toets('29 scheve rij -> één regel in fouten (niet stil overgeslagen)', j.fouten && j.fouten.length === 1 && /1 regel in het deadline-register kon ik niet lezen/.test(j.fouten[0]), JSON.stringify(j.fouten));
+      const titels = (c) => (E[c] ? E[c].deadlines.map((x) => x.titel) : []);
+      const alle = Object.keys(E).flatMap(titels);
+      toets('29 M1 pipe in een wikilink: 6 cellen, actie en bron kloppen (alias als naam)', E.POT && E.POT.deadlines.some((x) => x.titel === 'Begroting per praktijk aanleveren' && x.actie === 'David: naar Berdien' && x.bron && x.bron.naam === 'overleg gemeente'), JSON.stringify(E.POT && E.POT.deadlines));
+      toets('29 HEROPEND-rij open, titel = eerste niet-statusblok dat een zin opent; AFGEHANDELD en "vervallen — geen actie" dicht', titels('POT').includes('Subsidieaanvraag POH-Jeugd indienen — elke praktijk zelf.') && titels('TG').includes('Subsidieaanvraag POH-Jeugd indienen — elke praktijk zelf.') && !alle.some((t) => /klaar is|Oud ding|Kandidaat/.test(t)), JSON.stringify(titels('TG')));
+      toets('29 M2 titels: CAHAG (niet "€ 235"), vet woord midden in een zin is geen titel (90941, vervallen), eerste zin niet afgekapt na "max."',
+        titels('REGIO').includes('CAHAG-Cursusdag COPD/astma') && titels('GH').includes('In de map staat een factuur onder abonnee 90941, € 255.') && titels('TG').includes('NZa laat de prestaties vervallen — bekostiging herijken') && titels('HOLD').includes('Verantwoording subsidie (max. € 34.071) bij de gemeente.'), JSON.stringify([titels('REGIO'), titels('GH'), titels('HOLD')]));
+      toets('29 indeling: kostenmaatschap vóór POT, Holding / Privé onder beide, Systeem nergens, Privé herkend (é), Projecten', titels('KM')[0] === 'Kostenverdeling aanleveren' && !titels('POT').includes('Kostenverdeling aanleveren') && titels('PRIVE').includes('Verantwoording subsidie (max. € 34.071) bij de gemeente.') && !alle.some((t) => /API-key/.test(t)) && titels('PRIVE').includes('Studiedag — leerlingen vrij.') && titels('PROJ')[0] === 'Terugkoppeling aan VEZN', JSON.stringify([titels('KM').slice(0, 2), titels('PRIVE'), titels('PROJ')]));
+      toets('29 M3 vangnet: BSN-rij weg, "geboortedatum opvragen" blijft, oude volledige datum gemaskeerd; "28-9 (opgave …) niet meer seinen" dicht', !alle.some((t) => /Contract opmaken/.test(t)) && titels('TG').includes('Contract en rooster Jacqueline') && titels('PRIVE').includes('Cynthia is jarig ([datum], wordt 41).') && !JSON.stringify(j).includes('21-12-' + (J - 41)) && !titels('REGIO').includes('Oud'), JSON.stringify(titels('PRIVE')));
+      const gh = E.GH || { deadlines: [] };
+      toets('29 net verlopen (≤ 7 d) staat erbij met negatieve dagen, ouder telt als verlopen, > 400 d en "2026-09" niet', gh.deadlines.some((x) => x.titel === 'Net verlopen' && x.dagen === -3) && !gh.deadlines.some((x) => /Lang verlopen|Heel ver/.test(x.titel)) && gh.verlopen === 1 && !JSON.stringify(gh).includes('Alleen een maand'), JSON.stringify([gh.verlopen, gh.deadlines.map((x) => x.titel + x.dagen)]));
+      toets('29 gesorteerd op datum, sein binnen de termijn, hooguit 40 per entiteit + later', gh.deadlines.every((x, i, a) => !i || a[i - 1].datum <= x.datum) && gh.deadlines.some((x) => x.titel.startsWith('Roos') && x.sein === false && x.dagen === 3) && E.POT.deadlines.some((x) => x.sein === true) && E.KM.deadlines.length === 40 && E.KM.later === 6, JSON.stringify([E.KM.deadlines.length, E.KM.later]));
+      const lo = (c) => (E[c] ? E[c].lopend.map((x) => x.titel) : []);
+      toets('29 lopend: per wikilinkpad, anders op woorden; Tasker/machinekamer weg; voornaam uit Familie -> Privé; rest Overig', lo('TG').includes('Knietraject') && lo('GH').includes('Glas op de balie Groenhouten') && lo('GH').includes('Tweede voorschot POH-Jeugd Groenhouten') && lo('POT').includes('Tweede voorschot POH-Jeugd Groenhouten') && lo('PRIVE').includes('Ilvy') && lo('OVERIG').includes('Wachtend op anderen') && !JSON.stringify(j).includes('Tasker'), JSON.stringify([lo('TG'), lo('GH'), lo('PRIVE'), lo('OVERIG')]));
+      const glas = E.GH.lopend.find((x) => /Glas/.test(x.titel));
+      toets('29 Drive-link uit rclone lsjson (zelfde map, zelfde naam), anders null; geen markdown in de tekst', glas && glas.bron && glas.bron.link === 'https://drive.google.com/file/d/1GhLevAbcdef/view' && E.POT.deadlines.find((x) => /Subsidieaanvraag/.test(x.titel)).bron.link === 'https://drive.google.com/file/d/1PotJeugdGgzAbc/view' && E.PROJ.deadlines[0].bron.link === null && !/\*\*|\[\[/.test(JSON.stringify(j)), JSON.stringify([glas && glas.bron, E.PROJ.deadlines[0].bron]));
+      const rcRegels = fs.readFileSync(RCLOG, 'utf8').trim().split('\n');
+      toets('29 rclone: alleen lsjson --files-only met -- vóór het pad, één keer per map', rcRegels.every((l) => /^lsjson --files-only --no-modtime --no-mimetype -- nep:AI_SecondBrain\/(00|01|10|20|30)_/.test(l)) && new Set(rcRegels).size === rcRegels.length, rcRegels.join(' | '));
+      toets('29 200 schrijft geen auditregel en niets in de datamap', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAudit && fs.readdirSync(DATA).sort().join(',') === dataVoor);
+      // cache: zelfde mtime -> zelfde data, geen nieuwe rclone-aanroep binnen het uur; mtime anders -> opnieuw gelezen
+      const d1 = H.appStaat.projecten.data, nRc = rcRegels.length;
+      r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
+      toets('29 tweede keer uit het geheugen (geen nieuwe lezing, geen rclone)', r.status === 200 && H.appStaat.projecten.data === d1 && fs.readFileSync(RCLOG, 'utf8').trim().split('\n').length === nRc);
+      fs.writeFileSync(AC, fs.readFileSync(AC, 'utf8').replace('\n\n## Komende dagen', '\n- **Nieuw in Groenhouten** iets\n\n## Komende dagen')); const tt = new Date(Date.now() + 2000); fs.utimesSync(AC, tt, tt);
+      r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
+      toets('29 mtime anders -> opnieuw gelezen', r.status === 200 && H.appStaat.projecten.data !== d1 && JSON.stringify(r.j).includes('Nieuw in Groenhouten'));
+      // vaste plek (M4): geen Privé/Overig, geen medewerkersregels, geen Lopend
+      const nep = { _app: {}, writeHead(s) { this.st = s; }, end(x) { this.b = JSON.parse(x); } };
+      await H.appProjectenRoute({}, nep, { id: 'x', soort: 'vast' });
+      const vb = nep.b || {};
+      toets('29 vaste plek: alleen zakelijk, geen medewerkersregel (Roos), geen lopend, vaste_plek true', nep.st === 200 && vb.vaste_plek === true && vb.entiteiten.every((e) => !e.prive && e.lopend.length === 0) && !vb.entiteiten.some((e) => /^(PRIVE|OVERIG)$/.test(e.code)) && !JSON.stringify(vb).includes('Roos') && !JSON.stringify(vb).includes('Cynthia is jarig'), JSON.stringify(vb.entiteiten && vb.entiteiten.map((e) => e.code)));
+      // traag rclone: antwoord binnen ± 5 s zonder link; rclone weg: geen link, geen fout naar de app
+      fs.appendFileSync(DL, ''); H.appStaat.projecten = null; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
+      fs.writeFileSync(AC, fs.readFileSync(AC, 'utf8').replace('Leveranciers en ICT-contracten]]', 'traag/Leveranciers]]'));
+      let t0 = Date.now();
+      r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
+      const msT = Date.now() - t0, glasT = (r.j.entiteiten.find((e) => e.code === 'GH') || { lopend: [] }).lopend.find((x) => /Glas/.test(x.titel));
+      toets('29 trage rclone: antwoord na ± 5 s (≤ 6,5 s), die link ontbreekt, de rest komt (' + msT + ' ms)', r.status === 200 && msT >= 4500 && msT < 6500 && glasT && glasT.bron.link === null, JSON.stringify([msT, glasT && glasT.bron]));
+      await new Promise((ok) => setTimeout(ok, 3000));   // de trage aanroep loopt af
+      H.appStaat.projecten = null; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 }; ctx.process.env.APP_RCLONE_BIN = path.join(W, 'bestaat-niet-rclone');
+      r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
+      toets('29 geen rclone: geen links, geen fout naar de app, een uur niet opnieuw', r.status === 200 && r.j.fouten.length === 1 && !JSON.stringify(r.j).includes('drive.google.com') && H.appStaat.projDrive.uitTot > Date.now() + 50 * 60000, JSON.stringify(r.j.fouten));
+      // één bron weg -> regel in fouten; beide weg -> 503 (met auditregel)
+      const acBewaar = fs.readFileSync(AC, 'utf8'), dlBewaar = fs.readFileSync(DL, 'utf8');
+      fs.unlinkSync(AC); H.appStaat.projecten = null;
+      r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
+      toets('29 werkgeheugen weg: deadlines wel, regel in fouten', r.status === 200 && r.j.fouten.some((f) => /werkgeheugen/.test(f)) && r.j.entiteiten.some((e) => e.deadlines.length), JSON.stringify(r.j.fouten));
+      fs.unlinkSync(DL); H.appStaat.projecten = null;
+      const nA2 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
+      toets('29 beide bronnen weg -> 503 in gewone taal', r.status === 503 && /projecten zijn nu niet te lezen/.test(r.j.fout), r.status + ' ' + JSON.stringify(r.j));
+      fs.writeFileSync(AC, acBewaar); fs.writeFileSync(DL, dlBewaar); H.appStaat.projecten = null; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
+      delete ctx.process.env.APP_RCLONE_BIN; delete ctx.process.env.APP_DRIVE_REMOTE;
+      void nA2;
     }
 
     // ── 10. noodstop en app-aan (7-10, Telegram /app-noodstop en /app-aan) ──
