@@ -2142,11 +2142,13 @@ function naHerstartTussenstand() {
     let tekst = ''; try { tekst = fs.readFileSync(eindVoorlopigPad(id), 'utf8'); } catch (e) {}
     let files = []; try { files = collectFiles(path.join(IO, id, 'out')); } catch (e) {}
     try { fs.rmSync(eindVoorlopigPad(id), { force: true }); } catch (e) {}
-    try { fs.rmSync(path.join(IO, id), { recursive: true, force: true }); } catch (e) {}
     a.eindcontrole = 'tussenstand gemeld na herstart';
     saveAgents();
-    sendReport(a, { ok: true, tussenstand: true, files: files,
-      output: EIND_LET_OP_HERSTART + '\n\nWat de agent als laatste schreef:\n' + (tekst.trim() || '(geen tekst)') });
+    const output = EIND_LET_OP_HERSTART + '\n\nWat de agent als laatste schreef:\n' + (tekst.trim() || '(geen tekst)');
+    sendReport(a, { ok: true, tussenstand: true, files: files, output: output });
+    // wv364: dezelfde bestanden ook in de tab Bestanden (na collectFiles: appBewaar verplaatst ze), dan pas de jobmap weg.
+    try { appBewaarAgent(id, a, path.join(IO, id, 'out'), output, true, true); } catch (e) { logError('herstart-appbewaar', e); }
+    try { fs.rmSync(path.join(IO, id), { recursive: true, force: true }); } catch (e) {}
   }
 }
 
@@ -2277,9 +2279,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     entry.status = 'done'; entry.ok = false; entry.error = agentFoutcode(r.error); entry.ended = Date.now(); saveAgents();
     sendReport(entry, r);
   } finally {
-    const route = appRoute(entry && entry.label);
-    appBewaar(jobId, outdir, { soort: 'agent', label: entry && entry.label, ok: entry ? entry.ok : null,
-      rapport: (route === 'machinekamer' || route === 'david') ? appRapport : null });
+    appBewaarAgent(jobId, entry, outdir, appRapport, entry ? entry.ok : null, false);
     try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) {}
     try { fs.rmSync(eindVoorlopigPad(jobId), { force: true }); } catch (e) {}
     if (entry && entry.voorlopig) { entry.voorlopig = false; saveAgents(); }
@@ -2404,9 +2404,7 @@ function weesAfleveren(id) {
   // Fable-review diff K2 wv211: niets tussen 'register' en sendReport mag het rapport tegenhouden.
   sendReport(a, r);
   try { autoNaAfloop(id, { ok: r.ok, output: r.output }, a.label); } catch (err) { logError('wees-auto', err); }
-  const route = appRoute(a.label);
-  try { appBewaar(id, outdir, { soort: 'agent', label: a.label, ok: r.ok, rapport: (route === 'machinekamer' || route === 'david') ? r.output : null }); }
-  catch (err) { logError('wees-appbewaar', err); }
+  try { appBewaarAgent(id, a, outdir, r.output, r.ok, false); } catch (err) { logError('wees-appbewaar', err); }
   try { fs.rmSync(path.join(IO, id), { recursive: true, force: true }); } catch (err) {}
   try { fs.rmSync(eindVoorlopigPad(id), { force: true }); } catch (err) {}
 }
@@ -2433,6 +2431,8 @@ function weesRonde() {
     // ronde: de rol is na een start eerst passief, Fable B2 wv211).
     try { weesAfronden(id); } catch (e) { logError('wees-afronden', e); }
   }
+  // wv364: bestanden van agents die bij een herstart sneuvelden alsnog in de tab Bestanden (alleen als primair).
+  if (rolPrimair()) { try { appGesneuveldRonde(nu); } catch (e) { logError('app-gesneuveld', e); } }
 }
 
 // Na het opstarten: wezen terug in jobs (zodat /result 'loopt nog' zegt en de stopknop werkt) en de ronde starten.
@@ -5730,7 +5730,8 @@ function appBewaar(jobId, outdir, meta) {
     let overgeslagen = 0, vol = false;
     if (kand.length && appStaat.bestandenTotaal > APP_BESTANDEN_TOTAAL_BYTES) { overgeslagen = kand.length; kand = []; vol = true; }
     if (!kand.length && !rapport) return null;
-    const op = new Date();
+    // wv364: een gesneuvelde agent krijgt zijn eigen eindtijd (map, sortering én de 30 dagen tellen vanaf dan, niet vanaf nu)
+    const op = (meta.op > 0 && meta.op <= Date.now()) ? new Date(meta.op) : new Date();
     const dir = path.join(APP_BESTANDEN_DIR, op.toISOString().slice(0, 10), jobId);
     fs.mkdirSync(path.join(dir, 'b'), { recursive: true, mode: 0o700 });
     const lijst = [], gehad = new Set();
@@ -5748,6 +5749,7 @@ function appBewaar(jobId, outdir, meta) {
     const m = { job_id: jobId, soort: meta.soort === 'agent' ? 'agent' : 'beurt', kanaal: meta.kanaal || null, app: !!meta.app,
       label: meta.label ? String(meta.label).slice(0, 160) : null, ok: meta.ok === undefined ? null : !!meta.ok, op: op.toISOString(),
       bestanden: lijst, overgeslagen: overgeslagen, vol: vol, rapport: !!rapport };
+    if (meta.na_herstart) m.na_herstart = true;
     const tmp = path.join(dir, 'meta.json.nieuw');
     fs.writeFileSync(tmp, JSON.stringify(m), { mode: 0o600 });
     fs.renameSync(tmp, path.join(dir, 'meta.json'));
@@ -5755,6 +5757,49 @@ function appBewaar(jobId, outdir, meta) {
     appStaat.bestandenIndex = null;
     return m;
   } catch (e) { logError('app-bewaar', e); return null; }
+}
+// wv364: één ingang voor de bewaring van een AGENT: de finally van processAgent, de wees-aflevering, de tussenstand na een
+// herstart (naHerstartTussenstand) en gesneuvelde agents (appGesneuveldRonde). Rapport alleen bij route machinekamer:/david:
+// (§ 4.7). Idempotent per job via de registervlag app_bewaard: een tweede aanroep doet niets (en zou anders de meta van
+// dezelfde dag overschrijven met een lege lijst). naHerstart: meta.json krijgt na_herstart, eindtijd = entry.ended.
+function appBewaarAgent(jobId, entry, outdir, rapport, ok, naHerstart) {
+  if (entry && entry.app_bewaard) return null;
+  const route = appRoute(entry && entry.label);
+  const m = appBewaar(jobId, outdir, { soort: 'agent', label: entry && entry.label, ok: ok,
+    rapport: (route === 'machinekamer' || route === 'david') ? rapport : null,
+    na_herstart: !!naHerstart, op: naHerstart && entry ? entry.ended : null });
+  if (entry) { entry.app_bewaard = new Date().toISOString(); try { saveAgents(); } catch (e) { logError('app-bewaar', e); } }
+  return m;
+}
+// wv364 (K4 uit wv98): een agent die bij een containerherstart sneuvelde zonder tussenstand (status afgebroken-containerherstart,
+// geen voorlopig: dat doet naHerstartTussenstand) liet zijn out/ liggen tot niemand. Elke wees-ronde (30 s, alleen als
+// primair) verhuist die alsnog met appBewaar, zonder rapport (er is geen eindtekst). Rust-eis: de jongste wijziging in out/
+// is minstens APP_GESNEUVELD_RUST_MS oud, zodat een agent die toch nog leeft (weesLeeft is fail-closed) niet halverwege wordt
+// leeggehaald. Alleen eindtijden binnen de bewaartermijn; de jobmap zelf blijft staan (zoals voorheen; in/ is van niemand).
+const APP_GESNEUVELD_RUST_MS = 10 * 60 * 1000;
+function appGesneuveldRonde(nu) {
+  nu = nu || Date.now();
+  for (const id in agentsReg) {
+    const a = agentsReg[id];
+    if (!a || a.status !== 'afgebroken-containerherstart' || a.voorlopig || a.app_bewaard || !APP_JOB_RE.test(id)) continue;
+    if (!(a.ended > 0) || nu - a.ended > APP_BESTANDEN_MS) continue;
+    const outdir = path.join(IO, id, 'out');
+    let kand = [];
+    try { if (fs.lstatSync(outdir).isDirectory()) kand = appBewaarKandidaten(outdir); } catch (e) {}
+    if (kand.length) {
+      // jongste wijziging: bestanden én hun mappen (aanmaken/hernoemen raakt de map ook bij een bestand met oude mtime; Fable K7)
+      let jongst = 0;
+      const paden = new Set([outdir]);
+      kand.forEach(function (k) { paden.add(k.pad); paden.add(path.dirname(k.pad)); });
+      paden.forEach(function (p) { try { jongst = Math.max(jongst, fs.lstatSync(p).mtimeMs); } catch (e) {} });
+      if (nu - jongst < APP_GESNEUVELD_RUST_MS) continue;
+      // Opslag boven de grens: geen vlag, dus na het uurlijkse opruimen opnieuw (Fable M1 wv364)
+      if (appStaat.bestandenGemeten && appStaat.bestandenTotaal > APP_BESTANDEN_TOTAAL_BYTES) continue;
+    }
+    const m = appBewaarAgent(id, a, outdir, null, false, true);
+    if (m || kand.length) schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'app-gesneuveld', job_id: id,
+      bestanden: m ? m.bestanden.length : 0, overgeslagen: m ? m.overgeslagen : kand.length, fout: m ? null : 'niet bewaard (zie fouten)' }));
+  }
 }
 // Index van wat er bewaard is (jongste eerst); 20 s in het geheugen, leeggemaakt bij elke nieuwe bewaring of opruiming.
 function appBestandenIndex() {
@@ -5905,7 +5950,7 @@ async function appBestanden(req, res) {
     return { job_id: m.job_id, soort: m.soort, kanaal: m.kanaal, app: m.app, op: m.op,
       label: m.soort === 'agent' ? ((w && w.samenvatting) ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(m.label)) : m.soort === 'socev' ? 'bericht · ' + String(m.label || '').slice(0, 40) : null,
       bestanden: m.bestanden.map(function (b) { return { n: b.n, naam: appVeiligeNaam(b.naam, new Set()), grootte: b.grootte }; }),
-      overgeslagen: m.overgeslagen || 0, vol: m.vol === true };
+      overgeslagen: m.overgeslagen || 0, vol: m.vol === true, na_herstart: m.na_herstart === true };
   });
   appStuur(res, 200, { ok: true, items: lijst, bewaar_dagen: Math.round(APP_BESTANDEN_MS / 86400000) });
 }

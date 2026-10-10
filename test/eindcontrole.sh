@@ -19,7 +19,7 @@ let blok = src.slice(a, b)
   .replace('const EIND_BEZINK_MS = 5 * 1000;', 'const EIND_BEZINK_MS = 200;')
   .replace('}, 5000).unref();', '}, 400).unref();');
 const werk = fs.mkdtempSync(path.join(os.tmpdir(), 'eindtoets-'));
-const verzonden = [];
+const verzonden = [], bewaard = [];
 fs.mkdirSync(path.join(werk, 'jobout')); fs.writeFileSync(path.join(werk, 'jobout', 'herstart1.voorlopig.txt'), 'Waiting for the F5 round to finish.');
 fs.mkdirSync(path.join(werk, 'io', 'herstart1', 'out'), { recursive: true }); fs.writeFileSync(path.join(werk, 'io', 'herstart1', 'out', 'rapport.md'), 'skelet');
 const ctx = {
@@ -32,6 +32,8 @@ const ctx = {
   },
   collectFiles: function (d) { return fs.existsSync(d) ? fs.readdirSync(d).map(function (n) { return { name: n }; }) : []; },
   sendReport: function (e, res) { verzonden.push({ id: e.job_id, res: res }); },
+  // wv364: tussenstand na herstart ook naar de tab Bestanden; de stub kijkt of out/ op dat moment nog bestaat
+  appBewaarAgent: function (id, e, outdir, rapport, ok, naHerstart) { bewaard.push({ id: id, outBestaat: fs.existsSync(path.join(outdir, 'rapport.md')), rapport: rapport, naHerstart: naHerstart, naRapport: verzonden.length }); },
   projectDirFor: function () { return werk; },
   saveAgents: function () {}, schrijfLog: function () {}, logError: function (w, e) { console.log('logError', w, e); },
   runBrein: null,
@@ -165,6 +167,9 @@ const melding = function (id, status) { return '<task-notification>\n<task-id>' 
   const h = verzonden.filter(function (v) { return v.id === 'herstart1'; });
   toets('na herstart: voorlopig rapport alsnog verstuurd, met LET OP en bestanden', h.length === 1 && /^LET OP: tussenstand/.test(h[0].res.output) &&
     /Waiting for the F5/.test(h[0].res.output) && h[0].res.files.length === 1 && h[0].res.tussenstand === true);
+  toets('na herstart (wv364): bestanden naar de tab Bestanden, na het rapport, vóór het wissen van de jobmap, gemarkeerd na herstart',
+    bewaard.length === 1 && bewaard[0].id === 'herstart1' && bewaard[0].outBestaat && bewaard[0].naHerstart === true && bewaard[0].naRapport === 1 &&
+    /^LET OP: tussenstand/.test(bewaard[0].rapport) && !fs.existsSync(path.join(werk, 'io', 'herstart1')));
   toets('na herstart: zonder voorlopig-vlag niets verstuurd, en niets dubbel', verzonden.length === 1 && !fs.existsSync(path.join(werk, 'jobout', 'herstart1.voorlopig.txt')));
   toets('eindregel noemt wachtzin en run_in_background', /wachtzin/.test(T.AGENT_EINDREGEL) && /run_in_background/.test(T.AGENT_EINDREGEL));
   fs.rmSync(werk, { recursive: true, force: true });

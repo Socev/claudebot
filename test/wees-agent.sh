@@ -14,6 +14,8 @@
 #     rapport gaat pas als primair de deur uit (Fable B2 wv211), ook na een tussentijdse herstart van server.js (bevroren
 #     rapport in de jobmap, bestanden uit OUTDIR nog mee); de bovengrens-stop ook als passief
 #  L  wees die klaar is terwijl de pod primair is -> meteen afgeleverd
+#  K  (wv364) gesneuvelde agents (B, E) -> hun out/ alsnog in app-bestanden met na_herstart en hun eindtijd, alleen als
+#     primair, één keer; een wees (A) gewoon zonder na_herstart
 #  S  (wv216) stdin van elke claude-run is /dev/null; de nep-claude schrijft na de herstart naar stderr en stdout. Hij vangt
 #     EPIPE zelf af, dus dit toetst alleen de serverkant; het bewijs voor de echte CLI is test/cli-dode-pipe.sh (Fable K5)
 set -u
@@ -76,6 +78,7 @@ hook.listen(0, '127.0.0.1', async () => {
   let src = fs.readFileSync('server.js', 'utf8');
   [['const AGENT_START_SPREIDING_MS = 20 * 1000;', 'const AGENT_START_SPREIDING_MS = 200;'],
    ['const WEES_POLL_MS = 30 * 1000;', 'const WEES_POLL_MS = 400;'],
+   ['const APP_GESNEUVELD_RUST_MS = 10 * 60 * 1000;', 'const APP_GESNEUVELD_RUST_MS = 300;'],
    ['const KILL_GRACE_MS = 10 * 1000;', 'const KILL_GRACE_MS = 800;'],
    ['const ROL_INTERVAL_MS = 60 * 1000;', 'const ROL_INTERVAL_MS = 400;'],
    ['const ROL_INTERVAL_FOUT_MS = 15 * 1000;', 'const ROL_INTERVAL_FOUT_MS = 400;']].forEach(([a, b]) => {
@@ -98,6 +101,9 @@ hook.listen(0, '127.0.0.1', async () => {
   const start = () => { const k = spawn(process.execPath, [path.join(d, 'server.js')], { cwd: d, env: env, stdio: ['ignore', fs.openSync(path.join(W, 'server.out'), 'a'), fs.openSync(path.join(W, 'server.out'), 'a')] }); return k; };
   const klaar = async () => { for (let i = 0; i < 100; i++) { try { await vraag('GET', '/agents'); return; } catch (e) { await slaap(150); } } throw new Error('server kwam niet op'); };
   const reg = () => JSON.parse(fs.readFileSync(path.join(d, 'home', 'agent_jobs.json'), 'utf8'));
+  const appMeta = id => { const b = path.join(d, 'app-bestanden'); let r = null;
+    try { fs.readdirSync(b).forEach(dag => { const f = path.join(b, dag, id, 'meta.json'); if (fs.existsSync(f)) r = Object.assign(JSON.parse(fs.readFileSync(f, 'utf8')), { _dag: dag, _dir: path.dirname(f) }); }); } catch (e) {}
+    return r; };
   const wachtOp = async (fn, ms) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await fn()) return true; await slaap(200); } return false; };
   let s1, s2, vreemd;
   try {
@@ -142,6 +148,7 @@ hook.listen(0, '127.0.0.1', async () => {
     toets('E: (opzet) kleinkind leeft met de marker van de agent', kkMarker);
     toets('E: groepsleider dood, kleinkind met marker leeft -> afgebroken', st(ids.KLEINKIND).status === 'afgebroken-containerherstart', JSON.stringify(st(ids.KLEINKIND)));
     toets('C: pid van een vreemd proces (pid-hergebruik) -> afgebroken', st('vreemd00000000aa').status === 'afgebroken-containerherstart', JSON.stringify(st('vreemd00000000aa')));
+    toets('K: passief -> out/ van een gesneuvelde agent nog niet verhuisd', fs.existsSync(path.join(d, 'io', ids.DOOD, 'out', 'rapport-DOOD.md')) && !appMeta(ids.DOOD));
     toets('G: klaar terwijl server.js weg was -> als passief afgerond, rapport wacht', st(ids.GAP).status === 'done' && st(ids.GAP).rapport_wacht === true && st(ids.GAP).rapport === 'wacht-op-primair', JSON.stringify(st(ids.GAP)));
     const h = await vraag('GET', '/health');
     // D kan al op zijn bovengrens gestopt en (passief) afgerond zijn: dan telt hij bij rapport_wacht in plaats van lopend
@@ -202,6 +209,25 @@ hook.listen(0, '127.0.0.1', async () => {
     const L = rap(ids.LAAT);
     toets('L: als primair meteen afgeleverd, ok, geen wacht-vlag', L.ok === true && /KLAAR-WEES/.test(L.output || '') && st(ids.LAAT).status === 'done' && st(ids.LAAT).rapport === 'verzonden' && !st(ids.LAAT).rapport_wacht, JSON.stringify(st(ids.LAAT)));
     toets('nergens een dubbel rapport (5 rapporten, 5 jobs)', rapporten.length === 5 && new Set(rapporten.map(x => x.job_id)).size === 5, rapporten.map(x => x.job_id).join(','));
+    // ── K (wv364): gesneuvelde agents in de tab Bestanden ──
+    await wachtOp(() => appMeta(ids.DOOD) && appMeta(ids.KLEINKIND), 5000);
+    const rk = reg();
+    for (const [m, id] of [['DOOD', ids.DOOD], ['KLEINKIND', ids.KLEINKIND]]) {
+      const mt = appMeta(id) || {};
+      toets('K: ' + m + ' -> meta met na_herstart, soort agent, geen rapport, het bestand uit out/', mt.na_herstart === true && mt.soort === 'agent' && mt.rapport === false &&
+        JSON.stringify((mt.bestanden || []).map(b => b.naam)) === JSON.stringify(['rapport-' + m + '.md']), JSON.stringify(mt));
+      toets('K: ' + m + ' -> op = eindtijd van de agent (30 dagen tellen vanaf dan)', mt.op === new Date(rk[id].ended).toISOString() && mt._dag === mt.op.slice(0, 10), mt.op + ' vs ' + rk[id].ended);
+      toets('K: ' + m + ' -> verhuisd (out/ leeg), 0600, registervlag app_bewaard', !fs.existsSync(path.join(d, 'io', id, 'out', 'rapport-' + m + '.md')) &&
+        (fs.statSync(path.join(mt._dir, 'b', '1')).mode & 0o777) === 0o600 && !!rk[id].app_bewaard && fs.readFileSync(path.join(mt._dir, 'b', '1'), 'utf8') === 'skelet ' + m);
+    }
+    const mw = appMeta(ids.WEES) || {};
+    toets('K: wees (A) bewaard zonder na_herstart, met rapport (route machinekamer)', !mw.na_herstart && mw.rapport === true && (mw.bestanden || []).some(b => b.naam === 'rapport-WEES.md'), JSON.stringify(mw));
+    toets('K: entry zonder geldig job-id (vreemd) -> niets bewaard', !appMeta('vreemd00000000aa'));
+    const mvoor = fs.readFileSync(path.join(appMeta(ids.DOOD)._dir, 'meta.json'), 'utf8');
+    fs.writeFileSync(path.join(d, 'io', ids.DOOD, 'out', 'laat.md'), 'te laat');
+    await slaap(1500);
+    toets('K: idempotent -> een tweede ronde verhuist niets en laat meta.json ongemoeid', fs.existsSync(path.join(d, 'io', ids.DOOD, 'out', 'laat.md')) &&
+      fs.readFileSync(path.join(appMeta(ids.DOOD)._dir, 'meta.json'), 'utf8') === mvoor);
     const stdinRegels = fs.readFileSync(path.join(W, 'stdin.log'), 'utf8').trim().split('\n');
     toets('S: stdin van elke claude-run is /dev/null', stdinRegels.length >= 7 && stdinRegels.every(x => / \/dev\/null$/.test(x)), stdinRegels.join(' | '));
     const levend = [ids.WEES, ids.LAAT].every(id => /KLAAR-WEES/.test(rap(id).output || ''));

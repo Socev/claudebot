@@ -1535,7 +1535,9 @@ async function bewijs(o) {
       // haakjes in de pod: processJob alleen hoofdkanaal/machinekamer en nooit 'lezen'; processAgent rapport alleen machinekamer/david
       const volSrc = fs.readFileSync('server.js', 'utf8');
       toets('11 processJob bewaart alleen 40687/telegram-debug/cijfer-meester (wv200), nooit lezen', /if \(gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT\[chatId\]\) appBewaar\(/.test(volSrc) && /APP_KANAAL_VAN_CHAT = \{ '40687': 'hoofd', 'telegram-debug': 'machinekamer', 'cijfer-meester': 'cijfer-meester' \}/.test(volSrc) && !/'cijfermeester': 'cijfermeester'/.test(volSrc));
-      toets('11 processAgent: rapport alleen bij route machinekamer of david', /rapport: \(route === 'machinekamer' \|\| route === 'david'\) \? appRapport : null/.test(volSrc));
+      // wv364: één gedeelde ingang appBewaarAgent (finally, wees, tussenstand na herstart, gesneuvelde agents)
+      toets('11 processAgent: rapport alleen bij route machinekamer of david', /rapport: \(route === 'machinekamer' \|\| route === 'david'\) \? rapport : null/.test(volSrc) &&
+        /appBewaarAgent\(jobId, entry, outdir, appRapport, /.test(volSrc) && (volSrc.match(/appBewaar\(/g) || []).length === 3);
       toets('11 appRoute: zonder prefix = socev', H.appRoute('vakantie') === 'socev' && H.appRoute(' Machinekamer: x') === 'machinekamer' && H.appRoute('david:x') === 'david');
       for (const k of Object.keys(agentsReg)) delete agentsReg[k];
     }
