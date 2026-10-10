@@ -31,7 +31,8 @@ function maak(env) {
     schrijfLog: function (r) { ctx.log.push(r); }, nu: function () { return 'NU'; },
     velden: function (o) { return Object.keys(o).map(function (k) { return k + '=' + o[k]; }).join(' '); },
     logError: function () {},
-    setInterval: function () { ctx.intervallen++; return { unref: function () {} }; }
+    setInterval: function () { ctx.intervallen++; return { unref: function () {} }; },
+    setTimeout: function () { ctx.starttik = (ctx.starttik || 0) + 1; return { unref: function () {} }; }
   };
   ctx.enqueue = function (key, fn) { ctx.rij.push({ key: key, fn: fn }); };
   vm.createContext(ctx);
@@ -42,14 +43,22 @@ function maak(env) {
 // K3
 const c = maak();
 toets('cijfer-meester -> beide', c.lessenDomein('cijfer-meester', '') === 'beide', c.lessenDomein('cijfer-meester', ''));
-toets('cijfermeester -> beide', c.lessenDomein('cijfermeester', '') === 'beide');
+toets('cijfermeester (gedeeld) -> geen', c.lessenDomein('cijfermeester', '') === 'geen');
 toets('40687 blijft pa', c.lessenDomein('40687', '') === 'pa');
 toets('telegram-debug blijft machine', c.lessenDomein('telegram-debug', '') === 'machine');
 toets('machinekamer:-label wint', c.lessenDomein('cijfer-meester', 'machinekamer:x') === 'machine');
 toets('onbekend -> null (alle domeinen)', c.lessenDomein('iets-anders', '') === null);
 
+// K3: de gedeelde bot doet geen lessenaanroep; de app-sessie vraagt domein 'beide' op
+const lesBlok = knip('const LESSEN_AAN = ', 'async function processJob');
+const aanroepen = [];
+const lc = { process: { env: { SUPABASE_URL: 'https://x', SUPABASE_SERVICE_ROLE: 'k' } }, console, String, JSON, parseInt, Array, AbortSignal,
+  fetch: function (u, o) { aanroepen.push({ u: u, b: o && o.body ? JSON.parse(o.body) : null }); return Promise.resolve({ ok: true, json: function () { return Promise.resolve({ tekst: 'LES', aantal_grond: 1, aantal_taak: 0 }); } }); },
+  logError: function () {} };
+vm.createContext(lc);
+vm.runInContext(lesBlok + '\nthis.lessenBlok = lessenBlok;', lc);
 // K4
-toets('één interval gezet', c.intervallen === 1);
+toets('één interval en één starttik gezet', c.intervallen === 1 && c.starttik === 1);
 const sess = { 'cijfer-meester': 'a', 'codex:cijfer-meester': 'b', 'gemini:cijfer-meester': 'g', 'cijfermeester': 'c', 'codex:cijfermeester': 'd', '40687': 'e', 'ghawa:cijfer-meester': 'f' };
 Object.assign(c.chatSessions, sess);
 // 10-10-2026 zomertijd: 01:59Z = 03:59 Amsterdam, 02:10Z = 04:10, 03:00Z = 05:00
@@ -76,6 +85,13 @@ toets('wintertijd 04:10 Amsterdam: reset', c.nachtresetTik(Date.parse('2026-11-0
 const uit = maak({ NACHTRESET: '0' });
 toets('NACHTRESET=0: uit', uit.nachtresetTik(Date.parse('2026-10-10T02:10:00Z')).length === 0 && uit.rij.length === 0);
 
-console.log((fouten ? 'ROOD' : 'GROEN') + ': ' + goed + ' goed, ' + fouten + ' fout');
+(async function () {
+  const a = await lc.lessenBlok('vraag', 'cijfermeester', '');
+  toets('cijfermeester: leeg blok, geen enkele fetch', a === '' && aanroepen.length === 0, aanroepen);
+  const b = await lc.lessenBlok('vraag', 'cijfer-meester', '');
+  const rpc = aanroepen.filter(function (x) { return /mk_lessen_prompt/.test(x.u); });
+  toets('cijfer-meester: rpc met p_domein beide', b === 'LES\n\n' && rpc.length === 1 && rpc[0].b.p_domein === 'beide', aanroepen);
+  console.log((fouten ? 'ROOD' : 'GROEN') + ': ' + goed + ' goed, ' + fouten + ' fout');
 process.exit(fouten ? 1 : 0);
+})();
 JS
