@@ -774,6 +774,15 @@ function claudeVerbruik(j) {
     usd_lijst: typeof j.total_cost_usd === 'number' ? Math.round(j.total_cost_usd * 10000) / 10000 : null, ms: j.duration_ms || null, api_ms: j.duration_api_ms || null,
     calls: j.num_turns || null, modellen: j.modelUsage && typeof j.modelUsage === 'object' ? Object.keys(j.modelUsage) : [] };
 }
+// Allowlist (gereedschap 'lezen', beperkt=auto en sinds wv424 elke Socev-sessie buiten de machinekamer): alleen de genoemde
+// namen uit de podomgeving. Geldt voor alle drie de breinen (claude, codex, agy).
+function basisOmgeving(opts) {
+  const envMag = (opts && opts.gereedschap === 'lezen') ? GEREEDSCHAP_LEZEN_ENV_MAG : (opts && opts.envMag) || null;
+  if (!envMag) return process.env;
+  const b = {};
+  envMag.forEach(function (k) { if (process.env[k] != null) b[k] = process.env[k]; });
+  return b;
+}
 function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   // opts: { inactMs, maxMs, progress, vroegMs }  — progress wordt live bijgewerkt zodat
   // /result running_ms en last_activity_ms kan teruggeven. vroegMs (alleen achtergrondagents):
@@ -800,13 +809,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // opts.env: o.a. de agentmarker SOCEV_AGENT_RUN (eindcontrole, 4-10-2026).
     // Allowlist (gereedschap 'lezen' en beperkt=auto): alleen de genoemde namen uit de podomgeving; extra en opts.env
     // (OUTDIR, ANTHROPIC_MODEL, de agentmarker) komen er daarna bij.
-    let basisEnv = process.env;
-    const envMag = (opts && opts.gereedschap === 'lezen') ? GEREEDSCHAP_LEZEN_ENV_MAG : (opts && opts.envMag) || null;
-    if (envMag) {
-      basisEnv = {};
-      envMag.forEach(function (k) { if (process.env[k] != null) basisEnv[k] = process.env[k]; });
-    }
-    const env = Object.assign({}, basisEnv, extra, (opts && opts.env) || {});
+    const env = Object.assign({}, basisOmgeving(opts), extra, (opts && opts.env) || {});
     // detached: eigen procesgroep, zodat een kill ook MCP-servers en
     // bash-kinderen raakt en er geen wezen achterblijven.
     // stdin op 'ignore' (wv216, 8-10-2026): met een open stdin-pipe die nooit schrijft wachtte claude 2.1.291 bij ELKE
@@ -987,7 +990,7 @@ function runCodex(prompt, threadId, outdir, cwd, model, opts) {
     if (model) args.push('-m', model);
     if (threadId) args.push('resume', threadId);
     args.push('--', prompt);
-    const env = Object.assign({}, process.env, { OUTDIR: outdir, CODEX_HOME: CODEX_HOME }, (opts && opts.env) || {});
+    const env = Object.assign({}, basisOmgeving(opts), { OUTDIR: outdir, CODEX_HOME: CODEX_HOME }, (opts && opts.env) || {});
     const child = spawn('codex', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     weesSpawnMeld(opts, child, null, null);
     const t0 = Date.now();
@@ -1143,7 +1146,7 @@ function agyPoging(prompt, conversationId, outdir, cwd, model, effort, opts) {
     args.push('--print=' + prompt);
     // Automatische update uit: een CLI die zichzelf midden in een beurt vervangt, is niet
     // meer de versie die in /health staat.
-    const env = Object.assign({}, process.env, { OUTDIR: outdir, AGY_CLI_DISABLE_AUTO_UPDATE: '1' }, (opts && opts.env) || {});
+    const env = Object.assign({}, basisOmgeving(opts), { OUTDIR: outdir, AGY_CLI_DISABLE_AUTO_UPDATE: '1' }, (opts && opts.env) || {});
     const t0 = Date.now();
     let child;
     try {
@@ -1266,6 +1269,8 @@ function agyPoging(prompt, conversationId, outdir, cwd, model, effort, opts) {
 }
 
 async function runGemini(prompt, conversationId, outdir, cwd, model, opts) {
+  // wv424 (Fable #5): agy laadt /tmp/agy-mcp_config.json met de n8n- en Supabase-tokens letterlijk; een smalle beurt mag daar niet op.
+  if (opts && opts.envMag) return { ok: false, error: 'agy-smal-geweigerd', output: 'Het agy-brein draait alleen in de machinekamer (wv424): zijn MCP-config bevat beheersleutels. Kies claude of codex.' };
   const maxMs = (opts && opts.maxMs) || FG_MAX_MS;
   const t0 = Date.now();
   let effort = agyEffortVoor(model);
@@ -1575,7 +1580,7 @@ function jobEindLog(jobId, j, ws) {
 // Nieuw app-kanaal met een eigen sessie (APP_KANALEN)? Zet hem ook in NACHTRESET_SESSIES.
 // NOODREM: NACHTRESET=0 in de omgeving.
 const NACHTRESET_AAN = process.env.NACHTRESET !== '0';
-const NACHTRESET_SESSIES = ['cijfer-meester', 'cijfermeester', 'telegram-debug'];   // telegram-debug (machinekamer, ook app-kanaal machinekamer): 12-10-2026, David — de sessie stond op ± 880.000 tokens per stap
+const NACHTRESET_SESSIES = ['cijfer-meester', 'cijfermeester', 'telegram-debug', 'mcp-check'];   // telegram-debug (machinekamer, ook app-kanaal machinekamer): 12-10-2026, David — de sessie stond op ± 880.000 tokens per stap; mcp-check: wv424, de MCP-gezondheidscheck kreeg een eigen sessie (machinekamer-klasse)
 const NACHTRESET_UUR = 4;
 const nachtresetGedaan = {};   // sessiesleutel -> JJJJ-MM-DD (Amsterdam)
 function nachtresetTik(tijd) {
@@ -1780,6 +1785,9 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     if (lezen) runOpts.gereedschap = 'lezen';
     // wv275: een [AUTO]-beurt van de telefoon draagt zijn id in de omgeving; POST /agent leest hem daar terug (telMerkAgent).
     if (j.app && j.app.soort === 'tel') runOpts.env = { SOCEV_TEL_BEURT: jobId };
+    // wv424: buiten de machinekamer geen beheersleutels (zie MK_SESSIES).
+    if (!lezen && !runIsMk(chatId, ws)) socevSmalOpts(runOpts, chatId);
+    j.omgeving = lezen ? 'lezen' : (runIsMk(chatId, ws) ? 'mk' : 'smal');
     const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, lezen ? base : space.dir, runOpts);
     if (lezen) r.gereedschap = 'lezen';
     r.files = collectFiles(outdir);
@@ -2219,6 +2227,10 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     // Elke (her)start overschrijft ze, ook de codex-terugval (dan transcript null; Fable K2).
     runOpts.opSpawn = function (i) { entry.pid = i.pid; entry.sessie = i.sessie; entry.transcript = i.transcript; saveAgents(); };
     if (j.beperkt === 'auto') { runOpts.disallowedTools = AUTO_AGENT_VERBODEN; runOpts.envMag = AUTO_AGENT_ENV_MAG; }
+    // wv424: alleen een machinekamer:-agent met API_SECRET krijgt de volledige omgeving; Socevs eigen agents (SOCEV_AGENT_SLEUTEL)
+    // en alle andere labels draaien smal, ook in de hervatting van de eindcontrole (runOpts gaat mee).
+    // Geen SOCEV_ENV_EXTRA voor agents: chat_id is daar vrij invulbaar (Fable wv424 #1: chat_id 'cijfer-meester' gaf anders de Supabase-MCP).
+    else if (!agentIsMk(entry.label, j.smal, j.beperkt)) socevSmalOpts(runOpts, '');
     // Vroege levenscontrole (alleen de eerste run; hervattingen in de eindcontrole niet): geen
     // teken van leven binnen VROEG_LEVEN_MS -> procesgroep weg en precies één nieuwe start, weer
     // via de startspreiding. Komt ook die niet op gang, dan een duidelijke foutmelding.
@@ -2722,7 +2734,9 @@ function handleRequest(req, res) {
   if (req.method === 'POST' && req.url === '/agent') {
     return rolPoort(res, function () { readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
-      if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
+      // wv424: SOCEV_AGENT_SLEUTEL (Socev buiten de machinekamer) start alleen smalle agents.
+      const smal = socevAgentSleutelOk(d.secret);
+      if (SECRET && d.secret !== SECRET && !smal) { res.writeHead(401); return res.end('unauthorized'); }
       const prompt = (d.prompt || '').toString().trim();
       if (!prompt) { res.writeHead(400); return res.end('missing prompt'); }
       const label = (d.label || '').toString().trim().slice(0, 120) || 'naamloze agent';
@@ -2751,13 +2765,14 @@ function handleRequest(req, res) {
       if (beperkt) { const st = leesRuntime(); keuze = { runtime: 'claude', model: (st.models && typeof st.models.claude === 'string') ? st.models.claude : '', fallback: '' }; }
       const maxMin = Math.min(Math.max(parseInt(d.max_minuten || BG_MAX_DEFAULT_MIN, 10) || BG_MAX_DEFAULT_MIN, 5), BG_MAX_CAP_MIN);
       const jobId = crypto.randomBytes(8).toString('hex');
-      jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', beperkt: beperkt };
+      jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', beperkt: beperkt, smal: smal || undefined };
       res._log = { job_id: jobId, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', workspace: ws, agent: 1 };
       agentsReg[jobId] = {
         job_id: jobId, label: label, status: 'pending',
         chat_id: (d.chat_id != null) ? String(d.chat_id) : '',
         started: Date.now(), ended: null, ok: null, rapport: '-',
-        max_minuten: maxMin, workspace: ws, runtime: keuze.runtime, beperkt: beperkt || undefined
+        max_minuten: maxMin, workspace: ws, runtime: keuze.runtime, beperkt: beperkt || undefined,
+        omgeving: agentIsMk(label, smal, beperkt) ? 'mk' : (beperkt ? 'auto' : 'smal')   // wv424
       };
       // wv275: gestart vanuit een [AUTO]-beurt van de telefoon? Synchroon, vóór het antwoord: het verzoekende proces leeft dan nog.
       try { telMerkAgent(req, jobId, label); } catch (e) { logError('tel-merk', e); }
@@ -2765,7 +2780,7 @@ function handleRequest(req, res) {
       // Bewust NIET in de chat-wachtrij: agents draaien parallel aan het gesprek.
       processAgent(jobId, prompt, d.session_id, ws, keuze, maxMin * 60 * 1000);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, job_id: jobId, label: label, max_minuten: maxMin, runtime: keuze.runtime }));
+      res.end(JSON.stringify({ ok: true, job_id: jobId, label: label, max_minuten: maxMin, runtime: keuze.runtime, omgeving: agentsReg[jobId].omgeving }));
     }); });
   }
 
@@ -2781,6 +2796,7 @@ function handleRequest(req, res) {
         geeindigd: a.ended ? new Date(a.ended).toISOString() : null,
         rapport: a.rapport,
         eindcontrole: a.eindcontrole,
+        omgeving: a.omgeving,   // wv424: mk | smal | auto (geen inhoud, alleen de klasse)
         herstart: a.herstart,
         error: a.error,   // foutcode (wv51); de tikker gebruikt hem als /result kwijt is
         wees: a.wees ? new Date(a.wees).toISOString() : undefined,   // wv211: liep door over een herstart van server.js
@@ -2796,7 +2812,10 @@ function handleRequest(req, res) {
   if (req.method === 'POST' && req.url === '/result') {
     return readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
-      if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
+      // wv424: SOCEV_AGENT_SLEUTEL mag alleen het resultaat van een smalle agent ophalen.
+      const smalOk = socevAgentSleutelOk(d.secret) && !!((jobs[d.job_id] && jobs[d.job_id].smal) ||
+        (agentsReg[d.job_id] && agentsReg[d.job_id].omgeving === 'smal'));   // ook een smalle wees na een herstart (Fable wv424 #8)
+      if (SECRET && d.secret !== SECRET && !smalOk) { res.writeHead(401); return res.end('unauthorized'); }
       const j = jobs[d.job_id];
       res._log = { job_id: d.job_id, workspace: j && j.workspace };
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -6934,18 +6953,26 @@ async function appVandaagRoute(req, res, a) {
 // Telegram-bericht wordt daar ook opnieuw getekend als er een is (wv452: sinds 13-10 gaat het lijstje alleen naar de app,
 // message_id 0; Telegram met knoppen alleen nog als terugval; wv456: daarom noemen de weigerteksten hier Telegram niet meer).
 // Geen eigen logica op de pod: die zoekt alleen de rij op (datum + positie;
-// nonce en message_id gaan nooit naar de app) en geeft de pop-uptekst van n8n door. Sleutel: die van het Socev-schrijfluik
-// (N8N_WEBHOOK_SOCEV_AGENDA, ook buiten de auto-agents), in n8n alleen als sha256-vingerafdruk. Sinds wv181 ook 📅 (blok): dezelfde
+// nonce en message_id gaan nooit naar de app) en geeft de pop-uptekst van n8n door. Sleutel: sinds wv424 een eigen
+// (appKnopSleutel), in n8n alleen als sha256-vingerafdruk; daarvoor die van het Socev-schrijfluik. Sinds wv181 ook 📅 (blok): dezelfde
 // Blok-tak als in Telegram (claim, één voorstel per 30 min per item; AI - Voorwerk-blok zoekt het uur). Het voorstel komt als
 // agendaknop (✅/❌) in het hoofdkanaal van de app (wv325, bericht_route agenda = app; Telegram alleen als de pod het niet aanneemt);
 // app en pod schrijven zelf niets in de agenda. Niet via een app-beurt + Poortwachter: Voorwerk-blok
 // slaat de Poortwachter bewust over (Davids ✅ is de bevestiging) en een app-bevestiging gaf toch hooguit oranje = ✅ in Telegram.
+// wv424: Knop (app) van Agenda-knoppen en Voorwerk-knoppen heeft een eigen sleutel die alleen server.js gebruikt (n8n kent de
+// sha256). Daarvoor was het N8N_WEBHOOK_SOCEV_AGENDA, die elke Socev-sessie heeft voor zijn agendavoorstellen: zo'n sessie kon
+// dus zelf een app-knopdruk nadoen. Bestand (0600, buiten socev-app-data), gemaakt door de machinekamer; ontbreekt het, dan
+// geven de knoppen 503 (gebruik Telegram). Dekt niet: dezelfde uid kan het bestand lezen (zie MK_SESSIES).
+const APP_KNOP_SLEUTEL_PAD = process.env.APP_KNOP_SLEUTEL_PAD || '/opt/data/.socev-geheim/knop-app.key';
+function appKnopSleutel() {
+  try { const k = fs.readFileSync(APP_KNOP_SLEUTEL_PAD, 'utf8').trim(); return /^[0-9a-f]{64}$/.test(k) ? k : ''; } catch (e) { return ''; }
+}
 const APP_VOORWERK_KNOP_WF = process.env.APP_VOORWERK_KNOP_WF || 'SLYiYwqAabFlC8H3';   // AI - Voorwerk-knoppen
 const APP_ACTIE_KEUZE = { gedaan: 'g', later: 'l', laten_vallen: 'w', terug: 'o', blok: 'b' };
 const APP_ACTIES_PER_UUR = 60;
 appStaat.tellers.actie = appStaat.tellers.actie || [];
 async function appVoorwerkKnop(body) {
-  const geheim = process.env.N8N_WEBHOOK_SOCEV_AGENDA;
+  const geheim = appKnopSleutel();
   if (!geheim) throw new Error('voorwerkknop: sleutel ontbreekt');
   for (let poging = 0; poging < 2; poging++) {
     const url = await appWebhookUrl(APP_VOORWERK_KNOP_WF, 'Knop (app)', 'voorwerkKnopUrl', poging > 0);
@@ -6961,7 +6988,7 @@ async function appActieRoute(req, res, a, d) {
   const datum = String(d.datum || ''), positie = typeof d.positie === 'number' ? d.positie : NaN, keuze = String(d.keuze || '');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 10 || !Object.hasOwn(APP_ACTIE_KEUZE, keuze)) return appWeiger(res, 400, 'ongeldige knop', 'actie velden');   // hasOwn: geen 'constructor'
   if (!appTeller('actie', APP_ACTIES_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_ACTIES_PER_UUR + '); probeer het straks opnieuw', 'grens actie');
-  if (!process.env.N8N_WEBHOOK_SOCEV_AGENDA) return appWeiger(res, 503, 'de knoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'actie geen sleutel');
+  if (!appKnopSleutel()) return appWeiger(res, 503, 'de knoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'actie geen sleutel');
   let rijen;
   try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-actie', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen; probeer het zo opnieuw', 'actie lezen'); }
   const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
@@ -9816,7 +9843,7 @@ function appAgendaPlat(t) {
   return appKort(String(t == null ? '' : t).replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&'), 300);
 }
 async function appAgendaKnopN8n(body) {
-  const geheim = process.env.N8N_WEBHOOK_SOCEV_AGENDA;
+  const geheim = appKnopSleutel();
   if (!geheim) throw new Error('agendaknop: sleutel ontbreekt');
   for (let poging = 0; poging < 2; poging++) {
     const url = await appWebhookUrl(APP_AGENDA_KNOP_WF, 'Knop (app)', 'agendaKnopUrl', poging > 0);
@@ -9864,7 +9891,7 @@ async function appAgendaRoute(req, res, a, s, d) {
   if (!appAgendaKnoppenBewaar()) { terug(); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo opnieuw', 'agenda-knoppen.json'); }
   if (!appTeller('agenda', APP_AGENDA_PER_UUR, 3600000)) { terug(); return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_AGENDA_PER_UUR + '); probeer het straks opnieuw', 'grens agenda'); }
   if (!(await appRolOk())) { terug(); return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later opnieuw', 'rol passief'); }
-  if (!process.env.N8N_WEBHOOK_SOCEV_AGENDA) { terug(); return appWeiger(res, 503, 'de agendaknoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'agenda geen sleutel'); }
+  if (!appKnopSleutel()) { terug(); return appWeiger(res, 503, 'de agendaknoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'agenda geen sleutel'); }
   let j = null, fout = null;
   try { j = await appAgendaKnopN8n({ n: K.nonce, a: keuze }); } catch (x) { fout = x; }
   const pagina = j && typeof j.pagina === 'string' ? j.pagina : '';
@@ -11289,6 +11316,76 @@ const AUTO_AGENT_ENV_MAG = [
   'N8N_WEBHOOK_WHATSAPP',                             // whatsapp-chat-uitlezen, alleen lezen (WAHA read-only)
   'SUPABASE_RPC_CONTACTEN'                            // contacten-opzoeken, alleen lezen
 ];
+
+// ── wv424 (A1; JA David 11-10-2026, Fable GO met voorwaarden): Socev buiten de machinekamer zonder beheersleutels ──────
+// WAAROM. Elke Socev-beurt (hoofdkanaal, app, nachtsessies, Socevs eigen agents) erfde de hele podomgeving: n8n-API-sleutel,
+// n8n-MCP (kan de Poortwachter herschrijven en chat_log-rijen zetten), pod-API-geheim, Supabase service role en beheer-MCP,
+// Cloudflare, Telegram. Een prompt-injectie via mail, WhatsApp, web of een bijlage kon daarmee met één aanroep een
+// agendabevestiging vervalsen, of via de werkvoorraad een machinekamer-agent mét alle sleutels laten starten
+// (gemeten en afgewogen: /opt/data/mk-scripts/wv419/voorstel.md).
+// HOE. Alleen de machinekamer-klasse krijgt de volledige omgeving: /run met een chat_id uit MK_SESSIES (alleen n8n kent
+// API_SECRET) en /agent met label machinekamer:, gestart met API_SECRET. Al het andere draait op SOCEV_ENV_MAG plus wat
+// SOCEV_ENV_EXTRA per sessie toevoegt. Een onbekende of lege sessie is smal: de fout valt naar minder rechten.
+// Socev start agents met SOCEV_AGENT_SLEUTEL (afgeleid van API_SECRET, roteert mee). Zo'n agent draait altijd smal, ook met
+// label machinekamer:, en die sleutel opent alleen /agent en /result van zijn eigen smalle agents.
+// DEKT NIET (Fable, eerlijk): dezelfde uid. Een sessie met Bash kan /proc/<pid>/environ van server.js of van een lopende
+// machinekamer-sessie lezen, en bestanden met sleutels (transcripts, /tmp/agy-mcp_config.json). Dat sluit pas hidepid=2 of
+// uid-scheiding (B). Nieuw geheim in de pod? Dan zit het NIET in een Socev-sessie tot je het hier bewust toevoegt.
+const MK_SESSIES = new Set([
+  'telegram-debug',                                   // debug-bot, droomronde, app-kanaal machinekamer
+  'ciso', 'kaizen-review', 'structuur-wachter', 'socev-site',
+  'n8n-git-backup',                                   // node n8n-git-backup.mjs (N8N_API_KEY)
+  'keten-attest',                                     // ciso-dag.mjs, olares-login-check.py (SUPABASE_SERVICE_ROLE)
+  'tokenmeting',                                      // Tokens/tank.mjs (SUPABASE_SERVICE_ROLE)
+  'site-verversing',                                  // node verversing.js --push (n8n, Supabase-site, rclone)
+  'ideeenmotor',                                      // werkvoorraad.py zet (SUPABASE_SERVICE_ROLE)
+  'voor-jou',                                         // voor-jou.py (SUPABASE_SERVICE_ROLE, Todoist)
+  'werkvoorraad-box',                                 // tikker: box-rij schrijven
+  'mcp-check',                                        // AI - MCP-gezondheidscheck: meet of n8n/Supabase-MCP verbinden
+  'pod-uitrol'
+]);
+const SOCEV_ENV_MAG = AUTO_AGENT_ENV_MAG.concat([
+  'N8N_WEBHOOK_SMS',                                  // sms-berichten (versturen gaat langs David)
+  'N8N_WEBHOOK_SOCEV_AGENDA',                         // agenda-schrijven: voorstel naar de Poortwachter (Knop (app) heeft sinds wv424 een eigen sleutel)
+  'N8N_WEBHOOK_MAILCONCEPT',                          // mailconcept-aanmaken, voorlezen
+  'N8N_WEBHOOK_VERBETERLOG',
+  'TODOIST_MCP_TOKEN',                                // Todoist-MCP
+  'WERKKAMER_SLEUTEL_POD',                            // werkkamer-forum
+  'SUPABASE_URL',                                     // alleen het adres; de RPC-sleutels (SUPABASE_RPC_*) gaan via het voorvoegsel hieronder
+  'REPO_DIR', 'RELEASE_SHA', 'IMAGE_SHA', 'CODEX_HOME', 'PORT', 'GIT_USER_NAME', 'GIT_USER_EMAIL'   // paden en namen, geen sleutels
+]);
+const SOCEV_ENV_VOORVOEGSELS = ['SUPABASE_RPC_'];   // smalle RPC-sleutels (één functie per sleutel)
+// Per sessie extra. Restpunt (vervolgrij wv424): de Supabase-MCP is een beheertoken; deze sessies krijgen een smalle databankrol.
+const SOCEV_ENV_EXTRA = {
+  'personeels-wachter': ['SUPABASE_MCP_TOKEN'],       // secondbrain.personeel_state via de Supabase-MCP
+  'vault-concierge': ['SUPABASE_MCP_TOKEN'],          // secondbrain.concierge_state
+  'cijfer-meester': ['SUPABASE_MCP_TOKEN'],           // schema zorgdata (app-kanaal)
+  'cijfermeester': ['SUPABASE_MCP_TOKEN']             // idem, @cijfermeester_bot
+};
+const SOCEV_AGENT_SLEUTEL = SECRET ? crypto.createHmac('sha256', SECRET).update('wv424-socev-agent').digest('hex') : '';
+// Buffers vergelijken, niet stringlengtes: een niet-ASCII-teken gaf anders een RangeError (Fable wv424 #7).
+function socevAgentSleutelOk(s) {
+  if (!SOCEV_AGENT_SLEUTEL || typeof s !== 'string') return false;
+  const a = Buffer.from(s), b = Buffer.from(SOCEV_AGENT_SLEUTEL);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function socevEnvMag(chatId) {
+  const namen = SOCEV_ENV_MAG.concat(SOCEV_ENV_EXTRA[chatId] || []);
+  Object.keys(process.env).forEach(function (k) {
+    if (SOCEV_ENV_VOORVOEGSELS.some(function (v) { return k.indexOf(v) === 0; }) && namen.indexOf(k) < 0) namen.push(k);
+  });
+  return namen;
+}
+// /run: volledige omgeving alleen voor een machinekamer-sessie in de vault-werkruimte.
+function runIsMk(chatId, ws) { return ws === DEFAULT_WS && MK_SESSIES.has(String(chatId || '')); }
+// /agent: volledige omgeving alleen met API_SECRET, label machinekamer: en niet beperkt.
+function agentIsMk(label, smal, beperkt) { return !smal && !beperkt && /^\s*machinekamer:/i.test(String(label || '')); }
+// Opties voor een smalle beurt: allowlist plus de agent-sleutel van Socev (achtergrondagent).
+function socevSmalOpts(runOpts, chatId) {
+  runOpts.envMag = socevEnvMag(chatId);
+  runOpts.env = Object.assign({}, runOpts.env || {}, SOCEV_AGENT_SLEUTEL ? { SOCEV_AGENT_SLEUTEL: SOCEV_AGENT_SLEUTEL } : {});
+  return runOpts;
+}
 const autoAgentLog = [];          // tijdstippen van gestarte opdrachten (24 uur)
 const autoAgentJobs = new Set();  // job_ids die deze poort startte (alleen die mag hij stoppen)
 const autoAgentMk = new Set();    // daarvan: route machinekamer (komt niet terug in de auto)
