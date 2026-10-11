@@ -5318,6 +5318,14 @@ async function appKnopVraagTekst(jobId, kanaal, hash) {
   return null;
 }
 
+// wv393 (Fable M1): sinds een app-Ja met verse vingerafdruk de agenda direct mag aanpassen (Poortwachter groen bij exact
+// knop-ja-vers), heet een gevoelige Ja vanaf een apparaat met een vaste plek knop-ja-vers-vast: die blijft oranje en de ✅ kan daar
+// niet (/app/agenda staat in APP_BEHEER_ROUTES), dus de agenda verandert dan alleen via de telefoon. De vraag-id gaat mee in
+// Davids chat_log-tekst; de Poortwachter logt hem en de CISO-check C2-agenda-groen koppelt er de auditregel exact op.
+function appKnopBevestiging(keuze, gevoeligJa, a) {
+  return keuze === 'anders' ? 'knop-anders' : keuze === 'nee' ? 'knop-nee' : gevoeligJa ? (a && a.soort === 'vast' ? 'knop-ja-vers-vast' : 'knop-ja-vers') : 'knop-ja';
+}
+
 // Eén keer per vraag (job + hash), van welk apparaat ook; de tekst is die van de Telegram-knop (n8n "Vraagknop lezen"),
 // met kanaal "app-knop".
 async function appKnop(req, res, reg, a, s, d) {
@@ -5388,9 +5396,9 @@ async function appKnop(req, res, reg, a, s, d) {
     const wacht = nu - drukT > APP_KNOP_WACHT_MELD_MS ? '\n(Deze knopdruk stond tot ' + appKlok() + ' in de rij omdat Socev nog bezig was' + (gevoeligJa ? '; de vingerafdruk is gecontroleerd op het moment van drukken' : '') + '.)' : '';
     return appChatLogVoor(rij.kanaal, [
       { rol: 'socev', tekst: vb ? vb.bericht : vz, ts: nu - 1 },
-      { rol: 'david', ts: nu, bevestiging: keuze === 'anders' ? 'knop-anders' : keuze === 'nee' ? 'knop-nee' : gevoeligJa ? 'knop-ja-vers' : 'knop-ja',
+      { rol: 'david', ts: nu, bevestiging: appKnopBevestiging(keuze, gevoeligJa, a),
         tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? 'Nee' : 'Ja') + ' (knop in de app' + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
-          (keuze === 'anders' ? ' — toelichting: ' + appOntmasker(toel) : '') }])
+          (keuze === 'anders' ? ' — toelichting: ' + appOntmasker(toel) : '') + '\n(vraag-id ' + hash + ')' }])
       .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); });
   };
   // vervalt hij in de rij (noodstop), dan staat de vraag weer open; de vingerafdruk is dan verbruikt (nieuwe druk = nieuwe)
