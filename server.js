@@ -4951,7 +4951,7 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
   }
   const keuze = resolveKeuze({});
   if (keuze.fout) return { fout: 'brein' };
-  const jobId = crypto.randomBytes(8).toString('hex');
+  const jobId = meta.job_id || crypto.randomBytes(8).toString('hex');   // wv405: een knopdruk legt zijn job vooraf vast
   // Bestanden (wv99): vóór de wachtrij naar io/<job>/in, zodat een schrijffout hier terugkomt in plaats van stil te
   // verdwijnen (bouwplan § 4.7). Harde koppeling: lukt er één niet, dan staat alles nog klaar voor een nieuwe poging.
   if (meta.upload) {
@@ -4977,16 +4977,25 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
   enqueue(sessionKey(DEFAULT_WS, chatId), function () {
     // Nog in de wachtrij toen de noodstop kwam: vervalt, ook als de app intussen weer aan staat (Fable-review wv89 #3).
     const j = jobs[jobId];
-    if (!j) { try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {} return Promise.resolve(); }   // al opgeruimd: processJob zou niets wissen
-    if (j.app.noodstop || fs.existsSync(APP_UIT)) {
+    if (!j) { try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {} if (meta.bijVerval) meta.bijVerval(); return Promise.resolve(); }   // al opgeruimd: processJob zou niets wissen
+    const vervalt = function () {
+      if (!j.app.noodstop && !fs.existsSync(APP_UIT)) return false;
       j.status = 'done'; j.done_at = Date.now(); j.opgehaald = true;   // opgehaald: houdt een uitrol niet op
       j.result = { ok: false, error: 'vervallen door de noodstop' };
       try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {}   // processJob ruimt dan niet op
-      return Promise.resolve();
-    }
-    // appNaBeurt NIET teruggeven: een trage schijf mag de volgende beurt (ook uit Telegram) niet ophouden (Fable-review wv56 #3)
-    return processJob(jobId, prompt, '', [], chatId, DEFAULT_WS, keuze, '').then(function () {
-      appNaBeurt(jobId).catch(function (e) { logError('app-na-beurt', e); });
+      if (meta.bijVerval) meta.bijVerval();   // wv405: een knopdruk die vervalt, laat zijn vraag weer open
+      return true;
+    };
+    if (vervalt()) return Promise.resolve();
+    // wv405: wat pas bij de start mag (knopdruk uit de rij: chat_log + "gestart"); geeft een staart voor de prompt. Een fout
+    // hier houdt de beurt niet tegen.
+    const voor = meta.bijStart ? Promise.resolve().then(meta.bijStart).catch(function (e) { logError('app-bij-start', e); return ''; }) : Promise.resolve('');
+    return voor.then(function (staart) {
+      if (vervalt()) return;
+      // appNaBeurt NIET teruggeven: een trage schijf mag de volgende beurt (ook uit Telegram) niet ophouden (Fable-review wv56 #3)
+      return processJob(jobId, prompt + (staart || ''), '', [], chatId, DEFAULT_WS, keuze, '').then(function () {
+        appNaBeurt(jobId).catch(function (e) { logError('app-na-beurt', e); });
+      });
     });
   });
   if (meta.upload) { try { fs.rmSync(meta.upload.dir, { recursive: true, force: true }); } catch (e) { logError('app-upload-weg', e); } }
@@ -4999,9 +5008,17 @@ function appStartFout(res, st) {
   return appWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
 }
 // Gemeenschappelijke voorwaarden voor alles wat een beurt start (bericht, knop).
-async function appMagBeurt(res, kanaal) {
+// wv405: een knopdruk (rij) mag bij een bezig kanaal in de rij, hooguit APP_KNOP_RIJ_MAX tegelijk per kanaal; een getypt
+// bericht niet (de app zet het invoerveld dan dicht; 409 hier is het vangnet voor een tweede apparaat).
+const APP_KNOP_RIJ_MAX = 3;
+const APP_KNOP_WACHT_MELD_MS = 30 * 1000;   // langer in de rij: regel in de prompt dat hij wachtte
+function appKnopInRij(kanaal) {
+  return Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && j.app.soort === 'knop' && j.status === 'pending'; }).length;
+}
+async function appMagBeurt(res, kanaal, rij) {
   if (!(await appRolOk())) { appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik Telegram', 'rol passief'); return false; }
-  if (appLopend(kanaal)) { appWeiger(res, 409, 'Socev is in dit kanaal nog bezig; wacht op het antwoord', 'kanaal bezig'); return false; }
+  if (!rij && appLopend(kanaal)) { appWeiger(res, 409, 'Socev is in dit kanaal nog bezig; wacht op het antwoord', 'kanaal bezig'); return false; }
+  if (rij && appKnopInRij(kanaal) >= APP_KNOP_RIJ_MAX) { appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol'); return false; }
   if (!appTeller('beurt', APP_BEURTEN_PER_UUR, 3600000)) { appWeiger(res, 429, 'te veel berichten dit uur (max ' + APP_BEURTEN_PER_UUR + '); gebruik Telegram', 'grens beurt'); return false; }
   return true;
 }
@@ -5240,8 +5257,28 @@ async function appBeurt(req, res, reg, a, s, d) {
   appStuur(res, 200, { ok: true, job_id: st.job_id, bestanden: namen });
 }
 
+// wv405: een knopdruk staat in de rij tot zijn beurt start (antwoord.job; gestart pas bij de start). Is die job weg zonder
+// gestart te zijn én was de druk van vóór deze processtart (pod herstart vóór de start), dan is de druk verloren: de vraag telt
+// weer als open, zodat David opnieuw kan drukken. Binnen één proces verdwijnt een wachtende job niet stil (bijVerval); een
+// mislukte gestart-schrijf mag een afgehandelde Ja na de jobopruiming dus niet heropenen (Fable-diffreview wv405 #3).
+// Naar buiten alleen de vier velden van vóór wv405.
+const APP_PROCES_START = Date.now();
+function appAntwoord(r) {
+  const x = r && r.antwoord;
+  if (!x) return null;
+  if (x.job && x.gestart !== true && !jobs[x.job] && Date.parse(x.t) < APP_PROCES_START) return null;
+  return { keuze: x.keuze, t: x.t, apparaat: x.apparaat, vingerafdruk: x.vingerafdruk };
+}
 function appBeantwoord(jobId, hash) {
-  try { const v = appVragen()[jobId + ':' + hash]; return v && v.antwoord ? v.antwoord : null; } catch (e) { return null; }
+  try { return appAntwoord(appVragen()[jobId + ':' + hash]); } catch (e) { return null; }
+}
+// Alleen als de rij nog bij déze beurt hoort (een latere druk na een verloren druk heeft een eigen job).
+function appKnopRijZet(sleutel, jobId, f) {
+  try {
+    const w = appVragen();
+    if (!w[sleutel] || !w[sleutel].antwoord || w[sleutel].antwoord.job !== jobId) return;
+    f(w[sleutel]); appVragenSchrijf(w);
+  } catch (e) { logError('app-vragen', e); }
 }
 function appVraagGevoelig(jobId, hash) {
   try { const v = appVragen()[jobId + ':' + hash]; return !v || v.gevoelig !== false; } catch (e) { return true; }
@@ -5295,7 +5332,7 @@ async function appKnop(req, res, reg, a, s, d) {
   const rij = v[sleutel];
   if (!rij) return appWeiger(res, 404, 'deze vraag ken ik niet (meer); antwoord gewoon in tekst', 'onbekende vraag');
   const al = function (x) { return appStuur(res, 409, { ok: false, fout: 'al beantwoord: ' + (x.keuze === 'ja' ? 'Ja' : x.keuze === 'nee' ? 'Nee' : 'Anders') + ' ' + appKlok(x.t), beantwoord: x }); };
-  if (rij.antwoord) { res._app.reden = 'al beantwoord'; return al(rij.antwoord); }
+  if (appAntwoord(rij)) { res._app.reden = 'al beantwoord'; return al(appAntwoord(rij)); }
   // wv350 (Fable #4): een oude vraag die via zoeken weer in beeld kwam, start geen beurt meer (de sessie weet er niets meer van)
   if (Date.now() - Date.parse(rij.t || 0) > APP_VRAAG_GELDIG_MS) { res._app.reden = 'vraag verlopen'; return appStuur(res, 410, { ok: false, fout: 'deze vraag is verlopen (ouder dan 3 dagen); typ je antwoord als het nog speelt', verlopen: true }); }
   // wv263 (§ 4.3): bericht naar Telegram gegaan met knoppen -> daar antwoorden, niet ook hier (één antwoordplek)
@@ -5312,39 +5349,62 @@ async function appKnop(req, res, reg, a, s, d) {
   const terug = function () { if (versOud !== null && s.vers_tot === 0) s.vers_tot = versOud; };
   const vb = await appKnopVraagTekst(jobId, rij.kanaal, hash);
   const vz = (vb && vb.tekst) || '(vraagzin niet leesbaar in het bericht)';
-  if (!(await appMagBeurt(res, rij.kanaal))) return terug();
-  // opnieuw lezen ná het wachten: een tweede druk die intussen binnenkwam, wint niet
-  v = appVragen();
+  if (!(await appMagBeurt(res, rij.kanaal, true))) return terug();
+  // Fable-diffreview wv405 #2: een getypt bericht dat nog zijn chat_log-rij schrijft (startend, hooguit APP_CHATLOG_WACHT_MS)
+  // staat nog niet in de wachtrij; eerst dat bericht erin, dan pas deze druk erachter (anders draait het getypte bericht met
+  // deze druk als Davids laatste rij in chat_log).
+  for (let i = 0; i < 40 && appStaat.startend && appStaat.startend[rij.kanaal] > 0; i++) await new Promise(function (r) { setTimeout(r, 100); });
+  // opnieuw lezen ná het wachten: een tweede druk die intussen binnenkwam, wint niet. Vanaf hier geen await meer tot de
+  // beurt in de rij staat (wv405: chat_log gaat pas bij de start, in bijStart).
+  try { v = appVragen(); } catch (e) { logError('app-vragen', e); terug(); return appWeiger(res, 503, 'vragenregister onleesbaar; vraag de machinekamer', 'vragen kapot'); }
   if (!v[sleutel]) { terug(); return appWeiger(res, 404, 'deze vraag ken ik niet (meer)', 'onbekende vraag'); }
-  if (v[sleutel].antwoord) { terug(); res._app.reden = 'al beantwoord'; return al(v[sleutel].antwoord); }
+  if (appAntwoord(v[sleutel])) { terug(); res._app.reden = 'al beantwoord'; return al(appAntwoord(v[sleutel])); }
   if (appNaarTelegramNu(v[sleutel])) { terug(); return appStuur(res, 409, { ok: false, fout: 'deze vraag beantwoord je in Telegram', naar_telegram: true }); }
+  if (appKnopInRij(rij.kanaal) >= APP_KNOP_RIJ_MAX) { terug(); return appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol'); }   // Fable #4: na de awaits opnieuw
   const tijd = appKlok();
   const kanaalNaam = ({ hoofd: 'het hoofdkanaal', machinekamer: 'de machinekamer', 'cijfer-meester': 'de Cijfer-Meester' })[rij.kanaal] || rij.kanaal;   // Fable-review wv200 K1
   const tekst = keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk in de app (' + kanaalNaam + ') om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
     : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk in de app (' + kanaalNaam + ') om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)';
-  const antwoord = { keuze: keuze, t: new Date().toISOString(), apparaat: a.id, vingerafdruk: gevoeligJa || undefined };
-  v[sleutel].antwoord = antwoord;
+  const chatId = APP_KANALEN[rij.kanaal];
+  // wv405: loopt er al een beurt in dit gesprek (app of Telegram), dan komt deze erachter; de app toont dan "staat in de rij"
+  const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
+  const drukT = Date.now();
+  const antwoord = { keuze: keuze, t: new Date(drukT).toISOString(), apparaat: a.id, vingerafdruk: gevoeligJa || undefined };
+  const jobId2 = crypto.randomBytes(8).toString('hex');   // vooraf, zodat de druk in één schrijfactie aan zijn beurt vastzit
+  v[sleutel].antwoord = Object.assign({ job: jobId2, gestart: false }, antwoord);
   try { appVragenSchrijf(v); } catch (e) { logError('app-vragen', e); terug(); return appWeiger(res, 500, 'opslag', 'vragen niet schrijfbaar'); }
   // wv171: de druk als Davids bericht in chat_log, met het bericht waaronder gedrukt is 1 ms eerder als Socev-rij (zoals
-  // "Claude via Telegram" > Log David voorbereiden), zodat de Poortwachter de druk aan dát voorstel koppelt. Vóór de beurt en
-  // hooguit APP_CHATLOG_WACHT_MS wachten (Fable-review wv171 M1): staat de rij er niet op tijd, dan zegt de prompt dat deze beurt
-  // geen agenda-actie doet (anders ziet de Poortwachter een oudere rij).
-  const nu = Date.now();
-  const gelogd = await appChatLogStart(rij.kanaal, [
-    { rol: 'socev', tekst: vb ? vb.bericht : vz, ts: nu - 1 },
-    { rol: 'david', ts: nu, bevestiging: keuze === 'anders' ? 'knop-anders' : keuze === 'nee' ? 'knop-nee' : gevoeligJa ? 'knop-ja-vers' : 'knop-ja',
-      tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? 'Nee' : 'Ja') + ' (knop in de app' + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
-        (keuze === 'anders' ? ' — toelichting: ' + appOntmasker(toel) : '') }]);
-  const st = appStartBeurt(a, rij.kanaal, tekst + (gelogd ? '' : APP_CHATLOG_NIET), { soort: 'knop', tekst: (keuze === 'ja' ? '✓ Ja' + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
+  // "Claude via Telegram" > Log David voorbereiden), zodat de Poortwachter de druk aan dát voorstel koppelt. Hooguit
+  // APP_CHATLOG_WACHT_MS wachten (Fable-review wv171 M1): staat de rij er niet op tijd, dan zegt de prompt dat deze beurt geen
+  // agenda-actie doet. wv405: dit gebeurt pas als de beurt aan de beurt is (bijStart), zodat Davids laatste rij in chat_log
+  // ook na een wachttijd deze druk is en niet een bericht dat ertussen kwam. De vingerafdruk is gecontroleerd bij het drukken;
+  // het bewijs (knop-ja-vers, "met verse vingerafdruk bevestigd") reist mee en verloopt in de rij niet.
+  const bijStart = function () {
+    appKnopRijZet(sleutel, jobId2, function (x) { x.antwoord.gestart = true; });
+    // Fable-diffreview wv405 #1: het antwoord van de vorige beurt kan in dezelfde milliseconde in chat_log zijn gezet; dan zou
+    // de Poortwachter de druk aan dát antwoord koppelen. Altijd ná de laatst geschreven rij.
+    const nu = Math.max(Date.now(), (appStaat.chatlogLaatsteTs || 0) + 2);
+    const wacht = nu - drukT > APP_KNOP_WACHT_MELD_MS ? '\n(Deze knopdruk stond tot ' + appKlok() + ' in de rij omdat Socev nog bezig was' + (gevoeligJa ? '; de vingerafdruk is gecontroleerd op het moment van drukken' : '') + '.)' : '';
+    return appChatLogVoor(rij.kanaal, [
+      { rol: 'socev', tekst: vb ? vb.bericht : vz, ts: nu - 1 },
+      { rol: 'david', ts: nu, bevestiging: keuze === 'anders' ? 'knop-anders' : keuze === 'nee' ? 'knop-nee' : gevoeligJa ? 'knop-ja-vers' : 'knop-ja',
+        tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? 'Nee' : 'Ja') + ' (knop in de app' + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
+          (keuze === 'anders' ? ' — toelichting: ' + appOntmasker(toel) : '') }])
+      .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); });
+  };
+  // vervalt hij in de rij (noodstop), dan staat de vraag weer open; de vingerafdruk is dan verbruikt (nieuwe druk = nieuwe)
+  const bijVerval = function () { appKnopRijZet(sleutel, jobId2, function (x) { x.antwoord = null; }); };
+  const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', job_id: jobId2, bijStart: bijStart, bijVerval: bijVerval,
+    tekst: (keuze === 'ja' ? '✓ Ja' + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
   if (!st.job_id) {
     // niet gestart: de vraag is dan ook niet beantwoord, en de vingerafdruk niet gebruikt
     try { const w = appVragen(); if (w[sleutel]) { w[sleutel].antwoord = null; appVragenSchrijf(w); } } catch (e) { logError('app-vragen', e); }
     terug();
     return appStartFout(res, st);
   }
-  res._app.reden = 'knop ' + keuze + (gevoeligJa ? ' (vingerafdruk)' : '') + ' ' + hash + ' -> ' + st.job_id;
-  appStuur(res, 200, { ok: true, job_id: st.job_id, beantwoord: antwoord });
+  res._app.reden = 'knop ' + keuze + (gevoeligJa ? ' (vingerafdruk)' : '') + ' ' + hash + ' -> ' + st.job_id + (inRij ? ' (in de rij)' : '');
+  appStuur(res, 200, { ok: true, job_id: st.job_id, beantwoord: antwoord, in_rij: inRij });
 }
 
 // Kanaal in het pad (/app/geschiedenis/<kanaal>): het doorgeefluik geeft alleen het pad door, geen querystring.
@@ -5383,7 +5443,7 @@ async function appGeschiedenis(req, res, reg, a, pad) {
     anker = delen[2];
   }
   const lopend = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); })
-    .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, invoer: j.app.invoer || [], sinds: new Date(j.created).toISOString() }; });
+    .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, invoer: j.app.invoer || [], sinds: new Date(j.created).toISOString(), in_rij: j.status === 'pending' || undefined }; });   // wv405
   const ruw = await appGeschiedenisRuw(kanaal);
   let items = ruw.items, fout = null;
   if (ruw.fout) { logError('app-log-lees', ruw.fout); fout = 'geschiedenis nu niet leesbaar'; }
@@ -5402,7 +5462,8 @@ async function appGeschiedenis(req, res, reg, a, pad) {
   try { reacties = appReacties(); } catch (e) { logError('app-reacties', e); }
   const agendaKnoppen = appAgendaKnoppen(), agNu = Date.now();   // wv315: kapot = leeg (gelogd); nooit de nonce naar de app
   items = items.map(function (x) {
-    const b = x.vraag_hash && vragen[x.job_id + ':' + x.vraag_hash];
+    const bRij = x.vraag_hash && vragen[x.job_id + ':' + x.vraag_hash];
+    const b = bRij ? Object.assign({}, bRij, { antwoord: appAntwoord(bRij) }) : bRij;   // wv405: verloren knopdruk = open
     // wv277: Telegram-beurt (soort telegram): een vraag erin is alleen in Telegram te beantwoorden (staat niet in vragen.json)
     const tv = x.soort === 'telegram' && !x.vraag_hash ? appVraagVan(kanaal, x.antwoord) : null;
     // wv263: soort "socev" (n8n via /bericht; "bericht" is al Davids getypte beurt): Socevs bericht zonder vraag van David; bestanden staan in app-bestanden (meta.json)
@@ -6058,6 +6119,7 @@ async function appN8nZend(methode, pad, body) {
 }
 function appChatLog(kanaal, rijen) {
   if (kanaal !== 'hoofd' || !rijen.length) return Promise.resolve(false);
+  rijen.forEach(function (x) { if (x.ts > (appStaat.chatlogLaatsteTs || 0)) appStaat.chatlogLaatsteTs = x.ts; });   // wv405 (Fable #1)
   const data = rijen.map(function (x) {
     return { chat_id: APP_KANALEN.hoofd, rol: x.rol, tekst: appChatKort(x.tekst), ts: x.ts, tijd: new Date(x.ts).toISOString(), verbruikt: false,
       kanaal: 'app', bevestiging: x.bevestiging || '' };
@@ -9223,7 +9285,7 @@ function berichtStandVan(id) {
   const b = berichtIndex()[id];
   if (!b) return null;
   let beantwoord = false, vraagNaarTelegram = false;
-  if (b.vraag_hash) { try { const r = appVragen()[id + ':' + b.vraag_hash]; beantwoord = !!(r && r.antwoord); vraagNaarTelegram = appNaarTelegramNu(r); } catch (e) {} }
+  if (b.vraag_hash) { try { const r = appVragen()[id + ':' + b.vraag_hash]; beantwoord = !!appAntwoord(r); vraagNaarTelegram = appNaarTelegramNu(r); } catch (e) {} }
   const p = b.push || {};
   // wv292 (Fable wv263 #10): noodstop = de app staat uit; wat er nog niet uit was, haalt David daar niet. Voor n8n dan: seintje klaar,
   // 0 bezorgd (en app_uit), zodat de bestaande stap "geen seintje bezorgd" het bericht met knoppen naar Telegram zet.
@@ -9281,7 +9343,7 @@ function berichtNaarTelegram(res, d) {
   if (b.vraag_hash) {
     try {
       const v = appVragen(), r = v[id + ':' + b.vraag_hash];
-      if (r && r.antwoord) return berichtStuur(res, 409, { ok: false, fout: 'al beantwoord in de app', al_beantwoord: true });
+      if (appAntwoord(r)) return berichtStuur(res, 409, { ok: false, fout: 'al beantwoord in de app', al_beantwoord: true });
       if (r && zet(r)) appVragenSchrijf(v);
       if (r) nt = appNaarTelegramNu(r);
     } catch (e) { logError('bericht-vragen', e); return berichtStuur(res, 500, { ok: false, fout: 'vragenregister niet schrijfbaar' }); }

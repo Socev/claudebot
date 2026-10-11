@@ -21,6 +21,7 @@ for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_COD
                       ['const APP_PUSH_WACHT_MS = 20 * 1000;', 'const APP_PUSH_WACHT_MS = 300;'],
                       ['if (!(uur >= 7 && uur < 22)) return;', 'if (!(TOETSUUR(uur) >= 7 && TOETSUUR(uur) < 22)) return;'],
                       ['const BERICHT_BUNDEL_MS = 10 * 60 * 1000;', 'const BERICHT_BUNDEL_MS = 400;'],   // wv263
+                      ['const APP_KNOP_WACHT_MELD_MS = 30 * 1000;', 'const APP_KNOP_WACHT_MELD_MS = 300;'],   // wv405
                       ['const BERICHT_KIJKT_MS = 60 * 1000;', 'const BERICHT_KIJKT_MS = 300;'],   // wv292
                       ['const BERICHT_KIJKT_MARGE_MS = 8 * 1000;', 'const BERICHT_KIJKT_MARGE_MS = 150;'],
                       ['function berichtUur() { return Number(', 'function berichtUur() { if (TOETSBUUR() !== null) return TOETSBUUR(); return Number(']]) {
@@ -2114,14 +2115,100 @@ async function bewijs(o) {
       await slaap(30);
       toets('14 Ja op een gewone vraag: zonder vingerafdruk, prompt zonder bevestigingszin', r.status === 200 && gestart[gestart.length - 1].prompt.indexOf('verse vingerafdruk') < 0, JSON.stringify(r.j));
       afmaken[r.j.job_id]('ok'); await slaap(60);
-      // Ja terwijl het kanaal bezig is: 409 en de vingerafdruk blijft bruikbaar
+      // wv405: Ja terwijl het kanaal bezig is: in de rij (200, in_rij), vingerafdruk bij het drukken gecontroleerd en verbruikt;
+      // de beurt en de chat_log-rijen pas als de vorige klaar is; tweede druk = al beantwoord; volgorde blijft die van drukken
+      const vRij = await metVraag('hoofd', 'Zal ik de mail aan Piet versturen?');
+      const vRij2 = await metVraag('hoofd', 'Is de planning zo goed?');
       await vers(P);
       const sB = sessieVan(P), versVoor = sB.vers_tot;
-      let losB; ctx.enqueue('40687', () => new Promise((ok2) => { losB = ok2; }));
+      let losB; const plosB = new Promise((ok2) => { losB = ok2; }); ctx.enqueue('40687', () => plosB);
       const rb = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'bezet' }, { pot: P.jar });
-      r = await vraag('POST', '/app/knop', { job_id: vMail.job, vraag_hash: vMail.hash, keuze: 'ja' }, { pot: P.jar });
-      toets('14 gevoelige Ja terwijl het kanaal bezig is -> 409, vingerafdruk teruggezet', r.status === 409 && sB.vers_tot === versVoor && versVoor > 0, r.status + ' ' + sB.vers_tot);
-      losB(); await slaap(40); afmaken[rb.j.job_id]('ok'); await slaap(60);
+      await slaap(30);
+      const nGR = gestart.length, nCL = chatlogStaat.rijen.length;
+      r = await vraag('POST', '/app/knop', { job_id: vRij.job, vraag_hash: vRij.hash, keuze: 'ja' }, { pot: P.jar });
+      await slaap(30);
+      toets('14 wv405 gevoelige Ja bij bezig kanaal -> 200 in_rij, vingerafdruk verbruikt, nog geen beurt en geen chat_log', r.status === 200 && r.j.in_rij === true && r.j.beantwoord && r.j.beantwoord.vingerafdruk === true && versVoor > 0 && sB.vers_tot === 0 && gestart.length === nGR && chatlogStaat.rijen.length === nCL, r.status + ' ' + JSON.stringify(r.j) + ' ' + sB.vers_tot);
+      const jRij = r.j.job_id;
+      const r2 = await vraag('POST', '/app/knop', { job_id: vRij2.job, vraag_hash: vRij2.hash, keuze: 'nee' }, { pot: P.jar });
+      const jRij2 = r2.j.job_id;
+      toets('14 wv405 tweede knopdruk (andere vraag) kort erna -> ook 200 in_rij', r2.status === 200 && r2.j.in_rij === true && jRij2 !== jRij, JSON.stringify(r2.j));
+      await vers(P);
+      const rDubK = await vraag('POST', '/app/knop', { job_id: vRij.job, vraag_hash: vRij.hash, keuze: 'ja' }, { pot: P.jar });
+      toets('14 wv405 nog een druk op dezelfde vraag in de rij -> 409 al beantwoord, geen extra beurt, vingerafdruk niet verbruikt', rDubK.status === 409 && rDubK.j.beantwoord && rDubK.j.beantwoord.keuze === 'ja' && /^al beantwoord: Ja /.test(rDubK.j.fout) && sessieVan(P).vers_tot > 0 && Object.keys(jobs).filter((id) => jobs[id].app && jobs[id].app.soort === 'knop' && jobs[id].status === 'pending').length === 2, rDubK.status + ' ' + JSON.stringify(rDubK.j));
+      const rTyp = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'nog iets' }, { pot: P.jar });
+      toets('14 wv405 getypt bericht terwijl knopdrukken in de rij staan -> nog steeds 409 kanaal bezig', rTyp.status === 409 && /bezig/.test(rTyp.j.fout), rTyp.status);
+      { const g = await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar });
+        const lo = (g.j.lopend || []).filter((x) => x.job_id === jRij || x.job_id === jRij2);
+        const it = (g.j.items || []).find((x) => x.job_id === vRij.job);
+        toets('14 wv405 geschiedenis: beide knopdrukken lopend met in_rij, vraag toont beantwoord (alleen de vier velden)', lo.length === 2 && lo.every((x) => x.in_rij === true) && it && it.vraag && it.vraag.beantwoord && it.vraag.beantwoord.keuze === 'ja' && Object.keys(it.vraag.beantwoord).sort().join() === 'apparaat,keuze,t,vingerafdruk', JSON.stringify(lo) + JSON.stringify(it && it.vraag)); }
+      const vjR = JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[vRij.job + ':' + vRij.hash];
+      toets('14 wv405 vragen.json: druk hoort bij zijn job, nog niet gestart', vjR.antwoord && vjR.antwoord.job === jRij && vjR.antwoord.gestart === false, JSON.stringify(vjR));
+      losB(); await slaap(60);
+      toets('14 wv405 eerst de getypte beurt die al wachtte', gestart.length === nGR + 1 && gestart[gestart.length - 1].jobId === rb.j.job_id, gestart.slice(nGR).map((x) => x.jobId).join());
+      afmaken[rb.j.job_id]('ok'); await slaap(120);
+      const gR = gestart[gestart.length - 1];
+      const clR = chatlogStaat.rijen.slice(nCL);
+      toets('14 wv405 daarna de eerste knopbeurt, met "met verse vingerafdruk bevestigd"; chat_log knop-ja-vers pas nu, na het antwoord van de vorige beurt', gestart.length === nGR + 2 && gR.jobId === jRij && /, met verse vingerafdruk bevestigd, vraag-id /.test(gR.prompt) && /kanaal "app-knop", en handel af\.\)$/.test(gR.prompt) && clR.length >= 3 && clR[clR.length - 1].bevestiging === 'knop-ja-vers' && clR[clR.length - 2].rol === 'socev' && /Piet/.test(clR[clR.length - 2].tekst), gR.prompt.slice(-160) + ' ' + JSON.stringify(clR.map((x) => [x.rol, x.bevestiging])));
+      toets('14 wv405 vragen.json: gestart na de start', JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[vRij.job + ':' + vRij.hash].antwoord.gestart === true);
+      afmaken[jRij]('gedaan'); await slaap(120);
+      const gR2 = gestart[gestart.length - 1];
+      toets('14 wv405 en dan de tweede knopbeurt (Nee), in de volgorde van drukken', gestart.length === nGR + 3 && gR2.jobId === jRij2 && /David drukte NEE op de vraag: "Is de planning zo goed\?"/.test(gR2.prompt) && chatlogStaat.rijen[chatlogStaat.rijen.length - 1].bevestiging === 'knop-nee', gestart.slice(nGR).map((x) => x.jobId).join());
+      afmaken[jRij2]('ok'); await slaap(80);
+      // wv405: lang in de rij -> regel erbij dat hij wachtte en dat de vingerafdruk bij het drukken is gecontroleerd
+      { const vL = await metVraag('hoofd', 'Zal ik de factuur aan Jan versturen?');
+        await vers(P);
+        let losL; const plosL = new Promise((ok2) => { losL = ok2; }); ctx.enqueue('40687', () => plosL);
+        const rl = await vraag('POST', '/app/knop', { job_id: vL.job, vraag_hash: vL.hash, keuze: 'ja' }, { pot: P.jar });
+        await slaap(400);   // langer dan APP_KNOP_WACHT_MELD_MS (in de toets 300 ms)
+        const laatsteTs = Date.now() + 1; H.appStaat.chatlogLaatsteTs = laatsteTs;   // vorig antwoord "in dezelfde ms"
+        losL(); await slaap(80);
+        { const d2 = chatlogStaat.rijen.slice(-2);
+          toets('14 wv405 chat_log-rijen van de druk altijd ná de laatst geschreven rij (Fable #1)', d2.length === 2 && d2[0].rol === 'socev' && d2[1].rol === 'david' && d2[0].ts > laatsteTs && d2[1].ts > d2[0].ts, JSON.stringify(d2.map((x) => [x.rol, x.ts - laatsteTs]))); }
+        const gl = gestart[gestart.length - 1];
+        toets('14 wv405 langer in de rij dan APP_KNOP_WACHT_MELD_MS: regel "stond tot … in de rij", vingerafdruk gecontroleerd bij het drukken', rl.status === 200 && gl.jobId === rl.j.job_id && /\n\(Deze knopdruk stond tot \d\d:\d\d in de rij omdat Socev nog bezig was; de vingerafdruk is gecontroleerd op het moment van drukken\.\)$/.test(gl.prompt) && /met verse vingerafdruk bevestigd/.test(gl.prompt), JSON.stringify(gl.prompt.slice(-240)));
+        afmaken[rl.j.job_id]('ok'); await slaap(60); }
+      // wv405: verloren in de rij (pod herstart vóór de start: job weg, niet gestart) -> vraag weer open, nieuwe druk werkt
+      { const vV = await metVraag('hoofd', 'Is dit lijstje compleet?');
+        let losV; const plosV = new Promise((ok2) => { losV = ok2; }); ctx.enqueue('40687', () => plosV);
+        const rv = await vraag('POST', '/app/knop', { job_id: vV.job, vraag_hash: vV.hash, keuze: 'ja' }, { pot: P.jar });
+        const verlorenJob = rv.j.job_id;
+        delete jobs[verlorenJob];   // zoals na een herstart: jobs staan alleen in het geheugen
+        const u0 = await vraag('POST', '/app/uitslag', { job_id: vV.job }, { pot: P.jar });
+        toets('14 wv405 job weg zonder herstart (druk van na de processtart): blijft beantwoord (Fable #3)', u0.j.vraag && u0.j.vraag.beantwoord && u0.j.vraag.beantwoord.keuze === 'ja', JSON.stringify(u0.j.vraag));
+        { const vjx = JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8')); vjx[vV.job + ':' + vV.hash].antwoord.t = '2026-01-01T00:00:00.000Z'; fs.writeFileSync(path.join(DATA, 'vragen.json'), JSON.stringify(vjx)); }   // druk van vóór de (nagebootste) herstart
+        const u = await vraag('POST', '/app/uitslag', { job_id: vV.job }, { pot: P.jar });
+        toets('14 wv405 verloren knopdruk: uitslag toont de vraag weer open', rv.status === 200 && u.j.vraag && u.j.vraag.beantwoord === null, JSON.stringify(u.j.vraag));
+        losV(); await slaap(60);
+        const nV = gestart.length;
+        const rv2 = await vraag('POST', '/app/knop', { job_id: vV.job, vraag_hash: vV.hash, keuze: 'ja' }, { pot: P.jar });
+        await slaap(40);
+        toets('14 wv405 ... en een nieuwe druk geeft één nieuwe beurt (de oude wekt niets meer op)', rv2.status === 200 && rv2.j.job_id !== verlorenJob && gestart.length === nV + 1 && gestart[gestart.length - 1].jobId === rv2.j.job_id && JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[vV.job + ':' + vV.hash].antwoord.job === rv2.j.job_id, rv2.status + JSON.stringify(rv2.j));
+        afmaken[rv2.j.job_id]('ok'); await slaap(60); }
+      // wv405: hooguit APP_KNOP_RIJ_MAX (3) knopdrukken per kanaal in de rij
+      { const vs = [];
+        for (const z of ['Is A goed?', 'Is B goed?', 'Is C goed?', 'Is D goed?']) vs.push(await metVraag('hoofd', z));
+        let losM; const plosM = new Promise((ok2) => { losM = ok2; }); ctx.enqueue('40687', () => plosM);
+        const rr = [];
+        for (const x of vs) rr.push(await vraag('POST', '/app/knop', { job_id: x.job, vraag_hash: x.hash, keuze: 'nee' }, { pot: P.jar }));
+        toets('14 wv405 vierde knopdruk in de rij -> 429, vraag blijft open', rr.slice(0, 3).every((x) => x.status === 200) && rr[3].status === 429 && /in de rij/.test(rr[3].j.fout) && !JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))[vs[3].job + ':' + vs[3].hash].antwoord, rr.map((x) => x.status).join());
+        losM();
+        for (const x of rr.slice(0, 3)) { await slaap(60); afmaken[x.j.job_id]('ok'); }
+        await slaap(80); }
+      // wv405 (Fable #2): getypt bericht dat nog op chat_log wacht (startvenster) en een knopdruk vlak erna: het getypte bericht eerst
+      { const vS = await metVraag('hoofd', 'Is S goed?');
+        chatlogStaat.vertraging = 1500;
+        const nS = gestart.length;
+        const pTyp = vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst: 'getypt in het venster' }, { pot: P.jar });
+        await slaap(300);
+        const rS = await vraag('POST', '/app/knop', { job_id: vS.job, vraag_hash: vS.hash, keuze: 'nee' }, { pot: P.jar });
+        const rTS = await pTyp;
+        chatlogStaat.vertraging = 0;
+        await slaap(80);
+        toets('14 wv405 knopdruk tijdens het startvenster van een getypt bericht: komt erachter (in_rij), getypt bericht start eerst', rS.status === 200 && rS.j.in_rij === true && rTS.status === 200 && gestart.length === nS + 1 && gestart[gestart.length - 1].jobId === rTS.j.job_id, JSON.stringify([rS.status, rS.j.in_rij, rTS.status, gestart.slice(nS).map((x) => x.jobId), rTS.j.job_id]));
+        afmaken[rTS.j.job_id]('ok'); await slaap(120);
+        toets('14 wv405 ... en daarna de knopdruk', gestart.length === nS + 2 && gestart[gestart.length - 1].jobId === rS.j.job_id);
+        afmaken[rS.j.job_id]('ok'); await slaap(60); }
+      H.appStaat.tellers.beurt = [];   // wv405: de blokken hierboven tellen mee voor de uurgrens (30); de toetsen hierna rekenen op ruimte
       // één vingerafdruk, twee gevoelige Ja's tegelijk (twee tabbladen): precies één gaat door
       await vers(P);
       const nR = gestart.length;
@@ -4338,7 +4425,7 @@ async function bewijs(o) {
         && L[4].regel2 === 'over tijd (' + dm(plus(V, -2)) + ')' && L[5].regel2 === 'besluit', JSON.stringify([L[1].regel2, L[2].regel2, L[3].regel2, L[4].regel2, L[5].regel2]));
       toets('27 dichtbij (deadline ≤ 48 u): vandaag, morgen en over tijd', [2, 3, 4].every((i) => L[i].dichtbij) && !L[1].dichtbij && !L[5].dichtbij);
       toets('27 lijst zonder bewijs, herkomst, meting, sleutel of waarom', !/BEWIJS-|METING-|herkomst|sleutel|Waarom /.test(JSON.stringify(r.j)), JSON.stringify(r.j).slice(0, 300));
-      toets('27 GET (200) is stil: geen auditregel', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAu);
+      toets('27 GET (200) is stil: geen auditregel', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAu, fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').slice(nAu - 1).join(' | '));
       r = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
       toets('27 tweede keer binnen 60 s uit het geheugen (één RPC)', r.status === 200 && nRpc() === n0 + 1, nRpc() - n0);
       const nepRes = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
@@ -4845,6 +4932,12 @@ async function bewijs(o) {
       H.appAan('toets');   // ook als de app meteen weer aan gaat: de beurt blijft vervallen
       losLaten(); await slaap(50);
       toets('10 vervallen beurt start niet en eindigt met "vervallen door de noodstop"', gestart.length === nStart && jobs[jWacht].status === 'done' && jobs[jWacht].result.ok === false && /noodstop/.test(jobs[jWacht].result.error) && jobs[jWacht].opgehaald === true, JSON.stringify(jobs[jWacht]));
+      // wv405: een knopdruk in de rij die door de noodstop vervalt, zet zijn vraag weer open (bijVerval) en logt niets (geen bijStart)
+      { let nVerval = 0, nBijStart = 0, los2; const bezet2 = new Promise((ok) => { los2 = ok; }); ctx.enqueue('40687', () => bezet2);
+        const sk = H.appStartBeurt({ id: qId }, 'hoofd', 'knop', { soort: 'knop', tekst: 'k', bijStart: () => { nBijStart++; return ''; }, bijVerval: () => { nVerval++; } });
+        const un2 = H.appNoodstop('toets'); H.appAan('toets');
+        los2(); await slaap(50);
+        toets('10 wv405 knopdruk in de rij vervalt bij de noodstop: bijVerval 1x, geen bijStart, geen beurt', !!sk.job_id && un2.beurten_vervallen === 1 && nVerval === 1 && nBijStart === 0 && jobs[sk.job_id].status === 'done' && gestart.length === nStart, JSON.stringify([sk, un2.beurten_vervallen, nVerval, nBijStart])); }
       fs.writeFileSync(UIT, '');
       const sb = H.appStartBeurt({ id: qId }, 'hoofd', 'x', { soort: 'bericht', tekst: 'x' });
       toets('10 beurt die na de noodstop pas start -> fout noodstop', sb.fout === 'noodstop', JSON.stringify(sb));
