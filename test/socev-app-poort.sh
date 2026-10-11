@@ -29,6 +29,8 @@ for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_COD
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'apptoets-'));
 const DATA = path.join(W, 'data'); fs.mkdirSync(DATA, { recursive: true });
+// wv424: Knop (app) heeft een eigen sleutel (bestand); het schrijfluik (nep-schrijfluik) mag er niet meer in.
+const KNOPK = 'c'.repeat(64), KNOPK_PAD = path.join(W, 'knop-app.key'); fs.writeFileSync(KNOPK_PAD, KNOPK + '\n', { mode: 0o600 });
 fs.symlinkSync('/opt/data/socev-app-data/vendor', path.join(DATA, 'vendor'));   // brug-pad ook getoetst
 const UIT = path.join(W, 'app-uit');
 const TEAM = 'https://huisdokter.cloudflareaccess.com', AUD = 'a'.repeat(64), CLIENT = 'proefclient.access', POORT = 'p'.repeat(64);
@@ -200,7 +202,7 @@ async function nepFetch(url, opt) {
     if (akStaat.traag) { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; }
     if (akStaat.status !== 200) return antw(akStaat.status, {});
     if (akStaat.onleesbaar) return { ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token < in JSON'); } };
-    if ((opt.headers || {})['x-socev-sleutel'] !== 'nep-schrijfluik') return antw(200, { pagina: 'sleutel', tekst: 'Deze knop ken ik niet.' });
+    if ((opt.headers || {})['x-socev-sleutel'] !== KNOPK) return antw(200, { pagina: 'sleutel', tekst: 'Deze knop ken ik niet.' });
     return antw(200, akStaat.antwoord ? akStaat.antwoord(b) : { pagina: 'onbekend', tekst: '' });
   }
   if (url.startsWith(N8N + '/webhook/voorwerk-')) {   // wv173: AI - Voorwerk-knoppen (Knop (app))
@@ -209,7 +211,7 @@ async function nepFetch(url, opt) {
     if (url !== N8N + '/webhook/' + vkStaat.pad) return antw(404, {});
     if (vkStaat.traag) { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; }
     if (vkStaat.status !== 200) return antw(vkStaat.status, {});
-    if ((opt.headers || {})['x-socev-sleutel'] !== 'nep-schrijfluik') return antw(200, { ok: true, uitkomst: 'geweigerd', popup: 'Deze knop ken ik niet.' });
+    if ((opt.headers || {})['x-socev-sleutel'] !== KNOPK) return antw(200, { ok: true, uitkomst: 'geweigerd', popup: 'Deze knop ken ik niet.' });
     return antw(200, vkStaat.antwoord ? vkStaat.antwoord(b) : { ok: true });
   }
   if (url.startsWith(N8N + '/webhook/')) {   // wv136: AI - Agenda-Wachter API (alleen de leesacties)
@@ -338,7 +340,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', N8N_WEBHOOK_VERBETERLOG: 'nep-vbl', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
     APP_BINDING_BESTAND: path.join(W, 'app-binding.json'),   // wv316
-    TODOIST_MCP_TOKEN: 'nep-todoist', N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
+    TODOIST_MCP_TOKEN: 'nep-todoist', N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', APP_KNOP_SLEUTEL_PAD: KNOPK_PAD, CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
   VAULT: VAULT_T,
   TOETSUUR: () => toetsUur,
   TOETSBUUR: () => toetsBUur, SECRET: 'g'.repeat(40),
@@ -2719,7 +2721,7 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/actie', { datum: V, positie: 1, keuze: 'gedaan' }, { pot: P.jar });
       const a1 = vkStaat.aanroepen[0] || {};
       toets('20 ✅ -> 200 met de pop-uptekst van n8n', r.status === 200 && r.j.ok === true && r.j.uitkomst === 'ok' && r.j.melding === 'Gedaan: afgevinkt in Todoist.', JSON.stringify(r.j).slice(0, 300));
-      toets('20 naar de ingang Knop (app) (niet Knop (tg)), met de schrijfluiksleutel als kop, alleen nonce/keuze/message_id', vkStaat.aanroepen.length === 1 && a1.url === N8N + '/webhook/voorwerk-knop-app-proef1' && a1.methode === 'POST' && a1.sleutel === 'nep-schrijfluik'
+      toets('20 naar de ingang Knop (app) (niet Knop (tg)), met de schrijfluiksleutel als kop, alleen nonce/keuze/message_id', vkStaat.aanroepen.length === 1 && a1.url === N8N + '/webhook/voorwerk-knop-app-proef1' && a1.methode === 'POST' && a1.sleutel === KNOPK
         && JSON.stringify(a1.body) === JSON.stringify({ nonce: nn(1), keuze: 'g', message_id: 4242 }), JSON.stringify(a1));
       const it1 = (r.j.acties && r.j.acties.items || [])[0] || {};
       toets('20 verse stand terug: gedaan, geen knoppen, ↩️ tot ~1 min na de keuze (terug_ms = rest volgens de pod-klok)', it1.stand === 'gedaan' && it1.knoppen === false && it1.terug_tot && Date.parse(it1.terug_tot) - Date.now() > 50000 && Date.parse(it1.terug_tot) - Date.now() <= 60000
@@ -2779,7 +2781,7 @@ async function bewijs(o) {
       vkStaat.antwoord = () => ({ ok: true, uitkomst: 'sleutel', popup: 'Deze knop ken ik niet.' });
       const nLog = logs.length;
       r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
-      toets('20 n8n kent de sleutel niet -> 503 "niet ingericht; gebruik Telegram" en een foutregel (Fable M1)', r.status === 503 && /niet ingericht; gebruik Telegram/.test(r.j.fout) && logs.slice(nLog).some((l) => /app-actie: .*sleutel/.test(l)) && !logs.slice(nLog).some((l) => /nep-schrijfluik/.test(l)), JSON.stringify([r.j, logs.slice(nLog)]));
+      toets('20 n8n kent de sleutel niet -> 503 "niet ingericht; gebruik Telegram" en een foutregel (Fable M1)', r.status === 503 && /niet ingericht; gebruik Telegram/.test(r.j.fout) && logs.slice(nLog).some((l) => /app-actie: .*sleutel/.test(l)) && !logs.slice(nLog).some((l) => l.indexOf(KNOPK) >= 0), JSON.stringify([r.j, logs.slice(nLog)]));
       // K1: een verversing die loopt terwijl er getikt wordt, overschrijft de nieuwe stand niet
       vkStaat.antwoord = (b) => { const x = n8nStaat.portie.find((y) => y.nonce === b.nonce); Object.assign(x, { status: 'afgehandeld', keuze: 'gedaan', getikt_op: new Date().toISOString() }); return { ok: true, uitkomst: 'ok', popup: 'Gedaan.' }; };
       n8nStaat.portie.find((y) => y.positie === 2).status = 'open';
@@ -2798,10 +2800,10 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
       toets('20 webhookpad gewijzigd: 404 -> opnieuw opgezocht en één keer opnieuw', r.status === 200 && vkStaat.aanroepen.length === nV + 2 && vkStaat.aanroepen[nV + 1].url.endsWith('proef2'), JSON.stringify(vkStaat.aanroepen.slice(nV).map((x) => x.url)));
       // sleutel ontbreekt, passief, grens
-      const sk = ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA; delete ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA;
+      fs.renameSync(KNOPK_PAD, KNOPK_PAD + '.weg');
       const nS = vkStaat.aanroepen.length;
       r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
-      ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA = sk;
+      fs.renameSync(KNOPK_PAD + '.weg', KNOPK_PAD);
       toets('20 zonder schrijfluiksleutel -> 503, niets aangeroepen', r.status === 503 && vkStaat.aanroepen.length === nS, JSON.stringify(r.j));
       rolStub.primair = false;
       r = await vraag('POST', '/app/actie', { datum: V, positie: 2, keuze: 'gedaan' }, { pot: P.jar });
@@ -3745,7 +3747,7 @@ async function bewijs(o) {
         const r200 = [ra, rb].find((x) => x.status === 200), r409 = [ra, rb].find((x) => x.status === 409);
         toets('23c twee drukken tegelijk -> één n8n-aanroep, de ander 409 bezig', !!r200 && !!r409 && r409.j.bezig === true && nA() === 1, [ra.status, rb.status, nA()].join());
         const a1 = akStaat.aanroepen[0] || {};
-        toets('23c naar Knop (app) van Agenda-knoppen, sleutel als kop, body alleen {n, a}', a1.url === N8N + '/webhook/agenda-knop-app-aaaaaaaaaaaa' && a1.methode === 'POST' && a1.sleutel === 'nep-schrijfluik' && JSON.stringify(a1.body) === JSON.stringify({ n: nA1, a: 'ja' }), JSON.stringify(a1));
+        toets('23c naar Knop (app) van Agenda-knoppen, sleutel als kop, body alleen {n, a}', a1.url === N8N + '/webhook/agenda-knop-app-aaaaaaaaaaaa' && a1.methode === 'POST' && a1.sleutel === KNOPK && JSON.stringify(a1.body) === JSON.stringify({ n: nA1, a: 'ja' }), JSON.stringify(a1));
         toets('23c ✅ uitgevoerd -> 200 ok, melding "✅ " + platte tekst, ↩️ erbij (24 u)', r200 && r200.j.ok === true && r200.j.pagina === 'uitgevoerd' && r200.j.melding === '✅ Geplaatst: Tandarts vr 10-10 09:00 (Gezin) & herinnering.'
           && r200.j.agenda.knoppen.length === 2 && r200.j.agenda.knoppen[0].open === false && r200.j.agenda.knoppen[1].knop === 'ongedaan' && r200.j.agenda.knoppen[1].open === true
           && Math.abs(Date.parse(r200.j.agenda.knoppen[1].verloopt) - Date.now() - 24 * 3600000) < 60000, JSON.stringify(r200 && r200.j));
@@ -3835,10 +3837,10 @@ async function bewijs(o) {
         toets('23c webhookpad gewijzigd: 404 -> opnieuw opgezocht en één keer opnieuw', r.status === 200 && nA() === nVoorI + 2 && akStaat.aanroepen[nA() - 1].url.endsWith('bbbbbbbbbbbb'), JSON.stringify(akStaat.aanroepen.slice(nVoorI).map((x) => x.url)));
         // sleutel ontbreekt, passieve kant, grens: alles terug (stand, vingerafdruk), niets aangeroepen
         const nJ = nn(); const idJ = (await bqA(AG(nJ))).j.id;
-        const sk = ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA; delete ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA;
+        fs.renameSync(KNOPK_PAD, KNOPK_PAD + '.weg');
         const nVoorJ = nA();
         r = await app(D(idJ, { keuze: 'nee' }));
-        ctx.process.env.N8N_WEBHOOK_SOCEV_AGENDA = sk;
+        fs.renameSync(KNOPK_PAD + '.weg', KNOPK_PAD);
         toets('23c zonder schrijfluiksleutel -> 503, stand open, niets aangeroepen', r.status === 503 && agf()[idJ].knoppen.uitvoeren.stand === 'open' && nA() === nVoorJ, JSON.stringify(r.j));
         await vers(P);
         const versJ = sessieVan(P).vers_tot, bestandJ = fs.readFileSync(AGF, 'utf8');

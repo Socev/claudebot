@@ -89,10 +89,10 @@ rpc.listen(0, '127.0.0.1', async function () {
     toets('A omgeving is een allowlist (niets onbekends)', sa && vreemd.length === 0, vreemd.join(','));
     toets('A verboden tools blijven (--disallowedTools)', sa && sa.args.includes('--disallowedTools'));
 
-    // B. Gewone agent: omgeving ongewijzigd (geen allowlist voor andere aanroepers).
-    await agent('bb');
+    // B. Machinekamer-agent met API_SECRET: volledige omgeving (sinds wv424 alleen nog met label machinekamer:).
+    await agent('bb', { label: 'machinekamer: proef bb' });
     const sb = await wachtOp('bb');
-    toets('B gewone agent houdt zijn omgeving', sb && sb.env.includes('GEHEIM_NEP') && sb.env.includes('N8N_API_KEY') && !sb.args.includes('--disallowedTools'));
+    toets('B machinekamer-agent met API_SECRET houdt zijn omgeving', sb && sb.env.includes('GEHEIM_NEP') && sb.env.includes('N8N_API_KEY') && !sb.args.includes('--disallowedTools'));
   } catch (e) { console.log('ROOD  toets brak af: ' + (e && e.stack)); fout++; }
   try { p && process.kill(-p.pid, 'SIGKILL'); } catch (e) {}
   rpc.close();
