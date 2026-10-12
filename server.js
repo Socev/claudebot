@@ -1575,7 +1575,7 @@ function jobEindLog(jobId, j, ws) {
 // Nieuw app-kanaal met een eigen sessie (APP_KANALEN)? Zet hem ook in NACHTRESET_SESSIES.
 // NOODREM: NACHTRESET=0 in de omgeving.
 const NACHTRESET_AAN = process.env.NACHTRESET !== '0';
-const NACHTRESET_SESSIES = ['cijfer-meester', 'cijfermeester'];
+const NACHTRESET_SESSIES = ['cijfer-meester', 'cijfermeester', 'telegram-debug'];   // telegram-debug (machinekamer, ook app-kanaal machinekamer): 12-10-2026, David — de sessie stond op ± 880.000 tokens per stap
 const NACHTRESET_UUR = 4;
 const nachtresetGedaan = {};   // sessiesleutel -> JJJJ-MM-DD (Amsterdam)
 function nachtresetTik(tijd) {
