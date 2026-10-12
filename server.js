@@ -2590,6 +2590,9 @@ function handleRequest(req, res) {
       ok: true, service: 'claude-api', vault: VAULT, workspaces: spaces,
       // uitwijk stap 3: ok blijft true als de pod passief is (de supervisor-bootcheck leunt op ok; passief is geen defect)
       kant: ROL_KANT, rol: rol.rol, uitwijk: rolInfo(),
+      // wv452: de actieknoppen in de app werken zonder Telegram-bericht; AI - Voorwerk (acties in porties) kiest om 07:05 alleen dan de
+      // app-route (anders het oude Telegram-bericht met knoppen), zodat een nog niet uitgerolde pod geen knoploze ochtend geeft
+      actielijst_app: true,
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
       server: SERVER_ECHT ? { echt: true, paden: { home: serverPaden.home, io: serverPaden.io, jobout: serverPaden.jobout } }
