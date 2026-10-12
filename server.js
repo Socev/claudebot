@@ -6821,7 +6821,8 @@ function appActies(rijen, vandaag, nu) {
       later_tot: k === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(r.later_tot)) ? r.later_tot : null,
       op: k && r.getikt_op ? String(r.getikt_op).slice(0, 32) : null, blok: !!r.blok_op,
       herhaal: r.herhaal === true,
-      knoppen: stand === 'open' && Number(r.message_id) > 0 && /^[0-9a-f]{32}$/.test(String(r.nonce || '')),   // zelfde voorwaarden als Rij toetsen
+      // wv452: geen Telegram-message_id meer nodig (het lijstje van 07:05 staat sinds 12-10 alleen in de app; Rij toetsen eist hem alleen bij een tik in Telegram)
+      knoppen: stand === 'open' && /^[0-9a-f]{32}$/.test(String(r.nonce || '')),
       terug_tot: terugTot };
   }) };
 }
@@ -6919,7 +6920,8 @@ async function appVandaagRoute(req, res, a) {
 // ── Knoppen bij het actielijstje (wv173; bouwplan § 4.9): dezelfde knoppen als onder het ochtendlijstje in Telegram ──
 // ✅ gedaan, ⏭ volgende week, 🗑 laten vallen en ↩️ terugdraaien gaan naar de tweede ingang van *AI - Voorwerk-knoppen* (Knop (app)):
 // dezelfde rij-toets, claim en schrijfstappen (Todoist, actie_state, correspondentie_state) als een tik in Telegram, en het
-// Telegram-bericht wordt daar ook opnieuw getekend. Geen eigen logica op de pod: die zoekt alleen de rij op (datum + positie;
+// Telegram-bericht wordt daar ook opnieuw getekend als er een is (wv452: sinds 13-10 gaat het lijstje alleen naar de app,
+// message_id 0; Telegram met knoppen alleen nog als terugval). Geen eigen logica op de pod: die zoekt alleen de rij op (datum + positie;
 // nonce en message_id gaan nooit naar de app) en geeft de pop-uptekst van n8n door. Sleutel: die van het Socev-schrijfluik
 // (N8N_WEBHOOK_SOCEV_AGENDA, ook buiten de auto-agents), in n8n alleen als sha256-vingerafdruk. Sinds wv181 ook 📅 (blok): dezelfde
 // Blok-tak als in Telegram (claim, één voorstel per 30 min per item; AI - Voorwerk-blok zoekt het uur). Het voorstel komt als
@@ -6951,9 +6953,11 @@ async function appActieRoute(req, res, a, d) {
   let rijen;
   try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-actie', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen; probeer het zo opnieuw', 'actie lezen'); }
   const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
-  if (!rij || !/^[0-9a-f]{32}$/.test(String(rij.nonce || '')) || !(Number(rij.message_id) > 0)) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'actie onbekend');
+  if (!rij || !/^[0-9a-f]{32}$/.test(String(rij.nonce || ''))) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'actie onbekend');
+  // wv452: message_id 0 = het lijstje ging alleen naar de app (geen Telegram-bericht om bij te werken); n8n toetst nonce en status zelf
+  const mid = Number(rij.message_id) > 0 ? Number(rij.message_id) : 0;
   let j;
-  try { j = await appVoorwerkKnop({ nonce: rij.nonce, keuze: APP_ACTIE_KEUZE[keuze], message_id: Number(rij.message_id) }); } catch (e) {
+  try { j = await appVoorwerkKnop({ nonce: rij.nonce, keuze: APP_ACTIE_KEUZE[keuze], message_id: mid }); } catch (e) {
     logError('app-actie', e);
     // Bij een time-out kan de tik toch zijn doorgegaan: niet "mislukt" zeggen, wel laten nakijken
     // 503, geen 502: de app leest 502/504 als "Socev niet bereikbaar"

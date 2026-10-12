@@ -2703,7 +2703,7 @@ async function bewijs(o) {
       H.appStaat.vandaag = null;
       r = await vraag('GET', '/app/vandaag', undefined, { pot: P.jar });
       const st = (r.j.acties && r.j.acties.items || []).map((x) => x.positie + ':' + x.stand + ':' + (x.knoppen ? 'k' : '-') + (x.herhaal ? 'h' : ''));
-      toets('20 Vandaag: stand en knoppen per actie (open, herhaal, zonder bericht, al afgehandeld, bezig, verlopen, komt nog)', st.join(' ') === '1:open:k 2:open:kh 3:open:- 4:al afgehandeld:- 5:bezig:- 6:verlopen:- 7:nog niet verstuurd:-', st.join(' '));
+      toets('20 Vandaag: stand en knoppen per actie (open, herhaal, zonder Telegram-bericht (wv452: wel knoppen), al afgehandeld, bezig, verlopen, komt nog)', st.join(' ') === '1:open:k 2:open:kh 3:open:k 4:al afgehandeld:- 5:bezig:- 6:verlopen:- 7:nog niet verstuurd:-', st.join(' '));
       toets('20 Vandaag: nonce, sleutel en message_id niet in het antwoord', !/1111111111|SLEUTEL-|4242|nonce|message_id/.test(JSON.stringify(r.j.acties)), JSON.stringify(r.j.acties).slice(0, 300));
       const nAgenda = agendaStaat.aanroepen.length;
       // ongeldig
@@ -2712,8 +2712,14 @@ async function bewijs(o) {
         ong.push((await vraag('POST', '/app/actie', b, { pot: P.jar })).status);
       toets('20 ongeldig (letter b, constructor, __proto__, datum, positie 0, 1.5, tekst) -> 400', ong.join() === '400,400,400,400,400,400,400', ong.join());
       r = await vraag('POST', '/app/actie', { datum: V, positie: 9, keuze: 'gedaan' }, { pot: P.jar });
+      toets('20 onbekende actie -> 404, n8n niet aangeroepen', r.status === 404 && vkStaat.aanroepen.length === 0, [r.status, vkStaat.aanroepen.length].join());
+      // wv452: zonder Telegram-bericht (alleen in de app) -> wel naar n8n, met message_id 0; daarna rij 3 terug zoals hij was
       const r3 = await vraag('POST', '/app/actie', { datum: V, positie: 3, keuze: 'gedaan' }, { pot: P.jar });
-      toets('20 onbekende actie / zonder Telegram-bericht -> 404, n8n niet aangeroepen', r.status === 404 && r3.status === 404 && vkStaat.aanroepen.length === 0, [r.status, r3.status, vkStaat.aanroepen.length].join());
+      const a3 = vkStaat.aanroepen[0] || {};
+      toets('20 wv452: actie zonder Telegram-bericht -> 200, naar Knop (app) met message_id 0', r3.status === 200 && r3.j.uitkomst === 'ok' && vkStaat.aanroepen.length === 1
+        && JSON.stringify(a3.body) === JSON.stringify({ nonce: nn(3), keuze: 'g', message_id: 0 }), JSON.stringify([r3.status, r3.j, a3.body]).slice(0, 300));
+      Object.assign(n8nStaat.portie.find((y) => y.positie === 3), { status: 'open', keuze: '', getikt_op: '' });
+      vkStaat.aanroepen = [];
       // gedaan
       const nAudit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
       r = await vraag('POST', '/app/actie', { datum: V, positie: 1, keuze: 'gedaan' }, { pot: P.jar });
