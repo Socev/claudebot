@@ -6924,11 +6924,13 @@ async function appVandaagRoute(req, res, a) {
 // ✅ gedaan, ⏭ volgende week, 🗑 laten vallen en ↩️ terugdraaien gaan naar de tweede ingang van *AI - Voorwerk-knoppen* (Knop (app)):
 // dezelfde rij-toets, claim en schrijfstappen (Todoist, actie_state, correspondentie_state) als een tik in Telegram, en het
 // Telegram-bericht wordt daar ook opnieuw getekend als er een is (wv452: sinds 13-10 gaat het lijstje alleen naar de app,
-// message_id 0; Telegram met knoppen alleen nog als terugval). Geen eigen logica op de pod: die zoekt alleen de rij op (datum + positie;
+// message_id 0; Telegram met knoppen alleen nog als terugval; wv456: daarom noemen de weigerteksten hier Telegram niet meer).
+// Geen eigen logica op de pod: die zoekt alleen de rij op (datum + positie;
 // nonce en message_id gaan nooit naar de app) en geeft de pop-uptekst van n8n door. Sleutel: die van het Socev-schrijfluik
 // (N8N_WEBHOOK_SOCEV_AGENDA, ook buiten de auto-agents), in n8n alleen als sha256-vingerafdruk. Sinds wv181 ook 📅 (blok): dezelfde
 // Blok-tak als in Telegram (claim, één voorstel per 30 min per item; AI - Voorwerk-blok zoekt het uur). Het voorstel komt als
-// agendaknop (✅/❌) in Telegram; app en pod schrijven zelf niets in de agenda. Niet via een app-beurt + Poortwachter: Voorwerk-blok
+// agendaknop (✅/❌) in het hoofdkanaal van de app (wv325, bericht_route agenda = app; Telegram alleen als de pod het niet aanneemt);
+// app en pod schrijven zelf niets in de agenda. Niet via een app-beurt + Poortwachter: Voorwerk-blok
 // slaat de Poortwachter bewust over (Davids ✅ is de bevestiging) en een app-bevestiging gaf toch hooguit oranje = ✅ in Telegram.
 const APP_VOORWERK_KNOP_WF = process.env.APP_VOORWERK_KNOP_WF || 'SLYiYwqAabFlC8H3';   // AI - Voorwerk-knoppen
 const APP_ACTIE_KEUZE = { gedaan: 'g', later: 'l', laten_vallen: 'w', terug: 'o', blok: 'b' };
@@ -6950,13 +6952,15 @@ async function appVoorwerkKnop(body) {
 async function appActieRoute(req, res, a, d) {
   const datum = String(d.datum || ''), positie = typeof d.positie === 'number' ? d.positie : NaN, keuze = String(d.keuze || '');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 10 || !Object.hasOwn(APP_ACTIE_KEUZE, keuze)) return appWeiger(res, 400, 'ongeldige knop', 'actie velden');   // hasOwn: geen 'constructor'
-  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik de knoppen in Telegram', 'rol passief');
-  if (!appTeller('actie', APP_ACTIES_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_ACTIES_PER_UUR + '); gebruik Telegram', 'grens actie');
-  if (!process.env.N8N_WEBHOOK_SOCEV_AGENDA) return appWeiger(res, 503, 'de knoppen zijn hier nog niet ingericht; gebruik Telegram', 'actie geen sleutel');
+  if (!appTeller('actie', APP_ACTIES_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_ACTIES_PER_UUR + '); probeer het straks opnieuw', 'grens actie');
+  if (!process.env.N8N_WEBHOOK_SOCEV_AGENDA) return appWeiger(res, 503, 'de knoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'actie geen sleutel');
   let rijen;
   try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-actie', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen; probeer het zo opnieuw', 'actie lezen'); }
   const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
   if (!rij || !/^[0-9a-f]{32}$/.test(String(rij.nonce || ''))) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'actie onbekend');
+  // wv456 (Fable KAN 1a): op de reservekant alleen naar Telegram verwijzen als het lijstje daar met knoppen staat (message_id > 0:
+  // de pod was om 07:05 al passief, dus AI - Voorwerk koos de Telegram-route); anders bestaan die knoppen in Telegram niet
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; ' + (Number(rij.message_id) > 0 ? 'het lijstje van vandaag staat ook in Telegram, tik daar' : 'probeer het later opnieuw'), 'rol passief');
   // wv452: message_id 0 = het lijstje ging alleen naar de app (geen Telegram-bericht om bij te werken); n8n toetst nonce en status zelf
   const mid = Number(rij.message_id) > 0 ? Number(rij.message_id) : 0;
   let j;
@@ -6964,13 +6968,13 @@ async function appActieRoute(req, res, a, d) {
     logError('app-actie', e);
     // Bij een time-out kan de tik toch zijn doorgegaan: niet "mislukt" zeggen, wel laten nakijken
     // 503, geen 502: de app leest 502/504 als "Socev niet bereikbaar"
-    return appWeiger(res, 503, /timeout|abort/i.test(String(e && (e.name + ' ' + e.message))) ? 'geen antwoord van de knoppen; kijk zo bij Ververs of het gelukt is' : 'de knoppen reageren nu niet; probeer het zo opnieuw of tik in Telegram', 'actie n8n');
+    return appWeiger(res, 503, /timeout|abort/i.test(String(e && (e.name + ' ' + e.message))) ? 'geen antwoord van de knoppen; kijk zo bij Ververs of het gelukt is' : 'de knoppen reageren nu niet; probeer het zo opnieuw', 'actie n8n');
   }
   // Fable wv173 M1: n8n kent de sleutel niet (geroteerd zonder de vingerafdruk in Voorwerk-knoppen bij te werken) -> niet als
   // "deze knop ken ik niet" tonen, maar als storing laten zien en in de Foutmelder-route van de pod loggen
   if (j && j.uitkomst === 'sleutel') {
     logError('app-actie', new Error('AI - Voorwerk-knoppen weigert de sleutel van het schrijfluik (vingerafdruk in Knop lezen bijwerken?)'));
-    return appWeiger(res, 503, 'de knoppen zijn hier nu niet ingericht; gebruik Telegram', 'actie sleutel');
+    return appWeiger(res, 503, 'de knoppen zijn hier nu niet ingericht; probeer het later opnieuw', 'actie sleutel');
   }
   const uitkomst = ['ok', 'al_afgehandeld', 'weg', 'geweigerd', 'bezig', 'mislukt'].indexOf(j && j.uitkomst) >= 0 ? j.uitkomst : 'onbekend';
   const melding = appKort(j && j.popup || 'Onbekend antwoord van de knoppen; kijk bij Ververs.', 200);
@@ -7337,7 +7341,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   const id = d.id, keuze = String(d.keuze || '');
   const tekstId = String(d.tekst_id || '');
   if (!Number.isInteger(id) || id < 1 || id > 999999999 || ['ja', 'nee', 'anders'].indexOf(keuze) < 0 || !/^[a-f0-9]{8}$/.test(tekstId)) return appWeiger(res, 400, 'ongeldige knop', 'voor-jou knop velden');
-  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik Telegram', 'rol passief');
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later opnieuw', 'rol passief');   // wv456: kaarten staan alleen in de app
   if (!appTeller('voorjou', APP_VJ_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_VJ_PER_UUR + ')', 'grens voor-jou');   // Fable wv404 #9
   let punten;
   try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
@@ -9695,7 +9699,7 @@ const APP_AGENDA_GEEN_ANTWOORD = 'Geen antwoord van de agenda; kijk even in je a
 const APP_AGENDA_VERLOPEN = 'Deze knop is verlopen; vraag Socev het opnieuw voor te leggen.';
 // pagina van n8n -> uitkomst in gewone taal (uitgevoerd en mislukt krijgen de tekst van n8n erachter)
 const APP_AGENDA_UITKOMST = { uitgevoerd: '✅ ', afgewezen: '❌ Niet gedaan.', mislukt: '⚠️ ', verlopen: '⌛ Verlopen; er is niets gedaan.',
-  gebruikt: 'Al afgehandeld (in Telegram of eerder); niets opnieuw gedaan.', onbekend: 'Deze knop kent de agenda niet (meer); niets gedaan.' };
+  gebruikt: 'Al afgehandeld (eerder of op een ander apparaat); niets opnieuw gedaan.', onbekend: 'Deze knop kent de agenda niet (meer); niets gedaan.' };
 appStaat.tellers.agenda = appStaat.tellers.agenda || [];
 
 // Veld agenda van POST /bericht toetsen; geeft {nonce, soort, verloopt} of een foutzin (nooit met de nonce erin).
@@ -9787,10 +9791,10 @@ async function appAgendaRoute(req, res, a, s, d) {
     if (K2 && K2.stand === 'bezig' && K2.sinds === nu) { K2.stand = vorig.stand; K2.sinds = vorig.sinds; appAgendaKnoppenBewaar(); }
     if (versOud !== null && s.vers_tot === 0) s.vers_tot = versOud;
   };
-  if (!appAgendaKnoppenBewaar()) { terug(); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo opnieuw of gebruik Telegram', 'agenda-knoppen.json'); }
-  if (!appTeller('agenda', APP_AGENDA_PER_UUR, 3600000)) { terug(); return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_AGENDA_PER_UUR + '); gebruik Telegram', 'grens agenda'); }
-  if (!(await appRolOk())) { terug(); return appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik de knoppen in Telegram', 'rol passief'); }
-  if (!process.env.N8N_WEBHOOK_SOCEV_AGENDA) { terug(); return appWeiger(res, 503, 'de agendaknoppen zijn hier nog niet ingericht; gebruik Telegram', 'agenda geen sleutel'); }
+  if (!appAgendaKnoppenBewaar()) { terug(); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo opnieuw', 'agenda-knoppen.json'); }
+  if (!appTeller('agenda', APP_AGENDA_PER_UUR, 3600000)) { terug(); return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_AGENDA_PER_UUR + '); probeer het straks opnieuw', 'grens agenda'); }
+  if (!(await appRolOk())) { terug(); return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later opnieuw', 'rol passief'); }
+  if (!process.env.N8N_WEBHOOK_SOCEV_AGENDA) { terug(); return appWeiger(res, 503, 'de agendaknoppen zijn hier nog niet ingericht; probeer het later opnieuw', 'agenda geen sleutel'); }
   let j = null, fout = null;
   try { j = await appAgendaKnopN8n({ n: K.nonce, a: keuze }); } catch (x) { fout = x; }
   const pagina = j && typeof j.pagina === 'string' ? j.pagina : '';
@@ -9801,7 +9805,7 @@ async function appAgendaRoute(req, res, a, s, d) {
     // Fable wv173 M1: n8n kent de sleutel niet (geroteerd zonder de vingerafdruk in Knop lezen bij te werken) -> storing, geen "onbekend"
     open(null);
     logError('app-agenda', new Error('Agenda-knoppen weigert de sleutel van het schrijfluik (vingerafdruk in Knop lezen bijwerken?)'));
-    return appWeiger(res, 503, 'de agendaknoppen zijn hier nu niet ingericht; gebruik Telegram', 'agenda sleutel');
+    return appWeiger(res, 503, 'de agendaknoppen zijn hier nu niet ingericht; probeer het later opnieuw', 'agenda sleutel');
   }
   if (fout || !Object.hasOwn(APP_AGENDA_UITKOMST, pagina)) {
     // Time-out, 5xx of geen leesbaar antwoord: de claim kan al gebeurd zijn. Open laten (n8n weigert een tweede claim) en zeggen
