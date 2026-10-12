@@ -7084,7 +7084,8 @@ function appVjBeantwoordKort(p, vr) {
   const b = APP_VJ_KNOP_BEWIJS_RE.exec(String(p.bewijs || ''));
   if (b && p.status === 'gedaan') return { keuze: b[1].toLowerCase(), t: p.gesloten_op || null };
   const ks = appVjKaartSleutel(p), gek = appVjGekoppeld(p);
-  const x = appAntwoord(vr[ks.job + ':' + ks.hash]) || (gek ? appAntwoord(vr[gek]) : null);
+  const eigen = vr[ks.job + ':' + ks.hash];
+  const x = (appVjEigenVerouderd(p, eigen) ? null : appAntwoord(eigen)) || (gek ? appAntwoord(vr[gek]) : null);
   return x ? { keuze: x.keuze, t: x.t } : null;
 }
 // Registerrijen (Open vragen aan David.md), op mtime bewaard. Kolommen: gesteld | kanaal | vraag | aanname | status | bewijs
@@ -7141,13 +7142,22 @@ async function appVjRegisterVraag(p) {
     uit.herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + (kanaal ? ' (' + kanaal + ')' : '') + (stand ? ' — ' + stand : '') });
     if (p.soort === 'besluit' && !uit.vraag) {
       const open = /^(open|deels|wacht|uitgesteld)/i.test(r.status);
-      const st = String(r.status), tm = /(\d{1,2}-\d{1,2})(?:-\d{4})?,?\s+(?:om\s+)?(\d{1,2}:\d{2})/.exec(st) || /(\d{1,2}-\d{1,2})(?:-\d{4})?/.exec(st);
+      const tm = appVjStatusTijd(r.status);
       uit.vraag = { tekst: veilig ? vt : 'tekst verborgen', voorstel: veilig && at ? at : null, gesteld: tijd, kanaalTekst: kanaal || null,
         kanaalRuw: String(r.kanaal || ''), regSleutel: sl, verborgen: !veilig, regOpen: open,
-        elders: open ? null : { t: tm ? tm[1] + (tm[2] ? ' ' + tm[2] : '') : null, stand: stand || null } };
+        elders: open ? null : { t: tm, stand: stand || null } };
     }
   });
   return uit;
+}
+// Fable wv404 #4: tijd uit de statuscel ("beantwoord: JA 11-10 12:30", "afgehandeld 2026-10-11 (…)"): eerst jjjj-mm-dd, dan d-m;
+// nooit een stuk van een jaartal als dag lezen. Geeft "d-m" of "d-m uu:mm", of null.
+function appVjStatusTijd(st) {
+  st = String(st || '');
+  const iso = /(?<!\d)(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}:\d{2}))?/.exec(st);
+  if (iso) return Number(iso[3]) + '-' + Number(iso[2]) + (iso[4] ? ' ' + iso[4] : '');
+  const dm = /(?<![\d-])(\d{1,2})-(\d{1,2})(?:-\d{4})?(?![\d-])(?:,?\s+(?:om\s+)?(\d{1,2}:\d{2}))?/.exec(st);
+  return dm && Number(dm[2]) >= 1 && Number(dm[2]) <= 12 ? Number(dm[1]) + '-' + Number(dm[2]) + (dm[3] ? ' ' + dm[3] : '') : null;
 }
 // FNV-1a zoals appVraagUit (vraag_id in Telegram)
 function appVjFnv(t) { let h = 0x811c9dc5; for (const ch of String(t)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); }
@@ -7172,6 +7182,14 @@ function appVjKanaal(p, rv, gekRij) {
   if (/^(hoofd|socev|auto)/.test(k)) return 'hoofd';
   return p.prive === true ? 'hoofd' : 'machinekamer';
 }
+// Fable wv404 #3: het eigen kaartantwoord telt niet meer als de kaart ná een gestarte druk weer open is gezet (heropend door de ronde
+// of de trigger): dan mag David opnieuw antwoorden. Een druk die nog in de rij staat (niet gestart) telt wel.
+function appVjEigenVerouderd(p, rij) {
+  const x = rij && rij.antwoord;
+  if (!x || x.gestart !== true || (p.status !== 'open' && p.status !== 'later')) return false;
+  const b = Date.parse(p.bijgewerkt || '');
+  return Number.isFinite(b) && Date.parse(x.t) < b;
+}
 // Bewijsregel van een kaartdruk (ook het herkenningsteken in de lijst)
 const APP_VJ_KNOP_BEWIJS_RE = /David drukte (Ja|Nee|Anders) op de kaart \(vraag-id ([a-f0-9]{8})\)/;
 // Stand van de knoppen onder een besluit: vraag-id, kan er gedrukt worden, al beantwoord (hier of elders), gevoelig.
@@ -7181,10 +7199,11 @@ function appVjKnopStand(p, rv) {
   let vragenOk = true;
   try { v = appVragen(); } catch (e) { vragenOk = false; }
   const gekRij = gek && v[gek] ? v[gek] : null;
-  const eigen = v[ks.job + ':' + ks.hash] || null;
+  const eigenRij = v[ks.job + ':' + ks.hash] || null, eigenOud = appVjEigenVerouderd(p, eigenRij);
+  const eigen = eigenOud ? null : eigenRij;
   let beantwoord = appAntwoord(eigen) || appAntwoord(gekRij);
   const q = rv && rv.vraag;
-  const tekst = q ? q.tekst : appVjOpmaakWeg(p.titel);
+  const tekst = q ? q.tekst : appVjOpmaakWeg(p.titel).trim();
   const voorstel = q ? q.voorstel : null;
   const kanaal = appVjKanaal(p, rv, gekRij);
   const gev = appGevoelig(tekst + (voorstel ? '\n' + voorstel : ''));
@@ -7202,12 +7221,14 @@ function appVjKnopStand(p, rv) {
   else if (rv && !rv.leesbaar) waaromNiet = 'de vraag is nu niet te lezen; probeer het straks';
   else if (q && q.verborgen) waaromNiet = 'de vraag is hier verborgen; antwoord in het gesprek';
   else if (tekst.length + (voorstel ? voorstel.length : 0) > APP_VJ_VRAAG_MAX) waaromNiet = 'deze vraag is te lang voor een knop; antwoord in het gesprek';
-  else if (!tekst.trim()) waaromNiet = 'deze kaart heeft geen vraag';
-  return { p: p, rv: rv, ks: ks, gek: gekBruik ? gek : null, gekRij: gekRij, beantwoord: beantwoord, elders: beantwoord ? null : elders, knopBewijs: knopBewijs,
+  else if (!tekst.trim() || (!q && !/\?$/.test(tekst))) waaromNiet = 'deze kaart heeft geen vraag';   // Fable wv404 #5: een titel zonder vraagteken is geen vraag
+  else if (!/^[a-z0-9][a-z0-9_-]{1,60}$/.test(String(p.sleutel || ''))) waaromNiet = 'deze kaart heeft een onverwachte sleutel; antwoord in het gesprek';   // Fable wv404 #2
+  return { p: p, rv: rv, ks: ks, gek: gekBruik ? gek : null, gekRij: gekRij, eigenOud: eigenOud, beantwoord: beantwoord, elders: beantwoord ? null : elders, knopBewijs: knopBewijs,
+    tekstId: appVjFnv(tekst + '\n' + (voorstel || '') + '\n' + (q ? q.regSleutel : 'kaart') + '\n' + kanaal + '\n' + (gev !== null)),
     waaromNiet: waaromNiet, tekst: tekst, voorstel: voorstel, kanaal: kanaal, gevoelig: gev !== null, gevoeligReden: gev };
 }
 function appVjKnopVorm(k) {
-  return { vraag_id: k.gek ? k.gek.split(':')[1] : k.ks.hash, kanaal: k.kanaal, gevoelig: k.gevoelig, vraag: k.waaromNiet ? null : k.tekst, voorstel: k.waaromNiet ? null : k.voorstel,
+  return { vraag_id: k.gek ? k.gek.split(':')[1] : k.ks.hash, tekst_id: k.tekstId, kanaal: k.kanaal, gevoelig: k.gevoelig, vraag: k.waaromNiet ? null : k.tekst, voorstel: k.waaromNiet ? null : k.voorstel,
     beantwoord: k.beantwoord, elders: k.elders, kan: !k.beantwoord && !k.elders && !k.waaromNiet, waarom_niet: k.beantwoord || k.elders ? null : k.waaromNiet };
 }
 async function appVoorJouDetail(req, res, a, idTekst) {
@@ -7307,8 +7328,10 @@ async function appVoorJouKeuze(req, res, a, d) {
 // op gedaan (door david, bewijs met de keuze en het vraag-id); de beurt zelf werkt register en werkvoorraad bij.
 async function appVoorJouKnop(req, res, reg, a, s, d) {
   const id = d.id, keuze = String(d.keuze || '');
-  if (!Number.isInteger(id) || id < 1 || id > 999999999 || ['ja', 'nee', 'anders'].indexOf(keuze) < 0) return appWeiger(res, 400, 'ongeldige knop', 'voor-jou knop velden');
+  const tekstId = String(d.tekst_id || '');
+  if (!Number.isInteger(id) || id < 1 || id > 999999999 || ['ja', 'nee', 'anders'].indexOf(keuze) < 0 || !/^[a-f0-9]{8}$/.test(tekstId)) return appWeiger(res, 400, 'ongeldige knop', 'voor-jou knop velden');
   if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik Telegram', 'rol passief');
+  if (!appTeller('voorjou', APP_VJ_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_VJ_PER_UUR + ')', 'grens voor-jou');   // Fable wv404 #9
   let punten;
   try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
   const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === id; });
@@ -7319,14 +7342,19 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   if (k.beantwoord) { res._app.reden = 'voor-jou knop al beantwoord #' + id; return appStuur(res, 409, { ok: false, fout: 'al beantwoord: ' + (k.beantwoord.keuze === 'ja' ? 'Ja' : k.beantwoord.keuze === 'nee' ? 'Nee' : 'Anders') + ' ' + appKlok(k.beantwoord.t), beantwoord: k.beantwoord }); }
   if (k.elders) { res._app.reden = 'voor-jou knop elders #' + id; return appStuur(res, 409, { ok: false, fout: 'al beantwoord' + (k.elders.t ? ' op ' + k.elders.t : ''), elders: k.elders }); }
   if (k.waaromNiet) { res._app.reden = 'voor-jou knop kan niet #' + id; return appStuur(res, 409, { ok: false, fout: k.waaromNiet }); }
+  // Fable wv404 #1: de Ja hangt aan precies de tekst die David zag; is de vraag (of het voorstel, de rij, het kanaal) intussen anders, dan
+  // eerst opnieuw lezen
+  if (tekstId !== k.tekstId) { res._app.reden = 'voor-jou knop tekst gewijzigd #' + id; return appStuur(res, 409, { ok: false, fout: 'de vraag is intussen veranderd; lees hem opnieuw', tekst_gewijzigd: true, knop: appVjKnopVorm(k) }); }
   let jobId, hash;
   if (k.gek) { jobId = k.gek.split(':')[0]; hash = k.gek.split(':')[1]; }
   else {
     jobId = k.ks.job; hash = k.ks.hash;
     // eigen vraagrij: aanmaken, of (onbeantwoord) de tijd verversen; de kaart staat nog open, dus de vraag is nog actueel
     try {
-      const v = appVragen(), sl = jobId + ':' + hash, oud = v[sl];
-      if (!oud || !appAntwoord(oud)) {
+      const v = appVragen(), sl = jobId + ':' + hash;
+      if (k.eigenOud && v[sl]) v[sl].antwoord = null;   // heropende kaart (Fable #3): het oude antwoord van vóór het heropenen telt niet meer
+      const oud = v[sl];
+      if (!oud || !appAntwoord(oud) || k.eigenOud) {
         v[sl] = { kanaal: k.kanaal, t: new Date().toISOString(), antwoord: oud ? oud.antwoord : null, gevoelig: k.gevoelig || !!(oud && oud.gevoelig), gevoelig_reden: k.gevoeligReden || (oud && oud.gevoelig_reden) || undefined, soort: 'voorjou' };
         appVragenSchrijf(v);
       }
@@ -7336,7 +7364,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   const h = p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
   const wv = (Array.isArray(h.wv) ? h.wv : []).filter(function (x) { return Number.isInteger(Number(x)); }).slice(0, 6).map(function (x) { return 'wv' + Number(x); });
   const titel = appOntmasker(appVjOpmaakWeg(p.titel), 'kaart'), tekst = appOntmasker(k.tekst, 'kaart'), voorstel = k.voorstel ? appOntmasker(k.voorstel, 'kaart') : null;
-  const context = '(Voor jou-kaart ' + JSON.stringify(titel) + ' (punt ' + p.sleutel + ')' + (rv.vraag ? ', registerrij ' + rv.vraag.regSleutel : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') +
+  const context = '(Voor jou-kaart ' + JSON.stringify(titel) + ' (punt ' + appOntmasker(p.sleutel, 'kaart') + ')' + (rv.vraag ? ', registerrij ' + JSON.stringify(appOntmasker(rv.vraag.regSleutel, 'kaart')) : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') +
     (voorstel ? '. Voorstel op de kaart: ' + JSON.stringify(voorstel) : '') + '. David zag precies deze vraag' + (voorstel ? ' en dit voorstel' : '') + ' boven de knoppen; een Ja geldt voor wat er staat, niets meer. ' +
     'De kaart gaat vanzelf op beantwoord. Wacht een werkvoorraadrij op dit antwoord, geef hem vrij of zet hem bij volgens het antwoord. ' +
     'Een agendawijziging uit deze druk blijft oranje bij de Poortwachter (✅ in de app onder het volledige voorstel).)';

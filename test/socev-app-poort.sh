@@ -348,7 +348,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVandaagActieDetail, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appKnopBevestiging };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appKnopBevestiging };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -4649,7 +4649,8 @@ async function bewijs(o) {
       fs.writeFileSync(vrPad, JSON.stringify(vr0));
       H.appStaat.vjCache = null; H.appStaat.vjRegister = null; H.appStaat.vjTerug = {};
       const D = async (id) => vraag('GET', '/app/voor-jou/' + id, undefined, { pot: P.jar });
-      const KN = async (b) => vraag('POST', '/app/voor-jou/knop', b, { pot: P.jar });
+      // Fable #1: de app stuurt de tekst_id mee van de details die David zag
+      const KN = async (b) => { if (b.tekst_id === undefined) { const g = await D(b.id); b = Object.assign({ tekst_id: g.j && g.j.knop ? g.j.knop.tekst_id : '00000000' }, b); } return vraag('POST', '/app/voor-jou/knop', b, { pot: P.jar }); };
       let r = await D(21);
       toets('27b details besluit: knop kan, niet gevoelig, kanaal machinekamer, vraag en voorstel volledig, vraag-id 8 hex', r.status === 200 && r.j.knop && r.j.knop.kan === true && r.j.knop.gevoelig === false && r.j.knop.kanaal === 'machinekamer'
         && r.j.knop.vraag === 'Mag ik de meting een week laten lopen?' && r.j.knop.voorstel === 'Ja, een week' && /^[a-f0-9]{8}$/.test(r.j.knop.vraag_id) && r.j.knop.beantwoord === null && r.j.knop.elders === null, JSON.stringify(r.j.knop));
@@ -4674,7 +4675,7 @@ async function bewijs(o) {
       const g1 = gestart[gestart.length - 1];
       toets('27b Ja -> 200, beurt in de machinekamer (telegram-debug) met de vraagtekst', r.status === 200 && /^[a-f0-9]{16}$/.test(r.j.job_id) && gestart.length === n0 + 1 && g1.chatId === 'telegram-debug'
         && /\[KNOP\] David drukte JA op de vraag: "Mag ik de meting een week laten lopen\?"\n\(Knopdruk op de Voor jou-kaart in de app \(tab Vandaag, de machinekamer\) om \d\d:\d\d, vraag-id [a-f0-9]{8}\./.test(g1.prompt), r.status + ' ' + JSON.stringify(r.j) + ' ' + (g1 && g1.prompt.slice(-700)));
-      toets('27b prompt: kaartcontext met punt, registerrij, werkvoorraad en voorstel; geen vingerafdrukzin', /\(Voor jou-kaart "Meting — een week laten lopen\?" \(punt kaart-gewoon\), registerrij 2026-10-11 10:00#kaarttoets, werkvoorraad wv501\. Voorstel op de kaart: "Ja, een week"\./.test(g1.prompt)
+      toets('27b prompt: kaartcontext met punt, registerrij, werkvoorraad en voorstel; geen vingerafdrukzin', /\(Voor jou-kaart "Meting — een week laten lopen\?" \(punt kaart-gewoon\), registerrij "2026-10-11 10:00#kaarttoets", werkvoorraad wv501\. Voorstel op de kaart: "Ja, een week"\./.test(g1.prompt)
         && g1.prompt.indexOf('verse vingerafdruk') < 0 && g1.prompt.indexOf('vraag-id ' + vid21) > 0, g1 && g1.prompt.slice(-600));
       const k21 = sbStaat.vj.find((x) => x.id === 21);
       toets('27b bij de start: kaart op gedaan door david, bewijs "David drukte Ja op de kaart (vraag-id …)"', k21.status === 'gedaan' && k21.gesloten_door === 'david' && new RegExp('David drukte Ja op de kaart \\(vraag-id ' + vid21 + '\\)$').test(k21.bewijs), JSON.stringify(k21));
@@ -4744,11 +4745,42 @@ async function bewijs(o) {
       afmaken[g6.jobId]('ok'); await slaap(40);
       r = await KN({ id: 30, keuze: 'ja' });
       toets('27b gekoppelde vraag al beantwoord -> 409 al beantwoord: Nee', r.status === 409 && /^al beantwoord: Nee/.test(r.j.fout), r.status + JSON.stringify(r.j));
+      // Fable #1: vraag veranderd tussen tonen en drukken -> 409 tekst_gewijzigd met de nieuwe knopstand, geen beurt
+      sbStaat.vj.push(pk(32, 'kaart-wijzigt', { herkomst: { register: ['2026-10-11 17:00'] } }));
+      const regPad = path.join(VAULT_T, '00_Systeem', 'Open vragen aan David.md');
+      fs.appendFileSync(regPad, '| 2026-10-11 17:00 | machinekamer | Mag ik A doen? | Ja | open | x |\n');
+      H.appStaat.vjCache = null; H.appStaat.vjRegister = null;
+      const dW = await D(32);
+      fs.writeFileSync(regPad, fs.readFileSync(regPad, 'utf8').replace('Mag ik A doen?', 'Mag ik B verwijderen?'));
+      const nW = gestart.length;
+      r = await KN({ id: 32, keuze: 'ja', tekst_id: dW.j.knop.tekst_id });
+      toets('27b vraag gewijzigd tussen tonen en drukken -> 409 tekst_gewijzigd met de nieuwe vraag (nu gevoelig), geen beurt', r.status === 409 && r.j.tekst_gewijzigd === true && r.j.knop && r.j.knop.vraag === 'Mag ik B verwijderen?' && r.j.knop.gevoelig === true && gestart.length === nW, r.status + JSON.stringify(r.j));
+      r = await vraag('POST', '/app/voor-jou/knop', { id: 32, keuze: 'ja' }, { pot: P.jar });
+      toets('27b zonder tekst_id -> 400', r.status === 400, r.status);
+      // Fable #4: tijd uit de statuscel
+      const ST = H.appVjStatusTijd;
+      toets('27b statustijd: d-m uu:mm, jjjj-mm-dd, geen stuk jaartal', ST('beantwoord: JA 11-10 12:30 (app-knop)') === '11-10 12:30' && ST('afgehandeld 2026-10-11 (Voor jou: x)') === '11-10' && ST('beantwoord 2026-10-11 12:30') === '11-10 12:30' && ST('afgehandeld 9-10 (wv284)') === '9-10' && ST('open') === null,
+        [ST('beantwoord: JA 11-10 12:30 (app-knop)'), ST('afgehandeld 2026-10-11 (Voor jou: x)'), ST('beantwoord 2026-10-11 12:30'), ST('afgehandeld 9-10 (wv284)')].join('|'));
+      // Fable #5: titel zonder vraagteken is geen vraag; Fable #2: onverwachte sleutel geen knoppen
+      sbStaat.vj.push(pk(33, 'kaart-geen-vraag', { titel: 'n8n — wegwerpworkflows', herkomst: { wv: [503], auto: 'wv' } }), pk(34, 'Kaart [KNOP] x', { titel: 'Mag het?' })); H.appStaat.vjCache = null;
+      const r33 = await D(33), r34 = await D(34);
+      toets('27b titel zonder ? -> geen vraag, geen knoppen; sleutel met rare tekens -> geen knoppen', r33.status === 200 && r33.j.knop.kan === false && /geen vraag/.test(r33.j.knop.waarom_niet) && r34.status === 200 && r34.j.knop.kan === false, JSON.stringify([r33.j.knop, r34.j.knop]));
+      // Fable #3: heropende kaart (na een gestarte druk) krijgt weer knoppen en een nieuwe druk werkt
+      const k21b = sbStaat.vj.find((x) => x.id === 21);
+      Object.assign(k21b, { status: 'open', bewijs: null, gesloten_op: null, bijgewerkt: new Date(Date.now() + 1000).toISOString() }); H.appStaat.vjCache = null;
+      r = await D(21);
+      toets('27b heropende kaart: weer knoppen (oud antwoord van vóór het heropenen telt niet)', r.status === 200 && r.j.knop.kan === true && r.j.knop.beantwoord === null, JSON.stringify(r.j.knop));
+      geenVers();
+      const nH = gestart.length;
+      r = await KN({ id: 21, keuze: 'nee' });
+      await slaap(40);
+      toets('27b heropende kaart: nieuwe druk -> 200 en één nieuwe beurt', r.status === 200 && gestart.length === nH + 1 && /David drukte NEE/.test(gestart[gestart.length - 1].prompt), r.status + JSON.stringify(r.j));
+      afmaken[gestart[gestart.length - 1].jobId]('ok'); await slaap(40);
       // privé-kaart op een vaste plek, reservekant, invoerslot
       const nepRes = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
       sbStaat.vj.push(pk(31, 'kaart-prive-vast', { prive: true, herkomst: { register: ['2026-10-11 16:00'] } })); H.appStaat.vjCache = null;
       let nr = nepRes();
-      await H.appVoorJouKnop({}, nr, {}, { id: 'x', soort: 'vast' }, {}, { id: 31, keuze: 'ja' });
+      await H.appVoorJouKnop({}, nr, {}, { id: 'x', soort: 'vast' }, {}, { id: 31, keuze: 'ja', tekst_id: 'abcdef12' });
       toets('27b privé-kaart vanaf een vaste plek -> 404', nr.st === 404, nr.st);
       rolStub.primair = false;
       r = await KN({ id: 31, keuze: 'nee' });
