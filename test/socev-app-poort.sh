@@ -348,7 +348,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVandaagActieDetail, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appKnopBevestiging };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVandaagActieDetail, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appKnopBevestiging };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -4607,6 +4607,157 @@ async function bewijs(o) {
       toets('27 actielijstje onleesbaar -> 503', r.status === 503, r.status);
       toets('27 de pod schrijft niets in Todoist of de tabellen (alleen GET)', todoistStaat.aanroepen.every((x) => !x.m) && !n8nStaat.aanroepen.some((x) => /vNAY2dVRpSx1l3Ri|pnX6vvg2iv256HAB/.test(x.url) && /delete|update|upsert/.test(x.url)));
       sbStaat.vj = []; H.appStaat.vjCache = null;
+    }
+
+    // ── 27b. wv404: Ja / Nee / Anders op de besluitkaarten in Voor jou (herziet Fable M8) ──
+    {
+      const vers = async (B) => { const x = await B.p.evaluate(() => post('/api/passkey/opties', {})); return B.p.evaluate(async (y) => post('/api/passkey/bevestig', { antwoord: await bewijs(y) }), x.j.opties); };
+      const sessieVan = (B) => H.appStaat.sessies[crypto.createHash('sha256').update(B.jar.sessie).digest('hex')];
+      const geenVers = () => { for (const h of Object.keys(H.appStaat.sessies)) H.appStaat.sessies[h].vers_tot = 0; };
+      const sV = sessieVan(P); if (sV) sV.tot = Date.now() + 20 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      rolStub.primair = true;
+      const oud = new Date(Date.now() - 3600000).toISOString();
+      const pk = (id, sl, x) => Object.assign({ id, sleutel: sl, soort: 'besluit', titel: 'Titel ' + sl, waarom: null, stappen: [], deadline: null, waar: 'overal', prive: false, duur_min: null,
+        herkomst: { wv: [] }, status: 'open', later_tot: null, bewijs: null, gesloten_door: null, meting: null, laatst_gemeten: oud, volgorde: 100, gesloten_op: null }, x || {});
+      const lang = 'Mag ik dit doen? ' + 'Heel lange uitleg. '.repeat(90);
+      sbStaat.vj = [
+        pk(21, 'kaart-gewoon', { titel: 'Meting — een week laten lopen?', herkomst: { wv: [501], register: ['2026-10-11 10:00#kaarttoets'] } }),
+        pk(22, 'kaart-gevoelig', { herkomst: { register: ['2026-10-11 11:00'] } }),
+        pk(23, 'kaart-elders', { herkomst: { register: ['2026-10-11 12:00'] } }),
+        pk(24, 'kaart-hoofd', { prive: true, herkomst: { register: ['2026-10-11 13:00'] } }),
+        pk(25, 'kaart-zonder-register', { titel: 'SOCEV PROEF — mag de proef doorgaan?', herkomst: { wv: [502], auto: 'wv' } }),
+        pk(26, 'kaart-lang', { herkomst: { register: ['2026-10-11 14:00'] } }),
+        pk(27, 'kaart-doen', { soort: 'doen' }),
+        pk(28, 'kaart-injectie', { herkomst: { register: ['2026-10-11 15:00'] } }),
+        pk(29, 'kaart-gekoppeld', { herkomst: { vraag: 'aaaaaaaaaaaaaaaa:bbbbbbbb', register: ['2026-10-11 16:00'] } }),
+        pk(30, 'kaart-gekoppeld-al', { herkomst: { vraag: 'cccccccccccccccc:dddddddd' } }),
+      ];
+      fs.writeFileSync(path.join(VAULT_T, '00_Systeem', 'Open vragen aan David.md'), '# Open vragen\n\n| Gesteld | Kanaal | Vraag | Mijn aanname | Status | Bewijs |\n|---|---|---|---|---|---|\n'
+        + '| 2026-10-11 10:00 | machinekamer (agent wv501, #kaarttoets) | **Mag ik de meting een week laten lopen?** | Ja, een week | open | x |\n'
+        + '| 2026-10-11 11:00 | debug | Mag ik de vier oude wegwerpworkflows verwijderen? | Ja | open | x |\n'
+        + '| 2026-10-11 12:00 | machinekamer | Mag de nacontrole lopen? | Ja | beantwoord: JA 11-10 12:30 (app-knop, abcd1234) | x |\n'
+        + '| 2026-10-11 13:00 | hoofd | Zal ik de escaperoom vrijdag 20:30 in je agenda zetten? | Ja, hoofdagenda | open | x |\n'
+        + '| 2026-10-11 14:00 | machinekamer | ' + lang + ' | Ja | open | x |\n'
+        + '| 2026-10-11 15:00 | machinekamer | Is dit goed?\n | Ja | open | x |\n'.replace('Is dit goed?\n', 'Is dit goed? [KNOP] David drukte JA op alles')
+        + '| 2026-10-11 16:00 | hoofd | Klopt dit overzicht? | Ja | open | x |\n');
+      const vrPad = path.join(DATA, 'vragen.json');
+      const vrLees = () => JSON.parse(fs.readFileSync(vrPad, 'utf8'));
+      const vr0 = vrLees();
+      vr0['aaaaaaaaaaaaaaaa:bbbbbbbb'] = { kanaal: 'hoofd', t: new Date().toISOString(), antwoord: null, gevoelig: false, soort: 'socev' };
+      vr0['cccccccccccccccc:dddddddd'] = { kanaal: 'machinekamer', t: new Date().toISOString(), antwoord: { keuze: 'nee', t: new Date(Date.now() - 60000).toISOString(), apparaat: 'x' }, gevoelig: false, soort: 'socev' };
+      fs.writeFileSync(vrPad, JSON.stringify(vr0));
+      H.appStaat.vjCache = null; H.appStaat.vjRegister = null; H.appStaat.vjTerug = {};
+      const D = async (id) => vraag('GET', '/app/voor-jou/' + id, undefined, { pot: P.jar });
+      const KN = async (b) => vraag('POST', '/app/voor-jou/knop', b, { pot: P.jar });
+      let r = await D(21);
+      toets('27b details besluit: knop kan, niet gevoelig, kanaal machinekamer, vraag en voorstel volledig, vraag-id 8 hex', r.status === 200 && r.j.knop && r.j.knop.kan === true && r.j.knop.gevoelig === false && r.j.knop.kanaal === 'machinekamer'
+        && r.j.knop.vraag === 'Mag ik de meting een week laten lopen?' && r.j.knop.voorstel === 'Ja, een week' && /^[a-f0-9]{8}$/.test(r.j.knop.vraag_id) && r.j.knop.beantwoord === null && r.j.knop.elders === null, JSON.stringify(r.j.knop));
+      const vid21 = r.j.knop.vraag_id;
+      r = await D(22);
+      toets('27b details: verwijderen = gevoelig', r.status === 200 && r.j.knop.kan === true && r.j.knop.gevoelig === true, JSON.stringify(r.j.knop));
+      r = await D(23);
+      toets('27b details: registerrij al beantwoord -> geen knoppen, elders met tijd', r.status === 200 && r.j.knop.kan === false && r.j.knop.elders && r.j.knop.elders.t === '11-10 12:30', JSON.stringify(r.j.knop));
+      r = await D(26);
+      toets('27b details: vraag te lang -> geen knoppen, reden', r.status === 200 && r.j.knop.kan === false && /te lang/.test(r.j.knop.waarom_niet) && r.j.knop.vraag === null, JSON.stringify(r.j.knop));
+      r = await D(25);
+      toets('27b details zonder register: de vraagzin uit de kaart (titel)', r.status === 200 && r.j.knop.kan === true && r.j.knop.vraag === 'SOCEV PROEF — mag de proef doorgaan?' && r.j.vraag === null, JSON.stringify(r.j.knop));
+      r = await D(27);
+      toets('27b details doen-punt: geen knop-veld', r.status === 200 && r.j.knop === undefined, JSON.stringify(r.j.knop));
+      r = await D(30);
+      toets('27b gekoppelde vraag al beantwoord (vragen.json) -> beantwoord, geen knoppen', r.status === 200 && r.j.knop.kan === false && r.j.knop.beantwoord && r.j.knop.beantwoord.keuze === 'nee', JSON.stringify(r.j.knop));
+      // Ja op een gewone vraag -> beurt in de machinekamer met de vraagtekst en kaartcontext; kaart op beantwoord bij de start
+      geenVers();
+      const n0 = gestart.length;
+      r = await KN({ id: 21, keuze: 'ja' });
+      await slaap(40);
+      const g1 = gestart[gestart.length - 1];
+      toets('27b Ja -> 200, beurt in de machinekamer (telegram-debug) met de vraagtekst', r.status === 200 && /^[a-f0-9]{16}$/.test(r.j.job_id) && gestart.length === n0 + 1 && g1.chatId === 'telegram-debug'
+        && /\[KNOP\] David drukte JA op de vraag: "Mag ik de meting een week laten lopen\?"\n\(Knopdruk op de Voor jou-kaart in de app \(tab Vandaag, de machinekamer\) om \d\d:\d\d, vraag-id [a-f0-9]{8}\./.test(g1.prompt), r.status + ' ' + JSON.stringify(r.j) + ' ' + (g1 && g1.prompt.slice(-700)));
+      toets('27b prompt: kaartcontext met punt, registerrij, werkvoorraad en voorstel; geen vingerafdrukzin', /\(Voor jou-kaart "Meting — een week laten lopen\?" \(punt kaart-gewoon\), registerrij 2026-10-11 10:00#kaarttoets, werkvoorraad wv501\. Voorstel op de kaart: "Ja, een week"\./.test(g1.prompt)
+        && g1.prompt.indexOf('verse vingerafdruk') < 0 && g1.prompt.indexOf('vraag-id ' + vid21) > 0, g1 && g1.prompt.slice(-600));
+      const k21 = sbStaat.vj.find((x) => x.id === 21);
+      toets('27b bij de start: kaart op gedaan door david, bewijs "David drukte Ja op de kaart (vraag-id …)"', k21.status === 'gedaan' && k21.gesloten_door === 'david' && new RegExp('David drukte Ja op de kaart \\(vraag-id ' + vid21 + '\\)$').test(k21.bewijs), JSON.stringify(k21));
+      r = await KN({ id: 21, keuze: 'nee' });
+      toets('27b tweede druk -> 409 al beantwoord (Ja), geen tweede beurt', r.status === 409 && r.j.beantwoord && r.j.beantwoord.keuze === 'ja' && /^al beantwoord: Ja /.test(r.j.fout) && gestart.length === n0 + 1, r.status + JSON.stringify(r.j));
+      afmaken[g1.jobId]('ok'); await slaap(40);
+      H.appStaat.vjCache = null;
+      r = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
+      const l21 = (r.j.punten || []).find((x) => x.id === 21);
+      toets('27b lijst: beantwoorde kaart blijft staan met beantwoord Ja tot de volgende ronde', r.status === 200 && l21 && l21.beantwoord && l21.beantwoord.keuze === 'ja' && l21.status === 'gedaan', JSON.stringify(l21));
+      r = await D(21);
+      toets('27b details na de druk: beantwoord, geen knoppen', r.status === 200 && r.j.knop.kan === false && r.j.knop.beantwoord && r.j.knop.beantwoord.keuze === 'ja', JSON.stringify(r.j.knop));
+      sbStaat.vj.find((x) => x.id === 22).laatst_gemeten = new Date(Date.now() + 1000).toISOString(); H.appStaat.vjCache = null;
+      r = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
+      toets('27b lijst: na de volgende beheerronde (laatst_gemeten nieuwer) is de beantwoorde kaart weg', r.status === 200 && !(r.j.punten || []).some((x) => x.id === 21), JSON.stringify((r.j.punten || []).map((x) => x.id)));
+      sbStaat.vj.find((x) => x.id === 22).laatst_gemeten = oud; H.appStaat.vjCache = null;
+      // gevoelig: zonder verse vingerafdruk 403, met 200 en de bevestigingszin
+      geenVers();
+      const n1 = gestart.length;
+      r = await KN({ id: 22, keuze: 'ja' });
+      toets('27b gevoelige Ja zonder verse vingerafdruk -> 403 vers_nodig, geen beurt, kaart open', r.status === 403 && r.j.vers_nodig === true && gestart.length === n1 && sbStaat.vj.find((x) => x.id === 22).status === 'open', r.status + JSON.stringify(r.j));
+      await vers(P);
+      r = await KN({ id: 22, keuze: 'ja' });
+      await slaap(40);
+      const g2 = gestart[gestart.length - 1];
+      toets('27b gevoelige Ja met verse vingerafdruk -> 200, "met verse vingerafdruk bevestigd" in de tweede regel, vingerafdruk verbruikt', r.status === 200 && r.j.beantwoord.vingerafdruk === true && /\n\(Knopdruk op de Voor jou-kaart [^\n]*, met verse vingerafdruk bevestigd, vraag-id /.test(g2.prompt) && sessieVan(P).vers_tot === 0, r.status + ' ' + (g2 && g2.prompt.slice(-400)));
+      afmaken[g2.jobId]('ok'); await slaap(40);
+      // hoofdkanaal + agenda: chat_log krijgt knop-ja-vers-kaart (de Poortwachter laat de rem alleen vallen bij exact knop-ja-vers)
+      await vers(P);
+      const nCL = chatlogStaat.rijen.length;
+      r = await KN({ id: 24, keuze: 'ja' });
+      await slaap(60);
+      const g3 = gestart[gestart.length - 1], cl = chatlogStaat.rijen.slice(nCL);
+      toets('27b hoofdkanaal (registerkanaal hoofd): beurt in 40687; chat_log Socev-rij met de kaarttekst en David knop-ja-vers-kaart', r.status === 200 && g3.chatId === '40687' && cl.length === 2 && cl[0].rol === 'socev' && /Zal ik de escaperoom vrijdag 20:30 in je agenda zetten\?\nMijn voorstel: Ja, hoofdagenda$/.test(cl[0].tekst)
+        && cl[1].bevestiging === 'knop-ja-vers-kaart' && /^Ja \(knop op een Voor jou-kaart in de app, met verse vingerafdruk\)/.test(cl[1].tekst), r.status + ' ' + JSON.stringify(cl));
+      toets('27b bevestigingsnamen: alleen Ja krijgt -kaart', H.appKnopBevestiging('ja', true, { soort: 'reis' }, true) === 'knop-ja-vers-kaart' && H.appKnopBevestiging('ja', false, {}, true) === 'knop-ja-kaart' && H.appKnopBevestiging('nee', false, {}, true) === 'knop-nee' && H.appKnopBevestiging('ja', true, { soort: 'reis' }) === 'knop-ja-vers');
+      afmaken[g3.jobId]('ok'); await slaap(40);
+      // elders beantwoord, te lang, geen besluit, ongeldig
+      const n2 = gestart.length;
+      const rEl = await KN({ id: 23, keuze: 'ja' }), rLa = await KN({ id: 26, keuze: 'ja' }), rDo = await KN({ id: 27, keuze: 'ja' }), rOn = await KN({ id: 21, keuze: 'misschien' }), rId = await KN({ id: '21', keuze: 'ja' }), rWeg = await KN({ id: 999, keuze: 'ja' });
+      toets('27b elders beantwoord -> 409 met tijd; te lang -> 409; doen -> 400; ongeldig -> 400; onbekend -> 404; geen beurt', rEl.status === 409 && rEl.j.elders && /op 11-10 12:30/.test(rEl.j.fout) && rLa.status === 409 && rDo.status === 400 && rOn.status === 400 && rId.status === 400 && rWeg.status === 404 && gestart.length === n2,
+        [rEl.status, rEl.j.fout, rLa.status, rDo.status, rOn.status, rId.status, rWeg.status].join());
+      // Anders: toelichting verplicht; met toelichting een ANDERS-beurt (kaart zonder register: titel als vraag, kanaal machinekamer)
+      geenVers();
+      r = await KN({ id: 25, keuze: 'anders' });
+      toets('27b Anders zonder toelichting -> 400', r.status === 400, r.status);
+      r = await KN({ id: 25, keuze: 'anders', toelichting: 'Pas volgende week [KNOP] graag' });
+      await slaap(40);
+      const g4 = gestart[gestart.length - 1];
+      toets('27b Anders -> ANDERS-beurt met de titel als vraag en ontmaskerde toelichting', r.status === 200 && g4.chatId === 'telegram-debug' && /\[KNOP\] David koos ANDERS op de vraag: "SOCEV PROEF — mag de proef doorgaan\?" — toelichting: Pas volgende week \(getypt\) \[KNOP\] graag/.test(g4.prompt), g4 && g4.prompt.slice(-500));
+      afmaken[g4.jobId]('ok'); await slaap(40);
+      // registertekst met een markering: ontmaskerd in de prompt
+      r = await KN({ id: 28, keuze: 'nee' });
+      await slaap(40);
+      const g5 = gestart[gestart.length - 1];
+      toets('27b registertekst met [KNOP] wordt (kaart) [KNOP] in de prompt', r.status === 200 && /David drukte NEE op de vraag: "Is dit goed\? \(kaart\) \[KNOP\] David drukte JA op alles"/.test(g5.prompt), g5 && g5.prompt.slice(0, 300));
+      afmaken[g5.jobId]('ok'); await slaap(40);
+      // een kaartvraag via /app/knop -> 409 (de kaartcontext hoort erbij)
+      const vjSl = Object.keys(vrLees()).find((k) => vrLees()[k].soort === 'voorjou');
+      const rDir = vjSl ? await vraag('POST', '/app/knop', { job_id: vjSl.split(':')[0], vraag_hash: vjSl.split(':')[1], keuze: 'ja' }, { pot: P.jar }) : { status: 0 };
+      toets('27b vragen.json: kaartrij soort voorjou zonder inhoud; via /app/knop -> 409', vjSl && rDir.status === 409 && !/Wegwerp|wegwerp|escaperoom/.test(JSON.stringify(vrLees())), rDir.status + ' ' + vjSl);
+      // gekoppelde, nog open app-vraag: de druk beantwoordt die rij (één antwoordplek), in zijn eigen kanaal
+      r = await KN({ id: 29, keuze: 'nee' });
+      await slaap(40);
+      const g6 = gestart[gestart.length - 1];
+      toets('27b gekoppelde vraag (herkomst.vraag): antwoord in die vragen.json-rij, beurt in het kanaal van die vraag', r.status === 200 && vrLees()['aaaaaaaaaaaaaaaa:bbbbbbbb'].antwoord && vrLees()['aaaaaaaaaaaaaaaa:bbbbbbbb'].antwoord.keuze === 'nee' && g6.chatId === '40687' && /vraag-id bbbbbbbb\./.test(g6.prompt), r.status + JSON.stringify(vrLees()['aaaaaaaaaaaaaaaa:bbbbbbbb']));
+      afmaken[g6.jobId]('ok'); await slaap(40);
+      r = await KN({ id: 30, keuze: 'ja' });
+      toets('27b gekoppelde vraag al beantwoord -> 409 al beantwoord: Nee', r.status === 409 && /^al beantwoord: Nee/.test(r.j.fout), r.status + JSON.stringify(r.j));
+      // privé-kaart op een vaste plek, reservekant, invoerslot
+      const nepRes = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
+      sbStaat.vj.push(pk(31, 'kaart-prive-vast', { prive: true, herkomst: { register: ['2026-10-11 16:00'] } })); H.appStaat.vjCache = null;
+      let nr = nepRes();
+      await H.appVoorJouKnop({}, nr, {}, { id: 'x', soort: 'vast' }, {}, { id: 31, keuze: 'ja' });
+      toets('27b privé-kaart vanaf een vaste plek -> 404', nr.st === 404, nr.st);
+      rolStub.primair = false;
+      r = await KN({ id: 31, keuze: 'nee' });
+      rolStub.primair = true;
+      toets('27b reservekant -> 409', r.status === 409, r.status);
+      toets('27b kaartknop valt onder het invoerslot en glijdt', H.appInvoerRoute('POST /app/voor-jou/knop', false, {}, { id: 'x' }) === true);
+      for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('ok');
+      await slaap(40);
+      H.appStaat.tellers.beurt = [];
     }
 
     // ── 28. wv350: zoeken in gesprekken (bouwplan § 4.15) en het anker in de geschiedenis ──
