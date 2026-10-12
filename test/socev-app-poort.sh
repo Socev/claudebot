@@ -3468,6 +3468,16 @@ async function bewijs(o) {
       toets('23 onbekende bron / klasse / kanaal -> 400', r.status === 400 && rKl.status === 400 && rKa.status === 400, JSON.stringify([r.j, rKl.j, rKa.j]));
       r = await bq('/bericht', B({ tekst: 'x'.repeat(60001) }));
       toets('23 tekst > 60.000 -> 413 terugval', r.status === 413 && r.j.terugval === true, JSON.stringify(r.j));
+      // wv452 (Fable KAN 3): bron actielijst leegt het geheugen van Vandaag (de rijen staan al open); een andere bron niet
+      {
+        const vOud = H.appStaat.vandaag;
+        H.appStaat.vandaag = { data: { op: Date.now(), vandaag: 'x' }, bezig: null };
+        const rP = await bq('/bericht', B({ bron: 'proef', klasse: 'stil', sleutel: 'wv452-a' }));
+        const bleef = !!H.appStaat.vandaag.data;
+        const rA = await bq('/bericht', B({ bron: 'actielijst', kanaal: 'hoofd', klasse: 'stil', sleutel: 'wv452-b' }));
+        toets('23 wv452: bericht met bron actielijst leegt het Vandaag-geheugen, bron proef niet', rP.status === 200 && bleef && rA.status === 200 && H.appStaat.vandaag.data === null, JSON.stringify([rP.status, bleef, rA.status, rA.j]));
+        H.appStaat.vandaag = vOud;
+      }
       r = await bq('/bericht', '{"secret":"' + GEH + '", "tekst": "' + 'y'.repeat(300 * 1024) + '"}');
       toets('23 verzoek > 256 kB -> 413 (geen afgebroken verbinding)', r.status === 413, JSON.stringify(r).slice(0, 200));
 

@@ -9436,6 +9436,9 @@ async function berichtNieuw(res, d) {
   const plan = berichtPushPlan(id, kanaal, klasse);   // bewaart de index
   if (!idx[id].push) berichtIndexBewaar();
   const gewenst = berichtPushGewenst();
+  // wv452 (Fable KAN 3): het actielijstje van 07:05 zegt "de knoppen staan in Vandaag"; de rijen staan dan al open (n8n markeert ze vóór
+  // dit bericht), dus het geheugen van Vandaag (3 min) weg, anders toont Ververs nog "nog niet verstuurd" zonder knoppen
+  if (bron === 'actielijst' && appStaat.vandaag) appStaat.vandaag.data = null;
   res._log = { bericht: id, kanaal: kanaal, bron: bron, klasse: klasse, agenda: ag ? ag.soort : undefined };
   berichtStuur(res, 200, { ok: true, id: id, vraag: !!vraag && d.knoppen === true, push: { gewenst: gewenst, gestart: plan.direct }, uitgesteld: plan.uitgesteld, app_actief: berichtAppActief(),
     agenda: ag ? true : undefined });
