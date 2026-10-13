@@ -6375,9 +6375,10 @@ async function appMeldingenRoute(req, res, a) {
   const grens = appMeldGrens(a, gezien, Date.now());
   let sub = null;
   try { sub = appPushLees().apparaten[a.id] || null; } catch (e) {}
-  appStuur(res, 200, { ok: true, items: m.items.map(function (x) { const y = Object.assign({}, x); delete y.rij; delete y.kaart; return y; }), stand: m.stand,
+  const items = appMeldMetSeintjes(m.items);   // wv414: plus de kaarten van verlopen seintjes (pod zelf)
+  appStuur(res, 200, { ok: true, items: items.map(function (x) { const y = Object.assign({}, x); delete y.rij; delete y.kaart; return y; }), stand: m.stand,
     fouten: m.fouten, bijgewerkt: new Date(m.op).toISOString(), gezien: gezien, nieuw_na: new Date(grens).toISOString(),
-    nieuw: appMeldNieuw(m.items, grens).length,
+    nieuw: appMeldNieuw(items, grens).length,
     seintjes_meldingen: !!(sub && (sub.soorten || []).indexOf('meldingen') >= 0) });
 }
 function appMeldingenGezien(req, res, a, d) {
@@ -6474,7 +6475,7 @@ async function appNieuwRoute(req, res, a) {
   let m = appStaat.meld && appStaat.meld.data;
   if (!m || nu - m.op > APP_NIEUW_MELD_MS) { try { m = await appMeldingen(); } catch (e) { m = null; } }
   if (m) {
-    const nieuw = appMeldNieuw(m.items, appMeldGrens(a, appGezien()[a.id], nu));
+    const nieuw = appMeldNieuw(appMeldMetSeintjes(m.items), appMeldGrens(a, appGezien()[a.id], nu));
     tabs.meldingen = nieuw.length;
     if (nieuw.length) laatst.meldingen = nieuw[0].wanneer;
   } else { tabs.meldingen = 0; fouten.push('meldingen'); }
@@ -8061,6 +8062,7 @@ async function appPushStuur(id, reden) {
     try { appPushWijzig(function (p) { delete p.apparaten[id]; }); } catch (e) { logError('app-push', e); }
     return { ok: false, reden: 'apparaat niet (meer) actief' };
   }
+  if (sub.verlopen || !sub.endpoint) return { ok: false, reden: 'geen abonnement' };   // wv414: verlopen, wacht op de app
   if (!appPushEndpointOk(sub.endpoint)) return { ok: false, reden: 'onbekende pushdienst' };
   const v = await appVapid();
   if (!v) return { ok: false, reden: 'geen pushsleutel' };
@@ -8077,7 +8079,9 @@ async function appPushStuur(id, reden) {
     try { await r.text(); } catch (e) {}
   } catch (e) { logError('app-push', { name: e && e.name, code: e && e.cause && e.cause.code }); }
   const ok = status >= 200 && status < 300;
-  // 404/410: het abonnement bestaat niet meer bij de pushdienst (browser opnieuw ingesteld, rechten ingetrokken).
+  // 404/410: het abonnement bestaat niet meer bij de pushdienst (browser opnieuw ingesteld, rechten ingetrokken, of de
+  // pushdienst liet het verlopen: Pixel 9-10, wv282). wv414: niet meer spoorloos weghalen maar als verlopen bewaren (zonder
+  // endpoint); de app ziet dat na de volgende ontgrendeling en abonneert dan vanzelf opnieuw. Plus één kaart in Meldingen.
   const weg = status === 404 || status === 410;
   // 401/403: de pushdienst kent onze sleutel niet (vervangen via het sleutelportaal?) -> hooguit eens per 10 min opnieuw uit de kluis
   if ((status === 401 || status === 403) && Date.now() - (v.op || 0) > 10 * 60000) appStaat.vapid = null;
@@ -8085,18 +8089,19 @@ async function appPushStuur(id, reden) {
     appPushWijzig(function (p) {
       const s = p.apparaten[id];
       if (!s || s.endpoint !== sub.endpoint) return;
-      if (weg) delete p.apparaten[id];
-      else s.laatst = { op: new Date().toISOString(), status: status, reden: String(reden || '').slice(0, 30) };   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137)
+      const nu = new Date().toISOString();
+      s.laatst = { op: nu, status: status, reden: String(reden || '').slice(0, 30) };   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137)
+      if (weg) { s.endpoint = null; s.verlopen = nu; appPushVerlopenMeld(p, id, a.naam, nu, status); }
     });
   } catch (e) { logError('app-push', e); }
-  appAudit({ route: 'push', m: 'POST', status: status, apparaat: id, reden: String(reden || '').slice(0, 40) + (weg ? ' (abonnement verlopen, verwijderd)' : '') });
+  appAudit({ route: 'push', m: 'POST', status: status, apparaat: id, reden: String(reden || '').slice(0, 40) + (weg ? ' (abonnement verlopen, bewaard)' : '') });
   return { ok: ok, status: status, reden: ok ? 'verstuurd' : weg ? 'abonnement verlopen' : status ? 'pushdienst gaf ' + status : 'pushdienst niet bereikbaar' };
 }
 async function appPushAlle(soort, reden, filter) {
   if (!(await appRolOk())) return [];   // alleen de actieve kant (uitwijk) geeft seintjes (Fable-review wv100 B7)
   let p;
   try { p = appPushLees(); } catch (e) { logError('app-push', e); return []; }
-  const ids = Object.keys(p.apparaten).filter(function (id) { return (p.apparaten[id].soorten || []).indexOf(soort) >= 0 && (!filter || filter(id)); });
+  const ids = Object.keys(p.apparaten).filter(function (id) { return !p.apparaten[id].verlopen && (p.apparaten[id].soorten || []).indexOf(soort) >= 0 && (!filter || filter(id)); });
   const uit = [];
   for (const id of ids) uit.push(await appPushStuur(id, reden));
   return uit;
@@ -8128,7 +8133,7 @@ function appPushNaBeurt(jobId) {
 async function appPushMeldTik() {
   let p;
   try { p = appPushLees(); } catch (e) { return; }
-  const ids = Object.keys(p.apparaten).filter(function (id) { return (p.apparaten[id].soorten || []).indexOf('meldingen') >= 0; });
+  const ids = Object.keys(p.apparaten).filter(function (id) { return !p.apparaten[id].verlopen && (p.apparaten[id].soorten || []).indexOf('meldingen') >= 0; });
   if (!ids.length || fs.existsSync(APP_UIT)) return;
   const uur = Number(new Date().toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }));
   if (!(uur >= 7 && uur < 22)) return;
@@ -8138,7 +8143,7 @@ async function appPushMeldTik() {
   if (!m.gelezen || m.fouten.length) return;   // niet alles gelezen: niets beslissen
   for (const id of ids) {
     const s = appPushLees().apparaten[id];
-    if (!s) continue;
+    if (!s || s.verlopen) continue;
     if (!Array.isArray(s.meld_kaarten)) { appPushWijzig(function (q) { if (q.apparaten[id]) q.apparaten[id].meld_kaarten = m.kaarten.slice(0, 200); }); continue; }
     // opgeloste kaarten vergeten: gaat dezelfde storing later opnieuw mis, dan is dat weer nieuw
     const bekend = s.meld_kaarten.filter(function (k) { return m.kaarten.indexOf(k) >= 0; });
@@ -8153,14 +8158,50 @@ async function appPushMeldTik() {
 }
 setInterval(function () { appPushMeldTik().catch(function (e) { logError('app-push', e); }); }, APP_PUSH_MELD_TIK_MS).unref();
 
+// wv414: kaart in Meldingen bij een verlopen abonnement, hooguit één per apparaat per dag (Amsterdamse dag), 14 dagen bewaard.
+// Staat in push.json (verlopen_meld), dus binnen dezelfde schrijfstap als het abonnement zelf; geen endpoint, alleen id + naam.
+function appPushAmsDag(iso) { return new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' }); }
+function appPushVerlopenMeld(p, id, naam, iso, status) {
+  const grens = Date.now() - APP_MELD_DAGEN * 86400000;
+  const l = (Array.isArray(p.verlopen_meld) ? p.verlopen_meld : []).filter(function (x) { return x && Date.parse(x.op) >= grens; });
+  const zelfdeDag = l.find(function (x) { return x.apparaat === id && appPushAmsDag(x.op) === appPushAmsDag(iso); });
+  if (zelfdeDag) { zelfdeDag.af = null; zelfdeDag.af_op = null; zelfdeDag.aantal = (zelfdeDag.aantal || 1) + 1; zelfdeDag.status = status; }   // weer open, geen tweede kaart
+  else l.push({ apparaat: id, naam: String(naam || 'een apparaat').slice(0, 40), op: iso, status: status, aantal: 1, af: null, af_op: null });
+  p.verlopen_meld = l.slice(-50);
+}
+function appPushVerlopenAf(p, id, hoe) {
+  if (!Array.isArray(p.verlopen_meld)) return;
+  const nu = new Date().toISOString();
+  p.verlopen_meld.forEach(function (x) { if (x && x.apparaat === id && !x.af) { x.af = hoe; x.af_op = nu; } });
+}
+function appPushMeldItems() {
+  let l = [];
+  try { l = appPushLees().verlopen_meld || []; } catch (e) { return []; }
+  const grens = Date.now() - APP_MELD_DAGEN * 86400000;
+  return (Array.isArray(l) ? l : []).filter(function (x) { return x && Date.parse(x.op) >= grens; }).map(function (x) {
+    const herstel = x.af === 'hersteld' ? { stand: 'weer-goed', op: x.af_op, tekst: 'Vanzelf weer aangezet (' + appDagKlok(x.af_op) + ').' }
+      : x.af === 'uitgezet' ? { stand: 'weer-goed', op: x.af_op, tekst: 'Seintjes op dat apparaat daarna zelf uitgezet (' + appDagKlok(x.af_op) + ').' }
+        : { stand: 'nog-fout', op: null, tekst: 'Nog niet weer aan; dat gebeurt bij de volgende opening van de app op dat apparaat.' };
+    return { id: 'p' + appSha(x.apparaat + '|' + x.op).slice(0, 10), rij: 0, kaart: null, soort: 'storing', titel: 'Seintjes op ' + x.naam + ' verlopen',
+      uitleg: 'De pushdienst van de browser liet het abonnement voor seintjes vallen. De app zet ze bij de volgende opening op dat apparaat vanzelf weer aan.',
+      wanneer: x.op, eerste: x.op, aantal: x.aantal || 1, herstel: herstel, techniek: 'pushdienst gaf ' + (x.status || '?') + ' · apparaat ' + String(x.apparaat).slice(0, 6) };
+  });
+}
+function appMeldMetSeintjes(items) {
+  const eigen = appPushMeldItems();
+  if (!eigen.length) return items;
+  return items.concat(eigen).sort(function (a, b) { return Date.parse(b.wanneer) - Date.parse(a.wanneer); });
+}
 async function appPushStand(req, res, a) {
   res._app.stil = true;
   const v = await appVapid();
   let sub = null;
   try { sub = appPushLees().apparaten[a.id] || null; } catch (e) { logError('app-push', e); }
   const oud = !!(sub && v && sub.sleutel && sub.sleutel !== appSha(v.publiek).slice(0, 16));
+  // wv414: verlopen = de pushdienst liet het abonnement vallen; de app abonneert dan na de ontgrendeling vanzelf opnieuw
+  const verlopen = sub && sub.verlopen ? sub.verlopen : null;
   appStuur(res, 200, { ok: true, sleutel: v ? v.publiek : null, uit_reden: v ? null : 'seintjes zijn op de pod nog niet ingericht',
-    aan: !!sub && !oud, sleutel_oud: oud, soorten: sub ? sub.soorten || [] : [], laatst: sub ? sub.laatst || null : null });
+    aan: !!sub && !oud && !verlopen, sleutel_oud: oud, verlopen: verlopen, soorten: sub ? sub.soorten || [] : [], laatst: sub ? sub.laatst || null : null });
 }
 async function appPushAbonneer(req, res, a, d) {
   if (!appTeller('push', APP_PUSH_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens push');
@@ -8177,14 +8218,15 @@ async function appPushAbonneer(req, res, a, d) {
       const oud = p.apparaten[a.id] || {};
       p.apparaten[a.id] = { endpoint: ep, sinds: new Date().toISOString(), soorten: Array.isArray(oud.soorten) && oud.soorten.length ? oud.soorten : ['antwoord'],
         meld_kaarten: Array.isArray(oud.meld_kaarten) ? oud.meld_kaarten : null, meld_laatst: oud.meld_laatst || 0, laatst: null, sleutel: appSha(v.publiek).slice(0, 16) };
+      appPushVerlopenAf(p, a.id, 'hersteld');   // wv414: kaart in Meldingen op opgelost
       return p.apparaten[a.id].soorten;
     });
   } catch (e) { logError('app-push', e); return appWeiger(res, 500, 'opslaan lukte niet', 'push.json schrijven'); }
-  res._app.reden = 'seintjes aan (' + new URL(ep).hostname + ')';
+  res._app.reden = 'seintjes ' + (d.vanzelf === true ? 'vanzelf weer ' : '') + 'aan (' + new URL(ep).hostname + ')';
   appStuur(res, 200, { ok: true, aan: true, soorten: soorten });
 }
 function appPushOpzeggen(req, res, a) {
-  try { appPushWijzig(function (p) { delete p.apparaten[a.id]; }); }
+  try { appPushWijzig(function (p) { delete p.apparaten[a.id]; appPushVerlopenAf(p, a.id, 'uitgezet'); }); }
   catch (e) { logError('app-push', e); return appWeiger(res, 500, 'opslaan lukte niet', 'push.json schrijven'); }
   res._app.reden = 'seintjes uit';
   appStuur(res, 200, { ok: true, aan: false });
@@ -8218,17 +8260,19 @@ async function appPushProef(req, res, a) {
   appStuur(res, 200, { ok: true, verstuurd: r.ok, status: r.status || 0, reden: r.reden });
 }
 function appPushInfo() {
-  let n = 0, meld = 0, laatst = null;
+  let n = 0, meld = 0, verlopen = 0, laatst = null;
   try {
     const p = appPushLees();
     Object.keys(p.apparaten).forEach(function (id) {
-      const s = p.apparaten[id]; n++;
+      const s = p.apparaten[id];
+      if (s.verlopen) { verlopen++; return; }   // wv414
+      n++;
       if ((s.soorten || []).indexOf('meldingen') >= 0) meld++;
       if (s.laatst && (!laatst || s.laatst.op > laatst.op)) laatst = { op: s.laatst.op, status: s.laatst.status, reden: s.laatst.reden };
     });
   } catch (e) { return { push_json: 'kapot' }; }
   const v = appStaat.vapid;
-  return { abonnementen: n, met_meldingen: meld, sleutel: v && v.key ? 'geladen' : v && v.fout ? 'fout: ' + v.fout : 'nog niet gelezen', laatst: laatst };
+  return { abonnementen: n, met_meldingen: meld, verlopen: verlopen, sleutel: v && v.key ? 'geladen' : v && v.fout ? 'fout: ' + v.fout : 'nog niet gelezen', laatst: laatst };
 }
 
 function handleApp(req, res) {
@@ -9246,7 +9290,7 @@ function berichtPushGewenst() {
   try {
     const p = appPushLees();
     const act = new Set(appRegister().apparaten.filter(function (x) { return x.actief; }).map(function (x) { return x.id; }));
-    return Object.keys(p.apparaten).filter(function (id) { return act.has(id) && (p.apparaten[id].soorten || []).indexOf('antwoord') >= 0; }).length;
+    return Object.keys(p.apparaten).filter(function (id) { return act.has(id) && !p.apparaten[id].verlopen && (p.apparaten[id].soorten || []).indexOf('antwoord') >= 0; }).length;
   } catch (e) { logError('bericht-push', e); return 0; }
 }
 

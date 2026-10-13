@@ -1829,13 +1829,59 @@ async function bewijs(o) {
       regB.apparaten = regB.apparaten.filter((x) => x.id !== 'eeeeeeeeeeeeeeee'); fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regB));
       r = await vraag('POST', '/app/push/soorten', { meldingen: false }, { pot: P.jar });
       toets('12 meldingen uit: alleen antwoord', r.status === 200 && r.j.soorten.join() === 'antwoord');
-      // pushdienst zegt: abonnement bestaat niet meer
+      // pushdienst zegt: abonnement bestaat niet meer. wv414: niet spoorloos weg maar bewaard als verlopen (zonder endpoint),
+      // één kaart in Meldingen, en de app abonneert na de volgende ontgrendeling vanzelf opnieuw (Pixel 9-10, wv282).
+      const leesPj = () => JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8'));
       pushStaat.status = 410;
-      rs = await H.appPushStuur(pid, 'proef');
-      toets('12 pushdienst 410: abonnement verwijderd', rs.ok === false && /verlopen/.test(rs.reden) && !JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid], JSON.stringify(rs));
-      pushStaat.status = 201;
+      rs = await H.appPushStuur(pid, 'antwoord hoofd');
+      let pjV = leesPj().apparaten[pid];
+      toets('12 pushdienst 410: abonnement bewaard als verlopen, zonder endpoint (wv414)', rs.ok === false && /verlopen/.test(rs.reden) && pjV && pjV.endpoint === null && /^\d{4}-\d\d-\d\dT/.test(pjV.verlopen || '') && pjV.laatst && pjV.laatst.status === 410 && pjV.soorten.join() === 'antwoord', JSON.stringify(rs) + JSON.stringify(pjV));
+      toets('wv414 auditregel push 410 "abonnement verlopen, bewaard", geen endpoint', /"route":"push"[^\n]*"status":410[^\n]*abonnement verlopen, bewaard/.test(fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8')) && !/fcm\/send\/proef/.test(fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8')));
+      pushStaat.status = 201; pushes.length = 0;
+      rs = await H.appPushStuur(pid, 'antwoord hoofd');
+      toets('wv414 verlopen apparaat: geen POST meer naar de pushdienst', rs.ok === false && rs.reden === 'geen abonnement' && pushes.length === 0, JSON.stringify(rs) + pushes.length);
+      r = await vraag('POST', '/app/push/proef', {}, { pot: P.jar });
+      toets('wv414 proef op een verlopen apparaat -> 409 "zet eerst seintjes aan", niets verstuurd', r.status === 409 && pushes.length === 0, JSON.stringify(r.j));
+      { const q = leesPj(); q.apparaten[pid].soorten = ['antwoord', 'meldingen']; q.apparaten[pid].meld_kaarten = []; q.apparaten[pid].meld_laatst = 0; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(q)); }
+      n8nStaat.buffer.push({ id: 109, bron: 'foutmelder', tekst: fmt('AI - Verlopen', 'Stap', 'Service unavailable', 54400, 'Verlopen0001'), createdAt: new Date().toISOString() });
+      H.appStaat.meld = null; toetsUur = 12;
+      await H.appPushMeldTik();
+      toets('wv414 meldingen-tik slaat een verlopen apparaat over (geen POST, nulpunt onaangeroerd)', pushes.length === 0 && leesPj().apparaten[pid].meld_kaarten.length === 0, pushes.length + ' ' + JSON.stringify(leesPj().apparaten[pid].meld_kaarten));
+      toets('wv414 bericht-route telt een verlopen apparaat niet als seintjes-ontvanger', vm.runInContext('berichtPushGewenst()', ctx) === 0, vm.runInContext('berichtPushGewenst()', ctx));
+      toets('wv414 /health.app.seintjes: verlopen apart geteld', H.appInfo2().seintjes.abonnementen === 0 && H.appInfo2().seintjes.verlopen === 1, JSON.stringify(H.appInfo2().seintjes));
       r = await vraag('GET', '/app/push', undefined, { pot: P.jar });
-      toets('12 daarna: GET push zegt "niet aan"', r.j.aan === false);
+      toets('12 daarna: GET push zegt "niet aan" en "verlopen op …" (wv414)', r.j.aan === false && r.j.verlopen === pjV.verlopen && r.j.laatst.status === 410, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      let kV = (r.j.items || []).filter((x) => /^Seintjes op .+ verlopen$/.test(x.titel));
+      toets('wv414 Meldingen: één kaart "Seintjes op <apparaat> verlopen", nog niet hersteld, telt als nieuw', kV.length === 1 && kV[0].soort === 'storing' && kV[0].herstel.stand === 'nog-fout' && /vanzelf weer aan/.test(kV[0].uitleg) && !/fcm|https?:/.test(JSON.stringify(kV[0])) && r.j.nieuw >= 1, JSON.stringify(kV) + ' nieuw=' + r.j.nieuw);
+      // de app abonneert vanzelf opnieuw (vanzelf: true): weer aan, kaart op opgelost, auditregel herkenbaar
+      const EP2 = 'https://fcm.googleapis.com/fcm/send/proef:nieuw';
+      r = await vraag('POST', '/app/push/abonneer', { endpoint: EP2, sleutel: VAPID_PUB, vanzelf: true }, { pot: P.jar });
+      pjV = leesPj().apparaten[pid];
+      toets('wv414 vanzelf opnieuw abonneren: endpoint terug, verlopen weg, soorten behouden', r.status === 200 && pjV.endpoint === EP2 && !pjV.verlopen && pjV.soorten.join() === 'antwoord,meldingen', JSON.stringify(pjV));
+      toets('wv414 auditregel push/abonneer "seintjes vanzelf weer aan"', /"route":"\/app\/push\/abonneer"[^\n]*seintjes vanzelf weer aan \(fcm\.googleapis\.com\)/.test(fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8')), fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter((l) => /abonneer/.test(l)).slice(-2).join(' | '));
+      r = await vraag('GET', '/app/push', undefined, { pot: P.jar });
+      toets('wv414 daarna GET push: aan, verlopen null', r.j.aan === true && r.j.verlopen === null, JSON.stringify(r.j));
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      kV = (r.j.items || []).filter((x) => /^Seintjes op .+ verlopen$/.test(x.titel));
+      toets('wv414 Meldingen: kaart op opgelost ("Vanzelf weer aangezet")', kV.length === 1 && kV[0].herstel.stand === 'weer-goed' && /Vanzelf weer aangezet/.test(kV[0].herstel.tekst), JSON.stringify(kV));
+      // dezelfde dag nog eens verlopen: geen tweede kaart, wel weer open (hooguit één per apparaat per dag)
+      pushStaat.status = 404;
+      await H.appPushStuur(pid, 'proef');
+      pushStaat.status = 201;
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      kV = (r.j.items || []).filter((x) => /^Seintjes op .+ verlopen$/.test(x.titel));
+      toets('wv414 tweede verloop zelfde dag (404): één kaart, weer open, 2× gemeld', kV.length === 1 && kV[0].herstel.stand === 'nog-fout' && kV[0].aantal === 2 && leesPj().verlopen_meld.length === 1, JSON.stringify(kV));
+      // kaart van eergisteren telt als een andere dag; kaarten ouder dan 14 dagen vallen weg
+      { const q = leesPj(); q.verlopen_meld.unshift({ apparaat: pid, naam: 'Oud', op: new Date(Date.now() - 15 * 86400000).toISOString(), status: 410, aantal: 1, af: null, af_op: null }); fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(q)); }
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      toets('wv414 kaart ouder dan 14 dagen: niet getoond', !(r.j.items || []).some((x) => x.titel === 'Seintjes op Oud verlopen'));
+      // zelf opzeggen sluit de open kaart af
+      r = await vraag('POST', '/app/push/opzeggen', {}, { pot: P.jar });
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      kV = (r.j.items || []).filter((x) => /^Seintjes op .+ verlopen$/.test(x.titel) && x.titel !== 'Seintjes op Oud verlopen');
+      toets('wv414 zelf uitgezet: kaart afgesloten ("zelf uitgezet")', kV.length === 1 && kV[0].herstel.stand === 'weer-goed' && /zelf uitgezet/.test(kV[0].herstel.tekst), JSON.stringify(kV));
+      { const q = leesPj(); delete q.verlopen_meld; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(q)); }
       await vraag('POST', '/app/push/abonneer', { endpoint: EP, sleutel: VAPID_PUB }, { pot: P.jar });
       r = await vraag('POST', '/app/push/opzeggen', {}, { pot: P.jar });
       toets('12 opzeggen: weg uit push.json', r.status === 200 && !JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid]);
