@@ -8130,7 +8130,17 @@ function appPushNaBeurt(jobId) {
 // Seintje alleen bij een NIEUWE kaart (een storing die nog misgaat of een stroom die stilviel), niet elk uur opnieuw voor
 // dezelfde chronische storing (Fable-review wv100 K2). meld_kaarten = de kaarten die dit apparaat al kreeg; null = nulpunt
 // bij de eerstvolgende geslaagde lezing (nooit op een mislukte lezing, B5).
+// Fable wv414 #3: een verlopen apparaat dat intussen is ingetrokken of opnieuw gekoppeld (nieuw id) zou eeuwig blijven staan
+// (de oude opruiming in appPushStuur bereikt het niet meer): elke tik weghalen, kaart op 'ingetrokken'.
+function appPushVeegVerlopen() {
+  let p, act;
+  try { p = appPushLees(); act = new Set(appRegister().apparaten.filter(function (x) { return x.actief; }).map(function (x) { return x.id; })); } catch (e) { return; }
+  const weg = Object.keys(p.apparaten).filter(function (id) { return p.apparaten[id].verlopen && !act.has(id); });
+  if (!weg.length) return;
+  try { appPushWijzig(function (q) { weg.forEach(function (id) { delete q.apparaten[id]; appPushVerlopenAf(q, id, 'ingetrokken'); }); }); } catch (e) { logError('app-push', e); }
+}
 async function appPushMeldTik() {
+  appPushVeegVerlopen();
   let p;
   try { p = appPushLees(); } catch (e) { return; }
   const ids = Object.keys(p.apparaten).filter(function (id) { return !p.apparaten[id].verlopen && (p.apparaten[id].soorten || []).indexOf('meldingen') >= 0; });
@@ -8181,6 +8191,7 @@ function appPushMeldItems() {
   return (Array.isArray(l) ? l : []).filter(function (x) { return x && Date.parse(x.op) >= grens; }).map(function (x) {
     const herstel = x.af === 'hersteld' ? { stand: 'weer-goed', op: x.af_op, tekst: 'Vanzelf weer aangezet (' + appDagKlok(x.af_op) + ').' }
       : x.af === 'uitgezet' ? { stand: 'weer-goed', op: x.af_op, tekst: 'Seintjes op dat apparaat daarna zelf uitgezet (' + appDagKlok(x.af_op) + ').' }
+        : x.af === 'ingetrokken' ? { stand: 'weer-goed', op: x.af_op, tekst: 'Dat apparaat is intussen ontkoppeld; daar komen geen seintjes meer (' + appDagKlok(x.af_op) + ').' }
         : { stand: 'nog-fout', op: null, tekst: 'Nog niet weer aan; dat gebeurt bij de volgende opening van de app op dat apparaat.' };
     return { id: 'p' + appSha(x.apparaat + '|' + x.op).slice(0, 10), rij: 0, kaart: null, soort: 'storing', titel: 'Seintjes op ' + x.naam + ' verlopen',
       uitleg: 'De pushdienst van de browser liet het abonnement voor seintjes vallen. De app zet ze bij de volgende opening op dat apparaat vanzelf weer aan.',
@@ -8201,7 +8212,9 @@ async function appPushStand(req, res, a) {
   // wv414: verlopen = de pushdienst liet het abonnement vallen; de app abonneert dan na de ontgrendeling vanzelf opnieuw
   const verlopen = sub && sub.verlopen ? sub.verlopen : null;
   appStuur(res, 200, { ok: true, sleutel: v ? v.publiek : null, uit_reden: v ? null : 'seintjes zijn op de pod nog niet ingericht',
-    aan: !!sub && !oud && !verlopen, sleutel_oud: oud, verlopen: verlopen, soorten: sub ? sub.soorten || [] : [], laatst: sub ? sub.laatst || null : null });
+    aan: !!sub && !oud && !verlopen, sleutel_oud: oud, verlopen: verlopen,
+    endpoint_hash: sub && sub.endpoint ? appSha(sub.endpoint).slice(0, 16) : null,   // Fable wv414 #4: de app ziet zo of de browser intussen een ander adres heeft
+    soorten: sub ? sub.soorten || [] : [], laatst: sub ? sub.laatst || null : null });
 }
 async function appPushAbonneer(req, res, a, d) {
   if (!appTeller('push', APP_PUSH_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens push');
@@ -8238,7 +8251,7 @@ function appPushSoorten(req, res, a, d) {
   try {
     uit = appPushWijzig(function (p) {
       const s = p.apparaten[a.id];
-      if (!s) return null;
+      if (!s || s.verlopen) return null;   // wv414 (Fable #6)
       s.soorten = d.meldingen ? ['antwoord', 'meldingen'] : ['antwoord'];
       // aanzetten = vanaf nu: wat er al lag, geeft geen seintje (nulpunt bij de eerstvolgende tik)
       if (d.meldingen) {
