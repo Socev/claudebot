@@ -593,7 +593,10 @@ async function bewijs(o) {
       toets('4 wv205: vlak voor de grens (11:55) door tot 17:55 (6 u), om 11:25 tot 12:00 en dan glijdend 30 min', H.appSessieTot(t1, R, t1) === t1 + 6 * 3600000 && H.appSessieTot(t1b, R, t1b) === A('2026-10-08T10:00:00Z') && H.appSessieTot(t1b, R, A('2026-10-08T09:50:00Z')) === A('2026-10-08T10:20:00Z'));
       const t2 = A('2026-10-24T22:30:00Z');   // 00:30 Amsterdam in de nacht van de winterwissel: dagdeel 7 u, sessie max 6 u
       toets('4 wv205: nooit langer dan 6 u (wisselnacht 00:30 -> 06:30 is 7 u)', H.appSessieTot(t2, R, t2) === t2 + 6 * 3600000);
-      toets('4 wv205: vaste plek ongewijzigd 5 min glijdend, max 4 u', H.appSessieTot(t0, V, t0) === t0 + 5 * 60000 && H.appSessieTot(t0, V, t0 + 3.99 * 3600000) === t0 + 4 * 3600000);
+      // wv488 (David 14-10): vaste plek ook één vingerafdruk per dagdeel, max 6 u; over de grens heen 5 min glijdend (niet 30)
+      toets('4 wv488: vaste plek om 16:30 open tot 18:00, ook na 1 u stilte (oude regel: 5 min glijdend)', H.appSessieTot(t0, V, t0) === A('2026-10-08T16:00:00Z') && H.appSessieTot(t0, V, t0 + 3600000) === A('2026-10-08T16:00:00Z'));
+      toets('4 wv488: vaste plek vlak voor de grens (11:55) door tot 17:55; om 11:25 tot 12:00, bezig om 11:58 -> 12:03 (5 min glijdend)', H.appSessieTot(t1, V, t1) === t1 + 6 * 3600000 && H.appSessieTot(t1b, V, t1b) === A('2026-10-08T10:00:00Z') && H.appSessieTot(t1b, V, A('2026-10-08T09:58:00Z')) === A('2026-10-08T10:03:00Z'));
+      toets('4 wv488: vaste plek nooit langer dan 6 u (wisselnacht), ook niet glijdend aan het eind', H.appSessieTot(t2, V, t2) === t2 + 6 * 3600000 && H.appSessieTot(t0, V, t0 + 5.99 * 3600000) === t0 + 6 * 3600000);
       // echte vingerafdruk: sessie loopt tot het einde van het dagdeel, antwoord noemt dat moment, cookie 6 u
       const bw = await X.p.evaluate(async () => { const o = await post('/api/passkey/opties', {}); return bewijs(o.j.opties); });
       const nu0 = Date.now();
@@ -656,7 +659,8 @@ async function bewijs(o) {
       await dicht('start in de toekomst', (s) => { s.start = Date.now() + 60000; });
       await dicht('andere passkey dan die van het apparaat', (s) => { s.credential = 'nep-credential'; });
       await dicht('onbekend apparaat', (s) => { s.apparaat = 'bestaat-niet'; });
-      await dicht('reist-sessie terwijl het apparaat intussen vast is (tot > nu + 5 min)', (s) => { s.tot = Date.now() + 3600000; }, () => { const g = JSON.parse(regBewaar); g.apparaten.forEach((x) => { if (x.id === s1.apparaat) x.soort = 'vast'; }); fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(g), { mode: 0o600 }); return () => fs.writeFileSync(path.join(DATA, 'apparaten.json'), regBewaar, { mode: 0o600 }); });
+      // wv488: een vaste plek heeft dezelfde grens als meereizend (6 u vanaf de vingerafdruk)
+      await dicht('vaste plek: tot voorbij start + 6 u', (s) => { s.start = Date.now() - 6.5 * 3600000; s.tot = Date.now() + 600000; }, () => { const g = JSON.parse(regBewaar); g.apparaten.forEach((x) => { if (x.id === s1.apparaat) x.soort = 'vast'; }); fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(g), { mode: 0o600 }); return () => fs.writeFileSync(path.join(DATA, 'apparaten.json'), regBewaar, { mode: 0o600 }); });
       await dicht('ingetrokken apparaat', () => {}, () => { const g = JSON.parse(regBewaar); g.apparaten.forEach((x) => { if (x.id === s1.apparaat) x.actief = false; }); fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(g), { mode: 0o600 }); return () => fs.writeFileSync(path.join(DATA, 'apparaten.json'), regBewaar, { mode: 0o600 }); });
       let lk = await dicht('kapot bestand', '{kapot');
       toets('4 wv231: kapot bestand -> fout gemeld en bestand weg', /kapot|JSON|Unexpected/.test(String(lk.fout)) && !fs.existsSync(SF), JSON.stringify(lk));
@@ -674,6 +678,14 @@ async function bewijs(o) {
       lr = H.appSessiesLaad();
       r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
       toets('4 wv231: hersteld bestand -> weer 200', lr.hersteld >= 1 && r.status === 200, JSON.stringify(lr) + ' ' + r.status);
+      {   // wv488: een vaste-plek-sessie die nog 1 u loopt (binnen 6 u) komt na een herstart terug (oude regel: nooit > 5 min vooruit)
+        const j = JSON.parse(bewaar); j.sessies[hs].start = Date.now() - 3600000; j.sessies[hs].tot = Date.now() + 3600000; fs.writeFileSync(SF, JSON.stringify(j), { mode: 0o600 });
+        const g = JSON.parse(regBewaar); g.apparaten.forEach((x) => { if (x.id === s1.apparaat) x.soort = 'vast'; }); fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(g), { mode: 0o600 });
+        const lv = H.appSessiesLaad();
+        fs.writeFileSync(path.join(DATA, 'apparaten.json'), regBewaar, { mode: 0o600 });
+        toets('4 wv488: vaste plek, sessie nog 1 u (binnen 6 u) -> na herstart terug', lv.hersteld >= 1 && !!H.appStaat.sessies[hs] && H.appStaat.sessies[hs].vers_tot === 0, JSON.stringify(lv));
+        fs.writeFileSync(SF, bewaar, { mode: 0o600 }); lr = H.appSessiesLaad();
+      }
       H.appStaat.sessiesVuil = false;
       H.appGlijd({ start: Date.now(), tot: 0 }, { soort: 'reist' });
       toets('4 wv231: een verlenging markeert de sessies voor de minuuttik', H.appStaat.sessiesVuil === true);
@@ -1944,7 +1956,14 @@ async function bewijs(o) {
       toets('13 werk-pc gekoppeld als vaste plek Groenhouten', r.status === 200 && r.j.apparaat.soort === 'vast' && r.j.apparaat.vaste_plek === 'Groenhouten' && r.j.apparaat.goedkeurder === false, JSON.stringify(r.j));
       toets('13 Telegram noemt de vaste plek', /vaste plek Groenhouten/.test(telegram[telegram.length - 1]), telegram[telegram.length - 1]);
       const sW = () => Object.values(H.appStaat.sessies).find((x) => x.apparaat === wpId);
-      toets('13 sessie op de vaste plek: hooguit 5 min', sW() && sW().tot - Date.now() <= 5 * 60000 + 1000, sW() && sW().tot - Date.now());
+      // wv488: sessie op de vaste plek loopt tot het einde van het dagdeel (max 6 u), zoals meereizend
+      toets('13 wv488: sessie op de vaste plek tot het einde van het dagdeel, hooguit 6 u', sW() && sW().tot === H.appSessieTot(sW().start, { soort: 'vast' }, sW().start) && sW().tot - sW().start <= 6 * 3600000 && sW().tot >= sW().start + 5 * 60000, sW() && sW().tot - Date.now());
+      {   // wv488: de langere sessie maakt een gevoelige handeling niet makkelijker: vingerafdruk ouder dan 2 min -> 403
+        const vOud = sW().vers_tot; sW().vers_tot = Date.now() - 1;
+        const rv = await vraag('POST', '/app/apparaat/intrekken', { id: wpId }, { pot: WP.jar });
+        sW().vers_tot = vOud;
+        toets('13 wv488: vaste plek, sessie loopt, vingerafdruk niet vers -> gevoelige handeling 403, apparaat blijft actief', rv.status === 403 && /opnieuw/.test(rv.j.fout) && reg13().apparaten.find((x) => x.id === wpId).actief === true, JSON.stringify(rv.j));
+      }
       // toets plan: laptop "vast: Groenhouten" terwijl David thuis is -> dicht met reden
       r = await beurt13(WP, 'hallo vanaf de werk-pc');
       toets('13 vast Groenhouten, David thuis: beurt -> 423 dicht met reden', r.status === 423 && /invoer dicht: je bent niet op Groenhouten \(laatste melding 3 min geleden\)/.test(r.j.fout) && r.j.slot && r.j.slot.open === false, JSON.stringify(r.j));

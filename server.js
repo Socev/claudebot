@@ -3471,7 +3471,7 @@ const APP_CODE_INTERVAL_MS = 60 * 1000;
 const APP_CODE_PER_DAG = 10;
 const APP_UITDAGING_MS = 2 * 60 * 1000;
 const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
-const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // glijdend op een vaste-plek-apparaat (fase 4)
+const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // vaste plek: wie bezig is, houdt over de dagdeelgrens heen 5 min glijdend (wv488; was fase 4: 5 min glijdend)
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
@@ -3479,12 +3479,15 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
-const APP_SESSIE_MAX_MS = 4 * 60 * 60 * 1000;  // harde bovengrens vanaf de vingerafdruk (bouwplan: 12 u; review wv55 #3: korter); vaste plek
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
 // een grens (< 30 min) loopt hij door tot het einde van het volgende dagdeel (binnen die 6 u), en wie bezig is houdt de oude
-// glijdende 30 min. Een vaste plek houdt 5 min glijdend, max 4 u.
-const APP_SESSIE_REIST_MAX_MS = 6 * 60 * 60 * 1000;
+// glijdende 30 min.
+// wv488 (David 14-10: "eindeloos aan het unlocken hier op de PC ... max 1x per dagdeel, of als de pc gelocked wordt"; bouwplan
+// § 4.4e): een vaste plek volgt dezelfde dagdeelregel en dezelfde 6 u, met 5 min (niet 30) glijden over de grens. Dicht bij het
+// vergrendelen van de pc doet de app (IdleDetector -> /app/uitloggen); kan dat niet, dan vraagt de app na 15 min weg opnieuw.
+// Wat op een vaste plek extra dicht is (invoerslot, vers voor gevoelig, geen beheer/privé), blijft ongewijzigd.
+const APP_SESSIE_REIST_MAX_MS = 6 * 60 * 60 * 1000;   // vanaf de vingerafdruk, meereizend én (sinds wv488) vaste plek
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
 // Herstelcode (wv135, bouwplan § 4.4c): één code van 80 bits (16 tekens Crockford-base32), alleen scrypt-hash in het register.
 // Herstelcode én telefoon kwijt: herstel-vervalt; de eis valt pas 24 u NA de eigen waarneming van de pod weg (niet de
@@ -3772,12 +3775,11 @@ function appDagdeelEinde(t) {
   return utc;
 }
 function appSessieTot(start, apparaat, nu) {
-  if (apparaat.soort === 'vast') return Math.min(start + APP_SESSIE_MAX_MS, nu + APP_SESSIE_VAST_MS);
   // Minder dan 30 min van het dagdeel over (23:50): dan telt het volgende dagdeel mee, anders twee keer vragen in een half uur
   // (Fable-review wv205 K2); de 6 u blijft de grens.
   let einde = appDagdeelEinde(start);
   if (einde - start < APP_SESSIE_MS) einde = appDagdeelEinde(einde);
-  return Math.min(start + APP_SESSIE_REIST_MAX_MS, Math.max(einde, nu + APP_SESSIE_MS));
+  return Math.min(start + APP_SESSIE_REIST_MAX_MS, Math.max(einde, nu + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS)));
 }
 function appSessie(req, apparaat, glijd) {
   const c = String(req.headers['x-app-sessie'] || '');
@@ -3797,7 +3799,7 @@ function appNieuweSessie(apparaat, credentialId, sleutel) {
   appStaat.sessies[appSha(id)] = { apparaat: apparaat.id, credential: String(credentialId || ''), start: nu, vers_tot: nu + APP_VERS_MS,
     tot: appSessieTot(nu, apparaat, nu), binding: sleutel ? { x: sleutel.x, y: sleutel.y } : null };   // wv316: publieke apparaatsleutel (§ 4.4f)
   appSessiesBewaar();
-  return { w: id, s: Math.floor((apparaat.soort === 'vast' ? APP_SESSIE_MAX_MS : APP_SESSIE_REIST_MAX_MS) / 1000) };
+  return { w: id, s: Math.floor(APP_SESSIE_REIST_MAX_MS / 1000) };
 }
 function appSessiesWeg(apparaatId) {
   Object.keys(appStaat.sessies).forEach(function (h) { if (appStaat.sessies[h].apparaat === apparaatId) delete appStaat.sessies[h]; });
@@ -3828,7 +3830,7 @@ function appSessiesBewaar() {
   }
 }
 // Bij opstart: alleen sessies die nog lopen, van een actief apparaat in het register, met diens eigen passkey, en nooit
-// langer dan de grens van de soort (vast 4 u, meereizend 6 u vanaf de vingerafdruk). Kapot, onleesbaar, register kapot of
+// langer dan de grens van de soort (sinds wv488 voor beide soorten 6 u vanaf de vingerafdruk). Kapot, onleesbaar, register kapot of
 // app-uit = geen sessies en het bestand weg (dicht). Geeft het aantal herstelde sessies terug.
 function appSessiesLaad() {
   appStaat.sessies = {};
@@ -3854,8 +3856,9 @@ function appSessiesLaad() {
     const s = j.sessies[h] || {};
     const x = /^[a-f0-9]{64}$/.test(h) && typeof s.apparaat === 'string' && typeof s.credential === 'string' && s.credential
       ? reg.apparaten.find(function (y) { return y && y.id === s.apparaat && y.actief; }) : null;
-    // vaste plek: ook nooit meer dan 5 min vooruit (een sessie van vóór een soortwissel naar 'vast' komt zo niet ruim terug; Fable wv231)
-    const max = !x ? 0 : x.soort === 'vast' ? Math.min(s.start + APP_SESSIE_MAX_MS, nu + APP_SESSIE_VAST_MS) : s.start + APP_SESSIE_REIST_MAX_MS;
+    // wv488: vaste plek en meereizend dezelfde grens (einde dagdeel, hooguit 6 u vanaf de vingerafdruk); een soortwissel haalt
+    // de sessies van dat apparaat sowieso weg (apparaat/wijzig)
+    const max = !x ? 0 : s.start + APP_SESSIE_REIST_MAX_MS;
     if (!x || !x.credential || !appGelijk(s.credential, String(x.credential.id || '')) || !Number.isFinite(s.start) || !Number.isFinite(s.tot) ||
         s.start > nu || s.tot > max || nu > s.tot) { uit.vervallen++; return; }
     // wv316: sleutel ontbreekt = ongebonden sessie van vóór de binding (fase B: één nette heropening); kapotte vorm = vervalt
@@ -4745,7 +4748,7 @@ function appApparaatWijzig(req, res, reg, a, s, d) {
   x.soort = keus.soort; x.vaste_plek = keus.vaste_plek; x.open = null;
   x.plek_gewijzigd_op = new Date().toISOString(); x.plek_gewijzigd_door = a.id;
   try { appSchrijfJson(APP_REGISTER, vers); } catch (e) { logError('app-register', e); return appWeiger(res, 500, 'opslag', 'register niet schrijfbaar'); }
-  if (x.id !== a.id) { appSessiesWeg(x.id); delete appStaat.uitdagingen[x.id]; }   // nieuwe sessieduur (vast: 5 min) vanaf de volgende vingerafdruk
+  if (x.id !== a.id) { appSessiesWeg(x.id); delete appStaat.uitdagingen[x.id]; }   // soortwissel: nieuwe sessie (en invoerslot) vanaf de volgende vingerafdruk
   res._app.reden = 'gewijzigd ' + x.id + ': ' + van + ' -> ' + appPlekTekst(x);
   appTelegram('Socev-app: "' + x.naam + '" is nu ' + appPlekTekst(x) + ' (was: ' + van + '), ingesteld vanaf "' + a.naam + '".' +
     (x.soort === 'vast' ? ' Invoer daar alleen als je telefoon zegt dat je op ' + x.vaste_plek + ' bent.' : ''));
