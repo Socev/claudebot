@@ -81,6 +81,10 @@ const TEL_PAD = '^/tel/(koppel|beurt|uit|deel/[0-9a-f]{16}/[0-9]{1,2}|gespeeld/[
 // Briefwijzer route lokaal (wv288): de Worker eemwerk bereikt Qwen 3.8 (llama.cpp op de Olares) alleen via deze hostname,
 // achter Access met alleen servicetoken eemwerk-worker. Vanuit de pod is de origin intern (zonder Olares-login) bereikbaar.
 const QWEN = 'qwen-eemwerk.socev.dev';
+// 366ada1d = md5('llamacppqwen3827bggufv3').slice(0, 8): de Olares-app-id, vast zolang deze app blijft (n8n: md5('n8n') = 5877e26c).
+// Verandert pas bij een andere app (bv. een v4 of een ander model); dan veranderen ook QWEN_MODEL en de toets. Niet de Olares
+// Router als origin: die biedt naast Qwen ook Anthropic-modellen op Davids betaalde sleutel, en de ingress beperkt paden, niet
+// het model-veld (wv453, 15-10-2026).
 const QWEN_ORIGIN_HOST = '366ada1d.primumnonnocere.olares.com';
 const QWEN_ST_NAAM = 'eemwerk-worker';
 const QWEN_ACCESS_NAAM = 'Briefwijzer → eigen server (alleen servicetoken)';
@@ -97,7 +101,9 @@ const METRICS = '127.0.0.1:' + (process.env.TUNNEL_METRICS_POORT || '20241');   
 // geen Access-inlog, en ook de webhooks die een HTML-pagina geven (kluisluik, FV2-dashboard, agenda-knop) dicht.
 // Editor, formulieren, kluisluik en sleutelportaal blijven op de Olares-adressen. Bij een uitwijk komen editor en
 // formulieren tijdelijk achter Access op de VPS (bouwplan §6.1), niet via dit script.
-// n8n: alleen /webhook/ (machinepaden, POST/JSON) en readiness (alleen {"status":"ok"}) voor de Worker.
+// n8n: alleen /webhook/ (machinepaden, POST/JSON). De Worker socev-wachter checkt n8n via /webhook/socev-ping (wv453).
+// /healthz/readiness is sinds 15-10-2026 dicht: na de Olares-herstart van 12-10 gaf hij via de tunnel (cloudflared stuurt
+// X-Forwarded-For mee) een 302 naar de Olares-login, en een doorverwijzing naar een inlogpagina hoort niet onder huisdokter.dev.
 // socev: alleen /health/publiek en de kastjepaden (met hun eigen kastjecontrole).
 // (?i) en /+: n8n zoekt webhookpaden niet per se hoofdlettergevoelig op en kan dubbele slashes samenvouwen.
 const HTML_WEBHOOKS = '(?i)^/webhook/+(fv2(/|$)|kluis-|agenda-knop-)';
@@ -115,7 +121,6 @@ function ingress() {
     { hostname: SOCEV, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
     { hostname: N8N, path: HTML_WEBHOOKS, service: 'http_status:404' },
     Object.assign({ hostname: N8N, path: '^/webhook/' }, n8nOrigin),
-    Object.assign({ hostname: N8N, path: '^/healthz/readiness$' }, n8nOrigin),
     { hostname: N8N, service: 'http_status:404' },
     { hostname: SOCEV, path: '^/(health/publiek|auto/(ota/?|ws|hartslag|bericht/[0-9a-f]{32}/aankondiging))$', service: 'http://localhost:8080' },
     // Telefoon (Tasker, wv264): alleen de vijf /tel-paden; de query (?wacht=50) telt niet mee in het pad. Access-servicetoken
@@ -460,7 +465,8 @@ async function toets() {
   // Dicht in de tunnel = lege 404 van cloudflared; een n8n-404 noemt 'webhook' (dan kwam het verzoek wél bij n8n).
   const tunnel404 = function (r) { return n404(r) && !/webhook/i.test(r.tekst); };
   const regels = [
-    ['GET', 'https://' + N8N + '/healthz/readiness', function (r) { return r.status === 200 && /ok/.test(r.tekst); }, 'readiness 200'],
+    ['GET', 'https://' + N8N + '/webhook/socev-ping', function (r) { return r.status === 200 && /"ok":\s*true/.test(r.tekst); }, 'ping-webhook 200 {"ok":true} (wachter n8n-vast)'],
+    ['GET', 'https://' + N8N + '/healthz/readiness', n404, 'readiness dicht (sinds 15-10, wv453: gaf de Olares-login)'],
     ['GET', 'https://' + N8N + '/webhook/socev-wachter-ping', function (r) { return r.status === 404 && /webhook/i.test(r.tekst); }, 'n8n-404 met webhook-JSON (n8n antwoordt zelf)'],
     ['GET', 'https://' + N8N + '/', n404, 'editor dicht (404, geen redirect, geen Access)'],
     ['GET', 'https://' + N8N + '/signin', n404, 'n8n-inlog dicht'],
@@ -476,7 +482,7 @@ async function toets() {
     ['GET', 'https://' + N8N + '/rest/oauth2-credential/callback', n404, 'oauth-callback dicht'],
     ['GET', 'https://' + N8N + '/api/v1/workflows', n404, '/api/v1 dicht'],
     ['GET', 'https://' + N8N + '/mcp-server/http', n404, '/mcp-server dicht'],
-    ['GET', 'https://' + N8N + '/healthz', n404, '/healthz (zonder readiness) dicht'],
+    ['GET', 'https://' + N8N + '/healthz', n404, '/healthz dicht'],
     ['GET', 'https://' + N8N + '/healthz/readiness/x', n404, 'subpad onder readiness dicht'],
     ['GET', 'https://' + SOCEV + '/health/publiek', function (r) { return r.status === 200 && /"ok":true/.test(r.tekst) && !/secrets/.test(r.tekst); }, 'pod /health/publiek 200, klein'],
     ['GET', 'https://' + SOCEV + '/health', function (r) { return r.status === 404; }, 'pod /health dicht'],
