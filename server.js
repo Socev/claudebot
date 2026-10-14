@@ -3453,7 +3453,7 @@ function sleutelportaal(req, res) {
 // /app/geschiedenis leest het app-log (/opt/data/app-log: app-beurten, berichten van Socev (wv263) en Telegram-beurten (wv277), asynchroon en fail-open geschreven).
 // Fase 4 (wv134, invoerslot): een apparaat met soort 'vast' en een vaste plek neemt alleen invoer aan (elke POST behalve
 // APP_SLOT_VRIJ, uploads, downloads) als secondbrain.locatie_nu zegt dat David daar is (0-20 min, op 'ontvangen'), of als de
-// goedkeurder het 2 u heeft opengezet; anders 423 met de reden. Daar ook geen BSN-achtige getallen (422). Soort en vaste plek
+// goedkeurder het 2 u heeft opengezet; anders 423 met de reden. Een BSN-achtig getal wordt daar gemaskeerd, nooit geweigerd (wv464). Soort en vaste plek
 // stelt alleen de goedkeurder in (bij goedkeuren of via /app/apparaat/wijzig); de goedkeurder zelf blijft altijd meereizend.
 // Opslag: APP_DATA (/opt/data/socev-app-data; NIET /opt/data/app, dat zijn de server.js-releases). Geen inhoud in het
 // auditlog. Sessies staan in het geheugen en (sinds wv231) als hash in sessies.json: een herstart kost geen vingerafdruk,
@@ -3595,7 +3595,10 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/sleutels/vervang',    // wv157: sleutels alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot
   'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
   'POST /app/agenda']);    // wv315: agenda-✅/↩️ alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot (§ 4.13)
-const APP_BSN_TEKST = 'in je bericht staat een getal dat op een BSN lijkt (9 cijfers die de elfproef halen). Patiëntgegevens horen niet in Socev: haal het weg. Gaat het om iets anders, stuur het dan vanaf je telefoon.';
+// wv464 (David 12-10: "Jij mag mij nooit blokkeren … Die haal je desnoods later maar uit mijn text!"): op een vaste plek gaat
+// een bericht met een BSN-achtig getal gewoon door; het getal wordt vóór opslag en doorsturen vervangen (§ 4.11).
+const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
+const APP_BSN_SYS = '[Systeem: in Davids invoer stond een BSN-achtig getal (9 cijfers die de elfproef halen); de pod heeft het weggelaten (' + APP_BSN_MASKER + '). Vraag er niet naar; meestal was het een ander nummer.]';
 
 const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [], reactie: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
@@ -3688,6 +3691,7 @@ function appStuur(res, status, obj, cookies) {
   res.writeHead(status, Object.assign({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-App-Pod': '1' }, appCookieKop(cookies)));
   // wv316: podklok in elk antwoord; de app tekent daarmee (ook na een koude start meteen goed; Fable wv316 #3)
   if (obj && typeof obj === 'object' && !Array.isArray(obj) && obj.nu_ms === undefined) obj = Object.assign({}, obj, { nu_ms: Date.now() });
+  if (res._app && res._app.bsnWeg && status < 300 && obj && typeof obj === 'object' && !Array.isArray(obj)) obj = Object.assign({}, obj, { bsn_weg: true });   // wv464 (Fable #5: alleen als het lukte)
   res.end(JSON.stringify(obj));
 }
 function appWeiger(res, status, fout, reden) {
@@ -4742,19 +4746,40 @@ function appElfproef(c) {
   for (let i = 0; i < 8; i++) som += Number(c[i]) * (9 - i);
   return (som - Number(c[8])) % 11 === 0;
 }
-function appBsnAchtig(t) {
-  // Spaties zoals NBSP/smalle spatie/tab (komen mee bij plakken uit HIS of PDF) eerst gewoon maken (review wv134 K4).
+// wv464: vervangt elk BSN-achtig getal door `vervang`; de rest van de tekst (ook regeleinden) blijft zoals hij was.
+// Zonder treffer komt de tekst ongewijzigd terug; met treffer genormaliseerd zoals appOntmasker (onzichtbare opmaaktekens weg,
+// NFKC), anders zou "111\u00ad222333" of vol-breedte "１１１…" langs het masker glippen en daarna toch als 111222333 in de beurt
+// staan (Fable-diffreview wv464 #1).
+function appBsnMasker(t, vervang) {
+  const org = String(t == null ? '' : t), n = org.replace(/\p{Cf}/gu, '').normalize('NFKC');
+  // Horizontale spaties zoals NBSP/smalle spatie/tab (komen mee bij plakken uit HIS of PDF) eerst gewoon maken (review wv134 K4);
+  // teken voor teken, dus de posities in `tekst` gelden ook in `n`. Een regeleinde blijft een harde grens (twee BSN's onder
+  // elkaar in een geplakte kolom; Fable-diffreview wv464 #2).
   const re = /(?<!\d)(?<!\d[ .,/-])\d(?:[ .,/-]?\d){8}(?![ .,/-]?\d)/g;
-  const tekst = String(t || '').replace(/[\s\u00a0\u2007\u202f]/g, ' ');
-  let m;
-  while ((m = re.exec(tekst))) if (appElfproef(m[0].replace(/\D/g, ''))) return true;
-  return false;
+  const tekst = n.replace(/[^\S\r\n]/g, ' ');
+  let m, uit = '', vanaf = 0, raak = false;
+  while ((m = re.exec(tekst))) if (appElfproef(m[0].replace(/\D/g, ''))) { uit += n.slice(vanaf, m.index) + (vervang === undefined ? APP_BSN_MASKER : vervang); vanaf = m.index + m[0].length; raak = true; }
+  return raak ? uit + n.slice(vanaf) : org;
 }
-function appBsnIn(req, d) {
-  let naam = '';
-  try { naam = decodeURIComponent(String(req.headers['x-app-naam'] || '')); } catch (e) { naam = String(req.headers['x-app-naam'] || ''); }
-  // Ook als het geen tekst is (getal, lijst): de routes maken er later zelf een tekst van (review wv134 M3).
-  return [d.tekst, d.toelichting, d.naam, naam].some(function (t) { return t !== undefined && t !== null && appBsnAchtig(typeof t === 'string' ? t : JSON.stringify(t)); });
+function appBsnAchtig(t) {
+  const s = String(t || '');
+  return appBsnMasker(s, '\u0000') !== s;
+}
+// wv464: maskeert tekst, toelichting, naam en de bestandsnaamkop van dit verzoek ter plekke; true als er iets weg is. Ook als het
+// geen tekst is (getal, lijst; review wv134 M3): dan wordt het de gemaskeerde JSON-tekst.
+function appBsnMaskeer(req, d) {
+  let weg = false;
+  ['tekst', 'toelichting', 'naam'].forEach(function (k) {
+    const v = d[k];
+    if (v === undefined || v === null) return;
+    const t = typeof v === 'string' ? v : JSON.stringify(v);
+    if (appBsnAchtig(t)) { d[k] = appBsnMasker(t); weg = true; }
+  });
+  const kop = String(req.headers['x-app-naam'] || '');
+  let naam = kop;
+  try { naam = decodeURIComponent(kop); } catch (e) { /* ongeldige kop: zoals hij is */ }
+  if (kop && appBsnAchtig(naam)) { req.headers['x-app-naam'] = encodeURIComponent(appBsnMasker(naam, 'BSN-weggelaten')); weg = true; }
+  return weg;
 }
 async function appSlotRoute(req, res, a) {
   res._app.stil = true;   // de app vraagt dit elke minuut op een vaste-plek-apparaat
@@ -5280,7 +5305,7 @@ async function appBeurt(req, res, reg, a, s, d) {
   let st;
   try {
     const gelogd = await appChatLogStart(kanaal, [{ rol: 'david', ts: Date.now(), bevestiging: 'getypt', tekst: tekst ? appOntmasker(tekst) : '[' + upload.lijst.length + ' bestand(en)]' }]);
-    st = appStartBeurt(a, kanaal, (upload ? appBestandenPrompt(appOntmasker(tekst), namen) : appOntmasker(tekst)) + (gelogd ? '' : APP_CHATLOG_NIET), { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload });
+    st = appStartBeurt(a, kanaal, (upload ? appBestandenPrompt(appOntmasker(tekst), namen) : appOntmasker(tekst)) + (res._app.bsnWeg ? '\n' + APP_BSN_SYS : '') + (gelogd ? '' : APP_CHATLOG_NIET), { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload });
   } finally { delete appStaat.beurtStartend[bh]; klaarJob(st && st.job_id || null); }
   if (!st.job_id) return appStartFout(res, st);
   ids[bh] = { job: st.job_id, t: Date.now() };
@@ -5413,7 +5438,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const waarIn = kaart ? 'op de Voor jou-kaart in de app (tab Vandaag, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
   const tekst = (keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
-    : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '');
+    : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '') + (res._app.bsnWeg && keuze === 'anders' ? '\n' + APP_BSN_SYS : '');
   const chatId = APP_KANALEN[rij.kanaal];
   // wv405: loopt er al een beurt in dit gesprek (app of Telegram), dan komt deze erachter; de app toont dan "staat in de rij"
   const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
@@ -8343,7 +8368,7 @@ function handleApp(req, res) {
       am.n[o.apparaat] = (am.n[o.apparaat] || 0) + 1;
       if (am.n[o.apparaat] > 5) return;
     }
-    appAudit(Object.assign({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden },
+    appAudit(Object.assign({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden }, o.bsnWeg ? { bsn: 'gemaskeerd' } : {},
       o.binding ? { binding: o.binding } : {}, o.bindingExtra && Number.isFinite(o.bindingExtra.klok_s) ? { klok_s: o.bindingExtra.klok_s } : {}), o.voorAuth);
   });
   if (fs.existsSync(APP_UIT)) { req.resume(); return appWeiger(res, 503, 'de app staat uit (noodstop)', 'app-uit'); }
@@ -8403,15 +8428,15 @@ function handleApp(req, res) {
           if (ruw && bu.u === 'ok') res._app.inhoud = inhoud;
         }
         appHerstelVorigeWeg(reg, a);   // wv135
-        // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en de
-        // BSN-weigering (§ 4.11). Daarna verder met slotKlaar = true (apparaat en sessie worden dan opnieuw gecontroleerd).
+        // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en het
+        // BSN-masker (§ 4.11; wv464: maskeren, nooit weigeren). Daarna verder met slotKlaar = true (apparaat en sessie opnieuw gecontroleerd).
         if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
           return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
             // wv172 (Fable K5): voorlezen stuurt Socevs eigen antwoord terug, geen invoer van David
-            if (route !== 'POST /app/voorlees' && appBsnIn(req, d)) return appWeiger(res, 422, APP_BSN_TEKST, 'bsn-achtig getal');
+            if (route !== 'POST /app/voorlees' && appBsnMaskeer(req, d)) res._app.bsnWeg = true;
             return verder(true);
           });
         }

@@ -2023,8 +2023,14 @@ async function bewijs(o) {
       const rCo = await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'gewoon concept' }, { pot: WP.jar });
       const rV13o = await vraag('POST', '/app/voorlees', { tekst: 'Het bedrag was 111.222.333 euro.' }, { pot: WP.jar });
       toets('13 open: voorlezen van een antwoord met een BSN-achtig getal -> geen 422 (Socevs eigen tekst; wv172 Fable K5)', rV13o.status === 200, rV13o.status + ' ' + JSON.stringify(rV13o.j).slice(0, 80));
-      toets('13 open: concept met BSN-achtig getal -> 422 (niet bewaard), gewoon concept -> 200 (wv159)', r.status === 422 && rCo.status === 200 && rCo.j.bewaard === true
+      toets('13 open: concept met BSN-achtig getal -> 200 en bsn_weg (wv464), gewoon concept -> 200 (wv159)', r.status === 200 && r.j.bsn_weg === true && rCo.status === 200 && rCo.j.bewaard === true && rCo.j.bsn_weg === undefined
         && !fs.readFileSync(path.join(DATA, 'concepten.json'), 'utf8').includes('111222333'), r.status + ' ' + rCo.status);
+      {
+        await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'bsn 111222333 erin' }, { pot: WP.jar });
+        const rCg = await vraag('GET', '/app/concept/hoofd', undefined, { pot: WP.jar });
+        toets('13 open: concept met BSN-achtig getal wordt gemaskeerd bewaard (wv464)', rCg.status === 200 && rCg.j.concept && rCg.j.concept.tekst === 'bsn [BSN-achtig getal weggelaten] erin', JSON.stringify(rCg.j));
+        await vraag('POST', '/app/concept', { kanaal: 'hoofd', tekst: 'gewoon concept' }, { pot: WP.jar });
+      }
       await vers(WP);
       r = await vraag('POST', '/app/apparaat/intrekken', { id: pixelId }, { pot: WP.jar });
       toets('13 vaste pc (slot open, vers) trekt de Pixel in -> 403 (review M1)', r.status === 403 && /vaste plek/.test(r.j.fout) && reg13().apparaten.find((x) => x.id === pixelId).actief === true, JSON.stringify(r.j));
@@ -2037,20 +2043,31 @@ async function bewijs(o) {
         toets('13 apparatenlijst op de vaste pc: eigen slot wel, dat van een ander apparaat niet (review M2)', r.status === 200 && r.j.apparaten.find((x) => x.id === wpId).slot && r.j.apparaten.find((x) => x.id === pixelId).slot === null, JSON.stringify(r.j.apparaten.map((x) => [x.id, x.slot])));
         px.soort = 'reist'; px.vaste_plek = null; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg));
       }
-      for (const [naam, tekst] of [['getal', 111222333], ['lijst', ['bsn 111222333']], ['NBSP', 'bsn 111\u00a0222\u00a0333'], ['tab', 'bsn 111\t222\t333'], ['schuine streep', '111/222/333']]) {
+      // wv464 (David 12-10: "Jij mag mij nooit blokkeren"): op de vaste plek gaat het door, het getal is gemaskeerd
+      const promptVan13 = (jid) => { const g = gestart.find((x) => x.jobId === jid); return g ? g.prompt : ''; };
+      for (const [naam, tekst] of [['getal', 111222333], ['lijst', ['bsn 111222333']], ['NBSP', 'bsn 111\u00a0222\u00a0333'], ['tab', 'bsn 111\t222\t333'], ['schuine streep', '111/222/333'],
+        ['zachte afbreking (Fable wv464 #1)', 'bsn 111\u00ad222\u00ad333'], ['zero-width', 'bsn 111\u200b222333'], ['vol-breedte', 'bsn \uff11\uff11\uff11\uff12\uff12\uff12\uff13\uff13\uff13'], ['twee onder elkaar (Fable wv464 #2)', '111222333\n111222333']]) {
         r = await vraag('POST', '/app/beurt', { beurt_id: crypto.randomUUID(), kanaal: 'hoofd', tekst }, { pot: WP.jar });
-        toets('13 BSN als ' + naam + ' -> 422 (review M3/K4)', r.status === 422, JSON.stringify(r.j));
+        const pr = promptVan13(r.j.job_id);
+        toets('13 BSN als ' + naam + ' -> 200, gemaskeerd (wv464; review M3/K4)', r.status === 200 && r.j.bsn_weg === true && pr.includes('[BSN-achtig getal weggelaten]') && !/111\D?222\D?333/.test(pr), r.status + ' ' + pr.slice(0, 160));
+        afmakenAlles();
       }
-      afmakenAlles();
-      // BSN-weigering op de vaste plek, niet op de telefoon
+      // BSN-masker op de vaste plek, niet op de telefoon
       r = await beurt13(WP, 'kun je 111.222.333 opzoeken');
-      toets('13 BSN-achtig getal (elfproef, met punten) op de vaste plek -> 422', r.status === 422 && /BSN/.test(r.j.fout), JSON.stringify(r.j));
+      {
+        const pr = promptVan13(r.j.job_id), app13 = fs.readdirSync(LOGDIR).map((f) => fs.readFileSync(path.join(LOGDIR, f), 'utf8')).join('');
+        toets('13 BSN-achtig getal (elfproef, met punten) op de vaste plek -> 200, gemaskeerd in beurt en app-log, systeemregel erbij (wv464)', r.status === 200 && r.j.bsn_weg === true
+          && pr.includes('kun je [BSN-achtig getal weggelaten] opzoeken') && /\[Systeem: in Davids invoer stond een BSN-achtig getal/.test(pr) && !pr.includes('111.222.333') && !app13.includes('111.222.333') && app13.includes('kun je [BSN-achtig getal weggelaten] opzoeken'), r.status + ' ' + pr.slice(0, 200));
+      }
       r = await beurt13(WP, 'ordernummer 123456789 en tel 06 12345678 en +31 6 11122233');
-      toets('13 9 cijfers zonder elfproef en telefoonnummers -> doorgelaten', r.status === 200, JSON.stringify(r.j));
+      toets('13 9 cijfers zonder elfproef en telefoonnummers -> doorgelaten, niet gemaskeerd', r.status === 200 && r.j.bsn_weg === undefined && promptVan13(r.j.job_id).includes('ordernummer 123456789 en tel 06 12345678') && !/\[Systeem: in Davids invoer/.test(promptVan13(r.j.job_id)), JSON.stringify(r.j));
       r = await vraag('POST', '/app/knop', { job_id: 'f'.repeat(16), vraag_hash: 'x', keuze: 'anders', toelichting: 'bsn 111222333' }, { pot: WP.jar });
-      toets('13 BSN in de toelichting van Anders -> 422', r.status === 422, JSON.stringify(r.j));
+      {
+        const knop13 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').trim().split('\n').filter((x) => x.includes('"route":"/app/knop"')).pop() || '';
+        toets('13 BSN in de toelichting van Anders -> geen 422, gemaskeerd in de audit (wv464; onbekende vraag -> geen bsn_weg in het foutantwoord)', r.status !== 422 && r.j.bsn_weg === undefined && /"bsn":"gemaskeerd"/.test(knop13), r.status + ' ' + knop13);
+      }
       r = await upl('/app/upload/' + crypto.randomUUID() + '/1', Buffer.from('x'), 'scan 111222333.pdf', { pot: WP.jar });
-      toets('13 BSN in een bestandsnaam -> 422', r.status === 422, JSON.stringify(r));
+      toets('13 BSN in een bestandsnaam -> 200, naam gemaskeerd (wv464)', r.status === 200 && r.j.bsn_weg === true && /BSN-weggelaten/.test(r.j.naam) && !/111222333/.test(r.j.naam), JSON.stringify(r));
       toets('13 elfproef: 111222333 ja, 123456789 nee, 000000000 nee', H.appElfproef('111222333') && !H.appElfproef('123456789') && !H.appElfproef('000000000'));
       // te oud, toekomst, onderweg, databank weg -> dicht (fail-closed)
       meld('Huisartsenpraktijk Groenhouten', 'werk', 21);
@@ -2157,13 +2174,13 @@ async function bewijs(o) {
       // telefoon overal open, ook met BSN (Davids eigen gegevens mogen; alleen de vaste plek weigert)
       meld(null, 'auto', 30);
       r = await beurt13(P, 'onderweg, mijn bsn is 111222333');
-      toets('13 telefoon: overal open (auto, oude melding) en geen BSN-weigering', r.status === 200, JSON.stringify(r.j));
+      toets('13 telefoon: overal open (auto, oude melding), geen weigering en geen masker (Davids eigen BSN mag)', r.status === 200 && r.j.bsn_weg === undefined && (gestart.find((x) => x.jobId === r.j.job_id) || {}).prompt.includes('mijn bsn is 111222333'), JSON.stringify(r.j));
       // zichzelf intrekken mag ook als het dicht is
       r = await vraag('POST', '/app/apparaat/intrekken', { id: wpId }, { pot: WP.jar });
       toets('13 vaste pc trekt zichzelf in terwijl het dicht is -> mag (alleen dichter)', r.status === 200 || (r.status === 403 && /opnieuw/.test(r.j.fout)), JSON.stringify(r.j));
       if (r.status === 403) { await vers(WP); r = await vraag('POST', '/app/apparaat/intrekken', { id: wpId }, { pot: WP.jar }); toets('13 ... na verse vingerafdruk -> 200', r.status === 200, JSON.stringify(r.j)); }
       const audit13 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
-      toets('13 auditlog: slot-, wijzig- en openregels zonder berichtinhoud', /slot dicht: je bent niet op Groenhouten/.test(audit13) && /gewijzigd [a-f0-9]{16}: vaste plek Groenhouten -> vaste plek Thuis/.test(audit13) && /opengezet [a-f0-9]{16} tot/.test(audit13) && audit13.indexOf('111.222.333') < 0 && audit13.indexOf('opengezet\"') < 0);
+      toets('13 auditlog: slot-, wijzig- en openregels zonder berichtinhoud', /slot dicht: je bent niet op Groenhouten/.test(audit13) && /gewijzigd [a-f0-9]{16}: vaste plek Groenhouten -> vaste plek Thuis/.test(audit13) && /opengezet [a-f0-9]{16} tot/.test(audit13) && audit13.indexOf('111.222.333') < 0 && audit13.indexOf('opengezet\"') < 0 && /"bsn":"gemaskeerd"/.test(audit13));
       afmakenAlles();
       H.appStaat.tellers.beurt = [];
     }
