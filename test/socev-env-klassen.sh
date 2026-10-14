@@ -31,14 +31,27 @@ process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: '
 
 // Rol-RPC nabootsen (8-10-2026, wv216): sinds de uitwijk start /agent alleen als primair; zonder ontvanger las de server de
 // echte SUPABASE_URL met een nepsleutel, bleef passief en antwoordde 'passief' (6x rood, ook op main).
-const rpc = http.createServer((q, s) => { q.resume(); q.on('end', () => {
+const rapporten = [], cfVragen = [], lesRpc = [];
+const rpc = http.createServer((q, s) => { let b = ''; q.on('data', (c) => b += c); q.on('end', () => {
   if (q.url.indexOf('/rest/v1/rpc/uitwijk_stand_lees') === 0) return s.end(JSON.stringify([{ actieve_kant: 'olares', sinds: null }]));
+  if (q.url === '/rest/v1/rpc/mk_les_vast') { lesRpc.push(JSON.parse(b || '{}')); return s.end(String(100 + lesRpc.length)); }   // wv424b
+  if (q.url === '/rest/v1/rpc/mk_les_zonder_embedding') return s.end(JSON.stringify(lesRpc.map((x, i) => ({ uit_id: 101 + i, uit_tekst: x.p_kort }))));
+  if (q.url === '/rest/v1/rpc/mk_les_embedding_zet') { const r = JSON.parse(b || '{}'); return s.end(JSON.stringify([{ uit_bijgewerkt: (r.p_rijen || []).length }])); }
+  if (q.url.indexOf('/ai/run/') > 0) { const r = JSON.parse(b || '{}'); return s.end(JSON.stringify({ success: true, result: { data: (r.text || []).map(() => new Array(1024).fill(0.01)) } })); }
+  if (q.url === '/agentrapport') { try { rapporten.push(JSON.parse(b)); } catch (e) {} return s.end('{}'); }   // wv424b #9
+  if (q.url.indexOf('/client/v4/') === 0) {   // wv424b: nep-Cloudflare voor /smal/vault-zoek en /smal/fin-sql
+    cfVragen.push({ url: q.url, auth: q.headers.authorization, body: JSON.parse(b || '{}') });
+    if (q.url.indexOf('/d1/database/') > 0) return s.end(JSON.stringify({ success: true, result: [{ results: [{ een: 1 }] }] }));
+    return s.end(JSON.stringify({ success: true, result: { chunks: [{ score: 0.5, text: 'x', item: { key: 'vault/a.md' } }] } }));
+  }
   s.end('[]'); }); });
 const d = path.join(W, 'srv');
 ['home', 'vault', 'repo', 'io', 'jobout'].forEach((m) => fs.mkdirSync(path.join(d, m), { recursive: true }));
 fs.writeFileSync(path.join(d, 'server.js'), fs.readFileSync('server.js', 'utf8')
   .split('const AGENT_START_SPREIDING_MS = 20 * 1000;').join('const AGENT_START_SPREIDING_MS = 500;'));
 const poort = vrijePoort();
+// wv424b: nep-telegram-reader.js schrijft alleen op wat hij kreeg (args, NAMEN uit de omgeving).
+fs.writeFileSync(path.join(W, 'tg.js'), `require('fs').writeFileSync(${JSON.stringify(path.join(W, 'tg.uit'))}, JSON.stringify({ args: process.argv.slice(2), env: Object.keys(process.env) })); console.log('dialogen-lijst');`);
 const geheim = { GEHEIM_NEP: 'x', TELEGRAM_SESSIE: 'x', VAULT_BACKUP_CRYPT_WACHTWOORD: 'x', GEMINI_API_KEY_AUTO: 'x',
   CLOUDFLARE_AI_TOKEN_AUTO: 'x', N8N_API_KEY: 'x', N8N_WEBHOOK_SMS: 'x', N8N_WEBHOOK_SOCEV_AGENDA: 'x', N8N_WEBHOOK_MAILCONCEPT: 'x',
   SUPABASE_MCP_TOKEN: 'x', SUPABASE_SERVICE_ROLE: 'x', TELEGRAM_DEBUG_BOT_TOKEN: 'x', GIT_REPO_URL: 'x',
@@ -55,7 +68,9 @@ const env = Object.assign({}, process.env, geheim, mag, {
   ROL_BESTAND: path.join(d, 'rol'), UITROL_MARKER: path.join(d, 'uitrol-wacht'),
   SUPABASE_URL: 'http://127.0.0.1:' + rpc.address().port, SOCEV_KANT: 'olares',
   PORT: String(poort), PATH: path.join(W, 'bin') + ':' + process.env.PATH });
-delete env.AGENT_WEBHOOK_URL; delete env.SOCEV_AGENT_RUN;
+delete env.SOCEV_AGENT_RUN;
+env.AGENT_WEBHOOK_URL = 'http://127.0.0.1:' + rpc.address().port + '/agentrapport';   // wv424b #9: payload vangen
+env.SMAL_CF_BASIS = 'http://127.0.0.1:' + rpc.address().port; env.SMAL_TG_SCRIPT = path.join(W, 'tg.js');
 return spawn(process.execPath, [path.join(d, 'server.js')], { env, detached: true, stdio: ['ignore', fs.openSync(path.join(d, 'stdout.log'), 'a'), fs.openSync(path.join(d, 'stdout.log'), 'a')] });
 };
 let p = null;
@@ -142,6 +157,41 @@ rpc.listen(0, '127.0.0.1', async function () {
     const ag = await req('GET', '/agents');
     const kl = {}; (ag.agents || []).forEach((a) => { kl[a.label] = a.omgeving; });
     toets('F /agents toont de klasse (mk/smal) zonder inhoud', kl['machinekamer: proef ag'] === 'mk' && kl['machinekamer: proef ah'] === 'smal', JSON.stringify(kl));
+
+    // G. wv424b: smalle pod-routes (werkles, vault-zoek, fin-sql alleen lezen, telegram) en de klasse in het agentrapport.
+    const g0 = await req('POST', '/smal/les', { lessen: { kort: 'een les van tien tekens of meer' } });
+    const g0b = await req('POST', '/smal/les', { secret: SMAL.slice(0, 63) + (SMAL[63] === '0' ? '1' : '0'), lessen: { kort: 'een les van tien tekens of meer' } });
+    toets('G /smal zonder of met verkeerde sleutel: 401', g0._status === 401 && g0b._status === 401, g0._status + ',' + g0b._status);
+    const g1 = await req('POST', '/smal/les', { secret: SMAL, lessen: [{ kort: 'een les van tien tekens of meer', herkomst: 'David 14-10', domein: 'machine', vervangt_id: 7, draad_id: 3 }, { kort: 'tweede les, ook lang genoeg' }] });
+    const l0 = lesRpc[0] || {}, l1 = lesRpc[1] || {};
+    toets('G /smal/les: insert in server.js, domein altijd pa, geen vervangt_id/draad_id, herkomst gemerkt, beide geembed, notities terug',
+      g1._status === 200 && g1.ok === true && g1.ids.join() === '101,102' && g1.ingebed === 2 && g1.notities.length === 2
+      && l0.p_domein === 'pa' && l0.p_vervangt_id === null && l0.p_draad_id === null && l0.p_herkomst === 'David 14-10 (via /smal/les)'
+      && l1.p_domein === 'pa' && l1.p_herkomst === '(via /smal/les)', JSON.stringify(g1).slice(0, 250));
+    const g1b = await req('POST', '/smal/les', { secret: SMAL, lessen: Array.from({ length: 21 }, () => ({ kort: 'een les van tien tekens of meer' })) });
+    const g1c = await req('POST', '/smal/les', { secret: SMAL, lessen: { kort: 'kort' } });
+    toets('G /smal/les: meer dan 20 of een te korte les -> 400, niets geschreven', g1b._status === 400 && g1c._status === 400 && lesRpc.length === 2, [g1b._status, g1c._status, lesRpc.length].join());
+    const g2 = await req('POST', '/smal/vault-zoek', { secret: SMAL, query: 'wie regelt de verzekering', max_num_results: 500 });
+    const cv = cfVragen[cfVragen.length - 1] || {};
+    toets('G /smal/vault-zoek: naar AI Search /search van vault met het pod-token, max 50 resultaten', g2._status === 200 && g2.success === true && /ai-search\/instances\/vault\/search$/.test(cv.url) && cv.auth === 'Bearer x' && cv.body.max_num_results === 50, JSON.stringify(cv).slice(0, 200));
+    const nCf = cfVragen.length;
+    const schrijf = ['DELETE FROM reeks', 'WITH a AS (SELECT 1) DELETE FROM reeks', 'SELECT 1; DROP TABLE reeks', 'INSERT INTO reeks VALUES (1)', 'select 1;\nupdate reeks set bedrag=0',
+      'PRAGMA table_info(reeks)', 'REPLACE INTO reeks VALUES (1)', 'ATTACH DATABASE x AS y', ''];
+    const gw = []; for (const q of schrijf) gw.push((await req('POST', '/smal/fin-sql', { secret: SMAL, sql: q }))._status);
+    toets('G /smal/fin-sql: elke schrijf- of beheeropdracht 403, niets naar D1', gw.every((x) => x === 403) && cfVragen.length === nCf, gw.join(','));
+    const g3 = await req('POST', '/smal/fin-sql', { secret: SMAL, sql: "SELECT jaar, replace(rubriek,'_',' ') r FROM reeks WHERE entiteit=? ;", params: ['TG'] });
+    const cd = cfVragen[cfVragen.length - 1] || {};
+    toets('G /smal/fin-sql: SELECT (ook met replace()) en params gaan door naar D1 fin', g3._status === 200 && g3.success === true && /\/d1\/database\/ffcb09ad/.test(cd.url) && cd.body.params[0] === 'TG' && !/;/.test(cd.body.sql), JSON.stringify(cd).slice(0, 200));
+    const g4 = await req('POST', '/smal/telegram', { secret: SMAL, opdracht: 'lees', chat: '--help' });
+    const g5 = await req('POST', '/smal/telegram', { secret: SMAL, opdracht: 'stuur', chat: 'x' });
+    const g6 = await req('POST', '/smal/telegram', { secret: SMAL, opdracht: 'dialogen', aantal: 9999 });
+    let tu = null; try { tu = JSON.parse(fs.readFileSync(path.join(W, 'tg.uit'), 'utf8')); } catch (e) {}
+    toets('G /smal/telegram: vlag als chat 400, onbekende opdracht 400, dialogen met plafond 200; het kindproces krijgt alleen zijn eigen Telegram-sleutels',
+      g4._status === 400 && g5._status === 400 && g6._status === 200 && /dialogen-lijst/.test(g6.stdout) && tu && tu.args.join(' ') === 'dialogen --aantal 200' && tu.env.includes('TELEGRAM_SESSIE') && !tu.env.includes('SUPABASE_SERVICE_ROLE') && !tu.env.includes('N8N_API_KEY') && !tu.env.includes('API_SECRET'), [g4._status, g5._status, g6._status, tu && tu.args.join(' ')].join(' | '));
+    const g7 = await req('POST', '/smal/iets', { secret: SMAL });
+    toets('G onbekende smalle route: 404', g7._status === 404, String(g7._status));
+    const rp = {}; rapporten.forEach((r) => { rp[r.label] = r.omgeving; });
+    toets('G agentrapport geeft de klasse mee (Fable #9): mk en smal', rp['machinekamer: proef ag'] === 'mk' && rp['machinekamer: proef ah'] === 'smal', JSON.stringify(rp));
   } catch (e) { console.log('ROOD  toets brak af: ' + (e && e.stack)); fout++; }
   try { p && process.kill(-p.pid, 'SIGKILL'); } catch (e) {}
   rpc.close();

@@ -1637,6 +1637,7 @@ const LESSEN_AAN = process.env.LESSEN_INJECTIE !== '0';
 const LESSEN_MAX = parseInt(process.env.LESSEN_MAX || '5', 10);
 const LESSEN_TIMEOUT = parseInt(process.env.LESSEN_TIMEOUT_MS || '6000', 10);
 const LESSEN_CF_ACCOUNT = process.env.CF_ACCOUNT_ID || '23df9b0607bb70f6d7f15a63ec843d6d';
+const LESSEN_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen (wv424b)
 const LESSEN_EMBED_MODEL = '@cf/baai/bge-m3';   // 1024 dims, meertalig; de lessen zijn Nederlands
 // Welke sessie hoort bij welk domein. Wat hier NIET in staat krijgt geen
 // domeinfilter en dus de lessen uit alle domeinen: een regel of twee te veel is
@@ -1686,7 +1687,7 @@ function lessenLog(aantal, fout) {
 async function lessenVector(tekst) {
   const tok = process.env.CLOUDFLARE_API_TOKEN;
   if (!tok) return null;
-  const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + LESSEN_CF_ACCOUNT +
+  const r = await fetch(LESSEN_CF_BASIS + '/client/v4/accounts/' + LESSEN_CF_ACCOUNT +
                         '/ai/run/' + LESSEN_EMBED_MODEL, {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
@@ -1860,7 +1861,8 @@ function sendReport(entry, result, attempt) {
     output: result.output || '',
     error: result.error || '',
     files: result.files || [],
-    tussenstand: !!result.tussenstand
+    tussenstand: !!result.tussenstand,
+    omgeving: entry.omgeving || ''   // wv424b (Fable wv424 #9): mk | smal | auto; AI - Agent-rapport zet "(smal)" bij een smalle machinekamer:-agent
   };
   postJson(AGENT_WEBHOOK_URL, payload, function (err) {
     if (!err) {
@@ -2731,6 +2733,8 @@ function handleRequest(req, res) {
   }
 
   // ── v2: achtergrondagent starten ──────────────────────────────────────────
+  // wv424b: smalle routes voor sessies zonder beheersleutels (zie smalRoute)
+  if (req.method === 'POST' && reqPath(req).indexOf('/smal/') === 0) return rolPoort(res, function () { smalRoute(req, res); });   // passieve kant: niets schrijven, geen tweede Telegram-lezer
   if (req.method === 'POST' && req.url === '/agent') {
     return rolPoort(res, function () { readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
@@ -11350,6 +11354,7 @@ const SOCEV_ENV_MAG = AUTO_AGENT_ENV_MAG.concat([
   'N8N_WEBHOOK_MAILCONCEPT',                          // mailconcept-aanmaken, voorlezen
   'N8N_WEBHOOK_VERBETERLOG',
   'TODOIST_MCP_TOKEN',                                // Todoist-MCP
+  'CLOUDFLARE_AI_TOKEN_AUTO',                         // alleen Workers AI (wv424b: Jev-triage van onderwerp-oogsten); kost hooguit tegoed
   'WERKKAMER_SLEUTEL_POD',                            // werkkamer-forum
   'SUPABASE_URL',                                     // alleen het adres; de RPC-sleutels (SUPABASE_RPC_*) gaan via het voorvoegsel hieronder
   'REPO_DIR', 'RELEASE_SHA', 'IMAGE_SHA', 'CODEX_HOME', 'PORT', 'GIT_USER_NAME', 'GIT_USER_EMAIL'   // paden en namen, geen sleutels
@@ -11385,6 +11390,151 @@ function socevSmalOpts(runOpts, chatId) {
   runOpts.envMag = socevEnvMag(chatId);
   runOpts.env = Object.assign({}, runOpts.env || {}, SOCEV_AGENT_SLEUTEL ? { SOCEV_AGENT_SLEUTEL: SOCEV_AGENT_SLEUTEL } : {});
   return runOpts;
+}
+// ── wv424b: smalle pod-routes voor wat een smalle sessie niet meer zelf kan (Fable wv424 #3, #4) ─────────────────────
+// WAAROM. Sinds A1 heeft Socev buiten de machinekamer geen service role, Cloudflare-beheertoken of Telegram-sessie meer. Vier
+// vaste functies leunden daarop: werklessen vastleggen (nachtconsolidatie, hoofdkanaal), vault-rag (AI Search), fin-datahub
+// (D1) en telegram-lezen (Davids hele account). Hier doet server.js ze namens de sessie, en alleen díe handeling: de sleutel
+// zelf komt nooit in de sessie. Toegang met SOCEV_AGENT_SLEUTEL (of API_SECRET); body {secret, ...}.
+//   POST /smal/les          {lessen} (velden van les-vastleggen.mjs) -> mk_les_vast + vector, hier in server.js; domein altijd 'pa'
+//   POST /smal/vault-zoek   {query, max_num_results, score_threshold} -> AI Search /search van instance vault (alleen zoeken)
+//   POST /smal/fin-sql      {sql, params} -> D1 fin, alleen één SELECT/WITH zonder schrijfwoorden (laden blijft machinekamer)
+//   POST /smal/telegram     {opdracht: dialogen|lees, chat, dagen, aantal} -> telegram-reader.js (zelf alleen-lezen)
+// Fable wv424b: géén script uit de vault met de volle omgeving (de vault is schrijfbaar voor elke smalle sessie: drie regels
+// erin en de hele omgeving kwam terug). Lessen schrijft server.js zelf; telegram-reader.js komt uit de release en krijgt alleen
+// zijn eigen drie sleutels. Een les via deze route is altijd domein 'pa' (een machine-les zou anders als persistente injectie in
+// machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
+// beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
+// DEKT NIET: dezelfde uid (zie MK_SESSIES).
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30 };   // per uur
+const smalTellers = {};
+const SMAL_CF_ACCOUNT = '23df9b0607bb70f6d7f15a63ec843d6d';
+const SMAL_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen
+const SMAL_FIN_DB = 'ffcb09ad-fc50-4c83-aa7b-ad6409b44e03';
+const SMAL_TG_SCRIPT = process.env.SMAL_TG_SCRIPT || path.join(__dirname, 'telegram-reader.js');
+function smalSleutelOk(s) {
+  if (socevAgentSleutelOk(s)) return true;
+  if (!SECRET || typeof s !== 'string') return false;
+  const a = Buffer.from(s), b = Buffer.from(SECRET);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+// Alleen lezen: één statement, begint met SELECT of WITH, geen schrijf- of beheerwoord (ook niet in een WITH ... DELETE).
+// Een schrijfwoord in een tekstwaarde geeft een onterechte weigering, nooit een doorgelaten schrijfactie.
+function smalSqlLezend(q) {
+  const t = String(q || '').trim().replace(/;\s*$/, '');
+  if (!t || t.length > 20000 || t.indexOf(';') >= 0) return false;
+  if (!/^(select|with)\b/i.test(t)) return false;
+  return !/\b(insert|update|delete|replace\s+into|drop|alter|create|attach|detach|vacuum|reindex|pragma|analyze|savepoint|release|rollback|commit|begin)\b/i.test(t);
+}
+function smalKind(cmd, args, invoer, maxMs, env) {
+  return new Promise(function (klaar) {
+    let uit = '', fout = '', k;
+    try { k = spawn(cmd, args, { cwd: VAULT, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    catch (e) { return klaar({ code: -1, stdout: '', stderr: String(e && e.message || e) }); }
+    const t = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, maxMs);
+    k.stdout.on('data', function (c) { if (uit.length < 2e6) uit += c; });
+    k.stderr.on('data', function (c) { if (fout.length < 2e5) fout += c; });
+    k.on('error', function (e) { fout += String(e && e.message || e); });
+    k.on('close', function (code, sig) { clearTimeout(t); klaar({ code: code == null ? -1 : code, signaal: sig || undefined, stdout: uit, stderr: fout }); });
+    try { k.stdin.end(invoer || ''); } catch (e) {}
+  });
+}
+async function smalSbRpc(sb, naam, body) {
+  const r = await fetch(sb.url + '/rest/v1/rpc/' + naam, { method: 'POST',
+    headers: { apikey: sb.key, Authorization: 'Bearer ' + sb.key, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}), signal: AbortSignal.timeout(20000) });
+  const t = await r.text();
+  if (!r.ok) throw new Error('RPC ' + naam + ' gaf HTTP ' + r.status + ': ' + t.slice(0, 200));
+  return t ? JSON.parse(t) : null;
+}
+async function smalCf(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
+  let j = null; try { j = await r.json(); } catch (e) {}
+  return { status: r.status, j: j };
+}
+async function smalActie(actie, d) {
+  if (actie === 'les') {
+    const sb = lessenSb();
+    if (!sb) return { status: 503, j: { ok: false, fout: 'geen databanksleutel op de pod' } };
+    let lessen = d.lessen;
+    if (!lessen || typeof lessen !== 'object') return { status: 400, j: { ok: false, fout: 'lessen ontbreekt' } };
+    lessen = Array.isArray(lessen) ? lessen : [lessen];
+    if (lessen.length > 20) return { status: 400, j: { ok: false, fout: 'hooguit 20 lessen per aanroep; splits ze op' } };
+    for (const l of lessen) {
+      if (!l || typeof l.kort !== 'string' || l.kort.trim().length < 10) return { status: 400, j: { ok: false, fout: 'elke les heeft een veld "kort" van minstens tien tekens' } };
+    }
+    const tekst = function (v, n) { return (typeof v === 'string' && v.trim()) ? v.trim().slice(0, n) : null; };
+    const ids = [], notities = [];
+    for (const l of lessen) {
+      if (l.domein && l.domein !== 'pa') notities.push('"' + l.kort.trim().slice(0, 50) + '": domein ' + String(l.domein).slice(0, 10) + ' -> pa; een machine-les zet de machinekamer (box-rij)');
+      if (l.vervangt_id || l.draad_id) notities.push('"' + l.kort.trim().slice(0, 50) + '": vervangt_id/draad_id genegeerd (vervangen is machinekamerwerk)');
+      const id = await smalSbRpc(sb, 'mk_les_vast', {
+        p_kort: l.kort.trim().slice(0, 1000), p_waarom: tekst(l.waarom, 2000), p_hoe: tekst(l.hoe, 2000),
+        p_herkomst: (tekst(l.herkomst, 300) ? tekst(l.herkomst, 300) + ' ' : '') + '(via /smal/les)',
+        p_trefwoorden: Array.isArray(l.trefwoorden) ? l.trefwoorden.slice(0, 20).map(function (w) { return String(w).slice(0, 60); }) : [],
+        p_domein: 'pa', p_vervalt_als: tekst(l.vervalt_als, 500), p_draad_id: null, p_vervangt_id: null });
+      ids.push(id);
+    }
+    // Zonder vector is de les alleen op woorden vindbaar (51 % tegen 92 %, meting 19-9): in dezelfde handeling, zoals embed-lessen.mjs.
+    let ingebed = 0, embedFout = '';
+    try {
+      const taken = (await smalSbRpc(sb, 'mk_les_zonder_embedding', {}) || []).slice(0, 40);
+      const rijen = [];
+      for (const t of taken) { const v = await lessenVector(t.uit_tekst); if (v) rijen.push({ id: t.uit_id, embedding: JSON.stringify(v) }); }
+      if (rijen.length) { const u = await smalSbRpc(sb, 'mk_les_embedding_zet', { p_rijen: rijen, p_model: LESSEN_EMBED_MODEL }); ingebed = Array.isArray(u) && u[0] ? (u[0].uit_bijgewerkt || 0) : 0; }
+      if (rijen.length < taken.length) embedFout = (taken.length - rijen.length) + ' zonder vector (Workers AI); herstel in de machinekamer: node 00_Systeem/Lessen/embed-lessen.mjs';
+    } catch (e) { embedFout = 'embedden mislukt: ' + String(e && e.message || e).slice(0, 160); }
+    return { status: 200, j: { ok: !embedFout, ids: ids, ingebed: ingebed, notities: notities, fout: embedFout || undefined } };
+  }
+  if (actie === 'vault-zoek') {
+    if (!process.env.CLOUDFLARE_API_TOKEN) return { status: 503, j: { ok: false, fout: 'geen Cloudflare-sleutel op de pod' } };
+    const query = String(d.query || '').trim().slice(0, 2000);
+    if (!query) return { status: 400, j: { ok: false, fout: 'query ontbreekt' } };
+    const n = Math.min(Math.max(parseInt(d.max_num_results, 10) || 8, 1), 50);
+    const drempel = Math.min(Math.max(Number(d.score_threshold) || 0.1, 0), 1);
+    const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/ai-search/instances/vault/search',
+      { query: query, max_num_results: n, score_threshold: drempel });
+    return { status: r.status === 200 ? 200 : 502, j: r.j || { ok: false, fout: 'AI Search gaf HTTP ' + r.status } };
+  }
+  if (actie === 'fin-sql') {
+    if (!process.env.CLOUDFLARE_API_TOKEN) return { status: 503, j: { ok: false, fout: 'geen Cloudflare-sleutel op de pod' } };
+    if (!smalSqlLezend(d.sql)) return { status: 403, j: { ok: false, fout: 'alleen lezen: één SELECT of WITH, zonder schrijfwoorden; laden gaat via de machinekamer' } };
+    const params = Array.isArray(d.params) ? d.params.slice(0, 200).map(function (v) { return (v == null || typeof v === 'number' || typeof v === 'boolean') ? v : String(v); }) : [];
+    const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/d1/database/' + SMAL_FIN_DB + '/query',
+      { sql: String(d.sql).trim().replace(/;\s*$/, ''), params: params });
+    return { status: r.status === 200 ? 200 : (r.status === 400 ? 400 : 502), j: r.j || { success: false, errors: [{ message: 'D1 gaf HTTP ' + r.status }] } };
+  }
+  if (actie === 'telegram') {
+    const opdracht = String(d.opdracht || '');
+    let args;
+    if (opdracht === 'dialogen') args = ['dialogen', '--aantal', String(Math.min(Math.max(parseInt(d.aantal, 10) || 30, 1), 200))];
+    else if (opdracht === 'lees') {
+      const chat = String(d.chat || '').trim().slice(0, 120);
+      if (!chat || chat[0] === '-' && !/^-\d+$/.test(chat)) return { status: 400, j: { ok: false, fout: 'chat ontbreekt of ongeldig' } };
+      args = ['lees', '--chat', chat, '--dagen', String(Math.min(Math.max(parseInt(d.dagen, 10) || 7, 1), 90))];
+    } else return { status: 400, j: { ok: false, fout: 'opdracht moet dialogen of lees zijn' } };
+    const tgEnv = {};
+    ['PATH', 'HOME', 'TZ', 'LANG', 'TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 'TELEGRAM_SESSIE', 'TELEGRAM_LOCK'].forEach(function (k) { if (process.env[k] != null) tgEnv[k] = process.env[k]; });
+    const r = await smalKind(process.execPath, [SMAL_TG_SCRIPT].concat(args), '', 120000, tgEnv);
+    return { status: 200, j: { ok: r.code === 0, code: r.code, stdout: r.stdout, stderr: r.stderr } };
+  }
+  return { status: 404, j: { ok: false, fout: 'onbekende smalle route' } };
+}
+function smalRoute(req, res) {
+  const actie = reqPath(req).slice('/smal/'.length);
+  res._log = { smal: actie };
+  readBody(req, async function (d) {
+    const stuur = function (st, j) { res.writeHead(st, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(j)); };
+    if (!d) return stuur(400, { ok: false, fout: 'bad json' });
+    if (!smalSleutelOk(d.secret)) return stuur(401, { ok: false, fout: 'unauthorized' });
+    if (!Object.hasOwn(SMAL_GRENS, actie)) return stuur(404, { ok: false, fout: 'onbekende smalle route' });
+    const nu = Date.now(), lijst = (smalTellers[actie] = (smalTellers[actie] || []).filter(function (t) { return nu - t < 3600000; }));
+    if (lijst.length >= SMAL_GRENS[actie]) return stuur(429, { ok: false, fout: 'te vaak dit uur (max ' + SMAL_GRENS[actie] + ')' });
+    lijst.push(nu);
+    try { const r = await smalActie(actie, d); res._log.status_smal = r.status; stuur(r.status, r.j); }
+    catch (e) { logError('smal-' + actie, e); stuur(503, { ok: false, fout: 'route faalde: ' + String(e && e.message || e).slice(0, 200) }); }
+  });
 }
 const autoAgentLog = [];          // tijdstippen van gestarte opdrachten (24 uur)
 const autoAgentJobs = new Set();  // job_ids die deze poort startte (alleen die mag hij stoppen)
