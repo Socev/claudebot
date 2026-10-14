@@ -8386,7 +8386,8 @@ function handleApp(req, res) {
         }
         // Verlengen pas als de schrijvende route echt lukte; een ongeldig verzoek telt niet als activiteit (Fable-review wv56 #8).
         // wv159 (Fable K5): een concept dat de app na een mislukte poging opnieuw aanbiedt (herstel) is geen activiteit van David
-        if ((APP_GLIJD_ROUTES.has(route) && !(route === 'POST /app/concept' && d.herstel === true)) || upload) res.on('finish', function () { if (res.statusCode < 300) appGlijd(s, a); });
+        // wv488 (Fable 2e ronde #1): aanwezig op een vaste plek verlengt alleen met open invoerslot (zie appAanwezig)
+        if ((APP_GLIJD_ROUTES.has(route) && !(route === 'POST /app/concept' && d.herstel === true) && !(route === 'POST /app/aanwezig' && a.soort === 'vast')) || upload) res.on('finish', function () { if (res.statusCode < 300) appGlijd(s, a); });
         if (route === 'GET /app/apparaten') return appApparatenLijst(req, res, reg, a);
         if (route === 'POST /app/apparaat/intrekken') return appIntrekken(req, res, reg, a, s, d);
         if (route === 'POST /app/apparaat/wijzig') return appApparaatWijzig(req, res, reg, a, s, d);
@@ -9655,7 +9656,12 @@ function berichtRoute(req, res) {
 // dagdeel/6 u) gelden ongewijzigd. Verlengen doet de dispatcher (APP_GLIJD_ROUTES); stil (geen auditregel bij 200).
 function appAanwezig(req, res, a, s) {
   res._app.stil = true;
-  appStuur(res, 200, { ok: true, sessie_rest_s: Math.max(0, Math.floor((appSessieTot(s.start, a, Date.now()) - Date.now()) / 1000)) });
+  if (a.soort !== 'vast') return appStuur(res, 200, { ok: true, sessie_rest_s: Math.max(0, Math.floor((appSessieTot(s.start, a, Date.now()) - Date.now()) / 1000)) });
+  // wv488 (Fable 2e ronde #1): op een vaste plek telt aanwezig (ook de hartslag "pc in gebruik") alleen als Davids telefoon op die
+  // plek is (of de pc vanaf de telefoon is opengezet). Anders werkt er misschien een ander op de ontgrendelde pc: niet verlengen,
+  // dan sluit de pod hem na 60 min stilte. Geen 423: aanwezig is geen invoer.
+  const klaar = function () { appStuur(res, 200, { ok: true, sessie_rest_s: Math.max(0, Math.floor((s.tot - Date.now()) / 1000)) }); };
+  return appSlot(a).then(function (sl) { if (sl.open && appStaat.sessies[appSha(String(req.headers['x-app-sessie'] || ''))] === s) appGlijd(s, a); klaar(); }, function () { klaar(); });
 }
 // App: POST /app/bericht/getikt {ids} — het bericht was in beeld en is aangetikt, of de app werd via het seintje geopend.
 function appBerichtGetikt(req, res, a, d) {

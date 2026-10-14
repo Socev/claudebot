@@ -1967,6 +1967,12 @@ async function bewijs(o) {
       }
       // toets plan: laptop "vast: Groenhouten" terwijl David thuis is -> dicht met reden
       r = await beurt13(WP, 'hallo vanaf de werk-pc');
+      {   // wv488 (Fable 2e ronde #1): aanwezig met slot dicht (David niet op de plek) verlengt de sessie niet
+        sW().tot = Date.now() + 10 * 60000; const t13 = sW().tot;
+        const ra = await vraag('POST', '/app/aanwezig', {}, { pot: WP.jar });
+        toets('13 wv488: vaste plek, slot dicht (David thuis): aanwezig -> 200, sessie niet verlengd', ra.status === 200 && sW().tot === t13 && Math.abs(ra.j.sessie_rest_s - 600) <= 2, ra.status + ' ' + (sW().tot - t13) + ' ' + JSON.stringify(ra.j));
+        sW().tot = H.appSessieTot(sW().start, { soort: 'vast' }, Date.now());
+      }
       toets('13 vast Groenhouten, David thuis: beurt -> 423 dicht met reden', r.status === 423 && /invoer dicht: je bent niet op Groenhouten \(laatste melding 3 min geleden\)/.test(r.j.fout) && r.j.slot && r.j.slot.open === false, JSON.stringify(r.j));
       toets('13 de reden noemt niet waar David wél is (§ 4.11)', !/Thuis|thuis/.test(r.j.fout), r.j.fout);
       { const n13 = gestart.length;
@@ -2093,6 +2099,13 @@ async function bewijs(o) {
       await vers(WP);
       r = await beurt13(WP, 'thuis open?');
       toets('13 "vast: Thuis", David thuis -> 200', r.status === 200, JSON.stringify(r.j));
+      {   // wv488: slot open (David op de plek): aanwezig verlengt tot 60 min stilte (of het dagdeel)
+        const sw = Object.values(H.appStaat.sessies).find((x) => x.apparaat === wpId);
+        sw.tot = Date.now() + 5 * 60000;
+        const ra = await vraag('POST', '/app/aanwezig', {}, { pot: WP.jar });
+        await slaap(20);
+        toets('13 wv488: vaste plek, slot open: aanwezig -> sessie verlengd (60 min stilte of einde dagdeel)', ra.status === 200 && sw.tot > Date.now() + 5 * 60000 + 1000 && sw.tot <= Date.now() + 60 * 60000 + 1000, ra.status + ' ' + Math.round((sw.tot - Date.now()) / 60000));
+      }
       // openzetten vanaf de telefoon (terug naar Groenhouten, David thuis)
       await vers(P);
       await vraag('POST', '/app/apparaat/wijzig', { id: wpId, soort: 'vast', vaste_plek: 'Groenhouten' }, { pot: P.jar });
