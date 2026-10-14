@@ -3488,6 +3488,10 @@ const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fabl
 // vergrendelen van de pc doet de app (IdleDetector -> /app/uitloggen); kan dat niet, dan vraagt de app na 15 min weg opnieuw.
 // Wat op een vaste plek extra dicht is (invoerslot, vers voor gevoelig, geen beheer/privé), blijft ongewijzigd.
 const APP_SESSIE_REIST_MAX_MS = 6 * 60 * 60 * 1000;   // vanaf de vingerafdruk, meereizend én (sinds wv488) vaste plek
+// Fable-review wv488 #2: de pod dwingt op een vaste plek zelf nog een stiltegrens af, want hij weet niet of de slotwacht in de
+// app loopt (tab dicht, bevroren, geen toestemming). Zonder activiteit (schrijvende route of aanwezig) 60 min = dicht. Met de
+// slotwacht aan meldt de app elke 10 min aanwezig zolang Windows zegt dat de pc ontgrendeld in gebruik is.
+const APP_SESSIE_VAST_STIL_MS = 60 * 60 * 1000;
 const APP_VERS_MS = 2 * 60 * 1000;             // gevoelige handelingen: vingerafdruk hooguit zo oud
 // Herstelcode (wv135, bouwplan § 4.4c): één code van 80 bits (16 tekens Crockford-base32), alleen scrypt-hash in het register.
 // Herstelcode én telefoon kwijt: herstel-vervalt; de eis valt pas 24 u NA de eigen waarneming van de pod weg (niet de
@@ -3779,7 +3783,8 @@ function appSessieTot(start, apparaat, nu) {
   // (Fable-review wv205 K2); de 6 u blijft de grens.
   let einde = appDagdeelEinde(start);
   if (einde - start < APP_SESSIE_MS) einde = appDagdeelEinde(einde);
-  return Math.min(start + APP_SESSIE_REIST_MAX_MS, Math.max(einde, nu + (apparaat.soort === 'vast' ? APP_SESSIE_VAST_MS : APP_SESSIE_MS)));
+  if (apparaat.soort === 'vast') return Math.min(start + APP_SESSIE_REIST_MAX_MS, Math.max(einde, nu + APP_SESSIE_VAST_MS), nu + APP_SESSIE_VAST_STIL_MS);
+  return Math.min(start + APP_SESSIE_REIST_MAX_MS, Math.max(einde, nu + APP_SESSIE_MS));
 }
 function appSessie(req, apparaat, glijd) {
   const c = String(req.headers['x-app-sessie'] || '');
@@ -3856,8 +3861,7 @@ function appSessiesLaad() {
     const s = j.sessies[h] || {};
     const x = /^[a-f0-9]{64}$/.test(h) && typeof s.apparaat === 'string' && typeof s.credential === 'string' && s.credential
       ? reg.apparaten.find(function (y) { return y && y.id === s.apparaat && y.actief; }) : null;
-    // wv488: vaste plek en meereizend dezelfde grens (einde dagdeel, hooguit 6 u vanaf de vingerafdruk); een soortwissel haalt
-    // de sessies van dat apparaat sowieso weg (apparaat/wijzig)
+    // wv488: vaste plek en meereizend dezelfde bovengrens (hooguit 6 u vanaf de vingerafdruk); tot zelf al met de stiltegrens
     const max = !x ? 0 : s.start + APP_SESSIE_REIST_MAX_MS;
     if (!x || !x.credential || !appGelijk(s.credential, String(x.credential.id || '')) || !Number.isFinite(s.start) || !Number.isFinite(s.tot) ||
         s.start > nu || s.tot > max || nu > s.tot) { uit.vervallen++; return; }
