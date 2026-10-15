@@ -206,6 +206,37 @@ const fwGet = (s) => req(s, 'GET', '/auto/ota/', undefined, { 'Device-Id': '02:5
     await slaap(800); h = await req(s5, 'GET', '/health');
     toets('7 ongeldige SOCEV_KANT -> passief', h.rol === 'passief' && h.kant === 'onbekend', h.uitwijk && h.uitwijk.reden);
     stop(s5);
+
+    // ── 8. uitwijk stap 3b (wv498): olares-kant + stand vps -> uitwijk-3b stil; weer primair + klaarbestand -> box
+    const U3 = path.join(W, 'u3b.sh'), U3LOG = path.join(W, 'u3b.log'), U3WACHT = path.join(W, 'u3b-box.jsonl');
+    fs.writeFileSync(U3, '#!/usr/bin/env bash\necho "$SOCEV_KANT $*" >> ' + JSON.stringify(U3LOG) + '\necho \'{"klaar":true,"uitkomst":"gestopt","volgende_s":60}\'\n', { mode: 0o755 });
+    const u3n = () => lees(U3LOG).split('\n').filter(Boolean);
+    modus = 'vps';
+    const s7 = server('s7', vrijePoort(), { UITWIJK_3B_BIN: U3, UITWIJK_3B_BOX_WACHT: U3WACHT }); alle.push(s7); await wacht(s7);
+    h = await wachtRol(s7, 'passief', 2000);
+    for (let i = 0; i < 30 && u3n().length < 1; i++) await slaap(100);
+    toets('8 stand vps op de olares-kant -> uitwijk-3b stil met stand_sinds', /^olares stil --stand-sinds 2026-10-06T09:00:00Z$/.test(u3n()[0] || ''), u3n().join(' | '));
+    await slaap(2500);
+    toets('8 niet vaker dan volgende_s (60 s) opnieuw', u3n().length === 1, u3n().length + ' x');
+    h = await req(s7, 'GET', '/health');
+    toets('8 /health uitwijk.n8n_3b toont de laatste uitkomst', h.uitwijk && h.uitwijk.n8n_3b && h.uitwijk.n8n_3b.laatste_uitkomst === 'gestopt' && h.uitwijk.n8n_3b.aanroepen === 1, JSON.stringify(h.uitwijk && h.uitwijk.n8n_3b));
+    toets('8 gestopt gelogd', /uitwijk3b wat=stil uitkomst=gestopt/.test(lees(path.join(s7.d, 'api.log'))));
+    fs.writeFileSync(U3WACHT, '{"soort":"gestopt"}\n'); modus = 'olares';
+    h = await wachtRol(s7, 'primair', 3000);
+    for (let i = 0; i < 30 && u3n().length < 2; i++) await slaap(100);
+    toets('8 weer primair + klaarbestand -> uitwijk-3b box --primair-sinds', /^olares box --primair-sinds \d{10}$/.test(u3n()[1] || ''), u3n().join(' | '));
+    toets('8 nooit iets met start of resume', !/start|resume/.test(lees(U3LOG)));
+    stop(s7);
+    const n8a = u3n().length; modus = 'vps';
+    const s8 = server('s8', vrijePoort(), { SOCEV_KANT: 'vps', UITWIJK_3B_BIN: U3, UITWIJK_3B_BOX_WACHT: U3WACHT }); alle.push(s8); await wacht(s8);
+    await wachtRol(s8, 'primair', 2000); await slaap(1500);
+    toets('8 vps-kant roept uitwijk-3b nooit aan', u3n().length === n8a, u3n().join(' | '));
+    h = await req(s8, 'GET', '/health');
+    toets('8 vps-kant: n8n_3b null', h.uitwijk && h.uitwijk.n8n_3b === null);
+    stop(s8);
+    // s1 kreeg geen UITWIJK_3B_BIN en zag in deel 2 de stand vps: een proefkopie roept nooit het echte script aan
+    toets('8 proefkopie zonder UITWIJK_3B_BIN: echt script niet aangeroepen, één logregel', (lees(path.join(s1.d, 'api.log')).match(/uitwijk3b fout=script_ontbreekt/g) || []).length === 1
+      && !/\/opt\/data\/bin\/uitwijk-3b/.test(lees(path.join(s1.d, 'api.log'))), (lees(path.join(s1.d, 'api.log')).match(/uitwijk3b.*/g) || []).join(' | '));
   } catch (e) { toets('uitzondering', false, e.stack); }
   alle.forEach(stop); sb.close();
   console.log(fout ? ('ROOD: ' + fout + ' toets(en)') : 'deel A groen');

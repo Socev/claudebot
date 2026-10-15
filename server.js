@@ -10772,6 +10772,7 @@ async function rolRonde() {
   } finally {
     rolBezig = false;
     rolSchrijfBestand();
+    try { uitwijk3bRonde(); } catch (e) { logError('uitwijk3b', e); }
     if (!rol.eerste) { rol.eerste = Date.now(); rolEersteKlaar(); }
     clearTimeout(rolTimer);
     rolTimer = setTimeout(rolRonde, rol.fout ? ROL_INTERVAL_FOUT_MS : ROL_INTERVAL_MS);
@@ -10803,7 +10804,57 @@ function rolInfo() {
     fout: rol.fout, fouten_op_rij: rol.fouten_op_rij, wissels: rol.wissels, runsh_poort: ROL_RUNSH_POORT,
     // Kant zoals fetch-secrets.sh (image) hem toepaste; null = image van vóór stap 6d (dan geen n8n-override en het
     // Olares-tunneltoken nog in de omgeving). naar-vps eist hier 'vps' vóór de eerste beurt (review 6d #5).
-    fetch_secrets_kant: process.env.FETCH_SECRETS_KANT || null };
+    fetch_secrets_kant: process.env.FETCH_SECRETS_KANT || null,
+    n8n_3b: ROL_KANT === 'olares' ? { laatste_iso: u3b.laatste_iso, laatste_uitkomst: u3b.laatste_uitkomst, aanroepen: u3b.aanroepen,
+      bezig: u3b.bezig, box_wacht: fs.existsSync(U3B_WACHT) } : null };
+}
+
+// ── Uitwijk stap 3b (wv498, 15-10-2026; JA David app-knop 06:03) ──
+// Komt Olares tijdens een uitwijk vanzelf terug, dan start de Olares-n8n zijn workflows en trekt hij met setWebhook de
+// Telegram-bots weg van de R230, terwijl deze pod passief is (Fable-review stap 8 #2). Is deze kant olares en zegt een
+// verse lezing 'vps', dan laat de rolwachter /opt/data/bin/uitwijk-3b de n8n-app op Olares stoppen (via olares-eigen, dat
+// de stand zelf nog eens vers leest). Dat herhaalt zich zolang de stand vps is: na een tweede Olares-herstart kan de app
+// weer draaien (Fable-review 3b #4). Aanzetten gebeurt nooit vanzelf. Weer primair en een geslaagde bisync daarna: de
+// klaargezette box-rij gaat de vault in (eerder schrijven gaf een bisync-conflict met de R230-versie).
+// Een proefkopie van server.js krijgt een niet-bestaand pad: test/rolwachter.sh zet de nep-stand op vps.
+// Bouwplan uitwijk §6.3 en §10 rij 3b.
+const U3B_BIN = serverPad('uitwijk3b', process.env.UITWIJK_3B_BIN, '/opt/data/bin/uitwijk-3b', serverProefDeel('uitwijk-3b-bestaat-niet'));
+const U3B_WACHT = serverPad('uitwijk3b_box', process.env.UITWIJK_3B_BOX_WACHT, '/opt/data/uitwijk-3b-box.jsonl', serverProefDeel('uitwijk-3b-box.jsonl'));
+const U3B_GRENS_MS = 20 * 60 * 1000;   // achtervang; het script stopt olares-eigen zelf na 12 min (Fable-review 3b #6)
+const u3b = { bezig: false, volgende: 0, box_volgende: 0, laatste_iso: null, laatste_uitkomst: null, aanroepen: 0, ontbreekt_gemeld: false };
+
+function uitwijk3bRonde() {
+  if (ROL_KANT !== 'olares' || u3b.bezig) return;
+  const t = Date.now();
+  let args;
+  if (rol.actieve_kant === 'vps' && rol.gelezen && t - rol.gelezen < 30000) {
+    if (t < u3b.volgende) return;
+    args = ['stil'].concat(rol.stand_sinds ? ['--stand-sinds', String(rol.stand_sinds)] : []);
+  } else if (rolPrimair() && t >= u3b.box_volgende && fs.existsSync(U3B_WACHT)) {
+    u3b.box_volgende = t + 10 * 60 * 1000;
+    args = ['box', '--primair-sinds', String(Math.floor(rol.sinds_rol / 1000))];
+  } else return;
+  if (!fs.existsSync(U3B_BIN)) {   // één logregel, daarna stil (Fable-review 3b #9)
+    if (!u3b.ontbreekt_gemeld) { u3b.ontbreekt_gemeld = true; schrijfLog(nu() + ' uitwijk3b ' + velden({ fout: 'script ontbreekt', pad: U3B_BIN })); }
+    u3b.volgende = t + 10 * 60 * 1000;
+    return;
+  }
+  u3b.bezig = true; u3b.aanroepen++;
+  require('child_process').execFile(U3B_BIN, args, { timeout: U3B_GRENS_MS, killSignal: 'SIGKILL',
+    env: Object.assign({}, process.env, { SOCEV_KANT: ROL_KANT }) }, function (err, stdout) {
+    u3b.bezig = false;
+    let j = {};
+    try { j = JSON.parse(String(stdout || '').trim().split('\n').pop() || '{}'); } catch (e) { j = {}; }
+    u3b.laatste_iso = new Date().toISOString();
+    u3b.laatste_uitkomst = j.uitkomst || (err ? 'fout' : '?');
+    if (args[0] === 'stil') {
+      const s = Number(j.volgende_s);
+      u3b.volgende = Date.now() + 1000 * (s >= 60 && s <= 3600 ? s : 300);
+    }
+    if (err || ['gestopt', 'mislukt', 'opgegeven', 'box_gezet'].indexOf(j.uitkomst) >= 0) {
+      schrijfLog(nu() + ' uitwijk3b ' + velden({ wat: args[0], uitkomst: u3b.laatste_uitkomst, fout: err ? String(err.message || err).slice(0, 120) : null }));
+    }
+  });
 }
 
 // Direct bij de processtart: het bestand van het vorige proces telt niet meer (review stap 3, #7).
