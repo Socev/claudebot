@@ -7229,7 +7229,8 @@ async function appVjWvGekoppeld() {
   return st.bezig;
 }
 // wv506 (David JA 15-10 06:25): "Niet meer nodig" sluit ook de klus erachter. Pas na de ↩️-minuut; de databank toetst zelf (alleen
-// door David met bewijs "Niet meer nodig", ≥ 60 s dicht, rij wacht nog op David en hangt aan geen ander open punt) en zet de rij via
+// door David met exact app-bewijs "Niet meer nodig", ≥ 120 s dicht, rij wacht nog op David; een andere kaart voor dezelfde rij die
+// open, nieuwer of door David gedaan is wint) en zet de rij via
 // mk_werkvoorraad_bijwerk op vervallen. Herstart de pod tussendoor, dan doet de beheerronde het (voor-jou.py doorzet); het register
 // schrijft alleen die ronde. De databank eist ≥ 120 s na de keuze (een ↩️ kan door twee RPC's tot ± 76 s erna landen; review #3),
 // dus de timer staat op 135 s; een ↩️ wist hem.
