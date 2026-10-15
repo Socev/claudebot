@@ -6060,6 +6060,11 @@ async function appAgents(req, res, a) {
     const gekoppeld = new Set();
     (await appVjPunten()).forEach(function (p) { ((p.herkomst && Array.isArray(p.herkomst.wv)) ? p.herkomst.wv : []).forEach(function (n) { gekoppeld.add(Number(n)); }); });
     los = wachtOpDavid.filter(function (w) { return !gekoppeld.has(Number(w.wv)); });
+    // wv506: hangt de rij aan een punt dat langer dan 7 dagen dicht is, dan is hij niet los (anders eeuwig "komt bij de volgende
+    // ronde"). Alleen gelezen als er een losse rij is; niet leesbaar = de rij blijft los staan (zoals vóór wv506)
+    if (los.length) {
+      try { const ooit = await appVjWvGekoppeld(); los = los.filter(function (w) { return !ooit.has(Number(w.wv)); }); } catch (e) { logError('app-agents', e); }
+    }
   } catch (e) { logError('app-agents', e); voorJou = null; los = null; }
   appStuur(res, 200, { ok: true, max: typeof MAX_AGENTS === 'number' ? MAX_AGENTS : null, lopend: lopend, rij: rij, wacht_op_david: wachtOpDavid,
     voor_jou: voorJou, wacht_op_david_los: los, recent: recent, ruimte: ru, fout: fout });
@@ -7160,9 +7165,9 @@ async function appActieRoute(req, res, a, d) {
 // Eén beheerde lijst van wat Socev van David nodig heeft: tabel machinekamer.voor_jou (Supabase), gevuld en gemeten door de
 // beheerronde (07:15/17:15, skill voor-jou-beheer). De app leest de lijst (stil, 60 s in het geheugen, alle apparaten delen het)
 // en per punt de details; een knop zet ALLEEN de status van het punt (gedaan / later / niet meer nodig, ↩️ tot een minuut erna)
-// via mk_voor_jou_status, met compare-and-set op de status die de app zag (Fable M5). Werkvoorraad, register en Todoist raakt de
-// pod niet: de beheerronde opent daarna de werkvoorraadrij met niet_voor +15 min (Fable M4), dus een ↩️ binnen de minuut start
-// nooit een agent. wv404 (David 10-10, herziet M8): een besluit krijgt in de details Ja / Nee / Anders onder de volledige vraag en
+// via mk_voor_jou_status, met compare-and-set op de status die de app zag (Fable M5). Register en Todoist raakt de pod niet; de
+// beheerronde opent bij Gedaan de werkvoorraadrij met niet_voor +15 min (Fable M4), dus een ↩️ binnen de minuut start nooit een
+// agent. Uitzondering sinds wv506: bij Niet meer nodig zet de pod na de ↩️-minuut de rij erachter op vervallen (appVjDoorzetLater). wv404 (David 10-10, herziet M8): een besluit krijgt in de details Ja / Nee / Anders onder de volledige vraag en
 // het voorstel; de druk gaat door appKnop (zelfde vingerafdruk, rij, idempotentie in vragen.json), zie appVoorJouKnop. Privé-punten (kolom prive) niet op een apparaat met een vaste plek (M6). In de lijst geen bewijs, herkomst of
 // meting; die alleen in de details. Teksten staan al gefilterd in de tabel (voor_jou_tekst_ok); de pod filtert de registertekst zelf.
 const APP_VJ_CACHE_MS = 60 * 1000;
@@ -7208,6 +7213,34 @@ async function appVjPunten() {
     st.data = j.punten.filter(function (p) { return p && Number.isInteger(p.id) && p.id > 0; }); st.op = Date.now(); st.bezig = null; return st.data;
   }).catch(function (e) { st.bezig = null; st.data = null; st.foutOp = Date.now(); throw e; });
   return st.bezig;
+}
+// wv506 (David 15-10): werkvoorraadrijen die aan enig punt hangen, ook een punt dat langer dan 7 dagen dicht is (dat staat niet in
+// appVjPunten). Alleen voor het Agents-vangnet; zelfde cache en foutgrens als appVjPunten (Fable wv335 #6).
+async function appVjWvGekoppeld() {
+  const c = appStaat.vjWvCache;
+  if (c && c.data && Date.now() - c.op < APP_VJ_CACHE_MS) return c.data;
+  if (c && c.bezig) return c.bezig;
+  if (c && c.foutOp && Date.now() - c.foutOp < APP_VJ_FOUT_MS) return Promise.reject(new Error('voor_jou-koppeling kort geleden niet leesbaar'));
+  const st = appStaat.vjWvCache = { data: null, op: 0, bezig: null, foutOp: 0 };
+  st.bezig = appSbRpc('mk_voor_jou_wv_gekoppeld', {}).then(function (j) {
+    if (!j || !Array.isArray(j.wv)) throw new Error('voor_jou-koppeling zonder wv');
+    st.data = new Set(j.wv.map(Number)); st.op = Date.now(); st.bezig = null; return st.data;
+  }).catch(function (e) { st.bezig = null; st.data = null; st.foutOp = Date.now(); throw e; });
+  return st.bezig;
+}
+// wv506 (David JA 15-10 06:25): "Niet meer nodig" sluit ook de klus erachter. Pas na de ↩️-minuut; de databank toetst zelf (alleen
+// door David met bewijs "Niet meer nodig", ≥ 60 s dicht, rij wacht nog op David en hangt aan geen ander open punt) en zet de rij via
+// mk_werkvoorraad_bijwerk op vervallen. Herstart de pod tussendoor, dan doet de beheerronde het (voor-jou.py doorzet); het register
+// schrijft alleen die ronde.
+const APP_VJ_DOORZET_MS = APP_VJ_TERUG_MS + 15 * 1000;
+function appVjDoorzetLater(sleutel) {
+  const t = setTimeout(function () {
+    appSbRpc('mk_voor_jou_vervallen_doorzetten', { p_sleutel: sleutel }).then(function (r) {
+      appStaat.vjWvCache = null; appStaat.wvCache = null;
+      if (!r || r.ok !== true) logError('app-voor-jou', new Error('doorzetten zonder ok'));
+    }).catch(function (e) { logError('app-voor-jou', e); });
+  }, APP_VJ_DOORZET_MS);
+  if (t && t.unref) t.unref();
 }
 function appVjVoorApparaat(punten, a) { const vast = !!(a && a.soort === 'vast'); return punten.filter(function (p) { return !(vast && p.prive === true); }); }
 function appVjKort(p, vandaag) {
@@ -7487,6 +7520,7 @@ async function appVoorJouKeuze(req, res, a, d) {
   }
   if (keuze === 'terug') delete appStaat.vjTerug[id];
   else appStaat.vjTerug[id] = { van: van, naar: keuze, later_tot: van === 'later' ? (p.later_tot || null) : null, tot: nu + APP_VJ_TERUG_MS, apparaat: a.id };
+  if (keuze === 'vervallen') appVjDoorzetLater(p.sleutel);   // wv506: de klus erachter na de ↩️-minuut ook dicht
   Object.keys(appStaat.vjTerug).forEach(function (k) { if (appStaat.vjTerug[k].tot <= nu) delete appStaat.vjTerug[k]; });
   const melding = keuze === 'gedaan' ? 'Gedaan. Socev kijkt bij de volgende ronde of het ook zo gemeten wordt.'
     : keuze === 'later' ? 'Op later gezet tot ' + appVjDag(tot) + '.' : keuze === 'vervallen' ? 'Weggehaald: niet meer nodig.' : 'Teruggedraaid.';

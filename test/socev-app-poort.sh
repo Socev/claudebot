@@ -24,6 +24,7 @@ for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_COD
                       ['const APP_KNOP_WACHT_MELD_MS = 30 * 1000;', 'const APP_KNOP_WACHT_MELD_MS = 300;'],   // wv405
                       ['const BERICHT_KIJKT_MS = 60 * 1000;', 'const BERICHT_KIJKT_MS = 300;'],   // wv292
                       ['const BERICHT_KIJKT_MARGE_MS = 8 * 1000;', 'const BERICHT_KIJKT_MARGE_MS = 150;'],
+                      ['const APP_VJ_DOORZET_MS = APP_VJ_TERUG_MS + 15 * 1000;', 'const APP_VJ_DOORZET_MS = 300;'],   // wv506
                       ['function berichtUur() { return Number(', 'function berichtUur() { if (TOETSBUUR() !== null) return TOETSBUUR(); return Number(']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
@@ -310,6 +311,23 @@ async function nepFetch(url, opt) {
       Object.assign(x, { status: b.p_naar, later_tot: b.p_naar === 'later' ? b.p_later_tot : null, gesloten_door: ['gedaan', 'vervallen'].includes(b.p_naar) ? b.p_door : null,
         gesloten_op: ['gedaan', 'vervallen'].includes(b.p_naar) ? new Date().toISOString() : null, bewijs: b.p_bewijs != null ? b.p_bewijs : x.bewijs });
       return antw(200, { ok: true, punt: Object.assign({}, x) });
+    }
+    if (fn === 'mk_voor_jou_vervallen_doorzetten') {   // wv506: zoals de echte (door David, "Niet meer nodig", rij wacht op David, aan geen ander open punt; de 60 s toetst de databank)
+      if (sbStaat.vjKapot) return antw(500, { message: 'kapot' });
+      const uit = [];
+      (sbStaat.vj || []).filter((x) => x.status === 'vervallen' && x.gesloten_door === 'david' && /David tikte Niet meer nodig/.test(x.bewijs || '') && (!b.p_sleutel || x.sleutel === b.p_sleutel)).forEach((x) => {
+        ((x.herkomst && x.herkomst.wv) || []).forEach((n) => {
+          const w = (sbStaat.wvItems || []).find((y) => y.id === Number(n));
+          if (!w || w.status !== 'geblokkeerd' || !/^\s*david/i.test(w.geblokkeerd_door || '')) return;
+          if ((sbStaat.vj || []).some((o) => o !== x && ['open', 'later'].includes(o.status) && ((o.herkomst && o.herkomst.wv) || []).map(Number).includes(w.id))) return;
+          w.status = 'vervallen'; uit.push({ wv: w.id, punt: x.sleutel });
+        });
+      });
+      return antw(200, { ok: true, vervallen: uit, overgeslagen: [] });
+    }
+    if (fn === 'mk_voor_jou_wv_gekoppeld') {   // wv506: alle wv-ids uit alle punten (ook > 7 dagen dicht)
+      if (sbStaat.vjKapot || sbStaat.vjWvKapot) return antw(500, { message: 'kapot' });
+      return antw(200, { wv: [...new Set((sbStaat.vj || []).flatMap((x) => ((x.herkomst && x.herkomst.wv) || []).map(Number)))], op: new Date().toISOString() });
     }
     if (fn === 'mk_app_verbruik') return antw(200, sbStaat.verbruik || { nu: new Date().toISOString(), laatste: null, reeks: [] });
     if (fn === 'sb_app_vapid_lezen') return sbStaat.geenVapid ? antw(200, null) : antw(200, VAPID_W);
@@ -4737,6 +4755,49 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
       toets('27 Agents: een nieuwe blokkade zonder punt staat in wacht_op_david_los', JSON.stringify((r.j.wacht_op_david_los || []).map((w) => w.wv)) === '[400]', JSON.stringify(r.j.wacht_op_david_los));
       sbStaat.wvItems.pop(); H.appStaat.wvCache = null;
+      // ── wv506: "Niet meer nodig" sluit ook de klus erachter; Agents-vangnet voor punten > 7 dagen dicht ──
+      {
+        const vjN = sbStaat.vj.length, wvN = sbStaat.wvItems.length;
+        const lang = new Date(Date.now() - 10 * 86400000).toISOString();
+        sbStaat.vj.push(pnt(12, 'wv506-weg', { herkomst: { wv: [410], auto: 'wv' } }), pnt(13, 'wv506-terug', { herkomst: { wv: [411] } }),
+          pnt(14, 'wv506-oud', { status: 'vervallen', gesloten_door: 'david', gesloten_op: lang, herkomst: { wv: [412] } }), pnt(15, 'wv506-gedaan', { herkomst: { wv: [413] } }));
+        for (const id of [410, 411, 412, 413]) sbStaat.wvItems.push({ id, label: 'machinekamer:wv506 ' + id, samenvatting: 'Proef ' + id, status: 'geblokkeerd', geblokkeerd_door: 'David: proef ' + id });
+        H.appStaat.vjCache = null; H.appStaat.vjWvCache = null; H.appStaat.wvCache = null;
+        const nD = () => sbRpc.filter((x) => x.fn === 'mk_voor_jou_vervallen_doorzetten' && /^wv506-/.test(x.b.p_sleutel || ''));   // het eerdere "27 Niet meer nodig" heeft een eigen timer
+        const w = (id) => sbStaat.wvItems.find((x) => x.id === id);
+        const nD0 = nD().length;
+        r = await K({ id: 12, van: 'open', keuze: 'vervallen' });
+        toets('wv506 Niet meer nodig: geen doorzetten binnen de ↩️-minuut', r.status === 200 && nD().length === nD0 && w(410).status === 'geblokkeerd', JSON.stringify([r.status, nD().length - nD0]));
+        await new Promise((z) => setTimeout(z, 500));
+        toets('wv506 na de minuut: doorzetten met de sleutel van het punt, rij erachter vervallen', nD().length === nD0 + 1 && nD()[nD().length - 1].b.p_sleutel === 'wv506-weg' && w(410).status === 'vervallen', JSON.stringify([nD().slice(nD0).map((x) => x.b), w(410).status]));
+        r = await K({ id: 13, van: 'open', keuze: 'vervallen' });
+        const rT = await K({ id: 13, keuze: 'terug' });
+        await new Promise((z) => setTimeout(z, 500));
+        toets('wv506 ↩️ binnen de minuut: punt weer open, rij erachter blijft op jou wachten', r.status === 200 && rT.status === 200 && sbStaat.vj[sbStaat.vj.length - 3].status === 'open' && w(411).status === 'geblokkeerd', JSON.stringify([rT.status, w(411).status]));
+        const nD1 = nD().length;
+        r = await K({ id: 15, van: 'open', keuze: 'gedaan' });
+        await new Promise((z) => setTimeout(z, 500));
+        toets('wv506 Gedaan: geen doorzetten (dat blijft de beheerronde), rij blijft staan', r.status === 200 && nD().length === nD1 && w(413).status === 'geblokkeerd', JSON.stringify([nD().length - nD1, w(413).status]));
+        H.appStaat.vjCache = null; H.appStaat.wvCache = null;
+        r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+        const losIds = (r.j.wacht_op_david_los || []).map((x) => x.wv);
+        toets('wv506 Agents: rij van een punt > 7 dagen dicht is niet los; rij van een (net) gesloten punt ook niet', r.status === 200 && typeof r.j.voor_jou === 'number' && !losIds.includes(412) && !losIds.includes(413) && !losIds.includes(410), JSON.stringify(losIds));
+        const nG = sbRpc.filter((x) => x.fn === 'mk_voor_jou_wv_gekoppeld').length;
+        r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+        toets('wv506 Agents: koppeling 60 s uit het geheugen', sbRpc.filter((x) => x.fn === 'mk_voor_jou_wv_gekoppeld').length === nG, sbRpc.filter((x) => x.fn === 'mk_voor_jou_wv_gekoppeld').length - nG);
+        sbStaat.vjWvKapot = true; H.appStaat.vjWvCache = null; H.appStaat.vjCache = null;
+        r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+        const nK = sbRpc.filter((x) => x.fn === 'mk_voor_jou_wv_gekoppeld').length;
+        const r2 = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+        sbStaat.vjWvKapot = false;
+        toets('wv506 Agents: koppeling niet leesbaar -> rij blijft los zoals vóór wv506, voor_jou blijft een getal, 20 s geen nieuwe lezing', r.status === 200 && typeof r.j.voor_jou === 'number' && (r.j.wacht_op_david_los || []).map((x) => x.wv).includes(412)
+          && r2.status === 200 && sbRpc.filter((x) => x.fn === 'mk_voor_jou_wv_gekoppeld').length === nK, JSON.stringify([r.j.voor_jou, r.j.wacht_op_david_los]));
+        sbStaat.vj.splice(vjN); sbStaat.wvItems.splice(wvN); H.appStaat.vjCache = null; H.appStaat.vjWvCache = null; H.appStaat.wvCache = null; H.appStaat.vjTerug = {};
+        H.appStaat.vjWvCache = null;
+        const nG2 = sbRpc.filter((x) => x.fn === 'mk_voor_jou_wv_gekoppeld').length;
+        r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
+        toets('wv506 Agents: alle rijen gekoppeld -> geen extra lezing van de koppeling', r.status === 200 && (r.j.wacht_op_david_los || []).length === 0 && sbRpc.filter((x) => x.fn === 'mk_voor_jou_wv_gekoppeld').length === nG2, sbRpc.filter((x) => x.fn === 'mk_voor_jou_wv_gekoppeld').length - nG2);
+      }
       // ── details bij het actielijstje ──
       const ymdP = V;
       const prt = (pos, extra) => Object.assign({ nonce: String(pos).repeat(32).slice(0, 32), datum: ymdP, positie: pos, aantal: 3, bron: 'todoist', sleutel: 'TAAK' + pos + 'abcdef', titel: 't', regel: pos + '. Actie ' + pos + '… (Todoist)', herhaal: false, hard: '',
