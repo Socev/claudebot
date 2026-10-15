@@ -293,6 +293,66 @@ function modelFout(naam, runtime, ont) {
   return null;
 }
 
+// ── wv479: adviseur (claude --advisor <model>, 16-10-2026) ──────────────────
+// WAAROM. Proef (JA David 12-10, vraag-id 5579fe2e): machinekamer-klussen op Sonnet 5.5 als werkmodel met Opus 5.5 als
+// adviseur op beslismomenten, tegen minder weekquotum. Het werkmodel kiest zelf wanneer het de adviseur raadpleegt; elke
+// raadpleging leest het hele transcript ongecachet in tegen Opus-tarief. Gemeten 16-10 met claude 2.1.293 in deze pod:
+// `ANTHROPIC_MODEL=claude-sonnet-5-5 claude -p --advisor opus --output-format json` geeft in usage.iterations een
+// advisor_message (model claude-opus-5-5) en modelUsage per model; in het transcript staat per raadpleging een
+// advisor_tool_result. Alleen runtime claude; vaste lijst, een onbekende waarde wordt geweigerd (net als een onbekend model).
+const ADVISEURS = { opus: 'opus', 'claude-opus-5-5': 'claude-opus-5-5' };
+function ontleedAdviseur(v) {
+  const k = (v == null ? '' : String(v)).trim().toLowerCase();
+  if (!k) return '';
+  return Object.prototype.hasOwnProperty.call(ADVISEURS, k) ? ADVISEURS[k] : null;
+}
+// Proefteller (wv479). HOE. Bestand advisor-proef.json op het volume:
+//   { "aan": true, "model": "claude-sonnet-5-5", "advisor": "opus", "max": 10, "uitsluiten": "<regex>", "jobs": [], "overgeslagen": [] }
+// Een POST /agent van de werkvoorraad-tikker (label machinekamer:wv<id> … én de tikkerregel "[Werkvoorraad, item wv<id>]" in de
+// prompt), zonder eigen model/runtime/advisor, niet smal of beperkt, krijgt zolang jobs < max het proefmodel + de adviseur en
+// komt in jobs (job_id, wv, label, tijd). Uitgesloten (overgeslagen, met het raakwoord) is een rij waarvan label of eigen opdracht
+// (de prompt zonder het vaste grondwetblok vooraan en de tikker-slotregel achteraan) de uitsluitregel raakt: CISO, beveiliging,
+// bijvullen, sleutels/credentials, Fable-review, uitrol/server.js/n8n publiceren, uitwijk/Olares. Een knipfout valt altijd de
+// veilige kant op (meer tekst = eerder overgeslagen; Fable wv479 #4). Kleinste ingreep: geen databank-, n8n- of tikkerwijziging; de tikker
+// stuurt al alleen prompt, label, chat_id en max_minuten. Geen bestand, aan:false of een ongeldige waarde = alles zoals voorheen.
+// Wordt de claim niet weggeschreven, dan draait de agent gewoon op de standaard (een proefjob zonder spoor telt niet).
+// NOODREM: aan op false zetten (of het bestand weghalen). Meetscript: /opt/data/mk-scripts/wv-advisor/meet.py.
+const ADVISOR_PROEF_FILE = process.env.ADVISOR_PROEF_FILE || path.join(HOME, 'advisor-proef.json');
+// Fable-review wv479 #2: ook bouwrijen die niet letterlijk "Fable-review" zeggen (uitrol, server.js, n8n publiceren) en
+// infrastructuurproeven (uitwijk, Olares) blijven erbuiten; de proef meet dus vooral lezend werk en lichte klussen.
+const ADVISOR_PROEF_UIT_STD = '(\\bciso\\b|beveilig|bijvul|secret|credential|kluis|sleutelportaal|fable[- ]?(diff)?review|review door fable|langs fable|' +
+  'fable-subagent|uitrol|server\\.js|claudebot-src|publish_workflow|update_workflow|n8n-workflow|workflow publiceren|uitwijk|olares|advisor-proef)';
+function advisorProefKern(prompt) {
+  let k = String(prompt || '');
+  if (k.indexOf('GRONDWET-KERN v1') >= 0) { const i = k.indexOf('\n---\n'); if (i >= 0) k = k.slice(i + 5); }
+  const j = k.indexOf('[Werkvoorraad, item wv');
+  return j >= 0 ? k.slice(0, j) : k;
+}
+function advisorProefClaim(jobId, label, prompt) {
+  let p;
+  try { p = JSON.parse(fs.readFileSync(ADVISOR_PROEF_FILE, 'utf8')); } catch (e) { if (e && e.code !== 'ENOENT') logError('advisor-proef-lezen', e); return null; }
+  if (!p || typeof p !== 'object' || p.aan !== true) return null;
+  const jobs = Array.isArray(p.jobs) ? p.jobs : [];
+  if (jobs.length >= (Number(p.max) || 0)) return null;
+  const m = /^\s*machinekamer:wv(\d+)\s/i.exec(String(label || ''));
+  if (!m || String(prompt || '').indexOf('[Werkvoorraad, item wv' + m[1] + ']') < 0) return null;
+  const ont = ontleedModel(p.model), adv = ontleedAdviseur(p.advisor);
+  let re = null; try { re = new RegExp(p.uitsluiten || ADVISOR_PROEF_UIT_STD, 'i'); } catch (e) {}
+  if (!ont || ont.runtime !== 'claude' || !ont.model || !adv || !re) { logError('advisor-proef-ongeldig', { name: 'AdvisorProef', code: 'model/advisor/uitsluiten' }); return null; }
+  const t = new Date().toISOString();
+  const raak = re.exec(label + ' ' + advisorProefKern(prompt));
+  if (raak) p.overgeslagen = (Array.isArray(p.overgeslagen) ? p.overgeslagen : []).concat({ wv: Number(m[1]), job_id: jobId, t: t, raak: String(raak[0]).slice(0, 40) }).slice(-50);
+  else p.jobs = jobs.concat({ wv: Number(m[1]), job_id: jobId, label: String(label).slice(0, 120), t: t, model: ont.model, advisor: adv });
+  try {
+    const tmp = ADVISOR_PROEF_FILE + '.tmp.' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(p, null, 2));
+    fs.renameSync(tmp, ADVISOR_PROEF_FILE);
+  } catch (e) { logError('advisor-proef-schrijf', e); return null; }
+  if (raak) return null;
+  schrijfLog(JSON.stringify({ t: t, soort: 'advisor-proef', job_id: jobId, wv: Number(m[1]), nr: p.jobs.length, model: ont.model, advisor: adv }));
+  return { model: ont.model, advisor: adv };
+}
+
 // ── Tweede/derde brein: runtime-schakelaar (claude | codex | gemini) ────────
 // Eén pod, drie CLI's (claude, codex, agy), één schakelaar. De keuze per beurt komt, in deze
 // volgorde, uit: (1) body.runtime, (2) een modelalias met voorvoegsel,
@@ -803,6 +863,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     else args.push('--session-id', eigenId);
     // Beperkte agent (spraakkastje, 4-10-2026): verboden tools gelden ook onder bypassPermissions (gemeten 4-10).
     if (opts && opts.disallowedTools) args.push('--disallowedTools', opts.disallowedTools);
+    if (opts && opts.advisor) args.push('--advisor', opts.advisor);   // wv479: alleen achtergrondagents, waarde al getoetst (ontleedAdviseur)
     args.push('--', prompt);
     const extra = { OUTDIR: outdir };
     if (model) extra.ANTHROPIC_MODEL = model;
@@ -1561,7 +1622,8 @@ function jobEindLog(jobId, j, ws) {
     ok: r.ok ? 1 : 0,
     seconden: Math.round((((j.done_at || Date.now()) - (j.started || j.created || Date.now()))) / 1000),
     exit_code: (r.exit_code === undefined || r.exit_code === null) ? 'n.v.t.' : r.exit_code,
-    uitvoer_bytes: (r.output_bytes !== undefined) ? r.output_bytes : Buffer.byteLength(out, 'utf8')
+    uitvoer_bytes: (r.output_bytes !== undefined) ? r.output_bytes : Buffer.byteLength(out, 'utf8'),
+    model: j.agent ? j.model : undefined, advisor: j.agent ? j.advisor : undefined   // wv479: alleen agents (leeg = niet in de regel)
   });
 }
 
@@ -2228,6 +2290,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     // wv211: groepsleider en transcript in het register, zodat een herstart van server.js een doorlevende agent herkent.
     // Elke (her)start overschrijft ze, ook de codex-terugval (dan transcript null; Fable K2).
     runOpts.opSpawn = function (i) { entry.pid = i.pid; entry.sessie = i.sessie; entry.transcript = i.transcript; saveAgents(); };
+    if (keuze.advisor) runOpts.advisor = keuze.advisor;   // wv479: gaat mee in de hervattingen van de eindcontrole (runOpts)
     if (j.beperkt === 'auto') { runOpts.disallowedTools = AUTO_AGENT_VERBODEN; runOpts.envMag = AUTO_AGENT_ENV_MAG; }
     // wv424: alleen een machinekamer:-agent met API_SECRET krijgt de volledige omgeving; Socevs eigen agents (SOCEV_AGENT_SLEUTEL)
     // en alle andere labels draaien smal, ook in de hervatting van de eindcontrole (runOpts gaat mee).
@@ -2767,16 +2830,29 @@ function handleRequest(req, res) {
       // beperkt=auto (spraakkastje): altijd Claude zonder terugval, want alleen daar gelden de verboden tools.
       const beperkt = d.beperkt === 'auto' ? 'auto' : '';
       if (beperkt) { const st = leesRuntime(); keuze = { runtime: 'claude', model: (st.models && typeof st.models.claude === 'string') ? st.models.claude : '', fallback: '' }; }
+      // wv479: adviseur. Expliciet (veld advisor) alleen bij runtime claude en niet bij beperkt; onbekend = weigeren.
+      const advEigen = ontleedAdviseur(d.advisor);
+      if (advEigen === null) return weigerRuntime(res, { error: 'onbekende-adviseur', melding: 'onbekende adviseur; geldig zijn ' +
+        Object.keys(ADVISEURS).join(', ') + ', of leeg voor geen adviseur.', lengte: String(d.advisor).length }, '/agent');
+      if (advEigen && (beperkt || keuze.runtime !== 'claude')) return weigerRuntime(res, { error: 'adviseur-alleen-claude',
+        melding: 'een adviseur kan alleen bij runtime claude (en niet bij beperkt).', lengte: 0 }, '/agent');
       const maxMin = Math.min(Math.max(parseInt(d.max_minuten || BG_MAX_DEFAULT_MIN, 10) || BG_MAX_DEFAULT_MIN, 5), BG_MAX_CAP_MIN);
       const jobId = crypto.randomBytes(8).toString('hex');
-      jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', beperkt: beperkt, smal: smal || undefined };
+      keuze = Object.assign({}, keuze, { advisor: advEigen });
+      // Proefteller (wv479): alleen een tikker-rij zonder eigen keuze; geen terugval op een ander brein tijdens de proef.
+      const eigenKeuze = advEigen || (d.model != null && String(d.model).trim()) || (d.runtime != null && String(d.runtime).trim());
+      const proef = (!eigenKeuze && !beperkt && !smal) ? advisorProefClaim(jobId, label, prompt) : null;
+      if (proef) keuze = { runtime: 'claude', model: proef.model, advisor: proef.advisor, fallback: '' };
+      jobs[jobId] = { status: 'pending', created: Date.now(), agent: true, workspace: ws, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', beperkt: beperkt, smal: smal || undefined,
+        model: keuze.model || undefined, advisor: keuze.advisor || undefined };
       res._log = { job_id: jobId, chat_id: (d.chat_id != null) ? String(d.chat_id) : '', workspace: ws, agent: 1 };
       agentsReg[jobId] = {
         job_id: jobId, label: label, status: 'pending',
         chat_id: (d.chat_id != null) ? String(d.chat_id) : '',
         started: Date.now(), ended: null, ok: null, rapport: '-',
         max_minuten: maxMin, workspace: ws, runtime: keuze.runtime, beperkt: beperkt || undefined,
-        omgeving: agentIsMk(label, smal, beperkt) ? 'mk' : (beperkt ? 'auto' : 'smal')   // wv424
+        omgeving: agentIsMk(label, smal, beperkt) ? 'mk' : (beperkt ? 'auto' : 'smal'),   // wv424
+        model: keuze.model || undefined, advisor: keuze.advisor || undefined, advisor_proef: proef ? true : undefined   // wv479
       };
       // wv275: gestart vanuit een [AUTO]-beurt van de telefoon? Synchroon, vóór het antwoord: het verzoekende proces leeft dan nog.
       try { telMerkAgent(req, jobId, label); } catch (e) { logError('tel-merk', e); }
@@ -2784,7 +2860,8 @@ function handleRequest(req, res) {
       // Bewust NIET in de chat-wachtrij: agents draaien parallel aan het gesprek.
       processAgent(jobId, prompt, d.session_id, ws, keuze, maxMin * 60 * 1000);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, job_id: jobId, label: label, max_minuten: maxMin, runtime: keuze.runtime, omgeving: agentsReg[jobId].omgeving }));
+      res.end(JSON.stringify({ ok: true, job_id: jobId, label: label, max_minuten: maxMin, runtime: keuze.runtime, omgeving: agentsReg[jobId].omgeving,
+        model: keuze.model || undefined, advisor: keuze.advisor || undefined, advisor_proef: proef ? true : undefined }));
     }); });
   }
 
@@ -2801,6 +2878,7 @@ function handleRequest(req, res) {
         rapport: a.rapport,
         eindcontrole: a.eindcontrole,
         omgeving: a.omgeving,   // wv424: mk | smal | auto (geen inhoud, alleen de klasse)
+        model: a.model, advisor: a.advisor, advisor_proef: a.advisor_proef,   // wv479
         herstart: a.herstart,
         error: a.error,   // foutcode (wv51); de tikker gebruikt hem als /result kwijt is
         wees: a.wees ? new Date(a.wees).toISOString() : undefined,   // wv211: liep door over een herstart van server.js
