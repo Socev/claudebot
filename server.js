@@ -3587,7 +3587,8 @@ const APP_OPEN_MS = 2 * 60 * 60 * 1000;        // tijdelijk openzetten vanaf de 
 const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
 // gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
-const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
+// wv446 (Fable #1): meldingen/af is omkeerbaar en geen invoer naar Socev, net als gezien
+const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
@@ -6132,6 +6133,13 @@ const APP_MELD_TABEL = process.env.APP_MELD_TABEL || 'LIclFLTGAaaJOx1w';     // 
 const APP_STILTE_TABEL = process.env.APP_STILTE_TABEL || 'MF6DKIGzWVT8FAdy'; // n8n Data Table stilte_state
 const APP_WACHTER_URL = process.env.APP_WACHTER_URL || 'https://socev-wachter.d-schaap.workers.dev/stand';
 const APP_MELD_DAGEN = 14;
+// wv446 (David 12-10: "blijft er eentje als storing staan, maar dan wel met de opmerking dat er eigenlijk niets mee moet"):
+// afgehandeld per kaart op de pod (niet per apparaat), een eenmalig geweigerd verzoek geen storing, en een storing die 3 dagen
+// niet terugkwam terwijl de automatisering sindsdien slaagde: opgelost.
+const APP_MELD_AF = path.join(APP_DATA, 'meldingen-af.json');   // per kaart: afgehandeld t/m welke melding (laatst + aantal)
+const APP_MELD_WEIGER_MS = 24 * 3600 * 1000;   // geweigerd verzoek: zo lang een stille regel; zo vaak (≥ 3) binnen dit venster = storing
+const APP_MELD_WEIGER_STORING = 3;
+const APP_MELD_RUSTIG_MS = 3 * 86400000;       // zo lang niet teruggekomen: nakijken of hij sindsdien slaagde
 const APP_MELD_CACHE_MS = 60 * 1000;
 const APP_MELD_HERSTEL_MAX = 12;            // hooguit zoveel automatiseringen per verversing nakijken in n8n
 const APP_PUSH_WACHT_MS = 20 * 1000;        // antwoord klaar en de app haalt het niet op: dan pas een seintje
@@ -6238,7 +6246,7 @@ function appWfNaam(n) {
 // Volgorde telt: de eerste die past, geldt.
 const APP_FOUT_UITLEG = [
   [/ongeldige secret|invalid secret/i, 'sleutel',
-    'Er kwam een verzoek binnen zonder de juiste sleutel; dat is geweigerd. Eén keer is meestal een proef of een oude link; vaker betekent: sleutel nakijken.'],
+    'Binnen een dag kwamen meerdere verzoeken binnen zonder de juiste sleutel; die zijn geweigerd. Ergens wordt nog een oude sleutel of link gebruikt: sleutel nakijken.'],
   [/unauthori[sz]ed|\b401\b|forbidden|\b403\b|invalid (token|api.?key)|access denied/i, 'toegang',
     'Een dienst die deze automatisering aanroept, weigerde de toegang; meestal is een sleutel of koppeling verlopen of vervangen.'],
   [/service unavailable|\b503\b|bad gateway|\b502\b/i, 'pod', 'Een dienst die deze automatisering aanroept, gaf even geen antwoord; vaak is dat Socev zelf (de pod) tijdens een herstart of uitrol.'],
@@ -6299,7 +6307,22 @@ async function appWfBewaartGoed(wfId) {
   c[wfId] = { op: Date.now(), goed: goed };
   return goed;
 }
-async function appHerstel(wfId, naExecutie) {
+async function appHerstel(wfId, naExecutie, laatsteMs) {
+  const h = await appHerstelKaal(wfId, naExecutie);
+  // alleen als de afloop onbekend is: een aantoonbaar mislukte jongste run blijft nog-fout (Fable wv446 #2); bewaart n8n van deze
+  // automatisering geen geslaagde runs, dan valt er niets te vinden (#3)
+  const c = appStaat.wfInst && appStaat.wfInst[wfId];
+  if (h.stand !== 'onbekend' || !wfId || !naExecutie || !(Date.now() - laatsteMs >= APP_MELD_RUSTIG_MS) || (c && c.goed === false)) return h;
+  // wv446 regel 3: 3 dagen niet teruggekomen en sindsdien een geslaagde run
+  try {
+    const j = await appN8n('/executions?workflowId=' + encodeURIComponent(wfId) + '&status=success&limit=1');
+    const x = (Array.isArray(j && j.data) ? j.data : [])[0];
+    if (x && x.status === 'success' && Number(x.id) > Number(naExecutie))
+      return { stand: 'weer-goed', op: x.startedAt || null, tekst: 'Kwam niet meer terug en liep sindsdien goed (' + appDagKlok(x.startedAt) + ').' };
+  } catch (e) {}
+  return h;
+}
+async function appHerstelKaal(wfId, naExecutie) {
   if (!wfId) return { stand: 'onbekend', op: null, tekst: 'Of hij sindsdien weer goed liep, is niet na te gaan.' };
   let j, goed;
   try { [j, goed] = await Promise.all([appN8n('/executions?workflowId=' + encodeURIComponent(wfId) + '&limit=5'), appWfBewaartGoed(wfId)]); }
@@ -6337,23 +6360,39 @@ async function appMeldingenVerzamel() {
     const f = appFoutmelderLees(x.tekst);
     const u = appFoutUitleg(f.fout);
     const sleutel = (f.workflow_id || f.workflow) + '|' + f.knoop + '|' + u.soort;
-    const g = groepen[sleutel] || (groepen[sleutel] = { id: 'f' + x.id, sleutel: sleutel, soort: 'storing', f: f, uitleg: u, aantal: 0, eerste: x.createdAt, laatste: x.createdAt, executies: [], rij: 0 });
+    const g = groepen[sleutel] || (groepen[sleutel] = { id: 'f' + x.id, sleutel: sleutel, soort: 'storing', f: f, uitleg: u, aantal: 0, eerste: x.createdAt, laatste: x.createdAt, executies: [], rij: 0, tijden: [] });
     g.aantal++;
+    g.tijden.push(Date.parse(x.createdAt));
     if (Date.parse(x.createdAt) < Date.parse(g.eerste)) g.eerste = x.createdAt;
     if (Date.parse(x.createdAt) >= Date.parse(g.laatste)) { g.laatste = x.createdAt; g.id = 'f' + x.id; g.f = f; }
     g.rij = Math.max(g.rij, Number(x.id) || 0);
     if (f.executie && g.executies.length < 5) g.executies.push(f.executie);
   });
-  const lijst = Object.keys(groepen).map(function (k) { return groepen[k]; }).sort(function (a, b) { return Date.parse(b.laatste) - Date.parse(a.laatste); });
-  const herstel = await Promise.all(lijst.map(function (g, i) {
+  const lijst = Object.keys(groepen).map(function (k) { return groepen[k]; }).filter(function (g) {
+    // wv446 regel 2: een geweigerd verzoek (verkeerde sleutel) is pas een storing bij ≥ 3 binnen 24 u; minder = stille regel
+    // zolang de laatste jonger is dan 24 u, daarna weg
+    if (g.uitleg.soort !== 'sleutel' || appMeldPiek(g.tijden, APP_MELD_WEIGER_MS) >= APP_MELD_WEIGER_STORING) return true;
+    g.geweigerd = true;
+    return Date.now() - Date.parse(g.laatste) < APP_MELD_WEIGER_MS;
+  }).sort(function (a, b) { return Date.parse(b.laatste) - Date.parse(a.laatste); });
+  let nagekeken = 0;
+  const herstel = await Promise.all(lijst.map(function (g) {
     const laatsteEx = g.executies.reduce(function (m, e) { return Math.max(m, Number(e) || 0); }, 0);
-    return i < APP_MELD_HERSTEL_MAX ? appHerstel(g.f.workflow_id, laatsteEx || null) : Promise.resolve({ stand: 'onbekend', op: null, tekst: '' });
+    if (g.geweigerd || nagekeken >= APP_MELD_HERSTEL_MAX) return Promise.resolve({ stand: 'onbekend', op: null, tekst: '' });
+    nagekeken++;
+    g.nagekeken = true;
+    return appHerstel(g.f.workflow_id, laatsteEx || null, Date.parse(g.laatste));
   }));
   const items = lijst.map(function (g, i) {
     const f = g.f;
+    const techniek = ['stap: ' + (f.knoop || '?'), f.fout ? 'fout: ' + f.fout : null, g.executies.length ? 'executie ' + g.executies.join(', ') : null].filter(Boolean).join(' · ');
+    if (g.geweigerd) return { id: g.id, rij: g.rij, kaart: null, soort: 'geweigerd', titel: appWfNaam(f.workflow) + ': verzoek geweigerd',
+      uitleg: 'Een verzoek zonder de juiste sleutel is geweigerd. Eén keer is meestal een proef of een oude link; hier hoeft niets mee. Komt het binnen een dag ' + APP_MELD_WEIGER_STORING + ' keer voor, dan wordt het een storing.',
+      wanneer: g.laatste, eerste: g.eerste, aantal: g.aantal, herstel: { stand: 'onbekend', op: null, tekst: '' }, techniek: techniek };
+    // niet na te gaan of hij weer goed loopt, maar al 3 dagen niet teruggekomen: geen storing-chip meer (de app toont "kwam niet terug")
+    const rustig = !!g.nagekeken && herstel[i].stand === 'onbekend' && Date.now() - Date.parse(g.laatste) >= APP_MELD_RUSTIG_MS;
     return { id: g.id, rij: g.rij, kaart: 'k' + appSha(g.sleutel).slice(0, 12), soort: 'storing', titel: appWfNaam(f.workflow) + ' liep vast', uitleg: g.uitleg.tekst,
-      wanneer: g.laatste, eerste: g.eerste, aantal: g.aantal, herstel: herstel[i],
-      techniek: ['stap: ' + (f.knoop || '?'), f.fout ? 'fout: ' + f.fout : null, g.executies.length ? 'executie ' + g.executies.join(', ') : null].filter(Boolean).join(' · ') };
+      wanneer: g.laatste, eerste: g.eerste, aantal: g.aantal, herstel: herstel[i], rustig: rustig, techniek: techniek };
   });
   // Stilgevallen aanvoer: elke gemelde stroom één kaart (de laatste melding), met de stand van nu erbij.
   const nu = {};
@@ -6400,8 +6439,9 @@ async function appMeldingenVerzamel() {
           : 'Van buitenaf niet bereikbaar: ' + (weg.join(', ') || 'onbekend') + (buiten.sinds ? ' (sinds ' + appDagKlok(buiten.sinds) + ')' : '') + '.' };
   }
   // kaarten die (nog) misgaan en een melding in de buffer hebben: daarop geeft het meldingen-seintje een tik
-  const kaarten = items.filter(function (x) { return x.kaart && x.herstel.stand !== 'weer-goed'; }).map(function (x) { return x.kaart; });
-  return { items: items.slice(0, 100), stand: { aanvoer: aanvoer, extern: extern }, max_rij: maxRij, kaarten: kaarten, gelezen: !!rijen.length || !fouten.length, fouten: fouten, op: Date.now() };
+  const getoond = items.slice(0, 100);   // kaarten uit dezelfde lijst als de items (Fable wv446 #4)
+  const kaarten = getoond.filter(function (x) { return x.kaart && x.herstel.stand !== 'weer-goed'; }).map(function (x) { return x.kaart; });
+  return { items: getoond, stand: { aanvoer: aanvoer, extern: extern }, max_rij: maxRij, kaarten: kaarten, gelezen: !!rijen.length || !fouten.length, fouten: fouten, op: Date.now() };
 }
 // Eén verversing tegelijk, 60 s bewaard (meerdere apparaten en de seintjes-tik delen hem).
 function appMeldingen() {
@@ -6412,6 +6452,56 @@ function appMeldingen() {
   st.bezig = appMeldingenVerzamel().then(function (d) { st.data = d; st.bezig = null; return d; },
     function (e) { st.bezig = null; throw e; });
   return st.bezig;
+}
+// Grootste aantal tijdstippen binnen één venster van venMs (glijdend).
+function appMeldPiek(tijden, venMs) {
+  const t = tijden.filter(isFinite).sort(function (a, b) { return a - b; });
+  let max = 0;
+  for (let i = 0, j = 0; i < t.length; i++) { while (t[i] - t[j] >= venMs) j++; max = Math.max(max, i - j + 1); }
+  return max;
+}
+// wv446: afgehandeld per kaart. Sleutel = de kaart (storing: workflow + stap + soort fout) of anders het id. Komt er na het
+// afhandelen een nieuwere melding bij (later tijdstip of meer keer), dan staat de kaart vanzelf weer open.
+function appMeldRef(x) { return String(x.kaart || x.id); }
+function appMeldAfLees() {
+  try { const j = appLeesStreng(APP_MELD_AF, {}); return j.kaarten && typeof j.kaarten === 'object' ? j.kaarten : {}; }
+  catch (e) { logError('app-meldingen', e); return {}; }
+}
+function appMeldAfIs(x, af) {
+  const e = af[appMeldRef(x)];
+  return !!(e && Date.parse(x.wanneer) <= Date.parse(e.laatst) && (Number(x.aantal) || 1) <= (Number(e.aantal) || 1));
+}
+// Wat telt (nieuw, seintje): niet afgehandeld en geen stille regel.
+function appMeldTelt(x, af) { return x.soort !== 'geweigerd' && !appMeldAfIs(x, af); }
+// Kaarten die (nog) misgaan voor het meldingen-seintje, zonder de afgehandelde.
+function appMeldKaartenOpen(m) {
+  const af = appMeldAfLees();
+  const dicht = {};
+  m.items.forEach(function (x) { if (x.kaart && appMeldAfIs(x, af)) dicht[x.kaart] = true; });
+  return m.kaarten.filter(function (k) { return !dicht[k]; });
+}
+async function appMeldingenAf(req, res, a, d) {
+  const ref = String(d.ref || '');
+  if (!/^[a-z0-9-]{4,40}$/.test(ref) || typeof d.af !== 'boolean') return appWeiger(res, 400, 'ongeldige melding', 'meldingen af');
+  let item = null;
+  if (d.af) {
+    let m;
+    try { m = await appMeldingen(); } catch (e) { logError('app-meldingen', e); return appWeiger(res, 503, 'meldingen zijn nu niet te lezen', 'meldingen fout'); }
+    item = appMeldMetSeintjes(m.items).find(function (x) { return appMeldRef(x) === ref && x.soort !== 'geweigerd'; }) || null;
+    if (!item) return appWeiger(res, 404, 'die melding staat er niet meer', 'meldingen af onbekend');
+  }
+  try {
+    const j = appLeesStreng(APP_MELD_AF, {});
+    const k = j.kaarten && typeof j.kaarten === 'object' ? j.kaarten : {};
+    const grens = Date.now() - (APP_MELD_DAGEN + 1) * 86400000;
+    Object.keys(k).forEach(function (r) { if (!(Date.parse(k[r] && k[r].op) >= grens)) delete k[r]; });
+    if (d.af) k[ref] = { laatst: item.wanneer, aantal: Number(item.aantal) || 1, op: new Date().toISOString(), door: a.id };
+    else delete k[ref];
+    const sleutels = Object.keys(k);
+    if (sleutels.length > 300) sleutels.sort(function (x, y) { return Date.parse(k[x].op) - Date.parse(k[y].op); }).slice(0, sleutels.length - 300).forEach(function (r) { delete k[r]; });
+    appSchrijfJson(APP_MELD_AF, { kaarten: k });
+    appStuur(res, 200, { ok: true, ref: ref, afgehandeld: d.af ? k[ref].op : null });
+  } catch (e) { logError('app-meldingen', e); appWeiger(res, 500, 'opslaan lukte niet', 'meldingen af schrijven'); }
 }
 function appGezien() { try { return appLeesStreng(APP_MELD_GEZIEN, {}); } catch (e) { logError('app-meldingen', e); return {}; } }
 // wv144 (David 8-10: "blijven ongelezen … '9+'"): nieuw is wat later kwam dan je op dit apparaat zag, nooit van vóór het
@@ -6431,9 +6521,16 @@ async function appMeldingenRoute(req, res, a) {
   let sub = null;
   try { sub = appPushLees().apparaten[a.id] || null; } catch (e) {}
   const items = appMeldMetSeintjes(m.items);   // wv414: plus de kaarten van verlopen seintjes (pod zelf)
-  appStuur(res, 200, { ok: true, items: items.map(function (x) { const y = Object.assign({}, x); delete y.rij; delete y.kaart; return y; }), stand: m.stand,
+  const af = appMeldAfLees();   // wv446
+  appStuur(res, 200, { ok: true, items: items.map(function (x) {
+    const y = Object.assign({}, x); delete y.rij; delete y.kaart;
+    y.ref = appMeldRef(x).slice(0, 40);
+    const e = appMeldAfIs(x, af) ? af[appMeldRef(x)] : null;
+    y.afgehandeld = e ? e.op : null;
+    return y;
+  }), stand: m.stand,
     fouten: m.fouten, bijgewerkt: new Date(m.op).toISOString(), gezien: gezien, nieuw_na: new Date(grens).toISOString(),
-    nieuw: appMeldNieuw(items, grens).length,
+    nieuw: appMeldNieuw(items.filter(function (x) { return appMeldTelt(x, af); }), grens).length,
     seintjes_meldingen: !!(sub && (sub.soorten || []).indexOf('meldingen') >= 0) });
 }
 function appMeldingenGezien(req, res, a, d) {
@@ -6530,7 +6627,8 @@ async function appNieuwRoute(req, res, a) {
   let m = appStaat.meld && appStaat.meld.data;
   if (!m || nu - m.op > APP_NIEUW_MELD_MS) { try { m = await appMeldingen(); } catch (e) { m = null; } }
   if (m) {
-    const nieuw = appMeldNieuw(appMeldMetSeintjes(m.items), appMeldGrens(a, appGezien()[a.id], nu));
+    const afM = appMeldAfLees();   // wv446: afgehandeld en geweigerde verzoeken tellen niet
+    const nieuw = appMeldNieuw(appMeldMetSeintjes(m.items).filter(function (x) { return appMeldTelt(x, afM); }), appMeldGrens(a, appGezien()[a.id], nu));
     tabs.meldingen = nieuw.length;
     if (nieuw.length) laatst.meldingen = nieuw[0].wanneer;
   } else { tabs.meldingen = 0; fouten.push('meldingen'); }
@@ -8214,19 +8312,20 @@ async function appPushMeldTik() {
   let m;
   try { m = await appMeldingen(); } catch (e) { return; }
   if (!m.gelezen || m.fouten.length) return;   // niet alles gelezen: niets beslissen
+  const open = appMeldKaartenOpen(m);   // wv446: afgehandelde kaarten geven geen seintje
   for (const id of ids) {
     const s = appPushLees().apparaten[id];
     if (!s || s.verlopen) continue;
-    if (!Array.isArray(s.meld_kaarten)) { appPushWijzig(function (q) { if (q.apparaten[id]) q.apparaten[id].meld_kaarten = m.kaarten.slice(0, 200); }); continue; }
+    if (!Array.isArray(s.meld_kaarten)) { appPushWijzig(function (q) { if (q.apparaten[id]) q.apparaten[id].meld_kaarten = open.slice(0, 200); }); continue; }
     // opgeloste kaarten vergeten: gaat dezelfde storing later opnieuw mis, dan is dat weer nieuw
-    const bekend = s.meld_kaarten.filter(function (k) { return m.kaarten.indexOf(k) >= 0; });
-    const nieuw = m.kaarten.filter(function (k) { return bekend.indexOf(k) < 0; });
+    const bekend = s.meld_kaarten.filter(function (k) { return open.indexOf(k) >= 0; });
+    const nieuw = open.filter(function (k) { return bekend.indexOf(k) < 0; });
     if (!nieuw.length || (s.meld_laatst && Date.now() - s.meld_laatst < APP_PUSH_MELD_MS)) {
       if (bekend.length !== s.meld_kaarten.length) appPushWijzig(function (q) { if (q.apparaten[id]) q.apparaten[id].meld_kaarten = bekend; });
       continue;
     }
     const r = await appPushStuur(id, 'meldingen');
-    if (r.ok) appPushWijzig(function (q) { const x = q.apparaten[id]; if (x) { x.meld_kaarten = m.kaarten.slice(0, 200); x.meld_laatst = Date.now(); } });
+    if (r.ok) appPushWijzig(function (q) { const x = q.apparaten[id]; if (x) { x.meld_kaarten = open.slice(0, 200); x.meld_laatst = Date.now(); } });
   }
 }
 setInterval(function () { appPushMeldTik().catch(function (e) { logError('app-push', e); }); }, APP_PUSH_MELD_TIK_MS).unref();
@@ -8468,6 +8567,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/bestand/') === 0) return appBestand(req, res, route.slice('GET /app/bestand/'.length));
         if (route === 'GET /app/meldingen') return appMeldingenRoute(req, res, a);
         if (route === 'POST /app/meldingen/gezien') return appMeldingenGezien(req, res, a, d);
+        if (route === 'POST /app/meldingen/af') return appMeldingenAf(req, res, a, d);   // wv446
         if (route === 'GET /app/nieuw') return appNieuwRoute(req, res, a);
         if (route === 'GET /app/telegram-bezig') return appTelegramBezigRoute(req, res);   // wv292
         if (route === 'POST /app/gezien') return appNieuwGezien(req, res, a, d);

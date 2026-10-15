@@ -175,7 +175,7 @@ async function nepFetch(url, opt) {
     if (u.pathname === '/api/v1/executions' && n8nStaat.paginas && n8nStaat.paginas[u.searchParams.get('workflowId')]) {   // wv201: paginering
       const pg = n8nStaat.paginas[u.searchParams.get('workflowId')], i = Number(u.searchParams.get('cursor') || 0);
       return antw(200, { data: pg[i] || [], nextCursor: i + 1 < pg.length ? String(i + 1) : null }); }
-    if (u.pathname === '/api/v1/executions') { const e = n8nStaat.executies[u.searchParams.get('workflowId')]; return antw(200, { data: e ? [].concat(e) : [], nextCursor: null }); }
+    if (u.pathname === '/api/v1/executions') { const e = n8nStaat.executies[u.searchParams.get('workflowId')]; const st = u.searchParams.get('status'); return antw(200, { data: e ? [].concat(e).filter((x) => !st || x.status === st) : [], nextCursor: null }); }   // wv446: status-filter
     if (u.pathname === '/api/v1/data-tables/vNAY2dVRpSx1l3Ri/rows' || u.pathname === '/api/v1/data-tables/pnX6vvg2iv256HAB/rows') {   // wv335: actie_state / correspondentie_state
       const f = JSON.parse(u.searchParams.get('filter') || 'null'), t = u.pathname.includes('vNAY') ? (n8nStaat.actieState || []) : (n8nStaat.corrState || []);
       (n8nStaat.stateFilters = n8nStaat.stateFilters || []).push(f);
@@ -350,7 +350,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appKnopBevestiging };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -1632,13 +1632,14 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
       const its = r.j.items || [];
       const per = (t) => its.find((x) => x.titel === t);
-      toets('12 meldingen 200: 4 storingskaarten + 2 stilte-kaarten, nieuwste eerst, niets ouder dan 14 dagen, geen parro', r.status === 200 && its.length === 6 &&
-        its.filter((x) => x.soort === 'storing').length === 4 && its.filter((x) => x.soort === 'stil').length === 2 && !its.some((x) => /Oud|GEHEIM/.test(JSON.stringify(x))) &&
+      toets('12 meldingen 200: 3 storingskaarten + 1 geweigerd verzoek + 2 stilte-kaarten, nieuwste eerst, niets ouder dan 14 dagen, geen parro', r.status === 200 && its.length === 6 &&
+        its.filter((x) => x.soort === 'storing').length === 3 && its.filter((x) => x.soort === 'geweigerd').length === 1 && its.filter((x) => x.soort === 'stil').length === 2 && !its.some((x) => /Oud|GEHEIM/.test(JSON.stringify(x))) &&
         its.every((x, i) => i === 0 || Date.parse(its[i - 1].wanneer) >= Date.parse(x.wanneer)), JSON.stringify(its.map((x) => x.titel)));
       const dbg = per('Claude Debug via Telegram liep vast');
       toets('12 twee keer dezelfde storing = één kaart, 2×, weer goed (latere geslaagde run)', dbg && dbg.aantal === 2 && dbg.herstel.stand === 'weer-goed' && /weer goed gelopen/.test(dbg.herstel.tekst) && /pod/.test(dbg.uitleg), JSON.stringify(dbg));
-      const wa = per('WhatsApp Chat Reader liep vast');
-      toets('12 "(webhook)" en "AI - " weg uit de naam; sleuteluitleg; geen latere run = "niet meer gedraaid"', wa && /juiste sleutel/.test(wa.uitleg) && wa.herstel.stand === 'onbekend' && /niet meer gedraaid/.test(wa.herstel.tekst), JSON.stringify(wa));
+      const wa = per('WhatsApp Chat Reader: verzoek geweigerd');
+      toets('12 wv446: één geweigerd verzoek (sleutel, 1x in 24 u) = stille regel, geen storing; "(webhook)" en "AI - " weg uit de naam', wa && wa.soort === 'geweigerd' && /juiste sleutel/.test(wa.uitleg) && /hoeft niets mee/.test(wa.uitleg) && wa.herstel.stand === 'onbekend' && wa.afgehandeld === null && typeof wa.ref === 'string', JSON.stringify(wa));
+      toets('12 wv446: geweigerd verzoek: n8n niet nagekeken (geen executies-aanroep voor die automatisering)', !n8nStaat.aanroepen.some((x) => /GIuod668nbn9YPXI/.test(x.pad || x.url || JSON.stringify(x))), JSON.stringify(n8nStaat.aanroepen.slice(-3)));
       const vl = per('Voorlezen (Gemini-stem) liep vast');
       const lo = per('Locatie (Tasker) liep vast');
       toets('12 workflow zonder bewaarde geslaagde runs: latere fout = onbekend (niet "nog-fout"), eerlijke tekst', lo && lo.herstel.stand === 'onbekend' && /geen geslaagde runs/.test(lo.herstel.tekst), JSON.stringify(lo && lo.herstel));
@@ -1657,13 +1658,13 @@ async function bewijs(o) {
       apM.aangemaakt = uur(24 * 30);
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regM));
       r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
-      toets('12 wv144: gekoppeld 30 dagen geleden, nog niets gezien: alle 6 nieuw, nieuw_na = 7 dagen terug', r.j.nieuw === 6 && Math.abs(Date.parse(r.j.nieuw_na) - (Date.now() - 7 * 86400000)) < 120000, r.j.nieuw + ' ' + r.j.nieuw_na);
+      toets('12 wv144: gekoppeld 30 dagen geleden, nog niets gezien: alle 5 nieuw (geweigerd verzoek telt niet, wv446), nieuw_na = 7 dagen terug', r.j.nieuw === 5 && Math.abs(Date.parse(r.j.nieuw_na) - (Date.now() - 7 * 86400000)) < 120000, r.j.nieuw + ' ' + r.j.nieuw_na);
       n8nStaat.buffer.push({ id: 60, bron: 'foutmelder', tekst: fmt('AI - Achtdagen', 'Y', 'Service unavailable', 2, 'AchtDagen01'), createdAt: uur(24 * 8) });
       H.appStaat.meld = null;
       r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
-      toets('12 wv144: storing van 8 dagen geleden staat onder de kaarten maar telt niet als nieuw', (r.j.items || []).some((x) => /Achtdagen/.test(x.titel)) && r.j.nieuw === 6, r.j.nieuw + ' ' + (r.j.items || []).map((x) => x.titel).join());
+      toets('12 wv144: storing van 8 dagen geleden staat onder de kaarten maar telt niet als nieuw', (r.j.items || []).some((x) => /Achtdagen/.test(x.titel)) && r.j.nieuw === 5, r.j.nieuw + ' ' + (r.j.items || []).map((x) => x.titel).join());
       const rN = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
-      toets('12 wv144: /app/nieuw telt Meldingen hetzelfde (6)', rN.status === 200 && rN.j.tabs.meldingen === 6, JSON.stringify(rN.j && rN.j.tabs));
+      toets('12 wv144: /app/nieuw telt Meldingen hetzelfde (5)', rN.status === 200 && rN.j.tabs.meldingen === 5, JSON.stringify(rN.j && rN.j.tabs));
       n8nStaat.buffer.pop();
       // aangemaakt blijft 30 dagen terug: de toetsen hieronder zetten gezien op uren geleden (vóór het echte koppelen)
       H.appStaat.meld = null;
@@ -1691,6 +1692,66 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
       toets('12 externe wachter meldt storing: "niet bereikbaar: desktop (sinds …)"', r.j.stand.extern.ok === false && /niet bereikbaar: desktop \(sinds/.test(r.j.stand.extern.tekst), JSON.stringify(r.j.stand.extern));
       wachterStaat.j.status = 'ok'; wachterStaat.j.checks[0].ok = true; H.appStaat.meld = null;
+
+      // ── wv446: geweigerd verzoek, vanzelf opgelost, afgehandeld per kaart ──
+      toets('12 wv446 appMeldPiek: glijdend venster', H.appMeldPiek([0, 1, 2], 10) === 3 && H.appMeldPiek([0, 10, 20], 10) === 1 && H.appMeldPiek([30, 0, 5, 31, 32], 10) === 3 && H.appMeldPiek([], 10) === 0);
+      const buf446 = n8nStaat.buffer.slice(), ex446 = Object.assign({}, n8nStaat.executies), wf446 = Object.assign({}, n8nStaat.workflows);
+      const sl446 = (naam, ex, wf, h) => ({ id: 200 + ex % 100, bron: 'foutmelder', tekst: fmt('AI - ' + naam, '(onbekende knoop)', 'Ongeldige secret [line 2]', ex, wf), createdAt: uur(h) });
+      n8nStaat.buffer.push(sl446('Drie', 1001, 'DrieDrie0001', 1), sl446('Drie', 1002, 'DrieDrie0001', 8), sl446('Drie', 1003, 'DrieDrie0001', 20),
+        sl446('Twee', 1004, 'TweeTwee0001', 2), sl446('Twee', 1005, 'TweeTwee0001', 30), sl446('Oudsleutel', 1006, 'OudSleutel01', 30),
+        { id: 220, bron: 'foutmelder', tekst: fmt('AI - Rustig', 'Stap A', 'Service unavailable', 2000, 'RustigRust01'), createdAt: uur(96) },
+        { id: 221, bron: 'foutmelder', tekst: fmt('AI - Recent', 'Stap A', 'Service unavailable', 4000, 'RecentRece01'), createdAt: uur(24) },
+        { id: 222, bron: 'foutmelder', tekst: fmt('AI - Zonderlog', 'Stap', 'Service unavailable', 3000, 'ZonderLog001'), createdAt: uur(100) });
+      n8nStaat.executies.RustigRust01 = [{ id: '2600', status: 'canceled', startedAt: uur(1) }, { id: '2500', status: 'success', startedAt: uur(50) }, { id: '2000', status: 'error', startedAt: uur(96) }];
+      n8nStaat.executies.HardnekHar01 = [{ id: '2700', status: 'error', startedAt: uur(1) }, { id: '2650', status: 'success', startedAt: uur(50) }, { id: '2100', status: 'error', startedAt: uur(96) }];
+      n8nStaat.workflows.HardnekHar01 = { settings: {} };
+      n8nStaat.buffer.push({ id: 223, bron: 'foutmelder', tekst: fmt('AI - Hardnek', 'Stap A', 'Service unavailable', 2100, 'HardnekHar01'), createdAt: uur(96) });
+      n8nStaat.executies.RecentRece01 = [{ id: '4100', status: 'error', startedAt: uur(2) }, { id: '4050', status: 'success', startedAt: uur(10) }, { id: '4000', status: 'error', startedAt: uur(24) }];
+      n8nStaat.workflows.RustigRust01 = { settings: {} }; n8nStaat.workflows.RecentRece01 = { settings: {} };
+      n8nStaat.workflows.ZonderLog001 = { settings: { saveDataSuccessExecution: 'none' } };
+      H.appStaat.meld = null; H.appStaat.wfInst = {};
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      const it2 = r.j.items || [], per2 = (t) => it2.find((x) => x.titel === t);
+      const drie = per2('Drie liep vast');
+      toets('12 wv446: 3x geweigerd binnen 24 u = storing, met "sleutel nakijken"', drie && drie.soort === 'storing' && drie.aantal === 3 && /sleutel nakijken/.test(drie.uitleg), JSON.stringify(drie));
+      toets('12 wv446: 2x geweigerd, maar niet 3x binnen 24 u: stille regel', per2('Twee: verzoek geweigerd') && per2('Twee: verzoek geweigerd').soort === 'geweigerd' && !per2('Twee liep vast'), it2.map((x) => x.titel).join());
+      toets('12 wv446: eenmalig geweigerd van 30 u geleden: na 24 u weg', !it2.some((x) => /Oudsleutel/.test(x.titel)), it2.map((x) => x.titel).join());
+      const ru = per2('Rustig liep vast'), rc = per2('Recent liep vast'), zl = per2('Zonderlog liep vast');
+      toets('12 wv446 regel 3: 4 dagen niet terug, afloop onbekend (jongste run geannuleerd) + sindsdien geslaagd = opgelost', ru && ru.herstel.stand === 'weer-goed' && /Kwam niet meer terug/.test(ru.herstel.tekst), JSON.stringify(ru && ru.herstel));
+      const hn = per2('Hardnek liep vast');
+      toets('12 wv446 regel 3 (Fable #2): jongste run aantoonbaar mislukt blijft nog-fout, ook na 3 dagen', hn && hn.herstel.stand === 'nog-fout' && hn.rustig === false, JSON.stringify(hn && hn.herstel));
+      toets('12 wv446 regel 3: binnen 3 dagen telt de jongste run (nog-fout)', rc && rc.herstel.stand === 'nog-fout' && rc.rustig === false, JSON.stringify(rc && rc.herstel));
+      toets('12 wv446: geen bewaarde geslaagde runs, 4 dagen niet terug: niet "opgelost", wel rustig', zl && zl.herstel.stand === 'onbekend' && zl.rustig === true, JSON.stringify(zl));
+      toets('12 wv446: geweigerd verzoek telt niet als nieuw (gezien tot 4 u: Voorlezen, Teams, Drie)', r.j.nieuw === 3, r.j.nieuw);
+      // afgehandeld
+      for (const [b, st, wat] of [[{ ref: 'K!x', af: true }, 400, 'rare ref'], [{ ref: drie.ref, af: 'ja' }, 400, 'af geen boolean'], [{ ref: 'k000000000000', af: true }, 404, 'onbekende kaart'],
+        [{ ref: per2('Twee: verzoek geweigerd').ref, af: true }, 404, 'stille regel']]) {
+        r = await vraag('POST', '/app/meldingen/af', b, { pot: P.jar });
+        toets('12 wv446 afhandelen: ' + wat + ' -> ' + st, r.status === st, r.status + ' ' + JSON.stringify(r.j));
+      }
+      r = await vraag('POST', '/app/meldingen/af', { ref: drie.ref, af: true }, { pot: P.jar });
+      const afBestand = () => { try { return JSON.parse(fs.readFileSync(path.join(DATA, 'meldingen-af.json'), 'utf8')); } catch (e) { return null; } };
+      const afb = afBestand();
+      toets('12 wv446 afhandelen: 200, op de pod per kaart (niet per apparaat) met laatst + aantal', r.status === 200 && r.j.afgehandeld && afb && afb.kaarten[drie.ref] && afb.kaarten[drie.ref].aantal === 3 &&
+        afb.kaarten[drie.ref].laatst === drie.wanneer && Object.keys(afb).join() === 'kaarten', JSON.stringify(r.j) + ' ' + JSON.stringify(afb));
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      const drie2 = (r.j.items || []).find((x) => x.ref === drie.ref);
+      toets('12 wv446: afgehandelde kaart blijft in de lijst met tijdstip, telt niet meer als nieuw', drie2 && drie2.afgehandeld && r.j.nieuw === 2, r.j.nieuw + ' ' + JSON.stringify(drie2));
+      const rN2 = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+      toets('12 wv446: /app/nieuw telt hetzelfde (2)', rN2.j.tabs.meldingen === 2, JSON.stringify(rN2.j.tabs));
+      toets('12 wv446: seintje-kaarten zonder de afgehandelde', (() => { const m = H.appStaat.meld.data; const o = H.appMeldKaartenOpen(m); return m.kaarten.indexOf(drie.ref) >= 0 && o.indexOf(drie.ref) < 0 && o.length === m.kaarten.length - 1; })());
+      n8nStaat.buffer.push(sl446('Drie', 1007, 'DrieDrie0001', 0.5));
+      H.appStaat.meld = null;
+      r = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      const drie3 = (r.j.items || []).find((x) => x.ref === drie.ref);
+      toets('12 wv446: nieuwe melding op een afgehandelde kaart: weer open', drie3 && drie3.afgehandeld === null && drie3.aantal === 4 && r.j.nieuw === 3, r.j.nieuw + ' ' + JSON.stringify(drie3));
+      await vraag('POST', '/app/meldingen/af', { ref: drie.ref, af: true }, { pot: P.jar });
+      r = await vraag('POST', '/app/meldingen/af', { ref: drie.ref, af: false }, { pot: P.jar });
+      const r2 = await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
+      toets('12 wv446: terugdraaien: 200, kaart weer open, uit het bestand', r.status === 200 && r.j.afgehandeld === null && !afBestand().kaarten[drie.ref] &&
+        (r2.j.items || []).find((x) => x.ref === drie.ref).afgehandeld === null, JSON.stringify(r.j));
+      try { fs.unlinkSync(path.join(DATA, 'meldingen-af.json')); } catch (e) {}
+      n8nStaat.buffer = buf446; n8nStaat.executies = ex446; n8nStaat.workflows = wf446; H.appStaat.meld = null; H.appStaat.wfInst = {};
 
       // seintjes
       const st = await vraag('GET', '/app/status', undefined, { pot: P.jar });
@@ -1758,7 +1819,7 @@ async function bewijs(o) {
       await vraag('GET', '/app/meldingen', undefined, { pot: P.jar });
       r = await vraag('POST', '/app/push/soorten', { meldingen: true }, { pot: P.jar });
       const pj3 = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid];
-      toets('12 meldingen aan: nulpunt = de kaarten die nu (nog) misgaan', r.status === 200 && pj3.soorten.join() === 'antwoord,meldingen' && Array.isArray(pj3.meld_kaarten) && pj3.meld_kaarten.length === 3, JSON.stringify(pj3));
+      toets('12 meldingen aan: nulpunt = de kaarten die nu (nog) misgaan', r.status === 200 && pj3.soorten.join() === 'antwoord,meldingen' && Array.isArray(pj3.meld_kaarten) && pj3.meld_kaarten.length === 2, JSON.stringify(pj3));
       pushes.length = 0;
       await H.appPushMeldTik();
       toets('12 tik zonder nieuwe melding: geen seintje', pushes.length === 0, pushes.length);
@@ -1790,7 +1851,7 @@ async function bewijs(o) {
       n8nStaat.executies.NieuwNieuw01 = { id: '54200', status: 'success', startedAt: uur(0.001) };
       zetUurTerug(); H.appStaat.meld = null; H.appStaat.wfInst = {};
       await H.appPushMeldTik();
-      toets('12 storing opgelost: geen seintje, kaart vergeten', pushes.length === 2 && JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid].meld_kaarten.length === 4, JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid].meld_kaarten.length);
+      toets('12 storing opgelost: geen seintje, kaart vergeten', pushes.length === 2 && JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid].meld_kaarten.length === 3, JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pid].meld_kaarten.length);
       n8nStaat.buffer.push({ id: 108, bron: 'foutmelder', tekst: fmt('AI - Nieuw', 'Stap', 'Service unavailable', 54300, 'NieuwNieuw01'), createdAt: new Date().toISOString() });
       zetUurTerug(); H.appStaat.meld = null;
       await H.appPushMeldTik();
