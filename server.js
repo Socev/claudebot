@@ -7231,10 +7231,14 @@ async function appVjWvGekoppeld() {
 // wv506 (David JA 15-10 06:25): "Niet meer nodig" sluit ook de klus erachter. Pas na de ↩️-minuut; de databank toetst zelf (alleen
 // door David met bewijs "Niet meer nodig", ≥ 60 s dicht, rij wacht nog op David en hangt aan geen ander open punt) en zet de rij via
 // mk_werkvoorraad_bijwerk op vervallen. Herstart de pod tussendoor, dan doet de beheerronde het (voor-jou.py doorzet); het register
-// schrijft alleen die ronde.
-const APP_VJ_DOORZET_MS = APP_VJ_TERUG_MS + 15 * 1000;
-function appVjDoorzetLater(sleutel) {
-  const t = setTimeout(function () {
+// schrijft alleen die ronde. De databank eist ≥ 120 s na de keuze (een ↩️ kan door twee RPC's tot ± 76 s erna landen; review #3),
+// dus de timer staat op 135 s; een ↩️ wist hem.
+const APP_VJ_DOORZET_MS = APP_VJ_TERUG_MS + 75 * 1000;
+appStaat.vjDoorzet = appStaat.vjDoorzet || {};
+function appVjDoorzetLater(id, sleutel) {
+  clearTimeout(appStaat.vjDoorzet[id]);
+  const t = appStaat.vjDoorzet[id] = setTimeout(function () {
+    delete appStaat.vjDoorzet[id];
     appSbRpc('mk_voor_jou_vervallen_doorzetten', { p_sleutel: sleutel }).then(function (r) {
       appStaat.vjWvCache = null; appStaat.wvCache = null;
       if (!r || r.ok !== true) logError('app-voor-jou', new Error('doorzetten zonder ok'));
@@ -7518,9 +7522,9 @@ async function appVoorJouKeuze(req, res, a, d) {
     if (keuze === 'terug') delete appStaat.vjTerug[id];
     return appStuur(res, 409, { ok: false, fout: 'dit punt is intussen veranderd; ververs de lijst', nu: r && typeof r.nu === 'string' ? r.nu : null });
   }
-  if (keuze === 'terug') delete appStaat.vjTerug[id];
+  if (keuze === 'terug') { delete appStaat.vjTerug[id]; clearTimeout(appStaat.vjDoorzet[id]); delete appStaat.vjDoorzet[id]; }
   else appStaat.vjTerug[id] = { van: van, naar: keuze, later_tot: van === 'later' ? (p.later_tot || null) : null, tot: nu + APP_VJ_TERUG_MS, apparaat: a.id };
-  if (keuze === 'vervallen') appVjDoorzetLater(p.sleutel);   // wv506: de klus erachter na de ↩️-minuut ook dicht
+  if (keuze === 'vervallen') appVjDoorzetLater(id, p.sleutel);   // wv506: de klus erachter na de ↩️-minuut ook dicht
   Object.keys(appStaat.vjTerug).forEach(function (k) { if (appStaat.vjTerug[k].tot <= nu) delete appStaat.vjTerug[k]; });
   const melding = keuze === 'gedaan' ? 'Gedaan. Socev kijkt bij de volgende ronde of het ook zo gemeten wordt.'
     : keuze === 'later' ? 'Op later gezet tot ' + appVjDag(tot) + '.' : keuze === 'vervallen' ? 'Weggehaald: niet meer nodig.' : 'Teruggedraaid.';

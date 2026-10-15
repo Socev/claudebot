@@ -24,7 +24,7 @@ for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_COD
                       ['const APP_KNOP_WACHT_MELD_MS = 30 * 1000;', 'const APP_KNOP_WACHT_MELD_MS = 300;'],   // wv405
                       ['const BERICHT_KIJKT_MS = 60 * 1000;', 'const BERICHT_KIJKT_MS = 300;'],   // wv292
                       ['const BERICHT_KIJKT_MARGE_MS = 8 * 1000;', 'const BERICHT_KIJKT_MARGE_MS = 150;'],
-                      ['const APP_VJ_DOORZET_MS = APP_VJ_TERUG_MS + 15 * 1000;', 'const APP_VJ_DOORZET_MS = 300;'],   // wv506
+                      ['const APP_VJ_DOORZET_MS = APP_VJ_TERUG_MS + 75 * 1000;', 'const APP_VJ_DOORZET_MS = 300;'],   // wv506
                       ['function berichtUur() { return Number(', 'function berichtUur() { if (TOETSBUUR() !== null) return TOETSBUUR(); return Number(']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
@@ -315,7 +315,7 @@ async function nepFetch(url, opt) {
     if (fn === 'mk_voor_jou_vervallen_doorzetten') {   // wv506: zoals de echte (door David, "Niet meer nodig", rij wacht op David, aan geen ander open punt; de 60 s toetst de databank)
       if (sbStaat.vjKapot) return antw(500, { message: 'kapot' });
       const uit = [];
-      (sbStaat.vj || []).filter((x) => x.status === 'vervallen' && x.gesloten_door === 'david' && /David tikte Niet meer nodig/.test(x.bewijs || '') && (!b.p_sleutel || x.sleutel === b.p_sleutel)).forEach((x) => {
+      (sbStaat.vj || []).filter((x) => x.status === 'vervallen' && x.gesloten_door === 'david' && /^app \d{1,2}-\d{1,2} \d{1,2}:\d{2}: David tikte Niet meer nodig$/.test(x.bewijs || '') && (!b.p_sleutel || x.sleutel === b.p_sleutel)).forEach((x) => {
         ((x.herkomst && x.herkomst.wv) || []).forEach((n) => {
           const w = (sbStaat.wvItems || []).find((y) => y.id === Number(n));
           if (!w || w.status !== 'geblokkeerd' || !/^\s*david/i.test(w.geblokkeerd_door || '')) return;
@@ -4773,7 +4773,8 @@ async function bewijs(o) {
         r = await K({ id: 13, van: 'open', keuze: 'vervallen' });
         const rT = await K({ id: 13, keuze: 'terug' });
         await new Promise((z) => setTimeout(z, 500));
-        toets('wv506 ↩️ binnen de minuut: punt weer open, rij erachter blijft op jou wachten', r.status === 200 && rT.status === 200 && sbStaat.vj[sbStaat.vj.length - 3].status === 'open' && w(411).status === 'geblokkeerd', JSON.stringify([rT.status, w(411).status]));
+        toets('wv506 ↩️ binnen de minuut: punt weer open, timer gewist (geen doorzetten), rij erachter blijft op jou wachten', r.status === 200 && rT.status === 200 && sbStaat.vj[sbStaat.vj.length - 3].status === 'open' && w(411).status === 'geblokkeerd'
+          && !nD().some((x) => x.b.p_sleutel === 'wv506-terug') && !H.appStaat.vjDoorzet[13], JSON.stringify([rT.status, w(411).status, nD().map((x) => x.b.p_sleutel)]));
         const nD1 = nD().length;
         r = await K({ id: 15, van: 'open', keuze: 'gedaan' });
         await new Promise((z) => setTimeout(z, 500));
