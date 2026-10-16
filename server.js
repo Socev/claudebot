@@ -11189,6 +11189,9 @@ setInterval(opruimJobs, 5 * 60 * 1000);
 const BERICHT_VEEG_MAP = process.env.BERICHT_VEEG_MAP || '/opt/data/mk-scripts/bericht-wacht';
 const BERICHT_VEEG_SCRIPT = process.env.BERICHT_VEEG_SCRIPT || '/opt/data/mk-scripts/bericht.py';
 function berichtVeeg() {
+  // Fable wv390 ronde 3 #1: niet op een server in een wegwerpmap of de passieve kant; die zouden /bericht/stand op zichzelf
+  // vragen (404/409) en een onterechte Telegram-kopie sturen voor een bericht dat de echte pod wel bezorgde.
+  if (SERVER_ECHT !== true || !rolPrimair()) return false;
   try {
     if (!fs.readdirSync(BERICHT_VEEG_MAP).some(function (f) { return f.endsWith('.json'); })) return false;
     if (!fs.existsSync(BERICHT_VEEG_SCRIPT)) return false;
