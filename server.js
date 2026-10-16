@@ -9483,7 +9483,10 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'proef', 'droomronde', 'ideeenm
   'stiltewachter', 'meelezer', 'nachtwerk', 'werkkamer-toegang', 'foutmelder', 'script', 'socev-spreekt', 'heartbeat', 'vergaderbriefing',
   'parro', 'signal', 'teams', 'gambia', 'raw-input', 'files-portaal', 'voorlezen', 'briefing', 'actielijst', 'agenda', 'actie-bewaker',
   'agenda-wachter', 'correspondentie-wachter', 'dienstwaarschuwer', 'waarnemingzoeker',
-  'agentrapport-david', 'stiltewachter-david']);   // wv300: eigen bron per kanaal (agentrapport en stiltewachter dienen ook de machinekamer)
+  'agentrapport-david', 'stiltewachter-david',   // wv300: eigen bron per kanaal (agentrapport en stiltewachter dienen ook de machinekamer)
+  'droomronde-wachter']);   // wv390: Wachter melden van de droomronde (wv299). Bewust NIET 'echt-alarm' (Werkvoorraad-tikker, wv358): dat alarm
+                            // meldt juist een pod in een wegwerpmap, waar /bericht 200 geeft in lege data; het blijft op Telegram (§ 4.6).
+
 const BERICHT_TEKST_MAX = 60000;
 const BERICHT_BODY_MAX = 256 * 1024;
 const BERICHT_BESTAND_BODY_MAX = 28 * 1024 * 1024;   // base64 van 20 MB (27,96e6) + JSON; daarboven 413, nooit midden in een verzoek afbreken (Fable § 8 #4)

@@ -3665,6 +3665,12 @@ async function bewijs(o) {
       const rKl = await bq('/bericht', B({ klasse: 'heel-dringend' }));
       const rKa = await bq('/bericht', B({ kanaal: 'cijfer-meester' }));
       toets('23 onbekende bron / klasse / kanaal -> 400', r.status === 400 && rKl.status === 400 && rKa.status === 400, JSON.stringify([r.j, rKl.j, rKa.j]));
+      // wv390: droomronde-wachter is een bron; echt-alarm (tikker, wegwerpmap-alarm) bewust niet: 400 -> terugval Telegram in de sub
+      {
+        const rDw = await bq('/bericht', B({ bron: 'droomronde-wachter', klasse: 'dringend', sleutel: 'wv390-dw' }));
+        const rEa = await bq('/bericht', B({ bron: 'echt-alarm', sleutel: 'wv390-ea' }));
+        toets('23 wv390: bron droomronde-wachter -> 200, echt-alarm -> 400', rDw.status === 200 && rDw.j.ok === true && rEa.status === 400 && /onbekende bron/.test(rEa.j.fout), JSON.stringify([rDw.status, rDw.j, rEa.j]));
+      }
       r = await bq('/bericht', B({ tekst: 'x'.repeat(60001) }));
       toets('23 tekst > 60.000 -> 413 terugval', r.status === 413 && r.j.terugval === true, JSON.stringify(r.j));
       // wv452 (Fable KAN 3): bron actielijst leegt het geheugen van Vandaag (de rijen staan al open); een andere bron niet
