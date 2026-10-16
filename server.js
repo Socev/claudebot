@@ -11180,6 +11180,27 @@ function opruimJobs() {
 // aanroepbaar in een test, zonder vijf minuten te wachten of de klok te zetten.
 setInterval(opruimJobs, 5 * 60 * 1000);
 
+// ── veegronde van de scripthelper (wv390, Fable ronde 2 #1-#2) ─────────────
+// /opt/data/mk-scripts/bericht.py (berichten van machinekamer-scripts via /bericht) houdt wat nog moet gebeuren als wachtbestand
+// in bericht-wacht/: een melding die 23-07 tot 07:00 wacht (stap tot7), een mislukte Telegram-kopie (opnieuw), of een nakijkproces
+// dat met de pod stierf. Zonder vaste aanroeper bleef zo'n bestand liggen tot het volgende script meldde. Elke 5 minuten (en 1
+// minuut na de start) start de pod daarom `bericht.py --veeg`, maar alleen als er een wachtbestand is; het script claimt zelf
+// atomair (dubbele rondes kunnen geen kwaad). Vergeefse start = alleen een logregel.
+const BERICHT_VEEG_MAP = process.env.BERICHT_VEEG_MAP || '/opt/data/mk-scripts/bericht-wacht';
+const BERICHT_VEEG_SCRIPT = process.env.BERICHT_VEEG_SCRIPT || '/opt/data/mk-scripts/bericht.py';
+function berichtVeeg() {
+  try {
+    if (!fs.readdirSync(BERICHT_VEEG_MAP).some(function (f) { return f.endsWith('.json'); })) return false;
+    if (!fs.existsSync(BERICHT_VEEG_SCRIPT)) return false;
+    const p = spawn('python3', [BERICHT_VEEG_SCRIPT, '--veeg'], { detached: true, stdio: 'ignore', env: process.env });
+    p.on('error', function (e) { logError('bericht-veeg', e); });
+    p.unref();
+    return true;
+  } catch (e) { if (e.code !== 'ENOENT') logError('bericht-veeg', e); return false; }
+}
+setTimeout(berichtVeeg, 60 * 1000).unref();
+setInterval(berichtVeeg, 5 * 60 * 1000).unref();
+
 // ── wekker voor de offsite-backup ───────────────────────────────────────────
 // Waarom dit bestaat: /opt/data/bin/vault-offsite.sh bestaat en werkt, maar
 // NIETS riep het periodiek aan. Er is geen cron in deze container en run.sh
