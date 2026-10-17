@@ -25,7 +25,8 @@ for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_COD
                       ['const BERICHT_KIJKT_MS = 60 * 1000;', 'const BERICHT_KIJKT_MS = 300;'],   // wv292
                       ['const BERICHT_KIJKT_MARGE_MS = 8 * 1000;', 'const BERICHT_KIJKT_MARGE_MS = 150;'],
                       ['const APP_VJ_DOORZET_MS = APP_VJ_TERUG_MS + 75 * 1000;', 'const APP_VJ_DOORZET_MS = 300;'],   // wv506
-                      ['function berichtUur() { return Number(', 'function berichtUur() { if (TOETSBUUR() !== null) return TOETSBUUR(); return Number(']]) {
+                      ['function berichtUur() { return Number(', 'function berichtUur() { if (TOETSBUUR() !== null) return TOETSBUUR(); return Number('],
+                      ['function PROEF3A_UUR(u) { return u; }', 'function PROEF3A_UUR(u) { return TOETSBUUR() !== null ? TOETSBUUR() : u; }']]) {   // PROEF3A (wv581)
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
 }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'apptoets-'));
@@ -4366,6 +4367,121 @@ async function bewijs(o) {
       st = await bq('/bericht/stand', { secret: GEH, id: idH });
       toets('23 wv292 Fable #2 herstart: controle_na ligt na nu (n8n wacht, geeft niet op)', st.j.push_klaar === false && Date.parse(st.j.controle_na) > Date.now() + 60000, JSON.stringify(st.j));
       clearTimeout(H.appStaat.berichtPush.machinekamer.timer); H.appStaat.berichtPush = null;
+
+      // ── 23p. PROEF3A (wv581, wegwerp): proef op de Pixel — cookie-only route, interne trigger, verstoord-haak, M1 ──
+      {
+        const VL = vm.runInContext('PROEF3A_VLAG', ctx), LG = vm.runInContext('PROEF3A_LOG', ctx);
+        const vlag = () => (fs.existsSync(VL) ? JSON.parse(fs.readFileSync(VL, 'utf8')) : null);
+        const logR = () => (fs.existsSync(LG) ? fs.readFileSync(LG, 'utf8').trim().split('\n').filter(Boolean).map((x) => JSON.parse(x)) : []);
+        const T = (x) => bq('/bericht/proef-seintje', Object.assign({ secret: GEH }, x));
+        const R = (x, o) => vraag('POST', '/app/proef-seintje', x, Object.assign({ pot: P.jar }, o || {}));
+        const pj0 = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8'));
+        const zetLaatst = (msGeleden) => { const q = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')); q.apparaten[pId].laatst = { op: new Date(Date.now() - msGeleden).toISOString(), status: 201, reden: 'antwoord hoofd' }; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(q)); };
+        if (fs.existsSync(VL)) fs.unlinkSync(VL);
+        toetsBUur = 12; pushStaat.status = 201; pushStaat.traag = 0; H.appStaat.tellers.proef3a = [];
+        let q = await R({ stap: 'vraag', sw: 'proef3a-1' });
+        toets('23p zonder vlag: 200 proef null, geen logregel, stil in de audit', q.status === 200 && q.j.proef === null && logR().length === 0 && !/proef-seintje/.test(fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8')), JSON.stringify(q));
+        q = await R({ stap: 'zomaar' });
+        toets('23p onbekende stap -> 400', q.status === 400, JSON.stringify(q));
+        q = await R({ stap: 'vraag' }, { poort: 'x'.repeat(64) });
+        toets('23p zonder poortgeheim -> 401 (route achter de poort)', q.status === 401, JSON.stringify(q));
+        q = await R({ stap: 'vraag' }, { jwt: false });
+        toets('23p zonder Access-bewijs -> 401', q.status === 401, JSON.stringify(q));
+        r = await bq('/bericht/proef-seintje', { doe: 'aan', apparaat: pId });
+        toets('23p trigger zonder geheim -> 401', r.status === 401, JSON.stringify(r));
+        r = await T({ doe: 'toon' });
+        toets('23p trigger zonder vlag -> 409', r.status === 409 && /niet aan/.test(r.j.fout), JSON.stringify(r));
+        r = await T({ doe: 'aan', apparaat: 'f'.repeat(16) });
+        toets('23p aan met onbekend apparaat -> 400', r.status === 400, JSON.stringify(r));
+        r = await T({ doe: 'aan', apparaat: pId, dagen: 99 });
+        const v1 = vlag();
+        toets('23p aan: vlag voor P, hooguit 5 dagen, nr 0, geen sw', r.status === 200 && v1.apparaat === pId && Date.parse(v1.tot) - Date.now() <= 5 * 86400000 + 5000 && Date.parse(v1.tot) - Date.now() > 4.9 * 86400000 && v1.nr === 0 && !v1.sw_op, JSON.stringify(v1));
+        zetLaatst(11 * 60000);
+        r = await T({ doe: 'toon' });
+        toets('23p trigger vóór de proef-SW op het apparaat -> 409', r.status === 409 && /service-worker/.test(r.j.fout), JSON.stringify(r));
+        q = await R({ stap: 'kijk', sw: '', voor: ['socev'] });
+        toets('23p kijk van P zonder SW-versie: marker_tot = vlag.tot, sw_op blijft leeg', q.status === 200 && q.j.marker_tot === v1.tot && !vlag().sw_op, JSON.stringify(q.j));
+        q = await R({ stap: 'kijk', sw: 'proef3a-1', voor: ['user_visible_auto_notification', 'x y'] }, { pot: { koppel: '', apparaat: '', sessie: '' } });
+        toets('23p kijk zonder cookie: geen marker, log cookie geen', q.status === 200 && !q.j.marker_tot && logR().slice(-1)[0].cookie === 'geen' && !vlag().sw_op, JSON.stringify([q.j, logR().slice(-1)[0]]));
+        q = await R({ stap: 'kijk', sw: 'proef3a-1' }, { pot: { koppel: '', apparaat: pId + '.' + '0'.repeat(64), sessie: '' } });
+        toets('23p kijk met vals cookie: geen marker, log cookie ongeldig', !q.j.marker_tot && logR().slice(-1)[0].cookie === 'ongeldig', JSON.stringify(logR().slice(-1)[0]));
+        q = await R({ stap: 'kijk', sw: 'proef3a-1', voor: ['user_visible_auto_notification', 'x y', 'socev'] });
+        const lk = logR().slice(-1)[0];
+        toets('23p kijk van P met de proef-SW: sw_op gezet, tags gelogd (ongeldige als ?)', q.j.marker_tot && !!vlag().sw_op && lk.cookie === 'geldig' && lk.apparaat === pId && JSON.stringify(lk.voor) === JSON.stringify(['user_visible_auto_notification', '?', 'socev']), JSON.stringify(lk));
+        toetsBUur = 21; r = await T({ doe: 'toon' });
+        toets('23p trigger om 21 u -> 409 buiten 08-21', r.status === 409 && /08-21/.test(r.j.fout), JSON.stringify(r));
+        toetsBUur = 7; r = await T({ doe: 'toon' });
+        toets('23p trigger om 7 u -> 409', r.status === 409, JSON.stringify(r));
+        toetsBUur = 12;
+        zetLaatst(9 * 60000);
+        r = await T({ doe: 'toon' });
+        toets('23p echte push 9 min geleden -> 409 (rem 10 min)', r.status === 409 && /echte push/.test(r.j.fout), JSON.stringify(r));
+        zetLaatst(11 * 60000);
+        const laatstVoor = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pId].laatst;
+        r = await T({ doe: 'sluit' });
+        toets('23p sluit zonder voorafgaande toon -> 409', r.status === 409 && /sluit alleen/.test(r.j.fout), JSON.stringify(r));
+        pushes.length = 0;
+        r = await T({ doe: 'toon' });
+        const pp = pushes[0] || { h: {} };
+        const laatstNa = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pId].laatst;
+        toets('23p toon: één push naar P met Topic socev-proef, TTL 300, Urgency high', r.status === 200 && r.j.nr === 1 && pushes.length === 1 && /p23$/.test(pp.url) && pp.h.Topic === 'socev-proef' && pp.h.TTL === '300' && pp.h.Urgency === 'high', JSON.stringify([r.j, pushes.map((x) => [x.url, x.h.Topic, x.h.TTL])]));
+        toets('23p Fable M1: proefpush laat push.json laatst (laatste echte push) ongemoeid', JSON.stringify(laatstVoor) === JSON.stringify(laatstNa), JSON.stringify([laatstVoor, laatstNa]));
+        toets('23p proefpush in de audit met reden proef3a toon', /"route":"push"[^\n]*"reden":"proef3a toon"/.test(fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8')));
+        r = await T({ doe: 'niets' });
+        toets('23p tweede proefpush terwijl de eerste nog geen uitslag heeft -> 409', r.status === 409 && /loopt nog/.test(r.j.fout), JSON.stringify(r));
+        q = await R({ stap: 'vraag', sw: 'proef3a-1' }, { pot: { koppel: '', apparaat: '', sessie: '' } });
+        toets('23p vraag zonder cookie -> null (opdracht blijft staan)', q.j.proef === null && !vlag().wacht.gevraagd, JSON.stringify(q.j));
+        q = await R({ stap: 'vraag', sw: '' });
+        toets('23p vraag van P zonder proef-SW -> null', q.j.proef === null && !vlag().wacht.gevraagd, JSON.stringify(q.j));
+        q = await R({ stap: 'vraag', sw: 'proef3a-1', voor: [], zichtbaar: false });
+        toets('23p vraag van P met proef-SW -> {nr 1, toon}', q.j.proef && q.j.proef.nr === 1 && q.j.proef.doe === 'toon' && !!vlag().wacht.gevraagd, JSON.stringify(q.j));
+        q = await R({ stap: 'vraag', sw: 'proef3a-1' });
+        toets('23p tweede vraag -> null (eenmalig)', q.j.proef === null, JSON.stringify(q.j));
+        r = await T({ doe: 'sluit' });
+        toets('23p sluit vóór de uitslag van toon -> 409', r.status === 409, JSON.stringify(r));
+        q = await R({ stap: 'uitslag', nr: 1, doe: 'toon', voor: [], na: ['socev-proef'], zichtbaar: false, ms: 812.4, fout: 'x;y', sw: 'proef3a-1' });
+        const lu = logR().slice(-1)[0];
+        toets('23p uitslag: gelogd en gevalideerd, wacht.uitslag gezet', q.status === 200 && lu.stap === 'uitslag' && lu.nr === 1 && lu.doe === 'toon' && lu.ms === 812 && lu.fout === '' && JSON.stringify(lu.na) === '["socev-proef"]' && !!vlag().wacht.uitslag, JSON.stringify(lu));
+        pushes.length = 0;
+        r = await T({ doe: 'sluit' });
+        toets('23p sluit na toon met uitslag -> push nr 2', r.status === 200 && r.j.nr === 2 && pushes.length === 1, JSON.stringify(r.j));
+        await R({ stap: 'vraag', sw: 'proef3a-1' });
+        await R({ stap: 'uitslag', nr: 2, doe: 'sluit', voor: ['socev-proef'], na: [], zichtbaar: false, ms: 300 });
+        r = await T({ doe: 'niets' });
+        toets('23p niets -> push nr 3', r.status === 200 && r.j.nr === 3, JSON.stringify(r.j));
+        // echte push naar P terwijl nr 3 nog niet is opgehaald -> verstoord (vóór de fetch), de SW krijgt null
+        const r3 = await H.appPushStuur(pId, 'antwoord hoofd');
+        toets('23p echte push met open opdracht: verstoord gezet, echte push met Topic socev', r3.ok && !!vlag().wacht.verstoord && pushes.slice(-1)[0].h.Topic === 'socev' && pushes.slice(-1)[0].h.TTL === String(6 * 3600), JSON.stringify([vlag().wacht, pushes.slice(-1)[0].h.Topic]));
+        q = await R({ stap: 'vraag', sw: 'proef3a-1' });
+        toets('23p vraag na verstoord -> null (gewoon seintje)', q.j.proef === null, JSON.stringify(q.j));
+        toets('23p echte push werkt push.json laatst wel bij', JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pId].laatst.reden === 'antwoord hoofd');
+        // venster verlopen
+        zetLaatst(11 * 60000);
+        r = await T({ doe: 'niets' });
+        { const vv = vlag(); vv.wacht.op = new Date(Date.now() - 11 * 60000).toISOString(); fs.writeFileSync(VL, JSON.stringify(vv)); }
+        q = await R({ stap: 'vraag', sw: 'proef3a-1' });
+        toets('23p opdracht ouder dan 10 min -> null', r.status === 200 && q.j.proef === null, JSON.stringify([r.j, q.j]));
+        r = await T({ doe: 'toon' });
+        toets('23p na een verlopen opdracht mag een nieuwe', r.status === 200 && r.j.nr === 5, JSON.stringify(r.j));
+        // noodstop: route 503 (SW toont gewoon), trigger 503
+        fs.writeFileSync(UIT, '');
+        q = await R({ stap: 'vraag', sw: 'proef3a-1' }); r = await T({ doe: 'stand' });
+        fs.unlinkSync(UIT);
+        toets('23p noodstop: route 503 en trigger 503', q.status === 503 && r.status === 503, JSON.stringify([q.status, r.status]));
+        // teller
+        H.appStaat.tellers.proef3a = Array(120).fill(Date.now());
+        q = await R({ stap: 'kijk' });
+        H.appStaat.tellers.proef3a = [];
+        toets('23p teller: boven 120 per uur -> 429', q.status === 429, JSON.stringify(q));
+        const pv = logR().filter((x) => x.stap === 'push').map((x) => x.nr);
+        toets('23p log: push-regels 1,2,3,4,5', JSON.stringify(pv) === '[1,2,3,4,5]', JSON.stringify(pv));
+        toets('23p log bevat geen onbekende velden', logR().every((x) => Object.keys(x).every((k) => ['t', 'stap', 'cookie', 'apparaat', 'sw', 'voor', 'zichtbaar', 'antwoord', 'nr', 'doe', 'na', 'ms', 'fout', 'status', 'ok', 'reden', 'tot'].includes(k))), JSON.stringify(logR().map((x) => Object.keys(x))));
+        r = await T({ doe: 'uit' });
+        q = await R({ stap: 'vraag', sw: 'proef3a-1' });
+        toets('23p uit: vlag weg, route weer null, stand actief false', r.status === 200 && !fs.existsSync(VL) && q.j.proef === null && (await T({ doe: 'stand' })).j.actief === false, JSON.stringify(q.j));
+        fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pj0));
+        toetsBUur = 12;
+      }
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), regOrig23);
     }
 
