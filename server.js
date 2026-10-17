@@ -6956,19 +6956,17 @@ async function appAutokastje(req, res) {
 // ── Vandaag (fase 6a, wv136; bouwplan § 4.9): je dag in één oogopslag, alleen lezen ──
 // Bronnen die er al waren, geen nieuwe schrijfroute: agenda vandaag/morgen en de Gmail-concepten via de leesacties `agenda` en
 // `mail_zoeken` van *AI - Agenda-Wachter API* (de pod zoekt het webhookpad zelf op in n8n, zodat het niet in de code staat),
-// het actielijstje uit Data Table `voorwerk_portie` (de regels zijn daar al door het patiëntvangnet van fase C gegaan) en de
+// het actielijstje uit Data Table `voorwerk_portie` (sinds wv576 met de volle tekst, zonder patiëntvangnet) en de
 // voorwerkpagina's uit `00_Systeem/Voorwerk/`. Alles alleen in het geheugen van de pod (3 min, alle apparaten delen het), niets op
 // schijf; de app houdt het alleen in het geheugen (§ 4.11). Omschrijvingen van afspraken en de inhoud van concepten komen niet mee.
-// Titels in de agenda's David en Werk die op patiëntcontact kunnen wijzen, worden verborgen (zelfde norm als de vergaderbriefing,
-// Fable-review wv136 #2); op een apparaat met een vaste plek geen Gezin/Schapies en geen concepten (#5).
+// Agendatitels komen volledig mee: de app leest alleen David, en naar hem toe filteren we nooit op mogelijke patiëntgegevens
+// (wv576, David 16-10: "Jij moet NOOIT dingen filteren naar mij toe"; was Fable-review wv136 #2). Op een apparaat met een vaste
+// plek geen Gezin/Schapies en geen concepten (#5).
 const APP_VANDAAG_CACHE_MS = 3 * 60 * 1000;   // n8n bewaart elke run van de Agenda-API met inhoud (Fable-review wv136 #1): zuinig lezen
 const APP_AGENDA_WF = process.env.APP_AGENDA_WF || 'JD0yNxPq79jXk25J';          // AI - Agenda-Wachter API (alleen lezen)
 const APP_PORTIE_TABEL = process.env.APP_PORTIE_TABEL || 'jTz5tgWWPhkFz9Be';    // n8n Data Table voorwerk_portie
 const APP_VOORWERK_DIR = path.join(process.env.APP_VAULT_DIR || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', '00_Systeem', 'Voorwerk');
 const APP_VOORWERK_MAX = 64 * 1024;
-// Woorden die op een patiëntcontact kunnen wijzen (huisbezoek, visite, mw./dhr., MDO …); alleen in de agenda's David en Werk.
-const APP_PATIENT_RE = /(^|[^a-z])((huis)?bezoek(en)?|visite|pati[eë]nt(en)?|pat\.|consult|mdo|mevr(ouw)?\.?|meneer|mw\.|dhr\.?|fam\.|dossier)([^a-z]|$)/i;
-const APP_AGENDA_WERK = /^(david|werk)$/i;
 const APP_AGENDA_PRIVE = /^(gezin|schapies)$/i;
 const APP_GMAIL_CONCEPTEN = 'https://mail.google.com/mail/?authuser=d.schaap@gmail.com#drafts';
 
@@ -7031,9 +7029,8 @@ function appAfspraken(events, dag) {
       tot = isFinite(t) && td === dag ? appKlok(e.einde) : null;   // loopt door: geen eindtijd
     }
     if (!erop) return;
-    const verborgen = APP_AGENDA_WERK.test(String(e.kalender || '')) && APP_PATIENT_RE.test(String(e.titel || '') + ' ' + String(e.locatie || ''));
-    uit.push({ kalender: appKort(e.kalender, 20), titel: verborgen ? 'afspraak (titel verborgen)' : appKort(e.titel || '(zonder titel)', 200),
-      locatie: e.locatie && !verborgen ? appKort(e.locatie, 120) : null, verborgen: verborgen,
+    uit.push({ kalender: appKort(e.kalender, 20), titel: appKort(e.titel || '(zonder titel)', 200),
+      locatie: e.locatie ? appKort(e.locatie, 120) : null, verborgen: false,
       hele_dag: hele, meerdaags: meerdaags, start: String(e.start).slice(0, 32), van: van, tot: tot });
   });
   uit.sort(function (a, b) { return (a.hele_dag === b.hele_dag ? 0 : a.hele_dag ? -1 : 1) || (Date.parse(a.start) || 0) - (Date.parse(b.start) || 0); });
@@ -7247,7 +7244,8 @@ async function appActieRoute(req, res, a, d) {
 // beheerronde opent bij Gedaan de werkvoorraadrij met niet_voor +15 min (Fable M4), dus een ↩️ binnen de minuut start nooit een
 // agent. Uitzondering sinds wv506: bij Niet meer nodig zet de pod na de ↩️-minuut de rij erachter op vervallen (appVjDoorzetLater). wv404 (David 10-10, herziet M8): een besluit krijgt in de details Ja / Nee / Anders onder de volledige vraag en
 // het voorstel; de druk gaat door appKnop (zelfde vingerafdruk, rij, idempotentie in vragen.json), zie appVoorJouKnop. Privé-punten (kolom prive) niet op een apparaat met een vaste plek (M6). In de lijst geen bewijs, herkomst of
-// meting; die alleen in de details. Teksten staan al gefilterd in de tabel (voor_jou_tekst_ok); de pod filtert de registertekst zelf.
+// meting; die alleen in de details. Teksten staan al gefilterd in de tabel (voor_jou_tekst_ok); de pod houdt alleen sleutelachtige
+// registertekst tegen, nooit tekst die op een patiënt lijkt (wv576, David 16-10: naar hem toe nooit filteren).
 const APP_VJ_CACHE_MS = 60 * 1000;
 const APP_VJ_PER_UUR = 60;
 const APP_VJ_TERUG_MS = 60 * 1000;   // ↩️ zoals bij het actielijstje
@@ -7258,13 +7256,12 @@ const APP_VJ_WAAR = { pixel: 'op je telefoon', pc: 'op de pc', praktijk: 'op de 
 const APP_VJ_REGISTER = path.join(process.env.APP_VAULT_DIR || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', '00_Systeem', 'Open vragen aan David.md');
 // Sleutelachtige tekst (zelfde norm als machinekamer.voor_jou_tekst_ok); registertekst gaat niet door de RPC-weigering
 const APP_VJ_SLEUTEL_RE = /(sk-[a-z0-9_-]{16,}|ghp_[a-z0-9]{20,}|github_pat_|xox[abpr]-|eyJ[a-zA-Z0-9_-]{20,}\.|AKIA[A-Z0-9]{12,}|-----BEGIN|[A-Za-z0-9_+=-]{40,})/i;
-const APP_VJ_PATIENT_RE = /(^|[^a-z])(pati[eë]nt(en|e)?|bsn|geboortedatum|huisbezoek(en)?|visite|mevr\.?|dhr\.|mw\.|casus)([^a-z]|$)/i;
 appStaat.tellers.voorjou = appStaat.tellers.voorjou || [];
 appStaat.tellers.vjdetail = appStaat.tellers.vjdetail || [];
 appStaat.vjTerug = appStaat.vjTerug || {};
 
 function appVjDag(ymd) { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '')); return m ? Number(m[3]) + '-' + Number(m[2]) : ''; }
-function appVjVeilig(t) { t = String(t == null ? '' : t); return !(APP_VJ_SLEUTEL_RE.test(t) || APP_VJ_PATIENT_RE.test(t) || APP_PATIENT_RE.test(t)); }
+function appVjVeilig(t) { return !APP_VJ_SLEUTEL_RE.test(String(t == null ? '' : t)); }   // alleen sleutels; geen patiënttoets (wv576)
 // Grijze regel 2: wanneer · waar · duur (bouwplan § 2)
 function appVjRegel2(p, vandaag) {
   const delen = [];
@@ -7675,8 +7672,9 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
 // ── Details bij het actielijstje (wv335; bouwplan Voor jou § 2, § 4.4): GET /app/vandaag/actie/<datum>/<positie> ──
 // Uit voorwerk_portie de bron + sleutel van die regel, dan alleen-lezen de bron zelf: de Todoist-taak (inhoud, beschrijving, link),
 // de actie_state-rij (volledige tekst, bronpagina-naam, deadline) of de correspondentie_state-rij (onderwerp, aan, datum, Gmail-link).
-// Een regel die het patiëntvangnet al verborg ("tekst weggelaten") of een brontekst die op patiëntcontact wijst: alleen "tekst
-// verborgen". Op een apparaat met een vaste plek geen privébronnen (Todoist-project Privé, privé-entiteiten, het privé-postvak).
+// Altijd de volle brontekst, ook als het oude patiëntvangnet de regel ooit verving door "tekst weggelaten" (wv576, David 16-10:
+// naar hem toe nooit filteren); alleen sleutelachtige tekst blijft weg. Op een apparaat met een vaste plek geen privébronnen
+// (Todoist-project Privé, privé-entiteiten, het privé-postvak).
 // Niets op schijf; niet in het geheugen van Vandaag.
 const APP_ACTIE_STATE_TABEL = process.env.APP_ACTIE_STATE_TABEL || 'vNAY2dVRpSx1l3Ri';
 const APP_CORR_STATE_TABEL = process.env.APP_CORR_STATE_TABEL || 'pnX6vvg2iv256HAB';
@@ -7689,7 +7687,7 @@ function appVjRegels(s, n) {
   s = String(s == null ? '' : s).replace(/\r/g, '').replace(/[\u0000-\u0009\u000b-\u001f\u007f]+/g, ' ').replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   return s.length > n ? s.slice(0, n - 1).replace(/\s+\S*$/, '') + '…' : s;
 }
-function appBronVerborgen(t) { return /tekst weggelaten/i.test(String(t || '')) || !appVjVeilig(t); }
+function appBronVerborgen(t) { return !appVjVeilig(t); }
 async function appTodoistTaak(id) {
   const tok = process.env.TODOIST_MCP_TOKEN;
   if (!tok) throw new Error('todoist niet ingericht');
@@ -8040,8 +8038,9 @@ async function appPraktijkenRoute(req, res, a) {
 // ── Projecten (wv373, bouwplan § 4.9d): per entiteit de komende deadlines en de lopende zaken, alleen lezen ──
 // Bronnen: 00_Systeem/Deadlines.md (tabel onder "## Actueel") en 00_Systeem/actueel.md (§ Lopende zaken). Deterministisch
 // geparsed, geen taalmodel; in het geheugen op de mtime van beide bestanden + de datum van vandaag. Niets op schijf, stil.
-// Fable-ontwerpreview wv373: M1 pipes in wikilinks, M2 gesloten lijst statuswoorden, M3 oude datum maskeren (woord alleen
-// is geen trigger), M4 vaste plek zonder medewerkersregels en zonder Lopend, M5 rclone één tegelijk met grenzen.
+// Fable-ontwerpreview wv373: M1 pipes in wikilinks, M2 gesloten lijst statuswoorden, M4 vaste plek zonder medewerkersregels en
+// zonder Lopend, M5 rclone één tegelijk met grenzen. M3 (oude datum maskeren, BSN-rij weg) is eruit sinds wv576: David leest dit
+// alleen zelf en wil nooit gefilterde tekst (16-10).
 const APP_PROJ_ENT = [
   { code: 'TG', naam: 'Tolgaarde' }, { code: 'GH', naam: 'Groenhouten' }, { code: 'POT', naam: 'POT POH-GGZ' },
   { code: 'KM', naam: 'Kostenmaatschap' }, { code: 'HOLD', naam: 'Holding' }, { code: 'PROJ', naam: 'Projecten' },
@@ -8082,13 +8081,6 @@ function appProjPlat(s) {
     const d = x.split(/\\?\|/); const alias = d[1] ? d[1] : d[0].split('/').pop(); return alias.replace(/#.*$/, '');
   }).replace(/~~[^~]*~~/g, '').replace(/\*\*|__|\*|`/g, '').replace(/\\\|/g, '|').replace(/\s+/g, ' ').trim();
 }
-// Een volledige datum d-m-jjjj van ≥ 12 jaar terug lijkt op een geboortedatum: maskeren (Fable wv373 M3).
-function appProjMasker(s, jaar) {
-  let raak = false;
-  const uit = String(s || '').replace(/\b(\d{1,2})[-./](\d{1,2})[-./](\d{4})\b/g, function (m, d, mm, j) { if (Number(j) <= jaar - 12) { raak = true; return '[datum]'; } return m; });
-  // datum van de regel + "wordt 41" geeft het geboortejaar alsnog (Fable diffreview wv373 #2)
-  return raak ? uit.replace(/\bwordt \d{1,3}\b/g, 'wordt …') : uit;
-}
 function appProjWikiPaden(s) {
   const u = [], re = /\[\[([^\]|\\#]+)/g;
   let m;
@@ -8119,7 +8111,7 @@ function appProjCellen(regel) {
 function appProjDeadlines(tekst, vandaag, fouten) {
   const sectie = String(tekst).split(/^## Actueel\s*$/m)[1];
   if (sectie === undefined) { fouten.push('het deadline-register heeft geen sectie Actueel'); return []; }
-  const regels = sectie.split(/^## /m)[0].split('\n'), uit = [], jaar = Number(vandaag.slice(0, 4));
+  const regels = sectie.split(/^## /m)[0].split('\n'), uit = [];
   let scheef = 0;
   regels.forEach(function (regel) {
     if (!/^\|\s*\d{4}-\d{2}/.test(regel)) return;
@@ -8130,15 +8122,14 @@ function appProjDeadlines(tekst, vandaag, fouten) {
     const eerste = /^\s*\*\*([\s\S]+?)\*\*/.exec(wat);
     const kop = eerste ? appProjPlat(eerste[1]) : '';
     if (APP_PROJ_DICHT.test(kop) || /niet meer seinen/i.test(kop) || /^\s*(vervallen|geen actie)/i.test(appProjPlat(c[3]))) return;
-    if (appBsnAchtig(regel)) return;   // vangnet grondwet 3: hele rij weg
     const ents = appProjEntiteiten(c[1]);
     if (!ents) return;
     const dagen = Math.round((Date.parse(datum + 'T12:00:00Z') - Date.parse(vandaag + 'T12:00:00Z')) / 86400000);
     const sein = Number(String(c[4]).replace(/\D/g, '')) || 0;
     const bronPad = appProjWikiPaden(c[5])[0] || null;
     uit.push({ datum: datum, dagen: dagen, ents: ents,
-      titel: appKort(appProjMasker(appProjTitel(wat), jaar), 160) || '(zonder titel)',
-      actie: appKort(appProjMasker(appProjPlat(c[3]), jaar), 120),
+      titel: appKort(appProjTitel(wat), 160) || '(zonder titel)',
+      actie: appKort(appProjPlat(c[3]), 120),
       sein: dagen >= 0 && dagen <= sein,
       bron: { naam: bronPad ? appKort(appProjPlat('[[' + (/\[\[([^\]]+)\]\]/.exec(c[5]) || [null, bronPad])[1] + ']]'), 80) : appKort(appProjPlat(c[5]), 80), pad: bronPad },
       hr: /\/(Medewerkers|Gesprekken)\//.test(regel) || /^20_Prive\//.test(bronPad || '') || APP_PROJ_PERSONEEL.test(appProjPlat(appProjTitel(wat)) + ' ' + appProjPlat(c[3])) });
@@ -8168,11 +8159,11 @@ function appProjNamen() {
 function appProjLopend(tekst, vandaag, fouten) {
   const sectie = String(tekst).split(/^## Lopende zaken\s*$/m)[1];
   if (sectie === undefined) { fouten.push('het werkgeheugen heeft geen sectie Lopende zaken'); return []; }
-  const jaar = Number(vandaag.slice(0, 4)), namen = appProjNamen(), uit = [];
+  const namen = appProjNamen(), uit = [];
   sectie.split(/^## /m)[0].split('\n').forEach(function (regel) {
     if (!/^- /.test(regel)) return;
     const ruw = regel.slice(2);
-    if (appBsnAchtig(ruw) || APP_PROJ_SYS.test(ruw)) return;
+    if (APP_PROJ_SYS.test(ruw)) return;
     const vet = /^\s*\*\*([\s\S]+?)\*\*/.exec(ruw);
     const titel = vet ? appProjPlat(vet[1]).replace(/[.:]\s*$/, '') : '';
     const rest = appProjPlat(vet ? ruw.slice(vet.index + vet[0].length) : ruw).replace(/^[\s:.—-]+/, '').replace(/\s*→\s*$/, '');
@@ -8188,8 +8179,8 @@ function appProjLopend(tekst, vandaag, fouten) {
       if (!ents.length) appProjPlat(ruw).split(/[^A-Za-zÀ-ÿ]+/).forEach(function (w) { const c = namen[w]; if (c && c !== 'meer' && ents.indexOf(c) < 0) ents.push(c); });
     }
     const bronPad = paden[0] || null;
-    uit.push({ ents: ents.length ? ents : ['OVERIG'], titel: appKort(appProjMasker(titel || rest, jaar), 160),
-      tekst: titel ? appKort(appProjMasker(rest, jaar), 280) : '', bron: bronPad ? { naam: appKort(appProjPlat((/\[\[[^\]]+\]\]/.exec(ruw) || [''])[0]) || bronPad.split('/').pop(), 80), pad: bronPad } : null });
+    uit.push({ ents: ents.length ? ents : ['OVERIG'], titel: appKort(titel || rest, 160),
+      tekst: titel ? appKort(rest, 280) : '', bron: bronPad ? { naam: appKort(appProjPlat((/\[\[[^\]]+\]\]/.exec(ruw) || [''])[0]) || bronPad.split('/').pop(), 80), pad: bronPad } : null });
   });
   return uit;
 }

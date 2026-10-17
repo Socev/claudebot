@@ -2813,10 +2813,10 @@ async function bewijs(o) {
       const j = r.j || {};
       toets('17 200 met vandaag/morgen, geen fouten', r.status === 200 && j.vandaag === V && j.morgen === M && Array.isArray(j.fouten) && j.fouten.length === 0, JSON.stringify(j).slice(0, 400));
       const tv = (j.agenda && j.agenda.vandaag || []).map((a) => a.titel), tm = (j.agenda && j.agenda.morgen || []).map((a) => a.titel);
-      toets('17 agenda vandaag: hele dag eerst, afgezegd weg, nachtdienst erbij; scheef hele_dag-veld telt als gewone afspraak', JSON.stringify(tv) === JSON.stringify(['Vakantie', 'Scheef', 'afspraak (titel verborgen)', 'Overleg gemeente', 'Bezoek oma', 'Nachtdienst']), JSON.stringify(tv));
+      toets('17 agenda vandaag: hele dag eerst, afgezegd weg, nachtdienst erbij; scheef hele_dag-veld telt als gewone afspraak', JSON.stringify(tv) === JSON.stringify(['Vakantie', 'Scheef', 'Huisbezoek mw. Jansen', 'Overleg gemeente', 'Bezoek oma', 'Nachtdienst']), JSON.stringify(tv));
       toets('17 agenda morgen: meerdaagse vakantie, nachtdienst (geen begintijd), morgenvroeg; overmorgen niet', JSON.stringify(tm) === JSON.stringify(['Vakantie', 'Nachtdienst', 'Morgenvroeg', 'Werkoverleg Tolgaarde']), JSON.stringify(tm));
       const hb = j.agenda.vandaag[2];
-      toets('17 Werk-afspraak die op patiëntcontact wijst: titel en plek verborgen, tijd blijft; Gezin niet gefilterd (review #2)', hb.verborgen === true && hb.locatie === null && hb.van === '14:00' && !/Jansen|Dorpsstraat/.test(JSON.stringify(j)) && j.agenda.vandaag[4].verborgen === false, JSON.stringify(hb));
+      toets('17 Werk-afspraak met patiëntachtige titel: titel en plek volledig, niets verborgen (wv576, David nooit filteren)', hb.verborgen === false && hb.titel === 'Huisbezoek mw. Jansen' && hb.locatie === 'Dorpsstraat 1' && hb.van === '14:00' && j.agenda.vandaag[4].verborgen === false, JSON.stringify(hb));
       const ov = j.agenda.vandaag[3], nd = j.agenda.morgen[1];
       toets('17 tijden lokaal: 16:30-17:00, nachtdienst morgen tot 07:00 zonder begin', ov.van === '16:30' && ov.tot === '17:00' && ov.locatie === 'Teams' && nd.van === null && nd.tot === '07:00' && nd.meerdaags === true && j.agenda.vandaag[0].hele_dag === true && j.agenda.vandaag[0].meerdaags === true, JSON.stringify([ov, nd]));
       toets('17 geen omschrijving, snippet, nonce of sleutel in het antwoord', !/GEHEIM-OMSCHRIJVING|GEHEIM-SNIPPET|NONCE-|SLEUTEL-|omschrijving|snippet/.test(JSON.stringify(j)));
@@ -4669,9 +4669,9 @@ async function bewijs(o) {
       toets('27 besluit: vraag en voorstel uit het register, opmaak weg, geen Ja-knop-veld', r.status === 200 && r.j.vraag && r.j.vraag.tekst === 'Zal ik de ✅ naar de app verplaatsen? Wat er verandert: iets.' && r.j.vraag.voorstel === 'Ja — eerst één proef' && r.j.vraag.gesteld === '9-10 19:55'
         && /^Werkvoorraad wv325: .+ \(wacht op jou\)$/.test(r.j.herkomst[0].tekst), JSON.stringify([r.j.vraag, r.j.herkomst]));
       r = await vraag('GET', '/app/voor-jou/6', undefined, { pot: P.jar });
-      toets('27 register: kenmerk #wv318 kiest de juiste rij van twee op dezelfde tijd; patiëntachtige tekst verborgen', r.status === 200 && r.j.vraag && r.j.vraag.tekst === 'tekst verborgen' && !/Jansen|1950|nacontrole/.test(JSON.stringify(r.j)), JSON.stringify(r.j.vraag));
+      toets('27 register: kenmerk #wv318 kiest de juiste rij van twee op dezelfde tijd; patiëntachtige tekst volledig (wv576)', r.status === 200 && r.j.vraag && r.j.vraag.tekst === 'Gaat het om patiënt Jansen, geboortedatum 1-1-1950?' && r.j.vraag.voorstel === 'Ja' && !/nacontrole/.test(JSON.stringify(r.j)), JSON.stringify(r.j.vraag));
       r = await vraag('GET', '/app/voor-jou/11', undefined, { pot: P.jar });
-      toets('27 register: kanaal en status met patiënttekst niet getoond, alleen de tijd (Fable #2)', r.status === 200 && r.j.herkomst.some((h) => h.tekst === 'Vraag van 6-10 08:00') && !/Pietersen|Jansen/.test(JSON.stringify(r.j)), JSON.stringify(r.j.herkomst));
+      toets('27 register: kanaal en status met patiëntachtige tekst volledig getoond (wv576)', r.status === 200 && r.j.herkomst.some((h) => h.tekst === 'Vraag van 6-10 08:00 (mw. Pietersen belde) — beantwoord: bel mw. Jansen terug'), JSON.stringify(r.j.herkomst));
       const st404 = [];
       for (const q of ['/app/voor-jou/99', '/app/voor-jou/0', '/app/voor-jou/abc', '/app/voor-jou/7x', '/app/voor-jou/10']) st404.push((await vraag('GET', q, undefined, { pot: P.jar })).status);
       toets('27 details: onbekend, 0, tekst, rommel -> 404; een gesloten punt (≤ 7 d) mag wel', st404.join() === '404,404,404,404,200', st404.join());
@@ -4837,16 +4837,20 @@ async function bewijs(o) {
         && r.j.link === 'https://mail.google.com/mail/?authuser=doktersmaten@hapleusden.nl#all/198d200cd455fcc8' && !/GEHEIME/.test(JSON.stringify(r.j)), JSON.stringify(r.j));
       const nF = n8nStaat.stateFilters.length;
       r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/4', undefined, { pot: P.jar });
-      toets('27 actie-detail: regel die het vangnet al verborg -> tekst verborgen, bron niet gelezen', r.status === 200 && r.j.verborgen === true && r.j.regel === 'tekst verborgen' && r.j.tekst === null && n8nStaat.stateFilters.length === nF, JSON.stringify(r.j));
+      toets('27 actie-detail: oude regel met "tekst weggelaten" -> bron wél gelezen, niets verborgen (wv576)', r.status === 200 && r.j.verborgen === false && r.j.regel !== 'tekst verborgen' && n8nStaat.stateFilters.length === nF + 1 && /niet meer in de bewaking/.test(r.j.fout), JSON.stringify(r.j));
       r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/9', undefined, { pot: P.jar });
-      toets('27 actie-detail: brontekst die op patiëntcontact wijst -> verborgen', r.status === 200 && r.j.verborgen === true && !/Jansen|Huisbezoek/.test(JSON.stringify(r.j)), JSON.stringify(r.j));
+      toets('27 actie-detail: brontekst die op patiëntcontact wijst -> volle tekst (wv576)', r.status === 200 && r.j.verborgen === false && r.j.tekst === 'Huisbezoek mw. Jansen inplannen', JSON.stringify(r.j));
       r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/8', undefined, { pot: P.jar });
       toets('27 actie-detail: Todoist-taak bestaat niet meer -> 200 met uitleg', r.status === 200 && /bestaat niet meer/.test(r.j.fout) && r.j.tekst === null, JSON.stringify(r.j));
+      todoistStaat.taken.WEGtaak12345 = { id: 'WEGtaak12345', content: 'Sleutel sk-abcdefghijklmnopqrstuvwxyz0123 opnieuw zetten', description: '', project_id: '6gH8FxmpGHVVg5Gf', due: null };
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/8', undefined, { pot: P.jar });
+      delete todoistStaat.taken.WEGtaak12345;
+      toets('27 actie-detail: sleutelachtige brontekst blijft verborgen (wv576: alleen de patiënttoets is weg)', r.status === 200 && r.j.verborgen === true && r.j.tekst === null && !/sk-abcdef/.test(JSON.stringify(r.j)), JSON.stringify(r.j));
       const vastA = { id: 'x', soort: 'vast' };
       const dv = async (pos) => { const n = nepRes(); await H.appVandaagActieDetail({}, n, vastA, ymdP + '/' + pos); return n; };
       const v6 = await dv(6), v7 = await dv(7), v5 = await dv(5), v3 = await dv(3), v1 = await dv(1);
       r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/10', undefined, { pot: P.jar });
-      toets('27 actie-detail: tegenpartij die op een patiënt lijkt -> verborgen (Fable #1)', r.status === 200 && r.j.verborgen === true && !/Vries|Afspraak/.test(JSON.stringify(r.j)), JSON.stringify(r.j));
+      toets('27 actie-detail: tegenpartij die op een patiënt lijkt -> volledig getoond (wv576)', r.status === 200 && r.j.verborgen === false && r.j.onderwerp === 'Afspraak volgende week' && r.j.aan === 'Mw. J. de Vries <j@x.nl>', JSON.stringify(r.j));
       n8nStaat.portie.find((x) => x.positie === 9).sleutel = 'shizzle-x';
       const v9 = await dv(9);
       n8nStaat.portie.find((x) => x.positie === 9).sleutel = 'pat-x';
@@ -5233,7 +5237,7 @@ async function bewijs(o) {
         rij(plus(V, 12), 'Privé / Fiore school', '**Studiedag — leerlingen vrij.**', 'David', 0, ''),
         rij(plus(V, 13), 'Systeem', '**API-key van de pod verloopt**', 'David', 0, ''),
         rij(plus(V, 14), 'Projecten/H&O Subsidie', '**Terugkoppeling aan VEZN**', 'David', 0, '[[10_Zakelijk/Projecten/H&O_Subsidie/Uren\\|Urenreconstructie]]'),
-        // vangnet: BSN (elfproef) -> rij weg; het woord geboortedatum -> blijft; een oude volledige datum -> gemaskeerd
+        // wv576: geen vangnet meer naar David toe — rij met een BSN-achtig getal blijft, oude volledige datum en leeftijd blijven
         rij(plus(V, 15), 'Tolgaarde', '**Contract opmaken** met BSN 111222333 erin', 'David', 0, ''),
         rij(plus(V, 16), 'Tolgaarde', '**Contract en rooster Jacqueline** — NAW/geboortedatum/BSN opvragen', 'David', 0, ''),
         rij(plus(V, 17), 'Privé / Cynthia', '**Cynthia is jarig (21-12-' + (J - 41) + ', wordt 41).**', 'Socev: suggesties', 21, ''),
@@ -5280,7 +5284,7 @@ async function bewijs(o) {
       toets('29 M2 titels: CAHAG (niet "€ 235"), vet woord midden in een zin is geen titel (90941, vervallen), eerste zin niet afgekapt na "max."',
         titels('REGIO').includes('CAHAG-Cursusdag COPD/astma') && titels('GH').includes('In de map staat een factuur onder abonnee 90941, € 255.') && titels('TG').includes('NZa laat de prestaties vervallen — bekostiging herijken') && titels('HOLD').includes('Verantwoording subsidie (max. € 34.071) bij de gemeente.'), JSON.stringify([titels('REGIO'), titels('GH'), titels('HOLD')]));
       toets('29 indeling: kostenmaatschap vóór POT, Holding / Privé onder beide, Systeem nergens, Privé herkend (é), Projecten', titels('KM')[0] === 'Kostenverdeling aanleveren' && !titels('POT').includes('Kostenverdeling aanleveren') && titels('PRIVE').includes('Verantwoording subsidie (max. € 34.071) bij de gemeente.') && !alle.some((t) => /API-key/.test(t)) && titels('PRIVE').includes('Studiedag — leerlingen vrij.') && titels('PROJ')[0] === 'Terugkoppeling aan VEZN', JSON.stringify([titels('KM').slice(0, 2), titels('PRIVE'), titels('PROJ')]));
-      toets('29 M3 vangnet: BSN-rij weg, "geboortedatum opvragen" blijft, oude volledige datum gemaskeerd (en de leeftijd erbij); "28-9 (opgave …) niet meer seinen" dicht', !alle.some((t) => /Contract opmaken/.test(t)) && titels('TG').includes('Contract en rooster Jacqueline') && titels('PRIVE').includes('Cynthia is jarig ([datum], wordt …).') && !JSON.stringify(j).includes('21-12-' + (J - 41)) && !titels('REGIO').includes('Oud'), JSON.stringify(titels('PRIVE')));
+      toets('29 wv576 geen vangnet: BSN-rij blijft, "geboortedatum opvragen" blijft, oude volledige datum en leeftijd volledig; "28-9 (opgave …) niet meer seinen" dicht', titels('TG').some((t) => /^Contract opmaken/.test(t)) && titels('TG').includes('Contract en rooster Jacqueline') && titels('PRIVE').includes('Cynthia is jarig (21-12-' + (J - 41) + ', wordt 41).') && !titels('REGIO').includes('Oud'), JSON.stringify([titels('TG'), titels('PRIVE')]));
       const gh = E.GH || { deadlines: [] };
       toets('29 net verlopen (≤ 7 d) staat erbij met negatieve dagen, ouder telt als verlopen, > 400 d en "2026-09" niet', gh.deadlines.some((x) => x.titel === 'Net verlopen' && x.dagen === -3) && !gh.deadlines.some((x) => /Lang verlopen|Heel ver/.test(x.titel)) && gh.verlopen === 1 && !JSON.stringify(gh).includes('Alleen een maand'), JSON.stringify([gh.verlopen, gh.deadlines.map((x) => x.titel + x.dagen)]));
       toets('29 gesorteerd op datum, dagen te gaan, geen sein-veld meer (Fable #4), hooguit 40 per entiteit + later', gh.deadlines.every((x, i, a) => !i || a[i - 1].datum <= x.datum) && gh.deadlines.some((x) => x.titel.startsWith('Roos') && x.dagen === 3) && !JSON.stringify(j).includes('"sein"') && E.KM.deadlines.length === 40 && E.KM.later === 6, JSON.stringify([E.KM.deadlines.length, E.KM.later]));
