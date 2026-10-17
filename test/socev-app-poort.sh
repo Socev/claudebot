@@ -5059,7 +5059,7 @@ async function bewijs(o) {
       await slaap(40);
       const g1 = gestart[gestart.length - 1];
       toets('27b Ja -> 200, beurt in de machinekamer (telegram-debug) met de vraagtekst', r.status === 200 && /^[a-f0-9]{16}$/.test(r.j.job_id) && gestart.length === n0 + 1 && g1.chatId === 'telegram-debug'
-        && /\[KNOP\] David drukte JA op de vraag: "Mag ik de meting een week laten lopen\?"\n\(Knopdruk op de Voor jou-kaart in de app \(tab Vandaag, de machinekamer\) om \d\d:\d\d, vraag-id [a-f0-9]{8}\./.test(g1.prompt), r.status + ' ' + JSON.stringify(r.j) + ' ' + (g1 && g1.prompt.slice(-700)));
+        && /\[KNOP\] David drukte JA op de vraag: "Mag ik de meting een week laten lopen\?"\n\(Knopdruk op de Voor jou-kaart in de app \(tab Voor jou, de machinekamer\) om \d\d:\d\d, vraag-id [a-f0-9]{8}\./.test(g1.prompt), r.status + ' ' + JSON.stringify(r.j) + ' ' + (g1 && g1.prompt.slice(-700)));
       toets('27b prompt: kaartcontext met punt, registerrij, werkvoorraad en voorstel; geen vingerafdrukzin', /\(Voor jou-kaart "Meting — een week laten lopen\?" \(punt kaart-gewoon\), registerrij "2026-10-11 10:00#kaarttoets", werkvoorraad wv501\. Voorstel op de kaart: "Ja, een week"\./.test(g1.prompt)
         && g1.prompt.indexOf('verse vingerafdruk') < 0 && g1.prompt.indexOf('vraag-id ' + vid21) > 0, g1 && g1.prompt.slice(-600));
       const k21 = sbStaat.vj.find((x) => x.id === 21);

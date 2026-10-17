@@ -5514,7 +5514,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   if (appKnopInRij(rij.kanaal) >= APP_KNOP_RIJ_MAX) { terug(); return appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol'); }   // Fable #4: na de awaits opnieuw
   const tijd = appKlok();
   const kanaalNaam = ({ hoofd: 'het hoofdkanaal', machinekamer: 'de machinekamer', 'cijfer-meester': 'de Cijfer-Meester' })[rij.kanaal] || rij.kanaal;   // Fable-review wv200 K1
-  const waarIn = kaart ? 'op de Voor jou-kaart in de app (tab Vandaag, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
+  const waarIn = kaart ? 'op de Voor jou-kaart in de app (tab Voor jou, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
   const tekst = (keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
     : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '') + (res._app.bsnWeg && keuze === 'anders' ? '\n' + APP_BSN_SYS : '');
@@ -9901,7 +9901,7 @@ async function berichtNieuw(res, d) {
   const plan = berichtPushPlan(id, kanaal, klasse);   // bewaart de index
   if (!idx[id].push) berichtIndexBewaar();
   const gewenst = berichtPushGewenst();
-  // wv452 (Fable KAN 3): het actielijstje van 07:05 zegt "de knoppen staan in Vandaag"; de rijen staan dan al open (n8n markeert ze vóór
+  // wv452 (Fable KAN 3): het actielijstje van 07:05 zegt "de knoppen staan in Voor jou"; de rijen staan dan al open (n8n markeert ze vóór
   // dit bericht), dus het geheugen van Vandaag (3 min) weg, anders toont Ververs nog "nog niet verstuurd" zonder knoppen
   if (bron === 'actielijst' && appStaat.vandaag) appStaat.vandaag.data = null;
   res._log = { bericht: id, kanaal: kanaal, bron: bron, klasse: klasse, agenda: ag ? ag.soort : undefined };
