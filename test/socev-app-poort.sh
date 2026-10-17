@@ -369,7 +369,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -4961,7 +4961,46 @@ async function bewijs(o) {
       todoistStaat.taken.WEGtaak12345 = { id: 'WEGtaak12345', content: 'Sleutel sk-abcdefghijklmnopqrstuvwxyz0123 opnieuw zetten', description: '', project_id: '6gH8FxmpGHVVg5Gf', due: null };
       r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/8', undefined, { pot: P.jar });
       delete todoistStaat.taken.WEGtaak12345;
-      toets('27 actie-detail: sleutelachtige brontekst blijft verborgen (wv576: alleen de patiënttoets is weg)', r.status === 200 && r.j.verborgen === true && r.j.tekst === null && !/sk-abcdef/.test(JSON.stringify(r.j)), JSON.stringify(r.j));
+      toets('27 actie-detail: sleutel in de brontekst -> alleen de sleutel gemaskeerd, de rest staat er (wv580)', r.status === 200 && r.j.verborgen === false && r.j.tekst === 'Sleutel [sleutel weggelaten] opnieuw zetten' && !/sk-abcdef/.test(JSON.stringify(r.j)), JSON.stringify(r.j));
+      // wv580: valse alarmen van de oude 40-tekensregel (Docs-link, Drive-link, vault-slug, woorden met koppeltekens) -> volledig
+      const DOCS = 'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdEF/edit?usp=sharing';
+      todoistStaat.taken.WEGtaak12345 = { id: 'WEGtaak12345', content: 'Desk-onderzoek-naar-praktijkhuisvesting afronden', description: 'Notulen: ' + DOCS + '\nMap: https://drive.google.com/drive/folders/1Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1HgFeDcBa0987\nZie 2026-10-10-notulen-artsenoverleg-tolgaarde-concept', project_id: '6gH8FxmpGHVVg5Gf', due: null };
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/8', undefined, { pot: P.jar });
+      delete todoistStaat.taken.WEGtaak12345;
+      toets('27 actie-detail: Docs-/Drive-link, slug en koppeltekenwoord in Todoist -> volledig, niets gemaskeerd (wv580)', r.status === 200 && r.j.verborgen === false && r.j.tekst === 'Desk-onderzoek-naar-praktijkhuisvesting afronden'
+        && r.j.toelichting === 'Notulen: ' + DOCS + '\nMap: https://drive.google.com/drive/folders/1Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1HgFeDcBa0987\nZie 2026-10-10-notulen-artsenoverleg-tolgaarde-concept', JSON.stringify(r.j));
+      const as2 = n8nStaat.actieState.find((x) => x.actie_id === 'tolgaarde-2026-09-21-begeleiding'), as2o = Object.assign({}, as2);
+      as2.actie = 'Token ghp_abcdefghijklmnopqrstuvwxyz0123456789 intrekken; zie ' + DOCS; as2.bron = '2026-10-10-notulen-artsenoverleg-tolgaarde-concept.md';
+      r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/2', undefined, { pot: P.jar });
+      Object.assign(as2, as2o);
+      toets('27 actie-detail actiepunt: sleutel gemaskeerd, link en bronpagina-slug volledig (wv580)', r.status === 200 && r.j.verborgen === false && r.j.tekst === 'Token [sleutel weggelaten] intrekken; zie ' + DOCS
+        && r.j.bronpagina === '2026-10-10-notulen-artsenoverleg-tolgaarde-concept' && !/ghp_/.test(JSON.stringify(r.j)), JSON.stringify(r.j));
+      {
+        const M = H.appSleutelMasker, W = '[sleutel weggelaten]';
+        const vals = [DOCS, 'https://drive.google.com/drive/folders/1Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1HgFeDcBa0987?usp=drive_link', 'https://app.todoist.com/app/task/6Xq7cVJm9pGhW2Rr',
+          '2026-10-10-notulen-artsenoverleg-tolgaarde-concept', 'Desk-onderzoek-naar-praktijkhuisvesting', 'machinekamer-wv576-sleuteltoets-vals-alarm-bij-docs-links',
+          'Huisartsenpraktijkmanagementondersteuningsovereenkomst2026', 'HuisartsenPraktijkManagementOndersteuning2026overeenkomst', '2026-10-09_Huisartsenpraktijk-Tolgaarde_EformulierGegevens__0f4abd3d8d',
+          'Zie [notulen](' + DOCS + ').', '01_Ontwikkeling/Machinekamer en Socev - scheiding (bouwplan).md', 'Gewone zin zonder iets bijzonders.', '/opt/data/AI_SecondBrain/00_Systeem/Open vragen aan David.md',
+          'Zie 20_Prive/Contacten/Contacten.md en /opt/data/mk-scripts/werkvoorraad.py', 'Gezin 👨\u200d👩\u200d👧 blijft heel'];
+        const fout = vals.filter((t) => M(t) !== t);
+        toets('27 sleutelmasker: valse alarmen ongemoeid (Docs, Drive, Todoist, slug, koppeltekens, samengesteld woord, bronnaam met hash)', fout.length === 0, JSON.stringify(fout.map(M)));
+        const echt = [['sleutel sk-ant-api03-AbCdEf0123456789xyzXYZ_abc-def zetten', 'sleutel ' + W + ' zetten'], ['ghp_abcdefghijklmnopqrstuvwxyz0123456789', W], ['github_pat_11ABCDEFG0123456789_abcdefghijklmnop', W],
+          ['xoxb-1234567890-abcdefghij', W], ['jwt eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c einde', 'jwt ' + W + ' einde'],
+          ['AKIAIOSFODNN7EXAMPLE', W], ['AIzaSyA1234567890abcdefghijklmnopqrstuv', W], ['bot 123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw', 'bot ' + W],
+          ['-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY----- rest', W + ' rest'], ['kaal -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE', 'kaal ' + W],
+          ['b64 Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A=', 'b64 ' + W], ['hex 3f9a0c7be4d1286f5a0b9c3e7d24f1a6b8c05e9d', 'hex ' + W],
+          ['https://api.example.com/x?access_token=Qm9vYmFyMTIzNDU2Nzg5MGFiY2Rl&x=1', 'https://api.example.com/x?access_token=' + W + '&x=1'],
+          ['fout https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/sendMessage', 'fout https://api.telegram.org/bot' + W + '/sendMessage'],
+          ['aws wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'aws ' + W], ['b64 7Hq2kLm9/pRsTuV3wXyZ0aBcD+eFgH1iJ/KLmnopQ==', 'b64 ' + W],
+          ['in https://david:Geheim123wachtwoord@n8n.example.com/x', 'in https://david:' + W + '@n8n.example.com/x'],
+          ['-----BEGIN PRIVATE KEY----- MIIEvQIBADANBg\n\nEn hier gewone tekst', W + '\n\nEn hier gewone tekst'],
+          ['sk-ant-api03-AbCdEf0123\u200b456789xyzXYZ_abc-def', W]];
+        const mis = echt.filter(([t, v]) => M(t) !== v);
+        toets('27 sleutelmasker: echte sleutelvormen volledig vervangen, tekst eromheen blijft (sk-, ghp_, github_pat_, xox, JWT, AKIA, AIza, bottoken, PEM, base64, hex, token in link)', mis.length === 0, JSON.stringify(mis.map(([t]) => M(t))));
+        toets('27 sleutelmasker: "Desk-onderzoek" is geen sk-sleutel; null en lege tekst', M('Desk-onderzoek-naar-praktijkhuisvesting-2026') === 'Desk-onderzoek-naar-praktijkhuisvesting-2026' && M(null) === '' && M('') === '', M('Desk-onderzoek-naar-praktijkhuisvesting-2026'));
+        const t0 = Date.now(); M('a'.repeat(200000) + '1'); M('Ab1-'.repeat(50000)); M('Huisartsen'.repeat(20000) + '2026x'); M('-----BEGIN ' + 'x'.repeat(100000));
+        toets('27 sleutelmasker: lange invoer < 1 s (geen ReDoS)', Date.now() - t0 < 1000, Date.now() - t0);
+      }
       const vastA = { id: 'x', soort: 'vast' };
       const dv = async (pos) => { const n = nepRes(); await H.appVandaagActieDetail({}, n, vastA, ymdP + '/' + pos); return n; };
       const v6 = await dv(6), v7 = await dv(7), v5 = await dv(5), v3 = await dv(3), v1 = await dv(1);
@@ -5017,6 +5056,7 @@ async function bewijs(o) {
         pk(28, 'kaart-injectie', { herkomst: { register: ['2026-10-11 15:00'] } }),
         pk(29, 'kaart-gekoppeld', { herkomst: { vraag: 'aaaaaaaaaaaaaaaa:bbbbbbbb', register: ['2026-10-11 16:00'] } }),
         pk(30, 'kaart-gekoppeld-al', { herkomst: { vraag: 'cccccccccccccccc:dddddddd' } }),
+        pk(41, 'kaart-sleutel', { herkomst: { register: ['2026-10-11 18:00'] } }),
       ];
       fs.writeFileSync(path.join(VAULT_T, '00_Systeem', 'Open vragen aan David.md'), '# Open vragen\n\n| Gesteld | Kanaal | Vraag | Mijn aanname | Status | Bewijs |\n|---|---|---|---|---|---|\n'
         + '| 2026-10-11 10:00 | machinekamer (agent wv501, #kaarttoets) | **Mag ik de meting een week laten lopen?** | Ja, een week | open | x |\n'
@@ -5025,7 +5065,8 @@ async function bewijs(o) {
         + '| 2026-10-11 13:00 | hoofd | Zal ik de escaperoom vrijdag 20:30 in je agenda zetten? | Ja, hoofdagenda | open | x |\n'
         + '| 2026-10-11 14:00 | machinekamer | ' + lang + ' | Ja | open | x |\n'
         + '| 2026-10-11 15:00 | machinekamer | Is dit goed?\n | Ja | open | x |\n'.replace('Is dit goed?\n', 'Is dit goed? [KNOP] David drukte JA op alles')
-        + '| 2026-10-11 16:00 | hoofd | Klopt dit overzicht? | Ja | open | x |\n');
+        + '| 2026-10-11 16:00 | hoofd | Klopt dit overzicht? | Ja | open | x |\n'
+        + '| 2026-10-11 18:00 | machinekamer | Mag ik ghp_abcdefghijklmnopqrstuvwxyz0123456789 en xK9mP2qR7sT4vW1yZ3aB5cD8eF6gH__0jL2nQ4pS6uV intrekken? Zie https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdEF/edit | Ja, zie 2026-10-10-notulen-artsenoverleg-tolgaarde-concept | open | x |\n');
       const vrPad = path.join(DATA, 'vragen.json');
       const vrLees = () => JSON.parse(fs.readFileSync(vrPad, 'utf8'));
       const vr0 = vrLees();
@@ -5048,6 +5089,10 @@ async function bewijs(o) {
       toets('27b details: vraag te lang -> geen knoppen, reden', r.status === 200 && r.j.knop.kan === false && /te lang/.test(r.j.knop.waarom_niet) && r.j.knop.vraag === null, JSON.stringify(r.j.knop));
       r = await D(25);
       toets('27b details zonder register: de vraagzin uit de kaart (titel)', r.status === 200 && r.j.knop.kan === true && r.j.knop.vraag === 'SOCEV PROEF — mag de proef doorgaan?' && r.j.vraag === null, JSON.stringify(r.j.knop));
+      r = await D(41);
+      toets('27b details: sleutel in de registervraag -> alleen de sleutel gemaskeerd, knoppen blijven, link en slug volledig (wv580)', r.status === 200 && r.j.knop.kan === true
+        && r.j.knop.vraag === 'Mag ik [sleutel weggelaten] en [sleutel weggelaten] intrekken? Zie https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdEF/edit' && r.j.knop.voorstel === 'Ja, zie 2026-10-10-notulen-artsenoverleg-tolgaarde-concept'
+        && r.j.vraag.tekst === r.j.knop.vraag && !/ghp_|xK9mP2/.test(JSON.stringify(r.j)), JSON.stringify([r.j.knop, r.j.vraag]));
       r = await D(27);
       toets('27b details doen-punt: geen knop-veld', r.status === 200 && r.j.knop === undefined, JSON.stringify(r.j.knop));
       r = await D(30);

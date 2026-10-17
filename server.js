@@ -7053,7 +7053,7 @@ function appActies(rijen, vandaag, nu) {
     const stand = appPortieLopend(r, nu) ? 'bezig' : k || (r.status === 'klaar' ? 'nog niet verstuurd' : r.status === 'verbruikt' ? 'al afgehandeld' : verlopen ? 'verlopen' : 'open');
     const terugTot = k && r.herhaal !== true && !verlopen && ['afgehandeld', 'bezig'].indexOf(r.status) >= 0 && Date.parse(r.getikt_op || '') + APP_TERUG_MS > nu
       ? new Date(Date.parse(r.getikt_op) + APP_TERUG_MS).toISOString() : null;
-    return { positie: Number(r.positie) || 0, regel: appKort(String(r.regel || r.titel || '').replace(/^\d+\.\s*/, ''), 220), bron: appKort(r.bron, 30),
+    return { positie: Number(r.positie) || 0, regel: appKort(appSleutelMasker(String(r.regel || r.titel || '').replace(/^\d+\.\s*/, '')), 220), bron: appKort(r.bron, 30),
       stand: stand,
       later_tot: k === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(r.later_tot)) ? r.later_tot : null,
       op: k && r.getikt_op ? String(r.getikt_op).slice(0, 32) : null, blok: !!r.blok_op,
@@ -7254,14 +7254,59 @@ const APP_VJ_FOUT_MS = 20 * 1000;
 const APP_VJ_DETAIL_PER_UUR = 300;   // details (lijst en actielijstje samen); elke tik is een n8n- of Todoist-aanroep (Fable wv335 #12)
 const APP_VJ_WAAR = { pixel: 'op je telefoon', pc: 'op de pc', praktijk: 'op de praktijk', thuis: 'thuis', auto: 'in de auto' };
 const APP_VJ_REGISTER = path.join(process.env.APP_VAULT_DIR || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', '00_Systeem', 'Open vragen aan David.md');
-// Sleutelachtige tekst (zelfde norm als machinekamer.voor_jou_tekst_ok); registertekst gaat niet door de RPC-weigering
-const APP_VJ_SLEUTEL_RE = /(sk-[a-z0-9_-]{16,}|ghp_[a-z0-9]{20,}|github_pat_|xox[abpr]-|eyJ[a-zA-Z0-9_-]{20,}\.|AKIA[A-Z0-9]{12,}|-----BEGIN|[A-Za-z0-9_+=-]{40,})/i;
+// Sleutels in tekst voor David (grondwet 2): alleen de treffer wordt [sleutel weggelaten], het item blijft staan (wv580; David 16-10
+// "Jij moet NOOIT dingen filteren naar mij toe"). Vaste vormen eerst, en elk patroon pakt de héle sleutel (ook payload en handtekening
+// van een JWT, het hele PEM-blok): een half gemaskeerde sleutel is een gelekte sleutel. Registertekst gaat niet door de RPC-weigering.
+const APP_SLEUTEL_WEG = '[sleutel weggelaten]';
+const APP_SLEUTEL_VORM_RE = new RegExp('(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]*|xox[abprs]-[A-Za-z0-9-]*'
+  + '|eyJ[A-Za-z0-9_-]{20,400}\\.[A-Za-z0-9_.-]*|AKIA[A-Z0-9]{12,}|AIza[0-9A-Za-z_-]{35})'
+  // Telegram-bottoken ook midden in een API-pad (".../bot123:AA…"); PEM-blok tot END, een lege regel of het einde (Fable wv580 #1, #5)
+  + '|(?<!\\d)\\d{8,10}:AA[A-Za-z0-9_-]{30,}|-----BEGIN[\\s\\S]*?(?:-----END[^\\n]*?-----|(?=\\n\\s*\\n)|$)', 'g');
+const APP_SLEUTEL_URL_RE = /\bhttps?:\/\/[^\s<>"'`]+/g;
+const APP_SLEUTEL_INLOG_RE = /^(https?:\/\/[^\s\/@:]+:)([^\s@\/]{6,})@/i;   // Fable wv580 #7: https://naam:wachtwoord@host
+const APP_SLEUTEL_PARAM_RE = /([?&#][A-Za-z0-9_.-]*(?:token|key|secret|sig|signature|password|passwd|auth|code)[A-Za-z0-9_.-]*=)([^&#\s<>"'`]{16,})/gi;
+const APP_SLEUTEL_LANG_RE = /(?<![A-Za-z0-9_+=\/-])[A-Za-z0-9_+=\/-]{40,}/g;   // met '/': standaard base64 (Fable wv580 #2)
+// Lange reeks zonder vaste vorm: alleen een sleutel als hij letters én een cijfer heeft, niet grotendeels uit woorden en getallen
+// bestaat (vault-slug "2026-10-10-notulen-artsenoverleg-tolgaarde-concept", bronnaam met hash-staart, label "machinekamer-wv576-…")
+// en er willekeurig uitziet: ≥ 8 wissels tussen kleine letter, hoofdletter en cijfer (gemeten 18-10 op 100.000 willekeurige
+// sleutels van 40 tekens: base64/base64url 0 gemist, hex 0,04%).
+function appSleutelLang(m) {
+  if (!/\d/.test(m) || !/[A-Za-z]/.test(m)) return false;
+  const delen = m.split(/[-_+=\/]+/).filter(Boolean), kaal = m.replace(/[^A-Za-z0-9]/g, '');
+  // woorddeel: getal, HOOFDLETTERS, (CamelCase-)woorden van ≥ 2 kleine letters, of woorden van ≥ 4 met getallen ertussen
+  // ("Ondersteuning2026overeenkomst"); geen geneste herhaling in één regex (ReDoS)
+  const camel = function (x, re) { return x.split(/(?=[A-Z])/).every(function (w) { return re.test(w); }); };
+  const isWoord = function (d) {
+    if (d.length < 3) return false;
+    if (/^\d+$|^[A-Z]+$/.test(d) || camel(d, /^[A-Z]?[a-z]{2,}$/)) return true;
+    const st = d.split(/(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])/);
+    return st.some(function (x) { return /[A-Za-z]/.test(x); }) && st.every(function (x) { return /^\d+$/.test(x) || camel(x, /^[A-Z]?[a-z]{4,}$/); });
+  };
+  const woord = delen.filter(isWoord).reduce(function (n, d) { return n + d.length; }, 0);
+  if (woord * 2 >= kaal.length) return false;
+  const k = kaal.split('').map(function (c) { return /\d/.test(c) ? 'd' : c === c.toLowerCase() ? 'l' : 'u'; });
+  let wissel = 0;
+  for (let i = 1; i < k.length; i++) if (k[i] !== k[i - 1]) wissel++;
+  return wissel >= 8;
+}
+function appSleutelMasker(t) {
+  // onzichtbare tekens weg die een sleutel in tweeën kunnen splijten (Fable wv580 #6); ZWJ/ZWNJ alleen tussen sleuteltekens (emoji blijven heel)
+  let s = String(t == null ? '' : t).replace(/[\u0000\u00ad\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, '')
+    .replace(/(?<=[A-Za-z0-9_+=\/-])[\u200c\u200d](?=[A-Za-z0-9_+=\/-])/g, '').replace(APP_SLEUTEL_VORM_RE, APP_SLEUTEL_WEG);
+  // in een link (Docs, Drive, Todoist): geen lange-reeksregel (een document-id is geen sleutel), wel een geheim in de querystring
+  const urls = [];
+  s = s.replace(APP_SLEUTEL_URL_RE, function (u) {
+    urls.push(u.replace(APP_SLEUTEL_INLOG_RE, function (x, k) { return k + APP_SLEUTEL_WEG + '@'; }).replace(APP_SLEUTEL_PARAM_RE, function (x, k) { return k + APP_SLEUTEL_WEG; }));
+    return '\u0000' + (urls.length - 1) + '\u0000';
+  });
+  s = s.replace(APP_SLEUTEL_LANG_RE, function (m) { return appSleutelLang(m) ? APP_SLEUTEL_WEG : m; });
+  return s.replace(/\u0000(\d+)\u0000/g, function (x, i) { return urls[Number(i)]; });
+}
 appStaat.tellers.voorjou = appStaat.tellers.voorjou || [];
 appStaat.tellers.vjdetail = appStaat.tellers.vjdetail || [];
 appStaat.vjTerug = appStaat.vjTerug || {};
 
 function appVjDag(ymd) { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '')); return m ? Number(m[3]) + '-' + Number(m[2]) : ''; }
-function appVjVeilig(t) { return !APP_VJ_SLEUTEL_RE.test(String(t == null ? '' : t)); }   // alleen sleutels; geen patiënttoets (wv576)
 // Grijze regel 2: wanneer · waar · duur (bouwplan § 2)
 function appVjRegel2(p, vandaag) {
   const delen = [];
@@ -7420,17 +7465,17 @@ async function appVjRegisterVraag(p) {
     const r = m.find(function (x) { return /^(open|deels|wacht|uitgesteld)/i.test(x.status); }) || m[0];
     const tijd = appVjTijd(sl.split('#')[0]);
     if (!r) { uit.herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + (rijen ? ' (niet meer in het register)' : '') }); return; }
-    const vt = appVjOpmaakWeg(r.vraag), at = appVjOpmaakWeg(r.aanname);
-    const veilig = appVjVeilig(vt) && appVjVeilig(at);
-    // Fable wv335 #2: ook kanaal en status uit het (ongefilterde) register door het filter; bij een treffer alleen de tijd
-    const k0 = appKort(String(r.kanaal).replace(/\s*\(.*$/, ''), 40), s0 = appKort(appVjOpmaakWeg(String(r.status).split(/[;—(]/)[0]), 60);
-    const kanaal = appVjVeilig(k0) ? k0 : '', stand = appVjVeilig(s0) ? s0 : '';
+    // wv580: een sleutel in de vraag wordt [sleutel weggelaten]; de vraag zelf (met knoppen) blijft staan
+    // vóór én na het weghalen van opmaak: `__` kan in een sleutel staan (Fable wv580 #3)
+    const vt = appSleutelMasker(appVjOpmaakWeg(appSleutelMasker(r.vraag))), at = appSleutelMasker(appVjOpmaakWeg(appSleutelMasker(r.aanname)));
+    // Fable wv335 #2: ook kanaal en status uit het (ongefilterde) register door de sleuteltoets
+    const kanaal = appKort(appSleutelMasker(String(r.kanaal).replace(/\s*\(.*$/, '')), 40), stand = appKort(appSleutelMasker(appVjOpmaakWeg(appSleutelMasker(String(r.status).split(/[;—(]/)[0]))), 60);
     uit.herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + (kanaal ? ' (' + kanaal + ')' : '') + (stand ? ' — ' + stand : '') });
     if (p.soort === 'besluit' && !uit.vraag) {
       const open = /^(open|deels|wacht|uitgesteld)/i.test(r.status);
       const tm = appVjStatusTijd(r.status);
-      uit.vraag = { tekst: veilig ? vt : 'tekst verborgen', voorstel: veilig && at ? at : null, gesteld: tijd, kanaalTekst: kanaal || null,
-        kanaalRuw: String(r.kanaal || ''), regSleutel: sl, verborgen: !veilig, regOpen: open,
+      uit.vraag = { tekst: vt, voorstel: at || null, gesteld: tijd, kanaalTekst: kanaal || null,
+        kanaalRuw: String(r.kanaal || ''), regSleutel: sl, regOpen: open,
         elders: open ? null : { t: tm, stand: stand || null } };
     }
   });
@@ -7505,7 +7550,6 @@ function appVjKnopStand(p, rv) {
   }
   if (!vragenOk) waaromNiet = 'de knoppen zijn nu niet te gebruiken; probeer het straks of antwoord in het gesprek';
   else if (rv && !rv.leesbaar) waaromNiet = 'de vraag is nu niet te lezen; probeer het straks';
-  else if (q && q.verborgen) waaromNiet = 'de vraag is hier verborgen; antwoord in het gesprek';
   else if (tekst.length + (voorstel ? voorstel.length : 0) > APP_VJ_VRAAG_MAX) waaromNiet = 'deze vraag is te lang voor een knop; antwoord in het gesprek';
   else if (!tekst.trim() || (!q && !/\?$/.test(tekst))) waaromNiet = 'deze kaart heeft geen vraag';   // Fable wv404 #5: een titel zonder vraagteken is geen vraag
   else if (!/^[a-z0-9][a-z0-9_-]{1,60}$/.test(String(p.sleutel || ''))) waaromNiet = 'deze kaart heeft een onverwachte sleutel; antwoord in het gesprek';   // Fable wv404 #2
@@ -7536,8 +7580,8 @@ async function appVoorJouDetail(req, res, a, idTekst) {
     wvIds.forEach(function (n) {
       const w = items && items.find(function (x) { return Number(x.id) === Number(n); });
       const stand = !w ? (items ? 'afgerond' : null) : w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')) ? 'wacht op jou' : w.status === 'gestart' ? 'loopt' : w.status === 'open' ? 'in de rij' : String(w.status || '');
-      const wat = w ? (w.samenvatting ? String(w.samenvatting) : appLabelGewoon(w.label)) : '';
-      herkomst.push({ soort: 'werkvoorraad', tekst: 'Werkvoorraad wv' + Number(n) + (wat && appVjVeilig(wat) ? ': ' + appKort(wat, 200) : '') + (stand ? ' (' + stand + ')' : '') });
+      const wat = w ? appSleutelMasker(w.samenvatting ? String(w.samenvatting) : appLabelGewoon(w.label)) : '';
+      herkomst.push({ soort: 'werkvoorraad', tekst: 'Werkvoorraad wv' + Number(n) + (wat ? ': ' + appKort(wat, 200) : '') + (stand ? ' (' + stand + ')' : '') });
     });
   }
   // register: de vraag zoals hij gesteld is; bij een besluit ook het voorstel (wv404: helper, ook voor de kaartknop)
@@ -7652,7 +7696,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   const wv = (Array.isArray(h.wv) ? h.wv : []).filter(function (x) { return Number.isInteger(Number(x)); }).slice(0, 6).map(function (x) { return 'wv' + Number(x); });
   const titel = appOntmasker(appVjOpmaakWeg(p.titel), 'kaart'), tekst = appOntmasker(k.tekst, 'kaart'), voorstel = k.voorstel ? appOntmasker(k.voorstel, 'kaart') : null;
   const context = '(Voor jou-kaart ' + JSON.stringify(titel) + ' (punt ' + appOntmasker(p.sleutel, 'kaart') + ')' + (rv.vraag ? ', registerrij ' + JSON.stringify(appOntmasker(rv.vraag.regSleutel, 'kaart')) : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') +
-    (voorstel ? '. Voorstel op de kaart: ' + JSON.stringify(voorstel) : '') + '. David zag precies deze vraag' + (voorstel ? ' en dit voorstel' : '') + ' boven de knoppen; een Ja geldt voor wat er staat, niets meer. ' +
+    (voorstel ? '. Voorstel op de kaart: ' + JSON.stringify(voorstel) : '') + ((tekst + (voorstel || '')).indexOf(APP_SLEUTEL_WEG) >= 0 ? '. Op de kaart is een sleutel weggelaten (' + APP_SLEUTEL_WEG + '); de volledige tekst staat in de registerrij' : '') + '. David zag precies deze vraag' + (voorstel ? ' en dit voorstel' : '') + ' boven de knoppen; een Ja geldt voor wat er staat, niets meer. ' +
     'De kaart gaat vanzelf op beantwoord. Wacht een werkvoorraadrij op dit antwoord, geef hem vrij of zet hem bij volgens het antwoord. ' +
     'Een agendawijziging uit deze druk blijft oranje bij de Poortwachter (✅ in de app onder het volledige voorstel).)';
   const bericht = 'Voor jou-kaart ' + JSON.stringify(titel) + ':\n' + tekst + (voorstel ? '\nMijn voorstel: ' + voorstel : '');   // chat_log-rij van Socev (hoofdkanaal)
@@ -7687,7 +7731,6 @@ function appVjRegels(s, n) {
   s = String(s == null ? '' : s).replace(/\r/g, '').replace(/[\u0000-\u0009\u000b-\u001f\u007f]+/g, ' ').replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   return s.length > n ? s.slice(0, n - 1).replace(/\s+\S*$/, '') + '…' : s;
 }
-function appBronVerborgen(t) { return !appVjVeilig(t); }
 async function appTodoistTaak(id) {
   const tok = process.env.TODOIST_MCP_TOKEN;
   if (!tok) throw new Error('todoist niet ingericht');
@@ -7707,36 +7750,31 @@ async function appVandaagActieDetail(req, res, a, rest) {
   const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
   if (!rij) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'actie-detail onbekend');
   const bron = String(rij.bron || ''), sl = String(rij.sleutel || '');
-  const regel = appKort(String(rij.regel || rij.titel || '').replace(/^\d+\.\s*/, ''), 220);
+  const regel = appKort(appSleutelMasker(String(rij.regel || rij.titel || '').replace(/^\d+\.\s*/, '')), 220);
   const uit = { ok: true, datum: datum, positie: positie, bron: bron === 'todoist' ? 'Todoist' : bron === 'actie_state' ? 'actiepunt (notulen, app-groep of overleg)' : bron === 'correspondentie_state' ? 'mail waarin je iets beloofde of vroeg' : 'onbekend',
     regel: regel, tekst: null, toelichting: null, verwacht: null, deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(rij.hard || '')) ? rij.hard : null,
-    bronpagina: null, aan: null, onderwerp: null, op: null, link: null, link_tekst: null, verborgen: false, prive: false, fout: null };
-  if (appBronVerborgen(rij.regel) || appBronVerborgen(rij.titel)) { uit.verborgen = true; uit.regel = 'tekst verborgen'; res._app.reden = 'actie-detail verborgen'; return appStuur(res, 200, uit); }
+    bronpagina: null, aan: null, onderwerp: null, op: null, link: null, link_tekst: null, verborgen: false, prive: false, fout: null };   // verborgen: sinds wv580 altijd false (de app kent het veld)
   try {
     if (bron === 'todoist' && /^[A-Za-z0-9]{6,40}$/.test(sl)) {
       const t = await appTodoistTaak(sl);
       if (!t) uit.fout = 'deze Todoist-taak bestaat niet meer (afgevinkt of verwijderd)';
       else if (vast && APP_TODOIST_PRIVE.indexOf(String(t.project_id || '')) >= 0) uit.prive = true;
       else {
-        const tekst = String(t.content || ''), besch = String(t.description || '');
-        if (appBronVerborgen(tekst) || (besch && appBronVerborgen(besch))) uit.verborgen = true;
-        else {
-          uit.tekst = appKort(appVjOpmaakWeg(tekst), 500); uit.toelichting = besch ? appVjRegels(besch, 1500) : null;
-          const due = t.deadline && t.deadline.date ? t.deadline.date : t.due && t.due.date ? String(t.due.date).slice(0, 10) : null;
-          if (due && /^\d{4}-\d{2}-\d{2}$/.test(due)) uit.deadline = due;
-          uit.verwacht = t.checked ? 'al afgevinkt in Todoist' : 'afvinken in Todoist als het gedaan is (of ✅ hier)';
-        }
+        const tekst = appSleutelMasker(t.content || ''), besch = appSleutelMasker(t.description || '');
+        uit.tekst = appKort(appVjOpmaakWeg(tekst), 500); uit.toelichting = besch ? appVjRegels(besch, 1500) : null;
+        const due = t.deadline && t.deadline.date ? t.deadline.date : t.due && t.due.date ? String(t.due.date).slice(0, 10) : null;
+        if (due && /^\d{4}-\d{2}-\d{2}$/.test(due)) uit.deadline = due;
+        uit.verwacht = t.checked ? 'al afgevinkt in Todoist' : 'afvinken in Todoist als het gedaan is (of ✅ hier)';
         uit.link = 'https://app.todoist.com/app/task/' + sl; uit.link_tekst = 'Open in Todoist';
       }
     } else if (bron === 'actie_state' && /^[A-Za-z0-9._-]{3,120}$/.test(sl)) {
       const r = (await appN8nRijen(APP_ACTIE_STATE_TABEL, { type: 'and', filters: [{ columnName: 'actie_id', condition: 'eq', value: sl }] }, 1))[0];
       if (!r) uit.fout = 'dit actiepunt staat niet meer in de bewaking';
       else if (vast && APP_ENTITEIT_PRIVE.test(String(r.entiteit || ''))) uit.prive = true;
-      else if (appBronVerborgen(r.actie)) uit.verborgen = true;
       else {
-        uit.tekst = appKort(r.actie, 1000);
+        uit.tekst = appKort(appSleutelMasker(r.actie), 1000);
         const pg = /([^\/|,]+?)\.md\b/.exec(String(r.bron || ''));
-        uit.bronpagina = pg && appVjVeilig(pg[1]) ? appKort(pg[1].trim(), 160) : null;
+        uit.bronpagina = pg ? appKort(appSleutelMasker(pg[1].trim()), 160) : null;
         const dl = [r.deadline, r.uiterlijk].map(String).find(function (x) { return /^\d{4}-\d{2}-\d{2}$/.test(x); });
         if (dl) uit.deadline = dl;
         uit.verwacht = (r.eigenaar && !/^david$/i.test(String(r.eigenaar)) ? 'eigenaar ' + appKort(r.eigenaar, 60) + '; ' : '') + 'jij zorgt dat het gebeurt' + (r.entiteit ? ' (' + appKort(r.entiteit, 60) + ')' : '');
@@ -7746,9 +7784,8 @@ async function appVandaagActieDetail(req, res, a, rest) {
       const maten = r && /doktersmaten/i.test(String(r.bron || ''));
       if (!r) uit.fout = 'deze mail staat niet meer in de bewaking';
       else if (vast && !maten) uit.prive = true;
-      else if (appBronVerborgen(r.onderwerp) || appBronVerborgen(r.tegenpartij)) uit.verborgen = true;   // Fable wv335 #1: ook de naam
-      else {
-        uit.onderwerp = appKort(r.onderwerp, 300); uit.aan = r.tegenpartij ? appKort(r.tegenpartij, 160) : null;
+      else {   // Fable wv335 #1: ook de naam door de sleuteltoets
+        uit.onderwerp = appKort(appSleutelMasker(r.onderwerp), 300); uit.aan = r.tegenpartij ? appKort(appSleutelMasker(r.tegenpartij), 160) : null;
         uit.op = /^\d{4}-\d{2}-\d{2}/.test(String(r.verzonden_op || '')) ? String(r.verzonden_op).slice(0, 10) : null;
         const dl = String(r.uiterlijk || ''); if (/^\d{4}-\d{2}-\d{2}$/.test(dl)) uit.deadline = dl;
         uit.verwacht = r.type === 'belofte_david' ? 'je beloofde hier iets; afronden of laten weten' : 'je wacht op antwoord; nabellen of laten vallen';
