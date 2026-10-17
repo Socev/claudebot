@@ -442,15 +442,15 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8 start: ongeldig of onbekend agent_job -> geen regel', H.telZelfStart('xyz', 'r0') === '' && H.telZelfStart('0123456789abcdef', 'r0') === '' && H.telZelfStart(ja2, 'r0') === '');
     const run1 = 'b1b1b1b1b1b1b1b1'; jobs[run1] = { status: 'pending' };
     const hint = H.telZelfStart(ja1, run1);
-    toets('8 start: gemerkt + aanwezig -> regel vooraf, job gekoppeld', /^\[AUTO-RAPPORT\]/.test(hint) && /Verder in Telegram:/.test(hint) && jobs[run1].tel_zelf === ja1 && H.agentsReg[ja1].tel.gebruikt === run1, hint);
+    toets('8 start: gemerkt + aanwezig -> regel vooraf, job gekoppeld', /^\[AUTO-RAPPORT\]/.test(hint) && /Verder in de app:/.test(hint) && !/Telegram/.test(hint) && jobs[run1].tel_zelf === ja1 && H.agentsReg[ja1].tel.gebruikt === run1, hint);
     toets('8 start: tweede /run met hetzelfde agent_job (herkansing) -> geen regel', H.telZelfStart(ja1, 'b2b2b2b2b2b2b2b2') === '' && H.telStaat.zelf.dubbel >= 1);
     const nTts0 = st.tts.length;
-    jobs[run1] = Object.assign(jobs[run1], { status: 'done', result: { ok: true, output: 'De tweede offerte is goedkoper, ongeveer **tien procent**. Zie [link](https://x.y).\n\nVRAAG AAN DAVID: Zal ik de leverancier mailen?\n\nVerder in Telegram:\n- bedrag 1\n- bedrag 2' } });
+    jobs[run1] = Object.assign(jobs[run1], { status: 'done', result: { ok: true, output: 'De tweede offerte is goedkoper, ongeveer **tien procent**. Zie [link](https://x.y).\n\nVRAAG AAN DAVID: Zal ik de leverancier mailen?\n\nVerder in de app:\n- bedrag 1\n- bedrag 2' } });
     const pZ = tel('GET', '/tel/uit?wacht=10&plek=Auto'); await wacht(100);
     const xz = H.telZelfNaRun(run1);
     r = await pZ;
     toets('8 na de afweging: item zelf, meteen naar de open lange vraag, aankondigen ja', xz && r.j.id === ja1 && r.j.soort === 'zelf' && r.j.aankondigen === 'ja', r.j);
-    toets('8 spreektekst: zonder "Verder in Telegram", vraag "in Telegram"', xz && !/bedrag|https|\*\*/.test(xz.spreek) && /Ik heb een vraag voor je in Telegram\.$/.test(xz.spreek), xz && xz.spreek);
+    toets('8 spreektekst: zonder "Verder in de app", vraag "in de app"', xz && !/bedrag|https|\*\*/.test(xz.spreek) && /Ik heb een vraag voor je in de app\.$/.test(xz.spreek), xz && xz.spreek);
     toets('8 houdbaarheid 10 min, buiten de kostenmeting', Math.abs(xz.tot - Date.now() - 10 * 60000) < 5000 && xz.k_gelogd === 'nvt');
     r = await tel('GET', '/tel/deel/' + ja1 + '/0');
     toets('8 deel 0: belletje + vaste zin (WAV langer dan de spraak alleen)', r.status === 200 && r.b.toString('ascii', 0, 4) === 'RIFF' && r.b.length > 44 + 14400 + 24000 && st.tts.slice(nTts0).includes(H.TEL_ZELF_AANKONDIGING), { len: r.b.length, tts: st.tts.slice(nTts0) });
@@ -589,6 +589,7 @@ srv.listen(0, '127.0.0.1', async () => {
     // opname herkennen
     toets('6 opname: MPEG4 duur uit mvhd, WAV uit de kop, rest null', Math.abs(H.telOpname(mp4Maak(12.5)).s - 12.5) < 0.01 && Math.abs(H.telOpname(wavMaak(2)).s - 2) < 0.01 && H.telOpname(Buffer.from('#!AMR\n')) === null);
     toets('6 spreektekst zonder inhoud: vaste zin', H.telSpreektekst('Verder in de app:\nalles') === 'Ik heb een antwoord voor je in de app.');
+    toets('6 spreektekst: oude regel "Verder in Telegram" knipt nog (wv571)', H.telSpreektekst('Kern.\n\nVerder in Telegram:\n- bedrag') === 'Kern.', H.telSpreektekst('Kern.\n\nVerder in Telegram:\n- bedrag'));
     toets('6 geen onverwachte fouten in logError', !logs.some((l) => !/^(app-|tel-whisper|tel-deel)/.test(l) || /uitzondering/.test(l)), logs);
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }
   srv.close();

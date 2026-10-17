@@ -10758,15 +10758,15 @@ if (typeof process.once === 'function') {
 // Bouwplan "Spraak via de telefoon (Tasker)" § 13; Fable-review ontwerp verwerkt (10 punten).
 const TEL_ZELF_HERHAAL_MS = 4 * 60 * 1000;
 const TEL_ZELF_AANKONDIG_MS = 20 * 1000;     // lease van belletje + zin: niets anders tegelijk (Fable diff #4)
-const TEL_ZELF_TTL_MS = 10 * 60 * 1000;      // daarna alleen het schriftelijke spoor (Telegram)
+const TEL_ZELF_TTL_MS = 10 * 60 * 1000;      // daarna alleen het schriftelijke spoor (de app)
 const TEL_ZELF_MAX_OPEN = 3;
 const TEL_PLEK_MAX_MS = 3 * 60 * 1000;       // de lus vraagt ± elke minuut; ouder = onbekend
 // Vaste, neutrale zin: een onderwerp uit het label kan in een auto vol passagiers te veel zeggen (Fable #5).
 const TEL_ZELF_AANKONDIGING = 'Ik heb een antwoord op je opdracht van daarnet. Tik op de knop om te luisteren.';
 const TEL_ZELF_HINT = '[AUTO-RAPPORT] David gaf deze opdracht uit de auto en zit daar nog: je antwoord wordt op zijn telefoon ' +
-  'voorgelezen (en gaat zoals altijd ook naar Telegram). Schrijf de kern hardop-geschikt, als tegen een passagier: kort, geen ' +
+  'voorgelezen (en staat ook in de app). Schrijf de kern hardop-geschikt, als tegen een passagier: kort, geen ' +
   'lijstjes of tabellen, geen getallen om te onthouden, geen markdown. Wat niet hardop hoeft (links, lijstjes, bedragen) zet je ' +
-  'onder een eigen regel "Verder in Telegram:". Antwoord NIETS als dit niets voor David verandert.\n\n';
+  'onder een eigen regel "Verder in de app:". Antwoord NIETS als dit niets voor David verandert.\n\n';
 
 function telZelfLog(o) { try { appAuditRegel(TEL_AUDIT, Object.assign({ route: 'zelf' }, o)); } catch (e) { logError('tel-zelf-log', e); } }
 function telActief() { try { return telRegister().apparaten.find(function (x) { return x && x.actief; }) || null; } catch (e) { return null; } }
@@ -10858,7 +10858,7 @@ function telZelfStart(agentJob, runJobId) {
   telZelfLog({ gebeurtenis: 'start', job: agentJob, reden: 'regel vooraf' });
   return TEL_ZELF_HINT;
 }
-// Na afloop van die /run: Socevs antwoord als aankondiging op de telefoon, als David er nog zit. Telegram krijgt het hoe dan ook.
+// Na afloop van die /run: Socevs antwoord als aankondiging op de telefoon, als David er nog zit. De app krijgt het hoe dan ook.
 function telZelfNaRun(runJobId) {
   const j = jobs[runJobId];
   if (!j || !j.tel_zelf) return null;
@@ -10873,7 +10873,7 @@ function telZelfNaRun(runJobId) {
   if (rij.some(function (x) { return x.id === id; })) { telStaat.zelf.dubbel++; return klaar('al in de rij'); }
   if (rij.filter(function (x) { return x.soort === 'zelf' && x.apparaat === w.t.id && !x.gespeeld && nu < x.tot; }).length >= TEL_ZELF_MAX_OPEN) return klaar('rij vol');
   // k_gelogd: buiten de kostenmeting van /tel-beurten (wv339)
-  const x = { id: id, apparaat: w.t.id, soort: 'zelf', spreek: telSpreektekst(out, 'Telegram'), aankondiging: TEL_ZELF_AANKONDIGING,
+  const x = { id: id, apparaat: w.t.id, soort: 'zelf', spreek: telSpreektekst(out), aankondiging: TEL_ZELF_AANKONDIGING,
     t_start: nu, t_klaar: nu, tot: nu + TEL_ZELF_TTL_MS, k_gelogd: 'nvt' };
   rij.push(x);
   telRijBewaar();
