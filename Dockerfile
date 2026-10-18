@@ -65,10 +65,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # MCP-server + de Chromium-build zelf, in de image (deterministisch, overleeft
-# reboots en rebuilds; zelfde build-moment = passende browser-revisie).
+# reboots en rebuilds). Versie vast en de browser via de MCP zelf (wv604, 19-10-2026):
+# `npx -y playwright install` haalde de nieuwste losse playwright en dus een andere
+# revisie (1248) dan de MCP verwacht (1247). install-browser gebruikt de playwright
+# die in de MCP zit. Ophogen = versie hier aanpassen; de wrapper
+# mk-scripts/playwright-mcp.sh zoekt het buildnummer zelf.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN npm install -g @playwright/mcp \
- && npx -y playwright install chromium \
+RUN npm install -g @playwright/mcp@0.0.83 \
+ && playwright-mcp install-browser chromium \
  && chmod -R a+rX /opt/pw-browsers
 
 # Non-root gebruiker: 'claude' weigert bypassPermissions als root.
