@@ -4779,15 +4779,40 @@ async function bewijs(o) {
       toets('27 details: waarom, stappen, meting, bewijs', r.status === 200 && D.waarom === 'Waarom nas-backup' && D.stappen.length === 4 && D.meting === 'METING-nas-backup' && D.bewijs === 'BEWIJS-nas-backup', JSON.stringify(D).slice(0, 300));
       toets('27 stappen: commando na "Typ:" zonder toelichting, en tussen backticks; gewone stap zonder', D.stappen[0].commando === null && D.stappen[1].commando === 'n8n export:credentials --all --output=/tmp/c.json' && D.stappen[2].commando === 'ls -la /mnt' && D.stappen[2].tekst === 'Draai ls -la /mnt op de NAS', JSON.stringify(D.stappen));
       const hk = D.herkomst.map((x) => x.soort + ':' + x.tekst + (x.link ? ' @' + x.link : ''));
-      toets('27 herkomst in gewone taal: werkvoorraad met samenvatting en stand, vraag met tijd en status, Todoist met link', hk[0] === 'werkvoorraad:Werkvoorraad wv62: Back-up van Olares controleren (wacht op jou)' && hk[1] === 'vraag:Vraag van 7-10 13:30 (debug) — open'
+      toets('27 herkomst in gewone taal: werkvoorraad met samenvatting en stand, vraag met tijd en status, Todoist met link', hk[0] === 'werkvoorraad:Klus van Socev: Back-up van Olares controleren (wacht op jou)' && hk[1] === 'vraag:Vraag van 7-10 13:30 (debug) — open'
         && hk[2] === 'todoist:Todoist-taak @https://app.todoist.com/app/task/6hhXcR5c57pp4PXM' && !/GEHEIME-OPDRACHT/.test(JSON.stringify(D)), JSON.stringify(hk));
       r = await vraag('GET', '/app/voor-jou/5', undefined, { pot: P.jar });
       toets('27 besluit: vraag en voorstel uit het register, opmaak weg, geen Ja-knop-veld', r.status === 200 && r.j.vraag && r.j.vraag.tekst === 'Zal ik de ✅ naar de app verplaatsen? Wat er verandert: iets.' && r.j.vraag.voorstel === 'Ja — eerst één proef' && r.j.vraag.gesteld === '9-10 19:55'
-        && /^Werkvoorraad wv325: .+ \(wacht op jou\)$/.test(r.j.herkomst[0].tekst), JSON.stringify([r.j.vraag, r.j.herkomst]));
+        && /^Klus van Socev: .+ \(wacht op jou\)$/.test(r.j.herkomst[0].tekst) && !/\bwv\d+/.test(JSON.stringify(r.j)), JSON.stringify([r.j.vraag, r.j.herkomst]));
       r = await vraag('GET', '/app/voor-jou/6', undefined, { pot: P.jar });
       toets('27 register: kenmerk #wv318 kiest de juiste rij van twee op dezelfde tijd; patiëntachtige tekst volledig (wv576)', r.status === 200 && r.j.vraag && r.j.vraag.tekst === 'Gaat het om patiënt Jansen, geboortedatum 1-1-1950?' && r.j.vraag.voorstel === 'Ja' && !/nacontrole/.test(JSON.stringify(r.j)), JSON.stringify(r.j.vraag));
       r = await vraag('GET', '/app/voor-jou/11', undefined, { pot: P.jar });
       toets('27 register: kanaal en status met patiëntachtige tekst volledig getoond (wv576)', r.status === 200 && r.j.herkomst.some((h) => h.tekst === 'Vraag van 6-10 08:00 (mw. Pietersen belde) — beantwoord: bel mw. Jansen terug'), JSON.stringify(r.j.herkomst));
+      toets('wv646 details van een kaart met een klus: geen werkvoorraadnummer (grep wv+cijfer = 0)', D.herkomst[0].soort === 'werkvoorraad' && !/\bwv\d+/.test(JSON.stringify(D)), JSON.stringify(D.herkomst));
+      {   // wv646: oudere machinetekst (samenvatting, bewijs van de databank of een knopdruk, meting) in de details zonder interne nummers
+        const vjN = sbStaat.vj.length, wvN = sbStaat.wvItems.length, nu0 = new Date().toISOString();
+        sbStaat.vj.push(pnt(16, 'k646-trigger', { status: 'vervallen', gesloten_door: 'agent', gesloten_op: nu0, herkomst: { wv: [646], auto: 'wv' },
+            bewijs: 'de agent wacht niet meer op jou (wv645=vervallen); niet gemeten of het gedaan is', meting: 'werkvoorraad wv62: klaar' }),
+          pnt(19, 'k646-nieuw', { status: 'vervallen', gesloten_door: 'agent', gesloten_op: nu0, herkomst: { wv: [646], auto: 'wv' }, titel: 'Proef wv455: kaart', waarom: 'Wacht op werkvoorraad wv410',
+            stappen: ['Volg de stappenlijst van wv147', 'Draai `ls /opt/data/mk-scripts/wv646`'], bewijs: 'Socev wacht hier niet meer op jou; of het gedaan is, is niet gemeten.', meting: 'registerrij 10-10 07:16 (wv378b)' }),
+          pnt(17, 'k646-knop', { soort: 'besluit', status: 'gedaan', gesloten_door: 'david', gesloten_op: nu0, bewijs: 'app ma 19-10 07:08: David drukte Ja op de kaart (vraag-id ab12cd34)' }),
+          pnt(18, 'k646-sam', { herkomst: { wv: [647] } }), pnt(20, 'k646-open', { titel: 'Open kaart wv455' }));
+        sbStaat.wvItems.push({ id: 646, label: 'machinekamer:wv646 x', samenvatting: 'Vervolg op wv618: nummers uit de details', status: 'klaar' },
+          { id: 647, label: 'machinekamer:wv647-vervolg-op-wv646', samenvatting: null, status: 'geblokkeerd', geblokkeerd_door: 'David: ja' });
+        H.appStaat.vjCache = null; H.appStaat.vjWvCache = null; H.appStaat.wvCache = null;
+        const r19 = await vraag('GET', '/app/voor-jou/19', undefined, { pot: P.jar }), rl = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
+        const z19 = r19.j ? Object.assign({}, r19.j, { stappen: (r19.j.stappen || []).slice(0, 1) }) : null;   // stap 2 bevat een pad: dat blijft bewust staan
+        toets('wv646 oudere kaart: titel, waarom, stappen en meting (ook wv378b) zonder nummer, commando ongemoeid, bewijs van de nieuwe databanktekst ongewijzigd', r19.status === 200 && !/\bwv\d+/.test(JSON.stringify(z19))
+          && r19.j.titel === 'Proef een klus van Socev: kaart' && r19.j.waarom === 'Wacht op een klus van Socev' && r19.j.stappen[0].tekst === 'Volg de stappenlijst van een klus van Socev' && r19.j.stappen[1].commando === 'ls /opt/data/mk-scripts/wv646' && r19.j.stappen[1].tekst === 'Draai ls /opt/data/mk-scripts/wv646'
+          && r19.j.meting === 'registerrij 10-10 07:16 (een klus van Socev)' && r19.j.bewijs === 'Socev wacht hier niet meer op jou; of het gedaan is, is niet gemeten.', JSON.stringify(r19.j).slice(0, 600));
+        toets('wv646 lijst: titel zonder nummer', rl.status === 200 && rl.j.punten.some((x) => x.id === 20 && x.titel === 'Open kaart een klus van Socev') && !/\bwv\d+/.test(JSON.stringify(rl.j.punten)), JSON.stringify((rl.j.punten || []).map((x) => x.titel)));
+        const r16 = await vraag('GET', '/app/voor-jou/16', undefined, { pot: P.jar }), r17 = await vraag('GET', '/app/voor-jou/17', undefined, { pot: P.jar }), r18 = await vraag('GET', '/app/voor-jou/18', undefined, { pot: P.jar });
+        toets('wv646 bewijs en meting van een door de databank gesloten kaart: geen wv-nummer, wel de strekking', r16.status === 200 && !/\bwv\d+/.test(JSON.stringify(r16.j)) && /wacht niet meer op jou/.test(r16.j.bewijs) && r16.j.meting === 'een klus van Socev: klaar'
+          && r16.j.herkomst[0].tekst === 'Klus van Socev: Vervolg op een klus van Socev: nummers uit de details (klaar)', JSON.stringify([r16.status, r16.j.bewijs, r16.j.meting, r16.j.herkomst]));
+        toets('wv646 bewijs van een knopdruk: zonder vraag-id, knop blijft beantwoord (het ruwe bewijs telt)', r17.status === 200 && r17.j.bewijs === 'app ma 19-10 07:08: David drukte Ja op de kaart' && r17.j.knop && r17.j.knop.beantwoord && r17.j.knop.beantwoord.keuze === 'ja', JSON.stringify([r17.status, r17.j.bewijs, r17.j.knop]));
+        toets('wv646 klus zonder samenvatting: label zonder nummers', r18.status === 200 && !/\bwv\d+/.test(JSON.stringify(r18.j)) && /^Klus van Socev: .+ \(wacht op jou\)$/.test(r18.j.herkomst[0].tekst), JSON.stringify([r18.status, r18.j.herkomst]));
+        sbStaat.vj.length = vjN; sbStaat.wvItems.length = wvN; H.appStaat.vjCache = null; H.appStaat.vjWvCache = null; H.appStaat.wvCache = null;
+      }
       const st404 = [];
       for (const q of ['/app/voor-jou/99', '/app/voor-jou/0', '/app/voor-jou/abc', '/app/voor-jou/7x', '/app/voor-jou/10']) st404.push((await vraag('GET', q, undefined, { pot: P.jar })).status);
       toets('27 details: onbekend, 0, tekst, rommel -> 404; een gesloten punt (≤ 7 d) mag wel', st404.join() === '404,404,404,404,200', st404.join());

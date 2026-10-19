@@ -7369,7 +7369,7 @@ function appVjDoorzetLater(id, sleutel) {
 }
 function appVjVoorApparaat(punten, a) { const vast = !!(a && a.soort === 'vast'); return punten.filter(function (p) { return !(vast && p.prive === true); }); }
 function appVjKort(p, vandaag) {
-  return { id: p.id, soort: ['doen', 'besluit', 'proef'].indexOf(p.soort) >= 0 ? p.soort : 'doen', titel: appKort(p.titel, 120), regel2: appVjRegel2(p, vandaag),
+  return { id: p.id, soort: ['doen', 'besluit', 'proef'].indexOf(p.soort) >= 0 ? p.soort : 'doen', titel: appKort(appVjGewoon(p.titel), 120), regel2: appVjRegel2(p, vandaag),
     deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null, dichtbij: appVjDichtbij(p, vandaag),
     waar: APP_VJ_WAAR[p.waar] || null, duur_min: Number(p.duur_min) > 0 ? Number(p.duur_min) : null, status: p.status,
     later_tot: p.status === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(p.later_tot || '')) ? p.later_tot : null };
@@ -7445,9 +7445,9 @@ function appVjOpmaakWeg(t) { return String(t || '').replace(/\*\*|__|`/g, '').re
 function appVjStap(s) {
   s = appKort(s, 400);
   const bt = /`([^`]{2,300})`/.exec(s);
-  if (bt) return { tekst: s.replace(/`/g, ''), commando: bt[1].trim() };
+  if (bt) return { tekst: appVjGewoon(s.replace(/`/g, '')), commando: bt[1].trim() };   // wv646: commando ongemoeid
   const ty = /^(?:Typ|Voer uit|Commando)\s*:\s*(.+?)(?:\s+\([^)]*\))?\s*$/i.exec(s);
-  return ty ? { tekst: s, commando: ty[1].trim() } : { tekst: s, commando: null };
+  return ty ? { tekst: appVjGewoon(s), commando: ty[1].trim() } : { tekst: appVjGewoon(s), commando: null };
 }
 // wv404: de vraag van een besluit uit het register (zoals de details hem tonen) plus de herkomstregels. vraag.tekst/voorstel
 // zijn VOLLEDIG (geen afkapping): wat David boven de knoppen ziet, gaat letterlijk naar Socev. regOpen = de registerrij staat nog
@@ -7537,7 +7537,7 @@ function appVjKnopStand(p, rv) {
   const eigen = eigenOud ? null : eigenRij;
   let beantwoord = appAntwoord(eigen) || appAntwoord(gekRij);
   const q = rv && rv.vraag;
-  const tekst = q ? q.tekst : appVjOpmaakWeg(p.titel).trim();
+  const tekst = q ? q.tekst : appVjGewoon(appVjOpmaakWeg(p.titel)).trim();   // wv646: zoals de lijst hem toont; Socev krijgt dezelfde tekst
   const voorstel = q ? q.voorstel : null;
   const kanaal = appVjKanaal(p, rv, gekRij);
   const gev = appGevoelig(tekst + (voorstel ? '\n' + voorstel : ''));
@@ -7560,6 +7560,15 @@ function appVjKnopStand(p, rv) {
   return { p: p, rv: rv, ks: ks, gek: gekBruik ? gek : null, gekRij: gekRij, eigenOud: eigenOud, beantwoord: beantwoord, elders: beantwoord ? null : elders, knopBewijs: knopBewijs,
     tekstId: appVjFnv(tekst + '\n' + (voorstel || '') + '\n' + (q ? q.regSleutel : 'kaart') + '\n' + kanaal + '\n' + (gev !== null)),
     waaromNiet: waaromNiet, tekst: tekst, voorstel: voorstel, kanaal: kanaal, gevoelig: gev !== null, gevoeligReden: gev };
+}
+// wv646: tekst van een kaart en machinetekst in de details (titel, waarom, stappen, samenvatting van een klus, meting, bewijs) zonder interne nummers:
+// een werkvoorraadnummer wordt "een klus van Socev", het vraag-id achter een knopdruk valt weg (APP_VJ_KNOP_BEWIJS_RE leest het
+// ruwe bewijs, niet deze weergave). Een pad (/…/wv646/…) en een commando blijven staan. De bronnen schrijven het sinds wv618/wv646
+// zelf al zo; dit vangt oudere rijen.
+function appVjGewoon(t) {
+  return String(t == null ? '' : t)
+    .replace(/(^|[^A-Za-z0-9_\/])(?:werkvoorraad(?:rij)?\s+)?wv\d+[a-z]?(?:-\d+)?(?:=(?:open|gestart|klaar|geblokkeerd|vervallen|mislukt|afgebroken|weg)\b)?(?![A-Za-z0-9_])/gi, '$1een klus van Socev')
+    .replace(/\s*\(vraag-id [a-f0-9]{8}\)/g, '');
 }
 function appVjKnopVorm(k) {
   return { vraag_id: k.gek ? k.gek.split(':')[1] : k.ks.hash, tekst_id: k.tekstId, kanaal: k.kanaal, gevoelig: k.gevoelig, vraag: k.waaromNiet ? null : k.tekst, voorstel: k.waaromNiet ? null : k.voorstel,
@@ -7585,7 +7594,8 @@ async function appVoorJouDetail(req, res, a, idTekst) {
       const w = items && items.find(function (x) { return Number(x.id) === Number(n); });
       const stand = !w ? (items ? 'afgerond' : null) : w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')) ? 'wacht op jou' : w.status === 'gestart' ? 'loopt' : w.status === 'open' ? 'in de rij' : String(w.status || '');
       const wat = w ? appSleutelMasker(w.samenvatting ? String(w.samenvatting) : appLabelGewoon(w.label)) : '';
-      herkomst.push({ soort: 'werkvoorraad', tekst: 'Werkvoorraad wv' + Number(n) + (wat ? ': ' + appKort(wat, 200) : '') + (stand ? ' (' + stand + ')' : '') });
+      // wv646: geen nummer; David kent de werkvoorraad niet ("Geen idee wat dat laatste betekend", 19-10)
+      herkomst.push({ soort: 'werkvoorraad', tekst: 'Klus van Socev' + (wat ? ': ' + appKort(appVjGewoon(wat), 200) : '') + (stand ? ' (' + stand + ')' : '') });
     });
   }
   // register: de vraag zoals hij gesteld is; bij een besluit ook het voorstel (wv404: helper, ook voor de kaartknop)
@@ -7595,12 +7605,12 @@ async function appVoorJouDetail(req, res, a, idTekst) {
   (Array.isArray(h.todoist) ? h.todoist : []).map(String).filter(function (t) { return /^[A-Za-z0-9]{6,40}$/.test(t); }).slice(0, 6).forEach(function (t) {
     herkomst.push({ soort: 'todoist', tekst: 'Todoist-taak', link: 'https://app.todoist.com/app/task/' + t });
   });
-  if (typeof h.bericht === 'string' && h.bericht) herkomst.push({ soort: 'bericht', tekst: 'Bericht of rapport van Socev' + (/^[a-f0-9]{16}$/.test(h.bericht) ? ' (' + h.bericht + ')' : '') });
+  if (typeof h.bericht === 'string' && h.bericht) herkomst.push({ soort: 'bericht', tekst: 'Bericht of rapport van Socev' });   // wv646: zonder job-id
   const stappen = (Array.isArray(p.stappen) ? p.stappen : []).slice(0, 12).map(appVjStap);
   appStuur(res, 200, Object.assign(appVjKort(p, vandaag), { ok: true,
-    waarom: p.waarom ? appKort(p.waarom, 600) : null, stappen: stappen, herkomst: herkomst, vraag: vraag,
-    meting: p.meting ? appKort(p.meting, 400) : null, laatst_gemeten: p.laatst_gemeten || null,
-    bewijs: p.bewijs ? appKort(p.bewijs, 400) : null, gesloten_door: p.gesloten_door || null, gesloten_op: p.gesloten_op || null,
+    waarom: p.waarom ? appKort(appVjGewoon(p.waarom), 600) : null, stappen: stappen, herkomst: herkomst, vraag: vraag,
+    meting: p.meting ? appKort(appVjGewoon(p.meting), 400) : null, laatst_gemeten: p.laatst_gemeten || null,
+    bewijs: p.bewijs ? appKort(appVjGewoon(p.bewijs), 400) : null, gesloten_door: p.gesloten_door || null, gesloten_op: p.gesloten_op || null,
     terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' ? appVjKnopVorm(appVjKnopStand(p, rv)) : undefined }));
 }
 // POST /app/voor-jou/keuze {id, van, keuze: gedaan|later|vervallen|terug, tot?}. Onder het invoerslot (niet in APP_SLOT_VRIJ),
