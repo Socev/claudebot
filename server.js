@@ -3592,7 +3592,7 @@ const APP_UITDAGING_MS = 2 * 60 * 1000;
 const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
 const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // vaste plek: wie bezig is, houdt over de dagdeelgrens heen 5 min glijdend (wv488; was fase 4: 5 min glijdend)
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
-const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
+const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/rij/terug', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
   'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
@@ -3684,7 +3684,7 @@ const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
 // gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
 // wv446 (Fable #1): meldingen/af is omkeerbaar en geen invoer naar Socev, net als gezien
-const APP_SLOT_VRIJ = new Set(['POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
+const APP_SLOT_VRIJ = new Set(['POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
@@ -4965,7 +4965,7 @@ function appOntmasker(t, merk) {
   // anders glipt "​[KNOP]" erdoor (Fable-review diff wv135 #2). Daarna ELKE markering, waar ook in de tekst (ook na "> " of
   // "**"), en niet alleen aan het begin van een regel.
   return String(t).replace(/\p{Cf}/gu, '').normalize('NFKC')
-    .replace(/\[(\s*)(KNOP|APP|AUTO|REPLY OP VRAAG|FILES-PORTAAL|MACHINEKAMER|Systeem|WERKVOORRAAD|HEARTBEAT)\b/gi, '(' + (merk || 'getypt') + ') [$1$2');
+    .replace(/\[(\s*)(KNOP|APP|AUTO|REPLY OP VRAAG|ANTWOORD\s*OP|FILES-PORTAAL|MACHINEKAMER|Systeem|WERKVOORRAAD|HEARTBEAT)\b/gi, '(' + (merk || 'getypt') + ') [$1$2');   // wv628: ANTWOORD OP
 }
 
 function appUitvoer(j) {
@@ -5058,6 +5058,7 @@ async function appNaBeurt(jobId) {
   j.app.vraag = vraag;
   if (r.ok !== false && out) appChatLog(j.app.kanaal, [{ rol: 'socev', ts: Date.now(), tekst: out }]);   // wv171
   const goed = await appLogSchrijf(j.app.kanaal, { t: new Date().toISOString(), job_id: jobId, beurt_id: j.app.beurt_id, soort: j.app.soort,
+    getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined,   // wv628: typtijd (sorteren) en Antwoord hierop
     apparaat: j.app.apparaat, tekst: j.app.tekst, invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
     vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
   j.app.gelogd = goed;
@@ -5087,7 +5088,7 @@ async function appTelegramSpiegel(jobId, prompt, files) {
   const r = j.result || {};
   let antwoord = appUitvoer(j);
   if (antwoord.length > APP_SPIEGEL_ANTWOORD_MAX) antwoord = antwoord.slice(0, APP_SPIEGEL_ANTWOORD_MAX) + ' …';
-  return appLogSchrijf(kanaal, { t: new Date(j.done_at || Date.now()).toISOString(), job_id: jobId, soort: 'telegram', tekst: appSpiegelTekst(kanaal, prompt),
+  return appLogSchrijf(kanaal, { t: new Date(j.done_at || Date.now()).toISOString(), getypt: new Date(j.created || j.done_at || Date.now()).toISOString(), job_id: jobId, soort: 'telegram', tekst: appSpiegelTekst(kanaal, prompt),
     invoer: Array.isArray(files) && files.length ? files.map(function (f) { return f && String(f.name || '').slice(0, 200); }).filter(Boolean) : undefined,
     antwoord: antwoord, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
     bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
@@ -5127,18 +5128,35 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
   }
   jobs[jobId] = { status: 'pending', created: Date.now(), workspace: DEFAULT_WS, chat_id: chatId, runtime: keuze.runtime,
     app: { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, soort: meta.soort, tekst: meta.tekst, tel: meta.tel || undefined,
-      invoer: meta.upload ? meta.upload.lijst.map(function (x) { return x.doel; }) : [] } };
+      invoer: meta.upload ? meta.upload.lijst.map(function (x) { return x.doel; }) : [], rij: meta.rij || undefined, antwoord_op: meta.antwoord_op || undefined } };
+  // wv628 (§ 4.2 1a): een getypt machinekamer-bericht staat tot zijn start ook op schijf (rij.json), zodat een herstart het niet
+  // stil weggooit; weg bij de start (gestart), bij Haal terug en bij de noodstop.
+  if (meta.rij) appRijZet(jobId, { kanaal: kanaal, apparaat: a.id, beurt_id: meta.beurt_id || null, tekst: meta.tekst, getypt: new Date(jobs[jobId].created).toISOString(), invoer: jobs[jobId].app.invoer });
   // Zelfde wachtrij als /run: een Telegram-bericht en een app-bericht in hetzelfde gesprek lopen na elkaar.
   enqueue(sessionKey(DEFAULT_WS, chatId), function () {
     // Nog in de wachtrij toen de noodstop kwam: vervalt, ook als de app intussen weer aan staat (Fable-review wv89 #3).
     const j = jobs[jobId];
-    if (!j) { try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {} if (meta.bijVerval) meta.bijVerval(); return Promise.resolve(); }   // al opgeruimd: processJob zou niets wissen
+    if (!j) { try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {} if (meta.bijVerval) meta.bijVerval(); if (meta.rij) appRijWeg(jobId); return Promise.resolve(); }   // al opgeruimd: processJob zou niets wissen
     const vervalt = function () {
+      if (j.app.teruggehaald) return true;   // wv628: Haal terug heeft de beurt al afgesloten en opgeruimd (appRijTerug)
+      // wv628: een getypt bericht uit de rij start niet meer als deze kant intussen passief is (wissel naar de reservekant): de
+      // vault-sync staat hier dan stil. Niet verwerkt, net als na een herstart; de app zet de tekst terug in het invoerveld.
+      if (meta.rij && !rolPrimair()) {
+        j.status = 'done'; j.done_at = Date.now(); j.opgehaald = true;
+        j.result = { ok: false, error: 'niet verwerkt, stond in de rij (Socev wisselde naar de andere kant)' };
+        j.app.rijVerloren = true;   // de regel in het log schrijft appRijVerlorenLog, niet de geschiedenis uit het geheugen
+        try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {}
+        appRijVerlorenLog(jobId, { kanaal: kanaal, apparaat: j.app.apparaat, beurt_id: j.app.beurt_id, tekst: j.app.tekst, getypt: new Date(j.created).toISOString(), invoer: j.app.invoer }, 'andere kant')
+          .then(function (ok) { j.app.gelogd = ok; });
+        appRijWeg(jobId);
+        return true;
+      }
       if (!j.app.noodstop && !fs.existsSync(APP_UIT)) return false;
       j.status = 'done'; j.done_at = Date.now(); j.opgehaald = true;   // opgehaald: houdt een uitrol niet op
       j.result = { ok: false, error: 'vervallen door de noodstop' };
       try { fs.rmSync(path.join(APP_IO, jobId), { recursive: true, force: true }); } catch (e) {}   // processJob ruimt dan niet op
       if (meta.bijVerval) meta.bijVerval();   // wv405: een knopdruk die vervalt, laat zijn vraag weer open
+      if (meta.rij) appRijWeg(jobId);
       return true;
     };
     if (vervalt()) return Promise.resolve();
@@ -5147,6 +5165,10 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
     const voor = meta.bijStart ? Promise.resolve().then(meta.bijStart).catch(function (e) { logError('app-bij-start', e); return ''; }) : Promise.resolve('');
     return voor.then(function (staart) {
       if (vervalt()) return;
+      // wv628 (§ 4.2 1a, review #3): "gestart" in dezelfde tik als de laatste controle: processJob zet running pas na await
+      // lessenBlok, en in dat venster mag Haal terug niet meer lukken. Vanaf hier niet meer in rij.json.
+      j.app.gestart = true;
+      if (meta.rij) appRijWeg(jobId);
       // appNaBeurt NIET teruggeven: een trage schijf mag de volgende beurt (ook uit Telegram) niet ophouden (Fable-review wv56 #3)
       return processJob(jobId, prompt + (staart || ''), '', [], chatId, DEFAULT_WS, keuze, '').then(function () {
         appNaBeurt(jobId).catch(function (e) { logError('app-na-beurt', e); });
@@ -5160,6 +5182,7 @@ function appStartFout(res, st) {
   if (st.fout === 'noodstop') return appWeiger(res, 503, 'de app staat uit (noodstop)', 'app-uit (tijdens het verzoek)');
   if (st.fout === 'omlijsting') return appWeiger(res, 503, 'de machinekamer-omlijsting ontbreekt op de pod; gebruik de debug-bot', 'omlijsting ontbreekt');
   if (st.fout === 'bestanden') return appWeiger(res, 500, 'de bestanden konden op de pod niet klaargezet worden; probeer het opnieuw', 'bestanden klaarzetten');
+  if (st.fout === 'rij vol') return appWeiger(res, 429, 'er staan al ' + APP_RIJ_GETYPT_MAX + ' berichten in de rij; wacht tot Socev er een heeft opgepakt', 'getypt rij vol (na wachten)');   // wv628
   return appWeiger(res, 503, 'Socev kan nu geen beurt starten; gebruik Telegram', 'start ' + st.fout);
 }
 // Gemeenschappelijke voorwaarden voor alles wat een beurt start (bericht, knop).
@@ -5170,10 +5193,57 @@ const APP_KNOP_WACHT_MELD_MS = 30 * 1000;   // langer in de rij: regel in de pro
 function appKnopInRij(kanaal) {
   return Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && j.app.soort === 'knop' && j.status === 'pending'; }).length;
 }
+// wv628 (ontwerp parallelle draden § 4.2 1a): in de machinekamer gaat ook een getypt bericht bij een bezig kanaal in de rij, hooguit
+// APP_RIJ_GETYPT_MAX tegelijk (eigen teller naast de knopdrukken; in appBeurt na de laatste await opnieuw geteld). Het hoofdkanaal
+// en de Cijfer-Meester houden de 409 (hoofd: chat_log-volgorde van de Poortwachter; fase 1+). Uitknop zonder uitrol: bestand
+// rij-getypt-uit in socev-app-data (of APP_RIJ_GETYPT_UIT=1) = het oude gedrag; de app ziet het aan rij_getypt in de geschiedenis.
+const APP_RIJ_GETYPT_MAX = 3;
+const APP_RIJ_KANALEN = { machinekamer: true };
+const APP_RIJ_UIT = path.join(APP_DATA, 'rij-getypt-uit');
+const APP_RIJ = path.join(APP_DATA, 'rij.json');   // job -> {kanaal, apparaat, beurt_id, tekst, getypt, invoer}; alleen niet-gestarte berichten
+function appRijAan(kanaal) { return APP_RIJ_KANALEN[kanaal] === true && process.env.APP_RIJ_GETYPT_UIT !== '1' && !fs.existsSync(APP_RIJ_UIT); }
+function appGetyptInRij(kanaal) {
+  return Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && j.app.soort === 'bericht' && j.status === 'pending' && !j.app.teruggehaald; }).length;
+}
+// rij.json: best effort (een schrijffout houdt de beurt niet tegen, wel gelogd). Kapot = opnieuw beginnen met dit bericht.
+function appRijLees() { try { return appLeesStreng(APP_RIJ, {}); } catch (e) { logError('app-rij', e); return {}; } }
+function appRijZet(jobId, x) { try { const r = appRijLees(); r[jobId] = x; appSchrijfJson(APP_RIJ, r); return true; } catch (e) { logError('app-rij', e); return false; } }
+function appRijWeg(jobId) {
+  try {
+    if (!fs.existsSync(APP_RIJ)) return;
+    const r = appRijLees();
+    if (!r[jobId]) return;
+    delete r[jobId];
+    if (Object.keys(r).length) appSchrijfJson(APP_RIJ, r); else fs.unlinkSync(APP_RIJ);
+  } catch (e) { logError('app-rij', e); }
+}
+// Regel "niet verwerkt, stond in de rij" in het app-log; de app zet de tekst dan terug in het invoerveld van dat apparaat (het concept
+// op de pod is versleuteld met de apparaatsleutel, die de pod bij de opstart niet heeft). Bijlagen gaan niet mee terug.
+function appRijVerlorenLog(jobId, x, waarom) {
+  const kanaal = APP_KANALEN[x && x.kanaal] ? x.kanaal : null;
+  if (!kanaal) return Promise.resolve(false);
+  return appLogSchrijf(kanaal, { t: new Date().toISOString(), job_id: jobId, beurt_id: x.beurt_id || null, soort: 'rij-verloren', apparaat: x.apparaat || null,
+    tekst: String(x.tekst || ''), getypt: x.getypt || undefined, invoer: Array.isArray(x.invoer) && x.invoer.length ? x.invoer : undefined, antwoord: '', ok: false,
+    fout: 'niet verwerkt, stond in de rij' + (waarom ? ' (' + waarom + ')' : '') });
+}
+// Opstart: wat nog in rij.json staat, is in een vorig proces nooit gestart (uitrol, herstart, crash). Niet opnieuw in de rij (de
+// context is dan veranderd), wel zichtbaar als "niet verwerkt" en terug in het invoerveld. Alleen wat gelogd is, gaat eruit.
+async function appRijOpstart() {
+  let r;
+  try { r = appLeesStreng(APP_RIJ, {}); }
+  catch (e) { logError('app-rij', e); try { fs.renameSync(APP_RIJ, APP_RIJ + '.kapot'); } catch (e2) {} return 0; }
+  const ids = Object.keys(r).filter(function (id) { return !jobs[id]; });
+  const klaar = [];
+  for (const id of ids) { if (await appRijVerlorenLog(id, r[id], 'herstart')) klaar.push(id); }
+  klaar.forEach(appRijWeg);
+  if (ids.length) appAudit({ route: 'rij-opstart', m: '-', status: 200, apparaat: null, reden: ids.length + ' bericht(en) uit de rij niet verwerkt' + (klaar.length < ids.length ? ', ' + (ids.length - klaar.length) + ' niet te loggen' : '') });
+  return klaar.length;
+}
 async function appMagBeurt(res, kanaal, rij) {
   if (!(await appRolOk())) { appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik Telegram', 'rol passief'); return false; }
   if (!rij && appLopend(kanaal)) { appWeiger(res, 409, 'Socev is in dit kanaal nog bezig; wacht op het antwoord', 'kanaal bezig'); return false; }
-  if (rij && appKnopInRij(kanaal) >= APP_KNOP_RIJ_MAX) { appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol'); return false; }
+  if (rij === 'getypt' && appGetyptInRij(kanaal) >= APP_RIJ_GETYPT_MAX) { appWeiger(res, 429, 'er staan al ' + APP_RIJ_GETYPT_MAX + ' berichten in de rij; wacht tot Socev er een heeft opgepakt', 'getypt rij vol'); return false; }   // wv628
+  if (rij === true && appKnopInRij(kanaal) >= APP_KNOP_RIJ_MAX) { appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol'); return false; }
   if (!appTeller('beurt', APP_BEURTEN_PER_UUR, 3600000)) { appWeiger(res, 429, 'te veel berichten dit uur (max ' + APP_BEURTEN_PER_UUR + '); gebruik Telegram', 'grens beurt'); return false; }
   return true;
 }
@@ -5391,7 +5461,17 @@ async function appBeurt(req, res, reg, a, s, d) {
     const gehad = new Set();
     upload = { dir: dir, lijst: gekozen.map(function (k) { return { n: k.n, doel: appUniekeNaam(k.naam, gehad), grootte: k.grootte }; }) };
   }
-  if (!(await appMagBeurt(res, kanaal))) return;
+  // wv628 (§ 4.2 1c): "Antwoord hierop" = het id van een bericht in het machinekamergesprek; de pod zoekt het zelf op (de app stuurt
+  // geen tekst mee). Alleen de machinekamer; onbekend of ouder dan 3 dagen = 400.
+  let antwOp = null;
+  if (d.antwoord_op !== undefined && d.antwoord_op !== null && d.antwoord_op !== '') {
+    if (kanaal !== 'machinekamer') return appWeiger(res, 400, '"Antwoord hierop" kan alleen in de machinekamer', 'antwoord_op kanaal');
+    if (!APP_JOB_RE.test(String(d.antwoord_op))) return appWeiger(res, 400, 'dit bericht ken ik niet (meer); stuur je antwoord zonder citaat', 'antwoord_op vorm');
+    antwOp = await appAntwoordOpZoek(kanaal, String(d.antwoord_op));
+    if (antwOp.fout) return appWeiger(res, antwOp.status, antwOp.fout, antwOp.reden);
+  }
+  const rijAan = appRijAan(kanaal);   // wv628: in de machinekamer mag een getypt bericht in de rij
+  if (!(await appMagBeurt(res, kanaal, rijAan ? 'getypt' : false))) return;
   const ids = appBeurtIds();
   if (ids[bh]) { res._app.reden = 'herhaling ' + ids[bh].job; return appStuur(res, 200, { ok: true, job_id: ids[bh].job, al: true }); }   // tweede kwam tijdens de rolcheck
   const namen = upload ? upload.lijst.map(function (x) { return x.doel; }) : [];
@@ -5399,17 +5479,157 @@ async function appBeurt(req, res, reg, a, s, d) {
   let klaarJob = null;
   appStaat.beurtStartend = appStaat.beurtStartend || {};
   appStaat.beurtStartend[bh] = new Promise(function (r) { klaarJob = r; });
-  let st;
+  let st, inRij = false;
   try {
     const gelogd = await appChatLogStart(kanaal, [{ rol: 'david', ts: Date.now(), bevestiging: 'getypt', tekst: tekst ? appOntmasker(tekst) : '[' + upload.lijst.length + ' bestand(en)]' }]);
-    st = appStartBeurt(a, kanaal, (upload ? appBestandenPrompt(appOntmasker(tekst), namen) : appOntmasker(tekst)) + (res._app.bsnWeg ? '\n' + APP_BSN_SYS : '') + (gelogd ? '' : APP_CHATLOG_NIET), { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload });
+    // wv628: [ANTWOORD OP] vóór Davids tekst; is het geciteerde bericht een open gevoelige vraag, dan een regel dat getypt niet telt
+    const kop = antwOp ? appAntwoordOpRegel(antwOp.x) + '\n' : '';
+    const staartOp = antwOp && antwOp.gevoeligOpen ? '\n' + APP_ANTWOORD_OP_GEVOELIG : '';
+    const promptTekst = kop + (upload ? appBestandenPrompt(appOntmasker(tekst), namen) : appOntmasker(tekst)) + staartOp + (res._app.bsnWeg ? '\n' + APP_BSN_SYS : '') + (gelogd ? '' : APP_CHATLOG_NIET);
+    // wv628 (review #7): na de laatste await opnieuw tellen, anders komen twee gelijktijdige verzoeken er allebei door
+    if (rijAan && appGetyptInRij(kanaal) >= APP_RIJ_GETYPT_MAX) st = { fout: 'rij vol' };
+    else {
+      // in_rij zoals appKnop (wv405): elke niet-agent-beurt op dit gesprek, ook een lopende Telegram-beurt of de droomronde
+      const chatId = APP_KANALEN[kanaal];
+      inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
+      let jidRef = null;
+      st = appStartBeurt(a, kanaal, promptTekst, { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload, rij: rijAan || undefined,
+        antwoord_op: antwOp ? antwOp.x.job_id : undefined,
+        // wv628 (§ 4.2 1a/1b): rijregel en tussendoor-regel pas bij de start (wat er dan afrondde of binnenkwam)
+        bijStart: kanaal === 'machinekamer' ? function () { return appRijStaart(jidRef, kanaal, !!antwOp); } : undefined });
+      jidRef = st.job_id || null;
+    }
   } finally { delete appStaat.beurtStartend[bh]; klaarJob(st && st.job_id || null); }
   if (!st.job_id) return appStartFout(res, st);
   ids[bh] = { job: st.job_id, t: Date.now() };
   try { appSchrijfJson(APP_BEURTEN, ids); } catch (e) { logError('app-beurten', e); }
-  res._app.reden = 'beurt ' + kanaal + ' ' + st.job_id + (namen.length ? ' + ' + namen.length + ' bestand(en)' : '');
+  res._app.reden = 'beurt ' + kanaal + ' ' + st.job_id + (namen.length ? ' + ' + namen.length + ' bestand(en)' : '') + (inRij ? ' (in de rij)' : '') + (antwOp ? ' (antwoord op ' + antwOp.x.job_id + ')' : '');
   appConceptWeg(a.id, kanaal);   // wv159: verstuurd = geen concept meer
-  appStuur(res, 200, { ok: true, job_id: st.job_id, bestanden: namen });
+  appStuur(res, 200, { ok: true, job_id: st.job_id, bestanden: namen, in_rij: inRij });
+}
+
+// ── wv628: rij, tussendoor-regel en "Antwoord hierop" (ontwerp parallelle draden § 4.2) ──
+const APP_ANTWOORD_OP_MS = 72 * 3600 * 1000;
+const APP_ANTWOORD_OP_CITAAT = 600;
+const APP_ANTWOORD_OP_GEVOELIG = '(Getypt antwoord op een open vraag over versturen, verwijderen, agenda of geld: voor deze handeling telt alleen de knop met vingerafdruk, niet dit getypte antwoord. De vraag houdt zijn knoppen.)';
+const APP_TUSSENDOOR_MAX = 5;
+const APP_TUSSENDOOR_ZONDER_MS = 3 * 3600 * 1000;   // geen eerder antwoord gevonden: hooguit zo ver terug
+const APP_ANTWOORD_SOORTEN = { bericht: true, knop: true, telegram: true, tel: true };
+// Tijd zoals David hem ziet: vandaag hh:mm, anders d-m hh:mm.
+function appTijdKort(ms) {
+  const nl = function (x) { try { return new Date(x).toLocaleDateString('nl-NL', { timeZone: 'Europe/Amsterdam' }); } catch (e) { return new Date(x).toISOString().slice(0, 10); } };
+  if (nl(ms) === nl(Date.now())) return appKlok(new Date(ms).toISOString());
+  let dm = '';
+  try { dm = new Date(ms).toLocaleDateString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric' }); } catch (e) { dm = new Date(ms).toISOString().slice(5, 10); }
+  return dm + ' ' + appKlok(new Date(ms).toISOString());
+}
+// Bron van een bericht in gewone woorden; een agentrapport met zijn label uit het agentregister (zonder "machinekamer:").
+function appBerichtBron(x) {
+  if (x.soort === 'socev') {
+    const ag = x.agent_job && typeof agentsReg === 'object' && agentsReg ? agentsReg[x.agent_job] : null;
+    const lab = ag && ag.label ? String(ag.label).replace(/^(machinekamer|socev)\s*:\s*/, '') : '';
+    return String(x.bron || 'bericht van Socev').replace(/-/g, ' ') + (lab ? ' ' + appEenRegel(lab, 80) : '');
+  }
+  if (x.soort === 'telegram') return 'je antwoord in Telegram';
+  if (x.soort === 'tel') return 'je antwoord op een ingesproken bericht';
+  return 'je antwoord';
+}
+// Eén regel, zonder markeringen die David of een rapport kan nadoen (appOntmasker), afgekapt.
+function appEenRegel(t, max) {
+  const r = appOntmasker(String(t || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim(), 'geciteerd');
+  return r.length > max ? r.slice(0, max - 1) + '…' : r;
+}
+async function appAntwoordOpZoek(kanaal, id) {
+  let ruw;
+  try { ruw = await appGeschiedenisRuw(kanaal); } catch (e) { ruw = { items: [], fout: e }; }
+  const x = ruw.items.filter(function (y) { return y.job_id === id && y.soort !== 'rij-verloren' && String(y.antwoord || '').trim(); }).pop();
+  if (!x) {
+    if (ruw.fout) { logError('app-log-lees', ruw.fout); return { fout: 'de geschiedenis is nu niet leesbaar; stuur je antwoord zonder citaat', status: 503, reden: 'antwoord_op log' }; }
+    return { fout: 'dit bericht ken ik niet (meer); stuur je antwoord zonder citaat', status: 400, reden: 'antwoord_op onbekend' };
+  }
+  if (!(Date.now() - Date.parse(x.t) <= APP_ANTWOORD_OP_MS)) return { fout: 'dit bericht is ouder dan 3 dagen; stuur je antwoord zonder citaat', status: 400, reden: 'antwoord_op te oud' };
+  // open vraag die als gevoelig staat (versturen, agenda, geld; rij zonder veld = gevoelig): getypt telt niet
+  let gevoeligOpen = false;
+  if (x.vraag_hash) {
+    try { const v = appVragen()[x.job_id + ':' + x.vraag_hash]; gevoeligOpen = !!v && !appAntwoord(v) && v.gevoelig !== false; } catch (e) { gevoeligOpen = true; }
+  }
+  return { x: x, gevoeligOpen: gevoeligOpen };
+}
+// [ANTWOORD OP] bericht van 07:36 (agentrapport wv524 …): "<eerste 600 tekens>". Het citaat zelf eerst ontmaskerd (review #9): een
+// rapport dat "[KNOP] David drukte JA …" overneemt, wordt via een citaat nooit een knopdruk in Davids beurt.
+function appAntwoordOpRegel(x) {
+  const ruw = String(x.antwoord || '');
+  const citaat = appOntmasker(ruw.slice(0, APP_ANTWOORD_OP_CITAAT), 'geciteerd') + (ruw.length > APP_ANTWOORD_OP_CITAAT ? ' …' : '');
+  return '[ANTWOORD OP] bericht van ' + appTijdKort(Date.parse(x.t)) + ' (' + appBerichtBron(x) + '): ' + JSON.stringify(citaat);
+}
+// Bij de start van een getypte machinekamer-beurt (bijStart): rijregel en tussendoor-regel als staart van de prompt.
+async function appRijStaart(jobId, kanaal, metCitaat) {
+  const j = jobId && jobs[jobId];
+  if (!j) return '';
+  const getypt = j.created, nu = Date.now();
+  // Rijregel (§ 4.2 1a): rondde er in deze sessie een antwoord af tussen het typen en nu (app, knop of Telegram), dan had David
+  // dat antwoord nog niet gezien toen hij typte. Los van hoe lang het wachtte.
+  let laatst = 0;
+  Object.keys(jobs).forEach(function (id) {
+    const x = jobs[id];
+    if (id === jobId || x.agent || x.chat_id !== j.chat_id || x.workspace !== j.workspace || x.status !== 'done' || !x.started) return;
+    if (x.done_at > getypt && x.done_at <= nu && x.done_at > laatst) laatst = x.done_at;
+  });
+  let uit = laatst ? '\n(Dit bericht typte David om ' + appKlok(new Date(getypt).toISOString()) + ' terwijl je nog bezig was; je antwoord van ' + appKlok(new Date(laatst).toISOString()) + ' had hij toen nog niet gezien.)' : '';
+  try { uit += await appTussendoor(kanaal, j, metCitaat); } catch (e) { logError('app-tussendoor', e); }
+  return uit;
+}
+// Tussendoor-regel (§ 4.2 1b): de berichten van Socev zelf (soort socev: n8n, scripts, agents) die in de app binnenkwamen tussen het
+// laatste antwoord dat vóór het typen klaar was (of het typen van het vorige getypte bericht, dat ze al meekreeg) en het typen zelf.
+// "Kwam binnen", niet "zag David". Hooguit APP_TUSSENDOOR_MAX, de laatste; labels en vraagzinnen ontmaskerd als JSON-string.
+async function appTussendoor(kanaal, j, metCitaat) {
+  const getypt = j.created;
+  const items = (await appGeschiedenisRuw(kanaal)).items;
+  let onder = 0, ondergrensIs = 'antwoord';
+  items.forEach(function (x) { if (APP_ANTWOORD_SOORTEN[x.soort]) { const t = Date.parse(x.t); if (t <= getypt && t > onder) onder = t; } });
+  Object.keys(jobs).forEach(function (id) {   // ook wat nog niet in het log staat (Telegram-beurt net klaar)
+    const x = jobs[id];
+    if (x === j || x.agent || x.chat_id !== j.chat_id || x.workspace !== j.workspace || x.status !== 'done' || !x.started) return;
+    if (x.done_at <= getypt && x.done_at > onder) onder = x.done_at;
+  });
+  appStaat.tussendoorTot = appStaat.tussendoorTot || {};
+  const vorige = appStaat.tussendoorTot[kanaal] || 0;
+  if (vorige > onder && vorige < getypt) { onder = vorige; ondergrensIs = 'vorig bericht'; }
+  if (!(vorige > getypt)) appStaat.tussendoorTot[kanaal] = getypt;
+  const grens = onder || getypt - APP_TUSSENDOOR_ZONDER_MS;
+  const binnen = items.filter(function (x) { const t = Date.parse(x.t); return x.soort === 'socev' && t > grens && t <= getypt; });
+  if (!binnen.length) return '';
+  const toon = binnen.slice(-APP_TUSSENDOOR_MAX);
+  const delen = toon.map(function (x) {
+    const vq = /^[^\S\n]*[*_]*VRAAG AAN DAVID:[*_]*[^\S\n]*(.+)$/m.exec(String(x.antwoord || ''));
+    const eerste = String(x.antwoord || '').split('\n').map(function (l) { return l.replace(/^[#>*_`\s-]+|[*_`]+$/g, '').trim(); }).filter(Boolean)[0] || '';
+    const ag = x.agent_job && typeof agentsReg === 'object' && agentsReg ? agentsReg[x.agent_job] : null;
+    const label = ag && ag.label ? String(ag.label).replace(/^(machinekamer|socev)\s*:\s*/, '') : eerste;
+    return String(x.bron || 'bericht').replace(/-/g, ' ') + ' ' + JSON.stringify(appEenRegel(label, 80)) + ' (' + appKlok(x.t) + ', ' +
+      (vq ? 'met vraag: ' + JSON.stringify(appEenRegel(vq[1].replace(/[*_]+\s*$/, ''), 200)) : 'zonder vraag') + ')';
+  });
+  const van = onder ? (ondergrensIs === 'antwoord' ? 'je antwoord van ' + appKlok(new Date(onder).toISOString()) : 'zijn vorige bericht (getypt ' + appKlok(new Date(onder).toISOString()) + ')') : 'de ' + Math.round(APP_TUSSENDOOR_ZONDER_MS / 3600000) + ' uur vóór';
+  return '\n[Systeem: tussen ' + van + ' en dit bericht (getypt ' + appKlok(new Date(getypt).toISOString()) + ') kwam in de app binnen: ' + delen.join('; ') +
+    (binnen.length > toon.length ? '; en nog ' + (binnen.length - toon.length) + ' eerder' : '') + '. ' +
+    (metCitaat ? 'David koos met "Antwoord hierop" zelf het bericht waarop hij reageert ([ANTWOORD OP] hierboven).' : 'David gebruikte geen "Antwoord hierop"; is het niet duidelijk waar hij op reageert, vraag het dan.') + ']';
+}
+// POST /app/rij/terug {job_id}: alleen een eigen getypt bericht dat nog niet gestart is (vlag gestart, niet de status: die wordt pas
+// na lessenBlok running). De beurt_id blijft geregistreerd (een netwerkherhaling krijgt de teruggehaalde job). Bijlagen gaan niet
+// terug (ze staan al in io/<job>/in en worden hier opgeruimd); de app zegt "kies de bestanden opnieuw".
+function appRijTerug(req, res, a, d) {
+  const id = String(d.job_id || '');
+  if (!APP_JOB_RE.test(id)) return appWeiger(res, 400, 'job_id ontbreekt', 'job_id');
+  const j = jobs[id];
+  if (!j || !j.app || j.app.apparaat !== a.id || j.app.soort !== 'bericht' || !j.app.rij) return appWeiger(res, 404, 'dit bericht staat niet (meer) in de rij', 'rij terug onbekend');
+  if (j.app.teruggehaald) { res._app.reden = 'al teruggehaald ' + id; return appStuur(res, 200, { ok: true, al: true, tekst: j.app.tekst || '', invoer: j.app.invoer || [] }); }
+  if (j.app.gestart || j.status !== 'pending') { res._app.reden = 'rij terug te laat ' + id; return appStuur(res, 409, { ok: false, fout: 'Socev is er net mee begonnen; terughalen kan niet meer', gestart: true }); }
+  j.app.teruggehaald = true;
+  j.status = 'done'; j.done_at = Date.now(); j.opgehaald = true;   // houdt een uitrol niet op
+  j.result = { ok: false, error: 'teruggehaald' };
+  try { fs.rmSync(path.join(APP_IO, id), { recursive: true, force: true }); } catch (e) {}
+  appRijWeg(id);
+  res._app.reden = 'rij terug ' + id + ((j.app.invoer || []).length ? ' (' + j.app.invoer.length + ' bijlage(n) weg)' : '');
+  appStuur(res, 200, { ok: true, tekst: j.app.tekst || '', invoer: j.app.invoer || [] });
 }
 
 // wv405: een knopdruk staat in de rij tot zijn beurt start (antwoord.job; gestart pas bij de start). Is die job weg zonder
@@ -5445,9 +5665,11 @@ function appUitslag(req, res, reg, a, s, d) {
   const j = jobs[id];
   // Alleen jobs die via /app zijn gestart; van een andere job verraden we niet eens dat hij bestaat.
   if (!j || !j.app) return appStuur(res, 200, { ok: true, gevonden: false });
+  // wv628: teruggehaald uit de rij = eigen stand (geen fout, geen antwoord, niet in het log)
+  if (j.app.teruggehaald) { res._app.stil = true; return appStuur(res, 200, { ok: true, gevonden: true, klaar: true, teruggehaald: true, kanaal: j.app.kanaal, job_id: id, gelukt: false, antwoord: '', fout: null, vraag: null, bestanden: [] }); }
   if (j.status !== 'done') {
     res._app.stil = true;   // elke 3 s een regel zou de koppelsporen wegspoelen (Fable-review wv56 #7)
-    return appStuur(res, 200, { ok: true, gevonden: true, klaar: false, status: j.status, kanaal: j.app.kanaal,
+    return appStuur(res, 200, { ok: true, gevonden: true, klaar: false, status: j.status, kanaal: j.app.kanaal, gestart: j.app.gestart === true,   // wv628: gestart = niet meer terug te halen
       running_ms: (j.progress && j.progress.running_ms) || 0, last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0 });
   }
   if (!j.opgehaald) j.opgehaald = Date.now();
@@ -5595,13 +5817,16 @@ async function appGeschiedenisRuw(kanaal, lees) {
   items.forEach(function (x) { inLog[x.job_id] = 1; });
   Object.keys(jobs).forEach(function (id) {
     const j = jobs[id];
-    if (!j.app || j.app.kanaal !== kanaal || j.status !== 'done' || j.app.gelogd === true || inLog[id]) return;
+    if (!j.app || j.app.kanaal !== kanaal || j.status !== 'done' || j.app.gelogd === true || inLog[id] || j.app.teruggehaald || j.app.rijVerloren) return;   // wv628: teruggehaald staat nergens; verloren schrijft zijn eigen regel
     const r = j.result || {}, out = appUitvoer(j), v = appVraagVan(kanaal, out);
-    items.push({ t: new Date(j.done_at || j.created).toISOString(), job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst,
+    items.push({ t: new Date(j.done_at || j.created).toISOString(), getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined, job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst,
       invoer: j.app.invoer, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined, vraag_hash: v ? v.hash : undefined,
       bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
   });
-  items.sort(function (a, b) { return String(a.t).localeCompare(String(b.t)); });
+  // wv628 (§ 4.2 1a): in de machinekamer op typtijd, zodat een bericht uit de rij niet ónder rapporten staat die binnenkwamen terwijl
+  // het wachtte (het log krijgt de beurt pas na afloop). Het hoofdkanaal blijft op afloop.
+  const sk = kanaal === 'machinekamer' ? function (x) { return String(x.getypt && x.getypt < x.t ? x.getypt : x.t); } : function (x) { return String(x.t); };
+  items.sort(function (a, b) { return sk(a).localeCompare(sk(b)); });
   return { items: items, fout: fout };
 }
 async function appGeschiedenis(req, res, reg, a, pad) {
@@ -5614,7 +5839,8 @@ async function appGeschiedenis(req, res, reg, a, pad) {
     anker = delen[2];
   }
   const lopend = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && (j.status === 'pending' || j.status === 'running'); })
-    .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, invoer: j.app.invoer || [], sinds: new Date(j.created).toISOString(), in_rij: j.status === 'pending' || undefined }; });   // wv405
+    .map(function (id) { const j = jobs[id]; return { job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst, invoer: j.app.invoer || [], sinds: new Date(j.created).toISOString(), in_rij: (j.status === 'pending' && !j.app.gestart) || undefined,   // wv405
+      terug: (j.app.rij && j.app.soort === 'bericht' && j.app.apparaat === a.id && j.status === 'pending' && !j.app.gestart) || undefined, antwoord_op: j.app.antwoord_op || undefined }; });   // wv628: Haal terug alleen voor het eigen apparaat
   const ruw = await appGeschiedenisRuw(kanaal);
   let items = ruw.items, fout = null;
   if (ruw.fout) { logError('app-log-lees', ruw.fout); fout = 'geschiedenis nu niet leesbaar'; }
@@ -5643,7 +5869,8 @@ async function appGeschiedenis(req, res, reg, a, pad) {
     if (bericht) { try { const m = appBewaardVan(x.job_id); bnamen = m ? m.bestanden.map(function (f) { return f.naam; }) : []; } catch (e) { bnamen = []; } }
     // wv350: onbeantwoord en ouder dan APP_VRAAG_GELDIG_MS (vanaf de registratie, anders het bericht) = verlopen, geen knoppen
     const verlopen = x.vraag_hash && !(b && b.antwoord) && agNu - Date.parse((b && b.t) || x.t) > APP_VRAAG_GELDIG_MS;
-    return { t: x.t, job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
+    return { t: x.t, getypt: x.getypt || undefined, antwoord_op: x.antwoord_op || undefined, eigen: x.soort === 'rij-verloren' ? x.apparaat === a.id : undefined,   // wv628
+      job_id: x.job_id, beurt_id: x.beurt_id || null, soort: x.soort, tekst: x.tekst, invoer: Array.isArray(x.invoer) ? x.invoer : [], antwoord: x.antwoord, ok: x.ok !== false, fout: x.fout || null,
       vraag: x.vraag_hash ? { hash: x.vraag_hash, tekst: (appVraagUit(x.antwoord) || {}).tekst || '', beantwoord: b ? b.antwoord : null, gevoelig: !b || b.gevoelig !== false, naar_telegram: appNaarTelegramNu(b),
         naar_telegram_onzeker: appNaarTelegramNu(b) && appNaarTelegramVerlopen(b) || undefined, verlopen: verlopen || undefined }
         : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true, verlopen: agNu - Date.parse(x.t) > APP_VRAAG_GELDIG_MS || undefined } : null,
@@ -5654,6 +5881,9 @@ async function appGeschiedenis(req, res, reg, a, pad) {
   // wie de geschiedenis met een afgerond antwoord ophaalt, heeft het gezien (fase 5c, Fable-review wv100 B2)
   items.forEach(function (x) { if (jobs[x.job_id] && jobs[x.job_id].app && jobs[x.job_id].status === 'done') appGezienDoor(x.job_id, a.id); });
   const uit = { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout, reacties: !!reacties };
+  // wv628: wat deze pod kent (de app zet de Stuur-knop alleen open en toont Antwoord hierop als het er staat; oude pod = oud gedrag)
+  if (appRijAan(kanaal)) { uit.rij_getypt = true; uit.rij_max = APP_RIJ_GETYPT_MAX; }
+  if (kanaal === 'machinekamer') uit.antwoord_op = true;
   if (anker) { uit.anker = anker; uit.meer_nieuw = meerNieuw; }
   appStuur(res, 200, uit);
 }
@@ -9126,6 +9356,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/beurt') return appBeurt(req, res, reg, a, s, d);
         if (route === 'POST /app/uitslag') return appUitslag(req, res, reg, a, s, d);
         if (route === 'POST /app/knop') return appKnop(req, res, reg, a, s, d);
+        if (route === 'POST /app/rij/terug') return appRijTerug(req, res, a, d);   // wv628
         if (route.indexOf('GET /app/geschiedenis/') === 0) return appGeschiedenis(req, res, reg, a, route.slice('GET /app/geschiedenis/'.length));
         if (route === 'POST /app/zoek') return appZoek(req, res, a, d);   // wv350
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res);
@@ -9258,6 +9489,7 @@ setInterval(function () {
   try { appBindingModus(); } catch (e) { logError('app-binding-modus', e); }
 }, 60 * 1000).unref();
 setTimeout(function () { appIoOpruim(); }, 30 * 1000).unref();   // na een herstart bestaat geen app-beurt meer: weesmappen weg
+appRijOpstart().catch(function (e) { logError('app-rij', e); });   // wv628: berichten die in de rij stonden: "niet verwerkt" + terug in het invoerveld
 // wv231: sessies van vóór de herstart terug (alleen wat nog loopt, van een actief apparaat); in de audit één regel
 (function () {
   let r;
@@ -9801,6 +10033,7 @@ function appNaastLokaal(dag, nu) {
       if (x.job_id) gelogd[x.job_id] = true;
       if (!in_(x.t)) return;
       if (x.soort === 'telegram') { app[k].telegram++; return; }
+      if (x.soort === 'rij-verloren') return;   // wv628: de beurt telde al bij het versturen niet als regel; geen gebruik
       if (x.soort === 'socev') { app[k].van_socev++; app[k].per_bron[x.bron || '?'] = (app[k].per_bron[x.bron || '?'] || 0) + 1; return; }
       if (x.soort === 'knop') app[k].knoppen++; else if (x.soort === 'tel') app[k].tel++; else app[k].berichten++;
       if (x.ok === false) app[k].fout++;
