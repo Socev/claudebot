@@ -10400,7 +10400,7 @@ const TEL_AFZEGGEN = 'Dat is niet gelukt. Kijk even in de app.';
 appStaat.tellers['tel-alles'] = []; appStaat.tellers['tel-beurt'] = []; appStaat.tellers['tel-beurtdag'] = []; appStaat.tellers['tel-koppel'] = [];
 appStaat.tellers['tel-codes'] = []; appStaat.tellers['tel-delen'] = [];
 const telStaat = { code: null, polls: {}, hartslag: {}, audio: {}, delen: {}, rij: null, inBehandeling: 0, voorAuth: { minuut: 0, n: 0, overgeslagen: 0 }, gestopt: false,
-  plek: {}, zelf: { merk: 0, merk_mis: 0, hint: 0, items: 0, niet_aanwezig: 0, niets: 0, dubbel: 0 } };   // wv275
+  plek: {}, zelf: { merk: 0, merk_mis: 0, hint: 0, items: 0, niet_aanwezig: 0, niets: 0, dubbel: 0 }, telefoon: {} };   // wv275; telefoon: wv622
 
 function telUit() { return fs.existsSync(TEL_UIT) || fs.existsSync(APP_UIT); }
 function telConfig() {
@@ -10556,7 +10556,7 @@ function telUitgifte(x) {
   // Een aankondiging krijgt alleen een korte lease (belletje + zin) en een teller voor de ene herhaling; de volle lease pas bij deel >= 1.
   if (x.soort === 'zelf') { x.aangeboden_n = (x.aangeboden_n || 0) + 1; x.aangeboden_t = Date.now(); x.lease_tot = Date.now() + TEL_ZELF_AANKONDIG_MS; }
   else x.lease_tot = Date.now() + TEL_LEASE_MS;
-  x.uitgegeven = (x.uitgegeven || 0) + 1;
+  x.uitgegeven = (x.uitgegeven || 0) + 1; x.uitgifte_t = Date.now();   // uitgifte_t: wv622 (vrijgeven na een netwerkgat)
   telRijBewaar();
   return { ok: true, id: x.id, soort: x.soort, onderwerp: x.onderwerp || '', delen: telDelen(x).length, aankondigen: x.aankondiging ? 'ja' : 'nee', bezig: telBezig(x.apparaat),
     rest_s: Math.max(0, Math.round((x.tot - Date.now()) / 1000)) };   // wv275: Tasker laat %SocevWacht zo lang staan (Fable diff 2e ronde A)
@@ -10793,6 +10793,7 @@ function telUitRoute(req, res, t) {
   if (q.has('plek')) telStaat.plek[t.id] = { t: Date.now(), auto: /^auto$/i.test(String(q.get('plek') || '').trim()) };
   telAntwoordPoll(t.id, { ok: true, bezig: telBezig(t.id), reden: 'vervangen' });   // één open lange vraag per apparaat (vóór het opruimen: Fable #3)
   telOpruim();
+  telTelefoonMeldt(t, q);
   const x = telVolgende(t.id);
   if (x) { res._tel.stil = false; res._tel.reden = 'item ' + x.soort; return telStuur(res, 200, telUitgifte(x)); }
   if (!w || telStaat.gestopt) return telStuur(res, 200, { ok: true, bezig: telBezig(t.id) });
@@ -10801,12 +10802,42 @@ function telUitRoute(req, res, t) {
   res.on('close', function () { if (telStaat.polls[t.id] === p) { clearTimeout(p.timer); delete telStaat.polls[t.id]; } });
 }
 
+// wv622 (Tasker v7, 19-10-2026): de lus meldt zijn versie (&v=7), hoeveel aanvragen sinds de vorige geslaagde mislukten
+// (&fouten=n: een netwerkgat) en de vaste zin die Tasker zelf uitsprak (&zin=<code>, bv. traag, geennet, nietverstaan). Alleen
+// meten (auditregel zonder inhoud, versie in /health), met één gevolg: meldt de telefoon fouten, dan kan een item op de mislukte
+// lange vraag zijn uitgegeven aan een dode verbinding. Is er sinds die uitgifte geen enkel deel gevraagd, dan heeft de telefoon
+// het nooit gezien: lease los, zodat het meteen weer meegaat in plaats van na 3 min.
+const TEL_ZIN_RE = /^[a-z][a-z0-9-]{1,23}$/;
+function telTelefoonMeldt(t, q) {
+  const v = /^[0-9]{1,3}$/.test(String(q.get('v') || '')) ? Number(q.get('v')) : null;
+  const f = /^[0-9]{1,5}$/.test(String(q.get('fouten') || '')) ? Number(q.get('fouten')) : 0;
+  const zin = TEL_ZIN_RE.test(String(q.get('zin') || '')) && q.get('zin') !== 'geen' ? q.get('zin') : null;
+  const oud = telStaat.telefoon[t.id];
+  telStaat.telefoon[t.id] = { versie: v, t: Date.now() };
+  const regel = function (reden, extra) { telAudit(Object.assign({ route: '/tel/uit', m: 'GET', status: 200, apparaat: t.id, reden: reden }, extra || {})); };
+  if (!oud || oud.versie !== v) regel('telefoon versie ' + (v === null ? 'onbekend' : v));
+  if (zin) regel('telefoon zei ' + zin);
+  if (f > 0) {
+    const nu = Date.now();
+    let los = 0;
+    telRij().forEach(function (x) {
+      if (x.apparaat === t.id && x.soort !== 'bezig' && !x.gespeeld && x.lease_tot > nu && x.uitgifte_t && !(x.deel_t >= x.uitgifte_t)) {
+        x.lease_tot = 0; los++;
+        if (x.soort === 'zelf' && x.aangeboden_n > 0) x.aangeboden_n--;   // het verloren aanbod telt niet als de ene herhaling (Fable wv622 #6)
+      }
+    });
+    if (los) telRijBewaar();
+    regel('telefoon netwerkgat', { fouten: f, los: los });
+  }
+}
+
 async function telDeel(req, res, t, id, n) {
   const x = telRij().find(function (y) { return y.id === id && y.apparaat === t.id; });
   if (!x || x.soort === 'bezig' || x.gespeeld || Date.now() > x.tot) return telWeiger(res, 404, 'geen deel', 'onbekend item');
   if (!Number.isInteger(n) || n < 0 || (n === 0 && !x.aankondiging) || n > telDelen(x).length) return telWeiger(res, 404, 'geen deel', 'deel ' + n + ' bestaat niet');
   if (!process.env.GEMINI_API_KEY_AUTO) return telWeiger(res, 503, 'voorlezen staat nu niet aan op de pod', 'geen gemini-sleutel');
   if (n >= 1) x.lease_tot = Math.max(x.lease_tot || 0, Date.now() + TEL_LEASE_MS);   // wie afspeelt, houdt het item vast (deel 0 = aankondiging niet: wv275)
+  if (!(x.deel_t >= x.uitgifte_t)) { x.deel_t = Date.now(); telRijBewaar(); } else x.deel_t = Date.now();   // wv622: de telefoon heeft dit item ontvangen (op schijf: ook na een herstart niet meer vrijgeven)
   let wav;
   try {
     const p = telAudio(x, n);
@@ -10892,6 +10923,7 @@ function telInfo() {
   try { rij = telRij(); } catch (e) {}
   return { ingericht: telIngericht(), uit: telUit(), register: kapot ? 'kapot' : 'ok', gekoppeld: !!t, verloopt: t ? t.verloopt : null,
     luistert: t ? telLuistert(t.id) : false, lange_vragen: Object.keys(telStaat.polls).length,
+    tasker_versie: t && telStaat.telefoon[t.id] ? telStaat.telefoon[t.id].versie : null,   // wv622: &v= van de lus (null = v6 of ouder)
     beurten_lopend: rij.filter(function (x) { return x.soort === 'bezig'; }).length, items_klaar: rij.filter(function (x) { return x.soort !== 'bezig' && !x.gespeeld; }).length,
     zelf: Object.assign({ aanwezig: (function () { try { const w = telAanwezig(); return w.ok ? 'ja' : w.reden; } catch (e) { return 'fout'; } })() }, telStaat.zelf) };
 }

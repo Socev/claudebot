@@ -518,6 +518,57 @@ srv.listen(0, '127.0.0.1', async () => {
     toets('8 zelf-log zonder inhoud', !/offerte|Rapport|goedkoper/.test(JSON.stringify(zlog())), zlog());
     H.telStaat.rij.forEach((x) => { x.gespeeld = x.gespeeld || new Date().toISOString(); });
 
+    // ── 4t. wv622 (Tasker v7): versie, zin en netwerkgat van de telefoon; lease los na een gat ──
+    {
+      H.appStaat.tellers['tel-beurt'] = []; H.appStaat.tellers['tel-beurtdag'] = [];
+      sessie(PIXEL, 'credP', false);
+      const telLog = () => audit().trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((x) => /^telefoon /.test(x.reden || ''));
+      const voor = telLog().length;
+      r = await tel('GET', '/tel/uit?wacht=0&plek=Auto&v=7&fouten=0&zin=geen');
+      toets('4t lange vraag met v, fouten en zin: 200', r.status === 200, r.j);
+      r = await tel('GET', '/tel/uit?wacht=0&plek=Auto&v=7&fouten=0&zin=geen');
+      let tl = telLog().slice(voor);
+      toets('4t versie 7 één keer in de audit (niet bij elke lange vraag)', tl.filter((x) => x.reden === 'telefoon versie 7').length === 1 && tl.length === 1, tl);
+      toets('4t /health: tasker_versie 7', H.telInfo().tasker_versie === 7, H.telInfo().tasker_versie);
+      await tel('GET', '/tel/uit?wacht=0&zin=traag&v=7&fouten=0');
+      await tel('GET', '/tel/uit?wacht=0&zin=%25SocevZin&v=7&fouten=0');
+      await tel('GET', '/tel/uit?wacht=0&zin=Hallo%20daar&v=7&fouten=0');
+      tl = telLog().slice(voor);
+      toets('4t zin "traag" gelogd; letterlijke %SocevZin, "geen" en vrije tekst niet', tl.filter((x) => /^telefoon zei/.test(x.reden)).map((x) => x.reden).join() === 'telefoon zei traag', tl);
+      await tel('GET', '/tel/uit?wacht=0');
+      toets('4t lange vraag zonder v (v6): versie onbekend gelogd, /health null', telLog().slice(voor).some((x) => x.reden === 'telefoon versie onbekend') && H.telInfo().tasker_versie === null, telLog().slice(voor));
+      // item uitgegeven aan een lange vraag die de telefoon nooit zag
+      const rG = await tel('POST', '/tel/beurt', { ct: 'text/plain', body: 'vraag over het gat' }); await tik();
+      toets('4t beurt voor de gat-proef: 202', rG.status === 202, rG.j);
+      afmaken[rG.j.id]('Antwoord na het gat.'); await tik();
+      r = await tel('GET', '/tel/uit?wacht=0&v=7&fouten=0');
+      toets('4t item uitgegeven (de telefoon "mist" dit antwoord)', r.j.id === rG.j.id, r.j);
+      r = await tel('GET', '/tel/uit?wacht=0&v=7&fouten=0');
+      toets('4t zonder fouten: lease houdt het item vast', !r.j.id, r.j);
+      r = await tel('GET', '/tel/uit?wacht=0&v=7&fouten=3');
+      toets('4t met fouten=3 en geen deel gevraagd: lease los, meteen opnieuw uitgegeven', r.j.id === rG.j.id, r.j);
+      toets('4t netwerkgat in de audit met fouten en los', telLog().some((x) => x.reden === 'telefoon netwerkgat' && x.fouten === 3 && x.los === 1), telLog().slice(-2));
+      r = await tel('GET', '/tel/deel/' + rG.j.id + '/1');
+      toets('4t deel 1 opgehaald', r.status === 200, r.status);
+      r = await tel('GET', '/tel/uit?wacht=0&v=7&fouten=2');
+      toets('4t na een opgehaald deel: fouten geven het item NIET vrij (anders twee keer)', !r.j.id, r.j);
+      const op = JSON.parse(fs.readFileSync(path.join(DATA, 'tel-uit.json'), 'utf8')).items.find((x) => x.id === rG.j.id);
+      toets('4t deel_t staat op schijf (ook na een herstart niet vrijgeven)', op && op.deel_t >= op.uitgifte_t, op);
+      r = await tel('GET', '/tel/uit?wacht=0&v=abc&fouten=-1&zin=' + 'x'.repeat(40));
+      toets('4t onzin in v/fouten/zin: gewoon 200, niets vrijgegeven', r.status === 200 && !r.j.id, r.j);
+      await tel('POST', '/tel/gespeeld/' + rG.j.id);
+      // aankondiging (soort zelf) verloren in een gat: na vrijgave meteen opnieuw, en dat telt niet als de ene herhaling
+      const tid = Object.keys(H.telStaat.telefoon)[0], zid = 'cdcdcdcdcdcdcdcd', nu0 = Date.now();
+      H.telStaat.rij.push({ id: zid, apparaat: tid, soort: 'zelf', spreek: 'Zelf.', aankondiging: 'Aankondiging.', t_start: nu0, t_klaar: nu0, tot: nu0 + 600000, k_gelogd: 'nvt' });
+      r = await tel('GET', '/tel/uit?wacht=0&v=7&fouten=0');
+      toets('4t aankondiging uitgegeven', r.j.id === zid && r.j.aankondigen === 'ja', r.j);
+      r = await tel('GET', '/tel/uit?wacht=0&v=7&fouten=1');
+      const zi = H.telStaat.rij.find((x) => x.id === zid);
+      toets('4t aankondiging na een gat meteen opnieuw, telt niet als herhaling', r.j.id === zid && zi.aangeboden_n === 1, { r: r.j, n: zi.aangeboden_n });
+      zi.gespeeld = new Date().toISOString();
+      toets('4t audit zonder inhoud', !/gat\.|Antwoord na|Aankondiging\./.test(audit()));
+    }
+
     // ── 5. noodstop en passief ──
     rolStub.primair = false;
     r = await tel('GET', '/tel/uit');
