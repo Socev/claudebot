@@ -5140,7 +5140,9 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
     const vervalt = function () {
       if (j.app.teruggehaald) return true;   // wv628: Haal terug heeft de beurt al afgesloten en opgeruimd (appRijTerug)
       // wv628: een getypt bericht uit de rij start niet meer als deze kant intussen passief is (wissel naar de reservekant): de
-      // vault-sync staat hier dan stil. Niet verwerkt, net als na een herstart; de app zet de tekst terug in het invoerveld.
+      // vault-sync staat hier dan stil. Niet verwerkt, net als na een herstart. Bewust alleen voor getypte berichten (review #12):
+      // knopdrukken in de rij en Telegram-beurten lopen zoals vóór wv628 door; een vals passief (Supabase > 180 s weg) kost hier
+      // hooguit een bericht dat David opnieuw stuurt.
       if (meta.rij && !rolPrimair()) {
         j.status = 'done'; j.done_at = Date.now(); j.opgehaald = true;
         j.result = { ok: false, error: 'niet verwerkt, stond in de rij (Socev wisselde naar de andere kant)' };
@@ -5169,6 +5171,8 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
       // lessenBlok, en in dat venster mag Haal terug niet meer lukken. Vanaf hier niet meer in rij.json.
       j.app.gestart = true;
       if (meta.rij) appRijWeg(jobId);
+      // review #8: het tussendoor-venster van het volgende bericht begint pas bij dit bericht als dit echt start
+      if (j.app.tussendoorTot) { appStaat.tussendoorTot = appStaat.tussendoorTot || {}; if (!(appStaat.tussendoorTot[kanaal] > j.app.tussendoorTot)) appStaat.tussendoorTot[kanaal] = j.app.tussendoorTot; }
       // appNaBeurt NIET teruggeven: een trage schijf mag de volgende beurt (ook uit Telegram) niet ophouden (Fable-review wv56 #3)
       return processJob(jobId, prompt + (staart || ''), '', [], chatId, DEFAULT_WS, keuze, '').then(function () {
         appNaBeurt(jobId).catch(function (e) { logError('app-na-beurt', e); });
@@ -5202,8 +5206,10 @@ const APP_RIJ_KANALEN = { machinekamer: true };
 const APP_RIJ_UIT = path.join(APP_DATA, 'rij-getypt-uit');
 const APP_RIJ = path.join(APP_DATA, 'rij.json');   // job -> {kanaal, apparaat, beurt_id, tekst, getypt, invoer}; alleen niet-gestarte berichten
 function appRijAan(kanaal) { return APP_RIJ_KANALEN[kanaal] === true && process.env.APP_RIJ_GETYPT_UIT !== '1' && !fs.existsSync(APP_RIJ_UIT); }
+// review #6: een herhaling (zelfde beurt_id) hoort ook te horen dat het bericht nog in de rij staat
+function appWachtInRij(id) { const j = jobs[id]; return !!(j && j.app && j.status === 'pending' && !j.app.gestart && !j.app.teruggehaald); }
 function appGetyptInRij(kanaal) {
-  return Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && j.app.soort === 'bericht' && j.status === 'pending' && !j.app.teruggehaald; }).length;
+  return Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j.app && j.app.kanaal === kanaal && j.app.soort === 'bericht' && j.status === 'pending' && !j.app.teruggehaald && !j.app.gestart; }).length;   // review #7: gestart = niet meer in de rij
 }
 // rij.json: best effort (een schrijffout houdt de beurt niet tegen, wel gelogd). Kapot = opnieuw beginnen met dit bericht.
 function appRijLees() { try { return appLeesStreng(APP_RIJ, {}); } catch (e) { logError('app-rij', e); return {}; } }
@@ -5442,10 +5448,10 @@ async function appBeurt(req, res, reg, a, s, d) {
   const bh = appSha(bid);
   if (appStaat.beurtStartend && appStaat.beurtStartend[bh]) {   // wv171: dezelfde beurt_id wacht nog op chat_log
     const jid = await appStaat.beurtStartend[bh];
-    if (jid) { res._app.reden = 'herhaling ' + jid; return appStuur(res, 200, { ok: true, job_id: jid, al: true }); }
+    if (jid) { res._app.reden = 'herhaling ' + jid; return appStuur(res, 200, { ok: true, job_id: jid, al: true, in_rij: appWachtInRij(jid) }); }
   }
   const eerder = appBeurtIds()[bh];
-  if (eerder) { res._app.reden = 'herhaling ' + eerder.job; return appStuur(res, 200, { ok: true, job_id: eerder.job, al: true }); }
+  if (eerder) { res._app.reden = 'herhaling ' + eerder.job; return appStuur(res, 200, { ok: true, job_id: eerder.job, al: true, in_rij: appWachtInRij(eerder.job) }); }
   let upload = null;
   if (nrs.length) {
     const dir = appUploadMap(a, bid);
@@ -5473,7 +5479,7 @@ async function appBeurt(req, res, reg, a, s, d) {
   const rijAan = appRijAan(kanaal);   // wv628: in de machinekamer mag een getypt bericht in de rij
   if (!(await appMagBeurt(res, kanaal, rijAan ? 'getypt' : false))) return;
   const ids = appBeurtIds();
-  if (ids[bh]) { res._app.reden = 'herhaling ' + ids[bh].job; return appStuur(res, 200, { ok: true, job_id: ids[bh].job, al: true }); }   // tweede kwam tijdens de rolcheck
+  if (ids[bh]) { res._app.reden = 'herhaling ' + ids[bh].job; return appStuur(res, 200, { ok: true, job_id: ids[bh].job, al: true, in_rij: appWachtInRij(ids[bh].job) }); }   // tweede kwam tijdens de rolcheck
   const namen = upload ? upload.lijst.map(function (x) { return x.doel; }) : [];
   // wv171: Davids rij in chat_log vóór de beurt; kanaal en beurt_id zijn zolang gereserveerd (appLopend, herhaling hierboven)
   let klaarJob = null;
@@ -5485,7 +5491,8 @@ async function appBeurt(req, res, reg, a, s, d) {
     // wv628: [ANTWOORD OP] vóór Davids tekst; is het geciteerde bericht een open gevoelige vraag, dan een regel dat getypt niet telt
     const kop = antwOp ? appAntwoordOpRegel(antwOp.x) + '\n' : '';
     const staartOp = antwOp && antwOp.gevoeligOpen ? '\n' + APP_ANTWOORD_OP_GEVOELIG : '';
-    const promptTekst = kop + (upload ? appBestandenPrompt(appOntmasker(tekst), namen) : appOntmasker(tekst)) + staartOp + (res._app.bsnWeg ? '\n' + APP_BSN_SYS : '') + (gelogd ? '' : APP_CHATLOG_NIET);
+    // review #14: met bijlagen blijft de beurt beginnen met de bundelregel (CLAUDE.md); het citaat komt er dan achter
+    const promptTekst = (upload ? appBestandenPrompt(appOntmasker(tekst), namen) + (kop ? '\n' + kop.replace(/\n$/, '') : '') : kop + appOntmasker(tekst)) + staartOp + (res._app.bsnWeg ? '\n' + APP_BSN_SYS : '') + (gelogd ? '' : APP_CHATLOG_NIET);
     // wv628 (review #7): na de laatste await opnieuw tellen, anders komen twee gelijktijdige verzoeken er allebei door
     if (rijAan && appGetyptInRij(kanaal) >= APP_RIJ_GETYPT_MAX) st = { fout: 'rij vol' };
     else {
@@ -5536,7 +5543,7 @@ function appBerichtBron(x) {
 }
 // Eén regel, zonder markeringen die David of een rapport kan nadoen (appOntmasker), afgekapt.
 function appEenRegel(t, max) {
-  const r = appOntmasker(String(t || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim(), 'geciteerd');
+  const r = appOntmasker(String(t || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim(), 'geciteerd').replace(/\[/g, '(').replace(/\]/g, ')');   // review #10: geen haken in een label: ] sloot anders de [Systeem: …]-regel af
   return r.length > max ? r.slice(0, max - 1) + '…' : r;
 }
 async function appAntwoordOpZoek(kanaal, id) {
@@ -5595,7 +5602,7 @@ async function appTussendoor(kanaal, j, metCitaat) {
   appStaat.tussendoorTot = appStaat.tussendoorTot || {};
   const vorige = appStaat.tussendoorTot[kanaal] || 0;
   if (vorige > onder && vorige < getypt) { onder = vorige; ondergrensIs = 'vorig bericht'; }
-  if (!(vorige > getypt)) appStaat.tussendoorTot[kanaal] = getypt;
+  j.app.tussendoorTot = getypt;   // gezet bij de start (appStartBeurt), niet als het bericht hierna nog vervalt
   const grens = onder || getypt - APP_TUSSENDOOR_ZONDER_MS;
   const binnen = items.filter(function (x) { const t = Date.parse(x.t); return x.soort === 'socev' && t > grens && t <= getypt; });
   if (!binnen.length) return '';
@@ -6905,7 +6912,7 @@ async function appNieuwBronnen() {
     try { tijden = await appLogTijden(k); } catch (e) { if (!(e && e.code === 'ENOENT')) { uit[k] = null; continue; } }
     const t = tijden.slice();
     // afgerond maar (nog) niet in het log: uit het geheugen
-    Object.keys(jobs).forEach(function (id) { const j = jobs[id]; if (j.app && j.app.kanaal === k && j.status === 'done' && j.app.gelogd !== true) t.push(j.done_at || j.created); });
+    Object.keys(jobs).forEach(function (id) { const j = jobs[id]; if (j.app && j.app.kanaal === k && j.status === 'done' && j.app.gelogd !== true && !j.app.teruggehaald && !j.app.rijVerloren) t.push(j.done_at || j.created); });   // wv628 (review #9)
     uit[k] = t;
   }
   let idx = null;
