@@ -7462,8 +7462,11 @@ async function appVjRegisterVraag(p) {
   try { rijen = await appVjRegister(); } catch (e) { logError('app-voor-jou', e); rijen = null; uit.leesbaar = false; }
   reg.forEach(function (sl) {
     const m = rijen ? appVjRegisterMatch(rijen, sl) : [];
-    const r = m.find(function (x) { return /^(open|deels|wacht|uitgesteld)/i.test(x.status); }) || m[0];
     const tijd = appVjTijd(sl.split('#')[0]);
+    // wv621: een sleutel die op meer dan één registerrij past, koppelt aan geen enkele (19-10: kaart wv561 toonde de Outlook-vraag
+    // omdat "2026-10-17" ook bij die rij paste, en een Ja sloot de verkeerde handeling). Geen vraag, geen knoppen.
+    if (m.length > 1) { uit.dubbel = true; uit.herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + ' (past op ' + m.length + ' vragen in het register)' }); return; }
+    const r = m[0];
     if (!r) { uit.herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + (rijen ? ' (niet meer in het register)' : '') }); return; }
     // wv580: een sleutel in de vraag wordt [sleutel weggelaten]; de vraag zelf (met knoppen) blijft staan
     // vóór én na het weghalen van opmaak: `__` kan in een sleutel staan (Fable wv580 #3)
@@ -7550,6 +7553,7 @@ function appVjKnopStand(p, rv) {
   }
   if (!vragenOk) waaromNiet = 'de knoppen zijn nu niet te gebruiken; probeer het straks of antwoord in het gesprek';
   else if (rv && !rv.leesbaar) waaromNiet = 'de vraag is nu niet te lezen; probeer het straks';
+  else if (rv && rv.dubbel) waaromNiet = 'deze kaart wijst naar meer dan één vraag; antwoord in het gesprek';   // wv621
   else if (tekst.length + (voorstel ? voorstel.length : 0) > APP_VJ_VRAAG_MAX) waaromNiet = 'deze vraag is te lang voor een knop; antwoord in het gesprek';
   else if (!tekst.trim() || (!q && !/\?$/.test(tekst))) waaromNiet = 'deze kaart heeft geen vraag';   // Fable wv404 #5: een titel zonder vraagteken is geen vraag
   else if (!/^[a-z0-9][a-z0-9_-]{1,60}$/.test(String(p.sleutel || ''))) waaromNiet = 'deze kaart heeft een onverwachte sleutel; antwoord in het gesprek';   // Fable wv404 #2

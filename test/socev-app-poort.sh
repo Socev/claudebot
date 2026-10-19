@@ -5195,6 +5195,47 @@ async function bewijs(o) {
       sbStaat.vj.push(pk(33, 'kaart-geen-vraag', { titel: 'n8n — wegwerpworkflows', herkomst: { wv: [503], auto: 'wv' } }), pk(34, 'Kaart [KNOP] x', { titel: 'Mag het?' })); H.appStaat.vjCache = null;
       const r33 = await D(33), r34 = await D(34);
       toets('27b titel zonder ? -> geen vraag, geen knoppen; sleutel met rare tekens -> geen knoppen', r33.status === 200 && r33.j.knop.kan === false && /geen vraag/.test(r33.j.knop.waarom_niet) && r34.status === 200 && r34.j.knop.kan === false, JSON.stringify([r33.j.knop, r34.j.knop]));
+      // wv621 (19-10: een Ja op kaart wv561 droeg de Outlook-vraag; beide kaarten hadden registersleutel "2026-10-17"): twee kaarten op
+      // dezelfde dag. Sleutel zonder kenmerk die op twee rijen past -> geen vraag, geen knoppen; met eigen kenmerk elk zijn eigen vraag,
+      // en een Ja op de ene sluit alleen die ene.
+      fs.appendFileSync(regPad, '| 2026-10-12 09:00 | machinekamer (#dubbel-alfa) | Mag ik de Outlook-dubbelcheck bouwen? | Ja | open | x |\n'
+        + '| 2026-10-12 09:00 | machinekamer (#dubbel-beta) | Mag ik de Werkkamer-route bouwen? | Ja | open | x |\n');
+      sbStaat.vj.push(pk(42, 'kaart-dubbel-a', { titel: 'Outlook — dubbelcheck?', herkomst: { register: ['2026-10-12 09:00'] } }),
+        pk(43, 'kaart-dubbel-b', { titel: 'Werkkamer — route?', herkomst: { register: ['2026-10-12 09:00'] } }),
+        pk(44, 'kaart-uniek-a', { titel: 'Outlook — dubbelcheck?', herkomst: { register: ['2026-10-12 09:00#dubbel-alfa'] } }),
+        pk(45, 'kaart-uniek-b', { titel: 'Werkkamer — route?', herkomst: { register: ['2026-10-12 09:00#dubbel-beta'] } }));
+      H.appStaat.vjCache = null; H.appStaat.vjRegister = null;
+      const r42 = await D(42), r43 = await D(43);
+      toets('27b wv621 sleutel past op twee registerrijen -> geen vraag, geen knoppen, reden', r42.status === 200 && r42.j.knop.kan === false && /meer dan één vraag/.test(r42.j.knop.waarom_niet)
+        && r42.j.knop.vraag === null && r42.j.vraag === null && r43.j.knop.kan === false && r43.j.vraag === null, JSON.stringify([r42.j.knop, r42.j.vraag]));
+      const n42 = gestart.length;
+      r = await KN({ id: 42, keuze: 'ja', tekst_id: r42.j.knop.tekst_id });
+      toets('27b wv621 druk op een kaart met dubbele sleutel -> 409, geen beurt, kaart blijft open', r.status === 409 && /meer dan één vraag/.test(r.j.fout) && gestart.length === n42
+        && sbStaat.vj.find((x) => x.id === 42).status === 'open', r.status + JSON.stringify(r.j));
+      // Fable wv621 #7: de incidentvorm (sleutel zonder tijd, twee rijen van die dag) en een gemengde lijst [uniek, dubbel]
+      fs.appendFileSync(regPad, '| 2026-10-13 | machinekamer (#zt-a) | Mag ik X? | Ja | open | x |\n| 2026-10-13 | machinekamer (#zt-b) | Mag ik Y? | Ja | open | x |\n');
+      sbStaat.vj.push(pk(46, 'kaart-zonder-tijd', { titel: 'X?', herkomst: { register: ['2026-10-13'] } }),
+        pk(47, 'kaart-gemengd', { titel: 'Outlook?', herkomst: { register: ['2026-10-12 09:00#dubbel-alfa', '2026-10-12 09:00'] } }));
+      H.appStaat.vjCache = null; H.appStaat.vjRegister = null;
+      const r46 = await D(46), r47 = await D(47);
+      toets('27b wv621 sleutel zonder tijd op twee rijen van één dag, en gemengde lijst [uniek, dubbel] -> geen knoppen', r46.j.knop.kan === false && r46.j.knop.vraag === null
+        && r47.j.knop.kan === false && /meer dan één vraag/.test(r47.j.knop.waarom_niet), JSON.stringify([r46.j.knop, r47.j.knop]));
+      const r44 = await D(44), r45 = await D(45);
+      toets('27b wv621 eigen kenmerk -> elke kaart zijn eigen vraag, eigen vraag-id', r44.j.knop.kan === true && r44.j.knop.vraag === 'Mag ik de Outlook-dubbelcheck bouwen?'
+        && r45.j.knop.kan === true && r45.j.knop.vraag === 'Mag ik de Werkkamer-route bouwen?' && r44.j.knop.vraag_id !== r45.j.knop.vraag_id, JSON.stringify([r44.j.knop, r45.j.knop]));
+      geenVers();
+      r = await KN({ id: 44, keuze: 'ja' });
+      await slaap(40);
+      const g44 = gestart[gestart.length - 1];
+      const k44 = sbStaat.vj.find((x) => x.id === 44), k45 = sbStaat.vj.find((x) => x.id === 45);
+      toets('27b wv621 Ja op kaart A -> beurt met vraag A en sleutel van A; alleen kaart A dicht, kaart B open met knoppen', r.status === 200 && gestart.length === n42 + 1
+        && /David drukte JA op de vraag: "Mag ik de Outlook-dubbelcheck bouwen\?"/.test(g44.prompt) && /\(punt kaart-uniek-a\), registerrij "2026-10-12 09:00#dubbel-alfa"/.test(g44.prompt)
+        && g44.prompt.indexOf('Werkkamer') < 0 && k44.status === 'gedaan' && new RegExp('vraag-id ' + r44.j.knop.vraag_id).test(k44.bewijs) && k45.status === 'open' && k45.bewijs === null,
+        r.status + ' ' + JSON.stringify([k44, k45]) + ' ' + (g44 && g44.prompt.slice(-500)));
+      afmaken[g44.jobId]('ok'); await slaap(40);
+      H.appStaat.vjCache = null;
+      const r45b = await D(45);
+      toets('27b wv621 kaart B na de druk op A: nog steeds te beantwoorden', r45b.status === 200 && r45b.j.knop.kan === true && r45b.j.knop.beantwoord === null, JSON.stringify(r45b.j.knop));
       // Fable #3: heropende kaart (na een gestarte druk) krijgt weer knoppen en een nieuwe druk werkt
       const k21b = sbStaat.vj.find((x) => x.id === 21);
       Object.assign(k21b, { status: 'open', bewijs: null, gesloten_op: null, bijgewerkt: new Date(Date.now() + 1000).toISOString() }); H.appStaat.vjCache = null;
