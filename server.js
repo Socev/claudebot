@@ -2795,6 +2795,24 @@ function handleRequest(req, res) {
     }); });
   }
 
+  // ── wv561: Werkkamer-tegels zonder taalmodel (alleen lezen; body-secret zoals /run; geen andere invoer) ──
+  if (req.method === 'POST' && req.url === '/werkkamer-tegels') {
+    const eind = Date.now() + WK_TOTAAL_MS;   // totaalgrens inclusief de wachttijd van rolPoort (n8n-timeout 60 s)
+    return rolPoort(res, function () { readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
+      werkkamerTegels(eind).then(function (uit) {
+        res._log = { werkkamer: { todoist: uit.todoist.items.length, deadlines: uit.deadlines.items.length, duur_ms: uit.duur_ms } };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(uit));
+      }).catch(function (e) {
+        logError('werkkamer-tegels', e);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, fout: 'de werkkamer-tegels zijn nu niet samen te stellen' }));
+      });
+    }); });
+  }
+
   // ── v2: achtergrondagent starten ──────────────────────────────────────────
   // wv424b: smalle routes voor sessies zonder beheersleutels (zie smalRoute)
   if (req.method === 'POST' && reqPath(req).indexOf('/smal/') === 0) return rolPoort(res, function () { smalRoute(req, res); });   // passieve kant: niets schrijven, geen tweede Telegram-lezer
@@ -8138,18 +8156,20 @@ function appProjWikiPaden(s) {
   while ((m = re.exec(String(s || '')))) u.push(m[1].trim());
   return u;
 }
-function appProjTitel(wat) {
+function appProjTitel(wat, status) {
   // Een vet blok is de titel als het een zin opent: aan het begin, direct na een statusblok of na een zinseinde. Een vet woord
   // midden in een zin ("**90941**", "**vervallen**") of na een dubbele punt is nadruk, geen titel.
+  // `status`: eigen statuslijst (de Werkkamer, wv561); zonder = APP_PROJ_STATUS (de app, ongewijzigd).
+  const st = status || APP_PROJ_STATUS;
   const re = /\*\*([\s\S]+?)\*\*/g;
   let m, naStatus = 0;
   while ((m = re.exec(wat))) {
     const b = appProjPlat(m[1]), voor = wat.slice(0, m.index);
-    if (APP_PROJ_STATUS.test(b)) { naStatus = m.index + m[0].length; continue; }
+    if (st.test(b)) { naStatus = m.index + m[0].length; continue; }
     if (b && (/^\s*$/.test(voor) || /^\s*$/.test(wat.slice(naStatus, m.index)) || /[.!?]["')]?\s+$/.test(voor))) return b.replace(/\s*:\s*$/, '');
   }
   // geen bruikbaar vet blok: de eerste zin van wat er overblijft na de statusblokken (een zin eindigt vóór een hoofdletter)
-  const rest = appProjPlat(wat.replace(/\*\*([\s\S]+?)\*\*/g, function (x, b) { return APP_PROJ_STATUS.test(appProjPlat(b)) ? ' ' : b; })).replace(/^[\s:;.—-]+/, '');
+  const rest = appProjPlat(wat.replace(/\*\*([\s\S]+?)\*\*/g, function (x, b) { return st.test(appProjPlat(b)) ? ' ' : b; })).replace(/^[\s:;.—-]+/, '');
   const zin = (/^(.+?[.!?])\s+(?=[A-ZÀ-Ý"'(])/.exec(rest) || [null, rest])[1];
   return zin.charAt(0).toUpperCase() + zin.slice(1);
 }
@@ -8330,6 +8350,267 @@ async function appProjectenRoute(req, res, a) {
     e.lopend = e.lopend.map(function (x) { return Object.assign({}, x, { bron: metLink(x.bron) }); });
   });
   appStuur(res, 200, { ok: true, vaste_plek: vast, vandaag: d.vandaag, entiteiten: lijst, fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
+}
+
+// ── Werkkamer-tegels zonder taalmodel (wv561, 19-10-2026; akkoord David 19-10 17:40, app-knop) ──────────────────────
+// POST /werkkamer-tegels (body-secret zoals /run, achter rolPoort, geen andere invoer): het JSON-blok dat de skill
+// werkkamer-verversen elk uur door een modelbeurt liet schrijven (± 10% van het weekquotum en een flikkerende
+// deadline-tegel), nu deterministisch. Ontwerp + Fable-dispositie: 01_Ontwikkeling/Werkkamer-tegels zonder taalmodel
+// (ontwerp).md. Alleen lezen. Per paneel: `items`, `fout` (bron onbruikbaar: n8n slaat de PUT van dat paneel over, de oude
+// tegel blijft staan) en `melding` (niet-fataal: scheve rijen, afgekapt; n8n zet hem als fout-tekst óp de tegel). De kern
+// van de app-parser (cellen, titel, plat) is gedeeld; het filter is eigen: de Werkkamer is privé (besluit David 19-8) en
+// wil Privé, Gambia en Systeem wél, en "geen actie (ter info)"-rijen blijven zichtbaar (ontwerp regel 6).
+const WK_TOTAAL_MS = 38000, WK_DRIVE_WACHT_MS = 8000, WK_TODOIST_MS = 8000, WK_TODOIST_PAGINAS = 3;
+const WK_MAX_TODOIST = 80, WK_MAX_DEADLINES = 40, WK_MAX_DOCS = 8, WK_TERUG = 7, WK_VOORUIT = 60;
+const WK_DICHT = /^(AFGEHANDELD|AFGEROND|VERVALLEN|AFGEZIEN|BETAALD|VERLOPEN|INGEDIEND|AFGELOPEN|LOSGELATEN|OPGELOST)\b/;
+// Statuslijst voor de titel: die van de app plus UPDATE/AANVULLING/LOSGELATEN/"Oorspronkelijk:" (ontwerp regel 5); de app zelf
+// houdt APP_PROJ_STATUS ongewijzigd.
+const WK_STATUS = { test: function (b) { return APP_PROJ_STATUS.test(b) || /^(?:UPDATE|AANVULLING|LOSGELATEN)\b|^Oorspronkelijk:/.test(b); } };
+const WK_DOC_ENT = [
+  { naam: 'Groenhouten', mappen: ['10_Zakelijk/Groenhouten'] }, { naam: 'Tolgaarde', mappen: ['10_Zakelijk/Tolgaarde'] },
+  { naam: 'POT', mappen: ['10_Zakelijk/POT_POH_GGZ'] }, { naam: 'DBH', mappen: ['10_Zakelijk/DBH'] }, { naam: 'HAGRO', mappen: ['10_Zakelijk/HAGRO'] },
+  { naam: 'Gambia', mappen: ['20_Prive/Gambia'] }, { naam: 'Privé', mappen: ['20_Prive'], zonder: ['20_Prive/Gambia'] },
+  { naam: 'Systeem', mappen: ['00_Systeem', '01_Ontwikkeling'] },
+];
+const WK_DOC_SLA = /^(raw_input|Voltooid|Vervallen|Logboek)$/;
+appStaat.wkDocs = appStaat.wkDocs || {};   // pad -> { mtime, updated, eerste }: alleen opnieuw lezen als de mtime verandert
+function wkTekst(s, n) { return appKort(appSleutelMasker(appBsnMasker(s)), n); }   // vangnet grondwet 3 + secretgrep aan de andere kant
+// Dicht (ontwerp regel 2): de kop, of een later vet blok dat een zin opent (zelfde criterium als appProjTitel: aan het begin,
+// direct na een statusblok of na een zinseinde), begint met een sluitwoord. Een woord midden in de lopende tekst sluit niets.
+function wkDicht(wat) {
+  const re = /\*\*([\s\S]+?)\*\*/g;
+  let m, naStatus = 0;
+  while ((m = re.exec(wat))) {
+    const b = appProjPlat(m[1]), voor = wat.slice(0, m.index);
+    const opent = /^\s*$/.test(voor) || /^\s*$/.test(wat.slice(naStatus, m.index)) || /[.!?]["')]?\s+$/.test(voor);
+    if (opent && WK_DICHT.test(b)) return true;
+    if (WK_STATUS.test(b)) naStatus = m.index + m[0].length;
+  }
+  return false;
+}
+// Vaste afbeelding van de kolom Entiteit (57 ruwe waarden) op de acht namen van de Werkkamer (ontwerp regel 7).
+function wkEntiteit(kolom) {
+  const k = appProjPlat(kolom);
+  if (/gambia/i.test(k)) return 'Gambia';
+  const d = k.split(/\s*(?:\/|\+|↔|\(|,)\s*/)[0].trim();
+  if (/^systeem\b/i.test(d)) return 'Systeem';
+  if (/tolgaarde/i.test(d)) return 'Tolgaarde';
+  if (/groenhouten/i.test(d)) return 'Groenhouten';
+  if (/^POT\b|POH-|kostenmaatschap/i.test(d)) return 'POT';
+  if (/^DBH\b|bevlogen/i.test(d)) return 'DBH';
+  if (/^(HAGRO|LHV)\b/i.test(d)) return 'HAGRO';
+  if (/^(privé|prive|familie|gezin)(?![A-Za-zÀ-ÿ])/i.test(d)) return 'Privé';
+  return 'Overig';
+}
+function wkHouder(actie) {
+  if (/^\s*geen actie/i.test(actie)) return 'geen actie (ter info)';
+  const i = actie.indexOf(':'), h = i < 0 ? '' : actie.slice(0, i).trim();
+  return h && h.length <= 40 ? h : 'David';
+}
+function wkDagen(datum, vandaag) { return Math.round((Date.parse(datum + 'T12:00:00Z') - Date.parse(vandaag + 'T12:00:00Z')) / 86400000); }
+function wkDeadlines(tekst, vandaag) {
+  const sectie = String(tekst).split(/^## Actueel\s*$/m)[1];
+  if (sectie === undefined) return { items: [], fout: 'het deadline-register heeft geen sectie Actueel' };
+  const kand = [];
+  let scheef = 0, half = 0, seinFout = 0;
+  sectie.split(/^## /m)[0].split('\n').forEach(function (regel) {
+    if (!/^\|\s*\d{4}-\d{2}/.test(regel)) return;
+    const c = appProjCellen(regel);
+    if (c.length !== 6) { scheef++; return; }
+    const datum = c[0], wat = c[2], actie = appProjPlat(c[3]);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || isNaN(Date.parse(datum + 'T12:00:00Z'))) {
+      // halve of ongeldige datum: alleen tellen als de maand nog in het venster kan vallen (een "2026-09" van vorige maand niet)
+      const hm = /^(\d{4})-(\d{2})/.exec(datum), eind = hm ? new Date(Date.UTC(Number(hm[1]), Number(hm[2]), 0)).toISOString().slice(0, 10) : null;
+      if (!eind || wkDagen(eind, vandaag) >= -WK_TERUG) half++;
+      return;
+    }
+    const eerste = /^\s*\*\*([\s\S]+?)\*\*/.exec(wat), kop = eerste ? appProjPlat(eerste[1]) : '';
+    if (/niet meer seinen/i.test(kop) || /niet meer seinen/i.test(actie) || /^\s*(vervallen|geen actie meer)\b/i.test(actie) || wkDicht(wat)) return;
+    const dagen = wkDagen(datum, vandaag);
+    const sm = /^\s*(\d{1,3})\b/.exec(c[4]), signaleer = sm ? Number(sm[1]) : 0;   // "— (gemeld 14-10 …)" is geen 1410 (Fable 2)
+    if (!sm && dagen >= 0 && dagen <= WK_VOORUIT) seinFout++;
+    const sein = dagen >= 0 && dagen <= signaleer;
+    if (!((dagen >= -WK_TERUG && dagen <= WK_VOORUIT) || sein)) return;
+    kand.push({ datum: datum, titel: wkTekst(appProjTitel(wat, WK_STATUS), 160) || '(zonder titel)', houder: wkTekst(wkHouder(actie), 60),
+      dagen: dagen, sein: sein, entiteit: wkEntiteit(c[1]), volg: kand.length });
+  });
+  // Plafond met vaste volgorde (ontwerp regel 4): eerst sein of verlopen, dan de rest op datum, bij gelijke datum de registervolgorde.
+  const opDatum = function (a, b) { return a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : a.volg - b.volg; };
+  const voor = kand.filter(function (x) { return x.sein || x.dagen < 0; }).sort(opDatum), na = kand.filter(function (x) { return !(x.sein || x.dagen < 0); }).sort(opDatum);
+  const items = voor.concat(na).slice(0, WK_MAX_DEADLINES).sort(opDatum).map(function (x) {
+    return { datum: x.datum, titel: x.titel, houder: x.houder, dagen: x.dagen, sein: x.sein, entiteit: x.entiteit };
+  });
+  const afgekapt = Math.max(0, kand.length - WK_MAX_DEADLINES), m = [];
+  if (afgekapt) m.push(afgekapt + ' latere deadlines niet getoond (plafond ' + WK_MAX_DEADLINES + ')');
+  if (scheef) m.push(scheef + (scheef === 1 ? ' regel' : ' regels') + ' in het register onleesbaar (kolommen kloppen niet)');
+  if (half) m.push(half + (half === 1 ? ' regel' : ' regels') + ' zonder volledige datum');
+  if (seinFout) m.push(seinFout + (seinFout === 1 ? ' regel' : ' regels') + ' zonder getal bij Signaleer');
+  const uit = { items: items };
+  if (afgekapt) uit.afgekapt = afgekapt;
+  if (m.length) uit.melding = m.join('; ');
+  return uit;
+}
+// ── Documenten: map-walk + frontmatter (gecachet op mtime), daarna Drive-ID's uit de gedeelde rclone-cache van de app ──
+function wkWalk(vault, rel, zonder, uit, diep) {
+  if (diep > 10 || uit.length > 20000) return;
+  let l = [];
+  try { l = fs.readdirSync(path.join(vault, rel), { withFileTypes: true }); } catch (e) { return; }
+  l.forEach(function (x) {
+    if (x.name[0] === '_' || x.name[0] === '.') return;
+    const r = rel + '/' + x.name;
+    if (x.isDirectory()) { if (!WK_DOC_SLA.test(x.name) && zonder.indexOf(r) < 0) wkWalk(vault, r, zonder, uit, diep + 1); }
+    else if (x.isFile() && /\.md$/i.test(x.name)) uit.push(r);
+  });
+}
+function wkLeesBegin(abs, n) {
+  let fd = null;
+  try { fd = fs.openSync(abs, 'r'); const b = Buffer.alloc(n), k = fs.readSync(fd, b, 0, n, 0); return b.slice(0, k).toString('utf8'); }
+  finally { if (fd !== null) try { fs.closeSync(fd); } catch (e) {} }
+}
+function wkFrontmatter(t) {
+  t = String(t).replace(/^﻿/, '');
+  if (!/^---[ \t]*\r?\n/.test(t)) return { fm: '', rest: t };
+  const e = /\r?\n---[ \t]*(\r?\n|$)/.exec(t.slice(3));
+  return e ? { fm: t.slice(3, 3 + e.index), rest: t.slice(3 + e.index + e[0].length) } : { fm: t.slice(3), rest: '' };
+}
+// Eerste alinea na frontmatter, koppen en callout-koppen (een kop of "> [!info] Titel" is geen inhoud); de regels van die alinea
+// samengevoegd, want de vault breekt lange regels hard af, ook midden in een [[wikilink|alias]].
+function wkEersteRegel(rest) {
+  const r = String(rest).split(/\r?\n/), deel = [];
+  for (let i = 0; i < r.length; i++) {
+    const x = r[i].trim(), kaal = x.replace(/^(>\s*)+/, '');
+    const leeg = !kaal || /^#{1,6}(\s|$)/.test(kaal) || /^\[![^\]]*\]/.test(kaal) || /^(-{3,}|\*{3,}|_{3,})$/.test(kaal) || /^\|/.test(kaal) ||
+      /^<!--/.test(kaal) || /^!\[\[/.test(kaal) || /^%%/.test(kaal) || /^\*\*[^*]{1,80}\*\*:?$/.test(kaal);
+    if (leeg) { if (deel.length) break; continue; }
+    deel.push(kaal.replace(/^([-*+]|\d+[.)])\s+/, '').replace(/^\[[ xX]\]\s+/, ''));
+    if (deel.join(' ').length > 400) break;
+  }
+  return appProjPlat(deel.join(' ')).replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').trim();
+}
+function wkDocInfo(vault, rel) {
+  const abs = path.join(vault, rel);
+  let st;
+  try { st = fs.statSync(abs); } catch (e) { return null; }
+  const c = appStaat.wkDocs[rel];
+  if (c && c.mtime === st.mtimeMs) return c;
+  let fm = '';
+  try { fm = wkFrontmatter(wkLeesBegin(abs, 8192)).fm; } catch (e) { return null; }
+  const u = /^updated:\s*["']?(\d{4}-\d{2}-\d{2})/m.exec(fm);
+  const info = { mtime: st.mtimeMs, updated: u ? u[1] : appYmd(st.mtimeMs), eerste: null };
+  appStaat.wkDocs[rel] = info;
+  return info;
+}
+function wkDocKeuze(vault) {
+  const gezien = {};
+  return WK_DOC_ENT.map(function (e) {
+    const paden = [];
+    e.mappen.forEach(function (m) { wkWalk(vault, m, e.zonder || [], paden, 0); });
+    const l = [];
+    paden.forEach(function (p) { const i = wkDocInfo(vault, p); gezien[p] = 1; if (i) l.push({ pad: p, info: i }); });
+    l.sort(function (a, b) { return a.info.updated !== b.info.updated ? (a.info.updated < b.info.updated ? 1 : -1) : b.info.mtime !== a.info.mtime ? b.info.mtime - a.info.mtime : (a.pad < b.pad ? -1 : 1); });
+    return { naam: e.naam, gekozen: l.slice(0, WK_MAX_DOCS), leeg: !paden.length, gezien: gezien };
+  });
+}
+async function wkDocumenten(eind) {
+  const vault = appProjVault(), keuze = wkDocKeuze(vault);
+  // cache opruimen: paden die niet meer bestaan
+  const gezien = keuze.length ? keuze[0].gezien : {};
+  Object.keys(appStaat.wkDocs).forEach(function (p) { if (!gezien[p]) delete appStaat.wkDocs[p]; });
+  const D = appStaat.projDrive, mappen = [];
+  keuze.forEach(function (e) { e.gekozen.forEach(function (x) { const m = x.pad.slice(0, x.pad.lastIndexOf('/')); if (appProjMapOk(m) && mappen.indexOf(m) < 0) mappen.push(m); }); });
+  // Verouderde cache gewoon gebruiken (Drive-ID's zijn stabiel), op de achtergrond verversen, oudste eerst (Fable 7). Mist een
+  // gekozen bestand in een map die al > 10 min oud is (nieuw bestand), dan die map voorrang geven bij het verversen.
+  mappen.forEach(function (m) {
+    const x = D.mappen[m];
+    if (x && x.ids && Date.now() - x.op > 10 * 60 * 1000 && keuze.some(function (e) { return e.gekozen.some(function (g) { return g.pad.slice(0, g.pad.lastIndexOf('/')) === m && !x.ids[g.pad.slice(g.pad.lastIndexOf('/') + 1)]; }); })) x.op = 0;
+  });
+  const leeftijd = function (m) { const x = D.mappen[m]; return x ? x.op : -1; };
+  const volg = mappen.slice().sort(function (a, b) { return leeftijd(a) - leeftijd(b); });
+  const zonderCache = mappen.filter(function (m) { return !D.mappen[m]; }).length;
+  const vul = appProjDriveVul(volg).catch(function (e) { logError('werkkamer-drive', e); });
+  const wacht = Math.min(WK_DRIVE_WACHT_MS, eind - Date.now() - 2000);
+  if (zonderCache && wacht > 0) {   // alleen wachten op mappen zonder enige cache; nooit await op D.bezig zelf
+    let klok = null;
+    await Promise.race([vul, new Promise(function (ok) { klok = setTimeout(ok, wacht); })]);
+    clearTimeout(klok);
+  }
+  return keuze.map(function (e) {
+    const items = e.gekozen.map(function (x) {
+      if (x.info.eerste === null) {
+        try { x.info.eerste = wkEersteRegel(wkFrontmatter(wkLeesBegin(path.join(vault, x.pad), 65536)).rest); } catch (err) { x.info.eerste = ''; }
+      }
+      const it = { titel: wkTekst(x.pad.slice(x.pad.lastIndexOf('/') + 1).replace(/\.md$/i, ''), 160), pad: appBsnMasker(x.pad), updated: x.info.updated,
+        eerste_regel: wkTekst(x.info.eerste, 140) };
+      const link = appProjLink(x.pad.replace(/\.md$/i, ''));
+      if (link) it.link = link;
+      return it;
+    });
+    const uit = { entiteit: e.naam, items: items };
+    if (e.leeg) uit.melding = 'geen documenten gevonden in de map van deze entiteit';
+    return uit;
+  });
+}
+// ── Todoist: REST met het pod-token (zelfde patroon als appTodoistTaak), alleen GET, cursor hooguit 3 pagina's ──
+async function wkTodoistLijst(soort, eind) {
+  const tok = process.env.TODOIST_MCP_TOKEN;
+  if (!tok) throw new Error('todoist niet ingericht');
+  let cursor = null, n = 0, uit = [];
+  do {
+    const rest = Math.min(WK_TODOIST_MS, eind - Date.now() - 1000);
+    if (rest < 500) throw new Error('todoist: tijd op');
+    const r = await fetch('https://api.todoist.com/api/v1/' + soort + '?limit=200' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''),
+      { headers: { Authorization: 'Bearer ' + tok, accept: 'application/json' }, signal: AbortSignal.timeout(rest) });
+    if (!r.ok) throw new Error('todoist http ' + r.status);
+    const j = await r.json();
+    if (!j || !Array.isArray(j.results)) throw new Error('todoist: onbekend antwoord');
+    uit = uit.concat(j.results);
+    cursor = j.next_cursor || null;
+  } while (cursor && ++n < WK_TODOIST_PAGINAS);
+  return { lijst: uit, meer: !!cursor };
+}
+async function wkTodoist(eind) {
+  let t, p;
+  try { [t, p] = await Promise.all([wkTodoistLijst('tasks', eind), wkTodoistLijst('projects', eind)]); }
+  catch (e) { logError('werkkamer-todoist', e); return { items: [], fout: 'Todoist is nu niet te lezen' }; }
+  const proj = {}, open = t.lijst.filter(function (x) { return x && x.id && !x.checked && !x.is_deleted; }), perId = {};
+  p.lijst.forEach(function (x) { if (x && x.id) proj[x.id] = x.inbox_project ? 'Inbox' : String(x.name || ''); });
+  open.forEach(function (x) { perId[x.id] = x; });
+  const kaal = function (s) { return appVjOpmaakWeg(String(s || '')).replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim(); };
+  const lijst = open.map(function (x) {
+    const ouder = x.parent_id && perId[x.parent_id] ? kaal(perId[x.parent_id].content) : '';
+    const due = x.due && x.due.date ? String(x.due.date).slice(0, 10) : null;
+    const prio = [1, 2, 3, 4].indexOf(Number(x.priority)) >= 0 ? Number(x.priority) : 1;
+    return { titel: wkTekst((ouder ? ouder + ' › ' : '') + kaal(x.content), 160) || '(zonder titel)', project: wkTekst(proj[x.project_id] || 'onbekend project', 60),
+      datum: /^\d{4}-\d{2}-\d{2}$/.test(due || '') ? due : null, prioriteit: prio,
+      labels: (Array.isArray(x.labels) ? x.labels : []).map(function (l) { return wkTekst(l, 40); }), url: 'https://app.todoist.com/app/task/' + encodeURIComponent(x.id),
+      _o: Number(x.child_order) || 0, _id: String(x.id) };
+  });
+  // Volgorde (skill): over tijd en dan op datum oplopend, daarna zonder datum op prioriteit aflopend, dan project.
+  lijst.sort(function (a, b) {
+    if (a.datum && !b.datum) return -1;
+    if (!a.datum && b.datum) return 1;
+    if (a.datum !== b.datum) return a.datum < b.datum ? -1 : 1;
+    if (a.prioriteit !== b.prioriteit) return b.prioriteit - a.prioriteit;
+    if (a.project !== b.project) return a.project < b.project ? -1 : 1;
+    return a._o !== b._o ? a._o - b._o : (a._id < b._id ? -1 : a._id > b._id ? 1 : 0);
+  });
+  const items = lijst.slice(0, WK_MAX_TODOIST).map(function (x) { delete x._o; delete x._id; return x; });
+  const uit = { items: items }, m = [];
+  if (lijst.length > WK_MAX_TODOIST) { uit.afgekapt = lijst.length - WK_MAX_TODOIST; m.push(uit.afgekapt + ' taken niet getoond (plafond ' + WK_MAX_TODOIST + ')'); }
+  if (t.meer || p.meer) m.push('Todoist heeft meer dan ' + WK_TODOIST_PAGINAS + ' pagina\'s; niet alles gelezen');
+  if (m.length) uit.melding = m.join('; ');
+  return uit;
+}
+async function werkkamerTegels(eind) {
+  const begin = Date.now(), vandaag = appYmd(begin);
+  const todo = wkTodoist(eind);
+  let deadlines;
+  try { deadlines = wkDeadlines(fs.readFileSync(path.join(appProjVault(), '00_Systeem', 'Deadlines.md'), 'utf8'), vandaag); }
+  catch (e) { logError('werkkamer-deadlines', e); deadlines = { items: [], fout: 'het deadline-register is nu niet te lezen' }; }
+  let documenten;
+  try { documenten = await wkDocumenten(eind); }
+  catch (e) { logError('werkkamer-documenten', e); documenten = WK_DOC_ENT.map(function (x) { return { entiteit: x.naam, items: [], fout: 'de documenten zijn nu niet te lezen' }; }); }
+  return { ok: true, vandaag: vandaag, todoist: await todo, deadlines: deadlines, documenten: documenten, duur_ms: Date.now() - begin };
 }
 
 // ── seintjes (web-push zonder inhoud) ──
