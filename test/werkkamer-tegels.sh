@@ -84,7 +84,7 @@ process.on('exit', () => { if (!klaar) { console.log('ROOD  toets eindigde voort
   ];
   const D = H.wkDeadlines(kop + reg.join('\n') + '\n\n## Kandidaten\n\n| 2026-10-20 | X | **Niet in Actueel** | David | 3 | x |\n', vandaag);
   const T = (t) => D.items.find((x) => x.titel.indexOf(t) === 0);
-  toets('2a dicht: kop, later blok na zinseinde, na statusblok, "geen actie meer", "vervallen", "niet meer seinen"', !T('klaar') && !T('Titel vier') && !D.items.some((x) => /LOSGELATEN|niet meer nodig/.test(x.titel)) && !T('Feest') && !T('Oorspronkelijk') && !D.items.some((x) => x.datum === plus(9)), D.items.map((x) => x.titel));
+  toets('2a dicht: kop, later blok na zinseinde, na statusblok, "geen actie meer", "vervallen", "niet meer seinen"', !T('klaar') && !T('Titel vier') && !D.items.some((x) => x.datum === plus(5) || x.datum === plus(4) || x.datum === plus(3) && /klaar/i.test(x.titel)) && !T('Feest') && !T('Oorspronkelijk') && !D.items.some((x) => x.datum === plus(9)), D.items.map((x) => x.titel));
   toets('2b een sluitwoord midden in de tekst sluit niets', !!T('Titel zes'));
   toets('2c "geen actie — ter info" blijft zichtbaar met houder "geen actie (ter info)"', T('Studiedag') && T('Studiedag').houder === 'geen actie (ter info)' && T('Studiedag').entiteit === 'Privé', T('Studiedag'));
   toets('2d signaleer zonder leidend getal = 0 (geen 1410), sein false, geteld in melding', T('Zonder getal') && T('Zonder getal').sein === false && /1 regel zonder getal bij Signaleer/.test(D.melding || ''), [T('Zonder getal'), D.melding]);
