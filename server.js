@@ -2802,7 +2802,7 @@ function handleRequest(req, res) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       if (SECRET && d.secret !== SECRET) { res.writeHead(401); return res.end('unauthorized'); }
       werkkamerTegels(eind).then(function (uit) {
-        res._log = { werkkamer: { todoist: uit.todoist.items.length, deadlines: uit.deadlines.items.length, duur_ms: uit.duur_ms } };
+        reqLogExtra(res, { wk_todoist: uit.todoist.items.length, wk_deadlines: uit.deadlines.items.length, wk_ms: uit.duur_ms });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(uit));
       }).catch(function (e) {
@@ -8539,7 +8539,7 @@ async function wkDocumenten(eind) {
       if (x.info.eerste === null) {
         try { x.info.eerste = wkEersteRegel(wkFrontmatter(wkLeesBegin(path.join(vault, x.pad), 65536)).rest); } catch (err) { x.info.eerste = ''; }
       }
-      const it = { titel: wkTekst(x.pad.slice(x.pad.lastIndexOf('/') + 1).replace(/\.md$/i, ''), 160), pad: appBsnMasker(x.pad), updated: x.info.updated,
+      const it = { titel: wkTekst(x.pad.slice(x.pad.lastIndexOf('/') + 1).replace(/\.md$/i, ''), 160), pad: appSleutelMasker(appBsnMasker(x.pad)), updated: x.info.updated,
         eerste_regel: wkTekst(x.info.eerste, 140) };
       const link = appProjLink(x.pad.replace(/\.md$/i, ''));
       if (link) it.link = link;

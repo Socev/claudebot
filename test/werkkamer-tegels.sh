@@ -31,7 +31,8 @@ function laad(bestand, o) {
   if (wk) {
     // het routestuk uit de hoofdhandler, met readBody en rolPoort zoals in server.js (rolPoort nagebootst: primair of 409)
     const ra = src.indexOf('  // ── wv561: Werkkamer-tegels zonder taalmodel'), rb = src.indexOf('  // ── v2: achtergrondagent starten');
-    vm.runInContext('function readBody(req, cb) { let t = ""; req.on("data", function (c) { t += c; }); req.on("end", function () { try { cb(JSON.parse(t)); } catch (e) { cb(null); } }); }\n' +
+    vm.runInContext('function reqLogExtra(res, o) { res._log = Object.assign({}, res._log || {}, o); }\n' +
+      'function readBody(req, cb) { let t = ""; req.on("data", function (c) { t += c; }); req.on("end", function () { try { cb(JSON.parse(t)); } catch (e) { cb(null); } }); }\n' +
       'function rolPoort(res, verder) { if (rolPrimair()) return verder(); res.writeHead(409, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: false, error: "passief" })); }\n' +
       'globalThis.__route = function (req, res) {\n' + src.slice(ra, rb) + '\n  res.writeHead(404); res.end("nee");\n};', ctx, { filename: bestand + '#route' });
   }
@@ -80,12 +81,14 @@ process.on('exit', () => { if (!klaar) { console.log('ROOD  toets eindigde voort
     rij(plus(2), 'David (nascholing)', '**Nascholing**', 'David: x', 3),                                           // 18 Overig
     rij(plus(2), 'Familie', '**BSN 111222333 in de titel**', 'David: x', 3),                                       // 19 BSN gemaskeerd
     rij(plus(2), 'POT / kostenmaatschap', '**Pipe in [[a/b\\|alias]] titel**', 'David: x', 3),                    // 20 pipe in wikilink
+    rij(plus(11), 'Tolgaarde', '**Titel zeven** — iemand zei **AFGEHANDELD 1-10** maar niet echt', 'David: x', 7),  // 22 open (sluitwoord opent geen zin)
+    rij(plus(12), 'Tolgaarde', '**Titel acht**', 'David: bellen, anders vervallen', 7),                           // 23 open (vervallen niet aan het begin)
     rij(plus(2), 'LHV Midden-Nederland', '**28-9 (opgave David): Niet meer seinen.** Oorspronkelijk: **x**', 'David: x', 3), // 21 dicht (kop: niet meer seinen)
   ];
   const D = H.wkDeadlines(kop + reg.join('\n') + '\n\n## Kandidaten\n\n| 2026-10-20 | X | **Niet in Actueel** | David | 3 | x |\n', vandaag);
   const T = (t) => D.items.find((x) => x.titel.indexOf(t) === 0);
   toets('2a dicht: kop, later blok na zinseinde, na statusblok, "geen actie meer", "vervallen", "niet meer seinen"', !T('klaar') && !T('Titel vier') && !D.items.some((x) => x.datum === plus(5) || x.datum === plus(4) || x.datum === plus(3) && /klaar/i.test(x.titel)) && !T('Feest') && !T('Oorspronkelijk') && !D.items.some((x) => x.datum === plus(9)), D.items.map((x) => x.titel));
-  toets('2b een sluitwoord midden in de tekst sluit niets', !!T('Titel zes'));
+  toets('2b een sluitwoord midden in de tekst sluit niets (ook in hoofdletters na een streep; ook "vervallen" niet aan het begin van Actie)', !!T('Titel zes') && !!T('Titel zeven') && !!T('Titel acht'), D.items.map((x) => x.titel));
   toets('2c "geen actie — ter info" blijft zichtbaar met houder "geen actie (ter info)"', T('Studiedag') && T('Studiedag').houder === 'geen actie (ter info)' && T('Studiedag').entiteit === 'Privé', T('Studiedag'));
   toets('2d signaleer zonder leidend getal = 0 (geen 1410), sein false, geteld in melding', T('Zonder getal') && T('Zonder getal').sein === false && /1 regel zonder getal bij Signaleer/.test(D.melding || ''), [T('Zonder getal'), D.melding]);
   toets('2e sein binnen signaleer; buiten 60 dagen alleen met sein', T('Ver maar sein').sein === true && T('Heel ver met sein') && T('Heel ver met sein').sein === true && !T('Heel ver zonder sein'));
@@ -125,6 +128,12 @@ process.on('exit', () => { if (!klaar) { console.log('ROOD  toets eindigde voort
   mk('20_Prive/Huis.md', fm('2026-10-04') + 'Huis-regel\n');
   mk('00_Systeem/Logboek/2026-10-19.md', fm('2026-10-19') + 'x');
   mk('01_Ontwikkeling/Plan.md', fm('2026-10-02') + 'Plan-regel\n');
+  fs.mkdirSync(path.join(V, '10_Zakelijk/HAGRO'), { recursive: true });
+  mk('buiten/geheim.md', fm('2026-12-31') + 'buiten de entiteit\n');
+  fs.symlinkSync(path.join(V, 'buiten'), path.join(V, '10_Zakelijk/HAGRO/link-naar-buiten'));
+  mk('10_Zakelijk/HAGRO/echt.md', fm('2026-10-01') + 'Echte regel\n');
+  fs.symlinkSync(path.join(V, '10_Zakelijk/HAGRO/echt.md'), path.join(V, '10_Zakelijk/HAGRO/symlink.md'));
+  mk('10_Zakelijk/DBH/Sleutel sk-abcdefghijklmnopqrstuvwxyz0123.md', fm('2026-10-01') + 'Tekst met sk-abcdefghijklmnopqrstuvwxyz0123 erin\n');
   // rclone-cache vooraf gevuld voor één map (de route gebruikt verouderde cache gewoon)
   H.appStaat.projDrive.mappen['10_Zakelijk/Groenhouten/Map1'] = { op: Date.now() - 3 * 3600 * 1000, ids: { 'Doc 10.md': 'ABCDEFGHIJ1234567890' } };
   const t0 = Date.now();
@@ -136,6 +145,27 @@ process.on('exit', () => { if (!klaar) { console.log('ROOD  toets eindigde voort
   toets('3d BSN gemaskeerd in titel en eerste regel; vet-only kopje overgeslagen', (function () { const x = E('Tolgaarde').items.find((i) => /^BSN/.test(i.titel)); return x && !/111222333/.test(JSON.stringify(x)) && /^Patiënt/.test(x.eerste_regel); })(), E('Tolgaarde').items);
   toets('3e Privé zonder Gambia; Gambia apart; Systeem uit 00_ en 01_; lege map -> items [] met melding', E('Privé').items.length === 1 && E('Privé').items[0].titel === 'Huis' && E('Gambia').items[0].titel === 'G' && E('Systeem').items[0].titel === 'Plan' && E('POT').items.length === 0 && /geen documenten/.test(E('POT').melding));
   toets('3f link uit (verouderde) cache, zonder ID geen link; rclone afwezig hangt niet (' + (Date.now() - t0) + ' ms)', E('Groenhouten').items[0].link === 'https://drive.google.com/file/d/ABCDEFGHIJ1234567890/view' && !('link' in E('Groenhouten').items[1]) && Date.now() - t0 < 9500, E('Groenhouten').items.slice(0, 2));
+  toets('3h symlink-map en symlink-.md overgeslagen', E('HAGRO').items.length === 1 && E('HAGRO').items[0].titel === 'echt', E('HAGRO').items.map((x) => x.pad));
+  toets('3i sleutelvorm gemaskeerd in titel, pad en eerste regel', E('DBH').items.length === 1 && !/sk-abcdefghij/.test(JSON.stringify(E('DBH').items)), E('DBH').items);
+  // mtime verandert -> opnieuw gelezen; gekozen bestand ontbreekt in > 10 min oude cache -> voorrang (op 0)
+  mk('20_Prive/Huis.md', fm('2026-10-04') + 'Nieuwe huisregel\n', new Date(Date.now() + 5000));
+  H.appStaat.projDrive.mappen['20_Prive'] = { op: Date.now() - 20 * 60 * 1000, ids: { 'Ander.md': 'ZZZZZZZZZZZZZZZZZZZZ' } };
+  H.appStaat.projDrive.mappen['01_Ontwikkeling'] = { op: Date.now() - 20 * 60 * 1000, ids: { 'Plan.md': 'PPPPPPPPPPPPPPPPPPPP' } };
+  const docs2 = await H.wkDocumenten(Date.now() + 38000), E2 = (n) => docs2.find((x) => x.entiteit === n);
+  toets('3j gewijzigde mtime -> nieuwe eerste regel (cache op mtime)', E2('Privé').items[0].eerste_regel === 'Nieuwe huisregel', E2('Privé').items[0]);
+  toets('3k map waarin een gekozen bestand ontbreekt (cache > 10 min) krijgt voorrang; volledige map niet', H.appStaat.projDrive.mappen['20_Prive'].op === 0 && H.appStaat.projDrive.mappen['01_Ontwikkeling'].op > 0 && E2('Systeem').items[0].link === 'https://drive.google.com/file/d/PPPPPPPPPPPPPPPPPPPP/view');
+  fs.unlinkSync(path.join(V, '01_Ontwikkeling/Plan.md'));
+  await H.wkDocumenten(Date.now() + 38000);
+  toets('3l verdwenen bestand uit de documentcache', !Object.keys(H.appStaat.wkDocs).some((p) => /Plan\.md$/.test(p)) && Object.keys(H.appStaat.wkDocs).some((p) => /Huis\.md$/.test(p)));
+  mk('01_Ontwikkeling/Plan.md', fm('2026-10-02') + 'Plan-regel\n');
+  // trage rclone: wachten hooguit 8 s, alleen bij mappen zonder cache
+  const RC = path.join(H.W, 'trage-rclone'); fs.writeFileSync(RC, '#!/bin/sh\nsleep 30\n', { mode: 0o755 });
+  H.g.process.env.APP_RCLONE_BIN = RC; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
+  let t2 = Date.now(); await H.wkDocumenten(Date.now() + 38000); const duur1 = Date.now() - t2;
+  H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
+  t2 = Date.now(); await H.wkDocumenten(Date.now() + 6000); const duur2 = Date.now() - t2;
+  toets('3m trage rclone: wacht begrensd op 8 s (' + duur1 + ' ms) en door de totaalgrens (' + duur2 + ' ms bij 6 s rest)', duur1 >= 7500 && duur1 < 9500 && duur2 >= 3500 && duur2 < 5000, [duur1, duur2]);
+  H.g.process.env.APP_RCLONE_BIN = path.join(H.W, 'geen-rclone');
   toets('3g geen veld fout bij gezonde documenten; velden exact', docs.every((d) => !d.fout) && E('Groenhouten').items.every((x) => /^(titel,pad,updated,eerste_regel)(,link)?$/.test(Object.keys(x).join(','))));
 
   // ── 4. Todoist (nagebootst) ──
