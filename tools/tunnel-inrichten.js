@@ -47,6 +47,9 @@
  *          Worker het. Rotatie: `qwen-eemwerk --rotatie` (Cloudflare rotate: zelfde client-id, nieuw geheim -> Worker-secrets
  *          opnieuw -> toets -> wissen).
  *       Ontwerp: Socev/eemwerk vervolg/wv286-ontwerp.md; README § Route lokaal.
+ *   node tools/tunnel-inrichten.js bank                 Bankluis (wv680, 20-10-2026): bank.socev.dev, alleen GET /bank/terug naar de pod
+ *       (geen Access: de bank stuurt Davids browser terug; de pod laat alleen een bekende, onverbruikte state door).
+ *       a. ingress (eerst de deur); b. DNS bank.socev.dev -> tunnel; c. toets. Bouwplan bankkoppeling § 5.3.
  *   --editor bestaat niet meer (6-10-2026): geen editor en geen inlogpagina onder huisdokter.dev (phishingvlag Google).
  *
  * Nooit `cloudflared tunnel route dns` (kaapt het record); DNS gaat hier via de API.
@@ -81,6 +84,10 @@ const TEL_PAD = '^/tel/(koppel|beurt|uit|deel/[0-9a-f]{16}/[0-9]{1,2}|gespeeld/[
 // Briefwijzer route lokaal (wv288): de Worker eemwerk bereikt Qwen 3.8 (llama.cpp op de Olares) alleen via deze hostname,
 // achter Access met alleen servicetoken eemwerk-worker. Vanuit de pod is de origin intern (zonder Olares-login) bereikbaar.
 const QWEN = 'qwen-eemwerk.socev.dev';
+// Bankluis (wv680, 20-10-2026): terugkeer van de bank na koppelen. Alleen GET /bank/terug; geen Access (de bank stuurt Davids
+// browser hierheen, een inlog of passkey midden in de koppeling laat de code verlopen). De pod laat alleen een bekende,
+// onverbruikte state door (al het andere 404). Bouwplan bankkoppeling § 5.3.
+const BANK = 'bank.socev.dev';
 // 366ada1d = md5('llamacppqwen3827bggufv3').slice(0, 8): de Olares-app-id, vast zolang deze app blijft (n8n: md5('n8n') = 5877e26c).
 // Verandert pas bij een andere app (bv. een v4 of een ander model); dan veranderen ook QWEN_MODEL en de toets. Niet de Olares
 // Router als origin: die biedt naast Qwen ook Anthropic-modellen op Davids betaalde sleutel, en de ingress beperkt paden, niet
@@ -134,7 +141,12 @@ function ingress() {
     // Briefwijzer route lokaal (wv288): alleen de twee OpenAI-paden van Qwen; de rest van de llama.cpp-router (/health,
     // /slots, /props, /metrics, /upstream, /running, /logs, /unload, de web-UI) blijft dicht. Access-servicetoken ervóór.
     { hostname: QWEN, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
-  ].concat(qwenAud ? [Object.assign({ hostname: QWEN, path: '^/v1/(chat/completions|models)$' }, qwenOrigin)] : []).concat([
+  ].concat([
+    // Bankluis (wv680): alleen /bank/terug (de query met code en state telt niet mee in het pad); de rest 404.
+    { hostname: BANK, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
+    { hostname: BANK, path: '^/bank/terug$', service: 'http://localhost:8080' },
+    { hostname: BANK, service: 'http_status:404' },
+  ]).concat(qwenAud ? [Object.assign({ hostname: QWEN, path: '^/v1/(chat/completions|models)$' }, qwenOrigin)] : []).concat([
     { hostname: QWEN, service: 'http_status:404' },
     { service: 'http_status:404' },
   ]) } };
@@ -397,6 +409,40 @@ async function qwenDns(id) {
   if (bestaand && bestaand.length) { await cf('PATCH', '/zones/' + ZONE_SOCEV + '/dns_records/' + bestaand[0].id, body); console.log('dns ' + QWEN + ': vervangen'); }
   else { await cf('POST', '/zones/' + ZONE_SOCEV + '/dns_records', body); console.log('dns ' + QWEN + ': aangemaakt'); }
 }
+async function bankDns(id) {
+  const doel = id + '.cfargotunnel.com';
+  const bestaand = await cf('GET', '/zones/' + ZONE_SOCEV + '/dns_records?name=' + BANK);
+  if (bestaand && bestaand.length > 1) throw new Error('dns ' + BANK + ': ' + bestaand.length + ' records - eerst met de hand opruimen');
+  const body = { type: 'CNAME', name: BANK, content: doel, proxied: true, comment: 'tunnel ' + NAAM + ' - bankluis terugkeerpad (wv680, 20-10-2026)' };
+  if (bestaand && bestaand.length && bestaand[0].content === doel) return console.log('dns ' + BANK + ': staat al goed');
+  if (bestaand && bestaand.length) { await cf('PATCH', '/zones/' + ZONE_SOCEV + '/dns_records/' + bestaand[0].id, body); console.log('dns ' + BANK + ': vervangen'); }
+  else { await cf('POST', '/zones/' + ZONE_SOCEV + '/dns_records', body); console.log('dns ' + BANK + ': aangemaakt'); }
+}
+async function bankStap() {
+  const t = await tunnelZoekOfMaak();
+  await cf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + t + '/configurations', ingress());   // eerst de deur (alleen /bank/terug), dan DNS
+  console.log('ingress gezet');
+  await bankDns(t);
+}
+// Bankluis: alles behalve /bank/terug met een bekende state is 404, zonder doorverwijzing. Zonder DNS-record: overgeslagen.
+async function toetsBank(n404) {
+  const rec = await cf('GET', '/zones/' + ZONE_SOCEV + '/dns_records?name=' + BANK).catch(function () { return null; });
+  if (!rec || !rec.length) { console.log('OVERGESLAGEN bankluis: nog geen DNS voor ' + BANK + " (stap 'bank')"); return 0; }
+  let fout = 0;
+  const regel = function (goed, wat, r, extra) { if (!goed) fout++; console.log((goed ? 'GROEN ' : 'ROOD  ') + wat + '  [' + extra + ' -> ' + r.status + (r.location ? ' ' + r.location.slice(0, 50) : '') + ']'); };
+  const neppe = '/bank/terug?code=x&state=' + 'a'.repeat(48);
+  for (const [m, p, wat] of [['GET', '/', 'bank / dicht'], ['GET', '/health', 'bank /health dicht'], ['GET', '/health/publiek', 'bank /health/publiek dicht'],
+    ['GET', '/bank/terug', 'terugkeer zonder state 404'], ['GET', neppe, 'terugkeer met onbekende state 404'], ['POST', neppe, 'POST op terugkeer 404'],
+    ['GET', '/bank/terug/x', 'subpad dicht'], ['GET', '/app/sessie', 'app-pad niet via bank'], ['GET', '/sleutels', 'sleutelportaal niet via bank'], ['POST', '/smal/bank', 'smalle route niet via bank']]) {
+    const r = await http(m, 'https://' + BANK + p);
+    regel(n404(r), wat, r, m + ' ' + p.slice(0, 40));
+  }
+  for (const p of ['/bank/terug/../health', '/bank/terug/%2e%2e/health', '/bank/%2e%2e/sleutels', '/BANK/terug']) {
+    const r = await rauw('GET', BANK, p);
+    regel(r.status === 404 || r.status === 400, 'bank padtruc dicht', r, 'GET ' + p);
+  }
+  return fout;
+}
 async function qwenStap() {
   const st = await qwenServicetoken();
   await qwenAccess(st.id);
@@ -515,6 +561,7 @@ async function toets() {
   fout += await toetsAppPod(n404);
   fout += await toetsTel();
   fout += await toetsQwen(n404);
+  fout += await toetsBank(n404);
   const apps = await accessOpHuisdokter().catch(function (e) { return ['(niet leesbaar: ' + e.message + ')']; });
   if (apps.length) fout++;
   console.log((apps.length ? 'ROOD  ' : 'GROEN ') + 'geen Access-app op huisdokter.dev' + (apps.length ? ' [' + apps.join('; ') + ']' : ''));
@@ -693,7 +740,12 @@ async function toetsQwen(n404) {
       else console.log('LET OP  toets niet groen: tokengeheim blijft (0600) op de pod tot een groene toets; daarna opnieuw qwen-eemwerk draaien');
       process.exit(f ? 1 : 0);
     }
-    if (stap !== 'inrichten') throw new Error('onbekende stap ' + stap + ' (toets | ingress | app-pod | tel | qwen-eemwerk | inrichten)');
+    if (stap === 'bank') {
+      await bankStap();
+      await new Promise(function (r) { setTimeout(r, 20000); });
+      process.exit(await toets() ? 1 : 0);
+    }
+    if (stap !== 'inrichten') throw new Error('onbekende stap ' + stap + ' (toets | ingress | app-pod | tel | qwen-eemwerk | bank | inrichten)');
     const id = await tunnelZoekOfMaak();
     await cf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + id + '/configurations', ingress());
     console.log('ingress gezet');

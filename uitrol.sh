@@ -33,6 +33,9 @@ LOG="${BIN_DIR:-/opt/data/bin}/uitrol.log"
 # `cp -r` van de hele repo: dan zouden .github, Dockerfile en losse testbestanden
 # meeverhuizen naar een map die als applicatie wordt gedraaid.
 RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-telegram.js package.json"
+# Optioneel: gaat mee als het in de commit staat; een oudere commit zonder dit bestand blijft uitrolbaar (terugrollen).
+# bank-lezer.js (wv680): alleen-lezen bankluis, aangeroepen door server.js (/smal/bank, /bank/terug).
+RELEASE_OPTIONEEL="bank-lezer.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }
@@ -69,6 +72,12 @@ else
   rm -rf "$TMP"; mkdir -p "$TMP"
   for b in $RELEASE_BESTANDEN; do
     git -C "$BRON_REPO" show "$SHA:$b" > "$TMP/$b" 2>/dev/null || fout "$b ontbreekt in commit $KORT"
+  done
+  for b in $RELEASE_OPTIONEEL; do
+    if git -C "$BRON_REPO" cat-file -e "$SHA:$b" 2>/dev/null; then
+      git -C "$BRON_REPO" show "$SHA:$b" > "$TMP/$b" || fout "$b niet te lezen uit commit $KORT"
+      node --check "$TMP/$b" || fout "$b van $KORT komt de syntaxcontrole niet door"
+    fi
   done
   [ -s "$TMP/server.js" ] || fout "server.js is leeg in commit $KORT"
   node --check "$TMP/server.js" || fout "server.js van $KORT komt de syntaxcontrole niet door"

@@ -116,6 +116,7 @@ COPY telegram-claude-bot.js /app/release-bootstrap/telegram-claude-bot.js
 COPY telegram-reader.js /app/release-bootstrap/telegram-reader.js
 COPY koppel-telegram.js /app/release-bootstrap/koppel-telegram.js
 COPY package.json /app/release-bootstrap/package.json
+COPY bank-lezer.js /app/release-bootstrap/bank-lezer.js
 
 COPY server.js /app/server.js
 COPY telegram-claude-bot.js /app/telegram-claude-bot.js
