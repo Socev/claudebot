@@ -35,7 +35,8 @@ LOG="${BIN_DIR:-/opt/data/bin}/uitrol.log"
 RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-telegram.js package.json"
 # Optioneel: gaat mee als het in de commit staat; een oudere commit zonder dit bestand blijft uitrolbaar (terugrollen).
 # bank-lezer.js (wv680): alleen-lezen bankluis, aangeroepen door server.js (/smal/bank, /bank/terug).
-RELEASE_OPTIONEEL="bank-lezer.js"
+# bunq-lezer.js (wv683): bunq-bron van de bankluis, door bank-lezer.js geladen (ontbreekt hij, dan alleen Enable Banking).
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

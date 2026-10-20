@@ -37,6 +37,14 @@
  * vingerafdruk voor posten zonder entry_reference en de saldovoorkeur (src/data.ts). Overgenomen en vertaald, geen code
  * gedeeld; geen npm-afhankelijkheden.
  *
+ * BUNQ (wv683, fase 2). Tweede bron naast Enable Banking: alle bunq-rekeningen via bunq's eigen API, alleen lezen. Alle
+ * bunq-verkeer loopt via bunq-lezer.js (witte lijst: alleen GET op rekeningen en transacties, POST alleen /session-server,
+ * responsehandtekening verplicht). Een bunq-rekening staat in stand.json met bron 'bunq' en uid 'bunq-<id>'; saldo komt
+ * uit de rekeningenlijst (één opvraag voor alle rekeningen), transacties uit de payment-lijst. Opgeheven, bevroren en
+ * verdwenen rekeningen standaard weg (--alle toont ze). Zelfde 4×/dag-teller, cache en BANKDATA-regels. Extra stdin-velden:
+ * bunq_sleutel, bunq_sessie {token, tot}. Een nieuw sessietoken gaat terug in _bunq_sessie, een box-melding in _box;
+ * server.js haalt beide uit de uitvoer. Interne overboekingen: tegen_iban (alleen in de cache) → veld intern in de uitvoer.
+ *
  * Uitvoer: één JSON-object op stdout. Exit 0 = ok (ook bij een inhoudelijke weigering met ok:false), 1 = fout,
  * 2 = gebruik, 3 = onbekende of verbruikte state (server.js geeft dan 404).
  */
@@ -64,7 +72,19 @@ class BankFout extends Error {
 }
 class Weigering extends Error {}
 
-function uit(obj, code) { process.stdout.write(JSON.stringify(obj) + '\n'); process.exit(code || 0); }
+// Velden voor server.js (niet voor de sessie): een nieuw bunq-sessietoken en een box-melding. server.js haalt ze eruit.
+const naarServer = {};
+// Synchroon schrijven tot alles weg is: process.stdout.write + process.exit kapte onder een niet-Node-ouder (Python, shell)
+// af op 64 KB (gemeten wv683: 65.536 tekens bij --max 2000). EAGAIN op een niet-blokkerende pijp: kort wachten, opnieuw.
+function uit(obj, code) {
+  const buf = Buffer.from(JSON.stringify(Object.assign({}, obj, naarServer)) + '\n');
+  let o = 0, pogingen = 0;
+  while (o < buf.length && pogingen < 20000) {
+    try { o += fs.writeSync(1, buf, o); }
+    catch (e) { if (e.code !== 'EAGAIN') break; pogingen++; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); }
+  }
+  process.exit(code || 0);
+}
 function dag(d) { return new Date(d || Date.now()).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
 function isDatum(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s + 'T00:00:00Z')); }
 function plusDagen(datum, n) { const d = new Date(datum + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
@@ -78,7 +98,7 @@ function args(lijst) {
     const a = lijst[i];
     if (a.indexOf('--') === 0) {
       const k = a.slice(2);
-      if (['vers', 'controle'].indexOf(k) >= 0) opt[k] = true;
+      if (['vers', 'controle', 'alle'].indexOf(k) >= 0) opt[k] = true;
       else { opt[k] = lijst[i + 1]; i++; }
     } else pos.push(a);
   }
@@ -190,6 +210,8 @@ function db() {
     ' tegenpartij TEXT, omschrijving TEXT, status TEXT, saldo_na REAL, mcc TEXT, opgehaald TEXT, PRIMARY KEY (rek, id));' +
     'CREATE INDEX IF NOT EXISTS tx_datum ON tx (rek, datum);' +
     'CREATE TABLE IF NOT EXISTS saldo (rek TEXT PRIMARY KEY, json TEXT, opgehaald TEXT);');
+  // wv683: IBAN van de tegenpartij, alleen om interne overboekingen te herkennen (nooit in de uitvoer)
+  if (!dbObj.prepare('PRAGMA table_info(tx)').all().some(function (k) { return k.name === 'tegen_iban'; })) dbObj.exec('ALTER TABLE tx ADD COLUMN tegen_iban TEXT');
   return dbObj;
 }
 
@@ -225,7 +247,8 @@ function eenvoudig(lijst) {
       valuta: (t.transaction_amount && t.transaction_amount.currency) || 'EUR', tegenpartij: tegen,
       omschrijving: omschr && omschr !== tegen ? omschr : null,
       status: t.status === 'PDNG' ? 'wachtend' : (t.status === 'BOOK' ? 'geboekt' : String(t.status || '').slice(0, 10).toLowerCase()),
-      saldo_na: t.balance_after_transaction ? r2(Number(t.balance_after_transaction.amount)) : null, mcc: t.merchant_category_code || null };
+      saldo_na: t.balance_after_transaction ? r2(Number(t.balance_after_transaction.amount)) : null, mcc: t.merchant_category_code || null,
+      tegen_iban: (((af ? t.creditor_account : t.debtor_account) || {}).iban) || null };
   });
 }
 // Een wachtende post komt bij boeking met een ander kenmerk terug: na een volledige opvraag tot vandaag gaan alle
@@ -235,9 +258,9 @@ function cacheBij(rh, lijst, wisWachtendVanaf) {
   d.exec('BEGIN');
   try {
     if (wisWachtendVanaf) d.prepare("DELETE FROM tx WHERE rek = ? AND status = 'wachtend' AND datum >= ?").run(rh, wisWachtendVanaf);
-    const zet = d.prepare('INSERT OR REPLACE INTO tx (rek, id, datum, valutadatum, bedrag, valuta, tegenpartij, omschrijving, status, saldo_na, mcc, opgehaald)' +
-      ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-    lijst.forEach(function (t) { zet.run(rh, t.id, t.datum, t.valutadatum, t.bedrag, t.valuta, t.tegenpartij, t.omschrijving, t.status, t.saldo_na, t.mcc, nu); });
+    const zet = d.prepare('INSERT OR REPLACE INTO tx (rek, id, datum, valutadatum, bedrag, valuta, tegenpartij, omschrijving, status, saldo_na, mcc, opgehaald, tegen_iban)' +
+      ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    lijst.forEach(function (t) { zet.run(rh, t.id, t.datum, t.valutadatum, t.bedrag, t.valuta, t.tegenpartij, t.omschrijving, t.status, t.saldo_na, t.mcc, nu, t.tegen_iban || null); });
     d.prepare('DELETE FROM tx WHERE rek = ? AND datum < ?').run(rh, plusDagen(dag(), -BEWAAR_DAGEN));
     d.exec('COMMIT');
   } catch (e) { d.exec('ROLLBACK'); throw e; }
@@ -256,8 +279,12 @@ function saldiEenvoudig(lijst) {
 }
 
 // ── rekening zoeken ───────────────────────────────────────────────────────
+function zichtbaar(r) { return r.bron !== 'bunq' || r.status === 'ACTIVE'; }
 function rekeningVan(s, ref) {
-  const lijst = Object.keys(s.rekeningen).map(function (h) { return Object.assign({ hash: h }, s.rekeningen[h]); });
+  const n0 = String(ref || '').trim().toLowerCase();
+  // Opgeheven of bevroren bunq-rekeningen alleen op hun exacte uid (anders zouden oude namen elke zoekterm dubbel maken).
+  const lijst = Object.keys(s.rekeningen).map(function (h) { return Object.assign({ hash: h }, s.rekeningen[h]); })
+    .filter(function (r) { return zichtbaar(r) || (r.uid && String(r.uid).toLowerCase() === n0); });
   if (!ref) { if (lijst.length === 1) return lijst[0]; throw new Weigering(lijst.length ? 'meerdere rekeningen: noem er één (label, naam, laatste 4 cijfers of uid)' : 'nog geen rekening gekoppeld'); }
   const n = String(ref).trim().toLowerCase();
   const exact = lijst.filter(function (r) {
@@ -329,6 +356,98 @@ async function haalTransacties(s, rek, van) {
   if (!o.vanaf || van < o.vanaf) o.vanaf = van;
   return { aantal: lijst.length, paginas: paginas, afgekapt: !!sleutel };
 }
+
+// ── bunq (wv683) ──────────────────────────────────────────────────────────
+let bunqMod = null, bunqCtxObj, bunqCtxFout = null;
+function ebKlaar() { return !!(geheim && geheim.sleutel && geheim.app_id); }
+// Zonder bunq-lezer.js in de release of zonder staat.json: geen bunq (stil), de Enable Banking-kant werkt gewoon door.
+function bunqCtx() {
+  if (bunqCtxObj !== undefined) return bunqCtxObj;
+  bunqCtxObj = null;
+  try { bunqMod = require(path.join(__dirname, 'bunq-lezer.js')); } catch (e) { return null; }
+  // Kapotte staat.json: bunq uit voor deze aanroep, Enable Banking werkt door; de reden staat in rekeningen/toestemming (Fable wv683 #7).
+  try { bunqCtxObj = bunqMod.context(BANK_DIR, geheim || {}); } catch (e) { bunqCtxFout = String(e && e.message || e).slice(0, 200); bunqCtxObj = null; }
+  return bunqCtxObj;
+}
+function bunqKan(ctx) { return !!(ctx && (ctx.sessie || ctx.sleutel)); }
+function bunqRekeningen(s, ook) {
+  return Object.keys(s.rekeningen).filter(function (h) { return s.rekeningen[h].bron === 'bunq' && (ook || zichtbaar(s.rekeningen[h])); });
+}
+// 4×/dag: de rekeningenlijst geeft alle saldi tegelijk en telt als saldo-opvraag voor elke actieve bunq-rekening.
+function bunqMag(s) { return bunqRekeningen(s).every(function (h) { return magOpvragen(s, h, 'saldo'); }); }
+function bunqOud(s) { return !s.bunq || !s.bunq.lijst || Date.now() - Date.parse(s.bunq.lijst) > VERS_MS; }
+// Fout duiden. Geen toegang (thuis-IP of sleutel) of een foute handtekening: één box-rij per dag via server.js.
+function bunqDuid(s, e) {
+  const B = bunqMod || {};
+  if (B.BunqWeigering && e instanceof B.BunqWeigering) return { reden: 'weigering', tekst: e.message };
+  if (!(B.BunqFout && e instanceof B.BunqFout)) throw e;
+  s.bunq = s.bunq || {};
+  let tekst = e.tekst || ('bunq gaf HTTP ' + e.status);
+  if (e.reden === 'grens') tekst = 'bunq: te veel verzoeken (429)';
+  if (e.reden === 'toegang' || e.reden === 'handtekening') {
+    s.bunq.fout = { reden: e.reden, tekst: tekst, sinds: (s.bunq.fout && s.bunq.fout.reden === e.reden && s.bunq.fout.sinds) || new Date().toISOString() };
+    naarServer._bunq_sessie = null;   // server.js vergeet de sessie
+    if (s.bunq.box_dag !== dag()) { s.bunq.box_dag = dag(); naarServer._box = { reden: e.reden, tekst: tekst }; }
+  }
+  return { reden: e.reden, tekst: tekst };
+}
+function bunqNaRoep(ctx) { if (ctx && ctx.nieuweSessie) naarServer._bunq_sessie = ctx.nieuweSessie; }
+async function bunqLijstBij(s, ctx) {
+  let r;
+  try { r = await bunqMod.rekeningen(ctx); } finally { bunqNaRoep(ctx); }
+  const nu = new Date().toISOString(), gezien = new Set();
+  const zet = db().prepare('INSERT OR REPLACE INTO saldo (rek, json, opgehaald) VALUES (?, ?, ?)');
+  r.rekeningen.forEach(function (b) {
+    const h = hash('bunq:' + ctx.staat.user_id + ':' + b.id), oud = s.rekeningen[h] || {};
+    gezien.add(h);
+    s.rekeningen[h] = { bron: 'bunq', uid: 'bunq-' + b.id, bunq_id: b.id, sessie: null, bank: 'bunq', naam: schoon(b.naam, 80), product: b.soort, soort: b.soort,
+      valuta: b.valuta, iban: b.iban, status: b.status, gezamenlijk: b.soort === 'gezamenlijk', mede_eigenaars: b.mede_eigenaars,
+      label: oud.label || null, gekoppeld: oud.gekoppeld || nu };
+    if (b.status === 'ACTIVE') teller(s, h).saldo++;
+    zet.run(h, JSON.stringify({ geboekt: b.saldo, beschikbaar: null, valuta: b.valuta, peildatum: nu }), nu);
+    s.opgehaald[h] = Object.assign(s.opgehaald[h] || {}, { saldo: nu });
+  });
+  if (!r.afgekapt) Object.keys(s.rekeningen).forEach(function (h) { const x = s.rekeningen[h]; if (x.bron === 'bunq' && !gezien.has(h)) x.status = 'WEG'; });
+  s.bunq = Object.assign(s.bunq || {}, { lijst: nu, overgeslagen: r.overgeslagen });
+  delete s.bunq.fout;
+  return r;
+}
+// Eerste keer (nog geen bunq-rekeningen bekend): lijst ophalen zodat namen en labels te vinden zijn.
+async function bunqEersteKeer(s, ctx) {
+  if (!ctx || (s.bunq && s.bunq.lijst) || !bunqKan(ctx)) return null;
+  try { await bunqLijstBij(s, ctx); return null; } catch (e) { return bunqDuid(s, e).tekst; }
+}
+// Twee soorten opvraag. Gewoon: nieuwste eerst tot 'van'. Verlengen: staat er een afgekapte vulling (o.bunq_terug = id van de
+// oudste opgehaalde post) en vraagt men ouder dan o.vanaf, dan verder vanaf die post (older_id) in plaats van weer bovenaan
+// te beginnen; anders zou een afgekapte eerste vulling nooit af komen (Fable wv683 #2). Een fout halverwege: het opgehaalde
+// deel gaat wél de cache in, daarna de fout (Fable wv683 #1).
+async function haalTransactiesBunq(s, rek, van, ctx) {
+  const t = teller(s, rek.hash);
+  t.transacties++;
+  const o = s.opgehaald[rek.hash] = s.opgehaald[rek.hash] || {};
+  const verlengen = !!(o.bunq_terug && o.vanaf && van < o.vanaf);
+  let r;
+  try { r = await bunqMod.transacties(ctx, rek.bunq_id, van, function () { t.paginas++; }, verlengen ? o.bunq_terug : null); } finally { bunqNaRoep(ctx); }
+  const lijst = bunqMod.eenvoudig(r.posten, schoon);
+  cacheBij(rek.hash, lijst, null);
+  if (!verlengen) o.transacties = new Date().toISOString();
+  const af = r.afgekapt || r.fout;
+  if (!af) { if (!o.vanaf || van < o.vanaf || verlengen) o.vanaf = van; if (verlengen || !o.bunq_terug || van <= o.vanaf) delete o.bunq_terug; }
+  else if (r.oudste_id && (verlengen || !o.vanaf)) {
+    // De cache loopt nu aaneengesloten tot de oudste opgehaalde post; daar gaat de volgende verlenging verder.
+    o.bunq_terug = r.oudste_id;
+    if (r.oudste_dag && (!o.vanaf || r.oudste_dag < o.vanaf || verlengen)) o.vanaf = r.oudste_dag;
+  }
+  if (r.fout) throw r.fout;
+  return { aantal: lijst.length, paginas: r.paginas, afgekapt: r.afgekapt, onleesbaar: r.onleesbaar || undefined };
+}
+// Eigen IBAN's (beide bronnen, ook opgeheven) → naam, voor het veld 'intern' bij een overboeking tussen eigen rekeningen.
+function eigenIbans(s) {
+  const m = new Map();
+  Object.keys(s.rekeningen).forEach(function (h) { const r = s.rekeningen[h]; if (r.iban) m.set(String(r.iban).replace(/\s+/g, '').toUpperCase(), r.label || r.naam || h.slice(0, 12)); });
+  return m;
+}
+const LET_OP_GEZAMENLIJK = 'gezamenlijke rekening: posten van de mede-eigenaar staan erin; alleen voor David, nooit naar buiten';
 
 // ── opdrachten ────────────────────────────────────────────────────────────
 const opdrachten = {
@@ -423,6 +542,23 @@ const opdrachten = {
 
   async historie(a) {
     const id = a.pos[0];
+    // historie bunq: 13 maanden transacties van elke actieve bunq-rekening (eerste vulling; alleen machinekamer via server.js)
+    if (id === 'bunq') return metSlot(async function () {
+      const s = standLees(), ctx = bunqCtx();
+      if (!ctx) throw new Weigering('bunq is niet ingericht (staat.json of bunq-lezer.js ontbreekt)');
+      const eerst = await bunqEersteKeer(s, ctx);
+      if (eerst) { standSchrijf(s); return { ok: false, fout: eerst }; }
+      const van = plusDagen(dag(), -BEWAAR_DAGEN), resultaat = [];
+      for (const h of bunqRekeningen(s)) {
+        const rek = Object.assign({ hash: h }, s.rekeningen[h]), r = { rekening: h.slice(0, 12) };
+        if (!magOpvragen(s, h, 'transacties')) r.overgeslagen = 'opvraaggrens vandaag';
+        else { try { Object.assign(r, await haalTransactiesBunq(s, rek, van, ctx)); } catch (e) { r.transacties_fout = bunqDuid(s, e).tekst; } }
+        resultaat.push(r);
+        standSchrijf(s);
+        if (r.transacties_fout && /toegang|handtekening/.test(s.bunq && s.bunq.fout ? s.bunq.fout.reden : '')) break;
+      }
+      return { ok: true, bron: 'bunq', vanaf: van, rekeningen: resultaat };
+    });
     return metSlot(async function () {
       const s = standLees(), sessie = s.sessies[id];
       if (!sessie) throw new Weigering('onbekende sessie');
@@ -439,28 +575,68 @@ const opdrachten = {
     });
   },
 
-  async rekeningen() {
-    const s = standLees();
-    return { ok: true, rekeningen: Object.keys(s.rekeningen).map(function (h) {
-      const r = s.rekeningen[h], ss = s.sessies[r.sessie] || {}, o = s.opgehaald[h] || {}, t = (s.tellers.dag === dag() && s.tellers.per[h]) || {};
-      return { uid: r.uid, kort: h.slice(0, 12), label: r.label, naam: r.naam, product: r.product, bank: r.bank, iban: r.iban, valuta: r.valuta,
-        toestemming_tot: ss.geldig_tot ? String(ss.geldig_tot).slice(0, 10) : null, dagen_over: dagenOver(ss.geldig_tot), status: ss.status || '?',
-        saldo_opgehaald: o.saldo || null, transacties_opgehaald: o.transacties || null, transacties_vanaf: o.vanaf || null,
-        opvragen_vandaag: { saldo: t.saldo || 0, transacties: t.transacties || 0, max: MAX_PER_DAG } };
-    }) };
+  async rekeningen(a) {
+    let s = standLees(), let_op = null;
+    const ctx = bunqCtx();
+    // bunq: lijst ophalen als hij er nog niet is of ouder is dan een dag (nieuwe of opgeheven rekeningen), binnen de grens
+    if (ctx && bunqKan(ctx) && (!s.bunq || !s.bunq.lijst || Date.now() - Date.parse(s.bunq.lijst) > 24 * 3600 * 1000)) {
+      await metSlot(async function () {
+        s = standLees();
+        if (!bunqMag(s)) let_op = 'bunq: opvraaggrens vandaag bereikt; lijst van ' + ((s.bunq && s.bunq.lijst) || '?');
+        else { try { await bunqLijstBij(s, ctx); } catch (e) { let_op = bunqDuid(s, e).tekst; } }
+        standSchrijf(s);
+      });
+    }
+    const alle = !!(a && a.opt.alle);
+    const hashes = Object.keys(s.rekeningen).filter(function (h) { return alle || zichtbaar(s.rekeningen[h]); });
+    return { ok: true, let_op: let_op || undefined, verborgen: Object.keys(s.rekeningen).length - hashes.length || undefined,
+      bunq: ctx ? { lijst_van: (s.bunq && s.bunq.lijst) || null, fout: (s.bunq && s.bunq.fout && s.bunq.fout.tekst) || undefined } : (bunqCtxFout ? { fout: bunqCtxFout } : undefined),
+      rekeningen: hashes.map(function (h) {
+        const r = s.rekeningen[h], ss = s.sessies[r.sessie] || {}, o = s.opgehaald[h] || {}, t = (s.tellers.dag === dag() && s.tellers.per[h]) || {};
+        const bunq = r.bron === 'bunq';
+        return { uid: r.uid, kort: h.slice(0, 12), label: r.label, naam: r.naam, product: r.product, bank: r.bank, iban: r.iban, valuta: r.valuta,
+          bron: bunq ? 'bunq' : 'enablebanking', gezamenlijk: r.gezamenlijk || undefined,
+          toestemming_tot: bunq ? null : (ss.geldig_tot ? String(ss.geldig_tot).slice(0, 10) : null), dagen_over: bunq ? null : dagenOver(ss.geldig_tot),
+          status: bunq ? r.status : (ss.status || '?'),
+          saldo_opgehaald: o.saldo || null, transacties_opgehaald: o.transacties || null, transacties_vanaf: o.vanaf || null,
+          opvragen_vandaag: { saldo: t.saldo || 0, transacties: t.transacties || 0, max: MAX_PER_DAG } };
+      }) };
   },
 
   async saldo(a) {
     return metSlot(async function () {
-      const s = standLees();
-      const lijst = a.pos[0] ? [rekeningVan(s, a.pos[0])] : Object.keys(s.rekeningen).map(function (h) { return Object.assign({ hash: h }, s.rekeningen[h]); });
-      if (!lijst.length) throw new Weigering('nog geen rekening gekoppeld');
+      const s = standLees(), ctx = bunqCtx();
+      let bunqLetOp = await bunqEersteKeer(s, ctx), bunqVers = false;
+      const lijst = a.pos[0] ? [rekeningVan(s, a.pos[0])] : Object.keys(s.rekeningen).filter(function (h) { return zichtbaar(s.rekeningen[h]); })
+        .map(function (h) { return Object.assign({ hash: h }, s.rekeningen[h]); });
+      if (!lijst.length) throw new Weigering(bunqLetOp || 'nog geen rekening gekoppeld');
+      // bunq: één lijstopvraag geeft alle saldi; alleen als de stand ouder is dan 6 uur of vers gevraagd
+      if (!bunqLetOp && ctx && lijst.some(function (r) { return r.bron === 'bunq'; }) && (a.opt.vers || bunqOud(s))) {
+        if (!bunqMag(s)) bunqLetOp = 'opvraaggrens vandaag bereikt (' + MAX_PER_DAG + '×): laatst bekende stand';
+        else if (!bunqKan(ctx)) bunqLetOp = 'bunq-sleutel nu niet beschikbaar: laatst bekende stand';
+        else { try { await bunqLijstBij(s, ctx); bunqVers = true; } catch (e) { bunqLetOp = bunqDuid(s, e).tekst + '; laatst bekende stand'; } }
+      }
       const uitv = [];
-      for (const rek of lijst) {
+      for (const rek0 of lijst) {
+        const rek = rek0.bron === 'bunq' ? Object.assign({ hash: rek0.hash }, s.rekeningen[rek0.hash]) : rek0;
         const rij = db().prepare('SELECT json, opgehaald FROM saldo WHERE rek = ?').get(rek.hash);
         const vers = rij && Date.now() - Date.parse(rij.opgehaald) < VERS_MS;
         const r = { rekening: rek.label || rek.naam || rek.hash.slice(0, 12), iban_eind: rek.iban ? rek.iban.slice(-4) : null };
+        if (rek.bron === 'bunq') {
+          Object.assign(r, { bank: 'bunq', soort: rek.soort, gezamenlijk: rek.gezamenlijk || undefined, let_op_gezamenlijk: rek.gezamenlijk ? LET_OP_GEZAMENLIJK : undefined });
+          if (rek.status !== 'ACTIVE') r.let_op = 'rekening ' + String(rek.status).toLowerCase();
+          if (rij) Object.assign(r, JSON.parse(rij.json), { bron: bunqVers ? 'bank' : 'cache', stand_van: rij.opgehaald });
+          else r.fout = 'nog geen stand bekend';
+          if (bunqLetOp) r.let_op = bunqLetOp;
+          delete r.alle;
+          uitv.push(r);
+          continue;
+        }
         if (rij && vers && !a.opt.vers) Object.assign(r, JSON.parse(rij.json), { bron: 'cache', stand_van: rij.opgehaald });
+        else if (!ebKlaar()) {
+          r.let_op = 'Enable Banking-sleutel nu niet beschikbaar: laatst bekende stand';
+          if (rij) Object.assign(r, JSON.parse(rij.json), { bron: 'cache', stand_van: rij.opgehaald });
+        }
         else if (magOpvragen(s, rek.hash, 'saldo') && (s.sessies[rek.sessie] || {}).status === 'AUTHORIZED') {
           try { Object.assign(r, await haalSaldo(s, rek), { bron: 'bank', stand_van: new Date().toISOString() }); }
           catch (e) { const f = await duidFout(s, rek, e); r.fout = f.tekst; if (rij) Object.assign(r, JSON.parse(rij.json), { bron: 'cache', stand_van: rij.opgehaald }); }
@@ -482,37 +658,56 @@ const opdrachten = {
     const max = Math.min(Math.max(parseInt(a.opt.max, 10) || 200, 1), 2000);
     const zoek = a.opt.zoek ? String(a.opt.zoek).toLowerCase().slice(0, 80) : '';
     return metSlot(async function () {
-      const s = standLees(), rek = rekeningVan(s, a.pos[0]), o = s.opgehaald[rek.hash] || {};
+      const s = standLees(), ctx = bunqCtx();
+      const eerst = await bunqEersteKeer(s, ctx);
+      let rek;
+      try { rek = rekeningVan(s, a.pos[0]); } catch (e) { if (eerst) standSchrijf(s); throw eerst && e instanceof Weigering ? new Weigering(e.message + ' (' + eerst + ')') : e; }
+      const o = s.opgehaald[rek.hash] || {}, bunq = rek.bron === 'bunq';
       let bron = 'cache', let_op = null;
       const oud = !o.transacties || Date.now() - Date.parse(o.transacties) > VERS_MS;
       const teOud = o.vanaf && van < o.vanaf;
       const ophalen = teOud || ((oud || a.opt.vers) && tot >= plusDagen(vandaag, -2));
       if (ophalen) {
-        if ((s.sessies[rek.sessie] || {}).status !== 'AUTHORIZED') let_op = 'toestemming verlopen: alleen wat al in de cache stond';
+        if (bunq && rek.status !== 'ACTIVE') let_op = 'rekening ' + String(rek.status).toLowerCase() + ': alleen wat al in de cache stond';
+        else if (bunq && !bunqKan(ctx)) let_op = 'bunq-sleutel nu niet beschikbaar: alleen wat al in de cache stond';
+        else if (!bunq && !ebKlaar()) let_op = 'Enable Banking-sleutel nu niet beschikbaar: alleen wat al in de cache stond';
+        else if (!bunq && (s.sessies[rek.sessie] || {}).status !== 'AUTHORIZED') let_op = 'toestemming verlopen: alleen wat al in de cache stond';
         else if (!magOpvragen(s, rek.hash, 'transacties')) let_op = 'opvraaggrens vandaag bereikt (' + MAX_PER_DAG + '×): stand van ' + (o.transacties || '?');
         else {
           // Vanaf de oudste gevraagde dag, of vanaf 10 dagen vóór de vorige opvraag (late boekingen); nooit verder dan de bewaartermijn.
           let vanaf = teOud || !o.transacties ? van : plusDagen(o.transacties.slice(0, 10), -10);
           if (van < vanaf) vanaf = van;
           if (vanaf < plusDagen(vandaag, -BEWAAR_DAGEN)) vanaf = plusDagen(vandaag, -BEWAAR_DAGEN);
-          try { const r = await haalTransacties(s, rek, vanaf); bron = 'bank'; if (r.afgekapt) let_op = 'meer dan ' + MAX_PAGINAS + " pagina's; afgekapt"; }
-          catch (e) { let_op = (await duidFout(s, rek, e)).tekst + '; uit de cache'; }
+          if (bunq) {
+            try {
+              const r = await haalTransactiesBunq(s, rek, vanaf, ctx); bron = 'bank';
+              if (r.afgekapt) let_op = "te veel posten in één keer; afgekapt bij " + ((s.opgehaald[rek.hash] || {}).vanaf || '?') + ' (dezelfde vraag nog eens haalt het volgende deel)';
+              if (r.onleesbaar) let_op = (let_op ? let_op + '; ' : '') + r.onleesbaar + ' post(en) zonder leesbare datum overgeslagen';
+            }
+            catch (e) { let_op = bunqDuid(s, e).tekst + '; uit de cache'; }
+          } else {
+            try { const r = await haalTransacties(s, rek, vanaf); bron = 'bank'; if (r.afgekapt) let_op = 'meer dan ' + MAX_PAGINAS + " pagina's; afgekapt"; }
+            catch (e) { let_op = (await duidFout(s, rek, e)).tekst + '; uit de cache'; }
+          }
         }
       }
       standSchrijf(s);
-      const rijen = db().prepare('SELECT id, datum, valutadatum, bedrag, valuta, tegenpartij, omschrijving, status, saldo_na FROM tx WHERE rek = ? AND datum >= ? AND datum <= ? ORDER BY datum DESC, id')
+      const eigen = eigenIbans(s), eigenIban = rek.iban ? String(rek.iban).replace(/\s+/g, '').toUpperCase() : '';
+      const rijen = db().prepare('SELECT id, datum, valutadatum, bedrag, valuta, tegenpartij, omschrijving, status, saldo_na, tegen_iban FROM tx WHERE rek = ? AND datum >= ? AND datum <= ? ORDER BY datum DESC, id')
         .all(rek.hash, van, tot).filter(function (t) {
           return !zoek || [t.tegenpartij, t.omschrijving].some(function (v) { return v && v.toLowerCase().indexOf(zoek) >= 0; }) || String(t.bedrag).indexOf(zoek) >= 0;
         });
       const in_ = r2(rijen.filter(function (t) { return t.bedrag > 0; }).reduce(function (x, t) { return x + t.bedrag; }, 0));
       const af = r2(rijen.filter(function (t) { return t.bedrag < 0; }).reduce(function (x, t) { return x + t.bedrag; }, 0));
-      return { ok: true, rekening: rek.label || rek.naam || rek.hash.slice(0, 12), van: van, tot: tot, bron: bron,
+      return { ok: true, rekening: rek.label || rek.naam || rek.hash.slice(0, 12), bank: rek.bank || undefined, van: van, tot: tot, bron: bron,
+        let_op_gezamenlijk: rek.gezamenlijk ? LET_OP_GEZAMENLIJK : undefined,
         stand_van: (s.opgehaald[rek.hash] || {}).transacties || null, cache_vanaf: (s.opgehaald[rek.hash] || {}).vanaf || null, let_op: let_op,
         aantal: rijen.length, getoond: Math.min(rijen.length, max), totaal_in: in_, totaal_uit: af,
         transacties: rijen.slice(0, max).map(function (t) {
           return { datum: t.datum, bedrag: t.bedrag, valuta: t.valuta, tegenpartij: t.tegenpartij,
             omschrijving: t.omschrijving ? t.omschrijving.slice(0, OMSCHRIJVING_UIT) : null, status: t.status,
-            saldo_na: t.saldo_na == null ? undefined : t.saldo_na, valutadatum: t.valutadatum && t.valutadatum !== t.datum ? t.valutadatum : undefined };
+            saldo_na: t.saldo_na == null ? undefined : t.saldo_na, valutadatum: t.valutadatum && t.valutadatum !== t.datum ? t.valutadatum : undefined,
+            intern: t.tegen_iban && t.tegen_iban.toUpperCase() !== eigenIban && eigen.has(t.tegen_iban.toUpperCase()) ? eigen.get(t.tegen_iban.toUpperCase()) : undefined };
         }) };
     });
   },
@@ -524,7 +719,7 @@ const opdrachten = {
         const ss = s.sessies[id];
         const r = { sessie: id, bank: ss.bank, soort: ss.soort, sinds: ss.sinds, geldig_tot: ss.geldig_tot ? String(ss.geldig_tot).slice(0, 10) : null,
           dagen_over: dagenOver(ss.geldig_tot), status: ss.status, rekeningen: ss.rekeningen.length };
-        if (a.opt.controle) {
+        if (a.opt.controle && ebKlaar()) {
           try { const st = await api('GET', '/sessions/' + encodeURIComponent(id)); r.status_bank = st.status; ss.status = st.status || ss.status;
             if (st.access && st.access.valid_until) { ss.geldig_tot = st.access.valid_until; r.geldig_tot = String(st.access.valid_until).slice(0, 10); r.dagen_over = dagenOver(st.access.valid_until); } }
           catch (e) { r.controle_fout = e instanceof BankFout ? 'HTTP ' + e.status : String(e.message || e); if (e instanceof BankFout && [404, 410].indexOf(e.status) >= 0) ss.status = 'VERLOPEN'; }
@@ -534,7 +729,11 @@ const opdrachten = {
       const nu = Date.now();
       const wachtend = Object.values(s.wachtend).filter(function (w) { return !w.verbruikt && Date.parse(w.tot) > nu; }).length;
       standSchrijf(s);
-      return { ok: true, sessies: lijst, open_koppelinks: wachtend };
+      // bunq heeft geen toestemming met einddatum: de sleutel geldt tot David hem intrekt (bunq-app → Instellingen → Developers → API-sleutels).
+      const ctx = bunqCtx();
+      const bunq = ctx ? { ingericht: true, sinds: ctx.staat.aangemaakt || null, rekeningen: bunqRekeningen(s).length, lijst_van: (s.bunq && s.bunq.lijst) || null,
+        fout: (s.bunq && s.bunq.fout) ? s.bunq.fout.tekst + ' (sinds ' + s.bunq.fout.sinds + ')' : undefined } : { ingericht: false, fout: bunqCtxFout || undefined };
+      return { ok: true, sessies: lijst, open_koppelinks: wachtend, bunq: bunq };
     });
   },
 
@@ -574,11 +773,13 @@ const opdrachten = {
 async function hoofd() {
   const opdracht = process.argv[2];
   if (!opdracht || !Object.hasOwn(opdrachten, opdracht)) uit({ ok: false, fout: 'gebruik: ' + Object.keys(opdrachten).join(' | ') }, 2);
-  const zonderSleutel = ['rekeningen', 'label'];
+  // Enable Banking-sleutel alleen verplicht voor opdrachten die alleen Enable Banking raken; saldo/transacties/toestemming
+  // werken per rekening door (bunq zonder EB-sleutel en andersom).
+  const alleenEb = ['applicatie', 'banken', 'koppel-start', 'koppel-af', 'ontkoppel'];
   let invoer = '';
   if (!process.stdin.isTTY) { for await (const c of process.stdin) { invoer += c; if (invoer.length > 64 * 1024) break; } }
   try { geheim = invoer.trim() ? JSON.parse(invoer) : {}; } catch (e) { uit({ ok: false, fout: 'stdin is geen JSON' }, 2); }
-  if (zonderSleutel.indexOf(opdracht) < 0 && (!geheim.sleutel || !geheim.app_id)) uit({ ok: false, fout: 'sleutel of applicatie-id ontbreekt (kluis: enablebanking_app_key, enablebanking_app_id)' }, 1);
+  if ((alleenEb.indexOf(opdracht) >= 0 || (opdracht === 'historie' && process.argv[3] !== 'bunq')) && (!geheim.sleutel || !geheim.app_id)) uit({ ok: false, fout: 'sleutel of applicatie-id ontbreekt (kluis: enablebanking_app_key, enablebanking_app_id)' }, 1);
   try {
     const r = await opdrachten[opdracht](args(process.argv.slice(3)));
     const code = r && r._exit; if (r) delete r._exit;

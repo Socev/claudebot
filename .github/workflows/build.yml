@@ -40,6 +40,34 @@ jobs:
           if grep -nE "api\('POST'" bank-lezer.js | grep -vE "'/(auth|sessions)'"; then echo "::error::POST buiten /auth en /sessions"; exit 1; fi
           echo "bank-lezer.js: geen betaalroutes gevonden."
 
+      # bunq-lezer.js (wv683): de bunq-sleutel kan betalen, dus dit bestand mag precies twee dingen: GET op de witte lijst
+      # (monetary-account[-bank|-savings|-joint] en .../payment = de transactielijst) en POST /v1/session-server. Geen
+      # PUT/PATCH/DELETE, geen andere POST, geen betaal-objecten (draft-, schedule-, request-, batch-, card-, …).
+      - name: bunq-lezer.js moet alleen-lezen blijven
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' bunq-lezer.js)
+          if echo "$C" | grep -nEi "['\"](PUT|PATCH|DELETE)['\"]|draft-payment|schedule-payment|payment-batch|request-inquiry|request-response|bunqme|/card|/whitelist|credential-password-ip|/ip\b|attachment|note-text"; then
+            echo "::error::bunq-lezer.js bevat een schrijf- of betaalroute. Dit luik is alleen-lezen."; exit 1
+          fi
+          if echo "$C" | grep -nE "[\"'\`]POST[\"'\`]" | grep -vE "methode === 'POST'|'/v1/session-server'"; then echo "::error::POST buiten /v1/session-server"; exit 1; fi
+          if [ "$(echo "$C" | grep -c "roep(ctx, 'POST'")" != "1" ]; then echo "::error::meer dan één POST-aanroep in bunq-lezer.js"; exit 1; fi
+          # één netwerkaanroep, en die gaat altijd eerst door padToets
+          if [ "$(echo "$C" | grep -cE "\bfetch\(")" != "1" ] || ! echo "$C" | grep -qE "const url = padToets\(methode, padQuery"; then echo "::error::fetch buiten roep() of zonder padToets"; exit 1; fi
+          if echo "$C" | grep -nE "\b(http|https|net|tls|undici)\b'\)|require\('(node:)?(http|https|net|tls|child_process)'" ; then echo "::error::bunq-lezer.js mag geen eigen netwerk- of procesmodules laden"; exit 1; fi
+          echo "bunq-lezer.js: alleen lezen."
+
+      # De witte lijst en de handtekeningcontrole echt toetsen (nagebootste bunq en Enable Banking op 127.0.0.1); node:sqlite
+      # vraagt Node 22 (zelfde hoofdversie als de pod).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: bankluis-toetsen (Enable Banking + bunq)
+        run: |
+          bash test/bunq-lezer.sh
+          bash test/bunq-poort.sh
+          bash test/bank-lezer.sh
+          bash test/bankluis-poort.sh
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
