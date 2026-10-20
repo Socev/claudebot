@@ -4644,7 +4644,23 @@ async function appPasskeyOpties(req, res, reg, d) {
   const opties = await wa.generateAuthenticationOptions({ rpID: cfg.rpId, userVerification: 'required', timeout: 60000,
     challenge: appSleutelUitdaging(sl), allowCredentials: [{ id: a.credential.id, transports: appTransports(a.credential.transports) }] });
   appStaat.uitdagingen[a.id] = { c: opties.challenge, tot: Date.now() + APP_UITDAGING_MS, sleutel: sl };
+  const sr = appStartReden(d.start_reden);
+  if (sr) res._app.reden = sr;
   appStuur(res, 200, { ok: true, opties: opties, apparaatsleutel: !!sl });
+}
+// wv657 (spreekkamer-pc 19-10: 13 van de 15 keer openen waren koude starts; waarom de pagina opnieuw laadt zag de pod niet):
+// de app stuurt bij de eerste vingerafdruk na het laden mee hoe de pagina begon. Alleen bekende waarden, als korte auditreden;
+// geen inhoud, geen identifiers. Onbekend = '?'. Geen of geen object = geen reden (oude app, of geen start).
+function appStartReden(x) {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const kies = function (v, ok) { return ok.indexOf(v) >= 0 ? v : '?'; };
+  const w = Number.isInteger(x.weg_min) && x.weg_min >= 0 ? Math.min(x.weg_min, 10080) : null;
+  return 'start nav=' + kies(x.nav, ['navigate', 'reload', 'back_forward', 'prerender']) +
+    ' weggegooid=' + (x.wasDiscarded === true ? 'ja' : x.wasDiscarded === false ? 'nee' : '?') +
+    ' pcslot=' + kies(x.pcslot, ['granted', 'prompt', 'denied', 'kan-niet']) +
+    ' tab=' + kies(x.tab, ['zelfde', 'nieuw']) +
+    ' weg_min=' + (w === null ? '-' : String(w)) +
+    ' eigen=' + (x.eigen === undefined || x.eigen === null ? '-' : kies(x.eigen, ['versie', 'access']));
 }
 // wv316: d.apparaatsleutel lezen. null = geen sleutel (mag in 'meten'), false = al geweigerd (400). Telt per apparaat mee.
 function appSleutelUitVerzoek(res, d, apparaatId) {

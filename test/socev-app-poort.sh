@@ -597,6 +597,20 @@ async function bewijs(o) {
     await vraag('POST', '/app/uitloggen', {}, { pot: X.jar });
     r = await vraag('GET', '/app/apparaten', undefined, { pot: X.jar });
     toets('4 na uitloggen -> 401', r.status === 401 && X.jar.sessie === '');
+    {
+      // wv657: herlaadreden bij de start, gefilterd als auditreden; onbekende waarden worden '?', geen vrije tekst in de audit
+      const optR = () => fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((q) => q.route === '/app/passkey/opties').pop().reden;
+      await X.p.evaluate(() => post('/api/passkey/opties', { start_reden: { nav: 'reload', wasDiscarded: true, pcslot: 'granted', tab: 'zelfde', weg_min: 12, eigen: 'versie' } }));
+      toets('4 wv657: start_reden in de audit', optR() === 'start nav=reload weggegooid=ja pcslot=granted tab=zelfde weg_min=12 eigen=versie', optR());
+      await X.p.evaluate(() => post('/api/passkey/opties', { start_reden: { nav: 'GEHEIM<script>', wasDiscarded: 'ja', pcslot: 'x'.repeat(500), tab: 'drie', weg_min: 99999999, eigen: 'iets', extra: 'd.schaap@gmail.com' } }));
+      toets('4 wv657: onbekende waarden -> ?, weg_min begrensd, geen vrije tekst', optR() === 'start nav=? weggegooid=? pcslot=? tab=? weg_min=10080 eigen=?', optR());
+      await X.p.evaluate(() => post('/api/passkey/opties', { start_reden: { weg_min: -3 } }));
+      toets('4 wv657: negatieve weg_min -> -', optR() === 'start nav=? weggegooid=? pcslot=? tab=? weg_min=- eigen=-', optR());
+      await X.p.evaluate(() => post('/api/passkey/opties', { start_reden: 'reload' }));
+      const rr = optR();
+      await X.p.evaluate(() => post('/api/passkey/opties', { start_reden: ['reload'] }));
+      toets('4 wv657: geen object of lijst -> geen reden (zoals zonder veld)', rr === null && optR() === null, rr + ' ' + optR());
+    }
     opt = await X.p.evaluate(() => post('/api/passkey/opties', {}));
     toets('4 passkey-opties: alleen de passkey van dit apparaat, UV required', opt.status === 200 && opt.j.opties.allowCredentials.length === 1 && opt.j.opties.allowCredentials[0].id === reg.apparaten[0].credential.id && opt.j.opties.userVerification === 'required', JSON.stringify(opt));
     const bew = await X.p.evaluate((o) => bewijs(o), opt.j.opties);
