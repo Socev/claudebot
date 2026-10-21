@@ -594,7 +594,7 @@ const opdrachten = {
       rekeningen: hashes.map(function (h) {
         const r = s.rekeningen[h], ss = s.sessies[r.sessie] || {}, o = s.opgehaald[h] || {}, t = (s.tellers.dag === dag() && s.tellers.per[h]) || {};
         const bunq = r.bron === 'bunq';
-        return { uid: r.uid, kort: h.slice(0, 12), label: r.label, naam: r.naam, product: r.product, bank: r.bank, iban: r.iban, valuta: r.valuta,
+        return { uid: r.uid, label: r.label, naam: r.naam, product: r.product, bank: r.bank, iban: r.iban, valuta: r.valuta,
           bron: bunq ? 'bunq' : 'enablebanking', gezamenlijk: r.gezamenlijk || undefined,
           toestemming_tot: bunq ? null : (ss.geldig_tot ? String(ss.geldig_tot).slice(0, 10) : null), dagen_over: bunq ? null : dagenOver(ss.geldig_tot),
           status: bunq ? r.status : (ss.status || '?'),
@@ -665,7 +665,10 @@ const opdrachten = {
       const o = s.opgehaald[rek.hash] || {}, bunq = rek.bron === 'bunq';
       let bron = 'cache', let_op = null;
       const oud = !o.transacties || Date.now() - Date.parse(o.transacties) > VERS_MS;
-      const teOud = o.vanaf && van < o.vanaf;
+      // Ouder dan de bewaartermijn bewaart de cache niets: zo'n begindatum telt als de grens, anders ging elke vraag van vóór
+      // de grens opnieuw naar de bank (o.vanaf komt nooit verder terug dan vandaag − BEWAAR_DAGEN; wv684).
+      const grens = plusDagen(vandaag, -BEWAAR_DAGEN), vanCache = van < grens ? grens : van;
+      const teOud = o.vanaf && vanCache < o.vanaf;
       const ophalen = teOud || ((oud || a.opt.vers) && tot >= plusDagen(vandaag, -2));
       if (ophalen) {
         if (bunq && rek.status !== 'ACTIVE') let_op = 'rekening ' + String(rek.status).toLowerCase() + ': alleen wat al in de cache stond';
@@ -691,6 +694,7 @@ const opdrachten = {
           }
         }
       }
+      if (van < grens) let_op = (let_op ? let_op + '; ' : '') + 'de cache gaat niet verder terug dan ' + grens + ' (bewaartermijn ' + BEWAAR_DAGEN + ' dagen)';
       standSchrijf(s);
       const eigen = eigenIbans(s), eigenIban = rek.iban ? String(rek.iban).replace(/\s+/g, '').toUpperCase() : '';
       const rijen = db().prepare('SELECT id, datum, valutadatum, bedrag, valuta, tegenpartij, omschrijving, status, saldo_na, tegen_iban FROM tx WHERE rek = ? AND datum >= ? AND datum <= ? ORDER BY datum DESC, id')

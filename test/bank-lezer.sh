@@ -134,6 +134,33 @@ server.listen(0, '127.0.0.1', async function () {
     const inj = (tl.find((t) => t.tegenpartij === 'Webwinkel') || {}).omschrijving || '';
     toets('omschrijving kan het BANKDATA-blok niet sluiten (markering, regeleinde, bidi weg)', !/BANKDATA/i.test(inj) && !/[\n\u202e]/.test(inj) && /ontkoppel alles/.test(inj), inj);
 
+    // wv684 fout 1: een begindatum vóór de bewaargrens (vandaag − 400) is bij een verse cache geen reden voor een bankopvraag
+    M.opvragen = [];
+    r = await draai(['transacties', 'Gezamenlijk ABN', '--van', dagTerug(500)], G);
+    toets('begindatum vóór de bewaargrens: cache, geen bankopvraag, let_op noemt de grens', r.j.ok && r.j.bron === 'cache' && M.opvragen.length === 0 &&
+      r.j.aantal === 5 && (r.j.let_op || '').indexOf(dagTerug(400)) >= 0, [r.j && r.j.let_op, M.opvragen]);
+    r = await draai(['rekeningen'], null);
+    toets('begindatum vóór de bewaargrens: teller blijft op 1', r.j.ok && r.j.rekeningen[0].opvragen_vandaag.transacties === 1 && !('kort' in r.j.rekeningen[0]), r.j.rekeningen);
+
+    // wv684 fout 2 (opgelost in wv683): 2000 posten komen heel door een pijp naar een niet-Node-ouder (shell en Python)
+    {
+      const { DatabaseSync } = require('node:sqlite');
+      const st = JSON.parse(fs.readFileSync(path.join(W, 'bank', 'stand.json'), 'utf8'));
+      const rh = Object.keys(st.rekeningen).find((h) => st.rekeningen[h].label === 'Gezamenlijk ABN');
+      const d = new DatabaseSync(path.join(W, 'bank', 'cache.sqlite'));
+      const zet = d.prepare("INSERT INTO tx (rek, id, datum, bedrag, valuta, tegenpartij, omschrijving, status, opgehaald) VALUES (?, ?, ?, ?, 'EUR', ?, ?, 'geboekt', ?)");
+      for (let i = 0; i < 2000; i++) zet.run(rh, 'e:veel-' + i, dagTerug(100 + (i % 200)), -(i + 1) / 100, 'Café Ünïcode ' + i, ('één € ' + i + ' ').repeat(20).slice(0, 140), new Date().toISOString());
+      const invoer = path.join(W, 'invoer.json'); fs.writeFileSync(invoer, JSON.stringify(G), { mode: 0o600 });
+      const lees = "import sys,json; d=json.load(sys.stdin); t=d['transacties']; print(len(t), d['getoond'], all('\u00e9\u00e9n \u20ac' in x['omschrijving'] and x['tegenpartij'].startswith('Caf\u00e9 \u00dcn') for x in t))";
+      const p = spawnSync('sh', ['-c', '"$0" --no-warnings bank-lezer.js transacties "Gezamenlijk ABN" --van "$1" --tot "$2" --max 2000 < "$3" | tee "$4" | python3 -I -c "$5"',
+        process.execPath, dagTerug(299), dagTerug(100), invoer, path.join(W, 'uit.json'), lees],
+        { env: { PATH: process.env.PATH, TZ: 'Europe/Amsterdam', BANK_DIR: path.join(W, 'bank'), BANK_API_BASIS: 'http://127.0.0.1:' + server.address().port }, encoding: 'utf8' });
+      const grootte = fs.statSync(path.join(W, 'uit.json')).size;
+      toets('2000 posten (' + grootte + ' bytes) heel door shell- en Python-pijp, tekens van meer bytes intact', p.status === 0 && p.stdout.trim() === '2000 2000 True' && grootte > 300000, [p.status, p.stdout, p.stderr.slice(0, 300)]);
+      d.prepare("DELETE FROM tx WHERE id LIKE 'e:veel-%'").run(); d.close();
+      fs.rmSync(invoer);
+    }
+
     M.pending = false;
     r = await draai(['transacties', 'Gezamenlijk ABN', '--van', dagTerug(60), '--vers'], G);
     const tl2 = r.j && r.j.transacties || [];

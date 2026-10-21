@@ -12497,6 +12497,8 @@ function smalKind(cmd, args, invoer, maxMs, env) {
     try { k = spawn(cmd, args, { cwd: VAULT, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }
     catch (e) { return klaar({ code: -1, stdout: '', stderr: String(e && e.message || e) }); }
     const t = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, maxMs);
+    // wv684: als tekst lezen, zodat een teken van meer bytes op de grens van twee stukken heel blijft
+    k.stdout.setEncoding('utf8'); k.stderr.setEncoding('utf8');
     k.stdout.on('data', function (c) { if (uit.length < 2e6) uit += c; });
     k.stderr.on('data', function (c) { if (fout.length < 2e5) fout += c; });
     k.on('error', function (e) { fout += String(e && e.message || e); });
