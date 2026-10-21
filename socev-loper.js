@@ -38,7 +38,7 @@ const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const VERSIE = 'wv699-1';
+const VERSIE = 'wv699-2';
 const VAULT = process.env.SOCEV_LOPER_VAULT || '/opt/data/AI_SecondBrain';
 const IO = process.env.SOCEV_LOPER_IO || '/opt/data/io';
 const THUIS = process.env.SOCEV_LOPER_THUIS || '/opt/data/socev-thuis';
@@ -52,8 +52,18 @@ const MAX_LOPEND = 16;
 const NA_EINDE_MS = 10 * 60 * 1000;
 const MAX_LEES = 8 * 1024 * 1024;
 // Pod-sleutels komen nooit in een 1002-gesprek, ook niet als server.js zich vergist (verdediging in de diepte). Ook de
-// Supabase-MCP (kluis = bunq) niet: een 1002-proces kan de omgeving van zijn zustergesprekken lezen (Fable #9).
+// Supabase-MCP (kluis = bunq) niet: een 1002-proces kan de omgeving van zijn zustergesprekken lezen (Fable wv689 #9).
+// Twee lagen (Fable wv699 #2): een vaste lijst, en elke sleutelachtige naam behalve wat een smal gesprek bewust krijgt
+// (SOCEV_ENV_MAG in server.js, wv424). Een nieuwe sleutel voor smalle gesprekken = hier bewust toevoegen (image).
 const ENV_VERBODEN = /^(POD_BOOTSTRAP_SECRET|API_SECRET|N8N_API_KEY|N8N_MCP_TOKEN|SUPABASE_SERVICE_ROLE\w*|SUPABASE_MCP_TOKEN|SUPABASE_ACCESS_TOKEN|CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_API_TOKEN|TELEGRAM_\w*|TG_TOKEN|GITHUB_\w*|GH_TOKEN|VAULT_BACKUP_\w*|BUNQ\w*|ENABLE_BANKING\w*|AGENT_WEBHOOK_SECRET|GEMINI_\w*|GOOGLE_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|SECRETS_GELADEN|NODE_OPTIONS|LD_PRELOAD|LD_LIBRARY_PATH)$/;
+const ENV_SLEUTELACHTIG = /KEY|TOKEN|SECRET|ROLE|SLEUTEL|WACHTWOORD|PASSWORD|PASSWD|SESSIE|SESSION|CRED|_AUTO$/;
+const ENV_SLEUTEL_TOEGESTAAN = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'TODOIST_MCP_TOKEN', 'CLOUDFLARE_AI_TOKEN_AUTO',
+  'WERKKAMER_SLEUTEL_POD', 'SOCEV_AGENT_SLEUTEL', 'SOCEV_SESSIE']);
+function envVerboden(k) {
+  if (ENV_VERBODEN.test(k)) return true;
+  if (ENV_SLEUTEL_TOEGESTAAN.has(k) || /^SUPABASE_RPC_[A-Z0-9_]{1,60}$/.test(k)) return false;
+  return ENV_SLEUTELACHTIG.test(k);
+}
 const MARKER = /^SOCEV_[A-Z0-9_]{1,40}$/;
 const WAARDE = /^[A-Za-z0-9._:@\/-]{1,200}$/;
 const SIGNALEN = new Set(['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP', 'SIGQUIT']);
@@ -110,7 +120,7 @@ function opStart(v, sock) {
   Object.keys(bron).forEach(function (k) {
     const w = bron[k];
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,100}$/.test(k) || typeof w !== 'string' || w.indexOf('\0') >= 0) { geweigerd.push(k.slice(0, 40)); return; }
-    if (ENV_VERBODEN.test(k)) { geweigerd.push(k); return; }
+    if (envVerboden(k)) { geweigerd.push(k); return; }
     env[k] = w;
   });
   if (geweigerd.length) return { fout: 'env-geweigerd', namen: geweigerd };
@@ -315,4 +325,4 @@ if (require.main === module) {
   server.on('error', function (e) { log('socketfout ' + (e.code || '')); process.exit(1); });
   server.listen({ fd: fd }, function () { log('klaar uid=' + EIGEN_UID + ' versie=' + VERSIE); });
 }
-module.exports = { _toets: { markerWaarde: markerWaarde, ENV_VERBODEN: ENV_VERBODEN } };
+module.exports = { _toets: { markerWaarde: markerWaarde, envVerboden: envVerboden } };

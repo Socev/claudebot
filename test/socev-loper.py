@@ -33,6 +33,7 @@ case "$1" in
   lees-stdin) cat ;;
   slaap) sleep 30 ;;
   env) env | sort ;;
+  fds) for f in /proc/$$/fd/*; do echo "fd $(basename $f) -> $(readlink $f)"; done ;;
 esac
 exit 0
 """)
@@ -97,6 +98,21 @@ r = klant({"op": "start", "id": "j6", "brein": "claude", "args": [], "cwd": VAUL
 a = r["antwoorden"][0]
 ok("pod-sleutels in env geweigerd (N8N_API_KEY, SUPABASE_MCP_TOKEN, LD_PRELOAD), todoist niet",
    a.get("fout") == "env-geweigerd" and set(a.get("namen", [])) == {"N8N_API_KEY", "SUPABASE_MCP_TOKEN", "LD_PRELOAD"}, a)
+r = klant({"op": "start", "id": "j6b", "brein": "claude", "args": [], "cwd": VAULT,
+           "env": {"CLOUDFLARE_TUNNEL_TOKEN_OLARES": "x", "INCEPTRON_API_KEY": "y", "SITE_TELLINGEN_SLEUTEL": "z",
+                   "VAULT_BACKUP_CRYPT_WACHTWOORD": "w", "GEMINI_API_KEY_AUTO": "v", "WERKKAMER_SLEUTEL_POD": "ok",
+                   "SOCEV_SESSIE": "ok", "SUPABASE_RPC_CONTACTEN": "ok", "CLAUDE_CODE_OAUTH_TOKEN": "ok"}})
+a = r["antwoorden"][0]
+ok("sleutelachtige namen buiten de smalle lijst geweigerd; smalle (werkkamer, rpc, oauth, sessie) niet",
+   a.get("fout") == "env-geweigerd" and set(a.get("namen", [])) == {"CLOUDFLARE_TUNNEL_TOKEN_OLARES", "INCEPTRON_API_KEY",
+   "SITE_TELLINGEN_SLEUTEL", "VAULT_BACKUP_CRYPT_WACHTWOORD", "GEMINI_API_KEY_AUTO"}, a)
+r = klant({"op": "start", "id": "j6c", "brein": "claude", "args": ["env"], "cwd": VAULT,
+           "env": {"WERKKAMER_SLEUTEL_POD": "wk", "SOCEV_SESSIE": "s", "SUPABASE_RPC_CONTACTEN": "rpc", "TODOIST_MCP_TOKEN": "td"}},
+          tot_einde="j6c")
+ok("smalle sleutels komen in de omgeving van het kind", all(x in r["uit"] for x in ("WERKKAMER_SLEUTEL_POD=wk", "SUPABASE_RPC_CONTACTEN=rpc", "TODOIST_MCP_TOKEN=td")), r)
+r = klant({"op": "start", "id": "j6d", "brein": "claude", "args": ["fds"], "cwd": VAULT}, tot_einde="j6d")
+LUISTER = os.readlink("/proc/self/fd/3")
+ok("kind erft de luistersocket van de loper niet (%s)" % LUISTER, "fd 0" in r["uit"] and LUISTER not in r["uit"], r["uit"])
 r = klant({"op": "start", "id": "j7", "brein": "claude", "args": ["--x"], "cwd": IO + "/job1"}, tot_einde="j7")
 ok("cwd in io toegestaan", r["einde"] == {"code": 0, "signaal": None}, r)
 

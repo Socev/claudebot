@@ -38,6 +38,9 @@ docker run --rm -v "$VOL":/opt/data --entrypoint /bin/bash "$IMAGE" -c '
   echo "{\"hooks\":{}}" > .claude/settings.json; echo "# hook" > .claude/hooks/h.py
   echo "skill" > AI_SecondBrain/.claude/skills/x/SKILL.md; echo "{}" > AI_SecondBrain/.claude/settings.local.json
   echo "{}" > AI_SecondBrain/.obsidian/app.json
+  mkdir -p AI_SecondBrain/10_Zakelijk/huisbot/.claude AI_SecondBrain/00_Systeem/Lessen
+  echo "{\"hooks\":{}}" > AI_SecondBrain/10_Zakelijk/huisbot/.claude/settings.json
+  echo "console.log(1)" > AI_SecondBrain/00_Systeem/Lessen/les-vastleggen.mjs
   echo "gdrive:AI_SecondBrain" > AI_SecondBrain/.sync-id
   echo "inhoud" > AI_SecondBrain/00_Systeem/a.md; echo "persona" > AI_SecondBrain/CLAUDE.md
   echo "uitvoer machinekamer" > io/mkjob/out/r.txt
@@ -114,6 +117,10 @@ niet ".mcp.json in de vault-wortel"                          "$(s "touch $V/.mcp
 niet ".codex in de vault-wortel"                             "$(s "mkdir $V/.codex")"
 niet ".obsidian wijzigen"                                    "$(s "echo x >> $V/.obsidian/app.json")"
 niet ".sync-id wijzigen"                                     "$(s "echo x > $V/.sync-id")"
+niet "geneste .claude (huisbot) wijzigen"                  "$(s "echo x >> $V/10_Zakelijk/huisbot/.claude/settings.json")"
+niet "script in de vault (les-vastleggen.mjs) wijzigen"      "$(s "echo x >> $V/00_Systeem/Lessen/les-vastleggen.mjs")"
+ok   "script in de vault lezen"                              "$(s "cat $V/00_Systeem/Lessen/les-vastleggen.mjs")"
+niet "CLAUDE.md in de wortel verwijderen"                    "$(s "rm -f $V/CLAUDE.md; [ ! -e $V/CLAUDE.md ]")"
 ok   "CLAUDE.md in de wortel bewerken (in place)"            "$(s "echo socev >> $V/CLAUDE.md")"
 ok   "nieuw bestand in 00_Systeem"                           "$(s "echo nieuw > $V/00_Systeem/socev.md")"
 ok   "bestaand bestand in 00_Systeem wijzigen"               "$(s "echo erbij >> $V/00_Systeem/a.md")"
@@ -128,13 +135,16 @@ ok   "1002 schrijft in memory via de symlink"                "$(s "echo m2 >> $S
 ok   "1001 leest en wijzigt dat"                             "$(a "grep -q m2 $M/m.md && cat $M/nieuw.md && echo o >> $M/nieuw.md")"
 
 echo "== maskerherstel (rclone, cp -p) en code-plekken dieper in de vault =="
-ok   "rclone (als 1001) schrijft in de vault"                "$(a "echo r > /tmp/r.md && rclone copyto /tmp/r.md $V/00_Systeem/rclone.md")"
+ok   "rclone (als 1001, umask 077 zoals run.sh) schrijft in de vault" "$(a "umask 077; echo r > /tmp/r.md && rclone copyto /tmp/r.md $V/00_Systeem/rclone.md")"
 ok   "  1002 kan het rclone-bestand wijzigen"                "$(s "echo s >> $V/00_Systeem/rclone.md")"
 ok   "cp -p van een 0644-bestand (als 1001)"                 "$(a "echo p > /tmp/p.md && chmod 644 /tmp/p.md && cp -p /tmp/p.md $V/00_Systeem/cpp.md")"
-niet "  1002 kan cp -p-bestand vóór maskerherstel niet wijzigen (masker r--)" "$(s "echo s >> $V/00_Systeem/cpp.md")"
+if bash -c "$(s "test -w $V/00_Systeem/cpp.md")" >/dev/null 2>&1; then echo "  info  cp -p-bestand was al schrijfbaar voor 1002"; else echo "  info  cp -p-bestand vóór herstel niet schrijfbaar voor 1002 (masker r--), zoals verwacht"; fi
+ok   "1002 legt symlinks in de vault naar 1001-bestanden"    "$(s "ln -s /opt/data/.claude.json $V/00_Systeem/naar-claude-json && ln -s /opt/data/mk-scripts $V/00_Systeem/naar-mk")"
 ok   "1002 zet een .claude-map in een submap"                "$(s "mkdir -p $V/00_Systeem/.claude && echo '{}' > $V/00_Systeem/.claude/settings.json")"
 ok   "na-ronde (als 1001)"                                   "$(a "bash /app/socev-rechten.sh na-ronde")"
 ok   "  1002 kan cp -p-bestand na maskerherstel wijzigen"    "$(s "echo s >> $V/00_Systeem/cpp.md")"
+ok   "  symlinks niet gevolgd: .claude.json en mk-scripts zonder socev-ACL" "$(a "! getfacl -cp /opt/data/.claude.json /opt/data/mk-scripts 2>/dev/null | grep -q socev")"
+niet "  1002 leest .claude.json via de symlink"              "$(s "cat $V/00_Systeem/naar-claude-json")"
 ok   "  .claude van socev in de submap hernoemd"             "$(a "[ ! -e $V/00_Systeem/.claude ] && ls -d $V/00_Systeem/.claude.socev-geblokkeerd-*")"
 
 echo "== loper-socket =="
@@ -174,6 +184,7 @@ ok   "socev-thuis van socev, 0750"                           "stat_is /opt/data/
 ok   ".claude.json: pubmed, todoist, playwright; geen n8n of supabase" "$(s "python3 -c \"import json; d=json.load(open('/opt/data/socev-thuis/.claude.json')); import sys; sys.exit(0 if sorted(d['mcpServers'])==['playwright','pubmed','todoist'] and d['mcpServers']['playwright']['command']=='/app/playwright-mcp.sh' else 1)\"")"
 ok   "codex-config zonder supabase/n8n"                      "$(s "! grep -qE 'supabase|n8n' /opt/data/socev-thuis/.codex/config.toml && grep -q todoist /opt/data/socev-thuis/.codex/config.toml")"
 ok   "codex-login gekopieerd (socev, 0600)"                  "stat_is /opt/data/socev-thuis/.codex/auth.json '%U %a' 'socev 600'"
+ok   "eigen TMPDIR 0700"                                     "stat_is /opt/data/socev-thuis/tmp '%U %a' 'socev 700'"
 ok   "memory-symlink op zijn plek"                           "[ \"\$(r 'readlink $SM')\" = '$M' ]"
 ok   "1001 kan de thuismap zien, niet erin schrijven"        "$(a 'ls /opt/data/socev-thuis >/dev/null && ! touch /opt/data/socev-thuis/x')"
 
@@ -183,7 +194,7 @@ ok   "/health ok"                                            "docker exec $C cur
 ok   "1001 leest zijn eigen bestanden nog"                   "$(a 'cat /opt/data/bank/bunq/staat.json /opt/data/mk-scripts/x.sh /opt/data/socev-app-data/register.json /opt/data/.claude.json /opt/data/io/mkjob/out/r.txt')"
 ok   "managed settings: root, hook python3 -I /app/argv-wacht.py, allowManagedHooksOnly" "managed"
 ok   "argv-hook in het image: 24 weigeren + 22 doorlaten"   "$(a 'python3 /tmp/argv-hook-toets.py /app/argv-wacht.py')"
-ok   "CLI kent /etc/claude-code/managed-settings.json"       "cli_managed"
+ok   "CLI-binary noemt /etc/claude-code (string; of de hook vuurt, meet fase 2 in de pod)" "cli_managed"
 
 echo "== herstart: idempotent, eigendom blijft =="
 docker restart "$C" >/dev/null

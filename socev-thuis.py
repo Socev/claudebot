@@ -14,7 +14,7 @@ WAT. /opt/data/socev-thuis wordt HOME, TMPDIR en CODEX_HOME van de smalle gespre
                  auth.json alleen als hij nog ontbreekt (kopie via stdin met --codex-auth)
   .agents/skills -> vault/.claude/skills (Codex leest skills daar)
   tmp/           eigen TMPDIR (0700)
-  ACL u:claude:rX (+ standaard): server.js mag hier kijken (stat), niet schrijven.
+  ACL u:claude:rX (+ standaard): server.js mag hier kijken, niet schrijven; transcripts leest hij via de loper.
 """
 import json
 import os
@@ -70,8 +70,14 @@ def main():
         log("STOP: %s is geen gewone map" % THUIS)
         return 1
     os.umask(0o077)
-    for m in (".claude", ".claude/projects", ".claude/projects/-opt-data-AI-SecondBrain", ".codex", ".agents", "tmp"):
-        map_(os.path.join(THUIS, m))
+    # server.js (claude) mag hier kijken, niet schrijven. Wat de CLI later zelf aanmaakt (transcripts 0600, mappen 0700)
+    # is voor claude dicht: server.js leest dat via de loper (stat/map/lees), niet rechtstreeks (Fable wv699 #7).
+    subprocess.run(["setfacl", "-P", "-m", "u:claude:rX", THUIS], check=False)
+    subprocess.run(["setfacl", "-P", "-d", "-m", "u:claude:rX", THUIS], check=False)
+    for m in (".claude", ".claude/projects", ".claude/projects/-opt-data-AI-SecondBrain", ".codex", ".agents"):
+        map_(os.path.join(THUIS, m), 0o750)
+    map_(os.path.join(THUIS, "tmp"), 0o700)
+    os.chmod(os.path.join(THUIS, "tmp"), 0o700)
     link(os.path.join(THUIS, ".claude/projects/-opt-data-AI-SecondBrain/memory"), MEM_ECHT)
     link(os.path.join(THUIS, ".agents/skills"), VAULT + "/.claude/skills")
     link(os.path.join(THUIS, ".codex/AGENTS.md"), VAULT + "/CLAUDE.md")
@@ -110,9 +116,6 @@ def main():
             schrijf(auth, data)
             log("codex-login gekopieerd")
 
-    # server.js (claude) mag kijken, niet schrijven; ook in wat er later bijkomt (standaard-ACL).
-    subprocess.run(["setfacl", "-P", "-m", "u:claude:rX", THUIS], check=False)
-    subprocess.run(["setfacl", "-P", "-d", "-m", "u:claude:rX", THUIS], check=False)
     os.chmod(THUIS, 0o750)
     log("klaar")
     return 0
