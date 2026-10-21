@@ -126,7 +126,7 @@ NB=$(cat "$W/bewaker-pid-2" 2>/dev/null)
 sleep 3
 python3 -c "import json,sys; j=json.load(open('$W/bin/bewaker.pid')); sys.exit(0 if str(j['bewaker_pid'])=='$NB' else 1)" && groen "uitrol: nieuwe bewaker heeft het slot" || rood "uitrol: slot niet bij de nieuwe bewaker"
 kill -0 "$OUDB" 2>/dev/null && rood "uitrol: oude bewaker leeft nog" || true
-printf 'sleep 300\n' > "$W/uitrol.sh"; bash "$W/uitrol.sh" & HOUDER=$!
+printf 'for i in $(seq 1 300); do sleep 1; done\n' > "$W/uitrol.sh"; bash "$W/uitrol.sh" & HOUDER=$!
 printf '{"sha":"proef","start_iso":"%s","pid":%s}\n' "$(date -Iseconds)" "$HOUDER" > "$W/uitrol-wacht"
 touch "$W/blokkeer"
 for i in $(seq 1 8); do sleep 5; touch "$W/uitrol-wacht"; done   # 40 s, marker vers gehouden
@@ -141,7 +141,7 @@ stop
 
 # ── 3b. wikkel: marker van uitrol-na-agents.sh telt niet (die wacht bij een hangende server alleen langer) ──────────
 opzet wikkel; start
-printf 'sleep 300\n' > "$W/uitrol-na-agents.sh"; bash "$W/uitrol-na-agents.sh" & HOUDER=$!
+printf 'for i in $(seq 1 300); do sleep 1; done\n' > "$W/uitrol-na-agents.sh"; bash "$W/uitrol-na-agents.sh" & HOUDER=$!
 printf '{"sha":"proef","start_iso":"%s","pid":%s}\n' "$(date -Iseconds)" "$HOUDER" > "$W/uitrol-wacht"
 ( for i in $(seq 1 30); do sleep 3; touch "$W/uitrol-wacht" 2>/dev/null; done ) & VERS=$!
 touch "$W/blokkeer"
