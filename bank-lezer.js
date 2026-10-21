@@ -28,6 +28,22 @@
  *   node bank-lezer.js ontkoppel <sessie>             DELETE /sessions/{id} + wissen (alleen op Davids woord; server.js laat
  *                                                     dit alleen met API_SECRET toe, niet met de Socev-sleutel)
  *
+ * TRANSACTIEDATABASE (wv687, bouwplan § 9c). Elke opgehaalde post gaat ook naar BANK_DIR/transacties.sqlite (bank-archief.js):
+ * blijvend, nooit verwijderd, met ruwe JSON en een losse verrijking (type, categorie, eigenaar, interne overboeking,
+ * abonnement). Leesopdrachten op dat archief (geen bankopvraag, geen sleutel nodig):
+ *   node bank-lezer.js zoek [--tekst x] [--van] [--tot] [--rekening r] [--categorie c] [--eigenaar e] [--type t] [--max N]
+ *   node bank-lezer.js maand [--maand JJJJ-MM] [--rekening r] [--eigenaar e]     per categorie in/uit, intern apart
+ *   node bank-lezer.js intern [--van] [--tot] [--rekening r] [--max N]           overboekingen tussen eigen rekeningen
+ *   node bank-lezer.js abonnementen [--alle]
+ *   node bank-lezer.js corrigeer --nr N [--categorie c] [--subcategorie s] [--eigenaar e] [--type t] [--regel nee]
+ *   node bank-lezer.js corrigeer --rekening r --eigenaar e                     eigenaar van een hele rekening
+ *   node bank-lezer.js archief                                                  alleen aantallen (mag in een rapport)
+ *   node bank-lezer.js verrijk                                                  regels opnieuw toepassen (lokaal)
+ *   node bank-lezer.js verrijk-open [--max N] / verrijk-zet (stdin {resultaten, model})   alleen server.js (AI-stap)
+ * Historie voor het archief (alleen machinekamer via server.js):
+ *   node bank-lezer.js historie bunq --volledig [--opgeheven] [--opnieuw]       alle bunq-posten ooit, per rekening onder eigen slot
+ *   node bank-lezer.js historie abn-diep --van JJJJ-MM-DD                       ABN zo ver als de bank geeft (laat David er 2 over)
+ *
  * ALLEEN LEZEN. Dit script kent geen betaal-endpoint (/payments e.d.); de CI-build controleert dat. Een betaling via
  * Enable Banking zou bovendien altijd Davids eigen bank-inlog vragen.
  * OMSCHRIJVINGEN ZIJN DATA. Namen en omschrijvingen in de uitvoer komen van derden; server.js en de client zetten de
@@ -106,7 +122,7 @@ function args(lijst) {
     const a = lijst[i];
     if (a.indexOf('--') === 0) {
       const k = a.slice(2);
-      if (['vers', 'controle', 'alle'].indexOf(k) >= 0) opt[k] = true;
+      if (['vers', 'controle', 'alle', 'volledig', 'opgeheven', 'opnieuw'].indexOf(k) >= 0) opt[k] = true;
       else { opt[k] = lijst[i + 1]; i++; }
     } else pos.push(a);
   }
@@ -268,7 +284,7 @@ function eenvoudig(lijst) {
       omschrijving: omschr && omschr !== tegen ? omschr : null,
       status: t.status === 'PDNG' ? 'wachtend' : (t.status === 'BOOK' ? 'geboekt' : String(t.status || '').slice(0, 10).toLowerCase()),
       saldo_na: t.balance_after_transaction ? r2(Number(t.balance_after_transaction.amount)) : null, mcc: t.merchant_category_code || null,
-      tegen_iban: (((af ? t.creditor_account : t.debtor_account) || {}).iban) || null };
+      tegen_iban: (((af ? t.creditor_account : t.debtor_account) || {}).iban) || null, _ruw: t };
   });
 }
 // Een wachtende post komt bij boeking met een ander kenmerk terug: na een volledige opvraag tot vandaag gaan alle
@@ -286,6 +302,24 @@ function cacheBij(rh, lijst, wisWachtendVanaf) {
   } catch (e) { d.exec('ROLLBACK'); throw e; }
 }
 
+// ── archief (wv687): de blijvende transactiedatabase (bank-archief.js) ─────
+// Schrijven gaat altijd via archiefVeilig: een fout in het archief breekt de bankopvraag nooit; de reden gaat in _archief_fout
+// naar server.js (logregel), niet naar de sessie. Leesopdrachten gebruiken archiefOpen en geven een fout gewoon terug.
+let archiefObj;
+function archiefOpen() {
+  if (archiefObj) return archiefObj;
+  const A = require(path.join(__dirname, 'bank-archief.js'));
+  archiefObj = { A: A, a: A.open(BANK_DIR) };
+  return archiefObj;
+}
+function archiefVeilig(wat, fn) {
+  try { const x = archiefOpen(); return fn(x.A, x.a); }
+  catch (e) { naarServer._archief_fout = String((naarServer._archief_fout ? naarServer._archief_fout + '; ' : '') + wat + ': ' + String(e && e.message || e)).slice(0, 300); return null; }
+}
+function archiefBij(s, rh, lijst, opties) {
+  return archiefVeilig('bij', function (A, a) { A.rekeningenSync(a, s.rekeningen); return A.bij(a, rh, lijst, opties); });
+}
+
 // ── saldi (naar bankmcp simplifyBalances) ─────────────────────────────────
 function saldiEenvoudig(lijst) {
   lijst = lijst || [];
@@ -300,11 +334,12 @@ function saldiEenvoudig(lijst) {
 
 // ── rekening zoeken ───────────────────────────────────────────────────────
 function zichtbaar(r) { return r.bron !== 'bunq' || r.status === 'ACTIVE'; }
-function rekeningVan(s, ref) {
+function rekeningVan(s, ref, alle) {
   const n0 = String(ref || '').trim().toLowerCase();
   // Opgeheven of bevroren bunq-rekeningen alleen op hun exacte uid (anders zouden oude namen elke zoekterm dubbel maken).
+  // alle (archiefopdrachten, wv687): ook opgeheven rekeningen, als een zichtbare niet past.
   const lijst = Object.keys(s.rekeningen).map(function (h) { return Object.assign({ hash: h }, s.rekeningen[h]); })
-    .filter(function (r) { return zichtbaar(r) || (r.uid && String(r.uid).toLowerCase() === n0); });
+    .filter(function (r) { return alle || zichtbaar(r) || (r.uid && String(r.uid).toLowerCase() === n0); });
   if (!ref) { if (lijst.length === 1) return lijst[0]; throw new Weigering(lijst.length ? 'meerdere rekeningen: noem er één (label, naam, laatste 4 cijfers of uid)' : 'nog geen rekening gekoppeld'); }
   const n = String(ref).trim().toLowerCase();
   const exact = lijst.filter(function (r) {
@@ -371,6 +406,7 @@ async function haalTransacties(s, rek, van) {
   const lijst = eenvoudig(alle);
   // Wachtende posten alleen vervangen binnen het opgevraagde bereik en alleen bij een volledige opvraag (Fable wv680 #9).
   cacheBij(rek.hash, lijst, sleutel ? null : van);
+  archiefBij(s, rek.hash, lijst, { volledigVanaf: sleutel ? null : van });
   const o = s.opgehaald[rek.hash] = s.opgehaald[rek.hash] || {};
   o.transacties = new Date().toISOString();
   if (!o.vanaf || van < o.vanaf) o.vanaf = van;
@@ -450,6 +486,7 @@ async function haalTransactiesBunq(s, rek, van, ctx) {
   try { r = await bunqMod.transacties(ctx, rek.bunq_id, van, function () { t.paginas++; }, verlengen ? o.bunq_terug : null); } finally { bunqNaRoep(ctx); }
   const lijst = bunqMod.eenvoudig(r.posten, schoon);
   cacheBij(rek.hash, lijst, null);
+  archiefBij(s, rek.hash, lijst, null);
   if (!verlengen) o.transacties = new Date().toISOString();
   const af = r.afgekapt || r.fout;
   if (!af) { if (!o.vanaf || van < o.vanaf || verlengen) o.vanaf = van; if (verlengen || !o.bunq_terug || van <= o.vanaf) delete o.bunq_terug; }
@@ -470,6 +507,58 @@ function eigenIbans(s) {
   return m;
 }
 const LET_OP_GEZAMENLIJK = 'gezamenlijke rekening: posten van de mede-eigenaar staan erin; alleen voor David, nooit naar buiten';
+
+// ── historie voor het archief (wv687) ─────────────────────────────────────
+// bunq volledig: alle posten ooit, nieuwste eerst, met een eigen vervolgpunt (o.archief_terug) los van dat van de cache. Schrijft
+// alleen naar het archief (de cache blijft 13 maanden). Telt als één transactieopvraag per rekening per aanroep.
+async function haalArchiefBunq(s, rek, ctx) {
+  const x = archiefOpen();   // eerst: faalt het archief, dan geen getelde opvraag (tegenlezing INFO 6)
+  const t = teller(s, rek.hash);
+  t.transacties++;
+  const o = s.opgehaald[rek.hash] = s.opgehaald[rek.hash] || {};
+  let r;
+  try { r = await bunqMod.transacties(ctx, rek.bunq_id, '2000-01-01', function () { t.paginas++; }, o.archief_terug || null); } finally { bunqNaRoep(ctx); }
+  const lijst = bunqMod.eenvoudig(r.posten, schoon);
+  x.A.rekeningenSync(x.a, s.rekeningen);
+  const u = x.A.bij(x.a, rek.hash, lijst, null);
+  if (r.afgekapt || r.fout) { if (r.oudste_id) o.archief_terug = r.oudste_id; }
+  else { o.archief_klaar = new Date().toISOString(); delete o.archief_terug; }
+  if (r.fout) throw r.fout;
+  return { aantal: lijst.length, nieuw: u.nieuw, paginas: r.paginas, afgekapt: r.afgekapt || undefined, oudste: r.oudste_dag || null };
+}
+// ABN (Enable Banking) zo ver als de bank geeft: één opvraag vanaf 'van'; alleen naar het archief.
+async function haalArchiefEb(s, rek, van) {
+  const t = teller(s, rek.hash);
+  t.transacties++;
+  const alle = []; let sleutel = null, paginas = 0;
+  do {
+    const j = await api('GET', '/accounts/' + encodeURIComponent(rek.uid) + '/transactions', null, { date_from: van, date_to: dag(), continuation_key: sleutel || undefined });
+    paginas++; t.paginas++;
+    (j.transactions || []).forEach(function (x) { alle.push(x); });
+    sleutel = j.continuation_key || null;
+  } while (sleutel && paginas < MAX_PAGINAS);
+  const lijst = eenvoudig(alle);
+  const x = archiefOpen();
+  x.A.rekeningenSync(x.a, s.rekeningen);
+  const u = x.A.bij(x.a, rek.hash, lijst, { volledigVanaf: sleutel ? null : van });
+  const oudste = lijst.reduce(function (m, p) { return p.datum && (!m || p.datum < m) ? p.datum : m; }, null);
+  return { aantal: lijst.length, nieuw: u.nieuw, paginas: paginas, afgekapt: !!sleutel || undefined, oudste: oudste };
+}
+// Leesopdrachten op het archief: eerst de cache bijwerken in het archief (incrementeel) en de rekeningen gelijkzetten.
+function archiefKlaar() {
+  const x = archiefOpen(), s = standLees();
+  x.A.migreerCache(x.a, path.join(BANK_DIR, 'cache.sqlite'));
+  x.A.rekeningenSync(x.a, s.rekeningen);
+  return { A: x.A, a: x.a, s: s };
+}
+function archiefFilter(a, s) {
+  const o = a.opt, f = {};
+  ['van', 'tot'].forEach(function (k) { if (o[k] != null) { if (!isDatum(o[k])) throw new Weigering('--' + k + ' als JJJJ-MM-DD'); f[k] = o[k]; } });
+  if (o.rekening) f.rek = rekeningVan(s, o.rekening, true).hash;
+  ['categorie', 'eigenaar', 'tekst', 'max', 'maand'].forEach(function (k) { if (o[k] != null) f[k] = String(o[k]).slice(0, 80); });
+  if (o.type != null) f.type = String(o.type);
+  return f;
+}
 
 // ── opdrachten ────────────────────────────────────────────────────────────
 const opdrachten = {
@@ -564,6 +653,61 @@ const opdrachten = {
 
   async historie(a) {
     const id = a.pos[0];
+    // wv687: bunq volledig (alle posten ooit, per rekening onder een eigen slot zodat Davids vragen ertussendoor kunnen)
+    if (id === 'bunq' && a.opt.volledig) {
+      const ctx = bunqCtx();
+      if (!ctx) throw new Weigering('bunq is niet ingericht (staat.json of bunq-lezer.js ontbreekt)');
+      let lijst = [];
+      await metSlot(async function () {
+        const s = standLees(), eerst = await bunqEersteKeer(s, ctx);
+        standSchrijf(s);
+        if (eerst) throw new Weigering(eerst);
+        lijst = Object.keys(s.rekeningen).filter(function (h) {
+          const r = s.rekeningen[h];
+          return r.bron === 'bunq' && r.bunq_id != null && (r.status === 'ACTIVE' || (a.opt.opgeheven && r.status !== 'WEG'));
+        });
+      });
+      const resultaat = [];
+      let stop = false;
+      for (const h of lijst) {
+        if (stop) break;
+        const r = { rek_kort: h.slice(0, 8) };
+        await metSlot(async function () {
+          const s = standLees(), rek = Object.assign({ hash: h }, s.rekeningen[h]), o = s.opgehaald[h] || {};
+          r.status = String(rek.status || '?').toLowerCase();
+          if (o.archief_klaar && !o.archief_terug && !a.opt.opnieuw) { r.al_klaar = o.archief_klaar.slice(0, 10); return; }
+          if (!magOpvragen(s, h, 'transacties')) { r.overgeslagen = 'opvraaggrens vandaag'; return; }
+          try { Object.assign(r, await haalArchiefBunq(s, rek, ctx)); }
+          catch (e) {
+            const B = bunqMod || {};
+            if ((B.BunqFout && e instanceof B.BunqFout) || (B.BunqWeigering && e instanceof B.BunqWeigering)) { r.fout = bunqDuid(s, e).tekst; if (s.bunq && s.bunq.fout && /toegang|handtekening/.test(s.bunq.fout.reden)) stop = true; }
+            else { r.fout = 'archief: ' + String(e && e.message || e).slice(0, 120); naarServer._archief_fout = r.fout; stop = true; }   // vervolgpunt niet verschoven: volgende keer opnieuw
+          }
+          standSchrijf(s);
+        });
+        resultaat.push(r);
+      }
+      const v = archiefVeilig('verrijk', function (A, x) { return A.verrijk(x); });
+      return { ok: true, bron: 'bunq', volledig: true, rekeningen: resultaat, archief_posten: v ? v.posten : null };
+    }
+    // wv687: ABN zo ver terug als de bank geeft; alleen als David er vandaag daarna nog RESERVE overhoudt
+    if (id === 'abn-diep') {
+      const van = a.opt.van;
+      if (!isDatum(van) || van >= dag()) throw new Weigering('--van JJJJ-MM-DD (vóór vandaag)');
+      return metSlot(async function () {
+        const s = standLees(), resultaat = [];
+        for (const h of Object.keys(s.rekeningen).filter(function (k) { return s.rekeningen[k].bron !== 'bunq'; })) {
+          const rek = Object.assign({ hash: h }, s.rekeningen[h]), ss = s.sessies[rek.sessie] || {}, r = { rek_kort: h.slice(0, 8) };
+          if (ss.status !== 'AUTHORIZED' || (ss.geldig_tot && Date.parse(ss.geldig_tot) <= Date.now())) r.overgeslagen = 'toestemming geldt niet';
+          else if (teller(s, h).transacties + 1 > MAX_PER_DAG - RESERVE) r.overgeslagen = 'David moet er vandaag nog ' + RESERVE + ' overhouden';
+          else { try { Object.assign(r, await haalArchiefEb(s, rek, van)); } catch (e) { r.fout = (await duidFout(s, rek, e)).tekst; } }
+          resultaat.push(r);
+          standSchrijf(s);
+        }
+        const v = archiefVeilig('verrijk', function (A, x) { return A.verrijk(x); });
+        return { ok: true, bron: 'enablebanking', van: van, rekeningen: resultaat, archief_posten: v ? v.posten : null };
+      });
+    }
     // historie bunq: 13 maanden transacties van elke actieve bunq-rekening (eerste vulling; alleen machinekamer via server.js)
     if (id === 'bunq') return metSlot(async function () {
       const s = standLees(), ctx = bunqCtx();
@@ -887,6 +1031,8 @@ const opdrachten = {
           ronde_hoogst: ts.reduce(function (m, t) { return Math.max(m, t['ronde_' + soort] || 0); }, 0),
           minst_over: ts.length ? ts.reduce(function (m, t) { return Math.min(m, MAX_PER_DAG - (t[soort] || 0)); }, MAX_PER_DAG) : null };
       });
+      // wv687: archief bijwerken (cache incrementeel) en regels toepassen; alleen aantallen in de uitvoer
+      const arch = archiefVeilig('ronde', function (A, x) { A.migreerCache(x, path.join(BANK_DIR, 'cache.sqlite')); A.rekeningenSync(x, s.rekeningen); const v = A.verrijk(x); return { posten: v.posten, gewijzigd: v.gewijzigd }; });
       // Zonder één rekening leest de ronde niets: dat is stille uitval, geen succes (Fable wv685 #6).
       if (!ebRek.length && !bunqN) fout('bank', 'leeg', 'geen enkele rekening gekoppeld of zichtbaar');
       const geslaagd = fouten.length === 0, nu = new Date().toISOString();
@@ -908,8 +1054,37 @@ const opdrachten = {
       standSchrijf(s);
       return { ok: true, geslaagd: geslaagd, stempel: stempel, begin: new Date(begin).toISOString(), duur_s: Math.round((Date.now() - begin) / 100) / 10,
         rekeningen: { enablebanking: ebRek.length, bunq: bunqN }, saldo: tel.saldo, transacties: tel.transacties, opvragen: opv,
-        fouten: fouten, toestemming: toestemming, bunq: { ingericht: !!ctx } };
+        fouten: fouten, toestemming: toestemming, bunq: { ingericht: !!ctx }, archief: arch || { fout: true } };
     });
+  },
+
+  // ── transactiedatabase (wv687) ──
+  async zoek(a) { const x = archiefKlaar(); return Object.assign({ ok: true, bron: 'archief' }, x.A.zoek(x.a, archiefFilter(a, x.s))); },
+  async maand(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.maand(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^maand:/.test(e.message)) throw new Weigering(e.message); throw e; } },
+  async intern(a) { const x = archiefKlaar(); return Object.assign({ ok: true, bron: 'archief' }, x.A.internLijst(x.a, archiefFilter(a, x.s))); },
+  async abonnementen(a) { const x = archiefKlaar(); return Object.assign({ ok: true, bron: 'archief' }, x.A.abonnementen(x.a, { alle: !!a.opt.alle })); },
+  async archief() { const x = archiefKlaar(); x.A.verrijkAlsVuil(x.a); return Object.assign({ ok: true }, x.A.stand(x.a)); },
+  async verrijk() { const x = archiefKlaar(); return Object.assign({ ok: true }, x.A.verrijk(x.a)); },
+  async corrigeer(a) {
+    const x = archiefKlaar(), o = a.opt, v = {};
+    ['categorie', 'subcategorie', 'eigenaar', 'type'].forEach(function (k) { if (o[k] != null) v[k] = String(o[k]); });
+    if (o.regel != null) v.regel = !/^(nee|false|0)$/i.test(String(o.regel));
+    if (o.rekening) { if (o.nr) throw new Weigering('nr of rekening, niet allebei'); v.rek = rekeningVan(x.s, o.rekening, true).hash; if (o.door === 'machinekamer') v.door = 'machinekamer'; }
+    else v.nr = o.nr;
+    try { return x.A.corrigeer(x.a, v); } catch (e) { throw new Weigering(e.message); }
+  },
+  async 'verrijk-open'(a) { const x = archiefKlaar(); return Object.assign({ ok: true }, x.A.aiOpen(x.a, parseInt(a.opt.max, 10) || 60)); },
+  async 'verrijk-zet'() {
+    const x = archiefKlaar();
+    if (!Array.isArray(geheim.resultaten)) throw new Weigering('resultaten ontbreken');
+    return Object.assign({ ok: true }, x.A.aiZet(x.a, geheim.resultaten, geheim.model, geheim.gestuurd));
+  },
+  // Extra namen die niet naar het taalmodel mogen (meisjesnaam, kinderen). Alleen machinekamer, alleen via de CLI (stdin {namen: [...]}),
+  // niet via /smal/bank; de namen staan alleen in het archief (meta), nooit in de code of de uitvoer.
+  async masker() {
+    const x = archiefKlaar();
+    if (!Array.isArray(geheim.namen)) throw new Weigering('stdin {namen: [...]} ontbreekt');
+    return Object.assign({ ok: true }, x.A.maskerZet(x.a, geheim.namen));
   },
 
   async label(a) {
@@ -931,15 +1106,19 @@ const opdrachten = {
       let bank = 'ingetrokken';
       try { await api('DELETE', '/sessions/' + encodeURIComponent(id)); }
       catch (e) { if (!(e instanceof BankFout) || [404, 410].indexOf(e.status) < 0) throw e; bank = 'was al weg (HTTP ' + e.status + ')'; }
+      const weg = [];
       ss.rekeningen.forEach(function (h) {
         if (s.rekeningen[h] && s.rekeningen[h].sessie === id) {
+          weg.push(h);
           db().prepare('DELETE FROM tx WHERE rek = ?').run(h); db().prepare('DELETE FROM saldo WHERE rek = ?').run(h);
           delete s.rekeningen[h]; delete s.opgehaald[h];
         }
       });
       delete s.sessies[id];
       standSchrijf(s);
-      return { ok: true, sessie: id, bank: bank, gewist: true };
+      // wv687: het archief blijft (rekening krijgt status ontkoppeld); wissen alleen op Davids uitdrukkelijke woord, met de hand
+      archiefVeilig('ontkoppel', function (A, x) { A.markeerOntkoppeld(x, weg); A.rekeningenSync(x, s.rekeningen); });
+      return { ok: true, sessie: id, bank: bank, gewist: true, archief: 'bewaard (rekening op ontkoppeld)' };
     });
   },
 };

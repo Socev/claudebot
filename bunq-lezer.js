@@ -237,7 +237,8 @@ function eenvoudig(lijst, schoon) {
       valuta: (p.amount && p.amount.currency) || 'EUR', tegenpartij: tegen, omschrijving: omschr && omschr !== tegen ? omschr : null,
       status: 'geboekt', saldo_na: p.balance_after_mutation ? r2(Number(p.balance_after_mutation.value)) : null,
       mcc: ca.merchant_category_code ? String(ca.merchant_category_code).slice(0, 8) : null,
-      tegen_iban: typeof ca.iban === 'string' && /^[A-Z]{2}\d{2}[A-Z0-9]{8,30}$/.test(ca.iban) ? ca.iban : null };
+      tegen_iban: typeof ca.iban === 'string' && /^[A-Z]{2}\d{2}[A-Z0-9]{8,30}$/.test(ca.iban) ? ca.iban : null,
+      _ruw: p };   // wv687: het ruwe bankobject voor het archief (bank-archief.js, kolom ruwe_json); nooit in de uitvoer
   });
 }
 

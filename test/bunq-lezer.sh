@@ -237,6 +237,36 @@ api.listen(0, '127.0.0.1', async function () {
     r = await draai(['applicatie'], G);
     toets('Enable Banking-opdracht zonder EB-sleutel: nette fout', r.code === 1 && /ontbreekt/.test(r.j.fout), r.j);
 
+    // ── wv687: historie bunq volledig → archief (alle posten ooit), cache blijft 13 maanden ──
+    {
+      const grens = new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10);
+      const archRek = (j) => (j.per_rekening || []).find((x) => x.posten === 250);
+      nulTellers(); M.log = [];
+      r = await draai(['historie', 'bunq', '--volledig', '--opnieuw'], G, { BUNQ_MAX_PAGINAS: '1' });
+      const pr = (r.j.rekeningen || []).find((x) => x.aantal === 200);
+      toets('volledig, 1 pagina per opvraag: afgekapt met vervolgpunt', r.j.ok && r.j.volledig && r.j.rekeningen.length === 3 && pr && pr.afgekapt === true, r.j);
+      r = await draai(['historie', 'bunq', '--volledig'], G, { BUNQ_MAX_PAGINAS: '1' });
+      const ar = (await draai(['archief'], {})).j;
+      toets('volledig: tweede keer gaat verder (older_id) en heeft alle 250 posten, ook ouder dan 400 dagen', r.j.ok && archRek(ar) && archRek(ar).van < grens &&
+        M.log.filter((x) => /payment/.test(x.p) && /older_id=1050/.test(x.q)).length >= 1, [r.j, ar.per_rekening]);
+      M.log = [];
+      r = await draai(['historie', 'bunq', '--volledig'], G);
+      toets('volledig derde keer: al klaar, geen transactieopvraag', r.j.ok && r.j.rekeningen.every((x) => x.al_klaar) && M.log.filter((x) => /payment/.test(x.p)).length === 0, [r.j, M.log]);
+      nulTellers();
+      r = await draai(['historie', 'bunq', '--volledig', '--opgeheven'], G);
+      toets('volledig met opgeheven: ook de opgeheven en de bevroren rekening (5)', r.j.ok && r.j.rekeningen.length === 5 && r.j.rekeningen.filter((x) => x.status !== 'active').length === 2, r.j);
+      const d = new (require('node:sqlite').DatabaseSync)(path.join(BD, 'cache.sqlite'));
+      const oudInCache = d.prepare('SELECT count(*) AS n FROM tx WHERE datum < ?').get(grens).n; d.close();
+      toets('cache blijft binnen 400 dagen (archief houdt de rest)', oudInCache === 0, oudInCache);
+      r = await draai(['zoek', '--type', 'intern'], {});
+      const sp = (r.j.posten || []).find((x) => x.bedrag === -25);
+      toets('interne overboeking naar de spaarrekening: type intern, categorie sparen en beleggen', r.j.ok && sp && sp.categorie === 'sparen en beleggen' && sp.type === 'intern', r.j);
+      r = await draai(['zoek', '--tekst', 'bakker'], {});
+      toets('archief: omschrijving kan de BANKDATA-markering niet sluiten', r.j.ok && r.j.aantal === 1 && !/BANKDATA|\u202e|‮/.test(JSON.stringify(r.j.posten)), r.j.posten);
+      r = await draai(['zoek', '--rekening', 'Samen'], {});
+      toets('gezamenlijke rekening: posten gemarkeerd, eigenaar samen', r.j.ok && r.j.aantal === 1 && r.j.posten[0].gezamenlijk === true && r.j.posten[0].eigenaar === 'samen', r.j.posten);
+    }
+
     // ── 429 halverwege: één keer opnieuw na een pauze; blijft het 429, dan blijft het deel dat binnen was ──
     const leeg = () => { const p = path.join(BD, 'stand.json'); const s = JSON.parse(fs.readFileSync(p, 'utf8')); const h = Object.keys(s.rekeningen).find((k) => s.rekeningen[k].uid === 'bunq-1');
       delete s.opgehaald[h].transacties; delete s.opgehaald[h].vanaf; delete s.opgehaald[h].bunq_terug; s.tellers = { dag: '', per: {} }; fs.writeFileSync(p, JSON.stringify(s)); return h; };

@@ -56,6 +56,16 @@ jobs:
           if echo "$C" | grep -nE "\b(http|https|net|tls|undici)\b'\)|require\('(node:)?(http|https|net|tls|child_process)'" ; then echo "::error::bunq-lezer.js mag geen eigen netwerk- of procesmodules laden"; exit 1; fi
           echo "bunq-lezer.js: alleen lezen."
 
+      # bank-archief.js (wv687): de transactiedatabase is puur lokaal. Geen netwerk- of procesmodule en geen fetch: het archief
+      # kan per constructie niets naar een bank of elders sturen (ook niet als een AI-oordeel of omschrijving iets anders vraagt).
+      - name: bank-archief.js moet lokaal blijven
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' bank-archief.js)
+          if echo "$C" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|\bfetch\s*\(|process\.binding|import\("; then
+            echo "::error::bank-archief.js laadt een netwerk- of procesmodule; het archief moet lokaal blijven"; exit 1
+          fi
+          echo "bank-archief.js: alleen lokaal."
+
       # De witte lijst en de handtekeningcontrole echt toetsen (nagebootste bunq en Enable Banking op 127.0.0.1); node:sqlite
       # vraagt Node 22 (zelfde hoofdversie als de pod).
       - uses: actions/setup-node@v4
@@ -68,6 +78,7 @@ jobs:
           bash test/bank-lezer.sh
           bash test/bankluis-poort.sh
           bash test/bank-ronde.sh
+          bash test/bank-archief.sh
 
       - uses: docker/login-action@v3
         with:

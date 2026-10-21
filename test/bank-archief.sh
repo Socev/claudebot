@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# Toetst de transactiedatabase van de bankluis (wv687, 21-10-2026): bank-archief.js (rechtstreeks) en de AI-stap en de nieuwe
+# /smal/bank-opdrachten in server.js (bankblok uit server.js geknipt, in een vm-context, met een nagebootste claude).
+# Toetst: migratie uit de cache idempotent (twee keer, en na een nieuwe opvraag), wachtend → geboekt (vervangen, niet gewist;
+# vervallen zonder tegenhanger; afgekapte opvraag laat wachtend staan), ruwe velden onveranderlijk, interne overboeking + paar
+# tussen twee eigen rekeningen, maand zonder intern, correctie van David blijft staan na herverrijking en wordt een regel,
+# AI-oordeel alleen voor bekende groepen en categorieën, maskering (geen naam van David/Cynthia, geen IBAN), abonnement
+# herkend, geen netwerk- of procesmodule in bank-archief.js; server: archiefopdrachten zonder kluis, verrijk alleen
+# machinekamer, verrijk-open/-zet niet via /smal/bank, claude zonder tools/MCP/sessie met een kale omgeving.
+# Raakt de pod, de kluis, de bank en /opt/data/bank niet. Gebruik: bash test/bank-archief.sh
+set -u
+cd "$(dirname "$0")/.." || exit 1
+node --no-warnings - <<'JS'
+const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto'), vm = require('vm');
+const { spawn, spawnSync } = require('child_process');
+const { DatabaseSync } = require('node:sqlite');
+let fouten = 0, goed = 0;
+function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (!ok && extra !== undefined ? '  [' + JSON.stringify(extra).slice(0, 600) + ']' : '')); }
+const W = fs.mkdtempSync(path.join(os.tmpdir(), 'bankarchief-'));
+const BD = path.join(W, 'bank');
+const A = require(path.resolve('bank-archief.js'));
+const vandaag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+const dagTerug = (n) => { const d = new Date(vandaag + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
+const IB = { gez: 'NL00ABNA0123456789', prive: 'NL11BUNQ0000000001', spaar: 'NL22BUNQ0000000002', kids: 'NL33BUNQ0000000003' };
+const REK = {
+  gez: { uid: 'u1', bank: 'ABN AMRO', naam: 'Gezamenlijk', iban: IB.gez, sessie: 's1' },
+  prive: { bron: 'bunq', uid: 'bunq-1', bunq_id: 1, naam: 'Privé', soort: 'lopend', iban: IB.prive, status: 'ACTIVE' },
+  spaar: { bron: 'bunq', uid: 'bunq-2', bunq_id: 2, naam: 'Spaar', soort: 'spaar', iban: IB.spaar, status: 'ACTIVE' },
+  kids: { bron: 'bunq', uid: 'bunq-3', bunq_id: 3, naam: 'Kids', soort: 'lopend', iban: IB.kids, status: 'ACTIVE' },
+};
+const metaZetTest = (a, k, v) => a.db.prepare('INSERT INTO meta (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde').run(k, v);
+const p = (id, datum, bedrag, tegen, omschr, extra) => Object.assign({ id: id, datum: datum, valutadatum: datum, bedrag: bedrag, valuta: 'EUR', tegenpartij: tegen, omschrijving: omschr || null,
+  status: 'geboekt', saldo_na: null, mcc: null, tegen_iban: null, _ruw: { id: id, bron: 'nagebootst' } }, extra || {});
+
+(async function () {
+  try {
+    // ── geen netwerk- of procesmodule ──
+    const src = fs.readFileSync('bank-archief.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');
+    toets('bank-archief.js laadt geen netwerk- of procesmodule en roept geen fetch aan',
+      !/require\(['"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['"]\)/.test(src) && !/\bfetch\s*\(/.test(src) && !/process\.binding/.test(src), null);
+
+    // ── cache maken zoals bank-lezer.js hem maakt ──
+    fs.mkdirSync(BD, { recursive: true, mode: 0o700 });
+    const cpad = path.join(BD, 'cache.sqlite');
+    const c = new DatabaseSync(cpad);
+    c.exec('CREATE TABLE tx (rek TEXT NOT NULL, id TEXT NOT NULL, datum TEXT, valutadatum TEXT, bedrag REAL, valuta TEXT, tegenpartij TEXT, omschrijving TEXT, status TEXT, saldo_na REAL, mcc TEXT, opgehaald TEXT, tegen_iban TEXT, PRIMARY KEY (rek, id))');
+    const cz = c.prepare("INSERT OR REPLACE INTO tx VALUES (?, ?, ?, ?, ?, 'EUR', ?, ?, ?, NULL, NULL, ?, ?)");
+    cz.run('gez', 'e:c1', dagTerug(30), dagTerug(30), -80, 'Energie BV', 'termijn', 'geboekt', '2026-10-01T08:00:00Z', null);
+    cz.run('gez', 'e:c2', dagTerug(29), dagTerug(29), 2500, 'Werkgever', 'salaris', 'geboekt', '2026-10-01T08:00:00Z', null);
+    cz.run('gez', 'v:c3', dagTerug(1), dagTerug(1), -9.99, 'Webwinkel', null, 'wachtend', '2026-10-01T08:00:00Z', null);
+
+    const a = A.open(BD);
+    toets('archief 600 in een map 700', (fs.statSync(a.pad).mode & 0o777) === 0o600 && (fs.statSync(BD).mode & 0o777) === 0o700, null);
+    A.rekeningenSync(a, REK);
+    let m = A.migreerCache(a, cpad);
+    const tel = () => a.db.prepare('SELECT count(*) n FROM transacties').get().n;
+    toets('migratie: drie posten uit de cache', m.gemigreerd === 3 && tel() === 3, m);
+    m = A.migreerCache(a, cpad);
+    toets('migratie tweede keer: niets dubbel', m.gemigreerd === 0 && tel() === 3, m);
+    cz.run('gez', 'e:c1', dagTerug(30), dagTerug(30), -80, 'Energie BV', 'termijn', 'geboekt', '2026-10-02T08:00:00Z', null);   // zelfde post, nieuwe opvraag
+    cz.run('gez', 'e:c4', dagTerug(2), dagTerug(2), -15, 'Bakker', null, 'geboekt', '2026-10-02T08:00:00Z', null);
+    m = A.migreerCache(a, cpad);
+    toets('migratie na een nieuwe opvraag: alleen de nieuwe post erbij', m.gemigreerd === 1 && tel() === 4, m);
+    toets('wachtende post uit de cache staat als pending', a.db.prepare("SELECT status FROM transacties WHERE bron_id = 'v:c3'").get().status === 'pending', null);
+    c.close();
+
+    // ── ruwe velden onveranderlijk, ruwe JSON aangevuld ──
+    A.bij(a, 'gez', [p('e:c1', dagTerug(30), -81, 'Energie BV (gewijzigd)', 'termijn')], {});
+    const c1 = a.db.prepare("SELECT * FROM transacties WHERE bron_id = 'e:c1'").get();
+    toets('ruwe velden blijven, ruwe_json aangevuld, laatst_gezien bijgewerkt', c1.bedrag === -80 && c1.tegenpartij === 'Energie BV' && JSON.parse(c1.ruwe_json).id === 'e:c1' && c1.laatst_gezien > c1.eerste_gezien, c1);
+
+    // ── wachtend → geboekt ──
+    A.bij(a, 'gez', [p('v:w2', dagTerug(1), -20, 'Tankstation', null, { status: 'wachtend' })], {});
+    let r = A.bij(a, 'gez', [p('e:c1', dagTerug(30), -80, 'Energie BV')], {});   // afgekapt (geen volledigVanaf)
+    toets('afgekapte opvraag laat wachtende posten staan', a.db.prepare("SELECT count(*) n FROM transacties WHERE status = 'pending'").get().n === 2, r);
+    r = A.bij(a, 'gez', [p('e:b3', dagTerug(0), -9.99, 'Webwinkel'), p('e:c4', dagTerug(2), -15, 'Bakker')], { volledigVanaf: dagTerug(10) });
+    const v3 = a.db.prepare("SELECT status, vervangen_door FROM transacties WHERE bron_id = 'v:c3'").get(), b3 = a.db.prepare("SELECT nr FROM transacties WHERE bron_id = 'e:b3'").get();
+    toets('wachtend → geboekt: wachtende op vervangen met verwijzing (niet gewist)', r.vervangen === 1 && v3.status === 'vervangen' && v3.vervangen_door === b3.nr, [r, v3, b3]);
+    toets('wachtend zonder tegenhanger: vervallen (niet gewist)', r.vervallen === 1 && a.db.prepare("SELECT status FROM transacties WHERE bron_id = 'v:w2'").get().status === 'vervallen', r);
+    let z = A.zoek(a, { tekst: 'webwinkel' });
+    toets('zoek: Webwinkel één keer (geboekt), niets dubbel', z.aantal === 1 && !z.posten[0].status, z);
+    A.bij(a, 'gez', [p('v:w2', dagTerug(1), -20, 'Tankstation', null, { status: 'wachtend' })], {});
+    toets('vervallen post die weer wachtend terugkomt: weer pending', a.db.prepare("SELECT status FROM transacties WHERE bron_id = 'v:w2'").get().status === 'pending', null);
+
+    // ── interne overboeking tussen twee eigen rekeningen (mock met privé en kids) ──
+    A.bij(a, 'prive', [p('b:1', dagTerug(5), -50, 'D Schaap', 'zakgeld', { tegen_iban: IB.kids }), p('b:2', dagTerug(4), -12.5, 'Albert Heijn 1234', 'boodschappen'),
+      p('b:3', dagTerug(3), -100, 'D Schaap', 'naar spaar', { tegen_iban: IB.spaar })], {});
+    A.bij(a, 'kids', [p('b:11', dagTerug(4), 50, 'D Schaap', 'zakgeld', { tegen_iban: IB.prive })], {});
+    let v = A.verrijk(a);
+    const ver = (bron) => a.db.prepare('SELECT v.* FROM verrijking v JOIN transacties t ON t.nr = v.nr WHERE t.bron_id = ?').get(bron);
+    const nr = (bron) => a.db.prepare('SELECT nr FROM transacties WHERE bron_id = ?').get(bron).nr;
+    toets('interne overboeking privé → kids herkend en gekoppeld (beide kanten)', ver('b:1').type === 'intern' && ver('b:11').type === 'intern' && ver('b:1').intern_paar === nr('b:11') && ver('b:11').intern_paar === nr('b:1'), [ver('b:1'), ver('b:11')]);
+    toets('overboeking naar de spaarrekening: intern, sparen en beleggen, zonder paar', ver('b:3').type === 'intern' && ver('b:3').categorie === 'sparen en beleggen' && ver('b:3').intern_paar === null, ver('b:3'));
+    toets('eigenaar van de rekening: kids → kind, gezamenlijk → samen, privé → David', ver('b:11').eigenaar === 'kind' && ver('e:c1').eigenaar === 'samen' && ver('b:2').eigenaar === 'David', [ver('b:11'), ver('e:c1'), ver('b:2')]);
+    const il = A.internLijst(a, {});
+    toets('intern: overboekingen één keer (afschrijving), met van en naar', il.aantal === 2 && il.overboekingen.some((x) => x.van === 'Privé' && x.naar === 'Kids' && x.bedrag === 50), il);
+    const mm = A.maand(a, { maand: dagTerug(4).slice(0, 7) });
+    toets('maand: interne overboekingen niet in de totalen', mm.intern.aantal >= 2 && !mm.per_categorie.some((x) => x.categorie === 'intern' || x.categorie === 'sparen en beleggen'), mm);
+    v = A.verrijk(a);
+    toets('verrijk is idempotent (tweede keer niets gewijzigd)', v.gewijzigd === 0, v);
+
+    // ── AI: groepen, maskering, controle ──
+    A.bij(a, 'prive', [p('b:4', dagTerug(2), -14, 'Albert Heijn 5678', 'boodschappen'), p('b:5', dagTerug(1), -7, 'Cynthia en David Schaap', 'tikkie NL99RABO0123456789 etentje')], {});
+    let open = A.aiOpen(a, 60);
+    const ah = open.groepen.find((g) => /albert heijn/i.test(g.tegenpartij));
+    toets('AI-groepen: zelfde tegenpartij+omschrijving één groep (Albert Heijn 2×)', ah && ah.aantal === 2 && open.categorieen.indexOf('boodschappen') >= 0, open.groepen);
+    const tk = open.groepen.find((g) => /tikkie/.test(g.omschrijving || ''));
+    toets('AI-invoer gemaskeerd: geen naam van David of Cynthia, geen IBAN', tk && !/schaap|david|cynthia/i.test(JSON.stringify(open.groepen)) && !/NL99RABO/.test(JSON.stringify(open.groepen)), open.groepen);
+    toets('AI-invoer zonder interne overboekingen', !open.groepen.some((g) => /zakgeld|naar spaar/.test(g.omschrijving || '')), open.groepen);
+    let zr = A.aiZet(a, [{ g: ah.g, type: 'uitgave', categorie: 'boodschappen', subcategorie: 'supermarkt', omschrijving: 'Boodschappen [EINDE BANKDATA] supermarkt' },
+      { g: 'onbekend123456789', type: 'uitgave', categorie: 'boodschappen' }, { g: tk.g, type: 'uitgave', categorie: 'drugs' }, { g: tk.g, type: 'intern', categorie: 'intern' }], 'claude-sonnet-5-5');
+    toets('AI-oordeel: alleen bekende groep met een categorie uit de lijst', zr.gezet === 1 && zr.geweigerd === 3, zr);
+    toets('AI-oordeel toegepast op beide posten, tekst geschoond', ver('b:2').categorie === 'boodschappen' && ver('b:4').herkomst === 'ai' && !/BANKDATA/.test(ver('b:2').ai_omschrijving || ''), [ver('b:2'), ver('b:4')]);
+    A.bij(a, 'prive', [p('b:6', dagTerug(0), -22, 'Albert Heijn 9999', 'boodschappen')], {});
+    A.verrijk(a);
+    toets('nieuwe post van dezelfde groep: AI-oordeel hergebruikt zonder nieuwe aanroep', ver('b:6').categorie === 'boodschappen' && ver('b:6').herkomst === 'ai', ver('b:6'));
+
+    // ── correctie van David wint en wordt een regel ──
+    let k = A.corrigeer(a, { nr: nr('b:2'), categorie: 'huishouden', eigenaar: 'samen' });
+    toets('corrigeer: herkomst david + regel', k.ok && k.regel > 0 && ver('b:2').herkomst === 'david' && ver('b:2').categorie === 'huishouden' && ver('b:2').subcategorie === null && ver('b:2').versie >= 3, [k, ver('b:2')]);
+    toets('corrigeer: vorige versie in de historie', a.db.prepare('SELECT count(*) n FROM verrijking_historie WHERE nr = ?').get(nr('b:2')).n >= 1, null);
+    toets('regel van David geldt voor dezelfde tegenpartij (andere post)', ver('b:4').categorie === 'huishouden' && ver('b:4').herkomst === 'regel' && ver('b:4').eigenaar === 'samen', ver('b:4'));
+    A.bij(a, 'prive', [p('b:7', dagTerug(0), -30, 'Albert Heijn 4321', 'boodschappen')], {});
+    A.aiZet(a, [{ g: A.groepSleutel({ bedrag: -30, tegenpartij: 'Albert Heijn 4321', omschrijving: 'boodschappen' }), type: 'uitgave', categorie: 'boodschappen' }], 'x');
+    A.verrijk(a); A.verrijk(a);
+    toets('na herverrijking en een nieuw AI-oordeel: Davids correctie staat er nog', ver('b:2').categorie === 'huishouden' && ver('b:2').herkomst === 'david', ver('b:2'));
+    toets('nieuwe post na de correctie volgt Davids regel, niet de AI', ver('b:7').categorie === 'huishouden' && ver('b:7').herkomst === 'regel', ver('b:7'));
+    k = A.corrigeer(a, { nr: nr('b:1'), categorie: 'kinderen', subcategorie: 'zakgeld' });
+    A.bij(a, 'prive', [p('b:8', dagTerug(0), -50, 'D Schaap', 'zakgeld', { tegen_iban: IB.kids })], {});
+    A.verrijk(a);
+    toets('correctie op een interne overboeking: regel op het rekeningpaar (blijft intern)', ver('b:8').categorie === 'kinderen' && ver('b:8').type === 'intern' && ver('b:3').categorie === 'sparen en beleggen', [ver('b:8'), ver('b:3')]);
+    k = A.corrigeer(a, { rek: 'prive', eigenaar: 'Cynthia' });
+    toets('eigenaar per rekening (David): posten zonder regel volgen; een regel van David (eigenaar samen) wint', k.ok && ver('b:5').eigenaar === 'Cynthia' && ver('b:6').eigenaar === 'samen' && ver('b:2').eigenaar === 'samen', [ver('b:5'), ver('b:6'), ver('b:2')]);
+    A.rekeningenSync(a, REK);
+    toets('eigenaar van David blijft na een nieuwe rekeningensync', a.db.prepare("SELECT eigenaar FROM rekeningen WHERE rek = 'prive'").get().eigenaar === 'Cynthia', null);
+    k = A.corrigeer(a, { rek: 'spaar', eigenaar: 'kind', door: 'machinekamer' });
+    A.rekeningenSync(a, REK);
+    toets('eigenaar door de machinekamer blijft na een sync', k.ok && a.db.prepare("SELECT eigenaar, eigenaar_herkomst h FROM rekeningen WHERE rek = 'spaar'").get().h === 'machinekamer', k);
+    let f0 = null; try { A.corrigeer(a, { rek: 'prive', eigenaar: 'kind', door: 'machinekamer' }); } catch (e) { f0 = e.message; }
+    toets('machinekamer overschrijft een eigenaar van David niet', /David/.test(f0 || '') && a.db.prepare("SELECT eigenaar FROM rekeningen WHERE rek = 'prive'").get().eigenaar === 'Cynthia', f0);
+    let fout = null; try { A.corrigeer(a, { nr: 999999, categorie: 'x' }); } catch (e) { fout = e.message; }
+    toets('corrigeer onbekende post: nette fout', /bestaat niet/.test(fout || ''), fout);
+
+    // ── Fable wv687 #3: storting van een derde zonder IBAN wordt geen interne overboeking als de echte tegenpost er is ──
+    A.bij(a, 'kids', [p('b:oma', dagTerug(6), 75, 'Oma', 'verjaardag'), p('b:12', dagTerug(6), 75, 'D Schaap', 'kado', { tegen_iban: IB.prive })], {});
+    A.bij(a, 'prive', [p('b:9', dagTerug(6), -75, 'D Schaap', 'kado', { tegen_iban: IB.kids })], {});
+    A.verrijk(a);
+    toets('paar: de tegenpost met de eigen IBAN, niet de storting van een derde', ver('b:9').intern_paar === nr('b:12') && ver('b:oma').type === 'inkomst', [ver('b:9'), ver('b:oma')]);
+
+    // ── Fable wv687 #4: David zette alleen de categorie; de eigenaar blijft meerekenen ──
+    A.bij(a, 'kids', [p('b:13', dagTerug(5), -9, 'Bioscoop', 'film')], {});
+    A.verrijk(a);
+    k = A.corrigeer(a, { nr: nr('b:13'), categorie: 'vrije tijd en sport', regel: false });
+    A.corrigeer(a, { rek: 'kids', eigenaar: 'Cynthia' });
+    toets('correctie alleen categorie: eigenaar volgt een latere rekeningwijziging', ver('b:13').categorie === 'vrije tijd en sport' && ver('b:13').eigenaar === 'Cynthia' && ver('b:13').herkomst === 'david' && k.vast === 'categorie,ai_omschrijving', [k, ver('b:13')]);
+    A.corrigeer(a, { rek: 'kids', eigenaar: 'kind' });
+
+    // ── tegenlezing #1: David zette alleen de categorie; een later AI-oordeel brengt geen subcategorie of type uit een andere categorie mee ──
+    A.bij(a, 'kids', [p('b:15', dagTerug(5), -11, 'Speelgoedwinkel', 'lego')], {});
+    A.verrijk(a);
+    A.corrigeer(a, { nr: nr('b:15'), categorie: 'kinderen', regel: false });
+    A.aiZet(a, [{ g: A.groepSleutel({ bedrag: -11, tegenpartij: 'Speelgoedwinkel', omschrijving: 'lego' }), type: 'terugboeking', categorie: 'cadeaus en goede doelen', subcategorie: 'verjaardag' }], 'x');
+    A.verrijk(a);
+    toets('david-categorie: geen subcategorie of type van de AI uit een andere categorie', ver('b:15').categorie === 'kinderen' && ver('b:15').subcategorie === null && ver('b:15').type === 'uitgave', ver('b:15'));
+
+    // ── Fable wv687 #6: wachtende post zonder datum ──
+    A.bij(a, 'gez', [p('v:nd', '', -33, 'Garage', null, { status: 'wachtend', datum: '' })], {});
+    A.bij(a, 'gez', [p('e:nd', dagTerug(0), -33, 'Garage')], { volledigVanaf: dagTerug(10) });
+    z = A.zoek(a, { tekst: 'garage' });
+    toets('wachtend zonder datum: na volledige opvraag vervangen, niet dubbel', z.aantal === 1 && a.db.prepare("SELECT status FROM transacties WHERE bron_id = 'v:nd'").get().status === 'vervangen', z);
+
+    // ── Fable wv687 #10: lege rekeningenlijst zet niets op ontkoppeld ──
+    A.rekeningenSync(a, {});
+    toets('lege rekeningenlijst (onleesbare stand): niets ontkoppeld', a.db.prepare("SELECT count(*) n FROM rekeningen WHERE status = 'ontkoppeld'").get().n === 0, null);
+
+    // ── Fable wv687 #9: extra namen maskeren (alleen lokaal in meta) ──
+    A.maskerZet(a, ['van Oostrum', 'Ilvy']);
+    A.bij(a, 'prive', [p('b:14', dagTerug(1), -5, 'C van Oostrum', 'voor Ilvy schoolreis'), p('b:16', dagTerug(1), -6, 'I'.normalize('NFD') + 'lvy'.normalize('NFD') + ' Ilvy'.normalize('NFD'), 'bijdrage')], {});
+    A.verrijk(a);
+    open = A.aiOpen(a, 200);
+    toets('maskerlijst: meisjesnaam en kindernaam niet naar het model', !/oostrum|ilvy/i.test(JSON.stringify(open.groepen)) && open.groepen.some((g) => /\[eigen\]/.test(g.tegenpartij || '')), open.groepen.filter((g) => /eigen/.test(JSON.stringify(g))));
+    toets('stand noemt het aantal maskernamen, niet de namen', A.stand(a).masker_namen === 2 && !/oostrum|ilvy/i.test(JSON.stringify(A.stand(a))), null);
+
+    // ── Fable wv687 #5: groep zonder bruikbaar oordeel na twee pogingen niet meer aangeboden ──
+    const gb = open.groepen.find((g) => /bioscoop/i.test(g.tegenpartij || '')) || open.groepen[0];
+    A.aiZet(a, [{ g: gb.g, type: 'uitgave', categorie: 'onzin' }], 'x', [gb.g]);
+    toets('één mislukte poging: nog open', A.aiOpen(a, 500).groepen.some((g) => g.g === gb.g), null);
+    A.aiZet(a, [], 'x', [gb.g]);
+    toets('twee mislukte pogingen: niet meer aangeboden', !A.aiOpen(a, 500).groepen.some((g) => g.g === gb.g) && A.stand(a).ai_overgeslagen_groepen === 1, null);
+
+    // ── Fable wv687 #1: een correctie van David (ander handvat = ander proces) precies tussen lezen en schrijven van verrijk ──
+    {
+      const b = A.open(BD), doel = nr('b:6');
+      a.db.prepare("UPDATE verrijking SET herkomst = 'ai', categorie = 'boodschappen', david_velden = NULL WHERE nr = ?").run(doel);
+      a.db.prepare("UPDATE ai_groepen SET categorie = 'overig' WHERE sleutel = ?").run(A.groepSleutel({ bedrag: -22, tegenpartij: 'Albert Heijn 9999', omschrijving: 'boodschappen' }));
+      a.db.prepare("UPDATE regels SET actief = 0 WHERE herkomst = 'david'").run();
+      metaZetTest(a, 'vuil', '1');
+      const echteExec = a.db.exec.bind(a.db);
+      let gehaakt = false;
+      a.db.exec = function (sql) { if (!gehaakt && /BEGIN IMMEDIATE/.test(sql)) { gehaakt = true; A.corrigeer(b, { nr: doel, categorie: 'wonen', regel: false }); } return echteExec(sql); };
+      try { A.verrijk(a); } finally { a.db.exec = echteExec; }
+      toets('race: correctie tussen lezen en schrijven van verrijk blijft staan', gehaakt && ver('b:6').herkomst === 'david' && ver('b:6').categorie === 'wonen', ver('b:6'));
+      a.db.prepare("UPDATE regels SET actief = 1 WHERE herkomst = 'david' AND id IN (SELECT max(id) FROM regels WHERE herkomst = 'david' GROUP BY soort, patroon, rek, richting)").run();
+      b.db.close();
+    }
+
+    // ── abonnement ──
+    A.bij(a, 'gez', [1, 2, 3, 4].map((i) => p('e:nf' + i, dagTerug(i * 30 - 20), -15.99, 'Netflix International', 'abonnement')), {});
+    A.verrijk(a);
+    const ab = A.abonnementen(a, {});
+    toets('abonnement herkend (maandritme, vast bedrag)', ab.abonnementen.some((x) => /netflix/i.test(x.naam) && x.ritme === 'maand' && x.actief), ab);
+
+    // ── stand: alleen aantallen ──
+    const st = A.stand(a);
+    toets('stand: aantallen per status en herkomst, geen bedragen of namen', st.transacties === tel() && st.per_status.vervangen >= 1 && st.verrijking.per_herkomst.david >= 2 &&
+      !/Albert|Netflix|Schaap|NL\d\d/.test(JSON.stringify(st)), st);
+    toets('niets ooit verwijderd (alle bron_ids er nog)', ['e:c1', 'e:c2', 'v:c3', 'e:c4', 'v:w2', 'e:b3', 'b:1', 'b:11'].every((b) => a.db.prepare('SELECT 1 FROM transacties WHERE bron_id = ?').get(b)), null);
+
+    // ── server.js: /smal/bank-archiefopdrachten en de AI-stap (vm, nagebootste claude) ──
+    const ssrc = fs.readFileSync('server.js', 'utf8');
+    const s1 = ssrc.indexOf('// ── wv680: bankluis'), s2 = ssrc.indexOf('// ── einde bankluis ──');
+    const k1 = ssrc.indexOf('function smalKind('), k2 = ssrc.indexOf('async function smalSbRpc(');
+    const SECRET = 's'.repeat(40), logs = [];
+    let kluis = 0;
+    const nep = path.join(W, 'nep-claude.js'), spoor = path.join(W, 'claude-spoor.json');
+    fs.writeFileSync(nep, '#!' + process.execPath + '\n' + `
+const fs = require('fs'); const a = process.argv.slice(2); const i = a.indexOf('--json-schema');
+const prompt = fs.readFileSync(0, 'utf8'); const m = /\\[BANKDATA[^\\n]*\\n([\\s\\S]*?)\\n\\[EINDE BANKDATA\\]/.exec(prompt);
+const groepen = JSON.parse(m[1]);
+fs.writeFileSync(process.env.SPOOR || ${JSON.stringify(spoor)}, JSON.stringify({ args: a, env: Object.keys(process.env), cwd: process.cwd(), leeg: fs.readdirSync(process.cwd()).length, prompt: prompt, schema: JSON.parse(a[i + 1]) }));
+process.stdout.write(JSON.stringify({ type: 'result', is_error: false, usage: { input_tokens: 10, output_tokens: 5 }, structured_output: { r: groepen.map((g) => ({ g: g.g, type: g.richting === 'af' ? 'uitgave' : 'inkomst', categorie: g.richting === 'af' ? 'overig' : 'overig inkomen', omschrijving: 'nep' })) } }) + '\\n');
+`, { mode: 0o700 });
+    const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD, BANK_CLAUDE_BIN: nep, CLAUDE_CODE_OAUTH_TOKEN: 'oauth-mag-mee',
+      SUPABASE_URL: 'https://abcdef.supabase.co', SUPABASE_MCP_TOKEN: 'pat-geheim', ANDERE_SLEUTEL: 'mag-niet-mee' };
+    const g = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, setInterval, AbortSignal, Promise, JSON, Date, spawn, VAULT: W, SECRET: SECRET,
+      __dirname: process.cwd(), process: { env: env, execPath: process.execPath, pid: process.pid },
+      fetch: async function () { kluis++; return { ok: true, json: async () => [] }; },
+      logError: (w, e) => logs.push(w + ': ' + (e && e.message || e)), schrijfLog: (r) => logs.push(r), nu: () => 'NU', velden: (o) => JSON.stringify(o),
+      reqPath: (req) => (req.url || '').split('?')[0], rolPoort: (res, verder) => verder(), rol: { eerste: true }, rolPrimair: () => true, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 50 };
+    vm.createContext(g);
+    vm.runInContext(ssrc.slice(k1, k2) + '\n' + ssrc.slice(s1, s2) + '\n;globalThis.__h = { bankSmal, bankVerrijkStand, bankArchiefFout, laatsteFout: () => bankArchiefFoutLaatst };', g, { filename: 'server.js#bank' });
+    const h = g.__h;
+    fs.writeFileSync(path.join(BD, 'stand.json'), JSON.stringify({ versie: 1, wachtend: {}, sessies: {}, rekeningen: REK, tellers: { dag: '', per: {} }, opgehaald: {} }), { mode: 0o600 });
+    let s = await h.bankSmal({ secret: 'socev', opdracht: 'zoek', tekst: 'albert', max: 5 });
+    toets('smal zoek met de Socev-sleutel: ok, BANKDATA-markering, geen kluis', s.status === 200 && s.j.ok && s.j.aantal >= 3 && /BANKDATA/.test(s.j.let_op_bron) && kluis === 0, [s, kluis]);
+    s = await h.bankSmal({ secret: 'socev', opdracht: 'maand', maand: 'oktober' });
+    toets('smal maand met een ongeldige maand: 400', s.status === 400, s);
+    s = await h.bankSmal({ secret: 'socev', opdracht: 'corrigeer', nr: String(nr('b:6')), categorie: '--regel' });
+    toets('smal corrigeer met een vlag als waarde: 400', s.status === 400, s);
+    s = await h.bankSmal({ secret: 'socev', opdracht: 'corrigeer', nr: String(nr('b:6')), categorie: 'boodschappen', regel: 'nee' });
+    toets('smal corrigeer zonder regel: ok, geen nieuwe regel', s.status === 200 && s.j.ok && s.j.regel === null && ver('b:6').herkomst === 'david', [s.j, ver('b:6')]);
+    s = await h.bankSmal({ secret: 'socev', opdracht: 'corrigeer', rekening: 'Kids', eigenaar: 'kind', door: 'machinekamer' });
+    toets('smal corrigeer door=machinekamer met de Socev-sleutel: 403', s.status === 403, s);
+    s = await h.bankSmal({ secret: 'socev', opdracht: 'verrijk' });
+    toets('smal verrijk met de Socev-sleutel: 403', s.status === 403, s);
+    s = await h.bankSmal({ secret: SECRET, opdracht: 'verrijk-zet', resultaten: [] });
+    toets('smal verrijk-zet bestaat niet als opdracht: 400', s.status === 400, s);
+    s = await h.bankSmal({ secret: 'socev', opdracht: 'historie', sessie: 'abn-diep', van: '2015-01-01' });
+    toets('smal historie abn-diep met de Socev-sleutel: 403', s.status === 403, s);
+    s = await h.bankSmal({ secret: SECRET, opdracht: 'verrijk', max_batches: 3 });
+    toets('smal verrijk met API_SECRET: gestart (202)', s.status === 202 && s.j.gestart, s);
+    for (let i = 0; i < 100 && h.bankVerrijkStand().bezig; i++) await new Promise((ok) => setTimeout(ok, 100));
+    const vs = h.bankVerrijkStand();
+    toets('AI-stap klaar: groepen ingedeeld, niets open', !vs.bezig && vs.laatst.groepen_gezet >= 1 && vs.laatst.open_groepen === 0 && !vs.laatst.fout, vs);
+    const sp = JSON.parse(fs.readFileSync(spoor, 'utf8'));
+    toets('claude: geen tools, geen MCP, geen sessie, beperkt, Sonnet', sp.args.join(' ').indexOf('--tools  ') >= 0 && sp.args.indexOf('--strict-mcp-config') >= 0 && sp.args.indexOf('--no-session-persistence') >= 0 &&
+      sp.args.indexOf('--restricted') >= 0 && sp.args[sp.args.indexOf('--model') + 1] === 'claude-sonnet-5-5' && sp.args.indexOf('--dangerously-skip-permissions') < 0, sp.args.filter((x) => x.length < 40));
+    toets('claude: prompt via stdin, niet in argv (geen bankdata in de proceslijst)', sp.args.indexOf('--') < 0 && !/Albert|tikkie|bedrag_typisch/i.test(sp.args.join(' ')) && /bedrag_typisch/.test(sp.prompt), [sp.prompt.slice(0, 200), sp.args.filter((x) => x.length < 60)]);
+    toets('claude: kale omgeving (alleen de eigen inlog), lege werkmap', sp.env.indexOf('CLAUDE_CODE_OAUTH_TOKEN') >= 0 && sp.env.indexOf('SUPABASE_MCP_TOKEN') < 0 && sp.env.indexOf('ANDERE_SLEUTEL') < 0 &&
+      sp.env.indexOf('BANK_DIR') < 0 && sp.leeg === 0 && sp.cwd.indexOf(BD) < 0, [sp.env, sp.cwd]);
+    toets('claude: invoer zonder naam van David/Cynthia en zonder IBAN, schema met de categorielijst', !/schaap|david|cynthia|NL\d\d[A-Z]{4}/i.test(sp.prompt.split('[BANKDATA')[1]) && sp.schema.properties.r.items.properties.categorie.enum.indexOf('boodschappen') >= 0, sp.prompt.slice(0, 300));
+    toets('werkmap van claude opgeruimd', !fs.existsSync(sp.cwd), sp.cwd);
+    toets('correctie van David blijft staan na de AI-stap', ver('b:2').herkomst === 'david' && ver('b:2').categorie === 'huishouden', ver('b:2'));
+    s = await h.bankSmal({ secret: 'socev', opdracht: 'archief' });
+    toets('smal archief: aantallen + stand AI-stap, geen namen of bedragen', s.status === 200 && s.j.ok && s.j.verrijk_ai && s.j.verrijk_ai.laatst.batches >= 1 && !/Albert|Netflix|Schaap/.test(JSON.stringify(s.j)), s.j);
+    toets('log zonder invoer of uitvoer van het model', !logs.some((l) => /Albert|Netflix|tikkie|nep/i.test(l)), logs);
+    // archieffout zichtbaar: log met tekst (cijferreeksen weg), /health-tijd, één box-rij per dag
+    fs.mkdirSync(path.join(W, '00_Systeem', 'Meldingen'), { recursive: true });
+    const box = path.join(W, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    fs.writeFileSync(box, '# box\n\n## [direct] 2026-10-01 10:00 — oud\n- status: open\n');
+    h.bankArchiefFout('bij: database is locked 12345678'); h.bankArchiefFout('bij: database is locked');
+    const bt = fs.readFileSync(box, 'utf8');
+    toets('archieffout: log met reden, één box-rij per dag, tijd voor /health', logs.some((l) => /bank-archief .*database is locked #/.test(l)) && (bt.match(/transactiedatabase: schrijven mislukt/g) || []).length === 1 && !!h.laatsteFout().tijd, [logs.slice(-2), bt.slice(0, 300)]);
+  } catch (e) { fouten++; console.log('ROOD  uitzondering: ' + (e && e.stack || e)); }
+  fs.rmSync(W, { recursive: true, force: true });
+  console.log('\n' + goed + ' groen, ' + fouten + ' rood');
+  process.exit(fouten ? 1 : 0);
+})();
+JS

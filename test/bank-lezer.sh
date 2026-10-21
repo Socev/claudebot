@@ -168,6 +168,17 @@ server.listen(0, '127.0.0.1', async function () {
     r = await draai(['transacties', 'Gezamenlijk ABN', '--zoek', 'energie', '--van', dagTerug(60)], G);
     toets('zoeken op tegenpartij', r.j.ok && r.j.aantal === 1, r.j);
 
+    // wv687: transactiedatabase — doorgeschreven met ruwe JSON; wachtend → geboekt: de wachtende blijft bewaard als vervangen
+    M.opvragen = [];
+    r = await draai(['zoek', '--tekst', 'webwinkel'], null);
+    toets('archief: één Webwinkel-post (geboekt), niet dubbel', r.j && r.j.ok && r.j.aantal === 1 && !r.j.posten[0].status && r.j.posten[0].nr > 0, r.j);
+    r = await draai(['archief'], null);
+    toets('archief: wachtende post op vervangen (niet gewist), ruwe JSON bij bankposten', r.j.ok && r.j.per_status.vervangen === 1 && r.j.per_status.booked === 5 && r.j.met_ruwe_json === 6, r.j);
+    r = await draai(['maand', '--maand', vandaag.slice(0, 7)], null);
+    toets('maand: per categorie, alleen geboekt en wachtend', r.j.ok && r.j.posten >= 1 && Array.isArray(r.j.per_categorie), r.j);
+    toets('archiefopdrachten doen geen bankopvraag', M.opvragen.length === 0, M.opvragen);
+    toets('archief 600', (fs.statSync(path.join(W, 'bank', 'transacties.sqlite')).mode & 0o777) === 0o600, null);
+
     // teller: historie (1) + vers (1) = 2; nog twee vers, dan grens
     await draai(['transacties', 'Gezamenlijk ABN', '--vers'], G);
     await draai(['transacties', 'Gezamenlijk ABN', '--vers'], G);
@@ -219,11 +230,22 @@ server.listen(0, '127.0.0.1', async function () {
     r = await draai(['saldo', '--vers'], G);
     toets('401 + /application 503: storing, geen sleutelmelding', r.j.ok && /niet goed bereikbaar/.test(r.j.saldi[0].fout) && !/sleutel/.test(r.j.saldi[0].fout), r.j);
     delete M.forceer.balances; delete M.appFout;
+    // wv687 (Fable #2): archief onschrijfbaar → de bankopvraag gaat door, de reden gaat in _archief_fout naar de pod
+    {
+      const ap = path.join(W, 'bank', 'transacties.sqlite');
+      fs.renameSync(ap, ap + '.weg'); fs.mkdirSync(ap);
+      fs.writeFileSync(path.join(W, 'bank', 'stand.json'), JSON.stringify(Object.assign(JSON.parse(fs.readFileSync(path.join(W, 'bank', 'stand.json'), 'utf8')), { tellers: { dag: '', per: {} } })));
+      r = await draai(['transacties', 'Gezamenlijk ABN', '--vers'], G);
+      toets('archief onschrijfbaar: bankopvraag gaat door, reden voor de pod in _archief_fout', r.j && r.j.ok && r.j.bron === 'bank' && typeof r.j._archief_fout === 'string' && /^bij: /.test(r.j._archief_fout), [r.j && r.j.bron, r.j && r.j._archief_fout]);
+      fs.rmdirSync(ap); fs.renameSync(ap + '.weg', ap);
+    }
     // ontkoppelen wist alles van die sessie
     r = await draai(['ontkoppel', 'sess-2'], G);
     toets('ontkoppel: DELETE + gewist', r.j.ok && M.sessies['sess-2'].status === 'CLOSED', r.j);
     r = await draai(['rekeningen'], null);
     toets('na ontkoppelen geen rekeningen meer', r.j.ok && r.j.rekeningen.length === 0, r.j);
+    r = await draai(['archief'], null);
+    toets('ontkoppelen wist het archief niet: posten blijven, rekening op ontkoppeld', r.j.ok && r.j.transacties === 6 && r.j.per_rekening.length === 1 && r.j.per_rekening[0].status === 'ontkoppeld', r.j);
 
     const src = fs.readFileSync('bank-lezer.js', 'utf8');
     toets('geen betaal-endpoints in bank-lezer.js', !/\/payments|payment_id|\/payment-/i.test(src.replace(/^\s*(\*|\/\/).*$/gm, '')), null);
