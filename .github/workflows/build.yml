@@ -67,6 +67,7 @@ jobs:
           bash test/bunq-poort.sh
           bash test/bank-lezer.sh
           bash test/bankluis-poort.sh
+          bash test/bank-ronde.sh
 
       - uses: docker/login-action@v3
         with:

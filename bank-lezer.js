@@ -23,6 +23,8 @@
  *   node bank-lezer.js transacties <rekening> [--van JJJJ-MM-DD] [--tot JJJJ-MM-DD] [--zoek tekst] [--max N] [--vers]
  *   node bank-lezer.js toestemming [--controle]       per sessie einddatum en dagen over (--controle: GET /sessions/{id})
  *   node bank-lezer.js label <rekening> <label>
+ *   node bank-lezer.js ronde                          vaste ronde (wv685): saldo + nieuwe transacties per rekening, binnen 2 rondes
+ *                                                     per dag en met 2 opvragen over voor David; alleen aantallen in de uitvoer
  *   node bank-lezer.js ontkoppel <sessie>             DELETE /sessions/{id} + wissen (alleen op Davids woord; server.js laat
  *                                                     dit alleen met API_SECRET toe, niet met de Socev-sleutel)
  *
@@ -66,6 +68,12 @@ const MAX_TOESTEMMING_S = 180 * 86400;
 const BEWAAR_DAGEN = 400;                   // ± 13 maanden
 const MAX_PAGINAS = 60;
 const OMSCHRIJVING_UIT = 140;
+// wv685: vaste ronde (n8n AI - Bank-ronde 07:00 en 18:00 -> POST /bank-ronde -> opdracht ronde). Per rekening per soort per dag
+// hooguit RONDE_PER_DAG rondes, en een ronde vraagt alleen op als David daarna nog RESERVE eigen opvragen overhoudt.
+const RONDE_PER_DAG = 2;
+const BUNQ_STOP = ['toegang', 'handtekening', 'sleutel', 'weigering'];   // ronde: na zo'n bunq-fout geen verdere bunq-opvragen
+const RESERVE = 2;
+const RONDE_VERS_MS = parseInt(process.env.BANK_RONDE_VERS_MS, 10) >= 0 ? parseInt(process.env.BANK_RONDE_VERS_MS, 10) : 2 * 3600 * 1000;   // jonger: niet opvragen (env alleen in de toets)
 
 class BankFout extends Error {
   constructor(status, tekst) { super('Enable Banking HTTP ' + status); this.status = status; this.tekst = String(tekst || '').slice(0, 300); }
@@ -175,7 +183,9 @@ async function metSlot(fn) {
       await new Promise(function (r) { setTimeout(r, 500); });
     }
   }
-  try { return await fn(); } finally { try { fs.unlinkSync(SLOT); } catch (e) {} }
+  // Een lange opdracht (de ronde) ververst het slot elke minuut, anders ruimt een wachter het na 10 min op (Fable wv685 #2)
+  const vers = setInterval(function () { try { const n = new Date(); fs.utimesSync(SLOT, n, n); } catch (e) {} }, 60000);
+  try { return await fn(); } finally { clearInterval(vers); try { fs.unlinkSync(SLOT); } catch (e) {} }
 }
 function standLees() {
   let s = {};
@@ -196,6 +206,13 @@ function teller(s, rh, soort) {
   return t;
 }
 function magOpvragen(s, rh, soort) { return teller(s, rh, soort)[soort] < MAX_PER_DAG; }
+// wv685: ronde_<soort> telt de opvragen van de vaste ronde (zitten ook in <soort>). eigen = wat David (of de machinekamer met
+// de hand) vandaag al vroeg; die houdt samen met wat nog over is altijd RESERVE: ronde < 2 en teller < MAX − max(0, RESERVE − eigen).
+function rondeMag(s, rh, soort) {
+  const t = teller(s, rh), r = t['ronde_' + soort] || 0, eigen = Math.max(0, t[soort] - r);
+  return r < RONDE_PER_DAG && t[soort] < MAX_PER_DAG - Math.max(0, RESERVE - eigen);
+}
+function rondeTel(s, rh, soort) { const t = teller(s, rh); t['ronde_' + soort] = (t['ronde_' + soort] || 0) + 1; }
 
 // ── cache (node:sqlite) ───────────────────────────────────────────────────
 let dbObj = null;
@@ -740,6 +757,155 @@ const opdrachten = {
       const bunq = ctx ? { ingericht: true, sinds: ctx.staat.aangemaakt || null, rekeningen: bunqRekeningen(s).length, lijst_van: (s.bunq && s.bunq.lijst) || null,
         fout: (s.bunq && s.bunq.fout) ? s.bunq.fout.tekst + ' (sinds ' + s.bunq.fout.sinds + ')' : undefined } : { ingericht: false, fout: bunqCtxFout || undefined };
       return { ok: true, sessies: lijst, open_koppelinks: wachtend, bunq: bunq };
+    });
+  },
+
+  // wv685: vaste ronde. Alleen via POST /bank-ronde (server.js, API_SECRET). Per rekening saldo + nieuwe transacties binnen
+  // rondeMag; vóór de rekeningen per Enable Banking-sessie GET /sessions/{id} (metadata, geen bankopvraag). Uitvoer: alleen
+  // aantallen, tijden, toestemmingsdata en foutredenen (gaat naar n8n); geen bedragen, namen, IBAN's of sessie-id's.
+  // geslaagd = geen enkele fout; een opvraag die de grens overslaat is geen fout, een 429 van de bank wel (dan telt de bank
+  // anders dan wij). Enable Banking 'sleutel' of 'toestemming': één box-melding per reden per dag (_box_ronde, server.js).
+  async ronde() {
+    const begin = Date.now();
+    return metSlot(async function () {
+      const s = standLees(), ctx = bunqCtx(), vandaag = dag(), grens = plusDagen(vandaag, -BEWAAR_DAGEN);
+      const tel = { saldo: { bank: 0, vers: 0, grens: 0, fout: 0 }, transacties: { bank: 0, vers: 0, grens: 0, fout: 0, posten: 0 } };
+      const fouten = [];
+      const fout = function (bron, reden, tekst) {
+        const f = fouten.find(function (x) { return x.bron === bron && x.reden === reden; });
+        if (f) f.aantal++; else fouten.push({ bron: bron, reden: reden, tekst: String(tekst || '').slice(0, 200), aantal: 1 });
+      };
+      const vers = function (iso) { return !!iso && Date.now() - Date.parse(iso) < RONDE_VERS_MS; };
+      const vanafVoor = function (o) { const v = o && o.transacties ? plusDagen(dag(o.transacties), -10) : plusDagen(vandaag, -30); return v < grens ? grens : v; };
+      const ebDuid = async function (rek, e) {
+        if (e instanceof Weigering) return { reden: 'sleutel', tekst: 'sleutel in de kluis onbruikbaar: ' + e.message };
+        if (!(e instanceof BankFout)) return { reden: 'storing', tekst: 'interne fout: ' + String(e && e.message || e).slice(0, 120) };
+        return duidFout(s, rek, e);
+      };
+      const bqDuid = function (e) {
+        try { return bunqDuid(s, e); } catch (x) { return { reden: 'storing', tekst: 'interne fout: ' + String(e && e.message || e).slice(0, 120) }; }
+      };
+
+      // ── Enable Banking ──
+      const ebRek = Object.keys(s.rekeningen).filter(function (h) { return s.rekeningen[h].bron !== 'bunq'; });
+      let ebSleutel = ebKlaar();
+      if (ebRek.length && !ebSleutel) fout('enablebanking', 'sleutel', 'Enable Banking-sleutel of applicatie-id ontbreekt in de kluis');
+      const ebSessies = Array.from(new Set(ebRek.map(function (h) { return s.rekeningen[h].sessie; }).filter(Boolean)));
+      for (const id of ebSessies) {
+        const ss = s.sessies[id];
+        if (!ss || !ebSleutel || ss.status !== 'AUTHORIZED') continue;
+        try {
+          const st = await api('GET', '/sessions/' + encodeURIComponent(id));
+          if (st.status) ss.status = st.status;
+          if (st.access && st.access.valid_until) ss.geldig_tot = st.access.valid_until;
+        } catch (e) {
+          // 404/410 hier zet de sessie níet op verlopen: één meting is te weinig voor een kaart en een regel bij David (Fable
+          // wv685 #8). De rekeningopvraag hieronder krijgt dan een 401 en duidFout meet de sessie opnieuw.
+          if (e instanceof Weigering || (e instanceof BankFout && [401, 403].indexOf(e.status) >= 0)) {
+            const f = await ebDuid({ hash: ss.rekeningen[0], sessie: id }, e);
+            if (f.reden === 'sleutel') { ebSleutel = false; fout('enablebanking', 'sleutel', f.tekst); }
+          }
+          // anders (storing, 429): geen oordeel; de rekeningopvraag hieronder beslist
+        }
+      }
+      for (const h of ebRek) {
+        const rek = Object.assign({ hash: h }, s.rekeningen[h]), ss = s.sessies[rek.sessie] || {};
+        // Einddatum voorbij: verlopen, ook als Enable Banking de status nog AUTHORIZED noemt (niet gemeten of EB hem omzet;
+        // de docs noemen alleen EXPIRED_SESSION bij een opvraag). Geen bankopvraag meer (Fable wv685 #4).
+        if (ss.geldig_tot && Date.parse(ss.geldig_tot) <= Date.now()) { fout('enablebanking', 'toestemming', 'toestemming liep af op ' + String(ss.geldig_tot).slice(0, 10) + '; David moet opnieuw koppelen'); continue; }
+        if (ss.status !== 'AUTHORIZED') { fout('enablebanking', 'toestemming', 'toestemming bij de bank geldt niet meer (sessie ' + (ss.status || 'onbekend') + '); David moet opnieuw koppelen'); continue; }
+        if (!ebSleutel) continue;
+        const o = s.opgehaald[h] || {};
+        let stop = false;
+        for (const soort of ['saldo', 'transacties']) {
+          if (stop) break;
+          if (vers(o[soort])) { tel[soort].vers++; continue; }
+          if (!rondeMag(s, h, soort)) { tel[soort].grens++; continue; }
+          rondeTel(s, h, soort);
+          try {
+            if (soort === 'saldo') await haalSaldo(s, rek);
+            else tel.transacties.posten += (await haalTransacties(s, rek, vanafVoor(o))).aantal;
+            tel[soort].bank++;
+          } catch (e) {
+            const f = await ebDuid(rek, e);
+            tel[soort].fout++;
+            fout('enablebanking', f.reden, f.tekst);
+            if (f.reden === 'sleutel') ebSleutel = false;
+            if (f.reden === 'sleutel' || f.reden === 'toestemming' || f.reden === 'grens') stop = true;
+          }
+          standSchrijf(s);
+        }
+      }
+
+      // ── bunq ──
+      let bunqN = 0;
+      if (!ctx && bunqCtxFout) fout('bunq', 'staat', 'bunq-staat onleesbaar: ' + bunqCtxFout);
+      if (ctx && !bunqKan(ctx)) fout('bunq', 'sleutel', 'bunq-sleutel nu niet beschikbaar (kluis bunq_api_key)');
+      else if (ctx) {
+        let stop = false, bh = bunqRekeningen(s);
+        if (s.bunq && vers(s.bunq.lijst) && bh.length) tel.saldo.vers += bh.length;
+        else if (bh.length && !bh.every(function (h) { return rondeMag(s, h, 'saldo'); })) tel.saldo.grens += bh.length;
+        else {
+          try { await bunqLijstBij(s, ctx); bh = bunqRekeningen(s); bh.forEach(function (h) { rondeTel(s, h, 'saldo'); }); tel.saldo.bank += bh.length; }
+          catch (e) { const f = bqDuid(e); tel.saldo.fout++; fout('bunq', f.reden, f.tekst); stop = BUNQ_STOP.indexOf(f.reden) >= 0; }
+          standSchrijf(s);
+        }
+        bh = bunqRekeningen(s);
+        bunqN = bh.length;
+        if (!stop) for (const h of bh) {
+          const rek = Object.assign({ hash: h }, s.rekeningen[h]), o = s.opgehaald[h] || {};
+          if (vers(o.transacties)) { tel.transacties.vers++; continue; }
+          if (!rondeMag(s, h, 'transacties')) { tel.transacties.grens++; continue; }
+          rondeTel(s, h, 'transacties');
+          try { tel.transacties.posten += (await haalTransactiesBunq(s, rek, vanafVoor(o), ctx)).aantal; tel.transacties.bank++; }
+          catch (e) {
+            const f = bqDuid(e);
+            tel.transacties.fout++; fout('bunq', f.reden, f.tekst);
+            if (BUNQ_STOP.indexOf(f.reden) >= 0) { standSchrijf(s); break; }
+          }
+          standSchrijf(s);
+        }
+      }
+
+      // ── toestemming (alleen Enable Banking; bunq heeft geen einddatum) ──
+      const toestemming = ebSessies.map(function (id) {
+        const ss = s.sessies[id] || {}, eigen = (ss.rekeningen || []).filter(function (h) { return s.rekeningen[h] && s.rekeningen[h].sessie === id; });
+        const r0 = s.rekeningen[eigen[0]] || {};
+        return { sessie_kort: hash(id).slice(0, 8), bank: ss.bank || null, geldig_tot: ss.geldig_tot ? String(ss.geldig_tot).slice(0, 10) : null,
+          dagen_over: dagenOver(ss.geldig_tot), status: ss.status || null, verlopen: !!(ss.geldig_tot && Date.parse(ss.geldig_tot) <= Date.now()) || undefined, rekeningen: eigen.length, rekening: schoon(r0.label || r0.product || '', 40) || null };
+      });
+
+      // ── tellers (voor de toets "laat 2 over") en uitkomst ──
+      const zicht = Object.keys(s.rekeningen).filter(function (h) { return zichtbaar(s.rekeningen[h]); });
+      const opv = { max: MAX_PER_DAG, reserve: RESERVE };
+      ['saldo', 'transacties'].forEach(function (soort) {
+        const ts = zicht.map(function (h) { return teller(s, h); });
+        opv[soort] = { hoogst: ts.reduce(function (m, t) { return Math.max(m, t[soort] || 0); }, 0),
+          ronde_hoogst: ts.reduce(function (m, t) { return Math.max(m, t['ronde_' + soort] || 0); }, 0),
+          minst_over: ts.length ? ts.reduce(function (m, t) { return Math.min(m, MAX_PER_DAG - (t[soort] || 0)); }, MAX_PER_DAG) : null };
+      });
+      // Zonder één rekening leest de ronde niets: dat is stille uitval, geen succes (Fable wv685 #6).
+      if (!ebRek.length && !bunqN) fout('bank', 'leeg', 'geen enkele rekening gekoppeld of zichtbaar');
+      const geslaagd = fouten.length === 0, nu = new Date().toISOString();
+      // stempel (hartslag): ook als de enige fout een verlopen Enable Banking-toestemming is. Die ligt bij David (kaart + regel);
+      // anders gaf de stiltewachter elke 26 u een machinekamer-alarm over een ronde die gewoon draait (Fable wv685 #3).
+      const stempel = fouten.every(function (f) { return f.bron === 'enablebanking' && f.reden === 'toestemming'; });
+      s.ronde = Object.assign(s.ronde || {}, { laatst: nu, geslaagd: geslaagd });
+      if (geslaagd) s.ronde.laatst_geslaagd = nu;
+      // box-melding (server.js zet de rij): Enable Banking sleutel/toestemming, hooguit één per reden per dag
+      const box = [];
+      s.ronde.box = s.ronde.box || {};
+      fouten.forEach(function (f) {
+        if (f.bron !== 'enablebanking' || (f.reden !== 'sleutel' && f.reden !== 'toestemming')) return;
+        if (s.ronde.box[f.reden] === vandaag) return;
+        s.ronde.box[f.reden] = vandaag;
+        box.push({ bron: f.bron, reden: f.reden, tekst: f.tekst });
+      });
+      if (box.length) naarServer._box_ronde = box;
+      standSchrijf(s);
+      return { ok: true, geslaagd: geslaagd, stempel: stempel, begin: new Date(begin).toISOString(), duur_s: Math.round((Date.now() - begin) / 100) / 10,
+        rekeningen: { enablebanking: ebRek.length, bunq: bunqN }, saldo: tel.saldo, transacties: tel.transacties, opvragen: opv,
+        fouten: fouten, toestemming: toestemming, bunq: { ingericht: !!ctx } };
     });
   },
 

@@ -2798,6 +2798,19 @@ function handleRequest(req, res) {
     }); });
   }
 
+  // ── wv685: vaste bank-ronde (n8n AI - Bank-ronde; body-secret zoals /run; geen andere invoer; zie bankRondeStart) ──
+  if (req.method === 'POST' && (req.url === '/bank-ronde' || req.url === '/bank-ronde/uitkomst')) {
+    return rolPoort(res, function () { readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
+          !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
+      const r = req.url === '/bank-ronde' ? bankRondeStart() : bankRondeUitkomst();
+      reqLogExtra(res, { bank_ronde: req.url === '/bank-ronde' ? (r.status === 202 ? 'gestart' : 'bezig') : 'uitkomst' });
+      res.writeHead(r.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(r.j));
+    }); });
+  }
+
   // ── wv561: Werkkamer-tegels zonder taalmodel (alleen lezen; body-secret zoals /run; geen andere invoer) ──
   if (req.method === 'POST' && req.url === '/werkkamer-tegels') {
     const eind = Date.now() + WK_TOTAAL_MS;   // totaalgrens inclusief de wachttijd van rolPoort (n8n-timeout 60 s)
@@ -10195,8 +10208,9 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'proef', 'droomronde', 'ideeenm
   'parro', 'signal', 'teams', 'gambia', 'raw-input', 'files-portaal', 'voorlezen', 'briefing', 'actielijst', 'agenda', 'actie-bewaker',
   'agenda-wachter', 'correspondentie-wachter', 'dienstwaarschuwer', 'waarnemingzoeker',
   'agentrapport-david', 'stiltewachter-david',   // wv300: eigen bron per kanaal (agentrapport en stiltewachter dienen ook de machinekamer)
-  'droomronde-wachter']);   // wv390: Wachter melden van de droomronde (wv299). Bewust NIET 'echt-alarm' (Werkvoorraad-tikker, wv358): dat alarm
-                            // meldt juist een pod in een wegwerpmap, waar /bericht 200 geeft in lege data; het blijft op Telegram (§ 4.6).
+  'droomronde-wachter',   // wv390: Wachter melden van de droomronde (wv299). Bewust NIET 'echt-alarm' (Werkvoorraad-tikker, wv358): dat alarm
+                          // meldt juist een pod in een wegwerpmap, waar /bericht 200 geeft in lege data; het blijft op Telegram (§ 4.6).
+  'bank-ronde']);         // wv685: één regel in het hoofdkanaal als een banktoestemming verlopen is (AI - Bank-ronde)
 
 const BERICHT_TEKST_MAX = 60000;
 const BERICHT_BODY_MAX = 256 * 1024;
@@ -12676,7 +12690,7 @@ async function bankKind(args, extra, maxMs) {
   const invoer = Object.assign({}, w, extra || {});
   if (bunqSessie && Date.parse(bunqSessie.tot) > Date.now() + 60000) invoer.bunq_sessie = bunqSessie;
   const r = await smalKind(process.execPath, ['--no-warnings', BANK_SCRIPT].concat(args), JSON.stringify(invoer), maxMs || 170000, bankEnv());
-  let j = null;
+  let j = null, box = null;
   try { j = JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch (e) {}
   // bank-lezer schrijft nooit een sleutel naar stdout of stderr; stderr gaat toch niet terug naar de sessie.
   if (r.code !== 0 && r.stderr) logError('bank-' + args[0], new Error(String(r.stderr).slice(0, 300)));
@@ -12687,9 +12701,11 @@ async function bankKind(args, extra, maxMs) {
       bunqSessie = n && typeof n.token === 'string' && /^[A-Za-z0-9]{20,200}$/.test(n.token) && Date.parse(n.tot) > Date.now() ? { token: n.token, tot: String(n.tot) } : null;
     }
     if (j._box && typeof j._box === 'object') bankBoxRij(j._box);
+    // wv685: de box-melding van de ronde schrijft bankRonde zelf, ná de kaartstap, met de uitkomst erin (Fable wv685 #9)
+    if (Array.isArray(j._box_ronde)) box = j._box_ronde.slice(0, 4).filter(function (m) { return m && typeof m === 'object'; });
     Object.keys(j).forEach(function (k) { if (k[0] === '_') delete j[k]; });
   }
-  return { code: r.code, j: j || { ok: false, fout: 'bank-lezer gaf geen JSON (exit ' + r.code + ')' } };
+  return { code: r.code, j: j || { ok: false, fout: 'bank-lezer gaf geen JSON (exit ' + r.code + ')' }, box: box };
 }
 // wv683: één rij in de machinekamer-box als bunq de toegang weigert (thuis-IP gewijzigd of sleutel ingetrokken) of een
 // antwoord zonder geldige handtekening geeft. bank-lezer.js meldt hooguit één keer per dag; tekst is van de pod zelf, niet van bunq.
@@ -12703,7 +12719,15 @@ function bankBoxRij(m) {
     const anker = eerste.index;
     const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
     const ip = m.reden === 'toegang';
-    const rij = '\n## [direct] ' + tijd + ' — bunq-leesroute geweigerd: ' + (ip ? 'thuis-IP gewijzigd of sleutel ingetrokken' : 'antwoord zonder geldige handtekening') + ' (bankluis, automatisch)\n' +
+    // wv685: Enable Banking uit de vaste ronde (bank-lezer.js zet hooguit één per reden per dag); tekst van de pod zelf
+    const eb = m.bron === 'enablebanking' && (m.reden === 'sleutel' || m.reden === 'toestemming');
+    const rij = eb ? '\n## [direct] ' + tijd + ' — Enable Banking: ' + (m.reden === 'sleutel' ? 'sleutel of applicatie werkt niet' : 'toestemming bij de bank geldt niet meer') + ' (bank-ronde, automatisch)\n' +
+      '- status: open\n- van: pod bank-ronde (bank-lezer.js ronde via POST /bank-ronde; hooguit 1×/dag per reden)\n' +
+      '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: Socev ziet geen nieuwe ABN-saldi of -transacties; alleen de laatst bekende stand.\n' +
+      '- voorstel: ' + (m.reden === 'sleutel' ? '`applicatie` via /smal/bank (API_SECRET) draaien; faalt die: nieuwe applicatie + sleutel in het Enable Banking Control Panel (Sleutelregister, klasse B) en opnieuw koppelen — langs David (kluis, sleutelportaal).'
+        : (m.kaart || 'kaartstap niet gedraaid') + '. Staat er een kaart, dan ligt het bij David; anders de kaart nagaan (Supabase, mk_voor_jou_zet).') + '\n'
+      : '\n## [direct] ' + tijd + ' — bunq-leesroute geweigerd: ' + (ip ? 'thuis-IP gewijzigd of sleutel ingetrokken' : 'antwoord zonder geldige handtekening') + ' (bankluis, automatisch)\n' +
       '- status: open\n- van: pod bankluis (bunq-lezer.js via /smal/bank; hooguit 1×/dag)\n' +
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: Socev ziet geen nieuwe bunq-standen of -transacties; alleen de laatst bekende stand.\n' +
@@ -12813,6 +12837,156 @@ function bankTerug(req, res) {
   if (rol.eerste) return beslis();
   let tm = null;
   Promise.race([rolEerste, new Promise(function (r) { tm = setTimeout(r, ROL_START_WACHT_MS); })]).then(function () { clearTimeout(tm); beslis(); });
+}
+// ── wv685: vaste bank-ronde (n8n AI - Bank-ronde, 07:00 en 18:00) ─────────────────────────────────────────────────────
+// WAAROM. Zonder ronde leest Socev de bank alleen op vraag: de cache veroudert, een aflopende toestemming en een stilgevallen
+// koppeling merkt niemand (bouwplan § 9b). POST /bank-ronde {secret} (body-secret zoals /werkkamer-tegels, achter rolPoort,
+// geen andere invoer) → bank-lezer.js ronde. Daarna, alleen hier in de pod:
+//  1. geslaagd → hartslagstempel machinekamer.hartslag component bank-ronde (AI - Stiltewachter, rij hartslag-bank, 26 u);
+//  2. toestemmingskaarten in machinekamer.voor_jou (14 en 3 dagen vooraf; verlopen) met BANK_DIR/kaarten.json als geheugen,
+//     zodat elke drempel per sessie hooguit één keer een kaart geeft, ook als David de kaart al dichtzette;
+//  3. hoofd_regel: één regel voor het hoofdkanaal als een toestemming verlopen is (n8n stuurt hem via AI - Bericht aan David).
+// Antwoord naar n8n: alleen aantallen, tijden, toestemmingsdata en foutredenen (geen bedragen, namen of IBAN's).
+const BANK_KAARTEN = path.join(BANK_DIR, 'kaarten.json');
+let bankRondeBezig = false;
+function bankKaartenLees() { try { const k = JSON.parse(fs.readFileSync(BANK_KAARTEN, 'utf8')); return k && typeof k === 'object' ? k : {}; } catch (e) { return {}; } }
+function bankKaartenSchrijf(k) {
+  const tmp = BANK_KAARTEN + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(k, null, 1), { mode: 0o600 });
+  fs.renameSync(tmp, BANK_KAARTEN);
+}
+function bankDm(datum, jaar) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(datum || '')); return m ? Number(m[3]) + '-' + Number(m[2]) + (jaar ? '-' + m[1] : '') : '?'; }
+function bankNuKort() { const p = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }); return bankDm(p) + ' ' + p.slice(11, 16); }
+// De kaarttekst. Geen paden, wv-nummers of verwijzingen (mk_voor_jou_zet weigert die); de stappen staan in de kaart zelf.
+function bankKaart(soort, t, sleutel) {
+  const bank = String(t.bank || 'de bank').slice(0, 40), rek = t.rekening ? "de rekening '" + t.rekening + "'" : 'de rekening die nu gekoppeld is';
+  const dagen = t.dagen_over, tot = bankDm(t.geldig_tot, true);
+  const stappen = ["Zeg in de app tegen Socev: 'koppel de bank'.", 'Open de link die Socev je geeft in Chrome (niet in een app-venster); hij is een uur geldig.',
+    'Log in bij ' + bank + ' en vink alleen ' + rek + ' aan.', "Klaar als de pagina 'Gekoppeld' zegt; deze kaart gaat daarna vanzelf dicht."];
+  const p = { sleutel: sleutel, soort: 'doen', stappen: stappen, waar: 'overal', prive: true, duur_min: 5,
+    herkomst: { handmatig: 'bank-ronde', bank: t.sessie_kort } };
+  if (soort === 'verlopen') return Object.assign(p, { titel: 'Bank — koppeling ' + bank + ' verlopen: opnieuw koppelen', volgorde: 5,
+    deadline: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }),
+    waarom: 'De toestemming waarmee Socev ' + rek + ' bij ' + bank + ' leest, geldt niet meer (verlopen of ingetrokken). Socev ziet daar nu geen nieuwe saldi en afschrijvingen meer, tot je opnieuw koppelt.',
+    meting: bankNuKort() + ': De bank geeft geen toegang meer; opnieuw koppelen is nodig.' });
+  const kort = dagen != null && dagen <= 3;
+  return Object.assign(p, { titel: 'Bank — koppeling ' + bank + ' verlengen' + (kort ? ' (nog ' + Math.max(dagen, 0) + (dagen === 1 ? ' dag)' : ' dagen)') : ''),
+    volgorde: kort ? 5 : 40, deadline: t.geldig_tot,
+    waarom: 'Socev mag ' + rek + ' nog tot ' + tot + ' lezen; zo lang geldt je toestemming bij ' + bank + '. Daarna ziet Socev daar geen nieuwe saldi en afschrijvingen meer. Opnieuw koppelen kan nu al; de nieuwe toestemming loopt dan weer het maximum van de bank.',
+    meting: bankNuKort() + ': De koppeling loopt nog ' + Math.max(dagen, 0) + (dagen === 1 ? ' dag' : ' dagen') + ' (tot ' + bankDm(t.geldig_tot) + ').' });
+}
+// Toestemmingskaarten. Geheugen: kaarten.json {sleutel: {sessie_kort, bank, soort, gemaakt, drempel3?, gesloten?}}. Een kaart
+// komt er alleen als de RPC lukte (anders de volgende ronde opnieuw). Sluiten (gedaan, met meting) zodra dezelfde bank een
+// geldige koppeling met > 14 dagen heeft; een kaart die David zelf al sloot, alleen in het geheugen afsluiten.
+async function bankKaarten(toest) {
+  const uit = { gezet: [], bijgewerkt: [], gesloten: [], fouten: [] };
+  let hoofd = null;
+  const k = bankKaartenLees(), nu = new Date().toISOString();
+  let lijst = null;
+  const status = async function (sleutel) {
+    if (!lijst) { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); lijst = {}; ((j && j.punten) || []).forEach(function (p) { lijst[p.sleutel] = p.status; }); }
+    return lijst[sleutel] || null;   // null = niet (meer) in de lijst: dicht en ouder dan 7 dagen, of nooit gemaakt
+  };
+  const zet = async function (p) { await appSbRpc('mk_voor_jou_zet', { p: p }); };   // één parameter p jsonb, zoals voor-jou.py (Fable wv685 #1)
+  const geldig = (toest || []).filter(function (t) { return t && /^[0-9a-f]{8}$/.test(String(t.sessie_kort || '')); });
+  for (const t of geldig) {
+    try {
+      const v = 'bank-verleng-' + t.sessie_kort, x = 'bank-verlopen-' + t.sessie_kort;
+      const verlopen = t.verlopen === true || (t.status && t.status !== 'AUTHORIZED' && t.status !== 'VERVANGEN');   // Fable wv685 #4
+      if (!verlopen && t.status === 'AUTHORIZED' && typeof t.dagen_over === 'number') {
+        if (t.dagen_over <= 14 && !k[v]) {
+          await zet(bankKaart('verleng', t, v));
+          k[v] = { sessie_kort: t.sessie_kort, bank: t.bank, soort: 'verleng', gemaakt: nu };
+          uit.gezet.push(v);
+          if (t.dagen_over <= 3) k[v].drempel3 = nu;   // eerste kaart is al de korte; geen tweede
+        } else if (t.dagen_over <= 3 && k[v] && !k[v].drempel3 && !k[v].gesloten) {
+          const st = await status(v);
+          if (st === 'open' || st === 'later') {
+            await zet(bankKaart('verleng', t, v));
+            if (st === 'later') await appSbRpc('mk_voor_jou_status', { p_sleutel: v, p_van: 'later', p_naar: 'open', p_door: 'agent', p_reden: 'bank-ronde: toestemming loopt over ' + t.dagen_over + ' dagen af' });
+            uit.bijgewerkt.push(v);
+          } else {
+            await zet(bankKaart('verleng', t, v + '-3'));
+            k[v + '-3'] = { sessie_kort: t.sessie_kort, bank: t.bank, soort: 'verleng', gemaakt: nu, drempel3: nu };
+            uit.gezet.push(v + '-3');
+          }
+          k[v].drempel3 = nu;
+        }
+      } else if (verlopen && !k[x]) {
+        await zet(bankKaart('verlopen', t, x));
+        k[x] = { sessie_kort: t.sessie_kort, bank: t.bank, soort: 'verlopen', gemaakt: nu };
+        uit.gezet.push(x);
+        hoofd = 'De koppeling met je ' + String(t.bank || 'bank').slice(0, 40) + '-rekening is verlopen; ik zie daar nu geen nieuwe saldi of afschrijvingen meer. In Voor jou staat hoe je hem opnieuw koppelt (een paar minuten).';
+        k._hoofd = { tekst: hoofd, sinds: nu };   // tot /bank-ronde/uitkomst hem ophaalt (overleeft een herstart)
+      }
+    } catch (e) { logError('bank-kaart', e); uit.fouten.push(String(e && e.message || e).slice(0, 160)); }
+  }
+  // Sluiten: dezelfde bank heeft weer een geldige koppeling met meer dan 14 dagen
+  for (const sl of Object.keys(k)) {
+    const c = k[sl];
+    if (sl[0] === '_' || !c || c.gesloten) continue;
+    const nieuw = geldig.find(function (t) { return t.bank === c.bank && t.status === 'AUTHORIZED' && typeof t.dagen_over === 'number' && t.dagen_over > 14; });
+    if (!nieuw) continue;
+    try {
+      const st = await status(sl);
+      if (st === 'open' || st === 'later') {
+        const r = await appSbRpc('mk_voor_jou_status', { p_sleutel: sl, p_van: st, p_naar: 'gedaan', p_door: 'agent',
+          p_bewijs: 'De koppeling met ' + String(c.bank || 'de bank').slice(0, 40) + ' geldt weer, tot ' + bankDm(nieuw.geldig_tot, true) + '.',
+          p_reden: 'bank-ronde: sessie ' + nieuw.sessie_kort + ' AUTHORIZED, ' + nieuw.dagen_over + ' dagen over' });
+        if (!r || r.ok !== true) { uit.fouten.push(sl + ': ' + ((r && r.fout) || 'status niet gezet')); continue; }
+      }
+      c.gesloten = nu;
+      uit.gesloten.push(sl);
+    } catch (e) { logError('bank-kaart', e); uit.fouten.push(String(e && e.message || e).slice(0, 160)); }
+  }
+  try { bankKaartenSchrijf(k); } catch (e) { logError('bank-kaart', e); uit.fouten.push('kaarten.json niet schrijfbaar'); }
+  return { kaarten: uit, hoofd: hoofd };
+}
+async function bankRonde() {
+  const r = await bankKind(['ronde'], null, 900000);
+  const j = r.j || {};
+  // alleen de velden van de ronde naar n8n (bank-lezer geeft niets anders, maar een fout-object kan 'detail' van de bank dragen)
+  const uit = { ok: j.ok === true, geslaagd: j.geslaagd === true, begin: j.begin, duur_s: j.duur_s, rekeningen: j.rekeningen, saldo: j.saldo,
+    transacties: j.transacties, opvragen: j.opvragen, fouten: j.fouten, toestemming: j.toestemming, bunq: j.bunq,
+    fout: j.ok === true ? undefined : String(j.fout || 'ronde faalde').slice(0, 200) };
+  if (uit.ok && j.stempel === true) {
+    const n = ((j.rekeningen || {}).enablebanking || 0) + ((j.rekeningen || {}).bunq || 0);
+    try { await appSbRpc('mk_hartslag_stempel', { p_component: 'bank-ronde', p_gemeten_rijen: n, p_bevindingen: (j.fouten || []).length }); uit.hartslag = true; }
+    catch (e) { logError('bank-ronde-hartslag', e); uit.hartslag = false; }
+  } else uit.hartslag = false;
+  if (uit.ok && Array.isArray(j.toestemming)) uit.kaarten = (await bankKaarten(j.toestemming)).kaarten;
+  // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
+  (r.box || []).forEach(function (m) {
+    const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')
+      : (uit.kaarten.fouten.length ? 'kaartstap faalde: ' + uit.kaarten.fouten[0] : 'geen nieuwe kaart (al eerder gezet)')) : 'kaartstap niet gedraaid';
+    bankBoxRij(Object.assign({}, m, { kaart: kaart }));
+  });
+  schrijfLog(nu() + ' bank ' + velden({ opdracht: 'ronde', ok: uit.ok, geslaagd: uit.geslaagd, code: r.code, hartslag: uit.hartslag,
+    fouten: (j.fouten || []).length || undefined, kaarten: uit.kaarten ? uit.kaarten.gezet.length + uit.kaarten.gesloten.length || undefined : undefined }));
+  return uit;
+}
+// Asynchroon (Fable wv685 #5): n8n start de ronde (POST /bank-ronde, antwoord 202 meteen) en haalt na een paar minuten de
+// uitkomst op (POST /bank-ronde/uitkomst). Een ronde duurt ± 30–75 s en de Olares-ingress kapt lange verzoeken mogelijk af;
+// dan zou de hoofdregel verloren gaan. De hoofdregel staat in kaarten.json (_hoofd) tot de uitkomst hem ophaalt.
+let bankRondeLaatste = null;   // { begin, eind, uitkomst }
+function bankRondeStart() {
+  if (bankRondeBezig) return { status: 409, j: { ok: false, fout: 'er loopt al een bank-ronde', begin: bankRondeLaatste && bankRondeLaatste.begin } };
+  bankRondeBezig = true;
+  const begin = new Date().toISOString();
+  bankRondeLaatste = { begin: begin, eind: null, uitkomst: null };
+  bankRonde().then(function (u) { bankRondeLaatste.uitkomst = u; })
+    .catch(function (e) { logError('bank-ronde', e); bankRondeLaatste.uitkomst = { ok: false, geslaagd: false, fout: 'bank-ronde faalde in de pod' }; })
+    .finally(function () { bankRondeLaatste.eind = new Date().toISOString(); bankRondeBezig = false; });
+  return { status: 202, j: { ok: true, gestart: true, begin: begin } };
+}
+function bankRondeUitkomst() {
+  const l = bankRondeLaatste;
+  const uit = { ok: true, bezig: bankRondeBezig, begin: l ? l.begin : null, eind: l ? l.eind : null, uitkomst: l ? l.uitkomst : null };
+  try {
+    const k = bankKaartenLees();
+    if (k._hoofd && k._hoofd.tekst) { uit.hoofd_regel = String(k._hoofd.tekst).slice(0, 1000); delete k._hoofd; bankKaartenSchrijf(k); }
+  } catch (e) { logError('bank-ronde-uitkomst', e); }
+  return { status: 200, j: uit };
 }
 // ── einde bankluis ──
 
