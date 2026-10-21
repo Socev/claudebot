@@ -36,7 +36,8 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # Optioneel: gaat mee als het in de commit staat; een oudere commit zonder dit bestand blijft uitrolbaar (terugrollen).
 # bank-lezer.js (wv680): alleen-lezen bankluis, aangeroepen door server.js (/smal/bank, /bank/terug).
 # bunq-lezer.js (wv683): bunq-bron van de bankluis, door bank-lezer.js geladen (ontbreekt hij, dan alleen Enable Banking).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js"
+# bewaker.js (wv701): levensbewaking, door server.js losgekoppeld gestart (ontbreekt hij, dan geen bewaking).
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

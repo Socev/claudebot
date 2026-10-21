@@ -1594,6 +1594,11 @@ function agentInfo() {
 // langere UITROL_WACHT_MAX en liet een wees na een containerherstart (pid-hergebruik) te lang blokkeren.
 const UITROL_MARKER = serverPad('uitrol_marker', process.env.UITROL_MARKER, '/opt/data/uitrol-wacht', serverProefDeel('uitrol-wacht'));
 const UITROL_MARKER_MAX_MS = 5 * 60 * 1000;
+let bewakerPid = null;   // wv701: pid van bewaker.js (zie bewakerStart onderaan)
+function bewakerInfo() {
+  if (!bewakerPid) return { pid: null, leeft: false };
+  try { process.kill(bewakerPid, 0); return { pid: bewakerPid, leeft: true }; } catch (e) { return { pid: bewakerPid, leeft: e.code === 'EPERM' }; }
+}
 function uitrolWacht() {
   let st;
   try { st = fs.statSync(UITROL_MARKER); } catch (e) { return { wacht: false }; }
@@ -2704,7 +2709,9 @@ function handleRequest(req, res) {
       kluis_overgeslagen: process.env.KLUIS_OVERGESLAGEN === '1',
       brein: breinInfo(),
       // wacht een uitrol op stilte? Dan start de werkvoorraad-tikker niets (wv91, 7-10-2026)
-      uitrol: uitrolWacht()
+      uitrol: uitrolWacht(),
+      // wv701: levensbewaking (bewaker.js); leeft false = de bewaker stopte (zie supervisor.log, regels 'bewaker[')
+      bewaker: bewakerInfo()
     }));
   }
 
@@ -13645,4 +13652,17 @@ if (!SERVER_ECHT) {
 server.listen(PORT, '0.0.0.0', function () {
   console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents, breinen claude|codex|gemini) luistert op :' + PORT +
     ' (vault=' + VAULT + ', repo=' + REPO + ')');
+  bewakerStart();
 });
+
+// wv701 (21-10-2026, akkoord David): levensbewaking. bewaker.js draait als los proces naast deze server en laat hem doden
+// als /health/publiek 3 minuten niet antwoordt; de supervisor herstart hem dan. Een worker_thread hier zou bij een dichte
+// event loop of een vastgelopen proces niet betrouwbaar zijn. Alleen de echte server (SERVER_ECHT); BEWAKER=0 zet hem uit.
+// Waarom en hoe: kop van bewaker.js en het bouwplan "Levensbewaking server.js (bouwplan 21-10-2026)".
+function bewakerStart() {
+  if (SERVER_ECHT !== true || process.env.BEWAKER === '0') return;
+  const p = path.join(__dirname, 'bewaker.js');
+  if (!fs.existsSync(p)) return;   // release zonder bewaker (oude uitrol.sh of terugrol)
+  try { bewakerPid = require(p).start({ serverPid: process.pid, poort: PORT }); }
+  catch (e) { logError('bewaker', e); }
+}
