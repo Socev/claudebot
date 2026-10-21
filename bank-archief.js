@@ -22,14 +22,19 @@ const path = require('path');
 const crypto = require('crypto');
 
 const SCHEMA_VERSIE = 1;
-// Categorielijst (voorstel in het bouwplan § 9c; David kan er via corrigeer een bij maken).
+// Categorielijst, vastgesteld door David 21-10-2026 (bouwplan § 9c; David kan er via corrigeer een bij maken).
 const CAT_UIT = ['wonen', 'verzekeringen', 'boodschappen', 'huishouden', 'vervoer', 'abonnementen en communicatie', 'kinderen', 'gezondheid',
   'kleding en persoonlijk', 'horeca en uit eten', 'vrije tijd en sport', 'vakantie en reizen', 'cadeaus en goede doelen', 'Gambia-hulp',
   'belastingen', 'bankkosten', 'contant geld', 'overig'];
 const CAT_IN = ['inkomen', 'teruggave en terugbetaling', 'toeslagen en kinderbijslag', 'rente', 'overig inkomen'];
 const CAT_OVER = ['sparen en beleggen', 'intern'];
 const TYPES = ['uitgave', 'inkomst', 'intern', 'terugboeking'];
-const EIGENAREN = ['David', 'Cynthia', 'samen', 'kind', 'Gambia-hulp', 'onbekend'];
+const EIGENAREN = ['David', 'Cynthia', 'samen', 'kind', 'Gambia-hulp', 'extern', 'onbekend'];
+// Extern (wv709, David 21-10-2026): een rekening op Davids naam die van een ander is (de bunq-rekening van Elizabeth). Een
+// overboeking ernaar of ervan is geen interne overboeking maar een uitgave of inkomst; haar eigen posten tellen niet mee in
+// zoek, maand, intern en abonnementen (wel bewaard; met rekening=… op te vragen); haar saldo is geen vermogen van David.
+const EXTERN = 'extern';
+const LET_OP_EXTERN = 'externe rekening: staat op Davids naam maar is van een ander; posten en saldo zijn niet van David';
 const OORDEEL = ['type', 'categorie', 'subcategorie', 'ai_omschrijving', 'eigenaar'];
 const ZICHTBAAR = "t.status IN ('booked', 'pending')";
 const LET_OP_GEZAMENLIJK = 'gezamenlijke rekening: posten van de mede-eigenaar staan erin; alleen voor David, nooit naar buiten';
@@ -110,6 +115,7 @@ function open(bankDir) {
   else if (Number(v.waarde) > SCHEMA_VERSIE) { db.close(); throw new Error('archief heeft schema ' + v.waarde + ', deze code kent ' + SCHEMA_VERSIE); }
   return { db: db, pad: pad, dir: bankDir };
 }
+function externeRekeningen(a) { return new Set(a.db.prepare("SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern'").all().map(function (r) { return r.rek; })); }
 function metaLees(a, k) { const r = a.db.prepare('SELECT waarde FROM meta WHERE sleutel = ?').get(k); return r ? r.waarde : null; }
 function metaZet(a, k, v) { a.db.prepare('INSERT INTO meta (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde').run(k, v == null ? null : String(v)); }
 // Re-entrant: binnen een lopende transactie gewoon doorlopen (verrijk roept abonnementenHerken binnen zijn eigen transactie aan).
@@ -246,7 +252,9 @@ function verrijkBinnen(a) {
   reks.forEach(function (r) { if (r.iban) ibanRek.set(r.iban, r.rek); });
   const tx = db.prepare('SELECT t.nr, t.rek, t.datum, t.bedrag, t.tegenpartij, t.tegen_iban, t.omschrijving, t.status FROM transacties t WHERE ' + ZICHTBAAR + ' ORDER BY t.datum, t.nr').all();
   const bestaand = new Map(db.prepare('SELECT * FROM verrijking').all().map(function (v) { return [v.nr, v]; }));
-  const regels = db.prepare("SELECT * FROM regels WHERE actief = 1 AND herkomst = 'david' ORDER BY id DESC").all();
+  // regels van David gaan voor die van de machinekamer (alleen soort extern, wv709)
+  const regels = db.prepare("SELECT * FROM regels WHERE actief = 1 AND herkomst IN ('david', 'machinekamer') ORDER BY herkomst = 'david' DESC, id DESC").all();
+  const ext = externeRekeningen(a);
   const ai = new Map(db.prepare('SELECT * FROM ai_groepen').all().map(function (g) { return [g.sleutel, g]; }));
 
   // 1. interne overboekingen en paren (zelfde bedrag tegengesteld, ± 3 dagen, op de andere eigen rekening)
@@ -273,8 +281,8 @@ function verrijkBinnen(a) {
     if (kand.length) { paar.set(t.nr, kand[0].nr); paar.set(kand[0].nr, t.nr); if (!intern.has(kand[0].nr)) intern.set(kand[0].nr, t.rek); }
   });
 
-  // 2. abonnementen (zelfde tegenpartij op dezelfde rekening, vast ritme, bedrag binnen 20%)
-  const abo = abonnementenHerken(a, tx, intern, nu);
+  // 2. abonnementen (zelfde tegenpartij op dezelfde rekening, vast ritme, bedrag binnen 20%); niet op een externe rekening
+  const abo = abonnementenHerken(a, tx.filter(function (t) { return !ext.has(t.rek); }), intern, nu);
 
   // 3. oordeel per post
   const zetV = db.prepare('INSERT INTO verrijking (nr, type, categorie, subcategorie, ai_omschrijving, eigenaar, intern_paar, abonnement_id, herkomst, regel_id, david_velden, versie, bijgewerkt)' +
@@ -287,14 +295,21 @@ function verrijkBinnen(a) {
   {
     tx.forEach(function (t) {
       const oud = bestaand.get(t.nr), rek = reks.get(t.rek) || {};
-      const doel = intern.get(t.nr), ts = woordSleutel(t.tegenpartij), rt = richting(t.bedrag);
+      // naarExt: overboeking tussen een eigen en een externe rekening (het paar blijft, maar het is geen intern); op de externe
+      // rekening zelf is niets intern
+      let doel = intern.get(t.nr);
+      const naarExt = doel && ext.has(doel) && !ext.has(t.rek) ? doel : null;
+      if (naarExt || ext.has(t.rek)) doel = null;
+      const ts = woordSleutel(t.tegenpartij), rt = richting(t.bedrag);
       let n;
       {
         const r = regels.find(function (g) {
           if (g.rek && g.rek !== t.rek) return false;
           if (g.richting && g.richting !== rt) return false;
           if (g.soort === 'intern') return !!doel && g.patroon === doel;
-          if (g.soort === 'tegenpartij') return !doel && !!ts && g.patroon === ts;
+          if (g.soort === 'extern') return !!naarExt && g.patroon === naarExt;
+          if (g.herkomst !== 'david') return false;
+          if (g.soort === 'tegenpartij') return !doel && !naarExt && !!ts && g.patroon === ts;
           return false;
         });
         const g = ai.get(groepSleutel(t));
@@ -302,23 +317,29 @@ function verrijkBinnen(a) {
           const dr = reks.get(doel) || {};
           n = { type: 'intern', categorie: /spaar/i.test(String(dr.soort || '')) || /spaar/i.test(String(dr.naam || '')) ? 'sparen en beleggen' : 'intern',
             subcategorie: null, ai_omschrijving: (t.bedrag < 0 ? 'Naar ' : 'Van ') + (rekeningNaam(dr) || 'eigen rekening'), eigenaar: null, herkomst: 'regel', regel_id: null };
+        } else if (naarExt) {
+          n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: null, subcategorie: null, ai_omschrijving: (t.bedrag < 0 ? 'Naar ' : 'Van ') + (rekeningNaam(reks.get(naarExt)) || 'externe rekening'),
+            eigenaar: null, herkomst: 'regel', regel_id: null };
         } else if (g) n = { type: g.type || (t.bedrag < 0 ? 'uitgave' : 'inkomst'), categorie: g.categorie, subcategorie: g.subcategorie, ai_omschrijving: g.ai_omschrijving, eigenaar: null, herkomst: 'ai', regel_id: null };
         else n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: null, subcategorie: null, ai_omschrijving: null, eigenaar: null, herkomst: 'regel', regel_id: null };
         if (r) {
           // Een regel met een andere categorie dan de AI: subcategorie, type en omschrijving van de AI horen er niet meer bij (tegenlezing #1)
-          if (r.categorie != null && !doel && !(g && g.categorie === r.categorie)) { n.ai_omschrijving = null; n.subcategorie = null; n.type = t.bedrag < 0 ? 'uitgave' : 'inkomst'; }
+          if (r.categorie != null && !doel && !naarExt && !(g && g.categorie === r.categorie)) { n.ai_omschrijving = null; n.subcategorie = null; n.type = t.bedrag < 0 ? 'uitgave' : 'inkomst'; }
           ['type', 'categorie', 'subcategorie'].forEach(function (k) { if (r[k] != null) n[k] = r[k]; });
           n.herkomst = 'regel'; n.regel_id = r.id;
           if (r.eigenaar) n.eigenaar = r.eigenaar;
         }
+        if ((naarExt || ext.has(t.rek)) && n.type === 'intern') n.type = t.bedrag < 0 ? 'uitgave' : 'inkomst';   // extern is nooit intern
         if (!n.eigenaar) n.eigenaar = rek.eigenaar || 'onbekend';
       }
       // David: alleen de velden die hij zelf zette staan vast; de rest rekent gewoon mee (Fable wv687 #4). Zonder lijst: alles vast.
       n.david_velden = null;
       if (oud && oud.herkomst === 'david') {
-        const vast = oud.david_velden ? oud.david_velden.split(',') : OORDEEL;
+        let vast = oud.david_velden ? oud.david_velden.split(',') : OORDEEL;
         // Zette David een andere categorie dan de berekende, dan horen subcategorie en type van regel/AI er niet bij (tegenlezing #1)
         if (vast.indexOf('categorie') >= 0 && oud.categorie !== n.categorie) { n.subcategorie = null; if (!doel) n.type = t.bedrag < 0 ? 'uitgave' : 'inkomst'; }
+        // een type 'intern' dat David zette voordat de tegenrekening extern werd, blijft niet staan: extern is nooit intern
+        if ((naarExt || ext.has(t.rek)) && vast.indexOf('type') >= 0 && oud.type === 'intern') vast = vast.filter(function (k) { return k !== 'type'; });
         vast.forEach(function (k) { if (OORDEEL.indexOf(k) >= 0) n[k] = oud[k]; });
         n.herkomst = 'david'; n.regel_id = null; n.david_velden = oud.david_velden || null;
       }
@@ -381,7 +402,10 @@ function abonnementenHerken(a, tx, intern, nu) {
 function aiOpen(a, max) {
   verrijkAlsVuil(a);
   const rijen = a.db.prepare('SELECT t.nr, t.bedrag, t.tegenpartij, t.omschrijving FROM transacties t JOIN verrijking v ON v.nr = t.nr WHERE ' + ZICHTBAAR +
-    " AND v.categorie IS NULL AND v.herkomst <> 'david' AND v.type <> 'intern'").all();
+    " AND v.categorie IS NULL AND v.herkomst <> 'david' AND v.type <> 'intern' AND t.rek NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern')" +
+    // ook geen overboeking van of naar een externe rekening (die deelt de regel per rekening in; Fable wv709 #5)
+    " AND (v.intern_paar IS NULL OR (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern'))" +
+    " AND (t.tegen_iban IS NULL OR t.tegen_iban NOT IN (SELECT iban FROM rekeningen WHERE lower(eigenaar) = 'extern' AND iban IS NOT NULL))").all();
   const ai = new Set(a.db.prepare('SELECT sleutel FROM ai_groepen').all().map(function (g) { return g.sleutel; }));
   // twee keer geen bruikbaar oordeel: niet opnieuw aanbieden (Fable wv687 #5); blijft 'nog niet ingedeeld' tot David of een regel hem indeelt
   // na 90 dagen weer aanbieden (ander model of nieuwe categorie van David; tegenlezing #2)
@@ -437,18 +461,33 @@ function corrigeer(a, o) {
   const velden = {};
   if (o.categorie != null) { const c = geldigLabel(o.categorie, 40); if (!c) throw new Error('categorie: 1-40 tekens'); velden.categorie = c; }
   if (o.subcategorie != null) { const c = o.subcategorie === '' ? '' : geldigLabel(o.subcategorie, 40); if (c == null) throw new Error('subcategorie: 1-40 tekens'); velden.subcategorie = c || null; }
-  if (o.eigenaar != null) { const e = geldigLabel(o.eigenaar, 30); if (!e) throw new Error('eigenaar: 1-30 tekens (bv. ' + EIGENAREN.join(', ') + ')'); velden.eigenaar = e; }
+  if (o.eigenaar != null) { const e = geldigLabel(o.eigenaar, 30); if (!e) throw new Error('eigenaar: 1-30 tekens (bv. ' + EIGENAREN.join(', ') + ')'); velden.eigenaar = e.toLowerCase() === EXTERN ? EXTERN : e; }
   if (o.type != null) { if (TYPES.indexOf(o.type) < 0) throw new Error('type: ' + TYPES.join(', ')); velden.type = o.type; }
   if (o.rek) {
-    if (!velden.eigenaar || Object.keys(velden).length !== 1) throw new Error('per rekening kan alleen de eigenaar');
+    // per rekening: de eigenaar, en voor een externe rekening de categorie van de overboekingen ernaartoe (wv709)
+    if (velden.type || (!velden.eigenaar && !velden.categorie) || (velden.subcategorie !== undefined && !velden.categorie)) throw new Error('per rekening kan alleen de eigenaar, en bij een externe rekening de categorie (en subcategorie) van de overboekingen ernaartoe');
     // door machinekamer (alleen API_SECRET): een eigenaar die de naam niet verraadt (rekening op naam van een kind); David kan hem altijd overschrijven
     const door = o.door === 'machinekamer' ? 'machinekamer' : 'david';
-    const r = a.db.prepare("UPDATE rekeningen SET eigenaar = ?, eigenaar_herkomst = ? WHERE rek = ? AND (? = 'david' OR eigenaar_herkomst IS NOT 'david')").run(velden.eigenaar, door, o.rek, door);
-    if (!r.changes && door === 'machinekamer' && a.db.prepare('SELECT 1 FROM rekeningen WHERE rek = ?').get(o.rek)) throw new Error('eigenaar van deze rekening is door David gezet; die wint');
-    if (!r.changes) throw new Error('rekening niet in het archief');
-    metaZet(a, 'vuil', '1');
+    if (!a.db.prepare('SELECT 1 FROM rekeningen WHERE rek = ?').get(o.rek)) throw new Error('rekening niet in het archief');
+    let regelId = null;
+    inTransactie(a, function () {
+      if (velden.eigenaar) {
+        const r = a.db.prepare("UPDATE rekeningen SET eigenaar = ?, eigenaar_herkomst = ? WHERE rek = ? AND (? = 'david' OR eigenaar_herkomst IS NOT 'david')").run(velden.eigenaar, door, o.rek, door);
+        if (!r.changes) throw new Error('eigenaar van deze rekening is door David gezet; die wint');
+      }
+      if (velden.categorie) {
+        if (!externeRekeningen(a).has(o.rek)) throw new Error('categorie per rekening alleen voor een externe rekening (eigenaar extern)');
+        if (velden.categorie === 'intern') throw new Error('een externe rekening is nooit intern');
+        if (door === 'machinekamer' && a.db.prepare("SELECT 1 FROM regels WHERE soort = 'extern' AND patroon = ? AND richting = 'af' AND herkomst = 'david' AND actief = 1").get(o.rek)) throw new Error('categorie voor deze rekening is door David gezet; die wint');
+        a.db.prepare("UPDATE regels SET actief = 0 WHERE soort = 'extern' AND patroon = ? AND richting = 'af' AND actief = 1 AND (herkomst = ? OR ? = 'david')").run(o.rek, door, door);
+        regelId = Number(a.db.prepare("INSERT INTO regels (soort, patroon, rek, richting, type, categorie, subcategorie, eigenaar, herkomst, actief, aangemaakt, bron_nr) VALUES ('extern', ?, NULL, 'af', NULL, ?, ?, NULL, ?, 1, ?, NULL)")
+          .run(o.rek, velden.categorie, velden.subcategorie || null, door, nu).lastInsertRowid);
+      }
+      metaZet(a, 'vuil', '1');
+    });
     const v = verrijk(a);
-    return { ok: true, rekening: true, eigenaar: velden.eigenaar, door: door, posten_bijgewerkt: v.gewijzigd };
+    return { ok: true, rekening: true, eigenaar: velden.eigenaar, categorie: velden.categorie, regel: regelId || undefined, door: door, posten_bijgewerkt: v.gewijzigd,
+      nieuwe_categorie: velden.categorie && cats.indexOf(velden.categorie) < 0 ? true : undefined };
   }
   const nr = parseInt(o.nr, 10);
   if (!(nr > 0)) throw new Error('nr ontbreekt (het nummer uit zoek)');
@@ -464,6 +503,13 @@ function corrigeer(a, o) {
   const vast = new Set(oud.herkomst === 'david' ? (oud.david_velden ? oud.david_velden.split(',') : OORDEEL) : []);
   Object.keys(velden).forEach(function (k) { vast.add(k); if (k === 'categorie') vast.add('ai_omschrijving'); });
   const davidVelden = OORDEEL.filter(function (k) { return vast.has(k); }).join(',');
+  // overboeking tussen een eigen en een externe rekening (wv709): nooit intern; de regel gaat op de externe rekening
+  const ibanRek = new Map(a.db.prepare('SELECT rek, iban FROM rekeningen WHERE iban IS NOT NULL').all().map(function (r) { return [r.iban, r.rek]; }));
+  const ext = externeRekeningen(a);
+  const paarRek = oud.intern_paar ? (a.db.prepare('SELECT rek FROM transacties WHERE nr = ?').get(oud.intern_paar) || {}).rek : null;
+  const tegenRek = t.tegen_iban && ibanRek.get(t.tegen_iban) !== t.rek ? ibanRek.get(t.tegen_iban) : null;
+  const naarExt = ext.has(t.rek) ? null : [paarRek, tegenRek].find(function (x) { return x && ext.has(x); }) || null;
+  if (velden.type === 'intern' && (naarExt || ext.has(t.rek))) throw new Error('een externe rekening is nooit intern');
   let regelId = null;
   inTransactie(a, function () {
     if (oud.nr) a.db.prepare('INSERT INTO verrijking_historie (nr, versie, json, tijd) VALUES (?, ?, ?, ?)').run(nr, oud.versie, JSON.stringify(oud), nu);
@@ -472,11 +518,12 @@ function corrigeer(a, o) {
       " ai_omschrijving = excluded.ai_omschrijving, eigenaar = excluded.eigenaar, herkomst = 'david', regel_id = NULL, david_velden = excluded.david_velden, versie = excluded.versie, bijgewerkt = excluded.bijgewerkt")
       .run(nr, n.type, n.categorie, n.subcategorie, n.ai_omschrijving, n.eigenaar, oud.intern_paar || null, oud.abonnement_id || null, davidVelden, (oud.versie || 0) + 1, nu);
     if (o.regel !== false) {
-      const ibanRek = new Map(a.db.prepare('SELECT rek, iban FROM rekeningen WHERE iban IS NOT NULL').all().map(function (r) { return [r.iban, r.rek]; }));
-      const doel = t.tegen_iban && ibanRek.get(t.tegen_iban) !== t.rek ? ibanRek.get(t.tegen_iban) : null;
-      const soort = doel ? 'intern' : 'tegenpartij', patroon = doel || woordSleutel(t.tegenpartij);
+      // naar een externe rekening: regel op die rekening, voor elke eigen rekening; een post óp de externe rekening: regel alleen
+      // voor die rekening (anders kregen Davids eigen posten bij dezelfde tegenpartij haar categorie en eigenaar; Fable wv709 #2)
+      const doel = naarExt || ext.has(t.rek) || (tegenRek && ext.has(tegenRek)) ? null : tegenRek;
+      const soort = naarExt ? 'extern' : doel ? 'intern' : 'tegenpartij', patroon = naarExt || doel || woordSleutel(t.tegenpartij);
       if (patroon) {
-        const rk = doel ? t.rek : null, rt = richting(t.bedrag);
+        const rk = doel || ext.has(t.rek) ? t.rek : null, rt = richting(t.bedrag);
         a.db.prepare("UPDATE regels SET actief = 0 WHERE herkomst = 'david' AND actief = 1 AND soort = ? AND patroon = ? AND rek IS ? AND richting = ?").run(soort, patroon, rk, rt);
         regelId = Number(a.db.prepare("INSERT INTO regels (soort, patroon, rek, richting, type, categorie, subcategorie, eigenaar, herkomst, actief, aangemaakt, bron_nr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'david', 1, ?, ?)")
           .run(soort, patroon, rk, rt, velden.type || null, velden.categorie || null, velden.subcategorie || null, velden.eigenaar || null, nu, nr).lastInsertRowid);
@@ -494,11 +541,12 @@ const UIT_KOLOMMEN = 'SELECT t.nr, t.rek, t.datum, t.bedrag, t.valuta, t.tegenpa
   ' v.eigenaar, v.intern_paar, v.abonnement_id, v.herkomst, (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) AS paar_rek FROM transacties t LEFT JOIN verrijking v ON v.nr = t.nr';
 function rekNamen(a) { return new Map(a.db.prepare('SELECT * FROM rekeningen').all().map(function (r) { return [r.rek, r]; })); }
 function postUit(t, reks, n) {
-  const r = reks.get(t.rek);
+  const r = reks.get(t.rek), isExt = function (x) { return !!x && String(x.eigenaar || '').toLowerCase() === EXTERN; };
+  const ext = isExt(r) || isExt(reks.get(t.paar_rek));   // overboeking van of naar een externe rekening (wv709)
   return { nr: t.nr, datum: t.datum, rekening: rekeningNaam(r), bedrag: t.bedrag, valuta: t.valuta !== 'EUR' ? t.valuta : undefined, tegenpartij: t.tegenpartij,
     omschrijving: t.omschrijving ? String(t.omschrijving).slice(0, n || 140) : null, status: t.status === 'pending' ? 'wachtend' : undefined,
     type: t.type, categorie: t.categorie, subcategorie: t.subcategorie || undefined, ai_omschrijving: t.ai_omschrijving || undefined, eigenaar: t.eigenaar,
-    intern_met: t.paar_rek ? rekeningNaam(reks.get(t.paar_rek)) : undefined, abonnement: t.abonnement_id ? true : undefined, herkomst: t.herkomst,
+    intern_met: t.paar_rek && !ext ? rekeningNaam(reks.get(t.paar_rek)) : undefined, extern_met: t.paar_rek && ext ? rekeningNaam(reks.get(t.paar_rek)) : undefined, abonnement: t.abonnement_id ? true : undefined, herkomst: t.herkomst,
     gezamenlijk: r && r.gezamenlijk ? true : undefined };
 }
 function filter(o) {
@@ -506,10 +554,19 @@ function filter(o) {
   if (o.van) { w.push('t.datum >= ?'); p.push(o.van); }
   if (o.tot) { w.push('t.datum <= ?'); p.push(o.tot); }
   if (o.rek) { w.push('t.rek = ?'); p.push(o.rek); }
+  // zonder rekening: de posten op een externe rekening tellen niet mee (wv709); met rekening=… of eigenaar=extern wel
+  else if (String(o.eigenaar || '').toLowerCase() !== EXTERN) w.push("t.rek NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern')");
   if (o.categorie) { w.push('lower(v.categorie) = lower(?)'); p.push(o.categorie); }
   if (o.eigenaar) { w.push('lower(v.eigenaar) = lower(?)'); p.push(o.eigenaar); }
   if (o.type) { w.push('v.type = ?'); p.push(o.type); }
   return { w: w, p: p };
+}
+// Uitleg bij een overzicht: is de gevraagde rekening extern, of bleven er externe rekeningen buiten beschouwing?
+function letOpExtern(a, o) {
+  const ext = externeRekeningen(a);
+  if (!ext.size) return undefined;
+  if (o.rek) return ext.has(o.rek) ? LET_OP_EXTERN : undefined;
+  return String(o.eigenaar || '').toLowerCase() === EXTERN ? LET_OP_EXTERN : 'posten op een externe rekening (eigenaar extern) tellen niet mee; vraag ze op met rekening=…';
 }
 function zoek(a, o) {
   verrijkAlsVuil(a);
@@ -523,6 +580,7 @@ function zoek(a, o) {
   const som = function (l, teken) { return r2(l.filter(function (t) { return teken > 0 ? t.bedrag > 0 : t.bedrag < 0; }).reduce(function (x, t) { return x + t.bedrag; }, 0)); };
   const gez = rijen.some(function (t) { const r = reks.get(t.rek); return r && r.gezamenlijk; });
   return { aantal: rijen.length, getoond: Math.min(rijen.length, max), totaal_in: som(rijen, 1), totaal_uit: som(rijen, -1), let_op_gezamenlijk: gez ? LET_OP_GEZAMENLIJK : undefined,
+    let_op_extern: letOpExtern(a, o),
     let_op_intern: rijen.some(function (t) { return t.type === 'intern'; }) ? 'interne overboekingen tellen mee in de totalen; filter type=uitgave of type=inkomst om ze weg te laten' : undefined,
     posten: rijen.slice(0, max).map(function (t) { return postUit(t, reks); }) };
 }
@@ -546,7 +604,7 @@ function maand(a, o) {
   const uit = r2(lijst.reduce(function (s, x) { return s + x.uit; }, 0)), inn = r2(lijst.reduce(function (s, x) { return s + x.in; }, 0));
   const reks = rekNamen(a), gez = rijen.some(function (t) { const r = reks.get(t.rek); return r && r.gezamenlijk; });
   return { maand: m, rekening: o.rek ? rekeningNaam(reks.get(o.rek)) : 'alle', eigenaar: o.eigenaar || undefined, posten: rijen.length, totaal_uit: uit, totaal_in: inn,
-    let_op_gezamenlijk: gez ? LET_OP_GEZAMENLIJK : undefined,
+    let_op_gezamenlijk: gez ? LET_OP_GEZAMENLIJK : undefined, let_op_extern: letOpExtern(a, o),
     per_categorie: lijst, intern: { aantal: intN, in: r2(intIn), uit: r2(intUit), let_op: 'overboekingen tussen eigen rekeningen; niet in de totalen' },
     nog_niet_ingedeeld: open || undefined };
 }
@@ -571,7 +629,7 @@ function abonnementen(a, o) {
   verrijkAlsVuil(a);
   const reks = rekNamen(a);
   const l = a.db.prepare('SELECT b.*, (SELECT v.categorie FROM verrijking v JOIN transacties t ON t.nr = v.nr WHERE v.abonnement_id = b.id ORDER BY t.datum DESC LIMIT 1) AS categorie' +
-    ' FROM abonnementen b WHERE (? OR b.actief = 1) ORDER BY b.actief DESC, b.bedrag_typisch DESC').all(o && o.alle ? 1 : 0);
+    " FROM abonnementen b WHERE (? OR b.actief = 1) AND b.rek NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern') ORDER BY b.actief DESC, b.bedrag_typisch DESC").all(o && o.alle ? 1 : 0);
   const perMaand = function (b) { return b.ritme === 'maand' ? b.bedrag_typisch : b.ritme === 'kwartaal' ? b.bedrag_typisch / 3 : b.bedrag_typisch / 12; };
   return { aantal: l.length, per_maand_totaal: r2(l.filter(function (b) { return b.actief; }).reduce(function (s, b) { return s + perMaand(b); }, 0)),
     let_op: 'herkend aan ritme en bedrag (vaste lasten zoals hypotheek en verzekeringen tellen mee); geen opzegdata',
@@ -613,4 +671,4 @@ function stand(a) {
 }
 
 module.exports = { open, rekeningenSync, markeerOntkoppeld, bij, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, stand, maskerZet,
-  categorieen, woordSleutel, groepSleutel, maskeer, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, SCHEMA_VERSIE };
+  categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };

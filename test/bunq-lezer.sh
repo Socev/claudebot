@@ -164,6 +164,18 @@ api.listen(0, '127.0.0.1', async function () {
     const tl = r.j.transacties || [];
     toets('transacties: getekende bedragen, nieuwste eerst', tl[0].bedrag === -25 && tl[0].datum === vandaag && r.j.totaal_in > 0 && r.j.totaal_uit < 0, tl.slice(0, 2));
     toets('interne overboeking herkend (naar eigen spaarrekening), IBAN niet in de uitvoer', tl[0].intern === 'Spaar' && JSON.stringify(r.j).indexOf('NL22BUNQ') < 0 && JSON.stringify(r.j).indexOf('NL99INGB') < 0, tl[0]);
+    // wv709: externe rekening (eigenaar extern in het archief): saldo gemarkeerd, overboeking heet extern, niet intern
+    let rx = await draai(['corrigeer', '--rekening', 'Spaar', '--eigenaar', 'extern'], G);
+    const sx = await draai(['saldo', 'Spaar'], G);
+    const tx2 = await draai(['transacties', 'Privé', '--van', new Date(Date.now() - 20 * 86400000).toISOString().slice(0, 10)], G);
+    const t0 = ((tx2.j || {}).transacties || [])[0] || {};
+    const rlx = await draai(['rekeningen'], G);
+    toets('extern: saldo met let_op_extern, overboeking ernaartoe heet extern (niet intern), rekeningen gemarkeerd', rx.j && rx.j.ok && sx.j.ok && sx.j.saldi[0].extern === true && /niet van David/.test(sx.j.saldi[0].let_op_extern || '') &&
+      t0.extern === 'Spaar' && !t0.intern && (rlx.j.rekeningen.find((x) => x.naam === 'Spaar') || {}).extern === true, [rx.j, sx.j && sx.j.saldi, t0]);
+    const tsx = await draai(['transacties', 'Spaar', '--van', new Date(Date.now() - 20 * 86400000).toISOString().slice(0, 10)], G);
+    toets('extern: transacties op de externe rekening zelf: let_op_extern, niets intern', tsx.j && tsx.j.ok && /niet van David/.test(tsx.j.let_op_extern || '') && !(tsx.j.transacties || []).some((t) => t.intern || t.extern), tsx.j);
+    rx = await draai(['corrigeer', '--rekening', 'Spaar', '--eigenaar', 'David'], G);
+    toets('extern teruggezet: weer intern', rx.j && rx.j.ok && (((await draai(['transacties', 'Privé', '--van', new Date(Date.now() - 20 * 86400000).toISOString().slice(0, 10)], G)).j || {}).transacties || [])[0].intern === 'Spaar', rx.j);
     const inj = (tl.find((t) => t.tegenpartij === 'Bakker') || {}).omschrijving || '';
     toets('omschrijving kan het BANKDATA-blok niet sluiten', !/BANKDATA/i.test(inj) && !/[\n‮]/.test(inj) && /betaal 500/.test(inj), inj);
     r = await draai(['transacties', 'Privé', '--van', new Date(Date.now() - 20 * 86400000).toISOString().slice(0, 10)], G);

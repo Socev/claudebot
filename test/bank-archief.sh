@@ -180,6 +180,89 @@ const p = (id, datum, bedrag, tegen, omschr, extra) => Object.assign({ id: id, d
       toets('zelfde milliseconde: wachtende post toch vervangen', a.db.prepare("SELECT status FROM transacties WHERE bron_id = 'v:ms'").get().status === 'vervangen', null);
     }
 
+    // ── wv709: externe rekening (op Davids naam, van een ander; eigen archief) ──
+    {
+      const BE = path.join(W, 'bank-extern');
+      const e = A.open(BE);
+      const IE = { gez: 'NL00ABNA0999999999', prive: 'NL11BUNQ0000000091', eliz: 'NL08BUNQ0000000093' };
+      A.rekeningenSync(e, { gez: { uid: 'u9', bank: 'ABN AMRO', naam: 'Vaste lasten', iban: IE.gez, sessie: 's9' },
+        prive: { bron: 'bunq', uid: 'bunq-91', bunq_id: 91, naam: 'Privé', soort: 'lopend', iban: IE.prive, status: 'ACTIVE' },
+        eliz: { bron: 'bunq', uid: 'bunq-93', bunq_id: 93, naam: 'Elizabeth', soort: 'lopend', iban: IE.eliz, status: 'ACTIVE' } });
+      const d5 = dagTerug(5);
+      A.bij(e, 'gez', [p('x:1', d5, -350, 'D. Schaap', 'Periodieke overb Geld')], {});   // ABN geeft geen tegen-IBAN mee
+      A.bij(e, 'prive', [p('x:4', d5, -100, 'D. Schaap', null, { tegen_iban: IE.eliz }), p('x:5', d5, -20, 'Bakker', 'brood')], {});
+      A.bij(e, 'eliz', [p('x:2', d5, 350, 'D SCHAAP CJ', 'Geld', { tegen_iban: IE.gez }), p('x:6', d5, 100, 'D. Schaap', null, { tegen_iban: IE.prive }),
+        p('x:3', d5, -42, 'Kruidvat 123', 'pasbetaling'), p('x:a1', dagTerug(95), -9.99, 'Spotify', 'abo'), p('x:a2', dagTerug(65), -9.99, 'Spotify', 'abo'),
+        p('x:a3', dagTerug(35), -9.99, 'Spotify', 'abo'), p('x:a4', d5, -9.99, 'Spotify', 'abo')], {});
+      A.verrijk(e);
+      const ve = (bron) => e.db.prepare('SELECT v.* FROM verrijking v JOIN transacties t ON t.nr = v.nr WHERE t.bron_id = ?').get(bron);
+      const ne = (bron) => e.db.prepare('SELECT nr FROM transacties WHERE bron_id = ?').get(bron).nr;
+      toets('extern, vooraf: overboeking naar de rekening telt nog als intern en haar Spotify als abonnement', ve('x:1').type === 'intern' && ve('x:1').intern_paar === ne('x:2') &&
+        A.abonnementen(e, {}).abonnementen.some((b) => b.rekening === 'Elizabeth'), [ve('x:1'), A.abonnementen(e, {})]);
+      let ke = A.corrigeer(e, { rek: 'eliz', eigenaar: 'extern' });
+      toets('extern: eigenaar per rekening (David), blijft na een rekeningensync', ke.ok && ke.eigenaar === 'extern' &&
+        (A.rekeningenSync(e, { eliz: { bron: 'bunq', uid: 'bunq-93', naam: 'Elizabeth', soort: 'lopend', iban: IE.eliz, status: 'ACTIVE' }, gez: { uid: 'u9', bank: 'ABN AMRO', iban: IE.gez }, prive: { bron: 'bunq', uid: 'bunq-91', naam: 'Privé', iban: IE.prive, status: 'ACTIVE' } }),
+          e.db.prepare("SELECT eigenaar, eigenaar_herkomst h FROM rekeningen WHERE rek = 'eliz'").get().h === 'david') && e.db.prepare("SELECT eigenaar FROM rekeningen WHERE rek = 'eliz'").get().eigenaar === 'extern', ke);
+      A.verrijk(e);
+      toets('extern: de € 350 (ABN, zonder tegen-IBAN) is een uitgave, geen intern; paar blijft, omschrijving "Naar Elizabeth"', ve('x:1').type === 'uitgave' && ve('x:1').intern_paar === ne('x:2') &&
+        ve('x:1').ai_omschrijving === 'Naar Elizabeth' && ve('x:1').eigenaar === 'samen', ve('x:1'));
+      toets('extern: overboeking vanaf een bunq-rekening (met tegen-IBAN) ook uitgave', ve('x:4').type === 'uitgave', ve('x:4'));
+      toets('extern: op de externe rekening zelf is niets intern; eigenaar extern', ve('x:2').type === 'inkomst' && ve('x:6').type === 'inkomst' && ve('x:3').eigenaar === 'extern', [ve('x:2'), ve('x:6'), ve('x:3')]);
+      ke = A.corrigeer(e, { rek: 'eliz', categorie: 'cadeaus en goede doelen', subcategorie: 'steun Elizabeth', door: 'machinekamer' });
+      toets('extern: categorie per rekening (machinekamer) wordt een regel voor alle overboekingen ernaartoe', ke.ok && ke.regel > 0 &&
+        ve('x:1').categorie === 'cadeaus en goede doelen' && ve('x:1').subcategorie === 'steun Elizabeth' && ve('x:4').categorie === 'cadeaus en goede doelen' && ve('x:1').herkomst === 'regel' &&
+        ve('x:1').ai_omschrijving === 'Naar Elizabeth' && ve('x:1').type === 'uitgave' && e.db.prepare('SELECT herkomst FROM regels WHERE id = ?').get(ke.regel).herkomst === 'machinekamer', [ke, ve('x:1')]);
+      const me = A.maand(e, { maand: d5.slice(0, 7) });
+      const cg = me.per_categorie.find((x) => x.categorie === 'cadeaus en goede doelen') || {};
+      toets('extern: maand telt de € 350 en € 100 als uitgave, niets intern, Elizabeths posten niet mee', cg.uit === -450 && me.intern.aantal === 0 && me.totaal_uit === -470 &&
+        !JSON.stringify(me).includes('Kruidvat') && /extern/.test(me.let_op_extern || ''), me);
+      const ze = A.zoek(e, {});
+      toets('extern: zoek zonder rekening laat Elizabeths posten weg, met let_op_extern', !ze.posten.some((x) => x.rekening === 'Elizabeth') && ze.aantal === 3 && !!ze.let_op_extern &&
+        (ze.posten.find((x) => x.bedrag === -350) || {}).extern_met === 'Elizabeth' && !(ze.posten.find((x) => x.bedrag === -350) || {}).intern_met, ze);
+      const zr2 = A.zoek(e, { rek: 'eliz' });
+      toets('extern: met rekening=Elizabeth wel op te vragen (bewaard), met de waarschuwing', zr2.aantal === 7 && zr2.let_op_extern === A.LET_OP_EXTERN, zr2.aantal);
+      toets('extern: eigenaar=extern geeft haar posten', A.zoek(e, { eigenaar: 'extern' }).aantal === 7, null);
+      toets('extern: intern-lijst leeg', A.internLijst(e, {}).aantal === 0, A.internLijst(e, {}));
+      toets('extern: geen abonnement op de externe rekening (ook niet met alle)', !A.abonnementen(e, { alle: true }).abonnementen.some((b) => b.rekening === 'Elizabeth'), A.abonnementen(e, { alle: true }));
+      toets('extern: haar posten gaan niet naar het taalmodel', !/kruidvat|spotify/i.test(JSON.stringify(A.aiOpen(e, 500).groepen)), A.aiOpen(e, 500).groepen);
+      ke = A.corrigeer(e, { rek: 'eliz', categorie: 'kinderen' });
+      let fe = null; try { A.corrigeer(e, { rek: 'eliz', categorie: 'overig', door: 'machinekamer' }); } catch (x) { fe = x.message; }
+      toets('extern: categorie van David wint; machinekamer overschrijft hem niet', ve('x:1').categorie === 'kinderen' && /David/.test(fe || '') && ve('x:1').categorie === 'kinderen', [fe, ve('x:1')]);
+      fe = null; try { A.corrigeer(e, { rek: 'prive', categorie: 'overig' }); } catch (x) { fe = x.message; }
+      toets('extern: categorie per rekening alleen bij een externe rekening', /extern/.test(fe || ''), fe);
+      fe = null; try { A.corrigeer(e, { rek: 'eliz', categorie: 'intern' }); } catch (x) { fe = x.message; }
+      toets('extern: categorie intern geweigerd', /nooit intern/.test(fe || ''), fe);
+      ke = A.corrigeer(e, { nr: ne('x:4'), categorie: 'overig' });
+      toets('extern: correctie per post wordt een regel op de externe rekening (geldt ook voor de ABN-overboeking)', ke.ok && e.db.prepare('SELECT soort, patroon, rek FROM regels WHERE id = ?').get(ke.regel).soort === 'extern' &&
+        e.db.prepare('SELECT patroon FROM regels WHERE id = ?').get(ke.regel).patroon === 'eliz' && ve('x:1').categorie === 'overig' && ve('x:1').type === 'uitgave', [ke, ve('x:1')]);
+      // Fable wv709: randgevallen
+      A.bij(e, 'gez', [p('x:7', d5, -500, 'DEGIRO', 'storting'), p('x:12', d5, 60, 'D. Schaap', 'terug', { tegen_iban: IE.prive })], {});
+      A.bij(e, 'prive', [p('x:8', d5, -5, 'Kruidvat 123', 'eigen'), p('x:10', d5, 30, 'Elizabeth', 'terugbetaling-x10', { tegen_iban: IE.eliz }), p('x:11', d5, -60, 'D. Schaap', 'naar gez', { tegen_iban: IE.gez })], {});
+      A.bij(e, 'eliz', [p('x:9', d5, -30, 'D. Schaap', 'terug-x9', { tegen_iban: IE.prive })], {});
+      A.verrijk(e);
+      A.corrigeer(e, { nr: ne('x:7'), type: 'intern', regel: false });
+      A.verrijk(e);
+      toets('extern (Fable #1): type intern van David op een gewone ongepaarde post blijft staan', ve('x:7').type === 'intern', ve('x:7'));
+      ke = A.corrigeer(e, { nr: ne('x:3'), categorie: 'gezondheid', eigenaar: 'Elizabeth' });
+      toets('extern (Fable #2): correctie op een post van de externe rekening raakt Davids eigen posten niet', ve('x:3').categorie === 'gezondheid' && ve('x:8').categorie !== 'gezondheid' && ve('x:8').eigenaar === 'David' &&
+        e.db.prepare('SELECT rek FROM regels WHERE id = ?').get(ke.regel).rek === 'eliz', [ve('x:8'), ke]);
+      toets('extern (Fable #4/5): bijschrijving vanaf de externe rekening is inkomst "Van Elizabeth", niet intern, niet naar het taalmodel', ve('x:10').type === 'inkomst' && ve('x:10').ai_omschrijving === 'Van Elizabeth' &&
+        ve('x:10').intern_paar === ne('x:9') && !/terugbetaling-x10|Periodieke/.test(JSON.stringify(A.aiOpen(e, 500).groepen)), [ve('x:10'), A.aiOpen(e, 500).groepen]);
+      fe = null; try { A.corrigeer(e, { nr: ne('x:1'), type: 'intern' }); } catch (x) { fe = x.message; }
+      toets('extern (Fable #3): type intern per post op een overboeking naar de externe rekening geweigerd', /nooit intern/.test(fe || '') && ve('x:1').type === 'uitgave', fe);
+      A.corrigeer(e, { nr: ne('x:11'), type: 'uitgave', categorie: 'kinderen', regel: false });
+      const z11 = A.zoek(e, { tekst: 'naar gez' }).posten[0] || {};
+      toets('extern (Fable #6): extern_met alleen bij een echte externe tegenrekening', !!z11.intern_met && !z11.extern_met, z11);
+      ke = A.corrigeer(e, { rek: 'eliz', eigenaar: 'Extern' });
+      toets('extern (Fable #8): hoofdletter genormaliseerd', ke.eigenaar === 'extern' && A.stand(e).per_rekening.some((r) => r.eigenaar === 'extern'), ke);
+      toets('extern: verrijk idempotent', A.verrijk(e).gewijzigd === 0, null);
+      toets('extern: stand noemt eigenaar extern', A.stand(e).per_rekening.some((r) => r.eigenaar === 'extern'), A.stand(e).per_rekening);
+      A.corrigeer(e, { rek: 'eliz', eigenaar: 'David' });
+      toets('extern terugdraaien: weer intern (niets in de ruwe rijen veranderd)', ve('x:1').type === 'intern' && ve('x:2').type === 'intern' &&
+        e.db.prepare("SELECT bedrag, tegenpartij FROM transacties WHERE bron_id = 'x:3'").get().bedrag === -42, [ve('x:1'), ve('x:2')]);
+      e.db.close();
+    }
+
     // ── Fable wv687 #10: lege rekeningenlijst zet niets op ontkoppeld ──
     A.rekeningenSync(a, {});
     toets('lege rekeningenlijst (onleesbare stand): niets ontkoppeld', a.db.prepare("SELECT count(*) n FROM rekeningen WHERE status = 'ontkoppeld'").get().n === 0, null);

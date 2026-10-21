@@ -37,6 +37,8 @@
  *   node bank-lezer.js abonnementen [--alle]
  *   node bank-lezer.js corrigeer --nr N [--categorie c] [--subcategorie s] [--eigenaar e] [--type t] [--regel nee]
  *   node bank-lezer.js corrigeer --rekening r --eigenaar e                     eigenaar van een hele rekening
+ *   node bank-lezer.js corrigeer --rekening r --categorie c [--subcategorie s] externe rekening (eigenaar extern, wv709): categorie
+ *                                                                              van de overboekingen ernaartoe (die zijn een uitgave, geen intern)
  *   node bank-lezer.js archief                                                  alleen aantallen (mag in een rapport)
  *   node bank-lezer.js verrijk                                                  regels opnieuw toepassen (lokaal)
  *   node bank-lezer.js verrijk-open [--max N] / verrijk-zet (stdin {resultaten, model})   alleen server.js (AI-stap)
@@ -316,6 +318,11 @@ function archiefVeilig(wat, fn) {
   try { const x = archiefOpen(); return fn(x.A, x.a); }
   catch (e) { naarServer._archief_fout = String((naarServer._archief_fout ? naarServer._archief_fout + '; ' : '') + wat + ': ' + String(e && e.message || e)).slice(0, 300); return null; }
 }
+// Externe rekeningen (wv709): op Davids naam, maar van een ander. Uit het archief; faalt dat, dan een lege set met fout (logregel via
+// archiefVeilig) en zegt de uitvoer dat de markering ontbreekt (Fable wv709 #9).
+function externSet() { const x = archiefVeilig('extern', function (A, a) { return A.externeRekeningen(a); }); const s = x || new Set(); s.fout = !x; return s; }
+const EXTERN_ONBEKEND = 'archief niet leesbaar: externe rekeningen (niet van David) zijn nu niet gemarkeerd';
+const LET_OP_EXTERN = 'externe rekening: staat op Davids naam maar is van een ander; saldo en posten zijn niet van David (niet meetellen als zijn geld)';
 function archiefBij(s, rh, lijst, opties) {
   return archiefVeilig('bij', function (A, a) { A.rekeningenSync(a, s.rekeningen); return A.bij(a, rh, lijst, opties); });
 }
@@ -501,9 +508,13 @@ async function haalTransactiesBunq(s, rek, van, ctx) {
   return { aantal: lijst.length, paginas: r.paginas, afgekapt: r.afgekapt, onleesbaar: r.onleesbaar || undefined };
 }
 // Eigen IBAN's (beide bronnen, ook opgeheven) → naam, voor het veld 'intern' bij een overboeking tussen eigen rekeningen.
-function eigenIbans(s) {
+// alleenExtern: juist de externe rekeningen (veld 'extern'); anders zonder de externe (wv709).
+function eigenIbans(s, ext, alleenExtern) {
   const m = new Map();
-  Object.keys(s.rekeningen).forEach(function (h) { const r = s.rekeningen[h]; if (r.iban) m.set(String(r.iban).replace(/\s+/g, '').toUpperCase(), r.label || r.naam || h.slice(0, 12)); });
+  Object.keys(s.rekeningen).forEach(function (h) {
+    const r = s.rekeningen[h];
+    if (r.iban && !!alleenExtern === !!(ext && ext.has(h))) m.set(String(r.iban).replace(/\s+/g, '').toUpperCase(), r.label || r.naam || h.slice(0, 12));
+  });
   return m;
 }
 const LET_OP_GEZAMENLIJK = 'gezamenlijke rekening: posten van de mede-eigenaar staan erin; alleen voor David, nooit naar buiten';
@@ -754,14 +765,14 @@ const opdrachten = {
       });
     }
     const alle = !!(a && a.opt.alle);
-    const hashes = Object.keys(s.rekeningen).filter(function (h) { return alle || zichtbaar(s.rekeningen[h]); });
-    return { ok: true, let_op: let_op || undefined, verborgen: Object.keys(s.rekeningen).length - hashes.length || undefined,
+    const hashes = Object.keys(s.rekeningen).filter(function (h) { return alle || zichtbaar(s.rekeningen[h]); }), ext = externSet();
+    return { ok: true, let_op: let_op || undefined, let_op_extern: ext.fout ? EXTERN_ONBEKEND : undefined, verborgen: Object.keys(s.rekeningen).length - hashes.length || undefined,
       bunq: ctx ? { lijst_van: (s.bunq && s.bunq.lijst) || null, fout: (s.bunq && s.bunq.fout && s.bunq.fout.tekst) || undefined } : (bunqCtxFout ? { fout: bunqCtxFout } : undefined),
       rekeningen: hashes.map(function (h) {
         const r = s.rekeningen[h], ss = s.sessies[r.sessie] || {}, o = s.opgehaald[h] || {}, t = (s.tellers.dag === dag() && s.tellers.per[h]) || {};
         const bunq = r.bron === 'bunq';
         return { uid: r.uid, label: r.label, naam: r.naam, product: r.product, bank: r.bank, iban: r.iban, valuta: r.valuta,
-          bron: bunq ? 'bunq' : 'enablebanking', gezamenlijk: r.gezamenlijk || undefined,
+          bron: bunq ? 'bunq' : 'enablebanking', gezamenlijk: r.gezamenlijk || undefined, extern: ext.has(h) || undefined, let_op_extern: ext.has(h) ? LET_OP_EXTERN : undefined,
           toestemming_tot: bunq ? null : (ss.geldig_tot ? String(ss.geldig_tot).slice(0, 10) : null), dagen_over: bunq ? null : dagenOver(ss.geldig_tot),
           status: bunq ? r.status : (ss.status || '?'),
           saldo_opgehaald: o.saldo || null, transacties_opgehaald: o.transacties || null, transacties_vanaf: o.vanaf || null,
@@ -782,12 +793,13 @@ const opdrachten = {
         else if (!bunqKan(ctx)) bunqLetOp = 'bunq-sleutel nu niet beschikbaar: laatst bekende stand';
         else { try { await bunqLijstBij(s, ctx); bunqVers = true; } catch (e) { bunqLetOp = bunqDuid(s, e).tekst + '; laatst bekende stand'; } }
       }
-      const uitv = [];
+      const uitv = [], ext = externSet();
       for (const rek0 of lijst) {
         const rek = rek0.bron === 'bunq' ? Object.assign({ hash: rek0.hash }, s.rekeningen[rek0.hash]) : rek0;
         const rij = db().prepare('SELECT json, opgehaald FROM saldo WHERE rek = ?').get(rek.hash);
         const vers = rij && Date.now() - Date.parse(rij.opgehaald) < VERS_MS;
         const r = { rekening: rek.label || rek.naam || rek.hash.slice(0, 12), iban_eind: rek.iban ? rek.iban.slice(-4) : null };
+        if (ext.has(rek.hash)) Object.assign(r, { extern: true, let_op_extern: LET_OP_EXTERN });
         if (rek.bron === 'bunq') {
           Object.assign(r, { bank: 'bunq', soort: rek.soort, gezamenlijk: rek.gezamenlijk || undefined, let_op_gezamenlijk: rek.gezamenlijk ? LET_OP_GEZAMENLIJK : undefined });
           if (rek.status !== 'ACTIVE') r.let_op = 'rekening ' + String(rek.status).toLowerCase();
@@ -813,7 +825,7 @@ const opdrachten = {
         uitv.push(r);
       }
       standSchrijf(s);
-      return { ok: true, saldi: uitv };
+      return { ok: true, let_op_extern: ext.fout ? EXTERN_ONBEKEND : undefined, saldi: uitv };
     });
   },
 
@@ -862,7 +874,9 @@ const opdrachten = {
       }
       if (van < grens) let_op = (let_op ? let_op + '; ' : '') + 'de cache gaat niet verder terug dan ' + grens + ' (bewaartermijn ' + BEWAAR_DAGEN + ' dagen)';
       standSchrijf(s);
-      const eigen = eigenIbans(s), eigenIban = rek.iban ? String(rek.iban).replace(/\s+/g, '').toUpperCase() : '';
+      // op een externe rekening is niets intern; een overboeking naar of van een externe rekening heet 'extern' (wv709)
+      const ext = externSet(), isExt = ext.has(rek.hash);
+      const eigen = isExt ? new Map() : eigenIbans(s, ext), extIb = isExt ? new Map() : eigenIbans(s, ext, true), eigenIban = rek.iban ? String(rek.iban).replace(/\s+/g, '').toUpperCase() : '';
       const rijen = db().prepare('SELECT id, datum, valutadatum, bedrag, valuta, tegenpartij, omschrijving, status, saldo_na, tegen_iban FROM tx WHERE rek = ? AND datum >= ? AND datum <= ? ORDER BY datum DESC, id')
         .all(rek.hash, van, tot).filter(function (t) {
           return !zoek || [t.tegenpartij, t.omschrijving].some(function (v) { return v && v.toLowerCase().indexOf(zoek) >= 0; }) || String(t.bedrag).indexOf(zoek) >= 0;
@@ -870,14 +884,15 @@ const opdrachten = {
       const in_ = r2(rijen.filter(function (t) { return t.bedrag > 0; }).reduce(function (x, t) { return x + t.bedrag; }, 0));
       const af = r2(rijen.filter(function (t) { return t.bedrag < 0; }).reduce(function (x, t) { return x + t.bedrag; }, 0));
       return { ok: true, rekening: rek.label || rek.naam || rek.hash.slice(0, 12), bank: rek.bank || undefined, van: van, tot: tot, bron: bron,
-        let_op_gezamenlijk: rek.gezamenlijk ? LET_OP_GEZAMENLIJK : undefined,
+        let_op_gezamenlijk: rek.gezamenlijk ? LET_OP_GEZAMENLIJK : undefined, let_op_extern: isExt ? LET_OP_EXTERN : (ext.fout ? EXTERN_ONBEKEND : undefined),
         stand_van: (s.opgehaald[rek.hash] || {}).transacties || null, cache_vanaf: (s.opgehaald[rek.hash] || {}).vanaf || null, let_op: let_op,
         aantal: rijen.length, getoond: Math.min(rijen.length, max), totaal_in: in_, totaal_uit: af,
         transacties: rijen.slice(0, max).map(function (t) {
           return { datum: t.datum, bedrag: t.bedrag, valuta: t.valuta, tegenpartij: t.tegenpartij,
             omschrijving: t.omschrijving ? t.omschrijving.slice(0, OMSCHRIJVING_UIT) : null, status: t.status,
             saldo_na: t.saldo_na == null ? undefined : t.saldo_na, valutadatum: t.valutadatum && t.valutadatum !== t.datum ? t.valutadatum : undefined,
-            intern: t.tegen_iban && t.tegen_iban.toUpperCase() !== eigenIban && eigen.has(t.tegen_iban.toUpperCase()) ? eigen.get(t.tegen_iban.toUpperCase()) : undefined };
+            intern: t.tegen_iban && t.tegen_iban.toUpperCase() !== eigenIban && eigen.has(t.tegen_iban.toUpperCase()) ? eigen.get(t.tegen_iban.toUpperCase()) : undefined,
+            extern: t.tegen_iban && extIb.has(t.tegen_iban.toUpperCase()) ? extIb.get(t.tegen_iban.toUpperCase()) : undefined };
         }) };
     });
   },
