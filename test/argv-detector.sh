@@ -30,16 +30,18 @@ vm.runInContext(src.slice(a, b) + '\n;globalThis.__d = { argvDetStart, argvDetIn
 const W = process.env.W;
 const namen = g.__d.argvDetSleutels(process.env).map(s => s.naam);
 g.__d.argvDetStart({ env: process.env, boxPad: path.join(W, 'box.md'), staatPad: path.join(W, 'staat.json'), intervalMs: 250 });
-setTimeout(() => { console.log(JSON.stringify({ namen, info: g.__d.argvDetInfo(), log })); process.exit(0); }, 6500);
+setTimeout(() => { console.log(JSON.stringify({ namen, info: g.__d.argvDetInfo({ detail: true }), kort: g.__d.argvDetInfo(), log })); process.exit(0); }, 6500);
 JS
 DET=$!
 sleep 1
-bash "$W/lekker.sh" "$NEP" &          # treffer 1 (perl) + treffer 2 (bash met de waarde als $1)
+env -u SOCEV_AGENT_RUN SOCEV_SESSIE=toets-sessie bash "$W/lekker.sh" "$NEP" &   # treffer 1 (perl) + 2 (bash met de waarde als $1)
 sleep 0.2
 bash "$W/lekker.sh" "$NEP" &          # zelfde proces/script/sleutel: geen nieuwe box-rij
 sleep 0.2
 "$W"/x*z -e 'sleep 2' "$NEP" &        # procesnaam met opmaaktekens
 perl -e 'sleep 2' "zonder sleutel" &  # geen treffer
+GROOT=$(head -c 100000 /dev/zero | tr '\0' a)
+perl -e 'sleep 2' "$GROOT" "$GROOT" "$GROOT" "$GROOT" &   # cmdline van 400 kB: begrensd gelezen, geen fout
 wait $DET; wait
 cat "$W/fout.txt" >&2
 node -e '
@@ -60,6 +62,9 @@ t("waarde nergens: box", box.indexOf(NEP) < 0, null);
 t("waarde nergens: staat", staat.indexOf(NEP) < 0, null);
 t("waarde nergens: log/uitvoer", JSON.stringify(u).indexOf(NEP) < 0, null);
 t("geen fouten in de detector", u.info && u.info.fouten === 0, u.log);
+t("box: sessie uit SOCEV_SESSIE", /job\/sessie `toets-sessie`/.test(box), rijen);
+t("/health kort: geen sleutelnamen of tijden", u.kort && !("per_sleutel_24u" in u.kort) && !("laatste_iso" in u.kort) && u.kort.treffers_24u === u.info.treffers_24u, u.kort);
+t("geen tmp-bestanden achtergebleven", fs.readdirSync(W).filter(n => /\.tmp$/.test(n)).length === 0, fs.readdirSync(W));
 t("staat 0600", (fs.statSync(W + "/staat.json").mode & 0o777) === 0o600, null);
 process.exit(f ? 1 : 0);
 ' "$W" "$NEP"

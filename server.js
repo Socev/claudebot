@@ -1853,6 +1853,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     if (lezen) runOpts.gereedschap = 'lezen';
     // wv275: een [AUTO]-beurt van de telefoon draagt zijn id in de omgeving; POST /agent leest hem daar terug (telMerkAgent).
     if (j.app && j.app.soort === 'tel') runOpts.env = { SOCEV_TEL_BEURT: jobId };
+    // wv698: de sessienaam in de omgeving, zodat de argv-detector een lek aan een sessie kan koppelen (geen sleutel)
+    runOpts.env = Object.assign({}, runOpts.env || {}, { SOCEV_SESSIE: String(chatId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'onbekend' });
     // wv424: buiten de machinekamer geen beheersleutels (zie MK_SESSIES).
     if (!lezen && !runIsMk(chatId, ws)) socevSmalOpts(runOpts, chatId);
     j.omgeving = lezen ? 'lezen' : (runIsMk(chatId, ws) ? 'mk' : 'smal');
@@ -13787,8 +13789,9 @@ function tunnelInfo() {
 // WAAROM (21-10-2026, uid-scheiding fase 1b; bouwplan "Socev-gesprekken onder eigen gebruiker - sleutelscheiding" § 3.6
 // en § 5 #6): /proc/<pid>/cmdline is voor elke gebruiker in de pod leesbaar (hidepid en een eigen /proc kunnen niet). Een
 // sleutel die als argument aan curl e.d. wordt meegegeven, kan elk ander proces dus aflezen zolang de aanroep loopt. Deze
-// detector meet wie dat doet: elke seconde /proc/*/cmdline van nieuwe processen (en van processen jonger dan 3 s, om een
-// exec na de fork te zien) tegen de eigen sleutelwaarden. Bij een treffer: hooguit één box-rij per (procesnaam,
+// detector meet wie dat doet: elke 250 ms /proc/*/cmdline van nieuwe processen (en van processen jonger dan 1 s, om een
+// exec na de fork te zien; hooguit 128 kB per proces en 200 nieuwe per ronde) tegen de eigen sleutelwaarden. Het is een
+// steekproef, geen meetnet: een curl van 50 ms wordt vaak gemist, wat herhaald gebeurt of lang loopt niet (Fable wv698 #2). Bij een treffer: hooguit één box-rij per (procesnaam,
 // ouder-script, sleutelnaam) per dag en hooguit ARGV_DET_BOX_MAX per dag, met procesnaam, ouderketen en sleutelNAAM —
 // nooit de waarde. Procesnamen en paden zijn door elk proces zelf te kiezen en gaan de box in die de machinekamer leest:
 // alleen [A-Za-z0-9._+/@-] blijft staan (geen opmaak, geen regels). Meet alleen; houdt niets tegen (dat doet de hook in
@@ -13797,7 +13800,9 @@ const ARGV_DET_PATROON = /KEY|TOKEN|SECRET|ROLE|SLEUTEL|WACHTWOORD|PASSWORD|SESS
 const ARGV_DET_VAST = ['API_SECRET', 'N8N_API_KEY', 'N8N_MCP_TOKEN', 'SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE', 'CLOUDFLARE_API_TOKEN',
   'TELEGRAM_SESSIE', 'TELEGRAM_API_HASH', 'CLAUDE_CODE_OAUTH_TOKEN', 'AGENT_WEBHOOK_SECRET', 'WERKKAMER_SLEUTEL_POD'];
 const ARGV_DET_NIET = ['SECRETS_GELADEN'];          // kommalijst van namen, geen waarde
-const ARGV_DET_JONG_MS = 3000;
+const ARGV_DET_JONG_MS = 1000;
+const ARGV_DET_LEES_MAX = 128 * 1024;
+const ARGV_DET_NIEUW_MAX = 200;
 const ARGV_DET_BOX_MAX = 8;
 const argvDet = { aan: false, sleutels: [], gezien: new Map(), bezig: false, ticks: 0, fouten: 0, ms_max: 0, staat: null, staatPad: null, boxPad: null, procDir: '/proc' };
 function argvDetSleutels(env) {
@@ -13811,6 +13816,22 @@ function argvDetSleutels(env) {
     else perWaarde.set(w, { namen: [naam], buf: Buffer.from(w) });
   });
   return Array.from(perWaarde.values()).map(function (s) { return { naam: s.namen.sort().join('|'), buf: s.buf }; });
+}
+// Hooguit ARGV_DET_LEES_MAX bytes: een proces met een cmdline van megabytes kost dan niet meer dan een gewoon proces.
+async function argvDetLees(p) {
+  let fh = null;
+  try {
+    fh = await fs.promises.open(p, 'r');
+    const buf = Buffer.alloc(ARGV_DET_LEES_MAX);
+    let n = 0;
+    while (n < buf.length) {
+      const r = await fh.read(buf, n, buf.length - n, null);
+      if (!r.bytesRead) break;
+      n += r.bytesRead;
+    }
+    return buf.subarray(0, n);
+  } catch (e) { return null; }
+  finally { if (fh) { try { await fh.close(); } catch (e) {} } }
 }
 function argvDetVeilig(s, max) { return String(s || '').replace(/[^A-Za-z0-9._+\/@-]/g, '?').slice(0, max || 40) || '?'; }
 function argvDetDag(t) { return new Date(t).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 10); }
@@ -13854,11 +13875,12 @@ async function argvDetOuders(pid) {
     if (!st) break;
     keten.push(argvDetVeilig(st.comm, 20));
     if (n > 0 && !script) { try { script = argvDetScript(await fs.promises.readFile(argvDet.procDir + '/' + p + '/cmdline')); } catch (e) {} }
-    // welke achtergrondjob: alleen SOCEV_AGENT_RUN (hex) uit de omgeving van een voorouder, de rest blijft ongelezen in het geheugen
+    // welke job of sessie: alleen SOCEV_AGENT_RUN (hex) of SOCEV_SESSIE (chat-id) uit de omgeving van een voorouder;
+    // de rest van die omgeving wordt niet bewaard of gelogd
     if (!job) {
       try {
-        const env = await fs.promises.readFile(argvDet.procDir + '/' + p + '/environ');
-        const m = /(?:^|\0)SOCEV_AGENT_RUN=([0-9a-f]{6,32})(?:\0|$)/.exec(env.toString('latin1'));
+        const env = (await fs.promises.readFile(argvDet.procDir + '/' + p + '/environ')).toString('latin1');
+        const m = /(?:^|\0)SOCEV_AGENT_RUN=([0-9a-f]{6,32})(?:\0|$)/.exec(env) || /(?:^|\0)SOCEV_SESSIE=([A-Za-z0-9_-]{1,40})(?:\0|$)/.exec(env);
         if (m) job = m[1];
       } catch (e) {}
     }
@@ -13870,16 +13892,16 @@ function argvDetBoxRij(t) {
   try {
     const tekst = fs.readFileSync(argvDet.boxPad, 'utf8');
     const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(tekst);
-    if (!eerste) return false;
+    if (!eerste) { logError('argv-detector-box', { name: 'GeenRij', code: 'geen-rij' }); return false; }
     const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
     const rij = '\n## [week] ' + tijd + ' — Sleutel in een opdrachtregel: ' + t.naam + ' in `' + t.comm + '` (argv-detector, automatisch)\n' +
       '- status: open\n- van: pod argv-detector (server.js, wv698; hooguit 1×/dag per proces+script+sleutel, ' + ARGV_DET_BOX_MAX + '/dag totaal)\n' +
       '- gemeten: proces `' + t.comm + '` (pid ' + t.pid + '), ouderketen `' + t.keten.join(' ← ') + '`, script `' + t.script + '`' +
-      (t.job ? ', job `' + t.job + '`' : '') + '; sleutelnaam ' + t.naam + ' stond letterlijk in /proc/<pid>/cmdline (waarde niet gelogd).\n' +
+      (t.job ? ', job/sessie `' + t.job + '`' : '') + '; sleutelnaam ' + t.naam + ' stond letterlijk in /proc/<pid>/cmdline (waarde niet gelogd).\n' +
       '- gevolg als er niets gebeurt: elk proces in de pod — straks ook de afgeschermde Socev-gebruiker — kan deze sleutel aflezen zolang de aanroep loopt.\n' +
       '- voorstel: de aanroep omzetten naar `mk-curl --sleutel <NAAM> …` (mk-scripts/mk-curl) of de sleutel via stdin/omgeving doorgeven; ' +
-      'bouwplan sleutelscheiding § 3.6 en § 5 #6. Stand: GET /health → detector.\n';
-    const tmp = argvDet.boxPad + '.argv-' + crypto.randomBytes(4).toString('hex') + '.tmp';
+      'bouwplan sleutelscheiding § 3.6 en § 5 #6. Steekproef (korte aanroepen vaak gemist); stand: /opt/data/bin/argv-detector.json.\n';
+    const tmp = path.join(path.dirname(argvDet.boxPad), '.' + path.basename(argvDet.boxPad) + '.argv-' + crypto.randomBytes(4).toString('hex') + '.tmp');
     fs.writeFileSync(tmp, tekst.slice(0, eerste.index) + rij + tekst.slice(eerste.index));
     fs.renameSync(tmp, argvDet.boxPad);
     return true;
@@ -13894,9 +13916,9 @@ async function argvDetTreffer(pid, naam) {
   s.treffers.push({ t: t.t, naam: t.naam, comm: t.comm, script: t.script, job: t.job });
   s.treffers = s.treffers.filter(function (x) { return nuMs - Date.parse(x.t) < 24 * 3600 * 1000; }).slice(-500);
   const sleutel = t.comm + '|' + t.script + '|' + naam;
-  if (s.gemeld.indexOf(sleutel) < 0 && s.box_vandaag < ARGV_DET_BOX_MAX) {
-    s.gemeld.push(sleutel);
-    if (argvDetBoxRij(t)) s.box_vandaag++;
+  if (s.gemeld.indexOf(sleutel) < 0 && s.box_vandaag < ARGV_DET_BOX_MAX && argvDetBoxRij(t)) {
+    s.gemeld.push(sleutel);     // pas na een geslaagde rij: mislukt hij, dan bij de volgende treffer opnieuw (Fable wv698 #9)
+    s.box_vandaag++;
   }
   schrijfLog(nu() + ' argv-detector ' + velden({ sleutel: naam, proces: t.comm, script: t.script, job: t.job || '-' }));
   argvDetStaatBewaar();
@@ -13908,15 +13930,20 @@ async function argvDetTick() {
   try {
     const namen = await fs.promises.readdir(argvDet.procDir);
     const levend = new Set();
+    let nieuw = 0;
     for (const n of namen) {
       if (n.charCodeAt(0) < 48 || n.charCodeAt(0) > 57 || !/^\d+$/.test(n)) continue;
       levend.add(n);
       let e = argvDet.gezien.get(n);
       if (e && (e.klaar || t0 - e.eerst > ARGV_DET_JONG_MS)) { e.klaar = true; continue; }
-      if (!e) { e = { eerst: t0, klaar: false, gemeld: [] }; argvDet.gezien.set(n, e); }
-      let buf;
-      try { buf = await fs.promises.readFile(argvDet.procDir + '/' + n + '/cmdline'); } catch (err) { continue; }
-      if (!buf.length) continue;
+      if (!e) {
+        // een stortvloed nieuwe processen (straks ook van een andere gebruiker) mag de serverloop niet ophouden:
+        // de rest komt de volgende ronde (Fable wv698 #3)
+        if (++nieuw > ARGV_DET_NIEUW_MAX) continue;
+        e = { eerst: t0, klaar: false, gemeld: [] }; argvDet.gezien.set(n, e);
+      }
+      const buf = await argvDetLees(argvDet.procDir + '/' + n + '/cmdline');
+      if (!buf || !buf.length) continue;
       for (const s of argvDet.sleutels) {
         if (e.gemeld.indexOf(s.naam) >= 0 || buf.indexOf(s.buf) < 0) continue;
         e.gemeld.push(s.naam);
@@ -13936,14 +13963,16 @@ function argvDetStart(o) {
   argvDet.staatPad = o.staatPad; argvDet.boxPad = o.boxPad; argvDet.procDir = o.procDir || '/proc';
   argvDet.staat = argvDetStaatLaad();
   argvDet.aan = true;
-  argvDet.timer = setInterval(argvDetTick, o.intervalMs || 1000);
+  argvDet.timer = setInterval(argvDetTick, o.intervalMs || 250);
   if (argvDet.timer.unref) argvDet.timer.unref();
 }
-function argvDetInfo() {
+function argvDetInfo(o) {
   if (!argvDet.aan) return { aan: false };
   const nu = Date.now(), s = argvDet.staat, per = {};
   const recent = s.treffers.filter(function (x) { return nu - Date.parse(x.t) < 24 * 3600 * 1000; });
   recent.forEach(function (x) { per[x.naam] = (per[x.naam] || 0) + 1; });
+  // /health is zonder sleutel bereikbaar: geen sleutelnamen, tijden of scripts (Fable wv698 #8); detail in de staat (0600)
+  if (!o || !o.detail) return { aan: true, treffers_24u: recent.length, ticks: argvDet.ticks, ms_max: argvDet.ms_max, fouten: argvDet.fouten };
   return { aan: true, sleutels: argvDet.sleutels.length, treffers_24u: recent.length, per_sleutel_24u: per,
     laatste_iso: recent.length ? recent[recent.length - 1].t : null, box_vandaag: s.dag === argvDetDag(nu) ? s.box_vandaag : 0,
     ticks: argvDet.ticks, ms_max: argvDet.ms_max, fouten: argvDet.fouten };
