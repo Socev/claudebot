@@ -1621,7 +1621,9 @@ async function bewijs(o) {
       toets('11 processJob bewaart alleen 40687/telegram-debug/cijfer-meester (wv200), nooit lezen', /if \(gereedschap !== 'lezen' && APP_KANAAL_VAN_CHAT\[chatId\]\) appBewaar\(/.test(volSrc) && /APP_KANAAL_VAN_CHAT = \{ '40687': 'hoofd', 'telegram-debug': 'machinekamer', 'cijfer-meester': 'cijfer-meester' \}/.test(volSrc) && !/'cijfermeester': 'cijfermeester'/.test(volSrc));
       // wv364: één gedeelde ingang appBewaarAgent (finally, wees, tussenstand na herstart, gesneuvelde agents)
       toets('11 processAgent: rapport alleen bij route machinekamer of david', /rapport: \(route === 'machinekamer' \|\| route === 'david'\) \? rapport : null/.test(volSrc) &&
-        /appBewaarAgent\(jobId, entry, outdir, appRapport, /.test(volSrc) && (volSrc.match(/appBewaar\(/g) || []).length === 3);
+        /appBewaarAgent\(jobId, entry, outdir, appRapport, /.test(volSrc) && (volSrc.match(/appBewaar\(/g) || []).length === 4);
+      // wv716: de vierde ingang is de opvangronde na een herstart (appVerlorenAfronden), met dezelfde kanaalpoort als processJob (C8)
+      toets('11 wv716: appVerlorenAfronden bewaart alleen via APP_KANAAL_VAN_CHAT, als beurt met na_herstart', /const k = APP_KANAAL_VAN_CHAT\[x\.chat_id\];\s*if \(k\) \{\s*const m = appBewaar\(id, path\.join\(IO, id, 'out'\), \{ soort: 'beurt', kanaal: k, app: true, na_herstart: true/.test(volSrc));
       toets('11 appRoute: zonder prefix = socev', H.appRoute('vakantie') === 'socev' && H.appRoute(' Machinekamer: x') === 'machinekamer' && H.appRoute('david:x') === 'david');
       for (const k of Object.keys(agentsReg)) delete agentsReg[k];
     }

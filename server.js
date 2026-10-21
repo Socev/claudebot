@@ -1595,6 +1595,25 @@ function agentInfo() {
 const UITROL_MARKER = serverPad('uitrol_marker', process.env.UITROL_MARKER, '/opt/data/uitrol-wacht', serverProefDeel('uitrol-wacht'));
 const UITROL_MARKER_MAX_MS = 5 * 60 * 1000;
 let bewakerPid = null;   // wv701: pid van bewaker.js (zie bewakerStart onderaan)
+// wv716 (ontwerp wv703 D, Fable: bouwen): geheugen en lusvertraging van dit proces op /health.proces (niet op /health/publiek).
+// monitorEventLoopDelay is één libuv-timer (20 ms) met een histogram; elke volle minuut uitlezen en leegmaken, en de waarden van
+// die minuut tonen. Meet een sluipende JS-lus of GC-druk (de minuut vóór een syscall-hang blijft leeg); de bewaker neemt het
+// mee in zijn context, zodat een ingreep de lusvertraging van de minuut ervoor kent.
+const lusMeter = (function () {
+  try { const h = require('perf_hooks').monitorEventLoopDelay({ resolution: 20 }); h.enable(); return h; }
+  catch (e) { logError('lusmeter', e); return null; }
+})();
+let lusMinuut = null;
+if (lusMeter) setInterval(function () {
+  const ms = function (ns) { return Number.isFinite(ns) ? Math.round(ns / 1e5) / 10 : null; };
+  lusMinuut = { max_ms: lusMeter.count ? ms(lusMeter.max) : null, p99_ms: lusMeter.count ? ms(lusMeter.percentile(99)) : null, tot_iso: new Date().toISOString() };
+  lusMeter.reset();
+}, 60 * 1000).unref();
+function procesInfo() {
+  const m = process.memoryUsage();
+  return { rss_mb: Math.round(m.rss / 1048576), heap_mb: Math.round(m.heapUsed / 1048576),
+    lus_max_ms: lusMinuut ? lusMinuut.max_ms : null, lus_p99_ms: lusMinuut ? lusMinuut.p99_ms : null, lus_minuut_tot: lusMinuut ? lusMinuut.tot_iso : null };
+}
 function bewakerInfo() {
   if (!bewakerPid) return { pid: null, leeft: false };
   try { process.kill(bewakerPid, 0); return { pid: bewakerPid, leeft: true }; } catch (e) { return { pid: bewakerPid, leeft: e.code === 'EPERM' }; }
@@ -1858,6 +1877,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     // wv424: buiten de machinekamer geen beheersleutels (zie MK_SESSIES).
     if (!lezen && !runIsMk(chatId, ws)) socevSmalOpts(runOpts, chatId);
     j.omgeving = lezen ? 'lezen' : (runIsMk(chatId, ws) ? 'mk' : 'smal');
+    if (j.app) runOpts.opSpawn = function (i) { appLopendSpawn(jobId, i); };   // wv716: pid en transcript in beurt-lopend.json
     const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, lezen ? base : space.dir, runOpts);
     if (lezen) r.gereedschap = 'lezen';
     r.files = collectFiles(outdir);
@@ -2391,6 +2411,7 @@ function weesEindtekst(a) {
     return { tekst: '' };
   }
   let regels; try { regels = fs.readFileSync(a.transcript, 'utf8').split('\n'); } catch (e) { return { tekst: '' }; }
+  if (a.anker) regels = transcriptBeurtDeel(regels, a.anker);   // wv716 C1: alleen het deel van DEZE beurt
   let msgId = null; const delen = [];
   for (let i = regels.length - 1; i >= 0; i--) {
     if (!regels[i].trim()) continue;
@@ -2412,6 +2433,34 @@ function weesEindtekst(a) {
     if (!msgId) break;   // zonder id geen samenhang te bewijzen: alleen deze regel
   }
   return { tekst: delen.join('\n\n').trim() };
+}
+
+// wv716 (Fable wv703 C1): een hoofdkanaal-transcript is van het kanaal, niet van de beurt: na een herstart hervat de volgende
+// beurt (heartbeat, Telegram, app) dezelfde sessie binnen seconden en schrijft in hetzelfde bestand. Alleen de regels vanaf de
+// user-regel die het io-pad van deze job bevat (de [Systeem: invoerbestanden …]-hint in de prompt) tot de volgende echte
+// user-regel tellen. Echt = geen sidechain, geen isMeta (afbeelding, skill-tekst), geen tool_result, geen samenvatting.
+// Anker niet gevonden: niets (dan liever "verloren" dan het antwoord van een andere vraag).
+function transcriptEchteUser(r) {
+  if (!r || r.type !== 'user' || r.isSidechain || r.isMeta || r.isCompactSummary || r.isVisibleInTranscriptOnly) return false;
+  const c = r.message && r.message.content;
+  if (typeof c === 'string') return true;
+  return Array.isArray(c) && !c.some(function (b) { return b && b.type === 'tool_result'; });
+}
+function transcriptUserTekst(r) {
+  const c = r.message && r.message.content;
+  if (typeof c === 'string') return c;
+  return (Array.isArray(c) ? c : []).map(function (b) { return b && typeof b.text === 'string' ? b.text : ''; }).join('\n');
+}
+function transcriptBeurtDeel(regels, anker) {
+  let begin = -1;
+  for (let i = 0; i < regels.length; i++) {
+    if (!regels[i].trim()) continue;
+    let r; try { r = JSON.parse(regels[i]); } catch (e) { continue; }
+    if (!transcriptEchteUser(r)) continue;
+    if (begin < 0) { if (transcriptUserTekst(r).indexOf(anker) >= 0) begin = i; continue; }
+    return regels.slice(begin, i);
+  }
+  return begin < 0 ? [] : regels.slice(begin);
 }
 
 function weesStop(a, reden) {
@@ -2517,6 +2566,117 @@ function weesRonde() {
   }
   // wv364: bestanden van agents die bij een herstart sneuvelden alsnog in de tab Bestanden (alleen als primair).
   if (rolPrimair()) { try { appGesneuveldRonde(nu); } catch (e) { logError('app-gesneuveld', e); } }
+  appVerlorenRonde();   // wv716: app-beurten die een herstart niet overleefden (alleen als primair; zelf gevangen)
+}
+
+// ── wv716: verloren app-antwoord na een herstart (ontwerp wv703 C, Fable-review C1–C11) ──────────────────────────────────
+// Per rij in beurt-lopend.json zonder jobs[id] (dus van een vorig proces), alleen als primair:
+//   1 staat de job al in het app-log van het kanaal: uit het register, verder niets (C11: per id één keer lezen);
+//   2 leeft de CLI nog (pid + pid_start, geen zombie): wachten; boven FG_MAX_MS + 5 min stoppen zoals weesStop (C3);
+//   3 anders: de eindtekst van DEZE beurt uit het transcript (C1) of codex-last.md; tekst en geen limiet = het antwoord met de kop
+//     "na een herstart", anders een regel "verloren" (een knopdruk zet zijn vraag weer open, C6). Bestanden uit io/<id>/out via
+//     appBewaar, alleen voor de kanalen van APP_KANAAL_VAN_CHAT (C8). Geen vraag_hash (een oude VRAAG AAN DAVID krijgt geen
+//     geldige knoppen), geen chat_log en geen seintje: in het hoofdkanaal komt de regel onderaan, in de machinekamer valt hij op
+//     zijn typtijd en ziet David hem na het verversen (Fable C9, aanvaard). Lukt het app-log niet: blijft staan, volgende ronde.
+// Eén ronde tegelijk (C4). Bewust NIET (laag 2 van C1, apart voorgelegd): de kanaalwachtrij vasthouden zolang een wees-CLI leeft.
+const APP_VERLOREN_GRENS_MS = FG_MAX_MS + 5 * 60 * 1000;
+const APP_VERLOREN_KOP = '_(Antwoord na een herstart van de server)_';
+let appVerlorenLoopt = null;
+const appVerlorenLogGezien = {};
+function appVerlorenRonde() {
+  if (appVerlorenLoopt) return appVerlorenLoopt;
+  if (!rolPrimair()) return Promise.resolve(0);
+  appVerlorenLoopt = appVerlorenRondeKern().catch(function (e) { logError('app-verloren', e); return 0; })
+    .finally(function () { appVerlorenLoopt = null; });
+  return appVerlorenLoopt;
+}
+function appVerlorenLog(id, kanaal, uitkomst) {
+  schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'app-verloren-beurt', job_id: id, kanaal: kanaal || null, uitkomst: uitkomst }));
+}
+function appLopendLeeft(x) {
+  const st = appProcStat(x && x.pid);
+  if (!st || st.state === 'Z' || st.state === 'X') return false;
+  // Fable-diffreview wv716 #2: stat was bij de spawn onleesbaar (pid_start leeg): dan telt een levend pid als levend (tot de grens;
+  // stoppen doet de ronde dan niet, want zonder starttijd is pid-hergebruik niet uit te sluiten)
+  return x.pid_start ? st.start === String(x.pid_start) : true;
+}
+async function appVerlorenRondeKern() {
+  if (!fs.existsSync(APP_BEURT_LOPEND)) return 0;
+  const reg = appLopendLees();
+  let n = 0;
+  for (const id of Object.keys(reg)) {
+    if (jobs[id]) continue;   // van dit proces: de finally van appNaBeurt ruimt op
+    const x = reg[id];
+    if (!APP_JOB_RE.test(id) || !x || typeof x !== 'object' || !APP_KANALEN[x.kanaal]) { appLopendWeg(id); appVerlorenLog(id, x && x.kanaal, 'ongeldige rij'); continue; }
+    if (!appVerlorenLogGezien[id]) {
+      let regels;
+      try { regels = await appLogLees(x.kanaal); }
+      catch (e) { if (e && e.code === 'ENOENT') regels = []; else { logError('app-verloren', e); continue; } }
+      if (regels.some(function (l) { return l && l.job_id === id; })) { appLopendWeg(id); appVerlorenLog(id, x.kanaal, 'stond al in het app-log'); continue; }
+      appVerlorenLogGezien[id] = true;
+    }
+    if (appLopendLeeft(x)) {
+      const nu = Date.now(), oud = nu - (Number(x.gestart) || 0);
+      if (oud <= APP_VERLOREN_GRENS_MS) continue;
+      if (!x.pid_start) {   // zonder starttijd geen signaal (pid-hergebruik niet uit te sluiten); na twee keer de grens toch afronden
+        if (oud <= 2 * APP_VERLOREN_GRENS_MS) continue;
+      } else {
+        if (!x.stop_t) {
+          appLopendZet(id, function (y) { return y ? Object.assign(y, { stop_t: nu }) : null; });
+          try { process.kill(-x.pid, 'SIGTERM'); } catch (e) {}
+          appVerlorenLog(id, x.kanaal, 'cli boven de grens: SIGTERM naar procesgroep ' + x.pid);
+        } else if (nu - x.stop_t > KILL_GRACE_MS) {
+          try { process.kill(-x.pid, 'SIGKILL'); } catch (e) {}
+          appVerlorenLog(id, x.kanaal, 'cli boven de grens: SIGKILL naar procesgroep ' + x.pid);
+        }
+        continue;
+      }
+    }
+    if (await appVerlorenAfronden(id, x)) n++;
+  }
+  return n;
+}
+async function appVerlorenAfronden(id, x) {
+  const e = weesEindtekst({ transcript: x.transcript || null, runtime: x.runtime, job_id: id, started: Number(x.gestart) || 0, anker: path.join(IO, id) + path.sep });
+  const ok = !!(e.tekst && !e.limiet);
+  // Bestanden eerst, en hun namen in het register: lukt het app-log hierna niet, dan zijn ze al verhuisd en hergebruikt de
+  // volgende ronde de namen (een tweede appBewaar vindt niets meer).
+  let bestanden = Array.isArray(x.bestanden) ? x.bestanden : null;
+  if (!bestanden) {
+    bestanden = [];
+    const k = APP_KANAAL_VAN_CHAT[x.chat_id];
+    if (k) {
+      const m = appBewaar(id, path.join(IO, id, 'out'), { soort: 'beurt', kanaal: k, app: true, na_herstart: true, ok: ok });
+      if (m && Array.isArray(m.bestanden)) bestanden = m.bestanden.map(function (b) { return b.naam; });
+    }
+    appLopendZet(id, function (y) { return y ? Object.assign(y, { bestanden: bestanden }) : null; });
+  }
+  let antwoord, fout;
+  if (ok) {
+    let t = e.tekst;
+    if (t.length > APP_SPIEGEL_ANTWOORD_MAX) t = t.slice(0, APP_SPIEGEL_ANTWOORD_MAX) + ' …';   // C10
+    antwoord = APP_VERLOREN_KOP + (/VRAAG AAN DAVID:/.test(t) ? ' _(de knoppen onder de vraag vervallen; typ je antwoord)_' : '') + '\n\n' + t;
+  } else {
+    fout = e.limiet ? 'limiet-na-herstart' : 'verloren-na-herstart';
+    if (x.soort === 'knop' && x.knop) appKnopRijZet(x.knop, id, function (v) { v.antwoord = null; });   // C6: de vraag weer open
+    antwoord = x.soort === 'knop' ? 'Je knopdruk is niet verwerkt doordat de server herstartte; de knoppen onder de vraag staan weer open.'
+      : 'Dit antwoord is verloren gegaan doordat de server herstartte; vraag het opnieuw.';
+  }
+  const goed = await appLogSchrijf(x.kanaal, { t: new Date().toISOString(), job_id: id, beurt_id: x.beurt_id || null, soort: x.soort || 'bericht',
+    getypt: x.getypt || undefined, antwoord_op: x.antwoord_op || undefined, apparaat: x.apparaat || null, tekst: String(x.tekst || ''),
+    invoer: Array.isArray(x.invoer) && x.invoer.length ? x.invoer : undefined, antwoord: antwoord, ok: ok, fout: fout, na_herstart: true, bestanden: bestanden });
+  if (!goed) {
+    // Fable-diffreview wv716 #1: de append kan gelukt zijn terwijl de dagelijkse opschoning daarna faalde; de volgende ronde leest
+    // het app-log dus opnieuw (stap 1), anders komt er een tweede regel onder Davids vraag.
+    delete appVerlorenLogGezien[id];
+    appVerlorenLog(id, x.kanaal, 'app-log niet schrijfbaar, volgende ronde opnieuw');
+    return false;
+  }
+  appLopendWeg(id);
+  delete appVerlorenLogGezien[id];
+  try { fs.rmSync(path.join(IO, id), { recursive: true, force: true }); } catch (err) {}
+  appVerlorenLog(id, x.kanaal, ok ? 'antwoord na herstart' : fout);
+  return true;
 }
 
 // Na het opstarten: wezen terug in jobs (zodat /result 'loopt nog' zegt en de stopknop werkt) en de ronde starten.
@@ -2530,6 +2690,7 @@ function weesRonde() {
     schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'wees-herkend', job_id: id, pid: a.pid }));
   }
   setInterval(function () { try { weesRonde(); } catch (e) { logError('wees-ronde', e); } }, WEES_POLL_MS).unref();
+  setTimeout(function () { try { appVerlorenRonde(); } catch (e) { logError('app-verloren', e); } }, 15 * 1000).unref();   // wv716
 })();
 
 function readBody(req, cb) {
@@ -2718,7 +2879,9 @@ function handleRequest(req, res) {
       // wv701: levensbewaking (bewaker.js); leeft false = de bewaker stopte (zie supervisor.log, regels 'bewaker[')
       bewaker: bewakerInfo(),
       // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
-      detector: argvDetInfo()
+      detector: argvDetInfo(),
+      // wv716: rss/heap en lusvertraging (max, p99) van de laatste volle minuut; null in de eerste minuut na de start
+      proces: procesInfo()
     }));
   }
 
@@ -5091,29 +5254,33 @@ async function appLogLees(kanaal) {
 // Na afloop van een app-beurt: vraag vastleggen (alleen job:hash), antwoord in de geschiedenis, en pas dán "opgehaald"
 // (een dichte app houdt een uitrol dan niet op; § 4.5).
 async function appNaBeurt(jobId) {
-  const j = jobs[jobId];
-  if (!j || !j.app) return;
-  const r = j.result || {};
-  const out = appUitvoer(j);
-  const vraag = appVraagVan(j.app.kanaal, out);
-  if (vraag) {
-    // gevoelig één keer bepalen en vastleggen (Fable-ontwerpreview wv135 #6); een rij zonder dit veld (ouder) telt als gevoelig
-    const gev = appGevoelig(vraag.tekst);
-    try { const v = appVragen(); v[jobId + ':' + vraag.hash] = { kanaal: j.app.kanaal, t: new Date().toISOString(), antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined }; appVragenSchrijf(v); }
-    catch (e) { logError('app-vragen', e); }
-  }
-  j.app.vraag = vraag;
-  if (r.ok !== false && out) appChatLog(j.app.kanaal, [{ rol: 'socev', ts: Date.now(), tekst: out }]);   // wv171
-  const goed = await appLogSchrijf(j.app.kanaal, { t: new Date().toISOString(), job_id: jobId, beurt_id: j.app.beurt_id, soort: j.app.soort,
-    getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined,   // wv628: typtijd (sorteren) en Antwoord hierop
-    apparaat: j.app.apparaat, tekst: j.app.tekst, invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
-    vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
-  j.app.gelogd = goed;
-  // wv264: een beurt van de telefoon zet eerst zijn uit-item op schijf; pas dan telt hij als opgehaald (anders gooit een
-  // uitrol het antwoord tussen klaar en bewaard weg). Luistert de telefoon, dan geen seintje: het antwoord klinkt al.
-  const telGoed = j.app.soort === 'tel' ? telNaBeurt(jobId, out, r.ok !== false) : true;
-  if (goed && telGoed && !j.opgehaald) j.opgehaald = Date.now();
-  if (!(j.app.soort === 'tel' && telLuistert(j.app.tel))) appPushNaBeurt(jobId);   // fase 5c: seintje als de app het antwoord niet binnen 20 s ophaalt
+  // wv716 (Fable wv703 C2): het register altijd leeg, ook als de regel in het app-log niet lukte (de app toont het antwoord
+  // dan uit het geheugen); anders pakt de opvangronde na een latere herstart een beurt op die David al beantwoord zag.
+  try {
+    const j = jobs[jobId];
+    if (!j || !j.app) return;
+    const r = j.result || {};
+    const out = appUitvoer(j);
+    const vraag = appVraagVan(j.app.kanaal, out);
+    if (vraag) {
+      // gevoelig één keer bepalen en vastleggen (Fable-ontwerpreview wv135 #6); een rij zonder dit veld (ouder) telt als gevoelig
+      const gev = appGevoelig(vraag.tekst);
+      try { const v = appVragen(); v[jobId + ':' + vraag.hash] = { kanaal: j.app.kanaal, t: new Date().toISOString(), antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined }; appVragenSchrijf(v); }
+      catch (e) { logError('app-vragen', e); }
+    }
+    j.app.vraag = vraag;
+    if (r.ok !== false && out) appChatLog(j.app.kanaal, [{ rol: 'socev', ts: Date.now(), tekst: out }]);   // wv171
+    const goed = await appLogSchrijf(j.app.kanaal, { t: new Date().toISOString(), job_id: jobId, beurt_id: j.app.beurt_id, soort: j.app.soort,
+      getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined,   // wv628: typtijd (sorteren) en Antwoord hierop
+      apparaat: j.app.apparaat, tekst: j.app.tekst, invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
+      vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
+    j.app.gelogd = goed;
+    // wv264: een beurt van de telefoon zet eerst zijn uit-item op schijf; pas dan telt hij als opgehaald (anders gooit een
+    // uitrol het antwoord tussen klaar en bewaard weg). Luistert de telefoon, dan geen seintje: het antwoord klinkt al.
+    const telGoed = j.app.soort === 'tel' ? telNaBeurt(jobId, out, r.ok !== false) : true;
+    if (goed && telGoed && !j.opgehaald) j.opgehaald = Date.now();
+    if (!(j.app.soort === 'tel' && telLuistert(j.app.tel))) appPushNaBeurt(jobId);   // fase 5c: seintje als de app het antwoord niet binnen 20 s ophaalt
+  } finally { appLopendWeg(jobId); }
 }
 
 // wv277 (hoofdkanaal-bouwplan § 4.8): een beurt uit Telegram (/run met bron "telegram": *Claude via Telegram* en *Claude Debug via
@@ -5218,6 +5385,12 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
       // lessenBlok, en in dat venster mag Haal terug niet meer lukken. Vanaf hier niet meer in rij.json.
       j.app.gestart = true;
       if (meta.rij) appRijWeg(jobId);
+      // wv716: vanaf hier op schijf (beurt-lopend.json), zodat een herstart deze beurt niet stil laat verdwijnen
+      appLopendZet(jobId, function () {
+        return { kanaal: kanaal, chat_id: chatId, beurt_id: j.app.beurt_id || null, soort: j.app.soort, apparaat: j.app.apparaat || null,
+          tekst: String(j.app.tekst || '').slice(0, APP_SPIEGEL_MAX), getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined,
+          invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, gestart: Date.now(), runtime: keuze.runtime, knop: meta.knop_sleutel || undefined };
+      });
       // review #8: het tussendoor-venster van het volgende bericht begint pas bij dit bericht als dit echt start
       if (j.app.tussendoorTot) { appStaat.tussendoorTot = appStaat.tussendoorTot || {}; if (!(appStaat.tussendoorTot[kanaal] > j.app.tussendoorTot)) appStaat.tussendoorTot[kanaal] = j.app.tussendoorTot; }
       // appNaBeurt NIET teruggeven: een trage schijf mag de volgende beurt (ook uit Telegram) niet ophouden (Fable-review wv56 #3)
@@ -5292,6 +5465,50 @@ async function appRijOpstart() {
   if (ids.length) appAudit({ route: 'rij-opstart', m: '-', status: 200, apparaat: null, reden: ids.length + ' bericht(en) uit de rij niet verwerkt' + (klaar.length < ids.length ? ', ' + (ids.length - klaar.length) + ' niet te loggen' : '') });
   return klaar.length;
 }
+// ── wv716: lopende app-beurten op schijf (ontwerp wv703 C, Fable-review C1–C11) ─────────────────────────────────────────
+// WAAROM. 21-10 stond server.js 84 minuten stil; de bewaker (wv701) herstart hem nu, maar een app-beurt die op dat moment liep,
+// verdween stil: jobs staan alleen in het geheugen en het app-log krijgt de beurt pas na afloop (Davids vraag stond er niet eens
+// in). De CLI draait detached in een eigen procesgroep en schrijft na een SIGKILL van server.js zijn transcript gewoon af (wv211).
+// beurt-lopend.json onthoudt per gestarte app-beurt kanaal en vraag (bij de start) en pid, pid_start en transcript (bij de spawn);
+// appVerlorenRonde zet na een herstart het antwoord alsnog in de app, of een regel dat het verloren ging. Weg in de finally van
+// appNaBeurt (C2). Kapot bestand: opzij als .kapot (zoals rij.json), nooit een crash.
+const APP_BEURT_LOPEND = path.join(APP_DATA, 'beurt-lopend.json');   // job -> {kanaal, chat_id, beurt_id, soort, apparaat, tekst, getypt, gestart, pid, pid_start, transcript, runtime, knop}
+function appLopendLees() {
+  try { return appLeesStreng(APP_BEURT_LOPEND, {}); }
+  catch (e) { logError('app-beurt-lopend', e); try { fs.renameSync(APP_BEURT_LOPEND, APP_BEURT_LOPEND + '.kapot'); } catch (e2) {} return {}; }
+}
+// f(rij of null) -> nieuwe rij of null (= weg). Synchroon lezen-wijzigen-schrijven: geen await ertussen, dus geen verloren wijziging.
+function appLopendZet(jobId, f) {
+  try {
+    const r = appLopendLees();
+    const x = f(r[jobId] || null);
+    if (!x && !r[jobId]) return true;
+    if (x) r[jobId] = x; else delete r[jobId];
+    if (Object.keys(r).length) appSchrijfJson(APP_BEURT_LOPEND, r);
+    else { try { fs.unlinkSync(APP_BEURT_LOPEND); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; } }
+    return true;
+  } catch (e) { logError('app-beurt-lopend', e); return false; }
+}
+function appLopendWeg(jobId) { return appLopendZet(jobId, function () { return null; }); }
+// Starttijd en toestand uit /proc/<pid>/stat (veld 22; wereldleesbaar, ook als de CLI straks als socev draait: Fable C5).
+function appProcStat(pid) {
+  if (!(Number(pid) > 1)) return null;
+  try {
+    const s = fs.readFileSync('/proc/' + Number(pid) + '/stat', 'utf8');
+    const na = s.slice(s.lastIndexOf(')') + 2).split(' ');
+    return { state: na[0], start: na[19] };
+  } catch (e) { return null; }
+}
+// Bij de spawn (runOpts.opSpawn in processJob): pid, starttijd en transcript erbij. Een fallback-spawn overschrijft ze.
+function appLopendSpawn(jobId, i) {
+  const st = appProcStat(i && i.pid);
+  appLopendZet(jobId, function (x) {
+    if (!x) return null;
+    return Object.assign(x, { pid: i.pid, pid_start: st ? st.start : null, transcript: i.transcript || null,
+      runtime: i.transcript ? 'claude' : (x.runtime === 'gemini' ? 'gemini' : 'codex') });
+  });
+}
+
 async function appMagBeurt(res, kanaal, rij) {
   if (!(await appRolOk())) { appWeiger(res, 409, 'Socev draait nu op de reservekant; gebruik Telegram', 'rol passief'); return false; }
   if (!rij && appLopend(kanaal)) { appWeiger(res, 409, 'Socev is in dit kanaal nog bezig; wacht op het antwoord', 'kanaal bezig'); return false; }
@@ -5346,10 +5563,12 @@ function appIoOpruim() {
   let n = 0, namen = [];
   if (!APP_ECHT && !process.env.IO_DIR) return 0;   // wv318: een proefserver ruimt nooit de echte io op (andere jobs-lijst)
   try { namen = fs.readdirSync(APP_IO); } catch (e) { return 0; }
+  const lopend = fs.existsSync(APP_BEURT_LOPEND) ? appLopendLees() : {};
   namen.forEach(function (id) {
     if (!/^[a-f0-9]{16}$/.test(id)) return;
     const j = jobs[id];
     if (j && (j.status === 'pending' || j.status === 'running')) return;
+    if (lopend[id]) return;   // wv716: de opvangronde leest hier nog out/ en codex-last.md
     try {
       if (!fs.existsSync(path.join(APP_IO, id, APP_IO_MERK))) return;
       fs.rmSync(path.join(APP_IO, id), { recursive: true, force: true }); n++;
@@ -5842,7 +6061,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   };
   // vervalt hij in de rij (noodstop), dan staat de vraag weer open; de vingerafdruk is dan verbruikt (nieuwe druk = nieuwe)
   const bijVerval = function () { appKnopRijZet(sleutel, jobId2, function (x) { x.antwoord = null; }); };
-  const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', job_id: jobId2, bijStart: bijStart, bijVerval: bijVerval,
+  const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', job_id: jobId2, bijStart: bijStart, bijVerval: bijVerval, knop_sleutel: sleutel,
     tekst: (keuze === 'ja' ? '✓ Ja' + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
   if (!st.job_id) {
     // niet gestart: de vraag is dan ook niet beantwoord, en de vingerafdruk niet gebruikt

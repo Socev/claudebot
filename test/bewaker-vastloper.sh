@@ -7,6 +7,12 @@
 #   1 vastloper  event loop dicht (while(true) in vastInLus) -> momentopname met JS-stapel, SIGKILL, herstart door de
 #                supervisor, rij in de box, seintje; de herstart is trager dan BOOT_TIMEOUT_MS en toch GEEN terugflip
 #                (vorige tijdelijk = current), daarna vorige weer zoals hij was.
+#   1b fifo      (wv716) main thread hangt in fs.readSync op een FIFO (pipe_read, het K1-beeld), een ander proces houdt de
+#                signaalpijp van de server vast (pijpgenoot), een `cat /proc/<pid>/fd/<n>` hangt in pipe_read (pipe-lezer) en er
+#                lopen 500 extra processen (budget): momentopname met state S, CPU ≈ 0, wchan pipe_read (alleen als wchan op deze
+#                kernel leesbaar is; vooraf gemeten), "geen pauze" uit de inspector, fd_soorten/fd_laag, pijpgenoten en
+#                pipe_lezers gevuld, zombie-veld bij de kinderen; daarna SIGKILL en een herstart door de supervisor.
+#                Deze toets staat niet in CI (lange looptijd, echte processen); draai hem lokaal bij elke wijziging aan bewaker.js.
 #   2 traag      /health/publiek antwoordt pas na 5 s -> geen ingreep.
 #   3 uitrol     verse uitrolmarker van een levend proces -> geen ingreep; marker weg -> precies één ingreep (stille
 #                uren: wel de box, geen seintje). Een gewone herstart (SIGTERM, zoals uitrol.sh) -> oude bewaker stopt,
@@ -28,6 +34,9 @@ wachtOp(){ local i; for i in $(seq 1 $(( $2 * 2 ))); do grep -qE "$1" "$W/bin/su
 telIn(){ grep -cE "$1" "$W/bin/supervisor.log" 2>/dev/null || true; }
 
 if ss -ltn 2>/dev/null | grep -q ':9229 '; then echo "LET OP: poort 9229 is bezet - de JS-stapel wordt niet getoetst"; GEEN_INSPECTOR=1; else GEEN_INSPECTOR=0; fi
+# wv716 (Fable wv703 A5): is wchan op deze kernel leesbaar? Een slapend proces moet een echte naam geven, geen 0.
+WCHAN_OK=$(node -e 'const c=require("child_process").spawn("sleep",["5"]);setTimeout(()=>{let w="";try{w=require("fs").readFileSync("/proc/"+c.pid+"/wchan","utf8").trim()}catch(e){}c.kill();console.log(w&&w!=="0"?1:0)},300)')
+[ "$WCHAN_OK" = "1" ] || echo "LET OP: wchan is hier niet leesbaar - 1b toetst alleen state en CPU, niet pipe_read"
 
 opzet(){   # $1 = naam van het geval
   W="$TOP/$1"; POORT=$(vrijePoort)
@@ -39,12 +48,31 @@ let n = 0; try { n = parseInt(fs.readFileSync(W + '/starts', 'utf8'), 10) || 0; 
 fs.writeFileSync(W + '/starts', String(++n));
 function vastInLus() { while (true) {} }
 setInterval(function () { try { fs.renameSync(W + '/blokkeer', W + '/blokkeer-gedaan'); } catch (e) { return; } vastInLus(); }, 200);
+// wv716 (1b): main thread in een systeemaanroep (pipe_read op een FIFO, O_RDWR zodat open niet wacht)
+setInterval(function () {
+  try { fs.renameSync(W + '/fifo-blokkeer', W + '/fifo-blokkeer-gedaan'); } catch (e) { return; }
+  const fd = fs.openSync(W + '/fifo', fs.constants.O_RDWR);
+  fs.writeFileSync(W + '/fifo-fd', String(fd));
+  // EINTR opnieuw, zoals libuv in zijn eigen pijplezers: anders breekt de SIGUSR1 van de inspector de hang af (gemeten 21-10)
+  for (;;) { try { fs.readSync(fd, Buffer.alloc(1), 0, 1, null); break; } catch (e) { if (e.code !== 'EINTR') throw e; } }
+}, 200);
 process.once('SIGTERM', function () { setTimeout(function () { process.kill(process.pid, 'SIGTERM'); }, 150); });   // zoals server.js
 const srv = http.createServer(function (q, r) {
   const ant = function () { r.writeHead(200, { 'content-type': 'application/json' });
     r.end(JSON.stringify({ ok: true, versie: process.env.RELEASE_SHA, lopend: { beurten: 1, onopgehaald: 0 }, agents: { lopend: 0 } })); };
   if (q.url === '/health/publiek' && fs.existsSync(W + '/traag')) setTimeout(ant, 5000); else ant();
 });
+// wv716 (1b): een ander proces erft één uiteinde van een pijp waarvan beide uiteinden in deze server zitten (pijpgenoot)
+if (n === 1 && fs.existsSync(W + '/pijpgenoot')) {
+  const per = {};
+  for (const f of fs.readdirSync('/proc/self/fd')) { let d = ''; try { d = fs.readlinkSync('/proc/self/fd/' + f); } catch (e) { continue; } if (/^pipe:/.test(d)) (per[d] = per[d] || []).push(Number(f)); }
+  const paar = Object.keys(per).find((k) => per[k].length >= 2);
+  if (paar) {
+    const k = require('child_process').spawn('sleep', ['300'], { stdio: ['ignore', 'ignore', 'ignore', per[paar][0]], detached: true });
+    k.unref();
+    fs.writeFileSync(W + '/pijpgenoot-pid', k.pid + ' ' + paar);
+  } else fs.writeFileSync(W + '/pijpgenoot-pid', 'geen paar');
+}
 const laat = n > 1 && fs.existsSync(W + '/traag-herstart') ? 6000 : 0;   // herstart trager dan BOOT_TIMEOUT_MS
 setTimeout(function () {
   srv.listen(process.env.PORT, '127.0.0.1', function () {
@@ -107,6 +135,53 @@ else rood "vastloper: geen momentopname-bestand"; fi
 NB=$(cat "$W/bewaker-pid-2" 2>/dev/null)
 [ -n "$NB" ] && kill -0 "$NB" 2>/dev/null && groen "vastloper: nieuwe server heeft een levende bewaker ($NB)" || rood "vastloper: nieuwe server zonder bewaker"
 [ "$(pgrep -fc "$W/app/releases/.*/bewaker\.js")" = "1" ] && groen "vastloper: precies één bewaker" || rood "vastloper: aantal bewakers $(pgrep -fc "$W/app/releases/.*/bewaker\.js")"
+stop
+
+# ── 1b. fifo: systeemaanroep-hang (K1-beeld), pijpgenoot, pipe-lezer, 500 extra processen ─────────────────────────────
+opzet fifo; mkfifo "$W/fifo"; touch "$W/pijpgenoot"; start
+P1=$(serverPid)
+for i in $(seq 1 50); do [ -s "$W/pijpgenoot-pid" ] && break; sleep 0.2; done
+GENOOT=$(cut -d' ' -f1 "$W/pijpgenoot-pid" 2>/dev/null)
+[ -n "$GENOOT" ] && [ "$GENOOT" != "geen" ] && groen "fifo: pijpgenoot gestart ($(cat "$W/pijpgenoot-pid"))" || rood "fifo: geen pijpgenoot ($(cat "$W/pijpgenoot-pid" 2>/dev/null))"
+EXTRA=(); for i in $(seq 1 500); do sleep 600 & EXTRA+=($!); done
+touch "$W/fifo-blokkeer"
+for i in $(seq 1 50); do [ -s "$W/fifo-fd" ] && break; sleep 0.2; done
+FD=$(cat "$W/fifo-fd" 2>/dev/null)
+cat "/proc/$P1/fd/$FD" > /dev/null 2>&1 & LEZER=$!
+wachtOp 'uitslag: ' 120 || rood "fifo: geen uitslag binnen 120 s"
+wachtOp 'klaar - de nieuwe server' 20
+toon
+P2=$(serverPid)
+grep -q "SIGKILL" "$W/bin/supervisor.log" && groen "fifo: SIGKILL na genegeerde SIGTERM" || rood "fifo: geen SIGKILL"
+[ -n "$P2" ] && [ "$P2" != "$P1" ] && groen "fifo: nieuwe server ($P1 -> $P2)" || rood "fifo: geen nieuwe server (P1=$P1 P2=$P2)"
+B=$(ls "$W"/bin/bewaker-bewijs-*.json 2>/dev/null | head -1)
+if [ -n "$B" ]; then
+  python3 - "$B" "$GEEN_INSPECTOR" "$WCHAN_OK" "$P1" "$GENOOT" "$LEZER" <<'PY' && groen "fifo: momentopname met K1-meting compleet ($(basename "$B"))" || rood "fifo: momentopname onvolledig"
+import json, sys
+b = json.load(open(sys.argv[1])); geen_insp, wchan_ok, p1, genoot, lezer = sys.argv[2] == '1', sys.argv[3] == '1', int(sys.argv[4]), sys.argv[5], sys.argv[6]
+print('  cpu', b.get('cpu'), '| wchan', b.get('wchan'), '| js', b.get('js'), '| fd_soorten', b.get('fd_soorten'))
+print('  pijpgenoten', json.dumps(b.get('pijpgenoten'))[:400]); print('  pipe_lezers', json.dumps(b.get('pipe_lezers'))[:400])
+assert not b.get('onvolledig'), b.get('onvolledig')
+assert b['cpu']['state'] == 'S' and b['cpu']['procent'] <= 5, 'state S en CPU ~0 verwacht'
+if wchan_ok:
+    assert b['wchan'] == 'pipe_read', 'wchan van de server: ' + str(b['wchan'])
+    hoofd = [t for t in b['threads'] if t['tid'] == p1]
+    assert hoofd and hoofd[0]['wchan'] == 'pipe_read', 'main thread niet in pipe_read: ' + str(hoofd)
+if not geen_insp: assert str((b.get('js') or {}).get('fout', '')).startswith('geen pauze'), 'inspector: ' + str(b.get('js'))
+assert b['fd_soorten'].get('pipe', 0) >= 1 and 'fout' not in b['fd_soorten'], b['fd_soorten']
+assert isinstance(b['fd_laag'], dict) and '0' in b['fd_laag'] and all(len(v) <= 120 for v in b['fd_laag'].values()), b['fd_laag']
+assert b['fd_eigen_pijpen'], 'geen eigen pijpen'
+pg = b['pijpgenoten']
+assert 'fout' not in pg, pg.get('fout')
+assert any(str(h['pid']) == genoot and h['comm'] == 'sleep' for h in pg['houders']), 'pijpgenoot niet gevonden'
+assert pg['processen'] >= 500, 'budget: maar ' + str(pg['processen']) + ' processen bekeken'
+pl = b['pipe_lezers']
+if wchan_ok: assert any(str(h['pid']) == lezer and '/proc/' in h['cmdline'] for h in pl['lezers']), 'pipe-lezer niet gevonden'
+assert all('zombie' in k and 'state' in k for k in b['kinderen']), 'zombie-veld ontbreekt'
+PY
+else rood "fifo: geen momentopname-bestand"; fi
+grep -q "pijpgenoten 1 (" "$W/bin/supervisor.log" && groen "fifo: pijpgenoot staat in de logregel" || rood "fifo: pijpgenoot niet in de logregel"
+kill "${EXTRA[@]}" "$LEZER" 2>/dev/null; kill "$GENOOT" 2>/dev/null
 stop
 
 # ── 2. traag maar levend ──────────────────────────────────────────────────────────────────────────────────────────────

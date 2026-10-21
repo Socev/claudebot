@@ -22,11 +22,14 @@
  *   rem       hooguit 3 ingrepen per uur (bin/bewaker-staat.json); de vierde: niet doden, één melding.
  *   ingreep   vorige tijdelijk gelijk aan current (anders flipt de supervisor een gezonde release terug als de herstart
  *             niet binnen 25 s gezond is, en is zijn enige terugflip op; Fable #1) → momentopname (bin/bewaker-bewijs-*.json,
- *             voor wv700) → SIGTERM, 10 s genade, SIGKILL (de SIGTERM-handler van server.js draait niet in een dichte loop)
+ *             voor wv700) → SIGTERM, 5 s genade, SIGKILL (de SIGTERM-handler van server.js draait niet in een dichte loop)
  *             → losse niet-losgekoppelde kinderen opruimen (socev-auto; beurten en agents hebben een eigen procesgroep en
  *             blijven) → wachten tot /health weer ok is → vorige terugzetten → regel in supervisor.log, rij in de box,
  *             seintje via mk-scripts/bericht.py (niet 23:00–07:00).
  *   herstart  doet de supervisor (verwerkCrash): het kind sterft aan SIGKILL en telt als één crash.
+ *   bewijs    (wv716) naast CPU, threads/wchan en JS-stapel ook de fd-opbouw (alleen readlink), pijpgenoten (een ander proces
+ *             met de signaalpijp van server.js: K1) en pipe-lezers (pipe_read met /proc/ in de cmdline), zombie-kinderen
+ *             (K2-spoor); elk onderdeel met een eigen grens, parallel en tijdens de CPU-wacht.
  *
  * Alles wat bestanden raakt is asynchroon en begrensd: een hangend bestandssysteem mag het doden nooit tegenhouden.
  * Uitzetten: touch /opt/data/bewaker-uit (wordt elke tik gelezen) of BEWAKER=0 in de omgeving van server.js.
@@ -62,7 +65,7 @@ const C = {
   grens: getal('BEWAKER_GRENS_MS', 180000),
   minMissers: getal('BEWAKER_MIN_MISSERS', 8),
   context: getal('BEWAKER_CONTEXT_MS', 60000),
-  genade: getal('BEWAKER_GENADE_MS', 10000),
+  genade: getal('BEWAKER_GENADE_MS', 5000),   // wv716: bij een dichte lus of syscall-hang komt de SIGTERM-handler nooit
   killWacht: getal('BEWAKER_KILL_WACHT_MS', 30000),
   terug: getal('BEWAKER_TERUG_MS', 120000),
   remMax: getal('BEWAKER_REM_MAX', 3),
@@ -106,6 +109,10 @@ function metGrens(p, ms, standaard) {
     .finally(() => clearTimeout(t));
 }
 const lees = (p, ms) => metGrens(fsp.readFile(p, 'utf8'), ms || C.fs, null);
+// wv716: per blok van n tegelijk (Promise.all), zodat duizenden /proc-lezingen binnen de tijd blijven (Fable wv703 A3).
+async function inBlokken(lijst, n, f) {
+  for (let i = 0; i < lijst.length; i += n) await Promise.all(lijst.slice(i, i + n).map((x) => f(x).catch(() => null)));
+}
 function stempelUtc(d) { return (d || new Date()).toISOString().replace('T', ' ').slice(0, 19); }
 function amsterdam(d) { return (d || new Date()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }   // 'JJJJ-MM-DD HH:MM:SS'
 function eenRegel(s, n) { return String(s == null ? '' : s).replace(/[\r\n]+/g, ' ').slice(0, n || 300); }
@@ -238,14 +245,14 @@ async function threads(pid) {
   return uit;
 }
 async function kinderenVan(pid) {
-  const namen = await metGrens(fsp.readdir('/proc'), 3000, []);
+  const namen = (await metGrens(fsp.readdir('/proc'), 3000, [])).filter((n) => /^\d+$/.test(n));
   const uit = [];
-  for (const n of namen) {
-    if (!/^\d+$/.test(n)) continue;
+  await inBlokken(namen, 64, async function (n) {
     const st = await procStat(n);
-    if (st && st.ppid === pid) uit.push({ pid: parseInt(n, 10), comm: st.comm, start: st.start, pgrp: st.pgrp });
-  }
-  return uit;
+    // wv716: state en zombie erbij (een zombie-kind dat niemand oogst, wijst op een hangende SIGCHLD-afhandeling, K2)
+    if (st && st.ppid === pid) uit.push({ pid: parseInt(n, 10), comm: st.comm, start: st.start, pgrp: st.pgrp, state: st.state, zombie: st.state === 'Z' });
+  });
+  return uit.sort((a, b) => a.pid - b.pid);
 }
 async function staartVan(p, regels) {
   const fh = await metGrens(fsp.open(p, 'r'), C.fs, null);
@@ -301,47 +308,161 @@ async function jsStapel(pid) {
     };
   });
 }
-async function momentopname(stilS) {
-  const b = { tijd_iso: new Date().toISOString(), server_pid: SERVER, release: SHA, stil_s: stilS, missers: missers,
-    laatste_gezond: laatsteContext };
-  const s1 = await procStat(SERVER), t1 = mono(), th1 = await threads(SERVER);
-  const status = await lees('/proc/' + SERVER + '/status', 3000);
-  b.status = {};
-  if (status) for (const k of ['State', 'VmRSS', 'VmHWM', 'VmSwap', 'Threads', 'voluntary_ctxt_switches', 'nonvoluntary_ctxt_switches']) {
-    const m = new RegExp('^' + k + ':\\s*(.+)$', 'm').exec(status); if (m) b.status[k] = m[1].trim();
+// ── wv716: fd-opbouw, pijpgenoten en pipe-lezers (K1 tegenover K2; ontwerp wv703 A, Fable-review A1–A3) ──────────────
+// K1 = een ander proces leest de libuv-signaalpijp van server.js leeg (de grep op /proc/*/fd/* van 21-10), K2 = node/libuv
+// hangt zelf bij SIGCHLD. De fd-tabel van server.js verandert bij K1 niet; wat K1 bewijst is een ANDER proces met dezelfde
+// pipe-inode als een pijp waarvan beide uiteinden in server.js zitten (pijpgenoten), of een proces dat in pipe_read hangt
+// met /proc/ in zijn cmdline (pipe_lezers). Alleen readlink (opent het doel niet, volgt niets) en readFile op
+// stat/cmdline/wchan; nooit open/read op /proc/*/fd/*: dat is precies wat K1 veroorzaakt. Een andere uid geeft EACCES:
+// dat komt als fout in de JSON, nooit als lege lijst (Fable A2).
+const FD_MAX = 4096, GENOTEN_MAX_READLINK = 60000;
+async function fdOpbouw(pid) {
+  let namen;
+  try { namen = await fsp.readdir('/proc/' + pid + '/fd'); } catch (e) { return { fout: 'readdir: ' + ((e && e.code) || 'fout') }; }
+  namen = namen.filter((n) => /^\d+$/.test(n)).map(Number).sort((x, y) => x - y);
+  const doelen = {};
+  let fouten = 0, eacces = 0;
+  await inBlokken(namen.slice(0, FD_MAX), 64, async function (fd) {
+    try { doelen[fd] = await fsp.readlink('/proc/' + pid + '/fd/' + fd); }
+    catch (e) { if (e && e.code === 'ENOENT') return; fouten++; if (e && e.code === 'EACCES') eacces++; }   // ENOENT: fd net dicht
+  });
+  const soorten = {}, laag = {}, pijpen = {};
+  for (const fd of Object.keys(doelen)) {
+    const d = doelen[fd];
+    let soort = 'bestand';
+    const ino = /^pipe:\[(\d+)\]$/.exec(d);
+    if (/^socket:/.test(d)) soort = 'socket';
+    else if (ino) { soort = 'pipe'; (pijpen[ino[1]] = pijpen[ino[1]] || []).push(Number(fd)); }
+    else if (/^anon_inode:/.test(d) || /^\/dev\//.test(d)) soort = d.slice(0, 48);
+    soorten[soort] = (soorten[soort] || 0) + 1;
+    if (Number(fd) < 32) laag[fd] = eenRegel(d, 120);
   }
-  b.wchan = eenRegel(await lees('/proc/' + SERVER + '/wchan', 2000), 80) || null;
-  b.fds = await metGrens(fsp.readdir('/proc/' + SERVER + '/fd').then((x) => x.length), 3000, null);
-  b.cgroup = { cpu_stat: eenRegel(await lees(path.join(CGROUP, 'cpu.stat'), 2000), 400),
-    memory_current: eenRegel(await lees(path.join(CGROUP, 'memory.current'), 2000), 40),
-    memory_max: eenRegel(await lees(path.join(CGROUP, 'memory.max'), 2000), 40),
-    cpu_pressure: eenRegel(await lees(path.join(CGROUP, 'cpu.pressure'), 2000), 200),
-    io_pressure: eenRegel(await lees(path.join(CGROUP, 'io.pressure'), 2000), 200) };
-  b.kinderen = await kinderenVan(SERVER);
-  b.api_log = await staartVan(API_LOG, 50);
-  const ag = await leesJson(AGENTS);
-  b.agents_lopend = ag ? Object.keys(ag).map((k) => ag[k]).filter((a) => a && a.status === 'running')
-    .map((a) => ({ job_id: a.job_id, label: eenRegel(a.label, 80), started: a.started })) : null;
+  const eigen = {};   // pijpen met beide uiteinden in dit proces (de libuv-signaalpijp is er één van)
+  for (const i of Object.keys(pijpen)) if (pijpen[i].length >= 2) eigen[i] = pijpen[i];
+  const uit = { totaal: namen.length, soorten: soorten, laag: laag, eigen_pijpen: eigen };
+  if (namen.length > FD_MAX) uit.afgekapt_op = FD_MAX;
+  if (fouten) uit.fout = eacces ? 'EACCES bij ' + eacces + ' van ' + Math.min(namen.length, FD_MAX) + ' fds' : fouten + ' readlink-fout(en)';
+  return uit;
+}
+async function procNamen() {
+  return (await metGrens(fsp.readdir('/proc'), 3000, [])).filter((n) => /^\d+$/.test(n) && Number(n) !== SERVER && Number(n) !== process.pid);
+}
+async function cmdlineVan(pid, n) { return eenRegel(String(await lees('/proc/' + pid + '/cmdline', 2000) || '').replace(/\0/g, ' ').trim(), n || 160); }
+async function pijpgenoten(inodes) {
+  if (!inodes.length) return { inodes: [], houders: [], opmerking: 'geen pijp met beide uiteinden in de server' };
+  const zoek = new Set(inodes.map((i) => 'pipe:[' + i + ']'));
+  const namen = await procNamen();
+  const houders = [], geenToegang = [];
+  let gelezen = 0, afgekapt = false;
+  await inBlokken(namen, 16, async function (pid) {
+    let fds;
+    try { fds = await fsp.readdir('/proc/' + pid + '/fd'); }
+    catch (e) { if (e && e.code === 'EACCES') geenToegang.push(Number(pid)); return; }
+    if (gelezen + fds.length > GENOTEN_MAX_READLINK) { afgekapt = true; return; }
+    gelezen += fds.length;
+    const treffers = [];
+    await inBlokken(fds, 64, async function (fd) {
+      let d; try { d = await fsp.readlink('/proc/' + pid + '/fd/' + fd); } catch (e) { return; }
+      if (zoek.has(d)) treffers.push({ fd: Number(fd), inode: d.slice(6, -1) });
+    });
+    if (!treffers.length) return;
+    const st = await procStat(pid);
+    houders.push({ pid: Number(pid), comm: st ? st.comm : null, ppid: st ? st.ppid : null, cmdline: await cmdlineVan(pid, 120), fds: treffers });
+  });
+  const uit = { inodes: inodes, houders: houders.sort((x, y) => x.pid - y.pid), processen: namen.length, readlinks: gelezen };
+  if (afgekapt) uit.afgekapt_op = GENOTEN_MAX_READLINK;
+  if (geenToegang.length) { uit.fout = 'EACCES: fd-map van ' + geenToegang.length + ' proces(sen) onleesbaar'; uit.geen_toegang = geenToegang.slice(0, 20); }
+  return uit;
+}
+async function pipeLezers() {
+  const namen = await procNamen();
+  const lezers = [];
+  let inPipeRead = 0, onleesbaar = 0;
+  await inBlokken(namen, 64, async function (pid) {
+    const w = await lees('/proc/' + pid + '/wchan', 2000);
+    if (w === null) { onleesbaar++; return; }
+    if (w.trim() !== 'pipe_read') return;
+    inPipeRead++;
+    const cmd = await cmdlineVan(pid, 200);
+    if (cmd.indexOf('/proc/') >= 0) { const st = await procStat(pid); lezers.push({ pid: Number(pid), comm: st ? st.comm : null, ppid: st ? st.ppid : null, cmdline: cmd }); }
+  });
+  const uit = { lezers: lezers.sort((x, y) => x.pid - y.pid), in_pipe_read: inPipeRead, processen: namen.length };
+  if (onleesbaar) uit.wchan_onleesbaar = onleesbaar;
+  return uit;
+}
+
+// Elk onderdeel met een eigen grens en parallel, tijdens de CPU-wacht (Fable A3): één traag onderdeel kost alleen zijn
+// eigen veld ({fout: '… niet binnen …'}), nooit de hele momentopname. b wordt gaandeweg gevuld; overschrijdt het geheel
+// toch de buitengrens, dan bewaart ingreepKern wat er al staat.
+function deel(naam, f, ms) {
+  return metGrens(Promise.resolve().then(f), ms, { fout: naam + ' niet binnen ' + Math.round(ms / 1000) + ' s' });
+}
+async function momentopname(stilS, b) {
+  Object.assign(b, { tijd_iso: new Date().toISOString(), server_pid: SERVER, release: SHA, stil_s: stilS, missers: missers,
+    laatste_gezond: laatsteContext });
+  const s1 = await procStat(SERVER), t1 = mono();
+  const th1 = await deel('threads', () => threads(SERVER), 4000);
+  const cpuWacht = wacht(Math.max(0, C.cpuSample - (mono() - t1)));
+  const cg = (n, k) => lees(path.join(CGROUP, n), 2000).then((x) => eenRegel(x, k));
+  await Promise.all([
+    deel('status', async function () {
+      const status = await lees('/proc/' + SERVER + '/status', 3000);
+      b.status = {};
+      if (status) for (const k of ['State', 'VmRSS', 'VmHWM', 'VmSwap', 'Threads', 'voluntary_ctxt_switches', 'nonvoluntary_ctxt_switches']) {
+        const m = new RegExp('^' + k + ':\\s*(.+)$', 'm').exec(status); if (m) b.status[k] = m[1].trim();
+      }
+      b.wchan = eenRegel(await lees('/proc/' + SERVER + '/wchan', 2000), 80) || null;
+    }, 4000).then((x) => { if (x && x.fout) b.status = x; }),
+    deel('fd', () => fdOpbouw(SERVER), 6000).then(function (fd) {
+      b.fds = typeof fd.totaal === 'number' ? fd.totaal : null;
+      b.fd_soorten = fd.fout && !fd.soorten ? { fout: fd.fout } : Object.assign({}, fd.soorten, fd.fout ? { fout: fd.fout } : {}, fd.afgekapt_op ? { afgekapt_op: fd.afgekapt_op } : {});
+      b.fd_laag = fd.laag || { fout: fd.fout };
+      b.fd_eigen_pijpen = fd.eigen_pijpen || null;
+      if (!fd.eigen_pijpen) { b.pijpgenoten = { fout: 'geen fd-opbouw: ' + fd.fout }; return; }
+      return deel('pijpgenoten', () => pijpgenoten(Object.keys(fd.eigen_pijpen)), 10000).then((x) => { b.pijpgenoten = x; });
+    }),
+    deel('pipe_lezers', pipeLezers, 6000).then((x) => { b.pipe_lezers = x; }),
+    deel('cgroup', async function () {
+      return { cpu_stat: await cg('cpu.stat', 400), memory_current: await cg('memory.current', 40), memory_max: await cg('memory.max', 40),
+        cpu_pressure: await cg('cpu.pressure', 200), io_pressure: await cg('io.pressure', 200) };
+    }, 4000).then((x) => { b.cgroup = x; }),
+    deel('kinderen', () => kinderenVan(SERVER), 6000).then((x) => { b.kinderen = x; }),
+    deel('api_log', () => staartVan(API_LOG, 50), 4000).then((x) => { b.api_log = x; }),
+    deel('agents', async function () {
+      const ag = await leesJson(AGENTS);
+      return ag ? Object.keys(ag).map((k) => ag[k]).filter((a) => a && a.status === 'running')
+        .map((a) => ({ job_id: a.job_id, label: eenRegel(a.label, 80), started: a.started })) : null;
+    }, 4000).then((x) => { b.agents_lopend = x; }),
+    cpuWacht
+  ]);
   // CPU: twee samples (busy-loop ≈ 100% op de hoofdthread, wachten ≈ 0%), vóór de inspector die de lus stilzet.
-  await wacht(Math.max(0, C.cpuSample - (mono() - t1)));
-  const s2 = await procStat(SERVER), t2 = mono(), th2 = await threads(SERVER);
+  const s2 = await procStat(SERVER), t2 = mono();
+  const th2 = await deel('threads', () => threads(SERVER), 4000);
   if (s1 && s2) {
     const tik = (s2.utime + s2.stime) - (s1.utime + s1.stime);   // klokticks van 1/100 s
     b.cpu = { procent: Math.round(tik / ((t2 - t1) / 1000)), user_ticks: s2.utime - s1.utime, sys_ticks: s2.stime - s1.stime, state: s2.state };
   }
-  b.threads = th2.map(function (t) {
-    const v = th1.find((x) => x.tid === t.tid);
+  b.threads = Array.isArray(th2) ? th2.map(function (t) {
+    const v = Array.isArray(th1) ? th1.find((x) => x.tid === t.tid) : null;
     return { tid: t.tid, comm: t.comm, state: t.state, wchan: t.wchan, cpu_ticks: v ? (t.utime + t.stime) - (v.utime + v.stime) : null };
-  });
+  }) : th2;
   b.js = await jsStapel(SERVER);
   return b;
 }
 function kortBewijs(b) {
-  if (!b || b.fout) return (b && b.fout) || 'geen momentopname';
-  const delen = ['State ' + (b.status.State || '?'), 'CPU ' + (b.cpu ? b.cpu.procent + '%' : '?'), 'RSS ' + (b.status.VmRSS || '?'),
-    'threads ' + (b.status.Threads || '?'), 'fds ' + (b.fds == null ? '?' : b.fds), 'wchan ' + (b.wchan || '?')];
+  if (!b || (b.fout && !b.status)) return (b && b.fout) || 'geen momentopname';
+  const st = b.status || {};
+  const delen = ['State ' + (st.State || '?'), 'CPU ' + (b.cpu ? b.cpu.procent + '%' : '?'), 'RSS ' + (st.VmRSS || '?'),
+    'threads ' + (st.Threads || '?'), 'fds ' + (b.fds == null ? '?' : b.fds), 'wchan ' + (b.wchan || '?')];
+  const pg = b.pijpgenoten, pl = b.pipe_lezers;
+  if (pg && Array.isArray(pg.houders)) delen.push('pijpgenoten ' + pg.houders.length + (pg.houders.length ? ' (' + pg.houders.slice(0, 3).map((h) => h.pid + ' ' + h.comm).join(', ') + ')' : '') + (pg.fout ? ' [' + pg.fout + ']' : ''));
+  else if (pg && pg.fout) delen.push('pijpgenoten: ' + pg.fout);
+  if (pl && Array.isArray(pl.lezers)) delen.push('pipe-lezers met /proc/ ' + pl.lezers.length + (pl.lezers.length ? ' (' + pl.lezers.slice(0, 2).map((h) => h.pid + ' ' + eenRegel(h.cmdline, 60)).join('; ') + ')' : ''));
+  const z = Array.isArray(b.kinderen) ? b.kinderen.filter((k) => k.zombie).length : 0;
+  if (z) delen.push('zombie-kinderen ' + z);
   if (b.js && b.js.stapel && b.js.stapel.length) delen.push('JS-stapel boven: ' + b.js.stapel.slice(0, 3).join(' < '));
   else if (b.js) delen.push('JS-stapel: ' + (b.js.fout || b.js.uit || '?'));
+  if (b.onvolledig) delen.push(b.onvolledig);
   return delen.join('; ');
 }
 
@@ -441,7 +562,7 @@ async function tik() {
       contextMono = mono();
       const j = await vraag('/health');
       if (j) laatsteContext = { tijd_iso: new Date().toISOString(), versie: j.versie, lopend: j.lopend || null,
-        agents_lopend: j.agents ? j.agents.lopend : null };
+        agents_lopend: j.agents ? j.agents.lopend : null, proces: j.proces || null };   // wv716: rss/heap/lusvertraging van de minuut ervoor
       await oudHerstel();   // ook als een bewaker halverwege stierf en de nieuwe meteen startte (Fable wv701-code #4)
     }
     return;
@@ -518,14 +639,16 @@ async function ingreepKern(stil, s, n) {
   await log('INGREEP ' + n + '/' + C.remMax + ' dit uur: server ' + SERVER + ' antwoordt ' + stilS + ' s niet (' + missers + ' missers op rij) - momentopname, dan herstarten');
   const serverPgrp = (await procStat(SERVER) || {}).pgrp;
   const vorige = await beschermVorige();
-  const bewijs = await metGrens(momentopname(stilS), C.cpuSample + 20000, { fout: 'momentopname niet binnen de tijd' });
+  // wv716: buitengrens als vangnet; wat er dan al in b staat, blijft bewaard (elk onderdeel heeft ook zijn eigen grens)
+  const bewijs = {};
+  if (!(await metGrens(momentopname(stilS, bewijs).then(() => true), C.cpuSample + 25000, false))) bewijs.onvolledig = 'momentopname niet helemaal binnen de tijd';
   const bewijsPad = path.join(BIN, 'bewaker-bewijs-' + stempel + '.json');
   const bewaard = await schrijfAtomair(bewijsPad, JSON.stringify(bewijs, null, 1) + '\n');
   await log('momentopname: ' + kortBewijs(bewijs) + (bewaard ? ' -> ' + bewijsPad : ' (niet bewaard)'));
   const uitkomst = await dood();
   await log('server ' + SERVER + ': ' + uitkomst);
   await geefSlot();
-  const kinderen = uitkomst === 'blijft' ? [] : await ruimKinderenOp(bewijs.kinderen, serverPgrp);
+  const kinderen = uitkomst === 'blijft' ? [] : await ruimKinderenOp(Array.isArray(bewijs.kinderen) ? bewijs.kinderen : [], serverPgrp);
   const terug = uitkomst === 'blijft' ? null : await wachtOpGezond(C.terug);
   if (vorige && terug) await wacht(C.bootMarge);
   const herstel = await herstelVorige(vorige);
@@ -546,13 +669,13 @@ async function ingreepKern(stil, s, n) {
     ['van', 'bewaker.js (levensbewaking wv701, release ' + SHA + ')'],
     ['gemeten', 'geen antwoord op /health/publiek sinds ' + tijdKort(laatsteOkWand) + ' (' + stilS + ' s, ' + missers + ' missers op rij); ' + kortBewijs(bewijs) +
       '; stoppen: ' + uitkomst + (kinderen.length ? '; losse kinderen gestopt: ' + kinderen.join(', ') : '') + '; ' + uitslag + (flip ? '; ' + flip : '') + '; ' + herstel],
-    ['verloren', verloren + (beurtWeg ? '; een beurt die toen liep gaf geen antwoord (jobs staan alleen in het geheugen); agents rondt de weesafhandeling af' : '')],
+    ['verloren', verloren + (beurtWeg ? '; een app-beurt die toen liep, vangt server.js na de herstart op (beurt-lopend.json, wv716: antwoord alsnog in de app of een regel "verloren"); een Telegram-beurt niet (n8n krijgt /result found:false); agents rondt de weesafhandeling af' : '')],
     ['gevolg als er niets gebeurt', 'de bewaker vangt het op (hooguit ' + C.remMax + '×/uur), maar de oorzaak blijft en elke keer gaat een lopend antwoord verloren'],
     ['voorstel', 'momentopname naast wv700 leggen (JS-stapel, CPU, threads); bij een herhaling de oorzaak met voorrang']]);
   let tekst;
   if (uitkomst === 'blijft') tekst = 'De server hangt en laat zich niet stoppen. Herstart de pod in Olares, dan kijk ik daarna wat er was.';
   else if (terug) tekst = 'De server reageerde ' + minuten(stilS) + ' niet; ik heb hem om ' + tijdKort(Date.now() - terug.na_s * 1000) +
-    ' zelf herstart en hij draait weer.' + (beurtWeg ? ' Er liep toen een vraag; dat antwoord kwam niet aan, stel hem gerust opnieuw.' : '');
+    ' zelf herstart en hij draait weer.' + (beurtWeg ? ' Er liep toen een vraag. Kwam die uit de app, dan zet ik het antwoord daar alsnog neer of meld ik daar dat het verloren ging; een vraag uit Telegram stel je gerust opnieuw.' : '');
   else tekst = 'De server reageerde ' + minuten(stilS) + ' niet. Ik heb hem herstart, maar hij is na twee minuten nog niet terug. Herstart de pod in Olares als ik over een kwartier nog niet antwoord.';
   await seintje(tekst, 'bewaker-' + stempel);
   if (uitkomst !== 'blijft') { await log('bewaker van server ' + SERVER + ' klaar - de nieuwe server start zijn eigen bewaker'); process.exit(0); }
