@@ -26,8 +26,14 @@ if [ ! -f "$CODEX_HOME/config.toml" ]; then
 fi
 # 4. de schakelaar: standaard Claude, geen fallback (David kiest, niet parallel).
 [ -f /opt/data/runtime.json ] || printf '{ "default": "claude", "fallback": "", "models": { "codex": "gpt-6-astra" } }\n' > /opt/data/runtime.json
-# Volume kan root-owned aangemaakt zijn; geef het aan 'claude'
-chown -R claude:claude /opt/data 2>/dev/null || true
+# Volume kan root-owned aangemaakt zijn; geef het aan 'claude'. Sinds wv699 niet meer `chown -R`: de thuismap van socev
+# (1002) blijft van socev (anders verliest een terugdraai van fase 2 het hoofdkanaal, Fable #7), bestanden die socev in de
+# vault maakte blijven van socev (ze hebben een ACL voor claude), en -h: een symlink wordt zelf omgezet, nooit zijn doel.
+find /opt/data -path /opt/data/socev-thuis -prune -o ! -user claude ! -user socev -print0 2>/dev/null \
+  | xargs -0 -r chown -h claude:claude 2>/dev/null || true
+# Uid-scheiding fase 1 (wv699): gebruiker socev, rechten en de socev-loper. Bewust vóór fetch-secrets: de loper en zijn
+# root-herstartlus krijgen zo nooit een pod-sleutel in hun omgeving. Faalt hier iets, dan start de pod gewoon door.
+/app/socev-voorbereiding.sh || true
 # fetch-secrets.sh haalt de podsecrets op en exec't daarna de rest van de keten,
 # zodat run.sh en server.js ze als omgeving erven. Dat dit VOOR gosu staat is
 # bewust: gosu behoudt de omgeving over de privilegedrop heen (su - zou hem

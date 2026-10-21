@@ -42,6 +42,8 @@
  *     is /health het eerlijke antwoord op de vraag of het werkt.
  */
 'use strict';
+// Uid-scheiding (wv699, 21-10-2026): wat de pod-gebruiker maakt is privé; in de vault telt de standaard-ACL (zie run.sh).
+process.umask(0o077);
 const fs = require('fs');
 const path = require('path');
 const http = require('http');

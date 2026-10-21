@@ -1,0 +1,26 @@
+# codex-config-socev.toml — config.toml van Codex voor gebruiker socev (socev-thuis/.codex, wv699).
+# socev-thuis.py schrijft hem bij elke start opnieuw: zonder Supabase- en n8n-MCP (beheersleutels).
+# Geen secrets hier: tokens komen als omgevingsvariabele uit de kluis
+# (fetch-secrets.sh) en worden via bearer_token_env_var gelezen.
+
+# Standaardmodel; per beurt te overrulen met runtime.json (models.codex) of
+# een modelalias op /run. Slug geverifieerd 5-9-2026 (learn.chatgpt.com/docs/models).
+model = "gpt-6-astra"
+
+# De container is de sandbox (zelfde redenering als claude --permission-mode
+# bypassPermissions); server.js geeft de bypass-vlag ook nog expliciet mee.
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+# AGENTS.md (23 KB, werkwijze) + CLAUDE.md (9 KB, persona via symlink) is meer
+# dan de standaard 32 KiB; anders wordt de persona stil afgekapt.
+project_doc_max_bytes = 131072
+
+# Alleen todoist en pubmed: Supabase en n8n zijn beheersleutels en horen niet bij socev.
+
+[mcp_servers.todoist]
+url = "https://ai.todoist.net/mcp"
+bearer_token_env_var = "TODOIST_MCP_TOKEN"
+
+[mcp_servers.pubmed]
+url = "https://pubmed.mcp.claude.com/mcp"

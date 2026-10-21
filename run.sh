@@ -21,6 +21,10 @@
 #   SYNC_INTERVAL  300 (default)         — seconden tussen twee rondes
 #   SYNC_INIT      0 (default)           — 1 = eenmalig een resync toestaan
 set -u
+# Uid-scheiding (wv699, 21-10-2026): wat de pod-gebruiker voortaan maakt, is privé (0600/0700), ook /tmp/agy-mcp_config.json
+# e.d. In de vault en de memory-map telt de standaard-ACL (die geeft socev en claude rwX), niet deze umask. Supervisor en
+# server.js erven hem (supervisor.js zet hem ook zelf).
+umask 077
 export HOME=/opt/data
 export PATH=/usr/local/bin:/opt/data/bin:$PATH
 VAULT="${VAULT_DIR:-/opt/data/AI_SecondBrain}"
@@ -196,6 +200,36 @@ sync_lus(){
     fi
     sleep "$SYNC_INTERVAL"
   done
+}
+
+# ── Uid-scheiding (wv699): ACL en masker elke 5 minuten ─────────────────────────
+# rclone, cp -p en editors zetten soms zelf een modus; dan wordt het ACL-masker krapper en kan socev een vaultbestand niet
+# meer schrijven (Fable wv689 #4); een bestand dat met mv van buiten binnenkomt heeft helemaal geen ACL. Elke 5 minuten
+# (de bisync-cadans, maar los van de rol) krijgt wat veranderde zijn ACL terug, en worden .claude/.obsidian, de vault-wortel
+# en bisync.log nagelopen. Eens per dag de volledige ronde. Alles als claude (dit script); fouten stoppen de lus nooit.
+SOCEV_RECHTEN=/app/socev-rechten.sh
+SOCEV_RECHTEN_LOG="$BIN/socev-rechten.log"
+socev_rechten(){
+  [ -f "$SOCEV_RECHTEN" ] && id socev >/dev/null 2>&1 || return 0
+  if [ -f "$SOCEV_RECHTEN_LOG" ] && [ "$(stat -c %s "$SOCEV_RECHTEN_LOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+    mv -f "$SOCEV_RECHTEN_LOG" "$SOCEV_RECHTEN_LOG.1"
+  fi
+  bash "$SOCEV_RECHTEN" "$1" >> "$SOCEV_RECHTEN_LOG" 2>&1 || true
+}
+SOCEV_NA_LAATST=0
+socev_na_ronde_indien_nodig(){
+  local nu; nu=$(date +%s)
+  [ $(( nu - SOCEV_NA_LAATST )) -ge 300 ] || return 0
+  SOCEV_NA_LAATST=$nu
+  socev_rechten na-ronde
+}
+SOCEV_VOL_MARKER="$BIN/laatste-socev-rechten"
+socev_vol_indien_nodig(){
+  local vandaag; vandaag="$(date '+%Y-%m-%d')"
+  [ "$(cat "$SOCEV_VOL_MARKER" 2>/dev/null)" = "$vandaag" ] && return 0
+  # Niet midden in de nachtsessies van 02:30-04:30; de dagronde mag daarna.
+  [ "$(date +%H)" -ge 5 ] || return 0
+  socev_rechten vol   # schrijft zelf de marker
 }
 
 start_sync(){
@@ -487,5 +521,7 @@ while true; do
     if [ $(( now - last_git )) -ge "$GIT_EVERY" ]; then rol_primair && sync_repo; last_git=$now; fi
   fi
   vault_snapshot_indien_nodig
+  socev_vol_indien_nodig
+  socev_na_ronde_indien_nodig
   sleep 30
 done

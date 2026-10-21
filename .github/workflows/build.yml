@@ -81,6 +81,12 @@ jobs:
           bash test/bank-archief.sh
       - name: "argv-detector (wv698, sleutelwaarden in /proc/*/cmdline)"
         run: bash test/argv-detector.sh
+      # Uid-scheiding fase 1 (wv699): het protocol en de weigeringen van de socev-loper (zonder docker), en de argv-hook die
+      # sinds wv699 als managed settings in het image zit (24 weigeren + 22 doorlaten, nepsleutels).
+      - name: "socev-loper (wv699, protocol en weigeringen)"
+        run: python3 test/socev-loper.py
+      - name: "argv-hook (wv698/wv699, managed settings)"
+        run: python3 test/argv-hook-toets.py ./argv-wacht.py
 
       - uses: docker/login-action@v3
         with:
@@ -184,7 +190,7 @@ jobs:
           # zijn om het laden van secrets over te slaan.
           docker run -d --name rooktest -p 18080:8080 --env-file /tmp/chart.env \
             --entrypoint /bin/bash "$IMAGE" -c \
-            'mkdir -p /opt/data/bin /opt/data/io /opt/data/AI_SecondBrain "${REPO_DIR:-/opt/data/repo}" && chown -R claude:claude /opt/data && exec gosu claude /app/run.sh'
+            'mkdir -p /opt/data/bin /opt/data/io /opt/data/AI_SecondBrain "${REPO_DIR:-/opt/data/repo}" && chown -R claude:claude /opt/data && /app/socev-voorbereiding.sh && exec gosu claude /app/run.sh'
 
           echo "wachten tot /health antwoordt (max 90 s)"
           for i in $(seq 1 90); do
@@ -272,6 +278,16 @@ jobs:
             if ! grep -qE -- "^[[:space:]]+${vlag}([[:space:]]|$)" <<<"$HULP"; then echo "::error::agy kent de vlag $vlag niet meer - runGemini in server.js leunt erop"; exit 1; fi
             echo "  OK    $vlag"
           done
+
+      # WAAROM (wv699, 21-10-2026). Uid-scheiding fase 1: een tweede gebruiker socev (1002) die straks de smalle
+      # Socev-gesprekken draait, zodat een prompt-injectie niet bij de pod-sleutels kan (/proc/<pid>/environ, kluis, bunq).
+      # Deze stap draait het ECHTE entrypoint (alleen fetch-secrets is in de toets vervangen door een doorgeefluik) op een
+      # volume met nepbestanden op de gevoelige plekken, en toetst als 1002: niets van 1001 leesbaar, .claude/ in de vault
+      # niet schrijfbaar, de rest van de vault wel (en 1001 kan het daarna lezen), de loper-socket alleen voor 1001, de
+      # loper als 1002 zonder capabilities, binnen 5 s terug na een kill, en 1001 werkt als vandaag. Plus een herstart.
+      - name: "Rooktest - uid-scheiding (wv699)"
+        run: |
+          bash test/uid-scheiding.sh ghcr.io/socev/claudebot:${{ github.run_number }} /tmp/chart.env
 
       - name: Rooktest opruimen
         if: always()

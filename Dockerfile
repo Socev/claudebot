@@ -6,10 +6,12 @@ FROM node:22-bookworm-slim
 
 # git is nodig voor de GHAWA-workspace (node:slim bevat 'm niet standaard).
 # openssh-client is nodig voor de deploy key van socev.dev (git-over-SSH); 18-8-2026.
+# acl (setfacl/getfacl) en python3 (al aanwezig via ocrmypdf, nu expliciet) voor de uid-scheiding: wv699, 21-10-2026.
 # apt-get upgrade (CISO 6-10-2026, akkoord David bundel 5): het basisimage loopt achter op de
 # Debian-beveiligingsupdates (trivy: libpcre2, perl); zo neemt elke bouw de openstaande fixes mee.
 RUN apt-get update && apt-get upgrade -y --no-install-recommends && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip bash procps tzdata gosu git openssh-client pandoc poppler-utils ocrmypdf tesseract-ocr-nld \
+      acl python3 \
  && rm -rf /var/lib/apt/lists/*
 
 # npm zelf bijwerken (CISO 6-10-2026): de npm die met node:22 meekomt bevat oude pacote, sigstore,
@@ -78,6 +80,11 @@ RUN npm install -g @playwright/mcp@0.0.83 \
 # Non-root gebruiker: 'claude' weigert bypassPermissions als root.
 # HOME = /opt/data (hierop mount Olares het persistent volume).
 RUN id claude 2>/dev/null || useradd -u 1001 -d /opt/data -s /bin/bash claude
+# Tweede gebruiker (uid-scheiding fase 1, wv699, 21-10-2026; bouwplan "Socev-gesprekken onder eigen gebruiker -
+# sleutelscheiding"): smalle Socev-gesprekken gaan (fase 2) als socev draaien, zodat ze niet in de processen en bestanden
+# van claude kunnen kijken (kluissleutel, bunq, passkeys). Geen login, geen groep claude, thuismap op het volume.
+RUN id socev 2>/dev/null || { groupadd -g 1002 socev && useradd -u 1002 -g 1002 -d /opt/data/socev-thuis -M -s /usr/sbin/nologin socev; } \
+ && test "$(id -u socev):$(id -g socev):$(id -G socev)" = "1002:1002:1002"
 
 ENV HOME=/opt/data
 # Codex: auth.json, config.toml en sessies op het persistente volume, naast /opt/data/.claude.
@@ -109,6 +116,14 @@ COPY supervisor.js /app/supervisor.js
 COPY uitrol.sh /app/uitrol.sh
 # Bootstrap-config voor Codex; entrypoint kopieert hem alleen als er nog geen staat.
 COPY codex-config.toml /app/codex-config.toml
+# Uid-scheiding fase 1 (wv699): root-voorbereiding, rechten (als claude), thuismap (als socev), de root-herstartlus die de
+# loper-socket bindt, de loper zelf en de Playwright-regel voor socev. Keten-categorie: een loper die met een uitrol mee
+# zou bewegen, zou 1001 de code van een 1002-proces laten bepalen.
+COPY socev-voorbereiding.sh socev-rechten.sh socev-thuis.py loper-bind.py socev-loper.js playwright-mcp.sh codex-config-socev.toml /app/
+# argv-hook als managed settings (Fable wv698 #4): root-eigendom, dus geen sessie kan hem uitzetten of omzeilen, en hij
+# geldt ook voor sessies met een andere HOME. allowManagedHooksOnly: hooks uit HOME of de vault worden genegeerd.
+COPY argv-wacht.py /app/argv-wacht.py
+COPY managed-settings.json /etc/claude-code/managed-settings.json
 
 # De applicatiecode staat op TWEE plekken. /app/release-bootstrap is de kopie die
 # een vers volume vult; daarna draait de pod uit /opt/data/app/current en raakt
@@ -137,7 +152,10 @@ COPY package.json /app/package.json
 RUN npm install --omit=dev --no-audit --no-fund \
  && npm cache clean --force
 
-RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh /app/uitrol.sh
+RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh /app/uitrol.sh \
+      /app/socev-voorbereiding.sh /app/socev-rechten.sh /app/playwright-mcp.sh \
+ && chmod 0644 /app/socev-loper.js /app/loper-bind.py /app/socev-thuis.py /app/argv-wacht.py /etc/claude-code/managed-settings.json \
+ && chown -R root:root /app/socev-* /app/loper-bind.py /app/argv-wacht.py /app/playwright-mcp.sh /etc/claude-code
 
 EXPOSE 8080
 # entrypoint draait als root (chown volume), zakt dan naar 'claude'
