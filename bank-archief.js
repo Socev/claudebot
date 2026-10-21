@@ -171,8 +171,10 @@ function bij(a, rek, lijst, opties) {
     " vervangen_door = CASE WHEN transacties.status IN ('vervangen', 'vervallen') AND excluded.status = 'pending' THEN NULL ELSE transacties.vervangen_door END");
   const telVoor = a.db.prepare('SELECT count(*) n FROM transacties WHERE rek = ?').get(rek).n;
   return inTransactie(a, function () {
+    const gezien = new Set();
     (lijst || []).forEach(function (t) {
       const wacht = t.status === 'wachtend' || t.status === 'pending';
+      gezien.add((wacht ? 'p|' : '') + t.id);
       let ruw = null;
       if (t._ruw) { try { ruw = JSON.stringify(t._ruw); } catch (e) { ruw = null; } }
       zet.run(rek, (wacht ? 'p|' : '') + t.id, String(t.id), wacht ? 'pending' : 'booked', t.datum || null, t.valutadatum || null, t.bedrag, t.valuta || 'EUR',
@@ -181,8 +183,9 @@ function bij(a, rek, lijst, opties) {
     let vervangen = 0, vervallen = 0;
     if (o.volledigVanaf) {
       // zonder datum: het venster telt vanaf eerste_gezien (Fable wv687 #6)
-      const weg = a.db.prepare("SELECT nr, datum, bedrag FROM transacties WHERE rek = ? AND status = 'pending' AND (datum >= ? OR (datum IS NULL AND eerste_gezien >= ?)) AND laatst_gezien < ?")
-        .all(rek, o.volledigVanaf, o.volledigVanaf, nu);
+      // niet teruggekomen = niet in deze lijst (op sleutel, niet op tijd: twee schrijfacties in dezelfde milliseconde, CI #159)
+      const weg = a.db.prepare("SELECT nr, sleutel, datum, bedrag FROM transacties WHERE rek = ? AND status = 'pending' AND (datum >= ? OR (datum IS NULL AND eerste_gezien >= ?))")
+        .all(rek, o.volledigVanaf, o.volledigVanaf).filter(function (p) { return !gezien.has(p.sleutel); });
       const kand = a.db.prepare("SELECT nr, datum FROM transacties t WHERE rek = ? AND status = 'booked' AND bedrag = ? AND datum >= ? AND datum <= ?" +
         ' AND NOT EXISTS (SELECT 1 FROM transacties p WHERE p.vervangen_door = t.nr) ORDER BY datum, nr');
       weg.forEach(function (p) {

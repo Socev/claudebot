@@ -169,6 +169,17 @@ const p = (id, datum, bedrag, tegen, omschr, extra) => Object.assign({ id: id, d
     z = A.zoek(a, { tekst: 'garage' });
     toets('wachtend zonder datum: na volledige opvraag vervangen, niet dubbel', z.aantal === 1 && a.db.prepare("SELECT status FROM transacties WHERE bron_id = 'v:nd'").get().status === 'vervangen', z);
 
+    // ── CI #159: twee schrijfacties in dezelfde milliseconde (bevroren klok) ──
+    {
+      const echt = Date.prototype.toISOString;
+      Date.prototype.toISOString = function () { return '2026-10-21T10:00:00.000Z'; };
+      try {
+        A.bij(a, 'gez', [p('v:ms', dagTerug(1), -44, 'Kapper', null, { status: 'wachtend' })], {});
+        A.bij(a, 'gez', [p('e:ms', dagTerug(0), -44, 'Kapper')], { volledigVanaf: dagTerug(10) });
+      } finally { Date.prototype.toISOString = echt; }
+      toets('zelfde milliseconde: wachtende post toch vervangen', a.db.prepare("SELECT status FROM transacties WHERE bron_id = 'v:ms'").get().status === 'vervangen', null);
+    }
+
     // ── Fable wv687 #10: lege rekeningenlijst zet niets op ontkoppeld ──
     A.rekeningenSync(a, {});
     toets('lege rekeningenlijst (onleesbare stand): niets ontkoppeld', a.db.prepare("SELECT count(*) n FROM rekeningen WHERE status = 'ontkoppeld'").get().n === 0, null);
