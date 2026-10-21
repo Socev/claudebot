@@ -38,7 +38,8 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # bunq-lezer.js (wv683): bunq-bron van de bankluis, door bank-lezer.js geladen (ontbreekt hij, dan alleen Enable Banking).
 # bewaker.js (wv701): levensbewaking, door server.js losgekoppeld gestart (ontbreekt hij, dan geen bewaking).
 # bank-archief.js (wv687): transactiedatabase, door bank-lezer.js geladen (ontbreekt hij, dan alleen de cache; leesopdrachten op het archief falen netjes).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js"
+# studio.js (wv707): tab Studio in de app, door server.js geladen (ontbreekt hij, dan 404 op /app/studio/* en studio.aan=false in /health).
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

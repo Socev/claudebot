@@ -79,6 +79,9 @@ jobs:
           bash test/bankluis-poort.sh
           bash test/bank-ronde.sh
           bash test/bank-archief.sh
+      # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
+      - name: "studio (wv707, tab Studio fase 1)"
+        run: bash test/studio.sh
       - name: "argv-detector (wv698, sleutelwaarden in /proc/*/cmdline)"
         run: bash test/argv-detector.sh
       # Uid-scheiding fase 1 (wv699): het protocol en de weigeringen van de socev-loper (zonder docker), en de argv-hook die

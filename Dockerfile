@@ -139,6 +139,7 @@ COPY bank-lezer.js /app/release-bootstrap/bank-lezer.js
 COPY bunq-lezer.js /app/release-bootstrap/bunq-lezer.js
 COPY bank-archief.js /app/release-bootstrap/bank-archief.js
 COPY bewaker.js /app/release-bootstrap/bewaker.js
+COPY studio.js /app/release-bootstrap/studio.js
 
 COPY server.js /app/server.js
 COPY telegram-claude-bot.js /app/telegram-claude-bot.js

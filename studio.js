@@ -1,0 +1,782 @@
+'use strict';
+// studio.js — tab Studio in de Socev-app (wv707, fase 1, 21-10-2026).
+// Bouwplan: vault 01_Ontwikkeling/Studio - ComfyUI in de Socev-app (bouwplan 21-10-2026).md (§ 4 ontwerp, § 5 techniek, § 7 veiligheid).
+//
+// WAAROM. David (21-10): één tab om beeld en geluid te maken: flow kiezen, paar velden, Maak, resultaat in de app. Fase 1 = alleen
+// GRATIS motoren; betaalde diensten (ElevenLabs, OpenAI, Gemini via Router) komen in fase 2 met eigen sleutels en plafonds.
+//
+// MOTOREN (fase 1).
+// - router: Olares Router (https://f3395cd5.<olares>/v1). Elk FlowStudio-project dat David publiceert, verschijnt in /v1/models
+//   als model "Olares/<project-id>" met een formulier in flowstudio.parameters; Studio toont het vanzelf als flow ("flows toevoegen
+//   zonder code" = via FlowStudio). Alleen owned_by Olares (lokaal, gratis); betaalde aanbieders blijven buiten de catalogus. Altijd met
+//   de eigen sleutel router_studio_key uit de kluis (gelezen op het moment van de aanroep, nooit gelogd); zonder sleutel staat de flow
+//   op "wacht op sleutel" en gaat er niets naar Router. Beeld: POST /v1/images/generations met Prefer: respond-async, pollen op de
+//   Location (of /v1/images/generations/<id>), dan outputs[].content_url ophalen. Die vorm komt uit een openbaar voorbeeld
+//   (github.com/RonnyPfannschmidt/homelab-images, routerimages.py) en GET-metingen op 21-10; de eerste echte aanroep meet hem.
+//   Muziek (mode music_generation): de route documenteert Router niet; die flow staat op "nog niet klaar" tot hij gemeten is.
+// - piper: Piper op de pod (/opt/data/piper, stem nl_NL-ronnie-medium, CPU), tekst → WAV. Proefstem, geen GPU.
+// - comfyui: rechtstreeks ComfyUI (https://d9ce03380.<olares>), alleen als terugval. Elke flow gaat vóór elk indienen door de
+//   knopentoets (KNOPEN hieronder: vaste lijst in de pod, niet in de flow) en /object_info; Save → Preview; de taak wacht als ComfyUI
+//   iets anders doet (gedeeld met Davids browser) en onderbreekt alleen zijn eigen prompt_id; /free alleen bij een lege rij.
+//
+// GRENZEN. 1 taak tegelijk, hooguit 5 in de rij, 30 per dag (Europe/Amsterdam), max_seconden per flow. Een flow op "proef" draait
+// alleen met een verse vingerafdruk per keer; Activeer (ook met vingerafdruk) zet hem op actief. Resultaten via de BESTAANDE
+// bewaarfunctie van de tab Bestanden (deps.bewaar = appBewaar in server.js: jobmap van 16 hex, b/<n>, meta.json, 30 dagen).
+// Per taak één auditregel zonder prompttekst. ComfyUI, FlowStudio en Router worden nooit gestart, gestopt of gewijzigd.
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { spawn } = require('child_process');
+
+const GRENS = { rij: 5, per_dag: 30, tekst_max: 2000, aantal_max: 4, bestand_max: 20 * 1024 * 1024, taken_bewaar_ms: 30 * 86400000 };
+const ROUTER_MODELLEN_MS = 60 * 1000;
+const OBJECT_INFO_MS = 10 * 60 * 1000;
+const COMFY_WACHT_MAX_MS = 30 * 60 * 1000;    // zo lang wacht een taak op een lege ComfyUI-wachtrij / genoeg vrij VRAM
+const COMFY_WACHT_STAP_MS = 15 * 1000;
+const COMFY_FREE_NA_MS = 10 * 60 * 1000;
+const POLL_MS = 3000;
+
+// ── Knopentoets (bouwplan § 5.3 stap 2, § 7; Fable M2). Vaste lijst IN DE POD: een flow kan zichzelf niet toestaan. ──
+// Toegestaan: kern (python_module "nodes" of "comfy_extras.*") minus de weigerlijst, plus custom nodes op naam uit CUSTOM_WIT
+// (leeg: David noemt ze zelf). Geweigerd: comfy_api_nodes.* (betaald via Comfy-krediet), alles met file/path/url/download/eval/exec
+// e.d. in de naam, de gemeten voorbeelden van 21-10, en elke Save-knoop zonder Preview-tegenhanger (schrijft in ComfyUI's uitvoermap).
+const KNOPEN = {
+  weiger_naam: ['EvaluateStrings', 'StringEvaluate', 'LoadTextFile', 'SaveTextFile', 'ServerDownloader', 'LoadImageFromUrl', 'ReadJSONFile',
+    'VHS_LoadVideoPath', 'VHS_LoadAudio', 'VHS_LoadImagePath', 'VHS_LoadImagesPath', 'VHS_LoadVideoFFmpegPath'],
+  weiger_patroon: /(file|path|url|download|upload|eval|exec|shell|script|python|http|request|webhook|socket|subprocess|command|save|write|export)/i,
+  // knopen met output_node die wél mogen: ze schrijven alleen in ComfyUI's temp-map (Preview) of tonen tekst (Fable wv707 #1)
+  preview_ok: ['PreviewImage', 'PreviewAudio', 'PreviewAny'],
+  save_naar_preview: { SaveImage: 'PreviewImage', SaveAudio: 'PreviewAudio' },
+  custom_wit: [],
+};
+function knoopToets(klasse, info) {
+  if (typeof klasse !== 'string' || !/^[A-Za-z0-9_+.\- ]{1,120}$/.test(klasse)) return 'ongeldige knoopnaam';
+  if (KNOPEN.weiger_naam.indexOf(klasse) >= 0) return 'knoop ' + klasse + ' staat op de weigerlijst';
+  if (KNOPEN.weiger_patroon.test(klasse)) return 'knoop ' + klasse + ' kan bestanden, adressen of code raken';
+  const k = info && info[klasse];
+  if (!k) return 'knoop ' + klasse + ' bestaat niet in deze ComfyUI';
+  // elke uitvoerknoop buiten de Preview-lijst schrijft in ComfyUI's uitvoermap (SaveVideo, CheckpointSave, VAESave …)
+  if (k.output_node === true && KNOPEN.preview_ok.indexOf(klasse) < 0) return 'knoop ' + klasse + ' schrijft in ComfyUI\'s uitvoermap';
+  const mod = String(k.python_module || '');
+  if (mod === 'comfy_api_nodes' || mod.indexOf('comfy_api_nodes.') === 0) return 'knoop ' + klasse + ' is een betaalde partnerknoop';
+  if (mod === 'nodes' || mod.indexOf('comfy_extras.') === 0) return null;
+  if (mod.indexOf('custom_nodes.') === 0 && KNOPEN.custom_wit.indexOf(klasse) >= 0) return null;
+  return 'knoop ' + klasse + ' komt uit een pakket buiten de witte lijst (' + mod.slice(0, 60) + ')';
+}
+// Veldtypen tegen /object_info. Een link ([knoop-id, uitgang]) mag altijd (het type controleert ComfyUI); een waarde moet passen.
+function veldToets(klasse, naam, w, info) {
+  const k = info[klasse], inp = k.input || {};
+  const spec = (inp.required && inp.required[naam]) || (inp.optional && inp.optional[naam]);
+  if (Array.isArray(w) && w.length === 2 && typeof w[0] === 'string' && Number.isInteger(w[1])) return null;   // link
+  if (!spec) {
+    const basis = naam.split('.')[0];
+    const bs = (inp.required && inp.required[basis]) || (inp.optional && inp.optional[basis]);
+    if (naam.indexOf('.') > 0 && bs && bs[0] === 'COMFY_DYNAMICCOMBO_V3' && (typeof w !== 'object' || w === null)) return null;
+    return 'veld ' + naam + ' bestaat niet bij ' + klasse;
+  }
+  const t = spec[0], opt = spec[1] || {};
+  if (Array.isArray(t)) return t.indexOf(w) >= 0 ? null : 'waarde van ' + naam + ' staat niet in de keuzelijst';
+  if (t === 'COMBO' || t === 'COMFY_DYNAMICCOMBO_V3') {
+    const o = Array.isArray(opt.options) ? opt.options.map(function (x) { return x && typeof x === 'object' ? x.key : x; }) : null;
+    return !o || o.indexOf(w) >= 0 ? null : 'waarde van ' + naam + ' staat niet in de keuzelijst';
+  }
+  if (t === 'INT') return Number.isInteger(w) ? null : naam + ' moet een geheel getal zijn';
+  if (t === 'FLOAT') return typeof w === 'number' && isFinite(w) ? null : naam + ' moet een getal zijn';
+  if (t === 'BOOLEAN') return typeof w === 'boolean' ? null : naam + ' moet ja/nee zijn';
+  if (t === 'STRING') return typeof w === 'string' && w.length <= 20000 ? null : naam + ' moet tekst zijn';
+  return naam + ' (' + String(t).slice(0, 30) + ') kan alleen via een koppeling';
+}
+// Volledige toets van een API-JSON; herschrijft Save → Preview in de kopie. Geeft { fout } of { prompt }.
+function flowToets(api, info) {
+  if (!api || typeof api !== 'object' || Array.isArray(api)) return { fout: 'flow.json is geen ComfyUI-API-export' };
+  const uit = {};
+  const ids = Object.keys(api);
+  if (!ids.length || ids.length > 300) return { fout: 'flow.json heeft geen of te veel knopen' };
+  for (const id of ids) {
+    const n = api[id];
+    if (!n || typeof n.class_type !== 'string' || !n.inputs || typeof n.inputs !== 'object') return { fout: 'knoop ' + id + ' is onvolledig' };
+    const klasse = KNOPEN.save_naar_preview[n.class_type] || n.class_type;
+    const f = knoopToets(klasse, info);
+    if (f) return { fout: f };
+    const inputs = {};
+    for (const naam of Object.keys(n.inputs)) {
+      if (KNOPEN.save_naar_preview[n.class_type] && naam === 'filename_prefix') continue;   // Preview kent geen bestandsnaam
+      const fv = veldToets(klasse, naam, n.inputs[naam], info);
+      if (fv) return { fout: 'knoop ' + id + ': ' + fv };
+      inputs[naam] = n.inputs[naam];
+    }
+    for (const naam of Object.keys(n.inputs)) {
+      const w = n.inputs[naam];
+      if (Array.isArray(w) && w.length === 2 && typeof w[0] === 'string' && !api[w[0]]) return { fout: 'knoop ' + id + ' verwijst naar een knoop die er niet is' };
+    }
+    uit[id] = { class_type: klasse, inputs: inputs };
+  }
+  return { prompt: uit };
+}
+
+function hex16() { return crypto.randomBytes(8).toString('hex'); }
+function dagNL(t) { return new Date(t).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
+function schoon(t, max) { return String(t == null ? '' : t).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').slice(0, max); }
+// Foutteksten van buiten door een filter voor ze in een log of de app komen (sleutelachtige reeksen weg).
+function foutTekst(t) {
+  return schoon(t, 300).replace(/(Bearer\s+)\S+/gi, '$1[weg]').replace(/\b(sk|rk|key|tok)[-_][A-Za-z0-9_-]{8,}/gi, '[weg]')
+    .replace(/[A-Za-z0-9_-]{32,}/g, '[weg]');
+}
+// Vaste FlowStudio-labels in gewone taal; onbekende labels blijven zoals David ze in FlowStudio zette.
+const LABEL_NL = { 'Text (User Prompt)': 'Wat wil je zien?', 'Batch generate': 'Aantal', Megapixels: 'Grootte (megapixels)',
+  'Negative Prompt (empty = reference default)': 'Wat wil je níet zien? (leeg = standaard)', 'Music description': 'Beschrijving van de muziek',
+  Lyrics: 'Songtekst', 'Duration (sec)': 'Duur (seconden)' };
+const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'audio/wav': 'wav', 'audio/x-wav': 'wav',
+  'audio/wave': 'wav', 'audio/mpeg': 'mp3', 'audio/flac': 'flac', 'audio/ogg': 'ogg', 'video/mp4': 'mp4', 'video/webm': 'webm' };
+
+function maak(deps) {
+  const DIR = deps.dir;
+  const FLOWS = path.join(DIR, 'flows');
+  const WERK = path.join(DIR, 'werk');
+  const TAKEN = path.join(DIR, 'taken.json');
+  const AUDIT = path.join(DIR, 'audit.jsonl');
+  const ROUTER = String(deps.routerUrl || 'https://f3395cd5.primumnonnocere.olares.com').replace(/\/+$/, '');
+  const COMFY = String(deps.comfyUrl || 'https://d9ce03380.primumnonnocere.olares.com').replace(/\/+$/, '');
+  const PIPER = deps.piper || { bin: '/opt/data/piper/piper', model: '/opt/data/piper/nl_NL-ronnie-medium.onnx', data: '/opt/data/piper/espeak-ng-data' };
+  const doeFetch = deps.fetch || fetch;
+  const klok = deps.nu || Date.now;
+  const T = Object.assign({ poll: POLL_MS, wachtStap: COMFY_WACHT_STAP_MS, wachtMax: COMFY_WACHT_MAX_MS }, deps.tempo || {});   // tempo: alleen de toets
+  const log = deps.log || function () {};
+  const fout = deps.fout || function () {};
+  const st = { taken: [], rij: [], bezig: null, lokaal: { sleutel: null, flows: {} }, router: { op: 0, modellen: null, fout: null },
+    info: { op: 0, d: null }, comfyLaatst: 0, comfyFreeGedaan: true, timer: null };
+
+  // ── opslag ──
+  function mkdir(p) { fs.mkdirSync(p, { recursive: true, mode: 0o700 }); }
+  function schrijfJson(f, data) { mkdir(path.dirname(f)); const t = f + '.nieuw.' + process.pid; fs.writeFileSync(t, JSON.stringify(data, null, 1), { mode: 0o600 }); fs.renameSync(t, f); }
+  function bewaarTaken() {
+    const grens = klok() - GRENS.taken_bewaar_ms;
+    st.taken = st.taken.filter(function (t) { return Date.parse(t.gemaakt) > grens; }).slice(-300);
+    try { schrijfJson(TAKEN, { versie: 1, taken: st.taken }); } catch (e) { fout('studio-taken', e); }
+  }
+  function audit(o) {
+    try { mkdir(DIR); fs.appendFileSync(AUDIT, JSON.stringify(Object.assign({ t: new Date(klok()).toISOString() }, o)) + '\n', { mode: 0o600 }); }
+    catch (e) { fout('studio-audit', e); }
+  }
+  (function laad() {
+    try {
+      const j = JSON.parse(fs.readFileSync(TAKEN, 'utf8'));
+      st.taken = Array.isArray(j.taken) ? j.taken : [];
+    } catch (e) { st.taken = []; }
+    // Na een herstart loopt er niets meer: wat wachtte of bezig was, telt als onderbroken (nooit vanzelf opnieuw).
+    let n = 0;
+    st.taken.forEach(function (t) {
+      if (t.status === 'wacht' || t.status === 'bezig') { t.status = 'onderbroken'; t.reden = 'de pod herstartte tijdens deze taak'; t.eind = new Date(klok()).toISOString(); n++; }
+    });
+    if (n) bewaarTaken();
+    try { fs.rmSync(WERK, { recursive: true, force: true }); } catch (e) {}
+  })();
+
+  // ── catalogus: lokale flows (map per flow; flow.yaml in JSON-vorm, want JSON is geldige YAML en de pod heeft geen YAML-lezer) ──
+  function lokaleFlows() {
+    let namen = [];
+    try { namen = fs.readdirSync(FLOWS).filter(function (n) { return /^[a-z0-9][a-z0-9-]{1,40}$/.test(n); }).sort(); } catch (e) { namen = []; }
+    // herladen op bestandstijd (§ 5.2, Fable K13): sleutel = namen + mtimes; ongewijzigd = uit het geheugen
+    const delen = namen.map(function (n) {
+      let a = 0, b = 0;
+      try { a = fs.statSync(path.join(FLOWS, n, 'flow.yaml')).mtimeMs; } catch (e) {}
+      try { b = fs.statSync(path.join(FLOWS, n, 'flow.json')).mtimeMs; } catch (e) {}
+      return n + ':' + a + ':' + b;
+    });
+    const sleutel = delen.join('|');
+    if (st.lokaal.sleutel === sleutel) return st.lokaal.flows;
+    const flows = {};
+    for (const n of namen) {
+      const f = { id: n, bron: 'lokaal', fout: null };
+      try {
+        const y = JSON.parse(fs.readFileSync(path.join(FLOWS, n, 'flow.yaml'), 'utf8'));
+        Object.assign(f, {
+          titel: schoon(y.titel, 80) || n, uitleg: schoon(y.uitleg, 300), motor: String(y.motor || ''), status: String(y.status || 'proef'),
+          uitvoer: String(y.uitvoer || 'beeld'), velden: Array.isArray(y.velden) ? y.velden : [], prijs: y.prijs || null,
+          max_seconden: Math.max(10, Math.min(1800, Number(y.max_seconden) || 600)), gpu_mib_schatting: Math.max(0, Number(y.gpu_mib_schatting) || 0),
+          tijd: schoon(y.tijd, 80), max_per_dag: Math.max(0, Math.min(GRENS.per_dag, Number(y.max_per_dag) || 0)),
+        });
+        if (['comfyui', 'piper'].indexOf(f.motor) < 0) f.fout = 'onbekende motor';
+        if (['proef', 'actief', 'uit'].indexOf(f.status) < 0) f.fout = 'onbekende status';
+        if (f.motor === 'comfyui') f.api = JSON.parse(fs.readFileSync(path.join(FLOWS, n, 'flow.json'), 'utf8'));
+        f.velden = f.velden.map(veldNorm).filter(Boolean);
+      } catch (e) { f.fout = 'flow.yaml of flow.json onleesbaar'; f.titel = f.titel || n; f.status = 'uit'; }
+      flows[n] = f;
+    }
+    st.lokaal = { sleutel: sleutel, flows: flows };
+    return flows;
+  }
+  // Een veld uit flow.yaml of uit flowstudio.parameters naar één vorm.
+  function veldNorm(v) {
+    if (!v || typeof v !== 'object') return null;
+    const naam = String(v.naam || v.key || '');
+    if (!/^[A-Za-z0-9_:.\-]{1,80}$/.test(naam)) return null;
+    let soort = String(v.soort || v.type || 'tekst');
+    soort = { text: 'tekst', textarea: 'tekstvak', number: 'getal', select: 'keuze', batch: 'aantal', boolean: 'schakel' }[soort] || soort;
+    if (['tekst', 'tekstvak', 'getal', 'keuze', 'aantal', 'schakel', 'seed'].indexOf(soort) < 0) return null;
+    const o = { naam: naam, label: schoon(v.label || naam, 80), soort: soort, verplicht: v.verplicht === true || v.required === true,
+      meer: v.meer === true, standaard: v.standaard !== undefined ? v.standaard : v.default };
+    if (soort === 'keuze') {
+      const opties = (Array.isArray(v.opties) ? v.opties : Array.isArray(v.options) ? v.options : []).map(function (x) {
+        return x && typeof x === 'object' ? { label: schoon(x.label, 60), waarde: x.waarde !== undefined ? x.waarde : x.value } : { label: schoon(x, 60), waarde: x };
+      }).filter(function (x) { return ['string', 'number', 'boolean'].indexOf(typeof x.waarde) >= 0; }).slice(0, 40);
+      if (!opties.length) return null;
+      o.opties = opties;
+    }
+    if (soort === 'getal') { o.min = isFinite(Number(v.min)) ? Number(v.min) : null; o.max = isFinite(Number(v.max)) ? Number(v.max) : null; o.stap = Number(v.stap) || null; }
+    if (soort === 'aantal') { o.min = 1; o.max = GRENS.aantal_max; if (o.standaard == null) o.standaard = 1; }
+    if (soort === 'tekst' || soort === 'tekstvak') o.max = Math.min(GRENS.tekst_max, Number(v.max) || GRENS.tekst_max);
+    if (v.pad !== undefined) o.pad = (Array.isArray(v.pad) ? v.pad : [v.pad]).map(String).filter(function (p) { return /^[A-Za-z0-9_:]{1,40}\.inputs\.[A-Za-z0-9_.]{1,80}$/.test(p); });
+    if (v.associateRole === 'prompt' || v.rol === 'prompt') o.rol = 'prompt';
+    return o;
+  }
+
+  // ── catalogus: Router (FlowStudio-projecten als model) ──
+  // De catalogus (alleen lezen) gaat wél naar Router, ook zonder sleutel; met sleutel gaat die mee (Fable wv707 #13).
+  async function routerModellen(vers, sleutel) {
+    if (!vers && st.router.modellen && klok() - st.router.op < ROUTER_MODELLEN_MS) return st.router.modellen;
+    try {
+      const r = await doeFetch(ROUTER + '/v1/models', { redirect: 'manual', headers: sleutel ? { Authorization: 'Bearer ' + sleutel } : {}, signal: AbortSignal.timeout(15000) });
+      if (!r.ok) { await r.text().catch(function () {}); throw new Error('Router gaf HTTP ' + r.status); }
+      const j = await r.json();
+      st.router = { op: klok(), modellen: Array.isArray(j && j.data) ? j.data : [], fout: null };
+    } catch (e) {
+      st.router.fout = foutTekst(e && e.message || e);
+      st.router.op = klok();
+      if (!st.router.modellen) st.router.modellen = [];
+    }
+    return st.router.modellen;
+  }
+  function routerFlow(m, sleutel, sleutelFout) {
+    const id = String(m && m.id || '');
+    const mm = /^Olares\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/.exec(id);
+    if (!mm || m.owned_by !== 'Olares' || !m.flowstudio || !Array.isArray(m.flowstudio.parameters)) return null;
+    const mode = String(m.mode || '');
+    const uitvoer = mode === 'image_generation' ? 'beeld' : mode === 'music_generation' ? 'muziek' : mode === 'video_generation' ? 'video' : null;
+    if (!uitvoer) return null;
+    const velden = m.flowstudio.parameters.map(veldNorm).filter(Boolean);
+    velden.forEach(function (v) {
+      if (LABEL_NL[v.label]) v.label = LABEL_NL[v.label];
+      // optionele tekstvelden naast de prompt (zoals de negatieve prompt) onder "Meer": het formulier blijft kort
+      if (!v.verplicht && v.rol !== 'prompt' && (v.soort === 'tekst' || v.soort === 'tekstvak')) v.meer = true;
+    });
+    if ((m.canonical_fields || []).indexOf('seed') >= 0 && !velden.some(function (v) { return v.naam === 'seed'; }))
+      velden.push({ naam: 'seed', label: 'Seed (zelfde getal = zelfde uitkomst)', soort: 'seed', meer: true, standaard: null, verplicht: false });
+    let reden = null;
+    if (mode !== 'image_generation') reden = 'nog niet klaar: de ' + uitvoer + 'route van Router is nog niet gemeten';
+    else if (m.readiness && m.readiness !== 'ready') reden = 'FlowStudio meldt: ' + schoon(m.readiness, 40);
+    else if (sleutelFout) reden = 'de kluis is nu niet bereikbaar; de Router-sleutel kan niet gelezen worden';
+    else if (!sleutel) reden = 'wacht op sleutel';
+    return { id: 'fs-' + mm[1], bron: 'router', model: id, titel: schoon(m.name, 80) || id, uitleg: 'FlowStudio-project op Olares', motor: 'router',
+      status: 'actief', uitvoer: uitvoer, velden: velden, max_seconden: 900, gpu_mib_schatting: 0, reden: reden, tijd: uitvoer === 'beeld' ? '± 1 min; eerste keer langer' : '' };
+  }
+  function flowUit(f) {
+    const klaar = !f.fout && !f.reden && f.status !== 'uit';
+    return { id: f.id, titel: f.titel, uitleg: f.uitleg || '', motor: f.motor,
+      motor_naam: f.motor === 'router' ? 'lokaal · FlowStudio via Router' : f.motor === 'piper' ? 'lokaal · Piper op de pod (CPU)' : 'lokaal · ComfyUI rechtstreeks',
+      status: f.status, uitvoer: f.uitvoer, klaar: klaar, reden: f.fout || f.reden || (f.status === 'uit' ? 'staat uit' : null),
+      prijs: 'gratis', tijd: f.tijd || '', vers_per_keer: f.status === 'proef',
+      velden: (f.velden || []).map(function (v) { const o = Object.assign({}, v); delete o.pad; return o; }) };
+  }
+  async function catalogus(vers) {
+    let sleutelFout = false;
+    const sleutel = await deps.sleutel().catch(function (e) { fout('studio-sleutel', e); sleutelFout = true; return null; });
+    const ms = await routerModellen(vers, sleutel);
+    const lijst = [];
+    ms.forEach(function (m) { const f = routerFlow(m, !!sleutel, sleutelFout); if (f) lijst.push(f); });
+    const lok = lokaleFlows();
+    Object.keys(lok).forEach(function (k) { lijst.push(lok[k]); });
+    return { flows: lijst, sleutel: !!sleutel, router_fout: st.router.fout };
+  }
+
+  // ── stand ──
+  function vandaagN() { const d = dagNL(klok()); return st.taken.filter(function (t) { return dagNL(Date.parse(t.gemaakt)) === d; }).length; }
+  function stand() {
+    const maand = dagNL(klok()).slice(0, 7);
+    // alleen de tijd tussen indienen en klaar (niet het wachten op een bezette ComfyUI; Fable wv707 #12)
+    const gpuS = st.taken.filter(function (t) { return t.gpu_s > 0 && dagNL(Date.parse(t.gemaakt)).slice(0, 7) === maand; })
+      .reduce(function (s, t) { return s + t.gpu_s; }, 0);
+    return { vandaag: vandaagN(), per_dag: GRENS.per_dag, in_rij: st.rij.length, rij_max: GRENS.rij, bezig: st.bezig ? st.bezig.id : null,
+      gpu_minuten_maand: Math.round(gpuS / 6) / 10, kosten_maand: 0 };
+  }
+  function taakUit(t) {
+    return { id: t.id, flow: t.flow, titel: t.titel, motor: t.motor, uitvoer: t.uitvoer, status: t.status, fase: t.fase || null, procent: t.procent == null ? null : t.procent,
+      reden: t.reden || null, gemaakt: t.gemaakt, start: t.start || null, eind: t.eind || null, duur_s: t.duur_s || null, velden: t.velden,
+      bestanden: t.bestanden || [], plek_in_rij: t.status === 'wacht' ? st.rij.indexOf(t.id) + 1 : null, meting: t.meting || null };
+  }
+
+  // ── invoer ──
+  function waardenVan(f, invoer) {
+    const uit = {};
+    invoer = invoer && typeof invoer === 'object' ? invoer : {};
+    for (const v of f.velden) {
+      let w = invoer[v.naam];
+      if (w === undefined || w === null || w === '') w = v.standaard;
+      if (v.soort === 'tekst' || v.soort === 'tekstvak') {
+        w = schoon(w == null ? '' : w, 20000);
+        if (w.length > v.max) return { fout: v.label + ': hooguit ' + v.max + ' tekens' };
+        if (v.verplicht && !w.trim()) return { fout: v.label + ' is leeg' };
+      } else if (v.soort === 'keuze') {
+        const o = v.opties.find(function (x) { return String(x.waarde) === String(w); });
+        if (!o) return { fout: v.label + ': kies een van de opties' };
+        w = o.waarde;
+      } else if (v.soort === 'getal' || v.soort === 'aantal') {
+        w = Number(w);
+        if (!isFinite(w)) return { fout: v.label + ' moet een getal zijn' };
+        if (v.min != null && w < v.min) return { fout: v.label + ': minstens ' + v.min };
+        if (v.max != null && w > v.max) return { fout: v.label + ': hooguit ' + v.max };
+        if (v.soort === 'aantal') w = Math.round(w);
+      } else if (v.soort === 'seed') {
+        w = (w === undefined || w === null || w === '') ? crypto.randomInt(0, 2 ** 47) : Number(w);
+        if (!Number.isSafeInteger(w) || w < 0) return { fout: 'seed moet een geheel getal ≥ 0 zijn' };
+      } else if (v.soort === 'schakel') {
+        w = w === true || w === 'true' || w === 1;
+      }
+      uit[v.naam] = w;
+    }
+    return { waarden: uit };
+  }
+
+  // ── POST /app/studio/maak ──
+  // ctx: { versOk(): bool (synchroon), versVerbruik(): void, apparaat }
+  async function maakTaak(d, ctx) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief; Studio werkt alleen op de actieve kant' };
+    const flowId = String(d.flow || '');
+    if (!/^[a-z0-9][a-z0-9-]{1,48}$/.test(flowId)) return { status: 400, fout: 'onbekende flow' };
+    const beurt = String(d.beurt_id || '');
+    if (!/^[A-Za-z0-9-]{8,64}$/.test(beurt)) return { status: 400, fout: 'beurt_id ontbreekt' };
+    const al = st.taken.find(function (t) { return t.beurt_id === beurt; });
+    if (al) return { status: 200, taak: taakUit(al), al: true };
+    const c = await catalogus(false);
+    const f = c.flows.find(function (x) { return x.id === flowId; });
+    if (!f) return { status: 404, fout: 'deze flow bestaat niet (meer)' };
+    if (f.fout || f.reden || f.status === 'uit') return { status: 409, fout: 'deze flow kan nu niet: ' + (f.fout || f.reden || 'staat uit') };
+    const w = waardenVan(f, d.velden);
+    if (w.fout) return { status: 400, fout: w.fout };
+    // vanaf hier synchroon tot de taak in de rij staat (twee tabbladen = niet twee keer dezelfde vingerafdruk)
+    if (st.taken.find(function (t) { return t.beurt_id === beurt; })) return { status: 200, taak: taakUit(st.taken.find(function (t) { return t.beurt_id === beurt; })), al: true };
+    if (vandaagN() >= GRENS.per_dag) return { status: 429, fout: 'vandaag al ' + GRENS.per_dag + ' taken gemaakt; morgen weer' };
+    if (st.rij.length >= GRENS.rij) return { status: 429, fout: 'er staan al ' + GRENS.rij + ' taken in de rij; wacht tot er een klaar is' };
+    const flowMax = Number(f.max_per_dag) || 0, dag = dagNL(klok());
+    if (flowMax > 0 && st.taken.filter(function (t) { return t.flow === f.id && dagNL(Date.parse(t.gemaakt)) === dag; }).length >= flowMax)
+      return { status: 429, fout: 'deze flow heeft vandaag al ' + flowMax + ' taken gehad; morgen weer' };
+    if (f.status === 'proef') {
+      if (!ctx.versOk()) return { status: 403, fout: 'deze flow is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
+      ctx.versVerbruik();
+    }
+    const t = { id: hex16(), beurt_id: beurt, flow: f.id, titel: f.titel, motor: f.motor, uitvoer: f.uitvoer, status: 'wacht', fase: 'in de rij',
+      procent: null, gemaakt: new Date(klok()).toISOString(), velden: w.waarden, bestanden: [], proef: f.status === 'proef', apparaat: ctx.apparaat || null };
+    st.taken.push(t);
+    st.rij.push(t.id);
+    bewaarTaken();
+    setImmediate(volgende);
+    return { status: 200, taak: taakUit(t) };
+  }
+
+  // ── wachtrij: één tegelijk ──
+  function volgende() {
+    if (st.bezig || !st.rij.length) return;
+    const id = st.rij.shift();
+    const t = st.taken.find(function (x) { return x.id === id; });
+    if (!t || t.status !== 'wacht') return setImmediate(volgende);
+    const ctl = { gestopt: false, stop: null };
+    st.bezig = { id: id, ctl: ctl };
+    t.status = 'bezig'; t.start = new Date(klok()).toISOString(); t.fase = 'start';
+    bewaarTaken();
+    // Eindafhandeling in try/finally: wat er ook gooit (schijf vol, log), st.bezig komt altijd vrij en het proces krijgt nooit een
+    // onafgehandelde afwijzing (Fable wv707 #5).
+    voer(t, ctl).then(function (r) { return r; }, function (e) { return { fout: foutTekst(e && e.message || e) }; }).then(function (r) { try {
+      t.eind = new Date(klok()).toISOString();
+      t.duur_s = Math.round((Date.parse(t.eind) - Date.parse(t.start)) / 1000);
+      if (ctl.gestopt) { t.status = 'gestopt'; t.reden = r && r.noot ? r.noot : 'gestopt op je verzoek'; }
+      else if (r && r.ok) { t.status = 'klaar'; t.procent = 100; }
+      else { t.status = 'mislukt'; t.reden = (r && r.fout) || 'onbekende fout'; }
+      t.fase = null;
+      try { fs.rmSync(path.join(WERK, t.id), { recursive: true, force: true }); } catch (e) {}
+      audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: t.status, duur_s: t.duur_s, bestanden: (t.bestanden || []).length, kosten: 0,
+        proef: !!t.proef, reden: t.status === 'klaar' ? null : String(t.reden || '').slice(0, 160) });
+      log('studio taak=' + t.id + ' flow=' + t.flow + ' motor=' + t.motor + ' uitkomst=' + t.status + ' duur_s=' + t.duur_s);
+    } catch (e) { fout('studio-afronden', e); } finally {
+      st.bezig = null;
+      try { bewaarTaken(); } catch (e) {}
+      setImmediate(volgende);
+    } }).catch(function (e) { fout('studio-volgende', e); st.bezig = null; });
+  }
+  async function voer(t, ctl) {
+    const c = await catalogus(false);
+    const f = c.flows.find(function (x) { return x.id === t.flow; });
+    if (!f) return { fout: 'de flow is intussen weg' };
+    const out = path.join(WERK, t.id, 'out');
+    mkdir(out);
+    let r;
+    if (f.motor === 'piper') r = await motorPiper(t, f, out, ctl);
+    else if (f.motor === 'router') r = await motorRouter(t, f, out, ctl);
+    else if (f.motor === 'comfyui') r = await motorComfy(t, f, out, ctl);
+    else return { fout: 'onbekende motor' };
+    if (!r || !r.ok || ctl.gestopt) return r;
+    // bewaren via de bestaande bewaarfunctie van Bestanden (Fable M1)
+    const m = deps.bewaar(t.id, out, { soort: 'studio', label: f.titel, ok: true, app: true,
+      studio: { flow: f.id, motor: f.motor, kosten: 0, duur_s: Math.round((klok() - Date.parse(t.start)) / 1000) } });
+    if (!m || !m.bestanden || !m.bestanden.length) return { fout: m && m.vol ? 'de opslag op de pod zit vol (2 GB); er is niets bewaard' : 'het resultaat kon niet bewaard worden' };
+    t.bestanden = m.bestanden.map(function (b) { return { n: b.n, naam: b.naam, grootte: b.grootte }; });
+    return { ok: true };
+  }
+
+  // ── motor piper ──
+  function motorPiper(t, f, out, ctl) {
+    return new Promise(function (klaar) {
+      const tekst = String(t.velden.tekst || Object.values(t.velden).find(function (x) { return typeof x === 'string'; }) || '').trim();
+      if (!tekst) return klaar({ fout: 'geen tekst' });
+      t.fase = 'inspreken'; t.procent = null;
+      const doel = path.join(out, 'bandje.wav');
+      let k;
+      try {
+        k = spawn(PIPER.bin, ['--model', PIPER.model, '--espeak_data', PIPER.data, '--output_file', doel], {
+          env: { LD_LIBRARY_PATH: path.dirname(PIPER.bin), PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, stdio: ['pipe', 'ignore', 'pipe'] });
+      } catch (e) { return klaar({ fout: 'Piper start niet' }); }
+      let err = '', klaarGemeld = false;
+      const eind = function (r) { if (klaarGemeld) return; klaarGemeld = true; clearTimeout(tm); klaar(r); };
+      const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind({ fout: 'Piper deed er langer over dan ' + f.max_seconden + ' s' }); }, f.max_seconden * 1000);
+      ctl.stop = function () { try { k.kill('SIGKILL'); } catch (e) {} };
+      k.stderr.on('data', function (b) { if (err.length < 4000) err += b; });
+      k.on('error', function () { eind({ fout: 'Piper start niet' }); });
+      k.on('close', function (code) {
+        if (ctl.gestopt) return eind({ fout: 'gestopt' });
+        let g = 0; try { g = fs.statSync(doel).size; } catch (e) {}
+        if (code !== 0 || g < 100) return eind({ fout: 'Piper faalde (code ' + code + ')' });
+        eind({ ok: true });
+      });
+      k.stdin.on('error', function () {});
+      k.stdin.end(tekst.replace(/\s*\n\s*/g, ' ') + '\n');
+    });
+  }
+
+  // ── motor router (FlowStudio via Olares Router; altijd met eigen sleutel) ──
+  // Router-pad uit een Location of content_url: een pad /v1/… of een absolute URL (welke host ook) met zo'n pad. Het pad gaat
+  // altijd naar ROUTER zelf: de sleutel gaat nooit naar een ander adres (Fable wv707 #3d).
+  function routerPad(u) {
+    let p = String(u || '');
+    const m = /^https?:\/\/[^/]+(\/.*)$/i.exec(p);
+    if (m) p = m[1];
+    if (!/^\/v1\/[A-Za-z0-9_\-/.?=&%]{1,300}$/.test(p) || p.indexOf('..') >= 0 || p.indexOf('//') >= 0) return null;
+    return p;
+  }
+  const KLAAR = ['completed', 'succeeded', 'success', 'done', 'finished'];
+  const FOUT = ['failed', 'error', 'cancelled', 'canceled', 'expired', 'rejected'];
+  async function motorRouter(t, f, out, ctl) {
+    const sleutel = await deps.sleutel();
+    if (!sleutel) return { fout: 'de Router-sleutel ontbreekt (router_studio_key)' };
+    if (f.uitvoer !== 'beeld') return { fout: 'deze soort flow kan Studio nog niet maken' };
+    const params = {};
+    let prompt = '', n = 1, seed = null;
+    for (const v of f.velden) {
+      const w = t.velden[v.naam];
+      if (v.soort === 'aantal') { n = w; continue; }
+      if (v.naam === 'seed' && v.soort === 'seed') { seed = w; continue; }
+      if (v.rol === 'prompt') prompt = w;
+      params[v.naam] = w;
+    }
+    const body = { model: f.model, prompt: prompt, n: n, flowstudio: { params: params } };
+    if (seed != null) body.seed = seed;
+    const kop = { Authorization: 'Bearer ' + sleutel, 'Content-Type': 'application/json', Prefer: 'respond-async' };
+    t.fase = 'indienen bij Router';
+    const ac = new AbortController();
+    ctl.stop = function () { ac.abort(); };
+    const grens = klok() + f.max_seconden * 1000;
+    // redirect manual: een 3xx naar elders wordt nooit met de sleutel gevolgd (Fable wv707 #3)
+    const haal = function (pad, extra, ms) {
+      return doeFetch(ROUTER + pad, Object.assign({ redirect: 'manual', headers: { Authorization: 'Bearer ' + sleutel }, signal: AbortSignal.any([ac.signal, AbortSignal.timeout(ms)]) }, extra || {}));
+    };
+    let r = await haal('/v1/images/generations', { method: 'POST', headers: kop, body: JSON.stringify(body) }, 60000);
+    let job = await r.json().catch(function () { return null; });
+    if (!r.ok || !job || typeof job !== 'object') return { fout: 'Router weigerde (' + r.status + '): ' + foutTekst(job && job.error ? (job.error.message || job.error.code) : '') };
+    t.gpu_start = klok();
+    const pollPad = routerPad(r.headers.get('location')) || (job.id && /^[A-Za-z0-9_-]{1,100}$/.test(String(job.id)) ? '/v1/images/generations/' + job.id : null);
+    t.meting = { router_id: job.id ? String(job.id).slice(0, 100) : null };
+    const uitvoer = function (j) { return Array.isArray(j.outputs) && j.outputs.length ? j.outputs : Array.isArray(j.data) && j.data.length ? j.data : null; };
+    // Klaar = een klaar-status, of (zonder status) uitvoer erin. Fout = een fout-status. Al het andere: blijven pollen tot de grens
+    // (een onbekende tussenstatus mag nooit "mislukt" geven terwijl de GPU doorwerkt; Fable wv707 #3a/b).
+    for (;;) {
+      const status = String(job.status || '').toLowerCase();
+      if (FOUT.indexOf(status) >= 0) return { fout: 'FlowStudio meldt: ' + foutTekst(job.error && (job.error.message || job.error.code || job.error) || status) };
+      if (KLAAR.indexOf(status) >= 0 || (!status && uitvoer(job))) break;
+      if (ctl.gestopt) return { fout: 'gestopt', noot: 'gestopt op je verzoek; de generatie kan in FlowStudio nog even doorlopen' };
+      if (!pollPad) return { fout: 'Router gaf geen taak-id terug (status ' + foutTekst(status || 'leeg') + ')' };
+      if (klok() > grens) return { fout: 'Router was na ' + f.max_seconden + ' s nog niet klaar; de generatie kan in FlowStudio nog doorlopen' };
+      t.fase = status === 'queued' || status === 'pending' ? 'in de rij bij FlowStudio' : 'bezig in FlowStudio';
+      const pr = Number(job.progress);
+      if (isFinite(pr) && pr >= 0) t.procent = Math.round(pr <= 1 ? pr * 100 : Math.min(99, pr));
+      await wacht(T.poll, ctl);
+      if (ctl.gestopt) continue;
+      r = await haal(pollPad, null, 30000);
+      const j = await r.json().catch(function () { return null; });
+      if (!r.ok || !j || typeof j !== 'object') return { fout: 'Router gaf bij het nakijken HTTP ' + r.status };
+      job = j;
+    }
+    t.gpu_s = Math.round((klok() - t.gpu_start) / 1000);
+    const outs = uitvoer(job);
+    if (!outs) return { fout: 'Router gaf geen resultaat terug' };
+    let i = 0;
+    for (const o of outs.slice(0, GRENS.aantal_max)) {
+      i++;
+      t.fase = 'ophalen ' + i + ' van ' + Math.min(outs.length, GRENS.aantal_max);
+      let buf, type;
+      if (o && typeof o.b64_json === 'string') {
+        if (o.b64_json.length > GRENS.bestand_max * 1.4) return { fout: 'resultaat groter dan 20 MB' };
+        buf = Buffer.from(o.b64_json, 'base64'); type = 'image/png';
+      } else {
+        const pad = routerPad(o && (o.content_url || o.url));
+        if (!pad) return { fout: 'Router gaf een onbruikbaar resultaatadres' };
+        const rr = await haal(pad, null, 60000);
+        if (!rr.ok) { await rr.body?.cancel().catch(function () {}); return { fout: 'resultaat ophalen gaf HTTP ' + rr.status }; }
+        type = String(rr.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        buf = await leesMax(rr, GRENS.bestand_max);
+        if (!buf) return { fout: 'resultaat groter dan 20 MB' };
+      }
+      fs.writeFileSync(path.join(out, 'beeld-' + i + '.' + (EXT[type] || 'png')), buf, { mode: 0o600 });
+    }
+    return { ok: true };
+  }
+  // Antwoord lezen met een bovengrens: content-length vooraf, anders tellend afbreken (nooit honderden MB in de heap; Fable wv707 #6).
+  async function leesMax(r, max) {
+    const cl = Number(r.headers.get('content-length'));
+    if (isFinite(cl) && cl > max) { await r.body?.cancel().catch(function () {}); return null; }
+    if (!r.body) return Buffer.from(await r.arrayBuffer());
+    const delen = []; let n = 0;
+    const lezer = r.body.getReader();
+    for (;;) {
+      const { done, value } = await lezer.read();
+      if (done) break;
+      n += value.length;
+      if (n > max) { await lezer.cancel().catch(function () {}); return null; }
+      delen.push(Buffer.from(value));
+    }
+    return Buffer.concat(delen);
+  }
+
+  // ── motor comfyui (terugval; knopentoets vóór elk indienen) ──
+  async function comfyGet(p, ms) {
+    const r = await doeFetch(COMFY + p, { signal: AbortSignal.timeout(ms || 20000) });
+    if (r.status === 503) { await r.text().catch(function () {}); const e = new Error('ComfyUI staat uit; zet hem aan in de ComfyUI Launcher'); e.uit = true; throw e; }
+    if (!r.ok) { await r.text().catch(function () {}); throw new Error('ComfyUI gaf HTTP ' + r.status + ' op ' + p.split('?')[0]); }
+    return r;
+  }
+  async function comfyPost(p, body) {
+    const r = await doeFetch(COMFY + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000) });
+    const j = await r.json().catch(function () { return null; });
+    return { ok: r.ok, status: r.status, j: j };
+  }
+  async function objectInfo() {
+    if (st.info.d && klok() - st.info.op < OBJECT_INFO_MS) return st.info.d;
+    const r = await comfyGet('/object_info', 60000);
+    st.info = { op: klok(), d: await r.json() };
+    return st.info.d;
+  }
+  async function comfyStats() {
+    const j = await (await comfyGet('/system_stats')).json();
+    const dev = j && j.devices && j.devices[0] || {};
+    return { vram_vrij_mib: Math.round((dev.vram_free || 0) / 1048576), vram_totaal_mib: Math.round((dev.vram_total || 0) / 1048576),
+      ram_vrij_mib: Math.round(((j && j.system && j.system.ram_free) || 0) / 1048576) };
+  }
+  async function comfyRij() {
+    const q = await (await comfyGet('/queue')).json();
+    return { lopend: Array.isArray(q.queue_running) ? q.queue_running : [], wacht: Array.isArray(q.queue_pending) ? q.queue_pending : [] };
+  }
+  function vulIn(api, f, waarden) {
+    const kopie = JSON.parse(JSON.stringify(api));
+    for (const v of f.velden) {
+      for (const p of v.pad || []) {
+        const m = /^([^.]+)\.inputs\.(.+)$/.exec(p);
+        if (!m || !kopie[m[1]] || !kopie[m[1]].inputs) return { fout: 'veld ' + v.naam + ' wijst naar een knoop die er niet is' };
+        kopie[m[1]].inputs[m[2]] = waarden[v.naam];
+      }
+    }
+    return { api: kopie };
+  }
+  // Alleen de toets (ook voor de machinekamer bij het nakijken van een nieuwe flow): geeft null of de reden.
+  async function toetsFlow(api) {
+    const info = await objectInfo();
+    const r = flowToets(api, info);
+    return r.fout || null;
+  }
+  async function motorComfy(t, f, out, ctl) {
+    const v = vulIn(f.api, f, t.velden);
+    if (v.fout) return { fout: v.fout };
+    let info;
+    try { info = await objectInfo(); } catch (e) { return { fout: foutTekst(e.message) }; }
+    const toets = flowToets(v.api, info);
+    if (toets.fout) return { fout: 'knopentoets: ' + toets.fout };
+    // Gedeelde ComfyUI (§ 5.3 stap 4, Fable M3): alleen indienen bij een lege wachtrij en genoeg vrij VRAM; anders wachten.
+    const tot = klok() + T.wachtMax;
+    let voor;
+    for (;;) {
+      if (ctl.gestopt) return { fout: 'gestopt' };
+      let q;
+      try { q = await comfyRij(); voor = await comfyStats(); } catch (e) { return { fout: foutTekst(e.message) }; }
+      if (!q.lopend.length && !q.wacht.length && voor.vram_vrij_mib >= f.gpu_mib_schatting) break;
+      if (klok() > tot) return { fout: 'ComfyUI bleef ' + Math.round(T.wachtMax / 60000) + ' min bezig met iets anders; niets ingediend' };
+      t.fase = q.lopend.length || q.wacht.length ? 'wacht: ComfyUI is bezig met iets anders' : 'wacht: te weinig vrij videogeheugen (' + voor.vram_vrij_mib + ' MiB)';
+      await wacht(T.wachtStap, ctl);
+    }
+    const clientId = 'socev-studio-' + t.id;
+    t.meting = { vram_vrij_voor_mib: voor.vram_vrij_mib, ram_vrij_voor_mib: voor.ram_vrij_mib };
+    t.fase = 'indienen bij ComfyUI';
+    let pid = null, klaarWs = false, wsFout = null, ws = null;
+    try {
+      ws = new WebSocket(COMFY.replace(/^http/, 'ws') + '/ws?clientId=' + clientId);
+      ws.onmessage = function (ev) {
+        let m; try { m = JSON.parse(String(ev.data)); } catch (e) { return; }
+        const d = m && m.data || {};
+        if (!pid || d.prompt_id !== pid) return;
+        if (m.type === 'progress' && d.max > 0) { t.procent = Math.max(0, Math.min(99, Math.round(100 * d.value / d.max))); t.fase = 'bezig in ComfyUI'; }
+        else if (m.type === 'executing' && d.node === null) klaarWs = true;
+        else if (m.type === 'execution_success') klaarWs = true;
+        else if (m.type === 'execution_error') wsFout = foutTekst(d.exception_message || 'fout in ComfyUI');
+        else if (m.type === 'execution_interrupted') wsFout = 'onderbroken in ComfyUI';
+      };
+      ws.onerror = function () {};
+    } catch (e) { ws = null; }   // zonder websocket: alleen /history pollen
+    const sluit = function () { try { if (ws) ws.close(); } catch (e) {} };
+    try {
+      const p = await comfyPost('/prompt', { prompt: toets.prompt, client_id: clientId });
+      if (!p.ok || !p.j || !p.j.prompt_id) return { fout: 'ComfyUI weigerde de flow: ' + foutTekst(p.j && p.j.error ? (p.j.error.message || p.j.error.type) : 'HTTP ' + p.status) };
+      pid = String(p.j.prompt_id);
+      t.meting.prompt_id = pid;
+      t.gpu_start = klok();
+      st.comfyLaatst = klok(); st.comfyFreeGedaan = false;
+      const grens = klok() + f.max_seconden * 1000;
+      let hist = null, snel = 0;
+      for (;;) {
+        // na "klaar" van de websocket hooguit 20 snelle peilingen, daarna weer het gewone tempo (Fable wv707 #7)
+        await wacht(klaarWs && snel++ < 20 ? 50 : T.poll, ctl);
+        st.comfyLaatst = klok();
+        if (ctl.gestopt || klok() > grens) {
+          await comfyEigenStop(pid);
+          return ctl.gestopt ? { fout: 'gestopt' } : { fout: 'ComfyUI deed er langer over dan ' + f.max_seconden + ' s; eigen taak gestopt' };
+        }
+        if (wsFout) return { fout: wsFout };
+        try { const h = await (await comfyGet('/history/' + encodeURIComponent(pid))).json(); hist = h && h[pid]; } catch (e) { if (e.uit) return { fout: e.message }; hist = null; }
+        if (hist && hist.status && hist.status.status_str === 'error') return { fout: 'ComfyUI meldt een fout in de flow' };
+        if (hist && hist.outputs && (hist.status ? hist.status.completed !== false : true) && Object.keys(hist.outputs).length) break;
+      }
+      t.gpu_s = Math.round((klok() - t.gpu_start) / 1000);
+      // uitvoer via /view (type temp: Preview); niets blijft in ComfyUI's uitvoermap
+      let i = 0;
+      for (const nid of Object.keys(hist.outputs)) {
+        const o = hist.outputs[nid];
+        const lijst = [].concat(o.images || [], o.audio || []);
+        for (const b of lijst) {
+          if (i >= 8) break;
+          if (!b || typeof b.filename !== 'string' || !/^[A-Za-z0-9_.\- ()]{1,200}$/.test(b.filename)) continue;
+          const q = 'filename=' + encodeURIComponent(b.filename) + '&subfolder=' + encodeURIComponent(String(b.subfolder || '')) + '&type=' + encodeURIComponent(String(b.type || 'temp'));
+          const rr = await comfyGet('/view?' + q, 60000);
+          const buf = await leesMax(rr, GRENS.bestand_max);
+          if (!buf) continue;
+          i++;
+          const ext = (/\.([a-z0-9]{2,5})$/i.exec(b.filename) || [])[1] || 'png';
+          fs.writeFileSync(path.join(out, (o.audio ? 'geluid-' : 'beeld-') + i + '.' + ext.toLowerCase()), buf, { mode: 0o600 });
+        }
+      }
+      if (!i) return { fout: 'ComfyUI gaf geen beeld of geluid terug' };
+      try { const na = await comfyStats(); t.meting.vram_vrij_na_mib = na.vram_vrij_mib; t.meting.ram_vrij_na_mib = na.ram_vrij_mib; } catch (e) {}
+      return { ok: true };
+    } finally { sluit(); }
+  }
+  // Onderbreken alleen als ComFyUI NU onze eigen prompt draait; staat hij nog in de rij, dan alleen die uit de rij halen (Fable M3).
+  async function comfyEigenStop(pid) {
+    try {
+      const q = await comfyRij();
+      const loopt = q.lopend.some(function (x) { return Array.isArray(x) && String(x[1]) === pid; });
+      if (loopt) await comfyPost('/interrupt', { prompt_id: pid });
+      else if (q.wacht.some(function (x) { return Array.isArray(x) && String(x[1]) === pid; })) await comfyPost('/queue', { delete: [pid] });
+    } catch (e) { fout('studio-comfy-stop', e); }
+  }
+  // GPU teruggeven (§ 5.3 stap 8): 10 min na de laatste Studio-taak in ComfyUI, alleen bij een lege rij, één keer.
+  async function vrijRonde() {
+    if (st.comfyFreeGedaan || st.bezig || klok() - st.comfyLaatst < COMFY_FREE_NA_MS) return;
+    try {
+      const q = await comfyRij();
+      if (q.lopend.length || q.wacht.length) return;
+      await comfyPost('/free', { unload_models: true, free_memory: true });
+      st.comfyFreeGedaan = true;
+      log('studio comfy /free na ' + Math.round((klok() - st.comfyLaatst) / 60000) + ' min rust');
+    } catch (e) { if (!(e && e.uit)) fout('studio-free', e); else st.comfyFreeGedaan = true; }
+  }
+  function wacht(ms, ctl) {
+    return new Promise(function (r) {
+      const tm = setTimeout(r, ms);
+      if (ctl) ctl.wek = function () { clearTimeout(tm); r(); };
+    });
+  }
+
+  // ── stop / activeer ──
+  function stopTaak(id) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    const t = st.taken.find(function (x) { return x.id === id; });
+    if (!t) return { status: 404, fout: 'deze taak bestaat niet' };
+    if (t.status === 'wacht') {
+      st.rij = st.rij.filter(function (x) { return x !== id; });
+      t.status = 'gestopt'; t.reden = 'uit de rij gehaald'; t.eind = new Date(klok()).toISOString(); t.fase = null;
+      audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: 'gestopt', duur_s: 0, bestanden: 0, kosten: 0 });
+      bewaarTaken();
+      return { status: 200, taak: taakUit(t) };
+    }
+    if (t.status === 'bezig' && st.bezig && st.bezig.id === id) {
+      const c = st.bezig.ctl;
+      c.gestopt = true; t.fase = 'stoppen';
+      try { if (c.stop) c.stop(); } catch (e) {}
+      try { if (c.wek) c.wek(); } catch (e) {}
+      return { status: 200, taak: taakUit(t) };
+    }
+    return { status: 409, fout: 'deze taak loopt niet meer' };
+  }
+  // Activeer (alleen lokale flows op proef). ctx.versOk/versVerbruik als bij maak.
+  function activeer(id, ctx) {
+    if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief' };
+    const lok = lokaleFlows();
+    const f = lok[id];
+    if (!f) return { status: 404, fout: 'alleen een flow van de machinekamer kan op proef staan' };
+    if (f.fout) return { status: 409, fout: 'deze flow is kapot: ' + f.fout };
+    if (f.status !== 'proef') return { status: 409, fout: 'deze flow staat niet op proef' };
+    if (!ctx.versOk()) return { status: 403, fout: 'bevestig het activeren met je vingerafdruk', vers_nodig: true };
+    ctx.versVerbruik();
+    const p = path.join(FLOWS, id, 'flow.yaml');
+    try {
+      const y = JSON.parse(fs.readFileSync(p, 'utf8'));
+      y.status = 'actief';
+      y.geactiveerd = new Date(klok()).toISOString();
+      const tmp = p + '.nieuw.' + process.pid;
+      fs.writeFileSync(tmp, JSON.stringify(y, null, 1) + '\n', { mode: 0o600 });
+      fs.renameSync(tmp, p);
+    } catch (e) { fout('studio-activeer', e); return { status: 500, fout: 'activeren lukte niet' }; }
+    st.lokaal.sleutel = null;
+    audit({ flow: id, activeer: true, apparaat: ctx.apparaat || null });
+    return { status: 200, flow: flowUit(lokaleFlows()[id] || f) };
+  }
+
+  st.timer = setInterval(function () { vrijRonde().catch(function () {}); }, 60 * 1000);
+  if (st.timer.unref) st.timer.unref();
+
+  return {
+    // GET /app/studio/flows
+    flows: async function () {
+      const c = await catalogus(false);
+      return { flows: c.flows.filter(function (f) { return f.status !== 'uit'; }).map(flowUit), sleutel: c.sleutel,
+        router_bereikbaar: !c.router_fout, stand: stand() };
+    },
+    maak: maakTaak,
+    taken: function () { return { taken: st.taken.slice(-60).reverse().map(taakUit), stand: stand() }; },
+    // licht (Fable wv707 #2): alleen wat wacht of loopt, zonder velden; de app pollt dit tijdens een taak
+    lopend: function () { return { taken: st.taken.filter(function (t) { return t.status === 'wacht' || t.status === 'bezig'; }).map(function (t) { const o = taakUit(t); delete o.velden; return o; }), stand: stand() }; },
+    taak: function (id) { const t = st.taken.find(function (x) { return x.id === id; }); return t ? taakUit(t) : null; },
+    stop: stopTaak,
+    activeer: activeer,
+    teller: stand,
+    health: function () { return { taken_vandaag: vandaagN(), bezig: !!st.bezig, in_rij: st.rij.length }; },
+    toetsFlow: toetsFlow,
+    stopTimers: function () { clearInterval(st.timer); },
+    _st: st,
+  };
+}
+
+module.exports = { maak: maak, flowToets: flowToets, knoopToets: knoopToets, KNOPEN: KNOPEN, GRENS: GRENS };

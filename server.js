@@ -2682,6 +2682,7 @@ function handleRequest(req, res) {
       bunqluis: fs.existsSync(path.join(__dirname, 'bunq-lezer.js')) && fs.existsSync(path.join(BANK_DIR, 'bunq', 'staat.json')),   // wv683
       bankarchief: fs.existsSync(path.join(__dirname, 'bank-archief.js')),   // wv687: transactiedatabase in deze release
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
+      studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
       server: SERVER_ECHT ? { echt: true, paden: { home: serverPaden.home, io: serverPaden.io, jobout: serverPaden.jobout } }
@@ -4879,6 +4880,7 @@ function appInvoerRoute(route, upload, d, a) {
   if (route.indexOf('POST ') !== 0 || APP_SLOT_VRIJ.has(route)) return false;
   if (route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id) return false;
   if (route === 'POST /app/concept' && !String(d.tekst == null ? '' : d.tekst).trim()) return false;   // wv159: concept wissen mag altijd
+  if (/^POST \/app\/studio\/stop\/[a-f0-9]{16}$/.test(route)) return false;   // wv707 (Fable #8): stoppen is geen invoer
   return true;
 }
 // BSN-achtig: precies 9 cijfers (los of met spatie/punt/streepje ertussen) die de elfproef halen. Geen naamfilter (§ 4.11).
@@ -6260,10 +6262,13 @@ function appBewaar(jobId, outdir, meta) {
       totaal += k.grootte;
     }
     if (rapport) fs.writeFileSync(path.join(dir, 'rapport.md'), rapport.slice(0, APP_RAPPORT_MAX), { mode: 0o600 });
-    const m = { job_id: jobId, soort: meta.soort === 'agent' ? 'agent' : 'beurt', kanaal: meta.kanaal || null, app: !!meta.app,
+    // wv707: soort studio = resultaat uit de tab Studio (studio.js), met flow/motor/kosten/duur in m.studio (geen prompttekst)
+    const m = { job_id: jobId, soort: meta.soort === 'agent' ? 'agent' : meta.soort === 'studio' ? 'studio' : 'beurt', kanaal: meta.kanaal || null, app: !!meta.app,
       label: meta.label ? String(meta.label).slice(0, 160) : null, ok: meta.ok === undefined ? null : !!meta.ok, op: op.toISOString(),
       bestanden: lijst, overgeslagen: overgeslagen, vol: vol, rapport: !!rapport };
     if (meta.na_herstart) m.na_herstart = true;
+    if (m.soort === 'studio' && meta.studio && typeof meta.studio === 'object') m.studio = { flow: String(meta.studio.flow || '').slice(0, 60),
+      motor: String(meta.studio.motor || '').slice(0, 20), kosten: Number(meta.studio.kosten) || 0, duur_s: Number(meta.studio.duur_s) || 0 };
     const tmp = path.join(dir, 'meta.json.nieuw');
     fs.writeFileSync(tmp, JSON.stringify(m), { mode: 0o600 });
     fs.renameSync(tmp, path.join(dir, 'meta.json'));
@@ -6467,7 +6472,8 @@ async function appBestanden(req, res) {
   const lijst = items.filter(function (m) { return m.bestanden && m.bestanden.length; }).slice(0, 200).map(function (m) {
     const w = perJob[m.job_id];
     return { job_id: m.job_id, soort: m.soort, kanaal: m.kanaal, app: m.app, op: m.op,
-      label: m.soort === 'agent' ? ((w && w.samenvatting) ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(m.label)) : m.soort === 'socev' ? 'bericht · ' + String(m.label || '').slice(0, 40) : null,
+      label: m.soort === 'agent' ? ((w && w.samenvatting) ? String(w.samenvatting).slice(0, 200) : appLabelGewoon(m.label)) : m.soort === 'socev' ? 'bericht · ' + String(m.label || '').slice(0, 40)
+        : m.soort === 'studio' ? 'Studio · ' + String(m.label || '').slice(0, 80) : null,   // wv707
       bestanden: m.bestanden.map(function (b) { return { n: b.n, naam: appVeiligeNaam(b.naam, new Set()), grootte: b.grootte }; }),
       overgeslagen: m.overgeslagen || 0, vol: m.vol === true, na_herstart: m.na_herstart === true };
   });
@@ -9452,6 +9458,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/push/opzeggen') return appPushOpzeggen(req, res, a);
         if (route === 'POST /app/push/soorten') return appPushSoorten(req, res, a, d);
         if (route === 'POST /app/push/proef') return appPushProef(req, res, a);
+        if (route.indexOf(' /app/studio/') > 0) return typeof appStudio === 'function' ? appStudio(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'studio');   // wv707
         if (route === 'GET /app/tel') return telAppStand(req, res, a);                       // wv264: ⚙ → Telefoon
         if (route === 'POST /app/tel/koppelcode') return telAppKoppelcode(req, res, reg, a, s);
         if (route === 'POST /app/tel/ontkoppel') return telAppOntkoppel(req, res, a);
@@ -11684,6 +11691,76 @@ function telBelletje(wav) {
 // ── einde telefoon-poort ──────────────────────────────────────────────────────────────────────────────
 
 // ── einde socev-app poort ─────────────────────────────────────────────────────────────────────────
+
+// ── Studio (wv707, fase 1, 21-10-2026; bouwplan "Studio - ComfyUI in de Socev-app (bouwplan 21-10-2026)") ──
+// Tab Studio in de app: flows kiezen en maken (beeld via FlowStudio/Router, proefbandje via Piper; ComfyUI rechtstreeks als
+// terugval). Alle logica staat in studio.js; hier alleen de koppeling: routes /app/studio/* (na de app-poort: Access, apparaat,
+// sessie, slot), de bewaarfunctie van Bestanden (appBewaar) en de Router-sleutel uit de kluis. Die laatste leest de pod op het
+// moment van de aanroep via de Management-API (zelfde route als bankSleutels), 10 min in het geheugen, nooit in een log of antwoord.
+// Ontbreekt studio.js in de release (terugrol), dan 404 op de routes en studio.aan=false in /health.
+const STUDIO_DIR = serverPad('studio', process.env.STUDIO_DIR, '/opt/data/studio', serverProefDeel('studio'));
+const STUDIO_SLEUTEL_NAAM = 'router_studio_key';
+let studioSleutelCache = null;   // { w, tot }
+async function studioSleutel() {
+  if (process.env.ROUTER_STUDIO_KEY) return process.env.ROUTER_STUDIO_KEY;
+  if (studioSleutelCache && Date.now() < studioSleutelCache.tot) return studioSleutelCache.w;
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) return null;
+  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
+    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-studio/1' },
+    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + STUDIO_SLEUTEL_NAAM + "'" }),
+    signal: AbortSignal.timeout(20000) });
+  if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
+  const rijen = await r.json();
+  const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
+  // gevonden: 10 min; ontbreekt hij (David maakt hem nog), dan na 2 min opnieuw kijken
+  studioSleutelCache = { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 };
+  return studioSleutelCache.w;
+}
+const studio = (function () {
+  const p = path.join(__dirname, 'studio.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ dir: STUDIO_DIR, bewaar: appBewaar, primair: function () { return rolPrimair(); }, sleutel: studioSleutel,
+      routerUrl: process.env.STUDIO_ROUTER_URL, comfyUrl: process.env.STUDIO_COMFY_URL,
+      piper: process.env.STUDIO_PIPER_BIN ? { bin: process.env.STUDIO_PIPER_BIN, model: process.env.STUDIO_PIPER_MODEL, data: process.env.STUDIO_PIPER_DATA } : null,
+      log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError });
+  } catch (e) { logError('studio', e); return null; }
+})();
+function studioInfo() { return studio ? Object.assign({ aan: true }, studio.health()) : { aan: false }; }
+// Routes (bouwplan § 5.5). Maak op een flow op proef en Activeer eisen een verse vingerafdruk van dít apparaat (§ 4.4d),
+// gecontroleerd en verbruikt in studio.js zonder await ertussen. Schrijven alleen op de primaire kant (studio.js).
+async function appStudio(req, res, a, s, d, route) {
+  if (!studio) return appWeiger(res, 404, 'Studio zit niet in deze versie van de pod', 'studio ontbreekt');
+  const ctx = { versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; }, apparaat: a.naam };
+  const stuur = function (r, extra) {
+    if (r.status !== 200) { res._app.reden = 'studio: ' + String(r.fout || '').slice(0, 60); return appStuur(res, r.status, { ok: false, fout: r.fout, vers_nodig: r.vers_nodig === true }); }
+    appStuur(res, 200, Object.assign({ ok: true }, extra || r));
+  };
+  if (route === 'GET /app/studio/flows') { res._app.stil = true; return appStuur(res, 200, Object.assign({ ok: true }, await studio.flows())); }
+  if (route === 'GET /app/studio/taken') { res._app.stil = true; return appStuur(res, 200, Object.assign({ ok: true }, studio.taken())); }
+  if (route === 'GET /app/studio/lopend') { res._app.stil = true; return appStuur(res, 200, Object.assign({ ok: true }, studio.lopend())); }   // licht, tijdens een taak
+  if (route === 'GET /app/studio/teller') { res._app.stil = true; return appStuur(res, 200, { ok: true, stand: studio.teller() }); }
+  let m = /^GET \/app\/studio\/taak\/([a-f0-9]{16})$/.exec(route);
+  if (m) { res._app.stil = true; const t = studio.taak(m[1]); return t ? appStuur(res, 200, { ok: true, taak: t }) : appWeiger(res, 404, 'deze taak bestaat niet', 'studio taak'); }
+  if (route === 'POST /app/studio/maak') {
+    // wv464: op een vaste plek een BSN-achtig getal in de velden maskeren, nooit weigeren (zelfde regel als bij een bericht)
+    if (a.soort === 'vast' && d.velden && typeof d.velden === 'object') Object.keys(d.velden).forEach(function (k) {
+      const v = d.velden[k];
+      if (typeof v === 'string' && appBsnAchtig(v)) { d.velden[k] = appBsnMasker(v); res._app.bsnWeg = true; }
+    });
+    const r = await studio.maak(d, ctx);
+    if (r.status === 200) res._app.reden = 'studio maak ' + String(d.flow || '').slice(0, 40) + (r.al ? ' (al)' : '');
+    return stuur(r, { taak: r.taak, al: r.al === true });
+  }
+  m = /^POST \/app\/studio\/stop\/([a-f0-9]{16})$/.exec(route);
+  if (m) { const r = studio.stop(m[1]); return stuur(r, { taak: r.taak }); }
+  m = /^POST \/app\/studio\/flow\/([a-z0-9][a-z0-9-]{1,48})\/activeer$/.exec(route);
+  if (m) { const r = studio.activeer(m[1], ctx); if (r.status === 200) res._app.reden = 'studio activeer ' + m[1]; return stuur(r, { flow: r.flow }); }
+  return appWeiger(res, 404, 'onbekend', 'studio route');
+}
+// ── einde studio ──
 
 // ── Rolwachter (uitwijk stap 3, 6-10-2026) ─────────────────────────────────────────────────────────
 // Er is altijd maar één actieve kant (olares | vps); die staat in Supabase (machinekamer.uitwijk_stand, RPC
