@@ -268,7 +268,8 @@ api.listen(0, '127.0.0.1', async function () {
     toets('korte vulling eerst (30 dagen)', r.j.ok && r.j.bron === 'bank' && !r.j.let_op, r.j.let_op);
     r = await draai(['transacties', 'Privé', '--van', oud], G, { BUNQ_MAX_PAGINAS: '1' });
     const op3 = JSON.parse(fs.readFileSync(path.join(BD, 'stand.json'), 'utf8')).opgehaald[hPrive];
-    toets('daarna dieper en afgekapt: vervolgpunt vastgelegd', r.j.ok && /nog eens/.test(r.j.let_op || '') && op3.bunq_terug === 1050, [r.j.let_op, op3]);
+    toets('daarna dieper en afgekapt: vervolgpunt vastgelegd', r.j.ok && /nog eens/.test(r.j.let_op || '') && op3.bunq_terug === 1050 &&
+      op3.vanaf === new Date(Date.now() - 397 * 86400000).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), [r.j.let_op, op3]);   // afkapdag (post 1050, 398 dagen) telt niet als binnen
     M.log = [];
     r = await draai(['transacties', 'Privé', '--van', oud], G, { BUNQ_MAX_PAGINAS: '1' });
     toets('herhaling verlengt vanaf older_id 1050 (niet weer bovenaan) en maakt het af', r.j.ok && r.j.aantal === 200 && !r.j.let_op &&

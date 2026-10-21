@@ -437,7 +437,8 @@ async function haalTransactiesBunq(s, rek, van, ctx) {
     // De cache loopt nu aaneengesloten tot de oudste opgehaalde post; daar gaat de volgende verlenging verder. Ook als er al een
     // kortere vulling stond (o.vanaf) en deze opvraag van bovenaf verder terug kwam, anders begon elke herhaling weer bovenaan (wv684).
     o.bunq_terug = r.oudste_id;
-    if (r.oudste_dag && (!o.vanaf || r.oudste_dag < o.vanaf || verlengen)) o.vanaf = r.oudste_dag;
+    // De afkapdag zelf is maar half binnen (oudere posten van die dag staan op de volgende pagina): de cache geldt vanaf de dag erna.
+    if (r.oudste_dag) { const nv = plusDagen(r.oudste_dag, 1); if (!o.vanaf || nv < o.vanaf || (verlengen && nv <= o.vanaf)) o.vanaf = nv; }
   }
   if (r.fout) throw r.fout;
   return { aantal: lijst.length, paginas: r.paginas, afgekapt: r.afgekapt, onleesbaar: r.onleesbaar || undefined };

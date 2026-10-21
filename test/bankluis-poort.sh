@@ -116,7 +116,7 @@ api.listen(0, '127.0.0.1', async function () {
       const d = new DatabaseSync(path.join(W, 'bank', 'cache.sqlite'));
       const rh = d.prepare('SELECT rek FROM tx LIMIT 1').get().rek;
       const zet = d.prepare("INSERT INTO tx (rek, id, datum, bedrag, valuta, tegenpartij, omschrijving, status, opgehaald) VALUES (?, ?, ?, ?, 'EUR', ?, ?, 'geboekt', ?)");
-      for (let i = 0; i < 2000; i++) zet.run(rh, 'e:euro-' + i, '2026-0' + (1 + (i % 8)) + '-15', -1, '€€€ ' + i, '€'.repeat(140), 'NU');
+      for (let i = 0; i < 2000; i++) zet.run(rh, 'e:euro-' + i, '2026-0' + (1 + (i % 8)) + '-15', -1, '€'.repeat(136) + ' ' + i, '€'.repeat(140), 'NU');
       d.close();
       r = await h.bankSmal({ secret: 'socev', opdracht: 'transacties', rekening: '1234', van: '2026-01-01', tot: '2026-08-31', max: 2000 });
       const t = JSON.stringify(r.j);
