@@ -79,6 +79,8 @@ jobs:
           bash test/bankluis-poort.sh
           bash test/bank-ronde.sh
           bash test/bank-archief.sh
+      - name: argv-detector (wv698: sleutelwaarden in /proc/*/cmdline)
+        run: bash test/argv-detector.sh
 
       - uses: docker/login-action@v3
         with:

@@ -2713,7 +2713,9 @@ function handleRequest(req, res) {
       // wacht een uitrol op stilte? Dan start de werkvoorraad-tikker niets (wv91, 7-10-2026)
       uitrol: uitrolWacht(),
       // wv701: levensbewaking (bewaker.js); leeft false = de bewaker stopte (zie supervisor.log, regels 'bewaker[')
-      bewaker: bewakerInfo()
+      bewaker: bewakerInfo(),
+      // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
+      detector: argvDetInfo()
     }));
   }
 
@@ -13781,6 +13783,182 @@ function tunnelInfo() {
   };
 }
 
+// ── argv-detector (wv698) ───────────────────────────────────────────────────
+// WAAROM (21-10-2026, uid-scheiding fase 1b; bouwplan "Socev-gesprekken onder eigen gebruiker - sleutelscheiding" § 3.6
+// en § 5 #6): /proc/<pid>/cmdline is voor elke gebruiker in de pod leesbaar (hidepid en een eigen /proc kunnen niet). Een
+// sleutel die als argument aan curl e.d. wordt meegegeven, kan elk ander proces dus aflezen zolang de aanroep loopt. Deze
+// detector meet wie dat doet: elke seconde /proc/*/cmdline van nieuwe processen (en van processen jonger dan 3 s, om een
+// exec na de fork te zien) tegen de eigen sleutelwaarden. Bij een treffer: hooguit één box-rij per (procesnaam,
+// ouder-script, sleutelnaam) per dag en hooguit ARGV_DET_BOX_MAX per dag, met procesnaam, ouderketen en sleutelNAAM —
+// nooit de waarde. Procesnamen en paden zijn door elk proces zelf te kiezen en gaan de box in die de machinekamer leest:
+// alleen [A-Za-z0-9._+/@-] blijft staan (geen opmaak, geen regels). Meet alleen; houdt niets tegen (dat doet de hook in
+// de machinekamer, /opt/data/.claude/hooks). Uit: ARGV_DETECTOR=0 of het bestand /opt/data/argv-detector-uit.
+const ARGV_DET_PATROON = /KEY|TOKEN|SECRET|ROLE|SLEUTEL|WACHTWOORD|PASSWORD|SESSIE/;
+const ARGV_DET_VAST = ['API_SECRET', 'N8N_API_KEY', 'N8N_MCP_TOKEN', 'SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE', 'CLOUDFLARE_API_TOKEN',
+  'TELEGRAM_SESSIE', 'TELEGRAM_API_HASH', 'CLAUDE_CODE_OAUTH_TOKEN', 'AGENT_WEBHOOK_SECRET', 'WERKKAMER_SLEUTEL_POD'];
+const ARGV_DET_NIET = ['SECRETS_GELADEN'];          // kommalijst van namen, geen waarde
+const ARGV_DET_JONG_MS = 3000;
+const ARGV_DET_BOX_MAX = 8;
+const argvDet = { aan: false, sleutels: [], gezien: new Map(), bezig: false, ticks: 0, fouten: 0, ms_max: 0, staat: null, staatPad: null, boxPad: null, procDir: '/proc' };
+function argvDetSleutels(env) {
+  const perWaarde = new Map();
+  Object.keys(env).forEach(function (naam) {
+    if (ARGV_DET_NIET.indexOf(naam) >= 0) return;
+    if (ARGV_DET_VAST.indexOf(naam) < 0 && !ARGV_DET_PATROON.test(naam)) return;
+    const w = env[naam];
+    if (typeof w !== 'string' || w.length < 16 || /\s/.test(w)) return;
+    if (perWaarde.has(w)) perWaarde.get(w).namen.push(naam);
+    else perWaarde.set(w, { namen: [naam], buf: Buffer.from(w) });
+  });
+  return Array.from(perWaarde.values()).map(function (s) { return { naam: s.namen.sort().join('|'), buf: s.buf }; });
+}
+function argvDetVeilig(s, max) { return String(s || '').replace(/[^A-Za-z0-9._+\/@-]/g, '?').slice(0, max || 40) || '?'; }
+function argvDetDag(t) { return new Date(t).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 10); }
+function argvDetStaatLaad() {
+  let s = null;
+  try { s = JSON.parse(fs.readFileSync(argvDet.staatPad, 'utf8')); } catch (e) {}
+  if (!s || typeof s !== 'object') s = {};
+  return { dag: typeof s.dag === 'string' ? s.dag : '', gemeld: Array.isArray(s.gemeld) ? s.gemeld.slice(0, 200) : [],
+    box_vandaag: Number(s.box_vandaag) || 0, treffers: Array.isArray(s.treffers) ? s.treffers.slice(-500) : [] };
+}
+function argvDetStaatBewaar() {
+  try {
+    const tmp = argvDet.staatPad + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(argvDet.staat), { mode: 0o600 });
+    fs.renameSync(tmp, argvDet.staatPad);
+  } catch (e) { logError('argv-detector-staat', e); }
+}
+// ppid en procesnaam uit /proc/<pid>/stat (naam tussen de eerste '(' en de láátste ')': een naam kan ')' bevatten)
+async function argvDetStat(pid) {
+  try {
+    const t = await fs.promises.readFile(argvDet.procDir + '/' + pid + '/stat', 'utf8');
+    const a = t.indexOf('('), b = t.lastIndexOf(')');
+    return { comm: t.slice(a + 1, b), ppid: Number(t.slice(b + 2).split(' ')[1]) || 0 };
+  } catch (e) { return null; }
+}
+// Script van een proces: argv[1] van een tolk (bash/sh/python/node/…) als dat een pad is; "-c" geeft "(<tolk> -c)".
+function argvDetScript(buf) {
+  const a = buf.toString('utf8').split('\0');
+  const tolk = path.basename(a[0] || '');
+  if (!/^(ba|da|z)?sh$|^python3?(\.\d+)?$|^node$|^perl$|^ruby$|^deno$|^bun$/.test(tolk)) return null;
+  let i = 1;
+  while (i < a.length && /^-/.test(a[i]) && a[i] !== '-c') i++;
+  if (a[i] === '-c') return '(' + tolk + ' -c)';
+  return a[i] ? argvDetVeilig(a[i], 100) : null;
+}
+async function argvDetOuders(pid) {
+  const keten = [];
+  let script = null, job = null, p = pid;
+  for (let n = 0; n < 8 && p > 1; n++) {
+    const st = await argvDetStat(p);
+    if (!st) break;
+    keten.push(argvDetVeilig(st.comm, 20));
+    if (n > 0 && !script) { try { script = argvDetScript(await fs.promises.readFile(argvDet.procDir + '/' + p + '/cmdline')); } catch (e) {} }
+    // welke achtergrondjob: alleen SOCEV_AGENT_RUN (hex) uit de omgeving van een voorouder, de rest blijft ongelezen in het geheugen
+    if (!job) {
+      try {
+        const env = await fs.promises.readFile(argvDet.procDir + '/' + p + '/environ');
+        const m = /(?:^|\0)SOCEV_AGENT_RUN=([0-9a-f]{6,32})(?:\0|$)/.exec(env.toString('latin1'));
+        if (m) job = m[1];
+      } catch (e) {}
+    }
+    p = st.ppid;
+  }
+  return { keten: keten, script: script || '(' + (keten[1] || '?') + ')', job: job };
+}
+function argvDetBoxRij(t) {
+  try {
+    const tekst = fs.readFileSync(argvDet.boxPad, 'utf8');
+    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(tekst);
+    if (!eerste) return false;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const rij = '\n## [week] ' + tijd + ' — Sleutel in een opdrachtregel: ' + t.naam + ' in `' + t.comm + '` (argv-detector, automatisch)\n' +
+      '- status: open\n- van: pod argv-detector (server.js, wv698; hooguit 1×/dag per proces+script+sleutel, ' + ARGV_DET_BOX_MAX + '/dag totaal)\n' +
+      '- gemeten: proces `' + t.comm + '` (pid ' + t.pid + '), ouderketen `' + t.keten.join(' ← ') + '`, script `' + t.script + '`' +
+      (t.job ? ', job `' + t.job + '`' : '') + '; sleutelnaam ' + t.naam + ' stond letterlijk in /proc/<pid>/cmdline (waarde niet gelogd).\n' +
+      '- gevolg als er niets gebeurt: elk proces in de pod — straks ook de afgeschermde Socev-gebruiker — kan deze sleutel aflezen zolang de aanroep loopt.\n' +
+      '- voorstel: de aanroep omzetten naar `mk-curl --sleutel <NAAM> …` (mk-scripts/mk-curl) of de sleutel via stdin/omgeving doorgeven; ' +
+      'bouwplan sleutelscheiding § 3.6 en § 5 #6. Stand: GET /health → detector.\n';
+    const tmp = argvDet.boxPad + '.argv-' + crypto.randomBytes(4).toString('hex') + '.tmp';
+    fs.writeFileSync(tmp, tekst.slice(0, eerste.index) + rij + tekst.slice(eerste.index));
+    fs.renameSync(tmp, argvDet.boxPad);
+    return true;
+  } catch (e) { logError('argv-detector-box', e); return false; }
+}
+async function argvDetTreffer(pid, naam) {
+  const nuMs = Date.now(), dag = argvDetDag(nuMs), s = argvDet.staat;
+  if (s.dag !== dag) { s.dag = dag; s.gemeld = []; s.box_vandaag = 0; }
+  const st = await argvDetStat(pid);
+  const o = await argvDetOuders(pid);
+  const t = { t: new Date(nuMs).toISOString(), naam: naam, comm: argvDetVeilig(st ? st.comm : '?', 20), pid: Number(pid), keten: o.keten, script: o.script, job: o.job };
+  s.treffers.push({ t: t.t, naam: t.naam, comm: t.comm, script: t.script, job: t.job });
+  s.treffers = s.treffers.filter(function (x) { return nuMs - Date.parse(x.t) < 24 * 3600 * 1000; }).slice(-500);
+  const sleutel = t.comm + '|' + t.script + '|' + naam;
+  if (s.gemeld.indexOf(sleutel) < 0 && s.box_vandaag < ARGV_DET_BOX_MAX) {
+    s.gemeld.push(sleutel);
+    if (argvDetBoxRij(t)) s.box_vandaag++;
+  }
+  schrijfLog(nu() + ' argv-detector ' + velden({ sleutel: naam, proces: t.comm, script: t.script, job: t.job || '-' }));
+  argvDetStaatBewaar();
+}
+async function argvDetTick() {
+  if (argvDet.bezig || !argvDet.aan) return;
+  argvDet.bezig = true;
+  const t0 = Date.now();
+  try {
+    const namen = await fs.promises.readdir(argvDet.procDir);
+    const levend = new Set();
+    for (const n of namen) {
+      if (n.charCodeAt(0) < 48 || n.charCodeAt(0) > 57 || !/^\d+$/.test(n)) continue;
+      levend.add(n);
+      let e = argvDet.gezien.get(n);
+      if (e && (e.klaar || t0 - e.eerst > ARGV_DET_JONG_MS)) { e.klaar = true; continue; }
+      if (!e) { e = { eerst: t0, klaar: false, gemeld: [] }; argvDet.gezien.set(n, e); }
+      let buf;
+      try { buf = await fs.promises.readFile(argvDet.procDir + '/' + n + '/cmdline'); } catch (err) { continue; }
+      if (!buf.length) continue;
+      for (const s of argvDet.sleutels) {
+        if (e.gemeld.indexOf(s.naam) >= 0 || buf.indexOf(s.buf) < 0) continue;
+        e.gemeld.push(s.naam);
+        await argvDetTreffer(n, s.naam);
+      }
+    }
+    for (const k of argvDet.gezien.keys()) if (!levend.has(k)) argvDet.gezien.delete(k);
+  } catch (err) { argvDet.fouten++; if (argvDet.fouten <= 3) logError('argv-detector', err); }
+  argvDet.ticks++;
+  argvDet.ms_max = Math.max(argvDet.ms_max, Date.now() - t0);
+  argvDet.bezig = false;
+}
+function argvDetStart(o) {
+  o = o || {};
+  if (argvDet.aan) return;
+  argvDet.sleutels = argvDetSleutels(o.env || process.env);
+  argvDet.staatPad = o.staatPad; argvDet.boxPad = o.boxPad; argvDet.procDir = o.procDir || '/proc';
+  argvDet.staat = argvDetStaatLaad();
+  argvDet.aan = true;
+  argvDet.timer = setInterval(argvDetTick, o.intervalMs || 1000);
+  if (argvDet.timer.unref) argvDet.timer.unref();
+}
+function argvDetInfo() {
+  if (!argvDet.aan) return { aan: false };
+  const nu = Date.now(), s = argvDet.staat, per = {};
+  const recent = s.treffers.filter(function (x) { return nu - Date.parse(x.t) < 24 * 3600 * 1000; });
+  recent.forEach(function (x) { per[x.naam] = (per[x.naam] || 0) + 1; });
+  return { aan: true, sleutels: argvDet.sleutels.length, treffers_24u: recent.length, per_sleutel_24u: per,
+    laatste_iso: recent.length ? recent[recent.length - 1].t : null, box_vandaag: s.dag === argvDetDag(nu) ? s.box_vandaag : 0,
+    ticks: argvDet.ticks, ms_max: argvDet.ms_max, fouten: argvDet.fouten };
+}
+// ── einde argv-detector
+// Start: alleen de echte server (SERVER_ECHT); uit met ARGV_DETECTOR=0 of het bestand /opt/data/argv-detector-uit.
+function argvDetectorStart() {
+  if (SERVER_ECHT !== true || process.env.ARGV_DETECTOR === '0') return;
+  try { if (fs.existsSync(path.join(SERVER_ECHTE_HOME, 'argv-detector-uit'))) return; } catch (e) {}
+  try {
+    argvDetStart({ env: process.env, staatPad: path.join(HOME, 'bin', 'argv-detector.json'),
+      boxPad: path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md') });
+  } catch (e) { logError('argv-detector-start', e); }
+}
+
 if (process.env.AUTO_UIT_POD !== '1') { try { autoStart(); } catch (e) { logError('auto-start', e); } }
 if (process.env.TUNNEL_UIT_POD !== '1') { try { tunnelStart(); } catch (e) { logError('tunnel-start', e); } }
 
@@ -13809,6 +13987,7 @@ server.listen(PORT, '0.0.0.0', function () {
   console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents, breinen claude|codex|gemini) luistert op :' + PORT +
     ' (vault=' + VAULT + ', repo=' + REPO + ')');
   bewakerStart();
+  argvDetectorStart();
 });
 
 // wv701 (21-10-2026, akkoord David): levensbewaking. bewaker.js draait als los proces naast deze server en laat hem doden
