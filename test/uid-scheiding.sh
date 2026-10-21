@@ -121,6 +121,7 @@ niet ".sync-id wijzigen"                                     "$(s "echo x > $V/.
 niet "geneste .claude (huisbot) wijzigen"                  "$(s "echo x >> $V/10_Zakelijk/huisbot/.claude/settings.json")"
 niet "script in de vault (les-vastleggen.mjs) wijzigen"      "$(s "echo x >> $V/00_Systeem/Lessen/les-vastleggen.mjs")"
 ok   "script in de vault lezen"                              "$(s "cat $V/00_Systeem/Lessen/les-vastleggen.mjs")"
+ok   "DEKT NIET: script verwijderen en opnieuw schrijven lukt (map is rwX; signaal in het log, geen slot; fase 2: scripts verhuizen)" "$(s "cp $V/00_Systeem/Lessen/les-vastleggen.mjs /tmp/l.mjs && rm -f $V/00_Systeem/Lessen/les-vastleggen.mjs && cp /tmp/l.mjs $V/00_Systeem/Lessen/les-vastleggen.mjs")"
 niet "CLAUDE.md in de wortel verwijderen"                    "$(s "rm -f $V/CLAUDE.md; [ ! -e $V/CLAUDE.md ]")"
 ok   "CLAUDE.md in de wortel bewerken (in place)"            "$(s "echo socev >> $V/CLAUDE.md")"
 ok   "nieuw bestand in 00_Systeem"                           "$(s "echo nieuw > $V/00_Systeem/socev.md")"
