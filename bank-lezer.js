@@ -178,7 +178,10 @@ async function metSlot(fn) {
     catch (e) {
       if (e.code !== 'EEXIST') throw e;
       // Verouderd slot (> 10 min): eerst naar een eigen naam hernoemen, zodat maar één wachtende het weghaalt (Fable wv680 #13).
-      try { if (Date.now() - fs.statSync(SLOT).mtimeMs > 10 * 60000) { const weg = SLOT + '.oud.' + process.pid; fs.renameSync(SLOT, weg); fs.unlinkSync(weg); continue; } } catch (e2) { continue; }
+      // Slot van een proces dat niet meer bestaat (herstart midden in een ronde): meteen opruimen (tegenlezing Fable wv685 #5)
+      let dood = false;
+      try { const pid = parseInt(fs.readFileSync(SLOT, 'utf8'), 10); if (pid > 0 && pid !== process.pid) process.kill(pid, 0); } catch (e2) { dood = e2.code === 'ESRCH'; }
+      try { if (dood || Date.now() - fs.statSync(SLOT).mtimeMs > 10 * 60000) { const weg = SLOT + '.oud.' + process.pid; fs.renameSync(SLOT, weg); fs.unlinkSync(weg); continue; } } catch (e2) { continue; }
       if (Date.now() > eind) throw new Weigering('bankluis bezet (een andere opvraag loopt nog); probeer het over een minuut');
       await new Promise(function (r) { setTimeout(r, 500); });
     }

@@ -12917,7 +12917,14 @@ async function bankKaarten(toest) {
         k[x] = { sessie_kort: t.sessie_kort, bank: t.bank, soort: 'verlopen', gemaakt: nu };
         uit.gezet.push(x);
         hoofd = 'De koppeling met je ' + String(t.bank || 'bank').slice(0, 40) + '-rekening is verlopen; ik zie daar nu geen nieuwe saldi of afschrijvingen meer. In Voor jou staat hoe je hem opnieuw koppelt (een paar minuten).';
-        k._hoofd = { tekst: hoofd, sinds: nu };   // tot /bank-ronde/uitkomst hem ophaalt (overleeft een herstart)
+        k._hoofd = { tekst: hoofd, sinds: nu, bank: t.bank };   // tot /bank-ronde/uitkomst hem ophaalt (overleeft een herstart)
+        // 4 (tegenlezing Fable wv685): de open verleng-kaart van dezelfde sessie vervalt; anders twee kaarten voor één handeling
+        if (k[v] && !k[v].gesloten) {
+          const st = await status(v);
+          if (st === 'open' || st === 'later') await appSbRpc('mk_voor_jou_status', { p_sleutel: v, p_van: st, p_naar: 'vervallen', p_door: 'agent',
+            p_bewijs: 'De toestemming is inmiddels verlopen; zie de kaart "opnieuw koppelen".', p_reden: 'bank-ronde: vervangen door ' + x });
+          k[v].gesloten = nu;
+        }
       }
     } catch (e) { logError('bank-kaart', e); uit.fouten.push(String(e && e.message || e).slice(0, 160)); }
   }
@@ -12937,6 +12944,7 @@ async function bankKaarten(toest) {
       }
       c.gesloten = nu;
       uit.gesloten.push(sl);
+      if (k._hoofd && k._hoofd.bank === c.bank) delete k._hoofd;   // weer gekoppeld: de regel "is verlopen" klopt niet meer
     } catch (e) { logError('bank-kaart', e); uit.fouten.push(String(e && e.message || e).slice(0, 160)); }
   }
   try { bankKaartenSchrijf(k); } catch (e) { logError('bank-kaart', e); uit.fouten.push('kaarten.json niet schrijfbaar'); }
@@ -12984,7 +12992,13 @@ function bankRondeUitkomst() {
   const uit = { ok: true, bezig: bankRondeBezig, begin: l ? l.begin : null, eind: l ? l.eind : null, uitkomst: l ? l.uitkomst : null };
   try {
     const k = bankKaartenLees();
-    if (k._hoofd && k._hoofd.tekst) { uit.hoofd_regel = String(k._hoofd.tekst).slice(0, 1000); delete k._hoofd; bankKaartenSchrijf(k); }
+    // Alleen als er geen ronde loopt: bankKaarten schrijft anders zijn oude kopie (met _hoofd) terug → dubbel (tegenlezing #1).
+    // Ouder dan 14 uur: weggooien zonder te sturen; de kaart in Voor jou is de vangrail (tegenlezing #2).
+    if (!bankRondeBezig && k._hoofd && k._hoofd.tekst) {
+      if (Date.now() - Date.parse(k._hoofd.sinds) < 14 * 3600 * 1000) uit.hoofd_regel = String(k._hoofd.tekst).slice(0, 1000);
+      else uit.hoofd_vervallen = true;
+      delete k._hoofd; bankKaartenSchrijf(k);
+    }
   } catch (e) { logError('bank-ronde-uitkomst', e); }
   return { status: 200, j: uit };
 }

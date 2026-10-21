@@ -148,6 +148,10 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
       toets('David vroeg ' + eigen + '× saldo: na twee rondes teller ' + verwacht + ' (David houdt er samen minstens 2)', t.saldo === verwacht && (t.saldo - t.ronde_saldo) + (4 - t.saldo) >= 2, t);
     }
 
+    // ── slot van een dood proces (herstart midden in een ronde) ──
+    fs.writeFileSync(path.join(BD, '.slot'), '999999', { mode: 0o600 });
+    const t0 = Date.now(); r = await draai(['saldo'], AL);
+    toets('slot van een dood proces: meteen opgeruimd (geen "bezet", < 5 s)', r.j && r.j.ok && Date.now() - t0 < 5000, [r.j, Date.now() - t0]);
     // ── fouten ──
     nulTellers();
     E.forceer.balances = 429;
@@ -245,7 +249,11 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
     E.sessies['sess-0001'].status = 'REVOKED'; nulTellers(); zetStand((s) => { delete s.ronde.box; });   // de CLI-toetsen hierboven gebruikten de dagmelding al
     u = await h.bankRonde();
     const x = 'bank-verlopen-' + kort;
+    vm.runInContext('bankRondeBezig = true', ctx);
+    toets('pod: uitkomst tijdens een lopende ronde geeft de hoofdregel nog niet (geen dubbel)', !h.bankRondeUitkomst().j.hoofd_regel, null);
+    vm.runInContext('bankRondeBezig = false', ctx);
     let uk = h.bankRondeUitkomst().j;
+    toets('pod: verlopen → open verleng-kaart van dezelfde sessie vervallen (geen twee kaarten)', VJ[v].status === 'vervallen', VJ[v]);
     toets('pod: toestemming ingetrokken → niet geslaagd, wél hartslag (ligt bij David), kaart verlopen + hoofdregel via de uitkomst', !u.geslaagd && u.hartslag === true && VJ[x] && VJ[x].volgorde === 5 &&
       /verlopen/.test(VJ[x].titel) && /verlopen/.test(uk.hoofd_regel || ''), [u, VJ[x], uk]);
     toets('pod: hoofdregel één keer opgehaald', !h.bankRondeUitkomst().j.hoofd_regel, null);
@@ -258,8 +266,8 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
     r = await draai(['koppel-af'], Object.assign({ state: st2, code: 'goede-code' }, G));
     nulTellers();
     u = await h.bankRonde();
-    toets('pod: na herkoppelen geslaagd, beide oude kaarten gedaan met meting "geldt weer"', u.geslaagd && VJ[v].status === 'gedaan' && VJ[x].status === 'gedaan' && /geldt weer, tot/.test(VJ[v].bewijs) &&
-      u.kaarten.gesloten.length === 2 && u.toestemming.length === 1 && u.toestemming[0].sessie_kort !== kort, [u.kaarten, u.toestemming]);
+    toets('pod: na herkoppelen geslaagd, verlopen-kaart gedaan met meting "geldt weer"', u.geslaagd && VJ[v].status === 'vervallen' && VJ[x].status === 'gedaan' && /geldt weer, tot/.test(VJ[x].bewijs) &&
+      u.kaarten.gesloten.length === 1 && u.toestemming.length === 1 && u.toestemming[0].sessie_kort !== kort, [u.kaarten, u.toestemming]);
     // dichtgezet door David vóór 3 dagen → nieuwe korte kaart
     const kort2 = u.toestemming[0].sessie_kort, v2 = 'bank-verleng-' + kort2;
     E.sessies['sess-0002'].tot = new Date(Date.now() + 14.5 * 86400000).toISOString(); nulTellers();
@@ -302,6 +310,11 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
     u = await h.bankRonde();
     toets('pod: geen rekeningen → niet geslaagd (leeg), geen hartslag', !u.geslaagd && u.hartslag === false && HS.length === hs0 && u.fouten.some((f) => f.reden === 'leeg'), u);
     fs.writeFileSync(STAND, standBewaar, { mode: 0o600 }); fs.writeFileSync(path.join(BD, 'bunq', 'staat.json'), staatBewaar, { mode: 0o600 });
+    // oude hoofdregel (> 14 u) niet meer sturen; bij herkoppelen gewist
+    { const kp = path.join(BD, 'kaarten.json'), kk = JSON.parse(fs.readFileSync(kp, 'utf8'));
+      kk._hoofd = { tekst: 'oud', sinds: new Date(Date.now() - 15 * 3600000).toISOString(), bank: 'ABN AMRO' }; fs.writeFileSync(kp, JSON.stringify(kk));
+      uk = h.bankRondeUitkomst().j;
+      toets('pod: hoofdregel ouder dan 14 u: weggegooid, niet gestuurd', !uk.hoofd_regel && uk.hoofd_vervallen === true && !JSON.parse(fs.readFileSync(kp, 'utf8'))._hoofd, uk); }
     kluisFout = true; vm.runInContext('bankSleutelCache = null', ctx);
     u = await h.bankRonde();
     toets('pod: kluis onbereikbaar → ronde niet ok, geen hartslag, geen kaartwerk', !u.ok && !u.geslaagd && u.hartslag === false && !u.kaarten, u);
