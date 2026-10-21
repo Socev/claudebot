@@ -11,6 +11,7 @@
 #   3 uitrol     verse uitrolmarker van een levend proces -> geen ingreep; marker weg -> precies één ingreep (stille
 #                uren: wel de box, geen seintje). Een gewone herstart (SIGTERM, zoals uitrol.sh) -> oude bewaker stopt,
 #                nieuwe neemt het slot, geen ingreep.
+#   3b wikkel    marker van uitrol-na-agents.sh (wacht bij een hangende server tot 3 uur) houdt de ingreep niet tegen.
 #   4 rem        drie ingrepen in het afgelopen uur -> geen herstart, wel één rij in de box en één seintje.
 set -u
 HIER="$(cd "$(dirname "$0")/.." && pwd)"
@@ -63,7 +64,7 @@ start(){   # extra env als argumenten (NAAM=waarde ...)
     UITROL_MARKER="$W/uitrol-wacht" BEWAKER_UIT="$W/bewaker-uit" BEWAKER_BOX="$W/box.md" BEWAKER_BERICHT="$W/bericht.py" \
     BEWAKER_AGENTS="$W/agent_jobs.json" API_LOG="$W/bin/api.log" \
     BEWAKER_TIK_MS=1000 BEWAKER_TIMEOUT_MS=6000 BEWAKER_GRENS_MS=15000 BEWAKER_MIN_MISSERS=3 BEWAKER_CONTEXT_MS=2000 \
-    BEWAKER_GENADE_MS=2000 BEWAKER_KILL_WACHT_MS=5000 BEWAKER_TERUG_MS=30000 BEWAKER_CPU_MS=1000 BEWAKER_BOOT_MARGE_MS=5000 BEWAKER_UUR=12 "$@" \
+    BEWAKER_GENADE_MS=2000 BEWAKER_KILL_WACHT_MS=5000 BEWAKER_TERUG_MS=30000 BEWAKER_CPU_MS=1000 BEWAKER_BOOT_MARGE_MS=5000 BEWAKER_MARKER_GEDULD_MS=60000 BEWAKER_UUR=12 "$@" \
     setsid node "$HIER/supervisor.js" > "$W/supervisor.uit" 2>&1 &
   SUP=$!
   wachtOp 'gewapend' 15 || rood "$(basename "$W"): bewaker werd niet gewapend"
@@ -125,7 +126,7 @@ NB=$(cat "$W/bewaker-pid-2" 2>/dev/null)
 sleep 3
 python3 -c "import json,sys; j=json.load(open('$W/bin/bewaker.pid')); sys.exit(0 if str(j['bewaker_pid'])=='$NB' else 1)" && groen "uitrol: nieuwe bewaker heeft het slot" || rood "uitrol: slot niet bij de nieuwe bewaker"
 kill -0 "$OUDB" 2>/dev/null && rood "uitrol: oude bewaker leeft nog" || true
-sleep 300 & HOUDER=$!
+printf 'sleep 300\n' > "$W/uitrol.sh"; bash "$W/uitrol.sh" & HOUDER=$!
 printf '{"sha":"proef","start_iso":"%s","pid":%s}\n' "$(date -Iseconds)" "$HOUDER" > "$W/uitrol-wacht"
 touch "$W/blokkeer"
 for i in $(seq 1 8); do sleep 5; touch "$W/uitrol-wacht"; done   # 40 s, marker vers gehouden
@@ -136,6 +137,18 @@ wachtOp 'klaar - de nieuwe server' 20
 toon
 [ "$(telIn 'INGREEP')" = "1" ] && groen "uitrol: precies één ingreep na de marker" || rood "uitrol: $(telIn 'INGREEP') ingrepen"
 grep -q "stille uren" "$W/bin/supervisor.log" && [ ! -s "$W/seintjes.txt" ] && grep -q "bewaker herstartte hem" "$W/box.md" && groen "uitrol: stille uren - box wel, seintje niet" || rood "uitrol: stille uren niet goed"
+stop
+
+# ── 3b. wikkel: marker van uitrol-na-agents.sh telt niet (die wacht bij een hangende server alleen langer) ──────────
+opzet wikkel; start
+printf 'sleep 300\n' > "$W/uitrol-na-agents.sh"; bash "$W/uitrol-na-agents.sh" & HOUDER=$!
+printf '{"sha":"proef","start_iso":"%s","pid":%s}\n' "$(date -Iseconds)" "$HOUDER" > "$W/uitrol-wacht"
+( for i in $(seq 1 30); do sleep 3; touch "$W/uitrol-wacht" 2>/dev/null; done ) & VERS=$!
+touch "$W/blokkeer"
+wachtOp 'uitslag: ' 90 || rood "wikkel: geen ingreep ondanks een wikkelmarker"
+toon
+grep -q "is geen uitrol.sh" "$W/bin/supervisor.log" && [ "$(telIn 'INGREEP')" = "1" ] && groen "wikkel: marker van een wikkel telt niet, één ingreep" || rood "wikkel: marker van een wikkel hield de ingreep tegen"
+kill "$VERS" "$HOUDER" 2>/dev/null
 stop
 
 # ── 4. rem ────────────────────────────────────────────────────────────────────────────────────────────────────────────

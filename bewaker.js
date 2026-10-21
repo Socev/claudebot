@@ -68,6 +68,7 @@ const C = {
   remMax: getal('BEWAKER_REM_MAX', 3),
   remVenster: getal('BEWAKER_REM_VENSTER_MS', 3600000),
   cpuSample: getal('BEWAKER_CPU_MS', 5000),
+  markerGeduld: getal('BEWAKER_MARKER_GEDULD_MS', 420000),   // hooguit zo lang na de grens wijken voor een uitrolmarker
   bootMarge: getal('BEWAKER_BOOT_MARGE_MS', 30000),   // na gezond nog zo lang vorige=current: de supervisor toetst /health tot 25 s
   inspector: process.env.BEWAKER_INSPECTOR !== '0',
   inspectorPoort: getal('BEWAKER_INSPECTOR_POORT', 9229),
@@ -455,12 +456,18 @@ async function tik() {
 
 async function overweeg(stil) {
   if (await metGrens(fsp.stat(UIT).then(() => true), C.fs, false)) return eens('uit', UIT + ' staat er - niet ingrijpen');
+  // Uitrolmarker: alleen wijken als uitrol.sh ZELF draait (die stopt de server binnen seconden: zijn wachtlus leest een
+  // hangende /health als 0 lopend). De wikkels (uitrol-na-agents.sh, uitrol-als-auto-stil.sh) zetten dezelfde marker en
+  // wachten bij een hangende server juist langer, tot 3 uur (21-10: wachtte sinds 10:38, vastloper 10:48). En ook voor
+  // uitrol.sh hooguit markerGeduld na de grens: een SIGTERM van uitrol.sh doet niets bij een dichte event loop.
   const m = await leesJson(MARKER);
   const mst = await metGrens(fsp.stat(MARKER), C.fs, null);
-  if (mst && Date.now() - mst.mtimeMs <= MARKER_MAX_MS) {
-    let leeft = true;
-    if (m && m.pid) { try { process.kill(m.pid, 0); } catch (e) { if (e.code === 'ESRCH') leeft = false; } }
-    if (leeft) return eens('uitrol', 'uitrolmarker staat er (sha ' + (m && m.sha) + ', pid ' + (m && m.pid) + ') - niet ingrijpen, de uitrol stopt de server zelf');
+  if (mst && Date.now() - mst.mtimeMs <= MARKER_MAX_MS && m && m.pid > 1) {
+    const cmd = String(await lees('/proc/' + m.pid + '/cmdline', 3000) || '').replace(/\0/g, ' ');
+    if (!cmd) eens('marker-weg', 'uitrolmarker van pid ' + m.pid + ': dat proces is weg - telt niet');
+    else if (!/uitrol\.sh(\s|$)/.test(cmd)) eens('wikkel', 'uitrolmarker van pid ' + m.pid + ' is geen uitrol.sh (' + eenRegel(cmd, 80) + ') - telt niet, de wikkel wacht bij een hangende server alleen langer');
+    else if (stil < C.grens + C.markerGeduld) return eens('uitrol', 'uitrolmarker staat er (sha ' + m.sha + ', pid ' + m.pid + ', uitrol.sh) - niet ingrijpen, de uitrol stopt de server zelf');
+    else eens('uitrol-te-lang', 'uitrolmarker van uitrol.sh staat er nog, maar de server hangt al ' + Math.round(stil / 1000) + ' s - toch ingrijpen');
   }
   const st = await procStat(SERVER);
   const sup = st ? await lees('/proc/' + st.ppid + '/cmdline', 3000) : null;
