@@ -656,7 +656,7 @@ async function ingreepKern(stil, s, n) {
   const flip = vorige && curNa && curNa !== vorige.current ? 'LET OP: current wijst nu naar ' + curNa + ' (was ' + vorige.current + ')' : null;
   const ctx = laatsteContext;
   const verloren = ctx && ctx.lopend ? 'bij de laatste gezonde meting (' + tijdKort(Date.parse(ctx.tijd_iso)) + ') liepen ' + (ctx.lopend.beurten || 0) +
-    ' beurt(en), ' + (ctx.lopend.onopgehaald || 0) + ' onopgehaald resultaat, ' + (ctx.agents_lopend || 0) + ' agent(s)' : 'geen gezonde meting met lopende beurten bekend';
+    ' beurt(en)' + (ctx.lopend.wees ? ' (waarvan ' + ctx.lopend.wees + ' wees-CLI, die server.js na de herstart opnieuw vasthoudt: wv722)' : '') + ', ' + (ctx.lopend.onopgehaald || 0) + ' onopgehaald resultaat, ' + (ctx.agents_lopend || 0) + ' agent(s)' : 'geen gezonde meting met lopende beurten bekend';
   const beurtWeg = !!(ctx && ctx.lopend && (ctx.lopend.beurten || ctx.lopend.onopgehaald));
   let uitslag;
   if (uitkomst === 'blijft') uitslag = 'server ' + SERVER + ' reageert ook niet op SIGKILL (State ' + (bewijs.status && bewijs.status.State) + ') - herstart lukt niet, pod herstarten';

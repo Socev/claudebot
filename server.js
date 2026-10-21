@@ -597,7 +597,8 @@ function lopendeJobs() {
     if (j.status === 'pending' || j.status === 'running') beurten++;
     else if (j.status === 'done' && !j.agent && !j.opgehaald && j.done_at && nu - j.done_at < 10 * 60 * 1000) onopgehaald++;
   }
-  return { beurten: beurten, onopgehaald: onopgehaald };
+  const wees = Object.keys(appWeesVast).length;   // wv722: een wees-CLI die zijn kanaal vasthoudt, is een lopende beurt (uitrol.sh wacht)
+  return { beurten: beurten + wees, onopgehaald: onopgehaald, wees: wees };
 }
 function saveSessions() { try { fs.writeFileSync(SESS_FILE, JSON.stringify(chatSessions)); } catch (e) {} }
 
@@ -2578,8 +2579,9 @@ function weesRonde() {
 //     appBewaar, alleen voor de kanalen van APP_KANAAL_VAN_CHAT (C8). Geen vraag_hash (een oude VRAAG AAN DAVID krijgt geen
 //     geldige knoppen), geen chat_log en geen seintje: in het hoofdkanaal komt de regel onderaan, in de machinekamer valt hij op
 //     zijn typtijd en ziet David hem na het verversen (Fable C9, aanvaard). Lukt het app-log niet: blijft staan, volgende ronde.
-// Eén ronde tegelijk (C4). Bewust NIET (laag 2 van C1, apart voorgelegd): de kanaalwachtrij vasthouden zolang een wees-CLI leeft.
-const APP_VERLOREN_GRENS_MS = FG_MAX_MS + 5 * 60 * 1000;
+// Eén ronde tegelijk (C4). Laag 2 van C1 (de kanaalwachtrij vasthouden zolang een wees-CLI leeft): appWeesVasthouden, wv722.
+// wv722: alleen een proefkopie (toets) mag de grens korter zetten
+const APP_VERLOREN_GRENS_MS = (!SERVER_ECHT && Number(process.env.APP_VERLOREN_GRENS_MS) > 0) ? Number(process.env.APP_VERLOREN_GRENS_MS) : FG_MAX_MS + 5 * 60 * 1000;
 const APP_VERLOREN_KOP = '_(Antwoord na een herstart van de server)_';
 let appVerlorenLoopt = null;
 const appVerlorenLogGezien = {};
@@ -2677,6 +2679,58 @@ async function appVerlorenAfronden(id, x) {
   try { fs.rmSync(path.join(IO, id), { recursive: true, force: true }); } catch (err) {}
   appVerlorenLog(id, x.kanaal, ok ? 'antwoord na herstart' : fout);
   return true;
+}
+
+// ── wv722 (laag 2 van Fable wv703 C1): de kanaalwachtrij vasthouden zolang een wees-CLI van dat kanaal leeft ─────────────
+// Na een herstart hervat de eerstvolgende beurt in een kanaal (heartbeat, Telegram, app, nachtreset) binnen seconden dezelfde
+// sessie; zonder dit schrijven er twee CLI's in één transcript en wordt de wees-beurt "verloren". Per rij in beurt-lopend.json met
+// een levende CLI (appLopendLeeft: pid + pid_start) één vasthouder vóóraan in de keten van sessionKey(DEFAULT_WS, chat_id): één
+// keer aangeroepen vlak vóór server.listen, synchroon (geen await vóór de enqueue), ook voor rijen boven de grens. Met pid_start
+// vrij pas bij de dood (de opvangronde stopt hem boven de grens, als primair); op het plafond max(gestart + grens, opstart) +
+// genade + 3 rondes + 15 s zelf SIGKILL als pid en starttijd nog kloppen en deze kant primair is. Zonder pid_start of passief:
+// vrij op het plafond. Telt mee in /health lopend.beurten (uitrol.sh wacht erop) en apart als lopend.wees. Een tweede herstart
+// houdt opnieuw vast (het register staat op schijf). Alternatief "nieuwe sessie zolang de wees leeft" afgewezen (mk-scripts/wv716/
+// laag2-ontwerp.md): de beurt mist dan het gesprek. DEKT NIET: Telegram-/heartbeat-wezen (niet in het register); /run met een
+// expliciete session_id van een ander kanaal en /reset lopen buiten deze keten. Toets: test/app-verloren-beurt.sh deel r.
+const APP_WEES_TIK_MS = 2000;
+const appWeesVast = {};   // job -> sessiesleutel, zolang de vasthouder wacht
+function appWeesLog(id, x, uitkomst) {
+  schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'app-wees-vast', job_id: id, kanaal: x.kanaal || null, pid: x.pid, uitkomst: uitkomst }));
+}
+function appWeesVasthouden() {
+  const reg = fs.existsSync(APP_BEURT_LOPEND) ? appLopendLees() : {};
+  const opstart = Date.now();
+  Object.keys(reg).forEach(function (id) {
+    const x = reg[id];
+    // zelfde rijfilter als de ronde (Fable-diffreview wv722 #3); gestart nooit na de opstart, anders een eindeloos plafond bij een
+    // klok die terugsprong (#1)
+    if (!APP_JOB_RE.test(id) || !x || typeof x !== 'object' || !APP_KANALEN[x.kanaal] || APP_KANALEN[x.kanaal] !== String(x.chat_id) || !x.pid || !appLopendLeeft(x)) return;
+    const key = sessionKey(DEFAULT_WS, String(x.chat_id));
+    const gestart = Math.min(Number(x.gestart) || opstart, opstart);
+    const plafond = Math.max(gestart + APP_VERLOREN_GRENS_MS, opstart) + KILL_GRACE_MS + 3 * WEES_POLL_MS + 15000;
+    appWeesVast[id] = key;
+    appWeesLog(id, x, 'vast: ' + key);
+    enqueue(key, function () {
+      return new Promise(function (klaar) {
+        let gekild = false;
+        const t = setInterval(function () {
+          const leeft = appLopendLeeft(x);
+          if (leeft && Date.now() < plafond) return;
+          if (leeft && !gekild && x.pid_start && rolPrimair()) {
+            gekild = true;
+            try { process.kill(-x.pid, 'SIGKILL'); } catch (e) {}
+            return appWeesLog(id, x, 'plafond: SIGKILL naar procesgroep ' + x.pid);
+          }
+          clearInterval(t); delete appWeesVast[id];
+          appWeesLog(id, x, leeft ? 'vrij: plafond, cli leeft nog' : 'vrij: cli gestopt');
+          // het wees-antwoord meteen opvangen, niet pas bij de volgende ronde (tot 30 s, Fable-diffreview wv722 #4); niet erop wachten
+          if (!leeft) { try { appVerlorenRonde(); } catch (e) { logError('app-verloren', e); } }
+          klaar();
+        }, APP_WEES_TIK_MS);
+        t.unref();
+      });
+    });
+  });
 }
 
 // Na het opstarten: wezen terug in jobs (zodat /result 'loopt nog' zegt en de stopknop werkt) en de ronde starten.
@@ -14308,6 +14362,7 @@ if (!SERVER_ECHT) {
   schrijfLog(nu() + ' proefserver ' + velden({ map: SERVER_PROEF, omgeleid: omgeleid.join(',') || 'niets', oude_proefmappen_weg: opgeruimd }));
 }
 
+try { appWeesVasthouden(); } catch (e) { logError('app-wees-vast', e); }   // wv722: vóór listen, dus vóór elke /run of app-beurt
 server.listen(PORT, '0.0.0.0', function () {
   console.log('claude-api v2 (async, chat-sessies, per-chat serieel, multi-workspace, modelkanaal, liveness-watchdog, achtergrondagents, breinen claude|codex|gemini) luistert op :' + PORT +
     ' (vault=' + VAULT + ', repo=' + REPO + ')');

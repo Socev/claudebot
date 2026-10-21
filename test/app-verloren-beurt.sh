@@ -22,8 +22,13 @@
 #   E2E echte app-beurt: rij met pid/pid_start/transcript tijdens de beurt; SIGKILL van alleen server.js; de CLI maakt af;
 #       na de herstart het antwoord van DEZE beurt (niet dat van een Telegram-beurt die het transcript intussen hervatte)
 #   o  gewone app-beurt -> register na afloop leeg; h  app-log onschrijfbaar tijdens een beurt -> register toch leeg (C2)
+#   r  wv722 (laag 2 van C1): na een herstart houdt de server de wachtrij van een kanaal vast zolang een wees-CLI van dat kanaal
+#      leeft (grens via APP_VERLOREN_GRENS_MS=60 s, alleen in een proefkopie): r1 vier rijen vastgehouden (/health lopend.wees),
+#      r-d tweede herstart houdt opnieuw vast, r2 /run op 40687 blijft pending, r3 een ander kanaal loopt meteen, r-c twee rijen op
+#      40687: pas vrij na de tweede dood, r-g dan het eigen antwoord, r5 rij boven de grens: vast tot de ronde hem doodt,
+#      r-a rij zonder pid_start (machinekamer): vrij op het plafond zonder kill, r-e daarna lopend.wees en beurten 0
 # Deel 2 (vm, alleen het rondeblok): k twee rondes tegelijk -> één regel per id (C4); C11 het app-log per id één keer gelezen.
-# Gebruik: bash test/app-verloren-beurt.sh   (± 5 minuten; de ronde loopt na 15 s en dan elke 30 s)
+# Gebruik: bash test/app-verloren-beurt.sh   (± 8 minuten; de ronde loopt na 15 s en dan elke 30 s)
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
@@ -81,7 +86,7 @@ const REG = path.join(DATA, 'beurt-lopend.json');
 const HOME = path.join(d, 'home'), VAULT = path.join(d, 'vault');
 const PROJ = path.join(HOME, '.claude', 'projects', VAULT.replace(/[^a-zA-Z0-9]/g, '-'));
 fs.mkdirSync(PROJ, { recursive: true });
-let poort = 0, srv = null;
+let poort = 0, srv = null; const extraEnv = {};
 const TEAM = () => 'http://127.0.0.1:' + sb.address().port, AUD = 'a'.repeat(64), CLIENT = 'proefclient.access', POORTGEHEIM = 'p'.repeat(64);
 const APPARAAT = 'abcdef0123456789', APP_GEHEIM = hex(32), SESSIE = hex(32);
 function env() {
@@ -95,7 +100,7 @@ function env() {
     SUPABASE_URL: TEAM(), SUPABASE_SERVICE_ROLE: 'nep', SOCEV_KANT: 'olares', ROL_BESTAND: path.join(d, 'uitwijk-rol'),
     APP_POORT_SECRET: POORTGEHEIM, PORT: String(poort)
   };
-  return e;
+  return Object.assign(e, extraEnv);
 }
 function startServer() {
   poort = vrijePoort();
@@ -322,6 +327,65 @@ function transcript(id, regelsTxt) { const p = path.join(PROJ, id + '-sessie.jso
     toets('D /health.proces: rss_mb en heap_mb getallen, lus-velden aanwezig', h.proces && h.proces.rss_mb > 0 && h.proces.heap_mb > 0 && 'lus_max_ms' in h.proces && 'lus_p99_ms' in h.proces, h.proces);
     const hp = await req('GET', '/health/publiek');
     toets('D /health/publiek zonder proces', hp._status === 200 && !('proces' in hp), hp);
+    stopServer(); await slaap(500);
+
+    // ── r: wv722, de kanaalwachtrij vasthouden zolang een wees-CLI van dat kanaal leeft ─────────────────────────────────
+    extraEnv.APP_VERLOREN_GRENS_MS = '60000';
+    const run = (chat, tekst) => req('POST', '/run', { secret: 'proef', chat_id: chat, prompt: tekst });
+    const res = (j) => req('POST', '/result', { secret: 'proef', job_id: j });
+    const leeftP = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return false; } };
+    const wv = {}; ['A', 'B', 'C', 'K'].forEach((k) => { wv[k] = hex(8); });
+    const pA = spawn('sleep', ['600'], { detached: true, stdio: 'ignore' }); pA.unref();
+    const pB = spawn('sleep', ['600'], { detached: true, stdio: 'ignore' }); pB.unref();
+    const pC = spawn('sleep', ['600'], { detached: true, stdio: 'ignore' }); pC.unref();
+    const pK = spawn('bash', ['-c', 'trap "" TERM; while true; do sleep 1; done'], { detached: true, stdio: 'ignore' }); pK.unref();
+    await slaap(300);
+    fs.writeFileSync(REG, JSON.stringify({
+      [wv.A]: rij(wv.A, { gestart: Date.now(), pid: pA.pid, pid_start: procStart(pA.pid), transcript: null }),
+      [wv.B]: rij(wv.B, { gestart: Date.now(), pid: pB.pid, pid_start: procStart(pB.pid), transcript: null }),
+      [wv.C]: rij(wv.C, { kanaal: 'machinekamer', chat_id: 'telegram-debug', gestart: Date.now() - 60000, pid: pC.pid, pid_start: null, transcript: null }),
+      [wv.K]: rij(wv.K, { kanaal: 'cijfer-meester', chat_id: 'cijfer-meester', gestart: Date.now() - 120000, pid: pK.pid, pid_start: procStart(pK.pid), transcript: null }) }), { mode: 0o600 });
+    startServer(); await wachtGezond();
+    let hr = await req('GET', '/health');
+    toets('r1 vier wees-rijen vastgehouden: lopend.wees 4, telt mee in beurten', hr.lopend && hr.lopend.wees === 4 && hr.lopend.beurten >= 4, hr.lopend);
+    toets('r1 schrijfLog app-wees-vast per rij', Object.keys(wv).every((k) => new RegExp('"soort":"app-wees-vast","job_id":"' + wv[k] + '".*"uitkomst":"vast: ').test(apilog())), apilog().slice(-800));
+    stopServer(); await slaap(500);
+    startServer(); await wachtGezond(); await wachtRol('primair');
+    const opstartR = Date.now();
+    hr = await req('GET', '/health');
+    toets('r-d tweede herstart: opnieuw vastgehouden', hr.lopend && hr.lopend.wees === 4, hr.lopend);
+    const jR2 = (await run('40687', 'SLEUTEL:r2 vraag na de herstart')).job_id;
+    const jR3 = (await run('proef-vrij', 'SLEUTEL:r3 ander kanaal')).job_id;
+    const jR5 = (await run('cijfer-meester', 'SLEUTEL:r5 cijfer')).job_id;
+    const jRC = (await run('telegram-debug', 'SLEUTEL:rc machinekamer')).job_id;
+    await slaap(4000);
+    let x2 = await res(jR2), x3 = await res(jR3);
+    toets('r2 /run op 40687 blijft pending zolang de wees leeft', x2.found === true && x2.done === false && x2.status === 'pending', x2);
+    toets('r3 /run op een ander kanaal loopt meteen', x3.done === true && /ANTWOORD r3/.test(x3.output || ''), x3);
+    const x5v = await res(jR5), xcv = await res(jRC);
+    toets('r5/r-a ook cijfer-meester (boven de grens) en machinekamer (zonder pid_start) wachten nog', x5v.status === 'pending' && xcv.status === 'pending', [x5v, xcv]);
+    process.kill(pA.pid, 'SIGKILL');
+    await wachtTot(() => new RegExp('"job_id":"' + wv.A + '".*"uitkomst":"vrij: cli gestopt"').test(apilog()), 10);
+    await slaap(1500);
+    x2 = await res(jR2);
+    toets('r-c eerste wees dood, tweede leeft: nog pending', x2.status === 'pending', x2);
+    process.kill(pB.pid, 'SIGKILL');
+    let klaar2 = null;
+    for (let i = 0; i < 40 && !(klaar2 && klaar2.done); i++) { await slaap(250); klaar2 = await res(jR2); }
+    toets('r-g na de tweede dood: de beurt loopt, met het eigen antwoord', klaar2 && klaar2.done === true && /ANTWOORD r2/.test(klaar2.output || ''), klaar2);
+    let x5 = null;
+    for (let i = 0; i < 100 && !(x5 && x5.done); i++) { await slaap(1000); x5 = await res(jR5); }
+    toets('r5 rij boven de grens: vastgehouden tot de ronde de CLI doodt, daarna de beurt', x5 && x5.done === true && /ANTWOORD r5/.test(x5.output || '') && !leeftP(pK.pid) &&
+      /"job_id":"[0-9a-f]+","kanaal":"cijfer-meester","uitkomst":"cli boven de grens: SIGKILL/.test(apilog()), [x5, apilog().slice(-600)]);
+    let xc = await res(jRC);
+    toets('r-a rij zonder pid_start: na ± 60 s nog vast (plafond 115 s)', xc.status === 'pending' && Date.now() - opstartR < 105000, [xc, Date.now() - opstartR]);
+    for (let i = 0; i < 160 && !(xc && xc.done); i++) { await slaap(1000); xc = await res(jRC); }
+    toets('r-a vrij op het plafond (opstart + 115 s), zonder kill: CLI leeft nog', xc && xc.done === true && Date.now() - opstartR >= 110000 && leeftP(pC.pid) &&
+      new RegExp('"job_id":"' + wv.C + '".*"uitkomst":"vrij: plafond, cli leeft nog"').test(apilog()), [xc, Date.now() - opstartR]);
+    process.kill(pC.pid, 'SIGKILL');
+    await slaap(500);
+    hr = await req('GET', '/health');
+    toets('r-e daarna: lopend.wees 0 en beurten 0', hr.lopend && hr.lopend.wees === 0 && hr.lopend.beurten === 0, hr.lopend);
     stopServer();
   } catch (e) { toets('geen uitzondering in de toets', false, e && e.stack); }
 
@@ -333,7 +397,7 @@ function transcript(id, regelsTxt) { const p = path.join(PROJ, id + '-sessie.jso
     toets('vm: blokken gevonden', a1 > 0 && b1 > a1 && a2 > 0 && b2 > a2);
     const V = fs.mkdtempSync(path.join(os.tmpdir(), 'appverloren-vm-'));
     const telLees = {}, schrijf = [], faalEens = { id: null, gehad: false };
-    const ctx = vm.createContext({ require, fs, path, Buffer, console, setTimeout, clearTimeout, Promise, JSON, Date, Object, Number, String, Array,
+    const ctx = vm.createContext({ require, fs, path, Buffer, console, setTimeout, clearTimeout, setInterval, clearInterval, Promise, JSON, Date, Object, Number, String, Array, SERVER_ECHT: true,
       process: { pid: process.pid, kill: () => {} }, APP_DATA: V, IO: V, jobs: {}, FG_MAX_MS: 30 * 60 * 1000, KILL_GRACE_MS: 10000,
       APP_JOB_RE: /^[a-f0-9]{16}$/, APP_KANALEN: { hoofd: '40687' }, APP_KANAAL_VAN_CHAT: { '40687': 'hoofd' }, APP_SPIEGEL_ANTWOORD_MAX: 60000,
       rolPrimair: () => true, logError: (w, e) => console.log('  logError ' + w + ': ' + (e && e.message)), schrijfLog: () => {},
