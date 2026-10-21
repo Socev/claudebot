@@ -84,9 +84,10 @@ ok "voorbereiding: rechten zonder fouten" "docker logs $C 2>&1 | grep -q 'socev-
 ok "voorbereiding: thuismap ingericht" "docker logs $C 2>&1 | grep -q 'socev-thuis: klaar'"
 ok "root-lus heeft de socket gebonden" "docker logs $C 2>&1 | grep -q 'loper-bind: socket /run/socev-loper/loper.sock gebonden'"
 
-SERVER=$(r "pgrep -u 1001 -f 'app/current/server.js' | head -1")
+SERVER=$(r "pgrep -u 1001 -f 'node .*/server\.js' | head -1")
 echo "  server.js pid: ${SERVER:-?}"
-ok "server.js draait als 1001" "[ -n '$SERVER' ]"
+ok   "server.js draait als 1001"                             "[ -n '$SERVER' ] && stat_is /proc/$SERVER '%u' 1001"
+[ -n "$SERVER" ] || { echo "  STOP  zonder server.js-pid zeggen de proc-toetsen niets"; docker logs "$C" 2>&1 | tail -30; exit 1; }
 
 echo "== als 1002: niets van 1001 =="
 niet "/proc/1/environ (run.sh, 1001) lezen"                 "$(s 'cat /proc/1/environ')"
@@ -182,7 +183,7 @@ ok   "loper binnen 5 s terug (${DUUR}s, pid $LOPER -> ${NIEUW:-?})" "[ -n '$NIEU
 echo "== thuismap van socev =="
 ok   "socev-thuis van socev, 0750"                           "stat_is /opt/data/socev-thuis '%U:%G %a' 'socev:socev 750'"
 ok   ".claude.json: pubmed, todoist, playwright; geen n8n of supabase" "$(s "python3 -c \"import json; d=json.load(open('/opt/data/socev-thuis/.claude.json')); import sys; sys.exit(0 if sorted(d['mcpServers'])==['playwright','pubmed','todoist'] and d['mcpServers']['playwright']['command']=='/app/playwright-mcp.sh' else 1)\"")"
-ok   "codex-config zonder supabase/n8n"                      "$(s "! grep -qE 'supabase|n8n' /opt/data/socev-thuis/.codex/config.toml && grep -q todoist /opt/data/socev-thuis/.codex/config.toml")"
+ok   "codex-config zonder supabase/n8n"                      "$(s "! grep -qE '^\[mcp_servers\.(supabase|n8n)' /opt/data/socev-thuis/.codex/config.toml && grep -q '^\[mcp_servers\.todoist' /opt/data/socev-thuis/.codex/config.toml")"
 ok   "codex-login gekopieerd (socev, 0600)"                  "stat_is /opt/data/socev-thuis/.codex/auth.json '%U %a' 'socev 600'"
 ok   "eigen TMPDIR 0700"                                     "stat_is /opt/data/socev-thuis/tmp '%U %a' 'socev 700'"
 ok   "memory-symlink op zijn plek"                           "[ \"\$(r 'readlink $SM')\" = '$M' ]"
