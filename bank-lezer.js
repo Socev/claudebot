@@ -433,8 +433,9 @@ async function haalTransactiesBunq(s, rek, van, ctx) {
   if (!verlengen) o.transacties = new Date().toISOString();
   const af = r.afgekapt || r.fout;
   if (!af) { if (!o.vanaf || van < o.vanaf || verlengen) o.vanaf = van; if (verlengen || !o.bunq_terug || van <= o.vanaf) delete o.bunq_terug; }
-  else if (r.oudste_id && (verlengen || !o.vanaf)) {
-    // De cache loopt nu aaneengesloten tot de oudste opgehaalde post; daar gaat de volgende verlenging verder.
+  else if (r.oudste_id && (verlengen || !o.vanaf || (r.oudste_dag && r.oudste_dag < o.vanaf))) {
+    // De cache loopt nu aaneengesloten tot de oudste opgehaalde post; daar gaat de volgende verlenging verder. Ook als er al een
+    // kortere vulling stond (o.vanaf) en deze opvraag van bovenaf verder terug kwam, anders begon elke herhaling weer bovenaan (wv684).
     o.bunq_terug = r.oudste_id;
     if (r.oudste_dag && (!o.vanaf || r.oudste_dag < o.vanaf || verlengen)) o.vanaf = r.oudste_dag;
   }
@@ -680,7 +681,7 @@ const opdrachten = {
           // Vanaf de oudste gevraagde dag, of vanaf 10 dagen vóór de vorige opvraag (late boekingen); nooit verder dan de bewaartermijn.
           let vanaf = teOud || !o.transacties ? van : plusDagen(o.transacties.slice(0, 10), -10);
           if (van < vanaf) vanaf = van;
-          if (vanaf < plusDagen(vandaag, -BEWAAR_DAGEN)) vanaf = plusDagen(vandaag, -BEWAAR_DAGEN);
+          if (vanaf < grens) vanaf = grens;
           if (bunq) {
             try {
               const r = await haalTransactiesBunq(s, rek, vanaf, ctx); bron = 'bank';

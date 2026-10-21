@@ -262,6 +262,18 @@ api.listen(0, '127.0.0.1', async function () {
     r = await draai(['transacties', 'Privé', '--van', oud], G, { BUNQ_MAX_PAGINAS: '1' });
     toets('tweede keer: afgemaakt (200 posten binnen 399 dagen), geen let_op', r.j.ok && r.j.aantal === 200 && !r.j.let_op, [r.j.aantal, r.j.let_op]);
 
+    // ── wv684: eerst een korte vulling (30 dagen), dan dieper en afgekapt: de herhaling gaat verder vanaf de oudste post ──
+    leeg();
+    r = await draai(['transacties', 'Privé', '--van', new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10)], G);
+    toets('korte vulling eerst (30 dagen)', r.j.ok && r.j.bron === 'bank' && !r.j.let_op, r.j.let_op);
+    r = await draai(['transacties', 'Privé', '--van', oud], G, { BUNQ_MAX_PAGINAS: '1' });
+    const op3 = JSON.parse(fs.readFileSync(path.join(BD, 'stand.json'), 'utf8')).opgehaald[hPrive];
+    toets('daarna dieper en afgekapt: vervolgpunt vastgelegd', r.j.ok && /nog eens/.test(r.j.let_op || '') && op3.bunq_terug === 1050, [r.j.let_op, op3]);
+    M.log = [];
+    r = await draai(['transacties', 'Privé', '--van', oud], G, { BUNQ_MAX_PAGINAS: '1' });
+    toets('herhaling verlengt vanaf older_id 1050 (niet weer bovenaan) en maakt het af', r.j.ok && r.j.aantal === 200 && !r.j.let_op &&
+      M.log.filter((x) => /payment/.test(x.p)).length === 1 && M.log.filter((x) => /payment/.test(x.p))[0].q.indexOf('older_id=1050') > 0, [r.j.aantal, r.j.let_op, M.log]);
+
     // ── vieze rekeningnaam ──
     M.vieseNaam = true; verouder(); nulTellers();
     r = await draai(['saldo', '--vers'], G);

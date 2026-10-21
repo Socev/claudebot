@@ -110,6 +110,18 @@ api.listen(0, '127.0.0.1', async function () {
     toets('rekeningen via de poort', r.j.ok && r.j.rekeningen.length === 1, r.j);
     r = await h.bankSmal({ secret: 'socev', opdracht: 'transacties', rekening: '1234', van: '2026-09-01' });
     toets('transacties met let_op_bron (gegeven, geen opdracht)', r.j.ok && r.j.aantal === 1 && /geen opdracht/.test(r.j.let_op_bron), r.j);
+    // wv684: 2000 posten met tekens van drie bytes (€) komen heel door smalKind (setEncoding: geen U+FFFD op een stukgrens)
+    {
+      const { DatabaseSync } = require('node:sqlite');
+      const d = new DatabaseSync(path.join(W, 'bank', 'cache.sqlite'));
+      const rh = d.prepare('SELECT rek FROM tx LIMIT 1').get().rek;
+      const zet = d.prepare("INSERT INTO tx (rek, id, datum, bedrag, valuta, tegenpartij, omschrijving, status, opgehaald) VALUES (?, ?, ?, ?, 'EUR', ?, ?, 'geboekt', ?)");
+      for (let i = 0; i < 2000; i++) zet.run(rh, 'e:euro-' + i, '2026-0' + (1 + (i % 8)) + '-15', -1, '€€€ ' + i, '€'.repeat(140), 'NU');
+      d.close();
+      r = await h.bankSmal({ secret: 'socev', opdracht: 'transacties', rekening: '1234', van: '2026-01-01', tot: '2026-08-31', max: 2000 });
+      const t = JSON.stringify(r.j);
+      toets('2000 posten met € heel door smalKind, geen U+FFFD', r.j.ok && r.j.getoond === 2000 && t.indexOf('\ufffd') < 0 && t.length > 400000, [r.j.ok, r.j.getoond, r.j.fout, t.length]);
+    }
     r = await h.bankSmal({ secret: SECRET, opdracht: 'ontkoppel', sessie: 'sess-0001' });
     toets('ontkoppel met API_SECRET mag (nagebootste API: 404 = al weg)', r.status === 200 && r.j.ok, r.j);
     toets('kluis daarna 1× gelezen (10 minuten in het geheugen)', kluisAanroepen === 1, kluisAanroepen);
