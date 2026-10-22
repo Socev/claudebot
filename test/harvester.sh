@@ -332,7 +332,7 @@ Tekst onder de tabel.
   const src = fs.readFileSync('server.js', 'utf8');
   const s1 = src.indexOf('// ── Harvester (wv820'), s2 = src.indexOf('// ── einde harvester ──');
   toets('10 server.js: blok Harvester gevonden', s1 > 0 && s2 > s1);
-  toets('10 server.js: tellers harvester en harvester-bron bestaan in appStaat (anders faalt appTeller)', /tellers: \{[^}]*harvester: \[\], 'harvester-bron': \[\] \}/.test(src));
+  toets('10 server.js: tellers harvester en harvester-bron bestaan in appStaat (anders faalt appTeller)', /tellers: \{[^}]*harvester: \[\], 'harvester-bron': \[\][,} ]/.test(src));
   toets('10 server.js: dispatch, glijdroutes, /smal-grens, health, ronde-ingang', /route === 'GET \/app\/harvester' \|\| route\.indexOf\('POST \/app\/harvester\/'\) === 0\) return typeof appHarvester === 'function' \? appHarvester/.test(src) &&
     /'POST \/app\/harvester\/broedstoof', 'POST \/app\/harvester\/weg'/.test(src) && /'harvester\/kaart': 8 \}/.test(src) && /harvester: harvesterInfo\(\)/.test(src) &&
     /req\.url === '\/harvester-ronde' \|\| req\.url === '\/harvester-ronde\/uitkomst'/.test(src) && /if \(actie === 'harvester\/kaart'\)/.test(src));

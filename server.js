@@ -3510,6 +3510,7 @@ function handleRequest(req, res) {
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
+      secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
@@ -4524,6 +4525,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt
+['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
@@ -4626,7 +4628,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
 const APP_BSN_SYS = '[Systeem: in Davids invoer stond een BSN-achtig getal (9 cijfers die de elfproef halen); de pod heeft het weggelaten (' + APP_BSN_MASKER + '). Vraag er niet naar; meestal was het een ander nummer.]';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [], reactie: [], harvester: [], 'harvester-bron': [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -9392,6 +9394,7 @@ async function appFinancien(req, res, a) {
   }
   const d = {};
   ['peildatum', 'maand', 'deze_maand', 'vorige_maand', 'verloop', 'vaste_lasten', 'buffer', 'stroom', 'paypal', 'signalen', 'links', 'fouten'].forEach(function (k) { d[k] = j[k] === undefined ? null : j[k]; });
+  if (typeof secondbrainFinPagina === 'function') secondbrainFinPagina(d);   // wv832: link naar de vaultpagina (koppeltabel)
   appFinCache = Array.isArray(d.fouten) && d.fouten.length ? null : { op: nu, d: d };   // half overzicht niet bewaren (Fable diffreview #4)
   return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d));
 }
@@ -10677,6 +10680,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
         if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
+        if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
         if (route === 'GET /app/pot-afschriften') return appPotAfschriften(req, res, a);       // wv787: App POT-afschriften (alleen David, geen vaste plek)
         if (route === 'POST /app/pot-afschriften/maak') return appPotMaak(req, res, a, d);
@@ -13291,6 +13295,74 @@ async function appHarvester(req, res, a, d, route) {
   return appStuur(res, r.status, r.j);
 }
 // ── einde harvester ──
+
+// ── Second Brain (wv832; bouwplan vault 01_Ontwikkeling/Second Brain - Obsidian-browser in de app (bouwplan 22-10-2026).md) ──
+// WAAROM. David 22-10-2026: "dat je kan klikken op een betaling en dat je dan naar de Obsidian Browser gaat … (App: "Second Brain", met in
+// Overzicht die mooie 3d-view van alle bestanden)". secondbrain.js bouwt de kaart (pad, domein, datum, links; geen inhoud) en geeft één
+// pagina, een bestand of zoektreffers, altijd gemaskeerd en volgens de regels van dit apparaat (vaste plek: geen privé, gesprekken,
+// personeel). Hier alleen: grenzen, de audit (domein + HMAC van het pad, nooit het pad; Fable K10), zoeken op betekenis via de bestaande
+// AI Search-index met een eigen teller (Fable K11), de nachtbouw en de verrijking van Financiën (koppeltabel in de vault).
+// Op een vaste plek vallen de POST-routes onder het invoerslot (niet in APP_SLOT_VRIJ): openen alleen als David daar is, zoals /app/bestand.
+const SB_DIR = process.env.SECONDBRAIN_DIR || '/opt/data/secondbrain';
+const secondbrain = (function () {
+  const p = path.join(__dirname, 'secondbrain.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const S = require(p);
+    const s = S.maak({ vault: VAULT, dir: SB_DIR, fout: logError, bsnMasker: function (t) { return appBsnMasker(t); },
+      hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
+      betekenis: async function (q) {
+        if (!process.env.CLOUDFLARE_API_TOKEN) return null;
+        const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/ai-search/instances/vault/search',
+          { query: q, max_num_results: 30, score_threshold: 0.1 });
+        const ch = r.status === 200 && r.j && r.j.result && Array.isArray(r.j.result.chunks) ? r.j.result.chunks : null;
+        if (!ch) return null;
+        return ch.map(function (c) {
+          const it = c && c.item;
+          const key = it && typeof it === 'object' ? String(it.key || '') : ((/'key': '([^']+)'/.exec(String(it)) || [])[1] || '');
+          return { key: key, text: String(c && c.text || '').slice(0, 1000), score: Number(c && c.score) || 0 };
+        });
+      } });
+    s.mkdir();
+    s.laadBewaard();
+    return s;
+  } catch (e) { logError('secondbrain', e); return null; }
+})();
+function secondbrainInfo() {
+  if (!secondbrain) return { aan: false };
+  try { return secondbrain.health(); } catch (e) { return { aan: true, fout: true }; }
+}
+// Nachtbouw rond 03:50 (Amsterdamse tijd): de kaart vers en kaart.json bijgewerkt, ook als niemand de App opent.
+if (secondbrain) setInterval(function () {
+  try {
+    const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' }));
+    if (d.getHours() === 3 && d.getMinutes() >= 50) secondbrain.nacht(d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate());
+  } catch (e) { logError('secondbrain-nacht', e); }
+}, 5 * 60000).unref();
+async function appSecondBrain(req, res, a, d, route) {
+  if (!secondbrain) return appWeiger(res, 404, 'Second Brain zit niet in deze versie van de pod', 'secondbrain ontbreekt');
+  if (!appTeller('secondbrain', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 600)', 'grens secondbrain');
+  if (route === 'POST /app/secondbrain/zoek' && d && d.betekenis && !appTeller('secondbrain-betekenis', 60, 3600000))
+    return appWeiger(res, 429, 'zoeken op betekenis te vaak dit uur (max 60); het gewone zoeken werkt nog', 'grens secondbrain-betekenis');
+  let r;
+  try { r = await secondbrain.app(route, d || {}, { vast: a.soort === 'vast' }); }
+  catch (e) { logError('app-secondbrain', e); return appWeiger(res, 500, 'fout op de pod', 'secondbrain uitzondering'); }
+  const actie = route === 'GET /app/secondbrain' ? 'kaart' : route.slice('POST /app/secondbrain/'.length);
+  const au = r.audit || {};
+  res._app.reden = 'secondbrain ' + actie + (au.domein ? ' ' + au.domein : '') + (au.h ? ' h=' + au.h : '') + (r.status !== 200 ? ' (' + r.status + ')' : '');
+  return appStuur(res, r.status, r.j);
+}
+// Financiën (bouwplan § 7): bij een vaste last of PayPal-dienst het pad van de vaultpagina uit de koppeltabel, als die in de kaart staat.
+function secondbrainFinPagina(d) {
+  if (!secondbrain || !d) return;
+  try {
+    const zet = function (r) { if (r && typeof r.naam === 'string') { const p = secondbrain.koppelNaam(r.naam); if (p) r.pagina = p; } };
+    if (d.vaste_lasten && Array.isArray(d.vaste_lasten.rijen)) d.vaste_lasten.rijen.forEach(zet);
+    if (d.paypal && Array.isArray(d.paypal.diensten)) d.paypal.diensten.forEach(zet);
+  } catch (e) { logError('secondbrain-financien', e); }
+}
+// ── einde secondbrain ──
+
 
 // ── Rolwachter (uitwijk stap 3, 6-10-2026) ─────────────────────────────────────────────────────────
 // Er is altijd maar één actieve kant (olares | vps); die staat in Supabase (machinekamer.uitwijk_stand, RPC
