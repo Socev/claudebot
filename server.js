@@ -14622,9 +14622,10 @@ let bankRondeLaatste = null;   // { begin, eind, uitkomst }
 // Zo'n /run is smal, en zodra de loperstand `alles` aanzet draait hij als socev (1002), die /opt/data/bin, .health-pod en
 // /proc/<pid>/environ niet kan lezen (uid-scheiding, bouwplan sleutelscheiding § 8 voorwaarde c): dan faalt hij vanaf de eerste
 // ronde. Er is geen taalmodel nodig: de pod start het script zelf, als claude (1001), met alleen de basis en de eigen inlog in de
-// omgeving (het script leest de leessleutel van de health-pod zelf). Scheelt ook 24 Haiku-beurten per dag.
+// omgeving (het script leest de leessleutel van de health-pod zelf). Scheelt ook 24 Haiku-beurten per dag. De inlog is die van
+// server.js (account 1, met het vangnet), dezelfde die het script anders via /proc vond — nu zichtbaar (Fable wv811 #6).
 // HOE. POST /health-rapporten {secret} → `python3 healthrapporten.py start` (het script koppelt de ronde zelf los en print één
-// regel GESTART…/LOOPT NOG…, zonder gezondheidsinhoud) → {ok, regel}. Eén start tegelijk; grens 240 s (genoom_wacht kan de
+// regel GESTART…/LOOPT NOG…, zonder gezondheidsinhoud) → {ok, regel} met alleen 'GESTART (pid …)' of 'LOOPT NOG (pid …)'. Eén start tegelijk; grens 240 s (genoom_wacht kan de
 // genoom-pijplijn bevragen). Fout → 502 met alleen de soort fout en de exitcode, nooit stdout/stderr van het script.
 // DEKT NIET: wat het script zelf doet (review F5, ontwerp Health-pod § 15).
 const HEALTH_RAPPORTEN_BIN = process.env.HEALTH_RAPPORTEN_BIN || '/opt/data/bin/healthrapporten.py';   // alleen de toets wijst elders heen
@@ -14647,7 +14648,8 @@ function healthRapportenStart(klaar) {
         logError('health-rapporten', new Error(fout));
         return klaar({ status: 502, j: { ok: false, fout: fout } });
       }
-      klaar({ status: 200, j: { ok: true, regel: m[0].slice(0, 400) } });
+      // Alleen de startregel zelf; het deel '; vorige: …' (onderdeelnamen en foutaantallen) blijft uit de n8n-executies (Fable wv811 #5).
+      klaar({ status: 200, j: { ok: true, regel: m[0].split('; vorige')[0].slice(0, 200) } });
     });
 }
 function bankRondeStart() {
