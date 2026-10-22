@@ -9,6 +9,8 @@
 # socev-rechten.sh meegegeven, dan moet ook elke Windows-codesoort uit zijn WINCODE-lijst (en de scripts uit CODEPLEK) vallen,
 # zodat de twee lijsten niet uit elkaar lopen. Exit 0 = goed; anders 1 met per afwijking een regel op stderr.
 set -u
+# Hermetisch: geen echte rclone.conf (een versleutelde zou om een wachtwoord vragen en de synclus stil laten hangen; #9).
+export RCLONE_CONFIG=/dev/null
 F="${1:?filterbestand}"
 R="${2:-}"
 [ -r "$F" ] || { echo "bisync-filter-toets: filter $F ontbreekt of is onleesbaar" >&2; exit 1; }
@@ -16,13 +18,17 @@ command -v rclone >/dev/null || { echo "bisync-filter-toets: rclone ontbreekt" >
 T="$(mktemp -d)" || exit 1
 trap 'rm -rf "$T"' EXIT
 mag=( "a.md" "map/b.docx" "map/c.pdf" "map/d.json" "map/e.zip" "map/f.html" "map/g.txt" "map/h.ts" "map/py.md" "map/ps1"
-      ".claude/skills/x/SKILL.md" ".claude/skills/x/s.py" ".claude/settings.json" ".obsidian/app.json" ".sync-id" )
+      ".claude/skills/x/SKILL.md" ".claude/skills/x/s.py" ".claude/settings.json" ".obsidian/app.json" ".sync-id"
+      "map/Café ü.md" "Dossier.Ünal/brief.docx" "map/notitie über.md" )
 niet=( "map/x.ps1" "map/X.PS1" "map/y.ps1." "map/y2.ps1 " "map/y3.Ps1. ." "map/z.py" "map/z.mjs" "map/z.js" "map/z.cjs"
        "map/z.sh" "map/z.bat" "map/Z.CMD" "map/z.vbs" "map/z.lnk" "map/z.url" "map/z.exe" "map/z.hta" "map/z.pyc" "map/z.pyw"
        "map/z.docm" "map/z.xlsm" "map/z.skill" "map/z.scf" "map/z.library-ms" "map/z.searchConnector-ms" "map/desktop.ini"
        "map/Desktop.INI" "map/__pycache__/m.cpython-311.pyc" "map/__pycache__/notitie.md" "map/.claude/settings.json"
        "map/.CLAUDE/settings.json" "map/.vscode/tasks.json" "map/.codex/config.toml" "map/.obsidian/plugins/p/main.js"
-       "map/.mcp.json" "verzamel-claude.mjs" "00_Systeem/Tokens/tokens_pc.ps1" )
+       "map/.mcp.json" "verzamel-claude.mjs" "00_Systeem/Tokens/tokens_pc.ps1"
+       "map/evil.msı" "map/evil.pıf. " "map/x.ınf" "map/.git/config" "map/.git/hooks/pre-commit" "map/.Cursor/mcp.json"
+       "map/node_modules/p/index.md" "map/z.ps1.socev-geblokkeerd-20261022-1" "map/z.pyd" "map/z.wsb" "map/z.accdb"
+       "map/z.iqy" "map/z.rdp" )
 if [ -n "$R" ]; then
   [ -r "$R" ] || { echo "bisync-filter-toets: $R onleesbaar" >&2; exit 1; }
   # Elke -iname '*.ext' en -name '*.ext' uit socev-rechten.sh behalve .ts (video) en .zip (gewoon document op de pc).

@@ -53,7 +53,9 @@ WINCODE=( -o -iname '*.ps1' -o -iname '*.psm1' -o -iname '*.psd1' -o -iname '*.c
   -o -iname '*.sct' -o -iname '*.hta' -o -iname '*.jse' -o -iname '*.lnk' -o -iname '*.url' -o -iname '*.scr' -o -iname '*.cpl'
   -o -iname '*.msc' -o -iname '*.exe' -o -iname '*.msi' -o -iname '*.dll' -o -iname '*.reg' -o -iname '*.pyw' -o -iname '*.xll'
   -o -iname '*.docm' -o -iname '*.xlsm' -o -iname '*.pptm' -o -iname '*.iso' -o -iname '*.appinstaller'
-  -o -iname '*.settingcontent-ms' -o -iname '*.library-ms' -o -iname '*.jar' )
+  -o -iname '*.settingcontent-ms' -o -iname '*.library-ms' -o -iname '*.jar'
+  -o -iname '*.iqy' -o -iname '*.slk' -o -iname '*.wsb' -o -iname '*.rdp' -o -iname '*.ppkg' -o -iname '*.jnlp' -o -iname '*.ahk'
+  -o -iname '*.accdb' -o -iname '*.accde' -o -iname '*.mdb' -o -iname '*.mde' -o -iname '*.pyd' )
 # Code-plekken: wat 1001 (machinekamer) of Davids pc als code of config uitvoert. Op elke diepte (Fable wv699 #3:
 # 10_Zakelijk/.../huisbot/.claude), plus losse scripts (Fable wv699 #4) en sinds wv785 Python-bytecode en -pakketten
 # (sys.path) en Windows-code. Voor socev alleen lezen. *.ts hoofdlettergevoelig: *.TS is meestal video.

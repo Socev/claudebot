@@ -47,9 +47,21 @@ SYNCLOG="$BIN/bisync.log"
 # vandaan; .claude/ en .obsidian/ in de vaultwortel wel (socev kan daar niet schrijven). Waarom en wat: bisync-filter.txt.
 # ELKE bisync hieronder krijgt dit filter mee, ook de resyncs: een ronde zonder filter zou een geblokkeerd bestand alsnog
 # overzetten. Werkt het filter niet (bisync-filter-toets.sh), dan synct de lus niet (fail-closed).
-SYNC_FILTER="${SYNC_FILTER:-/app/bisync-filter.txt}"
-SYNC_FILTER_TOETS="${SYNC_FILTER_TOETS:-/app/bisync-filter-toets.sh}"
+# Vast in het image (root), niet via de omgeving te verleggen (Fable wv813 #12).
+SYNC_FILTER=/app/bisync-filter.txt
+SYNC_FILTER_TOETS=/app/bisync-filter-toets.sh
 FILTER=( --filter-from "$SYNC_FILTER" )
+# De uitzondering + /.claude/** en + /.obsidian/** in het filter leunt op de ACL: socev mag daar niets schrijven. Vóór elke
+# ronde nagaan (± 10 ms); kan socev het toch, dan deze ronde niet (Fable wv813 #6). De na-ronde zet de ACL terug.
+codeplek_dicht(){
+  local d
+  for d in "$VAULT/.claude" "$VAULT/.obsidian"; do
+    [ -e "$d" ] || continue
+    getfacl -R -P -p "$d" 2>/dev/null | grep -qE '^(default:)?user:socev:(rw|-w)' && return 1
+    [ -z "$(find -P "$d" -user socev -print -quit 2>/dev/null)" ] || return 1
+  done
+  return 0
+}
 
 # De bisync-toestand blijft op de standaardplek ($HOME/.cache/rclone/bisync).
 # HOME is /opt/data en dat is het persistent volume, dus die overleeft een
@@ -109,6 +121,10 @@ rol_reset_podstart(){
 }
 
 sync_ronde(){
+  if ! codeplek_dicht; then
+    echo "$(date '+%F %T') LET OP: socev kan schrijven in .claude/ of .obsidian/ van de vault - ronde overgeslagen (syncfilter wv813)" >> "$SYNCLOG"
+    return 1
+  fi
   if flock "$VAULT_LOCK" rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" \
        --create-empty-src-dirs --conflict-resolve newer \
        --resilient --recover --max-lock 2m >> "$SYNCLOG" 2>&1; then
@@ -158,6 +174,10 @@ sync_lus(){
   if ! FT="$(bash "$SYNC_FILTER_TOETS" "$SYNC_FILTER" /app/socev-rechten.sh 2>&1)"; then
     echo "$(date '+%F %T') SYNC STOP: syncfilter $SYNC_FILTER werkt niet - geen bisync tot een image met een goed filter" >> "$SYNCLOG"
     printf '%s\n' "$FT" | head -20 >> "$SYNCLOG"
+    # Hoorbaar (Fable wv813 #5): alleen bij een podstart, dus hooguit één bericht per start; best-effort.
+    [ -r /opt/data/mk-scripts/bericht.py ] && timeout 60 python3 /opt/data/mk-scripts/bericht.py --klasse normaal \
+      "Vault-sync staat stil sinds de herstart: het syncfilter van dit image werkt niet (bisync.log, SYNC STOP). Er is niets weg. Niet terug naar een image zonder filter: eerst nalopen (bouwplan uid-scheiding § 8)." \
+      >/dev/null 2>&1 || true
     while true; do sleep 3600; done
   fi
   echo "$(date '+%F %T') $FT" >> "$SYNCLOG"
