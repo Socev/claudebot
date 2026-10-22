@@ -96,7 +96,11 @@ function stop(srv) { try { process.kill(-srv.p.pid, 'SIGKILL'); } catch (e) {} }
   await new Promise((r) => hook.listen(0, '127.0.0.1', r));
   const alle = [];
   try {
-    const s = maakServer('s1', vrijePoort(), { CLAUDE_OAUTH_TOKEN_2: T2 }); alle.push(s); await wachtOp(s);
+    // ACCOUNT2_MEET=1: het opstartpad van de echte pod (meetklok), dat een proefserver anders overslaat (CI-rooktest 176 viel daarop)
+    const s = maakServer('s1', vrijePoort(), { CLAUDE_OAUTH_TOKEN_2: T2, ACCOUNT2_MEET: '1' }); alle.push(s); await wachtOp(s);
+    await slaap(2500);
+    const m2 = tankRijen.find((x) => x.rpc === 'mk_tank2_schrijf');
+    toets('A0 meetklok: na de start een meting van account 2 met bruikbaar', !!(m2 && m2.body.p_bruikbaar === true), JSON.stringify(m2 && m2.body));
     let h = await req(s, 'GET', '/health');
     toets('A /health: accounts.agents_op 2, token2 aanwezig, geen bezwaar', h.accounts && h.accounts.agents_op === 2 && h.accounts.token2 === true && h.accounts.bezwaar2 === null, JSON.stringify(h.accounts));
     toets('A /health noemt nooit het token', JSON.stringify(h).indexOf('NEP2') === -1 && JSON.stringify(h).indexOf('NEP1') === -1);

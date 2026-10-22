@@ -3240,7 +3240,8 @@ function appWeesVasthouden() {
   setInterval(function () { try { weesRonde(); } catch (e) { logError('wees-ronde', e); } }, WEES_POLL_MS).unref();
   setTimeout(loperPing, 5000).unref(); setInterval(loperPing, 60 * 1000).unref();   // wv715: /health.loper en storing
   if (SERVER_ECHT || process.env.ACCOUNT2_MEET === '1') {   // wv781; een proefserver meet niet (geen echte API-call)
-    setTimeout(account2MeetRonde, 1000).unref(); setInterval(account2MeetRonde, ACCOUNT2_MEET_MS).unref();
+    // De constanten staan verderop in het bestand: pas na het laden aanraken (CI-rooktest 176: TDZ bij de opstart)
+    setTimeout(function () { account2MeetRonde(); setInterval(account2MeetRonde, ACCOUNT2_MEET_MS).unref(); }, 1000).unref();
   }
   setTimeout(function () { try { appVerlorenRonde(); } catch (e) { logError('app-verloren', e); } }, 15 * 1000).unref();   // wv716
 })();
