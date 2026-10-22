@@ -38,7 +38,7 @@ function geldigeDatum(d) { return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/
 // Tekst van een derde, begrensd: geen stuurtekens, geen haakjes die een BANKDATA-blok kunnen openen, hooguit n tekens.
 function schoon(t, n) {
   if (t == null) return null;
-  const s = String(t).normalize('NFC').replace(/[\u0000-\u001f\u007f​-‏‪-‮⁠-⁯﻿]+/g, ' ').replace(/[[\]{}<>`|\\]/g, ' ')
+  const s = String(t).normalize('NFC').replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]+/g, ' ').replace(/[[\]{}<>`|\\]/g, ' ')
     .replace(/\s+/g, ' ').trim();
   return s ? s.slice(0, n || 80) : null;
 }
@@ -56,7 +56,7 @@ function naamUit(t) {
 const STOP = new Set(['the', 'walt', 'de', 'het', 'een', 'www', 'paypal', 'stichting', 'vereniging', 'fonds', 'b', 'v', 'bv', 'nv', 'ltd', 'limited', 'inc', 'gmbh', 'ab', 'sa', 'sarl', 'llc']);
 function dienstSleutel(naam) {
   if (!naam) return null;
-  const w = String(naam).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\.(com|nl|net|org|io|eu|de|co\.uk)\b/g, ' ')
+  const w = String(naam).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\.(com|nl|net|org|io|eu|de|co\.uk)\b/g, ' ')
     .replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(function (x) { return x.length >= 2 && !STOP.has(x); });
   return w.length ? w[0].slice(0, 40) : null;
 }
@@ -68,7 +68,8 @@ function datumUit(t) {
   if (m && MAANDEN[m[1].toLowerCase()]) return geldigeDatum(m[3] + '-' + String(MAANDEN[m[1].toLowerCase()]).padStart(2, '0') + '-' + m[2].padStart(2, '0'));
   return null;
 }
-function bedragUit(m) { return m ? { bedrag: getal(m[2]), valuta: m[3] === (VALUTA_TEKEN[m[1]] || m[3]) ? m[3] : m[3] } : null; }
+// Valutateken en -code moeten bij elkaar passen (€ … EUR); anders telt de code (een onbekend teken komt in de vormen niet voor).
+function bedragUit(m) { return m ? { bedrag: getal(m[2]), valuta: m[3] } : null; }
 
 /*
  * leesMail(m) — één mail uit het lees-luik ({id, van, aan, onderwerp, snippet, tekst, dag_lokaal}) → bewijs of { fout }.
@@ -87,12 +88,12 @@ function leesMail(m) {
   else if (/^(U hebt een terugbetaling van|Uw terugbetaling van)\b/i.test(ond)) soort = 'terugbetaling';
   else return { fout: 'onderwerp is geen ontvangstbewijs of terugbetaling', mail_id: id };
   // Alleen de tekst, zonder links; de snippet als terugval (het lees-luik geeft altijd een snippet).
-  const t = String(m.tekst || '').replace(/\[https?:\/\/[^\]]*\]/g, ' ').replace(/https?:\/\/\S+/g, ' ').replace(/[  ]/g, ' ').slice(0, 20000);
-  const s = String(m.snippet || '').replace(/[  ]/g, ' ').slice(0, 1000);
+  const t = String(m.tekst || '').replace(/\[https?:\/\/[^\]]*\]/g, ' ').replace(/https?:\/\/\S+/g, ' ').replace(/[\u00a0\u202f]/g, ' ').slice(0, 20000);
+  const s = String(m.snippet || '').replace(/[\u00a0\u202f]/g, ' ').slice(0, 1000);
   const plat = (t + '\n' + s);
   const ref = (/Transactiereferentie:?\s*\n?\s*([0-9A-Z]{17})\b/.exec(plat) || [])[1] || null;
   const b = { mail_id: id, soort: soort, ref: ref, datum: null, ontvanger: null, afgekapt: false, bedrag: null, valuta: null, bedrag_eur: null,
-    bron: 'onbekend', bron_eind: null, status: null, afschrift_naam: null, vorm: null };
+    bron: 'onbekend', bron_eind: null, status: null, afschrift_naam: null, vorm: null, origineel: null };
   const kandidaten = [];
   let x;
   if (soort === 'betaling') {
@@ -108,14 +109,20 @@ function leesMail(m) {
     if ((x = /(?:^|\n)Webwinkel\n([^\n]+)/.exec(t))) kandidaten.push(x[1].replace(/\s+Factuurreferentie.*$/, ''));
     if ((x = /\n([^\n]{2,90}?) betaald met\b/.exec(t))) kandidaten.push(x[1]);
     if (!kandidaten.length && (x = /betaling aan (.+)$/i.exec(ond))) kandidaten.push(x[1]);
-    // EUR: wat er van de bron afging
-    if ((x = new RegExp('betaald met\\s+[^€$£]{0,80}?' + BEDRAG).exec(t)) && x[3] === 'EUR') b.bedrag_eur = getal(x[2]);
+    // EUR: wat er van de bron afging. Twee methoden (PayPal-saldo + bank, Fable wv765 #6): alleen het bankdeel komt op de bank.
+    const blok = (/(?:betaald met|Gebruikte betaalmethoden)([\s\S]{0,400}?)(?:Transactiereferentie|Betaling bekijken|Je betaling is verzonden|Problemen met|-{10}|$)/.exec(t) || [])[1] || '';
+    const delen = [];
+    blok.replace(new RegExp('([^€$£]{0,80}?)' + BEDRAG, 'g'), function (heel, wat, teken, bedrag, code) { delen.push({ wat: wat, bedrag: getal(bedrag), valuta: code }); return heel; });
+    const bankDeel = delen.filter(function (d) { return /bank|rekening/i.test(d.wat) && d.valuta === 'EUR'; });
+    if (delen.length >= 2 && bankDeel.length === 1 && delen.some(function (d) { return !/bank|rekening/i.test(d.wat); })) { b.bedrag_eur = bankDeel[0].bedrag; b.vorm = 'gemengd'; }
+    else if ((x = new RegExp('betaald met\\s+[^€$£]{0,80}?' + BEDRAG).exec(t)) && x[3] === 'EUR') b.bedrag_eur = getal(x[2]);
     else if ((x = new RegExp('Gebruikte betaalmethoden[^€$£]{0,80}?' + BEDRAG).exec(t)) && x[3] === 'EUR') b.bedrag_eur = getal(x[2]);
     else if ((x = new RegExp('Omgerekend van:\\s*' + BEDRAG).exec(t)) && x[3] === 'EUR') b.bedrag_eur = getal(x[2]);
     else if ((x = new RegExp('Overgemaakt bedrag\\s*' + BEDRAG).exec(t)) && x[3] === 'EUR') b.bedrag_eur = getal(x[2]);
     // bron van het geld
     const bron = (/betaald met\s+([\s\S]{0,80}?)[€$£]/.exec(t) || /Gebruikte betaalmethoden \(totaal\)\s+([\s\S]{0,80}?)[€$£]/.exec(t) || [])[1] || '';
-    if (/creditcard|visa|mastercard|american express|amex/i.test(bron)) b.bron = 'kaart';
+    if (b.vorm === 'gemengd') b.bron = 'bank';
+    else if (/creditcard|visa|mastercard|american express|amex/i.test(bron)) b.bron = 'kaart';
     else if (/PayPal-saldo|saldo/i.test(bron)) b.bron = 'saldo';
     else if (/bank|rekening/i.test(bron)) b.bron = 'bank';
     const eind = /(?:x-|••|\*\*)(\d{4})\b/.exec(bron);
@@ -141,6 +148,8 @@ function leesMail(m) {
     const eind = /(?:x-|••|eindigend op )(\d{4})\b/.exec(naar);
     if (eind) b.bron_eind = eind[1];
     if ((x = /Transactiedatum\n([^\n]{6,40})/.exec(t))) b.datum = datumUit(x[1]);
+    // oorspronkelijke aankoop: één terugbetaling kan als "onderweg" (zonder referentie) én als "U hebt een terugbetaling" komen
+    if ((x = /voor uw aankoop op (\d{1,2} \w+ \d{4})/.exec(t.replace(/\s+/g, ' '))) || (x = /betaald op (\d{1,2} \w+ \d{4})/.exec(t.replace(/\s+/g, ' ')))) b.origineel = datumUit(x[1]);
   }
   if (b.valuta === 'EUR' && b.bedrag_eur == null && b.bedrag != null) b.bedrag_eur = b.bedrag;
   if (!b.datum) b.datum = geldigeDatum(String(m.dag_lokaal || '').slice(0, 10));
@@ -163,7 +172,7 @@ const PP_SCHEMA = 1;
 function schema(a) {
   a.db.exec('CREATE TABLE IF NOT EXISTS paypal_bewijs (ref TEXT PRIMARY KEY, soort TEXT NOT NULL, datum TEXT NOT NULL, ontvanger TEXT NOT NULL,' +
     ' afgekapt INTEGER NOT NULL DEFAULT 0, dienst TEXT, bedrag REAL NOT NULL, valuta TEXT NOT NULL, bedrag_eur REAL, bron TEXT NOT NULL, bron_eind TEXT,' +
-    ' status TEXT, afschrift_naam TEXT, vorm TEXT, mail_ids TEXT NOT NULL, eerste_gezien TEXT NOT NULL, bijgewerkt TEXT NOT NULL,' +
+    ' status TEXT, afschrift_naam TEXT, vorm TEXT, origineel TEXT, mail_ids TEXT NOT NULL, eerste_gezien TEXT NOT NULL, bijgewerkt TEXT NOT NULL,' +
     ' nr INTEGER, koppel_soort TEXT, koppel_dagen INTEGER, koppel_op TEXT);' +
     'CREATE INDEX IF NOT EXISTS pp_datum ON paypal_bewijs (datum);' +
     'CREATE INDEX IF NOT EXISTS pp_nr ON paypal_bewijs (nr);');
@@ -185,7 +194,7 @@ function controleer(b) {
   if (!ok) return null;
   return { ref: b.ref, soort: b.soort, datum: b.datum, ontvanger: schoon(b.ontvanger, 80), afgekapt: b.afgekapt ? 1 : 0, dienst: dienstSleutel(b.ontvanger),
     bedrag: r2(b.bedrag), valuta: b.valuta, bedrag_eur: b.bedrag_eur == null ? null : r2(b.bedrag_eur), bron: b.bron, bron_eind: b.bron_eind == null ? null : String(b.bron_eind),
-    status: schoon(b.status, 30), afschrift_naam: schoon(b.afschrift_naam, 40), vorm: schoon(b.vorm, 20), mail_id: b.mail_id };
+    status: schoon(b.status, 30), afschrift_naam: schoon(b.afschrift_naam, 40), vorm: schoon(b.vorm, 20), origineel: geldigeDatum(b.origineel), mail_id: b.mail_id };
 }
 /*
  * bij(a, lijst, fouten) — bewijzen bewaren. Idempotent op transactiereferentie: dezelfde betaling uit een tweede mail (PayPal
@@ -197,7 +206,11 @@ function bij(a, lijst, fouten) {
   const nu = nuIso(), uit = { aangeboden: (lijst || []).length, nieuw: 0, aangevuld: 0, ongewijzigd: 0, geweigerd: 0, niet_gelezen: (fouten || []).length };
   const lees = a.db.prepare('SELECT * FROM paypal_bewijs WHERE ref = ?');
   const zet = a.db.prepare('INSERT INTO paypal_bewijs (ref, soort, datum, ontvanger, afgekapt, dienst, bedrag, valuta, bedrag_eur, bron, bron_eind, status, afschrift_naam, vorm,' +
-    ' mail_ids, eerste_gezien, bijgewerkt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    ' origineel, mail_ids, eerste_gezien, bijgewerkt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+  // Fable wv765 #5: dezelfde terugbetaling als "onderweg" (sleutel mail:…) én met referentie: zelfde dienst, bedrag en oorspronkelijke aankoop
+  const tweeling = a.db.prepare("SELECT * FROM paypal_bewijs WHERE soort = 'terugbetaling' AND dienst = ? AND bedrag = ? AND valuta = ? AND origineel = ? AND ref != ?" +
+    " AND ((ref LIKE 'mail:%') != (? LIKE 'mail:%'))");
+  const weg = a.db.prepare('DELETE FROM paypal_bewijs WHERE ref = ?');
   const werk = a.db.prepare('UPDATE paypal_bewijs SET ontvanger = ?, afgekapt = ?, dienst = ?, bedrag_eur = ?, bron = ?, bron_eind = ?, status = ?, afschrift_naam = ?,' +
     ' mail_ids = ?, bijgewerkt = ? WHERE ref = ?');
   const doe = function () {
@@ -206,8 +219,18 @@ function bij(a, lijst, fouten) {
       if (!b) { uit.geweigerd++; return; }
       const o = lees.get(b.ref);
       if (!o) {
+        const tw = b.soort === 'terugbetaling' && b.origineel ? tweeling.get(b.dienst, b.bedrag, b.valuta, b.origineel, b.ref, b.ref) : null;
+        let ids = [b.mail_id];
+        if (tw) {
+          let oud = []; try { oud = JSON.parse(tw.mail_ids) || []; } catch (e) { oud = []; }
+          if (/^mail:/.test(b.ref)) {   // de definitieve staat er al: alleen het mail-id erbij
+            if (oud.indexOf(b.mail_id) < 0) a.db.prepare('UPDATE paypal_bewijs SET mail_ids = ?, bijgewerkt = ? WHERE ref = ?').run(JSON.stringify(oud.concat([b.mail_id]).slice(-5)), nu, tw.ref);
+            uit.aangevuld++; return;
+          }
+          weg.run(tw.ref); ids = oud.concat([b.mail_id]).slice(-5); uit.samengevoegd = (uit.samengevoegd || 0) + 1;
+        }
         zet.run(b.ref, b.soort, b.datum, b.ontvanger, b.afgekapt, b.dienst, b.bedrag, b.valuta, b.bedrag_eur, b.bron, b.bron_eind, b.status, b.afschrift_naam, b.vorm,
-          JSON.stringify([b.mail_id]), nu, nu);
+          b.origineel, JSON.stringify(ids), nu, nu);
         uit.nieuw++; return;
       }
       let ids = []; try { ids = JSON.parse(o.mail_ids) || []; } catch (e) { ids = []; }
@@ -254,7 +277,8 @@ function bekend(a, van) {
  * vier cijfers noemt, alleen de rekening met die vier cijfers. Venster: 0..VENSTER_DAGEN dagen na het bewijs (1 dag ervoor mag:
  * de transactiedatum van PayPal is Amerikaanse tijd).
  *  1. één op één: zelfde bedrag in euro's op de cent; paren op volgorde van dagverschil, dan datum (gulzig);
- *  2. meer bewijzen op één post: wat overblijft, 2–4 bewijzen binnen het venster die samen precies het bedrag zijn.
+ *  2. twee bewijzen op één post: wat overblijft, twee bewijzen binnen het venster en hooguit 2 dagen uit elkaar die samen precies
+ *     het bedrag zijn (meer of verder uit elkaar gaf toevalstreffers, Fable wv765 #3).
  */
 function koppel(a) {
   schema(a);
@@ -265,7 +289,7 @@ function koppel(a) {
     const reks = new Map(a.db.prepare('SELECT rek, iban_eind, eigenaar FROM rekeningen').all().map(function (r) { return [r.rek, r]; }));
     const posten = a.db.prepare("SELECT nr, rek, datum, bedrag FROM transacties WHERE status IN ('booked', 'pending') AND lower(tegenpartij) LIKE '%paypal%' AND datum IS NOT NULL")
       .all().filter(function (t) { return !vast.has(t.nr) && String((reks.get(t.rek) || {}).eigenaar || '').toLowerCase() !== 'extern'; });
-    const bewijzen = a.db.prepare("SELECT ref, soort, datum, bedrag_eur, bron, bron_eind FROM paypal_bewijs WHERE nr IS NULL AND bedrag_eur IS NOT NULL AND bron IN ('bank', 'onbekend')").all();
+    const bewijzen = a.db.prepare("SELECT ref, soort, datum, dienst, bedrag_eur, bron, bron_eind FROM paypal_bewijs WHERE nr IS NULL AND bedrag_eur IS NOT NULL AND bron IN ('bank', 'onbekend')").all();
     const past = function (b, t) {
       if ((b.soort === 'betaling') !== (t.bedrag < 0)) return null;
       if (b.bron_eind && (reks.get(t.rek) || {}).iban_eind !== b.bron_eind) return null;
@@ -281,23 +305,33 @@ function koppel(a) {
     bewijzen.forEach(function (b) {
       (perBedrag.get(centen(b.bedrag_eur)) || []).forEach(function (t) { const d = past(b, t); if (d != null) paren.push({ b: b, t: t, d: d }); });
     });
-    paren.sort(function (p, q) { return Math.abs(p.d) - Math.abs(q.d) || (p.d < 0) - (q.d < 0) || (p.b.datum < q.b.datum ? -1 : p.b.datum > q.b.datum ? 1 : 0) || p.t.nr - q.t.nr; });
+    // Gulzig op kosten. Ronde A: kosten = dagverschil, een dag ervóór telt als 5 (komt zelden voor). Daaruit per dienst de
+    // gebruikelijke vertraging (mediaan); ronde B: kosten = afstand tot die vertraging. Zo wint bij twee posten van hetzelfde bedrag
+    // niet de dienst met het kleinste verschil maar de dienst die past (Fable wv765 #1: Google 11e/Disney 15e, posten 14e/17e).
+    const gulzig = function (kosten) {
+      const l = paren.map(function (p) { return { p: p, k: kosten(p) }; });
+      l.sort(function (x, y) { return x.k - y.k || (x.p.b.datum < y.p.b.datum ? -1 : x.p.b.datum > y.p.b.datum ? 1 : 0) || x.p.t.nr - y.p.t.nr; });
+      const bg = new Set(), tg = new Set(), uitP = [];
+      l.forEach(function (x) { if (bg.has(x.p.b.ref) || tg.has(x.p.t.nr)) return; bg.add(x.p.b.ref); tg.add(x.p.t.nr); uitP.push(x.p); });
+      return uitP;
+    };
+    const vooraf = gulzig(function (p) { return p.d < 0 ? 5 : p.d; });
+    const lagPer = new Map();
+    vooraf.forEach(function (p) { if (!lagPer.has(p.b.dienst)) lagPer.set(p.b.dienst, []); lagPer.get(p.b.dienst).push(p.d); });
+    const lag = new Map(Array.from(lagPer.entries()).filter(function (e) { return e[1].length >= 3; }).map(function (e) { return [e[0], mediaan(e[1])]; }));
+    const gekozen = gulzig(function (p) { const L = lag.has(p.b.dienst) ? lag.get(p.b.dienst) : 2; return Math.abs(p.d - L) + (p.d < 0 ? 1 : 0); });
     const bGebruikt = new Set(), tGebruikt = new Set();
     let een = 0, som = 0;
-    paren.forEach(function (p) {
-      if (bGebruikt.has(p.b.ref) || tGebruikt.has(p.t.nr)) return;
-      bGebruikt.add(p.b.ref); tGebruikt.add(p.t.nr);
-      zet.run(p.t.nr, '1op1', p.d, nu, p.b.ref); een++;
-    });
-    // 2. meer bewijzen op één post (hooguit 4; zoekruimte begrensd)
+    gekozen.forEach(function (p) { bGebruikt.add(p.b.ref); tGebruikt.add(p.t.nr); zet.run(p.t.nr, '1op1', p.d, nu, p.b.ref); een++; });
+    // 2. twee bewijzen op één post
     const restB = bewijzen.filter(function (b) { return !bGebruikt.has(b.ref); });
     posten.filter(function (t) { return !tGebruikt.has(t.nr); }).sort(function (p, q) { return p.datum < q.datum ? -1 : 1; }).forEach(function (t) {
       const kand = restB.filter(function (b) { return !bGebruikt.has(b.ref) && past(b, t) != null && centen(b.bedrag_eur) < centen(t.bedrag); }).slice(0, 12);
       const doel = centen(t.bedrag);
       let gevonden = null;
       const zoek = function (start, gekozen, totaal) {
-        if (gevonden || gekozen.length > 4) return;
-        if (totaal === doel && gekozen.length >= 2) { gevonden = gekozen.slice(); return; }
+        if (gevonden || gekozen.length > 2) return;
+        if (totaal === doel && gekozen.length === 2 && Math.abs(dagVerschil(gekozen[0].datum, gekozen[1].datum)) <= 2) { gevonden = gekozen.slice(); return; }
         for (let i = start; i < kand.length && !gevonden; i++) {
           const c = centen(kand[i].bedrag_eur);
           if (totaal + c <= doel) { gekozen.push(kand[i]); zoek(i + 1, gekozen, totaal + c); gekozen.pop(); }
@@ -332,7 +366,7 @@ function dienstPerPost(a) {
 
 /*
  * reeksen(a) — vaste PayPal-diensten uit de bewijzen (alle bronnen: ook een abonnement op de creditcard is een vaste last).
- * Per dienst en bedragcluster (± 2%, of een prijsstap): ritme maand als in ≥ 80% van de maanden in de looptijd een post
+ * Per dienst en bedragcluster (± 2%, of een prijsstap): ritme maand als er ≥ 3 posten zijn en in ≥ 80% van de maanden in de looptijd een post
  * staat (posten per maand = mediaan, zodat twee abonnementen van hetzelfde bedrag bij één dienst twee per maand geven), jaar
  * bij een gat van 350–380 dagen. Prijsstap: een cluster stopt en binnen 45 dagen begint bij dezelfde dienst een cluster met
  * hetzelfde ritme dat hooguit 50% afwijkt → één reeks met bedrag_vorig en gewijzigd_op. Actief: laatste post binnen 1,5 × ritme.
@@ -359,7 +393,8 @@ function reeksen(a, o) {
       p.forEach(function (r) { const m = r.datum.slice(0, 7); maanden.set(m, (maanden.get(m) || 0) + 1); });
       const span = (Number(laatste.slice(0, 4)) - Number(eerste.slice(0, 4))) * 12 + Number(laatste.slice(5, 7)) - Number(eerste.slice(5, 7)) + 1;
       let ritme = null, perMaand = null;
-      if (p.length >= 2 && span >= 2 && maanden.size >= 0.8 * span) { ritme = 'maand'; perMaand = Math.max(1, Math.round(mediaan(Array.from(maanden.values())))); }
+      // twee posten is nog geen abonnement (Fable wv765 #2)
+      if (p.length >= 3 && span >= 3 && maanden.size >= 0.8 * span) { ritme = 'maand'; perMaand = Math.max(1, Math.round(mediaan(Array.from(maanden.values())))); }
       else if (p.length >= 2) {
         const gaten = []; for (let i = 1; i < p.length; i++) gaten.push(dagVerschil(p[i - 1].datum, p[i].datum));
         const mg = mediaan(gaten);
@@ -389,7 +424,8 @@ function reeksen(a, o) {
       const bedragEur = eur.length ? eur[eur.length - 1].bedrag_eur : null;
       const bronnen = Array.from(new Set(p.slice(-3).map(function (x) { return x.bron; })));
       const signalen = [];
-      if (actief && dagVerschil(r.eerste, peil) <= 62) signalen.push('nieuw');
+      // nieuw: een reeks bestaat pas vanaf drie posten, dus 'nieuw' tot ± drie termijnen na de eerste post
+      if (actief && dagVerschil(r.eerste, peil) <= Math.round(termijn * 3.3)) signalen.push('nieuw');
       if (actief && r.bedrag_vorig != null && r.bedrag > r.bedrag_vorig && dagVerschil(r.gewijzigd_op, peil) <= 92) signalen.push('duurder');
       if (actief && r.bedrag_vorig != null && r.bedrag < r.bedrag_vorig && dagVerschil(r.gewijzigd_op, peil) <= 92) signalen.push('goedkoper');
       if (!actief && dagVerschil(r.laatste, peil) <= Math.round(termijn * 1.5) + 92) signalen.push('weg');
@@ -448,7 +484,7 @@ function diensten(a, o) {
   const actief = l.filter(function (r) { return r.actief; });
   return { aantal: l.length, actief: actief.length, per_maand_totaal: r2(actief.reduce(function (s, r) { return s + r.per_maand; }, 0)),
     per_maand_bank: r2(actief.filter(function (r) { return r.betaald_via === 'bankrekening'; }).reduce(function (s, r) { return s + r.per_maand; }, 0)),
-    let_op: 'vaste PayPal-diensten herkend aan ritme en bedrag in de ontvangstbewijzen; signalen: nieuw (≤ 2 maanden), duurder/goedkoper (prijsstap ≤ 3 maanden), weg (uitgebleven)',
+    let_op: 'vaste PayPal-diensten herkend aan ritme en bedrag in de ontvangstbewijzen; signalen: nieuw (eerste drie termijnen), duurder/goedkoper (prijsstap ≤ 3 maanden), weg (uitgebleven)',
     diensten: l };
 }
 function stand(a) {
