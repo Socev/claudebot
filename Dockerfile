@@ -138,6 +138,7 @@ COPY package.json /app/release-bootstrap/package.json
 COPY bank-lezer.js /app/release-bootstrap/bank-lezer.js
 COPY bunq-lezer.js /app/release-bootstrap/bunq-lezer.js
 COPY bank-archief.js /app/release-bootstrap/bank-archief.js
+COPY paypal-bewijs.js /app/release-bootstrap/paypal-bewijs.js
 COPY bewaker.js /app/release-bootstrap/bewaker.js
 COPY studio.js /app/release-bootstrap/studio.js
 COPY bandjes.js /app/release-bootstrap/bandjes.js

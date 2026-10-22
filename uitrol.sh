@@ -41,7 +41,8 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # studio.js (wv707): tab Studio in de app, door server.js geladen (ontbreekt hij, dan 404 op /app/studio/* en studio.aan=false in /health).
 # bandjes.js (wv743): mini-app Bandjes, door server.js geladen (ontbreekt hij, dan 404 op /app/bandjes* en bandjes.aan=false in /health).
 # audio.js (wv743): telefoonversie van een bandje, door studio.js geladen als een flow erom vraagt (ontbreekt hij, dan alleen het origineel met een noot).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js"
+# paypal-bewijs.js (wv765): PayPal-laag, door bank-lezer.js en server.js geladen als een PayPal-opdracht hem vraagt (ontbreekt hij, dan faalt alleen die opdracht netjes).
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js paypal-bewijs.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

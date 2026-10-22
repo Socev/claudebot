@@ -42,6 +42,11 @@
  *   node bank-lezer.js archief                                                  alleen aantallen (mag in een rapport)
  *   node bank-lezer.js verrijk                                                  regels opnieuw toepassen (lokaal)
  *   node bank-lezer.js verrijk-open [--max N] / verrijk-zet (stdin {resultaten, model})   alleen server.js (AI-stap)
+ * PayPal-laag (wv765, paypal-bewijs.js; bewijzen uit de ontvangstbewijzen in Gmail, gekoppeld aan de PayPal-posten):
+ *   node bank-lezer.js paypal [--van] [--tot] [--dienst d] [--max N]            bewijzen met hun bankpost; posten zonder bewijs
+ *   node bank-lezer.js paypal-diensten                                          vaste PayPal-diensten (ritme, bedrag, signalen)
+ *   node bank-lezer.js paypal-bekend [--van]                                    alleen server.js: mail-id's die al bewaard zijn
+ *   node bank-lezer.js paypal-bij (stdin {bewijzen, fouten, ronde})            alleen server.js: bewaren (idempotent) + koppelen
  * Historie voor het archief (alleen machinekamer via server.js):
  *   node bank-lezer.js historie bunq --volledig [--opgeheven] [--opnieuw]       alle bunq-posten ooit, per rekening onder eigen slot
  *   node bank-lezer.js historie abn-diep --van JJJJ-MM-DD                       ABN zo ver als de bank geeft (laat David er 2 over)
@@ -562,6 +567,9 @@ function archiefKlaar() {
   x.A.rekeningenSync(x.a, s.rekeningen);
   return { A: x.A, a: x.a, s: s };
 }
+// wv765: de PayPal-laag; zelfde database, eigen tabel. Laadt pas als een PayPal-opdracht hem nodig heeft.
+let paypalObj;
+function paypalModule() { if (!paypalObj) paypalObj = require(path.join(__dirname, 'paypal-bewijs.js')); return paypalObj; }
 function archiefFilter(a, s) {
   const o = a.opt, f = {};
   ['van', 'tot'].forEach(function (k) { if (o[k] != null) { if (!isDatum(o[k])) throw new Weigering('--' + k + ' als JJJJ-MM-DD'); f[k] = o[k]; } });
@@ -1077,7 +1085,37 @@ const opdrachten = {
   async zoek(a) { const x = archiefKlaar(); return Object.assign({ ok: true, bron: 'archief' }, x.A.zoek(x.a, archiefFilter(a, x.s))); },
   async maand(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.maand(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^maand:/.test(e.message)) throw new Weigering(e.message); throw e; } },
   async intern(a) { const x = archiefKlaar(); return Object.assign({ ok: true, bron: 'archief' }, x.A.internLijst(x.a, archiefFilter(a, x.s))); },
-  async abonnementen(a) { const x = archiefKlaar(); return Object.assign({ ok: true, bron: 'archief' }, x.A.abonnementen(x.a, { alle: !!a.opt.alle })); },
+  async abonnementen(a) {
+    const x = archiefKlaar(), uit = Object.assign({ ok: true, bron: 'archief' }, x.A.abonnementen(x.a, { alle: !!a.opt.alle }));
+    // wv765: achter de PayPal-incasso's de echte diensten (uit de ontvangstbewijzen); faalt dat, dan alleen een let_op
+    try { const d = paypalModule().diensten(x.a); uit.paypal_diensten = { per_maand_totaal: d.per_maand_totaal, per_maand_bank: d.per_maand_bank,
+      let_op: 'de PayPal-regel hierboven is de som van deze diensten (plus losse PayPal-aankopen); details: opdracht paypal-diensten',
+      diensten: d.diensten.filter(function (r) { return r.actief; }).map(function (r) { return { naam: r.naam, ritme: r.ritme, bedrag: r.bedrag, valuta: r.valuta, per_maand: r.per_maand, betaald_via: r.betaald_via, signalen: r.signalen }; }) }; }
+    catch (e) { uit.paypal_diensten = { fout: 'PayPal-laag niet leesbaar' }; }
+    return uit;
+  },
+  // ── PayPal-laag (wv765): paypal-bewijs.js op dezelfde database ──
+  async paypal(a) {
+    const x = archiefKlaar(), o = {};
+    ['van', 'tot'].forEach(function (k) { if (a.opt[k] != null) { if (!isDatum(a.opt[k])) throw new Weigering('--' + k + ' als JJJJ-MM-DD'); o[k] = a.opt[k]; } });
+    if (a.opt.dienst != null) o.dienst = String(a.opt.dienst).slice(0, 40);
+    if (a.opt.max != null) o.max = a.opt.max;
+    return Object.assign({ ok: true, bron: 'archief' }, paypalModule().lijst(x.a, o));
+  },
+  async 'paypal-diensten'() { const x = archiefKlaar(); return Object.assign({ ok: true, bron: 'archief' }, paypalModule().diensten(x.a)); },
+  async 'paypal-bekend'(a) {
+    const x = archiefOpen();
+    if (a.opt.van != null && !isDatum(a.opt.van)) throw new Weigering('--van als JJJJ-MM-DD');
+    return { ok: true, mail_ids: paypalModule().bekend(x.a, a.opt.van) };
+  },
+  async 'paypal-bij'() {
+    const x = archiefKlaar(), P = paypalModule();
+    if (!Array.isArray(geheim.bewijzen)) throw new Weigering('bewijzen ontbreken');
+    const b = P.bij(x.a, geheim.bewijzen.slice(0, 200), Array.isArray(geheim.fouten) ? geheim.fouten.slice(0, 200) : []);
+    const k = geheim.koppel === false ? null : P.koppel(x.a);
+    if (geheim.ronde === true) P.metaZet(x.a, 'paypal_ronde_op', new Date().toISOString());
+    return { ok: true, bewaard: b, koppeling: k || undefined, stand: P.stand(x.a) };
+  },
   async archief() { const x = archiefKlaar(); x.A.verrijkAlsVuil(x.a); return Object.assign({ ok: true }, x.A.stand(x.a)); },
   async verrijk() { const x = archiefKlaar(); return Object.assign({ ok: true }, x.A.verrijk(x.a)); },
   async corrigeer(a) {

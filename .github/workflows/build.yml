@@ -66,6 +66,16 @@ jobs:
           fi
           echo "bank-archief.js: alleen lokaal."
 
+      # paypal-bewijs.js (wv765): de PayPal-laag leest mailtekst (gegeven, geen opdracht) en schrijft alleen in de transactiedatabase.
+      # Zelfde poort als bank-archief.js: geen netwerk- of procesmodule, geen fetch; ophalen doet server.js via het lees-luik.
+      - name: paypal-bewijs.js moet lokaal blijven
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' paypal-bewijs.js)
+          if echo "$C" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|\bfetch\s*\(|process\.binding|import\("; then
+            echo "::error::paypal-bewijs.js laadt een netwerk- of procesmodule; de PayPal-laag moet lokaal blijven"; exit 1
+          fi
+          echo "paypal-bewijs.js: alleen lokaal."
+
       # De witte lijst en de handtekeningcontrole echt toetsen (nagebootste bunq en Enable Banking op 127.0.0.1); node:sqlite
       # vraagt Node 22 (zelfde hoofdversie als de pod).
       - uses: actions/setup-node@v4
@@ -79,6 +89,7 @@ jobs:
           bash test/bankluis-poort.sh
           bash test/bank-ronde.sh
           bash test/bank-archief.sh
+          bash test/paypal-laag.sh
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
       - name: "studio (wv707, tab Studio fase 1)"
         run: bash test/studio.sh

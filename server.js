@@ -13051,8 +13051,9 @@ function smalRoute(req, res) {
 const BANK_SCRIPT = process.env.BANK_SCRIPT || path.join(__dirname, 'bank-lezer.js');
 const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
-  'zoek', 'maand', 'intern', 'abonnementen', 'corrigeer', 'archief', 'verrijk', 'historie', 'ontkoppel'];
-const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'corrigeer', 'archief', 'verrijk', 'verrijk-open', 'verrijk-zet'];   // geen kluis nodig
+  'zoek', 'maand', 'intern', 'abonnementen', 'corrigeer', 'archief', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'ontkoppel'];
+const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'corrigeer', 'archief', 'verrijk', 'verrijk-open', 'verrijk-zet',
+  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij'];   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
 const BANK_TERUG_PER_UUR = 30;
 const bankTerugTijden = [];
 let bankSleutelCache = null;   // { w: {sleutel, app_id, bunq_sleutel}, tot }; 10 minuten, alleen in het geheugen
@@ -13180,6 +13181,14 @@ async function bankSmal(d) {
   if (opdracht === 'ontkoppel' && !machinekamer) return { status: 403, j: { ok: false, fout: 'ontkoppelen alleen vanuit de machinekamer, op Davids woord' } };
   if (opdracht === 'historie' && (!machinekamer || ['bunq', 'abn-diep'].indexOf(d.sessie) < 0)) return { status: 403, j: { ok: false, fout: 'historie alleen vanuit de machinekamer, alleen sessie bunq of abn-diep' } };
   if (opdracht === 'verrijk' && !machinekamer) return { status: 403, j: { ok: false, fout: 'verrijk alleen vanuit de machinekamer' } };
+  // wv765: de PayPal-ronde (mail lezen via het lees-luik) vanuit /smal/bank alleen voor de machinekamer (historie); de vaste ronde loopt na de bank-ronde
+  if (opdracht === 'paypal-ronde') {
+    if (!machinekamer) return { status: 403, j: { ok: false, fout: 'paypal-ronde alleen vanuit de machinekamer' } };
+    if (d.van != null && !(typeof d.van === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d.van) && d.van >= '2015-01-01')) return { status: 400, j: { ok: false, fout: 'van: JJJJ-MM-DD' } };
+    const r = await paypalRonde({ van: d.van || null, bron: 'machinekamer' });
+    schrijfLog(nu() + ' bank ' + velden({ opdracht: 'paypal-ronde', ok: !!r.ok, mk: true, gelezen: r.gelezen, nieuw: r.nieuw }));
+    return { status: 200, j: r };
+  }
   // Begint met een letter of cijfer: een leidende '--' zou in het kind als optie gelezen worden (Fable wv680 #4).
   const ref = function (v) { return typeof v === 'string' && /^[\p{L}\p{N}][\p{L}\p{N} .\-_]{0,63}$/u.test(v.trim()) ? v.trim() : null; };
   const datum = function (v) { return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null; };
@@ -13208,6 +13217,15 @@ async function bankSmal(d) {
   if (opdracht === 'rekeningen' && d.alle === true) args.push('--alle');
   if (opdracht === 'historie' && d.sessie === 'bunq') { args.push('bunq'); ['volledig', 'opgeheven', 'opnieuw'].forEach(function (k) { if (d[k] === true) args.push('--' + k); }); }
   if (opdracht === 'historie' && d.sessie === 'abn-diep') { if (!datum(d.van)) return { status: 400, j: { ok: false, fout: 'van: JJJJ-MM-DD' } }; args.push('abn-diep', '--van', d.van); }
+  if (opdracht === 'paypal') {
+    const tekst = function (v) { return typeof v === 'string' && /^[\p{L}\p{N}][\p{L}\p{N} .,&'()\-_]*$/u.test(v.trim()) && v.trim().length <= 40 ? v.trim() : null; };
+    for (const k of ['van', 'tot', 'dienst', 'max']) {
+      if (d[k] == null || d[k] === '') continue;
+      const v = k === 'dienst' ? tekst(String(d[k])) : k === 'max' ? (/^\d{1,4}$/.test(String(d[k])) ? String(d[k]) : null) : (typeof d[k] === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d[k]) ? d[k] : null);
+      if (v == null) return { status: 400, j: { ok: false, fout: k + ' ongeldig' } };
+      args.push('--' + k, v);
+    }
+  }
   // wv687: archiefopdrachten (alleen de lokale database)
   if (['zoek', 'maand', 'intern', 'abonnementen', 'corrigeer'].indexOf(opdracht) >= 0) {
     const tekst = function (v, n) { return typeof v === 'string' && /^[\p{L}\p{N}][\p{L}\p{N} .,&'()\-_/:?+#€]*$/u.test(v.trim()) && v.trim().length <= (n || 80) ? v.trim() : null; };
@@ -13242,7 +13260,7 @@ async function bankSmal(d) {
   if (opdracht === 'ontkoppel') { if (typeof d.sessie !== 'string' || !/^[A-Za-z0-9-]{8,80}$/.test(d.sessie)) return { status: 400, j: { ok: false, fout: 'sessie ongeldig' } }; args.push(d.sessie); }
   const r = await bankKind(args, null, opdracht === 'historie' ? 1800000 : undefined);   // historie: 19 rekeningen × pagina's à 1,1 s
   const j = r.j;
-  if (['transacties', 'saldo', 'rekeningen', 'zoek', 'maand', 'intern', 'abonnementen'].indexOf(opdracht) >= 0) j.let_op_bron = BANK_LET_OP;   // wv683: ook rekeningnamen zijn tekst van derden
+  if (['transacties', 'saldo', 'rekeningen', 'zoek', 'maand', 'intern', 'abonnementen', 'paypal', 'paypal-diensten'].indexOf(opdracht) >= 0) j.let_op_bron = BANK_LET_OP;   // wv683: ook rekeningnamen zijn tekst van derden
   if (opdracht === 'archief') j.verrijk_ai = bankVerrijkStand();   // wv687: alleen aantallen en tijden
   schrijfLog(nu() + ' bank ' + velden({ opdracht: opdracht, ok: !!j.ok, code: r.code, mk: machinekamer || undefined }));
   return { status: 200, j: j };
@@ -13429,6 +13447,10 @@ async function bankRonde() {
     catch (e) { logError('bank-ronde-hartslag', e); uit.hartslag = false; }
   } else uit.hartslag = false;
   if (uit.ok && Array.isArray(j.toestemming)) uit.kaarten = (await bankKaarten(j.toestemming)).kaarten;
+  // wv765: PayPal-ontvangstbewijzen van de laatste dagen inlezen en koppelen (eigen hartslag; een fout raakt de bank-ronde niet)
+  try { const p = await paypalNaBankRonde(); uit.paypal = { ok: p.ok, gevonden: p.gevonden, gelezen: p.gelezen, nieuw: p.nieuw, niet_uitgelezen: p.niet_uitgelezen,
+    gekoppeld: p.koppeling ? p.koppeling.een_op_een + p.koppeling.samengesteld : undefined, fout: p.ok ? undefined : p.fout }; }
+  catch (e) { logError('paypal-ronde', e); uit.paypal = { ok: false, fout: 'paypal-ronde faalde in de pod' }; }
   // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
   (r.box || []).forEach(function (m) {
     const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')
@@ -13562,6 +13584,99 @@ function bankVerrijkStart(maxBatches) {
   bankVerrijkBezig = true;
   bankVerrijkAI(maxBatches).catch(function (e) { logError('bank-verrijk', e); }).finally(function () { bankVerrijkBezig = false; });
   return { status: 202, j: { ok: true, gestart: true, max_batches: maxBatches } };
+}
+// ── wv765: PayPal-laag (bouwplan privé-financiën § 9) ─────────────────────────────────────────────────────────────
+// WAAROM. Op het afschrift staat bij een PayPal-incasso alleen "PayPal"; David (22-10-2026): "lees mijn mail mee, Afzender
+// "service@paypal.nl", eerste woord onderwerp "Ontvangstbewijs", gericht aan d.schaap@gmail.com". De pod leest die mails via het
+// bestaande lees-luik (mail_zoeken + mail_lezen van AI - Agenda-Wachter API, alleen lezen; zelfde route als de tab Vandaag), leest
+// ze uit met vaste regels (paypal-bewijs.js leesMail, geen taalmodel) en geeft alleen de uitgelezen velden aan bank-lezer.js
+// (paypal-bij: bewaren in de transactiedatabase + koppelen aan de PayPal-posten). De mailtekst gaat nergens anders heen.
+// Ronde: na elke bank-ronde de laatste 10 dagen; historie alleen machinekamer (bank.py paypal-ronde van=…). Alleen nieuwe mails
+// worden geopend (n8n bewaart elke run van het lees-luik met inhoud). Hartslag paypal-ronde (stiltewachter hartslag-paypal, 26 u).
+const PAYPAL_QUERY = 'from:service@paypal.nl to:d.schaap@gmail.com (subject:Ontvangstbewijs OR subject:terugbetaling)';
+const PAYPAL_RONDE_DAGEN = 10;
+const PAYPAL_BATCH = 40;   // bewijzen per kindproces (stdin van bank-lezer.js is begrensd op 64 KB; 40 bewijzen ≈ 16 KB)
+let paypalBezig = false;
+function paypalGmailDag(ymd) { return String(ymd).replace(/-/g, '/'); }
+function paypalPlusDagen(ymd, n) { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+// Mails in [van, tot) zoeken; mail_zoeken geeft er hooguit 25: bij 25 het venster halveren (tot één dag).
+async function paypalZoek(van, tot, uit, diepte) {
+  const j = await appAgendaApi({ actie: 'mail_zoeken', query: PAYPAL_QUERY + ' after:' + paypalGmailDag(van) + ' before:' + paypalGmailDag(tot), max: 25 });
+  const mails = (j && Array.isArray(j.mails)) ? j.mails : null;
+  if (!mails) throw new Error('mail_zoeken gaf geen lijst');
+  const dagen = Math.round((Date.parse(tot) - Date.parse(van)) / 86400000);
+  if (mails.length >= 25 && dagen > 1 && (diepte || 0) < 8) {
+    const midden = paypalPlusDagen(van, Math.floor(dagen / 2));
+    await paypalZoek(van, midden, uit, (diepte || 0) + 1);
+    await paypalZoek(midden, tot, uit, (diepte || 0) + 1);
+    return;
+  }
+  if (mails.length >= 25) uit.afgekapt = true;
+  mails.forEach(function (m) { if (m && typeof m.id === 'string' && !uit.mails.has(m.id)) uit.mails.set(m.id, m); });
+}
+async function paypalRonde(o) {
+  if (paypalBezig) return { ok: false, fout: 'er loopt al een PayPal-ronde' };
+  paypalBezig = true;
+  const begin = Date.now();
+  try {
+    const P = require(path.join(__dirname, 'paypal-bewijs.js'));
+    const vandaag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    const van = (o && o.van) || paypalPlusDagen(vandaag, -PAYPAL_RONDE_DAGEN);
+    const bek = await bankKind(['paypal-bekend', '--van', paypalPlusDagen(van, -40)]);
+    if (!bek.j || bek.j.ok !== true || !Array.isArray(bek.j.mail_ids)) return { ok: false, fout: 'database niet leesbaar: ' + String((bek.j && bek.j.fout) || 'paypal-bekend faalde').slice(0, 120) };
+    const bekend = new Set(bek.j.mail_ids);
+    // zoeken per maand (een maand had tot nu toe hooguit 21 bewijzen), vanaf een dag vóór 'van'; morgen als bovengrens
+    const zoek = { mails: new Map(), afgekapt: false };
+    let s = paypalPlusDagen(van, -1);
+    const eind = paypalPlusDagen(vandaag, 1);
+    while (s < eind) {
+      let e = paypalPlusDagen(s.slice(0, 7) + '-01', 32).slice(0, 7) + '-01';
+      if (e > eind) e = eind;
+      await paypalZoek(s, e, zoek, 0);
+      s = e;
+    }
+    const nieuw = Array.from(zoek.mails.values()).filter(function (m) { return !bekend.has(m.id); });
+    const bewijzen = [], fouten = [];
+    let leesFout = 0;
+    for (const m of nieuw) {
+      let vol = null;
+      try { vol = await appAgendaApi({ actie: 'mail_lezen', id: m.id }); } catch (e) { leesFout++; continue; }   // volgende ronde opnieuw
+      if (!vol || typeof vol !== 'object') { leesFout++; continue; }
+      const b = P.leesMail({ id: m.id, van: vol.van || m.van, aan: vol.aan || m.aan, onderwerp: vol.onderwerp || m.onderwerp, snippet: m.snippet,
+        tekst: typeof vol.tekst === 'string' ? vol.tekst : '', dag_lokaal: vol.dag_lokaal || m.dag_lokaal });
+      if (b.fout) fouten.push({ mail_id: m.id, fout: b.fout }); else bewijzen.push(b);
+    }
+    // bewaren in batches; koppelen alleen bij de laatste (koppel rekent alles opnieuw)
+    let bewaard = { nieuw: 0, aangevuld: 0, geweigerd: 0 }, koppeling = null, stand = null;
+    const delen = [];
+    for (let i = 0; i < Math.max(bewijzen.length, 1); i += PAYPAL_BATCH) delen.push(bewijzen.slice(i, i + PAYPAL_BATCH));
+    for (let i = 0; i < delen.length; i++) {
+      const laatste = i === delen.length - 1;
+      const r = await bankKind(['paypal-bij'], { bewijzen: delen[i], fouten: laatste ? fouten : [], koppel: laatste, ronde: laatste });
+      if (!r.j || r.j.ok !== true) return { ok: false, fout: 'bewaren faalde: ' + String((r.j && r.j.fout) || 'paypal-bij faalde').slice(0, 120), gelezen: nieuw.length };
+      ['nieuw', 'aangevuld', 'geweigerd'].forEach(function (k) { bewaard[k] += (r.j.bewaard && r.j.bewaard[k]) || 0; });
+      if (laatste) { koppeling = r.j.koppeling || null; stand = r.j.stand || null; }
+    }
+    // alleen aantallen terug (geen bedragen, namen of mailinhoud)
+    return { ok: true, van: van, gevonden: zoek.mails.size, al_bekend: zoek.mails.size - nieuw.length, gelezen: nieuw.length - leesFout, lees_fout: leesFout || undefined,
+      niet_uitgelezen: fouten.length || undefined, afgekapt: zoek.afgekapt || undefined, bewaard: bewaard, koppeling: koppeling,
+      stand: stand ? { bewijzen: stand.bewijzen, per_koppeling: stand.per_koppeling, per_bron: stand.per_bron } : null, duur_s: Math.round((Date.now() - begin) / 100) / 10,
+      nieuw: bewaard.nieuw };
+  } catch (e) {
+    logError('paypal-ronde', e);
+    return { ok: false, fout: String(e && e.message || e).replace(/\d{6,}/g, '#').slice(0, 160) };
+  } finally { paypalBezig = false; }
+}
+// Na de bank-ronde: een fout in de PayPal-laag raakt de bank-ronde nooit; geslaagd → hartslag paypal-ronde.
+async function paypalNaBankRonde() {
+  const r = await paypalRonde({ bron: 'bank-ronde' });
+  if (r.ok) {
+    try { await appSbRpc('mk_hartslag_stempel', { p_component: 'paypal-ronde', p_gemeten_rijen: r.gevonden || 0, p_bevindingen: (r.niet_uitgelezen || 0) + (r.lees_fout || 0) }); r.hartslag = true; }
+    catch (e) { logError('paypal-hartslag', e); r.hartslag = false; }
+  }
+  schrijfLog(nu() + ' bank ' + velden({ opdracht: 'paypal-ronde', ok: !!r.ok, gevonden: r.gevonden, gelezen: r.gelezen, nieuw: r.nieuw, niet_uitgelezen: r.niet_uitgelezen,
+    fout: r.ok ? undefined : r.fout, hartslag: r.hartslag }));
+  return r;
 }
 // ── einde bankluis ──
 
