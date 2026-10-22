@@ -13707,7 +13707,12 @@ function bankBoxRij(m) {
     const ip = m.reden === 'toegang';
     // wv685: Enable Banking uit de vaste ronde (bank-lezer.js zet hooguit één per reden per dag); tekst van de pod zelf
     const eb = m.bron === 'enablebanking' && (m.reden === 'sleutel' || m.reden === 'toestemming');
-    const rij = m.bron === 'archief' ? '\n## [direct] ' + tijd + ' — bank-transactiedatabase: schrijven mislukt (bankluis, automatisch)\n' +
+    const rij = m.bron === 'vaste-lasten' ? '\n## [direct] ' + tijd + ' — vaste lasten ' + String(m.maand || '').slice(0, 7) + ': maandtabel niet bijgewerkt (bankluis, automatisch)\n' +
+      '- status: open\n- van: pod vaste-lasten-ronde (server.js vasteLastenRonde na de bank-ronde, vanaf de 3e; hooguit 1× per maand per reden)\n' +
+      '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: de tabel op de vaste-lastenpagina (20_Prive/Financien) blijft op de vorige stand; elke ronde (07:00/18:00) probeert het opnieuw tot het lukt.\n' +
+      '- voorstel: `python3 .claude/skills/bank-lezen/bank.py vaste-lasten maand=' + String(m.maand || 'JJJJ-MM').slice(0, 7) + '` (API_SECRET) draaien en de fout nagaan (markeringen op de pagina, archief); daarna dezelfde opdracht met `vault=ja`. Geheugen van de ronde: `/opt/data/bank/vaste-lasten-ronde.json`.\n'
+      : m.bron === 'archief' ?'\n## [direct] ' + tijd + ' — bank-transactiedatabase: schrijven mislukt (bankluis, automatisch)\n' +
       '- status: open\n- van: pod bankluis (bank-archief.js via bank-lezer.js archiefVeilig; hooguit 1×/dag)\n' +
       '- gemeten: ' + String(m.tekst || '').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: de cache en Davids bankvragen werken door, maar de database (`/opt/data/bank/transacties.sqlite`) loopt achter; zoek/maand/intern missen nieuwe posten.\n' +
@@ -14023,6 +14028,11 @@ async function bankRonde() {
   try { const p = await paypalNaBankRonde(); uit.paypal = { ok: p.ok, gevonden: p.gevonden, gelezen: p.gelezen, nieuw: p.nieuw, niet_uitgelezen: p.niet_uitgelezen,
     gekoppeld: p.koppeling ? p.koppeling.een_op_een + p.koppeling.samengesteld : undefined, fout: p.ok ? undefined : p.fout }; }
   catch (e) { logError('paypal-ronde', e); uit.paypal = { ok: false, fout: 'paypal-ronde faalde in de pod' }; }
+  // wv776: vanaf de 3e de vaste-lastentabel van de vorige maand in de vault (één keer per maand); alleen aantallen naar n8n, een fout raakt de ronde niet
+  try {
+    const v = await vasteLastenRonde();
+    if (v.gedaan || v.fout) uit.vaste_lasten = { maand: v.maand, uitkomst: v.uitkomst, verschillen: v.verschillen, fout: v.fout };
+  } catch (e) { logError('vaste-lasten-ronde', e); uit.vaste_lasten = { fout: 'vaste-lasten-ronde faalde in de pod' }; }
   // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
   (r.box || []).forEach(function (m) {
     const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')
@@ -14254,6 +14264,109 @@ async function paypalNaBankRonde() {
   schrijfLog(nu() + ' bank ' + velden({ opdracht: 'paypal-ronde', ok: !!r.ok, gevonden: r.gevonden, gelezen: r.gelezen, nieuw: r.nieuw, niet_uitgelezen: r.niet_uitgelezen,
     samengevoegd: (r.bewaard && r.bewaard.samengevoegd) || undefined, afgekapt: r.afgekapt, fout: r.ok ? undefined : r.fout, hartslag: r.hartslag }));
   return r;
+}
+// ── wv776: vaste lasten maandelijks in de vault (idee 16, bouwplan privé-financiën § 3 en § 10) ──────────────────────────
+// WAAROM. David zei 22-10-2026 Ja (registerrij #vaste-lasten-vault): het overzicht van de vaste lasten mag in zijn Second Brain en
+// Socev werkt het elke maand bij; zonder ronde veroudert de tabel. HOE. Na de bank-ronde, vanaf de 3e, één keer per maand: de
+// leesopdracht vaste-lasten over de vorige kalendermaand (deterministisch, geen taalmodel), alleen voor de vaste-lastenrekening
+// (standaard_rekening), en alleen het binnenblok <!-- vaste-lasten:tabel:begin/eind --> op de pagina vervangen, met dezelfde
+// controles als vault_schrijf in bank.py (geen markering, IBAN, machtiging of saldo; markeringen elk één keer en in volgorde),
+// atomair. Pas als er een geboekte post van de lopende maand op die rekening staat (maand compleet). De posten van de vorige maand
+// gingen op de 3e al door de AI-indeling na de rondes van de 1e en 2e (bankVerrijkStart na elke ronde; Fable wv776 #6).
+// Nooit een bericht aan David; bij een fout één box-rij per maand per reden. Geheugen: BANK_DIR/vaste-lasten-ronde.json.
+const VASTE_LASTEN_PAGINA = path.join('20_Prive', 'Financien', 'Huishoudbudget en vaste lasten.md');
+const VASTE_LASTEN_STAAT = path.join(BANK_DIR, 'vaste-lasten-ronde.json');
+const VASTE_LASTEN_VANAF = 3;    // eerste dag van de maand waarop de ronde loopt; daarna elke ronde tot het gelukt is (Fable wv776 #3)
+const VASTE_LASTEN_MELD = 10;    // vanaf deze dag een box-rij als de rekening de lopende maand nog niet gelezen heeft
+// Tekst van de pagina → nieuwe tekst met md in het binnenblok, of een reden waarom niet (gelijk aan vault_schrijf in bank.py)
+function vasteLastenBlok(t, md, datum) {
+  if (typeof md !== 'string' || !md.trim()) return { reden: 'geen tabel_md' };
+  if (md.indexOf('<!--') >= 0 || md.indexOf('-->') >= 0 || /\b[A-Z]{2}\d{2}[A-Z]{4}\d{6,}/.test(md) || /machtiging|incassant|saldo/i.test(md)) {
+    return { reden: 'tabel_md bevat een markering, IBAN, machtiging of saldo' };
+  }
+  const ob = '<!-- vaste-lasten:begin -->', oe = '<!-- vaste-lasten:eind -->', ib = '<!-- vaste-lasten:tabel:begin -->', ie = '<!-- vaste-lasten:tabel:eind -->';
+  if ([ob, oe, ib, ie].some(function (x) { return t.split(x).length !== 2; }) ||
+    !(t.indexOf(ob) < t.indexOf(ib) && t.indexOf(ib) < t.indexOf(ie) && t.indexOf(ie) < t.indexOf(oe))) {
+    return { reden: 'markeringen ontbreken of staan dubbel (verwacht begin < tabel:begin < tabel:eind < eind)' };
+  }
+  let nieuw = t.slice(0, t.indexOf(ib) + ib.length) + '\n' + md.trim() + '\n' + t.slice(t.indexOf(ie));
+  if (/^\d{4}-\d{2}-\d{2}$/.test(datum || '')) nieuw = nieuw.replace(/^updated: \d{4}-\d{2}-\d{2}$/m, 'updated: ' + datum);
+  return { tekst: nieuw, gewijzigd: nieuw !== t };
+}
+function vasteLastenVorigeMaand(datum) {
+  let j = Number(datum.slice(0, 4)), m = Number(datum.slice(5, 7)) - 1;
+  if (m < 1) { m = 12; j--; }
+  return j + '-' + String(m).padStart(2, '0');
+}
+function vasteLastenStaat() { try { const s = JSON.parse(fs.readFileSync(VASTE_LASTEN_STAAT, 'utf8')); return s && typeof s === 'object' ? s : {}; } catch (e) { return {}; } }
+function vasteLastenStaatZet(s) {
+  const tmp = VASTE_LASTEN_STAAT + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(s), { mode: 0o600 });
+  fs.renameSync(tmp, VASTE_LASTEN_STAAT);
+}
+// o.datum (JJJJ-MM-DD) en o.pagina alleen voor de toets en de droge ronde, nooit uit een verzoek
+let vasteLastenGeheugen = { klaar: null, fout: null, staatFoutDag: null };   // als de staat niet schrijfbaar is (Fable wv776 #5)
+async function vasteLastenRonde(o) {
+  o = o || {};
+  const datum = o.datum || new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const dagNr = Number(datum.slice(8, 10));
+  if (dagNr < VASTE_LASTEN_VANAF) return { gedaan: false, reden: 'voor de ' + VASTE_LASTEN_VANAF + 'e' };
+  const mnd = vasteLastenVorigeMaand(datum);
+  const s = vasteLastenStaat();
+  if ((s.maand === mnd && s.klaar === true) || vasteLastenGeheugen.klaar === mnd) return { gedaan: false, reden: 'al gedaan', maand: mnd };
+  const staatZet = function () {
+    try { vasteLastenStaatZet(s); return true; } catch (e) {
+      logError('vaste-lasten-staat', e);
+      if (vasteLastenGeheugen.staatFoutDag !== datum) {
+        vasteLastenGeheugen.staatFoutDag = datum;
+        bankBoxRij({ bron: 'vaste-lasten', maand: mnd, tekst: 'geheugen van de ronde niet schrijfbaar (' + (e.code || 'fout') + '); de pod onthoudt het tot een herstart' });
+      }
+      return false;
+    }
+  };
+  // één box-rij per maand per reden (Fable wv776 #4)
+  const fout = function (reden) {
+    const eerste = !(s.maand === mnd && s.fout === reden) && vasteLastenGeheugen.fout !== mnd + '|' + reden;
+    Object.assign(s, { maand: mnd, klaar: false, fout: reden, tijd: new Date().toISOString() });
+    vasteLastenGeheugen.fout = mnd + '|' + reden;
+    staatZet();
+    if (eerste) bankBoxRij({ bron: 'vaste-lasten', maand: mnd, tekst: reden });
+    schrijfLog(nu() + ' bank ' + velden({ opdracht: 'vaste-lasten-ronde', ok: false, maand: mnd, fout: reden }));
+    return { gedaan: false, maand: mnd, fout: reden };
+  };
+  const r = await bankKind(['vaste-lasten', '--maand', mnd]);
+  const j = r.j || {};
+  if (j.ok !== true) return fout('vaste-lasten gaf geen uitkomst: ' + String(j.fout || 'exit ' + r.code).replace(/\d{6,}/g, '#').slice(0, 120));
+  if (j.standaard_rekening !== true || j.maand !== mnd) return fout('vaste-lasten gaf niet de vaste-lastenrekening of niet maand ' + mnd);
+  // Poort (Fable wv776 #1/#2): pas schrijven als er een geboekte post van de lopende maand op de rekening staat. Dan is de vorige maand
+  // compleet en is de rekening na de maandwissel gelezen; een voorlopende podklok schrijft zo nooit een halve maand. Tot de 10e stil wachten.
+  if (!(typeof j.nieuwste_post === 'string' && j.nieuwste_post >= datum.slice(0, 7) + '-01')) {
+    if (dagNr < VASTE_LASTEN_MELD) return { gedaan: false, reden: 'wacht op een geboekte post van ' + datum.slice(0, 7), maand: mnd };
+    return fout('nog geen geboekte post van ' + datum.slice(0, 7) + ' op de vaste-lastenrekening; de ABN-koppeling leest niet of de podklok loopt voor');
+  }
+  const pad = o.pagina || path.join(VAULT, VASTE_LASTEN_PAGINA);
+  let t;
+  try { t = fs.readFileSync(pad, 'utf8'); } catch (e) { return fout('vaste-lastenpagina niet leesbaar (' + (e.code || 'fout') + ')'); }
+  const n = vasteLastenBlok(t, j.tabel_md, datum);
+  if (n.tekst == null) return fout('niet geschreven: ' + n.reden);
+  let uitkomst = 'ongewijzigd';
+  if (n.gewijzigd) {
+    const tmp = path.join(path.dirname(pad), '.vaste-lasten-' + crypto.randomBytes(4).toString('hex') + '.tmp');
+    try {
+      const modus = fs.statSync(pad).mode & 0o777;
+      fs.writeFileSync(tmp, n.tekst, { mode: modus });
+      fs.chmodSync(tmp, modus);
+      fs.renameSync(tmp, pad);
+      uitkomst = 'bijgewerkt';
+    } catch (e) { try { fs.unlinkSync(tmp); } catch (e2) {} return fout('schrijven mislukt (' + (e.code || 'fout') + ')'); }
+  }
+  const verschillen = Array.isArray(j.verschil) ? j.verschil.length : 0;
+  Object.assign(s, { maand: mnd, klaar: true, uitkomst: uitkomst, verschillen: verschillen, tijd: new Date().toISOString() });
+  delete s.fout;
+  vasteLastenGeheugen.klaar = mnd;
+  staatZet();
+  schrijfLog(nu() + ' bank ' + velden({ opdracht: 'vaste-lasten-ronde', ok: true, maand: mnd, uitkomst: uitkomst, verschillen: verschillen }));
+  return { gedaan: true, maand: mnd, uitkomst: uitkomst, verschillen: verschillen };
 }
 // ── einde bankluis ──
 

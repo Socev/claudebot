@@ -382,6 +382,8 @@ const p = (id, datum, bedrag, tegen, omschr, extra) => Object.assign({ id: id, d
         !/NL\d\d[A-Z]{4}|ST 1110|M1\b|331959|Machtiging|Incassant|termijn Omschrijving|Jan Jansen|<!--|-->|huur/.test(vlr.tabel_md), vlr.tabel_md);
       const vm2 = A.vasteLasten(v, { maand: '2025-12' });
       toets('vl: een eerdere maand rekent met de posten tot die maand (gemeente tussen twee aanslagen nog actief)', vm2.peildatum === '2025-12-31' && vm2.vaste_lasten.some((x) => /Gemeente/.test(x.naam)), vm2.vaste_lasten.map((x) => x.naam));
+      toets('vl: nieuwste_post = nieuwste geboekte post van de rekening, los van de maand (poort maandronde wv776)', /^\d{4}-\d{2}-\d{2}$/.test(vlr.nieuwste_post || '') &&
+        vlr.nieuwste_post === vm2.nieuwste_post && vlr.nieuwste_post >= '2026-06-01', [vlr.nieuwste_post, vm2.nieuwste_post]);
       let fout = null; try { A.vasteLasten(v, { maand: '2099-01' }); } catch (e) { fout = e.message; }
       toets('vl: toekomstige maand geweigerd', /^maand:/.test(fout || ''), fout);
       fout = null; try { A.vasteLasten(v, { maand: '2026-06', rek: 'el' }); } catch (e) { fout = e.message; }

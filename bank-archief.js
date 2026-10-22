@@ -1136,7 +1136,10 @@ function vasteLasten(a, o) {
   });
   const gebruikt = new Set(Array.from(vorig.values()));
   vorigL.forEach(function (v) { if (!gebruikt.has(v)) verschil.push({ wat: 'weg', post: rijTekst(v).split(' — ')[0], per_maand: v.per_maand }); });
-  const uit = { maand: m, peildatum: ref, vorige_stand: vorigeRef, rekening: rekeningNaam(r), standaard_rekening: standaard, vanaf: start, posten: rijen.length,
+  // wv776: nieuwste geboekte post op deze rekening; de maandronde schrijft pas als die in de maand ná m valt (maand compleet, rekening
+  // recent gelezen; vangt ook een voorlopende podklok, Fable wv776 #1/#2)
+  const nieuwste = (a.db.prepare("SELECT max(datum) d FROM transacties WHERE rek = ? AND status = 'booked'").get(rek) || {}).d || null;
+  const uit = { maand: m, peildatum: ref, vorige_stand: vorigeRef, nieuwste_post: nieuwste, rekening: rekeningNaam(r), standaard_rekening: standaard, vanaf: start, posten: rijen.length,
     reeksen: reeksNu.length, totaal_per_maand: totaal, waarvan_hypotheek: hyp || undefined, steun: steun, vaste_storting: storting,
     over: storting.length ? r2(stortTot - totaal - steunTot) : undefined, verschil: verschil,
     let_op_gezamenlijk: r && r.gezamenlijk ? LET_OP_GEZAMENLIJK : undefined,
