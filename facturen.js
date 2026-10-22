@@ -14,7 +14,8 @@
  * NIET ONDERHANDELBAAR (bouwplan § 1). Niets hier betaalt of verstuurt: Bevestigen zet een opdracht klaar die de koerier (F4) pas na
  * verstuur_na oppakt en die tot dan terug kan. Privé krijgt nooit een opdracht (kern + database). Nieuw IBAN blokkeert Bevestigen tot
  * Nagebeld (verse vingerafdruk). Regels van Privé-rekeningen worden niet opgeslagen; een onbekende rekening weigert het hele bestand.
- * Geen factuurtekst: een PDF-upload wacht op de koerier (te_lezen), een UBL wordt direct verwerkt en alleen velden blijven over.
+ * Geen factuurtekst: een PDF-upload wacht op de koerier (te_lezen), een UBL wordt direct verwerkt; behalve het stuk zelf (de bijlage voor
+ * de boekhouder) blijven alleen velden en besluitrijen over.
  * Elke query filtert op rol en entiteit; schrijven kan alleen op de primaire kant (anders 409). Foutmeldingen noemen nooit een bedrag,
  * naam, IBAN of omschrijving uit een stuk of bankbestand.
  *
@@ -105,6 +106,9 @@ function magFactuur(r, f) {
     (r.entiteiten || []).includes(f.entiteit);
 }
 function magEntiteit(r, e) { return isEig(r) || (e && e !== 'prive' && (r.entiteiten || []).includes(e)); }
+// Leverancier: een praktijkmanager alleen als de standaard-entiteit een van de zijne is (niet leeg, niet Privé). Anders zou hij via een
+// leverancier Davids Privé-stroom kunnen omleiden (leren, wijzigen) of zien (diffreview wv833 #2).
+function magLeverancier(r, l) { return !!l && (isEig(r) || (!!l.standaard_entiteit && magEntiteit(r, l.standaard_entiteit))); }
 function magTransactie(r, t) { return !!t && (isEig(r) || (!t.alleen_eigenaar && magEntiteit(r, t.entiteit))); }
 function magSignaal(r, s) { return !!s && (isEig(r) || (!s.alleen_eigenaar && !!s.entiteit && magEntiteit(r, s.entiteit))); }
 
@@ -238,12 +242,13 @@ function detail(fdb, r, id, nu) {
     const d = fdb.db.prepare('SELECT id, naam, mime, bytes, soort FROM document WHERE id = ?').get(did);
     return d ? { id: d.id, naam: d.naam, mime: d.mime, bytes: d.bytes, soort: d.soort } : null;
   };
-  const lev = poort.leverancier;
+  const lev = magLeverancier(r, poort.leverancier) ? poort.leverancier : null;
   const ents = entiteitenRijen(fdb).filter((e) => e.actief === 1 && magEntiteit(r, e.sleutel))
     .map((e) => ({ sleutel: e.sleutel, naam: e.naam_kort || e.naam, bestemming: bestemming(e) }));
-  const [kf, kp] = eigenaarFilter(r, 'k', 't.entiteit');
+  const [kf0, kp] = eigenaarFilter(r, 'k', 't.entiteit');
+  const kf = isEig(r) ? kf0 : kf0 + ' AND t.alleen_eigenaar = 0';
   return {
-    factuur: Object.assign(factuurKort(Object.assign({}, f, { controles: f.controles }), lev && lev.naam), {
+    factuur: Object.assign(factuurKort(Object.assign({}, f, { controles: f.controles }), lev ? lev.naam : null), {
       excl: f.excl, btw: f.btw, incl_eur: f.incl_eur, iban: f.iban, ibans_betaal: f.ibans_betaal, ibans_onbekend: ip.onbekend, kenmerk: f.kenmerk,
       redenen: f.redenen, controles: f.controles, bevestigd_door: f.bevestigd_door, bevestigd_op: f.bevestigd_op, ingevoerd_door: f.ingevoerd_door,
       ingevoerd_op: f.ingevoerd_op, betaald_gezien_op: f.betaald_gezien_op, nagebeld_door: f.nagebeld_door, nagebeld_op: f.nagebeld_op,
@@ -339,7 +344,7 @@ function uploads(fdb, r, nu) {
   return { bankbestanden: bestanden, stukken: docs, rekeningen: gezondheid(fdb, r, nu).rekeningen, pot };
 }
 function leveranciers(fdb, r) {
-  const lijst = leverancierLijst(fdb).filter((l) => isEig(r) || l.standaard_entiteit !== 'prive');
+  const lijst = leverancierLijst(fdb).filter((l) => magLeverancier(r, l));
   return { leveranciers: lijst.sort((a, b) => a.naam.localeCompare(b.naam, 'nl')).slice(0, 2000).map((l) => ({ id: l.id, naam: l.naam, kvk: l.kvk,
     standaard_entiteit: l.standaard_entiteit, standaard_betaalwijze: l.standaard_betaalwijze, ibans: l.ibans, mediaan: l.mediaan, alleen_portaal: !!l.alleen_portaal,
     incasso_tolerantie_pct: l.incasso_tolerantie_pct })) };
@@ -398,7 +403,8 @@ function bevestig(fdb, r, d, nu) {
         wanneer, f.id, 'te_beoordelen', f.versie);
     if (u.changes !== 1) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw');
     // leren: wijzigt een mens de entiteit of betaalwijze, dan wordt dat de standaard van de leverancier
-    const leer = K.leerUitBevestiging({ entiteit: f.entiteit, betaalwijze: f.betaalwijze }, { entiteit: e.sleutel, betaalwijze }, poort.leverancier);
+    // leren alleen als de bevestiger de leverancier mag beheren (een praktijkmanager nooit voor een Privé-leverancier; diffreview wv833 #2)
+    const leer = K.leerUitBevestiging({ entiteit: f.entiteit, betaalwijze: f.betaalwijze }, { entiteit: e.sleutel, betaalwijze }, magLeverancier(r, poort.leverancier) ? poort.leverancier : null);
     for (const w of leer.wijzigingen) {
       fdb.db.prepare('UPDATE leverancier SET ' + (w.veld === 'standaard_entiteit' ? 'standaard_entiteit' : 'standaard_betaalwijze') + ' = ?, bijgewerkt_op = ? WHERE id = ?').run(w.naar, wanneer, poort.leverancier.id);
       D.audit(fdb, { wie: r.wie, wat: 'leverancier_geleerd', object_soort: 'leverancier', object_id: poort.leverancier.id, entiteit: e.sleutel, voor: { [w.veld]: w.van }, na: { [w.veld]: w.naar }, wanneer });
@@ -474,7 +480,12 @@ const WIJZIG = {
   btw: (v) => { if (v === null) return null; if (int(v) === null) weiger(400, 'bedrag in centen (geheel getal)'); return v; },
   incl: (v) => { if (v === null) return null; if (int(v) === null) weiger(400, 'bedrag in centen (geheel getal)'); return v; },
   soort: (v) => { if (!['factuur', 'creditnota'].includes(v)) weiger(400, 'soort is factuur of creditnota'); return v; },
-  leverancier: (v, fdb) => { if (v === null) return null; if (!ID_RE.test(String(v)) || !fdb.db.prepare('SELECT 1 FROM leverancier WHERE id = ?').get(v)) weiger(400, 'onbekende leverancier'); return v; },
+  leverancier: (v, fdb, r) => {
+    if (v === null) return null;
+    const l = ID_RE.test(String(v)) ? fdb.db.prepare('SELECT id, standaard_entiteit FROM leverancier WHERE id = ?').get(v) : null;
+    if (!l || !magLeverancier(r, l)) weiger(400, 'onbekende leverancier');
+    return v;
+  },
 };
 function wijzig(fdb, r, d, nu) {
   const id = vraagId(d, 'id');
@@ -506,13 +517,13 @@ function wijzig(fdb, r, d, nu) {
         JSON.stringify(ip.onbekend), wanneer, f.id, f.versie, 'te_beoordelen');
     if (u.changes !== 1) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw');
     for (const k of Object.keys(na)) besluitRij(fdb, f.id, K.besluit('wijzigen', k, na[k] == null ? null : (k === 'iban' ? eind4(na[k]) : na[k]), 'mens', 'met de hand gewijzigd'), r.wie, wanneer);
+    // alleen de namen van de velden: bedrag, nummer of kenmerk uit een stuk horen niet in de audit (de waarden staan in de besluitrijen; diffreview wv833 #1)
     D.audit(fdb, { wie: r.wie, wat: 'factuur_wijzigen', object_soort: 'factuur', object_id: f.id, entiteit: nieuw.entiteit || f.entiteit,
-      voor: maskIban(voor), na: maskIban(na), wanneer });
+      na: { velden: Object.keys(na) }, wanneer });
     const nu2 = D.factuurVoorKern(fdb, f.id);
     return { gewijzigd: true, iban_poort: { iban_nieuw: ip.iban_nieuw, reden: ip.reden }, bevestigen: K.magBevestigen(nu2, { leverancier: lev, ctx }), versie: nu2.versie };
   });
 }
-function maskIban(o) { const x = Object.assign({}, o); if ('iban' in x) x.iban = eind4(x.iban); return x; }
 
 // Statusgebeurtenis zonder opdracht of met een nieuwe opdracht (Opnieuw proberen). Gedeeld door de routes en de signaalknoppen.
 function factuurGebeurtenis(fdb, r, f, gebeurtenis, nu) {
@@ -624,7 +635,7 @@ function voerGevolgUit(fdb, r, s, g, nu, uit) {
       if (!['alleen_portaal', 'standaard_betaalwijze'].includes(g.veld)) weiger(400, 'dit veld van de leverancier is niet te wijzigen');
       const l = g.leverancier ? fdb.db.prepare('SELECT id, standaard_entiteit, ' + g.veld + ' AS oud FROM leverancier WHERE id = ?').get(g.leverancier) : null;
       if (!l) weiger(409, 'bij dit signaal hoort geen bekende leverancier');
-      if (!isEig(r) && l.standaard_entiteit === 'prive') weiger(403, 'deze leverancier is alleen voor de eigenaar');
+      if (!magLeverancier(r, l)) weiger(403, 'deze leverancier mag je niet wijzigen');
       fdb.db.prepare('UPDATE leverancier SET ' + g.veld + ' = ?, bijgewerkt_op = ? WHERE id = ?').run(g.waarde, wanneer, l.id);
       D.audit(fdb, { wie: r.wie, wat: 'leverancier_bijwerken', object_soort: 'leverancier', object_id: l.id, voor: { [g.veld]: l.oud }, na: { [g.veld]: g.waarde }, wanneer });
       return { actie: g.actie, leverancier: l.id };
@@ -814,7 +825,8 @@ function soortVan(bytes, naam) {
   if ((kop[0] === 0xff && kop[1] === 0xd8) || kop.subarray(0, 4).toString('latin1') === '\x89PNG') return 'afbeelding';
   const begin = bytes.subarray(0, 4096).toString('utf8').replace(/^﻿/, '').trimStart();
   if (begin.charAt(0) === '<' && /<(?:\w+:)?(Invoice|CreditNote)\b/.test(begin) && !/<BkToCstmrStmt\b/.test(begin)) return 'ubl';
-  if (/\.(pdf)$/i.test(naam)) return 'pdf';
+  // alleen een echte PDF (kop iets verderop) telt via de naam; een bankexport met de naam .pdf wordt nooit als stuk bewaard (diffreview wv833 #3)
+  if (/\.(pdf)$/i.test(naam) && bytes.subarray(0, 1024).toString('latin1').indexOf('%PDF-') >= 0) return 'pdf';
   return 'bank';
 }
 /*
@@ -903,11 +915,11 @@ function verwerkBericht(fdb, invoer, o) {
 function upload(fdb, r, d, nu, o) {
   const beurt = String(d.beurt || ''), n = Number(d.n), soort = d.soort === undefined ? 'auto' : d.soort;
   if (!BEURT_RE.test(beurt) || !Number.isInteger(n) || n < 1 || n > 10) weiger(400, 'beurt en n ontbreken of zijn ongeldig');
-  if (!['auto', 'bank', 'factuur'].includes(soort)) weiger(400, 'soort is auto, bank of factuur');
   if (typeof o.uploadNeem !== 'function') weiger(503, 'uploads zijn hier niet ingericht');
   const st = o.uploadNeem(beurt, n);
   if (!st) weiger(404, 'het bestand staat niet (meer) klaar; upload het opnieuw');
   try {
+    if (!['auto', 'bank', 'factuur'].includes(soort)) weiger(400, 'soort is auto, bank of factuur');
     const bytes = Buffer.isBuffer(st.bytes) ? st.bytes : Buffer.from(st.bytes);
     if (!bytes.length) weiger(400, 'leeg bestand');
     if (bytes.length > D.MAX_STUK) weiger(413, 'bestand groter dan 20 MB');
@@ -964,8 +976,14 @@ function bankluisRonde(fdb, o) {
         const n = B.normaliseerBankluis(post, rk);
         if (!n.ok) continue;
         tel.gelezen++;
-        tel.nieuw += transactieInvoegen(fdb, Object.assign({}, n.transactie, { id: D.nieuwId(), bestand: null, rekening: k.id, bankluis_sleutel: post.sleutel, aangemaakt_op: wanneer }));
+        const nw = transactieInvoegen(fdb, Object.assign({}, n.transactie, { id: D.nieuwId(), bestand: null, rekening: k.id, bankluis_sleutel: post.sleutel, aangemaakt_op: wanneer }));
+        tel.nieuw += nw;
+        // een post die de bankluis-ronde eerder weghaalde en die weer geboekt staat: terugzetten (diffreview wv833 #4)
+        if (!nw) tel.terug = (tel.terug || 0) + fdb.db.prepare("UPDATE bank_transactie SET verwijderd_op = NULL, verwijderd_door = NULL WHERE entry_ref = ? AND verwijderd_door = 'bankluis'").run(n.transactie.entry_ref).changes;
       }
+      // geen enkele post in het venster terwijl er wel regels zijn: verkeerde koppeling of een lege/herbouwde bankluis — niets weghalen, wel melden
+      const binnen = Number(fdb.db.prepare("SELECT count(*) AS n FROM bank_transactie WHERE rekening = ? AND formaat = 'bankluis' AND verwijderd_op IS NULL AND boekdatum >= ?").get(k.id, van).n);
+      if (!p.lijst.length && binnen > 0) { fouten.push({ wat: 'bankluis', melding: 'geen posten voor rekening ' + eind4(k.iban) + ' in de bankluis; niets weggehaald' }); continue; }
       // vervangen_door-controle over wat al binnen is (alleen binnen het venster: oudere posten worden niet opnieuw gelezen)
       const perSleutel = new Map([...p.perNr.values()].map((x) => [x.sleutel, x]));
       for (const t of fdb.db.prepare("SELECT id, bankluis_sleutel FROM bank_transactie WHERE rekening = ? AND formaat = 'bankluis' AND verwijderd_op IS NULL AND boekdatum >= ?").all(k.id, van)) {
@@ -1057,10 +1075,13 @@ function rekening(fdb, r, d, nu) {
     const wanneer = nuIso(nu);
     const velden = {};
     for (const k of REK_VELDEN) if (d[k] !== undefined) velden[k] = d[k] === true ? 1 : d[k] === false ? 0 : d[k];
+    // de POT-rekening is altijd alleen voor de eigenaar (salarisregels = personeelsgegevens; bouwplan § 4.2; diffreview wv833 #5)
+    const potEis = (ent, eig) => { if (ent === 'pot' && Number(eig) !== 1) weiger(409, 'de POT-rekening is altijd alleen voor de eigenaar'); };
     if (d.id !== undefined) {
       const id = vraagId(d, 'id');
       const oud = fdb.db.prepare('SELECT * FROM rekening WHERE id = ?').get(id);
       if (!oud) weiger(404, 'rekening niet gevonden');
+      potEis(velden.entiteit !== undefined ? velden.entiteit : oud.entiteit, velden.alleen_eigenaar !== undefined ? velden.alleen_eigenaar : oud.alleen_eigenaar);
       const zet = Object.keys(velden);
       if (!zet.length) weiger(400, 'niets te wijzigen');
       fdb.db.prepare('UPDATE rekening SET ' + zet.map((k) => k + ' = ?').join(', ') + ' WHERE id = ?').run(...zet.map((k) => velden[k]), id);
@@ -1071,6 +1092,8 @@ function rekening(fdb, r, d, nu) {
     const iban = K.ibanNorm(d.iban);
     if (!iban || !K.ibanMod97(iban)) weiger(400, 'geen geldig IBAN');
     if (!velden.entiteit || !velden.bank_formaat || velden.controle === undefined) weiger(400, 'entiteit, bank_formaat en controle zijn nodig');
+    if (velden.entiteit === 'pot' && velden.alleen_eigenaar === undefined) velden.alleen_eigenaar = 1;
+    potEis(velden.entiteit, velden.alleen_eigenaar === undefined ? 0 : velden.alleen_eigenaar);
     const id = D.nieuwId();
     D.voegToe(fdb, 'rekening', Object.assign({ id, iban }, velden));
     D.audit(fdb, { wie: r.wie, wat: 'rekening_toevoegen', object_soort: 'rekening', object_id: id, entiteit: velden.entiteit, na: Object.assign({ iban: eind4(iban) }, velden), wanneer });
@@ -1103,7 +1126,7 @@ function leverancierRoute(fdb, r, d, nu) {
   const id = vraagId(d, 'id');
   return D.transactie(fdb, function () {
     const l = fdb.db.prepare('SELECT * FROM leverancier WHERE id = ?').get(id);
-    if (!l || (!isEig(r) && l.standaard_entiteit === 'prive')) weiger(404, 'leverancier niet gevonden');
+    if (!magLeverancier(r, l)) weiger(404, 'leverancier niet gevonden');
     const zet = {};
     if (d.standaard_entiteit !== undefined) {
       if (d.standaard_entiteit !== null && !fdb.db.prepare('SELECT 1 FROM entiteit WHERE sleutel = ?').get(String(d.standaard_entiteit))) weiger(400, 'onbekende entiteit');

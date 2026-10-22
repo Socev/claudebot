@@ -3911,6 +3911,7 @@ async function bewijs(o) {
       const apF = sPf().apparaat;
       const klaarF = () => vm.runInContext('appUploadLijst(appUploadMap({ id: ' + JSON.stringify(apF) + ' }, ' + JSON.stringify(ubF) + ')).length', ctx);
       toets('20h upload staat klaar op de pod', klaarF() === 1, klaarF());
+      toets('20h een ander apparaat kan dit klaarstaande bestand niet overnemen', FA.facturenUploadNeem({ id: 'f'.repeat(16) }, ubF, 1) === null && klaarF() === 1);
       r = await vraag('POST', '/app/facturen/upload', { beurt: ubF, n: 1, soort: 'factuur' }, { pot: P.jar });
       toets('20h facturen/upload neemt het bestand over (te_lezen) en ruimt het op', r.status === 200 && r.j.soort === 'pdf' && r.j.te_lezen === true && klaarF() === 0, JSON.stringify(r.j));
       r = await vraag('POST', '/app/facturen/upload', { beurt: ubF, n: 1 }, { pot: P.jar });
@@ -3923,6 +3924,18 @@ async function bewijs(o) {
       toets('20h document: 200 met base64-PDF en een auditrij', r.status === 200 && Buffer.from(r.j.inhoud, 'base64').slice(0, 5).toString() === '%PDF-' && auF() === au0 + 1, JSON.stringify([r.status, auF(), au0]));
       toets('20h documentinzage = invoerroute; adres en verzendmodus in APP_BEHEER_ROUTES', H.appInvoerRoute('GET /app/facturen/document/' + docF, false, {}, { soort: 'vast' }) === true &&
         vm.runInContext("APP_BEHEER_ROUTES.has('POST /app/facturen/instellingen/adres') && APP_BEHEER_ROUTES.has('POST /app/facturen/instellingen/modus')", ctx) === true);
+      // vaste plek: boekhoudadres of verzendmodus wijzigen kan nooit, ook niet met een verse vingerafdruk (APP_BEHEER_ROUTES, vóór het slot)
+      const REGF = path.join(DATA, 'apparaten.json'), regF0 = fs.readFileSync(REGF);
+      const regF = JSON.parse(regF0); const apRij = regF.apparaten.find((x) => x.id === apF);
+      Object.assign(apRij, { soort: 'vast', vaste_plek: 'Thuis' }); fs.writeFileSync(REGF, JSON.stringify(regF));
+      sPf().vers_tot = Date.now() + 60000;
+      const rAd = await vraag('POST', '/app/facturen/instellingen/adres', { entiteit: 'tolgaarde', boekhoud_doel: 'ander@acta.invalid' }, { pot: P.jar });
+      const rMo = await vraag('POST', '/app/facturen/instellingen/modus', { modus: 'concept' }, { pot: P.jar });
+      fs.writeFileSync(REGF, regF0);
+      toets('20h vaste plek: adres en verzendmodus -> 403 (beheer), adres ongewijzigd, vingerafdruk niet verbruikt',
+        rAd.status === 403 && /vaste plek/.test(rAd.j.fout) && rMo.status === 403 && fdbF.db.prepare("SELECT boekhoud_doel AS d FROM entiteit WHERE sleutel = 'tolgaarde'").get().d !== 'ander@acta.invalid' && sPf().vers_tot > 0, JSON.stringify([rAd, rMo]));
+      r = await vraag('POST', '/app/facturen/instellingen/adres', { entiteit: 'tolgaarde', boekhoud_doel: 'nieuw-tg@acta.invalid' }, { pot: P.jar });
+      toets('20h telefoon met verse vingerafdruk: adres gewijzigd en vingerafdruk verbruikt', r.status === 200 && sPf().vers_tot === 0, JSON.stringify(r.j));
       // passieve kant: schrijven 409, lezen mag
       rolStub.primair = false;
       r = await vraag('POST', '/app/facturen/geen-factuur', { id: fn.id }, { pot: P.jar });

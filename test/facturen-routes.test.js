@@ -253,9 +253,87 @@ test('IBAN met de hand wijzigen rekent de IBAN-poort opnieuw uit (nieuw IBAN →
   assert.equal(t.call('POST', 'bevestig', { id: f.id }).status, 409);
   assert.equal(t.call('POST', 'wijzig', { id: f.id, velden: { iban: 'geen iban' } }).status, 400);
   assert.equal(t.call('POST', 'wijzig', { id: f.id, velden: { tekst: 'x' } }).status, 400, 'onbekend veld');
-  const audit = t.fdb.db.prepare("SELECT na FROM audit WHERE wat = 'factuur_wijzigen' AND object_id = ?").get(f.id);
-  assert.match(audit.na, /…5678/);
-  assert.doesNotMatch(audit.na, /0912345678/, 'audit zonder volledig IBAN');
+  const audit = t.fdb.db.prepare("SELECT voor, na FROM audit WHERE wat = 'factuur_wijzigen' AND object_id = ?").get(f.id);
+  assert.deepEqual(JSON.parse(audit.na), { velden: ['iban'] });
+  assert.doesNotMatch(String(audit.voor) + audit.na, /0912345678|NL\d\d/, 'audit zonder IBAN');
+});
+
+test('review wv833 #1: de audit van wijzigen noemt alleen veldnamen, geen bedrag, nummer of kenmerk', () => {
+  const t = opzet();
+  const f = gewoon(t);
+  const r = t.call('POST', 'wijzig', { id: f.id, velden: { incl: 123456, nummer: 'FACT-GEHEIM-9', kenmerk: 'KENMERK-GEHEIM' } });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  const a = t.fdb.db.prepare("SELECT voor, na FROM audit WHERE wat = 'factuur_wijzigen' AND object_id = ?").get(f.id);
+  assert.doesNotMatch(String(a.voor) + a.na, /123456|GEHEIM|ZA-/);
+  assert.deepEqual(JSON.parse(a.na).velden.sort(), ['incl', 'kenmerk', 'nummer']);
+});
+
+test('review wv833 #2: praktijkmanager kan een Privé-leverancier niet zien, koppelen of laten leren', () => {
+  const t = opzet();
+  const pm = t.pm();
+  const levK = t.fdb.db.prepare("SELECT id FROM leverancier WHERE standaard_entiteit = 'prive'").get();
+  const f = gewoon(t, "entiteit = 'tolgaarde'");
+  const ibanK = t.fdb.db.prepare('SELECT iban FROM leverancier_iban WHERE leverancier = ?').get(levK.id).iban;
+  t.fdb.db.prepare('UPDATE factuur SET leverancier = ?, iban = ?, ibans_betaal = ?, ibans_onbekend = ?, iban_nieuw = 0 WHERE id = ?').run(levK.id, ibanK, JSON.stringify([ibanK]), '[]', f.id);
+  const d = t.call('GET', 'factuur/' + f.id, {}, { rol: pm });
+  assert.equal(d.status, 200);
+  assert.equal(d.j.leverancier, null, 'geen naam, standaard of IBANs van de Privé-leverancier');
+  const b = t.call('POST', 'bevestig', { id: f.id, entiteit: 'groenhouten', betaalwijze: 'zelf' }, { rol: pm });
+  assert.equal(b.status, 200, JSON.stringify(b.j));
+  assert.equal(t.fdb.db.prepare('SELECT standaard_entiteit AS s FROM leverancier WHERE id = ?').get(levK.id).s, 'prive', 'leren niet door de praktijkmanager');
+  const g = gewoon(t, "entiteit = 'tolgaarde'");
+  assert.equal(t.call('POST', 'wijzig', { id: g.id, velden: { leverancier: levK.id } }, { rol: pm }).status, 400);
+  assert.equal(t.call('POST', 'leverancier', { id: levK.id, alleen_portaal: 1 }, { rol: pm }).status, 404);
+  t.fdb.db.prepare("DELETE FROM gebruiker_entiteit WHERE entiteit = 'groenhouten'").run();
+  const pm2 = F.rolVoor(t.fdb, { ingang: 'fac', email: 'praktijkmanager@voorbeeld.invalid' });
+  assert.ok(!t.call('GET', 'leveranciers', {}, { rol: pm2 }).j.leveranciers.some((l) => l.standaard_entiteit === 'groenhouten' || l.standaard_entiteit === 'prive'), 'alleen leveranciers van zijn entiteiten');
+});
+
+test('review wv833 #3: een bankexport met de naam .pdf wordt nooit als stuk bewaard', () => {
+  const t = opzet();
+  const b = bankOpzet(t);
+  const docs = t.n('SELECT count(*) AS n FROM document');
+  t.zetKlaar('beurt-0040', 1, 'afschrift.pdf', b.tab);
+  const r = t.call('POST', 'upload', { beurt: 'beurt-0040', n: 1 });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(r.j.soort, 'bank');
+  assert.equal(r.j.prive_weggegooid, 1);
+  assert.equal(t.n('SELECT count(*) AS n FROM document'), docs);
+  t.zetKlaar('beurt-0041', 1, 'x.pdf', b.tab);
+  assert.equal(t.call('POST', 'upload', { beurt: 'beurt-0041', n: 1, soort: 'raar' }).status, 400);
+  assert.equal(t.klaar['beurt-0041'][1], undefined, 'ook een ongeldig verzoek ruimt het klaarstaande bestand op');
+});
+
+test('review wv833 #4: lege of verkeerd gekoppelde bankluis haalt niets weg; een teruggekeerde post komt terug', () => {
+  const t = opzet();
+  const pad = bankluis(t.dir, [{ nr: 1, sleutel: 'a', status: 'booked', datum: '2026-10-15', bedrag: -10 }]);
+  t.call('POST', 'bankluis', {}, { bankluisPad: pad });
+  const levend = () => t.n("SELECT count(*) AS n FROM bank_transactie WHERE formaat = 'bankluis' AND verwijderd_op IS NULL");
+  const n1 = levend();
+  assert.ok(n1 >= 1);
+  const leeg = path.join(t.dir, 'leeg'); fs.mkdirSync(leeg);
+  const r = t.call('POST', 'bankluis', {}, { bankluisPad: bankluis(leeg, []) });
+  assert.equal(r.j.ok, false, 'gemeld als fout');
+  assert.equal(levend(), n1, 'niets weggehaald');
+  // a verdwijnt even (status pending), daarna weer geboekt: terug
+  bankluis(t.dir, [{ nr: 1, sleutel: 'a', status: 'pending', datum: '2026-10-15', bedrag: -10 }, { nr: 2, sleutel: 'b', status: 'booked', datum: '2026-10-16', bedrag: -1 }]);
+  t.call('POST', 'bankluis', {}, { bankluisPad: pad });
+  const a = () => t.fdb.db.prepare("SELECT verwijderd_op FROM bank_transactie WHERE entry_ref = 'bankluis:proef-pot|a'").get().verwijderd_op;
+  assert.ok(a(), 'a weg zolang hij niet geboekt is');
+  bankluis(t.dir, [{ nr: 1, sleutel: 'a', status: 'booked', datum: '2026-10-15', bedrag: -10 }]);
+  const r3 = t.call('POST', 'bankluis', {}, { bankluisPad: pad });
+  assert.equal(a(), null, 'a terug');
+  assert.equal(r3.j.terug, 1);
+});
+
+test('review wv833 #5: de POT-rekening is altijd alleen voor de eigenaar', () => {
+  const t = opzet();
+  const pot = t.fdb.db.prepare("SELECT id FROM rekening WHERE entiteit = 'pot'").get();
+  assert.equal(t.call('POST', 'instellingen/rekening', { id: pot.id, alleen_eigenaar: 0 }).status, 409);
+  assert.equal(t.call('POST', 'instellingen/rekening', { iban: ibanFromAbnAccount('0000000035'), entiteit: 'pot', bank_formaat: 'abn_tab', controle: 1, alleen_eigenaar: 0 }).status, 409);
+  const r = t.call('POST', 'instellingen/rekening', { iban: ibanFromAbnAccount('0000000036'), entiteit: 'pot', bank_formaat: 'abn_tab', controle: 1 });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(t.fdb.db.prepare('SELECT alleen_eigenaar AS a FROM rekening WHERE id = ?').get(r.j.id).a, 1, 'standaard alleen eigenaar');
 });
 
 // ───────────────────────────── passieve kant ─────────────────────────────
