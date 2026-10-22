@@ -169,6 +169,24 @@ function scenario() {
     davidRij(db, '2026-09-30', 1, 'x', 'y', null, null);   // nieuwe grens 30-9
     const v5 = P.voorstel({ iban: IB.pot, posten, rijen: leesRijen(db), grootboek: gb, vandaag: '2026-10-24' });
     toets('pdf-lading over dezelfde periode: 0 nieuw, dubbel vermoed 1', v5.telling.nieuw === 0 && v5.telling.dubbel_vermoed === 1, v5.telling);
+    // David wist een rij die wij zetten (sleutel in het grootboek): niet terugzetten
+    const { db: dbM, posten: pM } = scenario();
+    const vM = P.voorstel({ iban: IB.pot, posten: pM, rijen: leesRijen(dbM), grootboek: {}, vandaag: '2026-10-22' });
+    P.statements(vM, { vandaag: '2026-10-22' }).forEach((b) => voerUit(dbM, b.statements));
+    const gbM = {}; vM.nieuw.forEach((x) => { gbM[x.rij.sleutel] = '2026-10-22'; });
+    dbM.prepare('DELETE FROM bank_toewijzing WHERE bankmutatie_id IN (SELECT id FROM bankmutatie WHERE sleutel = ?)').run(vM.nieuw[0].rij.sleutel);
+    dbM.prepare('DELETE FROM bankmutatie WHERE sleutel = ?').run(vM.nieuw[0].rij.sleutel);
+    const vM2 = P.voorstel({ iban: IB.pot, posten: pM, rijen: leesRijen(dbM), grootboek: gbM, vandaag: '2026-10-23' });
+    toets('rij die David wiste (in het grootboek): niet terug, geteld', vM2.telling.nieuw === 0 && vM2.telling.door_david_verwijderd === 1, vM2.telling);
+    const vM3 = P.voorstel({ iban: IB.pot, posten: pM, rijen: leesRijen(dbM), grootboek: {}, vandaag: '2026-10-23' });
+    toets('zonder grootboek zou hij terugkomen (daarom het schakelscript)', vM3.telling.nieuw === 1, vM3.telling);
+    // groep zonder IBAN en naam: naam alleen als David overal dezelfde gebruikte
+    const dbL = maakD1();
+    davidRij(dbL, '2026-07-01', -9.85, 'ABN AMRO Bank N.V.', '', null, { soort: 'overig' });
+    davidRij(dbL, '2026-08-01', -3.10, 'Kosten rente', '', null, { soort: 'overig' });
+    const pl = (nr, datum, bedrag) => ({ nr, sleutel: 'e:' + nr, datum, valutadatum: datum, bedrag, tegen_iban: null, tegenpartij: '', regels: ['ABN AMRO Bank N.V.               Betaalpakket'] });
+    const vL = P.voorstel({ iban: IB.pot, posten: [pl(1, '2026-07-01', -9.85), pl(2, '2026-08-01', -3.10), pl(3, '2026-10-01', -9.85)], rijen: leesRijen(dbL), grootboek: {}, vandaag: '2026-10-22' });
+    toets('lege groep met verschillende namen bij David: naam leeg, toewijzing wel (eensgezind overig)', vL.nieuw.length === 1 && vL.nieuw[0].rij.naam === '' && vL.nieuw[0].toewijzing.soort === 'overig', vL.nieuw);
   }
   // ── 2. grens en koppeling ──
   {
@@ -258,12 +276,16 @@ function scenario() {
     toets('IBAN bankluis ≠ datahub: niets geschreven, box-rij', u.gedaan === false && u.fout === 'rekening wijkt af' && boxRijen() === box0 + 1, u);
     u = await h.potDatahubRonde({ vandaag: '2026-10-23' });
     toets('zelfde reden dezelfde dag: geen tweede box-rij', boxRijen() === box0 + 1);
+    u = await h.potDatahubRonde({ vandaag: '2026-10-25' });
+    toets('zelfde toestand twee dagen later: geen nieuwe box-rij', boxRijen() === box0 + 1);
+    u = await h.potDatahubRonde({ vandaag: '2026-10-30' });
+    toets('zelfde toestand na 7 dagen: wel weer een box-rij', boxRijen() === box0 + 2, boxRijen() - box0);
     kindIban = IB.pot;
     toets('box-rij zonder IBAN of naam', !bevatGeheim(fs.readFileSync(BOX, 'utf8')));
     // D1-fout
     d1Fout = 'D1_ERROR: iets met 98765432 en ' + MW[0];
     u = await h.potDatahubRonde({ vandaag: '2026-10-24' });
-    toets('D1 onbereikbaar: fout, box-rij, geen exceptie', u.gedaan === false && /faalde/.test(u.fout) && boxRijen() === box0 + 2, u);
+    toets('D1 onbereikbaar: fout, box-rij, geen exceptie', u.gedaan === false && /faalde/.test(u.fout) && boxRijen() === box0 + 3, u);
     toets('foutlog zonder cijferreeks', logs.some((x) => /pot-datahub: D1 http 500/.test(x)) && !logs.some((x) => /98765432/.test(x)), logs.slice(-2));
     d1Fout = null;
     // nieuwe post + een batch die halverwege faalt (UNIQUE-conflict in de bron? nee: een kapotte toewijzing) → rollback, volgende ronde zet hem
@@ -279,6 +301,21 @@ function scenario() {
     u = await h.potDatahubRonde({ vandaag: '2026-10-25' });
     const u2 = await h.potDatahubRonde({ vandaag: '2026-10-25' });
     toets('kapot geheugen: stil, één box-rij, bestand niet overschreven', u.reden === 'geheugen onleesbaar' && u2.reden === 'geheugen onleesbaar' && boxRijen() === box1 + 1 && fs.readFileSync(STAAT, 'utf8') === '{kapot', [u, boxRijen() - box1]);
+    // ontbrekende module in de release: box-rij, geen exceptie naar bankRonde
+    const echtDir = g2.__dirname; ctx.__dirname = path.join(W, 'leeg'); fs.mkdirSync(ctx.__dirname, { recursive: true });
+    fs.writeFileSync(STAAT, JSON.stringify({ aan: true }), { mode: 0o600 }); const box2 = boxRijen();
+    let gooit = false; try { u = await h.potDatahubRonde({ vandaag: '2026-10-26' }); } catch (e) { gooit = true; }
+    toets('pot-datahub.js ontbreekt: fout + box-rij, geen exceptie', !gooit && u.gedaan === false && boxRijen() === box2 + 1, [gooit, u]);
+    ctx.__dirname = echtDir;
+    // schakelscript: alleen aan wijzigen, grootboek blijft
+    fs.writeFileSync(STAAT, JSON.stringify({ aan: true, grootboek: { a: '2026-10-22', b: '2026-10-22' }, box: {} }), { mode: 0o600 });
+    const sch = (arg) => spawnSync('python3', [process.env.POT_DH_SCHAKEL || '/opt/data/mk-scripts/pot-datahub-schakel.py', arg], { env: { PATH: process.env.PATH, BANK_DIR: BD }, encoding: 'utf8' });
+    if (fs.existsSync(process.env.POT_DH_SCHAKEL || '/opt/data/mk-scripts/pot-datahub-schakel.py')) {
+      const s1 = sch('uit'); const na = JSON.parse(fs.readFileSync(STAAT, 'utf8'));
+      toets('schakelscript uit: aan=false, grootboek intact, 600', na.aan === false && Object.keys(na.grootboek).length === 2 && (fs.statSync(STAAT).mode & 0o777) === 0o600, [s1.stdout, s1.stderr]);
+      fs.writeFileSync(STAAT, '{kapot'); const s2 = sch('aan');
+      toets('schakelscript op kapot bestand: weigert, niet overschreven', s2.status !== 0 && fs.readFileSync(STAAT, 'utf8') === '{kapot');
+    } else console.log('(schakelscript niet aanwezig: overgeslagen)');
     // schakelaar uit
     fs.writeFileSync(STAAT, JSON.stringify({ aan: false, grootboek: {} }), { mode: 0o600 });
     u = await h.potDatahubRonde({ vandaag: '2026-10-26' });

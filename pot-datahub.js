@@ -141,7 +141,7 @@ function voorstel(inv) {
   });
   hist.forEach(function (l) { l.sort(function (a, b) { return a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : a.r.id - b.r.id; }); });
   const t = { posten: posten.length, gekoppeld: k.paar.size, nieuw: 0, toegewezen: 0, zonder_toewijzing: 0, onbekend: 0, onverklaard: 0, herstel: 0,
-    herstel_toegewezen: 0, dubbel_vermoed: 0, eigen_zonder_post: 0, grens: grens };
+    herstel_toegewezen: 0, dubbel_vermoed: 0, eigen_zonder_post: 0, door_david_verwijderd: 0, grens: grens };
   const nieuw = [], herstel = [];
   const davidsOpBedrag = new Map();
   davids.forEach(function (r) { const b = c(r.bedrag); if (!davidsOpBedrag.has(b)) davidsOpBedrag.set(b, []); davidsOpBedrag.get(b).push(r); });
@@ -151,13 +151,17 @@ function voorstel(inv) {
     // Binnen Davids lading moet elke post er al in staan (per maand complete afschriften met sluitende saldoketen): niet zetten, alleen
     // tellen. In de laatste VENSTER dagen alleen zetten als er bij David helemaal geen rij met dat bedrag in de buurt is (Fable wv815 #5).
     if (p.datum <= plusDagen(grens, -VENSTER) || (p.datum <= grens && vlakBij(p, davidsOpBedrag))) { t.onverklaard++; return; }
+    // Al eens door ons gezet (grootboek) en nu niet meer in D1: David haalde hem weg. Niet terugzetten (Fable wv815 diff M1).
+    if (Object.prototype.hasOwnProperty.call(grootboek, d1Sleutel(iban, p.sleutel))) { t.door_david_verwijderd++; return; }
     const h = hist.get(tegenSleutel(p)) || [];
     const tekst = bankTekst(p);
     const laatste = h.length ? h[h.length - 1].r : null;
+    // De groep zonder IBAN en naam (bankkosten e.d.) heeft bij David verschillende namen: alleen overnemen als ze allemaal gelijk zijn (diff K2)
+    const naam = !laatste ? '' : tegenSleutel(p).indexOf('leeg') === 0 && !h.every(function (x) { return x.r.naam === laatste.naam; }) ? '' : laatste.naam == null ? '' : String(laatste.naam);
     // tegenrekening alleen als David er bij deze tegenpartij altijd een had (en minstens één rij: Fable wv815 #3)
     const metRek = h.length > 0 && h.every(function (x) { return !!x.r.tegenrekening; }) && !!ibanNorm(p.tegen_iban);
     const rij = { rekening: iban, boekdatum: p.datum, bedrag: Math.round(Number(p.bedrag) * 100) / 100, tegenrekening: metRek ? ibanNorm(p.tegen_iban) : null,
-      naam: laatste && laatste.naam != null ? String(laatste.naam) : '', omschrijving: tekst.omschrijving, kenmerk: tekst.kenmerk, banksoort: tekst.banksoort,
+      naam: naam, omschrijving: tekst.omschrijving, kenmerk: tekst.kenmerk, banksoort: tekst.banksoort,
       sleutel: d1Sleutel(iban, p.sleutel), geladen_op: inv.vandaag };
     const tw = wijsToe(p, tekst.omschrijving, h, herkomst);
     t.nieuw++; if (!h.length) t.onbekend++;

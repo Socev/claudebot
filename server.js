@@ -14088,7 +14088,7 @@ function bankBoxRij(m) {
       '- status: open\n- van: pod pot-datahub-ronde (server.js potDatahubRonde na de bank-ronde; hooguit 1× per dag per reden)\n' +
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').replace(/\d{6,}/g, '#').replace(/\d[\d.]*,\d{2}/g, '#').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: ' + (m.gevolg || 'Davids POT-app (werk.socev.dev/pot) mist de nieuwste posten; elke ronde (07:00/18:00) probeert het opnieuw.') + '\n' +
-      '- voorstel: geheugen en schakelaar `/opt/data/bank/pot-datahub.json` (aan, grootboek, box); api.log `pot-datahub`; droog: `potDatahubRonde({droog: true})` via de proef in `test/pot-datahub.sh` (POT_DH_DROOG). Terugzetten: schakelaar uit; rijen herkenbaar aan `bron_bestand = \'enablebanking\'` (bouwplan bankkoppeling § 9f).\n'
+      '- voorstel: schakelaar alleen met `python3 /opt/data/mk-scripts/pot-datahub-schakel.py aan|uit|stand` (laat het grootboek staan; nooit het bestand overschrijven); geheugen `/opt/data/bank/pot-datahub.json`; api.log `pot-datahub`; droog: `potDatahubRonde({droog: true})` via de proef in `test/pot-datahub.sh` (POT_DH_DROOG). Terugzetten: schakelaar uit; rijen herkenbaar aan `bron_bestand = \'enablebanking\'` (bouwplan bankkoppeling § 9f).\n'
       : m.bron === 'pot-afschrift' ? '\n## [direct] ' + tijd + ' — POT-afschrift ' + String(m.maand || '').slice(0, 7) + ': niet gemaakt (bankluis, automatisch)\n' +
       '- status: open\n- van: pod pot-afschrift-ronde (server.js potAfschriftRonde na de bank-ronde, vanaf de 3e; hooguit 1× per maand per reden)\n' +
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').replace(/\d[\d.]*,\d{2}/g, '#').slice(0, 200) + '\n' +
@@ -15042,9 +15042,9 @@ async function potDhD1(batch) {
     method: 'POST', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': 'application/json' },
     body: JSON.stringify({ batch: batch }), signal: AbortSignal.timeout(30000) });
   const j = await r.json().catch(function () { return null; });
-  const ok = r.ok && j && j.success === true && Array.isArray(j.result) && j.result.length === batch.length && j.result.every(function (x) { return x && x.success !== false && Array.isArray(x.results); });
+  const ok = r.ok && j && j.success === true && Array.isArray(j.result) && j.result.length === batch.length && j.result.every(function (x) { return x && x.success !== false; });   // results alleen bij SELECT nodig (diff I2)
   if (!ok) throw new Error('D1 http ' + r.status + (j && Array.isArray(j.errors) && j.errors[0] ? ': ' + String(j.errors[0].message || '').replace(/\d{6,}/g, '#').slice(0, 120) : ''));
-  return j.result.map(function (x) { return { results: x.results, changes: x.meta && x.meta.changes }; });
+  return j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [], changes: x.meta && x.meta.changes }; });
 }
 async function potDatahubRonde(o) {
   o = o || {};
@@ -15058,16 +15058,20 @@ async function potDatahubRonde(o) {
   if (!o.droog && st.aan !== true) return { gedaan: false, reden: 'uit' };
   if (potDhBezig) return { gedaan: false, reden: 'bezig' };
   if (!process.env.CLOUDFLARE_API_TOKEN) return { gedaan: false, fout: 'geen Cloudflare-sleutel op de pod' };
-  const P = require(path.join(__dirname, 'pot-datahub.js'));
+  let P = null;
   const vandaag = o.vandaag || new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
-  const box = function (reden, kop, tekst, gevolg) {
-    if (o.droog || st.box[reden] === vandaag) return;
+  // Box-rij per reden alleen als de toestand verandert (merk: aantal of fouttekst), of na 7 dagen dezelfde toestand (diff K4).
+  const box = function (reden, kop, tekst, gevolg, merk) {
+    if (o.droog) return;
+    const vorig = st.box[reden], m = String(merk == null ? tekst : merk);
+    if (vorig && typeof vorig === 'object' && vorig.merk === m && Date.parse(vandaag) - Date.parse(vorig.dag) < 7 * 864e5) return;
     bankBoxRij({ bron: 'pot-datahub', kop: kop, tekst: tekst, gevolg: gevolg });
-    const b = {}; b[reden] = vandaag; try { potDhStaatBij(null, b); } catch (e) { logError('pot-datahub', e); }
-    st.box[reden] = vandaag;
+    const b = {}; b[reden] = { merk: m, dag: vandaag }; try { potDhStaatBij(null, b); } catch (e) { logError('pot-datahub', e); }
+    st.box[reden] = b[reden];
   };
   potDhBezig = true;
   try {
+    P = require(path.join(__dirname, 'pot-datahub.js'));   // binnen de try: ontbreekt hij in de release, dan een box-rij (diff K3)
     const kop = await potDhD1([{ sql: P.SQL_LEES_REKENING, params: ['POT'] },
       { sql: "SELECT max(boekdatum) AS d FROM bankmutatie WHERE entiteit = ? AND coalesce(bron_bestand, '') <> ?", params: ['POT', P.BRON_BESTAND] }]);
     const rek = kop[0].results, grens = kop[1].results[0] && kop[1].results[0].d;
@@ -15097,17 +15101,17 @@ async function potDatahubRonde(o) {
     t.geschreven = geschreven; t.toewijzingen_geschreven = toegewezen;
     if (t.onverklaard) box('onverklaard', t.onverklaard + ' post(en) niet geplaatst',
       t.onverklaard + ' POT-post(en) uit de bankluis vallen binnen Davids eigen lading (t/m ' + t.grens + ') maar staan daar niet in; niet gezet.',
-      'die posten ontbreken in de POT-app; nagaan of Davids afschrift of de bankluis afwijkt (bedrag of datum).');
+      'die posten ontbreken in de POT-app; nagaan of Davids afschrift of de bankluis afwijkt (bedrag of datum).', t.onverklaard);
     if (t.dubbel_vermoed) box('dubbel', t.dubbel_vermoed + ' mogelijk dubbele post(en)',
       t.dubbel_vermoed + ' rij(en) van David (eigen lading) passen op bedrag en datum bij rijen die de pod zette.',
-      'de POT-app kan die posten dubbel tellen; één van beide rijen weghalen (onze herken je aan bron_bestand enablebanking).');
+      'de POT-app kan die posten dubbel tellen; één van beide rijen weghalen (onze herken je aan bron_bestand enablebanking).', t.dubbel_vermoed);
     schrijfLog(nu() + ' pot-datahub ' + velden({ nieuw: t.nieuw, geschreven: geschreven, toegewezen: toegewezen, zonder: t.zonder_toewijzing, onbekend: t.onbekend,
-      onverklaard: t.onverklaard || undefined, herstel: t.herstel || undefined, dubbel: t.dubbel_vermoed || undefined }));
+      onverklaard: t.onverklaard || undefined, herstel: t.herstel || undefined, dubbel: t.dubbel_vermoed || undefined, verwijderd: t.door_david_verwijderd || undefined }));
     return { gedaan: true, telling: t };
   } catch (e) {
     const tekst = String(e && e.message || e).replace(/[\r\n]+/g, ' ').replace(/\d{6,}/g, '#').slice(0, 160);
     logError('pot-datahub', new Error(tekst));
-    box('fout', 'niet gelukt', tekst);
+    box('fout', 'niet gelukt', tekst, null, tekst.replace(/\d+/g, '#'));
     return { gedaan: false, fout: 'pot-datahub-ronde faalde in de pod' };
   } finally { potDhBezig = false; }
 }
