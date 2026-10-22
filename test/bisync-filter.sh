@@ -82,11 +82,13 @@ ok "  zelftoets vóór de eerste bisync, anders SYNC STOP"     "awk '/^sync_lus\
 # codeplek_dicht uit run.sh, los gedraaid op een proefvault (Fable wv813 #6)
 sed -n '/^codeplek_dicht()/,/^}/p' "$RUN" > "$T/grendel.sh"; export GV="$T/gv"
 mkdir -p "$GV/.claude/skills/x" "$GV/.obsidian"; echo s > "$GV/.claude/skills/x/SKILL.md"
-ok "  ronde overgeslagen als codeplek_dicht faalt"           "grep -A3 '^sync_ronde()' \"\$RUN\" | grep -q 'codeplek_dicht'"
+ok "  grendel in de lus vóór sync_ronde/zelfherstel, en vóór SYNC_INIT" "awk '/^sync_lus\\(\\)/{s=1} s&&/if ! codeplek_dicht/{g=NR} s&&/if sync_ronde/{r=NR} END{exit !(g && r && g<r)}' \"\$RUN\" && grep -q 'SYNC_INIT\" = \"1\" \] && \[ ! -f \"\$MARKER\" \] && codeplek_dicht' \"\$RUN\""
 ok "  codeplek_dicht: .claude/.obsidian zonder socev-schrijfrecht = dicht" "VAULT=\$GV; . \$T/grendel.sh; codeplek_dicht"
 if id socev >/dev/null 2>&1 && command -v setfacl >/dev/null; then
   ok "  codeplek_dicht: socev rw op een skillbestand = open (ronde overslaan)" "setfacl -m u:socev:rw \$GV/.claude/skills/x/SKILL.md && VAULT=\$GV; . \$T/grendel.sh; ! codeplek_dicht"
   ok "  codeplek_dicht: standaard-ACL socev rwx op .obsidian = open" "setfacl -x u:socev \$GV/.claude/skills/x/SKILL.md && setfacl -d -m u:socev:rwx \$GV/.obsidian && VAULT=\$GV; . \$T/grendel.sh; ! codeplek_dicht"
+  ok "  codeplek_dicht: standaard-ACL other rwx (zonder o+w-bestand) = open" "setfacl -k \$GV/.obsidian && VAULT=\$GV; . \$T/grendel.sh; codeplek_dicht && setfacl -d -m o::rwx \$GV/.obsidian && ! codeplek_dicht && setfacl -k \$GV/.obsidian"
+  ok "  codeplek_dicht: o+w op een bestand = open" "setfacl -k \$GV/.obsidian && VAULT=\$GV; . \$T/grendel.sh; codeplek_dicht && chmod o+w \$GV/.claude/skills/x/SKILL.md && ! codeplek_dicht"
 else
   echo "  info  geen gebruiker socev of setfacl hier: ACL-gevallen alleen in uid-scheiding.sh"
 fi

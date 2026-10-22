@@ -28,7 +28,7 @@ niet=( "map/x.ps1" "map/X.PS1" "map/y.ps1." "map/y2.ps1 " "map/y3.Ps1. ." "map/z
        "map/.mcp.json" "verzamel-claude.mjs" "00_Systeem/Tokens/tokens_pc.ps1"
        "map/evil.msı" "map/evil.pıf. " "map/x.ınf" "map/.git/config" "map/.git/hooks/pre-commit" "map/.Cursor/mcp.json"
        "map/node_modules/p/index.md" "map/z.ps1.socev-geblokkeerd-20261022-1" "map/z.pyd" "map/z.wsb" "map/z.accdb"
-       "map/z.iqy" "map/z.rdp" )
+       "map/z.iqy" "map/z.rdp" "map/z.xlsb" "map/.claude.socev-geblokkeerd-20261022-1/settings.json" )
 if [ -n "$R" ]; then
   [ -r "$R" ] || { echo "bisync-filter-toets: $R onleesbaar" >&2; exit 1; }
   # Elke -iname '*.ext' en -name '*.ext' uit socev-rechten.sh behalve .ts (video) en .zip (gewoon document op de pc).

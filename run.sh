@@ -57,8 +57,8 @@ codeplek_dicht(){
   local d
   for d in "$VAULT/.claude" "$VAULT/.obsidian"; do
     [ -e "$d" ] || continue
-    getfacl -R -P -p "$d" 2>/dev/null | grep -qE '^(default:)?user:socev:(rw|-w)' && return 1
-    [ -z "$(find -P "$d" -user socev -print -quit 2>/dev/null)" ] || return 1
+    getfacl -R -P -p "$d" 2>/dev/null | grep -qE '^(default:)?(user:socev:|other::)(rw|-w)' && return 1
+    [ -z "$(find -P "$d" \( -user socev -o -perm /o=w \) -print -quit 2>/dev/null)" ] || return 1
   done
   return 0
 }
@@ -121,10 +121,6 @@ rol_reset_podstart(){
 }
 
 sync_ronde(){
-  if ! codeplek_dicht; then
-    echo "$(date '+%F %T') LET OP: socev kan schrijven in .claude/ of .obsidian/ van de vault - ronde overgeslagen (syncfilter wv813)" >> "$SYNCLOG"
-    return 1
-  fi
   if flock "$VAULT_LOCK" rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" \
        --create-empty-src-dirs --conflict-resolve newer \
        --resilient --recover --max-lock 2m >> "$SYNCLOG" 2>&1; then
@@ -190,7 +186,7 @@ sync_lus(){
   # Allereerste koppeling: bisync heeft nog geen vergelijkingslijsten en weigert.
   # Die eerste --resync kan bestanden overschrijven, dus die doen we NOOIT
   # vanzelf. Zet SYNC_INIT=1 als je hem bewust wilt.
-  if [ "$SYNC_INIT" = "1" ] && [ ! -f "$MARKER" ]; then
+  if [ "$SYNC_INIT" = "1" ] && [ ! -f "$MARKER" ] && codeplek_dicht; then
     echo "$(date) eerste koppeling met $BRON — resync, nieuwste bestand wint" >> "$SYNCLOG"
     if rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" --resync --resync-mode newer \
          --create-empty-src-dirs >> "$SYNCLOG" 2>&1; then
@@ -216,6 +212,12 @@ sync_lus(){
     fi
     [ "$ROL_VORIG" = "passief" ] && echo "$(date '+%F %T') PRIMAIR: bisync hervat" >> "$SYNCLOG"
     ROL_VORIG=primair
+    # Grendel vóór élke bisync, ook het zelfherstel (Fable-natoets wv813 #1): kan socev in .claude/.obsidian schrijven, dan
+    # deze ronde niet; geen "ronde mislukt" (dat zou zelfherstel starten), wel elke keer een regel, en RONDE OK blijft uit.
+    if ! codeplek_dicht; then
+      echo "$(date '+%F %T') LET OP: socev kan schrijven in .claude/ of .obsidian/ van de vault - ronde overgeslagen (syncfilter wv813)" >> "$SYNCLOG"
+      sleep "$SYNC_INTERVAL"; continue
+    fi
     if sync_ronde; then
       FOUTEN=0
       # Na een geslaagde ronde de koppeling vastleggen als dat nog niet gebeurd is.

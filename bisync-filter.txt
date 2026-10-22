@@ -31,10 +31,11 @@
 - {{(?i)(desktop\.ini|autorun\.inf)[. ]*}}
 - {{(?i)__pycache__[. ]*}}/**
 # Quarantaine van socev-rechten.sh: aanvallersinhoud onder een onschadelijke naam hoort ook niet op de pc (Fable wv813 #10).
+- *.socev-geblokkeerd-*/**
 - *.socev-geblokkeerd-*
 # Een extensie met een niet-ASCII-teken nooit: Go's (?i) vouwt de Turkse ı niet naar i, Windows wel (".msı" opent als .msi;
 # Fable wv813 #1). Gewone namen met é/ü vóór de laatste punt blijven gewoon meegaan.
 - {{.*\.[^/.]*[^\x00-\x7F][^/.]*[. ]*}}
 # Scripts en Windows-code. Volgt WINCODE en de scripts van CODEPLEK in socev-rechten.sh, plus wat Windows verder als code
 # start, laadt of zonder klik leest (bisync-filter-toets.sh en test/bisync-filter.sh toetsen dat elke WINCODE-soort hier valt).
-- {{(?i).*\.(ps1|psm1|psd1|ps1xml|ps2|ps2xml|psc1|psc2|msh|msh1|msh2|mshxml|msh1xml|msh2xml|cmd|bat|com|pif|vb|vbs|vbe|js|jse|mjs|cjs|wsf|wsh|ws|wsc|sct|hta|py|pyw|pyz|pyzw|pyc|pyo|whl|egg|sh|bash|lnk|url|scf|scr|cpl|msc|exe|msi|msp|mst|dll|ocx|sys|drv|reg|inf|ins|isp|jar|xll|xla|xlam|docm|dotm|xlsm|xltm|pptm|potm|ppsm|ppam|sldm|wll|iso|img|vhd|vhdx|appinstaller|application|appref-ms|appx|appxbundle|msix|msixbundle|gadget|diagcab|xbap|chm|settingcontent-ms|library-ms|searchconnector-ms|search-ms|theme|themepack|deskthemepack|skill|iqy|slk|dqy|oqy|rqy|pyd|node|wsb|rdp|ppkg|website|jnlp|ahk|accdb|accde|accdr|accda|mdb|mde|ade|adp|mda)[. ]*}}
+- {{(?i).*\.(ps1|psm1|psd1|ps1xml|ps2|ps2xml|psc1|psc2|msh|msh1|msh2|mshxml|msh1xml|msh2xml|cmd|bat|com|pif|vb|vbs|vbe|js|jse|mjs|cjs|wsf|wsh|ws|wsc|sct|hta|py|pyw|pyz|pyzw|pyc|pyo|whl|egg|sh|bash|lnk|url|scf|scr|cpl|msc|exe|msi|msp|mst|dll|ocx|sys|drv|reg|inf|ins|isp|jar|xll|xla|xlam|docm|dotm|xlsm|xlsb|xltm|pptm|potm|ppsm|ppam|sldm|wll|iso|img|vhd|vhdx|appinstaller|application|appref-ms|appx|appxbundle|msix|msixbundle|gadget|diagcab|xbap|chm|settingcontent-ms|library-ms|searchconnector-ms|search-ms|theme|themepack|deskthemepack|skill|iqy|slk|dqy|oqy|rqy|pyd|node|wsb|rdp|ppkg|website|jnlp|ahk|accdb|accde|accdr|accda|mdb|mde|ade|adp|mda)[. ]*}}
