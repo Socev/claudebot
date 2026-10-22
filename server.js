@@ -13988,7 +13988,7 @@ const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', '
   'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'ontkoppel'];
 const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'verrijk-open', 'verrijk-zet',
   'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'geld-briefing',   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
-  'pot-afschrift-maanden', 'pot-afschrift'];   // wv787: alleen voor de App-routes en de maandronde (niet in BANK_OPDRACHTEN: niet via /smal/bank)
+  'pot-afschrift-maanden', 'pot-afschrift', 'pot-datahub-invoer'];   // wv787 (wv815: pot-datahub-invoer alleen voor potDatahubRonde): alleen voor de App-routes en de maandronde (niet in BANK_OPDRACHTEN: niet via /smal/bank)
 const BANK_TERUG_PER_UUR = 30;
 const bankTerugTijden = [];
 let bankSleutelCache = null;   // { w: {sleutel, app_id, bunq_sleutel}, tot }; 10 minuten, alleen in het geheugen
@@ -14084,7 +14084,12 @@ function bankBoxRij(m) {
     const ip = m.reden === 'toegang';
     // wv685: Enable Banking uit de vaste ronde (bank-lezer.js zet hooguit één per reden per dag); tekst van de pod zelf
     const eb = m.bron === 'enablebanking' && (m.reden === 'sleutel' || m.reden === 'toestemming');
-    const rij = m.bron === 'pot-afschrift' ? '\n## [direct] ' + tijd + ' — POT-afschrift ' + String(m.maand || '').slice(0, 7) + ': niet gemaakt (bankluis, automatisch)\n' +
+    const rij = m.bron === 'pot-datahub' ? '\n## [direct] ' + tijd + ' — POT-posten naar de datahub: ' + String(m.kop || 'niet gelukt').replace(/[\r\n]+/g, ' ').slice(0, 80) + ' (bankluis, automatisch)\n' +
+      '- status: open\n- van: pod pot-datahub-ronde (server.js potDatahubRonde na de bank-ronde; hooguit 1× per dag per reden)\n' +
+      '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').replace(/\d{6,}/g, '#').replace(/\d[\d.]*,\d{2}/g, '#').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: ' + (m.gevolg || 'Davids POT-app (werk.socev.dev/pot) mist de nieuwste posten; elke ronde (07:00/18:00) probeert het opnieuw.') + '\n' +
+      '- voorstel: geheugen en schakelaar `/opt/data/bank/pot-datahub.json` (aan, grootboek, box); api.log `pot-datahub`; droog: `potDatahubRonde({droog: true})` via de proef in `test/pot-datahub.sh` (POT_DH_DROOG). Terugzetten: schakelaar uit; rijen herkenbaar aan `bron_bestand = \'enablebanking\'` (bouwplan bankkoppeling § 9f).\n'
+      : m.bron === 'pot-afschrift' ? '\n## [direct] ' + tijd + ' — POT-afschrift ' + String(m.maand || '').slice(0, 7) + ': niet gemaakt (bankluis, automatisch)\n' +
       '- status: open\n- van: pod pot-afschrift-ronde (server.js potAfschriftRonde na de bank-ronde, vanaf de 3e; hooguit 1× per maand per reden)\n' +
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').replace(/\d[\d.]*,\d{2}/g, '#').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: André krijgt het afschrift niet vanzelf; vanaf de 10e staat er een Voor jou-kaart om het zelf bij ABN te downloaden.\n' +
@@ -14430,6 +14435,11 @@ async function bankRonde() {
     const pa = await potAfschriftRonde();
     if (pa.gedaan || pa.fout) uit.pot_afschrift = { maand: pa.maand, uitkomst: pa.uitkomst, fout: pa.fout };
   } catch (e) { logError('pot-ronde', e); uit.pot_afschrift = { fout: 'pot-afschrift-ronde faalde in de pod' }; }
+  // wv815: nieuwe POT-posten naar Davids datahub (D1 fin), alleen met de schakelaar aan; alleen aantallen naar n8n, een fout raakt de ronde niet
+  if (uit.ok) try {
+    const pd = await potDatahubRonde();
+    if (pd.gedaan || pd.fout) uit.pot_datahub = { telling: pd.telling, fout: pd.fout };
+  } catch (e) { logError('pot-datahub', e); uit.pot_datahub = { fout: 'pot-datahub-ronde faalde in de pod' }; }
   // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
   (r.box || []).forEach(function (m) {
     const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')
@@ -14999,6 +15009,107 @@ async function potAfschriftRonde(o) {
     box('ronde faalde: ' + String(e && e.message || e).replace(/[\r\n]+/g, ' ').slice(0, 100)); bewaar();
     return { gedaan: false, maand: mnd, fout: 'pot-afschrift-ronde faalde in de pod' };
   } finally { potAfBezig = false; }
+}
+// ── wv815: POT-posten naar Davids datahub (bouwplan bankkoppeling § 9f) ─────────────────────────────────────────────────
+// WAAROM. David 22-10: "Ik wil dat je die ook synct … dat scheelt alvast 1 upload". Zijn POT-app (werk.socev.dev/pot) leest D1 `fin`;
+// zijn eigen lading liep t/m 31-8. Na elke bank-ronde: D1 lezen (rekening, Davids grens, zijn en onze rijen), de POT-posten uit de
+// bankluis (bank-lezer pot-datahub-invoer), voorstel en statements uit pot-datahub.js (puur), schrijven in D1-batches met parameters.
+// Schakelaar en geheugen: BANK_DIR/pot-datahub.json {aan, grootboek: {d1sleutel: datum}, box: {reden: dag}} (600); zonder bestand of
+// bij een kapot bestand: uit. Het grootboek houdt bij welke van onze rijen al een toewijzingspoging kregen, zodat een half geschreven
+// batch één keer wordt hersteld en een toewijzing die David weghaalde niet terugkomt (Fable wv815 #1). Alleen aantallen naar n8n en log.
+const POT_DH_STAAT = path.join(BANK_DIR, 'pot-datahub.json');
+const POT_DH_MAX_MS = 120000;
+let potDhBezig = false, potDhKapotDag = null;
+function potDhStaat() {
+  try { const s = JSON.parse(fs.readFileSync(POT_DH_STAAT, 'utf8')); if (s && typeof s === 'object' && !Array.isArray(s)) return { aan: s.aan === true, grootboek: s.grootboek && typeof s.grootboek === 'object' ? s.grootboek : {}, box: s.box && typeof s.box === 'object' ? s.box : {} }; }
+  catch (e) {}
+  return { aan: false, grootboek: {}, box: {}, kapot: fs.existsSync(POT_DH_STAAT) };
+}
+// Vers lezen en alleen grootboek en box bijwerken: de schakelaar zet de machinekamer, die overschrijft de ronde nooit.
+function potDhStaatBij(grootboek, box) {
+  let s = {};
+  try { s = JSON.parse(fs.readFileSync(POT_DH_STAAT, 'utf8')) || {}; } catch (e) { s = {}; }
+  if (typeof s !== 'object' || Array.isArray(s)) s = {};
+  s.grootboek = Object.assign({}, s.grootboek && typeof s.grootboek === 'object' ? s.grootboek : {}, grootboek || {});
+  s.box = Object.assign({}, s.box && typeof s.box === 'object' ? s.box : {}, box || {});
+  const tmp = POT_DH_STAAT + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(s), { mode: 0o600 });
+  fs.renameSync(tmp, POT_DH_STAAT);
+}
+// D1 `fin`, één batch (transactie) met parameters. Foutteksten zonder statement of parameters, cijferreeksen gemaskeerd (Fable wv815 #2).
+async function potDhD1(batch) {
+  const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + APP_CF_ACCOUNT + '/d1/database/' + APP_FIN_DB + '/query', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ batch: batch }), signal: AbortSignal.timeout(30000) });
+  const j = await r.json().catch(function () { return null; });
+  const ok = r.ok && j && j.success === true && Array.isArray(j.result) && j.result.length === batch.length && j.result.every(function (x) { return x && x.success !== false && Array.isArray(x.results); });
+  if (!ok) throw new Error('D1 http ' + r.status + (j && Array.isArray(j.errors) && j.errors[0] ? ': ' + String(j.errors[0].message || '').replace(/\d{6,}/g, '#').slice(0, 120) : ''));
+  return j.result.map(function (x) { return { results: x.results, changes: x.meta && x.meta.changes }; });
+}
+async function potDatahubRonde(o) {
+  o = o || {};
+  const st = potDhStaat();
+  if (st.kapot && !o.droog) {
+    // Kapot geheugen: niet overschrijven (de schakelaar en het grootboek staan erin), wel één box-rij per dag.
+    const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    if (potDhKapotDag !== dag) { potDhKapotDag = dag; bankBoxRij({ bron: 'pot-datahub', kop: 'geheugen onleesbaar', tekst: 'pot-datahub.json is geen geldige JSON; de stap staat stil tot het bestand hersteld is.' }); }
+    return { gedaan: false, reden: 'geheugen onleesbaar' };
+  }
+  if (!o.droog && st.aan !== true) return { gedaan: false, reden: 'uit' };
+  if (potDhBezig) return { gedaan: false, reden: 'bezig' };
+  if (!process.env.CLOUDFLARE_API_TOKEN) return { gedaan: false, fout: 'geen Cloudflare-sleutel op de pod' };
+  const P = require(path.join(__dirname, 'pot-datahub.js'));
+  const vandaag = o.vandaag || new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const box = function (reden, kop, tekst, gevolg) {
+    if (o.droog || st.box[reden] === vandaag) return;
+    bankBoxRij({ bron: 'pot-datahub', kop: kop, tekst: tekst, gevolg: gevolg });
+    const b = {}; b[reden] = vandaag; try { potDhStaatBij(null, b); } catch (e) { logError('pot-datahub', e); }
+    st.box[reden] = vandaag;
+  };
+  potDhBezig = true;
+  try {
+    const kop = await potDhD1([{ sql: P.SQL_LEES_REKENING, params: ['POT'] },
+      { sql: "SELECT max(boekdatum) AS d FROM bankmutatie WHERE entiteit = ? AND coalesce(bron_bestand, '') <> ?", params: ['POT', P.BRON_BESTAND] }]);
+    const rek = kop[0].results, grens = kop[1].results[0] && kop[1].results[0].d;
+    if (rek.length !== 1 || !rek[0].iban) throw new Error('datahub: ' + rek.length + ' POT-rekeningen in bankrekening');
+    if (!grens) throw new Error('datahub: geen eigen lading van David');
+    const van = new Date(Date.parse(grens + 'T12:00:00Z') - 10 * 864e5).toISOString().slice(0, 10);
+    const k = await bankKind(['pot-datahub-invoer', '--van', van], {}, POT_DH_MAX_MS);
+    const j = (k && k.j) || {};
+    if (j.ok !== true || !Array.isArray(j.posten)) throw new Error('bankluis gaf geen POT-posten');
+    if (String(j.iban || '') !== String(rek[0].iban).replace(/\s+/g, '').toUpperCase()) {
+      box('rekening', 'rekening wijkt af', 'De IBAN van de POT-rekening in de bankluis is niet die in de datahub (tabel bankrekening); niets geschreven.',
+        'er komen geen POT-posten meer in de datahub tot de rekening in bankrekening en de bankluis weer gelijk zijn.');
+      return { gedaan: false, fout: 'rekening wijkt af' };
+    }
+    const lees = await potDhD1([{ sql: P.SQL_LEES_RIJEN, params: ['POT', P.leesVanaf(j.posten) || van] }]);
+    const v = P.voorstel({ iban: rek[0].iban, posten: j.posten, rijen: lees[0].results.map(P.rijUitD1), grootboek: st.grootboek, vandaag: vandaag });
+    const t = v.telling;
+    if (o.droog) return { gedaan: false, droog: true, telling: t };
+    let geschreven = 0, toegewezen = 0;
+    for (const b of P.statements(v, { vandaag: vandaag })) {
+      if (b.statements.length) {
+        const res = await potDhD1(b.statements);
+        b.statements.forEach(function (s, i) { if (s.sql.indexOf('INSERT OR IGNORE INTO bankmutatie') === 0) geschreven += Number(res[i].changes) || 0; else if (s.sql.indexOf('INSERT INTO bank_toewijzing') === 0) toegewezen += Number(res[i].changes) || 0; });
+      }
+      const g = {}; b.sleutels.forEach(function (s) { g[s] = vandaag; }); potDhStaatBij(g, null);
+    }
+    t.geschreven = geschreven; t.toewijzingen_geschreven = toegewezen;
+    if (t.onverklaard) box('onverklaard', t.onverklaard + ' post(en) niet geplaatst',
+      t.onverklaard + ' POT-post(en) uit de bankluis vallen binnen Davids eigen lading (t/m ' + t.grens + ') maar staan daar niet in; niet gezet.',
+      'die posten ontbreken in de POT-app; nagaan of Davids afschrift of de bankluis afwijkt (bedrag of datum).');
+    if (t.dubbel_vermoed) box('dubbel', t.dubbel_vermoed + ' mogelijk dubbele post(en)',
+      t.dubbel_vermoed + ' rij(en) van David (eigen lading) passen op bedrag en datum bij rijen die de pod zette.',
+      'de POT-app kan die posten dubbel tellen; één van beide rijen weghalen (onze herken je aan bron_bestand enablebanking).');
+    schrijfLog(nu() + ' pot-datahub ' + velden({ nieuw: t.nieuw, geschreven: geschreven, toegewezen: toegewezen, zonder: t.zonder_toewijzing, onbekend: t.onbekend,
+      onverklaard: t.onverklaard || undefined, herstel: t.herstel || undefined, dubbel: t.dubbel_vermoed || undefined }));
+    return { gedaan: true, telling: t };
+  } catch (e) {
+    const tekst = String(e && e.message || e).replace(/[\r\n]+/g, ' ').replace(/\d{6,}/g, '#').slice(0, 160);
+    logError('pot-datahub', new Error(tekst));
+    box('fout', 'niet gelukt', tekst);
+    return { gedaan: false, fout: 'pot-datahub-ronde faalde in de pod' };
+  } finally { potDhBezig = false; }
 }
 // ── einde bankluis ──
 

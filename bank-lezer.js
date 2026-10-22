@@ -1235,6 +1235,15 @@ const opdrachten = {
       bestanden: [{ soort: 'mt940', naam: r.bestandsnamen.mt940, grootte: Buffer.byteLength(r.mt940, 'latin1') }, { soort: 'pdf', naam: r.bestandsnamen.pdf, grootte: r.pdf.length }],
       mail: P.mailConcept(maand, t), mail_correctie: P.mailConcept(maand, t, { correctie: true }), ontvanger: x.A.metaLees(x.a, 'pot_afschrift_ontvanger') || null };
   },
+  // wv815: POT-posten voor Davids datahub (server.js potDatahubRonde na de bank-ronde); alleen de pod (BANK_LOKAAL), niet via /smal/bank.
+  // Uitvoer naar de pod (geheugen), nooit naar een sessie of log: de pod schrijft ze met parameters in D1 `fin`.
+  async 'pot-datahub-invoer'(a) {
+    if (a.opt.van != null && !isDatum(a.opt.van)) throw new Weigering('--van als JJJJ-MM-DD');
+    const x = archiefKlaar();
+    let inv;
+    try { inv = x.A.potDatahubInvoer(x.a, a.opt.van || null); } catch (e) { throw new Weigering('POT-rekening: ' + e.message); }
+    return Object.assign({ ok: true }, inv);
+  },
   // wv787: ontvanger van de POT-afschriften (André, Acta). Alleen machinekamer via de CLI (stdin {adres}); niet in code of vault.
   async 'pot-ontvanger'() {
     const x = archiefKlaar();

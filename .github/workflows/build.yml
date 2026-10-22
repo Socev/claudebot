@@ -110,6 +110,22 @@ jobs:
           fi
           echo "facturen-kern.js en facturen-bank.js: puur."
 
+      # pot-datahub.js (wv815): POT-posten naar Davids datahub. Puur: geen bestand-, netwerk- of procesmodule, geen fetch en geen klok
+      # (vandaag komt van server.js); alleen crypto en mt940-lezer.js. Schrijven in D1 doet server.js, altijd met parameters.
+      - name: pot-datahub.js moet puur blijven
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' pot-datahub.js)
+          if echo "$C" | grep -nE "require\([\`'\"](node:)?(fs(/promises)?|os|http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.|import\("; then
+            echo "::error::pot-datahub.js laadt een bestand-, netwerk- of procesmodule; de module moet puur blijven"; exit 1
+          fi
+          if echo "$C" | sed 's/new Date(\s*[^)[:space:]]/NIEUWEDATUM(/g' | grep -nE "Date\.now\s*\(|new Date\b|(^|[^.A-Za-z0-9_])Date\(|Math\.random"; then
+            echo "::error::pot-datahub.js leest zelf de klok of het toeval; geef vandaag mee"; exit 1
+          fi
+          if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|\./mt940-lezer\.js)'\)$"; then
+            echo "::error::pot-datahub.js laadt een module buiten crypto en mt940-lezer.js"; exit 1
+          fi
+          echo "pot-datahub.js: puur."
+
       # De witte lijst en de handtekeningcontrole echt toetsen (nagebootste bunq en Enable Banking op 127.0.0.1); node:sqlite
       # vraagt Node 22 (zelfde hoofdversie als de pod).
       - uses: actions/setup-node@v4
@@ -131,6 +147,7 @@ jobs:
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
           bash test/facturen-kern.sh   # wv797: Facturen-app kern — besliskader, UBL, validators, IBAN-poort, patiëntkenmerk, overgangen, vingerafdruk
           bash test/facturen-bank.sh   # wv798: Facturen-app bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
+          bash test/pot-datahub.sh   # wv815: POT-posten naar Davids datahub — koppelen, grens, Davids vorm, toewijzing, grootboek, D1-batch met parameters
           bash test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
       - name: "studio (wv707, tab Studio fase 1)"

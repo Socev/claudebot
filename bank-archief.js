@@ -1307,6 +1307,21 @@ function potAfschriftMaanden(a) {
   return { rek: rk.rek, eerste_maand: eerste, laatst_gelezen: rk.laatst_gezien, nieuwste_post: nieuwste, vandaag: vandaag(), maanden: uit };
 }
 
+// ── wv815: invoer voor Davids datahub (pot-datahub.js, server.js potDatahubRonde na de bank-ronde) ────────
+// Alle geboekte, niet-vervangen posten van de POT-rekening met wat de koppeling nodig heeft (datum, valutadatum, bedrag, tegenpartij,
+// vaste sleutel); de bankregels alleen vanaf `van` (de posten die nieuw kunnen zijn), zodat de uitvoer klein blijft. Leest alleen.
+function potDatahubInvoer(a, van) {
+  const rk = potRekeningEen(a);
+  const rijen = a.db.prepare('SELECT t.nr, t.sleutel, t.datum, t.valutadatum, t.bedrag, t.tegen_iban, t.tegenpartij, t.omschrijving, t.ruwe_json FROM transacties t' +
+    ' WHERE t.rek = ? AND ' + POT_BOEKT + ' AND t.datum IS NOT NULL ORDER BY t.datum, t.nr').all(rk.rek);
+  return { iban: ibanNorm(rk.iban), posten: rijen.map(function (r) {
+    const p = { nr: r.nr, sleutel: r.sleutel, datum: r.datum, valutadatum: r.valutadatum || null, bedrag: r.bedrag, tegen_iban: r.tegen_iban ? ibanNorm(r.tegen_iban) : null,
+      tegenpartij: r.tegenpartij || '' };
+    if (!van || r.datum >= van) p.regels = potAfschriftPost(r).regels;
+    return p;
+  }) };
+}
+
 function stand(a) {
   const db = a.db;
   const per = db.prepare('SELECT r.rek, r.bron, r.status, r.eigenaar, r.eigenaar_herkomst, count(t.nr) n, min(t.datum) van, max(t.datum) tot, sum(t.ruwe_json IS NOT NULL) ruw' +
@@ -1342,5 +1357,5 @@ function stand(a) {
 }
 
 module.exports = { open, rekeningenSync, markeerOntkoppeld, bij, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
-  zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, potAfschriftInvoer, potAfschriftMaanden, metaLees, metaZet, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
+  zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, potAfschriftInvoer, potAfschriftMaanden, potDatahubInvoer, metaLees, metaZet, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
   categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, reeksenBereken, vastePosten, rijenVan, archiefStart, machtigingVan, naamNorm, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };

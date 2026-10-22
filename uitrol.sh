@@ -47,7 +47,8 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # pot-afschrift.js + mt940-lezer.js (wv787): App POT-afschriften, door bank-lezer.js geladen bij pot-afschrift (ontbreken ze, dan 503 op /app/pot-afschriften en pot_afschrift.aan=false in /health).
 # facturen-kern.js (wv797): kern van de Facturen-app (puur); nog door niets geladen, F1c/F2 koppelen hem (ontbreekt hij, dan geen Facturen).
 # facturen-bank.js (wv798): bankparsers, matching en signalen van de Facturen-app (puur, laadt facturen-kern.js + mt940-lezer.js); F2 koppelt hem.
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js"
+# pot-datahub.js (wv815): POT-posten naar Davids datahub, door server.js geladen in potDatahubRonde na de bank-ronde (ontbreekt hij, dan faalt alleen die stap: box-rij, de ronde loopt door).
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }
