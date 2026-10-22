@@ -103,7 +103,8 @@ const zetStand = (f) => { const s = stand(); f(s); fs.writeFileSync(STAND, JSON.
 const nulTellers = () => zetStand((s) => { s.tellers = { dag: '', per: {} }; });
 const ebHash = () => Object.keys(stand().rekeningen).find((h) => stand().rekeningen[h].bron !== 'bunq');
 const AL = Object.assign({ bunq_sleutel: BSLEUTEL }, G);
-const geenBankdata = (o) => !/1234\.56|777\.77|5000|95\.5|12\.34|NL\d\d|Bakker|Jansen|Gezamenlijk Naam|sess-|uid-|hash-1/.test(o);
+// ISO-tijden eerst weg: '12.34' trof de seconden van een tijdstempel (CI #166, flake; wv740)
+const geenBankdata = (o) => !/1234\.56|777\.77|5000|95\.5|12\.34|NL\d\d|Bakker|Jansen|Gezamenlijk Naam|sess-|uid-|hash-1/.test(String(o).replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, ''));
 
 ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function () {
   try {
