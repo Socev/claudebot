@@ -3870,6 +3870,69 @@ async function bewijs(o) {
       delete ctx.bankKind;
     }
 
+    // ── 20h. wv833: App Facturen (F2): /app/facturen/* door de echte poort → facturen.js; upload-overname, verse vingerafdruk, passieve kant ──
+    {
+      const FD = path.join(W, 'facturen');
+      ctx.process.env.FACTUREN_DIR = FD;
+      Object.assign(ctx, { serverPad: (naam, env, echt, proef) => env || proef, serverProefDeel: (d) => path.join(W, 'proef-' + d), ROL_KANT: 'olares', __dirname: process.cwd() });
+      const fa = src.indexOf('// ── Facturen-app, opslag (wv824'), fb = src.indexOf('// ── Bandjes (wv743', fa);
+      toets('20h Facturen-blok gevonden', fa > 0 && fb > fa);
+      vm.runInContext(src.slice(fa, fb) + '\n;globalThis.__fa = { facturenInfo, facturenOpen, facturenUploadNeem };', ctx, { filename: 'server.js#facturen' });
+      const FA = ctx.__fa;
+      r = await vraag('GET', '/app/facturen', undefined, { pot: pot() });
+      toets('20h GET /app/facturen zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      const fdbF = FA.facturenOpen();
+      const ZF = require(path.join(process.cwd(), 'test', 'facturen-zaad.js'));
+      ZF.zaai(fdbF, { vandaag: new Date().toISOString().slice(0, 10) });
+      r = await vraag('GET', '/app/facturen', undefined, { pot: P.jar });
+      toets('20h met sessie: 200, rol eigenaar, tellers', r.status === 200 && r.j.rol === 'eigenaar' && r.j.tellers.beoordelen > 0 && r.j.verzendmodus === 'concept', JSON.stringify(r.j).slice(0, 300));
+      const hf = FA.facturenInfo();
+      toets('20h /health.facturen: aan, schema 2, routes', hf.aan === true && hf.schema === 2 && hf.routes === true, JSON.stringify(hf));
+      // Bevestigen: één klik (geen vingerafdruk nodig)
+      const sPf = () => H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      sPf().vers_tot = 0;
+      const fb1 = fdbF.db.prepare("SELECT id FROM factuur WHERE status = 'te_beoordelen' AND entiteit IN ('tolgaarde','groenhouten') AND betaalwijze <> 'onbekend' AND iban_nieuw = 0 AND valuta = 'EUR' LIMIT 1").get();
+      r = await vraag('POST', '/app/facturen/bevestig', { id: fb1.id }, { pot: P.jar });
+      toets('20h bevestig: 200, in de wachtrij met opdracht, wie = david (apparaat)', r.status === 200 && r.j.status === 'in_wachtrij' && /^[0-9a-f]{16}$/.test(r.j.opdracht.id) &&
+        /^david \(/.test(fdbF.db.prepare('SELECT bevestigd_door AS w FROM factuur WHERE id = ?').get(fb1.id).w), JSON.stringify(r.j));
+      // Nagebeld: verse vingerafdruk van dít apparaat; verbruikt
+      const fn = fdbF.db.prepare("SELECT id FROM factuur WHERE status = 'te_beoordelen' AND iban_nieuw = 1 AND leverancier IS NOT NULL LIMIT 1").get();
+      sPf().vers_tot = 0;
+      r = await vraag('POST', '/app/facturen/nagebeld', { id: fn.id }, { pot: P.jar });
+      toets('20h nagebeld zonder verse vingerafdruk -> 403 vers_nodig', r.status === 403 && r.j.vers_nodig === true, JSON.stringify(r.j));
+      sPf().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/facturen/nagebeld', { id: fn.id }, { pot: P.jar });
+      toets('20h nagebeld met verse vingerafdruk -> 200 en de vingerafdruk is verbruikt', r.status === 200 && r.j.nagebeld === true && sPf().vers_tot === 0, JSON.stringify([r.status, r.j]));
+      // upload via /app/upload en overnemen; het klaarstaande bestand is daarna weg
+      const ubF = crypto.randomUUID();
+      const pdfF = ZF.pdf(['Leverancier A B.V.', 'Factuur PORT-1', 'synthetisch']);
+      r = await upl('/app/upload/' + ubF + '/1', pdfF, 'portaal.pdf', { pot: P.jar });
+      toets('20h upload klaargezet', r.status === 200, JSON.stringify(r.j));
+      const apF = sPf().apparaat;
+      const klaarF = () => vm.runInContext('appUploadLijst(appUploadMap({ id: ' + JSON.stringify(apF) + ' }, ' + JSON.stringify(ubF) + ')).length', ctx);
+      toets('20h upload staat klaar op de pod', klaarF() === 1, klaarF());
+      r = await vraag('POST', '/app/facturen/upload', { beurt: ubF, n: 1, soort: 'factuur' }, { pot: P.jar });
+      toets('20h facturen/upload neemt het bestand over (te_lezen) en ruimt het op', r.status === 200 && r.j.soort === 'pdf' && r.j.te_lezen === true && klaarF() === 0, JSON.stringify(r.j));
+      r = await vraag('POST', '/app/facturen/upload', { beurt: ubF, n: 1 }, { pot: P.jar });
+      toets('20h tweede keer: staat niet meer klaar -> 404', r.status === 404, r.status);
+      // documentinzage: base64 + auditrij in de facturendatabase; telt als invoer (slot op een vaste plek)
+      const docF = fdbF.db.prepare('SELECT document FROM factuur WHERE id = ?').get(fb1.id).document;
+      const auF = () => Number(fdbF.db.prepare("SELECT count(*) AS n FROM audit WHERE wat = 'document_inzage'").get().n);
+      const au0 = auF();
+      r = await vraag('GET', '/app/facturen/document/' + docF, undefined, { pot: P.jar });
+      toets('20h document: 200 met base64-PDF en een auditrij', r.status === 200 && Buffer.from(r.j.inhoud, 'base64').slice(0, 5).toString() === '%PDF-' && auF() === au0 + 1, JSON.stringify([r.status, auF(), au0]));
+      toets('20h documentinzage = invoerroute; adres en verzendmodus in APP_BEHEER_ROUTES', H.appInvoerRoute('GET /app/facturen/document/' + docF, false, {}, { soort: 'vast' }) === true &&
+        vm.runInContext("APP_BEHEER_ROUTES.has('POST /app/facturen/instellingen/adres') && APP_BEHEER_ROUTES.has('POST /app/facturen/instellingen/modus')", ctx) === true);
+      // passieve kant: schrijven 409, lezen mag
+      rolStub.primair = false;
+      r = await vraag('POST', '/app/facturen/geen-factuur', { id: fn.id }, { pot: P.jar });
+      const rl = await vraag('GET', '/app/facturen/lijst/beoordelen', undefined, { pot: P.jar });
+      rolStub.primair = true;
+      toets('20h passieve kant: schrijven -> 409, lezen 200', r.status === 409 && rl.status === 200, JSON.stringify([r.status, rl.status]));
+      r = await vraag('GET', '/app/facturen/factuur/ffffffffffffffff', undefined, { pot: P.jar });
+      toets('20h onbekende factuur -> 404; geen onverwachte fouten in logError', r.status === 404 && !logs.some((l) => /^facturen/.test(l)), JSON.stringify(logs.filter((l) => /facturen/.test(l))));
+    }
+
     // ── 21. wv201: app naast Telegram (fase 7, meetpunt 6): alleen tellingen per dag, nooit inhoud ──
     {
       const D = '2026-10-07', Z = (h, m) => new Date(Date.UTC(2026, 9, 6, 22 + h, m || 0)).toISOString();   // Z(0) = 7-10 00:00 Amsterdam

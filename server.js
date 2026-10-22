@@ -3674,6 +3674,23 @@ function handleRequest(req, res) {
     }); });
   }
 
+  // ── wv833: Facturen-ronde (n8n-tik; body-secret zoals /bank-ronde; geen andere invoer): nu de back-up van 02:00, de koerier volgt in F4 ──
+  if (req.method === 'POST' && req.url === '/facturen-ronde') {
+    return rolPoort(res, function () { readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
+          !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
+      const fdb = facturenRoutes ? facturenOpen() : null;
+      let st = 200, j;
+      if (!facturenRoutes) { st = 404; j = { ok: false, fout: 'Facturen zit niet in deze versie van de pod' }; }
+      else if (!fdb) { st = 409; j = { ok: false, fout: 'Facturen draait alleen op de primaire Olares-kant' }; }
+      else { try { j = facturenRoutes.ronde(fdb, { nu: Date.now() }); if (!j.ok) st = 500; } catch (e) { logError('facturen-ronde', e); st = 500; j = { ok: false, fout: 'facturen-ronde faalde in de pod' }; } }
+      reqLogExtra(res, { facturen_ronde: j && j.ok ? 'backup' : 'fout' });
+      res.writeHead(st, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(j));
+    }); });
+  }
+
   // ── wv820: wekelijkse Harvester-ronde (n8n AI - Harvester-ronde; body-secret zoals /run; geen andere invoer) ──
   if (req.method === 'POST' && (req.url === '/harvester-ronde' || req.url === '/harvester-ronde/uitkomst')) {
     return rolPoort(res, function () { readBody(req, function (d) {
@@ -4601,7 +4618,9 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/modellen',    // wv138: een runtimewissel raakt alle workflows; nooit vanaf een werk-pc
   'POST /app/sleutels/vervang',    // wv157: sleutels alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot
   'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
-  'POST /app/agenda']);    // wv315: agenda-✅/↩️ alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot (§ 4.13)
+  'POST /app/agenda',      // wv315 (zie hieronder)
+  'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus']);    // wv833: boekhoud-/afschriftadres en verzendmodus alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk)
+// wv315: agenda-✅/↩️ alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot (§ 4.13)
 // wv464 (David 12-10: "Jij mag mij nooit blokkeren … Die haal je desnoods later maar uit mijn text!"): op een vaste plek gaat
 // een bericht met een BSN-achtig getal gewoon door; het getal wordt vóór opslag en doorsturen vervangen (§ 4.11).
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
@@ -5756,7 +5775,7 @@ async function appSlot(a) {
 // Valt deze route onder het slot? Alles wat schrijft (POST) behalve APP_SLOT_VRIJ, plus downloaden (op een vaste-plek-pc landt
 // een bestand in Downloads; Fable § 8g K6). Zichzelf intrekken mag altijd: dat maakt alleen dichter.
 function appInvoerRoute(route, upload, d, a) {
-  if (upload || route.indexOf('GET /app/bestand/') === 0) return true;
+  if (upload || route.indexOf('GET /app/bestand/') === 0 || route.indexOf('GET /app/facturen/document/') === 0) return true;   // wv833: facturen-stuk inzien = als downloaden
   if (route.indexOf('POST ') !== 0 || APP_SLOT_VRIJ.has(route)) return false;
   if (route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id) return false;
   if (route === 'POST /app/concept' && !String(d.tekst == null ? '' : d.tekst).trim()) return false;   // wv159: concept wissen mag altijd
@@ -10540,7 +10559,7 @@ function handleApp(req, res) {
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en het
         // BSN-masker (§ 4.11; wv464: maskeren, nooit weigeren). Daarna verder met slotKlaar = true (apparaat en sessie opnieuw gecontroleerd).
         if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
-          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
+          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
@@ -10613,6 +10632,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/push/proef') return appPushProef(req, res, a);
         if (route.indexOf(' /app/studio/') > 0) return typeof appStudio === 'function' ? appStudio(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'studio');   // wv707
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
+        if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
         if (route === 'GET /app/pot-afschriften') return appPotAfschriften(req, res, a);       // wv787: App POT-afschriften (alleen David, geen vaste plek)
@@ -13008,8 +13028,8 @@ async function appStudio(req, res, a, s, d, route) {
 
 // ── Facturen-app, opslag (wv824, F1c, 22-10-2026; bouwplan "Facturen-app - bouwplan (App, 22-10-2026)" § 4.1, § 4.2 en § 8) ──
 // facturen-db.js houdt /opt/data/facturen/facturen.sqlite bij (map 700, bestand 600, WAL; schema als migraties, CHECK's en triggers die
-// Privé nooit naar de boekhouder laten gaan). Routes /app/facturen/* en de 02:00-tik (back-up) volgen in F2; tot dan alleen
-// /health.facturen = { aan, schema }. De database wordt pas geopend (en zo nodig aangemaakt) op de primaire kant: de VPS krijgt er geen
+// Privé nooit naar de boekhouder laten gaan). Routes /app/facturen/* en de 02:00-tik (back-up): facturen.js (wv833, F2, hieronder);
+// /health.facturen = { aan, schema, routes }. De database wordt pas geopend (en zo nodig aangemaakt) op de primaire kant: de VPS krijgt er geen
 // (bouwplan § 8). Ontbreekt facturen-db.js in de release (terugrol), dan aan=false en draait de rest door.
 const FACTUREN_DIR = serverPad('facturen', process.env.FACTUREN_DIR, '/opt/data/facturen', serverProefDeel('facturen'));
 const facturenMod = (function () {
@@ -13031,11 +13051,60 @@ function facturenOpen() {
 function facturenInfo() {
   if (facturenMod === null) return { aan: false };
   if (facturenMod === false) return { aan: false, fout: true };
+  // wv833: zonder facturen.js (terugrol) geen routes: aan=false, de opslag blijft wel gemeld
+  const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return facturenMod.health(f);
-    return { aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined };
-  } catch (e) { return { aan: true, fout: true }; }
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true } : { aan: false, opslag: true, routes: false });
+    return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
+  } catch (e) { return { aan: routes, fout: true }; }
+}
+// ── Facturen-app, routes (wv833, F2, 22-10-2026; bouwplan § 4.3 en § 7) ──
+// /app/facturen/* na de app-poort → facturen.js (rollen + entiteitfilter, Bevestigen/Terugdraaien/Nagebeld, uploads, bankcontrole,
+// signalen, documentinzage). Hier alleen de koppeling: rol eigenaar = Davids app-sessie, verse vingerafdruk (appVersOk) voor Nagebeld en
+// de beheerroutes (adres, verzendmodus; ook in APP_BEHEER_ROUTES), documentinzage telt als invoer (appInvoerRoute), uploads via de
+// bestaande /app/upload/<beurt>/<n> en dan POST /app/facturen/upload {beurt, n, soort} (facturenUploadNeem neemt het klaarstaande
+// bestand over en ruimt het op, ook bij een weigering). Schrijven alleen bij rolPrimair(); de database opent alleen op de Olares-kant.
+// POST /facturen-ronde (n8n-tik, body-secret zoals /bank-ronde): de back-up van 02:00 (de koerier volgt in F4). Na de bank-ronde leest
+// Facturen de bankluis-rekeningen read-only (facturenNaBankRonde). Ontbreekt facturen.js in de release: 404 en facturen.aan=false.
+const facturenRoutes = (function () {
+  const p = path.join(__dirname, 'facturen.js');
+  if (!facturenMod || !fs.existsSync(p)) return null;
+  try { return require(p).maak({ fout: logError }); } catch (e) { logError('facturen', e); return null; }
+})();
+const FACTUREN_BANKLUIS = path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite');
+// Het klaarstaande bestand van dít apparaat en deze beurt (zelfde map als appUpload): bytes + naam, en weg() ruimt het op.
+function facturenUploadNeem(a, beurt, n) {
+  const dir = appUploadMap(a, beurt);
+  const x = appUploadLijst(dir).find(function (b) { return b.n === n; });
+  if (!x) return null;
+  const p = path.join(dir, String(n));
+  let bytes;
+  try { if (!fs.lstatSync(p).isFile()) return null; bytes = fs.readFileSync(p); } catch (e) { return null; }
+  return { naam: x.naam, bytes: bytes, weg: function () {
+    try { fs.rmSync(p, { force: true }); fs.rmSync(p + '.json', { force: true }); if (!fs.readdirSync(dir).length) fs.rmdirSync(dir); } catch (e) { logError('facturen-upload', e); }
+  } };
+}
+async function appFacturen(req, res, a, s, d, route) {
+  if (!facturenRoutes) return appWeiger(res, 404, 'Facturen zit niet in deze versie van de pod', 'facturen ontbreekt');
+  const fdb = facturenOpen();
+  const rol = facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' });
+  const pad = route.slice(route.indexOf(' ') + 1);
+  const r = facturenRoutes.app(fdb, { methode: req.method, pad: pad, d: d || {}, rol: rol, primair: rolPrimair(),
+    versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; },
+    uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS });
+  if (req.method === 'GET' && pad.indexOf('/app/facturen/document/') !== 0 && r.status === 200) res._app.stil = true;
+  res._app.reden = 'facturen ' + (r.reden || pad.slice('/app/facturen'.length) || '/');
+  return appStuur(res, r.status, r.j);
+}
+// Na de bank-ronde: bankluis-rekeningen van Facturen read-only inlezen + bankcontrole (alleen aantallen terug; zonder bankluis-rekening niets).
+function facturenNaBankRonde() {
+  if (!facturenRoutes) return null;
+  const fdb = facturenOpen();
+  if (!fdb) return null;
+  const r = facturenRoutes.bankluisRonde(fdb, { nu: Date.now(), pad: FACTUREN_BANKLUIS });
+  if (!r.rekeningen) return null;
+  return { ok: r.ok, nieuw: r.nieuw, vervangen: r.vervangen, signalen: r.controle ? r.controle.signalen : undefined, fouten: (r.fouten || []).length || undefined };
 }
 
 // ── Bandjes (wv743, 22-10-2026; bouwplan "Bandjes - mini-app voor telefoonbandjes (bouwplan 22-10-2026)" § 5) ──
@@ -14615,6 +14684,11 @@ async function bankRonde() {
     const pd = await potDatahubRonde();
     if (pd.gedaan || pd.fout) uit.pot_datahub = { telling: pd.telling, fout: pd.fout };
   } catch (e) { logError('pot-datahub', e); uit.pot_datahub = { fout: 'pot-datahub-ronde faalde in de pod' }; }
+  // wv833: Facturen leest de bankluis-rekeningen read-only (alleen booked, vervangen_door-controle) + bankcontrole; alleen aantallen naar n8n
+  if (uit.ok) try {
+    const fr = facturenNaBankRonde();
+    if (fr) uit.facturen = fr;
+  } catch (e) { logError('facturen-bankluis', e); uit.facturen = { fout: 'facturen-bankluis faalde in de pod' }; }
   // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
   (r.box || []).forEach(function (m) {
     const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')

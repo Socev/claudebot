@@ -618,8 +618,13 @@ test('server.js: /health.facturen = { aan, schema }; database alleen op de prima
   // passieve kant: module er wel, maar geen database aanmaken
   const rol = { waarde: false };
   const b = draai(ROOT, rol);
-  assert.deepEqual(JSON.parse(JSON.stringify(b.r.facturenInfo())), { aan: true, schema: null, passief: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(b.r.facturenInfo())), { aan: true, schema: null, passief: true, routes: true });
   assert.equal(fs.existsSync(b.dir), false, 'passief maakt geen database');
+  // wv833: opslag wel, facturen.js (routes) niet in de release → aan=false, opslag=true
+  const half = fs.mkdtempSync(path.join(WEG, 'zonder-routes-'));
+  for (const f of ['facturen-db.js', 'facturen-kern.js', 'facturen-bank.js', 'mt940-lezer.js']) fs.copyFileSync(path.join(ROOT, f), path.join(half, f));
+  const hr = draai(half, { waarde: false });
+  assert.deepEqual(JSON.parse(JSON.stringify(hr.r.facturenInfo())), { aan: false, schema: null, passief: true, opslag: true, routes: false });
   // primair: database aangemaakt (700/600), schema van de code
   rol.waarde = true;
   const h = b.r.facturenInfo();
@@ -633,7 +638,7 @@ test('server.js: /health.facturen = { aan, schema }; database alleen op de prima
   assert.equal(b.r.facturenInfo().schema, D.SCHEMA_VERSIE);
   // VPS-kant die bij een uitwijk primair is: nooit een database (bouwplan § 8)
   const v = draai(ROOT, { waarde: true, kant: 'vps' });
-  assert.deepEqual(JSON.parse(JSON.stringify(v.r.facturenInfo())), { aan: true, schema: null, passief: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(v.r.facturenInfo())), { aan: true, schema: null, passief: true, routes: true });
   assert.equal(fs.existsSync(v.dir), false, 'VPS maakt geen database');
   // openen mislukt (map is een bestand): fout gemeld, en binnen een minuut geen nieuwe poging
   const c = draai(ROOT, { waarde: true });
