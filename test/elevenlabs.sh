@@ -37,6 +37,7 @@ const router = http.createServer((req, res) => {
     if (req.method === 'POST' && m) {
       R.posts.push({ voice: m[1], formaat: m[2], body: JSON.parse(body || '{}'), kop: req.headers });
       if (R.modus === '401') { res.writeHead(401, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ detail: { status: 'missing_permissions', message: 'The API key ' + SLEUTEL + ' is missing the permission text_to_speech' } })); }
+      if (R.modus === '502') { res.writeHead(502, { 'Content-Type': 'text/plain' }); return res.end('bad gateway'); }
       if (R.modus === '422') { res.writeHead(422, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'model does not declare POST', code: 'audio_operation_not_supported' } })); }
       if (R.modus === 'breek') { res.writeHead(200, { 'Content-Type': 'audio/pcm', 'character-cost': R.credits }); res.write(PCM.subarray(0, 1000)); return setTimeout(() => req.socket.destroy(), 30); }
       if (R.modus === 'hang') { R.hang = res; res.writeHead(200, { 'Content-Type': 'audio/pcm', 'character-cost': R.credits }); res.write(PCM.subarray(0, 1000)); return; }
@@ -161,6 +162,11 @@ const router = http.createServer((req, res) => {
   await wachtKlaar(r.taak.id);
   toets('7 422 van Router: mislukt, vrijgegeven', S.taak(r.taak.id).status === 'mislukt' && verbruikRegels().filter((x) => x.taak === r.taak.id).pop().soort === 'vrijgegeven');
 
+  R.modus = '502'; vers = true;
+  r = await S.maak({ flow: 'bandje-elevenlabs', velden: { tekst: GEHEIM, stem: ROOS }, beurt_id: nieuweBeurt() }, ctx);
+  await wachtKlaar(r.taak.id);
+  toets('7 502 van Router: mislukt, geschat (telt mee; Fable #2)', S.taak(r.taak.id).status === 'mislukt' && verbruikRegels().filter((x) => x.taak === r.taak.id).pop().soort === 'geschat');
+
   // 8. verbinding breekt midden in het geluid: geschat (telt mee)
   R.modus = 'breek'; vers = true; const voor8 = S.teller().plafond.elevenlabs.besteed_eur;
   r = await S.maak({ flow: 'bandje-elevenlabs', velden: { tekst: GEHEIM, stem: ROOS }, beurt_id: nieuweBeurt() }, ctx);
@@ -264,14 +270,26 @@ const router = http.createServer((req, res) => {
     toets('13 model uit de invoer gaat voor (flash)', (R.posts[p15] || {}).body && R.posts[p15].body.model_id === 'eleven_flash_v2_5');
     vers = true;
     m = await rt.app('POST /app/bandjes/maak', { praktijk: 'groenhouten', bandje: gh.id, versie: gh.versie, tekst_hash: gh.tekst_hash, model: 'eleven_bestaat_niet', beurt_id: nieuweBeurt() }, ctx);
-    toets('13 onbekend model uit de invoer: valt terug op de praktijkinstelling (geen fout)', m.status === 200);
-    await wachtKlaar(m.j.taak.id);
+    toets('13 onbekend model uit de invoer: 400, geen stille terugval (Fable #4)', m.status === 400 && /model/.test(m.j.fout), m);
     fs.writeFileSync(path.join(DIR, 'studio-limieten.json'), JSON.stringify({ elevenlabs: 0 }));
     vers = true;
     m = await rt.app('POST /app/bandjes/maak', { praktijk: 'groenhouten', bandje: gh.id, versie: gh.versie, tekst_hash: gh.tekst_hash, beurt_id: nieuweBeurt() }, ctx);
     toets('13 plafond bereikt: 409 met plafond: true via bandjes', m.status === 409 && m.j.plafond === true, m);
     const ins = await rt.app('POST /app/bandjes/instellingen', { praktijk: 'tolgaarde', praktijkstem: 'elevenlabs:' + ROOS }, ctx);
     toets('13 praktijkstem Roos nu toegestaan via instellingen', ins.status === 200, ins);
+    fs.writeFileSync(path.join(DIR, 'studio-limieten.json'), JSON.stringify({ elevenlabs: 10 }));
+    // Fable #1: bandje met een eigen (betaalde) stem, David kiest expliciet "praktijkstem" (hier een Piper-stem die de toets niet kent)
+    const ghPad = path.join(VAULT, B.PRAKTIJKEN.groenhouten.pad);
+    fs.writeFileSync(ghPad, fs.readFileSync(ghPad, 'utf8').replace('- praktijkstem: elevenlabs:' + ROOS, '- praktijkstem: piper:nl_NL-ronnie-medium').replace('- stem: praktijkstem', '- stem: elevenlabs:' + ROOS));
+    const gh2 = (await rt.app('GET /app/bandjes', {}, ctx)).j.praktijken.find((x) => x.id === 'groenhouten').bandjes[0];
+    toets('13 (voorwaarde) bandje heeft de eigen stem Roos', gh2 && gh2.stem === 'elevenlabs:' + ROOS, gh2 && gh2.stem);
+    vers = true; const p16 = R.posts.length;
+    m = await rt.app('POST /app/bandjes/maak', { praktijk: 'groenhouten', bandje: gh2.id, versie: gh2.versie, tekst_hash: gh2.tekst_hash, stem: 'praktijkstem', beurt_id: nieuweBeurt() }, ctx);
+    toets('13 expliciet "praktijkstem" gaat vóór de bewaarde ElevenLabs-stem: geen ElevenLabs-aanroep (Fable #1)', m.status !== 200 && R.posts.length === p16 && /stem/.test(m.j.fout || ''), m);
+    vers = true;
+    m = await rt.app('POST /app/bandjes/maak', { praktijk: 'groenhouten', bandje: gh2.id, versie: gh2.versie, tekst_hash: gh2.tekst_hash, beurt_id: nieuweBeurt() }, ctx);
+    toets('13 zonder stem in de invoer: de bewaarde stem van het bandje (Roos)', m.status === 200, m);
+    if (m.status === 200) await wachtKlaar(m.j.taak.id);
   }
   toets('13 geen onverwachte fouten', fouts.length === 0, fouts);
 

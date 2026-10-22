@@ -212,7 +212,7 @@ function maak(deps) {
   function bewaarTaken() {
     const grens = klok() - GRENS.taken_bewaar_ms;
     st.taken = st.taken.filter(function (t) { return Date.parse(t.gemaakt) > grens; }).slice(-300);
-    try { schrijfJson(TAKEN, { versie: 1, taken: st.taken }); } catch (e) { fout('studio-taken', e); }
+    try { schrijfJson(TAKEN, { versie: 1, taken: st.taken }); return true; } catch (e) { fout('studio-taken', e); return false; }
   }
   function audit(o) {
     try { mkdir(DIR); fs.appendFileSync(AUDIT, JSON.stringify(Object.assign({ t: new Date(klok()).toISOString() }, o)) + '\n', { mode: 0o600 }); }
@@ -619,7 +619,8 @@ function maak(deps) {
     voer(t, ctl).then(function (r) { return r; }, function (e) { return { fout: foutTekst(e && e.message || e) }; }).then(function (r) { try {
       t.eind = new Date(klok()).toISOString();
       t.duur_s = Math.round((Date.parse(t.eind) - Date.parse(t.start)) / 1000);
-      if (ctl.gestopt) { t.status = 'gestopt'; t.reden = r && r.noot ? r.noot : 'gestopt op je verzoek'; }
+      // wv782: geleverd en betaald = afmaken en bewaren, ook als Stop daarna kwam (Fable wv782 #5a)
+      if (ctl.gestopt && !(r && r.ok && t.geleverd)) { t.status = 'gestopt'; t.reden = r && r.noot ? r.noot : 'gestopt op je verzoek'; }
       else if (r && r.ok) { t.status = 'klaar'; t.procent = 100; }
       else { t.status = 'mislukt'; t.reden = (r && r.fout) || 'onbekende fout'; }
       t.fase = null;
@@ -657,7 +658,7 @@ function maak(deps) {
     else if (f.motor === 'comfyui') r = await motorComfy(t, f, out, ctl);
     else if (f.motor === 'elevenlabs') r = await motorEleven(t, f, out, ctl);
     else return { fout: 'onbekende motor' };
-    if (!r || !r.ok || ctl.gestopt) return r;
+    if (!r || !r.ok || (ctl.gestopt && !t.geleverd)) return r;
     // wv743: telefoonversies (8 kHz PCM + µ-law) naast het origineel; mislukt het, dan het origineel toch bewaren met een noot
     if (f.telefoonversie) {
       t.fase = 'telefoonversie maken';
@@ -711,7 +712,9 @@ function maak(deps) {
     if (ctl.gestopt) return { fout: 'gestopt' };
     t.fase = 'inspreken bij ElevenLabs'; t.procent = null;
     // eerst vastleggen dát er aangeroepen wordt (een herstart midden in de aanroep laat de reservering dan als 'geschat' staan)
-    t.aangeroepen = true; bewaarTaken();
+    // lukt dat schrijven niet, dan niet aanroepen (Fable wv782 #6: anders telt een herstart de reservering als vrijgegeven)
+    t.aangeroepen = true;
+    if (!bewaarTaken()) { t.aangeroepen = false; return { fout: 'de taak kon niet bewaard worden (schijf?); er is niets aangeroepen' }; }
     const ac = new AbortController();
     ctl.stop = function () { try { ac.abort(); } catch (e) {} };
     let r;
@@ -728,8 +731,9 @@ function maak(deps) {
     const rid = r.headers.get('request-id');
     t.meting = { model: model, formaat: ELEVEN.formaat, http: r.status, request_id: rid && /^[A-Za-z0-9_-]{4,64}$/.test(rid) ? rid : null };
     if (!r.ok) {
-      // een HTTP-fout betekent: niets gemaakt, ElevenLabs rekent het niet (gemeten 22-10: validatiefout vóór het inspreken)
-      t.geweigerd = true;
+      // een 3xx/4xx betekent: niets gemaakt, ElevenLabs rekent het niet (gemeten 22-10: validatiefout vóór het inspreken). Een 5xx kan
+      // ná het genereren komen (Router-proxy valt om): dan geschat, telt mee (Fable wv782 #2).
+      t.geweigerd = r.status < 500;
       const j = await r.json().catch(function () { return null; });
       const d = j && (j.detail || j.error) || {};
       const melding = typeof d === 'string' ? d : (d.message || d.code || d.status || '');

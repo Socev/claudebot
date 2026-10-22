@@ -640,7 +640,8 @@ function routes(deps) {
     if (!b) return { status: 404, j: { ok: false, fout: 'dit bandje staat niet in het register' } };
     if (Number(d.versie) !== b.versie || String(d.tekst_hash || '') !== b.tekst_hash) return { status: 409, j: { ok: false, fout: 'dit bandje is intussen gewijzigd; herlaad', gewijzigd: true } };
     if (b.onbekend || !b.tekst) return { status: 400, j: { ok: false, fout: 'bewaar eerst een tekst' } };
-    const stem = d.stem && d.stem !== 'praktijkstem' ? String(d.stem) : (b.stem && b.stem !== 'praktijkstem' ? b.stem : praktijkstem(l.instellingen));
+    // een expliciete keuze "praktijkstem" gaat vóór de bewaarde stem van het bandje (Fable wv782 #1: anders een betaalde stem die David niet koos)
+    const stem = d.stem ? (d.stem === 'praktijkstem' ? praktijkstem(l.instellingen) : String(d.stem)) : (b.stem && b.stem !== 'praktijkstem' ? b.stem : praktijkstem(l.instellingen));
     const s = lijst.find(function (x) { return x.id === stem; });
     if (!s) return { status: 400, j: { ok: false, fout: 'onbekende stem' } };
     if (!s.beschikbaar || !s.flow) return { status: 409, j: { ok: false, fout: 'deze stem kan nu niet: ' + (s.reden || 'niet beschikbaar') } };
@@ -648,6 +649,8 @@ function routes(deps) {
     let model = null;
     if (s.motor === 'elevenlabs') {
       // wv782: voice-id uit de stem-id; model uit de witte lijst van Studio (die toetst het nogmaals)
+      // een opgegeven maar onbekend model = 400, geen stille terugval (Fable wv782 #4: de app toonde dan een andere prijs)
+      if (d.model != null && d.model !== '' && !(s.modellen || []).some(function (o) { return o.waarde === String(d.model); })) return { status: 400, j: { ok: false, fout: 'onbekend model' } };
       model = modelVoor(s, d.model, l.instellingen);
       if (!model) return { status: 400, j: { ok: false, fout: 'onbekend model' } };
       velden.stem = ELEVEN_ID_RE.exec(stem)[1];
