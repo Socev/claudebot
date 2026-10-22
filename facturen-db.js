@@ -422,8 +422,9 @@ WHEN NEW.id IS NOT OLD.id OR NEW.soort IS NOT OLD.soort OR NEW.factuur IS NOT OL
   OR NEW.vingerafdruk IS NOT OLD.vingerafdruk OR NEW.idempotentiesleutel IS NOT OLD.idempotentiesleutel OR NEW.aangemaakt_op IS NOT OLD.aangemaakt_op
 BEGIN SELECT RAISE(ABORT, 'opdracht_onveranderlijk: entiteit, doel, bijlagen en vingerafdruk liggen vast; maak een nieuwe opdracht'); END;
 -- levensloop: wat dood is (teruggedraaid, geweigerd, gelukt, drie keer mislukt) leeft niet meer op; poging gaat nooit omlaag; terug naar
--- wacht bestaat niet. Wordt een opdracht (weer) verzendbaar (wacht, opgehaald, mislukt met poging < 3), dan opnieuw toetsen tegen de verse
--- factuur of het verse afschrift: zelfde entiteit, niet prive, nog onderweg, en het doeladres is nog het adres uit de entiteitentabel.
+-- wacht bestaat niet. Gaat een opdracht naar wacht of opgehaald (de enige weg naar de koerier), dan opnieuw toetsen tegen de verse factuur
+-- of het verse afschrift: zelfde entiteit, niet prive, nog onderweg, en het doeladres is nog het adres uit de entiteitentabel. Een resultaat
+-- vastleggen (mislukt, geweigerd, gelukt) kan altijd; een nieuwe poging loopt weer via opgehaald (natoets wv824).
 -- (Diffreview wv824 #1: een oude opdracht mocht niet "herleven" nadat de factuur Privé werd.)
 CREATE TRIGGER opdracht_levensloop BEFORE UPDATE OF status, poging ON opdracht
 WHEN NEW.status IS NOT OLD.status OR NEW.poging IS NOT OLD.poging
@@ -434,16 +435,16 @@ BEGIN
   SELECT RAISE(ABORT, 'opdracht_terug: alleen een wachtende opdracht kan terug') WHERE NEW.status = 'teruggedraaid' AND OLD.status <> 'wacht';
   SELECT RAISE(ABORT, 'opdracht_wacht: een opdracht gaat nooit terug naar wacht') WHERE NEW.status = 'wacht' AND OLD.status <> 'wacht';
   SELECT RAISE(ABORT, 'opdracht_prive: privé gaat nooit naar de boekhouder')
-    WHERE (NEW.status IN ('wacht','opgehaald') OR (NEW.status = 'mislukt' AND NEW.poging < 3))
+    WHERE NEW.status IN ('wacht','opgehaald')
       AND (NEW.entiteit = 'prive' OR (NEW.soort = 'boekhouder_factuur' AND (SELECT entiteit FROM factuur WHERE id = NEW.factuur) IS 'prive'));
   SELECT RAISE(ABORT, 'opdracht_entiteit: de factuur is niet meer van deze entiteit of staat niet meer onderweg')
-    WHERE (NEW.status IN ('wacht','opgehaald') OR (NEW.status = 'mislukt' AND NEW.poging < 3)) AND NEW.soort = 'boekhouder_factuur'
+    WHERE NEW.status IN ('wacht','opgehaald') AND NEW.soort = 'boekhouder_factuur'
       AND NOT EXISTS (SELECT 1 FROM factuur f WHERE f.id = NEW.factuur AND f.entiteit IS NEW.entiteit AND f.status IN ('in_wachtrij','wordt_verstuurd'));
   SELECT RAISE(ABORT, 'opdracht_entiteit: het afschrift is niet meer van deze entiteit of staat niet meer in de wachtrij')
-    WHERE (NEW.status IN ('wacht','opgehaald') OR (NEW.status = 'mislukt' AND NEW.poging < 3)) AND NEW.soort = 'boekhouder_afschrift'
+    WHERE NEW.status IN ('wacht','opgehaald') AND NEW.soort = 'boekhouder_afschrift'
       AND NOT EXISTS (SELECT 1 FROM pot_afschrift a JOIN rekening r ON r.id = a.rekening WHERE a.id = NEW.afschrift AND r.entiteit IS NEW.entiteit AND a.status = 'in_wachtrij');
   SELECT RAISE(ABORT, 'opdracht_doeladres: het adres van de entiteit is gewijzigd')
-    WHERE (NEW.status IN ('wacht','opgehaald') OR (NEW.status = 'mislukt' AND NEW.poging < 3))
+    WHERE NEW.status IN ('wacht','opgehaald')
       AND NEW.doeladres IS NOT (SELECT CASE NEW.soort WHEN 'boekhouder_factuur' THEN boekhoud_doel ELSE afschrift_doel END FROM entiteit WHERE sleutel = NEW.entiteit);
 END;
 -- INSERT OR REPLACE verwijdert en voegt opnieuw toe zonder UPDATE-trigger; met recursive_triggers (open() zet hem aan) vangen deze hem
@@ -736,12 +737,14 @@ function claimOpdrachten(fdb, nu, o) {
         fdb.db.exec('RELEASE claim');
       } catch (e) {
         fdb.db.exec('ROLLBACK TO claim'); fdb.db.exec('RELEASE claim');
+        uit.fouten.push({ id: op.id, fout: String(e && e.message || e).slice(0, 200) });
+        // alleen een fout in de gegevens van deze rij weigert de opdracht; een fout in de code laat hem staan voor de volgende ronde
+        if (e instanceof TypeError || e instanceof ReferenceError || e instanceof RangeError || e instanceof SyntaxError) continue;
         fdb.db.exec('SAVEPOINT weiger');
         try {
           if (weigerOpdracht(fdb, op, 'fout bij claimen: ' + String(e && e.message || e).slice(0, 200), tijd, wie)) uit.geweigerd.push({ id: op.id, reden: 'fout' });
           fdb.db.exec('RELEASE weiger');
         } catch (e2) { fdb.db.exec('ROLLBACK TO weiger'); fdb.db.exec('RELEASE weiger'); }
-        uit.fouten.push({ id: op.id, fout: String(e && e.message || e).slice(0, 200) });
       }
     }
     return uit;

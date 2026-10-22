@@ -799,3 +799,16 @@ test('review #7: ook via UPDATE kan een praktijkmanager niet aan Privé', () => 
   gooit(() => f.db.prepare("INSERT OR REPLACE INTO gebruiker_entiteit (gebruiker, entiteit) VALUES ('1111111111111111', 'prive')").run(), /gebruiker_prive/);
   D.sluit(f);
 });
+
+test('natoets: de koerier kan een mislukking altijd vastleggen, ook na een adreswijziging; de nieuwe poging wordt dan geweigerd', () => {
+  const f = basis();
+  const t = inWachtrij(f);
+  D.claimOpdrachten(f, NU);
+  f.db.prepare("UPDATE entiteit SET boekhoud_doel = 'nieuw-adres@acta.invalid' WHERE sleutel = 'tolgaarde'").run();
+  f.db.prepare("UPDATE opdracht SET status = 'mislukt', fout = 'HTTP 502' WHERE id = ?").run(t.opdracht);
+  const c = D.claimOpdrachten(f, NU + 60000);
+  assert.equal(c.opdrachten.length, 0);
+  assert.deepEqual(c.geweigerd.map((x) => x.id), [t.opdracht]);
+  assert.equal(f.db.prepare('SELECT status FROM factuur WHERE id = ?').get(t.id).status, 'verzending_mislukt');
+  D.sluit(f);
+});
