@@ -35,6 +35,8 @@
  *   node bank-lezer.js maand [--maand JJJJ-MM] [--rekening r] [--eigenaar e]     per categorie in/uit, intern apart
  *   node bank-lezer.js intern [--van] [--tot] [--rekening r] [--max N]           overboekingen tussen eigen rekeningen
  *   node bank-lezer.js abonnementen [--alle]
+ *   node bank-lezer.js vaste-lasten [--maand JJJJ-MM] [--rekening r]   vaste lasten per maand + verschil met de vorige stand + tabel_md (wv764)
+ *   node bank-lezer.js stroom [--maand JJJJ-MM] [--rekening r]         overboekingen per rekeningpaar (vast/los), buffer en dekking (wv764)
  *   node bank-lezer.js corrigeer --nr N [--categorie c] [--subcategorie s] [--eigenaar e] [--type t] [--regel nee]
  *   node bank-lezer.js corrigeer --rekening r --eigenaar e                     eigenaar van een hele rekening
  *   node bank-lezer.js corrigeer --rekening r --categorie c [--subcategorie s] externe rekening (eigenaar extern, wv709): categorie
@@ -1116,6 +1118,9 @@ const opdrachten = {
     if (geheim.ronde === true) P.metaZet(x.a, 'paypal_ronde_op', new Date().toISOString());
     return { ok: true, bewaard: b, koppeling: k || undefined, stand: P.stand(x.a) };
   },
+  // wv764 (idee 16 fase B): vaste lasten en geldstroom per maand, alleen het archief
+  async 'vaste-lasten'(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.vasteLasten(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^(maand|rekening):/.test(e.message)) throw new Weigering(e.message); throw e; } },
+  async stroom(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.stroom(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^(maand|rekening):/.test(e.message)) throw new Weigering(e.message); throw e; } },
   async archief() { const x = archiefKlaar(); x.A.verrijkAlsVuil(x.a); return Object.assign({ ok: true }, x.A.stand(x.a)); },
   async verrijk() { const x = archiefKlaar(); return Object.assign({ ok: true }, x.A.verrijk(x.a)); },
   async corrigeer(a) {

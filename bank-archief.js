@@ -38,6 +38,14 @@ const LET_OP_EXTERN = 'externe rekening: staat op Davids naam maar is van een an
 const OORDEEL = ['type', 'categorie', 'subcategorie', 'ai_omschrijving', 'eigenaar'];
 const ZICHTBAAR = "t.status IN ('booked', 'pending')";
 const LET_OP_GEZAMENLIJK = 'gezamenlijke rekening: posten van de mede-eigenaar staan erin; alleen voor David, nooit naar buiten';
+// wv764: kolommen van een herkende reeks (ontwerp privé-financiën § 4). sleutel_soort: machtiging | naam | omschrijving (+ |cluster).
+const ABO_KOLOMMEN = [['sleutel_soort', 'TEXT'], ['groep', 'TEXT'], ['soort', 'TEXT'], ['wijze', 'TEXT'], ['per_maand', 'REAL'], ['n_per_maand', 'INTEGER'],
+  ['termijnen', 'INTEGER'], ['termijnen_bron', 'TEXT'], ['bedrag_vorig', 'REAL'], ['gewijzigd_op', 'TEXT'], ['verwacht_volgende', 'TEXT'], ['dag', 'INTEGER'],
+  ['extra', 'INTEGER'], ['afrekening', 'INTEGER'], ['bedrag_min', 'REAL'], ['bedrag_max', 'REAL'], ['categorie', 'TEXT'], ['subcategorie', 'TEXT'],
+  ['laatste_afwijkend', 'REAL'], ['laatste_afwijkend_op', 'TEXT']];
+// Vaste last (niet opzegbaar) of abonnement (opzegbaar), naar de categorie van de laatste post; David stuurt via de categorie (corrigeer).
+const VAST_CAT = ['wonen', 'verzekeringen', 'belastingen', 'bankkosten'];
+const GEEN_REEKS_CAT = ['boodschappen', 'horeca en uit eten', 'contant geld', 'vakantie en reizen', 'kleding en persoonlijk'];
 
 function nuIso() { return new Date().toISOString(); }
 function vandaag() { return new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
@@ -113,6 +121,18 @@ function open(bankDir) {
   if (!v) db.prepare("INSERT INTO meta (sleutel, waarde) VALUES ('schema', ?)").run(String(SCHEMA_VERSIE));
   // Een nieuwer schema dan deze code kent (terugrollen): niet schrijven met oude code. Latere versies migreren hier (ALTER TABLE).
   else if (Number(v.waarde) > SCHEMA_VERSIE) { db.close(); throw new Error('archief heeft schema ' + v.waarde + ', deze code kent ' + SCHEMA_VERSIE); }
+  // wv764 (idee 16 fase B): extra kolommen voor de vaste-lastenherkenning. Alleen toevoegen, geen schemaversie omhoog: oudere code
+  // (terugrollen) leest en schrijft de tabel gewoon door; de rijen die zij schrijft (sleutel_soort leeg) ruimt de nieuwe herkenning op.
+  // Onder BEGIN IMMEDIATE met hercontrole: twee processen die tegelijk voor het eerst openen (bank-ronde + leesopdracht) botsten
+  // anders op 'database is locked' of 'duplicate column' (Fable wv764 #9).
+  const abOntbreekt = function () { const k = new Set(db.prepare('PRAGMA table_info(abonnementen)').all().map(function (x) { return x.name; })); return ABO_KOLOMMEN.filter(function (x) { return !k.has(x[0]); }); };
+  if (abOntbreekt().length) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      abOntbreekt().forEach(function (k) { try { db.exec('ALTER TABLE abonnementen ADD COLUMN ' + k[0] + ' ' + k[1]); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } });
+      db.exec('COMMIT');
+    } catch (e) { try { db.exec('ROLLBACK'); } catch (e2) {} db.close(); throw e; }
+  }
   return { db: db, pad: pad, dir: bankDir };
 }
 function externeRekeningen(a) { return new Set(a.db.prepare("SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern'").all().map(function (r) { return r.rek; })); }
@@ -281,10 +301,7 @@ function verrijkBinnen(a) {
     if (kand.length) { paar.set(t.nr, kand[0].nr); paar.set(kand[0].nr, t.nr); if (!intern.has(kand[0].nr)) intern.set(kand[0].nr, t.rek); }
   });
 
-  // 2. abonnementen (zelfde tegenpartij op dezelfde rekening, vast ritme, bedrag binnen 20%); niet op een externe rekening
-  const abo = abonnementenHerken(a, tx.filter(function (t) { return !ext.has(t.rek); }), intern, nu);
-
-  // 3. oordeel per post
+  // 2. oordeel per post (3. daarna de reeksen: de herkenning gebruikt de categorie van dit oordeel, wv764)
   const zetV = db.prepare('INSERT INTO verrijking (nr, type, categorie, subcategorie, ai_omschrijving, eigenaar, intern_paar, abonnement_id, herkomst, regel_id, david_velden, versie, bijgewerkt)' +
     ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (nr) DO UPDATE SET type = excluded.type, categorie = excluded.categorie, subcategorie = excluded.subcategorie,' +
     ' ai_omschrijving = excluded.ai_omschrijving, eigenaar = excluded.eigenaar, intern_paar = excluded.intern_paar, abonnement_id = excluded.abonnement_id,' +
@@ -292,6 +309,8 @@ function verrijkBinnen(a) {
     " WHERE verrijking.herkomst <> 'david' OR excluded.herkomst = 'david'");
   const hist = db.prepare('INSERT INTO verrijking_historie (nr, versie, json, tijd) VALUES (?, ?, ?, ?)');
   let gewijzigd = 0;
+  const oordelen = [];
+  let abo = new Map();
   {
     tx.forEach(function (t) {
       const oud = bestaand.get(t.nr), rek = reks.get(t.rek) || {};
@@ -344,6 +363,15 @@ function verrijkBinnen(a) {
         n.herkomst = 'david'; n.regel_id = null; n.david_velden = oud.david_velden || null;
       }
       n.intern_paar = paar.get(t.nr) || null;
+      oordelen.push({ t: t, oud: oud, n: n });
+    });
+    // 3. reeksen (vaste lasten en abonnementen): niet op een externe rekening, geen interne overboeking (ook niet naar een
+    // externe rekening: die staat in vaste-lasten apart als steun), geen terugboeking
+    abo = abonnementenHerken(a, oordelen.filter(function (x) {
+      return !ext.has(x.t.rek) && !intern.has(x.t.nr) && x.n.type !== 'intern' && x.n.type !== 'terugboeking';
+    }).map(function (x) { return Object.assign({}, x.t, { categorie: x.n.categorie, subcategorie: x.n.subcategorie }); }), nu);
+    oordelen.forEach(function (x) {
+      const t = x.t, oud = x.oud, n = x.n;
       n.abonnement_id = abo.get(t.nr) || null;
       const anders = !oud || OORDEEL.concat(['intern_paar', 'abonnement_id', 'herkomst', 'regel_id', 'david_velden']).some(function (k) { return (oud[k] == null ? null : oud[k]) !== (n[k] == null ? null : n[k]); });
       if (!anders) return;
@@ -360,37 +388,275 @@ function verrijkBinnen(a) {
 }
 function verrijkAlsVuil(a) { return metaLees(a, 'vuil') === '0' ? null : verrijk(a); }
 
-function abonnementenHerken(a, tx, intern, nu) {
-  const groepen = new Map(), uit = new Map(), grens = plusDagen(vandaag(), -400);
-  tx.forEach(function (t) {
-    if (t.bedrag >= 0 || intern.has(t.nr) || !t.datum || t.datum < grens) return;
-    const ts = woordSleutel(t.tegenpartij);
-    if (!ts) return;
-    const k = t.rek + '|' + ts;
-    if (!groepen.has(k)) groepen.set(k, []);
-    groepen.get(k).push(t);
+// ── reeksen: vaste lasten en abonnementen (wv764, idee 16 fase B) ──────────
+// Ontwerp: vault 01_Ontwikkeling/Privé-financiën - ontwerp levend overzicht (bouwplan 22-10-2026).md § 4. Sleutel per reeks:
+// 1. de SEPA-machtiging, genormaliseerd (spaties en voorloopnullen weg: ABN breekt waarden met spaties, de gemeente ging van
+//    000000043562 naar 43562; niet de incassant erbij, het waterschap wisselde van incassant-ID bij dezelfde machtiging);
+// 2. anders de genormaliseerde tegenpartij (rechtsvorm en "via …" weg); 3. zonder tegenpartij de omschrijving (ABN-betaalpakket).
+// bunq kent geen incasso's en geen machtigingsvelden (gemeten 22-10-2026 over alle 26.789 bunq-posten): daar altijd sleutel 2.
+// Binnen een sleutel: meerdere posten per maand (PayPal: ± 10 diensten achter één machtiging) → per bedragcluster (± 2%), met
+// het aantal per maand per cluster; anders één reeks met een hoofdpost per maand. Een losse afwijkende post (eigen bijdrage,
+// jaarafrekening, eenmalige extra) is geen ruis maar hangt als extra of afrekening aan de reeks en telt niet mee in het bedrag.
+// Bedrag: dalend (lineaire hypotheek) = laatste post; wisselend (wonen/energie, Tibber) = gemiddelde over 12 maanden; anders de
+// laatste vaste stand, met bedrag_vorig en gewijzigd_op bij een prijsstap; schommelt het na een stap licht, het gemiddelde sinds de stap.
+// Termijnen (gemeente, waterschap): maandposten met een gat van 2+ maanden; per maand = termijnbedrag × termijnen / 12, met het
+// aantal termijnen van de laatste volledig geziene termijnreeks, anders 10 (termijnen_bron 'aangenomen').
+const OMS_LABEL = '(?:Incassant|Naam|Machtiging|Omschrijving|IBAN|BIC|Kenmerk|Betalingskenm\\w*|Eigen ?ref\\w*|Valutadatum|Reden|Terugboeking)\\s*:';
+function omsVeld(oms, naam) {
+  const m = new RegExp('\\b' + naam + '\\s*:\\s*([\\s\\S]*?)\\s*(?=' + OMS_LABEL + '|$)', 'i').exec(String(oms || ''));
+  return m ? m[1] : null;
+}
+function machtigingVan(oms) {
+  const m = omsVeld(oms, 'Machtiging');
+  if (!m) return null;
+  const s = m.replace(/\s+/g, '').toUpperCase().replace(/^0+(?=.)/, '');
+  return /^[A-Z0-9./+?:()\-]{2,60}$/.test(s) ? s : null;
+}
+const RECHTSVORM = new Set(['bv', 'nv', 'sarl', 'sa', 'gmbh', 'ltd', 'inc', 'bvba', 'vof', 'cv']);
+function naamNorm(t) {
+  if (!t) return '';
+  const s = String(t).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+via\s+.*$/, '').replace(/[^a-z]+/g, ' ').trim();
+  return s.split(' ').filter(function (w) { return w.length >= 2 && !RECHTSVORM.has(w); }).slice(0, 4).join(' ');
+}
+const RITMES = [['maand', 25, 35, 52], ['kwartaal', 80, 100, 150], ['jaar', 350, 380, 570]];   // naam, gat van–tot (dagen), actief tot
+function plusMaanden(d, n) {
+  const j = Number(d.slice(0, 4)), m = Number(d.slice(5, 7)) - 1 + n, dg = Number(d.slice(8, 10));
+  const jj = j + Math.floor(m / 12), mm = ((m % 12) + 12) % 12, max = new Date(Date.UTC(jj, mm + 1, 0)).getUTCDate();
+  return jj + '-' + String(mm + 1).padStart(2, '0') + '-' + String(Math.min(dg, max)).padStart(2, '0');
+}
+function maandEinde(m) { return plusDagen(plusMaanden(m + '-01', 1), -1); }
+function modus(l) {
+  const tel = new Map();
+  l.forEach(function (x, i) { const k = r2(x); const v = tel.get(k) || { n: 0, i: 0 }; v.n++; v.i = i; tel.set(k, v); });
+  let best = null;
+  tel.forEach(function (v, k) { if (!best || v.n > best.n || (v.n === best.n && v.i > best.i)) best = { k: k, n: v.n, i: v.i }; });
+  return best ? best.k : null;
+}
+// afrondingsruis (219,24 / 219,25; laatste termijn 84,72 na 84,69) is geen prijsstap; 387,32 → 389,04 (0,44%) wel
+function zelfdeBedrag(a, b) { return Math.abs(a - b) <= Math.max(0.05, 0.001 * Math.abs(b)); }
+
+// posten: [{nr, rek, datum, bedrag, tegenpartij, omschrijving, categorie, subcategorie}] (al zonder intern, extern en terugboeking).
+// o.ref: peildatum (JJJJ-MM-DD); o.start: {rek: eerste datum in het archief} (een reeks die daar begint, is aan de voorkant afgekapt).
+function reeksenBereken(posten, o) {
+  const ref = o.ref, van = plusDagen(ref, -800), start = o.start || {}, groepen = new Map(), uit = [];
+  (posten || []).forEach(function (t) {
+    if (!(t.bedrag < 0) || !t.datum || t.datum < van || t.datum > ref) return;
+    const m = machtigingVan(t.omschrijving);
+    // zonder machtiging een overboeking (ABN: SEPA Overboeking / Periodieke overb.): aan een persoon of eenmalig, geen vaste last
+    if (!m && /^\s*SEPA\s+(Periodieke\s+)?overb/i.test(t.omschrijving || '')) return;
+    const nn = naamNorm(t.tegenpartij), ow = t.tegenpartij ? '' : woordSleutel(t.omschrijving);
+    const k = m ? 'm:' + m : nn ? 'n:' + nn : ow ? 'o:' + ow : null;
+    if (!k) return;
+    const g = t.rek + '\u0000' + k;
+    if (!groepen.has(g)) groepen.set(g, { rek: t.rek, sleutel: k, soort: m ? 'machtiging' : nn ? 'naam' : 'omschrijving', l: [] });
+    groepen.get(g).l.push(t);
   });
-  const zet = a.db.prepare('INSERT INTO abonnementen (rek, tegen_sleutel, naam, ritme, bedrag_typisch, aantal, eerste, laatste, actief, bijgewerkt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
-    ' ON CONFLICT (rek, tegen_sleutel) DO UPDATE SET naam = excluded.naam, ritme = excluded.ritme, bedrag_typisch = excluded.bedrag_typisch, aantal = excluded.aantal,' +
-    ' eerste = excluded.eerste, laatste = excluded.laatste, actief = excluded.actief, bijgewerkt = excluded.bijgewerkt');
-  const RITME = [['maand', 25, 35, 3], ['kwartaal', 80, 100, 3], ['jaar', 350, 380, 2]];
+  groepen.forEach(function (g) {
+    const l = g.l.sort(function (x, y) { return x.datum < y.datum ? -1 : x.datum > y.datum ? 1 : x.nr - y.nr; });
+    const perMaand = new Map();
+    l.forEach(function (t) { perMaand.set(t.datum.slice(0, 7), (perMaand.get(t.datum.slice(0, 7)) || 0) + 1); });
+    const info = { rek: g.rek, sleutel: g.sleutel, sleutel_soort: g.soort, ref: ref, start: start[g.rek] || null };
+    const pm = Array.from(perMaand.values());
+    if (pm.reduce(function (x, y) { return x + y; }, 0) / pm.length >= 1.9) {
+      // meerdere diensten achter één sleutel: per bedragcluster (± 2%), oplopend aaneengeregen
+      const s = l.slice().sort(function (x, y) { return -x.bedrag - -y.bedrag || (x.datum < y.datum ? -1 : 1); });
+      const cl = [];
+      s.forEach(function (t) { const c = cl[cl.length - 1]; if (c && -t.bedrag <= c.basis * 1.02 + 0.005) c.l.push(t); else cl.push({ basis: -t.bedrag, l: [t] }); });
+      cl.forEach(function (c) {
+        const lc = c.l.sort(function (x, y) { return x.datum < y.datum ? -1 : x.datum > y.datum ? 1 : x.nr - y.nr; });
+        const r = reeksVan(lc, Object.assign({}, info, { cluster: true, sleutel: g.sleutel + '|c:' + modus(lc.map(function (t) { return -t.bedrag; })).toFixed(2), groep: g.sleutel }));
+        if (r) uit.push(r);
+      });
+    } else {
+      const r = reeksVan(l, Object.assign({}, info, { cluster: false, groep: g.sleutel }));
+      if (r) uit.push(r);
+    }
+  });
+  return uit;
+}
+
+function reeksVan(l, i) {
+  if (l.length < 2) return null;
+  const machtiging = i.sleutel_soort === 'machtiging';
+  const laatsteMet = l.slice().reverse().find(function (t) { return t.categorie; }) || {};
+  const categorie = laatsteMet.categorie || null, subcategorie = laatsteMet.subcategorie || null;
+  const bedragen = l.map(function (t) { return -t.bedrag; }), md = mediaan(bedragen);
+  const binnen20 = bedragen.filter(function (b) { return Math.abs(b - md) <= 0.2 * md; }).length;
+  // wisselend alleen bij energie, warmte en water (niet heel 'wonen': een huur- of VvE-stap is een prijsstap; Fable wv764 #8)
+  const woonEnergie = /energie|stroom|\bgas\b|warmte|water/i.test(String(subcategorie || ''));
+  let wisselend = !i.cluster && woonEnergie && binnen20 < 0.8 * l.length;
+  // 1. afwijkende losse posten: wijkt af van de stand ervoor én erna (een blijvende prijsstap dus niet). Aan het eind (geen
+  // posten erna) is één afwijkende post dubbelzinnig: nieuwe prijs of losse post. Lijkt hij op de post ervoor, dan is het een
+  // nieuwe stand; anders 'voorlopig': telt mee voor actief en laatste, niet voor het bedrag (Fable wv764 #2)
+  const afw = new Map();
+  if (!wisselend && !i.cluster) {
+    l.forEach(function (t, k) {
+      const b = -t.bedrag;
+      const voor = mediaan(l.slice(Math.max(0, k - 3), k).map(function (x) { return -x.bedrag; })), na = mediaan(l.slice(k + 1, k + 4).map(function (x) { return -x.bedrag; }));
+      const soort = function (ref) { return ref == null ? null : b < 0.5 * ref ? 'extra' : b > 1.35 * ref ? 'afrekening' : 'gewoon'; };
+      const sv = soort(voor), sn = soort(na);
+      let s = sv && sn ? (sv === sn ? sv : 'gewoon') : (sv || sn || 'gewoon');
+      // alleen omhoog is dubbelzinnig (Natuurmonumenten 2,75 → 9,25); een veel lagere laatste post is een losse extra (eigen bijdrage)
+      if (s !== 'gewoon' && na == null) s = k > 0 && Math.abs(b + l[k - 1].bedrag) <= 0.02 * b ? 'gewoon' : s === 'afrekening' ? 'voorlopig' : 'extra';
+      if (s !== 'gewoon') afw.set(t.nr, s);
+    });
+  }
+  // 2. hoofdposten: twee posten dichter bij elkaar dan de helft van het gewone gat zijn er één te veel (eigen bijdrage naast de
+  // premie); de post die het dichtst bij de vorige hoofdpost ligt blijft, de ander is extra. Niet per kalendermaand: KPN schuift
+  // tussen de 30e en de 5e (07-01 en 07-31). Grens 10–45 dagen, uit het voorlopige gat (Fable wv764 #7)
+  let hoofd = l.filter(function (t) { return !afw.has(t.nr); });
+  if (!i.cluster) {
+    const g0 = [];
+    for (let k = 1; k < hoofd.length; k++) g0.push(dagVerschil(hoofd[k - 1].datum, hoofd[k].datum));
+    const grens = Math.min(45, Math.max(10, 0.5 * (mediaan(g0.filter(function (g) { return g >= 10; })) || 30)));
+    const mdH = mediaan(hoofd.map(function (t) { return -t.bedrag; }));
+    const gekozen = [];
+    hoofd.forEach(function (t) {
+      const p = gekozen[gekozen.length - 1];
+      if (!p || dagVerschil(p.datum, t.datum) >= grens) { gekozen.push(t); return; }
+      const ref = gekozen.length > 1 ? -gekozen[gekozen.length - 2].bedrag : mdH;
+      if (Math.abs(-t.bedrag - ref) < Math.abs(-p.bedrag - ref)) { gekozen[gekozen.length - 1] = t; afw.set(p.nr, 'extra'); }
+      else afw.set(t.nr, 'extra');
+    });
+    hoofd = gekozen;
+  }
+  if (hoofd.length < 2) return null;
+  // 3. ritme (bij een cluster per maand de eerste post: twee diensten met hetzelfde bedrag geven anders een gat van 0). Een
+  // afrekening valt meestal op het ritme (PWN: de kwartaalpost van december): in een maand zonder hoofdpost telt hij mee
+  const hoofdMnd = new Set(hoofd.map(function (t) { return t.datum.slice(0, 7); }));
+  const ritmeL = i.cluster ? hoofd.filter(function (t, k) { return k === 0 || t.datum.slice(0, 7) !== hoofd[k - 1].datum.slice(0, 7); })
+    : hoofd.concat(l.filter(function (t) { return afw.get(t.nr) === 'afrekening' && !hoofdMnd.has(t.datum.slice(0, 7)); }))
+      .sort(function (x, y) { return x.datum < y.datum ? -1 : x.datum > y.datum ? 1 : x.nr - y.nr; });
+  if (ritmeL.length < 2) return null;
+  const gaten = [];
+  for (let k = 1; k < ritmeL.length; k++) gaten.push(dagVerschil(ritmeL[k - 1].datum, ritmeL[k].datum));
+  const mg = mediaan(gaten);
+  let r = RITMES.find(function (x) { return mg >= x[1] && mg <= x[2]; });
+  if (!r) return null;
+  let ritme = r[0];
+  // termijnen: belastingen (gemeente, waterschap; ook in het eerste jaar, vóór het eerste gat), of minstens twee reeksen van 3+
+  // maandposten met een gat van 75–200 dagen ertussen. Eén pauze maakt van een abonnement nog geen termijnreeks (Fable wv764 #3, #4)
+  const runs = [[ritmeL[0]]];
+  for (let k = 1; k < ritmeL.length; k++) { if (dagVerschil(ritmeL[k - 1].datum, ritmeL[k].datum) >= 75) runs.push([]); runs[runs.length - 1].push(ritmeL[k]); }
+  const lang = gaten.filter(function (g) { return g >= 75 && g <= 200; });
+  if (ritme === 'maand' && !i.cluster && (categorie === 'belastingen' || (lang.length && runs.filter(function (u) { return u.length >= 3; }).length >= 2))) ritme = 'termijnen';
+  const telGaten = ritme === 'termijnen' ? gaten.filter(function (g) { return g < 75; }) : gaten;
+  const regelmatig = telGaten.filter(function (g) { return g >= r[1] * 0.8 && g <= r[2] * 1.2; }).length;
+  if (regelmatig < 0.7 * telGaten.length) return null;
+  // een bedragcluster (paraplumachtiging PayPal, of een naam) alleen per maand: twee losse aankopen een jaar of kwartaal uit elkaar
+  // zijn geen abonnement (Fable wv764 #5). Zonder machtiging strenger: een jaarreeks pas bij 3 posten (toiletbezoek op vakantie,
+  // inschrijving voor een loop), een cluster vanaf 4 posten (Albert Heijn)
+  const minN = machtiging ? 2 : i.cluster ? 4 : 3;
+  if (ritmeL.length < minN || (i.cluster && ritme !== 'maand')) return null;
+  // wisselend alleen bij een strak ritme. Zonder machtiging de oude veiligheid: bedrag binnen 20% (anders vallen toevallige
+  // herhalingen bij een winkel erin)
+  wisselend = wisselend && regelmatig >= 0.8 * telGaten.length;
+  if (!machtiging && !wisselend) {
+    // zonder machtiging: de hoofdposten binnen 20% van hun mediaan, of grotendeels herhaalde bedragen (prijsstappen: bunq 28,99 →
+    // 26,99 → 23,19 bij een naamwissel 'bunq' → 'bunq BV'); losse winkelbedragen herhalen zich niet
+    const mdH = mediaan(hoofd.map(function (t) { return -t.bedrag; }));
+    const band = hoofd.filter(function (t) { return Math.abs(-t.bedrag - mdH) <= 0.2 * mdH; }).length;
+    const herhaald = hoofd.filter(function (t, k) { return (k > 0 && zelfdeBedrag(-t.bedrag, -hoofd[k - 1].bedrag)) || (k < hoofd.length - 1 && zelfdeBedrag(-t.bedrag, -hoofd[k + 1].bedrag)); }).length;
+    if (band < 0.8 * hoofd.length && herhaald < 0.7 * hoofd.length) return null;
+  }
+  // zonder machtiging nooit een reeks bij boodschappen, horeca, contant, vakantie of kleding (de kantine van de hockeyclub elk september)
+  if (!machtiging && GEEN_REEKS_CAT.indexOf(categorie) >= 0) return null;
+
+  // 4. bedrag en stand
+  const hb = hoofd.map(function (t) { return -t.bedrag; });
+  const laatste = hoofd[hoofd.length - 1];
+  let wijze = 'vast', bedrag, vorig = null, gewijzigd = null, bmin = null, bmax = null;
+  const staart = hb.slice(-4);
+  const dalend = !i.cluster && staart.length >= 4 && staart.every(function (b, k) { return k === 0 || (b < staart[k - 1] && (staart[k - 1] - b) / staart[k - 1] < 0.02); });
+  if (wisselend) {
+    const jaar = hoofd.filter(function (t) { return t.datum > plusDagen(i.ref, -365); }).map(function (t) { return -t.bedrag; });
+    const l12 = jaar.length >= 2 ? jaar : hb.slice(-12);
+    wijze = 'wisselend'; bedrag = r2(l12.reduce(function (s, b) { return s + b; }, 0) / l12.length);
+    bmin = Math.min.apply(null, l12); bmax = Math.max.apply(null, l12);
+  } else if (dalend) {
+    wijze = 'dalend'; bedrag = r2(hb[hb.length - 1]); vorig = r2(hb[0]);   // vorig = eerste post in het venster (sinds = eerste)
+  } else {
+    // segmenten van gelijke bedragen (± max(2 ct, 0,5%))
+    const seg = [];
+    // in een cluster op de cent (0,99 → 1,00 is een andere dienst of een prijsstap; de wisselkoersruis van een dollardienst schommelt dan)
+    const gelijk = i.cluster ? function (x, y) { return Math.abs(x - y) < 0.005; } : zelfdeBedrag;
+    hoofd.forEach(function (t) { const b = -t.bedrag, s = seg[seg.length - 1]; if (s && gelijk(b, s.basis)) s.l.push(t); else seg.push({ basis: b, l: [t] }); });
+    const S = seg[seg.length - 1], P = seg.length > 1 ? seg[seg.length - 2] : null;
+    const bedr = function (s) { return modus(s.l.map(function (t) { return -t.bedrag; })); };
+    if (S.l.length >= 2 || !P || P.l.length >= 2) {
+      bedrag = bedr(S);
+      if (P) { vorig = bedr(P); gewijzigd = S.l[0].datum; }
+    } else {
+      // schommelt na de laatste grote stap (> 10%): gemiddelde sinds die stap
+      let k = hb.length - 1;
+      while (k > 0 && Math.abs(hb[k] - hb[k - 1]) <= 0.1 * hb[k - 1]) k--;
+      const sinds = hb.slice(k);
+      bedrag = r2(sinds.reduce(function (s, b) { return s + b; }, 0) / sinds.length);
+      wijze = 'schommelt'; bmin = Math.min.apply(null, sinds); bmax = Math.max.apply(null, sinds);
+      if (k > 0) { vorig = r2(hb[k - 1]); gewijzigd = hoofd[k].datum; }
+    }
+  }
+  // zonder machtiging alleen een vaste stand (of energie/dalend), niet een bedrag dat blijft schommelen (HEMA elk kwartaal)
+  if (!machtiging && wijze === 'schommelt') return null;
+  // 5. termijnen: aantal van de laatste volledig geziene termijnreeks (begin en eind gezien), anders 10
+  let termijnen = null, tBron = null;
+  if (ritme === 'termijnen') {
+    const afgekapt = i.start && dagVerschil(i.start, runs[0][0].datum) <= 45;
+    const volledig = runs.filter(function (u, k) { return (k > 0 || !afgekapt) && (k < runs.length - 1 || dagVerschil(u[u.length - 1].datum, i.ref) >= 75); });
+    const huidig = runs[runs.length - 1].length;
+    if (volledig.length) { termijnen = Math.max(volledig[volledig.length - 1].length, huidig); tBron = 'gemeten'; }
+    else { termijnen = Math.max(10, huidig); tBron = 'aangenomen'; }
+    termijnen = Math.min(termijnen, 12);
+  }
+  // 6. actief op de laatste post die bij de reeks hoort (hoofd, afrekening of voorlopig); aantal per maand (cluster: posten in de
+  // laatste 91 dagen / 3) en per maand
+  const bij = l.filter(function (t) { const s = afw.get(t.nr); return !s || s === 'afrekening' || s === 'voorlopig'; });
+  const laatsteBij = bij[bij.length - 1] || laatste;
+  const voorlopig = l.filter(function (t) { return afw.get(t.nr) === 'voorlopig'; }).pop() || null;
+  const actiefTot = ritme === 'termijnen' ? 200 : r[3];
+  const actief = dagVerschil(laatsteBij.datum, i.ref) <= actiefTot ? 1 : 0;
+  let nPm = 1;
+  if (i.cluster && ritme === 'maand') nPm = Math.max(actief, Math.round(hoofd.filter(function (t) { return t.datum > plusDagen(i.ref, -91); }).length / 3));
+  const perMaand = r2(ritme === 'maand' ? bedrag * nPm : ritme === 'kwartaal' ? bedrag / 3 : ritme === 'jaar' ? bedrag / 12 : bedrag * termijnen / 12);
+  const dagen = ritmeL.slice(-3).map(function (t) { return Number(t.datum.slice(8, 10)); });
+  const stap = ritme === 'kwartaal' ? 3 : ritme === 'jaar' ? 12 : 1;
+  const nrs = new Map();
+  l.forEach(function (t) { nrs.set(t.nr, afw.get(t.nr) || 'hoofd'); });
+  return { rek: i.rek, sleutel: i.sleutel, sleutel_soort: i.sleutel_soort + (i.cluster ? '|cluster' : ''), groep: i.groep, naam: laatste.tegenpartij || null,
+    categorie: categorie, subcategorie: subcategorie, soort: VAST_CAT.indexOf(categorie) >= 0 ? 'vast' : 'abonnement', wijze: wijze, ritme: ritme,
+    bedrag: r2(bedrag), per_maand: perMaand, n_per_maand: nPm, termijnen: termijnen, termijnen_bron: tBron, bedrag_vorig: vorig, gewijzigd_op: gewijzigd,
+    bedrag_min: bmin, bedrag_max: bmax, aantal: hoofd.length, eerste: hoofd[0].datum, laatste: laatsteBij.datum, actief: actief,
+    verwacht_volgende: actief ? plusMaanden(ritmeL[ritmeL.length - 1].datum, stap) : null, dag: Math.round(mediaan(dagen)),
+    laatste_afwijkend: voorlopig ? -voorlopig.bedrag : null, laatste_afwijkend_op: voorlopig ? voorlopig.datum : null,
+    extra: Array.from(afw.values()).filter(function (s) { return s === 'extra'; }).length, afrekening: Array.from(afw.values()).filter(function (s) { return s === 'afrekening'; }).length,
+    start_afgekapt: !!(i.start && dagVerschil(i.start, hoofd[0].datum) <= 45), nrs: nrs };
+}
+
+// Peildag: vandaag, of de nieuwste post als de podklok achterloopt (de klok liep eerder dagen mis; Fable wv764 #12)
+function peildag(a) {
+  const m = (a.db.prepare("SELECT max(datum) d FROM transacties WHERE status IN ('booked', 'pending')").get() || {}).d;
+  return m && m > vandaag() ? m : vandaag();
+}
+function archiefStart(a) { return new Map(a.db.prepare("SELECT rek, min(datum) d FROM transacties WHERE status IN ('booked', 'pending') GROUP BY rek").all().map(function (r) { return [r.rek, r.d]; })); }
+function abonnementenHerken(a, tx, nu) {
+  const uit = new Map();
+  const start = {};
+  archiefStart(a).forEach(function (d, rek) { start[rek] = d; });
+  const reeksen = reeksenBereken(tx, { ref: peildag(a), start: start });
+  const kol = ['rek', 'tegen_sleutel', 'naam', 'ritme', 'bedrag_typisch', 'aantal', 'eerste', 'laatste', 'actief', 'bijgewerkt'].concat(ABO_KOLOMMEN.map(function (k) { return k[0]; }));
+  const zet = a.db.prepare('INSERT INTO abonnementen (' + kol.join(', ') + ') VALUES (' + kol.map(function () { return '?'; }).join(', ') + ')' +
+    ' ON CONFLICT (rek, tegen_sleutel) DO UPDATE SET ' + kol.slice(2).map(function (k) { return k + ' = excluded.' + k; }).join(', '));
+  const id = a.db.prepare('SELECT id FROM abonnementen WHERE rek = ? AND tegen_sleutel = ?');
   inTransactie(a, function () {
-    groepen.forEach(function (l, k) {
-      if (l.length < 2) return;
-      l.sort(function (x, y) { return x.datum < y.datum ? -1 : x.datum > y.datum ? 1 : 0; });
-      const gaten = [];
-      for (let i = 1; i < l.length; i++) gaten.push(dagVerschil(l[i - 1].datum, l[i].datum));
-      const mg = mediaan(gaten), mb = mediaan(l.map(function (t) { return -t.bedrag; }));
-      const r = RITME.find(function (x) { return mg >= x[1] && mg <= x[2] && l.length >= x[3]; });
-      if (!r || !mb) return;
-      const binnen = l.filter(function (t) { return Math.abs(-t.bedrag - mb) <= 0.2 * mb; }).length;
-      const regelmatig = gaten.filter(function (g) { return g >= r[1] * 0.8 && g <= r[2] * 1.2; }).length;
-      if (binnen < 0.8 * l.length || regelmatig < 0.7 * gaten.length) return;
-      const laatste = l[l.length - 1];
-      const actief = dagVerschil(laatste.datum, vandaag()) <= Math.round(r[2] * 1.5) ? 1 : 0;
-      zet.run(laatste.rek, k.split('|')[1], laatste.tegenpartij, r[0], r2(mb), l.length, l[0].datum, laatste.datum, actief, nu);
-      const id = a.db.prepare('SELECT id FROM abonnementen WHERE rek = ? AND tegen_sleutel = ?').get(laatste.rek, k.split('|')[1]).id;
-      l.forEach(function (t) { if (Math.abs(-t.bedrag - mb) <= 0.2 * mb) uit.set(t.nr, id); });
+    // rijen van de herkenning van vóór wv764 (of van teruggerolde code): opnieuw opbouwen
+    a.db.prepare('DELETE FROM abonnementen WHERE sleutel_soort IS NULL').run();
+    reeksen.forEach(function (r) {
+      zet.run(r.rek, r.sleutel, r.naam, r.ritme, r.bedrag, r.aantal, r.eerste, r.laatste, r.actief, nu, r.sleutel_soort, r.groep, r.soort, r.wijze, r.per_maand, r.n_per_maand,
+        r.termijnen, r.termijnen_bron, r.bedrag_vorig, r.gewijzigd_op, r.verwacht_volgende, r.dag, r.extra, r.afrekening, r.bedrag_min, r.bedrag_max, r.categorie, r.subcategorie,
+        r.laatste_afwijkend, r.laatste_afwijkend_op);
+      const n = id.get(r.rek, r.sleutel).id;
+      // hoofdposten en afrekeningen horen bij de reeks; een losse extra post (eigen bijdrage) niet
+      r.nrs.forEach(function (s, nr) { if (s !== 'extra') uit.set(nr, n); });
     });
     // niet meer herkend (ritme of bedrag veranderd): niet meer actief
     a.db.prepare('UPDATE abonnementen SET actief = 0 WHERE bijgewerkt < ?').run(nu);
@@ -628,13 +894,267 @@ function internLijst(a, o) {
 function abonnementen(a, o) {
   verrijkAlsVuil(a);
   const reks = rekNamen(a);
-  const l = a.db.prepare('SELECT b.*, (SELECT v.categorie FROM verrijking v JOIN transacties t ON t.nr = v.nr WHERE v.abonnement_id = b.id ORDER BY t.datum DESC LIMIT 1) AS categorie' +
-    " FROM abonnementen b WHERE (? OR b.actief = 1) AND b.rek NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern') ORDER BY b.actief DESC, b.bedrag_typisch DESC").all(o && o.alle ? 1 : 0);
-  const perMaand = function (b) { return b.ritme === 'maand' ? b.bedrag_typisch : b.ritme === 'kwartaal' ? b.bedrag_typisch / 3 : b.bedrag_typisch / 12; };
+  const l = a.db.prepare("SELECT b.* FROM abonnementen b WHERE (? OR b.actief = 1) AND b.rek NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern')" +
+    ' ORDER BY b.actief DESC, b.per_maand DESC, b.bedrag_typisch DESC').all(o && o.alle ? 1 : 0);
+  const perMaand = function (b) { return b.per_maand != null ? b.per_maand : b.ritme === 'maand' ? b.bedrag_typisch : b.ritme === 'kwartaal' ? b.bedrag_typisch / 3 : b.bedrag_typisch / 12; };
   return { aantal: l.length, per_maand_totaal: r2(l.filter(function (b) { return b.actief; }).reduce(function (s, b) { return s + perMaand(b); }, 0)),
-    let_op: 'herkend aan ritme en bedrag (vaste lasten zoals hypotheek en verzekeringen tellen mee); geen opzegdata',
-    abonnementen: l.map(function (b) { return { naam: b.naam, rekening: rekeningNaam(reks.get(b.rek)), ritme: b.ritme, bedrag: b.bedrag_typisch, per_maand: r2(perMaand(b)),
-      categorie: b.categorie || undefined, sinds: b.eerste, laatst: b.laatste, aantal: b.aantal, actief: !!b.actief }; }) };
+    let_op: 'herkend aan machtiging, tegenpartij, ritme en bedrag (vaste lasten zoals hypotheek en verzekeringen tellen mee; soort vast of abonnement); geen opzegdata.' +
+      ' Het overzicht per maand met verschil: vaste-lasten',
+    abonnementen: l.map(function (b) { return { id: b.id, naam: b.naam, rekening: rekeningNaam(reks.get(b.rek)), soort: b.soort || undefined, ritme: b.ritme,
+      wijze: b.wijze && b.wijze !== 'vast' ? b.wijze : undefined, bedrag: b.bedrag_typisch, aantal_per_maand: b.n_per_maand > 1 ? b.n_per_maand : undefined,
+      termijnen: b.termijnen || undefined, termijnen_bron: b.termijnen_bron || undefined, per_maand: r2(perMaand(b)),
+      categorie: b.categorie || undefined, subcategorie: b.subcategorie || undefined, sinds: b.eerste, laatst: b.laatste, aantal: b.aantal,
+      bedrag_vorig: b.bedrag_vorig == null ? undefined : b.bedrag_vorig, gewijzigd_op: b.gewijzigd_op || undefined, verwacht_volgende: b.verwacht_volgende || undefined,
+      extra_posten: b.extra || undefined, afrekeningen: b.afrekening || undefined, actief: !!b.actief }; }) };
+}
+
+// ── vaste lasten per maand en geldstroom (wv764, ontwerp § 3 en § 5) ──────
+// vaste-lasten rekent de reeksen opnieuw uit op de peildatum (einde van de maand, of vandaag) en op het einde van de maand ervoor,
+// en geeft de tabel ook als markdown (tabel_md): die mag, en alleen die, in het blok tussen de markeringen op de vault-pagina
+// Huishoudbudget en vaste lasten (smalle uitzondering, Ja van David 22-10-2026). Daarom alleen namen van organisaties, bedragen,
+// ritme en maanden; nooit IBAN, machtiging, omschrijving of saldo. Tekst van derden (tegenpartij) gaat door mdVeilig.
+const MAANDEN = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
+function eur(n) { const v = Math.abs(r2(n)).toFixed(2).split('.'); return (n < -0.004 ? '− ' : '') + '€ ' + v[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + v[1]; }
+function getal(n) { const v = Math.abs(r2(n)).toFixed(2).split('.'); return v[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + v[1]; }
+function mndJaar(d) { return d ? MAANDEN[Number(d.slice(5, 7)) - 1] + ' ' + d.slice(0, 4) : '—'; }
+function dmj(d) { return Number(d.slice(8, 10)) + '-' + Number(d.slice(5, 7)) + '-' + d.slice(0, 4); }
+function mdVeilig(s, n) { return String(s || '').normalize('NFC').replace(/[^\p{L}\p{N} .,&'()\-/+]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, n || 40).trim(); }
+function hoofdletter(s) { s = mdVeilig(s, 40); return s ? s[0].toUpperCase() + s.slice(1) : s; }
+function vasteLastenRekening(a, rek) {
+  const reks = rekNamen(a);
+  if (rek) {
+    if (!reks.has(rek)) throw new Error('rekening: niet in het archief');
+    if (externeRekeningen(a).has(rek)) throw new Error('rekening: een externe rekening (eigenaar extern) heeft geen vaste lasten van David');
+    return rek;
+  }
+  const l = Array.from(reks.values()).filter(function (r) { return r.bron !== 'bunq' && String(r.eigenaar || '').toLowerCase() !== EXTERN; });
+  if (l.length !== 1) throw new Error('rekening: noem de rekening (bijvoorbeeld rekening="Vaste lasten")');
+  return l[0].rek;
+}
+// Posten van één rekening, gesplitst: lasten (kandidaat voor een reeks), naar een externe rekening (steun) en interne bijschrijvingen.
+function vastePosten(a, rek) {
+  const ext = externeRekeningen(a);
+  const iban = new Map(a.db.prepare('SELECT rek, iban FROM rekeningen WHERE iban IS NOT NULL').all().map(function (r) { return [r.iban, r.rek]; }));
+  const rijen = a.db.prepare('SELECT t.nr, t.rek, t.datum, t.bedrag, t.tegenpartij, t.tegen_iban, t.omschrijving, t.saldo_na, v.type, v.categorie, v.subcategorie,' +
+    ' (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) AS paar_rek FROM transacties t LEFT JOIN verrijking v ON v.nr = t.nr WHERE ' + ZICHTBAAR +
+    ' AND t.rek = ? ORDER BY t.datum, t.nr').all(rek);
+  const uit = { lasten: [], steun: [], intern_in: [], intern_uit: [], alle: rijen };
+  rijen.forEach(function (t) {
+    const tegen = t.paar_rek || (t.tegen_iban && iban.get(t.tegen_iban) !== t.rek ? iban.get(t.tegen_iban) : null);
+    t.tegen_rek = tegen || null;
+    if (tegen && ext.has(tegen)) { if (t.bedrag < 0) uit.steun.push(t); return; }
+    if (tegen || t.type === 'intern') { (t.bedrag > 0 ? uit.intern_in : uit.intern_uit).push(t); return; }
+    if (t.type === 'terugboeking') return;
+    uit.lasten.push(t);
+  });
+  return uit;
+}
+// Terugkerende bedragen (± tol) in de laatste 183 dagen tot ref, in minstens 3 verschillende maanden: de vaste stroom.
+function vasteBedragen(lijst, ref, tol) {
+  const van = plusDagen(ref, -183), cl = [];
+  lijst.filter(function (t) { return t.datum > van && t.datum <= ref; }).sort(function (x, y) { return Math.abs(x.bedrag) - Math.abs(y.bedrag); }).forEach(function (t) {
+    const b = Math.abs(t.bedrag), c = cl[cl.length - 1];
+    if (c && b <= c.basis * (1 + tol) + 0.005) c.l.push(t); else cl.push({ basis: b, l: [t] });
+  });
+  return cl.filter(function (c) { return new Set(c.l.map(function (t) { return t.datum.slice(0, 7); })).size >= 3; }).map(function (c) {
+    const l = c.l.sort(function (x, y) { return x.datum < y.datum ? -1 : 1; });
+    return { bedrag: modus(l.map(function (t) { return Math.abs(t.bedrag); })), dag: Math.round(mediaan(l.slice(-3).map(function (t) { return Number(t.datum.slice(8, 10)); }))),
+      laatste: l[l.length - 1].datum, l: l };
+  });
+}
+function rijenVan(reeksen) {
+  const per = new Map();
+  reeksen.forEach(function (r) {
+    const k = (r.sleutel_soort.indexOf('cluster') >= 0 ? 'g:' + r.groep : 'n:' + (naamNorm(r.naam) || r.sleutel)) + '|' + r.ritme;
+    if (!per.has(k)) per.set(k, []);
+    per.get(k).push(r);
+  });
+  return Array.from(per.entries()).map(function (e) {
+    const l = e[1].sort(function (x, y) { return y.per_maand - x.per_maand || y.bedrag - x.bedrag; }), r0 = l[0], cluster = e[0].indexOf('g:') === 0;
+    const nieuwste = l.slice().sort(function (x, y) { return x.laatste < y.laatste ? 1 : -1; })[0];
+    const sub = l.map(function (r) { return r.subcategorie; }).find(Boolean), cat = l.map(function (r) { return r.categorie; }).find(Boolean);
+    const naam = mdVeilig(nieuwste.naam, 30), soortNaam = hoofdletter(sub || cat || '');
+    const ritmes = Array.from(new Set(l.map(function (r) { return r.ritme; })));
+    const wijziging = l.filter(function (r) { return r.gewijzigd_op; }).sort(function (x, y) { return x.gewijzigd_op < y.gewijzigd_op ? 1 : -1; })[0];
+    const rij = { sleutel: e[0], sleutels: l.map(function (r) { return r.sleutel; }), naam: naam || null, soort_post: soortNaam || null, categorie: cat || null, soort: r0.soort, ritme: ritmes.length === 1 ? ritmes[0] : 'gemengd',
+      reeksen: l.length, bedrag: r2(l.reduce(function (s, r) { return s + (r.ritme === 'maand' ? r.bedrag * r.n_per_maand : r.bedrag); }, 0)),
+      per_maand: r2(l.reduce(function (s, r) { return s + r.per_maand; }, 0)), wijze: l.length === 1 ? r0.wijze : undefined,
+      bedrag_min: l.length === 1 ? r0.bedrag_min : undefined, bedrag_max: l.length === 1 ? r0.bedrag_max : undefined,
+      bedrag_vorig: l.length === 1 ? r0.bedrag_vorig : undefined, gewijzigd_op: wijziging ? wijziging.gewijzigd_op : null,
+      laatste_afwijkend: l.length === 1 && r0.laatste_afwijkend != null ? r0.laatste_afwijkend : undefined, laatste_afwijkend_op: l.length === 1 ? r0.laatste_afwijkend_op || undefined : undefined,
+      eerste: l.map(function (r) { return r.eerste; }).sort()[0], laatste_start: l.filter(function (r) { return !r.start_afgekapt; }).map(function (r) { return r.eerste; }).sort().pop() || null,
+      start_afgekapt: l.every(function (r) { return r.start_afgekapt; }),
+      termijnen: l.length === 1 ? r0.termijnen : undefined, termijnen_bron: l.length === 1 ? r0.termijnen_bron : undefined,
+      onderdelen: l.length > 1 ? l.map(function (r) { return { bedrag: r.bedrag, aantal: r.n_per_maand > 1 ? r.n_per_maand : undefined, dag: r.dag, ritme: r.ritme !== 'maand' ? r.ritme : undefined }; }) : undefined,
+      cluster: cluster || undefined };
+    return rij;
+  }).sort(function (x, y) { return y.per_maand - x.per_maand; });
+}
+function rijTekst(r) {
+  let t = r.soort_post && r.naam ? r.soort_post + ' (' + r.naam + ')' : (r.soort_post || r.naam || 'Zonder naam');
+  if (r.wijze === 'dalend') t += ' — daalt elke maand';
+  else if (r.wijze === 'wisselend') t += ' — wisselend, ' + getal(r.bedrag_min) + '–' + getal(r.bedrag_max) + ' (12 maanden)';
+  else if (r.wijze === 'schommelt') t += ' — schommelt ' + getal(r.bedrag_min) + '–' + getal(r.bedrag_max);
+  if (r.laatste_afwijkend != null) t += ' — laatste post ' + getal(r.laatste_afwijkend) + ' (' + dmj(r.laatste_afwijkend_op) + ') wijkt af; nog niet meegeteld';
+  if (r.onderdelen) {
+    const ond = r.onderdelen.map(function (o) { return getal(o.bedrag) + (o.aantal ? ' ×' + o.aantal : '') + (r.cluster && o.dag ? ' (' + o.dag + 'e)' : '') + (o.ritme ? ' per ' + o.ritme : ''); });
+    t += ' — ' + (r.cluster ? r.onderdelen.reduce(function (s, o) { return s + (o.aantal || 1); }, 0) + ' vaste betalingen: ' + ond.join(' · ') : r.reeksen + ' reeksen: ' + ond.join(' + '));
+  }
+  return t;
+}
+function ritmeTekst(r) {
+  if (r.ritme === 'termijnen') return (r.termijnen || '?') + ' termijnen' + (r.termijnen_bron === 'aangenomen' ? ' (aantal aangenomen)' : '');
+  return r.ritme;
+}
+function sindsTekst(r, start) {
+  if (r.wijze === 'dalend') return 'daalt sinds ' + mndJaar(r.eerste) + ' (toen ' + eur(r.bedrag_vorig) + ')';
+  if (r.cluster && r.reeksen > 1) return 'laatste wijziging ' + mndJaar([r.gewijzigd_op || '', r.laatste_start || ''].sort().pop());
+  if (r.gewijzigd_op) return mndJaar(r.gewijzigd_op) + (r.bedrag_vorig != null ? ' (was ' + eur(r.bedrag_vorig) + ')' : r.reeksen > 1 ? ' (bedragen schuiven)' : '');
+  return r.start_afgekapt ? 'vóór ' + mndJaar(plusMaanden(start, 1)) : mndJaar(r.eerste);
+}
+function vasteLasten(a, o) {
+  verrijkAlsVuil(a);
+  const nu = peildag(a), m = o.maand || nu.slice(0, 7);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(m)) throw new Error('maand: JJJJ-MM');
+  if (m > nu.slice(0, 7)) throw new Error('maand: die maand is nog niet begonnen');
+  const rek = vasteLastenRekening(a, o.rek), reks = rekNamen(a), r = reks.get(rek);
+  // alleen de tabel van de vaste-lastenrekening (de enige niet-bunq-rekening) mag de vault in: op bunq zijn reeksen naam-gebaseerd en
+  // kan een vaste overboeking aan een persoon ertussen staan (Fable wv764 #6); bank.py schrijft alleen bij standaard_rekening
+  let standaard = false;
+  try { standaard = vasteLastenRekening(a, null) === rek; } catch (e) { standaard = false; }
+  const eind = maandEinde(m), ref = eind < nu ? eind : nu, vorigeRef = plusDagen(m + '-01', -1);
+  const start = archiefStart(a).get(rek) || null, st = {};
+  st[rek] = start;
+  const p = vastePosten(a, rek);
+  const reeksNu = reeksenBereken(p.lasten, { ref: ref, start: st }).filter(function (x) { return x.actief; });
+  const reeksVor = reeksenBereken(p.lasten, { ref: vorigeRef, start: st }).filter(function (x) { return x.actief; });
+  const rijen = rijenVan(reeksNu), vorigL = rijenVan(reeksVor), vorig = new Map();
+  // een rij uit de vorige stand hoort bij een rij nu als ze een reeks delen (naamwissel bij dezelfde machtiging: gemeente aug 2026)
+  rijen.forEach(function (x) { const v = vorigL.find(function (y) { return y.sleutels.some(function (k) { return x.sleutels.indexOf(k) >= 0; }); }); if (v) vorig.set(x.sleutel, v); });
+  const totaal = r2(rijen.reduce(function (s, x) { return s + x.per_maand; }, 0));
+  const hyp = r2(rijen.filter(function (x) { return /hypothe/i.test(String(x.soort_post || '')); }).reduce(function (s, x) { return s + x.per_maand; }, 0));
+  // steun: vaste overboekingen naar een externe rekening (Elizabeth); vaste storting: vaste interne bijschrijving (± 0,5%)
+  const steunPer = new Map();
+  p.steun.forEach(function (t) { if (!steunPer.has(t.tegen_rek)) steunPer.set(t.tegen_rek, []); steunPer.get(t.tegen_rek).push(t); });
+  const steun = [];
+  steunPer.forEach(function (l, tr) {
+    const v = vasteBedragen(l, ref, 0.02);
+    if (!v.length) return;
+    const sub = l.slice().reverse().map(function (t) { return t.subcategorie; }).find(Boolean);
+    steun.push({ naam: sub ? hoofdletter(sub) : 'Naar ' + mdVeilig(rekeningNaam(reks.get(tr)), 30), per_maand: r2(v.reduce(function (s, x) { return s + x.bedrag; }, 0)), dag: v[0].dag });
+  });
+  const stortPer = new Map();
+  p.intern_in.forEach(function (t) { const k = t.tegen_rek || '?'; if (!stortPer.has(k)) stortPer.set(k, []); stortPer.get(k).push(t); });
+  const storting = [];
+  stortPer.forEach(function (l, tr) {
+    vasteBedragen(l, ref, 0.005).forEach(function (v) {
+      if (v.laatste < plusDagen(ref, -45)) return;   // gestopt
+      storting.push({ van: mdVeilig(rekeningNaam(reks.get(tr)) || 'eigen rekening', 30), bedrag: v.bedrag, dag: v.dag });
+    });
+  });
+  const steunTot = r2(steun.reduce(function (s, x) { return s + x.per_maand; }, 0)), stortTot = r2(storting.reduce(function (s, x) { return s + x.bedrag; }, 0));
+  // verschil met de vorige stand (einde vorige maand); wisselende reeksen pas bij meer dan 5%
+  const verschil = [];
+  rijen.forEach(function (x) {
+    const v = vorig.get(x.sleutel);
+    if (!v) { verschil.push({ wat: 'nieuw', post: rijTekst(x).split(' — ')[0], per_maand: x.per_maand }); return; }
+    const d = r2(x.per_maand - v.per_maand);
+    // dalend (hypotheek) verandert elke maand; wisselend en schommelend pas boven 5%
+    if (Math.abs(d) >= 0.5 && x.wijze !== 'dalend' && ((x.wijze !== 'wisselend' && x.wijze !== 'schommelt') || Math.abs(d) > 0.05 * v.per_maand)) verschil.push({ wat: 'anders', post: rijTekst(x).split(' — ')[0], van: v.per_maand, naar: x.per_maand });
+    x.verschil = d || undefined;
+  });
+  const gebruikt = new Set(Array.from(vorig.values()));
+  vorigL.forEach(function (v) { if (!gebruikt.has(v)) verschil.push({ wat: 'weg', post: rijTekst(v).split(' — ')[0], per_maand: v.per_maand }); });
+  const uit = { maand: m, peildatum: ref, vorige_stand: vorigeRef, rekening: rekeningNaam(r), standaard_rekening: standaard, vanaf: start, posten: rijen.length,
+    reeksen: reeksNu.length, totaal_per_maand: totaal, waarvan_hypotheek: hyp || undefined, steun: steun, vaste_storting: storting,
+    over: storting.length ? r2(stortTot - totaal - steunTot) : undefined, verschil: verschil,
+    let_op_gezamenlijk: r && r.gezamenlijk ? LET_OP_GEZAMENLIJK : undefined,
+    let_op: 'tabel_md mag alleen in het blok tussen de markeringen op de vault-pagina Huishoudbudget en vaste lasten (Ja van David 22-10-2026); de rest is gesprek',
+    vaste_lasten: rijen.map(function (x) { const y = Object.assign({}, x); delete y.sleutel; delete y.sleutels; delete y.cluster; delete y.start_afgekapt; delete y.laatste_start; return y; }) };
+  uit.tabel_md = vasteLastenMd(uit, rijen, r, start);
+  return uit;
+}
+function vasteLastenMd(u, rijen, r, start) {
+  const rij = function (x) { return '| ' + rijTekst(x) + ' | ' + eur(x.bedrag) + ' | ' + ritmeTekst(x) + ' | ' + sindsTekst(x, start) + ' | ' + eur(x.per_maand) + ' |'; };
+  const kop = '| Post (tegenpartij op het afschrift) | Bedrag | Ritme | Sinds | Per maand |\n|---|--:|---|---|--:|';
+  const mnd = rijen.filter(function (x) { return x.ritme === 'maand'; }), ander = rijen.filter(function (x) { return x.ritme !== 'maand'; });
+  const regels = ['*Stand ' + dmj(u.peildatum) + ', automatisch berekend door Socev uit de transactiedatabase van de bankkoppeling (rekening "' + mdVeilig(u.rekening, 30) + '", afschrijvingen vanaf ' +
+    (start ? dmj(start) : '—') + '). Alleen terugkerende posten aan organisaties; geen rekeningnummers, saldi of losse uitgaven. "Sinds" = sinds wanneer dít bedrag geldt; "vóór ' +
+    (start ? mndJaar(plusMaanden(start, 1)) : '—') + '" = al zo bij het begin van de meetreeks.*', ''];
+  if (mnd.length) regels.push('**Maandelijks**', '', kop, mnd.map(rij).join('\n'), '');
+  if (ander.length) regels.push('**In termijnen, per kwartaal of per jaar** (per maand = jaarbedrag / 12)', '', kop, ander.map(rij).join('\n'), '');
+  regels.push('| | Per maand |', '|---|--:|', '| **Totaal vaste lasten** | **' + eur(u.totaal_per_maand) + '** |');
+  if (u.waarvan_hypotheek) regels.push('| waarvan zonder hypotheek | ' + eur(u.totaal_per_maand - u.waarvan_hypotheek) + ' |');
+  u.steun.forEach(function (s) { regels.push('| ' + s.naam + ' (rond de ' + s.dag + 'e) | ' + eur(s.per_maand) + ' |'); });
+  u.vaste_storting.forEach(function (s) { regels.push('| **Vaste storting** vanaf ' + s.van + ', rond de ' + s.dag + 'e | **' + eur(s.bedrag) + '** |'); });
+  if (u.over != null) regels.push('| **Over na vaste lasten' + (u.steun.length ? ' en steun' : '') + '** | **' + eur(u.over) + '** |');
+  regels.push('');
+  const vs = u.verschil.map(function (v) {
+    return v.wat === 'nieuw' ? '- nieuw: ' + v.post + ' (' + eur(v.per_maand) + ' per maand)' : v.wat === 'weg' ? '- niet meer gezien: ' + v.post + ' (was ' + eur(v.per_maand) + ' per maand)'
+      : '- ' + v.post + ': ' + eur(v.van) + ' → ' + eur(v.naar) + ' per maand';
+  });
+  regels.push('**Verschil met de stand van ' + dmj(u.vorige_stand) + ':** ' + (vs.length ? '' : 'geen.'));
+  if (vs.length) regels.push('', vs.join('\n'));
+  return regels.join('\n').replace(/<!--|-->/g, '');
+}
+
+// Geldstroom per maand (ontwerp § 5): per rekeningpaar (van → naar) aantal en som van de overboekingen, vast (zelfde paar en
+// bedrag in minstens 3 verschillende maanden van het laatste half jaar) of los; en voor de vaste-lastenrekening de buffer (vaste storting − alle uitgaven,
+// rollend over 3 maanden) en de dekking voor wat tot de 5e van de volgende maand nog afgaat. Saldo: alleen gesprek, nooit de vault.
+function stroom(a, o) {
+  verrijkAlsVuil(a);
+  const nu = peildag(a), m = o.maand || nu.slice(0, 7);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(m)) throw new Error('maand: JJJJ-MM');
+  if (m > nu.slice(0, 7)) throw new Error('maand: die maand is nog niet begonnen');
+  const reks = rekNamen(a), ext = externeRekeningen(a);
+  const eind = maandEinde(m), ref = eind < nu ? eind : nu, van4 = plusDagen(ref, -183);
+  const iban = new Map(a.db.prepare('SELECT rek, iban FROM rekeningen WHERE iban IS NOT NULL').all().map(function (r) { return [r.iban, r.rek]; }));
+  const rijen = a.db.prepare('SELECT t.nr, t.rek, t.datum, t.bedrag, t.tegen_iban, v.type, (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) AS paar_rek' +
+    ' FROM transacties t LEFT JOIN verrijking v ON v.nr = t.nr WHERE ' + ZICHTBAAR + ' AND t.bedrag < 0 AND t.datum >= ? AND t.datum <= ?').all(van4, ref);
+  const paren = new Map();
+  rijen.forEach(function (t) {
+    if (ext.has(t.rek)) return;   // posten op de externe rekening zelf zijn niet van David
+    const naar = t.paar_rek || (t.tegen_iban && iban.get(t.tegen_iban) !== t.rek ? iban.get(t.tegen_iban) : null);
+    if (!naar || (t.type !== 'intern' && !ext.has(naar))) return;
+    const k = t.rek + '>' + naar;
+    if (!paren.has(k)) paren.set(k, { van: t.rek, naar: naar, l: [] });
+    paren.get(k).l.push(t);
+  });
+  const uit = [];
+  paren.forEach(function (p) {
+    const inM = p.l.filter(function (t) { return t.datum.slice(0, 7) === m; });
+    if (!inM.length) return;
+    const vast = vasteBedragen(p.l, ref, 0.005).filter(function (v) { return v.l.some(function (t) { return t.datum.slice(0, 7) === m; }); });
+    const vastNr = new Set();
+    vast.forEach(function (v) { v.l.forEach(function (t) { if (t.datum.slice(0, 7) === m) vastNr.add(t.nr); }); });
+    const los = inM.filter(function (t) { return !vastNr.has(t.nr); });
+    uit.push({ van: rekeningNaam(reks.get(p.van)), naar: rekeningNaam(reks.get(p.naar)), extern: ext.has(p.naar) || undefined, aantal: inM.length,
+      som: r2(-inM.reduce(function (s, t) { return s + t.bedrag; }, 0)), vast: vast.map(function (v) { return { bedrag: v.bedrag, dag: v.dag }; }),
+      los: los.length ? { aantal: los.length, som: r2(-los.reduce(function (s, t) { return s + t.bedrag; }, 0)) } : undefined });
+  });
+  uit.sort(function (x, y) { return y.som - x.som; });
+  // buffer en dekking van de vaste-lastenrekening (als die er is)
+  let buffer;
+  try {
+    const rek = vasteLastenRekening(a, o.rek);
+    const p = vastePosten(a, rek), r = reks.get(rek);
+    const maanden = [plusMaanden(m + '-01', -2).slice(0, 7), plusMaanden(m + '-01', -1).slice(0, 7), m];
+    const perM = maanden.map(function (mm) {
+      const inn = r2(p.intern_in.filter(function (t) { return t.datum.slice(0, 7) === mm; }).reduce(function (s, t) { return s + t.bedrag; }, 0));
+      const af = r2(-p.lasten.concat(p.steun).filter(function (t) { return t.datum.slice(0, 7) === mm && t.bedrag < 0; }).reduce(function (s, t) { return s + t.bedrag; }, 0));
+      return { maand: mm, stortingen: inn, uitgaven: af, verschil: r2(inn - af) };
+    });
+    const st = {}; st[rek] = archiefStart(a).get(rek) || null;
+    const tot = plusDagen(eind, 5);
+    const nog = reeksenBereken(p.lasten, { ref: ref, start: st }).filter(function (x) { return x.actief && x.verwacht_volgende && x.verwacht_volgende > ref && x.verwacht_volgende <= tot; });
+    const saldoRij = p.alle.filter(function (t) { return t.datum <= ref && t.saldo_na != null; }).pop();
+    const nogAf = r2(nog.reduce(function (s, x) { return s + (x.ritme === 'maand' ? x.bedrag * x.n_per_maand : x.bedrag); }, 0));
+    buffer = { rekening: rekeningNaam(r), per_maand: perM, rollend_3_maanden: r2(perM.reduce(function (s, x) { return s + x.verschil; }, 0)),
+      dekking: saldoRij ? { saldo_op: saldoRij.datum, saldo: saldoRij.saldo_na, nog_af_tot: tot, vaste_lasten_nog_af: nogAf, genoeg: saldoRij.saldo_na - nogAf >= 0 } : undefined,
+      let_op: 'saldo alleen voor David in het gesprek; nooit in de vault' };
+  } catch (e) { if (!/^rekening:/.test(e.message)) throw e; }
+  return { maand: m, peildatum: ref, overboekingen: uit, buffer: buffer,
+    let_op: 'per rekeningpaar één regel (de afschrijvingen); vast = zelfde paar en bedrag in minstens 3 verschillende maanden van het laatste half jaar; naar een externe rekening is een uitgave, geen intern' };
 }
 // Alleen aantallen, data en herkomst; geen bedragen, namen of IBAN's (mag in een rapport).
 function stand(a) {
@@ -670,5 +1190,5 @@ function stand(a) {
   };
 }
 
-module.exports = { open, rekeningenSync, markeerOntkoppeld, bij, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, stand, maskerZet,
-  categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };
+module.exports = { open, rekeningenSync, markeerOntkoppeld, bij, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
+  categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, reeksenBereken, vastePosten, archiefStart, machtigingVan, naamNorm, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };

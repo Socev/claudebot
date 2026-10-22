@@ -13051,8 +13051,8 @@ function smalRoute(req, res) {
 const BANK_SCRIPT = process.env.BANK_SCRIPT || path.join(__dirname, 'bank-lezer.js');
 const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
-  'zoek', 'maand', 'intern', 'abonnementen', 'corrigeer', 'archief', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'ontkoppel'];
-const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'corrigeer', 'archief', 'verrijk', 'verrijk-open', 'verrijk-zet',
+  'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'ontkoppel'];
+const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'verrijk', 'verrijk-open', 'verrijk-zet',
   'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij'];   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
 const BANK_TERUG_PER_UUR = 30;
 const bankTerugTijden = [];
@@ -13227,16 +13227,17 @@ async function bankSmal(d) {
     }
   }
   // wv687: archiefopdrachten (alleen de lokale database)
-  if (['zoek', 'maand', 'intern', 'abonnementen', 'corrigeer'].indexOf(opdracht) >= 0) {
+  // wv764: vaste-lasten en stroom (maand, rekening) op dezelfde manier
+  if (['zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer'].indexOf(opdracht) >= 0) {
     const tekst = function (v, n) { return typeof v === 'string' && /^[\p{L}\p{N}][\p{L}\p{N} .,&'()\-_/:?+#€]*$/u.test(v.trim()) && v.trim().length <= (n || 80) ? v.trim() : null; };
     const fout = function (m) { return { status: 400, j: { ok: false, fout: m } }; };
     const toegestaan = { zoek: ['tekst', 'van', 'tot', 'rekening', 'categorie', 'eigenaar', 'type', 'max'], maand: ['maand', 'rekening', 'eigenaar'],
-      intern: ['van', 'tot', 'rekening', 'max'], abonnementen: [], corrigeer: ['nr', 'rekening', 'categorie', 'subcategorie', 'eigenaar', 'type', 'regel'] }[opdracht];
+      intern: ['van', 'tot', 'rekening', 'max'], abonnementen: [], 'vaste-lasten': ['maand', 'rekening'], stroom: ['maand', 'rekening'], corrigeer: ['nr', 'rekening', 'categorie', 'subcategorie', 'eigenaar', 'type', 'regel'] }[opdracht];
     for (const k of toegestaan) {
       if (d[k] == null || d[k] === '') continue;
       let v = null;
       if (k === 'van' || k === 'tot') v = datum(d[k]);
-      else if (k === 'maand') v = typeof d[k] === 'string' && /^\d{4}-\d{2}$/.test(d[k]) ? d[k] : null;
+      else if (k === 'maand') v = typeof d[k] === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(d[k]) ? d[k] : null;
       else if (k === 'max' || k === 'nr') v = /^\d{1,9}$/.test(String(d[k])) ? String(d[k]) : null;
       else if (k === 'type') v = ['uitgave', 'inkomst', 'intern', 'terugboeking'].indexOf(d[k]) >= 0 ? d[k] : null;
       else if (k === 'regel') v = d[k] === true || /^(ja|true)$/i.test(String(d[k])) ? 'ja' : (d[k] === false || /^(nee|false)$/i.test(String(d[k])) ? 'nee' : null);
@@ -13260,7 +13261,7 @@ async function bankSmal(d) {
   if (opdracht === 'ontkoppel') { if (typeof d.sessie !== 'string' || !/^[A-Za-z0-9-]{8,80}$/.test(d.sessie)) return { status: 400, j: { ok: false, fout: 'sessie ongeldig' } }; args.push(d.sessie); }
   const r = await bankKind(args, null, opdracht === 'historie' ? 1800000 : undefined);   // historie: 19 rekeningen × pagina's à 1,1 s
   const j = r.j;
-  if (['transacties', 'saldo', 'rekeningen', 'zoek', 'maand', 'intern', 'abonnementen', 'paypal', 'paypal-diensten'].indexOf(opdracht) >= 0) j.let_op_bron = BANK_LET_OP;   // wv683: ook rekeningnamen zijn tekst van derden
+  if (['transacties', 'saldo', 'rekeningen', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'paypal', 'paypal-diensten'].indexOf(opdracht) >= 0) j.let_op_bron = BANK_LET_OP;   // wv683: ook rekeningnamen zijn tekst van derden
   if (opdracht === 'archief') j.verrijk_ai = bankVerrijkStand();   // wv687: alleen aantallen en tijden
   schrijfLog(nu() + ' bank ' + velden({ opdracht: opdracht, ok: !!j.ok, code: r.code, mk: machinekamer || undefined }));
   return { status: 200, j: j };

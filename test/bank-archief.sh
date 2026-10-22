@@ -304,6 +304,115 @@ const p = (id, datum, bedrag, tegen, omschr, extra) => Object.assign({ id: id, d
     const ab = A.abonnementen(a, {});
     toets('abonnement herkend (maandritme, vast bedrag)', ab.abonnementen.some((x) => /netflix/i.test(x.naam) && x.ritme === 'maand' && x.actief), ab);
 
+    // ── wv764: vaste lasten (idee 16 fase B) — herkenning per machtiging, termijnen, clusters, tabel en geldstroom ──
+    {
+      toets('machtiging genormaliseerd (spaties, voorloopnullen) en naam zonder rechtsvorm', A.machtigingVan('Naam: X Machtiging: 0000 4356 2 Omschrijving: y') === '43562' &&
+        A.machtigingVan('Machtiging: 43562') === '43562' && A.naamNorm('PayPal (Europe) S.a r.l.') === A.naamNorm('PayPal Europe S.a.r.l. e') && A.naamNorm('TAF B.V.') === A.naamNorm('TAF BV'),
+        [A.machtigingVan('Naam: X Machtiging: 0000 4356 2 Omschrijving: y'), A.naamNorm('PayPal (Europe) S.a r.l.'), A.naamNorm('PayPal Europe S.a.r.l. e')]);
+      const BV = path.join(W, 'bank-vl'), v = A.open(BV);
+      const IV = { vl: 'NL00ABNA0555555555', pr: 'NL11BUNQ0000000071', el: 'NL08BUNQ0000000073' };
+      A.rekeningenSync(v, { vl: { uid: 'u7', bank: 'ABN AMRO', naam: 'Vaste lasten', iban: IV.vl, sessie: 's7' },
+        pr: { bron: 'bunq', uid: 'bunq-71', bunq_id: 71, naam: 'Privé', soort: 'lopend', iban: IV.pr, status: 'ACTIVE' },
+        el: { bron: 'bunq', uid: 'bunq-73', bunq_id: 73, naam: 'Elizabeth', soort: 'lopend', iban: IV.el, status: 'ACTIVE' } });
+      const mnd = []; for (let y = 2025, m = 1; y < 2026 || m <= 6; m++) { if (m > 12) { m = 1; y++; } mnd.push(y + '-' + String(m).padStart(2, '0')); if (y === 2026 && m === 6) break; }
+      const dg = (ym, d) => ym + '-' + String(d).padStart(2, '0');
+      const inc = (mach, naam) => 'SEPA Incasso algemeen doorlopend Incassant: NL00ZZZ999999990000 Naam: ' + naam + ' Machtiging: ' + mach + ' Omschrijving: termijn';
+      const VL = [], PR = [], EL = [];
+      let n = 0; const q = (l, datum, bedrag, tegen, oms, extra) => l.push(p('vl:' + (++n), datum, bedrag, tegen, oms, extra));
+      mnd.forEach((ym, k) => {
+        q(VL, dg(ym, 1), -(2900 - 2.5 * k), 'ABN AMRO BANK NV', inc('ST 1110 7002', 'ABN AMRO BANK NV'));                     // hypotheek, lineair dalend
+        q(VL, dg(ym, 2), ym === '2026-06' ? -302 : -300, 'MKB LEASE', inc('331959-3', 'MKB LEASE'));                           // prijsstap 0,67% in juni
+        q(VL, dg(ym, 15), ym >= '2026-05' ? -31 : -30, 'KPN - Mobiel', inc('M1', 'KPN - Mobiel'));                             // twee nummers, één rij
+        { const d = new Date(Date.UTC(2025, 0, 1) + Math.round(30.4 * k) * 86400000).toISOString().slice(0, 10); q(VL, d, -15, 'KPN - Mobiel', inc('M 2', 'KPN - Mobiel')); }   // schuift over de maandgrens
+        q(VL, dg(ym, 25), -[400, 380, 300, 250, 200, 180, 170, 190, 260, 330, 390, 420, 410, 390, 310, 240, 210, 190][k], 'Tibber Netherlands B.V.', inc('TB1', 'Tibber'));
+        q(VL, dg(ym, 27), -270, 'NV UNIVE ZORG', inc('UV1', 'NV UNIVE ZORG'));
+        q(VL, dg(ym, 10), -9.99, 'PayPal Europe S.a.r.l. e', inc('PP1', 'PayPal'));
+        q(VL, dg(ym, 11), -4.99, 'PayPal Europe S.a.r.l. e', inc('PP1', 'PayPal'));
+        q(VL, dg(ym, 19), -4.99, 'PayPal (Europe) S.a r.l.', inc('PP1', 'PayPal'));
+        if (ym <= '2026-02') q(VL, dg(ym, 5), -2.99, 'PayPal Europe S.a.r.l. e', inc('PP1', 'PayPal'));                         // gestopt
+        q(VL, dg(ym, 5), -50, 'Jan Jansen', 'SEPA Overboeking IBAN: NL22RABO0123456789 BIC: RABONL2U Naam: Jan Jansen Omschrijving: huur');
+        if (['2025-03', '2025-08', '2026-02'].indexOf(ym) >= 0) q(VL, dg(ym, 3), -40, 'NV UNIVE ZORG', inc('UV1', 'NV UNIVE ZORG'));   // eigen bijdrage
+        if (ym >= '2025-02' && ym <= '2025-11') q(VL, dg(ym, 28), -200, 'Gemeente Huizen', inc('000000043562', 'Gemeente Huizen'));
+        if (ym >= '2026-03') q(VL, dg(ym, 28), -210, 'GEM HUIZEN BELASTINGEN', inc('43562', 'GEM HUIZEN BELASTINGEN'));          // naamwissel, zelfde machtiging
+        if (ym >= '2025-07') {
+          q(VL, dg(ym, 20), -350, 'D. Schaap', 'Periodieke overb Geld', { tegen_iban: IV.el });                                   // steun (externe rekening)
+          q(VL, dg(ym, 19), 5000, 'D. Schaap', 'vaste storting', { tegen_iban: IV.pr });
+          PR.push(p('pr:' + ym, dg(ym, 19), -5000, 'D. Schaap', 'vaste storting', { tegen_iban: IV.vl }));
+          EL.push(p('el:' + ym, dg(ym, 20), 350, 'D SCHAAP CJ', 'Geld', { tegen_iban: IV.vl }));
+        }
+      });
+      q(VL, '2025-06-29', -266, 'NV UNIVE ZORG', inc('UV1', 'NV UNIVE ZORG'));                                                   // twee dagen na de premie
+      q(VL, '2026-04-20', -125.99, 'PayPal Europe S.a.r.l. e', inc('PP1', 'PayPal'));                                            // eenmalig
+      [['2025-03-23', 160], ['2025-06-23', 160], ['2025-09-23', 160], ['2025-12-23', 260], ['2026-03-23', 180], ['2026-06-23', 180]].forEach((x) => q(VL, x[0], -x[1], 'Nv Pwn Waterleidingbedri', inc('3942177', 'PWN')));
+      A.bij(v, 'vl', VL, {}); A.bij(v, 'pr', PR, {}); A.bij(v, 'el', EL, {});
+      A.corrigeer(v, { rek: 'el', eigenaar: 'extern' });
+      const nrv = (b) => v.db.prepare('SELECT nr FROM transacties WHERE bron_id = ?').get(b).nr;
+      const tib = VL.find((x) => /Tibber/.test(x.tegenpartij)).id;
+      A.corrigeer(v, { nr: nrv(tib), categorie: 'wonen', subcategorie: 'energie' });                                           // regel: alle Tibber-posten wonen/energie
+      A.verrijk(v);
+      // de opgeslagen reeksen rekenen met vandaag; de toets rekent met een vaste peildatum (zelfde functie, zelfde posten)
+      const RS = A.reeksenBereken(A.vastePosten(v, 'vl').lasten, { ref: '2026-06-30', start: { vl: A.archiefStart(v).get('vl') } });
+      const reeks = (re) => RS.filter((x) => new RegExp('^' + re.replace(/%/g, '.*')).test(x.naam || '')).map((x) => Object.assign({}, x, { bedrag_typisch: x.bedrag, nrs: undefined }));
+      const hyp = reeks('ABN AMRO%')[0], gem = reeks('%HUIZEN%'), kpn = reeks('KPN%'), tb = reeks('Tibber%')[0], uv = reeks('NV UNIVE%')[0], pw = reeks('Nv Pwn%')[0], ls = reeks('MKB%')[0];
+      toets('vl: hypotheek dalend, bedrag = laatste post', hyp && hyp.wijze === 'dalend' && hyp.bedrag_typisch === 2857.5 && hyp.per_maand === 2857.5, hyp);
+      toets('vl: gemeente één reeks over de naamwissel en voorloopnullen, 10 termijnen gemeten, per maand = 210 × 10 / 12', gem.length === 1 && gem[0].ritme === 'termijnen' &&
+        gem[0].termijnen === 10 && gem[0].termijnen_bron === 'gemeten' && gem[0].bedrag_typisch === 210 && gem[0].per_maand === 175 && gem[0].naam === 'GEM HUIZEN BELASTINGEN' && gem[0].bedrag_vorig === 200, gem);
+      toets('vl: KPN twee machtigingen = twee reeksen, niet geclusterd; prijsstap 30 → 31', kpn.length === 2 && kpn.some((x) => x.bedrag_typisch === 31 && x.bedrag_vorig === 30) && kpn.some((x) => x.bedrag_typisch === 15 && x.actief), kpn);
+      toets('vl: Tibber wisselend, gemiddelde van 12 maanden', tb && tb.wijze === 'wisselend' && tb.bedrag_typisch === 292.5 && tb.soort === 'vast', tb);
+      toets('vl: Univé premie met losse eigen bijdragen als extra (niet in het bedrag, geen abonnement-id)', uv && uv.bedrag_typisch === 270 && uv.extra === 4 &&
+        v.db.prepare("SELECT count(*) n FROM verrijking WHERE abonnement_id IS NOT NULL AND nr IN (SELECT nr FROM transacties WHERE bedrag IN (-40, -266))").get().n === 0, uv);
+      const pwId = (v.db.prepare("SELECT id FROM abonnementen WHERE tegen_sleutel = 'm:3942177'").get() || {}).id;
+      toets('vl: PWN afrekening hangt aan de reeks, bedrag 180 sinds maart', pw && pw.ritme === 'kwartaal' && pw.bedrag_typisch === 180 && pw.afrekening === 1 && pw.bedrag_vorig === 160 && pw.per_maand === 60 &&
+        !!pwId && v.db.prepare("SELECT abonnement_id a FROM verrijking WHERE nr = (SELECT nr FROM transacties WHERE bedrag = -260 AND tegenpartij LIKE 'Nv Pwn%')").get().a === pwId, [pw, pwId]);
+      toets('vl: kleine prijsstap (0,67%) is een stap, geen ruis', ls && ls.bedrag_typisch === 302 && ls.bedrag_vorig === 300 && ls.gewijzigd_op === '2026-06-02', ls);
+      const pp = RS.filter((x) => x.sleutel_soort === 'machtiging|cluster' && x.actief).sort((x, y) => x.bedrag - y.bedrag);
+      toets('vl: PayPal per bedragcluster, twee diensten van 4,99, gestopte en eenmalige niet actief', pp.length === 2 && pp[0].bedrag === 4.99 && pp[0].n_per_maand === 2 && pp[1].bedrag === 9.99 &&
+        !RS.some((x) => x.actief && (x.bedrag === 2.99 || x.bedrag === 125.99)), pp.map((x) => [x.bedrag, x.n_per_maand]));
+      toets('vl: opgeslagen in abonnementen met soort en per_maand; oude rijen (zonder sleutel_soort) opgeruimd', v.db.prepare("SELECT count(*) n FROM abonnementen WHERE sleutel_soort IS NULL").get().n === 0 &&
+        v.db.prepare("SELECT count(*) n FROM abonnementen WHERE tegen_sleutel = 'm:43562' AND per_maand > 0 AND soort IS NOT NULL").get().n === 1, v.db.prepare('SELECT tegen_sleutel, per_maand, soort FROM abonnementen').all());
+      toets('vl: overboeking aan een persoon, steun en storting geen reeks', !reeks('Jan%').length && !reeks('D%Schaap%').length, reeks('%Schaap%'));
+      const vlr = A.vasteLasten(v, { maand: '2026-06' });
+      toets('vl: vaste-lasten juni 2026 — totaal, steun, storting, over', vlr.totaal_per_maand === 4022.97 && vlr.steun.length === 1 && vlr.steun[0].per_maand === 350 &&
+        vlr.vaste_storting.length === 1 && vlr.vaste_storting[0].bedrag === 5000 && vlr.over === 627.03 && vlr.peildatum === '2026-06-30', [vlr.totaal_per_maand, vlr.steun, vlr.vaste_storting, vlr.over, vlr.vaste_lasten.map((x) => [x.naam, x.per_maand])]);
+      toets('vl: KPN als één rij met twee reeksen, PayPal als één rij', vlr.vaste_lasten.filter((x) => /KPN/.test(x.naam)).length === 1 && vlr.vaste_lasten.find((x) => /KPN/.test(x.naam)).reeksen === 2 &&
+        vlr.vaste_lasten.filter((x) => /PayPal/.test(x.naam)).length === 1 && vlr.vaste_lasten.find((x) => /PayPal/.test(x.naam)).per_maand === 19.97, vlr.vaste_lasten);
+      toets('vl: verschil met de vorige stand (lease 300 → 302; hypotheek telt niet als verschil)', vlr.verschil.some((x) => x.wat === 'anders' && /MKB/.test(x.post) && x.van === 300 && x.naar === 302) &&
+        !vlr.verschil.some((x) => /ABN AMRO/.test(x.post)), vlr.verschil);
+      toets('vl: tabel_md zonder IBAN, machtiging, omschrijving, persoon of markering', /\| \*\*Totaal vaste lasten\*\* \| \*\*€ 4\.022,97\*\* \|/.test(vlr.tabel_md) &&
+        !/NL\d\d[A-Z]{4}|ST 1110|M1\b|331959|Machtiging|Incassant|termijn Omschrijving|Jan Jansen|<!--|-->|huur/.test(vlr.tabel_md), vlr.tabel_md);
+      const vm2 = A.vasteLasten(v, { maand: '2025-12' });
+      toets('vl: een eerdere maand rekent met de posten tot die maand (gemeente tussen twee aanslagen nog actief)', vm2.peildatum === '2025-12-31' && vm2.vaste_lasten.some((x) => /Gemeente/.test(x.naam)), vm2.vaste_lasten.map((x) => x.naam));
+      let fout = null; try { A.vasteLasten(v, { maand: '2099-01' }); } catch (e) { fout = e.message; }
+      toets('vl: toekomstige maand geweigerd', /^maand:/.test(fout || ''), fout);
+      fout = null; try { A.vasteLasten(v, { maand: '2026-06', rek: 'el' }); } catch (e) { fout = e.message; }
+      toets('vl: externe rekening geweigerd', /^rekening:/.test(fout || ''), fout);
+      const sr = A.stroom(v, { maand: '2026-06' });
+      const ps = sr.overboekingen.find((x) => x.van === 'Privé' && x.naar === 'Vaste lasten'), es = sr.overboekingen.find((x) => x.naar === 'Elizabeth');
+      toets('vl: stroom — vaste storting en steun als vast paar, buffer over 3 maanden, dekking met saldo', ps && ps.vast.length === 1 && ps.vast[0].bedrag === 5000 && es && es.extern && es.som === 350 &&
+        sr.buffer && sr.buffer.per_maand.length === 3 && sr.buffer.per_maand[2].stortingen === 5000, sr);
+      // Fable wv764: randgevallen
+      const R = (posten, ref, start) => A.reeksenBereken(posten.map((x, i) => Object.assign({ nr: 9000 + i, rek: 'x', tegenpartij: 'Org', categorie: null, subcategorie: null }, x)), { ref: ref, start: { x: start || '2024-01-01' } });
+      const maandPosten = (van, n, bedrag, mach, extra) => Array.from({ length: n }, (_, k) => Object.assign({ datum: (Number(van.slice(0, 4)) + Math.floor((Number(van.slice(5, 7)) - 1 + k) / 12)) + '-' +
+        String(((Number(van.slice(5, 7)) - 1 + k) % 12) + 1).padStart(2, '0') + '-10', bedrag: -(typeof bedrag === 'function' ? bedrag(k) : bedrag), omschrijving: inc(mach, 'Org') }, extra || {}));
+      let rr = R(maandPosten('2025-01', 12, (k) => k < 11 ? 2.75 : 9.25, 'NM1'), '2025-12-31');
+      toets('rand: prijsstap > 35% als laatste post — reeks blijft actief, laatste post voorlopig', rr.length === 1 && rr[0].actief === 1 && rr[0].bedrag === 2.75 && rr[0].laatste_afwijkend === 9.25, rr);
+      rr = R(maandPosten('2025-01', 13, (k) => k < 11 ? 2.75 : 9.25, 'NM1'), '2026-01-31');
+      toets('rand: twee posten op de nieuwe stand — nieuwe prijs, niet meer voorlopig', rr.length === 1 && rr[0].bedrag === 9.25 && rr[0].bedrag_vorig === 2.75 && rr[0].laatste_afwijkend === null, rr);
+      rr = R(maandPosten('2025-03', 8, 210, 'GM1', { categorie: 'belastingen' }), '2026-01-31', '2025-02-01');
+      toets('rand: belastingen vóór het eerste gat — termijnen (10 aangenomen), in de gatmaand nog actief', rr.length === 1 && rr[0].ritme === 'termijnen' && rr[0].termijnen === 10 &&
+        rr[0].termijnen_bron === 'aangenomen' && rr[0].actief === 1 && rr[0].per_maand === 175, rr);
+      rr = R(maandPosten('2025-01', 1, 39.95, 'SP1').concat(maandPosten('2025-06', 10, 39.95, 'SP1')), '2026-03-31');
+      toets('rand: één pauze maakt van een maandabonnement geen termijnreeks', rr.length === 1 && rr[0].ritme === 'maand' && rr[0].per_maand === 39.95, rr);
+      rr = R([{ datum: '2025-06-13', bedrag: -59.99, omschrijving: inc('PPX', 'PayPal') }, { datum: '2026-06-15', bedrag: -59.99, omschrijving: inc('PPX', 'PayPal') }]
+        .concat(maandPosten('2025-06', 12, 9.99, 'PPX'), maandPosten('2025-06', 12, 4.99, 'PPX'), maandPosten('2025-06', 12, 2.99, 'PPX')), '2026-06-30');
+      toets('rand: paraplumachtiging — twee jaarposten zijn geen reeks, de maanddiensten wel', !rr.some((x) => x.bedrag === 59.99) && rr.filter((x) => x.actief).length === 3, rr.map((x) => [x.bedrag, x.ritme]));
+      rr = R(maandPosten('2025-01', 12, (k) => k < 8 ? 1000 : 1250, 'HR1', { categorie: 'wonen', subcategorie: 'huur' }), '2025-12-31');
+      toets('rand: huurstap +25% in wonen is een prijsstap, niet wisselend', rr.length === 1 && rr[0].wijze === 'vast' && rr[0].bedrag === 1250 && rr[0].bedrag_vorig === 1000, rr);
+      const vlB = A.vasteLasten(v, { maand: '2026-06', rek: 'pr' });
+      toets('vl: andere rekening dan de vaste-lastenrekening: standaard_rekening false (bank.py schrijft dan niet)', vlB.standaard_rekening === false && vlr.standaard_rekening === true, [vlB.standaard_rekening, vlr.standaard_rekening]);
+      v.db.close();
+    }
+
     // ── stand: alleen aantallen ──
     const st = A.stand(a);
     toets('stand: aantallen per status en herkomst, geen bedragen of namen', st.transacties === tel() && st.per_status.vervangen >= 1 && st.verrijking.per_herkomst.david >= 2 &&
@@ -337,6 +446,12 @@ process.stdout.write(JSON.stringify({ type: 'result', is_error: false, usage: { 
     fs.writeFileSync(path.join(BD, 'stand.json'), JSON.stringify({ versie: 1, wachtend: {}, sessies: {}, rekeningen: REK, tellers: { dag: '', per: {} }, opgehaald: {} }), { mode: 0o600 });
     let s = await h.bankSmal({ secret: 'socev', opdracht: 'zoek', tekst: 'albert', max: 5 });
     toets('smal zoek met de Socev-sleutel: ok, BANKDATA-markering, geen kluis', s.status === 200 && s.j.ok && s.j.aantal >= 3 && /BANKDATA/.test(s.j.let_op_bron) && kluis === 0, [s, kluis]);
+    s = await h.bankSmal({ secret: 'socev', opdracht: 'vaste-lasten', maand: '2026-13' });   // maand 13: 400 vóór het kindproces
+    toets('smal vaste-lasten met een ongeldige maand: 400', s.status === 400, s);
+    s = await h.bankSmal({ secret: 'socev', opdracht: 'vaste-lasten' });
+    toets('smal vaste-lasten met de Socev-sleutel: ok, BANKDATA-markering, tabel_md, geen kluis', s.status === 200 && s.j.ok && /BANKDATA/.test(s.j.let_op_bron) && typeof s.j.tabel_md === 'string' && kluis === 0, [s, kluis]);
+    s = await h.bankSmal({ secret: 'socev', opdracht: 'stroom', maand: vandaag.slice(0, 7) });
+    toets('smal stroom: ok, BANKDATA-markering', s.status === 200 && s.j.ok && /BANKDATA/.test(s.j.let_op_bron), s);
     s = await h.bankSmal({ secret: 'socev', opdracht: 'maand', maand: 'oktober' });
     toets('smal maand met een ongeldige maand: 400', s.status === 400, s);
     s = await h.bankSmal({ secret: 'socev', opdracht: 'corrigeer', nr: String(nr('b:6')), categorie: '--regel' });
