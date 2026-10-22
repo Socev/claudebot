@@ -7935,8 +7935,9 @@ async function appNieuwRoute(req, res, a) {
   for (const k of ['hoofd', 'machinekamer']) {
     try { const x = await appLogTijden(k, true); if (x.length) telegram[k] = new Date(Math.max.apply(null, x)).toISOString(); } catch (e) {}
   }
+  const gd = appGezienDavid();   // wv804 (ontwerp § 2): door David gezien, voor fase 4 (nu informatief)
   appStuur(res, 200, { ok: true, nu: new Date(nu).toISOString(), tabs: tabs, laatst: laatst, gezien: gezien, seintje: appSeintjeTab(a.id), fouten: fouten, telegram: telegram,
-    naar_telegram: appNaarTelegramWissels(nu), telegram_bezig: appTelegramBezig() });
+    naar_telegram: appNaarTelegramWissels(nu), telegram_bezig: appTelegramBezig(), david: gd ? { tabs: gd.tabs, punten_n: Object.keys(gd.punten).length } : null });
 }
 // wv292 (Fable wv263 #14): per gesprek het jongste moment waarop een vraag van Socev naar Telegram ging, terugkwam of zijn voorlopige
 // Telegram-stand verliep; de app herlaadt het open gesprek als dit verandert (anders staan er knoppen die 409 geven, of juist niet).
@@ -7981,10 +7982,19 @@ function appTelegramBezigRoute(req, res) {
   appStuur(res, 200, { ok: true, bezig: appTelegramBezig() });
 }
 // De tab die open is (of net verlaten werd) als gezien zetten: tot nu, of tot een meegegeven tijdstip (nooit terug).
+// wv804 (ontwerp § 2, Fable M6): door_david: true zet ook gezien-david.json (als de pod het aanvaardt; antwoord door_david);
+// tab vandaag alleen met door_david en punten (≤ 100 ids), zonder tabtijd.
 function appNieuwGezien(req, res, a, d) {
   res._app.stil = true;
   const tab = String(d.tab || '');
-  if (APP_NIEUW_TABS.indexOf(tab) < 0) return appWeiger(res, 400, 'onbekende tab', 'gezien tab');
+  const dd = d.door_david === true;
+  let punten = null;
+  if (tab === 'vandaag') {
+    if (!dd || !Array.isArray(d.punten) || !d.punten.length || d.punten.length > 100 || !d.punten.every(function (x) { return typeof x === 'string' && APP_GEZIEN_PUNT_RE.test(x); }))
+      return appWeiger(res, 400, 'ongeldig verzoek', 'gezien vandaag');
+    punten = d.punten.slice();
+  } else if (d.punten !== undefined) return appWeiger(res, 400, 'punten alleen bij vandaag', 'gezien punten');
+  if (tab !== 'vandaag' && APP_NIEUW_TABS.indexOf(tab) < 0) return appWeiger(res, 400, 'onbekende tab', 'gezien tab');
   // zonder tot: nu (de tab die je net bekeek of verlaat; Fable-review wv137 #3), anders begrensd
   let t = Date.now();
   if (tab !== 'broedstoof' && d.tot !== undefined) {
@@ -7992,13 +8002,23 @@ function appNieuwGezien(req, res, a, d) {
     if (!isFinite(t) || t > Date.now() + 60000 || t < Date.now() - 365 * 86400000) return appWeiger(res, 400, 'ongeldig tijdstip', 'gezien tot');
   }
   try {
-    const alle = appLeesStreng(APP_GEZIEN, {});
-    const g = alle[a.id] = alle[a.id] || {};
-    if (tab === 'broedstoof') { const n = appBusMaxNr(); if (n !== null) g.broedstoof_nr = n; }
-    else if (!g[tab] || Date.parse(g[tab]) < t) g[tab] = new Date(t).toISOString();
-    appSchrijfJson(APP_GEZIEN, alle);
-    appStuur(res, 200, { ok: true });
-  } catch (e) { logError('app-nieuw', e); appWeiger(res, 500, 'opslaan lukte niet', 'gezien schrijven'); }
+    if (tab !== 'vandaag') {
+      const alle = appLeesStreng(APP_GEZIEN, {});
+      const g = alle[a.id] = alle[a.id] || {};
+      if (tab === 'broedstoof') { const n = appBusMaxNr(); if (n !== null) g.broedstoof_nr = n; }
+      else if (!g[tab] || Date.parse(g[tab]) < t) g[tab] = new Date(t).toISOString();
+      appSchrijfJson(APP_GEZIEN, alle);
+    }
+  } catch (e) { logError('app-nieuw', e); return appWeiger(res, 500, 'opslaan lukte niet', 'gezien schrijven'); }
+  if (!dd || tab === 'broedstoof') return appStuur(res, 200, { ok: true, door_david: false });
+  return appDoorDavidMag(a).then(function (mag) {
+    if (mag) return appStuur(res, 200, { ok: true, door_david: appGezienDavidZet(a, tab, t, punten) });
+    // Fable M6: 10 s in de wacht op een aanwezig van dit apparaat, daarna vervalt het
+    const gw = appStaat.gezienWacht || (appStaat.gezienWacht = {});
+    const w = gw[a.id] && Date.now() - gw[a.id].op < APP_GEZIEN_WACHT_MS ? gw[a.id] : (gw[a.id] = { op: Date.now(), lijst: [] });
+    if (w.lijst.length < 20) w.lijst.push({ tab: tab, t: t, punten: punten });
+    appStuur(res, 200, { ok: true, door_david: false });
+  }, function (e) { logError('app-nieuw', e); appStuur(res, 200, { ok: true, door_david: false }); });
 }
 
 // ── Concept per kanaal (wv159, bouwplan § 4.11; David 8-10: "ik had hier wat getikt, ging even weg … en mijn getikte tekst
@@ -10032,7 +10052,9 @@ function appVapidJwt(v, aud) {
   return k + '.' + i + '.' + crypto.sign('sha256', Buffer.from(k + '.' + i), { key: v.key, dsaEncoding: 'ieee-p1363' }).toString('base64url');
 }
 // Eén seintje naar één apparaat. Alleen naar een actief apparaat uit het register, nooit tijdens een noodstop.
-async function appPushStuur(id, reden) {
+// wv804 (ontwerp § 5): poets = {voor: iso}: een lege push (TTL 600, Urgency low, Topic socev) die een nog niet bezorgd echt seintje
+// bij de pushdienst vervangt; de SW vraagt de stand en vervangt de melding. Schrijft laatst/laatst_per niet, wel s.poets.
+async function appPushStuur(id, reden, poets) {
   if (fs.existsSync(APP_UIT)) return { ok: false, reden: 'app staat uit' };
   let a = null;
   try { a = appRegister().apparaten.find(function (x) { return x.id === id; }); } catch (e) { return { ok: false, reden: 'register onleesbaar' }; }
@@ -10051,15 +10073,20 @@ async function appPushStuur(id, reden) {
   // Niet versturen; de app vraagt om seintjes opnieuw aan te zetten (Fable-review wv100 B6).
   if (sub.sleutel && sub.sleutel !== appSha(v.publiek).slice(0, 16)) return { ok: false, reden: 'sleutel vervangen; zet seintjes opnieuw aan' };
   let status = 0;
+  // wv804 (ontwerp § 4, K5): onderweg vóór de fetch (de SW kan de stand vragen voordat de pod het antwoord van de pushdienst
+  // verwerkt); overleeft geen herstart (restrisico, gedocumenteerd). Een poets telt niet als onderweg.
+  const po = appStaat.pushOnderweg || (appStaat.pushOnderweg = {});
+  if (!poets) po[id] = (po[id] || 0) + 1;
   try {
     // meldingen: kort houdbaar en niet dringend, zodat een telefoon die offline was niet na 22:00 alsnog zoemt (K6)
     const meld = reden === 'meldingen';
     const r = await fetch(sub.endpoint, { method: 'POST', body: '', redirect: 'manual', signal: AbortSignal.timeout(10000),
-      headers: { TTL: String(meld ? 3600 : APP_PUSH_TTL_S), Urgency: meld ? 'normal' : 'high', Topic: 'socev', Authorization: 'vapid t=' + appVapidJwt(v, new URL(sub.endpoint).origin) + ', k=' + v.publiek } });
+      headers: { TTL: String(poets ? 600 : meld ? 3600 : APP_PUSH_TTL_S), Urgency: poets ? 'low' : meld ? 'normal' : 'high', Topic: 'socev', Authorization: 'vapid t=' + appVapidJwt(v, new URL(sub.endpoint).origin) + ', k=' + v.publiek } });
     status = r.status;
     try { await r.text(); } catch (e) {}
   } catch (e) { logError('app-push', { name: e && e.name, code: e && e.cause && e.cause.code }); }
   const ok = status >= 200 && status < 300;
+  const kanaalVan = /^antwoord ([a-z-]+)$/.exec(String(reden || ''));
   // 404/410: het abonnement bestaat niet meer bij de pushdienst (browser opnieuw ingesteld, rechten ingetrokken, of de
   // pushdienst liet het verlopen: Pixel 9-10, wv282). wv414: niet meer spoorloos weghalen maar als verlopen bewaren (zonder
   // endpoint); de app ziet dat na de volgende ontgrendeling en abonneert dan vanzelf opnieuw. Plus één kaart in Meldingen.
@@ -10071,11 +10098,15 @@ async function appPushStuur(id, reden) {
       const s = p.apparaten[id];
       if (!s || s.endpoint !== sub.endpoint) return;
       const nu = new Date().toISOString();
-      s.laatst = { op: nu, status: status, reden: String(reden || '').slice(0, 30) };   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137)
+      if (poets) s.poets = { op: nu, voor: poets.voor, status: status };   // wv804 (ontwerp § 5)
+      else s.laatst = { op: nu, status: status, reden: String(reden || '').slice(0, 30) };   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137)
+      // wv804 Fable B1/M2: per kanaal het laatste bezorgde (2xx) seintje; een mislukte push overschrijft niets
+      if (!poets && ok && kanaalVan) (s.laatst_per = s.laatst_per || {})[kanaalVan[1]] = { op: nu };
       if (weg) { s.endpoint = null; s.verlopen = nu; appPushVerlopenMeld(p, id, a.naam, nu, status); }
     });
   } catch (e) { logError('app-push', e); }
-  appAudit({ route: 'push', m: 'POST', status: status, apparaat: id, reden: String(reden || '').slice(0, 40) + (weg ? ' (abonnement verlopen, bewaard)' : '') });
+  if (!poets) { if (--po[id] <= 0) delete po[id]; }
+  appAudit({ route: 'push', m: 'POST', status: status, apparaat: id, reden: (poets ? 'poets' : String(reden || '').slice(0, 40)) + (weg ? ' (abonnement verlopen, bewaard)' : '') });
   return { ok: ok, status: status, reden: ok ? 'verstuurd' : weg ? 'abonnement verlopen' : status ? 'pushdienst gaf ' + status : 'pushdienst niet bereikbaar' };
 }
 async function appPushAlle(soort, reden, filter) {
@@ -10103,9 +10134,127 @@ function appPushNaBeurt(jobId) {
     if (!k || !k.app || k.app.noodstop) return;
     const gz = k.app.gezien || {}, iemand = Object.keys(gz).length > 0, vrager = k.app.apparaat;
     if (iemand && gz[vrager]) return;
-    appPushAlle('antwoord', 'antwoord ' + k.app.kanaal, function (id) { return !iemand || id === vrager; }).catch(function (e) { logError('app-push', e); });
+    // wv804 (ontwerp § 3): alleen wie mag (de Pixel, of zoem aan); een pc-vrager zonder zoem krijgt niets (de Pixel zag het = David zag het)
+    appPushAlle('antwoord', 'antwoord ' + k.app.kanaal, function (id) { return (!iemand || id === vrager) && appPushMag(id); }).catch(function (e) { logError('app-push', e); });
   }, APP_PUSH_WACHT_MS);
   if (t && t.unref) t.unref();
+}
+// ── wv804: één meldingenkanaal fase 3 (bouwplan § 4.2–4.4, ontwerp § 2–5, Fable-review § 11) ──
+// Alleen-Pixel (ontwerp § 3): een antwoord-seintje gaat naar de goedkeurder, of naar een apparaat met soort zoem in push.json.
+function appPushMag(id, reg, s) {
+  try { const g = appGoedkeurder(reg || appRegister()); if (g && g.id === id) return true; } catch (e) {}
+  try { if (s === undefined) s = appPushLees().apparaten[id]; } catch (e) { return false; }
+  return !!s && (s.soorten || []).indexOf('zoem') >= 0;
+}
+// gezien-david.json (ontwerp § 2): {versie, tabs: {tab: iso}, punten: {id: iso}, bron: {tab: apparaat}}; geen inhoud. Kapot: null +
+// logError (niet stil); dan wordt er ook niet geschreven (geen overschrijven).
+const APP_GEZIEN_DAVID = path.join(APP_DATA, 'gezien-david.json');
+const APP_GEZIEN_DAVID_PUNTEN_MAX = 500;
+const APP_GEZIEN_DAVID_PUNT_MS = 14 * 86400000;
+const APP_GEZIEN_PUNT_RE = /^[a-z0-9:_-]{1,80}$/;
+const APP_DAVID_AANWEZIG_MS = 130 * 1000;   // wv804 Fable M6: door_david van een ander apparaat alleen met aanwezig < 130 s
+const APP_GEZIEN_WACHT_MS = 10 * 1000;      // ... anders 10 s in de wacht op een aanwezig, daarna vervalt het
+const APP_SEINTJE_STAND_PER_UUR = 60;
+const APP_POETS_MS = 2 * 60 * 1000;
+function appGezienDavid() {
+  try {
+    const g = appLeesStreng(APP_GEZIEN_DAVID, {});
+    return { versie: 1, tabs: g.tabs && typeof g.tabs === 'object' ? g.tabs : {}, punten: g.punten && typeof g.punten === 'object' ? g.punten : {}, bron: g.bron && typeof g.bron === 'object' ? g.bron : {} };
+  } catch (e) { logError('gezien-david', e); return null; }
+}
+function appGezienDavidZet(a, tab, t, punten) {
+  const g = appGezienDavid();
+  if (!g) return false;
+  const iso = new Date(t).toISOString();
+  if (tab === 'vandaag') (punten || []).forEach(function (p) { g.punten[p] = iso; });
+  else if (!g.tabs[tab] || Date.parse(g.tabs[tab]) < t) g.tabs[tab] = iso;   // nooit terug
+  g.bron[tab] = a.id;
+  const grens = Date.now() - APP_GEZIEN_DAVID_PUNT_MS;
+  const pk = Object.keys(g.punten).filter(function (k) { return Date.parse(g.punten[k]) >= grens; })
+    .sort(function (x, y) { return Date.parse(g.punten[y]) - Date.parse(g.punten[x]); }).slice(0, APP_GEZIEN_DAVID_PUNTEN_MAX);
+  const punt = {}; pk.forEach(function (k) { punt[k] = g.punten[k]; }); g.punten = punt;
+  try { appSchrijfJson(APP_GEZIEN_DAVID, g); } catch (e) { logError('gezien-david', e); return false; }
+  // poets-push (ontwerp § 5): alleen na een door_david-gezien vanaf een ander apparaat dan de Pixel
+  if (tab !== 'vandaag') { try { const px = appGoedkeurder(appRegister()); if (px && px.id !== a.id) appPoetsPlan(); } catch (e) {} }
+  return true;
+}
+// Fable M6: door_david server-side. Goedkeurder altijd; ander apparaat alleen met aanwezig < 130 s (vaste plek: alleen met open slot,
+// appAanwezig telt daar alleen met open slot). Anders 10 s in de wacht: komt er binnen die tijd een aanwezig, dan alsnog.
+function appDoorDavidMag(a) {
+  let g = null;
+  try { g = appGoedkeurder(appRegister()); } catch (e) {}
+  if (g && g.id === a.id) return Promise.resolve(true);
+  const aw = (appStaat.aanwezig || {})[a.id] || 0;
+  if (!(Date.now() - aw < APP_DAVID_AANWEZIG_MS)) return Promise.resolve(false);
+  if (a.soort !== 'vast') return Promise.resolve(true);
+  return appSlot(a).then(function (sl) { return !!sl.open; }, function () { return false; });
+}
+function appGezienWachtAf(a) {
+  const w = appStaat.gezienWacht && appStaat.gezienWacht[a.id];
+  if (!w) return;
+  delete appStaat.gezienWacht[a.id];
+  if (Date.now() - w.op < APP_GEZIEN_WACHT_MS) w.lijst.forEach(function (x) { appGezienDavidZet(a, x.tab, x.t, x.punten); });
+}
+// toon (ontwerp § 4 + Fable B1/M2/K2): tonen als er iets onderweg is, als er geen gegevens zijn, als het laatste seintje geen
+// antwoord-seintje was (meldingen, proef, onbekend), of als een kanaal een bezorgd seintje heeft (< 24 u) dat David nog niet zag.
+function appSeintjeToon(id, s) {
+  if ((appStaat.pushOnderweg || {})[id]) return true;
+  if (!s || !s.laatst) return true;
+  if (!/^antwoord [a-z-]+$/.test(String(s.laatst.reden || ''))) return true;
+  const lp = s.laatst_per || {}, ks = Object.keys(lp);
+  if (!ks.length) return true;
+  return ks.some(function (k) {
+    const op = Date.parse((lp[k] || {}).op);
+    return Date.now() - op < APP_SEINTJE_TAB_MS && !berichtGezienDoorDavid(k, op);
+  });
+}
+// GET /app/seintje-stand (proef 3a, ontwerp § 4): alleen het apparaatcookie (de SW heeft geen sessie); antwoord alleen {ok, toon}.
+// Noodstop: 503 in handleApp (Fable K1); passieve kant 409 (Fable M4: de SW toont dan gewoon). Stil in audit; eigen teller.
+function appSeintjeStand(req, res, reg) {
+  res._app.stil = true;
+  const a = appApparaat(req, reg);
+  if (!a) return appStuur(res, 200, { ok: true, toon: false });
+  res._app.apparaat = a.id;
+  const tl = 'seintje-stand:' + a.id;
+  if (!appStaat.tellers[tl]) appStaat.tellers[tl] = [];   // Fable K6: lazy init
+  if (!appTeller(tl, APP_SEINTJE_STAND_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens seintje-stand');
+  return appRolOk().then(function (actief) {
+    if (!actief) return appWeiger(res, 409, 'passief', 'seintje-stand passief');
+    let s = null;
+    try {
+      s = appPushLees().apparaten[a.id] || null;
+      // Fable M3: dit apparaat draait de nieuwe SW; pas dan mag er een poets-push heen
+      if (s && !s.sw_vraagt) appPushWijzig(function (p) { const x = p.apparaten[a.id]; if (x && !x.sw_vraagt) x.sw_vraagt = new Date().toISOString(); });
+    } catch (e) { logError('app-push', e); return appStuur(res, 200, { ok: true, toon: true }); }
+    appStuur(res, 200, { ok: true, toon: appSeintjeToon(a.id, s) });
+  }, function () { appWeiger(res, 409, 'passief', 'seintje-stand rol'); });
+}
+// Poets-push (ontwerp § 5 + Fable B1/M3): naar de Pixel als die de nieuwe SW draait (sw_vraagt), een bezorgd kanaalseintje kreeg ná
+// zijn laatste poll en er nu niets meer ongezien is; één per seintje; hooguit één per 2 min (daarbinnen één timer die opnieuw beslist).
+// Niet tijdens een noodstop, alleen op de actieve kant.
+function appPoetsPlan() {
+  const ps = appStaat.poets || (appStaat.poets = { laatst: 0, timer: null });
+  if (ps.timer) return;
+  const wacht = ps.laatst + APP_POETS_MS - Date.now();
+  if (wacht > 0) { ps.timer = setTimeout(function () { ps.timer = null; appPoetsPlan(); }, wacht); if (ps.timer.unref) ps.timer.unref(); return; }
+  appRolOk().then(function (actief) { if (actief) return appPoetsBeslis(); }).catch(function (e) { logError('app-push', e); });
+}
+async function appPoetsBeslis() {
+  if (fs.existsSync(APP_UIT)) return;
+  const ps = appStaat.poets;
+  const px = appGoedkeurder(appRegister());
+  if (!px) return;
+  const s = appPushLees().apparaten[px.id];
+  if (!s || s.verlopen || !s.endpoint || !s.sw_vraagt) return;
+  const lp = s.laatst_per || {};
+  const jongste = Math.max.apply(null, [0].concat(Object.keys(lp).map(function (k) { return Date.parse((lp[k] || {}).op) || 0; })));
+  if (!(jongste > (berichtNieuwLaatst()[px.id] || 0))) return;
+  const voor = new Date(jongste).toISOString();
+  if (s.poets && s.poets.voor === voor) return;
+  if (appSeintjeToon(px.id, s)) return;
+  if (Date.now() - ps.laatst < APP_POETS_MS) return;
+  ps.laatst = Date.now();
+  await appPushStuur(px.id, 'poets', { voor: voor });
 }
 // Elke 5 min: nieuwe storing of stilgevallen aanvoer -> seintje, alleen voor apparaten die dat aanzetten, 07-22 u, ≤ 1/uur.
 // Seintje alleen bij een NIEUWE kaart (een storing die nog misgaat of een stroom die stilviel), niet elk uur opnieuw voor
@@ -10228,15 +10377,19 @@ function appPushOpzeggen(req, res, a) {
 }
 function appPushSoorten(req, res, a, d) {
   if (!appTeller('push', APP_PUSH_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens push');
-  if (typeof d.meldingen !== 'boolean') return appWeiger(res, 400, 'ongeldig verzoek', 'push soorten');
+  // wv804 Fable K4: meldingen en/of zoem, elk optioneel boolean, minstens één
+  const gm = d.meldingen !== undefined, gz = d.zoem !== undefined;
+  if ((!gm && !gz) || (gm && typeof d.meldingen !== 'boolean') || (gz && typeof d.zoem !== 'boolean')) return appWeiger(res, 400, 'ongeldig verzoek', 'push soorten');
   let uit;
   try {
     uit = appPushWijzig(function (p) {
       const s = p.apparaten[a.id];
       if (!s || s.verlopen) return null;   // wv414 (Fable #6)
-      s.soorten = d.meldingen ? ['antwoord', 'meldingen'] : ['antwoord'];
+      const oud = s.soorten || [];
+      const meld = gm ? d.meldingen : oud.indexOf('meldingen') >= 0, zoem = gz ? d.zoem : oud.indexOf('zoem') >= 0;
+      s.soorten = ['antwoord'].concat(meld ? ['meldingen'] : [], zoem ? ['zoem'] : []);
       // aanzetten = vanaf nu: wat er al lag, geeft geen seintje (nulpunt bij de eerstvolgende tik)
-      if (d.meldingen) {
+      if (d.meldingen === true) {
         const md = appStaat.meld && appStaat.meld.data;
         s.meld_kaarten = md && md.gelezen && !md.fouten.length ? md.kaarten.slice(0, 200) : null;   // anders nulpunt bij de volgende tik (B5)
         s.meld_laatst = 0;
@@ -10245,7 +10398,7 @@ function appPushSoorten(req, res, a, d) {
     });
   } catch (e) { logError('app-push', e); return appWeiger(res, 500, 'opslaan lukte niet', 'push.json schrijven'); }
   if (!uit) return appWeiger(res, 409, 'zet eerst seintjes aan op dit apparaat', 'push niet aan');
-  res._app.reden = 'seintjes meldingen ' + (d.meldingen ? 'aan' : 'uit');
+  res._app.reden = [gm ? 'seintjes meldingen ' + (d.meldingen ? 'aan' : 'uit') : null, gz ? 'zoem ' + (d.zoem ? 'aan' : 'uit') : null].filter(Boolean).join(', ');
   appStuur(res, 200, { ok: true, soorten: uit });
 }
 async function appPushProef(req, res, a) {
@@ -10300,7 +10453,8 @@ function handleApp(req, res) {
     if (afwijzing) { req.resume(); return appWeiger(res, 401, 'niet toegestaan', 'access: ' + afwijzing); }
     res._app.voorAuth = false;
     // wv159 (Fable K9): concept bewaren heeft een eigen grens (APP_CONCEPT_PER_UUR) en telt niet mee in 'alles'
-    if (!(req.method === 'POST' && p === '/app/concept') && !appTeller('alles', APP_VERZOEKEN_PER_UUR, 3600000)) { req.resume(); return appWeiger(res, 429, 'te veel verzoeken', 'grens alles'); }
+    // wv804: seintje-stand heeft een eigen teller per apparaat en telt evenmin mee
+    if (!(req.method === 'POST' && p === '/app/concept') && !(req.method === 'GET' && p === '/app/seintje-stand') && !appTeller('alles', APP_VERZOEKEN_PER_UUR, 3600000)) { req.resume(); return appWeiger(res, 429, 'te veel verzoeken', 'grens alles'); }
     // Upload (wv99): ruwe bytes, geen JSON; de route leest de stroom zelf. Wordt hij eerder geweigerd (geen sessie e.d.), dan
     // de rest van de stroom weggooien zodat de verbinding netjes afloopt.
     const upload = req.method === 'POST' && p.indexOf('/app/upload/') === 0;
@@ -10315,6 +10469,7 @@ function handleApp(req, res) {
       if (route === 'POST /app/passkey/opties' && !appTeller('openen', APP_OPENEN_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak ontgrendeld dit uur', 'grens openen');
       const verder = function (slotKlaar) {
         if (route === 'GET /app/status') return appStatus(req, res, reg, lichaam);
+        if (route === 'GET /app/seintje-stand') return appSeintjeStand(req, res, reg);   // wv804: alleen apparaatcookie (service worker)
         if (route === 'POST /app/koppel/code') return appKoppelCode(req, res, reg);
         if (route === 'POST /app/koppel/aanvraag') return appKoppelAanvraag(req, res, reg, d);
         if (route === 'GET /app/koppel/stand') return appKoppelStand(req, res);
@@ -11206,6 +11361,22 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'proef', 'droomronde', 'ideeenm
   'droomronde-wachter',   // wv390: Wachter melden van de droomronde (wv299). Bewust NIET 'echt-alarm' (Werkvoorraad-tikker, wv358): dat alarm
                           // meldt juist een pod in een wegwerpmap, waar /bericht 200 geeft in lege data; het blijft op Telegram (§ 4.6).
   'bank-ronde']);         // wv685: één regel in het hoofdkanaal als een banktoestemming verlopen is (AI - Bank-ronde)
+// wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
+// zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
+const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag' };
+// Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
+// tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
+// wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
+function meldSoort(kanaal, bron, klasse, vraag, agenda, gegeven) {
+  if (klasse === 'stil') return 'archief';
+  if (vraag || agenda) return 'vraag';
+  if (gegeven) return gegeven;
+  if (kanaal === 'hoofd' && klasse === 'dringend') return 'dag';
+  return Object.prototype.hasOwnProperty.call(MELD_SOORT, bron) ? MELD_SOORT[bron] : 'archief';
+}
+// Een vraag zoemt alleen in hoofd (machinekamervragen nooit, bouwplan § 7-3); antwoord en dag altijd; archief nooit.
+function meldSeintje(kanaal, soort) { return soort === 'vraag' ? kanaal === 'hoofd' : soort === 'antwoord' || soort === 'dag'; }
 
 const BERICHT_TEKST_MAX = 60000;
 const BERICHT_BODY_MAX = 256 * 1024;
@@ -11221,6 +11392,8 @@ const BERICHT_GETIKT_MAX = 50;
 const BERICHT_HERPLAN_MS = 30 * 1000;
 const BERICHT_KIJKT_MS = 60 * 1000;          // wv292 (Fable wv263 #13): de app pollt /app/nieuw elke minuut, alleen zichtbaar
 const BERICHT_KIJKT_MARGE_MS = 8 * 1000;     // na de volgende poll heeft de app de tab als gezien gezet (POST /app/gezien)
+const BERICHT_INVOER_MS = 2 * 60 * 1000;     // wv804 (ontwerp § 2): echte invoer op een ander apparaat < 2 min = David is bezig
+const BERICHT_BEZIG_MAX = 3;                 // wv804 Fable M1: bezig aan het eind van een bundel = hooguit 3× opnieuw plannen
 const BERICHT_CONTROLE_MARGE_MS = 90 * 1000; // wv292 (Fable wv263 #7): n8n kijkt na een uitgesteld seintje opnieuw (controle_na)
 const BERICHT_VOORLOPIG_MS = 5 * 60 * 1000;  // wv292 (Fable wv263 #6): voorlopig naar Telegram, zonder bevestiging weer knoppen in de app
 const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram))?$/;
@@ -11305,9 +11478,10 @@ function berichtAppActief() {
 }
 function berichtPushGewenst() {
   try {
-    const p = appPushLees();
-    const act = new Set(appRegister().apparaten.filter(function (x) { return x.actief; }).map(function (x) { return x.id; }));
-    return Object.keys(p.apparaten).filter(function (id) { return act.has(id) && !p.apparaten[id].verlopen && (p.apparaten[id].soorten || []).indexOf('antwoord') >= 0; }).length;
+    const p = appPushLees(), reg = appRegister();
+    const act = new Set(reg.apparaten.filter(function (x) { return x.actief; }).map(function (x) { return x.id; }));
+    // wv804 (ontwerp § 3): alleen wie een antwoord-seintje mag krijgen (de Pixel, of zoem aan)
+    return Object.keys(p.apparaten).filter(function (id) { return act.has(id) && !p.apparaten[id].verlopen && (p.apparaten[id].soorten || []).indexOf('antwoord') >= 0 && appPushMag(id, reg, p.apparaten[id]); }).length;
   } catch (e) { logError('bericht-push', e); return 0; }
 }
 
@@ -11336,7 +11510,7 @@ async function berichtPushNu(kanaal, ids) {
   if (fs.existsSync(APP_UIT)) return berichtPushZet(ids, { klaar: true, verstuurd: 0, noodstop: true });
   let uit = [];
   let gooide = false;
-  try { uit = await appPushAlle('antwoord', 'antwoord ' + kanaal); } catch (e) { logError('bericht-push', e); gooide = true; }
+  try { uit = await appPushAlle('antwoord', 'antwoord ' + kanaal, function (id) { return appPushMag(id); }); } catch (e) { logError('bericht-push', e); gooide = true; }   // wv804: alleen-Pixel
   const verstuurd = uit.filter(function (r) { return r && r.ok; }).length;
   // wv292 (Fable wv263 #7): faalden alle pushdiensten, dan het volgende bericht niet bundelen (n8n ziet het dan na 1 min)
   berichtPushStaat(kanaal).mislukt = verstuurd === 0 && (uit.length > 0 || (gooide && berichtPushGewenst() > 0));   // Fable wv292 #6
@@ -11362,7 +11536,15 @@ function berichtBundelAf(kanaal) {
   if (fs.existsSync(APP_UIT)) return berichtPushZet(ids, { klaar: true, verstuurd: 0, noodstop: true });   // wv292 (Fable wv263 #10)
   if (berichtStilleUren(kanaal)) { k.wachtend = ids; berichtWachtZet(ids, berichtPlanTimer(kanaal, Date.now() + berichtTot7(Date.now()))); return; }
   const jongste = Math.max.apply(null, ids.map(function (id) { return Date.parse(idx[id].t); }));
-  if (berichtGezienPixel(kanaal, jongste)) return berichtPushZet(ids, { klaar: true, verstuurd: 0, overbodig: true });
+  if (berichtGezienDoorDavid(kanaal, jongste)) { k.uitstel = 0; return berichtPushZet(ids, { klaar: true, verstuurd: 0, overbodig: true }); }
+  // wv804 Fable M1: David nog bezig = uitstellen (± 70 s, controle_na schuift mee), hooguit 3×; daarna alleen op gezien beslissen
+  if (berichtDavidBezig(Date.now()) && (k.uitstel || 0) < BERICHT_BEZIG_MAX) {
+    k.uitstel = (k.uitstel || 0) + 1;
+    k.wachtend = ids;
+    berichtWachtZet(ids, berichtPlanTimer(kanaal, Date.now() + BERICHT_KIJKT_MS + BERICHT_KIJKT_MARGE_MS));
+    return;
+  }
+  k.uitstel = 0;
   k.laatst = Date.now();
   berichtPushNu(kanaal, ids).catch(function (e) { logError('bericht-push', e); });
 }
@@ -11372,8 +11554,10 @@ function berichtWachtZet(ids, tot) {
   berichtIndexBewaar();
 }
 // Beslist bij aankomst; het seintje zelf gaat pas na het antwoord aan n8n (Fable § 8 #3).
-function berichtPushPlan(id, kanaal, klasse) {
+function berichtPushPlan(id, kanaal, klasse, seintje) {
   if (klasse === 'stil') { berichtPushZet([id], { klaar: true, verstuurd: 0, overbodig: true, reden: 'stil' }); return { direct: false, uitgesteld: null }; }
+  // wv804 (ontwerp § 1): soort zonder seintje (archief, machinekamervraag): klaar, geen bundeltimer
+  if (seintje === false) { berichtPushZet([id], { klaar: true, verstuurd: 0, overbodig: true, reden: 'soort' }); return { direct: false, uitgesteld: null }; }
   const k = berichtPushStaat(kanaal), nu = Date.now();
   if (klasse === 'dringend') { berichtWachtZet([id], nu); return { direct: true, uitgesteld: null }; }   // storingsalarmen: direct, ook 23–07 (Fable § 8 #5)
   let tot = 0;
@@ -11383,7 +11567,8 @@ function berichtPushPlan(id, kanaal, klasse) {
   else {
     // wv292 (Fable wv263 #13): de Pixel heeft de app open (poll < 1 min geleden): wachten tot na zijn volgende poll; zag hij de
     // tab dan, dan geen seintje (overbodig), anders alsnog (hooguit ± 70 s later). Dringend gaat hierboven al direct.
-    const kijkt = berichtPixelKijkt(nu);
+    // wv804: berichtDavidBezig (Pixel pollt, of echte invoer elders < 2 min) vervangt berichtPixelKijkt
+    const kijkt = berichtDavidBezig(nu);
     if (kijkt) tot = kijkt + BERICHT_KIJKT_MS + BERICHT_KIJKT_MARGE_MS;
   }
   if (!tot) {
@@ -11414,22 +11599,36 @@ function berichtHerplan() {
 }
 setTimeout(berichtHerplan, BERICHT_HERPLAN_MS).unref();
 
-// Laatste GET /app/nieuw van de Pixel als die korter dan een poll-interval geleden was (de app pollt alleen als hij zichtbaar is), anders 0.
-function berichtPixelKijkt(nu) {
+// wv804 (ontwerp § 2, vervangt berichtPixelKijkt): is David bezig? De Pixel pollde < 60 s geleden (de app pollt alleen zichtbaar):
+// dan die poll; anders meldde een ander apparaat < 2 min geleden echte invoer (POST /app/aanwezig; vaste plek alleen met open slot):
+// dan nu (de wachttijd loopt vanaf nu). Niet bezig: 0.
+function berichtDavidBezig(nu) {
   try {
     const p = appGoedkeurder(appRegister());
-    if (!p) return 0;
-    const keek = berichtNieuwLaatst()[p.id] || 0;
-    return nu - keek < BERICHT_KIJKT_MS ? keek : 0;
+    const keek = p ? berichtNieuwLaatst()[p.id] || 0 : 0;
+    if (p && nu - keek < BERICHT_KIJKT_MS) return keek;
+    const aw = appStaat.aanwezig || {};
+    return Object.keys(aw).some(function (id) { return (!p || id !== p.id) && nu - aw[id] < BERICHT_INVOER_MS; }) ? nu : 0;
   } catch (e) { return 0; }
 }
-// gezien_pixel: de goedkeurder (de Pixel) zette de tab als gezien ná het bericht; een ander apparaat telt niet (Fable § 8 #6).
-function berichtGezienPixel(kanaal, t) {
+// wv804 (ontwerp § 2, vervangt berichtGezienPixel): David zag het kanaal ná t: gezien-david.json, of (overgang: een oude app stuurt nog
+// geen door_david) de goedkeurder zette de tab per apparaat op gezien. Een ander apparaat zonder door_david telt niet (Fable § 8 #6).
+function berichtGezienDoorDavid(kanaal, t) {
+  const gd = appGezienDavid();
+  const g = gd && gd.tabs[kanaal];
+  if (g && Date.parse(g) >= t) return true;
   try {
     const p = appGoedkeurder(appRegister());
     if (!p) return false;
-    const g = (appLeesStreng(APP_GEZIEN, {})[p.id] || {})[kanaal];
-    return !!g && Date.parse(g) >= t;
+    const gp = (appLeesStreng(APP_GEZIEN, {})[p.id] || {})[kanaal];
+    return !!gp && Date.parse(gp) >= t;
+  } catch (e) { return false; }
+}
+// wv804: een (willekeurig) apparaat zette de tab per apparaat op gezien ná t (alleen informatief in /bericht/stand)
+function berichtGezienErgens(kanaal, t) {
+  try {
+    const alle = appLeesStreng(APP_GEZIEN, {});
+    return Object.keys(alle).some(function (id) { const g = (alle[id] || {})[kanaal]; return !!g && Date.parse(g) >= t; });
   } catch (e) { return false; }
 }
 
@@ -11451,6 +11650,8 @@ async function berichtNieuw(res, d) {
   if (d.knoppen !== undefined && typeof d.knoppen !== 'boolean') return berichtStuur(res, 400, { ok: false, fout: 'knoppen is true of false' });
   if (d.sleutel !== undefined && (typeof d.sleutel !== 'string' || !d.sleutel || d.sleutel.length > 200)) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige sleutel' });
   if (d.agent_job !== undefined && d.agent_job !== '' && !APP_JOB_RE.test(String(d.agent_job))) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige agent_job' });
+  // wv804 (ontwerp § 1): optioneel veld soort van de bron
+  if (d.soort !== undefined && !(typeof d.soort === 'string' && Object.prototype.hasOwnProperty.call(MELD_SOORTEN, d.soort))) return berichtStuur(res, 400, { ok: false, fout: 'soort is vraag, antwoord, dag of archief' });
   // wv315 (§ 4.13): een agendaknop (✅ uitvoeren of ↩️ ongedaan) van AI - Agenda-knoppen; alleen bij bron agenda. De nonce blijft hier.
   let ag = null;
   if (d.agenda !== undefined) {
@@ -11467,7 +11668,9 @@ async function berichtNieuw(res, d) {
       res._log = { bericht: al, dubbel: true };
       // wv315: dubbel = niets nieuws, ook geen tweede agendaknop; agenda true als de eerste er een kreeg
       const agAl = ag && appAgendaKnoppen()[al] ? true : undefined;
-      return berichtStuur(res, 200, { ok: true, id: al, dubbel: true, push: { gewenst: berichtPushGewenst(), gestart: false }, uitgesteld: null, app_actief: berichtAppActief(), agenda: agAl });
+      const soAl = idx[al].soort || null;   // wv804: soort van het eerste
+      return berichtStuur(res, 200, { ok: true, id: al, dubbel: true, push: { gewenst: berichtPushGewenst(), gestart: false }, uitgesteld: null, app_actief: berichtAppActief(), agenda: agAl,
+        soort: soAl, seintje: soAl ? meldSeintje(idx[al].kanaal, soAl) : null });
     }
   }
   const id = crypto.randomBytes(8).toString('hex'), t = new Date(nu).toISOString();
@@ -11477,6 +11680,7 @@ async function berichtNieuw(res, d) {
   // wv315: bij een agendaknop geen vraagregistratie, ook niet als de tekst een VRAAG AAN DAVID-regel heeft (de knop is ✅/❌)
   const vraag = ag ? null : appVraagVan(kanaal, tekst);
   const vsl = vraag ? id + ':' + vraag.hash : null;
+  const soort = meldSoort(kanaal, bron, klasse, !!vraag, !!ag, d.soort), seintje = meldSeintje(kanaal, soort);   // wv804 (ontwerp § 1)
   if (vraag) {
     const gev = appGevoelig(vraag.tekst);
     try { const v = appVragen(); v[vsl] = { kanaal: kanaal, t: t, antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined, soort: 'socev', naar_telegram: d.knoppen === true ? undefined : t }; appVragenSchrijf(v); }
@@ -11491,22 +11695,22 @@ async function berichtNieuw(res, d) {
   }
   const agentJob = d.agent_job ? String(d.agent_job) : undefined;
   const goed = await appLogSchrijf(kanaal, { t: t, job_id: id, soort: 'socev', bron: bron, klasse: klasse, tekst: '', antwoord: tekst, ok: true,
-    vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, bestanden: [] });
+    vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, bestanden: [], meld: soort });   // wv804: meld = soort (fase 4 c)
   if (!goed) {
     if (vsl) { try { const v = appVragen(); delete v[vsl]; appVragenSchrijf(v); } catch (e) { logError('bericht-vragen', e); } }
     if (ag) { delete agk[id]; appAgendaKnoppenBewaar(); }   // wv315
     return berichtStuur(res, 500, { ok: false, fout: 'app-log niet schrijfbaar', terugval: true });
   }
-  idx[id] = { t: t, kanaal: kanaal, bron: bron, klasse: klasse, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null, knoppen: d.knoppen === true };
-  const plan = berichtPushPlan(id, kanaal, klasse);   // bewaart de index
+  idx[id] = { t: t, kanaal: kanaal, bron: bron, klasse: klasse, soort: soort, sleutel: sl || undefined, vraag_hash: vraag ? vraag.hash : undefined, push: null, getikt: null, naar_telegram: vraag && d.knoppen !== true ? t : null, knoppen: d.knoppen === true };
+  const plan = berichtPushPlan(id, kanaal, klasse, seintje);   // bewaart de index
   if (!idx[id].push) berichtIndexBewaar();
   const gewenst = berichtPushGewenst();
   // wv452 (Fable KAN 3): het actielijstje van 07:05 zegt "de knoppen staan in Voor jou"; de rijen staan dan al open (n8n markeert ze vóór
   // dit bericht), dus het geheugen van Vandaag (3 min) weg, anders toont Ververs nog "nog niet verstuurd" zonder knoppen
   if (bron === 'actielijst' && appStaat.vandaag) appStaat.vandaag.data = null;
-  res._log = { bericht: id, kanaal: kanaal, bron: bron, klasse: klasse, agenda: ag ? ag.soort : undefined };
+  res._log = { bericht: id, kanaal: kanaal, bron: bron, klasse: klasse, soort: soort, agenda: ag ? ag.soort : undefined };
   berichtStuur(res, 200, { ok: true, id: id, vraag: !!vraag && d.knoppen === true, push: { gewenst: gewenst, gestart: plan.direct }, uitgesteld: plan.uitgesteld, app_actief: berichtAppActief(),
-    agenda: ag ? true : undefined });
+    agenda: ag ? true : undefined, soort: soort, seintje: seintje });
   if (plan.direct && plan.gebundeld) setTimeout(function () { berichtBundelAf(kanaal); }, 0);   // Fable wv292 #3: met de wachtende mee
   else if (plan.direct) setTimeout(function () { berichtPushNu(kanaal, [id]).catch(function (e) { logError('bericht-push', e); }); }, 0);
 }
@@ -11563,7 +11767,9 @@ function berichtStandVan(id) {
     push_klaar: klaar, verstuurd: uit ? 0 : klaar ? (p.verstuurd || 0) : 0, overbodig: !uit && p.overbodig === true, uitgesteld_tot: !klaar ? p.uitgesteld_tot || null : null,
     // wv292 (Fable wv263 #7): wanneer n8n opnieuw moet kijken als het seintje nog niet weg is (bundel, stille uren, Pixel kijkt)
     controle_na: !klaar && p.uitgesteld_tot ? new Date((Date.parse(p.uitgesteld_tot) || Date.now()) + BERICHT_CONTROLE_MARGE_MS).toISOString() : null,
-    gezien_pixel: berichtGezienPixel(b.kanaal, Date.parse(b.t)), getikt: !!b.getikt, beantwoord: beantwoord, vraag: !!b.vraag_hash,
+    // wv804: gezien_pixel = door David gezien (naam blijft, n8n leest hem); gezien_ergens = een apparaat zette de tab op gezien
+    gezien_pixel: berichtGezienDoorDavid(b.kanaal, Date.parse(b.t)), gezien_ergens: berichtGezienErgens(b.kanaal, Date.parse(b.t)),
+    soort: b.soort || null, seintje: b.soort ? meldSeintje(b.kanaal, b.soort) : null, getikt: !!b.getikt, beantwoord: beantwoord, vraag: !!b.vraag_hash,
     naar_telegram: b.vraag_hash ? vraagNaarTelegram : !!b.naar_telegram, naar_telegram_voorlopig: !!(b.naar_telegram_tot && Date.parse(b.naar_telegram_tot) > Date.now()),
     app_uit: uit, app_actief: !uit && berichtAppActief() };
 }
@@ -11652,12 +11858,15 @@ function berichtRoute(req, res) {
 // dagdeel/6 u) gelden ongewijzigd. Verlengen doet de dispatcher (APP_GLIJD_ROUTES); stil (geen auditregel bij 200).
 function appAanwezig(req, res, a, s) {
   res._app.stil = true;
+  // wv804 (ontwerp § 2, Fable M6): laatste echte invoer per apparaat (David bezig; door_david aanvaarden); vaste plek alleen met open slot
+  const invoer = function () { (appStaat.aanwezig || (appStaat.aanwezig = {}))[a.id] = Date.now(); appGezienWachtAf(a); };
+  if (a.soort !== 'vast') invoer();
   if (a.soort !== 'vast') return appStuur(res, 200, { ok: true, sessie_rest_s: Math.max(0, Math.floor((appSessieTot(s.start, a, Date.now()) - Date.now()) / 1000)) });
   // wv488 (Fable 2e ronde #1): op een vaste plek telt aanwezig (ook de hartslag "pc in gebruik") alleen als Davids telefoon op die
   // plek is (of de pc vanaf de telefoon is opengezet). Anders werkt er misschien een ander op de ontgrendelde pc: niet verlengen,
   // dan sluit de pod hem na 60 min stilte. Geen 423: aanwezig is geen invoer.
   const klaar = function () { appStuur(res, 200, { ok: true, sessie_rest_s: Math.max(0, Math.floor((s.tot - Date.now()) / 1000)) }); };
-  return appSlot(a).then(function (sl) { if (sl.open && appStaat.sessies[appSha(String(req.headers['x-app-sessie'] || ''))] === s) appGlijd(s, a); klaar(); }, function () { klaar(); });
+  return appSlot(a).then(function (sl) { if (sl.open && appStaat.sessies[appSha(String(req.headers['x-app-sessie'] || ''))] === s) { appGlijd(s, a); invoer(); } klaar(); }, function () { klaar(); });
 }
 // App: POST /app/bericht/getikt {ids} — het bericht was in beeld en is aangetikt, of de app werd via het seintje geopend.
 function appBerichtGetikt(req, res, a, d) {

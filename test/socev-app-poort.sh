@@ -24,6 +24,9 @@ for (const [x, y] of [['const APP_CODE_INTERVAL_MS = 60 * 1000;', 'const APP_COD
                       ['const APP_KNOP_WACHT_MELD_MS = 30 * 1000;', 'const APP_KNOP_WACHT_MELD_MS = 300;'],   // wv405
                       ['const BERICHT_KIJKT_MS = 60 * 1000;', 'const BERICHT_KIJKT_MS = 300;'],   // wv292
                       ['const BERICHT_KIJKT_MARGE_MS = 8 * 1000;', 'const BERICHT_KIJKT_MARGE_MS = 150;'],
+                      ['const BERICHT_INVOER_MS = 2 * 60 * 1000;', 'const BERICHT_INVOER_MS = 300;'],   // wv804
+                      ['const APP_GEZIEN_WACHT_MS = 10 * 1000;', 'const APP_GEZIEN_WACHT_MS = 1000;'],   // wv804 (Fable M6)
+                      ['const APP_POETS_MS = 2 * 60 * 1000;', 'const APP_POETS_MS = 1200;'],   // wv804 (ontwerp § 5)
                       ['const APP_VJ_DOORZET_MS = APP_VJ_TERUG_MS + 75 * 1000;', 'const APP_VJ_DOORZET_MS = 300;'],   // wv506
                       ['function berichtUur() { return Number(', 'function berichtUur() { if (TOETSBUUR() !== null) return TOETSBUUR(); return Number(']]) {
   if (blok.indexOf(x) < 0) toets('vervanging gevonden: ' + x, false); blok = blok.split(x).join(y);
@@ -1940,7 +1943,10 @@ async function bewijs(o) {
         await slaap(900);
         return pushes.map((x) => /windows/.test(x.url) ? 'laptop' : 'telefoon').sort().join(',');
       };
-      toets('12 niemand keek: seintje naar telefoon én laptop', (await beurtKlaar('b1-niemand')) === 'laptop,telefoon');
+      // wv804 (ontwerp § 3): alleen-Pixel; de laptop alleen met zoem
+      toets('12 wv804 niemand keek: seintje alleen naar de telefoon (de Pixel), niet naar de laptop', (await beurtKlaar('b1-niemand')) === 'telefoon');
+      { const pz = JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')); pz.apparaten.eeeeeeeeeeeeeeee.soorten = ['antwoord', 'zoem']; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pz)); }
+      toets('12 niemand keek: laptop met zoem -> seintje naar telefoon én laptop', (await beurtKlaar('b1-niemand-zoem')) === 'laptop,telefoon');
       toets('12 laptop keek mee, telefoon (vrager) niet: alleen de telefoon', (await beurtKlaar('b1-laptop', async (id) => { jobs[id].app.gezien = { eeeeeeeeeeeeeeee: Date.now() }; })) === 'telefoon');
       toets('12 telefoon (vrager) haalde de geschiedenis op: niemand (Fable-review wv100 B2)', (await beurtKlaar('b2-geschiedenis', async () => { await vraag('GET', '/app/geschiedenis/hoofd', undefined, { pot: P.jar }); })) === '');
       toets('12 passieve kant: geen antwoord-seintje', (await beurtKlaar('b7-passief', async () => { rolStub.primair = false; })) === '');
@@ -4035,7 +4041,8 @@ async function bewijs(o) {
         r0.end();
       });
       const GEH = 'g'.repeat(40);
-      const B = (x) => Object.assign({ secret: GEH, kanaal: 'machinekamer', bron: 'agentrapport', klasse: 'normaal', tekst: '🤖 Agentrapport — proef\n\nAlles klaar.' }, x || {});
+      // wv804: soort antwoord, zodat de bestaande seintjestoetsen (machinekamer, agentrapport = archief) blijven gelden
+      const B = (x) => Object.assign({ secret: GEH, kanaal: 'machinekamer', bron: 'agentrapport', klasse: 'normaal', soort: 'antwoord', tekst: '🤖 Agentrapport — proef\n\nAlles klaar.' }, x || {});
       const pId = P.jar.apparaat.split('.')[0];
       // P (de telefoon uit § 8) speelt hier de Pixel: tijdelijk de goedkeurder in het register, na deze sectie terug
       const regOrig23 = fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8');
@@ -4047,7 +4054,8 @@ async function bewijs(o) {
       const ander = reg23.apparaten.find((x) => x.actief && x.id !== pId);
       const pj = { versie: 1, apparaten: {} };
       pj.apparaten[pId] = { endpoint: 'https://fcm.googleapis.com/fcm/send/p23', soorten: ['antwoord'], sinds: new Date().toISOString(), sleutel: crypto.createHash('sha256').update(VAPID_PUB).digest('hex').slice(0, 16) };
-      if (ander) pj.apparaten[ander.id] = { endpoint: 'https://fcm.googleapis.com/fcm/send/a23', soorten: ['antwoord'], sinds: new Date().toISOString(), sleutel: pj.apparaten[pId].sleutel };
+      // wv804 (ontwerp § 3): alleen de Pixel krijgt antwoord-seintjes; het tweede apparaat hier met zoem, zodat de oude tellingen gelden
+      if (ander) pj.apparaten[ander.id] = { endpoint: 'https://fcm.googleapis.com/fcm/send/a23', soorten: ['antwoord', 'zoem'], sinds: new Date().toISOString(), sleutel: pj.apparaten[pId].sleutel };
       fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pj));
       if (fs.existsSync(UIT)) fs.unlinkSync(UIT);
       toetsBUur = 12; pushStaat.status = 201; pushStaat.traag = 0;
@@ -4100,15 +4108,15 @@ async function bewijs(o) {
       const AJ = 'abcdef0123456789';
       r = await bq('/bericht', B({ tekst: '🤖 Agentrapport — proef\n\nKlaar.\n\nVRAAG AAN DAVID: ' + VR23, knoppen: true, sleutel: 'exec-1:agentrapport', agent_job: AJ }));
       const id1 = r.j.id;
-      toets('23 bericht -> 200, id 16 hex, vraag geregistreerd, push gewenst 2 en gestart', r.status === 200 && /^[a-f0-9]{16}$/.test(id1) && r.j.vraag === true && r.j.push.gewenst === (ander ? 2 : 1) && r.j.push.gestart === true && r.j.uitgesteld === null, JSON.stringify(r.j));
+      // wv804 (ontwerp § 1, bouwplan § 7-3): een machinekamervraag is soort vraag zonder seintje
+      toets('23 bericht -> 200, id 16 hex, vraag geregistreerd, push gewenst 2, machinekamervraag: geen seintje (wv804)', r.status === 200 && /^[a-f0-9]{16}$/.test(id1) && r.j.vraag === true && r.j.push.gewenst === (ander ? 2 : 1) && r.j.push.gestart === false && r.j.uitgesteld === null && r.j.soort === 'vraag' && r.j.seintje === false, JSON.stringify(r.j));
       toets('23 antwoord < 1 s ook met twee trage pushdiensten (seintje asynchroon)', r.ms < 1000, r.ms);
       await slaap(60);
       let st = await bq('/bericht/stand', { secret: GEH, id: id1 });
-      toets('23 stand direct na het bericht: push nog niet klaar, niet gezien/getikt/beantwoord', st.status === 200 && st.j.push_klaar === false && st.j.gezien_pixel === false && st.j.getikt === false && st.j.beantwoord === false, JSON.stringify(st.j));
+      toets('23 stand direct na het bericht: push klaar zonder seintje (wv804), niet gezien/getikt/beantwoord', st.status === 200 && st.j.push_klaar === true && st.j.overbodig === true && st.j.soort === 'vraag' && st.j.seintje === false && st.j.gezien_pixel === false && st.j.getikt === false && st.j.beantwoord === false, JSON.stringify(st.j));
       await slaap((ander ? 2 : 1) * 1500 + 300);
       st = await bq('/bericht/stand', { secret: GEH, id: id1 });
-      toets('23 na de pushdiensten: verstuurd = 2 (seintjes onder soort antwoord, reden antwoord machinekamer)', st.j.push_klaar === true && st.j.verstuurd === (ander ? 2 : 1) && pushes.length >= (ander ? 2 : 1) && pushes.every((x) => x.body === '') &&
-        JSON.parse(fs.readFileSync(path.join(DATA, 'push.json'), 'utf8')).apparaten[pId].laatst.reden === 'antwoord machinekamer', JSON.stringify(st.j));
+      toets('23 wv804 machinekamervraag: geen pushdienst aangeroepen, verstuurd 0', st.j.push_klaar === true && st.j.verstuurd === 0 && pushes.length === 0, JSON.stringify(st.j));
       pushStaat.traag = 0;
       const regels = fs.readFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
       const l1 = regels.find((x) => x.job_id === id1);
@@ -4773,6 +4781,214 @@ async function bewijs(o) {
       st = await bq('/bericht/stand', { secret: GEH, id: idH });
       toets('23 wv292 Fable #2 herstart: controle_na ligt na nu (n8n wacht, geeft niet op)', st.j.push_klaar === false && Date.parse(st.j.controle_na) > Date.now() + 60000, JSON.stringify(st.j));
       clearTimeout(H.appStaat.berichtPush.machinekamer.timer); H.appStaat.berichtPush = null;
+      // ── 23d. wv804: één meldingenkanaal fase 3 (ontwerp § 1–5, § 9 a–g, Fable-review § 11 B1/M1–M6/K1/K4/K6) ──
+      {
+        const sha = (x) => crypto.createHash('sha256').update(x).digest('hex');
+        const PJP = path.join(DATA, 'push.json'), pjBewaar = fs.readFileSync(PJP, 'utf8');
+        const PJ = () => JSON.parse(fs.readFileSync(PJP, 'utf8'));
+        const zetPJ = (f) => { const p = PJ(); f(p); fs.writeFileSync(PJP, JSON.stringify(p)); };
+        const GDP = path.join(DATA, 'gezien-david.json');
+        const GD = () => JSON.parse(fs.readFileSync(GDP, 'utf8'));
+        const stand = (jar) => vraag('GET', '/app/seintje-stand', undefined, jar ? { pot: jar } : {});
+        const pix = () => pushes.filter((x) => /\/p23$/.test(x.url) && x.h.Urgency !== 'low');
+        const poetsen = () => pushes.filter((x) => /\/p23$/.test(x.url) && x.h.Urgency === 'low');
+        const lap = () => pushes.filter((x) => /\/l804$/.test(x.url));
+        const rust = async () => { await slaap(BUNDEL23 + 50); H.appStaat.berichtPush = null; H.appStaat.aanwezig = {}; };
+        const LTID = 'e804e804e804e804', VPID = 'e805e805e805e805';
+        const LT = { koppel: '', apparaat: LTID + '.' + 'f'.repeat(64), sessie: '1'.repeat(64) };
+        const VP = { koppel: '', apparaat: VPID + '.' + 'e'.repeat(64), sessie: '2'.repeat(64) };
+        const aanwezig = (jar) => vraag('POST', '/app/aanwezig', {}, { pot: jar });
+        const gezienDD = (jar, tab, x) => vraag('POST', '/app/gezien', Object.assign({ tab: tab, door_david: true }, x || {}), { pot: jar });
+        const HB = (tekst, x) => B(Object.assign({ kanaal: 'hoofd', bron: 'agentrapport-david', soort: undefined, tekst: tekst }, x || {}));
+        { const rg = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+          rg.apparaten.push({ id: LTID, naam: 'Laptop 804', soort: 'reist', actief: true, systeem: 'Windows', cookie_hash: sha('f'.repeat(64)) });
+          rg.apparaten.push({ id: VPID, naam: 'Pc 804', soort: 'vast', vaste_plek: 'Groenhouten', actief: true, systeem: 'Windows', cookie_hash: sha('e'.repeat(64)) });
+          fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg)); }
+        const nu4 = Date.now();
+        H.appStaat.sessies[sha(LT.sessie)] = { apparaat: LTID, credential: '', start: nu4, vers_tot: nu4 + 60000, tot: nu4 + 3600000, binding: null };
+        H.appStaat.sessies[sha(VP.sessie)] = { apparaat: VPID, credential: '', start: nu4, vers_tot: nu4 + 60000, tot: nu4 + 3600000, binding: null };
+        zetPJ((p) => { p.apparaten[LTID] = { endpoint: 'https://fcm.googleapis.com/fcm/send/l804', soorten: ['antwoord'], sinds: new Date().toISOString(), sleutel: p.apparaten[pId].sleutel };
+          if (ander) delete p.apparaten[ander.id];
+          delete p.apparaten[pId].sw_vraagt; delete p.apparaten[pId].poets; delete p.apparaten[pId].verlopen; p.apparaten[pId].endpoint = 'https://fcm.googleapis.com/fcm/send/p23'; });
+        pushStaat.status = 201; pushStaat.traag = 0; H.appStaat.tellers.alles = []; H.appStaat.tellers.push = [];
+        await rust();
+
+        // a. soort per bron, soort + seintje in /bericht en /bericht/stand
+        r = await bq('/bericht', B({ soort: undefined, tekst: 'agentrapport machinekamer (wv804 a)' }));
+        let s4 = await bq('/bericht/stand', { secret: GEH, id: r.j.id });
+        toets('23d wv804 a machinekamer agentrapport zonder soort -> archief, geen seintje (POST en stand), overbodig reden soort', r.status === 200 && r.j.soort === 'archief' && r.j.seintje === false && r.j.push.gestart === false && s4.j.soort === 'archief' && s4.j.seintje === false && s4.j.push_klaar === true && s4.j.overbodig === true && H.appStaat.berichten[r.j.id].push.reden === 'soort', JSON.stringify([r.j, s4.j]));
+        const rA = await bq('/bericht', HB('antwoord (wv804 a)'));
+        const rD = await bq('/bericht', HB('briefing (wv804 a)', { bron: 'briefing' }));
+        const rS = await bq('/bericht', HB('stil (wv804 a)', { klasse: 'stil', soort: 'antwoord' }));
+        const rX = await bq('/bericht', B({ soort: 'zomaar' })), rX2 = await bq('/bericht', B({ soort: 3 }));
+        const rG = await bq('/bericht', B({ bron: 'foutmelder', soort: 'dag', tekst: 'dag via soort (wv804 a)' }));
+        s4 = await bq('/bericht/stand', { secret: GEH, id: rA.j.id });
+        toets('23d wv804 a agentrapport-david -> antwoord, briefing -> dag, stil wint van soort, soort gevalideerd (400), gegeven soort dag geldt; stand idem', rA.j.soort === 'antwoord' && rA.j.seintje === true && rD.j.soort === 'dag' && rD.j.seintje === true && rS.j.soort === 'archief' && rS.j.seintje === false && rX.status === 400 && rX2.status === 400 && rG.j.soort === 'dag' && rG.j.seintje === true && s4.j.soort === 'antwoord' && s4.j.seintje === true, JSON.stringify([rA.j.soort, rD.j.soort, rS.j.soort, rX.status, rX2.status, rG.j.soort, s4.j.soort]));
+        const lg4 = fs.readFileSync(path.join(LOGDIR, 'hoofd.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((x) => x.job_id === rD.j.id);
+        const ix4 = JSON.parse(fs.readFileSync(path.join(DATA, 'berichten.json'), 'utf8'))[rD.j.id];
+        toets('23d wv804 a soort in de index (berichten.json) en als meld in de app-logregel', lg4 && lg4.meld === 'dag' && ix4 && ix4.soort === 'dag', JSON.stringify([lg4 && lg4.meld, ix4 && ix4.soort]));
+        // M5: dringend in de machinekamer blijft archief (soort wel terug, zodat n8n de 15-min-kopie houdt); hoofd dringend -> dag, direct
+        await rust();
+        r = await bq('/bericht', B({ bron: 'foutmelder', klasse: 'dringend', soort: undefined, tekst: 'storing (wv804 M5)' }));
+        const rM5 = await bq('/bericht', HB('briefing faalde (wv804 M5)', { bron: 'foutmelder', klasse: 'dringend' }));
+        toets('23d wv804 M5 dringend machinekamer zonder soort -> archief, geen seintje, soort teruggegeven; dringend hoofd -> dag, direct', r.j.soort === 'archief' && r.j.seintje === false && r.j.push.gestart === false && rM5.j.soort === 'dag' && rM5.j.seintje === true && rM5.j.push.gestart === true, JSON.stringify([r.j, rM5.j]));
+        // c. machinekamervraag geregistreerd zonder seintje; hoofdvraag wel (een vraag wint van soort archief)
+        const rVm = await bq('/bericht', B({ soort: undefined, tekst: 'x\n\nVRAAG AAN DAVID: Zal ik de proef 804 opruimen?', knoppen: true }));
+        const rVh = await bq('/bericht', HB('x\n\nVRAAG AAN DAVID: Zal ik de proef 805 opruimen?', { soort: 'archief', knoppen: true }));
+        toets('23d wv804 c machinekamervraag: geregistreerd, geen seintje; hoofdvraag (ook met soort archief): vraag, wel seintje', rVm.j.vraag === true && rVm.j.soort === 'vraag' && rVm.j.seintje === false && rVh.j.vraag === true && rVh.j.soort === 'vraag' && rVh.j.seintje === true, JSON.stringify([rVm.j, rVh.j]));
+        // b. archief bij een verlopen Pixel-abonnement: gewenst 0, seintje false, overbodig (reden soort)
+        await rust();
+        zetPJ((p) => { p.apparaten[pId].verlopen = new Date().toISOString(); });
+        r = await bq('/bericht', B({ soort: 'archief', tekst: 'archief bij verlopen Pixel (wv804 b)' }));
+        s4 = await bq('/bericht/stand', { secret: GEH, id: r.j.id });
+        toets('23d wv804 b archief + verlopen Pixel: gewenst 0 (laptop zonder zoem telt niet), seintje false, overbodig reden soort', r.j.push.gewenst === 0 && r.j.seintje === false && s4.j.overbodig === true && s4.j.push_klaar === true && H.appStaat.berichten[r.j.id].push.reden === 'soort', JSON.stringify([r.j, s4.j]));
+        zetPJ((p) => { delete p.apparaten[pId].verlopen; });
+
+        // d + g. zichtbaar op de laptop zonder door_david: gezien_pixel false; seintje alleen naar de Pixel
+        await rust(); await slaap(350); pushes.length = 0;
+        r = await bq('/bericht', HB('antwoord (wv804 d)'));
+        await slaap(120);
+        const rGz = await vraag('POST', '/app/gezien', { tab: 'hoofd' }, { pot: LT });
+        s4 = await bq('/bericht/stand', { secret: GEH, id: r.j.id });
+        toets('23d wv804 d laptop zag hoofd zonder door_david: door_david false, gezien_pixel false, gezien_ergens true', rGz.status === 200 && rGz.j.door_david === false && s4.j.gezien_pixel === false && s4.j.gezien_ergens === true, JSON.stringify([rGz.j, s4.j]));
+        toets('23d wv804 g alleen-Pixel: seintje naar de Pixel, niet naar de laptop; laatst_per.hoofd gezet', r.j.push.gestart === true && pix().length === 1 && lap().length === 0 && s4.j.verstuurd === 1 && !!(PJ().apparaten[pId].laatst_per || {}).hoofd, JSON.stringify([r.j.push, pix().length, lap().length, s4.j.verstuurd]));
+        const rz0 = await vraag('POST', '/app/push/soorten', {}, { pot: LT });
+        const rz1 = await vraag('POST', '/app/push/soorten', { zoem: 'ja' }, { pot: LT });
+        r = await vraag('POST', '/app/push/soorten', { zoem: true }, { pot: LT });
+        toets('23d wv804 K4 push/soorten: leeg of geen boolean -> 400; zoem: true -> antwoord,zoem', rz0.status === 400 && rz1.status === 400 && r.status === 200 && r.j.soorten.join() === 'antwoord,zoem', JSON.stringify([rz0.status, rz1.status, r.j]));
+        await rust(); pushes.length = 0;
+        r = await bq('/bericht', HB('antwoord (wv804 g zoem)'));
+        await slaap(150);
+        toets('23d wv804 g laptop met zoem krijgt het antwoord-seintje ook (gewenst 2)', pix().length === 1 && lap().length === 1 && r.j.push.gewenst === 2, JSON.stringify([pix().length, lap().length, r.j.push]));
+        const rz2 = await vraag('POST', '/app/push/soorten', { meldingen: true }, { pot: LT });
+        const rz3 = await vraag('POST', '/app/push/soorten', { zoem: false, meldingen: false }, { pot: LT });
+        toets('23d wv804 K4 meldingen naast zoem blijft werken; beide uit -> alleen antwoord', rz2.j.soorten.join() === 'antwoord,meldingen,zoem' && rz3.j.soorten.join() === 'antwoord', JSON.stringify([rz2.j, rz3.j]));
+
+        // f. seintje-stand
+        r = await stand(null);
+        toets('23d wv804 f seintje-stand zonder apparaatcookie -> 200 toon false, alleen ok/toon', r.status === 200 && r.j.toon === false && Object.keys(r.j).sort().join() === 'nu_ms,ok,toon', JSON.stringify(r.j));
+        r = await stand(P.jar);
+        toets('23d wv804 f Pixel na een echt seintje (hoofd ongezien) -> toon true; sw_vraagt gezet (M3)', r.status === 200 && r.j.toon === true && !!PJ().apparaten[pId].sw_vraagt, JSON.stringify([r.j, PJ().apparaten[pId].sw_vraagt]));
+        const swV = PJ().apparaten[pId].sw_vraagt;
+        const rDDh = await gezienDD(P.jar, 'hoofd'), rDDm = await gezienDD(P.jar, 'machinekamer');
+        r = await stand(P.jar);
+        toets('23d wv804 f na door_david van de Pixel (goedkeurder altijd) -> toon false; bron = Pixel; sw_vraagt één keer gezet', rDDh.j.door_david === true && rDDm.j.door_david === true && r.j.toon === false && GD().bron.hoofd === pId && PJ().apparaten[pId].sw_vraagt === swV, JSON.stringify([rDDh.j, r.j, GD()]));
+        { const rg = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')); rg.apparaten.find((x) => x.id === VPID).actief = false; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg)); }
+        r = await stand(VP);
+        { const rg = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')); rg.apparaten.find((x) => x.id === VPID).actief = true; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg)); }
+        toets('23d wv804 f ingetrokken apparaat -> toon false', r.status === 200 && r.j.toon === false, JSON.stringify(r.j));
+        fs.writeFileSync(UIT, ''); r = await stand(P.jar); fs.unlinkSync(UIT);
+        toets('23d wv804 f (K1) noodstop -> 503 (geen doorlaat; de SW toont dan gewoon)', r.status === 503, JSON.stringify(r));
+        rolStub.primair = false; r = await stand(P.jar); rolStub.primair = true;
+        toets('23d wv804 M4 passieve kant -> 409 (niet toon false)', r.status === 409, JSON.stringify(r));
+        H.appStaat.tellers['seintje-stand:' + LTID] = undefined;
+        zetPJ((p) => { delete p.apparaten[LTID].laatst; delete p.apparaten[LTID].laatst_per; });   // M2: geen gegevens
+        const alles4 = H.appStaat.tellers.alles.length;
+        let n200 = 0, tLT = null;
+        for (let i = 0; i < 60; i++) { const q = await stand(LT); if (q.status === 200) { n200++; tLT = q.j.toon; } }
+        r = await stand(LT);
+        toets('23d wv804 f teller: 60 per uur per apparaat, de 61e -> 429; telt niet in alles', n200 === 60 && r.status === 429 && H.appStaat.tellers.alles.length === alles4, JSON.stringify([n200, r.status, H.appStaat.tellers.alles.length, alles4]));
+        toets('23d wv804 M2 geen gegevens (geen laatst op de laptop) -> toon true', tLT === true, tLT);
+        const aud4 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter((l) => /"route":"\/app\/seintje-stand"/.test(l));
+        toets('23d wv804 f stil in audit: geen regel bij 200 (wel bij 409/429/503)', aud4.length > 0 && !aud4.some((l) => /"status":200/.test(l)), aud4.slice(0, 3).join(' | '));
+
+        // B1: hoofd ongezien + machinekamer door David gezien op de laptop -> toon true, geen poets
+        await rust(); await slaap(350); pushes.length = 0;
+        await bq('/bericht', HB('hoofd ongezien (wv804 B1)'));
+        await slaap(120);
+        await bq('/bericht', B({ tekst: 'machinekamer (wv804 B1)' }));
+        await slaap(120);
+        await aanwezig(LT);
+        let rDD = await gezienDD(LT, 'machinekamer');
+        await slaap(120);
+        r = await stand(P.jar);
+        toets('23d wv804 B1 twee kanalen: hoofd ongezien, machinekamer door David gezien (laptop, aanwezig) -> toon true, geen poets', rDD.j.door_david === true && r.j.toon === true && poetsen().length === 0 && pix().length === 2, JSON.stringify([rDD.j, r.j, poetsen().length, pix().length]));
+        // M2: 2xx-seintje (hoofd, ongezien) gevolgd door een mislukte push -> toon true; laatst_per alleen bij 2xx
+        const lpMk = PJ().apparaten[pId].laatst_per.machinekamer.op;
+        await rust(); pushStaat.status = 500;
+        await bq('/bericht', B({ tekst: 'machinekamer faalt (wv804 M2)' }));
+        await slaap(150); pushStaat.status = 201;
+        r = await stand(P.jar);
+        toets('23d wv804 M2 2xx gevolgd door 5xx -> toon true; laatst status 500, laatst_per.machinekamer ongewijzigd', r.j.toon === true && PJ().apparaten[pId].laatst.status === 500 && PJ().apparaten[pId].laatst_per.machinekamer.op === lpMk, JSON.stringify([r.j, PJ().apparaten[pId].laatst]));
+        // e. laptop ziet ook hoofd door David -> niets meer ongezien -> poets-push naar de Pixel
+        pushes.length = 0;
+        const laatstVoor = JSON.stringify(PJ().apparaten[pId].laatst);
+        await aanwezig(LT);
+        rDD = await gezienDD(LT, 'hoofd');
+        await slaap(150);
+        const pjE = PJ().apparaten[pId], lpE = pjE.laatst_per || {};
+        const jongE = new Date(Math.max.apply(null, Object.keys(lpE).map((k) => Date.parse(lpE[k].op)))).toISOString();
+        const audE = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+        const pe = poetsen();
+        toets('23d wv804 e poets-push naar de Pixel: leeg, TTL 600, Urgency low, Topic socev; laatst ongewijzigd; poets.voor = jongste seintje; audit reden poets', rDD.j.door_david === true && pe.length === 1 && pushes.length === 1 && pe[0].body === '' && pe[0].h.TTL === '600' && pe[0].h.Topic === 'socev' &&
+          JSON.stringify(pjE.laatst) === laatstVoor && pjE.poets && pjE.poets.voor === jongE && pjE.poets.status === 201 && /"route":"push"[^\n]*"reden":"poets"/.test(audE), JSON.stringify([rDD.j, pushes.map((x) => x.h.Urgency), pjE.poets, jongE]));
+        r = await stand(P.jar);
+        toets('23d wv804 e daarna seintje-stand van de Pixel -> toon false', r.j.toon === false, JSON.stringify(r.j));
+        // tweede poets binnen 2 min niet; de timer beslist daarna opnieuw
+        await rust(); pushes.length = 0;
+        await bq('/bericht', HB('tweede seintje (wv804 e)'));
+        await slaap(120);
+        await aanwezig(LT); rDD = await gezienDD(LT, 'hoofd');
+        await slaap(120);
+        const pe2 = poetsen().length;
+        await slaap(1300);
+        toets('23d wv804 e tweede poets binnen 2 min niet; daarna beslist de timer opnieuw: één poets voor het nieuwe seintje', rDD.j.door_david === true && pe2 === 0 && poetsen().length === 1 && PJ().apparaten[pId].poets.voor === PJ().apparaten[pId].laatst_per.hoofd.op, JSON.stringify([pe2, poetsen().length, PJ().apparaten[pId].poets]));
+        await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+        r = await vraag('GET', '/app/nieuw', undefined, { pot: LT });
+        toets('23d wv804 e gezien-david.json bestaat na een minuutpoll nog; /app/nieuw geeft david {tabs, punten_n}', fs.existsSync(GDP) && !!GD().tabs.hoofd && r.j.david && r.j.david.tabs.hoofd === GD().tabs.hoofd && typeof r.j.david.punten_n === 'number', JSON.stringify(r.j.david));
+        // M3: zonder sw_vraagt (oude service worker) geen poets
+        zetPJ((p) => { delete p.apparaten[pId].sw_vraagt; });
+        await rust(); await slaap(1300); pushes.length = 0;
+        await bq('/bericht', HB('seintje naar een oude SW (wv804 M3)'));
+        await slaap(120);
+        await aanwezig(LT); rDD = await gezienDD(LT, 'hoofd');
+        await slaap(150);
+        toets('23d wv804 M3 Pixel vroeg nooit seintje-stand (oude SW): geen poets-push', rDD.j.door_david === true && pix().length === 1 && poetsen().length === 0, JSON.stringify([pix().length, poetsen().length]));
+
+        // M1: David typt op de laptop maar ziet hoofd niet -> uitstel (hooguit 3×), daarna toch het seintje
+        await rust(); await slaap(350); pushes.length = 0;
+        await aanwezig(LT);
+        r = await bq('/bericht', HB('terwijl David typt (wv804 M1)'));
+        const idM1 = r.j.id, u0 = r.j.uitgesteld;
+        let s1 = null;
+        for (let i = 0; i < 14; i++) { await slaap(150); await aanwezig(LT); if (i === 6) s1 = await bq('/bericht/stand', { secret: GEH, id: idM1 }); }
+        await slaap(700);
+        s4 = await bq('/bericht/stand', { secret: GEH, id: idM1 });
+        toets('23d wv804 M1 bezig (invoer op de laptop): niet direct, uitgesteld; na de eerste bundel opnieuw gepland, controle_na schuift mee', r.j.push.gestart === false && !!u0 && s1 && s1.j.push_klaar === false && Date.parse(s1.j.uitgesteld_tot) > Date.parse(u0) && !!s1.j.controle_na, JSON.stringify([r.j, s1 && s1.j]));
+        toets('23d wv804 M1 bezig zonder gezien: na hooguit 3× uitstel komt het seintje alsnog', s4.j.push_klaar === true && s4.j.verstuurd === 1 && s4.j.overbodig === false && pix().length === 1, JSON.stringify([s4.j, pix().length]));
+
+        // M6: vandaag + punten; door_david server-side
+        r = await gezienDD(P.jar, 'vandaag', { punten: ['vj:1', 'todo:abc-1'] });
+        const rv0 = await vraag('POST', '/app/gezien', { tab: 'vandaag', punten: ['vj:1'] }, { pot: P.jar });
+        const rv1 = await gezienDD(P.jar, 'vandaag', { punten: ['Vj 1'] });
+        const rv2 = await gezienDD(P.jar, 'hoofd', { punten: ['vj:1'] });
+        const rv3 = await gezienDD(P.jar, 'vandaag', { punten: Array.from({ length: 101 }, (_, i) => 'p' + i) });
+        toets('23d wv804 M6 vandaag met door_david + punten (Pixel) -> 200 en in gezien-david.json; zonder door_david, foute id, punten bij een andere tab, > 100 -> 400', r.status === 200 && r.j.door_david === true && !!GD().punten['vj:1'] && !!GD().punten['todo:abc-1'] && rv0.status === 400 && rv1.status === 400 && rv2.status === 400 && rv3.status === 400, JSON.stringify([r.j, rv0.status, rv1.status, rv2.status, rv3.status]));
+        H.appStaat.aanwezig = {};
+        const mkVoor = GD().tabs.machinekamer;
+        await slaap(20);
+        r = await gezienDD(LT, 'machinekamer');
+        const mkGeen = GD().tabs.machinekamer;
+        await slaap(100);
+        await aanwezig(LT);
+        const mkNa = GD().tabs.machinekamer;
+        toets('23d wv804 M6 laptop zonder aanwezig -> door_david false, niets gezet; aanwezig binnen de wacht -> alsnog gezet', r.j.door_david === false && mkGeen === mkVoor && mkNa > mkVoor, JSON.stringify([r.j, mkVoor, mkGeen, mkNa]));
+        H.appStaat.aanwezig = {};
+        const mkV2 = GD().tabs.machinekamer;
+        await slaap(20);
+        r = await gezienDD(LT, 'machinekamer');
+        await slaap(1100); await aanwezig(LT);
+        toets('23d wv804 M6 wacht verlopen -> vervalt, niet gezet', r.j.door_david === false && GD().tabs.machinekamer === mkV2, JSON.stringify([r.j, GD().tabs.machinekamer, mkV2]));
+        await aanwezig(VP);
+        r = await gezienDD(VP, 'machinekamer');
+        toets('23d wv804 M6 vaste plek zonder open slot: aanwezig telt niet, door_david false', r.status === 200 && r.j.door_david === false && !(H.appStaat.aanwezig || {})[VPID], JSON.stringify([r.j, H.appStaat.aanwezig]));
+
+        if (H.appStaat.poets && H.appStaat.poets.timer) { clearTimeout(H.appStaat.poets.timer); H.appStaat.poets.timer = null; }
+        if (H.appStaat.gezienWacht) H.appStaat.gezienWacht = {};
+        fs.writeFileSync(PJP, pjBewaar);
+        delete H.appStaat.sessies[sha(LT.sessie)]; delete H.appStaat.sessies[sha(VP.sessie)];
+        H.appStaat.aanwezig = {}; await slaap(BUNDEL23 + 50); H.appStaat.berichtPush = null;
+      }
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), regOrig23);
     }
 
