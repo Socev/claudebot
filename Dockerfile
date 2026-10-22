@@ -151,6 +151,7 @@ COPY pot-datahub.js /app/release-bootstrap/pot-datahub.js
 COPY bewaker.js /app/release-bootstrap/bewaker.js
 COPY studio.js /app/release-bootstrap/studio.js
 COPY bandjes.js /app/release-bootstrap/bandjes.js
+COPY harvester.js /app/release-bootstrap/harvester.js
 COPY audio.js /app/release-bootstrap/audio.js
 COPY spreektekst.js /app/release-bootstrap/spreektekst.js
 

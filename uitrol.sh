@@ -41,6 +41,7 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # studio.js (wv707): tab Studio in de app, door server.js geladen (ontbreekt hij, dan 404 op /app/studio/* en studio.aan=false in /health).
 # bandjes.js (wv743): mini-app Bandjes, door server.js geladen (ontbreekt hij, dan 404 op /app/bandjes* en bandjes.aan=false in /health).
 # audio.js (wv743): telefoonversie van een bandje, door studio.js geladen als een flow erom vraagt (ontbreekt hij, dan alleen het origineel met een noot).
+# harvester.js (wv820): App Harvester, door server.js geladen (ontbreekt hij, dan 404 op /app/harvester* en /harvester-ronde, harvester.aan=false in /health).
 # spreektekst.js (wv803): spreektekst van een bandje (nummers, websites, pauzes), door bandjes.js geladen (zelfde commit; ontbreekt hij, dan laadt bandjes.js niet: 404 op /app/bandjes*).
 # paypal-bewijs.js (wv765): PayPal-laag, door bank-lezer.js en server.js geladen als een PayPal-opdracht hem vraagt (ontbreekt hij, dan faalt alleen die opdracht netjes).
 # financien-app.js (wv771): App Financiën, door bank-lezer.js geladen bij de opdracht app-financien (ontbreekt hij, dan geeft de route 503).
@@ -48,7 +49,7 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # facturen-kern.js (wv797): kern van de Facturen-app (puur); nog door niets geladen, F1c/F2 koppelen hem (ontbreekt hij, dan geen Facturen).
 # facturen-bank.js (wv798): bankparsers, matching en signalen van de Facturen-app (puur, laadt facturen-kern.js + mt940-lezer.js); F2 koppelt hem.
 # pot-datahub.js (wv815): POT-posten naar Davids datahub, door server.js geladen in potDatahubRonde na de bank-ronde (ontbreekt hij, dan faalt alleen die stap: box-rij, de ronde loopt door).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js"
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js harvester.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

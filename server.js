@@ -3509,7 +3509,8 @@ function handleRequest(req, res) {
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
-      bandjes: bandjesInfo(),   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
+      bandjes: bandjesInfo(),
+      harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
       server: SERVER_ECHT ? { echt: true, paden: { home: serverPaden.home, io: serverPaden.io, jobout: serverPaden.jobout } }
@@ -3667,6 +3668,20 @@ function handleRequest(req, res) {
           !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
       const r = req.url === '/bank-ronde' ? bankRondeStart() : bankRondeUitkomst();
       reqLogExtra(res, { bank_ronde: req.url === '/bank-ronde' ? (r.status === 202 ? 'gestart' : 'bezig') : 'uitkomst' });
+      res.writeHead(r.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(r.j));
+    }); });
+  }
+
+  // ── wv820: wekelijkse Harvester-ronde (n8n AI - Harvester-ronde; body-secret zoals /run; geen andere invoer) ──
+  if (req.method === 'POST' && (req.url === '/harvester-ronde' || req.url === '/harvester-ronde/uitkomst')) {
+    return rolPoort(res, function () { readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
+          !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
+      const r = !harvester ? { status: 404, j: { ok: false, fout: 'Harvester zit niet in deze versie van de pod' } }
+        : req.url === '/harvester-ronde' ? harvester.rondeStart() : harvester.rondeUitkomst();
+      reqLogExtra(res, { harvester_ronde: req.url === '/harvester-ronde' ? (r.status === 202 ? 'gestart' : 'bezig') : 'uitkomst' });
       res.writeHead(r.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(r.j));
     }); });
@@ -4472,7 +4487,8 @@ const APP_SESSIE_MS = 30 * 60 * 1000;          // glijdend
 const APP_SESSIE_VAST_MS = 5 * 60 * 1000;      // vaste plek: wie bezig is, houdt over de dagdeelgrens heen 5 min glijdend (wv488; was fase 4: 5 min glijdend)
 // Routes die de sessie verlengen (schrijvend, door David gestart). Fase 3 voegt beurt en knop toe; uitslag/geschiedenis niet.
 const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beurt', 'POST /app/knop', 'POST /app/rij/terug', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs',
-  'POST /app/broedstoof/voorrang', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
+  'POST /app/broedstoof/voorrang', 'POST /app/harvester/broedstoof', 'POST /app/harvester/weg', 'POST /app/harvester/terug', 'POST /app/harvester/bron-nieuw',
+  'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt
@@ -4576,7 +4592,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
 const APP_BSN_SYS = '[Systeem: in Davids invoer stond een BSN-achtig getal (9 cijfers die de elfproef halen); de pod heeft het weggelaten (' + APP_BSN_MASKER + '). Vraag er niet naar; meestal was het een ander nummer.]';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [], reactie: [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [], reactie: [], harvester: [], 'harvester-bron': [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -10582,6 +10598,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/push/proef') return appPushProef(req, res, a);
         if (route.indexOf(' /app/studio/') > 0) return typeof appStudio === 'function' ? appStudio(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'studio');   // wv707
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
+        if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
         if (route === 'GET /app/pot-afschriften') return appPotAfschriften(req, res, a);       // wv787: App POT-afschriften (alleen David, geen vaste plek)
         if (route === 'POST /app/pot-afschriften/maak') return appPotMaak(req, res, a, d);
@@ -13011,6 +13028,99 @@ async function appBandjes(req, res, a, s, d, route) {
 }
 // ── einde bandjes ──
 
+// ── Harvester (wv820, 22-10-2026; bouwplan "01_Ontwikkeling/Harvester - ideeën oogsten (bouwplan 22-10-2026).md") ──
+// App Harvester: ideeën van gevolgde bronnen (RSS/Atom) met een cijfer voor gaaf, handig en complex; "Naar Broedstoof" zet een idee
+// geparkeerd op de Ideeënbus. Logica in harvester.js; hier de koppeling: routes /app/harvester(*) na de app-poort, POST
+// /harvester-ronde(/uitkomst) (n8n AI - Harvester-ronde, body-secret), /smal/harvester/kaart (de Verkenner), /health.harvester, de
+// modelaanroep (Sonnet zonder tools, account 2) en de hartslag. Schrijven alleen op de primaire kant. Ontbreekt harvester.js in de
+// release (terugrol), dan 404 op de routes en harvester.aan=false in /health.
+const HARVESTER_DIR = serverPad('harvester', process.env.HARVESTER_DIR, '/opt/data/harvester', serverProefDeel('harvester'));
+const HARVESTER_MODEL = 'claude-sonnet-5-5';
+const HARVESTER_BIN = process.env.HARVESTER_CLAUDE_BIN || 'claude';   // alleen de toets wijst elders heen
+const HARVESTER_ENV = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'NODE_VERSION'];
+// Eén claude -p-aanroep zoals de bankindeling (Fable wv820 #10): geen tools, geen MCP, geen sessie, lege map, prompt via stdin.
+// Account 2 (zoals de agents); kan dat niet, dan account 1 alleen als Davids reserve daar over is (account1Vangnet), anders niet.
+async function harvesterClaude(systeem, prompt, schema) {
+  let tok = '', account = kiesAccount({ account: 2 });
+  if (account === 2) { try { tok = await account2Token(); } catch (e) { tok = ''; } }
+  if (!tok) {
+    const v = await account1Vangnet();
+    if (!v.mag) return { ok: false, fout: 'geen ruimte op account 2 of 1 (' + v.reden + ')' };
+    account = 1; tok = process.env.CLAUDE_CODE_OAUTH_TOKEN || '';
+  }
+  return new Promise(function (klaar) {
+    let map = null;
+    try { map = fs.mkdtempSync(path.join(require('os').tmpdir(), 'harvester-ai-')); } catch (e) { return klaar({ ok: false, fout: 'geen werkmap' }); }
+    const opruim = function () { try { fs.rmSync(map, { recursive: true, force: true }); } catch (e) {} };
+    const env = { DISABLE_AUTOUPDATER: '1' };
+    HARVESTER_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
+    if (tok) env.CLAUDE_CODE_OAUTH_TOKEN = tok;
+    const args = ['-p', '--output-format', 'json', '--restricted', '--strict-mcp-config', '--tools', '', '--permission-mode', 'acceptEdits',
+      '--permission-prompts', 'none', '--no-session-persistence', '--model', HARVESTER_MODEL, '--effort', 'low', '--system-prompt', systeem,
+      '--json-schema', JSON.stringify(schema)];
+    let k, uit = '', fout = '';
+    try { k = spawn(HARVESTER_BIN, args, { cwd: map, env: env, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    catch (e) { opruim(); return klaar({ ok: false, fout: 'claude start niet' }); }
+    k.stdin.on('error', function () {});
+    try { k.stdin.end(prompt); } catch (e) {}
+    const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, 360000);
+    k.stdout.setEncoding('utf8'); k.stderr.setEncoding('utf8');
+    k.stdout.on('data', function (c) { if (uit.length < 4e6) uit += c; });
+    k.stderr.on('data', function (c) { if (fout.length < 1e4) fout += c; });
+    k.on('error', function () {});
+    k.on('close', function (code) {
+      clearTimeout(tm); opruim();
+      let j = null;
+      try { j = JSON.parse(uit.trim().split('\n').pop()); } catch (e) {}
+      if (!j) return klaar({ ok: false, fout: 'claude gaf geen JSON (exit ' + code + ')' });
+      if (j.is_error) return klaar({ ok: false, fout: 'claude: ' + String(j.result || j.subtype || 'fout').slice(0, 120) });
+      let s = j.structured_output;
+      if (!s && typeof j.result === 'string') { const m = /\{[\s\S]*\}/.exec(j.result); if (m) { try { s = JSON.parse(m[0]); } catch (e) {} } }
+      if (!s || typeof s !== 'object') return klaar({ ok: false, fout: 'antwoord zonder kaarten' });
+      klaar({ ok: true, data: s, verbruik: { account: account, in: (j.usage || {}).input_tokens || 0, uit: (j.usage || {}).output_tokens || 0, ms: j.duration_ms || null } });
+    });
+  });
+}
+const harvester = (function () {
+  const p = path.join(__dirname, 'harvester.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const H = require(p);
+    const h = H.maak({ vault: VAULT, dir: HARVESTER_DIR, fout: logError, claude: harvesterClaude,
+      // hartslag na elke geslaagde ronde, ook leeg (AI - Stiltewachter, rij hartslag-harvester; Fable wv820 #3)
+      hartslag: async function (items, kaarten) {
+        await appSbRpc('mk_hartslag_stempel', { p_component: 'harvester-ronde', p_gemeten_rijen: items, p_bevindingen: kaarten });
+        return true;
+      } });
+    h.mkdir();   // /opt/data/harvester en tmp/ op 0700; kaarten en staat 0600
+    return h;
+  } catch (e) { logError('harvester', e); return null; }
+})();
+function harvesterInfo() {
+  if (!harvester) return { aan: false };
+  try { return harvester.health(); } catch (e) { return { aan: true, fout: true }; }
+}
+async function appHarvester(req, res, a, d, route) {
+  if (!harvester) return appWeiger(res, 404, 'Harvester zit niet in deze versie van de pod', 'harvester ontbreekt');
+  if (route === 'GET /app/harvester') res._app.stil = true;
+  else {
+    if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+    if (!appTeller('harvester', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens harvester');
+    if (route === 'POST /app/harvester/bron-nieuw' && !appTeller('harvester-bron', 10, 3600000)) return appWeiger(res, 429, 'te vaak een bron toegevoegd dit uur (max 10)', 'grens harvester-bron');
+    // wv464: op een vaste plek een BSN-achtig getal maskeren, nooit weigeren
+    if (a.soort === 'vast' && d && typeof d === 'object') ['naam', 'adres'].forEach(function (k) {
+      if (typeof d[k] === 'string' && appBsnAchtig(d[k])) { d[k] = appBsnMasker(d[k]); res._app.bsnWeg = true; }
+    });
+  }
+  let r;
+  try { r = await harvester.app(route, d || {}); }
+  catch (e) { logError('app-harvester', e); return appWeiger(res, 500, 'fout op de pod', 'harvester uitzondering'); }
+  if (r.status !== 200) res._app.reden = 'harvester: ' + String(r.j && r.j.fout || '').slice(0, 60);
+  else if (route !== 'GET /app/harvester') res._app.reden = 'harvester ' + route.slice('POST /app/harvester/'.length) + ' ' + String(d && d.id || '').slice(0, 40);
+  return appStuur(res, r.status, r.j);
+}
+// ── einde harvester ──
+
 // ── Rolwachter (uitwijk stap 3, 6-10-2026) ─────────────────────────────────────────────────────────
 // Er is altijd maar één actieve kant (olares | vps); die staat in Supabase (machinekamer.uitwijk_stand, RPC
 // uitwijk_stand_lees). Een pod die niet de actieve kant is, is PASSIEF: /run, /agent en de kastjepaden geven 409 (de
@@ -13824,7 +13934,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30 };   // per uur
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30, 'harvester/kaart': 8 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
 const SMAL_CF_ACCOUNT = '23df9b0607bb70f6d7f15a63ec843d6d';
 const SMAL_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen
@@ -13941,6 +14051,12 @@ async function smalActie(actie, d) {
   }
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
   // wv743: voorstel van Socev in het bandjesregister (skill bandjes); de pod schrijft, de skill nooit zelf (Fable #5)
+  // wv820: kaart van de Verkenner (research-scout) in de Harvester; de pod controleert en schrijft (Fable wv820 #8)
+  if (actie === 'harvester/kaart') {
+    if (!harvester) return { status: 404, j: { ok: false, fout: 'Harvester zit niet in deze versie van de pod' } };
+    if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
+    return harvester.smal('kaart', d);
+  }
   if (actie === 'bandjes/voorstel') return bandjes ? bandjes.smal('voorstel', d) : { status: 404, j: { ok: false, fout: 'Bandjes zit niet in deze versie van de pod' } };
   return { status: 404, j: { ok: false, fout: 'onbekende smalle route' } };
 }

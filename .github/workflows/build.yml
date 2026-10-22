@@ -155,6 +155,8 @@ jobs:
       # Bandjes (wv739/wv743): register lezen/schrijven, routes, Studio-koppeling (nep-Piper), naKlaar, /smal, box-rij, server.js-blok in een vm.
       - name: "bandjes (wv743, mini-app Bandjes)"
         run: bash test/bandjes.sh
+      - name: "harvester (wv820, App Harvester)"
+        run: bash test/harvester.sh
       # Telefoonversie (wv743): 1 kHz/3 kHz doorlaat, 6 kHz → 2 kHz-spiegeling ≤ −40 dB, lengte, WAV-kop, µ-law binnen de G.711-fout.
       - name: "audio (wv743, telefoonversie 8 kHz PCM + µ-law)"
         run: bash test/audio.sh
