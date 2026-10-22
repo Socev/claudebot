@@ -283,6 +283,17 @@ test('review wv833 #2: praktijkmanager kan een Privé-leverancier niet zien, kop
   assert.equal(t.fdb.db.prepare('SELECT standaard_entiteit AS s FROM leverancier WHERE id = ?').get(levK.id).s, 'prive', 'leren niet door de praktijkmanager');
   const g = gewoon(t, "entiteit = 'tolgaarde'");
   assert.equal(t.call('POST', 'wijzig', { id: g.id, velden: { leverancier: levK.id } }, { rol: pm }).status, 400);
+  // nabellen door de praktijkmanager op een factuur van een Privé-leverancier: factuur nagebeld, IBAN niet bekend bij die leverancier
+  const h = gewoon(t, "entiteit = 'tolgaarde' AND id <> '" + f.id + "'");
+  const vreemd = Z.maakIban('NL', 'TEST', '0955555555');
+  t.fdb.db.prepare('UPDATE factuur SET leverancier = ?, iban = ?, ibans_betaal = ? WHERE id = ?').run(levK.id, vreemd, JSON.stringify([vreemd]), h.id);
+  const nb = t.call('POST', 'nagebeld', { id: h.id }, { rol: pm, }) ;
+  assert.equal(nb.status, 403, 'zonder vingerafdruk');
+  t.vers.ok = true;
+  const nb2 = t.call('POST', 'nagebeld', { id: h.id }, { rol: pm });
+  assert.equal(nb2.status, 200, JSON.stringify(nb2.j));
+  assert.equal(nb2.j.leverancier_bekend, 0);
+  assert.equal(t.n('SELECT count(*) AS n FROM leverancier_iban WHERE iban = ?', [vreemd]), 0);
   assert.equal(t.call('POST', 'leverancier', { id: levK.id, alleen_portaal: 1 }, { rol: pm }).status, 404);
   t.fdb.db.prepare("DELETE FROM gebruiker_entiteit WHERE entiteit = 'groenhouten'").run();
   const pm2 = F.rolVoor(t.fdb, { ingang: 'fac', email: 'praktijkmanager@voorbeeld.invalid' });

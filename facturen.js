@@ -456,7 +456,8 @@ function nagebeld(fdb, r, d, nu, o) {
       .run(JSON.stringify(ip.onbekend), n.factuur.nagebeld_door, n.factuur.nagebeld_op, JSON.stringify(n.factuur.nagebeld_ibans), wanneer, f.id, f.versie);
     if (u.changes !== 1) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw');
     let bekend = 0;
-    if (poort.leverancier) for (const li of n.leverancier_iban) {
+    // bekend maken bij de leverancier alleen als de beller die leverancier mag beheren (natoets wv833: praktijkmanager en Privé-leverancier)
+    if (poort.leverancier && magLeverancier(r, poort.leverancier)) for (const li of n.leverancier_iban) {
       bekend += fdb.db.prepare('INSERT INTO leverancier_iban (leverancier, iban, toegevoegd_door, toegevoegd_op) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING')
         .run(poort.leverancier.id, li.iban, li.toegevoegd_door, li.toegevoegd_op).changes;
     }
