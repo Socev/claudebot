@@ -8,6 +8,9 @@
  * "Ontvangstbewijs", gericht aan d.schaap@gmail.com - als je die automatisch verwerkt, dan kun je de Paypal-betalingen
  * reconstrueren". PayPal mailt per betaling een ontvangstbewijs (en per terugbetaling een bericht); deze module leest die met
  * vaste regels uit, bewaart ze in de transactiedatabase (tabel paypal_bewijs) en koppelt ze aan de PayPal-posten op de bank.
+ * Sinds wv780 (David 22-10-2026, Ja op de vraag "ook de berichten 'Geautoriseerd met …', 'U hebt een betaling … geautoriseerd' en
+ * 'U hebt een betaling overgemaakt' meelezen, alleen om die betalingen aan de afschrijving te koppelen?") ook die drie soorten: voor
+ * 23 van de 284 PayPal-afschrijvingen (o.a. een Google-abonnement, een dollarabonnement, een overmaking) stuurt PayPal geen ontvangstbewijs.
  *
  * HOE. server.js haalt de mails op via het bestaande lees-luik (mail_zoeken/mail_lezen, alleen lezen) en roept leesMail aan
  * (zuivere functie, geen taalmodel); bank-lezer.js (paypal-bij) bewaart de uitkomst met bij() en koppelt met koppel().
@@ -72,9 +75,30 @@ function datumUit(t) {
 function bedragUit(m) { return m ? { bedrag: getal(m[2]), valuta: m[3] } : null; }
 
 /*
+ * soortVanOnderwerp(onderwerp) — welke mail dit is, alleen op het onderwerp (server.js opent een mail pas als dit iets geeft).
+ *  - "Ontvangstbewijs …"                                        → betaling
+ *  - "U hebt een terugbetaling van …" / "Uw terugbetaling van …" → terugbetaling
+ *  - "U hebt een betaling aan <ontvanger> geautoriseerd"         → betaling, vorm geautoriseerd (wv780)
+ *  - "<ontvanger>: € 18,00 EUR" (tekst "Geautoriseerd met …")    → betaling, vorm geautoriseerd (wv780)
+ *  - "U hebt een betaling overgemaakt"                           → betaling, vorm overgemaakt (wv780)
+ * Andere PayPal-mails ("Uw betaling aan … is verwerkt", "U hebt een bestelling geplaatst bij …", claims, inlogberichten) niet: die
+ * vallen buiten Davids afbakening (de eerste twee liepen gemeten 22-10 alleen via de creditcard en hebben al een ontvangstbewijs).
+ */
+function soortVanOnderwerp(o) {
+  const ond = schoon(o, 200) || '';
+  if (/^Ontvangstbewijs\b/i.test(ond)) return { soort: 'betaling', vorm: null };
+  if (/^(U hebt een terugbetaling van|Uw terugbetaling van)\b/i.test(ond)) return { soort: 'terugbetaling', vorm: null };
+  if (/^U hebt een betaling aan .{2,90} geautoriseerd$/i.test(ond)) return { soort: 'betaling', vorm: 'geautoriseerd' };
+  if (/^[^:]{2,90}:\s?[€$£]\s?\d{1,3}(?:\.\d{3})*,\d{2}\s?[A-Z]{3}$/.test(ond)) return { soort: 'betaling', vorm: 'geautoriseerd' };
+  if (/^U hebt een betaling overgemaakt$/i.test(ond)) return { soort: 'betaling', vorm: 'overgemaakt' };
+  return null;
+}
+
+/*
  * leesMail(m) — één mail uit het lees-luik ({id, van, aan, onderwerp, snippet, tekst, dag_lokaal}) → bewijs of { fout }.
  * Twee soorten ontvangstbewijs ("… voor uw betaling aan <ontvanger>" en "… voor uw PayPal-betaling" met de ontvanger pas in
- * de tekst) en twee soorten terugbetaling ("U hebt een terugbetaling van …", "Uw terugbetaling van … is onderweg").
+ * de tekst), twee soorten terugbetaling ("U hebt een terugbetaling van …", "Uw terugbetaling van … is onderweg") en sinds wv780
+ * twee soorten autorisatie (status geautoriseerd) en de overmaking (zie soortVanOnderwerp).
  */
 function leesMail(m) {
   if (!m || typeof m !== 'object') return { fout: 'geen mail' };
@@ -83,10 +107,9 @@ function leesMail(m) {
   if (!AFZENDER.test(String(m.van || ''))) return { fout: 'afzender is niet service@paypal.nl', mail_id: id };
   if (!ONTVANGER.test(String(m.aan || ''))) return { fout: 'niet gericht aan d.schaap@gmail.com', mail_id: id };
   const ond = schoon(m.onderwerp, 200) || '';
-  let soort;
-  if (/^Ontvangstbewijs\b/i.test(ond)) soort = 'betaling';
-  else if (/^(U hebt een terugbetaling van|Uw terugbetaling van)\b/i.test(ond)) soort = 'terugbetaling';
-  else return { fout: 'onderwerp is geen ontvangstbewijs of terugbetaling', mail_id: id };
+  const sv = soortVanOnderwerp(ond);
+  if (!sv) return { fout: 'onderwerp is geen ontvangstbewijs, autorisatie, overmaking of terugbetaling', mail_id: id };
+  const soort = sv.soort;
   // Alleen de tekst, zonder links; de snippet als terugval (het lees-luik geeft altijd een snippet).
   const t = String(m.tekst || '').replace(/\[https?:\/\/[^\]]*\]/g, ' ').replace(/https?:\/\/\S+/g, ' ').replace(/[\u00a0\u202f]/g, ' ').slice(0, 20000);
   const s = String(m.snippet || '').replace(/[\u00a0\u202f]/g, ' ').slice(0, 1000);
@@ -96,31 +119,51 @@ function leesMail(m) {
     bron: 'onbekend', bron_eind: null, status: null, afschrift_naam: null, vorm: null, origineel: null };
   const kandidaten = [];
   let x;
+  if (soort === 'betaling' && sv.vorm) {
+    // wv780: autorisatie ("U hebt een betaling van € 12,00 EUR aan <ontvanger> (adres) geautoriseerd" / "Je hebt € 18,00 EUR
+    // geautoriseerd voor <ontvanger>") of overmaking ("U hebt € 25,00 EUR overgemaakt aan <ontvanger>")
+    if (sv.vorm === 'geautoriseerd' && (x = new RegExp('U hebt een betaling van ' + BEDRAG + ' aan ([^\\n(]+?)\\s*(?:\\(|\\n|geautoriseerd|$)').exec(plat))) {
+      Object.assign(b, bedragUit(x)); kandidaten.push(x[4]);
+    } else if (sv.vorm === 'geautoriseerd' && (x = new RegExp('Je hebt ' + BEDRAG + ' geautoriseerd voor ([^\\n]+)').exec(plat))) {
+      Object.assign(b, bedragUit(x)); kandidaten.push(x[4]);
+    } else if (sv.vorm === 'overgemaakt' && (x = new RegExp('U hebt ' + BEDRAG + ' overgemaakt aan ([^\\n]+)').exec(plat))) {
+      Object.assign(b, bedragUit(x)); kandidaten.push(x[4]);
+    }
+    if ((x = /(?:^|\n)Webwinkel\n([^\n]+)/.exec(t))) kandidaten.push(x[1]);
+    if (!kandidaten.length && (x = /^U hebt een betaling aan (.+) geautoriseerd$/i.exec(ond))) kandidaten.push(x[1]);
+    if (!kandidaten.length && (x = /^([^:]{2,90}):\s?[€$£]/.exec(ond))) kandidaten.push(x[1]);
+    b.vorm = sv.vorm;
+  }
   if (soort === 'betaling') {
     // bedrag en ontvanger
-    if ((x = new RegExp('U hebt ' + BEDRAG + ' betaald aan ([^\\n]+?)(?:\\s+Transactiereferentie|\\n|$)').exec(plat))) {
+    if (sv.vorm) { /* hierboven */ }
+    else if ((x = new RegExp('U hebt ' + BEDRAG + ' betaald aan ([^\\n]+?)(?:\\s+Transactiereferentie|\\n|$)').exec(plat))) {
       Object.assign(b, bedragUit(x)); kandidaten.push(x[4]); b.vorm = 'betaling-aan';
     } else if ((x = new RegExp('betaling van ' + BEDRAG + ' overgemaakt naar ([^\\n(]+)').exec(plat))) {
       Object.assign(b, bedragUit(x)); kandidaten.push(x[4]); b.vorm = 'overgemaakt-naar';
     } else if ((x = new RegExp('\\bBetaling ' + BEDRAG).exec(t))) {   // "Bedankt dat u met PayPal hebt betaald": Betaling € 5,00 USD
       Object.assign(b, bedragUit(x)); b.vorm = 'webwinkel';
     }
-    if ((x = /(?:^|\n)Betaling aan\n([^\n]+)/.exec(t))) kandidaten.unshift(x[1]);
-    if ((x = /(?:^|\n)Webwinkel\n([^\n]+)/.exec(t))) kandidaten.push(x[1].replace(/\s+Factuurreferentie.*$/, ''));
-    if ((x = /\n([^\n]{2,90}?) betaald met\b/.exec(t))) kandidaten.push(x[1]);
-    if (!kandidaten.length && (x = /betaling aan (.+)$/i.exec(ond))) kandidaten.push(x[1]);
+    if (!sv.vorm) {
+      if ((x = /(?:^|\n)Betaling aan\n([^\n]+)/.exec(t))) kandidaten.unshift(x[1]);
+      if ((x = /(?:^|\n)Webwinkel\n([^\n]+)/.exec(t))) kandidaten.push(x[1].replace(/\s+Factuurreferentie.*$/, ''));
+      if ((x = /\n([^\n]{2,90}?) betaald met\b/.exec(t))) kandidaten.push(x[1]);
+      if (!kandidaten.length && (x = /betaling aan (.+)$/i.exec(ond))) kandidaten.push(x[1]);
+    }
     // EUR: wat er van de bron afging. Twee methoden (PayPal-saldo + bank, Fable wv765 #6): alleen het bankdeel komt op de bank.
-    const blok = (/(?:betaald met|Gebruikte betaalmethoden)([\s\S]{0,400}?)(?:Transactiereferentie|Betaling bekijken|Je betaling is verzonden|Problemen met|-{10}|$)/.exec(t) || [])[1] || '';
+    const blok = (/(?:betaald met|Betaald met:|Gebruikte betaalmethoden|Geautoriseerd met\n)([\s\S]{0,400}?)(?:Transactiereferentie|Betaling bekijken|Je betaling is verzonden|Problemen met|-{10}|$)/.exec(t) || [])[1] || '';
     const delen = [];
     blok.replace(new RegExp('([^€$£]{0,80}?)' + BEDRAG, 'g'), function (heel, wat, teken, bedrag, code) { delen.push({ wat: wat, bedrag: getal(bedrag), valuta: code }); return heel; });
     const bankDeel = delen.filter(function (d) { return /bank|rekening/i.test(d.wat) && d.valuta === 'EUR'; });
     if (delen.length >= 2 && bankDeel.length === 1 && delen.some(function (d) { return !/bank|rekening/i.test(d.wat); })) { b.bedrag_eur = bankDeel[0].bedrag; b.vorm = 'gemengd'; }
     else if ((x = new RegExp('betaald met\\s+[^€$£]{0,80}?' + BEDRAG).exec(t)) && x[3] === 'EUR') b.bedrag_eur = getal(x[2]);
     else if ((x = new RegExp('Gebruikte betaalmethoden[^€$£]{0,80}?' + BEDRAG).exec(t)) && x[3] === 'EUR') b.bedrag_eur = getal(x[2]);
+    else if ((x = new RegExp('(?:Geautoriseerd met|Betaald met:)\\n[^€$£]{0,80}?' + BEDRAG).exec(t)) && x[3] === 'EUR') b.bedrag_eur = getal(x[2]);   // wv780
     else if ((x = new RegExp('Omgerekend van:\\s*' + BEDRAG).exec(t)) && x[3] === 'EUR') b.bedrag_eur = getal(x[2]);
     else if ((x = new RegExp('Overgemaakt bedrag\\s*' + BEDRAG).exec(t)) && x[3] === 'EUR') b.bedrag_eur = getal(x[2]);
     // bron van het geld
-    const bron = (/betaald met\s+([\s\S]{0,80}?)[€$£]/.exec(t) || /Gebruikte betaalmethoden \(totaal\)\s+([\s\S]{0,80}?)[€$£]/.exec(t) || [])[1] || '';
+    const bron = (/betaald met\s+([\s\S]{0,80}?)[€$£]/.exec(t) || /Gebruikte betaalmethoden \(totaal\)\s+([\s\S]{0,80}?)[€$£]/.exec(t) ||
+      /(?:Geautoriseerd met|Betaald met:)\n([\s\S]{0,80}?)[€$£]/.exec(t) || [])[1] || '';
     if (b.vorm === 'gemengd') b.bron = 'bank';
     else if (/creditcard|visa|mastercard|american express|amex/i.test(bron)) b.bron = 'kaart';
     else if (/PayPal-saldo|saldo/i.test(bron)) b.bron = 'saldo';
@@ -129,6 +172,7 @@ function leesMail(m) {
     if (eind) b.bron_eind = eind[1];
     if ((x = /Transactiedatum:?\s*\n?\s*([^\n]{6,40})/.exec(t)) || (x = /(?:^|\n)Datum\n([^\n]{6,30})/.exec(t)) || (x = /Transactiedatum (\d{1,2} \w+\.? \d{4})/.exec(s))) b.datum = datumUit(x[1]);
     if ((x = /Betaalstatus\n([A-Z ]{3,30})\n/.exec(t))) b.status = schoon(x[1], 30).toLowerCase();
+    if (sv.vorm === 'geautoriseerd') b.status = 'geautoriseerd';   // wv780: merkteken van een autorisatie (bij() voegt samen met het latere bewijs)
     if ((x = /afschrift te staan als\s*\n?\s*["'](PAYPAL\s*\n?\s*\*[^"'\n]{1,40}(?:\n[^"'\n]{0,20})?)["']/i.exec(t))) b.afschrift_naam = schoon(x[1], 40);
   } else {
     b.vorm = 'terugbetaling';
@@ -199,8 +243,13 @@ function controleer(b) {
 /*
  * bij(a, lijst, fouten) — bewijzen bewaren. Idempotent op transactiereferentie: dezelfde betaling uit een tweede mail (PayPal
  * stuurt soms twee bewijzen) vult alleen lege velden aan en voegt het mail-id toe; een volledige naam wint van een afgekapte.
+ * Autorisatie (status geautoriseerd, wv780) en ontvangstbewijs van dezelfde betaling worden één rij, het ontvangstbewijs wint:
+ * op referentie, en anders op dienst + bedrag + valuta met het bewijs 0..AUT_DAGEN dagen na de autorisatie (1 dag ervóór mag,
+ * Amerikaanse tijd). Een autorisatie met een ander bedrag dan het latere bewijs (deelbetaling) blijft apart staan.
  * fouten: [{mail_id, fout}] van leesMail, alleen geteld (en de laatste paar mail-id's bewaard om na te lopen).
  */
+const AUT_DAGEN = 3;
+function isAut(r) { return !!r && r.status === 'geautoriseerd'; }
 function bij(a, lijst, fouten) {
   schema(a);
   const nu = nuIso(), uit = { aangeboden: (lijst || []).length, nieuw: 0, aangevuld: 0, ongewijzigd: 0, geweigerd: 0, niet_gelezen: (fouten || []).length };
@@ -213,11 +262,48 @@ function bij(a, lijst, fouten) {
   const weg = a.db.prepare('DELETE FROM paypal_bewijs WHERE ref = ?');
   const werk = a.db.prepare('UPDATE paypal_bewijs SET ontvanger = ?, afgekapt = ?, dienst = ?, bedrag_eur = ?, bron = ?, bron_eind = ?, status = ?, afschrift_naam = ?,' +
     ' mail_ids = ?, bijgewerkt = ? WHERE ref = ?');
+  // wv780: autorisatie ↔ ontvangstbewijs van dezelfde betaling met een andere referentie (dichtstbijzijnde dag eerst)
+  const autVan = a.db.prepare("SELECT * FROM paypal_bewijs WHERE soort = 'betaling' AND status = 'geautoriseerd' AND dienst = ? AND bedrag = ? AND valuta = ? AND datum BETWEEN ? AND ? AND ref != ?");
+  const bewijsVan = a.db.prepare("SELECT * FROM paypal_bewijs WHERE soort = 'betaling' AND (status IS NULL OR status != 'geautoriseerd') AND dienst = ? AND bedrag = ? AND valuta = ? AND datum BETWEEN ? AND ? AND ref != ?");
+  const dichtst = function (l, datum) { return l.sort(function (p, q) { return Math.abs(dagVerschil(p.datum, datum)) - Math.abs(dagVerschil(q.datum, datum)) || (p.ref < q.ref ? -1 : 1); })[0] || null; };
+  const idsVan = function (r) { let l = []; try { l = JSON.parse(r.mail_ids) || []; } catch (e) { l = []; } return l; };
+  const metId = function (l, id) { return l.indexOf(id) >= 0 ? l : l.concat([id]).slice(-5); };
   const doe = function () {
     (lijst || []).forEach(function (ruw) {
       const b = controleer(ruw);
       if (!b) { uit.geweigerd++; return; }
       const o = lees.get(b.ref);
+      // autorisatie eerst bewaard, ontvangstbewijs met dezelfde referentie komt later: het bewijs vervangt de autorisatie
+      if (o && isAut(o) && !isAut(b)) {
+        weg.run(o.ref);
+        zet.run(b.ref, b.soort, b.datum, b.ontvanger, b.afgekapt, b.dienst, b.bedrag, b.valuta, b.bedrag_eur, b.bron, b.bron_eind, b.status, b.afschrift_naam, b.vorm,
+          b.origineel, JSON.stringify(metId(idsVan(o), b.mail_id)), o.eerste_gezien, nu);
+        uit.samengevoegd = (uit.samengevoegd || 0) + 1; return;
+      }
+      if (o && !isAut(o) && isAut(b)) {   // bewijs staat er al: alleen het mail-id van de autorisatie erbij
+        const ids = idsVan(o);
+        if (ids.indexOf(b.mail_id) >= 0) { uit.ongewijzigd++; return; }
+        a.db.prepare('UPDATE paypal_bewijs SET mail_ids = ?, bijgewerkt = ? WHERE ref = ?').run(JSON.stringify(metId(ids, b.mail_id)), nu, o.ref);
+        uit.aangevuld++; return;
+      }
+      if (!o && b.soort === 'betaling' && b.dienst) {
+        if (isAut(b)) {
+          const bw = dichtst(bewijsVan.all(b.dienst, b.bedrag, b.valuta, plusDagen(b.datum, -1), plusDagen(b.datum, AUT_DAGEN), b.ref), b.datum);
+          if (bw) {
+            const ids = idsVan(bw);
+            if (ids.indexOf(b.mail_id) < 0) a.db.prepare('UPDATE paypal_bewijs SET mail_ids = ?, bijgewerkt = ? WHERE ref = ?').run(JSON.stringify(metId(ids, b.mail_id)), nu, bw.ref);
+            uit.aangevuld++; return;
+          }
+        } else {
+          const au = dichtst(autVan.all(b.dienst, b.bedrag, b.valuta, plusDagen(b.datum, -AUT_DAGEN), plusDagen(b.datum, 1), b.ref), b.datum);
+          if (au) {
+            weg.run(au.ref);
+            zet.run(b.ref, b.soort, b.datum, b.ontvanger, b.afgekapt, b.dienst, b.bedrag, b.valuta, b.bedrag_eur, b.bron, b.bron_eind, b.status, b.afschrift_naam, b.vorm,
+              b.origineel, JSON.stringify(metId(idsVan(au), b.mail_id)), au.eerste_gezien, nu);
+            uit.samengevoegd = (uit.samengevoegd || 0) + 1; return;
+          }
+        }
+      }
       if (!o) {
         const tw = b.soort === 'terugbetaling' && b.origineel ? tweeling.get(b.dienst, b.bedrag, b.valuta, b.origineel, b.ref, b.ref) : null;
         let ids = [b.mail_id];
@@ -477,7 +563,7 @@ function lijst(a, o) {
     niet_op_de_bank: rijen.filter(function (r) { return r.bron === 'kaart' || r.bron === 'saldo'; }).length,
     nog_niet_gevonden: rijen.filter(function (r) { return r.nr == null && r.bron !== 'kaart' && r.bron !== 'saldo'; }).length,
     bankposten_zonder_bewijs: { aantal: zonder.length, posten: zonder.slice(0, 20) },
-    let_op: 'uit de PayPal-ontvangstbewijzen in Davids Gmail (d.schaap@gmail.com); betalingen via de creditcard of het PayPal-saldo staan niet op de bank',
+    let_op: 'uit de PayPal-ontvangstbewijzen in Davids Gmail (d.schaap@gmail.com), sinds 22-10-2026 ook de autorisatie- en overmakingsberichten (status geautoriseerd = PayPal meldde alleen de autorisatie); betalingen via de creditcard of het PayPal-saldo staan niet op de bank',
     bewijzen: rijen.slice(0, max).map(function (r) { return bewijsUit(r, posten); }) };
 }
 function diensten(a, o) {
@@ -498,4 +584,4 @@ function stand(a) {
     niet_gelezen: ng.length, bij_op: metaLees(a, 'paypal_bij_op'), koppel_op: metaLees(a, 'paypal_koppel_op'), ronde_op: metaLees(a, 'paypal_ronde_op') };
 }
 
-module.exports = { leesMail, dienstSleutel, datumUit, schema, bij, bekend, koppel, dienstPerPost, reeksen, lijst, diensten, stand, VENSTER_DAGEN, metaZet };
+module.exports = { leesMail, soortVanOnderwerp, dienstSleutel, datumUit, schema, bij, bekend, koppel, dienstPerPost, reeksen, lijst, diensten, stand, VENSTER_DAGEN, metaZet };

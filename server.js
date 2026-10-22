@@ -14165,7 +14165,10 @@ function bankVerrijkStart(maxBatches) {
 // (paypal-bij: bewaren in de transactiedatabase + koppelen aan de PayPal-posten). De mailtekst gaat nergens anders heen.
 // Ronde: na elke bank-ronde de laatste 10 dagen; historie alleen machinekamer (bank.py paypal-ronde van=…). Alleen nieuwe mails
 // worden geopend (n8n bewaart elke run van het lees-luik met inhoud). Hartslag paypal-ronde (stiltewachter hartslag-paypal, 26 u).
-const PAYPAL_QUERY = 'from:service@paypal.nl to:d.schaap@gmail.com (subject:Ontvangstbewijs OR subject:terugbetaling)';
+// wv780 (David 22-10-2026, Ja): ook "U hebt een betaling aan … geautoriseerd", "<dienst>: € 18,00 EUR" (Geautoriseerd met …) en
+// "U hebt een betaling overgemaakt". Gmail zoekt op woorden, dus ruimer (EUR/USD/GBP); geopend wordt alleen een mail waarvan het
+// onderwerp past (paypal-bewijs.js soortVanOnderwerp), de rest wordt niet gelezen.
+const PAYPAL_QUERY = 'from:service@paypal.nl to:d.schaap@gmail.com (subject:Ontvangstbewijs OR subject:terugbetaling OR subject:geautoriseerd OR subject:"betaling overgemaakt" OR subject:EUR OR subject:USD OR subject:GBP)';
 const PAYPAL_RONDE_DAGEN = 10;
 const PAYPAL_BATCH = 40;   // bewijzen per kindproces (stdin van bank-lezer.js is begrensd op 64 KB; 40 bewijzen ≈ 16 KB)
 let paypalBezig = false;
@@ -14207,7 +14210,8 @@ async function paypalRonde(o) {
       await paypalZoek(s, e, zoek, 0);
       s = e;
     }
-    const nieuw = Array.from(zoek.mails.values()).filter(function (m) { return !bekend.has(m.id); });
+    const passend = Array.from(zoek.mails.values()).filter(function (m) { return !!P.soortVanOnderwerp(m.onderwerp); });   // wv780: andere PayPal-mails niet openen
+    const nieuw = passend.filter(function (m) { return !bekend.has(m.id); });
     const bewijzen = [], fouten = [];
     let leesFout = 0;
     for (const m of nieuw) {
@@ -14230,7 +14234,8 @@ async function paypalRonde(o) {
       if (laatste) { koppeling = r.j.koppeling || null; stand = r.j.stand || null; }
     }
     // alleen aantallen terug (geen bedragen, namen of mailinhoud)
-    return { ok: true, van: van, gevonden: zoek.mails.size, al_bekend: zoek.mails.size - nieuw.length, gelezen: nieuw.length - leesFout, lees_fout: leesFout || undefined,
+    return { ok: true, van: van, gevonden: passend.length, overgeslagen: (zoek.mails.size - passend.length) || undefined, al_bekend: passend.length - nieuw.length,
+      gelezen: nieuw.length - leesFout, lees_fout: leesFout || undefined,
       niet_uitgelezen: fouten.length || undefined, afgekapt: zoek.afgekapt || undefined, bewaard: bewaard, koppeling: koppeling,
       stand: stand ? { bewijzen: stand.bewijzen, per_koppeling: stand.per_koppeling, per_bron: stand.per_bron } : null, duur_s: Math.round((Date.now() - begin) / 100) / 10,
       nieuw: bewaard.nieuw };

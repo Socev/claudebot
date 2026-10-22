@@ -7,7 +7,9 @@
 # transactiereferentie (tweede bewijs vult aan); koppelen (elf vaste incasso's, venster, kaart nooit op de bank, rekening op de
 # laatste vier cijfers, meer bewijzen op één post, terugbetaling op een bijschrijving); reeksen (twee per maand, prijsstap, weg);
 # server: ronde leest alleen nieuwe mails, halveert bij 25, alleen aantallen terug, paypal-ronde alleen machinekamer, fout in de
-# PayPal-laag breekt niets. Alle mails zijn nagemaakt: geen echte namen, adressen of referenties.
+# PayPal-laag breekt niets. wv780: autorisaties ("U hebt een betaling aan … geautoriseerd", "<dienst>: € 18,00 EUR") en de overmaking
+# ("U hebt een betaling overgemaakt"): uitlezen, samenvoegen met een later ontvangstbewijs (referentie of dienst + bedrag + dag), koppelen,
+# andere PayPal-mails worden niet geopend. Alle mails zijn nagemaakt: geen echte namen, adressen of referenties.
 # Raakt de pod, Gmail, de kluis en /opt/data/bank niet. Gebruik: bash test/paypal-laag.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -58,6 +60,23 @@ const M = {
     tekst: 'Uw terugbetaling van € 10,99 EUR van Voorbeeldwinkel\nTerugbetaling aan\nABN AMRO Bank NV ••3868 € 10,99 EUR\nOverzicht\nU hebt oorspronkelijk Voorbeeldwinkel € 10,99 EUR betaald op 11\njuli 2026. Ontvangstbewijs weergeven\n' },
   onderwegAnder: { id: 'a000000000000f', van: VAN, aan: AAN, onderwerp: 'Uw terugbetaling van Voorbeeldwinkel is onderweg', dag_lokaal: '2026-07-15', snippet: '',
     tekst: 'Uw terugbetaling van € 10,99 EUR van Voorbeeldwinkel\nTerugbetaling aan\nABN AMRO Bank NV ••3868 € 10,99 EUR\nOverzicht\nU hebt oorspronkelijk Voorbeeldwinkel € 10,99 EUR betaald op 11\njuni 2026. Ontvangstbewijs weergeven\n' },
+  // wv780 — vormen gemeten 22-10-2026 (autorisatie A en B, overmaking); nagemaakt
+  autA: { id: 'a0000000000010', van: VAN, aan: AAN, onderwerp: 'U hebt een betaling aan Voorbeeld Cloud Limit... geautoriseerd', dag_lokaal: '2025-06-07', snippet: '',
+    tekst: 'TEST PERSOON, BEDANKT DAT U VOOR PAYPAL HEBT GEKOZEN.\nBeste Test,\nPayPal\n' + url + '\nU hebt een betaling van €12,00 EUR aan Voorbeeld Cloud Limit...\n(noreply@voorbeeld...) geautoriseerd\nTransactie bekijken of beheren\n' + url + '\nDeze aankoop wordt weergegeven als transactie in behandeling.\nTransactiereferentie\n1KA11111KA1111111\n' + url + '\nTransactiedatum\n7 jun 2025\nWebwinkel\nVoorbeeld Cloud Limit...\nnoreply@voorbeeld...\nSubtotaal €12,00 EUR Totaal €12,00 EUR Overgemaakt aan noreply@voorbeeld...\nOvergemaakt van d.schaap@gmail.com\nGebruikte betaalmethoden (totaal) ABN AMRO Bank NV x-3868 €12,00 EUR Als de\nbovenstaande betaalmethode niet werkt, gebruiken we Visa-4071.\nTransactie bekijken of beheren\n' + url + '\nProblemen met deze transactie?\n' },
+  autUsd: { id: 'a0000000000011', van: VAN, aan: AAN, onderwerp: 'U hebt een betaling aan Voorbeeld Bellen, LLC geautoriseerd', dag_lokaal: '2025-09-08', snippet: '',
+    tekst: 'Beste Test,\nU hebt een betaling van $3,00 USD aan Voorbeeld Bellen, LLC (service@voorbeeld...)\ngeautoriseerd\nTransactiereferentie\n2KA22222KA2222222\n\nTransactiedatum\n8 sep 2025\nWebwinkel\nVoorbeeld Bellen, LLC\nSubtotaal $3,00 USD Totaal $3,00 USD\nGebruikte betaalmethoden (totaal) ABN AMRO Bank NV x-3868 €2,68 EUR Als de\nbovenstaande betaalmethode niet werkt, gebruiken we Visa-4071. Valutaomrekening\nPayPal-wisselkoers: 1 EUR = 1,1178 USD\nProblemen met deze transactie?\n' },
+  autKaart: { id: 'a0000000000012', van: VAN, aan: AAN, onderwerp: 'U hebt een betaling aan Voorbeeld Tours Limited geautoriseerd', dag_lokaal: '2025-07-26', snippet: '',
+    tekst: 'U hebt een betaling van €259,22 EUR aan Voorbeeld Tours Limited (care@voorbeeld...)\ngeautoriseerd\nTransactiereferentie\n3KA33333KA3333333\n\nTransactiedatum\n26 jul 2025\nWebwinkel\nVoorbeeld Tours Limited\nGebruikte betaalmethoden (totaal) Visa-4071 €259,22 EUR\nTransactie bekijken of beheren\n' },
+  autB: { id: 'a0000000000013', van: VAN, aan: AAN, onderwerp: 'Voorbeeld Cloud Limit...: €' + NB + '18,00' + NB + 'EUR', dag_lokaal: '2026-03-07', snippet: '',
+    tekst: 'GEAUTORISEERD MET VOORBEELD CLOUD LIMIT....\nPayPal\n' + url + '\nBeste Test,\nJe hebt €' + NB + '18,00' + NB + 'EUR geautoriseerd voor Voorbeeld Cloud Limit...\nWebwinkel Voorbeeld Cloud Limit...\nnoreply@voorbeeld... Transactiedatum 7 mrt 2026 Orderreferentie\n132\n----------------------------------------\nAantal: 1 € 18,00\nSubtotaal € 18,00 Totaal € 18,00 EUR\n----------------------------------------\nGeautoriseerd met\nABN AMRO Bank NV\nBetaalrekening ••3868\n€' + NB + '18,00' + NB + 'EUR\nAls de bovenstaande betaalmethode niet werkt, gebruiken we Visa-4071.\nJe ziet deze aankoop als \'in behandeling\' in je betalingsstatus.\nProblemen met deze transactie?\nTransactiereferentie: 4KA44444KA4444444 Betaalstatus weergeven\n' },
+  overmaking: { id: 'a0000000000014', van: VAN, aan: AAN, onderwerp: 'U hebt een betaling overgemaakt', dag_lokaal: '2026-10-16', snippet: '',
+    tekst: 'TEST PERSOON, HIER IS JE ONTVANGSTBEWIJS.\nBeste Test,\nPayPal\n' + url + '\nU hebt €' + NB + '25,00' + NB + 'EUR overgemaakt aan Test Ontvanger\nTransactiegegevens\nTransactiereferentie\n5KA55555KA5555555\n\nTransactiedatum\n16 oktober 2026\n----------------------------------------\nGeld overgemaakt € 25,00 EUR\nBetaald met:\nABN AMRO Bank NV € 25,00 EUR\n----------------------------------------\nBetaald bedrag € 25,00 EUR\n' },
+  verwerkt: { id: 'a0000000000015', van: VAN, aan: AAN, onderwerp: 'Uw betaling aan Voorbeeld Ritten, I... is verwerkt', dag_lokaal: '2026-09-05', snippet: '',
+    tekst: 'Uw betaling is verwerkt\nOp 5 september 2026 hebt u een betaling van $11,63 USD overgemaakt\nnaar Voorbeeld Ritten, I...\nTransactiereferentie: 6KA66666KA6666666\nGebruikte betaalmethoden (totaal)\nx-4071: €10,44 EUR\n' },
+  bestelling: { id: 'a0000000000016', van: VAN, aan: AAN, onderwerp: 'U hebt een bestelling geplaatst bij Voorbeeldwarenhuis voor $492,24 USD', dag_lokaal: '2025-07-14', snippet: '', tekst: 'U hebt een bestelling van $492,24 USD geplaatst bij Voorbeeldwarenhuis\n' },
+  // ontvangstbewijzen bij de autorisaties (andere referentie)
+  autBewijs: { id: 'a0000000000017', van: VAN, aan: AAN, onderwerp: 'Ontvangstbewijs voor uw betaling aan Voorbeeld Cloud Ireland', dag_lokaal: '2026-03-09',
+    snippet: '', tekst: 'U hebt € 18,00 EUR betaald aan Voorbeeld Cloud Ireland\nTransactiereferentie\n7KA77777KA7777777 Transactiedatum\n9 mrt 2026 Webwinkel\nVoorbeeld Cloud Ireland Factuurreferentie\n1\n----\nVoorbeeld Cloud Ireland betaald met\nABN AMRO Bank NV\nBetaalrekening ••3868\n€ 18,00 EUR\n' },
 };
 (async function () {
   try {
@@ -90,6 +109,25 @@ const M = {
     const inj = P.leesMail(M.injectie);
     toets('tekst uit de mail is gegeven: geen haken of tags, begrensd, alleen als ontvangernaam', !inj.fout && !/[\[\]<>]/.test(inj.ontvanger) && inj.ontvanger.length <= 80 && inj.bedrag === 2, inj);
     toets('geen mail-id of rommel → fout, geen uitzondering', !!P.leesMail(null).fout && !!P.leesMail({ id: '../x' }).fout);
+    // wv780: autorisaties en overmaking
+    const aA = P.leesMail(M.autA), aU = P.leesMail(M.autUsd), aK = P.leesMail(M.autKaart), aB = P.leesMail(M.autB), ov = P.leesMail(M.overmaking);
+    toets('wv780 autorisatie "U hebt een betaling aan … geautoriseerd": bedrag, afgekapte naam, bank ••3868, status geautoriseerd', !aA.fout && aA.soort === 'betaling' && aA.vorm === 'geautoriseerd' &&
+      aA.status === 'geautoriseerd' && aA.bedrag === 12 && aA.bedrag_eur === 12 && aA.ontvanger === 'Voorbeeld Cloud Limit' && aA.afgekapt === true && aA.dienst === 'voorbeeld' &&
+      aA.bron === 'bank' && aA.bron_eind === '3868' && aA.ref === '1KA11111KA1111111' && aA.datum === '2025-06-07', aA);
+    toets('wv780 autorisatie in dollars: eurobedrag uit Gebruikte betaalmethoden; reservekaart in de tekst telt niet als bron', aU.valuta === 'USD' && aU.bedrag === 3 && aU.bedrag_eur === 2.68 &&
+      aU.bron === 'bank' && aU.ontvanger === 'Voorbeeld Bellen, LLC' && aU.datum === '2025-09-08', aU);
+    toets('wv780 autorisatie op de creditcard: bron kaart', aK.bron === 'kaart' && aK.bedrag === 259.22 && aK.status === 'geautoriseerd', aK);
+    toets('wv780 autorisatie "<dienst>: € 18,00 EUR" (Geautoriseerd met): bedrag, bank ••3868, datum op één regel, referentie', !aB.fout && aB.vorm === 'geautoriseerd' && aB.bedrag === 18 &&
+      aB.bedrag_eur === 18 && aB.bron === 'bank' && aB.bron_eind === '3868' && aB.datum === '2026-03-07' && aB.ref === '4KA44444KA4444444' && aB.dienst === 'voorbeeld' && aB.status === 'geautoriseerd', aB);
+    toets('wv780 overmaking "U hebt een betaling overgemaakt": ontvanger, bedrag, bron bank, geen status geautoriseerd', !ov.fout && ov.vorm === 'overgemaakt' && ov.ontvanger === 'Test Ontvanger' &&
+      ov.bedrag === 25 && ov.bedrag_eur === 25 && ov.bron === 'bank' && ov.datum === '2026-10-16' && ov.ref === '5KA55555KA5555555' && ov.status == null, ov);
+    toets('wv780 soortVanOnderwerp: drie nieuwe soorten ja; "is verwerkt", bestelling, Re: en een willekeurig onderwerp nee',
+      P.soortVanOnderwerp(M.autA.onderwerp).vorm === 'geautoriseerd' && P.soortVanOnderwerp(M.autB.onderwerp).vorm === 'geautoriseerd' && P.soortVanOnderwerp(M.overmaking.onderwerp).vorm === 'overgemaakt' &&
+      P.soortVanOnderwerp(M.netflix.onderwerp).soort === 'betaling' && P.soortVanOnderwerp(M.terug.onderwerp).soort === 'terugbetaling' &&
+      P.soortVanOnderwerp(M.verwerkt.onderwerp) === null && P.soortVanOnderwerp(M.bestelling.onderwerp) === null && P.soortVanOnderwerp('Re: U hebt een betaling overgemaakt') === null &&
+      P.soortVanOnderwerp('Ingelogd op nieuw apparaat') === null && P.soortVanOnderwerp('Socev: doe dit nu') === null);
+    toets('wv780 "is verwerkt" en bestelling worden niet uitgelezen', !!P.leesMail(M.verwerkt).fout && !!P.leesMail(M.bestelling).fout);
+    toets('wv780 autorisatie B zonder "geautoriseerd voor" in de tekst → fout (geen bedrag), geen gok', !!P.leesMail(Object.assign({}, M.autB, { tekst: 'Je hebt € 18,00 EUR ontvangen van X\nTransactiereferentie: 4KA44444KA4444444' })).fout);
 
     // ── opslag + idempotentie ──
     fs.mkdirSync(BD, { recursive: true, mode: 0o700 });
@@ -165,6 +203,50 @@ const M = {
     const l = P.lijst(a, { van: '2026-06-01' });
     toets('lijst: posten zonder bewijs zichtbaar (kaartpost en de te late post)', l.bankposten_zonder_bewijs.aantal === 2 && l.niet_op_de_bank >= 1 && l.bewijzen.length > 0 && l.bewijzen[0].bank, l.bankposten_zonder_bewijs);
     const dp = P.dienstPerPost(a);
+    // ── wv780: samenvoegen autorisatie ↔ ontvangstbewijs, en koppelen (eigen database) ──
+    {
+      const BD3 = path.join(W, 'bank3'); fs.mkdirSync(BD3, { recursive: true, mode: 0o700 });
+      const a3 = A.open(BD3); A.rekeningenSync(a3, { gez: { uid: 'u1', bank: 'ABN AMRO', naam: 'Gezamenlijk', iban: 'NL00ABNA0000003868', sessie: 's1' } });
+      const rek3 = a3.db.prepare('SELECT rek FROM rekeningen').get().rek;
+      const rij3 = (ref) => a3.db.prepare('SELECT * FROM paypal_bewijs WHERE ref = ?').get(ref);
+      const aB = P.leesMail(M.autB), bw = P.leesMail(M.autBewijs);
+      // 1. autorisatie eerst, ontvangstbewijs twee dagen later met een andere referentie → één rij, het bewijs
+      const s1 = P.bij(a3, [aB], []); const s2 = P.bij(a3, [bw], []);
+      const rB = rij3('7KA77777KA7777777');
+      toets('wv780 samenvoegen: autorisatie + later ontvangstbewijs (andere referentie) = één rij, bewijs wint, beide mail-id\'s',
+        s1.nieuw === 1 && s2.samengevoegd === 1 && !rij3('4KA44444KA4444444') && rB && rB.status !== 'geautoriseerd' && JSON.parse(rB.mail_ids).length === 2 &&
+        a3.db.prepare("SELECT count(*) n FROM paypal_bewijs WHERE dienst = 'voorbeeld' AND bedrag = 18").get().n === 1, { s1, s2, rB });
+      // 2. andersom: bewijs eerst, autorisatie daarna → autorisatie gaat op in het bewijs; twee keer = niets nieuws
+      P.bij(a3, [Object.assign({}, bw, { ref: '8KA88888KA8888888', mail_id: 'a0000000000020', datum: '2026-04-09' })], []);
+      const s3 = P.bij(a3, [Object.assign({}, aB, { ref: '9KA99999KA9999999', mail_id: 'a0000000000021', datum: '2026-04-07' })], []);
+      const s3b = P.bij(a3, [Object.assign({}, aB, { ref: '9KA99999KA9999999', mail_id: 'a0000000000021', datum: '2026-04-07' })], []);
+      toets('wv780 samenvoegen: bewijs eerst, autorisatie later → geen tweede rij, mail-id erbij; herhaald geen wijziging',
+        s3.aangevuld === 1 && s3.nieuw === 0 && !rij3('9KA99999KA9999999') && JSON.parse(rij3('8KA88888KA8888888').mail_ids).indexOf('a0000000000021') >= 0 && s3b.nieuw === 0 && s3b.aangevuld === 1, { s3, s3b });
+      toets('wv780 bekend: ook het mail-id van een opgegane autorisatie (wordt niet opnieuw geopend)', new Set(P.bekend(a3, '2025-01-01')).has('a0000000000021'));
+      // 3. zelfde referentie: autorisatie → ontvangstbewijs vervangt; ontvangstbewijs → autorisatie verandert niets
+      P.bij(a3, [Object.assign({}, aB, { ref: 'AKA00000KA0000000', mail_id: 'a0000000000022', datum: '2026-05-07' })], []);
+      const s4 = P.bij(a3, [Object.assign({}, bw, { ref: 'AKA00000KA0000000', mail_id: 'a0000000000023', datum: '2026-05-08', status: 'voltooid' })], []);
+      const r4 = rij3('AKA00000KA0000000');
+      toets('wv780 zelfde referentie: ontvangstbewijs vervangt de autorisatie (status, datum), mail-id\'s samen', s4.samengevoegd === 1 && r4.status === 'voltooid' && r4.datum === '2026-05-08' && JSON.parse(r4.mail_ids).length === 2, { s4, r4 });
+      const s5 = P.bij(a3, [Object.assign({}, aB, { ref: 'AKA00000KA0000000', mail_id: 'a0000000000024', datum: '2026-05-07' })], []);
+      toets('wv780 zelfde referentie: latere autorisatie maakt van een bewijs geen autorisatie', s5.aangevuld === 1 && rij3('AKA00000KA0000000').status === 'voltooid', rij3('AKA00000KA0000000'));
+      // 4. niet samenvoegen: ander bedrag (deelbetaling) of te ver uit elkaar
+      P.bij(a3, [Object.assign({}, aB, { ref: 'BKA00000KA0000000', mail_id: 'a0000000000025', datum: '2026-06-07' })], []);
+      const s6 = P.bij(a3, [Object.assign({}, bw, { ref: 'CKA00000KA0000000', mail_id: 'a0000000000026', datum: '2026-06-08', bedrag: 6.5, bedrag_eur: 6.5 })], []);
+      const s7 = P.bij(a3, [Object.assign({}, bw, { ref: 'DKA00000KA0000000', mail_id: 'a0000000000027', datum: '2026-06-14' })], []);
+      toets('wv780 niet samenvoegen: ander bedrag (deelbetaling) of bewijs 7 dagen na de autorisatie', s6.nieuw === 1 && s7.nieuw === 1 && !!rij3('BKA00000KA0000000'), { s6, s7 });
+      // 5. koppelen: autorisatie B, dollarautorisatie en overmaking aan hun afschrijving; kaartautorisatie nooit
+      P.bij(a3, [P.leesMail(M.autUsd), P.leesMail(M.autKaart), P.leesMail(M.overmaking)], []);
+      A.bij(a3, rek3, [post('w1', '2025-09-10', -2.68), post('w2', '2025-07-27', -259.22), post('w3', '2026-10-20', -25), post('w4', '2026-06-10', -18)], {});
+      P.koppel(a3);
+      const kp3 = (ref) => a3.db.prepare('SELECT t.bron_id FROM paypal_bewijs b LEFT JOIN transacties t ON t.nr = b.nr WHERE b.ref = ?').get(ref).bron_id;
+      toets('wv780 koppelen: dollarautorisatie, overmaking en autorisatie B aan hun post; kaartautorisatie niet',
+        /w1/.test(String(kp3('2KA22222KA2222222'))) && /w3/.test(String(kp3('5KA55555KA5555555'))) && /w4/.test(String(kp3('BKA00000KA0000000'))) && kp3('3KA33333KA3333333') == null,
+        ['2KA22222KA2222222', '5KA55555KA5555555', 'BKA00000KA0000000', '3KA33333KA3333333'].map(kp3));
+      const l3 = P.lijst(a3, { dienst: 'voorbeeld bellen' });
+      toets('wv780 lijst: autorisatie zichtbaar als status geautoriseerd', l3.bewijzen.length === 1 && l3.bewijzen[0].status === 'geautoriseerd' && /autorisatie/.test(l3.let_op), l3);
+      a3.db.close();
+    }
     toets('dienstPerPost: de PayPal-post van Netflix heet netflix, de som-post meerdere', Array.from(dp.values()).some(function (x) { return x.dienst === 'netflix'; }) && Array.from(dp.values()).some(function (x) { return x.dienst === 'meerdere'; }));
 
     // ── reeksen ──
@@ -201,14 +283,14 @@ const M = {
     const LL = { zoek: [], lees: [], vol: false, faal: false };
     const SECRET = 's'.repeat(40), logs = [], rpc = [];
     const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD2, N8N_WEBHOOK_AGENDA_API: 'x' };
-    const mails = [M.netflix, M.overgemaakt, M.overgemaakt2, M.terug];
+    const mails = [M.netflix, M.overgemaakt, M.overgemaakt2, M.terug, M.verwerkt];   // verwerkt: gevonden door Gmail, nooit geopend (wv780)
     const g = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, spawn, SECRET: SECRET, VAULT: W,
       __dirname: process.cwd(), process: { env: env, execPath: process.execPath },
       appAgendaApi: async function (body) {
         if (LL.faal) throw new Error('agenda-luik http 503');
         if (body.actie === 'mail_zoeken') {
           LL.zoek.push(body.query);
-          if (!/^from:service@paypal\.nl to:d\.schaap@gmail\.com \(subject:Ontvangstbewijs OR subject:terugbetaling\) after:\d{4}\/\d{2}\/\d{2} before:\d{4}\/\d{2}\/\d{2}$/.test(body.query)) return { mails: [] };
+          if (!/^from:service@paypal\.nl to:d\.schaap@gmail\.com \(subject:Ontvangstbewijs OR subject:terugbetaling OR subject:geautoriseerd OR subject:"betaling overgemaakt" OR subject:EUR OR subject:USD OR subject:GBP\) after:\d{4}\/\d{2}\/\d{2} before:\d{4}\/\d{2}\/\d{2}$/.test(body.query)) return { mails: [] };
           if (LL.vol && /after:2026\/09\/0\d? before:2026\/10\/01/.test(body.query) && !LL.gehalveerd) { LL.gehalveerd = true; return { aantal: 25, mails: Array.from({ length: 25 }, (x, i) => ({ id: 'e' + String(i).padStart(13, '0'), van: VAN, aan: AAN, onderwerp: 'Ontvangstbewijs voor uw betaling aan Z', snippet: '', dag_lokaal: '2026-09-02' })) }; }
           const m = /after:(\d{4})\/(\d{2})\/(\d{2}) before:(\d{4})\/(\d{2})\/(\d{2})/.exec(body.query), v = m[1] + '-' + m[2] + '-' + m[3], t = m[4] + '-' + m[5] + '-' + m[6];
           const l = mails.filter((x) => x.dag_lokaal >= v && x.dag_lokaal < t).map((x) => ({ id: x.id, van: x.van, aan: x.aan, onderwerp: x.onderwerp, snippet: x.snippet, dag_lokaal: x.dag_lokaal }));
@@ -226,6 +308,7 @@ const M = {
     const r1 = await h.bankSmal({ opdracht: 'paypal-ronde', secret: SECRET, van: '2026-07-01' });
     toets('server: paypal-ronde (machinekamer) leest, bewaart en koppelt', r1.status === 200 && r1.j.ok === true && r1.j.bewaard.nieuw === 3 && r1.j.bewaard.aangevuld === 1 && r1.j.koppeling && r1.j.koppeling.een_op_een === 2, r1.j);
     toets('server: elke mail één keer geopend', LL.lees.length === 4 && new Set(LL.lees).size === 4, LL.lees);
+    toets('server (wv780): een andere PayPal-mail ("is verwerkt") wordt niet geopend en apart geteld', LL.lees.indexOf(M.verwerkt.id) < 0 && r1.j.overgeslagen === 1 && r1.j.gevonden === 4, r1.j);
     toets('server: antwoord bevat alleen aantallen (geen namen, bedragen of tekst)', !/Netflix|Voorbeeld|20[.,]99|Transactie/.test(JSON.stringify(r1.j)), r1.j);
     const voor = LL.lees.length;
     const r2 = await h.bankSmal({ opdracht: 'paypal-ronde', secret: SECRET, van: '2026-07-01' });
