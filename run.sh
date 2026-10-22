@@ -43,6 +43,13 @@ SYNC_INIT="${SYNC_INIT:-0}"
 BRON="${SYNC_REMOTE}:${SYNC_PATH}"
 MARKER="$VAULT/.sync-id"
 SYNCLOG="$BIN/bisync.log"
+# Syncfilter (wv813, 22-10-2026): scripts en Windows-code gaan niet naar Drive (en dus Davids pc), en komen er ook niet
+# vandaan; .claude/ en .obsidian/ in de vaultwortel wel (socev kan daar niet schrijven). Waarom en wat: bisync-filter.txt.
+# ELKE bisync hieronder krijgt dit filter mee, ook de resyncs: een ronde zonder filter zou een geblokkeerd bestand alsnog
+# overzetten. Werkt het filter niet (bisync-filter-toets.sh), dan synct de lus niet (fail-closed).
+SYNC_FILTER="${SYNC_FILTER:-/app/bisync-filter.txt}"
+SYNC_FILTER_TOETS="${SYNC_FILTER_TOETS:-/app/bisync-filter-toets.sh}"
+FILTER=( --filter-from "$SYNC_FILTER" )
 
 # De bisync-toestand blijft op de standaardplek ($HOME/.cache/rclone/bisync).
 # HOME is /opt/data en dat is het persistent volume, dus die overleeft een
@@ -102,7 +109,7 @@ rol_reset_podstart(){
 }
 
 sync_ronde(){
-  if flock "$VAULT_LOCK" rclone bisync "$BRON" "$VAULT" \
+  if flock "$VAULT_LOCK" rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" \
        --create-empty-src-dirs --conflict-resolve newer \
        --resilient --recover --max-lock 2m >> "$SYNCLOG" 2>&1; then
     echo "$(date '+%F %T') RONDE OK" >> "$SYNCLOG"
@@ -126,7 +133,7 @@ zelfherstel(){
     fi
   fi
   echo "$(date '+%F %T') ZELFHERSTEL: resync met --resync-mode newer (nieuwste wint, niets wordt verwijderd)" >> "$SYNCLOG"
-  if rclone bisync "$BRON" "$VAULT" \
+  if rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" \
        --resync --resync-mode newer --create-empty-src-dirs >> "$SYNCLOG" 2>&1; then
     touch "$ZELFHERSTEL_MARKER"
     [ -f "$MARKER" ] || printf '%s' "$BRON" > "$MARKER"
@@ -146,6 +153,15 @@ sync_lus(){
     while true; do sleep 3600; done
   fi
 
+  # Filter eerst toetsen (wv813): een rclone-filter dat niet past, laat stil alles door. Faalt de toets, dan geen bisync
+  # (zoals hierboven: proces blijft leven); de stilte valt op in bisync.log en bij de syncwachters.
+  if ! FT="$(bash "$SYNC_FILTER_TOETS" "$SYNC_FILTER" /app/socev-rechten.sh 2>&1)"; then
+    echo "$(date '+%F %T') SYNC STOP: syncfilter $SYNC_FILTER werkt niet - geen bisync tot een image met een goed filter" >> "$SYNCLOG"
+    printf '%s\n' "$FT" | head -20 >> "$SYNCLOG"
+    while true; do sleep 3600; done
+  fi
+  echo "$(date '+%F %T') $FT" >> "$SYNCLOG"
+
   while ! rclone listremotes 2>/dev/null | grep -q "^${SYNC_REMOTE}:"; do
     echo "$(date) WACHT: rclone-remote ${SYNC_REMOTE} nog niet geconfigureerd" >> "$SYNCLOG"
     sleep "$SYNC_INTERVAL"
@@ -156,7 +172,7 @@ sync_lus(){
   # vanzelf. Zet SYNC_INIT=1 als je hem bewust wilt.
   if [ "$SYNC_INIT" = "1" ] && [ ! -f "$MARKER" ]; then
     echo "$(date) eerste koppeling met $BRON — resync, nieuwste bestand wint" >> "$SYNCLOG"
-    if rclone bisync "$BRON" "$VAULT" --resync --resync-mode newer \
+    if rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" --resync --resync-mode newer \
          --create-empty-src-dirs >> "$SYNCLOG" 2>&1; then
       printf '%s' "$BRON" > "$MARKER"
       echo "$(date) koppeling vastgelegd in .sync-id" >> "$SYNCLOG"
@@ -195,7 +211,7 @@ sync_lus(){
       # is het iets dat een mens moet zien — en dat meldt de wachter.
       if [ "$FOUTEN" -ge 3 ]; then
         echo "$(date) LET OP: drie mislukte rondes en zelfherstel kon of mocht niet." >> "$SYNCLOG"
-        echo "$(date) Handmatig: rclone bisync \"$BRON\" \"$VAULT\" --resync --resync-mode newer (eerst --dry-run)" >> "$SYNCLOG"
+        echo "$(date) Handmatig: rclone bisync \"$BRON\" \"$VAULT\" --filter-from $SYNC_FILTER --resync --resync-mode newer (eerst --dry-run)" >> "$SYNCLOG"
       fi
     fi
     sleep "$SYNC_INTERVAL"

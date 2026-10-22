@@ -1,0 +1,28 @@
+# bisync-filter.txt — wat de vault-sync NIET met Google Drive (en dus Davids pc) uitwisselt (wv813, 22-10-2026; zit in het image).
+#
+# WAAROM. De vault gaat elke 5 minuten via rclone bisync naar Google Drive, en Drive for Desktop zet hem op Davids Windows-pc.
+# Socev-gesprekken (gebruiker socev, 1002) mogen bijna overal in de vault schrijven. Dan kan zo'n gesprek een bestand van
+# claude vullen en hernoemen naar .ps1/.mjs ("geleend eigendom", Fable wv785 #2), of een eigen script neerzetten in de 5 minuten
+# vóór socev-rechten.sh het hernoemt. Draait iets op de pc uit de vault (de Taakplanner-taak Tokenboekhouding pc draaide
+# verzamel-*.mjs uit 00_Systeem/Tokens; David die dubbelklikt), dan is dat code-uitvoering op zijn pc. Met dit filter komt zo'n
+# bestand niet op Drive, wie de eigenaar ook is. Bouwplan "Socev-gesprekken onder eigen gebruiker - sleutelscheiding" § 8.
+#
+# HOE. rclone --filter-from: de eerste regel die past wint; een regex {{…}} moet de HELE naam dekken (een regel als
+# '- {{\.ps1$}}' past op niets en laat alles door: bisync-filter-toets.sh vangt dat bij elke start). Hoofdletterongevoelig en
+# met punten/spaties aan het eind, want Windows haalt die weg ("x.PS1. " opent als x.ps1). Het filter werkt in BEIDE
+# richtingen: wat hier valt blijft op Drive en in de vault zoals het was (niets wordt gewist), maar wijzigingen gaan niet
+# meer over. Een wijziging van dit bestand vraagt geen --resync (--filter-from, niet --filters-file; gemeten rclone 1.75.2).
+#
+# Uitzondering: .claude/ en .obsidian/ in de vaultwortel. Daar kan socev niet schrijven (r-X; de wortel is r-x, dus ook niet
+# weg te hernoemen), en daar staan de skills en de Obsidian-instellingen die op de pc wél mee moeten.
++ /.claude/**
++ /.obsidian/**
+# Config-mappen elders: Claude Code (hooks), VS Code (taken bij openen), Codex en Obsidian voeren die op de pc uit.
+- {{(?i)\.(claude|obsidian|vscode|codex)[. ]*}}/**
+- {{(?i)\.mcp\.json[. ]*}}
+# Mapweergave-bestanden: Verkenner leest ze al bij het openen van de map (pictogram van een netwerkpad = NTLM-lek).
+- {{(?i)(desktop\.ini|autorun\.inf)[. ]*}}
+- {{(?i)__pycache__[. ]*}}/**
+# Scripts en Windows-code. Volgt WINCODE en de scripts van CODEPLEK in socev-rechten.sh, plus wat Windows verder als code
+# start, laadt of zonder klik leest (bisync-filter-toets.sh en test/bisync-filter.sh toetsen dat elke WINCODE-soort hier valt).
+- {{(?i).*\.(ps1|psm1|psd1|ps1xml|ps2|ps2xml|psc1|psc2|msh|msh1|msh2|mshxml|msh1xml|msh2xml|cmd|bat|com|pif|vb|vbs|vbe|js|jse|mjs|cjs|wsf|wsh|ws|wsc|sct|hta|py|pyw|pyz|pyzw|pyc|pyo|whl|egg|sh|bash|lnk|url|scf|scr|cpl|msc|exe|msi|msp|mst|dll|ocx|sys|drv|reg|inf|ins|isp|jar|xll|xla|xlam|docm|dotm|xlsm|xltm|pptm|potm|ppsm|ppam|sldm|wll|iso|img|vhd|vhdx|appinstaller|application|appref-ms|appx|appxbundle|msix|msixbundle|gadget|diagcab|xbap|chm|settingcontent-ms|library-ms|searchconnector-ms|search-ms|theme|themepack|deskthemepack|skill)[. ]*}}

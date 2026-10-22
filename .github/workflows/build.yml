@@ -351,6 +351,15 @@ jobs:
       # volume met nepbestanden op de gevoelige plekken, en toetst als 1002: niets van 1001 leesbaar, .claude/ in de vault
       # niet schrijfbaar, de rest van de vault wel (en 1001 kan het daarna lezen), de loper-socket alleen voor 1001, de
       # loper als 1002 zonder capabilities, binnen 5 s terug na een kill, en 1001 werkt als vandaag. Plus een herstart.
+      # WAAROM (wv813, 22-10-2026). De vault gaat via rclone bisync naar Google Drive en zo naar Davids pc. bisync-filter.txt
+      # houdt scripts en Windows-code (ook een bestand van claude dat een socev-gesprek vulde en hernoemde) van Drive. Deze
+      # stap draait in het image een echte bisync tussen twee proefmappen met /app/bisync-filter.txt, de zelftoets (ook tegen
+      # de WINCODE-lijst van /app/socev-rechten.sh) en controleert dat /app/run.sh het filter bij elke bisync meegeeft.
+      - name: "Rooktest - syncfilter vault (wv813)"
+        run: |
+          docker run --rm -v "$PWD":/src:ro --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} \
+            /src/test/bisync-filter.sh /app/bisync-filter.txt /app/run.sh
+
       - name: "Rooktest - uid-scheiding (wv699)"
         run: |
           bash test/uid-scheiding.sh ghcr.io/socev/claudebot:${{ github.run_number }} /tmp/chart.env

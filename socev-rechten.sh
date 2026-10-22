@@ -20,7 +20,8 @@
 #       (*.js, *.mjs, *.py, *.sh …) (Fable wv689 #1 en wv699 #3/#4: code en hookconfig die de machinekamer draait,
 #       Obsidian-plug-ins die op Davids pc draaien); wat socev zelf zo noemt krijgt een andere naam
 #     - ook Python-bytecode en -pakketten (__pycache__/, *.pyc, *.zip: sys.path) en Windows-code (*.ps1, *.psm1, *.cmd,
-#       *.bat, *.vbs …): bisync zet de vault zonder filter op Davids pc (wv785, Fable wv715 en wv784). Zulke bestanden
+#       *.bat, *.vbs …): de vault staat via bisync op Davids pc (wv785, Fable wv715 en wv784; sinds wv813 houdt bisync-filter.txt
+#       ze van Drive, maar 1001 kan ze in de vault nog tegenkomen). Zulke bestanden
 #       die socev zelf maakt krijgen een andere naam; *.zip van socev alleen gemeld (kan een gewoon document zijn)
 #     - symlinks van socev in de vault en het gedeelde geheugen gaan weg (logregel met het doel): een 1001-proces dat daar
 #       leest of schrijft zou ze volgen (confused deputy; wv785, Fable wv784)
@@ -112,8 +113,9 @@ vault_vreemde_codeplekken(){
     find "$V" -type f -user socev -cnewer "$STEMPEL" \( -iname '*.mjs' -o -iname '*.cjs' -o -name '*.ts' -o -iname '*.py' \
       -o -iname '*.sh' -o -iname '*.bash' -o -iname '*.zip' -o -iname '*.whl' -o -iname '*.egg' \) -printf '%p\n' 2>/dev/null \
       | { head -20; cat >/dev/null; } | while IFS= read -r p; do log "let op: code van socev in de vault: $(printf %q "$p")"; done
-    # DEKT NIET (Fable wv785 #2): socev kan een bestand van claude vullen en hernoemen ("geleend eigendom"), want de mappen
-    # zijn rwX; zo'n Windows-codebestand is van claude en wordt niet hernoemd. Wel gemeld: elke nieuwe of gewijzigde
+    # Geleend eigendom (Fable wv785 #2): socev kan een bestand van claude vullen en hernoemen, want de mappen zijn rwX; zo'n
+    # Windows-codebestand is van claude en wordt hier niet hernoemd. Naar Drive/Davids pc gaat het sinds wv813 niet meer
+    # (bisync-filter.txt in run.sh, ook binnen de 5 minuten vóór deze ronde); in de vault blijft het. Wel gemeld: elke nieuwe of gewijzigde
     # Windows-code die niet van socev is (ook rclone van de pc en de machinekamer; dat is weinig). *.js bewust niet: de
     # machinekamer schrijft er veel, dat zou ruis geven (Fable-natoets wv785). De CISO-ronde leest deze regels (C11).
     find "$V" -type f ! -user socev -cnewer "$STEMPEL" \( -false "${WINCODE[@]}" \) -printf '%p\n' 2>/dev/null \
