@@ -13004,10 +13004,14 @@ const facturenMod = (function () {
   try { return require(p); } catch (e) { logError('facturen', e); return false; }
 })();
 let facturenDb = null, facturenFout = null;
+// Alleen op de Olares-kant én primair: ook als de VPS bij een uitwijk primair wordt, krijgt hij geen database (diffreview wv824 #2).
+// Mislukt openen, dan hooguit één nieuwe poging per minuut (openen is synchroon en kan bij een slot ± 20 s duren).
+function facturenMagOpenen() { return ROL_KANT === 'olares' && rolPrimair(); }
 function facturenOpen() {
-  if (facturenDb || !facturenMod || !rolPrimair()) return facturenDb;
+  if (facturenDb || !facturenMod || !facturenMagOpenen()) return facturenDb;
+  if (facturenFout && Date.now() - facturenFout.ms < 60000) return null;
   try { facturenDb = facturenMod.open(FACTUREN_DIR); facturenFout = null; }
-  catch (e) { if (!facturenFout) logError('facturen', e); facturenFout = { tijd: nu(), code: e && e.code || 'fout' }; }
+  catch (e) { if (!facturenFout) logError('facturen', e); facturenFout = { ms: Date.now(), code: e && e.code || 'fout' }; }
   return facturenDb;
 }
 function facturenInfo() {
@@ -13016,7 +13020,7 @@ function facturenInfo() {
   try {
     const f = facturenOpen();
     if (f) return facturenMod.health(f);
-    return { aan: true, schema: null, passief: !rolPrimair(), fout: facturenFout ? facturenFout.code : undefined };
+    return { aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined };
   } catch (e) { return { aan: true, fout: true }; }
 }
 

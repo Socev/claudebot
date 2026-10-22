@@ -264,7 +264,7 @@ CREATE TABLE opdracht (
   bijlagen TEXT NOT NULL CHECK (json_valid(bijlagen) AND json_type(bijlagen) = 'array' AND json_array_length(bijlagen) >= 1),
   vingerafdruk TEXT NOT NULL ${SHA('vingerafdruk')},
   vingerafdruk_koerier TEXT CHECK (vingerafdruk_koerier IS NULL OR (length(vingerafdruk_koerier) = 64 AND vingerafdruk_koerier NOT GLOB '*[^0-9a-f]*')),
-  verstuur_na TEXT NOT NULL,
+  verstuur_na TEXT NOT NULL CHECK (verstuur_na GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]*'),
   idempotentiesleutel TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL DEFAULT 'wacht' CHECK (status IN ${IN(L.opdrachtStatus)}),
   opgehaald_op TEXT,
@@ -395,6 +395,9 @@ BEGIN SELECT RAISE(ABORT, 'rekening_prive: een privérekening heeft controle 0, 
 CREATE TRIGGER gebruiker_entiteit_prive BEFORE INSERT ON gebruiker_entiteit
 WHEN NEW.entiteit = 'prive' AND (SELECT rol FROM gebruiker WHERE id = NEW.gebruiker) IS NOT 'eigenaar'
 BEGIN SELECT RAISE(ABORT, 'gebruiker_prive: alleen de eigenaar ziet Privé'); END;
+CREATE TRIGGER gebruiker_entiteit_prive_upd BEFORE UPDATE ON gebruiker_entiteit
+WHEN NEW.entiteit = 'prive' AND (SELECT rol FROM gebruiker WHERE id = NEW.gebruiker) IS NOT 'eigenaar'
+BEGIN SELECT RAISE(ABORT, 'gebruiker_prive: alleen de eigenaar ziet Privé'); END;
 CREATE TRIGGER gebruiker_rol_prive BEFORE UPDATE OF rol ON gebruiker
 WHEN NEW.rol <> 'eigenaar' AND EXISTS (SELECT 1 FROM gebruiker_entiteit WHERE gebruiker = NEW.id AND entiteit = 'prive')
 BEGIN SELECT RAISE(ABORT, 'gebruiker_prive: alleen de eigenaar ziet Privé'); END;
@@ -418,6 +421,39 @@ WHEN NEW.id IS NOT OLD.id OR NEW.soort IS NOT OLD.soort OR NEW.factuur IS NOT OL
   OR NEW.entiteit IS NOT OLD.entiteit OR NEW.doeladres IS NOT OLD.doeladres OR NEW.bijlagen IS NOT OLD.bijlagen
   OR NEW.vingerafdruk IS NOT OLD.vingerafdruk OR NEW.idempotentiesleutel IS NOT OLD.idempotentiesleutel OR NEW.aangemaakt_op IS NOT OLD.aangemaakt_op
 BEGIN SELECT RAISE(ABORT, 'opdracht_onveranderlijk: entiteit, doel, bijlagen en vingerafdruk liggen vast; maak een nieuwe opdracht'); END;
+-- levensloop: wat dood is (teruggedraaid, geweigerd, gelukt, drie keer mislukt) leeft niet meer op; poging gaat nooit omlaag; terug naar
+-- wacht bestaat niet. Wordt een opdracht (weer) verzendbaar (wacht, opgehaald, mislukt met poging < 3), dan opnieuw toetsen tegen de verse
+-- factuur of het verse afschrift: zelfde entiteit, niet prive, nog onderweg, en het doeladres is nog het adres uit de entiteitentabel.
+-- (Diffreview wv824 #1: een oude opdracht mocht niet "herleven" nadat de factuur Privé werd.)
+CREATE TRIGGER opdracht_levensloop BEFORE UPDATE OF status, poging ON opdracht
+WHEN NEW.status IS NOT OLD.status OR NEW.poging IS NOT OLD.poging
+BEGIN
+  SELECT RAISE(ABORT, 'opdracht_dood: een teruggedraaide, geweigerde, gelukte of drie keer mislukte opdracht leeft niet meer op')
+    WHERE OLD.status IN ('teruggedraaid','geweigerd','gelukt') OR (OLD.status = 'mislukt' AND OLD.poging >= 3);
+  SELECT RAISE(ABORT, 'opdracht_poging: poging gaat nooit omlaag') WHERE NEW.poging < OLD.poging;
+  SELECT RAISE(ABORT, 'opdracht_terug: alleen een wachtende opdracht kan terug') WHERE NEW.status = 'teruggedraaid' AND OLD.status <> 'wacht';
+  SELECT RAISE(ABORT, 'opdracht_wacht: een opdracht gaat nooit terug naar wacht') WHERE NEW.status = 'wacht' AND OLD.status <> 'wacht';
+  SELECT RAISE(ABORT, 'opdracht_prive: privé gaat nooit naar de boekhouder')
+    WHERE (NEW.status IN ('wacht','opgehaald') OR (NEW.status = 'mislukt' AND NEW.poging < 3))
+      AND (NEW.entiteit = 'prive' OR (NEW.soort = 'boekhouder_factuur' AND (SELECT entiteit FROM factuur WHERE id = NEW.factuur) IS 'prive'));
+  SELECT RAISE(ABORT, 'opdracht_entiteit: de factuur is niet meer van deze entiteit of staat niet meer onderweg')
+    WHERE (NEW.status IN ('wacht','opgehaald') OR (NEW.status = 'mislukt' AND NEW.poging < 3)) AND NEW.soort = 'boekhouder_factuur'
+      AND NOT EXISTS (SELECT 1 FROM factuur f WHERE f.id = NEW.factuur AND f.entiteit IS NEW.entiteit AND f.status IN ('in_wachtrij','wordt_verstuurd'));
+  SELECT RAISE(ABORT, 'opdracht_entiteit: het afschrift is niet meer van deze entiteit of staat niet meer in de wachtrij')
+    WHERE (NEW.status IN ('wacht','opgehaald') OR (NEW.status = 'mislukt' AND NEW.poging < 3)) AND NEW.soort = 'boekhouder_afschrift'
+      AND NOT EXISTS (SELECT 1 FROM pot_afschrift a JOIN rekening r ON r.id = a.rekening WHERE a.id = NEW.afschrift AND r.entiteit IS NEW.entiteit AND a.status = 'in_wachtrij');
+  SELECT RAISE(ABORT, 'opdracht_doeladres: het adres van de entiteit is gewijzigd')
+    WHERE (NEW.status IN ('wacht','opgehaald') OR (NEW.status = 'mislukt' AND NEW.poging < 3))
+      AND NEW.doeladres IS NOT (SELECT CASE NEW.soort WHEN 'boekhouder_factuur' THEN boekhoud_doel ELSE afschrift_doel END FROM entiteit WHERE sleutel = NEW.entiteit);
+END;
+-- INSERT OR REPLACE verwijdert en voegt opnieuw toe zonder UPDATE-trigger; met recursive_triggers (open() zet hem aan) vangen deze hem
+CREATE TRIGGER factuur_weg_opdracht BEFORE DELETE ON factuur WHEN EXISTS (SELECT 1 FROM opdracht WHERE factuur = OLD.id)
+BEGIN SELECT RAISE(ABORT, 'factuur_weg: er hoort een opdracht bij deze factuur'); END;
+CREATE TRIGGER afschrift_weg_opdracht BEFORE DELETE ON pot_afschrift WHEN EXISTS (SELECT 1 FROM opdracht WHERE afschrift = OLD.id)
+BEGIN SELECT RAISE(ABORT, 'afschrift_weg: er hoort een opdracht bij dit afschrift'); END;
+CREATE TRIGGER rekening_weg BEFORE DELETE ON rekening
+WHEN EXISTS (SELECT 1 FROM bank_transactie WHERE rekening = OLD.id) OR EXISTS (SELECT 1 FROM pot_afschrift WHERE rekening = OLD.id)
+BEGIN SELECT RAISE(ABORT, 'rekening_weg: er horen bankregels of afschriften bij deze rekening'); END;
 -- de andere kant: een factuur met een levende opdracht wisselt niet van entiteit (eerst terugdraaien)
 CREATE TRIGGER factuur_entiteit_opdracht BEFORE UPDATE OF entiteit ON factuur
 WHEN NEW.entiteit IS NOT OLD.entiteit AND EXISTS (SELECT 1 FROM opdracht WHERE factuur = NEW.id AND ${LEVEND})
@@ -452,6 +488,11 @@ BEGIN
   SELECT RAISE(ABORT, 'transactie_eigenaar: deze rekening is alleen voor de eigenaar')
     WHERE NEW.alleen_eigenaar < (SELECT alleen_eigenaar FROM rekening WHERE id = NEW.rekening);
 END;
+
+-- een rekening met opgeslagen regels wordt niet Privé, wisselt niet van entiteit en wordt niet "strenger" dan zijn regels (diffreview #3)
+CREATE TRIGGER rekening_regels_upd BEFORE UPDATE OF entiteit, controle, alleen_eigenaar ON rekening
+WHEN EXISTS (SELECT 1 FROM bank_transactie t WHERE t.rekening = NEW.id AND (NEW.controle IS NOT 1 OR t.entiteit IS NOT NEW.entiteit OR t.alleen_eigenaar < NEW.alleen_eigenaar))
+BEGIN SELECT RAISE(ABORT, 'rekening_regels: er staan bankregels die daarna niet meer kloppen; eerst opruimen'); END;
 
 -- het auditlog is alleen-toevoegen
 CREATE TRIGGER audit_geen_wijziging BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'audit: alleen toevoegen'); END;
@@ -544,7 +585,8 @@ function open(dir, opties) {
       try { db.exec('PRAGMA journal_mode = WAL;'); break; }
       catch (e) { if (i >= 250 || !/locked|busy/i.test(String(e.message))) throw e; Atomics.wait(WACHT, 0, 0, 20); }
     }
-    db.exec('PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;');
+    // recursive_triggers: dan vuren de DELETE-triggers ook bij INSERT OR REPLACE (anders omzeilt REPLACE de UPDATE-triggers; diffreview #1)
+    db.exec('PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON; PRAGMA synchronous = NORMAL;');
     ['-wal', '-shm'].forEach(function (s) { try { fs.chmodSync(pad + s, 0o600); } catch (e) {} });
     const fdb = { db, pad, dir, stukken: path.join(dir, 'stukken'), backup: path.join(dir, 'backup'), _inTx: false };
     if (opties.alleenLezen) {
@@ -673,62 +715,118 @@ function terugdraaien(fdb, factuurId, o) {
  * resultaat, of `mislukt` met poging < 3 → `opgehaald` (opgehaald_op = nu, poging + 1). Vanaf dan geen terugdraaien meer. Drie keer
  * opgehaald zonder resultaat → definitief mislukt: factuur naar verzending_mislukt (afschrift terug naar klaar) en signaal
  * "verzending mislukt" in dezelfde transactie (storingen zichtbaar). Elke statuswijziging is voorwaardelijk (WHERE status = oud).
- * nu in ms. → { opdrachten: [rij met bijlagen als lijst], definitief: [id] }
+ * Vóór elke claim: klopt de opdracht nog met de verse factuur of het verse afschift (entiteit, niet prive, onderweg, doeladres)? Zo niet →
+ * `geweigerd` + signaal, geen nieuwe poging (zelfde regel als de consistentiecontrole van de koerier). Elke opdracht in een eigen
+ * SAVEPOINT: één kapotte rij houdt de rest niet tegen (diffreview #4).
+ * nu in ms. → { opdrachten: [rij met bijlagen als lijst], definitief: [id], geweigerd: [{ id, reden }], fouten: [{ id, fout }] }
  */
 function claimOpdrachten(fdb, nu, o) {
   o = o || {};
   if (!Number.isFinite(nu)) throw new DbFout('nu', 'claimOpdrachten vraagt nu (ms)');
   const wie = o.wie || 'koerier', max = Number.isInteger(o.max) && o.max > 0 ? o.max : 50;
+  const tijd = nuIso(nu);
   return transactie(fdb, function () {
     const kand = fdb.db.prepare("SELECT * FROM opdracht WHERE status IN ('wacht','opgehaald','mislukt') ORDER BY verstuur_na, id").all();
-    const uit = { opdrachten: [], definitief: [] };
+    const uit = { opdrachten: [], definitief: [], geweigerd: [], fouten: [] };
     for (const op of kand) {
       if (uit.opdrachten.length >= max) break;
-      const ov = K.opdrachtOvergang(op, 'claim', nu);
-      if (!ov.ok) continue;
-      const tijd = nuIso(nu);
-      if (ov.naar === 'opgehaald') {
-        const r = fdb.db.prepare("UPDATE opdracht SET status = 'opgehaald', opgehaald_op = ?, poging = ?, bijgewerkt_op = ? WHERE id = ? AND status = ? AND poging = ?")
-          .run(ov.opgehaald_op, ov.poging, tijd, op.id, op.status, op.poging);
-        if (r.changes !== 1) continue;
-        if (ov.factuur === 'koerier_haalt_op' && op.factuur) {
-          const r2 = fdb.db.prepare("UPDATE factuur SET status = 'wordt_verstuurd', bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = 'in_wachtrij'").run(tijd, op.factuur);
-          if (r2.changes !== 1) throw new DbFout('race', 'factuur ' + op.factuur + ' staat niet in de wachtrij');
-        }
-        uit.opdrachten.push(leesJson(Object.assign({}, op, { status: 'opgehaald', opgehaald_op: ov.opgehaald_op, poging: ov.poging })));
-        audit(fdb, { wie, wat: 'opdracht_opgehaald', object_soort: 'opdracht', object_id: op.id, entiteit: op.entiteit, voor: { status: op.status, poging: op.poging }, na: { status: 'opgehaald', poging: ov.poging }, wanneer: tijd });
-      } else if (ov.naar === 'mislukt' && ov.definitief) {
-        const r = fdb.db.prepare("UPDATE opdracht SET status = 'mislukt', fout = ?, bijgewerkt_op = ? WHERE id = ? AND status = 'opgehaald' AND poging = ?")
-          .run(String(ov.reden || 'drie pogingen zonder resultaat').slice(0, 500), tijd, op.id, op.poging);
-        if (r.changes !== 1) continue;
-        verzendingMislukt(fdb, op, ov.reden, tijd, wie);
-        uit.definitief.push(op.id);
+      fdb.db.exec('SAVEPOINT claim');
+      try {
+        claimEen(fdb, op, nu, tijd, wie, uit);
+        fdb.db.exec('RELEASE claim');
+      } catch (e) {
+        fdb.db.exec('ROLLBACK TO claim'); fdb.db.exec('RELEASE claim');
+        fdb.db.exec('SAVEPOINT weiger');
+        try {
+          if (weigerOpdracht(fdb, op, 'fout bij claimen: ' + String(e && e.message || e).slice(0, 200), tijd, wie)) uit.geweigerd.push({ id: op.id, reden: 'fout' });
+          fdb.db.exec('RELEASE weiger');
+        } catch (e2) { fdb.db.exec('ROLLBACK TO weiger'); fdb.db.exec('RELEASE weiger'); }
+        uit.fouten.push({ id: op.id, fout: String(e && e.message || e).slice(0, 200) });
       }
     }
     return uit;
   });
 }
+function claimEen(fdb, op, nu, tijd, wie, uit) {
+  const ov = K.opdrachtOvergang(op, 'claim', nu);
+  if (!ov.ok) return;
+  if (ov.naar === 'opgehaald') {
+    const klopt = opdrachtKlopt(fdb, op);
+    if (klopt) { if (weigerOpdracht(fdb, op, klopt, tijd, wie)) uit.geweigerd.push({ id: op.id, reden: klopt }); return; }
+    const r = fdb.db.prepare("UPDATE opdracht SET status = 'opgehaald', opgehaald_op = ?, poging = ?, bijgewerkt_op = ? WHERE id = ? AND status = ? AND poging = ?")
+      .run(ov.opgehaald_op, ov.poging, tijd, op.id, op.status, op.poging);
+    if (r.changes !== 1) return;
+    if (ov.factuur === 'koerier_haalt_op' && op.factuur) {
+      const r2 = fdb.db.prepare("UPDATE factuur SET status = 'wordt_verstuurd', bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = 'in_wachtrij'").run(tijd, op.factuur);
+      if (r2.changes !== 1) throw new DbFout('race', 'factuur ' + op.factuur + ' staat niet in de wachtrij');
+    }
+    uit.opdrachten.push(leesJson(Object.assign({}, op, { status: 'opgehaald', opgehaald_op: ov.opgehaald_op, poging: ov.poging })));
+    audit(fdb, { wie, wat: 'opdracht_opgehaald', object_soort: 'opdracht', object_id: op.id, entiteit: op.entiteit, voor: { status: op.status, poging: op.poging }, na: { status: 'opgehaald', poging: ov.poging }, wanneer: tijd });
+  } else if (ov.naar === 'mislukt' && ov.definitief) {
+    const r = fdb.db.prepare("UPDATE opdracht SET status = 'mislukt', fout = ?, bijgewerkt_op = ? WHERE id = ? AND status = 'opgehaald' AND poging = ?")
+      .run(String(ov.reden || 'drie pogingen zonder resultaat').slice(0, 500), tijd, op.id, op.poging);
+    if (r.changes !== 1) return;
+    verzendingMislukt(fdb, op, ov.reden, tijd, wie, 'mislukt_definitief');
+    uit.definitief.push(op.id);
+  }
+}
+// Klopt de opdracht nog met de verse rijen? null = ja, anders de reden (zonder inhoud).
+function opdrachtKlopt(fdb, op) {
+  if (op.entiteit === 'prive') return 'opdracht voor privé';
+  const doelKol = op.soort === 'boekhouder_factuur' ? 'boekhoud_doel' : 'afschrift_doel';
+  const e = fdb.db.prepare('SELECT ' + doelKol + ' AS doel FROM entiteit WHERE sleutel = ?').get(op.entiteit);
+  if (!e || e.doel !== op.doeladres) return 'doeladres wijkt af van de entiteitentabel';
+  if (op.soort === 'boekhouder_factuur') {
+    const f = fdb.db.prepare('SELECT entiteit, status FROM factuur WHERE id = ?').get(op.factuur);
+    if (!f) return 'factuur ontbreekt';
+    if (f.entiteit === 'prive') return 'factuur is privé';
+    if (f.entiteit !== op.entiteit) return 'entiteit van de factuur wijkt af';
+    if (!['in_wachtrij', 'wordt_verstuurd'].includes(f.status)) return 'factuur staat niet meer onderweg (' + f.status + ')';
+  } else {
+    const a = fdb.db.prepare('SELECT a.status, r.entiteit FROM pot_afschrift a JOIN rekening r ON r.id = a.rekening WHERE a.id = ?').get(op.afschrift);
+    if (!a) return 'afschrift ontbreekt';
+    if (a.entiteit !== op.entiteit) return 'entiteit van het afschrift wijkt af';
+    if (a.status !== 'in_wachtrij') return 'afschrift staat niet meer in de wachtrij (' + a.status + ')';
+  }
+  return null;
+}
+// Geweigerd: opdracht dood, factuur naar verzending_mislukt (alleen als hij onderweg was), afschrift terug naar klaar, signaal.
+function weigerOpdracht(fdb, op, reden, tijd, wie) {
+  const r = fdb.db.prepare("UPDATE opdracht SET status = 'geweigerd', fout = ?, bijgewerkt_op = ? WHERE id = ? AND status = ?").run(String(reden).slice(0, 500), tijd, op.id, op.status);
+  if (r.changes !== 1) return false;
+  verzendingMislukt(fdb, op, reden, tijd, wie, 'geweigerd');
+  return true;
+}
 // Factuur naar verzending_mislukt (of afschrift terug naar klaar) + signaal, met dezelfde sleutel als facturen-bank.js (geen tweede melding).
-function verzendingMislukt(fdb, op, reden, tijd, wie) {
+// De factuur gaat alleen mee als hij onderweg was (in_wachtrij → wordt_verstuurd → verzending_mislukt, langs de kern); een factuur die
+// intussen elders staat (bv. een oude opdracht na terugdraaien), blijft staan.
+function verzendingMislukt(fdb, op, reden, tijd, wie, gebeurtenis) {
   const B = require('./facturen-bank.js');
-  let f = null;
+  let f = null, eigenaar = false;
   if (op.factuur) {
     f = fdb.db.prepare('SELECT id, status, entiteit, leverancier, incl, alleen_eigenaar, patientkenmerk FROM factuur WHERE id = ?').get(op.factuur);
-    const ov = K.statusOvergang(f.status, 'mislukt_definitief', {});
-    if (!ov.ok) throw new DbFout(ov.fout, ov.reden);
-    const r = fdb.db.prepare('UPDATE factuur SET status = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = ?').run(ov.naar, tijd, f.id, f.status);
-    if (r.changes !== 1) throw new DbFout('race', 'factuur veranderde');
+    if (f && ['in_wachtrij', 'wordt_verstuurd'].includes(f.status)) {
+      let st = f.status;
+      if (st === 'in_wachtrij') { const o1 = K.statusOvergang(st, 'koerier_haalt_op', {}); if (!o1.ok) throw new DbFout(o1.fout, o1.reden); st = o1.naar; }
+      const ov = K.statusOvergang(st, gebeurtenis, {});
+      if (!ov.ok) throw new DbFout(ov.fout, ov.reden);
+      const r = fdb.db.prepare('UPDATE factuur SET status = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = ?').run(ov.naar, tijd, f.id, f.status);
+      if (r.changes !== 1) throw new DbFout('race', 'factuur veranderde');
+    }
+    eigenaar = !!(f && (f.alleen_eigenaar || f.patientkenmerk || f.entiteit === 'prive'));
   } else {
     fdb.db.prepare("UPDATE pot_afschrift SET status = 'klaar', bijgewerkt_op = ? WHERE id = ? AND status = 'in_wachtrij'").run(tijd, op.afschrift);
+    eigenaar = true;   // POT-afschriften en alles wat ervan afgeleid is: alleen de eigenaar (App-bouwplan § 4.2; diffreview #6)
   }
   const s = B.maakSignaal('verzending_mislukt', { entiteit: op.entiteit, leverancier: f ? f.leverancier : null, facturen: f ? [f.id] : [],
-    bedrag_centen: f ? f.incl : null, details: { opdracht: op.id, status: 'mislukt', afschrift: op.afschrift || undefined, reden: String(reden || '').slice(0, 200) },
-    sleutel_extra: 'op=' + op.id, alleen_eigenaar: !!(f && (f.alleen_eigenaar || f.patientkenmerk)) });
+    bedrag_centen: f ? f.incl : null, details: { opdracht: op.id, status: gebeurtenis === 'geweigerd' ? 'geweigerd' : 'mislukt', afschrift: op.afschrift || undefined, reden: String(reden || '').slice(0, 200) },
+    sleutel_extra: 'op=' + op.id, alleen_eigenaar: eigenaar });
   fdb.db.prepare('INSERT INTO signaal (id, sleutel, soort, titel, entiteit, leverancier, transacties, facturen, bedrag_centen, details, alleen_eigenaar, aangemaakt_op) ' +
     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (sleutel) DO NOTHING')
     .run(nieuwId(), s.sleutel, s.soort, s.titel, s.entiteit || null, s.leverancier || null, JSON.stringify(s.transacties), JSON.stringify(s.facturen),
       s.bedrag_centen == null ? null : s.bedrag_centen, JSON.stringify(s.details), s.alleen_eigenaar ? 1 : 0, tijd);
-  audit(fdb, { wie, wat: 'verzending_mislukt', object_soort: 'opdracht', object_id: op.id, entiteit: op.entiteit, na: { status: 'mislukt', definitief: true }, wanneer: tijd });
+  audit(fdb, { wie, wat: gebeurtenis === 'geweigerd' ? 'opdracht_geweigerd' : 'verzending_mislukt', object_soort: 'opdracht', object_id: op.id, entiteit: op.entiteit,
+    na: { status: gebeurtenis === 'geweigerd' ? 'geweigerd' : 'mislukt', definitief: true, reden: String(reden || '').slice(0, 200) }, wanneer: tijd });
 }
 
 // ───────────────────────────── stukken (bestanden) ─────────────────────────────
@@ -823,6 +921,8 @@ function herstel(backupPad, dir) {
   maakMap(dir);
   const pad = path.join(dir, BESTAND);
   if (fs.existsSync(pad)) throw new DbFout('bestaat', 'in deze map staat al een database; eerst zelf wegzetten');
+  // een achtergebleven -wal zou SQLite over de back-up heen afspelen (diffreview #5)
+  for (const s of ['-wal', '-shm', '-journal']) if (fs.existsSync(pad + s)) throw new DbFout('bestaat', 'in deze map staat nog ' + BESTAND + s + '; eerst zelf wegzetten');
   fs.copyFileSync(backupPad, pad, fs.constants.COPYFILE_EXCL);
   fs.chmodSync(pad, 0o600);
   return open(dir);
