@@ -153,7 +153,8 @@ function isTerminal(status) {
 const AGENTS_FILE = path.join(HOME, 'agent_jobs.json');
 const AGENT_WEBHOOK_URL = process.env.AGENT_WEBHOOK_URL || '';
 const AGENT_WEBHOOK_SECRET = process.env.AGENT_WEBHOOK_SECRET || SECRET;
-const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '3', 10);
+// wv781 (22-10-2026): 4 i.p.v. 3 sinds het tweede abonnement; gemeten 22-10: pod 2,7 van 16 GB, agent ± 330 MB rss, 2 cores, lus p99 21 ms
+const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || '4', 10);
 const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 
 // ── verharding: logging ─────────────────────────────────────────────────────
@@ -1273,6 +1274,11 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // Allowlist (gereedschap 'lezen' en beperkt=auto): alleen de genoemde namen uit de podomgeving; extra en opts.env
     // (OUTDIR, ANTHROPIC_MODEL, de agentmarker) komen er daarna bij.
     const env = Object.assign({}, basisOmgeving(opts), extra, (opts && opts.env) || {});
+    // wv781: account 2 (tweede abonnement) alleen voor agents en alleen als het mag; anders blijft het token van account 1 staan.
+    const account = kiesAccount(opts);
+    if (account === 2) env.CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_OAUTH_TOKEN_2 || account2.waarde;
+    delete env.CLAUDE_OAUTH_TOKEN_2;   // Fable wv781 #7: het tweede token nooit als losse naam in een kindomgeving
+    progress.account = account;
     // detached: eigen procesgroep, zodat een kill ook MCP-servers en
     // bash-kinderen raakt en er geen wezen achterblijven.
     // stdin op 'ignore' (wv216, 8-10-2026): met een open stdin-pipe die nooit schrijft wachtte claude 2.1.291 bij ELKE
@@ -1371,6 +1377,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       resolved = true;
       clearInterval(watchdog);
       if (r && r.exit_code === undefined) r.exit_code = laatsteCode;
+      if (r) { r.account = account; if (fs.existsSync(pinned)) r.eigen_sessie = eigenId; }   // wv781: account + sessie voor de terugval
       resolve(r);
     }
     function finalize(code) {
@@ -1460,7 +1467,8 @@ function codexRolloutFor(threadId) {
 }
 
 function isLimietFout(tekst) {
-  return /usage limit|rate limit|rate_limit|too many requests|\b429\b|quota|limit reached|weekly limit|resets? (at|in)/i.test(String(tekst || ''));
+  // wv781: ook de tekst van de huidige CLI ("You've hit your limit · resets 7pm")
+  return /usage limit|rate limit|rate_limit|too many requests|\b429\b|quota|limit reached|weekly limit|resets? (at|in)|hit your (usage )?limit|limit · resets/i.test(String(tekst || ''));
 }
 
 function runCodex(prompt, threadId, outdir, cwd, model, opts) {
@@ -1481,6 +1489,7 @@ function runCodex(prompt, threadId, outdir, cwd, model, opts) {
     if (threadId) args.push('resume', threadId);
     args.push('--', prompt);
     const env = Object.assign({}, basisOmgeving(opts), { OUTDIR: outdir, CODEX_HOME: CODEX_HOME }, (opts && opts.env) || {});
+    delete env.CLAUDE_OAUTH_TOKEN_2;   // wv781
     const child = spawn('codex', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     weesSpawnMeld(opts, child, null, null);
     const t0 = Date.now();
@@ -1637,6 +1646,7 @@ function agyPoging(prompt, conversationId, outdir, cwd, model, effort, opts) {
     // Automatische update uit: een CLI die zichzelf midden in een beurt vervangt, is niet
     // meer de versie die in /health staat.
     const env = Object.assign({}, basisOmgeving(opts), { OUTDIR: outdir, AGY_CLI_DISABLE_AUTO_UPDATE: '1' }, (opts && opts.env) || {});
+    delete env.CLAUDE_OAUTH_TOKEN_2;   // wv781
     const t0 = Date.now();
     let child;
     try {
@@ -1880,10 +1890,34 @@ function agyVersieMeten() {
 function runBrein(runtime, prompt, sessionId, outdir, cwd, model, opts) {
   if (runtime === 'codex') return runCodex(prompt, sessionId, outdir, cwd, model, opts);
   if (runtime === 'gemini') return runGemini(prompt, sessionId, outdir, cwd, model, opts);
-  return runClaude(prompt, sessionId, outdir, cwd, model, opts).then(function (r) {
+  function merk(r) {
     r.runtime = 'claude';
     if (r && !r.ok && r.error !== 'limiet' && !/^afgebroken-/.test(String(r.error || '')) && isLimietFout(r.output || r.error)) r.error = 'limiet';
     return r;
+  }
+  const t0 = Date.now();
+  return runClaude(prompt, sessionId, outdir, cwd, model, opts).then(merk).then(async function (r) {
+    // wv781: limiet of een ongeldig token op account 2 -> account 2 dicht (half uur, bij een tokenfout 6 uur) en dezelfde beurt verder
+    // op account 1, in de eigen sessie (gemeten 22-10: --resume van een sessie van token 2 met token 1 werkt), met de rest van de
+    // bovengrens. Alleen als account 1 Davids reserve nog heeft (Fable wv781 #1); anders blijft het 'limiet' (pauze in de tikker).
+    if (!(r && r.account === 2 && !r.ok)) return r;
+    const auth = r.error !== 'limiet' && ACCOUNT2_AUTHFOUT.test(String(r.output || '') + ' ' + String(r.error || ''));
+    if (r.error !== 'limiet' && !auth) return r;
+    account2Blok = { tot: Date.now() + (auth ? ACCOUNT2_AUTH_BLOK_MS : ACCOUNT2_BLOK_MS), reden: auth ? 'token' : 'limiet' };
+    account2Tank = { tijd: 0, data: null };   // de oude meting zegt niets meer
+    if (auth) account2 = { waarde: '', gehaald: Date.now(), fout: 'token geweigerd', bron: null };   // over 10 min opnieuw uit de kluis
+    account2MeetRonde();   // verse rij in tankmeting_2 (status), zodat de tikker het ook ziet
+    const v1 = await account1Vangnet();
+    schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'account2-' + (auth ? 'token' : 'limiet'), terugval: v1.mag ? 1 : 0,
+      vangnet: v1.reden, sessie: !!r.eigen_sessie }));
+    if (!v1.mag) { r.error = 'limiet'; r.account2_vangnet = v1.reden; return r; }
+    const sid = r.eigen_sessie || sessionId || '';
+    const p2 = r.eigen_sessie ? '[Pod: je vorige poging stopte op de gebruikslimiet van het tweede abonnement; deze beurt draait op het eerste. ' +
+      'Ga verder met de opdracht hierboven, waar je gebleven was. Staat de opdracht niet in je sessie, dan is dit hem:]\n\n' + prompt : prompt;
+    const rest = Math.max(((opts && opts.maxMs) || FG_MAX_MS) - (Date.now() - t0), 5 * 60 * 1000);
+    return runClaude(p2, sid, outdir, cwd, model, Object.assign({}, opts, { account: 1, maxMs: rest })).then(merk).then(function (r2) {
+      r2.account_terugval = true; return r2;
+    });
   });
 }
 
@@ -2763,12 +2797,15 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     let t0 = Date.now();
     const runOpts = { progress: j.progress, maxMs: maxMs, inactMs: INACT_MS, lastFile: path.join(base, 'codex-last.md'), env: {} };
     runOpts.env[EIND_MARKER] = jobId;
+    runOpts.account = 2;   // wv781: achtergrondagents op het tweede abonnement (kiesAccount valt terug op 1 als het niet mag)
+    if (accountStand().agents === 2 && !account2Klaar()) { try { await account2Token(); } catch (e) {} }   // Fable wv781 #3: ook vlak na een podstart
+    const opSpawnWv781 = function () { entry.account = j.progress && j.progress.account; };
     // wv211: groepsleider en transcript in het register, zodat een herstart van server.js een doorlevende agent herkent.
     // Elke (her)start overschrijft ze, ook de codex-terugval (dan transcript null; Fable K2).
     runOpts.opSpawn = function (i) {
       entry.pid = i.pid; entry.sessie = i.sessie; entry.transcript = i.transcript;
       entry.loper_id = i.loper_id || null; entry.pid_start = i.pid_start || null; entry.gebruiker = i.loper_id ? 'socev' : 'claude';   // wv715
-      saveAgents();
+      opSpawnWv781(); saveAgents();
     };
     if (keuze.advisor) runOpts.advisor = keuze.advisor;   // wv479: gaat mee in de hervattingen van de eindcontrole (runOpts)
     if (j.beperkt === 'auto') { runOpts.disallowedTools = AUTO_AGENT_VERBODEN; runOpts.envMag = AUTO_AGENT_ENV_MAG; }
@@ -3202,6 +3239,9 @@ function appWeesVasthouden() {
   }
   setInterval(function () { try { weesRonde(); } catch (e) { logError('wees-ronde', e); } }, WEES_POLL_MS).unref();
   setTimeout(loperPing, 5000).unref(); setInterval(loperPing, 60 * 1000).unref();   // wv715: /health.loper en storing
+  if (SERVER_ECHT || process.env.ACCOUNT2_MEET === '1') {   // wv781; een proefserver meet niet (geen echte API-call)
+    setTimeout(account2MeetRonde, 1000).unref(); setInterval(account2MeetRonde, ACCOUNT2_MEET_MS).unref();
+  }
   setTimeout(function () { try { appVerlorenRonde(); } catch (e) { logError('app-verloren', e); } }, 15 * 1000).unref();   // wv716
 })();
 
@@ -3236,12 +3276,14 @@ function reqPath(req) {
 const TANK_CACHE_MS = 5 * 60 * 1000;
 let tankCache = { tijd: 0, data: null };
 
-async function meetTank() {
-  const tok = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  if (!tok) return { ok: false, fout: 'CLAUDE_CODE_OAUTH_TOKEN ontbreekt' };
+async function meetTank(account) {
+  // wv781: account 2 (tweede Max-abonnement) meet met zijn eigen token en schrijft in machinekamer.tankmeting_2
+  const tw = account === 2;
+  const tok = tw ? await account2Token() : process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (!tok) return { ok: false, account: tw ? 2 : 1, fout: tw ? 'token van account 2 niet beschikbaar' : 'CLAUDE_CODE_OAUTH_TOKEN ontbreekt' };
   let r;
   try {
-    r = await fetch('https://api.anthropic.com/v1/messages', {
+    r = await fetch((!SERVER_ECHT && process.env.TANK_PROEF_URL) || 'https://api.anthropic.com/v1/messages', {   // proefingang wv781
       method: 'POST',
       headers: {
         authorization: 'Bearer ' + tok,
@@ -3267,7 +3309,7 @@ async function meetTank() {
   const benut7 = getal('7d-utilization');
   const reset7iso = moment('7d-reset');
   const uit = {
-    ok: true,
+    ok: true, account: tw ? 2 : 1,
     gemeten_op: new Date().toISOString(),
     bron: 'anthropic-ratelimit-unified-* headers op /v1/messages',
     vijf_uur: { benut: getal('5h-utilization'), status: h('5h-status'), reset: moment('5h-reset') },
@@ -3301,14 +3343,14 @@ async function meetTank() {
   const sbKey = process.env.SUPABASE_SERVICE_ROLE;
   if (sbUrl && sbKey && reset7iso && rolPrimair()) {   // passief: meten mag, wegschrijven niet (uitwijk stap 3)
     try {
-      const b = await fetch(sbUrl.replace(/\/$/, '') + '/rest/v1/rpc/mk_tank_schrijf', {
+      const b = await fetch(sbUrl.replace(/\/$/, '') + '/rest/v1/rpc/' + (tw ? 'mk_tank2_schrijf' : 'mk_tank_schrijf'), {
         method: 'POST',
         headers: { apikey: sbKey, authorization: 'Bearer ' + sbKey, 'content-type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(Object.assign({
           p_vijf_uur: uit.vijf_uur.benut, p_zeven_dagen: benut7,
           p_zeven_dagen_reset: reset7iso, p_vijf_uur_reset: uit.vijf_uur.reset,
           p_status: uit.status, p_overage: uit.overage.status, p_bindend: uit.representatief,
-        }),
+        }, tw ? { p_bruikbaar: account2BezwaarZonderTank() === null } : {})),
         signal: AbortSignal.timeout(15000),
       });
       const t = await b.text();
@@ -3329,7 +3371,116 @@ async function meetTank() {
     uit.bewaard = false;
     uit.bewaarfout = 'SUPABASE_URL of SUPABASE_SERVICE_ROLE ontbreekt';
   }
+  if (tw) account2Tank = { tijd: Date.now(), data: uit };
   return uit;
+}
+
+// ── wv781: twee Max-abonnementen (22-10-2026, opdracht David) ──────────────────────────────
+// WAAROM. David nam een tweede Claude Max-abonnement (account drsocev@gmail.com) voor ± 4 weken ontwikkeltempo. Keuze: geen tweede
+// pod met eigen ingang, maar in deze pod een tweede langlevend OAuth-token (`claude setup-token`, kluis claude_oauth_token_2) en per
+// CLI-proces kiezen welk token hij krijgt. Achtergrondagents (/agent) draaien op account 2; Davids eigen gesprekken (/run: hoofdkanaal,
+// app, machinekamer, Cijfer-Meester, nachtrondes) blijven op account 1. Krijgt een agent op account 2 een limietweigering, dan gaat die
+// beurt verder op account 1 en blijft account 2 een half uur dicht (of tot de meting weer ruimte toont).
+// SCHAKELAAR (zonder herstart): env CLAUDE_AGENTS_ACCOUNT=1|2 wint; anders het bestand /opt/data/claude-accounts.json {"agents":1|2}
+// (ontbreekt = 2, onleesbaar = 1). Op 1 draait alles weer op account 1. Het token staat alleen in de kluis en in dit geheugen.
+const ACCOUNT_STAND_PAD = serverPad('accounts', process.env.CLAUDE_ACCOUNTS_STAND, '/opt/data/claude-accounts.json', serverProefDeel('claude-accounts.json'));
+const ACCOUNT2_BLOK_MS = 30 * 60 * 1000;
+const ACCOUNT2_AUTH_BLOK_MS = 6 * 3600 * 1000;
+const ACCOUNT2_AUTHFOUT = /authentication_error|invalid.{0,20}(token|api.?key|bearer)|oauth token (has )?(expired|revoked)|token (has been )?revoked|\b401\b|please run \/login|not logged in/i;
+const ACCOUNT2_WEEK_MAX = 0.97;   // zelfde drempel als werkvoorraad_stand.account2_max
+const ACCOUNT1_RESERVE = 1 / 14;  // Davids reserve op account 1 (werkvoorraad_stand.reserve_david)
+const ACCOUNT1_VIJF_UUR_MAX = 0.85;
+const ACCOUNT2_MEET_MS = 10 * 60 * 1000;
+let account2 = { waarde: '', gehaald: 0, fout: null, bron: null };
+let account2Blok = { tot: 0, reden: '' };
+let account2Tank = { tijd: 0, data: null };
+let accountStandCache = { mtime: -1, agents: 2 };
+// Token van account 2: uit de kluis via de Management-API (zelfde route als mk-scripts/kluis-waarde.py), daarna alleen in dit geheugen.
+// claude_oauth_token_2 staat bewust NIET op secondbrain.pod_secret_whitelist: dan zou elk kind met de volle omgeving het als
+// CLAUDE_OAUTH_TOKEN_2 erven (Fable wv781 #7). De env-naam blijft als proefingang (test/twee-accounts.sh); runClaude wist hem in de kindomgeving.
+// Een mislukte haalpoging wacht 10 minuten voor de volgende (geen hamer op de kluis).
+async function account2Token() {
+  if (process.env.CLAUDE_OAUTH_TOKEN_2) { account2.bron = 'env'; return process.env.CLAUDE_OAUTH_TOKEN_2; }
+  if (account2.waarde) return account2.waarde;
+  if (Date.now() - account2.gehaald < 10 * 60 * 1000) return '';
+  account2.gehaald = Date.now();
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(process.env.SUPABASE_URL || '');
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) { account2.fout = 'geen SUPABASE_URL of SUPABASE_MCP_TOKEN'; return ''; }
+  try {
+    const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', {
+      method: 'POST', headers: { authorization: 'Bearer ' + pat, 'content-type': 'application/json', 'user-agent': 'socev-pod-account2/1' },
+      body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = 'claude_oauth_token_2'" }),
+      signal: AbortSignal.timeout(20000) });
+    if (!r.ok) { account2.fout = 'kluis http ' + r.status; return ''; }
+    const rijen = await r.json();
+    const w = Array.isArray(rijen) && rijen.length === 1 && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
+    if (!/^sk-ant-oat[A-Za-z0-9_-]{20,}$/.test(w)) { account2.fout = 'kluisregel ontbreekt of heeft een onverwachte vorm'; return ''; }
+    account2 = { waarde: w, gehaald: Date.now(), fout: null, bron: 'kluis' };
+    return w;
+  } catch (e) { account2.fout = 'kluis onbereikbaar (' + String(e && e.name || 'fout') + ')'; return ''; }
+}
+function account2Klaar() { return !!(process.env.CLAUDE_OAUTH_TOKEN_2 || account2.waarde); }
+function accountStand() {
+  const e = String(process.env.CLAUDE_AGENTS_ACCOUNT || '').trim();
+  if (e === '1' || e === '2') return { agents: Number(e), bron: 'env' };
+  let st; try { st = fs.statSync(ACCOUNT_STAND_PAD); } catch (err) { return { agents: 2, bron: 'standaard' }; }
+  if (st.mtimeMs !== accountStandCache.mtime) {
+    let a = 2;
+    try { const j = JSON.parse(fs.readFileSync(ACCOUNT_STAND_PAD, 'utf8')); a = (j && Number(j.agents) === 1) ? 1 : 2; }
+    catch (err) { a = 1; logError('accounts-stand', err); }   // onleesbaar = veilig terug op account 1
+    accountStandCache = { mtime: st.mtimeMs, agents: a };
+  }
+  return { agents: accountStandCache.agents, bron: 'bestand' };
+}
+// Waarom nu niet op account 2 (null = het mag): voor /health en de keuze per proces. Zonder de tank: wat de pod zelf beslist
+// (schakelaar, token, blok na limiet); dat gaat als 'bruikbaar' mee in tankmeting_2, zodat de tikker het ziet (Fable wv781 #1).
+function account2BezwaarZonderTank() {
+  if (accountStand().agents !== 2) return 'schakelaar op 1';
+  if (!account2Klaar()) return 'geen token';
+  if (Date.now() < account2Blok.tot) return 'dicht na ' + (account2Blok.reden === 'token' ? 'tokenfout' : 'limiet') + ' tot ' + new Date(account2Blok.tot).toISOString().slice(11, 16) + 'Z';
+  return null;
+}
+function account2Bezwaar() {
+  const b = account2BezwaarZonderTank();
+  if (b) return b;
+  const t = account2Tank.data;
+  if (t && t.ok && Date.now() - account2Tank.tijd < 30 * 60 * 1000) {
+    if (t.status && !/^allowed/.test(t.status)) return 'tank status ' + t.status;
+    if (t.zeven_dagen && typeof t.zeven_dagen.benut === 'number' && t.zeven_dagen.benut >= ACCOUNT2_WEEK_MAX) return 'tank week vol';
+  }
+  return null;
+}
+// Davids vangnet (Fable wv781 #1): een agent valt alleen terug op account 1 als daar de reserve nog over is. Meting uit de cache
+// van /tank (≤ 5 min), anders een verse; geen meting = niet terugvallen (fail-closed, net als de tikker).
+async function account1Vangnet() {
+  let t = (tankCache.data && Date.now() - tankCache.tijd < TANK_CACHE_MS) ? tankCache.data : null;
+  if (!t) { try { t = await meetTank(); if (t && t.ok) tankCache = { tijd: Date.now(), data: t }; } catch (e) { t = null; } }
+  if (!t || !t.ok) return { mag: false, reden: 'geen meting van account 1' };
+  const rest = 1 - Number(t.zeven_dagen && t.zeven_dagen.benut);
+  if (!(rest >= ACCOUNT1_RESERVE)) return { mag: false, reden: 'account 1 onder Davids reserve (' + Math.round(rest * 100) + '% over)' };
+  if (!(Number(t.vijf_uur && t.vijf_uur.benut) < ACCOUNT1_VIJF_UUR_MAX)) return { mag: false, reden: 'account 1 vijf-uursvenster vol' };
+  if (t.status && !/^allowed/.test(t.status)) return { mag: false, reden: 'account 1 status ' + t.status };
+  return { mag: true, reden: Math.round(rest * 100) + '% over op account 1' };
+}
+// opts.account === 2 vraagt account 2 (alleen processAgent zet dat); al het andere draait op account 1.
+function kiesAccount(opts) { return (opts && opts.account === 2 && !account2Bezwaar()) ? 2 : 1; }
+function accountInfo() {
+  const lopend = {};
+  for (const id in jobs) {
+    const j = jobs[id];
+    if (j && j.status === 'running') { const a = (j.progress && j.progress.account) || (agentsReg[id] && agentsReg[id].account); if (a) lopend[id] = a; }
+  }
+  const t = account2Tank.data;
+  const stand = accountStand();
+  return { agents_op: stand.agents, stand_bron: stand.bron, token2: account2Klaar(), token2_fout: account2Klaar() ? null : account2.fout,
+    bezwaar2: account2Bezwaar(), tank2: (t && t.ok) ? { week: t.zeven_dagen.benut, vijf_uur: t.vijf_uur.benut, status: t.status,
+      minuten_oud: Math.round((Date.now() - account2Tank.tijd) / 60000) } : null, lopend: lopend };
+}
+// Meting van account 2 elke 10 minuten (wegschrijven alleen op de primaire kant; meetTank toetst dat zelf). Geeft de tikker zijn verse
+// meting in machinekamer.tankmeting_2 zonder n8n-wijziging; een mislukte meting laat de vorige staan.
+function account2MeetRonde() {
+  account2Token().then(function (tok) { if (tok) return meetTank(2); }).catch(function (e) { logError('account2-meting', e); });
 }
 
 function handleRequest(req, res) {
@@ -3396,7 +3547,9 @@ function handleRequest(req, res) {
       // wv715: de socev-loper (smalle gesprekken als uid 1002): stand, bereikbaar (ping elke minuut), lopend, fouten
       loper: loperInfo(),
       // wv716: rss/heap en lusvertraging (max, p99) van de laatste volle minuut; null in de eerste minuut na de start
-      proces: procesInfo()
+      proces: procesInfo(),
+      // wv781: twee abonnementen — agents_op (schakelaar), token2 aanwezig, bezwaar2 (waarom nu niet op 2), lopend: job -> 1|2
+      accounts: accountInfo()
     }));
   }
 
@@ -3408,6 +3561,20 @@ function handleRequest(req, res) {
   // Gebruikstank. Gecached op 5 minuten, want elke aanroep is een echte API-call; met
   // ?verversen=1 forceer je een nieuwe meting. Geen secret nodig: er komt niets gevoeligs uit
   // en n8n moet hem zonder omhaal kunnen lezen, net als /health.
+  if (req.method === 'GET' && reqPath(req) === '/tank' && /[?&]account=2(&|$)/.test(req.url || '')) {   // wv781
+    const oud2 = Date.now() - account2Tank.tijd;
+    if (!/[?&]verversen=1/.test(req.url || '') && account2Tank.data && account2Tank.data.ok && oud2 < TANK_CACHE_MS) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(Object.assign({}, account2Tank.data, { uit_cache: true, cache_seconden: Math.round(oud2 / 1000) })));
+    }
+    return meetTank(2).then(function (d) {
+      res.writeHead(d.ok ? 200 : 503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(Object.assign({}, d, { uit_cache: false })));
+    }).catch(function (e) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, account: 2, fout: String(e && e.message || e).slice(0, 200) }));
+    });
+  }
   if (req.method === 'GET' && reqPath(req) === '/tank') {
     const vers = /[?&]verversen=1/.test(req.url || '');
     const oud = Date.now() - tankCache.tijd;
@@ -3606,6 +3773,7 @@ function handleRequest(req, res) {
         omgeving: a.omgeving,   // wv424: mk | smal | auto (geen inhoud, alleen de klasse)
         gebruiker: a.gebruiker || (a.status === 'pending' ? undefined : 'claude'),   // wv715: socev = via de loper (uid 1002)
         model: a.model, advisor: a.advisor, advisor_proef: a.advisor_proef,   // wv479
+        account: a.account,   // wv781: 1 of 2 (tweede abonnement)
         herstart: a.herstart,
         error: a.error,   // foutcode (wv51); de tikker gebruikt hem als /result kwijt is
         wees: a.wees ? new Date(a.wees).toISOString() : undefined,   // wv211: liep door over een herstart van server.js
@@ -10445,6 +10613,12 @@ async function appVerbruik(req, res) {
       vijf_uur_reset: l.vijf_uur_reset || null, zeven_dagen_reset: l.zeven_dagen_reset || null, status: String(l.status || '').slice(0, 30),
       verstreken: getal(l.verstreken), voorsprong: getal(l.voorsprong), per_dag_over: getal(l.per_dag_over), oordeel: String(l.oordeel || '').slice(0, 60) } : null,
     reeks: tank && Array.isArray(tank.reeks) ? tank.reeks.map(function (r) { return [r[0], getal(r[1]), getal(r[2]), getal(r[3])]; }) : [],
+    // wv781: tweede abonnement (agents); null zolang er geen meting is
+    account2: tank && tank.account2 ? { gemeten_op: tank.account2.gemeten_op, minuten_oud: getal(tank.account2.minuten_oud), vijf_uur: getal(tank.account2.vijf_uur),
+      zeven_dagen: getal(tank.account2.zeven_dagen), vijf_uur_reset: tank.account2.vijf_uur_reset || null, zeven_dagen_reset: tank.account2.zeven_dagen_reset || null,
+      status: String(tank.account2.status || '').slice(0, 30), verstreken: getal(tank.account2.verstreken), oordeel: String(tank.account2.oordeel || '').slice(0, 60),
+      agents_op: accountStand().agents, bezwaar: account2Bezwaar() } : null,
+    reeks2: tank && Array.isArray(tank.reeks2) ? tank.reeks2.map(function (r) { return [r[0], getal(r[1]), getal(r[2]), getal(r[3])]; }) : [],
     ruimte: wv && wv.ruimte ? { mag: wv.ruimte.mag === true, pad: String(wv.ruimte.pad || '').slice(0, 20), reden: String(wv.ruimte.reden || '').slice(0, 160) } : null,
     tikker: wv && wv.tikker ? { aan: wv.tikker.aan !== false, reden: String(wv.tikker.reden || '').slice(0, 160), starts_vandaag: Number(wv.tikker.starts_vandaag) || 0,
       max_dag: Number(wv.tikker.max_dag) || 0, alleen_doorwerk: wv.tikker.alleen_doorwerk === true } : null,
