@@ -85,7 +85,13 @@ const bevatNaam = (o) => { const t = JSON.stringify(o); return MW.some((n) => t.
     toets('indeling: verzekering → overig; voorschot → ontvangsten', cat('e:nn') === 'overig' && cat('e:v1') === 'ontvangsten', [cat('e:nn'), cat('e:v1')]);
     toets('indeling: herkomst regel, eigenaar POT, type uitgave/inkomst', ['e:s1', 'e:v1'].every((i) => v(['pot', i]).herkomst === 'regel' && v(['pot', i]).eigenaar === 'POT') &&
       v(['pot', 'e:s1']).type === 'uitgave' && v(['pot', 'e:v1']).type === 'inkomst', v(['pot', 'e:s1']));
-    toets('overboeking privé → POT is geen intern (uitgave)', v(['prive', 'b:1']).type === 'uitgave', v(['prive', 'b:1']));
+    toets('overboeking privé → POT is geen intern (uitgave), wel ingedeeld (overig / POT)', v(['prive', 'b:1']).type === 'uitgave' && v(['prive', 'b:1']).categorie === 'overig' &&
+      v(['prive', 'b:1']).subcategorie === 'POT', v(['prive', 'b:1']));
+    // Fable wv786 #3: factuur van de salarisadministratie is geen loon; "incl pensioenpremie" in een salarisomschrijving is loon
+    toets('regels: factuur salarisadministratie → overig', A.potCategorie({ bedrag: -95, tegenpartij: 'Salarisverwerker X', omschrijving: 'factuur salarisadministratie sep' }) === 'overig', null);
+    toets('regels: salaris incl pensioenpremie → salarissen', A.potCategorie({ bedrag: -2000, tegenpartij: MW[0], omschrijving: 'Salaris oktober incl pensioenpremie' }) === 'salarissen', null);
+    toets('regels: PGGM zonder omschrijving → pensioen; teruggave → ontvangsten', A.potCategorie({ bedrag: -10, tegenpartij: 'P G G M', omschrijving: null }) === 'pensioen' &&
+      A.potCategorie({ bedrag: 50, tegenpartij: 'Belastingdienst', omschrijving: 'teruggaaf' }) === 'ontvangsten', null);
 
     // ── taalmodel: geen POT-post, ook niet de overboeking ernaartoe ──
     const open = A.aiOpen(a, 500);
@@ -106,6 +112,15 @@ const bevatNaam = (o) => { const t = JSON.stringify(o); return MW.some((n) => t.
     const nrNN = a.db.prepare("SELECT nr FROM transacties WHERE bron_id = 'e:nn'").get().nr;
     A.corrigeer(a, { nr: nrNN, categorie: 'verzekeringen' });
     toets('correctie van David op een POT-post wint', cat('e:nn') === 'verzekeringen' && v(['pot', 'e:nn']).herkomst === 'david', v(['pot', 'e:nn']));
+
+    // Fable wv786 #7: een AI-groep die alleen op POT-posten past (gat vóór de uitrol) wordt bij verrijk gewist; een gedeelde niet
+    const gPot = A.groepSleutel({ bedrag: -1850.10, tegenpartij: MW[1], omschrijving: 'netto loon okt' });
+    a.db.prepare("INSERT INTO ai_groepen (sleutel, type, categorie, ai_omschrijving, model, gemaakt) VALUES (?, 'uitgave', 'overig', 'Salaris Pietersen', 'oud', '2026-10-22')").run(gPot);
+    a.db.prepare("INSERT INTO ai_overslaan (sleutel, pogingen, laatst) VALUES (?, 1, '2026-10-22')").run(A.groepSleutel({ bedrag: -2100.55, tegenpartij: MW[0], omschrijving: 'Salaris oktober 2026' }));
+    const vw = A.verrijk(a);
+    toets('AI-groep die alleen op POT-posten past: gewist bij verrijk (ook de overslaanregel)', vw.ai_pot_gewist === 1 && !a.db.prepare('SELECT 1 FROM ai_groepen WHERE sleutel = ?').get(gPot) &&
+      a.db.prepare('SELECT count(*) n FROM ai_overslaan').get().n === 0, vw);
+    toets('de gedeelde AI-groep (privé b:2) blijft staan', !!a.db.prepare('SELECT 1 FROM ai_groepen WHERE sleutel = ?').get(g.g), null);
 
     // ── privé-overzichten ──
     const zoek = A.zoek(a, {});

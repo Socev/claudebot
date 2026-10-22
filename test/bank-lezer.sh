@@ -47,8 +47,10 @@ const server = http.createServer(function (req, res) {
     if (p === '/sessions' && req.method === 'POST') {
       const j = JSON.parse(body); if (j.code !== 'goede-code') return stuur(422, { message: 'bad code' });
       const id = 'sess-' + (Object.keys(M.sessies).length + 1); const uid = 'uid-' + (++M.uidTeller);
-      M.sessies[id] = { status: 'AUTHORIZED', uid: uid };
-      return stuur(200, { session_id: id, accounts: [{ uid: uid, account_id: { iban: 'NL00ABNA0123456789' }, name: 'Gezamenlijk', currency: 'EUR', identification_hash: 'hash-gezamenlijk-1' }],
+      M.sessies[id] = { status: 'AUTHORIZED', uid: uid, uids: M.metPot ? [uid + '-pot'] : [] };
+      // wv786: met M.metPot vinkt David ook de POT-rekening aan (zelfde naam bij ABN)
+      const pot = M.metPot ? [{ uid: uid + '-pot', account_id: { iban: 'NL99ABNA0987654321' }, name: 'Gezamenlijk', currency: 'EUR', identification_hash: 'hash-pot-1' }] : [];
+      return stuur(200, { session_id: id, accounts: [{ uid: uid, account_id: { iban: 'NL00ABNA0123456789' }, name: 'Gezamenlijk', currency: 'EUR', identification_hash: 'hash-gezamenlijk-1' }].concat(pot),
         aspsp: { name: 'ABN AMRO', country: 'NL' }, psu_type: 'personal', access: { valid_until: new Date(Date.now() + 179 * 86400000).toISOString() } });
     }
     let m = /^\/sessions\/(.+)$/.exec(p);
@@ -58,7 +60,7 @@ const server = http.createServer(function (req, res) {
     if (m) {
       M.opvragen.push(m[2] + (u.searchParams.get('continuation_key') ? '+' : ''));
       if (M.forceer[m[2]]) return stuur(M.forceer[m[2]], { message: 'geforceerd' });
-      const sess = Object.values(M.sessies).find((s) => s.uid === m[1]);
+      const sess = Object.values(M.sessies).find((s) => s.uid === m[1] || (s.uids || []).indexOf(m[1]) >= 0);
       if (!sess || sess.status !== 'AUTHORIZED') return stuur(401, { message: 'session expired' });
       if (m[2] === 'balances') return stuur(200, { balances: [{ balance_type: 'ITAV', balance_amount: { currency: 'EUR', amount: '99.00' } }, { balance_type: 'CLBD', balance_amount: { currency: 'EUR', amount: '1234.56' }, reference_date: vandaag }] });
       const ck = u.searchParams.get('continuation_key');
@@ -246,6 +248,34 @@ server.listen(0, '127.0.0.1', async function () {
     toets('na ontkoppelen geen rekeningen meer', r.j.ok && r.j.rekeningen.length === 0, r.j);
     r = await draai(['archief'], null);
     toets('ontkoppelen wist het archief niet: posten blijven, rekening op ontkoppeld', r.j.ok && r.j.transacties === 6 && r.j.per_rekening.length === 1 && r.j.per_rekening[0].status === 'ontkoppeld', r.j);
+
+    // wv786: POT-rekening in dezelfde toestemming als de gezamenlijke; zakelijke IBAN vooraf gezet door de machinekamer (CLI)
+    r = await draai(['zakelijk'], { ibans: { 'NL99 ABNA 0987 6543 21': 'POT' } });
+    toets('POT: zakelijk zet de IBAN zonder hem terug te geven', r.j && r.j.ok && r.j.zakelijk === 1 && r.o.indexOf('0987654321') < 0, r.j);
+    M.metPot = true;
+    r = await draai(['koppel-start', '--bank', 'ABN AMRO'], G);
+    r = await draai(['koppel-af'], Object.assign({ state: M.auth[M.auth.length - 1].state, code: 'goede-code' }, G));
+    toets('POT: koppel-af met twee rekeningen', r.j && r.j.ok && r.j.rekeningen === 2, r.j);
+    r = await draai(['rekeningen'], null);
+    const rpot = r.j.rekeningen.find((x) => x.iban === 'NL99ABNA0987654321'), rgez = r.j.rekeningen.find((x) => x.iban === 'NL00ABNA0123456789');
+    toets('POT: label POT bij koppelen, eigenaar POT, niet gezamenlijk; de gezamenlijke niet', rpot && rpot.label === 'POT' && rpot.eigenaar === 'POT' && rpot.pot && !rpot.gezamenlijk &&
+      rgez && rgez.label !== 'POT' && !rgez.pot, r.j.rekeningen);
+    r = await draai(['saldo'], G);
+    toets('POT: saldo zonder rekening toont alleen de gezamenlijke, met de hint', r.j.ok && r.j.saldi.length === 1 && /POT/.test(r.j.let_op_pot || ''), r.j);
+    r = await draai(['saldo', 'POT'], G);
+    toets('POT: saldo POT', r.j.ok && r.j.saldi.length === 1 && r.j.saldi[0].pot === true && r.j.saldi[0].rekening === 'POT', r.j);
+    const sessPot = Object.keys(M.sessies).pop();
+    r = await draai(['historie', sessPot], G);
+    toets('POT: historie haalt beide rekeningen op', r.j.ok && r.j.rekeningen.length === 2, r.j);
+    r = await draai(['zoek'], null);
+    toets('POT: zoek zonder rekening heeft geen POT-post', r.j.ok && r.j.aantal > 0 && r.j.posten.every((x) => x.rekening !== 'POT' && x.eigenaar !== 'POT'), r.j.posten && r.j.posten.map((x) => x.rekening));
+    r = await draai(['zoek', '--rekening', 'POT'], null);
+    toets('POT: zoek rekening=POT, alles op regels ingedeeld (geen AI)', r.j.ok && r.j.aantal > 0 && r.j.posten.every((x) => x.eigenaar === 'POT' && x.herkomst !== 'ai' &&
+      ['salarissen', 'loonheffing', 'pensioen', 'overig', 'ontvangsten'].indexOf(x.categorie) >= 0), r.j.posten);
+    r = await draai(['verrijk-open', '--max', '500'], null);
+    const zp = (await draai(['zoek', '--rekening', 'POT'], null)).j.aantal, zg = (await draai(['zoek', '--rekening', '6789'], null)).j;   // beide heten 'Gezamenlijk' bij ABN: op de laatste 4 cijfers
+    toets('POT: verrijk-open biedt alleen de posten van de gezamenlijke rekening aan', r.j.ok && r.j.open_posten <= zg.aantal && zp > 0, [r.j.open_posten, zg.aantal]);
+    M.metPot = false;
 
     const src = fs.readFileSync('bank-lezer.js', 'utf8');
     toets('geen betaal-endpoints in bank-lezer.js', !/\/payments|payment_id|\/payment-/i.test(src.replace(/^\s*(\*|\/\/).*$/gm, '')), null);

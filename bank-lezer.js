@@ -674,12 +674,15 @@ const opdrachten = {
       s.sessies[sessie.session_id] = { bank: (sessie.aspsp && sessie.aspsp.name) || w.bank, land: (sessie.aspsp && sessie.aspsp.country) || w.land,
         soort: sessie.psu_type || w.soort, sinds: nu, geldig_tot: (sessie.access && sessie.access.valid_until) || w.toestemming_tot, status: 'AUTHORIZED',
         rekeningen: [] };
+      // wv786 (Fable #6): ABN geeft beide rekeningen dezelfde naam; de zakelijke (POT) krijgt meteen het label POT
+      const zak = archiefVeilig('zakelijk', function (A, x) { return A.zakelijkeIbans(x); }) || {};
       (sessie.accounts || []).forEach(function (r) {
         const h = r.identification_hash || hash(r.uid);
         const oud = s.rekeningen[h] || {};
+        const iban = (r.account_id && r.account_id.iban) || null, ent = iban ? zak[String(iban).replace(/\s+/g, '').toUpperCase()] : null;
         s.rekeningen[h] = { uid: r.uid, sessie: sessie.session_id, bank: s.sessies[sessie.session_id].bank,
           naam: r.name || null, product: r.product || null, valuta: r.currency || null, soort: r.cash_account_type || null,
-          iban: (r.account_id && r.account_id.iban) || null, label: oud.label || null, gekoppeld: nu };
+          iban: iban, label: oud.label || ent || null, gekoppeld: nu };
         s.sessies[sessie.session_id].rekeningen.push(h);
       });
       // Oude sessies waarvan alle rekeningen nu onder deze sessie vallen: VERVANGEN (niet bij EB verwijderen zonder Davids woord).
@@ -1167,6 +1170,15 @@ const opdrachten = {
   async zakelijk() {
     const x = archiefKlaar();
     const r = x.A.zakelijkZet(x.a, geheim.ibans);
+    const zak = x.A.zakelijkeIbans(x.a);
+    // een al gekoppelde zakelijke rekening zonder label krijgt het label POT (Fable wv786 #6)
+    await metSlot(async function () {
+      const s = standLees();
+      let gezet = 0;
+      Object.keys(s.rekeningen).forEach(function (h) { const q = s.rekeningen[h], e = q.iban && zak[String(q.iban).replace(/\s+/g, '').toUpperCase()]; if (e && !q.label) { q.label = e; gezet++; } });
+      if (gezet) standSchrijf(s);
+      x.s = s;
+    });
     x.A.rekeningenSync(x.a, x.s.rekeningen);
     const v = x.A.verrijk(x.a);
     return Object.assign({ ok: true, pot_rekeningen: x.A.potRekeningen(x.a).size, posten_bijgewerkt: v.gewijzigd }, r);

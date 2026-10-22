@@ -48,13 +48,17 @@ function isAfgescheiden(e) { const x = String(e || '').toLowerCase(); return x =
 // Indeling van een post op de POT-rekening, op vaste regels (getoetst 22-10-2026 tegen Davids eigen indeling in de datahub, 1.870
 // posten 2022-2026: salaris 584/585, pensioen 69/69, loonheffing 65/65 uitgaand). ABN breekt namen met spaties ("Welzi jn"):
 // organisaties daarom ook zonder spaties vergelijken. Geen taalmodel.
+// Volgorde (Fable wv786 #3): een factuur of administratiekosten is nooit loon ("salarisadministratie"); een pensioenfonds herken je
+// aan de tegenpartij, niet aan "incl pensioenpremie" in een salarisomschrijving.
 function potCategorie(t) {
   const tegen = String(t.tegenpartij || '').toLowerCase(), oms = String(t.omschrijving || '').toLowerCase().replace(/\s+/g, ' ');
-  const plat = (tegen + ' ' + oms).replace(/\s+/g, '');
+  const tegenPlat = tegen.replace(/\s+/g, '');
   if (!(t.bedrag < 0)) return 'ontvangsten';
-  if (/belastingdienst/.test(tegen.replace(/\s+/g, '')) || /loonheff/.test(oms)) return 'loonheffing';
-  if (/pfzw|pensioen|pensionfund|pggm|zorgenwelzijn/.test(plat)) return 'pensioen';
+  if (/belastingdienst/.test(tegenPlat) || /loonheff/.test(oms)) return 'loonheffing';
+  if (/pfzw|pensioen|pensionfund|pggm|zorgenwelzijn/.test(tegenPlat)) return 'pensioen';
+  if (/factuur|\bfact\b|nota\b|administratie|verwerking|abonnement/.test(oms) || /salarisverwerk|loonadministr|loonbureau|salarisadministr/.test(tegenPlat)) return 'overig';
   if (/\bsalaris|\bsalary|\bloon\b|nettoloon|netto loon|vakantiegeld|vakantietoeslag|eindejaarsuitkering|\beju\b|\bslr\b|loonstrook|\bsal\b/.test(oms)) return 'salarissen';
+  if (/pensioen/.test(oms.replace(/\s+/g, ''))) return 'pensioen';
   return 'overig';
 }
 const OORDEEL = ['type', 'categorie', 'subcategorie', 'ai_omschrijving', 'eigenaar'];
@@ -356,7 +360,7 @@ function verrijkBinnen(a) {
     ' herkomst = excluded.herkomst, regel_id = excluded.regel_id, david_velden = excluded.david_velden, versie = excluded.versie, bijgewerkt = excluded.bijgewerkt' +
     " WHERE verrijking.herkomst <> 'david' OR excluded.herkomst = 'david'");
   const hist = db.prepare('INSERT INTO verrijking_historie (nr, versie, json, tijd) VALUES (?, ?, ?, ?)');
-  let gewijzigd = 0;
+  let gewijzigd = 0, gewisteAi = 0;
   const oordelen = [];
   let abo = new Map();
   {
@@ -386,7 +390,9 @@ function verrijkBinnen(a) {
           n = { type: 'intern', categorie: /spaar/i.test(String(dr.soort || '')) || /spaar/i.test(String(dr.naam || '')) ? 'sparen en beleggen' : 'intern',
             subcategorie: null, ai_omschrijving: (t.bedrag < 0 ? 'Naar ' : 'Van ') + (rekeningNaam(dr) || 'eigen rekening'), eigenaar: null, herkomst: 'regel', regel_id: null };
         } else if (naarExt) {
-          n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: null, subcategorie: null, ai_omschrijving: (t.bedrag < 0 ? 'Naar ' : 'Van ') + (rekeningNaam(reks.get(naarExt)) || 'externe rekening'),
+          // naar of van de POT-rekening (wv786; Fable #5): standaard overig / overig inkomen met subcategorie POT, zodat hij niet eeuwig
+          // 'nog niet ingedeeld' blijft (hij gaat niet naar de AI); een regel van David op de rekening (corrigeer rekening=POT categorie=…) wint
+          n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: pot.has(naarExt) ? (t.bedrag < 0 ? 'overig' : 'overig inkomen') : null, subcategorie: pot.has(naarExt) ? POT : null, ai_omschrijving: (t.bedrag < 0 ? 'Naar ' : 'Van ') + (rekeningNaam(reks.get(naarExt)) || 'externe rekening'),
             eigenaar: null, herkomst: 'regel', regel_id: null };
         } else if (pot.has(t.rek)) n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: potCategorie(t), subcategorie: null, ai_omschrijving: null, eigenaar: null, herkomst: 'regel', regel_id: null };
         else if (g) n = { type: g.type || (t.bedrag < 0 ? 'uitgave' : 'inkomst'), categorie: g.categorie, subcategorie: g.subcategorie, ai_omschrijving: g.ai_omschrijving, eigenaar: null, herkomst: 'ai', regel_id: null };
@@ -431,10 +437,19 @@ function verrijkBinnen(a) {
         oud ? oud.versie + (oordeelAnders ? 1 : 0) : 1, nu);
       gewijzigd++;
     });
+    // wv786 (Fable #7): een AI-groep die alleen op POT-posten past (ontstaan als de POT-rekening vóór deze code in een AI-ronde zat)
+    // bevat modeltekst over een medewerker; die gebruikt niemand meer: weg, met de overslaanregel erbij
+    if (pot.size) {
+      const privé = new Set(), alleenPot = new Set();
+      tx.forEach(function (t) { if (!pot.has(t.rek)) privé.add(groepSleutel(t)); });
+      tx.forEach(function (t) { if (pot.has(t.rek)) { const k = groepSleutel(t); if (!privé.has(k)) alleenPot.add(k); } });
+      const wisG = db.prepare('DELETE FROM ai_groepen WHERE sleutel = ?'), wisO = db.prepare('DELETE FROM ai_overslaan WHERE sleutel = ?');
+      alleenPot.forEach(function (k) { if (ai.has(k)) { wisG.run(k); gewisteAi++; } wisO.run(k); });
+    }
     metaZet(a, 'vuil', '0');
     metaZet(a, 'verrijkt_op', nu);
   }
-  return { posten: tx.length, gewijzigd: gewijzigd, intern: intern.size, paren: paar.size / 2, abonnementen: new Set(abo.values()).size };
+  return { posten: tx.length, gewijzigd: gewijzigd, intern: intern.size, paren: paar.size / 2, abonnementen: new Set(abo.values()).size, ai_pot_gewist: gewisteAi || undefined };
 }
 function verrijkAlsVuil(a) { return metaLees(a, 'vuil') === '0' ? null : verrijk(a); }
 
