@@ -29,12 +29,34 @@ const CAT_UIT = ['wonen', 'verzekeringen', 'boodschappen', 'huishouden', 'vervoe
 const CAT_IN = ['inkomen', 'teruggave en terugbetaling', 'toeslagen en kinderbijslag', 'rente', 'overig inkomen'];
 const CAT_OVER = ['sparen en beleggen', 'intern'];
 const TYPES = ['uitgave', 'inkomst', 'intern', 'terugboeking'];
-const EIGENAREN = ['David', 'Cynthia', 'samen', 'kind', 'Gambia-hulp', 'extern', 'onbekend'];
+const EIGENAREN = ['David', 'Cynthia', 'samen', 'kind', 'Gambia-hulp', 'extern', 'POT', 'onbekend'];
 // Extern (wv709, David 21-10-2026): een rekening op Davids naam die van een ander is (de bunq-rekening van Elizabeth). Een
 // overboeking ernaar of ervan is geen interne overboeking maar een uitgave of inkomst; haar eigen posten tellen niet mee in
 // zoek, maand, intern en abonnementen (wel bewaard; met rekening=… op te vragen); haar saldo is geen vermogen van David.
 const EXTERN = 'extern';
 const LET_OP_EXTERN = 'externe rekening: staat op Davids naam maar is van een ander; posten en saldo zijn niet van David';
+// POT (wv786, opdracht David 22-10-2026): de ABN-rekening van de POT-constructie (bij ABN een privérekening op Davids naam, gebruikt
+// voor alle salariskosten). Zakelijk en afgescheiden: telt overal mee als 'afgescheiden' zoals extern (niet in zoek/maand/intern/
+// abonnementen/vaste lasten/stroom/PayPal zonder rekening=…, nooit naar het taalmodel, nooit intern), maar de posten worden met vaste
+// regels ingedeeld (CAT_POT), niet door de AI: salarisbetalingen zijn personeelsgegevens (namen, bedragen) en blijven op de pod.
+// Herkend op IBAN uit meta 'zakelijk_ibans' (alleen machinekamer zet die, opdracht zakelijk; de IBAN staat niet in de code).
+const POT = 'POT';
+const AFGESCHEIDEN_SQL = "lower(eigenaar) IN ('extern', 'pot')";
+const CAT_POT = ['salarissen', 'loonheffing', 'pensioen', 'overig', 'ontvangsten'];
+const LET_OP_POT = 'POT-rekening (zakelijk): salarisbetalingen zijn personeelsgegevens van POT-medewerkers; alleen voor David in het gesprek, nooit in de vault, de briefing, een Voor jou-kaart of een rapport; telt nergens mee in zijn privé-overzichten';
+function isAfgescheiden(e) { const x = String(e || '').toLowerCase(); return x === EXTERN || x === 'pot'; }
+// Indeling van een post op de POT-rekening, op vaste regels (getoetst 22-10-2026 tegen Davids eigen indeling in de datahub, 1.870
+// posten 2022-2026: salaris 584/585, pensioen 69/69, loonheffing 65/65 uitgaand). ABN breekt namen met spaties ("Welzi jn"):
+// organisaties daarom ook zonder spaties vergelijken. Geen taalmodel.
+function potCategorie(t) {
+  const tegen = String(t.tegenpartij || '').toLowerCase(), oms = String(t.omschrijving || '').toLowerCase().replace(/\s+/g, ' ');
+  const plat = (tegen + ' ' + oms).replace(/\s+/g, '');
+  if (!(t.bedrag < 0)) return 'ontvangsten';
+  if (/belastingdienst/.test(tegen.replace(/\s+/g, '')) || /loonheff/.test(oms)) return 'loonheffing';
+  if (/pfzw|pensioen|pensionfund|pggm|zorgenwelzijn/.test(plat)) return 'pensioen';
+  if (/\bsalaris|\bsalary|\bloon\b|nettoloon|netto loon|vakantiegeld|vakantietoeslag|eindejaarsuitkering|\beju\b|\bslr\b|loonstrook|\bsal\b/.test(oms)) return 'salarissen';
+  return 'overig';
+}
 const OORDEEL = ['type', 'categorie', 'subcategorie', 'ai_omschrijving', 'eigenaar'];
 const ZICHTBAAR = "t.status IN ('booked', 'pending')";
 const LET_OP_GEZAMENLIJK = 'gezamenlijke rekening: posten van de mede-eigenaar staan erin; alleen voor David, nooit naar buiten';
@@ -135,7 +157,27 @@ function open(bankDir) {
   }
   return { db: db, pad: pad, dir: bankDir };
 }
-function externeRekeningen(a) { return new Set(a.db.prepare("SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern'").all().map(function (r) { return r.rek; })); }
+// Afgescheiden rekeningen: extern (wv709) en POT (wv786). Alles wat privé-overzichten maakt, laat ze zonder rekening=… weg.
+function externeRekeningen(a) { return new Set(a.db.prepare('SELECT rek FROM rekeningen WHERE ' + AFGESCHEIDEN_SQL).all().map(function (r) { return r.rek; })); }
+function potRekeningen(a) { return new Set(a.db.prepare("SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'pot'").all().map(function (r) { return r.rek; })); }
+function zakelijkeIbans(a) {
+  let m = {};
+  try { m = JSON.parse(metaLees(a, 'zakelijk_ibans') || '{}'); } catch (e) { m = {}; }
+  return m && typeof m === 'object' && !Array.isArray(m) ? m : {};
+}
+// Alleen machinekamer (bank-lezer.js zakelijk, stdin): {IBAN: 'POT'}. Vervangt de hele lijst; leeg object = geen.
+function zakelijkZet(a, ibans) {
+  if (!ibans || typeof ibans !== 'object' || Array.isArray(ibans)) throw new Error('ibans: object {IBAN: "POT"}');
+  const m = {};
+  Object.keys(ibans).forEach(function (k) {
+    const i = ibanNorm(k);
+    if (!/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(i || '')) throw new Error('ibans: geen IBAN');
+    if (ibans[k] !== POT) throw new Error('ibans: alleen entiteit POT');
+    m[i] = POT;
+  });
+  inTransactie(a, function () { metaZet(a, 'zakelijk_ibans', JSON.stringify(m)); metaZet(a, 'vuil', '1'); });
+  return { zakelijk: Object.keys(m).length };
+}
 function metaLees(a, k) { const r = a.db.prepare('SELECT waarde FROM meta WHERE sleutel = ?').get(k); return r ? r.waarde : null; }
 function metaZet(a, k, v) { a.db.prepare('INSERT INTO meta (sleutel, waarde) VALUES (?, ?) ON CONFLICT (sleutel) DO UPDATE SET waarde = excluded.waarde').run(k, v == null ? null : String(v)); }
 // Re-entrant: binnen een lopende transactie gewoon doorlopen (verrijk roept abonnementenHerken binnen zijn eigen transactie aan).
@@ -150,8 +192,9 @@ function inTransactie(a, fn) {
 // ── rekeningen (uit stand.json) ─────────────────────────────────────────────
 // Eigenaar van een rekening (systeem): gezamenlijk → samen, naam met kids/kind → kind, Gambia → Gambia-hulp, anders David.
 // Een eigenaar die David zette (eigenaar_herkomst 'david') blijft altijd staan.
-function eigenaarStandaard(r) {
+function eigenaarStandaard(r, zak) {
   const n = String((r.label || '') + ' ' + (r.naam || '') + ' ' + (r.product || '')).toLowerCase();
+  if (zak && r.iban && zak[ibanNorm(r.iban)]) return zak[ibanNorm(r.iban)];   // POT (wv786): op IBAN, vóór 'samen'
   if (r.gezamenlijk || r.soort === 'gezamenlijk' || r.bron !== 'bunq') return 'samen';   // de enige ABN-rekening is de gezamenlijke (bouwplan § 2)
   if (/gambia/.test(n)) return 'Gambia-hulp';
   if (/\bkids?\b|\bkind(eren)?\b/.test(n)) return 'kind';
@@ -165,12 +208,17 @@ function rekeningenSync(a, rekeningen) {
     ' iban_eind = COALESCE(excluded.iban_eind, rekeningen.iban_eind), naam = excluded.naam, label = excluded.label, soort = excluded.soort, status = excluded.status,' +
      " gezamenlijk = excluded.gezamenlijk, eigenaar = CASE WHEN rekeningen.eigenaar_herkomst IN ('david', 'machinekamer') THEN rekeningen.eigenaar ELSE excluded.eigenaar END," +
     ' laatst_gezien = excluded.laatst_gezien');
+  const zak = zakelijkeIbans(a);
+  // POT (wv786): een zakelijke IBAN wint van een eigenaar die het systeem of de machinekamer zette (bv. 'extern' als noodgreep vóór de
+  // uitrol, of 'samen' als standaard), nooit van David. Niet gezamenlijk: de mede-eigenaarregel geldt voor privé.
+  const zetZak = a.db.prepare("UPDATE rekeningen SET eigenaar = ?, eigenaar_herkomst = 'systeem', gezamenlijk = 0 WHERE rek = ? AND eigenaar_herkomst IS NOT 'david' AND (eigenaar IS NOT ? OR gezamenlijk <> 0)");
   inTransactie(a, function () {
     Object.keys(rekeningen || {}).forEach(function (h) {
-      const r = rekeningen[h] || {}, bunq = r.bron === 'bunq', iban = ibanNorm(r.iban);
+      const r = rekeningen[h] || {}, bunq = r.bron === 'bunq', iban = ibanNorm(r.iban), zakelijk = !!(iban && zak[iban]);
       gezien.add(h);
       zet.run(h, bunq ? 'bunq' : (/abn/i.test(r.bank || '') ? 'abn' : 'enablebanking'), r.uid || null, iban, iban ? iban.slice(-4) : null, r.naam || null, r.label || null,
-        r.soort || r.product || null, bunq ? String(r.status || '?') : 'ACTIVE', (r.gezamenlijk || r.soort === 'gezamenlijk' || !bunq) ? 1 : 0, eigenaarStandaard(r), nu, nu);
+        r.soort || r.product || null, bunq ? String(r.status || '?') : 'ACTIVE', !zakelijk && (r.gezamenlijk || r.soort === 'gezamenlijk' || !bunq) ? 1 : 0, eigenaarStandaard(r, zak), nu, nu);
+      if (zakelijk) zetZak.run(zak[iban], h, zak[iban]);
     });
     // Lege lijst (onleesbare stand.json): niets op ontkoppeld zetten (Fable wv687 #10)
     if (gezien.size) oud.forEach(function (r, h) { if (!gezien.has(h) && r.status !== 'ontkoppeld') a.db.prepare("UPDATE rekeningen SET status = 'ontkoppeld' WHERE rek = ?").run(h); });
@@ -274,7 +322,7 @@ function verrijkBinnen(a) {
   const bestaand = new Map(db.prepare('SELECT * FROM verrijking').all().map(function (v) { return [v.nr, v]; }));
   // regels van David gaan voor die van de machinekamer (alleen soort extern, wv709)
   const regels = db.prepare("SELECT * FROM regels WHERE actief = 1 AND herkomst IN ('david', 'machinekamer') ORDER BY herkomst = 'david' DESC, id DESC").all();
-  const ext = externeRekeningen(a);
+  const ext = externeRekeningen(a), pot = potRekeningen(a);
   const ai = new Map(db.prepare('SELECT * FROM ai_groepen').all().map(function (g) { return [g.sleutel, g]; }));
 
   // 1. interne overboekingen en paren (zelfde bedrag tegengesteld, ± 3 dagen, op de andere eigen rekening)
@@ -324,6 +372,7 @@ function verrijkBinnen(a) {
       {
         const r = regels.find(function (g) {
           if (g.rek && g.rek !== t.rek) return false;
+          if (pot.has(t.rek) && g.rek !== t.rek) return false;   // POT: alleen regels die David óp de POT-rekening maakte (wv786)
           if (g.richting && g.richting !== rt) return false;
           if (g.soort === 'intern') return !!doel && g.patroon === doel;
           if (g.soort === 'extern') return !!naarExt && g.patroon === naarExt;
@@ -331,7 +380,7 @@ function verrijkBinnen(a) {
           if (g.soort === 'tegenpartij') return !doel && !naarExt && !!ts && g.patroon === ts;
           return false;
         });
-        const g = ai.get(groepSleutel(t));
+        const g = pot.has(t.rek) ? null : ai.get(groepSleutel(t));   // POT: nooit een AI-oordeel (wv786)
         if (doel) {
           const dr = reks.get(doel) || {};
           n = { type: 'intern', categorie: /spaar/i.test(String(dr.soort || '')) || /spaar/i.test(String(dr.naam || '')) ? 'sparen en beleggen' : 'intern',
@@ -339,7 +388,8 @@ function verrijkBinnen(a) {
         } else if (naarExt) {
           n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: null, subcategorie: null, ai_omschrijving: (t.bedrag < 0 ? 'Naar ' : 'Van ') + (rekeningNaam(reks.get(naarExt)) || 'externe rekening'),
             eigenaar: null, herkomst: 'regel', regel_id: null };
-        } else if (g) n = { type: g.type || (t.bedrag < 0 ? 'uitgave' : 'inkomst'), categorie: g.categorie, subcategorie: g.subcategorie, ai_omschrijving: g.ai_omschrijving, eigenaar: null, herkomst: 'ai', regel_id: null };
+        } else if (pot.has(t.rek)) n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: potCategorie(t), subcategorie: null, ai_omschrijving: null, eigenaar: null, herkomst: 'regel', regel_id: null };
+        else if (g) n = { type: g.type || (t.bedrag < 0 ? 'uitgave' : 'inkomst'), categorie: g.categorie, subcategorie: g.subcategorie, ai_omschrijving: g.ai_omschrijving, eigenaar: null, herkomst: 'ai', regel_id: null };
         else n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: null, subcategorie: null, ai_omschrijving: null, eigenaar: null, herkomst: 'regel', regel_id: null };
         if (r) {
           // Een regel met een andere categorie dan de AI: subcategorie, type en omschrijving van de AI horen er niet meer bij (tegenlezing #1)
@@ -668,10 +718,14 @@ function abonnementenHerken(a, tx, nu) {
 function aiOpen(a, max) {
   verrijkAlsVuil(a);
   const rijen = a.db.prepare('SELECT t.nr, t.bedrag, t.tegenpartij, t.omschrijving FROM transacties t JOIN verrijking v ON v.nr = t.nr WHERE ' + ZICHTBAAR +
-    " AND v.categorie IS NULL AND v.herkomst <> 'david' AND v.type <> 'intern' AND t.rek NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern')" +
+    " AND v.categorie IS NULL AND v.herkomst <> 'david' AND v.type <> 'intern' AND t.rek NOT IN (SELECT rek FROM rekeningen WHERE " + AFGESCHEIDEN_SQL + ")" +
     // ook geen overboeking van of naar een externe rekening (die deelt de regel per rekening in; Fable wv709 #5)
-    " AND (v.intern_paar IS NULL OR (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern'))" +
-    " AND (t.tegen_iban IS NULL OR t.tegen_iban NOT IN (SELECT iban FROM rekeningen WHERE lower(eigenaar) = 'extern' AND iban IS NOT NULL))").all();
+    " AND (v.intern_paar IS NULL OR (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) NOT IN (SELECT rek FROM rekeningen WHERE " + AFGESCHEIDEN_SQL + "))" +
+    " AND (t.tegen_iban IS NULL OR t.tegen_iban NOT IN (SELECT iban FROM rekeningen WHERE " + AFGESCHEIDEN_SQL + " AND iban IS NOT NULL))" +
+    // POT (wv786): ook niet als de rekening (nog) niet als POT gemarkeerd is maar de IBAN wel als zakelijk bekend is, en geen
+    // overboeking naar zo'n IBAN
+    " AND t.rek NOT IN (SELECT rek FROM rekeningen WHERE iban IS NOT NULL AND iban IN (SELECT value FROM json_each(?)))" +
+    " AND (t.tegen_iban IS NULL OR t.tegen_iban NOT IN (SELECT value FROM json_each(?)))").all(JSON.stringify(Object.keys(zakelijkeIbans(a))), JSON.stringify(Object.keys(zakelijkeIbans(a))));
   const ai = new Set(a.db.prepare('SELECT sleutel FROM ai_groepen').all().map(function (g) { return g.sleutel; }));
   // twee keer geen bruikbaar oordeel: niet opnieuw aanbieden (Fable wv687 #5); blijft 'nog niet ingedeeld' tot David of een regel hem indeelt
   // na 90 dagen weer aanbieden (ander model of nieuwe categorie van David; tegenlezing #2)
@@ -727,7 +781,7 @@ function corrigeer(a, o) {
   const velden = {};
   if (o.categorie != null) { const c = geldigLabel(o.categorie, 40); if (!c) throw new Error('categorie: 1-40 tekens'); velden.categorie = c; }
   if (o.subcategorie != null) { const c = o.subcategorie === '' ? '' : geldigLabel(o.subcategorie, 40); if (c == null) throw new Error('subcategorie: 1-40 tekens'); velden.subcategorie = c || null; }
-  if (o.eigenaar != null) { const e = geldigLabel(o.eigenaar, 30); if (!e) throw new Error('eigenaar: 1-30 tekens (bv. ' + EIGENAREN.join(', ') + ')'); velden.eigenaar = e.toLowerCase() === EXTERN ? EXTERN : e; }
+  if (o.eigenaar != null) { const e = geldigLabel(o.eigenaar, 30); if (!e) throw new Error('eigenaar: 1-30 tekens (bv. ' + EIGENAREN.join(', ') + ')'); velden.eigenaar = e.toLowerCase() === EXTERN ? EXTERN : e.toLowerCase() === 'pot' ? POT : e; }
   if (o.type != null) { if (TYPES.indexOf(o.type) < 0) throw new Error('type: ' + TYPES.join(', ')); velden.type = o.type; }
   if (o.rek) {
     // per rekening: de eigenaar, en voor een externe rekening de categorie van de overboekingen ernaartoe (wv709)
@@ -742,7 +796,7 @@ function corrigeer(a, o) {
         if (!r.changes) throw new Error('eigenaar van deze rekening is door David gezet; die wint');
       }
       if (velden.categorie) {
-        if (!externeRekeningen(a).has(o.rek)) throw new Error('categorie per rekening alleen voor een externe rekening (eigenaar extern)');
+        if (!externeRekeningen(a).has(o.rek)) throw new Error('categorie per rekening alleen voor een externe rekening of de POT-rekening (eigenaar extern of POT)');
         if (velden.categorie === 'intern') throw new Error('een externe rekening is nooit intern');
         if (door === 'machinekamer' && a.db.prepare("SELECT 1 FROM regels WHERE soort = 'extern' AND patroon = ? AND richting = 'af' AND herkomst = 'david' AND actief = 1").get(o.rek)) throw new Error('categorie voor deze rekening is door David gezet; die wint');
         a.db.prepare("UPDATE regels SET actief = 0 WHERE soort = 'extern' AND patroon = ? AND richting = 'af' AND actief = 1 AND (herkomst = ? OR ? = 'david')").run(o.rek, door, door);
@@ -807,7 +861,7 @@ const UIT_KOLOMMEN = 'SELECT t.nr, t.rek, t.datum, t.bedrag, t.valuta, t.tegenpa
   ' v.eigenaar, v.intern_paar, v.abonnement_id, v.herkomst, (SELECT p.rek FROM transacties p WHERE p.nr = v.intern_paar) AS paar_rek FROM transacties t LEFT JOIN verrijking v ON v.nr = t.nr';
 function rekNamen(a) { return new Map(a.db.prepare('SELECT * FROM rekeningen').all().map(function (r) { return [r.rek, r]; })); }
 function postUit(t, reks, n) {
-  const r = reks.get(t.rek), isExt = function (x) { return !!x && String(x.eigenaar || '').toLowerCase() === EXTERN; };
+  const r = reks.get(t.rek), isExt = function (x) { return !!x && isAfgescheiden(x.eigenaar); };
   const ext = isExt(r) || isExt(reks.get(t.paar_rek));   // overboeking van of naar een externe rekening (wv709)
   return { nr: t.nr, datum: t.datum, rekening: rekeningNaam(r), bedrag: t.bedrag, valuta: t.valuta !== 'EUR' ? t.valuta : undefined, tegenpartij: t.tegenpartij,
     omschrijving: t.omschrijving ? String(t.omschrijving).slice(0, n || 140) : null, status: t.status === 'pending' ? 'wachtend' : undefined,
@@ -820,8 +874,9 @@ function filter(o) {
   if (o.van) { w.push('t.datum >= ?'); p.push(o.van); }
   if (o.tot) { w.push('t.datum <= ?'); p.push(o.tot); }
   if (o.rek) { w.push('t.rek = ?'); p.push(o.rek); }
-  // zonder rekening: de posten op een externe rekening tellen niet mee (wv709); met rekening=… of eigenaar=extern wel
-  else if (String(o.eigenaar || '').toLowerCase() !== EXTERN) w.push("t.rek NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern')");
+  // zonder rekening: de posten op een externe rekening (wv709) of de POT-rekening (wv786) tellen niet mee; met rekening=… of
+  // eigenaar=extern/POT wel (de eigenaarfilter hieronder houdt dan alleen die posten over)
+  else if (!isAfgescheiden(o.eigenaar)) w.push('t.rek NOT IN (SELECT rek FROM rekeningen WHERE ' + AFGESCHEIDEN_SQL + ')');
   if (o.categorie) { w.push('lower(v.categorie) = lower(?)'); p.push(o.categorie); }
   if (o.eigenaar) { w.push('lower(v.eigenaar) = lower(?)'); p.push(o.eigenaar); }
   if (o.type) { w.push('v.type = ?'); p.push(o.type); }
@@ -829,10 +884,11 @@ function filter(o) {
 }
 // Uitleg bij een overzicht: is de gevraagde rekening extern, of bleven er externe rekeningen buiten beschouwing?
 function letOpExtern(a, o) {
-  const ext = externeRekeningen(a);
+  const ext = externeRekeningen(a), pot = potRekeningen(a);
   if (!ext.size) return undefined;
-  if (o.rek) return ext.has(o.rek) ? LET_OP_EXTERN : undefined;
-  return String(o.eigenaar || '').toLowerCase() === EXTERN ? LET_OP_EXTERN : 'posten op een externe rekening (eigenaar extern) tellen niet mee; vraag ze op met rekening=…';
+  if (o.rek) return pot.has(o.rek) ? LET_OP_POT : ext.has(o.rek) ? LET_OP_EXTERN : undefined;
+  const e = String(o.eigenaar || '').toLowerCase();
+  return e === 'pot' ? LET_OP_POT : e === EXTERN ? LET_OP_EXTERN : 'posten op een externe rekening of de POT-rekening (eigenaar extern of POT) tellen niet mee; vraag ze op met rekening=…';
 }
 function zoek(a, o) {
   verrijkAlsVuil(a);
@@ -894,7 +950,7 @@ function internLijst(a, o) {
 function abonnementen(a, o) {
   verrijkAlsVuil(a);
   const reks = rekNamen(a);
-  const l = a.db.prepare("SELECT b.* FROM abonnementen b WHERE (? OR b.actief = 1) AND b.rek NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) = 'extern')" +
+  const l = a.db.prepare("SELECT b.* FROM abonnementen b WHERE (? OR b.actief = 1) AND b.rek NOT IN (SELECT rek FROM rekeningen WHERE " + AFGESCHEIDEN_SQL + ")" +
     ' ORDER BY b.actief DESC, b.per_maand DESC, b.bedrag_typisch DESC').all(o && o.alle ? 1 : 0);
   const perMaand = function (b) { return b.per_maand != null ? b.per_maand : b.ritme === 'maand' ? b.bedrag_typisch : b.ritme === 'kwartaal' ? b.bedrag_typisch / 3 : b.bedrag_typisch / 12; };
   return { aantal: l.length, per_maand_totaal: r2(l.filter(function (b) { return b.actief; }).reduce(function (s, b) { return s + perMaand(b); }, 0)),
@@ -924,10 +980,10 @@ function vasteLastenRekening(a, rek) {
   const reks = rekNamen(a);
   if (rek) {
     if (!reks.has(rek)) throw new Error('rekening: niet in het archief');
-    if (externeRekeningen(a).has(rek)) throw new Error('rekening: een externe rekening (eigenaar extern) heeft geen vaste lasten van David');
+    if (externeRekeningen(a).has(rek)) throw new Error('rekening: een externe rekening of de POT-rekening (eigenaar extern of POT) heeft geen vaste lasten van David');
     return rek;
   }
-  const l = Array.from(reks.values()).filter(function (r) { return r.bron !== 'bunq' && String(r.eigenaar || '').toLowerCase() !== EXTERN; });
+  const l = Array.from(reks.values()).filter(function (r) { return r.bron !== 'bunq' && !isAfgescheiden(r.eigenaar); });
   if (l.length !== 1) throw new Error('rekening: noem de rekening (bijvoorbeeld rekening="Vaste lasten")');
   return l[0].rek;
 }
@@ -1157,6 +1213,36 @@ function stroom(a, o) {
     let_op: 'per rekeningpaar één regel (de afschrijvingen); vast = zelfde paar en bedrag in minstens 3 verschillende maanden van het laatste half jaar; naar een externe rekening is een uitgave, geen intern' };
 }
 // Alleen aantallen, data en herkomst; geen bedragen, namen of IBAN's (mag in een rapport).
+// ── POT-rekening (wv786): overzicht zonder namen ───────────────────────────
+// Per maand per categorie (salarissen, loonheffing, pensioen, overig, ontvangsten): aantal en bedrag. Geen tegenpartij, omschrijving of
+// IBAN: dit is het standaardantwoord op "wat ging er aan salarissen af?" en de voeding voor een latere POT-app. Losse posten (met namen)
+// alleen via zoek rekening=POT, en alleen voor David in het gesprek.
+function potOverzicht(a, o) {
+  verrijkAlsVuil(a);
+  o = o || {};
+  const pot = Array.from(potRekeningen(a));
+  if (!pot.length) return { rekening: null, let_op: 'er is (nog) geen POT-rekening gekoppeld' };
+  let van = o.van, tot = o.tot;
+  if (o.maand) { if (!/^\d{4}-\d{2}$/.test(o.maand)) throw new Error('maand: JJJJ-MM'); van = o.maand + '-01'; tot = maandEinde(o.maand); }
+  if (!van) van = plusMaanden(vandaag().slice(0, 7) + '-01', -11);
+  if (!tot) tot = vandaag();
+  const rijen = a.db.prepare('SELECT substr(t.datum, 1, 7) m, coalesce(v.categorie, ?) c, count(*) n, sum(t.bedrag) s FROM transacties t LEFT JOIN verrijking v ON v.nr = t.nr' +
+    ' WHERE ' + ZICHTBAAR + ' AND t.rek IN (SELECT value FROM json_each(?)) AND t.datum >= ? AND t.datum <= ? GROUP BY m, c ORDER BY m, c')
+    .all('nog niet ingedeeld', JSON.stringify(pot), van, tot);
+  const maanden = new Map(), totaal = {};
+  rijen.forEach(function (r) {
+    if (!maanden.has(r.m)) maanden.set(r.m, { maand: r.m, aantal: 0, uit: 0, in: 0, per_categorie: {} });
+    const x = maanden.get(r.m);
+    x.aantal += r.n; if (r.s < 0) x.uit += r.s; else x.in += r.s;
+    x.per_categorie[r.c] = r2((x.per_categorie[r.c] || 0) + r.s);
+    totaal[r.c] = r2((totaal[r.c] || 0) + r.s);
+  });
+  const reks = rekNamen(a);
+  return { rekening: pot.map(function (h) { return rekeningNaam(reks.get(h)); }).join(', '), van: van, tot: tot, categorieen: CAT_POT, let_op_pot: LET_OP_POT,
+    totaal_per_categorie: totaal,
+    maanden: Array.from(maanden.values()).map(function (x) { return { maand: x.maand, aantal: x.aantal, uit: r2(x.uit), in: r2(x.in), per_categorie: x.per_categorie }; }) };
+}
+
 function stand(a) {
   const db = a.db;
   const per = db.prepare('SELECT r.rek, r.bron, r.status, r.eigenaar, r.eigenaar_herkomst, count(t.nr) n, min(t.datum) van, max(t.datum) tot, sum(t.ruwe_json IS NOT NULL) ruw' +
@@ -1186,9 +1272,11 @@ function stand(a) {
       posten: r.n, van: r.van, tot: r.tot, met_ruwe_json: r.ruw || 0 }; }),
     categorieen: CAT_UIT.concat(CAT_IN, CAT_OVER), eigen_categorieen: categorieen(a).length - CAT_UIT.length - CAT_IN.length - CAT_OVER.length, eigenaren: EIGENAREN,
     masker_namen: (function () { try { return JSON.parse(metaLees(a, 'masker_namen') || '[]').length; } catch (e) { return 0; } })(),
+    zakelijke_ibans: Object.keys(zakelijkeIbans(a)).length,   // wv786: alleen het aantal
     ai_overgeslagen_groepen: db.prepare('SELECT count(*) n FROM ai_overslaan WHERE pogingen >= 2').get().n,
   };
 }
 
 module.exports = { open, rekeningenSync, markeerOntkoppeld, bij, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
+  zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
   categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, reeksenBereken, vastePosten, archiefStart, machtigingVan, naamNorm, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };

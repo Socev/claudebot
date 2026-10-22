@@ -42,6 +42,8 @@
  *   node bank-lezer.js corrigeer --rekening r --categorie c [--subcategorie s] externe rekening (eigenaar extern, wv709): categorie
  *                                                                              van de overboekingen ernaartoe (die zijn een uitgave, geen intern)
  *   node bank-lezer.js archief                                                  alleen aantallen (mag in een rapport)
+ *   node bank-lezer.js pot [--maand JJJJ-MM] [--van] [--tot]                    POT-rekening per maand per categorie, zonder namen (wv786)
+ *   node bank-lezer.js zakelijk (stdin {ibans: {IBAN: 'POT'}})                  alleen machinekamer via de CLI: zakelijke IBAN's (wv786)
  *   node bank-lezer.js verrijk                                                  regels opnieuw toepassen (lokaal)
  *   node bank-lezer.js verrijk-open [--max N] / verrijk-zet (stdin {resultaten, model})   alleen server.js (AI-stap)
  * PayPal-laag (wv765, paypal-bewijs.js; bewijzen uit de ontvangstbewijzen in Gmail, gekoppeld aan de PayPal-posten):
@@ -51,7 +53,13 @@
  *   node bank-lezer.js paypal-bij (stdin {bewijzen, fouten, ronde})            alleen server.js: bewaren (idempotent) + koppelen
  * Historie voor het archief (alleen machinekamer via server.js):
  *   node bank-lezer.js historie bunq --volledig [--opgeheven] [--opnieuw]       alle bunq-posten ooit, per rekening onder eigen slot
- *   node bank-lezer.js historie abn-diep --van JJJJ-MM-DD                       ABN zo ver als de bank geeft (laat David er 2 over)
+ *   node bank-lezer.js historie abn-diep --van JJJJ-MM-DD [--rekening r]        ABN zo ver als de bank geeft (laat David er 2 over)
+ *
+ * POT-REKENING (wv786, opdracht David 22-10-2026). De ABN-rekening van de POT-constructie (privérekening op Davids naam, alleen voor
+ * salariskosten) zit sinds 22-10 in dezelfde toestemming als de gezamenlijke rekening. Eigenaar POT (op IBAN, meta zakelijk_ibans):
+ * buiten elk privé-overzicht (saldo zonder rekening, zoek, maand, intern, abonnementen, vaste-lasten, stroom, PayPal), nooit naar het
+ * taalmodel (indeling op vaste regels: salarissen, loonheffing, pensioen, overig, ontvangsten), alleen op te vragen met rekening=POT
+ * of via pot (zonder namen). Bouwplan § 9e.
  *
  * ALLEEN LEZEN. Dit script kent geen betaal-endpoint (/payments e.d.); de CI-build controleert dat. Een betaling via
  * Enable Banking zou bovendien altijd Davids eigen bank-inlog vragen.
@@ -330,6 +338,18 @@ function archiefVeilig(wat, fn) {
 function externSet() { const x = archiefVeilig('extern', function (A, a) { return A.externeRekeningen(a); }); const s = x || new Set(); s.fout = !x; return s; }
 const EXTERN_ONBEKEND = 'archief niet leesbaar: externe rekeningen (niet van David) zijn nu niet gemarkeerd';
 const LET_OP_EXTERN = 'externe rekening: staat op Davids naam maar is van een ander; saldo en posten zijn niet van David (niet meetellen als zijn geld)';
+// POT (wv786): de ABN-rekening van de POT-constructie. Afgescheiden zoals extern (de archieffunctie externeRekeningen geeft beide), met
+// eigen uitleg; herkend in het archief (eigenaar POT) én, vóór de eerste archiefsynchronisatie, op de zakelijke IBAN-lijst.
+const LET_OP_POT = 'POT-rekening (zakelijk): salarisbetalingen zijn personeelsgegevens van POT-medewerkers; alleen voor David in het gesprek, nooit in de vault, de briefing, een Voor jou-kaart of een rapport; telt niet mee als zijn privégeld';
+const POT_VERBORGEN = 'de POT-rekening (zakelijk) staat hier niet bij; vraag hem apart op met rekening=POT';
+function potSet(s) {
+  const x = archiefVeilig('pot', function (A, a) {
+    const p = A.potRekeningen(a), zak = A.zakelijkeIbans(a);
+    Object.keys((s && s.rekeningen) || {}).forEach(function (h) { const i = s.rekeningen[h].iban; if (i && zak[String(i).replace(/\s+/g, '').toUpperCase()]) p.add(h); });
+    return p;
+  });
+  const p = x || new Set(); p.fout = !x; return p;
+}
 function archiefBij(s, rh, lijst, opties) {
   return archiefVeilig('bij', function (A, a) { A.rekeningenSync(a, s.rekeningen); return A.bij(a, rh, lijst, opties); });
 }
@@ -356,6 +376,8 @@ function rekeningVan(s, ref, alle) {
     .filter(function (r) { return alle || zichtbaar(r) || (r.uid && String(r.uid).toLowerCase() === n0); });
   if (!ref) { if (lijst.length === 1) return lijst[0]; throw new Weigering(lijst.length ? 'meerdere rekeningen: noem er één (label, naam, laatste 4 cijfers of uid)' : 'nog geen rekening gekoppeld'); }
   const n = String(ref).trim().toLowerCase();
+  // wv786: "POT" is altijd de POT-rekening (eigenaar POT), ook zonder label
+  if (n === 'pot') { const p = potSet(s), l = lijst.filter(function (r) { return p.has(r.hash); }); if (l.length === 1) return l[0]; if (!l.length) throw new Weigering('er is (nog) geen POT-rekening gekoppeld'); }
   const exact = lijst.filter(function (r) {
     return [r.uid, r.label, r.naam, r.product, r.iban].some(function (v) { return v && String(v).toLowerCase() === n; }) ||
       (n.length >= 8 && r.hash.indexOf(n) === 0) || (/^\d{4}$/.test(n) && r.iban && r.iban.slice(-4) === n);
@@ -717,7 +739,9 @@ const opdrachten = {
       if (!isDatum(van) || van >= dag()) throw new Weigering('--van JJJJ-MM-DD (vóór vandaag)');
       return metSlot(async function () {
         const s = standLees(), resultaat = [];
-        for (const h of Object.keys(s.rekeningen).filter(function (k) { return s.rekeningen[k].bron !== 'bunq'; })) {
+        // wv786: --rekening (bv. POT) haalt alleen die rekening op; de rest houdt zijn opvragen
+        const alleen = a.opt.rekening ? rekeningVan(s, a.opt.rekening).hash : null;
+        for (const h of Object.keys(s.rekeningen).filter(function (k) { return s.rekeningen[k].bron !== 'bunq' && (!alleen || k === alleen); })) {
           const rek = Object.assign({ hash: h }, s.rekeningen[h]), ss = s.sessies[rek.sessie] || {}, r = { rek_kort: h.slice(0, 8) };
           if (ss.status !== 'AUTHORIZED' || (ss.geldig_tot && Date.parse(ss.geldig_tot) <= Date.now())) r.overgeslagen = 'toestemming geldt niet';
           else if (teller(s, h).transacties + 1 > MAX_PER_DAG - RESERVE) r.overgeslagen = 'David moet er vandaag nog ' + RESERVE + ' overhouden';
@@ -775,14 +799,18 @@ const opdrachten = {
       });
     }
     const alle = !!(a && a.opt.alle);
-    const hashes = Object.keys(s.rekeningen).filter(function (h) { return alle || zichtbaar(s.rekeningen[h]); }), ext = externSet();
+    const hashes = Object.keys(s.rekeningen).filter(function (h) { return alle || zichtbaar(s.rekeningen[h]); }), ext = externSet(), pot = potSet(s);
+    // wv786: eigenaar per rekening uit het archief (POT, extern, samen, …)
+    const eig = archiefVeilig('eigenaar', function (A, x) { return new Map(x.db.prepare('SELECT rek, eigenaar FROM rekeningen').all().map(function (r) { return [r.rek, r.eigenaar]; })); }) || new Map();
     return { ok: true, let_op: let_op || undefined, let_op_extern: ext.fout ? EXTERN_ONBEKEND : undefined, verborgen: Object.keys(s.rekeningen).length - hashes.length || undefined,
       bunq: ctx ? { lijst_van: (s.bunq && s.bunq.lijst) || null, fout: (s.bunq && s.bunq.fout && s.bunq.fout.tekst) || undefined } : (bunqCtxFout ? { fout: bunqCtxFout } : undefined),
       rekeningen: hashes.map(function (h) {
         const r = s.rekeningen[h], ss = s.sessies[r.sessie] || {}, o = s.opgehaald[h] || {}, t = (s.tellers.dag === dag() && s.tellers.per[h]) || {};
         const bunq = r.bron === 'bunq';
         return { uid: r.uid, label: r.label, naam: r.naam, product: r.product, bank: r.bank, iban: r.iban, valuta: r.valuta,
-          bron: bunq ? 'bunq' : 'enablebanking', gezamenlijk: r.gezamenlijk || undefined, extern: ext.has(h) || undefined, let_op_extern: ext.has(h) ? LET_OP_EXTERN : undefined,
+          bron: bunq ? 'bunq' : 'enablebanking', eigenaar: pot.has(h) ? 'POT' : (eig.get(h) || undefined),
+          gezamenlijk: !pot.has(h) && r.gezamenlijk || undefined, extern: ext.has(h) && !pot.has(h) || undefined, let_op_extern: ext.has(h) && !pot.has(h) ? LET_OP_EXTERN : undefined,
+          pot: pot.has(h) || undefined, let_op_pot: pot.has(h) ? LET_OP_POT : undefined,
           toestemming_tot: bunq ? null : (ss.geldig_tot ? String(ss.geldig_tot).slice(0, 10) : null), dagen_over: bunq ? null : dagenOver(ss.geldig_tot),
           status: bunq ? r.status : (ss.status || '?'),
           saldo_opgehaald: o.saldo || null, transacties_opgehaald: o.transacties || null, transacties_vanaf: o.vanaf || null,
@@ -794,8 +822,11 @@ const opdrachten = {
     return metSlot(async function () {
       const s = standLees(), ctx = bunqCtx();
       let bunqLetOp = await bunqEersteKeer(s, ctx), bunqVers = false;
-      const lijst = a.pos[0] ? [rekeningVan(s, a.pos[0])] : Object.keys(s.rekeningen).filter(function (h) { return zichtbaar(s.rekeningen[h]); })
+      // wv786: zonder rekening=… geen POT-rekening (privé-overzicht); met rekening=POT wel
+      const pot = potSet(s);
+      const lijst = a.pos[0] ? [rekeningVan(s, a.pos[0])] : Object.keys(s.rekeningen).filter(function (h) { return zichtbaar(s.rekeningen[h]) && !pot.has(h); })
         .map(function (h) { return Object.assign({ hash: h }, s.rekeningen[h]); });
+      const potWeg = !a.pos[0] && Object.keys(s.rekeningen).some(function (h) { return pot.has(h); });
       if (!lijst.length) throw new Weigering(bunqLetOp || 'nog geen rekening gekoppeld');
       // bunq: één lijstopvraag geeft alle saldi; alleen als de stand ouder is dan 6 uur of vers gevraagd
       if (!bunqLetOp && ctx && lijst.some(function (r) { return r.bron === 'bunq'; }) && (a.opt.vers || bunqOud(s))) {
@@ -809,7 +840,8 @@ const opdrachten = {
         const rij = db().prepare('SELECT json, opgehaald FROM saldo WHERE rek = ?').get(rek.hash);
         const vers = rij && Date.now() - Date.parse(rij.opgehaald) < VERS_MS;
         const r = { rekening: rek.label || rek.naam || rek.hash.slice(0, 12), iban_eind: rek.iban ? rek.iban.slice(-4) : null };
-        if (ext.has(rek.hash)) Object.assign(r, { extern: true, let_op_extern: LET_OP_EXTERN });
+        if (pot.has(rek.hash)) Object.assign(r, { pot: true, let_op_pot: LET_OP_POT });
+        else if (ext.has(rek.hash)) Object.assign(r, { extern: true, let_op_extern: LET_OP_EXTERN });
         if (rek.bron === 'bunq') {
           Object.assign(r, { bank: 'bunq', soort: rek.soort, gezamenlijk: rek.gezamenlijk || undefined, let_op_gezamenlijk: rek.gezamenlijk ? LET_OP_GEZAMENLIJK : undefined });
           if (rek.status !== 'ACTIVE') r.let_op = 'rekening ' + String(rek.status).toLowerCase();
@@ -835,7 +867,7 @@ const opdrachten = {
         uitv.push(r);
       }
       standSchrijf(s);
-      return { ok: true, let_op_extern: ext.fout ? EXTERN_ONBEKEND : undefined, saldi: uitv };
+      return { ok: true, let_op_extern: ext.fout ? EXTERN_ONBEKEND : undefined, let_op_pot: potWeg ? POT_VERBORGEN : (pot.fout ? EXTERN_ONBEKEND : undefined), saldi: uitv };
     });
   },
 
@@ -885,7 +917,7 @@ const opdrachten = {
       if (van < grens) let_op = (let_op ? let_op + '; ' : '') + 'de cache gaat niet verder terug dan ' + grens + ' (bewaartermijn ' + BEWAAR_DAGEN + ' dagen)';
       standSchrijf(s);
       // op een externe rekening is niets intern; een overboeking naar of van een externe rekening heet 'extern' (wv709)
-      const ext = externSet(), isExt = ext.has(rek.hash);
+      const ext = externSet(), isExt = ext.has(rek.hash), isPot = potSet(s).has(rek.hash);
       const eigen = isExt ? new Map() : eigenIbans(s, ext), extIb = isExt ? new Map() : eigenIbans(s, ext, true), eigenIban = rek.iban ? String(rek.iban).replace(/\s+/g, '').toUpperCase() : '';
       const rijen = db().prepare('SELECT id, datum, valutadatum, bedrag, valuta, tegenpartij, omschrijving, status, saldo_na, tegen_iban FROM tx WHERE rek = ? AND datum >= ? AND datum <= ? ORDER BY datum DESC, id')
         .all(rek.hash, van, tot).filter(function (t) {
@@ -894,7 +926,8 @@ const opdrachten = {
       const in_ = r2(rijen.filter(function (t) { return t.bedrag > 0; }).reduce(function (x, t) { return x + t.bedrag; }, 0));
       const af = r2(rijen.filter(function (t) { return t.bedrag < 0; }).reduce(function (x, t) { return x + t.bedrag; }, 0));
       return { ok: true, rekening: rek.label || rek.naam || rek.hash.slice(0, 12), bank: rek.bank || undefined, van: van, tot: tot, bron: bron,
-        let_op_gezamenlijk: rek.gezamenlijk ? LET_OP_GEZAMENLIJK : undefined, let_op_extern: isExt ? LET_OP_EXTERN : (ext.fout ? EXTERN_ONBEKEND : undefined),
+        let_op_gezamenlijk: rek.gezamenlijk && !isPot ? LET_OP_GEZAMENLIJK : undefined, let_op_extern: isPot ? undefined : isExt ? LET_OP_EXTERN : (ext.fout ? EXTERN_ONBEKEND : undefined),
+        let_op_pot: isPot ? LET_OP_POT : undefined,
         stand_van: (s.opgehaald[rek.hash] || {}).transacties || null, cache_vanaf: (s.opgehaald[rek.hash] || {}).vanaf || null, let_op: let_op,
         aantal: rijen.length, getoond: Math.min(rijen.length, max), totaal_in: in_, totaal_uit: af,
         transacties: rijen.slice(0, max).map(function (t) {
@@ -1122,6 +1155,22 @@ const opdrachten = {
   async 'vaste-lasten'(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.vasteLasten(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^(maand|rekening):/.test(e.message)) throw new Weigering(e.message); throw e; } },
   async stroom(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.stroom(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^(maand|rekening):/.test(e.message)) throw new Weigering(e.message); throw e; } },
   async archief() { const x = archiefKlaar(); x.A.verrijkAlsVuil(x.a); return Object.assign({ ok: true }, x.A.stand(x.a)); },
+  // wv786: POT-rekening per maand per categorie, zonder namen
+  async pot(a) {
+    const x = archiefKlaar(), o = {};
+    ['van', 'tot'].forEach(function (k) { if (a.opt[k] != null) { if (!isDatum(a.opt[k])) throw new Weigering('--' + k + ' als JJJJ-MM-DD'); o[k] = a.opt[k]; } });
+    if (a.opt.maand != null) o.maand = String(a.opt.maand).slice(0, 7);
+    return Object.assign({ ok: true, bron: 'archief' }, x.A.potOverzicht(x.a, o));
+  },
+  // wv786: zakelijke IBAN's (alleen POT). Alleen machinekamer, alleen via de CLI (stdin {ibans: {IBAN: 'POT'}}), niet via /smal/bank;
+  // de IBAN staat alleen in het archief (meta), nooit in de code of de uitvoer. Daarna gelijk de rekeningen en de indeling bijwerken.
+  async zakelijk() {
+    const x = archiefKlaar();
+    const r = x.A.zakelijkZet(x.a, geheim.ibans);
+    x.A.rekeningenSync(x.a, x.s.rekeningen);
+    const v = x.A.verrijk(x.a);
+    return Object.assign({ ok: true, pot_rekeningen: x.A.potRekeningen(x.a).size, posten_bijgewerkt: v.gewijzigd }, r);
+  },
   async verrijk() { const x = archiefKlaar(); return Object.assign({ ok: true }, x.A.verrijk(x.a)); },
   async corrigeer(a) {
     const x = archiefKlaar(), o = a.opt, v = {};

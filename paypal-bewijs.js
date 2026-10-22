@@ -288,7 +288,7 @@ function koppel(a) {
     const vast = new Set(a.db.prepare("SELECT nr FROM paypal_bewijs WHERE koppel_soort = 'david' AND nr IS NOT NULL").all().map(function (r) { return r.nr; }));
     const reks = new Map(a.db.prepare('SELECT rek, iban_eind, eigenaar FROM rekeningen').all().map(function (r) { return [r.rek, r]; }));
     const posten = a.db.prepare("SELECT nr, rek, datum, bedrag FROM transacties WHERE status IN ('booked', 'pending') AND lower(tegenpartij) LIKE '%paypal%' AND datum IS NOT NULL")
-      .all().filter(function (t) { return !vast.has(t.nr) && String((reks.get(t.rek) || {}).eigenaar || '').toLowerCase() !== 'extern'; });
+      .all().filter(function (t) { return !vast.has(t.nr) && ['extern', 'pot'].indexOf(String((reks.get(t.rek) || {}).eigenaar || '').toLowerCase()) < 0; });   // extern (wv709) en POT (wv786) niet
     const bewijzen = a.db.prepare("SELECT ref, soort, datum, dienst, bedrag_eur, bron, bron_eind FROM paypal_bewijs WHERE nr IS NULL AND bedrag_eur IS NOT NULL AND bron IN ('bank', 'onbekend')").all();
     const past = function (b, t) {
       if ((b.soort === 'betaling') !== (t.bedrag < 0)) return null;
@@ -467,7 +467,8 @@ function lijst(a, o) {
   const som = function (l) { return r2(l.reduce(function (s, r) { return s + (r.bedrag_eur || 0); }, 0)); };
   const bet = rijen.filter(function (r) { return r.soort === 'betaling'; }), terug = rijen.filter(function (r) { return r.soort === 'terugbetaling'; });
   // bankposten zonder bewijs in dezelfde periode
-  const bw = ["status IN ('booked', 'pending')", "lower(tegenpartij) LIKE '%paypal%'", 'nr NOT IN (SELECT nr FROM paypal_bewijs WHERE nr IS NOT NULL)'], bp = [];
+  const bw = ["status IN ('booked', 'pending')", "lower(tegenpartij) LIKE '%paypal%'", 'nr NOT IN (SELECT nr FROM paypal_bewijs WHERE nr IS NOT NULL)',
+    "rek NOT IN (SELECT rek FROM rekeningen WHERE lower(eigenaar) IN ('extern', 'pot'))"], bp = [];   // extern (wv709) en POT (wv786) niet
   if (geldigeDatum(o.van)) { bw.push('datum >= ?'); bp.push(o.van); }
   if (geldigeDatum(o.tot)) { bw.push('datum <= ?'); bp.push(o.tot); }
   const zonder = a.db.prepare('SELECT nr, datum, bedrag FROM transacties WHERE ' + bw.join(' AND ') + ' ORDER BY datum DESC').all(...bp);

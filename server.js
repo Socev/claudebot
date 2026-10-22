@@ -13709,7 +13709,7 @@ function smalRoute(req, res) {
 const BANK_SCRIPT = process.env.BANK_SCRIPT || path.join(__dirname, 'bank-lezer.js');
 const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
-  'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'ontkoppel'];
+  'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'ontkoppel'];
 const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'verrijk', 'verrijk-open', 'verrijk-zet',
   'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij'];   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
 const BANK_TERUG_PER_UUR = 30;
@@ -13874,7 +13874,20 @@ async function bankSmal(d) {
   if (opdracht === 'toestemming' && d.controle === true) args.push('--controle');
   if (opdracht === 'rekeningen' && d.alle === true) args.push('--alle');
   if (opdracht === 'historie' && d.sessie === 'bunq') { args.push('bunq'); ['volledig', 'opgeheven', 'opnieuw'].forEach(function (k) { if (d[k] === true) args.push('--' + k); }); }
-  if (opdracht === 'historie' && d.sessie === 'abn-diep') { if (!datum(d.van)) return { status: 400, j: { ok: false, fout: 'van: JJJJ-MM-DD' } }; args.push('abn-diep', '--van', d.van); }
+  if (opdracht === 'historie' && d.sessie === 'abn-diep') {
+    if (!datum(d.van)) return { status: 400, j: { ok: false, fout: 'van: JJJJ-MM-DD' } };
+    args.push('abn-diep', '--van', d.van);
+    if (d.rekening != null) { if (!ref(String(d.rekening))) return { status: 400, j: { ok: false, fout: 'rekening ongeldig' } }; args.push('--rekening', ref(String(d.rekening))); }   // wv786: bv. alleen POT
+  }
+  // wv786: POT-rekening per maand per categorie (zonder namen)
+  if (opdracht === 'pot') {
+    for (const k of ['van', 'tot', 'maand']) {
+      if (d[k] == null || d[k] === '') continue;
+      const v = k === 'maand' ? (typeof d[k] === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(d[k]) ? d[k] : null) : datum(d[k]);
+      if (v == null) return { status: 400, j: { ok: false, fout: k + ' ongeldig' } };
+      args.push('--' + k, v);
+    }
+  }
   if (opdracht === 'paypal') {
     const tekst = function (v) { return typeof v === 'string' && /^[\p{L}\p{N}][\p{L}\p{N} .,&'()\-_]*$/u.test(v.trim()) && v.trim().length <= 40 ? v.trim() : null; };
     for (const k of ['van', 'tot', 'dienst', 'max']) {
