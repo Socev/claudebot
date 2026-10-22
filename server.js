@@ -9873,8 +9873,7 @@ function appVapidJwt(v, aud) {
   return k + '.' + i + '.' + crypto.sign('sha256', Buffer.from(k + '.' + i), { key: v.key, dsaEncoding: 'ieee-p1363' }).toString('base64url');
 }
 // Eén seintje naar één apparaat. Alleen naar een actief apparaat uit het register, nooit tijdens een noodstop.
-async function appPushStuur(id, reden, opties) {
-  const proef3a = !!(opties && opties.proef3a);   // PROEF3A (wv581, wegwerp): proefpush van fase 3a
+async function appPushStuur(id, reden) {
   if (fs.existsSync(APP_UIT)) return { ok: false, reden: 'app staat uit' };
   let a = null;
   try { a = appRegister().apparaten.find(function (x) { return x.id === id; }); } catch (e) { return { ok: false, reden: 'register onleesbaar' }; }
@@ -9892,14 +9891,12 @@ async function appPushStuur(id, reden, opties) {
   // Abonnement hoort bij een andere VAPID-sleutel (vervangen via het sleutelportaal): de pushdienst zou 403 geven.
   // Niet versturen; de app vraagt om seintjes opnieuw aan te zetten (Fable-review wv100 B6).
   if (sub.sleutel && sub.sleutel !== appSha(v.publiek).slice(0, 16)) return { ok: false, reden: 'sleutel vervangen; zet seintjes opnieuw aan' };
-  if (!proef3a) proef3aEchtePush(id);   // PROEF3A (wv581): vóór de fetch, zodat de SW van deze echte push nooit een proefopdracht krijgt
   let status = 0;
   try {
     // meldingen: kort houdbaar en niet dringend, zodat een telefoon die offline was niet na 22:00 alsnog zoemt (K6)
     const meld = reden === 'meldingen';
-    // PROEF3A (wv581): eigen Topic (vervangt nooit een wachtende echte push) en TTL 5 min (het opdrachtvenster is 10 min)
     const r = await fetch(sub.endpoint, { method: 'POST', body: '', redirect: 'manual', signal: AbortSignal.timeout(10000),
-      headers: { TTL: String(proef3a ? PROEF3A_TTL_S : meld ? 3600 : APP_PUSH_TTL_S), Urgency: meld ? 'normal' : 'high', Topic: proef3a ? 'socev-proef' : 'socev', Authorization: 'vapid t=' + appVapidJwt(v, new URL(sub.endpoint).origin) + ', k=' + v.publiek } });
+      headers: { TTL: String(meld ? 3600 : APP_PUSH_TTL_S), Urgency: meld ? 'normal' : 'high', Topic: 'socev', Authorization: 'vapid t=' + appVapidJwt(v, new URL(sub.endpoint).origin) + ', k=' + v.publiek } });
     status = r.status;
     try { await r.text(); } catch (e) {}
   } catch (e) { logError('app-push', { name: e && e.name, code: e && e.cause && e.cause.code }); }
@@ -9915,7 +9912,7 @@ async function appPushStuur(id, reden, opties) {
       const s = p.apparaten[id];
       if (!s || s.endpoint !== sub.endpoint) return;
       const nu = new Date().toISOString();
-      if (!proef3a) s.laatst = { op: nu, status: status, reden: String(reden || '').slice(0, 30) };   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137); PROEF3A: laatst = laatste échte push (Fable wv581 M1)
+      s.laatst = { op: nu, status: status, reden: String(reden || '').slice(0, 30) };   // 30: 'antwoord machinekamer' is 21 (seintje -> tab, wv137)
       if (weg) { s.endpoint = null; s.verlopen = nu; appPushVerlopenMeld(p, id, a.naam, nu, status); }
     });
   } catch (e) { logError('app-push', e); }
@@ -10114,131 +10111,6 @@ function appPushInfo() {
   return { abonnementen: n, met_meldingen: meld, verlopen: verlopen, sleutel: v && v.key ? 'geladen' : v && v.fout ? 'fout: ' + v.fout : 'nog niet gelezen', laatst: laatst };
 }
 
-// ── PROEF3A (wv581; bouwplan "Eén meldingenkanaal" § 6 fase 3a, Fable-review wv581) — WEGWERP: na de proef weg ──
-// Meet op de Pixel (1) of het apparaatcookie meegaat bij een fetch uit een door push gewekte service worker en (2) of Chrome
-// "Deze site is op de achtergrond bijgewerkt" toont als een push eindigt zonder melding (een proefmelding sluiten, of niets tonen).
-// De machinekamer zet de proef aan/uit en stuurt proefpushes via POST /bericht/proef-seintje (API_SECRET, mk-scripts/proef3a/
-// proef.py). De service worker vraagt de pod alleen iets als de app op dít apparaat een marker in Cache Storage zette (antwoord
-// op stap kijk, alleen voor het proefapparaat, tot de vlag verloopt). Een echte push krijgt altijd proef: null (= het seintje
-// van nu): verstoord-haak vóór de fetch, eenmalige opdracht, eigen Topic. Alleen tijden, id's en meldingstags in het log.
-const PROEF3A_DIR = process.env.PROEF3A_DIR || appStandaard('/opt/data/mk-scripts/proef3a', 'proef3a');
-const PROEF3A_VLAG = path.join(PROEF3A_DIR, 'vlag.json');
-const PROEF3A_LOG = path.join(PROEF3A_DIR, 'log.jsonl');
-const PROEF3A_SW = 'proef3a-1';                   // versie van het proefpad in sw.js
-const PROEF3A_VENSTER_MS = 10 * 60 * 1000;        // zo lang mag de service worker de opdracht ophalen
-const PROEF3A_REM_MS = 10 * 60 * 1000;            // zo lang geen échte push naar het proefapparaat vóór een proefpush
-const PROEF3A_TTL_S = 300;
-const PROEF3A_MAX_DAGEN = 5;
-const PROEF3A_TAG_RE = /^[A-Za-z0-9_-]{1,40}$/;
-appStaat.tellers.proef3a = appStaat.tellers.proef3a || [];   // Fable wv581 K2
-function proef3aVlag() {
-  let v;
-  try { v = appLeesStreng(PROEF3A_VLAG, null); } catch (e) { return null; }
-  if (!v || typeof v.apparaat !== 'string' || !(Date.parse(v.tot) > Date.now())) return null;
-  return v;
-}
-function proef3aLog(o) {
-  try {
-    fs.mkdirSync(PROEF3A_DIR, { recursive: true, mode: 0o700 });
-    fs.appendFileSync(PROEF3A_LOG, JSON.stringify(Object.assign({ t: new Date().toISOString() }, o)) + '\n', { mode: 0o600 });
-  } catch (e) { logError('proef3a', e); }
-}
-function proef3aWachtOpen(v) { return !!(v && v.wacht && Date.now() - Date.parse(v.wacht.op) < PROEF3A_VENSTER_MS); }
-function proef3aTags(x) { return Array.isArray(x) ? x.slice(0, 10).map(function (t) { return PROEF3A_TAG_RE.test(String(t)) ? String(t) : '?'; }) : null; }
-// Haak in appPushStuur: een échte push naar het proefapparaat terwijl er een opdracht open staat -> die opdracht vervalt.
-function proef3aEchtePush(id) {
-  try {
-    const v = proef3aVlag();
-    if (!v || v.apparaat !== id || !proef3aWachtOpen(v) || v.wacht.verstoord || v.wacht.gevraagd) return;
-    v.wacht.verstoord = new Date().toISOString();
-    appSchrijfJson(PROEF3A_VLAG, v);
-    proef3aLog({ stap: 'verstoord', nr: v.wacht.nr });
-  } catch (e) { logError('proef3a', e); }
-}
-// POST /app/proef-seintje — alleen het apparaatcookie (geen sessie, geen vingerafdruk, geen apparaatsleutel: de service worker
-// heeft die niet; Fable wv581 K1). Stappen: kijk (de app, bij openen/terug in beeld), vraag (de SW bij een push), uitslag (de SW).
-function proef3aRoute(req, res, reg, d) {
-  res._app.stil = true;
-  if (!appTeller('proef3a', 120, 3600000)) return appWeiger(res, 429, 'te veel', 'grens proef3a');
-  const stap = String(d.stap || '');
-  if (['kijk', 'vraag', 'uitslag'].indexOf(stap) < 0) return appWeiger(res, 400, 'onbekende stap', 'proef3a stap');
-  const v = proef3aVlag();
-  if (!v) return appStuur(res, 200, { ok: true, proef: null });
-  const a = appApparaat(req, reg);
-  if (a) res._app.apparaat = a.id;
-  const nu = new Date().toISOString();
-  const sw = /^[a-z0-9-]{1,20}$/.test(String(d.sw || '')) ? String(d.sw) : '';
-  const isProef = !!(a && a.id === v.apparaat);
-  const regel = { stap: stap, cookie: a ? 'geldig' : req.headers['x-app-apparaat'] ? 'ongeldig' : 'geen', apparaat: a ? a.id : null, sw: sw,
-    voor: proef3aTags(d.voor), zichtbaar: typeof d.zichtbaar === 'boolean' ? d.zichtbaar : null };
-  const antw = { ok: true, proef: null };
-  let schrijf = false;
-  if (isProef && sw === PROEF3A_SW && !v.sw_op) { v.sw_op = nu; schrijf = true; }
-  if (stap === 'kijk') {
-    if (isProef) antw.marker_tot = v.tot;
-  } else if (stap === 'vraag') {
-    if (isProef && sw === PROEF3A_SW && proef3aWachtOpen(v) && !v.wacht.verstoord && !v.wacht.gevraagd) {
-      v.wacht.gevraagd = nu; schrijf = true;
-      antw.proef = { nr: v.wacht.nr, doe: v.wacht.doe };
-    }
-    regel.antwoord = antw.proef ? antw.proef.doe : null;
-    if (antw.proef) regel.nr = antw.proef.nr;
-  } else {
-    regel.nr = Number.isInteger(d.nr) && d.nr > 0 && d.nr <= 10000 ? d.nr : null;
-    regel.doe = ['toon', 'sluit', 'niets'].indexOf(d.doe) >= 0 ? d.doe : null;
-    regel.na = proef3aTags(d.na);
-    regel.ms = typeof d.ms === 'number' && d.ms >= 0 && d.ms <= 60000 ? Math.round(d.ms) : null;
-    regel.fout = /^[A-Za-z]{1,40}$/.test(String(d.fout || '')) ? String(d.fout) : '';
-    if (isProef && regel.nr && v.wacht && v.wacht.nr === regel.nr && !v.wacht.uitslag) { v.wacht.uitslag = nu; schrijf = true; }
-  }
-  if (schrijf) { try { appSchrijfJson(PROEF3A_VLAG, v); } catch (e) { logError('proef3a', e); } }
-  proef3aLog(regel);
-  appStuur(res, 200, antw);
-}
-// POST /bericht/proef-seintje (intern, API_SECRET; via berichtRoute: geheim, noodstop, alleen de primaire kant). De pod is de
-// enige schrijver van vlag.json (Fable wv581 K3). doe: aan | uit | stand | toon | sluit | niets.
-async function proef3aTrigger(res, d) {
-  const doe = String(d.doe || '');
-  let v;
-  try { v = appLeesStreng(PROEF3A_VLAG, null); } catch (e) { return berichtStuur(res, 500, { ok: false, fout: 'vlag onleesbaar' }); }
-  if (doe === 'stand') return berichtStuur(res, 200, { ok: true, vlag: v, actief: !!proef3aVlag() });
-  if (doe === 'uit') {
-    try { fs.unlinkSync(PROEF3A_VLAG); } catch (e) { if (!e || e.code !== 'ENOENT') return berichtStuur(res, 500, { ok: false, fout: 'vlag niet weg' }); }
-    proef3aLog({ stap: 'uit' });
-    return berichtStuur(res, 200, { ok: true });
-  }
-  if (doe === 'aan') {
-    let a;
-    try { a = appRegister().apparaten.find(function (x) { return x.id === String(d.apparaat || '') && x.actief; }); } catch (e) { return berichtStuur(res, 503, { ok: false, fout: 'register onleesbaar' }); }
-    if (!a) return berichtStuur(res, 400, { ok: false, fout: 'onbekend of niet actief apparaat' });
-    const dagen = Math.min(PROEF3A_MAX_DAGEN, Math.max(1, Number(d.dagen) || 4));
-    const zelfde = !!(v && v.apparaat === a.id);
-    const nieuw = { apparaat: a.id, naam: String(a.naam || '').slice(0, 40), sinds: zelfde && v.sinds ? v.sinds : new Date().toISOString(),
-      tot: new Date(Date.now() + dagen * 86400000).toISOString(), nr: zelfde ? Number(v.nr) || 0 : 0, wacht: zelfde ? v.wacht || null : null, sw_op: zelfde ? v.sw_op || null : null };
-    try { appSchrijfJson(PROEF3A_VLAG, nieuw); } catch (e) { return berichtStuur(res, 500, { ok: false, fout: 'vlag niet geschreven' }); }
-    proef3aLog({ stap: 'aan', apparaat: a.id, tot: nieuw.tot });
-    return berichtStuur(res, 200, { ok: true, vlag: nieuw });
-  }
-  if (['toon', 'sluit', 'niets'].indexOf(doe) < 0) return berichtStuur(res, 400, { ok: false, fout: 'onbekende doe' });
-  v = proef3aVlag();
-  if (!v) return berichtStuur(res, 409, { ok: false, fout: 'proef staat niet aan' });
-  const uur = Number(new Date().toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }));
-  if (!(PROEF3A_UUR(uur) >= 8 && PROEF3A_UUR(uur) < 21)) return berichtStuur(res, 409, { ok: false, fout: 'buiten 08-21' });
-  if (!v.sw_op) return berichtStuur(res, 409, { ok: false, fout: 'proefapparaat draait de proef-service-worker nog niet' });
-  if (proef3aWachtOpen(v) && !v.wacht.uitslag && !v.wacht.verstoord) return berichtStuur(res, 409, { ok: false, fout: 'vorige proefpush loopt nog' });
-  if (doe === 'sluit' && !(v.wacht && v.wacht.doe === 'toon' && v.wacht.uitslag)) return berichtStuur(res, 409, { ok: false, fout: 'sluit alleen na een toon met uitslag' });
-  let laatst = null;
-  try { const s = appPushLees().apparaten[v.apparaat]; laatst = s && s.laatst && Date.parse(s.laatst.op); } catch (e) { return berichtStuur(res, 500, { ok: false, fout: 'push.json onleesbaar' }); }
-  if (laatst && Date.now() - laatst < PROEF3A_REM_MS) return berichtStuur(res, 409, { ok: false, fout: 'echte push minder dan 10 min geleden', laatst: new Date(laatst).toISOString() });
-  v.nr = (Number(v.nr) || 0) + 1;
-  v.wacht = { nr: v.nr, doe: doe, op: new Date().toISOString(), gevraagd: null, uitslag: null, verstoord: null };
-  try { appSchrijfJson(PROEF3A_VLAG, v); } catch (e) { return berichtStuur(res, 500, { ok: false, fout: 'vlag niet geschreven' }); }
-  const r = await appPushStuur(v.apparaat, 'proef3a ' + doe, { proef3a: true });
-  proef3aLog({ stap: 'push', nr: v.nr, doe: doe, status: r.status || 0, ok: !!r.ok, reden: String(r.reden || '').slice(0, 60) });
-  return berichtStuur(res, 200, { ok: !!r.ok, nr: v.nr, doe: doe, push: r });
-}
-function PROEF3A_UUR(u) { return u; }   // toets vervangt dit
-
 function handleApp(req, res) {
   const p = reqPath(req);
   res._log = { app: 1 };
@@ -10302,7 +10174,6 @@ function handleApp(req, res) {
           if (su && !(bu && bu.u !== 'ok' && appBindingModus().modus === 'afdwingen')) { delete appStaat.sessies[appSha(c)]; appSessiesBewaar(); }
           return appStuur(res, 200, { ok: true }, { sessie: null });
         }
-        if (route === 'POST /app/proef-seintje') return proef3aRoute(req, res, reg, d);   // PROEF3A (wv581, wegwerp): alleen het apparaatcookie
         // Vanaf hier: alleen met een pod-sessie (vingerafdruk) op een geldig apparaat. Alleen APP_GLIJD_ROUTES verlengen hem.
         const a = appApparaat(req, reg);
         const s = a ? appSessie(req, a, false) : null;
@@ -11189,7 +11060,7 @@ const BERICHT_KIJKT_MS = 60 * 1000;          // wv292 (Fable wv263 #13): de app 
 const BERICHT_KIJKT_MARGE_MS = 8 * 1000;     // na de volgende poll heeft de app de tab als gezien gezet (POST /app/gezien)
 const BERICHT_CONTROLE_MARGE_MS = 90 * 1000; // wv292 (Fable wv263 #7): n8n kijkt na een uitgesteld seintje opnieuw (controle_na)
 const BERICHT_VOORLOPIG_MS = 5 * 60 * 1000;  // wv292 (Fable wv263 #6): voorlopig naar Telegram, zonder bevestiging weer knoppen in de app
-const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram|proef-seintje))?$/;   // proef-seintje: PROEF3A (wv581, wegwerp)
+const BERICHT_RE = /^\/bericht(\/(bestand|stand|naar-telegram))?$/;
 
 function berichtIsPad(req) { return BERICHT_RE.test(reqPath(req)); }
 function berichtStuur(res, status, obj) {
@@ -11605,7 +11476,6 @@ function berichtRoute(req, res) {
       if (p === '/bericht') return berichtNieuw(res, d);
       if (p === '/bericht/bestand') return berichtBestand(res, d);
       if (p === '/bericht/stand') return berichtStand(res, d);
-      if (p === '/bericht/proef-seintje') return proef3aTrigger(res, d);   // PROEF3A (wv581, wegwerp)
       return berichtNaarTelegram(res, d);
     }).catch(function (e) { logError('bericht', e); berichtStuur(res, 500, { ok: false, fout: 'fout op de pod', terugval: true }); });
   });
