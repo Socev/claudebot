@@ -3507,7 +3507,7 @@ function handleRequest(req, res) {
       bunqluis: fs.existsSync(path.join(__dirname, 'bunq-lezer.js')) && fs.existsSync(path.join(BANK_DIR, 'bunq', 'staat.json')),   // wv683
       bankarchief: fs.existsSync(path.join(__dirname, 'bank-archief.js')),   // wv687: transactiedatabase in deze release
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
-      bank_verrijk_ai: bankVerrijkStand(),   // wv740: stand van de AI-indeling (alleen aantallen en tijden); peilen hoeft niet meer via /smal/bank
+      bank_verrijk_ai: bankVerrijkStand(true),   // wv740: stand van de AI-indeling (alleen aantallen en tijden); peilen hoeft niet meer via /smal/bank
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
@@ -14909,10 +14909,13 @@ const BANK_AI_SYSTEEM = 'Je deelt Nederlandse banktransacties van een huishouden
   'subcategorie (kort, Nederlands, mag leeg) en omschrijving (hooguit 60 tekens, Nederlands: wat het is, zonder bedragen en zonder ' +
   'namen van privépersonen). Twijfel je, kies dan "overig" of "overig inkomen". [eigen] staat voor de rekeninghouder zelf.';
 let bankVerrijkBezig = false, bankVerrijkLaatste = null;
-function bankVerrijkStand() {
+// open (wv740, voor /health zonder sleutel; Fable wv740 MOET): van de fout alleen de soort vóór de dubbele punt, nooit de tekst
+// van claude of bank-lezer (die kan een gegeven citeren); de volle tekst blijft in archief en api.log
+function bankVerrijkStand(open) {
   const l = bankVerrijkLaatste;
+  const fout = l && l.fout ? (open ? String(l.fout).replace(/:.*$/s, '') : l.fout) : undefined;
   return { bezig: bankVerrijkBezig, laatst: l ? { begin: l.begin, eind: l.eind, batches: l.batches, groepen_gezet: l.groepen_gezet, geweigerd: l.geweigerd,
-    weigering: l.weigering, open_groepen: l.open_groepen, fout: l.fout || undefined } : null };
+    weigering: l.weigering, open_groepen: l.open_groepen, fout: fout } : null };
 }
 function bankAiSchema(cats) {
   return { type: 'object', additionalProperties: false, required: ['r'], properties: { r: { type: 'array', items: { type: 'object', additionalProperties: false,

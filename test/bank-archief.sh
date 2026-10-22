@@ -474,11 +474,20 @@ process.stdout.write(JSON.stringify({ type: 'result', is_error: false, usage: { 
     for (let i = 0; i < 100 && h.bankVerrijkStand().bezig; i++) await new Promise((ok) => setTimeout(ok, 100));
     const vs = h.bankVerrijkStand();
     toets('AI-stand (wv740): weigering als aantallen in de stand (ook in /health bank_verrijk_ai)', vs.laatst && vs.laatst.weigering && ['groep', 'categorie', 'intern'].every((k) => Number.isInteger(vs.laatst.weigering[k])) &&
-      /bank_verrijk_ai: bankVerrijkStand\(\)/.test(ssrc), vs.laatst);
+      /bank_verrijk_ai: bankVerrijkStand\(true\)/.test(ssrc), vs.laatst);
+    {
+      // wv740 (Fable MOET): /health krijgt van een fout alleen de soort, niet de tekst van claude of bank-lezer
+      const b1 = ssrc.indexOf('function bankVerrijkStand('), b2 = ssrc.indexOf('function bankAiSchema(');
+      const c = {};
+      vm.createContext(c);
+      vm.runInContext('let bankVerrijkBezig = false, bankVerrijkLaatste = { begin: 1, eind: 2, batches: 1, groepen_gezet: 0, geweigerd: 0, open_groepen: 3, fout: "claude: gegeven X\\nY" };\n' +
+        ssrc.slice(b1, b2) + '\n;globalThis.__s = [bankVerrijkStand(true), bankVerrijkStand()];', c);
+      toets('AI-stand open (/health): fout alleen de soort, met sleutel de volle tekst', c.__s[0].laatst.fout === 'claude' && /gegeven X/.test(c.__s[1].laatst.fout), c.__s.map((x) => x.laatst.fout));
+    }
     {
       // wv740: eigen uurteller per sleutel — de machinekamer (API_SECRET) kan Socevs teller niet opmaken
       const t1 = ssrc.indexOf('function smalTel('), t2 = ssrc.indexOf('function smalRoute(');
-      const gr = /const SMAL_GRENS = \{[^\n]*\};/.exec(ssrc)[0];
+      const gr = /const SMAL_GRENS = \{[^\n}]*\};/.exec(ssrc)[0];
       const c = { Date };
       vm.createContext(c);
       vm.runInContext(gr + '\nconst smalTellers = {};\n' + ssrc.slice(t1, t2) + '\n;globalThis.__t = { smalTel, SMAL_GRENS, smalTellers };', c);
