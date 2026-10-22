@@ -1,0 +1,18 @@
+{
+ "titel": "Stem (ElevenLabs)",
+ "uitleg": "Tekst inspreken met een ElevenLabs-stem via de Olares Router. Je krijgt een WAV om te luisteren en twee telefoonversies (8 kHz mono). Betaald: de prijs staat erbij, elke keer je vingerafdruk. De tekst gaat naar ElevenLabs (VS): geen patiëntgegevens.",
+ "motor": "elevenlabs",
+ "status": "actief",
+ "uitvoer": "geluid",
+ "bron": "wv782 (bouwplan Studio § 5.4). Repo: studio-flows/stem-elevenlabs/flow.yaml; op de pod /opt/data/studio/flows/stem-elevenlabs/.",
+ "tijd": "± 2–15 s",
+ "max_seconden": 120,
+ "max_per_dag": 20,
+ "telefoonversie": true,
+ "bestandsnaam": "stem",
+ "velden": [
+  { "naam": "tekst", "label": "Tekst", "soort": "tekstvak", "verplicht": true, "max": 2000 },
+  { "naam": "stem", "label": "Stem", "soort": "keuze", "verplicht": true, "standaard": "7qdUFMklKPaaAVMsBTBt",
+    "opties": [ { "label": "Roos (praktijkstem)", "waarde": "7qdUFMklKPaaAVMsBTBt" } ] }
+ ]
+}

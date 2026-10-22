@@ -12671,7 +12671,7 @@ async function appStudio(req, res, a, s, d, route) {
   if (!studio) return appWeiger(res, 404, 'Studio zit niet in deze versie van de pod', 'studio ontbreekt');
   const ctx = appStudioCtx(a, s);
   const stuur = function (r, extra) {
-    if (r.status !== 200) { res._app.reden = 'studio: ' + String(r.fout || '').slice(0, 60); return appStuur(res, r.status, { ok: false, fout: r.fout, vers_nodig: r.vers_nodig === true }); }
+    if (r.status !== 200) { res._app.reden = 'studio: ' + String(r.fout || '').slice(0, 60); return appStuur(res, r.status, { ok: false, fout: r.fout, vers_nodig: r.vers_nodig === true, plafond: r.plafond === true }); }
     appStuur(res, 200, Object.assign({ ok: true }, extra || r));
   };
   if (route === 'GET /app/studio/flows') { res._app.stil = true; return appStuur(res, 200, Object.assign({ ok: true }, await studio.flows())); }

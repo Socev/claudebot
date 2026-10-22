@@ -445,16 +445,29 @@ const STEM_RE = /^[a-z0-9]{2,20}:[A-Za-z0-9_.\/-]{1,80}$/;
 const BEURT_RE = /^[A-Za-z0-9-]{8,64}$/;
 const APP_LINK = 'https://app.socev.dev/';
 const SMAL_NIEUW_OPEN = 3;   // zoveel nieuwe bandjes zonder tekst mag de skill per praktijk open hebben
-// Stemmen uit de Studio-flows met de vlag bandje (Fable #8). ElevenLabs staat er grijs bij tot Studio fase 2.
-function stemmenUit(flows) {
+// Stemmen uit de Studio-flows met de vlag bandje (Fable #8). wv782: staat er een ElevenLabs-flow met de vlag bandje (bandje-elevenlabs),
+// dan wordt elke ElevenLabs-stem uit de registers (praktijkstem en `stemmen`, beide praktijken) een eigen stem op die flow, betaald,
+// met de modellen en tarieven van Studio. Zonder die flow (oude release of flow weg) blijft ElevenLabs grijs zoals in wv743.
+const ELEVEN_ID_RE = /^elevenlabs:([A-Za-z0-9]{8,40})$/;
+function stemmenUit(flows, regStemmen) {
   const uit = [];
+  const el = (flows || []).find(function (f) { return f && f.bandje === true && f.motor === 'elevenlabs'; });
+  if (el) {
+    (regStemmen || []).forEach(function (r) {
+      if (!r || !ELEVEN_ID_RE.test(r.id) || uit.some(function (x) { return x.id === r.id; })) return;
+      uit.push({ id: r.id, flow: el.id, naam: r.naam || 'ElevenLabs-stem', motor: 'elevenlabs', betaald: true, beschikbaar: el.klaar === true,
+        reden: el.klaar ? null : (el.reden || 'niet beschikbaar'), prijs: el.prijs || null, vers_per_keer: true, prijs_tabel: el.prijs_tabel || null,
+        modellen: (el.velden || []).filter(function (v) { return v.naam === 'model'; }).map(function (v) { return v.opties || []; })[0] || [],
+        model_standaard: ((el.velden || []).find(function (v) { return v.naam === 'model'; }) || {}).standaard || null });
+    });
+  }
   (flows || []).forEach(function (f) {
-    if (!f || f.bandje !== true || !f.stem) return;
+    if (!f || f.bandje !== true || !f.stem || f.motor === 'elevenlabs') return;
     if (uit.some(function (x) { return x.id === f.stem; })) return;
     uit.push({ id: f.stem, flow: f.id, naam: f.titel, motor: f.motor, betaald: false, beschikbaar: f.klaar === true, reden: f.klaar ? null : (f.reden || 'niet beschikbaar'),
       prijs: f.prijs || 'gratis', vers_per_keer: f.vers_per_keer === true });
   });
-  uit.push({ id: 'elevenlabs', flow: null, naam: 'ElevenLabs (betaald)', motor: 'elevenlabs', betaald: true, beschikbaar: false,
+  if (!el) uit.push({ id: 'elevenlabs', flow: null, naam: 'ElevenLabs (betaald)', motor: 'elevenlabs', betaald: true, beschikbaar: false,
     reden: 'nog niet beschikbaar — komt met Studio fase 2', prijs: null, vers_per_keer: true });
   return uit;
 }
@@ -538,12 +551,34 @@ function routes(deps) {
       praktijkstem: praktijkstem(l.instellingen), bandjes: l.bandjes || [],
       dicht: l.dicht || null, fouten: l.fouten || [], conflicten: l.conflicten || [], teruggezet: l.teruggezet || [], ontbreekt: l.ontbreekt === true };
   }
+  // wv782: de ElevenLabs-stemmen komen uit de registers (praktijkstem eerst, dan `stemmen`); een praktijkstem zonder naam in `stemmen`
+  // heet "ElevenLabs-stem"
+  function registerStemmen() {
+    const uit = [];
+    Object.keys(PRAKTIJKEN).forEach(function (pr) {
+      let l; try { l = S.lees(pr); } catch (e) { return; }
+      const inst = l && l.instellingen || {};
+      const lijst = stemmenLijst(inst.stemmen).filter(Boolean);
+      const ps = String(inst.praktijkstem || '');
+      if (STEM_RE.test(ps)) { const n = lijst.find(function (x) { return x.id === ps; }); uit.push({ id: ps, naam: n ? n.naam : null }); }
+      lijst.forEach(function (x) { uit.push(x); });
+    });
+    return uit;
+  }
   async function stemmen() {
     let flows = [];
     try { flows = deps.studio ? (await deps.studio.flows({ verborgen: true })).flows : []; } catch (e) { fout('bandjes-stemmen', e); }
-    return stemmenUit(flows);
+    return stemmenUit(flows, registerStemmen());
   }
-  const fouts = function (r) { return { status: r.status, j: Object.assign({ ok: false, fout: r.fout }, r.gewijzigd ? { gewijzigd: true } : {}, r.dicht ? { dicht: true } : {}, r.vers_nodig ? { vers_nodig: true } : {}) }; };
+  // wv782: het model van een ElevenLabs-bandje: uit de invoer, anders de praktijkinstelling `model`, anders de standaard van Studio
+  function modelVoor(s, gevraagd, inst) {
+    const ok = function (m) { return (s.modellen || []).some(function (o) { return o.waarde === m; }); };
+    if (gevraagd && ok(String(gevraagd))) return String(gevraagd);
+    const pm = String(inst && inst.model || '');
+    if (ok(pm)) return pm;
+    return s.model_standaard || null;
+  }
+  const fouts = function (r) { return { status: r.status, j: Object.assign({ ok: false, fout: r.fout }, r.gewijzigd ? { gewijzigd: true } : {}, r.dicht ? { dicht: true } : {}, r.vers_nodig ? { vers_nodig: true } : {}, r.plafond ? { plafond: true } : {}) }; };
   const goedOf = function (r, extra) { return r.status === 200 ? { status: 200, j: Object.assign({ ok: true }, extra || {}, r.bandje ? { bandje: r.bandje } : {}, r.ongewijzigd ? { ongewijzigd: true } : {}) } : fouts(r); };
   function praktijk(d) { const pr = String(d && d.praktijk || ''); return Object.hasOwn(PRAKTIJKEN, pr) ? pr : null; }
   function stemOk(w, lijst) { return w === 'praktijkstem' || (STEM_RE.test(w) && lijst.some(function (x) { return x.id === w; })); }
@@ -553,7 +588,9 @@ function routes(deps) {
     d = d && typeof d === 'object' ? d : {};
     if (route === 'GET /app/bandjes') {
       const pr = Object.keys(PRAKTIJKEN).map(lees).map(praktijkUit);
-      return { status: 200, j: { ok: true, praktijken: pr, stemmen: await stemmen(), schrijven: !!primair(), stem_standaard: STEM_STANDAARD, grens: GRENS } };
+      let kosten = null;
+      try { const t = deps.studio && deps.studio.teller ? deps.studio.teller() : null; kosten = t && t.plafond ? t.plafond.elevenlabs || null : null; } catch (e) { kosten = null; }
+      return { status: 200, j: { ok: true, praktijken: pr, stemmen: await stemmen(), schrijven: !!primair(), stem_standaard: STEM_STANDAARD, grens: GRENS, kosten: kosten } };
     }
     const m = /^POST \/app\/bandjes\/(tekst|nieuw|voorstel|instellingen|maak|status)$/.exec(route);
     if (!m) return { status: 404, j: { ok: false, fout: 'onbekend' } };
@@ -607,8 +644,17 @@ function routes(deps) {
     const s = lijst.find(function (x) { return x.id === stem; });
     if (!s) return { status: 400, j: { ok: false, fout: 'onbekende stem' } };
     if (!s.beschikbaar || !s.flow) return { status: 409, j: { ok: false, fout: 'deze stem kan nu niet: ' + (s.reden || 'niet beschikbaar') } };
-    const r = await deps.studio.maak({ flow: s.flow, velden: { tekst: b.tekst }, beurt_id: beurt }, ctx,
-      { bron: { soort: 'bandje', praktijk: pr, bandje: id, versie: b.versie, tekst_hash: b.tekst_hash, stem: stem } });
+    const velden = { tekst: b.tekst };
+    let model = null;
+    if (s.motor === 'elevenlabs') {
+      // wv782: voice-id uit de stem-id; model uit de witte lijst van Studio (die toetst het nogmaals)
+      model = modelVoor(s, d.model, l.instellingen);
+      if (!model) return { status: 400, j: { ok: false, fout: 'onbekend model' } };
+      velden.stem = ELEVEN_ID_RE.exec(stem)[1];
+      velden.model = model;
+    }
+    const r = await deps.studio.maak({ flow: s.flow, velden: velden, beurt_id: beurt }, ctx,
+      { bron: Object.assign({ soort: 'bandje', praktijk: pr, bandje: id, versie: b.versie, tekst_hash: b.tekst_hash, stem: stem }, model ? { model: model } : {}) });
     if (r.status !== 200) return fouts(r);
     return { status: 200, j: { ok: true, taak: r.taak, al: r.al === true } };
   }
@@ -651,7 +697,7 @@ function routes(deps) {
     const bs = taak.bestanden || [];
     const hoofd = bs.find(function (x) { return !/-telefoon-(pcm|ulaw)\.wav$/i.test(x.naam); }) || bs[0];
     const tel = bs.filter(function (x) { return /-telefoon-(pcm|ulaw)\.wav$/i.test(x.naam); }).length;
-    const waarde = vandaag(klok) + ' · v' + b.versie + ' · ' + b.stem + ' · ' + taak.id + '/' + (hoofd ? hoofd.naam : '?') +
+    const waarde = vandaag(klok) + ' · v' + b.versie + ' · ' + b.stem + (b.model ? ' · ' + b.model : '') + ' · ' + taak.id + '/' + (hoofd ? hoofd.naam : '?') +
       (tel === 2 ? ' (+ telefoonversies PCM en µ-law)' : ' (zonder telefoonversie)');
     const r = S.zetVelden(b.praktijk, b.bandje, { 'laatste bestand': waarde, status: 'gemaakt (v' + b.versie + ')' }, { versie: b.versie, tekst_hash: b.tekst_hash });
     if (r.status !== 200) { log('bandjes naklaar taak=' + taak.id + ' register niet bijgewerkt: ' + String(r.fout || '').slice(0, 120)); boxMeld(S.lees(b.praktijk)); }

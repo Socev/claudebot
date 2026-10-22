@@ -1,0 +1,19 @@
+{
+ "titel": "ElevenLabs (betaald)",
+ "uitleg": "Stem voor de mini-app Bandjes: ElevenLabs via de Olares Router, met de stem uit het bandjesregister (praktijkstem of stemmen). Eén aanroep in PCM 24 kHz; de pod maakt de WAV en twee telefoonversies (WAV 8 kHz mono, PCM 16-bit en G.711 µ-law). Betaald: prijs vooraf, verse vingerafdruk per keer, maandplafond. Verborgen in de Studio-lijst; alleen via Bandjes.",
+ "motor": "elevenlabs",
+ "status": "actief",
+ "uitvoer": "geluid",
+ "bron": "wv782 (bouwplan Studio § 5.4, Bandjes § 5.4). Repo: studio-flows/bandje-elevenlabs/flow.yaml; op de pod /opt/data/studio/flows/bandje-elevenlabs/. Tarieven en modellen staan in studio.js (ELEVEN), niet hier.",
+ "tijd": "± 2–15 s",
+ "max_seconden": 120,
+ "max_per_dag": 30,
+ "telefoonversie": true,
+ "verborgen": true,
+ "bandje": true,
+ "bestandsnaam": "bandje",
+ "velden": [
+  { "naam": "tekst", "label": "Tekst van het bandje", "soort": "tekstvak", "verplicht": true, "max": 2000 },
+  { "naam": "stem", "label": "Stem (ElevenLabs voice-id)", "soort": "tekst", "verplicht": true, "max": 40 }
+ ]
+}

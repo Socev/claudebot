@@ -54,6 +54,41 @@ const COMFY_FREE_NA_MS = 10 * 60 * 1000;
 const POLL_MS = 3000;
 const FS_PROJECT_MS = 60 * 1000;               // cache van FlowStudio /api/projects/<id> (estHostMemMib, status)
 
+// ── ElevenLabs via Olares Router (wv782, fase 2 deel stem, 22-10-2026; bouwplan Studio § 5.4, § 6, § 7) ──
+// GEMETEN 22-10 (mk-scripts/elevenlabs/voortgang.md): Router declareert POST /v1/audio/speech en /v1/text-to-speech/<id> NIET voor de
+// ElevenLabs-modellen (422 audio_operation_not_supported), maar stuurt POST /v1/text-to-speech/<voice_id>/stream?output_format=… 1-op-1
+// door naar api.elevenlabs.io (body { text, model_id }; ElevenLabs-kop character-cost komt terug). Router telt die aanroepen als
+// "audio_unmetered" (cost_usd 0): het Router-budget op de sleutel beschermt dus NIET; het plafond hieronder is het enige slot in Socev.
+// Eén aanroep per taak (twee = dubbel betalen) in pcm_24000 (op elk ElevenLabs-abonnement; pcm_44100 vraagt Pro); de pod maakt er een
+// WAV van en audio.js de telefoonversies. Prijs vooraf = tekens × tarief (bouwplan § 6: $ 0,08 / $ 0,04 per 1.000 tekens, naar boven
+// afgerond en als euro geteld, dus ruim); achteraf blijft die schatting staan, met de ElevenLabs-credits erbij (die rekenen anders:
+// 12 tekens kostten 5 credits). Nooit automatisch opnieuw; de tekst gaat nooit in een log, audit of meta.
+const ELEVEN = {
+  modellen: {
+    eleven_multilingual_v2: { naam: 'Multilingual v2 (standaard)', eur_per_1000: 0.10 },
+    eleven_v3: { naam: 'v3 (expressiever)', eur_per_1000: 0.10 },
+    eleven_flash_v2_5: { naam: 'Flash v2.5 (sneller, goedkoper)', eur_per_1000: 0.05 },
+  },
+  standaard: 'eleven_multilingual_v2',
+  formaat: 'pcm_24000', rate: 24000,
+  stem_re: /^[A-Za-z0-9]{8,40}$/,
+  tarief_bron: 'bouwplan Studio § 6 (prijspagina ElevenLabs 21-10-2026), naar boven afgerond',
+};
+const PLAFOND_STANDAARD = { elevenlabs: 10 };   // euro per kalendermaand (Europe/Amsterdam); David 22-10: "€ 10 tot ik anders zeg"
+function prijsVooraf(tekens, model) {
+  const m = ELEVEN.modellen[model] || ELEVEN.modellen[ELEVEN.standaard];
+  return Math.max(0.01, Math.ceil(tekens * m.eur_per_1000 / 10) / 100);   // op hele centen naar boven
+}
+function euro(x) { return '€ ' + (Math.round(x * 100) / 100).toFixed(2).replace('.', ','); }
+function pcmNaarWav(pcm, rate) {
+  const h = Buffer.alloc(44);
+  h.write('RIFF', 0, 'ascii'); h.writeUInt32LE(36 + pcm.length, 4); h.write('WAVE', 8, 'ascii');
+  h.write('fmt ', 12, 'ascii'); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22);
+  h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34);
+  h.write('data', 36, 'ascii'); h.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([h, pcm]);
+}
+
 // ── Knopentoets (bouwplan § 5.3 stap 2, § 7; Fable M2). Vaste lijst IN DE POD: een flow kan zichzelf niet toestaan. ──
 // Toegestaan: kern (python_module "nodes" of "comfy_extras.*") minus de weigerlijst, plus custom nodes op naam uit CUSTOM_WIT
 // (leeg: David noemt ze zelf). Geweigerd: comfy_api_nodes.* (betaald via Comfy-krediet), alles met file/path/url/download/eval/exec
@@ -183,6 +218,44 @@ function maak(deps) {
     try { mkdir(DIR); fs.appendFileSync(AUDIT, JSON.stringify(Object.assign({ t: new Date(klok()).toISOString() }, o)) + '\n', { mode: 0o600 }); }
     catch (e) { fout('studio-audit', e); }
   }
+
+  // ── verbruik en plafond (wv782; bouwplan § 5.4 write-ahead, § 6 maandplafond) ──
+  // verbruik.jsonl: per betaalde taak eerst 'gereserveerd' (vóór de aanroep, synchroon in maak), daarna 'verrekend' (geleverd),
+  // 'geschat' (aanroep gedaan, uitkomst onbekend: telt mee) of 'vrijgegeven' (nooit aangeroepen of door de aanbieder geweigerd: telt niet).
+  // De laatste regel per taak telt; een open reservering telt mee. Geen tekst, alleen bedragen.
+  const VERBRUIK = path.join(DIR, 'verbruik.jsonl');
+  const LIMIETEN = path.join(DIR, 'studio-limieten.json');
+  const vb = {};   // taak → { aanbieder, maand, soort, eur, credits }
+  (function laadVerbruik() {
+    let t = '';
+    try { t = fs.readFileSync(VERBRUIK, 'utf8'); } catch (e) { return; }
+    t.split('\n').forEach(function (r) {
+      if (!r.trim()) return;
+      try { const o = JSON.parse(r); if (o && typeof o.taak === 'string' && typeof o.eur === 'number') vb[o.taak] = o; } catch (e) {}
+    });
+  })();
+  function verbruikZet(taak, aanbieder, soort, eur, extra) {
+    const o = Object.assign({ t: new Date(klok()).toISOString(), taak: taak, aanbieder: aanbieder, maand: (vb[taak] && vb[taak].maand) || dagNL(klok()).slice(0, 7),
+      soort: soort, eur: Math.round(eur * 100) / 100 }, extra || {});
+    mkdir(DIR);
+    fs.appendFileSync(VERBRUIK, JSON.stringify(o) + '\n', { mode: 0o600 });   // gooit bij een volle schijf: dan geen aanroep
+    vb[taak] = o;
+    return o;
+  }
+  function besteed(aanbieder, maand) {
+    maand = maand || dagNL(klok()).slice(0, 7);
+    let s = 0;
+    Object.keys(vb).forEach(function (k) { const o = vb[k]; if (o.aanbieder === aanbieder && o.maand === maand && o.soort !== 'vrijgegeven') s += o.eur; });
+    return Math.round(s * 100) / 100;
+  }
+  function plafond(aanbieder) {
+    try {
+      const j = JSON.parse(fs.readFileSync(LIMIETEN, 'utf8'));
+      const w = Number(j && j[aanbieder]);
+      if (isFinite(w) && w >= 0 && w <= 500) return w;
+    } catch (e) {}
+    return PLAFOND_STANDAARD[aanbieder] || 0;
+  }
   (function laad() {
     try {
       const j = JSON.parse(fs.readFileSync(TAKEN, 'utf8'));
@@ -195,6 +268,14 @@ function maak(deps) {
     });
     if (n) bewaarTaken();
     try { fs.rmSync(WERK, { recursive: true, force: true }); } catch (e) {}
+    // wv782: open reserveringen na een herstart afsluiten. Was de aanbieder al aangeroepen, dan 'geschat' (telt mee, want misschien
+    // geleverd en betaald); anders 'vrijgegeven'.
+    Object.keys(vb).forEach(function (k) {
+      if (vb[k].soort !== 'gereserveerd') return;
+      const t = st.taken.find(function (x) { return x.id === k; });
+      try { verbruikZet(k, vb[k].aanbieder, t && t.aangeroepen ? 'geschat' : 'vrijgegeven', t && t.aangeroepen ? vb[k].eur : 0, { na_herstart: true }); }
+      catch (e) { fout('studio-verbruik', e); }
+    });
   })();
 
   // ── catalogus: lokale flows (map per flow; flow.yaml in JSON-vorm, want JSON is geldige YAML en de pod heeft geen YAML-lezer) ──
@@ -223,10 +304,20 @@ function maak(deps) {
           verborgen: y.verborgen === true, telefoonversie: y.telefoonversie === true, bandje: y.bandje === true,   // wv743
           stem: /^[a-z0-9]{2,20}:[A-Za-z0-9_.\/-]{1,80}$/.test(String(y.stem || '')) ? String(y.stem) : null,
         });
-        if (['comfyui', 'piper'].indexOf(f.motor) < 0) f.fout = 'onbekende motor';
+        if (['comfyui', 'piper', 'elevenlabs'].indexOf(f.motor) < 0) f.fout = 'onbekende motor';
         if (['proef', 'actief', 'uit'].indexOf(f.status) < 0) f.fout = 'onbekende status';
         if (f.motor === 'comfyui') f.api = JSON.parse(fs.readFileSync(path.join(FLOWS, n, 'flow.json'), 'utf8'));
         f.velden = f.velden.map(veldNorm).filter(Boolean);
+        if (f.motor === 'elevenlabs') {
+          // wv782: betaald. Tarieven en modellen uit de pod (ELEVEN), nooit uit flow.yaml: een flow kan zichzelf niet goedkoper maken.
+          f.betaald = true; f.aanbieder = 'elevenlabs'; f.uitvoer = 'geluid';
+          f.bestandsnaam = /^[a-z]{2,20}$/.test(String(y.bestandsnaam || '')) ? String(y.bestandsnaam) : 'stem';
+          f.velden = f.velden.filter(function (v) { return v.naam !== 'model'; });
+          f.velden.push({ naam: 'model', label: 'Model', soort: 'keuze', verplicht: true, meer: true, standaard: ELEVEN.standaard,
+            opties: Object.keys(ELEVEN.modellen).map(function (k) { return { label: ELEVEN.modellen[k].naam, waarde: k }; }) });
+          const tv = f.velden.find(function (v) { return v.naam === 'tekst'; }), sv = f.velden.find(function (v) { return v.naam === 'stem'; });
+          if (!tv || !sv) f.fout = 'een ElevenLabs-flow heeft de velden tekst en stem nodig';
+        }
       } catch (e) { f.fout = 'flow.yaml of flow.json onleesbaar'; f.titel = f.titel || n; f.status = 'uit'; }
       flows[n] = f;
     }
@@ -360,9 +451,13 @@ function maak(deps) {
   function flowUit(f) {
     const klaar = !f.fout && !f.reden && f.status !== 'uit';
     return { id: f.id, titel: f.titel, uitleg: f.uitleg || '', motor: f.motor,
-      motor_naam: f.motor === 'router' ? 'lokaal · FlowStudio via Router' : f.motor === 'piper' ? 'lokaal · Piper op de pod (CPU)' : 'lokaal · ComfyUI rechtstreeks',
+      motor_naam: f.motor === 'router' ? 'lokaal · FlowStudio via Router' : f.motor === 'piper' ? 'lokaal · Piper op de pod (CPU)'
+        : f.motor === 'elevenlabs' ? 'betaald · ElevenLabs via Router (de tekst gaat naar ElevenLabs, VS)' : 'lokaal · ComfyUI rechtstreeks',
       status: f.status, uitvoer: f.uitvoer, klaar: klaar, reden: f.fout || f.reden || (f.status === 'uit' ? 'staat uit' : null),
-      prijs: 'gratis', tijd: f.tijd || '', vers_per_keer: f.status === 'proef', bandje: f.bandje === true, stem: f.stem || null,
+      prijs: f.betaald ? 'betaald · ± € 0,10 per 1.000 tekens (Flash € 0,05)' : 'gratis', tijd: f.tijd || '',
+      vers_per_keer: f.status === 'proef' || f.betaald === true, bandje: f.bandje === true, stem: f.stem || null,
+      betaald: f.betaald === true, aanbieder: f.aanbieder || null,
+      prijs_tabel: f.betaald ? Object.keys(ELEVEN.modellen).reduce(function (o, k) { o[k] = ELEVEN.modellen[k].eur_per_1000; return o; }, {}) : null,
       velden: (f.velden || []).map(function (v) { const o = Object.assign({}, v); delete o.pad; return o; }) };
   }
   async function catalogus(vers) {
@@ -377,7 +472,12 @@ function maak(deps) {
       if (g) { f.reden = geheugenTekst(g.nodig_mib, g.vrij_mib, f.uitvoer); f.geheugen = g; }
     }));
     const lok = lokaleFlows();
-    Object.keys(lok).forEach(function (k) { lijst.push(lok[k]); });
+    // wv782: een betaalde flow zonder Router-sleutel wacht (kopie: het cache-object van lokaleFlows blijft schoon)
+    Object.keys(lok).forEach(function (k) {
+      const f = lok[k];
+      if (f.betaald && !f.fout && !sleutel) lijst.push(Object.assign({}, f, { reden: sleutelFout ? 'de kluis is nu niet bereikbaar; de Router-sleutel kan niet gelezen worden' : 'wacht op de Router-sleutel (router_studio_key)' }));
+      else lijst.push(f);
+    });
     return { flows: lijst, sleutel: !!sleutel, router_fout: st.router.fout };
   }
 
@@ -389,13 +489,16 @@ function maak(deps) {
     const gpuS = st.taken.filter(function (t) { return t.gpu_s > 0 && dagNL(Date.parse(t.gemaakt)).slice(0, 7) === maand; })
       .reduce(function (s, t) { return s + t.gpu_s; }, 0);
     return { vandaag: vandaagN(), per_dag: GRENS.per_dag, in_rij: st.rij.length, rij_max: GRENS.rij, bezig: st.bezig ? st.bezig.id : null,
-      gpu_minuten_maand: Math.round(gpuS / 6) / 10, kosten_maand: 0 };
+      gpu_minuten_maand: Math.round(gpuS / 6) / 10, kosten_maand: besteed('elevenlabs', maand),
+      plafond: { elevenlabs: { plafond_eur: plafond('elevenlabs'), besteed_eur: besteed('elevenlabs', maand), rest_eur: Math.max(0, Math.round((plafond('elevenlabs') - besteed('elevenlabs', maand)) * 100) / 100) } } };
   }
   function taakUit(t) {
     return { id: t.id, flow: t.flow, titel: t.titel, motor: t.motor, uitvoer: t.uitvoer, status: t.status, fase: t.fase || null, procent: t.procent == null ? null : t.procent,
       reden: t.reden || null, gemaakt: t.gemaakt, start: t.start || null, eind: t.eind || null, duur_s: t.duur_s || null, velden: t.velden,
       bestanden: t.bestanden || [], plek_in_rij: t.status === 'wacht' ? st.rij.indexOf(t.id) + 1 : null, meting: t.meting || null,
-      bron: t.bron || null, noot: t.noot || null };
+      bron: t.bron || null, noot: t.noot || null,
+      betaald: t.betaald === true, kosten_eur: t.betaald ? (vb[t.id] ? (vb[t.id].soort === 'vrijgegeven' ? 0 : vb[t.id].eur) : t.prijs_vooraf || 0) : 0,
+      kosten_staat: t.betaald && vb[t.id] ? vb[t.id].soort : null, credits: t.credits == null ? null : t.credits };
   }
 
   // ── invoer ──
@@ -435,6 +538,7 @@ function maak(deps) {
     if (!b || typeof b !== 'object' || b.soort !== 'bandje') return null;
     const o = { soort: 'bandje', praktijk: String(b.praktijk || ''), bandje: String(b.bandje || ''), versie: Number(b.versie),
       tekst_hash: String(b.tekst_hash || ''), stem: schoon(b.stem, 100) };
+    if (b.model && Object.hasOwn(ELEVEN.modellen, String(b.model))) o.model = String(b.model);   // wv782
     if (!/^[a-z]{2,20}$/.test(o.praktijk) || !/^[a-z]{2}-[a-z0-9-]{2,30}$/.test(o.bandje) || !Number.isInteger(o.versie) || o.versie < 0 || !/^[a-f0-9]{8,64}$/.test(o.tekst_hash)) return null;
     return o;
   }
@@ -457,6 +561,16 @@ function maak(deps) {
     if (f.fout || f.reden || f.status === 'uit') return { status: 409, fout: 'deze flow kan nu niet: ' + (f.fout || f.reden || 'staat uit') };
     const w = waardenVan(f, d.velden);
     if (w.fout) return { status: 400, fout: w.fout };
+    // wv782: betaald — stem en model uit de witte lijst, prijs vooraf en plafond (vóór de vingerafdruk: geen vingerafdruk verbruiken
+    // voor een taak die toch geweigerd wordt)
+    let prijs = 0;
+    if (f.betaald) {
+      if (!ELEVEN.stem_re.test(String(w.waarden.stem || ''))) return { status: 400, fout: 'onbekende stem (ElevenLabs voice-id)' };
+      if (!Object.hasOwn(ELEVEN.modellen, String(w.waarden.model || ''))) return { status: 400, fout: 'onbekend model' };
+      const tekst = String(w.waarden.tekst || '').trim();
+      if (!tekst) return { status: 400, fout: 'de tekst is leeg' };
+      prijs = prijsVooraf(tekst.length, w.waarden.model);
+    }
     // vanaf hier synchroon tot de taak in de rij staat (twee tabbladen = niet twee keer dezelfde vingerafdruk)
     if (st.taken.find(function (t) { return t.beurt_id === beurt; })) return { status: 200, taak: taakUit(st.taken.find(function (t) { return t.beurt_id === beurt; })), al: true };
     if (vandaagN() >= GRENS.per_dag) return { status: 429, fout: 'vandaag al ' + GRENS.per_dag + ' taken gemaakt; morgen weer' };
@@ -464,7 +578,12 @@ function maak(deps) {
     const flowMax = Number(f.max_per_dag) || 0, dag = dagNL(klok());
     if (flowMax > 0 && st.taken.filter(function (t) { return t.flow === f.id && dagNL(Date.parse(t.gemaakt)) === dag; }).length >= flowMax)
       return { status: 429, fout: 'deze flow heeft vandaag al ' + flowMax + ' taken gehad; morgen weer' };
-    if (f.status === 'proef') {
+    if (f.betaald) {
+      const pl = plafond(f.aanbieder), al = besteed(f.aanbieder);
+      if (al + prijs > pl + 1e-9) return { status: 409, plafond: true, fout: 'het maandplafond voor ElevenLabs (' + euro(pl) + ') is bereikt: deze maand al ' + euro(al) + ', dit bandje kost ± ' + euro(prijs) + '. Vraag Socev om het plafond te verhogen.' };
+      if (!ctx.versOk()) return { status: 403, fout: 'betaald (± ' + euro(prijs) + ' bij ElevenLabs): bevestig met je vingerafdruk', vers_nodig: true };
+      ctx.versVerbruik();
+    } else if (f.status === 'proef') {
       if (!ctx.versOk()) return { status: 403, fout: 'deze flow is nog op proef: bevestig met je vingerafdruk', vers_nodig: true };
       ctx.versVerbruik();
     }
@@ -472,6 +591,12 @@ function maak(deps) {
       procent: null, gemaakt: new Date(klok()).toISOString(), velden: w.waarden, bestanden: [], proef: f.status === 'proef', apparaat: ctx.apparaat || null };
     const bron = bronNorm(extra && extra.bron);
     if (bron) t.bron = bron;
+    if (f.betaald) {
+      // write-ahead: eerst reserveren, dan pas in de rij (lukt het schrijven niet, dan geen taak en dus geen aanroep)
+      t.betaald = true; t.aanbieder = f.aanbieder; t.prijs_vooraf = prijs;
+      try { verbruikZet(t.id, f.aanbieder, 'gereserveerd', prijs, { model: w.waarden.model, tekens: String(w.waarden.tekst || '').trim().length }); }
+      catch (e) { fout('studio-verbruik', e); return { status: 500, fout: 'de reservering kon niet bewaard worden; er is niets aangeroepen' }; }
+    }
     st.taken.push(t);
     st.rij.push(t.id);
     bewaarTaken();
@@ -499,7 +624,15 @@ function maak(deps) {
       else { t.status = 'mislukt'; t.reden = (r && r.fout) || 'onbekende fout'; }
       t.fase = null;
       try { fs.rmSync(path.join(WERK, t.id), { recursive: true, force: true }); } catch (e) {}
-      audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: t.status, duur_s: t.duur_s, bestanden: (t.bestanden || []).length, kosten: 0,
+      // wv782: reservering verrekenen. Geleverd = de schatting vooraf (met credits erbij); aanroep gedaan maar uitkomst onbekend =
+      // 'geschat' (telt mee); nooit aangeroepen of door de aanbieder geweigerd (HTTP-fout, ElevenLabs rekent die niet) = vrijgegeven.
+      if (t.betaald) {
+        const soort = t.geleverd ? 'verrekend' : (t.aangeroepen && !t.geweigerd ? 'geschat' : 'vrijgegeven');
+        try { verbruikZet(t.id, t.aanbieder, soort, soort === 'vrijgegeven' ? 0 : t.prijs_vooraf, t.credits != null ? { credits: t.credits } : null); }
+        catch (e) { fout('studio-verbruik', e); }
+      }
+      audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: t.status, duur_s: t.duur_s, bestanden: (t.bestanden || []).length,
+        kosten: t.betaald && vb[t.id] && vb[t.id].soort !== 'vrijgegeven' ? vb[t.id].eur : 0, credits: t.credits == null ? undefined : t.credits,
         proef: !!t.proef, reden: t.status === 'klaar' ? null : String(t.reden || '').slice(0, 160) });
       log('studio taak=' + t.id + ' flow=' + t.flow + ' motor=' + t.motor + ' uitkomst=' + t.status + ' duur_s=' + t.duur_s);
       // wv743: los van de afronding, met eigen catch (synchroon gooien én een afgewezen belofte); raakt de finally nooit
@@ -522,6 +655,7 @@ function maak(deps) {
     if (f.motor === 'piper') r = await motorPiper(t, f, out, ctl);
     else if (f.motor === 'router') r = await motorRouter(t, f, out, ctl);
     else if (f.motor === 'comfyui') r = await motorComfy(t, f, out, ctl);
+    else if (f.motor === 'elevenlabs') r = await motorEleven(t, f, out, ctl);
     else return { fout: 'onbekende motor' };
     if (!r || !r.ok || ctl.gestopt) return r;
     // wv743: telefoonversies (8 kHz PCM + µ-law) naast het origineel; mislukt het, dan het origineel toch bewaren met een noot
@@ -532,7 +666,7 @@ function maak(deps) {
     }
     // bewaren via de bestaande bewaarfunctie van Bestanden (Fable M1); bij een bandje het label uit de bron (wv743)
     const m = deps.bewaar(t.id, out, { soort: 'studio', label: t.bron ? bronLabel(t.bron) : f.titel, ok: true, app: true,
-      studio: { flow: f.id, motor: f.motor, kosten: 0, duur_s: Math.round((klok() - Date.parse(t.start)) / 1000) } });
+      studio: { flow: f.id, motor: f.motor, kosten: t.betaald ? t.prijs_vooraf : 0, duur_s: Math.round((klok() - Date.parse(t.start)) / 1000) } });
     if (!m || !m.bestanden || !m.bestanden.length) return { fout: m && m.vol ? 'de opslag op de pod zit vol (2 GB); er is niets bewaard' : 'het resultaat kon niet bewaard worden' };
     t.bestanden = m.bestanden.map(function (b) { return { n: b.n, naam: b.naam, grootte: b.grootte }; });
     return { ok: true };
@@ -565,6 +699,53 @@ function maak(deps) {
       k.stdin.on('error', function () {});
       k.stdin.end(tekst.replace(/\s*\n\s*/g, ' ') + '\n');
     });
+  }
+
+  // ── motor elevenlabs (wv782; via Olares Router, altijd met eigen sleutel; één aanroep, nooit opnieuw) ──
+  async function motorEleven(t, f, out, ctl) {
+    const sleutel = await deps.sleutel().catch(function () { return null; });
+    if (!sleutel) return { fout: 'de Router-sleutel ontbreekt (router_studio_key); er is niets aangeroepen' };
+    const tekst = String(t.velden.tekst || '').trim().replace(/\s*\n\s*/g, ' ');
+    const stem = String(t.velden.stem || ''), model = String(t.velden.model || '');
+    if (!tekst || !ELEVEN.stem_re.test(stem) || !Object.hasOwn(ELEVEN.modellen, model)) return { fout: 'tekst, stem of model ongeldig; er is niets aangeroepen' };
+    if (ctl.gestopt) return { fout: 'gestopt' };
+    t.fase = 'inspreken bij ElevenLabs'; t.procent = null;
+    // eerst vastleggen dát er aangeroepen wordt (een herstart midden in de aanroep laat de reservering dan als 'geschat' staan)
+    t.aangeroepen = true; bewaarTaken();
+    const ac = new AbortController();
+    ctl.stop = function () { try { ac.abort(); } catch (e) {} };
+    let r;
+    try {
+      r = await doeFetch(ROUTER + '/v1/text-to-speech/' + stem + '/stream?output_format=' + ELEVEN.formaat, { method: 'POST', redirect: 'manual',
+        headers: { Authorization: 'Bearer ' + sleutel, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: tekst, model_id: model, model: 'elevenlabs/' + model }),
+        signal: AbortSignal.any([ac.signal, AbortSignal.timeout(f.max_seconden * 1000)]) });
+    } catch (e) {
+      return { fout: ctl.gestopt ? 'gestopt' : 'ElevenLabs/Router gaf geen antwoord (' + foutTekst(e && e.message || e) + '); kosten als geschat geteld' };
+    }
+    const cc = Number(r.headers.get('character-cost'));
+    if (isFinite(cc) && cc >= 0) t.credits = cc;
+    const rid = r.headers.get('request-id');
+    t.meting = { model: model, formaat: ELEVEN.formaat, http: r.status, request_id: rid && /^[A-Za-z0-9_-]{4,64}$/.test(rid) ? rid : null };
+    if (!r.ok) {
+      // een HTTP-fout betekent: niets gemaakt, ElevenLabs rekent het niet (gemeten 22-10: validatiefout vóór het inspreken)
+      t.geweigerd = true;
+      const j = await r.json().catch(function () { return null; });
+      const d = j && (j.detail || j.error) || {};
+      const melding = typeof d === 'string' ? d : (d.message || d.code || d.status || '');
+      if (r.status === 401 || r.status === 403 || /permission|unauthori[sz]ed|forbidden/i.test(String(melding)))
+        return { fout: 'de Router-sleutel mag ElevenLabs (nog) niet aanroepen: ' + foutTekst(melding) };
+      if (r.status === 429) return { fout: 'ElevenLabs is even te druk of het tegoed is op (429): ' + foutTekst(melding) };
+      return { fout: 'ElevenLabs weigerde (' + r.status + '): ' + foutTekst(melding) };
+    }
+    let pcm;
+    try { pcm = await leesMax(r, GRENS.bestand_max); }
+    catch (e) { return { fout: ctl.gestopt ? 'gestopt' : 'het geluid kwam niet volledig binnen (' + foutTekst(e && e.message || e) + '); kosten als geschat geteld' }; }
+    if (!pcm) return { fout: 'het geluid was groter dan ' + Math.round(GRENS.bestand_max / 1048576) + ' MB' };
+    if (pcm.length < 200) return { fout: 'ElevenLabs gaf (bijna) geen geluid terug' };
+    t.geleverd = true;
+    fs.writeFileSync(path.join(out, (f.bestandsnaam || 'stem') + '.wav'), pcmNaarWav(pcm.subarray(0, pcm.length - (pcm.length % 2)), ELEVEN.rate), { mode: 0o600 });
+    return { ok: true };
   }
 
   // ── motor router (FlowStudio via Olares Router; altijd met eigen sleutel) ──
@@ -867,6 +1048,7 @@ function maak(deps) {
     if (t.status === 'wacht') {
       st.rij = st.rij.filter(function (x) { return x !== id; });
       t.status = 'gestopt'; t.reden = 'uit de rij gehaald'; t.eind = new Date(klok()).toISOString(); t.fase = null;
+      if (t.betaald) { try { verbruikZet(t.id, t.aanbieder, 'vrijgegeven', 0); } catch (e) { fout('studio-verbruik', e); } }   // wv782
       audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: 'gestopt', duur_s: 0, bestanden: 0, kosten: 0 });
       bewaarTaken();
       return { status: 200, taak: taakUit(t) };
