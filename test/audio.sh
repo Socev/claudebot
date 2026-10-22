@@ -2,7 +2,7 @@
 # Toetst audio.js (wv743, telefoonversie van een bandje; bouwplan Bandjes § 5.3, Fable-review vooraf #14).
 # Toetst: 1 kHz → 0 ± 0,5 dB; 3 kHz ≥ −1 dB; 6 kHz in → energie op 2 kHz (de spiegeling) ≤ −40 dB (22.050 en 44.100 Hz, zonder
 # normalisering, ten opzichte van de invoer; en in een mengsel 1 kHz + 6 kHz met normalisering, ten opzichte van de 1 kHz);
-# lengte ± 1 per 1.000; WAV-kop geldig (44 bytes, fmt 16, geen LIST) voor PCM en µ-law; µ-law terug-gedecodeerd binnen de
+# lengte ± 1 per 1.000; WAV-kop geldig (PCM 44 bytes, fmt 16; µ-law 58 bytes, fmt 18 + fact; geen LIST); µ-law terug-gedecodeerd binnen de
 # G.711-fout; normaliseren op −3 dBFS na het filter met 0,3 s stilte; DC weg; stereo; WAV lezen met data-lengte 0 (streamend);
 # geen WAV / 24-bit = nette fout; telefoonversie() in een map (origineel blijft staan, twee bestanden erbij, niet zichzelf omzetten).
 # Raakt niets buiten een wegwerpmap. Gebruik: bash test/audio.sh
@@ -97,16 +97,18 @@ const r1 = (x) => Math.round(x * 10) / 10;
   toets('PCM-kop: RIFF/WAVE, fmt 16, PCM 1, mono, 8000, 16 bit, data direct na 44 bytes, geen LIST',
     kp.riff === 'RIFF' && kp.wave === 'WAVEfmt ' && kp.fmtLen === 16 && kp.formaat === 1 && kp.kanalen === 1 && kp.rate === 8000 && kp.bps === 16000 && kp.blok === 2 &&
     kp.bits === 16 && kp.data === 'data' && kp.dataLen === kp.lengte - 44 && kp.grootte === kp.lengte - 8 && !kp.list, kp);
-  toets('µ-law-kop: formaat 7, mono, 8000, 8 bit, 8000 B/s, blok 1, geen LIST',
-    ku.riff === 'RIFF' && ku.wave === 'WAVEfmt ' && ku.fmtLen === 16 && ku.formaat === 7 && ku.kanalen === 1 && ku.rate === 8000 && ku.bps === 8000 && ku.blok === 1 &&
-    ku.bits === 8 && ku.data === 'data' && ku.dataLen === ku.lengte - 44 && ku.grootte === ku.lengte - 8 && !ku.list, ku);
+  // µ-law volgens de RIFF-spec (Fable wv743 #4): fmt 18 (cbSize 0) + fact (aantal monsters) + data op 50, kop 58 bytes
+  Object.assign(ku, { cb: uB.readUInt16LE(36), fact: uB.toString('ascii', 38, 42), factLen: uB.readUInt32LE(42), factN: uB.readUInt32LE(46), data: uB.toString('ascii', 50, 54), dataLen: uB.readUInt32LE(54) });
+  toets('µ-law-kop: formaat 7, mono, 8000, 8 bit, 8000 B/s, blok 1, fmt 18 + cbSize 0, fact = aantal monsters, 58 bytes, geen LIST',
+    ku.riff === 'RIFF' && ku.wave === 'WAVEfmt ' && ku.fmtLen === 18 && ku.formaat === 7 && ku.kanalen === 1 && ku.rate === 8000 && ku.bps === 8000 && ku.blok === 1 &&
+    ku.bits === 8 && ku.cb === 0 && ku.fact === 'fact' && ku.factLen === 4 && ku.factN === ku.dataLen && ku.data === 'data' && ku.dataLen === ku.lengte - 58 && ku.grootte === ku.lengte - 8 && !ku.list, ku);
   toets('PCM en µ-law even lang (monsters)', kp.dataLen / 2 === ku.dataLen, [kp.dataLen, ku.dataLen]);
   const duur = (kp.dataLen / 2) / 8000;
   toets('duur = 3 s + 2 × 0,3 s (± 1/1000; ' + duur + ' s)', Math.abs(duur - 3.6) <= 3.6 / 1000);
   // µ-law terug-gedecodeerd binnen de G.711-fout: per segment e hooguit 2^(e+2) naast de PCM-waarde (half een kwantiseerstap)
   let slechtst = 0, buiten = 0;
   for (let k = 0; k < ku.dataLen; k++) {
-    const s = pcmB.readInt16LE(44 + 2 * k), u = uB[44 + k], d = A.muLawTerug(u);
+    const s = pcmB.readInt16LE(44 + 2 * k), u = uB[58 + k], d = A.muLawTerug(u);
     const e = ((~u & 0xff) & 0x70) >> 4, grens = Math.pow(2, e + 2) + (Math.abs(s) > 32635 ? Math.abs(s) - 32635 : 0);
     const f = Math.abs(d - s);
     if (f > grens) buiten++;

@@ -201,6 +201,8 @@ function toetsTekst(t) {
   const n = normTekst(schoon(t, GRENS.tekst + 1));
   if (!n.trim()) return { fout: 'de tekst is leeg' };
   if (n.length > GRENS.tekst) return { fout: 'de tekst is langer dan ' + GRENS.tekst + ' tekens' };
+  // de lezer leest "(onbekend…" als "tekst nog niet bekend" (Fable wv743 #6): zo'n tekst zou stil leeg teruggelezen worden
+  if (/^\(onbekend\b/i.test(n.trim())) return { fout: 'begin de tekst niet met "(onbekend"' };
   return { tekst: n };
 }
 
@@ -280,7 +282,7 @@ function nieuwBandje(md, voorvoegsel, o, klok) {
   if (o.tekst && String(o.tekst).trim()) { const t = toetsTekst(o.tekst); if (t.fout) return { status: 400, fout: t.fout }; tekst = t.tekst; }
   const sectie = ['## ' + id + ' — ' + naam, '- menu: ' + eenRegel(o.menu || '', GRENS.veld), '- wanneer: ' + eenRegel(o.wanneer || '', GRENS.veld),
     '- stem: praktijkstem', '- versie: ' + (tekst ? '1' : '0'), '- laatste bestand: —', '- status: ' + (tekst ? 'concept (v1)' : 'tekst onbekend'),
-    '- bron: aangemaakt in de app ' + vandaag(klok), '', '**Tekst**'].concat(tekst ? citaat(tekst) : ['> ' + ONBEKEND], ['']);
+    '- bron: ' + (o.bron ? eenRegel(o.bron, 80) + ' ' : 'aangemaakt in de app ') + vandaag(klok), '', '**Tekst**'].concat(tekst ? citaat(tekst) : ['> ' + ONBEKEND], ['']);
   let at = p.regels.findIndex(function (r) { return /^##\s+(historie|versiegeschiedenis)\b/i.test(r); });
   if (at < 0) at = p.regels.length;
   const regels = zetUpdated(p.regels.slice(0, at).concat(sectie, p.regels.slice(at)), klok);
@@ -426,6 +428,7 @@ const STEM_STANDAARD = 'piper:nl_NL-ronnie-medium';
 const STEM_RE = /^[a-z0-9]{2,20}:[A-Za-z0-9_.\/-]{1,80}$/;
 const BEURT_RE = /^[A-Za-z0-9-]{8,64}$/;
 const APP_LINK = 'https://app.socev.dev/';
+const SMAL_NIEUW_OPEN = 3;   // zoveel nieuwe bandjes zonder tekst mag de skill per praktijk open hebben
 // Stemmen uit de Studio-flows met de vlag bandje (Fable #8). ElevenLabs staat er grijs bij tot Studio fase 2.
 function stemmenUit(flows) {
   const uit = [];
@@ -486,9 +489,15 @@ function routes(deps) {
         '- voorstel: ' + (soort === 'teruggezet' ? 'de laatst bewaarde tekst staat in `' + path.join(deps.dir, 'journaal.jsonl') + '`; zet hem terug in `' + pagina + '` met een versie ≥ die uit het journaal (of hoog de versie op als de pagina zo goed is). Daarna gaat de mini-app vanzelf weer open.'
           : soort === 'conflict' ? 'vergelijk de conflictkopie met `' + pagina + '`, neem wat ontbreekt over en verwijder de kopie; daarna gaat de mini-app vanzelf weer open.'
           : 'dubbel of verkeerd id in `' + pagina + '` rechtzetten (ids zijn onveranderlijk; hernoem de dubbele).') + '\n';
-      const tmp = deps.boxPad + '.bandjes-' + crypto.randomBytes(4).toString('hex') + '.tmp';
-      fs.writeFileSync(tmp, t.slice(0, anker) + rij + t.slice(anker));
-      fs.renameSync(tmp, deps.boxPad);
+      // tmp buiten de vault (zelfde schijf; niet zichtbaar voor bisync) met de modus van het origineel (umask 077 in run.sh; Fable wv743 #5)
+      const modus = fs.statSync(deps.boxPad).mode & 0o777;
+      const tmpDir = path.join(deps.dir, 'tmp');
+      fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
+      const tmp = path.join(tmpDir, 'machinekamer.md.' + crypto.randomBytes(4).toString('hex'));
+      fs.writeFileSync(tmp, t.slice(0, anker) + rij + t.slice(anker), { mode: modus });
+      fs.chmodSync(tmp, modus);
+      try { fs.renameSync(tmp, deps.boxPad); }
+      catch (e) { try { fs.unlinkSync(tmp); } catch (x) {} if (e && e.code === 'EXDEV') { fs.writeFileSync(deps.boxPad, t.slice(0, anker) + rij + t.slice(anker)); } else throw e; }
       log('bandjes box-rij praktijk=' + l.praktijk + ' soort=' + soort);
       return true;
     } catch (e) { fout('bandjes-box', e); return false; }
@@ -559,16 +568,18 @@ function routes(deps) {
       return goedOf(S.haalVoorstelWeg(pr, id));
     }
     if (actie === 'status') {
+      // versie én hash (Fable wv743 #2): anders zegt het label "in centrale (vN)" bij een tekst die David intussen in Obsidian wijzigde
       const v = Number(d.versie);
-      if (!Number.isInteger(v) || v < 1) return { status: 400, j: { ok: false, fout: 'versie ontbreekt' } };
+      if (!Number.isInteger(v) || v < 1 || !/^[a-f0-9]{16}$/.test(String(d.tekst_hash || ''))) return { status: 400, j: { ok: false, fout: 'versie of tekst_hash ontbreekt' } };
       const r = S.zetVelden(pr, id, { 'in centrale': 'v' + v + ', ' + vandaag(klok), status: 'in centrale (v' + v + ')' },
-        { versie: v, tekst_hash: d.tekst_hash ? String(d.tekst_hash) : null });
+        { versie: v, tekst_hash: String(d.tekst_hash) });
       return goedOf(r);
     }
     // maak: de tekst komt UIT HET REGISTER, nooit uit de invoer; versie + hash moeten kloppen met wat de app las
     const beurt = String(d.beurt_id || '');
     if (!BEURT_RE.test(beurt)) return { status: 400, j: { ok: false, fout: 'beurt_id ontbreekt' } };
     if (!deps.studio) return { status: 503, j: { ok: false, fout: 'Studio zit niet in deze versie van de pod' } };
+    const lijst = await stemmen();   // vóór het lezen (Fable wv743 #7): tussen lezen/toetsen en studio.maak geen extra await
     const l = lees(pr);
     if (l.status !== 200) return fouts(l);
     if (l.dicht) return { status: 409, j: { ok: false, fout: l.dicht, dicht: true } };
@@ -576,7 +587,6 @@ function routes(deps) {
     if (!b) return { status: 404, j: { ok: false, fout: 'dit bandje staat niet in het register' } };
     if (Number(d.versie) !== b.versie || String(d.tekst_hash || '') !== b.tekst_hash) return { status: 409, j: { ok: false, fout: 'dit bandje is intussen gewijzigd; herlaad', gewijzigd: true } };
     if (b.onbekend || !b.tekst) return { status: 400, j: { ok: false, fout: 'bewaar eerst een tekst' } };
-    const lijst = await stemmen();
     const stem = d.stem && d.stem !== 'praktijkstem' ? String(d.stem) : (b.stem && b.stem !== 'praktijkstem' ? b.stem : praktijkstem(l.instellingen));
     const s = lijst.find(function (x) { return x.id === stem; });
     if (!s) return { status: 400, j: { ok: false, fout: 'onbekende stem' } };
@@ -597,7 +607,15 @@ function routes(deps) {
     if (!pr) return { status: 400, j: { ok: false, fout: 'onbekende praktijk (tolgaarde of groenhouten)' } };
     let id = String(d.bandje || '');
     if (!id && d.nieuw && typeof d.nieuw === 'object') {
-      const n = S.nieuw(pr, { naam: d.nieuw.naam, menu: d.nieuw.menu, wanneer: d.nieuw.wanneer });
+      // eerst de tekst toetsen (anders staat er een leeg bandje zonder voorstel) en hooguit SMAL_NIEUW_OPEN bandjes van Socev die nog
+      // geen tekst hebben: een voorstel is gegeven, geen opdracht, en een geïnjecteerd verzoek mag het register niet vullen (Fable wv743 #3)
+      const t = toetsTekst(d.tekst);
+      if (t.fout) return { status: 400, j: { ok: false, fout: t.fout } };
+      const l = S.lees(pr);
+      if (l.status !== 200) return fouts(l);
+      const open = (l.bandjes || []).filter(function (x) { return x.onbekend && /^voorstel van Socev\b/.test(x.bron || ''); }).length;
+      if (open >= SMAL_NIEUW_OPEN) return { status: 409, j: { ok: false, fout: 'er staan al ' + open + ' nieuwe bandjes van Socev zonder tekst; David moet die eerst bewaren of weghalen' } };
+      const n = S.nieuw(pr, { naam: d.nieuw.naam, menu: d.nieuw.menu, wanneer: d.nieuw.wanneer, bron: 'voorstel van Socev' });
       if (n.status !== 200) return fouts(n);
       id = n.bandje.id;
     }

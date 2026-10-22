@@ -319,6 +319,8 @@ toets('B onbekende stem: 400', r.status === 400, r);
 await app('POST /app/bandjes/tekst', { praktijk: 'tolgaarde', bandje: 'tg-buiten', tekst: 'Route-tekst één.', versie: bu.versie, tekst_hash: bu.tekst_hash, stem: 'praktijkstem' });
 bu = await herlees();
 toets('B terug naar praktijkstem', bu.stem === 'praktijkstem' && bu.versie === 3, bu);
+r = await app('POST /app/bandjes/tekst', { praktijk: 'tolgaarde', bandje: 'tg-buiten', tekst: '(onbekend nummer) belt u 112', versie: bu.versie, tekst_hash: bu.tekst_hash });
+toets('B tekst die met "(onbekend" begint: 400 (Fable wv743 #6)', r.status === 400 && /onbekend/.test(r.j.fout), r);
 r = await app('POST /app/bandjes/tekst', { praktijk: 'elders', bandje: 'tg-buiten', tekst: 'x', versie: 0, tekst_hash: '' });
 toets('B onbekende praktijk: 400', r.status === 400, r);
 r = await app('POST /app/bandjes/tekst', { praktijk: 'tolgaarde', bandje: '../../etc', tekst: 'x', versie: 0, tekst_hash: '' });
@@ -333,6 +335,14 @@ r = R2.smal('voorstel', { praktijk: 'groenhouten', nieuw: { naam: 'HAP-verwijzin
 toets('B smal voorstel met nieuw bandje: id + voorstel', r.status === 200 && r.j.bandje.id === 'gh-hap-verwijzing' && r.j.bandje.onbekend && r.j.bandje.voorstel.tekst === 'Nieuw voorstel.', r);
 toets('B smal: onbekende praktijk 400, te lang 400, geen bandje 400', R2.smal('voorstel', { praktijk: 'x', bandje: 'tg-buiten', tekst: 'a' }).status === 400 &&
   R2.smal('voorstel', { praktijk: 'tolgaarde', bandje: 'tg-buiten', tekst: 'x'.repeat(1501) }).status === 400 && R2.smal('voorstel', { praktijk: 'tolgaarde', tekst: 'a' }).status === 400);
+{ const voor = (await herlees(), g.j.praktijken[1].bandjes.length);
+  r = R2.smal('voorstel', { praktijk: 'groenhouten', nieuw: { naam: 'Leeg' }, tekst: '' });
+  g = await app('GET /app/bandjes', {});
+  toets('B smal nieuw met lege tekst: 400 en geen bandje aangemaakt (Fable wv743 #3)', r.status === 400 && g.j.praktijken[1].bandjes.length === voor, r); }
+{ const a1 = R2.smal('voorstel', { praktijk: 'groenhouten', nieuw: { naam: 'Twee' }, tekst: 'b' }), a2 = R2.smal('voorstel', { praktijk: 'groenhouten', nieuw: { naam: 'Drie' }, tekst: 'c' });
+  const a3 = R2.smal('voorstel', { praktijk: 'groenhouten', nieuw: { naam: 'Vier' }, tekst: 'd' });
+  toets('B smal nieuw: hooguit 3 open bandjes van Socev zonder tekst, de vierde 409', a1.status === 200 && a2.status === 200 && a3.status === 409 && /al 3 nieuwe bandjes/.test(a3.j.fout) && /^voorstel van Socev /.test(a1.j.bandje.bron), [a1.status, a2.status, a3]);
+  toets('B smal: voorstel op een bestaand bandje kan dan nog wel', R2.smal('voorstel', { praktijk: 'groenhouten', bandje: 'gh-buiten', tekst: 'e' }).status === 200); }
 toets('B smal: alleen voorstel', R2.smal('tekst', { praktijk: 'tolgaarde', bandje: 'tg-buiten', tekst: 'a' }).status === 404);
 for (const k of ['neem', 'over', 'neem over', 'accepteer', undefined]) {
   r = await app('POST /app/bandjes/voorstel', { praktijk: 'tolgaarde', bandje: 'tg-buiten', keuze: k });
@@ -376,12 +386,11 @@ const tid = r.j.taak.id;
 await totDat(() => ST.taak(tid).status !== 'wacht' && ST.taak(tid).status !== 'bezig');
 let tk = ST.taak(tid);
 toets('B maak: klaar, drie bestanden op naam (origineel + twee telefoonversies)', tk.status === 'klaar' && tk.bestanden.map((x) => x.naam).join(',') === 'bandje-telefoon-pcm.wav,bandje-telefoon-ulaw.wav,bandje.wav' && !tk.noot, tk);
-const ingesproken = fs.readdirSync(path.join(SD), { recursive: true }).length >= 0 && logs.length >= 0;
 const job = bewaard[tid];
 toets('B label in Bestanden uit de bron', job && job.label === 'tolgaarde · tg-buiten · v3', job && job.label);
 { const pcm = fs.readFileSync(path.join(BEWAAR, tid, 'b', '1')), ul = fs.readFileSync(path.join(BEWAAR, tid, 'b', '2'));
   const w = A.leesWav(pcm);
-  toets('B telefoonversie PCM: 8 kHz mono 16-bit; µ-law: formaat 7', w.rate === 8000 && w.kanalen === 1 && pcm.length > 44 && ul.readUInt16LE(20) === 7 && ul.readUInt32LE(24) === 8000, { rate: w.rate }); }
+  toets('B telefoonversie PCM: 8 kHz mono 16-bit; µ-law: formaat 7, kop 58', w.rate === 8000 && w.kanalen === 1 && pcm.length > 44 && ul.readUInt16LE(20) === 7 && ul.readUInt32LE(24) === 8000 && ul.toString('ascii', 50, 54) === 'data', { rate: w.rate }); }
 toets('B de tekst kwam uit het register (niet uit de invoer)', tk.velden.tekst === 'Route-tekst één.', tk.velden);
 await totDat(async () => /gemaakt/.test((await herlees()).status));
 bu = await herlees();
@@ -440,9 +449,13 @@ toets('B ... tweede keer zonder nieuwe vingerafdruk: weer 403', r.status === 403
 
 // ── 7. status in centrale ──
 bu = await herlees();
-r = await app('POST /app/bandjes/status', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: bu.versie - 1 });
+r = await app('POST /app/bandjes/status', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: bu.versie - 1, tekst_hash: bu.tekst_hash });
 toets('B status met verouderde versie: 409', r.status === 409, r);
 r = await app('POST /app/bandjes/status', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: bu.versie });
+toets('B status zonder tekst_hash: 400 (Fable wv743 #2)', r.status === 400, r);
+r = await app('POST /app/bandjes/status', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: bu.versie, tekst_hash: 'ffffffffffffffff' });
+toets('B status met andere hash (David wijzigde in Obsidian): 409', r.status === 409, r);
+r = await app('POST /app/bandjes/status', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: bu.versie, tekst_hash: bu.tekst_hash });
 bu = await herlees();
 toets('B status: in centrale (v4) + veld in centrale', r.status === 200 && bu.status === 'in centrale (v4)' && /^v4, \d/.test(bu.in_centrale), bu);
 await app('POST /app/bandjes/tekst', { praktijk: 'tolgaarde', bandje: 'tg-buiten', tekst: 'Versie vijf.', versie: bu.versie, tekst_hash: bu.tekst_hash });
@@ -461,6 +474,7 @@ toets('B passief: lezen wel (schrijven false), bewaren 409, smal 409', g.status 
 prim = true;
 
 // ── 10. teruggezet / conflict: dicht + één box-rij per dag ──
+fs.chmodSync(BOX, 0o640);
 const boxVoor = fs.readFileSync(BOX, 'utf8');
 const nuTg = fs.readFileSync(TG2, 'utf8');
 fs.writeFileSync(TG2, nuTg.replace(/- versie: 5/, '- versie: 2'));   // bisync zet een oudere kopie terug
@@ -472,6 +486,7 @@ toets('B teruggezet: Tolgaarde dicht met reden', /teruggezet/.test(g.j.praktijke
 toets('B conflictkopie: Groenhouten dicht met naam', /Bandjes\.md\.conflict1/.test(g.j.praktijken[1].dicht || ''), g.j.praktijken[1].dicht);
 toets('B box: twee rijen (één per praktijk/soort), boven de eerste echte rij, niet in het codeblok', (boxNa.match(/— Bandjes (Tolgaarde|Groenhouten):/g) || []).length === 2 &&
   boxNa.indexOf('— Bandjes Tolgaarde: bewaarde tekst teruggezet') > boxNa.indexOf('```\n\n') && boxNa.indexOf('— Bandjes Tolgaarde') < boxNa.indexOf('## [week] 2026-10-22 09:55') && boxNa.startsWith(boxVoor.slice(0, boxVoor.indexOf('\n## [week] 2026-10-22'))), boxNa.slice(0, 900));
+toets('B box: modus van het origineel behouden, geen tijdelijk bestand in de vault (Fable wv743 #5)', (fs.statSync(BOX).mode & 0o777) === 0o640 && fs.readdirSync(path.dirname(BOX)).length === 1 && fs.readdirSync(path.join(D2, 'tmp')).length === 0, fs.readdirSync(path.dirname(BOX)));
 toets('B box: rij in het vaste formaat (status open, gevolg, voorstel)', /## \[direct\] \d{4}-\d{2}-\d{2} \d{2}:\d{2} — Bandjes Tolgaarde: [^\n]+\n- status: open\n- van: pod bandjes\.js[^\n]*\n- gemeten: [^\n]+\n- gevolg als er niets gebeurt: [^\n]+\n- voorstel: [^\n]+journaal\.jsonl/.test(boxNa), boxNa.slice(0, 1200));
 r = await app('POST /app/bandjes/maak', { praktijk: 'tolgaarde', bandje: 'tg-buiten', versie: 2, tekst_hash: B.tekstHash('Versie vijf.'), beurt_id: beurt() });
 toets('B teruggezet: maak 409 dicht', r.status === 409 && r.j.dicht === true, r);

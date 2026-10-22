@@ -12,8 +12,8 @@
 // (± 64 taps bij 22.050 Hz; bij een hogere rate evenredig meer, zodat het filter in Hz gelijk blijft), per monster genormaliseerd
 // op een som van 1 (geen rimpel per fase). Verhoudingen als 2,756 en 5,513 zijn niet geheel, dus geen decimatie. Daarna
 // normaliseren op de piek (−3 dBFS; −1 dBFS clipt in G.711; versterking hooguit +24 dB, zodat ruis nooit tot een bandje wordt
-// opgeblazen), 0,3 s stilte voor en na, en een kale WAV-kop van 44 bytes (`fmt ` 16 bytes, geen LIST; zoals de telefoonpoort in
-// server.js). Het werk loopt in blokken met setImmediate ertussen, zodat de pod tijdens een lang bandje blijft antwoorden.
+// opgeblazen), 0,3 s stilte voor en na. PCM krijgt een kale WAV-kop van 44 bytes (`fmt ` 16 bytes, geen LIST; zoals de telefoonpoort in
+// server.js), µ-law de spec-kop van 58 bytes (zie wavKop). Het werk loopt in blokken met setImmediate ertussen, zodat de pod tijdens een lang bandje blijft antwoorden.
 const fs = require('fs');
 const path = require('path');
 
@@ -57,12 +57,18 @@ function leesWav(buf) {
   }
   return { rate: fmt.rate, kanalen: fmt.kanalen, bits: fmt.bits, formaat: fmt.formaat, monsters: m };
 }
-// Kale WAV-kop van 44 bytes. formaat 1 = PCM 16-bit, 7 = G.711 µ-law 8-bit.
+// WAV-kop, mono. formaat 1 = PCM 16-bit: kaal, 44 bytes (`fmt ` 16, geen LIST; zoals de telefoonpoort). formaat 7 = G.711 µ-law
+// 8-bit: volgens de RIFF-spec voor niet-PCM een `fmt ` van 18 bytes (cbSize 0) plus een `fact`-blok met het aantal monsters, 58 bytes;
+// zo schrijven sox, ffmpeg en Windows hem en zo verwachten strenge lezers als BroadWorks (KPN ÉÉN) hem (Fable wv743 #4; niet gemeten).
 function wavKop(formaat, rate, bits, dataBytes) {
-  const h = Buffer.alloc(44), blok = bits / 8;
-  h.write('RIFF', 0, 'ascii'); h.writeUInt32LE(36 + dataBytes, 4); h.write('WAVEfmt ', 8, 'ascii'); h.writeUInt32LE(16, 16);
+  const blok = bits / 8, pcm = formaat === 1, fmtLen = pcm ? 16 : 18, kop = pcm ? 44 : 58;
+  const h = Buffer.alloc(kop);
+  h.write('RIFF', 0, 'ascii'); h.writeUInt32LE(kop - 8 + dataBytes, 4); h.write('WAVEfmt ', 8, 'ascii'); h.writeUInt32LE(fmtLen, 16);
   h.writeUInt16LE(formaat, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * blok, 28);
-  h.writeUInt16LE(blok, 32); h.writeUInt16LE(bits, 34); h.write('data', 36, 'ascii'); h.writeUInt32LE(dataBytes, 40);
+  h.writeUInt16LE(blok, 32); h.writeUInt16LE(bits, 34);
+  let i = 36;
+  if (!pcm) { h.writeUInt16LE(0, 36); h.write('fact', 38, 'ascii'); h.writeUInt32LE(4, 42); h.writeUInt32LE(dataBytes / blok, 46); i = 50; }
+  h.write('data', i, 'ascii'); h.writeUInt32LE(dataBytes, i + 4);
   return h;
 }
 function naarPcm16(m) {
