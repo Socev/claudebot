@@ -171,12 +171,18 @@ jobs:
           bash test/financien-app.sh   # wv771: App Financiën — veld-allowlist, signalen, opzeglinks met host-allowlist
           bash test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
-          bash test/facturen-kern.sh   # wv797: Facturen-app kern — besliskader, UBL, validators, IBAN-poort, patiëntkenmerk, overgangen, vingerafdruk
-          bash test/facturen-bank.sh   # wv798: Facturen-app bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
           bash test/pot-datahub.sh   # wv815: POT-posten naar Davids datahub — koppelen, grens, Davids vorm, toewijzing, grootboek, D1-batch met parameters
-          bash test/facturen-routes.sh   # wv833: Facturen-app routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
-          bash test/facturen-db.sh   # wv824: Facturen-app opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
           bash test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
+      # Facturen-app (wv797–wv833) in een eigen stap die ook draait als een eerdere stap rood is: een rode bankluis-toets mag de Facturen-toetsen
+      # niet verbergen (sinds run 200 stopte de bankluis-stap op test/bunq-lezer.sh en draaiden ze niet meer).
+      - name: "facturen (wv797–wv833: kern, bank, opslag, routes)"
+        if: ${{ !cancelled() }}
+        run: |
+          pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
+          bash test/facturen-kern.sh   # wv797: kern — besliskader, UBL, validators, IBAN-poort, patiëntkenmerk, overgangen, vingerafdruk
+          bash test/facturen-bank.sh   # wv798: bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
+          bash test/facturen-db.sh   # wv824: opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
+          bash test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
       - name: "studio (wv707, tab Studio fase 1)"
         run: bash test/studio.sh
