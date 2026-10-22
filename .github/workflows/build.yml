@@ -91,6 +91,7 @@ jobs:
           bash test/bank-archief.sh
           bash test/paypal-laag.sh
           bash test/bank-pot.sh   # wv786: POT-rekening afgescheiden van privé, indeling zonder taalmodel
+          bash test/financien-app.sh   # wv771: App Financiën — veld-allowlist, signalen, opzeglinks met host-allowlist
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
       - name: "studio (wv707, tab Studio fase 1)"
         run: bash test/studio.sh
