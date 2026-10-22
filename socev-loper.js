@@ -258,9 +258,9 @@ function opSocketEigenaar(v) {
     const st = procStatus(p);
     if (!st || st.dood || st.uid !== EIGEN_UID) continue;
     // Eerst de marker (één leesactie), dan pas de fd's: een proces zonder marker doet er voor de vrager niet toe.
+    if (++procs > MAX_SCAN_PROC) return { fout: 'te-groot' };
     const w = markerWaarde(p, naam);
     if (w === undefined) continue;
-    if (++procs > MAX_SCAN_PROC) return { fout: 'te-groot' };
     let fds = [];
     try { fds = fs.readdirSync('/proc/' + p + '/fd'); } catch (e) { continue; }
     for (let k = 0; k < fds.length; k++) {

@@ -114,7 +114,8 @@ vault_vreemde_codeplekken(){
       | { head -20; cat >/dev/null; } | while IFS= read -r p; do log "let op: code van socev in de vault: $(printf %q "$p")"; done
     # DEKT NIET (Fable wv785 #2): socev kan een bestand van claude vullen en hernoemen ("geleend eigendom"), want de mappen
     # zijn rwX; zo'n Windows-codebestand is van claude en wordt niet hernoemd. Wel gemeld: elke nieuwe of gewijzigde
-    # Windows-code die niet van socev is (ook rclone van de pc en de machinekamer; dat is weinig).
+    # Windows-code die niet van socev is (ook rclone van de pc en de machinekamer; dat is weinig). *.js bewust niet: de
+    # machinekamer schrijft er veel, dat zou ruis geven (Fable-natoets wv785). De CISO-ronde leest deze regels (C11).
     find "$V" -type f ! -user socev -cnewer "$STEMPEL" \( -false "${WINCODE[@]}" \) -printf '%p\n' 2>/dev/null \
       | { head -20; cat >/dev/null; } | while IFS= read -r p; do log "let op: Windows-code nieuw of gewijzigd (niet van socev): $(printf %q "$p")"; done
   fi
