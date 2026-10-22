@@ -14223,14 +14223,14 @@ async function paypalRonde(o) {
       if (b.fout) fouten.push({ mail_id: m.id, fout: b.fout }); else bewijzen.push(b);
     }
     // bewaren in batches; koppelen alleen bij de laatste (koppel rekent alles opnieuw)
-    let bewaard = { nieuw: 0, aangevuld: 0, geweigerd: 0 }, koppeling = null, stand = null;
+    let bewaard = { nieuw: 0, aangevuld: 0, geweigerd: 0, samengevoegd: 0 }, koppeling = null, stand = null;
     const delen = [];
     for (let i = 0; i < Math.max(bewijzen.length, 1); i += PAYPAL_BATCH) delen.push(bewijzen.slice(i, i + PAYPAL_BATCH));
     for (let i = 0; i < delen.length; i++) {
       const laatste = i === delen.length - 1;
       const r = await bankKind(['paypal-bij'], { bewijzen: delen[i], fouten: laatste ? fouten : [], koppel: laatste, ronde: laatste });
       if (!r.j || r.j.ok !== true) return { ok: false, fout: 'bewaren faalde: ' + String((r.j && r.j.fout) || 'paypal-bij faalde').slice(0, 120), gelezen: nieuw.length };
-      ['nieuw', 'aangevuld', 'geweigerd'].forEach(function (k) { bewaard[k] += (r.j.bewaard && r.j.bewaard[k]) || 0; });
+      ['nieuw', 'aangevuld', 'geweigerd', 'samengevoegd'].forEach(function (k) { bewaard[k] += (r.j.bewaard && r.j.bewaard[k]) || 0; });
       if (laatste) { koppeling = r.j.koppeling || null; stand = r.j.stand || null; }
     }
     // alleen aantallen terug (geen bedragen, namen of mailinhoud)
@@ -14252,7 +14252,7 @@ async function paypalNaBankRonde() {
     catch (e) { logError('paypal-hartslag', e); r.hartslag = false; }
   }
   schrijfLog(nu() + ' bank ' + velden({ opdracht: 'paypal-ronde', ok: !!r.ok, gevonden: r.gevonden, gelezen: r.gelezen, nieuw: r.nieuw, niet_uitgelezen: r.niet_uitgelezen,
-    fout: r.ok ? undefined : r.fout, hartslag: r.hartslag }));
+    samengevoegd: (r.bewaard && r.bewaard.samengevoegd) || undefined, afgekapt: r.afgekapt, fout: r.ok ? undefined : r.fout, hartslag: r.hartslag }));
   return r;
 }
 // ── einde bankluis ──

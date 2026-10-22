@@ -75,8 +75,11 @@ const M = {
     tekst: 'Uw betaling is verwerkt\nOp 5 september 2026 hebt u een betaling van $11,63 USD overgemaakt\nnaar Voorbeeld Ritten, I...\nTransactiereferentie: 6KA66666KA6666666\nGebruikte betaalmethoden (totaal)\nx-4071: €10,44 EUR\n' },
   bestelling: { id: 'a0000000000016', van: VAN, aan: AAN, onderwerp: 'U hebt een bestelling geplaatst bij Voorbeeldwarenhuis voor $492,24 USD', dag_lokaal: '2025-07-14', snippet: '', tekst: 'U hebt een bestelling van $492,24 USD geplaatst bij Voorbeeldwarenhuis\n' },
   // ontvangstbewijzen bij de autorisaties (andere referentie)
-  autBewijs: { id: 'a0000000000017', van: VAN, aan: AAN, onderwerp: 'Ontvangstbewijs voor uw betaling aan Voorbeeld Cloud Ireland', dag_lokaal: '2026-03-09',
-    snippet: '', tekst: 'U hebt € 18,00 EUR betaald aan Voorbeeld Cloud Ireland\nTransactiereferentie\n7KA77777KA7777777 Transactiedatum\n9 mrt 2026 Webwinkel\nVoorbeeld Cloud Ireland Factuurreferentie\n1\n----\nVoorbeeld Cloud Ireland betaald met\nABN AMRO Bank NV\nBetaalrekening ••3868\n€ 18,00 EUR\n' },
+  autBewijs: { id: 'a0000000000017', van: VAN, aan: AAN, onderwerp: 'Ontvangstbewijs voor uw betaling aan Voorbeeld Cloud Limited', dag_lokaal: '2026-03-09',
+    snippet: '', tekst: 'U hebt € 18,00 EUR betaald aan Voorbeeld Cloud Limited\nTransactiereferentie\n7KA77777KA7777777 Transactiedatum\n9 mrt 2026 Webwinkel\nVoorbeeld Cloud Limited Factuurreferentie\n1\n----\nVoorbeeld Cloud Limited betaald met\nABN AMRO Bank NV\nBetaalrekening ••3868\n€ 18,00 EUR\n' },
+  // webwinkelvorm zonder eurobedrag of bron (Fable wv780 #1)
+  kaalBewijs: { id: 'a0000000000018', van: VAN, aan: AAN, onderwerp: 'Ontvangstbewijs voor uw PayPal-betaling', dag_lokaal: '2025-09-09', snippet: '',
+    tekst: 'Betaling aan\nVoorbeeld Bellen, LLC\nTransactiereferentie\n2KA22222KA2222222\nDatum\n9 september 2025\nBetaalstatus\nVOLTOOID\nBetaling $3,00 USD\n' },
 };
 (async function () {
   try {
@@ -221,7 +224,7 @@ const M = {
       const s3 = P.bij(a3, [Object.assign({}, aB, { ref: '9KA99999KA9999999', mail_id: 'a0000000000021', datum: '2026-04-07' })], []);
       const s3b = P.bij(a3, [Object.assign({}, aB, { ref: '9KA99999KA9999999', mail_id: 'a0000000000021', datum: '2026-04-07' })], []);
       toets('wv780 samenvoegen: bewijs eerst, autorisatie later → geen tweede rij, mail-id erbij; herhaald geen wijziging',
-        s3.aangevuld === 1 && s3.nieuw === 0 && !rij3('9KA99999KA9999999') && JSON.parse(rij3('8KA88888KA8888888').mail_ids).indexOf('a0000000000021') >= 0 && s3b.nieuw === 0 && s3b.aangevuld === 1, { s3, s3b });
+        s3.aangevuld === 1 && s3.nieuw === 0 && !rij3('9KA99999KA9999999') && JSON.parse(rij3('8KA88888KA8888888').mail_ids).indexOf('a0000000000021') >= 0 && s3b.nieuw === 0 && s3b.ongewijzigd === 1, { s3, s3b });
       toets('wv780 bekend: ook het mail-id van een opgegane autorisatie (wordt niet opnieuw geopend)', new Set(P.bekend(a3, '2025-01-01')).has('a0000000000021'));
       // 3. zelfde referentie: autorisatie → ontvangstbewijs vervangt; ontvangstbewijs → autorisatie verandert niets
       P.bij(a3, [Object.assign({}, aB, { ref: 'AKA00000KA0000000', mail_id: 'a0000000000022', datum: '2026-05-07' })], []);
@@ -235,16 +238,37 @@ const M = {
       const s6 = P.bij(a3, [Object.assign({}, bw, { ref: 'CKA00000KA0000000', mail_id: 'a0000000000026', datum: '2026-06-08', bedrag: 6.5, bedrag_eur: 6.5 })], []);
       const s7 = P.bij(a3, [Object.assign({}, bw, { ref: 'DKA00000KA0000000', mail_id: 'a0000000000027', datum: '2026-06-14' })], []);
       toets('wv780 niet samenvoegen: ander bedrag (deelbetaling) of bewijs 7 dagen na de autorisatie', s6.nieuw === 1 && s7.nieuw === 1 && !!rij3('BKA00000KA0000000'), { s6, s7 });
+      // Fable wv780 #2: andere betaling van dezelfde grove dienst (zelfde eerste woord, zelfde bedrag, twee dagen later) blijft apart
+      const s8 = P.bij(a3, [Object.assign({}, bw, { ref: 'EKA00000KA0000000', mail_id: 'a0000000000028', datum: '2026-06-09', ontvanger: 'Voorbeeld Winkel Ireland', bron: 'kaart', bron_eind: null })], []);
+      toets('wv780 niet samenvoegen: zelfde dienstsleutel maar andere ontvanger', s8.nieuw === 1 && !!rij3('BKA00000KA0000000') && !!rij3('EKA00000KA0000000'), s8);
       // 5. koppelen: autorisatie B, dollarautorisatie en overmaking aan hun afschrijving; kaartautorisatie nooit
       P.bij(a3, [P.leesMail(M.autUsd), P.leesMail(M.autKaart), P.leesMail(M.overmaking)], []);
+      // Fable wv780 #1: kaal ontvangstbewijs met dezelfde referentie als de dollarautorisatie → eurobedrag, bron en ••3868 blijven
+      const kb = P.leesMail(M.kaalBewijs);
+      const s9 = P.bij(a3, [kb], []), r9 = rij3('2KA22222KA2222222');
+      toets('wv780 vervangen: bewijs zonder eurobedrag/bron houdt die van de autorisatie (en wordt gewoon bewijs)', kb.bedrag_eur == null && kb.bron === 'onbekend' && s9.samengevoegd === 1 &&
+        r9.bedrag_eur === 2.68 && r9.bron === 'bank' && r9.bron_eind === '3868' && r9.vorm !== 'geautoriseerd' && r9.status === 'voltooid' && JSON.parse(r9.mail_ids).length === 2, { kb, r9 });
       A.bij(a3, rek3, [post('w1', '2025-09-10', -2.68), post('w2', '2025-07-27', -259.22), post('w3', '2026-10-20', -25), post('w4', '2026-06-10', -18)], {});
       P.koppel(a3);
       const kp3 = (ref) => a3.db.prepare('SELECT t.bron_id FROM paypal_bewijs b LEFT JOIN transacties t ON t.nr = b.nr WHERE b.ref = ?').get(ref).bron_id;
       toets('wv780 koppelen: dollarautorisatie, overmaking en autorisatie B aan hun post; kaartautorisatie niet',
         /w1/.test(String(kp3('2KA22222KA2222222'))) && /w3/.test(String(kp3('5KA55555KA5555555'))) && /w4/.test(String(kp3('BKA00000KA0000000'))) && kp3('3KA33333KA3333333') == null,
         ['2KA22222KA2222222', '5KA55555KA5555555', 'BKA00000KA0000000', '3KA33333KA3333333'].map(kp3));
-      const l3 = P.lijst(a3, { dienst: 'voorbeeld bellen' });
-      toets('wv780 lijst: autorisatie zichtbaar als status geautoriseerd', l3.bewijzen.length === 1 && l3.bewijzen[0].status === 'geautoriseerd' && /autorisatie/.test(l3.let_op), l3);
+      const l3 = P.lijst(a3, { dienst: 'voorbeeld tours' });
+      toets('wv780 lijst: autorisatie zichtbaar als status geautoriseerd en apart geteld', l3.bewijzen.length === 1 && l3.bewijzen[0].status === 'geautoriseerd' && /autorisatie/.test(l3.let_op) &&
+        l3.waarvan_autorisatie && l3.waarvan_autorisatie.aantal === 1, l3);
+      // Fable wv780 #3: spookautorisatie (nooit geïnd) pakt de post niet af van een echt bewijs, ook niet met een kleiner dagverschil
+      P.bij(a3, [{ mail_id: 'a0000000000030', soort: 'betaling', ref: 'FKA00000KA0000000', datum: '2026-08-03', ontvanger: 'Streamhuis', bedrag: 12.34, valuta: 'EUR', bedrag_eur: 12.34, bron: 'bank', bron_eind: '3868' },
+        { mail_id: 'a0000000000031', soort: 'betaling', ref: 'GKA00000KA0000000', datum: '2026-08-06', ontvanger: 'Reisbureau Test', bedrag: 12.34, valuta: 'EUR', bedrag_eur: 12.34, bron: 'bank', bron_eind: '3868', vorm: 'geautoriseerd', status: 'geautoriseerd' }], []);
+      A.bij(a3, rek3, [post('w5', '2026-08-08', -12.34)], {});
+      // som (Fable wv780 #4): autorisatie € 50 + bewijs € 20 vormen geen post van € 70
+      P.bij(a3, [{ mail_id: 'a0000000000032', soort: 'betaling', ref: 'HKA00000KA0000000', datum: '2026-09-01', ontvanger: 'Hotel Test', bedrag: 50, valuta: 'EUR', bedrag_eur: 50, bron: 'bank', vorm: 'geautoriseerd', status: 'geautoriseerd' },
+        { mail_id: 'a0000000000033', soort: 'betaling', ref: 'JKA00000KA0000000', datum: '2026-09-01', ontvanger: 'Hotel Test', bedrag: 20, valuta: 'EUR', bedrag_eur: 20, bron: 'bank' }], []);
+      A.bij(a3, rek3, [post('w6', '2026-09-03', -70)], {});
+      P.koppel(a3);
+      toets('wv780 koppelen: echt bewijs wint van een autorisatie op dezelfde post; som nooit met een autorisatie',
+        /w5/.test(String(kp3('FKA00000KA0000000'))) && kp3('GKA00000KA0000000') == null && kp3('HKA00000KA0000000') == null && kp3('JKA00000KA0000000') == null,
+        ['FKA00000KA0000000', 'GKA00000KA0000000', 'HKA00000KA0000000', 'JKA00000KA0000000'].map(kp3));
       a3.db.close();
     }
     toets('dienstPerPost: de PayPal-post van Netflix heet netflix, de som-post meerdere', Array.from(dp.values()).some(function (x) { return x.dienst === 'netflix'; }) && Array.from(dp.values()).some(function (x) { return x.dienst === 'meerdere'; }));
