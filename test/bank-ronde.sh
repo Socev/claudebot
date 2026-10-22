@@ -224,6 +224,8 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
     const ctx = vm.createContext(g);
     vm.runInContext(src.slice(k1, k2) + '\n' + src.slice(a, b) + '\n;globalThis.__h = { bankRonde, bankKaarten, bankRondeStart, bankRondeUitkomst };', ctx, { filename: 'server.js#bank' });
     const h = ctx.__h;
+    // wv776: de maandronde vaste lasten heeft een eigen toets (test/vaste-lasten-ronde.sh); hier niet laten meedraaien op de 3e–10e
+    ctx.vasteLastenRonde = async function () { return { gedaan: false, reden: 'toets' }; };
     const zetTot = (dagen) => { E.sessies['sess-0001'].tot = new Date(Date.now() + (dagen + 0.5) * 86400000).toISOString(); nulTellers(); };
 
     zetTot(20);

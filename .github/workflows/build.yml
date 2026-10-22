@@ -89,6 +89,7 @@ jobs:
           bash test/bankluis-poort.sh
           bash test/bank-ronde.sh
           bash test/bank-archief.sh
+          bash test/vaste-lasten-ronde.sh   # wv776: maandronde vaste lasten (binnenblok vault, poort nieuwste post, box 1× per maand per reden)
           bash test/paypal-laag.sh
           bash test/bank-pot.sh   # wv786: POT-rekening afgescheiden van privé, indeling zonder taalmodel
           bash test/financien-app.sh   # wv771: App Financiën — veld-allowlist, signalen, opzeglinks met host-allowlist
