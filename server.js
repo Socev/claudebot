@@ -1112,10 +1112,15 @@ function loperSpawn(brein, args, o) {
   let sock = null, klaar = false, gestart = false, uitB = 0, foutB = 0, stopNaStart = null, rest = '';
   // Fable wv715 #4: de loper (wv699-2) kan bij 'volg' een brok missen (momentopname en aanmelden in twee ticks). Na een
   // herverbinding daarom bij het einde nog één 'volg' vanaf onze offset: de job is dan klaar, er komt niets meer bij.
-  let herverbonden = false, slotEinde = null;
+  // Natoets Fable: uitB telt ontvangen bytes, geen offset; mist er een brok in het midden, dan klopt 'vanaf uitB' niet. De slot-volg
+  // vraagt daarom alles vanaf 0 en vervangt bij een verschil de hele stdout (event 'vervang-uit'; claude -p json schrijft toch alleen
+  // het eindresultaat).
+  let herverbonden = false, slotEinde = null; const slotUit = [];
+  let wachtAntwoord = null, volgOk = false;
   const t0 = Date.now();
   function einde(code, sig) {
     if (klaar) return; klaar = true;
+    if (wachtAntwoord) clearTimeout(wachtAntwoord);
     if (sock) { try { sock.destroy(); } catch (e) {} }
     k.emit('exit', code, sig);
     k.stdout.end(); k.stderr.end();
@@ -1123,6 +1128,7 @@ function loperSpawn(brein, args, o) {
   }
   function fout(code, uitleg) {
     if (klaar) return; klaar = true;
+    if (wachtAntwoord) clearTimeout(wachtAntwoord);
     if (sock) { try { sock.destroy(); } catch (e) {} }
     loperStoring(code);
     const e = new Error(uitleg); e.code = code; e.loperFout = code;
@@ -1148,18 +1154,27 @@ function loperSpawn(brein, args, o) {
       return;
     }
     if (r.nr === 2) {   // antwoord op volg na een herverbinding
+      volgOk = !!r.ok;
       if (!r.ok) return slotEinde ? einde(slotEinde.code, slotEinde.signaal) : einde(null, 'SIGKILL');
       return;
     }
     if (r.id !== o.id) return;
-    if (r.ev === 'uit') { const b = Buffer.from(r.b64 || '', 'base64'); uitB += b.length; k.stdout.write(b); }
+    if (r.ev === 'uit') {
+      const b = Buffer.from(r.b64 || '', 'base64');
+      if (slotEinde) { slotUit.push(b); return; }
+      uitB += b.length; k.stdout.write(b);
+    }
     else if (r.ev === 'fout') { const b = Buffer.from(r.b64 || '', 'base64'); foutB += b.length; k.stderr.write(b); }
     else if (r.ev === 'einde') {
       if (r.fout) return fout('loper-spawn', 'De afgeschermde Socev-gebruiker kon ' + brein + ' niet starten (' + r.fout + ').');
-      if (herverbonden && !slotEinde) {   // slot-volg: gemiste brokken ophalen, daarna pas het einde
+      if (herverbonden && !slotEinde) {   // slot-volg: alles opnieuw ophalen, daarna pas het einde
         slotEinde = { code: r.code, signaal: r.signaal };
-        if (sock) { try { sock.destroy(); } catch (e) {} }   // close → verbind(false) → volg vanaf uitB/foutB → einde opnieuw
+        if (sock) { try { sock.destroy(); } catch (e) {} }   // close → verbind(false) → volg vanaf 0 → einde opnieuw
         return;
+      }
+      if (slotEinde) {
+        const heel = Buffer.concat(slotUit);
+        if (heel.length > uitB) k.emit('vervang-uit', heel);   // er ontbrak iets: de volledige uitvoer van de loper geldt
       }
       einde(r.code, r.signaal);
     }
@@ -1168,13 +1183,24 @@ function loperSpawn(brein, args, o) {
     const grens = Date.now() + LOPER_HERKANS_MS;
     (function poging() {
       if (klaar) return;
-      rest = '';
+      rest = ''; volgOk = false;
+      if (wachtAntwoord) { clearTimeout(wachtAntwoord); wachtAntwoord = null; }
       const s = net.connect(LOPER_SOCK);
       let verbonden = false;
       s.on('connect', function () {
         verbonden = true; sock = s;
         if (eerste) stuur({ op: 'start', nr: 1, id: o.id, brein: brein, args: args, cwd: o.cwd, env: o.env, invoer: '' });
-        else stuur({ op: 'volg', nr: 2, id: o.id, vanaf_uit: uitB, vanaf_fout: foutB });
+        else stuur({ op: 'volg', nr: 2, id: o.id, vanaf_uit: slotEinde ? 0 : uitB, vanaf_fout: foutB });
+        // Root houdt de socket vast: ook als de loper (her)start of stilstaat (SIGSTOP door een socev-sessie) lukt verbinden,
+        // maar komt er geen antwoord. Zonder grens zou de beurt eeuwig wachten (kill vóór de start doet dan niets).
+        wachtAntwoord = setTimeout(function () {
+          if (klaar || (eerste ? gestart : volgOk)) return;
+          loperOp({ op: 'stop', id: o.id, signaal: 'SIGKILL' }, 5000).catch(function () {});
+          if (eerste) fout('loper-onbereikbaar', 'De afgeschermde Socev-gebruiker antwoordde niet binnen ' + Math.round(LOPER_HERKANS_MS / 1000) + ' s; de beurt is niet gestart.');
+          else if (slotEinde) einde(slotEinde.code, slotEinde.signaal);
+          else { loperStoring('loper-verbinding-weg'); einde(null, 'SIGKILL'); }
+        }, LOPER_HERKANS_MS);
+        if (wachtAntwoord.unref) wachtAntwoord.unref();
       });
       s.setEncoding('utf8');
       s.on('data', function (d) {
@@ -1380,6 +1406,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
 
     child.stdout.on('data', function (d) { out += d; lastStdout = Date.now(); });
     child.stderr.on('data', function (d) { err += d; });
+    if (viaLoper) child.on('vervang-uit', function (b) { out = b.toString('utf8'); lastStdout = Date.now(); });   // wv715 slot-volg
     // 'close' is de nette route (alle streams leeg); 'exit' + 10 s is de
     // failsafe voor het geval een ontsnapt kindproces de pipes openhoudt.
     child.on('close', function (code) { finalize(code); });

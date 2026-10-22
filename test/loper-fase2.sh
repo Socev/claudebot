@@ -66,6 +66,19 @@ os.execve(sys.argv[2], [sys.argv[2], sys.argv[3]], {"PATH": os.environ["PATH"], 
 `, SOCK, process.execPath, path.resolve('socev-loper.js'), path.join(d, 'vault'), path.join(d, 'io'), THUIS, NEP],
     { stdio: ['ignore', 'ignore', fs.openSync(path.join(W, 'loper.log'), 'a')] });
 }
+// proxy tussen server.js en de loper: knip() verbreekt alle lopende verbindingen (herverbinding + volg + slot-volg toetsen)
+const PROXY = path.join(W, 'proxy.sock');
+const proxyConns = new Set();
+let proxy = null;
+const startProxy = () => { proxy = require('net').createServer(c => {
+  const u = require('net').connect(SOCK);
+  proxyConns.add(c); proxyConns.add(u);
+  c.pipe(u); u.pipe(c);
+  const weg = () => { proxyConns.delete(c); proxyConns.delete(u); c.destroy(); u.destroy(); };
+  c.on('error', weg); u.on('error', weg); c.on('close', weg); u.on('close', weg);
+}).listen(PROXY); };
+startProxy();
+const knip = () => { const n = proxyConns.size; proxyConns.forEach(x => x.destroy()); return n; };
 const hook = http.createServer((q, s) => { let b = ''; q.on('data', c => b += c); q.on('end', () => {
   if (q.url.indexOf('/rest/v1/rpc/uitwijk_stand_lees') === 0) return s.end(JSON.stringify([{ actieve_kant: 'olares', sinds: null }]));
   if (q.url === '/rapport') { try { rapporten.push(JSON.parse(b)); } catch (e) {} }
@@ -98,7 +111,7 @@ hook.listen(0, '127.0.0.1', async () => {
     OFFSITE_INTERVAL_MIN: '0', AUTO_UIT_POD: '1', LESSEN_INJECTIE: '0', API_SECRET: 'proef', MAX_AGENTS: '8',
     PORT: String(poort), AGENT_WEBHOOK_URL: 'http://127.0.0.1:' + hook.address().port + '/rapport', AGENT_WEBHOOK_SECRET: 'proef',
     SUPABASE_URL: 'http://127.0.0.1:' + hook.address().port, SUPABASE_SERVICE_ROLE: 'proef', SOCEV_KANT: 'olares',
-    SOCEV_LOPER_SOCK: SOCK, SOCEV_THUIS: THUIS, SOCEV_LOPER_UID: String(process.getuid()), SOCEV_LOPER_STAND: STAND, SOCEV_LOPER_HERKANS_MS: '2500',
+    SOCEV_LOPER_SOCK: PROXY, SOCEV_THUIS: THUIS, SOCEV_LOPER_UID: String(process.getuid()), SOCEV_LOPER_STAND: STAND, SOCEV_LOPER_HERKANS_MS: '2500',
     PATH: path.dirname(NEP) + ':' + process.env.PATH });
   delete env.CLAUDE_CODE_OAUTH_TOKEN; delete env.SOCEV_AGENT_RUN; delete env.SOCEV_LOPER;
   fs.copyFileSync(NEP, path.join(d, 'bin', 'claude')); env.PATH = path.join(d, 'bin') + ':' + env.PATH;
@@ -148,6 +161,17 @@ hook.listen(0, '127.0.0.1', async () => {
     fs.writeFileSync(path.join(W, 'go'), '1');
     await wachtOp(async () => (await vraag('POST', '/result', { secret: 'proef', job_id: aW.job_id })).done, 8000);
     fs.unlinkSync(path.join(W, 'go'));
+    // ── H: verbinding valt weg midden in een beurt → herverbinden + volg + slot-volg, beurt slaagt toch ──
+    const aH = await vraag('POST', '/run', { secret: 'proef', chat_id: 'loper-proef', prompt: 'MODUS:WACHT', workspace: 'vault' });
+    await wachtOp(() => (starts().match(/WACHT/g) || []).length >= 2, 8000);
+    await slaap(400);
+    const geknipt = knip();
+    await slaap(1800);
+    fs.writeFileSync(path.join(W, 'go'), '1');
+    let rH = null;
+    await wachtOp(async () => { rH = await vraag('POST', '/result', { secret: 'proef', job_id: aH.job_id }); return rH.done; }, 15000);
+    fs.unlinkSync(path.join(W, 'go'));
+    toets('H: verbinding geknipt midden in de beurt → herverbonden, resultaat compleet', geknipt > 0 && rH && (rH.result || rH).ok === true && /KLAAR-WACHT/.test((rH.result || rH).output || ''), 'geknipt=' + geknipt + ' ' + JSON.stringify(rH).slice(0, 300));
     // ── L: symlinks in OUTDIR worden niet gevolgd (Fable wv715 #1) ──
     fs.writeFileSync(path.join(W, 'geheim.txt'), 'GEHEIM-1001');
     const rL = await run('loper-proef', 'MODUS:LINK');
@@ -199,6 +223,7 @@ hook.listen(0, '127.0.0.1', async () => {
     toets('W: bovengrens → gestopt via de loper (EPERM-pad), afgerond met afgebroken-bovengrens', wKlaar && ew.error === 'afgebroken-bovengrens' && await wachtOp(() => !hangLeeft(), 5000), JSON.stringify(ew) + ' pgrep=' + hangLeeft());
     // ── D: dicht bij uitval ──
     loper.kill('SIGKILL'); await slaap(300); try { fs.unlinkSync(SOCK); } catch (e) {}
+    await new Promise(r => proxy.close(r)); knip(); try { fs.unlinkSync(PROXY); } catch (e) {}   // socket weg, zoals zonder loper
     const voor = starts();
     const t0 = Date.now();
     const rD = await run('loper-proef', 'MODUS:DICHT');
@@ -208,9 +233,16 @@ hook.listen(0, '127.0.0.1', async () => {
     toets('D: /health.loper bereikbaar false, storing_sinds gezet, fout geteld', hD.loper && hD.loper.bereikbaar === false && !!hD.loper.storing_sinds && hD.loper.fouten >= 1, JSON.stringify(hD.loper));
     const rG = await run('buiten-stand', 'MODUS:GEWOONNADICHT');
     toets('D: sessie buiten de stand blijft werken zonder loper', (rG.result || rG).ok === true, JSON.stringify(rG).slice(0, 200));
-    startLoper(); await slaap(600);
+    startLoper(); startProxy(); await slaap(600);
     const rT = await run('loper-proef', 'MODUS:TERUG');
     toets('D: loper terug → volgende beurt weer via de loper', (rT.result || rT).ok === true && ((rT.result || rT).output || '').indexOf('home=' + THUIS) >= 0, JSON.stringify(rT).slice(0, 300));
+    // ── Z: loper staat stil (SIGSTOP door een socev-sessie): verbinden lukt, antwoord komt niet → na de grens dicht, niet eeuwig ──
+    loper.kill('SIGSTOP');
+    const tZ = Date.now();
+    const rZ = await run('loper-proef', 'MODUS:STIL');
+    const duurZ = Date.now() - tZ;
+    loper.kill('SIGCONT'); await slaap(800);
+    toets('Z: loper stil → loper-onbereikbaar na de grens (geen hangende beurt)', (rZ.result || rZ).error === 'loper-onbereikbaar' && duurZ >= 2000 && duurZ < 15000, JSON.stringify(rZ).slice(0, 300) + ' ' + duurZ + ' ms');
     // stand weg = uit
     fs.unlinkSync(STAND);
     const rU = await run('loper-proef', 'MODUS:UIT');
@@ -220,7 +252,7 @@ hook.listen(0, '127.0.0.1', async () => {
   try { execFileSync('pkill', ['-f', path.join(W, 'nep-claude')]); } catch (e) {}
   console.log(fout ? 'ROOD: ' + fout + ' toets(en) mislukt — werkmap ' + W : 'ALLES GROEN');
   if (!fout) fs.rmSync(W, { recursive: true, force: true });
-  hook.close();
+  hook.close(); try { proxy.close(); } catch (e) {}
   process.exit(fout ? 1 : 0);
 });
 JS
