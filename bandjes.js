@@ -290,13 +290,29 @@ function nieuwBandje(md, voorvoegsel, o, klok) {
   return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)) };
 }
 
-// Praktijkinstelling (praktijkstem) in het blok "## Praktijkinstellingen"; ontbreekt het blok, dan vóór het eerste bandje (wv743).
-const INSTELLINGEN = ['praktijkstem'];
+// Praktijkinstelling (praktijkstem, stemmen, model) in het blok "## Praktijkinstellingen"; ontbreekt het blok, dan vóór het eerste
+// bandje (wv743). `stemmen` (wv757) is de lijst waaruit David per bandje kiest: items gescheiden door ';', elk 'naam (motor:id)', een
+// kaal id zonder motor is ElevenLabs (afspraak met de mini-app, wv744). De schrijver is strikt: elk item moet zo te lezen zijn.
+const INSTELLINGEN = ['praktijkstem', 'stemmen', 'model'];
+const INSTELLING_MAX = { stemmen: 600 };
+const STEMITEM_RE = /^([^();:]{1,40}?)\s*\(\s*([A-Za-z0-9_.:\/-]{1,100})\s*\)$/;
+function stemmenLijst(w) {
+  return String(w || '').split(';').map(function (x) { return x.trim(); }).filter(Boolean).map(function (x) {
+    const m = STEMITEM_RE.exec(x);
+    if (!m) return null;
+    const id = m[2].indexOf(':') < 0 ? 'elevenlabs:' + m[2] : m[2];
+    return STEM_RE.test(id) ? { naam: m[1].trim(), id: id } : null;
+  });
+}
 function zetInstelling(md, voorvoegsel, sleutel, waarde, klok) {
   const p = parse(md, voorvoegsel);
   if (p.fouten.length) return { status: 409, fout: 'de registerpagina is niet in orde: ' + p.fouten.join('; ') };
   if (INSTELLINGEN.indexOf(sleutel) < 0) return { status: 400, fout: 'onbekende instelling' };
-  const w = eenRegel(waarde, 100);
+  const w = eenRegel(waarde, INSTELLING_MAX[sleutel] || 100);
+  if (sleutel === 'stemmen') {
+    const l = stemmenLijst(w);
+    if (!l.length || l.indexOf(null) >= 0) return { status: 400, fout: "stemmen: elk item 'naam (motor:id)', gescheiden door ;" };
+  }
   let regels = p.regels.slice();
   const kop = regels.findIndex(function (r, i) { return i >= p.frontmatterTot && /^##\s+praktijkinstellingen\s*$/i.test(r); });
   if (kop < 0) {
@@ -652,4 +668,4 @@ function routes(deps) {
 }
 
 module.exports = { PRAKTIJKEN, GRENS, STEM_STANDAARD, normTekst, tekstHash, parse, bandjeUit, zetTekst, zetVoorstel, haalVoorstelWeg, zetVelden, nieuwBandje,
-  zetInstelling, stemmenUit, maak, routes };
+  zetInstelling, stemmenLijst, stemmenUit, maak, routes };

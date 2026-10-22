@@ -364,6 +364,14 @@ await app('POST /app/bandjes/instellingen', { praktijk: 'groenhouten', praktijks
 { const p = B.parse(fs.readFileSync(GH2, 'utf8'), 'gh'); toets('B instellingen: blok blijft één, model-regel blijft staan', p.instellingen.praktijkstem === 'piper:nl_NL-ronnie-medium' && p.instellingen.model === 'piper' && (fs.readFileSync(GH2, 'utf8').match(/^- praktijkstem:/gm) || []).length === 1); }
 { const md = B.zetInstelling('---\nupdated: 2026-01-01\n---\n# X\n\n## gh-aa — A\n**Tekst**\n> a\n', 'gh', 'praktijkstem', 'piper:nl_NL-ronnie-medium');
   toets('B instellingen: blok aangemaakt vóór het eerste bandje', md.status === 200 && /\n## Praktijkinstellingen\n- praktijkstem: piper:nl_NL-ronnie-medium\n\n## gh-aa/.test(md.md), md.md); }
+{ const md0 = '---\nupdated: 2026-01-01\n---\n# X\n\n## Praktijkinstellingen\n- praktijkstem: onbekend\n- model: onbekend\n\n## gh-aa — A\n**Tekst**\n> a\n';
+  let r1 = B.zetInstelling(md0, 'gh', 'stemmen', 'Roos (elevenlabs:7qdUFMklKPaaAVMsBTBt); Kees (abcDEF123)');
+  toets('B instellingen wv757: stemmen gezet als nieuwe regel na model, lijst leesbaar (kaal id = elevenlabs)', r1.status === 200 && /\n- model: onbekend\n- stemmen: Roos \(elevenlabs:7qdUFMklKPaaAVMsBTBt\); Kees \(abcDEF123\)\n\n## gh-aa/.test(r1.md)
+    && JSON.stringify(B.stemmenLijst(r1.instellingen.stemmen)) === JSON.stringify([{ naam: 'Roos', id: 'elevenlabs:7qdUFMklKPaaAVMsBTBt' }, { naam: 'Kees', id: 'elevenlabs:abcDEF123' }]), r1);
+  const r2 = B.zetInstelling(r1.md, 'gh', 'model', 'standaard van Studio fase 2');
+  toets('B instellingen wv757: model overschreven, stemmen blijft', r2.status === 200 && r2.instellingen.model === 'standaard van Studio fase 2' && /- stemmen: Roos/.test(r2.md) && (r2.md.match(/^- model:/gm) || []).length === 1, r2);
+  toets('B instellingen wv757: stemmen zonder (motor:id) geweigerd', B.zetInstelling(md0, 'gh', 'stemmen', 'Roos').status === 400 && B.zetInstelling(md0, 'gh', 'stemmen', 'Roos (ab:yz); ').status === 200 && B.zetInstelling(md0, 'gh', 'stemmen', 'Roos (a b)').status === 400 && B.zetInstelling(md0, 'gh', 'stemmen', '').status === 400);
+  toets('B instellingen wv757: lange lijst (600) niet afgekapt op 100', B.zetInstelling(md0, 'gh', 'stemmen', Array.from({ length: 8 }, (_, i) => 'Stem' + i + ' (elevenlabs:7qdUFMklKPaaAVMsBTB' + i + ')').join('; ')).instellingen.stemmen.split(';').length === 8); }
 { const md = fs.readFileSync(TG2, 'utf8').replace('- praktijkstem: piper:nl_NL-ronnie-medium', '- praktijkstem: onbekend (ElevenLabs)'); fs.writeFileSync(TG2, md);
   g = await app('GET /app/bandjes', {});
   toets('B praktijkstem "onbekend" in het register: valt terug op de gratis proefstem', g.j.praktijken[0].praktijkstem === 'piper:nl_NL-ronnie-medium'); }
