@@ -67,17 +67,22 @@ const src = fs.readFileSync('server.js', 'utf8');
 const a = src.indexOf('// ── wv680: bankluis'), b = src.indexOf('// ── einde bankluis ──');
 const k1 = src.indexOf('function smalKind('), k2 = src.indexOf('async function smalSbRpc(');
 const logs = [], zend = [], rpc = [];
-let zendFout = null, rpcFout = null;
+let zendFout = null, rpcFout = null, leesFout = null; const tabel = [];
 const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD, N8N_API_KEY: 'k' };
 const g2 = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT: VAULT, SECRET: 'x'.repeat(40),
   __dirname: process.cwd(), process: { env: env, execPath: process.execPath, pid: process.pid }, spawn: spawn, APP_MELD_TABEL: 'TABEL',
-  appN8nBasis: () => 'http://n8n.test', appN8nZend: async function (m, p, body) { if (zendFout) throw new Error(zendFout); zend.push({ m, p, body }); return [Object.assign({ id: 1 }, body.data)]; },
+  appN8nBasis: () => 'http://n8n.test', appN8nZend: async function (m, p, body) {
+    if (m === 'GET') { if (leesFout) throw new Error(leesFout); return { data: tabel.slice(), nextCursor: null }; }
+    if (zendFout) throw new Error(zendFout); zend.push({ m, p, body });
+    const i = tabel.findIndex((r) => r.bron === 'geld'); const rij = Object.assign({ id: 1 }, body.data);
+    if (i >= 0) tabel[i] = rij; else tabel.push(rij);
+    return rij; },   // n8n geeft bij upsert één object terug (OpenAPI); de pod leest daarna terug
   fetch: async function () { throw new Error('geen netwerk in deze toets'); },
   appSbRpc: async function (n, p) { if (rpcFout) throw new Error(rpcFout); rpc.push({ n, p }); return { ok: true }; },
   logError: (w, e) => logs.push(w + ': ' + (e && e.message || e)), schrijfLog: (x) => logs.push(x), nu: () => 'NU', velden: (o) => JSON.stringify(o),
   reqPath: (req) => (req.url || '').split('?')[0], rolPoort: (res, verder) => verder(), rol: { eerste: true }, rolPrimair: () => true, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 50 };
 const ctx = vm.createContext(g2);
-vm.runInContext(src.slice(k1, k2) + '\n' + src.slice(a, b) + '\n;globalThis.__h = { geldBriefingRonde };', ctx, { filename: 'server.js#bank' });
+vm.runInContext(src.slice(k1, k2) + '\n' + src.slice(a, b) + '\n;globalThis.__h = { geldBriefingRonde, gg: geldGeheugen };', ctx, { filename: 'server.js#bank' });
 const h = ctx.__h;
 const STAAT = path.join(BD, 'geld-briefing.json');
 const ms = (d, u) => Date.parse(d + 'T' + String(u).padStart(2, '0') + ':00:00+01:00');
@@ -146,6 +151,13 @@ const boxRijen = () => (fs.readFileSync(BOX, 'utf8').match(/^## \[direct\]/gm) |
   toets('volgende avond: kaart alsnog gezet, geen nieuwe rij', u.reden === 'al gedaan' && JSON.parse(fs.readFileSync(STAAT, 'utf8')).kaarten_open.length === 0 && rpc.some((x) => /bijstorten/.test(x.p.p.titel)));
   toets('do 31-12 (geen briefingdag-inhaal na de maand-klaar) en 1-1 → januari nog niet', (await ronde('2026-12-31', 18)).reden === 'nog niet');
 
+  // geheugen kwijt (niet schrijfbaar + herstart) maar de rij voor deze maand staat er al → geen tweede blok
+  const bewaard = fs.readFileSync(STAAT, 'utf8'); const zendVoor = zend.length;
+  fs.writeFileSync(STAAT, JSON.stringify({ laatste_peil: '2026-11-24', gemeld: {} }), { mode: 0o600 });
+  h.gg.klaar = null; h.gg.fouten = {};
+  u = await ronde('2026-12-29', 18);
+  toets('rij voor deze maand staat al in n8n → al gedaan, geen tweede rij', /rij staat er/.test(u.reden || '') && zend.length === zendVoor, u);
+  fs.writeFileSync(STAAT, bewaard, { mode: 0o600 });
   // podklok wijkt af; poort; onleesbaar geheugen
   u = await ronde('2027-01-24', 18, { n8nMs: ms('2027-01-24', 18) + 2 * 3600 * 1000 });
   toets('januari: podklok 2 uur naast n8n → fout, geen rij', /podklok/.test(u.fout || '') && zend.filter((x) => x.body.data.datum === '2027-01-25').length === 0, u);
@@ -159,6 +171,18 @@ const boxRijen = () => (fs.readFileSync(BOX, 'utf8').match(/^## \[direct\]/gm) |
   kind = uitkomst([sig]);
   u = await ronde('2027-01-27', 18);
   toets('onleesbaar geheugen → fout, geen rij (nooit als leeg behandelen)', /onleesbaar/.test(u.fout || '') && zend.filter((x) => /^2027-01/.test(x.body.data.datum)).length === 0, u);
+  // kaart die steeds faalt: na 3 pogingen eruit met één box-rij
+  fs.writeFileSync(STAAT, JSON.stringify({ laatste_peil: '2026-12-27', gemeld: {}, maand_klaar: '2027-01', kaarten_open: [{ sleutel: 'geld-aaaaaaaaaaaa', titel: 'x' }] }), { mode: 0o600 });
+  h.gg.klaar = null; h.gg.fouten = {}; rpcFout = 'geweigerd';
+  const bx = boxRijen();
+  for (const d of ['2027-01-26', '2027-01-27', '2027-01-28']) await ronde(d, 18);
+  st = JSON.parse(fs.readFileSync(STAAT, 'utf8'));
+  toets('kaart na 3 mislukte pogingen weg, één box-rij, _pogingen niet naar de RPC', st.kaarten_open.length === 0 && boxRijen() === bx + 1, [st.kaarten_open, boxRijen() - bx]);
+  rpcFout = null;
+  leesFout = 'n8n http 503'; fs.writeFileSync(STAAT, JSON.stringify({ laatste_peil: '2026-12-27', gemeld: {} }), { mode: 0o600 }); h.gg.klaar = null; h.gg.fouten = {};
+  u = await ronde('2027-01-25', 18);
+  toets('ochtend_buffer niet leesbaar → fout, geen rij', /niet leesbaar/.test(u.fout || ''), u);
+  leesFout = null;
   toets('geen bedragen in api-log', !logs.some((x) => /€|\d+,\d\d/.test(x)), logs.filter((x) => /€|\d+,\d\d/.test(x)));
   console.log('\n' + goed + ' groen, ' + fouten + ' rood'); process.exit(fouten ? 1 : 0);
 })().catch(function (e) { console.log('ROOD  uitzondering: ' + (e && e.stack || e)); process.exit(1); });

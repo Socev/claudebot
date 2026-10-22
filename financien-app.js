@@ -399,7 +399,7 @@ function briefing(A, a, o) {
       if (!v) {
         if (!x.start_afgekapt && !isPaypal(x) && aantalIn(x, rD) >= 2 && x.eerste > plusMaanden(D, -4))
           sig.push({ soort: 'nieuw', sleutel: 'nieuw|' + x.sleutel, naam: naam, ernst: 'info', link: link,
-            zin: 'Nieuw: ' + naam + (x.soort_post ? ' (' + veilig(x.soort_post, 30).toLowerCase() + ')' : '') + ', ' + eur(x.per_maand) + ' per maand sinds ' + mndJaar(x.eerste) + '.' });
+            zin: 'Nieuw: ' + naam + (x.soort_post && naam === toonNaam(x) ? ' (' + veilig(x.soort_post, 30).toLowerCase() + ')' : '') + ', ' + eur(x.per_maand) + ' per maand sinds ' + mndJaar(x.eerste) + '.' });
         return;
       }
       gebruikt.add(v);

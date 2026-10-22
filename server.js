@@ -14411,12 +14411,19 @@ async function geldN8nTijd() {
   if (!Number.isFinite(ms)) throw new Error('n8n gaf geen tijd');
   return ms;
 }
+const GELD_FILTER = { type: 'and', filters: [{ columnName: 'bron', condition: 'eq', value: 'geld' }] };
+// de geld-rij zoals n8n hem nu heeft (of null); de vorm van het upsert-antwoord verschilt per n8n-versie, dit leesantwoord niet (Fable wv777 diff #1)
+async function geldRijLees() {
+  const j = await appN8nZend('GET', '/data-tables/' + APP_MELD_TABEL + '/rows?limit=5&filter=' + encodeURIComponent(JSON.stringify(GELD_FILTER)));
+  const l = Array.isArray(j && j.data) ? j.data : [];
+  return l.filter(function (r) { return r && r.bron === 'geld'; }).sort(function (x, y) { return String(x.datum) < String(y.datum) ? 1 : -1; })[0] || null;
+}
 async function geldRijZet(datum, tekst) {
-  const body = { filter: { type: 'and', filters: [{ columnName: 'bron', condition: 'eq', value: 'geld' }] }, data: { bron: 'geld', datum: datum, tekst: tekst }, returnData: true };
+  const body = { filter: GELD_FILTER, data: { bron: 'geld', datum: datum, tekst: tekst }, returnData: true };
   const poging = function () { return appN8nZend('POST', '/data-tables/' + APP_MELD_TABEL + '/rows/upsert', body); };
-  const r = await poging().catch(function () { return new Promise(function (ok) { setTimeout(ok, 2000); }).then(poging); });
-  const rij = Array.isArray(r) ? r[0] : r && Array.isArray(r.data) ? r.data[0] : null;
-  if (!rij || rij.bron !== 'geld' || rij.datum !== datum) throw new Error('upsert gaf geen rij terug');
+  await poging().catch(function () { return new Promise(function (ok) { setTimeout(ok, 2000); }).then(poging); });
+  const rij = await geldRijLees();   // teruglezen: staat hij er echt, met deze datum en tekst?
+  if (!rij || rij.datum !== datum || rij.tekst !== tekst) throw new Error('rij na het schrijven niet teruggelezen');
 }
 // De kaart. Geen paden, wv-nummers of verwijzingen (mk_voor_jou_zet weigert die); de stappen staan in de kaart zelf.
 function geldKaart(s, peil) {
@@ -14448,8 +14455,18 @@ async function geldBriefingRonde(o) {
   const F = geldF();
   const nuMs = o.nuMs || Date.now();
   const vandaag = o.datum || geldYmd(nuMs);
-  const uur = o.uur != null ? o.uur : Number(new Date(nuMs).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false }));
+  const uur = o.uur != null ? o.uur : Number(new Date(nuMs).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }));
   if (!(uur >= 12)) return { gedaan: false, reden: 'alleen na de avondronde' };
+  // klok eerst (Fable wv777 diff #2): een achterlopende podklok zou anders stil "nog niet" zeggen tot hij zelf de 25e haalt.
+  // n8n onbereikbaar: doorgaan op de podklok (dan faalt het schrijven toch). Afwijking: luid, één box-rij per maand.
+  let n8nMs = o.n8nMs;
+  if (n8nMs == null) { try { n8nMs = await geldN8nTijd(); } catch (e) { n8nMs = null; } }
+  if (n8nMs != null && Math.abs(n8nMs - nuMs) > GELD_KLOK_MS) {
+    const m = geldYmd(n8nMs).slice(0, 7), k = m + '|klok';
+    if (!geldGeheugen.fouten[k]) { geldGeheugen.fouten[k] = true; bankBoxRij({ bron: 'geld', maand: m, tekst: 'podklok wijkt meer dan 30 minuten af van n8n; geen blok tot de klok klopt' }); }
+    schrijfLog(nu() + ' bank ' + velden({ opdracht: 'geld-briefing', ok: false, fout: 'podklok wijkt af van n8n' }));
+    return { gedaan: false, fout: 'podklok wijkt meer dan 30 minuten af van n8n; geen blok' };
+  }
   const morgen = geldYmd(Date.parse(vandaag + 'T12:00:00Z') + 86400000), M = morgen.slice(0, 7), doel = F.briefingDag(M);
   if (!doel || morgen < doel) return { gedaan: false, reden: 'nog niet' };
   if (!F.werkdag(morgen)) return { gedaan: false, reden: 'morgen geen werkdag', maand: M };
@@ -14469,9 +14486,11 @@ async function geldBriefingRonde(o) {
     if (Array.isArray(s.kaarten_open) && s.kaarten_open.length) await geldKaarten(s);
     return { gedaan: false, reden: 'al gedaan', maand: M };
   }
-  let n8nMs = o.n8nMs;
-  if (n8nMs == null) { try { n8nMs = await geldN8nTijd(); } catch (e) { return fout('n8n niet bereikbaar voor de tijd (' + String(e.message || e).slice(0, 40) + ')', s); } }
-  if (Math.abs(n8nMs - nuMs) > GELD_KLOK_MS) return fout('podklok wijkt meer dan 30 minuten af van n8n; geen blok', s);
+  // staat er al een geld-rij voor deze maand (geheugen niet schrijfbaar en daarna een herstart: Fable diff #4), dan niet nog een
+  try {
+    const al = await geldRijLees();
+    if (al && String(al.datum).slice(0, 7) === M && al.datum >= doel && String(al.tekst || '').trim()) { geldGeheugen.klaar = M; return { gedaan: false, reden: 'al gedaan (rij staat er)', maand: M }; }
+  } catch (e) { return fout('ochtend_buffer niet leesbaar (' + String(e.message || e).slice(0, 40) + ')', s); }
   const args = ['geld-briefing', '--peil', vandaag];
   if (typeof s.laatste_peil === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s.laatste_peil)) args.push('--vorige', s.laatste_peil);
   const r = await bankKind(args);
@@ -14501,7 +14520,13 @@ async function geldKaarten(s) {
   if (!Array.isArray(s.kaarten_open) || !s.kaarten_open.length) return;
   const rest = [];
   for (const k of (s.kaarten_open || [])) {
-    try { await appSbRpc('mk_voor_jou_zet', { p: k }); } catch (e) { logError('geld-kaart', e); rest.push(k); }
+    const p = Object.assign({}, k); delete p._pogingen;
+    try { await appSbRpc('mk_voor_jou_zet', { p: p }); } catch (e) {
+      logError('geld-kaart', e);
+      k._pogingen = (k._pogingen | 0) + 1;
+      if (k._pogingen < 3) rest.push(k);
+      else bankBoxRij({ bron: 'geld', maand: String(s.maand_klaar || ''), tekst: 'Voor jou-kaart na 3 pogingen niet gezet (' + String(e && e.message || e).replace(/\d{6,}/g, '#').slice(0, 60) + '); het blok noemde hem wel' });
+    }
   }
   s.kaarten_open = rest;
   try { geldStaatZet(s); } catch (e) { logError('geld-staat', e); }
