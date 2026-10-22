@@ -2173,7 +2173,7 @@ setTimeout(function () { try { nachtresetTik(); } catch (e) { logError('nachtres
 // ── Werklessen op context (19-9-2026, akkoord David: "Ja dat mag") ──────────
 // WAAROM DIT HIER STAAT. CLAUDE.md liet elke sessie `00_Systeem/Werklessen.md`
 // integraal meelezen: 49,6 KB met 67 lessen, waarvan er per taak een handvol van
-// toepassing is. Gemeten met de vaste toetsset in `00_Systeem/Lessen` (30 echte
+// toepassing is. Gemeten met de vaste toetsset in `mk-scripts/lessen` (30 echte
 // situaties, 37 verwachte lessen): op betekenis ophalen levert 91,9 % van de
 // juiste lessen in de top 5, tegen 51,4 % voor kale woordmatching - en het blok
 // is dan ~2,6 KB in plaats van 49,6 KB.
@@ -13382,7 +13382,7 @@ const MK_SESSIES = new Set([
   'ciso', 'kaizen-review', 'structuur-wachter', 'socev-site',
   'n8n-git-backup',                                   // node n8n-git-backup.mjs (N8N_API_KEY)
   'keten-attest',                                     // ciso-dag.mjs, olares-login-check.py (SUPABASE_SERVICE_ROLE)
-  'tokenmeting',                                      // Tokens/tank.mjs (SUPABASE_SERVICE_ROLE)
+  'tokenmeting',                                      // mk-scripts/tokens/*.mjs (SUPABASE_SERVICE_ROLE; wv784)
   'site-verversing',                                  // node verversing.js --push (n8n, Supabase-site, rclone)
   'ideeenmotor',                                      // werkvoorraad.py zet (SUPABASE_SERVICE_ROLE)
   'voor-jou',                                         // voor-jou.py (SUPABASE_SERVICE_ROLE, Todoist)
@@ -13527,7 +13527,7 @@ async function smalActie(actie, d) {
       const rijen = [];
       for (const t of taken) { const v = await lessenVector(t.uit_tekst); if (v) rijen.push({ id: t.uit_id, embedding: JSON.stringify(v) }); }
       if (rijen.length) { const u = await smalSbRpc(sb, 'mk_les_embedding_zet', { p_rijen: rijen, p_model: LESSEN_EMBED_MODEL }); ingebed = Array.isArray(u) && u[0] ? (u[0].uit_bijgewerkt || 0) : 0; }
-      if (rijen.length < taken.length) embedFout = (taken.length - rijen.length) + ' zonder vector (Workers AI); herstel in de machinekamer: node 00_Systeem/Lessen/embed-lessen.mjs';
+      if (rijen.length < taken.length) embedFout = (taken.length - rijen.length) + ' zonder vector (Workers AI); herstel in de machinekamer: node /opt/data/AI_SecondBrain/.claude/skills/nachtconsolidatie/scripts/embed-lessen.mjs';
     } catch (e) { embedFout = 'embedden mislukt: ' + String(e && e.message || e).slice(0, 160); }
     return { status: 200, j: { ok: !embedFout, ids: ids, ingebed: ingebed, notities: notities, fout: embedFout || undefined } };
   }
