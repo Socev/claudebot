@@ -43,9 +43,20 @@ toets('v3 gelijk aan v4', S.naarModel(p, 'eleven_v3', { pauze: 0.8 }) === S.naar
 toets('pauze 0: geen tag', S.naarModel(p, 'eleven_multilingual_v2', { pauze: 0 }) === 'Eerste zin. Tweede zin? Derde zin!');
 toets('Piper (model null): markering weg', S.naarModel(p, null) === 'Eerste zin. Tweede zin? Derde zin!');
 toets('v2: audiotags worden weggehaald (anders voorgelezen)', S.naarModel('Hallo [whispering] daar.', 'eleven_multilingual_v2') === 'Hallo daar.');
-toets('v4: break-tag weggehaald, audiotag blijft', S.naarModel('Hallo <break time="1s"/> [whispering] daar.', 'eleven_v4') === 'Hallo [whispering] daar.');
+toets('v4: eigen break-tag wordt [pause], audiotag blijft', S.naarModel('Hallo <break time="1s"/> [whispering] daar.', 'eleven_v4') === 'Hallo [pause] [whispering] daar.');
 toets('v2: hooguit 40 break-tags, daarna …', (S.naarModel(Array(50).fill('Zin.').join(' [pauze] '), 'eleven_multilingual_v2').match(/<break/g) || []).length === 40);
 toets('break hooguit 3 s', /<break time="3\.0s" \/>/.test(S.naarModel('A. [pauze 9] B.', 'eleven_multilingual_v2')));
+// Fable wv803: doorlekkende tags (#2) en randgevallen (#5–#9)
+toets('v4: onleesbare [pauze …] en <tags> gaan eruit, [Pauze 1,5 sec] telt', S.naarModel('A [pauze1] B [pauze lang] C [Pauze 1,5 sec] D <speak>E</speak>', 'eleven_v4') === 'A B C [long pause] D E', S.naarModel('A [pauze1] B [pauze lang] C [Pauze 1,5 sec] D <speak>E</speak>', 'eleven_v4'));
+toets('v2: eigen <break> afgetopt op 3 s, ms omgerekend', S.naarModel('A <break time="5s"/> B <break time="500ms" /> C', 'eleven_multilingual_v2') === 'A <break time="3.0s" /> B <break time="0.5s" /> C');
+toets('v4: eigen <break> wordt [long pause]', S.naarModel('A <break time="1.5s"/> B', 'eleven_v4') === 'A [long pause] B');
+toets('nummer 085-7731100 in 3-3-2-2', af('Bel 085-7731100.') === 'Bel nul vijfentachtig, zeven zeven drie, elf, nul nul.', af('Bel 085-7731100.'));
+toets('nummer met " - " en +31', af('Bel 033 - 494 12 34.') === 'Bel nul drieëndertig, vier negen vier, twaalf, vierendertig.' && af('Bel +31 85 773 11 00.') === 'Bel nul vijfentachtig, zeven zeven drie, elf, nul nul.', [af('Bel 033 - 494 12 34.'), af('Bel +31 85 773 11 00.')]);
+toets('"1e verdieping" blijft', af('Op de 1e verdieping.') === 'Op de 1e verdieping.');
+toets('€ 1.150,00 en € 5,-', af('Kost € 1.150,00 of € 5,-.') === 'Kost 1150 euro of 5 euro.', af('Kost € 1.150,00 of € 5,-.'));
+toets('half/kwart op de klok van 12', af('Van 12:30 tot 13:15 en 23:45.') === 'Van half één tot kwart over één en kwart voor twaalf.', af('Van 12:30 tot 13:15 en 23:45.'));
+toets('geen website: typfout "apotheek.De", woord-TLD zonder www', af('Bij apotheek.De apotheek. Zie info.nu of www.site.de.') === 'Bij apotheek.De apotheek. [pauze] Zie info.nu of w w w punt site punt d e.', af('Bij apotheek.De apotheek. Zie info.nu of www.site.de.'));
+toets('a.u.b. midden in de zin; z.s.m. op een zinseinde houdt de pauze', af('Graag a.u.b. even. Bel z.s.m. Dan.') === 'Graag alstublieft even. [pauze] Bel zo snel mogelijk. [pauze] Dan.', af('Graag a.u.b. even. Bel z.s.m. Dan.'));
 // zinnen
 toets('zinnen: stukken zonder markering', JSON.stringify(S.zinnen(p)) === JSON.stringify(['Eerste zin.', 'Tweede zin?', 'Derde zin!']), S.zinnen(p));
 toets('zinnen: leeg = []', S.zinnen('').length === 0);

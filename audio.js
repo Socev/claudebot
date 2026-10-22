@@ -210,8 +210,10 @@ async function normaliseer(dir, o) {
     await nul();
     const pcm = naarPcm16(m);
     const tmp = f + '.norm';
-    fs.writeFileSync(tmp, Buffer.concat([wavKop(1, w.rate, 16, pcm.length), pcm]), { mode: 0o600 });
-    fs.renameSync(tmp, f);
+    try {
+      fs.writeFileSync(tmp, Buffer.concat([wavKop(1, w.rate, 16, pcm.length), pcm]), { mode: 0o600 });
+      fs.renameSync(tmp, f);
+    } catch (e) { try { fs.unlinkSync(tmp); } catch (x) {} throw e; }   // geen restbestand dat mee naar Bestanden gaat (Fable wv803 #10)
     uit.push({ naam: n, versterking_db: Math.round(200 * Math.log10(v)) / 10 });
   }
   return uit;

@@ -335,6 +335,10 @@ const router = http.createServer((req, res) => {
     vers = true; p = R.posts.length;
     m = await rt.app('POST /app/bandjes/proef', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, zin: 5, beurt_id: nieuweBeurt() }, ctx);
     toets('14 proefzin buiten de lijst: 400, geen aanroep', m.status === 400 && R.posts.length === p, m);
+    vers = true; p = R.posts.length;
+    m = await rt.app('POST /app/bandjes/proef', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, zin: 0, spreek_hash: 'a'.repeat(16), beurt_id: nieuweBeurt() }, ctx);
+    toets('14 spreek_hash klopt niet (eigen versie/uitspraaklijst intussen gewijzigd): 409 gewijzigd, geen aanroep (Fable #3)', m.status === 409 && m.j.gewijzigd === true && R.posts.length === p, m);
+    toets('14 GET geeft spreek-hash van 16 hex', /^[a-f0-9]{16}$/.test(b14.spreektekst.hash || ''), b14.spreektekst);
     vers = false; p = R.posts.length;
     m = await rt.app('POST /app/bandjes/proef', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, zin: 0, beurt_id: nieuweBeurt() }, ctx);
     toets('14 proefzin zonder vingerafdruk: 403 vers_nodig (betaald)', m.status === 403 && m.j.vers_nodig === true && R.posts.length === p, m);
@@ -352,6 +356,17 @@ const router = http.createServer((req, res) => {
     r14 = await rt.app('POST /app/bandjes/tekst', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, tekst: 'Wij zijn vandaag gesloten.' }, ctx);
     b14 = await lees14();
     toets('14 tekst gewijzigd: eigen spreektekst verouderd, automatische geldt weer', r14.status === 200 && b14.spreektekst.verouderd === true && b14.spreektekst.eigen === false && b14.spreektekst.tekst === 'Wij zijn vandaag gesloten.' && /Eigen versie/.test(b14.spreektekst.eigen_oud || ''), b14.spreektekst);
+    // Fable #1: David zet in Obsidian twee lege regels onder de kop; terug naar automatisch mag het citaat niet als wees laten staan
+    {
+      const b15 = await lees14();
+      await rt.app('POST /app/bandjes/spreektekst', { praktijk: 'tolgaarde', bandje: b15.id, versie: b15.versie, tekst_hash: b15.tekst_hash, spreektekst: 'Wees-proef. [pauze] Tweede.' }, ctx);
+      fs.writeFileSync(tgPad, fs.readFileSync(tgPad, 'utf8').replace(/(\*\*Spreektekst\*\* [^\n]*\n)/, '$1\n\n'));
+      const b16 = await lees14();
+      toets('14 (voorwaarde) eigen spreektekst met twee lege regels onder de kop wordt nog gelezen', b16.spreektekst.eigen === true && /Wees-proef/.test(b16.spreektekst.tekst), b16.spreektekst);
+      const r16 = await rt.app('POST /app/bandjes/spreektekst', { praktijk: 'tolgaarde', bandje: b16.id, versie: b16.versie, tekst_hash: b16.tekst_hash, spreektekst: null }, ctx);
+      const b17 = await lees14();
+      toets('14 terug naar automatisch met lege regels: geen wees-citaat, tekst onveranderd (Fable #1)', r16.status === 200 && !/Wees-proef/.test(fs.readFileSync(tgPad, 'utf8')) && b17.tekst === b16.tekst && b17.tekst_hash === b16.tekst_hash, { t: b17.tekst, reg: fs.readFileSync(tgPad, 'utf8').slice(-400) });
+    }
     r14 = await rt.app('POST /app/bandjes/spreektekst', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: 'f'.repeat(16), spreektekst: 'x' }, ctx);
     toets('14 spreektekst met verkeerde hash: 409 gewijzigd', r14.status === 409 && r14.j.gewijzigd === true, r14);
     r14 = await rt.app('POST /app/bandjes/spreektekst', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, spreektekst: null }, ctx);

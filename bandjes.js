@@ -161,7 +161,9 @@ function herschrijfSectie(p, b, w) {
       let at = r.length; while (at > 1 && r[at - 1].trim() === '') at--;
       r = r.slice(0, at).concat(['', '**Tekst**'], nieuw, r.slice(at));
     } else {
-      let s = m + 1; while (s < r.length && r[s].trim() === '' && s < m + 2) s++;   // hooguit één lege regel tussen kop en citaat
+      // wv803 (Fable #1): even tolerant als de lezer — elk aantal lege regels tussen kop en citaat (anders blijft het citaat als wees
+      // staan en leest de lezer het als deel van het blok erboven, bv. een oude spreektekst als bandjestekst)
+      let s = m + 1; while (s < r.length && r[s].trim() === '') s++;
       const e = /^>/.test(r[s] || '') ? blokEind(r, s) : m + 1;
       r = r.slice(0, m + 1).concat(nieuw, r.slice(e));
     }
@@ -170,7 +172,7 @@ function herschrijfSectie(p, b, w) {
   if (w.voorstel !== undefined) {
     const m = r.findIndex(function (x) { return VOORSTEL_RE.test(x); });
     if (m >= 0) {
-      let s = m + 1; while (s < r.length && r[s].trim() === '' && s < m + 2) s++;
+      let s = m + 1; while (s < r.length && r[s].trim() === '') s++;
       const e = /^>/.test(r[s] || '') ? blokEind(r, s) : m + 1;
       let begin = m; if (begin > 0 && r[begin - 1].trim() === '') begin--;
       r = r.slice(0, begin).concat(r.slice(e));
@@ -179,7 +181,7 @@ function herschrijfSectie(p, b, w) {
       const blok = ['', '**Voorstel van Socev**' + (w.voorstel.kop ? ' ' + eenRegel(w.voorstel.kop, GRENS.reden + 40) : '')].concat(citaat(w.voorstel.tekst));
       const tm = r.findIndex(function (x) { return TEKST_RE.test(x); });
       let at;
-      if (tm >= 0) { let s = tm + 1; while (s < r.length && r[s].trim() === '' && s < tm + 2) s++; at = /^>/.test(r[s] || '') ? blokEind(r, s) : tm + 1; }
+      if (tm >= 0) { let s = tm + 1; while (s < r.length && r[s].trim() === '') s++; at = /^>/.test(r[s] || '') ? blokEind(r, s) : tm + 1; }
       else { at = r.length; while (at > 1 && r[at - 1].trim() === '') at--; }
       r = r.slice(0, at).concat(blok, r.slice(at));
     }
@@ -188,7 +190,7 @@ function herschrijfSectie(p, b, w) {
   if (w.spreek !== undefined) {
     const m = r.findIndex(function (x) { return SPREEK_RE.test(x); });
     if (m >= 0) {
-      let s = m + 1; while (s < r.length && r[s].trim() === '' && s < m + 2) s++;
+      let s = m + 1; while (s < r.length && r[s].trim() === '') s++;
       const e = /^>/.test(r[s] || '') ? blokEind(r, s) : m + 1;
       let begin = m; if (begin > 0 && r[begin - 1].trim() === '') begin--;
       r = r.slice(0, begin).concat(r.slice(e));
@@ -197,7 +199,7 @@ function herschrijfSectie(p, b, w) {
       const blok = ['', '**Spreektekst** ' + eenRegel(w.spreek.kop, 120)].concat(citaat(w.spreek.tekst));
       const tm = r.findIndex(function (x) { return TEKST_RE.test(x); });
       let at;
-      if (tm >= 0) { let s = tm + 1; while (s < r.length && r[s].trim() === '' && s < tm + 2) s++; at = /^>/.test(r[s] || '') ? blokEind(r, s) : tm + 1; }
+      if (tm >= 0) { let s = tm + 1; while (s < r.length && r[s].trim() === '') s++; at = /^>/.test(r[s] || '') ? blokEind(r, s) : tm + 1; }
       else { at = r.length; while (at > 1 && r[at - 1].trim() === '') at--; }
       r = r.slice(0, at).concat(blok, r.slice(at));
     }
@@ -540,7 +542,10 @@ function spreekVan(b, inst) {
   const eigen = b && b.spreek_eigen;
   const geldig = !!(eigen && eigen.bij && eigen.bij === b.tekst_hash);
   const tekst = !b || b.onbekend || !b.tekst ? '' : geldig ? eigen.tekst : SPREEK.afleiden(b.tekst, inst && inst.uitspraak);
-  return { tekst: tekst, eigen: geldig, verouderd: !!eigen && !geldig, eigen_oud: eigen && !geldig ? eigen.tekst : null, zinnen: SPREEK.zinnen(tekst) };
+  // hash (Fable wv803 #3): wat David zag; maak/proef eisen hem, zodat een intussen gewijzigde eigen spreektekst of uitspraaklijst niet
+  // stil een andere tekst (en prijs) inspreekt dan hij bevestigde. ongekoppeld = eigen blok zonder hash (zelf in Obsidian geschreven).
+  return { tekst: tekst, hash: tekstHash(tekst), eigen: geldig, verouderd: !!eigen && !geldig, ongekoppeld: !!eigen && !eigen.bij,
+    eigen_oud: eigen && !geldig ? eigen.tekst : null, zinnen: SPREEK.zinnen(tekst) };
 }
 function knoppenVan(d) {
   const uit = {};
@@ -745,6 +750,8 @@ function routes(deps) {
     const kn = knoppenVan(d);
     if (kn.fout) return { status: 400, j: { ok: false, fout: kn.fout } };
     const sp = spreekVan(b, l.instellingen);
+    if (d.spreek_hash != null && d.spreek_hash !== '' && String(d.spreek_hash) !== sp.hash)
+      return { status: 409, j: { ok: false, fout: 'de spreektekst is intussen gewijzigd (eigen versie of uitspraaklijst); herlaad', gewijzigd: true } };
     let spreek = sp.tekst;
     const proef = actie === 'proef';
     if (proef) {
@@ -772,6 +779,8 @@ function routes(deps) {
       velden.snelheid = kn.waarden.snelheid;
       velden.stabiliteit = kn.waarden.stabiliteit;
     }
+    // Fable wv803 #4: een leesbare fout als de spreektekst (met pauzes) te lang is, vóór Studio en vóór de vingerafdruk
+    if (velden.tekst.length > SPREEK.MAX) return { status: 400, j: { ok: false, fout: 'de spreektekst is met de pauzes te lang voor de stem (' + velden.tekst.length + ' van ' + SPREEK.MAX + ' tekens); kort hem in of kies minder pauze' } };
     const r = await deps.studio.maak({ flow: s.flow, velden: velden, beurt_id: beurt }, ctx,
       { bron: Object.assign({ soort: 'bandje', praktijk: pr, bandje: id, versie: b.versie, tekst_hash: b.tekst_hash, stem: stem }, model ? { model: model } : {}, proef ? { proef: true } : {}) });
     if (r.status !== 200) return fouts(r);
