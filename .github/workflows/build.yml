@@ -171,6 +171,9 @@ jobs:
         run: bash test/bandjes.sh
       - name: "harvester (wv820, App Harvester)"
         run: bash test/harvester.sh
+      # Health-rapporten (wv811): start zonder taalmodel — alleen de startregel terug, omgeving-allowlist, tijdgrens, één tegelijk.
+      - name: "health-rapporten (wv811, start zonder taalmodel)"
+        run: bash test/health-rapporten-start.sh
       # Telefoonversie (wv743): 1 kHz/3 kHz doorlaat, 6 kHz → 2 kHz-spiegeling ≤ −40 dB, lengte, WAV-kop, µ-law binnen de G.711-fout.
       - name: "audio (wv743, telefoonversie 8 kHz PCM + µ-law)"
         run: bash test/audio.sh

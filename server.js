@@ -3688,6 +3688,20 @@ function handleRequest(req, res) {
     }); });
   }
 
+  // ── wv811: Health-rapporten starten zonder taalmodel (n8n AI - Health-rapporten; body-secret zoals /run; geen andere invoer) ──
+  if (req.method === 'POST' && req.url === '/health-rapporten') {
+    return rolPoort(res, function () { readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
+          !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
+      healthRapportenStart(function (r) {
+        reqLogExtra(res, { health_rapporten: r.j.ok ? r.j.regel.slice(0, 7) : 'fout' });
+        res.writeHead(r.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r.j));
+      });
+    }); });
+  }
+
   // ── wv561: Werkkamer-tegels zonder taalmodel (alleen lezen; body-secret zoals /run; geen andere invoer) ──
   if (req.method === 'POST' && req.url === '/werkkamer-tegels') {
     const eind = Date.now() + WK_TOTAAL_MS;   // totaalgrens inclusief de wachttijd van rolPoort (n8n-timeout 60 s)
@@ -14603,6 +14617,39 @@ async function bankRonde() {
 // uitkomst op (POST /bank-ronde/uitkomst). Een ronde duurt ± 30–75 s en de Olares-ingress kapt lange verzoeken mogelijk af;
 // dan zou de hoofdregel verloren gaan. De hoofdregel staat in kaarten.json (_hoofd) tot de uitkomst hem ophaalt.
 let bankRondeLaatste = null;   // { begin, eind, uitkomst }
+// ── wv811: Health-rapporten starten zonder taalmodel ─────────────────────────────────────────────────────────────────────
+// WAAROM. n8n AI - Health-rapporten startte de generator elk uur met een anonieme /run (Haiku: "voer dit ene commando uit").
+// Zo'n /run is smal, en zodra de loperstand `alles` aanzet draait hij als socev (1002), die /opt/data/bin, .health-pod en
+// /proc/<pid>/environ niet kan lezen (uid-scheiding, bouwplan sleutelscheiding § 8 voorwaarde c): dan faalt hij vanaf de eerste
+// ronde. Er is geen taalmodel nodig: de pod start het script zelf, als claude (1001), met alleen de basis en de eigen inlog in de
+// omgeving (het script leest de leessleutel van de health-pod zelf). Scheelt ook 24 Haiku-beurten per dag.
+// HOE. POST /health-rapporten {secret} → `python3 healthrapporten.py start` (het script koppelt de ronde zelf los en print één
+// regel GESTART…/LOOPT NOG…, zonder gezondheidsinhoud) → {ok, regel}. Eén start tegelijk; grens 240 s (genoom_wacht kan de
+// genoom-pijplijn bevragen). Fout → 502 met alleen de soort fout en de exitcode, nooit stdout/stderr van het script.
+// DEKT NIET: wat het script zelf doet (review F5, ontwerp Health-pod § 15).
+const HEALTH_RAPPORTEN_BIN = process.env.HEALTH_RAPPORTEN_BIN || '/opt/data/bin/healthrapporten.py';   // alleen de toets wijst elders heen
+const HEALTH_RAPPORTEN_ENV = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'CLAUDE_CODE_OAUTH_TOKEN'];
+const HEALTH_RAPPORTEN_MS = Number(process.env.HEALTH_RAPPORTEN_MS) || 240000;
+let healthRapportenBezig = false;
+function healthRapportenStart(klaar) {
+  if (healthRapportenBezig) return klaar({ status: 409, j: { ok: false, fout: 'er loopt al een start' } });
+  healthRapportenBezig = true;
+  const env = {};
+  HEALTH_RAPPORTEN_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
+  require('child_process').execFile('python3', [HEALTH_RAPPORTEN_BIN, 'start'],
+    { env: env, cwd: '/opt/data', timeout: HEALTH_RAPPORTEN_MS, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 },
+    function (err, stdout) {
+      healthRapportenBezig = false;
+      const m = /(GESTART|LOOPT NOG)[^\n]*/.exec(String(stdout || ''));
+      if (err || !m) {
+        const fout = err && err.killed ? 'start duurde langer dan ' + Math.round(HEALTH_RAPPORTEN_MS / 1000) + ' s'
+          : 'start niet bevestigd' + (err && err.code != null ? ' (exit ' + err.code + ')' : '');
+        logError('health-rapporten', new Error(fout));
+        return klaar({ status: 502, j: { ok: false, fout: fout } });
+      }
+      klaar({ status: 200, j: { ok: true, regel: m[0].slice(0, 400) } });
+    });
+}
 function bankRondeStart() {
   if (bankRondeBezig) return { status: 409, j: { ok: false, fout: 'er loopt al een bank-ronde', begin: bankRondeLaatste && bankRondeLaatste.begin } };
   bankRondeBezig = true;
