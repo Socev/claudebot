@@ -48,6 +48,7 @@ const klaar = () => {
   process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: 'KLAAR-' + modus + ' home=' + process.env.HOME, session_id: sid }));
   setTimeout(() => process.exit(0), 50);
 };
+if (modus === 'LINK' && process.env.OUTDIR) { try { fs.symlinkSync(${JSON.stringify(path.join(W, 'geheim.txt'))}, path.join(process.env.OUTDIR, 'link.txt')); fs.mkdirSync(path.join(process.env.OUTDIR, 'sub')); fs.symlinkSync(${JSON.stringify(W)}, path.join(process.env.OUTDIR, 'sub', 'maplink')); } catch (e) {} }
 if (modus === 'HANG') setInterval(() => r({ type: 'progress' }), 300);
 else if (modus === 'WACHT') { const go = ${JSON.stringify(path.join(W, 'go'))}; const iv = setInterval(() => { r({ type: 'progress' }); if (fs.existsSync(go)) { clearInterval(iv); klaar(); } }, 200); }
 else klaar();
@@ -147,6 +148,13 @@ hook.listen(0, '127.0.0.1', async () => {
     fs.writeFileSync(path.join(W, 'go'), '1');
     await wachtOp(async () => (await vraag('POST', '/result', { secret: 'proef', job_id: aW.job_id })).done, 8000);
     fs.unlinkSync(path.join(W, 'go'));
+    // ── L: symlinks in OUTDIR worden niet gevolgd (Fable wv715 #1) ──
+    fs.writeFileSync(path.join(W, 'geheim.txt'), 'GEHEIM-1001');
+    const rL = await run('loper-proef', 'MODUS:LINK');
+    const namenL = ((rL.result || rL).files || []).map(f => f.name);
+    toets('L: link naar een pod-bestand en een maplink in OUTDIR → niet in het resultaat, gewoon bestand wel', (rL.result || rL).ok === true &&
+      namenL.indexOf('uit-LINK.txt') >= 0 && namenL.indexOf('link.txt') < 0 && JSON.stringify((rL.result || rL).files || []).indexOf(Buffer.from('GEHEIM-1001').toString('base64')) < 0 &&
+      !namenL.some(n => /geheim|server\.js|loper\.log/.test(n)), JSON.stringify(namenL));
     // ── O: sessie-overgang ──
     const sid = '11111111-2222-4333-8444-555555555555';
     const projH = path.join(d, 'home', '.claude', 'projects', path.join(d, 'vault').replace(/[^a-zA-Z0-9]/g, '-'));
@@ -167,6 +175,16 @@ hook.listen(0, '127.0.0.1', async () => {
     toets('A: agent via de loper afgerond, register met loper_id, pid_start, gebruiker socev', agKlaar && ea.ok === true && !!ea.loper_id && !!ea.pid_start && ea.gebruiker === 'socev' && (ea.transcript || '').indexOf(THUIS) === 0, JSON.stringify(ea));
     const lijst = (await vraag('GET', '/agents')).agents;
     toets('A: /agents toont gebruiker socev', (lijst.find(x => x.job_id === ag.job_id) || {}).gebruiker === 'socev');
+    // ── A2: stand met alleen sessies (agents uit): agent met de agent-sleutel → toch via de loper (Fable #2); n8n-agent (API_SECRET) niet ──
+    fs.writeFileSync(STAND, JSON.stringify({ sessies: ['loper-proef'] }));
+    const agentSleutel = require('crypto').createHmac('sha256', 'proef').update('wv424-socev-agent').digest('hex');
+    const ag2 = await vraag('POST', '/agent', { secret: agentSleutel, label: 'socev: via sleutel', prompt: 'MODUS:AGENTSLEUTEL', chat_id: '40687', workspace: 'vault', runtime: 'claude' });
+    const ag3 = await vraag('POST', '/agent', { secret: 'proef', label: 'socev: via n8n', prompt: 'MODUS:AGENTN8N', chat_id: '40687', workspace: 'vault', runtime: 'claude' });
+    await wachtOp(() => { const x = reg(); return [ag2.job_id, ag3.job_id].every(id => x[id] && x[id].status === 'done'); }, 20000);
+    const e2 = reg()[ag2.job_id] || {}, e3 = reg()[ag3.job_id] || {};
+    toets('A2: agent gestart met de agent-sleutel → via de loper, ook met agents uit', e2.gebruiker === 'socev' && e2.ok === true, JSON.stringify(ag2) + ' ' + JSON.stringify(e2));
+    toets('A2: smalle n8n-agent (API_SECRET) met agents uit → gewone spawn', e3.gebruiker === 'claude' && e3.ok === true, JSON.stringify(e3));
+    fs.writeFileSync(STAND, JSON.stringify({ sessies: ['loper-proef', 'personeels-wachter'], agents: true }));
     // ── W: wees over een herstart van server.js ──
     const aw = await vraag('POST', '/agent', { secret: 'proef', label: 'socev: proef wees', prompt: 'MODUS:HANG', chat_id: '40687', workspace: 'vault', runtime: 'claude' });
     await wachtOp(() => { const x = reg()[aw.job_id]; return x && x.pid && x.pid_start && x.loper_id; }, 15000);

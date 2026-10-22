@@ -696,6 +696,7 @@ function weesLeeft(pid, jobId, a) {
     const st = fs.readFileSync('/proc/' + pid + '/status', 'utf8');   // eerst status: een zombie leeft niet (Fable K5)
     if (/^State:\s+[ZX]/m.test(st)) return false;
     if (a && a.loper_id) {
+      if (!a.pid_start) { schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'loper-wees-zonder-starttijd', job_id: jobId })); return false; }
       const ps = appProcStat(pid);
       return Number((/^Uid:\s+(\d+)/m.exec(st) || [])[1]) === LOPER_UID && !!a.pid_start && !!ps && ps.start === String(a.pid_start);
     }
@@ -895,14 +896,16 @@ function loperStand() {
   return loperStandCache.stand;
 }
 function loperNooit(chatId) { return Object.prototype.hasOwnProperty.call(SOCEV_ENV_EXTRA, String(chatId || '')); }
-// /run: alleen smal (de aanroeper toetst dat); per sessie alleen in de vault-werkruimte, 'alles' ook elders (de loper weigert dan
-// een cwd buiten vault/io: dicht).
-function loperVoorRun(chatId, ws) {
+// /run: alleen smal (de aanroeper toetst dat). Ook buiten de vault-werkruimte: de loper weigert dan de cwd (dicht), nooit stil
+// als 1001 (Fable wv715 #7).
+function loperVoorRun(chatId) {
   if (loperNooit(chatId)) return false;
   const s = loperStand();
-  return s.alles || (ws === DEFAULT_WS && s.sessies.indexOf(String(chatId || '')) >= 0);
+  return s.alles || s.sessies.indexOf(String(chatId || '')) >= 0;
 }
-function loperVoorAgent() { const s = loperStand(); return s.alles || s.agents; }
+// Fable wv715 #2: een agent die een Socev-sessie startte (agent-sleutel, j.smal) gaat via de loper zodra de stand íets aanzet;
+// anders was één /agent-aanroep vanuit een 1002-sessie genoeg om als 1001 te draaien.
+function loperVoorAgent(smal) { const s = loperStand(); return s.alles || s.agents || (!!smal && s.sessies.length > 0); }
 function socevPad(p) { return typeof p === 'string' && (p === SOCEV_THUIS || p.indexOf(SOCEV_THUIS + '/') === 0); }
 function socevProjectDirFor(cwd) { return path.join(SOCEV_PROJECTS_DIR, cwd.replace(/[^a-zA-Z0-9]/g, '-')); }
 
@@ -939,10 +942,16 @@ function loperSync(verzoek) {
   return JSON.parse(uit.toString('utf8'));
 }
 // Transcript lezen: van socev (0600, onleesbaar voor 1001) via de loper, anders gewoon. Gooit bij een fout (zoals readFileSync).
+// Synchroon alleen de STAART (Fable wv715 #6): de synchrone lezers (eindOpenTaken, weesEindtekst zonder anker) kijken naar de
+// laatste beurt, en een groot transcript zou de event-loop seconden stilzetten. Een eerste halve regel faalt bij JSON.parse en
+// wordt door beide lezers overgeslagen; een taak die vóór die staart begon, telt niet mee (fail-open, zoals een onleesbaar transcript).
 const LOPER_LEES_STUK = 6 * 1024 * 1024;
+const LOPER_SYNC_STAART = 6 * 1024 * 1024;
 function transcriptLees(pad) {
   if (!socevPad(pad)) return fs.readFileSync(pad, 'utf8');
-  const delen = []; let vanaf = 0;
+  const kop = loperSync({ op: 'stat', pad: pad });
+  if (!kop.ok) throw Object.assign(new Error('loper stat: ' + kop.fout), { code: kop.code || kop.fout || 'loper' });
+  const delen = []; let vanaf = Math.max(0, Number(kop.grootte || 0) - LOPER_SYNC_STAART);
   for (let n = 0; n < 64; n++) {
     const r = loperSync({ op: 'lees', pad: pad, vanaf: vanaf, max: LOPER_LEES_STUK });
     if (!r.ok) throw Object.assign(new Error('loper lees: ' + r.fout), { code: r.code || r.fout || 'loper' });
@@ -984,6 +993,7 @@ async function loperNieuwsteMtime(dir, max) {
 }
 // Procesgroep signaleren: eigen groep direct; een groep van socev mag 1001 niet signaleren (EPERM), dan via de loper.
 function groepSignaal(pid, sig, loperId) {
+  if (!(Number(pid) > 1)) return false;   // nooit kill(-0/-1)
   try { process.kill(-pid, sig); return true; } catch (e) {
     if (loperId && e && e.code === 'EPERM') {
       loperOp({ op: 'stop', id: loperId, signaal: sig }, 5000).then(function (r) {
@@ -1100,6 +1110,9 @@ function loperSpawn(brein, args, o) {
   k.loper = true; k.loperId = o.id; k.pid = null;
   k.stdout = new PassThrough(); k.stderr = new PassThrough();
   let sock = null, klaar = false, gestart = false, uitB = 0, foutB = 0, stopNaStart = null, rest = '';
+  // Fable wv715 #4: de loper (wv699-2) kan bij 'volg' een brok missen (momentopname en aanmelden in twee ticks). Na een
+  // herverbinding daarom bij het einde nog één 'volg' vanaf onze offset: de job is dan klaar, er komt niets meer bij.
+  let herverbonden = false, slotEinde = null;
   const t0 = Date.now();
   function einde(code, sig) {
     if (klaar) return; klaar = true;
@@ -1135,7 +1148,7 @@ function loperSpawn(brein, args, o) {
       return;
     }
     if (r.nr === 2) {   // antwoord op volg na een herverbinding
-      if (!r.ok) return einde(null, 'SIGKILL');
+      if (!r.ok) return slotEinde ? einde(slotEinde.code, slotEinde.signaal) : einde(null, 'SIGKILL');
       return;
     }
     if (r.id !== o.id) return;
@@ -1143,6 +1156,11 @@ function loperSpawn(brein, args, o) {
     else if (r.ev === 'fout') { const b = Buffer.from(r.b64 || '', 'base64'); foutB += b.length; k.stderr.write(b); }
     else if (r.ev === 'einde') {
       if (r.fout) return fout('loper-spawn', 'De afgeschermde Socev-gebruiker kon ' + brein + ' niet starten (' + r.fout + ').');
+      if (herverbonden && !slotEinde) {   // slot-volg: gemiste brokken ophalen, daarna pas het einde
+        slotEinde = { code: r.code, signaal: r.signaal };
+        if (sock) { try { sock.destroy(); } catch (e) {} }   // close → verbind(false) → volg vanaf uitB/foutB → einde opnieuw
+        return;
+      }
       einde(r.code, r.signaal);
     }
   }
@@ -1174,7 +1192,7 @@ function loperSpawn(brein, args, o) {
         if (!verbonden) {
           if (Date.now() < grens) return setTimeout(poging, 2000).unref();
           return eerste && !gestart ? fout('loper-onbereikbaar', 'De afgeschermde Socev-gebruiker is niet bereikbaar (' + Math.round((Date.now() - t0) / 1000) + ' s geprobeerd); de beurt is niet gestart.')
-            : (loperStoring('loper-verbinding-weg'), einde(null, 'SIGKILL'));
+            : slotEinde ? einde(slotEinde.code, slotEinde.signaal) : (loperStoring('loper-verbinding-weg'), einde(null, 'SIGKILL'));
         }
         sock = null;
         // Verbinding viel weg. Vóór de startbevestiging weten we niet of hij liep: stoppen voor de zekerheid, dan fout.
@@ -1182,7 +1200,8 @@ function loperSpawn(brein, args, o) {
           loperOp({ op: 'stop', id: o.id, signaal: 'SIGKILL' }, 5000).catch(function () {});
           return fout('loper-verbinding-weg', 'De verbinding met de afgeschermde Socev-gebruiker viel weg tijdens de start.');
         }
-        setTimeout(function () { verbind(false); }, 1000).unref();
+        herverbonden = true;
+        setTimeout(function () { verbind(false); }, slotEinde ? 0 : 1000).unref();
       });
     })();
   }
@@ -1271,13 +1290,16 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
       return Math.max(m, newestMtimeIn(pinnedDir, 2000), loperSubM);
     }
 
+    // Fable wv715 #3: zonder pid (loper nog niet bevestigd) nooit process.kill(-pid): -null = 0 = de eigen procesgroep van server.js.
+    function sein(sig) {
+      if (!(Number(child.pid) > 1)) { try { child.kill(sig); } catch (e2) {} return; }
+      try { process.kill(-child.pid, sig); } catch (e) { try { child.kill(sig); } catch (e2) {} }
+    }
     function killGroup(reason) {
       if (killedReason) return;
       killedReason = reason;
-      try { process.kill(-child.pid, 'SIGTERM'); } catch (e) { try { child.kill('SIGTERM'); } catch (e2) {} }
-      setTimeout(function () {
-        try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { try { child.kill('SIGKILL'); } catch (e2) {} }
-      }, KILL_GRACE_MS);
+      sein('SIGTERM');
+      setTimeout(function () { sein('SIGKILL'); }, KILL_GRACE_MS);
     }
     // Stop-ingang (fase 2 spraakkastje): de smalle poort mag een opdracht die zij zelf startte afbreken.
     progress.stoppen = function () { killGroup('gestopt'); };
@@ -1864,20 +1886,30 @@ function runMetFallback(keuze, prompt, sessionId, outdir, cwd, opts) {
   });
 }
 
+// wv715 (Fable #1): geen symlinks volgen. Een sessie als socev (1002) kon anders `ln -s /opt/data/bank/bunq/staat.json $OUTDIR/x`
+// zetten en server.js (1001) las het voor haar in het resultaat. Mappen via lstat, bestanden met O_NOFOLLOW geopend, en het
+// geopende bestand moet echt onder de uitvoermap liggen (ook tegen een map die tussen lstat en readdir een link werd).
 function collectFiles(dir) {
   const res = [];
+  let wortel; try { wortel = fs.realpathSync(dir); } catch (e) { return res; }
   const stack = [dir];
   while (stack.length) {
     const cur = stack.pop();
-    if (!fs.existsSync(cur)) continue;
-    const names = fs.readdirSync(cur);
+    let names; try { names = fs.readdirSync(cur); } catch (e) { continue; }
     for (let i = 0; i < names.length; i++) {
       const fp = path.join(cur, names[i]);
-      const st = fs.statSync(fp);
-      if (st.isDirectory()) stack.push(fp);
-      else if (st.isFile() && st.size <= MAX_FILE) {
-        res.push({ name: names[i], content_base64: fs.readFileSync(fp).toString('base64'), size: st.size });
-      }
+      let lst; try { lst = fs.lstatSync(fp); } catch (e) { continue; }
+      if (lst.isDirectory()) { stack.push(fp); continue; }
+      if (!lst.isFile() || lst.size > MAX_FILE) continue;
+      let fd;
+      try {
+        fd = fs.openSync(fp, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+        const st = fs.fstatSync(fd);
+        let echt = ''; try { echt = fs.readlinkSync('/proc/self/fd/' + fd); } catch (e) {}
+        if (!st.isFile() || st.size > MAX_FILE || echt.indexOf(wortel + path.sep) !== 0) continue;
+        res.push({ name: names[i], content_base64: fs.readFileSync(fd).toString('base64'), size: st.size });
+      } catch (e) { /* link, verdwenen of onleesbaar: overslaan */ }
+      finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch (e) {} } }
     }
   }
   return res;
@@ -2258,7 +2290,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     if (!lezen && !runIsMk(chatId, ws)) socevSmalOpts(runOpts, chatId);
     j.omgeving = lezen ? 'lezen' : (runIsMk(chatId, ws) ? 'mk' : 'smal');
     // wv715: smal en in de stand → als socev via de loper; de jobmap gaat dan open voor socev (faalt dat: de beurt faalt, dicht)
-    if (j.omgeving === 'smal' && loperVoorRun(chatId, ws)) {
+    if (j.omgeving === 'smal' && loperVoorRun(chatId)) {
       runOpts.loper = true; j.gebruiker = 'socev';
       runOpts.env = Object.assign({}, runOpts.env || {}, { SOCEV_LOPER_JOB: jobId });
       loperJobmap(base);
@@ -2718,7 +2750,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     // Geen SOCEV_ENV_EXTRA voor agents: chat_id is daar vrij invulbaar (Fable wv424 #1: chat_id 'cijfer-meester' gaf anders de Supabase-MCP).
     else if (!agentIsMk(entry.label, j.smal, j.beperkt)) socevSmalOpts(runOpts, '');
     // wv715: smalle agents (ook beperkt=auto) als socev via de loper als de stand 'agents' of 'alles' zegt; jobmap open, anders dicht
-    if (runOpts.envMag && loperVoorAgent()) { runOpts.loper = true; loperJobmap(base); }
+    if (runOpts.envMag && loperVoorAgent(j.smal)) { runOpts.loper = true; loperJobmap(base); }
     // Vroege levenscontrole (alleen de eerste run; hervattingen in de eindcontrole niet): geen
     // teken van leven binnen VROEG_LEVEN_MS -> procesgroep weg en precies één nieuwe start, weer
     // via de startspreiding. Komt ook die niet op gang, dan een duidelijke foutmelding.
