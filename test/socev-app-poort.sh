@@ -4866,7 +4866,7 @@ async function bewijs(o) {
 
         // f. seintje-stand
         r = await stand(null);
-        toets('23d wv804 f seintje-stand zonder apparaatcookie -> 200 toon false, alleen ok/toon', r.status === 200 && r.j.toon === false && Object.keys(r.j).sort().join() === 'nu_ms,ok,toon', JSON.stringify(r.j));
+        toets('23d wv804 f seintje-stand zonder apparaatcookie -> 200 toon true (diffreview #2), alleen ok/toon', r.status === 200 && r.j.toon === true && Object.keys(r.j).sort().join() === 'nu_ms,ok,toon', JSON.stringify(r.j));
         r = await stand(P.jar);
         toets('23d wv804 f Pixel na een echt seintje (hoofd ongezien) -> toon true; sw_vraagt gezet (M3)', r.status === 200 && r.j.toon === true && !!PJ().apparaten[pId].sw_vraagt, JSON.stringify([r.j, PJ().apparaten[pId].sw_vraagt]));
         const swV = PJ().apparaten[pId].sw_vraagt;
@@ -4876,7 +4876,7 @@ async function bewijs(o) {
         { const rg = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')); rg.apparaten.find((x) => x.id === VPID).actief = false; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg)); }
         r = await stand(VP);
         { const rg = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')); rg.apparaten.find((x) => x.id === VPID).actief = true; fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(rg)); }
-        toets('23d wv804 f ingetrokken apparaat -> toon false', r.status === 200 && r.j.toon === false, JSON.stringify(r.j));
+        toets('23d wv804 f ingetrokken apparaat -> toon true (diffreview #2: krijgt geen pushes meer)', r.status === 200 && r.j.toon === true, JSON.stringify(r.j));
         fs.writeFileSync(UIT, ''); r = await stand(P.jar); fs.unlinkSync(UIT);
         toets('23d wv804 f (K1) noodstop -> 503 (geen doorlaat; de SW toont dan gewoon)', r.status === 503, JSON.stringify(r));
         rolStub.primair = false; r = await stand(P.jar); rolStub.primair = true;

@@ -8018,7 +8018,7 @@ function appNieuwGezien(req, res, a, d) {
     const w = gw[a.id] && Date.now() - gw[a.id].op < APP_GEZIEN_WACHT_MS ? gw[a.id] : (gw[a.id] = { op: Date.now(), lijst: [] });
     if (w.lijst.length < 20) w.lijst.push({ tab: tab, t: t, punten: punten });
     appStuur(res, 200, { ok: true, door_david: false });
-  }, function (e) { logError('app-nieuw', e); appStuur(res, 200, { ok: true, door_david: false }); });
+  }).catch(function (e) { logError('app-nieuw', e); appStuur(res, 200, { ok: true, door_david: false }); });   // diffreview #4: ook een fout in de verwerking
 }
 
 // ── Concept per kanaal (wv159, bouwplan § 4.11; David 8-10: "ik had hier wat getikt, ging even weg … en mijn getikte tekst
@@ -10200,11 +10200,13 @@ function appGezienWachtAf(a) {
 function appSeintjeToon(id, s) {
   if ((appStaat.pushOnderweg || {})[id]) return true;
   if (!s || !s.laatst) return true;
+  if (!s.laatst.status) return true;   // diffreview #1: geen antwoord van de pushdienst (time-out) kan toch bezorgd zijn; 4xx/5xx = niet bezorgd
   if (!/^antwoord [a-z-]+$/.test(String(s.laatst.reden || ''))) return true;
   const lp = s.laatst_per || {}, ks = Object.keys(lp);
   if (!ks.length) return true;
   return ks.some(function (k) {
     const op = Date.parse((lp[k] || {}).op);
+    if (!isFinite(op)) return true;   // diffreview #5: kapotte tijd = tonen
     return Date.now() - op < APP_SEINTJE_TAB_MS && !berichtGezienDoorDavid(k, op);
   });
 }
@@ -10213,7 +10215,9 @@ function appSeintjeToon(id, s) {
 function appSeintjeStand(req, res, reg) {
   res._app.stil = true;
   const a = appApparaat(req, reg);
-  if (!a) return appStuur(res, 200, { ok: true, toon: false });
+  // diffreview #2: zonder (geldig) apparaatcookie tonen: het pushabonnement leeft los van het cookie; een ingetrokken apparaat krijgt
+  // geen pushes meer (appPushStuur haalt zijn abonnement weg), dus tonen kost niets en lekt niets
+  if (!a) return appStuur(res, 200, { ok: true, toon: true });
   res._app.apparaat = a.id;
   const tl = 'seintje-stand:' + a.id;
   if (!appStaat.tellers[tl]) appStaat.tellers[tl] = [];   // Fable K6: lazy init
