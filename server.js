@@ -13053,10 +13053,22 @@ const bandjes = (function () {
     const B = require(p);
     const opslag = B.maak({ vault: VAULT, dir: BANDJES_DIR, fout: logError });
     opslag.mkdir();   // /opt/data/bandjes en tmp/ op 0700 (journaal 0600); de registerpagina's blijven 0644
-    return B.routes({ opslag: opslag, studio: studio, primair: function () { return rolPrimair(); }, dir: BANDJES_DIR,
+    return B.routes({ opslag: opslag, studio: studio, primair: function () { return rolPrimair(); }, dir: BANDJES_DIR, bestandVan: bandjesBestandVan,   // wv830: archief
       boxPad: path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError });
   } catch (e) { logError('bandjes', e); return null; }
 })();
+// wv830: de bestanden van een Studio-taak in Bestanden (naam → pad), voor het archief bij "Staat in centrale"; null als ze weg zijn.
+// Alleen gewone bestanden onder APP_BESTANDEN_DIR (geen koppeling volgen).
+function bandjesBestandVan(jobId) {
+  const m = appBewaardVan(jobId);
+  if (!m || !Array.isArray(m.bestanden)) return null;
+  const uit = [];
+  m.bestanden.forEach(function (x) {
+    const p = path.join(APP_BESTANDEN_DIR, m.dag, jobId, 'b', String(x.n));
+    try { if (Number.isInteger(x.n) && fs.lstatSync(p).isFile()) uit.push({ naam: String(x.naam), pad: p }); } catch (e) {}
+  });
+  return uit;
+}
 function bandjesInfo() {
   if (!bandjes) return { aan: false };
   try { return bandjes.health(); } catch (e) { return { aan: true, fout: true }; }

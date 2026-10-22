@@ -552,6 +552,7 @@ function maak(deps) {
       tekst_hash: String(b.tekst_hash || ''), stem: schoon(b.stem, 100) };
     if (b.model && Object.hasOwn(ELEVEN.modellen, String(b.model))) o.model = String(b.model);   // wv782
     if (b.proef === true) o.proef = true;   // wv803: één proefzin; bandjes.naKlaar laat het register dan ongemoeid
+    if (Number.isInteger(b.basis) && b.basis >= 0) o.basis = b.basis;   // wv830: registerversie bij Maak (versie = de werkversie)
     if (!/^[a-z]{2,20}$/.test(o.praktijk) || !/^[a-z]{2}-[a-z0-9-]{2,30}$/.test(o.bandje) || !Number.isInteger(o.versie) || o.versie < 0 || !/^[a-f0-9]{8,64}$/.test(o.tekst_hash)) return null;
     return o;
   }

@@ -47,6 +47,26 @@ function tekstHash(t) { return crypto.createHash('sha256').update(normTekst(t), 
 function vandaag(klok) { const d = new Date(klok ? klok() : Date.now()); return d.toLocaleDateString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', year: 'numeric' }).replace(/\//g, '-'); }
 function vandaagIso(klok) { return new Date(klok ? klok() : Date.now()).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
 
+// ── versiemodel (wv830, David 22-10-2026) ──
+// Per bandje hooguit twee versies: vN staat in de centrale (veld "in centrale: vN …"; geen veld = v0, nog nooit in de centrale) en
+// hooguit één werkversie v(N+1). Een tekstwijziging (eigen of een overgenomen voorstel) en elke nieuwe generatie horen bij die
+// werkversie: opnieuw genereren of de tekst nog eens wijzigen overschrijft v(N+1), het nummer loopt niet op. "Staat in centrale" kan
+// zodra de werkversie een gemaakt bandje heeft; dan is v(N+1) de actuele en begint een volgende poging als v(N+2).
+function centraleVersie(velden) { const m = /^\s*v(\d+)\b/.exec(String(velden && velden['in centrale'] || '')); return m ? Number(m[1]) : 0; }
+function werkNummer(b) { const n = centraleVersie(b.velden); return b.versie > n ? b.versie : n + 1; }
+// "22-10-2026 · v2 · stem · model · 0123456789abcdef/bandje.wav (+ …) · tekst <hash>" → { versie, job, hash } (hash pas sinds wv830)
+function laatsteVan(w) {
+  w = String(w || '');
+  const v = /·\s*v(\d+)\s*·/.exec(w), j = /\b([a-f0-9]{16})\/[^\s]+/.exec(w), h = /·\s*tekst ([a-f0-9]{16})\b/.exec(w);
+  return v && j ? { versie: Number(v[1]), job: j[1], hash: h ? h[1] : null } : null;
+}
+// Kan dit bandje nu als "staat in de centrale" gemarkeerd worden? Werkversie bestaat, is gemaakt (status én laatste bestand op deze
+// versie) en het gemaakte geluid hoort bij de tekst van nu (hash in het veld; oudere velden zonder hash toetst de route aan de taak).
+function kanCentrale(b) {
+  const n = centraleVersie(b.velden), lb = laatsteVan(b.velden['laatste bestand']);
+  return !b.onbekend && !!b.tekst && b.versie > n && /^gemaakt\b/i.test(b.velden.status || '') && !!lb && lb.versie === b.versie && (!lb.hash || lb.hash === b.hash);
+}
+
 // ── lezen ──
 // Geeft { instellingen, bandjes: [{ id, naam, velden, tekst, onbekend, versie, voorstel, van, tot }], fouten, regels }.
 // van/tot = regelnummers van de sectie (tot exclusief), voor de schrijver.
@@ -125,7 +145,9 @@ function bandjeUit(b) {
   const v = b.velden;
   return { id: b.id, naam: b.naam, menu: v.menu || '', wanneer: v.wanneer || '', tijdvensters: v.tijdvensters || '', stem: v.stem || 'praktijkstem',
     versie: b.versie, tekst: b.tekst, onbekend: b.onbekend, tekst_hash: b.hash, status: v.status || '', laatste_bestand: v['laatste bestand'] || '',
-    in_centrale: v['in centrale'] || '', bron: v.bron || '', aandachtspunt: v.aandachtspunt || '', voorstel: b.voorstel, spreek_eigen: b.spreek || null };
+    in_centrale: v['in centrale'] || '', bron: v.bron || '', aandachtspunt: v.aandachtspunt || '', voorstel: b.voorstel, spreek_eigen: b.spreek || null,
+    // wv830: versiemodel (zie werkNummer); werkversie = null als de tekst die van de centrale is
+    centrale_versie: centraleVersie(v), werkversie: b.versie > centraleVersie(v) ? b.versie : null, volgende_versie: werkNummer(b), kan_centrale: kanCentrale(b) };
 }
 
 // ── schrijven (strikt) ──
@@ -251,10 +273,22 @@ function zetTekst(md, voorvoegsel, id, o, klok) {
   const voorstelWeg = !!o.voorstel_weg && !!b.voorstel;
   if (!tekstWijzigt && !stemWijzigt && !voorstelWeg) return { status: 200, md: md, bandje: bandjeUit(b), ongewijzigd: true };
   const velden = {};
-  if (tekstWijzigt) { velden.versie = String(b.versie + 1); velden.status = 'concept (v' + (b.versie + 1) + ')'; }
+  // wv830: een tekstwijziging hoort bij de werkversie v(N+1); bestaat die al, dan wordt hij overschreven (nummer blijft)
+  const nieuwV = werkNummer(b);
+  if (tekstWijzigt) {
+    velden.versie = String(nieuwV);
+    // terug naar precies de tekst van het gemaakte bandje van deze versie (Fable wv830 #9): weer "gemaakt", geen nieuwe generatie nodig
+    const lb = laatsteVan(b.velden['laatste bestand']);
+    velden.status = lb && lb.hash && lb.hash === tekstHash(t.tekst) && lb.versie === nieuwV ? 'gemaakt (v' + nieuwV + ')' : 'concept (v' + nieuwV + ')';
+  }
   if (stemWijzigt) velden.stem = stem;
   let regels = vervangSectie(p, b, herschrijfSectie(p, b, { velden: velden, tekst: tekstWijzigt ? t.tekst : undefined, voorstel: voorstelWeg ? null : undefined }));
-  if (!b.onbekend && tekstWijzigt) regels = voegGeschiedenisToe(regels, ['### ' + b.id + ' v' + b.versie + ' — vervangen ' + vandaag(klok)].concat(citaat(b.tekst)));
+  // de versiegeschiedenis bewaart de tekst die in de centrale stond (vN), niet elk concept (die staan in het journaal). De eerste
+  // tekstwijziging na vN vervangt altijd de tekst van vN: ook als een nieuwe generatie het nummer al naar v(N+1) zette (tekst gelijk)
+  const n = centraleVersie(b.velden);
+  const histV = b.versie <= n ? b.versie : n;
+  const alGehad = new RegExp('^### ' + b.id + ' v' + histV + ' — ', 'm').test(md);
+  if (!b.onbekend && tekstWijzigt && histV >= 1 && !alGehad) regels = voegGeschiedenisToe(regels, ['### ' + b.id + ' v' + histV + ' — vervangen ' + vandaag(klok)].concat(citaat(b.tekst)));
   regels = zetUpdated(regels, klok);
   const uit = klaar(regels);
   return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)) };
@@ -317,6 +351,33 @@ function zetVelden(md, voorvoegsel, id, velden, verwacht, klok) {
   const uit = klaar(zetUpdated(vervangSectie(p, b, herschrijfSectie(p, b, { velden: v })), klok));
   return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)) };
 }
+// Na een geslaagde generatie (wv830): het register naar de werkversie. o: { basis, versie, tekst_hash, waarde }. basis = de versie die de
+// app las toen hij op Maak drukte; versie = het doel (werkNummer op dat moment). Klopt basis, hash of doel niet meer (intussen
+// gewijzigd of al gemarkeerd), dan 409 en blijft het register zoals het is.
+function zetGemaakt(md, voorvoegsel, id, o, klok) {
+  const p = parse(md, voorvoegsel);
+  if (p.fouten.length) return { status: 409, fout: 'de registerpagina is niet in orde: ' + p.fouten.join('; ') };
+  const b = zoek(p, id);
+  if (!b) return { status: 404, fout: 'dit bandje staat niet in het register' };
+  if (Number(o.basis) !== b.versie || String(o.tekst_hash || '') !== b.hash) return { status: 409, fout: 'dit bandje is intussen gewijzigd', gewijzigd: true };
+  // doel null (taak van vóór wv830, zonder basis; Fable wv830 #11): de werkversie van nu
+  const doel = o.versie == null ? werkNummer(b) : Number(o.versie);
+  if (doel !== werkNummer(b)) return { status: 409, fout: 'de versie klopt niet meer (intussen in de centrale gezet?)', gewijzigd: true };
+  const waarde = typeof o.waarde === 'function' ? o.waarde(doel) : o.waarde;
+  const uit = klaar(zetUpdated(vervangSectie(p, b, herschrijfSectie(p, b, { velden: { versie: String(doel), 'laatste bestand': waarde, status: 'gemaakt (v' + doel + ')' } })), klok));
+  return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)) };
+}
+// "Staat in centrale" (wv830): de werkversie wordt de actuele. o: { versie, tekst_hash, waarde } (waarde = "vN sinds <datum>, [[archief]]").
+function zetInCentrale(md, voorvoegsel, id, o, klok) {
+  const p = parse(md, voorvoegsel);
+  if (p.fouten.length) return { status: 409, fout: 'de registerpagina is niet in orde: ' + p.fouten.join('; ') };
+  const b = zoek(p, id);
+  if (!b) return { status: 404, fout: 'dit bandje staat niet in het register' };
+  if (Number(o.versie) !== b.versie || String(o.tekst_hash || '') !== b.hash) return { status: 409, fout: 'dit bandje is intussen gewijzigd; herlaad', gewijzigd: true };
+  if (!kanCentrale(b)) return { status: 409, fout: b.versie <= centraleVersie(b.velden) ? 'deze versie staat al in de centrale' : 'maak eerst het bandje van deze versie', gewijzigd: true };
+  const uit = klaar(zetUpdated(vervangSectie(p, b, herschrijfSectie(p, b, { velden: { 'in centrale': o.waarde, status: 'in centrale (v' + b.versie + ')' } })), klok));
+  return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)) };
+}
 function slug(t) {
   return String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24).replace(/-+$/, '');
 }
@@ -333,7 +394,7 @@ function nieuwBandje(md, voorvoegsel, o, klok) {
   let tekst = null;
   if (o.tekst && String(o.tekst).trim()) { const t = toetsTekst(o.tekst); if (t.fout) return { status: 400, fout: t.fout }; tekst = t.tekst; }
   const sectie = ['## ' + id + ' — ' + naam, '- menu: ' + eenRegel(o.menu || '', GRENS.veld), '- wanneer: ' + eenRegel(o.wanneer || '', GRENS.veld),
-    '- stem: praktijkstem', '- versie: ' + (tekst ? '1' : '0'), '- laatste bestand: —', '- status: ' + (tekst ? 'concept (v1)' : 'tekst onbekend'),
+    '- stem: praktijkstem', '- versie: ' + (tekst ? '1' : '0'), '- laatste bestand: —', '- in centrale: —', '- status: ' + (tekst ? 'concept (v1)' : 'tekst onbekend'),
     '- bron: ' + (o.bron ? eenRegel(o.bron, 80) + ' ' : 'aangemaakt in de app ') + vandaag(klok), '', '**Tekst**'].concat(tekst ? citaat(tekst) : ['> ' + ONBEKEND], ['']);
   let at = p.regels.findIndex(function (r) { return /^##\s+(historie|versiegeschiedenis)\b/i.test(r); });
   if (at < 0) at = p.regels.length;
@@ -412,9 +473,20 @@ function maak(deps) {
     if (journaalCache && journaalCache.mtime === s.mtimeMs && journaalCache.grootte === s.size) return journaalCache.st;
     try { t = fs.readFileSync(JOURNAAL, 'utf8'); } catch (e) { return st; }
     journaalCache = { mtime: s.mtimeMs, grootte: s.size, st: st };
+    // wv830: de werkversie wordt overschreven zonder nieuw nummer; daarom ook de hashes die de pod eerder op dezelfde versie schreef
+    // (eerder): staat zo'n oudere hash weer in de pagina, dan zette de synchronisatie een oudere kopie terug
     t.split('\n').forEach(function (r) {
       if (!r) return;
-      try { const j = JSON.parse(r); if (!j.bandje) return; const k = j.praktijk + '/' + j.bandje; if (!st[k] || j.versie >= st[k].versie) st[k] = j; } catch (e) {}
+      try {
+        const j = JSON.parse(r); if (!j.bandje) return; const k = j.praktijk + '/' + j.bandje;
+        const vorig = st[k];
+        if (!vorig || j.versie >= vorig.versie) {
+          const eerder = vorig && vorig.versie === j.versie ? Object.assign({}, vorig.eerder) : {};
+          if (vorig && vorig.versie === j.versie && vorig.tekst_hash && vorig.tekst_hash !== j.tekst_hash) eerder[vorig.tekst_hash] = true;
+          delete eerder[j.tekst_hash];
+          st[k] = Object.assign({}, j, { eerder: eerder, centrale: Math.max(typeof j.centrale === 'number' ? j.centrale : 0, vorig && typeof vorig.centrale === 'number' ? vorig.centrale : 0) });
+        }
+      } catch (e) {}
     });
     return st;
   }
@@ -442,6 +514,9 @@ function maak(deps) {
     p.bandjes.forEach(function (b) {
       const j = js[pr + '/' + b.id];
       if (j && b.versie < j.versie) teruggezet.push(b.id + ' (v' + b.versie + ' terwijl v' + j.versie + ' bewaard was)');
+      else if (j && b.versie === j.versie && b.hash !== j.tekst_hash && j.eerder && j.eerder[b.hash]) teruggezet.push(b.id + ' (een eerdere tekst van v' + b.versie + ' staat weer in de pagina)');
+      // "in centrale" bepaalt sinds wv830 de nummering: een kopie met een lagere centrale-versie dan de pod schreef is teruggezet (Fable #5)
+      else if (j && typeof j.centrale === 'number' && centraleVersie(b.velden) < j.centrale) teruggezet.push(b.id + ' (in centrale v' + centraleVersie(b.velden) + ' terwijl v' + j.centrale + ' bewaard was)');
     });
     if (teruggezet.length) redenen.push('teruggezet door de synchronisatie: ' + teruggezet.join(', '));
     return { status: 200, praktijk: pr, naam: PRAKTIJKEN[pr].naam, instellingen: p.instellingen, bandjes: p.bandjes.map(bandjeUit),
@@ -478,10 +553,79 @@ function maak(deps) {
     try {
       mkdir(DIR);
       fs.appendFileSync(JOURNAAL, JSON.stringify(r.bandje ? { tijd: new Date(klok()).toISOString(), praktijk: pr, bandje: r.bandje.id, actie: actie,
-        versie: r.bandje.versie, tekst_hash: r.bandje.tekst_hash, tekst: r.bandje.tekst } : { tijd: new Date(klok()).toISOString(), praktijk: pr, actie: actie,
+        versie: r.bandje.versie, tekst_hash: r.bandje.tekst_hash, centrale: r.bandje.centrale_versie, tekst: r.bandje.tekst } : { tijd: new Date(klok()).toISOString(), praktijk: pr, actie: actie,
         instellingen: r.instellingen || null }) + '\n', { mode: 0o600 });
     } catch (e) { fout('bandjes-journaal', e); }
     return r.bandje ? { status: 200, bandje: r.bandje } : { status: 200, instellingen: r.instellingen };
+  }
+  // ── archief (wv830): bij "Staat in centrale" de bestanden + tekst naar 10_Zakelijk/<Praktijk>/Telefoon/Archief/ ──
+  // a: { versie, tekst_hash, bestanden: [{ naam, pad }], spreektekst, stem, model, job }. Eerst alle toetsen (zelfde als zetInCentrale),
+  // dan de bestanden (nooit overschrijven: bestaat de naam al, dan -2, -3 …), dan het register. Mislukt het register daarna, dan blijft
+  // het archief staan (gedateerd, onschadelijk) en meldt de route de fout.
+  const ARCHIEF_BESTANDEN = [['bandje-telefoon-ulaw.wav', '-telefoon-ulaw.wav', 'telefoon, WAV 8 kHz µ-law'], ['bandje-telefoon-pcm.wav', '-telefoon-pcm.wav', 'telefoon, WAV 8 kHz PCM'], ['bandje.wav', '-luister.wav', 'luisterversie, goede kwaliteit']];
+  // Schrijft het archief van één versie: de bestanden (kopie, 0644, nooit overschrijven: naam bezet = -2, -3 …) en een .md met tekst,
+  // spreektekst en links. a: { bestanden: [{ naam, pad }], spreektekst, stem, model, job, origineel?: vaultpad, toelichting? }.
+  // origineel = het geluid staat al in de vault (de aangeleverde opname): dan alleen de .md met een link ernaar. Geeft
+  // { basis, vaultBasis } of { fout }. Half geschreven = alles weer weg.
+  function schrijfArchief(pr, b, a, klokIso) {
+    const f = pad(pr);
+    const lijst = ARCHIEF_BESTANDEN.map(function (x) { const g = (a.bestanden || []).find(function (y) { return y && y.naam === x[0]; }); return g ? { bron: g.pad, achter: x[1], uitleg: x[2] } : null; }).filter(Boolean);
+    if (!lijst.length && !a.origineel) return { status: 409, fout: 'de bestanden van dit bandje staan niet meer in Bestanden (30 dagen); maak het opnieuw en zet het dan in de centrale' };
+    const map = path.join(path.dirname(f), 'Archief');
+    const iso = klokIso || vandaagIso(klok);
+    let basis = b.id + '-v' + b.versie + '-' + iso, n = 2;
+    const bezet = function (bs) { return fs.existsSync(path.join(map, bs + '.md')) || ARCHIEF_BESTANDEN.some(function (x) { return fs.existsSync(path.join(map, bs + x[1])); }); };
+    while (bezet(basis)) basis = b.id + '-v' + b.versie + '-' + iso + '-' + (n++);
+    const vaultMap = path.posix.join(path.posix.dirname(PRAKTIJKEN[pr].pad), 'Archief');
+    const geschreven = [];
+    try {
+      fs.mkdirSync(map, { recursive: true, mode: 0o755 });
+      mkdir(path.join(DIR, 'tmp'));
+      lijst.forEach(function (x) {
+        const doel = path.join(map, basis + x.achter);
+        const tmp = path.join(DIR, 'tmp', basis + x.achter + '.' + crypto.randomBytes(4).toString('hex'));
+        fs.copyFileSync(x.bron, tmp);
+        fs.chmodSync(tmp, 0o644);
+        try { fs.renameSync(tmp, doel); } catch (e) { if (e && e.code === 'EXDEV') { fs.copyFileSync(tmp, doel); fs.unlinkSync(tmp); } else { try { fs.unlinkSync(tmp); } catch (y) {} throw e; } }
+        geschreven.push(doel);
+      });
+      const v = b.velden;
+      const regels = ['---', 'type: bandje-archief', 'praktijk: ' + PRAKTIJKEN[pr].naam, 'bandje: ' + b.id, 'versie: ' + b.versie,
+        'in centrale sinds: ' + iso, 'stem: ' + eenRegel(a.stem || v.stem || '', 100), 'model: ' + eenRegel(a.model || '—', 60), 'job: ' + eenRegel(a.job || '—', 20),
+        'tekst_hash: ' + b.hash, 'updated: ' + iso, '---', '', '# ' + b.id + ' v' + b.versie + ' — ' + b.naam, '',
+        (a.toelichting ? eenRegel(a.toelichting, 400) : 'In de centrale gezet op ' + vandaag(klok) + ' (gemarkeerd in de App Bandjes).') + ' Register: [[' + PRAKTIJKEN[pr].pad.replace(/\.md$/, '') + ']].', '',
+        '- menu: ' + eenRegel(v.menu || '', GRENS.veld), '- wanneer: ' + eenRegel(v.wanneer || '', GRENS.veld)].concat(
+        lijst.map(function (x) { return '- ' + x.uitleg + ': ![[' + vaultMap + '/' + basis + x.achter + ']]'; }),
+        a.origineel ? ['- opname zoals die in de centrale stond: ![[' + eenRegel(a.origineel, 300) + ']]'] : [],
+        ['', '**Tekst**'], citaat(b.tekst), a.spreektekst ? ['', '**Spreektekst** (wat de stem zei)'].concat(citaat(String(a.spreektekst).slice(0, 4000))) : [], ['']);
+      const doelMd = path.join(map, basis + '.md');
+      schrijfAtomair(doelMd, regels.join('\n'));
+      geschreven.push(doelMd);
+    } catch (e) {
+      geschreven.forEach(function (g) { try { fs.unlinkSync(g); } catch (x) {} });
+      fout('bandjes-archief', e);
+      return { status: 500, fout: 'het archief kon niet geschreven worden; er is niets gemarkeerd' };
+    }
+    return { status: 200, basis: basis, vaultBasis: vaultMap + '/' + basis };
+  }
+  function inCentrale(pr, id, a) {
+    const l = lees(pr);
+    if (l.status !== 200) return l;
+    if (l.dicht) return { status: 409, fout: l.dicht, dicht: true };
+    const md = fs.readFileSync(pad(pr), 'utf8');
+    const vv = PRAKTIJKEN[pr].voorvoegsel;
+    const b = zoek(parse(md, vv), id);
+    if (!b) return { status: 404, fout: 'dit bandje staat niet in het register' };
+    // proefronde: dezelfde toetsen als het schrijven, met een tijdelijke waarde (eerst toetsen, dan pas het archief)
+    const proef = zetInCentrale(md, vv, id, { versie: a.versie, tekst_hash: a.tekst_hash, waarde: 'v' + b.versie }, klok);
+    if (proef.status !== 200) return proef;
+    const ar = schrijfArchief(pr, b, a);
+    if (ar.status !== 200) return ar;
+    const waarde = 'v' + b.versie + ' sinds ' + vandaag(klok) + ', [[' + ar.vaultBasis + ']]';
+    // mislukt het register nu nog (in de tussentijd gewijzigd), dan blijft het archief staan: gedateerd en onschadelijk
+    const r = muteer(pr, 'in-centrale', function (md2, vv2) { return zetInCentrale(md2, vv2, id, { versie: a.versie, tekst_hash: a.tekst_hash, waarde: waarde }, klok); });
+    if (r.status === 200) r.archief = ar.vaultBasis + '.md';
+    return r;
   }
   return {
     lees: lees,
@@ -490,6 +634,11 @@ function maak(deps) {
     zetVoorstel: function (pr, id, o) { return muteer(pr, 'voorstel', function (md, vv) { return zetVoorstel(md, vv, id, o, klok); }); },
     haalVoorstelWeg: function (pr, id) { return muteer(pr, 'voorstel-weg', function (md, vv) { return haalVoorstelWeg(md, vv, id, klok); }); },
     zetVelden: function (pr, id, v, verwacht) { return muteer(pr, 'velden', function (md, vv) { return zetVelden(md, vv, id, v, verwacht, klok); }); },
+    zetGemaakt: function (pr, id, o) { return muteer(pr, 'gemaakt', function (md, vv) { return zetGemaakt(md, vv, id, o, klok); }); },
+    inCentrale: inCentrale,
+    schrijfArchief: schrijfArchief,   // ook voor de eenmalige migratie (wv830)
+    pad: pad,
+    archiefMap: function (pr) { return PRAKTIJKEN[pr] ? path.join(path.dirname(pad(pr)), 'Archief') : null; },
     nieuw: function (pr, o) { return muteer(pr, 'nieuw', function (md, vv) { return nieuwBandje(md, vv, o, klok); }); },
     zetSpreektekst: function (pr, id, o) { return muteer(pr, 'spreektekst', function (md, vv) { return zetSpreektekst(md, vv, id, o, klok); }); },
     zetInstelling: function (pr, k, w) { return muteer(pr, 'instellingen', function (md, vv) { return zetInstelling(md, vv, k, w, klok); }); },
@@ -601,7 +750,7 @@ function routes(deps) {
         '- status: open\n- van: pod bandjes.js (mini-app Bandjes; hooguit 1×/dag per praktijk en soort)\n' +
         '- gemeten: ' + eenRegel(gemeten, 300) + '\n' +
         '- gevolg als er niets gebeurt: Bewaar en Maak voor ' + PRAKTIJKEN[l.praktijk].naam + ' staan dicht in de mini-app (lezen werkt).\n' +
-        '- voorstel: ' + (soort === 'teruggezet' ? 'de laatst bewaarde tekst staat in `' + path.join(deps.dir, 'journaal.jsonl') + '`; zet hem terug in `' + pagina + '` met een versie ≥ die uit het journaal (of hoog de versie op als de pagina zo goed is). Daarna gaat de mini-app vanzelf weer open.'
+        '- voorstel: ' + (soort === 'teruggezet' ? 'de laatst bewaarde tekst en velden staan in `' + path.join(deps.dir, 'journaal.jsonl') + '`; zet ze terug in `' + pagina + '` met een versie ≥ die uit het journaal (of hoog de versie met 1 op als de pagina zo goed is; bij "eerdere tekst van vN" of "in centrale" staan de versies al gelijk: dan versie ophogen of de tekst/het veld in centrale rechtzetten). Daarna gaat de mini-app vanzelf weer open.'
           : soort === 'conflict' ? 'vergelijk de conflictkopie met `' + pagina + '`, neem wat ontbreekt over en verwijder de kopie; daarna gaat de mini-app vanzelf weer open.'
           : 'dubbel of verkeerd id in `' + pagina + '` rechtzetten (ids zijn onveranderlijk; hernoem de dubbele).') + '\n';
       // tmp buiten de vault (zelfde schijf; niet zichtbaar voor bisync) met de modus van het origineel (umask 077 in run.sh; Fable wv743 #5)
@@ -727,12 +876,41 @@ function routes(deps) {
       return goed(S.zetSpreektekst(pr, id, { versie: d.versie, tekst_hash: d.tekst_hash, spreektekst: d.spreektekst }));
     }
     if (actie === 'status') {
-      // versie én hash (Fable wv743 #2): anders zegt het label "in centrale (vN)" bij een tekst die David intussen in Obsidian wijzigde
+      // versie én hash (Fable wv743 #2): anders zegt het label "in centrale (vN)" bij een tekst die David intussen in Obsidian wijzigde.
+      // wv830: alleen de werkversie met een gemaakt bandje; de bestanden van dat bandje (uit Bestanden) + tekst gaan naar het archief.
       const v = Number(d.versie);
       if (!Number.isInteger(v) || v < 1 || !/^[a-f0-9]{16}$/.test(String(d.tekst_hash || ''))) return { status: 400, j: { ok: false, fout: 'versie of tekst_hash ontbreekt' } };
-      const r = S.zetVelden(pr, id, { 'in centrale': 'v' + v + ', ' + vandaag(klok), status: 'in centrale (v' + v + ')' },
-        { versie: v, tekst_hash: String(d.tekst_hash) });
-      return goed(r);
+      const l = lees(pr);
+      if (l.status !== 200) return fouts(l);
+      if (l.dicht) return { status: 409, j: { ok: false, fout: l.dicht, dicht: true } };
+      const b = l.bandjes.find(function (x) { return x.id === id; });
+      if (!b) return { status: 404, j: { ok: false, fout: 'dit bandje staat niet in het register' } };
+      if (v !== b.versie || String(d.tekst_hash) !== b.tekst_hash) return { status: 409, j: { ok: false, fout: 'dit bandje is intussen gewijzigd; herlaad', gewijzigd: true } };
+      if (!b.kan_centrale) return { status: 409, j: { ok: false, fout: b.werkversie === null ? 'deze versie staat al in de centrale' : 'maak eerst het bandje van deze versie' } };
+      const lb = laatsteVan(b.laatste_bestand);
+      if (d.job != null && d.job !== '' && String(d.job) !== lb.job) return { status: 409, j: { ok: false, fout: 'dit is niet het laatst gemaakte bandje van deze versie; herlaad', gewijzigd: true } };
+      // het geluid moet bij de tekst van nu horen: de hash in "laatste bestand", anders (velden van vóór wv830) die van de Studio-taak
+      let taak = null;
+      try { taak = deps.studio && deps.studio.taak ? deps.studio.taak(lb.job) : null; } catch (e) { taak = null; }
+      const tb = taak && taak.bron && taak.bron.soort === 'bandje' && taak.bron.praktijk === pr && taak.bron.bandje === id && !taak.bron.proef ? taak.bron : null;
+      if (taak && !tb) return { status: 409, j: { ok: false, fout: 'het laatste bestand hoort niet bij dit bandje; maak het opnieuw' } };
+      const hash = lb.hash || (tb && tb.tekst_hash) || null;
+      if (hash !== b.tekst_hash) return { status: 409, j: { ok: false, fout: hash ? 'het gemaakte bandje hoort bij een eerdere tekst; druk op Maak' : 'niet na te gaan bij welke tekst het gemaakte bandje hoort; maak het opnieuw' } };
+      // loopt er nog een Maak voor dit bandje, dan eerst die afwachten: anders valt die (betaalde) generatie na het markeren weg (Fable wv830 #4)
+      let lopend = [];
+      try { lopend = deps.studio && deps.studio.lopend ? deps.studio.lopend().taken || [] : []; } catch (e) { lopend = []; }
+      if (lopend.some(function (x) { return x && x.bron && x.bron.soort === 'bandje' && x.bron.praktijk === pr && x.bron.bandje === id && !x.bron.proef; }))
+        return { status: 409, j: { ok: false, fout: 'er wordt nog een bandje gemaakt; wacht tot dat klaar is' } };
+      let bestanden = null;
+      try { bestanden = deps.bestandVan ? deps.bestandVan(lb.job) : null; } catch (e) { fout('bandjes-bestand', e); bestanden = null; }
+      // zonder telefoonversie geen archief van wat in de centrale gaat (Fable wv830 #10)
+      if (bestanden && bestanden.length && !bestanden.some(function (x) { return /^bandje-telefoon-(ulaw|pcm)\.wav$/.test(x.naam); }))
+        return { status: 409, j: { ok: false, fout: 'bij dit bandje ontbreken de telefoonversies; maak het opnieuw' } };
+      if (!bestanden || !bestanden.length) return { status: 409, j: { ok: false, fout: 'de bestanden van dit bandje staan niet meer in Bestanden (30 dagen); maak het opnieuw en zet het dan in de centrale' } };
+      const r = S.inCentrale(pr, id, { versie: v, tekst_hash: String(d.tekst_hash), bestanden: bestanden, job: lb.job,
+        stem: tb ? tb.stem : b.stem, model: tb && tb.model ? tb.model : null, spreektekst: taak && taak.velden && typeof taak.velden.tekst === 'string' ? taak.velden.tekst : spreekVan(b, l.instellingen).tekst });
+      if (r.status === 200) log('bandjes in centrale ' + pr + '/' + id + ' v' + v + ' archief=' + r.archief);
+      return r.status === 200 ? (function () { const g = goed(r); g.j.archief = r.archief; return g; })() : fouts(r);
     }
     // maak (en proef, wv803): de tekst komt UIT HET REGISTER, nooit uit de invoer; versie + hash moeten kloppen met wat de app las.
     // Wat naar de stem gaat is de spreektekst (eigen of automatisch, zie spreekVan), per model vertaald; proef = één zin daaruit (index).
@@ -781,8 +959,10 @@ function routes(deps) {
     }
     // Fable wv803 #4: een leesbare fout als de spreektekst (met pauzes) te lang is, vóór Studio en vóór de vingerafdruk
     if (velden.tekst.length > SPREEK.MAX) return { status: 400, j: { ok: false, fout: 'de spreektekst is met de pauzes te lang voor de stem (' + velden.tekst.length + ' van ' + SPREEK.MAX + ' tekens); kort hem in of kies minder pauze' } };
+    // wv830: de generatie hoort bij de werkversie (volgende_versie): staat de tekst al in de centrale (vN), dan wordt dit v(N+1);
+    // basis = de versie die het register nu heeft (naKlaar toetst daarop)
     const r = await deps.studio.maak({ flow: s.flow, velden: velden, beurt_id: beurt }, ctx,
-      { bron: Object.assign({ soort: 'bandje', praktijk: pr, bandje: id, versie: b.versie, tekst_hash: b.tekst_hash, stem: stem }, model ? { model: model } : {}, proef ? { proef: true } : {}) });
+      { bron: Object.assign({ soort: 'bandje', praktijk: pr, bandje: id, versie: b.volgende_versie, basis: b.versie, tekst_hash: b.tekst_hash, stem: stem }, model ? { model: model } : {}, proef ? { proef: true } : {}) });
     if (r.status !== 200) return fouts(r);
     return { status: 200, j: { ok: true, taak: r.taak, al: r.al === true } };
   }
@@ -826,9 +1006,13 @@ function routes(deps) {
     const bs = taak.bestanden || [];
     const hoofd = bs.find(function (x) { return !/-telefoon-(pcm|ulaw)\.wav$/i.test(x.naam); }) || bs[0];
     const tel = bs.filter(function (x) { return /-telefoon-(pcm|ulaw)\.wav$/i.test(x.naam); }).length;
-    const waarde = vandaag(klok) + ' · v' + b.versie + ' · ' + b.stem + (b.model ? ' · ' + b.model : '') + ' · ' + taak.id + '/' + (hoofd ? hoofd.naam : '?') +
-      (tel === 2 ? ' (+ telefoonversies PCM en µ-law)' : ' (zonder telefoonversie)');
-    const r = S.zetVelden(b.praktijk, b.bandje, { 'laatste bestand': waarde, status: 'gemaakt (v' + b.versie + ')' }, { versie: b.versie, tekst_hash: b.tekst_hash });
+    // wv830: met de tekst-hash erin (de knop "Staat in centrale" toetst daarop) en naar de werkversie (zetGemaakt)
+    // versie, tekst-hash en job vóór stem en model: het veld is hooguit 160 tekens en een lange stem-id mag die niet afkappen (Fable wv830 #2)
+    const waarde = function (v) { return vandaag(klok) + ' · v' + v + ' · tekst ' + b.tekst_hash + ' · ' + taak.id + '/' + (hoofd ? hoofd.naam : '?') + ' · ' + b.stem + (b.model ? ' · ' + b.model : '') +
+      (tel === 2 ? ' (+ telefoon PCM en µ-law)' : ' (zonder telefoonversie)'); };
+    // taken van vóór wv830 hebben geen basis: dan de registerversie en de werkversie van nu (Fable wv830 #11)
+    const heeftBasis = Number.isInteger(b.basis);
+    const r = S.zetGemaakt(b.praktijk, b.bandje, { basis: heeftBasis ? b.basis : b.versie, versie: heeftBasis ? b.versie : null, tekst_hash: b.tekst_hash, waarde: waarde });
     if (r.status !== 200) { log('bandjes naklaar taak=' + taak.id + ' register niet bijgewerkt: ' + String(r.fout || '').slice(0, 120)); boxMeld(S.lees(b.praktijk)); }
     else log('bandjes naklaar taak=' + taak.id + ' ' + b.praktijk + '/' + b.bandje + ' v' + b.versie + ' gemaakt');
   }
@@ -843,4 +1027,5 @@ function routes(deps) {
 }
 
 module.exports = { PRAKTIJKEN, GRENS, STEM_STANDAARD, normTekst, tekstHash, parse, bandjeUit, zetTekst, zetVoorstel, haalVoorstelWeg, zetVelden, nieuwBandje,
+  centraleVersie, werkNummer, laatsteVan, kanCentrale, zetGemaakt, zetInCentrale,
   zetInstelling, zetSpreektekst, stemmenLijst, stemmenUit, maak, routes };
