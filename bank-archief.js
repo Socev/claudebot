@@ -767,13 +767,16 @@ function aiZet(a, resultaten, model, gestuurd) {
   const gezetSet = new Set();
   const cats = categorieen(a), nu = nuIso();
   let gezet = 0, geweigerd = 0;
+  const weigering = { groep: 0, categorie: 0, intern: 0 };   // wv740: alleen aantallen, voor de log en /health
   const zet = a.db.prepare('INSERT OR REPLACE INTO ai_groepen (sleutel, type, categorie, subcategorie, ai_omschrijving, model, gemaakt) VALUES (?, ?, ?, ?, ?, ?, ?)');
   const schoonKort = function (s, n) { return typeof s === 'string' ? (s.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').replace(/\[[^\]]*BANK\s*DATA[^\]]*\]?/giu, '').replace(/\s+/g, ' ').trim().slice(0, n) || null) : null; };
   inTransactie(a, function () {
     (Array.isArray(resultaten) ? resultaten : []).slice(0, 500).forEach(function (r) {
       const x = r && open.get(String(r.g || ''));
       const type = r && TYPES.indexOf(r.type) >= 0 && r.type !== 'intern' ? r.type : null;
-      if (!x || !r.categorie || cats.indexOf(r.categorie) < 0 || r.categorie === 'intern') { geweigerd++; return; }
+      if (!x || !r.categorie || cats.indexOf(r.categorie) < 0 || r.categorie === 'intern') {
+        geweigerd++; weigering[!x ? 'groep' : r.categorie === 'intern' ? 'intern' : 'categorie']++; return;
+      }
       zet.run(x.g, type || (x.richting === 'af' ? 'uitgave' : 'inkomst'), r.categorie, schoonKort(r.subcategorie, 40), schoonKort(r.omschrijving, 80), String(model || '').slice(0, 40) || null, nu);
       gezet++; gezetSet.add(x.g);
     });
@@ -785,7 +788,7 @@ function aiZet(a, resultaten, model, gestuurd) {
     metaZet(a, 'vuil', '1');
   });
   const v = verrijk(a);
-  return { gezet: gezet, geweigerd: geweigerd, verrijkt: v.gewijzigd };
+  return { gezet: gezet, geweigerd: geweigerd, weigering: weigering, verrijkt: v.gewijzigd };
 }
 
 // ── correctie door David ────────────────────────────────────────────────────

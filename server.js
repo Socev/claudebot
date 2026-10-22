@@ -3507,6 +3507,7 @@ function handleRequest(req, res) {
       bunqluis: fs.existsSync(path.join(__dirname, 'bunq-lezer.js')) && fs.existsSync(path.join(BANK_DIR, 'bunq', 'staat.json')),   // wv683
       bankarchief: fs.existsSync(path.join(__dirname, 'bank-archief.js')),   // wv687: transactiedatabase in deze release
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
+      bank_verrijk_ai: bankVerrijkStand(),   // wv740: stand van de AI-indeling (alleen aantallen en tijden); peilen hoeft niet meer via /smal/bank
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
@@ -14304,6 +14305,16 @@ async function smalActie(actie, d) {
   if (actie === 'bandjes/voorstel') return bandjes ? bandjes.smal('voorstel', d) : { status: 404, j: { ok: false, fout: 'Bandjes zit niet in deze versie van de pod' } };
   return { status: 404, j: { ok: false, fout: 'onbekende smalle route' } };
 }
+// wv740: Socev (SOCEV_AGENT_SLEUTEL) en de machinekamer (API_SECRET) hebben elk een eigen uurteller per route. 22-10 08:19 liep de
+// gedeelde bankteller vol doordat de machinekamer tijdens een AI-ronde elke 15 s 'archief' peilde; tot ± 09:05 had elke bankvraag
+// van Socev een 429 gekregen. Nu kan de machinekamer alleen zijn eigen teller opmaken. De grens per teller blijft SMAL_GRENS.
+function smalTel(actie, socev, nu) {
+  const k = socev ? actie : actie + '|mk';
+  const lijst = (smalTellers[k] = (smalTellers[k] || []).filter(function (t) { return nu - t < 3600000; }));
+  if (lijst.length >= SMAL_GRENS[actie]) return false;
+  lijst.push(nu);
+  return true;
+}
 function smalRoute(req, res) {
   const actie = reqPath(req).slice('/smal/'.length);
   res._log = { smal: actie };
@@ -14312,9 +14323,8 @@ function smalRoute(req, res) {
     if (!d) return stuur(400, { ok: false, fout: 'bad json' });
     if (!smalSleutelOk(d.secret)) return stuur(401, { ok: false, fout: 'unauthorized' });
     if (!Object.hasOwn(SMAL_GRENS, actie)) return stuur(404, { ok: false, fout: 'onbekende smalle route' });
-    const nu = Date.now(), lijst = (smalTellers[actie] = (smalTellers[actie] || []).filter(function (t) { return nu - t < 3600000; }));
-    if (lijst.length >= SMAL_GRENS[actie]) return stuur(429, { ok: false, fout: 'te vaak dit uur (max ' + SMAL_GRENS[actie] + ')' });
-    lijst.push(nu);
+    const socev = socevAgentSleutelOk(d.secret);
+    if (!smalTel(actie, socev, Date.now())) return stuur(429, { ok: false, fout: 'te vaak dit uur (max ' + SMAL_GRENS[actie] + (socev ? '' : ', teller machinekamer') + ')' });
     try { const r = await smalActie(actie, d); res._log.status_smal = r.status; stuur(r.status, r.j); }
     catch (e) { logError('smal-' + actie, e); stuur(503, { ok: false, fout: 'route faalde: ' + String(e && e.message || e).slice(0, 200) }); }
   });
@@ -14902,7 +14912,7 @@ let bankVerrijkBezig = false, bankVerrijkLaatste = null;
 function bankVerrijkStand() {
   const l = bankVerrijkLaatste;
   return { bezig: bankVerrijkBezig, laatst: l ? { begin: l.begin, eind: l.eind, batches: l.batches, groepen_gezet: l.groepen_gezet, geweigerd: l.geweigerd,
-    open_groepen: l.open_groepen, fout: l.fout || undefined } : null };
+    weigering: l.weigering, open_groepen: l.open_groepen, fout: l.fout || undefined } : null };
 }
 function bankAiSchema(cats) {
   return { type: 'object', additionalProperties: false, required: ['r'], properties: { r: { type: 'array', items: { type: 'object', additionalProperties: false,
@@ -14947,7 +14957,7 @@ function bankClaude(groepen, cats) {
   });
 }
 async function bankVerrijkAI(maxBatches) {
-  const l = bankVerrijkLaatste = { begin: new Date().toISOString(), eind: null, batches: 0, groepen_gezet: 0, geweigerd: 0, open_groepen: null, fout: null };
+  const l = bankVerrijkLaatste = { begin: new Date().toISOString(), eind: null, batches: 0, groepen_gezet: 0, geweigerd: 0, weigering: { groep: 0, categorie: 0, intern: 0 }, open_groepen: null, fout: null };
   try {
     for (let i = 0; i < maxBatches; i++) {
       const o = await bankKind(['verrijk-open', '--max', String(BANK_AI_BATCH)], {}, 120000);
@@ -14959,13 +14969,16 @@ async function bankVerrijkAI(maxBatches) {
       const z = await bankKind(['verrijk-zet'], { resultaten: r.r, model: BANK_AI_MODEL, gestuurd: o.j.groepen.map(function (g) { return g.g; }) }, 120000);
       if (!z.j.ok) { l.fout = 'verrijk-zet: ' + String(z.j.fout || 'exit ' + z.code).slice(0, 120); break; }
       l.batches++; l.groepen_gezet += z.j.gezet || 0; l.geweigerd += z.j.geweigerd || 0;
+      // wv740: waarom geweigerd (onbekende groep, categorie buiten de lijst, of 'intern' — dat bepalen alleen de regels)
+      if (z.j.weigering) ['groep', 'categorie', 'intern'].forEach(function (k) { l.weigering[k] += parseInt(z.j.weigering[k], 10) || 0; });
       l.open_groepen = Math.max(0, (l.open_groepen || 0) - (z.j.gezet || 0));
       // Groepen zonder bruikbaar oordeel telt het archief (na 2 keer niet meer aangeboden); minder dan de helft bruikbaar: stoppen
       if ((z.j.gezet || 0) < o.j.groepen.length / 2) { l.fout = 'model gaf voor ' + (o.j.groepen.length - (z.j.gezet || 0)) + ' van ' + o.j.groepen.length + ' groepen geen bruikbare indeling'; break; }
     }
   } catch (e) { l.fout = 'interne fout'; logError('bank-verrijk', e); }
   l.eind = new Date().toISOString();
-  schrijfLog(nu() + ' bank ' + velden({ opdracht: 'verrijk-ai', batches: l.batches, gezet: l.groepen_gezet, geweigerd: l.geweigerd, open: l.open_groepen, fout: l.fout ? 1 : undefined }));
+  schrijfLog(nu() + ' bank ' + velden({ opdracht: 'verrijk-ai', batches: l.batches, gezet: l.groepen_gezet, geweigerd: l.geweigerd, w_groep: l.weigering.groep || undefined,
+    w_categorie: l.weigering.categorie || undefined, w_intern: l.weigering.intern || undefined, open: l.open_groepen, fout: l.fout ? 1 : undefined }));
   return l;
 }
 function bankVerrijkStart(maxBatches) {

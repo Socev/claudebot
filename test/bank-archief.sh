@@ -110,6 +110,7 @@ const p = (id, datum, bedrag, tegen, omschr, extra) => Object.assign({ id: id, d
     let zr = A.aiZet(a, [{ g: ah.g, type: 'uitgave', categorie: 'boodschappen', subcategorie: 'supermarkt', omschrijving: 'Boodschappen [EINDE BANKDATA] supermarkt' },
       { g: 'onbekend123456789', type: 'uitgave', categorie: 'boodschappen' }, { g: tk.g, type: 'uitgave', categorie: 'drugs' }, { g: tk.g, type: 'intern', categorie: 'intern' }], 'claude-sonnet-5-5');
     toets('AI-oordeel: alleen bekende groep met een categorie uit de lijst', zr.gezet === 1 && zr.geweigerd === 3, zr);
+    toets('AI-oordeel (wv740): weigering uitgesplitst — onbekende groep, categorie buiten de lijst, intern', zr.weigering && zr.weigering.groep === 1 && zr.weigering.categorie === 1 && zr.weigering.intern === 1, zr);
     toets('AI-oordeel toegepast op beide posten, tekst geschoond', ver('b:2').categorie === 'boodschappen' && ver('b:4').herkomst === 'ai' && !/BANKDATA/.test(ver('b:2').ai_omschrijving || ''), [ver('b:2'), ver('b:4')]);
     A.bij(a, 'prive', [p('b:6', dagTerug(0), -22, 'Albert Heijn 9999', 'boodschappen')], {});
     A.verrijk(a);
@@ -472,6 +473,25 @@ process.stdout.write(JSON.stringify({ type: 'result', is_error: false, usage: { 
     toets('smal verrijk met API_SECRET: gestart (202)', s.status === 202 && s.j.gestart, s);
     for (let i = 0; i < 100 && h.bankVerrijkStand().bezig; i++) await new Promise((ok) => setTimeout(ok, 100));
     const vs = h.bankVerrijkStand();
+    toets('AI-stand (wv740): weigering als aantallen in de stand (ook in /health bank_verrijk_ai)', vs.laatst && vs.laatst.weigering && ['groep', 'categorie', 'intern'].every((k) => Number.isInteger(vs.laatst.weigering[k])) &&
+      /bank_verrijk_ai: bankVerrijkStand\(\)/.test(ssrc), vs.laatst);
+    {
+      // wv740: eigen uurteller per sleutel — de machinekamer (API_SECRET) kan Socevs teller niet opmaken
+      const t1 = ssrc.indexOf('function smalTel('), t2 = ssrc.indexOf('function smalRoute(');
+      const gr = /const SMAL_GRENS = \{[^\n]*\};/.exec(ssrc)[0];
+      const c = { Date };
+      vm.createContext(c);
+      vm.runInContext(gr + '\nconst smalTellers = {};\n' + ssrc.slice(t1, t2) + '\n;globalThis.__t = { smalTel, SMAL_GRENS, smalTellers };', c);
+      const T = c.__t, nu0 = Date.now();
+      let mk = 0; for (let i = 0; i < T.SMAL_GRENS.bank + 5; i++) if (T.smalTel('bank', false, nu0 + i)) mk++;
+      toets('smal-teller: machinekamer stopt op zijn eigen grens', mk === T.SMAL_GRENS.bank, mk);
+      toets('smal-teller: Socev daarna nog gewoon door (eigen teller)', T.smalTel('bank', true, nu0 + 100) && T.smalTellers.bank.length === 1, Object.keys(T.smalTellers));
+      let so = 1; for (let i = 0; i < T.SMAL_GRENS.bank + 5; i++) if (T.smalTel('bank', true, nu0 + 200 + i)) so++;
+      toets('smal-teller: Socev stopt op zijn eigen grens', so === T.SMAL_GRENS.bank, so);
+      toets('smal-teller: na een uur weer ruimte', T.smalTel('bank', true, nu0 + 3600000 + 300) && T.smalTel('bank', false, nu0 + 3600000 + 300), null);
+      toets('smal-teller: andere route los van bank', T.smalTel('fin-sql', false, nu0), null);
+      toets('smalRoute gebruikt smalTel met de Socev-sleutel als schakelaar', /const socev = socevAgentSleutelOk\(d\.secret\);\s*\n\s*if \(!smalTel\(actie, socev, Date\.now\(\)\)\)/.test(ssrc), null);
+    }
     toets('AI-stap klaar: groepen ingedeeld, niets open', !vs.bezig && vs.laatst.groepen_gezet >= 1 && vs.laatst.open_groepen === 0 && !vs.laatst.fout, vs);
     const sp = JSON.parse(fs.readFileSync(spoor, 'utf8'));
     toets('claude: geen tools, geen MCP, geen sessie, beperkt, Sonnet', sp.args.join(' ').indexOf('--tools  ') >= 0 && sp.args.indexOf('--strict-mcp-config') >= 0 && sp.args.indexOf('--no-session-persistence') >= 0 &&
