@@ -139,6 +139,8 @@ toets('signalen: weggevallen reeks (Krant) = navragen', s('weg', /Krant/).length
 toets('signalen: Netflix op twee eigen rekeningen = dubbel; Buckaroo (betaaldienst) niet', s('dubbel', /streaming|Netflix/i).length === 1 && !sig.some((x) => x.soort === 'dubbel' && /Buckaroo/i.test(x.zin)), sig);
 toets('signalen: dubbel zonder linkregel toont de categorie, niet de naam van de aanbieder', s('dubbel', /streaming/i).length === 1 && !/Netflix/.test(s('dubbel', /streaming/i)[0].zin), s('dubbel', /streaming/i));
 toets('signalen: Tibber wisselend zonder heel vergelijkingsjaar geen "duurder"', !sig.some((x) => /Tibber/.test(x.titel) && x.soort === 'duurder'), sig);
+toets('signalen: energie dezelfde maanden vorig jaar, met de richting', s('energie', /Energie/).length === 1 && /een jaar eerder .*\(\+7%\)/.test(s('energie', /Energie/)[0].zin), sig.filter((x) => x.soort === 'energie'));
+toets('signalen: eerst fout, dan wacht, dan info', sig.every((x, i) => i === 0 || ({ fout: 0, wacht: 1, info: 2 })[sig[i - 1].toon] <= ({ fout: 0, wacht: 1, info: 2 })[x.toon]), sig.map((x) => x.toon));
 toets('signalen: elk met één zin en een toon', sig.length > 0 && sig.every((x) => x.zin.length > 10 && x.zin.length <= 240 && ['info', 'wacht', 'fout'].indexOf(x.toon) >= 0), sig);
 const v = uit.verloop;
 toets('verloop: 24 maanden, lopende maand gemarkeerd, onvolledig vóór de koppeling van de ABN-rekening (bunq telt niet)', v.maanden.length === 24 && v.maanden[23].lopend === true && v.maanden[23].volledig === false &&
@@ -149,6 +151,15 @@ toets('stroom: externe rekening heet "extern", eigen rekeningen met hun naam', s
 toets('buffer: drie volledige maanden, lopende maand apart', uit.buffer && uit.buffer.per_maand.length === 3 && uit.buffer.per_maand[2].maand === F.maandPlus(mNu, -1) && uit.buffer.lopend.maand === mNu, uit.buffer);
 toets('deze maand: in en uit als positieve getallen', uit.deze_maand.uit >= 0 && uit.deze_maand.in >= 0 && uit.deze_maand.maand === mNu, uit.deze_maand);
 
+// ── koppeling midden in de maand (zoals de echte ABN-koppeling op 30-4): die maand is onvolledig ──
+{
+  const BD2 = path.join(W, 'bank2'), a2 = A.open(BD2);
+  A.rekeningenSync(a2, { vl: REK.vl });
+  A.bij(a2, 'vl', VL.filter((x) => x.datum >= dg(mnd[0], 15)).map((x) => Object.assign({}, x, { id: 'b2' + x.id })), {});
+  const u = F.bereken(A, a2, { vault: VAULT });
+  toets('volledigheid: eerste post op de 15e → die maand onvolledig, de volgende volledig', u.verloop.volledig_vanaf === mnd[1], u.verloop.volledig_vanaf);
+  a2.db.close();
+}
 // ── Bewust dempt een signaal ──
 fs.writeFileSync(LP, linkPagina('', '| paypal | dubbel | 22-10-2026 | "die twee zijn bewust" — David 22-10-2026 |\n| krant | * | 22-10-2026 | |\n'));
 const uit2 = F.bereken(A, a, { vault: VAULT });

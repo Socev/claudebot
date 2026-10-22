@@ -7,6 +7,7 @@
 // machtiging, geen omschrijving, geen losse posten, geen saldo behalve de dekking van de vaste-lastenrekening. Steun heet "Steun (vast)",
 // een externe rekening "extern", een PayPal-ontvanger of een naam onder "dubbel" alleen als hij in de linkslijst staat (kan een persoon
 // zijn). Een fout in één blok maakt alleen dat blok leeg; de foutmelding is generiek (geen tegenpartij in api.log; Fable #17).
+// Dit bestand schrijft niets; bank-lezer.js (archiefKlaar) werkt vóór het lezen wel de cache en de indeling bij, zoals bij elke leesopdracht.
 //
 // Opzeglinks (Fable #8): de vault-pagina levert link, soort, bron en datum; de host moet in LINK_HOSTS staan voor dat herkenwoord
 // (allowlist in de code, gaat mee in de review van elke uitrol). Alleen https, geen gebruikersnaam of poort, host exact in de lijst.
@@ -195,7 +196,7 @@ function blokVasteLasten(A, a, nu, links, signalen) {
       if (x.reeksen === 1 && x.bedrag_vorig != null && x.gewijzigd_op && x.gewijzigd_op >= plusDagen(nu, -90) && x.bedrag > x.bedrag_vorig + 0.005)
         signalen.push({ soort: 'prijsstap', naam: naam, toon: 'wacht', post: naam, link: link,
           zin: naam + ': sinds ' + mndJaar(x.gewijzigd_op) + ' ' + eur(x.bedrag) + ' in plaats van ' + eur(x.bedrag_vorig) + (x.ritme !== 'maand' ? ' per ' + x.ritme : '') + '.' });
-      else if (x.reeksen > 1 && d && x.per_maand - d.per_maand >= 0.5)
+      else if (x.reeksen > 1 && d && x.per_maand - d.per_maand >= 0.5 && d.per_maand > 0 && (x.per_maand - d.per_maand) / d.per_maand > 0.03)
         signalen.push({ soort: 'prijsstap', naam: naam, toon: 'wacht', post: naam, link: link,
           zin: naam + ' samen nu ' + eur(x.per_maand) + ' per maand; drie maanden geleden ' + eur(d.per_maand) + '.' });
     }
@@ -328,7 +329,8 @@ function bereken(A, a, o) {
   uit.paypal = o.paypal ? blok('paypal', function () { return blokPaypal(o.paypal, a, L.links, signalen); }) : null;
   // één signaal per soort en post; gedempt wat David al kent (Bewust-tabel)
   const gezien = new Set();
-  uit.signalen = signalen.filter(function (s) {
+  const ernst = { fout: 0, wacht: 1, info: 2 };   // eerst wat het meest telt (Fable diffreview #3)
+  uit.signalen = signalen.slice().sort(function (x, y) { return (ernst[x.toon] ?? 2) - (ernst[y.toon] ?? 2); }).filter(function (s) {
     const k = s.soort + '|' + (s.post || s.naam || s.zin);
     if (gezien.has(k) || gedempt(s, L.bewust)) return false;
     gezien.add(k); return true;

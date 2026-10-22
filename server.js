@@ -9302,7 +9302,7 @@ async function appPraktijkenRoute(req, res, a) {
 // dan 200 met vaste_plek en een zin, zoals Praktijken/Voor jou (Fable wv771 #15). Wél een auditregel per keer openen (route, apparaat,
 // status; geen inhoud): één verzoek geeft het hele privé-overzicht (Fable #14). 60 s in het geheugen tegen Ververs-spam en als terugval
 // als de database even bezet is (bankronde); niets op schijf. Grens 20 s (Fable #13).
-const APP_FIN_CACHE_MS = 60000, APP_FIN_MAX_MS = 20000;
+const APP_FIN_CACHE_MS = 60000, APP_FIN_MAX_MS = 20000, APP_FIN_TERUGVAL_MS = 30 * 60000;
 let appFinCache = null;   // { op, d }
 async function appFinancien(req, res, a) {
   res._app.reden = 'financien';
@@ -9315,12 +9315,13 @@ async function appFinancien(req, res, a) {
   if (!j || j.ok !== true) {
     // een oudere bank-lezer.js kent de opdracht niet (gebruik: …): de pod wordt bijgewerkt (Fable #12)
     const oud = j && typeof j.fout === 'string' && /^gebruik:/.test(j.fout);
-    if (appFinCache) return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString(), oud: true }, appFinCache.d));
+    // terugval op het geheugen hooguit 30 min oud; de app zegt dan "cijfers van HH:MM" (Fable diffreview #2)
+    if (appFinCache && nu - appFinCache.op < APP_FIN_TERUGVAL_MS) return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString(), oud: true }, appFinCache.d));
     return appWeiger(res, 503, oud ? 'Financiën wordt net bijgewerkt; probeer het over een paar minuten' : 'de cijfers zijn nu niet te lezen; probeer het zo opnieuw', oud ? 'financien oud' : 'financien fout');
   }
   const d = {};
   ['peildatum', 'maand', 'deze_maand', 'vorige_maand', 'verloop', 'vaste_lasten', 'buffer', 'stroom', 'paypal', 'signalen', 'links', 'fouten'].forEach(function (k) { d[k] = j[k] === undefined ? null : j[k]; });
-  appFinCache = { op: nu, d: d };
+  appFinCache = Array.isArray(d.fouten) && d.fouten.length ? null : { op: nu, d: d };   // half overzicht niet bewaren (Fable diffreview #4)
   return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d));
 }
 
