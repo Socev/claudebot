@@ -126,6 +126,19 @@ jobs:
           fi
           echo "pot-datahub.js: puur."
 
+      # facturen-db.js (wv824, F1c): de opslag van de Facturen-app is lokaal (SQLite + stukken op de pod). Geen netwerk- of procesmodule en
+      # geen fetch; hij laadt alleen fs, path, crypto, node:sqlite en de pure buren. Versturen doet de koerier (F4), nooit de opslag.
+      - name: facturen-db.js moet lokaal blijven
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' facturen-db.js)
+          if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\("; then
+            echo "::error::facturen-db.js laadt een netwerk- of procesmodule; de opslag moet lokaal blijven"; exit 1
+          fi
+          if grep -vE '^\s*(\*|//)' facturen-db.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypto|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js)'\)$"; then
+            echo "::error::facturen-db.js laadt een module buiten fs, path, crypto, node:sqlite en de pure buren"; exit 1
+          fi
+          echo "facturen-db.js: alleen lokaal."
+
       # De witte lijst en de handtekeningcontrole echt toetsen (nagebootste bunq en Enable Banking op 127.0.0.1); node:sqlite
       # vraagt Node 22 (zelfde hoofdversie als de pod).
       - uses: actions/setup-node@v4
@@ -148,6 +161,7 @@ jobs:
           bash test/facturen-kern.sh   # wv797: Facturen-app kern — besliskader, UBL, validators, IBAN-poort, patiëntkenmerk, overgangen, vingerafdruk
           bash test/facturen-bank.sh   # wv798: Facturen-app bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
           bash test/pot-datahub.sh   # wv815: POT-posten naar Davids datahub — koppelen, grens, Davids vorm, toewijzing, grootboek, D1-batch met parameters
+          bash test/facturen-db.sh   # wv824: Facturen-app opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
           bash test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
       - name: "studio (wv707, tab Studio fase 1)"

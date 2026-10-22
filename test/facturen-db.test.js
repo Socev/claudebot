@@ -1,0 +1,634 @@
+'use strict';
+// Toetsen voor facturen-db.js (wv824, Facturen-app F1c). Alles in wegwerpmappen onder TMPDIR; synthetische gegevens (test/facturen-zaad.js).
+// Raakt /opt/data/facturen, de kluis, mail en de vault niet. Draaien: bash test/facturen-db.sh
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { Worker } = require('worker_threads');
+const { spawn } = require('child_process');
+const ROOT = path.resolve(__dirname, '..');
+const D = require(path.join(ROOT, 'facturen-db.js'));
+const K = require(path.join(ROOT, 'facturen-kern.js'));
+const B = require(path.join(ROOT, 'facturen-bank.js'));
+const Z = require(path.join(__dirname, 'facturen-zaad.js'));
+
+const WEG = fs.mkdtempSync(path.join(os.tmpdir(), 'facturen-db-'));
+process.on('exit', () => { try { fs.rmSync(WEG, { recursive: true, force: true }); } catch (e) {} });
+let n = 0;
+const map = (naam) => path.join(WEG, (naam || 'db') + '-' + (++n));
+const modus = (p) => (fs.statSync(p).mode & 0o777).toString(8);
+const NU = Date.parse('2026-10-22T12:00:00Z');
+const iso = (ms) => new Date(ms).toISOString();
+
+// Kleine basisset: entiteiten tolgaarde, groenhouten, pot, prive; rekeningen; één leverancier; documenten en facturen op verzoek.
+function basis(dir) {
+  const f = D.open(dir || map());
+  D.transactie(f, () => {
+    D.voegToe(f, 'entiteit', { sleutel: 'tolgaarde', naam: 'Tolgaarde (proef)', boekhoud_doel: 'boekhouder-tolgaarde@acta.invalid', boekhoud_route: 'exact' });
+    D.voegToe(f, 'entiteit', { sleutel: 'groenhouten', naam: 'Groenhouten (proef)', boekhoud_doel: 'boekhouder-groenhouten@acta.invalid', boekhoud_route: 'exact' });
+    D.voegToe(f, 'entiteit', { sleutel: 'pot', naam: 'POT (proef)', boekhoud_doel: 'boekhouder-pot@acta.invalid', boekhoud_route: 'exact', afschrift_doel: 'afschrift-pot@acta.invalid' });
+    D.voegToe(f, 'entiteit', { sleutel: 'prive', naam: 'Privé' });
+    D.voegToe(f, 'rekening', { id: 'aaaaaaaaaaaa0001', entiteit: 'tolgaarde', iban: Z.maakIban('NL', 'TEST', '0000000011'), bank_formaat: 'abn_mt940', controle: 1 });
+    D.voegToe(f, 'rekening', { id: 'aaaaaaaaaaaa0002', entiteit: 'pot', iban: Z.maakIban('NL', 'TEST', '0000000015'), bank_formaat: 'bankluis', bankluis_rek: 'proef-pot', controle: 1, alleen_eigenaar: 1 });
+    D.voegToe(f, 'rekening', { id: 'aaaaaaaaaaaa0009', entiteit: 'prive', iban: Z.maakIban('NL', 'TEST', '0000000019'), bank_formaat: 'abn_tab', controle: 0, alleen_eigenaar: 1 });
+    D.voegToe(f, 'leverancier', { id: 'bbbbbbbbbbbb0001', naam: 'Leverancier A B.V.', genormaliseerd: 'leverancier a', aangemaakt_op: iso(NU) });
+  });
+  return f;
+}
+function factuur(f, o) {
+  o = o || {};
+  const bytes = Buffer.from('%PDF-1.4 synthetisch ' + D.nieuwId());
+  const s = D.stukSchrijf(f, bytes);
+  const doc = D.nieuwId(), id = o.id || D.nieuwId();
+  D.voegToe(f, 'document', { id: doc, sha256: s.sha256, soort: 'pdf', aangemaakt_op: iso(NU) });
+  const bevestigd = o.status && !['te_beoordelen', 'geen_factuur', 'dubbel'].includes(o.status);
+  D.voegToe(f, 'factuur', Object.assign({ id, document: doc, leverancier: 'bbbbbbbbbbbb0001', nummer: 'P-' + id.slice(0, 6), incl: 12100, excl: 10000, btw: 2100,
+    betaalwijze: 'zelf', entiteit: 'tolgaarde', status: 'te_beoordelen', aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) },
+    bevestigd ? { betaalspoor: 'te_betalen', bevestigd_door: 'toets', bevestigd_op: iso(NU) } : {}, o));
+  return { id, doc, sha256: s.sha256 };
+}
+// Opdracht zoals F2 hem bij Bevestigen maakt (vingerafdruk uit de kern); entiteit/doel standaard die van de factuur.
+function opdracht(f, fac, o) {
+  o = o || {};
+  const r = f.db.prepare('SELECT f.entiteit, e.boekhoud_doel FROM factuur f LEFT JOIN entiteit e ON e.sleutel = f.entiteit WHERE f.id = ?').get(fac.id);
+  const id = o.id || D.nieuwId(), entiteit = o.entiteit || r.entiteit, doel = o.doeladres || r.boekhoud_doel || 'iemand@ergens.invalid';
+  const bijlagen = [{ naam: 'f.pdf', mime: 'application/pdf', sha256: fac.sha256 }];
+  const vf = K.vingerafdruk({ id, soort: 'boekhouder_factuur', doeladres: doel, regel: { factuur_id: fac.id, entiteit: entiteit === 'prive' ? 'x' : entiteit, bedrag_centen: 12100, doeladres: doel }, bijlagen });
+  D.voegToe(f, 'opdracht', Object.assign({ id, soort: 'boekhouder_factuur', factuur: fac.id, entiteit, doeladres: doel, bijlagen, vingerafdruk: vf,
+    verstuur_na: iso(NU - 60000), idempotentiesleutel: fac.id + ':' + id, status: 'wacht', aangemaakt_door: 'toets', aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) }, o.extra || {}));
+  return id;
+}
+// In de wachtrij zetten zoals Bevestigen dat doet (één transactie).
+function inWachtrij(f, o) {
+  return D.transactie(f, () => {
+    const fac = factuur(f, Object.assign({ status: 'in_wachtrij' }, o || {}));
+    fac.opdracht = opdracht(f, fac);
+    return fac;
+  });
+}
+const gooit = (fn, re, uitleg) => assert.throws(fn, (e) => re.test(String(e && (e.message || e))), uitleg);
+
+// ───────────────────────────── migraties ─────────────────────────────
+
+test('migraties: nieuw → alle versies; opnieuw openen past niets toe en verandert niets', () => {
+  const dir = map();
+  const f1 = D.open(dir);
+  assert.equal(f1.schema, D.SCHEMA_VERSIE);
+  assert.deepEqual(f1.toegepast, D.MIGRATIES.map((m) => m.versie));
+  const schema1 = f1.db.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all();
+  D.sluit(f1);
+  const f2 = D.open(dir);
+  assert.deepEqual(f2.toegepast, []);
+  assert.equal(f2.schema, D.SCHEMA_VERSIE);
+  assert.deepEqual(f2.db.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all(), schema1);
+  assert.equal(f2.db.prepare('SELECT count(*) AS n FROM schema_migratie').get().n, D.MIGRATIES.length);
+  assert.equal(D.metaLees(f2, 'verzendmodus'), 'concept');
+  // migreer() rechtstreeks nog eens: idempotent
+  assert.deepEqual(D.migreer(f2.db).toegepast, []);
+  D.sluit(f2);
+});
+
+test('migraties: acht processen die tegelijk een lege database openen, botsen niet', async () => {
+  const dir = map();
+  const code = "const D=require(" + JSON.stringify(path.join(ROOT, 'facturen-db.js')) + ");const f=D.open(process.argv[1]);process.stdout.write(String(f.schema));";
+  const uit = await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map(() => new Promise((res) => {
+    const p = spawn(process.execPath, ['--no-warnings', '-e', code, dir]);
+    let o = '', e = '';
+    p.stdout.on('data', (d) => { o += d; }); p.stderr.on('data', (d) => { e += d; });
+    p.on('close', (c) => res({ c, o, e }));
+  })));
+  for (const u of uit) assert.equal(u.c, 0, u.e);
+  for (const u of uit) assert.equal(u.o, String(D.SCHEMA_VERSIE));
+  const f = D.open(dir);
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM schema_migratie').get().n, D.MIGRATIES.length);
+  D.sluit(f);
+});
+
+test('migraties: een database met een nieuwer schema wordt geweigerd (terugrollen schrijft niet met oude code)', () => {
+  const dir = map();
+  const f = D.open(dir);
+  f.db.prepare("INSERT INTO schema_migratie (versie, naam, toegepast_op) VALUES (99, 'toekomst', 'x')").run();
+  D.sluit(f);
+  gooit(() => D.open(dir), /schema 99/);
+});
+
+test('bevroren lijsten in het schema = lijsten van de kern en de bankmodule', () => {
+  assert.deepEqual(D.LIJSTEN.status, K.STATUSSEN);
+  assert.deepEqual(D.LIJSTEN.betaalspoor, K.BETAALSPOREN);
+  assert.deepEqual(D.LIJSTEN.opdrachtStatus, K.OPDRACHT_STATUSSEN);
+  assert.deepEqual(D.LIJSTEN.besluitBron, K.BESLUIT_BRONNEN);
+  assert.deepEqual(D.LIJSTEN.formaat, B.FORMATEN);
+  assert.deepEqual(D.LIJSTEN.categorie, B.CATEGORIEEN);
+  assert.deepEqual(D.LIJSTEN.signaal, B.SIGNAAL_SOORTEN);
+});
+
+test('rechten: map 700, database (+ wal/shm) 600, stukken en back-up 700, stuk 600', () => {
+  const f = basis();
+  assert.equal(modus(f.dir), '700');
+  assert.equal(modus(f.pad), '600');
+  for (const s of ['-wal', '-shm']) if (fs.existsSync(f.pad + s)) assert.equal(modus(f.pad + s), '600', s);
+  assert.equal(modus(f.stukken), '700');
+  assert.equal(modus(f.backup), '700');
+  const s = D.stukSchrijf(f, Buffer.from('rechten'));
+  assert.equal(modus(D.stukPad(f, s.sha256)), '600');
+  assert.equal(modus(path.dirname(D.stukPad(f, s.sha256))), '700');
+  assert.equal(f.db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
+  assert.equal(f.db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
+  D.sluit(f);
+});
+
+test('geen kolom voor factuur- of mailtekst', () => {
+  const f = D.open(map());
+  for (const t of D.TABELLEN) {
+    const k = f.db.prepare('PRAGMA table_info(' + t + ')').all().map((x) => x.name);
+    for (const naam of k) {
+      if (t === 'tekstanker' && naam === 'tekst') continue;   // het anker zelf (een kort woord), geen factuurtekst
+      assert.ok(!/^(tekst|inhoud|body|mailtekst|pdftekst|ruwe_tekst|tekstinhoud)$/.test(naam), t + '.' + naam);
+    }
+  }
+  D.sluit(f);
+});
+
+// ───────────────────────────── Privé nooit naar de boekhouder ─────────────────────────────
+
+test('Privé: entiteit prive heeft nooit een boekhoud- of afschriftadres (CHECK, insert en update)', () => {
+  const f = D.open(map());
+  gooit(() => D.voegToe(f, 'entiteit', { sleutel: 'prive', naam: 'Privé', boekhoud_doel: 'x@y.invalid' }), /CHECK/);
+  gooit(() => D.voegToe(f, 'entiteit', { sleutel: 'prive', naam: 'Privé', afschrift_doel: 'x@y.invalid' }), /CHECK/);
+  gooit(() => D.voegToe(f, 'entiteit', { sleutel: 'prive', naam: 'Privé', boekhoud_route: 'mail' }), /CHECK/);
+  D.voegToe(f, 'entiteit', { sleutel: 'prive', naam: 'Privé' });
+  gooit(() => f.db.prepare("UPDATE entiteit SET boekhoud_doel = 'x@y.invalid' WHERE sleutel = 'prive'").run(), /CHECK/);
+  gooit(() => f.db.prepare("UPDATE entiteit SET afschrift_doel = 'x@y.invalid' WHERE sleutel = 'prive'").run(), /CHECK/);
+  D.sluit(f);
+  // een andere entiteit met een adres hernoemen naar prive kan ook niet
+  const g = D.open(map());
+  D.voegToe(g, 'entiteit', { sleutel: 'tolgaarde', naam: 'T', boekhoud_doel: 'b@acta.invalid' });
+  gooit(() => g.db.prepare("UPDATE entiteit SET sleutel = 'prive' WHERE sleutel = 'tolgaarde'").run(), /CHECK/);
+  D.sluit(g);
+});
+
+test('Privé: een opdracht voor prive is onmogelijk — insert, langs elke weg', () => {
+  const f = basis();
+  const p = factuur(f, { entiteit: 'prive' });
+  // (1) rechtstreeks met entiteit prive (CHECK op de kolom; prive heeft ook geen adres)
+  gooit(() => opdracht(f, p, { entiteit: 'prive', doeladres: 'iemand@ergens.invalid' }), /CHECK|opdracht_prive/);
+  // (2) met een andere entiteit voor een privéfactuur (trigger: moet gelijk zijn aan de factuur)
+  gooit(() => opdracht(f, p, { entiteit: 'tolgaarde', doeladres: 'boekhouder-tolgaarde@acta.invalid' }), /opdracht_entiteit/);
+  // (3) privéfactuur in de wachtrij zetten (CHECK op de factuur)
+  gooit(() => factuur(f, { entiteit: 'prive', status: 'in_wachtrij' }), /CHECK/);
+  gooit(() => factuur(f, { entiteit: null, status: 'in_wachtrij' }), /CHECK/);
+  // (4) een privé-afschrift kan niet bestaan (dus ook geen afschriftopdracht)
+  const s = D.stukSchrijf(f, Buffer.from('mt940 proef'));
+  D.voegToe(f, 'document', { id: 'cccccccccccc0001', sha256: s.sha256, soort: 'mt940', aangemaakt_op: iso(NU) });
+  gooit(() => D.voegToe(f, 'pot_afschrift', { id: 'dddddddddddd0001', rekening: 'aaaaaaaaaaaa0009', periode: '2026-09', aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) }), /afschrift_prive/);
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM opdracht').get().n, 0);
+  D.sluit(f);
+});
+
+test('Privé: een opdracht voor prive is onmogelijk — update, langs elke weg', () => {
+  const f = basis();
+  const t = inWachtrij(f);
+  // (1) opdracht.entiteit naar prive (CHECK + onveranderlijk)
+  gooit(() => f.db.prepare("UPDATE opdracht SET entiteit = 'prive' WHERE id = ?").run(t.opdracht), /CHECK|onveranderlijk/);
+  // (2) factuur.entiteit naar prive terwijl de opdracht wacht (trigger + CHECK op de status)
+  gooit(() => f.db.prepare("UPDATE factuur SET entiteit = 'prive' WHERE id = ?").run(t.id), /factuur_entiteit|CHECK/);
+  // (3) ook samen met een statuswissel naar te_beoordelen in één UPDATE: de levende opdracht houdt het tegen
+  gooit(() => f.db.prepare("UPDATE factuur SET entiteit = 'prive', status = 'te_beoordelen' WHERE id = ?").run(t.id), /factuur_entiteit/);
+  // (4) opdracht omhangen naar een privéfactuur
+  const p = factuur(f, { entiteit: 'prive' });
+  gooit(() => f.db.prepare('UPDATE opdracht SET factuur = ? WHERE id = ?').run(p.id, t.opdracht), /onveranderlijk/);
+  // (5) privéfactuur naar een status onderweg (CHECK)
+  for (const st of ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt']) {
+    gooit(() => f.db.prepare("UPDATE factuur SET status = ?, betaalspoor = 'te_betalen', bevestigd_door = 'x', bevestigd_op = 'x' WHERE id = ?").run(st, p.id), /CHECK/, st);
+  }
+  // (6) de rekening van een POT-afschrift met een levende opdracht naar prive verhangen
+  const s1 = D.stukSchrijf(f, Buffer.from('mt940')), s2 = D.stukSchrijf(f, Buffer.from('pdf'));
+  D.voegToe(f, 'document', { id: 'cccccccccccc0001', sha256: s1.sha256, soort: 'mt940', aangemaakt_op: iso(NU) });
+  D.voegToe(f, 'document', { id: 'cccccccccccc0002', sha256: s2.sha256, soort: 'pdf', aangemaakt_op: iso(NU) });
+  D.voegToe(f, 'pot_afschrift', { id: 'dddddddddddd0001', rekening: 'aaaaaaaaaaaa0002', periode: '2026-09', mt940_document: 'cccccccccccc0001', pdf_document: 'cccccccccccc0002', status: 'in_wachtrij', aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) });
+  const bijl = [{ sha256: s1.sha256 }, { sha256: s2.sha256 }];
+  D.voegToe(f, 'opdracht', { id: 'eeeeeeeeeeee0001', soort: 'boekhouder_afschrift', afschrift: 'dddddddddddd0001', entiteit: 'pot', doeladres: 'afschrift-pot@acta.invalid', bijlagen: bijl,
+    vingerafdruk: K.vingerafdruk({ id: 'eeeeeeeeeeee0001', soort: 'boekhouder_afschrift', doeladres: 'afschrift-pot@acta.invalid', regel: { afschrift_id: 'dddddddddddd0001', entiteit: 'pot', periode: '2026-09', doeladres: 'afschrift-pot@acta.invalid' }, bijlagen: bijl }),
+    verstuur_na: iso(NU), idempotentiesleutel: 'af:1', aangemaakt_door: 'toets', aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) });
+  gooit(() => f.db.prepare("UPDATE pot_afschrift SET rekening = 'aaaaaaaaaaaa0009' WHERE id = 'dddddddddddd0001'").run(), /afschrift_rekening|afschrift_prive/);
+  gooit(() => f.db.prepare("UPDATE rekening SET entiteit = 'prive', controle = 0 WHERE id = 'aaaaaaaaaaaa0002'").run(), /rekening_entiteit/);
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM opdracht WHERE entiteit = 'prive'").get().n, 0);
+  D.sluit(f);
+});
+
+test('Privé: bankregels van een rekening zonder controle worden nooit opgeslagen; POT blijft eigenaar-only', () => {
+  const f = basis();
+  const tx = (rek, ent, o) => D.voegToe(f, 'bank_transactie', Object.assign({ id: D.nieuwId(), rekening: rek, entiteit: ent, eigen_iban: Z.maakIban('NL', 'TEST', '0000000011'),
+    boekdatum: '2026-10-01', bedrag_centen: -100, entry_ref: 'r-' + D.nieuwId(), formaat: 'abn_tab', bestand: null, aangemaakt_op: iso(NU) }, o || {}));
+  gooit(() => tx('aaaaaaaaaaaa0009', 'prive', { formaat: 'bankluis', bankluis_sleutel: 'x' }), /CHECK|transactie_prive/);
+  gooit(() => tx('aaaaaaaaaaaa0002', 'pot', { formaat: 'bankluis', bankluis_sleutel: 'x', alleen_eigenaar: 0 }), /transactie_eigenaar/);
+  gooit(() => tx('aaaaaaaaaaaa0002', 'tolgaarde', { formaat: 'bankluis', bankluis_sleutel: 'x', alleen_eigenaar: 1 }), /transactie_entiteit/);
+  tx('aaaaaaaaaaaa0002', 'pot', { formaat: 'bankluis', bankluis_sleutel: 'x', alleen_eigenaar: 1 });
+  gooit(() => f.db.prepare("UPDATE bank_transactie SET alleen_eigenaar = 0 WHERE rekening = 'aaaaaaaaaaaa0002'").run(), /transactie_eigenaar/);
+  // privérekening: altijd controle 0 en alleen eigenaar
+  gooit(() => f.db.prepare("UPDATE rekening SET controle = 1 WHERE id = 'aaaaaaaaaaaa0009'").run(), /rekening_prive/);
+  gooit(() => D.voegToe(f, 'rekening', { id: 'aaaaaaaaaaaa0010', entiteit: 'prive', iban: Z.maakIban('NL', 'TEST', '0000000020'), bank_formaat: 'abn_tab', controle: 1, alleen_eigenaar: 1 }), /rekening_prive/);
+  D.sluit(f);
+});
+
+test('Privé: een praktijkmanager kan niet aan Privé gekoppeld worden', () => {
+  const f = basis();
+  D.voegToe(f, 'gebruiker', { id: '1111111111111111', ingang: 'fac', rol: 'praktijkmanager', email: 'pm@voorbeeld.invalid' });
+  D.voegToe(f, 'gebruiker', { id: '2222222222222222', ingang: 'app', rol: 'eigenaar' });
+  gooit(() => D.voegToe(f, 'gebruiker_entiteit', { gebruiker: '1111111111111111', entiteit: 'prive' }), /gebruiker_prive/);
+  D.voegToe(f, 'gebruiker_entiteit', { gebruiker: '2222222222222222', entiteit: 'prive' });
+  gooit(() => f.db.prepare("UPDATE gebruiker SET rol = 'praktijkmanager' WHERE id = '2222222222222222'").run(), /gebruiker_prive/);
+  D.sluit(f);
+});
+
+// ───────────────────────────── trigger: opdracht.entiteit = factuur/afschrift ─────────────────────────────
+
+test('trigger: opdracht.entiteit en doeladres volgen de factuur en de entiteitentabel (insert)', () => {
+  const f = basis();
+  const t = factuur(f, { status: 'in_wachtrij' });
+  gooit(() => opdracht(f, t, { entiteit: 'groenhouten', doeladres: 'boekhouder-groenhouten@acta.invalid' }), /opdracht_entiteit/);
+  gooit(() => opdracht(f, t, { doeladres: 'boekhouder-groenhouten@acta.invalid' }), /opdracht_doeladres/);
+  gooit(() => opdracht(f, t, { doeladres: 'iemand@buiten.invalid' }), /opdracht_doeladres/);
+  const g = factuur(f, { status: 'te_beoordelen', entiteit: null });
+  gooit(() => opdracht(f, g, { entiteit: 'tolgaarde', doeladres: 'boekhouder-tolgaarde@acta.invalid' }), /opdracht_entiteit/);
+  opdracht(f, t);
+  // afschrift: entiteit moet die van de rekening zijn, doel het afschriftadres
+  const s1 = D.stukSchrijf(f, Buffer.from('mt')), s2 = D.stukSchrijf(f, Buffer.from('pd'));
+  D.voegToe(f, 'document', { id: 'cccccccccccc0001', sha256: s1.sha256, soort: 'mt940', aangemaakt_op: iso(NU) });
+  D.voegToe(f, 'document', { id: 'cccccccccccc0002', sha256: s2.sha256, soort: 'pdf', aangemaakt_op: iso(NU) });
+  D.voegToe(f, 'pot_afschrift', { id: 'dddddddddddd0001', rekening: 'aaaaaaaaaaaa0002', periode: '2026-09', mt940_document: 'cccccccccccc0001', pdf_document: 'cccccccccccc0002', status: 'klaar', aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) });
+  const af = (ent, doel) => D.voegToe(f, 'opdracht', { id: D.nieuwId(), soort: 'boekhouder_afschrift', afschrift: 'dddddddddddd0001', entiteit: ent, doeladres: doel, bijlagen: [s1.sha256, s2.sha256],
+    vingerafdruk: 'a'.repeat(64), verstuur_na: iso(NU), idempotentiesleutel: 'af:' + D.nieuwId(), aangemaakt_door: 'toets', aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) });
+  gooit(() => af('tolgaarde', 'boekhouder-tolgaarde@acta.invalid'), /opdracht_entiteit/);
+  gooit(() => af('pot', 'boekhouder-pot@acta.invalid'), /opdracht_doeladres/);
+  af('pot', 'afschrift-pot@acta.invalid');
+  // soort en koppeling moeten kloppen
+  gooit(() => D.voegToe(f, 'opdracht', { id: D.nieuwId(), soort: 'boekhouder_factuur', factuur: t.id, afschrift: 'dddddddddddd0001', entiteit: 'tolgaarde', doeladres: 'boekhouder-tolgaarde@acta.invalid',
+    bijlagen: [t.sha256], vingerafdruk: 'a'.repeat(64), verstuur_na: iso(NU), idempotentiesleutel: 'x:' + D.nieuwId(), aangemaakt_door: 't', aangemaakt_op: iso(NU), bijgewerkt_op: iso(NU) }), /CHECK/);
+  D.sluit(f);
+});
+
+test('trigger: na het aanmaken blijft de opdracht gelijk aan de factuur (update van opdracht, factuur en rekening)', () => {
+  const f = basis();
+  const t = inWachtrij(f);
+  for (const [kol, w] of [['entiteit', 'groenhouten'], ['doeladres', 'boekhouder-groenhouten@acta.invalid'], ['bijlagen', '["' + 'b'.repeat(64) + '"]'],
+    ['vingerafdruk', 'c'.repeat(64)], ['idempotentiesleutel', 'ander'], ['soort', 'boekhouder_afschrift']]) {
+    gooit(() => f.db.prepare('UPDATE opdracht SET ' + kol + ' = ? WHERE id = ?').run(w, t.opdracht), /onveranderlijk|CHECK/, kol);
+  }
+  gooit(() => f.db.prepare("UPDATE factuur SET entiteit = 'groenhouten' WHERE id = ?").run(t.id), /factuur_entiteit/);
+  // status/poging/resultaat mogen wel (dat is de levensloop)
+  f.db.prepare("UPDATE opdracht SET fout = 'proef', bijgewerkt_op = 'x' WHERE id = ?").run(t.opdracht);
+  // na terugdraaien mag de factuur van entiteit wisselen, en een nieuwe opdracht volgt de nieuwe entiteit
+  assert.equal(D.terugdraaien(f, t.id, { wie: 'toets' }).ok, true);
+  f.db.prepare("UPDATE factuur SET entiteit = 'groenhouten' WHERE id = ?").run(t.id);
+  gooit(() => opdracht(f, t, { entiteit: 'tolgaarde', doeladres: 'boekhouder-tolgaarde@acta.invalid' }), /opdracht_entiteit/);
+  opdracht(f, t);
+  D.sluit(f);
+});
+
+test('hooguit één levende opdracht per factuur; een verstuurde krijgt er nooit een tweede', () => {
+  const f = basis();
+  const t = inWachtrij(f);
+  gooit(() => opdracht(f, t), /UNIQUE/);
+  f.db.prepare("UPDATE opdracht SET status = 'opgehaald', opgehaald_op = 'x', poging = 1 WHERE id = ?").run(t.opdracht);
+  gooit(() => opdracht(f, t), /UNIQUE/);
+  f.db.prepare("UPDATE opdracht SET status = 'gelukt' WHERE id = ?").run(t.opdracht);
+  gooit(() => opdracht(f, t), /UNIQUE/);
+  // mislukt na drie pogingen is dood: "Opnieuw proberen" mag een nieuwe maken; geweigerd ook
+  const u = inWachtrij(f);
+  f.db.prepare("UPDATE opdracht SET status = 'mislukt', poging = 2 WHERE id = ?").run(u.opdracht);
+  gooit(() => opdracht(f, u), /UNIQUE/);
+  f.db.prepare("UPDATE opdracht SET poging = 3 WHERE id = ?").run(u.opdracht);
+  opdracht(f, u);
+  // poging nooit boven 3
+  gooit(() => f.db.prepare("UPDATE opdracht SET poging = 4 WHERE id = ?").run(u.opdracht), /CHECK/);
+  D.sluit(f);
+});
+
+test('een document is hooguit één factuur (splitsen bestaat niet)', () => {
+  const f = basis();
+  const t = factuur(f);
+  gooit(() => D.voegToe(f, 'factuur', { id: D.nieuwId(), document: t.doc, status: 'te_beoordelen', aangemaakt_op: 'x', bijgewerkt_op: 'x' }), /UNIQUE/);
+  gooit(() => D.voegToe(f, 'factuur', { id: D.nieuwId(), document: t.doc.replace(/.$/, 'f'), status: 'te_beoordelen', aangemaakt_op: 'x', bijgewerkt_op: 'x' }), /FOREIGN KEY/);
+  D.sluit(f);
+});
+
+test('id\'s zijn 16 hex kleine letters (paden); sha256 64 hex', () => {
+  const f = basis();
+  for (const fout of ['fac_0123456789ab', 'ABCDEF0123456789', '0123456789abcde', '0123456789abcdef0']) {
+    gooit(() => D.voegToe(f, 'leverancier', { id: fout, naam: 'X', genormaliseerd: 'x', aangemaakt_op: 'x' }), /CHECK/, fout);
+  }
+  gooit(() => D.voegToe(f, 'document', { id: D.nieuwId(), sha256: 'A'.repeat(64), soort: 'pdf', aangemaakt_op: 'x' }), /CHECK/);
+  for (let i = 0; i < 50; i++) assert.match(D.nieuwId(), /^[0-9a-f]{16}$/);
+  D.sluit(f);
+});
+
+// ───────────────────────────── terugdraaien tegen claimen ─────────────────────────────
+
+test('terugdraaien vóór claimen: opdracht teruggedraaid, factuur terug naar Beoordelen, claim pakt hem niet', () => {
+  const f = basis();
+  const t = inWachtrij(f);
+  const r = D.terugdraaien(f, t.id, { wie: 'toets', wanneer: iso(NU) });
+  assert.deepEqual(r, { ok: true, factuur: t.id, opdracht: t.opdracht });
+  assert.equal(f.db.prepare('SELECT status FROM opdracht WHERE id = ?').get(t.opdracht).status, 'teruggedraaid');
+  assert.equal(f.db.prepare('SELECT status FROM factuur WHERE id = ?').get(t.id).status, 'te_beoordelen');
+  assert.equal(D.claimOpdrachten(f, NU).opdrachten.length, 0);
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM audit WHERE wat = 'terugdraaien' AND object_id = ?").get(t.id).n, 1);
+  // tweede keer: niets meer terug te draaien
+  assert.equal(D.terugdraaien(f, t.id, { wie: 'toets' }).ok, false);
+  D.sluit(f);
+});
+
+test('claimen vóór terugdraaien: changes() == 0 → al_opgehaald, er verandert niets', () => {
+  const f = basis();
+  const t = inWachtrij(f);
+  const c = D.claimOpdrachten(f, NU);
+  assert.deepEqual(c.opdrachten.map((o) => o.id), [t.opdracht]);
+  assert.equal(c.opdrachten[0].poging, 1);
+  assert.ok(Array.isArray(c.opdrachten[0].bijlagen));
+  const voor = D.tellingen(f);
+  const r = D.terugdraaien(f, t.id, { wie: 'toets' });
+  assert.equal(r.ok, false);
+  assert.equal(r.fout, 'ongeldige_overgang');   // de factuur staat al op wordt_verstuurd
+  assert.equal(f.db.prepare('SELECT status FROM factuur WHERE id = ?').get(t.id).status, 'wordt_verstuurd');
+  assert.equal(f.db.prepare('SELECT status FROM opdracht WHERE id = ?').get(t.opdracht).status, 'opgehaald');
+  assert.deepEqual(D.tellingen(f), voor);
+  D.sluit(f);
+});
+
+test('terugdraaien: de voorwaardelijke UPDATE wint ook als een tweede verbinding de opdracht net claimde', () => {
+  const f = basis();
+  const t = inWachtrij(f);
+  // een tweede verbinding (de koerier in een ander proces) claimt; de factuur staat nog op in_wachtrij (bv. halverwege een oudere koerier)
+  const k = D.open(f.dir);
+  k.db.prepare("UPDATE opdracht SET status = 'opgehaald', opgehaald_op = ?, poging = 1 WHERE id = ?").run(iso(NU), t.opdracht);
+  D.sluit(k);
+  const r = D.terugdraaien(f, t.id, { wie: 'toets' });
+  assert.equal(r.ok, false);
+  assert.equal(r.fout, 'al_opgehaald');
+  assert.equal(f.db.prepare('SELECT status FROM factuur WHERE id = ?').get(t.id).status, 'in_wachtrij');
+  assert.equal(f.db.prepare('SELECT status FROM opdracht WHERE id = ?').get(t.opdracht).status, 'opgehaald');
+  D.sluit(f);
+});
+
+test('race (twee threads, eigen verbinding, zelfde startmoment): precies één wint, nooit allebei', async () => {
+  const f = basis();
+  const RONDES = 40;
+  const ronden = [];
+  // ronde i claimt met nu = NU + i min en zijn opdracht heeft verstuur_na = NU + i min - 1 s: alleen die (en eerdere, al beslist) is claimbaar
+  for (let i = 0; i < RONDES; i++) ronden.push(D.transactie(f, () => { const x = factuur(f, { status: 'in_wachtrij' }); x.opdracht = opdracht(f, x, { extra: { verstuur_na: iso(NU + i * 60000 - 1000) } }); return x; }));
+  D.sluit(f);
+  const sab = new SharedArrayBuffer(4 * (RONDES + 1));
+  const wcode = `
+    const { workerData: w, parentPort } = require('worker_threads');
+    const D = require(${JSON.stringify(path.join(ROOT, 'facturen-db.js'))});
+    const f = D.open(w.dir);
+    const s = new Int32Array(w.sab);
+    const uit = [];
+    for (let i = 0; i < w.ronden.length; i++) {
+      Atomics.add(s, i, 1); while (Atomics.load(s, i) < 2) Atomics.wait(s, i, 1, 5);
+      if (w.rol === 'terug') uit.push(D.terugdraaien(f, w.ronden[i].id, { wie: 'toets' }).ok);
+      else uit.push(D.claimOpdrachten(f, w.nu + i * 60000).opdrachten.some((o) => o.id === w.ronden[i].opdracht));
+    }
+    D.sluit(f); parentPort.postMessage(uit);`;
+  const draai = (rol) => new Promise((res, rej) => {
+    const w = new Worker(wcode, { eval: true, workerData: { dir: f.dir, sab, rol, nu: NU, ronden: ronden.map((r) => ({ id: r.id, opdracht: r.opdracht })) } });
+    w.on('message', res); w.on('error', rej);
+  });
+  const [terug, claim] = await Promise.all([draai('terug'), draai('claim')]);
+  const g = D.open(f.dir);
+  let terugWon = 0, claimWon = 0;
+  for (let i = 0; i < RONDES; i++) {
+    assert.ok(terug[i] !== claim[i], 'ronde ' + i + ': precies één wint (terug=' + terug[i] + ', claim=' + claim[i] + ')');
+    const op = g.db.prepare('SELECT status FROM opdracht WHERE id = ?').get(ronden[i].opdracht).status;
+    const fa = g.db.prepare('SELECT status FROM factuur WHERE id = ?').get(ronden[i].id).status;
+    if (terug[i]) { terugWon++; assert.deepEqual([op, fa], ['teruggedraaid', 'te_beoordelen'], 'ronde ' + i); }
+    else { claimWon++; assert.deepEqual([op, fa], ['opgehaald', 'wordt_verstuurd'], 'ronde ' + i); }
+  }
+  assert.equal(terugWon + claimWon, RONDES);
+  D.sluit(g);
+});
+
+test('claimen: pas na verstuur_na; 30 min zonder resultaat opnieuw; drie keer niets → verzending mislukt + één signaal', () => {
+  const f = basis();
+  const t = D.transactie(f, () => { const x = factuur(f, { status: 'in_wachtrij' }); x.opdracht = opdracht(f, x, { extra: { verstuur_na: iso(NU + 3600000) } }); return x; });
+  assert.equal(D.claimOpdrachten(f, NU).opdrachten.length, 0, 'verstuur_na in de toekomst');
+  let nu = NU + 3600000;
+  assert.equal(D.claimOpdrachten(f, nu).opdrachten[0].poging, 1);
+  assert.equal(D.claimOpdrachten(f, nu + 29 * 60000).opdrachten.length, 0, 'nog onderweg');
+  nu += 31 * 60000;
+  assert.equal(D.claimOpdrachten(f, nu).opdrachten[0].poging, 2);
+  nu += 31 * 60000;
+  assert.equal(D.claimOpdrachten(f, nu).opdrachten[0].poging, 3);
+  nu += 31 * 60000;
+  const c = D.claimOpdrachten(f, nu);
+  assert.deepEqual(c.definitief, [t.opdracht]);
+  assert.equal(f.db.prepare('SELECT status FROM opdracht WHERE id = ?').get(t.opdracht).status, 'mislukt');
+  assert.equal(f.db.prepare('SELECT status FROM factuur WHERE id = ?').get(t.id).status, 'verzending_mislukt');
+  const s = f.db.prepare("SELECT * FROM signaal WHERE soort = 'verzending_mislukt'").all();
+  assert.equal(s.length, 1);
+  assert.equal(s[0].sleutel, B.signaalSleutel('verzending_mislukt', [], [t.id], 'op=' + t.opdracht), 'zelfde sleutel als facturen-bank.js: geen tweede melding');
+  assert.equal(D.claimOpdrachten(f, nu + 3600000).opdrachten.length, 0);
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM signaal").get().n, 1);
+  // "Opnieuw proberen" mag nu een nieuwe opdracht maken (de dode telt niet als levend)
+  f.db.prepare("UPDATE factuur SET status = 'in_wachtrij' WHERE id = ?").run(t.id);
+  opdracht(f, t);
+  D.sluit(f);
+});
+
+// ───────────────────────────── stukken ─────────────────────────────
+
+test('stukken: atomair, idempotent, geen tijdelijke resten, beschadiging gezien en hersteld', () => {
+  const f = D.open(map());
+  const bytes = Buffer.from('%PDF-1.4 stuk ' + 'x'.repeat(5000));
+  const a = D.stukSchrijf(f, bytes);
+  assert.equal(a.nieuw, true);
+  assert.equal(a.sha256, D.sha256(bytes));
+  assert.equal(D.stukPad(f, a.sha256), path.join(f.stukken, a.sha256.slice(0, 2), a.sha256));
+  assert.equal(D.stukSchrijf(f, bytes).nieuw, false);
+  assert.ok(D.stukLees(f, a.sha256).equals(bytes));
+  assert.deepEqual(fs.readdirSync(path.dirname(D.stukPad(f, a.sha256))).filter((x) => x.startsWith('.tmp')), []);
+  // beschadigd op schijf: lezen weigert, opnieuw schrijven herstelt
+  fs.writeFileSync(D.stukPad(f, a.sha256), 'kapot');
+  gooit(() => D.stukLees(f, a.sha256), /sha256/);
+  assert.equal(D.stukSchrijf(f, bytes).nieuw, true);
+  assert.ok(D.stukLees(f, a.sha256).equals(bytes));
+  assert.equal(modus(D.stukPad(f, a.sha256)), '600');
+  // geen pad buiten de stukkenmap
+  for (const fout of ['../' + 'a'.repeat(61), 'A'.repeat(64), 'a'.repeat(63), '']) gooit(() => D.stukPad(f, fout), /sha256/, fout);
+  gooit(() => D.stukSchrijf(f, 'tekst'), /Buffer/);
+  assert.equal(D.stukBestaat(f, 'f'.repeat(64)), false);
+  // Uint8Array mag ook
+  const u = D.stukSchrijf(f, new Uint8Array([1, 2, 3]));
+  assert.ok(D.stukLees(f, u.sha256).equals(Buffer.from([1, 2, 3])));
+  D.sluit(f);
+});
+
+// ───────────────────────────── audit ─────────────────────────────
+
+test('audit is alleen-toevoegen', () => {
+  const f = D.open(map());
+  D.audit(f, { wie: 'toets', wat: 'inzage', object_soort: 'document', object_id: '0123456789abcdef', na: { ok: true } });
+  gooit(() => f.db.prepare("UPDATE audit SET wie = 'ander'").run(), /audit/);
+  gooit(() => f.db.prepare('DELETE FROM audit').run(), /audit/);
+  gooit(() => D.audit(f, { wat: 'x', object_soort: 'y' }), /wie/);
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM audit').get().n, 1);
+  D.sluit(f);
+});
+
+// ───────────────────────────── zaad + back-up ─────────────────────────────
+
+test('zaad: ± 80 facturen in alle statussen, opdrachten consistent, nooit op de echte map', () => {
+  const f = D.open(map('zaad'));
+  const z = Z.zaai(f, { vandaag: '2026-10-22' });
+  assert.equal(z.facturen, 80);
+  const st = new Set(f.db.prepare('SELECT DISTINCT status FROM factuur').all().map((x) => x.status));
+  for (const s of K.STATUSSEN) assert.ok(st.has(s), 'status ' + s);
+  const sp = new Set(f.db.prepare('SELECT DISTINCT betaalspoor FROM factuur WHERE betaalspoor IS NOT NULL').all().map((x) => x.betaalspoor));
+  for (const s of K.BETAALSPOREN) assert.ok(sp.has(s), 'betaalspoor ' + s);
+  const so = new Set(f.db.prepare('SELECT DISTINCT soort FROM signaal').all().map((x) => x.soort));
+  for (const s of B.SIGNAAL_SOORTEN) assert.ok(so.has(s), 'signaal ' + s);
+  assert.ok(z.tellingen.bank_transactie >= 20 && z.tellingen.leverancier >= 10 && z.tellingen.uitzondering >= 3);
+  assert.deepEqual(f.db.prepare('PRAGMA foreign_key_check').all(), []);
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM opdracht WHERE entiteit = 'prive'").get().n, 0);
+  // elke opdracht: vingerafdruk opnieuw op te bouwen uit de rijen (wat de koerier in F4 doet), stukken op schijf met de goede sha256
+  for (const o of f.db.prepare('SELECT * FROM opdracht').all()) {
+    const bijl = JSON.parse(o.bijlagen);
+    let regel;
+    if (o.soort === 'boekhouder_factuur') {
+      const fa = f.db.prepare('SELECT f.id, f.entiteit, f.incl, e.boekhoud_doel FROM factuur f JOIN entiteit e ON e.sleutel = f.entiteit WHERE f.id = ?').get(o.factuur);
+      assert.equal(fa.boekhoud_doel, o.doeladres);
+      regel = { factuur_id: fa.id, entiteit: fa.entiteit, bedrag_centen: fa.incl, doeladres: fa.boekhoud_doel };
+    } else {
+      const a = f.db.prepare('SELECT a.id, a.periode, r.entiteit FROM pot_afschrift a JOIN rekening r ON r.id = a.rekening WHERE a.id = ?').get(o.afschrift);
+      regel = { afschrift_id: a.id, entiteit: a.entiteit, periode: a.periode, doeladres: o.doeladres };
+    }
+    assert.equal(K.vingerafdruk({ id: o.id, soort: o.soort, doeladres: o.doeladres, regel, bijlagen: bijl }), o.vingerafdruk, o.id);
+    for (const b of bijl) assert.ok(D.stukLees(f, b.sha256).length > 0);
+    assert.match(o.doeladres, /\.invalid$/);
+  }
+  // geen echte gegevens: alle IBAN's met bankcode TEST, alle adressen op .invalid
+  for (const r of f.db.prepare('SELECT iban FROM rekening UNION SELECT iban FROM leverancier_iban UNION SELECT iban FROM factuur WHERE iban IS NOT NULL').all()) assert.match(r.iban, /^NL\d\dTEST\d{10}$/);
+  for (const r of f.db.prepare('SELECT boekhoud_doel AS a FROM entiteit WHERE boekhoud_doel IS NOT NULL UNION SELECT afschrift_doel FROM entiteit WHERE afschrift_doel IS NOT NULL UNION SELECT afzender FROM bericht').all()) assert.match(r.a, /\.invalid$/);
+  // de kernvorm van een factuur: sha256 als document, lijsten, booleans; een nieuw IBAN houdt Bevestigen tegen
+  const nieuw = f.db.prepare("SELECT id, leverancier FROM factuur WHERE iban_nieuw = 1 AND status = 'te_beoordelen' AND entiteit IS NOT NULL LIMIT 1").get();
+  const fk = D.factuurVoorKern(f, nieuw.id);
+  assert.match(fk.document, /^[0-9a-f]{64}$/);
+  assert.ok(Array.isArray(fk.ibans_onbekend) && fk.ibans_onbekend.length === 1);
+  assert.equal(fk.iban_nieuw, true);
+  const lev = f.db.prepare('SELECT id, naam FROM leverancier WHERE id = ?').get(nieuw.leverancier);
+  lev.ibans = f.db.prepare('SELECT iban FROM leverancier_iban WHERE leverancier = ?').all(lev.id).map((x) => x.iban);
+  const mb = K.magBevestigen(fk, { leverancier: lev, ctx: { entiteiten: [] } });
+  assert.equal(mb.ok, false);
+  assert.ok(mb.redenen.some((x) => /nabellen/.test(x)), JSON.stringify(mb.redenen));
+  // weigeren: database met facturen, en de echte map (zonder hem aan te maken)
+  gooit(() => Z.zaai(f), /database met facturen/);
+  const bestond = fs.existsSync('/opt/data/facturen');
+  gooit(() => Z.zaai({ dir: '/opt/data/facturen', db: null }), /echte facturenmap/);
+  gooit(() => Z.zaai({ dir: '/opt/data/facturen/sub', db: null }), /echte facturenmap/);
+  assert.equal(fs.existsSync('/opt/data/facturen'), bestond);
+  D.sluit(f);
+});
+
+test('back-up: VACUUM INTO, 600, terugzetten geeft dezelfde tellingen; rotatie 14 dagen; zelfde dag overschrijft', () => {
+  const f = D.open(map('bron'));
+  Z.zaai(f, { vandaag: '2026-10-22' });
+  const tel = D.tellingen(f);
+  // oude kopieën om op te ruimen (13 dagen blijft, 14 en ouder weg) + een vergeten tijdelijk bestand
+  for (const d of ['2026-10-09', '2026-10-08', '2026-09-30']) fs.writeFileSync(path.join(f.backup, 'facturen-' + d + '.sqlite'), 'oud', { mode: 0o600 });
+  fs.writeFileSync(path.join(f.backup, '.tmp-oud.sqlite'), 'x');
+  const oud = (NU - 2 * 86400000) / 1000;
+  fs.utimesSync(path.join(f.backup, '.tmp-oud.sqlite'), oud, oud);
+  fs.writeFileSync(path.join(f.backup, 'ander-bestand.txt'), 'blijft');
+  const b = D.backup(f, { nu: NU });
+  assert.equal(b.ok, true);
+  assert.equal(path.basename(b.pad), 'facturen-2026-10-22.sqlite');
+  assert.equal(modus(b.pad), '600');
+  assert.deepEqual(b.verwijderd.sort(), ['.tmp-oud.sqlite', 'facturen-2026-09-30.sqlite', 'facturen-2026-10-08.sqlite']);
+  assert.deepEqual(fs.readdirSync(f.backup).sort(), ['ander-bestand.txt', 'facturen-2026-10-09.sqlite', 'facturen-2026-10-22.sqlite']);
+  // zelfde dag nog eens: overschrijft (na een wijziging), geen tweede bestand
+  D.audit(f, { wie: 'toets', wat: 'na_backup', object_soort: 'proef' });
+  const b2 = D.backup(f, { nu: NU + 3600000 });
+  assert.equal(b2.pad, b.pad);
+  assert.equal(fs.readdirSync(f.backup).filter((x) => /^facturen-/.test(x)).length, 2);
+  const tel2 = D.tellingen(f);
+  assert.equal(D.health(f).laatste_backup, '2026-10-22');
+  // terugzetten in een lege map: zelfde tellingen, schema, integriteit; daarna gewoon bruikbaar
+  const h = D.herstel(b2.pad, map('herstel'));
+  assert.deepEqual(D.tellingen(h), tel2);
+  assert.ok(tel2.audit === tel.audit + 1 && tel2.factuur === tel.factuur);
+  assert.equal(h.schema, D.SCHEMA_VERSIE);
+  assert.deepEqual(h.toegepast, []);
+  assert.equal(h.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.deepEqual(h.db.prepare('PRAGMA foreign_key_check').all(), []);
+  // de triggers zitten ook in de kopie
+  gooit(() => h.db.prepare("UPDATE entiteit SET boekhoud_doel = 'x@y.invalid' WHERE sleutel = 'prive'").run(), /CHECK/);
+  gooit(() => h.db.prepare('DELETE FROM audit').run(), /audit/);
+  gooit(() => D.herstel(b2.pad, h.dir), /staat al een database/);
+  D.sluit(h);
+  D.sluit(f);
+});
+
+test('health: geen inhoud, alleen aan en schema', () => {
+  const f = D.open(map());
+  const h = D.health(f);
+  assert.deepEqual(Object.keys(h).sort(), ['aan', 'laatste_backup', 'schema', 'schema_code']);
+  assert.equal(h.schema, D.SCHEMA_VERSIE);
+  assert.deepEqual(D.health(null), { aan: true, schema: null, schema_code: D.SCHEMA_VERSIE });
+  D.sluit(f);
+  const r = D.open(f.dir, { alleenLezen: true });
+  assert.equal(r.schema, D.SCHEMA_VERSIE);
+  gooit(() => D.voegToe(r, 'audit', { wie: 'x', wat: 'y', object_soort: 'z', wanneer: 'x' }), /readonly|query_only|attempt to write/i);
+  D.sluit(r);
+});
+
+test('voegToe: onbekende tabel of kolom wordt geweigerd (geen tekst van buiten in de SQL)', () => {
+  const f = D.open(map());
+  gooit(() => D.voegToe(f, 'sqlite_master', { name: 'x' }), /onbekende tabel/);
+  gooit(() => D.voegToe(f, 'audit', { 'wie) VALUES (1); --': 'x' }), /kent geen kolom/);
+  D.sluit(f);
+});
+
+// ───────────────────────────── server.js-blok (in een vm, zonder echte server) ─────────────────────────────
+
+test('server.js: /health.facturen = { aan, schema }; database alleen op de primaire kant; zonder module aan=false', () => {
+  const vm = require('vm');
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  const van = src.indexOf('// ── Facturen-app, opslag (wv824'), tot = src.indexOf('// ── Bandjes (wv743', van);
+  assert.ok(van > 0 && tot > van, 'blok gevonden');
+  assert.match(src, /facturen: facturenInfo\(\),/);
+  const draai = (dirname, primair) => {
+    const dir = map('server');
+    const fouten = [];
+    const ctx = { require, path, fs, __dirname: dirname, process: { env: { FACTUREN_DIR: dir } }, console,
+      serverPad: (naam, env, echt, proef) => env || proef, serverProefDeel: (d) => path.join(WEG, 'proef', d),
+      rolPrimair: () => primair.waarde, logError: (w, e) => fouten.push(w + ': ' + e.message), nu: () => 'nu' };
+    vm.createContext(ctx);
+    const r = vm.runInContext(src.slice(van, tot) + ';({ facturenInfo, FACTUREN_DIR })', ctx);
+    return { r, dir, fouten };
+  };
+  // module ontbreekt (terugrol): aan=false, geen database
+  const leeg = fs.mkdtempSync(path.join(WEG, 'zonder-'));
+  const a = draai(leeg, { waarde: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(a.r.facturenInfo())), { aan: false });
+  assert.equal(fs.existsSync(a.dir), false);
+  // passieve kant: module er wel, maar geen database aanmaken
+  const rol = { waarde: false };
+  const b = draai(ROOT, rol);
+  assert.deepEqual(JSON.parse(JSON.stringify(b.r.facturenInfo())), { aan: true, schema: null, passief: true });
+  assert.equal(fs.existsSync(b.dir), false, 'passief maakt geen database');
+  // primair: database aangemaakt (700/600), schema van de code
+  rol.waarde = true;
+  const h = b.r.facturenInfo();
+  assert.equal(h.aan, true);
+  assert.equal(h.schema, D.SCHEMA_VERSIE);
+  assert.equal(modus(b.dir), '700');
+  assert.equal(modus(path.join(b.dir, D.BESTAND)), '600');
+  assert.deepEqual(b.fouten, []);
+  // daarna passief worden: de geopende database blijft gewoon gemeld (geen nieuwe opening, geen fout)
+  rol.waarde = false;
+  assert.equal(b.r.facturenInfo().schema, D.SCHEMA_VERSIE);
+});

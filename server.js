@@ -3511,6 +3511,7 @@ function handleRequest(req, res) {
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
+      facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
       server: SERVER_ECHT ? { echt: true, paden: { home: serverPaden.home, io: serverPaden.io, jobout: serverPaden.jobout } }
@@ -12990,6 +12991,34 @@ async function appStudio(req, res, a, s, d, route) {
   return appWeiger(res, 404, 'onbekend', 'studio route');
 }
 // ── einde studio ──
+
+// ── Facturen-app, opslag (wv824, F1c, 22-10-2026; bouwplan "Facturen-app - bouwplan (App, 22-10-2026)" § 4.1, § 4.2 en § 8) ──
+// facturen-db.js houdt /opt/data/facturen/facturen.sqlite bij (map 700, bestand 600, WAL; schema als migraties, CHECK's en triggers die
+// Privé nooit naar de boekhouder laten gaan). Routes /app/facturen/* en de 02:00-tik (back-up) volgen in F2; tot dan alleen
+// /health.facturen = { aan, schema }. De database wordt pas geopend (en zo nodig aangemaakt) op de primaire kant: de VPS krijgt er geen
+// (bouwplan § 8). Ontbreekt facturen-db.js in de release (terugrol), dan aan=false en draait de rest door.
+const FACTUREN_DIR = serverPad('facturen', process.env.FACTUREN_DIR, '/opt/data/facturen', serverProefDeel('facturen'));
+const facturenMod = (function () {
+  const p = path.join(__dirname, 'facturen-db.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('facturen', e); return false; }
+})();
+let facturenDb = null, facturenFout = null;
+function facturenOpen() {
+  if (facturenDb || !facturenMod || !rolPrimair()) return facturenDb;
+  try { facturenDb = facturenMod.open(FACTUREN_DIR); facturenFout = null; }
+  catch (e) { if (!facturenFout) logError('facturen', e); facturenFout = { tijd: nu(), code: e && e.code || 'fout' }; }
+  return facturenDb;
+}
+function facturenInfo() {
+  if (facturenMod === null) return { aan: false };
+  if (facturenMod === false) return { aan: false, fout: true };
+  try {
+    const f = facturenOpen();
+    if (f) return facturenMod.health(f);
+    return { aan: true, schema: null, passief: !rolPrimair(), fout: facturenFout ? facturenFout.code : undefined };
+  } catch (e) { return { aan: true, fout: true }; }
+}
 
 // ── Bandjes (wv743, 22-10-2026; bouwplan "Bandjes - mini-app voor telefoonbandjes (bouwplan 22-10-2026)" § 5) ──
 // Mini-app Bandjes: het register van de telefoonbandjes (vault 10_Zakelijk/{Tolgaarde,Groenhouten}/Telefoon/Bandjes.md) lezen en
