@@ -746,3 +746,53 @@ test('opdracht drie keer opgehaald zonder resultaat → definitief mislukt', () 
   const r = K.opdrachtOvergang({ status: 'opgehaald', opgehaald_op: '2026-10-22T14:00:00Z', poging: 3 }, 'claim', Date.parse('2026-10-22T15:00:00Z'));
   assert.deepEqual([r.ok, r.naar, r.definitief, r.factuur], [true, 'mislukt', true, 'mislukt_definitief']);
 });
+
+// ───────────── natoets diffreview wv797 ─────────────
+
+test('IBAN-lezer: btw-nummer + woord is nooit een IBAN; onbekend land weigeren; exacte landlengte', () => {
+  for (let i = 0; i < 2000; i++) assert.deepEqual(K.ibansIn('Btw-nr NL' + String(100000000 + i * 37).slice(0, 9) + 'B01 KvK 12345678'), []);
+  assert.deepEqual(K.ibansIn('IBAN LT12 1000 0111 0100 1000 BIC HABALT22').map((x) => x.iban), ['LT121000011101001000']);
+  assert.equal(K.ibanMod97('XX121000011101001000'), false);
+  assert.equal(K.ibansIn('IBAN ' + spatie(IBAN.A) + 'X').length, 0, 'laatste stukje loopt over de lengte: liever geen IBAN dan een geplakt (zelf betalen blokkeert dan)');
+  assert.equal(K.ibansIn('IBAN ' + spatie(IBAN.A) + ' BIC TESTNL2A').length, 1);
+});
+
+test('betaalwijze: "reeds betaald € 0,00", vorige factuur en rentebeding zijn geen betaald; "niets afgeschreven" geen incasso', () => {
+  for (const t of ['Reeds betaald: € 0,00\nNog te betalen: € 121,00', 'Uw vorige factuur is betaald, bedankt!', 'Over facturen die na de vervaldatum zijn voldaan, rekenen wij rente.']) {
+    assert.notEqual(K.stapBetaalwijze(t, {}, {}, {}).betaalwijze, 'betaald', t);
+    assert.equal(K.stapBetaalwijze(t, {}, {}, { leverancier: LEV_A }).betaalwijze, 'zelf', t);
+  }
+  assert.notEqual(K.stapBetaalwijze('Er wordt niets afgeschreven; maak het bedrag zelf over.', {}, {}, {}).betaalwijze, 'incasso');
+  assert.equal(K.stapBetaalwijze('Betaal via bankoverschrijving. Wilt u liever automatische incasso? Vraag dan een machtiging aan.', {}, {}, { leverancier: LEV_A }).betaalwijze, 'zelf');
+  assert.equal(K.stapBetaalwijze('Er is een machtiging afgegeven.', {}, {}, {}).betaalwijze, 'incasso', 'zwak patroon zonder standaard');
+});
+
+test('bedragen: "nog/bedrag te betalen" als laatste redmiddel, haakjes overslaan, korting met losse min', () => {
+  assert.equal(K.leesPdfTekst('Factuur 10\nNog te betalen: € 121,00').incl, 12100);
+  assert.equal(K.leesPdfTekst('Factuur 11\nBedrag te betalen: € 121,00').incl, 12100);
+  assert.equal(K.leesPdfTekst('Factuur 12\nTotaal 121,00\nBetaald 50,00\nNog te betalen 71,00').incl, 12100);
+  const v = K.leesPdfTekst('Factuur 13\nTotaal te betalen (btw € 21,00): € 121,00');
+  assert.equal(v.incl, 12100);
+  assert.deepEqual(K.bedragenIn('Korting - € 5,00'), [-500]);
+  assert.deepEqual(K.bedragenIn('Abonnement oktober - € 12,50'), [1250]);
+});
+
+test('nabellen hangt aan de IBANs van nu: gewijzigd IBAN of verouderde vlag blokkeert met verse poort', () => {
+  const NL20 = maakIban('NL', 'TEST', '0000000888'), NL91 = maakIban('NL', 'TEST', '0000000999');
+  const f = { status: 'te_beoordelen', entiteit: 'tolgaarde', betaalwijze: 'zelf', iban: NL20, iban_nieuw: true, ibans_onbekend: [NL91], nagebeld_ibans: [NL91], nagebeld_op: 'x', leverancier_id: LEV_A.id };
+  assert.equal(K.magBevestigen(f).ok, false, 'het gekozen IBAN is niet nagebeld');
+  const oud = Object.assign({}, f, { iban_nieuw: false, ibans_onbekend: [], nagebeld_ibans: [] });
+  assert.equal(K.magBevestigen(oud).ok, true, 'zonder poort vertrouwt hij de vlag');
+  assert.equal(K.magBevestigen(oud, { leverancier: LEV_A, ctx: ctxBasis() }).ok, false, 'met verse poort niet');
+  assert.equal(K.magBevestigen(Object.assign({}, oud, { iban: IBAN.A }), { leverancier: LEV_A, ctx: ctxBasis() }).ok, true);
+  const n = K.nagebeld(Object.assign({}, f), 'eigenaar', 'y');
+  assert.deepEqual(n.factuur.nagebeld_ibans.sort(), [NL20, NL91].sort());
+  assert.equal(K.statusOvergang('te_beoordelen', 'bevestigen', Object.assign({}, oud, { poort: { leverancier: LEV_A, ctx: ctxBasis() } })).ok, false);
+  assert.throws(() => K.maakOpdracht(Object.assign({ id: 'fedcba9876543210', incl: 100 }, oud), ENT[0], { id: '0123456789abcdef', bijlagen: ['a'.repeat(64)], poort: { leverancier: LEV_A, ctx: ctxBasis() } }), /nabellen/);
+});
+
+test('patiëntkenmerk: patiënt met oude datum op één regel en "Geb:"', () => {
+  assert.ok(K.stapPatientkenmerk(['Patiënt: J. Voorbeeld (01-02-1950)']).kenmerk);
+  assert.ok(K.stapPatientkenmerk(['Naam patiënt: Voorbeeld\nGeb: 01-02-1950']).kenmerk);
+  assert.equal(K.stapPatientkenmerk(['Aantal patiënten oktober 2026: 3']).kenmerk, false);
+});

@@ -66,7 +66,9 @@ function bedragNaarCenten(s) {
 // valutateken ("€ 1 234,56"; "aantal 3 120,00" blijft 120,00).
 const BEDRAG_RE = /(?<![\d.,])(?:(-|−)(?=[€$£\d]|EUR))?(?:(?:€|EUR|USD|GBP|CHF|\$|£) ?)?(?:(-|−)(?=\d))?(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d+[.,]\d{2}|(?:\d{1,3}(?:\.\d{3})+|\d+),(?:--?|—))(?![\d%]|[.\-/]\d)(-(?! ?\d))?/g;
 function bedragenIn(regel) {
-  const r = String(regel).replace(/((?:€|EUR) ?-?)(\d{1,3}(?: \d{3})+,\d{2})(?!\d)/g, (_, a, n) => a + n.replace(/ /g, '.'));
+  let r = String(regel).replace(/((?:€|EUR) ?-?)(\d{1,3}(?: \d{3})+,\d{2})(?!\d)/g, (_, a, n) => a + n.replace(/ /g, '.'));
+  // Op een kortings- of creditregel telt ook "- € 5,00" (min met een spatie) als negatief (natoets #5).
+  if (/korting|credit|aftrek|verrekend|retour/i.test(r)) r = r.replace(/(^|\s)[-−] (?=€|EUR|\d)/g, '$1-');
   const uit = []; let m; BEDRAG_RE.lastIndex = 0;
   while ((m = BEDRAG_RE.exec(r))) {
     const c = bedragNaarCenten((m[1] || m[2] ? '-' : '') + m[3] + (m[4] ? '-' : ''));
@@ -106,12 +108,17 @@ function leesDatum(s) {
 
 // ───────────────────────────── IBAN en BSN ─────────────────────────────
 
-const IBAN_LENGTE = { NL: 18, BE: 16, DE: 22, FR: 27, GB: 22, LU: 20, IE: 22, ES: 24, IT: 27, AT: 20, CH: 21, DK: 18, SE: 24, NO: 15, FI: 18, PT: 25, PL: 28, CZ: 24, MC: 27, LI: 21, GM: 0 };
+// IBAN-lengte per land (SEPA + een paar gangbare andere). Een land dat hier niet staat, is geen IBAN (diffreview wv797 natoets #8).
+const IBAN_LENGTE = {
+  AD: 24, AT: 20, BE: 16, BG: 22, CH: 21, CY: 28, CZ: 24, DE: 22, DK: 18, EE: 20, ES: 24, FI: 18, FO: 18, FR: 27, GB: 22, GI: 23, GL: 18,
+  GR: 27, HR: 21, HU: 28, IE: 22, IS: 26, IT: 27, LI: 21, LT: 20, LU: 20, LV: 21, MC: 27, MT: 31, NL: 18, NO: 15, PL: 28, PT: 25, RO: 24,
+  SE: 24, SI: 19, SK: 24, SM: 27, VA: 22, AE: 23, IL: 23, SA: 24, TR: 26,
+};
 function ibanNorm(i) { return i == null ? null : String(i).replace(/\s+/g, '').toUpperCase() || null; }
 function ibanMod97(i) {
   const s = ibanNorm(i);
   if (!s || !/^[A-Z]{2}\d{2}[A-Z0-9]{8,30}$/.test(s)) return false;
-  if (IBAN_LENGTE[s.slice(0, 2)] && IBAN_LENGTE[s.slice(0, 2)] !== s.length) return false;
+  if (IBAN_LENGTE[s.slice(0, 2)] !== s.length) return false;
   const r = s.slice(4) + s.slice(0, 4);
   let rest = 0;
   for (const ch of r) {
@@ -133,20 +140,25 @@ function bsnElfproef(c) {
 function ibansIn(tekst, opties) {
   // Alleen a–z naar hoofdletters (toUpperCase kan de lengte veranderen, ß → SS, en dan kloppen de posities niet meer).
   const t = schoon(tekst).replace(/[a-z]/g, (c) => c.toUpperCase());
-  // Groepen met spatie of streepje, ook "NL 91 ABNA …" en "NL91 ABNA 0417 164 300" (diffreview wv797 #3).
-  const re = /\b([A-Z]{2}[ -]?\d{2}(?:[ -]?[A-Z0-9]){10,30})/g;
+  // Begin "NL91" / "NL 91" / "NL-91", daarna stukjes letters/cijfers met hooguit één spatie of streepje ertussen, tot precies de lengte van
+  // het land. Een stukje dat over die lengte heen loopt, maakt het geen IBAN: zo wordt "NL833719481B01 KvK 1…" (btw-nummer + woord)
+  // nooit aan elkaar geplakt (diffreview wv797 natoets #1). Ook "NL91 ABNA 0417 164 300" en "NL91-ABNA-…" (#3).
+  const re = /\b([A-Z]{2})[ -]?(\d{2})/g;
   const uit = []; const gezien = new Set(); let m;
   while ((m = re.exec(t))) {
-    const comp = m[1].replace(/[ -]/g, ''), land = comp.slice(0, 2), lengte = IBAN_LENGTE[land];
-    let iban = null, lengteRuw = m[1].length;
-    if (lengte && comp.length >= lengte) {
-      iban = comp.slice(0, lengte);
-      let n = 0, k = 0;
-      while (k < m[1].length && n < lengte) { if (!/[ -]/.test(m[1][k])) n++; k++; }
-      lengteRuw = k;
-    } else if (lengte === undefined && ibanMod97(comp)) iban = comp;
-    if (!iban) continue;
-    re.lastIndex = m.index + lengteRuw;
+    const lengte = IBAN_LENGTE[m[1]];
+    if (!lengte) continue;
+    let comp = m[1] + m[2], k = m.index + m[0].length;
+    while (comp.length < lengte) {
+      let j = k;
+      if (t[j] === ' ' || t[j] === '-') j++;
+      const stuk = /^[A-Z0-9]+/.exec(t.slice(j, j + 40));
+      if (!stuk || comp.length + stuk[0].length > lengte) break;
+      comp += stuk[0]; k = j + stuk[0].length;
+    }
+    if (comp.length !== lengte || /[A-Z0-9]/.test(t[k] || '')) continue;
+    const iban = comp, lengteRuw = k - m.index;
+    re.lastIndex = k;
     const voor = t.slice(Math.max(0, m.index - 90), m.index);
     const geldig = ibanMod97(iban);
     if (!geldig && !/IBAN\W{0,12}$/.test(voor) && !/(REKENING|REK\.?|BANK)\W{0,20}$/.test(voor)) continue;
@@ -166,7 +178,8 @@ const BSN_LABEL = /\b(bsn|burgerservicenummer|burger\s?service\s?nummer|sofi(?:n
 const ANDER_NUMMER = /\b(factuur|nota|kenmerk|klant|order|debiteur|referentie|contract|relatie|lid|abonnement|polis|invoice|account|rekening|tel|telefoon|fax|kvk|btw|artikel|art|bestel|dossier|ordernr|pakket|zending|transactie)\w*\W{0,15}$/i;
 // Ook samenstellingen (patiëntnaam, cliëntnummer) en "geb." met een datum (diffreview wv797 #4).
 const PATIENT_WOORD = /\b(pati[eë]nt|cli[eë]nt)/i;
-const GEBOORTE = new RegExp('\\b(geboortedatum|geb\\.?\\s?datum|geboren(?:\\s+op)?|geb\\.)\\s?[:.]?\\s?' + DATUM_BRON, 'i');
+const GEBOORTE = new RegExp('\\b(geboortedatum|geb\\.?\\s?datum|geboren(?:\\s+op)?|geb\\.?)\\s?[:.]?\\s?' + DATUM_BRON, 'i');
+const DATUM_IN = new RegExp(DATUM_BRON, 'gi');
 
 function stapPatientkenmerk(teksten, koerierVlag) {
   const soorten = new Set();
@@ -184,6 +197,12 @@ function stapPatientkenmerk(teksten, koerierVlag) {
       if (!ANDER_NUMMER.test(regelVoor)) soorten.add('bsn_los');
     }
     if (PATIENT_WOORD.test(tekst) && GEBOORTE.test(zonderAccenten(tekst))) soorten.add('patient_geboortedatum');
+    // Patiëntwoord met een datum van vóór 2010 op dezelfde regel ("Patiënt: … (01-02-1950)"): vrijwel altijd een geboortedatum (natoets #7).
+    for (const regel of tekst.split('\n')) {
+      if (!PATIENT_WOORD.test(regel)) continue;
+      let d; DATUM_IN.lastIndex = 0;
+      while ((d = DATUM_IN.exec(zonderAccenten(regel)))) { const x = leesDatum(d[1]); if (x && x < '2010-01-01') { soorten.add('patient_datum'); break; } }
+    }
   }
   const lijst = [...soorten].sort();
   return {
@@ -321,6 +340,7 @@ const LABEL_INCL = [
   { re: /(?:total\s+)?amount\s+due|total\s+due|balance\s+due|total\s+incl\.?\s?vat|grand\s+total/i },
   { re: /eindtotaal|totaalbedrag|totaal\s+bedrag|factuurbedrag/i },
   { re: /^totaal\b(?!.*(excl|btw|vat|netto|sub))/i, laatste: true },
+  { re: /^(?:nog|bedrag)\s+te\s+(?:betalen|voldoen)\b/i },   // laatste redmiddel: "nog te betalen" kan een restbedrag zijn
 ];
 const LABEL_EXCL = [
   { re: /(?:totaal|totaalbedrag|totaal\s+bedrag)\s?(?:excl(?:usief|\.)?|ex\.)\s?(?:btw|b\.t\.w\.)?/i },
@@ -334,7 +354,7 @@ function bedragNaLabel(regels, labels, nietNa) {
     for (let i = 0; i < regels.length; i++) {
       const r = regels[i], m = lab.re.exec(r);
       if (!m) continue;
-      const na = r.slice(m.index + m[0].length);
+      const na = r.slice(m.index + m[0].length).replace(/\([^)]{0,80}\)/g, ' ');   // "(btw € 21,00)" is niet het totaal (natoets #5)
       if (nietNa && nietNa.test(na)) continue;   // "Totaalbedrag excl. btw" is geen incl (diffreview wv797 #5)
       let b = bedragenIn(na);
       // Label aan het eind van de regel (kolomopmaak): dan het eerste bedrag op een van de twee volgende regels.
@@ -682,16 +702,21 @@ const TEKST_ZELF = [
   /\bbinnen\s+\d+\s+dagen\b[^\n]{0,40}\b(?:over\s+te\s+maken|te\s+voldoen|te\s+betalen|betalen)\b/i,
   /\bplease\s+(?:pay|transfer|remit)\b/i,
 ];
-const VOORWAARDE_BETAALD = /\b(wanneer|indien|als|zodra|mocht|niet|tenzij|nadat|voordat|kan|kunt|kunnen|worden|wordt|te|graag|liever|wilt|wil|if|unless|when|can)\b/i;
+const VOORWAARDE_BETAALD = /\b(wanneer|indien|als|zodra|mocht|niet|tenzij|nadat|voordat|kan|kunt|kunnen|worden|wordt|te|graag|liever|wilt|wil|die|vorige|eerdere|eerder|if|unless|when|can)\b/i;
+// "Reeds betaald: € 0,00" is juist níét betaald (diffreview wv797 natoets #2).
+const NA_NUL = /^\s?:?\s?(?:€|eur)?\s?0[,.]00\b/i;
+// Staat er een openstaand bedrag boven nul, dan is de factuur niet al betaald.
+const OPENSTAAND = /\b(?:nog\s+te\s+betalen|openstaand(?:\s+bedrag)?|amount\s+due|balance\s+due)\s?:?\s?(?:€|eur)?\s?(\d[\d.,]*\d)/gi;
 const VOORWAARDE_ANDER = /\b(wanneer|indien|als|zodra|mocht|niet|tenzij|liever|wilt|wil|kunt|kunnen|kan|aanvragen|if|unless|can)\b/i;
-function stellend(t, patronen, voorwaarde) {
+function stellend(t, patronen, voorwaarde, nietNa) {
   for (const re of patronen) {
     const g = new RegExp(re.source, 'gi'); let m;
     while ((m = g.exec(t))) {
       const begin = Math.max(t.lastIndexOf('.', m.index - 1), t.lastIndexOf('\n', m.index - 1), t.lastIndexOf('?', m.index - 1), t.lastIndexOf('!', m.index - 1), t.lastIndexOf(';', m.index - 1), m.index - 80);
       const eindRe = /[.?!\n;]/g; eindRe.lastIndex = m.index + m[0].length;
       const eind = eindRe.exec(t);
-      if (!voorwaarde.test(t.slice(begin + 1, m.index)) && !/\b(niet|geen|not|no)\b/i.test(m[0]) && !(eind && eind[0] === '?')) return true;
+      if (nietNa && nietNa.test(t.slice(m.index + m[0].length, m.index + m[0].length + 20))) continue;
+      if (!voorwaarde.test(t.slice(begin + 1, m.index)) && !/\b(niet|niets|nooit|geen|not|no|never)\b/i.test(m[0]) && !(eind && eind[0] === '?')) return true;
     }
   }
   return false;
@@ -703,7 +728,9 @@ function stapBetaalwijze(tekst, velden, ctx, opties) {
   let wijze = null, bron = null, reden = null;
   if (velden.betaalwijze_hint) { wijze = velden.betaalwijze_hint; bron = 'regel'; reden = 'betaalwijze uit de UBL'; }
   else if (t) {
-    const B = stellend(t, TEKST_BETAALD, VOORWAARDE_BETAALD), I = stellend(t, TEKST_INCASSO, VOORWAARDE_ANDER), Z = stellend(t, TEKST_ZELF, VOORWAARDE_ANDER);
+    let open = false, om; OPENSTAAND.lastIndex = 0;
+    while ((om = OPENSTAAND.exec(t))) { const c = bedragNaarCenten(om[1]); if (c != null && c > 0) open = true; }
+    const B = !open && stellend(t, TEKST_BETAALD, VOORWAARDE_BETAALD, NA_NUL), I = stellend(t, TEKST_INCASSO, VOORWAARDE_ANDER), Z = stellend(t, TEKST_ZELF, VOORWAARDE_ANDER);
     const kandidaten = [B && 'betaald', I && 'incasso', Z && 'zelf'].filter(Boolean);
     if (kandidaten.length > 1) {
       // Tegenstrijdige tekst: de leveranciersstandaard beslist als die een van de kandidaten is, anders kiest een mens.
@@ -712,9 +739,10 @@ function stapBetaalwijze(tekst, velden, ctx, opties) {
     } else if (B) { wijze = 'betaald'; bron = 'regel'; reden = 'tekst: al betaald'; }
     else if (I) { wijze = 'incasso'; bron = 'regel'; reden = 'tekst: wordt geïncasseerd'; }
     else if (Z) { wijze = 'zelf'; bron = 'regel'; reden = 'tekst: zelf overmaken'; }
-    else if (stellend(t, TEKST_INCASSO_ZWAK, VOORWAARDE_ANDER)) { wijze = 'incasso'; bron = 'regel'; reden = 'tekst noemt incasso'; }
   }
   if (!wijze && lev && lev.standaard_betaalwijze && lev.standaard_betaalwijze !== 'onbekend') { wijze = lev.standaard_betaalwijze; bron = 'leverancier'; reden = 'standaard van de leverancier'; }
+  // Een losse vermelding van incasso of een machtiging telt pas na de leveranciersstandaard (natoets #3).
+  if (!wijze && t && !velden.betaalwijze_hint && stellend(t, TEKST_INCASSO_ZWAK, VOORWAARDE_ANDER)) { wijze = 'incasso'; bron = 'regel'; reden = 'tekst noemt incasso'; }
   if (!wijze && lev && lev.bankhistorie) {
     const h = lev.bankhistorie, top = ['incasso', 'zelf'].sort((a, b) => (h[b] || 0) - (h[a] || 0))[0];
     if ((h[top] || 0) >= 2 && (h[top] || 0) > (h[top === 'incasso' ? 'zelf' : 'incasso'] || 0)) { wijze = top; bron = 'bank'; reden = 'bankhistorie van de leverancier'; }
@@ -785,21 +813,23 @@ function ibanPoort(f, leverancier, ctx) {
   const meer = vreemd.length > 1 ? ' (de factuur noemt meer dan één IBAN)' : '';
   return { iban_nieuw: true, onbekend, reden: (leverancier ? 'Nieuw IBAN voor een bekende leverancier: eerst nabellen' : 'Nieuwe leverancier met een nog niet nagebeld IBAN: eerst nabellen') + meer };
 }
-// Dekt het nabellen de IBAN's die nu op de factuur staan? nagebeld_ibans moet elk onbekend IBAN bevatten (ook een later met de hand
-// ingevuld IBAN: dan staat het na een nieuwe ibanPoort in ibans_onbekend en is het nabellen niet meer genoeg; diffreview #10).
-function ibanGeborgd(f) {
-  if (!f.iban_nieuw) return true;
+// Dekt het nabellen de IBAN's die nu op de factuur staan? Nodig = elk onbekend IBAN plus het gekozen IBAN; met `poort` ({ leverancier, ctx })
+// rekent hij de IBAN-poort zelf opnieuw uit in plaats van op opgeslagen vlaggen te vertrouwen (diffreview wv797 #10 en natoets #6).
+function ibanGeborgd(f, poort) {
+  const vers = poort ? ibanPoort(f, poort.leverancier || null, poort.ctx) : null;
+  if (!(vers ? vers.iban_nieuw : f.iban_nieuw)) return true;
   const gedekt = new Set(f.nagebeld_ibans || []);
-  const nodig = [...new Set((f.ibans_onbekend && f.ibans_onbekend.length ? f.ibans_onbekend : [f.iban]).filter(Boolean))];
+  const nodig = [...new Set((vers ? vers.onbekend : f.ibans_onbekend || []).concat(f.iban ? [ibanNorm(f.iban)] : []))];
   return !!f.nagebeld_op && nodig.every((i) => gedekt.has(i));
 }
 
 // Wat houdt Bevestigen tegen (zonder de status)? Gedeeld door magBevestigen, de statusovergang en maakOpdracht (diffreview #10).
-function bevestigBlokkades(f) {
+// Geef `poort` ({ leverancier, ctx }) mee waar de leverancier bekend is (F2 doet dat altijd): dan telt de verse IBAN-poort.
+function bevestigBlokkades(f, poort) {
   const r = [];
   if (!f.entiteit) r.push('geen entiteit');
   if (!f.betaalwijze || f.betaalwijze === 'onbekend') r.push('betaalwijze onbekend');
-  if (!ibanGeborgd(f)) r.push('nieuw IBAN: eerst nabellen');
+  if (!ibanGeborgd(f, poort)) r.push('nieuw IBAN: eerst nabellen');
   if (f.betaalwijze === 'zelf') {
     if (!f.iban) r.push('zelf betalen zonder IBAN');
     else if (!ibanMod97(f.iban) || (f.controles || []).some((c) => !c.ok && c.ernst === 'fout' && /^iban/.test(c.naam))) r.push('IBAN-fout bij zelf betalen');
@@ -807,9 +837,9 @@ function bevestigBlokkades(f) {
   return r;
 }
 // Mag deze factuur nu bevestigd worden (status, entiteit, betaalwijze, IBAN-poort, IBAN bij zelf betalen)?
-function magBevestigen(f) {
+function magBevestigen(f, poort) {
   const r = f.status !== 'te_beoordelen' ? ['status is ' + f.status] : [];
-  r.push(...bevestigBlokkades(f));
+  r.push(...bevestigBlokkades(f, poort));
   return { ok: r.length === 0, redenen: r };
 }
 
@@ -817,7 +847,7 @@ function magBevestigen(f) {
 function nagebeld(f, wie, wanneer) {
   if (!f.iban_nieuw) throw new KernFout('niet_nodig', 'factuur heeft geen nieuw IBAN');
   if (!wie || !wanneer) throw new KernFout('wie_wanneer', 'nagebeld vraagt wie en wanneer');
-  const ibans = [...new Set((f.ibans_onbekend && f.ibans_onbekend.length ? f.ibans_onbekend : [f.iban]).filter(Boolean))];
+  const ibans = [...new Set((f.ibans_onbekend || []).concat(f.iban ? [ibanNorm(f.iban)] : []))];
   return {
     factuur: { nagebeld_door: wie, nagebeld_op: wanneer, nagebeld_ibans: ibans },
     leverancier_iban: ibans.map((iban) => ({ leverancier_id: f.leverancier_id || null, iban, toegevoegd_door: wie, toegevoegd_op: wanneer })),
@@ -897,7 +927,7 @@ function beslisBericht(invoer, ctx) {
     f.redenen = redenen;
     f.geslaagd = va.controles.filter((c) => c.ok).map((c) => c.naam);
     f.besluiten = besluiten;
-    f.bevestigen = magBevestigen(f);
+    f.bevestigen = magBevestigen(f, { leverancier: lev, ctx });
     facturen.push(f);
     for (const d of [g.pdf, g.ubl].filter(Boolean)) docUit.push({ sha256: d.sha256, uitkomst: status, factuur: hoofd.sha256, rol: d === hoofd ? 'document' : 'ubl_document' });
   }
@@ -950,7 +980,7 @@ const STATUS_OVERGANGEN = [
   ['geen_factuur', 'toch_factuur', 'te_beoordelen'],
   ['dubbel', 'toch_factuur', 'te_beoordelen'],
 ];
-function bevestigFout(c) { return bevestigBlokkades(c)[0] || null; }
+function bevestigFout(c) { return bevestigBlokkades(c, c.poort || null)[0] || null; }
 // Eén overgang; geeft { ok, naar } of { ok:false, fout, reden }. Elke combinatie die niet in de tabel staat wordt geweigerd.
 function statusOvergang(van, gebeurtenis, ctx) {
   ctx = ctx || {};
@@ -1084,7 +1114,7 @@ function maakOpdracht(f, entiteit, o) {
   if (f.entiteit !== entiteit.sleutel) throw new KernFout('opdracht_entiteit', 'entiteit van de opdracht wijkt af van de factuur');
   if (!entiteit.boekhoud_doel) throw new KernFout('geen_doel', 'entiteit heeft geen boekhoudadres');
   if (!/^[0-9a-f]{16}$/.test(String(o.id || '')) || !/^[0-9a-f]{16}$/.test(String(f.id || ''))) throw new KernFout('id', 'id is 16 hex kleine letters');
-  const blok = bevestigBlokkades(f);
+  const blok = bevestigBlokkades(f, o.poort || null);
   if (blok.length) throw new KernFout('niet_bevestigbaar', blok.join('; '));
   const shas = (o.bijlagen || []).map((b) => (typeof b === 'string' ? b : b && b.sha256));
   if (f.document && !shas.includes(f.document)) throw new KernFout('bijlagen', 'het stuk van de factuur zit niet in de bijlagen');
