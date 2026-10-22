@@ -25,7 +25,7 @@ const MAX_MD = 2 * 1024 * 1024;
 const MAX_BESTAND = 20 * 1024 * 1024;
 const MAX_TREFFERS = 40, FRAGMENT = 160, ZOEK_MS = 4000, MAX_Q = 200;
 
-const NOOIT_MAP = ['00_Systeem/Beveiliging', '00_Systeem/Tokens', '00_Systeem/Vault-RAG', 'TempFinData', 'Claude outputs', '01_Ontwikkeling/0b-werkmap'];
+const NOOIT_MAP = ['00_Systeem/Beveiliging', '01_Ontwikkeling/Beveiliging', '00_Systeem/Tokens', '00_Systeem/Vault-RAG', 'TempFinData', 'Claude outputs', '01_Ontwikkeling/0b-werkmap'];
 const VAST_DICHT_TOP = ['20_Prive', '30_Conversaties'];
 const VAST_DICHT_DEEL = ['medewerkers', 'personeel', 'gesprekken'];
 const VAST_DICHT_PREFIX = ['00_Systeem/Meldingen/', '01_Ontwikkeling/0b-werkmap/'];
@@ -75,6 +75,8 @@ function masker(t, vast, bsnMasker) {
   s = s.replace(/AIza[0-9A-Za-z_-]{30,}/g, WEG);
   s = s.replace(/ya29\.[0-9A-Za-z_-]{20,}/g, WEG);
   s = s.replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, WEG);
+  s = s.replace(/hooks\.slack\.com\/services\/[A-Za-z0-9\/_-]+/gi, 'hooks.slack.com/services/' + WEG);
+  s = s.replace(/(discord(?:app)?\.com\/api\/webhooks\/)[A-Za-z0-9\/_-]+/gi, function (m, a) { return a + WEG; });
   s = s.replace(/(bearer\s+)([A-Za-z0-9+\/=._-]{16,})/gi, function (m, a) { return a + WEG; });
   s = s.replace(/((?:service_role|anon[_-]?key|api[_-]?key|token|password|passwd|wachtwoord)["'`]?\s*[:=]\s*["'`]?)([^\s"'`]{16,})/gi, function (m, a) { return a + WEG; });
   // naam-route: secret/geheim/sleutel als naamdeel, waarde ≥ 12 tekens met letters én cijfers en geen omgevingsnaam (HOOFDLETTERS_ONDER)
@@ -83,12 +85,13 @@ function masker(t, vast, bsnMasker) {
   // kale tokens (Fable M1): een reeks [A-Za-z0-9_-] met daarin een stuk van 20+ letters/cijfers dat vaak wisselt tussen letter en
   // cijfer (willekeurig, zoals een sleutel of hash); niet direct na een / (pad in een URL) en niet binnen [[ ]]. Namen als
   // `mk_werkvoorraad_tik_wv427` of `n8n-backup-2026-10-22` blijven staan (korte stukken), een UUID ook.
-  s = s.replace(/(\[\[[^\]\n]*\]\])|(^|[^A-Za-z0-9_\-\/.])([A-Za-z0-9_-]{20,})(?![A-Za-z0-9_-])/g, function (m, wiki, voor, tok) {
+  s = s.replace(/(\[\[[^\]\n]*\]\])|(^|[^A-Za-z0-9_\-\/])([A-Za-z0-9_-]{20,})(?![A-Za-z0-9_-])/g, function (m, wiki, voor, tok) {
     if (wiki) return wiki;
     return willekeurig(tok) ? voor + WEG : m;
   });
   if (vast) {
-    s = s.replace(/\b[A-Z]{2}[0-9]{2}[ ]?[A-Z]{4}(?:[ ]?[0-9]){10}\b/g, '[IBAN weggelaten]');
+    // IBAN, ook in kleine letters en uit andere landen (Fable diffreview K3): landcode, controlegetal, blokken van vier
+    s = s.replace(/\b[A-Za-z]{2}[0-9]{2}(?: ?[A-Za-z0-9]{4}){2,7}(?: ?[A-Za-z0-9]{1,4})?\b/g, function (m) { return /[0-9]{6}/.test(m.replace(/ /g, '')) ? '[IBAN weggelaten]' : m; });
     if (typeof bsnMasker === 'function') { try { s = bsnMasker(s); } catch (e) {} }
   }
   return s;
@@ -165,7 +168,7 @@ function maak(opt) {
   let bouwBezig = null;
   let laatsteHash = null;
   let laatsteNacht = null;
-  let bestandBezig = 0, zoekBezig = false;
+  let bestandBezig = 0, zoekBezig = false, laatsteDwang = 0;
   let echteVault = null;
 
   function mkdir() {
@@ -288,8 +291,9 @@ function maak(opt) {
     try { return bouw(); } catch (e) { fout('secondbrain-bouw', e); return kaart; } finally { bouwBezig = null; }
   }
 
-  // Mag dit bestand op dit apparaat (P2) en in deze weergave (P4)?
-  const mag = function (b, ctx) { return !(ctx.vast && b.x); };
+  // Mag dit bestand op dit apparaat (P2) en in deze weergave (P4)? Op een vaste plek is verborgen ook dicht: in Bronnen-mappen staan
+  // sollicitatietranscripten en arbeidsovereenkomsten (Fable diffreview M2), en "alles" doet daar niets.
+  const mag = function (b, ctx) { return !(ctx.vast && (b.x || b.v)); };
   const inLijst = function (b, ctx, alles) { return mag(b, ctx) && (alles || !b.v); };
 
   function kaartVoor(ctx, alles) {
@@ -326,7 +330,8 @@ function maak(opt) {
     let k = vers(false);
     if (!k) return null;
     let i = k.perPad.get(sleutel(pad));
-    if (i === undefined) { k = vers(true); i = k && k.perPad.get(sleutel(pad)); }
+    // onbekend pad: hooguit eens per 10 s geforceerd herbouwen (anders blokkeert elk fout pad de event-loop ± 130 ms; Fable diffreview K6)
+    if (i === undefined && nu() - laatsteDwang > 10000) { laatsteDwang = nu(); k = vers(true); i = k && k.perPad.get(sleutel(pad)); }
     if (i === undefined || !k) return null;
     const b = k.bestanden[i];
     if (!mag(b, ctx)) return null;
@@ -340,7 +345,8 @@ function maak(opt) {
       return { b: b, i: i, abs: echt, st: st, k: k };
     } catch (e) { return null; }
   }
-  const audit = function (b) { return { domein: b ? b.d : null, h: b ? hmac(b.p) : null }; };
+  // Bij een weigering de HMAC van het gevraagde pad, zodat pogingen achteraf aan een pad te koppelen zijn (Fable diffreview K5)
+  const audit = function (b, gevraagd) { return { domein: b ? b.d : null, h: b ? hmac(b.p) : (typeof gevraagd === 'string' && gevraagd ? hmac(gevraagd.slice(0, 600)) : null) }; };
 
   function eigenschappen(fm, ctx) {
     const uit = [];
@@ -361,7 +367,7 @@ function maak(opt) {
 
   function open(d, ctx) {
     const z = zoekPad(d && d.pad, ctx);
-    if (!z || z.b.s !== 'md') return { status: 404, j: { ok: false, fout: 'deze pagina is er niet (meer)' }, audit: audit(null) };
+    if (!z || z.b.s !== 'md') return { status: 404, j: { ok: false, fout: 'deze pagina is er niet (meer)' }, audit: audit(null, d && d.pad) };
     if (z.st.size > MAX_MD) return { status: 413, j: { ok: false, fout: 'deze pagina is te groot om hier te tonen' }, audit: audit(z.b) };
     let t;
     try { t = fs.readFileSync(z.abs, 'utf8'); } catch (e) { return { status: 404, j: { ok: false, fout: 'niet te lezen' }, audit: audit(z.b) }; }
@@ -394,7 +400,7 @@ function maak(opt) {
 
   function bestand(d, ctx) {
     const z = zoekPad(d && d.pad, ctx);
-    if (!z || z.b.s === 'md') return { status: 404, j: { ok: false, fout: 'dit bestand is er niet (meer)' }, audit: audit(null) };
+    if (!z || z.b.s === 'md') return { status: 404, j: { ok: false, fout: 'dit bestand is er niet (meer)' }, audit: audit(null, d && d.pad) };
     if (bestandBezig >= 2) return { status: 429, j: { ok: false, fout: 'even geduld: er worden al twee bestanden geladen' }, audit: audit(z.b) };
     bestandBezig++;
     try {
@@ -409,11 +415,15 @@ function maak(opt) {
   }
 
   const plat = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  // Eerst een ruim stuk maskeren en dan pas knippen: anders verliest een sleutel op de knipgrens zijn kop en herkent het masker
+  // de staart niet meer (Fable diffreview K4).
   function fragment(tekst, pos, ctx) {
-    const van = Math.max(0, pos - 60);
-    let f = tekst.slice(van, van + FRAGMENT * 2);
-    f = masker(f, ctx.vast, bsnMasker).replace(/\s+/g, ' ').trim().slice(0, FRAGMENT);
-    return (van > 0 ? '… ' : '') + f + (f.length >= FRAGMENT ? ' …' : '');
+    const ruimVan = Math.max(0, pos - 600);
+    const ruim = masker(tekst.slice(ruimVan, pos + 600), ctx.vast, bsnMasker);
+    const rel = Math.min(ruim.length, pos - ruimVan);
+    const van = Math.max(0, rel - 60);
+    const f = ruim.slice(van, van + FRAGMENT * 2).replace(/\s+/g, ' ').trim().slice(0, FRAGMENT);
+    return (van > 0 || ruimVan > 0 ? '… ' : '') + f + (f.length >= FRAGMENT ? ' …' : '');
   }
 
   async function zoek(d, ctx) {

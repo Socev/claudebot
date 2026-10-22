@@ -5778,6 +5778,7 @@ async function appSlot(a) {
 // een bestand in Downloads; Fable § 8g K6). Zichzelf intrekken mag altijd: dat maakt alleen dichter.
 function appInvoerRoute(route, upload, d, a) {
   if (upload || route.indexOf('GET /app/bestand/') === 0 || route.indexOf('GET /app/facturen/document/') === 0) return true;   // wv833: facturen-stuk inzien = als downloaden
+  if (route === 'GET /app/secondbrain') return true;   // wv832: de kaart (bestandsnamen) op een vaste plek alleen met open slot (Fable diffreview K7)
   if (route.indexOf('POST ') !== 0 || APP_SLOT_VRIJ.has(route)) return false;
   if (route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id) return false;
   if (route === 'POST /app/concept' && !String(d.tekst == null ? '' : d.tekst).trim()) return false;   // wv159: concept wissen mag altijd

@@ -54,6 +54,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   // NFD-naam (macOS/Drive) moet ook via NFC vindbaar zijn
   zet('10_Zakelijk/Holding/Café notitie.md', '# cafe\n');
 
+  zet('01_Ontwikkeling/Beveiliging/CISO.md', '# ciso\n');
   const sb = S.maak({ vault: V, dir: D, fout: (w, e) => console.error('fout', w, e && e.message), hmac: (p) => 'h' + Buffer.from(p).toString('hex').slice(0, 15),
     bsnMasker: (t) => String(t).replace(/\b\d{9}\b/g, '[BSN]'),
     betekenis: async (q) => [{ key: 'vault/20_Prive/Gezondheid/Bloed.md', text: 'privé ' + TOKEN }, { key: 'vault/10_Zakelijk/Tolgaarde/Verzekeringen.md', text: 'polis' },
@@ -62,7 +63,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const k = await sb.app('POST /app/secondbrain/kaart', { alles: true }, {});
   const paden = k.j.knopen.map((x) => x[0]);
   toets('1 kaart: 200 met knopen en lijnen', k.status === 200 && paden.length > 10 && k.j.lijnen.length > 0, k.j);
-  const nooit = ['00_Systeem/Beveiliging/Sleutelregister.md', '00_Systeem/Tokens/dag.jsonl', 'TempFinData/cf_token.txt', 'Claude outputs/x.pdf', '01_Ontwikkeling/0b-werkmap/a.md',
+  const nooit = ['01_Ontwikkeling/Beveiliging/CISO.md', '00_Systeem/Beveiliging/Sleutelregister.md', '00_Systeem/Tokens/dag.jsonl', 'TempFinData/cf_token.txt', 'Claude outputs/x.pdf', '01_Ontwikkeling/0b-werkmap/a.md',
     '01_Ontwikkeling/script.js', '01_Ontwikkeling/pagina.html', '01_Ontwikkeling/Plan.md.conflict1', '.obsidian/app.json', '.git/HEAD', 'node_modules/x/index.md', '01_Ontwikkeling/link.md'];
   toets('1 nooit in de kaart (P3: beveiliging, tokens, TempFinData, Claude outputs, 0b-werkmap, code, html, conflictkopie, punt-mappen, node_modules, symlink)',
     nooit.every((p) => paden.indexOf(p) < 0), nooit.filter((p) => paden.indexOf(p) >= 0));
@@ -130,6 +131,12 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const vm = await sb.app('POST /app/secondbrain/open', { pad: '10_Zakelijk/Tolgaarde/Medewerkers/Jan Jansen.md' }, {});
   toets('3 telefoon: personeel wel, IBAN niet gemaskeerd (alleen op vast)', vm.status === 200 && vm.j.md.indexOf('NL12ABNA0123456789') >= 0);
 
+  // Fable diffreview: op een vaste plek is verborgen (Bronnen) ook dicht, ook met alles
+  toets('3 vaste plek: Bronnen (verborgen) dicht, ook via open', (await sb.app('POST /app/secondbrain/open', { pad: '10_Zakelijk/Tolgaarde/Bronnen/_register.md' }, { vast: true })).status === 404 &&
+    (await sb.app('POST /app/secondbrain/bestand', { pad: '10_Zakelijk/Tolgaarde/Bronnen/scan.pdf' }, { vast: true })).status === 404);
+  toets('3 vaste plek: kaart met alles zonder Bronnen', !(await sb.app('POST /app/secondbrain/kaart', { alles: true }, { vast: true })).j.knopen.some((x) => /\/Bronnen\//.test(x[0])));
+  const a404 = await sb.app('POST /app/secondbrain/open', { pad: '20_Prive/Gezondheid/Bloed.md' }, { vast: true });
+  toets('3 audit bij 404: hmac van het gevraagde pad, geen domein, geen pad', a404.audit.h && a404.audit.domein === null && JSON.stringify(a404.audit).indexOf('Bloed') < 0, a404.audit);
   // ── 4. bestand ──
   const b1 = await sb.app('POST /app/secondbrain/bestand', { pad: '01_Ontwikkeling/schema.png' }, {});
   toets('4 bestand: beeld als base64 met type', b1.status === 200 && b1.j.type === 'image/png' && Buffer.from(b1.j.inhoud, 'base64').toString('hex') === '89504e470d0a1a0a', b1.j);
@@ -162,12 +169,29 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   // ── 6. Financiën-koppeltabel ──
   toets('6 koppel: "Centraal Beheer" (zonder B.V., andere hoofdletters) → pagina', sb.koppelNaam('CENTRAAL BEHEER') === '10_Zakelijk/Tolgaarde/Verzekeringen.md' && sb.koppelNaam('Weg') === null && sb.koppelNaam('Iets anders') === null);
 
+  const zv = await sb.app('POST /app/secondbrain/zoek', { q: 'bron', alles: true }, { vast: true });
+  toets('5 zoeken op vast met alles: geen Bronnen', !zv.j.treffers.some((t) => /Bronnen/.test(t.pad)), zv.j.treffers);
+  // fragment: een sleutel op de knipgrens (60 tekens voor de treffer) blijft gemaskeerd (Fable diffreview K4)
+  const lang = 'Qw3rTy7uIo9pAs1dFg5hJk2lZx4cVb6nM8qW0eR';
+  zet('01_Ontwikkeling/Grens.md', '# grens\n' + 'x'.repeat(30) + ' ' + lang + ' ' + 'y'.repeat(5) + ' grenswoord hier\n');
+  sb.vers(true);
+  const zg = await sb.app('POST /app/secondbrain/zoek', { q: 'grenswoord' }, {});
+  toets('5 fragment: geen stuk van een sleutel op de knipgrens', zg.j.treffers.length === 1 && !/[A-Za-z0-9]{8,}/.test(zg.j.treffers[0].fragment.replace('grenswoord', '').replace(/sleutel weggelaten/, '').replace(/x{8,}|y+/g, '')), zg.j.treffers);
+  // onbekend pad: hooguit eens per 10 s een geforceerde herbouw (Fable diffreview K6)
+  for (let i = 0; i < 5; i++) await sb.app('POST /app/secondbrain/open', { pad: 'bestaat/niet' + i + '.md' }, {});
+  const naBouw = sb.health().gebouwd;
+  await new Promise((r) => setTimeout(r, 5));
+  await sb.app('POST /app/secondbrain/open', { pad: 'bestaat/nogniet.md' }, {});
+  toets('3 onbekend pad: hooguit één geforceerde herbouw per 10 s', sb.health().gebouwd === naBouw, [naBouw, sb.health().gebouwd]);
+
   // ── 7. masker los ──
   const m = S.masker;
   toets('7 masker: jwt, sk-, github, bearer, private key, AIza', ['eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc', 'sk-' + 'a1'.repeat(15), 'ghp_' + 'A1'.repeat(15), 'Authorization: Bearer ' + 'abc123'.repeat(5),
     '-----BEGIN PRIVATE KEY-----\nMIIx\n-----END PRIVATE KEY-----', 'AIza' + 'Sy1'.repeat(12)].every((x) => m(x).indexOf('[sleutel weggelaten]') >= 0 && m(x).length < x.length + 21), ['x']);
   toets('7 masker laat namen staan (mk_werkvoorraad_tik_wv427, n8n-backup-2026-10-22.json, UUID, CLOUDFLARE_API_TOKEN)',
     ['mk_werkvoorraad_tik_eerlijke_beurt_wv427', 'n8n-backup-2026-10-22.json', '3569d2f6-35b7-4048-b65a-8839257ea464', 'sleutel: CLOUDFLARE_API_TOKEN', 'Arbeidsovereenkomst2026'].every((x) => m(x) === x));
+  toets('7 masker: token na een punt, Slack- en Discord-webhook', m('x.' + lang) === 'x.[sleutel weggelaten]' && /services\/\[sleutel weggelaten\]$/.test(m('https://hooks.slack.com/services/T0/B0/abcXYZ123')) && /webhooks\/\[sleutel weggelaten\]$/.test(m('https://discord.com/api/webhooks/1/abc')));
+  toets('7 masker vast: IBAN in kleine letters en buitenlands', m('nl91abna0417164300 en DE89 3704 0044 0532 0130 00', true) === '[IBAN weggelaten] en [IBAN weggelaten]', m('nl91abna0417164300 en DE89 3704 0044 0532 0130 00', true));
   toets('7 masker vast: IBAN en BSN weg', m('NL12 ABNA 0123 4567 89 en 123456782', true, (t) => t.replace(/\b\d{9}\b/g, '[BSN]')) === '[IBAN weggelaten] en [BSN]');
 
   // ── 8. podstart met bewaarde kaart, health ──
@@ -187,6 +211,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const slotVrij = /const APP_SLOT_VRIJ = new Set\(\[([^\]]*)\]\)/.exec(src)[1];
   toets('9 invoerslot op vaste plek geldt (niet in APP_SLOT_VRIJ)', slotVrij.indexOf('secondbrain') < 0);
   toets('9 audit: reden met domein en h=, niet het pad', /res\._app\.reden = 'secondbrain ' \+ actie \+ \(au\.domein \? ' ' \+ au\.domein : ''\) \+ \(au\.h \? ' h=' \+ au\.h : ''\)/.test(src) && !/res\._app\.reden = [^\n]*d\.pad/.test(src));
+  toets('9 GET /app/secondbrain valt op een vaste plek onder het invoerslot', src.indexOf("  if (route === 'GET /app/secondbrain') return true;") > src.indexOf('function appInvoerRoute('));
   toets('9 vast doorgegeven aan de module', /secondbrain\.app\(route, d \|\| \{\}, \{ vast: a\.soort === 'vast' \}\)/.test(src));
   toets('9 /health.secondbrain', /secondbrain: secondbrainInfo\(\),/.test(src));
   toets('9 Financiën verrijkt vóór de cache', /if \(typeof secondbrainFinPagina === 'function'\) secondbrainFinPagina\(d\);[^\n]*\n  appFinCache = /.test(src));
