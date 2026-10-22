@@ -150,7 +150,8 @@ r = klant([{"op": "volg", "id": "j1"}], tot_einde="j1")
 ok("volg op een afgeronde job: buffer + einde", "nep-claude --version" in r["uit"] and r["einde"]["code"] == 0, r)
 
 # volg zonder verlies (wv785, Fable wv715 #4): de momentopname van de buffer en het aanmelden als volger moeten in één tick
-# gebeuren. (a) Deterministisch: een brok in dezelfde tick als het volg-verzoek (test/loper-volg-tick.js; op wv699-2 rood).
+# gebeuren. (a) Deterministisch: een brok in dezelfde tick als het volg-verzoek (test/loper-volg-tick.js; wv699-2 met de
+# toetshaken erbij gepatcht geeft "AC": brok B kwijt).
 # (b) Onder belasting: een job schrijft ± 4 s regels in blokjes; 40 verbindingen melden zich verspreid aan met volg vanaf 0 en
 # lezen tot het einde. Elke volger moet precies alle regels in volgorde hebben, het antwoord vóór de buffer.
 t = subprocess.run(["node", os.path.join(REPO, "test", "loper-volg-tick.js"), os.path.join(REPO, "socev-loper.js")],
@@ -236,14 +237,16 @@ for f in ("/proc/net/tcp", "/proc/net/tcp6"):
             inode = k[9]
 r = klant([{"op": "socket-eigenaar", "inode": inode},
            {"op": "socket-eigenaar", "inode": inode, "naam": "PATH"},
+           {"op": "socket-eigenaar", "inode": inode, "naam": "SOCEV_ANDERS"},
            {"op": "socket-eigenaar", "inode": "999999999"},
            {"op": "socket-eigenaar", "inode": "1; ls"}])
 A = r["antwoorden"]
 ok("socket-eigenaar: proces van de job (pid %s) met SOCEV_TEL_BEURT" % tcp_pid,
    A[0].get("waarde") == "0123456789abcdef" and (A[0].get("pid") == tcp_pid or A[0].get("ppid") == tcp_pid), A[0])
 ok("socket-eigenaar: alleen SOCEV_-markers", A[1].get("fout") == "naam-ongeldig", A[1])
-ok("socket-eigenaar: onbekende inode = pid null", A[2].get("ok") and A[2].get("pid") is None, A[2])
-ok("socket-eigenaar: ongeldige inode geweigerd", A[3].get("fout") == "inode-ongeldig", A[3])
+ok("socket-eigenaar: proces zonder die marker telt niet (pid null)", A[2].get("ok") and A[2].get("pid") is None, A[2])
+ok("socket-eigenaar: onbekende inode = pid null", A[3].get("ok") and A[3].get("pid") is None, A[3])
+ok("socket-eigenaar: ongeldige inode geweigerd", A[4].get("fout") == "inode-ongeldig", A[4])
 conn.close()
 lsn.close()
 klant([{"op": "stop", "id": "jtcp"}], wacht_ms=500)

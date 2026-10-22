@@ -31,7 +31,9 @@
  *                                         Zonder pid: alle 1002-processen met die marker (pid, ppid). Alleen SOCEV_-markers.
  *   socket-eigenaar {inode, naam?}      → welk 1002-proces houdt socket:[inode] open (server.js ziet de inode in
  *                                         /proc/net/tcp, maar /proc/<pid>/fd van 1002 niet)? {pid, ppid, waarde} met de
- *                                         waarde van marker naam (standaard SOCEV_TEL_BEURT), of {pid: null} (wv785, Fable wv715 #5)
+ *                                         waarde van marker naam (standaard SOCEV_TEL_BEURT), of {pid: null} (wv785, Fable wv715 #5).
+ *                                         Alleen processen die de marker dragen; begrensd (fout te-groot). De waarde is een
+ *                                         hint, geen bewijs: elk 1002-proces kan elke SOCEV_-marker in zijn omgeving zetten.
  *   stat {pad} | map {pad} | lees {pad, vanaf?, max?}
  *                                       → alleen binnen socev-thuis/.claude/projects en socev-thuis/.codex/sessions
  *                                         (transcripts zijn 0600 en voor server.js anders onleesbaar)
@@ -71,6 +73,7 @@ function envVerboden(k) {
 }
 const MARKER = /^SOCEV_[A-Z0-9_]{1,40}$/;
 const WAARDE = /^[A-Za-z0-9._:@\/-]{1,200}$/;
+const MAX_SCAN_PROC = 4000, MAX_SCAN_FD = 20000;   // socket-eigenaar: de loper is single-threaded (Fable wv785 #6)
 const SIGNALEN = new Set(['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP', 'SIGQUIT']);
 const EIGEN_UID = typeof process.getuid === 'function' ? process.getuid() : -1;
 
@@ -94,7 +97,8 @@ function stuur(sock, obj) {
 }
 function voegToe(j, stroom, chunk) {
   const b = j[stroom];
-  if (b.lengte + chunk.length <= MAX_BUF) { b.delen.push(chunk); b.lengte += chunk.length; } else b.afgekapt = true;
+  // Na het afkappen niets meer bewaren, ook geen kleiner brok: de buffer blijft een aaneengesloten begin (Fable wv785 #7).
+  if (!b.afgekapt && b.lengte + chunk.length <= MAX_BUF) { b.delen.push(chunk); b.lengte += chunk.length; } else b.afgekapt = true;
   b.totaal += chunk.length;
   const ev = { ev: stroom, id: j.id, b64: chunk.toString('base64') };
   j.volgers.forEach(function (s) { stuur(s, ev); });
@@ -247,19 +251,23 @@ function opSocketEigenaar(v) {
   const doel = 'socket:[' + String(v.inode) + ']';
   let namen = [];
   try { namen = fs.readdirSync('/proc'); } catch (e) { return { fout: 'proc-onleesbaar' }; }
+  let procs = 0, fdsGezien = 0;
   for (let i = 0; i < namen.length; i++) {
     const p = namen[i];
     if (!/^\d+$/.test(p) || Number(p) === process.pid) continue;
     const st = procStatus(p);
     if (!st || st.dood || st.uid !== EIGEN_UID) continue;
+    // Eerst de marker (één leesactie), dan pas de fd's: een proces zonder marker doet er voor de vrager niet toe.
+    const w = markerWaarde(p, naam);
+    if (w === undefined) continue;
+    if (++procs > MAX_SCAN_PROC) return { fout: 'te-groot' };
     let fds = [];
     try { fds = fs.readdirSync('/proc/' + p + '/fd'); } catch (e) { continue; }
     for (let k = 0; k < fds.length; k++) {
+      if (++fdsGezien > MAX_SCAN_FD) return { fout: 'te-groot' };
       let l;
       try { l = fs.readlinkSync('/proc/' + p + '/fd/' + fds[k]); } catch (e) { continue; }
-      if (l !== doel) continue;
-      const w = markerWaarde(p, naam);
-      return { pid: Number(p), ppid: st.ppid, waarde: w !== undefined && WAARDE.test(w) ? w : null };
+      if (l === doel) return { pid: Number(p), ppid: st.ppid, waarde: WAARDE.test(w) ? w : null };
     }
   }
   return { pid: null };

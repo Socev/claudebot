@@ -45,15 +45,20 @@ acl(){ setfacl -P "$@" 2>/dev/null || FOUTEN=$((FOUTEN + 1)); }
 command -v setfacl >/dev/null || { log "STOP: setfacl ontbreekt (pakket acl)"; exit 1; }
 id socev >/dev/null 2>&1 || { log "STOP: gebruiker socev ontbreekt"; exit 1; }
 
-# Windows-code (wv785): de vault staat via bisync binnen minuten op Davids pc. Hoofdletterongevoelig, zoals Windows.
-WINCODE=( -o -iname '*.ps1' -o -iname '*.psm1' -o -iname '*.psd1' -o -iname '*.cmd' -o -iname '*.bat' -o -iname '*.vbs'
-  -o -iname '*.vbe' -o -iname '*.wsf' -o -iname '*.wsh' -o -iname '*.hta' -o -iname '*.jse' -o -iname '*.lnk' -o -iname '*.url'
-  -o -iname '*.scr' -o -iname '*.exe' -o -iname '*.msi' -o -iname '*.dll' -o -iname '*.reg' )
+# Windows-code (wv785): de vault staat via bisync binnen minuten op Davids pc. Hoofdletterongevoelig, zoals Windows. Een
+# volledige lijst bestaat niet (Fable wv785 #8); dit zijn de gangbare die Windows zelf start of opent als code.
+WINCODE=( -o -iname '*.ps1' -o -iname '*.psm1' -o -iname '*.psd1' -o -iname '*.cmd' -o -iname '*.bat' -o -iname '*.com'
+  -o -iname '*.pif' -o -iname '*.vbs' -o -iname '*.vbe' -o -iname '*.wsf' -o -iname '*.wsh' -o -iname '*.ws' -o -iname '*.wsc'
+  -o -iname '*.sct' -o -iname '*.hta' -o -iname '*.jse' -o -iname '*.lnk' -o -iname '*.url' -o -iname '*.scr' -o -iname '*.cpl'
+  -o -iname '*.msc' -o -iname '*.exe' -o -iname '*.msi' -o -iname '*.dll' -o -iname '*.reg' -o -iname '*.pyw' -o -iname '*.xll'
+  -o -iname '*.docm' -o -iname '*.xlsm' -o -iname '*.pptm' -o -iname '*.iso' -o -iname '*.appinstaller'
+  -o -iname '*.settingcontent-ms' -o -iname '*.library-ms' -o -iname '*.jar' )
 # Code-plekken: wat 1001 (machinekamer) of Davids pc als code of config uitvoert. Op elke diepte (Fable wv699 #3:
-# 10_Zakelijk/.../huisbot/.claude), plus losse scripts (Fable wv699 #4). Voor socev alleen lezen.
+# 10_Zakelijk/.../huisbot/.claude), plus losse scripts (Fable wv699 #4) en sinds wv785 Python-bytecode en -pakketten
+# (sys.path) en Windows-code. Voor socev alleen lezen. *.ts hoofdlettergevoelig: *.TS is meestal video.
 CODEPLEK=( -path '*/.claude' -o -path '*/.claude/*' -o -path '*/.obsidian' -o -path '*/.obsidian/*' -o -name .mcp.json
   -o -path '*/.codex' -o -path '*/.codex/*' -o -path '*/.vscode' -o -path '*/.vscode/*' -o -name .sync-id
-  -o -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.ts' -o -name '*.py' -o -name '*.sh' -o -name '*.bash'
+  -o -iname '*.js' -o -iname '*.mjs' -o -iname '*.cjs' -o -name '*.ts' -o -iname '*.py' -o -iname '*.sh' -o -iname '*.bash'
   -o -path '*/__pycache__' -o -path '*/__pycache__/*' -o -iname '*.pyc' -o -iname '*.pyo' -o -iname '*.zip' -o -iname '*.whl'
   -o -iname '*.egg' "${WINCODE[@]}" )
 # Alle rondes met -execdir: find houdt de map vast en geeft ./naam door, zodat een map die socev tussendoor door een
@@ -75,28 +80,43 @@ vault_wortel(){
   acl -d -m u:socev:rwX,u:claude:rwX,m::rwX "$V"
 }
 
-# Code-plekken die socev zelf aanmaakt (de wortel kan niet, dieper wel): andere naam en een logregel. Code-bestanden van
-# socev alleen melden (fase 2 meet of dat legitiem voorkomt).
+# Hernoemen met controle (Fable wv785 #5): mv -n slaagt ook als het doel al bestaat; alleen geslaagd als de oude naam weg is.
+# Het achtervoegsel heeft een toevalsdeel, zodat socev het doel niet vooraf kan neerzetten.
+HERNOEM='mv -n -- "$1" "$1.$2" 2>/dev/null && [ ! -e "$1" ] && [ ! -L "$1" ]'
+# hernoem_socev <reden> <find-voorwaarden…>: wat find vindt (van socev) krijgt een andere naam, met een logregel per stuk.
+hernoem_socev(){ local reden="$1" suf st p; shift
+  suf="socev-geblokkeerd-$(date +%Y%m%d%H%M%S)-$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')"
+  while IFS= read -r -d '' st && IFS= read -r -d '' p; do
+    [ "$st" = hernoemd ] || FOUTEN=$((FOUTEN + 1))
+    log "LET OP: $(printf %q "$p") (van socev) $st naar *.$suf: $reden"
+  done < <(find "$V" -mindepth 2 -user socev "$@" \( -execdir sh -c "$HERNOEM" _ {} "$suf" \; -printf 'hernoemd\0%p\0' \
+             -o -printf 'mislukt\0%p\0' \) 2>/dev/null)
+}
+
+# Code-plekken die socev zelf aanmaakt (de wortel kan niet, dieper wel): andere naam en een logregel. Bytecode weg, Windows-
+# code andere naam; overige code-bestanden van socev alleen melden (fase 2 meet of dat legitiem voorkomt).
 vault_vreemde_codeplekken(){
-  local ts; ts=$(date +%Y%m%d%H%M%S)
-  find "$V" -mindepth 2 -user socev \( -name .claude -o -name .mcp.json -o -name .codex -o -name .obsidian -o -name .vscode \) \
-    -prune -execdir mv -n -- {} "{}.socev-geblokkeerd-$ts" \; -printf '%p\n' 2>/dev/null | while IFS= read -r p; do
-    log "LET OP: $(printf %q "$p") (van socev) hernoemd naar *.socev-geblokkeerd-$ts: code-plek"
-  done
+  hernoem_socev code-plek \( -name .claude -o -name .mcp.json -o -name .codex -o -name .obsidian -o -name .vscode \) -prune
   # Python-bytecode van socev (wv785): weg. Het is een cache (Python maakt hem opnieuw) en een vervalste .pyc in een map waar
-  # 1001 Python uit laadt is code. Ontstaat ook gewoon als een smal gesprek een vaultscript draait: daarom geen LET OP.
-  find "$V" -mindepth 2 -user socev \( -type d -name __pycache__ -prune -execdir rm -rf -- {} \; -printf '%p\n' \
-    -o ! -type d \( -iname '*.pyc' -o -iname '*.pyo' \) -execdir rm -f -- {} \; -printf '%p\n' \) 2>/dev/null | head -20 \
-    | while IFS= read -r p; do log "bytecode van socev weggehaald: $(printf %q "$p")"; done
-  # Windows-code van socev: andere naam, zodat hij op Davids pc niet als code opent of draait (wv785).
-  find "$V" -mindepth 2 ! -path '*.socev-geblokkeerd-*' ! -type d -user socev \( -false "${WINCODE[@]}" \) \
-    -execdir mv -n -- {} "{}.socev-geblokkeerd-$ts" \; -printf '%p\n' 2>/dev/null | while IFS= read -r p; do
-    log "LET OP: $(printf %q "$p") (van socev) hernoemd naar *.socev-geblokkeerd-$ts: Windows-code"
-  done
+  # 1001 Python uit laadt is code. Per entry -user socev en -delete (unlinkat/rmdir vanuit de map, nooit rm -rf): een map
+  # die socev tussendoor onder die naam schuift, blijft staan zolang er iets van een ander in zit (Fable wv785 #3). Ontstaat
+  # ook gewoon als een smal gesprek een vaultscript draait: daarom geen LET OP. Lezen tot het eind: head mag find niet
+  # afbreken voordat alles weg is (Fable wv785 #4).
+  find "$V" -mindepth 2 -user socev \( \( -path '*/__pycache__/*' -o -iname '*.pyc' -o -iname '*.pyo' \) ! -type d -delete -printf '%p\n' \
+    -o \( -name __pycache__ -o -path '*/__pycache__/*' \) -type d -empty -delete -printf '%p\n' \) 2>/dev/null \
+    | { head -20; cat >/dev/null; } | while IFS= read -r p; do log "bytecode van socev weggehaald: $(printf %q "$p")"; done
+  # Windows-code van socev (en *.js: Windows start dat met WScript): andere naam, zodat hij op Davids pc niet als code
+  # opent of draait (wv785). Een hernoemd bestand eindigt op het achtervoegsel en valt daarna buiten de lijst.
+  hernoem_socev Windows-code ! -type d \( -iname '*.js' "${WINCODE[@]}" \)
   if [ -f "$STEMPEL" ]; then
-    find "$V" -type f -user socev -cnewer "$STEMPEL" \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.ts' -o -name '*.py' \
-      -o -name '*.sh' -o -name '*.bash' -o -iname '*.zip' -o -iname '*.whl' -o -iname '*.egg' \) -printf '%p\n' 2>/dev/null | head -20 \
-      | while IFS= read -r p; do log "let op: code van socev in de vault: $(printf %q "$p")"; done
+    find "$V" -type f -user socev -cnewer "$STEMPEL" \( -iname '*.mjs' -o -iname '*.cjs' -o -name '*.ts' -o -iname '*.py' \
+      -o -iname '*.sh' -o -iname '*.bash' -o -iname '*.zip' -o -iname '*.whl' -o -iname '*.egg' \) -printf '%p\n' 2>/dev/null \
+      | { head -20; cat >/dev/null; } | while IFS= read -r p; do log "let op: code van socev in de vault: $(printf %q "$p")"; done
+    # DEKT NIET (Fable wv785 #2): socev kan een bestand van claude vullen en hernoemen ("geleend eigendom"), want de mappen
+    # zijn rwX; zo'n Windows-codebestand is van claude en wordt niet hernoemd. Wel gemeld: elke nieuwe of gewijzigde
+    # Windows-code die niet van socev is (ook rclone van de pc en de machinekamer; dat is weinig).
+    find "$V" -type f ! -user socev -cnewer "$STEMPEL" \( -false "${WINCODE[@]}" \) -printf '%p\n' 2>/dev/null \
+      | { head -20; cat >/dev/null; } | while IFS= read -r p; do log "let op: Windows-code nieuw of gewijzigd (niet van socev): $(printf %q "$p")"; done
   fi
 }
 
@@ -108,11 +128,12 @@ vreemde_symlinks(){
   local w st p doel
   for w in "$V" "$MEM"; do
     [ -d "$w" ] || continue
-    while IFS= read -r -d '' st && IFS= read -r -d '' p && IFS= read -r -d '' doel; do
+    # Eerst pad en doel (na het wissen is het doel niet meer te lezen), dan de uitkomst.
+    while IFS= read -r -d '' p && IFS= read -r -d '' doel && IFS= read -r -d '' st; do
       [ "$st" = weg ] || FOUTEN=$((FOUTEN + 1))
       log "LET OP: symlink van socev $st: $(printf %q "$p") -> $(printf %q "$doel")"
-    done < <(find -P "$w" -mindepth 1 -type l -user socev \
-               \( -execdir rm -f -- {} \; -printf 'weg\0%p\0%l\0' -o -printf 'mislukt\0%p\0%l\0' \) 2>/dev/null)
+    done < <(find -P "$w" -mindepth 1 -type l -user socev -printf '%p\0%l\0' \
+               \( -execdir rm -f -- {} \; -printf 'weg\0' -o -printf 'mislukt\0' \) 2>/dev/null)
   done
 }
 
