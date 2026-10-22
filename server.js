@@ -12602,7 +12602,7 @@ async function appStudio(req, res, a, s, d, route) {
 // Mini-app Bandjes: het register van de telefoonbandjes (vault 10_Zakelijk/{Tolgaarde,Groenhouten}/Telefoon/Bandjes.md) lezen en
 // bewerken, en een bandje laten inspreken via de Studio-motorlaag (zelfde wachtrij, grenzen, vingerafdruk-regel en Bestanden). Alle
 // logica staat in bandjes.js (register, journaal, routes) en audio.js (telefoonversie, via studio.js); hier alleen de koppeling:
-// routes GET /app/bandjes en POST /app/bandjes/{tekst,nieuw,voorstel,instellingen,maak,status} na de app-poort, POST
+// routes GET /app/bandjes en POST /app/bandjes/{tekst,nieuw,voorstel,instellingen,maak,status,spreektekst,proef} (wv803) na de app-poort, POST
 // /smal/bandjes/voorstel (API-geheim of Socev-sleutel; de skill bandjes), het BSN-masker op een vaste plek en /health.bandjes.
 // Schrijven alleen op de primaire kant. Ontbreekt bandjes.js in de release (terugrol), dan 404 en bandjes.aan=false in /health.
 const BANDJES_DIR = serverPad('bandjes', process.env.BANDJES_DIR, '/opt/data/bandjes', serverProefDeel('bandjes'));
@@ -12624,7 +12624,7 @@ function bandjesInfo() {
 async function appBandjes(req, res, a, s, d, route) {
   if (!bandjes) return appWeiger(res, 404, 'Bandjes zit niet in deze versie van de pod', 'bandjes ontbreekt');
   // wv464: op een vaste plek een BSN-achtig getal maskeren, nooit weigeren (zoals Studio). Praktijknummers (10 cijfers) raakt dit niet.
-  if (a.soort === 'vast' && d && typeof d === 'object') ['tekst', 'naam', 'menu', 'wanneer'].forEach(function (k) {
+  if (a.soort === 'vast' && d && typeof d === 'object') ['tekst', 'naam', 'menu', 'wanneer', 'spreektekst', 'uitspraak'].forEach(function (k) {   // wv803: spreektekst, uitspraak
     if (typeof d[k] === 'string' && appBsnAchtig(d[k])) { d[k] = appBsnMasker(d[k]); res._app.bsnWeg = true; }
   });
   if (route === 'GET /app/bandjes') res._app.stil = true;

@@ -45,7 +45,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
-const GRENS = { rij: 5, per_dag: 30, tekst_max: 2000, aantal_max: 4, bestand_max: 20 * 1024 * 1024, taken_bewaar_ms: 30 * 86400000 };
+const GRENS = { rij: 5, per_dag: 30, tekst_max: 3000, aantal_max: 4, bestand_max: 20 * 1024 * 1024, taken_bewaar_ms: 30 * 86400000 };
 const ROUTER_MODELLEN_MS = 60 * 1000;
 const OBJECT_INFO_MS = 10 * 60 * 1000;
 const COMFY_WACHT_MAX_MS = 30 * 60 * 1000;    // zo lang wacht een taak op een lege ComfyUI-wachtrij / genoeg vrij VRAM
@@ -63,13 +63,21 @@ const FS_PROJECT_MS = 60 * 1000;               // cache van FlowStudio /api/proj
 // WAV van en audio.js de telefoonversies. Prijs vooraf = tekens × tarief (bouwplan § 6: $ 0,08 / $ 0,04 per 1.000 tekens, naar boven
 // afgerond en als euro geteld, dus ruim); achteraf blijft die schatting staan, met de ElevenLabs-credits erbij (die rekenen anders:
 // 12 tekens kostten 5 credits). Nooit automatisch opnieuw; de tekst gaat nooit in een log, audit of meta.
+// wv803 (22-10, David 17:04 "er is zelfs al een v4"): eleven_v4 staat niet in de Router-catalogus, maar de Router stuurt model_id 1-op-1
+// door: met model "elevenlabs/eleven_v3" (een model dat de Router wél kent) en model_id "eleven_v4" → 200; een verzonnen model_id → 400
+// model_not_found (ElevenLabs valideert dus echt). `router` = het Router-model per ElevenLabs-model. Elke aanroep stuurt language_code "nl",
+// apply_text_normalization (flash: auto, want "on" is daar alleen voor Enterprise) en voice_settings (speed 0,7–1,2, stability 0–1);
+// alle vier modellen namen dat 22-10 aan (voortgang-2.md). Pauzes vertaalt spreektekst.js per model.
 const ELEVEN = {
   modellen: {
-    eleven_multilingual_v2: { naam: 'Multilingual v2 (standaard)', eur_per_1000: 0.10 },
-    eleven_v3: { naam: 'v3 (expressiever)', eur_per_1000: 0.10 },
-    eleven_flash_v2_5: { naam: 'Flash v2.5 (sneller, goedkoper)', eur_per_1000: 0.05 },
+    eleven_v4: { naam: 'v4 (beste, standaard)', eur_per_1000: 0.10, router: 'eleven_v3' },
+    eleven_v3: { naam: 'v3 (expressiever)', eur_per_1000: 0.10, router: 'eleven_v3' },
+    eleven_multilingual_v2: { naam: 'Multilingual v2', eur_per_1000: 0.10, router: 'eleven_multilingual_v2' },
+    eleven_flash_v2_5: { naam: 'Flash v2.5 (sneller, goedkoper)', eur_per_1000: 0.05, router: 'eleven_flash_v2_5', normalisatie: 'auto' },
   },
-  standaard: 'eleven_multilingual_v2',
+  standaard: 'eleven_v4',
+  taal: 'nl',
+  stemgevoel: { snelheid: { min: 0.7, max: 1.2, standaard: 0.95 }, stabiliteit: { min: 0, max: 1, standaard: 0.5 }, gelijkenis: 0.75 },
   formaat: 'pcm_24000', rate: 24000,
   stem_re: /^[A-Za-z0-9]{8,40}$/,
   tarief_bron: 'bouwplan Studio § 6 (prijspagina ElevenLabs 21-10-2026), naar boven afgerond',
@@ -312,9 +320,13 @@ function maak(deps) {
           // wv782: betaald. Tarieven en modellen uit de pod (ELEVEN), nooit uit flow.yaml: een flow kan zichzelf niet goedkoper maken.
           f.betaald = true; f.aanbieder = 'elevenlabs'; f.uitvoer = 'geluid';
           f.bestandsnaam = /^[a-z]{2,20}$/.test(String(y.bestandsnaam || '')) ? String(y.bestandsnaam) : 'stem';
-          f.velden = f.velden.filter(function (v) { return v.naam !== 'model'; });
+          f.velden = f.velden.filter(function (v) { return ['model', 'snelheid', 'stabiliteit'].indexOf(v.naam) < 0; });
           f.velden.push({ naam: 'model', label: 'Model', soort: 'keuze', verplicht: true, meer: true, standaard: ELEVEN.standaard,
             opties: Object.keys(ELEVEN.modellen).map(function (k) { return { label: ELEVEN.modellen[k].naam, waarde: k }; }) });
+          // wv803: stemgevoel uit de pod (grenzen gemeten), als getal-velden onder "meer"
+          const sg = ELEVEN.stemgevoel;
+          f.velden.push({ naam: 'snelheid', label: 'Snelheid (1 = normaal)', soort: 'getal', verplicht: false, meer: true, standaard: sg.snelheid.standaard, min: sg.snelheid.min, max: sg.snelheid.max, stap: 0.05 });
+          f.velden.push({ naam: 'stabiliteit', label: 'Stabiliteit (hoger = rustiger, lager = expressiever)', soort: 'getal', verplicht: false, meer: true, standaard: sg.stabiliteit.standaard, min: sg.stabiliteit.min, max: sg.stabiliteit.max, stap: 0.05 });
           const tv = f.velden.find(function (v) { return v.naam === 'tekst'; }), sv = f.velden.find(function (v) { return v.naam === 'stem'; });
           if (!tv || !sv) f.fout = 'een ElevenLabs-flow heeft de velden tekst en stem nodig';
         }
@@ -539,10 +551,11 @@ function maak(deps) {
     const o = { soort: 'bandje', praktijk: String(b.praktijk || ''), bandje: String(b.bandje || ''), versie: Number(b.versie),
       tekst_hash: String(b.tekst_hash || ''), stem: schoon(b.stem, 100) };
     if (b.model && Object.hasOwn(ELEVEN.modellen, String(b.model))) o.model = String(b.model);   // wv782
+    if (b.proef === true) o.proef = true;   // wv803: één proefzin; bandjes.naKlaar laat het register dan ongemoeid
     if (!/^[a-z]{2,20}$/.test(o.praktijk) || !/^[a-z]{2}-[a-z0-9-]{2,30}$/.test(o.bandje) || !Number.isInteger(o.versie) || o.versie < 0 || !/^[a-f0-9]{8,64}$/.test(o.tekst_hash)) return null;
     return o;
   }
-  function bronLabel(b) { return b.praktijk + ' · ' + b.bandje + ' · v' + b.versie; }
+  function bronLabel(b) { return b.praktijk + ' · ' + b.bandje + ' · v' + b.versie + (b.proef ? ' · proefzin' : ''); }
 
   // ── POST /app/studio/maak ──
   // ctx: { versOk(): bool (synchroon), versVerbruik(): void, apparaat }
@@ -661,6 +674,11 @@ function maak(deps) {
     if (!r || !r.ok || (ctl.gestopt && !t.geleverd)) return r;
     // wv743: telefoonversies (8 kHz PCM + µ-law) naast het origineel; mislukt het, dan het origineel toch bewaren met een noot
     if (f.telefoonversie) {
+      // wv803: eerst het origineel op een gewone luistersterkte (ElevenLabs leverde piek −11 dBFS, RMS ± −31: in de app nauwelijks
+      // hoorbaar, David 22-10 "hoor ik niets"); mislukt dat, dan blijft het origineel zoals het kwam
+      t.fase = 'geluid op sterkte brengen';
+      try { const n = await audioMod().normaliseer(out); if (n && n.length) t.meting = Object.assign({}, t.meting || {}, { versterking_db: n[0].versterking_db }); }
+      catch (e) { fout('studio-normaliseer', e); }
       t.fase = 'telefoonversie maken';
       try { await audioMod().telefoonversie(out); }
       catch (e) { t.noot = 'telefoonversie mislukt (' + foutTekst(e && e.message || e) + '); alleen het origineel is bewaard'; fout('studio-telefoonversie', e); }
@@ -708,6 +726,8 @@ function maak(deps) {
     if (!sleutel) return { fout: 'de Router-sleutel ontbreekt (router_studio_key); er is niets aangeroepen' };
     const tekst = String(t.velden.tekst || '').trim().replace(/\s*\n\s*/g, ' ');
     const stem = String(t.velden.stem || ''), model = String(t.velden.model || '');
+    const md = ELEVEN.modellen[model], sg = ELEVEN.stemgevoel;
+    const tussen = function (v, g) { v = Number(v); return Number.isFinite(v) ? Math.min(g.max, Math.max(g.min, v)) : g.standaard; };
     if (!tekst || !ELEVEN.stem_re.test(stem) || !Object.hasOwn(ELEVEN.modellen, model)) return { fout: 'tekst, stem of model ongeldig; er is niets aangeroepen' };
     if (ctl.gestopt) return { fout: 'gestopt' };
     t.fase = 'inspreken bij ElevenLabs'; t.procent = null;
@@ -721,7 +741,9 @@ function maak(deps) {
     try {
       r = await doeFetch(ROUTER + '/v1/text-to-speech/' + stem + '/stream?output_format=' + ELEVEN.formaat, { method: 'POST', redirect: 'manual',
         headers: { Authorization: 'Bearer ' + sleutel, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: tekst, model_id: model, model: 'elevenlabs/' + model }),
+        body: JSON.stringify({ text: tekst, model_id: model, model: 'elevenlabs/' + (md.router || model), language_code: ELEVEN.taal,
+          apply_text_normalization: md.normalisatie || 'on',
+          voice_settings: { stability: tussen(t.velden.stabiliteit, sg.stabiliteit), similarity_boost: sg.gelijkenis, speed: tussen(t.velden.snelheid, sg.snelheid), use_speaker_boost: true } }),
         signal: AbortSignal.any([ac.signal, AbortSignal.timeout(f.max_seconden * 1000)]) });
     } catch (e) {
       return { fout: ctl.gestopt ? 'gestopt' : 'ElevenLabs/Router gaf geen antwoord (' + foutTekst(e && e.message || e) + '); kosten als geschat geteld' };
@@ -729,7 +751,8 @@ function maak(deps) {
     const cc = Number(r.headers.get('character-cost'));
     if (isFinite(cc) && cc >= 0) t.credits = cc;
     const rid = r.headers.get('request-id');
-    t.meting = { model: model, formaat: ELEVEN.formaat, http: r.status, request_id: rid && /^[A-Za-z0-9_-]{4,64}$/.test(rid) ? rid : null };
+    t.meting = { model: model, formaat: ELEVEN.formaat, http: r.status, request_id: rid && /^[A-Za-z0-9_-]{4,64}$/.test(rid) ? rid : null, tekens: tekst.length,
+      snelheid: tussen(t.velden.snelheid, sg.snelheid), stabiliteit: tussen(t.velden.stabiliteit, sg.stabiliteit) };
     if (!r.ok) {
       // een 3xx/4xx betekent: niets gemaakt, ElevenLabs rekent het niet (gemeten 22-10: validatiefout vóór het inspreken). Een 5xx kan
       // ná het genereren komen (Router-proxy valt om): dan geschat, telt mee (Fable wv782 #2).

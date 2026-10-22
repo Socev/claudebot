@@ -83,7 +83,7 @@ const router = http.createServer((req, res) => {
   toets('1 flow kapot zonder veld stem', (c.flows.find((f) => f.id === 'eleven-zonder-stem') || {}).klaar === false);
   toets('1 betaald, prijs, vers_per_keer, motor_naam noemt ElevenLabs VS', stem.betaald === true && stem.vers_per_keer === true && /betaald/.test(stem.prijs) && /VS/.test(stem.motor_naam) && stem.prijs_tabel && stem.prijs_tabel.eleven_flash_v2_5 === 0.05);
   const mv = stem.velden.find((v) => v.naam === 'model');
-  toets('1 model-veld uit de pod (3 modellen, standaard multilingual_v2)', mv && mv.soort === 'keuze' && mv.opties.length === 3 && mv.standaard === 'eleven_multilingual_v2', mv);
+  toets('1 model-veld uit de pod (4 modellen, standaard v4; wv803)', mv && mv.soort === 'keuze' && mv.opties.length === 4 && mv.standaard === 'eleven_v4' && mv.opties[0].waarde === 'eleven_v4', mv);
   let r = await S.maak({ flow: 'stem-elevenlabs', velden: { tekst: GEHEIM, stem: ROOS }, beurt_id: nieuweBeurt() }, ctx);
   toets('1 maak zonder sleutel: 409, niets naar de aanbieder', r.status === 409 && R.posts.length === 0, r);
   sleutel = SLEUTEL;
@@ -113,7 +113,9 @@ const router = http.createServer((req, res) => {
   let t = S.taak(r.taak.id);
   toets('4 taak klaar', t.status === 'klaar', t);
   const p = R.posts[0] || {};
-  toets('4 aanroep: voice in het pad, pcm_24000, model_id + model, tekst', p.voice === ROOS && p.formaat === 'pcm_24000' && p.body.model_id === 'eleven_multilingual_v2' && p.body.model === 'elevenlabs/eleven_multilingual_v2' && p.body.text === GEHEIM, p);
+  toets('4 aanroep: voice in het pad, pcm_24000, model_id + model, tekst', p.voice === ROOS && p.formaat === 'pcm_24000' && p.body.model_id === 'eleven_v4' && p.body.model === 'elevenlabs/eleven_v3' && p.body.text === GEHEIM, p);
+  // wv803: taal, normalisatie en stemgevoel (standaard) gaan mee
+  toets('4b aanroep: language_code nl, apply_text_normalization on, voice_settings (speed 0,95, stability 0,5)', p.body.language_code === 'nl' && p.body.apply_text_normalization === 'on' && p.body.voice_settings && p.body.voice_settings.speed === 0.95 && p.body.voice_settings.stability === 0.5 && p.body.voice_settings.similarity_boost === 0.75, p.body);
   toets('4 eigen sleutel als Bearer', p.kop && p.kop.authorization === 'Bearer ' + SLEUTEL);
   toets('4 bestanden: stem.wav + twee telefoonversies', t.bestanden.map((b) => b.naam).join(',') === 'stem-telefoon-pcm.wav,stem-telefoon-ulaw.wav,stem.wav', t.bestanden);
   const wav = fs.readFileSync(path.join(BEWAAR, t.id, 'b', '3'));
@@ -220,7 +222,7 @@ const router = http.createServer((req, res) => {
   const roos = lijst.find((x) => x.id === 'elevenlabs:' + ROOS);
   toets('12 Roos één keer, betaald, op bandje-elevenlabs, beschikbaar', lijst.filter((x) => x.id === 'elevenlabs:' + ROOS).length === 1 && roos.flow === 'bandje-elevenlabs' && roos.betaald && roos.beschikbaar && roos.vers_per_keer, roos);
   toets('12 Anna ook; geen grijze plaatshouder meer', lijst.some((x) => x.id === 'elevenlabs:AnnaVoice1234') && !lijst.some((x) => x.id === 'elevenlabs'));
-  toets('12 modellen + standaard bij de stem', roos.modellen.length === 3 && roos.model_standaard === 'eleven_multilingual_v2');
+  toets('12 modellen + standaard bij de stem', roos.modellen.length === 4 && roos.model_standaard === 'eleven_v4');
   toets('12 zonder ElevenLabs-flow: grijze plaatshouder zoals wv743', B.stemmenUit(c.flows.filter((f) => f.motor !== 'elevenlabs'), reg).some((x) => x.id === 'elevenlabs' && !x.beschikbaar));
   sleutel = null;
   const zonder = B.stemmenUit((await S.flows({ verborgen: true })).flows, reg).find((x) => x.id === 'elevenlabs:' + ROOS);
@@ -252,13 +254,13 @@ const router = http.createServer((req, res) => {
     toets('13 maak met vingerafdruk: taak', m.status === 200 && m.j.taak, m);
     await wachtKlaar(m.j.taak.id);
     const pp = R.posts[p13] || {};
-    toets('13 Tolgaarde: Roos, model onbekend → standaard multilingual_v2, tekst uit het register', pp.voice === ROOS && pp.body.model_id === 'eleven_multilingual_v2' && pp.body.text === 'Wij zijn gesloten.', pp);
+    toets('13 Tolgaarde: Roos, model onbekend → standaard v4, tekst uit het register', pp.voice === ROOS && pp.body.model_id === 'eleven_v4' && pp.body.text === 'Wij zijn gesloten.', pp);
     const t13 = S.taak(m.j.taak.id);
-    toets('13 bron draagt stem en model; bestand bandje.wav', t13.bron && t13.bron.stem === 'elevenlabs:' + ROOS && t13.bron.model === 'eleven_multilingual_v2' && t13.bestanden.some((b) => b.naam === 'bandje.wav'), t13);
+    toets('13 bron draagt stem en model; bestand bandje.wav', t13.bron && t13.bron.stem === 'elevenlabs:' + ROOS && t13.bron.model === 'eleven_v4' && t13.bestanden.some((b) => b.naam === 'bandje.wav'), t13);
     rt.naKlaar(t13);
     const na = await rt.app('GET /app/bandjes', {}, ctx);
     const bna = na.j.praktijken.find((x) => x.id === 'tolgaarde').bandjes[0];
-    toets('13 register: laatste bestand met stem en model, status gemaakt (v1)', /elevenlabs:7qdUFMklKPaaAVMsBTBt · eleven_multilingual_v2/.test(bna.laatste_bestand || JSON.stringify(bna)) && /gemaakt \(v1\)/.test(JSON.stringify(bna)), bna);
+    toets('13 register: laatste bestand met stem en model, status gemaakt (v1)', /elevenlabs:7qdUFMklKPaaAVMsBTBt · eleven_v4/.test(bna.laatste_bestand || JSON.stringify(bna)) && /gemaakt \(v1\)/.test(JSON.stringify(bna)), bna);
     const gh = na.j.praktijken.find((x) => x.id === 'groenhouten').bandjes[0];
     vers = true; const p14 = R.posts.length;
     m = await rt.app('POST /app/bandjes/maak', { praktijk: 'groenhouten', bandje: gh.id, versie: gh.versie, tekst_hash: gh.tekst_hash, beurt_id: nieuweBeurt() }, ctx);
@@ -290,6 +292,72 @@ const router = http.createServer((req, res) => {
     m = await rt.app('POST /app/bandjes/maak', { praktijk: 'groenhouten', bandje: gh2.id, versie: gh2.versie, tekst_hash: gh2.tekst_hash, beurt_id: nieuweBeurt() }, ctx);
     toets('13 zonder stem in de invoer: de bewaarde stem van het bandje (Roos)', m.status === 200, m);
     if (m.status === 200) await wachtKlaar(m.j.taak.id);
+  }
+  // 14. wv803: spreektekst, uitspraaklijst, schuifjes, proefzin, eigen spreektekst (Tolgaarde, Roos, standaard v4)
+  {
+    const tgPad = path.join(VAULT, B.PRAKTIJKEN.tolgaarde.pad);
+    const lees14 = async () => (await rt.app('GET /app/bandjes', {}, ctx)).j.praktijken.find((x) => x.id === 'tolgaarde').bandjes[0];
+    let b14 = await lees14();
+    let r14 = await rt.app('POST /app/bandjes/tekst', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, tekst: 'Wij zijn gesloten. Bel 085 773 11 00 of kijk op www.hpgroenhouten.nl.' }, ctx);
+    toets('14 tekst met nummer en website bewaard', r14.status === 200, r14);
+    r14 = await rt.app('POST /app/bandjes/instellingen', { praktijk: 'tolgaarde', uitspraak: 'hpgroenhouten = h p groenhouten\nUw Zorg Online = uw zorg online' }, ctx);
+    toets('14 uitspraaklijst bewaard als één regel', r14.status === 200 && r14.j.instellingen.uitspraak === 'hpgroenhouten = h p groenhouten; Uw Zorg Online = uw zorg online' && /- uitspraak: hpgroenhouten = h p groenhouten; Uw Zorg Online/.test(fs.readFileSync(tgPad, 'utf8')), r14);
+    r14 = await rt.app('POST /app/bandjes/instellingen', { praktijk: 'tolgaarde', uitspraak: 'zonder isgelijkteken' }, ctx);
+    toets('14 uitspraaklijst zonder "=": 400', r14.status === 400 && /uitspraaklijst/.test(r14.j.fout), r14);
+    b14 = await lees14();
+    const sp = b14.spreektekst || {};
+    toets('14 GET: automatische spreektekst (nummer, website met uitspraaklijst, [pauze]), 2 zinnen', sp.eigen === false && /nul vijfentachtig, zeven zeven drie, elf, nul nul/.test(sp.tekst) && /w w w punt h p groenhouten punt n l/.test(sp.tekst) && /gesloten\. \[pauze\] Bel/.test(sp.tekst) && sp.zinnen.length === 2, sp);
+    vers = true; let p = R.posts.length;
+    let m = await rt.app('POST /app/bandjes/maak', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, snelheid: 1.1, stabiliteit: 0.7, beurt_id: nieuweBeurt() }, ctx);
+    if (m.status === 200) await wachtKlaar(m.j.taak.id);
+    let pb = (R.posts[p] || {}).body || {};
+    toets('14 maak v4: spreektekst met [pause], snelheid en stabiliteit uit de invoer', m.status === 200 && pb.model_id === 'eleven_v4' && /gesloten\. \[pause\] Bel nul vijfentachtig/.test(pb.text) && !/pauze/.test(pb.text) && pb.voice_settings.speed === 1.1 && pb.voice_settings.stability === 0.7, { m, pb });
+    const t14 = m.status === 200 ? S.taak(m.j.taak.id) : null;
+    const vb14 = t14 ? verbruikRegels().filter((x) => x.taak === t14.id || x.id === t14.id) : [];
+    toets('14 prijs vooraf op de spreektekst (reservering telt de tekens van de spreektekst)', t14 && t14.velden.tekst.length > b14.tekst.length && vb14.some((x) => x.tekens === t14.velden.tekst.length), { lengte: t14 && t14.velden.tekst.length, vb14 });
+    vers = true; p = R.posts.length;
+    m = await rt.app('POST /app/bandjes/maak', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, model: 'eleven_multilingual_v2', pauze: 0.5, beurt_id: nieuweBeurt() }, ctx);
+    if (m.status === 200) await wachtKlaar(m.j.taak.id);
+    pb = (R.posts[p] || {}).body || {};
+    toets('14 maak v2: break-tag van de gekozen pauze', m.status === 200 && /gesloten\. <break time="0\.5s" \/> Bel/.test(pb.text), pb.text);
+    vers = true; p = R.posts.length;
+    m = await rt.app('POST /app/bandjes/maak', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, snelheid: 1.3, beurt_id: nieuweBeurt() }, ctx);
+    toets('14 snelheid 1,3 (buiten 0,7–1,2): 400, geen aanroep', m.status === 400 && /snelheid/.test(m.j.fout) && R.posts.length === p, m);
+    const regVoor = fs.readFileSync(tgPad, 'utf8');
+    vers = true; p = R.posts.length;
+    m = await rt.app('POST /app/bandjes/proef', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, zin: 1, beurt_id: nieuweBeurt() }, ctx);
+    if (m.status === 200) await wachtKlaar(m.j.taak.id);
+    pb = (R.posts[p] || {}).body || {};
+    const tp = m.status === 200 ? S.taak(m.j.taak.id) : null;
+    toets('14 proefzin: alleen zin 2, bron proef, label "· proefzin"', m.status === 200 && /^Bel nul vijfentachtig/.test(pb.text) && !/gesloten/.test(pb.text) && tp && tp.bron.proef === true && bewaard[tp.id] && / · proefzin$/.test(bewaard[tp.id].label), { m, pb, bron: tp && tp.bron, label: tp && bewaard[tp.id] && bewaard[tp.id].label });
+    if (tp) rt.naKlaar(tp);
+    toets('14 proefzin laat het register ongemoeid (geen laatste bestand/status)', fs.readFileSync(tgPad, 'utf8') === regVoor);
+    vers = true; p = R.posts.length;
+    m = await rt.app('POST /app/bandjes/proef', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, zin: 5, beurt_id: nieuweBeurt() }, ctx);
+    toets('14 proefzin buiten de lijst: 400, geen aanroep', m.status === 400 && R.posts.length === p, m);
+    vers = false; p = R.posts.length;
+    m = await rt.app('POST /app/bandjes/proef', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, zin: 0, beurt_id: nieuweBeurt() }, ctx);
+    toets('14 proefzin zonder vingerafdruk: 403 vers_nodig (betaald)', m.status === 403 && m.j.vers_nodig === true && R.posts.length === p, m);
+    // eigen spreektekst
+    r14 = await rt.app('POST /app/bandjes/spreektekst', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, spreektekst: 'Eigen versie. [pauze 1,5] Tweede zin.' }, ctx);
+    const reg1 = fs.readFileSync(tgPad, 'utf8');
+    toets('14 eigen spreektekst bewaard: blok in het register met de tekst_hash, geen nieuwe versie', r14.status === 200 && reg1.indexOf('**Spreektekst** (bij v' + b14.versie + ', tekst ' + b14.tekst_hash) > 0 && /> Eigen versie\. \[pauze 1,5\] Tweede zin\./.test(reg1) && r14.j.bandje.versie === b14.versie, { r14, reg1 });
+    b14 = await lees14();
+    toets('14 GET: eigen spreektekst geldt', b14.spreektekst.eigen === true && b14.spreektekst.tekst === 'Eigen versie. [pauze 1,5] Tweede zin.' && b14.spreektekst.zinnen.length === 2, b14.spreektekst);
+    vers = true; p = R.posts.length;
+    m = await rt.app('POST /app/bandjes/maak', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, beurt_id: nieuweBeurt() }, ctx);
+    if (m.status === 200) await wachtKlaar(m.j.taak.id);
+    toets('14 maak met eigen spreektekst: [pauze 1,5] → [long pause]', ((R.posts[p] || {}).body || {}).text === 'Eigen versie. [long pause] Tweede zin.', R.posts[p] && R.posts[p].body.text);
+    r14 = await rt.app('POST /app/bandjes/tekst', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, tekst: 'Wij zijn vandaag gesloten.' }, ctx);
+    b14 = await lees14();
+    toets('14 tekst gewijzigd: eigen spreektekst verouderd, automatische geldt weer', r14.status === 200 && b14.spreektekst.verouderd === true && b14.spreektekst.eigen === false && b14.spreektekst.tekst === 'Wij zijn vandaag gesloten.' && /Eigen versie/.test(b14.spreektekst.eigen_oud || ''), b14.spreektekst);
+    r14 = await rt.app('POST /app/bandjes/spreektekst', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: 'f'.repeat(16), spreektekst: 'x' }, ctx);
+    toets('14 spreektekst met verkeerde hash: 409 gewijzigd', r14.status === 409 && r14.j.gewijzigd === true, r14);
+    r14 = await rt.app('POST /app/bandjes/spreektekst', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, spreektekst: null }, ctx);
+    const reg2 = fs.readFileSync(tgPad, 'utf8');
+    toets('14 terug naar automatisch: blok weg, rest van de sectie staat er nog', r14.status === 200 && reg2.indexOf('**Spreektekst**') < 0 && /\*\*Tekst\*\*\n> Wij zijn vandaag gesloten\./.test(reg2) && /- uitspraak: hpgroenhouten/.test(reg2), reg2);
+    r14 = await rt.app('POST /app/bandjes/spreektekst', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, spreektekst: 'y'.repeat(3001) }, ctx);
+    toets('14 spreektekst > 3000 tekens: 400', r14.status === 400 && /3000/.test(r14.j.fout), r14);
   }
   toets('13 geen onverwachte fouten', fouts.length === 0, fouts);
 

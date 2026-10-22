@@ -1,6 +1,6 @@
 {
  "titel": "ElevenLabs (betaald)",
- "uitleg": "Stem voor de mini-app Bandjes: ElevenLabs via de Olares Router, met de stem uit het bandjesregister (praktijkstem of stemmen). Eén aanroep in PCM 24 kHz; de pod maakt de WAV en twee telefoonversies (WAV 8 kHz mono, PCM 16-bit en G.711 µ-law). Betaald: prijs vooraf, verse vingerafdruk per keer, maandplafond. Verborgen in de Studio-lijst; alleen via Bandjes.",
+ "uitleg": "Stem voor de mini-app Bandjes: ElevenLabs via de Olares Router, met de stem uit het bandjesregister (praktijkstem of stemmen). Krijgt de spreektekst (wv803: nummers en websites uitgeschreven, pauzes per model). Eén aanroep in PCM 24 kHz; de pod brengt het geluid op sterkte en maakt de WAV en twee telefoonversies (WAV 8 kHz mono, PCM 16-bit en G.711 µ-law). Betaald: prijs vooraf, verse vingerafdruk per keer, maandplafond. Verborgen in de Studio-lijst; alleen via Bandjes.",
  "motor": "elevenlabs",
  "status": "actief",
  "uitvoer": "geluid",
@@ -13,7 +13,7 @@
  "bandje": true,
  "bestandsnaam": "bandje",
  "velden": [
-  { "naam": "tekst", "label": "Tekst van het bandje", "soort": "tekstvak", "verplicht": true, "max": 2000 },
+  { "naam": "tekst", "label": "Tekst van het bandje", "soort": "tekstvak", "verplicht": true, "max": 3000 },
   { "naam": "stem", "label": "Stem (ElevenLabs voice-id)", "soort": "tekst", "verplicht": true, "max": 40 }
  ]
 }

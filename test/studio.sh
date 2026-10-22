@@ -304,8 +304,8 @@ const PIPER = process.env.PIPER_ECHT === '1' ? { bin: '/opt/data/piper/piper', m
   await wachtKlaar(r.taak.id, 30000);
   r = S.activeer('fs-' + MOSS, ctx);
   toets('3 Activeer op een Router-flow: geweigerd (alleen lokale proefflows)', r.status === 404, r);
-  r = await S.maak({ flow: 'proefbandje', beurt_id: nb(), velden: { tekst: 'x'.repeat(2001) } }, ctx);
-  toets('3 tekst > 2000 tekens: geweigerd', r.status === 400 && /2000/.test(r.fout), r);
+  r = await S.maak({ flow: 'proefbandje', beurt_id: nb(), velden: { tekst: 'x'.repeat(3001) } }, ctx);
+  toets('3 tekst > 3000 tekens: geweigerd (wv803: grens 3000 voor de spreektekst)', r.status === 400 && /3000/.test(r.fout), r);
   r = await S.maak({ flow: 'proefbandje', beurt_id: nb(), velden: { tekst: '   ' } }, ctx);
   toets('3 lege verplichte tekst: geweigerd', r.status === 400, r);
 

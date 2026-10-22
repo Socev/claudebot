@@ -191,4 +191,30 @@ async function telefoonversie(dir, o) {
   return { bestanden: gemaakt };
 }
 
-module.exports = { UIT_RATE, AFSNIJ_HZ, leesWav, wavKop, naarPcm16, naarMuLaw, muLaw, muLawTerug, herbemonster, naarTelefoon, telefoonversie, kern };
+// wv803: het origineel (om te beluisteren in de app) op een gewone sterkte: piek naar −1 dBFS (versterking hooguit +24 dB, verzwakken
+// mag), zelfde bemonstering, mono PCM 16-bit met een kale kop. ElevenLabs leverde 22-10 piek −11 dBFS / RMS ± −31 dBFS; in Chrome op
+// Windows hoorde David "niets", het gedownloade bestand wel (met de volumeknop van zijn speler). Alleen WAV's die nog geen telefoonversie
+// zijn; een bestand dat niet als PCM 16-bit te lezen is, blijft staan (gooit). Geeft [{ naam, versterking_db }].
+async function normaliseer(dir, o) {
+  o = Object.assign({ piekDbfs: -1, maxVersterkingDb: STANDAARD.maxVersterkingDb }, o || {});
+  const namen = fs.readdirSync(dir).filter(function (n) { return /\.wav$/i.test(n) && !/-telefoon-(pcm|ulaw)\.wav$/i.test(n); }).sort();
+  const uit = [];
+  for (const n of namen) {
+    const f = path.join(dir, n);
+    const w = leesWav(fs.readFileSync(f));
+    const p = piek(w.monsters);
+    if (!(p > 0)) { uit.push({ naam: n, versterking_db: 0 }); continue; }
+    const v = Math.min(Math.pow(10, o.piekDbfs / 20) / p, Math.pow(10, o.maxVersterkingDb / 20));
+    const m = w.monsters;
+    for (let k = 0; k < m.length; k++) m[k] = m[k] * v;
+    await nul();
+    const pcm = naarPcm16(m);
+    const tmp = f + '.norm';
+    fs.writeFileSync(tmp, Buffer.concat([wavKop(1, w.rate, 16, pcm.length), pcm]), { mode: 0o600 });
+    fs.renameSync(tmp, f);
+    uit.push({ naam: n, versterking_db: Math.round(200 * Math.log10(v)) / 10 });
+  }
+  return uit;
+}
+
+module.exports = { UIT_RATE, AFSNIJ_HZ, leesWav, wavKop, naarPcm16, naarMuLaw, muLaw, muLawTerug, herbemonster, naarTelefoon, telefoonversie, normaliseer, kern };

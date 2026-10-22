@@ -549,7 +549,7 @@ toets('B opgelost: weer open', JSON.stringify(R2.health()) === JSON.stringify({ 
   toets('S BSN-achtig getal op een vaste plek: gemaskeerd, niet geweigerd', o.st === 200 && o.j.bandje.tekst === 'Bel [BSN-achtig getal weggelaten] niet.' && rs._app.bsnWeg === true, o);
   toets('S health via server.js', JSON.stringify(c.bandjesInfo()) === JSON.stringify({ aan: true, dicht_tolgaarde: false, dicht_groenhouten: false }), c.bandjesInfo());
 }
-toets('B geen onverwachte fouten', fouts.filter((f) => !/naKlaar gooit|studio-telefoonversie|studio-sleutel/.test(f)).length === 0, fouts);
+toets('B geen onverwachte fouten', fouts.filter((f) => !/naKlaar gooit|studio-telefoonversie|studio-normaliseer|studio-sleutel/.test(f)).length === 0, fouts);
 ST.stopTimers();
 fs.rmSync(W2, { recursive: true, force: true });
 fs.rmSync(W, { recursive: true, force: true });

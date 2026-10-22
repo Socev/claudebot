@@ -104,6 +104,9 @@ jobs:
       # ElevenLabs via Router (wv782): nep-Router, vingerafdruk per taak, reservering/verrekening/plafond, herstart, Bandjes-stemmen.
       - name: "elevenlabs (wv782, Studio fase 2 deel stem)"
         run: bash test/elevenlabs.sh
+      # Spreektekst (wv803): nummers/websites uitgeschreven, pauzes per model, uitspraaklijst; origineel op sterkte (audio.normaliseer).
+      - name: "spreektekst (wv803, Bandjes uitspraak en pauzes)"
+        run: bash test/spreektekst.sh
       - name: "argv-detector (wv698, sleutelwaarden in /proc/*/cmdline)"
         run: bash test/argv-detector.sh
       # Twee abonnementen (wv781): agents op account 2, /run op 1, terugval met Davids vangnet, schakelaar, /tank?account=2 (nep-claude).

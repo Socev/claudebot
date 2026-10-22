@@ -24,7 +24,7 @@
    "label": "Tekst van het bandje",
    "soort": "tekstvak",
    "verplicht": true,
-   "max": 1500
+   "max": 3000
   }
  ]
 }

@@ -17,6 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const SPREEK = require('./spreektekst.js');   // wv803
 
 const PRAKTIJKEN = {
   tolgaarde: { naam: 'Tolgaarde', pad: '10_Zakelijk/Tolgaarde/Telefoon/Bandjes.md', voorvoegsel: 'tg' },
@@ -29,6 +30,9 @@ const ID_RE = /^(tg|gh)-[a-z0-9-]{2,30}$/;
 const VELD_RE = /^-\s+([^:]{1,40}):\s?(.*)$/;
 const TEKST_RE = /^\*\*Tekst\*\*\s*$/i;
 const VOORSTEL_RE = /^\*\*Voorstel van Socev\*\*\s*(.*)$/i;
+// wv803: eigen spreektekst van David (wat de stem zegt), gebonden aan de tekst_hash van de geschreven tekst waar hij bij hoort
+const SPREEK_RE = /^\*\*Spreektekst\*\*\s*(.*)$/i;
+const SPREEK_MAX = SPREEK.MAX;   // uitgeschreven nummers maken de spreektekst ± 2× zo lang als de tekst
 
 function schoon(t, max) {
   return String(t == null ? '' : t).replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f‪-‮⁦-⁩]/g, '').slice(0, max);
@@ -66,7 +70,7 @@ function parse(md, voorvoegsel) {
       sluit(i);
       const m = KOP_RE.exec(r);
       if (m && /^(tg|gh)-/i.test(m[1])) {
-        huidig = { id: m[1].toLowerCase(), naam: m[2], velden: {}, tekstRegels: null, voorstelRegels: null, voorstelKop: '', van: i, tot: null };
+        huidig = { id: m[1].toLowerCase(), naam: m[2], velden: {}, tekstRegels: null, voorstelRegels: null, voorstelKop: '', spreekRegels: null, spreekKop: '', van: i, tot: null };
         sectie = 'bandje';
       } else sectie = /^##\s+praktijkinstellingen\s*$/i.test(r) ? 'instellingen' : 'overig';
       continue;
@@ -80,6 +84,8 @@ function parse(md, voorvoegsel) {
     if (TEKST_RE.test(r)) { modus = 'tekst'; blok = huidig.tekstRegels = []; continue; }
     const vm = VOORSTEL_RE.exec(r);
     if (vm) { modus = 'voorstel'; blok = huidig.voorstelRegels = []; huidig.voorstelKop = vm[1].trim(); continue; }
+    const sm = SPREEK_RE.exec(r);
+    if (sm) { modus = 'spreek'; blok = huidig.spreekRegels = []; huidig.spreekKop = sm[1].trim(); continue; }
     if (modus) {
       if (/^>/.test(r)) { blok.push(r.replace(/^>\s?/, '')); continue; }
       if (r.trim() === '') { blok.push(''); continue; }
@@ -109,14 +115,17 @@ function afrondBandje(b) {
   b.versie = Number.isFinite(v) && v >= 0 ? v : 0;
   const vt = b.voorstelRegels ? normTekst(b.voorstelRegels.join('\n')) : '';
   b.voorstel = vt ? { tekst: vt, kop: b.voorstelKop } : null;
-  delete b.tekstRegels; delete b.voorstelRegels; delete b.voorstelKop;
+  const st = b.spreekRegels ? normTekst(b.spreekRegels.join('\n')) : '';
+  const bij = /\b([a-f0-9]{16})\b/.exec(b.spreekKop || '');
+  b.spreek = st ? { tekst: st, bij: bij ? bij[1] : null } : null;
+  delete b.tekstRegels; delete b.voorstelRegels; delete b.voorstelKop; delete b.spreekRegels; delete b.spreekKop;
 }
 // Voor de app: zonder regelnummers.
 function bandjeUit(b) {
   const v = b.velden;
   return { id: b.id, naam: b.naam, menu: v.menu || '', wanneer: v.wanneer || '', tijdvensters: v.tijdvensters || '', stem: v.stem || 'praktijkstem',
     versie: b.versie, tekst: b.tekst, onbekend: b.onbekend, tekst_hash: b.hash, status: v.status || '', laatste_bestand: v['laatste bestand'] || '',
-    in_centrale: v['in centrale'] || '', bron: v.bron || '', aandachtspunt: v.aandachtspunt || '', voorstel: b.voorstel };
+    in_centrale: v['in centrale'] || '', bron: v.bron || '', aandachtspunt: v.aandachtspunt || '', voorstel: b.voorstel, spreek_eigen: b.spreek || null };
 }
 
 // ── schrijven (strikt) ──
@@ -135,7 +144,7 @@ function herschrijfSectie(p, b, w) {
   let laatsteVeld = 0;
   const vast = {};
   for (let k = 1; k < r.length; k++) {
-    if (TEKST_RE.test(r[k]) || VOORSTEL_RE.test(r[k])) break;
+    if (TEKST_RE.test(r[k]) || VOORSTEL_RE.test(r[k]) || SPREEK_RE.test(r[k])) break;
     const m = VELD_RE.exec(r[k]);
     if (!m) continue;
     laatsteVeld = k;
@@ -168,6 +177,24 @@ function herschrijfSectie(p, b, w) {
     }
     if (w.voorstel) {
       const blok = ['', '**Voorstel van Socev**' + (w.voorstel.kop ? ' ' + eenRegel(w.voorstel.kop, GRENS.reden + 40) : '')].concat(citaat(w.voorstel.tekst));
+      const tm = r.findIndex(function (x) { return TEKST_RE.test(x); });
+      let at;
+      if (tm >= 0) { let s = tm + 1; while (s < r.length && r[s].trim() === '' && s < tm + 2) s++; at = /^>/.test(r[s] || '') ? blokEind(r, s) : tm + 1; }
+      else { at = r.length; while (at > 1 && r[at - 1].trim() === '') at--; }
+      r = r.slice(0, at).concat(blok, r.slice(at));
+    }
+  }
+  // spreektekst (wv803): zelfde vorm als het voorstel; nieuw direct onder de tekst
+  if (w.spreek !== undefined) {
+    const m = r.findIndex(function (x) { return SPREEK_RE.test(x); });
+    if (m >= 0) {
+      let s = m + 1; while (s < r.length && r[s].trim() === '' && s < m + 2) s++;
+      const e = /^>/.test(r[s] || '') ? blokEind(r, s) : m + 1;
+      let begin = m; if (begin > 0 && r[begin - 1].trim() === '') begin--;
+      r = r.slice(0, begin).concat(r.slice(e));
+    }
+    if (w.spreek) {
+      const blok = ['', '**Spreektekst** ' + eenRegel(w.spreek.kop, 120)].concat(citaat(w.spreek.tekst));
       const tm = r.findIndex(function (x) { return TEKST_RE.test(x); });
       let at;
       if (tm >= 0) { let s = tm + 1; while (s < r.length && r[s].trim() === '' && s < tm + 2) s++; at = /^>/.test(r[s] || '') ? blokEind(r, s) : tm + 1; }
@@ -252,6 +279,29 @@ function haalVoorstelWeg(md, voorvoegsel, id, klok) {
   const uit = klaar(zetUpdated(vervangSectie(p, b, herschrijfSectie(p, b, { voorstel: null })), klok));
   return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)) };
 }
+// Eigen spreektekst bewaren (wv803). o: { versie, tekst_hash, spreektekst (string, of null = terug naar automatisch) }. De spreektekst
+// hoort bij de tekst van dát moment (kop "(bij v<N>, tekst <hash>)"); wijzigt de tekst later, dan geldt hij als verouderd en maakt de
+// pod weer de automatische (routes). Geen nieuwe versie: de versie volgt de geschreven tekst.
+function zetSpreektekst(md, voorvoegsel, id, o, klok) {
+  const p = parse(md, voorvoegsel);
+  if (p.fouten.length) return { status: 409, fout: 'de registerpagina is niet in orde: ' + p.fouten.join('; ') };
+  const b = zoek(p, id);
+  if (!b) return { status: 404, fout: 'dit bandje staat niet in het register' };
+  if (Number(o.versie) !== b.versie || String(o.tekst_hash || '') !== b.hash) return { status: 409, fout: 'dit bandje is intussen gewijzigd; herlaad', gewijzigd: true };
+  if (b.onbekend || !b.tekst) return { status: 400, fout: 'bewaar eerst een tekst' };
+  if (o.spreektekst === null) {
+    if (!b.spreek) return { status: 200, md: md, bandje: bandjeUit(b), ongewijzigd: true };
+    const uit0 = klaar(zetUpdated(vervangSectie(p, b, herschrijfSectie(p, b, { spreek: null })), klok));
+    return { status: 200, md: uit0, bandje: bandjeUit(zoek(parse(uit0, voorvoegsel), id)) };
+  }
+  const n = normTekst(schoon(o.spreektekst, SPREEK_MAX + 1)).replace(/\n{2,}/g, '\n');
+  if (!n.trim()) return { status: 400, fout: 'de spreektekst is leeg' };
+  if (n.length > SPREEK_MAX) return { status: 400, fout: 'de spreektekst is langer dan ' + SPREEK_MAX + ' tekens' };
+  if (b.spreek && b.spreek.tekst === n && b.spreek.bij === b.hash) return { status: 200, md: md, bandje: bandjeUit(b), ongewijzigd: true };
+  const kop = '(bij v' + b.versie + ', tekst ' + b.hash + ', ' + vandaag(klok) + ')';
+  const uit = klaar(zetUpdated(vervangSectie(p, b, herschrijfSectie(p, b, { spreek: { tekst: n, kop: kop } })), klok));
+  return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)) };
+}
 // Losse velden (laatste bestand, in centrale, status) — alleen deze sleutels.
 const VRIJE_VELDEN = ['laatste bestand', 'in centrale', 'status', 'stem'];
 function zetVelden(md, voorvoegsel, id, velden, verwacht, klok) {
@@ -293,8 +343,8 @@ function nieuwBandje(md, voorvoegsel, o, klok) {
 // Praktijkinstelling (praktijkstem, stemmen, model) in het blok "## Praktijkinstellingen"; ontbreekt het blok, dan vóór het eerste
 // bandje (wv743). `stemmen` (wv757) is de lijst waaruit David per bandje kiest: items gescheiden door ';', elk 'naam (motor:id)', een
 // kaal id zonder motor is ElevenLabs (afspraak met de mini-app, wv744). De schrijver is strikt: elk item moet zo te lezen zijn.
-const INSTELLINGEN = ['praktijkstem', 'stemmen', 'model'];
-const INSTELLING_MAX = { stemmen: 600 };
+const INSTELLINGEN = ['praktijkstem', 'stemmen', 'model', 'uitspraak'];
+const INSTELLING_MAX = { stemmen: 600, uitspraak: 1500 };   // wv803: uitspraaklijst ('woord = uitspraak; …', zie spreektekst.js)
 const STEMITEM_RE = /^([^();:]{1,40}?)\s*\(\s*([A-Za-z0-9_.:\/-]{1,100})\s*\)$/;
 function stemmenLijst(w) {
   return String(w || '').split(';').map(function (x) { return x.trim(); }).filter(Boolean).map(function (x) {
@@ -308,10 +358,18 @@ function zetInstelling(md, voorvoegsel, sleutel, waarde, klok) {
   const p = parse(md, voorvoegsel);
   if (p.fouten.length) return { status: 409, fout: 'de registerpagina is niet in orde: ' + p.fouten.join('; ') };
   if (INSTELLINGEN.indexOf(sleutel) < 0) return { status: 400, fout: 'onbekende instelling' };
-  const w = eenRegel(waarde, INSTELLING_MAX[sleutel] || 100);
+  let w = eenRegel(waarde, INSTELLING_MAX[sleutel] || 100);
   if (sleutel === 'stemmen') {
     const l = stemmenLijst(w);
     if (!l.length || l.indexOf(null) >= 0) return { status: 400, fout: "stemmen: elk item 'naam (motor:id)', gescheiden door ;" };
+  }
+  if (sleutel === 'uitspraak') {
+    // vóór eenRegel toetsen (nieuwe regels zijn hier scheidingstekens) en dan als één regel met '; ' schrijven
+    const ruw = schoon(waarde, INSTELLING_MAX.uitspraak + 200);
+    const f = SPREEK.lijstFout(ruw);
+    if (f) return { status: 400, fout: 'uitspraaklijst: ' + f };
+    w = SPREEK.lijstNaarRegel(ruw) || '—';
+    if (w.length > INSTELLING_MAX.uitspraak) return { status: 400, fout: 'uitspraaklijst: hooguit ' + INSTELLING_MAX.uitspraak + ' tekens' };
   }
   let regels = p.regels.slice();
   const kop = regels.findIndex(function (r, i) { return i >= p.frontmatterTot && /^##\s+praktijkinstellingen\s*$/i.test(r); });
@@ -431,6 +489,7 @@ function maak(deps) {
     haalVoorstelWeg: function (pr, id) { return muteer(pr, 'voorstel-weg', function (md, vv) { return haalVoorstelWeg(md, vv, id, klok); }); },
     zetVelden: function (pr, id, v, verwacht) { return muteer(pr, 'velden', function (md, vv) { return zetVelden(md, vv, id, v, verwacht, klok); }); },
     nieuw: function (pr, o) { return muteer(pr, 'nieuw', function (md, vv) { return nieuwBandje(md, vv, o, klok); }); },
+    zetSpreektekst: function (pr, id, o) { return muteer(pr, 'spreektekst', function (md, vv) { return zetSpreektekst(md, vv, id, o, klok); }); },
     zetInstelling: function (pr, k, w) { return muteer(pr, 'instellingen', function (md, vv) { return zetInstelling(md, vv, k, w, klok); }); },
     mkdir: function () { mkdir(DIR); mkdir(path.join(DIR, 'tmp')); try { fs.chmodSync(DIR, 0o700); fs.chmodSync(path.join(DIR, 'tmp'), 0o700); } catch (e) {} },
     journaalPad: JOURNAAL,
@@ -470,6 +529,28 @@ function stemmenUit(flows, regStemmen) {
   if (!el) uit.push({ id: 'elevenlabs', flow: null, naam: 'ElevenLabs (betaald)', motor: 'elevenlabs', betaald: true, beschikbaar: false,
     reden: 'nog niet beschikbaar — komt met Studio fase 2', prijs: null, vers_per_keer: true });
   return uit;
+}
+// wv803: spreektekst en stemgevoel. Standaard en grenzen gemeten 22-10 (voortgang-2.md): ElevenLabs speed 0,7–1,2 (1,25 = 400),
+// stability 0–1; pauze in seconden voor een kale [pauze] (v2/flash: break-tag van precies die duur; v3/v4: [pause] vanaf 0,5 s, [long pause]
+// vanaf 1,4 s, daaronder alleen de punt ± 0,37 s).
+const SPREEK_STD = { snelheid: 0.95, stabiliteit: 0.5, pauze: 0.8 };
+const SPREEK_GRENS = { snelheid: [0.7, 1.2], stabiliteit: [0, 1], pauze: [0, 2] };
+// De spreektekst van een bandje (uit bandjeUit): de eigen van David als die bij deze tekst hoort, anders automatisch uit tekst + uitspraaklijst.
+function spreekVan(b, inst) {
+  const eigen = b && b.spreek_eigen;
+  const geldig = !!(eigen && eigen.bij && eigen.bij === b.tekst_hash);
+  const tekst = !b || b.onbekend || !b.tekst ? '' : geldig ? eigen.tekst : SPREEK.afleiden(b.tekst, inst && inst.uitspraak);
+  return { tekst: tekst, eigen: geldig, verouderd: !!eigen && !geldig, eigen_oud: eigen && !geldig ? eigen.tekst : null, zinnen: SPREEK.zinnen(tekst) };
+}
+function knoppenVan(d) {
+  const uit = {};
+  for (const k of Object.keys(SPREEK_STD)) {
+    const ruw = d ? d[k] : null;
+    const v = ruw == null || ruw === '' ? SPREEK_STD[k] : Number(ruw);
+    if (!Number.isFinite(v) || v < SPREEK_GRENS[k][0] || v > SPREEK_GRENS[k][1]) return { fout: k + ' moet tussen ' + SPREEK_GRENS[k][0] + ' en ' + SPREEK_GRENS[k][1] + ' liggen' };
+    uit[k] = Math.round(v * 100) / 100;
+  }
+  return { waarden: uit };
 }
 function link(pr, id, voorstel) {
   return APP_LINK + '?mini=bandjes&praktijk=' + encodeURIComponent(pr) + (id ? '&bandje=' + encodeURIComponent(id) : '') + (voorstel ? '&voorstel=1' : '');
@@ -548,7 +629,8 @@ function routes(deps) {
   function praktijkstem(inst) { const w = String(inst && inst.praktijkstem || ''); return STEM_RE.test(w) ? w : STEM_STANDAARD; }
   function praktijkUit(l) {
     return { id: l.praktijk, naam: l.naam || (PRAKTIJKEN[l.praktijk] && PRAKTIJKEN[l.praktijk].naam), instellingen: l.instellingen || {},
-      praktijkstem: praktijkstem(l.instellingen), bandjes: l.bandjes || [],
+      praktijkstem: praktijkstem(l.instellingen),
+      bandjes: (l.bandjes || []).map(function (b) { return Object.assign({}, b, { spreektekst: spreekVan(b, l.instellingen) }); }),   // wv803
       dicht: l.dicht || null, fouten: l.fouten || [], conflicten: l.conflicten || [], teruggezet: l.teruggezet || [], ontbreekt: l.ontbreekt === true };
   }
   // wv782: de ElevenLabs-stemmen komen uit de registers (praktijkstem eerst, dan `stemmen`); een praktijkstem zonder naam in `stemmen`
@@ -590,9 +672,10 @@ function routes(deps) {
       const pr = Object.keys(PRAKTIJKEN).map(lees).map(praktijkUit);
       let kosten = null;
       try { const t = deps.studio && deps.studio.teller ? deps.studio.teller() : null; kosten = t && t.plafond ? t.plafond.elevenlabs || null : null; } catch (e) { kosten = null; }
-      return { status: 200, j: { ok: true, praktijken: pr, stemmen: await stemmen(), schrijven: !!primair(), stem_standaard: STEM_STANDAARD, grens: GRENS, kosten: kosten } };
+      return { status: 200, j: { ok: true, praktijken: pr, stemmen: await stemmen(), schrijven: !!primair(), stem_standaard: STEM_STANDAARD, grens: GRENS, kosten: kosten,
+        spreek: { standaard: SPREEK_STD, grenzen: SPREEK_GRENS, max: SPREEK.MAX } } };
     }
-    const m = /^POST \/app\/bandjes\/(tekst|nieuw|voorstel|instellingen|maak|status)$/.exec(route);
+    const m = /^POST \/app\/bandjes\/(tekst|nieuw|voorstel|instellingen|maak|status|spreektekst|proef)$/.exec(route);
     if (!m) return { status: 404, j: { ok: false, fout: 'onbekend' } };
     if (!primair()) return { status: 409, j: { ok: false, fout: 'deze kant van Socev is nu passief; bandjes bewaren en maken kan alleen op de actieve kant' } };
     const pr = praktijk(d);
@@ -604,6 +687,11 @@ function routes(deps) {
       return goedOf(r);
     }
     if (actie === 'instellingen') {
+      // wv803: de uitspraaklijst (één instelling per verzoek)
+      if (typeof d.uitspraak === 'string') {
+        const r = S.zetInstelling(pr, 'uitspraak', d.uitspraak);
+        return r.status === 200 ? { status: 200, j: { ok: true, instellingen: r.instellingen } } : fouts(r);
+      }
       const w = String(d.praktijkstem || '');
       if (!stemOk(w, await stemmen()) || w === 'praktijkstem') return { status: 400, j: { ok: false, fout: 'onbekende stem' } };
       const r = S.zetInstelling(pr, 'praktijkstem', w);
@@ -620,6 +708,11 @@ function routes(deps) {
       if (d.keuze !== 'laat') return { status: 400, j: { ok: false, fout: 'alleen laten liggen kan hier; overnemen gaat via Bewaar' } };
       return goedOf(S.haalVoorstelWeg(pr, id));
     }
+    if (actie === 'spreektekst') {
+      // wv803: eigen spreektekst bewaren (string) of terug naar automatisch (null); versie + hash zoals Bewaar
+      if (d.spreektekst !== null && typeof d.spreektekst !== 'string') return { status: 400, j: { ok: false, fout: 'spreektekst ontbreekt' } };
+      return goedOf(S.zetSpreektekst(pr, id, { versie: d.versie, tekst_hash: d.tekst_hash, spreektekst: d.spreektekst }));
+    }
     if (actie === 'status') {
       // versie én hash (Fable wv743 #2): anders zegt het label "in centrale (vN)" bij een tekst die David intussen in Obsidian wijzigde
       const v = Number(d.versie);
@@ -628,7 +721,8 @@ function routes(deps) {
         { versie: v, tekst_hash: String(d.tekst_hash) });
       return goedOf(r);
     }
-    // maak: de tekst komt UIT HET REGISTER, nooit uit de invoer; versie + hash moeten kloppen met wat de app las
+    // maak (en proef, wv803): de tekst komt UIT HET REGISTER, nooit uit de invoer; versie + hash moeten kloppen met wat de app las.
+    // Wat naar de stem gaat is de spreektekst (eigen of automatisch, zie spreekVan), per model vertaald; proef = één zin daaruit (index).
     const beurt = String(d.beurt_id || '');
     if (!BEURT_RE.test(beurt)) return { status: 400, j: { ok: false, fout: 'beurt_id ontbreekt' } };
     if (!deps.studio) return { status: 503, j: { ok: false, fout: 'Studio zit niet in deze versie van de pod' } };
@@ -640,12 +734,23 @@ function routes(deps) {
     if (!b) return { status: 404, j: { ok: false, fout: 'dit bandje staat niet in het register' } };
     if (Number(d.versie) !== b.versie || String(d.tekst_hash || '') !== b.tekst_hash) return { status: 409, j: { ok: false, fout: 'dit bandje is intussen gewijzigd; herlaad', gewijzigd: true } };
     if (b.onbekend || !b.tekst) return { status: 400, j: { ok: false, fout: 'bewaar eerst een tekst' } };
+    const kn = knoppenVan(d);
+    if (kn.fout) return { status: 400, j: { ok: false, fout: kn.fout } };
+    const sp = spreekVan(b, l.instellingen);
+    let spreek = sp.tekst;
+    const proef = actie === 'proef';
+    if (proef) {
+      const z = Number(d.zin);
+      if (!Number.isInteger(z) || z < 0 || z >= sp.zinnen.length) return { status: 400, j: { ok: false, fout: 'kies een zin uit de spreektekst' } };
+      spreek = sp.zinnen[z];
+    }
+    if (!spreek.trim()) return { status: 400, j: { ok: false, fout: 'de spreektekst is leeg' } };
     // een expliciete keuze "praktijkstem" gaat vóór de bewaarde stem van het bandje (Fable wv782 #1: anders een betaalde stem die David niet koos)
     const stem = d.stem ? (d.stem === 'praktijkstem' ? praktijkstem(l.instellingen) : String(d.stem)) : (b.stem && b.stem !== 'praktijkstem' ? b.stem : praktijkstem(l.instellingen));
     const s = lijst.find(function (x) { return x.id === stem; });
     if (!s) return { status: 400, j: { ok: false, fout: 'onbekende stem' } };
     if (!s.beschikbaar || !s.flow) return { status: 409, j: { ok: false, fout: 'deze stem kan nu niet: ' + (s.reden || 'niet beschikbaar') } };
-    const velden = { tekst: b.tekst };
+    const velden = { tekst: SPREEK.naarModel(spreek, null) };   // Piper: zonder pauzemarkering
     let model = null;
     if (s.motor === 'elevenlabs') {
       // wv782: voice-id uit de stem-id; model uit de witte lijst van Studio (die toetst het nogmaals)
@@ -655,9 +760,12 @@ function routes(deps) {
       if (!model) return { status: 400, j: { ok: false, fout: 'onbekend model' } };
       velden.stem = ELEVEN_ID_RE.exec(stem)[1];
       velden.model = model;
+      velden.tekst = SPREEK.naarModel(spreek, model, { pauze: kn.waarden.pauze });
+      velden.snelheid = kn.waarden.snelheid;
+      velden.stabiliteit = kn.waarden.stabiliteit;
     }
     const r = await deps.studio.maak({ flow: s.flow, velden: velden, beurt_id: beurt }, ctx,
-      { bron: Object.assign({ soort: 'bandje', praktijk: pr, bandje: id, versie: b.versie, tekst_hash: b.tekst_hash, stem: stem }, model ? { model: model } : {}) });
+      { bron: Object.assign({ soort: 'bandje', praktijk: pr, bandje: id, versie: b.versie, tekst_hash: b.tekst_hash, stem: stem }, model ? { model: model } : {}, proef ? { proef: true } : {}) });
     if (r.status !== 200) return fouts(r);
     return { status: 200, j: { ok: true, taak: r.taak, al: r.al === true } };
   }
@@ -696,6 +804,7 @@ function routes(deps) {
   function naKlaar(taak) {
     const b = taak && taak.bron;
     if (!b || b.soort !== 'bandje' || !Object.hasOwn(PRAKTIJKEN, b.praktijk)) return;
+    if (b.proef) { log('bandjes naklaar taak=' + taak.id + ' proefzin ' + b.praktijk + '/' + b.bandje + ' (register ongemoeid)'); return; }   // wv803
     if (taak.status !== 'klaar') { log('bandjes naklaar taak=' + taak.id + ' uitkomst=' + taak.status + ' (register ongemoeid)'); return; }
     const bs = taak.bestanden || [];
     const hoofd = bs.find(function (x) { return !/-telefoon-(pcm|ulaw)\.wav$/i.test(x.naam); }) || bs[0];
@@ -717,4 +826,4 @@ function routes(deps) {
 }
 
 module.exports = { PRAKTIJKEN, GRENS, STEM_STANDAARD, normTekst, tekstHash, parse, bandjeUit, zetTekst, zetVoorstel, haalVoorstelWeg, zetVelden, nieuwBandje,
-  zetInstelling, stemmenLijst, stemmenUit, maak, routes };
+  zetInstelling, zetSpreektekst, stemmenLijst, stemmenUit, maak, routes };
