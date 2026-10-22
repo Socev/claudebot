@@ -47,7 +47,15 @@ docker run --rm -v "$VOL":/opt/data --entrypoint /bin/bash "$IMAGE" -c '
   echo "ronde ok" > bin/bisync.log; printf "#!/bin/sh\necho olares\n" > bin/olares-cli; chmod 755 bin/olares-cli
   echo "geheugen" > .claude/projects/-opt-data-AI-SecondBrain/memory/m.md
   echo "{\"tokens\":\"NEP-CI\"}" > .codex/auth.json; chmod 600 .codex/auth.json
-  chown -R 1001:1001 /opt/data'
+  # wv785: bytecode, pakketten en Windows-code van claude in de vault, en een symlink van claude (die blijft)
+  mkdir -p AI_SecondBrain/00_Systeem/py/__pycache__
+  echo "print(1)" > AI_SecondBrain/00_Systeem/py/m.py; echo "pyc" > AI_SecondBrain/00_Systeem/py/__pycache__/m.cpython-311.pyc
+  for f in oud.pyc pak.zip taak.ps1 Taak.BAT run.cmd x.vbs mod.psm1; do echo "code" > AI_SecondBrain/00_Systeem/$f; done
+  ln -s a.md AI_SecondBrain/00_Systeem/claude-link
+  chown -R 1001:1001 /opt/data
+  # wv785: de oude Codex-loginkopie in de thuismap van socev (stond er sinds wv699)
+  mkdir -p socev-thuis/.codex; echo "{\"tokens\":\"NEP-CI\"}" > socev-thuis/.codex/auth.json; chmod 600 socev-thuis/.codex/auth.json
+  chown -R 1002:1002 socev-thuis'
 
 start(){
   docker run -d --name "$C" -v "$VOL":/opt/data -v /tmp/nep-fetch-secrets.sh:/app/fetch-secrets.sh:ro \
@@ -119,6 +127,11 @@ niet ".codex in de vault-wortel"                             "$(s "mkdir $V/.cod
 niet ".obsidian wijzigen"                                    "$(s "echo x >> $V/.obsidian/app.json")"
 niet ".sync-id wijzigen"                                     "$(s "echo x > $V/.sync-id")"
 niet "geneste .claude (huisbot) wijzigen"                  "$(s "echo x >> $V/10_Zakelijk/huisbot/.claude/settings.json")"
+for f in py/__pycache__/m.cpython-311.pyc oud.pyc pak.zip taak.ps1 Taak.BAT run.cmd x.vbs mod.psm1; do
+  niet "$f van claude wijzigen (wv785)"                     "$(s "echo x >> $V/00_Systeem/$f")"
+done
+ok   "pak.zip en taak.ps1 van claude lezen"                  "$(s "cat $V/00_Systeem/pak.zip $V/00_Systeem/taak.ps1")"
+niet "nieuw bestand in __pycache__ van claude (wv785)"       "$(s "echo x > $V/00_Systeem/py/__pycache__/n.cpython-311.pyc")"
 niet "script in de vault (les-vastleggen.mjs) wijzigen"      "$(s "echo x >> $V/00_Systeem/Lessen/les-vastleggen.mjs")"
 ok   "script in de vault lezen"                              "$(s "cat $V/00_Systeem/Lessen/les-vastleggen.mjs")"
 ok   "DEKT NIET: script verwijderen en opnieuw schrijven lukt (map is rwX; signaal in het log, geen slot; fase 2: scripts verhuizen)" "$(s "cp $V/00_Systeem/Lessen/les-vastleggen.mjs /tmp/l.mjs && rm -f $V/00_Systeem/Lessen/les-vastleggen.mjs && cp /tmp/l.mjs $V/00_Systeem/Lessen/les-vastleggen.mjs")"
@@ -142,12 +155,23 @@ ok   "  1002 kan het rclone-bestand wijzigen"                "$(s "echo s >> $V/
 ok   "cp -p van een 0644-bestand (als 1001)"                 "$(a "echo p > /tmp/p.md && chmod 644 /tmp/p.md && cp -p /tmp/p.md $V/00_Systeem/cpp.md")"
 if bash -c "$(s "test -w $V/00_Systeem/cpp.md")" >/dev/null 2>&1; then echo "  info  cp -p-bestand was al schrijfbaar voor 1002"; else echo "  info  cp -p-bestand vóór herstel niet schrijfbaar voor 1002 (masker r--), zoals verwacht"; fi
 ok   "1002 legt symlinks in de vault naar 1001-bestanden"    "$(s "ln -s /opt/data/.claude.json $V/00_Systeem/naar-claude-json && ln -s /opt/data/mk-scripts $V/00_Systeem/naar-mk")"
+ok   "1002 legt een symlink binnen de vault en een in het gedeelde geheugen" "$(s "ln -s a.md $V/00_Systeem/naar-a && mkdir -p $V/00_Systeem/diep/er && ln -s /opt/data/bank $V/00_Systeem/diep/er/naar-bank && ln -s /opt/data/.claude.json $SM/MEMORY-link.md")"
 ok   "1002 zet een .claude-map in een submap"                "$(s "mkdir -p $V/00_Systeem/.claude && echo '{}' > $V/00_Systeem/.claude/settings.json")"
-ok   "na-ronde (als 1001)"                                   "$(a "bash /app/socev-rechten.sh na-ronde")"
+ok   "1002 zet Windows-code, bytecode en een zip in de vault (wv785)" "$(s "echo x > $V/00_Systeem/nieuw.ps1 && echo x > $V/00_Systeem/Start.CMD && echo x > $V/00_Systeem/los.pyc && mkdir -p $V/00_Systeem/sub3/__pycache__ && echo x > $V/00_Systeem/sub3/__pycache__/z.cpython-311.pyc && echo x > $V/00_Systeem/eigen.zip")"
+ok   "DEKT NIET: 1002 hernoemt __pycache__ van 1001 weg en zet een eigen neer (map is rwX)" "$(s "mv $V/00_Systeem/py/__pycache__ $V/00_Systeem/py/pyc-weg && mkdir $V/00_Systeem/py/__pycache__ && echo vals > $V/00_Systeem/py/__pycache__/m.cpython-311.pyc")"
+ok   "na-ronde (als 1001)"                                   "$(a "bash /app/socev-rechten.sh na-ronde > /tmp/na-ronde.log 2>&1")"
+r 'cat /tmp/na-ronde.log' | sed 's/^/    | /' | head -20
 ok   "  1002 kan cp -p-bestand na maskerherstel wijzigen"    "$(s "echo s >> $V/00_Systeem/cpp.md")"
 ok   "  symlinks niet gevolgd: .claude.json en mk-scripts zonder socev-ACL" "$(a "! getfacl -cp /opt/data/.claude.json /opt/data/mk-scripts 2>/dev/null | grep -q socev")"
 niet "  1002 leest .claude.json via de symlink"              "$(s "cat $V/00_Systeem/naar-claude-json")"
 ok   "  .claude van socev in de submap hernoemd"             "$(a "[ ! -e $V/00_Systeem/.claude ] && ls -d $V/00_Systeem/.claude.socev-geblokkeerd-*")"
+ok   "  symlinks van socev weg (vault, diep, memory), doelen ongemoeid (wv785)" "$(a "for l in $V/00_Systeem/naar-claude-json $V/00_Systeem/naar-mk $V/00_Systeem/naar-a $V/00_Systeem/diep/er/naar-bank $M/MEMORY-link.md; do [ ! -L \$l ] && [ ! -e \$l ] || exit 1; done; [ -f /opt/data/.claude.json ] && [ -d /opt/data/mk-scripts ] && [ -f $V/00_Systeem/a.md ] && [ -d /opt/data/bank ]")"
+ok   "  symlink van claude blijft"                           "$(a "[ -L $V/00_Systeem/claude-link ]")"
+ok   "  logregel per weggehaalde symlink, met het doel"      "[ \"\$(r 'grep -c \"symlink van socev weg: .* -> \" /tmp/na-ronde.log')\" = 5 ] && r 'grep -q \"naar-bank -> /opt/data/bank\" /tmp/na-ronde.log'"
+ok   "  Windows-code van socev hernoemd (nieuw.ps1, Start.CMD)" "$(a "[ ! -e $V/00_Systeem/nieuw.ps1 ] && [ ! -e $V/00_Systeem/Start.CMD ] && ls $V/00_Systeem/nieuw.ps1.socev-geblokkeerd-* $V/00_Systeem/Start.CMD.socev-geblokkeerd-*")"
+ok   "  bytecode van socev weg (los.pyc, __pycache__ in sub3 en py)" "$(a "[ ! -e $V/00_Systeem/los.pyc ] && [ ! -e $V/00_Systeem/sub3/__pycache__ ] && [ ! -e $V/00_Systeem/py/__pycache__ ]")"
+ok   "  zip van socev blijft (alleen gemeld)"                "$(a "[ -f $V/00_Systeem/eigen.zip ]") && r 'grep -q \"code van socev in de vault: .*eigen.zip\" /tmp/na-ronde.log'"
+ok   "  na-ronde zonder fouten"                              "! r 'grep -q fouten: /tmp/na-ronde.log'"
 
 echo "== loper-socket =="
 ok   "map /run/socev-loper root 0755"                        "stat_is /run/socev-loper '%U:%G %a' 'root:root 755'"
@@ -158,6 +182,7 @@ PING=$(loper '{"op":"ping"}')
 echo "  ping: $PING"
 LOPER=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["antwoorden"][0]["pid"])' "$PING" 2>/dev/null)
 ok   "1001 bereikt de loper, die draait als 1002"            "python3 -c 'import json,sys; a=json.loads(sys.argv[1])[\"antwoorden\"][0]; sys.exit(0 if a[\"ok\"] and a[\"uid\"]==1002 and a[\"gid\"]==1002 else 1)' '$PING'"
+ok   "loper-versie wv785-1 (volg in één tick, socket-eigenaar)" "grep -q '\"versie\":\"wv785-1\"' <<<'$PING'"
 ok   "loper: uid 1002, NoNewPrivs 1, geen capabilities, geen groepen" "loper_status $LOPER"
 ok   "loper-omgeving zonder pod-sleutels"                    "zonder_sleutels $LOPER"
 LUS=$(r "pgrep -u 0 -f loper-bind.py | head -1")
@@ -185,7 +210,10 @@ echo "== thuismap van socev =="
 ok   "socev-thuis van socev, 0750"                           "stat_is /opt/data/socev-thuis '%U:%G %a' 'socev:socev 750'"
 ok   ".claude.json: pubmed, todoist, playwright; geen n8n of supabase" "$(s "python3 -c \"import json; d=json.load(open('/opt/data/socev-thuis/.claude.json')); import sys; sys.exit(0 if sorted(d['mcpServers'])==['playwright','pubmed','todoist'] and d['mcpServers']['playwright']['command']=='/app/playwright-mcp.sh' else 1)\"")"
 ok   "codex-config zonder supabase/n8n"                      "$(s "! grep -qE '^\[mcp_servers\.(supabase|n8n)' /opt/data/socev-thuis/.codex/config.toml && grep -q '^\[mcp_servers\.todoist' /opt/data/socev-thuis/.codex/config.toml")"
-ok   "codex-login gekopieerd (socev, 0600)"                  "stat_is /opt/data/socev-thuis/.codex/auth.json '%U %a' 'socev 600'"
+ok   "geen Codex-loginkopie meer in socev-thuis (wv785)"     "! r 'test -e /opt/data/socev-thuis/.codex/auth.json'"
+ok   "  oude kopie weggehaald en gelogd"                     "docker logs $C 2>&1 | grep -q 'socev-thuis: codex-loginkopie weggehaald (auth.json)'"
+ok   "  login van 1001 ongemoeid"                            "$(a "grep -q NEP-CI /opt/data/.codex/auth.json")"
+ok   "codex-config en AGENTS.md wel op hun plek"             "r 'test -f /opt/data/socev-thuis/.codex/config.toml && test -L /opt/data/socev-thuis/.codex/AGENTS.md'"
 ok   "eigen TMPDIR 0700"                                     "stat_is /opt/data/socev-thuis/tmp '%U %a' 'socev 700'"
 ok   "memory-symlink op zijn plek"                           "[ \"\$(r 'readlink $SM')\" = '$M' ]"
 ok   "1001 kan de thuismap zien, niet erin schrijven"        "$(a 'ls /opt/data/socev-thuis >/dev/null && ! touch /opt/data/socev-thuis/x')"

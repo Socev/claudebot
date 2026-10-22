@@ -19,6 +19,11 @@
 #     - code-plekken op elke diepte alleen r-X: .claude/, .obsidian/, .codex/, .vscode/, .mcp.json, .sync-id en scripts
 #       (*.js, *.mjs, *.py, *.sh …) (Fable wv689 #1 en wv699 #3/#4: code en hookconfig die de machinekamer draait,
 #       Obsidian-plug-ins die op Davids pc draaien); wat socev zelf zo noemt krijgt een andere naam
+#     - ook Python-bytecode en -pakketten (__pycache__/, *.pyc, *.zip: sys.path) en Windows-code (*.ps1, *.psm1, *.cmd,
+#       *.bat, *.vbs …): bisync zet de vault zonder filter op Davids pc (wv785, Fable wv715 en wv784). Zulke bestanden
+#       die socev zelf maakt krijgen een andere naam; *.zip van socev alleen gemeld (kan een gewoon document zijn)
+#     - symlinks van socev in de vault en het gedeelde geheugen gaan weg (logregel met het doel): een 1001-proces dat daar
+#       leest of schrijft zou ze volgen (confused deputy; wv785, Fable wv784)
 #   io                      alleen doorlopen (x); per smalle job zet server.js zelf een ACL (fase 2); bestaande jobmappen o-rwx
 #   bin                     alleen doorlopen (x) + bisync.log lezen (nachtconsolidatie, vault-concierge); niet olares-cli e.d.
 #   auto-memory             doorlopen tot .claude/projects/-opt-data-AI-SecondBrain/memory, die zelf rwX (gedeeld geheugen)
@@ -40,11 +45,17 @@ acl(){ setfacl -P "$@" 2>/dev/null || FOUTEN=$((FOUTEN + 1)); }
 command -v setfacl >/dev/null || { log "STOP: setfacl ontbreekt (pakket acl)"; exit 1; }
 id socev >/dev/null 2>&1 || { log "STOP: gebruiker socev ontbreekt"; exit 1; }
 
+# Windows-code (wv785): de vault staat via bisync binnen minuten op Davids pc. Hoofdletterongevoelig, zoals Windows.
+WINCODE=( -o -iname '*.ps1' -o -iname '*.psm1' -o -iname '*.psd1' -o -iname '*.cmd' -o -iname '*.bat' -o -iname '*.vbs'
+  -o -iname '*.vbe' -o -iname '*.wsf' -o -iname '*.wsh' -o -iname '*.hta' -o -iname '*.jse' -o -iname '*.lnk' -o -iname '*.url'
+  -o -iname '*.scr' -o -iname '*.exe' -o -iname '*.msi' -o -iname '*.dll' -o -iname '*.reg' )
 # Code-plekken: wat 1001 (machinekamer) of Davids pc als code of config uitvoert. Op elke diepte (Fable wv699 #3:
 # 10_Zakelijk/.../huisbot/.claude), plus losse scripts (Fable wv699 #4). Voor socev alleen lezen.
 CODEPLEK=( -path '*/.claude' -o -path '*/.claude/*' -o -path '*/.obsidian' -o -path '*/.obsidian/*' -o -name .mcp.json
   -o -path '*/.codex' -o -path '*/.codex/*' -o -path '*/.vscode' -o -path '*/.vscode/*' -o -name .sync-id
-  -o -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.ts' -o -name '*.py' -o -name '*.sh' -o -name '*.bash' )
+  -o -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.ts' -o -name '*.py' -o -name '*.sh' -o -name '*.bash'
+  -o -path '*/__pycache__' -o -path '*/__pycache__/*' -o -iname '*.pyc' -o -iname '*.pyo' -o -iname '*.zip' -o -iname '*.whl'
+  -o -iname '*.egg' "${WINCODE[@]}" )
 # Alle rondes met -execdir: find houdt de map vast en geeft ./naam door, zodat een map die socev tussendoor door een
 # symlink vervangt de wijziging niet buiten de vault kan laten landen (Fable wv699 #1; xargs met volle paden kon dat wel).
 # vault_acl <acl> [extra find-voorwaarden]: eigen bestanden en mappen buiten de code-plekken.
@@ -70,12 +81,39 @@ vault_vreemde_codeplekken(){
   local ts; ts=$(date +%Y%m%d%H%M%S)
   find "$V" -mindepth 2 -user socev \( -name .claude -o -name .mcp.json -o -name .codex -o -name .obsidian -o -name .vscode \) \
     -prune -execdir mv -n -- {} "{}.socev-geblokkeerd-$ts" \; -printf '%p\n' 2>/dev/null | while IFS= read -r p; do
-    log "LET OP: $p (van socev) hernoemd naar *.socev-geblokkeerd-$ts: code-plek"
+    log "LET OP: $(printf %q "$p") (van socev) hernoemd naar *.socev-geblokkeerd-$ts: code-plek"
+  done
+  # Python-bytecode van socev (wv785): weg. Het is een cache (Python maakt hem opnieuw) en een vervalste .pyc in een map waar
+  # 1001 Python uit laadt is code. Ontstaat ook gewoon als een smal gesprek een vaultscript draait: daarom geen LET OP.
+  find "$V" -mindepth 2 -user socev \( -type d -name __pycache__ -prune -execdir rm -rf -- {} \; -printf '%p\n' \
+    -o ! -type d \( -iname '*.pyc' -o -iname '*.pyo' \) -execdir rm -f -- {} \; -printf '%p\n' \) 2>/dev/null | head -20 \
+    | while IFS= read -r p; do log "bytecode van socev weggehaald: $(printf %q "$p")"; done
+  # Windows-code van socev: andere naam, zodat hij op Davids pc niet als code opent of draait (wv785).
+  find "$V" -mindepth 2 ! -path '*.socev-geblokkeerd-*' ! -type d -user socev \( -false "${WINCODE[@]}" \) \
+    -execdir mv -n -- {} "{}.socev-geblokkeerd-$ts" \; -printf '%p\n' 2>/dev/null | while IFS= read -r p; do
+    log "LET OP: $(printf %q "$p") (van socev) hernoemd naar *.socev-geblokkeerd-$ts: Windows-code"
   done
   if [ -f "$STEMPEL" ]; then
     find "$V" -type f -user socev -cnewer "$STEMPEL" \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.ts' -o -name '*.py' \
-      -o -name '*.sh' -o -name '*.bash' \) -printf '%p\n' 2>/dev/null | head -20 | while IFS= read -r p; do log "let op: code van socev in de vault: $p"; done
+      -o -name '*.sh' -o -name '*.bash' -o -iname '*.zip' -o -iname '*.whl' -o -iname '*.egg' \) -printf '%p\n' 2>/dev/null | head -20 \
+      | while IFS= read -r p; do log "let op: code van socev in de vault: $(printf %q "$p")"; done
   fi
+}
+
+# Symlinks van socev in de vault en het gedeelde geheugen: weg (wv785, Fable wv784 voorwaarde a). Een 1001-proces dat daar
+# leest of schrijft (nachtconsolidatie, intake, Claude Code die MEMORY.md laadt) zou ze volgen naar een eigen bestand of een
+# geheim. find -P volgt zelf niets; rm via -execdir haalt alleen de link weg, nooit het doel. Logregel met het doel, zodat
+# een legitieme link (komt bij socev niet voor) terug te zetten is. DEKT NIET: tot de volgende ronde (≤ 5 min) staat hij er.
+vreemde_symlinks(){
+  local w st p doel
+  for w in "$V" "$MEM"; do
+    [ -d "$w" ] || continue
+    while IFS= read -r -d '' st && IFS= read -r -d '' p && IFS= read -r -d '' doel; do
+      [ "$st" = weg ] || FOUTEN=$((FOUTEN + 1))
+      log "LET OP: symlink van socev $st: $(printf %q "$p") -> $(printf %q "$doel")"
+    done < <(find -P "$w" -mindepth 1 -type l -user socev \
+               \( -execdir rm -f -- {} \; -printf 'weg\0%p\0%l\0' -o -printf 'mislukt\0%p\0%l\0' \) 2>/dev/null)
+  done
 }
 
 # /opt/data/.claude: alles o-rwx behalve de gedeelde memory-map (socev mag daar alleen doorheen, op naam).
@@ -101,7 +139,11 @@ if [ "$WAT" = "vol" ]; then
     code_acl
     vault_acl u:socev:rwX,m::rwX
     vault_acl_d u:socev:rwX,u:claude:rwX,m::rwX
+    vreemde_symlinks
     vault_vreemde_codeplekken
+    # Een map van socev waar claude niet in kan, verbergt wat erin staat voor de rondes hierboven (alleen melden).
+    find "$V" -mindepth 1 -type d -user socev ! -readable -printf '%p\n' 2>/dev/null | head -5 | while IFS= read -r p; do
+      log "let op: map van socev niet leesbaar voor claude: $(printf %q "$p")"; done
   fi
   # io: doorlopen, en bestaande jobmappen dicht voor anderen. Geen standaard-ACL: machinekamer-jobs blijven dicht.
   if [ -d "$IO" ]; then
@@ -142,6 +184,7 @@ if [ "$WAT" = "na-ronde" ]; then
   fi
   # Wortel: is er schrijfrecht voor socev bijgekomen (iemand zette de ACL anders), dan terug.
   getfacl -cp "$V" 2>/dev/null | grep -q '^user:socev:.w' && { log "vault-wortel had schrijfrecht voor socev: hersteld"; vault_wortel; }
+  vreemde_symlinks
   vault_vreemde_codeplekken
   mv -f "$NIEUW" "$STEMPEL" 2>/dev/null
   claude_thuis_dicht

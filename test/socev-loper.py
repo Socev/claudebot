@@ -34,6 +34,8 @@ case "$1" in
   slaap) sleep 30 ;;
   env) env | sort ;;
   fds) for f in /proc/$$/fd/*; do echo "fd $(basename $f) -> $(readlink $f)"; done ;;
+  tcp) exec 5<>"/dev/tcp/127.0.0.1/$2"; echo verbonden; sleep 6 ;;
+  veel) for b in $(seq 1 "$2"); do for i in $(seq 1 "$3"); do echo "r$b.$i"; done; sleep 0.001; done ;;
 esac
 exit 0
 """)
@@ -146,6 +148,105 @@ ok("stop -> einde met SIGTERM, volg op een nieuwe verbinding", r["einde"] and r[
 ok("volg stuurt de buffer na", "nep-claude slaap" in r["uit"], r)
 r = klant([{"op": "volg", "id": "j1"}], tot_einde="j1")
 ok("volg op een afgeronde job: buffer + einde", "nep-claude --version" in r["uit"] and r["einde"]["code"] == 0, r)
+
+# volg zonder verlies (wv785, Fable wv715 #4): de momentopname van de buffer en het aanmelden als volger moeten in één tick
+# gebeuren. (a) Deterministisch: een brok in dezelfde tick als het volg-verzoek (test/loper-volg-tick.js; op wv699-2 rood).
+# (b) Onder belasting: een job schrijft ± 4 s regels in blokjes; 40 verbindingen melden zich verspreid aan met volg vanaf 0 en
+# lezen tot het einde. Elke volger moet precies alle regels in volgorde hebben, het antwoord vóór de buffer.
+t = subprocess.run(["node", os.path.join(REPO, "test", "loper-volg-tick.js"), os.path.join(REPO, "socev-loper.js")],
+                   capture_output=True, text=True, timeout=30)
+ok("volg: brok in dezelfde tick als het verzoek komt mee (A+B+C, antwoord eerst)", t.returncode == 0, t.stdout + t.stderr)
+import threading  # noqa: E402
+
+BLOKKEN, PER_BLOK, VOLGERS = 2000, 25, 40
+r = klant([{"op": "start", "id": "jveel", "brein": "claude", "args": ["veel", str(BLOKKEN), str(PER_BLOK)], "cwd": VAULT}],
+          wacht_ms=300)
+ok("start veel", r["antwoorden"] and r["antwoorden"][0].get("ok"), r)
+
+
+def volger(nr, uitkomst):
+    v = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    v.connect(SOCK)
+    v.sendall((json.dumps({"op": "volg", "nr": 1, "id": "jveel"}) + "\n").encode())
+    rest, uit, antwoord_eerst, einde = b"", bytearray(), None, None
+    v.settimeout(30)
+    while einde is None:
+        d = v.recv(1 << 16)
+        if not d:
+            break
+        rest += d
+        while b"\n" in rest:
+            regel, rest = rest.split(b"\n", 1)
+            m = json.loads(regel)
+            if "ev" not in m:
+                antwoord_eerst = antwoord_eerst if antwoord_eerst is not None else (len(uit) == 0)
+            elif m["ev"] == "uit":
+                if antwoord_eerst is None:
+                    antwoord_eerst = False
+                uit += base64.b64decode(m["b64"])
+            elif m["ev"] == "einde":
+                einde = m
+    v.close()
+    uitkomst[nr] = (bytes(uit).decode(), einde, antwoord_eerst)
+
+
+import base64  # noqa: E402
+VERWACHT = ["nep-claude veel %d %d" % (BLOKKEN, PER_BLOK),
+            "HOME=%s TMPDIR=%s/tmp CODEX_HOME=%s/.codex PWD=%s" % (THUIS, THUIS, THUIS, VAULT)] \
+    + ["r%d.%d" % (b, i) for b in range(1, BLOKKEN + 1) for i in range(1, PER_BLOK + 1)] + [""]
+uitkomsten = {}
+draden = []
+t_veel = time.time()
+for n in range(VOLGERS):
+    t = threading.Thread(target=volger, args=(n, uitkomsten))
+    t.start()
+    draden.append(t)
+    time.sleep(0.06)
+for t in draden:
+    t.join(60)
+print("  info  veel-job + %d volgers: %.1f s" % (VOLGERS, time.time() - t_veel))
+regels_ok = []
+for n in range(VOLGERS):
+    uit, einde, eerst = uitkomsten.get(n, ("", None, None))
+    regels = uit.split("\n")
+    verwacht = VERWACHT
+    regels_ok.append(regels == verwacht and einde and einde.get("code") == 0 and eerst is True)
+    if not regels_ok[-1]:
+        mis = next((k for k in range(min(len(regels), len(verwacht))) if regels[k] != verwacht[k]), None)
+        print("  volger %d: %d regels (verwacht %d), eerste verschil op %s, einde %s, antwoord eerst %s"
+              % (n, len(regels), len(verwacht), mis, einde, eerst))
+ok("volg onder belasting: %d volgers, elk alle %d regels in volgorde, antwoord vóór de buffer"
+   % (VOLGERS, BLOKKEN * PER_BLOK), all(regels_ok), regels_ok)
+
+# socket-eigenaar (wv785, Fable wv715 #5): welk proces van de loper-uid houdt een TCP-socket open, met zijn SOCEV_TEL_BEURT.
+lsn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+lsn.bind(("127.0.0.1", 0))
+lsn.listen(4)
+POORT = lsn.getsockname()[1]
+r = klant([{"op": "start", "id": "jtcp", "brein": "claude", "args": ["tcp", str(POORT)], "cwd": VAULT,
+            "env": {"SOCEV_TEL_BEURT": "0123456789abcdef"}}], wacht_ms=300)
+tcp_pid = r["antwoorden"][0].get("pid")
+lsn.settimeout(5)
+conn, adres = lsn.accept()
+inode = None
+for f in ("/proc/net/tcp", "/proc/net/tcp6"):
+    for rij in open(f).read().split("\n")[1:]:
+        k = rij.split()
+        if len(k) > 9 and k[1].endswith(":%04X" % adres[1]) and k[2].endswith(":%04X" % POORT):
+            inode = k[9]
+r = klant([{"op": "socket-eigenaar", "inode": inode},
+           {"op": "socket-eigenaar", "inode": inode, "naam": "PATH"},
+           {"op": "socket-eigenaar", "inode": "999999999"},
+           {"op": "socket-eigenaar", "inode": "1; ls"}])
+A = r["antwoorden"]
+ok("socket-eigenaar: proces van de job (pid %s) met SOCEV_TEL_BEURT" % tcp_pid,
+   A[0].get("waarde") == "0123456789abcdef" and (A[0].get("pid") == tcp_pid or A[0].get("ppid") == tcp_pid), A[0])
+ok("socket-eigenaar: alleen SOCEV_-markers", A[1].get("fout") == "naam-ongeldig", A[1])
+ok("socket-eigenaar: onbekende inode = pid null", A[2].get("ok") and A[2].get("pid") is None, A[2])
+ok("socket-eigenaar: ongeldige inode geweigerd", A[3].get("fout") == "inode-ongeldig", A[3])
+conn.close()
+lsn.close()
+klant([{"op": "stop", "id": "jtcp"}], wacht_ms=500)
 
 # lees / stat / map
 r = klant([{"op": "lees", "pad": THUIS + "/.claude/projects/p/s.jsonl"},

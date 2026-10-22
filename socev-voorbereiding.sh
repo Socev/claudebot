@@ -25,15 +25,10 @@ mkdir -p "$THUIS" && chown socev:socev "$THUIS" && chmod 0750 "$THUIS" || log "t
 setpriv --reuid=1001 --regid=1001 --init-groups -- env -i PATH=$P HOME=/opt/data VAULT_DIR="${VAULT_DIR:-/opt/data/AI_SecondBrain}" \
   bash /app/socev-rechten.sh vol || log "socev-rechten.sh vol gaf een fout"
 
-# 3. Thuismap vullen, als socev. De Codex-login gaat van claude naar socev via een pijp (geen van beiden leest de ander).
-if [ -f /opt/data/.codex/auth.json ] && ! setpriv --reuid=1002 --regid=1002 --clear-groups -- env -i /usr/bin/test -e "$THUIS/.codex/auth.json"; then
-  CODEX_AUTH=--codex-auth
-else
-  CODEX_AUTH=
-fi
-{ if [ -n "$CODEX_AUTH" ]; then setpriv --reuid=1001 --regid=1001 --init-groups -- env -i /bin/cat /opt/data/.codex/auth.json; fi; } \
-  | setpriv --reuid=1002 --regid=1002 --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs -- \
-      env -i PATH=$P HOME="$THUIS" python3 -I /app/socev-thuis.py $CODEX_AUTH || log "socev-thuis.py gaf een fout"
+# 3. Thuismap vullen, als socev. Geen Codex-login meer (wv785): een kopie kon bij een refresh de 1001-login ongeldig maken,
+#    en codex draait niet via de loper; socev-thuis.py haalt een oude kopie weg.
+setpriv --reuid=1002 --regid=1002 --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs -- \
+  env -i PATH=$P HOME="$THUIS" python3 -I /app/socev-thuis.py </dev/null || log "socev-thuis.py gaf een fout"
 
 # 4. Root-herstartlus van de loper (bindt /run/socev-loper/loper.sock en start de loper als 1002). Lege omgeving: dit proces
 #    en de loper zien nooit een pod-sleutel. Logt naar het containerlog.

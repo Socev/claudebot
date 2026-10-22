@@ -21,12 +21,17 @@
  *                                         cwd binnen de vault of io; env zonder pod-sleutels (anders fout env-geweigerd).
  *   invoer {id, b64?|tekst?, einde?}    → stdin van een lopende job
  *   stop {id, signaal?}                 → kill(-pgid): server.js mag een 1002-proces zelf niet signaleren
- *   volg {id, vanaf_uit?, vanaf_fout?}  → buffer vanaf die offset nasturen, daarna live (na een herstart van server.js)
+ *   volg {id, vanaf_uit?, vanaf_fout?}  → buffer vanaf die offset nasturen, daarna live (na een herstart van server.js).
+ *                                         Momentopname, nasturen en aanmelden gebeuren in dezelfde tick als het antwoord
+ *                                         (wv785, Fable wv715 #4): geen brok kan ertussen vallen.
  *   lijst                               → lopende en < 10 min geleden afgeronde jobs (zonder inhoud)
  *   leeft {pid, naam, waarde?} | {naam, waarde}
  *                                       → vervangt het lezen van /proc/<pid>/environ door server.js (Fable #3): leeft het
  *                                         1002-proces en draagt het naam=waarde? Zonder waarde: de waarde van die marker.
  *                                         Zonder pid: alle 1002-processen met die marker (pid, ppid). Alleen SOCEV_-markers.
+ *   socket-eigenaar {inode, naam?}      → welk 1002-proces houdt socket:[inode] open (server.js ziet de inode in
+ *                                         /proc/net/tcp, maar /proc/<pid>/fd van 1002 niet)? {pid, ppid, waarde} met de
+ *                                         waarde van marker naam (standaard SOCEV_TEL_BEURT), of {pid: null} (wv785, Fable wv715 #5)
  *   stat {pad} | map {pad} | lees {pad, vanaf?, max?}
  *                                       → alleen binnen socev-thuis/.claude/projects en socev-thuis/.codex/sessions
  *                                         (transcripts zijn 0600 en voor server.js anders onleesbaar)
@@ -38,7 +43,7 @@ const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const VERSIE = 'wv699-2';
+const VERSIE = 'wv785-1';
 const VAULT = process.env.SOCEV_LOPER_VAULT || '/opt/data/AI_SecondBrain';
 const IO = process.env.SOCEV_LOPER_IO || '/opt/data/io';
 const THUIS = process.env.SOCEV_LOPER_THUIS || '/opt/data/socev-thuis';
@@ -175,19 +180,24 @@ function opStop(v) {
   return { signaal: sig };
 }
 
+// Wat na het antwoord nog op dezelfde verbinding moet, in dezelfde tick (verbinding() roept het aan na stuur(antwoord)).
+const NA = Symbol('na');
 function opVolg(v, sock) {
   const j = jobs.get(v.id);
   if (!j) return { fout: 'onbekende-job' };
-  const uit = bufferVanaf(j.uit, Number(v.vanaf_uit) || 0);
-  const fout = bufferVanaf(j.fout, Number(v.vanaf_fout) || 0);
-  // Eerst het antwoord, dan de buffer, dan live (of meteen het einde).
-  setImmediate(function () {
+  const vanafUit = Number(v.vanaf_uit) || 0, vanafFout = Number(v.vanaf_fout) || 0;
+  const r = { job: jobInfo(j), afgekapt: j.uit.afgekapt || j.fout.afgekapt };
+  // Eerst het antwoord, dan de buffer, dan live (of meteen het einde). Momentopname en aanmelden in één tick (wv785, Fable
+  // wv715 #4): met setImmediate ertussen ging een brok die in die tussentijd binnenkwam naar de buffer maar niet naar deze volger.
+  r[NA] = function () {
+    const uit = bufferVanaf(j.uit, vanafUit);
+    const fout = bufferVanaf(j.fout, vanafFout);
     if (uit.length) stuur(sock, { ev: 'uit', id: j.id, b64: uit.toString('base64') });
     if (fout.length) stuur(sock, { ev: 'fout', id: j.id, b64: fout.toString('base64') });
     if (j.klaar) stuur(sock, { ev: 'einde', id: j.id, code: j.code, signaal: j.signaal });
     else j.volgers.add(sock);
-  });
-  return { job: jobInfo(j), afgekapt: j.uit.afgekapt || j.fout.afgekapt };
+  };
+  return r;
 }
 
 // /proc/<pid>/status: uid en ppid, zombie = dood (zoals weesLeeft in server.js).
@@ -227,6 +237,32 @@ function opLeeft(v) {
     if (markerWaarde(p, v.naam) === v.waarde) uit.push({ pid: Number(p), ppid: st.ppid });
   });
   return { pids: uit };
+}
+
+// Welk 1002-proces houdt deze socket open? Alleen eigen uid; 1001 kan /proc/<pid>/fd van 1002 niet lezen (wv785, Fable wv715 #5).
+function opSocketEigenaar(v) {
+  if (!/^\d{1,20}$/.test(String(v.inode == null ? '' : v.inode)) || String(v.inode) === '0') return { fout: 'inode-ongeldig' };
+  const naam = v.naam == null ? 'SOCEV_TEL_BEURT' : v.naam;
+  if (typeof naam !== 'string' || !MARKER.test(naam)) return { fout: 'naam-ongeldig' };
+  const doel = 'socket:[' + String(v.inode) + ']';
+  let namen = [];
+  try { namen = fs.readdirSync('/proc'); } catch (e) { return { fout: 'proc-onleesbaar' }; }
+  for (let i = 0; i < namen.length; i++) {
+    const p = namen[i];
+    if (!/^\d+$/.test(p) || Number(p) === process.pid) continue;
+    const st = procStatus(p);
+    if (!st || st.dood || st.uid !== EIGEN_UID) continue;
+    let fds = [];
+    try { fds = fs.readdirSync('/proc/' + p + '/fd'); } catch (e) { continue; }
+    for (let k = 0; k < fds.length; k++) {
+      let l;
+      try { l = fs.readlinkSync('/proc/' + p + '/fd/' + fds[k]); } catch (e) { continue; }
+      if (l !== doel) continue;
+      const w = markerWaarde(p, naam);
+      return { pid: Number(p), ppid: st.ppid, waarde: w !== undefined && WAARDE.test(w) ? w : null };
+    }
+  }
+  return { pid: null };
 }
 
 function leesbaarPad(p) {
@@ -279,6 +315,7 @@ function behandel(v, sock) {
     case 'volg': return opVolg(v, sock);
     case 'lijst': { const l = []; jobs.forEach(function (j) { l.push(jobInfo(j)); }); return { jobs: l }; }
     case 'leeft': return opLeeft(v);
+    case 'socket-eigenaar': return opSocketEigenaar(v);
     case 'stat': return opStat(v);
     case 'map': return opMap(v);
     case 'lees': return opLees(v);
@@ -301,8 +338,10 @@ function verbinding(sock) {
       if (!v || typeof v !== 'object') { stuur(sock, { ok: false, fout: 'geen-object' }); continue; }
       let r;
       try { r = behandel(v, sock) || {}; } catch (e) { r = { fout: 'intern' }; log('interne fout op=' + String(v.op).slice(0, 20) + ' ' + (e && e.code || '')); }
+      const na = r[NA];
       const antwoord = Object.assign({ nr: v.nr === undefined ? null : v.nr, ok: !r.fout }, r);
       stuur(sock, antwoord);
+      if (na) { try { na(); } catch (e) { log('interne fout na op=' + String(v.op).slice(0, 20) + ' ' + (e && e.code || '')); } }
     }
   });
   sock.on('error', function () {});
@@ -325,4 +364,4 @@ if (require.main === module) {
   server.on('error', function (e) { log('socketfout ' + (e.code || '')); process.exit(1); });
   server.listen({ fd: fd }, function () { log('klaar uid=' + EIGEN_UID + ' versie=' + VERSIE); });
 }
-module.exports = { _toets: { markerWaarde: markerWaarde, envVerboden: envVerboden } };
+module.exports = { _toets: { markerWaarde: markerWaarde, envVerboden: envVerboden, verbinding: verbinding, jobs: jobs, voegToe: voegToe } };

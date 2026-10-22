@@ -10,8 +10,9 @@ WAT. /opt/data/socev-thuis wordt HOME, TMPDIR en CODEX_HOME van de smalle gespre
                  De rest van het bestand (cache, projecten) beheert de CLI zelf.
   .claude/projects/-opt-data-AI-SecondBrain/memory -> /opt/data/.claude/projects/-opt-data-AI-SecondBrain/memory
                  (zelfde auto-memory als de machinekamer, zoals nu; ACL zet socev-rechten.sh)
-  .codex/        config.toml uit /app/codex-config-socev.toml (zonder Supabase en n8n), AGENTS.md -> vault/CLAUDE.md,
-                 auth.json alleen als hij nog ontbreekt (kopie via stdin met --codex-auth)
+  .codex/        config.toml uit /app/codex-config-socev.toml (zonder Supabase en n8n), AGENTS.md -> vault/CLAUDE.md.
+                 GEEN login meer (wv785): een kopie van de 1001-login (auth.json) kon bij een refresh hier de echte login
+                 ongeldig maken, en codex draait niet via de loper (codex-smal-uit). Een bestaande kopie gaat weg.
   .agents/skills -> vault/.claude/skills (Codex leest skills daar)
   tmp/           eigen TMPDIR (0700)
   ACL u:claude:rX (+ standaard): server.js mag hier kijken, niet schrijven; transcripts leest hij via de loper.
@@ -103,18 +104,19 @@ def main():
         proj[p] = e
     schrijf(cj, json.dumps(d, indent=2) + "\n")
 
-    # Codex: config altijd uit het image (geen Supabase/n8n-MCP), login alleen als hij ontbreekt.
+    # Codex: config altijd uit het image (geen Supabase/n8n-MCP); geen login (wv785), een oude kopie gaat weg.
     try:
         with open(CODEX_SJABLOON) as f:
             schrijf(os.path.join(THUIS, ".codex/config.toml"), f.read())
     except OSError:
         log("let op: %s ontbreekt" % CODEX_SJABLOON)
-    auth = os.path.join(THUIS, ".codex/auth.json")
-    if "--codex-auth" in sys.argv:
-        data = sys.stdin.buffer.read()
-        if data and not os.path.exists(auth):
-            schrijf(auth, data)
-            log("codex-login gekopieerd")
+    for naam in ("auth.json", "auth.json.nieuw"):
+        auth = os.path.join(THUIS, ".codex", naam)
+        if os.path.isdir(auth) and not os.path.islink(auth):
+            os.replace(auth, auth + ".weg-%d" % int(time.time()))
+        elif os.path.lexists(auth):
+            os.unlink(auth)
+            log("codex-loginkopie weggehaald (%s)" % naam)
 
     os.chmod(THUIS, 0o750)
     log("klaar")
