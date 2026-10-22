@@ -44,6 +44,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { EventEmitter } = require('events');
 
 // ── wv349: een proefkopie raakt nooit de echte paden ─────────────────────────
 // Alleen de release die de supervisor start (dit bestand ligt in RELEASE_DIR) krijgt de echte paden als standaard.
@@ -93,6 +94,27 @@ const IO = serverPad('io', process.env.IO_DIR, '/opt/data/io', serverProefDeel('
 const MAX_FILE = (parseInt(process.env.MAX_FILE_MB || '20', 10)) * 1024 * 1024;
 const SESS_FILE = path.join(HOME, 'chat_sessions.json');
 const SYNC_LOG = process.env.SYNC_LOG || '/opt/data/bin/bisync.log';
+// ── wv715: uid-scheiding fase 2 — smalle gesprekken als gebruiker socev (1002) via de socev-loper ────────────────────────────
+// WAAROM. Alles in de pod draaide als één gebruiker (claude, 1001): een Socev-gesprek dat via een prompt-injectie een paar
+// Bash-commando's draait, kon /proc/<pid>/environ van server.js of PID 1 lezen en zo bij de kluissleutel (bunq kan betalen).
+// Fase 1 (image 166, wv699) zette gebruiker socev, de rechten en de loper (/app/socev-loper.js) klaar. Hier start server.js de
+// smalle gesprekken echt via de loper. Bouwplan: 01_Ontwikkeling/Socev-gesprekken onder eigen gebruiker - sleutelscheiding
+// (bouwplan 21-10-2026).md, § 3.4 en Fable-review § 5 (#3 environ-lezers, #4 jobmap-ACL, #7 terugdraaien, #10 dicht bij uitval).
+// HOE. Een smalle beurt (opts.envMag) gaat via de loper als de STAND dat zegt: omgeving SOCEV_LOPER=aan (alles) of =uit (niets);
+// anders het bestand LOPER_STAND_PAD {"sessies": [...], "agents": bool, "alles": bool} (alleen 1001 kan het schrijven), zodat de
+// omschakeling per fase zonder uitrol gaat: loper-proef → nachtsessies → hoofdkanaal na de 03:00-reset. Geen bestand = uit.
+// Nooit via de loper (keuze wv715, voorwaarde b): de sessies van SOCEV_ENV_EXTRA (Supabase-MCP = kluis; de loper weigert die
+// naam) blijven 1001 tot ze een smalle databankrol hebben; 'lezen' (geen Bash) en het codex-brein (login-kopie: een refresh
+// in socev-thuis kan de 1001-login ongeldig maken, niet gemeten om die niet te breken) ook niet: codex smal via de loper = fout.
+// DICHT BIJ UITVAL: een geselecteerde beurt draait nooit stil als 1001; de loper wordt 30 s opnieuw geprobeerd, daarna fout
+// 'loper-onbereikbaar', een box-rij (1×/dag) en na 10 min storing één regel aan David (bericht.py).
+const LOPER_SOCK = (!SERVER_ECHT && process.env.SOCEV_LOPER_SOCK) || '/run/socev-loper/loper.sock';
+const SOCEV_THUIS = (!SERVER_ECHT && process.env.SOCEV_THUIS) || '/opt/data/socev-thuis';
+const SOCEV_PROJECTS_DIR = path.join(SOCEV_THUIS, '.claude', 'projects');
+const LOPER_UID = Number((!SERVER_ECHT && process.env.SOCEV_LOPER_UID) || 1002);
+const LOPER_STAND_PAD = serverPad('loper_stand', process.env.SOCEV_LOPER_STAND, '/opt/data/bin/socev-loper.json', serverProefDeel('socev-loper.json'));
+const LOPER_HERKANS_MS = Number((!SERVER_ECHT && process.env.SOCEV_LOPER_HERKANS_MS) || 30 * 1000);
+const LOPER_DAVID_NA_MS = 10 * 60 * 1000;
 
 // ── v2: tijdslimieten ───────────────────────────────────────────────────────
 // Inactiviteit: ruim boven de langste gemeten tool-call (Fable-review 544 s).
@@ -638,7 +660,7 @@ try {
   for (const id in agentsReg) {
     // wv211 (8-10-2026): een herstart van alleen server.js (uitrol, crash) laat agents in hun eigen procesgroep doorleven.
     // Leeft de groepsleider nog, dan blijft hij 'running' met de vlag wees (zie weesRonde); anders afgebroken zoals altijd.
-    if (agentsReg[id].status === 'running' && agentsReg[id].pid && weesLeeft(agentsReg[id].pid, id)) {
+    if (agentsReg[id].status === 'running' && agentsReg[id].pid && weesLeeft(agentsReg[id].pid, id, agentsReg[id])) {
       if (!agentsReg[id].wees) agentsReg[id].wees = Date.now();   // bij een tweede herstart de eerste tijd houden
       dirty = true;
     } else if (agentsReg[id].status === 'running' && agentsReg[id].transcript && !agentsReg[id].voorlopig) {
@@ -666,17 +688,25 @@ try {
 // De marker in zijn omgeving beschermt tegen pid-hergebruik na een echte containerherstart; alleen de groepsleider telt,
 // zodat een losgelaten kleinkind met dezelfde marker (bv. een setsid-uitrolwachter van de agent zelf) hem niet levend houdt.
 // Letterlijke marker: EIND_MARKER (SOCEV_AGENT_RUN) bestaat bij het opstarten nog niet (const verderop).
-function weesLeeft(pid, jobId) {
+// wv715: een agent onder socev (a.loper_id): zijn environ is voor 1001 onleesbaar (Fable § 5 #3); dan uid + starttijd
+// (/proc/<pid>/status en stat zijn wereldleesbaar). Zonder starttijd: dood (fail-closed, zoals een ontbrekende marker).
+function weesLeeft(pid, jobId, a) {
   if (!/^\d+$/.test(String(pid))) return false;
   try {
     const st = fs.readFileSync('/proc/' + pid + '/status', 'utf8');   // eerst status: een zombie leeft niet (Fable K5)
     if (/^State:\s+[ZX]/m.test(st)) return false;
+    if (a && a.loper_id) {
+      const ps = appProcStat(pid);
+      return Number((/^Uid:\s+(\d+)/m.exec(st) || [])[1]) === LOPER_UID && !!a.pid_start && !!ps && ps.start === String(a.pid_start);
+    }
     return fs.readFileSync('/proc/' + pid + '/environ').indexOf(Buffer.from('SOCEV_AGENT_RUN=' + jobId + '\0')) !== -1;
   } catch (e) { return false; }
 }
 function weesSpawnMeld(opts, child, sessie, transcript) {
   if (!opts || typeof opts.opSpawn !== 'function' || !child || !child.pid) return;
-  try { opts.opSpawn({ pid: child.pid, sessie: sessie || null, transcript: transcript || null }); } catch (e) { logError('wees-spawn', e); }
+  const st = appProcStat(child.pid);   // wv715: starttijd, zodat een 1002-wees zonder environ te herkennen is
+  try { opts.opSpawn({ pid: child.pid, sessie: sessie || null, transcript: transcript || null, loper_id: child.loperId || null, pid_start: st ? st.start : null }); }
+  catch (e) { logError('wees-spawn', e); }
 }
 // Foutcode in het register (wv51, 8-10-2026): raakt het /result van een werkvoorraad-job kwijt (containerherstart,
 // ttl 2 u), dan handelt de tikker de fout toch af (limiet -> pauze, afgebroken-gestopt -> vervallen). Alleen korte
@@ -844,6 +874,321 @@ function basisOmgeving(opts) {
   envMag.forEach(function (k) { if (process.env[k] != null) b[k] = process.env[k]; });
   return b;
 }
+// ── wv715: de loper-klant (zie de constanten bovenin, LOPER_SOCK) ────────────────────────────────────────────────────────────
+// Stand: welke smalle beurten via de loper gaan. Bestand alleen herlezen als het veranderde.
+let loperStandCache = { mtime: -1, stand: null };
+const LOPER_STAND_UIT = { bron: 'geen', alles: false, agents: false, sessies: [] };
+function loperStand() {
+  const e = String(process.env.SOCEV_LOPER || '').trim().toLowerCase();
+  if (e === 'uit') return { bron: 'env', alles: false, agents: false, sessies: [] };
+  if (e === 'aan') return { bron: 'env', alles: true, agents: true, sessies: [] };
+  let st; try { st = fs.statSync(LOPER_STAND_PAD); } catch (err) { return LOPER_STAND_UIT; }
+  if (st.mtimeMs !== loperStandCache.mtime) {
+    let s;
+    try {
+      const j = JSON.parse(fs.readFileSync(LOPER_STAND_PAD, 'utf8'));
+      s = { bron: 'bestand', alles: j.alles === true, agents: j.agents === true,
+        sessies: (Array.isArray(j.sessies) ? j.sessies : []).filter(function (x) { return typeof x === 'string' && /^[A-Za-z0-9_:-]{1,60}$/.test(x); }) };
+    } catch (err) { s = { bron: 'bestand-ongeldig', alles: false, agents: false, sessies: [] }; logError('loper-stand', err); }
+    loperStandCache = { mtime: st.mtimeMs, stand: s };
+  }
+  return loperStandCache.stand;
+}
+function loperNooit(chatId) { return Object.prototype.hasOwnProperty.call(SOCEV_ENV_EXTRA, String(chatId || '')); }
+// /run: alleen smal (de aanroeper toetst dat); per sessie alleen in de vault-werkruimte, 'alles' ook elders (de loper weigert dan
+// een cwd buiten vault/io: dicht).
+function loperVoorRun(chatId, ws) {
+  if (loperNooit(chatId)) return false;
+  const s = loperStand();
+  return s.alles || (ws === DEFAULT_WS && s.sessies.indexOf(String(chatId || '')) >= 0);
+}
+function loperVoorAgent() { const s = loperStand(); return s.alles || s.agents; }
+function socevPad(p) { return typeof p === 'string' && (p === SOCEV_THUIS || p.indexOf(SOCEV_THUIS + '/') === 0); }
+function socevProjectDirFor(cwd) { return path.join(SOCEV_PROJECTS_DIR, cwd.replace(/[^a-zA-Z0-9]/g, '-')); }
+
+// Eén verzoek op een eigen verbinding (ping, stop, leeft, stat, map, lees). Belooft het antwoord {ok, ...}; verbindfout = reject.
+function loperOp(verzoek, timeoutMs) {
+  return new Promise(function (klaar, mis) {
+    const s = net.connect(LOPER_SOCK);
+    let rest = '', af = false;
+    const t = setTimeout(function () { eind(null, Object.assign(new Error('loper time-out'), { code: 'ETIMEDOUT' })); }, timeoutMs || 10000);
+    function eind(r, e) { if (af) return; af = true; clearTimeout(t); s.destroy(); if (e) mis(e); else klaar(r); }
+    s.on('connect', function () { s.write(JSON.stringify(Object.assign({}, verzoek, { nr: 1 })) + '\n'); });
+    s.setEncoding('utf8');
+    s.on('data', function (d) {
+      rest += d;
+      let i;
+      while ((i = rest.indexOf('\n')) >= 0) {
+        let r; try { r = JSON.parse(rest.slice(0, i)); } catch (e) { r = null; }
+        rest = rest.slice(i + 1);
+        if (r && r.nr === 1) return eind(r);
+      }
+    });
+    s.on('error', function (e) { eind(null, e); });
+    s.on('close', function () { eind(null, Object.assign(new Error('loper sloot de verbinding'), { code: 'ECONNRESET' })); });
+  });
+}
+// Synchroon (voor de bestaande synchrone transcriptlezers: eindOpenTaken, weesEindtekst): een kort node-proces doet het verzoek.
+// Alleen voor zeldzame paden (eindcontrole, wees na een herstart); geen sleutel in argv of stdin.
+const LOPER_SYNC_JS = "const n=require('net');let i='';process.stdin.on('data',d=>i+=d).on('end',()=>{const s=n.connect(process.argv[1]);" +
+  "let r='';s.on('connect',()=>s.write(i.trim()+'\\n'));s.setEncoding('utf8');s.on('data',d=>{r+=d;const k=r.indexOf('\\n');" +
+  "if(k>=0){process.stdout.write(r.slice(0,k));s.destroy();}});s.on('error',e=>process.stdout.write(JSON.stringify({ok:false,fout:'verbind-'+(e.code||'')})));});";
+function loperSync(verzoek) {
+  const uit = require('child_process').execFileSync(process.execPath, ['-e', LOPER_SYNC_JS, LOPER_SOCK],
+    { input: JSON.stringify(Object.assign({}, verzoek, { nr: 1 })), timeout: 20000, maxBuffer: 16 * 1024 * 1024, env: { PATH: process.env.PATH || '/usr/bin:/bin' } });
+  return JSON.parse(uit.toString('utf8'));
+}
+// Transcript lezen: van socev (0600, onleesbaar voor 1001) via de loper, anders gewoon. Gooit bij een fout (zoals readFileSync).
+const LOPER_LEES_STUK = 6 * 1024 * 1024;
+function transcriptLees(pad) {
+  if (!socevPad(pad)) return fs.readFileSync(pad, 'utf8');
+  const delen = []; let vanaf = 0;
+  for (let n = 0; n < 64; n++) {
+    const r = loperSync({ op: 'lees', pad: pad, vanaf: vanaf, max: LOPER_LEES_STUK });
+    if (!r.ok) throw Object.assign(new Error('loper lees: ' + r.fout), { code: r.code || r.fout || 'loper' });
+    const b = Buffer.from(r.b64 || '', 'base64');
+    delen.push(b); vanaf += b.length;
+    if (!b.length || vanaf >= r.grootte) break;
+  }
+  return Buffer.concat(delen).toString('utf8');
+}
+async function transcriptLeesAsync(pad) {
+  if (!socevPad(pad)) return fs.promises.readFile(pad, 'utf8');
+  const delen = []; let vanaf = 0;
+  for (let n = 0; n < 64; n++) {
+    const r = await loperOp({ op: 'lees', pad: pad, vanaf: vanaf, max: LOPER_LEES_STUK }, 30000);
+    if (!r.ok) throw Object.assign(new Error('loper lees: ' + r.fout), { code: r.code || r.fout || 'loper' });
+    const b = Buffer.from(r.b64 || '', 'base64');
+    delen.push(b); vanaf += b.length;
+    if (!b.length || vanaf >= r.grootte) break;
+  }
+  return Buffer.concat(delen).toString('utf8');
+}
+// Jongste mtime in een map van socev (subagent-transcripts <id>/): via map/stat van de loper, begrensd.
+async function loperNieuwsteMtime(dir, max) {
+  let nieuwst = 0, gezien = 0;
+  const stapel = [dir];
+  while (stapel.length && gezien < (max || 300)) {
+    const cur = stapel.pop();
+    let r; try { r = await loperOp({ op: 'map', pad: cur }, 5000); } catch (e) { break; }
+    if (!r.ok || !Array.isArray(r.namen)) continue;
+    for (let i = 0; i < r.namen.length && gezien < (max || 300); i++) {
+      const fp = path.join(cur, r.namen[i].naam);
+      gezien++;
+      if (r.namen[i].map) { stapel.push(fp); continue; }
+      let st; try { st = await loperOp({ op: 'stat', pad: fp }, 5000); } catch (e) { continue; }
+      if (st.ok && st.mtime_ms > nieuwst) nieuwst = st.mtime_ms;
+    }
+  }
+  return nieuwst;
+}
+// Procesgroep signaleren: eigen groep direct; een groep van socev mag 1001 niet signaleren (EPERM), dan via de loper.
+function groepSignaal(pid, sig, loperId) {
+  try { process.kill(-pid, sig); return true; } catch (e) {
+    if (loperId && e && e.code === 'EPERM') {
+      loperOp({ op: 'stop', id: loperId, signaal: sig }, 5000).then(function (r) {
+        if (!r.ok && r.fout !== 'onbekende-job') logError('loper-stop', { name: 'LoperStop', code: r.fout });
+      }).catch(function (err) { logError('loper-stop', err); });
+      return true;
+    }
+    return false;
+  }
+}
+// Levende processen van een agent onder socev (vervangt het environ-lezen van eindLevendeProcessen voor 1002; Fable § 5 #3).
+async function eindLevendeLoper(jobId) {
+  let r; try { r = await loperOp({ op: 'leeft', naam: EIND_MARKER, waarde: String(jobId) }, 5000); } catch (e) { return []; }
+  if (!r.ok || !Array.isArray(r.pids)) return [];
+  const merk = {}; r.pids.forEach(function (x) { merk[x.pid] = x.ppid; });
+  const uit = [];
+  r.pids.forEach(function (x) {
+    const info = eindProcInfo(x.pid);
+    if (!info || !info.cmd || info.zombie || /mcp/i.test(info.cmd)) return;
+    let q = x.pid, n = 0, uitrol = false;
+    while (merk[q] !== undefined && n++ < 30) {
+      const qi = q === x.pid ? info : eindProcInfo(q);
+      if (qi && /uitrol/.test(qi.cmd)) { uitrol = true; break; }
+      q = merk[q];
+    }
+    if (!uitrol) uit.push({ pid: Number(x.pid), cmd: info.cmd.slice(0, 80) });
+  });
+  return uit;
+}
+// Jobmap open voor socev (Fable § 5 #4): bestaande inhoud (uploads 0600 → masker), en een standaard-ACL zodat wat socev
+// in out/ zet voor 1001 leesbaar en wisbaar blijft. Machinekamer-jobmappen blijven dicht (umask 077).
+function loperJobmap(base) {
+  const cp = require('child_process');
+  const ik = typeof process.getuid === 'function' ? process.getuid() : 1001;
+  fs.mkdirSync(path.join(base, 'out'), { recursive: true });
+  cp.execFileSync('setfacl', ['-R', '-m', 'u:' + LOPER_UID + ':rwX,m::rwX', base], { timeout: 15000, stdio: 'ignore' });
+  cp.execFileSync('setfacl', ['-R', '-d', '-m', 'u:' + LOPER_UID + ':rwX,u:' + ik + ':rwX,m::rwX', base], { timeout: 15000, stdio: 'ignore' });
+}
+
+// Storing (dicht bij uitval): box-rij 1×/dag, na LOPER_DAVID_NA_MS één regel aan David per storing.
+const loperStaat = { bereikbaar: null, uid: null, versie: null, lopend: null, ping_t: null, storing_sinds: null, david_gemeld: false,
+  box_dag: null, gestart: 0, geweigerd: 0, fouten: 0, laatste_fout: null };
+function loperStoring(code) {
+  const nuMs = Date.now();
+  loperStaat.fouten++; loperStaat.laatste_fout = { t: new Date(nuMs).toISOString(), code: String(code || '').slice(0, 40) };
+  if (!/^loper-(onbereikbaar|verbinding-weg)$/.test(String(code))) return;
+  if (!loperStaat.storing_sinds) loperStaat.storing_sinds = nuMs;
+  const dag = new Date(nuMs).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  if (loperStaat.box_dag !== dag && SERVER_ECHT) { loperStaat.box_dag = dag; loperBoxRij(code); }
+  if (!loperStaat.david_gemeld && nuMs - loperStaat.storing_sinds > LOPER_DAVID_NA_MS && SERVER_ECHT) {
+    loperStaat.david_gemeld = true;
+    const sinds = new Date(loperStaat.storing_sinds).toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' });
+    try {
+      const k = spawn('python3', ['/opt/data/mk-scripts/bericht.py', '--klasse', 'dringend',
+        'Socev kan zijn gewone gesprekken sinds ' + sinds + ' niet starten (de afgeschermde gebruiker reageert niet). De machinekamer kijkt ernaar; terugzetten kan met SOCEV_LOPER=uit.'],
+        { detached: true, stdio: 'ignore', env: process.env });
+      k.on('error', function (e) { logError('loper-david', e); });
+      k.unref();
+    } catch (e) { logError('loper-david', e); }
+  }
+}
+function loperHersteld() { loperStaat.storing_sinds = null; loperStaat.david_gemeld = false; }
+function loperBoxRij(code) {
+  try {
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const t = fs.readFileSync(pad, 'utf8');
+    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
+    if (!eerste) return;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const rij = '\n## [direct] ' + tijd + ' — socev-loper onbereikbaar: smalle beurten falen dicht (' + code + ', automatisch)\n' +
+      '- status: open\n- van: pod server.js (wv715, loper-klant; hooguit 1×/dag)\n' +
+      '- gemeten: ' + LOPER_SOCK + ' gaf ' + LOPER_HERKANS_MS / 1000 + ' s geen verbinding of de verbinding viel weg midden in een beurt; /health.loper toont de stand.\n' +
+      '- gevolg als er niets gebeurt: elke beurt in de stand (' + JSON.stringify(loperStand()).slice(0, 160) + ') faalt; na 10 min krijgt David één regel.\n' +
+      '- voorstel: `ls -l /run/socev-loper/`, loper-ping met `node /opt/data/claudebot-src/test/loper-klant.js /run/socev-loper/loper.sock \'{"op":"ping"}\'`; ' +
+      'komt hij niet terug: stand terugzetten (`/opt/data/bin/socev-loper.json` → {"sessies":[]}) of SOCEV_LOPER=uit + uitrol, en de herstartlus in het image nagaan (bouwplan sleutelscheiding § 7).\n';
+    const tmp = path.join(path.dirname(pad), '.machinekamer.md.loper-' + crypto.randomBytes(4).toString('hex') + '.tmp');
+    fs.writeFileSync(tmp, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
+    fs.renameSync(tmp, pad);
+  } catch (e) { logError('loper-box', e); }
+}
+function loperPing() {
+  return loperOp({ op: 'ping' }, 5000).then(function (r) {
+    loperStaat.ping_t = new Date().toISOString();
+    loperStaat.bereikbaar = !!r.ok; loperStaat.uid = r.uid; loperStaat.versie = r.versie || null; loperStaat.lopend = r.lopend;
+    if (r.ok && r.uid === LOPER_UID) loperHersteld();
+    return r;
+  }).catch(function (e) {
+    loperStaat.ping_t = new Date().toISOString(); loperStaat.bereikbaar = false;
+    const s = loperStand();
+    if (s.alles || s.agents || s.sessies.length) loperStoring('loper-onbereikbaar');   // alleen ruis als de loper in gebruik is
+    return null;
+  });
+}
+function loperInfo() {
+  const s = loperStand();
+  return { stand: s, bereikbaar: loperStaat.bereikbaar, uid: loperStaat.uid, versie: loperStaat.versie, lopend: loperStaat.lopend,
+    ping_t: loperStaat.ping_t, storing_sinds: loperStaat.storing_sinds ? new Date(loperStaat.storing_sinds).toISOString() : null,
+    gestart: loperStaat.gestart, geweigerd: loperStaat.geweigerd, fouten: loperStaat.fouten, laatste_fout: loperStaat.laatste_fout,
+    nooit: Object.keys(SOCEV_ENV_EXTRA) };
+}
+
+// Loper-job-id: de agentmarker of het /run-job-id plus een volgnummer (een herstart of hervatting is een nieuwe job bij de loper).
+function loperJobId(opts) {
+  const basis = String((opts && opts.env && (opts.env[EIND_MARKER] || opts.env.SOCEV_LOPER_JOB)) || 'run').replace(/[^A-Za-z0-9]/g, '').slice(0, 40) || 'run';
+  return basis + '-' + crypto.randomBytes(4).toString('hex');
+}
+// ChildProcess-achtig object (pid, stdout, stderr, kill, events spawn/exit/close/error) over één socketverbinding per job.
+// Verbinden: tot LOPER_HERKANS_MS opnieuw proberen, dan fout loper-onbereikbaar (nooit terugvallen op 1001, Fable § 5 #10).
+// Valt de verbinding midden in de job weg: opnieuw verbinden en 'volg' vanaf de ontvangen offset; lukt dat niet binnen
+// LOPER_HERKANS_MS of kent de loper de job niet meer, dan eindigt de job zonder code (de beurt faalt zoals bij een gedood proces).
+function loperSpawn(brein, args, o) {
+  const k = new EventEmitter();
+  const { PassThrough } = require('stream');
+  k.loper = true; k.loperId = o.id; k.pid = null;
+  k.stdout = new PassThrough(); k.stderr = new PassThrough();
+  let sock = null, klaar = false, gestart = false, uitB = 0, foutB = 0, stopNaStart = null, rest = '';
+  const t0 = Date.now();
+  function einde(code, sig) {
+    if (klaar) return; klaar = true;
+    if (sock) { try { sock.destroy(); } catch (e) {} }
+    k.emit('exit', code, sig);
+    k.stdout.end(); k.stderr.end();
+    setImmediate(function () { k.emit('close', code, sig); });
+  }
+  function fout(code, uitleg) {
+    if (klaar) return; klaar = true;
+    if (sock) { try { sock.destroy(); } catch (e) {} }
+    loperStoring(code);
+    const e = new Error(uitleg); e.code = code; e.loperFout = code;
+    k.emit('error', e);
+  }
+  function stuur(v) { try { sock.write(JSON.stringify(v) + '\n'); } catch (e) {} }
+  k.kill = function (sig) {
+    const s = sig || 'SIGTERM';
+    if (klaar) return false;
+    if (!gestart) { stopNaStart = s; return true; }
+    loperOp({ op: 'stop', id: o.id, signaal: s }, 5000).catch(function (e) { logError('loper-stop', e); });
+    return true;
+  };
+  function regel(r) {
+    if (r.nr === 1) {   // antwoord op start
+      if (!r.ok) {
+        if (r.fout === 'env-geweigerd') loperStaat.geweigerd++;
+        return fout('loper-' + String(r.fout || 'fout').slice(0, 30), 'De afgeschermde Socev-gebruiker weigerde de start (' + r.fout + (r.namen ? ': ' + r.namen.join(',') : '') + ').');
+      }
+      gestart = true; k.pid = r.pid; loperStaat.gestart++; loperHersteld();
+      k.emit('spawn');
+      if (stopNaStart) k.kill(stopNaStart);
+      return;
+    }
+    if (r.nr === 2) {   // antwoord op volg na een herverbinding
+      if (!r.ok) return einde(null, 'SIGKILL');
+      return;
+    }
+    if (r.id !== o.id) return;
+    if (r.ev === 'uit') { const b = Buffer.from(r.b64 || '', 'base64'); uitB += b.length; k.stdout.write(b); }
+    else if (r.ev === 'fout') { const b = Buffer.from(r.b64 || '', 'base64'); foutB += b.length; k.stderr.write(b); }
+    else if (r.ev === 'einde') {
+      if (r.fout) return fout('loper-spawn', 'De afgeschermde Socev-gebruiker kon ' + brein + ' niet starten (' + r.fout + ').');
+      einde(r.code, r.signaal);
+    }
+  }
+  function verbind(eerste) {
+    const grens = Date.now() + LOPER_HERKANS_MS;
+    (function poging() {
+      if (klaar) return;
+      rest = '';
+      const s = net.connect(LOPER_SOCK);
+      let verbonden = false;
+      s.on('connect', function () {
+        verbonden = true; sock = s;
+        if (eerste) stuur({ op: 'start', nr: 1, id: o.id, brein: brein, args: args, cwd: o.cwd, env: o.env, invoer: '' });
+        else stuur({ op: 'volg', nr: 2, id: o.id, vanaf_uit: uitB, vanaf_fout: foutB });
+      });
+      s.setEncoding('utf8');
+      s.on('data', function (d) {
+        rest += d;
+        let i;
+        while ((i = rest.indexOf('\n')) >= 0) {
+          let r; try { r = JSON.parse(rest.slice(0, i)); } catch (e) { r = null; }
+          rest = rest.slice(i + 1);
+          if (r) regel(r);
+        }
+      });
+      s.on('error', function () { /* close volgt */ });
+      s.on('close', function () {
+        if (klaar) return;
+        if (!verbonden) {
+          if (Date.now() < grens) return setTimeout(poging, 2000).unref();
+          return eerste && !gestart ? fout('loper-onbereikbaar', 'De afgeschermde Socev-gebruiker is niet bereikbaar (' + Math.round((Date.now() - t0) / 1000) + ' s geprobeerd); de beurt is niet gestart.')
+            : (loperStoring('loper-verbinding-weg'), einde(null, 'SIGKILL'));
+        }
+        sock = null;
+        // Verbinding viel weg. Vóór de startbevestiging weten we niet of hij liep: stoppen voor de zekerheid, dan fout.
+        if (!gestart) {
+          loperOp({ op: 'stop', id: o.id, signaal: 'SIGKILL' }, 5000).catch(function () {});
+          return fout('loper-verbinding-weg', 'De verbinding met de afgeschermde Socev-gebruiker viel weg tijdens de start.');
+        }
+        setTimeout(function () { verbind(false); }, 1000).unref();
+      });
+    })();
+  }
+  verbind(true);
+  return k;
+}
 function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
   // opts: { inactMs, maxMs, progress, vroegMs }  — progress wordt live bijgewerkt zodat
   // /result running_ms en last_activity_ms kan teruggeven. vroegMs (alleen achtergrondagents):
@@ -859,6 +1204,17 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // Exact pinnen (4-10-2026). Een nieuwe sessie krijgt hier zelf haar id mee; gemeten met
     // claude 2.1.288: --session-id <uuid> schrijft <uuid>.jsonl en --resume <id> schrijft in
     // datzelfde <id>.jsonl door. Daarmee weet de watchdog precies welk transcript van ons is.
+    // wv715: via de loper (socev, 1002) liggen de transcripts in socev-thuis; een hervatting waarvan het transcript alleen bij de
+    // andere gebruiker ligt (omschakeling of terugdraaien buiten de 03:00-reset) begint vers in plaats van te falen (Fable § 5 #7).
+    const viaLoper = !!(opts && opts.loper);
+    if (sessionId && /^[A-Za-z0-9-]+$/.test(String(sessionId))) {
+      const hier = path.join(viaLoper ? socevProjectDirFor(cwd) : projectDirFor(cwd), sessionId + '.jsonl');
+      const daar = path.join(viaLoper ? projectDirFor(cwd) : socevProjectDirFor(cwd), sessionId + '.jsonl');
+      if (!fs.existsSync(hier) && fs.existsSync(daar)) {
+        schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'sessie-overgezet', naar: viaLoper ? 'socev' : 'claude' }));
+        sessionId = '';
+      }
+    }
     const eigenId = sessionId || crypto.randomUUID();
     if (sessionId) args.push('--resume', sessionId);
     else args.push('--session-id', eigenId);
@@ -878,11 +1234,14 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // run 3 s en schreef dan "no stdin data received in 3s" op stderr (gemeten). Niemand schrijft naar child.stdin.
     // stdout/stderr blijven pipes: gemeten dat de CLI een dode pipe overleeft (wees na een herstart van server.js, exit 0,
     // transcript compleet); test/cli-dode-pipe.sh herhaalt die meting bij een nieuwe CLI-versie.
-    const child = spawn('claude', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    weesSpawnMeld(opts, child, eigenId, path.join(projectDirFor(cwd), eigenId + '.jsonl'));
+    // wv715: smal + stand → als socev via de loper (zelfde contract als een ChildProcess; kill gaat via de loper).
+    const projDir = viaLoper ? socevProjectDirFor(cwd) : projectDirFor(cwd);
+    const child = viaLoper ? loperSpawn('claude', args, { cwd: cwd, env: env, id: loperJobId(opts) })
+      : spawn('claude', args, { cwd: cwd, env: env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    if (viaLoper) child.once('spawn', function () { weesSpawnMeld(opts, child, eigenId, path.join(projDir, eigenId + '.jsonl')); });
+    else weesSpawnMeld(opts, child, eigenId, path.join(projDir, eigenId + '.jsonl'));
     const t0 = Date.now();
     let out = '', err = '', lastStdout = t0, killedReason = null;
-    const projDir = projectDirFor(cwd);
 
     // Incident 4-10 21:39 (cde3fa2108aef3c2, 1e1e03989a58b11f): de oude heuristiek pinde "het
     // eerste nieuwe .jsonl" en nam zo het transcript van een buurman die in dezelfde tik van 30 s
@@ -892,12 +1251,24 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     const pinned = path.join(projDir, eigenId + '.jsonl');
     const pinnedDir = path.join(projDir, eigenId);
 
+    // wv715: de submap <id>/ van een socev-sessie is voor 1001 gewoon doorloopbaar (standaard-ACL u:claude:r-x in socev-thuis;
+    // gemeten 22-10 met een echte subagent als 1002). Alleen als dat ooit EACCES geeft, meet de loper (map/stat), asynchroon;
+    // de watchdog gebruikt dan de laatst gemeten waarde.
+    let loperSubM = 0, loperSubBezig = false;
+    function subDicht() {
+      try { fs.accessSync(pinnedDir, fs.constants.R_OK | fs.constants.X_OK); return false; } catch (e) { return !!e && e.code === 'EACCES'; }
+    }
     function transcriptMtime() {
       let m = 0;
       try { m = fs.statSync(pinned).mtimeMs; } catch (e) {}
       if (m > t0) transcriptMeterBewezen[projDir] = true;
+      if (viaLoper && !loperSubBezig && subDicht()) {
+        loperSubBezig = true;
+        loperNieuwsteMtime(pinnedDir, 300).then(function (x) { if (x > loperSubM) loperSubM = x; }).catch(function () {})
+          .then(function () { loperSubBezig = false; });
+      }
       // Ruime grens: tool-results/ telt mee in dezelfde loop en mag subagents/ niet wegdrukken.
-      return Math.max(m, newestMtimeIn(pinnedDir, 2000));
+      return Math.max(m, newestMtimeIn(pinnedDir, 2000), loperSubM);
     }
 
     function killGroup(reason) {
@@ -993,7 +1364,11 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     child.on('exit', function (code) {
       setTimeout(function () { finalize(code); }, 10000);
     });
-    child.on('error', function (e) { finish({ ok: false, error: String(e) }); });
+    child.on('error', function (e) {
+      // wv715: een loperfout (onbereikbaar, geweigerd) met een eigen code en een zin voor de storingsmelding
+      if (e && e.loperFout) return finish({ ok: false, error: e.loperFout, output: String(e.message || ''), running_ms: Date.now() - t0 });
+      finish({ ok: false, error: String(e) });
+    });
   });
 }
 
@@ -1040,6 +1415,10 @@ function isLimietFout(tekst) {
 }
 
 function runCodex(prompt, threadId, outdir, cwd, model, opts) {
+  // wv715 (voorwaarde d): codex niet als socev — de login-kopie in socev-thuis/.codex kan bij een refresh de 1001-login ongeldig
+  // maken. Een beurt die via de loper moet, draait dus niet op codex (dicht, nooit als 1001).
+  if (opts && opts.loper) return Promise.resolve({ ok: false, error: 'codex-smal-uit', runtime: 'codex',
+    output: 'Het codex-brein draait niet voor afgeschermde Socev-gesprekken (wv715); kies claude.' });
   const inactMs = (opts && opts.inactMs) || INACT_MS;
   const maxMs = (opts && opts.maxMs) || FG_MAX_MS;
   const progress = (opts && opts.progress) || {};
@@ -1878,6 +2257,12 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     // wv424: buiten de machinekamer geen beheersleutels (zie MK_SESSIES).
     if (!lezen && !runIsMk(chatId, ws)) socevSmalOpts(runOpts, chatId);
     j.omgeving = lezen ? 'lezen' : (runIsMk(chatId, ws) ? 'mk' : 'smal');
+    // wv715: smal en in de stand → als socev via de loper; de jobmap gaat dan open voor socev (faalt dat: de beurt faalt, dicht)
+    if (j.omgeving === 'smal' && loperVoorRun(chatId, ws)) {
+      runOpts.loper = true; j.gebruiker = 'socev';
+      runOpts.env = Object.assign({}, runOpts.env || {}, { SOCEV_LOPER_JOB: jobId });
+      loperJobmap(base);
+    }
     if (j.app) runOpts.opSpawn = function (i) { appLopendSpawn(jobId, i); };   // wv716: pid en transcript in beurt-lopend.json
     const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, lezen ? base : space.dir, runOpts);
     if (lezen) r.gereedschap = 'lezen';
@@ -2012,10 +2397,10 @@ function eindSlaap(ms) { return new Promise(function (r) { setTimeout(r, ms); })
 // gewone prompt (ook onze hervatprompt) begint een nieuwe beurt: taken van een vorige
 // `claude -p` zijn bij diens einde al gedood of afgewacht. Fail-open: geen of onleesbaar
 // transcript = niets gevonden (de andere twee toetsen blijven staan).
-function eindOpenTaken(cwd, sessionId) {
+function eindOpenTaken(cwd, sessionId, viaLoper) {
   if (!sessionId || !/^[A-Za-z0-9-]+$/.test(String(sessionId))) return [];
   let tekst;
-  try { tekst = fs.readFileSync(path.join(projectDirFor(cwd), sessionId + '.jsonl'), 'utf8'); } catch (e) { return []; }
+  try { tekst = transcriptLees(path.join(viaLoper ? socevProjectDirFor(cwd) : projectDirFor(cwd), sessionId + '.jsonl')); } catch (e) { return []; }
   let open = {};
   const regels = tekst.split('\n');
   for (let i = 0; i < regels.length; i++) {
@@ -2173,15 +2558,19 @@ async function eindcontrole(jobId, keuze, r, outdir, cwd, runOpts, t0, maxMs, en
   // Processen die de agent al in een hervatprompt kreeg voorgelegd: liepen die na zijn
   // eindrapport bewust door (bv. een daemon), dan niet nóg eens afwachten.
   const bekend = {};
-  function nieuwe() { return eindLevendeProcessen(jobId).filter(function (p) { return !bekend[p.pid]; }); }
+  // wv715: processen onder socev ziet eindLevendeProcessen niet (environ dicht): die komen via de loper ('leeft').
+  async function nieuwe() {
+    const l = eindLevendeProcessen(jobId).concat(runOpts.loper ? await eindLevendeLoper(jobId) : []);
+    return l.filter(function (p) { return !bekend[p.pid]; });
+  }
   let wachtBudget = INACT_MS;
   try {
     for (let ronde = 0; ; ronde++) {
       if (!r || !r.ok) return r;   // fouten en afbrekingen houden hun eigen melding
-      const taken = (r.runtime === 'claude') ? eindOpenTaken(cwd, r.session_id) : [];
+      const taken = (r.runtime === 'claude') ? eindOpenTaken(cwd, r.session_id, runOpts.loper) : [];
       const wachtzin = eindIsWachtzin(r.output);
-      let procs = nieuwe();
-      if (procs.length) { await eindSlaap(EIND_BEZINK_MS); procs = nieuwe(); }
+      let procs = await nieuwe();
+      if (procs.length) { await eindSlaap(EIND_BEZINK_MS); procs = await nieuwe(); }
       if (!taken.length && !procs.length && !wachtzin) {
         if (ronde > 0) { entry.eindcontrole = 'hervat ' + ronde + 'x, afgerond'; saveAgents(); }
         return r;
@@ -2202,7 +2591,7 @@ async function eindcontrole(jobId, keuze, r, outdir, cwd, runOpts, t0, maxMs, en
         entry.eindcontrole = 'wacht op ' + procs.length + ' proces(sen)'; saveAgents();
         while (procs.length && Date.now() + EIND_POLL_MS <= grens) {
           await eindSlaap(EIND_POLL_MS);
-          procs = nieuwe();
+          procs = await nieuwe();
           progress.running_ms = Date.now() - t0; progress.last_activity_ms = 0;
         }
         gewachtMs = Date.now() - start;
@@ -2317,13 +2706,19 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     runOpts.env[EIND_MARKER] = jobId;
     // wv211: groepsleider en transcript in het register, zodat een herstart van server.js een doorlevende agent herkent.
     // Elke (her)start overschrijft ze, ook de codex-terugval (dan transcript null; Fable K2).
-    runOpts.opSpawn = function (i) { entry.pid = i.pid; entry.sessie = i.sessie; entry.transcript = i.transcript; saveAgents(); };
+    runOpts.opSpawn = function (i) {
+      entry.pid = i.pid; entry.sessie = i.sessie; entry.transcript = i.transcript;
+      entry.loper_id = i.loper_id || null; entry.pid_start = i.pid_start || null; entry.gebruiker = i.loper_id ? 'socev' : 'claude';   // wv715
+      saveAgents();
+    };
     if (keuze.advisor) runOpts.advisor = keuze.advisor;   // wv479: gaat mee in de hervattingen van de eindcontrole (runOpts)
     if (j.beperkt === 'auto') { runOpts.disallowedTools = AUTO_AGENT_VERBODEN; runOpts.envMag = AUTO_AGENT_ENV_MAG; }
     // wv424: alleen een machinekamer:-agent met API_SECRET krijgt de volledige omgeving; Socevs eigen agents (SOCEV_AGENT_SLEUTEL)
     // en alle andere labels draaien smal, ook in de hervatting van de eindcontrole (runOpts gaat mee).
     // Geen SOCEV_ENV_EXTRA voor agents: chat_id is daar vrij invulbaar (Fable wv424 #1: chat_id 'cijfer-meester' gaf anders de Supabase-MCP).
     else if (!agentIsMk(entry.label, j.smal, j.beperkt)) socevSmalOpts(runOpts, '');
+    // wv715: smalle agents (ook beperkt=auto) als socev via de loper als de stand 'agents' of 'alles' zegt; jobmap open, anders dicht
+    if (runOpts.envMag && loperVoorAgent()) { runOpts.loper = true; loperJobmap(base); }
     // Vroege levenscontrole (alleen de eerste run; hervattingen in de eindcontrole niet): geen
     // teken van leven binnen VROEG_LEVEN_MS -> procesgroep weg en precies één nieuwe start, weer
     // via de startspreiding. Komt ook die niet op gang, dan een duidelijke foutmelding.
@@ -2411,7 +2806,8 @@ function weesEindtekst(a) {
     if (a.runtime === 'codex') { try { return { tekst: fs.readFileSync(path.join(IO, a.job_id, 'codex-last.md'), 'utf8').trim() }; } catch (e) {} }
     return { tekst: '' };
   }
-  let regels; try { regels = fs.readFileSync(a.transcript, 'utf8').split('\n'); } catch (e) { return { tekst: '' }; }
+  // wv715: een socev-transcript via de loper; appVerlorenAfronden leest het vooraf asynchroon (a.tekst_vooraf)
+  let regels; try { regels = (typeof a.tekst_vooraf === 'string' ? a.tekst_vooraf : transcriptLees(a.transcript)).split('\n'); } catch (e) { return { tekst: '' }; }
   if (a.anker) regels = transcriptBeurtDeel(regels, a.anker);   // wv716 C1: alleen het deel van DEZE beurt
   let msgId = null; const delen = [];
   for (let i = regels.length - 1; i >= 0; i--) {
@@ -2467,7 +2863,7 @@ function transcriptBeurtDeel(regels, anker) {
 function weesStop(a, reden) {
   // Reden in het register (Fable K1): een tweede herstart tussen SIGTERM en SIGKILL verliest hem anders.
   a.wees_reden = reden; a.wees_kill_t = Date.now(); saveAgents();
-  try { process.kill(-a.pid, 'SIGTERM'); } catch (e) {}
+  groepSignaal(a.pid, 'SIGTERM', a.loper_id);   // wv715: een socev-groep via de loper
 }
 
 // wv216 (Fable-review diff wv211 K3): afronden en afleveren gescheiden. Vroeger bleef een klare wees op een PASSIEVE pod
@@ -2555,10 +2951,10 @@ function weesRonde() {
       let m = 0; try { m = fs.statSync(a.transcript).mtimeMs; } catch (e) {}
       if (m) j.progress.last_activity_ms = Math.max(0, nu - m);
     }
-    if (weesLeeft(a.pid, id)) {
+    if (weesLeeft(a.pid, id, a)) {
       // De watchdog is met het oude server.js gestorven: zonder deze grens bezet een hangende wees eeuwig een slot.
       if (!a.wees_reden && a.max_minuten && nu - (a.started || nu) > a.max_minuten * 60 * 1000 + WEES_POLL_MS) weesStop(a, 'bovengrens');
-      else if (a.wees_reden && nu - (a.wees_kill_t || 0) > KILL_GRACE_MS) { try { process.kill(-a.pid, 'SIGKILL'); } catch (e) {} }
+      else if (a.wees_reden && nu - (a.wees_kill_t || 0) > KILL_GRACE_MS) groepSignaal(a.pid, 'SIGKILL', a.loper_id);
       continue;
     }
     // Afronden ook als passief (wv216); het rapport gaat alleen als primair de deur uit (weesAfleveren toetst dat per
@@ -2625,10 +3021,10 @@ async function appVerlorenRondeKern() {
       } else {
         if (!x.stop_t) {
           appLopendZet(id, function (y) { return y ? Object.assign(y, { stop_t: nu }) : null; });
-          try { process.kill(-x.pid, 'SIGTERM'); } catch (e) {}
+          groepSignaal(x.pid, 'SIGTERM', x.loper_id);
           appVerlorenLog(id, x.kanaal, 'cli boven de grens: SIGTERM naar procesgroep ' + x.pid);
         } else if (nu - x.stop_t > KILL_GRACE_MS) {
-          try { process.kill(-x.pid, 'SIGKILL'); } catch (e) {}
+          groepSignaal(x.pid, 'SIGKILL', x.loper_id);
           appVerlorenLog(id, x.kanaal, 'cli boven de grens: SIGKILL naar procesgroep ' + x.pid);
         }
         continue;
@@ -2639,7 +3035,9 @@ async function appVerlorenRondeKern() {
   return n;
 }
 async function appVerlorenAfronden(id, x) {
-  const e = weesEindtekst({ transcript: x.transcript || null, runtime: x.runtime, job_id: id, started: Number(x.gestart) || 0, anker: path.join(IO, id) + path.sep });
+  let vooraf;   // wv715: socev-transcript (groot, hoofdkanaal) asynchroon via de loper, niet synchroon in de lus
+  if (x.transcript && socevPad(x.transcript)) { try { vooraf = await transcriptLeesAsync(x.transcript); } catch (err) { vooraf = ''; logError('app-verloren-lees', err); } }
+  const e = weesEindtekst({ transcript: x.transcript || null, tekst_vooraf: vooraf, runtime: x.runtime, job_id: id, started: Number(x.gestart) || 0, anker: path.join(IO, id) + path.sep });
   const ok = !!(e.tekst && !e.limiet);
   // Bestanden eerst, en hun namen in het register: lukt het app-log hierna niet, dan zijn ze al verhuisd en hergebruikt de
   // volgende ronde de namen (een tweede appBewaar vindt niets meer).
@@ -2718,7 +3116,7 @@ function appWeesVasthouden() {
           if (leeft && Date.now() < plafond) return;
           if (leeft && !gekild && x.pid_start && rolPrimair()) {
             gekild = true;
-            try { process.kill(-x.pid, 'SIGKILL'); } catch (e) {}
+            groepSignaal(x.pid, 'SIGKILL', x.loper_id);
             return appWeesLog(id, x, 'plafond: SIGKILL naar procesgroep ' + x.pid);
           }
           clearInterval(t); delete appWeesVast[id];
@@ -2744,6 +3142,7 @@ function appWeesVasthouden() {
     schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'wees-herkend', job_id: id, pid: a.pid }));
   }
   setInterval(function () { try { weesRonde(); } catch (e) { logError('wees-ronde', e); } }, WEES_POLL_MS).unref();
+  setTimeout(loperPing, 5000).unref(); setInterval(loperPing, 60 * 1000).unref();   // wv715: /health.loper en storing
   setTimeout(function () { try { appVerlorenRonde(); } catch (e) { logError('app-verloren', e); } }, 15 * 1000).unref();   // wv716
 })();
 
@@ -2935,6 +3334,8 @@ function handleRequest(req, res) {
       bewaker: bewakerInfo(),
       // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
       detector: argvDetInfo(),
+      // wv715: de socev-loper (smalle gesprekken als uid 1002): stand, bereikbaar (ping elke minuut), lopend, fouten
+      loper: loperInfo(),
       // wv716: rss/heap en lusvertraging (max, p99) van de laatste volle minuut; null in de eerste minuut na de start
       proces: procesInfo()
     }));
@@ -3144,6 +3545,7 @@ function handleRequest(req, res) {
         rapport: a.rapport,
         eindcontrole: a.eindcontrole,
         omgeving: a.omgeving,   // wv424: mk | smal | auto (geen inhoud, alleen de klasse)
+        gebruiker: a.gebruiker || (a.status === 'pending' ? undefined : 'claude'),   // wv715: socev = via de loper (uid 1002)
         model: a.model, advisor: a.advisor, advisor_proef: a.advisor_proef,   // wv479
         herstart: a.herstart,
         error: a.error,   // foutcode (wv51); de tikker gebruikt hem als /result kwijt is
@@ -5559,7 +5961,7 @@ function appLopendSpawn(jobId, i) {
   const st = appProcStat(i && i.pid);
   appLopendZet(jobId, function (x) {
     if (!x) return null;
-    return Object.assign(x, { pid: i.pid, pid_start: st ? st.start : null, transcript: i.transcript || null,
+    return Object.assign(x, { pid: i.pid, pid_start: st ? st.start : null, transcript: i.transcript || null, loper_id: i.loper_id || null,
       runtime: i.transcript ? 'claude' : (x.runtime === 'gemini' ? 'gemini' : 'codex') });
   });
 }
@@ -11865,8 +12267,30 @@ function telVerbindingProces(req) {
   }
   return null;
 }
+// wv715: een verbinding van een socev-proces (uid 1002): /proc/<pid>/fd en environ zijn voor 1001 dicht. De uid van de socket
+// staat wel in /proc/net/tcp; is er precies één lopende [AUTO]-beurt via de loper, dan is het die.
+function telVerbindingUid(req) {
+  const s = req && req.socket;
+  if (!s) return null;
+  const hex = function (n) { return ('0000' + Number(n).toString(16).toUpperCase()).slice(-4); };
+  const zijn = ':' + hex(s.remotePort), onze = ':' + hex(s.localPort);
+  let uid = null;
+  ['/proc/net/tcp', '/proc/net/tcp6'].some(function (f) {
+    let t = ''; try { t = fs.readFileSync(f, 'utf8'); } catch (e) { return false; }
+    return t.split('\n').slice(1).some(function (r) {
+      const k = r.trim().split(/\s+/);
+      if (k.length > 9 && k[1].slice(-5) === zijn && k[2].slice(-5) === onze) { uid = Number(k[7]); return true; }
+      return false;
+    });
+  });
+  return uid;
+}
 function telBeurtVanVerzoek(req) {
   const pid = telVerbindingProces(req);
+  if (!pid && telVerbindingUid(req) === LOPER_UID) {
+    const tel = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j && j.app && j.app.soort === 'tel' && j.status === 'running' && j.gebruiker === 'socev'; });
+    return tel.length === 1 ? { beurt: tel[0] } : { fout: tel.length ? 'meer dan één tel-beurt via de loper' : 'geen tel-beurt via de loper' };
+  }
   if (!pid) return { fout: 'proces niet gevonden' };
   let env;
   try { env = fs.readFileSync('/proc/' + pid + '/environ').toString('latin1'); } catch (e) { return { fout: 'omgeving onleesbaar' }; }

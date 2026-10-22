@@ -35,6 +35,9 @@ const ctx = {
   // wv364: tussenstand na herstart ook naar de tab Bestanden; de stub kijkt of out/ op dat moment nog bestaat
   appBewaarAgent: function (id, e, outdir, rapport, ok, naHerstart) { bewaard.push({ id: id, outBestaat: fs.existsSync(path.join(outdir, 'rapport.md')), rapport: rapport, naHerstart: naHerstart, naRapport: verzonden.length }); },
   projectDirFor: function () { return werk; },
+  // wv715: transcript lezen (socev via de loper; hier gewoon) en processen onder socev (hier geen)
+  transcriptLees: function (p) { return fs.readFileSync(p, 'utf8'); }, socevProjectDirFor: function () { return werk; },
+  eindLevendeLoper: function () { return Promise.resolve([]); },
   saveAgents: function () {}, schrijfLog: function () {}, logError: function (w, e) { console.log('logError', w, e); },
   runBrein: null,
   // rolwachter (uitwijk stap 3): de toets draait als primaire kant
