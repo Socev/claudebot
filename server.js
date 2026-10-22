@@ -13611,7 +13611,7 @@ const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
   'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'ontkoppel'];
 const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'verrijk-open', 'verrijk-zet',
-  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien'];   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
+  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'geld-briefing'];   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
 const BANK_TERUG_PER_UUR = 30;
 const bankTerugTijden = [];
 let bankSleutelCache = null;   // { w: {sleutel, app_id, bunq_sleutel}, tot }; 10 minuten, alleen in het geheugen
@@ -13712,6 +13712,11 @@ function bankBoxRij(m) {
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: de tabel op de vaste-lastenpagina (20_Prive/Financien) blijft op de vorige stand; elke ronde (07:00/18:00) probeert het opnieuw tot het lukt.\n' +
       '- voorstel: `python3 .claude/skills/bank-lezen/bank.py vaste-lasten maand=' + String(m.maand || 'JJJJ-MM').slice(0, 7) + '` (API_SECRET) draaien en de fout nagaan (markeringen op de pagina, archief); daarna dezelfde opdracht met `vault=ja`. Geheugen van de ronde: `/opt/data/bank/vaste-lasten-ronde.json`.\n'
+      : m.bron === 'geld' ? '\n## [direct] ' + tijd + ' — geld deze maand ' + String(m.maand || '').slice(0, 7) + ': blok voor de briefing niet klaargezet (bankluis, automatisch)\n' +
+      '- status: open\n- van: pod geld-briefing (server.js geldBriefingRonde na de bank-ronde van 18:00, dag vóór de eerste werkdag na de 24e; hooguit 1× per maand per reden)\n' +
+      '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: geen blok "Geld deze maand" onder het ochtendbericht; elke avondronde (18:00) probeert het opnieuw voor de volgende werkdag, tot het einde van de maand. De App Financiën werkt gewoon.\n' +
+      '- voorstel: `/opt/data/bank/geld-briefing.json` (600) en api.log (`opdracht=geld-briefing`) nalopen; de signalen zelf: bank-lezer `geld-briefing --peil JJJJ-MM-DD` op een VACUUM INTO-kopie. Geheugen onleesbaar: het bestand wegzetten geeft één eerste-keer-blok.\n'
       : m.bron === 'archief' ?'\n## [direct] ' + tijd + ' — bank-transactiedatabase: schrijven mislukt (bankluis, automatisch)\n' +
       '- status: open\n- van: pod bankluis (bank-archief.js via bank-lezer.js archiefVeilig; hooguit 1×/dag)\n' +
       '- gemeten: ' + String(m.tekst || '').slice(0, 200) + '\n' +
@@ -14033,6 +14038,11 @@ async function bankRonde() {
     const v = await vasteLastenRonde();
     if (v.gedaan || v.fout) uit.vaste_lasten = { maand: v.maand, uitkomst: v.uitkomst, verschillen: v.verschillen, fout: v.fout };
   } catch (e) { logError('vaste-lasten-ronde', e); uit.vaste_lasten = { fout: 'vaste-lasten-ronde faalde in de pod' }; }
+  // wv777: de avond vóór de eerste werkdag na de 24e de geldsignalen voor de briefing (alleen aantallen naar n8n; een fout raakt de ronde niet)
+  if (uit.ok) try {
+    const g = await geldBriefingRonde();
+    if (g.gedaan || g.fout) uit.geld = { maand: g.maand, regels: g.regels, kaarten: g.kaarten, fout: g.fout };
+  } catch (e) { logError('geld-briefing', e); uit.geld = { fout: 'geld-briefing faalde in de pod' }; }
   // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
   (r.box || []).forEach(function (m) {
     const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')
@@ -14367,6 +14377,134 @@ async function vasteLastenRonde(o) {
   staatZet();
   schrijfLog(nu() + ' bank ' + velden({ opdracht: 'vaste-lasten-ronde', ok: true, maand: mnd, uitkomst: uitkomst, verschillen: verschillen }));
   return { gedaan: true, maand: mnd, uitkomst: uitkomst, verschillen: verschillen };
+}
+// ── wv777: "Geld deze maand" in de briefing (idee 16 stap C; bouwplan Privé-financiën § 12) ──
+// Na de bank-ronde van 18:00, op de dag vóór de eerste werkdag na de 24e (of later in de maand als het misliep): de signalen van
+// financien-app.js briefing (geen taalmodel), alleen wat nog niet gemeld is (geheugen BANK_DIR/geld-briefing.json, 600), als één
+// rij in de n8n-tabel ochtend_buffer (bron 'geld', datum = de briefingdag). De Dagelijkse briefing zet die regels letterlijk onder
+// het ochtendbericht en geeft ze nooit aan het taalmodel (de briefingsessie gaat 's nachts naar de vault). Geen nieuwe signalen =
+// geen rij. Kaarten (dekking, dubbel) via mk_voor_jou_zet. Nooit een bericht; een fout = één box-rij per maand per reden.
+const GELD_STAAT = path.join(BANK_DIR, 'geld-briefing.json');
+const GELD_KLOK_MS = 30 * 60 * 1000;   // podklok mag zoveel afwijken van n8n (Fable wv777 #4: de rij moet de datum van n8n treffen)
+let geldGeheugen = { klaar: null, fouten: {} };   // als het geheugenbestand niet schrijfbaar is
+function geldF() { return require(path.join(__dirname, 'financien-app.js')); }
+function geldYmd(ms) { return new Date(ms).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
+function geldStaatLees() {
+  let t;
+  try { t = fs.readFileSync(GELD_STAAT, 'utf8'); } catch (e) { return e.code === 'ENOENT' ? { ok: true, s: null } : { ok: false, fout: 'geheugen niet leesbaar (' + (e.code || 'fout') + ')' }; }
+  try { const s = JSON.parse(t); return s && typeof s === 'object' && !Array.isArray(s) ? { ok: true, s: s } : { ok: false, fout: 'geheugen geen object' }; }
+  catch (e) { return { ok: false, fout: 'geheugen onleesbaar (geen JSON)' }; }   // Fable #14: nooit als "leeg" behandelen
+}
+function geldStaatZet(s) {
+  const tmp = GELD_STAAT + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(s), { mode: 0o600 });
+  fs.renameSync(tmp, GELD_STAAT);
+}
+// tijd van n8n (Date-kop van een kleine leesvraag op de tabel); de briefing kijkt met de klok van n8n naar de datum van de rij
+async function geldN8nTijd() {
+  const b = appN8nBasis(), k = process.env.N8N_API_KEY;
+  if (!b || !k) throw new Error('n8n-API niet ingesteld');
+  const r = await fetch(b + '/api/v1/data-tables/' + APP_MELD_TABEL + '/rows?limit=1', { headers: { 'X-N8N-API-KEY': k, accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+  await r.text().catch(function () {});
+  if (!r.ok) throw new Error('n8n http ' + r.status);
+  const ms = Date.parse(r.headers.get('date') || '');
+  if (!Number.isFinite(ms)) throw new Error('n8n gaf geen tijd');
+  return ms;
+}
+async function geldRijZet(datum, tekst) {
+  const body = { filter: { type: 'and', filters: [{ columnName: 'bron', condition: 'eq', value: 'geld' }] }, data: { bron: 'geld', datum: datum, tekst: tekst }, returnData: true };
+  const poging = function () { return appN8nZend('POST', '/data-tables/' + APP_MELD_TABEL + '/rows/upsert', body); };
+  const r = await poging().catch(function () { return new Promise(function (ok) { setTimeout(ok, 2000); }).then(poging); });
+  const rij = Array.isArray(r) ? r[0] : r && Array.isArray(r.data) ? r.data[0] : null;
+  if (!rij || rij.bron !== 'geld' || rij.datum !== datum) throw new Error('upsert gaf geen rij terug');
+}
+// De kaart. Geen paden, wv-nummers of verwijzingen (mk_voor_jou_zet weigert die); de stappen staan in de kaart zelf.
+function geldKaart(s, peil) {
+  const sl = 'geld-' + crypto.createHash('sha256').update(String(s.sleutel)).digest('hex').slice(0, 12);
+  const p = { sleutel: sl, soort: 'doen', waar: 'overal', prive: true, duur_min: 5, volgorde: 40, herkomst: { handmatig: 'geld-briefing' } };
+  const eind = (function () { const d = new Date(peil.slice(0, 7) + '-01T12:00:00Z'); d.setUTCMonth(d.getUTCMonth() + 1); d.setUTCDate(0); return d.toISOString().slice(0, 10); })();
+  if (s.kaart === 'dekking') return Object.assign(p, { titel: 'Vaste-lastenrekening — bijstorten vóór de 1e', volgorde: 10, deadline: eind,
+    waarom: String(s.zin) + ' Op de 1e gaan onder meer hypotheek en lease eraf; staat er dan te weinig op, dan kan een incasso mislukken.',
+    stappen: ['Maak vóór de 1e het tekort over naar de gezamenlijke vaste-lastenrekening' + (s.bedrag > 0 ? ' (minstens ' + bankEur(s.bedrag) + ')' : '') + ', bijvoorbeeld vanaf je eigen bunq-rekening.',
+      'Klaar als het geld erop staat; zet deze kaart dan op gedaan.'],
+    meting: bankNuKort() + ': ' + String(s.zin) });
+  const dl = geldYmd(Date.parse(peil + 'T12:00:00Z') + 30 * 86400000);
+  if (s.paypal) return Object.assign(p, { titel: 'PayPal — ' + (s.aantal || 2) + ' keer ' + bankEur(s.bedrag) + ' per maand nakijken', deadline: dl,
+    waarom: String(s.zin) + ' Socev ziet alleen dat PayPal dit bedrag elke maand meer dan eens afschrijft, niet voor welke dienst.',
+    stappen: ['Open PayPal (app of paypal.com) en ga naar Instellingen › Betalingen › Automatische betalingen beheren.',
+      'Zoek de diensten van ' + bankEur(s.bedrag) + ' per maand.', 'Zijn het aparte abonnementen die je wilt houden: zet deze kaart op gedaan.',
+      'Is er één dubbel of overbodig: zeg hem op bij de dienst zelf of daar in PayPal.'],
+    meting: bankNuKort() + ': ' + String(s.zin) });
+  return Object.assign(p, { titel: String(s.naam || 'Abonnement').slice(0, 40) + ' — op twee rekeningen nakijken', deadline: dl,
+    waarom: String(s.zin) + ' Socev ziet alleen de afschrijvingen, niet of het om twee contracten gaat.',
+    stappen: ['Open in de Socev-app Apps › Financiën en kijk onder "Om naar te kijken" welke rekeningen het zijn.',
+      'Kijk bij de aanbieder of er twee contracten of abonnementen lopen.', 'Is er één overbodig: zeg hem op bij de aanbieder; anders zet je deze kaart op gedaan.'],
+    meting: bankNuKort() + ': ' + String(s.zin) });
+}
+function bankEur(n) { const v = Math.abs(Math.round(n * 100) / 100).toFixed(2).split('.'); return '€ ' + v[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + v[1]; }
+// o.datum, o.uur, o.nuMs, o.n8nMs alleen voor de toets, nooit uit een verzoek
+async function geldBriefingRonde(o) {
+  o = o || {};
+  const F = geldF();
+  const nuMs = o.nuMs || Date.now();
+  const vandaag = o.datum || geldYmd(nuMs);
+  const uur = o.uur != null ? o.uur : Number(new Date(nuMs).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false }));
+  if (!(uur >= 12)) return { gedaan: false, reden: 'alleen na de avondronde' };
+  const morgen = geldYmd(Date.parse(vandaag + 'T12:00:00Z') + 86400000), M = morgen.slice(0, 7), doel = F.briefingDag(M);
+  if (!doel || morgen < doel) return { gedaan: false, reden: 'nog niet' };
+  if (!F.werkdag(morgen)) return { gedaan: false, reden: 'morgen geen werkdag', maand: M };
+  const st = geldStaatLees();
+  const fout = function (reden, s) {
+    const k = M + '|' + reden.replace(/\d+/g, '#');
+    const eerste = !(s && s.fouten && s.fouten[k]) && !geldGeheugen.fouten[k];
+    geldGeheugen.fouten[k] = true;
+    if (s && st.ok) { s.fouten = s.fouten || {}; Object.keys(s.fouten).forEach(function (x) { if (x.slice(0, 7) < M) delete s.fouten[x]; }); s.fouten[k] = new Date(nuMs).toISOString(); try { geldStaatZet(s); } catch (e) {} }
+    if (eerste) bankBoxRij({ bron: 'geld', maand: M, tekst: reden });
+    schrijfLog(nu() + ' bank ' + velden({ opdracht: 'geld-briefing', ok: false, maand: M, fout: reden }));
+    return { gedaan: false, maand: M, fout: reden };
+  };
+  if (!st.ok) return fout(st.fout, null);
+  const s = st.s || {};
+  if (s.maand_klaar === M || geldGeheugen.klaar === M) {
+    if (Array.isArray(s.kaarten_open) && s.kaarten_open.length) await geldKaarten(s);
+    return { gedaan: false, reden: 'al gedaan', maand: M };
+  }
+  let n8nMs = o.n8nMs;
+  if (n8nMs == null) { try { n8nMs = await geldN8nTijd(); } catch (e) { return fout('n8n niet bereikbaar voor de tijd (' + String(e.message || e).slice(0, 40) + ')', s); } }
+  if (Math.abs(n8nMs - nuMs) > GELD_KLOK_MS) return fout('podklok wijkt meer dan 30 minuten af van n8n; geen blok', s);
+  const args = ['geld-briefing', '--peil', vandaag];
+  if (typeof s.laatste_peil === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s.laatste_peil)) args.push('--vorige', s.laatste_peil);
+  const r = await bankKind(args);
+  const j = r.j || {};
+  if (j.ok !== true) return fout('geld-briefing gaf geen uitkomst: ' + String(j.fout || 'exit ' + r.code).replace(/\d{6,}/g, '#').slice(0, 100), s);
+  if (j.geen) return { gedaan: false, reden: 'geen vaste-lastenrekening', maand: M };
+  if (Array.isArray(j.fouten) && j.fouten.length) return fout('onderdelen faalden: ' + j.fouten.join(', ').slice(0, 80), s);
+  // poort (Fable #3): de vaste-lastenrekening moet recent gelezen zijn (niet: alle banken)
+  if (!(typeof j.nieuwste_post === 'string' && j.nieuwste_post >= geldYmd(Date.parse(vandaag + 'T12:00:00Z') - 4 * 86400000)))
+    return fout('vaste-lastenrekening niet recent gelezen (nieuwste geboekte post ouder dan 4 dagen)', s);
+  // eerste keer = nog nooit een maand gedaan (een eerdere fout schrijft ook het geheugen, dus niet op "bestand bestaat" toetsen)
+  const n = F.briefingNieuw(j, s.gemeld || {}, { eersteKeer: !s.laatste_peil && !s.gemeld });
+  const tekst = F.briefingTekst(n.nieuw);
+  if (tekst) { try { await geldRijZet(morgen, tekst); } catch (e) { return fout('regel in de ochtendbuffer niet gezet (' + String(e.message || e).slice(0, 40) + ')', s); } }
+  // geheugen direct na de gelukte rij (Fable #2): anders rekent de volgende avond opnieuw en komt er een tweede blok
+  const kaarten = n.nieuw.filter(function (x) { return x.kaart; }).map(function (x) { return geldKaart(x, vandaag); });
+  Object.assign(s, { maand_klaar: M, laatste_peil: vandaag, blok_datum: tekst ? morgen : null, regels: n.nieuw.length, gemeld: n.gemeld,
+    kaarten_open: (Array.isArray(s.kaarten_open) ? s.kaarten_open : []).concat(kaarten), tijd: new Date(nuMs).toISOString() });
+  geldGeheugen.klaar = M;
+  try { geldStaatZet(s); } catch (e) { logError('geld-staat', e); bankBoxRij({ bron: 'geld', maand: M, tekst: 'geheugen niet schrijfbaar (' + (e.code || 'fout') + '); de pod onthoudt het tot een herstart' }); }
+  await geldKaarten(s);
+  schrijfLog(nu() + ' bank ' + velden({ opdracht: 'geld-briefing', ok: true, maand: M, regels: n.nieuw.length, kaarten: kaarten.length || undefined, blok: tekst ? morgen : undefined }));
+  return { gedaan: true, maand: M, regels: n.nieuw.length, kaarten: kaarten.length, blok: tekst ? morgen : null };
+}
+// open kaarten zetten; wat lukt valt uit de lijst (mk_voor_jou_zet is idempotent op sleutel), de rest de volgende ronde opnieuw
+async function geldKaarten(s) {
+  if (!Array.isArray(s.kaarten_open) || !s.kaarten_open.length) return;
+  const rest = [];
+  for (const k of (s.kaarten_open || [])) {
+    try { await appSbRpc('mk_voor_jou_zet', { p: k }); } catch (e) { logError('geld-kaart', e); rest.push(k); }
+  }
+  s.kaarten_open = rest;
+  try { geldStaatZet(s); } catch (e) { logError('geld-staat', e); }
 }
 // ── einde bankluis ──
 

@@ -1159,6 +1159,13 @@ const opdrachten = {
   // wv771: App Financiën — één alleen-lees overzicht, veld voor veld opgebouwd (financien-app.js); alleen voor GET /app/financien
   async 'app-financien'() { const x = archiefKlaar(); let P = null; try { P = paypalModule(); } catch (e) { P = null; }
     return Object.assign({ ok: true, bron: 'archief' }, require(path.join(__dirname, 'financien-app.js')).bereken(x.A, x.a, { paypal: P })); },
+  // wv777: signalen voor het blok "Geld deze maand" in de briefing (financien-app.js briefing); alleen de pod roept dit aan, na de bank-ronde
+  async 'geld-briefing'(a) {
+    const o = {};
+    ['peil', 'vorige'].forEach(function (k) { if (a.opt[k] != null) { if (!isDatum(a.opt[k])) throw new Weigering('--' + k + ' als JJJJ-MM-DD'); o[k] = a.opt[k]; } });
+    const x = archiefKlaar();
+    return Object.assign({ ok: true, bron: 'archief' }, require(path.join(__dirname, 'financien-app.js')).briefing(x.A, x.a, o));
+  },
   async stroom(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.stroom(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^(maand|rekening):/.test(e.message)) throw new Weigering(e.message); throw e; } },
   async archief() { const x = archiefKlaar(); x.A.verrijkAlsVuil(x.a); return Object.assign({ ok: true }, x.A.stand(x.a)); },
   // wv786: POT-rekening per maand per categorie, zonder namen

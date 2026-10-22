@@ -157,6 +157,12 @@ function toonNaam(x) {
   return veilig(x.naam, 30) || veilig(x.soort_post, 30) || 'Zonder naam';
 }
 // Vergelijkbaar bedrag: termijnreeksen op het termijnbedrag (aantal termijnen kan van aangenomen naar gemeten gaan; Fable #4)
+// In de briefing (Fable wv777 #10): een reeks zonder machtiging (iDEAL, overboeking) kan op een persoon staan; dan de soort, niet de naam
+function naamVeilig(x) {
+  if (isPaypal(x)) return 'PayPal';
+  if ((x.sleutels || []).some(function (k) { return k.indexOf('m:') === 0; })) return toonNaam(x);
+  return veilig(x.soort_post, 30) || 'Een vaste betaling';
+}
 function vergelijkBedrag(x) { return x.ritme === 'termijnen' ? x.bedrag : x.per_maand; }
 function naarPerMaand(x, d) { return x.ritme === 'termijnen' ? d * (x.termijnen || 10) / 12 : d; }
 
@@ -280,11 +286,11 @@ function signaalDubbel(A, a, links, signalen) {
     if (!per.has(k)) per.set(k, []);
     per.get(k).push(b);
   });
-  per.forEach(function (l) {
+  per.forEach(function (l, k) {
     const reks = new Set(l.map(function (b) { return b.rekening; }));
     if (reks.size < 2) return;
     const naam = bekend(l[0].naam, links) ? veilig(l[0].naam, 30) : (veilig(l[0].subcategorie, 30) || 'Een abonnement');
-    signalen.push({ soort: 'dubbel', naam: naam, toon: 'wacht', post: naam, link: linkVoor(l[0].naam, links),
+    signalen.push({ soort: 'dubbel', naam: naam, toon: 'wacht', post: naam, sleutel: k, link: linkVoor(l[0].naam, links),
       zin: naam + ' loopt op ' + reks.size + ' eigen rekeningen (samen ' + eur(l.reduce(function (s, b) { return s + (b.per_maand || 0); }, 0)) + ' per maand): twee abonnementen of één dubbel?' });
   });
 }
@@ -342,4 +348,183 @@ function bereken(A, a, o) {
   return uit;
 }
 
-module.exports = { bereken, leesLinks, linkGeldig, linkVoor, LINK_HOSTS, LINK_PAGINA, plusMaanden, maandPlus };
+// ── Geld deze maand: signalen voor de briefing (wv777; bouwplan idee 16 § 6 en § 12) ──
+// Eén keer per maand, op de eerste werkdag na de 24e, een blok in het ochtendbericht; alleen als er iets nieuws is. De App toont de
+// staande toestand ("Om naar te kijken"); de briefing alleen wat sinds de vorige maand veranderde, en nooit twee keer hetzelfde
+// (geheugen 'gemeld' bij de pod, BANK_DIR/geld-briefing.json). Zelfde herkenning, namen en bedragnotatie als de App.
+// Drempels (§ 6, gemeten op zes maanden, § 12): duurder > 3% én > € 3 per maand t.o.v. de stand een maand eerder (wisselend en de
+// PayPal-set > 5% én > € 5, wisselend op het 12-maandsgemiddelde, dalend nooit), of t.o.v. een jaar eerder (de App-regel; vangt sluipende stappen); lager > € 20 per maand;
+// weg = liep een maand eerder, nu geen actieve reeks (termijnen nooit); nieuw = nieuwe reeks, ≥ 2 posten, eerste post < 4 maanden;
+// buffer = rollend negatief in twee volledige maanden op rij (één keer tot hij weer ruim is); dekking = saldo dekt de vaste lasten tot
+// de 1e (+5) niet; storting = de vaste storting is deze maand niet binnen; storno = teruggeboekte incasso; dubbel = App-regel (Voor jou).
+// De tekst gaat NIET door een taalmodel (de briefingsessie wordt 's nachts in de vault samengevat): n8n zet hem er letterlijk onder.
+const FEEST_VAST = ['12-25', '12-26', '01-01'];
+function pasen(j) {   // anonieme gregoriaanse berekening
+  const a = j % 19, b = Math.floor(j / 100), c = j % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const mnd = Math.floor((h + l - 7 * m + 114) / 31), dag = ((h + l - 7 * m + 114) % 31) + 1;
+  return j + '-' + String(mnd).padStart(2, '0') + '-' + String(dag).padStart(2, '0');
+}
+function feestdag(d) {
+  const j = Number(d.slice(0, 4)), p = pasen(j);
+  const koning = new Date(Date.UTC(j, 3, 27)).getUTCDay() === 0 ? j + '-04-26' : j + '-04-27';
+  return FEEST_VAST.indexOf(d.slice(5)) >= 0 || d === koning || [1, 39, 50].some(function (n) { return plusDagen(p, n) === d; });   // paas-, hemelvaart, pinkstermaandag
+}
+function werkdag(d) { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w >= 1 && w <= 5 && !feestdag(d); }
+// eerste werkdag na de 24e van maand m (JJJJ-MM)
+function briefingDag(m) { for (let d = 25; d <= 31; d++) { const x = m + '-' + String(d).padStart(2, '0'); if (x.slice(0, 7) === m && plusDagen(m + '-01', d - 1) === x && werkdag(x)) return x; } return null; }
+
+function briefing(A, a, o) {
+  o = o || {};
+  // V = de peildag van het vorige blok (geheugen van de pod), zodat er geen gat of overlap ontstaat als de briefingdag schuift
+  // (Fable wv777 #1: 24-6 → 26-7 liet een incasso van 25/26 juni buiten beide vergelijkingen); anders een maand eerder
+  const D = o.peil || peildag(a), M = D.slice(0, 7), fouten = [], sig = [];
+  const V = o.vorige && /^\d{4}-\d{2}-\d{2}$/.test(o.vorige) && o.vorige >= plusDagen(D, -45) && o.vorige <= plusDagen(D, -20) ? o.vorige : plusMaanden(D, -1);
+  const L = leesLinks(o.vault || process.env.VAULT_DIR || '/opt/data/AI_SecondBrain');
+  const blok = function (naam, f) { try { return f(); } catch (e) { fouten.push(naam); return null; } };
+  const rek = vasteRekening(a);
+  const uit = { peildatum: D, vorige: V, maand: M, signalen: sig, stand: {}, fouten: fouten };
+  if (!rek) { uit.geen = 'nog geen gezamenlijke vaste-lastenrekening gekoppeld'; return uit; }
+  const st = {}; st[rek] = A.archiefStart(a).get(rek) || null;
+  const p = A.vastePosten(a, rek);
+  // poort voor de pod (Fable #3): de nieuwste geboekte post op deze rekening, niet "alle banken gelezen"
+  uit.nieuwste_post = (a.db.prepare("SELECT max(datum) d FROM transacties WHERE rek = ? AND status = 'booked'").get(rek) || {}).d || null;
+  // 1. vaste lasten: stand nu tegen de stand een maand eerder (op reeks, zoals de App; naamwissel = dezelfde rij)
+  blok('vaste_lasten', function () {
+    const rD = A.reeksenBereken(p.lasten, { ref: D, start: st }).filter(function (x) { return x.actief; });
+    const rV = A.reeksenBereken(p.lasten, { ref: V, start: st }).filter(function (x) { return x.actief; });
+    const nu = A.rijenVan(rD), vorig = A.rijenVan(rV), gebruikt = new Set();
+    nu.forEach(function (x) {
+      const v = rijMatch(x, vorig), naam = isPaypal(x) ? 'De vaste PayPal-betalingen samen' : naamVeilig(x), link = isPaypal(x) ? null : linkVoor(x.naam, L.links);
+      if (!v) {
+        if (!x.start_afgekapt && !isPaypal(x) && aantalIn(x, rD) >= 2 && x.eerste > plusMaanden(D, -4))
+          sig.push({ soort: 'nieuw', sleutel: 'nieuw|' + x.sleutel, naam: naam, ernst: 'info', link: link,
+            zin: 'Nieuw: ' + naam + (x.soort_post ? ' (' + veilig(x.soort_post, 30).toLowerCase() + ')' : '') + ', ' + eur(x.per_maand) + ' per maand sinds ' + mndJaar(x.eerste) + '.' });
+        return;
+      }
+      gebruikt.add(v);
+      if (x.ritme !== v.ritme || x.wijze === 'dalend' || v.wijze === 'dalend') return;
+      const nieuw = vergelijkBedrag(x), oud = vergelijkBedrag(v);
+      if (!(oud > 0)) return;
+      const dPm = naarPerMaand(x, nieuw - oud), pct = (nieuw - oud) / oud;
+      // vaste bedragen al vanaf 3% én € 3: een jaarlijkse indexatie (KPN okt 2026: bijna 4%) is precies wat David wil zien;
+      // wisselende posten en de PayPal-set (diensten komen en gaan) houden de 5% én € 5 van § 6 (meting § 12)
+      const ruim = isPaypal(x) || wissel(x) || wissel(v), grens = ruim ? 5 : 3, grensPct = ruim ? 0.05 : 0.03;
+      if (dPm > grens && pct > grensPct) sig.push({ soort: 'duurder', sleutel: 'bedrag|' + x.sleutel, niveau: getal(x.per_maand), naam: naam, ernst: 'wacht', link: link,
+        zin: naam + ' ' + (isPaypal(x) ? 'nu ' : 'kost nu ') + eur(x.per_maand) + ' per maand; een maand eerder ' + eur(v.per_maand) + ' (+' + Math.round(pct * 100) + '%).' });
+      else if (dPm < -20) sig.push({ soort: 'lager', sleutel: 'bedrag|' + x.sleutel, niveau: getal(x.per_maand), naam: naam, ernst: 'info',
+        zin: naam + ' ' + (isPaypal(x) ? 'nu ' : 'kost nu ') + eur(x.per_maand) + ' per maand; een maand eerder ' + eur(v.per_maand) + '. Klopt dat?' });
+    });
+    vorig.forEach(function (v) {
+      if (gebruikt.has(v) || rijMatch(v, nu) || v.per_maand < 5 || v.ritme === 'termijnen' || isPaypal(v)) return;
+      const naam = naamVeilig(v);
+      sig.push({ soort: 'weg', sleutel: 'weg|' + v.sleutel, naam: naam, ernst: 'info',
+        zin: 'Navragen: ' + naam + ' (' + eur(v.per_maand) + ' per maand) is niet meer afgeschreven. Opgezegd, of blijft een incasso uit?' });
+    });
+    // sluipend duurder: de jaarvergelijking van de App (zelfde regel, zelfde drempel); alleen 'duurder', de rest komt hierboven al
+    const app = [];
+    blokVasteLasten(A, a, D, L.links, app);
+    const rijenNu = new Map(nu.map(function (x) { return [toonNaam(x), x]; }));
+    app.forEach(function (s) {
+      const x = rijenNu.get(s.post);
+      if (s.soort !== 'duurder' || !x || naamVeilig(x) !== toonNaam(x) || sig.some(function (y) { return y.sleutel === 'bedrag|' + x.sleutel; })) return;
+      sig.push({ soort: 'duurder', sleutel: 'bedrag|' + x.sleutel, niveau: getal(x.per_maand), jaar: true, naam: s.naam, ernst: 'wacht', link: s.link, zin: s.zin });
+    });
+  });
+  // 2. buffer (twee volledige maanden op rij negatief), dekking tot de 1e, vaste storting. Storting en dekking alleen als de vaste
+  // storting al twee dagen voorbij is (Fable wv777 #5: anders hangt de uitkomst aan één dag)
+  const stortingen = blok('storting', function () { return A.vasteLasten(a, { rek: rek, maand: maandPlus(M, -1) }).vaste_storting || []; }) || [];
+  const dagD = Number(D.slice(8, 10)), stortingVoorbij = stortingen.every(function (s) { return (s.dag | 0) + 2 < dagD; });
+  blok('buffer', function () {
+    const b1 = A.stroom(a, { maand: maandPlus(M, -1) }).buffer, b2 = A.stroom(a, { maand: maandPlus(M, -2) }).buffer;
+    const krap = !!(b1 && b2 && b1.rollend_3_maanden < 0 && b2.rollend_3_maanden < 0);
+    uit.stand.buffer_krap = krap;
+    uit.stand.buffer_ruim = !!(b1 && b1.rollend_3_maanden > 0);   // pas dan mag een volgende krapte weer gemeld worden
+    if (krap) {
+      const per = b1.per_maand || [];
+      sig.push({ soort: 'buffer', sleutel: 'buffer', naam: 'Vaste-lastenrekening', ernst: 'wacht',
+        zin: 'De vaste-lastenrekening loopt leeg: ' + mndJaar(per[0].maand + '-01') + ' t/m ' + mndJaar(per[per.length - 1].maand + '-01') + ' ging er ' + eur(-b1.rollend_3_maanden) + ' meer af dan de stortingen (ook de maand ervoor al negatief).' });
+    }
+    const nu = A.stroom(a, { maand: M }).buffer, dk = nu && nu.dekking;
+    if (dk && !dk.genoeg && dk.nog_af_tot && stortingVoorbij) sig.push({ soort: 'dekking', sleutel: 'dekking|' + M, naam: 'Vaste-lastenrekening', ernst: 'fout', kaart: 'dekking',
+      bedrag: getal(dk.vaste_lasten_nog_af - dk.saldo), tot: dk.nog_af_tot,
+      zin: 'Het saldo van de vaste-lastenrekening dekt de vaste lasten tot en met ' + dk.nog_af_tot.split('-').reverse().map(Number).join('-') + ' niet: er komt nog ' + eur(dk.vaste_lasten_nog_af) + ' af.' });
+  });
+  blok('storting', function () {
+    stortingen.forEach(function (s) {
+      if (!(s.bedrag > 0) || dagD < 23 || !((s.dag | 0) + 2 < dagD)) return;
+      // een hogere storting telt ook (Fable #5); een losse kleine aanvulling niet
+      const binnen = p.intern_in.some(function (t) { return t.datum.slice(0, 7) === M && t.datum <= D && t.bedrag >= 0.9 * s.bedrag; });
+      if (!binnen) sig.push({ soort: 'storting', sleutel: 'storting|' + M + '|' + Math.round(s.bedrag), naam: 'Vaste storting', ernst: 'fout',
+        zin: 'De vaste storting van ' + eur(s.bedrag) + ' (meestal rond de ' + s.dag + 'e) is deze maand nog niet binnen; op de 1e volgen hypotheek en lease.' });
+    });
+  });
+  // 3. storno: een teruggeboekte incasso (alleen posten met een machtiging: dat is een organisatie, geen persoon)
+  blok('storno', function () {
+    p.alle.forEach(function (t) {
+      if (!(t.datum > V && t.datum <= D) || !A.machtigingVan(t.omschrijving)) return;
+      if (t.type !== 'terugboeking' && !(t.bedrag > 0)) return;
+      const naam = veilig(A.naamNorm(t.tegenpartij) ? t.tegenpartij : '', 30) || 'een incasso';
+      sig.push({ soort: 'storno', sleutel: 'storno|' + t.nr, naam: naam, ernst: 'wacht',
+        zin: 'Teruggeboekt: ' + naam + ' ' + eur(Math.abs(t.bedrag)) + ' op ' + Number(t.datum.slice(8, 10)) + ' ' + MAANDEN[Number(t.datum.slice(5, 7)) - 1] + '. Navragen of hij opnieuw komt.' });
+    });
+  });
+  // 4. dubbel (App-regel): twee keer hetzelfde PayPal-bedrag per maand, of dezelfde aanbieder op twee eigen rekeningen → Voor jou
+  blok('dubbel', function () {
+    const d = [];
+    signaalDubbel(A, a, L.links, d);
+    const rD = A.reeksenBereken(p.lasten, { ref: D, start: st }).filter(function (x) { return x.actief; });
+    A.rijenVan(rD).forEach(function (x) {
+      if (isPaypal(x) && x.onderdelen) x.onderdelen.forEach(function (on) {
+        if (on.aantal >= 2) d.push({ soort: 'dubbel', post: 'PayPal ' + getal(on.bedrag), naam: 'PayPal', paypal: true, bedrag: getal(on.bedrag), aantal: on.aantal,
+          zin: on.aantal + ' keer ' + eur(on.bedrag) + ' per maand via PayPal: ' + on.aantal + ' abonnementen of één dubbel?' });
+      });
+    });
+    d.forEach(function (s) { sig.push({ soort: 'dubbel', sleutel: 'dubbel|' + norm(s.sleutel || s.post || s.naam), naam: s.naam, ernst: 'wacht', kaart: 'dubbel', paypal: !!s.paypal,
+      bedrag: s.bedrag, aantal: s.aantal, link: s.link || null, zin: s.zin }); });
+  });
+  // wat David al kent (Bewust-tabel in de linkslijst) dempt, net als in de App
+  uit.signalen = sig.filter(function (s) { return !gedempt(s, L.bewust); });
+  return uit;
+}
+
+// Alleen wat nog niet gemeld is. gemeld = { sleutel: { datum, niveau? } }. Bedragsignalen opnieuw pas als het bedrag sinds de vorige
+// melding weer > 5% én > € 5 verschoof; nieuw/weg/storno niet binnen 180 dagen; dubbel niet binnen 400 dagen; buffer tot hij weer
+// ruim is; dekking en storting één keer per maand (de maand zit in de sleutel). eersteKeer: de jaarvergelijking die er al stond is
+// bekend (staat in de App) en telt als gemeld, zodat het eerste blok alleen de maand zelf laat zien.
+function briefingNieuw(b, gemeld, o) {
+  o = o || {};
+  const g = Object.assign({}, gemeld || {}), D = b.peildatum, nieuw = [];
+  if (b.stand && b.stand.buffer_ruim === true) delete g.buffer;
+  (b.signalen || []).forEach(function (s) {
+    const oud = g[s.sleutel];
+    if (o.eersteKeer && s.jaar) { g[s.sleutel] = { datum: D, niveau: s.niveau }; return; }
+    let toon = !oud;
+    if (oud) {
+      // een maand-op-maandsignaal is per definitie nieuw (de vergelijking schuift mee); alleen de jaarvergelijking kan blijven staan
+      if (s.niveau != null && !s.jaar) toon = !(oud.datum === D && oud.niveau === s.niveau);
+      else if (s.niveau != null && oud.niveau != null) { const d = s.niveau - oud.niveau; toon = Math.abs(d) > 5 && Math.abs(d) > 0.05 * Math.abs(oud.niveau); }
+      else if (s.soort === 'dubbel') toon = oud.datum < plusDagen(D, -400);
+      else if (s.soort === 'buffer') toon = false;
+      else toon = oud.datum < plusDagen(D, -180);
+    }
+    if (!toon) return;
+    g[s.sleutel] = { datum: D, niveau: s.niveau != null ? s.niveau : undefined };
+    nieuw.push(s);
+  });
+  // opruimen: sleutels ouder dan 400 dagen
+  Object.keys(g).forEach(function (k) { if (!g[k] || !g[k].datum || g[k].datum < plusDagen(D, -400)) delete g[k]; });
+  const ernst = { fout: 0, wacht: 1, info: 2 };
+  nieuw.sort(function (x, y) { return (ernst[x.ernst] ?? 2) - (ernst[y.ernst] ?? 2); });
+  return { nieuw: nieuw, gemeld: g };
+}
+// Het blok zoals het onder het ochtendbericht komt (platte regels; n8n zet de kop en escapet). Hooguit 6 regels + verwijzing.
+function briefingTekst(nieuw) {
+  if (!nieuw || !nieuw.length) return '';
+  const r = nieuw.slice(0, 6).map(function (s) { return '• ' + String(s.zin).slice(0, 240) + (s.kaart ? ' (staat in Voor jou)' : ''); });
+  if (nieuw.length > 6) r.push('• en nog ' + (nieuw.length - 6) + ' kleinere; vraag Socev ernaar.');
+  r.push('Overzicht in Apps › Financiën. Socev zegt niets op en betaalt niets.');
+  return r.join('\n');
+}
+
+module.exports = { bereken, leesLinks, linkGeldig, linkVoor, LINK_HOSTS, LINK_PAGINA, plusMaanden, maandPlus, briefing, briefingNieuw, briefingTekst, briefingDag, werkdag, feestdag, pasen };
