@@ -3814,13 +3814,21 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/pot-afschriften/bestand/2026-08/pdf', undefined, { pot: P.jar });
       const r3 = await vraag('GET', '/app/pot-afschriften/bestand/2026-09/../../stand', undefined, { pot: P.jar });
       toets('20g bestand: onbekende maand 404, pad met .. geweigerd', r.status === 404 && r3.status === 404, JSON.stringify([r.status, r3.status]));
+      // wv835: voor het concept weer de echte bestanden, en het kind geeft dezelfde sha's als meta.json (zoals bank-lezer pot-afschrift)
+      fs.writeFileSync(path.join(PD, 'POT-2026-09.sta'), inhoudMt);
+      AFS.j.sha256 = { mt940: sha(inhoudMt), pdf: sha(inhoudPdf) };
       // concept: verse vingerafdruk, nieuw/veranderd, webhook, dubbel
       const sP = () => H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
-      const webhook = { calls: [], gooi: false };
+      const webhook = { calls: [], gooi: false, status: 200, telBijlagen: null };
       const oudFetch = ctx.fetch, oudUrl = ctx.appWebhookUrl;
       ctx.appWebhookUrl = async () => 'https://mailconcept.toets/webhook/x';
       ctx.fetch = async (url, opt) => {
-        if (String(url).startsWith('https://mailconcept.toets/')) { webhook.calls.push(JSON.parse(opt.body)); if (webhook.gooi) throw new Error('timeout'); return { ok: true, status: 200, json: async () => ({ ok: true, concept_id: 'r-' + webhook.calls.length, thread_id: 't' }) }; }
+        if (String(url).startsWith('https://mailconcept.toets/')) {
+          const b = JSON.parse(opt.body); webhook.calls.push(b); if (webhook.gooi) throw new Error('timeout');
+          if (webhook.status === 'kaal502') return { ok: false, status: 502, json: async () => { throw new Error('geen json'); } };
+          if (webhook.status !== 200) return { ok: false, status: webhook.status, json: async () => ({ ok: false, fout: webhook.status === 502 ? 'Gmail weigerde het concept: x' : 'bijlage 1: inhoud past niet bij .pdf' }) };
+          return { ok: true, status: 200, json: async () => ({ ok: true, concept_id: 'r-' + webhook.calls.length, thread_id: 't', bijlagen: webhook.telBijlagen != null ? webhook.telBijlagen : (b.bijlagen || []).length }) };
+        }
         return oudFetch(url, opt);
       };
       const gM = ctx.process.env.N8N_WEBHOOK_MAILCONCEPT; delete ctx.process.env.N8N_WEBHOOK_MAILCONCEPT;
@@ -3839,9 +3847,26 @@ async function bewijs(o) {
       sP().vers_tot = Date.now() + 60000;
       r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09' }, { pot: P.jar });
       const pod = () => JSON.parse(fs.readFileSync(path.join(W, 'bank', 'pot-afschriften', 'pod.json'), 'utf8'));
-      toets('20g concept: 200, webhook met ontvanger, onderwerp en tekst (geen bijlage), concept_id in pod.json',
+      const bl0 = webhook.calls[0] && webhook.calls[0].bijlagen || [];
+      const blInhoud = (x) => Buffer.from(x.inhoud_base64, 'base64');
+      toets('20g concept: 200, webhook met ontvanger, onderwerp en tekst, concept_id in pod.json',
         r.status === 200 && webhook.calls.length === 1 && webhook.calls[0].aan === 'boekhouder@voorbeeld.nl' && webhook.calls[0].secret === 'nep-mailconcept' && /september 2026/.test(webhook.calls[0].onderwerp) &&
-        !('bijlagen' in webhook.calls[0]) && pod().maanden['2026-09'].concept_id === 'r-1' && !pod().maanden['2026-09'].aangevraagd && /mail\.google\.com/.test(r.j.gmail), JSON.stringify([r.status, r.j, webhook.calls]).slice(0, 400));
+        pod().maanden['2026-09'].concept_id === 'r-1' && !pod().maanden['2026-09'].aangevraagd && /mail\.google\.com/.test(r.j.gmail) && r.j.bijlagen === 2, JSON.stringify([r.status, r.j, webhook.calls]).slice(0, 400));
+      {
+        const stO = pod(); stO.maanden['2026-07'] = { concept_id: 'oud', concept_op: '2026-10-22T21:02:35.953Z', concept_sha: 'a'.repeat(64) };
+        fs.writeFileSync(path.join(W, 'bank', 'pot-afschriften', 'pod.json'), JSON.stringify(stO));
+        kAntw['pot-afschrift-maanden'] = { code: 0, j: { ok: true, ontvanger_gezet: true, maanden: [
+          { maand: '2026-09', aantal: 26, compleet: true, gemaakt: { op: '2026-10-22T19:00:00Z', aantal: 26, sha_mt940: sha(inhoudMt) } },
+          { maand: '2026-07', aantal: 20, compleet: true, gemaakt: { op: '2026-10-22T19:00:00Z', aantal: 20, sha_mt940: 'a'.repeat(64) } }] } };
+        const rO = await vraag('GET', '/app/pot-afschriften', undefined, { pot: P.jar });
+        const c9 = rO.j.maanden && rO.j.maanden.find((x) => x.maand === '2026-09'), c7 = rO.j.maanden && rO.j.maanden.find((x) => x.maand === '2026-07');
+        toets('20g wv835 pod.json onthoudt 2 bijlagen; het overzicht meldt 2 bij het nieuwe concept en 0 bij een concept van vóór wv835',
+          pod().maanden['2026-09'].bijlagen === 2 && c9 && c9.concept.bijlagen === 2 && c9.concept.actueel === true && c7 && c7.concept.bijlagen === 0 && c7.concept.actueel === true, JSON.stringify([c9, c7]));
+      }
+      toets('20g wv835 concept: MT940 (.sta, octet-stream) en PDF als bijlage, inhoud en sha byte-gelijk aan de bestanden, geen inhoud in het antwoord aan de app',
+        bl0.length === 2 && bl0[0].naam === 'POT-2026-09.sta' && bl0[0].mime === 'application/octet-stream' && blInhoud(bl0[0]).equals(inhoudMt) &&
+        bl0[1].naam === 'POT-afschrift 2026-09.pdf' && bl0[1].mime === 'application/pdf' && sha(blInhoud(bl0[1])) === sha(inhoudPdf) && !/inhoud_base64/.test(JSON.stringify(r.j)),
+        JSON.stringify(bl0.map((x) => [x.naam, x.mime, x.inhoud_base64.length])));
       sP().vers_tot = Date.now() + 60000;
       r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09' }, { pot: P.jar });
       toets('20g tweede druk voor hetzelfde afschrift -> 409 al_klaar, geen tweede concept', r.status === 409 && r.j.al_klaar === true && webhook.calls.length === 1, JSON.stringify(r.j));
@@ -3855,15 +3880,52 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
       toets('20g met "nogmaals" -> 200, nieuw concept', r.status === 200 && webhook.calls.length === 3 && pod().maanden['2026-09'].concept_id === 'r-3', JSON.stringify(r.j).slice(0, 200));
       // late boeking: andere MT940-sha dan het vorige concept → correctietekst
-      kAntw['pot-afschrift'] = { code: 0, j: Object.assign({}, AFS.j, { nieuw: false, sha256: { mt940: 'd'.repeat(64), pdf: 'e'.repeat(64) },
+      const inhoudMt2 = Buffer.from(':20:ABN AMRO BANK NV\r\n:61:late boeking\r\n'), inhoudPdf2 = Buffer.from('%PDF-1.4 nep v2');
+      fs.writeFileSync(path.join(PD, 'POT-afschrift 2026-09.pdf'), inhoudPdf2); fs.writeFileSync(path.join(PD, 'POT-2026-09.sta'), inhoudMt2);
+      const meta2 = { maand: '2026-09', bestanden: { mt940: 'POT-2026-09.sta', pdf: 'POT-afschrift 2026-09.pdf' }, sha_mt940: sha(inhoudMt2), sha_pdf: sha(inhoudPdf2) };
+      fs.writeFileSync(path.join(PD, 'meta.json'), JSON.stringify(meta2));
+      kAntw['pot-afschrift'] = { code: 0, j: Object.assign({}, AFS.j, { nieuw: false, sha256: { mt940: sha(inhoudMt2), pdf: sha(inhoudPdf2) },
         mail_correctie: { onderwerp: 'POT POH-GGZ: afschrift september 2026 (correctie)', bericht: 'Hoi André,\n\nDit vervangt het afschrift.\n\nGroet,\nDavid' } }) };
       sP().vers_tot = Date.now() + 60000;
       r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09' }, { pot: P.jar });
-      toets('20g nieuwe versie na een concept -> correctietekst in het concept', r.status === 200 && webhook.calls.length === 4 && /\(correctie\)$/.test(webhook.calls[3].onderwerp) && pod().maanden['2026-09'].correctie === true, JSON.stringify([r.status, webhook.calls[3]]).slice(0, 300));
+      toets('20g nieuwe versie na een concept -> correctietekst in het concept, met de nieuwe bestanden eraan', r.status === 200 && webhook.calls.length === 4 && /\(correctie\)$/.test(webhook.calls[3].onderwerp) && pod().maanden['2026-09'].correctie === true &&
+        webhook.calls[3].bijlagen.length === 2 && blInhoud(webhook.calls[3].bijlagen[0]).equals(inhoudMt2) && blInhoud(webhook.calls[3].bijlagen[1]).equals(inhoudPdf2), JSON.stringify([r.status, webhook.calls[3].onderwerp]).slice(0, 300));
+      const AFS2 = kAntw['pot-afschrift'];
       kAntw['pot-afschrift'] = { code: 0, j: Object.assign({}, AFS.j, { nieuw: false, ontvanger: null }) };
       sP().vers_tot = Date.now() + 60000;
       r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
       toets('20g zonder ingestelde ontvanger -> 409, geen webhook', r.status === 409 && /ontvanger/.test(r.j.fout) && webhook.calls.length === 4, JSON.stringify(r.j));
+      // wv835: bestanden die niet kloppen → geen concept, geen "aangevraagd"; het luik telt minder bijlagen of weigert (400)
+      kAntw['pot-afschrift'] = AFS2;
+      fs.writeFileSync(path.join(PD, 'POT-2026-09.sta'), Buffer.from('gewijzigd op schijf'));
+      sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
+      toets('20g wv835 MT940 op schijf wijkt af van meta -> 409 "kloppen niet", geen webhook, geen aangevraagd', r.status === 409 && /kloppen niet/.test(r.j.fout) && webhook.calls.length === 4 && !pod().maanden['2026-09'].aangevraagd, JSON.stringify(r.j));
+      fs.writeFileSync(path.join(PD, 'POT-2026-09.sta'), inhoudMt2);
+      kAntw['pot-afschrift'] = { code: 0, j: Object.assign({}, AFS2.j, { sha256: { mt940: sha(inhoudMt2), pdf: 'f'.repeat(64) } }) };
+      sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
+      toets('20g wv835 kind en meta.json noemen een andere PDF -> 409, geen webhook', r.status === 409 && webhook.calls.length === 4, JSON.stringify(r.j));
+      fs.unlinkSync(path.join(PD, 'POT-afschrift 2026-09.pdf'));
+      kAntw['pot-afschrift'] = AFS2;
+      sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
+      toets('20g wv835 PDF weg -> 409, geen webhook', r.status === 409 && webhook.calls.length === 4, JSON.stringify(r.j));
+      fs.writeFileSync(path.join(PD, 'POT-afschrift 2026-09.pdf'), inhoudPdf2);
+      webhook.telBijlagen = 1; sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
+      toets('20g wv835 luik meldt 1 van 2 bijlagen -> 502, aangevraagd blijft (kijk eerst in Gmail)', r.status === 502 && webhook.calls.length === 5 && !!pod().maanden['2026-09'].aangevraagd && !pod().maanden['2026-09'].concept_id, JSON.stringify([r.status, pod().maanden['2026-09']]));
+      webhook.telBijlagen = null; webhook.status = 400; sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
+      toets('20g wv835 luik weigert (400) -> 502 "geen concept", aangevraagd weer weg', r.status === 502 && /geen concept/.test(r.j.fout) && webhook.calls.length === 6 && !pod().maanden['2026-09'].aangevraagd, JSON.stringify([r.status, r.j, pod().maanden['2026-09']]));
+      webhook.status = 502; sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
+      toets('20g wv835 luik meldt Gmail-fout (502 met ok:false) -> 502 "geen concept", aangevraagd weg', r.status === 502 && /geen concept/.test(r.j.fout) && webhook.calls.length === 7 && !pod().maanden['2026-09'].aangevraagd, JSON.stringify([r.status, r.j, pod().maanden['2026-09']]));
+      webhook.status = 'kaal502'; sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
+      toets('20g wv835 kale 502 (tunnel, geen JSON) -> 502, aangevraagd blijft (kijk eerst in Gmail)', r.status === 502 && !/geen concept/.test(r.j.fout) && webhook.calls.length === 8 && !!pod().maanden['2026-09'].aangevraagd, JSON.stringify([r.status, r.j]));
+      webhook.status = 200;
+      toets('20g wv835 geen bestandsinhoud in de foutlog', !logs.some((x) => /JTVERi|OjIwOk|%PDF|:20:ABN/.test(x)), logs.filter((x) => /pot-/.test(x)).slice(-3));
       const ln = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter((x) => /pot-/.test(x));
       toets('20g auditregels: route en maand, geen bedrag, naam of adres', ln.length >= 5 && ln.every((x) => !/4\.990|3216|Jansen|boekhouder@/.test(x)) && ln.some((x) => /pot-concept 2026-09 klaar/.test(x)), ln.slice(-3));
       ctx.fetch = oudFetch; if (oudUrl) ctx.appWebhookUrl = oudUrl; else delete ctx.appWebhookUrl;

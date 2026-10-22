@@ -9402,7 +9402,8 @@ async function appFinancien(req, res, a) {
 // HOE. De App vraagt de maanden (GET /app/pot-afschriften), maakt een afschrift (POST …/maak → bank-lezer pot-afschrift; de bestanden staan
 // in BANK_DIR/pot-afschriften/<maand>/, niet in Bestanden: dat overzicht toont ook de pc met een vaste plek), downloadt (GET
 // …/bestand/<maand>/<mt940|pdf>) en zet een Gmail-concept aan André klaar (POST …/concept: verse vingerafdruk van dít apparaat, bestaande
-// webhook AI - Mailconcept naar Gmail, zonder bijlagen — dat kan dat luik niet (gemeten 22-10); David hangt ze aan en verstuurt). Na de
+// webhook AI - Mailconcept naar Gmail, sinds wv835 mét de MT940 en de PDF als bijlage (het luik kan dat sinds wv834); David kijkt het
+// concept na en verstuurt). Na de
 // bank-ronde vanaf de 3e na 12:00 (de ronde van 18:00 vangt late boekingen; Fable wv787 #3) één keer per maand het afschrift van de vorige
 // maand + een Voor jou-kaart; lukt het op de 10e nog niet, een kaart "zelf downloaden" (Fable #10). Nooit op een apparaat met een vaste
 // plek (salarisregels = personeelsgegevens); geen bedrag, naam of saldo in api.log, een box-rij of een kaart. Geheugen van de pod:
@@ -9411,6 +9412,7 @@ const POT_AF_DIR = path.join(process.env.BANK_DIR || '/opt/data/bank', 'pot-afsc
 const POT_AF_STAAT = path.join(POT_AF_DIR, 'pod.json');
 const POT_AF_MAILWF = process.env.POT_AF_MAILWF || 'ruUxLjRmYxgM8jzp';   // n8n AI - Mailconcept naar Gmail (webhookpad uit de workflow)
 const POT_AF_MAX_MS = 20000;
+const POT_AF_BIJLAGE_MAX = 10 * 1024 * 1024;   // wv835: samen; als JSON-base64 ruim onder de 16 MiB van de webhook (skill mailconcept-aanmaken § Bijlagen)
 const POT_AF_VANAF = 3, POT_AF_VANAF_UUR = 12, POT_AF_MELD = 10;
 const POT_AF_MND = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
 const POT_AF_MAAND_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -9464,7 +9466,7 @@ async function appPotAfschriften(req, res, a) {
     const sm = st.maanden[m.maand] || {}, gm = m.gemaakt;
     return { maand: m.maand, naam: potAfMaandNaam(m.maand), aantal: m.aantal, loopt_nog: m.loopt_nog === true, compleet: m.compleet === true, eerste: m.eerste === true,
       gemaakt: gm ? { op: gm.op, aantal: gm.aantal, begin: g(gm.begin), eind: g(gm.eind), bij: g(gm.bij), af: g(gm.af), stuk_open: gm.stuk_open, vervangen_op: gm.vervangen_op || null } : null,
-      concept: sm.concept_op ? { op: sm.concept_op, actueel: !!(gm && sm.concept_sha === gm.sha_mt940) } : null,
+      concept: sm.concept_op ? { op: sm.concept_op, actueel: !!(gm && sm.concept_sha === gm.sha_mt940), bijlagen: sm.bijlagen === 2 ? 2 : 0 } : null,   // wv835: concepten van vóór 23-10 hebben geen bijlagen
       aangevraagd: sm.aangevraagd && !sm.concept_id ? sm.aangevraagd : null };
   });
   appStuur(res, 200, { ok: true, vaste_plek: false, ontvanger_gezet: j.ontvanger_gezet === true, laatst_gelezen: j.laatst_gelezen || null, maanden: maanden });
@@ -9503,6 +9505,30 @@ async function appPotBestand(req, res, a, rest) {
   res._app.reden = 'pot-bestand ' + m0[1] + ' ' + m0[2];
   appStuur(res, 200, { ok: true, naam: naam, type: m0[2] === 'pdf' ? 'application/pdf' : 'text/plain', grootte: inhoud.length, sha256: sha, inhoud: inhoud.toString('base64') });
 }
+// wv835: de twee bestanden van het afschrift dat het kind net teruggaf, als bijlagen voor het mailluik ({naam, mime, inhoud_base64}).
+// Zelfde toets als appPotBestand: meta.json van die maand, een veilige naam, en de sha256 van de inhoud gelijk aan meta én aan het kind.
+// Klopt er iets niet, dan null: geen concept (niet half, niet zonder bijlagen).
+async function potAfBijlagen(maand, j) {
+  let meta;
+  try { meta = JSON.parse(await fs.promises.readFile(path.join(POT_AF_DIR, maand, 'meta.json'), 'utf8')); } catch (e) { return null; }
+  if (!meta || meta.maand !== maand || !meta.bestanden || !j || !j.sha256) return null;
+  const uit = [];
+  let totaal = 0;
+  for (const soort of ['mt940', 'pdf']) {
+    const naam = meta.bestanden[soort], sha = meta['sha_' + soort];
+    if (typeof naam !== 'string' || !/^[A-Za-z0-9 ._-]{1,60}$/.test(naam) || /^\./.test(naam) || typeof sha !== 'string' || sha !== j.sha256[soort]) return null;
+    let inhoud;
+    try {
+      const st = await fs.promises.stat(path.join(POT_AF_DIR, maand, naam));   // Fable wv835 #3: grootte vóór het lezen
+      if (!st.isFile() || totaal + st.size > POT_AF_BIJLAGE_MAX) return null;
+      inhoud = await fs.promises.readFile(path.join(POT_AF_DIR, maand, naam));
+    } catch (e) { return null; }
+    if (!inhoud.length || crypto.createHash('sha256').update(inhoud).digest('hex') !== sha) return null;
+    totaal += inhoud.length;
+    uit.push({ naam: naam, mime: soort === 'pdf' ? 'application/pdf' : 'application/octet-stream', inhoud_base64: inhoud.toString('base64') });
+  }
+  return totaal <= POT_AF_BIJLAGE_MAX ? uit : null;
+}
 async function appPotConcept(req, res, a, s, d) {
   if (a.soort === 'vast') return appWeiger(res, 403, 'een mailconcept klaarzetten kan niet vanaf een pc met een vaste plek; gebruik je telefoon of laptop', 'pot vast');
   const maand = potAfMaandUit(res, d); if (!maand) return;
@@ -9532,25 +9558,42 @@ async function appPotConcept(req, res, a, s, d) {
     // ging er al een concept van een ándere versie van deze maand uit (late boeking), dan de correctietekst (Fable wv787 diff #3)
     const correctie = !!(sm.concept_sha && sm.concept_sha !== j.sha256.mt940 && j.mail_correctie);
     const mail = correctie ? j.mail_correctie : j.mail;
+    // wv835: MT940 en PDF gaan mee; klopt een bestand niet met het afschrift, dan geen concept (vóór "aangevraagd": er gaat niets uit)
+    const bijlagen = await potAfBijlagen(maand, j);
+    if (!bijlagen) return appWeiger(res, 409, 'de bestanden van dit afschrift kloppen niet (meer); tik op Maak opnieuw en probeer het dan nog eens', 'pot concept bestanden');
     sm.aangevraagd = new Date().toISOString(); delete sm.concept_id; st.maanden[maand] = sm; potAfStaatZet(st);
-    const body = JSON.stringify({ secret: geheim, aan: j.ontvanger, onderwerp: String(mail && mail.onderwerp || '').slice(0, 120), bericht: String(mail && mail.bericht || '').slice(0, 2000) });
+    const onderwerp = String(mail && mail.onderwerp || '').slice(0, 120);
+    const body = JSON.stringify({ secret: geheim, aan: j.ontvanger, onderwerp: onderwerp, bericht: String(mail && mail.bericht || '').slice(0, 2000), bijlagen: bijlagen });
     let antw = null;
     for (let poging = 0; poging < 2 && !antw; poging++) {
       const url = await appWebhookUrl(POT_AF_MAILWF, null, 'potMailUrl', poging > 0);
-      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body, signal: AbortSignal.timeout(20000) });
+      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body, signal: AbortSignal.timeout(30000) });
       if (r.status === 404 && poging === 0) continue;
+      // 400 = het luik weigerde de aanroep (bijlagen) en maakte zeker géén concept: dan geen "kijk eerst in Gmail" (skill § Bijlagen)
+      if (r.status === 400) { const e = new Error('mailconcept http 400'); e.geenConcept = true; throw e; }
+      // 502 met {ok:false} komt van het luik zelf (Gmail weigerde): ook dan zeker géén concept (Fable wv835 #1); een kale 502 (tunnel) niet
+      if (r.status === 502) {
+        let jf = null; try { jf = await r.json(); } catch (e) { jf = null; }
+        const e = new Error('mailconcept http 502'); if (jf && jf.ok === false && typeof jf.fout === 'string') e.geenConcept = true; throw e;
+      }
       if (!r.ok) throw new Error('mailconcept http ' + r.status);
       antw = await r.json();
     }
     if (!antw || antw.ok !== true || typeof antw.concept_id !== 'string') throw new Error('mailconcept zonder concept_id');
+    // een concept zonder (alle) bijlagen telt niet als klaar: "aangevraagd" blijft staan, David kijkt in Gmail (komt bij dit luik niet voor)
+    if (antw.bijlagen !== bijlagen.length) throw new Error('mailconcept met ' + (Number(antw.bijlagen) | 0) + ' van ' + bijlagen.length + ' bijlagen');
     const st2 = potAfStaat(), sm2 = st2.maanden[maand] || {};
-    Object.assign(sm2, { concept_id: antw.concept_id.slice(0, 60), concept_op: new Date().toISOString(), concept_sha: j.sha256.mt940, correctie: correctie || undefined });
+    Object.assign(sm2, { concept_id: antw.concept_id.slice(0, 60), concept_op: new Date().toISOString(), concept_sha: j.sha256.mt940, correctie: correctie || undefined, bijlagen: bijlagen.length });
     delete sm2.aangevraagd; st2.maanden[maand] = sm2; potAfStaatZet(st2);
     if (typeof potAfKaartConcept === 'function') potAfKaartConcept(maand).catch(function (e) { logError('pot-kaart', new Error(String(e && e.message || e).slice(0, 120))); });
     res._app.reden = 'pot-concept ' + maand + ' klaar';
-    return appStuur(res, 200, { ok: true, concept_op: sm2.concept_op, gmail: APP_GMAIL_CONCEPTEN, onderwerp: JSON.parse(body).onderwerp, afschrift: potAfAntwoord(j) });
+    return appStuur(res, 200, { ok: true, concept_op: sm2.concept_op, gmail: APP_GMAIL_CONCEPTEN, onderwerp: onderwerp, bijlagen: bijlagen.length, afschrift: potAfAntwoord(j) });
   } catch (e) {
     logError('pot-concept', new Error(String(e && e.message || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)));
+    if (e && e.geenConcept) {
+      try { const st3 = potAfStaat(), sm3 = st3.maanden[maand]; if (sm3 && sm3.aangevraagd && !sm3.concept_id) { delete sm3.aangevraagd; potAfStaatZet(st3); } } catch (e2) {}
+      return appWeiger(res, 502, 'het mailluik of Gmail nam het concept met de bestanden niet aan; er staat geen concept in Gmail. Probeer het later opnieuw', 'pot concept geweigerd');
+    }
     return appWeiger(res, 502, 'het mailconcept kon niet gemaakt worden; probeer het later opnieuw', 'pot concept fout');
   } finally { potAfBezig = false; }
 }
@@ -15218,10 +15261,10 @@ function potAfKaartDoen(maand) {
   const n = potAfMaandNaam(maand), dl = new Date(Date.UTC(Number(maand.slice(0, 4)), Number(maand.slice(5, 7)), POT_AF_MELD)).toISOString().slice(0, 10);
   return { sleutel: 'pot-afschrift-' + maand, soort: 'doen', titel: 'POT — afschrift ' + n + ' naar André (Acta Synergia) sturen', volgorde: 30, deadline: dl,
     waar: 'overal', prive: true, duur_min: 4, herkomst: { handmatig: 'pot-afschrift', maand: maand },
-    waarom: 'André verwerkt de bankafschriften van de POT. Socev heeft het afschrift van ' + n + ' gemaakt uit de bankkoppeling: een MT940-bestand om in te lezen en een PDF met per regel wat het is. Het mailconcept aan André zet Socev op jouw teken klaar; de twee bestanden aanhangen en versturen doe je zelf.',
+    waarom: 'André verwerkt de bankafschriften van de POT. Socev heeft het afschrift van ' + n + ' gemaakt uit de bankkoppeling: een MT940-bestand om in te lezen en een PDF met per regel wat het is. Het mailconcept aan André zet Socev op jouw teken klaar, met beide bestanden eraan; nakijken en versturen doe je zelf.',
     stappen: ['Open in de app Apps › POT-afschriften (op je telefoon of laptop, niet op de praktijk-pc).', 'Kijk de PDF van ' + n + ' even na (knop PDF).',
-      "Tik op 'Zet mailconcept klaar voor André' en bevestig met je vingerafdruk.", "Tik op 'MT940' en 'PDF' om beide bestanden op je apparaat te bewaren.",
-      'Open het concept in Gmail (Concepten), hang de twee bestanden aan en verstuur.', 'Klaar? Tik hier op Gedaan.'],
+      "Tik op 'Zet mailconcept klaar voor André' en bevestig met je vingerafdruk.",
+      'Open het concept in Gmail (Concepten): de MT940 en de PDF hangen er al aan. Kijk het na en verstuur.', 'Klaar? Tik hier op Gedaan.'],
     meting: bankNuKort() + ': Het afschrift van ' + n + ' staat klaar in de app; het mailconcept nog niet.' };
 }
 function potAfKaartNiet(maand, reden) {
@@ -15234,7 +15277,7 @@ function potAfKaartNiet(maand, reden) {
       herkomst: { handmatig: 'pot-afschrift', maand: maand },
       waarom: 'Na het maken van het afschrift van ' + vn + ' kwam er bij de bank nog een boeking in die maand bij. Daardoor sluit ' + n + ' niet aan op wat André van ' + vn + ' heeft. Eerst ' + vn + ' opnieuw maken en als correctie sturen; daarna kan ' + n + '.',
       stappen: ['Open in de app Apps › POT-afschriften (op je telefoon of laptop).', 'Kies ' + vn + " en tik op 'Maak opnieuw'.",
-        "Tik op 'Zet mailconcept klaar voor André' (het concept zegt dat het een correctie is), hang PDF en MT940 aan en verstuur.",
+        "Tik op 'Zet mailconcept klaar voor André' (het concept zegt dat het een correctie is en heeft PDF en MT940 al eraan), kijk het na in Gmail en verstuur.",
         'Kies daarna ' + n + ", tik op 'Maak afschrift' en stuur het op dezelfde manier.", 'Klaar? Tik hier op Gedaan.'],
       meting: bankNuKort() + ': ' + n + ' sluit niet aan op het afschrift van ' + vn + '.' };
   }
@@ -15254,7 +15297,7 @@ async function potAfKaartConcept(maand) {
   const pnt = ((j && j.punten) || []).find(function (p) { return p.sleutel === rd.kaart; });
   if (!pnt || (pnt.status !== 'open' && pnt.status !== 'later')) return;
   const p = potAfKaartDoen(maand);
-  p.meting = bankNuKort() + ': Het mailconcept aan André staat in Gmail; de twee bestanden aanhangen en versturen doe je zelf.';
+  p.meting = bankNuKort() + ': Het mailconcept aan André staat in Gmail, met beide bestanden eraan; nakijken en versturen doe je zelf.';
   await appSbRpc('mk_voor_jou_zet', { p: p });
 }
 // Maandronde, na de bank-ronde. Antwoord naar n8n: alleen maand en uitkomst.

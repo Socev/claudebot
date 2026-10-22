@@ -423,7 +423,8 @@ function zelfcontrole(mt940, verwacht) {
   });
 }
 
-// Mailconcept aan de boekhouder (alleen tekst; versturen doet David). Davids stem voor iemand die hij goed kent (skill mijn-mailstem).
+// Mailconcept aan de boekhouder (de tekst; de MT940 en de PDF hangt server.js appPotConcept er sinds wv835 aan; versturen doet David).
+// Davids stem voor iemand die hij goed kent (skill mijn-mailstem).
 // o.correctie: er ging al een afschrift van deze maand naar André en er kwam daarna een boeking bij (Fable wv787 diff #3).
 function mailConcept(maand, telling, o) {
   const m = maandNaam(maand);
