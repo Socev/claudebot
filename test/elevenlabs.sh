@@ -341,6 +341,7 @@ const router = http.createServer((req, res) => {
     // eigen spreektekst
     r14 = await rt.app('POST /app/bandjes/spreektekst', { praktijk: 'tolgaarde', bandje: b14.id, versie: b14.versie, tekst_hash: b14.tekst_hash, spreektekst: 'Eigen versie. [pauze 1,5] Tweede zin.' }, ctx);
     const reg1 = fs.readFileSync(tgPad, 'utf8');
+    toets('14 antwoord op bewaren draagt de spreektekst (zoals GET)', r14.status === 200 && r14.j.bandje.spreektekst && r14.j.bandje.spreektekst.eigen === true && r14.j.bandje.spreektekst.zinnen.length === 2, r14.j.bandje);
     toets('14 eigen spreektekst bewaard: blok in het register met de tekst_hash, geen nieuwe versie', r14.status === 200 && reg1.indexOf('**Spreektekst** (bij v' + b14.versie + ', tekst ' + b14.tekst_hash) > 0 && /> Eigen versie\. \[pauze 1,5\] Tweede zin\./.test(reg1) && r14.j.bandje.versie === b14.versie, { r14, reg1 });
     b14 = await lees14();
     toets('14 GET: eigen spreektekst geldt', b14.spreektekst.eigen === true && b14.spreektekst.tekst === 'Eigen versie. [pauze 1,5] Tweede zin.' && b14.spreektekst.zinnen.length === 2, b14.spreektekst);

@@ -682,9 +682,17 @@ function routes(deps) {
     if (!pr) return { status: 400, j: { ok: false, fout: 'onbekende praktijk' } };
     const id = String(d.bandje || '');
     const actie = m[1];
+    // wv803: een bandje in een antwoord draagt altijd zijn spreektekst (zoals in GET), anders valt die in de app weg tot het herladen
+    const goed = function (r) {
+      if (r && r.status === 200 && r.bandje) {
+        let inst = {}; try { inst = S.lees(pr).instellingen || {}; } catch (e) { inst = {}; }
+        r = Object.assign({}, r, { bandje: Object.assign({}, r.bandje, { spreektekst: spreekVan(r.bandje, inst) }) });
+      }
+      return goedOf(r);
+    };
     if (actie === 'nieuw') {
       const r = S.nieuw(pr, { naam: d.naam, menu: d.menu, wanneer: d.wanneer, tekst: d.tekst });
-      return goedOf(r);
+      return goed(r);
     }
     if (actie === 'instellingen') {
       // wv803: de uitspraaklijst (één instelling per verzoek)
@@ -701,17 +709,17 @@ function routes(deps) {
     if (actie === 'tekst') {
       if (d.stem != null && d.stem !== '' && !stemOk(String(d.stem), await stemmen())) return { status: 400, j: { ok: false, fout: 'onbekende stem' } };
       const r = S.zetTekst(pr, id, { tekst: d.tekst, versie: d.versie, tekst_hash: d.tekst_hash, stem: d.stem ? String(d.stem) : null, voorstel_weg: d.voorstel_weg === true });
-      return goedOf(r);
+      return goed(r);
     }
     if (actie === 'voorstel') {
       // alleen "laten liggen": overnemen bestaat alleen in de app (zet de tekst in het vak); pas Bewaar schrijft (Fable #11)
       if (d.keuze !== 'laat') return { status: 400, j: { ok: false, fout: 'alleen laten liggen kan hier; overnemen gaat via Bewaar' } };
-      return goedOf(S.haalVoorstelWeg(pr, id));
+      return goed(S.haalVoorstelWeg(pr, id));
     }
     if (actie === 'spreektekst') {
       // wv803: eigen spreektekst bewaren (string) of terug naar automatisch (null); versie + hash zoals Bewaar
       if (d.spreektekst !== null && typeof d.spreektekst !== 'string') return { status: 400, j: { ok: false, fout: 'spreektekst ontbreekt' } };
-      return goedOf(S.zetSpreektekst(pr, id, { versie: d.versie, tekst_hash: d.tekst_hash, spreektekst: d.spreektekst }));
+      return goed(S.zetSpreektekst(pr, id, { versie: d.versie, tekst_hash: d.tekst_hash, spreektekst: d.spreektekst }));
     }
     if (actie === 'status') {
       // versie én hash (Fable wv743 #2): anders zegt het label "in centrale (vN)" bij een tekst die David intussen in Obsidian wijzigde
@@ -719,7 +727,7 @@ function routes(deps) {
       if (!Number.isInteger(v) || v < 1 || !/^[a-f0-9]{16}$/.test(String(d.tekst_hash || ''))) return { status: 400, j: { ok: false, fout: 'versie of tekst_hash ontbreekt' } };
       const r = S.zetVelden(pr, id, { 'in centrale': 'v' + v + ', ' + vandaag(klok), status: 'in centrale (v' + v + ')' },
         { versie: v, tekst_hash: String(d.tekst_hash) });
-      return goedOf(r);
+      return goed(r);
     }
     // maak (en proef, wv803): de tekst komt UIT HET REGISTER, nooit uit de invoer; versie + hash moeten kloppen met wat de app las.
     // Wat naar de stem gaat is de spreektekst (eigen of automatisch, zie spreekVan), per model vertaald; proef = één zin daaruit (index).
