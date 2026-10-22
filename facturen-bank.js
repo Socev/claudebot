@@ -389,6 +389,11 @@ function uitzonderingVoor(tx, ctx) {
 const AUTO_ZEKERHEID = 0.8, SUBSET_MAX = 20, SUBSET_AUTO_MAX = 8, VALUTA_MARGE = 0.03;
 const INCASSO_TOL_PCT = 5, INCASSO_TOL_MIN = 100;   // incasso: ± max(5 %, € 1) tenzij de leverancier een eigen tolerantie heeft
 const NIET_OPEN = ['geen_factuur', 'dubbel'];
+function incassoTolerantie(l, centen) {
+  const p = l ? l.incasso_tolerantie_pct : null;
+  const pct = p !== null && p !== undefined && p !== '' && Number.isFinite(Number(p)) ? Number(p) : INCASSO_TOL_PCT;
+  return Math.max(INCASSO_TOL_MIN, Math.round(Math.abs(centen) * pct / 100));
+}
 
 // Aflopende zekerheid in plaats van een hard datumvenster: binnen 45 dagen na de vervaldatum telt alles, daarna zakt het lineair tot
 // de helft; ruim vóór de factuurdatum betalen zakt sneller (vooruitbetaling kan, maar is zeldzaam).
@@ -402,6 +407,8 @@ function datumFactor(tx, f) {
   if (voorFactuur > 7) x = Math.min(x, Math.max(0.5, 1 - (voorFactuur - 7) / 60));
   return x;
 }
+// Kan deze betaling redelijkerwijs voor deze factuur zijn? Vervaldatum (anders factuurdatum) hooguit 20 dagen na de boekdatum.
+function opeisbaar(tx, f) { const ref = f.vervaldatum || f.factuurdatum; return !ref || !isIsoDatum(ref) || dagenTussen(tx.boekdatum, ref) <= 20; }
 function afstand(tx, f) { const ref = f.vervaldatum || f.factuurdatum; return ref && isIsoDatum(ref) ? Math.abs(dagenTussen(ref, tx.boekdatum)) : 9999; }
 function rond(x) { return Math.round(x * 1000) / 1000; }
 
@@ -517,24 +524,26 @@ function matchTransactie(tx, facturen, ctx) {
     const vanIban = eur.filter((f) => (ibanNorm(f.iban) === tegen || (lt && lt.via === 'iban' && f.leverancier === lt.leverancier.id)) && teBetalen(f) === bedrag);
     if (vanIban.length) {
       const g = opDatum(vanIban);
-      // meer facturen met hetzelfde bedrag: niet gokken welke (abonnement september of oktober?) — een mens kiest (diffreview wv798 #3)
-      const twijfel = g.length > 1;
-      uit.push(kandidaat('iban_bedrag', [g[0]], (twijfel ? 0.6 : 0.95) * datumFactor(tx, g[0]), tx, g.length > 1 ? { alternatieven: g.slice(1, 4).map((f) => f.id) } : null));
+      // meer opeisbare facturen met hetzelfde bedrag: niet gokken welke (abonnement september of oktober?) — een mens kiest (diffreview
+      // wv798 #3). Een factuur die pas over weken vervalt (vooruit ingevoerde huur) telt niet als alternatief (natoets #5).
+      const alt = g.slice(1).filter((f) => opeisbaar(tx, f));
+      const twijfel = alt.length > 0;
+      uit.push(kandidaat('iban_bedrag', [g[0]], (twijfel ? 0.6 : 0.95) * datumFactor(tx, g[0]), tx, twijfel ? { alternatieven: alt.slice(0, 3).map((f) => f.id) } : null));
     }
   }
   // (3) incasso met tolerantie
   if (tx.is_incasso && lt && r === 'af') {
     const l = lt.leverancier;
-    const pct = l.incasso_tolerantie_pct !== null && l.incasso_tolerantie_pct !== undefined && l.incasso_tolerantie_pct !== '' && Number.isFinite(Number(l.incasso_tolerantie_pct))
-      ? Number(l.incasso_tolerantie_pct) : INCASSO_TOL_PCT;
     const vanLev = eur.filter((f) => f.leverancier === l.id && teBetalen(f) > 0);
-    const binnen = vanLev.map((f) => ({ f, diff: Math.abs(teBetalen(f) - bedrag), tol: Math.max(INCASSO_TOL_MIN, Math.round(teBetalen(f) * pct / 100)) }))
+    const binnen = vanLev.map((f) => ({ f, diff: Math.abs(teBetalen(f) - bedrag), tol: incassoTolerantie(l, teBetalen(f)) }))
       .filter((x) => x.diff <= x.tol).sort((a, b) => a.diff - b.diff || afstand(tx, a.f) - afstand(tx, b.f));
     if (binnen.length) {
       const b = binnen[0];
       const basis = b.diff === 0 ? 0.92 : 0.9 - 0.3 * (b.diff / b.tol);
-      const twijfel = binnen.length > 1 && binnen[1].diff === b.diff;
-      uit.push(kandidaat('incasso', [b.f], (twijfel ? 0.6 : basis) * datumFactor(tx, b.f), tx, { verschil_centen: teBetalen(b.f) - bedrag }));
+      const gelijk = binnen.slice(1).filter((x) => x.diff === b.diff && opeisbaar(tx, x.f));
+      const twijfel = gelijk.length > 0;
+      uit.push(kandidaat('incasso', [b.f], (twijfel ? 0.6 : basis) * datumFactor(tx, b.f), tx, Object.assign({ verschil_centen: teBetalen(b.f) - bedrag },
+        twijfel ? { alternatieven: gelijk.slice(0, 3).map((x) => x.f.id) } : null)));
     }
   }
   // (4) subset-som per IBAN (of incassant): verzamelbetaling, factuur min creditnota
@@ -773,14 +782,15 @@ function bankcontrole(inv) {
     if (!txFacturen.has(txId)) txFacturen.set(txId, []);
     txFacturen.get(txId).push(fId);
   };
-  for (const k of inv.koppelingen || []) koppel(k.transactie, k.factuur, k.methode, k.bron);
+  for (const k of inv.koppelingen || []) { koppel(k.transactie, k.factuur, k.methode, k.bron); if (k.volledig === true) betaald.get(k.factuur)[betaald.get(k.factuur).length - 1].volledig = true; }
   // voldaan: de gekoppelde betalingen dekken het bedrag; of een mens koppelde; of de koppeling was een incasso binnen de tolerantie of
   // een valutabetaling (euro tegen vreemde valuta is niet op te tellen); of de factuur zit in een verzamelbetaling (één post voor meer
   // facturen, ook factuur min creditnota: de post dekt dan de groep, niet de factuur los) (diffreview wv798 #2)
   const voldaan = (f) => {
     const ks = betaald.get(f.id) || [];
     if (!ks.length) return false;
-    if (ks.some((k) => k.bron === 'mens' || k.methode === 'incasso' || k.methode === 'valuta' || (txFacturen.get(k.tx) || []).length > 1)) return true;
+    // een mens-koppeling telt alleen als volledig als hij dat zegt (termijnbetalingen: de eerste termijn dekt de factuur niet; natoets #3)
+    if (ks.some((k) => k.volledig === true || k.methode === 'incasso' || k.methode === 'valuta' || (txFacturen.get(k.tx) || []).length > 1)) return true;
     const som = ks.reduce((s, k) => s + (txMap.has(k.tx) ? -txMap.get(k.tx).bedrag_centen : 0), 0);
     return teBetalen(f) > 0 ? som >= teBetalen(f) : som <= teBetalen(f);
   };
@@ -791,8 +801,45 @@ function bankcontrole(inv) {
   const signalen = [];
   const voorgesteld = new Set();
 
+  // Ronde 1: alleen de zekere koppelingen (geborgde tegenpartij, ≥ 0,8, geen gelijkwaardig alternatief). Zo hangt "dubbel betaald" niet
+  // af van de volgorde in het bestand: een incasso die maar net binnen de tolerantie valt, ziet in ronde 2 de exacte handbetaling al
+  // gekoppeld staan (natoets wv798 #1).
+  const ronde1 = (tx) => {
+    if (txFacturen.has(tx.id) || uitzonderingVoor(tx, ctx)) return;
+    const kand = matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx);
+    const k = kand[0];
+    if (!k || k.ter_bevestiging) return;
+    if (!k.facturen.every((fid) => fMap.has(fid) && tegenpartijGeborgd(tx, fMap.get(fid), ctx))) return;
+    if (kand[1] && kand[1].zekerheid >= k.zekerheid - 0.05 && kand[1].facturen.join() !== k.facturen.join()) return;
+    const eigenaar = eigenaarVan(tx, k.facturen);
+    for (const fid of k.facturen) {
+      uit.koppelingen.push({ transactie: tx.id, factuur: fid, bron: 'auto', methode: k.methode, zekerheid: k.zekerheid, alleen_eigenaar: eigenaar });
+      koppel(tx.id, fid, k.methode, 'auto');
+      const f = fMap.get(fid);
+      if (f && f.betaalspoor && f.betaalspoor !== 'betaald_gezien') uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'bankmatch', van: f.betaalspoor, naar: 'betaald_gezien' });
+    }
+  };
+  txs.forEach(ronde1);
+
+  // Dubbel geüpload: welke post gaat bij "Is hetzelfde" weg? Die krijgt in ronde 2 geen eigen voorstel of signaal ernaast (natoets #7).
+  // F2 sluit bij transactie_verwijderen ook de open signalen en voorstellen van die post.
+  const getal = (x) => (x !== undefined && x !== null && /^\d+$/.test(String(x)) ? Number(x) : null);
+  const jonger = (x, y) => {
+    if (x.bestand_op && y.bestand_op) return String(x.bestand_op) > String(y.bestand_op);
+    const gx = getal(x.bestand), gy = getal(y.bestand);
+    if (gx !== null && gy !== null) return gx > gy;   // "10" is jonger dan "9" (natoets #6)
+    return String(x.bestand) > String(y.bestand);
+  };
+  const dubbelParen = dubbelGeupload(txs).map(([a, b]) => {
+    const volgorde = jonger(a, b) ? [a, b] : [b, a];
+    const weg = volgorde.find((t) => !txFacturen.has(t.id)) || null;
+    return { a, b, weg };
+  });
+  const overslaan = new Set(dubbelParen.map((p) => p.weg && p.weg.id).filter(Boolean));
+
+  // Ronde 2: wat over is → fraudesignaal, uitzondering, voorstel, dubbel betaald of geen factuur
   for (const tx of txs) {
-    if (txFacturen.has(tx.id)) continue;
+    if (txFacturen.has(tx.id) || overslaan.has(tx.id)) continue;
     const lt = leverancierBijTx(tx, ctx);
     const tegen = ibanNorm(tx.tegenpartij_iban);
     const basis = { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lt ? lt.leverancier.naam : tx.tegenpartij_naam,
@@ -804,34 +851,16 @@ function bankcontrole(inv) {
     }
     const u = uitzonderingVoor(tx, ctx);
     if (u) { uit.uitzonderingen.push(Object.assign({ transactie: tx.id, alleen_eigenaar: !!tx.alleen_eigenaar }, u)); continue; }
-    const openF = (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f));
-    const kand = matchTransactie(tx, openF, ctx);
-    if (kand.length) {
-      const k = kand[0];
-      const geborgd = k.facturen.every((fid) => fMap.has(fid) && tegenpartijGeborgd(tx, fMap.get(fid), ctx));
-      const gelijkwaardig = kand[1] && kand[1].zekerheid >= k.zekerheid - 0.05 && kand[1].facturen.join() !== k.facturen.join();
-      const eigenaar = eigenaarVan(tx, k.facturen);
-      if (!k.ter_bevestiging && geborgd && !gelijkwaardig) {
-        for (const fid of k.facturen) {
-          uit.koppelingen.push({ transactie: tx.id, factuur: fid, bron: 'auto', methode: k.methode, zekerheid: k.zekerheid, alleen_eigenaar: eigenaar });
-          koppel(tx.id, fid, k.methode, 'auto');
-          const f = fMap.get(fid);
-          if (f && f.betaalspoor && f.betaalspoor !== 'betaald_gezien') uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'bankmatch', van: f.betaalspoor, naar: 'betaald_gezien' });
-        }
-      } else {
-        const sleutel = 'voorstel:' + tx.id + '|' + k.facturen.slice().sort().join(',');
-        if (!afgewezen.has(sleutel)) {
-          uit.voorstellen.push(Object.assign({ sleutel, transactie: tx.id }, k, { ter_bevestiging: true, tegenpartij_geborgd: geborgd, alleen_eigenaar: eigenaar }));
-          k.facturen.concat(k.alternatieven || []).forEach((f) => voorgesteld.add(f));   // ook de alternatieven: een mens kiest, geen vals signaal ernaast
-          continue;
-        }
-      }
-      if (txFacturen.has(tx.id)) continue;
-    }
-    // geen (aanvaarde) open factuur: dubbel betaald? (zelf betaald én geïncasseerd, of hetzelfde factuurnummer aan dezelfde leverancier opnieuw)
+    // eerst: is dit een tweede betaling van een al voldane factuur? (zelf betaald én geïncasseerd, of hetzelfde factuurnummer opnieuw)
     if (richtingVan(tx) === 'af') {
       const ref = referentieStukken(tx);
-      const al = (fPerEnt.get(tx.entiteit) || []).filter((f) => voldaan(f) && teBetalen(f) === -tx.bedrag_centen && !NIET_OPEN.includes(f.status));
+      const bedrag = -tx.bedrag_centen;
+      const al = (fPerEnt.get(tx.entiteit) || []).filter((f) => {
+        if (!voldaan(f) || NIET_OPEN.includes(f.status) || !(teBetalen(f) > 0)) return false;
+        const incassoSpel = tx.is_incasso || (betaald.get(f.id) || []).some((k) => k.methode === 'incasso');
+        const tol = incassoSpel ? incassoTolerantie(levVan(f.leverancier, ctx), teBetalen(f)) : 0;   // incasso: binnen de tolerantie (natoets #1)
+        return Math.abs(teBetalen(f) - bedrag) <= tol;
+      });
       const dubbel = al.find((f) => {
         const l = levVan(f.leverancier, ctx);
         const zelfdeLev = !!(l && ((lt && lt.leverancier.id === l.id) || (tegen && levIbans(l).has(tegen))));
@@ -850,8 +879,20 @@ function bankcontrole(inv) {
         })));
         continue;
       }
-      if (dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));
     }
+    const kand = matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx);
+    if (kand.length) {
+      const k = kand[0];
+      const sleutel = 'voorstel:' + tx.id + '|' + k.facturen.slice().sort().join(',');
+      if (!afgewezen.has(sleutel)) {
+        const geborgd = k.facturen.every((fid) => fMap.has(fid) && tegenpartijGeborgd(tx, fMap.get(fid), ctx));
+        const alle = k.facturen.concat(k.alternatieven || []);
+        uit.voorstellen.push(Object.assign({ sleutel, transactie: tx.id }, k, { ter_bevestiging: true, tegenpartij_geborgd: geborgd, alleen_eigenaar: eigenaarVan(tx, alle) }));
+        alle.forEach((f) => voorgesteld.add(f));   // ook de alternatieven: een mens kiest, geen vals signaal ernaast
+        continue;
+      }
+    }
+    if (richtingVan(tx) === 'af' && dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));
   }
 
   // signalen per factuur — alleen voor entiteiten waarvan de app een bank ziet (rekening met controle 1); Privé-regels worden niet
@@ -885,12 +926,8 @@ function bankcontrole(inv) {
         details: { opdracht: op.id, status: op.status }, sleutel_extra: 'op=' + op.id, alleen_eigenaar: isPrive(f) }));
     }
   }
-  const isGekoppeld = (t) => txFacturen.has(t.id);
-  const jonger = (x, y) => String(x.bestand_op || x.bestand) > String(y.bestand_op || y.bestand);
-  for (const [a, b] of dubbelGeupload(txs)) {
+  for (const { a, b, weg } of dubbelParen) {
     // "Is hetzelfde" haalt de post uit het jongste bestand weg, nooit een gekoppelde (diffreview wv798 #14)
-    const volgorde = jonger(a, b) ? [a, b] : [b, a];
-    const weg = volgorde.find((t) => !isGekoppeld(t)) || null;
     signalen.push(maakSignaal('mogelijk_dubbel_geupload', { transacties: [a.id, b.id], eigen_iban: a.eigen_iban, entiteit: a.entiteit, naam: a.tegenpartij_naam,
       bedrag_centen: a.bedrag_centen, datum: a.boekdatum, alleen_eigenaar: !!(a.alleen_eigenaar || b.alleen_eigenaar), details: { te_verwijderen: weg ? weg.id : null } }));
   }
