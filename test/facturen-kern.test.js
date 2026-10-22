@@ -193,6 +193,8 @@ test('UBL weigert DOCTYPE/ENTITY en kapotte XML; ander XML is geen UBL', () => {
   assert.equal(K.leesUbl('<Invoice><ID>1</Invoice>').ok, false);
   assert.equal(K.leesUbl('<Invoice><ID>1</ID>').ok, false);
   assert.equal(K.leesUbl('<Bestelling><ID>1</ID></Bestelling>').reden, 'geen_ubl_factuur');
+  assert.equal(K.leesUbl(ubl() + '<Invoice><ID>2</ID></Invoice>').ok, false, 'twee wortels');
+  assert.equal(K.leesUbl(ubl() + 'rommel').ok, false, 'losse tekst na de wortel');
   const sbd = '<StandardBusinessDocument><Header/>' + ubl().replace(/^<\?xml[^>]*>/, '') + '</StandardBusinessDocument>';
   assert.equal(K.leesUbl(sbd).nummer, 'VB-2026-0413');
 });
@@ -285,12 +287,17 @@ test('fixture nieuw IBAN bij bekende leverancier: iban_nieuw, Bevestigen geblokk
   assert.equal(s.ok, false);
   assert.match(s.reden, /nabellen/);
   const n = K.nagebeld(f, 'eigenaar', '2026-10-22T10:00:00+02:00');
-  assert.deepEqual(n.leverancier_iban, { leverancier_id: LEV_A.id, iban: IBAN.A2, toegevoegd_door: 'eigenaar', toegevoegd_op: '2026-10-22T10:00:00+02:00' });
+  assert.deepEqual(n.leverancier_iban, [{ leverancier_id: LEV_A.id, iban: IBAN.A2, toegevoegd_door: 'eigenaar', toegevoegd_op: '2026-10-22T10:00:00+02:00' }]);
+  assert.deepEqual(n.factuur.nagebeld_ibans, [IBAN.A2]);
   assert.equal(n.besluit.bron, 'mens');
   const na = Object.assign({}, f, n.factuur);
   assert.equal(K.magBevestigen(na).ok, true);
   assert.deepEqual(K.statusOvergang('te_beoordelen', 'bevestigen', na), { ok: true, naar: 'in_wachtrij' });
   assert.throws(() => K.nagebeld(Object.assign({}, f, { iban_nieuw: false }), 'eigenaar', 'x'), /geen nieuw IBAN/);
+  // nabellen hangt aan het IBAN: daarna een ander (nieuw) IBAN invullen → opnieuw geblokkeerd
+  const ander = maakIban('NL', 'TEST', '0000000777');
+  const herpoort = K.ibanPoort({ iban: ander }, LEV_A, ctxBasis());
+  assert.equal(K.magBevestigen(Object.assign({}, na, { iban: ander, ibans_betaal: [ander], ibans_onbekend: herpoort.onbekend, iban_nieuw: herpoort.iban_nieuw })).ok, false);
   // nieuwe leverancier: ook nabellen
   const r2 = K.beslisBericht({ bericht: { afzender: 'x@onbekend.example' }, documenten: [doc(pdfA().replace('KvK 99100001', 'KvK 99100099'))] }, ctxBasis());
   assert.equal(r2.facturen[0].leverancier_id, LEV_A.id, 'onbekende KvK, maar het IBAN is bekend bij leverancier A');
@@ -394,6 +401,7 @@ test('fixture patiëntkenmerk → alleen eigenaar, geen model, geen kenmerk in r
   const f3 = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(pdfA())] }, ctxBasis()).facturen[0];
   assert.equal(K.zichtbaarVoor('praktijkmanager', f3), true);
   assert.equal(K.zichtbaarVoor('praktijkmanager', Object.assign({}, f3, { entiteit: 'prive' })), false);
+  assert.equal(K.zichtbaarVoor('praktijkmanager', Object.assign({}, f3, { entiteit: null })), false, 'zonder entiteit kan het Privé zijn');
 });
 
 test('de factuurtekst komt niet in de uitkomst (vluchtig)', () => {
@@ -448,6 +456,10 @@ test('validators: ±0,02, datums, 3× mediaan, mod-97, eigen IBAN fout/intern', 
   const c = (f, lev) => Object.fromEntries(K.valideer(f, ctxBasis(), { leverancier: lev }).controles.map((x) => [x.naam, x]));
   assert.equal(c(basis).bedragen.ok, true);
   assert.equal(c(Object.assign({}, basis, { incl: 12103 })).bedragen.ok, false);
+  assert.equal(c(Object.assign({}, basis, { excl: null, btw: null })).bedragen.ok, false, 'niet na te rekenen = melding');
+  assert.equal(c(Object.assign({}, basis, { excl: null, btw: 21694, incl: 12500 })).bedrag_volgorde.ok, false);
+  assert.equal(c(basis).drempel_vast, undefined);
+  assert.equal(c(Object.assign({}, basis, { excl: 826446, btw: 173554, incl: 1000000 })).drempel_vast.ok, false, 'boven € 2.500');
   assert.equal(c(Object.assign({}, basis, { vervaldatum: '2026-09-01' })).datums.ok, false);
   assert.equal(c(Object.assign({}, basis, { factuurdatum: '2026-12-31', vervaldatum: '2027-01-30' })).datums.ok, false);
   assert.equal(c(Object.assign({}, basis, { factuurdatum: '2025-01-01', vervaldatum: '2025-01-31' })).datums.ok, false);
@@ -490,7 +502,7 @@ test('leren uit een bevestiging met wijziging: nieuwe leveranciersstandaard + me
 // ───────────── statusovergangen ─────────────
 
 test('statusovergangen: precies de tabel uit § 4.4, elke andere combinatie geweigerd', () => {
-  const ok = { entiteit: 'tolgaarde', betaalwijze: 'zelf', opdracht_status: 'wacht', modus: 'concept' };
+  const ok = { entiteit: 'tolgaarde', betaalwijze: 'zelf', iban: IBAN.A, opdracht_status: 'wacht', modus: 'concept' };
   const geldig = new Set(K.STATUS_OVERGANGEN.map((o) => (o[0] || '—') + '|' + o[1]));
   let geweigerd = 0, toegestaan = 0;
   for (const van of [null].concat(K.STATUSSEN)) {
@@ -510,10 +522,13 @@ test('statusovergangen: precies de tabel uit § 4.4, elke andere combinatie gewe
 });
 
 test('statusovergangen: voorwaarden (privé, terugdraaien na claimen, modus)', () => {
-  assert.deepEqual(K.statusOvergang('te_beoordelen', 'bevestigen', { entiteit: 'tolgaarde', betaalwijze: 'zelf' }), { ok: true, naar: 'in_wachtrij' });
-  assert.deepEqual(K.statusOvergang('te_beoordelen', 'bevestigen', { entiteit: 'prive', betaalwijze: 'zelf' }), { ok: true, naar: 'prive_archief' });
+  assert.deepEqual(K.statusOvergang('te_beoordelen', 'bevestigen', { entiteit: 'tolgaarde', betaalwijze: 'zelf', iban: IBAN.A }), { ok: true, naar: 'in_wachtrij' });
+  assert.deepEqual(K.statusOvergang('te_beoordelen', 'bevestigen', { entiteit: 'prive', betaalwijze: 'incasso' }), { ok: true, naar: 'prive_archief' });
   assert.equal(K.statusOvergang('te_beoordelen', 'bevestigen', { entiteit: 'tolgaarde', betaalwijze: 'onbekend' }).ok, false);
   assert.equal(K.statusOvergang('te_beoordelen', 'bevestigen', { betaalwijze: 'zelf' }).ok, false);
+  assert.match(K.statusOvergang('te_beoordelen', 'bevestigen', { entiteit: 'tolgaarde', betaalwijze: 'zelf' }).reden, /zonder IBAN/);
+  assert.match(K.statusOvergang('te_beoordelen', 'bevestigen', { entiteit: 'tolgaarde', betaalwijze: 'zelf', iban: 'NL00TEST0000000101' }).reden, /IBAN-fout/);
+  assert.match(K.statusOvergang('te_beoordelen', 'bevestigen', { entiteit: 'tolgaarde', betaalwijze: 'zelf', iban: IBAN.A2, iban_nieuw: true, ibans_onbekend: [IBAN.A2], nagebeld_op: 'x', nagebeld_ibans: [IBAN.B] }).reden, /nabellen/);
   assert.equal(K.statusOvergang('in_wachtrij', 'terugdraaien', { opdracht_status: 'opgehaald' }).ok, false);
   assert.deepEqual(K.statusOvergang('in_wachtrij', 'terugdraaien', { opdracht_status: 'wacht' }), { ok: true, naar: 'te_beoordelen' });
   assert.deepEqual(K.statusOvergang('prive_archief', 'terugdraaien', {}), { ok: true, naar: 'te_beoordelen' });
@@ -523,7 +538,7 @@ test('statusovergangen: voorwaarden (privé, terugdraaien na claimen, modus)', (
   assert.equal(K.statusOvergang('verzending_mislukt', 'opnieuw_proberen', { entiteit: 'prive' }).ok, false);
   // privé komt langs geen enkele weg in de wachtrij
   for (const van of [null].concat(K.STATUSSEN)) for (const g of K.GEBEURTENISSEN) {
-    const r = K.statusOvergang(van, g, { entiteit: 'prive', betaalwijze: 'zelf', opdracht_status: 'wacht', modus: 'versturen' });
+    const r = K.statusOvergang(van, g, { entiteit: 'prive', betaalwijze: 'zelf', iban: IBAN.A, opdracht_status: 'wacht', modus: 'versturen' });
     assert.ok(!(r.ok && r.naar === 'in_wachtrij'), 'privé naar in_wachtrij via ' + (van || '—') + ' ' + g);
   }
 });
@@ -583,7 +598,7 @@ test('verstuur_na: volgende hele uur; dagelijks 17:00 Nederlandse tijd (ook rond
 });
 
 test('maakOpdracht: privé geweigerd, doeladres uit de entiteit, vingerafdruk erbij', () => {
-  const f = { id: 'fedcba9876543210', entiteit: 'tolgaarde', incl: 142850, doeladres: 'kwaadwillig@voorbeeld.test' };
+  const f = { id: 'fedcba9876543210', entiteit: 'tolgaarde', betaalwijze: 'incasso', incl: 142850, document: 'a'.repeat(64), doeladres: 'kwaadwillig@voorbeeld.test' };
   const ent = ENT.find((e) => e.sleutel === 'tolgaarde');
   const op = K.maakOpdracht(f, ent, { id: '0123456789abcdef', bijlagen: [{ naam: 'a.pdf', sha256: 'a'.repeat(64) }], verstuur_na: '2026-10-22T15:00:00.000Z' });
   assert.equal(op.doeladres, '<exact-inkoopadres-tolgaarde>');
@@ -594,6 +609,9 @@ test('maakOpdracht: privé geweigerd, doeladres uit de entiteit, vingerafdruk er
   assert.throws(() => K.maakOpdracht(f, ENT.find((e) => e.sleutel === 'prive'), { id: '0123456789abcdef', bijlagen: ['a'.repeat(64)] }), /privé/);
   assert.throws(() => K.maakOpdracht(f, ENT.find((e) => e.sleutel === 'groenhouten'), { id: '0123456789abcdef', bijlagen: ['a'.repeat(64)] }), /wijkt af/);
   assert.throws(() => K.maakOpdracht(f, ent, { id: 'op_1', bijlagen: ['a'.repeat(64)] }), /16 hex/);
+  assert.throws(() => K.maakOpdracht(f, ent, { id: '0123456789abcdef', bijlagen: ['b'.repeat(64)] }), /niet in de bijlagen/);
+  assert.throws(() => K.maakOpdracht(Object.assign({}, f, { betaalwijze: 'zelf', iban: IBAN.A2, iban_nieuw: true, ibans_onbekend: [IBAN.A2] }), ent, { id: '0123456789abcdef', bijlagen: ['a'.repeat(64)] }), /nabellen/);
+  assert.throws(() => K.maakOpdracht(Object.assign({}, f, { betaalwijze: 'onbekend' }), ent, { id: '0123456789abcdef', bijlagen: ['a'.repeat(64)] }), /betaalwijze/);
 });
 
 // ───────────── vingerafdruk: vaste testvectoren (onafhankelijk berekend met Python json.dumps(separators=(',',':'), ensure_ascii=False)) ─────────────
@@ -617,13 +635,114 @@ test('vingerafdruk exact volgens contracten/koerier-api.md (vaste testvectoren)'
   assert.throws(() => K.vingerafdruk(Object.assign({}, op, { bijlagen: [] })), /sha256/);
   assert.throws(() => K.vingerafdruk(Object.assign({}, op, { soort: 'betaling' })), /soort/);
   assert.throws(() => K.vingerafdruk(Object.assign({}, op, { regel: { entiteit: 'tolgaarde', bedrag_centen: 1, doeladres: 'x' } })), /factuur_id/);
+  assert.throws(() => K.vingerafdruk(Object.assign({}, op, { regel: Object.assign({}, op.regel, { factuur_id: '' }) })), /factuur_id/);
+  assert.throws(() => K.vingerafdruk(Object.assign({}, op, { regel: Object.assign({}, op.regel, { entiteit: 'prive' }) })), /privé/);
 });
 
 // ───────────── puurheid (zelfde regel als de CI-poort) ─────────────
 
 test('facturen-kern.js is puur: geen bestand-, netwerk- of procesmodule, geen klok', () => {
   const bron = fs.readFileSync(path.resolve(__dirname, '..', 'facturen-kern.js'), 'utf8').split('\n').filter((r) => !/^\s*(\*|\/\/)/.test(r)).join('\n');
-  assert.doesNotMatch(bron, /require\(['"](node:)?(fs|http|https|net|tls|dgram|dns|child_process|worker_threads|undici|cluster|os|vm)['"]\)|\bfetch\s*\(|process\.|import\(/);
-  assert.doesNotMatch(bron, /Date\.now\s*\(|new Date\(\s*\)|Math\.random/);
+  assert.doesNotMatch(bron, /require\([`'"](node:)?(fs(\/promises)?|os|http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[`'"]\)|\bfetch\s*\(|process\.|import\(/);
+  assert.doesNotMatch(bron.replace(/new Date\(\s*[^)\s]/g, 'NIEUWEDATUM('), /Date\.now\s*\(|new Date\b|(^|[^.A-Za-z0-9_])Date\(|\.format(ToParts)?\(\s*\)|Math\.random/);
   assert.deepEqual((bron.match(/require\(['"][^'"]+['"]\)/g) || []), ["require('crypto')"]);
+});
+
+// ───────────── diffreview wv797: vangnetten ─────────────
+
+test('ReDoS: 200.000 tekens witruimte en vulsel lopen in alle stappen snel door', () => {
+  const t0 = process.hrtime.bigint();
+  const lang = [
+    'saldo' + ' '.repeat(200000) + 'x', 'wordt omstreeks ' + ' '.repeat(200000), 'datum' + ' '.repeat(200000) + '1',
+    'Factuur' + '\n'.repeat(100000) + 'nummer', 'patiënt geboren op' + ' \n'.repeat(90000), 'IBAN ' + 'NL12 '.repeat(40000),
+    '1'.repeat(200000), ('Totaal te betalen ' + '9'.repeat(30) + ',0').repeat(5000), 'gelieve ' + 'a'.repeat(200000) + ' over te maken',
+  ];
+  for (const t of lang) {
+    K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t)] }, ctxBasis());
+    K.stapBetaalwijze(t, {}, {}, {});
+    K.stapPatientkenmerk([t]);
+  }
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(ms < 5000, 'duurde ' + Math.round(ms) + ' ms');
+});
+
+test('betaalwijze: voorwaardelijke en mogelijke vormen zijn geen "al betaald"; incassoaanbod wint niet van een betaalverzoek', () => {
+  const nietBetaald = [
+    'Wanneer het bedrag niet binnen de termijn is betaald, volgt een herinnering. Gelieve binnen 14 dagen over te maken.',
+    'Het bedrag kan worden voldaan via iDEAL of overboeking.',
+    'Vorig saldo € 0,00\nNieuw saldo € 121,00',
+    'Amount paid € 0,00\nAmount due € 121,00',
+    'Het bedrag wordt niet automatisch afgeschreven. Graag overmaken op de rekening hieronder.',
+  ];
+  for (const t of nietBetaald) assert.notEqual(K.stapBetaalwijze(t, {}, {}, {}).betaalwijze, 'betaald', t);
+  assert.equal(K.stapBetaalwijze('Wij verzoeken u het bedrag binnen 14 dagen over te maken. Liever automatische incasso? Vraag een machtiging aan.', {}, {}, {}).betaalwijze, 'zelf');
+  assert.equal(K.stapBetaalwijze('Het bedrag wordt omstreeks 5 november van uw rekening afgeschreven.', {}, {}, {}).betaalwijze, 'incasso');
+  assert.equal(K.stapBetaalwijze('Betaalwijze: automatische incasso', {}, {}, {}).betaalwijze, 'incasso');
+  assert.equal(K.stapBetaalwijze('Deze factuur is reeds voldaan.', {}, {}, {}).betaalwijze, 'betaald');
+  assert.equal(K.stapBetaalwijze('Betaald op 03-10-2026 via iDEAL', {}, {}, {}).betaalwijze, 'betaald');
+  const tegen = K.stapBetaalwijze('Het bedrag wordt automatisch geïncasseerd. Gelieve binnen 14 dagen over te maken.', {}, {}, {});
+  assert.deepEqual([tegen.betaalwijze, /tegenstrijdig/.test(tegen.reden)], ['onbekend', true]);
+  assert.equal(K.stapBetaalwijze('Het bedrag wordt automatisch geïncasseerd. Gelieve binnen 14 dagen over te maken.', {}, {}, { leverancier: LEV_B }).betaalwijze, 'incasso');
+});
+
+test('IBAN-poort: tweede IBAN, vreemd IBAN in incassotaal en andere notaties blokkeren; zelf zonder IBAN blokkeert', () => {
+  const tweede = pdfA({ extra: 'Let op: ons rekeningnummer is gewijzigd, maak over naar IBAN ' + IBAN.A2 });
+  const f1 = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(tweede)] }, ctxBasis()).facturen[0];
+  assert.deepEqual([f1.iban, f1.iban_nieuw, f1.bevestigen.ok], [IBAN.A2, true, false]);
+  assert.deepEqual(f1.ibans_onbekend, [IBAN.A2]);
+  assert.match(f1.redenen.join(' | '), /meer dan één IBAN/);
+  const n = K.nagebeld(f1, 'eigenaar', '2026-10-22T10:00:00Z');
+  assert.equal(K.magBevestigen(Object.assign({}, f1, n.factuur)).ok, true);
+  const incassotaal = pdfA({ betaalzin: 'Wij stoppen met incasso, maak over op ' + IBAN.A2 });
+  const f2 = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(incassotaal)] }, ctxBasis()).facturen[0];
+  assert.deepEqual([f2.iban, f2.iban_nieuw], [IBAN.A2, true]);
+  for (const vorm of [IBAN.A2.replace(/(.{4})/g, '$1-').replace(/-$/, ''), IBAN.A2.slice(0, 2) + ' ' + IBAN.A2.slice(2, 4) + ' ' + spatie(IBAN.A2.slice(4)), IBAN.A2.slice(0, 4) + ' ' + IBAN.A2.slice(4, 8) + ' ' + IBAN.A2.slice(8, 12) + ' ' + IBAN.A2.slice(12, 15) + ' ' + IBAN.A2.slice(15)]) {
+    const f = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(pdfA({ betaalzin: 'Gelieve over te maken op IBAN ' + vorm + ' t.n.v. Leverancier A' }))] }, ctxBasis()).facturen[0];
+    assert.deepEqual([f.iban, f.iban_nieuw], [IBAN.A2, true], vorm);
+  }
+  const zonder = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(pdfA({ betaalzin: 'Gelieve binnen 30 dagen over te maken.' }))] }, ctxBasis()).facturen[0];
+  assert.equal(zonder.iban, null);
+  assert.ok(zonder.bevestigen.redenen.includes('zelf betalen zonder IBAN'));
+});
+
+test('patiëntkenmerk: samenstellingen en "geb." worden gevangen', () => {
+  for (const t of ['Patiëntnaam: J. Voorbeeld\nGeb.datum: 01-02-1950', 'Patiënt: J. Voorbeeld geb. 01-02-1950', 'Cliëntnummer 123 Geboortedatum: 01-02-1950', 'Patiëntgegevens\nGeboortedatum 01-02-1950']) {
+    assert.ok(K.stapPatientkenmerk([t]).soorten.includes('patient_geboortedatum'), t);
+  }
+  assert.equal(K.stapPatientkenmerk(['IBAN ' + maakIban('NL', 'TEST', '0111222333') + '\nnogmaals ' + maakIban('NL', 'TEST', '0111222333')]).kenmerk, false, 'tweede keer hetzelfde IBAN');
+});
+
+test('bedragen: "excl" na een totaallabel, ",-", datum na een bedrag, spatie als duizendtal, losse min, betaalzin vóór het totaal', () => {
+  const v1 = K.leesPdfTekst('Factuur 1\nTotaalbedrag excl. btw € 100,00\nBtw € 21,00\nTotaalbedrag incl. btw € 121,00');
+  assert.deepEqual([v1.excl, v1.btw, v1.incl], [10000, 2100, 12100]);
+  const v2 = K.leesPdfTekst('Factuur 2\nTotaal € 1.250,-\nWaarvan btw € 216,94');
+  assert.deepEqual([v2.incl, v2.btw], [125000, 21694]);
+  assert.equal(K.leesPdfTekst('Factuur 3\nTotaal te betalen: € 121,00 vóór 22.10.2026').incl, 12100);
+  assert.equal(K.leesPdfTekst('Factuur 4\nTotaal € 121,00 per 01.11').incl, 12100);
+  assert.deepEqual(K.bedragenIn('Totaal € 1 234,56'), [123456]);
+  assert.deepEqual(K.bedragenIn('aantal 3 120,00'), [12000]);
+  assert.deepEqual(K.bedragenIn('Abonnement oktober - € 12,50'), [1250]);
+  assert.deepEqual(K.bedragenIn('Korting -€ 5,00 en € -2,50 en 7,50-'), [-500, -250, -750]);
+  const v3 = K.leesPdfTekst('Factuur 5\nGelieve het bedrag binnen 30 dagen te voldoen.\nSubtotaal € 100,00\nBtw 21% € 21,00\nTotaal € 121,00');
+  assert.deepEqual([v3.excl, v3.incl], [10000, 12100]);
+});
+
+test('creditnota alleen op een kop of nummerlabel, niet op een los woord in de voettekst', () => {
+  for (const voet of ['Bij een klacht volgt creditering.', "Creditnota's worden verrekend met de volgende factuur."]) {
+    const v = K.leesPdfTekst(pdfA({ extra: voet }));
+    assert.deepEqual([v.soort, v.incl], ['factuur', 142850], voet);
+  }
+  assert.equal(K.leesPdfTekst('Leverancier A\nCreditnotanummer: CN-9\nTotaal 10,00').soort, 'creditnota');
+  assert.equal(K.leesPdfTekst('Factuur 6\nTotaal -10,00').soort, 'creditnota', 'negatief totaal');
+});
+
+test('kenmerk vraagt minstens één cijfer', () => {
+  assert.equal(K.leesPdfTekst('Factuur 7\nGelieve te betalen o.v.v. het factuurnummer.').kenmerk, null);
+  assert.equal(K.leesPdfTekst('Factuur 8\nonder vermelding van Voorbeeldnaam').kenmerk, null);
+  assert.equal(K.leesPdfTekst('Factuur 9\nBetalingskenmerk: 1234 5678 9012 3456').kenmerk, '1234 5678 9012 3456');
+});
+
+test('opdracht drie keer opgehaald zonder resultaat → definitief mislukt', () => {
+  const r = K.opdrachtOvergang({ status: 'opgehaald', opgehaald_op: '2026-10-22T14:00:00Z', poging: 3 }, 'claim', Date.parse('2026-10-22T15:00:00Z'));
+  assert.deepEqual([r.ok, r.naar, r.definitief, r.factuur], [true, 'mislukt', true, 'mislukt_definitief']);
 });
