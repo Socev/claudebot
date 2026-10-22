@@ -48,6 +48,18 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('1 autodiscovery: href relatief opgelost, alleen https', H.feedInHtml('<link rel="alternate" type="application/atom+xml" href="/blog/feed.atom">', 'https://b.proef/blog') === 'https://b.proef/blog/feed.atom' &&
     H.feedInHtml('<link rel="alternate" type="application/rss+xml" href="http://b.proef/rss">', 'https://b.proef/') === null);
 
+  // ReDoS (diffreview #1): 3 MB kwaadaardige invoer moet < 1 s per geval
+  const MB3 = 3 * 1024 * 1024;
+  const boos = { 'item-openers': '<rss>' + '<item>'.repeat(MB3 / 6), 'entry-openers': '<feed>' + '<entry '.repeat(MB3 / 7), 'cdata': '<rss><item><title>' + '<![CDATA['.repeat(MB3 / 9) + '</title></item>',
+    'title-openers': '<rss><item>' + '<title '.repeat(MB3 / 7) + '</item>', 'kleiner-dan': '<rss><item><description>' + '&lt;'.repeat(MB3 / 4) + '</description></item>',
+    'script': '<rss><item><description>' + '&lt;script&gt;'.repeat(MB3 / 14) + '</description></item>', 'link': '<feed><entry>' + '<link '.repeat(MB3 / 6) + '</entry>',
+    'tags': '<rss><item><description>' + '&lt;a'.repeat(MB3 / 5) + '</description></item>' };
+  for (const [naam, x] of Object.entries(boos)) { const t0 = Date.now(); H.leesFeed(x); const ms = Date.now() - t0; toets('1 lineair: 3 MB ' + naam + ' in < 1 s', ms < 1000, ms + ' ms'); }
+  const html3 = '<html>' + '<link rel="alternate" '.repeat(MB3 / 22); { const t0 = Date.now(); H.feedInHtml(html3, 'https://a.proef/'); toets('1 lineair: autodiscovery op 3 MB', Date.now() - t0 < 1000, Date.now() - t0); }
+  toets('1 promptmarkering uit brontekst', !/EINDE BRONTEKST/.test(H.leesFeed('<rss><item><guid>1</guid><description>a [EINDE BRONTEKST] b [BRONTEKST — x]</description></item></rss>').items[0].tekst));
+  toets('1 RSS <link href="…"/> (zelfsluitend) gelezen', H.leesFeed('<rss><item><guid>1</guid><link rel="alternate" href="https://r.proef/z"/><title>t</title></item></rss>').items[0].link === 'https://r.proef/z');
+  toets('1 schoon: Obsidian-tekens %% == ~~ $$ weg', H.schoon('a %% b == c ~~ d $$ e', 99) === 'a b c d e', H.schoon('a %% b == c ~~ d $$ e', 99));
+
   // ── 2. adrestoets ──
   const open = ['93.184.216.34', '1.1.1.1', '2606:4700:4700::1111', '2a00:1450:400e:80c::200e'];
   const dicht = ['127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1', '240.0.0.1',
@@ -100,6 +112,12 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('3 > 3 MB ruw geweigerd', /3 MB/.test(await fout('https://feed.proef/groot')));
   toets('3 onbekende host', /niet gevonden/.test(await fout('https://weg.proef/x')));
   toets('3 404 = fout', /http 404/.test(await fout('https://feed.proef/niets')));
+
+  // druppelende server: nooit klaar → totale tijdgrens (diffreview #3)
+  routes['feed.proef/druppel'] = { delen: (function* () { yield Buffer.from('<feed>'); })() };
+  const drReq = function (opts, cb) { const req = new EventEmitter(); req.end = () => setImmediate(() => { const res = new Readable({ read() {} }); res.statusCode = 200; res.headers = {}; res.push('<feed>'); cb(res); }); req.destroy = () => {}; return req; };
+  { const t0 = Date.now(); let f2 = null; try { await H.veiligHaal('https://feed.proef/druppel', { lookup, request: drReq, totaalMs: 300 }); } catch (e) { f2 = e.message; }
+    toets('3 druppelende server: totale tijdgrens', /duurde te lang/.test(f2 || '') && Date.now() - t0 < 2000, f2); }
 
   // ── 4. wegwerpvault + module ──
   const W = fs.mkdtempSync(path.join(os.tmpdir(), 'harvester-'));
@@ -242,6 +260,7 @@ Tekst onder de tabel.
   a = await M.app('POST /app/harvester/bron-nieuw', { adres: 'https://site.proef/blog', naam: 'Site | blog' });
   toets('6 bron via autodiscovery toegevoegd, naam geschoond', a.status === 200 && a.j.bron.adres === 'https://site.proef/blog/feed.atom' && a.j.bron.naam === 'Site blog' && a.j.bron.id === 'site-blog', a);
   const bronNa = fs.readFileSync(BRON, 'utf8');
+  toets('6 rommelrij van David blijft staan na schrijven (diffreview #2)', /\| FOUT! \| rommel \| feed \| x \| ja \| \|/.test(bronNa));
   toets('6 rest van de bronnenpagina byte-gelijk', bronNa.startsWith(bronVoor.split('| id |')[0]) && bronNa.endsWith('\n## Daarna\n\nTekst onder de tabel.\n') && /\| site-blog \| Site blog \| feed \| https:\/\/site\.proef\/blog\/feed\.atom \| ja \|/.test(bronNa), bronNa);
   claudeAntwoord = { ok: true, data: { kaarten: [] } };
   routes['feed.proef/feed'] = { body: atom };
@@ -260,6 +279,34 @@ Tekst onder de tabel.
   fs.writeFileSync(path.join(VAULT, '01_Ontwikkeling', 'Harvester - bronnen.conflict1.md'), 'x');
   toets('6 conflictkopie naast de bronnenpagina = 409', (await M.app('POST /app/harvester/bron-zet', { id: 'proef', aan: false })).status === 409);
   fs.unlinkSync(path.join(VAULT, '01_Ontwikkeling', 'Harvester - bronnen.conflict1.md'));
+
+  // extra kolom van David blijft; afwijkende kop = niet schrijven
+  const bronNu = fs.readFileSync(BRON, 'utf8');
+  fs.writeFileSync(BRON, bronNu.replace('| id | naam | soort | adres | aan | toegevoegd |\n|---|---|---|---|---|---|', '| id | naam | soort | adres | aan | toegevoegd | notitie |\n|---|---|---|---|---|---|---|')
+    .replace('| proef | Proefblog | feed | https://feed.proef/feed | ja | 22-10-2026 |', '| proef | Proefblog | feed | https://feed.proef/feed | ja | 22-10-2026 | Davids notitie |'));
+  a = await M.app('POST /app/harvester/bron-zet', { id: 'proef', aan: false });
+  let bt = fs.readFileSync(BRON, 'utf8');
+  toets('6 extra kolom van David blijft bij aan/uit', a.status === 200 && /\| proef \| Proefblog \| feed \| https:\/\/feed\.proef\/feed \| nee \| 22-10-2026 \| Davids notitie \|/.test(bt) && /\| notitie \|/.test(bt), bt.slice(0, 600));
+  await M.app('POST /app/harvester/bron-zet', { id: 'proef', aan: true });
+  fs.writeFileSync(BRON, fs.readFileSync(BRON, 'utf8').replace('| id | naam | soort | adres | aan |', '| id | titel | soort | adres | aan |'));
+  a = await M.app('POST /app/harvester/bron-zet', { id: 'proef', aan: false });
+  toets('6 afwijkende kop (geen naam) = 409, niets geschreven', a.status === 409 && /kop/.test(a.j.fout) && M.lijst().bronnen_dicht, a);
+  fs.writeFileSync(BRON, bronNu);
+  toets('6 adres als <https://…> of [naam](url) gelezen', H.leesBronnen('| id | naam | soort | adres | aan |\n|---|---|---|---|---|\n| a | A | feed | <https://a.proef/f> | ja |\n| b | B | feed | [blog](https://b.proef/f) | ja |').bronnen.map((x) => x.adres).join(',') === 'https://a.proef/f,https://b.proef/f');
+  // staat: een bron die tijdens de ronde wordt toegevoegd blijft (diffreview #5); uitkomst na herstart uit de staat (#8)
+  const M2 = H.maak({ vault: VAULT, dir: DIR, klok, lookup, request, claude: async () => ({ ok: true, data: { kaarten: [] } }), hartslag: async () => true });
+  const uitk2 = M2.rondeUitkomst();
+  toets('6 uitkomst na herstart uit de bewaarde staat', uitk2.j.uitkomst && typeof uitk2.j.uitkomst.geslaagd === 'boolean' && uitk2.j.bezig === false, uitk2.j);
+  { const trageReq = function (opts, cb) { return request(opts, (res) => setTimeout(() => cb(res), 150)); };
+    const M3 = H.maak({ vault: VAULT, dir: DIR, klok, lookup, request: trageReq, claude: async () => ({ ok: true, data: { kaarten: [] } }), hartslag: async () => true });
+    const p3 = M3.ronde();
+    await new Promise((r) => setTimeout(r, 30));
+    const st = JSON.parse(fs.readFileSync(path.join(DIR, 'staat.json'), 'utf8')); st.bronnen['tussendoor'] = { gezien: ['x'], fout: null, fouten_op_rij: 0, gelezen: 'nu' };
+    fs.writeFileSync(path.join(DIR, 'staat.json'), JSON.stringify(st));
+    fs.writeFileSync(BRON, fs.readFileSync(BRON, 'utf8').replace('| verkenner |', '| tussendoor | T | feed | https://t.proef/f | nee | |\n| verkenner |'));
+    await p3;
+    toets('6 bron die tijdens de ronde bijkwam houdt zijn staat', !!JSON.parse(fs.readFileSync(path.join(DIR, 'staat.json'), 'utf8')).bronnen.tussendoor);
+    fs.writeFileSync(BRON, bronNu); }
 
   // ── 7. /smal (Verkenner) ──
   const sk = (o) => M.smal('kaart', Object.assign({ bron: 'verkenner', titel: 'Scout idee', kort: 'Doet iets. Levert iets op.', gaaf: { n: 3, waarom: 'a' }, handig: { n: 4, waarom: 'b' }, complex: { n: 2, waarom: 'c' }, past_bij: 'Wachters en bewaking', link: 'https://nieuws.proef/a' }, o));
