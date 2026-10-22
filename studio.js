@@ -137,6 +137,7 @@ const LABEL_NL = { 'Text (User Prompt)': 'Wat wil je zien?', 'Batch generate': '
   'Negative Prompt (empty = reference default)': 'Wat wil je níet zien? (leeg = standaard)', 'Music description': 'Beschrijving van de muziek',
   Lyrics: 'Songtekst', 'Duration (sec)': 'Duur (seconden)' };
 const MUZIEK_DUUR = { min: 5, max: 300 };     // seconden; begrenst de GPU-tijd van één muziektaak (wv736)
+const MUZIEK_AANTAL_MAX = 2;                   // 2 × 300 s blijft binnen max_seconden van een muziekflow (Fable wv736 #3)
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'audio/wav': 'wav', 'audio/x-wav': 'wav',
   'audio/wave': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/flac': 'flac', 'audio/x-flac': 'flac', 'audio/ogg': 'ogg', 'video/mp4': 'mp4', 'video/webm': 'webm' };
 
@@ -153,7 +154,7 @@ function maak(deps) {
   const PIPER = deps.piper || { bin: '/opt/data/piper/piper', model: '/opt/data/piper/nl_NL-ronnie-medium.onnx', data: '/opt/data/piper/espeak-ng-data' };
   const doeFetch = deps.fetch || fetch;
   const klok = deps.nu || Date.now;
-  const T = Object.assign({ poll: POLL_MS, wachtStap: COMFY_WACHT_STAP_MS, wachtMax: COMFY_WACHT_MAX_MS }, deps.tempo || {});   // tempo: alleen de toets
+  const T = Object.assign({ poll: POLL_MS, wachtStap: COMFY_WACHT_STAP_MS, wachtMax: COMFY_WACHT_MAX_MS, fsTimeout: 6000 }, deps.tempo || {});   // tempo: alleen de toets
   const log = deps.log || function () {};
   const fout = deps.fout || function () {};
   const st = { taken: [], rij: [], bezig: null, lokaal: { sleutel: null, flows: {} }, router: { op: 0, modellen: null, fout: null },
@@ -279,6 +280,7 @@ function maak(deps) {
       if (v.naam === 'max_duration' && v.soort === 'getal') {
         v.min = Math.max(MUZIEK_DUUR.min, v.min == null ? MUZIEK_DUUR.min : v.min); v.max = Math.min(MUZIEK_DUUR.max, v.max == null ? MUZIEK_DUUR.max : v.max);
       }
+      if (v.soort === 'aantal') v.max = Math.min(v.max, MUZIEK_AANTAL_MAX);
     });
     if ((m.canonical_fields || []).indexOf('seed') >= 0 && !velden.some(function (v) { return v.naam === 'seed'; }))
       velden.push({ naam: 'seed', label: 'Seed (zelfde getal = zelfde uitkomst)', soort: 'seed', meer: true, standaard: null, verplicht: false });
@@ -288,7 +290,7 @@ function maak(deps) {
     else if (sleutelFout) reden = 'de kluis is nu niet bereikbaar; de Router-sleutel kan niet gelezen worden';
     else if (!sleutel) reden = 'wacht op sleutel';
     return { id: 'fs-' + mm[1], project: mm[1], bron: 'router', model: id, titel: schoon(m.name, 80) || id, uitleg: 'FlowStudio-project op Olares', motor: 'router',
-      status: 'actief', uitvoer: uitvoer, velden: velden, max_seconden: 900, gpu_mib_schatting: 0, reden: reden,
+      status: 'actief', uitvoer: uitvoer, velden: velden, max_seconden: uitvoer === 'muziek' ? 1200 : 900, gpu_mib_schatting: 0, reden: reden,
       tijd: uitvoer === 'beeld' ? '± 1 min; eerste keer langer' : uitvoer === 'muziek' ? 'enkele minuten; eerste keer langer' : '' };
   }
 
@@ -305,11 +307,12 @@ function maak(deps) {
     if (!vers && c && klok() - c.op < FS_PROJECT_MS) return c.d;
     let d = null;
     try {
-      const r = await doeFetch(FLOWSTUDIO + '/api/projects/' + pid, { redirect: 'manual', signal: AbortSignal.timeout(6000) });
+      const r = await doeFetch(FLOWSTUDIO + '/api/projects/' + pid, { redirect: 'manual', signal: AbortSignal.timeout(T.fsTimeout) });
       if (r.ok) {
         const j = await r.json().catch(function () { return null; });   // onbekende /api-paden geven HTML met 200 (gemeten)
         const nodig = j && Number(j.estHostMemMib);
-        if (j && j.id === pid && isFinite(nodig) && nodig > 0) d = { nodig_mib: Math.round(nodig), status: schoon(j.status, 30).toLowerCase() };
+        if (j && j.id === pid && isFinite(nodig) && nodig > 0) d = { nodig_mib: Math.round(nodig), status: schoon(j.status, 30).toLowerCase(),
+          lopend: isFinite(Number(j.runningJobCount)) ? Number(j.runningJobCount) : null };
       } else await r.text().catch(function () {});
     } catch (e) { d = null; }
     st.fs[pid] = { op: klok(), d: d };
@@ -320,7 +323,7 @@ function maak(deps) {
   async function geheugenTekort(pid, vers) {
     if (!pid) return null;
     const p = await fsProject(pid, vers);
-    if (!p || p.status !== 'standby') return null;
+    if (!p || p.status !== 'standby' || p.lopend > 0) return null;   // loopt er al een taak, dan is de motor warm
     const vrij = vrijGeheugenMib();
     if (vrij == null || vrij >= p.nodig_mib) return null;
     return { nodig_mib: p.nodig_mib, vrij_mib: vrij };
@@ -547,7 +550,11 @@ function maak(deps) {
     // geheugen vers nakijken vlak vóór het indienen (de taak kan een tijd in de rij hebben gestaan); te weinig = niets naar Router
     t.fase = 'geheugen van Olares nakijken';
     const g = await geheugenTekort(f.project, true);
-    if (g) { t.meting = { geheugen_nodig_mib: g.nodig_mib, geheugen_vrij_mib: g.vrij_mib }; return { fout: geheugenTekst(g.nodig_mib, g.vrij_mib, f.uitvoer) }; }
+    // meting bij elke Router-taak: welke FlowStudio-status en hoeveel vrij geheugen er vóór het indienen was. Zo meet de eerste geslaagde
+    // run (en de taak erna) of FlowStudio een warme motor echt anders dan "standby" noemt (Fable wv736 #2: alleen standby is ooit gezien).
+    const fsP = st.fs[f.project] && st.fs[f.project].d;
+    const voor = { fs_status: fsP ? fsP.status : null, fs_lopend: fsP ? fsP.lopend : null, geheugen_nodig_mib: fsP ? fsP.nodig_mib : null, geheugen_vrij_mib: vrijGeheugenMib() };
+    if (g) { t.meting = voor; return { fout: geheugenTekst(g.nodig_mib, g.vrij_mib, f.uitvoer) }; }
     const geheugenFout = function () {
       const p = st.fs[f.project] && st.fs[f.project].d;
       return geheugenTekst(p ? p.nodig_mib : null, vrijGeheugenMib(), f.uitvoer);
@@ -581,7 +588,7 @@ function maak(deps) {
     }
     t.gpu_start = klok();
     const pollPad = routerPad(r.headers.get('location')) || (job.id && /^[A-Za-z0-9_-]{1,100}$/.test(String(job.id)) ? '/v1/' + route + '/generations/' + job.id : null);
-    t.meting = { router_id: job.id ? String(job.id).slice(0, 100) : null };
+    t.meting = Object.assign({ router_id: job.id ? String(job.id).slice(0, 100) : null }, voor);
     const uitvoer = function (j) { return Array.isArray(j.outputs) && j.outputs.length ? j.outputs : Array.isArray(j.data) && j.data.length ? j.data : null; };
     // Klaar = een klaar-status, of (zonder status) uitvoer erin. Fout = een fout-status. Al het andere: blijven pollen tot de grens
     // (een onbekende tussenstatus mag nooit "mislukt" geven terwijl de GPU doorwerkt; Fable wv707 #3a/b).

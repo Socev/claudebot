@@ -53,6 +53,7 @@ const router = http.createServer((req, res) => {
       { id: 'Olares/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL', owned_by: 'Olares', mode: 'chat' }] });
     if (req.method === 'POST' && req.url === '/v1/images/generations') {
       R.posts.push({ url: req.url, kop: req.headers, body: JSON.parse(body || '{}') });
+      if (R.weiger === 503) return stuur(503, { error: 'engine_host_mem_unavailable', error_code: 'upstream_capacity_unavailable' });
       if (R.weiger) return stuur(R.weiger, { error: { message: 'Bearer ' + SLEUTEL + ' ongeldig', code: 'x' } });
       R.polls = 0;
       if (R.modus === 'sync-data') return stuur(200, { created: 1, data: [{ b64_json: PNG.toString('base64') }] });
@@ -87,14 +88,15 @@ const router = http.createServer((req, res) => {
   });
 });
 // ── nagebootste FlowStudio (alleen GET /api/projects/<id>) + nep-/proc/meminfo ──
-const F = { est: 49152, status: 'standby', uit: false, html: false, hits: [], auth: [] };
+const F = { est: 49152, status: 'standby', lopend: 0, uit: false, html: false, hangt: false, hits: [], auth: [] };
 const flowstudio = http.createServer((req, res) => {
   F.hits.push(req.method + ' ' + req.url); F.auth.push(req.headers.authorization || '');
   const m = /^\/api\/projects\/([a-f0-9-]{36})$/.exec(req.url);
+  if (F.hangt) return;   // antwoordt nooit
   if (F.uit) { res.writeHead(500); return res.end('stuk'); }
   if (F.html || !m || req.method !== 'GET') { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end('<!DOCTYPE html><html></html>'); }
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ id: m[1], name: 'x', status: F.status, estHostMemMib: F.est, availableHostMemMib: 85889, estVramMib: 21504, resourceOk: true }));
+  res.end(JSON.stringify({ id: m[1], name: 'x', status: F.status, runningJobCount: F.lopend, queuedJobCount: 0, estHostMemMib: F.est, availableHostMemMib: 85889, estVramMib: 21504, resourceOk: true }));
 });
 const MEM = path.join(W, 'meminfo');
 const zetVrij = (gib) => fs.writeFileSync(MEM, 'MemTotal:       98234196 kB\nMemFree:         1832444 kB\nMemAvailable:   ' + Math.round(gib * 1048576) + ' kB\n');
@@ -427,7 +429,7 @@ const PIPER = process.env.PIPER_ECHT === '1' ? { bin: '/opt/data/piper/piper', m
     const D7 = path.join(W, 'studio7'); fs.mkdirSync(path.join(D7, 'flows'), { recursive: true });
     fs.cpSync(path.join(DIR, 'flows', 'moss-comfyui'), path.join(D7, 'flows', 'moss-comfyui'), { recursive: true });
     const S7m = (mem) => studioMod.maak({ dir: D7, bewaar, primair: () => true, sleutel: async () => SLEUTEL, routerUrl: RURL, comfyUrl: CURL, flowstudioUrl: FURL,
-      meminfo: mem || MEM, piper: PIPER, log: () => {}, fout: (w, e) => fouts.push(w + ': ' + (e && e.message)), tempo: { poll: 30, wachtStap: 40, wachtMax: 1500 } });
+      meminfo: mem || MEM, piper: PIPER, log: () => {}, fout: (w, e) => fouts.push(w + ': ' + (e && e.message)), tempo: { poll: 30, wachtStap: 40, wachtMax: 1500, fsTimeout: 300 } });
     let S7 = S7m();
     const nieuw = (mem) => { S7.stopTimers(); S7 = S7m(mem); };   // verse instantie = lege FlowStudio-cache
     const w7 = async (id, ms) => { await totDat(() => { const x = S7.taak(id); return x && ['klaar', 'mislukt', 'gestopt', 'onderbroken'].includes(x.status); }, ms || 8000); return S7.taak(id); };
@@ -464,7 +466,8 @@ const PIPER = process.env.PIPER_ECHT === '1' ? { bin: '/opt/data/piper/piper', m
     // onleesbaar of motor al bezig: oude gedrag (niet blokkeren)
     zetVrij(10);
     for (const [zet, terug, naam] of [[() => { F.uit = true; }, () => { F.uit = false; }, 'FlowStudio geeft HTTP 500'], [() => { F.html = true; }, () => { F.html = false; }, 'FlowStudio geeft HTML in plaats van JSON'],
-      [() => { F.status = 'running'; }, () => { F.status = 'standby'; }, 'motor draait al (status niet standby)'], [() => { F.est = 0; }, () => { F.est = 49152; }, 'geen estHostMemMib']]) {
+      [() => { F.status = 'running'; }, () => { F.status = 'standby'; }, 'motor draait al (status niet standby)'], [() => { F.lopend = 1; }, () => { F.lopend = 0; }, 'er loopt al een FlowStudio-taak (runningJobCount)'],
+      [() => { F.est = 0; }, () => { F.est = 49152; }, 'geen estHostMemMib'], [() => { F.hangt = true; }, () => { F.hangt = false; }, 'FlowStudio hangt (timeout)']]) {
       zet(); nieuw();
       c7 = await S7.flows();
       const pn = R.posts.length;
@@ -475,6 +478,14 @@ const PIPER = process.env.PIPER_ECHT === '1' ? { bin: '/opt/data/piper/piper', m
     nieuw(path.join(W, 'bestaat-niet'));
     c7 = await S7.flows();
     toets('7 meminfo onleesbaar: niet blokkeren', fsF(c7, MOSS).klaar === true, fsF(c7, MOSS).reden);
+    // Router weigert synchroon (503) op geheugen: zelfde tekst
+    zetVrij(60); nieuw(); R.weiger = 503;
+    r = await maakMoss(); t = await w7(r.taak.id);
+    toets('7 Router weigert synchroon (503 engine_host_mem_unavailable): gewone taal', t.status === 'mislukt' && /^Olares heeft nu te weinig vrij geheugen voor FlowStudio/.test(t.reden), t.reden);
+    R.weiger = 0;
+    r = await maakMoss(); t = await w7(r.taak.id);
+    toets('7 meting bij elke Router-taak: FlowStudio-status, lopend en vrij geheugen vóór het indienen', t.status === 'klaar' && t.meting && t.meting.fs_status === 'standby' && t.meting.fs_lopend === 0
+      && t.meting.geheugen_vrij_mib === 60 * 1024 && t.meting.geheugen_nodig_mib === 49152 && t.meting.router_id === 'job-1', t.meting);
     flowstudio.close();   // FlowStudio onbereikbaar (verbinding geweigerd)
     zetVrij(10); nieuw();
     c7 = await S7.flows();
@@ -486,7 +497,7 @@ const PIPER = process.env.PIPER_ECHT === '1' ? { bin: '/opt/data/piper/piper', m
     c7 = await S7.flows();
     const mz7 = fsF(c7, MUZIEK), veld = (n) => mz7.velden.find((v) => v.naam === n);
     toets('7 muziek: klaar met sleutel en genoeg geheugen; songtekst in beeld, duur 5–300 s, seed onder Meer', mz7.klaar === true && veld('lyrics').meer !== true && veld('lyrics').soort === 'tekstvak'
-      && veld('max_duration').min === 5 && veld('max_duration').max === 300 && veld('seed') && veld('seed').meer === true, mz7);
+      && veld('max_duration').min === 5 && veld('max_duration').max === 300 && veld('batch_count').max === 2 && veld('seed') && veld('seed').meer === true, mz7);
     r = await S7.maak({ flow: 'fs-' + MUZIEK, beurt_id: nb(), velden: { caption: 'rustige wachtmuziek, piano', max_duration: 30, batch_count: 1, seed: 5 } }, ctx);
     t = await w7(r.taak.id);
     const mp = R.posts[R.posts.length - 1] || {};
