@@ -9296,6 +9296,34 @@ async function appPraktijkenRoute(req, res, a) {
   appStuur(res, 200, { ok: true, vaste_plek: false, entiteiten: d.entiteiten, fouten: d.fouten, bijgewerkt: new Date(d.op).toISOString() });
 }
 
+// ── App Financiën (wv771; bouwplan idee 16 § 11): privégeld, alleen lezen ──
+// Eén route zonder parameters. Het bankkind (bank-lezer.js app-financien, lokaal: geen kluis, geen bankopvraag) bouwt het antwoord veld
+// voor veld op (financien-app.js); hier alleen doorgeven. Niet op een apparaat met een vaste plek (privégeld niet op de spreekkamer-pc):
+// dan 200 met vaste_plek en een zin, zoals Praktijken/Voor jou (Fable wv771 #15). Wél een auditregel per keer openen (route, apparaat,
+// status; geen inhoud): één verzoek geeft het hele privé-overzicht (Fable #14). 60 s in het geheugen tegen Ververs-spam en als terugval
+// als de database even bezet is (bankronde); niets op schijf. Grens 20 s (Fable #13).
+const APP_FIN_CACHE_MS = 60000, APP_FIN_MAX_MS = 20000;
+let appFinCache = null;   // { op, d }
+async function appFinancien(req, res, a) {
+  res._app.reden = 'financien';
+  if (a.soort === 'vast') return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'Financiën staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' });
+  const nu = Date.now();
+  if (appFinCache && nu - appFinCache.op < APP_FIN_CACHE_MS) return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString() }, appFinCache.d));
+  let r;
+  try { r = await bankKind(['app-financien'], {}, APP_FIN_MAX_MS); } catch (e) { logError('app-financien', new Error('bankkind faalde')); r = null; }
+  const j = r && r.j;
+  if (!j || j.ok !== true) {
+    // een oudere bank-lezer.js kent de opdracht niet (gebruik: …): de pod wordt bijgewerkt (Fable #12)
+    const oud = j && typeof j.fout === 'string' && /^gebruik:/.test(j.fout);
+    if (appFinCache) return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString(), oud: true }, appFinCache.d));
+    return appWeiger(res, 503, oud ? 'Financiën wordt net bijgewerkt; probeer het over een paar minuten' : 'de cijfers zijn nu niet te lezen; probeer het zo opnieuw', oud ? 'financien oud' : 'financien fout');
+  }
+  const d = {};
+  ['peildatum', 'maand', 'deze_maand', 'vorige_maand', 'verloop', 'vaste_lasten', 'buffer', 'stroom', 'paypal', 'signalen', 'links', 'fouten'].forEach(function (k) { d[k] = j[k] === undefined ? null : j[k]; });
+  appFinCache = { op: nu, d: d };
+  return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d));
+}
+
 // ── Projecten (wv373, bouwplan § 4.9d): per entiteit de komende deadlines en de lopende zaken, alleen lezen ──
 // Bronnen: 00_Systeem/Deadlines.md (tabel onder "## Actueel") en 00_Systeem/actueel.md (§ Lopende zaken). Deterministisch
 // geparsed, geen taalmodel; in het geheugen op de mtime van beide bestanden + de datum van vandaag. Niets op schijf, stil.
@@ -10364,6 +10392,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/push/proef') return appPushProef(req, res, a);
         if (route.indexOf(' /app/studio/') > 0) return typeof appStudio === 'function' ? appStudio(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'studio');   // wv707
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
+        if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
         if (route === 'GET /app/tel') return telAppStand(req, res, a);                       // wv264: ⚙ → Telefoon
         if (route === 'POST /app/tel/koppelcode') return telAppKoppelcode(req, res, reg, a, s);
         if (route === 'POST /app/tel/ontkoppel') return telAppOntkoppel(req, res, a);
@@ -13711,7 +13740,7 @@ const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
   'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'ontkoppel'];
 const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'verrijk-open', 'verrijk-zet',
-  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij'];   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
+  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien'];   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
 const BANK_TERUG_PER_UUR = 30;
 const bankTerugTijden = [];
 let bankSleutelCache = null;   // { w: {sleutel, app_id, bunq_sleutel}, tot }; 10 minuten, alleen in het geheugen

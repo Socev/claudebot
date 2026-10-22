@@ -385,7 +385,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -3726,6 +3726,30 @@ async function bewijs(o) {
       toets('20 geen nieuw bestand op schijf (audio nooit bewaard)', nieuw.length === 0, nieuw.join(', '));
       const audit20 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
       toets('20 auditlog: seconden en delen, nooit de tekst', /spraak 2 s -> 44 tekens/.test(audit20) && /voorlees deel 1\/\d+ \(\d+ tekens\)/.test(audit20) && !/werkoverleg|jaarrekening|Zo-kef/.test(audit20), audit20.slice(-300));
+    }
+
+    // ── 20f. wv771: App Financiën (bouwplan idee 16 § 11): sessie verplicht, vaste plek leeg, alleen vaste velden, 60 s geheugen ──
+    {
+      r = await vraag('GET', '/app/financien', undefined, { pot: pot() });
+      toets('20f GET /app/financien zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      let nK = 0, kArgs = null, kAntw = { code: 0, j: { ok: true, peildatum: '2026-10-22', maand: '2026-10', deze_maand: { maand: '2026-10', in: 1, uit: 2 }, signalen: [], fouten: [], geheim_veld: 'NL00ABNA0123456789' } };
+      ctx.bankKind = async (args, extra, ms) => { nK++; kArgs = [args, ms]; return kAntw; };
+      vm.runInContext('appFinCache = null', ctx);
+      r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
+      toets('20f met sessie: 200, opdracht app-financien met grens 20 s, alleen de vaste velden (onbekend veld niet doorgegeven)', r.status === 200 && r.j.vaste_plek === false &&
+        r.j.deze_maand.in === 1 && !('geheim_veld' in r.j) && !/NL00ABNA/.test(JSON.stringify(r.j)) && kArgs && kArgs[0][0] === 'app-financien' && kArgs[1] === 20000, JSON.stringify([r.j, kArgs]).slice(0, 300));
+      r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
+      toets('20f tweede keer binnen 60 s uit het geheugen (geen tweede bankkind)', r.status === 200 && nK === 1, nK);
+      const nep = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
+      await H.appFinancien({}, nep, { id: 'x', soort: 'vast' });
+      toets('20f vaste plek: 200 met vaste_plek en een zin, geen cijfers, geen bankkind', nep.st === 200 && nep.b.vaste_plek === true && /telefoon/.test(nep.b.melding) && !('deze_maand' in nep.b) && nK === 1, JSON.stringify(nep.b));
+      vm.runInContext('appFinCache = null', ctx); kAntw = { code: 2, j: { ok: false, fout: 'gebruik: zoek | maand' } };
+      r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
+      toets('20f oudere bank-lezer (kent de opdracht niet): 503 "wordt net bijgewerkt"', r.status === 503 && /bijgewerkt/.test(r.j.fout), JSON.stringify(r.j));
+      kAntw = { code: 1, j: { ok: false, fout: 'interne fout: X' } };
+      r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
+      toets('20f fout in het kind: 503 in gewone taal, geen foutdetail naar de app', r.status === 503 && /niet te lezen/.test(r.j.fout) && !/interne/.test(r.j.fout), JSON.stringify(r.j));
+      delete ctx.bankKind; vm.runInContext('appFinCache = null', ctx);
     }
 
     // ── 21. wv201: app naast Telegram (fase 7, meetpunt 6): alleen tellingen per dag, nooit inhoud ──

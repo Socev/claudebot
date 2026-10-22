@@ -1156,6 +1156,9 @@ const opdrachten = {
   },
   // wv764 (idee 16 fase B): vaste lasten en geldstroom per maand, alleen het archief
   async 'vaste-lasten'(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.vasteLasten(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^(maand|rekening):/.test(e.message)) throw new Weigering(e.message); throw e; } },
+  // wv771: App Financiën — één alleen-lees overzicht, veld voor veld opgebouwd (financien-app.js); alleen voor GET /app/financien
+  async 'app-financien'() { const x = archiefKlaar(); let P = null; try { P = paypalModule(); } catch (e) { P = null; }
+    return Object.assign({ ok: true, bron: 'archief' }, require(path.join(__dirname, 'financien-app.js')).bereken(x.A, x.a, { paypal: P })); },
   async stroom(a) { const x = archiefKlaar(); try { return Object.assign({ ok: true, bron: 'archief' }, x.A.stroom(x.a, archiefFilter(a, x.s))); } catch (e) { if (/^(maand|rekening):/.test(e.message)) throw new Weigering(e.message); throw e; } },
   async archief() { const x = archiefKlaar(); x.A.verrijkAlsVuil(x.a); return Object.assign({ ok: true }, x.A.stand(x.a)); },
   // wv786: POT-rekening per maand per categorie, zonder namen

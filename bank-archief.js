@@ -1294,4 +1294,4 @@ function stand(a) {
 
 module.exports = { open, rekeningenSync, markeerOntkoppeld, bij, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
   zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
-  categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, reeksenBereken, vastePosten, archiefStart, machtigingVan, naamNorm, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };
+  categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, reeksenBereken, vastePosten, rijenVan, archiefStart, machtigingVan, naamNorm, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };
