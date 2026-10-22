@@ -1,0 +1,30 @@
+{
+ "titel": "Piper — Ronnie (gratis proefstem)",
+ "uitleg": "Stem voor de mini-app Bandjes: Nederlandse computerstem Ronnie op de pod (Piper, CPU, gratis). Levert het origineel (22.050 Hz) en twee telefoonversies (WAV 8 kHz mono, PCM 16-bit en G.711 µ-law). Verborgen in de Studio-lijst; alleen via Bandjes.",
+ "motor": "piper",
+ "status": "actief",
+ "uitvoer": "geluid",
+ "bron": "Piper op de pod (/opt/data/piper, stem nl_NL-ronnie-medium, CC0); wv743 (bouwplan Bandjes § 5.4). Voorbeeld in de repo: studio-flows/bandje-piper/flow.yaml; op de pod in /opt/data/studio/flows/bandje-piper/",
+ "tijd": "± 5–20 s",
+ "max_seconden": 180,
+ "gpu_mib_schatting": 0,
+ "max_per_dag": 30,
+ "prijs": {
+  "eenheid": "bandje",
+  "bedrag": 0,
+  "bron": "lokaal op de pod"
+ },
+ "telefoonversie": true,
+ "verborgen": true,
+ "bandje": true,
+ "stem": "piper:nl_NL-ronnie-medium",
+ "velden": [
+  {
+   "naam": "tekst",
+   "label": "Tekst van het bandje",
+   "soort": "tekstvak",
+   "verplicht": true,
+   "max": 1500
+  }
+ ]
+}

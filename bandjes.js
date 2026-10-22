@@ -213,12 +213,17 @@ function zetTekst(md, voorvoegsel, id, o, klok) {
   if (Number(o.versie) !== b.versie || String(o.tekst_hash || '') !== b.hash) return { status: 409, fout: 'dit bandje is intussen gewijzigd; herlaad', gewijzigd: true };
   const t = toetsTekst(o.tekst);
   if (t.fout) return { status: 400, fout: t.fout };
-  if (t.tekst === b.tekst && !o.stem && !o.voorstel_weg) return { status: 200, md: md, bandje: bandjeUit(b), ongewijzigd: true };
-  const nieuweVersie = b.versie + 1;
-  const velden = { versie: String(nieuweVersie), status: 'concept (v' + nieuweVersie + ')' };
-  if (o.stem) velden.stem = eenRegel(o.stem, 80);
-  let regels = vervangSectie(p, b, herschrijfSectie(p, b, { velden: velden, tekst: t.tekst, voorstel: o.voorstel_weg ? null : undefined }));
-  if (!b.onbekend && b.tekst !== t.tekst) regels = voegGeschiedenisToe(regels, ['### ' + b.id + ' v' + b.versie + ' — vervangen ' + vandaag(klok)].concat(citaat(b.tekst)));
+  // wv743: alleen een andere stem = geen nieuwe versie (de versie volgt de tekst); voorstel_weg zonder tekstwijziging = alleen het blok weg
+  const stem = o.stem ? eenRegel(o.stem, 80) : null;
+  const stemWijzigt = !!stem && stem !== (b.velden.stem || 'praktijkstem');
+  const tekstWijzigt = t.tekst !== b.tekst;
+  const voorstelWeg = !!o.voorstel_weg && !!b.voorstel;
+  if (!tekstWijzigt && !stemWijzigt && !voorstelWeg) return { status: 200, md: md, bandje: bandjeUit(b), ongewijzigd: true };
+  const velden = {};
+  if (tekstWijzigt) { velden.versie = String(b.versie + 1); velden.status = 'concept (v' + (b.versie + 1) + ')'; }
+  if (stemWijzigt) velden.stem = stem;
+  let regels = vervangSectie(p, b, herschrijfSectie(p, b, { velden: velden, tekst: tekstWijzigt ? t.tekst : undefined, voorstel: voorstelWeg ? null : undefined }));
+  if (!b.onbekend && tekstWijzigt) regels = voegGeschiedenisToe(regels, ['### ' + b.id + ' v' + b.versie + ' — vervangen ' + vandaag(klok)].concat(citaat(b.tekst)));
   regels = zetUpdated(regels, klok);
   const uit = klaar(regels);
   return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)) };
@@ -283,6 +288,33 @@ function nieuwBandje(md, voorvoegsel, o, klok) {
   return { status: 200, md: uit, bandje: bandjeUit(zoek(parse(uit, voorvoegsel), id)) };
 }
 
+// Praktijkinstelling (praktijkstem) in het blok "## Praktijkinstellingen"; ontbreekt het blok, dan vóór het eerste bandje (wv743).
+const INSTELLINGEN = ['praktijkstem'];
+function zetInstelling(md, voorvoegsel, sleutel, waarde, klok) {
+  const p = parse(md, voorvoegsel);
+  if (p.fouten.length) return { status: 409, fout: 'de registerpagina is niet in orde: ' + p.fouten.join('; ') };
+  if (INSTELLINGEN.indexOf(sleutel) < 0) return { status: 400, fout: 'onbekende instelling' };
+  const w = eenRegel(waarde, 100);
+  let regels = p.regels.slice();
+  const kop = regels.findIndex(function (r, i) { return i >= p.frontmatterTot && /^##\s+praktijkinstellingen\s*$/i.test(r); });
+  if (kop < 0) {
+    let at = p.bandjes.length ? p.bandjes[0].van : regels.length;
+    regels = regels.slice(0, at).concat(['## Praktijkinstellingen', '- ' + sleutel + ': ' + w, ''], regels.slice(at));
+  } else {
+    let eind = kop + 1; while (eind < regels.length && !/^##\s/.test(regels[eind])) eind++;
+    let laatste = kop, gezet = false;
+    for (let k = kop + 1; k < eind; k++) {
+      const m = VELD_RE.exec(regels[k]);
+      if (!m) continue;
+      laatste = k;
+      if (!gezet && m[1].trim().toLowerCase() === sleutel) { regels[k] = '- ' + m[1].trim() + ': ' + w; gezet = true; }
+    }
+    if (!gezet) regels = regels.slice(0, laatste + 1).concat(['- ' + sleutel + ': ' + w], regels.slice(laatste + 1));
+  }
+  const uit = klaar(zetUpdated(regels, klok));
+  return { status: 200, md: uit, instellingen: parse(uit, voorvoegsel).instellingen };
+}
+
 // ── opslag: vault + journaal buiten de vault ──
 function maak(deps) {
   const VAULT = deps.vault;
@@ -294,13 +326,17 @@ function maak(deps) {
   function mkdir(d, mode) { fs.mkdirSync(d, { recursive: true, mode: mode || 0o700 }); }
   function pad(pr) { return path.join(VAULT, PRAKTIJKEN[pr].pad); }
   // laatste versie per praktijk/bandje die de pod zelf schreef
+  let journaalCache = null;   // { mtime, grootte, st } (wv743: /health leest elke keer)
   function journaalStand() {
     const st = {};
-    let t = '';
+    let t = '', s = null;
+    try { s = fs.statSync(JOURNAAL); } catch (e) { return st; }
+    if (journaalCache && journaalCache.mtime === s.mtimeMs && journaalCache.grootte === s.size) return journaalCache.st;
     try { t = fs.readFileSync(JOURNAAL, 'utf8'); } catch (e) { return st; }
+    journaalCache = { mtime: s.mtimeMs, grootte: s.size, st: st };
     t.split('\n').forEach(function (r) {
       if (!r) return;
-      try { const j = JSON.parse(r); const k = j.praktijk + '/' + j.bandje; if (!st[k] || j.versie >= st[k].versie) st[k] = j; } catch (e) {}
+      try { const j = JSON.parse(r); if (!j.bandje) return; const k = j.praktijk + '/' + j.bandje; if (!st[k] || j.versie >= st[k].versie) st[k] = j; } catch (e) {}
     });
     return st;
   }
@@ -339,7 +375,16 @@ function maak(deps) {
     const tmp = path.join(tmpDir, path.basename(f) + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex'));
     fs.writeFileSync(tmp, inhoud, { mode: 0o644 });
     try { fs.chmodSync(tmp, 0o644); } catch (e) {}
-    fs.renameSync(tmp, f);                  // zelfde schijf als de vault (gemeten 22-10, device 64514): atomair
+    try { fs.renameSync(tmp, f); }          // zelfde schijf als de vault (gemeten 22-10, device 64514): atomair
+    catch (e) {
+      if (!e || e.code !== 'EXDEV') { try { fs.unlinkSync(tmp); } catch (x) {} throw e; }
+      // andere schijf (alleen in een proefopstelling): tijdelijk bestand naast de pagina, dan rename (kort zichtbaar voor bisync)
+      try { fs.unlinkSync(tmp); } catch (x) {}
+      const naast = path.join(path.dirname(f), '.' + path.basename(f) + '.' + crypto.randomBytes(4).toString('hex') + '.tmp');
+      fs.writeFileSync(naast, inhoud, { mode: 0o644 });
+      fs.renameSync(naast, f);
+      fout('bandjes-exdev', new Error('tmp op een andere schijf dan de vault; naast de pagina geschreven'));
+    }
   }
   // Voert een mutatie uit: lezen, toetsen, schrijven, journaal — allemaal synchroon.
   function muteer(pr, actie, fn) {
@@ -354,10 +399,11 @@ function maak(deps) {
     delete cache[pr];
     try {
       mkdir(DIR);
-      fs.appendFileSync(JOURNAAL, JSON.stringify({ tijd: new Date(klok()).toISOString(), praktijk: pr, bandje: r.bandje.id, actie: actie,
-        versie: r.bandje.versie, tekst_hash: r.bandje.tekst_hash, tekst: r.bandje.tekst }) + '\n', { mode: 0o600 });
+      fs.appendFileSync(JOURNAAL, JSON.stringify(r.bandje ? { tijd: new Date(klok()).toISOString(), praktijk: pr, bandje: r.bandje.id, actie: actie,
+        versie: r.bandje.versie, tekst_hash: r.bandje.tekst_hash, tekst: r.bandje.tekst } : { tijd: new Date(klok()).toISOString(), praktijk: pr, actie: actie,
+        instellingen: r.instellingen || null }) + '\n', { mode: 0o600 });
     } catch (e) { fout('bandjes-journaal', e); }
-    return { status: 200, bandje: r.bandje };
+    return r.bandje ? { status: 200, bandje: r.bandje } : { status: 200, instellingen: r.instellingen };
   }
   return {
     lees: lees,
@@ -367,7 +413,225 @@ function maak(deps) {
     haalVoorstelWeg: function (pr, id) { return muteer(pr, 'voorstel-weg', function (md, vv) { return haalVoorstelWeg(md, vv, id, klok); }); },
     zetVelden: function (pr, id, v, verwacht) { return muteer(pr, 'velden', function (md, vv) { return zetVelden(md, vv, id, v, verwacht, klok); }); },
     nieuw: function (pr, o) { return muteer(pr, 'nieuw', function (md, vv) { return nieuwBandje(md, vv, o, klok); }); },
+    zetInstelling: function (pr, k, w) { return muteer(pr, 'instellingen', function (md, vv) { return zetInstelling(md, vv, k, w, klok); }); },
+    mkdir: function () { mkdir(DIR); mkdir(path.join(DIR, 'tmp')); try { fs.chmodSync(DIR, 0o700); fs.chmodSync(path.join(DIR, 'tmp'), 0o700); } catch (e) {} },
+    journaalPad: JOURNAAL,
   };
 }
 
-module.exports = { PRAKTIJKEN, GRENS, normTekst, tekstHash, parse, bandjeUit, zetTekst, zetVoorstel, haalVoorstelWeg, zetVelden, nieuwBandje, maak };
+// ── routes (rij B, wv743; bouwplan § 5.2) ──
+// server.js doet de poort (Access, apparaat, sessie, slot), het BSN-masker op een vaste plek en bouwt de ctx (versOk/versVerbruik uit
+// de sessie, precies zoals appStudio). Deze laag bouwt nooit zelf een ctx en schrijft alleen via de opslag hierboven.
+const STEM_STANDAARD = 'piper:nl_NL-ronnie-medium';
+const STEM_RE = /^[a-z0-9]{2,20}:[A-Za-z0-9_.\/-]{1,80}$/;
+const BEURT_RE = /^[A-Za-z0-9-]{8,64}$/;
+const APP_LINK = 'https://app.socev.dev/';
+// Stemmen uit de Studio-flows met de vlag bandje (Fable #8). ElevenLabs staat er grijs bij tot Studio fase 2.
+function stemmenUit(flows) {
+  const uit = [];
+  (flows || []).forEach(function (f) {
+    if (!f || f.bandje !== true || !f.stem) return;
+    if (uit.some(function (x) { return x.id === f.stem; })) return;
+    uit.push({ id: f.stem, flow: f.id, naam: f.titel, motor: f.motor, betaald: false, beschikbaar: f.klaar === true, reden: f.klaar ? null : (f.reden || 'niet beschikbaar'),
+      prijs: f.prijs || 'gratis', vers_per_keer: f.vers_per_keer === true });
+  });
+  uit.push({ id: 'elevenlabs', flow: null, naam: 'ElevenLabs (betaald)', motor: 'elevenlabs', betaald: true, beschikbaar: false,
+    reden: 'nog niet beschikbaar — komt met Studio fase 2', prijs: null, vers_per_keer: true });
+  return uit;
+}
+function link(pr, id, voorstel) {
+  return APP_LINK + '?mini=bandjes&praktijk=' + encodeURIComponent(pr) + (id ? '&bandje=' + encodeURIComponent(id) : '') + (voorstel ? '&voorstel=1' : '');
+}
+function routes(deps) {
+  const S = deps.opslag;
+  const klok = deps.klok || Date.now;
+  const log = deps.log || function () {};
+  const fout = deps.fout || function () {};
+  const primair = deps.primair || function () { return true; };
+  const BOX_STAND = path.join(deps.dir, 'box.json');
+  // ── box-rij bij teruggezet of een conflictkopie: hooguit één per praktijk per soort per dag (ook over een herstart) ──
+  function boxMeld(l) {
+    if (!deps.boxPad || !l || l.status !== 200) return;
+    const soorten = [];
+    if (l.teruggezet && l.teruggezet.length) soorten.push(['teruggezet', 'teruggezet door de synchronisatie: ' + l.teruggezet.join(', ')]);
+    if (l.conflicten && l.conflicten.length) soorten.push(['conflict', 'conflictkopie naast de registerpagina: ' + l.conflicten.join(', ')]);
+    if (l.fouten && l.fouten.length) soorten.push(['pagina', 'registerpagina niet in orde: ' + l.fouten.join('; ')]);
+    if (!soorten.length) return;
+    const dag = vandaagIso(klok);
+    let st = {};
+    try { st = JSON.parse(fs.readFileSync(BOX_STAND, 'utf8')) || {}; } catch (e) { st = {}; }
+    let veranderd = false;
+    soorten.forEach(function (s) {
+      const k = l.praktijk + '/' + s[0];
+      if (st[k] === dag) return;
+      if (schrijfBoxRij(l, s[0], s[1])) { st[k] = dag; veranderd = true; }
+    });
+    if (veranderd) {
+      try { fs.mkdirSync(deps.dir, { recursive: true, mode: 0o700 }); const tmp = BOX_STAND + '.' + process.pid; fs.writeFileSync(tmp, JSON.stringify(st), { mode: 0o600 }); fs.renameSync(tmp, BOX_STAND); }
+      catch (e) { fout('bandjes-box-stand', e); }
+    }
+  }
+  function schrijfBoxRij(l, soort, gemeten) {
+    try {
+      const t = fs.readFileSync(deps.boxPad, 'utf8');
+      const anker = eersteRij(t);   // eerste echte rij, niet een kop in een codeblok erboven
+      if (anker < 0) return false;
+      const tijd = new Date(klok()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+      const pagina = PRAKTIJKEN[l.praktijk].pad;
+      const rij = '\n## [direct] ' + tijd + ' — Bandjes ' + PRAKTIJKEN[l.praktijk].naam + ': ' + (soort === 'teruggezet' ? 'bewaarde tekst teruggezet door de synchronisatie'
+        : soort === 'conflict' ? 'conflictkopie naast het register' : 'registerpagina niet in orde') + ' (pod, automatisch)\n' +
+        '- status: open\n- van: pod bandjes.js (mini-app Bandjes; hooguit 1×/dag per praktijk en soort)\n' +
+        '- gemeten: ' + eenRegel(gemeten, 300) + '\n' +
+        '- gevolg als er niets gebeurt: Bewaar en Maak voor ' + PRAKTIJKEN[l.praktijk].naam + ' staan dicht in de mini-app (lezen werkt).\n' +
+        '- voorstel: ' + (soort === 'teruggezet' ? 'de laatst bewaarde tekst staat in `' + path.join(deps.dir, 'journaal.jsonl') + '`; zet hem terug in `' + pagina + '` met een versie ≥ die uit het journaal (of hoog de versie op als de pagina zo goed is). Daarna gaat de mini-app vanzelf weer open.'
+          : soort === 'conflict' ? 'vergelijk de conflictkopie met `' + pagina + '`, neem wat ontbreekt over en verwijder de kopie; daarna gaat de mini-app vanzelf weer open.'
+          : 'dubbel of verkeerd id in `' + pagina + '` rechtzetten (ids zijn onveranderlijk; hernoem de dubbele).') + '\n';
+      const tmp = deps.boxPad + '.bandjes-' + crypto.randomBytes(4).toString('hex') + '.tmp';
+      fs.writeFileSync(tmp, t.slice(0, anker) + rij + t.slice(anker));
+      fs.renameSync(tmp, deps.boxPad);
+      log('bandjes box-rij praktijk=' + l.praktijk + ' soort=' + soort);
+      return true;
+    } catch (e) { fout('bandjes-box', e); return false; }
+  }
+  // Index van de "\n" vóór de eerste rij "## [soort] JJJJ-MM-DD" buiten een ```-blok (het formaatvoorbeeld staat in zo'n blok).
+  function eersteRij(t) {
+    let i = 0, blok = false;
+    while (i < t.length) {
+      const e = t.indexOf('\n', i), r = t.slice(i, e < 0 ? t.length : e);
+      if (/^```/.test(r)) blok = !blok;
+      else if (!blok && i > 0 && /^## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.test(r)) return i - 1;
+      if (e < 0) break;
+      i = e + 1;
+    }
+    return -1;
+  }
+  function lees(pr) { const l = S.lees(pr); boxMeld(l); return l; }
+  // De praktijkstem uit het register; staat er (nog) geen geldige stem-id, dan de gratis proefstem.
+  function praktijkstem(inst) { const w = String(inst && inst.praktijkstem || ''); return STEM_RE.test(w) ? w : STEM_STANDAARD; }
+  function praktijkUit(l) {
+    return { id: l.praktijk, naam: l.naam || (PRAKTIJKEN[l.praktijk] && PRAKTIJKEN[l.praktijk].naam), instellingen: l.instellingen || {},
+      praktijkstem: praktijkstem(l.instellingen), bandjes: l.bandjes || [],
+      dicht: l.dicht || null, fouten: l.fouten || [], conflicten: l.conflicten || [], teruggezet: l.teruggezet || [], ontbreekt: l.ontbreekt === true };
+  }
+  async function stemmen() {
+    let flows = [];
+    try { flows = deps.studio ? (await deps.studio.flows({ verborgen: true })).flows : []; } catch (e) { fout('bandjes-stemmen', e); }
+    return stemmenUit(flows);
+  }
+  const fouts = function (r) { return { status: r.status, j: Object.assign({ ok: false, fout: r.fout }, r.gewijzigd ? { gewijzigd: true } : {}, r.dicht ? { dicht: true } : {}, r.vers_nodig ? { vers_nodig: true } : {}) }; };
+  const goedOf = function (r, extra) { return r.status === 200 ? { status: 200, j: Object.assign({ ok: true }, extra || {}, r.bandje ? { bandje: r.bandje } : {}, r.ongewijzigd ? { ongewijzigd: true } : {}) } : fouts(r); };
+  function praktijk(d) { const pr = String(d && d.praktijk || ''); return Object.hasOwn(PRAKTIJKEN, pr) ? pr : null; }
+  function stemOk(w, lijst) { return w === 'praktijkstem' || (STEM_RE.test(w) && lijst.some(function (x) { return x.id === w; })); }
+
+  // app: route = "GET /app/bandjes" of "POST /app/bandjes/<actie>"; d = body (al gemaskeerd); ctx van appStudio. Geeft { status, j }.
+  async function app(route, d, ctx) {
+    d = d && typeof d === 'object' ? d : {};
+    if (route === 'GET /app/bandjes') {
+      const pr = Object.keys(PRAKTIJKEN).map(lees).map(praktijkUit);
+      return { status: 200, j: { ok: true, praktijken: pr, stemmen: await stemmen(), schrijven: !!primair(), stem_standaard: STEM_STANDAARD, grens: GRENS } };
+    }
+    const m = /^POST \/app\/bandjes\/(tekst|nieuw|voorstel|instellingen|maak|status)$/.exec(route);
+    if (!m) return { status: 404, j: { ok: false, fout: 'onbekend' } };
+    if (!primair()) return { status: 409, j: { ok: false, fout: 'deze kant van Socev is nu passief; bandjes bewaren en maken kan alleen op de actieve kant' } };
+    const pr = praktijk(d);
+    if (!pr) return { status: 400, j: { ok: false, fout: 'onbekende praktijk' } };
+    const id = String(d.bandje || '');
+    const actie = m[1];
+    if (actie === 'nieuw') {
+      const r = S.nieuw(pr, { naam: d.naam, menu: d.menu, wanneer: d.wanneer, tekst: d.tekst });
+      return goedOf(r);
+    }
+    if (actie === 'instellingen') {
+      const w = String(d.praktijkstem || '');
+      if (!stemOk(w, await stemmen()) || w === 'praktijkstem') return { status: 400, j: { ok: false, fout: 'onbekende stem' } };
+      const r = S.zetInstelling(pr, 'praktijkstem', w);
+      return r.status === 200 ? { status: 200, j: { ok: true, instellingen: r.instellingen } } : fouts(r);
+    }
+    if (!ID_RE.test(id)) return { status: 400, j: { ok: false, fout: 'onbekend bandje' } };
+    if (actie === 'tekst') {
+      if (d.stem != null && d.stem !== '' && !stemOk(String(d.stem), await stemmen())) return { status: 400, j: { ok: false, fout: 'onbekende stem' } };
+      const r = S.zetTekst(pr, id, { tekst: d.tekst, versie: d.versie, tekst_hash: d.tekst_hash, stem: d.stem ? String(d.stem) : null, voorstel_weg: d.voorstel_weg === true });
+      return goedOf(r);
+    }
+    if (actie === 'voorstel') {
+      // alleen "laten liggen": overnemen bestaat alleen in de app (zet de tekst in het vak); pas Bewaar schrijft (Fable #11)
+      if (d.keuze !== 'laat') return { status: 400, j: { ok: false, fout: 'alleen laten liggen kan hier; overnemen gaat via Bewaar' } };
+      return goedOf(S.haalVoorstelWeg(pr, id));
+    }
+    if (actie === 'status') {
+      const v = Number(d.versie);
+      if (!Number.isInteger(v) || v < 1) return { status: 400, j: { ok: false, fout: 'versie ontbreekt' } };
+      const r = S.zetVelden(pr, id, { 'in centrale': 'v' + v + ', ' + vandaag(klok), status: 'in centrale (v' + v + ')' },
+        { versie: v, tekst_hash: d.tekst_hash ? String(d.tekst_hash) : null });
+      return goedOf(r);
+    }
+    // maak: de tekst komt UIT HET REGISTER, nooit uit de invoer; versie + hash moeten kloppen met wat de app las
+    const beurt = String(d.beurt_id || '');
+    if (!BEURT_RE.test(beurt)) return { status: 400, j: { ok: false, fout: 'beurt_id ontbreekt' } };
+    if (!deps.studio) return { status: 503, j: { ok: false, fout: 'Studio zit niet in deze versie van de pod' } };
+    const l = lees(pr);
+    if (l.status !== 200) return fouts(l);
+    if (l.dicht) return { status: 409, j: { ok: false, fout: l.dicht, dicht: true } };
+    const b = l.bandjes.find(function (x) { return x.id === id; });
+    if (!b) return { status: 404, j: { ok: false, fout: 'dit bandje staat niet in het register' } };
+    if (Number(d.versie) !== b.versie || String(d.tekst_hash || '') !== b.tekst_hash) return { status: 409, j: { ok: false, fout: 'dit bandje is intussen gewijzigd; herlaad', gewijzigd: true } };
+    if (b.onbekend || !b.tekst) return { status: 400, j: { ok: false, fout: 'bewaar eerst een tekst' } };
+    const lijst = await stemmen();
+    const stem = d.stem && d.stem !== 'praktijkstem' ? String(d.stem) : (b.stem && b.stem !== 'praktijkstem' ? b.stem : praktijkstem(l.instellingen));
+    const s = lijst.find(function (x) { return x.id === stem; });
+    if (!s) return { status: 400, j: { ok: false, fout: 'onbekende stem' } };
+    if (!s.beschikbaar || !s.flow) return { status: 409, j: { ok: false, fout: 'deze stem kan nu niet: ' + (s.reden || 'niet beschikbaar') } };
+    const r = await deps.studio.maak({ flow: s.flow, velden: { tekst: b.tekst }, beurt_id: beurt }, ctx,
+      { bron: { soort: 'bandje', praktijk: pr, bandje: id, versie: b.versie, tekst_hash: b.tekst_hash, stem: stem } });
+    if (r.status !== 200) return fouts(r);
+    return { status: 200, j: { ok: true, taak: r.taak, al: r.al === true } };
+  }
+
+  // POST /smal/bandjes/voorstel (API-geheim; de skill van Socev). d: { praktijk, bandje | nieuw: { naam, menu, wanneer }, tekst, reden }.
+  // Eén schrijver (Fable #5): de skill schrijft nooit zelf in de pagina. Geeft { status, j } met de link die de mini-app opent.
+  function smal(actie, d) {
+    if (actie !== 'voorstel') return { status: 404, j: { ok: false, fout: 'onbekende smalle route' } };
+    if (!primair()) return { status: 409, j: { ok: false, fout: 'deze kant van Socev is nu passief' } };
+    d = d && typeof d === 'object' ? d : {};
+    const pr = praktijk(d);
+    if (!pr) return { status: 400, j: { ok: false, fout: 'onbekende praktijk (tolgaarde of groenhouten)' } };
+    let id = String(d.bandje || '');
+    if (!id && d.nieuw && typeof d.nieuw === 'object') {
+      const n = S.nieuw(pr, { naam: d.nieuw.naam, menu: d.nieuw.menu, wanneer: d.nieuw.wanneer });
+      if (n.status !== 200) return fouts(n);
+      id = n.bandje.id;
+    }
+    if (!ID_RE.test(id)) return { status: 400, j: { ok: false, fout: 'bandje ontbreekt (id uit het register, of nieuw: { naam })' } };
+    const r = S.zetVoorstel(pr, id, { tekst: d.tekst, reden: d.reden });
+    if (r.status !== 200) return fouts(r);
+    log('bandjes voorstel praktijk=' + pr + ' bandje=' + id + ' tekens=' + r.bandje.voorstel.tekst.length);
+    return { status: 200, j: { ok: true, bandje: r.bandje, link: link(pr, id, true) } };
+  }
+
+  // Na een Studio-taak met bron bandje (deps.naKlaar van studio.js): "laatste bestand" en status "gemaakt (vN)" alleen als versie + hash
+  // nog kloppen. Mislukt de taak of is het bandje intussen gewijzigd, dan blijft het register zoals het was (logregel).
+  function naKlaar(taak) {
+    const b = taak && taak.bron;
+    if (!b || b.soort !== 'bandje' || !Object.hasOwn(PRAKTIJKEN, b.praktijk)) return;
+    if (taak.status !== 'klaar') { log('bandjes naklaar taak=' + taak.id + ' uitkomst=' + taak.status + ' (register ongemoeid)'); return; }
+    const bs = taak.bestanden || [];
+    const hoofd = bs.find(function (x) { return !/-telefoon-(pcm|ulaw)\.wav$/i.test(x.naam); }) || bs[0];
+    const tel = bs.filter(function (x) { return /-telefoon-(pcm|ulaw)\.wav$/i.test(x.naam); }).length;
+    const waarde = vandaag(klok) + ' · v' + b.versie + ' · ' + b.stem + ' · ' + taak.id + '/' + (hoofd ? hoofd.naam : '?') +
+      (tel === 2 ? ' (+ telefoonversies PCM en µ-law)' : ' (zonder telefoonversie)');
+    const r = S.zetVelden(b.praktijk, b.bandje, { 'laatste bestand': waarde, status: 'gemaakt (v' + b.versie + ')' }, { versie: b.versie, tekst_hash: b.tekst_hash });
+    if (r.status !== 200) { log('bandjes naklaar taak=' + taak.id + ' register niet bijgewerkt: ' + String(r.fout || '').slice(0, 120)); boxMeld(S.lees(b.praktijk)); }
+    else log('bandjes naklaar taak=' + taak.id + ' ' + b.praktijk + '/' + b.bandje + ' v' + b.versie + ' gemaakt');
+  }
+
+  // /health: zonder inhoud
+  function health() {
+    const uit = { aan: true };
+    Object.keys(PRAKTIJKEN).forEach(function (pr) { try { uit['dicht_' + pr] = !!S.lees(pr).dicht; } catch (e) { uit['dicht_' + pr] = null; } });
+    return uit;
+  }
+  return { app: app, smal: smal, naKlaar: naKlaar, health: health, stemmen: stemmen };
+}
+
+module.exports = { PRAKTIJKEN, GRENS, STEM_STANDAARD, normTekst, tekstHash, parse, bandjeUit, zetTekst, zetVoorstel, haalVoorstelWeg, zetVelden, nieuwBandje,
+  zetInstelling, stemmenUit, maak, routes };

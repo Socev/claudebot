@@ -32,6 +32,14 @@
 // alleen met een verse vingerafdruk per keer; Activeer (ook met vingerafdruk) zet hem op actief. Resultaten via de BESTAANDE
 // bewaarfunctie van de tab Bestanden (deps.bewaar = appBewaar in server.js: jobmap van 16 hex, b/<n>, meta.json, 30 dagen).
 // Per taak één auditregel zonder prompttekst. ComfyUI, FlowStudio en Router worden nooit gestart, gestopt of gewijzigd.
+//
+// BANDJES (wv743; bouwplan "Bandjes - mini-app voor telefoonbandjes (bouwplan 22-10-2026)" § 5.4). De mini-app Bandjes (bandjes.js)
+// gebruikt deze motorlaag: zelfde wachtrij, grenzen, vingerafdruk-regel en Bestanden. Vijf raakpunten: (1) flows met "verborgen": true
+// staan niet in de Studio-lijst; (2) een flow met "telefoonversie": true krijgt vóór het bewaren de twee telefoonversies (audio.js; mislukt
+// dat, dan wordt het origineel toch bewaard met een noot); (3) een taak kan een `bron` dragen ({ soort: 'bandje', praktijk, bandje,
+// versie, tekst_hash, stem }), alleen vanuit de server (derde argument van maak, nooit uit de invoer van de app); (4) het label in
+// Bestanden komt dan uit die bron ("tolgaarde · tg-buiten · v3"); (5) deps.naKlaar(taak) na afloop, los en met eigen catch, zodat een
+// fout daarin nooit de afronding raakt die de wachtrij vrijgeeft.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -125,6 +133,9 @@ function flowToets(api, info) {
 }
 
 function hex16() { return crypto.randomBytes(8).toString('hex'); }
+// audio.js pas laden als een flow hem nodig heeft (wv743): ontbreekt hij, dan faalt alleen de telefoonversie (zacht), niet Studio
+let audioCache = null;
+function audioMod() { return audioCache || (audioCache = require('./audio.js')); }
 function dagNL(t) { return new Date(t).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
 function schoon(t, max) { return String(t == null ? '' : t).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').slice(0, max); }
 // Foutteksten van buiten door een filter voor ze in een log of de app komen (sleutelachtige reeksen weg).
@@ -209,6 +220,8 @@ function maak(deps) {
           uitvoer: String(y.uitvoer || 'beeld'), velden: Array.isArray(y.velden) ? y.velden : [], prijs: y.prijs || null,
           max_seconden: Math.max(10, Math.min(1800, Number(y.max_seconden) || 600)), gpu_mib_schatting: Math.max(0, Number(y.gpu_mib_schatting) || 0),
           tijd: schoon(y.tijd, 80), max_per_dag: Math.max(0, Math.min(GRENS.per_dag, Number(y.max_per_dag) || 0)),
+          verborgen: y.verborgen === true, telefoonversie: y.telefoonversie === true, bandje: y.bandje === true,   // wv743
+          stem: /^[a-z0-9]{2,20}:[A-Za-z0-9_.\/-]{1,80}$/.test(String(y.stem || '')) ? String(y.stem) : null,
         });
         if (['comfyui', 'piper'].indexOf(f.motor) < 0) f.fout = 'onbekende motor';
         if (['proef', 'actief', 'uit'].indexOf(f.status) < 0) f.fout = 'onbekende status';
@@ -349,7 +362,7 @@ function maak(deps) {
     return { id: f.id, titel: f.titel, uitleg: f.uitleg || '', motor: f.motor,
       motor_naam: f.motor === 'router' ? 'lokaal · FlowStudio via Router' : f.motor === 'piper' ? 'lokaal · Piper op de pod (CPU)' : 'lokaal · ComfyUI rechtstreeks',
       status: f.status, uitvoer: f.uitvoer, klaar: klaar, reden: f.fout || f.reden || (f.status === 'uit' ? 'staat uit' : null),
-      prijs: 'gratis', tijd: f.tijd || '', vers_per_keer: f.status === 'proef',
+      prijs: 'gratis', tijd: f.tijd || '', vers_per_keer: f.status === 'proef', bandje: f.bandje === true, stem: f.stem || null,
       velden: (f.velden || []).map(function (v) { const o = Object.assign({}, v); delete o.pad; return o; }) };
   }
   async function catalogus(vers) {
@@ -381,7 +394,8 @@ function maak(deps) {
   function taakUit(t) {
     return { id: t.id, flow: t.flow, titel: t.titel, motor: t.motor, uitvoer: t.uitvoer, status: t.status, fase: t.fase || null, procent: t.procent == null ? null : t.procent,
       reden: t.reden || null, gemaakt: t.gemaakt, start: t.start || null, eind: t.eind || null, duur_s: t.duur_s || null, velden: t.velden,
-      bestanden: t.bestanden || [], plek_in_rij: t.status === 'wacht' ? st.rij.indexOf(t.id) + 1 : null, meting: t.meting || null };
+      bestanden: t.bestanden || [], plek_in_rij: t.status === 'wacht' ? st.rij.indexOf(t.id) + 1 : null, meting: t.meting || null,
+      bron: t.bron || null, noot: t.noot || null };
   }
 
   // ── invoer ──
@@ -416,9 +430,20 @@ function maak(deps) {
     return { waarden: uit };
   }
 
+  // ── bron van een taak (wv743): alleen deze velden, alleen bekende vormen ──
+  function bronNorm(b) {
+    if (!b || typeof b !== 'object' || b.soort !== 'bandje') return null;
+    const o = { soort: 'bandje', praktijk: String(b.praktijk || ''), bandje: String(b.bandje || ''), versie: Number(b.versie),
+      tekst_hash: String(b.tekst_hash || ''), stem: schoon(b.stem, 100) };
+    if (!/^[a-z]{2,20}$/.test(o.praktijk) || !/^[a-z]{2}-[a-z0-9-]{2,30}$/.test(o.bandje) || !Number.isInteger(o.versie) || o.versie < 0 || !/^[a-f0-9]{8,64}$/.test(o.tekst_hash)) return null;
+    return o;
+  }
+  function bronLabel(b) { return b.praktijk + ' · ' + b.bandje + ' · v' + b.versie; }
+
   // ── POST /app/studio/maak ──
   // ctx: { versOk(): bool (synchroon), versVerbruik(): void, apparaat }
-  async function maakTaak(d, ctx) {
+  // extra: alleen vanuit de server (bandjes, wv743): { bron: { soort: 'bandje', praktijk, bandje, versie, tekst_hash, stem } }
+  async function maakTaak(d, ctx, extra) {
     if (!deps.primair()) return { status: 409, fout: 'deze kant van Socev is nu passief; Studio werkt alleen op de actieve kant' };
     const flowId = String(d.flow || '');
     if (!/^[a-z0-9][a-z0-9-]{1,48}$/.test(flowId)) return { status: 400, fout: 'onbekende flow' };
@@ -445,6 +470,8 @@ function maak(deps) {
     }
     const t = { id: hex16(), beurt_id: beurt, flow: f.id, titel: f.titel, motor: f.motor, uitvoer: f.uitvoer, status: 'wacht', fase: 'in de rij',
       procent: null, gemaakt: new Date(klok()).toISOString(), velden: w.waarden, bestanden: [], proef: f.status === 'proef', apparaat: ctx.apparaat || null };
+    const bron = bronNorm(extra && extra.bron);
+    if (bron) t.bron = bron;
     st.taken.push(t);
     st.rij.push(t.id);
     bewaarTaken();
@@ -475,6 +502,10 @@ function maak(deps) {
       audit({ taak: t.id, flow: t.flow, motor: t.motor, uitkomst: t.status, duur_s: t.duur_s, bestanden: (t.bestanden || []).length, kosten: 0,
         proef: !!t.proef, reden: t.status === 'klaar' ? null : String(t.reden || '').slice(0, 160) });
       log('studio taak=' + t.id + ' flow=' + t.flow + ' motor=' + t.motor + ' uitkomst=' + t.status + ' duur_s=' + t.duur_s);
+      // wv743: los van de afronding, met eigen catch (synchroon gooien én een afgewezen belofte); raakt de finally nooit
+      if (t.bron && deps.naKlaar) {
+        try { Promise.resolve(deps.naKlaar(taakUit(t))).catch(function (e) { fout('studio-naklaar', e); }); } catch (e) { fout('studio-naklaar', e); }
+      }
     } catch (e) { fout('studio-afronden', e); } finally {
       st.bezig = null;
       try { bewaarTaken(); } catch (e) {}
@@ -493,8 +524,14 @@ function maak(deps) {
     else if (f.motor === 'comfyui') r = await motorComfy(t, f, out, ctl);
     else return { fout: 'onbekende motor' };
     if (!r || !r.ok || ctl.gestopt) return r;
-    // bewaren via de bestaande bewaarfunctie van Bestanden (Fable M1)
-    const m = deps.bewaar(t.id, out, { soort: 'studio', label: f.titel, ok: true, app: true,
+    // wv743: telefoonversies (8 kHz PCM + µ-law) naast het origineel; mislukt het, dan het origineel toch bewaren met een noot
+    if (f.telefoonversie) {
+      t.fase = 'telefoonversie maken';
+      try { await audioMod().telefoonversie(out); }
+      catch (e) { t.noot = 'telefoonversie mislukt (' + foutTekst(e && e.message || e) + '); alleen het origineel is bewaard'; fout('studio-telefoonversie', e); }
+    }
+    // bewaren via de bestaande bewaarfunctie van Bestanden (Fable M1); bij een bandje het label uit de bron (wv743)
+    const m = deps.bewaar(t.id, out, { soort: 'studio', label: t.bron ? bronLabel(t.bron) : f.titel, ok: true, app: true,
       studio: { flow: f.id, motor: f.motor, kosten: 0, duur_s: Math.round((klok() - Date.parse(t.start)) / 1000) } });
     if (!m || !m.bestanden || !m.bestanden.length) return { fout: m && m.vol ? 'de opslag op de pod zit vol (2 GB); er is niets bewaard' : 'het resultaat kon niet bewaard worden' };
     t.bestanden = m.bestanden.map(function (b) { return { n: b.n, naam: b.naam, grootte: b.grootte }; });
@@ -872,9 +909,10 @@ function maak(deps) {
 
   return {
     // GET /app/studio/flows
-    flows: async function () {
+    // o.verborgen (alleen de server, voor de stemmenlijst van Bandjes): ook de verborgen flows
+    flows: async function (o) {
       const c = await catalogus(false);
-      return { flows: c.flows.filter(function (f) { return f.status !== 'uit'; }).map(flowUit), sleutel: c.sleutel,
+      return { flows: c.flows.filter(function (f) { return f.status !== 'uit' && (!f.verborgen || (o && o.verborgen === true)); }).map(flowUit), sleutel: c.sleutel,
         router_bereikbaar: !c.router_fout, stand: stand() };
     },
     maak: maakTaak,

@@ -2898,6 +2898,7 @@ function handleRequest(req, res) {
       bankarchief: fs.existsSync(path.join(__dirname, 'bank-archief.js')),   // wv687: transactiedatabase in deze release
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
+      bandjes: bandjesInfo(),   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
       server: SERVER_ECHT ? { echt: true, paden: { home: serverPaden.home, io: serverPaden.io, jobout: serverPaden.jobout } }
@@ -9732,6 +9733,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/push/soorten') return appPushSoorten(req, res, a, d);
         if (route === 'POST /app/push/proef') return appPushProef(req, res, a);
         if (route.indexOf(' /app/studio/') > 0) return typeof appStudio === 'function' ? appStudio(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'studio');   // wv707
+        if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
         if (route === 'GET /app/tel') return telAppStand(req, res, a);                       // wv264: ⚙ → Telefoon
         if (route === 'POST /app/tel/koppelcode') return telAppKoppelcode(req, res, reg, a, s);
         if (route === 'POST /app/tel/ontkoppel') return telAppOntkoppel(req, res, a);
@@ -11998,15 +12000,18 @@ const studio = (function () {
     return require(p).maak({ dir: STUDIO_DIR, bewaar: appBewaar, primair: function () { return rolPrimair(); }, sleutel: studioSleutel,
       routerUrl: process.env.STUDIO_ROUTER_URL, comfyUrl: process.env.STUDIO_COMFY_URL, flowstudioUrl: process.env.STUDIO_FLOWSTUDIO_URL,   // wv736: geheugencontrole
       piper: process.env.STUDIO_PIPER_BIN ? { bin: process.env.STUDIO_PIPER_BIN, model: process.env.STUDIO_PIPER_MODEL, data: process.env.STUDIO_PIPER_DATA } : null,
-      log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError });
+      log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError,
+      naKlaar: function (t) { return bandjes ? bandjes.naKlaar(t) : null; } });   // wv743: register bijwerken na een bandje
   } catch (e) { logError('studio', e); return null; }
 })();
 function studioInfo() { return studio ? Object.assign({ aan: true }, studio.health()) : { aan: false }; }
+// Zelfde ctx voor Studio en Bandjes (wv743): vingerafdruk van dít apparaat uit de sessie; bandjes.js bouwt er nooit zelf een.
+function appStudioCtx(a, s) { return { versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; }, apparaat: a.naam }; }
 // Routes (bouwplan § 5.5). Maak op een flow op proef en Activeer eisen een verse vingerafdruk van dít apparaat (§ 4.4d),
 // gecontroleerd en verbruikt in studio.js zonder await ertussen. Schrijven alleen op de primaire kant (studio.js).
 async function appStudio(req, res, a, s, d, route) {
   if (!studio) return appWeiger(res, 404, 'Studio zit niet in deze versie van de pod', 'studio ontbreekt');
-  const ctx = { versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; }, apparaat: a.naam };
+  const ctx = appStudioCtx(a, s);
   const stuur = function (r, extra) {
     if (r.status !== 200) { res._app.reden = 'studio: ' + String(r.fout || '').slice(0, 60); return appStuur(res, r.status, { ok: false, fout: r.fout, vers_nodig: r.vers_nodig === true }); }
     appStuur(res, 200, Object.assign({ ok: true }, extra || r));
@@ -12034,6 +12039,43 @@ async function appStudio(req, res, a, s, d, route) {
   return appWeiger(res, 404, 'onbekend', 'studio route');
 }
 // ── einde studio ──
+
+// ── Bandjes (wv743, 22-10-2026; bouwplan "Bandjes - mini-app voor telefoonbandjes (bouwplan 22-10-2026)" § 5) ──
+// Mini-app Bandjes: het register van de telefoonbandjes (vault 10_Zakelijk/{Tolgaarde,Groenhouten}/Telefoon/Bandjes.md) lezen en
+// bewerken, en een bandje laten inspreken via de Studio-motorlaag (zelfde wachtrij, grenzen, vingerafdruk-regel en Bestanden). Alle
+// logica staat in bandjes.js (register, journaal, routes) en audio.js (telefoonversie, via studio.js); hier alleen de koppeling:
+// routes GET /app/bandjes en POST /app/bandjes/{tekst,nieuw,voorstel,instellingen,maak,status} na de app-poort, POST
+// /smal/bandjes/voorstel (API-geheim of Socev-sleutel; de skill bandjes), het BSN-masker op een vaste plek en /health.bandjes.
+// Schrijven alleen op de primaire kant. Ontbreekt bandjes.js in de release (terugrol), dan 404 en bandjes.aan=false in /health.
+const BANDJES_DIR = serverPad('bandjes', process.env.BANDJES_DIR, '/opt/data/bandjes', serverProefDeel('bandjes'));
+const bandjes = (function () {
+  const p = path.join(__dirname, 'bandjes.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const B = require(p);
+    const opslag = B.maak({ vault: VAULT, dir: BANDJES_DIR, fout: logError });
+    opslag.mkdir();   // /opt/data/bandjes en tmp/ op 0700 (journaal 0600); de registerpagina's blijven 0644
+    return B.routes({ opslag: opslag, studio: studio, primair: function () { return rolPrimair(); }, dir: BANDJES_DIR,
+      boxPad: path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError });
+  } catch (e) { logError('bandjes', e); return null; }
+})();
+function bandjesInfo() {
+  if (!bandjes) return { aan: false };
+  try { return bandjes.health(); } catch (e) { return { aan: true, fout: true }; }
+}
+async function appBandjes(req, res, a, s, d, route) {
+  if (!bandjes) return appWeiger(res, 404, 'Bandjes zit niet in deze versie van de pod', 'bandjes ontbreekt');
+  // wv464: op een vaste plek een BSN-achtig getal maskeren, nooit weigeren (zoals Studio). Praktijknummers (10 cijfers) raakt dit niet.
+  if (a.soort === 'vast' && d && typeof d === 'object') ['tekst', 'naam', 'menu', 'wanneer'].forEach(function (k) {
+    if (typeof d[k] === 'string' && appBsnAchtig(d[k])) { d[k] = appBsnMasker(d[k]); res._app.bsnWeg = true; }
+  });
+  if (route === 'GET /app/bandjes') res._app.stil = true;
+  const r = await bandjes.app(route, d || {}, appStudioCtx(a, s));
+  if (r.status !== 200) res._app.reden = 'bandjes: ' + String(r.j && r.j.fout || '').slice(0, 60);
+  else if (route !== 'GET /app/bandjes') res._app.reden = 'bandjes ' + route.slice('POST /app/bandjes/'.length) + ' ' + String(d && d.praktijk || '').slice(0, 12) + ' ' + String(d && d.bandje || '').slice(0, 34);
+  return appStuur(res, r.status, r.j);
+}
+// ── einde bandjes ──
 
 // ── Rolwachter (uitwijk stap 3, 6-10-2026) ─────────────────────────────────────────────────────────
 // Er is altijd maar één actieve kant (olares | vps); die staat in Supabase (machinekamer.uitwijk_stand, RPC
@@ -12848,7 +12890,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60 };   // per uur
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30 };   // per uur
 const smalTellers = {};
 const SMAL_CF_ACCOUNT = '23df9b0607bb70f6d7f15a63ec843d6d';
 const SMAL_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen
@@ -12964,6 +13006,8 @@ async function smalActie(actie, d) {
     return { status: 200, j: { ok: r.code === 0, code: r.code, stdout: r.stdout, stderr: r.stderr } };
   }
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
+  // wv743: voorstel van Socev in het bandjesregister (skill bandjes); de pod schrijft, de skill nooit zelf (Fable #5)
+  if (actie === 'bandjes/voorstel') return bandjes ? bandjes.smal('voorstel', d) : { status: 404, j: { ok: false, fout: 'Bandjes zit niet in deze versie van de pod' } };
   return { status: 404, j: { ok: false, fout: 'onbekende smalle route' } };
 }
 function smalRoute(req, res) {
