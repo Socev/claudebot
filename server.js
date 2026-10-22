@@ -3508,6 +3508,7 @@ function handleRequest(req, res) {
       bankarchief: fs.existsSync(path.join(__dirname, 'bank-archief.js')),   // wv687: transactiedatabase in deze release
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
+      pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
@@ -9325,6 +9326,164 @@ async function appFinancien(req, res, a) {
   return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d));
 }
 
+// ── wv787: POT-afschriften (App POT-afschriften; bouwplan vault 01_Ontwikkeling/POT-afschriften - bouwplan (App, 22-10-2026).md) ──
+// WAAROM. David 22-10-2026: "een functie … die 1x per maand én op verzoek de transacties in de gewenste formaten naar de boekhouder
+// stuurt per mail (MT940, PDF)". André (Acta Synergia) krijgt de POT-afschriften niet vanzelf: de rekening staat op Davids naam.
+// HOE. De App vraagt de maanden (GET /app/pot-afschriften), maakt een afschrift (POST …/maak → bank-lezer pot-afschrift; de bestanden staan
+// in BANK_DIR/pot-afschriften/<maand>/, niet in Bestanden: dat overzicht toont ook de pc met een vaste plek), downloadt (GET
+// …/bestand/<maand>/<mt940|pdf>) en zet een Gmail-concept aan André klaar (POST …/concept: verse vingerafdruk van dít apparaat, bestaande
+// webhook AI - Mailconcept naar Gmail, zonder bijlagen — dat kan dat luik niet (gemeten 22-10); David hangt ze aan en verstuurt). Na de
+// bank-ronde vanaf de 3e na 12:00 (de ronde van 18:00 vangt late boekingen; Fable wv787 #3) één keer per maand het afschrift van de vorige
+// maand + een Voor jou-kaart; lukt het op de 10e nog niet, een kaart "zelf downloaden" (Fable #10). Nooit op een apparaat met een vaste
+// plek (salarisregels = personeelsgegevens); geen bedrag, naam of saldo in api.log, een box-rij of een kaart. Geheugen van de pod:
+// BANK_DIR/pot-afschriften/pod.json (concept, kaart, ronde); de bank-lezer houdt meta.json per maand.
+const POT_AF_DIR = path.join(process.env.BANK_DIR || '/opt/data/bank', 'pot-afschriften');   // zelfde map als bank-lezer.js (BANK_DIR)
+const POT_AF_STAAT = path.join(POT_AF_DIR, 'pod.json');
+const POT_AF_MAILWF = process.env.POT_AF_MAILWF || 'ruUxLjRmYxgM8jzp';   // n8n AI - Mailconcept naar Gmail (webhookpad uit de workflow)
+const POT_AF_MAX_MS = 20000;
+const POT_AF_VANAF = 3, POT_AF_VANAF_UUR = 12, POT_AF_MELD = 10;
+const POT_AF_MND = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+const POT_AF_MAAND_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+let potAfBezig = false;
+const POT_AF_CODE = process.env.POT_AF_CODE_DIR || (typeof __dirname === 'string' ? __dirname : '.');
+function potAfAan() { return fs.existsSync(path.join(POT_AF_CODE, 'pot-afschrift.js')) && fs.existsSync(path.join(POT_AF_CODE, 'mt940-lezer.js')); }
+function potAfInfo() { let s = null; try { s = potAfStaat(); } catch (e) { s = null; } return { aan: potAfAan(), laatste_ronde: s && s.laatste_ronde || null }; }
+function potAfStaat() {
+  try { const s = JSON.parse(fs.readFileSync(POT_AF_STAAT, 'utf8')); if (s && typeof s === 'object' && s.maanden && s.ronde) return s; } catch (e) {}
+  return { maanden: {}, ronde: {} };
+}
+function potAfStaatZet(s) {
+  fs.mkdirSync(POT_AF_DIR, { recursive: true, mode: 0o700 });
+  const t = POT_AF_STAAT + '.' + process.pid + '.' + crypto.randomBytes(3).toString('hex') + '.tmp';
+  fs.writeFileSync(t, JSON.stringify(s), { mode: 0o600 });
+  fs.renameSync(t, POT_AF_STAAT);
+}
+function potAfMaandNaam(m) { return POT_AF_MND[Number(m.slice(5, 7)) - 1] + ' ' + m.slice(0, 4); }
+function potAfVorigeMaand(datum) { const d = new Date(Date.UTC(Number(datum.slice(0, 4)), Number(datum.slice(5, 7)) - 2, 1)); return d.toISOString().slice(0, 7); }
+function potAfWanneer(iso) { const p = new Date(iso).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }); return Number(p.slice(8, 10)) + '-' + Number(p.slice(5, 7)) + ' ' + p.slice(11, 16); }
+// Het kind: bank-lezer pot-afschrift (maakt of hergebruikt de bestanden; weigert zelf een maand die niet compleet is of niet sluit).
+async function potAfMaakKind(maand) {
+  let r;
+  try { r = await bankKind(['pot-afschrift', '--maand', maand], {}, POT_AF_MAX_MS); } catch (e) { return { ok: false, fout: 'bankkind faalde' }; }
+  const j = (r && r.j) || {};
+  if (j.ok === true) return j;
+  if (j.geweigerd === true) return { ok: false, geweigerd: true, reden: String(j.reden || 'geweigerd').slice(0, 300) };
+  return { ok: false, oud: typeof j.fout === 'string' && /^gebruik:/.test(j.fout), fout: 'geen afschrift' };   // geen tekst van het kind doorgeven
+}
+// Wat de App van een afschrift te zien krijgt, veld voor veld (geen posten, geen namen; de saldi en totalen zijn voor David).
+function potAfAntwoord(j) {
+  const g = function (n) { return typeof n === 'number' && Number.isFinite(n) ? Math.round(n * 100) / 100 : null; };
+  return { maand: j.maand, nieuw: j.nieuw === true, veranderd: j.veranderd === true, pdf_veranderd: j.pdf_veranderd === true, gemaakt: j.gemaakt, aantal: j.aantal, begin: g(j.begin), eind: g(j.eind),
+    bij: g(j.bij), af: g(j.af), stuk_open: j.stuk_open, ingekort86: j.ingekort86,
+    bestanden: (j.bestanden || []).map(function (b) { return { soort: b.soort === 'pdf' ? 'pdf' : 'mt940', naam: String(b.naam).slice(0, 60), grootte: b.grootte }; }) };
+}
+async function appPotAfschriften(req, res, a) {
+  res._app.reden = 'pot-afschriften';
+  if (a.soort === 'vast') return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'POT-afschriften staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek (er staan salarisgegevens in).' });
+  if (!potAfAan()) return appWeiger(res, 503, 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten', 'pot uit');
+  let r;
+  try { r = await bankKind(['pot-afschrift-maanden'], {}, POT_AF_MAX_MS); } catch (e) { r = null; }
+  const j = r && r.j;
+  if (!j || j.ok !== true) {
+    const oud = j && typeof j.fout === 'string' && /^gebruik:/.test(j.fout), geen = j && typeof j.fout === 'string' && /geen POT-rekening/.test(j.fout);
+    return appWeiger(res, 503, oud ? 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten' : geen ? 'er is (nog) geen POT-rekening gekoppeld' : 'de POT-rekening is nu niet te lezen; probeer het zo opnieuw', 'pot maanden fout');
+  }
+  const st = potAfStaat();
+  const g = function (n) { return typeof n === 'number' && Number.isFinite(n) ? Math.round(n * 100) / 100 : null; };
+  const maanden = (Array.isArray(j.maanden) ? j.maanden : []).filter(function (m) { return m && POT_AF_MAAND_RE.test(String(m.maand)); }).slice(0, 18).map(function (m) {
+    const sm = st.maanden[m.maand] || {}, gm = m.gemaakt;
+    return { maand: m.maand, naam: potAfMaandNaam(m.maand), aantal: m.aantal, loopt_nog: m.loopt_nog === true, compleet: m.compleet === true, eerste: m.eerste === true,
+      gemaakt: gm ? { op: gm.op, aantal: gm.aantal, begin: g(gm.begin), eind: g(gm.eind), bij: g(gm.bij), af: g(gm.af), stuk_open: gm.stuk_open, vervangen_op: gm.vervangen_op || null } : null,
+      concept: sm.concept_op ? { op: sm.concept_op, actueel: !!(gm && sm.concept_sha === gm.sha_mt940) } : null,
+      aangevraagd: sm.aangevraagd && !sm.concept_id ? sm.aangevraagd : null };
+  });
+  appStuur(res, 200, { ok: true, vaste_plek: false, ontvanger_gezet: j.ontvanger_gezet === true, laatst_gelezen: j.laatst_gelezen || null, maanden: maanden });
+}
+function potAfMaandUit(res, d) {
+  const maand = String(d && d.maand || '');
+  if (!POT_AF_MAAND_RE.test(maand)) { appWeiger(res, 400, 'maand als JJJJ-MM', 'pot maand'); return null; }
+  return maand;
+}
+async function appPotMaak(req, res, a, d) {
+  if (a.soort === 'vast') return appWeiger(res, 403, 'POT-afschriften kan niet vanaf een pc met een vaste plek; gebruik je telefoon of laptop', 'pot vast');
+  const maand = potAfMaandUit(res, d); if (!maand) return;
+  if (!potAfAan()) return appWeiger(res, 503, 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten', 'pot uit');
+  if (potAfBezig) return appWeiger(res, 409, 'er wordt al een afschrift gemaakt; probeer het zo nog eens', 'pot bezig');
+  res._app.reden = 'pot-maak ' + maand;
+  potAfBezig = true;
+  let j;
+  try { j = await potAfMaakKind(maand); } finally { potAfBezig = false; }
+  if (!j.ok) return appStuur(res, j.geweigerd ? 422 : 503, { ok: false, geweigerd: j.geweigerd === true,
+    fout: j.geweigerd ? j.reden : j.oud ? 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten' : 'het afschrift kon niet gemaakt worden; probeer het zo opnieuw' });
+  appStuur(res, 200, { ok: true, afschrift: potAfAntwoord(j) });
+}
+async function appPotBestand(req, res, a, rest) {
+  if (a.soort === 'vast') return appWeiger(res, 403, 'POT-afschriften kan niet vanaf een pc met een vaste plek', 'pot vast');
+  const m0 = /^(\d{4}-(?:0[1-9]|1[0-2]))\/(mt940|pdf)$/.exec(rest);
+  if (!m0) return appWeiger(res, 404, 'onbekend', 'pot bestand pad');
+  if (!appTeller('bestand', APP_BESTAND_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel downloads dit uur (max ' + APP_BESTAND_PER_UUR + ')', 'grens bestand');
+  let meta;
+  try { meta = JSON.parse(await fs.promises.readFile(path.join(POT_AF_DIR, m0[1], 'meta.json'), 'utf8')); } catch (e) { meta = null; }
+  const naam = meta && meta.maand === m0[1] && meta.bestanden ? meta.bestanden[m0[2]] : null;
+  if (!naam || !/^[A-Za-z0-9 ._-]{1,60}$/.test(naam)) return appWeiger(res, 404, 'dit afschrift is er (nog) niet; maak het eerst', 'pot bestand weg');
+  let inhoud;
+  try { inhoud = await fs.promises.readFile(path.join(POT_AF_DIR, m0[1], naam)); } catch (e) { return appWeiger(res, 404, 'dit afschrift is er (nog) niet; maak het opnieuw', 'pot bestand onleesbaar'); }
+  const sha = crypto.createHash('sha256').update(inhoud).digest('hex');
+  if (sha !== meta['sha_' + m0[2]]) return appWeiger(res, 409, 'het bestand klopt niet met het afschrift; maak het opnieuw', 'pot bestand sha');
+  res._app.reden = 'pot-bestand ' + m0[1] + ' ' + m0[2];
+  appStuur(res, 200, { ok: true, naam: naam, type: m0[2] === 'pdf' ? 'application/pdf' : 'text/plain', grootte: inhoud.length, sha256: sha, inhoud: inhoud.toString('base64') });
+}
+async function appPotConcept(req, res, a, s, d) {
+  if (a.soort === 'vast') return appWeiger(res, 403, 'een mailconcept klaarzetten kan niet vanaf een pc met een vaste plek; gebruik je telefoon of laptop', 'pot vast');
+  const maand = potAfMaandUit(res, d); if (!maand) return;
+  if (!potAfAan()) return appWeiger(res, 503, 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten', 'pot uit');
+  if (potAfBezig) return appWeiger(res, 409, 'er wordt al een afschrift gemaakt; probeer het zo nog eens', 'pot bezig');
+  const geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;   // vóór de vingerafdruk: zonder luik geen vingerafdruk verbruiken (Fable wv787 diff #6)
+  if (!geheim) return appWeiger(res, 503, 'het mailconcept-luik is op de pod niet ingericht; vraag de machinekamer', 'pot geen luik');
+  if (!appVersOk(a, s)) { res._app.reden = 'pot-concept, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
+  s.vers_tot = 0;   // één vingerafdruk = één concept; verbruikt vóór de eerste await (twee tabbladen = niet twee concepten)
+  const nogmaals = d.nogmaals === true;
+  res._app.reden = 'pot-concept ' + maand;
+  potAfBezig = true;
+  try {
+    const j = await potAfMaakKind(maand);
+    if (!j.ok) return appStuur(res, j.geweigerd ? 422 : 503, { ok: false, geweigerd: j.geweigerd === true, fout: j.geweigerd ? j.reden : 'het afschrift kon niet gemaakt worden; probeer het zo opnieuw' });
+    // Fable wv787 #2: geen concept bij een (nieuw of) veranderd afschrift; David kijkt eerst de nieuwe bestanden na
+    if (j.nieuw || j.veranderd) return appStuur(res, 409, { ok: false, veranderd: true, afschrift: potAfAntwoord(j),
+      fout: j.veranderd ? 'Het afschrift is veranderd sinds je het maakte (een late boeking). Download de nieuwe bestanden, kijk ze na en druk dan nog eens.'
+        : 'Het afschrift is nu pas gemaakt. Kijk het eerst na en druk dan nog eens.' });
+    if (!j.ontvanger || !/^[^@\s]+@[^@\s]+$/.test(j.ontvanger)) return appWeiger(res, 409, 'de ontvanger (André) is op de pod nog niet ingesteld; vraag de machinekamer', 'pot geen ontvanger');
+    const st = potAfStaat(), sm = st.maanden[maand] || {};
+    // Fable wv787 #14: niet twee concepten door een dubbele druk of een verloren antwoord
+    if (!nogmaals && sm.concept_id && sm.concept_sha === j.sha256.mt940)
+      return appStuur(res, 409, { ok: false, al_klaar: true, concept_op: sm.concept_op, fout: 'Er staat al een concept voor dit afschrift in Gmail (van ' + potAfWanneer(sm.concept_op) + ').' });
+    if (!nogmaals && sm.aangevraagd && !sm.concept_id && Date.now() - Date.parse(sm.aangevraagd) < 24 * 3600000)
+      return appStuur(res, 409, { ok: false, misschien_al: true, fout: 'Om ' + potAfWanneer(sm.aangevraagd) + ' is al een concept aangevraagd, maar de bevestiging kwam niet terug. Kijk eerst in Gmail bij Concepten; staat het er niet, kies dan Toch opnieuw.' });
+    // ging er al een concept van een ándere versie van deze maand uit (late boeking), dan de correctietekst (Fable wv787 diff #3)
+    const correctie = !!(sm.concept_sha && sm.concept_sha !== j.sha256.mt940 && j.mail_correctie);
+    const mail = correctie ? j.mail_correctie : j.mail;
+    sm.aangevraagd = new Date().toISOString(); delete sm.concept_id; st.maanden[maand] = sm; potAfStaatZet(st);
+    const body = JSON.stringify({ secret: geheim, aan: j.ontvanger, onderwerp: String(mail && mail.onderwerp || '').slice(0, 120), bericht: String(mail && mail.bericht || '').slice(0, 2000) });
+    let antw = null;
+    for (let poging = 0; poging < 2 && !antw; poging++) {
+      const url = await appWebhookUrl(POT_AF_MAILWF, null, 'potMailUrl', poging > 0);
+      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body, signal: AbortSignal.timeout(20000) });
+      if (r.status === 404 && poging === 0) continue;
+      if (!r.ok) throw new Error('mailconcept http ' + r.status);
+      antw = await r.json();
+    }
+    if (!antw || antw.ok !== true || typeof antw.concept_id !== 'string') throw new Error('mailconcept zonder concept_id');
+    const st2 = potAfStaat(), sm2 = st2.maanden[maand] || {};
+    Object.assign(sm2, { concept_id: antw.concept_id.slice(0, 60), concept_op: new Date().toISOString(), concept_sha: j.sha256.mt940, correctie: correctie || undefined });
+    delete sm2.aangevraagd; st2.maanden[maand] = sm2; potAfStaatZet(st2);
+    if (typeof potAfKaartConcept === 'function') potAfKaartConcept(maand).catch(function (e) { logError('pot-kaart', new Error(String(e && e.message || e).slice(0, 120))); });
+    res._app.reden = 'pot-concept ' + maand + ' klaar';
+    return appStuur(res, 200, { ok: true, concept_op: sm2.concept_op, gmail: APP_GMAIL_CONCEPTEN, onderwerp: JSON.parse(body).onderwerp, afschrift: potAfAntwoord(j) });
+  } catch (e) {
+    logError('pot-concept', new Error(String(e && e.message || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)));
+    return appWeiger(res, 502, 'het mailconcept kon niet gemaakt worden; probeer het later opnieuw', 'pot concept fout');
+  } finally { potAfBezig = false; }
+}
 // ── Projecten (wv373, bouwplan § 4.9d): per entiteit de komende deadlines en de lopende zaken, alleen lezen ──
 // Bronnen: 00_Systeem/Deadlines.md (tabel onder "## Actueel") en 00_Systeem/actueel.md (§ Lopende zaken). Deterministisch
 // geparsed, geen taalmodel; in het geheugen op de mtime van beide bestanden + de datum van vandaag. Niets op schijf, stil.
@@ -10265,6 +10424,10 @@ function handleApp(req, res) {
         if (route.indexOf(' /app/studio/') > 0) return typeof appStudio === 'function' ? appStudio(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'studio');   // wv707
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
+        if (route === 'GET /app/pot-afschriften') return appPotAfschriften(req, res, a);       // wv787: App POT-afschriften (alleen David, geen vaste plek)
+        if (route === 'POST /app/pot-afschriften/maak') return appPotMaak(req, res, a, d);
+        if (route === 'POST /app/pot-afschriften/concept') return appPotConcept(req, res, a, s, d);
+        if (route.indexOf('GET /app/pot-afschriften/bestand/') === 0) return appPotBestand(req, res, a, route.slice('GET /app/pot-afschriften/bestand/'.length));
         if (route === 'GET /app/tel') return telAppStand(req, res, a);                       // wv264: ⚙ → Telefoon
         if (route === 'POST /app/tel/koppelcode') return telAppKoppelcode(req, res, reg, a, s);
         if (route === 'POST /app/tel/ontkoppel') return telAppOntkoppel(req, res, a);
@@ -13611,7 +13774,8 @@ const BANK_DIR = process.env.BANK_DIR || '/opt/data/bank';
 const BANK_OPDRACHTEN = ['applicatie', 'banken', 'koppel-start', 'rekeningen', 'saldo', 'transacties', 'toestemming', 'label',
   'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'historie', 'paypal', 'paypal-diensten', 'paypal-ronde', 'ontkoppel'];
 const BANK_LOKAAL = ['label', 'zoek', 'maand', 'intern', 'abonnementen', 'vaste-lasten', 'stroom', 'corrigeer', 'archief', 'pot', 'verrijk', 'verrijk-open', 'verrijk-zet',
-  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'geld-briefing'];   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
+  'paypal', 'paypal-diensten', 'paypal-bekend', 'paypal-bij', 'app-financien', 'geld-briefing',   // geen kluis nodig (wv765: de PayPal-laag leest alleen de database)
+  'pot-afschrift-maanden', 'pot-afschrift'];   // wv787: alleen voor de App-routes en de maandronde (niet in BANK_OPDRACHTEN: niet via /smal/bank)
 const BANK_TERUG_PER_UUR = 30;
 const bankTerugTijden = [];
 let bankSleutelCache = null;   // { w: {sleutel, app_id, bunq_sleutel}, tot }; 10 minuten, alleen in het geheugen
@@ -13707,7 +13871,12 @@ function bankBoxRij(m) {
     const ip = m.reden === 'toegang';
     // wv685: Enable Banking uit de vaste ronde (bank-lezer.js zet hooguit één per reden per dag); tekst van de pod zelf
     const eb = m.bron === 'enablebanking' && (m.reden === 'sleutel' || m.reden === 'toestemming');
-    const rij = m.bron === 'vaste-lasten' ? '\n## [direct] ' + tijd + ' — vaste lasten ' + String(m.maand || '').slice(0, 7) + ': maandtabel niet bijgewerkt (bankluis, automatisch)\n' +
+    const rij = m.bron === 'pot-afschrift' ? '\n## [direct] ' + tijd + ' — POT-afschrift ' + String(m.maand || '').slice(0, 7) + ': niet gemaakt (bankluis, automatisch)\n' +
+      '- status: open\n- van: pod pot-afschrift-ronde (server.js potAfschriftRonde na de bank-ronde, vanaf de 3e; hooguit 1× per maand per reden)\n' +
+      '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').replace(/\d[\d.]*,\d{2}/g, '#').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: André krijgt het afschrift niet vanzelf; vanaf de 10e staat er een Voor jou-kaart om het zelf bij ABN te downloaden.\n' +
+      '- voorstel: `echo {} | BANK_DIR=/opt/data/bank node /opt/data/claudebot-src/bank-lezer.js pot-afschrift --maand ' + String(m.maand || 'JJJJ-MM').slice(0, 7) + '` draaien (alleen ok/reden bekijken, geen posten) en de reden nagaan; geheugen: `/opt/data/bank/pot-afschriften/pod.json`.\n'
+      : m.bron === 'vaste-lasten' ? '\n## [direct] ' + tijd + ' — vaste lasten ' + String(m.maand || '').slice(0, 7) + ': maandtabel niet bijgewerkt (bankluis, automatisch)\n' +
       '- status: open\n- van: pod vaste-lasten-ronde (server.js vasteLastenRonde na de bank-ronde, vanaf de 3e; hooguit 1× per maand per reden)\n' +
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: de tabel op de vaste-lastenpagina (20_Prive/Financien) blijft op de vorige stand; elke ronde (07:00/18:00) probeert het opnieuw tot het lukt.\n' +
@@ -14043,6 +14212,11 @@ async function bankRonde() {
     const g = await geldBriefingRonde();
     if (g.gedaan || g.fout) uit.geld = { maand: g.maand, regels: g.regels, kaarten: g.kaarten, fout: g.fout };
   } catch (e) { logError('geld-briefing', e); uit.geld = { fout: 'geld-briefing faalde in de pod' }; }
+  // wv787: vanaf de 3e (na 12:00) het POT-afschrift van de vorige maand + Voor jou-kaart (één keer per maand); alleen maand en uitkomst naar n8n
+  if (uit.ok) try {
+    const pa = await potAfschriftRonde();
+    if (pa.gedaan || pa.fout) uit.pot_afschrift = { maand: pa.maand, uitkomst: pa.uitkomst, fout: pa.fout };
+  } catch (e) { logError('pot-ronde', e); uit.pot_afschrift = { fout: 'pot-afschrift-ronde faalde in de pod' }; }
   // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
   (r.box || []).forEach(function (m) {
     const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')
@@ -14530,6 +14704,88 @@ async function geldKaarten(s) {
   }
   s.kaarten_open = rest;
   try { geldStaatZet(s); } catch (e) { logError('geld-staat', e); }
+}
+
+// Kaarten (Voor jou). Geen bedrag, naam of saldo; de stappen staan in de kaart zelf (David heeft geen toegang tot onze context).
+function potAfKaartDoen(maand) {
+  const n = potAfMaandNaam(maand), dl = new Date(Date.UTC(Number(maand.slice(0, 4)), Number(maand.slice(5, 7)), POT_AF_MELD)).toISOString().slice(0, 10);
+  return { sleutel: 'pot-afschrift-' + maand, soort: 'doen', titel: 'POT — afschrift ' + n + ' naar André (Acta Synergia) sturen', volgorde: 30, deadline: dl,
+    waar: 'overal', prive: true, duur_min: 4, herkomst: { handmatig: 'pot-afschrift', maand: maand },
+    waarom: 'André verwerkt de bankafschriften van de POT. Socev heeft het afschrift van ' + n + ' gemaakt uit de bankkoppeling: een MT940-bestand om in te lezen en een PDF met per regel wat het is. Het mailconcept aan André zet Socev op jouw teken klaar; de twee bestanden aanhangen en versturen doe je zelf.',
+    stappen: ['Open in de app Apps › POT-afschriften (op je telefoon of laptop, niet op de praktijk-pc).', 'Kijk de PDF van ' + n + ' even na (knop PDF).',
+      "Tik op 'Zet mailconcept klaar voor André' en bevestig met je vingerafdruk.", "Tik op 'MT940' en 'PDF' om beide bestanden op je apparaat te bewaren.",
+      'Open het concept in Gmail (Concepten), hang de twee bestanden aan en verstuur.', 'Klaar? Tik hier op Gedaan.'],
+    meting: bankNuKort() + ': Het afschrift van ' + n + ' staat klaar in de app; het mailconcept nog niet.' };
+}
+function potAfKaartNiet(maand, reden) {
+  const n = potAfMaandNaam(maand), eind = new Date(Date.UTC(Number(maand.slice(0, 4)), Number(maand.slice(5, 7)), 0)).toISOString().slice(0, 10);
+  // de vorige maand veranderde na het maken (late boeking): niet bij ABN downloaden, maar die maand opnieuw maken (Fable wv787 diff #4)
+  if (/veranderd sinds dat afschrift/.test(String(reden || ''))) {
+    const vm = new Date(Date.UTC(Number(maand.slice(0, 4)), Number(maand.slice(5, 7)) - 2, 1)).toISOString().slice(0, 7), vn = potAfMaandNaam(vm);
+    return { sleutel: 'pot-afschrift-' + maand + '-niet', soort: 'doen', titel: 'POT — afschrift ' + vn + ' opnieuw maken, daarna ' + n + ' naar André', volgorde: 20,
+      deadline: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), waar: 'overal', prive: true, duur_min: 8,
+      herkomst: { handmatig: 'pot-afschrift', maand: maand },
+      waarom: 'Na het maken van het afschrift van ' + vn + ' kwam er bij de bank nog een boeking in die maand bij. Daardoor sluit ' + n + ' niet aan op wat André van ' + vn + ' heeft. Eerst ' + vn + ' opnieuw maken en als correctie sturen; daarna kan ' + n + '.',
+      stappen: ['Open in de app Apps › POT-afschriften (op je telefoon of laptop).', 'Kies ' + vn + " en tik op 'Maak opnieuw'.",
+        "Tik op 'Zet mailconcept klaar voor André' (het concept zegt dat het een correctie is), hang PDF en MT940 aan en verstuur.",
+        'Kies daarna ' + n + ", tik op 'Maak afschrift' en stuur het op dezelfde manier.", 'Klaar? Tik hier op Gedaan.'],
+      meting: bankNuKort() + ': ' + n + ' sluit niet aan op het afschrift van ' + vn + '.' };
+  }
+  return { sleutel: 'pot-afschrift-' + maand + '-niet', soort: 'doen', titel: 'POT — afschrift ' + n + ' zelf bij ABN downloaden en naar André sturen', volgorde: 20,
+    deadline: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), waar: 'overal', prive: true, duur_min: 10,
+    herkomst: { handmatig: 'pot-afschrift', maand: maand },
+    waarom: 'Socev kon het afschrift van ' + n + ' niet maken uit de bankkoppeling (' + String(reden || 'onbekende reden').replace(/[\r\n]+/g, ' ').slice(0, 160) + '). André wacht op het afschrift; zo stuur je het zelf.',
+    stappen: ['Log in bij ABN AMRO (Internet Bankieren op de laptop) en open de POT-rekening.', "Zoek 'Af- en bijschrijvingen downloaden' en kies het formaat MT940, periode 1-" + Number(maand.slice(5, 7)) + ' t/m ' + bankDm(eind, true) + '.',
+      'Mail het bestand aan André (Acta Synergia).', 'Klaar? Tik hier op Gedaan.'],
+    meting: bankNuKort() + ': Het afschrift van ' + n + ' kon Socev niet maken.' };
+}
+// Na het concept: de meting op een open kaart van die maand bijwerken (een kaart die David al dichtzette, blijft dicht).
+async function potAfKaartConcept(maand) {
+  const rd = potAfStaat().ronde[maand];
+  if (!rd || !rd.kaart) return;
+  const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+  const pnt = ((j && j.punten) || []).find(function (p) { return p.sleutel === rd.kaart; });
+  if (!pnt || (pnt.status !== 'open' && pnt.status !== 'later')) return;
+  const p = potAfKaartDoen(maand);
+  p.meting = bankNuKort() + ': Het mailconcept aan André staat in Gmail; de twee bestanden aanhangen en versturen doe je zelf.';
+  await appSbRpc('mk_voor_jou_zet', { p: p });
+}
+// Maandronde, na de bank-ronde. Antwoord naar n8n: alleen maand en uitkomst.
+async function potAfschriftRonde(o) {
+  o = o || {};
+  if (!potAfAan()) return { gedaan: false, reden: 'module ontbreekt' };
+  const p = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  const datum = o.datum || p.slice(0, 10), uur = o.uur != null ? o.uur : Number(p.slice(11, 13)), dag = Number(datum.slice(8, 10));
+  if (dag < POT_AF_VANAF || (dag === POT_AF_VANAF && uur < POT_AF_VANAF_UUR)) return { gedaan: false, reden: 'te vroeg' };
+  const mnd = potAfVorigeMaand(datum);
+  if (potAfBezig) return { gedaan: false, reden: 'bezig', maand: mnd };
+  const st = potAfStaat(), rd = st.ronde[mnd] || {};
+  if (rd.kaart || rd.niet_kaart || rd.overgeslagen) return { gedaan: false, reden: 'al gedaan', maand: mnd };
+  const bewaar = function () { st.ronde[mnd] = rd; st.laatste_ronde = new Date().toISOString(); try { potAfStaatZet(st); } catch (e) { logError('pot-staat', e); } };
+  if ((st.maanden[mnd] || {}).concept_id) { rd.overgeslagen = 'concept al gemaakt'; bewaar(); return { gedaan: false, reden: 'concept al gemaakt', maand: mnd }; }
+  const box = function (reden) { if (rd.box !== reden) { rd.box = reden; bankBoxRij({ bron: 'pot-afschrift', maand: mnd, tekst: reden }); } };
+  potAfBezig = true;
+  try {
+    const j = await potAfMaakKind(mnd);
+    if (!j.ok) {
+      const reden = j.geweigerd ? j.reden : 'bank-lezer gaf geen afschrift';
+      rd.laatste_reden = reden;
+      if (dag < POT_AF_MELD) { bewaar(); return { gedaan: false, maand: mnd, uitkomst: 'wacht' }; }
+      await appSbRpc('mk_voor_jou_zet', { p: potAfKaartNiet(mnd, reden) });
+      rd.niet_kaart = 'pot-afschrift-' + mnd + '-niet'; rd.op = new Date().toISOString();
+      box(reden); bewaar();
+      return { gedaan: true, maand: mnd, uitkomst: 'kaart zelf downloaden' };
+    }
+    if (!j.aantal) { rd.overgeslagen = 'geen posten'; bewaar(); return { gedaan: false, maand: mnd, uitkomst: 'geen posten' }; }
+    await appSbRpc('mk_voor_jou_zet', { p: potAfKaartDoen(mnd) });
+    rd.kaart = 'pot-afschrift-' + mnd; rd.op = new Date().toISOString(); delete rd.laatste_reden;
+    bewaar();
+    return { gedaan: true, maand: mnd, uitkomst: 'kaart gezet' };
+  } catch (e) {
+    logError('pot-ronde', new Error(String(e && e.message || e).slice(0, 120)));
+    box('ronde faalde: ' + String(e && e.message || e).replace(/[\r\n]+/g, ' ').slice(0, 100)); bewaar();
+    return { gedaan: false, maand: mnd, fout: 'pot-afschrift-ronde faalde in de pod' };
+  } finally { potAfBezig = false; }
 }
 // ── einde bankluis ──
 

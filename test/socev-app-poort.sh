@@ -374,7 +374,8 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', N8N_WEBHOOK_VERBETERLOG: 'nep-vbl', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
     N8N_MCP_URL: N8N + '/mcp-server/http', N8N_API_KEY: 'nep-n8n', APP_WACHTER_URL: 'https://wachter.toets/stand',
     APP_BINDING_BESTAND: path.join(W, 'app-binding.json'),   // wv316
-    TODOIST_MCP_TOKEN: 'nep-todoist', N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', APP_KNOP_SLEUTEL_PAD: KNOPK_PAD, CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL }, pid: process.pid },
+    TODOIST_MCP_TOKEN: 'nep-todoist', N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', APP_KNOP_SLEUTEL_PAD: KNOPK_PAD, CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL,
+    BANK_DIR: path.join(W, 'bank'), POT_AF_CODE_DIR: process.cwd(), N8N_WEBHOOK_MAILCONCEPT: 'nep-mailconcept' }, pid: process.pid },
   VAULT: VAULT_T,
   TOETSUUR: () => toetsUur,
   TOETSBUUR: () => toetsBUur, SECRET: 'g'.repeat(40),
@@ -384,7 +385,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -3749,6 +3750,118 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
       toets('20f fout in het kind: 503 in gewone taal, geen foutdetail naar de app', r.status === 503 && /niet te lezen/.test(r.j.fout) && !/interne/.test(r.j.fout), JSON.stringify(r.j));
       delete ctx.bankKind; vm.runInContext('appFinCache = null', ctx);
+    }
+
+    // ── 20g. wv787: App POT-afschriften: sessie, geen vaste plek, veld voor veld, downloaden met sha-controle, concept met verse vingerafdruk ──
+    {
+      r = await vraag('GET', '/app/pot-afschriften', undefined, { pot: pot() });
+      toets('20g GET /app/pot-afschriften zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      let kArgs = [], kAntw = {};
+      ctx.bankKind = async (args, extra, ms) => { kArgs.push([args, ms]); return kAntw[args[0]] || { code: 1, j: { ok: false, fout: 'interne fout: X' } }; };
+      kAntw['pot-afschrift-maanden'] = { code: 0, j: { ok: true, ontvanger_gezet: true, laatst_gelezen: '2026-10-22T05:00:00Z', geheim_veld: 'NL00ABNA0123456789', maanden: [
+        { maand: '2026-10', aantal: 15, loopt_nog: true, compleet: false, gemaakt: null },
+        { maand: '2026-09', aantal: 26, loopt_nog: false, compleet: true, gemaakt: { op: '2026-10-03T16:00:00Z', aantal: 26, begin: 4990, eind: 3216.05, bij: 2500, af: 4273.95, stuk_open: 3, sha_mt940: 'a'.repeat(64), posten: [{ naam: 'Jansen Medewerker' }] } },
+        { maand: 'kapot', aantal: 1 }] } };
+      r = await vraag('GET', '/app/pot-afschriften', undefined, { pot: P.jar });
+      const m9 = r.j.maanden && r.j.maanden.find((x) => x.maand === '2026-09');
+      toets('20g met sessie: 200, maanden met naam, gemaakt veld voor veld (geen posten/IBAN/sha), ongeldige maand eruit, grens 20 s',
+        r.status === 200 && r.j.vaste_plek === false && r.j.maanden.length === 2 && m9.naam === 'september 2026' && m9.gemaakt.eind === 3216.05 && !('posten' in m9.gemaakt) && !('sha_mt940' in m9.gemaakt) &&
+        !/NL00ABNA|Jansen/.test(JSON.stringify(r.j)) && kArgs[0][0][0] === 'pot-afschrift-maanden' && kArgs[0][1] === 20000, JSON.stringify(r.j).slice(0, 400));
+      const nep = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
+      let n1 = nep(); await H.appPotAfschriften({}, n1, { id: 'x', soort: 'vast' });
+      let n2 = nep(); await H.appPotMaak({}, n2, { id: 'x', soort: 'vast' }, { maand: '2026-09' });
+      let n3 = nep(); await H.appPotBestand({}, n3, { id: 'x', soort: 'vast' }, '2026-09/pdf');
+      toets('20g vaste plek: overzicht 200 met vaste_plek, maken en downloaden 403, geen bankkind', n1.st === 200 && n1.b.vaste_plek === true && !('maanden' in n1.b) && n2.st === 403 && n3.st === 403 && kArgs.length === 1, JSON.stringify([n1.b, n2.st, n3.st]));
+      kAntw['pot-afschrift-maanden'] = { code: 2, j: { ok: false, fout: 'gebruik: zoek | maand' } };
+      r = await vraag('GET', '/app/pot-afschriften', undefined, { pot: P.jar });
+      toets('20g oudere bank-lezer: 503 "wordt net bijgewerkt"', r.status === 503 && /bijgewerkt/.test(r.j.fout), JSON.stringify(r.j));
+      // maken
+      const AFS = { code: 0, j: { ok: true, maand: '2026-09', nieuw: true, veranderd: false, gemaakt: '2026-10-22T19:00:00Z', aantal: 26, begin: 4990, eind: 3216.05, bij: 2500, af: 4273.95, stuk_open: 3, ingekort86: 0,
+        sha256: { mt940: 'b'.repeat(64), pdf: 'c'.repeat(64) }, bestanden: [{ soort: 'mt940', naam: 'POT-2026-09.sta', grootte: 10 }, { soort: 'pdf', naam: 'POT-afschrift 2026-09.pdf', grootte: 20 }],
+        mail: { onderwerp: 'POT POH-GGZ: afschrift september 2026', bericht: 'Hoi André,\n\nHierbij.\n\nGroet,\nDavid' }, ontvanger: 'boekhouder@voorbeeld.nl', posten: [{ naam: 'Jansen Medewerker' }] } };
+      kAntw['pot-afschrift'] = AFS;
+      r = await vraag('POST', '/app/pot-afschriften/maak', { maand: '2026-09' }, { pot: P.jar });
+      toets('20g maak: 200, afschrift veld voor veld (geen ontvanger, mail, posten), opdracht met --maand', r.status === 200 && r.j.afschrift.aantal === 26 && r.j.afschrift.bestanden.length === 2 && !/Jansen|boekhouder|Hoi Andr/.test(JSON.stringify(r.j)) &&
+        JSON.stringify(kArgs[kArgs.length - 1][0]) === JSON.stringify(['pot-afschrift', '--maand', '2026-09']), JSON.stringify(r.j).slice(0, 300));
+      r = await vraag('POST', '/app/pot-afschriften/maak', { maand: '2026-13' }, { pot: P.jar });
+      toets('20g maak: ongeldige maand -> 400', r.status === 400, r.status);
+      kAntw['pot-afschrift'] = { code: 0, j: { ok: false, geweigerd: true, maand: '2026-10', reden: 'de maand oktober 2026 loopt nog; het afschrift kan vanaf de 3e van de maand erna' } };
+      r = await vraag('POST', '/app/pot-afschriften/maak', { maand: '2026-10' }, { pot: P.jar });
+      toets('20g maak: geweigerd -> 422 met de reden', r.status === 422 && r.j.geweigerd === true && /loopt nog/.test(r.j.fout), JSON.stringify(r.j));
+      kAntw['pot-afschrift'] = { code: 1, j: { ok: false, fout: 'interne fout: Jansen Medewerker' } };
+      r = await vraag('POST', '/app/pot-afschriften/maak', { maand: '2026-09' }, { pot: P.jar });
+      toets('20g maak: fout in het kind -> 503 zonder detail', r.status === 503 && !/interne|Jansen/.test(r.j.fout), JSON.stringify(r.j));
+      // downloaden
+      const PD = path.join(W, 'bank', 'pot-afschriften', '2026-09');
+      fs.mkdirSync(PD, { recursive: true });
+      const inhoudPdf = Buffer.from('%PDF-1.4 nep'), inhoudMt = Buffer.from(':20:ABN AMRO BANK NV\r\n');
+      fs.writeFileSync(path.join(PD, 'POT-afschrift 2026-09.pdf'), inhoudPdf); fs.writeFileSync(path.join(PD, 'POT-2026-09.sta'), inhoudMt);
+      const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+      fs.writeFileSync(path.join(PD, 'meta.json'), JSON.stringify({ maand: '2026-09', bestanden: { mt940: 'POT-2026-09.sta', pdf: 'POT-afschrift 2026-09.pdf' }, sha_mt940: sha(inhoudMt), sha_pdf: sha(inhoudPdf) }));
+      r = await vraag('GET', '/app/pot-afschriften/bestand/2026-09/pdf', undefined, { pot: P.jar });
+      const r2 = await vraag('GET', '/app/pot-afschriften/bestand/2026-09/mt940', undefined, { pot: P.jar });
+      toets('20g bestand: pdf en mt940 als base64 met naam, type en sha', r.status === 200 && Buffer.from(r.j.inhoud, 'base64').equals(inhoudPdf) && r.j.type === 'application/pdf' && r.j.naam === 'POT-afschrift 2026-09.pdf' &&
+        r2.status === 200 && r2.j.type === 'text/plain' && Buffer.from(r2.j.inhoud, 'base64').equals(inhoudMt), JSON.stringify([r.status, r2.status]));
+      fs.writeFileSync(path.join(PD, 'POT-2026-09.sta'), Buffer.from('anders'));
+      r = await vraag('GET', '/app/pot-afschriften/bestand/2026-09/mt940', undefined, { pot: P.jar });
+      toets('20g bestand: inhoud wijkt af van meta.json -> 409', r.status === 409, r.status);
+      r = await vraag('GET', '/app/pot-afschriften/bestand/2026-08/pdf', undefined, { pot: P.jar });
+      const r3 = await vraag('GET', '/app/pot-afschriften/bestand/2026-09/../../stand', undefined, { pot: P.jar });
+      toets('20g bestand: onbekende maand 404, pad met .. geweigerd', r.status === 404 && r3.status === 404, JSON.stringify([r.status, r3.status]));
+      // concept: verse vingerafdruk, nieuw/veranderd, webhook, dubbel
+      const sP = () => H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      const webhook = { calls: [], gooi: false };
+      const oudFetch = ctx.fetch, oudUrl = ctx.appWebhookUrl;
+      ctx.appWebhookUrl = async () => 'https://mailconcept.toets/webhook/x';
+      ctx.fetch = async (url, opt) => {
+        if (String(url).startsWith('https://mailconcept.toets/')) { webhook.calls.push(JSON.parse(opt.body)); if (webhook.gooi) throw new Error('timeout'); return { ok: true, status: 200, json: async () => ({ ok: true, concept_id: 'r-' + webhook.calls.length, thread_id: 't' }) }; }
+        return oudFetch(url, opt);
+      };
+      const gM = ctx.process.env.N8N_WEBHOOK_MAILCONCEPT; delete ctx.process.env.N8N_WEBHOOK_MAILCONCEPT;
+      sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09' }, { pot: P.jar });
+      toets('20g concept zonder mailluik -> 503, vingerafdruk niet verbruikt', r.status === 503 && /niet ingericht/.test(r.j.fout) && sP().vers_tot > 0, JSON.stringify([r.status, r.j]));
+      ctx.process.env.N8N_WEBHOOK_MAILCONCEPT = gM;
+      sP().vers_tot = 0;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09' }, { pot: P.jar });
+      toets('20g concept zonder verse vingerafdruk -> 403 vers_nodig, geen webhook', r.status === 403 && r.j.vers_nodig === true && webhook.calls.length === 0, JSON.stringify(r.j));
+      kAntw['pot-afschrift'] = AFS;   // nieuw: true
+      sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09' }, { pot: P.jar });
+      toets('20g concept bij een nieuw afschrift -> 409 veranderd, geen webhook, vingerafdruk verbruikt', r.status === 409 && r.j.veranderd === true && webhook.calls.length === 0 && sP().vers_tot === 0, JSON.stringify(r.j).slice(0, 200));
+      kAntw['pot-afschrift'] = { code: 0, j: Object.assign({}, AFS.j, { nieuw: false }) };
+      sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09' }, { pot: P.jar });
+      const pod = () => JSON.parse(fs.readFileSync(path.join(W, 'bank', 'pot-afschriften', 'pod.json'), 'utf8'));
+      toets('20g concept: 200, webhook met ontvanger, onderwerp en tekst (geen bijlage), concept_id in pod.json',
+        r.status === 200 && webhook.calls.length === 1 && webhook.calls[0].aan === 'boekhouder@voorbeeld.nl' && webhook.calls[0].secret === 'nep-mailconcept' && /september 2026/.test(webhook.calls[0].onderwerp) &&
+        !('bijlagen' in webhook.calls[0]) && pod().maanden['2026-09'].concept_id === 'r-1' && !pod().maanden['2026-09'].aangevraagd && /mail\.google\.com/.test(r.j.gmail), JSON.stringify([r.status, r.j, webhook.calls]).slice(0, 400));
+      sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09' }, { pot: P.jar });
+      toets('20g tweede druk voor hetzelfde afschrift -> 409 al_klaar, geen tweede concept', r.status === 409 && r.j.al_klaar === true && webhook.calls.length === 1, JSON.stringify(r.j));
+      sP().vers_tot = Date.now() + 60000; webhook.gooi = true;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
+      toets('20g antwoord van de webhook verloren -> 502, aangevraagd blijft staan', r.status === 502 && webhook.calls.length === 2 && !!pod().maanden['2026-09'].aangevraagd && !pod().maanden['2026-09'].concept_id, JSON.stringify([r.status, pod()]));
+      sP().vers_tot = Date.now() + 60000; webhook.gooi = false;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09' }, { pot: P.jar });
+      toets('20g daarna zonder "nogmaals" -> 409 misschien_al (kijk eerst in Gmail), geen webhook', r.status === 409 && r.j.misschien_al === true && webhook.calls.length === 2, JSON.stringify(r.j));
+      sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
+      toets('20g met "nogmaals" -> 200, nieuw concept', r.status === 200 && webhook.calls.length === 3 && pod().maanden['2026-09'].concept_id === 'r-3', JSON.stringify(r.j).slice(0, 200));
+      // late boeking: andere MT940-sha dan het vorige concept → correctietekst
+      kAntw['pot-afschrift'] = { code: 0, j: Object.assign({}, AFS.j, { nieuw: false, sha256: { mt940: 'd'.repeat(64), pdf: 'e'.repeat(64) },
+        mail_correctie: { onderwerp: 'POT POH-GGZ: afschrift september 2026 (correctie)', bericht: 'Hoi André,\n\nDit vervangt het afschrift.\n\nGroet,\nDavid' } }) };
+      sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09' }, { pot: P.jar });
+      toets('20g nieuwe versie na een concept -> correctietekst in het concept', r.status === 200 && webhook.calls.length === 4 && /\(correctie\)$/.test(webhook.calls[3].onderwerp) && pod().maanden['2026-09'].correctie === true, JSON.stringify([r.status, webhook.calls[3]]).slice(0, 300));
+      kAntw['pot-afschrift'] = { code: 0, j: Object.assign({}, AFS.j, { nieuw: false, ontvanger: null }) };
+      sP().vers_tot = Date.now() + 60000;
+      r = await vraag('POST', '/app/pot-afschriften/concept', { maand: '2026-09', nogmaals: true }, { pot: P.jar });
+      toets('20g zonder ingestelde ontvanger -> 409, geen webhook', r.status === 409 && /ontvanger/.test(r.j.fout) && webhook.calls.length === 4, JSON.stringify(r.j));
+      const ln = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').filter((x) => /pot-/.test(x));
+      toets('20g auditregels: route en maand, geen bedrag, naam of adres', ln.length >= 5 && ln.every((x) => !/4\.990|3216|Jansen|boekhouder@/.test(x)) && ln.some((x) => /pot-concept 2026-09 klaar/.test(x)), ln.slice(-3));
+      ctx.fetch = oudFetch; if (oudUrl) ctx.appWebhookUrl = oudUrl; else delete ctx.appWebhookUrl;
+      delete ctx.bankKind;
     }
 
     // ── 21. wv201: app naast Telegram (fase 7, meetpunt 6): alleen tellingen per dag, nooit inhoud ──

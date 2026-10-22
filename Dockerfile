@@ -140,6 +140,8 @@ COPY bunq-lezer.js /app/release-bootstrap/bunq-lezer.js
 COPY bank-archief.js /app/release-bootstrap/bank-archief.js
 COPY paypal-bewijs.js /app/release-bootstrap/paypal-bewijs.js
 COPY financien-app.js /app/release-bootstrap/financien-app.js
+COPY pot-afschrift.js /app/release-bootstrap/pot-afschrift.js
+COPY mt940-lezer.js /app/release-bootstrap/mt940-lezer.js
 COPY bewaker.js /app/release-bootstrap/bewaker.js
 COPY studio.js /app/release-bootstrap/studio.js
 COPY bandjes.js /app/release-bootstrap/bandjes.js

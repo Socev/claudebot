@@ -76,6 +76,18 @@ jobs:
           fi
           echo "paypal-bewijs.js: alleen lokaal."
 
+      # pot-afschrift.js en mt940-lezer.js (wv787): de afschriftmaker van de POT-rekening is puur (invoer erin, MT940 + PDF eruit). Geen
+      # bestand-, netwerk- of procesmodule en geen fetch: bestanden schrijft bank-lezer.js, versturen doet niemand (een concept maakt server.js).
+      - name: pot-afschrift.js en mt940-lezer.js moeten puur blijven
+        run: |
+          for f in pot-afschrift.js mt940-lezer.js; do
+            C=$(grep -vE '^\s*(\*|//)' "$f")
+            if echo "$C" | grep -nE "require\(['\"](node:)?(fs|http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|\bfetch\s*\(|process\.binding|import\("; then
+              echo "::error::$f laadt een bestand-, netwerk- of procesmodule; de afschriftmaker moet puur blijven"; exit 1
+            fi
+          done
+          echo "pot-afschrift.js en mt940-lezer.js: puur."
+
       # De witte lijst en de handtekeningcontrole echt toetsen (nagebootste bunq en Enable Banking op 127.0.0.1); node:sqlite
       # vraagt Node 22 (zelfde hoofdversie als de pod).
       - uses: actions/setup-node@v4
@@ -94,6 +106,8 @@ jobs:
           bash test/bank-pot.sh   # wv786: POT-rekening afgescheiden van privé, indeling zonder taalmodel
           bash test/financien-app.sh   # wv771: App Financiën — veld-allowlist, signalen, opzeglinks met host-allowlist
           bash test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
+          pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
+          bash test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
       - name: "studio (wv707, tab Studio fase 1)"
         run: bash test/studio.sh

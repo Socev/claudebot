@@ -1261,6 +1261,52 @@ function potOverzicht(a, o) {
     maanden: Array.from(maanden.values()).map(function (x) { return { maand: x.maand, aantal: x.aantal, uit: r2(x.uit), in: r2(x.in), per_categorie: x.per_categorie }; }) };
 }
 
+// ── wv787: invoer voor de afschriftmaker (pot-afschrift.js) ─────────────────
+// Eén plek voor de selectie, zodat de Facturen-app later dezelfde invoer krijgt (Fable wv787 #11): alleen geboekte, niet-vervangen
+// posten van de POT-rekening; per post de omschrijvingsregels van de bank, de transactiecode en de categorie (David wint, anders de
+// vaste regel); de posten van de laatste dag vóór de maand (beginsaldo); de eerste archiefmaand en wanneer de rekening laatst gelezen
+// is (compleet); de IBAN's van Davids eigen rekeningen (niet extern, niet POT) voor "van/naar eigen rekening". Leest alleen.
+const POT_BOEKT = "t.status = 'booked' AND t.vervangen_door IS NULL";
+function potRekeningEen(a) {
+  const pot = Array.from(potRekeningen(a));
+  if (pot.length !== 1) throw new Error(pot.length ? 'meer dan één POT-rekening' : 'er is (nog) geen POT-rekening gekoppeld');
+  return a.db.prepare('SELECT rek, iban, laatst_gezien FROM rekeningen WHERE rek = ?').get(pot[0]);
+}
+function potAfschriftPost(r) {
+  let j = null;
+  try { j = r.ruwe_json ? JSON.parse(r.ruwe_json) : null; } catch (e) { j = null; }
+  let rl = j && Array.isArray(j.remittance_information) ? j.remittance_information.map(function (x) { return String(x == null ? '' : x).slice(0, 200); }).slice(0, 40) : [];
+  if (!rl.length && r.omschrijving) rl = [String(r.omschrijving).slice(0, 500)];   // post zonder ruwe bankregels: de opgeslagen omschrijving (Fable wv787 diff #5)
+  const code = j && j.bank_transaction_code && typeof j.bank_transaction_code.code === 'string' ? j.bank_transaction_code.code : null;
+  return { nr: r.nr, datum: r.datum, bedrag: r.bedrag, saldo_na: r.saldo_na, tegenpartij: r.tegenpartij, tegen_iban: r.tegen_iban, regels: rl, code: code,
+    categorie: r.categorie || potCategorie(r) };
+}
+function potAfschriftInvoer(a, maand) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(maand || ''))) throw new Error('maand: JJJJ-MM');
+  verrijkAlsVuil(a);
+  const rk = potRekeningEen(a), db = a.db;
+  const kol = 'SELECT t.nr, t.datum, t.bedrag, t.saldo_na, t.tegenpartij, t.tegen_iban, t.omschrijving, t.ruwe_json, v.categorie FROM transacties t LEFT JOIN verrijking v ON v.nr = t.nr WHERE t.rek = ? AND ' + POT_BOEKT;
+  const posten = db.prepare(kol + ' AND t.datum >= ? AND t.datum <= ? ORDER BY t.datum, t.nr DESC').all(rk.rek, maand + '-01', maandEinde(maand)).map(potAfschriftPost);
+  const vd = (db.prepare('SELECT max(t.datum) d FROM transacties t WHERE t.rek = ? AND ' + POT_BOEKT + ' AND t.datum < ?').get(rk.rek, maand + '-01') || {}).d;
+  const voorDag = vd ? db.prepare(kol + ' AND t.datum = ? ORDER BY t.nr DESC').all(rk.rek, vd).map(potAfschriftPost) : [];
+  const eerste = (db.prepare('SELECT min(t.datum) d FROM transacties t WHERE t.rek = ? AND ' + POT_BOEKT).get(rk.rek) || {}).d;
+  const eigen = db.prepare("SELECT iban FROM rekeningen WHERE iban IS NOT NULL AND rek <> ? AND NOT (" + AFGESCHEIDEN_SQL + ")").all(rk.rek).map(function (r) { return ibanNorm(r.iban); });
+  const nieuwste = (db.prepare('SELECT max(t.datum) d FROM transacties t WHERE t.rek = ? AND ' + POT_BOEKT).get(rk.rek) || {}).d || null;
+  // laatstGezien hier = rekeningen.laatst_gezien; dat zet rekeningenSync bij elke opdracht op nu, dus de aanroeper (bank-lezer.js, later
+  // Facturen) vervangt het door de echte ophaaltijd van de transacties (stand.json opgehaald[rek].transacties; Fable wv787 diff #1)
+  return { rek: rk.rek, rekening: { iban: ibanNorm(rk.iban), valuta: 'EUR' }, maand: maand, posten: posten, voorDag: voorDag, eersteMaand: eerste ? eerste.slice(0, 7) : null,
+    laatstGezien: rk.laatst_gezien, nieuwstePost: nieuwste, vandaag: vandaag(), eigenIbans: eigen };
+}
+// Maanden met hun aantal posten (zonder bedragen of namen), van de eerste archiefmaand tot en met de lopende maand.
+function potAfschriftMaanden(a) {
+  const rk = potRekeningEen(a);
+  const n = new Map(a.db.prepare('SELECT substr(t.datum, 1, 7) m, count(*) n FROM transacties t WHERE t.rek = ? AND ' + POT_BOEKT + ' GROUP BY m').all(rk.rek).map(function (r) { return [r.m, r.n]; }));
+  const eerste = Array.from(n.keys()).sort()[0] || null, nu = vandaag().slice(0, 7), uit = [];
+  if (eerste) for (let m = eerste; m <= nu; m = plusMaanden(m + '-01', 1).slice(0, 7)) uit.push({ maand: m, aantal: n.get(m) || 0 });
+  const nieuwste = (a.db.prepare('SELECT max(t.datum) d FROM transacties t WHERE t.rek = ? AND ' + POT_BOEKT).get(rk.rek) || {}).d || null;
+  return { rek: rk.rek, eerste_maand: eerste, laatst_gelezen: rk.laatst_gezien, nieuwste_post: nieuwste, vandaag: vandaag(), maanden: uit };
+}
+
 function stand(a) {
   const db = a.db;
   const per = db.prepare('SELECT r.rek, r.bron, r.status, r.eigenaar, r.eigenaar_herkomst, count(t.nr) n, min(t.datum) van, max(t.datum) tot, sum(t.ruwe_json IS NOT NULL) ruw' +
@@ -1296,5 +1342,5 @@ function stand(a) {
 }
 
 module.exports = { open, rekeningenSync, markeerOntkoppeld, bij, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
-  zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
+  zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, potAfschriftInvoer, potAfschriftMaanden, metaLees, metaZet, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
   categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, reeksenBereken, vastePosten, rijenVan, archiefStart, machtigingVan, naamNorm, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };

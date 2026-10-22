@@ -44,7 +44,8 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # spreektekst.js (wv803): spreektekst van een bandje (nummers, websites, pauzes), door bandjes.js geladen (zelfde commit; ontbreekt hij, dan laadt bandjes.js niet: 404 op /app/bandjes*).
 # paypal-bewijs.js (wv765): PayPal-laag, door bank-lezer.js en server.js geladen als een PayPal-opdracht hem vraagt (ontbreekt hij, dan faalt alleen die opdracht netjes).
 # financien-app.js (wv771): App Financiën, door bank-lezer.js geladen bij de opdracht app-financien (ontbreekt hij, dan geeft de route 503).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js"
+# pot-afschrift.js + mt940-lezer.js (wv787): App POT-afschriften, door bank-lezer.js geladen bij pot-afschrift (ontbreken ze, dan 503 op /app/pot-afschriften en pot_afschrift.aan=false in /health).
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

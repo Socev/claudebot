@@ -1175,6 +1175,77 @@ const opdrachten = {
     if (a.opt.maand != null) o.maand = String(a.opt.maand).slice(0, 7);
     return Object.assign({ ok: true, bron: 'archief' }, x.A.potOverzicht(x.a, o));
   },
+  // wv787: POT-afschriften (MT940 + verrijkte PDF) voor de App POT-afschriften; alleen voor de pod (BANK_LOKAAL), niet via /smal/bank.
+  // De maker (pot-afschrift.js) is puur; hier alleen invoer (bank-archief potAfschriftInvoer), bestanden en het geheugen per maand.
+  // Bestanden in BANK_DIR/pot-afschriften/<maand>/ (700/600), meta.json per maand; 24 maanden bewaard. Uitvoer: geen posten of namen.
+  async 'pot-afschrift-maanden'() {
+    const x = archiefKlaar();
+    let m;
+    try { m = x.A.potAfschriftMaanden(x.a); } catch (e) { throw new Weigering('POT-rekening: ' + e.message); }
+    const vandaag = m.vandaag;
+    m.laatst_gelezen = potOpgehaald(x.s, m.rek);   // echte ophaaltijd, niet laatst_gezien (Fable wv787 diff #1)
+    const maanden = m.maanden.map(function (r) {
+      const meta = potMeta(r.maand), eind = potLaatsteDag(r.maand);
+      const compleet = vandaag > eind && !!m.laatst_gelezen && String(m.laatst_gelezen).slice(0, 10) >= potPlusDagen(eind, 2) &&
+        (String(m.nieuwste_post || '') > eind || vandaag >= potPlusDagen(eind, 10));   // zelfde poort als pot-afschrift.js
+      return { maand: r.maand, aantal: r.aantal, loopt_nog: vandaag <= eind, compleet: compleet, eerste: r.maand === m.eerste_maand,
+        gemaakt: meta ? { op: meta.gemaakt, aantal: meta.aantal, begin: meta.begin, eind: meta.eind, bij: meta.bij, af: meta.af, stuk_open: meta.stuk_open,
+          sha_mt940: meta.sha_mt940, vervangen_op: meta.vervangen_op || null } : null };
+    });
+    return { ok: true, eerste_maand: m.eerste_maand, laatst_gelezen: m.laatst_gelezen, ontvanger_gezet: !!x.A.metaLees(x.a, 'pot_afschrift_ontvanger'), maanden: maanden.reverse() };
+  },
+  async 'pot-afschrift'(a) {
+    const maand = String(a.opt.maand || '');
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(maand)) throw new Weigering('maand als JJJJ-MM');
+    const P = require(path.join(__dirname, 'pot-afschrift.js'));
+    const x = archiefKlaar();
+    let inv;
+    try { inv = x.A.potAfschriftInvoer(x.a, maand); } catch (e) { throw new Weigering('POT-rekening: ' + e.message); }
+    inv.laatstGezien = potOpgehaald(x.s, inv.rek);   // echte ophaaltijd van de transacties (Fable wv787 diff #1)
+    const vorig = potMeta(potMaandPlus(maand, -1));
+    const oud = potMeta(maand);
+    inv.vorigEind = vorig ? vorig.eind_centen : null;
+    inv.gemaakt = oud && oud.gemaakt ? oud.gemaakt : new Date().toISOString();
+    let r = P.maakAfschrift(inv);
+    if (!r.ok) return { ok: false, maand: maand, reden: r.reden, geweigerd: true };
+    let veranderd = false, pdfVeranderd = false;
+    if (oud && (oud.sha_mt940 !== r.sha256.mt940 || oud.sha_pdf !== r.sha256.pdf)) {
+      // late boeking (MT940 anders: veranderd) of alleen de PDF anders (indeling, stukken, eigen rekening): nieuw tijdstip, nieuwe bestanden
+      // (Fable wv787 #2 en diff #2)
+      veranderd = oud.sha_mt940 !== r.sha256.mt940; pdfVeranderd = !veranderd;
+      inv.gemaakt = new Date().toISOString();
+      r = P.maakAfschrift(inv);
+      if (!r.ok) return { ok: false, maand: maand, reden: r.reden, geweigerd: true };
+    }
+    const dir = potMap(maand);
+    const pm = path.join(dir, r.bestandsnamen.mt940), pp = path.join(dir, r.bestandsnamen.pdf);
+    const schrijf = function (pad, inhoud) { const t = pad + '.' + process.pid + '.tmp'; fs.writeFileSync(t, inhoud, { mode: 0o600 }); fs.renameSync(t, pad); };
+    const zelfde = function (pad, sha) { try { return crypto.createHash('sha256').update(fs.readFileSync(pad)).digest('hex') === sha; } catch (e) { return false; } };
+    if (!zelfde(pm, r.sha256.mt940)) schrijf(pm, Buffer.from(r.mt940, 'latin1'));
+    if (!zelfde(pp, r.sha256.pdf)) schrijf(pp, r.pdf);
+    const t = r.telling;
+    const meta = { maand: maand, gemaakt: inv.gemaakt, aantal: t.aantal, eind_centen: t.eind, begin: t.begin / 100, eind: t.eind / 100, bij: t.bij / 100, af: t.af / 100,
+      stuk_open: t.stuk_open, ingekort86: t.ingekort86, per_soort: t.per_soort, sha_mt940: r.sha256.mt940, sha_pdf: r.sha256.pdf,
+      bestanden: { mt940: r.bestandsnamen.mt940, pdf: r.bestandsnamen.pdf }, vervangen_op: veranderd ? inv.gemaakt : (oud && oud.vervangen_op) || null,
+      vorige_sha_mt940: veranderd ? oud.sha_mt940 : (oud && oud.vorige_sha_mt940) || null };
+    schrijf(path.join(dir, 'meta.json'), JSON.stringify(meta));
+    potOpruimen();
+    return { ok: true, maand: maand, nieuw: !oud, veranderd: veranderd, pdf_veranderd: pdfVeranderd, gemaakt: meta.gemaakt, aantal: meta.aantal, begin: meta.begin, eind: meta.eind,
+      bij: meta.bij, af: meta.af, stuk_open: meta.stuk_open, ingekort86: meta.ingekort86, sha256: r.sha256,
+      bestanden: [{ soort: 'mt940', naam: r.bestandsnamen.mt940, grootte: Buffer.byteLength(r.mt940, 'latin1') }, { soort: 'pdf', naam: r.bestandsnamen.pdf, grootte: r.pdf.length }],
+      mail: P.mailConcept(maand, t), mail_correctie: P.mailConcept(maand, t, { correctie: true }), ontvanger: x.A.metaLees(x.a, 'pot_afschrift_ontvanger') || null };
+  },
+  // wv787: ontvanger van de POT-afschriften (André, Acta). Alleen machinekamer via de CLI (stdin {adres}); niet in code of vault.
+  async 'pot-ontvanger'() {
+    const x = archiefKlaar();
+    if (geheim.adres !== undefined) {
+      const ad = String(geheim.adres || '').trim().toLowerCase();
+      if (!/^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,120}\.[a-z]{2,}$/.test(ad)) throw new Weigering('geen geldig mailadres');
+      x.A.metaZet(x.a, 'pot_afschrift_ontvanger', ad);
+    }
+    const ad = x.A.metaLees(x.a, 'pot_afschrift_ontvanger');
+    return { ok: true, gezet: !!ad, domein: ad ? ad.split('@')[1] : null };
+  },
   // wv786: zakelijke IBAN's (alleen POT). Alleen machinekamer, alleen via de CLI (stdin {ibans: {IBAN: 'POT'}}), niet via /smal/bank;
   // de IBAN staat alleen in het archief (meta), nooit in de code of de uitvoer. Daarna gelijk de rekeningen en de indeling bijwerken.
   async zakelijk() {
@@ -1251,6 +1322,31 @@ const opdrachten = {
     });
   },
 };
+
+// ── wv787: POT-afschriften op schijf ────────────────────────────────────────
+const POT_AFSCHRIFT_DIR = path.join(BANK_DIR, 'pot-afschriften');
+const POT_BEWAAR_MAANDEN = 24;
+function potMaandPlus(m, n) { const d = new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)) - 1 + n, 1)); return d.toISOString().slice(0, 7); }
+function potLaatsteDag(m) { return new Date(Date.UTC(Number(m.slice(0, 4)), Number(m.slice(5, 7)), 0)).toISOString().slice(0, 10); }
+function potPlusDagen(d, n) { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
+function potMap(maand) {
+  fs.mkdirSync(POT_AFSCHRIFT_DIR, { recursive: true, mode: 0o700 });
+  const d = path.join(POT_AFSCHRIFT_DIR, maand);
+  fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(POT_AFSCHRIFT_DIR, 0o700); fs.chmodSync(d, 0o700); } catch (e) {}
+  return d;
+}
+function potMeta(maand) {
+  if (!/^\d{4}-\d{2}$/.test(String(maand || ''))) return null;
+  try { const m = JSON.parse(fs.readFileSync(path.join(POT_AFSCHRIFT_DIR, maand, 'meta.json'), 'utf8')); return m && m.maand === maand ? m : null; } catch (e) { return null; }
+}
+function potOpgehaald(s, rek) { const o = s && s.opgehaald && rek ? s.opgehaald[rek] : null; return o && typeof o.transacties === 'string' ? o.transacties : null; }
+function potOpruimen() {
+  const grens = potMaandPlus(new Date().toISOString().slice(0, 7), -POT_BEWAAR_MAANDEN);
+  let l = [];
+  try { l = fs.readdirSync(POT_AFSCHRIFT_DIR); } catch (e) { return; }
+  l.filter(function (m) { return /^\d{4}-\d{2}$/.test(m) && m < grens; }).forEach(function (m) { try { fs.rmSync(path.join(POT_AFSCHRIFT_DIR, m), { recursive: true, force: true }); } catch (e) {} });
+}
 
 // ── start ─────────────────────────────────────────────────────────────────
 async function hoofd() {
