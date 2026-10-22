@@ -146,6 +146,7 @@ COPY financien-app.js /app/release-bootstrap/financien-app.js
 COPY pot-afschrift.js /app/release-bootstrap/pot-afschrift.js
 COPY mt940-lezer.js /app/release-bootstrap/mt940-lezer.js
 COPY facturen-kern.js /app/release-bootstrap/facturen-kern.js
+COPY facturen-bank.js /app/release-bootstrap/facturen-bank.js
 COPY bewaker.js /app/release-bootstrap/bewaker.js
 COPY studio.js /app/release-bootstrap/studio.js
 COPY bandjes.js /app/release-bootstrap/bandjes.js

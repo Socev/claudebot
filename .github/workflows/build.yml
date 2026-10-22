@@ -90,17 +90,25 @@ jobs:
 
       # facturen-kern.js (wv797, Facturen-app F1a): de kern beslist (entiteit, betaalwijze, controles) en is puur: geen bestand-, netwerk- of
       # procesmodule, geen fetch en geen klok (vandaag/nu komen van de beller). Opslaan doet facturen-db.js, mail en versturen de koerier.
-      - name: facturen-kern.js moet puur blijven
+      # facturen-bank.js (wv798, F1b): bankparsers, matching en signalen; zelfde poort, en hij mag alleen de pure buren laden
+      # (facturen-kern.js, mt940-lezer.js). Een signaal geeft hooguit een tekst om te kopiëren: niets betaalt of mailt.
+      - name: facturen-kern.js en facturen-bank.js moeten puur blijven
         run: |
-          C=$(grep -vE '^\s*(\*|//)' facturen-kern.js)
-          if echo "$C" | grep -nE "require\([\`'\"](node:)?(fs(/promises)?|os|http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.|import\("; then
-            echo "::error::facturen-kern.js laadt een bestand-, netwerk- of procesmodule; de kern moet puur blijven"; exit 1
+          for f in facturen-kern.js facturen-bank.js; do
+            C=$(grep -vE '^\s*(\*|//)' "$f")
+            if echo "$C" | grep -nE "require\([\`'\"](node:)?(fs(/promises)?|os|http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.|import\("; then
+              echo "::error::$f laadt een bestand-, netwerk- of procesmodule; de kern moet puur blijven"; exit 1
+            fi
+            # klok: Date.now(), new Date() / new Date zonder argument, Date() als functie, format() zonder datum, Math.random
+            if echo "$C" | sed 's/new Date(\s*[^)[:space:]]/NIEUWEDATUM(/g' | grep -nE "Date\.now\s*\(|new Date\b|(^|[^.A-Za-z0-9_])Date\(|\.format(ToParts)?\(\s*\)|Math\.random"; then
+              echo "::error::$f leest zelf de klok of het toeval; geef vandaag/nu mee"; exit 1
+            fi
+          done
+          # facturen-bank.js laadt alleen crypto en de pure buren
+          if grep -vE '^\s*(\*|//)' facturen-bank.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|\./mt940-lezer\.js|\./facturen-kern\.js)'\)$"; then
+            echo "::error::facturen-bank.js laadt een module buiten crypto, mt940-lezer.js en facturen-kern.js"; exit 1
           fi
-          # klok: Date.now(), new Date() / new Date zonder argument, Date() als functie, format() zonder datum, Math.random
-          if echo "$C" | sed 's/new Date(\s*[^)[:space:]]/NIEUWEDATUM(/g' | grep -nE "Date\.now\s*\(|new Date\b|(^|[^.A-Za-z0-9_])Date\(|\.format(ToParts)?\(\s*\)|Math\.random"; then
-            echo "::error::facturen-kern.js leest zelf de klok of het toeval; geef vandaag/nu mee"; exit 1
-          fi
-          echo "facturen-kern.js: puur."
+          echo "facturen-kern.js en facturen-bank.js: puur."
 
       # De witte lijst en de handtekeningcontrole echt toetsen (nagebootste bunq en Enable Banking op 127.0.0.1); node:sqlite
       # vraagt Node 22 (zelfde hoofdversie als de pod).
@@ -122,6 +130,7 @@ jobs:
           bash test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
           bash test/facturen-kern.sh   # wv797: Facturen-app kern — besliskader, UBL, validators, IBAN-poort, patiëntkenmerk, overgangen, vingerafdruk
+          bash test/facturen-bank.sh   # wv798: Facturen-app bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
           bash test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
       - name: "studio (wv707, tab Studio fase 1)"
