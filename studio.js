@@ -13,7 +13,16 @@
 //   op "wacht op sleutel" en gaat er niets naar Router. Beeld: POST /v1/images/generations met Prefer: respond-async, pollen op de
 //   Location (of /v1/images/generations/<id>), dan outputs[].content_url ophalen. Die vorm komt uit een openbaar voorbeeld
 //   (github.com/RonnyPfannschmidt/homelab-images, routerimages.py) en GET-metingen op 21-10; de eerste echte aanroep meet hem.
-//   Muziek (mode music_generation): de route documenteert Router niet; die flow staat op "nog niet klaar" tot hij gemeten is.
+//   Muziek (mode music_generation, wv736): zelfde vorm op /v1/music/generations (GET /v1/music/generations/<id> bestaat, gemeten
+//   22-10); de eerste echte aanroep is de meting.
+//   GEHEUGEN (wv736). FlowStudio start per project een motor die veel servergeheugen wil (OpenMOSS en MiniMax: estHostMemMib 49152);
+//   is dat er niet, dan faalt de taak pas na precies 10 min met engine_host_mem_unavailable (gemeten 21/22-10). Daarom leest de pod
+//   vóór het indienen FlowStudio GET /api/projects/<id> (zonder login, zonder sleutel) en vergelijkt estHostMemMib met MemAvailable
+//   uit /proc/meminfo (in de pod = de hele machine). Te weinig en de motor staat op "standby": meteen mislukt, niets naar Router.
+//   Kan FlowStudio of meminfo niet gelezen worden, of draait de motor al (status niet standby): niet blokkeren (oude gedrag).
+//   ONZEKER: FlowStudio's eigen maat is niet bekend. Zijn veld availableHostMemMib (85.889) is statisch, niet live (MemAvailable was
+//   toen 22 GiB); misschien rekent hij met Kubernetes-reserveringen in plaats van MemAvailable. De controle is dus een NOODZAKELIJKE
+//   voorwaarde: genoeg MemAvailable garandeert niet dat de motor start, te weinig betekent wel (vrijwel) zeker dat hij niet start.
 // - piper: Piper op de pod (/opt/data/piper, stem nl_NL-ronnie-medium, CPU), tekst → WAV. Proefstem, geen GPU.
 // - comfyui: rechtstreeks ComfyUI (https://d9ce03380.<olares>), alleen als terugval. Elke flow gaat vóór elk indienen door de
 //   knopentoets (KNOPEN hieronder: vaste lijst in de pod, niet in de flow) en /object_info; Save → Preview; de taak wacht als ComfyUI
@@ -35,6 +44,7 @@ const COMFY_WACHT_MAX_MS = 30 * 60 * 1000;    // zo lang wacht een taak op een l
 const COMFY_WACHT_STAP_MS = 15 * 1000;
 const COMFY_FREE_NA_MS = 10 * 60 * 1000;
 const POLL_MS = 3000;
+const FS_PROJECT_MS = 60 * 1000;               // cache van FlowStudio /api/projects/<id> (estHostMemMib, status)
 
 // ── Knopentoets (bouwplan § 5.3 stap 2, § 7; Fable M2). Vaste lijst IN DE POD: een flow kan zichzelf niet toestaan. ──
 // Toegestaan: kern (python_module "nodes" of "comfy_extras.*") minus de weigerlijst, plus custom nodes op naam uit CUSTOM_WIT
@@ -126,8 +136,9 @@ function foutTekst(t) {
 const LABEL_NL = { 'Text (User Prompt)': 'Wat wil je zien?', 'Batch generate': 'Aantal', Megapixels: 'Grootte (megapixels)',
   'Negative Prompt (empty = reference default)': 'Wat wil je níet zien? (leeg = standaard)', 'Music description': 'Beschrijving van de muziek',
   Lyrics: 'Songtekst', 'Duration (sec)': 'Duur (seconden)' };
+const MUZIEK_DUUR = { min: 5, max: 300 };     // seconden; begrenst de GPU-tijd van één muziektaak (wv736)
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'audio/wav': 'wav', 'audio/x-wav': 'wav',
-  'audio/wave': 'wav', 'audio/mpeg': 'mp3', 'audio/flac': 'flac', 'audio/ogg': 'ogg', 'video/mp4': 'mp4', 'video/webm': 'webm' };
+  'audio/wave': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/flac': 'flac', 'audio/x-flac': 'flac', 'audio/ogg': 'ogg', 'video/mp4': 'mp4', 'video/webm': 'webm' };
 
 function maak(deps) {
   const DIR = deps.dir;
@@ -136,6 +147,8 @@ function maak(deps) {
   const TAKEN = path.join(DIR, 'taken.json');
   const AUDIT = path.join(DIR, 'audit.jsonl');
   const ROUTER = String(deps.routerUrl || 'https://f3395cd5.primumnonnocere.olares.com').replace(/\/+$/, '');
+  const FLOWSTUDIO = String(deps.flowstudioUrl || 'https://9ff9df3a.primumnonnocere.olares.com').replace(/\/+$/, '');
+  const MEMINFO = deps.meminfo || '/proc/meminfo';
   const COMFY = String(deps.comfyUrl || 'https://d9ce03380.primumnonnocere.olares.com').replace(/\/+$/, '');
   const PIPER = deps.piper || { bin: '/opt/data/piper/piper', model: '/opt/data/piper/nl_NL-ronnie-medium.onnx', data: '/opt/data/piper/espeak-ng-data' };
   const doeFetch = deps.fetch || fetch;
@@ -144,7 +157,7 @@ function maak(deps) {
   const log = deps.log || function () {};
   const fout = deps.fout || function () {};
   const st = { taken: [], rij: [], bezig: null, lokaal: { sleutel: null, flows: {} }, router: { op: 0, modellen: null, fout: null },
-    info: { op: 0, d: null }, comfyLaatst: 0, comfyFreeGedaan: true, timer: null };
+    fs: {}, info: { op: 0, d: null }, comfyLaatst: 0, comfyFreeGedaan: true, timer: null };
 
   // ── opslag ──
   function mkdir(p) { fs.mkdirSync(p, { recursive: true, mode: 0o700 }); }
@@ -260,15 +273,73 @@ function maak(deps) {
       // optionele tekstvelden naast de prompt (zoals de negatieve prompt) onder "Meer": het formulier blijft kort
       if (!v.verplicht && v.rol !== 'prompt' && (v.soort === 'tekst' || v.soort === 'tekstvak')) v.meer = true;
     });
+    if (uitvoer === 'muziek') velden.forEach(function (v) {
+      // de songtekst hoort bij muziek in beeld (niet onder Meer); de duur begrenst de GPU-tijd
+      if (v.naam === 'lyrics' && (v.soort === 'tekst' || v.soort === 'tekstvak')) { v.soort = 'tekstvak'; v.meer = false; }
+      if (v.naam === 'max_duration' && v.soort === 'getal') {
+        v.min = Math.max(MUZIEK_DUUR.min, v.min == null ? MUZIEK_DUUR.min : v.min); v.max = Math.min(MUZIEK_DUUR.max, v.max == null ? MUZIEK_DUUR.max : v.max);
+      }
+    });
     if ((m.canonical_fields || []).indexOf('seed') >= 0 && !velden.some(function (v) { return v.naam === 'seed'; }))
       velden.push({ naam: 'seed', label: 'Seed (zelfde getal = zelfde uitkomst)', soort: 'seed', meer: true, standaard: null, verplicht: false });
     let reden = null;
-    if (mode !== 'image_generation') reden = 'nog niet klaar: de ' + uitvoer + 'route van Router is nog niet gemeten';
+    if (uitvoer === 'video') reden = 'nog niet klaar: de videoroute van Router is nog niet gebouwd';
     else if (m.readiness && m.readiness !== 'ready') reden = 'FlowStudio meldt: ' + schoon(m.readiness, 40);
     else if (sleutelFout) reden = 'de kluis is nu niet bereikbaar; de Router-sleutel kan niet gelezen worden';
     else if (!sleutel) reden = 'wacht op sleutel';
-    return { id: 'fs-' + mm[1], bron: 'router', model: id, titel: schoon(m.name, 80) || id, uitleg: 'FlowStudio-project op Olares', motor: 'router',
-      status: 'actief', uitvoer: uitvoer, velden: velden, max_seconden: 900, gpu_mib_schatting: 0, reden: reden, tijd: uitvoer === 'beeld' ? '± 1 min; eerste keer langer' : '' };
+    return { id: 'fs-' + mm[1], project: mm[1], bron: 'router', model: id, titel: schoon(m.name, 80) || id, uitleg: 'FlowStudio-project op Olares', motor: 'router',
+      status: 'actief', uitvoer: uitvoer, velden: velden, max_seconden: 900, gpu_mib_schatting: 0, reden: reden,
+      tijd: uitvoer === 'beeld' ? '± 1 min; eerste keer langer' : uitvoer === 'muziek' ? 'enkele minuten; eerste keer langer' : '' };
+  }
+
+  // ── geheugencontrole vóór een FlowStudio-taak (wv736; zie de kop) ──
+  function vrijGeheugenMib() {
+    try {
+      const m = /^MemAvailable:\s+(\d+)\s*kB/m.exec(fs.readFileSync(MEMINFO, 'utf8'));
+      return m ? Math.floor(Number(m[1]) / 1024) : null;
+    } catch (e) { return null; }
+  }
+  // FlowStudio-project lezen: alleen GET, zonder kop (de Router-sleutel gaat nooit naar FlowStudio). Onleesbaar = null (1 min onthouden).
+  async function fsProject(pid, vers) {
+    const c = st.fs[pid];
+    if (!vers && c && klok() - c.op < FS_PROJECT_MS) return c.d;
+    let d = null;
+    try {
+      const r = await doeFetch(FLOWSTUDIO + '/api/projects/' + pid, { redirect: 'manual', signal: AbortSignal.timeout(6000) });
+      if (r.ok) {
+        const j = await r.json().catch(function () { return null; });   // onbekende /api-paden geven HTML met 200 (gemeten)
+        const nodig = j && Number(j.estHostMemMib);
+        if (j && j.id === pid && isFinite(nodig) && nodig > 0) d = { nodig_mib: Math.round(nodig), status: schoon(j.status, 30).toLowerCase() };
+      } else await r.text().catch(function () {});
+    } catch (e) { d = null; }
+    st.fs[pid] = { op: klok(), d: d };
+    return d;
+  }
+  // Tekort = { nodig_mib, vrij_mib } of null. Alleen als de motor op standby staat: draait hij al, dan zit zijn geheugen al in gebruik
+  // en zegt MemAvailable niets meer over deze taak.
+  async function geheugenTekort(pid, vers) {
+    if (!pid) return null;
+    const p = await fsProject(pid, vers);
+    if (!p || p.status !== 'standby') return null;
+    const vrij = vrijGeheugenMib();
+    if (vrij == null || vrij >= p.nodig_mib) return null;
+    return { nodig_mib: p.nodig_mib, vrij_mib: vrij };
+  }
+  function geheugenTekst(nodigMib, vrijMib, uitvoer) {
+    const gb = function (x) { return Math.round(x / 1024); };
+    const nodig = nodigMib > 0 ? nodigMib : 48 * 1024;
+    // meldt FlowStudio een tekort terwijl de pod genoeg ziet, dan rekent FlowStudio anders (zie ONZEKER in de kop): beide getallen noemen
+    const stand = vrijMib == null ? ' GB nodig)' : vrijMib < nodig ? ' GB nodig, nu ' + gb(vrijMib) + ' GB vrij)'
+      : ' GB nodig; FlowStudio meldt een tekort, de pod ziet ' + gb(vrijMib) + ' GB vrij)';
+    return 'Olares heeft nu te weinig vrij geheugen voor FlowStudio (± ' + gb(nodig) + stand + (uitvoer === 'beeld' ? '; MOSS-Image rechtstreeks werkt wel' : '');
+  }
+  // De fout van Router/FlowStudio als het geheugen op is (gemeten 22-10: error als tekst, error_code upstream_capacity_unavailable).
+  function isGeheugenFout(j) {
+    if (!j || typeof j !== 'object') return false;
+    const e = j.error, pr = j.provider_response && typeof j.provider_response === 'object' ? j.provider_response : {};
+    const teksten = [j.error_code, pr.error_code, typeof e === 'string' ? e : e && (e.code || e.message), typeof pr.error === 'string' ? pr.error : pr.error && (pr.error.code || pr.error.message)];
+    return teksten.some(function (x) { return /engine_host_mem_unavailable|upstream_capacity_unavailable/i.test(String(x || '')); })
+      || (e && typeof e === 'object' && /upstream_capacity_unavailable/i.test(String(e.type || '')));
   }
   function flowUit(f) {
     const klaar = !f.fout && !f.reden && f.status !== 'uit';
@@ -284,6 +355,11 @@ function maak(deps) {
     const ms = await routerModellen(vers, sleutel);
     const lijst = [];
     ms.forEach(function (m) { const f = routerFlow(m, !!sleutel, sleutelFout); if (f) lijst.push(f); });
+    // geheugen: alleen voor flows die verder klaar zijn, zodat de flow in de app niet "klaar" lijkt (FlowStudio-cache 1 min)
+    await Promise.all(lijst.filter(function (f) { return !f.reden; }).map(async function (f) {
+      const g = await geheugenTekort(f.project, false);
+      if (g) { f.reden = geheugenTekst(g.nodig_mib, g.vrij_mib, f.uitvoer); f.geheugen = g; }
+    }));
     const lok = lokaleFlows();
     Object.keys(lok).forEach(function (k) { lijst.push(lok[k]); });
     return { flows: lijst, sleutel: !!sleutel, router_fout: st.router.fout };
@@ -466,12 +542,22 @@ function maak(deps) {
   async function motorRouter(t, f, out, ctl) {
     const sleutel = await deps.sleutel();
     if (!sleutel) return { fout: 'de Router-sleutel ontbreekt (router_studio_key)' };
-    if (f.uitvoer !== 'beeld') return { fout: 'deze soort flow kan Studio nog niet maken' };
+    const route = f.uitvoer === 'beeld' ? 'images' : f.uitvoer === 'muziek' ? 'music' : null;
+    if (!route) return { fout: 'deze soort flow kan Studio nog niet maken' };
+    // geheugen vers nakijken vlak vóór het indienen (de taak kan een tijd in de rij hebben gestaan); te weinig = niets naar Router
+    t.fase = 'geheugen van Olares nakijken';
+    const g = await geheugenTekort(f.project, true);
+    if (g) { t.meting = { geheugen_nodig_mib: g.nodig_mib, geheugen_vrij_mib: g.vrij_mib }; return { fout: geheugenTekst(g.nodig_mib, g.vrij_mib, f.uitvoer) }; }
+    const geheugenFout = function () {
+      const p = st.fs[f.project] && st.fs[f.project].d;
+      return geheugenTekst(p ? p.nodig_mib : null, vrijGeheugenMib(), f.uitvoer);
+    };
     const params = {};
     let prompt = '', n = 1, seed = null;
     for (const v of f.velden) {
       const w = t.velden[v.naam];
-      if (v.soort === 'aantal') { n = w; continue; }
+      // muziek: batch_count ook onder flowstudio.params (opdracht wv736; de vorm meet de eerste aanroep), beeld zoals gemeten in wv718
+      if (v.soort === 'aantal') { n = w; if (route === 'music') params[v.naam] = w; continue; }
       if (v.naam === 'seed' && v.soort === 'seed') { seed = w; continue; }
       if (v.rol === 'prompt') prompt = w;
       params[v.naam] = w;
@@ -487,18 +573,24 @@ function maak(deps) {
     const haal = function (pad, extra, ms) {
       return doeFetch(ROUTER + pad, Object.assign({ redirect: 'manual', headers: { Authorization: 'Bearer ' + sleutel }, signal: AbortSignal.any([ac.signal, AbortSignal.timeout(ms)]) }, extra || {}));
     };
-    let r = await haal('/v1/images/generations', { method: 'POST', headers: kop, body: JSON.stringify(body) }, 60000);
+    let r = await haal('/v1/' + route + '/generations', { method: 'POST', headers: kop, body: JSON.stringify(body) }, 60000);
     let job = await r.json().catch(function () { return null; });
-    if (!r.ok || !job || typeof job !== 'object') return { fout: 'Router weigerde (' + r.status + '): ' + foutTekst(job && job.error ? (job.error.message || job.error.code) : '') };
+    if (!r.ok || !job || typeof job !== 'object') {
+      if (isGeheugenFout(job)) return { fout: geheugenFout() };
+      return { fout: 'Router weigerde (' + r.status + '): ' + foutTekst(job && job.error ? (typeof job.error === 'string' ? job.error : job.error.message || job.error.code) : '') };
+    }
     t.gpu_start = klok();
-    const pollPad = routerPad(r.headers.get('location')) || (job.id && /^[A-Za-z0-9_-]{1,100}$/.test(String(job.id)) ? '/v1/images/generations/' + job.id : null);
+    const pollPad = routerPad(r.headers.get('location')) || (job.id && /^[A-Za-z0-9_-]{1,100}$/.test(String(job.id)) ? '/v1/' + route + '/generations/' + job.id : null);
     t.meting = { router_id: job.id ? String(job.id).slice(0, 100) : null };
     const uitvoer = function (j) { return Array.isArray(j.outputs) && j.outputs.length ? j.outputs : Array.isArray(j.data) && j.data.length ? j.data : null; };
     // Klaar = een klaar-status, of (zonder status) uitvoer erin. Fout = een fout-status. Al het andere: blijven pollen tot de grens
     // (een onbekende tussenstatus mag nooit "mislukt" geven terwijl de GPU doorwerkt; Fable wv707 #3a/b).
     for (;;) {
       const status = String(job.status || '').toLowerCase();
-      if (FOUT.indexOf(status) >= 0) return { fout: 'FlowStudio meldt: ' + foutTekst(job.error && (job.error.message || job.error.code || job.error) || status) };
+      if (FOUT.indexOf(status) >= 0) {
+        if (isGeheugenFout(job)) return { fout: geheugenFout() };
+        return { fout: 'FlowStudio meldt: ' + foutTekst(job.error && (job.error.message || job.error.code || job.error) || status) };
+      }
       if (KLAAR.indexOf(status) >= 0 || (!status && uitvoer(job))) break;
       if (ctl.gestopt) return { fout: 'gestopt', noot: 'gestopt op je verzoek; de generatie kan in FlowStudio nog even doorlopen' };
       if (!pollPad) return { fout: 'Router gaf geen taak-id terug (status ' + foutTekst(status || 'leeg') + ')' };
@@ -523,7 +615,7 @@ function maak(deps) {
       let buf, type;
       if (o && typeof o.b64_json === 'string') {
         if (o.b64_json.length > GRENS.bestand_max * 1.4) return { fout: 'resultaat groter dan 20 MB' };
-        buf = Buffer.from(o.b64_json, 'base64'); type = 'image/png';
+        buf = Buffer.from(o.b64_json, 'base64'); type = route === 'images' ? 'image/png' : '';
       } else {
         const pad = routerPad(o && (o.content_url || o.url));
         if (!pad) return { fout: 'Router gaf een onbruikbaar resultaatadres' };
@@ -533,9 +625,23 @@ function maak(deps) {
         buf = await leesMax(rr, GRENS.bestand_max);
         if (!buf) return { fout: 'resultaat groter dan 20 MB' };
       }
-      fs.writeFileSync(path.join(out, 'beeld-' + i + '.' + (EXT[type] || 'png')), buf, { mode: 0o600 });
+      const ext = EXT[type] || soortVan(buf) || (route === 'images' ? 'png' : 'flac');
+      fs.writeFileSync(path.join(out, (route === 'images' ? 'beeld-' : 'muziek-') + i + '.' + ext), buf, { mode: 0o600 });
     }
     return { ok: true };
+  }
+  // Extensie uit de eerste bytes als Router geen bruikbaar content-type geeft (muziek: vorm nog niet gemeten).
+  function soortVan(b) {
+    if (!b || b.length < 12) return null;
+    const h = b.subarray(0, 12).toString('latin1');
+    if (b[0] === 0x89 && h.slice(1, 4) === 'PNG') return 'png';
+    if (b[0] === 0xff && b[1] === 0xd8) return 'jpg';
+    if (h.slice(0, 4) === 'RIFF' && h.slice(8, 12) === 'WAVE') return 'wav';
+    if (h.slice(0, 4) === 'RIFF' && h.slice(8, 12) === 'WEBP') return 'webp';
+    if (h.slice(0, 4) === 'fLaC') return 'flac';
+    if (h.slice(0, 4) === 'OggS') return 'ogg';
+    if (h.slice(0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) return 'mp3';
+    return null;
   }
   // Antwoord lezen met een bovengrens: content-length vooraf, anders tellend afbreken (nooit honderden MB in de heap; Fable wv707 #6).
   async function leesMax(r, max) {

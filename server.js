@@ -6756,7 +6756,7 @@ const APP_MIME = { pdf: 'application/pdf', docx: 'application/vnd.openxmlformats
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   md: 'text/markdown', txt: 'text/plain', csv: 'text/csv', json: 'application/json', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
   gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', html: 'text/html', ics: 'text/calendar', zip: 'application/zip', mp3: 'audio/mpeg',
-  ogg: 'audio/ogg', wav: 'audio/wav', mp4: 'video/mp4' };
+  ogg: 'audio/ogg', wav: 'audio/wav', flac: 'audio/flac', mp4: 'video/mp4' };   // flac: muziek uit Studio (wv736)
 async function appBestand(req, res, rest) {
   const m0 = /^([a-f0-9]{16})\/(\d{1,3})$/.exec(rest);
   if (!m0) return appWeiger(res, 404, 'onbekend', 'bestand pad');
@@ -11996,7 +11996,7 @@ const studio = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     return require(p).maak({ dir: STUDIO_DIR, bewaar: appBewaar, primair: function () { return rolPrimair(); }, sleutel: studioSleutel,
-      routerUrl: process.env.STUDIO_ROUTER_URL, comfyUrl: process.env.STUDIO_COMFY_URL,
+      routerUrl: process.env.STUDIO_ROUTER_URL, comfyUrl: process.env.STUDIO_COMFY_URL, flowstudioUrl: process.env.STUDIO_FLOWSTUDIO_URL,   // wv736: geheugencontrole
       piper: process.env.STUDIO_PIPER_BIN ? { bin: process.env.STUDIO_PIPER_BIN, model: process.env.STUDIO_PIPER_MODEL, data: process.env.STUDIO_PIPER_DATA } : null,
       log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError });
   } catch (e) { logError('studio', e); return null; }
