@@ -27,6 +27,14 @@ class BankWeigering extends Error {
 const MAX_BESTAND = 20 * 1024 * 1024;
 const FORMATEN = ['ing_csv', 'abn_tab', 'abn_mt940', 'bankluis'];
 const OMS_HASH = 500, OMS_OPSLAG = 200, TYPE_OPSLAG = 60;
+// controle: 1 = zakelijk (inlezen), 0 = Privé (weggooien). Alles anders (NULL, leeg, onzin) is een onvolledige rekening: weigeren, nooit
+// stil als Privé behandelen (diffreview wv798 #5).
+function controleVan(rk) {
+  const c = rk ? rk.controle : undefined;
+  if (c === 1 || c === '1' || c === true) return 1;
+  if (c === 0 || c === '0' || c === false) return 0;
+  return null;
+}
 function eind4(iban) { const s = String(iban || ''); return '…' + s.slice(-4); }
 
 // ───────────────────────────── entry_ref (exact zoals FV2) ─────────────────────────────
@@ -189,7 +197,7 @@ function leesAbnTab(tekst) {
     // de referentie slaat zo'n regel stil over; wij weigeren het bestand (storingen zichtbaar, geen stil gat)
     if (p.length < 8) throw new BankWeigering('regel_ongeldig', 'ABN-TAB regel ' + (i + 1) + ': te weinig kolommen');
     const acct = p[0], d2 = p[5];
-    if (!/^\d{9,10}$/.test(acct.trim())) throw new BankWeigering('regel_ongeldig', 'ABN-TAB regel ' + (i + 1) + ': rekeningnummer ongeldig');
+    if (!/^\d{9,10}$/.test(acct)) throw new BankWeigering('regel_ongeldig', 'ABN-TAB regel ' + (i + 1) + ': rekeningnummer ongeldig');
     if (!/^\d{8}$/.test(d2)) throw new BankWeigering('regel_ongeldig', 'ABN-TAB regel ' + (i + 1) + ': rentedatum is geen JJJJMMDD');
     const boekdatum = d2.slice(0, 4) + '-' + d2.slice(4, 6) + '-' + d2.slice(6, 8);
     if (!isIsoDatum(boekdatum)) throw new BankWeigering('regel_ongeldig', 'ABN-TAB regel ' + (i + 1) + ': ongeldige datum');
@@ -251,7 +259,11 @@ function normaliseer(r, formaat, rekening) {
  */
 function leesBankbestand(invoer, opties) {
   try { return leesBestand(invoer, opties || {}); }
-  catch (e) { if (e instanceof BankWeigering) return { ok: false, fout: e.code, uitleg: e.uitleg }; throw e; }
+  catch (e) {
+    if (e instanceof BankWeigering) return { ok: false, fout: e.code, uitleg: e.uitleg };
+    // een onverwachte fout kan bestandsinhoud in zijn melding dragen (rekeningnummer, bedrag): nooit doorgeven (diffreview wv798 #11)
+    return { ok: false, fout: 'onleesbaar', uitleg: 'het bestand is niet te lezen (' + String(e && e.name || 'fout').slice(0, 40) + ')' };
+  }
 }
 function leesBestand(invoer, opties) {
   const tekst = alsTekst(invoer);
@@ -266,10 +278,11 @@ function leesBestand(invoer, opties) {
   const gezien = new Set(rijen.map((r) => ibanNorm(r.eigen_iban_ruw)));
   for (const iban of gezien) {
     if (!rekeningen.get(iban)) throw new BankWeigering('onbekende_rekening', 'het bestand bevat rekening ' + eind4(iban) + ' die de app niet kent; voeg hem eerst toe in Instellingen (eigenaar)');
+    if (controleVan(rekeningen.get(iban)) === null) throw new BankWeigering('rekening_onvolledig', 'rekening ' + eind4(iban) + ' heeft geen geldige controle-instelling (1 of 0); zet die eerst in Instellingen');
   }
   for (const iban of gezien) {
     const rk = rekeningen.get(iban);
-    if (Number(rk.controle) === 0) continue;   // Privé: formaat doet er niet toe, de regels gaan hieronder weg
+    if (controleVan(rk) === 0) continue;   // Privé: formaat doet er niet toe, de regels gaan hieronder weg
     if (rk.bank_formaat === 'bankluis') throw new BankWeigering('verkeerd_formaat', 'rekening ' + eind4(iban) + ' komt via de bankkoppeling binnen; een upload zou dubbel tellen');
     if (rk.bank_formaat !== formaat) throw new BankWeigering('verkeerd_formaat', 'rekening ' + eind4(iban) + ' leest de app als ' + rk.bank_formaat + ', dit bestand is ' + formaat + '; exporteer in het vaste formaat van die rekening');
   }
@@ -278,7 +291,7 @@ function leesBestand(invoer, opties) {
   let prive = 0;
   for (const r of rijen) {
     const iban = ibanNorm(r.eigen_iban_ruw), rk = rekeningen.get(iban);
-    if (Number(rk.controle) === 0) { prive++; continue; }   // weg zonder opslag: geen veld, geen hash blijft over
+    if (controleVan(rk) === 0) { prive++; continue; }   // weg zonder opslag: geen veld, geen hash blijft over
     transacties.push(normaliseer(r, formaat, rk));
     per[iban] = (per[iban] || 0) + 1;
   }
@@ -291,7 +304,7 @@ function leesBestand(invoer, opties) {
 function normaliseerBankluis(post, rekening) {
   if (!post || !rekening) return { ok: false, fout: 'geen_invoer' };
   if (rekening.bank_formaat !== 'bankluis') return { ok: false, fout: 'geen_bankluis_rekening' };
-  if (Number(rekening.controle) === 0) return { ok: false, fout: 'prive' };
+  if (controleVan(rekening) !== 1) return { ok: false, fout: controleVan(rekening) === 0 ? 'prive' : 'rekening_onvolledig' };
   if (String(post.rek) !== String(rekening.rek)) return { ok: false, fout: 'andere_rekening' };
   if (post.status !== 'booked') return { ok: false, fout: 'niet_geboekt' };
   if (post.vervangen_door !== null && post.vervangen_door !== undefined) return { ok: false, fout: 'vervangen' };
@@ -373,7 +386,7 @@ function uitzonderingVoor(tx, ctx) {
 
 // ───────────────────────────── matching afschrijving ↔ factuur (§ 4.6) ─────────────────────────────
 
-const AUTO_ZEKERHEID = 0.8, SUBSET_MAX = 20, VALUTA_MARGE = 0.03;
+const AUTO_ZEKERHEID = 0.8, SUBSET_MAX = 20, SUBSET_AUTO_MAX = 8, VALUTA_MARGE = 0.03;
 const INCASSO_TOL_PCT = 5, INCASSO_TOL_MIN = 100;   // incasso: ± max(5 %, € 1) tenzij de leverancier een eigen tolerantie heeft
 const NIET_OPEN = ['geen_factuur', 'dubbel'];
 
@@ -403,10 +416,22 @@ function leverancierBijTx(tx, ctx) {
   if (tx.incassant_id) { const l = lijst.find((x) => (x.incassant_ids || []).includes(tx.incassant_id)); if (l) return { leverancier: l, via: 'incassant' }; }
   const n = normNaam(tx.tegenpartij_naam);
   if (n.length >= 4) {
-    const l = lijst.find((x) => { const m = normNaam(x.naam); return m.length >= 4 && (m === n || (Math.min(m.length, n.length) >= 6 && (n.indexOf(m) >= 0 || m.indexOf(n) >= 0))); });
-    if (l) return { leverancier: l, via: 'naam' };
+    // eerst exact; anders een deel van de naam, maar alleen als precies één leverancier past (anders wint de eerste in de lijst)
+    const exact = lijst.filter((x) => normNaam(x.naam) === n);
+    const deel = exact.length ? exact : lijst.filter((x) => { const m = normNaam(x.naam); return m.length >= 6 && n.length >= 6 && (n.indexOf(m) >= 0 || m.indexOf(n) >= 0); });
+    if (deel.length === 1) return { leverancier: deel[0], via: 'naam' };
   }
   return null;
+}
+// Is de tegenpartij van deze post aantoonbaar de leverancier van de factuur? Alleen via een IBAN dat een mens kende (leverancier_iban,
+// pas na Nagebeld) of de incassant-id van die leverancier. f.iban telt niet: dat kan een nog niet nagebeld IBAN van de factuur zijn.
+// Zonder borging nooit automatisch koppelen (diffreview wv798 #1).
+function tegenpartijGeborgd(tx, f, ctx) {
+  const l = levVan(f.leverancier, ctx);
+  if (!l) return false;
+  const tegen = ibanNorm(tx.tegenpartij_iban);
+  if (tegen && levIbans(l).has(tegen)) return true;
+  return !!(tx.is_incasso && tx.incassant_id && (l.incassant_ids || []).includes(tx.incassant_id) && (!tegen || !levIbans(l).size));
 }
 // Stukken van de omschrijving en het kenmerk, elk genormaliseerd (alleen letters en cijfers). Een factuurnummer moet een heel stuk zijn
 // (geen deel van een langer getal); een lang betalingskenmerk (≥ 12) mag ook met spaties ertussen staan.
@@ -492,21 +517,23 @@ function matchTransactie(tx, facturen, ctx) {
     const vanIban = eur.filter((f) => (ibanNorm(f.iban) === tegen || (lt && lt.via === 'iban' && f.leverancier === lt.leverancier.id)) && teBetalen(f) === bedrag);
     if (vanIban.length) {
       const g = opDatum(vanIban);
-      const twijfel = g.length > 1 && afstand(tx, g[0]) === afstand(tx, g[1]);
+      // meer facturen met hetzelfde bedrag: niet gokken welke (abonnement september of oktober?) — een mens kiest (diffreview wv798 #3)
+      const twijfel = g.length > 1;
       uit.push(kandidaat('iban_bedrag', [g[0]], (twijfel ? 0.6 : 0.95) * datumFactor(tx, g[0]), tx, g.length > 1 ? { alternatieven: g.slice(1, 4).map((f) => f.id) } : null));
     }
   }
   // (3) incasso met tolerantie
   if (tx.is_incasso && lt && r === 'af') {
     const l = lt.leverancier;
-    const pct = Number.isFinite(Number(l.incasso_tolerantie_pct)) ? Number(l.incasso_tolerantie_pct) : INCASSO_TOL_PCT;
+    const pct = l.incasso_tolerantie_pct !== null && l.incasso_tolerantie_pct !== undefined && l.incasso_tolerantie_pct !== '' && Number.isFinite(Number(l.incasso_tolerantie_pct))
+      ? Number(l.incasso_tolerantie_pct) : INCASSO_TOL_PCT;
     const vanLev = eur.filter((f) => f.leverancier === l.id && teBetalen(f) > 0);
     const binnen = vanLev.map((f) => ({ f, diff: Math.abs(teBetalen(f) - bedrag), tol: Math.max(INCASSO_TOL_MIN, Math.round(teBetalen(f) * pct / 100)) }))
       .filter((x) => x.diff <= x.tol).sort((a, b) => a.diff - b.diff || afstand(tx, a.f) - afstand(tx, b.f));
     if (binnen.length) {
       const b = binnen[0];
       const basis = b.diff === 0 ? 0.92 : 0.9 - 0.3 * (b.diff / b.tol);
-      const twijfel = binnen.length > 1 && binnen[1].diff === b.diff && afstand(tx, binnen[1].f) === afstand(tx, b.f);
+      const twijfel = binnen.length > 1 && binnen[1].diff === b.diff;
       uit.push(kandidaat('incasso', [b.f], (twijfel ? 0.6 : basis) * datumFactor(tx, b.f), tx, { verschil_centen: teBetalen(b.f) - bedrag }));
     }
   }
@@ -516,7 +543,10 @@ function matchTransactie(tx, facturen, ctx) {
     const s = subsetSom(vanLev, bedrag);
     if (s) {
       const f0 = Math.min.apply(null, s.subset.map((f) => datumFactor(tx, f)));
-      uit.push(kandidaat('subset', s.subset, (s.uniek ? 0.88 : 0.6) * f0, tx, { creditnota: s.subset.some((f) => teBetalen(f) < 0) }));
+      // bij veel open facturen is een unieke combinatie vaak toeval (simulatie: 20 → ± 22 %): dan alleen automatisch als de omschrijving
+      // minstens één van de facturen noemt (diffreview wv798 #4)
+      const zeker = s.uniek && (vanLev.length <= SUBSET_AUTO_MAX || s.subset.some((f) => noemtFactuur(ref, f)));
+      uit.push(kandidaat('subset', s.subset, (zeker ? 0.88 : 0.6) * f0, tx, { creditnota: s.subset.some((f) => teBetalen(f) < 0) }));
     }
   }
   // (5) vreemde valuta: alleen met een koers (van de factuur of van de beller), ± 3 %, altijd ter bevestiging
@@ -633,7 +663,8 @@ const SIGNALEN = {
   mogelijk_dubbel_geupload: {
     titel: 'Mogelijk dubbel geüpload',
     knoppen: {
-      is_hetzelfde: { label: 'Is hetzelfde', vereist: [], gevolgen: (s) => [{ actie: 'transactie_verwijderen', transactie: s.transacties[1] }],
+      is_hetzelfde: { label: 'Is hetzelfde', vereist: [], voorwaarde: (s) => (s.details && s.details.te_verwijderen ? null : 'beide posten zijn al gekoppeld; ontkoppel er eerst één'),
+        gevolgen: (s) => [{ actie: 'transactie_verwijderen', transactie: s.details.te_verwijderen }],
         les: (s) => 'Dezelfde betaling aan ' + naamVan(s) + ' kwam via twee bestanden binnen; de tweede is weggehaald. Upload per rekening één soort export.' },
       zijn_er_twee: { label: 'Zijn er echt twee', vereist: [], gevolgen: () => [],
         les: (s) => 'Twee gelijke betalingen aan ' + naamVan(s) + ' op één dag waren echt twee betalingen.' },
@@ -642,12 +673,13 @@ const SIGNALEN = {
 };
 const SIGNAAL_SOORTEN = Object.keys(SIGNALEN);
 
-function signaalSleutel(soort, transacties, facturen) {
-  return soort + ':' + (transacties || []).slice().sort().join(',') + '|' + (facturen || []).slice().sort().join(',');
+function signaalSleutel(soort, transacties, facturen, extra) {
+  return soort + ':' + (transacties || []).slice().sort().join(',') + '|' + (facturen || []).slice().sort().join(',') + (extra ? '|' + extra : '');
 }
 function maakSignaal(soort, o) {
   const s = Object.assign({ soort, titel: SIGNALEN[soort].titel, transacties: [], facturen: [], status: 'open' }, o);
-  s.sleutel = signaalSleutel(soort, s.transacties, s.facturen);
+  s.sleutel = signaalSleutel(soort, s.transacties, s.facturen, s.sleutel_extra);
+  delete s.sleutel_extra;
   s.knoppen = Object.keys(SIGNALEN[soort].knoppen);
   s.alleen_eigenaar = !!s.alleen_eigenaar;
   return s;
@@ -676,6 +708,8 @@ function afhandelSignaal(signaal, knop, opties) {
   for (const v of k.vereist) if (opties[v] === undefined || opties[v] === null || opties[v] === '') return { ok: false, fout: 'vereist', reden: v };
   if (k.vereist.includes('categorie') && !CATEGORIEEN.includes(opties.categorie)) return { ok: false, fout: 'onbekende_categorie', reden: CATEGORIEEN.join(', ') };
   if (k.vereist.includes('toelichting') && String(opties.toelichting).trim().length < 5) return { ok: false, fout: 'vereist', reden: 'toelichting' };
+  const vw = k.voorwaarde ? k.voorwaarde(signaal) : null;
+  if (vw) return { ok: false, fout: 'voorwaarde', reden: vw };
   const af = Object.assign({}, signaal, { status: 'afgehandeld', afhandeling: knop, les: k.les(signaal, opties).slice(0, LES_MAX), wie: opties.wie, wanneer: opties.nu });
   if (k.sluimer_dagen) af.sluimer_tot = plusDagen(opties.nu.slice(0, 10), k.sluimer_dagen);
   return { ok: true, signaal: af, gevolgen: k.gevolgen(signaal, opties) };
@@ -712,10 +746,14 @@ function dubbelGeupload(transacties) {
 /*
  * De bankcontrole over de hele stand (puur; F2 roept hem na elke upload en bankluis-ronde aan).
  * inv = { vandaag, transacties, facturen, leveranciers, uitzonderingen, entiteiten, rekeningen, koppelingen, opdrachten, bestaandeSignalen,
- *         koersen }. transacties: genormaliseerd + { id, bestand }; facturen: { id, entiteit, leverancier, nummer, kenmerk, incl (centen,
- *         creditnota negatief), valuta, incl_eur?, iban, factuurdatum, vervaldatum, betaalwijze, betaalspoor, status, ingevoerd_op, prive? }.
- * → { koppelingen (nieuw, bron 'auto'), voorstellen (ter bevestiging), uitzonderingen (toegepast), betaalspoor (gebeurtenissen 'bankmatch'),
- *     signalen (nieuw; bestaande sleutels niet opnieuw, tenzij gesluimerd en de sluimer voorbij is) }.
+ *         afgewezenVoorstellen, koersen }.
+ *   transacties: genormaliseerd + { id, bestand, bestand_op? }; facturen: { id, entiteit, leverancier, nummer, kenmerk, incl (centen,
+ *   creditnota negatief), valuta, incl_eur?, iban, factuurdatum, vervaldatum, betaalwijze, betaalspoor, status, ingevoerd_op, dubbel_van?,
+ *   patientkenmerk?, alleen_eigenaar? }; koppelingen: { transactie, factuur, bron ('auto'|'mens'), methode? }.
+ * → { koppelingen (nieuw, bron 'auto'), voorstellen (ter bevestiging, met sleutel), uitzonderingen (toegepast), betaalspoor ('bankmatch'),
+ *     signalen (nieuw), heropenen (sleutels van gesluimerde signalen waarvan de sluimer voorbij is en het probleem blijft) }.
+ * Automatisch koppelen alleen als de tegenpartij geborgd is (bekend IBAN of incassant van die leverancier) én de zekerheid ≥ 0,8 én er
+ * geen gelijkwaardig alternatief is; al het andere wordt een voorstel dat een mens bevestigt.
  */
 function bankcontrole(inv) {
   const vandaag = inv && inv.vandaag;
@@ -724,74 +762,87 @@ function bankcontrole(inv) {
   const txs = (inv.transacties || []).slice().sort((a, b) => (a.boekdatum < b.boekdatum ? -1 : a.boekdatum > b.boekdatum ? 1 : String(a.entry_ref).localeCompare(String(b.entry_ref))));
   const facturen = inv.facturen || [];
   const fMap = new Map(facturen.map((f) => [f.id, f]));
+  const fPerEnt = new Map();
+  for (const f of facturen) { if (!fPerEnt.has(f.entiteit)) fPerEnt.set(f.entiteit, []); fPerEnt.get(f.entiteit).push(f); }
   const txMap = new Map(txs.map((t) => [t.id, t]));
-  const betaald = new Map();   // factuur → [tx-id's]
+  const betaald = new Map();   // factuur → [{ tx, methode, bron }]
   const txFacturen = new Map();   // tx → [factuur-id's]
-  const koppel = (txId, fId) => {
+  const koppel = (txId, fId, methode, bron) => {
     if (!betaald.has(fId)) betaald.set(fId, []);
-    betaald.get(fId).push(txId);
+    betaald.get(fId).push({ tx: txId, methode: methode || null, bron: bron || null });
     if (!txFacturen.has(txId)) txFacturen.set(txId, []);
     txFacturen.get(txId).push(fId);
   };
-  for (const k of inv.koppelingen || []) koppel(k.transactie, k.factuur);
-  // voldaan: de gekoppelde betalingen dekken het bedrag, of de factuur zit in een verzamelbetaling (één post voor meer facturen,
-  // ook factuur min creditnota: dan dekt de post de factuur niet los, maar wel de groep)
+  for (const k of inv.koppelingen || []) koppel(k.transactie, k.factuur, k.methode, k.bron);
+  // voldaan: de gekoppelde betalingen dekken het bedrag; of een mens koppelde; of de koppeling was een incasso binnen de tolerantie of
+  // een valutabetaling (euro tegen vreemde valuta is niet op te tellen); of de factuur zit in een verzamelbetaling (één post voor meer
+  // facturen, ook factuur min creditnota: de post dekt dan de groep, niet de factuur los) (diffreview wv798 #2)
   const voldaan = (f) => {
-    const ids = betaald.get(f.id) || [];
-    if (!ids.length) return false;
-    if (ids.some((id) => (txFacturen.get(id) || []).length > 1)) return true;
-    const som = ids.reduce((s, id) => s + (txMap.has(id) ? -txMap.get(id).bedrag_centen : 0), 0);
+    const ks = betaald.get(f.id) || [];
+    if (!ks.length) return false;
+    if (ks.some((k) => k.bron === 'mens' || k.methode === 'incasso' || k.methode === 'valuta' || (txFacturen.get(k.tx) || []).length > 1)) return true;
+    const som = ks.reduce((s, k) => s + (txMap.has(k.tx) ? -txMap.get(k.tx).bedrag_centen : 0), 0);
     return teBetalen(f) > 0 ? som >= teBetalen(f) : som <= teBetalen(f);
   };
-  const uit = { koppelingen: [], voorstellen: [], uitzonderingen: [], betaalspoor: [], signalen: [] };
+  const isPrive = (f) => !!f && (f.entiteit === 'prive' || !!f.prive || !!f.alleen_eigenaar || !!f.patientkenmerk);
+  const eigenaarVan = (tx, fids) => !!(tx && tx.alleen_eigenaar) || (fids || []).some((id) => isPrive(fMap.get(id)));
+  const afgewezen = new Set(inv.afgewezenVoorstellen || []);
+  const uit = { koppelingen: [], voorstellen: [], uitzonderingen: [], betaalspoor: [], signalen: [], heropenen: [] };
   const signalen = [];
   const voorgesteld = new Set();
-  const isPrive = (f) => f.entiteit === 'prive' || !!f.prive || !!f.alleen_eigenaar || !!f.patientkenmerk;
 
   for (const tx of txs) {
     if (txFacturen.has(tx.id)) continue;
-    const u = uitzonderingVoor(tx, ctx);
-    if (u) { uit.uitzonderingen.push(Object.assign({ transactie: tx.id }, u)); continue; }
     const lt = leverancierBijTx(tx, ctx);
-    const openF = facturen.filter((f) => !voldaan(f));
-    const kand = matchTransactie(tx, openF, ctx);
+    const tegen = ibanNorm(tx.tegenpartij_iban);
     const basis = { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lt ? lt.leverancier.naam : tx.tegenpartij_naam,
       tegenpartij_iban: tx.tegenpartij_iban, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar, leverancier: lt ? lt.leverancier.id : null };
-    // betaald aan onbekend IBAN: de tegenpartij is een bekende leverancier (incassant of naam), het IBAN niet
-    const tegen = ibanNorm(tx.tegenpartij_iban);
-    if (richtingVan(tx) === 'af' && tegen && lt && lt.via !== 'iban' && levIbans(lt.leverancier).size) {
+    // betaald aan onbekend IBAN: de tegenpartij is een bekende leverancier (incassant of naam), het IBAN niet. Vóór de uitzonderingen,
+    // zodat een uitzondering op naam het fraudesignaal nooit uitzet (diffreview wv798 #13).
+    if (richtingVan(tx) === 'af' && tegen && lt && lt.via !== 'iban' && levIbans(lt.leverancier).size && !eigenIbanMap(ctx).has(tegen)) {
       signalen.push(maakSignaal('onbekend_iban', Object.assign({}, basis, { details: { via: lt.via } })));
     }
+    const u = uitzonderingVoor(tx, ctx);
+    if (u) { uit.uitzonderingen.push(Object.assign({ transactie: tx.id, alleen_eigenaar: !!tx.alleen_eigenaar }, u)); continue; }
+    const openF = (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f));
+    const kand = matchTransactie(tx, openF, ctx);
     if (kand.length) {
       const k = kand[0];
-      const onbekend = lt && lt.via !== 'iban' && tegen && levIbans(lt.leverancier).size > 0;
-      const auto = !k.ter_bevestiging && !onbekend && !(kand[1] && kand[1].zekerheid >= k.zekerheid - 0.05 && kand[1].facturen.join() !== k.facturen.join());
-      if (auto) {
+      const geborgd = k.facturen.every((fid) => fMap.has(fid) && tegenpartijGeborgd(tx, fMap.get(fid), ctx));
+      const gelijkwaardig = kand[1] && kand[1].zekerheid >= k.zekerheid - 0.05 && kand[1].facturen.join() !== k.facturen.join();
+      const eigenaar = eigenaarVan(tx, k.facturen);
+      if (!k.ter_bevestiging && geborgd && !gelijkwaardig) {
         for (const fid of k.facturen) {
-          uit.koppelingen.push({ transactie: tx.id, factuur: fid, bron: 'auto', methode: k.methode, zekerheid: k.zekerheid, alleen_eigenaar: !!tx.alleen_eigenaar });
-          koppel(tx.id, fid);
+          uit.koppelingen.push({ transactie: tx.id, factuur: fid, bron: 'auto', methode: k.methode, zekerheid: k.zekerheid, alleen_eigenaar: eigenaar });
+          koppel(tx.id, fid, k.methode, 'auto');
           const f = fMap.get(fid);
           if (f && f.betaalspoor && f.betaalspoor !== 'betaald_gezien') uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'bankmatch', van: f.betaalspoor, naar: 'betaald_gezien' });
         }
       } else {
-        uit.voorstellen.push(Object.assign({ transactie: tx.id, alleen_eigenaar: !!tx.alleen_eigenaar }, k, { onbekend_iban: !!onbekend }));
-        k.facturen.forEach((f) => voorgesteld.add(f));
+        const sleutel = 'voorstel:' + tx.id + '|' + k.facturen.slice().sort().join(',');
+        if (!afgewezen.has(sleutel)) {
+          uit.voorstellen.push(Object.assign({ sleutel, transactie: tx.id }, k, { ter_bevestiging: true, tegenpartij_geborgd: geborgd, alleen_eigenaar: eigenaar }));
+          k.facturen.concat(k.alternatieven || []).forEach((f) => voorgesteld.add(f));   // ook de alternatieven: een mens kiest, geen vals signaal ernaast
+          continue;
+        }
       }
-      continue;
+      if (txFacturen.has(tx.id)) continue;
     }
-    // geen open factuur: dubbel betaald? (zelf betaald én geïncasseerd, of hetzelfde factuurnummer opnieuw betaald)
+    // geen (aanvaarde) open factuur: dubbel betaald? (zelf betaald én geïncasseerd, of hetzelfde factuurnummer aan dezelfde leverancier opnieuw)
     if (richtingVan(tx) === 'af') {
       const ref = referentieStukken(tx);
-      const al = facturen.filter((f) => f.entiteit === tx.entiteit && voldaan(f) && teBetalen(f) === -tx.bedrag_centen && !NIET_OPEN.includes(f.status));
+      const al = (fPerEnt.get(tx.entiteit) || []).filter((f) => voldaan(f) && teBetalen(f) === -tx.bedrag_centen && !NIET_OPEN.includes(f.status));
       const dubbel = al.find((f) => {
+        const l = levVan(f.leverancier, ctx);
+        const zelfdeLev = !!(l && ((lt && lt.leverancier.id === l.id) || (tegen && levIbans(l).has(tegen))));
+        if (!zelfdeLev) return false;   // een factuurnummer alleen is niet genoeg: "1001" komt bij veel leveranciers voor (diffreview wv798 #1)
         if (noemtFactuur(ref, f)) return true;
-        const eerdere = (betaald.get(f.id) || []).map((id) => txMap.get(id)).filter(Boolean);
-        const zelfdeLev = lt && f.leverancier === lt.leverancier.id;
+        const eerdere = (betaald.get(f.id) || []).map((k) => txMap.get(k.tx)).filter(Boolean);
         // ander soort betaling (handmatig vs incasso) aan dezelfde leverancier binnen 60 dagen: het klassieke "zelf betaald én geïncasseerd"
-        return zelfdeLev && eerdere.some((e) => e.is_incasso !== tx.is_incasso && Math.abs(dagenTussen(e.boekdatum, tx.boekdatum)) <= 60);
+        return eerdere.some((e) => e.is_incasso !== tx.is_incasso && Math.abs(dagenTussen(e.boekdatum, tx.boekdatum)) <= 60);
       });
       if (dubbel) {
-        const eerdere = (betaald.get(dubbel.id) || []).map((id) => txMap.get(id)).filter(Boolean);
+        const eerdere = (betaald.get(dubbel.id) || []).map((k) => txMap.get(k.tx)).filter(Boolean);
         signalen.push(maakSignaal('dubbel_betaald', Object.assign({}, basis, {
           transacties: eerdere.map((e) => e.id).concat([tx.id]), facturen: [dubbel.id], leverancier: dubbel.leverancier || basis.leverancier,
           naam: (levVan(dubbel.leverancier, ctx) || {}).naam || basis.naam, bedrag_centen: teBetalen(dubbel),
@@ -803,10 +854,12 @@ function bankcontrole(inv) {
     }
   }
 
-  // signalen per factuur
+  // signalen per factuur — alleen voor entiteiten waarvan de app een bank ziet (rekening met controle 1); Privé-regels worden niet
+  // opgeslagen, dus daar zou elk signaal vals zijn (diffreview wv798 #12)
+  const zichtbaar = new Set((ctx.rekeningen || []).filter((r) => controleVan(r) === 1).map((r) => r.entiteit));
   const gekoppeld = (f) => (betaald.get(f.id) || []).length > 0 || voorgesteld.has(f.id);
   for (const f of facturen) {
-    if (NIET_OPEN.includes(f.status) || gekoppeld(f)) continue;
+    if (NIET_OPEN.includes(f.status) || gekoppeld(f) || f.entiteit === 'prive' || !zichtbaar.has(f.entiteit)) continue;
     const l = levVan(f.leverancier, ctx);
     const basis = { facturen: [f.id], entiteit: f.entiteit, naam: l ? l.naam : null, leverancier: f.leverancier || null, bedrag_centen: teBetalen(f),
       datum: f.vervaldatum || null, alleen_eigenaar: isPrive(f) };
@@ -820,41 +873,53 @@ function bankcontrole(inv) {
     if (f.status === 'dubbel' && f.dubbel_van) {
       const l = levVan(f.leverancier, ctx);
       signalen.push(maakSignaal('dubbele_factuur', { facturen: [f.id, f.dubbel_van], entiteit: f.entiteit, naam: l ? l.naam : null, leverancier: f.leverancier || null,
-        bedrag_centen: teBetalen(f), alleen_eigenaar: isPrive(f) || isPrive(fMap.get(f.dubbel_van) || {}) }));
+        bedrag_centen: teBetalen(f), alleen_eigenaar: isPrive(f) || isPrive(fMap.get(f.dubbel_van)) }));
     }
   }
   for (const op of inv.opdrachten || []) {
     if (op.status === 'geweigerd' || (op.status === 'mislukt' && Number(op.poging) >= 3)) {
       const f = fMap.get(op.factuur) || {};
       const l = levVan(f.leverancier, ctx);
+      // de opdracht hoort in de sleutel: na "Opnieuw proberen" is een tweede mislukking een nieuw signaal (diffreview wv798 #7)
       signalen.push(maakSignaal('verzending_mislukt', { facturen: [op.factuur], entiteit: op.entiteit, naam: l ? l.naam : null, leverancier: f.leverancier || null,
-        details: { opdracht: op.id, status: op.status }, alleen_eigenaar: isPrive(f) }));
+        details: { opdracht: op.id, status: op.status }, sleutel_extra: 'op=' + op.id, alleen_eigenaar: isPrive(f) }));
     }
   }
+  const isGekoppeld = (t) => txFacturen.has(t.id);
+  const jonger = (x, y) => String(x.bestand_op || x.bestand) > String(y.bestand_op || y.bestand);
   for (const [a, b] of dubbelGeupload(txs)) {
+    // "Is hetzelfde" haalt de post uit het jongste bestand weg, nooit een gekoppelde (diffreview wv798 #14)
+    const volgorde = jonger(a, b) ? [a, b] : [b, a];
+    const weg = volgorde.find((t) => !isGekoppeld(t)) || null;
     signalen.push(maakSignaal('mogelijk_dubbel_geupload', { transacties: [a.id, b.id], eigen_iban: a.eigen_iban, entiteit: a.entiteit, naam: a.tegenpartij_naam,
-      bedrag_centen: a.bedrag_centen, datum: a.boekdatum, alleen_eigenaar: !!(a.alleen_eigenaar || b.alleen_eigenaar) }));
+      bedrag_centen: a.bedrag_centen, datum: a.boekdatum, alleen_eigenaar: !!(a.alleen_eigenaar || b.alleen_eigenaar), details: { te_verwijderen: weg ? weg.id : null } }));
   }
 
-  // nooit twee keer dezelfde melding (grondwet 10): bestaande sleutel → niet opnieuw, behalve een gesluimerd signaal na zijn sluimer
-  const bestaand = new Map((inv.bestaandeSignalen || []).map((s) => [s.sleutel, s]));
-  const nieuw = new Set();
-  for (const s of signalen) {
+  // nooit twee keer dezelfde melding (grondwet 10). Bestaande sleutel → niet opnieuw. Een gesluimerd signaal waarvan de sluimer voorbij is
+  // en waarvan het probleem blijft, gaat naar `heropenen` (zelfde rij weer open; geen tweede rij met dezelfde sleutel). Staat dezelfde
+  // sleutel er zowel open als afgehandeld, dan wint open (diffreview wv798 #8).
+  const bestaand = new Map();
+  for (const s of inv.bestaandeSignalen || []) {
     const b = bestaand.get(s.sleutel);
-    if (nieuw.has(s.sleutel)) continue;
-    if (b && !(b.status === 'afgehandeld' && b.sluimer_tot && b.sluimer_tot <= vandaag)) continue;
-    nieuw.add(s.sleutel);
-    uit.signalen.push(s);
+    if (!b || s.status === 'open') bestaand.set(s.sleutel, s);
+  }
+  const gezien = new Set();
+  for (const s of signalen) {
+    if (gezien.has(s.sleutel)) continue;
+    gezien.add(s.sleutel);
+    const b = bestaand.get(s.sleutel);
+    if (!b) { uit.signalen.push(s); continue; }
+    if (b.status === 'afgehandeld' && b.sluimer_tot && b.sluimer_tot <= vandaag) uit.heropenen.push({ sleutel: s.sleutel, soort: s.soort });
   }
   return uit;
 }
 
 module.exports = {
-  BankWeigering, FORMATEN, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX,
+  BankWeigering, FORMATEN, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
   // parsers
   pyStr, mkRef, kenEntryRefsToe, normBedrag, herkenFormaat, csvRijen, leesIng, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
   // controle
-  uitzonderingVoor, uitzonderingPast, leverancierBijTx, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
+  uitzonderingVoor, uitzonderingPast, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
   // signalen
   maakSignaal, signaalSleutel, afhandelSignaal, terugvraagTekst,
 };

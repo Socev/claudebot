@@ -108,7 +108,8 @@ function leesMt940(tekst) {
     else if (tag.naam === '60F' || tag.naam === '60M') blok.begin = saldo(tag.naam, v);
     else if (tag.naam === '62F' || tag.naam === '62M') blok.eind = saldo(tag.naam, v);
     else if (tag.naam === '64') blok.beschikbaar = saldo('64', v);
-    else if (tag.naam === '61') { post = regel61(v.replace(/\s+$/, '')); post.omschrijving86 = null; blok.posten.push(post); }
+    // :61: met trimEnd(): /\s+$/ is kwadratisch op een lange reeks spaties in een upload (diffreview wv798 #10)
+    else if (tag.naam === '61') { post = regel61(v.trimEnd()); post.omschrijving86 = null; blok.posten.push(post); }
     else if (tag.naam === '86') {
       if (post && post.omschrijving86 === null) {
         post.omschrijving86 = v;

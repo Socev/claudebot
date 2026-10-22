@@ -506,8 +506,14 @@ test('incasso niet gezien (> 14 dagen na vervaldatum), te betalen niet betaald, 
   const a = B.afhandelSignaal(s, 'afwachten', { wie: 'eigenaar', nu: '2026-10-22T10:00:00Z' });
   assert.equal(a.signaal.sluimer_tot, '2026-11-05');
   // na de sluimer komt hij terug; ervoor niet; een gewoon afgehandeld signaal nooit
-  assert.equal(controle({ transacties: [], facturen: fx, bestaandeSignalen: [a.signaal] }).signalen.filter((x) => x.soort === 'incasso_niet_gezien').length, 0);
-  assert.equal(B.bankcontrole({ vandaag: '2026-11-05', leveranciers: LEVS, transacties: [], facturen: [fx[0]], bestaandeSignalen: [a.signaal] }).signalen.length, 1);
+  const voor = controle({ transacties: [], facturen: fx, bestaandeSignalen: [a.signaal] });
+  assert.equal(voor.signalen.filter((x) => x.soort === 'incasso_niet_gezien').length, 0);
+  assert.deepEqual(voor.heropenen, []);
+  const na = B.bankcontrole({ vandaag: '2026-11-05', leveranciers: LEVS, rekeningen: REKENINGEN, transacties: [], facturen: [fx[0]], bestaandeSignalen: [a.signaal] });
+  assert.deepEqual(na.signalen, []);   // geen tweede rij met dezelfde sleutel: de bestaande gaat weer open
+  assert.deepEqual(na.heropenen, [{ sleutel: a.signaal.sleutel, soort: 'incasso_niet_gezien' }]);
+  // staat dezelfde sleutel er ook open, dan wint open: niets heropenen
+  assert.deepEqual(B.bankcontrole({ vandaag: '2026-11-05', leveranciers: LEVS, rekeningen: REKENINGEN, transacties: [], facturen: [fx[0]], bestaandeSignalen: [s, a.signaal] }).heropenen, []);
   const zelf = B.afhandelSignaal(s, 'toch_zelf_betalen', { wie: 'eigenaar', nu: '2026-10-22T10:00:00Z' });
   assert.deepEqual(zelf.gevolgen, [{ actie: 'betaalspoor', factuur: 'i1', gebeurtenis: 'toch_zelf_betalen' }]);
   assert.equal(controle({ transacties: [], facturen: fx, bestaandeSignalen: [zelf.signaal] }).signalen.filter((x) => x.soort === 'incasso_niet_gezien').length, 0);
@@ -547,7 +553,7 @@ test('betaald aan onbekend IBAN: bekende incassant op een ander IBAN → fraudes
   const r = controle({ transacties: [t], facturen: [f] });
   assert.equal(r.koppelingen.length, 0);
   assert.equal(r.voorstellen.length, 1);
-  assert.equal(r.voorstellen[0].onbekend_iban, true);
+  assert.equal(r.voorstellen[0].tegenpartij_geborgd, false);
   assert.deepEqual(soorten(r), ['onbekend_iban']);
   const s = r.signalen[0];
   assert.deepEqual(s.knoppen, ['uitzoeken']);
@@ -570,7 +576,14 @@ test('zelfde periode in twee bestanden (oude en nieuwe ING-variant): andere entr
   assert.deepEqual(soorten(r), ['mogelijk_dubbel_geupload']);
   const s = r.signalen[0];
   const h = B.afhandelSignaal(s, 'is_hetzelfde', { wie: 'eigenaar', nu: '2026-10-22T10:00:00Z' });
-  assert.deepEqual(h.gevolgen, [{ actie: 'transactie_verwijderen', transactie: 'tb' }]);
+  assert.deepEqual(h.gevolgen, [{ actie: 'transactie_verwijderen', transactie: 'tb' }]);   // uit het jongste bestand (b2)
+  // de jongste is gekoppeld → de andere gaat weg; beide gekoppeld → knop geweigerd
+  const fa = fac({ id: 'fx', leverancier: 'lf', nummer: 'F-9', incl: 4500, factuurdatum: '2026-09-20' });
+  const r2 = controle({ transacties: [a, b], facturen: [fa], koppelingen: [{ transactie: 'tb', factuur: 'fx', bron: 'mens' }] });
+  assert.equal(r2.signalen.find((x) => x.soort === 'mogelijk_dubbel_geupload').details.te_verwijderen, 'ta');
+  const r3 = controle({ transacties: [a, b], facturen: [fa], koppelingen: [{ transactie: 'tb', factuur: 'fx', bron: 'mens' }, { transactie: 'ta', factuur: 'fx', bron: 'mens' }] });
+  const s3 = r3.signalen.find((x) => x.soort === 'mogelijk_dubbel_geupload');
+  assert.equal(B.afhandelSignaal(s3, 'is_hetzelfde', { wie: 'eigenaar', nu: '2026-10-22T10:00:00Z' }).fout, 'voorwaarde');
   // uit hetzelfde bestand (echt twee gelijke posten) of zonder bestand (bankluis) → geen signaal
   assert.equal(B.dubbelGeupload([a, Object.assign({}, b, { bestand: 'b1' })]).length, 0);
   assert.equal(B.dubbelGeupload([Object.assign({}, a, { bestand: undefined }), Object.assign({}, b, { bestand: undefined })]).length, 0);
@@ -597,7 +610,7 @@ test('alle signalen: elke knop geeft een les, onbekende knop/zonder wie geweiger
   const TOEGESTAAN = new Set(['upload_openen', 'uitzondering_maken', 'leverancier_bijwerken', 'tekst_tonen', 'factuur_status', 'betaalspoor', 'betaallijst', 'koppelen', 'transactie_verwijderen']);
   const opties = { wie: 'eigenaar', nu: '2026-10-22T10:00:00Z', categorie: 'overig', leverancier: 'la', transactie: 't1', toelichting: 'uitgezocht en in orde' };
   for (const soort of B.SIGNAAL_SOORTEN) {
-    const s = B.maakSignaal(soort, { transacties: ['t1', 't2'], facturen: ['f1'], naam: 'Leverancier A B.V.', leverancier: 'la', bedrag_centen: -1000, eigen_iban: ABN_TG, details: { nummer: 'A-1', datums: ['2026-10-01', '2026-10-05'] } });
+    const s = B.maakSignaal(soort, { transacties: ['t1', 't2'], facturen: ['f1'], naam: 'Leverancier A B.V.', leverancier: 'la', bedrag_centen: -1000, eigen_iban: ABN_TG, details: { nummer: 'A-1', datums: ['2026-10-01', '2026-10-05'], te_verwijderen: 't2' } });
     assert.ok(s.knoppen.length >= 1, soort);
     for (const knop of s.knoppen) {
       const a = B.afhandelSignaal(s, knop, opties);
@@ -630,7 +643,8 @@ test('POT en Privé: signalen en koppelingen van een eigenaar-rekening, en van e
   const f = fac({ id: 'pf', entiteit: 'pot', leverancier: 'la', nummer: 'A-99', incl: 2500, factuurdatum: '2026-09-25', vervaldatum: '2026-10-05' });
   const pf = fac({ id: 'pr', entiteit: 'prive', leverancier: 'lb', nummer: 'B-99', incl: 3000, betaalspoor: 'te_betalen', factuurdatum: '2026-09-01', vervaldatum: '2026-09-15' });
   const r = controle({ transacties: [potTx, potTx2], facturen: [f, pf] });
-  assert.ok(r.signalen.length === 2 && r.signalen.every((s) => s.alleen_eigenaar === true), JSON.stringify(r.signalen));
+  // Privé-bankregels worden nooit opgeslagen: een Privé-factuur krijgt dus geen (altijd valse) betaalsignalen
+  assert.ok(r.signalen.length === 1 && r.signalen[0].soort === 'geen_factuur' && r.signalen[0].alleen_eigenaar === true, JSON.stringify(r.signalen));
   assert.ok(r.koppelingen.length === 1 && r.koppelingen[0].alleen_eigenaar === true);
   // een gewoon zakelijk signaal niet
   assert.equal(controle({ transacties: [tx({ boekdatum: '2026-10-01', bedrag_centen: -4500, tegenpartij_iban: LEV.F })], facturen: [] }).signalen[0].alleen_eigenaar, false);
@@ -652,4 +666,105 @@ test('subset-som: hooguit 20 open facturen per IBAN (de dichtstbijzijnde), snel 
   const dicht = tx({ boekdatum: '2026-09-15', bedrag_centen: -((1000 + 23 * 7) + (1000 + 24 * 7)), tegenpartij_iban: LEV.A });
   const k2 = B.matchTransactie(dicht, veel, { leveranciers: LEVS });
   assert.ok(k2.some((x) => x.methode === 'subset' && x.facturen.slice().sort().join() === 's23,s24'), JSON.stringify(k2));
+});
+
+// ═════════════════════════════ diffreview wv798 ═════════════════════════════
+
+test('#1 nooit automatisch koppelen zonder geborgde tegenpartij: kenmerk naar vreemd IBAN, niet-nagebeld factuur-IBAN, leverancier zonder IBAN, dubbelzinnige naam', () => {
+  const f = fac({ id: 'k1', leverancier: 'la', nummer: '1001', incl: 125000, iban: LEV.A, factuurdatum: '2026-10-01', vervaldatum: '2026-10-15' });
+  const vreemd = tx({ boekdatum: '2026-10-10', bedrag_centen: -125000, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Iemand Anders', omschrijving: 'Factuur 1001' });
+  const r = controle({ transacties: [vreemd], facturen: [f] });
+  assert.equal(r.koppelingen.length, 0);
+  assert.equal(r.voorstellen.length, 1); assert.equal(r.voorstellen[0].tegenpartij_geborgd, false);
+  // een factuur-IBAN dat nog niet is nagebeld telt niet als bekend
+  const fn = fac({ id: 'k2', leverancier: 'la', nummer: 'A-200', incl: 7000, iban: LEV.VREEMD, iban_nieuw: 1, status: 'te_beoordelen', betaalspoor: null, factuurdatum: '2026-10-01' });
+  assert.equal(controle({ transacties: [tx({ boekdatum: '2026-10-05', bedrag_centen: -7000, tegenpartij_iban: LEV.VREEMD })], facturen: [fn] }).koppelingen.length, 0);
+  // leverancier zonder bekende IBAN's: alles is voorstel
+  const fd = fac({ id: 'k3', leverancier: 'ld', nummer: 'D-1', incl: 5000, iban: LEV.VREEMD, factuurdatum: '2026-10-01' });
+  const rd = controle({ transacties: [tx({ boekdatum: '2026-10-05', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Leverancier D Inc.', omschrijving: 'D-1' })], facturen: [fd] });
+  assert.equal(rd.koppelingen.length, 0); assert.equal(rd.voorstellen.length, 1);
+  // naam die op twee leveranciers past → geen leverancier
+  const lijst = [{ id: 'm1', naam: 'Medi Zorg', ibans: [] }, { id: 'm2', naam: 'Medi Zorg Groep B.V.', ibans: [] }, { id: 'm3', naam: 'Zorg Groep Medi', ibans: [] }];
+  assert.equal(B.leverancierBijTx(tx({ tegenpartij_naam: 'MEDI ZORG GROEP BV' }), { leveranciers: lijst }).leverancier.id, 'm2');   // exact wint
+  assert.equal(B.leverancierBijTx(tx({ tegenpartij_naam: 'MEDI ZORG GROEP NOORD' }), { leveranciers: lijst }), null);   // twee deel-treffers
+  // factuurnummer van een ándere leverancier is geen dubbele betaling
+  const betaaldA = fac({ id: 'k4', leverancier: 'la', nummer: '1002', incl: 3000, factuurdatum: '2026-09-01' });
+  const eerst = tx({ boekdatum: '2026-09-05', bedrag_centen: -3000, tegenpartij_iban: LEV.A });
+  const ander = tx({ boekdatum: '2026-09-20', bedrag_centen: -3000, tegenpartij_iban: LEV.F, omschrijving: 'Factuur 1002' });
+  assert.deepEqual(soorten(controle({ transacties: [eerst, ander], facturen: [betaaldA] })), ['geen_factuur']);
+});
+
+test('#2 incasso binnen de tolerantie telt als voldaan: een tweede (handmatige) betaling is dubbel betaald, geen tweede koppeling', () => {
+  const f = fac({ id: 'q1', leverancier: 'lc', nummer: 'C-40', incl: 10000, betaalwijze: 'incasso', betaalspoor: 'incasso_verwacht', factuurdatum: '2026-09-20', vervaldatum: '2026-10-01' });
+  const inc = tx({ boekdatum: '2026-10-01', bedrag_centen: -9950, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000301', tegenpartij_iban: LEV.C });
+  const hand = tx({ boekdatum: '2026-10-03', bedrag_centen: -10000, tegenpartij_iban: LEV.C, omschrijving: 'C-40' });
+  const r = controle({ transacties: [inc, hand], facturen: [f] });
+  assert.deepEqual(r.koppelingen.map((k) => [k.transactie, k.methode]), [[inc.id, 'incasso']]);
+  assert.deepEqual(soorten(r), ['dubbel_betaald']);
+});
+
+test('#3 twee open facturen met hetzelfde bedrag op hetzelfde IBAN → voorstel met alternatief, geen gok', () => {
+  const fx = [fac({ id: 'ab9', leverancier: 'la', nummer: 'AB-09', incl: 5000, factuurdatum: '2026-09-01', vervaldatum: '2026-09-15' }),
+    fac({ id: 'ab10', leverancier: 'la', nummer: 'AB-10', incl: 5000, factuurdatum: '2026-10-01', vervaldatum: '2026-10-15' })];
+  const r = controle({ transacties: [tx({ boekdatum: '2026-10-01', bedrag_centen: -5000, tegenpartij_iban: LEV.A })], facturen: fx });
+  assert.equal(r.koppelingen.length, 0);
+  assert.equal(r.voorstellen.length, 1);
+  assert.equal(r.voorstellen[0].alternatieven.length, 1);
+  assert.deepEqual(r.signalen, []);   // geen "te betalen, niet betaald" naast het voorstel: een mens kiest welke factuur betaald is
+});
+
+test('#4 subset-som bij veel open facturen alleen automatisch als de omschrijving er één noemt', () => {
+  const veel = [];
+  for (let i = 0; i < 12; i++) veel.push(fac({ id: 'z' + i, leverancier: 'la', nummer: 'Z-' + (100 + i), incl: 2000 + i * i * 53 + i * 7, factuurdatum: '2026-09-' + String(10 + i) }));
+  const doel = -(veel[3].incl + veel[7].incl);
+  const kaal = controle({ transacties: [tx({ boekdatum: '2026-10-01', bedrag_centen: doel, tegenpartij_iban: LEV.A })], facturen: veel });
+  assert.equal(kaal.koppelingen.length, 0); assert.equal(kaal.voorstellen[0].methode, 'subset');
+  const genoemd = controle({ transacties: [tx({ boekdatum: '2026-10-01', bedrag_centen: doel, tegenpartij_iban: LEV.A, omschrijving: 'Z-103 en meer' })], facturen: veel });
+  assert.deepEqual(genoemd.koppelingen.map((k) => k.factuur).sort(), ['z3', 'z7']);
+});
+
+test('#5/#11 rekening zonder geldige controle en een TAB-rekeningnummer met spatie → geweigerd met uitleg, nooit stil weg of een exceptie', () => {
+  const tab = tabRij('0000000011', '20261001', '1,00', '0,00', '-1,00', 'BEA, Betaalpas x');
+  const r = B.leesBankbestand(tab, { rekeningen: [{ iban: ABN_TG, entiteit: 'tolgaarde', bank_formaat: 'abn_tab', controle: null }] });
+  assert.equal(r.ok, false); assert.equal(r.fout, 'rekening_onvolledig');
+  assert.equal(B.leesBankbestand(tab, { rekeningen: [{ iban: ABN_TG, entiteit: 'tolgaarde', bank_formaat: 'abn_tab', controle: '1' }] }).ok, true);
+  const spatie = B.leesBankbestand('123456789 \tEUR\t20261001\t1,00\t0,00\t20261001\t-1,00\tBEA, Betaalpas x', { rekeningen: REKENINGEN });
+  assert.equal(spatie.ok, false); assert.equal(spatie.fout, 'regel_ongeldig'); assert.ok(!spatie.uitleg.includes('123456789'));
+});
+
+test('#6 incassotolerantie NULL = de standaard 5 %', () => {
+  const lev = [{ id: 'lt', naam: 'Leverancier T B.V.', ibans: [LEV.C], incassant_ids: ['NL00ZZZTEST0000000999'], incasso_tolerantie_pct: null }];
+  const f = fac({ id: 'tt', leverancier: 'lt', nummer: 'T-1', incl: 10000, factuurdatum: '2026-10-01' });
+  const k = B.matchTransactie(tx({ boekdatum: '2026-10-05', bedrag_centen: -10300, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000999', tegenpartij_iban: LEV.C }), [f], { leveranciers: lev });
+  assert.ok(k.some((x) => x.methode === 'incasso'));
+});
+
+test('#7 een tweede mislukte verzending (nieuwe opdracht) geeft een nieuw signaal', () => {
+  const f = fac({ id: 'vm', leverancier: 'la', nummer: 'A-80', incl: 1000, status: 'verzending_mislukt' });
+  const r1 = controle({ transacties: [], facturen: [f], opdrachten: [{ id: 'op1', factuur: 'vm', entiteit: 'tolgaarde', status: 'geweigerd', poging: 1 }] });
+  const af = B.afhandelSignaal(r1.signalen[0], 'opnieuw_proberen', { wie: 'eigenaar', nu: '2026-10-22T10:00:00Z' }).signaal;
+  const r2 = controle({ transacties: [], facturen: [f], bestaandeSignalen: [af], opdrachten: [{ id: 'op1', factuur: 'vm', entiteit: 'tolgaarde', status: 'geweigerd', poging: 1 }, { id: 'op2', factuur: 'vm', entiteit: 'tolgaarde', status: 'mislukt', poging: 3 }] });
+  assert.equal(r2.signalen.length, 1); assert.equal(r2.signalen[0].details.opdracht, 'op2');
+});
+
+test('#9 alleen_eigenaar ook op uitzonderingen en op koppelingen/voorstellen met een eigenaar-factuur (patiëntkenmerk)', () => {
+  const loon = tx({ boekdatum: '2026-09-25', eigen_iban: ABN_POT, entiteit: 'pot', alleen_eigenaar: true, bedrag_centen: -300000, transactietype: 'BANKLUIS:SEPA Batch Salaris' });
+  assert.equal(controle({ transacties: [loon], facturen: [] }).uitzonderingen[0].alleen_eigenaar, true);
+  const f = fac({ id: 'pk', leverancier: 'la', nummer: 'A-90', incl: 4000, patientkenmerk: 'bsn', factuurdatum: '2026-10-01' });
+  const r = controle({ transacties: [tx({ boekdatum: '2026-10-05', bedrag_centen: -4000, tegenpartij_iban: LEV.A })], facturen: [f] });
+  assert.equal(r.koppelingen[0].alleen_eigenaar, true);
+});
+
+test('#10 MT940 met een lange reeks spaties: lineair (geen ReDoS)', () => {
+  const t0 = Date.now();
+  B.leesBankbestand(':20:X\n:25:' + MT_IBAN + '\n:60F:C261230EUR1,00\n:61:' + ' '.repeat(400000) + 'x\n:62F:C261231EUR1,00\n-', { rekeningen: REKENINGEN });
+  assert.ok(Date.now() - t0 < 1500, 'te traag: ' + (Date.now() - t0) + ' ms');
+});
+
+test('#13 een uitzondering op naam zet het fraudesignaal niet uit', () => {
+  const uitz = [{ id: 'u', richting: 'af', tegenpartij: 'Leverancier C', categorie: 'abonnement_zonder_factuur' }];
+  const t = tx({ boekdatum: '2026-10-10', bedrag_centen: -6000, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000301', tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Leverancier C B.V.' });
+  const r = controle({ transacties: [t], facturen: [], uitzonderingen: uitz });
+  assert.deepEqual(soorten(r), ['onbekend_iban']);
+  assert.equal(r.uitzonderingen.length, 1);
 });
