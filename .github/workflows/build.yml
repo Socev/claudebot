@@ -125,6 +125,21 @@ jobs:
             echo "::error::pot-datahub.js laadt een module buiten crypto en mt940-lezer.js"; exit 1
           fi
           echo "pot-datahub.js: puur."
+      # pot-verzend.js (wv911): nota's uit Davids POT-app als Gmail-concept klaarzetten. Puur: alleen crypto; D1, lees-luik, mailluik,
+      # pdftotext, vault, Voor jou en het conceptregister komen van server.js (io). Geen eigen klok: tijden komen van D1.
+      - name: pot-verzend.js moet puur blijven
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' pot-verzend.js)
+          if echo "$C" | grep -nE "require\([\`'\"](node:)?(fs(/promises)?|os|http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.|import\("; then
+            echo "::error::pot-verzend.js laadt een bestand-, netwerk- of procesmodule; de module moet puur blijven"; exit 1
+          fi
+          if echo "$C" | sed 's/new Date(\s*[^)[:space:]]/NIEUWEDATUM(/g' | grep -nE "Date\.now\s*\(|new Date\b|(^|[^.A-Za-z0-9_])Date\(|Math\.random"; then
+            echo "::error::pot-verzend.js leest zelf de klok of het toeval; tijden komen van D1"; exit 1
+          fi
+          if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('crypto'\)$"; then
+            echo "::error::pot-verzend.js laadt een module buiten crypto"; exit 1
+          fi
+          echo "pot-verzend.js: puur."
 
       # facturen-db.js (wv824, F1c): de opslag van de Facturen-app is lokaal (SQLite + stukken op de pod). Geen netwerk- of procesmodule en
       # geen fetch; hij laadt alleen fs, path, crypto, node:sqlite en de pure buren. Versturen doet de koerier (F4), nooit de opslag.
@@ -204,6 +219,7 @@ jobs:
           bash test/financien-app.sh   # wv771: App Financiën — veld-allowlist, signalen, opzeglinks met host-allowlist
           bash test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
+          bash test/pot-verzend.sh   # wv911: POT-nota's als Gmail-concept — frontmatter, adres, PDF-controle, claim, onzeker-herstel, voorcontrole, kaarten
           bash test/pot-datahub.sh   # wv815: POT-posten naar Davids datahub — koppelen, grens, Davids vorm, toewijzing, grootboek, D1-batch met parameters
           bash test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
       # Facturen-app (wv797–wv833) in een eigen stap die ook draait als een eerdere stap rood is: een rode bankluis-toets mag de Facturen-toetsen

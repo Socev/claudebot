@@ -50,6 +50,7 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # facturen-kern.js (wv797): kern van de Facturen-app (puur); nog door niets geladen, F1c/F2 koppelen hem (ontbreekt hij, dan geen Facturen).
 # facturen-bank.js (wv798): bankparsers, matching en signalen van de Facturen-app (puur, laadt facturen-kern.js + mt940-lezer.js); F2 koppelt hem.
 # pot-datahub.js (wv815): POT-posten naar Davids datahub, door server.js geladen in potDatahubRonde na de bank-ronde (ontbreekt hij, dan faalt alleen die stap: box-rij, de ronde loopt door).
+# pot-verzend.js (wv911): nota's uit de POT-app als Gmail-concept, door server.js geladen in potVzTik (ontbreekt hij, dan pot_verzend.module=false in /health en blijven rijen wachten).
 # facturen-db.js (wv824): opslag van de Facturen-app (SQLite /opt/data/facturen, migraties, triggers, stukken, back-up); server.js opent hem alleen
 #   op de primaire kant voor /health.facturen (ontbreekt hij, dan facturen.aan=false; F2 koppelt de routes).
 # facturen.js (wv833): routes /app/facturen/* en POST /facturen-ronde, door server.js geladen (ontbreekt hij, dan 404 op /app/facturen* en facturen.aan=false in /health).
@@ -60,7 +61,7 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 #   /opt/data/facturen/backup/ van vóór de uitrol terugzetten, of vooruit herstellen.
 # secondbrain.js (wv832): App Second Brain, routes /app/secondbrain* (ontbreekt hij, dan 404 en secondbrain.aan=false in /health).
 # ideeen.js (wv761): App Ideeën van buitenaf (Ideeënbeurs), door server.js geladen (ontbreekt hij, dan 404 op /app/ideeen* en ideeen.aan=false in /health).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js secondbrain.js ideeen.js managers.js ringkaart.js"
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js secondbrain.js ideeen.js managers.js ringkaart.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

@@ -148,6 +148,7 @@ COPY mt940-lezer.js /app/release-bootstrap/mt940-lezer.js
 COPY facturen-kern.js /app/release-bootstrap/facturen-kern.js
 COPY facturen-bank.js /app/release-bootstrap/facturen-bank.js
 COPY pot-datahub.js /app/release-bootstrap/pot-datahub.js
+COPY pot-verzend.js /app/release-bootstrap/pot-verzend.js
 COPY facturen-db.js /app/release-bootstrap/facturen-db.js
 COPY facturen.js /app/release-bootstrap/facturen.js
 COPY facturen-koerier.js /app/release-bootstrap/facturen-koerier.js

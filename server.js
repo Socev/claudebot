@@ -3517,6 +3517,7 @@ function handleRequest(req, res) {
       bankarchief_fout: bankArchiefFoutLaatst ? bankArchiefFoutLaatst.tijd : null,   // wv687: laatste schrijffout (tekst in api.log en de box)
       bank_verrijk_ai: bankVerrijkStand(true),   // wv740: stand van de AI-indeling (alleen aantallen en tijden); peilen hoeft niet meer via /smal/bank
       studio: studioInfo(),   // wv707: tab Studio (studio.js in deze release? taken vandaag, bezig, in de rij; geen inhoud)
+      pot_verzend: typeof potVzInfo === 'function' ? potVzInfo() : { aan: false },   // wv911: POT-app nota's als Gmail-concept (schakelaar, laatste tik, aantallen; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
@@ -14904,6 +14905,11 @@ function bankBoxRij(m) {
       '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
       '- gevolg als er niets gebeurt: geen blok "Geld deze maand" onder het ochtendbericht; elke avondronde (18:00) probeert het opnieuw voor de volgende werkdag, tot het einde van de maand. De App Financiën werkt gewoon.\n' +
       '- voorstel: `/opt/data/bank/geld-briefing.json` (600) en api.log (`opdracht=geld-briefing`) nalopen; de signalen zelf: bank-lezer `geld-briefing --peil JJJJ-MM-DD` op een VACUUM INTO-kopie. Geheugen onleesbaar: het bestand wegzetten geeft één eerste-keer-blok.\n'
+      : m.bron === 'pot-verzend' ? '\n## [direct] ' + tijd + ' — POT-app nota\'s klaarzetten: ' + String(m.kop || 'storing').replace(/[\r\n]+/g, ' ').slice(0, 40) + ' (pod, automatisch)\n' +
+      '- status: open\n- van: pod pot-verzend-tik (server.js potVzTik, elke minuut; hooguit 1× per dag per reden)\n' +
+      '- gemeten: ' + String(m.tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: nota\'s die David in de POT-app (werk.socev.dev/pot, tab Nota\'s) klaarzette, komen niet of later als concept in Gmail; de app toont de status per nota.\n' +
+      '- voorstel: /health `pot_verzend` en api.log (`pot-verzend`) nalopen; D1 `select status, count(*) from nota_verzending group by 1`; uitzetten = `rm /opt/data/pot-verzend/aan` (rijen blijven wachten). Bouwplan POT-app nota\'s klaarzetten.\n'
       : m.bron === 'archief' ?'\n## [direct] ' + tijd + ' — bank-transactiedatabase: schrijven mislukt (bankluis, automatisch)\n' +
       '- status: open\n- van: pod bankluis (bank-archief.js via bank-lezer.js archiefVeilig; hooguit 1×/dag)\n' +
       '- gemeten: ' + String(m.tekst || '').slice(0, 200) + '\n' +
@@ -15910,6 +15916,102 @@ async function potAfschriftRonde(o) {
 // Schakelaar en geheugen: BANK_DIR/pot-datahub.json {aan, grootboek: {d1sleutel: datum}, box: {reden: dag}} (600); zonder bestand of
 // bij een kapot bestand: uit. Het grootboek houdt bij welke van onze rijen al een toewijzingspoging kregen, zodat een half geschreven
 // batch één keer wordt hersteld en een toewijzing die David weghaalde niet terugkomt (Fable wv815 #1). Alleen aantallen naar n8n en log.
+// ── POT-app: nota's als Gmail-concept klaarzetten (wv911, 23-10-2026) ─────────────────────────────────────────────────────────────
+// Bouwplan: vault "01_Ontwikkeling/POT-app - nota's klaarzetten voor verzending (bouwplan 23-10-2026).md"; de logica staat in
+// pot-verzend.js (puur). Davids POT-app (werk.socev.dev/pot) zet per nota een rij in D1 fin.nota_verzending; deze tik (elke minuut,
+// alleen de primaire kant, schakelaar <POT_VZ_DIR>/aan) haalt ze op en zet per nota één Gmail-concept klaar via het bestaande
+// mailluik. Versturen doet David. Geen nieuwe ingang en geen nieuwe sleutel: D1 (CLOUDFLARE_API_TOKEN), het lees-luik en het mailluik
+// bestonden al. Ontvangers alleen uit de praktijkpagina's in de vault (frontmatter facturen_aan), nooit uit D1 of de browser.
+// De D1-claim (status wacht → bezig in één UPDATE … RETURNING) is het enige slot: ook twee pods tegelijk maken geen dubbel concept.
+const POT_VZ_DIR = process.env.POT_VZ_DIR || '/opt/data/pot-verzend';
+const POT_VZ_MOD = (function () { const p = path.join(__dirname, 'pot-verzend.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('pot-verzend', e); return null; } })();
+const POT_VZ_TIK_MS = 60 * 1000;
+const POT_VZ_PDFTOTEXT = '/usr/bin/pdftotext';
+const potVz = { bezig: false, laatste: null, laatste_meting: 0, laatste_kaarten: 0, uitkomst: null, fouten_op_rij: 0, laatste_fout: null, rij: {}, box: {} };
+function potVzAan() { return !!POT_VZ_MOD && fs.existsSync(path.join(POT_VZ_DIR, 'aan')); }
+function potVzInfo() {
+  const u = potVz.uitkomst;
+  return { aan: potVzAan(), module: !!POT_VZ_MOD, laatste_tik: potVz.laatste, fouten_op_rij: potVz.fouten_op_rij, laatste_fout: potVz.laatste_fout,
+    laatste: u ? { geclaimd: u.geclaimd, concept: u.concept, wacht_op_adres: u.wacht_op_adres, fout: u.fout, onzeker: u.onzeker, verzonden: u.verzonden, fouten: u.fouten } : null };
+}
+// De praktijkpagina's: alle pagina's in HAGRO/Praktijken plus de hoofdpagina's van Groenhouten en Tolgaarde (Fable vooraf #6: vaste plekken)
+function potVzVault() {
+  const map = path.join('10_Zakelijk', 'HAGRO', 'Praktijken');
+  const namen = fs.readdirSync(path.join(VAULT, map)).filter(function (n) { return /\.md$/.test(n); });
+  const paden = namen.map(function (n) { return path.join(map, n); }).concat([path.join('10_Zakelijk', 'Groenhouten', 'index.md'), path.join('10_Zakelijk', 'Tolgaarde', 'index.md')]);
+  const uit = [];
+  paden.forEach(function (rel) { try { uit.push({ pad: rel, tekst: fs.readFileSync(path.join(VAULT, rel), 'utf8').slice(0, 20000) }); } catch (e) { /* ontbreekt: dan geen adres voor die praktijk */ } });
+  return uit;
+}
+// PDF → tekst in het geheugen (zelfde vorm als facturen-koerier: vast pad, geen shell, lege omgeving, stdin/stdout)
+function potVzPdfTekst(bytes) {
+  return new Promise(function (klaar) {
+    let kind;
+    try {
+      kind = require('child_process').execFile(POT_VZ_PDFTOTEXT, ['-q', '-enc', 'UTF-8', '-', '-'], { timeout: 20000, maxBuffer: 2 * 1024 * 1024, encoding: 'utf8', env: {}, windowsHide: true },
+        function (err, stdout) { klaar(err ? { ok: false } : { ok: true, tekst: String(stdout || '').slice(0, 200000) }); });
+    } catch (e) { return klaar({ ok: false }); }
+    kind.stdin.on('error', function () {});
+    kind.stdin.end(bytes);
+  });
+}
+async function potVzConcept(body) {
+  const geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;
+  if (!geheim) throw new Error('mailluik niet ingericht');
+  const tekst = JSON.stringify(Object.assign({ secret: geheim }, body));
+  for (let poging = 0; poging < 2; poging++) {
+    const url = await appWebhookUrl(POT_AF_MAILWF, null, 'potVzMailUrl', poging > 0);
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: tekst, signal: AbortSignal.timeout(45000) });
+    if (r.status === 404 && poging === 0) continue;
+    let j = null; try { j = await r.json(); } catch (e) { j = null; }
+    return { status: r.status, j: j };
+  }
+  return { status: 404, j: null };
+}
+function potVzRegister(regel) {
+  const pad = path.join(VAULT, '01_Ontwikkeling', '0b-werkmap', 'conceptregister.jsonl');
+  fs.appendFileSync(pad, JSON.stringify(regel) + '\n');
+}
+const POT_VZ_IO = {
+  d1: function (batch) { return potDhD1(batch); },
+  luik: function (body) { return appAgendaApi(body); },
+  concept: potVzConcept,
+  pdftotext: potVzPdfTekst,
+  vault: function () { return potVzVault(); },
+  kaartZet: function (p) { return appSbRpc('mk_voor_jou_zet', { p: p }); },
+  kaartLijst: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); return (j && j.punten) || []; },
+  kaartDicht: function (sleutel, van, bewijs) { return appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: bewijs, p_reden: 'pot-verzend: vanzelf opgelost' }); },
+  register: potVzRegister,
+};
+// Box: één rij per reden per dag; tijdelijke storingen (luik, pdftotext, vault, kaarten) pas na 5 tikken op rij
+function potVzBox(reden, tekst) {
+  const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  if (potVz.box[reden] === dag) return;
+  potVz.box[reden] = dag;
+  try { bankBoxRij({ bron: 'pot-verzend', kop: reden, tekst: tekst }); } catch (e) { logError('pot-verzend-box', e); }
+}
+async function potVzTik() {
+  if (potVz.bezig || !potVzAan() || !rolPrimair()) return;
+  if (!process.env.CLOUDFLARE_API_TOKEN || !process.env.N8N_WEBHOOK_MAILCONCEPT || !process.env.N8N_WEBHOOK_AGENDA_API) { potVzBox('geheim', 'CLOUDFLARE_API_TOKEN, N8N_WEBHOOK_MAILCONCEPT of N8N_WEBHOOK_AGENDA_API ontbreekt in de pod'); return; }
+  potVz.bezig = true;
+  const t0 = Date.now();   // niet `nu`: dat is de logtijd-functie (Fable diffreview wv911 #1)
+  const meten = t0 - potVz.laatste_meting > 3600e3, kaarten = t0 - potVz.laatste_kaarten > 3600e3;
+  try {
+    const u = await POT_VZ_MOD.ronde(POT_VZ_IO, { meten: meten, kaarten: kaarten });
+    potVz.uitkomst = u; potVz.laatste = new Date().toISOString(); potVz.fouten_op_rij = 0;
+    if (meten) potVz.laatste_meting = t0;
+    if (kaarten && u.fouten.indexOf('kaarten') < 0) potVz.laatste_kaarten = t0;
+    if (u.geclaimd || u.concept || u.fout || u.onzeker || u.verzonden || u.opnieuw) schrijfLog(nu() + ' pot-verzend ' + velden({ geclaimd: u.geclaimd, concept: u.concept, adres: u.wacht_op_adres, fout: u.fout, onzeker: u.onzeker, verzonden: u.verzonden, opnieuw: u.opnieuw }));
+    ['luik', 'pdftotext', 'vault', 'kaarten', 'register'].forEach(function (r) { potVz.rij[r] = u.fouten.indexOf(r) >= 0 ? (potVz.rij[r] || 0) + 1 : 0; if (potVz.rij[r] === 5) potVzBox(r, 'stap ' + r + ' faalde 5 tikken op rij'); });
+    if (u.fouten.indexOf('dagplafond') >= 0) potVzBox('dagplafond', 'meer dan ' + POT_VZ_MOD.GRENS.perDag + ' concepten vandaag; de rest wacht tot morgen');
+  } catch (e) {
+    potVz.fouten_op_rij++; potVz.laatste_fout = new Date().toISOString();
+    logError('pot-verzend', e);
+    if (potVz.fouten_op_rij === 5) potVzBox('ronde', 'de ronde faalde 5 keer op rij: ' + String(e && e.message || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120));
+  } finally { potVz.bezig = false; }
+}
+setInterval(function () { potVzTik().catch(function (e) { logError('pot-verzend', e); }); }, POT_VZ_TIK_MS).unref();
+
 const POT_DH_STAAT = path.join(BANK_DIR, 'pot-datahub.json');
 const POT_DH_MAX_MS = 120000;
 let potDhBezig = false, potDhKapotDag = null;
