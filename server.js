@@ -14354,7 +14354,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30, 'harvester/kaart': 8, 'health-opgaven': 20 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30, 'health-opgaven': 20, 'harvester/kaart': 8 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
 const SMAL_CF_ACCOUNT = '23df9b0607bb70f6d7f15a63ec843d6d';
 const SMAL_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen
