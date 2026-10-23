@@ -388,7 +388,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -1390,6 +1390,33 @@ async function bewijs(o) {
       toets('9b percentages gelijk aan kolom % van de bus (alle 10), bron kolom', Object.keys(verwacht).every((n) => per[n] && per[n].pct === verwacht[n] && per[n].pct_bron === 'kolom'), JSON.stringify(Object.values(per).map((i) => [i.nr, i.pct, i.pct_bron])));
       toets('9b titel en kort plat (geen ** of [[ ]])', per[9] && /Socev-app/.test(per[9].titel) && per[2] && !/\*\*|\[\[/.test(per[2].titel) && per[9].kort && per[9].kort.length <= 240, JSON.stringify(per[2]) + JSON.stringify(per[9]));
       toets('9b idee 9: agent bezig (werkvoorraadrij + lopende job), 1 in de rij, 1 wacht op David', per[9].bezig.length === 1 && per[9].bezig[0].label === 'app layout + broedstoof-tab' && per[9].bezig[0].wv === 92 && per[9].in_rij === 1 && per[9].startklaar === 0 && per[9].wacht_op_david === 1, JSON.stringify(per[9]));
+      // wv891: per wachtende rij de titel in gewone taal en de Voor jou-kaart (tik = die kaart); geen label, prompt of bewijs
+      toets('9b wv891: wacht-lijst zonder kaart: titel uit geblokkeerd_door zonder "David:", stand geen, geen punt', Array.isArray(per[9].wacht) && per[9].wacht.length === 1 && per[9].wacht[0].titel === 'app-toets' && per[9].wacht[0].stand === 'geen' && per[9].wacht[0].punt === null && per[9].wacht[0].wv === 85, JSON.stringify(per[9].wacht));
+      toets('9b wv891: idee zonder wachtende rij heeft een lege wacht-lijst', Array.isArray(per[2].wacht) && per[2].wacht.length === 0, JSON.stringify(per[2].wacht));
+      {
+        const vjVoor = sbStaat.vj, vandaagB = H.appYmd(Date.now());
+        sbStaat.vj = [{ id: 901, sleutel: 'wv85', soort: 'besluit', titel: 'App-toets wv85 — nalopen?', status: 'open', prive: false, herkomst: { wv: [85], auto: 'wv' }, bewijs: 'GEHEIMBEWIJS', stappen: [] }];
+        H.appStaat.vjCache = null;
+        const rk = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+        const w9 = (rk.j.ideeen || []).find((i) => i.nr === 9).wacht;
+        toets('9b wv891: met kaart: punt = kaart-id, stand open, titel = kaarttitel in gewone taal (geen wv-nummer)', w9.length === 1 && w9[0].punt === 901 && w9[0].stand === 'open' && w9[0].titel === 'App-toets een klus van Socev — nalopen?', JSON.stringify(w9));
+        toets('9b wv891: wacht-lijst zonder label, prompt, bewijs of sleutel', !/GEHEIMBEWIJS|"sleutel"|"label"|"prompt"|machinekamer:toets/.test(JSON.stringify(w9)), JSON.stringify(w9));
+        const w85 = { id: 85, status: 'geblokkeerd', geblokkeerd_door: 'David: app-toets' };
+        const prv = [{ id: 902, prive: true, status: 'open', titel: 'Privé-kaart', herkomst: { wv: ['85'] } }, { id: 903, prive: true, status: 'open', titel: 'Tweede privé', herkomst: { wv: [85] } }];
+        const pv = H.appBroedWacht(w85, prv, { soort: 'vast' }, vandaagB), pr = H.appBroedWacht(w85, prv, { soort: 'reist' }, vandaagB);
+        toets('9b wv891: privé-kaart op een vaste plek: één regel, stand prive, geen titel en geen punt (Fable #2)', pv.length === 1 && pv[0].stand === 'prive' && pv[0].titel === null && pv[0].punt === null, JSON.stringify(pv));
+        toets('9b wv891: meereizend: beide privé-kaarten (wv als tekst telt ook), nieuwste eerst', pr.length === 2 && pr[0].punt === 903 && pr[1].punt === 902 && pr[1].titel === 'Privé-kaart', JSON.stringify(pr));
+        const bt = H.appBroedWacht(w85, [{ id: 904, prive: false, status: 'gedaan', titel: 'Al beantwoord', herkomst: { wv: [85] } }], { soort: 'reist' }, vandaagB);
+        toets('9b wv891: kaart dicht, rij wacht nog: stand beantwoord zonder punt', bt.length === 1 && bt[0].stand === 'beantwoord' && bt[0].punt === null && bt[0].titel === 'Al beantwoord', JSON.stringify(bt));
+        const lt = H.appBroedWacht(w85, [{ id: 905, prive: false, status: 'later', later_tot: '2999-01-01', titel: 'Later', herkomst: { wv: [85] } }], { soort: 'reist' }, vandaagB);
+        toets('9b wv891: kaart op later (datum nog niet bereikt) telt als beantwoord/dicht, niet open', lt[0].stand === 'beantwoord', JSON.stringify(lt));
+        toets('9b wv891: Voor jou niet leesbaar: stand onbekend met de tekst van de rij', JSON.stringify(H.appBroedWacht(w85, null, { soort: 'reist' }, vandaagB)) === JSON.stringify([{ wv: 85, titel: 'app-toets', punt: null, stand: 'onbekend' }]));
+        sbStaat.vjKapot = true; H.appStaat.vjCache = null;
+        const rkp = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
+        const k9 = (rkp.j.ideeen || []).find((i) => i.nr === 9);
+        toets('9b wv891: Voor jou-databank weg: broedstoof blijft 200, wacht_op_david 1, stand onbekend', rkp.status === 200 && k9.wacht_op_david === 1 && k9.wacht[0].stand === 'onbekend', JSON.stringify(k9 && k9.wacht));
+        sbStaat.vjKapot = false; sbStaat.vj = vjVoor; H.appStaat.vjCache = null;
+      }
       toets('9b idee 7: agent buiten de werkvoorraad via label "idee 7"', per[7].bezig.length === 1 && per[7].bezig[0].wv === null && /schaduwmeting/.test(per[7].bezig[0].label), JSON.stringify(per[7]));
       toets('9b idee 2: gestarte rij met afgeronde job telt niet als bezig; "idee 70" telt niet voor 7', per[2].bezig.length === 0 && per[7].bezig.length === 1, JSON.stringify(per[2]));
       toets('9b tikkerstand meegegeven (alleen doorwerk, dagmaximum)', r.j.tikker && r.j.tikker.alleen_doorwerk === true && r.j.tikker.starts_vandaag === 42 && /dagmaximum/.test(r.j.tikker.reden), JSON.stringify(r.j.tikker));
@@ -1470,6 +1497,38 @@ async function bewijs(o) {
       toets('9b /apparaat/aanvraag zonder open aanvraag: 200 zonder auditregel (stil)', r.status === 200 && r.j.aanvraag === null && fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nA0);
       toets('9b auditlog: voorrang-regels met idee, actie en van->naar', /"route":"\/app\/broedstoof\/voorrang".*"reden":"voorrang idee 9 eerder 0->1"/.test(auditB) && /"reden":"voorrang idee 5 normaal 2->0"/.test(auditB), auditB.split('\n').filter((l) => /broedstoof/.test(l)).slice(-3).join(' '));
       logs.splice(0, logs.length, ...logs.filter((l) => !/^app-broedstoof|^app-voorrang/.test(l)));
+    }
+
+    // ── 9c. Ochtendbriefing op het Overzicht (wv891) ──
+    {
+      const sB = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      sB.tot = Date.now() + 10 * 60000;
+      r = await vraag('GET', '/app/briefing', undefined, { pot: pot() });
+      toets('9c briefing zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      const HP = path.join(LOGDIR, 'hoofd.jsonl'), hVoor = fs.existsSync(HP) ? fs.readFileSync(HP, 'utf8') : null;
+      const tB = new Date(Date.now() - 2 * 3600000).toISOString(), tOud = new Date(Date.now() - 26 * 3600000).toISOString();
+      const regel = (o) => JSON.stringify(Object.assign({ soort: 'socev', ok: true, tekst: '' }, o)) + '\n';
+      fs.appendFileSync(HP, regel({ t: tOud, job_id: 'b0b0b0b0b0b0b0b1', bron: 'briefing', klasse: 'normaal', antwoord: '**🌅 Ochtendbericht**\n\nGoedemorgen David, gisteren' }) +
+        regel({ t: tB, job_id: 'b0b0b0b0b0b0b0b2', bron: 'briefing', klasse: 'normaal', antwoord: '**🌅 Ochtendbericht**\n\n**Goedemorgen David, vrijdag 23 oktober**\n\n**Vandaag**\n• Je agenda is **leeg**, rustige dag.\n• Bel [[Mensen/X|de fysio]] over de Compex.\nDeze week:\n- Derde regel.\n- Vierde regel.\n- Vijfde regel valt weg.' }) +
+        regel({ t: new Date(Date.parse(tB) + 30000).toISOString(), job_id: 'b0b0b0b0b0b0b0b3', bron: 'briefing', klasse: 'stil', antwoord: '🔊 Ochtendbriefing 23 oktober' }) +
+        regel({ t: new Date(Date.parse(tB) + 60000).toISOString(), job_id: 'b0b0b0b0b0b0b0b4', bron: 'heartbeat', klasse: 'normaal', antwoord: 'iets anders' }));
+      const nA = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
+      r = await vraag('GET', '/app/briefing', undefined, { pot: P.jar });
+      const b = r.j.briefing;
+      toets('9c laatste niet-stille briefing (niet de 🔊-regel of een andere bron), met job_id, t en dag (Amsterdam)', r.status === 200 && b && b.job_id === 'b0b0b0b0b0b0b0b2' && b.t === tB && b.dag === H.appYmd(Date.parse(tB)), JSON.stringify(r.j));
+      toets('9c kop plat uit de Goedemorgen-regel', b && b.kop === 'Goedemorgen David, vrijdag 23 oktober', b && b.kop);
+      toets('9c hooguit vier regels platte tekst, zonder tussenkoppen, ** of wikilinks', b && b.regels.length === 4 && b.regels[0] === '• Je agenda is leeg, rustige dag.' && b.regels[1] === '• Bel de fysio over de Compex.' && b.regels[2] === '• Derde regel.' && !b.regels.some((x) => /\*\*|\[\[|Deze week|Vijfde/.test(x)), JSON.stringify(b && b.regels));
+      await slaap(30);
+      toets('9c GET briefing (200) schrijft geen auditregel (stil)', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nA);
+      const kopZonder = H.appBriefingVorm({ job_id: 'x', t: tB, antwoord: 'Ik heb gekeken.\n\n**Maandag 26 oktober: drukke dag**\n\nTekst van de dag hier.' });
+      toets('9c kop-terugval: vetgedrukte regel met een weekdag; zonder herkenbare kop: kop null', kopZonder.kop === 'Maandag 26 oktober: drukke dag' && kopZonder.regels[0] === 'Tekst van de dag hier.' && H.appBriefingVorm({ job_id: 'x', t: tB, antwoord: 'Zomaar een tekst die lang genoeg is om inhoud te zijn.' }).kop === null, JSON.stringify(kopZonder));
+      // vaste plek: alleen de kop (zoals /app/vandaag de Gezin-agenda weglaat; Fable wv891 #5)
+      const uitV = H.appBriefingVoor(b, { soort: 'vast' }), uitR = H.appBriefingVoor(b, { soort: 'reist' });
+      toets('9c vaste plek: kop en job_id wel, regels leeg; meereizend alles', uitV && uitV.kop === b.kop && uitV.job_id === 'b0b0b0b0b0b0b0b2' && uitV.regels.length === 0 && uitR.regels.length === 4 && b.regels.length === 4 && H.appBriefingVoor(null, { soort: 'vast' }) === null, JSON.stringify(uitV));
+      if (hVoor === null) fs.unlinkSync(HP); else fs.writeFileSync(HP, hVoor);
+      r = await vraag('GET', '/app/briefing', undefined, { pot: P.jar });
+      toets('9c log zonder briefing: briefing null (geen fout)', r.status === 200 && r.j.briefing === null && r.j.fout === null, JSON.stringify(r.j));
+      logs.splice(0, logs.length, ...logs.filter((l) => !/^app-briefing/.test(l)));
     }
 
     // ── 11. fase 5a: tabs Agents en Bestanden (wv98) ──

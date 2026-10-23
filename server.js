@@ -7094,7 +7094,30 @@ async function appSbRpc(fn, body) {
 }
 function appLabelKort(l) { return String(l || '').replace(/^(machinekamer|socev):\s*/, '').replace(/^wv\d+\s+/, '').slice(0, 120); }
 function appAgentsReg() { return typeof agentsReg !== 'undefined' && agentsReg ? agentsReg : {}; }
-async function appBroedstoof(req, res) {
+// wv891 (David 23-10: "ik kan eigenlijk nergens zien wat er dan op mij wacht"): per werkvoorraadrij die op David wacht de titel in
+// gewone taal en de Voor jou-kaart erbij (koppeling herkomst.wv, zoals Agents). stand: open (tik = die kaart), beantwoord (kaart dicht,
+// de rij wacht nog op de verwerking), prive (privé-kaart op een vaste plek: geen titel), geen (geen kaart), onbekend (Voor jou niet
+// leesbaar). Titel = de kaarttitel, anders geblokkeerd_door zonder "David:"; nooit label, prompt, bewijs of sleutel (Fable wv891 #12).
+const APP_BROED_WACHT_MAX = 5;
+appStaat.broedZonderKaart = appStaat.broedZonderKaart || new Set();
+const appWachtOpDavid = function (w) { return w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')); };
+function appBroedWacht(w, vj, a, vandaag) {
+  const vast = !!(a && a.soort === 'vast');
+  const los = appKort(appVjGewoon(String(w.geblokkeerd_door || '').replace(/^\s*david\s*:?\s*/i, '')), 160) || 'wacht op jou';
+  if (!vj) return [{ wv: w.id, titel: los, punt: null, stand: 'onbekend' }];
+  const bij = vj.filter(function (p) { return ((p.herkomst && Array.isArray(p.herkomst.wv)) ? p.herkomst.wv : []).some(function (n) { return Number(n) === Number(w.id); }); })
+    .sort(function (x, y) { return y.id - x.id; });
+  const zicht = bij.filter(function (p) { return appVjZichtbaar(p, vandaag); });
+  const vorm = function (p, stand) {
+    return vast && p.prive === true ? { wv: w.id, titel: null, punt: null, stand: 'prive' } : { wv: w.id, titel: appKort(appVjGewoon(p.titel), 120), punt: stand === 'open' ? p.id : null, stand: stand };
+  };
+  // Fable wv891 #3: alle zichtbare kaarten van de rij (hooguit 3), een privé-kaart op een vaste plek één keer
+  let uit = zicht.length ? zicht.slice(0, 3).map(function (p) { return vorm(p, 'open'); }) : bij.length ? [vorm(bij[0], 'beantwoord')] : null;
+  if (uit) return uit.filter(function (x, i) { return x.stand !== 'prive' || uit.findIndex(function (y) { return y.stand === 'prive'; }) === i; });
+  if (!appStaat.broedZonderKaart.has(w.id)) { appStaat.broedZonderKaart.add(w.id); logError('app-broedstoof', new Error('wv' + w.id + ' wacht op David zonder open Voor jou-kaart')); }
+  return [{ wv: w.id, titel: los, punt: null, stand: 'geen' }];
+}
+async function appBroedstoof(req, res, a) {
   res._app.stil = true;   // elke 30 s per apparaat: geen auditregel bij 200 (Fable-review wv92 #8)
   let bus;
   try { bus = appBusLees(); } catch (e) { logError('app-broedstoof', e); return appWeiger(res, 503, 'de ideeënbus is nu niet leesbaar', 'bus onleesbaar'); }
@@ -7103,6 +7126,10 @@ async function appBroedstoof(req, res) {
   const reg = appAgentsReg();
   const loopt = function (a) { return a && (a.status === 'pending' || a.status === 'running'); };
   const items = (db && Array.isArray(db.items)) ? db.items : [];
+  // wv891: de Voor jou-kaarten alleen lezen als er iets op David wacht (zelfde cache als Voor jou; niet leesbaar = stand onbekend)
+  let vj = null;
+  if (items.some(appWachtOpDavid)) { try { vj = await appVjPunten(); } catch (e) { logError('app-broedstoof', e); vj = null; } }
+  const vandaagB = appYmd(Date.now());
   const voorrang = {};
   ((db && db.voorrang) || []).forEach(function (v) { voorrang[v.idee] = v; });
   const nu = Date.now();
@@ -7131,7 +7158,8 @@ async function appBroedstoof(req, res) {
       startklaar: open.filter(function (w) {
         return (!w.niet_voor || Date.parse(w.niet_voor) <= nu) && !w.wacht_op_item && !(w.wacht_op_job || []).some(function (j) { return loopt(reg[j]); });
       }).length,
-      wacht_op_david: rijen.filter(function (w) { return w.status === 'geblokkeerd' && /^david/i.test(String(w.geblokkeerd_door || '')); }).length,
+      wacht_op_david: rijen.filter(appWachtOpDavid).length,
+      wacht: [].concat.apply([], rijen.filter(appWachtOpDavid).map(function (w) { return appBroedWacht(w, vj, a, vandaagB); })).slice(0, APP_BROED_WACHT_MAX),   // wv891
       volgende: open.length ? appLabelKort(open[0].label) : null };
   });
   const ru = db && db.ruimte ? { mag: !!db.ruimte.mag, reden: String(db.ruimte.reden || '').slice(0, 160) } : null;
@@ -7155,6 +7183,57 @@ async function appBroedstoofVoorrang(req, res, reg, a, s, d) {
   res._app.reden = 'voorrang idee ' + idee + ' ' + actie + ' ' + r.van + '->' + r.voorrang;
   appStuur(res, 200, { ok: true, idee: idee, voorrang: r.voorrang, gewijzigd: r.gewijzigd === true });
 }
+
+// ── wv891: de ochtendbriefing op het Overzicht (mission control) ──
+// GET /app/briefing: het laatste briefingbericht van n8n in het hoofdkanaal (app-log hoofd.jsonl, bron briefing, niet de stille
+// 🔊-regel), als kop + hooguit vier regels platte tekst; de app toont hem alleen op zijn dag en tikt door naar het bericht (job_id).
+// Geen nieuwe opslag: alleen lezen, in het geheugen op mtime + grootte van het log (Fable wv891 #4c). Stil (de app leest hem met de
+// agenda, elke 15 min). Op een vaste plek alleen de kop, zoals /app/vandaag daar de Gezin-agenda weglaat (Fable wv891 #5).
+const APP_BRIEFING_REGELS = 4;
+function appBriefingPlat(r) {
+  return String(r || '').replace(/^#+\s*/, '').replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\((?:[^)]*)\)/g, '$1')
+    .replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, '$2').replace(/\s+/g, ' ').trim();
+}
+// kop: een regel met "Goedemorgen", anders de eerste vetgedrukte regel met een weekdag, anders geen (Fable wv891 #11). Tussenkoppen
+// (een hele regel vet, een #-kop of een kort woord zonder punt zoals "Vandaag") tellen niet als inhoud.
+function appBriefingVorm(x) {
+  const ruw = String(x.antwoord || '').split('\n').map(function (r) { return r.trim(); }).filter(Boolean);
+  const start = Math.max(0, ruw.findIndex(function (r) { return /ochtendbericht/i.test(r); }) + 1);
+  const l = ruw.slice(start);
+  const isKop = function (r) { return /^#/.test(r) || /^\*\*[^*]+\*\*:?$/.test(r); };
+  let k = l.findIndex(function (r) { return /^(\*\*)?\s*goedemorgen\b/i.test(r); });
+  if (k < 0) k = l.findIndex(function (r) { return isKop(r) && /(maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag)/i.test(r); });
+  const kop = k >= 0 ? appKort(appBriefingPlat(l[k]), 160) : null;
+  const regels = l.slice(k + 1).filter(function (r) {
+    if (isKop(r)) return false;
+    const p = appBriefingPlat(r);
+    const z = p.replace(/^[•\-*]\s*/, '');
+    return z && !(z.length <= 30 && !/^[•\-*]/.test(r) && !/[.!?]$/.test(z)) && !(z.length <= 40 && /:$/.test(z));   // tussenkop: 'Vandaag', 'Deze week:'
+  }).slice(0, APP_BRIEFING_REGELS).map(function (r) { return appKort(appBriefingPlat(r.replace(/^[-*]\s+/, '• ')), 200); });
+  return { job_id: x.job_id, t: x.t, dag: appYmd(Date.parse(x.t)), kop: kop, regels: regels };
+}
+async function appBriefingRoute(req, res, a) {
+  res._app.stil = true;
+  let st = null;
+  try { st = fs.statSync(appLogPad('hoofd')); } catch (e) { if (!(e && e.code === 'ENOENT')) logError('app-briefing', e); }
+  let b = null;
+  if (st) {
+    const c = appStaat.briefing;
+    if (c && c.mtime === st.mtimeMs && c.size === st.size) b = c.b;
+    else {
+      try {
+        const l = await appLogLees('hoofd');
+        for (let i = l.length - 1; i >= 0; i--) {
+          const x = l[i];
+          if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse !== 'stil' && x.ok !== false && /^[a-f0-9]{16}$/.test(String(x.job_id || '')) && String(x.antwoord || '').trim()) { b = appBriefingVorm(x); break; }
+        }
+        appStaat.briefing = { mtime: st.mtimeMs, size: st.size, b: b };
+      } catch (e) { logError('app-briefing', e); return appStuur(res, 200, { ok: true, briefing: null, fout: 'de briefing is nu niet te lezen' }); }
+    }
+  }
+  appStuur(res, 200, { ok: true, briefing: appBriefingVoor(b, a), vaste_plek: !!(a && a.soort === 'vast'), fout: null });
+}
+function appBriefingVoor(b, a) { return b ? (a && a.soort === 'vast' ? Object.assign({}, b, { regels: [] }) : b) : null; }
 
 // ── fase 5a: tabs Agents en Bestanden (wv98, 8-10-2026; bouwplan § 4.7 en § 4.9) ──
 // Bestanden: wat Socev in out/ zet bij een beurt in het hoofdkanaal of de machinekamer (Telegram of app) of bij een
@@ -10674,7 +10753,8 @@ function handleApp(req, res) {
         if (route === 'POST /app/rij/terug') return appRijTerug(req, res, a, d);   // wv628
         if (route.indexOf('GET /app/geschiedenis/') === 0) return appGeschiedenis(req, res, reg, a, route.slice('GET /app/geschiedenis/'.length));
         if (route === 'POST /app/zoek') return appZoek(req, res, a, d);   // wv350
-        if (route === 'GET /app/broedstoof') return appBroedstoof(req, res);
+        if (route === 'GET /app/broedstoof') return appBroedstoof(req, res, a);   // wv891: apparaat (privé-kaart op een vaste plek)
+        if (route === 'GET /app/briefing') return appBriefingRoute(req, res, a);   // wv891
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
         if (route === 'GET /app/agents') return appAgents(req, res, a);
         if (route.indexOf('GET /app/agent/') === 0) return appAgentRapport(req, res, route.slice('GET /app/agent/'.length));
