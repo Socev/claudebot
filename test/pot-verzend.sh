@@ -260,6 +260,11 @@ const ronde = (o) => V.ronde(io, o);
   const sj = fs.readFileSync('server.js', 'utf8'); const i = sj.indexOf('async function potVzTik()'); const tik = sj.slice(i, sj.indexOf('\nsetInterval(', i));
   toets('potVzTik overschaduwt nu() niet', i > 0 && !/\b(const|let|var)\s+nu\b/.test(tik) && /schrijfLog\(nu\(\)/.test(tik));
 
+  // kaartgrenzen van de databank (titel ≤ 90, waarom ≤ 400, meting ≤ 300)
+  const lang = Array.from({ length: 30 }, (_, i) => ({ id: i, nummer: '2026' + (500 + i), fout: 'de PDF hoort niet bij deze nota (mist nummer, bedrag, praktijknaam)', deadline: '2026-11-02', praktijk: 'Huisartsenpraktijk Korte Geer', reden: 'op de pagina Huisartsenpraktijk Korte Geer staat nog geen factuuradres (veld facturen_aan)', opmerking: 'geen_adres' }));
+  const ka = [V.kaartFout(lang, '1-1 07:00'), V.kaartAdres(lang, '1-1 07:00'), V.kaartGepland('SLOEL', '2026-11-02', lang.map((x) => ({ ...x, onderwerp: 'Factuur SLOEL - Correctie doorbelaste huur 2026' })), '1-1 07:00')];
+  toets('kaarten blijven binnen de databankgrenzen', ka.every((p) => p.titel.length >= 3 && p.titel.length <= 90 && p.waarom.length <= 400 && p.meting.length <= 300 && p.stappen.length <= 12 && /^[a-z0-9][a-z0-9-]{1,60}$/.test(p.sleutel)), ka.map((p) => [p.titel.length, p.waarom.length, p.meting.length]));
+
   // 13. mailbody
   const mb = V.mailBody({ onderwerp: 'O', bericht: 'B', van: null, pdf_naam: 'x.pdf', pdf_b64: 'QQ==' }, { aan: ['a@b.example', 'c@d.example'], cc: [] });
   toets('mailbody: meerdere adressen komma-gescheiden, geen lege cc of van', mb.aan === 'a@b.example, c@d.example' && !('cc' in mb) && !('van' in mb) && !('secret' in mb), mb);

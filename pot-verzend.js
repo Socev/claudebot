@@ -127,10 +127,13 @@ function mailBody(rij, ontv) {
 
 // ── Voor jou ─────────────────────────────────────────────────────────────────
 const dm = (iso) => { const [j, m, d] = String(iso).slice(0, 10).split('-'); return `${Number(d)}-${Number(m)}`; };
+// Grenzen van machinekamer.voor_jou (CHECK): titel 3–90, waarom ≤ 400, meting ≤ 300, ≤ 12 stappen; anders weigert de databank de kaart
+const kap = (t, n) => { t = String(t || ''); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+function kaartGrens(p) { return Object.assign(p, { titel: kap(p.titel, 90), waarom: kap(p.waarom, 400), meting: kap(p.meting, 300), stappen: (p.stappen || []).slice(0, 12) }); }
 const korteHash = (s) => crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 8);
 function kaartGepland(ent, plan, rijen, nuKort) {
   const nrs = rijen.map((r) => r.nummer).sort();
-  return { sleutel: `pot-verzend-${ent.toLowerCase()}-${plan}`, soort: 'doen', volgorde: 25, deadline: plan, waar: 'overal', prive: true, duur_min: 2 + rijen.length,
+  return kaartGrens({ sleutel: `pot-verzend-${ent.toLowerCase()}-${plan}`, soort: 'doen', volgorde: 25, deadline: plan, waar: 'overal', prive: true, duur_min: 2 + rijen.length,
     titel: `${ENT_NAAM[ent] || ent}-nota's van ${dm(plan)} — versturen`,
     herkomst: { handmatig: 'pot-verzend', entiteit: ent, plan_datum: plan },
     waarom: `Je liet in de POT-app ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} klaarzetten voor ${dm(plan)}. Socev heeft vanochtend per nota een concept in Gmail gezet, met de PDF eraan, aan het factuuradres uit de Second Brain. Versturen doe je zelf.`,
@@ -138,12 +141,12 @@ function kaartGepland(ent, plan, rijen, nuKort) {
       `Zoek de concepten van ${nrs.length > 1 ? `de nota's ${nrs.join(', ')}` : `nota ${nrs[0]}`} (onderwerp ${rijen[0].onderwerp}).`,
       'Kijk per concept de ontvanger, de tekst en de PDF na en verstuur het.',
       "In de POT-app (tab Nota's) staat binnen een uur 'verzonden'; deze kaart gaat dan vanzelf dicht."],
-    meting: `${nuKort}: ${rijen.length} concept${rijen.length > 1 ? 'en staan' : ' staat'} klaar in Gmail.` };
+    meting: `${nuKort}: ${rijen.length} concept${rijen.length > 1 ? 'en staan' : ' staat'} klaar in Gmail.` });
 }
 function kaartAdres(rijen, nuKort) {
   const regels = [...new Set(rijen.map((r) => `${r.praktijk}: ${r.reden}`))];
   const bevestig = rijen.some((r) => /^adres_(gewijzigd|nieuw)/.test(r.opmerking || ''));
-  return { sleutel: 'pot-verzend-adres-' + korteHash(rijen.map((r) => r.id).sort().join(',')), soort: 'doen', volgorde: 22, waar: 'overal', prive: true, duur_min: 5,
+  return kaartGrens({ sleutel: 'pot-verzend-adres-' + korteHash(rijen.map((r) => r.id).sort().join(',')), soort: 'doen', volgorde: 22, waar: 'overal', prive: true, duur_min: 5,
     deadline: rijen.map((r) => r.deadline).sort()[0],
     titel: `POT-app — factuuradres ${bevestig ? 'bevestigen of ' : ''}aanvullen (${rijen.length} nota${rijen.length > 1 ? "'s" : ''})`,
     herkomst: { handmatig: 'pot-verzend', soort: 'adres', ids: rijen.map((r) => r.id) },
@@ -151,10 +154,10 @@ function kaartAdres(rijen, nuKort) {
     stappen: [...(bevestig ? ["Klopt het nieuwe adres? Open de POT-app, tab Nota's, en tik bij de nota op 'adres klopt'."] : []),
       "Ontbreekt of klopt het adres niet: open in Obsidian de pagina van de praktijk (map Zakelijk › HAGRO › Praktijken, of de hoofdpagina van Groenhouten of Tolgaarde) en zet bij de eigenschappen facturen_aan op het juiste mailadres (fin_praktijk noemt de praktijk in de POT-app).",
       'Socev kijkt elke tien minuten opnieuw en zet het concept dan vanzelf klaar; deze kaart gaat daarna dicht.'],
-    meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s wachten" : ' wacht'} op een factuuradres.` };
+    meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s wachten" : ' wacht'} op een factuuradres.` });
 }
 function kaartFout(rijen, nuKort) {
-  return { sleutel: 'pot-verzend-fout-' + korteHash(rijen.map((r) => r.id).sort().join(',')), soort: 'doen', volgorde: 21, waar: 'overal', prive: true, duur_min: 5,
+  return kaartGrens({ sleutel: 'pot-verzend-fout-' + korteHash(rijen.map((r) => r.id).sort().join(',')), soort: 'doen', volgorde: 21, waar: 'overal', prive: true, duur_min: 5,
     deadline: rijen.map((r) => r.deadline).sort()[0],
     titel: `POT-app — ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} niet klaargezet`,
     herkomst: { handmatig: 'pot-verzend', soort: 'fout', ids: rijen.map((r) => r.id) },
@@ -162,7 +165,7 @@ function kaartFout(rijen, nuKort) {
     stappen: ["Open de POT-app, tab Nota's: bij deze nota's staat 'niet gelukt' (houd je vinger op het label voor de reden).",
       "Selecteer ze en tik nog eens op 'Zet klaar voor verzending'. Lukt het weer niet, zeg het dan in de machinekamer.",
       'Deze kaart gaat vanzelf dicht zodra ze opnieuw klaarstaan.'],
-    meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} niet klaargezet.` };
+    meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} niet klaargezet.` });
 }
 
 // ── de ronde ─────────────────────────────────────────────────────────────────
