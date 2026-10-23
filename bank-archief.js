@@ -99,16 +99,48 @@ function maskeer(t, n, extra) {
   return s.replace(/\b(d\.?\s*)?schaap\b/gi, '[eigen]').replace(/\bdavid\b/gi, '[eigen]').replace(/\bcynthia\b/gi, '[eigen]')
     .replace(/\b[A-Z]{2}\d{2}[A-Z0-9 ]{10,30}\b/g, '[iban]').replace(/\d{7,}/g, '#').replace(/\s+/g, ' ').trim().slice(0, n || 140) || null;
 }
-function maskerLijst(a) {
+function maskerLijst(a, minWoorden) {
   let l = [];
   try { l = JSON.parse(metaLees(a, 'masker_namen') || '[]'); } catch (e) { l = []; }
-  return (Array.isArray(l) ? l : []).filter(function (x) { return typeof x === 'string' && x.trim().length >= 2; })
+  return (Array.isArray(l) ? l : []).filter(function (x) { return typeof x === 'string' && x.trim().length >= 2 && x.trim().split(/\s+/).length >= (minWoorden || 1); })
     .map(function (x) { return new RegExp('(?<![\\p{L}])' + x.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '(?![\\p{L}])', 'giu'); });
 }
 function maskerZet(a, namen) {
   const l = (Array.isArray(namen) ? namen : []).map(function (x) { return String(x).normalize('NFC').trim(); }).filter(function (x) { return x.length >= 2 && x.length <= 60 && /^[\p{L} .'-]+$/u.test(x); });
   metaZet(a, 'masker_namen', JSON.stringify(Array.from(new Set(l))));
   return { namen: l.length };
+}
+// wv847 (Ja David 23-10-2026 03:01, #bank-eigen-intern): een overboeking van of naar een rekening op Davids of Cynthia's naam die
+// niet in de bankluis gekoppeld is, telt als intern (buiten de uitgaven- en inkomstentotalen), zonder paar. Alleen als de
+// tegenpartij níets anders draagt dan eigen namen (als maskeer: d. schaap, david, cynthia, masker_namen van ≥ 2 woorden) plus
+// voorletters, aanspreekvormen en "en/of". Achternaam alleen of met een andere voorletter ("J Schaap": familie) en een naam met
+// een rechtsvorm of een ander woord ("D Schaap Beheer BV": de zaak) blijven buiten. Meting 23-10: 1.536 posten op 13 tegen-IBAN's.
+const EIGEN_VULWOORD = new Set(['hr', 'dhr', 'mw', 'mevr', 'mevrouw', 'heer', 'mr', 'dr', 'drs', 'ing', 'en', 'of', 'eo', 'e', 'o']);
+function eigenNaam(tegenpartij, extra) {
+  if (!tegenpartij) return false;
+  let s = ' ' + String(tegenpartij).normalize('NFC').toLowerCase() + ' ', eigen = false;
+  if (/(?<![\p{L}])(b\.?\s?v|n\.?\s?v|v\.?\s?o\.?\s?f|c\.?\s?v)\.?(?![\p{L}])/u.test(s)) return false;
+  const weg = function (re) { s = s.replace(re, function () { eigen = true; return ' '; }); };
+  (extra || []).forEach(function (re) { weg(new RegExp(re.source, re.flags)); });
+  weg(/(?<![\p{L}])(?<!(?<![\p{L}])\p{L}\.\s?)d\.?\s*schaap(?![\p{L}])/gu);   // niet "J.D. Schaap" (Fable wv847 #1), wel "Dhr. D. Schaap"
+  weg(/(?<![\p{L}])(david|cynthia)(?![\p{L}])/gu);
+  s = s.replace(/(?<![\p{L}])schaap(?![\p{L}])/gu, ' ');   // de achternaam telt alleen naast een eigen voornaam of voorletter
+  return eigen && s.replace(/[^\p{L}]+/gu, ' ').trim().split(' ').filter(Boolean).every(function (w) { return (w.length <= 2 && w !== 'zn') || EIGEN_VULWOORD.has(w); });
+}
+// Context voor eigenOnbekend: alle IBAN's in de bankluis (ook extern en POT) plus de zakelijke IBAN's; die zijn nooit 'niet gekoppeld'.
+function eigenCtx(a) {
+  const ibans = new Set(a.db.prepare('SELECT iban FROM rekeningen WHERE iban IS NOT NULL').all().map(function (r) { return ibanNorm(r.iban); }));
+  Object.keys(zakelijkeIbans(a)).forEach(function (i) { ibans.add(ibanNorm(i)); });
+  // alleen maskernamen van twee of meer woorden (Cynthia's meisjesnaam): een kindernaam alleen is geen rekening van David of Cynthia
+  // (Davids Ja ging over hen twee; "I Schaap" bleef al buiten, Fable wv847 #2)
+  return { ibans: ibans, extra: maskerLijst(a, 2), cache: new Map() };
+}
+// Post naar of van een eigen, niet-gekoppelde rekening: tegen-IBAN verplicht en onbekend, niet op een afgescheiden rekening, eigen naam.
+function eigenOnbekend(ctx, t, ext) {
+  if (!t.tegen_iban || ctx.ibans.has(ibanNorm(t.tegen_iban)) || ext.has(t.rek)) return false;
+  const k = String(t.tegenpartij || '');
+  if (!ctx.cache.has(k)) ctx.cache.set(k, eigenNaam(k, ctx.extra));
+  return ctx.cache.get(k);
 }
 function geldigLabel(v, n) { return typeof v === 'string' && /^[\p{L}\p{N}][\p{L}\p{N} .,&'()\-/]{0,79}$/u.test(v.trim()) && v.trim().length <= (n || 40) ? v.trim() : null; }
 
@@ -328,6 +360,7 @@ function verrijkBinnen(a) {
   const regels = db.prepare("SELECT * FROM regels WHERE actief = 1 AND herkomst IN ('david', 'machinekamer') ORDER BY herkomst = 'david' DESC, id DESC").all();
   const ext = externeRekeningen(a), pot = potRekeningen(a);
   const ai = new Map(db.prepare('SELECT * FROM ai_groepen').all().map(function (g) { return [g.sleutel, g]; }));
+  const eigen = eigenCtx(a);
 
   // 1. interne overboekingen en paren (zelfde bedrag tegengesteld, ± 3 dagen, op de andere eigen rekening)
   const intern = new Map(), paar = new Map(), perRekBedrag = new Map();
@@ -372,6 +405,7 @@ function verrijkBinnen(a) {
       const naarExt = doel && ext.has(doel) && !ext.has(t.rek) ? doel : null;
       if (naarExt || ext.has(t.rek)) doel = null;
       const ts = woordSleutel(t.tegenpartij), rt = richting(t.bedrag);
+      const eigenOnb = !doel && !naarExt && eigenOnbekend(eigen, t, ext);   // wv847
       let n;
       {
         const r = regels.find(function (g) {
@@ -381,6 +415,8 @@ function verrijkBinnen(a) {
           if (g.soort === 'intern') return !!doel && g.patroon === doel;
           if (g.soort === 'extern') return !!naarExt && g.patroon === naarExt;
           if (g.herkomst !== 'david') return false;
+          // wv847: David wijst een niet-gekoppelde tegenrekening aan (bv. een rekening van de zaak: inkomen in plaats van intern)
+          if (g.soort === 'tegen_iban') return !doel && !naarExt && !!t.tegen_iban && g.patroon === ibanNorm(t.tegen_iban);
           if (g.soort === 'tegenpartij') return !doel && !naarExt && !!ts && g.patroon === ts;
           return false;
         });
@@ -395,11 +431,19 @@ function verrijkBinnen(a) {
           n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: pot.has(naarExt) ? (t.bedrag < 0 ? 'overig' : 'overig inkomen') : null, subcategorie: pot.has(naarExt) ? POT : null, ai_omschrijving: (t.bedrag < 0 ? 'Naar ' : 'Van ') + (rekeningNaam(reks.get(naarExt)) || 'externe rekening'),
             eigenaar: null, herkomst: 'regel', regel_id: null };
         } else if (pot.has(t.rek)) n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: potCategorie(t), subcategorie: null, ai_omschrijving: null, eigenaar: null, herkomst: 'regel', regel_id: null };
-        else if (g) n = { type: g.type || (t.bedrag < 0 ? 'uitgave' : 'inkomst'), categorie: g.categorie, subcategorie: g.subcategorie, ai_omschrijving: g.ai_omschrijving, eigenaar: null, herkomst: 'ai', regel_id: null };
+        else if (eigenOnb) {
+          // wv847: naar of van een eigen rekening die niet gekoppeld is; wint van de AI (systeemregel), niet van David
+          n = { type: 'intern', categorie: /spaar/i.test(String(t.omschrijving || '')) || (g && g.categorie === 'sparen en beleggen') ? 'sparen en beleggen' : 'intern',
+            subcategorie: null, ai_omschrijving: (t.bedrag < 0 ? 'Naar' : 'Van') + ' eigen rekening (niet gekoppeld)', eigenaar: null, herkomst: 'regel', regel_id: null };
+        } else if (g) n = { type: g.type || (t.bedrag < 0 ? 'uitgave' : 'inkomst'), categorie: g.categorie, subcategorie: g.subcategorie, ai_omschrijving: g.ai_omschrijving, eigenaar: null, herkomst: 'ai', regel_id: null };
         else n = { type: t.bedrag < 0 ? 'uitgave' : 'inkomst', categorie: null, subcategorie: null, ai_omschrijving: null, eigenaar: null, herkomst: 'regel', regel_id: null };
         if (r) {
           // Een regel met een andere categorie dan de AI: subcategorie, type en omschrijving van de AI horen er niet meer bij (tegenlezing #1)
-          if (r.categorie != null && !doel && !naarExt && !(g && g.categorie === r.categorie)) { n.ai_omschrijving = null; n.subcategorie = null; n.type = t.bedrag < 0 ? 'uitgave' : 'inkomst'; }
+          if (r.categorie != null && !doel && !naarExt && (eigenOnb || !(g && g.categorie === r.categorie))) {
+            n.ai_omschrijving = null; n.subcategorie = null;
+            // wv847: een eigen rekening die David als 'intern' of 'sparen en beleggen' aanwijst, blijft intern
+            n.type = eigenOnb && CAT_OVER.indexOf(r.categorie) >= 0 ? 'intern' : t.bedrag < 0 ? 'uitgave' : 'inkomst';
+          }
           ['type', 'categorie', 'subcategorie'].forEach(function (k) { if (r[k] != null) n[k] = r[k]; });
           n.herkomst = 'regel'; n.regel_id = r.id;
           if (r.eigenaar) n.eigenaar = r.eigenaar;
@@ -412,7 +456,7 @@ function verrijkBinnen(a) {
       if (oud && oud.herkomst === 'david') {
         let vast = oud.david_velden ? oud.david_velden.split(',') : OORDEEL;
         // Zette David een andere categorie dan de berekende, dan horen subcategorie en type van regel/AI er niet bij (tegenlezing #1)
-        if (vast.indexOf('categorie') >= 0 && oud.categorie !== n.categorie) { n.subcategorie = null; if (!doel) n.type = t.bedrag < 0 ? 'uitgave' : 'inkomst'; }
+        if (vast.indexOf('categorie') >= 0 && oud.categorie !== n.categorie) { n.subcategorie = null; if (!doel) n.type = eigenOnb && CAT_OVER.indexOf(oud.categorie) >= 0 ? 'intern' : t.bedrag < 0 ? 'uitgave' : 'inkomst'; }
         // een type 'intern' dat David zette voordat de tegenrekening extern werd, blijft niet staan: extern is nooit intern
         if ((naarExt || ext.has(t.rek)) && vast.indexOf('type') >= 0 && oud.type === 'intern') vast = vast.filter(function (k) { return k !== 'type'; });
         vast.forEach(function (k) { if (OORDEEL.indexOf(k) >= 0) n[k] = oud[k]; });
@@ -859,7 +903,10 @@ function corrigeer(a, o) {
       // naar een externe rekening: regel op die rekening, voor elke eigen rekening; een post óp de externe rekening: regel alleen
       // voor die rekening (anders kregen Davids eigen posten bij dezelfde tegenpartij haar categorie en eigenaar; Fable wv709 #2)
       const doel = naarExt || ext.has(t.rek) || (tegenRek && ext.has(tegenRek)) ? null : tegenRek;
-      const soort = naarExt ? 'extern' : doel ? 'intern' : 'tegenpartij', patroon = naarExt || doel || woordSleutel(t.tegenpartij);
+      // wv847: bij een eigen, niet-gekoppelde rekening geldt de regel voor die ene tegenrekening (David wijst per rekening aan),
+      // niet voor alle posten met zijn eigen naam als tegenpartij
+      const eigenIban = !doel && !naarExt && eigenOnbekend(eigenCtx(a), t, ext) ? ibanNorm(t.tegen_iban) : null;
+      const soort = naarExt ? 'extern' : doel ? 'intern' : eigenIban ? 'tegen_iban' : 'tegenpartij', patroon = naarExt || doel || eigenIban || woordSleutel(t.tegenpartij);
       if (patroon) {
         const rk = doel || ext.has(t.rek) ? t.rek : null, rt = richting(t.bedrag);
         a.db.prepare("UPDATE regels SET actief = 0 WHERE herkomst = 'david' AND actief = 1 AND soort = ? AND patroon = ? AND rek IS ? AND richting = ?").run(soort, patroon, rk, rt);
@@ -961,7 +1008,7 @@ function internLijst(a, o) {
     let_op: 'per overboeking één regel (de afschrijving); de bijschrijving op de andere rekening is het paar',
     overboekingen: rijen.slice(0, max).map(function (t) {
       const naar = t.paar_rek || ibanRek.get(tegen.get(t.nr));
-      return { nr: t.nr, datum: t.datum, van: rekeningNaam(reks.get(t.rek)), naar: rekeningNaam(reks.get(naar)) || 'eigen rekening', bedrag: r2(-t.bedrag),
+      return { nr: t.nr, datum: t.datum, van: rekeningNaam(reks.get(t.rek)), naar: rekeningNaam(reks.get(naar)) || (t.paar_rek ? 'eigen rekening' : 'eigen rekening (niet gekoppeld)'), bedrag: r2(-t.bedrag),
         omschrijving: t.omschrijving ? String(t.omschrijving).slice(0, 80) : null, paar: t.intern_paar || undefined };
     }) };
 }

@@ -181,6 +181,74 @@ const p = (id, datum, bedrag, tegen, omschr, extra) => Object.assign({ id: id, d
       toets('zelfde milliseconde: wachtende post toch vervangen', a.db.prepare("SELECT status FROM transacties WHERE bron_id = 'v:ms'").get().status === 'vervangen', null);
     }
 
+    // ── wv847: overboeking naar of van een eigen rekening die niet gekoppeld is (Ja David 23-10, #bank-eigen-intern) ──
+    {
+      const BO = path.join(W, 'bank-eigen');
+      const o = A.open(BO);
+      const IO = { gez: 'NL00ABNA0777777777', prive: 'NL11BUNQ0000000071', eliz: 'NL08BUNQ0000000073', ing: 'NL44INGB0000000074', zaak: 'NL55RABO0000000075',
+        ander: 'NL66ASNB0000000076', pot: 'NL77ABNA0000000077', fam: 'NL88INGB0000000078' };
+      A.rekeningenSync(o, { gez: { uid: 'u7', bank: 'ABN AMRO', naam: 'Vaste lasten', iban: IO.gez, sessie: 's7' },
+        prive: { bron: 'bunq', uid: 'bunq-71', bunq_id: 71, naam: 'Privé', soort: 'lopend', iban: IO.prive, status: 'ACTIVE' },
+        eliz: { bron: 'bunq', uid: 'bunq-73', bunq_id: 73, naam: 'Elizabeth', soort: 'lopend', iban: IO.eliz, status: 'ACTIVE' } });
+      A.corrigeer(o, { rek: 'eliz', eigenaar: 'extern' });
+      A.maskerZet(o, ['van Testnaam', 'Kidnaam']);
+      A.zakelijkZet(o, { [IO.pot]: 'POT' });
+      const d = (n) => dagTerug(n), mnd = (k) => dagTerug(3 + 30 * k);
+      A.bij(o, 'prive', [p('o:1', d(4), -200, 'D Schaap', 'overboeking', { tegen_iban: IO.ing }), p('o:2', d(4), 300, 'CYNTHIA VAN TESTNAAM', 'terug', { tegen_iban: IO.ander }),
+        p('o:3', d(4), -50, 'J Schaap', 'verjaardag', { tegen_iban: IO.fam }), p('o:4', d(4), 1000, 'D Schaap Beheer B.V.', 'uitkering', { tegen_iban: IO.zaak }),
+        p('o:5', d(4), -100, 'D Schaap', 'naar spaarrekening', { tegen_iban: IO.ing }), p('o:6', d(4), -75, 'D Schaap', 'contant'),
+        p('o:7', d(4), -20, 'David Jansen', 'lunch', { tegen_iban: IO.fam }), p('o:8', d(4), -60, 'D Schaap', 'geld', { tegen_iban: IO.eliz }),
+        p('o:10', d(4), -80, 'D Schaap', 'loon', { tegen_iban: IO.pot }), p('o:12', d(6), 500, 'D Schaap', 'dividend', { tegen_iban: IO.zaak }),
+        p('o:13', d(5), 600, 'D Schaap', 'dividend', { tegen_iban: IO.zaak }), p('o:14', d(5), 700, 'D Schaap', 'terug', { tegen_iban: IO.ing }),
+        p('o:15', d(4), -30, 'Dhr. D. Schaap', null, { tegen_iban: IO.ing }),
+        p('o:16', d(4), -35, 'J.D. Schaap', 'cadeau', { tegen_iban: IO.fam }), p('o:17', d(4), -45, 'Kidnaam Schaap', 'zakgeld', { tegen_iban: IO.fam }),
+        p('o:18', d(4), -55, 'D Schaap & Zn', 'hout', { tegen_iban: IO.fam })].concat([0, 1, 2, 3].map((k) => p('o:m' + k, mnd(k), -500, 'D Schaap eo C van Testnaam', 'maandelijks', { tegen_iban: IO.ander }))), {});
+      A.bij(o, 'eliz', [p('o:9', d(4), 40, 'D Schaap', 'van eigen', { tegen_iban: IO.ing })], {});
+      A.verrijk(o);
+      const vo = (bron) => o.db.prepare('SELECT v.* FROM verrijking v JOIN transacties t ON t.nr = v.nr WHERE t.bron_id = ?').get(bron);
+      const no = (bron) => o.db.prepare('SELECT nr FROM transacties WHERE bron_id = ?').get(bron).nr;
+      const isEigen = (b) => vo(b).type === 'intern' && vo(b).herkomst === 'regel' && vo(b).intern_paar == null && /eigen rekening \(niet gekoppeld\)/.test(vo(b).ai_omschrijving || '');
+      toets('eigen niet gekoppeld (wv847): naar en van een eigen naam met onbekende IBAN is intern, zonder paar, "Naar/Van eigen rekening (niet gekoppeld)"',
+        isEigen('o:1') && isEigen('o:2') && isEigen('o:14') && isEigen('o:15') && vo('o:1').categorie === 'intern' && /^Naar/.test(vo('o:1').ai_omschrijving) && /^Van/.test(vo('o:2').ai_omschrijving), ['o:1', 'o:2', 'o:14', 'o:15'].map(vo));
+      toets('eigen niet gekoppeld: omschrijving met spaar → sparen en beleggen', isEigen('o:5') && vo('o:5').categorie === 'sparen en beleggen', vo('o:5'));
+      toets('eigen niet gekoppeld: "D Schaap eo C <meisjesnaam>" ook intern', isEigen('o:m0') && isEigen('o:m3'), vo('o:m0'));
+      toets('eigen niet gekoppeld: andere voorletter (ook J.D.), rechtsvorm, & Zn, andere David, kindernaam, geen IBAN blijven buiten', ['o:3', 'o:4', 'o:6', 'o:7', 'o:16', 'o:17', 'o:18'].every((b) => vo(b).type !== 'intern'), ['o:3', 'o:4', 'o:6', 'o:7', 'o:16', 'o:17', 'o:18'].map(vo));
+      toets('eigen niet gekoppeld: naar de externe rekening, de POT-IBAN of óp de externe rekening nooit intern', vo('o:8').type === 'uitgave' && vo('o:10').type === 'uitgave' && vo('o:9').type === 'inkomst', ['o:8', 'o:9', 'o:10'].map(vo));
+      const mo = A.maand(o, { maand: d(4).slice(0, 7) });
+      toets('eigen niet gekoppeld: maand telt ze als intern, niet in de totalen, niet als nog niet ingedeeld',
+        mo.intern.aantal >= 5 && !mo.per_categorie.some((x) => x.categorie === 'intern' || x.categorie === 'sparen en beleggen') && mo.totaal_in === Math.round(mo.per_categorie.reduce((s, x) => s + x.in, 0) * 100) / 100 &&
+        !mo.per_categorie.some((x) => x.in === 300 || x.in === 700), mo);
+      toets('eigen niet gekoppeld: niet naar het taalmodel', !A.aiOpen(o, 500).groepen.some((g) => /overboeking|maandelijks|naar spaar|^terug$/.test(g.omschrijving || '')), A.aiOpen(o, 500).groepen);
+      toets('eigen niet gekoppeld: vaste maandelijkse overboeking is geen abonnement', !A.abonnementen(o, { alle: true }).abonnementen.some((b) => b.bedrag === 500), A.abonnementen(o, { alle: true }));
+      const il = A.internLijst(o, {});
+      toets('eigen niet gekoppeld: intern-lijst toont ze met "eigen rekening (niet gekoppeld)"', il.overboekingen.some((x) => x.bedrag === 200 && x.naar === 'eigen rekening (niet gekoppeld)') && il.zonder_paar >= 5, il);
+      let fo = null;
+      try { A.vasteLasten(o, {}); A.stroom(o, {}); A.zoek(o, { type: 'intern' }); A.stand(o); } catch (x) { fo = x.message; }
+      toets('eigen niet gekoppeld: vaste-lasten, stroom, zoek en stand breken niet op een intern zonder paar', !fo || /^rekening:/.test(fo), fo);
+      // de regel wint van de AI (systeemregel), niet van David
+      o.db.prepare("INSERT OR REPLACE INTO ai_groepen (sleutel, type, categorie, subcategorie, ai_omschrijving, model, gemaakt) VALUES (?, 'uitgave', 'overig', NULL, 'iets', 'x', '2026-10-23')")
+        .run(A.groepSleutel({ bedrag: -200, tegenpartij: 'D Schaap', omschrijving: 'overboeking' }));
+      A.metaZet(o, 'vuil', '1'); A.verrijk(o);
+      toets('eigen niet gekoppeld: wint van een AI-oordeel op dezelfde groep', isEigen('o:1'), vo('o:1'));
+      // David wijst een tegenrekening aan (de zaak): regel per tegen-IBAN, niet voor al zijn posten met dezelfde naam
+      A.corrigeer(o, { nr: no('o:12'), categorie: 'inkomen' });
+      toets('eigen niet gekoppeld: correctie van David geldt voor die tegenrekening (inkomen), andere eigen rekening blijft intern',
+        vo('o:12').type === 'inkomst' && vo('o:12').categorie === 'inkomen' && vo('o:13').type === 'inkomst' && vo('o:13').categorie === 'inkomen' && vo('o:13').herkomst === 'regel' &&
+        isEigen('o:14') && o.db.prepare("SELECT soort FROM regels WHERE herkomst = 'david' AND actief = 1 ORDER BY id DESC").get().soort === 'tegen_iban', ['o:12', 'o:13', 'o:14'].map(vo));
+      A.corrigeer(o, { nr: no('o:1'), categorie: 'sparen en beleggen', regel: false });
+      toets('eigen niet gekoppeld: David zet sparen en beleggen → blijft intern', vo('o:1').type === 'intern' && vo('o:1').categorie === 'sparen en beleggen' && vo('o:1').herkomst === 'david', vo('o:1'));
+      A.metaZet(o, 'vuil', '1'); A.verrijk(o);
+      toets('eigen niet gekoppeld: correctie blijft staan na herverrijking', vo('o:1').herkomst === 'david' && vo('o:1').type === 'intern' && vo('o:12').categorie === 'inkomen', [vo('o:1'), vo('o:12')]);
+      // wordt de onbekende rekening alsnog gekoppeld, dan wordt het een gewone interne overboeking met de rekeningnaam
+      A.rekeningenSync(o, { gez: { uid: 'u7', bank: 'ABN AMRO', naam: 'Vaste lasten', iban: IO.gez, sessie: 's7' },
+        prive: { bron: 'bunq', uid: 'bunq-71', bunq_id: 71, naam: 'Privé', soort: 'lopend', iban: IO.prive, status: 'ACTIVE' },
+        eliz: { bron: 'bunq', uid: 'bunq-73', bunq_id: 73, naam: 'Elizabeth', soort: 'lopend', iban: IO.eliz, status: 'ACTIVE' },
+        ing: { bron: 'bunq', uid: 'bunq-74', bunq_id: 74, naam: 'Buffer', soort: 'lopend', iban: IO.ing, status: 'ACTIVE' } });
+      A.metaZet(o, 'vuil', '1'); A.verrijk(o);
+      toets('eigen niet gekoppeld: na koppelen gewone interne overboeking met rekeningnaam', vo('o:5').type === 'intern' && vo('o:5').ai_omschrijving === 'Naar Buffer', vo('o:5'));
+      o.db.close();
+    }
+
     // ── wv709: externe rekening (op Davids naam, van een ander; eigen archief) ──
     {
       const BE = path.join(W, 'bank-extern');
