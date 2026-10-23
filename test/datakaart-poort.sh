@@ -9,6 +9,7 @@
 #  F  kaart onleesbaar                                        -> rood;  G  kaart ontbreekt -> groen met logregel
 #  H  c.sqlite_master en ${x}.jsonl tellen niet als naam      -> groen
 #  I  UITROL_DATAKAART=0                                      -> groen met logregel
+#  K  dotfile en .sqlite3 tellen wel                          -> rood;  L  geen draaiende release -> niet getoetst
 set -u
 cd "$(dirname "$0")/.." || exit 1
 BRON="$(pwd)"
@@ -57,6 +58,15 @@ printf '\nconst q = "select name from c.sqlite_master"; const p = `${kanaal}.jso
 git -C "$W/repo" commit -qam 'nep: geen echte namen'
 toets 'H c.sqlite_master en ${x}.jsonl tellen niet' "$(poort "$(git -C "$W/repo" rev-parse HEAD)" "$W/kaart-zonder.json")" 0
 git -C "$W/repo" reset -q --hard "$NEP"
+printf '\nconst P2 = "/opt/data/nep/.verborgen-dm.sqlite3";\n' >> "$W/repo/server.js"
+git -C "$W/repo" commit -qam 'nep: dotfile sqlite3'
+toets 'K .verborgen-dm.sqlite3 (dotfile, sqlite3) = rood' "$(poort "$(git -C "$W/repo" rev-parse HEAD)" "$W/kaart-met.json")" 1
+grep -q '.verborgen-dm.sqlite3' "$W/uit.txt" && echo "GROEN K noemt de naam" || { echo "ROOD  K noemt de naam niet"; fout=$((fout+1)); }
+git -C "$W/repo" reset -q --hard "$NEP"
+mv "$W/app/current" "$W/app/current.weg"; mkdir "$W/app/current"
+toets 'L geen draaiende release = niet getoetst' "$(poort "$NEP" "$W/kaart-zonder.json")" 0
+grep -q 'geen draaiende release' "$W/uit.txt" && echo "GROEN L logregel" || { echo "ROOD  L geen logregel"; fout=$((fout+1)); }
+rmdir "$W/app/current"; mv "$W/app/current.weg" "$W/app/current"
 toets 'I UITROL_DATAKAART=0 = door' "$(poort "$NEP" "$W/kaart-zonder.json" UITROL_DATAKAART=0)" 0
 grep -q 'datakaart-poort UIT' "$W/uit.txt" && echo "GROEN I logregel" || { echo "ROOD  I geen logregel"; fout=$((fout+1)); }
 # J de echte kaart tegen de echte draaiende release en deze commit (alleen als beide er zijn)

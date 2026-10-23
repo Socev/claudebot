@@ -89,7 +89,7 @@ DOEL="$RELEASES/$KORT"
 
 # ── 1b. datakaart-poort (wv844, Data Manager; Fable-review wv844 #1) ────────────────────────────────────────────────────
 # Nieuwe opslag bestaat pas met een regel in 00_Systeem/datakaart.json. Een .sqlite/.jsonl-basisnaam in de release-bestanden
-# van deze commit die NIET in de draaiende release staat en ook in geen `pod_bestanden` van de Datakaart, stopt de uitrol.
+# van deze commit (.sqlite, .sqlite3, .jsonl; bewust geen .db: dat matcht ook JS als `this.db`) die NIET in de draaiende release staat en ook in geen `pod_bestanden` van de Datakaart, stopt de uitrol.
 # Alleen namen die nieuw zijn t.o.v. current: zo blokkeert een terugrol of een herhaalde uitrol nooit. Grens: een naam zonder
 # vaste vorm (`${x}.jsonl`) glipt erdoor; de weekronde van de Data Manager vangt de rest. Nood: UITROL_DATAKAART=0.
 DATAKAART="${UITROL_DATAKAART_PAD:-/opt/data/AI_SecondBrain/00_Systeem/datakaart.json}"
@@ -99,10 +99,12 @@ elif [ -f "$DOEL/server.js" ]; then
   log "datakaart-poort: release $KORT stond er al (terugrol of herhaling) - niet getoetst"
 elif [ ! -f "$DATAKAART" ]; then
   log "datakaart-poort: $DATAKAART ontbreekt (uitwijkkant?) - niet getoetst"
+elif [ ! -f "$CURRENT/server.js" ]; then
+  log "datakaart-poort: geen draaiende release (vers volume of herstel) - niet getoetst"
 else
   ONBEKEND="$(for b in $RELEASE_BESTANDEN $RELEASE_OPTIONEEL; do git -C "$BRON_REPO" show "$SHA:$b" 2>/dev/null; echo; done \
     | python3 -c 'import glob,json,re,sys
-R=re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:sqlite|jsonl))(?![A-Za-z0-9_])")
+R=re.compile(r"(?<![A-Za-z0-9_.-])(\.?[A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:sqlite3?|jsonl))(?![A-Za-z0-9_])")
 nieuw=set(R.findall(sys.stdin.read()))
 nu=set()
 for f in glob.glob(sys.argv[2]+"/*.js"): nu|=set(R.findall(open(f,errors="ignore").read()))
