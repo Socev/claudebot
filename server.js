@@ -3534,7 +3534,8 @@ function handleRequest(req, res) {
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
-      ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761: App Ideeën van buitenaf (laatste lezing, fout, aantal kaarten; geen inhoud)
+      ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761/wv942: App AIX (laatste lezing, catalogus, plaatsing, uur- en weekronde; geen inhoud)
+      aix: typeof aixInfo === 'function' ? aixInfo() : { aan: false },   // wv942: aix.js (sleutel bruikbaar?, laatst bereikbaar, plat sinds; nooit de sleutel)
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
       facturen_ingang: facturenIngangInfo(),   // wv856: smalle ingang /fac (ingericht?, uit?; geen inhoud, geen gebruikers)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
@@ -4558,7 +4559,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
-['POST /app/ideeen/reactie', 'POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: reageren of naar de bus = David die werkt
+['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
 APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
@@ -4648,7 +4649,6 @@ const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
 // wv446 (Fable #1): meldingen/af is omkeerbaar en geen invoer naar Socev, net als gezien
 const APP_SLOT_VRIJ = new Set(['POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
-APP_SLOT_VRIJ.add('POST /app/ideeen/toets');   // wv861: de vaste toets op Davids reactie is lezen (waarschuwing), geen invoer
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
@@ -9297,19 +9297,21 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
       : !pot.reden && k.gevoelig ? ' (POT-vrijgave: de pod legt deze vrijgave zelf vast in de POT-databank zodra deze druk is aangenomen; op de verzenddag verstuurt de pod tussen 09:00 en 12:00 één mail per nota. Jij doet niets en verstuurt niets; bevestig het David in één zin.)'
       : ' (POT-vrijgave NIET vastgelegd: ' + (pot.reden || 'geen verse vingerafdruk') + '. De nota\'s komen op de verzenddag om 07:00 als concept in Gmail. Zeg dat kort; jij verstuurt niets.)');
   }
-  // wv861: bundelkaart van de Ideeënbeurs (sleutel in /opt/data/ideeenbeurs/bundel.json). De pod plaatst zelf, nooit het taalmodel, en
-  // alleen bij een Ja met verse vingerafdruk van telefoon of meereizend apparaat (ideeen.plaatsBundel toetst de bevestiging opnieuw).
+  // wv861/wv942: bundelkaart van AIX (sleutel in /opt/data/aix-winkel/bundel.json; startset of weekbundel). De pod plaatst zelf, nooit het taalmodel,
+  // en alleen bij een Ja met verse vingerafdruk van telefoon of meereizend apparaat (ideeen.plaatsBundel toetst de bevestiging opnieuw). Nee = bundel dicht, niets geplaatst.
   let ib = null, ctxIb = context;
   try { ib = typeof ideeen !== 'undefined' && ideeen && typeof ideeen.bundelVoor === 'function' ? ideeen.bundelVoor(p.sleutel) : null; } catch (e) { logError('ideeen', e); ib = null; }
-  if (ib && ib.afgehandeld) ctxIb = context + ' (Ideeënbeurs: deze bundel is al afgehandeld op ' + ib.afgehandeld + '; de pod plaatst niets meer. Jij plaatst ook niets, ook niet via het forum of de skill werkkamer-forum. Zeg David wat er destijds geplaatst is (/health, ideeen.plaatsing).)';   // Fable #5
-  else if (ib) ctxIb = context + (keuze !== 'ja' ? ' (Ideeënbeurs: geen Ja, dus de pod plaatst niets; de kaarten blijven klaarstaan in de tab. Zeg dat kort.)'
-    : a.soort !== 'vast' ? ' (Ideeënbeurs: de pod plaatst nu zelf de ' + ib.aangevinkt + ' kaart(en) die op Deel staan in het forumonderdeel Ideeën. Jij plaatst niets, ook niet via het forum. Kijk na een minuut in /health (ideeen.plaatsing), werk in de catalogus gedeeld op en draad bij en bevestig het David in één zin.)'
-      : ' (Ideeënbeurs: NIET geplaatst, want deze Ja kwam van een vaste plek. Jij plaatst niets. Zet een nieuwe bundelkaart klaar (bundel.json met de nieuwe kaartsleutel) of heropen deze met voor-jou-beheer, zodat David op de telefoon kan drukken.)');
+  if (ib && ib.afgehandeld) ctxIb = context + ' (AIX: deze bundel is al afgehandeld op ' + ib.afgehandeld + '; de pod plaatst niets meer. Jij plaatst ook niets op AIX. Zeg David wat er destijds geplaatst is (/health, ideeen.plaatsing).)';   // Fable wv861 #5
+  else if (ib) ctxIb = context + (keuze === 'nee' ? ' (AIX: Nee, dus de pod plaatst niets; de bundel is dicht en de kaarten blijven als concept in de catalogus. Zeg dat kort.)'
+    : keuze !== 'ja' ? ' (AIX: geen Ja, dus de pod plaatst niets; de kaarten blijven klaarstaan in de App AIX. Zeg dat kort.)'
+    : a.soort !== 'vast' ? ' (AIX: de pod plaatst nu zelf de ' + ib.aangevinkt + ' stuk(ken) die op Deel staan in Socevs winkel op aix.socev.dev. Jij plaatst niets en hebt geen toegang tot AIX. Kijk na een minuut in /health (ideeen.plaatsing), werk in de catalogus "gedeeld op" en "aix" bij en bevestig het David in één zin.)'
+      : ' (AIX: NIET geplaatst, want deze Ja kwam van een vaste plek. Jij plaatst niets. Laat David op de telefoon drukken: heropen deze kaart met voor-jou-beheer.)');
   // wv921 en wv861 sluiten elkaar uit (pot-vrijgave-N vs. de sleutel in bundel.json); de haak van de ene of de andere
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
     { tekst: tekst, bericht: bericht, context: pot ? ctx : ctxIb, bijStart: bijStart, gevoelig: k.gevoelig || (!pot && !!ib),
       naStart: pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
         : !pot && ib && !ib.afgehandeld ? function (kz, gevoeligJa, ap, bevestiging, vraagId) {
+          if (kz === 'nee') { try { ideeen.bundelNee(ib.kaart); } catch (e) { logError('ideeen-plaats', e); } return; }
           if (kz !== 'ja') return;
           ideeen.plaatsBundel({ kaart: ib.kaart, bevestiging: bevestiging, vraagId: vraagId })
             .then(function (u) { if (u && u.ok === false) logError('ideeen-plaats', new Error(u.reden)); })
@@ -11041,9 +11043,9 @@ function handleApp(req, res) {
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
-        if (route === 'GET /app/ideeen' || route.indexOf('GET /app/ideeen/plaatje/') === 0 || route === 'POST /app/ideeen/reactie' || route === 'POST /app/ideeen/gezien' || route === 'POST /app/ideeen/naar-ideeenbus' ||
-          /^POST \/app\/ideeen\/kaart\/k\d{2,3}\/(deel|niet)$/.test(route) || route === 'POST /app/ideeen/toets')   // wv861: Deel/Niet per conceptkaart, vaste toets als waarschuwing
-          return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App Ideeën van buitenaf
+        if (route === 'GET /app/ideeen' || /^GET \/app\/ideeen\/(plaatje\/[1-9][0-9]{0,11}\/[0-2]|kaart\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||
+          route === 'POST /app/ideeen/naar-ideeenbus' || /^POST \/app\/ideeen\/kaart\/[ka]\d{2,3}\/(deel|niet)$/.test(route))   // wv942: AIX lezen, Deel/Niet per kaart of antwoord
+          return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App AIX (was Ideeën van buitenaf)
         if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
@@ -13727,20 +13729,16 @@ async function harvesterClaude(systeem, prompt, schema) {
     });
   });
 }
-// wv828: bron ideeenbeurs — alleen lezen met de podsleutel, alleen deze twee GET-paden (Fable wv828 #12); ander pad = geen netwerk.
-// ideeenForum en ideeen staan verderop (pas aangeroepen tijdens een ronde). Geoogst wordt alleen wat David in de tab zag (#10).
-function harvesterForum(pad) {
-  if (!/^(draden\?forum=ideeen|draad\/[1-9][0-9]{0,8}\?stil=1)$/.test(String(pad))) return Promise.resolve({ status: 400, j: { ok: false, fout: 'pad niet toegestaan' } });
-  return ideeenForum('GET', pad);
-}
-function harvesterIdeeenGezien() { try { return ideeen ? Number(ideeen.health().gezien_tot) || 0 : 0; } catch (e) { return 0; } }
+// wv942: bron aix — kaarten van andere winkels die David in de App AIX zag (ideeen.gezienKaarten, via aix.js; vaste velden). ideeen staat
+// verderop (pas aangeroepen tijdens een ronde). De forumbron ideeenbeurs is vervallen.
+function harvesterAix() { if (typeof ideeen === 'undefined' || !ideeen || typeof ideeen.gezienKaarten !== 'function') return Promise.reject(new Error('App AIX ontbreekt in deze pod')); return ideeen.gezienKaarten(); }
 const harvester = (function () {
   const p = path.join(__dirname, 'harvester.js');
   if (!fs.existsSync(p)) return null;
   try {
     const H = require(p);
     const h = H.maak({ vault: VAULT, dir: HARVESTER_DIR, fout: logError, claude: harvesterClaude,
-      forum: harvesterForum, ideeenGezien: harvesterIdeeenGezien,
+      aixKaarten: harvesterAix,
       // hartslag na elke geslaagde ronde, ook leeg (AI - Stiltewachter, rij hartslag-harvester; Fable wv820 #3)
       hartslag: async function (items, kaarten) {
         await appSbRpc('mk_hartslag_stempel', { p_component: 'harvester-ronde', p_gemeten_rijen: items, p_bevindingen: kaarten });
@@ -13896,22 +13894,32 @@ async function appRingkaart(req, res, a) {
 }
 // ── einde ringkaart ──
 
-// ── Ideeënbeurs (wv761, 23-10-2026; bouwplan "01_Ontwikkeling/Ideeënbeurs met Albert van der Veer (ontwerp 22-10-2026).md" § 8) ──
-// App "Ideeën van buitenaf": kaarten in het afgeschermde forumonderdeel `ideeen` (forum.socev.dev) lezen en er als David op reageren,
-// een kaart van buiten naar de Ideeënbus (geparkeerd). Logica in ideeen.js; hier de koppeling: routes /app/ideeen(*) na de app-poort,
-// de forumaanroep met de podsleutel (WERKKAMER_SLEUTEL_POD; ideeen.js raakt alleen forum `ideeen`) en /health.ideeen. Schrijven alleen
-// op de primaire kant. Ontbreekt ideeen.js in de release (terugrol), dan 404 op de routes en ideeen.aan=false in /health.
-const IDEEEN_DIR = serverPad('ideeenbeurs', process.env.IDEEEN_DIR, '/opt/data/ideeenbeurs', serverProefDeel('ideeenbeurs'));
-const IDEEEN_FORUM = process.env.IDEEEN_FORUM_BASIS || 'https://forum.socev.dev/api/';   // alleen de toets wijst elders heen
-async function ideeenForum(methode, pad, body) {
-  const sleutel = process.env.WERKKAMER_SLEUTEL_POD || '';
-  if (!sleutel) return { status: 503, j: { ok: false, fout: 'geen forumsleutel op de pod' } };
-  const r = await fetch(IDEEEN_FORUM + pad, { method: methode, signal: AbortSignal.timeout(20000),
-    headers: Object.assign({ 'X-Werkkamer-Sleutel': sleutel }, body ? { 'Content-Type': 'application/json' } : {}), body: body ? JSON.stringify(body) : undefined });
-  const type = String(r.headers.get('content-type') || '').split(';')[0].trim();
-  if (/^image\//.test(type)) { const buf = Buffer.from(await r.arrayBuffer()); return { status: r.status, bin: buf.length <= 600 * 1024 ? buf : null, type: type }; }
-  let j = null; try { j = await r.json(); } catch (e) {}
-  return { status: r.status, j: j };
+// ── Ideeënbeurs → AIX (wv761, wv861; sinds wv942 AIX: bouwplan "01_Ontwikkeling/AIX - Agentic Ideas eXchange (ontwerp 23-10-2026).md" § 5.3–§ 8) ──
+// App AIX (zelfde tegel als "Ideeën van buitenaf"): lezen wat andere agents etaleren, Socevs eigen winkel, en Klaar om te delen (Deel/Niet per
+// conceptkaart of antwoordconcept). Logica in ideeen.js (App, bundel, concepten) en aix.js (ondertekenen met Socevs eigen sleutel, vaste velden,
+// goedkeuringsronde). Hier de koppeling: routes /app/ideeen(*) na de app-poort, /health.ideeen en /health.aix, de Voor jou-kaarten (mk_voor_jou_zet),
+// de modelaanroep zonder gereedschap (harvesterClaude) en twee tikken: elk uur de goedkeuringsronde + bundelkaart, zondag 11:00 het weekritme.
+// De tikken draaien alleen in de echte pod op de actieve kant (SERVER_ECHT, rolPrimair) of in een proef met AIX_RONDE=1. AIX plat = geen melding;
+// pas na meer dan een dag één box-rij. Ontbreekt aix.js of ideeen.js in de release (terugrol), dan 404 op de routes en aan=false in /health.
+const IDEEEN_DIR = serverPad('aix-winkel', process.env.IDEEEN_DIR, '/opt/data/aix-winkel', serverProefDeel('aix-winkel'));
+const AIX_SLEUTEL = process.env.AIX_SLEUTEL || '/opt/data/aix/sleutel';
+const aix = (function () {
+  const p = path.join(__dirname, 'aix.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ sleutelPad: AIX_SLEUTEL, basis: process.env.AIX_BASIS || undefined }); } catch (e) { logError('aix', e); return null; }
+})();
+async function aixVoorJou(p) {
+  const r = await appSbRpc('mk_voor_jou_zet', { p: p });   // één parameter p jsonb (Fable wv685 #1)
+  appStaat.vjCache = null;
+  if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet');
+  return r;
+}
+async function aixVoorJouSluit(sleutel, bewijs) {
+  for (const van of ['open', 'later']) {
+    const r = await appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: bewijs, p_reden: 'aix-ronde' });
+    if (r && r.ok === true) { appStaat.vjCache = null; return true; }
+  }
+  return false;   // al dicht (David sloot hem zelf) of weg: niets te doen
 }
 const ideeen = (function () {
   const p = path.join(__dirname, 'ideeen.js');
@@ -13919,43 +13927,101 @@ const ideeen = (function () {
   try {
     const I = require(p);
     let Hmod = null; try { Hmod = require(path.join(__dirname, 'harvester.js')); } catch (e) {}
-    const i = I.maak({ vault: VAULT, dir: IDEEEN_DIR, forum: ideeenForum, fout: logError, harvester: Hmod });
-    i.mkdir();   // /opt/data/ideeenbeurs en tmp/ op 0700; staat 0600
+    const i = I.maak({ vault: VAULT, dir: IDEEEN_DIR, aix: aix, fout: logError, harvester: Hmod, voorJou: aixVoorJou,
+      claude: function (s, pr, sc) { return typeof harvesterClaude === 'function' ? harvesterClaude(s, pr, sc) : Promise.resolve({ ok: false, fout: 'geen modelaanroep' }); } });
+    i.mkdir();   // /opt/data/aix-winkel en tmp/ op 0700; staat en journaal 0600
     return i;
   } catch (e) { logError('ideeen', e); return null; }
 })();
-['ideeen', 'ideeen-reactie', 'ideeen-plaatje', 'ideeen-toets'].forEach(function (k) { if (!appStaat.tellers[k]) appStaat.tellers[k] = []; });
+['ideeen', 'ideeen-plaatje'].forEach(function (k) { if (!appStaat.tellers[k]) appStaat.tellers[k] = []; });
+const aixRonde = { bezig: false, laatste: null, week: null, box: null };
+// tikken alleen in de echte pod (of een proef met AIX_RONDE=1); typeof: het blok draait ook los in de toetsen (vm zonder SERVER_ECHT)
+const AIX_TIKKEN = !!(aix && ideeen && ((typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT) || process.env.AIX_RONDE === '1'));
+function aixStaatPad() { return path.join(IDEEEN_DIR, 'ronde.json'); }
+function aixStaatLees() { try { const j = JSON.parse(fs.readFileSync(aixStaatPad(), 'utf8')); return j && typeof j === 'object' ? j : {}; } catch (e) { return {}; } }
+function aixStaatSchrijf(s) {
+  fs.mkdirSync(IDEEEN_DIR, { recursive: true, mode: 0o700 });
+  const tmp = aixStaatPad() + '.' + process.pid; fs.writeFileSync(tmp, JSON.stringify(s, null, 1), { mode: 0o600 }); fs.renameSync(tmp, aixStaatPad());
+}
+// Eén box-rij als AIX meer dan een dag niet bereikbaar is; één per plat-periode (tekst van de pod zelf)
+function aixBoxRij(sinds) {
+  try {
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const t = fs.readFileSync(pad, 'utf8');
+    // eerste echte rij: een regel "## [soort] JJJJ-MM-DD" buiten een codeblok (een voorbeeld in een codeblok telt niet)
+    let eerste = null;
+    const re = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/g;
+    for (let m; (m = re.exec(t));) { if (((t.slice(0, m.index).match(/^```/gm) || []).length % 2) === 0) { eerste = m; break; } }
+    if (!eerste) return false;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const rij = '\n## [direct] ' + tijd + ' — AIX al meer dan een dag niet bereikbaar (pod aix-ronde, automatisch)\n- status: open\n' +
+      '- van: pod aix-ronde (server.js, elk uur; hooguit één rij per periode)\n- gemeten: niet bereikbaar sinds ' + String(sinds).slice(0, 16) + ' UTC; laatste fout ' + String(aix ? aix.info().laatste_fout : '-').slice(0, 60) + '\n' +
+      '- gevolg als er niets gebeurt: de App AIX toont "niet bereikbaar", aanvragen van nieuwe agents blijven liggen en de weekbundel slaat over. David merkt verder niets.\n' +
+      '- voorstel: `node /app/aix.js ik` in de pod (leest alleen); Worker `aix` en het domein aix.socev.dev in Cloudflare nakijken; daarna `/health` aix.plat_sinds.\n';
+    fs.writeFileSync(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
+    return true;
+  } catch (e) { logError('aix-box', e); return false; }
+}
+async function aixUurRonde() {
+  if (!aix || !ideeen || aixRonde.bezig) return null;
+  aixRonde.bezig = true;
+  try {
+    const A = require(path.join(__dirname, 'aix.js'));
+    const u = await A.goedkeurRonde({ aix: aix, staatLees: aixStaatLees, staatSchrijf: aixStaatSchrijf, voorJou: aixVoorJou, voorJouSluit: aixVoorJouSluit,
+      contact: function (e) { return A.contactNaam(VAULT, e); } });
+    let b = null;
+    try { b = await ideeen.zorgBundelKaart(); } catch (e) { logError('aix-bundel', e); b = { fout: String(e && e.message || e).slice(0, 120) }; }
+    // geen nieuwe hangende plaatsing laten staan: na een herstart nakijken (alleen als er iets hangt; nakijk doet dan zelf niets)
+    try { if (u.ok) await ideeen.nakijk(); } catch (e) { logError('aix-nakijk', e); }
+    const i = aix.info();
+    if (i.plat_sinds && Date.now() - Date.parse(i.plat_sinds) > 86400000 && aixRonde.box !== i.plat_sinds) { if (aixBoxRij(i.plat_sinds)) aixRonde.box = i.plat_sinds; }
+    aixRonde.laatste = { op: u.op, ok: u.ok, plat: !!u.plat, bekeken: u.bekeken, afgewezen: u.afgewezen.length, toegelaten: u.toegelaten.length, kaarten: u.kaarten.length,
+      gesloten: u.gesloten.length, signalen: u.signalen.length, fouten: u.fouten.length, bundelkaart: b && b.gezet ? b.kaart : null };
+    if (u.fouten.length) logError('aix-ronde', new Error(u.fouten.slice(0, 3).join('; ')));
+    schrijfLog(nu() + ' aix-ronde ' + velden(aixRonde.laatste));
+    return u;
+  } catch (e) { logError('aix-ronde', e); return null; }
+  finally { aixRonde.bezig = false; }
+}
+async function aixWeekRonde() {
+  if (!ideeen) return null;
+  try { const u = await ideeen.weekRonde(); aixRonde.week = { op: u.op, ok: u.ok, geteld: u.geteld, fout: u.fout || null, bundel: u.bundel && u.bundel.kaart || null }; schrijfLog(nu() + ' aix-week ' + velden(aixRonde.week)); return u; }
+  catch (e) { logError('aix-week', e); return null; }
+}
+if (AIX_TIKKEN) {
+  setTimeout(function () { if (rolPrimair()) aixUurRonde(); }, 5 * 60000).unref();   // eerste ronde 5 min na de start (bundelkaart, nakijk)
+  setInterval(function () {
+    if (!rolPrimair()) return;
+    aixUurRonde();
+    try {
+      const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' }));
+      const dag = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+      const s = aixStaatLees();
+      if (d.getDay() === 0 && d.getHours() >= 11 && s.week_dag !== dag) { s.week_dag = dag; aixStaatSchrijf(s); aixWeekRonde(); }   // zondag vanaf 11:00, één keer
+    } catch (e) { logError('aix-week', e); }
+  }, 60 * 60000).unref();
+}
 function ideeenInfo() {
   if (!ideeen) return { aan: false };
-  try { return ideeen.health(); } catch (e) { return { aan: true, fout: true }; }
+  try { return Object.assign(ideeen.health(), { ronde: aixRonde.laatste, week: aixRonde.week }); } catch (e) { return { aan: true, fout: true }; }
+}
+function aixInfo() {
+  if (!aix) return { aan: false };
+  try { return Object.assign({ aan: true, tikken: AIX_TIKKEN }, aix.info()); } catch (e) { return { aan: true, fout: true }; }
 }
 async function appIdeeen(req, res, a, d, route) {
-  if (!ideeen) return appWeiger(res, 404, 'De Ideeënbeurs zit niet in deze versie van de pod', 'ideeen ontbreekt');
-  if (route.indexOf('GET ') === 0 || route === 'POST /app/ideeen/gezien' || route === 'POST /app/ideeen/toets') res._app.stil = true;
-  if (route === 'POST /app/ideeen/toets') {
-    // wv861: lezen, geen rol- of invoerslot; eigen teller (de app vraagt hem na een typpauze)
-    if (!appTeller('ideeen-toets', 600, 3600000)) return appStuur(res, 200, { ok: true, treffers: [], toets: false });
-    // Fable #14: op een vaste plek (werk-pc) alleen de soort, niet welk woord in de contacten staat
-    if (a && a.soort === 'vast') {
-      let rv; try { rv = await ideeen.app(route, d || {}); } catch (e) { return appStuur(res, 200, { ok: true, treffers: [], toets: false }); }
-      const tr = (rv.j && rv.j.treffers || []).map(function (x) { return { soort: x.soort, treffer: '' }; });
-      return appStuur(res, 200, Object.assign({}, rv.j, { treffers: tr.filter(function (x, i) { return tr.findIndex(function (y) { return y.soort === x.soort; }) === i; }) }));
-    }
-  } else if (route.indexOf('POST ') === 0) {
+  if (!ideeen) return appWeiger(res, 404, 'AIX zit niet in deze versie van de pod', 'ideeen ontbreekt');
+  if (route.indexOf('GET ') === 0 || route === 'POST /app/ideeen/gezien') res._app.stil = true;
+  if (route.indexOf('POST ') === 0) {
     if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
     if (!appTeller('ideeen', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens ideeen');
-    if (route === 'POST /app/ideeen/reactie') {
-      if (!appTeller('ideeen-reactie', 20, 3600000)) return appWeiger(res, 429, 'te veel reacties dit uur (max 20)', 'grens ideeen-reactie');
-      // wv464: op een vaste plek een BSN-achtig getal maskeren, nooit weigeren
-      if (a.soort === 'vast' && d && typeof d.tekst === 'string' && appBsnAchtig(d.tekst)) { d.tekst = appBsnMasker(d.tekst); res._app.bsnWeg = true; }
-    }
   } else if (route.indexOf('GET /app/ideeen/plaatje/') === 0 && !appTeller('ideeen-plaatje', 200, 3600000)) return appWeiger(res, 429, 'te veel plaatjes dit uur (max 200)', 'grens ideeen-plaatje');
   let r;
-  try { r = await ideeen.app(route, Object.assign({}, d || {}, { __apparaat: a && a.id })); }   // wv861: apparaat alleen voor het journaal van Deel/Niet
-  catch (e) { logError('app-ideeen', e); return appWeiger(res, 502, 'het forum is nu niet bereikbaar', 'ideeen uitzondering'); }
+  try { r = await ideeen.app(route, Object.assign({}, d || {}, { __apparaat: a && a.id })); }   // apparaat alleen voor het journaal van Deel/Niet
+  catch (e) { logError('app-ideeen', e); return appWeiger(res, 502, 'AIX is nu niet bereikbaar', 'ideeen uitzondering'); }
   if (r.status !== 200) res._app.reden = 'ideeen: ' + String(r.j && r.j.fout || '').slice(0, 60);
   else if (route.indexOf('POST /app/ideeen/kaart/') === 0) res._app.reden = 'ideeen ' + route.slice('POST /app/ideeen/'.length);
-  else if (route.indexOf('POST ') === 0 && route !== 'POST /app/ideeen/gezien' && route !== 'POST /app/ideeen/toets') res._app.reden = 'ideeen ' + route.slice('POST /app/ideeen/'.length) + ' draad ' + String(d && d.draad || '').slice(0, 10);
+  else if (route === 'POST /app/ideeen/naar-ideeenbus') res._app.reden = 'ideeen naar-ideeenbus kaart ' + String(d && d.kaart || '').slice(0, 12);
   return appStuur(res, r.status, r.j);
 }
 // ── einde ideeënbeurs ──

@@ -138,48 +138,61 @@ function maak(o) {
   return { toets: toets, namen: huidigeNamen };
 }
 
-// Catalogus: één blok per kaart (### K01 · titel, daarna "- veld: waarde"-regels). Alleen de velden die Albert ziet worden getoetst.
+// Catalogus (wv942, AIX): één blok per kaart (### K01 · titel) of per antwoordconcept (### A01 · …), daarna "- veld: waarde"-regels.
+// Alleen de velden die AIX toont worden getoetst. Grenzen zoals de site (§ 4 van het AIX-bouwplan); de site dwingt ze ook af.
 const DEELBAAR = ['concept', 'ja', 'nee', 'privé'];
-const VELDEN = { titel: 70, wat: 300, waarom: 160 };
-const MIN = { titel: 3, wat: 10, waarom: 5 };
-const ALLE_VELDEN = ['titel', 'wat', 'waarom', 'status', 'link', 'plaatje', 'bron', 'deelbaar', 'gedeeld_op', 'draad'];
-// zoals zinnen() in de forum-API (functions/api/[[pad]].js): een punt/!/? gevolgd door spatie en een hoofdletter of cijfer = nieuwe zin
-const zinnen = (s) => (String(s).match(/[.!?]+(?=\s+["'(]?[A-ZÀ-Ý0-9])/g) || []).length + 1;
-const STATUSSEN = ['bedacht', 'in aanbouw', 'in gebruik'];
+const VELDEN = { titel: 70, zin: 160, wat: 400, oplevert: 300, hoe: 500 };
+const MIN = { titel: 3, zin: 10, wat: 20, oplevert: 10, hoe: 10 };
+const ALLE_VELDEN = ['titel', 'zin', 'wat', 'oplevert', 'hoe', 'categorie', 'status', 'link', 'plaatje', 'bron', 'deelbaar', 'gedeeld_op', 'aix',
+  'kaart', 'reactie', 'soort', 'tekst'];
+const STATUSSEN = ['bedacht', 'in aanbouw', 'in gebruik', 'gestopt'];
+const CATEGORIEEN = ['apps', 'managers-en-bewaking', 'informatieverwerking', 'geheugen-en-kennis', 'spraak-en-beeld', 'agenda-en-taken', 'koppelingen', 'werkwijze', 'overig'];
+const PLAATJE = /^[a-z0-9][a-z0-9._-]{0,60}\.(png|jpe?g|webp)$/;
+const ANTWOORD = { min: 10, max: 800, soorten: ['antwoord', 'tip'] };
 function leesCatalogus(md) {
   const kaarten = [], fouten = [];
   const delen = String(md || '').replace(/\r\n?/g, '\n').split(/^### /m).slice(1);
   delen.forEach(function (blok) {
-    const kop = /^(K\d{2,3})\b/.exec(blok);
+    const kop = /^([KA]\d{2,3})\b/.exec(blok);
     if (!kop) return;
-    const k = { id: kop[1].toLowerCase() };
+    const k = { id: kop[1].toLowerCase(), vorm: kop[1][0] === 'A' ? 'antwoord' : 'kaart' };
     blok.split('\n').slice(1).forEach(function (r) {
       const m = /^- ([a-zé ]+?):\s?(.*)$/.exec(r);
       const veld = m ? m[1].trim().replace(/ /g, '_') : null;
-      if (veld && ALLE_VELDEN.indexOf(veld) >= 0) k[veld] = m[2].trim();   // Fable #7: een regel "- id: …" overschrijft het id niet
+      if (veld && ALLE_VELDEN.indexOf(veld) >= 0 && !Object.hasOwn(k, veld)) k[veld] = m[2].trim();   // Fable wv861 #7: "- id:" overschrijft niets; eerste regel wint
     });
     k.deelbaar = String(k.deelbaar || '').toLowerCase();
     const f = [];
-    Object.keys(VELDEN).forEach(function (v) {
-      if (!k[v]) f.push(v + ' ontbreekt'); else if (k[v].length > VELDEN[v]) f.push(v + ' te lang (' + k[v].length + '/' + VELDEN[v] + ')'); else if (k[v].length < MIN[v]) f.push(v + ' te kort');
-    });
-    if (k.wat && zinnen(k.wat) > 2) f.push('wat: hooguit twee zinnen');   // Fable #9: zoals het forum, anders strandt hij pas na Davids Ja op 422
-    if (k.waarom && zinnen(k.waarom) > 1) f.push('waarom: één zin');
-    if (STATUSSEN.indexOf(k.status) < 0) f.push('status onbekend');
+    if (k.vorm === 'kaart') {
+      Object.keys(VELDEN).forEach(function (v) {
+        if (!k[v]) f.push(v + ' ontbreekt'); else if ([...k[v]].length > VELDEN[v]) f.push(v + ' te lang (' + [...k[v]].length + '/' + VELDEN[v] + ')'); else if ([...k[v]].length < MIN[v]) f.push(v + ' te kort');
+      });
+      if (STATUSSEN.indexOf(k.status) < 0) f.push('status onbekend');
+      if (CATEGORIEEN.indexOf(k.categorie) < 0) f.push('categorie onbekend');
+      if (k.link) f.push('link: Socev zet nooit een link (AIX § 4)');
+      k.plaatjes = k.plaatje ? k.plaatje.split(/\s*,\s*/).filter(Boolean) : [];
+      if (k.plaatjes.length > 3) f.push('hooguit 3 plaatjes');
+      if (k.plaatjes.some(function (x) { return !PLAATJE.test(x); })) f.push('plaatje: alleen een bestandsnaam uit de proefschermen (png, jpg, webp)');
+    } else {
+      k.kaart_id = /^[1-9][0-9]{0,11}$/.test(String(k.kaart || '')) ? Number(k.kaart) : null;
+      k.reactie_id = /^[1-9][0-9]{0,11}$/.test(String(k.reactie || '')) ? Number(k.reactie) : null;
+      if (!k.kaart_id) f.push('kaart ontbreekt');
+      if (ANTWOORD.soorten.indexOf(k.soort) < 0) f.push('soort onbekend');
+      if (!k.tekst || [...k.tekst].length < ANTWOORD.min) f.push('tekst te kort'); else if ([...k.tekst].length > ANTWOORD.max) f.push('tekst te lang');
+    }
     if (DEELBAAR.indexOf(k.deelbaar) < 0) f.push('deelbaar onbekend');
-    if (k.link) f.push('link: in fase 2 niet toegestaan (de toets houdt elke domeinnaam tegen)');   // Fable #3
-    if (k.plaatje) f.push('plaatje: in fase 2 niet toegestaan');
     const eerder = kaarten.find(function (x) { return x.id === k.id; });
-    if (eerder) { f.push('dubbel id'); if (eerder.vormfout.indexOf('dubbel id') < 0) { eerder.vormfout.push('dubbel id'); fouten.push(eerder.id + ': dubbel id'); } }   // Fable #8: beide
+    if (eerder) { f.push('dubbel id'); if (eerder.vormfout.indexOf('dubbel id') < 0) { eerder.vormfout.push('dubbel id'); fouten.push(eerder.id + ': dubbel id'); } }   // Fable wv861 #8: beide
     k.vormfout = f;
     if (f.length) fouten.push(k.id + ': ' + f.join(', '));
     kaarten.push(k);
   });
   return { kaarten: kaarten, fouten: fouten };
 }
-const kaartTekst = function (k) { return [k.titel, k.wat, k.waarom, k.link || ''].join('\n'); };
+// De tekst die op AIX komt (kaart: alle tekstvelden; antwoord: de reactie)
+const kaartTekst = function (k) { return k.vorm === 'antwoord' ? String(k.tekst || '') : [k.titel, k.zin, k.wat, k.oplevert, k.hoe, k.link || ''].join('\n'); };
 
-module.exports = { maak: maak, leesNamen: leesNamen, leesCatalogus: leesCatalogus, kaartTekst: kaartTekst, zinnen: zinnen, STATUSSEN: STATUSSEN, VELDEN: VELDEN, DEELBAAR: DEELBAAR };
+module.exports = { maak: maak, leesNamen: leesNamen, leesCatalogus: leesCatalogus, kaartTekst: kaartTekst, STATUSSEN: STATUSSEN, VELDEN: VELDEN, DEELBAAR: DEELBAAR, CATEGORIEEN: CATEGORIEEN, PLAATJE: PLAATJE };
 
 if (require.main === module) {
   const a = process.argv.slice(2);

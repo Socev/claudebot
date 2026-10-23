@@ -65,7 +65,8 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # gezondheid-app.js (wv937): App Gezondheid, routes GET /app/gezondheid(/genoom) (ontbreekt hij, dan 404 en gezondheid.aan=false in /health).
 # ideeen.js (wv761): App Ideeën van buitenaf (Ideeënbeurs), door server.js geladen (ontbreekt hij, dan 404 op /app/ideeen* en ideeen.aan=false in /health).
 # ideeen-filter.js (wv861): de vaste toets van de Ideeënbeurs, door ideeen.js geladen (ontbreekt hij, dan geen catalogus, geen Deel en geen plaatsen: ideeen.catalogus=false).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js secondbrain.js ideeen.js ideeen-filter.js managers.js ringkaart.js gezondheid-app.js"
+# aix.js (wv942): de pod-kant van AIX (ondertekenen, lezen, goedkeuringsronde), door server.js geladen (ontbreekt hij, dan aix.aan=false en geen uurronde).
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js ringkaart.js gezondheid-app.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

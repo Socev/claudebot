@@ -95,17 +95,25 @@ const st = fs.statSync(path.join(V, '20_Prive/Contacten/Contacten.md')); fs.utim
 toets('namen ververst bij een nieuwe mtime', fv.toets('Ruud Hoogkamp').some((x) => x.soort === 'naam'));
 fs.rmSync(V, { recursive: true, force: true });
 
-// catalogus
-const md = `# Cat\n\n### K01 · Goed\n- titel: Goed\n- wat: Doet iets.\n- waarom: Handig.\n- status: in gebruik\n- deelbaar: concept\n\n### K02 · Te lang\n- titel: ${'a'.repeat(71)}\n- wat: x\n- waarom: y\n- status: klaar\n- deelbaar: misschien\n\n### K02 · Dubbel\n- titel: tt\n- wat: w\n- waarom: z\n- status: bedacht\n- deelbaar: privé\n- link: https://x.nl\n- id: k09\n\n### Geen id\n- titel: q\n`;
+// catalogus (wv942: AIX-velden; kaarten K en antwoordconcepten A)
+const goedeKaart = (id, x = '') => `### ${id} · Goed\n- titel: Goed idee\n- zin: Een zin over het idee.\n- wat: Doet iets voor de gebruiker.\n- oplevert: Scheelt tijd.\n- hoe: Een script en een knop.\n- categorie: apps\n- status: in gebruik\n- deelbaar: concept\n${x}\n`;
+const md = `# Cat\n\n${goedeKaart('K01')}### K02 · Te lang\n- titel: ${'a'.repeat(71)}\n- zin: x\n- wat: x\n- status: klaar\n- categorie: winkel\n- deelbaar: misschien\n\n### K02 · Dubbel\n- titel: tt\n- zin: Een zin over het idee.\n- wat: w\n- status: bedacht\n- deelbaar: privé\n- link: https://x.nl\n- id: k09\n\n### Geen id\n- titel: q\n`;
 const c = F.leesCatalogus(md);
 toets('catalogus: 3 kaarten (blok zonder K-id genegeerd), id klein', c.kaarten.length === 3 && c.kaarten[0].id === 'k01', c.kaarten.map((k) => k.id));
-toets('catalogus: K01 zonder vormfout', c.kaarten[0].vormfout.length === 0, c.kaarten[0]);
-toets('catalogus: K02 titel te lang, status en deelbaar onbekend', ['titel te lang', 'status onbekend', 'deelbaar onbekend'].every((s) => c.kaarten[1].vormfout.some((x) => x.indexOf(s) === 0)), c.kaarten[1].vormfout);
-toets('catalogus: dubbel id op BEIDE kaarten; link en te korte velden = vormfout; "- id:" overschrijft het id niet', c.kaarten[1].vormfout.includes('dubbel id') && c.kaarten[2].vormfout.includes('dubbel id') && c.kaarten[2].id === 'k02' &&
-  c.kaarten[2].vormfout.some((x) => /^link: in fase 2 niet toegestaan/.test(x)) && c.kaarten[2].vormfout.includes('titel te kort'), c.kaarten[2]);
-const c2 = F.leesCatalogus('### K05 · x\r\n- titel: Goede titel\r\n- wat: Eerste zin hier. Tweede zin hier. Derde zin hier.\r\n- waarom: Kort. En nog een.\r\n- status: bedacht\r\n- deelbaar: concept\r\n');
-toets('catalogus: CRLF gelezen; wat > 2 zinnen en waarom > 1 zin = vormfout (zoals het forum)', c2.kaarten[0].titel === 'Goede titel' && c2.kaarten[0].vormfout.includes('wat: hooguit twee zinnen') && c2.kaarten[0].vormfout.includes('waarom: één zin'), c2.kaarten[0]);
-toets('kaartTekst: titel, wat, waarom, link (geen bron)', F.kaartTekst({ titel: 'a', wat: 'b', waarom: 'c', bron: 'wv1', link: '' }) === 'a\nb\nc\n');
+toets('catalogus: K01 zonder vormfout', c.kaarten[0].vormfout.length === 0 && c.kaarten[0].vorm === 'kaart', c.kaarten[0]);
+toets('catalogus: K02 titel te lang, status, categorie en deelbaar onbekend, velden ontbreken', ['titel te lang', 'status onbekend', 'categorie onbekend', 'deelbaar onbekend', 'oplevert ontbreekt', 'hoe ontbreekt', 'zin te kort'].every((s) => c.kaarten[1].vormfout.some((x) => x.indexOf(s) === 0)), c.kaarten[1].vormfout);
+toets('catalogus: dubbel id op BEIDE kaarten; link = vormfout (Socev zet nooit een link); "- id:" overschrijft het id niet', c.kaarten[1].vormfout.includes('dubbel id') && c.kaarten[2].vormfout.includes('dubbel id') && c.kaarten[2].id === 'k02' &&
+  c.kaarten[2].vormfout.some((x) => /^link: Socev zet nooit een link/.test(x)) && c.kaarten[2].vormfout.includes('titel te kort'), c.kaarten[2]);
+const c2 = F.leesCatalogus('### K05 · x\r\n- titel: Goede titel\r\n- zin: Een zin over het idee.\r\n- wat: Doet iets voor de gebruiker.\r\n- oplevert: Scheelt tijd.\r\n- hoe: Een script.\r\n- categorie: werkwijze\r\n- status: gestopt\r\n- plaatje: scherm-1.png, scherm-2.webp\r\n- deelbaar: concept\r\n- titel: tweede titel wint niet\r\n');
+toets('catalogus: CRLF gelezen; status gestopt mag; twee plaatjes; eerste regel van een veld wint', c2.kaarten[0].titel === 'Goede titel' && c2.kaarten[0].vormfout.length === 0 && c2.kaarten[0].plaatjes.join() === 'scherm-1.png,scherm-2.webp', c2.kaarten[0]);
+const c3 = F.leesCatalogus(goedeKaart('K06', '- plaatje: ../geheim.png, a.png, b.png, c.png'));
+toets('catalogus: plaatje met pad of meer dan 3 = vormfout', c3.kaarten[0].vormfout.includes('hooguit 3 plaatjes') && c3.kaarten[0].vormfout.some((x) => /^plaatje:/.test(x)), c3.kaarten[0].vormfout);
+toets('catalogus: zin langer dan 160 = vormfout', F.leesCatalogus(goedeKaart('K07').replace('Een zin over het idee.', 'z'.repeat(161))).kaarten[0].vormfout.some((x) => /^zin te lang/.test(x)));
+const c4 = F.leesCatalogus('## Antwoordconcepten\n\n### A01 · tip\n- kaart: 12\n- reactie: 34\n- soort: antwoord\n- tekst: Dank! Zo werkt het precies.\n- deelbaar: concept\n\n### A02 · fout\n- kaart: nul\n- soort: preek\n- tekst: kort\n- deelbaar: concept\n');
+toets('catalogus: antwoordconcept A01 goed (kaart, reactie, soort, tekst)', c4.kaarten[0].vorm === 'antwoord' && c4.kaarten[0].kaart_id === 12 && c4.kaarten[0].reactie_id === 34 && c4.kaarten[0].vormfout.length === 0, c4.kaarten[0]);
+toets('catalogus: A02 zonder kaart, onbekende soort, te korte tekst = vormfout', ['kaart ontbreekt', 'soort onbekend', 'tekst te kort'].every((x) => c4.kaarten[1].vormfout.includes(x)), c4.kaarten[1].vormfout);
+toets('kaartTekst: kaart = titel, zin, wat, oplevert, hoe, link (geen bron); antwoord = tekst', F.kaartTekst({ vorm: 'kaart', titel: 'a', zin: 'z', wat: 'b', oplevert: 'o', hoe: 'h', bron: 'wv1', link: '' }) === 'a\nz\nb\no\nh\n' &&
+  F.kaartTekst({ vorm: 'antwoord', tekst: 'Dank', bron: 'x' }) === 'Dank');
 
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');
 process.exit(fouten ? 1 : 0);

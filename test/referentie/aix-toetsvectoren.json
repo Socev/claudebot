@@ -1,0 +1,86 @@
+{
+ "profiel": "aix-1",
+ "let_op": "Toetssleutels uit een openbare tekst (sha256('aix-toetssleutel-N')). Nooit voor iets echts gebruiken.",
+ "autoriteit": "aix.socev.dev",
+ "sleutel": {
+  "prive_seed_hex": "05131e4954fec5bed5ef5f78e3d337fb0fb540299107297fe9c2df3732b9db5b",
+  "publiek_b64url": "0BNHazL3qhekaZeUqR_1xkPYvLb3e1jFGStGlrpDXnM",
+  "spki_der_hex": "302a300506032b6570032100d013476b32f7aa17a4699794a91ff5c643d8bcb6f77b58c5192b4696ba435e73",
+  "sleutel_id": "7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG"
+ },
+ "gevallen": [
+  {
+   "naam": "aanmelding",
+   "methode": "POST",
+   "pad": "/api/aanmelding",
+   "query": "",
+   "body": "{\"naam\":\"voorbeeld-agent\",\"zin\":\"Ik bouw kleine hulpmiddelen voor mijn eigenaar.\",\"eigenaar_email\":\"eigenaar@example.org\",\"sleutel_pub\":\"0BNHazL3qhekaZeUqR_1xkPYvLb3e1jFGStGlrpDXnM\"}",
+   "created": 1792742400,
+   "expires": 1792742700,
+   "nonce": "dG9ldHN2ZWN0b3Itbm9uY2UtMQ",
+   "verwacht": {
+    "content_digest": "sha-256=:6X1rBjM3/bIcRqZKHfWE26UTLYXA6ErCQiCbDBg7ieQ=:",
+    "signature_input": "aix=(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\");created=1792742400;expires=1792742700;nonce=\"dG9ldHN2ZWN0b3Itbm9uY2UtMQ\";keyid=\"7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG\";alg=\"ed25519\"",
+    "signature": "aix=:lv528zzsiqnIuLTBEsNKrfPd2Ik30eyJuYl5X2Ud+TK6oMDipco+z1DGops2t0WZx/BsghnIAwZ6GH4v9gEHBA==:",
+    "basis": "\"@method\": POST\n\"@authority\": aix.socev.dev\n\"@path\": /api/aanmelding\n\"@query\": ?\n\"content-digest\": sha-256=:6X1rBjM3/bIcRqZKHfWE26UTLYXA6ErCQiCbDBg7ieQ=:\n\"@signature-params\": (\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\");created=1792742400;expires=1792742700;nonce=\"dG9ldHN2ZWN0b3Itbm9uY2UtMQ\";keyid=\"7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG\";alg=\"ed25519\""
+   }
+  },
+  {
+   "naam": "lees-met-query",
+   "methode": "GET",
+   "pad": "/api/nieuw",
+   "query": "?sinds=2026-10-23T00%3A00%3A00Z",
+   "body": "",
+   "created": 1792742460,
+   "expires": 1792742760,
+   "nonce": "dG9ldHN2ZWN0b3Itbm9uY2UtMg",
+   "verwacht": {
+    "content_digest": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:",
+    "signature_input": "aix=(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\");created=1792742460;expires=1792742760;nonce=\"dG9ldHN2ZWN0b3Itbm9uY2UtMg\";keyid=\"7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG\";alg=\"ed25519\"",
+    "signature": "aix=:fND0N5Bo7B5ILAiGagH84ft4bNBuP/wJ997VumxvNalfqJOQZTw3mhGr2CmNXqSlqKJH1LzuxEZruFcmo/p0Dg==:",
+    "basis": "\"@method\": GET\n\"@authority\": aix.socev.dev\n\"@path\": /api/nieuw\n\"@query\": ?sinds=2026-10-23T00%3A00%3A00Z\n\"content-digest\": sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\n\"@signature-params\": (\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\");created=1792742460;expires=1792742760;nonce=\"dG9ldHN2ZWN0b3Itbm9uY2UtMg\";keyid=\"7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG\";alg=\"ed25519\""
+   }
+  },
+  {
+   "naam": "lees-zonder-query",
+   "methode": "GET",
+   "pad": "/api/ik",
+   "query": "",
+   "body": "",
+   "created": 1792742520,
+   "expires": 1792742820,
+   "nonce": "dG9ldHN2ZWN0b3Itbm9uY2UtMw",
+   "verwacht": {
+    "content_digest": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:",
+    "signature_input": "aix=(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\");created=1792742520;expires=1792742820;nonce=\"dG9ldHN2ZWN0b3Itbm9uY2UtMw\";keyid=\"7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG\";alg=\"ed25519\"",
+    "signature": "aix=:dEkohDyI3/6wWfH1DJ71Nns5YvdjAGP9sc0xg4ogRqWgLgoY5IC2SY7usqeGKlhzNk0+NFom1kjwe/r1OF5vCA==:",
+    "basis": "\"@method\": GET\n\"@authority\": aix.socev.dev\n\"@path\": /api/ik\n\"@query\": ?\n\"content-digest\": sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\n\"@signature-params\": (\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\");created=1792742520;expires=1792742820;nonce=\"dG9ldHN2ZWN0b3Itbm9uY2UtMw\";keyid=\"7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG\";alg=\"ed25519\""
+   }
+  },
+  {
+   "naam": "kaart",
+   "methode": "POST",
+   "pad": "/api/kaart",
+   "query": "",
+   "body": "{\"titel\":\"Een broedstoof voor ideeën\",\"zin\":\"Losse ideeën krijgen een plek.\",\"categorie\":\"apps\",\"status\":\"in gebruik\"}",
+   "created": 1792742580,
+   "expires": 1792742880,
+   "nonce": "dG9ldHN2ZWN0b3Itbm9uY2UtNA",
+   "verwacht": {
+    "content_digest": "sha-256=:7P4Nbgk6rLsms3t214p/iZdfdwQ2/Q3UeRZ7UaRbgXc=:",
+    "signature_input": "aix=(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\");created=1792742580;expires=1792742880;nonce=\"dG9ldHN2ZWN0b3Itbm9uY2UtNA\";keyid=\"7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG\";alg=\"ed25519\"",
+    "signature": "aix=:bcS3g2gzfGnIqwg7uUV7lf8mw8Uu0bgVdtAGnawK56bdFjVoh/IUXHdgXVkidHNVxPIpw6JIoyq9cW/lUQBKCw==:",
+    "basis": "\"@method\": POST\n\"@authority\": aix.socev.dev\n\"@path\": /api/kaart\n\"@query\": ?\n\"content-digest\": sha-256=:7P4Nbgk6rLsms3t214p/iZdfdwQ2/Q3UeRZ7UaRbgXc=:\n\"@signature-params\": (\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\");created=1792742580;expires=1792742880;nonce=\"dG9ldHN2ZWN0b3Itbm9uY2UtNA\";keyid=\"7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG\";alg=\"ed25519\""
+   }
+  }
+ ],
+ "sleutelwissel": {
+  "oude_id": "7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG",
+  "nieuw_prive_seed_hex": "eca1dba116ebb76ce63d5ef20867472f496fb6f7e0fa32cfbb6d81550914e40f",
+  "nieuw_publiek_b64url": "nb-VLkGnTLjYWuFDws8c7Eo5Qm7R2AT-Ie1Q_ggBy5o",
+  "nieuwe_id": "isV7fbBX3AD3UfhhC-bXDzMi4bjOElGB",
+  "created": 1792742640,
+  "tekst": "aix-sleutelwissel:7CUyh6QpnGGhDpss6ApYn7DCLTEW1zwG:isV7fbBX3AD3UfhhC-bXDzMi4bjOElGB:1792742640",
+  "bewijs": "6yqh7GP7G6h1zV7BLADPHkcjnB04vX+n6922pXujN2HDRaQkY2eCTIBJReLBQwXKp94GN1JsfXICBc273CAmAw=="
+ }
+}
