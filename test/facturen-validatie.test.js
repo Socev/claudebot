@@ -170,9 +170,21 @@ test('droogloop: dezelfde posten onder een andere entry_ref (ander saldo) worden
   try { hist(t, b, 'b.tab'); } catch (e) { fout = e; }
   assert.ok(fout && fout.status === 409 && fout.extra && fout.extra.code === 'mogelijk_dubbel', String(fout && fout.fout));
   assert.equal(t.n('SELECT count(*) n FROM bank_transactie'), 3);
+  assert.equal(D.bronBestaat(t.fdb, D.sha256(Buffer.from(b))), false, 'geweigerd: geen wees in bankbron/ (diffreview #3)');
   const f = hist(t, b, 'b.tab', { forceer: true });
   assert.equal(f.nieuw, 3);
   assert.equal(t.fdb.db.prepare("SELECT na FROM audit WHERE wat = 'bankbestand_historisch' ORDER BY wanneer DESC, rowid DESC LIMIT 1").get().na.includes('"geforceerd":true'), true);
+  // zonder startdatum: gewone App-upload, geen droogloop-weigering (gedrag van vóór wv944; diffreview #2)
+  const t3 = opzet({ start: false });
+  F.verwerkBankbestand(t3.fdb, t3.eig, Buffer.from(a), 'a.tab', NU);
+  const z = F.verwerkBankbestand(t3.fdb, t3.eig, Buffer.from(b), 'b.tab', NU);
+  assert.equal(z.nieuw, 3); assert.equal(z.check.mogelijk_dubbel, 0);
+  // praktijkmanager-upload: ruwe bestand niet bewaard (F2-belofte voor de smalle ingang; diffreview #13)
+  const t4 = opzet({ start: false });
+  const pmBytes = tab([['20261012', -100, ov(LEV.A, 'Leverancier A B.V.', 'pm')]]);
+  const pmu = F.verwerkBankbestand(t4.fdb, t4.pm, Buffer.from(pmBytes), 'pm.tab', NU);
+  assert.equal(pmu.nieuw, 1); assert.equal(pmu.bron_bewaard, false);
+  assert.equal(D.bronBestaat(t4.fdb, D.sha256(Buffer.from(pmBytes))), false);
   // suffix: twee identieke posten in A (ref X en X-1); B bevat er maar één → basis telt 1 in B en 2 in de database
   const t2 = opzet();
   const regel = [acc => [acc, 'EUR', '20250110', '100,00', '90,00', '20250110', '-10,00', 'BEA, Betaalpas x'].join('\t')];
@@ -385,4 +397,21 @@ test('routes: GET/POST validatie voor de eigenaar; praktijkmanager ziet geen his
   assert.equal(pg.status, 200); assert.equal(pg.j.bank.regels, 1, 'alleen de regel na de start'); assert.equal(pg.j.facturen.archief, 0);
   assert.deepEqual(pg.j.controles.nieuwe_iban, []);
   assert.ok(F.ROUTES.GET.includes('validatie') && F.ROUTES.POST.includes('validatie'));
+});
+
+test('prestaties: overzicht met 1.500 facturen en 30.000 regels blijft onder 3 s (diffreview #1)', () => {
+  const tx = [], fs_ = [];
+  for (let i = 0; i < 30000; i++) {
+    const d = K.plusDagen('2024-01-01', i % 900);
+    tx.push({ id: 'x' + i, entiteit: i % 2 ? 'tolgaarde' : 'groenhouten', boekdatum: d, bedrag_centen: -(1000 + (i % 97) * 10), tegenpartij_iban: maakIban('NL', 'TEST', String(1000 + (i % 400)).padStart(10, '0')),
+      tegenpartij_naam: 'Leverancier ' + (i % 400), is_incasso: i % 3 === 0, incassant_id: i % 3 === 0 ? 'NL00ZZZ' + (i % 400) : null, omschrijving: 'factuur ' + i });
+  }
+  for (let j = 0; j < 1500; j++) fs_.push({ id: 'f' + j, entiteit: j % 2 ? 'tolgaarde' : 'groenhouten', nummer: 'N' + j, incl: 1000 + (j % 97) * 10,
+    iban: maakIban('NL', 'TEST', String(1000 + (j % 400)).padStart(10, '0')), factuurdatum: K.plusDagen('2024-01-01', j % 900) });
+  const t0 = Date.now();
+  for (const f of fs_) f.betaling = V.betalingVan(f, tx, {});
+  V.controles({ vandaag: '2026-10-22', transacties: tx, facturen: fs_, dekking: [] });
+  V.profielen(tx);
+  const ms = Date.now() - t0;
+  assert.ok(ms < 3000, 'duurde ' + ms + ' ms');
 });

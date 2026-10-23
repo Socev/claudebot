@@ -132,7 +132,9 @@ function betalingVan(f, transacties, opties) {
   if (gekoppeld.size) { const l = txs.filter((t) => gekoppeld.has(t.id)); if (l.length) return uit(l, 'vast', 'gekoppeld in Facturen'); }
   const incl = Number.isSafeInteger(f.incl) ? Math.abs(f.incl) : null;
   const datum = isIsoDatum(f.factuurdatum) ? f.factuurdatum : null;
-  const venster = (t) => !datum || (dagenTussen(plusDagen(datum, -45), t.boekdatum) >= 0 && dagenTussen(t.boekdatum, plusDagen(datum, 120)) >= 0);
+  // grenzen één keer berekenen en als tekst vergelijken (JJJJ-MM-DD): O(T) per factuur zonder datumobjecten (Fable diffreview wv944 #1)
+  const vVan = datum ? plusDagen(datum, -45) : null, vTot = datum ? plusDagen(datum, 120) : null;
+  const venster = (t) => !datum || (t.boekdatum >= vVan && t.boekdatum <= vTot);
   // 1. kenmerk of factuurnummer in kenmerk/omschrijving (≥ 5 tekens, anders te toevallig)
   const sleutels = [echtKenmerk(f.kenmerk), echtKenmerk(f.nummer)].filter(Boolean);
   if (sleutels.length) {

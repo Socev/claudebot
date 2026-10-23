@@ -881,7 +881,9 @@ function historieCheck(fdb, transacties, start) {
   const tp = (x) => K.ibanNorm(x.tegenpartij_iban) || K.normNaam(x.tegenpartij_naam);
   let dubbel = 0;
   for (const t of nieuw) {
-    if (start && t.boekdatum >= start) continue;   // na de start: het signaal mogelijk_dubbel_geupload
+    // alleen historie (vóór de start): na de start doet het signaal mogelijk_dubbel_geupload dit werk, en zonder startdatum blijft het
+    // gedrag van vóór wv944 (Fable diffreview wv944 #2)
+    if (!start || t.boekdatum >= start) continue;
     if (zelfde.all(t.eigen_iban, t.boekdatum, t.bedrag_centen).some((x) => x.entry_ref !== t.entry_ref && tp(x) === tp(t))) dubbel++;
   }
   return { regels: transacties.length, al_bekend: al, nieuw: nieuw.length, mogelijk_dubbel: dubbel, suffix_verschil: suffix,
@@ -904,8 +906,17 @@ function verwerkBankbestand(fdb, r, bytes, naam, nu, opties) {
   const lees = B.leesBankbestand(new Uint8Array(bytes), { rekeningen });
   if (!lees.ok) weiger(422, lees.uitleg, { code: lees.fout });
   if (!isEig(r) && lees.transacties.some((t) => t.alleen_eigenaar || !magEntiteit(r, t.entiteit))) weiger(403, 'dit bestand bevat een rekening die alleen de eigenaar mag inlezen');
-  // het ruwe bestand als bron (idempotent; ook als het bestand al bekend is: dan ontbrak de bron misschien nog)
-  const bron = opties.droog ? null : D.bronSchrijf(fdb, Buffer.from(bytes));
+  // het ruwe bestand als bron (idempotent; ook als het bestand al bekend is: dan ontbrak de bron misschien nog). Alleen voor de eigenaar:
+  // een upload via de smalle ingang (F6) houdt de belofte van F2 dat het ruwe bestand niet bewaard wordt (Fable diffreview wv944 #13).
+  const bron = opties.droog || !isEig(r) ? null : D.bronSchrijf(fdb, Buffer.from(bytes));
+  try { return verwerkBankbestandTx(fdb, r, lees, sha, bron, naam, nu, opties, modus, start, rekeningen); }
+  catch (e) {
+    // geweigerd of mislukt: een net geschreven bron zonder bank_bestand weer weg (geen wees offsite; diffreview #3)
+    if (bron && bron.nieuw && !fdb.db.prepare('SELECT 1 FROM bank_bestand WHERE sha256 = ?').get(sha)) { try { fs.unlinkSync(D.bronPad(fdb, sha)); } catch (e2) {} }
+    throw e;
+  }
+}
+function verwerkBankbestandTx(fdb, r, lees, sha, bron, naam, nu, opties, modus, start, rekeningen) {
   return D.transactie(fdb, function () {
     const bekend = fdb.db.prepare('SELECT id FROM bank_bestand WHERE sha256 = ?').get(sha);
     if (bekend) {
@@ -1076,7 +1087,9 @@ function validatie(fdb, r, d, nu, opties) {
       factuurdatum: f.factuurdatum, vervaldatum: f.vervaldatum }, betaling: Object.assign({}, b, { regels: inv.txs.filter((t) => b.transacties.includes(t.id)).map(txUit) }) };
   }
   if (soort !== 'overzicht') weiger(400, 'soort is overzicht, zoek, tegenpartij of factuur');
-  for (const f of inv.facturen) f.betaling = V.betalingVan(f, inv.txs, { koppelingen: f.koppelingen });
+  const perEnt = new Map();   // betalingVan kijkt alleen binnen de entiteit: één keer groeperen (diffreview wv944 #1)
+  for (const t of inv.txs) { if (!perEnt.has(t.entiteit)) perEnt.set(t.entiteit, []); perEnt.get(t.entiteit).push(t); }
+  for (const f of inv.facturen) f.betaling = V.betalingVan(f, perEnt.get(f.entiteit) || [], { koppelingen: f.koppelingen });
   const dekking = inv.start ? [{ van: inv.start, tot: null }] : [];
   if (d && d.dekking_fv2 === true) {
     const fv = inv.facturen.filter((f) => f.herkomst === 'fv2' && f.factuurdatum).map((f) => f.factuurdatum).sort();
