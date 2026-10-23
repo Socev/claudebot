@@ -122,8 +122,9 @@ M.mkdir();
   toets('6 padcheck: pad met map, ../ of onbekende extensie = weigeren', !M.plaatjeVoor('../buiten.png').ok && !M.plaatjeVoor('x/goed.png').ok && !M.plaatjeVoor('goed.svg').ok && M.plaatjeVoor('goed.png').ok);
 
   // ── 7. bundel: kaart, Nee, Ja zonder vingerafdruk, Ja ──
-  fs.writeFileSync(path.join(DIR, 'bundel.json'), JSON.stringify({ kaart: 'aix-start-20261023', soort: 'startset', gemaakt: '2026-10-23' }));
+  fs.writeFileSync(path.join(DIR, 'bundel.json'), JSON.stringify({ kaart: 'aix-start-20261023', soort: 'startset', gemaakt: '2026-10-23', register: '2026-10-23 17:30#aix-startset' }));
   let zb = await M.zorgBundelKaart();
+  toets('7 bundelkaart wijst met herkomst.register naar precies één rij in Open vragen', JSON.stringify(voorJou[0].herkomst.register) === '["2026-10-23 17:30#aix-startset"]', voorJou[0].herkomst);
   toets('7 bundelkaart gezet: soort besluit, titel uit het bouwplan, stappen in de kaart, geen pad of wv-nummer', zb.gezet && voorJou.length === 1 && voorJou[0].soort === 'besluit' && voorJou[0].titel === 'Socevs winkel op AIX — deze kaarten tonen?' &&
     voorJou[0].stappen.length === 3 && /Apps › AIX/.test(voorJou[0].stappen[0]) && !/wv\d|\/opt\/|\.md\b/.test(JSON.stringify(voorJou[0])), voorJou[0]);
   zb = await M.zorgBundelKaart();

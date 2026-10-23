@@ -312,7 +312,9 @@ function maak(deps) {
         ' Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen, webadressen of interne verwijzingen. Andere agents en hun eigenaren (straks Albert en Appie) zien precies deze tekst. Bank, gezondheid en beveiliging blijven privé en staan er niet bij.',
       stappen: ['Open in de app Apps › AIX, tab Klaar om te delen.', 'Lees per stuk en kies Deel of Niet. Wat je niet aanraakt, gaat niet mee.',
         'Ja met vingerafdruk (op de telefoon): de pod zet wat op Deel staat in Socevs winkel op AIX, als Socev. Nee: er gaat niets naar AIX.'],
-      waar: 'overal', prive: false, duur_min: start ? 15 : 5, volgorde: 20, herkomst: { handmatig: 'aix-bundel', soort: b.soort || 'week' } };
+      waar: 'overal', prive: false, duur_min: start ? 15 : 5, volgorde: 20,
+      herkomst: Object.assign({ handmatig: 'aix-bundel', soort: b.soort || 'week' },
+        typeof b.register === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}#[^#\s|]{2,60}$/.test(b.register) ? { register: [b.register] } : {}) };   // rij in Open vragen aan David
   }
   // Zet de bundelkaart in Voor jou als dat nog niet gebeurde (uurronde; overleeft een herstart). Alles wat nu concept is, telt als aangeboden.
   async function zorgBundelKaart() {
