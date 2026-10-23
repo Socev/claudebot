@@ -3529,7 +3529,7 @@ function handleRequest(req, res) {
       pot_verzend: typeof potVzInfo === 'function' ? potVzInfo() : { aan: false },   // wv911: POT-app nota's als Gmail-concept (schakelaar, laatste tik, aantallen; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
-      gezondheid: gezondheidInfo(),   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
+      gezondheid: typeof gezondheidInfo === 'function' ? gezondheidInfo() : { aan: false },   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
@@ -9573,19 +9573,27 @@ async function appFinancien(req, res, a) {
 // 60 s in het geheugen tegen Ververs-spam en hooguit 30 min als terugval als de health-pod even weg is (de App zegt dan "van HH:MM").
 // Een half antwoord (een blok faalde) wordt niet bewaard. Niets op schijf. Opgaven: niet hier — de App vult het gesprek met Davids
 // eigen zin en Socev gebruikt de bestaande opgaveroute (skill health-pod; Fable wv937 #11: geen tweede schrijfweg).
-const gezondheid = (function () {
-  const p = path.join(__dirname, 'gezondheid-app.js');
-  if (!fs.existsSync(p)) return null;
-  try { return require(p).maak({ fout: logError }); } catch (e) { logError('gezondheid', e); return null; }
-})();
+// Lui geladen (pas bij het eerste verzoek of /health): het app-blok draait in de poort- en UI-toets in een vm zonder __dirname.
+let appGezMod;   // undefined = nog niet geprobeerd, null = niet in deze release
+function gezondheidMod() {
+  if (appGezMod !== undefined) return appGezMod;
+  appGezMod = null;
+  try {
+    const p = path.join(__dirname, 'gezondheid-app.js');
+    if (fs.existsSync(p)) appGezMod = require(p).maak({ env: process.env, fout: logError });
+  } catch (e) { logError('gezondheid', e); }
+  return appGezMod;
+}
 function gezondheidInfo() {
-  if (!gezondheid) return { aan: false };
-  try { return gezondheid.health(); } catch (e) { return { aan: true, fout: true }; }
+  const g = gezondheidMod();
+  if (!g) return { aan: false };
+  try { return g.health(); } catch (e) { return { aan: true, fout: true }; }
 }
 const APP_GEZ_CACHE_MS = 60000, APP_GEZ_TERUGVAL_MS = 30 * 60000;
 const appGezCache = {};   // route -> { op, j }
 async function appGezondheid(req, res, a, route) {
   res._app.reden = route === 'GET /app/gezondheid' ? 'gezondheid' : 'gezondheid genoom';
+  const gezondheid = gezondheidMod();
   if (!gezondheid) return appWeiger(res, 404, 'Gezondheid zit niet in deze versie van de pod', 'gezondheid ontbreekt');
   if (a.soort === 'vast') return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'Gezondheid staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' });
   const nu = Date.now(), c = appGezCache[route];
