@@ -14347,13 +14347,14 @@ function socevSmalOpts(runOpts, chatId) {
 //   POST /smal/vault-zoek   {query, max_num_results, score_threshold} -> AI Search /search van instance vault (alleen zoeken)
 //   POST /smal/fin-sql      {sql, params} -> D1 fin, alleen één SELECT/WITH zonder schrijfwoorden (laden blijft machinekamer)
 //   POST /smal/telegram     {opdracht: dialogen|lees, chat, dagen, aantal} -> telegram-reader.js (zelf alleen-lezen)
+//   POST /smal/health-opgaven  {} -> health-import.py --alleen-opgaven als claude (wv887; zie healthOpgaven)
 // Fable wv424b: géén script uit de vault met de volle omgeving (de vault is schrijfbaar voor elke smalle sessie: drie regels
 // erin en de hele omgeving kwam terug). Lessen schrijft server.js zelf; telegram-reader.js komt uit de release en krijgt alleen
 // zijn eigen drie sleutels. Een les via deze route is altijd domein 'pa' (een machine-les zou anders als persistente injectie in
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30, 'harvester/kaart': 8 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30, 'harvester/kaart': 8, 'health-opgaven': 20 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
 const SMAL_CF_ACCOUNT = '23df9b0607bb70f6d7f15a63ec843d6d';
 const SMAL_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen
@@ -14469,6 +14470,7 @@ async function smalActie(actie, d) {
     return { status: 200, j: { ok: r.code === 0, code: r.code, stdout: r.stdout, stderr: r.stderr } };
   }
   if (actie === 'bank') return bankSmal(d);   // wv680: alleen-lezen bankluis (zie bankSmal)
+  if (actie === 'health-opgaven') return healthOpgaven();   // wv887: de body doet niet mee, het commando ligt vast
   // wv743: voorstel van Socev in het bandjesregister (skill bandjes); de pod schrijft, de skill nooit zelf (Fable #5)
   // wv820: kaart van de Verkenner (research-scout) in de Harvester; de pod controleert en schrijft (Fable wv820 #8)
   if (actie === 'harvester/kaart') {
@@ -15038,6 +15040,52 @@ function healthRapportenStart(klaar) {
       // Alleen de startregel zelf; het deel '; vorige: …' (onderdeelnamen en foutaantallen) blijft uit de n8n-executies (Fable wv811 #5).
       klaar({ status: 200, j: { ok: true, regel: m[0].split('; vorige')[0].slice(0, 200) } });
     });
+}
+// ── wv887: opgaven van David naar de health-pod, zonder schrijfsleutel bij Socev ─────────────────────────────────────────
+// WAAROM. Zegt David "ik woog vanochtend 85 kg", dan zet Socev een regel op de opgavenpagina in de vault en draaide tot nu toe
+// zelf `health-import.py --alleen-opgaven`; dat script leest de schrijfsleutel uit /opt/data/.health-pod/sleutels.env (0600
+// claude). Zodra het hoofdkanaal als socev (1002) draait (bouwplan sleutelscheiding § 8 stap 5) kan dat niet meer, en dat moet
+// zo blijven: met de schrijfsleutel kan een gesprek elke route van de pod beschrijven (ook /diagnoses). Hier start de pod het
+// script als claude, met een vast commando: Socev kan alleen "verwerk de opgavenpagina" vragen, niet kiezen wat er geschreven
+// wordt. Het script houdt zijn eigen routegrens (Api.routes: /personen, /bronnen, /metingen, /gebeurtenissen) en alle toetsen
+// (getal letterlijk in Davids woorden, soort en eenheid, bereik, geen toekomst), en volgt sinds wv887 geen symlink en geen pad
+// buiten de vault (de kaart en de opgavenpagina zijn voor socev schrijfbaar).
+// HOE. POST /smal/health-opgaven {secret} (SOCEV_AGENT_SLEUTEL of API_SECRET; 20 per uur per teller) → `python3 -I
+// health-import.py --alleen-opgaven`, omgeving alleen HOME/PATH/TZ/LANG/LC_ALL (het script leest zijn sleutels zelf), één
+// tegelijk (409), 90 s, alleen op de primaire kant. Antwoord: {ok, nieuw, bestond, overgeslagen: [{rij, reden}]} (hooguit 20;
+// rij en reden komen van de opgavenpagina die Socev zelf schreef), bij een stop {ok:false, fout: 'IMPORT GESTOPT: …'}. Nooit
+// stdout of stderr van het script verder; in de foutlog alleen de soort fout.
+// DEKT NIET: de vault blijft de bron. Wat Socev in het dossier of de importkaart zet, zet de nachtimport (als claude, met de
+// volle schrijfrol) later ook in de pod, met het citaat als herkomst; dat is het ontwerp (Health-pod § 22), geen omweg.
+const HEALTH_OPGAVEN_BIN = process.env.HEALTH_OPGAVEN_BIN || '/opt/data/bin/health-import.py';   // alleen de toets wijst elders heen
+const HEALTH_OPGAVEN_ENV = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL'];
+const HEALTH_OPGAVEN_MS = Number(process.env.HEALTH_OPGAVEN_MS) || 90000;
+let healthOpgavenBezig = false;
+async function healthOpgaven() {
+  if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant; de nachtimport zet de opgave er later in' } };
+  if (healthOpgavenBezig) return { status: 409, j: { ok: false, fout: 'er loopt al een opgavenronde; probeer het over een minuut opnieuw' } };
+  healthOpgavenBezig = true;
+  try {
+    const env = {};
+    HEALTH_OPGAVEN_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
+    return healthOpgavenUitslag(await smalKind('python3', ['-I', HEALTH_OPGAVEN_BIN, '--alleen-opgaven'], '', HEALTH_OPGAVEN_MS, env));
+  } finally { healthOpgavenBezig = false; }
+}
+function healthOpgavenUitslag(r) {
+  const regels = String(r.stdout || '').trim().split('\n');
+  let j = null;
+  try { j = JSON.parse(regels[regels.length - 1]); } catch (e) {}
+  if (j && j.deel === 'opgaven' && j.droog === false && (r.code === 0 || r.code === 1)) {
+    const over = Array.isArray(j.overgeslagen) ? j.overgeslagen : [];
+    return { status: 200, j: { ok: r.code === 0, nieuw: Number(j.nieuw) || 0, bestond: Number(j.bestond) || 0,
+      overgeslagen: over.slice(0, 20).map(function (o) { return { rij: String(o && o.rij || '').slice(0, 120), reden: String(o && o.reden || '').slice(0, 300) }; }),
+      en_nog_overgeslagen: Math.max(0, over.length - 20) || undefined } };
+  }
+  const gestopt = /IMPORT GESTOPT: [^\n]*/.exec(String(r.stderr || ''));
+  const soort = r.signaal ? 'tijdgrens' : gestopt ? 'gestopt' : 'exit ' + r.code;
+  logError('health-opgaven', new Error('importeur: ' + soort));
+  return { status: 502, j: { ok: false, fout: r.signaal ? 'de importeur duurde langer dan ' + Math.round(HEALTH_OPGAVEN_MS / 1000) + ' s'
+    : gestopt ? gestopt[0].slice(0, 300) : 'de importeur faalde (exit ' + r.code + ')' } };
 }
 function bankRondeStart() {
   if (bankRondeBezig) return { status: 409, j: { ok: false, fout: 'er loopt al een bank-ronde', begin: bankRondeLaatste && bankRondeLaatste.begin } };
