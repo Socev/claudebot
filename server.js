@@ -16378,6 +16378,8 @@ async function potAfKaartConcept(maand, meting) {
 async function potAfschriftRonde(o) {
   o = o || {};
   if (!potAfAan()) return { gedaan: false, reden: 'module ontbreekt' };
+  // wv959 (Fable-hercontrole): een onleesbaar pod.json niet stil vervangen door een lege staat (dan vergeet de pod welke route een maand had)
+  if (potAfStaatKapot()) { logError('pot-ronde', new Error('pod.json onleesbaar')); return { gedaan: false, reden: 'geheugen onleesbaar', fout: 'pot-afschriften: pod.json onleesbaar' }; }
   const p = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' });
   const datum = o.datum || p.slice(0, 10), uur = o.uur != null ? o.uur : Number(p.slice(11, 13)), dag = Number(datum.slice(8, 10));
   if (dag < POT_AF_VANAF || (dag === POT_AF_VANAF && uur < POT_AF_VANAF_UUR)) return { gedaan: false, reden: 'te vroeg' };
