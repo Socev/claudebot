@@ -46,6 +46,7 @@ const KLOK_MARGE_S = 60;
 const VERZOEKEN_PER_UUR = 600;      // per gebruiker
 const UPLOADS_PER_UUR = 30;         // per gebruiker
 const UPLOADS_TEGELIJK = 2;         // lopende stromen per gebruiker (Fable wv856 #4)
+const UPLOAD_TOTAAL = 60 * 1024 * 1024;   // alles wat via deze ingang klaarstaat, alle gebruikers samen (diffreview wv856 #2)
 const VOOR_AUTH_PER_MIN = 5;        // auditregels voor weigeringen vóór slot 5
 const AUDIT_MAX = 5 * 1024 * 1024;
 const CONFIG_MS = 10 * 1000;
@@ -98,7 +99,7 @@ async function controleerJwt(token, verwacht, certs, nuMs) {
  * maak(o) → { isPad(req), verwerk(req, res), info() }.
  * o = { dir (FACTUREN_DIR), appUit (pad noodstop), appAud() → aud van de Socev-app, certs(team, kid), routes (facturen.js maak()),
  *       open() → fdb | null, primair() → bool, body(req, cb(fout, d)), upload(req, res, pseudo, rest), uploadNeem(pseudo, beurt, n),
- *       stuur(res, status, obj), bankluisPad, fout(label, e), nu() }
+ *       stuur(res, status, obj), bankluisPad, fout(label, e), nu(), uploadBytes() → bytes die via deze ingang klaarstaan }
  */
 function maak(o) {
   const dir = path.join(o.dir, 'ingang');
@@ -208,13 +209,19 @@ function maak(o) {
       res._app.apparaat = 'fac-' + rol.id;
       if (!teller(rol.id, 'alles', VERZOEKEN_PER_UUR)) return weiger(429, 'te veel verzoeken dit uur', 'grens alles');
       const pseudo = { id: 'fac-' + rol.id };
+      // mag_bevestigen = 0: alleen kijken en uploaden (lezen, ruwe upload en de overname); elke andere handeling 403 (diffreview wv856 #4)
+      if (rol.mag_bevestigen === false && req.method === 'POST' && !UPLOAD_RE.test(p) && p !== '/fac/facturen/upload')
+        return weiger(403, 'je kunt in Facturen alleen kijken en uploaden; vraag het David', 'alleen kijken');
 
       // ruwe upload (één bestand per verzoek); de route van server.js schrijft naar een eigen map per gebruiker
       const up = UPLOAD_RE.exec(p);
       if (up) {
         if (req.method !== 'POST') return weiger(404, 'onbekend', 'upload methode');
         const g = tellers[rol.id];
+        // de verbinding kan tijdens de JWT-controle al weg zijn; dan nooit een lopende stroom tellen (diffreview wv856 #3)
+        if (req.destroyed || req.aborted || res.destroyed) return weiger(400, 'upload afgebroken', 'upload weg vóór start');
         if (g.lopend >= UPLOADS_TEGELIJK) return weiger(429, 'wacht tot de vorige upload klaar is', 'upload tegelijk');
+        if (typeof o.uploadBytes === 'function' && o.uploadBytes() > UPLOAD_TOTAAL) return weiger(507, 'er staan nu te veel bestanden klaar; probeer het over een uur', 'upload vol');
         if (!teller(rol.id, 'upload', UPLOADS_PER_UUR)) return weiger(429, 'te veel bestanden dit uur (max ' + UPLOADS_PER_UUR + ')', 'grens upload');
         g.lopend++;
         let af = false;

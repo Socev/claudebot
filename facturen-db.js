@@ -529,7 +529,10 @@ INSERT INTO meta (sleutel, waarde) VALUES ('verstuur_instelling', '{"soort":"uur
 
 // wv856 (F6, Fable #1): via de smalle ingang ('fac', geen passkey) nooit eigenaar — in de database, niet alleen in facturen.js; en het
 // e-mailadres van een fac-gebruiker staat er altijd in kleine letters zonder witruimte (zo vindt rolVoor hem, en nooit een tweede rij).
+// LET OP terugrol: na deze migratie opent een release van vóór wv856 de database niet meer (schema_nieuwer); terugrollen = ook de
+// database terugzetten (backup/ van vóór de uitrol) of vooruit herstellen. Gemeld in uitrol.sh (diffreview wv856 #6).
 const M3 = `
+UPDATE gebruiker SET email = lower(trim(email)) WHERE ingang = 'fac' AND email IS NOT NULL AND email <> lower(trim(email));
 UPDATE gebruiker SET rol = 'praktijkmanager' WHERE ingang = 'fac' AND rol <> 'praktijkmanager';
 CREATE TRIGGER gebruiker_fac_rol BEFORE INSERT ON gebruiker
 WHEN NEW.ingang = 'fac' AND (NEW.rol <> 'praktijkmanager' OR NEW.email IS NULL OR NEW.email <> lower(trim(NEW.email)))

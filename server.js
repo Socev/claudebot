@@ -4630,7 +4630,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
 const APP_BSN_SYS = '[Systeem: in Davids invoer stond een BSN-achtig getal (9 cijfers die de elfproef halen); de pod heeft het weggelaten (' + APP_BSN_MASKER + '). Vraag er niet naar; meestal was het een ander nummer.]';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -6370,7 +6370,7 @@ function appUpload(req, res, reg, a, rest) {
   const lengte = req.headers['content-length'] !== undefined ? Number(req.headers['content-length']) : null;
   if (lengte !== null && lengte > APP_UPLOAD_BESTAND_MAX) return weg(413, 'bestand te groot (max ' + (APP_UPLOAD_BESTAND_MAX >> 20) + ' MB per bestand)', 'upload te groot');
   if (appBeurtIds()[appSha(bid)]) return weg(409, 'dit bericht is al verstuurd', 'upload na beurt');
-  if (!appTeller('upload', APP_UPLOAD_PER_UUR, 3600000)) return weg(429, 'te veel bestanden dit uur (max ' + APP_UPLOAD_PER_UUR + ')', 'grens upload');
+  if (!appTeller(String(a.id).indexOf('fac-') === 0 ? 'upload-fac' : 'upload', APP_UPLOAD_PER_UUR, 3600000)) return weg(429, 'te veel bestanden dit uur (max ' + APP_UPLOAD_PER_UUR + ')', 'grens upload');   // wv856: de Facturen-ingang telt apart (diffreview #2)
   const dir = appUploadMap(a, bid);
   let klaar;
   try { klaar = appUploadLijst(dir); } catch (e) { logError('app-upload', e); return weg(503, 'opslag op de pod onleesbaar', 'upload lijst'); }
@@ -13216,13 +13216,26 @@ const facturenIngang = (function () {
   const p = path.join(__dirname, 'facturen-ingang.js');
   if (!facturenRoutes || !fs.existsSync(p)) return null;
   try {
+    // eigen routes-instantie: de teller voor documentinzage (120/u) deelt de ingang niet met David (diffreview wv856 #2)
+    const routes = require(path.join(__dirname, 'facturen.js')).maak({ fout: logError });
     return require(p).maak({ dir: FACTUREN_DIR, appUit: APP_UIT, appAud: function () { return appConfig().aud; },
-      certs: function (team, kid) { return appCerts({ team: team }, kid); }, routes: facturenRoutes, open: facturenOpen, primair: rolPrimair,
+      certs: function (team, kid) { return appCerts({ team: team }, kid); }, routes: routes, open: facturenOpen, primair: rolPrimair,
+      uploadBytes: function () { return facturenIngangUploadBytes(); },
       body: function (req, cb) { appBody(req, function (fout, d) { cb(fout, d); }); },
       upload: function (req, res, pseudo, rest) { return appUpload(req, res, null, pseudo, rest); },
       uploadNeem: facturenUploadNeem, stuur: appStuur, bankluisPad: FACTUREN_BANKLUIS, fout: logError });
   } catch (e) { logError('facturen-ingang', e); return null; }
 })();
+// Wat de Facturen-ingang samen klaar heeft staan (alle mappen fac-*): de ingang begrenst dat zelf, zodat hij Davids uploadruimte niet vult.
+function facturenIngangUploadBytes() {
+  let n = 0, mappen = [];
+  try { mappen = fs.readdirSync(APP_UPLOAD_DIR).filter(function (m) { return m.indexOf('fac-') === 0; }); } catch (e) { return 0; }
+  mappen.forEach(function (m) {
+    const ad = path.join(APP_UPLOAD_DIR, m);
+    try { fs.readdirSync(ad).forEach(function (b) { const bd = path.join(ad, b); try { fs.readdirSync(bd).forEach(function (f) { try { n += fs.statSync(path.join(bd, f)).size; } catch (e) {} }); } catch (e) {} }); } catch (e) {}
+  });
+  return n;
+}
 function facturenIngangIsPad(req) { const p = reqPath(req); return p === '/fac' || p.indexOf('/fac/') === 0; }
 function facturenIngangInfo() { if (!facturenIngang) return { aan: false }; try { return Object.assign({ aan: true }, facturenIngang.info()); } catch (e) { return { aan: true, fout: true }; } }
 

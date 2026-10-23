@@ -622,6 +622,7 @@ async function facturenStap() {
   facPagesSecret('FAC_TOEGESTAAN', adr.lijst.join(','));
   const audPod = await facAccessPod(st.id);
   const audGeb = await facAccessSite(adr.lijst);
+  facPagesSecret('ACCESS_AUD', audGeb);   // de middleware van de site eist hem (diffreview wv856 #1); elke run opnieuw, ook bij een nieuwe aud
   if (!FAC_DROOG) {
     fs.mkdirSync(FAC_INGANG, { recursive: true, mode: 0o700 });
     const cfgPad = path.join(FAC_INGANG, 'config.json');
@@ -630,7 +631,12 @@ async function facturenStap() {
     fs.renameSync(cfgPad + '.nieuw', cfgPad);
     console.log('ingang/config.json geschreven (aud ' + audPod.slice(0, 8) + '… en ' + audGeb.slice(0, 8) + '…)');
   }
-  const t = await tunnelZoekOfMaak();
+  let t;
+  if (FAC_DROOG) {   // droog: alleen zoeken, nooit een tunnel aanmaken (diffreview wv856 #5)
+    const lijst = await cf('GET', '/accounts/' + ACC + '/cfd_tunnel?is_deleted=false&name=' + NAAM);
+    if (!lijst || !lijst.length) throw new Error('tunnel ' + NAAM + ' niet gevonden (droog: niets aangemaakt)');
+    t = lijst[0].id; console.log('tunnel bestaat: ' + t);
+  } else t = await tunnelZoekOfMaak();
   await facSchrijf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + t + '/configurations', ingress(), 'ingress (fac-pod alleen ^/fac/, met Access-bewijs)');   // eerst de deur, dan DNS
   await facDns(FAC_POD, t + '.cfargotunnel.com', 'tunnel ' + NAAM + ' - Facturen pod-ingang');
   await facPagesDomein();
@@ -653,6 +659,9 @@ async function toetsFacturen(n404) {
   for (const host of [N8N, SOCEV, APP_POD, BANK]) { const r = await http('GET', 'https://' + host + '/fac/wie'); regel(n404(r) || r.status === 401 || r.status === 403, '/fac niet via ' + host, r, 'GET ' + host + '/fac/wie'); }
   let cfg = null; try { cfg = JSON.parse(fs.readFileSync(path.join(FAC_INGANG, 'config.json'), 'utf8')); } catch (e) {}
   if (!cfg) { console.log('LET OP  Facturen-ingang nog niet ingericht (geen ingang/config.json): alleen de controle hierboven'); return fout; }
+  const gz = facPagesGezet();
+  const alle = ['ACCESS_AUD', 'FAC_TOEGESTAAN', 'FAC_POORT_SECRET', 'FAC_POD_CLIENT_ID', 'FAC_POD_CLIENT_SECRET'].filter(function (k) { return !gz[k]; });
+  regel(!alle.length, 'Pages-secrets van ' + FAC_PAGES + ' gezet' + (alle.length ? ' (mist: ' + alle.join(', ') + ')' : ''), { status: alle.length ? 0 : 200 }, 'pages-gezet.json');
   const U = 'https://' + FAC_POD;
   let r = await http('GET', U + '/fac/wie');
   regel((r.status === 401 || r.status === 403) && !r.location, 'fac-pod zonder servicetoken: Access weigert (kale 401)', r, 'GET /fac/wie');

@@ -81,7 +81,7 @@ async function opzet(o) {
       if (!b) return null;
       return { naam: b.naam, bytes: b.bytes, weg: () => { delete klaar[pseudo.id][beurt + '/' + n]; } };
     },
-    stuur, bankluisPad: path.join(dir, 'geen-bankluis.sqlite'), fout: (l, e) => t.fouten.push(l + ': ' + (e && e.message)),
+    stuur, bankluisPad: path.join(dir, 'geen-bankluis.sqlite'), fout: (l, e) => t.fouten.push(l + ': ' + (e && e.message)), uploadBytes: () => t.vol || 0,
   });
   t.server = http.createServer((req, res) => (t.ingang.isPad(req) ? t.ingang.verwerk(req, res) : (res.writeHead(404), res.end())));
   await new Promise((ok) => t.server.listen(0, '127.0.0.1', ok));
@@ -285,8 +285,18 @@ test('mag_bevestigen 0 → Bevestigen 403; anders gewoon bevestigen (naar de wac
     const ander = f.find((x) => x.id !== gelukt.id);
     const r = await t.vraag('POST', '/fac/facturen/bevestig', { d: { id: ander.id, entiteit: ander.entiteit, betaalwijze: 'incasso' } });
     assert.equal(r.status, 403);
-    assert.match(r.j.fout, /bevestigen staat voor jou uit/);
+    assert.match(r.j.fout, /alleen kijken en uploaden/);
     assert.equal((await t.vraag('GET', '/fac/wie')).j.mag_bevestigen, false);
+    // alleen kijken en uploaden: elke andere POST 403 (ook opnieuw, terugdraaien, wijzigen), lezen en uploaden wel
+    for (const route of ['opnieuw', 'terugdraaien', 'wijzig', 'ingevoerd', 'signaal', 'leverancier', 'koppel', 'geen-factuur'])
+      assert.equal((await t.vraag('POST', '/fac/facturen/' + route, { d: { id: gelukt.id } })).status, 403, route);
+    assert.equal((await t.vraag('GET', '/fac/facturen/lijst/beoordelen')).status, 200);
+    assert.equal((await t.vraag('POST', '/fac/upload/beurt-0099/1', { ruw: Buffer.from('x'), koppen: { 'X-App-Naam': 'a.tab' } })).status, 200);
+    assert.notEqual((await t.vraag('POST', '/fac/facturen/upload', { d: { beurt: 'beurt-0099', n: 1 } })).status, 403);
+    // en in facturen.js zelf (tweede laag): Bevestigen weigert bij mag_bevestigen 0
+    const pm = F.rolVoor(t.fdb, { ingang: 'fac', email: PM });
+    const b = t.routes.app(t.fdb, { methode: 'POST', pad: '/app/facturen/bevestig', d: { id: ander.id, entiteit: ander.entiteit, betaalwijze: 'incasso' }, rol: pm, primair: true, versOk: () => false, versVerbruik: () => {} });
+    assert.equal(b.status, 403); assert.match(b.j.fout, /bevestigen staat voor jou uit/);
   } finally { await sluit(t); }
 });
 
@@ -327,6 +337,11 @@ test('upload: eigen map per gebruiker, overname via /fac/facturen/upload; een re
     r = await t.vraag('POST', '/fac/upload/beurt-0020/1', { ruw: Buffer.from('x'), koppen: { 'X-App-Naam': 'b.tab' } });
     assert.equal(r.status, 429, r.tekst);
     for (const q of open) q.destroy();
+    await new Promise((ok) => setTimeout(ok, 100));
+    t.vol = 61 * 1024 * 1024;
+    r = await t.vraag('POST', '/fac/upload/beurt-0021/1', { ruw: Buffer.from('x'), koppen: { 'X-App-Naam': 'c.tab' } });
+    assert.equal(r.status, 507, 'alles via de ingang samen hooguit 60 MB');
+    t.vol = 0;
   } finally { await sluit(t); }
 });
 
@@ -393,6 +408,9 @@ test('server.js: /fac vóór handleRequest, zonder module 404; /health noemt de 
   assert.ok(i > 0 && j > i, '/fac wordt vóór handleRequest afgehandeld');
   assert.match(server, /facturen_ingang: facturenIngangInfo\(\)/);
   assert.match(server, /if \(facturenIngang\) return facturenIngang\.verwerk\(req, res\);\n\s*req\.resume\(\); res\.writeHead\(404/);
+  assert.match(server, /appTeller\(String\(a\.id\)\.indexOf\('fac-'\) === 0 \? 'upload-fac' : 'upload'/, 'eigen uploadteller voor de ingang');
+  assert.match(server, /'upload-fac': \[\]/);
+  assert.match(server, /const routes = require\(path\.join\(__dirname, 'facturen\.js'\)\)\.maak\(/, 'eigen routes-instantie (documentteller)');
 });
 
 // ───────────────────────────── gebruikersbeheer ─────────────────────────────

@@ -53,6 +53,8 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 #   op de primaire kant voor /health.facturen (ontbreekt hij, dan facturen.aan=false; F2 koppelt de routes).
 # facturen.js (wv833): routes /app/facturen/* en POST /facturen-ronde, door server.js geladen (ontbreekt hij, dan 404 op /app/facturen* en facturen.aan=false in /health).
 # facturen-ingang.js (wv856): smalle ingang /fac/* voor de praktijkmanager (facturen.socev.dev); door server.js geladen, slapend (404) tot de inrichting (ontbreekt hij, dan 404 op /fac).
+#   Met wv856 krijgt de facturendatabase migratie 3: een terugrol naar een release van vóór wv856 opent hem niet meer (schema_nieuwer) — dan ook
+#   /opt/data/facturen/backup/ van vóór de uitrol terugzetten, of vooruit herstellen.
 # secondbrain.js (wv832): App Second Brain, routes /app/secondbrain* (ontbreekt hij, dan 404 en secondbrain.aan=false in /health).
 RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js harvester.js facturen-db.js facturen.js facturen-ingang.js secondbrain.js"
 
