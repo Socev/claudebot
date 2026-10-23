@@ -486,8 +486,28 @@ const p = (id, datum, bedrag, tegen, omschr, extra) => Object.assign({ id: id, d
       toets('wv779 rand: twee diensten van 4,99 = twee reeksen met elk één per maand; post zonder bewijs bij Samsung', rd('samsung').length === 1 && rd('skyshowtime').length === 1 &&
         rd('samsung')[0].n_per_maand === 1 && rd('samsung')[0].aantal === 12 && rd('samsung')[0].paypal_naam === 'Samsung', rr.map((x) => [x.bedrag, x.paypal_dienst, x.n_per_maand, x.aantal]));
       toets('wv779 rand: cluster zonder enig bewijs = zonder ontvangstbewijs; persoon zonder naam; rijTekst', rr.some((x) => x.bedrag === 1.5 && x.paypal_zonder_bewijs) && rd('jan')[0].paypal_naam === null &&
-        A.rijenVan(rr.filter((x) => x.actief)).map(A.rijTekst).sort().join('|') === ['PayPal (zonder ontvangstbewijs)', 'PayPal — Samsung', 'PayPal — SkyShowtime', 'PayPal — onbekende dienst'].sort().join('|'),
+        A.rijenVan(rr.filter((x) => x.actief)).map(A.rijTekst).sort().join('|') === ['PayPal (zonder ontvangstbewijs)', 'PayPal — Samsung', 'PayPal — SkyShowtime', 'PayPal — onbekende dienst, rond de 3e'].sort().join('|'),
         A.rijenVan(rr.filter((x) => x.actief)).map(A.rijTekst));
+      // wv909 (Fable wv779 #5): een cluster van posten met elk twee bewijzen (pp_meerdere, koppel_soort som) heeft wél bewijzen; een
+      // cluster dat vooral uit posten zonder bewijs bestaat blijft "zonder ontvangstbewijs"; mist alleen de nieuwste post zijn bewijzen nog
+      // (PayPal-ronde koppelt na de bankronde), dan blijft het "meerdere" (Fable wv909 #1)
+      const meer = (van, n, bedrag, dag, zonder) => maandPosten(van, n, bedrag, 'PPY').map((x, k) => Object.assign(x, { datum: x.datum.slice(0, 8) + dag }, zonder && zonder.indexOf(k) >= 0 ? {} : { pp_meerdere: true }));
+      rr = R(dpost('2025-07', 12, 4.99, '11', 'samsung').concat(meer('2025-07', 12, 9.98, '25'), meer('2025-07', 12, 7.5, '20', [0, 1, 2, 3, 5, 6, 8]), meer('2025-07', 12, 12.5, '22', [11])), '2026-06-30');
+      const rm = rr.find((x) => x.bedrag === 9.98), rz = rr.find((x) => x.bedrag === 7.5);
+      toets('wv909 #5: cluster met alleen posten met twee bewijzen = "meerdere diensten in één afschrijving", eigen sleutel |d:+', rm && rm.paypal_meerdere && !rm.paypal_zonder_bewijs && /\|d:\+\|c:9\.98$/.test(rm.sleutel) &&
+        A.ppTitel(rm) === 'PayPal — meerdere diensten in één afschrijving' && A.rijenVan([rm]).map(A.rijTekst)[0] === 'PayPal — meerdere diensten in één afschrijving', rm);
+      const rn = rr.find((x) => x.bedrag === 12.5);
+      toets('wv909 #5: cluster met vooral posten zonder bewijs blijft "zonder ontvangstbewijs"', rz && rz.paypal_zonder_bewijs && !rz.paypal_meerdere && A.ppTitel(rz) === 'PayPal (zonder ontvangstbewijs)', rz);
+      toets('wv909 #5: nieuwste post nog zonder bewijzen — blijft "meerdere" (geen kanteling)', rn && rn.paypal_meerdere && /\|d:\+\|/.test(rn.sleutel), rn);
+      toets('wv909 #5: "zonder ontvangstbewijs" en "meerdere" van dezelfde groep en hetzelfde bedrag zijn één rij tussen peildata',
+        A.rijHoort(A.rijenVan([rm])[0], A.rijenVan([Object.assign({}, rm, { sleutel: rm.sleutel.replace('|d:+|', '|d:-|'), paypal_meerdere: undefined, paypal_zonder_bewijs: true })])[0]) &&
+        !A.rijHoort(A.rijenVan([rm])[0], A.rijenVan([Object.assign({}, rm, { sleutel: rm.sleutel.replace('|d:+|c:9.98', '|d:-|c:7.50'), paypal_meerdere: undefined, paypal_zonder_bewijs: true })])[0]), null);
+      rr = R(maandPosten('2025-07', 12, 9.98, 'PPM').map((x) => Object.assign(x, { pp_meerdere: true })), '2026-06-30');
+      toets('wv909 #5: één reeks (één per maand) met alleen zulke posten heet ook zo', rr.length === 1 && rr[0].paypal_meerdere && A.ppTitel(rr[0]) === 'PayPal — meerdere diensten in één afschrijving', rr);
+      // wv909 (Fable wv779 #7): twee onbekende diensten (ontvanger mogelijk een persoon) krijgen de incassodag in de titel
+      rr = R(dpost('2025-07', 12, 6, '03', 'jan').concat(dpost('2025-07', 12, 8, '17', 'klaas')), '2026-06-30');
+      const tt = A.rijenVan(rr.filter((x) => x.actief)).map(A.ppTitel).sort();
+      toets('wv909 #7: twee onbekende diensten = twee titels met de incassodag', tt.join('|') === 'PayPal — onbekende dienst, rond de 17e|PayPal — onbekende dienst, rond de 3e' && rr.every((x) => A.ppTitel(x) === tt.find((t) => t.indexOf(', rond de ' + x.dag + 'e') > 0)), [tt, rr.map((x) => [x.paypal_dienst, x.dag])]);
       rr = R(maandPosten('2025-07', 12, 4.99, 'PPZ').concat(maandPosten('2025-07', 12, 4.99, 'PPZ').map((x) => Object.assign(x, { datum: x.datum.slice(0, 8) + '19' }))), '2026-06-30');
       toets('wv779 rand: zonder dienstinformatie de paraplu zoals vóór wv779 (één cluster, twee per maand)', rr.length === 1 && rr[0].n_per_maand === 2 && !rr[0].paypal_dienst && !rr[0].paypal_zonder_bewijs, rr);
       // Fable wv779 #3: prijsstap waarbij de incassodag verschuift (oud laatst 31-7, nieuw 26-8 en 21-9): één reeks, niet twee naast elkaar

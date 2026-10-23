@@ -479,6 +479,17 @@ function dienstPerPost(a) {
  * bij een gat van 350–380 dagen. Prijsstap: een cluster stopt en binnen 45 dagen begint bij dezelfde dienst een cluster met
  * hetzelfde ritme dat hooguit 50% afwijkt → één reeks met bedrag_vorig en gewijzigd_op. Actief: laatste post binnen 1,5 × ritme.
  */
+// Dag van de maand van de laatste posten: de bankdatum als het bewijs gekoppeld is (zelfde dag als de rij in de vaste lasten), anders
+// de bondatum (Fable wv909 #2)
+function incassoDag(a, p) {
+  const nrs = p.map(function (x) { return x.nr; }).filter(function (n) { return n != null; });
+  let bank = new Map();
+  try {
+    if (nrs.length) bank = new Map(a.db.prepare('SELECT nr, datum FROM transacties WHERE nr IN (' + nrs.map(function () { return '?'; }).join(',') + ')').all(...nrs)
+      .map(function (t) { return [t.nr, t.datum]; }));
+  } catch (e) { bank = new Map(); }
+  return Math.round(mediaan(p.map(function (x) { return Number(String(bank.get(x.nr) || x.datum).slice(8, 10)); })));
+}
 function reeksen(a, o) {
   schema(a);
   o = o || {};
@@ -541,6 +552,7 @@ function reeksen(a, o) {
         bedrag: r.bedrag, valuta: r.valuta !== 'EUR' ? r.valuta : undefined, bedrag_eur: r.valuta !== 'EUR' ? bedragEur : undefined,
         per_maand: r2((r.valuta === 'EUR' ? r.bedrag : (bedragEur || 0)) * r.perMaand), bedrag_vorig: r.bedrag_vorig != null ? r.bedrag_vorig : undefined,
         gewijzigd_op: r.gewijzigd_op || undefined, sinds: r.eerste, laatst: r.laatste, aantal: r.aantal, actief: actief,
+        dag: incassoDag(a, p.slice(-3)),   // titel van een onbekende dienst (wv909)
         betaald_via: bronnen.length === 1 ? { bank: 'bankrekening', kaart: 'creditcard', saldo: 'PayPal-saldo', onbekend: 'onbekend' }[bronnen[0]] : 'wisselend',
         gekoppeld: p.filter(function (x) { return x.nr != null; }).length, signalen: signalen.length ? signalen : undefined });
     });

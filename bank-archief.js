@@ -562,10 +562,15 @@ function paypalReeksen(a, peil) {
     return require('./paypal-bewijs.js').reeksen(a, { peil: peil }) || [];
   } catch (e) { return []; }
 }
-// dienst op de posten zetten (pp_dienst, pp_naam); 'meerdere' (één afschrijving voor meer bewijzen) telt als onbekend
+// dienst op de posten zetten (pp_dienst, pp_naam); 'meerdere' (één afschrijving voor meer bewijzen, koppel_soort som) heeft geen
+// dienst maar wel bewijzen: pp_meerdere (wv909, Fable wv779 #5)
 function metDienst(posten, dm) {
   if (!dm) return posten;
-  posten.forEach(function (t) { const d = dm.get(t.nr); if (d && d.dienst && d.dienst !== 'meerdere') { t.pp_dienst = d.dienst; t.pp_naam = d.naam; } });
+  posten.forEach(function (t) {
+    const d = dm.get(t.nr);
+    if (d && d.dienst === 'meerdere') t.pp_meerdere = true;
+    else if (d && d.dienst) { t.pp_dienst = d.dienst; t.pp_naam = d.naam; }
+  });
   return posten;
 }
 // Weergavenaam van een PayPal-dienst. Een PayPal-ontvanger kan een persoon zijn (gemeten 23-10-2026: één van 31): bekende diensten
@@ -586,10 +591,14 @@ function paypalNaam(dienst, ontvanger) {
 // Een bedragcluster onder de paraplu per dienst splitsen: gekoppelde posten bij hun dienst; een post zonder bewijs bij de dienst
 // waarvan de afschrijvingen het dichtst bij dezelfde dag van de maand vallen (hooguit 4 dagen, één kandidaat), anders apart.
 // metInfo: de paraplu heeft elders wél bewijzen; een cluster zonder enig bewijs heet dan "zonder ontvangstbewijs" (geen dubbelsignaal).
+// Bestaat de rest uit posten met twee of meer bewijzen (pp_meerdere), dan "meerdere diensten in één afschrijving" (wv909). Op de
+// meerderheid, niet op elke post: de PayPal-ronde koppelt ná de bankronde, dus de nieuwste post mist zijn bewijzen soms nog (Fable wv909 #1).
+function meestMeerdere(r) { const n = r.filter(function (t) { return t.pp_meerdere; }).length; return n > 0 && n * 2 >= r.length; }
 function splitsDienst(l, metInfo) {
   const per = new Map();
+  const rest = function (r) { return meestMeerdere(r) ? { dienst: null, l: r, meerdere: true } : { dienst: null, l: r, zonder_bewijs: !!metInfo }; };
   l.forEach(function (t) { if (t.pp_dienst) { if (!per.has(t.pp_dienst)) per.set(t.pp_dienst, []); per.get(t.pp_dienst).push(t); } });
-  if (!per.size) return [{ dienst: null, l: l, zonder_bewijs: !!metInfo }];
+  if (!per.size) return [rest(l)];
   const dagAfst = function (x, y) { const d = Math.abs(x - y); return Math.min(d, 31 - d); };
   const dagen = new Map(Array.from(per.entries()).map(function (e) { return [e[0], mediaan(e[1].map(function (t) { return Number(t.datum.slice(8, 10)); }))]; }));
   const zonder = [];
@@ -603,7 +612,7 @@ function splitsDienst(l, metInfo) {
     const naam = e[1].filter(function (t) { return t.pp_naam; }).sort(function (x, y) { return x.datum < y.datum ? 1 : -1; })[0];
     return { dienst: e[0], naam: naam ? naam.pp_naam : null, l: e[1] };
   });
-  if (zonder.length) uit.push({ dienst: null, l: zonder, zonder_bewijs: true });
+  if (zonder.length) uit.push(rest(zonder));
   return uit;
 }
 
@@ -635,7 +644,7 @@ function reeksenBereken(posten, o) {
       const cl = [];
       s.forEach(function (t) { const c = cl[cl.length - 1]; if (c && -t.bedrag <= c.basis * 1.02 + 0.005) c.l.push(t); else cl.push({ basis: -t.bedrag, l: [t] }); });
       // wv779: binnen een bedragcluster per PayPal-dienst (twee diensten van 4,99 zijn geen dubbel abonnement)
-      const metInfo = l.some(function (t) { return t.pp_dienst; });
+      const metInfo = l.some(function (t) { return t.pp_dienst || t.pp_meerdere; });
       const opDatum = function (x, y) { return x.datum < y.datum ? -1 : x.datum > y.datum ? 1 : x.nr - y.nr; };
       const delen = [];
       cl.forEach(function (c) { splitsDienst(c.l, metInfo).forEach(function (s) { s.l.sort(opDatum); delen.push(s); }); });
@@ -654,7 +663,7 @@ function reeksenBereken(posten, o) {
       ketens.forEach(function (k) {
         const s = k[k.length - 1], lc = [].concat.apply([], k.map(function (x) { return x.l; })).sort(opDatum);
         const r = reeksVan(lc, Object.assign({}, info, { cluster: k.length === 1, groep: g.sleutel, dienst: s.dienst, dienst_naam: s.naam, zonder_bewijs: !!s.zonder_bewijs,
-          sleutel: g.sleutel + (s.dienst ? '|d:' + s.dienst : s.zonder_bewijs ? '|d:-' : '') + '|c:' + modus(s.l.map(function (t) { return -t.bedrag; })).toFixed(2) }));
+          meerdere: !!s.meerdere, sleutel: g.sleutel + (s.dienst ? '|d:' + s.dienst : s.meerdere ? '|d:+' : s.zonder_bewijs ? '|d:-' : '') + '|c:' + modus(s.l.map(function (t) { return -t.bedrag; })).toFixed(2) }));
         if (r) uit.push(r);
       });
     } else {
@@ -662,7 +671,8 @@ function reeksenBereken(posten, o) {
       const ds = new Set(l.filter(function (t) { return t.pp_dienst; }).map(function (t) { return t.pp_dienst; }));
       const dn = ds.size === 1 && l.filter(function (t) { return t.pp_dienst; }).length * 2 >= l.length ? Array.from(ds)[0] : null;
       const nm = dn ? l.filter(function (t) { return t.pp_naam; }).pop() : null;
-      const r = reeksVan(l, Object.assign({}, info, { cluster: false, groep: g.sleutel, dienst: dn, dienst_naam: nm ? nm.pp_naam : null }));
+      const r = reeksVan(l, Object.assign({}, info, { cluster: false, groep: g.sleutel, dienst: dn, dienst_naam: nm ? nm.pp_naam : null,
+        meerdere: !dn && meestMeerdere(l) }));
       if (r) uit.push(r);
     }
   });
@@ -824,7 +834,8 @@ function reeksVan(l, i) {
     laatste_afwijkend: voorlopig ? -voorlopig.bedrag : null, laatste_afwijkend_op: voorlopig ? voorlopig.datum : null,
     extra: Array.from(afw.values()).filter(function (s) { return s === 'extra'; }).length, afrekening: Array.from(afw.values()).filter(function (s) { return s === 'afrekening'; }).length,
     start_afgekapt: !!(i.start && dagVerschil(i.start, hoofd[0].datum) <= 45), nrs: nrs,
-    paypal_dienst: i.dienst || undefined, paypal_naam: i.dienst ? paypalNaam(i.dienst, i.dienst_naam) : undefined, paypal_zonder_bewijs: i.zonder_bewijs || undefined };
+    paypal_dienst: i.dienst || undefined, paypal_naam: i.dienst ? paypalNaam(i.dienst, i.dienst_naam) : undefined, paypal_zonder_bewijs: i.zonder_bewijs || undefined,
+    paypal_meerdere: i.meerdere || undefined };
 }
 
 // Peildag: vandaag, of de nieuwste post als de podklok achterloopt (de klok liep eerder dagen mis; Fable wv764 #12)
@@ -855,6 +866,25 @@ function abonnementenHerken(a, tx, nu, dm) {
     });
     // niet meer herkend (ritme of bedrag veranderd): niet meer actief
     a.db.prepare('UPDATE abonnementen SET actief = 0 WHERE bijgewerkt < ?').run(nu);
+    // wv909 (Fable wv779 #8): de paraplurijen van vóór de splitsing per dienst (…|c:<bedrag> zonder |d:) zijn vervangen, geen gestopt
+    // abonnement: weg zodra dezelfde groep nu dienstrijen heeft. Net zo een rij "zonder ontvangstbewijs" (|d:-|c:x) die nu "meerdere
+    // diensten" heet (|d:+|c:x), en andersom. Zonder PayPal-laag (geen dienstrijen) blijft alles staan.
+    const nuD = new Set(), nuRest = new Set();
+    reeksen.forEach(function (r) {
+      const m = /^(.*?)\|d:([^|]*)\|c:([0-9.]+)$/.exec(r.sleutel);
+      if (!m) return;
+      nuD.add(r.rek + '\u0000' + m[1]);
+      if (m[2] === '+' || m[2] === '-') nuRest.add(r.rek + '\u0000' + m[1] + '|d:' + m[2] + '|c:' + m[3]);
+    });
+    if (nuD.size) {
+      const wisA = a.db.prepare('DELETE FROM abonnementen WHERE id = ?'), losV = a.db.prepare('UPDATE verrijking SET abonnement_id = NULL WHERE abonnement_id = ?');
+      const wis = function (id) { losV.run(id); wisA.run(id); };
+      a.db.prepare("SELECT id, rek, tegen_sleutel FROM abonnementen WHERE bijgewerkt < ? AND tegen_sleutel LIKE '%|c:%'").all(nu).forEach(function (b) {
+        const oud = /^(.*?)\|c:([0-9.]+)$/.exec(b.tegen_sleutel), rst = /^(.*?)\|d:([+-])\|c:([0-9.]+)$/.exec(b.tegen_sleutel);
+        if (oud && oud[1].indexOf('|d:') < 0 && nuD.has(b.rek + '\u0000' + oud[1])) wis(b.id);
+        else if (rst && nuRest.has(b.rek + '\u0000' + rst[1] + '|d:' + (rst[2] === '+' ? '-' : '+') + '|c:' + rst[3])) wis(b.id);
+      });
+    }
   });
   return uit;
 }
@@ -1170,17 +1200,20 @@ function vasteBedragen(lijst, ref, tol) {
       laatste: l[l.length - 1].datum, l: l };
   });
 }
-// PayPal-titel van een reeks of rij (wv779): "PayPal — Netflix", "PayPal — onbekende dienst" (ontvanger mogelijk een persoon) of
+// PayPal-titel van een reeks of rij (wv779): "PayPal — Netflix", "PayPal — onbekende dienst, rond de 3e" (ontvanger mogelijk een persoon;
+// de incassodag houdt twee zulke rijen uit elkaar in de App en de briefing, wv909), "PayPal — meerdere diensten in één afschrijving" of
 // "PayPal (zonder ontvangstbewijs)"; null als er geen PayPal-dienstinformatie is (dan de weergave van vóór wv779)
+function ppOnbekend(dag) { return 'onbekende dienst' + (dag >= 1 && dag <= 31 ? ', rond de ' + Math.round(dag) + 'e' : ''); }
 function ppTitel(r) {
-  if (r.paypal_dienst) return 'PayPal — ' + (r.paypal_naam || 'onbekende dienst');
+  if (r.paypal_dienst) return 'PayPal — ' + (r.paypal_naam || ppOnbekend(r.dag));
+  if (r.paypal_meerdere) return 'PayPal — meerdere diensten in één afschrijving';
   return r.paypal_zonder_bewijs ? 'PayPal (zonder ontvangstbewijs)' : null;
 }
 function rijenVan(reeksen) {
   const per = new Map();
   reeksen.forEach(function (r) {
     // wv779: een PayPal-dienst is een eigen rij (alle bedragen van die dienst samen); de rest van de paraplu blijft één rij
-    const pd = r.paypal_dienst ? '|d:' + r.paypal_dienst : r.paypal_zonder_bewijs ? '|d:-' : '';
+    const pd = r.paypal_dienst ? '|d:' + r.paypal_dienst : r.paypal_meerdere ? '|d:+' : r.paypal_zonder_bewijs ? '|d:-' : '';
     const k = (pd ? 'g:' + r.groep + pd : r.sleutel_soort.indexOf('cluster') >= 0 ? 'g:' + r.groep : 'n:' + (naamNorm(r.naam) || r.sleutel)) + '|' + r.ritme;
     if (!per.has(k)) per.set(k, []);
     per.get(k).push(r);
@@ -1204,14 +1237,17 @@ function rijenVan(reeksen) {
       onderdelen: l.length > 1 ? l.map(function (r) { return { bedrag: r.bedrag, aantal: r.n_per_maand > 1 ? r.n_per_maand : undefined, dag: r.dag, ritme: r.ritme !== 'maand' ? r.ritme : undefined }; }) : undefined,
       cluster: cluster || undefined,
       paypal_dienst: r0.paypal_dienst || undefined, paypal_naam: r0.paypal_dienst ? (l.map(function (r) { return r.paypal_naam; }).find(Boolean) || null) : undefined,
-      paypal_zonder_bewijs: r0.paypal_zonder_bewijs || undefined, aantal_per_maand: l.length === 1 && r0.ritme === 'maand' && r0.n_per_maand > 1 ? r0.n_per_maand : undefined };
+      paypal_zonder_bewijs: r0.paypal_zonder_bewijs || undefined, paypal_meerdere: r0.paypal_meerdere || undefined, dag: r0.dag, aantal_per_maand: l.length === 1 && r0.ritme === 'maand' && r0.n_per_maand > 1 ? r0.n_per_maand : undefined };
     return rij;
   }).sort(function (x, y) { return y.per_maand - x.per_maand; });
 }
 // Hoort rij y (andere peildatum) bij rij x? Als ze een reeks delen; een PayPal-dienst ook op dienst en ritme (na een prijsstap
 // is het bedragcluster, en dus de reekssleutel, nieuw; wv779)
+// "zonder ontvangstbewijs" en "meerdere diensten" van dezelfde groep en hetzelfde bedrag zijn dezelfde rij (|d:- en |d:+; wv909)
+function restGelijk(k) { return String(k).replace('|d:+|', '|d:-|'); }
 function rijHoort(x, y) {
-  return y.sleutels.some(function (k) { return x.sleutels.indexOf(k) >= 0; }) || (!!x.paypal_dienst && x.sleutel === y.sleutel);
+  const xs = x.sleutels.map(restGelijk);
+  return y.sleutels.some(function (k) { return xs.indexOf(restGelijk(k)) >= 0; }) || (!!x.paypal_dienst && x.sleutel === y.sleutel);
 }
 // Prijsstap van een PayPal-dienst uit de bewijzen (paypal-bewijs.js reeksen): de bankreeks begint na een stap opnieuw (nieuw
 // bedragcluster), de bewijsreeks weet het vorige bedrag. Alleen bij een rij met één reeks in euro's, zelfde bedrag (± 2%).

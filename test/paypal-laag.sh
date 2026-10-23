@@ -361,6 +361,74 @@ const M = {
       const u5 = F.bereken(A, a5, { vault: VA, paypal: null });
       toets('wv779 terugval: dubbelsignaal van de paraplu zoals vóór wv779', u5.signalen.some((x) => x.soort === 'dubbel' && /4,99/.test(x.zin)), u5.signalen);
       a5.db.close();
+      // ── wv909 (Fable wv779 #5, #7, #8): som-koppeling, twee onbekende diensten, oude paraplurijen ──
+      {
+        const BD6 = path.join(W, 'bank6'); fs.mkdirSync(BD6, { recursive: true, mode: 0o700 });
+        const a6 = A.open(BD6); A.rekeningenSync(a6, { gez: { uid: 'u1', bank: 'ABN AMRO', naam: 'Vaste lasten', iban: 'NL00ABNA0000003868', sessie: 's1' } });
+        const rek6 = a6.db.prepare('SELECT rek FROM rekeningen').get().rek;
+        const bw = [], ps = [];
+        let i = 0;
+        const bewijs = (ontv, bedrag, datum) => { i++; bw.push({ mail_id: 'f' + String(i).padStart(13, '0'), soort: 'betaling', ref: 'WZ' + String(i).padStart(15, '0'), datum: datum, ontvanger: ontv, bedrag: bedrag, valuta: 'EUR', bedrag_eur: bedrag, bron: 'bank', bron_eind: '3868' }); };
+        const post = (bedrag, datum) => { i++; ps.push(pp('z' + i, datum, -bedrag)); };
+        for (let k = -8; k <= 0; k++) {
+          const ym = mP(k);
+          if (dg(ym, 12) <= vnd) { post(20.99, dg(ym, 12)); bewijs('Netflix.com', 20.99, dg(ym, 10)); }
+          if (dg(ym, 5) <= vnd) { post(6, dg(ym, 5)); bewijs('Piet Voorbeeld', 6, dg(ym, 3)); }                 // persoon 1, rond de 5e
+          if (k >= -3 && dg(ym, 19) <= vnd) { post(8, dg(ym, 19)); bewijs('Klaas Proef', 8, dg(ym, 17)); }     // persoon 2, nieuw, rond de 19e
+          // één afschrijving voor twee betalingen (koppel_soort som)
+          if (dg(ym, 16) <= vnd) { post(9.98, dg(ym, 16)); bewijs('Voorbeeld Games Ltd', 3.49, dg(ym, 14)); bewijs('Ander Bedrijf GmbH', 6.49, dg(ym, 14)); }
+        }
+        P.bij(a6, bw, []); A.bij(a6, rek6, ps, {}); P.koppel(a6);
+        const somN = a6.db.prepare("SELECT count(*) n FROM paypal_bewijs WHERE koppel_soort = 'som'").get().n;
+        const v6 = A.vasteLasten(a6, { maand: mP(-1) }), pr6 = (re) => v6.vaste_lasten.filter((x) => re.test(x.naam));
+        toets('wv909 #5: afschrijving met twee bewijzen = "PayPal — meerdere diensten in één afschrijving", niet "zonder ontvangstbewijs"', somN >= 10 && pr6(/^PayPal — meerdere diensten in één afschrijving$/).length === 1 &&
+          pr6(/meerdere/)[0].per_maand === 9.98 && !pr6(/zonder ontvangstbewijs/).length && /\| PayPal — meerdere diensten in één afschrijving \|/.test(v6.tabel_md), [somN, v6.vaste_lasten.map((x) => x.naam)]);
+        const onb = pr6(/onbekende dienst/).map((x) => x.naam).sort();
+        toets('wv909 #7: twee onbekende diensten met de incassodag, nooit bij naam', onb.join('|') === 'PayPal — onbekende dienst, rond de 19e|PayPal — onbekende dienst, rond de 5e' && !/piet|klaas|voorbeeld|proef/i.test(JSON.stringify(v6)), onb);
+        const VA6 = path.join(W, 'vault6'); fs.mkdirSync(path.join(VA6, '20_Prive', 'Financien'), { recursive: true });
+        const u6 = F.bereken(A, a6, { vault: VA6, paypal: P }), rij6 = (u6.vaste_lasten || {}).rijen || [];
+        const nieuw6 = u6.signalen.filter((x) => x.soort === 'nieuw' && /onbekende dienst/.test(x.titel || ''));
+        toets('wv909 #7 App: twee eigen rijen; "nieuw" van bank en bewijzen één keer (op de dienst, niet op de titel); geen persoon',
+          u6.fouten.length === 0 && rij6.filter((r) => /onbekende dienst, rond de/.test(r.naam)).length === 2 && nieuw6.length === 1 && /rond de 19e$/.test(nieuw6[0].titel) &&
+          !/piet|klaas|proef|games|ander bedrijf/i.test(JSON.stringify(u6.vaste_lasten)) && !/piet|klaas|proef/i.test(JSON.stringify(u6.signalen)), [u6.fouten, rij6.map((r) => r.naam), nieuw6]);
+        toets('wv909 #5 App: geen dubbelsignaal op de afschrijving met twee bewijzen', !u6.signalen.some((x) => x.soort === 'dubbel'), u6.signalen);
+        const b6 = F.briefing(A, a6, { vault: VA6, peil: vnd });
+        toets('wv909 briefing: draait zonder fouten, geen persoon', b6.fouten.length === 0 && !/piet|klaas|proef/i.test(JSON.stringify(b6)), b6);
+        // #8: de paraplurijen van vóór wv779 (…|c:<bedrag> zonder |d:) en een "zonder ontvangstbewijs"-rij die nu "meerdere" heet: weg bij verrijk
+        A.verrijk(a6);
+        const grp = a6.db.prepare("SELECT groep FROM abonnementen WHERE tegen_sleutel LIKE '%|d:%' LIMIT 1").get().groep;
+        const oudZet = a6.db.prepare("INSERT INTO abonnementen (rek, tegen_sleutel, naam, ritme, bedrag_typisch, aantal, eerste, laatste, actief, bijgewerkt, sleutel_soort, groep, per_maand) VALUES (?, ?, ?, 'maand', ?, 9, '2026-01-01', '2026-06-01', 1, '2026-07-01T00:00:00Z', 'machtiging|cluster', ?, ?)");
+        oudZet.run(rek6, grp + '|c:6.00', 'PayPal Europe S.a.r.l. e', 6, grp, 6);
+        oudZet.run(rek6, grp + '|c:9.98', 'PayPal Europe S.a.r.l. e', 9.98, grp, 9.98);
+        oudZet.run(rek6, grp + '|d:-|c:9.98', 'PayPal (zonder ontvangstbewijs)', 9.98, grp, 9.98);
+        oudZet.run(rek6, 'm:ANDERS123|c:5.00', 'Ander Abonnement', 5, 'm:ANDERS123', 5);   // andere groep zonder dienstrijen: blijft
+        oudZet.run(rek6, 'm:ANDERS123|d:-|c:5.00', 'Ander Abonnement 2', 5, 'm:ANDERS123', 5);   // |d:- zonder |d:+-tegenhanger in deze ronde: blijft
+        const oudId = a6.db.prepare("SELECT id FROM abonnementen WHERE tegen_sleutel = ?").get(grp + '|c:6.00').id;
+        a6.db.prepare('UPDATE verrijking SET abonnement_id = ? WHERE nr = (SELECT min(nr) FROM transacties)').run(oudId);
+        A.verrijk(a6);
+        const alle6 = A.abonnementen(a6, { alle: 1 }).abonnementen;
+        const wees = a6.db.prepare('SELECT count(*) n FROM verrijking WHERE abonnement_id IS NOT NULL AND abonnement_id NOT IN (SELECT id FROM abonnementen)').get().n;
+        toets('wv909 #8: oude paraplurijen weg bij verrijk (geen gestopte "PayPal Europe"); andere groep blijft; geen verwijzing naar een gewiste rij',
+          alle6.filter((x) => x.bedrag === 9.98).length === 1 &&
+          !alle6.some((x) => /PayPal Europe|zonder ontvangstbewijs/.test(x.naam)) && alle6.some((x) => x.naam === 'Ander Abonnement') && alle6.some((x) => x.naam === 'Ander Abonnement 2') && wees === 0 &&
+          alle6.some((x) => x.naam === 'PayPal — meerdere diensten in één afschrijving' && x.actief) && alle6.filter((x) => /onbekende dienst, rond de/.test(x.naam)).length === 2, [alle6.map((x) => [x.naam, x.actief]), wees]);
+        // andersom: verdwijnen de bewijzen van de som-koppeling, dan wordt het "zonder ontvangstbewijs" (|d:-) en gaat de niet-actieve
+        // "meerdere"-rij (|d:+) van hetzelfde bedrag weg (Fable wv909 #1)
+        a6.db.prepare("DELETE FROM paypal_bewijs WHERE koppel_soort = 'som'").run();
+        A.verrijk(a6);
+        const na6 = A.abonnementen(a6, { alle: 1 }).abonnementen.filter((x) => x.bedrag === 9.98);
+        toets('wv909 #8 andersom: "meerdere" → "zonder ontvangstbewijs" laat geen gestopte "meerdere"-rij achter', na6.length === 1 && na6[0].naam === 'PayPal (zonder ontvangstbewijs)' && na6[0].actief, na6);
+        a6.db.close();
+        // zonder PayPal-laag geen dienstrijen: de paraplu blijft (ook niet-actieve rijen)
+        const a7 = maak('bank7', false);
+        a7.db.exec('DROP TABLE IF EXISTS paypal_bewijs');
+        A.verrijk(a7);
+        const r7 = a7.db.prepare("SELECT rek, groep FROM abonnementen WHERE tegen_sleutel LIKE '%|c:%' LIMIT 1").get();
+        a7.db.prepare("INSERT INTO abonnementen (rek, tegen_sleutel, naam, ritme, bedrag_typisch, aantal, eerste, laatste, actief, bijgewerkt, sleutel_soort, groep, per_maand) VALUES (?, ?, 'PayPal Europe S.a.r.l. e', 'maand', 1.23, 9, '2026-01-01', '2026-06-01', 1, '2026-07-01T00:00:00Z', 'machtiging|cluster', ?, 1.23)").run(r7.rek, r7.groep + '|c:1.23', r7.groep);
+        A.verrijk(a7);
+        toets('wv909 #8 terugval: zonder PayPal-laag blijven de paraplurijen staan', A.abonnementen(a7, { alle: 1 }).abonnementen.some((x) => x.bedrag === 1.23 && !x.actief), A.abonnementen(a7, { alle: 1 }).abonnementen);
+        a7.db.close();
+      }
       const bsrc = fs.readFileSync('bank-archief.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');
       toets('wv779 bank-archief gebruikt paypal-bewijs alleen lezend (dienstPerPost, reeksen), in try/catch', (bsrc.match(/require\('\.\/paypal-bewijs\.js'\)\.(\w+)/g) || []).every((x) => /\.(dienstPerPost|reeksen)$/.test(x)) && /require\('\.\/paypal-bewijs\.js'\)\.dienstPerPost/.test(bsrc), bsrc.match(/require\('\.\/paypal-bewijs\.js'\)\.\w+/g));
     }
