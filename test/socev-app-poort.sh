@@ -4240,12 +4240,46 @@ async function bewijs(o) {
       toets('20i na een geweigerde opdracht: overzicht "mislukt"; de knop zet een nieuwe opdracht in Facturen (één levend), geen mailconcept',
         s10b.facturen.status === 'mislukt' && r.status === 200 && r.j.route === 'facturen' && o10.length === 2 && o10.filter((x) => x.status === 'wacht').length === 1 && hook.calls.length === 4,
         JSON.stringify([s10b.facturen, r.status, o10.map((x) => x.status)]));
+      // 8b. (Fable wv959 #8) een mislukte poging (poging < 3, afschrift nog in de wachtrij) → 409 wachtrij, geen tweede opdracht
+      const levend10 = o10.find((x) => x.status === 'wacht');
+      fdbI.db.prepare("UPDATE opdracht SET status = 'mislukt', poging = 1 WHERE id = ?").run(levend10.id);
+      r = await druk('2026-10');
+      toets('20i opdracht mislukt (poging 1) → 409 "al in de Facturen-wachtrij", geen nieuwe opdracht, geen mailconcept',
+        r.status === 409 && /al in de Facturen-wachtrij/.test(r.j.fout) && r.j.facturen.status === 'wachtrij' && opn('2026-10').length === 2 && hook.calls.length === 4, JSON.stringify(r.j));
+      // 8c. late boeking terwijl de opdracht wacht: eerlijk "let op", geen tweede opdracht
+      const sha10 = kindVan['2026-10'].j.sha256.mt940; kindVan['2026-10'].j.sha256.mt940 = 'd'.repeat(64);
+      r = await druk('2026-10');
+      kindVan['2026-10'].j.sha256.mt940 = sha10;
+      toets('20i afschrift veranderd na het klaarzetten → 409 met "Let op … correctie", geen tweede opdracht', r.status === 409 && /Let op/.test(r.j.fout) && opn('2026-10').length === 2, JSON.stringify(r.j));
+      // 8d. (Fable wv959 #2) verzendmodus versturen: de melding en de stand zeggen dat Facturen verstuurt, niet "versturen doe je zelf"
+      fdbI.db.prepare("UPDATE meta SET waarde = 'versturen' WHERE sleutel = 'verzendmodus'").run();
+      maakMaand('2026-02');
+      r = await druk('2026-02');
+      const ov2 = await vraag('GET', '/app/pot-afschriften', undefined, { pot: P.jar });
+      fdbI.db.prepare("UPDATE meta SET waarde = 'concept' WHERE sleutel = 'verzendmodus'").run();
+      toets('20i verzendmodus versturen → melding "verstuurt Facturen", facturen.modus versturen; overzicht facturen_modus versturen',
+        r.status === 200 && r.j.route === 'facturen' && /verstuurt Facturen/.test(r.j.melding) && !/doe je zelf/.test(r.j.melding) && r.j.facturen.modus === 'versturen' &&
+        ov2.j.facturen_modus === 'versturen' && ov2.j.maanden.find((x) => x.maand === '2026-02').facturen.modus === 'versturen', JSON.stringify([r.j, ov2.j.facturen_modus]).slice(0, 300));
+      // 8e. (Fable wv959 #6) de pod onthoudt de maand in Facturen, de database niet (teruggezet) → 409, geen nieuwe opdracht of concept
+      maakMaand('2026-01');
+      { const s1 = podI(); s1.maanden['2026-01'] = { facturen: { op: '2026-10-23T10:00:00Z', afschrift: 'a'.repeat(16), opdracht: 'b'.repeat(16) } }; fs.writeFileSync(path.join(PAD, 'pod.json'), JSON.stringify(s1)); }
+      r = await druk('2026-01');
+      toets('20i pod.json kent de maand, Facturen niet meer → 409 "kent het nu niet meer", geen opdracht, geen mailconcept',
+        r.status === 409 && /kent het nu niet meer/.test(r.j.fout) && opn('2026-01').length === 0 && hook.calls.length === 4, JSON.stringify(r.j));
+      // 8f. (Fable wv959 #4) onleesbaar pod.json → 503, geen route
+      const podTekst = fs.readFileSync(path.join(PAD, 'pod.json'), 'utf8');
+      fs.writeFileSync(path.join(PAD, 'pod.json'), '{kapot');
+      maakMaand('2025-12');
+      r = await druk('2025-12');
+      fs.writeFileSync(path.join(PAD, 'pod.json'), podTekst);
+      toets('20i onleesbaar pod.json → 503, geen opdracht, geen mailconcept, bestand niet overschreven door de knop',
+        r.status === 503 && /geheugen/.test(r.j.fout) && opn('2025-12').length === 0 && hook.calls.length === 4, JSON.stringify(r.j));
       // 9. oudere bank-lezer (geen rek) bij een nieuwe maand → terugval, met de reden
       maakMaand('2026-03', { rek: null });
       r = await druk('2026-03');
       toets('20i bank-lezer zonder rek → mailconcept-terugval', r.status === 200 && r.j.route === 'mailconcept' && /bank-lezer/.test(r.j.route_reden) && hook.calls.length === 5, JSON.stringify(r.j).slice(0, 300));
       // nooit beide: per maand óf Facturen-opdrachten óf mailconcepten
-      const beide = ['2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-10'].filter((m) => opn(m).length && hook.calls.some((c) => c.onderwerp.indexOf(m) >= 0));
+      const beide = ['2025-12', '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-10'].filter((m) => opn(m).length && hook.calls.some((c) => c.onderwerp.indexOf(m) >= 0));
       toets('20i per maand nooit beide routes', beide.length === 0, JSON.stringify(beide));
       ctx.fetch = oudFetchI; if (oudUrlI) ctx.appWebhookUrl = oudUrlI; else delete ctx.appWebhookUrl;
       delete ctx.bankKind;
