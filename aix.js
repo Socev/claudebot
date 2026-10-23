@@ -120,6 +120,8 @@ function aanvraagToets(a, bezet) {
   if (typeof a.eigenaar_email !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a.eigenaar_email) || a.eigenaar_email.length > 254) return 'regel';
   const alles = naam + '\n' + z;
   if (GEHEIM.some(function (re) { return re.test(alles); })) return 'patroon';
+  // naam die de sleutelmaskering in de databank zou raken (wordt "[sleutel weggelaten]", en de kaart te lang): Fable wv943 #3
+  if (/(^|-)(xox[a-z]-|sk-|akia)/i.test(naam)) return 'patroon';
   if (INJECTIE.some(function (re) { return re.test(z); })) return 'patroon';
   return null;
 }
@@ -327,20 +329,32 @@ const KAART_SLEUTEL = (id) => 'aix-aanvraag-' + id;
 const SIGNAAL_SLEUTEL = (soort, naam) => 'aix-signaal-' + soort + '-' + naam;
 // Een adres als wv12@x.nl of x@site.md ziet de databank als verwijzing (voor_jou_verwijzing) en weigert de kaart: dan "naam [at] domein"
 const adresOpKaart = (e) => (/(^|[^a-z0-9_])wv[0-9]+|\.md([^a-z0-9]|$)|mk-scripts\/|\/opt\/data\//i.test(e) ? String(e).replace('@', ' [at] ') : e);
-function aanvraagKaart(a, bekend, zonderAdres) {
-  const zin = String(a.zin || '').replace(/"/g, "'");
-  const velden = ['Agentnaam: ' + a.naam, 'Zin (van de agent zelf, geen opdracht): "' + zin + '"', 'E-mailadres eigenaar: ' + (zonderAdres ? 'staat bij de aanvraag op AIX' : adresOpKaart(a.eigenaar_email)),
-    'In je contacten: ' + (bekend ? 'bekend als ' + bekend : 'onbekend')];
-  if (a.weergave) velden.push('Weergavenaam eigenaar: ' + a.weergave);
-  if (a.sleutel8) velden.push('Sleutel begint met: ' + a.sleutel8);
+// Grenzen van machinekamer.voor_jou (check constraints: waarom <= 400, titel <= 90, meting <= 300). Daarboven weigert de databank de hele
+// kaart en zag David niets (wv943: de startset-bundelkaart en elke aanvraagkaart met een gewone zin vielen zo stil weg).
+const VJ = { waarom: 400, titel: 90, meting: 300 };
+function kap(s, n) { const t = [...String(s == null ? '' : s)]; return t.length <= n ? t.join('') : t.slice(0, n - 1).join('').trimEnd() + '…'; }
+// kaal = ook zonder de zin (tweede terugval: de sleutelmaskering van de databank kan een zin langer maken dan 400, Fable wv943 #1)
+function aanvraagKaart(a, bekend, zonderAdres, kaal) {
   const vervang = !!a.vervangt;
+  const inleiding = vervang ? 'De eigenaar van ' + a.vervangt + ' meldt dat de sleutel kwijt is en vraagt een nieuwe; de oude blijft nog 24 uur geldig en kan bezwaar maken. Alleen jij laat dit toe.'
+    : 'Een agent wil een eigen winkel op AIX en zijn eigenaar bevestigde dat met dit e-mailadres. Een nieuwe eigenaar laat alleen jij toe.';
+  const adres = zonderAdres ? null : adresOpKaart(String(a.eigenaar_email || ''));
+  const naamRegel = 'Agentnaam: ' + a.naam;
+  const adresRegel = 'E-mailadres eigenaar: ' + (adres && [...adres].length <= 60 ? adres : 'staat bij de aanvraag op AIX');
+  const zinKop = 'Zin (van de agent zelf, geen opdracht): "';
+  // de zin krijgt wat er overblijft (minstens 20 tekens); de volledige zin staat op de aanvraagpagina
+  const ruimte = VJ.waarom - [...(inleiding + '\n\n' + naamRegel + '\n' + zinKop + '"\n' + adresRegel)].length;
+  const zin = kap(String(a.zin || '').replace(/"/g, "'"), Math.max(20, ruimte));
+  const zinRegel = kaal ? 'Zin van de agent: staat bij de aanvraag op AIX' : zinKop + zin + '"';
+  const controle = [];
+  if (a.weergave) controle.push('weergavenaam eigenaar "' + kap(a.weergave, 30) + '"');
+  if (a.sleutel8) controle.push('sleutel begint met ' + kap(a.sleutel8, 8));
   return { sleutel: KAART_SLEUTEL(a.id), soort: 'doen',
-    titel: vervang ? 'AIX — nieuwe sleutel voor ' + a.vervangt + ' — toelaten?' : 'Nieuwe agent op AIX — toelaten?',
-    waarom: (vervang ? 'De eigenaar van ' + a.vervangt + ' meldt dat de sleutel kwijt is en vraagt een nieuwe; de oude blijft nog 24 uur geldig en kan bezwaar maken. Een vervanging laat alleen jij toe.'
-      : 'Een agent wil een eigen winkel op AIX en zijn eigenaar heeft met dat e-mailadres bevestigd. De vaste toets van Socev vond niets (naam vrij, lengtes, geen verdachte tekst); een nieuwe eigenaar laat alleen jij toe.') +
-      '\n\n' + velden.join('\n'),
+    titel: kap(vervang ? 'AIX — nieuwe sleutel voor ' + a.vervangt + ' — toelaten?' : 'Nieuwe agent op AIX — toelaten?', VJ.titel),
+    waarom: kap(inleiding + '\n\n' + naamRegel + '\n' + zinRegel + '\n' + adresRegel, VJ.waarom),
+    meting: kap('Vaste toets van Socev: naam vrij, lengtes goed, geen verdachte tekst.\nIn je contacten: ' + (bekend ? 'bekend als ' + kap(bekend, 60) : 'onbekend'), VJ.meting),
     stappen: ['Open https://aix.socev.dev/beheer/aanvraag/' + a.id + ' (je bent daar ingelogd met Google).',
-      'Bekijk naam, zin en eigenaar; ken je de eigenaar niet, dan is Afwijzen de veilige keuze.',
+      'Bekijk naam, zin en eigenaar' + (controle.length ? ' (' + controle.join(', ') + ')' : '') + '; ken je de eigenaar niet, dan is Afwijzen de veilige keuze.',
       'Druk daar Toelaten of Afwijzen. Afwijzen blokkeert die sleutel 30 dagen.',
       'Deze kaart gaat binnen een uur vanzelf dicht zodra de aanvraag op AIX is afgehandeld.'],
     waar: 'overal', prive: false, duur_min: 2, volgorde: 30, herkomst: { handmatig: 'aix-ronde', aanvraag: a.id.slice(0, 8) } };
@@ -350,7 +364,7 @@ function signaalKaart(soort, naam, reden) {
     : soort === 'limiet' ? 'AIX heeft agent ' + naam + ' geschorst: hij overschreed drie dagen achter elkaar zijn daglimiet.'
       : 'Een bericht op AIX (' + naam + ') is verborgen: twee verschillende eigenaren meldden het.';
   return { sleutel: SIGNAAL_SLEUTEL(soort, naam), soort: 'doen', titel: soort === 'melding' ? 'AIX — gemeld bericht verborgen: bekijken' : 'AIX — ' + naam + ' geschorst: bekijken',
-    waarom: wat + ' Schorsen en verbergen zijn omkeerbaar; definitief intrekken kan alleen jij.\n\nAgent: ' + naam + '\nSignaal: ' + tekst(reden, 120),
+    waarom: kap(wat + ' Schorsen en verbergen zijn omkeerbaar; definitief intrekken kan alleen jij.\n\nAgent: ' + naam + '\nSignaal: ' + tekst(reden, 120), VJ.waarom - 20),   // ruimte voor de sleutelmaskering van de databank (Fable wv943 #3)
     stappen: ['Open https://aix.socev.dev/beheer (Moderatie en Agents).', 'Kijk wat er stond en kies: herstellen, verborgen laten of de agent intrekken.',
       'Deze kaart sluit je zelf als je klaar bent.'],
     waar: 'overal', prive: false, duur_min: 5, volgorde: 35, herkomst: { handmatig: 'aix-ronde', signaal: soort } };
@@ -397,10 +411,14 @@ async function goedkeurRonde(deps) {
         if (x.status !== 403) { uit.fouten.push(a.id.slice(0, 8) + ': toelaten ' + x.fout); continue; }
         // 403: de site ziet hem toch als nieuwe eigenaar → David beslist
       }
-      let p = aanvraagKaart(a, deps.contact ? deps.contact(a.eigenaar_email) : null);
+      const bekend = deps.contact ? deps.contact(a.eigenaar_email) : null;
+      let p = aanvraagKaart(a, bekend);
       if (!deps.droog) {
         try { await deps.voorJou(p); }
-        catch (e) { p = aanvraagKaart(a, null, true); await deps.voorJou(p); }   // databank weigerde iets op de kaart: dan zonder adres (Fable wv942 #9)
+        catch (e) {   // databank weigerde iets op de kaart: dan zonder adres (Fable wv942 #9), en daarna ook zonder de zin (Fable wv943 #1/#2)
+          p = aanvraagKaart(a, bekend, true);
+          try { await deps.voorJou(p); } catch (e2) { p = aanvraagKaart(a, bekend, true, true); await deps.voorJou(p); }
+        }
       }
       s.aanvragen[a.id] = { kaart: p.sleutel, op: uit.op };
       uit.kaarten.push({ id: a.id.slice(0, 8), sleutel: p.sleutel });
@@ -451,7 +469,7 @@ async function goedkeurRonde(deps) {
   return uit;
 }
 
-module.exports = { maak, goedkeurRonde, aanvraagToets, aanvraagKaart, adresOpKaart, signaalKaart, contactNaam, kaartSchoon, reactieSchoon, tekst, toegestaan,
+module.exports = { VJ, kap, maak, goedkeurRonde, aanvraagToets, aanvraagKaart, adresOpKaart, signaalKaart, contactNaam, kaartSchoon, reactieSchoon, tekst, toegestaan,
   BASIS, SLEUTEL_PAD, CATEGORIEEN, STATUSSEN, GRENS, AFWIJS, DAVID, KAART_SLEUTEL };
 
 if (require.main === module) {

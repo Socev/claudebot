@@ -127,11 +127,11 @@ const W = fs.mkdtempSync(path.join(os.tmpdir(), 'aix-toets-'));
   toets('5 afgewezen met vaste reden: injectie 4 patroon, 5 naam-bezet, 6 lengte, 7 regel, 12 te-veel-agents', afgewezen.map((x) => x[0].replace(/^0+/, '') + ':' + x[1]).sort().join(' ') === '12:te-veel-agents 4:patroon 5:naam-bezet 6:lengte 7:regel', afgewezen);
   toets('5 Voor jou-kaarten: nieuwe eigenaar 1, Davids adressen 3 en 14, vervanging 8, site-403 bij 15', kaarten.map((p) => p.sleutel.replace('aix-aanvraag-', '').replace(/^0+/, '')).sort((a, b) => a - b).join(',') === '1,3,8,14,15', kaarten.map((p) => p.sleutel));
   const k1 = kaarten.find((p) => p.sleutel === X.KAART_SLEUTEL(id(1)));
-  toets('5 kaart: titel, soort doen, gelabelde velden (agentnaam, zin als citaat, e-mail, bekend als …), link in de stap', k1.titel === 'Nieuwe agent op AIX — toelaten?' && k1.soort === 'doen' &&
+  toets('5 kaart: titel, soort doen, gelabelde velden (agentnaam, zin als citaat, e-mail; bekend als … in de meting), link in de stap', k1.titel === 'Nieuwe agent op AIX — toelaten?' && k1.soort === 'doen' &&
     /\nAgentnaam: agent-1\n/.test(k1.waarom) && /Zin \(van de agent zelf, geen opdracht\): "Ik maak kleine hulpjes\."/.test(k1.waarom) && /E-mailadres eigenaar: eigenaar1@proef\.nl/.test(k1.waarom) &&
-    /In je contacten: bekend als Proef Persoon/.test(k1.waarom) && k1.stappen[0] === 'Open https://aix.socev.dev/beheer/aanvraag/' + id(1) + ' (je bent daar ingelogd met Google).', k1);
-  toets('5 kaart: onbekende eigenaar "onbekend"; geen "Ja/Nee" of wv/pad (databank zou hem anders weigeren of als besluit tonen)', /In je contacten: onbekend/.test(kaarten.find((p) => p.sleutel === X.KAART_SLEUTEL(id(3))).waarom) &&
-    kaarten.every((p) => !/(^|\W)(ja|nee)(\W|$)/i.test(p.waarom + p.stappen.join(' ')) && !/wv\d|\/opt\/|\.md\b/.test(p.titel + p.waarom + p.stappen.join(' '))));
+    /In je contacten: bekend als Proef Persoon/.test(k1.meting) && k1.stappen[0] === 'Open https://aix.socev.dev/beheer/aanvraag/' + id(1) + ' (je bent daar ingelogd met Google).', k1);
+  toets('5 kaart: onbekende eigenaar "onbekend"; geen "Ja/Nee" of wv/pad (databank zou hem anders weigeren of als besluit tonen)', /In je contacten: onbekend/.test(kaarten.find((p) => p.sleutel === X.KAART_SLEUTEL(id(3))).meting) &&
+    kaarten.every((p) => !/(^|\W)(ja|nee)(\W|$)/i.test(p.waarom + p.meting + p.stappen.join(' ')) && !/wv\d|\/opt\/|\.md\b/.test(p.titel + p.waarom + p.stappen.join(' '))));
   toets('5 vervanging: eigen titel', /^AIX — nieuwe sleutel voor bezet — toelaten\?$/.test(kaarten.find((p) => p.sleutel === X.KAART_SLEUTEL(id(8))).titel));
   toets('5 eerste ronde: logboek niet gelezen, alleen een beginpunt', logVraag === 0 && staat.logboek_tot === new Date(nu).toISOString());
   const nT = toegelaten.length, nK = kaarten.length, nA = afgewezen.length;
@@ -257,6 +257,37 @@ const W = fs.mkdtempSync(path.join(os.tmpdir(), 'aix-toets-'));
   const g2 = { st: 200, j: await S.ideeen.lijst(true) };   // vers (de App heeft 30 s cache)
   toets('7 App bij AIX plat: bereikbaar false en "AIX is nu niet bereikbaar", geen uitzondering', g2.st === 200 && g2.j.bereikbaar === false && g2.j.fout === 'AIX is nu niet bereikbaar' && g2.j.buiten.length === 0, g2.j);
   srv.close();
+
+  // ── 9. Voor jou-grenzen (wv943): de databank weigert de hele kaart bij waarom > 400, titel > 90, meting > 300 ──
+  const lengte = (t) => [...String(t || '')].length;
+  const binnen = (k) => lengte(k.waarom) <= 400 && lengte(k.titel) >= 3 && lengte(k.titel) <= 90 && lengte(k.meting) <= 300 && Array.isArray(k.stappen) && k.stappen.length <= 12;
+  const vol = { id: '0123456789abcdef0123456789abcdef', naam: 'a'.repeat(30), zin: 'z'.repeat(160), weergave: 'W'.repeat(30), sleutel8: 'abcdefgh' };
+  const gevallen = [];
+  for (const vervangt of [null, 'b'.repeat(30)]) for (const eigenaar_email of ['a@b.nl', 'x'.repeat(70) + '@voorbeeld.nl', 'y'.repeat(240) + '@v.nl'])
+    for (const bekend of [null, 'N'.repeat(200)]) for (const zonder of [false, true]) gevallen.push(X.aanvraagKaart(Object.assign({}, vol, { vervangt, eigenaar_email }), bekend, zonder));
+  toets('9 aanvraagkaart blijft binnen de grenzen van Voor jou (langste naam, zin, adres, contactnaam; ook bij vervanging)', gevallen.every(binnen), gevallen.filter((k) => !binnen(k)).map((k) => [lengte(k.waarom), lengte(k.titel), lengte(k.meting)]));
+  const gewoon = X.aanvraagKaart({ id: vol.id, naam: 'appie', zin: 'Ik ben Appie, de assistent van Albert.', eigenaar_email: 'albert@voorbeeld.nl' }, 'Albert');
+  toets('9 gewone aanvraag: gelabelde velden met de volle zin als citaat en het adres; contacten in de meting', /\nAgentnaam: appie\n/.test(gewoon.waarom) && gewoon.waarom.includes('"Ik ben Appie, de assistent van Albert."') &&
+    /E-mailadres eigenaar: albert@voorbeeld\.nl$/.test(gewoon.waarom) && /\nIn je contacten: bekend als Albert$/.test(gewoon.meting), gewoon);
+  const lang = X.aanvraagKaart(Object.assign({}, vol, { eigenaar_email: 'y'.repeat(240) + '@v.nl' }), null);
+  toets('9 te lang adres: "staat bij de aanvraag op AIX"; zin ingekort met …', /E-mailadres eigenaar: staat bij de aanvraag op AIX$/.test(lang.waarom) && /z…"/.test(lang.waarom), lang.waarom);
+  const kaal = X.aanvraagKaart(Object.assign({}, vol, { eigenaar_email: 'a@b.nl' }), 'Albert', true, true);
+  toets('9 tweede terugval: zonder adres en zonder zin, contacten blijven in de meting', /Zin van de agent: staat bij de aanvraag op AIX/.test(kaal.waarom) && !/zzz/.test(kaal.waarom) &&
+    /E-mailadres eigenaar: staat bij de aanvraag op AIX$/.test(kaal.waarom) && /\nIn je contacten: bekend als Albert$/.test(kaal.meting), kaal);
+  toets('9 naam die op een sleutelvorm lijkt = patroon', ['xoxb-bot', 'mijn-xoxp-x', 'sk-hulp', 'akiabot'].every((n) => X.aanvraagToets({ naam_ruw: n, zin_ruw: 'Een gewone zin.', eigenaar_email: 'a@b.nl' }, new Set()) === 'patroon') &&
+    X.aanvraagToets({ naam_ruw: 'appie', zin_ruw: 'Een gewone zin.', eigenaar_email: 'a@b.nl' }, new Set()) === null && X.aanvraagToets({ naam_ruw: 'desk-bot', zin_ruw: 'Een gewone zin.', eigenaar_email: 'a@b.nl' }, new Set()) === null);
+  // ronde: een databank die (na maskering) twee keer weigert → derde poging kaal, en "bekend" blijft
+  {
+    const gezet = [];
+    let weiger = 2;
+    const rr = await X.goedkeurRonde({ aix: { aanvragen: async () => ({ ok: true, aanvragen: [{ id: 'f'.repeat(32), naam_ruw: 'appie', naam: 'appie', zin_ruw: 'Ik koppel xoxb-a en xoxb-b voor mijn eigenaar.', zin: 'Ik koppel xoxb-a en xoxb-b voor mijn eigenaar.', eigenaar_email: 'albert@voorbeeld.nl', status: 'wacht_op_toelating' }] }),
+      winkels: async () => ({ ok: true, winkels: [] }), logboek: async () => ({ ok: true, logboek: [] }), toelaten: async () => ({ ok: false, status: 403, fout: 'nieuwe eigenaar' }) },
+      staatLees: () => ({}), staatSchrijf: () => {}, contact: () => 'Albert', voorJouSluit: async () => true,
+      voorJou: async (p) => { if (weiger-- > 0) throw new Error('voor_jou_waarom_check'); gezet.push(p); return { sleutel: p.sleutel }; } });
+    toets('9 ronde: twee weigeringen → kaal geplaatst, met "bekend als Albert"', gezet.length === 1 && /staat bij de aanvraag op AIX/.test(gezet[0].waarom) && /bekend als Albert/.test(gezet[0].meting), [rr.fouten, gezet]);
+  }
+  const sg = ['geheim', 'limiet', 'melding'].map((s) => X.signaalKaart(s, 'n'.repeat(30), 'r'.repeat(500)));
+  toets('9 signaalkaarten binnen de grenzen', sg.every(binnen), sg.map((k) => lengte(k.waarom)));
 
   toets('8 uitrol.sh en Dockerfile nemen aix.js mee', /^RELEASE_OPTIONEEL="[^"]*\baix\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY aix\.js \/app\/release-bootstrap\/aix\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
   fs.rmSync(W, { recursive: true, force: true });

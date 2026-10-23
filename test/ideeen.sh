@@ -226,6 +226,16 @@ M.mkdir();
   toets('9 Socev krijgt bij de Ja de opdracht niets zelf te plaatsen en de catalogus niet te openen', /Jij plaatst niets, hebt geen toegang tot AIX en hoeft de catalogus niet te openen/.test(src));
   toets('9 forum-koppeling weg (geen ideeenForum of IDEEEN_FORUM)', !/ideeenForum|IDEEEN_FORUM/.test(src));
 
+  // ── 10. bundelkaart binnen de grenzen van Voor jou (wv943: waarom > 400 = de databank weigert de kaart, David zag niets) ──
+  {
+    const Ib = I.maak({ vault: VAULT, dir: path.join(W, 'grens') });
+    const lengte = (t) => [...String(t || '')].length;
+    const ks = [Ib.bundelKaart({ kaart: 'aix-start-x', soort: 'startset' }, 26), Ib.bundelKaart({ kaart: 'aix-start-x', soort: 'startset' }, 99999),
+      Ib.bundelKaart({ kaart: 'aix-week-x', soort: 'week', nieuw: 3 }, 99999), Ib.bundelKaart({ kaart: 'aix-week-x', soort: 'week' }, 1)];
+    toets('10 bundelkaart (startset en week, grote aantallen): waarom <= 400, titel <= 90, stappen <= 12', ks.every((k) => lengte(k.waarom) <= 400 && lengte(k.titel) <= 90 && k.stappen.length <= 12), ks.map((k) => [lengte(k.waarom), lengte(k.titel)]));
+    toets('10 startset-kaart noemt het aantal en dat privé privé blijft, zonder … (niet afgekapt)', /zette 26 ideekaarten klaar/.test(ks[0].waarom) && /privé\.$/.test(ks[0].waarom), ks[0].waarom);
+  }
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

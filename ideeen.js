@@ -298,6 +298,7 @@ function maak(deps) {
     if (b.afgehandeld) return { kaart: b.kaart, afgehandeld: b.afgehandeld, aangevinkt: 0 };
     return { kaart: b.kaart, afgehandeld: null, aangevinkt: concepten().bundel.aangevinkt };
   }
+  function kap(t, n) { const x = [...String(t)]; return x.length <= n ? x.join('') : x.slice(0, n - 1).join('').trimEnd() + '…'; }
   function isBundel(sleutel) { const b = bundelLees(); return !!(b && b.kaart === String(sleutel || '')); }   // goedkoop: de Voor jou-lijst toont hem altijd als gevoelig
   // De Voor jou-kaart van de bundel (soort besluit). Stappen in de kaart zelf; geen paden of verwijzingen.
   function bundelKaart(b, n) {
@@ -306,10 +307,11 @@ function maak(deps) {
     if (!start && Number.isInteger(b.nieuw) && b.nieuw > 0) n = b.nieuw;
     return { sleutel: b.kaart, soort: 'besluit',
       titel: start ? 'Socevs winkel op AIX — deze kaarten tonen?' : 'AIX-weekbundel — ' + n + ' nieuwe kaart' + (n === 1 ? '' : 'en') + ' of antwoord' + (n === 1 ? '' : 'en') + ' plaatsen?',
-      waarom: (start ? 'Socevs winkel op aix.socev.dev is nog leeg. Socev zette ' + n + ' ideekaarten klaar (Managers, Apps, werkwijze, spraak en beeld), in show-and-tell-vorm: wat het doet, wat het oplevert, hoe het grofweg gebouwd is.'
-        : 'Er staan ' + n + ' nieuwe of gewijzigde stukken voor AIX klaar (kaarten, antwoorden op vragen onder onze kaarten, of tips bij kaarten van anderen)' +
-          (totaal > n ? '; samen met wat er nog klaarstond zijn het er ' + totaal + '.' : '.')) +
-        ' Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen, webadressen of interne verwijzingen. Andere agents en hun eigenaren (straks Albert en Appie) zien precies deze tekst. Bank, gezondheid en beveiliging blijven privé en staan er niet bij.',
+      // waarom <= 400 tekens (check constraint in de databank; daarboven werd de kaart geweigerd en zag David niets, wv943)
+      waarom: kap((start ? 'Socevs winkel op aix.socev.dev is nog leeg. Socev zette ' + n + ' ideekaarten klaar (Managers, Apps, werkwijze, spraak en beeld) in show-and-tell-vorm.'
+        : 'Er staan ' + n + ' nieuwe of gewijzigde stukken voor AIX klaar (kaarten, antwoorden onder onze kaarten, tips bij andermans kaarten)' +
+          (totaal > n ? '; met wat er nog klaarstond ' + totaal + '.' : '.')) +
+        ' Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen of webadressen. Andere agents en hun eigenaren (straks Albert en Appie) zien precies deze tekst; bank, gezondheid en beveiliging blijven privé.', 400),
       stappen: ['Open in de app Apps › AIX, tab Klaar om te delen.', 'Lees per stuk en kies Deel of Niet. Wat je niet aanraakt, gaat niet mee.',
         'Ja met vingerafdruk (op de telefoon): de pod zet wat op Deel staat in Socevs winkel op AIX, als Socev. Nee: er gaat niets naar AIX.'],
       waar: 'overal', prive: false, duur_min: start ? 15 : 5, volgorde: 20,
