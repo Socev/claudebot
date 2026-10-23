@@ -4224,6 +4224,13 @@ async function bewijs(o) {
         const rEa = await bq('/bericht', B({ bron: 'echt-alarm', sleutel: 'wv390-ea' }));
         toets('23 wv390: bron droomronde-wachter -> 200, echt-alarm -> 400', rDw.status === 200 && rDw.j.ok === true && rEa.status === 400 && /onbekende bron/.test(rEa.j.fout), JSON.stringify([rDw.status, rDw.j, rEa.j]));
       }
+      // wv589: dagsamenvatting (07:15, machinekamer) is een bron, soort archief, geen seintje; dezelfde sleutel = dubbel met hetzelfde id
+      {
+        const rDs = await bq('/bericht', B({ bron: 'dagsamenvatting', kanaal: 'machinekamer', klasse: 'normaal', soort: undefined, sleutel: 'dagsamenvatting:2026-10-24' }));
+        const rDs2 = await bq('/bericht', B({ bron: 'dagsamenvatting', kanaal: 'machinekamer', klasse: 'normaal', soort: undefined, sleutel: 'dagsamenvatting:2026-10-24' }));
+        toets('23 wv589: bron dagsamenvatting -> 200 archief zonder seintje; zelfde sleutel dubbel', rDs.status === 200 && rDs.j.ok === true && rDs.j.soort === 'archief' && rDs.j.seintje === false
+          && rDs2.status === 200 && rDs2.j.dubbel === true && rDs2.j.id === rDs.j.id, JSON.stringify([rDs.status, rDs.j, rDs2.j]));
+      }
       r = await bq('/bericht', B({ tekst: 'x'.repeat(60001) }));
       toets('23 tekst > 60.000 -> 413 terugval', r.status === 413 && r.j.terugval === true, JSON.stringify(r.j));
       // wv452 (Fable KAN 3): bron actielijst leegt het geheugen van Vandaag (de rijen staan al open); een andere bron niet

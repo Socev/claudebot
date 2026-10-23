@@ -2216,7 +2216,8 @@ const LESSEN_DOMEIN = {
   'vault-concierge': 'machine', 'site-verversing': 'machine', 'kaizen-review': 'machine',
   'pod-uitrol': 'machine', 'webhook-bewaker': 'machine', 'keten-attest': 'machine', 'ciso': 'machine',
   'data-manager': 'machine',  // wv844
-  'design-manager': 'machine' // wv845
+  'design-manager': 'machine', // wv845
+  'dagsamenvatting': 'machine'  // wv589
 };
 
 function lessenDomein(chatId, label) {
@@ -11480,7 +11481,8 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'proef', 'droomronde', 'ideeenm
   'agentrapport-david', 'stiltewachter-david',   // wv300: eigen bron per kanaal (agentrapport en stiltewachter dienen ook de machinekamer)
   'droomronde-wachter',   // wv390: Wachter melden van de droomronde (wv299). Bewust NIET 'echt-alarm' (Werkvoorraad-tikker, wv358): dat alarm
                           // meldt juist een pod in een wegwerpmap, waar /bericht 200 geeft in lege data; het blijft op Telegram (§ 4.6).
-  'bank-ronde']);         // wv685: één regel in het hoofdkanaal als een banktoestemming verlopen is (AI - Bank-ronde)
+  'bank-ronde',           // wv685: één regel in het hoofdkanaal als een banktoestemming verlopen is (AI - Bank-ronde)
+  'dagsamenvatting']);    // wv589: dagsamenvatting "Gebeurd" 07:15 (idee 13 § 4.6): machinekamer, geen MELD_SOORT-regel = archief, geen seintje
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
@@ -14288,6 +14290,7 @@ const MK_SESSIES = new Set([
   'voor-jou',                                         // voor-jou.py (SUPABASE_SERVICE_ROLE, Todoist)
   'werkvoorraad-box',                                 // tikker: box-rij schrijven
   'mcp-check',                                        // AI - MCP-gezondheidscheck: meet of n8n/Supabase-MCP verbinden
+  'dagsamenvatting',                                  // wv589: dagsamenvatting.py (SUPABASE_SERVICE_ROLE) + bericht.py (API_SECRET, N8N_API_KEY, debug-bot)
   'pod-uitrol'
 ]);
 const SOCEV_ENV_MAG = AUTO_AGENT_ENV_MAG.concat([
