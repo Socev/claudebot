@@ -4647,6 +4647,7 @@ const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
 // wv446 (Fable #1): meldingen/af is omkeerbaar en geen invoer naar Socev, net als gezien
 const APP_SLOT_VRIJ = new Set(['POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
+APP_SLOT_VRIJ.add('POST /app/ideeen/toets');   // wv861: de vaste toets op Davids reactie is lezen (waarschuwing), geen invoer
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
@@ -8959,7 +8960,9 @@ function appVjKnopStand(p, rv) {
   const tekst = q ? q.tekst : appVjGewoon(appVjOpmaakWeg(p.titel)).trim();   // wv646: zoals de lijst hem toont; Socev krijgt dezelfde tekst
   const voorstel = q ? q.voorstel : null;
   const kanaal = appVjKanaal(p, rv, gekRij);
-  const gev = appGevoelig(tekst + (voorstel ? '\n' + voorstel : ''));
+  let gev = appGevoelig(tekst + (voorstel ? '\n' + voorstel : ''));
+  // wv861 (Fable #4): de bundelkaart van de Ideeënbeurs is altijd gevoelig (Ja · vingerafdruk), welke woorden Socev ook koos
+  if (gev === null) { try { if (typeof ideeen !== 'undefined' && ideeen && ideeen.isBundel && ideeen.isBundel(p.sleutel)) gev = 'versturen'; } catch (e) {} }
   // gekoppeld en bruikbaar: de druk loopt via die vraag (ook de knoppen onder het oorspronkelijke bericht tonen dan beantwoord)
   const gekBruik = !!(gekRij && !appNaarTelegramNu(gekRij) && Date.now() - Date.parse(gekRij.t || 0) <= APP_VRAAG_GELDIG_MS);
   let elders = null, waaromNiet = null;
@@ -9149,9 +9152,24 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
       : !pot.reden && k.gevoelig ? ' (POT-vrijgave: de pod legt deze vrijgave zelf vast in de POT-databank zodra deze druk is aangenomen; op de verzenddag verstuurt de pod tussen 09:00 en 12:00 één mail per nota. Jij doet niets en verstuurt niets; bevestig het David in één zin.)'
       : ' (POT-vrijgave NIET vastgelegd: ' + (pot.reden || 'geen verse vingerafdruk') + '. De nota\'s komen op de verzenddag om 07:00 als concept in Gmail. Zeg dat kort; jij verstuurt niets.)');
   }
+  // wv861: bundelkaart van de Ideeënbeurs (sleutel in /opt/data/ideeenbeurs/bundel.json). De pod plaatst zelf, nooit het taalmodel, en
+  // alleen bij een Ja met verse vingerafdruk van telefoon of meereizend apparaat (ideeen.plaatsBundel toetst de bevestiging opnieuw).
+  let ib = null, ctxIb = context;
+  try { ib = typeof ideeen !== 'undefined' && ideeen && typeof ideeen.bundelVoor === 'function' ? ideeen.bundelVoor(p.sleutel) : null; } catch (e) { logError('ideeen', e); ib = null; }
+  if (ib && ib.afgehandeld) ctxIb = context + ' (Ideeënbeurs: deze bundel is al afgehandeld op ' + ib.afgehandeld + '; de pod plaatst niets meer. Jij plaatst ook niets, ook niet via het forum of de skill werkkamer-forum. Zeg David wat er destijds geplaatst is (/health, ideeen.plaatsing).)';   // Fable #5
+  else if (ib) ctxIb = context + (keuze !== 'ja' ? ' (Ideeënbeurs: geen Ja, dus de pod plaatst niets; de kaarten blijven klaarstaan in de tab. Zeg dat kort.)'
+    : a.soort !== 'vast' ? ' (Ideeënbeurs: de pod plaatst nu zelf de ' + ib.aangevinkt + ' kaart(en) die op Deel staan in het forumonderdeel Ideeën. Jij plaatst niets, ook niet via het forum. Kijk na een minuut in /health (ideeen.plaatsing), werk in de catalogus gedeeld op en draad bij en bevestig het David in één zin.)'
+      : ' (Ideeënbeurs: NIET geplaatst, want deze Ja kwam van een vaste plek. Jij plaatst niets. Zet een nieuwe bundelkaart klaar (bundel.json met de nieuwe kaartsleutel) of heropen deze met voor-jou-beheer, zodat David op de telefoon kan drukken.)');
+  // wv921 en wv861 sluiten elkaar uit (pot-vrijgave-N vs. de sleutel in bundel.json); de haak van de ene of de andere
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
-    { tekst: tekst, bericht: bericht, context: ctx, bijStart: bijStart, gevoelig: k.gevoelig,
-      naStart: pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); } : undefined,
+    { tekst: tekst, bericht: bericht, context: pot ? ctx : ctxIb, bijStart: bijStart, gevoelig: k.gevoelig || (!pot && !!ib),
+      naStart: pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
+        : !pot && ib && !ib.afgehandeld ? function (kz, gevoeligJa, ap, bevestiging, vraagId) {
+          if (kz !== 'ja') return;
+          ideeen.plaatsBundel({ kaart: ib.kaart, bevestiging: bevestiging, vraagId: vraagId })
+            .then(function (u) { if (u && u.ok === false) logError('ideeen-plaats', new Error(u.reden)); })
+            .catch(function (e) { logError('ideeen-plaats', e); });
+        } : undefined,
       bijVerval: pot && !pot.reden ? function () { potVzIntrekken(pot.v); } : undefined });
   await knopRes;
   if (res._app) res._app.reden = 'voor-jou knop #' + id + ' ' + (res._app.reden || '');
@@ -10830,7 +10848,8 @@ function handleApp(req, res) {
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
-        if (route === 'GET /app/ideeen' || route.indexOf('GET /app/ideeen/plaatje/') === 0 || route === 'POST /app/ideeen/reactie' || route === 'POST /app/ideeen/gezien' || route === 'POST /app/ideeen/naar-ideeenbus')
+        if (route === 'GET /app/ideeen' || route.indexOf('GET /app/ideeen/plaatje/') === 0 || route === 'POST /app/ideeen/reactie' || route === 'POST /app/ideeen/gezien' || route === 'POST /app/ideeen/naar-ideeenbus' ||
+          /^POST \/app\/ideeen\/kaart\/k\d{2,3}\/(deel|niet)$/.test(route) || route === 'POST /app/ideeen/toets')   // wv861: Deel/Niet per conceptkaart, vaste toets als waarschuwing
           return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App Ideeën van buitenaf
         if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
@@ -13711,15 +13730,24 @@ const ideeen = (function () {
     return i;
   } catch (e) { logError('ideeen', e); return null; }
 })();
-['ideeen', 'ideeen-reactie', 'ideeen-plaatje'].forEach(function (k) { if (!appStaat.tellers[k]) appStaat.tellers[k] = []; });
+['ideeen', 'ideeen-reactie', 'ideeen-plaatje', 'ideeen-toets'].forEach(function (k) { if (!appStaat.tellers[k]) appStaat.tellers[k] = []; });
 function ideeenInfo() {
   if (!ideeen) return { aan: false };
   try { return ideeen.health(); } catch (e) { return { aan: true, fout: true }; }
 }
 async function appIdeeen(req, res, a, d, route) {
   if (!ideeen) return appWeiger(res, 404, 'De Ideeënbeurs zit niet in deze versie van de pod', 'ideeen ontbreekt');
-  if (route.indexOf('GET ') === 0 || route === 'POST /app/ideeen/gezien') res._app.stil = true;
-  if (route.indexOf('POST ') === 0) {
+  if (route.indexOf('GET ') === 0 || route === 'POST /app/ideeen/gezien' || route === 'POST /app/ideeen/toets') res._app.stil = true;
+  if (route === 'POST /app/ideeen/toets') {
+    // wv861: lezen, geen rol- of invoerslot; eigen teller (de app vraagt hem na een typpauze)
+    if (!appTeller('ideeen-toets', 600, 3600000)) return appStuur(res, 200, { ok: true, treffers: [], toets: false });
+    // Fable #14: op een vaste plek (werk-pc) alleen de soort, niet welk woord in de contacten staat
+    if (a && a.soort === 'vast') {
+      let rv; try { rv = await ideeen.app(route, d || {}); } catch (e) { return appStuur(res, 200, { ok: true, treffers: [], toets: false }); }
+      const tr = (rv.j && rv.j.treffers || []).map(function (x) { return { soort: x.soort, treffer: '' }; });
+      return appStuur(res, 200, Object.assign({}, rv.j, { treffers: tr.filter(function (x, i) { return tr.findIndex(function (y) { return y.soort === x.soort; }) === i; }) }));
+    }
+  } else if (route.indexOf('POST ') === 0) {
     if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
     if (!appTeller('ideeen', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens ideeen');
     if (route === 'POST /app/ideeen/reactie') {
@@ -13729,10 +13757,11 @@ async function appIdeeen(req, res, a, d, route) {
     }
   } else if (route.indexOf('GET /app/ideeen/plaatje/') === 0 && !appTeller('ideeen-plaatje', 200, 3600000)) return appWeiger(res, 429, 'te veel plaatjes dit uur (max 200)', 'grens ideeen-plaatje');
   let r;
-  try { r = await ideeen.app(route, d || {}); }
+  try { r = await ideeen.app(route, Object.assign({}, d || {}, { __apparaat: a && a.id })); }   // wv861: apparaat alleen voor het journaal van Deel/Niet
   catch (e) { logError('app-ideeen', e); return appWeiger(res, 502, 'het forum is nu niet bereikbaar', 'ideeen uitzondering'); }
   if (r.status !== 200) res._app.reden = 'ideeen: ' + String(r.j && r.j.fout || '').slice(0, 60);
-  else if (route.indexOf('POST ') === 0 && route !== 'POST /app/ideeen/gezien') res._app.reden = 'ideeen ' + route.slice('POST /app/ideeen/'.length) + ' draad ' + String(d && d.draad || '').slice(0, 10);
+  else if (route.indexOf('POST /app/ideeen/kaart/') === 0) res._app.reden = 'ideeen ' + route.slice('POST /app/ideeen/'.length);
+  else if (route.indexOf('POST ') === 0 && route !== 'POST /app/ideeen/gezien' && route !== 'POST /app/ideeen/toets') res._app.reden = 'ideeen ' + route.slice('POST /app/ideeen/'.length) + ' draad ' + String(d && d.draad || '').slice(0, 10);
   return appStuur(res, r.status, r.j);
 }
 // ── einde ideeënbeurs ──

@@ -54,6 +54,14 @@ async function forum(m, pad, body) {
     return { status: 200, j: { ok: true, id } };
   }
   if (m === 'GET' && (x = /^afbeelding\/(\d+)\?forum=ideeen$/.exec(pad))) return { status: 200, bin: Buffer.from('PNGDATA' + x[1]), type: 'image/png' };
+  if (m === 'POST' && pad === 'draad') {
+    // wv861: kaart plaatsen (zoals de forum-API van fase 1: kaartvorm in ideeen, 422 bij een te lange wat)
+    if (F.plaatsFout === 'weg') throw new Error('ETIMEDOUT');
+    if (F.plaatsFout === 422 || body.kaart.wat.length > 300) return { status: 422, j: { ok: false, fout: 'wat: te lang', veld: 'wat' } };
+    const id = 200 + Object.keys(F.draden).length;
+    draad(id, body.forum, body.als || 'pod', body.kaart);
+    return { status: 200, j: { ok: true, id, forum: body.forum, kaart: body.kaart } };
+  }
   return { status: 404, j: { ok: false, fout: 'onbekend' } };
 }
 let nu = Date.parse('2026-10-23T10:00:00Z');
@@ -69,7 +77,7 @@ M.mkdir();
   toets('1 kaartvelden en plaatje; draad zonder kaart: wat uit de eerste tekst, kaartvorm false', k(2).kaartvorm && k(2).plaatje === 7 && k(2).status === 'in gebruik' && !k(3).kaartvorm && k(3).wat === 'eerste tekst', [k(2), k(3)]);
   toets('1 reacties: plaatje eruit als nummer, gewist leeg', k(2).reacties[0].tekst === 'Vraag van Albert' && k(2).reacties[0].plaatjes[0] === 8 && k(2).reacties[1].gewist && k(2).reacties[1].tekst === '', k(2).reacties);
   toets('1 teller nieuw: buiten-berichten na gezien (0) = kaart 2 (1 + reactie Albert), kaart 3 (1); gewist telt niet', r.j.nieuw === 3 && k(2).nieuw === 2 && k(3).nieuw === 1 && k(1).nieuw === 0, r.j.kaarten.map((x) => [x.id, x.nieuw]));
-  toets('1 concepten leeg in fase 1', Array.isArray(r.j.concepten) && r.j.concepten.length === 0 && r.j.catalogus === false);
+  toets('1 zonder catalogus: concepten leeg, catalogus false met reden', Array.isArray(r.j.concepten) && r.j.concepten.length === 0 && r.j.catalogus === false && /staat er \(nog\) niet/.test(r.j.catalogus_fout), r.j);
   const n0 = F.aanroepen.length;
   await M.app('GET /app/ideeen');
   toets('1 cache: tweede GET binnen 20 s leest het forum niet opnieuw', F.aanroepen.length === n0, F.aanroepen.length - n0);
@@ -131,13 +139,110 @@ M.mkdir();
   toets('6 forum onbereikbaar: 502 met gewone taal, health fout', r.status === 502 && /niet te lezen/.test(r.j.fout) && M.health().fout, r);
   F.weg = false;
 
+  // ── 8. fase 2 (wv861): catalogus, vaste toets, Deel/Niet, plaatsen na de Ja ──
+  const CAT = path.join(VAULT, I.CATALOGUS);
+  const blok = (id, titel, wat, x = {}) => '### ' + id + ' · ' + titel + '\n- titel: ' + titel + '\n- wat: ' + wat + '\n- waarom: ' + (x.waarom || 'Scheelt tijd.') + '\n- status: ' + (x.status || 'in gebruik') + '\n- bron: wv1 intern\n- deelbaar: ' + (x.deelbaar || 'concept') + '\n- gedeeld op:\n- draad:\n';
+  const catTekst = '# Catalogus\n\n' + [blok('K01', 'Knoppen onder elke vraag', 'Drie knoppen onder elke vraag.'), blok('K02', 'Voorlezen', 'Een knop leest het antwoord voor.'),
+    blok('K03', 'Iets met de praktijk', 'Op Tolgaarde werkt dit al.'), blok('K04', 'Geheim', 'Niet delen.', { deelbaar: 'privé' }),
+    blok('K05', 'Te lang', 'x'.repeat(301)), blok('K06', 'Derde', 'Nog een kaart.')].join('\n');
+  fs.writeFileSync(CAT, catTekst);
+  const naamToets = { toets: (t) => /Jorien/.test(t) ? [{ soort: 'naam', treffer: 'Jorien' }] : [] };
+  nu += 30000; r = await M.app('GET /app/ideeen');
+  const ck = (id) => r.j.concepten.find((x) => x.id === id);
+  toets('8 catalogus gelezen: concepten zonder privé, bron gaat niet mee', r.j.catalogus === true && r.j.concepten.length === 5 && !ck('k04') && !('bron' in ck('k01')), r.j.concepten && r.j.concepten.map((x) => x.id));
+  toets('8 vaste toets live: praktijknaam = treffer, kan niet delen', ck('k03').treffers.some((t) => /praktijk/.test(t.soort)) && ck('k03').kan_delen === false && ck('k01').kan_delen === true, ck('k03'));
+  toets('8 vormfout (wat > 300) = kan niet delen', ck('k05').vormfout.length > 0 && ck('k05').kan_delen === false, ck('k05'));
+  toets('8 geen bundel: bundel.open false, aangevinkt 0', r.j.bundel && r.j.bundel.open === false && r.j.bundel.aangevinkt === 0, r.j.bundel);
+  let kz = await M.app('POST /app/ideeen/kaart/k01/deel', { __apparaat: 'tel1' });
+  toets('8 Deel op een schone kaart: 200, in het journaal (0600, met hash en apparaat)', kz.status === 200 && (fs.statSync(path.join(DIR, 'journaal.jsonl')).mode & 0o777) === 0o600 && /"soort":"keuze","id":"k01","keuze":"deel","hash":"[a-f0-9]{16}","apparaat":"tel1"/.test(fs.readFileSync(path.join(DIR, 'journaal.jsonl'), 'utf8')), kz);
+  toets('8 Deel op een kaart met treffer = 409 met reden; Niet mag wel', (await M.app('POST /app/ideeen/kaart/k03/deel')).status === 409 && (await M.app('POST /app/ideeen/kaart/k03/niet')).status === 200);
+  toets('8 Deel op privé of onbekend = 404', (await M.app('POST /app/ideeen/kaart/k04/deel')).status === 404 && (await M.app('POST /app/ideeen/kaart/k99/deel')).status === 404);
+  await M.app('POST /app/ideeen/kaart/k02/deel'); await M.app('POST /app/ideeen/kaart/k06/deel'); await M.app('POST /app/ideeen/kaart/k06/niet');
+  nu += 30000; r = await M.app('GET /app/ideeen');
+  toets('8 keuzes zichtbaar: k01 deel, k02 deel, k03 niet, k06 niet (laatste wint); aangevinkt 2', ck('k01').keuze === 'deel' && ck('k02').keuze === 'deel' && ck('k03').keuze === 'niet' && ck('k06').keuze === 'niet' && r.j.bundel.aangevinkt === 2, r.j.concepten.map((x) => [x.id, x.keuze]));
+  // tekst van k02 verandert na de Deel: keuze vervalt (gewijzigd), telt niet meer mee
+  fs.writeFileSync(CAT, catTekst.replace('Een knop leest het antwoord voor.', 'Een knop leest elk antwoord voor.'));
+  nu += 30000; r = await M.app('GET /app/ideeen');
+  toets('8 tekst gewijzigd na Deel: keuze vervalt (gewijzigd true), aangevinkt 1', ck('k02').keuze === null && ck('k02').gewijzigd === true && r.j.bundel.aangevinkt === 1, ck('k02'));
+  await M.app('POST /app/ideeen/kaart/k02/deel');
+  // plaatsen
+  toets('8 bundelVoor zonder bundel.json = null', M.bundelVoor('wv950') === null);
+  fs.writeFileSync(path.join(DIR, 'bundel.json'), JSON.stringify({ kaart: 'wv950', gemaakt: '2026-10-23' }));
+  toets('8 bundelVoor: andere kaart = null, eigen kaart = aangevinkt 2', M.bundelVoor('wv951') === null && M.bundelVoor('wv950').aangevinkt === 2, M.bundelVoor('wv950'));
+  const voorPlaats = F.aanroepen.filter((a) => a[0] === 'POST' && a[1] === 'draad').length;
+  toets('8 zonder verse vingerafdruk (knop-ja-kaart, knop-ja-vers-vast-kaart) niets geplaatst, bundel blijft open',
+    (await M.plaatsBundel({ kaart: 'wv950', bevestiging: 'knop-ja-kaart' })).ok === false && (await M.plaatsBundel({ kaart: 'wv950', bevestiging: 'knop-ja-vers-vast-kaart' })).ok === false &&
+    F.aanroepen.filter((a) => a[0] === 'POST' && a[1] === 'draad').length === voorPlaats && M.bundelVoor('wv950') !== null);
+  toets('8 andere kaart dan de bundel: niets', (await M.plaatsBundel({ kaart: 'wv951', bevestiging: I.BEVESTIGING_PLAATSEN })).ok === false);
+  // k01 krijgt intussen een naam erin via de toets? nee: k01 blijft schoon; k02 en k01 gaan, k03/k05/k06 niet
+  let u = await M.plaatsBundel({ kaart: 'wv950', bevestiging: I.BEVESTIGING_PLAATSEN, vraagId: 'abcd1234' });
+  const geplaatst = F.aanroepen.filter((a) => a[0] === 'POST' && a[1] === 'draad').slice(voorPlaats);
+  toets('8 Ja met verse vingerafdruk: precies k01 en k02 geplaatst, als socev in ideeen, alleen kaartvelden (geen bron)', u.geplaatst.map((x) => x.id).join() === 'k01,k02' && geplaatst.length === 2 &&
+    geplaatst.every((a) => a[2].forum === 'ideeen' && a[2].als === 'socev' && Object.keys(a[2].kaart).join() === 'titel,wat,waarom,status'), { u, geplaatst });
+  toets('8 bundel afgehandeld: tweede Ja plaatst niets', (await M.plaatsBundel({ kaart: 'wv950', bevestiging: I.BEVESTIGING_PLAATSEN })).ok === false && !!M.bundelVoor('wv950').afgehandeld && M.isBundel('wv950') && !M.isBundel('wv951'), M.bundelVoor('wv950'));
+  nu += 30000; r = await M.app('GET /app/ideeen');
+  toets('8 na plaatsen: k01/k02 niet meer in concepten, wel als kaart van ons; plaatsing in GET en health', !ck('k01') && !ck('k02') && r.j.kaarten.filter((x) => x.groep === 'ons' && /Knoppen|Voorlezen/.test(x.titel)).length === 2 &&
+    r.j.plaatsing.geplaatst === 2 && M.health().plaatsing.geplaatst === 2 && M.health().catalogus.concepten === 3, { p: r.j.plaatsing, h: M.health() });
+  toets('8 Deel op een al gedeelde kaart = 404 (niet meer concept-in-de-tab) of 409', [404, 409].includes((await M.app('POST /app/ideeen/kaart/k01/deel')).status));
+  // forum weigert (422) = plaats-fout, zeker niet geplaatst; forum weg = onzeker, nooit vanzelf opnieuw
+  fs.writeFileSync(CAT, catTekst + '\n' + blok('K07', 'Zevende', 'Kaart zeven.') + '\n' + blok('K08', 'Achtste', 'Kaart acht.'));
+  await M.app('POST /app/ideeen/kaart/k07/deel'); await M.app('POST /app/ideeen/kaart/k08/deel');
+  fs.writeFileSync(path.join(DIR, 'bundel.json'), JSON.stringify({ kaart: 'wv952' }));
+  F.plaatsFout = 422;
+  u = await M.plaatsBundel({ kaart: 'wv952', bevestiging: I.BEVESTIGING_PLAATSEN });
+  toets('8 forum 422: plaats-fout, niets geplaatst', u.geplaatst.length === 0 && u.fouten.length === 2, u);
+  fs.writeFileSync(path.join(DIR, 'bundel.json'), JSON.stringify({ kaart: 'wv953' }));
+  F.plaatsFout = 'weg';
+  u = await M.plaatsBundel({ kaart: 'wv953', bevestiging: I.BEVESTIGING_PLAATSEN });
+  toets('8 forum weg: onzeker gemeld', u.geplaatst.length === 0 && u.fouten.every((x) => /onzeker/.test(x.reden)), u);
+  F.plaatsFout = null;
+  nu += 30000; r = await M.app('GET /app/ideeen');
+  toets('8 onzeker = bezig: kan niet delen en Deel/Niet geweigerd', ck('k07').bezig === true && ck('k07').kan_delen === false && (await M.app('POST /app/ideeen/kaart/k07/niet')).status === 409, ck('k07'));
+  fs.writeFileSync(path.join(DIR, 'bundel.json'), JSON.stringify({ kaart: 'wv954' }));
+  u = await M.plaatsBundel({ kaart: 'wv954', bevestiging: I.BEVESTIGING_PLAATSEN });
+  toets('8 volgende bundel: onzekere kaart overgeslagen, nooit dubbel geplaatst', u.geplaatst.length === 0 && u.overgeslagen.some((x) => /onzeker/.test(x.reden)), u);
+  // nakijk (Fable #6): k07/k08 hangen op bezig; zet er één draad van socev met de titel van k07 neer, k08 niet
+  draad(250, 'ideeen', 'socev', K('Zevende'));
+  const nk = await M.nakijk();
+  nu += 30000; r = await M.app('GET /app/ideeen');
+  toets('8 nakijk: k07 op het forum gevonden = gedeeld (uit de concepten), k08 niet = plaats-fout, weer te kiezen', nk.ok && nk.nagekeken === 2 && nk.uit.find((x) => x.id === 'k07').draad === 250 && !ck('k07') && ck('k08') && ck('k08').bezig === false && /niet op het forum gevonden/.test(ck('k08').fout || '') && (await M.app('POST /app/ideeen/kaart/k08/niet')).status === 200, { nk, k08: ck('k08') });
+  toets('8 nakijk zonder hangende kaarten: niets te doen, geen forumaanroep', (await M.nakijk()).nagekeken === 0);
+  // catalogus onleesbaar ná de Ja (Fable #10): bundel blijft open
+  fs.writeFileSync(path.join(DIR, 'bundel.json'), JSON.stringify({ kaart: 'wv955' }));
+  fs.writeFileSync(CAT.replace(/\.md$/, '.conflict2.md'), 'x');
+  u = await M.plaatsBundel({ kaart: 'wv955', bevestiging: I.BEVESTIGING_PLAATSEN });
+  toets('8 catalogus dicht bij plaatsen: niets geplaatst en bundel niet verbruikt', u.geplaatst.length === 0 && u.fouten.length === 1 && M.bundelVoor('wv955') && !M.bundelVoor('wv955').afgehandeld, { u, b: M.bundelVoor('wv955') });
+  fs.unlinkSync(CAT.replace(/\.md$/, '.conflict2.md'));
+  // meer dan bundel_max (Fable #12): overgeslagen gemeld
+  const veel = Array.from({ length: I.GRENS.bundel_max + 2 }, (_, i) => blok('K' + (110 + i), 'Veel ' + i, 'Kaart nummer veel.')).join('\n');
+  fs.writeFileSync(CAT, catTekst + '\n' + veel);
+  for (let i = 0; i < I.GRENS.bundel_max + 2; i++) await M.app('POST /app/ideeen/kaart/k' + (110 + i) + '/deel');
+  u = await M.plaatsBundel({ kaart: 'wv955', bevestiging: I.BEVESTIGING_PLAATSEN });
+  toets('8 boven ' + I.GRENS.bundel_max + ' in één bundel: rest overgeslagen met reden', u.geplaatst.length === I.GRENS.bundel_max && u.overgeslagen.filter((x) => /meer dan/.test(x.reden)).length === 2, { g: u.geplaatst.length, o: u.overgeslagen });
+  fs.writeFileSync(CAT, catTekst);
+  // vaste toets als waarschuwing
+  const M2 = I.maak({ vault: VAULT, dir: path.join(W, 'staat2'), forum, klok: () => nu, harvester: H, filter: naamToets });
+  let tz = await M2.app('POST /app/ideeen/toets', { tekst: 'Groet aan Jorien' });
+  toets('8 toets: treffers terug, status 200 (nooit blokkeren)', tz.status === 200 && tz.j.treffers.length === 1 && tz.j.toets === true, tz);
+  toets('8 toets: schone tekst geen treffers', (await M2.app('POST /app/ideeen/toets', { tekst: 'Leuk idee!' })).j.treffers.length === 0);
+  toets('8 reactie met een naam wordt gewoon geplaatst (waarschuwing is alleen in de app)', (await M2.app('POST /app/ideeen/reactie', { draad: 2, tekst: 'Groet aan Jorien' })).status === 200);
+  // catalogus met conflictkopie: dicht
+  fs.writeFileSync(CAT.replace(/\.md$/, '.conflict1.md'), 'x');
+  nu += 30000; r = await M.app('GET /app/ideeen');
+  toets('8 conflictkopie naast de catalogus: catalogus false met reden, Deel = 503', r.j.catalogus === false && /conflictkopie/.test(r.j.catalogus_fout) && (await M.app('POST /app/ideeen/kaart/k08/niet')).status === 503, r.j.catalogus_fout);
+  fs.unlinkSync(CAT.replace(/\.md$/, '.conflict1.md'));
+
   // ── 7. server.js-koppeling (vm) ──
   const src = fs.readFileSync('server.js', 'utf8');
   const s1 = src.indexOf('// ── Ideeënbeurs (wv761'), s2 = src.indexOf('// ── einde ideeënbeurs ──');
   toets('7 server.js: blok gevonden', s1 > 0 && s2 > s1);
-  toets('7 server.js: dispatch, glijdroutes, health', /route === 'GET \/app\/ideeen' \|\| route\.indexOf\('GET \/app\/ideeen\/plaatje\/'\) === 0 \|\| route === 'POST \/app\/ideeen\/reactie' \|\| route === 'POST \/app\/ideeen\/gezien' \|\| route === 'POST \/app\/ideeen\/naar-ideeenbus'\)/.test(src) &&
+  toets('7 server.js: dispatch, glijdroutes, health', /route === 'GET \/app\/ideeen' \|\| route\.indexOf\('GET \/app\/ideeen\/plaatje\/'\) === 0 \|\| route === 'POST \/app\/ideeen\/reactie' \|\| route === 'POST \/app\/ideeen\/gezien' \|\| route === 'POST \/app\/ideeen\/naar-ideeenbus' \|\|\n\s+\/\^POST \\\/app\\\/ideeen\\\/kaart\\\/k\\d\{2,3\}\\\/\(deel\|niet\)\$\/\.test\(route\) \|\| route === 'POST \/app\/ideeen\/toets'\)/.test(src) &&
     /\['POST \/app\/ideeen\/reactie', 'POST \/app\/ideeen\/naar-ideeenbus'\]\.forEach\(function \(r\) \{ APP_GLIJD_ROUTES\.add\(r\); \}\)/.test(src) && /ideeen: typeof ideeenInfo === 'function' \? ideeenInfo\(\)/.test(src));
-  toets('7 uitrol.sh en Dockerfile nemen ideeen.js mee', / ideeen\.js"/.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY ideeen\.js \/app\/release-bootstrap\/ideeen\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
+  toets('7 uitrol.sh neemt ideeen-filter.js mee (wv861), Dockerfile ook', /^RELEASE_OPTIONEEL="[^"]*\bideeen-filter\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY ideeen-filter\.js \/app\/release-bootstrap\/ideeen-filter\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
+  toets('7 toets is slotvrij (lezen), Deel/Niet en toets in de dispatch, teller ideeen-toets', /APP_SLOT_VRIJ\.add\('POST \/app\/ideeen\/toets'\)/.test(src) && /'ideeen-toets'\]\.forEach/.test(src));
+  toets('7 appKnop: haak naStart pas na een geslaagde start, met de bevestiging van appKnopBevestiging', /if \(!st\.job_id\) \{[\s\S]{0,400}return appStartFout\(res, st\);\n  \}\n[^\n]*\n  \/\/ wv921[^\n]*\n  if \(kaart && kaart\.naStart\) \{ try \{ kaart\.naStart\(keuze, gevoeligJa, a, appKnopBevestiging\(keuze, gevoeligJa, a, true\), hash\)/.test(src));
+  toets('7 appVoorJouKnop: bundelkaart via ideeen.bundelVoor, plaatsen alleen bij ja via plaatsBundel met de bevestiging', /ib = typeof ideeen !== 'undefined' && ideeen && typeof ideeen\.bundelVoor === 'function' \? ideeen\.bundelVoor\(p\.sleutel\)/.test(src) && /if \(kz !== 'ja'\) return;\n\s+ideeen\.plaatsBundel\(\{ kaart: ib\.kaart, bevestiging: bevestiging, vraagId: vraagId \}\)/.test(src));
+  toets('7 uitrol.sh en Dockerfile nemen ideeen.js mee', /^RELEASE_OPTIONEEL="[^"]*\bideeen\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY ideeen\.js \/app\/release-bootstrap\/ideeen\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
   const gevraagd = [];
   const nepFetch = async (u, o) => { gevraagd.push([u, o]); return { status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true, draden: [] }) }; };
   const appStaat = { tellers: {} };
@@ -164,6 +269,12 @@ M.mkdir();
   const rs2 = { _app: {} }, dd2 = { draad: 2, tekst: 'mijn bsn 123456789' };
   await S.appIdeeen({}, rs2, { soort: 'mee' }, dd2, 'POST /app/ideeen/reactie');
   toets('7 meereizend: niets gemaskeerd (Davids eigen woorden)', !rs2._app.bsnWeg && /123456789/.test(dd2.tekst));
+  const tv = await S.appIdeeen({}, { _app: {} }, { soort: 'vast' }, { tekst: 'Op Tolgaarde en in Leusden' }, 'POST /app/ideeen/toets');
+  const tm = await S.appIdeeen({}, { _app: {} }, { soort: 'mee' }, { tekst: 'Op Tolgaarde en in Leusden' }, 'POST /app/ideeen/toets');
+  toets('7 toets op een vaste plek: alleen de soort (één keer), geen treffertekst; meereizend wel de woorden (Fable #14)', tv.st === 200 && tv.j.treffers.length === 1 && tv.j.treffers[0].treffer === '' && tm.j.treffers.length === 2 && tm.j.treffers.some((x) => x.treffer === 'Tolgaarde'), [tv.j, tm.j]);
+  ctx.__primair = false;
+  toets('7 toets ook op de reservekant (lezen)', (await S.appIdeeen({}, { _app: {} }, { soort: 'mee' }, { tekst: 'x' }, 'POST /app/ideeen/toets')).st === 200);
+  ctx.__primair = true;
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
