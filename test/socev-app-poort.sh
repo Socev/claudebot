@@ -1410,6 +1410,7 @@ async function bewijs(o) {
         toets('9b wv891: kaart dicht, rij wacht nog: stand beantwoord zonder punt', bt.length === 1 && bt[0].stand === 'beantwoord' && bt[0].punt === null && bt[0].titel === 'Al beantwoord', JSON.stringify(bt));
         const lt = H.appBroedWacht(w85, [{ id: 905, prive: false, status: 'later', later_tot: '2999-01-01', titel: 'Later', herkomst: { wv: [85] } }], { soort: 'reist' }, vandaagB);
         toets('9b wv891: kaart op later (datum nog niet bereikt) telt als beantwoord/dicht, niet open', lt[0].stand === 'beantwoord', JSON.stringify(lt));
+        toets('9b wv891: vaste plek zonder (leesbare) kaart: geen vrije tekst van de rij (diffreview #3)', H.appBroedWacht(w85, [], { soort: 'vast' }, vandaagB)[0].titel === null && H.appBroedWacht(w85, null, { soort: 'vast' }, vandaagB)[0].titel === null && H.appBroedWacht(w85, [], { soort: 'vast' }, vandaagB)[0].stand === 'geen');
         toets('9b wv891: Voor jou niet leesbaar: stand onbekend met de tekst van de rij', JSON.stringify(H.appBroedWacht(w85, null, { soort: 'reist' }, vandaagB)) === JSON.stringify([{ wv: 85, titel: 'app-toets', punt: null, stand: 'onbekend' }]));
         sbStaat.vjKapot = true; H.appStaat.vjCache = null;
         const rkp = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });

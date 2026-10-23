@@ -7103,7 +7103,8 @@ appStaat.broedZonderKaart = appStaat.broedZonderKaart || new Set();
 const appWachtOpDavid = function (w) { return w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')); };
 function appBroedWacht(w, vj, a, vandaag) {
   const vast = !!(a && a.soort === 'vast');
-  const los = appKort(appVjGewoon(String(w.geblokkeerd_door || '').replace(/^\s*david\s*:?\s*/i, '')), 160) || 'wacht op jou';
+  // diffreview wv891 #3: op een vaste plek geen vrije tekst van de rij (de kaart erachter kan privé zijn); de app zegt dan "Een privé-punt"
+  const los = vast ? null : appKort(appVjGewoon(String(w.geblokkeerd_door || '').replace(/^\s*david\s*:?\s*/i, '')), 160) || 'wacht op jou';
   if (!vj) return [{ wv: w.id, titel: los, punt: null, stand: 'onbekend' }];
   const bij = vj.filter(function (p) { return ((p.herkomst && Array.isArray(p.herkomst.wv)) ? p.herkomst.wv : []).some(function (n) { return Number(n) === Number(w.id); }); })
     .sort(function (x, y) { return y.id - x.id; });
@@ -7113,6 +7114,7 @@ function appBroedWacht(w, vj, a, vandaag) {
   };
   // Fable wv891 #3: alle zichtbare kaarten van de rij (hooguit 3), een privé-kaart op een vaste plek één keer
   let uit = zicht.length ? zicht.slice(0, 3).map(function (p) { return vorm(p, 'open'); }) : bij.length ? [vorm(bij[0], 'beantwoord')] : null;
+  if (uit) appStaat.broedZonderKaart.delete(w.id);   // diffreview #4: verliest hij later weer zijn kaart, dan opnieuw één logregel
   if (uit) return uit.filter(function (x, i) { return x.stand !== 'prive' || uit.findIndex(function (y) { return y.stand === 'prive'; }) === i; });
   if (!appStaat.broedZonderKaart.has(w.id)) { appStaat.broedZonderKaart.add(w.id); logError('app-broedstoof', new Error('wv' + w.id + ' wacht op David zonder open Voor jou-kaart')); }
   return [{ wv: w.id, titel: los, punt: null, stand: 'geen' }];
