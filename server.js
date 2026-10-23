@@ -13358,12 +13358,20 @@ async function harvesterClaude(systeem, prompt, schema) {
     });
   });
 }
+// wv828: bron ideeenbeurs — alleen lezen met de podsleutel, alleen deze twee GET-paden (Fable wv828 #12); ander pad = geen netwerk.
+// ideeenForum en ideeen staan verderop (pas aangeroepen tijdens een ronde). Geoogst wordt alleen wat David in de tab zag (#10).
+function harvesterForum(pad) {
+  if (!/^(draden\?forum=ideeen|draad\/[1-9][0-9]{0,8}\?stil=1)$/.test(String(pad))) return Promise.resolve({ status: 400, j: { ok: false, fout: 'pad niet toegestaan' } });
+  return ideeenForum('GET', pad);
+}
+function harvesterIdeeenGezien() { try { return ideeen ? Number(ideeen.health().gezien_tot) || 0 : 0; } catch (e) { return 0; } }
 const harvester = (function () {
   const p = path.join(__dirname, 'harvester.js');
   if (!fs.existsSync(p)) return null;
   try {
     const H = require(p);
     const h = H.maak({ vault: VAULT, dir: HARVESTER_DIR, fout: logError, claude: harvesterClaude,
+      forum: harvesterForum, ideeenGezien: harvesterIdeeenGezien,
       // hartslag na elke geslaagde ronde, ook leeg (AI - Stiltewachter, rij hartslag-harvester; Fable wv820 #3)
       hartslag: async function (items, kaarten) {
         await appSbRpc('mk_hartslag_stempel', { p_component: 'harvester-ronde', p_gemeten_rijen: items, p_bevindingen: kaarten });
