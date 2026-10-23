@@ -7919,14 +7919,23 @@ function appBusMaxNr() { try { return appBusLees().ideeen.reduce(function (m, i)
 // Alleen de tijden uit het app-log, bewaard op mtime + grootte: niet elke minuut per apparaat 30 dagen tekst parsen (review #5).
 // wv277: Telegram-beurten (soort telegram) apart: David zag ze al in Telegram, dus geen teller of app-badge; alleen het jongste
 // tijdstip, zodat een open gesprek herlaadt (Fable wv277 #2). telegram=true geeft die tijden.
+// wv894: een agentrapport zonder vraag dat de app in de machinekamer ingeklapt toont (zelfde regel als socev-app src/inklap.ts:
+// bron agentrapport, geen geregistreerde vraag en geen vraagregel, kop "🤖 Agentrapport — "; een mislukte agent blijft open).
+function appInklapRapport(kanaal, x) {
+  if (kanaal !== 'machinekamer' || x.soort !== 'socev' || x.bron !== 'agentrapport' || x.vraag_hash) return false;
+  const a = String(x.antwoord || '');
+  return /^\s*🤖 Agentrapport — /.test(a) && !/^[^\S\n]*[*_]*VRAAG AAN DAVID:/m.test(a);
+}
+// soort: true = Telegram-beurten, 'zacht' = ingeklapte rapporten (wv894; zitten ook in de gewone lijst), anders de rest
 async function appLogTijden(kanaal, telegram) {
   const st = await fs.promises.stat(appLogPad(kanaal));
   const c = (appStaat.logTijden = appStaat.logTijden || {})[kanaal];
-  if (c && c.mtime === st.mtimeMs && c.size === st.size) return telegram ? c.tg : c.t;
-  const t = [], tg = [];
-  (await appLogLees(kanaal)).forEach(function (x) { (x.soort === 'telegram' ? tg : t).push(Date.parse(x.t)); });
-  appStaat.logTijden[kanaal] = { mtime: st.mtimeMs, size: st.size, t: t, tg: tg };
-  return telegram ? tg : t;
+  const kies = function (c) { return telegram === 'zacht' ? c.z : telegram ? c.tg : c.t; };
+  if (c && c.mtime === st.mtimeMs && c.size === st.size) return kies(c);
+  const t = [], tg = [], z = [];
+  (await appLogLees(kanaal)).forEach(function (x) { (x.soort === 'telegram' ? tg : t).push(Date.parse(x.t)); if (appInklapRapport(kanaal, x)) z.push(Date.parse(x.t)); });
+  appStaat.logTijden[kanaal] = { mtime: st.mtimeMs, size: st.size, t: t, tg: tg, z: z };
+  return kies(appStaat.logTijden[kanaal]);
 }
 // Tijdstippen waarop er per tab iets nieuws kwam (jongste eerst niet nodig); null = bron nu niet leesbaar.
 async function appNieuwBronnen() {
@@ -7975,13 +7984,20 @@ async function appNieuwRoute(req, res, a) {
   if (nieuwPunt && alle) { try { alle[a.id] = g; appSchrijfJson(APP_GEZIEN, alle); } catch (e) { logError('app-nieuw', e); } }
   const bronnen = await appNieuwBronnen();
   const tabs = {}, laatst = {}, fouten = alle ? [] : ['gezien'];   // kapot gezien.json: zichtbaar in fouten (review #4)
+  const grenzen = {};
   Object.keys(bronnen).forEach(function (t) {
     if (!bronnen[t]) { tabs[t] = 0; fouten.push(t); return; }
-    const grens = Math.max(Date.parse(g[t] || 0) || nu, nu - APP_NIEUW_MAX_MS);   // wv144: ouder dan 7 dagen telt niet
+    const grens = grenzen[t] = Math.max(Date.parse(g[t] || 0) || nu, nu - APP_NIEUW_MAX_MS);   // wv144: ouder dan 7 dagen telt niet
     const nieuw = bronnen[t].filter(function (x) { return x > grens; });
     tabs[t] = nieuw.length;
     if (nieuw.length) laatst[t] = new Date(Math.max.apply(null, nieuw)).toISOString();
   });
+  // wv894: hoeveel van de nieuwe in de machinekamer ingeklapte agentrapporten zijn (de app telt ze zacht, niet op het pictogram);
+  // zelfde grens; uit hetzelfde gelezen log (de cache hierboven), dus nooit meer dan tabs.machinekamer
+  const zacht = {};
+  if (tabs.machinekamer > 0 && grenzen.machinekamer) {
+    try { zacht.machinekamer = Math.min(tabs.machinekamer, (await appLogTijden('machinekamer', 'zacht')).filter(function (x) { return x > grenzen.machinekamer; }).length); } catch (e) {}
+  }
   const maxNr = appBusMaxNr();
   if (maxNr === null) { tabs.broedstoof = 0; fouten.push('broedstoof'); }
   else tabs.broedstoof = Math.max(0, maxNr - (typeof g.broedstoof_nr === 'number' ? g.broedstoof_nr : maxNr));
@@ -8005,7 +8021,7 @@ async function appNieuwRoute(req, res, a) {
   }
   const gd = appGezienDavid();   // wv804 (ontwerp § 2): door David gezien, voor fase 4 (nu informatief)
   appStuur(res, 200, { ok: true, nu: new Date(nu).toISOString(), tabs: tabs, laatst: laatst, gezien: gezien, seintje: appSeintjeTab(a.id), fouten: fouten, telegram: telegram,
-    naar_telegram: appNaarTelegramWissels(nu), telegram_bezig: appTelegramBezig(), david: gd ? { tabs: gd.tabs, punten_n: Object.keys(gd.punten).length } : null });
+    naar_telegram: appNaarTelegramWissels(nu), telegram_bezig: appTelegramBezig(), david: gd ? { tabs: gd.tabs, punten_n: Object.keys(gd.punten).length } : null, zacht: zacht });
 }
 // wv292 (Fable wv263 #14): per gesprek het jongste moment waarop een vraag van Socev naar Telegram ging, terugkwam of zijn voorlopige
 // Telegram-stand verliep; de app herlaadt het open gesprek als dit verandert (anders staan er knoppen die 409 geven, of juist niet).

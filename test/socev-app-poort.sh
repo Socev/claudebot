@@ -388,7 +388,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -4774,6 +4774,30 @@ async function bewijs(o) {
       toets('23 meetlat: van_socev per bron, niet bij berichten', nd && nd.app.machinekamer.van_socev >= 8 && nd.app.machinekamer.per_bron.agentrapport >= 5 && nd.app.machinekamer.per_bron.foutmelder === 1, JSON.stringify(nd && nd.app.machinekamer));
       r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
       toets('23 /app/nieuw telt berichten mee in de tab machinekamer', r.status === 200 && typeof r.j.tabs.machinekamer === 'number', JSON.stringify(r.j.tabs));
+      // wv894: agentrapporten zonder vraag (de app klapt ze in) tellen apart als zacht; vraag, mislukt en een andere bron niet; hoofd nooit
+      {
+        const rG894 = await vraag('POST', '/app/gezien', { tab: 'machinekamer', tot: new Date().toISOString() }, { pot: P.jar });
+        await slaap(20);
+        const sl894 = 'wv894-' + Date.now() + '-';
+        const uit894 = [];
+        uit894.push(await bq('/bericht', B({ tekst: '🤖 Agentrapport — machinekamer:wv1 a\n\nKlaar.', sleutel: sl894 + 1, soort: undefined })));
+        uit894.push(await bq('/bericht', B({ tekst: '🤖 Agentrapport — machinekamer:wv2 b\n\n[Pod: herstart]\n\nOok klaar.', sleutel: sl894 + 2, soort: undefined })));
+        uit894.push(await bq('/bericht', B({ tekst: '🤖 Agentrapport — wv3 c\n\nKlaar.\n\nVRAAG AAN DAVID: Mag ik dit uitrollen?', sleutel: sl894 + 3, knoppen: true, soort: undefined })));
+        uit894.push(await bq('/bericht', B({ tekst: '⚠️ Agent mislukt — wv4 d\n\nFout: afgebroken-bovengrens', sleutel: sl894 + 4, soort: undefined })));
+        uit894.push(await bq('/bericht', B({ bron: 'droomronde', tekst: 'Droomronde: niets bijzonders.', sleutel: sl894 + 5, soort: undefined })));
+        uit894.push(await bq('/bericht', B({ kanaal: 'hoofd', tekst: '🤖 Agentrapport — e\n\nKlaar.', sleutel: sl894 + 6, soort: undefined })));
+        const r894 = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+        toets('23 wv894: /app/nieuw zacht.machinekamer = 2 ingeklapte rapporten van 5 nieuwe (vraag, mislukt en droomronde tellen gewoon)',
+          rG894.status === 200 && uit894.every((x) => x.status === 200) && r894.status === 200 && r894.j.tabs.machinekamer === 5 && r894.j.zacht && r894.j.zacht.machinekamer === 2 && r894.j.zacht.hoofd === undefined,
+          JSON.stringify([rG894.status, uit894.map((x) => x.status), r894.j && r894.j.tabs, r894.j && r894.j.zacht]));
+        await vraag('POST', '/app/gezien', { tab: 'machinekamer', tot: new Date().toISOString() }, { pot: P.jar });
+        const r894b = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+        toets('23 wv894: na gezien geen zacht meer', r894b.status === 200 && r894b.j.tabs.machinekamer === 0 && !(r894b.j.zacht && r894b.j.zacht.machinekamer), JSON.stringify([r894b.j && r894b.j.tabs, r894b.j && r894b.j.zacht]));
+        const ink = (kanaal, x) => H.appInklapRapport(kanaal, Object.assign({ soort: 'socev', bron: 'agentrapport', antwoord: '🤖 Agentrapport — x\n\nKlaar.' }, x));
+        toets('23 wv894: appInklapRapport alleen machinekamer, bron agentrapport, zonder vraag(regel), niet mislukt',
+          ink('machinekamer', {}) === true && ink('hoofd', {}) === false && ink('machinekamer', { vraag_hash: 'h' }) === false && ink('machinekamer', { bron: 'agentrapport-david' }) === false
+          && ink('machinekamer', { antwoord: '⚠️ Agent mislukt — x\n\nFout' }) === false && ink('machinekamer', { antwoord: '🤖 Agentrapport — x\n\n**VRAAG AAN DAVID:** ja?' }) === false && ink('machinekamer', { soort: 'bericht' }) === false, '');
+      }
       toets('23 /health appInfo noemt berichten', H.appInfo().berichten && typeof H.appInfo().berichten.laatste_48u === 'number', JSON.stringify(H.appInfo().berichten));
 
       // ── wv292: open KAN-punten uit de Fable-review van fase 0+1 (wv263) ──
