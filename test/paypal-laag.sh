@@ -9,7 +9,9 @@
 # server: ronde leest alleen nieuwe mails, halveert bij 25, alleen aantallen terug, paypal-ronde alleen machinekamer, fout in de
 # PayPal-laag breekt niets. wv780: autorisaties ("U hebt een betaling aan … geautoriseerd", "<dienst>: € 18,00 EUR") en de overmaking
 # ("U hebt een betaling overgemaakt"): uitlezen, samenvoegen met een later ontvangstbewijs (referentie of dienst + bedrag + dag), koppelen,
-# andere PayPal-mails worden niet geopend. Alle mails zijn nagemaakt: geen echte namen, adressen of referenties.
+# andere PayPal-mails worden niet geopend. wv779: vaste lasten per PayPal-dienst (regel "PayPal — <dienst>", post zonder bewijs bij de dienst
+# van dezelfde dag, prijsstap uit de bewijzen, persoon nooit bij naam, zonder bewijs apart), App Financiën en briefing (dubbel per dienst),
+# abonnementen, terugval zonder PayPal-tabel. Alle mails zijn nagemaakt: geen echte namen, adressen of referenties.
 # Raakt de pod, Gmail, de kluis en /opt/data/bank niet. Gebruik: bash test/paypal-laag.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -293,6 +295,75 @@ const M = {
     const st = P.stand(a);
     toets('stand: alleen aantallen en data', st.bewijzen > 0 && !JSON.stringify(st).match(/Netflix|Streamdienst|20\.99/), st);
     a.db.close();
+
+    // ── wv779: vaste lasten per PayPal-dienst (bank-archief + App Financiën), eigen database, maanden tot vorige maand ──
+    {
+      const F = require(path.resolve('financien-app.js'));
+      const vnd = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+      const mP = (k) => F.maandPlus(vnd.slice(0, 7), k), dg = (ym, d) => ym + '-' + String(d).padStart(2, '0');
+      const inc = 'SEPA Incasso algemeen doorlopend Incassant: LU00ZZZ0000000000000 Naam: PayPal Europe S.a.r.l. et Cie S.C.A Machtiging: 5KVJ224466XYZ Omschrijving: 1000000000000 PAYPAL';
+      const pp = (id, datum, bedrag) => ({ id: id, datum: datum, valutadatum: datum, bedrag: bedrag, valuta: 'EUR', tegenpartij: 'PayPal Europe S.a.r.l. e', omschrijving: inc, status: 'geboekt', saldo_na: null, mcc: null, tegen_iban: null, _ruw: { id: id } });
+      const maak = function (naam, metBewijs) {
+        const BD4 = path.join(W, naam); fs.mkdirSync(BD4, { recursive: true, mode: 0o700 });
+        const a4 = A.open(BD4); A.rekeningenSync(a4, { gez: { uid: 'u1', bank: 'ABN AMRO', naam: 'Vaste lasten', iban: 'NL00ABNA0000003868', sessie: 's1' } });
+        const rek4 = a4.db.prepare('SELECT rek FROM rekeningen').get().rek;
+        const bw = [], ps = [];
+        let i = 0;
+        const zet = function (ontv, bedrag, dag, ym, bewijs) {
+          i++;
+          if (dg(ym, dag + 2) > vnd) return;   // de lopende maand tot vandaag
+          ps.push(pp('w' + i, dg(ym, dag + 2), -bedrag));
+          if (bewijs && metBewijs) bw.push({ mail_id: 'e' + String(i).padStart(13, '0'), soort: 'betaling', ref: 'WV' + String(i).padStart(15, '0'), datum: dg(ym, dag), ontvanger: ontv, bedrag: bedrag, valuta: 'EUR', bedrag_eur: bedrag, bron: 'bank', bron_eind: '3868' });
+        };
+        for (let k = -8; k <= 0; k++) {
+          const ym = mP(k);
+          zet('Netflix.com', k <= -6 ? 17.99 : 20.99, 10, ym, k !== -1);   // prijsstap; post van vorige maand zonder bewijs (mail kwam niet)
+          zet('Samsung Electronics', 4.99, 11, ym, true);                  // twee diensten van 4,99: geen dubbel
+          zet('SkyShowtime Limited', 4.99, 19, ym, true);
+          zet('Apple Services', 2.99, 7, ym, true); zet('Apple Services', 2.99, 14, ym, true);   // één dienst twee keer 2,99: wél dubbel
+          zet('Piet Voorbeeld', 6.0, 3, ym, true);                         // een persoon: nooit bij naam
+          zet('-', 3.5, 4, ym, false); zet('-', 3.5, 22, ym, false);       // zonder bewijs, twee per maand
+        }
+        if (metBewijs) P.bij(a4, bw, []);
+        A.bij(a4, rek4, ps, {});
+        if (metBewijs) P.koppel(a4);
+        return a4;
+      };
+      const a4 = maak('bank4', true);
+      const vlm = A.vasteLasten(a4, { maand: mP(-1) });
+      const md = vlm.tabel_md, pr = (re) => vlm.vaste_lasten.filter((x) => re.test(x.naam));
+      toets('wv779 vaste lasten: elke PayPal-dienst een eigen regel "PayPal — <dienst>"', ['Netflix', 'Samsung', 'SkyShowtime', 'Apple'].every((d) => pr(new RegExp('^PayPal — ' + d + '$')).length === 1) && /\| PayPal — Netflix \|/.test(md), vlm.vaste_lasten.map((x) => x.naam));
+      toets('wv779 vaste lasten: Netflix met de post zonder bewijs (zelfde dag), prijsstap uit de bewijzen in "Sinds"', pr(/Netflix/)[0].per_maand === 20.99 && pr(/Netflix/)[0].bedrag_vorig === 17.99 && /PayPal — Netflix \| € 20,99 \| maand \| \w+ \d{4} \(was € 17,99\)/.test(md), [pr(/Netflix/)[0], md.split('\n').filter((l) => /Netflix/.test(l))]);
+      toets('wv779 vaste lasten: persoon als ontvanger heet "onbekende dienst", nooit bij naam', pr(/onbekende dienst/).length === 1 && !/piet|voorbeeld/i.test(JSON.stringify(vlm)), pr(/onbekende/));
+      toets('wv779 vaste lasten: posten zonder bewijs als "PayPal (zonder ontvangstbewijs)"', pr(/zonder ontvangstbewijs/).length === 1 && pr(/zonder ontvangstbewijs/)[0].per_maand === 7, pr(/zonder/));
+      toets('wv779 vaste lasten: totaal gelijk (niets dubbel of kwijt)', Math.abs(vlm.totaal_per_maand - (20.99 + 4.99 + 4.99 + 5.98 + 6 + 7)) < 0.01, vlm.totaal_per_maand);
+      toets('wv779 vaste lasten: Apple twee keer 2,99 in de tabel', /PayPal — Apple — 2 keer per maand/.test(md), md.split('\n').filter((l) => /Apple/.test(l)));
+      // App Financiën en briefing
+      const VA = path.join(W, 'vault4'); fs.mkdirSync(path.join(VA, '20_Prive', 'Financien'), { recursive: true });
+      const u = F.bereken(A, a4, { vault: VA, paypal: P });
+      const sg = u.signalen, rijenA = (u.vaste_lasten || {}).rijen || [];
+      toets('wv779 App: vaste lasten met de dienst; geen persoon', u.fouten.length === 0 && rijenA.some((r) => r.naam === 'PayPal — Netflix') && rijenA.some((r) => r.naam === 'PayPal — SkyShowtime') && !/piet|voorbeeld/i.test(JSON.stringify(u)), [u.fouten, rijenA.map((r) => r.naam)]);
+      toets('wv779 App: dubbel noemt de dienst (Apple 2,99); twee diensten van 4,99 en posten zonder bewijs geven geen dubbel',
+        sg.filter((x) => x.soort === 'dubbel').length === 1 && /aan Apple via PayPal/.test(sg.find((x) => x.soort === 'dubbel').zin) && sg.find((x) => x.soort === 'dubbel').titel === 'PayPal — Apple', sg.filter((x) => x.soort === 'dubbel'));
+      toets('wv779 App: PayPal-diensten bij naam (bekende dienst), persoon als PayPal-dienst', u.paypal.diensten.some((d) => d.naam === 'Samsung') && !u.paypal.diensten.some((d) => /Piet/.test(d.naam)), u.paypal.diensten.map((d) => d.naam));
+      const b = F.briefing(A, a4, { vault: VA, peil: vnd });
+      toets('wv779 briefing: dubbel per dienst, geen "4,99 via PayPal" en geen "PayPal-betalingen samen"', b.signalen.filter((x) => x.soort === 'dubbel').length === 1 && /Apple/.test(b.signalen.find((x) => x.soort === 'dubbel').zin) && !b.signalen.some((x) => /4,99|samen/.test(x.zin)), b.signalen);
+      // verrijk: de abonnementen heten naar de dienst
+      A.verrijk(a4);
+      const ab = A.abonnementen(a4, {}).abonnementen.map((x) => x.naam);
+      toets('wv779 abonnementen: naam "PayPal — <dienst>"', ab.indexOf('PayPal — Netflix') >= 0 && ab.indexOf('PayPal — Samsung') >= 0 && !ab.some((x) => /piet|voorbeeld/i.test(x)), ab);
+      a4.db.close();
+      // terugval: zonder bewijzen (geen PayPal-laag) de weergave van vóór wv779
+      const a5 = maak('bank5', false);
+      a5.db.exec('DROP TABLE IF EXISTS paypal_bewijs');
+      const v5 = A.vasteLasten(a5, { maand: mP(-1) });
+      toets('wv779 terugval zonder PayPal-tabel: één PayPal-regel met bedragclusters, zoals vóór wv779', v5.vaste_lasten.filter((x) => /PayPal/.test(x.naam)).length === 1 && /vaste betalingen: .*4,99 ×2/.test(v5.tabel_md) && !/PayPal —/.test(v5.tabel_md), v5.vaste_lasten.map((x) => x.naam));
+      const u5 = F.bereken(A, a5, { vault: VA, paypal: null });
+      toets('wv779 terugval: dubbelsignaal van de paraplu zoals vóór wv779', u5.signalen.some((x) => x.soort === 'dubbel' && /4,99/.test(x.zin)), u5.signalen);
+      a5.db.close();
+      const bsrc = fs.readFileSync('bank-archief.js', 'utf8').replace(/^\s*(\*|\/\/).*$/gm, '');
+      toets('wv779 bank-archief gebruikt paypal-bewijs alleen lezend (dienstPerPost, reeksen), in try/catch', (bsrc.match(/require\('\.\/paypal-bewijs\.js'\)\.(\w+)/g) || []).every((x) => /\.(dienstPerPost|reeksen)$/.test(x)) && /require\('\.\/paypal-bewijs\.js'\)\.dienstPerPost/.test(bsrc), bsrc.match(/require\('\.\/paypal-bewijs\.js'\)\.\w+/g));
+    }
 
     // ── server: paypalRonde (bankblok uit server.js, echte bank-lezer.js als kind, nagebootst lees-luik) ──
     const ssrc = fs.readFileSync('server.js', 'utf8');

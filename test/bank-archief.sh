@@ -477,6 +477,29 @@ const p = (id, datum, bedrag, tegen, omschr, extra) => Object.assign({ id: id, d
       rr = R([{ datum: '2025-06-13', bedrag: -59.99, omschrijving: inc('PPX', 'PayPal') }, { datum: '2026-06-15', bedrag: -59.99, omschrijving: inc('PPX', 'PayPal') }]
         .concat(maandPosten('2025-06', 12, 9.99, 'PPX'), maandPosten('2025-06', 12, 4.99, 'PPX'), maandPosten('2025-06', 12, 2.99, 'PPX')), '2026-06-30');
       toets('rand: paraplumachtiging — twee jaarposten zijn geen reeks, de maanddiensten wel', !rr.some((x) => x.bedrag === 59.99) && rr.filter((x) => x.actief).length === 3, rr.map((x) => [x.bedrag, x.ritme]));
+      // wv779: PayPal-dienst op de post (pp_dienst uit de PayPal-laag): één bedragcluster met twee diensten wordt twee reeksen; een post
+      // zonder bewijs gaat naar de dienst op dezelfde dag van de maand; is er geen enkele dienst in een cluster, dan "zonder ontvangstbewijs"
+      const dpost = (van, n, bedrag, dag, dienst, zonder) => maandPosten(van, n, bedrag, 'PPY').map((x, k) => Object.assign(x, { datum: x.datum.slice(0, 8) + dag },
+        dienst && !(zonder && zonder.indexOf(k) >= 0) ? { pp_dienst: dienst, pp_naam: dienst === 'samsung' ? 'Samsung Electronics' : 'Jan de Vries' } : {}));
+      rr = R(dpost('2025-07', 12, 4.99, '11', 'samsung', [11]).concat(dpost('2025-07', 12, 4.99, '19', 'skyshowtime'), dpost('2025-07', 12, 1.5, '05', null), dpost('2025-07', 12, 6, '03', 'jan')), '2026-06-30');
+      const rd = (d) => rr.filter((x) => x.paypal_dienst === d);
+      toets('wv779 rand: twee diensten van 4,99 = twee reeksen met elk één per maand; post zonder bewijs bij Samsung', rd('samsung').length === 1 && rd('skyshowtime').length === 1 &&
+        rd('samsung')[0].n_per_maand === 1 && rd('samsung')[0].aantal === 12 && rd('samsung')[0].paypal_naam === 'Samsung', rr.map((x) => [x.bedrag, x.paypal_dienst, x.n_per_maand, x.aantal]));
+      toets('wv779 rand: cluster zonder enig bewijs = zonder ontvangstbewijs; persoon zonder naam; rijTekst', rr.some((x) => x.bedrag === 1.5 && x.paypal_zonder_bewijs) && rd('jan')[0].paypal_naam === null &&
+        A.rijenVan(rr.filter((x) => x.actief)).map(A.rijTekst).sort().join('|') === ['PayPal (zonder ontvangstbewijs)', 'PayPal — Samsung', 'PayPal — SkyShowtime', 'PayPal — onbekende dienst'].sort().join('|'),
+        A.rijenVan(rr.filter((x) => x.actief)).map(A.rijTekst));
+      rr = R(maandPosten('2025-07', 12, 4.99, 'PPZ').concat(maandPosten('2025-07', 12, 4.99, 'PPZ').map((x) => Object.assign(x, { datum: x.datum.slice(0, 8) + '19' }))), '2026-06-30');
+      toets('wv779 rand: zonder dienstinformatie de paraplu zoals vóór wv779 (één cluster, twee per maand)', rr.length === 1 && rr[0].n_per_maand === 2 && !rr[0].paypal_dienst && !rr[0].paypal_zonder_bewijs, rr);
+      // Fable wv779 #3: prijsstap waarbij de incassodag verschuift (oud laatst 31-7, nieuw 26-8 en 21-9): één reeks, niet twee naast elkaar
+      const nf = (datum, bedrag) => ({ datum: datum, bedrag: -bedrag, omschrijving: inc('PPY', 'PayPal'), pp_dienst: 'netflix', pp_naam: 'Netflix.com' });
+      rr = R(['2026-02-28', '2026-03-31', '2026-04-30', '2026-05-31', '2026-06-30', '2026-07-31'].map((d) => nf(d, 17.99)).concat([nf('2026-08-26', 20.99), nf('2026-09-21', 20.99)],
+        dpost('2026-02', 8, 4.99, '11', 'samsung'), dpost('2026-02', 8, 4.99, '19', 'skyshowtime')), '2026-09-21');
+      const nfr = rr.filter((x) => x.paypal_dienst === 'netflix' && x.actief);
+      toets('wv779 rand: prijsstap binnen één dienst = één reeks met bedrag_vorig (niet 17,99 + 20,99 naast elkaar)', nfr.length === 1 && nfr[0].bedrag === 20.99 && nfr[0].bedrag_vorig === 17.99 && nfr[0].per_maand === 20.99 &&
+        A.rijenVan(rr.filter((x) => x.actief)).filter((x) => x.paypal_dienst === 'netflix').length === 1, rr.filter((x) => x.paypal_dienst === 'netflix').map((x) => [x.bedrag, x.bedrag_vorig, x.actief, x.per_maand]));
+      toets('wv779 naam: persoon met een "rechtsvorm" als voornaam blijft naamloos; organisatie wel bij naam', A.paypalNaam('ab', 'Ab Jansen') === null && A.paypalNaam('sa', 'Sa Nguyen') === null &&
+        A.paypalNaam('jan', 'Jan de Vries') === null && A.paypalNaam('voorbeeld', 'Voorbeeld Games Ltd') === 'Voorbeeld Games Ltd' && A.paypalNaam('zweeds', 'Zweeds Bedrijf AB') === 'Zweeds Bedrijf AB' &&
+        A.paypalNaam('steampowered', 'www.steampowered.com') === 'Steam' && A.paypalNaam('x', 'Iets Payments') === 'Iets Payments', null);
       rr = R(maandPosten('2025-01', 12, (k) => k < 8 ? 1000 : 1250, 'HR1', { categorie: 'wonen', subcategorie: 'huur' }), '2025-12-31');
       toets('rand: huurstap +25% in wonen is een prijsstap, niet wisselend', rr.length === 1 && rr[0].wijze === 'vast' && rr[0].bedrag === 1250 && rr[0].bedrag_vorig === 1000, rr);
       const vlB = A.vasteLasten(v, { maand: '2026-06', rek: 'pr' });
