@@ -23,7 +23,7 @@ const PER_MANAGER_24U = 3, TOTAAL_24U = 6;
 const REDENEN = { 'david-vroeg': 'David vroeg erom', 'na-bouwstap': 'na een bouwstap', controle: 'controle' };
 const DOOR = { david: 'door jou', socev: 'door Socev', machinekamer: 'door de machinekamer' };
 
-// Het register (de naam-whitelist). UI Manager komt hier als één regel bij. rooster: dag 0 = zondag, tijd Europe/Amsterdam (de n8n-trigger).
+// Het register (de naam-whitelist). Een nieuwe manager = één regel hier (+ test/managers.sh). rooster: dag 0 = zondag, tijd Europe/Amsterdam (de n8n-trigger).
 const MANAGERS = [
   { id: 'data', naam: 'Data Manager', skill: 'data-manager', sessie: 'data-manager', model: 'claude-sonnet-5-5', hartslag: 'data_manager', patroon: '^DM[0-9]',
     bewaakt: 'Waar al je gegevens staan (databanken, pod, Drive, vault) en of elke plek een backup en een eigenaar heeft.',
@@ -33,6 +33,11 @@ const MANAGERS = [
     bewaakt: 'Of alle apps één vormgeving houden (Socev-blauw en de bouwdoos) en of de indeling logisch is.',
     rooster: { dag: 6, uur: 10, min: 0 }, slot: 'DESIGN-MANAGER', slotRe: /^DESIGN-MANAGER \d{4}-\d{2}-\d{2}: \d+ checks/,
     slotFormaat: 'DESIGN-MANAGER <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open (<k> nieuw), kaart geen, wv geen' },
+  // wv896 UI Manager (vr 10:00, Sonnet): meet gebruik (wat David doet en waar hij vastloopt), niet de vorm (dat is Design).
+  { id: 'ui', naam: 'UI Manager', skill: 'ui-manager', sessie: 'ui-manager', model: 'claude-sonnet-5-5', hartslag: 'ui_manager', patroon: '^UI[0-9]',
+    bewaakt: 'Hoe je de app echt gebruikt: wat je opent, waar je vastloopt of iets zoekt, wat traag is of niets doet.',
+    rooster: { dag: 5, uur: 10, min: 0 }, slot: 'UI-MANAGER', slotRe: /^UI-MANAGER \d{4}-\d{2}-\d{2}: \d+ checks/,
+    slotFormaat: 'UI-MANAGER <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open (<k> nieuw), voorstellen <v>, kaart geen, wv geen' },
   { id: 'ciso', naam: 'CISO', skill: 'ciso', sessie: 'ciso', model: '', hartslag: 'ciso', patroon: '^C[0-9]',
     bewaakt: 'De beveiliging: sleutels, toegang, versies en wat er van buitenaf bereikbaar is.',
     rooster: { dag: 1, uur: 6, min: 0 }, slot: 'CISO', slotRe: /^CISO \d{4}-\d{2}-\d{2}: \d+ checks/,

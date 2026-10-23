@@ -174,6 +174,7 @@ const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 const API_LOG = serverPad('api_log', process.env.API_LOG, '/opt/data/bin/api.log', serverProefDeel('api.log'));
 const LOG_MAX_BYTES = parseInt(process.env.LOG_MAX_BYTES || String(5 * 1024 * 1024), 10);
 const LOG_STAT_EVERY = 100;   // omvang niet elke regel opvragen, maar elke 100
+const LOG_GENERATIES = Math.max(1, Math.min(20, parseInt(process.env.LOG_GENERATIES || '10', 10) || 10));   // wv896
 
 let logTeller = 0;
 let logOmvang = null;         // gecachete omvang van API_LOG
@@ -184,7 +185,14 @@ function roteerIndienNodig(extra) {
       try { logOmvang = fs.statSync(API_LOG).size; } catch (e) { logOmvang = 0; }
     }
     if (logOmvang + extra > LOG_MAX_BYTES) {
-      try { fs.renameSync(API_LOG, API_LOG + '.1'); } catch (e) {}  // bestaande .1 wordt overschreven
+      // wv896: LOG_GENERATIES oude bestanden (.1 = de vorige, zoals altijd); de UI Manager vat er per volle dag het app-gebruik
+      // uit samen en had met één generatie (± 1 dag) nooit een hele kalenderdag (Fable wv896 #1). 10 × 5 MB ≈ 10 dagen.
+      // LET OP (gemeten 23-10, Fable diffreview #9): de supervisor geeft het kind als stdout een fd op het bestand dat bij de start
+      // api.log heette, en schrijfLog schrijft elke regel ook naar stdout. Dat inode schuift nu .1 → … → .N mee en krijgt de
+      // stdout-kopie (regels dubbel, nieuwere stempels dan zijn naam zegt); na .N groeit het ontkoppeld door tot de volgende
+      // kindherstart. Was al zo met één generatie; lezers ontdubbelen op de hele regel (ui-manager/gebruik.py). Vervolgrij wv896.
+      for (let i = LOG_GENERATIES - 1; i >= 1; i--) { try { fs.renameSync(API_LOG + '.' + i, API_LOG + '.' + (i + 1)); } catch (e) {} }
+      try { fs.renameSync(API_LOG, API_LOG + '.1'); } catch (e) {}  // de oudste (.LOG_GENERATIES) wordt overschreven
       logOmvang = 0;
     }
   } catch (e) { /* logging mag de server nooit omleggen */ }
@@ -2221,6 +2229,7 @@ const LESSEN_DOMEIN = {
   'pod-uitrol': 'machine', 'webhook-bewaker': 'machine', 'keten-attest': 'machine', 'ciso': 'machine',
   'data-manager': 'machine',  // wv844
   'design-manager': 'machine', // wv845
+  'ui-manager': 'machine',     // wv896 (Fable diffreview #8)
   'dagsamenvatting': 'machine'  // wv589
 };
 
@@ -14560,7 +14569,11 @@ const SOCEV_ENV_EXTRA = {
   // SUPABASE_MCP_TOKEN (structuur_state), werkvoorraad.py alleen SUPABASE_URL (al in SOCEV_ENV_MAG) + SUPABASE_SERVICE_ROLE
   // (rij voor pure tokenvervangingen, Voor jou-kaart). Geen n8n-, Cloudflare-, Telegram- of pod-sleutel nodig: hij leest repo's
   // en bouwt statisch in /tmp.
-  'design-manager': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE']
+  'design-manager': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE'],
+  // wv896 UI Manager (vr 10:00, Sonnet): zelfde smalle omgeving als design-manager. Leest api.log, het app-auditlog en het app-log
+  // (alleen tellingen en hashes de deur uit) en bouwt de app statisch in /tmp; schrijft structuur_state (MCP-token) en hooguit een
+  // werkvoorraadrij of Voor jou-kaart (service role via werkvoorraad.py).
+  'ui-manager': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE']
 };
 const SOCEV_AGENT_SLEUTEL = SECRET ? crypto.createHmac('sha256', SECRET).update('wv424-socev-agent').digest('hex') : '';
 // Buffers vergelijken, niet stringlengtes: een niet-ASCII-teken gaf anders een RangeError (Fable wv424 #7).
