@@ -2215,7 +2215,8 @@ const LESSEN_DOMEIN = {
   'telegram-debug': 'machine', 'structuur-wachter': 'machine', 'werkkamer': 'machine',
   'vault-concierge': 'machine', 'site-verversing': 'machine', 'kaizen-review': 'machine',
   'pod-uitrol': 'machine', 'webhook-bewaker': 'machine', 'keten-attest': 'machine', 'ciso': 'machine',
-  'data-manager': 'machine'   // wv844
+  'data-manager': 'machine',  // wv844
+  'design-manager': 'machine' // wv845
 };
 
 function lessenDomein(chatId, label) {
@@ -14306,7 +14307,12 @@ const SOCEV_ENV_EXTRA = {
   'personeels-wachter': ['SUPABASE_MCP_TOKEN'],       // secondbrain.personeel_state via de Supabase-MCP
   'vault-concierge': ['SUPABASE_MCP_TOKEN'],          // secondbrain.concierge_state
   'cijfer-meester': ['SUPABASE_MCP_TOKEN'],           // schema zorgdata (app-kanaal)
-  'cijfermeester': ['SUPABASE_MCP_TOKEN']             // idem, @cijfermeester_bot
+  'cijfermeester': ['SUPABASE_MCP_TOKEN'],            // idem, @cijfermeester_bot
+  // wv845 Design Manager (za 10:00, Sonnet): smal, niet in MK_SESSIES (Fable wv845 #6). wachter-state.py leest alleen
+  // SUPABASE_MCP_TOKEN (structuur_state), werkvoorraad.py alleen SUPABASE_URL (al in SOCEV_ENV_MAG) + SUPABASE_SERVICE_ROLE
+  // (rij voor pure tokenvervangingen, Voor jou-kaart). Geen n8n-, Cloudflare-, Telegram- of pod-sleutel nodig: hij leest repo's
+  // en bouwt statisch in /tmp.
+  'design-manager': ['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE']
 };
 const SOCEV_AGENT_SLEUTEL = SECRET ? crypto.createHmac('sha256', SECRET).update('wv424-socev-agent').digest('hex') : '';
 // Buffers vergelijken, niet stringlengtes: een niet-ASCII-teken gaf anders een RangeError (Fable wv424 #7).
