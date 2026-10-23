@@ -220,6 +220,9 @@ jobs:
           bash test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
           bash test/pot-verzend.sh   # wv911: POT-nota's als Gmail-concept — frontmatter, adres, PDF-controle, claim, onzeker-herstel, voorcontrole, kaarten
+          bash test/pot-auto.sh   # wv921: automatisch versturen — vrijgave, kaart-hash, venster zomer/winter/weekend/feestdag, onzeker nooit terug, plafond, twee pods
+          bash test/pot-auto-pod.sh   # wv921: knoproute (alleen knop-ja-vers-kaart, intrekken bij verval), verzendgeheim buiten de Socev-omgeving, noodstop
+          bash test/verzender-toetsen.sh   # wv921: Toetsen-code van AI - Facturen-verzender (bron pot, eigen geheim, witte lijst, cc, plafond) + hash in het image
           bash test/pot-datahub.sh   # wv815: POT-posten naar Davids datahub — koppelen, grens, Davids vorm, toewijzing, grootboek, D1-batch met parameters
           bash test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
       # Facturen-app (wv797–wv833) in een eigen stap die ook draait als een eerdere stap rood is: een rode bankluis-toets mag de Facturen-toetsen

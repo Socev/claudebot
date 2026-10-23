@@ -6832,7 +6832,10 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
       .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); });
   };
   // vervalt hij in de rij (noodstop), dan staat de vraag weer open; de vingerafdruk is dan verbruikt (nieuwe druk = nieuwe)
-  const bijVerval = function () { appKnopRijZet(sleutel, jobId2, function (x) { x.antwoord = null; }); };
+  const bijVerval = function () {
+    appKnopRijZet(sleutel, jobId2, function (x) { x.antwoord = null; });
+    if (kaart && kaart.bijVerval) { try { kaart.bijVerval(); } catch (e) { logError('app-voor-jou', e); } }   // wv921: vrijgave POT-nota's intrekken
+  };
   const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', job_id: jobId2, bijStart: bijStart, bijVerval: bijVerval, knop_sleutel: sleutel,
     tekst: (keuze === 'ja' ? '✓ Ja' + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
   if (!st.job_id) {
@@ -6842,6 +6845,8 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
     return appStartFout(res, st);
   }
   res._app.reden = 'knop ' + keuze + (gevoeligJa ? ' (vingerafdruk)' : '') + ' ' + hash + ' -> ' + st.job_id + (inRij ? ' (in de rij)' : '');
+  // wv921: pas ná een geslaagde appStartBeurt (Fable #3); de haak beslist zelf of deze druk iets vastlegt
+  if (kaart && kaart.naStart) { try { kaart.naStart(keuze, gevoeligJa, a, appKnopBevestiging(keuze, gevoeligJa, a, true), hash); } catch (e) { logError('app-voor-jou', e); } }
   appStuur(res, 200, { ok: true, job_id: st.job_id, beantwoord: antwoord, in_rij: inRij });
 }
 
@@ -9135,8 +9140,19 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
       .then(function (r) { appStaat.vjCache = null; if (!r || r.ok !== true) logError('app-voor-jou', new Error('kaart ' + p.sleutel + ' niet op beantwoord: ' + (r && r.nu))); })
       .catch(function (e) { appStaat.vjCache = null; logError('app-voor-jou', e); });
   };
+  // wv921: besluitkaart van pot-verzend ("Zal ik N SLOEL-nota's … versturen?"). De pod-code legt de vrijgave zelf vast in D1, nooit het
+  // taalmodel; Socev hoort alleen wat er gebeurde.
+  let pot = null, ctx = context;
+  if (/^pot-vrijgave-\d{1,9}$/.test(String(p.sleutel || ''))) {
+    pot = await potVzKnopVoor(p, a);
+    ctx = context + (keuze !== 'ja' ? ' (POT-vrijgave: geen Ja, dus niets vrijgegeven; de nota\'s komen op de verzenddag om 07:00 als concept in Gmail. Zeg dat kort; jij verstuurt niets.)'
+      : !pot.reden && k.gevoelig ? ' (POT-vrijgave: de pod legt deze vrijgave zelf vast in de POT-databank zodra deze druk is aangenomen; op de verzenddag verstuurt de pod tussen 09:00 en 12:00 één mail per nota. Jij doet niets en verstuurt niets; bevestig het David in één zin.)'
+      : ' (POT-vrijgave NIET vastgelegd: ' + (pot.reden || 'geen verse vingerafdruk') + '. De nota\'s komen op de verzenddag om 07:00 als concept in Gmail. Zeg dat kort; jij verstuurt niets.)');
+  }
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
-    { tekst: tekst, bericht: bericht, context: context, bijStart: bijStart, gevoelig: k.gevoelig });
+    { tekst: tekst, bericht: bericht, context: ctx, bijStart: bijStart, gevoelig: k.gevoelig,
+      naStart: pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); } : undefined,
+      bijVerval: pot && !pot.reden ? function () { potVzIntrekken(pot.v); } : undefined });
   await knopRes;
   if (res._app) res._app.reden = 'voor-jou knop #' + id + ' ' + (res._app.reden || '');
 }
@@ -10865,6 +10881,9 @@ function appNoodstop(bron) {
   try { fs.unlinkSync(APP_CONCEPTEN); } catch (e) { if (!e || e.code !== 'ENOENT') uit.fouten.push('concepten: ' + (e && e.code || e)); }   // wv159
   uit.aanvraag = !!appStaat.aanvraag; appStaat.aanvraag = null;
   uit.koppelcode = !!appStaat.koppel; appStaat.koppel = null;
+  // wv921: automatisch versturen van POT-nota's uit (rijen vallen terug op concept; aanzetten alleen door de machinekamer)
+  try { fs.unlinkSync(path.join(POT_VZ_DIR, 'auto-aan')); uit.pot_auto_uit = true; } catch (e) { if (!e || e.code !== 'ENOENT') uit.fouten.push('pot-auto: ' + (e && e.code || e)); }
+  try { fs.unlinkSync(path.join(POT_VZ_DIR, 'auto-proef')); } catch (e) { if (!e || e.code !== 'ENOENT') uit.fouten.push('pot-proef: ' + (e && e.code || e)); }
   try { fs.unlinkSync(APP_HEROPEND); uit.heropend_weg = true; } catch (e) { if (!e || e.code !== 'ENOENT') uit.fouten.push('koppel-heropend: ' + (e && e.code || e)); }
   // wv135: een lopend verzoek om de herstelcode te laten vervallen is afgebroken; de herstelcode zelf blijft (bewijs om opnieuw op te bouwen)
   uit.herstel_vervalt_weg = appHerstelVervaltWeg();
@@ -11592,7 +11611,7 @@ const BERICHT_NIEUW_LAATST = path.join(APP_DATA, 'nieuw-laatst.json');
 const BERICHT_KANALEN = { hoofd: true, machinekamer: true };
 const BERICHT_KLASSEN = { stil: true, normaal: true, dringend: true };
 // Vaste lijst (bouwplan § 3, fasen 1–5); een nieuwe bron vraagt een regel hier, net als een rij in bericht_route.
-const BERICHT_BRONNEN = new Set(['agentrapport', 'proef', 'droomronde', 'ideeenmotor', 'ciso', 'research-scout', 'quotumalarm', 'voorwerk',
+const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'proef', 'droomronde', 'ideeenmotor', 'ciso', 'research-scout', 'quotumalarm', 'voorwerk',
   'stiltewachter', 'meelezer', 'nachtwerk', 'werkkamer-toegang', 'foutmelder', 'script', 'socev-spreekt', 'heartbeat', 'vergaderbriefing',
   'parro', 'signal', 'teams', 'gambia', 'raw-input', 'files-portaal', 'voorlezen', 'briefing', 'actielijst', 'agenda', 'actie-bewaker',
   'agenda-wachter', 'correspondentie-wachter', 'dienstwaarschuwer', 'waarnemingzoeker',
@@ -15940,12 +15959,116 @@ const POT_VZ_DIR = process.env.POT_VZ_DIR || '/opt/data/pot-verzend';
 const POT_VZ_MOD = (function () { const p = path.join(__dirname, 'pot-verzend.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('pot-verzend', e); return null; } })();
 const POT_VZ_TIK_MS = 60 * 1000;
 const POT_VZ_PDFTOTEXT = '/usr/bin/pdftotext';
-const potVz = { bezig: false, laatste: null, laatste_meting: 0, laatste_kaarten: 0, uitkomst: null, fouten_op_rij: 0, laatste_fout: null, rij: {}, box: {} };
+const potVz = { bezig: false, laatste: null, laatste_meting: 0, laatste_kaarten: 0, uitkomst: null, fouten_op_rij: 0, laatste_fout: null, rij: {}, box: {},
+  auto: { dag: null, verstuurd: 0, onzeker: 0, terug: 0, geheim: null, stand_op: 0, stand: null } };
 function potVzAan() { return !!POT_VZ_MOD && fs.existsSync(path.join(POT_VZ_DIR, 'aan')); }
+// wv921: automatisch versturen (los van `aan`; zonder dit bestand alleen terugvallen op concept). /app-noodstop haalt hem weg.
+function potVzAutoAan() { return !!POT_VZ_MOD && !!POT_VZ_MOD.autoRonde && fs.existsSync(path.join(POT_VZ_DIR, 'auto-aan')); }
+// Proef (wv921): <POT_VZ_DIR>/auto-proef = JSON-lijst van proefpraktijken (P90–P99, adres = Davids testalias) waarvoor automatisch geldt
+// terwijl auto-aan voor echte praktijken nog uit staat. Alleen de machinekamer zet en wist dit bestand.
+function potVzProef() {
+  try { const l = JSON.parse(fs.readFileSync(path.join(POT_VZ_DIR, 'auto-proef'), 'utf8')); return Array.isArray(l) ? l.filter(function (x) { return /^P9\d$/.test(String(x)); }) : []; }
+  catch (e) { return []; }
+}
 function potVzInfo() {
-  const u = potVz.uitkomst;
+  const u = potVz.uitkomst, a = potVz.auto;
   return { aan: potVzAan(), module: !!POT_VZ_MOD, laatste_tik: potVz.laatste, fouten_op_rij: potVz.fouten_op_rij, laatste_fout: potVz.laatste_fout,
-    laatste: u ? { geclaimd: u.geclaimd, concept: u.concept, wacht_op_adres: u.wacht_op_adres, fout: u.fout, onzeker: u.onzeker, verzonden: u.verzonden, fouten: u.fouten } : null };
+    laatste: u ? { geclaimd: u.geclaimd, concept: u.concept, wacht_op_adres: u.wacht_op_adres, fout: u.fout, onzeker: u.onzeker, verzonden: u.verzonden, fouten: u.fouten } : null,
+    auto: { aan: potVzAutoAan(), proef: potVzProef(), geheim: a.geheim, dag: a.dag, vandaag_verstuurd: a.verstuurd, vandaag_onzeker: a.onzeker, vandaag_concept: a.terug, toetsen_sha: POT_VZ_TOETSEN_SHA.slice(0, 12) } };
+}
+// ── wv921: automatisch versturen — eigen verzendgeheim, verzender, Toetsen-hash, podbericht ──────────────────────────────────────────
+// Het eigen verzendgeheim (kluis n8n_verzender_versturen_secret, wv921) staat NIET in de podomgeving en dus nooit in SOCEV_ENV_MAG of
+// AUTO_AGENT_ENV_MAG (Fable #1): de pod leest het op het moment van versturen via de Management-API (zelfde route als bankSleutels),
+// 10 min in het geheugen, nooit in een log of antwoord. Alleen dit geheim opent modus versturen in AI - Facturen-verzender; het oude
+// geheim (N8N_WEBHOOK_MAILCONCEPT) geeft daar 401 op versturen.
+const POT_VZ_GEHEIM_NAAM = 'n8n_verzender_versturen_secret';
+// sha256 van de jsCode van de Code-knoop Toetsen in AI - Facturen-verzender, zoals gepubliceerd door wv921. Wijkt de workflow af, dan
+// verstuurt de pod niets en wordt alles concept (Fable #10). Bewuste wijziging aan de verzender = deze waarde mee wijzigen (nieuw image).
+const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '43f51008dc5061d05841f44092ab4b4528067ea3a0c59513a09d37c6b8a66426';
+let potVzGeheimCache = null;   // { w, tot }
+async function potVzVerzendGeheim() {
+  if (potVzGeheimCache && Date.now() < potVzGeheimCache.tot) return potVzGeheimCache.w;
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) return null;
+  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
+    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-pot-verzend/1' },
+    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + POT_VZ_GEHEIM_NAAM + "'" }),
+    signal: AbortSignal.timeout(20000) });
+  if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
+  const rijen = await r.json();
+  const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
+  potVzGeheimCache = { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 };
+  return potVzGeheimCache.w;
+}
+async function potVzVerzenderOk() {
+  const w = await appN8n('/workflows/' + encodeURIComponent(FACTUREN_VERZENDER_WF));
+  if (!w || !Array.isArray(w.nodes)) throw new Error('verzender niet te lezen');
+  if (w.active !== true) return false;
+  const k = w.nodes.filter(function (x) { return x && x.name === 'Toetsen' && x.type === 'n8n-nodes-base.code'; });
+  if (k.length !== 1 || typeof k[0].parameters.jsCode !== 'string') return false;
+  return crypto.createHash('sha256').update(k[0].parameters.jsCode).digest('hex') === POT_VZ_TOETSEN_SHA;
+}
+// { bron, modus, ref, aan, cc, onderwerp, bericht, van, bijlage: { naam, bytes } } → { status, j }. Vóór de aanroep mislukt = zekerNietVerstuurd.
+async function potVzVerstuur(v) {
+  const vooraf = function (m) { const e = new Error(m); e.zekerNietVerstuurd = true; e.code = 'vooraf'; return e; };
+  let geheim = null;
+  try { geheim = await potVzVerzendGeheim(); } catch (e) { throw vooraf('verzendgeheim niet te lezen'); }
+  if (!geheim) throw vooraf('verzendgeheim ontbreekt');
+  for (let poging = 0; poging < 2; poging++) {
+    let url;
+    try { url = await appWebhookUrl(FACTUREN_VERZENDER_WF, null, 'facturenVerzenderUrl', poging > 0); } catch (e) { throw vooraf('verzender-webhook niet gevonden'); }
+    const fd = new FormData();
+    fd.append('secret', geheim);
+    ['bron', 'modus', 'ref', 'aan', 'cc', 'onderwerp', 'bericht', 'van'].forEach(function (k) { if (v[k] != null && v[k] !== '') fd.append(k, String(v[k])); });
+    fd.append('bijlage', new Blob([v.bijlage.bytes], { type: 'application/pdf' }), v.bijlage.naam);
+    const r = await fetch(url, { method: 'POST', body: fd, signal: AbortSignal.timeout(120000) });
+    if (r.status === 404 && poging === 0) { try { await r.arrayBuffer(); } catch (e) {} continue; }   // webhook niet geregistreerd: er is niets verstuurd
+    let j = null;
+    try { j = await r.json(); } catch (e) { j = null; }
+    return { status: r.status, j: j };
+  }
+  throw vooraf('verzender-webhook niet gevonden');
+}
+async function potVzBericht(tekst) {
+  const r = await berichtIntern({ kanaal: 'hoofd', bron: 'pot-verzend', klasse: 'normaal', tekst: tekst, sleutel: 'pot-verzend-' + crypto.createHash('sha256').update(tekst).digest('hex').slice(0, 16) });
+  if (!r || r.status !== 200) throw new Error('bericht niet bezorgd (' + (r && r.status) + ')');
+}
+// Knoproute (appVoorJouKnop): vóór de druk de verse kaart tegen de D1-vrijgave toetsen; na een geslaagde start vastleggen; bij verval
+// intrekken. Alleen een Ja met verse vingerafdruk van telefoon of meereizend apparaat (bevestiging knop-ja-vers-kaart) telt.
+async function potVzKnopVoor(p, a) {
+  if (!POT_VZ_MOD || typeof POT_VZ_MOD.vrijgaveToets !== 'function') return { reden: 'deze pod kent automatisch versturen niet' };
+  if (a && a.soort === 'vast') return { reden: 'een Ja vanaf een vaste plek telt niet' };
+  let v = null, nuD1 = null, aantal = -1;
+  try {
+    const r = await potDhD1([{ sql: 'select * from nota_vrijgave where kaart_sleutel=?', params: [String(p.sleutel)] }, { sql: "select strftime('%Y-%m-%dT%H:%M:%SZ','now') as nu", params: [] },
+      { sql: "select count(*) as n from nota_verzending r join nota_vrijgave v on v.id=r.vrijgave_id where v.kaart_sleutel=? and r.status='auto_gevraagd'", params: [String(p.sleutel)] }]);
+    v = r[0].results[0] || null; nuD1 = r[1].results[0].nu; aantal = Number(r[2].results[0].n);
+  } catch (e) { logError('pot-verzend-knop', e); return { reden: 'de POT-databank was niet te lezen' }; }
+  const reden = POT_VZ_MOD.vrijgaveToets(p, v, POT_VZ_MOD.amsterdam(nuD1).ymd, aantal);
+  return reden ? { reden: reden } : { v: v };
+}
+function potVzVrijgeven(v, keuze, gevoeligJa, a, bevestiging, vraagId) {
+  if (keuze !== 'ja' || gevoeligJa !== true || !a || a.soort === 'vast' || bevestiging !== POT_VZ_MOD.AUTO_BEVESTIGING) return;
+  potDhD1(POT_VZ_MOD.vrijgaveSql(v.id, v.kaart_tekst_hash, vraagId, bevestiging)).then(function (r) {
+    schrijfLog(nu() + ' pot-verzend vrijgave ' + velden({ vrijgave: v.id, vastgelegd: r[0].changes, rijen: r[1].changes }));
+    if (r[0].changes !== 1) { potVzBox('vrijgave', 'een Ja op vrijgave ' + v.id + ' kon niet worden vastgelegd (al vrij, ingetrokken of verlopen); die nota\'s worden concept'); potVzNietVast(); }
+  }).catch(function (e) { logError('pot-verzend-knop', e); potVzBox('vrijgave', 'vastleggen van een vrijgave faalde: ' + String(e && e.message || e).slice(0, 100) + '; die nota\'s worden concept'); potVzNietVast(); });
+}
+// Diffreview #5: Socev zei "de pod legt het vast"; lukte dat niet, dan hoort David het meteen (geen taalmodel)
+function potVzNietVast() {
+  potVzBericht('Je Ja op de POT-nota\'s kon ik niet vastleggen. Ze gaan dus niet vanzelf: op de verzenddag staan ze om 07:00 als concept in Gmail, versturen doe je dan zelf.').catch(function (e) { logError('pot-verzend-knop', e); });
+}
+function potVzIntrekken(v) {
+  potDhD1(POT_VZ_MOD.intrekSql(v.id)).then(function (r) { schrijfLog(nu() + ' pot-verzend intrekken ' + velden({ vrijgave: v.id, rijen: r[1].changes })); })
+    .catch(function (e) { logError('pot-verzend-knop', e); potVzBox('intrekken', 'intrekken van vrijgave ' + v.id + ' faalde; controleer nota_vrijgave'); });
+}
+// Hartslag in D1 (pot_pod_stand): de POT-app biedt "op die dag zelf versturen" alleen aan als de pod de laatste 15 min 'aan' meldde.
+async function potVzStand(aan) {
+  const w = aan ? 'aan' : 'uit';
+  if (potVz.auto.stand === w && Date.now() - potVz.auto.stand_op < 5 * 60 * 1000) return;
+  await potDhD1([{ sql: "insert into pot_pod_stand (sleutel, waarde, op) values ('auto', ?, strftime('%Y-%m-%dT%H:%M:%SZ','now')) on conflict(sleutel) do update set waarde=excluded.waarde, op=excluded.op", params: [w] }]);
+  potVz.auto.stand = w; potVz.auto.stand_op = Date.now();
 }
 // De praktijkpagina's: alle pagina's in HAGRO/Praktijken plus de hoofdpagina's van Groenhouten en Tolgaarde (Fable vooraf #6: vaste plekken)
 function potVzVault() {
@@ -15995,6 +16118,9 @@ const POT_VZ_IO = {
   kaartLijst: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); return (j && j.punten) || []; },
   kaartDicht: function (sleutel, van, bewijs) { return appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: bewijs, p_reden: 'pot-verzend: vanzelf opgelost' }); },
   register: potVzRegister,
+  verstuur: potVzVerstuur,
+  verzenderOk: potVzVerzenderOk,
+  bericht: potVzBericht,
 };
 // Box: één rij per reden per dag; tijdelijke storingen (luik, pdftotext, vault, kaarten) pas na 5 tikken op rij
 function potVzBox(reden, tekst) {
@@ -16010,7 +16136,22 @@ async function potVzTik() {
   const t0 = Date.now();   // niet `nu`: dat is de logtijd-functie (Fable diffreview wv911 #1)
   const meten = t0 - potVz.laatste_meting > 3600e3, kaarten = t0 - potVz.laatste_kaarten > 3600e3;
   try {
-    const u = await POT_VZ_MOD.ronde(POT_VZ_IO, { meten: meten, kaarten: kaarten });
+    // wv921: automatisch alleen met de schakelaar én een leesbaar eigen verzendgeheim; anders alleen terugvallen op concept
+    let auto = potVzAutoAan();
+    if (auto) { try { auto = !!(await potVzVerzendGeheim()); potVz.auto.geheim = auto; } catch (e) { auto = false; potVz.auto.geheim = false; } }
+    try { await potVzStand(auto); } catch (e) { logError('pot-verzend-stand', e); }
+    const proef = potVzProef();
+    if (proef.length && !auto) { try { if (!(await potVzVerzendGeheim())) proef.length = 0; } catch (e) { proef.length = 0; } }
+    const u = await POT_VZ_MOD.ronde(POT_VZ_IO, { meten: meten, kaarten: kaarten, auto: auto, proef: proef });
+    const dagA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+    if (potVz.auto.dag !== dagA) Object.assign(potVz.auto, { dag: dagA, verstuurd: 0, onzeker: 0, terug: 0 });
+    potVz.auto.verstuurd += u.auto_verstuurd || 0; potVz.auto.onzeker += u.onzeker_verzonden || 0; potVz.auto.terug += u.auto_terug || 0;
+    if (potVzAutoAan() && !auto) potVzBox('geheim-auto', 'auto-aan staat, maar het verzendgeheim (' + POT_VZ_GEHEIM_NAAM + ') is niet te lezen; alles valt terug op concept');
+    if (u.onzeker_verzonden) potVzBox('onzeker-verzonden', u.onzeker_verzonden + ' nota(\'s) zonder bevestiging van de verzender (onzeker_verzonden); nooit opnieuw verstuurd, de pod zoekt in Verzonden');
+    if (u.fouten.indexOf('toetsen') >= 0) potVzBox('toetsen', 'de Toetsen-code van AI - Facturen-verzender wijkt af van POT_VZ_TOETSEN_SHA in het image; alles van vandaag naar concept');
+    if (u.fouten.indexOf('autoplafond') >= 0) potVzBox('autoplafond', 'meer dan ' + POT_VZ_MOD.AUTO.perDag + ' automatische verzendingen vandaag; de rest wordt na 12:00 concept');
+    ['verzender', 'bericht'].forEach(function (r) { potVz.rij[r] = u.fouten.indexOf(r) >= 0 ? (potVz.rij[r] || 0) + 1 : 0; if (potVz.rij[r] === 5) potVzBox(r, 'stap ' + r + ' faalde 5 tikken op rij'); });
+    if (u.auto_verstuurd || u.auto_terug || u.onzeker_verzonden || u.vrijgave_kaart || u.verstuurd_door_david) schrijfLog(nu() + ' pot-verzend auto ' + velden({ verstuurd: u.auto_verstuurd, concept: u.auto_terug, onzeker: u.onzeker_verzonden, kaart: u.vrijgave_kaart, door_david: u.verstuurd_door_david }));
     potVz.uitkomst = u; potVz.laatste = new Date().toISOString(); potVz.fouten_op_rij = 0;
     if (meten) potVz.laatste_meting = t0;
     if (kaarten && u.fouten.indexOf('kaarten') < 0) potVz.laatste_kaarten = t0;
