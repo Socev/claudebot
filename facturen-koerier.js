@@ -101,12 +101,15 @@ function adresIn(veld, adres) { return String(veld || '').toLowerCase().indexOf(
 function gmailDag(ymd) { return String(ymd).replace(/-/g, '/'); }
 function plusDagen(ymd, n) { return K.plusDagen(ymd, n); }
 
-// De verzender neemt alleen .pdf, .xml en MT940 aan: een naam zonder passende extensie krijgt er een (diffreview wv855 #2).
-function naamMetExtensie(naam, mime, bytes) {
-  let n = String(naam || 'stuk').replace(/[\\/]/g, '_').slice(0, 110);
-  if (/\.(pdf|xml|940|sta|mt940)$/i.test(n)) return n;
-  const isPdf = bytes && bytes.subarray(0, 5).toString('latin1') === '%PDF-';
-  return n + (isPdf || /pdf/i.test(String(mime)) ? '.pdf' : /xml/i.test(String(mime)) ? '.xml' : '.940');
+// De verzender neemt alleen PDF, UBL-XML en (bij een afschrift) MT940 aan. De extensie volgt uit de inhoud, niet uit de naam; iets anders
+// (een foto, een kantoorbestand) is niet verzendbaar → null, dan weigert de controle (diffreview wv855 #2 en natoets).
+function naamMetExtensie(naam, mime, bytes, soort) {
+  const stam = String(naam || 'stuk').replace(/[\\/]/g, '_').replace(/\.(pdf|xml|940|sta|mt940)$/i, '').slice(0, 110) || 'stuk';
+  const b = bytes || Buffer.alloc(0);
+  if (b.subarray(0, 5).toString('latin1') === '%PDF-') return stam + '.pdf';
+  if (/^\s*(?:\ufeff)?<(?:\?xml|(?:\w+:)?(?:Invoice|CreditNote)\b)/.test(b.subarray(0, 300).toString('utf8'))) return stam + '.xml';
+  if (soort === 'boekhouder_afschrift' && /^\s*:20:/.test(b.subarray(0, 50).toString('latin1'))) return stam + '.940';
+  return null;
 }
 // Onderwerp en tekst van de mail aan de boekhouder: kort, zonder factuurtekst, met het token.
 function mailVoor(fdb, op) {
@@ -167,7 +170,9 @@ function controleer(fdb, op) {
     let bytes;
     try { bytes = D.stukLees(fdb, b.sha256); } catch (e3) { return { ok: false, reden: 'stuk ontbreekt of is beschadigd' }; }
     if (sha256(bytes) !== b.sha256) return { ok: false, reden: 'stuk komt niet overeen met zijn sha256' };
-    bijlagen.push({ naam: naamMetExtensie(b.naam, b.mime, bytes), mime: b.mime || 'application/octet-stream', bytes });
+    const naam = naamMetExtensie(b.naam, b.mime, bytes, op.soort);
+    if (!naam) return { ok: false, reden: 'bijlagetype niet verzendbaar (alleen PDF, UBL of MT940)' };
+    bijlagen.push({ naam, mime: b.mime || 'application/octet-stream', bytes });
   }
   return { ok: true, bijlagen, vingerafdruk };
 }
@@ -323,7 +328,8 @@ async function verstuurEen(fdb, io, op, modus, o, uit) {
   if (eerder) {
     const t = await zoekToken(fdb, io, op);   // een zoekfout gooit LuikFout: niets versturen
     if (t && !t.passend) {
-      D.opdrachtResultaat(fdb, op.id, { status: 'geweigerd', fout: 'er staat al een ' + (t.verzonden ? 'verzonden mail' : 'concept') + ' met dit kenmerk en andere stukken of een ander adres; eerst nakijken' }, { nu: klok(), wie });
+      D.opdrachtResultaat(fdb, op.id, { status: 'geweigerd', fout: t.verzonden ? 'er is al een mail met dit kenmerk verzonden (andere stukken of een ander adres); nakijken'
+        : 'er staat al een concept met dit kenmerk (andere stukken of een ander adres): verwijder het oude concept in Gmail en kies Opnieuw proberen' }, { nu: klok(), wie });
       uit.verzending.geweigerd++;
       return;
     }
@@ -368,12 +374,13 @@ async function verstuurEen(fdb, io, op, modus, o, uit) {
 
 async function leesUploads(fdb, pdf, o) {
   const tel = { gelezen: 0, facturen: 0, fout: 0 };
-  const docs = fdb.db.prepare("SELECT d.* FROM document d WHERE d.te_lezen = 1 AND d.soort = 'pdf' AND NOT EXISTS (SELECT 1 FROM factuur f WHERE f.document = d.id OR f.ubl_document = d.id) " +
-    'ORDER BY d.aangemaakt_op LIMIT ?').all(GRENS.teLezen);
-  // een upload die drie keer faalt, wordt overgeslagen (anders houden twintig kapotte PDF's elke nieuwere tegen; diffreview wv855 #6)
+  // een upload die drie keer faalt, wordt overgeslagen en telt niet mee in de 20 (anders houden kapotte PDF's elke nieuwere tegen; diffreview wv855 #6)
   const pogingen = json(D.metaLees(fdb, 'koerier_upload_fout'), {}) || {};
+  const opgegeven = Object.keys(pogingen).filter((k) => pogingen[k] >= 3 && /^[0-9a-f]{16}$/.test(k));
+  tel.overgeslagen = opgegeven.length;
+  const docs = fdb.db.prepare("SELECT d.* FROM document d WHERE d.te_lezen = 1 AND d.soort = 'pdf' AND NOT EXISTS (SELECT 1 FROM factuur f WHERE f.document = d.id OR f.ubl_document = d.id) " +
+    'AND d.id NOT IN (SELECT value FROM json_each(?)) ORDER BY d.aangemaakt_op LIMIT ?').all(JSON.stringify(opgegeven), GRENS.teLezen);
   for (const d of docs) {
-    if ((pogingen[d.id] || 0) >= 3) { tel.overgeslagen = (tel.overgeslagen || 0) + 1; continue; }
     if (o.klok() - o.start > GRENS.rondeMs * 2) break;
     try {
       const bytes = D.stukLees(fdb, d.sha256);
@@ -385,7 +392,10 @@ async function leesUploads(fdb, pdf, o) {
       delete pogingen[d.id];
     } catch (e) { tel.fout++; pogingen[d.id] = (pogingen[d.id] || 0) + 1; }
   }
-  for (const k of Object.keys(pogingen)) if (!docs.some((d) => d.id === k) && pogingen[k] < 3) delete pogingen[k];
+  for (const k of Object.keys(pogingen)) {
+    if (pogingen[k] < 3 && !docs.some((d) => d.id === k)) delete pogingen[k];
+    else if (pogingen[k] >= 3 && !fdb.db.prepare('SELECT 1 FROM document WHERE id = ? AND te_lezen = 1').get(k)) delete pogingen[k];
+  }
   D.metaZet(fdb, 'koerier_upload_fout', JSON.stringify(pogingen));
   hartslag(fdb, 'upload', 'upload', o, { ok: tel.fout === 0, aantallen: tel, fouten: [] });
   return tel;

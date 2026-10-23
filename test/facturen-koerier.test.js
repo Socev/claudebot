@@ -336,6 +336,17 @@ test('een upload die steeds faalt, houdt de rest niet tegen en wordt na drie kee
   assert.equal(u4.upload.fout, 0);
 });
 
+test('bijlagetype: alleen PDF, UBL of (afschrift) MT940 gaat mee; een foto of onbekend bestand → geweigerd, nooit als .940', () => {
+  const pdfB = Z.pdf(['x']);
+  assert.equal(KO.naamMetExtensie('factuur', 'application/pdf', pdfB, 'boekhouder_factuur'), 'factuur.pdf');
+  assert.equal(KO.naamMetExtensie('scan.pdf', 'application/pdf', pdfB, 'boekhouder_factuur'), 'scan.pdf');
+  assert.equal(KO.naamMetExtensie('f.xml', 'application/xml', Buffer.from('<?xml version="1.0"?><Invoice/>'), 'boekhouder_factuur'), 'f.xml');
+  assert.equal(KO.naamMetExtensie('foto.jpg', 'image/jpeg', Buffer.from([0xff, 0xd8, 0xff, 0xe0]), 'boekhouder_factuur'), null);
+  assert.equal(KO.naamMetExtensie('nep.pdf', 'application/pdf', Buffer.from('geen pdf'), 'boekhouder_factuur'), null);
+  assert.equal(KO.naamMetExtensie('POT.sta', 'application/octet-stream', Buffer.from(':20:PROEF'), 'boekhouder_afschrift'), 'POT.940');
+  assert.equal(KO.naamMetExtensie('x.940', 'application/octet-stream', Buffer.from(':20:PROEF'), 'boekhouder_factuur'), null);
+});
+
 test('mislukt max 3× dan signaal; daarna geen poging meer; Opnieuw proberen vindt een eerder concept via het token', async (tc) => {
   const t = opzet(), g = nepGmail();
   const oud = KO.GRENS.verzendingen; KO.GRENS.verzendingen = 30; tc.after(() => { KO.GRENS.verzendingen = oud; });   // het zaad heeft zelf veel claimbare opdrachten
