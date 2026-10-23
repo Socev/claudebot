@@ -7245,15 +7245,35 @@ async function appBriefingRoute(req, res, a) {
         const l = await appLogLees('hoofd');
         for (let i = l.length - 1; i >= 0; i--) {
           const x = l[i];
-          if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse !== 'stil' && x.ok !== false && /^[a-f0-9]{16}$/.test(String(x.job_id || '')) && String(x.antwoord || '').trim()) { b = appBriefingVorm(x); break; }
+          if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse !== 'stil' && x.ok !== false && /^[a-f0-9]{16}$/.test(String(x.job_id || '')) && String(x.antwoord || '').trim()) { b = appBriefingVorm(x); b.tekst = appMoetBericht(x.antwoord); break; }
         }
+        // wv594: de gesproken briefing (stille 🔊-regel, bron briefing) van dezelfde dag, jongste eerst; het bestand zoekt de route per verzoek op
+        const stem = [];
+        if (b) l.forEach(function (x) { if (x && x.soort === 'socev' && x.bron === 'briefing' && x.klasse === 'stil' && APP_JOB_RE.test(String(x.job_id || '')) && appYmd(Date.parse(x.t)) === b.dag) stem.unshift(x.job_id); });
+        if (b) b.stem = stem;
         appStaat.briefing = { mtime: st.mtimeMs, size: st.size, b: b };
       } catch (e) { logError('app-briefing', e); return appStuur(res, 200, { ok: true, briefing: null, fout: 'de briefing is nu niet te lezen' }); }
     }
   }
   appStuur(res, 200, { ok: true, briefing: appBriefingVoor(b, a), vaste_plek: !!(a && a.soort === 'vast'), fout: null });
 }
-function appBriefingVoor(b, a) { return b ? (a && a.soort === 'vast' ? Object.assign({}, b, { regels: [] }) : b) : null; }
+// wv594: tekst (de hele briefing, voor Lees in Voor jou) en audio ({job_id, n, naam} van de gesproken briefing) alleen op een
+// meereizend apparaat; op een vaste plek alleen de kop (Fable wv891 #5).
+function appBriefingVoor(b, a) {
+  if (!b) return null;
+  const { stem, tekst, ...kaal } = b;
+  if (a && a.soort === 'vast') return Object.assign({}, kaal, { regels: [], tekst: null, audio: null });
+  return Object.assign({}, kaal, { tekst: tekst || null, audio: appBriefingAudio(stem) });
+}
+function appBriefingAudio(stem) {
+  for (const job of stem || []) {
+    let m = null;
+    try { m = appBewaardVan(job); } catch (e) { return null; }
+    const i = m && Array.isArray(m.bestanden) ? m.bestanden.findIndex(function (f) { return f && /\.(mp3|ogg|oga|opus|wav|m4a|aac|webm)$/i.test(String(f.naam || '')); }) : -1;
+    if (i >= 0) return { job_id: job, n: i + 1, naam: m.bestanden[i].naam };
+  }
+  return null;
+}
 
 // ── fase 5a: tabs Agents en Bestanden (wv98, 8-10-2026; bouwplan § 4.7 en § 4.9) ──
 // Bestanden: wat Socev in out/ zet bij een beurt in het hoofdkanaal of de machinekamer (Telegram of app) of bij een
@@ -8827,8 +8847,95 @@ async function appVoorJouRoute(req, res, a) {
   let vr = {};
   try { vr = appVragen(); } catch (e) { vr = {}; }
   const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr) }); });
+  // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten)
+  let moet = null, moetFout = null;
+  try { moet = await appMoetIets(eigen, nu); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
+  const sleutels = [];
+  lijst.forEach(function (p) { sleutels.push('k:' + p.id); if (p.deadline && p.deadline < vandaag) sleutels.push('k:' + p.id + ':over'); });
+  (moet || []).forEach(function (m) { sleutels.push(m.punt); });
   appStuur(res, 200, { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: !!(a && a.soort === 'vast'),
-    bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null });
+    bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null, moet_iets: moet, moet_fout: moetFout, gezien: appMoetGezien(sleutels) });
+}
+// ── wv594: één meldingenkanaal fase 4 (bouwplan "Eén meldingenkanaal" § 4.5; fase 3 punt a, ontwerp wv804 § 0) ──
+// Moet iets: open app-vragen (< 72 u, onbeantwoord, niet naar Telegram, geen Telegram-beurt; soort leeg of socev, dus geen
+// voorjou), wachtende agenda-✅ (uitvoeren open en nog niet verlopen) en dag-berichten van vandaag in het hoofdkanaal (meld dag,
+// of zonder meld: dringend; de briefing niet, die heeft een eigen kaart bovenaan Voor jou). Ontdubbeld tegen open kaarten: eerst de
+// koppeling (herkomst.vraag = job:hash, appVjGekoppeld; review wv588 M3-rest), dan een wv-nummer in de vraagzin dat in een open
+// kaarttitel staat. Per punt de volle berichttekst (de app toont hem pas na "Lees en beantwoord"), begrensd. Puur: getoetst in 27c.
+const APP_MOET_BERICHT_MAX = 20000;
+const APP_MOET_MAX = 30;
+const APP_MOET_WV_RE = /\bwv\s?(\d{2,4})\b/gi;
+function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu) {
+  const vandaag = appYmd(nu), gekoppeld = {}, kaartWv = {};
+  (kaarten || []).forEach(function (p) {
+    if (!p || p.status !== 'open') return;
+    const g = appVjGekoppeld(p);
+    if (g) gekoppeld[g] = 1;
+    String(p.titel || '').replace(APP_MOET_WV_RE, function (m, n) { kaartWv[n] = 1; return m; });
+  });
+  const uit = [];
+  ['hoofd', 'machinekamer'].forEach(function (kanaal) {
+    (perKanaal[kanaal] || []).forEach(function (x) {
+      if (!x || !APP_JOB_RE.test(String(x.job_id || '')) || x.soort === 'telegram') return;   // een vraag daarin beantwoordt David alleen in Telegram
+      const t = Date.parse(x.t);
+      if (!isFinite(t)) return;
+      const basis = { kanaal: kanaal, job_id: x.job_id, t: new Date(t).toISOString(), bron: x.soort === 'socev' ? x.bron || null : null, socev: x.soort === 'socev' };
+      const e = agendaKnoppen && agendaKnoppen[x.job_id];
+      if (e && e.kanaal === kanaal) {
+        const vorm = appAgendaVorm(e, nu);
+        if (vorm.knoppen.some(function (k) { return k.knop === 'uitvoeren' && k.open && Date.parse(k.verloopt) > nu; })) {
+          uit.push(Object.assign({ punt: 'a:' + x.job_id, soort: 'agenda', bericht: appMoetBericht(x.antwoord), agenda: vorm }, basis));
+          return;
+        }
+      }
+      if (x.vraag_hash) {
+        const id = x.job_id + ':' + x.vraag_hash, r = vragen && vragen[id];
+        if (!r || (r.soort && r.soort !== 'socev') || r.kanaal !== kanaal || appAntwoord(r) || appNaarTelegramNu(r, nu)) return;
+        if (!(nu - Date.parse(r.t || x.t) < APP_VRAAG_GELDIG_MS)) return;
+        const v = appVraagUit(x.antwoord);
+        if (!v || v.hash !== x.vraag_hash || gekoppeld[id]) return;
+        let wv = false;
+        v.tekst.replace(APP_MOET_WV_RE, function (m, n) { if (kaartWv[n]) wv = true; return m; });   // alleen de vraagzin: een rapport noemt vaak tientallen wv-nummers
+        if (wv) return;
+        uit.push(Object.assign({ punt: 'v:' + id, soort: 'vraag', hash: x.vraag_hash, tekst: v.tekst, gevoelig: r.gevoelig !== false, bericht: appMoetBericht(x.antwoord) }, basis));
+        return;
+      }
+      const dag = x.meld ? x.meld === 'dag' : x.klasse === 'dringend';
+      if (kanaal === 'hoofd' && x.soort === 'socev' && dag && x.klasse !== 'stil' && x.bron !== 'briefing' && x.ok !== false && appYmd(t) === vandaag)
+        uit.push(Object.assign({ punt: 'd:' + x.job_id, soort: 'dag', bericht: appMoetBericht(x.antwoord) }, basis));
+    });
+  });
+  const rang = { dag: 0, agenda: 1, vraag: 2 };
+  return uit.sort(function (p, q) { return rang[p.soort] - rang[q.soort] || q.t.localeCompare(p.t); }).slice(0, APP_MOET_MAX);
+}
+function appMoetBericht(t) { t = String(t || ''); return t.length > APP_MOET_BERICHT_MAX ? t.slice(0, APP_MOET_BERICHT_MAX) + '\n\n…' : t; }
+// Het app-log van de laatste 73 uur, bewaard op mtime + grootte (GET /app/voor-jou leest elke paar minuten per apparaat).
+async function appMoetLog(kanaal) {
+  let st;
+  try { st = await fs.promises.stat(appLogPad(kanaal)); } catch (e) { if (e && e.code === 'ENOENT') return []; throw e; }
+  const c = (appStaat.moetLog = appStaat.moetLog || {})[kanaal];
+  if (c && c.mtime === st.mtimeMs && c.size === st.size && Date.now() - c.op < 3600000) return c.items;
+  const grens = Date.now() - APP_VRAAG_GELDIG_MS - 3600000;
+  const items = (await appLogLees(kanaal)).filter(function (x) { return Date.parse(x.t) >= grens; });
+  appStaat.moetLog[kanaal] = { mtime: st.mtimeMs, size: st.size, op: Date.now(), items: items };
+  return items;
+}
+async function appMoetIets(kaarten, nu) {
+  const per = {};
+  for (const k of ['hoofd', 'machinekamer']) {
+    const r = await appGeschiedenisRuw(k, appMoetLog);
+    if (r.fout) throw r.fout;
+    per[k] = r.items;
+  }
+  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu);
+}
+// Gezien door David (gezien-david.json, fase 3) voor de sleutels die Voor jou nu toont; null = bestand onleesbaar (app: onbekend).
+function appMoetGezien(sleutels) {
+  const g = appGezienDavid();
+  if (!g) return null;
+  const uit = {};
+  sleutels.forEach(function (s) { if (g.punten[s]) uit[s] = g.punten[s]; });
+  return uit;
 }
 // wv404: {keuze, t} als dit besluit via een knop beantwoord is (kaartdruk in het bewijs, of een antwoord in vragen.json), anders null
 function appVjBeantwoordKort(p, vr) {
