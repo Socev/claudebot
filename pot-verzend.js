@@ -26,7 +26,7 @@ const D1_NU = "strftime('%Y-%m-%dT%H:%M:%SZ','now')";
 const KOL = 'id, nota_id, entiteit, nummer, praktijk_id, status, niet_voor, plan_datum, onderwerp, bericht, van, pdf_naam, pdf_b64, pdf_sha256, pdf_bytes, aangevraagd_op, reden, aan, cc, bron_pagina, concept_id, thread_id, concept_op, pogingen, geclaimd_op, opmerking, auto, vrijgave_id, verzend_reservering_op, message_id, fout';
 const ADRES_RE = /^[a-z0-9._%+'-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/;
 const ID_RE = /^P\d{2}$/;
-const ENT_NAAM = { SLOEL: 'SLOEL', POT: 'POT', KM: 'KM POH-GGZ' };
+const ENT_NAAM = { SLOEL: 'SLOEL', POT: 'POT', KM: 'KM POH-GGZ', PROEF: 'PROEF' };
 
 // ── ontvangers uit de Second Brain ────────────────────────────────────────────
 // Alleen het eerste frontmatterblok; alleen de drie sleutels; vormen: `k: waarde`, `k: [a, b]`, `k:` + regels `  - a`.
@@ -274,7 +274,8 @@ function kaartOnzeker(rijen, nuKort) {
 async function autoControle(io, r, n, ontv) {
   if (!n || n.entiteit !== r.entiteit || n.nummer !== r.nummer || n.praktijk_id !== r.praktijk_id) return { ok: false, reden: 'de nota is in de POT-app niet meer dezelfde' };
   if (n.status !== 'definitief') return { ok: false, reden: `de nota is nu ${n.status}` };
-  if (r.entiteit !== 'SLOEL') return { ok: false, reden: 'alleen SLOEL-nota\'s gaan automatisch' };
+  // SLOEL, of de proefnota (entiteit PROEF bij een proefpraktijk P9x, alleen door de machinekamer in D1 gezet; adres = Davids testalias)
+  if (r.entiteit !== 'SLOEL' && !(r.entiteit === 'PROEF' && /^P9\d$/.test(String(r.praktijk_id)))) return { ok: false, reden: 'alleen SLOEL-nota\'s gaan automatisch' };
   const pb = pdfBytes(r);
   if (!pb.ok) return { ok: false, reden: pb.fout };
   let tk;
@@ -405,7 +406,8 @@ async function autoRonde(io, nuD1, o, uit, zet) {
   }
 
   // 5. versturen: alleen met auto, op een werkdag, 09:00–12:00 Amsterdam, rijen auto_vrij van vandaag
-  if (ietsAuto && werkdag(vandaag) && A.uur >= AUTO.vanUur && A.uur < AUTO.totUur) {
+  // geen nieuwe verzending na 11:55: de verzender weigert vanaf 12:00 (natoets Fable #3); wat overblijft wordt om 12:00 concept
+  if (ietsAuto && werkdag(vandaag) && A.uur >= AUTO.vanUur && A.uur < AUTO.totUur && !(A.uur === AUTO.totUur - 1 && A.min >= 55)) {
     const kand = (await io.d1([{ sql: `select ${KOL} from nota_verzending where status='auto_vrij' and plan_datum=? order by id limit ${AUTO.perDag}`, params: [vandaag] }]))[0].results.filter(magAuto);
     if (kand.length) {
       let verzOk = null;

@@ -284,6 +284,30 @@ async function jaKnop(vid, bevestiging) {
     toets('proef: proefnota verstuurd naar het proefadres, echte nota niet (valt terug op concept)', st(pr.id).status === 'auto_verstuurd' && verstuurd.length === vp + 1 && verstuurd[verstuurd.length - 1].aan === 'test@david.example' && ['wacht', 'concept'].includes(st(echt.id).status), { pr: st(pr.id).status, echt: st(echt.id).status });
   }
 
+  // ── L. PROEF-entiteit: alleen bij een proefpraktijk ──
+  {
+    db.exec("insert or ignore into entiteit (code, naam) values ('PROEF','Proef Socev')");
+    const mk = (nr, pr) => { db.prepare("insert into nota (entiteit, jaar, nummer, praktijk_id, datum, soort, regels, bedrag, status) values ('PROEF',2026,?,?,'2026-11-01','proef','[]',1,'definitief')").run(nr, pr); return db.prepare('select * from nota where nummer=?').get(nr); };
+    const pn = mk('PROEF001', 'P90'), fout1 = mk('PROEF002', 'P01');
+    const zetRij = (n) => { const b = pdfVoor(n); db.prepare(`insert into nota_verzending (nota_id, entiteit, nummer, praktijk_id, status, niet_voor, plan_datum, onderwerp, bericht, van, pdf_naam, pdf_b64, pdf_sha256, pdf_bytes, aangevraagd_op, bijgewerkt_op, auto) values (?,?,?,?,'auto_gevraagd','2026-11-23T06:00:00Z','2026-11-23','PROEF','PROEF','"David Schaap" <dokterschaap@gmail.com>',?,?,?,?,'2026-11-06T10:00:00Z','2026-11-06T10:00:00Z',1)`).run(n.id, 'PROEF', n.nummer, n.praktijk_id, `PROEF - ${n.nummer}.pdf`, b.toString('base64'), crypto.createHash('sha256').update(b).digest('hex'), b.length); return db.prepare('select * from nota_verzending where nummer=?').get(n.nummer); };
+    const a = zetRij(pn), b = zetRij(fout1);
+    zetNu('2026-11-06T10:00:00Z');
+    await ronde({ auto: true, proef: ['P90'] });
+    toets('PROEF-nota bij proefpraktijk P90 → kaart; PROEF-nota bij een echte praktijk → niet automatisch', st(a.id).vrijgave_id && st(b.id).status === 'wacht' && /alleen SLOEL/.test(st(b.id).opmerking), { a: st(a.id), b: st(b.id).opmerking });
+    toets('kaarttitel noemt PROEF', /PROEF-nota/.test(kaartRij[`pot-vrijgave-${st(a.id).vrijgave_id}`].titel), kaartRij[`pot-vrijgave-${st(a.id).vrijgave_id}`].titel);
+  }
+
+  // ── M. na 11:55 geen nieuwe verzending ──
+  {
+    zetNu('2026-11-06T10:00:00Z');
+    const m1 = autoRij(nota('P05', 77), '2026-11-24', '2026-11-24T06:00:00Z');
+    await ronde(); await jaKnop(st(m1.id).vrijgave_id);
+    zetNu('2026-11-24T10:56:00Z'); const vm = verstuurd.length; await ronde();
+    toets('11:56: niets meer gestart, rij blijft auto_vrij', verstuurd.length === vm && st(m1.id).status === 'auto_vrij', st(m1.id).status);
+    zetNu('2026-11-24T11:00:00Z'); await ronde();
+    toets('12:00: daarna concept', ['wacht', 'concept'].includes(st(m1.id).status), st(m1.id).status);
+  }
+
   // ── I. geen auto-rij in de bestaande conceptclaim; kaartgrenzen ──
   const sj = fs.readFileSync('pot-verzend.js', 'utf8');
   const claim = /update nota_verzending set status='bezig'[^`]*`/.exec(sj);
