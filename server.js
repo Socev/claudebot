@@ -8848,7 +8848,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   try { vr = appVragen(); } catch (e) { vr = {}; }
   const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr) }); });
   // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten).
-  // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (de app met de proefschakelaar); /app/voor-jou blijft zoals main.
+  // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (sinds wv946 de enige weg van de app); /app/voor-jou blijft zoals main.
   const basisAntwoord = { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: !!(a && a.soort === 'vast'),
     bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null };
   if (!kanaal) return appStuur(res, 200, basisAntwoord);
@@ -10750,7 +10750,9 @@ function appGezienDavidZet(a, tab, t, punten) {
   else if (!g.tabs[tab] || Date.parse(g.tabs[tab]) < t) g.tabs[tab] = iso;   // nooit terug
   g.bron[tab] = a.id;
   const grens = Date.now() - APP_GEZIEN_DAVID_PUNT_MS;
-  const pk = Object.keys(g.punten).filter(function (k) { return Date.parse(g.punten[k]) >= grens; })
+  // wv946 (Fable #3): een k:-sleutel (kaart) vervalt niet na 14 dagen: een kaart die langer open staat, zou anders weer als nieuw
+  // tellen; appMoetGezienOpruim haalt hem weg zodra de kaart niet meer wacht. Moet iets (v:/a:/d:, < 72 u) vervalt wel.
+  const pk = Object.keys(g.punten).filter(function (k) { return /^k:/.test(k) || Date.parse(g.punten[k]) >= grens; })
     .sort(function (x, y) { return Date.parse(g.punten[y]) - Date.parse(g.punten[x]); }).slice(0, APP_GEZIEN_DAVID_PUNTEN_MAX);
   const punt = {}; pk.forEach(function (k) { punt[k] = g.punten[k]; }); g.punten = punt;
   try { appSchrijfJson(APP_GEZIEN_DAVID, g); } catch (e) { logError('gezien-david', e); return false; }
@@ -11150,7 +11152,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/projecten') return appProjectenRoute(req, res, a);   // wv373
         if (route === 'POST /app/actie') return appActieRoute(req, res, a, d);
         if (route === 'GET /app/voor-jou') return appVoorJouRoute(req, res, a);   // wv335
-        if (route === 'GET /app/voor-jou/kanaal') return appVoorJouRoute(req, res, a, true);   // wv926 (Fable #1): Moet iets alleen voor de proef
+        if (route === 'GET /app/voor-jou/kanaal') return appVoorJouRoute(req, res, a, true);   // wv926 (Fable #1) / wv946: de app vraagt alleen nog deze; /app/voor-jou blijft voor een oude app in de cache
         if (route.indexOf('GET /app/voor-jou/') === 0) return appVoorJouDetail(req, res, a, route.slice('GET /app/voor-jou/'.length));
         if (route === 'POST /app/voor-jou/keuze') return appVoorJouKeuze(req, res, a, d);
         if (route === 'POST /app/voor-jou/knop') return appVoorJouKnop(req, res, reg, a, s, d);   // wv404

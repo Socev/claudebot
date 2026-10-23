@@ -5772,6 +5772,14 @@ async function bewijs(o) {
         n27 = await route();
         toets('27 wv594 #2: heropend: kaart 10 staat in de lijst en heeft geen gezien (telt opnieuw); 1 nog wel', n27.b.punten.some((x) => x.id === 10) && !n27.b.gezien['k:10'] && n27.b.gezien['k:1'] === tq, JSON.stringify(n27.b.gezien));
         sbStaat.vj[9] = v10; H.appStaat.vjCache = null;
+        // wv946 (Fable #3): een kaartsleutel (k:) vervalt niet na 14 dagen (de kaart wacht nog); een oude Moet iets-sleutel wel
+        {
+          const oud946 = new Date(Date.now() - 20 * 86400000).toISOString(), g946 = GD();
+          g946.punten['k:1'] = oud946; g946.punten['v:oud946:h'] = oud946; fs.writeFileSync(GDP, JSON.stringify(g946));
+          const ok946 = ctx.appGezienDavidZet({ id: 'x', soort: 'reist' }, 'vandaag', Date.now(), ['k:4']);
+          toets('27 wv946 Fable #3: na een schrijfactie blijft k:1 (20 dagen oud, kaart wacht nog) staan; een 20 dagen oude v:-sleutel vervalt', ok946 === true && GD().punten['k:1'] === oud946 && !GD().punten['v:oud946:h'] && !!GD().punten['k:4'], JSON.stringify(GD().punten));
+          const g946b = GD(); g946b.punten['k:1'] = tq; fs.writeFileSync(GDP, JSON.stringify(g946b));
+        }
         // vaste plek: geen hoofdkanaal in Moet iets
         n27 = await route('vast');
         ms = (n27.b.moet_iets || []).map((x) => x.punt);
