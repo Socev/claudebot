@@ -52,11 +52,14 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # facturen-db.js (wv824): opslag van de Facturen-app (SQLite /opt/data/facturen, migraties, triggers, stukken, back-up); server.js opent hem alleen
 #   op de primaire kant voor /health.facturen (ontbreekt hij, dan facturen.aan=false; F2 koppelt de routes).
 # facturen.js (wv833): routes /app/facturen/* en POST /facturen-ronde, door server.js geladen (ontbreekt hij, dan 404 op /app/facturen* en facturen.aan=false in /health).
+# facturen-koerier.js (wv855): de koerier (verzend-detectie, consistentiecontrole, verzender, uploads, postvak), door server.js geladen bij POST
+#   /facturen-ronde (ontbreekt hij, dan doet de ronde alleen de back-up en /health.facturen.koerier.aan=false).
 # facturen-ingang.js (wv856): smalle ingang /fac/* voor de praktijkmanager (facturen.socev.dev); door server.js geladen, slapend (404) tot de inrichting (ontbreekt hij, dan 404 op /fac).
 #   Met wv856 krijgt de facturendatabase migratie 3: een terugrol naar een release van vóór wv856 opent hem niet meer (schema_nieuwer) — dan ook
 #   /opt/data/facturen/backup/ van vóór de uitrol terugzetten, of vooruit herstellen.
 # secondbrain.js (wv832): App Second Brain, routes /app/secondbrain* (ontbreekt hij, dan 404 en secondbrain.aan=false in /health).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js harvester.js facturen-db.js facturen.js facturen-ingang.js secondbrain.js"
+# ideeen.js (wv761): App Ideeën van buitenaf (Ideeënbeurs), door server.js geladen (ontbreekt hij, dan 404 op /app/ideeen* en ideeen.aan=false in /health).
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js secondbrain.js ideeen.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

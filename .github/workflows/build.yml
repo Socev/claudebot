@@ -152,6 +152,22 @@ jobs:
           fi
           echo "facturen.js: alleen lokaal."
 
+      # facturen-koerier.js (wv855, F4): de koerier van de Facturen-app. Positieve poort: alleen crypto, child_process (één execFile van
+      # /usr/bin/pdftotext, PDF op stdin, tekst op stdout) en de Facturen-buren; geen fetch en geen fs: het lees-luik en de verzender komen als
+      # functies uit server.js, de stukken leest facturen-db.js. Zo kan hij niets anders aanroepen dan pdftotext.
+      - name: facturen-koerier.js alleen pdftotext
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' facturen-koerier.js)
+          if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|worker_threads|cluster|vm|undici|fs|fs/promises)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\(|execSync|spawnSync|\bspawn\s*\(|[^.]\bexec\s*\("; then
+            echo "::error::facturen-koerier.js laadt een netwerk-, bestands- of andere procesmodule"; exit 1
+          fi
+          if grep -vE '^\s*(\*|//)' facturen-koerier.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|child_process|\./facturen-kern\.js|\./facturen-db\.js|\./facturen\.js)'\)$"; then
+            echo "::error::facturen-koerier.js laadt een module buiten crypto, child_process en de Facturen-buren"; exit 1
+          fi
+          if [ "$(grep -vE '^\s*(\*|//)' facturen-koerier.js | grep -c 'execFile(')" != "1" ] || ! grep -q "^const PDFTOTEXT = '/usr/bin/pdftotext';$" facturen-koerier.js; then
+            echo "::error::facturen-koerier.js: child_process alleen voor één execFile van /usr/bin/pdftotext"; exit 1
+          fi
+          echo "facturen-koerier.js: alleen pdftotext."
       # facturen-ingang.js (wv856, F6): de smalle ingang /fac voor de praktijkmanager. Geen netwerk- of procesmodule, geen fetch en geen
       # console (de certs van Access komen uit server.js); de gebruikers-JWT en het Access-bewijs gaan alleen naar controleerJwt, nooit
       # in een log, audit of antwoord (Fable wv856 #3).
@@ -192,7 +208,7 @@ jobs:
           bash test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
       # Facturen-app (wv797–wv833) in een eigen stap die ook draait als een eerdere stap rood is: een rode bankluis-toets mag de Facturen-toetsen
       # niet verbergen (sinds run 200 stopte de bankluis-stap op test/bunq-lezer.sh en draaiden ze niet meer).
-      - name: "facturen (wv797–wv833: kern, bank, opslag, routes)"
+      - name: "facturen (wv797–wv855: kern, bank, opslag, routes, koerier)"
         if: ${{ !cancelled() }}
         run: |
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
@@ -200,6 +216,8 @@ jobs:
           bash test/facturen-bank.sh   # wv798: bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
           bash test/facturen-db.sh   # wv824: opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
           bash test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
+          command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils)   # de koerier roept /usr/bin/pdftotext echt aan
+          bash test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads
           bash test/facturen-ingang.sh   # wv856: smalle ingang /fac — poortgeheim, servicetoken- en gebruikers-JWT, nooit eigenaar, praktijkmanager-scope, uploads, audit
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
       - name: "studio (wv707, tab Studio fase 1)"

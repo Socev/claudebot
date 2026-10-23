@@ -848,6 +848,113 @@ function verzendingMislukt(fdb, op, reden, tijd, wie, gebeurtenis) {
     na: { status: gebeurtenis === 'geweigerd' ? 'geweigerd' : 'mislukt', definitief: true, reden: String(reden || '').slice(0, 200) }, wanneer: tijd });
 }
 
+// ───────────────────────────── opdrachten: uitkomst van de koerier (F4, wv855) ─────────────────────────────
+
+function opdrachtOf(fdb, opId) {
+  const op = fdb.db.prepare('SELECT * FROM opdracht WHERE id = ?').get(String(opId || ''));
+  if (!op) throw new DbFout('onbekend', 'opdracht niet gevonden');
+  return op;
+}
+/*
+ * Reservering vóór de aanroep van de verzender (bouwplan § 4.4, Fable F4): sleutel (het token in het onderwerp) + tijd + modus, in een
+ * eigen transactie die gecommit is vóór de aanroep. Alleen een opgehaalde opdracht (de koerier heeft hem). Een tweede poging laat de
+ * sleutel staan en zet alleen de tijd opnieuw. → { ok, eerder: bool }
+ */
+function reserveer(fdb, opId, o) {
+  o = o || {};
+  if (!o.sleutel || !/^F[VA][0-9a-f]{16}$/.test(o.sleutel)) throw new DbFout('sleutel', 'reserveer vraagt een sleutel FV/FA + 16 hex');
+  if (!['concept', 'versturen'].includes(o.modus)) throw new DbFout('modus', 'reserveer vraagt modus concept of versturen');
+  const tijd = nuIso(o.nu);
+  return transactie(fdb, function () {
+    const op = opdrachtOf(fdb, opId);
+    if (op.status !== 'opgehaald') throw new DbFout('status', 'alleen een opgehaalde opdracht wordt gereserveerd (' + op.status + ')');
+    if (op.verzend_reservering && op.verzend_reservering !== o.sleutel) throw new DbFout('sleutel', 'de opdracht heeft al een andere reservering');
+    fdb.db.prepare('UPDATE opdracht SET verzend_reservering = ?, verzend_reservering_op = ?, modus = ?, bijgewerkt_op = ? WHERE id = ? AND status = \'opgehaald\'')
+      .run(o.sleutel, tijd, o.modus, tijd, op.id);
+    audit(fdb, { wie: o.wie || 'koerier', wat: 'verzend_reservering', object_soort: 'opdracht', object_id: op.id, entiteit: op.entiteit,
+      na: { modus: o.modus, poging: op.poging, eerder: !!op.verzend_reservering }, wanneer: tijd });
+    return { ok: true, eerder: !!op.verzend_reservering };
+  });
+}
+/*
+ * Uitkomst van een verzendpoging (contract koerier-api.md "POST /api/koerier/opdracht/:id"), in één transactie:
+ * - gelukt: opdracht → gelukt (extern_id, modus, vingerafdruk_koerier); factuur wordt_verstuurd → concept_klaar (concept) of verstuurd
+ *   (versturen); afschrift → verstuurd bij versturen (bij concept pas na de verzend-detectie). Een tweede gelukt verandert niets.
+ * - mislukt: opdracht → mislukt (de volgende ronde probeert opnieuw, max 3); de derde → definitief + factuur verzending_mislukt + signaal.
+ * - geweigerd: opdracht → geweigerd + factuur verzending_mislukt + signaal, geen nieuwe poging.
+ * → { ok, gewijzigd } of { ok:false, fout }
+ */
+function opdrachtResultaat(fdb, opId, r, o) {
+  o = o || {};
+  const tijd = nuIso(o.nu), wie = o.wie || 'koerier';
+  r = r || {};
+  return transactie(fdb, function () {
+    const op = opdrachtOf(fdb, opId);
+    if (r.status === 'gelukt') {
+      if (!['concept', 'versturen'].includes(r.modus)) throw new DbFout('modus', 'gelukt vraagt de modus');
+      const ov = K.opdrachtOvergang(op, 'gelukt');
+      if (!ov.ok) return { ok: false, fout: ov.fout, reden: ov.reden };
+      if (!ov.gewijzigd) return { ok: true, gewijzigd: false };
+      const u = fdb.db.prepare("UPDATE opdracht SET status = 'gelukt', extern_id = ?, modus = ?, vingerafdruk_koerier = ?, fout = NULL, bijgewerkt_op = ? WHERE id = ? AND status = 'opgehaald'")
+        .run(String(r.extern_id || '').slice(0, 200) || null, r.modus, r.vingerafdruk_koerier || null, tijd, op.id);
+      if (u.changes !== 1) throw new DbFout('race', 'opdracht veranderde');
+      let naar = null;
+      if (op.factuur) {
+        const f = fdb.db.prepare('SELECT id, status FROM factuur WHERE id = ?').get(op.factuur);
+        if (f && f.status === 'wordt_verstuurd') {
+          const fo = K.statusOvergang('wordt_verstuurd', 'gelukt', { modus: r.modus });
+          if (!fo.ok) throw new DbFout(fo.fout, fo.reden);
+          const u2 = fdb.db.prepare('UPDATE factuur SET status = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = \'wordt_verstuurd\'').run(fo.naar, tijd, f.id);
+          if (u2.changes !== 1) throw new DbFout('race', 'factuur veranderde');
+          naar = fo.naar;
+        }
+      } else if (r.modus === 'versturen') {
+        fdb.db.prepare("UPDATE pot_afschrift SET status = 'verstuurd', bijgewerkt_op = ? WHERE id = ? AND status = 'in_wachtrij'").run(tijd, op.afschrift);
+        naar = 'verstuurd';
+      }
+      audit(fdb, { wie, wat: 'opdracht_gelukt', object_soort: 'opdracht', object_id: op.id, entiteit: op.entiteit,
+        na: { modus: r.modus, factuur_status: naar, overgenomen: !!r.overgenomen }, wanneer: tijd });
+      return { ok: true, gewijzigd: true, factuur_status: naar };
+    }
+    if (r.status === 'mislukt') {
+      const ov = K.opdrachtOvergang(op, 'mislukt');
+      if (!ov.ok) return { ok: false, fout: ov.fout, reden: ov.reden };
+      const fout = String(r.fout || 'mislukt').slice(0, 500);
+      const u = fdb.db.prepare("UPDATE opdracht SET status = 'mislukt', fout = ?, bijgewerkt_op = ? WHERE id = ? AND status = 'opgehaald'").run(fout, tijd, op.id);
+      if (u.changes !== 1) throw new DbFout('race', 'opdracht veranderde');
+      if (ov.definitief) verzendingMislukt(fdb, op, fout, tijd, wie, 'mislukt_definitief');
+      else audit(fdb, { wie, wat: 'opdracht_mislukt', object_soort: 'opdracht', object_id: op.id, entiteit: op.entiteit, na: { poging: op.poging, fout: fout.slice(0, 200) }, wanneer: tijd });
+      return { ok: true, gewijzigd: true, definitief: !!ov.definitief };
+    }
+    if (r.status === 'geweigerd') {
+      if (op.status !== 'opgehaald') return { ok: false, fout: 'ongeldige_overgang', reden: op.status + ' → geweigerd' };
+      return { ok: weigerOpdracht(fdb, op, String(r.fout || 'geweigerd'), tijd, wie), gewijzigd: true };
+    }
+    throw new DbFout('status', 'onbekende uitkomst');
+  });
+}
+/*
+ * Verzend-detectie (modus concept): de mail met het token staat in Verzonden → factuur concept_klaar → verstuurd (kern verzonden_gezien),
+ * afschrift in_wachtrij → verstuurd. Alleen een gelukte conceptopdracht. → { ok, gewijzigd }
+ */
+function verzondenGezien(fdb, opId, o) {
+  o = o || {};
+  const tijd = nuIso(o.nu), wie = o.wie || 'koerier';
+  return transactie(fdb, function () {
+    const op = opdrachtOf(fdb, opId);
+    if (op.status !== 'gelukt' || op.modus !== 'concept') return { ok: false, fout: 'geen gelukte conceptopdracht' };
+    let gewijzigd = 0;
+    if (op.factuur) {
+      const ov = K.statusOvergang('concept_klaar', 'verzonden_gezien', {});
+      if (!ov.ok) throw new DbFout(ov.fout, ov.reden);
+      gewijzigd = fdb.db.prepare("UPDATE factuur SET status = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = 'concept_klaar'").run(ov.naar, tijd, op.factuur).changes;
+    } else gewijzigd = fdb.db.prepare("UPDATE pot_afschrift SET status = 'verstuurd', bijgewerkt_op = ? WHERE id = ? AND status = 'in_wachtrij'").run(tijd, op.afschrift).changes;
+    if (gewijzigd) audit(fdb, { wie, wat: 'verzonden_gezien', object_soort: 'opdracht', object_id: op.id, entiteit: op.entiteit,
+      na: { message_id: o.message_id ? String(o.message_id).slice(0, 100) : null }, wanneer: tijd });
+    return { ok: true, gewijzigd: gewijzigd === 1 };
+  });
+}
+
 // ───────────────────────────── stukken (bestanden) ─────────────────────────────
 
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
@@ -965,7 +1072,7 @@ function health(fdb) {
 module.exports = {
   DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
-  terugdraaien, claimOpdrachten,
+  terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256,
   backup, herstel, tellingen, health,
 };

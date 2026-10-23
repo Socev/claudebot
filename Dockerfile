@@ -150,12 +150,14 @@ COPY facturen-bank.js /app/release-bootstrap/facturen-bank.js
 COPY pot-datahub.js /app/release-bootstrap/pot-datahub.js
 COPY facturen-db.js /app/release-bootstrap/facturen-db.js
 COPY facturen.js /app/release-bootstrap/facturen.js
+COPY facturen-koerier.js /app/release-bootstrap/facturen-koerier.js
 COPY facturen-ingang.js /app/release-bootstrap/facturen-ingang.js
 COPY bewaker.js /app/release-bootstrap/bewaker.js
 COPY studio.js /app/release-bootstrap/studio.js
 COPY bandjes.js /app/release-bootstrap/bandjes.js
 COPY harvester.js /app/release-bootstrap/harvester.js
 COPY secondbrain.js /app/release-bootstrap/secondbrain.js
+COPY ideeen.js /app/release-bootstrap/ideeen.js
 COPY audio.js /app/release-bootstrap/audio.js
 COPY spreektekst.js /app/release-bootstrap/spreektekst.js
 
