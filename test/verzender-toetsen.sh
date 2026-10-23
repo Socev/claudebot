@@ -14,14 +14,15 @@ const OUD = 'oud-geheim-mailconcept', NIEUW = 'nieuw-verzendgeheim';
 const PDF = Buffer.from('%PDF-1.3\n...\n%%EOF');
 async function draai(body, files, o) {
   o = o || {};
-  const src = (o.code || code).replace('const nu = Date.now();', `const nu = ${o.nu || Date.parse('2026-11-02T08:30:00Z')};`).replace("const VERSTUREN_GEHEIM_SHA = '675ccb2c6d979175f015301fb6b6614ccc2952f5f2f7a855a0262fd7b84019c9'", `const VERSTUREN_GEHEIM_SHA = '${crypto.createHash('sha256').update(NIEUW).digest('hex')}'`);
+  const src = (o.code || code).replace('const nu = Date.now();', `const nu = ${o.nu || Date.parse('2026-11-02T08:30:00Z')};`);
   const binary = {};
   (files || []).forEach((f, i) => { binary['b' + i] = { fileName: f.naam, data: 'x' }; });
-  const item = { json: { body }, binary: files && files.length ? binary : undefined };
+  // zoals de workflow: IF *Verzendgeheim?* (sha256) → *Merk verzendgeheim* zet json.verzendgeheim; een veld in body telt niet
+  const item = { json: Object.assign({ body }, body.secret === NIEUW ? { verzendgeheim: true } : {}), binary: files && files.length ? binary : undefined };
   const sd = o.sd || {};
   const f = new Function('$input', '$getWorkflowStaticData', 'require', `return (async function () {\n${src}\n}).call(this);`);
   const ctx = { helpers: { getBinaryDataBuffer: async (i, k) => files[Number(k.slice(1))].bytes } };
-  const uit = await f.call(ctx, { first: () => item }, () => sd, require);
+  const uit = await f.call(ctx, { first: () => item }, () => sd, (m) => { throw new Error(`Module '${m}' is disallowed`); });   // n8n-taakomgeving: geen require
   return uit[0];
 }
 const pot = (x) => Object.assign({ secret: NIEUW, bron: 'pot', modus: 'versturen', ref: 'POT12', aan: 'praktijkmanager@huisartskortegeer.nl', onderwerp: 'Factuur SLOEL - Correctie doorbelaste huur 2026', bericht: 'Hallo allen,\n\nBij deze ...', van: '"David Schaap" <dokterschaap@gmail.com>' }, x);
@@ -30,6 +31,9 @@ const een = [{ naam: 'SLOEL - 2026033 - Huisartsenpraktijk Korte Geer.pdf', byte
   let r = await draai(pot(), een);
   toets('pot + eigen geheim + adres op de lijst → in orde, pad pot, één bijlage', r.json.toets.fout === null && r.json.toets.pad === 'pot' && r.json.toets.aantal === 1 && r.binary.bijlage_0.mimeType === 'application/pdf' && r.json.van === '"David Schaap" <dokterschaap@gmail.com>', r.json);
   toets('het geheim gaat niet verder de workflow in', !JSON.stringify(r.json).includes(NIEUW));
+  r = await draai(pot({ secret: OUD, verzendgeheim: true }), een);
+  toets('verzendgeheim als veld in de body meesturen telt niet → 401', r.json.toets.status === 401, r.json.toets);
+  toets('Toetsen gebruikt geen require (n8n staat crypto niet toe)', !/\brequire\s*\(/.test(code.replace(/\/\/.*$/gm, '')));
   r = await draai(pot({ secret: OUD }), een);
   toets('oud geheim + versturen (pot) → 401', r.json.toets.status === 401 && r.json.toets.code === 'secret' && !r.binary, r.json.toets);
   r = await draai({ secret: OUD, modus: 'versturen', aan: 'd.schaap+facturentest@gmail.com', token: 'FV0123456789abcdef', onderwerp: 'x [ref FV0123456789abcdef]', bericht: 'b' }, een);
@@ -80,6 +84,13 @@ const een = [{ naam: 'SLOEL - 2026033 - Huisartsenpraktijk Korte Geer.pdf', byte
   const sj = fs.readFileSync('server.js', 'utf8');
   const m = /const POT_VZ_TOETSEN_SHA = process\.env\.POT_VZ_TOETSEN_SHA_TOETS \|\| '([0-9a-f]{64})'/.exec(sj);
   toets('POT_VZ_TOETSEN_SHA in server.js = sha256 van dit bestand', m && m[1] === crypto.createHash('sha256').update(code).digest('hex'), m && m[1]);
+  const merk = fs.readFileSync('tools/n8n/facturen-verzender-merk.js', 'utf8');
+  const mm = /const POT_VZ_MERK_SHA = process\.env\.POT_VZ_MERK_SHA_TOETS \|\| '([0-9a-f]{64})'/.exec(sj);
+  toets('POT_VZ_MERK_SHA in server.js = sha256 van de merk-knoop', mm && mm[1] === crypto.createHash('sha256').update(merk).digest('hex'), mm && mm[1]);
+  const mf = new Function('$input', merk);
+  const mu = mf({ all: () => [{ json: { body: { a: 1 } }, binary: { b0: { fileName: 'x.pdf' } } }] });
+  toets('merk-knoop zet verzendgeheim buiten body en houdt de bijlage', mu.length === 1 && mu[0].json.verzendgeheim === true && mu[0].json.body.a === 1 && mu[0].binary.b0.fileName === 'x.pdf');
+  toets('server.js kent de sha256 van het verzendgeheim voor de IF-controle', /const POT_VZ_GEHEIM_SHA = '675ccb2c6d979175f015301fb6b6614ccc2952f5f2f7a855a0262fd7b84019c9'/.test(sj));
   console.log(`\n${goed} groen, ${fout} rood`);
   process.exit(fout ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

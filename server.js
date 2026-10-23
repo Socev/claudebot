@@ -15984,7 +15984,7 @@ function potVzInfo() {
 const POT_VZ_GEHEIM_NAAM = 'n8n_verzender_versturen_secret';
 // sha256 van de jsCode van de Code-knoop Toetsen in AI - Facturen-verzender, zoals gepubliceerd door wv921. Wijkt de workflow af, dan
 // verstuurt de pod niets en wordt alles concept (Fable #10). Bewuste wijziging aan de verzender = deze waarde mee wijzigen (nieuw image).
-const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '43f51008dc5061d05841f44092ab4b4528067ea3a0c59513a09d37c6b8a66426';
+const POT_VZ_TOETSEN_SHA = process.env.POT_VZ_TOETSEN_SHA_TOETS || '26adbc1d69b12eb2c997790eb5e5e94da0b72e7e4b06c7716d25994bfd241b02';
 let potVzGeheimCache = null;   // { w, tot }
 async function potVzVerzendGeheim() {
   if (potVzGeheimCache && Date.now() < potVzGeheimCache.tot) return potVzGeheimCache.w;
@@ -16001,13 +16001,21 @@ async function potVzVerzendGeheim() {
   potVzGeheimCache = { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 };
   return potVzGeheimCache.w;
 }
+// Merk-knoop en de hash in de IF *Verzendgeheim?* horen bij dezelfde grens: alleen daar ontstaat json.verzendgeheim (n8n staat crypto in
+// Code-knopen niet toe). sha256 van tools/n8n/facturen-verzender-merk.js; de IF-waarde is de (niet-geheime) sha256 van het verzendgeheim.
+const POT_VZ_MERK_SHA = process.env.POT_VZ_MERK_SHA_TOETS || '92594dfa5edd9ea7b656dd1b4a8c1f831b86c22e0de42d7fa53c0f303b6117bb';
+const POT_VZ_GEHEIM_SHA = '675ccb2c6d979175f015301fb6b6614ccc2952f5f2f7a855a0262fd7b84019c9';
 async function potVzVerzenderOk() {
   const w = await appN8n('/workflows/' + encodeURIComponent(FACTUREN_VERZENDER_WF));
   if (!w || !Array.isArray(w.nodes)) throw new Error('verzender niet te lezen');
   if (w.active !== true) return false;
-  const k = w.nodes.filter(function (x) { return x && x.name === 'Toetsen' && x.type === 'n8n-nodes-base.code'; });
-  if (k.length !== 1 || typeof k[0].parameters.jsCode !== 'string') return false;
-  return crypto.createHash('sha256').update(k[0].parameters.jsCode).digest('hex') === POT_VZ_TOETSEN_SHA;
+  const knoop = function (naam, type) { const k = w.nodes.filter(function (x) { return x && x.name === naam && x.type === type; }); return k.length === 1 ? k[0] : null; };
+  const sha = function (s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); };
+  const t = knoop('Toetsen', 'n8n-nodes-base.code'), m = knoop('Merk verzendgeheim', 'n8n-nodes-base.code'), i = knoop('Verzendgeheim?', 'n8n-nodes-base.if');
+  if (!t || !m || !i || typeof t.parameters.jsCode !== 'string' || typeof m.parameters.jsCode !== 'string') return false;
+  const c = (((i.parameters || {}).conditions || {}).conditions) || [];
+  const ifOk = c.length === 1 && c[0].rightValue === POT_VZ_GEHEIM_SHA && c[0].operator && c[0].operator.operation === 'equals' && ((i.parameters.conditions || {}).combinator === 'and');
+  return ifOk && sha(t.parameters.jsCode) === POT_VZ_TOETSEN_SHA && sha(m.parameters.jsCode) === POT_VZ_MERK_SHA;
 }
 // { bron, modus, ref, aan, cc, onderwerp, bericht, van, bijlage: { naam, bytes } } → { status, j }. Vóór de aanroep mislukt = zekerNietVerstuurd.
 async function potVzVerstuur(v) {

@@ -21,13 +21,14 @@
 // Haalt nooit iets op. Fout → { toets: { fout, code, status } } zonder binaire data; de workflow antwoordt dan met die status.
 // De pod vergelijkt vóór elke batch de sha256 van déze code met de waarde in zijn image (Fable #10): wie hier iets wijzigt, zet de
 // automatische verzending stil tot het image mee is gewijzigd.
-const crypto = require('crypto');
+// Welk geheim: de taakomgeving van deze n8n staat require('crypto') niet toe (gemeten 23-10). Daarom vergelijkt de IF *Verzendgeheim?*
+// de sha256 met een expressie, en zet de Code-knoop *Merk verzendgeheim* alleen op die tak json.verzendgeheim = true — buiten body,
+// dus een beller kan die vlag niet zelf meesturen (de webhook levert alleen headers/params/query/body).
 const AAN_TOEGESTAAN = ['d.schaap+facturentest@gmail.com', '453248tt@inkoop.exactonline.nl', '61j3j624@inkoop.exactonline.nl', 't17475m7@inkoop.exactonline.nl', '1435h6s3@inkoop.exactonline.nl', 'f13x@inkoop.exactonline.nl', 'a.schaap@actasynergia.nl', 'a8r1@inkoop.exactonline.nl']; // F5 (wv912, 23-10-2026, Davids Ja): testalias + boekhoudadressen uit de stamgegevens
 const VERSTUREN_AAN = false;
 const PER_UUR = 30;
 const MAX_AANTAL = 3, MAX_BYTES = 20 * 1024 * 1024;
 const TYPES = { pdf: 'application/pdf', xml: 'application/xml', '940': 'application/octet-stream', sta: 'application/octet-stream', mt940: 'application/octet-stream' };
-const VERSTUREN_GEHEIM_SHA = '675ccb2c6d979175f015301fb6b6614ccc2952f5f2f7a855a0262fd7b84019c9';   // wv921: sha256 van het eigen verzendgeheim
 const AAN_POT = ['praktijkmanager@huisartskortegeer.nl', 'praktijkmanager@vanmeeterenvandop.nl', 'facturen@hapleusden.nl', 'r.vreekamp@hpleusdenzuid.nl',
   'facturen@huisartsentolgaarde.nl', 'm.schoonman@gmail.com', 'd.schaap+facturentest@gmail.com'];   // wv921: Korte Geer (P01–P03), Biezenkamp, Groenhouten, Sante, Tolgaarde, Lepelaar + testalias
 const VERSTUREN_POT = true;
@@ -65,7 +66,7 @@ const adressen = (x) => String(x ?? '').split(',').map((a) => a.trim().toLowerCa
 const nu = Date.now();
 const item = $input.first();
 const { secret, ...body } = (item.json && item.json.body) || {};             // het secret gaat niet verder de workflow in
-const versturenGeheim = crypto.createHash('sha256').update(String(secret ?? '')).digest('hex') === VERSTUREN_GEHEIM_SHA;
+const versturenGeheim = item.json.verzendgeheim === true;   // alleen gezet door *Merk verzendgeheim* (IF op sha256 = die van n8n_verzender_versturen_secret)
 const bestanden = item.binary ? Object.keys(item.binary) : [];
 const binary = {}, meta = [], namen = new Set();
 let fout = null, code = null, status = 400, totaal = 0;
