@@ -9606,7 +9606,8 @@ async function appGezondheid(req, res, a, route) {
     res._app.reden += ' weg';
     return appStuur(res, r.status, r.j);
   }
-  if (r.j.fouten && r.j.fouten.length) { res._app.reden += ' half (' + r.j.fouten.map(function (f) { return f.blok; }).join(',') + ')'; delete appGezCache[route]; }
+  // half antwoord: niet bewaren, maar de laatste volle stand blijft als terugval staan (Fable wv937 diff #3)
+  if (r.j.fouten && r.j.fouten.length) res._app.reden += ' half (' + r.j.fouten.map(function (f) { return f.blok; }).join(',') + ')';
   else appGezCache[route] = { op: nu, j: r.j };
   return appStuur(res, 200, Object.assign({}, r.j, { vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }));
 }

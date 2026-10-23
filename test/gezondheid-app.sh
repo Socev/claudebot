@@ -54,6 +54,7 @@ const srv = http.createServer(function (req, res) {
   if (g === 'redirect') { res.writeHead(302, { Location: 'http://127.0.0.1:' + srv.address().port + '/gestolen' }); return res.end(); }
   if (g === 'html') { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end('<html>Access login</html>'); }
   if (g === 'traag') return setTimeout(function () { try { res.writeHead(200); res.end('{}'); } catch (e) {} }, 4000);
+  if (g === 'druppel') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('['); const t = setInterval(function () { try { res.write(' '); } catch (e) { clearInterval(t); } }, 300); setTimeout(function () { clearInterval(t); try { res.end(']'); } catch (e) {} }, 6000); return; }
   if (g === 'groot') { res.writeHead(200); return res.end('"' + 'x'.repeat(2.2 * 1024 * 1024) + '"'); }
   const a = ANTW[p];
   if (!a) { res.writeHead(404); return res.end('{}'); }
@@ -108,8 +109,8 @@ const srv = http.createServer(function (req, res) {
     s.indexOf('import_sleutel') < 0 && s.indexOf('persoon_id') < 0 && s.indexOf('vastgelegd_door') < 0);
   toets('diagnoses en medicatie gevuld', r.j.lopend.diagnoses[0].omschrijving === 'meniscusscheur' && r.j.lopend.medicatie[0].middel === 'geen');
   const k = r.j.knie;
-  toets('knie: dag, fase, rondes, laatste heelslide, medicatie per middel, ≤ 3 mijlpalen, zin', k.dag_na_ok === 3 && k.fase === 'bedrust-w1-2' && k.gedaan === 7 && k.heelslide.graden === 30 &&
-    k.medicatie[0].naam === 'Paracetamol' && k.medicatie[0].vandaag_mg === 1000 && k.mijlpalen.length === 3 && k.zin === 'Dag 3 na de operatie.', k);
+  toets('knie: dag, fase, rondes, laatste heelslide, medicatie per middel, ≤ 3 mijlpalen, geen samenvattingszin (middelnamen)', k.dag_na_ok === 3 && k.fase === 'bedrust-w1-2' && k.gedaan === 7 && k.heelslide.graden === 30 &&
+    k.medicatie[0].naam === 'Paracetamol' && k.medicatie[0].vandaag_mg === 1000 && k.mijlpalen.length === 3 && !('zin' in k), k);
   toets('knie: geen dosis_mg per inname, geen herinneringen of notities', !('dosis_mg' in k.medicatie[0]) && !('herinneringen' in k) && s.indexOf('"notities"') < 0);
   toets('totaal en advies (adviezen alleen bij advies)', r.j.totaal.beweringen.length === 1 && !('adviezen' in r.j.totaal) && r.j.advies.adviezen[0].advies === 'bespreek X');
   toets('links vast', r.j.links.pod === 'https://health.primumnonnocere.olares.com/' && r.j.links.knie === 'https://knie.socev.dev/');
@@ -147,12 +148,18 @@ const srv = http.createServer(function (req, res) {
   const t0 = Date.now();
   r = await maak().overzicht();
   toets('tijdgrens per aanroep (1,5 s in de toets)', r.status === 200 && fb('metingen') === 'tijdgrens' && Date.now() - t0 < 3500, { ms: Date.now() - t0, f: r.j.fouten });
+  gedrag = { '/diagnoses': 'druppel' };
+  const t1 = Date.now();
+  r = await maak().overzicht();
+  toets('totaalgrens: een druppelend antwoord stopt na de grens (Fable diff #2)', fb('diagnoses') === 'tijdgrens' && Date.now() - t1 < 3500, { ms: Date.now() - t1, f: r.j.fouten });
   gedrag = { '/gebeurtenissen': 'groot' };
   r = await maak().overzicht();
   toets('bodylimiet 2 MB', fb('gebeurtenissen') === 'te groot', r.j.fouten);
   gedrag = {};
   r = await maak({ HEALTH_POD_SLEUTELS: path.join(W, 'bestaat-niet.env') }).overzicht();
   toets('sleutelbestand weg → 503 zonder pad of melding van het OS', r.status === 503 && JSON.stringify(r).indexOf('bestaat-niet') < 0, r);
+  { const m3 = maak(); log.length = 0; await Promise.all([m3.overzicht(), m3.genoom()]);
+    toets('Overzicht en Genoom tegelijk: /rapporten één keer (Fable diff #12)', log.filter((x) => x.pad === '/rapporten').length === 1, log.map((x) => x.pad)); }
   // rapportencache 30 min
   const m2 = maak(); log.length = 0;
   await m2.overzicht(); klok += 29 * 60000; await m2.genoom(); const n1 = log.filter((x) => x.pad === '/rapporten').length;
@@ -172,7 +179,7 @@ const srv = http.createServer(function (req, res) {
   let nep = { aanroepen: 0, volgende: null };
   const ctx = { require: function (p) { if (/gezondheid-app\.js$/.test(p)) return { maak: function () { return {
     overzicht: async function () { nep.aanroepen++; return nep.volgende; }, genoom: async function () { nep.aanroepen++; return nep.volgende; }, health: function () { return { aan: true }; } }; } }; return require(p); },
-    path: path, fs: { existsSync: function () { return true; } }, __dirname: __dirname, logError: function () {}, Date: Date, Object: Object, Error: Error, JSON: JSON,
+    path: path, fs: { existsSync: function () { return true; } }, __dirname: __dirname, process: { env: {} }, logError: function () {}, Date: Date, Object: Object, Error: Error, JSON: JSON,
     appStuur: function (res, st, o) { antw.push({ st: st, o: o }); }, appWeiger: function (res, st, f, reden) { res._app.reden = reden; antw.push({ st: st, o: { ok: false, fout: f } }); } };
   vm.createContext(ctx); vm.runInContext(blok, ctx);
   const res = () => ({ _app: {} });
@@ -199,6 +206,21 @@ const srv = http.createServer(function (req, res) {
   const n = nep.aanroepen;
   await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid');
   toets('half antwoord niet bewaren, auditreden noemt het blok', antw[0].st === 200 && nep.aanroepen === n + 1 && /half \(knie\)/.test(rs._app.reden), rs._app.reden);
+  // terugval blijft na een half antwoord (Fable diff #3): volle stand, dan half, dan pod weg → de volle stand met oud
+  Date.now = () => echtNu() + 40 * 60000;
+  nep.volgende = { status: 200, j: { ok: true, metingen: [3], fouten: [] } };
+  await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid');
+  Date.now = () => echtNu() + 42 * 60000;
+  nep.volgende = { status: 200, j: { ok: true, metingen: [4], fouten: [{ blok: 'knie', soort: 'geen json' }] } };
+  await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid');
+  nep.volgende = { status: 503, j: { ok: false, fout: 'weg', pod_weg: true } };
+  antw = [];
+  await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid');
+  toets('half antwoord wist de terugval niet', antw[0].st === 200 && antw[0].o.oud === true && antw[0].o.metingen[0] === 3, antw[0]);
+  // module niet in de release → 404
+  vm.runInContext('appGezMod = null;', ctx); antw = [];
+  await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid');
+  toets('gezondheid-app.js ontbreekt → 404 met nette zin', antw[0].st === 404 && /niet in deze versie/.test(antw[0].o.fout), antw[0]);
   Date.now = echtNu;
   srv.close();
   console.log((fouten ? 'ROOD' : 'GROEN') + ': ' + goed + ' goed, ' + fouten + ' fout');

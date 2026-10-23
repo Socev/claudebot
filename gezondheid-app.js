@@ -74,12 +74,15 @@ function haal(basis, pad, koppen, ms) {
     try { u = new URL(basis.replace(/\/$/, '') + pad); } catch (e) { return faal(new GezFout('adres')); }
     const mod = u.protocol === 'https:' ? https : http;
     let af = false;
+    // Totaalgrens (Fable wv937 diff #2): `timeout` van http.request is een stilte-grens; een druppelend antwoord houdt hem anders open.
+    const klok = setTimeout(function () { if (af) return; af = true; req.destroy(); faal(new GezFout('tijdgrens')); }, ms);
     const req = mod.request(u, { method: 'GET', headers: Object.assign({ Accept: 'application/json', 'User-Agent': 'socev-app-gezondheid' }, koppen), timeout: ms },
       function (res) {
         const st = res.statusCode || 0;
         let n = 0; const delen = [];
-        res.on('data', function (c) { n += c.length; if (n > MAX_BYTES) { af = true; req.destroy(); return faal(new GezFout('te groot')); } delen.push(c); });
+        res.on('data', function (c) { if (af) return; n += c.length; if (n > MAX_BYTES) { af = true; clearTimeout(klok); req.destroy(); return faal(new GezFout('te groot')); } delen.push(c); });
         res.on('end', function () {
+          clearTimeout(klok);
           if (af) return;
           if (st >= 300 && st < 400) return faal(new GezFout('weigert'));   // een redirect volgen we nooit
           if (st === 502 || st === 503 || st === 504) return faal(new GezFout('weg'));
@@ -88,10 +91,10 @@ function haal(basis, pad, koppen, ms) {
           try { j = JSON.parse(Buffer.concat(delen).toString('utf8')); } catch (e) { return faal(new GezFout('geen json')); }   // Access-loginpagina e.d.
           klaar(j);
         });
-        res.on('error', function () { if (!af) { af = true; faal(new GezFout('weg')); } });
+        res.on('error', function () { clearTimeout(klok); if (!af) { af = true; faal(new GezFout('weg')); } });
       });
-    req.on('timeout', function () { af = true; req.destroy(); faal(new GezFout('tijdgrens')); });
-    req.on('error', function () { if (!af) { af = true; faal(new GezFout('weg')); } });
+    req.on('timeout', function () { clearTimeout(klok); if (af) return; af = true; req.destroy(); faal(new GezFout('tijdgrens')); });
+    req.on('error', function () { clearTimeout(klok); if (!af) { af = true; faal(new GezFout('weg')); } });
     req.end();
   });
 }
@@ -168,7 +171,6 @@ function knieBlok(k) {
     medicatie: lijst(med.per_middel).slice(0, 8).map((m) => ({ naam: tekst(m.naam, 60), vandaag_aantal: heel(m.vandaag_aantal), vandaag_mg: getal(m.vandaag_mg),
       laatste: m.laatste && typeof m.laatste === 'object' ? { datum: tekst(m.laatste.datum, 20), tijd: tekst(m.laatste.tijd, 10) } : null })),
     mijlpalen: lijst(k.komende_mijlpalen).slice(0, 3).map((m) => ({ datum: tekst(m.datum, 20), titel: tekst(m.titel, 200), ongeveer: !!(m && m.ongeveer) })),
-    zin: tekst(k.tekst, 1200),
   };
 }
 
@@ -203,9 +205,11 @@ function maak(opts) {
     if (!s.KNIE_APP_ACCESS_CLIENT_ID || !s.KNIE_APP_ACCESS_CLIENT_SECRET) return Promise.reject(new GezFout('sleutel'));
     return haal(knieBasis, '/api/samenvatting', { 'CF-Access-Client-Id': s.KNIE_APP_ACCESS_CLIENT_ID, 'CF-Access-Client-Secret': s.KNIE_APP_ACCESS_CLIENT_SECRET }, ms);
   }
+  let rapLoopt = null;             // lopende aanroep: Overzicht en Genoom tegelijk = één keer /rapporten (Fable diff #12)
   function rapporten() {
     if (rapCache && nu() - rapCache.op < RAPPORT_MS) return Promise.resolve(rapCache.j);
-    return pod('/rapporten').then(function (j) { rapCache = { op: nu(), j: j }; return j; });
+    if (!rapLoopt) rapLoopt = pod('/rapporten').then(function (j) { rapCache = { op: nu(), j: j }; return j; }).finally(function () { rapLoopt = null; });
+    return rapLoopt;
   }
   // Elk blok apart: een fout maakt alleen dat blok leeg en noemt de soort (geen foutbody, geen inhoud in de log).
   async function blokken(spec) {
