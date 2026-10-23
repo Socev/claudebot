@@ -152,6 +152,23 @@ jobs:
           fi
           echo "facturen.js: alleen lokaal."
 
+      # facturen-ingang.js (wv856, F6): de smalle ingang /fac voor de praktijkmanager. Geen netwerk- of procesmodule, geen fetch en geen
+      # console (de certs van Access komen uit server.js); de gebruikers-JWT en het Access-bewijs gaan alleen naar controleerJwt, nooit
+      # in een log, audit of antwoord (Fable wv856 #3).
+      - name: facturen-ingang.js moet lokaal blijven en geen JWT doorgeven
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' facturen-ingang.js)
+          if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\(|console\."; then
+            echo "::error::facturen-ingang.js laadt een netwerk- of procesmodule of logt naar de console"; exit 1
+          fi
+          if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypto)'\)$"; then
+            echo "::error::facturen-ingang.js laadt een module buiten fs, path en crypto"; exit 1
+          fi
+          if echo "$C" | grep -niE "x-fac-gebruiker|cf-access-jwt-assertion" | grep -vE "controleerJwt\(String\(req\.headers\['(x-fac-gebruiker|cf-access-jwt-assertion)'\]"; then
+            echo "::error::facturen-ingang.js gebruikt een JWT-kop buiten controleerJwt"; exit 1
+          fi
+          echo "facturen-ingang.js: alleen lokaal; JWT-koppen alleen naar controleerJwt."
+
       # De witte lijst en de handtekeningcontrole echt toetsen (nagebootste bunq en Enable Banking op 127.0.0.1); node:sqlite
       # vraagt Node 22 (zelfde hoofdversie als de pod).
       - uses: actions/setup-node@v4
@@ -183,6 +200,7 @@ jobs:
           bash test/facturen-bank.sh   # wv798: bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
           bash test/facturen-db.sh   # wv824: opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
           bash test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
+          bash test/facturen-ingang.sh   # wv856: smalle ingang /fac — poortgeheim, servicetoken- en gebruikers-JWT, nooit eigenaar, praktijkmanager-scope, uploads, audit
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
       - name: "studio (wv707, tab Studio fase 1)"
         run: bash test/studio.sh

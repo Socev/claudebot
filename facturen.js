@@ -65,18 +65,19 @@ function vraagId(d, k) { const v = String(d && d[k] || ''); if (!ID_RE.test(v)) 
 
 /*
  * Rol bij een ingang. 'app' = Davids app-sessie (bestaande app-poort: Access + apparaat + vingerafdruk) = eigenaar, alle entiteiten.
- * 'fac' = de smalle ingang van F6 (bouwplan § 4.3): de gebruiker uit de tabel (actief), rol en entiteiten uit gebruiker_entiteit; een
- * praktijkmanager ziet nooit Privé (ook als de tabel iets anders zou zeggen). Onbekend → null (403).
+ * 'fac' = de smalle ingang van F6 (bouwplan § 4.3; facturen-ingang.js): de gebruiker uit de tabel (actief), entiteiten uit
+ * gebruiker_entiteit. Via 'fac' altijd praktijkmanager (wv856: die ingang kent geen passkey; de database weigert sinds migratie 3 ook een
+ * fac-rij met een andere rol) en nooit Privé, ook als de tabel iets anders zou zeggen. Onbekend → null (403).
  */
 function rolVoor(fdb, o) {
   o = o || {};
   if (o.ingang === 'app') return { soort: 'eigenaar', wie: kort(o.wie || 'david', 100), entiteiten: null, ingang: 'app' };
   if (o.ingang !== 'fac' || !o.email) return null;
-  const g = fdb.db.prepare("SELECT id, rol, actief FROM gebruiker WHERE email = ? AND ingang = 'fac'").get(String(o.email).toLowerCase());
+  const g = fdb.db.prepare("SELECT id, rol, actief, mag_bevestigen FROM gebruiker WHERE email = ? AND ingang = 'fac'").get(String(o.email).trim().toLowerCase());
   if (!g || g.actief !== 1) return null;
   const ents = fdb.db.prepare('SELECT entiteit FROM gebruiker_entiteit WHERE gebruiker = ?').all(g.id).map((r) => r.entiteit);
-  if (g.rol === 'eigenaar') return { soort: 'eigenaar', wie: kort(o.email, 100), entiteiten: null, ingang: 'fac' };
-  return { soort: 'praktijkmanager', wie: kort(o.email, 100), entiteiten: ents.filter((e) => e !== 'prive'), ingang: 'fac' };
+  return { soort: 'praktijkmanager', wie: kort(String(o.email).trim().toLowerCase(), 100), id: g.id, entiteiten: ents.filter((e) => e !== 'prive'), ingang: 'fac',
+    mag_bevestigen: g.mag_bevestigen === 1 };
 }
 const isEig = (r) => r.soort === 'eigenaar';
 function eisEigenaar(r) { if (!isEig(r)) weiger(403, 'alleen de eigenaar'); }
@@ -203,6 +204,9 @@ function overzicht(fdb, r, nu) {
       mislukt: tel("f.status = 'verzending_mislukt'", []),
     },
     gezondheid: gezondheid(fdb, r, nu),
+    // wv856 (Fable #9b): de namen van de eigen entiteiten, want Instellingen (waar de eigenaar ze vandaan haalt) is alleen voor de eigenaar
+    entiteiten: isEig(r) ? undefined : entiteitenRijen(fdb).filter((e) => e.actief === 1 && magEntiteit(r, e.sleutel))
+      .map((e) => ({ sleutel: e.sleutel, naam: e.naam, naam_kort: e.naam_kort || null })),
   };
 }
 // Bovenbalk rechts: bron zonder ronde in > 26 u = rood; per rekening dagen sinds de laatste upload of bankluis-ronde (oranje/rood).
@@ -373,6 +377,7 @@ function instellingen(fdb, r) {
  */
 function bevestig(fdb, r, d, nu) {
   const id = vraagId(d, 'id');
+  if (r.mag_bevestigen === false) weiger(403, 'bevestigen staat voor jou uit; vraag het David');   // wv856: gebruiker.mag_bevestigen
   return D.transactie(fdb, function () {
     const f = factuurOf404(fdb, r, id);
     if (d.versie !== undefined && d.versie !== f.versie) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw', { versie: f.versie });
@@ -448,6 +453,8 @@ function nagebeld(fdb, r, d, nu, o) {
     const poort = poortVoor(fdb, f, ctx);
     const ip = K.ibanPoort(f, poort.leverancier, ctx);
     if (!ip.iban_nieuw) weiger(409, 'deze factuur heeft geen nieuw IBAN');
+    // wv856: de fraudepoort vraagt een verse vingerafdruk; de smalle ingang heeft die niet, dus nabellen bevestigt David in zijn app
+    if (r.ingang === 'fac') weiger(403, 'een nieuw rekeningnummer zet David na het nabellen vrij, in zijn eigen app', { alleen_david: true });
     if (!o.versOk()) weiger(403, 'bevestig met je vingerafdruk', { vers_nodig: true });
     o.versVerbruik();
     const wanneer = nuIso(nu);

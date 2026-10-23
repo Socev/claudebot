@@ -527,9 +527,22 @@ INSERT INTO meta (sleutel, waarde) VALUES ('verzendmodus', 'concept');
 INSERT INTO meta (sleutel, waarde) VALUES ('verstuur_instelling', '{"soort":"uur"}');
 `;
 
+// wv856 (F6, Fable #1): via de smalle ingang ('fac', geen passkey) nooit eigenaar — in de database, niet alleen in facturen.js; en het
+// e-mailadres van een fac-gebruiker staat er altijd in kleine letters zonder witruimte (zo vindt rolVoor hem, en nooit een tweede rij).
+const M3 = `
+UPDATE gebruiker SET rol = 'praktijkmanager' WHERE ingang = 'fac' AND rol <> 'praktijkmanager';
+CREATE TRIGGER gebruiker_fac_rol BEFORE INSERT ON gebruiker
+WHEN NEW.ingang = 'fac' AND (NEW.rol <> 'praktijkmanager' OR NEW.email IS NULL OR NEW.email <> lower(trim(NEW.email)))
+BEGIN SELECT RAISE(ABORT, 'gebruiker_fac: via de smalle ingang alleen praktijkmanager, met een e-mailadres in kleine letters'); END;
+CREATE TRIGGER gebruiker_fac_rol_upd BEFORE UPDATE OF ingang, rol, email ON gebruiker
+WHEN NEW.ingang = 'fac' AND (NEW.rol <> 'praktijkmanager' OR NEW.email IS NULL OR NEW.email <> lower(trim(NEW.email)))
+BEGIN SELECT RAISE(ABORT, 'gebruiker_fac: via de smalle ingang alleen praktijkmanager, met een e-mailadres in kleine letters'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
+  { versie: 3, naam: 'smalle ingang: fac-gebruiker alleen praktijkmanager (wv856)', sql: M3 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',

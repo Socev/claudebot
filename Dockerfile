@@ -150,6 +150,7 @@ COPY facturen-bank.js /app/release-bootstrap/facturen-bank.js
 COPY pot-datahub.js /app/release-bootstrap/pot-datahub.js
 COPY facturen-db.js /app/release-bootstrap/facturen-db.js
 COPY facturen.js /app/release-bootstrap/facturen.js
+COPY facturen-ingang.js /app/release-bootstrap/facturen-ingang.js
 COPY bewaker.js /app/release-bootstrap/bewaker.js
 COPY studio.js /app/release-bootstrap/studio.js
 COPY bandjes.js /app/release-bootstrap/bandjes.js

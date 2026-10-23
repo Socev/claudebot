@@ -3514,6 +3514,7 @@ function handleRequest(req, res) {
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
+      facturen_ingang: facturenIngangInfo(),   // wv856: smalle ingang /fac (ingericht?, uit?; geen inhoud, geen gebruikers)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
       server: SERVER_ECHT ? { echt: true, paden: { home: serverPaden.home, io: serverPaden.io, jobout: serverPaden.jobout } }
@@ -13205,6 +13206,26 @@ async function appBandjes(req, res, a, s, d, route) {
 }
 // ── einde bandjes ──
 
+// ── Facturen-app, smalle ingang voor de praktijkmanager (wv856, F6, 23-10-2026; bouwplan § 4.3 en § 7) ──
+// /fac/* = de eigen pod-ingang van facturen.socev.dev (eigen Access-app met Google-login, eigen doorgeef-Function, eigen servicetoken en
+// poortgeheim): alleen Facturen-routes, altijd als praktijkmanager (geen Privé, geen POT-rekening, geen Instellingen, geen eigenaar, geen
+// verse vingerafdruk). Sloten en waarom: facturen-ingang.js. Config in FACTUREN_DIR/ingang/ (config.json + geheim/poort.key, gezet door
+// tools/tunnel-inrichten.js facturen na Davids Ja); zonder config is /fac 404 (slapend). Uploads lopen via appUpload met een eigen map
+// per gebruiker ('fac-<id>'), daarna neemt POST /fac/facturen/upload het bestand over (facturenUploadNeem).
+const facturenIngang = (function () {
+  const p = path.join(__dirname, 'facturen-ingang.js');
+  if (!facturenRoutes || !fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ dir: FACTUREN_DIR, appUit: APP_UIT, appAud: function () { return appConfig().aud; },
+      certs: function (team, kid) { return appCerts({ team: team }, kid); }, routes: facturenRoutes, open: facturenOpen, primair: rolPrimair,
+      body: function (req, cb) { appBody(req, function (fout, d) { cb(fout, d); }); },
+      upload: function (req, res, pseudo, rest) { return appUpload(req, res, null, pseudo, rest); },
+      uploadNeem: facturenUploadNeem, stuur: appStuur, bankluisPad: FACTUREN_BANKLUIS, fout: logError });
+  } catch (e) { logError('facturen-ingang', e); return null; }
+})();
+function facturenIngangIsPad(req) { const p = reqPath(req); return p === '/fac' || p.indexOf('/fac/') === 0; }
+function facturenIngangInfo() { if (!facturenIngang) return { aan: false }; try { return Object.assign({ aan: true }, facturenIngang.info()); } catch (e) { return { aan: true, fout: true }; } }
+
 // ── Harvester (wv820, 22-10-2026; bouwplan "01_Ontwikkeling/Harvester - ideeën oogsten (bouwplan 22-10-2026).md") ──
 // App Harvester: ideeën van gevolgde bronnen (RSS/Atom) met een cijfer voor gaaf, handig en complex; "Naar Broedstoof" zet een idee
 // geparkeerd op de Ideeënbus. Logica in harvester.js; hier de koppeling: routes /app/harvester(*) na de app-poort, POST
@@ -13552,6 +13573,10 @@ const server = http.createServer(function (req, res) {
     if (autoIsInternPad(req)) return autoIntern(req, res);
     if (sleutelportaalIsPad(req)) return sleutelportaal(req, res);
     if (appIsPad(req)) return handleApp(req, res);
+    if (facturenIngangIsPad(req)) {   // wv856: smalle ingang Facturen (praktijkmanager); zonder module 404, nooit door naar handleRequest
+      if (facturenIngang) return facturenIngang.verwerk(req, res);
+      req.resume(); res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); return res.end('{"ok":false,"fout":"onbekend"}');
+    }
     if (telIsPad(req)) return handleTel(req, res);   // wv264: spraak via de telefoon (Tasker)
     if (berichtIsPad(req)) return berichtRoute(req, res);   // wv263: bericht aan David (intern, API_SECRET)
     if (bankIsPad(req)) return bankTerug(req, res);   // wv680: terugkeer van de bank na koppelen (bank.socev.dev)

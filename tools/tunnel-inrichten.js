@@ -50,6 +50,18 @@
  *   node tools/tunnel-inrichten.js bank                 Bankluis (wv680, 20-10-2026): bank.socev.dev, alleen GET /bank/terug naar de pod
  *       (geen Access: de bank stuurt Davids browser terug; de pod laat alleen een bekende, onverbruikte state door).
  *       a. ingress (eerst de deur); b. DNS bank.socev.dev -> tunnel; c. toets. Bouwplan bankkoppeling § 5.3.
+ *   FAC_EMAILS=<adres>,<adres> [FAC_ALLEEN_KIJKEN=<adres>] node tools/tunnel-inrichten.js facturen [--droog]
+ *                                                       Facturen-app F6 (wv856, 23-10-2026): smalle ingang voor de praktijkmanager.
+ *       Alleen na Davids Ja (nieuwe Access-apps, servicetoken en DNS) en pas als Facturen live is (F5). --droog: alleen lezen en tonen.
+ *       a. Pages-project socev-facturen (zoeken of aanmaken); b. servicetoken "Facturen-ingang Functions" (1 jaar) -> Pages-secrets
+ *          FAC_POD_CLIENT_ID/_SECRET + /opt/data/facturen/ingang/geheim/servicetoken.json (0600; na een groene toets het geheim eraf);
+ *       c. poortgeheim ingang/geheim/poort.key (0600) -> Pages-secret FAC_POORT_SECRET; d. Pages-secret FAC_TOEGESTAAN = FAC_EMAILS;
+ *       e. Access-app op fac-pod.socev.dev: ALLEEN dat servicetoken (kale 401); f. Access-app op facturen.socev.dev: alleen Google-login,
+ *          policy = precies FAC_EMAILS, sessie 8 u (Fable wv856 #2); g. ingang/config.json (team, twee aud's, client-id; geen geheimen);
+ *       h. DNS fac-pod -> tunnel, ingress alleen ^/fac/ met het Access-bewijs als tweede slot (Fable wv856 #7); i. custom domain
+ *          facturen.socev.dev op het Pages-project (+ CNAME); j. gebruikers in de facturendatabase (tools/facturen-gebruiker.js zet; een
+ *          adres in FAC_ALLEEN_KIJKEN zonder Bevestigen); k. toets. De site zelf: npm run deploy:facturen in /opt/data/socev-app.
+ *       Eén bron voor de adressen (FAC_EMAILS): Access-policy, Pages-secret en tabel gebruiker worden alle drie gezet en vergeleken.
  *   --editor bestaat niet meer (6-10-2026): geen editor en geen inlogpagina onder huisdokter.dev (phishingvlag Google).
  *
  * Nooit `cloudflared tunnel route dns` (kaapt het record); DNS gaat hier via de API.
@@ -98,6 +110,17 @@ const QWEN_ACCESS_NAAM = 'Briefwijzer → eigen server (alleen servicetoken)';
 const QWEN_MODEL = 'unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL';
 const QWEN_GEHEIM = 'eemwerk-servicetoken.json';
 const EEMWERK = '/opt/data/mk-scripts/eemwerk';
+// Facturen-app F6 (wv856): smalle ingang voor de praktijkmanager. Geheimen en config onder /opt/data/facturen/ingang (niet in
+// socev-app-data: daar schrijft de machinekamer alleen koppel-heropend en herstel-vervalt).
+const FAC_SITE = 'facturen.socev.dev';
+const FAC_POD = 'fac-pod.socev.dev';
+const FAC_PAGES = 'socev-facturen';
+const FAC_REPO = '/opt/data/socev-app';
+const FAC_INGANG = path.join(process.env.FACTUREN_DIR || '/opt/data/facturen', 'ingang');
+const FAC_GEHEIM = path.join(FAC_INGANG, 'geheim');
+const FAC_ST_NAAM = 'Facturen-ingang Functions';
+const FAC_POD_ACCESS_NAAM = 'Facturen pod-ingang (alleen servicetoken)';
+const FAC_SITE_ACCESS_NAAM = 'Facturen voor de praktijkmanager (facturen.socev.dev)';
 const BIN = '/opt/data/bin/cloudflared';
 const LOG = '/opt/data/bin/tunnel.log';
 const METRICS = '127.0.0.1:' + (process.env.TUNNEL_METRICS_POORT || '20241');   // zelfde poort als server.js (los-proces-herkenning)
@@ -120,6 +143,9 @@ function ingress() {
   const qwenAud = (function () { try { return JSON.parse(appGeheimLees('qwen-config.json')).access_aud || ''; } catch (e) { return ''; } })();
   const qwenOrigin = { service: 'https://' + QWEN_ORIGIN_HOST, originRequest: { httpHostHeader: QWEN_ORIGIN_HOST, originServerName: QWEN_ORIGIN_HOST,
     access: { required: true, teamName: TEAM.replace(/^https:\/\/|\.cloudflareaccess\.com$/g, ''), audTag: [qwenAud] } } };
+  // Facturen-ingang (wv856): pas doorlaten als de inrichting er is; cloudflared eist dan zelf het Access-bewijs van fac-pod (tweede slot).
+  const facAud = (function () { try { return JSON.parse(fs.readFileSync(path.join(FAC_INGANG, 'config.json'), 'utf8')).aud_pod || ''; } catch (e) { return ''; } })();
+  const facOrigin = { service: 'http://localhost:8080', originRequest: { access: { required: true, teamName: TEAM.replace(/^https:\/\/|\.cloudflareaccess\.com$/g, ''), audTag: [facAud] } } };
   // Eerst: elk pad met een '..'-segment dicht. cloudflared matcht op het gedecodeerde pad zonder dot-segmenten op te
   // lossen, dus '/webhook/../rest/settings' en '/webhook/%2e%2e/rest' zouden anders op de webhook-regel passen en pas
   // achter de Olares-ingang tot '/rest/...' genormaliseerd worden (review Fable 6-10).
@@ -146,6 +172,10 @@ function ingress() {
     { hostname: BANK, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
     { hostname: BANK, path: '^/bank/terug$', service: 'http://localhost:8080' },
     { hostname: BANK, service: 'http_status:404' },
+    // Facturen-ingang (wv856): alleen /fac/<kleine letters, cijfers, / en ->, en alleen met het Access-bewijs van fac-pod.
+    { hostname: FAC_POD, path: '/\\.\\.(/|\\\\|$)', service: 'http_status:404' },
+  ]).concat(/^[0-9a-f]{64}$/.test(facAud) ? [Object.assign({ hostname: FAC_POD, path: '^/fac/[a-z0-9/-]{1,64}$' }, facOrigin)] : []).concat([
+    { hostname: FAC_POD, service: 'http_status:404' },
   ]).concat(qwenAud ? [Object.assign({ hostname: QWEN, path: '^/v1/(chat/completions|models)$' }, qwenOrigin)] : []).concat([
     { hostname: QWEN, service: 'http_status:404' },
     { service: 'http_status:404' },
@@ -460,6 +490,208 @@ function qwenGeheimWissen() {
   console.log('tokengeheim ' + QWEN_ST_NAAM + ' van de pod gewist (alleen nog Worker-secret)');
 }
 
+// ── Facturen-app F6, stap facturen (wv856) ──
+// Alleen na Davids Ja en na F5 (bouwplan Facturen-app § 4.3, § 7). FAC_EMAILS is de enige bron voor de adressen.
+const FAC_DROOG = process.argv.includes('--droog');
+function facGeheimLees(naam) { try { return fs.readFileSync(path.join(FAC_GEHEIM, naam), 'utf8'); } catch (e) { return null; } }
+function facGeheimSchrijf(naam, inhoud) {
+  fs.mkdirSync(FAC_GEHEIM, { recursive: true, mode: 0o700 });
+  fs.chmodSync(FAC_INGANG, 0o700); fs.chmodSync(FAC_GEHEIM, 0o700);
+  const f = path.join(FAC_GEHEIM, naam), tmp = f + '.nieuw';
+  fs.writeFileSync(tmp, inhoud, { mode: 0o600 });
+  fs.renameSync(tmp, f);
+}
+function facAdressen() {
+  const lijst = String(process.env.FAC_EMAILS || '').split(',').map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
+  if (!lijst.length || lijst.length > 4) throw new Error('FAC_EMAILS: 1 tot 4 adressen, met komma (David en Cynthia)');
+  for (const e of lijst) if (!/^[^\s@,]+@[^\s@,]+\.[a-z]{2,}$/.test(e)) throw new Error('FAC_EMAILS: geen geldig adres');
+  const kijk = String(process.env.FAC_ALLEEN_KIJKEN || '').split(',').map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
+  for (const e of kijk) if (lijst.indexOf(e) < 0) throw new Error('FAC_ALLEEN_KIJKEN: adres staat niet in FAC_EMAILS');
+  return { lijst: Array.from(new Set(lijst)).sort(), kijk: kijk };
+}
+const masker = function (e) { const i = e.indexOf('@'); return e[0] + '…' + e.slice(i); };
+function facPagesGezet() { try { return JSON.parse(facGeheimLees('pages-gezet.json') || '{}'); } catch (e) { return {}; } }
+// Pages-secret van socev-facturen; de waarde alleen via stdin, nooit in argv of uitvoer (zoals pagesSecret hierboven).
+function facPagesSecret(naam, waarde) {
+  if (FAC_DROOG) return console.log('DROOG pages-secret ' + naam + ' (' + FAC_PAGES + ') zou gezet worden');
+  const r = spawnSync('npx', ['--yes', 'wrangler@4', 'pages', 'secret', 'put', naam, '--project-name', FAC_PAGES], {
+    input: waarde, encoding: 'utf8', timeout: 120000, cwd: FAC_REPO,
+    env: Object.assign({}, process.env, { CLOUDFLARE_ACCOUNT_ID: ACC, WRANGLER_SEND_METRICS: 'false' }),
+  });
+  const uit = String((r.stdout || '') + (r.stderr || '')).split(waarde).join('••••');
+  if (r.status !== 0) throw new Error('pages secret ' + naam + ': wrangler exit ' + r.status + ' ' + uit.replace(/\s+/g, ' ').slice(-200));
+  const g = facPagesGezet(); g[naam] = new Date().toISOString(); facGeheimSchrijf('pages-gezet.json', JSON.stringify(g));
+  console.log('pages-secret ' + naam + ' (' + FAC_PAGES + '): gezet');
+}
+async function facSchrijf(methode, pad, body, wat) {
+  if (FAC_DROOG) { console.log('DROOG ' + methode + ' ' + wat); return null; }
+  return cf(methode, pad, body);
+}
+async function facPagesProject() {
+  const p = await cf('GET', '/accounts/' + ACC + '/pages/projects/' + FAC_PAGES).catch(function (e) { if (/HTTP 404/.test(e.message)) return null; throw e; });
+  if (p) return console.log('pages-project ' + FAC_PAGES + ' bestaat');
+  await facSchrijf('POST', '/accounts/' + ACC + '/pages/projects', { name: FAC_PAGES, production_branch: 'main' }, 'pages-project ' + FAC_PAGES + ' aanmaken');
+  if (!FAC_DROOG) console.log('pages-project ' + FAC_PAGES + ' aangemaakt');
+}
+async function facServicetoken() {
+  const lijst = await cf('GET', '/accounts/' + ACC + '/access/service_tokens');
+  const bestaand = (lijst || []).find(function (t) { return t.name === FAC_ST_NAAM; });
+  let g = null; try { g = JSON.parse(facGeheimLees('servicetoken.json') || 'null'); } catch (e) {}
+  if (bestaand) {
+    if (!g || g.client_id !== bestaand.client_id) throw new Error('servicetoken "' + FAC_ST_NAAM + '" bestaat, maar het geheimbestand hoort er niet bij - vervangen via de machinekamer (rotate), niet blind opnieuw');
+    console.log('servicetoken ' + FAC_ST_NAAM + ' bestaat (verloopt ' + bestaand.expires_at + ')');
+  } else {
+    if (g) throw new Error('geheimbestand servicetoken.json zonder token in Cloudflare - eerst met de hand opruimen');
+    if (FAC_DROOG) { console.log('DROOG servicetoken ' + FAC_ST_NAAM + ' (1 jaar) zou aangemaakt worden'); return { id: 'droog', client_id: '0'.repeat(32) + '.access' }; }
+    const t = await cf('POST', '/accounts/' + ACC + '/access/service_tokens', { name: FAC_ST_NAAM, duration: '8760h' });
+    g = { id: t.id, client_id: t.client_id, client_secret: t.client_secret, aangemaakt: new Date().toISOString(), verloopt: t.expires_at || null };
+    facGeheimSchrijf('servicetoken.json', JSON.stringify(g));   // meteen, zodat een fout hierna het geheim niet kwijtmaakt
+    console.log('servicetoken ' + FAC_ST_NAAM + ' aangemaakt (verloopt ' + (t.expires_at || '?') + ')');
+  }
+  const gz = facPagesGezet();
+  if (!gz.FAC_POD_CLIENT_ID) facPagesSecret('FAC_POD_CLIENT_ID', g.client_id);
+  if (!gz.FAC_POD_CLIENT_SECRET) {
+    if (!g.client_secret) throw new Error('servicetoken-geheim staat niet meer op de pod en FAC_POD_CLIENT_SECRET is nooit gezet - rotate');
+    facPagesSecret('FAC_POD_CLIENT_SECRET', g.client_secret);
+  }
+  return { id: g.id || bestaand.id, client_id: g.client_id };
+}
+function facPoortgeheim() {
+  const bestaand = (facGeheimLees('poort.key') || '').trim();
+  if (bestaand) { if (!facPagesGezet().FAC_POORT_SECRET) facPagesSecret('FAC_POORT_SECRET', bestaand); else console.log('poortgeheim facturen staat er al'); return; }
+  if (FAC_DROOG) return console.log('DROOG poortgeheim facturen zou aangemaakt worden');
+  const g = crypto.randomBytes(32).toString('hex');
+  facGeheimSchrijf('poort.key', g);
+  facPagesSecret('FAC_POORT_SECRET', g);
+  console.log('poortgeheim facturen aangemaakt');
+}
+async function facAccessPod(tokenId) {
+  const apps = await cf('GET', '/accounts/' + ACC + '/access/apps?per_page=100');
+  const body = { name: FAC_POD_ACCESS_NAAM, domain: FAC_POD, type: 'self_hosted', session_duration: '24h', app_launcher_visible: false,
+    auto_redirect_to_identity: false, service_auth_401_redirect: true, skip_interstitial: true,
+    policies: [{ name: 'Alleen servicetoken ' + FAC_ST_NAAM, decision: 'non_identity', precedence: 1, include: [{ service_token: { token_id: tokenId } }] }] };
+  const bestaand = (apps || []).find(function (a) { return a.domain === FAC_POD; });
+  const app = await facSchrijf(bestaand ? 'PUT' : 'POST', '/accounts/' + ACC + '/access/apps' + (bestaand ? '/' + bestaand.id : ''), body, 'access-app ' + FAC_POD);
+  if (FAC_DROOG) return bestaand ? bestaand.aud : 'a'.repeat(64);
+  if (!app || !/^[0-9a-f]{64}$/.test(app.aud || '')) throw new Error('access-app ' + FAC_POD + ': geen aud terug');
+  console.log('access-app ' + FAC_POD + ': ' + (bestaand ? 'bijgewerkt' : 'aangemaakt'));
+  return app.aud;
+}
+async function facAccessSite(adressen) {
+  const idps = await cf('GET', '/accounts/' + ACC + '/access/identity_providers');
+  const google = (idps || []).filter(function (i) { return i.type === 'google' || i.type === 'google-apps'; });
+  if (google.length !== 1) throw new Error('verwacht precies één Google-login in Access, gevonden: ' + google.length);
+  const apps = await cf('GET', '/accounts/' + ACC + '/access/apps?per_page=100');
+  const body = { name: FAC_SITE_ACCESS_NAAM, domain: FAC_SITE, type: 'self_hosted', session_duration: '8h', app_launcher_visible: false,
+    allowed_idps: [google[0].id], auto_redirect_to_identity: true, skip_interstitial: true,
+    policies: [{ name: 'Alleen de adressen uit FAC_EMAILS', decision: 'allow', precedence: 1, include: adressen.map(function (e) { return { email: { email: e } }; }) }] };
+  const bestaand = (apps || []).find(function (a) { return a.domain === FAC_SITE; });
+  const app = await facSchrijf(bestaand ? 'PUT' : 'POST', '/accounts/' + ACC + '/access/apps' + (bestaand ? '/' + bestaand.id : ''), body, 'access-app ' + FAC_SITE + ' (' + adressen.map(masker).join(', ') + ')');
+  if (FAC_DROOG) return bestaand ? bestaand.aud : 'b'.repeat(64);
+  if (!app || !/^[0-9a-f]{64}$/.test(app.aud || '')) throw new Error('access-app ' + FAC_SITE + ': geen aud terug');
+  console.log('access-app ' + FAC_SITE + ': ' + (bestaand ? 'bijgewerkt' : 'aangemaakt') + ' (Google, 8 u, ' + adressen.length + ' adressen)');
+  return app.aud;
+}
+async function facDns(naam, doel, wat) {
+  const bestaand = await cf('GET', '/zones/' + ZONE_SOCEV + '/dns_records?name=' + naam);
+  if (bestaand && bestaand.length > 1) throw new Error('dns ' + naam + ': ' + bestaand.length + ' records - eerst met de hand opruimen');
+  const body = { type: 'CNAME', name: naam, content: doel, proxied: true, comment: wat + ' (wv856, Facturen-app F6)' };
+  if (bestaand && bestaand.length && bestaand[0].content === doel) return console.log('dns ' + naam + ': staat al goed');
+  await facSchrijf(bestaand && bestaand.length ? 'PATCH' : 'POST', '/zones/' + ZONE_SOCEV + '/dns_records' + (bestaand && bestaand.length ? '/' + bestaand[0].id : ''), body, 'dns ' + naam + ' -> ' + doel);
+  if (!FAC_DROOG) console.log('dns ' + naam + ': ' + (bestaand && bestaand.length ? 'vervangen' : 'aangemaakt'));
+}
+async function facPagesDomein() {
+  const d = await cf('GET', '/accounts/' + ACC + '/pages/projects/' + FAC_PAGES + '/domains').catch(function () { return []; });
+  if ((d || []).some(function (x) { return x.name === FAC_SITE; })) return console.log('pages-domein ' + FAC_SITE + ' staat er al');
+  await facSchrijf('POST', '/accounts/' + ACC + '/pages/projects/' + FAC_PAGES + '/domains', { name: FAC_SITE }, 'pages-domein ' + FAC_SITE);
+  if (!FAC_DROOG) console.log('pages-domein ' + FAC_SITE + ' toegevoegd');
+}
+function facGebruikers(adr) {
+  const G = require(path.join(__dirname, 'facturen-gebruiker.js'));
+  for (const e of adr.lijst) {
+    if (FAC_DROOG) { console.log('DROOG gebruiker ' + masker(e) + (adr.kijk.indexOf(e) >= 0 ? ' (alleen kijken)' : '') + ' zou gezet worden'); continue; }
+    G.hoofd(['zet', e].concat(adr.kijk.indexOf(e) >= 0 ? ['--geen-bevestigen'] : []));
+  }
+}
+async function facturenStap() {
+  const adr = facAdressen();
+  if (FAC_DROOG) console.log('DROOG: alleen lezen; niets wordt aangemaakt of gewijzigd');
+  await facPagesProject();
+  const st = await facServicetoken();
+  facPoortgeheim();
+  facPagesSecret('FAC_TOEGESTAAN', adr.lijst.join(','));
+  const audPod = await facAccessPod(st.id);
+  const audGeb = await facAccessSite(adr.lijst);
+  if (!FAC_DROOG) {
+    fs.mkdirSync(FAC_INGANG, { recursive: true, mode: 0o700 });
+    const cfgPad = path.join(FAC_INGANG, 'config.json');
+    fs.writeFileSync(cfgPad + '.nieuw', JSON.stringify({ access_team: TEAM, aud_pod: audPod, aud_gebruiker: audGeb, servicetoken_client_id: st.client_id,
+      bijgewerkt: new Date().toISOString() }, null, 1), { mode: 0o600 });
+    fs.renameSync(cfgPad + '.nieuw', cfgPad);
+    console.log('ingang/config.json geschreven (aud ' + audPod.slice(0, 8) + '… en ' + audGeb.slice(0, 8) + '…)');
+  }
+  const t = await tunnelZoekOfMaak();
+  await facSchrijf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + t + '/configurations', ingress(), 'ingress (fac-pod alleen ^/fac/, met Access-bewijs)');   // eerst de deur, dan DNS
+  await facDns(FAC_POD, t + '.cfargotunnel.com', 'tunnel ' + NAAM + ' - Facturen pod-ingang');
+  await facPagesDomein();
+  await facDns(FAC_SITE, FAC_PAGES + '.pages.dev', 'Pages ' + FAC_PAGES);
+  facGebruikers(adr);
+}
+// Na een volledig groene toets: het servicetokengeheim van de pod af; alleen Pages kent het nog (Fable wv856 #10).
+function facGeheimWissen() {
+  let g = null; try { g = JSON.parse(facGeheimLees('servicetoken.json') || 'null'); } catch (e) {}
+  if (!g || !g.client_secret || !facPagesGezet().FAC_POD_CLIENT_SECRET) return;
+  delete g.client_secret; g.geheim_gewist = new Date().toISOString();
+  facGeheimSchrijf('servicetoken.json', JSON.stringify(g));
+  console.log('servicetokengeheim ' + FAC_ST_NAAM + ' van de pod gewist (alleen nog Pages-secret)');
+}
+// Facturen-ingang: /fac alleen via fac-pod, alleen met servicetoken, en de pod weigert zonder gebruikers-JWT (403). De site:
+// zonder inlog naar de Access-inlog van het team, nooit iets van de app. Niet ingericht: alleen de controle dat /fac elders dicht is.
+async function toetsFacturen(n404) {
+  let fout = 0;
+  const regel = function (goed, wat, r, extra) { if (!goed) fout++; console.log((goed ? 'GROEN ' : 'ROOD  ') + wat + '  [' + extra + ' -> ' + r.status + (r.location ? ' ' + r.location.slice(0, 50) : '') + ']'); };
+  for (const host of [N8N, SOCEV, APP_POD, BANK]) { const r = await http('GET', 'https://' + host + '/fac/wie'); regel(n404(r) || r.status === 401 || r.status === 403, '/fac niet via ' + host, r, 'GET ' + host + '/fac/wie'); }
+  let cfg = null; try { cfg = JSON.parse(fs.readFileSync(path.join(FAC_INGANG, 'config.json'), 'utf8')); } catch (e) {}
+  if (!cfg) { console.log('LET OP  Facturen-ingang nog niet ingericht (geen ingang/config.json): alleen de controle hierboven'); return fout; }
+  const U = 'https://' + FAC_POD;
+  let r = await http('GET', U + '/fac/wie');
+  regel((r.status === 401 || r.status === 403) && !r.location, 'fac-pod zonder servicetoken: Access weigert (kale 401)', r, 'GET /fac/wie');
+  const s = await http('GET', 'https://' + FAC_SITE + '/api/wie');
+  regel((s.status === 302 && /cloudflareaccess\.com/.test(s.location)) || s.status === 401 || s.status === 403, 'site zonder inlog: Access (inlog of 401)', s, 'GET ' + FAC_SITE + '/api/wie');
+  let g = null; try { g = JSON.parse(facGeheimLees('servicetoken.json') || 'null'); } catch (e) {}
+  const poort = (facGeheimLees('poort.key') || '').trim();
+  if (!g || !g.client_secret || !poort) { console.log('LET OP  servicetokengeheim staat niet op de pod (bewust gewist): de fac-pod-toetsen met token lopen niet'); return fout; }
+  const tok = { 'CF-Access-Client-Id': g.client_id, 'CF-Access-Client-Secret': g.client_secret };
+  r = await http('GET', U + '/fac/wie', tok);
+  regel(r.status === 403 && /niet toegestaan/.test(r.tekst), 'servicetoken zonder poortgeheim: pod weigert (403)', r, 'GET /fac/wie');
+  const metPoort = Object.assign({ 'X-Fac-Poort': poort }, tok);
+  r = await http('GET', U + '/fac/wie', metPoort);
+  regel(r.status === 403 && /niet toegestaan/.test(r.tekst), 'servicetoken + poortgeheim, zonder gebruikers-JWT: pod weigert (403)', r, 'GET /fac/wie');
+  for (const [m, p] of [['GET', '/app/status'], ['POST', '/run'], ['GET', '/health'], ['GET', '/'], ['GET', '/fac'], ['GET', '/FAC/wie'], ['GET', '/sleutels'], ['GET', '/tel/uit']]) {
+    r = await http(m, U + p, metPoort);
+    regel(n404(r), 'fac-pod ' + p + ' dicht in de tunnel (404)', r, m + ' ' + p);
+  }
+  for (const p of ['/fac/../app/status', '/fac/%2e%2e/run', '/fac/wie/../../health', '/fac/..%2Fapp%2Fstatus', '/fac/x/..\\run']) {
+    r = await rauw('GET', FAC_POD, p, metPoort);
+    regel(r.status === 404 || r.status === 400, 'fac-pod padtruc dicht', r, 'GET ' + p);
+  }
+  // één bron: de adressen in de Access-policy = FAC_EMAILS = de actieve fac-gebruikers in de database (Fable wv856 #8)
+  try {
+    const adr = facAdressen();
+    const apps = await cf('GET', '/accounts/' + ACC + '/access/apps?per_page=100');
+    const a = (apps || []).find(function (x) { return x.domain === FAC_SITE; });
+    const pol = a ? await cf('GET', '/accounts/' + ACC + '/access/apps/' + a.id + '/policies') : [];
+    const inPolicy = [].concat.apply([], (pol || []).map(function (p) { return (p.include || []).map(function (i) { return i.email && i.email.email ? String(i.email.email).toLowerCase() : null; }); })).filter(Boolean).sort();
+    const D = require(path.join(__dirname, '..', 'facturen-db.js'));
+    const fdb = D.open(process.env.FACTUREN_DIR || '/opt/data/facturen');
+    const inDb = fdb.db.prepare("SELECT email FROM gebruiker WHERE ingang = 'fac' AND actief = 1 ORDER BY email").all().map(function (x) { return x.email; });
+    fdb.db.close();
+    const gelijk = JSON.stringify(inPolicy) === JSON.stringify(adr.lijst) && JSON.stringify(inDb) === JSON.stringify(adr.lijst);
+    regel(gelijk, 'adressen gelijk in Access-policy, FAC_EMAILS en de facturendatabase (' + adr.lijst.length + ')', { status: gelijk ? 200 : 0 }, 'vergelijking');
+  } catch (e) { console.log('LET OP  adresvergelijking niet uitgevoerd: ' + e.message); }
+  return fout;
+}
+
 function draaitAl() {
   for (const pid of fs.readdirSync('/proc').filter(function (d) { return /^\d+$/.test(d); })) {
     let cmd = ''; try { cmd = fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8'); } catch (e) { continue; }
@@ -562,6 +794,7 @@ async function toets() {
   fout += await toetsTel();
   fout += await toetsQwen(n404);
   fout += await toetsBank(n404);
+  fout += await toetsFacturen(n404);   // wv856
   const apps = await accessOpHuisdokter().catch(function (e) { return ['(niet leesbaar: ' + e.message + ')']; });
   if (apps.length) fout++;
   console.log((apps.length ? 'ROOD  ' : 'GROEN ') + 'geen Access-app op huisdokter.dev' + (apps.length ? ' [' + apps.join('; ') + ']' : ''));
@@ -745,7 +978,16 @@ async function toetsQwen(n404) {
       await new Promise(function (r) { setTimeout(r, 20000); });
       process.exit(await toets() ? 1 : 0);
     }
-    if (stap !== 'inrichten') throw new Error('onbekende stap ' + stap + ' (toets | ingress | app-pod | tel | qwen-eemwerk | bank | inrichten)');
+    if (stap === 'facturen') {   // wv856: alleen na Davids Ja en na F5
+      await facturenStap();
+      if (FAC_DROOG) process.exit(0);
+      await new Promise(function (r) { setTimeout(r, 20000); });
+      const f = await toets();
+      if (!f) facGeheimWissen();
+      else console.log('LET OP  toets niet groen: servicetokengeheim blijft (0600) op de pod tot een groene toets; daarna opnieuw facturen draaien');
+      process.exit(f ? 1 : 0);
+    }
+    if (stap !== 'inrichten') throw new Error('onbekende stap ' + stap + ' (toets | ingress | app-pod | tel | qwen-eemwerk | bank | facturen | inrichten)');
     const id = await tunnelZoekOfMaak();
     await cf('PUT', '/accounts/' + ACC + '/cfd_tunnel/' + id + '/configurations', ingress());
     console.log('ingress gezet');
