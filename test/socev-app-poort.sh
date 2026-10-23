@@ -372,6 +372,7 @@ function processJob(jobId, prompt, sess, files, chatId, ws, keuze) {
 }
 const rolStub = { eerste: 1, primair: true };
 // wv231: als functie, zodat de herstarttoets het blok in een tweede, verse context kan laden (zelfde opslag)
+const POT_VZ_T = path.join(W, 'pot-verzend'); fs.mkdirSync(POT_VZ_T, { recursive: true });
 const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, console, URL, setInterval, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, URLSearchParams,
   process: { env: { APP_DATA_DIR: DATA, APP_UIT_BESTAND: UIT, TELEGRAM_DEBUG_BOT_TOKEN: 'nep', APP_POORT_SECRET: POORT, APP_LOG_DIR: LOGDIR,
     APP_BUS_PAD: BUS, SUPABASE_URL: SB, SUPABASE_SERVICE_ROLE: 'nep-sleutel', N8N_WEBHOOK_VERBETERLOG: 'nep-vbl', APP_BESTANDEN_DIR: BEWAAR, APP_UPLOAD_DIR: path.join(W, 'upload'), IO_DIR: path.join(W, 'io'),
@@ -380,6 +381,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
     TODOIST_MCP_TOKEN: 'nep-todoist', N8N_WEBHOOK_AGENDA_API: 'nep-agenda', N8N_WEBHOOK_SOCEV_AGENDA: 'nep-schrijfluik', APP_KNOP_SLEUTEL_PAD: KNOPK_PAD, CLOUDFLARE_AI_TOKEN_AUTO: 'nep-cf', GEMINI_API_KEY_AUTO: 'nep-gemini', APP_VAULT_DIR: VAULT_T, CLOUDFLARE_API_TOKEN: 'nep-cf', SLEUTELPORTAAL_SLEUTEL: SP_SLEUTEL,
     BANK_DIR: path.join(W, 'bank'), POT_AF_CODE_DIR: process.cwd(), N8N_WEBHOOK_MAILCONCEPT: 'nep-mailconcept' }, pid: process.pid },
   VAULT: VAULT_T,
+  POT_VZ_DIR: POT_VZ_T,   // wv941: staat in server.js buiten het app-blok; appNoodstop ruimt er auto-aan/auto-proef op
   TOETSUUR: () => toetsUur,
   TOETSBUUR: () => toetsBUur, SECRET: 'g'.repeat(40),
   agentsReg,
@@ -6305,7 +6307,9 @@ async function bewijs(o) {
       fs.writeFileSync(path.join(DATA, 'herstel-vervalt'), '');
       const herstelVoorNood = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')).herstel.hash;
       const sesVoorNood = Object.keys(JSON.parse(fs.readFileSync(path.join(DATA, 'sessies.json'), 'utf8')).sessies).length;
+      fs.writeFileSync(path.join(POT_VZ_T, 'auto-aan'), ''); fs.writeFileSync(path.join(POT_VZ_T, 'auto-proef'), '["P90"]');
       const u = H.appNoodstop('toets');
+      toets('10 wv941: noodstop zet het automatisch versturen van POT-nota\'s uit (auto-aan en auto-proef weg), zonder fouten', u.pot_auto_uit === true && !fs.existsSync(path.join(POT_VZ_T, 'auto-aan')) && !fs.existsSync(path.join(POT_VZ_T, 'auto-proef')) && u.fouten.length === 0, JSON.stringify(u.fouten));
       toets('10 wv231: noodstop haalt sessies.json weg (er stonden sessies in)', sesVoorNood >= 1 && !fs.existsSync(path.join(DATA, 'sessies.json')), sesVoorNood);
       toets('10 wv159: noodstop haalt de concepten weg', !fs.existsSync(path.join(DATA, 'concepten.json')));
       toets('10 wv135: noodstop haalt herstel-vervalt weg, herstelcode blijft', u.herstel_vervalt_weg === true && !fs.existsSync(path.join(DATA, 'herstel-vervalt')) && JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8')).herstel.hash === herstelVoorNood, JSON.stringify(u));
