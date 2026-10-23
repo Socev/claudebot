@@ -241,7 +241,7 @@ function zaai(fdb, o) {
             vingerafdruk_koerier: ['gelukt', 'geweigerd'].includes(opStatus) ? (opStatus === 'geweigerd' ? '0'.repeat(64) : K.vingerafdruk(op)) : null,
             verstuur_na: opStatus === 'wacht' ? tijd(0, 13 + (i % 4)) : tijd(-ouderdom + 1, 10), idempotentiesleutel: fid + ':' + oid, status: opStatus,
             opgehaald_op: opStatus === 'wacht' ? null : tijd(opStatus === 'opgehaald' ? 0 : -ouderdom + 1, 10.2), poging,
-            verzend_reservering: ['gelukt', 'mislukt', 'opgehaald'].includes(opStatus) ? oid : null,
+            verzend_reservering: ['gelukt', 'mislukt', 'opgehaald'].includes(opStatus) ? 'FV' + fid : null,   // het token van de koerier (wv855)
             verzend_reservering_op: ['gelukt', 'mislukt', 'opgehaald'].includes(opStatus) ? tijd(-ouderdom + 1, 10.25) : null,
             modus: opStatus === 'gelukt' ? 'concept' : null, extern_id: opStatus === 'gelukt' ? 'proef-concept-' + oid : null,
             fout: opStatus === 'geweigerd' ? 'vingerafdruk wijkt af' : opStatus === 'mislukt' ? 'HTTP 502 (proef)' : null,
@@ -282,7 +282,7 @@ function zaai(fdb, o) {
         const op = { id: oid, soort: 'boekhouder_afschrift', doeladres: doel, regel: { afschrift_id: aid, entiteit: 'pot', periode, doeladres: doel }, bijlagen };
         D.voegToe(fdb, 'opdracht', { id: oid, soort: 'boekhouder_afschrift', afschrift: aid, entiteit: 'pot', doeladres: doel, bijlagen, vingerafdruk: K.vingerafdruk(op),
           vingerafdruk_koerier: K.vingerafdruk(op), verstuur_na: tijd(-19, 10), idempotentiesleutel: aid + ':' + oid, status: 'gelukt', opgehaald_op: tijd(-19, 10.1), poging: 1,
-          verzend_reservering: oid, verzend_reservering_op: tijd(-19, 10.15), modus: 'concept', extern_id: 'proef-concept-' + oid, aangemaakt_door: W, aangemaakt_op: tijd(-19, 9), bijgewerkt_op: tijd(-19, 10.2) });
+          verzend_reservering: 'FA' + aid, verzend_reservering_op: tijd(-19, 10.15), modus: 'concept', extern_id: 'proef-concept-' + oid, aangemaakt_door: W, aangemaakt_op: tijd(-19, 9), bijgewerkt_op: tijd(-19, 10.2) });
       }
     }
 

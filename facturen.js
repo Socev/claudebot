@@ -1220,7 +1220,8 @@ function afschriftKlaarzetten(fdb, r, invoer, o) {
     if (!a) { a = { id: D.nieuwId() }; D.voegToe(fdb, 'pot_afschrift', { id: a.id, rekening: rek.id, periode: invoer.periode, mt940_document: ids[0].id, pdf_document: ids[1].id, status: 'in_wachtrij', aangemaakt_op: wanneer, bijgewerkt_op: wanneer }); }
     else fdb.db.prepare("UPDATE pot_afschrift SET mt940_document = ?, pdf_document = ?, status = 'in_wachtrij', bijgewerkt_op = ? WHERE id = ?").run(ids[0].id, ids[1].id, wanneer, a.id);
     const opId = D.nieuwId();
-    const bijlagen = ids.map((x) => ({ naam: x.naam, mime: x.soort === 'pdf' ? 'application/pdf' : 'application/octet-stream', sha256: x.sha256 }));
+    // naam en mime uit de documentrij (bij een hergebruikt stuk de oude naam), zoals de consistentiecontrole ze opnieuw opbouwt (diffreview wv855 #5)
+    const bijlagen = ids.map((x) => { const d = fdb.db.prepare('SELECT naam, mime, sha256 FROM document WHERE id = ?').get(x.id); return { naam: d.naam, mime: d.mime, sha256: d.sha256 }; });
     const op = { id: opId, soort: 'boekhouder_afschrift', doeladres: e.afschrift_doel,
       regel: { afschrift_id: a.id, entiteit: e.sleutel, periode: invoer.periode, doeladres: e.afschrift_doel }, bijlagen };
     const vingerafdruk = K.vingerafdruk(op);

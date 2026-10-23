@@ -3689,14 +3689,15 @@ function handleRequest(req, res) {
       const stuur = function (st, j) { reqLogExtra(res, { facturen_ronde: j && j.ok ? 'ok' : 'fout' }); res.writeHead(st, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(j)); };
       if (!facturenRoutes) return stuur(404, { ok: false, fout: 'Facturen zit niet in deze versie van de pod' });
       if (!fdb) return stuur(409, { ok: false, fout: 'Facturen draait alleen op de primaire Olares-kant' });
-      if (facturenRondeBezig && Date.now() - facturenRondeBezig < 10 * 60000) return stuur(503, { ok: false, fout: 'er loopt al een facturen-ronde' });
-      facturenRondeBezig = Date.now();
+      if (facturenRondeBezig && Date.now() - facturenRondeBezig.op < 10 * 60000) return stuur(503, { ok: false, fout: 'er loopt al een facturen-ronde' });
+      const mijn = { op: Date.now() };   // alleen de eigen ronde geeft de vlag vrij (diffreview wv855 #7)
+      facturenRondeBezig = mijn;
       const nu = Date.now();
       const p = facturenKoerier ? facturenKoerier.ronde(fdb, facturenIo(), { nu: nu })
         : Promise.resolve(facturenRoutes.backupNodig(fdb, nu) ? facturenRoutes.ronde(fdb, { nu: nu }) : { ok: true, koerier: false });
       p.then(function (j) { stuur(j && j.ok ? 200 : 500, j); })
         .catch(function (e) { logError('facturen-ronde', e); stuur(500, { ok: false, fout: 'facturen-ronde faalde in de pod' }); })
-        .finally(function () { facturenRondeBezig = 0; });
+        .finally(function () { if (facturenRondeBezig === mijn) facturenRondeBezig = null; });
     }); });
   }
 
@@ -13139,7 +13140,7 @@ const facturenKoerier = (function () {
   try { return require(p); } catch (e) { logError('facturen', e); return null; }
 })();
 const FACTUREN_VERZENDER_WF = process.env.FACTUREN_VERZENDER_WF || 'MiWuPjabqip7dCNo';   // AI - Facturen-verzender
-let facturenRondeBezig = 0;
+let facturenRondeBezig = null;   // { op } van de lopende ronde
 async function facturenLuikBytes(body) {
   const geheim = process.env.N8N_WEBHOOK_AGENDA_API;
   if (!geheim) throw new Error('lees-luik niet ingericht');

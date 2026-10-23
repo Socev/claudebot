@@ -28,6 +28,8 @@ function nepGmail(o) {
     if (g.luikStuk) throw Object.assign(new Error('lees-luik weg'), { code: 'ECONNRESET' });
     if (b.actie === 'mail_zoeken') {
       g.zoek.push(b.query);
+      // zoals het echte luik bij een Gmail-fout: 200 met een lege lijst en een melding
+      if (g.zoekMelding) return { query: b.query, aantal: 0, mails: [], melding: g.zoekMelding };
       const q = String(b.query);
       let lijst;
       const tok = tokens(q);
@@ -56,12 +58,12 @@ function nepGmail(o) {
     return x ? { bytes: x.bytes } : { json: { modus: 'lijst', fout: 'bijlage niet gevonden' } };
   };
   g.verzender = async function (v) {
-    g.verzonden.push({ token: v.token, aan: v.aan, modus: v.modus, onderwerp: v.onderwerp, n: v.bijlagen.length, shas: v.bijlagen.map((b) => D.sha256(b.bytes)) });
-    if (g.status) return { status: g.status, j: { ok: false, code: 'gmail', fout: 'proef' } };
+    g.verzonden.push({ token: v.token, aan: v.aan, modus: v.modus, onderwerp: v.onderwerp, tekst: v.tekst, namen: v.bijlagen.map((b) => b.naam), n: v.bijlagen.length, shas: v.bijlagen.map((b) => D.sha256(b.bytes)) });
+    if (g.status) return { status: g.status, j: { ok: false, code: g.status === 401 ? 'secret' : 'gmail', fout: 'proef' } };
     if (g.witteLijst && !g.witteLijst.includes(v.aan)) return { status: 403, j: { ok: false, code: 'witte_lijst', fout: 'adres staat niet op de witte lijst' } };
     if (v.modus !== 'concept') return { status: 403, j: { ok: false, code: 'versturen_uit' } };
     const id = 'm' + String(++g.n).padStart(15, '0');
-    g.mails.push({ id, thread_id: id, aan: v.aan, onderwerp: v.onderwerp, labels: ['DRAFT'], datum: new Date(NU).toISOString(), dag_lokaal: '2026-10-22' });
+    g.mails.push({ id, thread_id: id, aan: v.aan, onderwerp: v.onderwerp, snippet: v.tekst.replace(/\s+/g, ' ').slice(0, 200), labels: ['DRAFT'], datum: new Date(NU).toISOString(), dag_lokaal: '2026-10-22' });
     if (g.verlies[v.token] > 0) { g.verlies[v.token]--; throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }); }
     return { status: 200, j: { ok: true, extern_id: 'r-' + id, message_id: id, modus: 'concept', bijlagen: v.bijlagen.length } };
   };
@@ -137,8 +139,11 @@ test('opdracht pas na verstuur_na; dan één concept met het token en de stukken
   assert.equal(g.verzonden.filter((v) => v.token === tok).length, 0, 'vóór verstuur_na niets');
   assert.equal(t.op(op.id).status, 'wacht');
   const u = await t.ronde(g, VERSTUUR + 5 * MIN);
+  assert.equal(u.ok, true, JSON.stringify(u.fouten));
   const mijn = g.verzonden.filter((v) => v.token === tok);
   assert.equal(mijn.length, 1, JSON.stringify(u));
+  assert.match(mijn[0].tekst, new RegExp('^Kenmerk ' + tok + ', opdracht ' + op.id));
+  assert.ok(mijn[0].namen.every((n) => /\.(pdf|xml)$/.test(n)));
   assert.equal(mijn[0].aan, op.doeladres);
   assert.equal(mijn[0].modus, 'concept');
   assert.match(mijn[0].onderwerp, new RegExp('\\[ref ' + tok + '\\]$'));
@@ -270,13 +275,70 @@ test('lees-luik stuk → nul aanroepen van de verzender (een zoekfout is nooit "
   assert.equal(t.op(op.id).status, 'opgehaald');
   assert.equal(t.op(op.id).poging, 1, 'niet opnieuw geclaimd');
   g.luikStuk = false;
-  await t.ronde(g, VERSTUUR + 90 * MIN);
+  // Gmail-fout in het luik (200 + melding, geen lijst): ook geen aanroep (diffreview wv855 #1)
+  g.zoekMelding = 'fout bij zoeken: proef';
+  const u2 = await t.ronde(g, VERSTUUR + 90 * MIN);
+  assert.equal(u2.ok, false);
+  assert.equal(g.verzonden.length, voor);
+  assert.equal(t.op(op.id).status, 'opgehaald');
+  g.zoekMelding = 'deels mislukt: proef';
+  await t.ronde(g, VERSTUUR + 95 * MIN);
+  assert.equal(g.verzonden.length, voor);
+  g.zoekMelding = null;
+  await t.ronde(g, VERSTUUR + 100 * MIN);
   assert.equal(t.op(op.id).status, 'gelukt');
   assert.equal(g.concepten(tok), 1);
 });
 
-test('mislukt max 3× dan signaal; daarna geen poging meer; Opnieuw proberen vindt een eerder concept via het token', async () => {
+test('een oud concept met andere stukken wordt niet overgenomen en er komt geen tweede: geweigerd + signaal (diffreview wv855 #4)', async () => {
   const t = opzet(), g = nepGmail();
+  const { f, op, tok } = t.bevestig();
+  t.fdb.db.prepare('UPDATE opdracht SET verzend_reservering = ?, verzend_reservering_op = ? WHERE id = ?').run(null, null, op.id);
+  g.mails.push({ id: 'mo00000000000001', aan: op.doeladres, onderwerp: 'oud [ref ' + tok + ']', snippet: 'Kenmerk ' + tok + ', opdracht 00000000000000aa.', labels: ['DRAFT'], dag_lokaal: '2026-10-22' });
+  // een eerdere reservering voor deze factuur (bv. een opdracht van vóór Terug naar beoordelen) laat de koerier eerst zoeken
+  const oud = t.fdb.db.prepare("SELECT id FROM opdracht WHERE factuur = ? AND id <> ?").get(f.id, op.id);
+  assert.equal(oud, undefined);
+  D.claimOpdrachten(t.fdb, VERSTUUR + 1000, { max: 50 });
+  D.reserveer(t.fdb, op.id, { sleutel: tok, modus: 'concept', nu: VERSTUUR + 2000 });
+  t.fdb.db.prepare("UPDATE opdracht SET opgehaald_op = ? WHERE id = ?").run(new Date(VERSTUUR - UUR).toISOString(), op.id);
+  await t.ronde(g, VERSTUUR + 5 * MIN);
+  assert.equal(t.op(op.id).status, 'geweigerd');
+  assert.match(t.op(op.id).fout, /al een concept met dit kenmerk/);
+  assert.equal(g.verzonden.filter((v) => v.token === tok).length, 0);
+  assert.equal(g.concepten(tok), 1);
+});
+
+test('verkeerd geheim (401) of plafond (429) bij de verzender: geen extra poging, de ronde stopt met verzenden (diffreview wv855 #3)', async () => {
+  const t = opzet(), g = nepGmail();
+  t.bevestig();
+  g.status = 401;
+  const u = await t.ronde(g, VERSTUUR + 5 * MIN);
+  assert.equal(g.verzonden.length, 1, 'na de eerste 401 niets meer');
+  assert.equal(u.verzending.mislukt, 0);
+  assert.equal(u.verzending.geen_resultaat, 1);
+  assert.ok(u.fouten.some((x) => x.soort === 'verzender_geheim'));
+});
+
+test('een upload die steeds faalt, houdt de rest niet tegen en wordt na drie keer overgeslagen (diffreview wv855 #6)', async () => {
+  const t = opzet(), g = nepGmail();
+  const kapot = D.stukSchrijf(t.fdb, Buffer.from('%PDF-1.4 kapot'));
+  const goed = D.stukSchrijf(t.fdb, Z.pdf(['Leverancier A B.V.', 'Factuur', 'Factuurnummer: GOED-1']));
+  const k = D.nieuwId(), gd = D.nieuwId();
+  D.voegToe(t.fdb, 'document', { id: k, sha256: kapot.sha256, naam: 'kapot.pdf', mime: 'application/pdf', bytes: kapot.bytes, soort: 'pdf', te_lezen: 1, geupload_door: 'david (proef)', aangemaakt_op: new Date(NU - UUR).toISOString() });
+  D.voegToe(t.fdb, 'document', { id: gd, sha256: goed.sha256, naam: 'goed.pdf', mime: 'application/pdf', bytes: goed.bytes, soort: 'pdf', te_lezen: 1, geupload_door: 'david (proef)', aangemaakt_op: new Date(NU).toISOString() });
+  const u = await t.ronde(g, NU + MIN);
+  assert.equal(u.upload.gelezen, 1);
+  assert.equal(u.upload.fout, 1);
+  assert.equal(t.fdb.db.prepare('SELECT te_lezen FROM document WHERE id = ?').get(gd).te_lezen, 0);
+  await t.ronde(g, NU + 61 * MIN); await t.ronde(g, NU + 121 * MIN);
+  const u4 = await t.ronde(g, NU + 181 * MIN);
+  assert.equal(u4.upload.overgeslagen, 1);
+  assert.equal(u4.upload.fout, 0);
+});
+
+test('mislukt max 3× dan signaal; daarna geen poging meer; Opnieuw proberen vindt een eerder concept via het token', async (tc) => {
+  const t = opzet(), g = nepGmail();
+  const oud = KO.GRENS.verzendingen; KO.GRENS.verzendingen = 30; tc.after(() => { KO.GRENS.verzendingen = oud; });   // het zaad heeft zelf veel claimbare opdrachten
   const { f, op, tok } = t.bevestig();
   g.status = 500;
   await t.ronde(g, VERSTUUR + 5 * MIN);
@@ -291,7 +353,7 @@ test('mislukt max 3× dan signaal; daarna geen poging meer; Opnieuw proberen vin
   assert.equal(g.verzonden.filter((v) => v.token === tok).length, 3);
   // stel dat poging 3 tóch een concept maakte: Opnieuw proberen → nieuwe opdracht, zelfde token → overgenomen, geen tweede
   g.status = null;
-  g.mails.push({ id: 'mx00000000000001', aan: op.doeladres, onderwerp: 'x [ref ' + tok + ']', labels: ['DRAFT'], dag_lokaal: '2026-10-22' });
+  g.mails.push({ id: 'mx00000000000001', aan: op.doeladres, onderwerp: 'x [ref ' + tok + ']', snippet: 'Kenmerk ' + tok + ', opdracht ' + op.id + '. Inkoopfactuur', labels: ['DRAFT'], dag_lokaal: '2026-10-22' });
   const r = t.call('POST', 'opnieuw', { id: f.id }, { nu: VERSTUUR + 190 * MIN });
   assert.equal(r.status, 200, JSON.stringify(r.j));
   await t.ronde(g, Date.parse(r.j.opdracht.verstuur_na) + MIN);
@@ -341,14 +403,10 @@ test('rondebudget en pod-plafond: wat niet past blijft opgehaald zonder reserver
   const voor = g.verzonden.length;
   const u = await t.ronde(g, VERSTUUR + 5 * MIN);
   assert.equal(g.verzonden.length - voor, 1, 'na de eerste aanroep is het budget op');
-  assert.ok(u.verzending.overgeslagen >= 1);
-  const over = t.fdb.db.prepare("SELECT count(*) AS n FROM opdracht WHERE status = 'opgehaald' AND verzend_reservering IS NULL AND opgehaald_op = ?").get(new Date(VERSTUUR + 5 * MIN).toISOString()).n;
-  assert.equal(Number(over), u.verzending.overgeslagen, 'elke overgeslagen opdracht: opgehaald zonder reservering');
-  for (const o of [t.op(a.op.id), t.op(b.op.id)]) {
-    if (o.status === 'gelukt' || o.status === 'wacht') continue;   // wacht: niet geclaimd (maximaal 8 per ronde, het zaad gaat voor)
-    assert.equal(o.status, 'opgehaald');
-    assert.equal(o.verzend_reservering, null, 'nooit aangeroepen, dus geen reservering');
-  }
+  assert.equal(u.verzending.budget_op, true);
+  assert.equal(u.verzending.geclaimd, 1, 'alleen geclaimd wat ook geprobeerd wordt');
+  assert.equal(t.n("SELECT count(*) AS n FROM opdracht WHERE status = 'opgehaald' AND verzend_reservering IS NULL AND opgehaald_op = ?", [new Date(VERSTUUR + 5 * MIN).toISOString()]), 0);
+  for (const o of [t.op(a.op.id), t.op(b.op.id)]) assert.ok(['gelukt', 'wacht'].includes(o.status), o.status);
   // plafond: 30 reserveringen in het laatste uur → geen claim
   const t2 = opzet(), g2 = nepGmail();
   const c = t2.bevestig();
@@ -510,7 +568,8 @@ test('server.js: /facturen-ronde achter rolPoort + body-secret, één ronde tege
   assert.match(blok, /return rolPoort\(res, function/);
   assert.match(blok, /timingSafeEqual/);
   assert.match(blok, /if \(!fdb\) return stuur\(409/);
-  assert.match(blok, /facturenRondeBezig && Date\.now\(\) - facturenRondeBezig < 10 \* 60000\) return stuur\(503/);
+  assert.match(blok, /facturenRondeBezig && Date\.now\(\) - facturenRondeBezig\.op < 10 \* 60000\) return stuur\(503/);
+  assert.match(blok, /if \(facturenRondeBezig === mijn\) facturenRondeBezig = null/);
   assert.match(s, /function facturenMagOpenen\(\) \{ return ROL_KANT === 'olares' && rolPrimair\(\); \}/);
   const vz = s.slice(s.indexOf('async function facturenVerzender'), s.indexOf('function facturenIo'));
   assert.match(vz, /process\.env\.N8N_WEBHOOK_MAILCONCEPT/);

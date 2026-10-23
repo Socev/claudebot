@@ -101,6 +101,13 @@ function adresIn(veld, adres) { return String(veld || '').toLowerCase().indexOf(
 function gmailDag(ymd) { return String(ymd).replace(/-/g, '/'); }
 function plusDagen(ymd, n) { return K.plusDagen(ymd, n); }
 
+// De verzender neemt alleen .pdf, .xml en MT940 aan: een naam zonder passende extensie krijgt er een (diffreview wv855 #2).
+function naamMetExtensie(naam, mime, bytes) {
+  let n = String(naam || 'stuk').replace(/[\\/]/g, '_').slice(0, 110);
+  if (/\.(pdf|xml|940|sta|mt940)$/i.test(n)) return n;
+  const isPdf = bytes && bytes.subarray(0, 5).toString('latin1') === '%PDF-';
+  return n + (isPdf || /pdf/i.test(String(mime)) ? '.pdf' : /xml/i.test(String(mime)) ? '.xml' : '.940');
+}
 // Onderwerp en tekst van de mail aan de boekhouder: kort, zonder factuurtekst, met het token.
 function mailVoor(fdb, op) {
   const e = fdb.db.prepare('SELECT naam, naam_kort FROM entiteit WHERE sleutel = ?').get(op.entiteit) || {};
@@ -110,11 +117,11 @@ function mailVoor(fdb, op) {
     const f = fdb.db.prepare('SELECT f.nummer, f.leverancier_naam, l.naam AS lev FROM factuur f LEFT JOIN leverancier l ON l.id = f.leverancier WHERE f.id = ?').get(op.factuur) || {};
     const wat = [kort(f.lev || f.leverancier_naam, 80), kort(f.nummer, 40)].filter(Boolean).join(' ');
     return { onderwerp: kort('Inkoopfactuur ' + ent + (wat ? ' — ' + wat : ''), 180) + ' [ref ' + tok + ']',
-      tekst: 'Inkoopfactuur voor ' + kort(e.naam || ent, 120) + '.\n\nKlaargezet door Socev (assistent van David Schaap) na zijn akkoord.\nKenmerk: ' + tok + '\n' };
+      tekst: 'Kenmerk ' + tok + ', opdracht ' + op.id + '.\n\nInkoopfactuur voor ' + kort(e.naam || ent, 120) + '.\nKlaargezet door Socev (assistent van David Schaap) na zijn akkoord.\n' };
   }
   const a = fdb.db.prepare('SELECT periode FROM pot_afschrift WHERE id = ?').get(op.afschrift) || {};
   return { onderwerp: 'Bankafschrift ' + ent + ' ' + kort(a.periode, 10) + ' [ref ' + tok + ']',
-    tekst: 'Bankafschrift ' + kort(e.naam || ent, 120) + ' over ' + kort(a.periode, 10) + ' (MT940 en PDF).\n\nKlaargezet door Socev (assistent van David Schaap) na zijn akkoord.\nKenmerk: ' + tok + '\n' };
+    tekst: 'Kenmerk ' + tok + ', opdracht ' + op.id + '.\n\nBankafschrift ' + kort(e.naam || ent, 120) + ' over ' + kort(a.periode, 10) + ' (MT940 en PDF).\nKlaargezet door Socev (assistent van David Schaap) na zijn akkoord.\n' };
 }
 
 // ───────────────────────────── consistentiecontrole ─────────────────────────────
@@ -160,7 +167,7 @@ function controleer(fdb, op) {
     let bytes;
     try { bytes = D.stukLees(fdb, b.sha256); } catch (e3) { return { ok: false, reden: 'stuk ontbreekt of is beschadigd' }; }
     if (sha256(bytes) !== b.sha256) return { ok: false, reden: 'stuk komt niet overeen met zijn sha256' };
-    bijlagen.push({ naam: b.naam || 'stuk', mime: b.mime || 'application/octet-stream', bytes });
+    bijlagen.push({ naam: naamMetExtensie(b.naam, b.mime, bytes), mime: b.mime || 'application/octet-stream', bytes });
   }
   return { ok: true, bijlagen, vingerafdruk };
 }
@@ -173,20 +180,37 @@ async function zoek(io, query) {
   let j;
   try { j = await io.luik({ actie: 'mail_zoeken', query, max: 25 }); } catch (e) { throw new LuikFout(foutSoort(e)); }
   if (!j || !Array.isArray(j.mails)) throw new LuikFout('geen_lijst');
+  // het echte lees-luik meldt een Gmail-fout als 200 met { mails: [], melding: 'fout bij zoeken: …' } of 'deels mislukt: …' (diffreview
+  // wv855 #1, gemeten in AI - Agenda-Wachter API › Formatteer mails): dat is nooit "niets gevonden"
+  if (j.melding) throw new LuikFout(/^deels/.test(String(j.melding)) ? 'deels_mislukt' : 'zoekfout');
+  if (Number.isInteger(j.aantal) && j.aantal !== j.mails.length) throw new LuikFout('onvolledig');
   return j.mails.filter((m) => m && typeof m.id === 'string');
 }
 /*
- * Staat er al een mail met dit token aan dit doeladres (concept of verzonden)? Alleen het onderwerp-token telt, en `aan` moet het
- * doeladres bevatten (een concept aan een oud adres neemt de koerier niet over). → { id, verzonden, message_id } | null; een zoekfout gooit.
+ * Staat er al een mail met dit token (concept of verzonden)? → null (geen), of { id, verzonden, passend, opdracht }. passend = de mail gaat
+ * naar dit doeladres én noemt (in de eerste regel, dus in de snippet) een opdracht van deze factuur of dit afschrift met dezelfde bijlagen
+ * en hetzelfde adres; alleen dan neemt de koerier hem over. Een treffer die niet past (oud concept met andere stukken of een ander adres):
+ * niet overnemen en ook niet opnieuw maken (diffreview wv855 #4). Een zoekfout gooit LuikFout.
  */
-async function zoekToken(io, tok, doel) {
+const OPDRACHT_RE = /opdracht ([0-9a-f]{16})/;
+async function zoekToken(fdb, io, op) {
+  const tok = tokenVan(op);
   const mails = await zoek(io, 'subject:' + tok + ' {in:draft in:sent}');
-  const raak = mails.filter((m) => { const t = TOKEN_RE.exec(String(m.onderwerp || '')); return t && t[1] === tok && adresIn(m.aan, doel); });
+  const raak = mails.filter((m) => { const t = TOKEN_RE.exec(String(m.onderwerp || '')); return t && t[1] === tok; });
   if (!raak.length) return null;
-  const verzonden = raak.find((m) => (m.labels || []).includes('SENT') && !(m.labels || []).includes('DRAFT'));
-  const concept = raak.find((m) => (m.labels || []).includes('DRAFT'));
-  const m = verzonden || concept || raak[0];
-  return { id: m.id, verzonden: !!verzonden, message_id: m.id };
+  const past = (m) => {
+    if (!adresIn(m.aan, op.doeladres)) return false;
+    const x = OPDRACHT_RE.exec(String(m.snippet || ''));
+    if (!x) return false;
+    const ander = fdb.db.prepare('SELECT * FROM opdracht WHERE id = ?').get(x[1]);
+    return !!ander && ander.soort === op.soort && (ander.factuur || null) === (op.factuur || null) && (ander.afschrift || null) === (op.afschrift || null) &&
+      ander.doeladres === op.doeladres && JSON.stringify((json(ander.bijlagen, []) || []).map((b) => b.sha256)) === JSON.stringify((json(op.bijlagen, []) || []).map((b) => b.sha256));
+  };
+  const sent = (m) => (m.labels || []).includes('SENT') && !(m.labels || []).includes('DRAFT');
+  const goed = raak.filter(past);
+  if (!goed.length) return { id: raak[0].id, verzonden: raak.some(sent), passend: false };
+  const m = goed.find(sent) || goed[0];
+  return { id: m.id, verzonden: sent(m), passend: true };
 }
 
 // ───────────────────────────── de ronde ─────────────────────────────
@@ -203,7 +227,7 @@ async function ronde(fdb, io, o) {
   const wie = o.wie || 'koerier';
   const pdf = typeof io.pdftotext === 'function' ? io.pdftotext : pdfNaarTekst;
   const uit = { ok: true, fouten: [], voorronde: { gezocht: 0, overgenomen: 0 }, detectie: { gezocht: 0, verstuurd: 0 },
-    verzending: { geclaimd: 0, gelukt: 0, overgenomen: 0, mislukt: 0, geweigerd: 0, geen_resultaat: 0, definitief: 0, overgeslagen: 0 } };
+    verzending: { geclaimd: 0, gelukt: 0, overgenomen: 0, mislukt: 0, geweigerd: 0, geen_resultaat: 0, definitief: 0 } };
   let luikOk = true;
   const fout = (wat, e) => { uit.ok = false; uit.fouten.push({ wat, soort: foutSoort(e) }); };
 
@@ -214,10 +238,11 @@ async function ronde(fdb, io, o) {
   //    concept er staat, of verstuurt hij opnieuw; Fable F4 MOET 2)
   for (const op of fdb.db.prepare("SELECT * FROM opdracht WHERE status = 'opgehaald' AND verzend_reservering IS NOT NULL AND opgehaald_op <= ? ORDER BY opgehaald_op LIMIT 20")
     .all(nuIso(start - OPGEHAALD_MS))) {
+    if (klok() - start > GRENS.rondeMs) break;
     try {
       uit.voorronde.gezocht++;
-      const t = await zoekToken(io, tokenVan(op), op.doeladres);
-      if (t) {
+      const t = await zoekToken(fdb, io, op);
+      if (t && t.passend) {
         D.opdrachtResultaat(fdb, op.id, { status: 'gelukt', extern_id: t.id, modus: op.modus || 'concept', overgenomen: true }, { nu: klok(), wie });
         uit.voorronde.overgenomen++;
       }
@@ -248,33 +273,38 @@ async function ronde(fdb, io, o) {
 
   // 3. claimen en verzenden — niet als het lees-luik stuk is (dan kan de koerier niet eerst zoeken) of het pod-plafond bereikt is
   const laatsteUur = Number(fdb.db.prepare('SELECT count(*) AS n FROM opdracht WHERE verzend_reservering_op >= ?').get(nuIso(start - 3600000)).n);
-  if (!luikOk) uit.verzending.overgeslagen = -1;
+  if (!luikOk) uit.verzending.niet_gestart = 'lees-luik';
   else if (laatsteUur >= GRENS.perUur) { uit.verzending.plafond = true; }
   else {
-    let claim;
-    try { claim = D.claimOpdrachten(fdb, start, { wie, max: Math.min(GRENS.verzendingen, GRENS.perUur - laatsteUur) }); }
-    catch (e) { fout('claim', e); claim = { opdrachten: [], definitief: [], geweigerd: [], fouten: [] }; }
-    uit.verzending.geclaimd = claim.opdrachten.length;
-    uit.verzending.definitief += claim.definitief.length;
-    uit.verzending.geweigerd += claim.geweigerd.length;
-    if (claim.fouten.length) fout('claim', { code: 'rij' });
+    // één voor één claimen zolang het rondebudget het toelaat: wat geclaimd is, wordt ook geprobeerd (diffreview wv855 #7)
     const modus = D.metaLees(fdb, 'verzendmodus') === 'versturen' ? 'versturen' : 'concept';
-    for (const op0 of claim.opdrachten) {
-      // het rondebudget: wat niet meer past blijft opgehaald zonder resultaat en komt na 30 min terug
-      if (klok() - start > GRENS.rondeMs || !luikOk) { uit.verzending.overgeslagen++; continue; }
-      const op = fdb.db.prepare('SELECT * FROM opdracht WHERE id = ?').get(op0.id);
+    const max = Math.min(GRENS.verzendingen, GRENS.perUur - laatsteUur);
+    while (uit.verzending.geclaimd < max && luikOk && klok() - start <= GRENS.rondeMs) {
+      let claim;
+      try { claim = D.claimOpdrachten(fdb, start, { wie, max: 1 }); }
+      catch (e) { fout('claim', e); break; }
+      uit.verzending.definitief += claim.definitief.length;
+      uit.verzending.geweigerd += claim.geweigerd.length;
+      if (claim.fouten.length) fout('claim', { code: 'rij' });
+      if (!claim.opdrachten.length) break;
+      uit.verzending.geclaimd++;
+      const op = fdb.db.prepare('SELECT * FROM opdracht WHERE id = ?').get(claim.opdrachten[0].id);
       try { await verstuurEen(fdb, io, op, modus, { klok, wie }, uit); }
-      catch (e) { if (e instanceof LuikFout) { luikOk = false; fout('lees-luik', e); } else fout('verzending', e); }
+      catch (e) {
+        if (e instanceof LuikFout) { luikOk = false; fout('lees-luik', e); }
+        else { fout('verzending', e); if (e && e.stopVerzenden) break; }
+      }
     }
+    if (klok() - start > GRENS.rondeMs) uit.verzending.budget_op = true;
   }
 
   // 4. handmatige PDF-uploads (te_lezen): Davids eigen handeling, dus ook als het postvak uit staat
-  try { uit.upload = await leesUploads(fdb, pdf, { klok, wie }); } catch (e) { fout('upload', e); }
+  try { uit.upload = await leesUploads(fdb, pdf, { klok, wie, start }); } catch (e) { fout('upload', e); }
 
   // 5. verzamelpostvak (alleen als de bron aan staat; tot F5 uit)
   const bron = fdb.db.prepare("SELECT * FROM bron WHERE soort = 'verzamelpostvak' AND actief = 1 ORDER BY naam LIMIT 1").get();
-  if (bron && luikOk) { try { uit.postvak = await leesPostvak(fdb, bron, io, pdf, { klok, wie, start }); if (!uit.postvak.ok) uit.ok = false; } catch (e) { fout('postvak', e); } }
-  else uit.postvak = bron ? { overgeslagen: 'lees-luik' } : { aan: false };
+  if (bron && luikOk && klok() - start <= GRENS.rondeMs * 2) { try { uit.postvak = await leesPostvak(fdb, bron, io, pdf, { klok, wie, start }); if (!uit.postvak.ok) uit.ok = false; } catch (e) { fout('postvak', e); } }
+  else uit.postvak = bron ? { overgeslagen: luikOk ? 'tijd' : 'lees-luik' } : { aan: false };
 
   // 6. hartslag (alleen soorten en aantallen)
   D.metaZet(fdb, 'koerier_ronde', JSON.stringify({ op: nuIso(start), eind: nuIso(klok()), ok: uit.ok, fout: uit.fouten.length ? uit.fouten.map((f) => f.wat + ':' + f.soort).join(', ').slice(0, 200) : null,
@@ -291,7 +321,12 @@ async function verstuurEen(fdb, io, op, modus, o, uit) {
   // ooit gereserveerd voor deze factuur of dit afschrift (ook een eerdere opdracht, bv. vóór Opnieuw proberen)? Dan eerst zoeken.
   const eerder = fdb.db.prepare('SELECT 1 FROM opdracht WHERE verzend_reservering IS NOT NULL AND ' + (op.factuur ? 'factuur = ?' : 'afschrift = ?')).get(op.factuur || op.afschrift);
   if (eerder) {
-    const t = await zoekToken(io, tok, op.doeladres);   // een zoekfout gooit LuikFout: niets versturen
+    const t = await zoekToken(fdb, io, op);   // een zoekfout gooit LuikFout: niets versturen
+    if (t && !t.passend) {
+      D.opdrachtResultaat(fdb, op.id, { status: 'geweigerd', fout: 'er staat al een ' + (t.verzonden ? 'verzonden mail' : 'concept') + ' met dit kenmerk en andere stukken of een ander adres; eerst nakijken' }, { nu: klok(), wie });
+      uit.verzending.geweigerd++;
+      return;
+    }
     if (t) {
       D.opdrachtResultaat(fdb, op.id, { status: 'gelukt', extern_id: t.id, modus: t.verzonden ? modus : 'concept', vingerafdruk_koerier: c.vingerafdruk, overgenomen: true }, { nu: klok(), wie });
       uit.verzending.overgenomen++;
@@ -321,6 +356,9 @@ async function verstuurEen(fdb, io, op, modus, o, uit) {
     return;
   }
   if (st === 200) { uit.verzending.geen_resultaat++; return; }   // 200 zonder extern_id: onduidelijk → niet als mislukt tellen, eerst zoeken
+  // verkeerd geheim of plafond: zeker niets gemaakt, en elke volgende opdracht zou hetzelfde krijgen → geen resultaat en de ronde stopt met
+  // verzenden (diffreview wv855 #3); de opdracht komt na 30 min terug
+  if (st === 401 || st === 429) { uit.verzending.geen_resultaat++; const e = new Error('verzender ' + st); e.code = st === 401 ? 'verzender_geheim' : 'verzender_plafond'; e.stopVerzenden = true; throw e; }
   const r = D.opdrachtResultaat(fdb, op.id, { status: 'mislukt', fout: 'verzender http ' + (Number(st) || 0) + (j.code ? ' ' + kort(j.code, 30) : '') }, { nu: klok(), wie });
   uit.verzending.mislukt++;
   if (r.definitief) uit.verzending.definitief++;
@@ -332,15 +370,23 @@ async function leesUploads(fdb, pdf, o) {
   const tel = { gelezen: 0, facturen: 0, fout: 0 };
   const docs = fdb.db.prepare("SELECT d.* FROM document d WHERE d.te_lezen = 1 AND d.soort = 'pdf' AND NOT EXISTS (SELECT 1 FROM factuur f WHERE f.document = d.id OR f.ubl_document = d.id) " +
     'ORDER BY d.aangemaakt_op LIMIT ?').all(GRENS.teLezen);
+  // een upload die drie keer faalt, wordt overgeslagen (anders houden twintig kapotte PDF's elke nieuwere tegen; diffreview wv855 #6)
+  const pogingen = json(D.metaLees(fdb, 'koerier_upload_fout'), {}) || {};
   for (const d of docs) {
-    let bytes;
-    try { bytes = D.stukLees(fdb, d.sha256); } catch (e) { tel.fout++; continue; }
-    const t = await pdf(bytes);
-    if (!t.ok) { tel.fout++; continue; }   // blijft te_lezen; volgende ronde opnieuw (een PDF die altijd faalt, kan David als stuk zien)
-    const v = F.verwerkBericht(fdb, { bericht: null, documenten: [{ sha256: d.sha256, naam: d.naam, mime: d.mime || 'application/pdf', bytes: d.bytes, tekst: t.tekst, tekstlaag: t.tekstlaag }] },
-      { wie: o.wie, nu: o.klok(), geupload_door: d.geupload_door });
-    tel.gelezen++; tel.facturen += v.facturen.length;
+    if ((pogingen[d.id] || 0) >= 3) { tel.overgeslagen = (tel.overgeslagen || 0) + 1; continue; }
+    if (o.klok() - o.start > GRENS.rondeMs * 2) break;
+    try {
+      const bytes = D.stukLees(fdb, d.sha256);
+      const t = await pdf(bytes);
+      if (!t.ok) throw Object.assign(new Error('pdftotext'), { code: t.fout });
+      const v = F.verwerkBericht(fdb, { bericht: null, documenten: [{ sha256: d.sha256, naam: d.naam, mime: d.mime || 'application/pdf', bytes: d.bytes, tekst: t.tekst, tekstlaag: t.tekstlaag }] },
+        { wie: o.wie, nu: o.klok(), geupload_door: d.geupload_door });
+      tel.gelezen++; tel.facturen += v.facturen.length;
+      delete pogingen[d.id];
+    } catch (e) { tel.fout++; pogingen[d.id] = (pogingen[d.id] || 0) + 1; }
   }
+  for (const k of Object.keys(pogingen)) if (!docs.some((d) => d.id === k) && pogingen[k] < 3) delete pogingen[k];
+  D.metaZet(fdb, 'koerier_upload_fout', JSON.stringify(pogingen));
   hartslag(fdb, 'upload', 'upload', o, { ok: tel.fout === 0, aantallen: tel, fouten: [] });
   return tel;
 }
@@ -445,4 +491,4 @@ async function leesBericht(fdb, bron, io, pdf, m, eigen, o, tel, nietGelezen) {
   return n;
 }
 
-module.exports = { ronde, controleer, pdfNaarTekst, oorspronkelijkeAfzender, isDoorgestuurd, tokenVan, mailVoor, zoekToken, LuikFout, GRENS, PDFTOTEXT, TOKEN_RE };
+module.exports = { ronde, controleer, pdfNaarTekst, oorspronkelijkeAfzender, isDoorgestuurd, tokenVan, mailVoor, zoekToken, naamMetExtensie, LuikFout, GRENS, PDFTOTEXT, TOKEN_RE };
