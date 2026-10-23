@@ -38,7 +38,7 @@ const STAPPEN = { beoordelen: ['te_beoordelen'], wachtrij: ['in_wachtrij', 'word
   dubbel: ['dubbel'], mislukt: ['verzending_mislukt'], verstuurd: ['concept_klaar', 'verstuurd'] };
 // Alle routes (de toets controleert ze tegen APP_ROUTE_RE van server.js en de doorgeef-Function: [a-z0-9/-]{1,64}).
 const ROUTES = {
-  GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'betalen', 'bank', 'uploads', 'leveranciers', 'instellingen'],
+  GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'kandidaten/<id>', 'betalen', 'bank', 'uploads', 'leveranciers', 'instellingen'],
   POST: ['bevestig', 'terugdraaien', 'nagebeld', 'geen-factuur', 'toch-factuur', 'wijzig', 'ingevoerd', 'ingevoerd-ongedaan', 'opnieuw',
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'koppel', 'upload', 'leverancier', 'bankluis',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering'],
@@ -201,6 +201,8 @@ function overzicht(fdb, r, nu) {
       betalen: tel("f.betaalspoor = 'te_betalen' AND f.status IN (" + BETAAL_STATUS.map(() => '?').join(',') + ')', BETAAL_STATUS),
       bankcontrole: signalen + voorstellen, signalen, voorstellen,
       mislukt: tel("f.status = 'verzending_mislukt'", []),
+      // concept in Gmail dat na 3 dagen nog niet verstuurd is (David gooide het weg of vergat het; Fable F4 #4): zichtbaar, geen signaal
+      concept_oud: tel("f.status = 'concept_klaar' AND f.bijgewerkt_op < ?", [nuIso(nu - 3 * 86400000)]),
     },
     gezondheid: gezondheid(fdb, r, nu),
   };
@@ -219,7 +221,12 @@ function gezondheid(fdb, r, nu) {
     return { id: k.id, entiteit: k.entiteit, iban: eind4(k.iban), bank_formaat: k.bank_formaat, laatste_invoer_op: k.laatste_invoer_op, dagen,
       kleur: dagen == null || dagen >= k.rood_na_dagen ? 'rood' : dagen >= k.waarschuw_na_dagen ? 'oranje' : 'groen' };
   });
-  return { bronnen, rekeningen };
+  // de koerier (F4): laatste ronde; geen ronde in > 3 uur of de laatste mislukt = rood (storingen zichtbaar)
+  const kr = json(D.metaLees(fdb, 'koerier_ronde'), null);
+  const kUur = kr && kr.op ? (nu - Date.parse(kr.op)) / 3600000 : null;
+  const koerier = { laatste_ronde: kr ? kr.op : null, ok: kr ? !!kr.ok : null, fout: kr && kr.fout ? kort(kr.fout, 80) : null,
+    kleur: kUur == null || kUur > 3 || (kr && !kr.ok) ? 'rood' : 'groen' };
+  return { bronnen, rekeningen, koerier };
 }
 function lijst(fdb, r, stap) {
   const st = STAPPEN[stap];
@@ -281,6 +288,24 @@ function document(fdb, r, id, o) {
   return { naam: d.naam, type: d.mime || (d.soort === 'pdf' ? 'application/pdf' : 'application/octet-stream'), soort: d.soort, grootte: inhoud.length, sha256: d.sha256,
     inhoud: inhoud.toString('base64') };
 }
+/*
+ * Kandidaat-bankposten voor een signaal waarvan een knop een transactie vraagt (te_betalen_niet_betaald › Is al betaald,
+ * ingevoerd_niet_gezien › Koppelen; overdracht F3 #2): afschrijvingen van de entiteit van het signaal in de laatste 60 dagen met een
+ * bedrag binnen ± 5 % van het signaal, rol- en POT-filter (eigenaarFilter), hooguit 20, dichtstbijzijnde bedrag eerst.
+ */
+const KANDIDAAT_SOORTEN = ['te_betalen_niet_betaald', 'ingevoerd_niet_gezien'];
+function kandidaten(fdb, r, id, nu) {
+  const s = fdb.db.prepare('SELECT * FROM signaal WHERE id = ?').get(id);
+  if (!magSignaal(r, s)) weiger(404, 'signaal niet gevonden');
+  if (!KANDIDAAT_SOORTEN.includes(s.soort)) weiger(409, 'bij dit signaal hoort geen bankpost om te kiezen');
+  if (!s.entiteit || !Number.isSafeInteger(s.bedrag_centen) || s.bedrag_centen <= 0) return { signaal: s.id, kandidaten: [] };
+  const doel = s.bedrag_centen, marge = Math.max(1, Math.round(doel * 0.05));
+  const [tf, tp] = eigenaarFilter(r, 't');
+  const rijen = fdb.db.prepare('SELECT t.*, (SELECT count(*) FROM koppeling k WHERE k.transactie = t.id) AS kop FROM bank_transactie t WHERE t.verwijderd_op IS NULL AND t.entiteit = ? ' +
+    'AND t.bedrag_centen < 0 AND -t.bedrag_centen BETWEEN ? AND ? AND t.boekdatum >= ? AND ' + tf + ' ORDER BY abs(-t.bedrag_centen - ?), t.boekdatum DESC LIMIT 20')
+    .all(s.entiteit, doel - marge, doel + marge, K.plusDagen(dagAmsterdam(nu), -60), ...tp, doel);
+  return { signaal: s.id, kandidaten: rijen.map((t) => Object.assign(txKort(t), { gekoppeld: t.kop > 0 })) };
+}
 function betalen(fdb, r, nu) {
   const [ff, fp] = factuurFilter(r, 'f');
   const ctx = kernCtx(fdb, nu), vandaag = ctx.vandaag;
@@ -295,6 +320,7 @@ function betalen(fdb, r, nu) {
       dringend: !!(f.vervaldatum && K.dagenTussen(vandaag, f.vervaldatum) <= 3), omschrijving: [f.nummer, f.kenmerk].filter(Boolean).join(' ') || null,
       incl: f.incl, valuta: f.valuta, ingevoerd_door: f.ingevoerd_door, ingevoerd_op: f.ingevoerd_op };
     // een factuur met een openstaande IBAN-blokkade staat er niet op (ontwerp v2 § 3), met een verwijzing naar Beoordelen
+    if (K.isCreditnota(f)) continue;   // een creditnota hoort nooit op de betaallijst (wv855; staat er een oude op te_betalen, dan niet tonen)
     if (K.magBevestigen(Object.assign({}, f, { status: 'te_beoordelen' }), { leverancier: lev, ctx }).redenen.some((x) => /IBAN/.test(x))) { geblokkeerd.push({ id: f.id, reden: 'IBAN nog niet nagebeld' }); continue; }
     (f.betaalspoor === 'ingevoerd' ? ingevoerd : teBetalen).push(rij);
   }
@@ -395,8 +421,8 @@ function bevestig(fdb, r, d, nu) {
     if (ov.naar === 'in_wachtrij' && !Number.isSafeInteger(nieuw.incl)) weiger(409, 'vul eerst het totaalbedrag in');
     const wanneer = nuIso(nu);
     // een eerder "ingevoerd in bank" of "betaald gezien" blijft staan na terugdraaien en opnieuw bevestigen (facturen-db terugdraaien)
-    let spoor = K.betaalspoorBegin(betaalwijze);
-    if (f.betaalspoor === 'betaald_gezien' || (f.betaalspoor === 'ingevoerd' && betaalwijze === 'zelf')) spoor = f.betaalspoor;
+    let spoor = K.betaalspoorBegin(betaalwijze, nieuw);   // creditnota → betaald_vooraf (niets te betalen; wv855)
+    if (f.betaalspoor === 'betaald_gezien' || (f.betaalspoor === 'ingevoerd' && betaalwijze === 'zelf' && !K.isCreditnota(nieuw))) spoor = f.betaalspoor;
     const u = fdb.db.prepare('UPDATE factuur SET entiteit = ?, betaalwijze = ?, status = ?, betaalspoor = ?, bevestigd_door = ?, bevestigd_op = ?, controles = ?, intern = ?, ' +
       'iban_nieuw = ?, ibans_onbekend = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND status = ? AND versie = ?')
       .run(e.sleutel, betaalwijze, ov.naar, spoor, r.wie, wanneer, JSON.stringify(va.controles), va.intern ? 1 : 0, ip.iban_nieuw ? 1 : 0, JSON.stringify(ip.onbekend),
@@ -1148,7 +1174,64 @@ function leverancierRoute(fdb, r, d, nu) {
 
 // ───────────────────────────── ronde (n8n-tik) ─────────────────────────────
 
-// POST /facturen-ronde (02:00): de back-up (VACUUM INTO, 14 dagen). De koerier volgt in F4.
+// Back-up nodig? De eerste ronde na 02:00 (Nederlandse tijd) op een dag zonder back-up (F4: de tik loopt elk uur; wv855).
+function backupNodig(fdb, nu) {
+  const uur = Number(new Date(nu).toLocaleString('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }));
+  if (!(uur >= 2)) return false;
+  const lb = json(D.metaLees(fdb, 'laatste_backup'), null);
+  return !lb || lb.dag !== dagAmsterdam(nu);
+}
+/*
+ * POT-afschrift in de verzendwachtrij (bouwplan § 4.4 en § 5; F4): de twee gemaakte bestanden van de afschriftmaker (wv787, MT940 + PDF)
+ * als stukken opslaan (nooit als bankbestand inlezen), pot_afschrift → in_wachtrij en een opdracht boekhouder_afschrift naar het
+ * afschriftadres van de entiteit van de rekening (de database dwingt adres en entiteit af). Alleen de eigenaar; wie = Davids klik.
+ * Nog door niets aangeroepen: de POT-App gebruikt tot F5 het mailconcept-pad (de POT heeft nog geen afschriftadres; stamgegeven F5).
+ * invoer = { rekening (id), periode (JJJJ-MM), mt940: { naam, bytes }, pdf: { naam, bytes } }.
+ */
+function afschriftKlaarzetten(fdb, r, invoer, o) {
+  eisEigenaar(r);
+  const nu = o.nu, wanneer = nuIso(nu);
+  const rek = fdb.db.prepare('SELECT * FROM rekening WHERE id = ?').get(String(invoer.rekening || ''));
+  if (!rek) weiger(404, 'rekening niet gevonden');
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(invoer.periode || ''))) weiger(400, 'periode als JJJJ-MM');
+  for (const [x, soort] of [[invoer.mt940, 'mt940'], [invoer.pdf, 'pdf']]) if (!x || !x.bytes || !x.bytes.length) weiger(400, soort + ' ontbreekt');
+  if (Buffer.from(invoer.pdf.bytes).subarray(0, 5).toString('latin1') !== '%PDF-') weiger(400, 'de PDF is geen PDF');
+  const stuk = (x, soort) => {
+    const st = D.stukSchrijf(fdb, Buffer.isBuffer(x.bytes) ? x.bytes : Buffer.from(x.bytes));
+    return { st, naam: kort(x.naam || (soort === 'mt940' ? 'afschrift.940' : 'afschrift.pdf'), 120), soort };
+  };
+  const e0 = fdb.db.prepare('SELECT afschrift_doel FROM entiteit WHERE sleutel = ?').get(rek.entiteit);
+  if (!e0 || !e0.afschrift_doel) weiger(409, 'deze entiteit heeft geen afschriftadres (eerst instellen)');   // vóór het wegschrijven: geen losse stukken
+  const delen = [stuk(invoer.mt940, 'mt940'), stuk(invoer.pdf, 'pdf')];
+  return D.transactie(fdb, function () {
+    const e = fdb.db.prepare('SELECT * FROM entiteit WHERE sleutel = ?').get(rek.entiteit);
+    if (!e || !e.afschrift_doel) weiger(409, 'deze entiteit heeft geen afschriftadres (eerst instellen)');
+    const ids = delen.map((d) => {
+      const b = fdb.db.prepare('SELECT id FROM document WHERE sha256 = ?').get(d.st.sha256);
+      if (b) return { id: b.id, sha256: d.st.sha256, naam: d.naam, soort: d.soort };
+      const id = D.nieuwId();
+      D.voegToe(fdb, 'document', { id, sha256: d.st.sha256, naam: d.naam, mime: d.soort === 'pdf' ? 'application/pdf' : 'application/octet-stream', bytes: d.st.bytes,
+        soort: d.soort, te_lezen: 0, geupload_door: r.wie, aangemaakt_op: wanneer });
+      return { id, sha256: d.st.sha256, naam: d.naam, soort: d.soort };
+    });
+    let a = fdb.db.prepare('SELECT * FROM pot_afschrift WHERE rekening = ? AND periode = ?').get(rek.id, invoer.periode);
+    // een verstuurd afschrift krijgt nooit een tweede opdracht (de database houdt één levende opdracht per afschrift)
+    if (a && ['in_wachtrij', 'verstuurd'].includes(a.status)) weiger(409, 'dit afschrift staat al in de wachtrij of is verstuurd');
+    if (!a) { a = { id: D.nieuwId() }; D.voegToe(fdb, 'pot_afschrift', { id: a.id, rekening: rek.id, periode: invoer.periode, mt940_document: ids[0].id, pdf_document: ids[1].id, status: 'in_wachtrij', aangemaakt_op: wanneer, bijgewerkt_op: wanneer }); }
+    else fdb.db.prepare("UPDATE pot_afschrift SET mt940_document = ?, pdf_document = ?, status = 'in_wachtrij', bijgewerkt_op = ? WHERE id = ?").run(ids[0].id, ids[1].id, wanneer, a.id);
+    const opId = D.nieuwId();
+    const bijlagen = ids.map((x) => ({ naam: x.naam, mime: x.soort === 'pdf' ? 'application/pdf' : 'application/octet-stream', sha256: x.sha256 }));
+    const op = { id: opId, soort: 'boekhouder_afschrift', doeladres: e.afschrift_doel,
+      regel: { afschrift_id: a.id, entiteit: e.sleutel, periode: invoer.periode, doeladres: e.afschrift_doel }, bijlagen };
+    const vingerafdruk = K.vingerafdruk(op);
+    const verstuurNa = K.verstuurNa(nu, verstuurInstelling(fdb));
+    D.voegToe(fdb, 'opdracht', { id: opId, soort: op.soort, afschrift: a.id, entiteit: e.sleutel, doeladres: e.afschrift_doel, bijlagen, vingerafdruk,
+      verstuur_na: verstuurNa, idempotentiesleutel: 'afschrift:' + a.id + ':' + opId, status: 'wacht', poging: 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer, bijgewerkt_op: wanneer });
+    D.audit(fdb, { wie: r.wie, wat: 'afschrift_klaarzetten', object_soort: 'pot_afschrift', object_id: a.id, entiteit: e.sleutel, na: { periode: invoer.periode, opdracht: opId }, wanneer });
+    return { afschrift: a.id, opdracht: { id: opId, verstuur_na: verstuurNa } };
+  });
+}
+// POST /facturen-ronde: de back-up (VACUUM INTO, 14 dagen); de koerier (facturen-koerier.js) roept dit aan als backupNodig.
 function ronde(fdb, o) {
   const nu = o.nu || Date.now();
   const uit = { ok: true };
@@ -1187,6 +1270,7 @@ function maak(opties) {
           if (v.primair === false) weiger(409, 'Facturen draait alleen op de primaire kant');   // inzage schrijft een auditrij
           return ok(document(fdb, r, m[1], { nu, teller, docPerUur }), 'document ' + m[1]);
         }
+        if ((m = /^kandidaten\/([0-9a-f]{16})$/.exec(rest))) return ok(kandidaten(fdb, r, m[1], nu));
         if (rest === 'betalen') return ok(betalen(fdb, r, nu));
         if (rest === 'bank') return ok(bank(fdb, r, nu));
         if (rest === 'uploads') return ok(uploads(fdb, r, nu));
@@ -1245,4 +1329,4 @@ function alsFout(e, log) {
   return { status: 500, j: { ok: false, fout: 'fout op de pod' }, reden: 'uitzondering' };
 }
 
-module.exports = { maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, ronde, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };
+module.exports = { maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };

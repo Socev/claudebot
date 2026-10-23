@@ -901,6 +901,8 @@ function bankcontrole(inv) {
   const gekoppeld = (f) => (betaald.get(f.id) || []).length > 0 || voorgesteld.has(f.id);
   for (const f of facturen) {
     if (NIET_OPEN.includes(f.status) || gekoppeld(f) || f.entiteit === 'prive' || !zichtbaar.has(f.entiteit)) continue;
+    // een creditnota vraagt geen betaling: nooit "te betalen, niet betaald" of "incasso niet gezien" (wv855, overdracht F3 #1)
+    if (f.soort === 'creditnota' || (Number.isSafeInteger(Number(f.incl)) && Number(f.incl) < 0)) continue;
     const l = levVan(f.leverancier, ctx);
     const basis = { facturen: [f.id], entiteit: f.entiteit, naam: l ? l.naam : null, leverancier: f.leverancier || null, bedrag_centen: teBetalen(f),
       datum: f.vervaldatum || null, alleen_eigenaar: isPrive(f) };

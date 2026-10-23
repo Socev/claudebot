@@ -1008,10 +1008,14 @@ const BETAALSPOOR_OVERGANGEN = [
   ['incasso_verwacht', 'toch_zelf_betalen', 'te_betalen'],
   ['betaald_vooraf', 'bankmatch', 'betaald_gezien'],
 ];
-function betaalspoorBegin(betaalwijze) {
+// Een creditnota vraagt nooit een betaalhandeling (wv855, overdracht F3 #1; Fable F4 #7): ongeacht de betaalwijze `betaald_vooraf`
+// ("niets te betalen"); een terugboeking of verrekening in de bank zet hem via bankmatch op betaald_gezien. Een eigen spoor `geen` zou een
+// herbouw van de factuurtabel vragen (CHECK); dit spoor geeft geen signaal (te betalen / incasso niet gezien) en staat niet op de betaallijst.
+function isCreditnota(f) { return !!f && (f.soort === 'creditnota' || (Number.isSafeInteger(f.incl) && f.incl < 0)); }
+function betaalspoorBegin(betaalwijze, f) {
   const b = BETAALSPOOR_BEGIN[betaalwijze];
   if (!b) throw new KernFout('betaalwijze_onbekend', 'Bevestigen kan niet met betaalwijze ' + betaalwijze);
-  return b;
+  return isCreditnota(f) ? 'betaald_vooraf' : b;
 }
 function betaalspoorOvergang(van, gebeurtenis) {
   if (!BETAALSPOREN.includes(van)) return { ok: false, fout: 'onbekend_betaalspoor', reden: String(van) };
@@ -1150,7 +1154,7 @@ module.exports = {
   // leren
   leerUitBevestiging,
   // overgangen (§ 4.4)
-  STATUSSEN, GEBEURTENISSEN, STATUS_OVERGANGEN, statusOvergang, BETAALSPOREN, BETAALSPOOR_OVERGANGEN, betaalspoorBegin, betaalspoorOvergang,
+  STATUSSEN, GEBEURTENISSEN, STATUS_OVERGANGEN, statusOvergang, BETAALSPOREN, BETAALSPOOR_OVERGANGEN, betaalspoorBegin, betaalspoorOvergang, isCreditnota,
   OPDRACHT_STATUSSEN, claimbaar, opdrachtOvergang, verstuurNa, MAX_POGINGEN, OPGEHAALD_TIMEOUT_MS,
   // opdracht + vingerafdruk
   vingerafdrukCanoniek, vingerafdruk, maakOpdracht,

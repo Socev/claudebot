@@ -3676,20 +3676,27 @@ function handleRequest(req, res) {
     }); });
   }
 
-  // ── wv833: Facturen-ronde (n8n-tik; body-secret zoals /bank-ronde; geen andere invoer): nu de back-up van 02:00, de koerier volgt in F4 ──
+  // ── wv833/wv855: Facturen-ronde (n8n AI - Facturen-ronde, elk uur; body-secret zoals /bank-ronde; geen andere invoer). F4: de koerier
+  // (facturen-koerier.js: verzend-detectie, claimen, consistentiecontrole, verzender, uploads lezen, postvak als de bron aan staat) en de
+  // back-up bij de eerste ronde na 02:00. Hooguit één ronde tegelijk (een vastgelopen vlag vervalt na 10 min); bezig → 503. Passief → 409
+  // (rolPoort; de n8n-tik telt dat niet als storing). Antwoord: alleen aantallen en foutsoorten.
   if (req.method === 'POST' && req.url === '/facturen-ronde') {
     return rolPoort(res, function () { readBody(req, function (d) {
       if (!d) { res.writeHead(400); return res.end('bad json'); }
       if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
           !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
       const fdb = facturenRoutes ? facturenOpen() : null;
-      let st = 200, j;
-      if (!facturenRoutes) { st = 404; j = { ok: false, fout: 'Facturen zit niet in deze versie van de pod' }; }
-      else if (!fdb) { st = 409; j = { ok: false, fout: 'Facturen draait alleen op de primaire Olares-kant' }; }
-      else { try { j = facturenRoutes.ronde(fdb, { nu: Date.now() }); if (!j.ok) st = 500; } catch (e) { logError('facturen-ronde', e); st = 500; j = { ok: false, fout: 'facturen-ronde faalde in de pod' }; } }
-      reqLogExtra(res, { facturen_ronde: j && j.ok ? 'backup' : 'fout' });
-      res.writeHead(st, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(j));
+      const stuur = function (st, j) { reqLogExtra(res, { facturen_ronde: j && j.ok ? 'ok' : 'fout' }); res.writeHead(st, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(j)); };
+      if (!facturenRoutes) return stuur(404, { ok: false, fout: 'Facturen zit niet in deze versie van de pod' });
+      if (!fdb) return stuur(409, { ok: false, fout: 'Facturen draait alleen op de primaire Olares-kant' });
+      if (facturenRondeBezig && Date.now() - facturenRondeBezig < 10 * 60000) return stuur(503, { ok: false, fout: 'er loopt al een facturen-ronde' });
+      facturenRondeBezig = Date.now();
+      const nu = Date.now();
+      const p = facturenKoerier ? facturenKoerier.ronde(fdb, facturenIo(), { nu: nu })
+        : Promise.resolve(facturenRoutes.backupNodig(fdb, nu) ? facturenRoutes.ronde(fdb, { nu: nu }) : { ok: true, koerier: false });
+      p.then(function (j) { stuur(j && j.ok ? 200 : 500, j); })
+        .catch(function (e) { logError('facturen-ronde', e); stuur(500, { ok: false, fout: 'facturen-ronde faalde in de pod' }); })
+        .finally(function () { facturenRondeBezig = 0; });
     }); });
   }
 
@@ -13104,7 +13111,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f) } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -13122,6 +13129,60 @@ const facturenRoutes = (function () {
   try { return require(p).maak({ fout: logError }); } catch (e) { logError('facturen', e); return null; }
 })();
 const FACTUREN_BANKLUIS = path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite');
+// ── Facturen-app, koerier (wv855, F4, 23-10-2026; bouwplan § 4.4 en § 4.5) ──
+// facturen-koerier.js doet de ronde; hier alleen de I/O: het lees-luik (mail_zoeken/mail_lezen als JSON, mail_bijlage ook als bytes) en de
+// verzender (n8n AI - Facturen-verzender: Gmail-concept met bijlagen, witte lijst + plafond in de workflow; multipart, geheim =
+// N8N_WEBHOOK_MAILCONCEPT, het webhookpad uit de workflow zelf). Zonder facturen-koerier.js (terugrol) doet de ronde alleen de back-up.
+const facturenKoerier = (function () {
+  const p = path.join(__dirname, 'facturen-koerier.js');
+  if (!facturenRoutes || !fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('facturen', e); return null; }
+})();
+const FACTUREN_VERZENDER_WF = process.env.FACTUREN_VERZENDER_WF || 'MiWuPjabqip7dCNo';   // AI - Facturen-verzender
+let facturenRondeBezig = 0;
+async function facturenLuikBytes(body) {
+  const geheim = process.env.N8N_WEBHOOK_AGENDA_API;
+  if (!geheim) throw new Error('lees-luik niet ingericht');
+  for (let poging = 0; poging < 2; poging++) {
+    const url = await appAgendaUrl(poging > 0);
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.assign({ secret: geheim }, body)), signal: AbortSignal.timeout(60000) });
+    if (r.status === 404 && poging === 0) continue;
+    if (!r.ok) throw new Error('lees-luik http ' + r.status);
+    if (/json/i.test(r.headers.get('content-type') || '')) return { json: await r.json() };
+    const n = Number(r.headers.get('content-length') || 0);
+    if (n > 21 * 1024 * 1024) throw new Error('bijlage te groot');
+    return { bytes: Buffer.from(await r.arrayBuffer()) };
+  }
+  throw new Error('lees-luik niet gevonden');
+}
+// Verzender: { modus, aan, onderwerp, tekst, token, bijlagen: [{ naam, mime, bytes }] } → { status, j }. Een fout vóór de aanroep krijgt
+// zekerNietVerstuurd (dan telt hij als mislukt); een time-out of verbroken verbinding niet (dan zoekt de koerier eerst, na 30 min).
+async function facturenVerzender(v) {
+  const geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;
+  const vooraf = function (m) { const e = new Error(m); e.zekerNietVerstuurd = true; e.code = 'verzender_niet_ingericht'; return e; };
+  if (!geheim) throw vooraf('verzender niet ingericht');
+  if (!/^[A-Za-z0-9]{8,40}$/.test(FACTUREN_VERZENDER_WF)) throw vooraf('verzender-workflow onbekend');
+  for (let poging = 0; poging < 2; poging++) {
+    let url;
+    try { url = await appWebhookUrl(FACTUREN_VERZENDER_WF, null, 'facturenVerzenderUrl', poging > 0); } catch (e) { throw vooraf('verzender-webhook niet gevonden'); }
+    const fd = new FormData();
+    fd.append('secret', geheim); fd.append('modus', v.modus); fd.append('aan', v.aan); fd.append('onderwerp', v.onderwerp); fd.append('bericht', v.tekst); fd.append('token', v.token);
+    for (const b of v.bijlagen || []) fd.append('bijlage', new Blob([b.bytes], { type: b.mime || 'application/octet-stream' }), b.naam);
+    const r = await fetch(url, { method: 'POST', body: fd, signal: AbortSignal.timeout(120000) });
+    if (r.status === 404 && poging === 0) { try { await r.arrayBuffer(); } catch (e) {} continue; }   // webhook niet geregistreerd: er is niets gemaakt
+    let j = null;
+    try { j = await r.json(); } catch (e) { j = null; }
+    return { status: r.status, j: j };
+  }
+  throw vooraf('verzender-webhook niet gevonden');
+}
+function facturenIo() { return { luik: appAgendaApi, luikBytes: facturenLuikBytes, verzender: facturenVerzender }; }
+function facturenKoerierInfo(fdb) {
+  if (!facturenKoerier) return { aan: false };
+  let k = null;
+  try { k = JSON.parse(facturenMod.metaLees(fdb, 'koerier_ronde') || 'null'); } catch (e) { k = null; }
+  return { aan: true, laatste_ronde: k ? k.op : null, ok: k ? !!k.ok : null, fout: k && k.fout ? String(k.fout).slice(0, 120) : null, verzendmodus: facturenMod.metaLees(fdb, 'verzendmodus') };
+}
 // Het klaarstaande bestand van dít apparaat en deze beurt (zelfde map als appUpload): bytes + naam, en weg() ruimt het op.
 function facturenUploadNeem(a, beurt, n) {
   const dir = appUploadMap(a, beurt);
