@@ -3520,7 +3520,8 @@ function handleRequest(req, res) {
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
-      managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
+      managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },
+      ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761: App Ideeën van buitenaf (laatste lezing, fout, aantal kaarten; geen inhoud)
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
@@ -10800,6 +10801,7 @@ function handleApp(req, res) {
         if (route.indexOf(' /app/studio/') > 0) return typeof appStudio === 'function' ? appStudio(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'studio');   // wv707
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
         if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
+        if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
         if (route === 'GET /app/ideeen' || route.indexOf('GET /app/ideeen/plaatje/') === 0 || route === 'POST /app/ideeen/reactie' || route === 'POST /app/ideeen/gezien' || route === 'POST /app/ideeen/naar-ideeenbus')
@@ -13622,6 +13624,35 @@ async function appManagers(req, res, a, d, route) {
   return appWeiger(res, 404, 'onbekend', 'managers route');
 }
 // ── einde managers ──
+
+// ── Ringkaart (wv888, 23-10-2026; bouwplan "01_Ontwikkeling/Ringkaart van Socev - tandwielweergave (bouwplan 23-10-2026).md") ──
+// GET /app/ringkaart: wachters (hartslagtabel via RPC mk_hartslag_stand, service_role, 60 s buffer), skills en kanalen (ringkaart.js,
+// uit de vault). Alleen lezen. Op een vaste plek geen beschrijvingen (Fable wv888 #4). Stil in het auditlog bij 200 (de app ververst
+// elke 2 min zolang de ringen in beeld zijn). Ontbreekt ringkaart.js in de release (terugrol), dan 404 en tekent de app de ringen zonder.
+const RINGKAART_MOD = (function () { const p = path.join(__dirname, 'ringkaart.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('ringkaart', e); return null; } })();
+const ringkaart = (function () { try { return RINGKAART_MOD ? RINGKAART_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT }) : null; } catch (e) { logError('ringkaart', e); return null; } })();
+const RINGKAART_HARTSLAG_MS = 60000;
+let ringkaartHartslag = null;   // { t, rijen } of null
+async function ringkaartRijen() {
+  if (ringkaartHartslag && Date.now() - ringkaartHartslag.t < RINGKAART_HARTSLAG_MS) return ringkaartHartslag.rijen;
+  try {
+    const r = await appSbRpc('mk_hartslag_stand', {});
+    ringkaartHartslag = { t: Date.now(), rijen: Array.isArray(r) ? r : null };
+  } catch (e) { logError('app-ringkaart', e); ringkaartHartslag = { t: Date.now() - RINGKAART_HARTSLAG_MS + 15000, rijen: null }; }   // fout: 15 s niet opnieuw
+  return ringkaartHartslag.rijen;
+}
+async function appRingkaart(req, res, a) {
+  if (!ringkaart) return appWeiger(res, 404, 'De ringkaart zit niet in deze versie van de pod', 'ringkaart ontbreekt');
+  appStaat.tellers.ringkaart = appStaat.tellers.ringkaart || [];
+  if (!appTeller('ringkaart', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ringkaart');
+  const vast = !!(a && a.soort === 'vast');
+  let uit;
+  try { uit = ringkaart.stand(await ringkaartRijen(), vast); }
+  catch (e) { logError('app-ringkaart', e); return appWeiger(res, 500, 'fout op de pod', 'ringkaart uitzondering'); }
+  res._app.stil = true;
+  return appStuur(res, 200, uit);
+}
+// ── einde ringkaart ──
 
 // ── Ideeënbeurs (wv761, 23-10-2026; bouwplan "01_Ontwikkeling/Ideeënbeurs met Albert van der Veer (ontwerp 22-10-2026).md" § 8) ──
 // App "Ideeën van buitenaf": kaarten in het afgeschermde forumonderdeel `ideeen` (forum.socev.dev) lezen en er als David op reageren,
