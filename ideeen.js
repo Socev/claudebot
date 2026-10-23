@@ -290,7 +290,7 @@ function maak(deps) {
     return { ok: true, bin: bin, type: type };
   }
 
-  // ── bundel (startset en weekbundel) ──
+  // ── bundel (startset, weekbundel en sinds wv965 deel: opnieuw aanbieden na een afgehandelde bundel) ──
   // Is dit de bundelkaart? Dan het aantal dat nu op Deel staat, of wanneer hij al afgehandeld is (Fable wv861 #5).
   function bundelVoor(sleutel) {
     const b = bundelLees();
@@ -302,6 +302,7 @@ function maak(deps) {
   function isBundel(sleutel) { const b = bundelLees(); return !!(b && b.kaart === String(sleutel || '')); }   // goedkoop: de Voor jou-lijst toont hem altijd als gevoelig
   // De Voor jou-kaart van de bundel (soort besluit). Stappen in de kaart zelf; geen paden of verwijzingen.
   function bundelKaart(b, n) {
+    if (b.soort === 'deel') return deelKaart(b, n);
     const start = b.soort === 'startset';
     const totaal = n;
     if (!start && Number.isInteger(b.nieuw) && b.nieuw > 0) n = b.nieuw;
@@ -318,13 +319,43 @@ function maak(deps) {
       herkomst: Object.assign({ handmatig: 'aix-bundel', soort: b.soort || 'week' },
         typeof b.register === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}#[^#\s|]{2,60}$/.test(b.register) ? { register: [b.register] } : {}) };   // rij in Open vragen aan David
   }
+  // wv965: de bundel opnieuw aanbieden. 23-10 drukte David Ja op de startset vóór hij iets op Deel zette (hij las Ja als "alle"); er ging niets
+  // naar AIX en daarna kwam er geen vraag meer. Nu: staat er na een afgehandelde bundel (Ja of Nee) iets op Deel met een keuze die nieuwer is
+  // dan die afhandeling en nog niet gedeeld, dan maakt de uurronde een nieuwe bundel (soort deel) met een eigen kaart. Alleen keuzes van ná de
+  // afhandeling tellen, zodat een Nee niet elk uur terugkomt; plaatsen blijft plaatsBundel na een nieuwe Ja met verse vingerafdruk.
+  function deelKaart(b, n) {
+    const wat = b.alleen_kaarten === false ? (n === 1 ? 'stuk' : 'stukken') : (n === 1 ? 'kaart' : 'kaarten');
+    return { sleutel: b.kaart, soort: 'besluit', titel: 'Socevs winkel op AIX — ' + n + ' ' + wat + ' op Deel plaatsen?',
+      waarom: kap('Er staan ' + n + ' ' + wat + ' op Deel die nog niet in Socevs winkel op aix.socev.dev staan: ze kwamen op Deel nadat de vorige vraag over AIX al was afgehandeld, ' +
+        'dus ging er niets naar AIX. Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen of webadressen. Bank, gezondheid en beveiliging blijven privé.', 400),
+      stappen: ['Moet er een niet mee? Zet hem in de app bij Apps › AIX, tab Klaar om te delen, op Niet.',
+        'Ja met vingerafdruk (op de telefoon): de pod zet wat op Deel staat in Socevs winkel op AIX, als Socev. Nee: er gaat niets naar AIX.'],
+      waar: 'overal', prive: false, duur_min: 2, volgorde: 20, herkomst: { handmatig: 'aix-bundel', soort: 'deel' } };
+  }
+  function deelNaAfhandeling(b) {
+    const t = Date.parse(b.afgehandeld);
+    if (!Number.isFinite(t) || plaatsBezig) return null;
+    const c = concepten();
+    if (!c.ok) return null;
+    const j = journaal();
+    const op = c.concepten.filter(function (k) { return k.keuze === 'deel' && k.kan_delen; });
+    if (!op.some(function (k) { return Date.parse((j[k.id] || {}).keuze_op) > t; })) return null;
+    const d = new Date(klok()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).replace(/[-: ]/g, '').slice(0, 12);
+    return { kaart: 'aix-deel-' + d.slice(0, 8) + '-' + d.slice(8), soort: 'deel', gemaakt: new Date(klok()).toISOString(), na: b.kaart, nieuw: op.length,
+      alleen_kaarten: op.every(function (k) { return k.vorm === 'kaart'; }) };
+  }
   // Zet de bundelkaart in Voor jou als dat nog niet gebeurde (uurronde; overleeft een herstart). Alles wat nu concept is, telt als aangeboden.
   async function zorgBundelKaart() {
-    const b = bundelLees();
+    let b = bundelLees();
+    if (b && b.afgehandeld && deps.voorJou) { const nb = deelNaAfhandeling(b); if (nb) { schrijfJson(P.bundel, nb); b = nb; } }
     if (!b || b.afgehandeld || b.kaart_gezet || !deps.voorJou) return { gezet: false };
     const c = concepten();
     if (!c.ok || !c.concepten.length) return { gezet: false, reden: c.fout || 'niets klaar' };
-    await deps.voorJou(bundelKaart(b, c.concepten.length));
+    if (b.soort === 'deel' && !c.bundel.aangevinkt) {   // alles weer op Niet gezet voordat de kaart er stond: bundel dicht, geen kaart
+      b.afgehandeld = new Date(klok()).toISOString(); b.uitkomst = 'leeg'; schrijfJson(P.bundel, b);
+      return { gezet: false, reden: 'niets meer op Deel' };
+    }
+    await deps.voorJou(bundelKaart(b, b.soort === 'deel' ? c.bundel.aangevinkt : c.concepten.length));
     b.kaart_gezet = new Date(klok()).toISOString();
     schrijfJson(P.bundel, b);
     const s = staatLees();

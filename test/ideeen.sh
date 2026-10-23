@@ -236,6 +236,59 @@ M.mkdir();
     toets('10 startset-kaart noemt het aantal en dat privé privé blijft, zonder … (niet afgekapt)', /zette 26 ideekaarten klaar/.test(ks[0].waarom) && /privé\.$/.test(ks[0].waarom), ks[0].waarom);
   }
 
+  // ── 11. wv965: bundel opnieuw aanbieden als er na een afgehandelde bundel iets op Deel kwam (23-10: Ja vóór de Deel-keuzes, 0 geplaatst) ──
+  {
+    const D3 = path.join(W, 'staat-wv965'); const vj = []; let gooi = false;
+    const M3 = I.maak({ vault: VAULT, dir: D3, aix, klok: () => nu, harvester: H, filter: naamToets, plaatjes: PROEF, claude,
+      voorJou: async (p) => { if (gooi) { gooi = false; throw new Error('mk_voor_jou_zet weigerde'); } vj.push(p); return { sleutel: p.sleutel }; } });
+    M3.mkdir();
+    const bundel = () => JSON.parse(fs.readFileSync(path.join(D3, 'bundel.json'), 'utf8'));
+    const lengte = (t) => [...String(t || '')].length;
+    nu += 3600000;
+    fs.writeFileSync(path.join(D3, 'bundel.json'), JSON.stringify({ kaart: 'aix-start-20261023', soort: 'startset', kaart_gezet: iso(2), afgehandeld: new Date(nu - 60000).toISOString(), uitkomst: 'ja' }));
+    const deelbaar = M3.concepten().concepten.filter((k) => k.kan_delen).map((k) => k.id);
+    let z = await M3.zorgBundelKaart();
+    toets('11 afgehandelde bundel zonder nieuwe Deel-keuze: geen nieuwe bundel, geen kaart', !z.gezet && vj.length === 0 && bundel().kaart === 'aix-start-20261023' && deelbaar.length >= 2, { z, deelbaar });
+    nu += 60000;
+    await M3.app('POST /app/ideeen/kaart/' + deelbaar[0] + '/deel'); await M3.app('POST /app/ideeen/kaart/' + deelbaar[1] + '/deel');
+    gooi = true;
+    let gegooid = false; try { await M3.zorgBundelKaart(); } catch (e) { gegooid = true; }
+    toets('11 kaart zetten mislukt: nieuwe bundel staat, kaart nog niet gezet (volgend uur opnieuw)', gegooid && bundel().soort === 'deel' && !bundel().kaart_gezet && vj.length === 0, bundel());
+    z = await M3.zorgBundelKaart();
+    const k = vj[0] || {};
+    toets('11 Deel na de afhandeling: nieuwe bundel (soort deel) met een eigen besluitkaart "… 2 … op Deel plaatsen?"', z.gezet && vj.length === 1 && k.soort === 'besluit' && /^aix-deel-\d{8}-\d{4}$/.test(k.sleutel) &&
+      /^Socevs winkel op AIX — 2 (kaarten|stukken) op Deel plaatsen\?$/.test(k.titel) && bundel().kaart === k.sleutel && bundel().na === 'aix-start-20261023', { z, k, b: bundel() });
+    toets('11 kaart binnen de grenzen, stappen in de kaart, geen pad of wv-nummer', lengte(k.waarom) <= 400 && lengte(k.titel) <= 90 && k.stappen.length >= 2 && !/wv\d|\/opt\/|\.md\b/.test(JSON.stringify(k)) && /vingerafdruk/.test(k.stappen.join(' ')), k);
+    toets('11 isBundel en bundelVoor kennen de nieuwe bundel (dus altijd gevoelig, Ja plaatst)', M3.isBundel(k.sleutel) && M3.bundelVoor(k.sleutel).aangevinkt === 2 && !M3.bundelVoor(k.sleutel).afgehandeld);
+    z = await M3.zorgBundelKaart();
+    toets('11 niet dubbel', !z.gezet && vj.length === 1);
+    // Nee: dicht; dezelfde (oudere) Deel-keuzes brengen hem niet elk uur terug
+    M3.bundelNee(k.sleutel); nu += 3600000;
+    z = await M3.zorgBundelKaart();
+    toets('11 na Nee: geen nieuwe bundel zolang er geen nieuwere Deel-keuze is', !z.gezet && vj.length === 1 && bundel().kaart === k.sleutel && bundel().uitkomst === 'nee', bundel());
+    await M3.app('POST /app/ideeen/kaart/' + deelbaar[0] + '/niet'); z = await M3.zorgBundelKaart();
+    toets('11 een nieuwe Niet-keuze brengt geen bundel', !z.gezet && vj.length === 1);
+    nu += 60000; await M3.app('POST /app/ideeen/kaart/' + deelbaar[0] + '/deel'); z = await M3.zorgBundelKaart();
+    const k2 = vj[1] || {};
+    toets('11 weer iets op Deel na de Nee: nieuwe bundel met een andere sleutel; telt alles wat op Deel staat (2)', z.gezet && k2.sleutel && k2.sleutel !== k.sleutel && /— 2 /.test(k2.titel), k2);
+    // Ja zonder verse vingerafdruk = niets; Ja = plaatsen, daarna geen nieuwe bundel
+    const s0 = X.schrijf.length;
+    toets('11 Ja van een vaste plek plaatst niets', (await M3.plaatsBundel({ kaart: k2.sleutel, bevestiging: 'knop-ja-vers-vast-kaart' })).ok === false && X.schrijf.length === s0);
+    const u = await M3.plaatsBundel({ kaart: k2.sleutel, bevestiging: I.BEVESTIGING_PLAATSEN, vraagId: 'wv965abc' });
+    nu += 3600000; z = await M3.zorgBundelKaart();
+    toets('11 Ja met verse vingerafdruk: de 2 Deel-stukken geplaatst, daarna geen nieuwe bundel', u.geplaatst.length === 2 && !z.gezet && vj.length === 2 && M3.health().plaatsing.geplaatst === 2, u);
+    // bundel gemaakt maar kaart mislukt, daarna alles op Niet: bundel dicht (leeg), geen kaart
+    nu += 60000; const rest = M3.concepten().concepten.filter((x) => x.kan_delen).map((x) => x.id);
+    if (rest.length) {
+      await M3.app('POST /app/ideeen/kaart/' + rest[0] + '/deel'); gooi = true; try { await M3.zorgBundelKaart(); } catch (e) {}
+      await M3.app('POST /app/ideeen/kaart/' + rest[0] + '/niet'); z = await M3.zorgBundelKaart();
+      toets('11 alles weer op Niet voordat de kaart stond: bundel dicht (leeg), geen kaart', !z.gezet && bundel().soort === 'deel' && bundel().uitkomst === 'leeg' && vj.length === 2, { z, b: bundel() });
+    } else toets('11 (rest) er is nog een deelbaar stuk voor de leeg-proef', false, rest);
+    const Ig = I.maak({ vault: VAULT, dir: path.join(W, 'grens2') });
+    const kg = [Ig.bundelKaart({ kaart: 'aix-deel-x', soort: 'deel' }, 99999), Ig.bundelKaart({ kaart: 'aix-deel-x', soort: 'deel', alleen_kaarten: false }, 1)];
+    toets('11 deel-kaart bij grote aantallen binnen de grenzen; enkelvoud "1 stuk"', kg.every((x) => lengte(x.waarom) <= 400 && lengte(x.titel) <= 90) && /— 1 stuk op Deel/.test(kg[1].titel), kg.map((x) => [lengte(x.waarom), x.titel]));
+  }
+
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
