@@ -472,9 +472,19 @@ let invoer=''; process.stdin.on('data',c=>invoer+=c); process.stdin.on('end',()=
     gezienTot = 60; antw2 = { ok: true, data: { kaarten: [] } };
     u2 = await M2.ronde();
     toets('11 pas na Davids blik in de tab geoogst (Fable #10)', u2.items === 1 && /Albert nog niet gezien/.test(prompt2), u2);
+    toets('11 kapotte draad 3 keer op rij = één regel voor David (diffreview #1)', /bron Albert en Appie \(ideeënbeurs\) \(1 kaart niet te lezen, 3 keer op rij\)/.test(M2.rondeUitkomst().j.regel || ''), M2.rondeUitkomst().j);
     // al gezien → niets
     u2 = await M2.ronde();
     toets('11 al gezien = niets', u2.geslaagd && u2.items === 0, u2);
+    // blijvers (gewist, verplaatst, kapot, onbekende naam) na 4 rondes gezien; wachten op David telt niet mee (diffreview #1/#3)
+    zet(115, { titel: 'Albert nieuw, nog niet gezien', auteur: 'albert@proef.nl', van: 'albert', soort: 'mens', bid: 70 });
+    await M2.ronde();
+    toets('11 GET-lijst: kaarten die op Davids blik wachten zijn zichtbaar', (await M2.app('GET /app/harvester', {})).j.bronnen.find((b) => b.id === 'ideeenbeurs').wacht_david === 1);
+    net = [];
+    u2 = await M2.ronde();
+    const st6 = JSON.parse(fs.readFileSync(path.join(D2, 'staat.json'), 'utf8')).bronnen.ideeenbeurs;
+    toets('11 na 4 rondes zijn de blijvers weg; alleen de kaart die op David wacht wordt nog bekeken', u2.geslaagd && net.filter((x) => x.indexOf('draad/') === 0).join(',') === 'draad/115?stil=1' &&
+      Object.keys(st6.pogingen || {}).length === 0 && [106, 107, 111, 113, 114].every((n) => st6.gezien.includes(H.sleutel('ideeenbeurs', 'draad:' + n))), { net, st6 });
     // forum onbereikbaar → fout per bron, feed door
     forumStand = 503;
     u2 = await M2.ronde();
@@ -492,7 +502,10 @@ let invoer=''; process.stdin.on('data',c=>invoer+=c); process.stdin.on('end',()=
     for (let i = 0; i < 15; i++) zet(300 + i, { titel: 'Reeks ' + i, auteur: 'appie', van: 'appie', soort: 'bot', bid: 300 + i });
     net = []; antw2 = { ok: true, data: { kaarten: [] } };
     u2 = await M2.ronde();
-    toets('11 hooguit 10 draden per ronde opgehaald', net.filter((x) => x.indexOf('draad/') === 0).length === 10 && u2.geslaagd, net.length);
+    const opg = net.filter((x) => x.indexOf('draad/') === 0).map((x) => Number(/\d+/.exec(x)[0]));
+    toets('11 hooguit 10 draden per ronde, de nieuwe eerst (115 en Reeks 300–308)', opg.length === 10 && opg.every((n) => n === 115 || n >= 300) && u2.geslaagd && u2.items === 10, { opg, u2 });
+    net = []; u2 = await M2.ronde();
+    toets('11 volgende ronde: de rest van de reeks (309–314)', net.filter((x) => x.indexOf('draad/') === 0).length === 6 && u2.items === 6, { net, u2 });
     toets('11 GET-lijst: bron ideeenbeurs aan, met laatste lezing', (await M2.app('GET /app/harvester', {})).j.bronnen.find((b) => b.id === 'ideeenbeurs').aan === true);
   }
 

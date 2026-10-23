@@ -33,7 +33,7 @@ const GRENS = { titel: 70, kort: 300, waarom: 140, naam: 60, adres: 500, item_te
 const OPHAAL_MS = 20000, OPHAAL_TOTAAL_MS = 60000, RONDE_FEEDS_MS = 10 * 60000;
 // Bron ideeenbeurs (wv828, bouwplan § 12): kaarten van Albert en Appie uit forumonderdeel `ideeen`, alleen lezen.
 const IB = { forum: 'ideeen', van: { appie: 'bot', albert: 'mens' }, ons: ['socev', 'david', 'pod', 'n8n'], status: ['bedacht', 'in aanbouw', 'in gebruik'],
-  draden_ronde: 10, link: 'https://app.socev.dev/?app=ideeen' };
+  draden_ronde: 10, wacht_max: 4, link: 'https://app.socev.dev/?app=ideeen' };
 const UA = 'OVIS-Harvester/1 (+https://socev.dev)';
 
 // ── tekst ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -370,37 +370,48 @@ function sleutel(bronId, itemId) { return crypto.createHash('sha256').update(bro
 // forum(pad) -> {status, j}: alleen GET, door server.js begrensd tot deze twee paden; de paden hier komen alleen uit getallen (Fable #12).
 // gezienTot = het hoogste berichtnummer dat David in de tab Ideeën van buitenaf zag: alleen wat hij zag wordt geoogst, zodat hij een kaart
 // die er niet hoort eerst kan verbergen voordat er een samenvatting in de vault (spiegel) komt (Fable #10).
-// Uit: { ok, items, overslaan[] (van ons of nagebootst: telt als gezien), wacht (niet gezien, volgende week opnieuw), fouten (draden die niet te lezen waren) }.
+// pogingen = per draad hoe vaak hij afviel om een reden die kan overgaan (draad niet te lezen, verplaatst, gewist, nog geen weergavenaam,
+// lege kaart); na IB.wacht_max rondes telt hij als gezien, zodat blijvers de 10 plekken niet voorgoed bezetten (diffreview #1). Wachten op
+// Davids blik telt niet mee. Nieuwe draden (minste pogingen) eerst.
+// Uit: { items, overslaan[] (van ons, nagebootst of te vaak afgevallen: telt als gezien na een geslaagde ronde), pogingen, wacht_david,
+//        fouten (draden niet te lezen deze ronde), kapot_op_rij (hoogste aantal keren op rij dat één draad niet te lezen was) }.
 function kaartVeld(t, max) { return schoon(zonderMarkering(String(t == null ? '' : t)), max); }
-async function leesIdeeenbeurs(forum, gezien, gezienTot, bronId, budgetMs, klok) {
+async function leesIdeeenbeurs(forum, gezien, pogingen, gezienTot, bronId, budgetMs, klok) {
   const t0 = klok();
   const r = await forum('draden?forum=' + IB.forum);
   if (!r || r.status !== 200 || r.bin || !r.j || !Array.isArray(r.j.draden)) throw new Error('forum gaf ' + (r && r.status) + (r && r.j && r.j.fout ? ': ' + String(r.j.fout).slice(0, 80) : ''));
+  const oud = pogingen && typeof pogingen === 'object' ? pogingen : {};
+  const pog = function (id) { return Number.isInteger(oud[id]) && oud[id] > 0 ? oud[id] : 0; };
   const kand = r.j.draden.filter(function (d) {
     return d && Number.isInteger(d.id) && d.id > 0 && String(d.forum).toLowerCase() === IB.forum && !d.gewist_op && d.kaart && typeof d.kaart === 'object' &&
       IB.ons.indexOf(String(d.gemaakt_door || '').toLowerCase()) < 0 && !gezien.has(sleutel(bronId, 'draad:' + d.id));
-  }).sort(function (a, b) { return a.id - b.id; });
-  const uit = { ok: true, items: [], overslaan: [], wacht: 0, fouten: 0, opgehaald: 0 };
+  }).sort(function (a, b) { return (pog(a.id) - pog(b.id)) || (a.id - b.id); });
+  const uit = { items: [], overslaan: [], pogingen: {}, wacht_david: 0, fouten: 0, kapot_op_rij: 0, opgehaald: 0 };
+  kand.forEach(function (d) { if (pog(d.id)) uit.pogingen[d.id] = pog(d.id); });   // alleen draden die er nog staan
+  const valAf = function (id) { const n = pog(id) + 1; if (n >= IB.wacht_max) { delete uit.pogingen[id]; uit.overslaan.push(id); } else uit.pogingen[id] = n; return n; };
   for (const d of kand) {
-    if (uit.opgehaald >= IB.draden_ronde || klok() - t0 > budgetMs) { uit.wacht++; continue; }
+    if (uit.opgehaald >= IB.draden_ronde || klok() - t0 > budgetMs) continue;   // volgende week
     uit.opgehaald++;
-    let g;
-    try { g = await forum('draad/' + d.id + '?stil=1'); } catch (e) { uit.fouten++; continue; }
-    if (!g || g.status !== 200 || g.bin || !g.j || !g.j.draad || !Array.isArray(g.j.berichten) || !g.j.berichten.length) { uit.fouten++; continue; }
+    let g = null;
+    try { g = await forum('draad/' + d.id + '?stil=1'); } catch (e) { g = null; }
+    if (!g || g.status !== 200 || g.bin || !g.j || !g.j.draad || !Array.isArray(g.j.berichten) || !g.j.berichten.length) {
+      uit.fouten++; uit.kapot_op_rij = Math.max(uit.kapot_op_rij, valAf(d.id)); continue;
+    }
     const dr = g.j.draad, e = g.j.berichten[0], k = dr.kaart;
     const van = String(e.van || '').toLowerCase(), auteur = String(e.auteur || '').toLowerCase(), soort = String(e.soort || '');
-    // tijdelijk niet (verplaatst, gewist, nog niet gezien, nog geen weergavenaam): niet gezien, volgende week opnieuw (Fable #3)
-    if (dr.id !== d.id || String(dr.forum).toLowerCase() !== IB.forum || dr.gewist_op || e.gewist || e.gewist_op || !k || typeof k !== 'object') { uit.wacht++; continue; }
-    if (IB.ons.indexOf(van) >= 0) { uit.overslaan.push(d.id); continue; }   // David via de browser (mailadres als starter): van ons
-    // alleen echt van Appie of Albert: weergavenaam, eigen naam (geen 'als' via een moderatorsleutel) en soort passen bij elkaar (Fable #1)
+    // kan overgaan (verplaatst, gewist, geen kaart): volgende week opnieuw, hooguit IB.wacht_max keer (Fable #3, diffreview #1)
+    if (dr.id !== d.id || String(dr.forum).toLowerCase() !== IB.forum || dr.gewist_op || e.gewist || e.gewist_op || !k || typeof k !== 'object') { valAf(d.id); continue; }
+    if (IB.ons.indexOf(van) >= 0) { delete uit.pogingen[d.id]; uit.overslaan.push(d.id); continue; }   // David via de browser (mailadres als starter)
+    // alleen echt van Appie of Albert: weergavenaam, eigen naam (geen 'als' via een moderatorsleutel) en soort passen bij elkaar (Fable #1).
+    // Naam van Appie/Albert maar via, soort of eigen naam klopt niet = nagebootst; de starter verandert nooit, dus meteen gezien.
+    // Een onbekende weergavenaam (Albert vóór zijn lid-rij) mag overgaan.
     const echt = Object.hasOwn(IB.van, van) && e.via == null && soort === IB.van[van] && (soort === 'bot' ? auteur === van : auteur.indexOf('@') > 0);
-    // naam van Appie/Albert maar via, soort of eigen naam klopt niet = nagebootst; de starter verandert nooit, dus voorgoed gezien.
-    // Een onbekende weergavenaam (Albert vóór zijn lid-rij) wacht wel (Fable #3).
-    if (!echt) { if (Object.hasOwn(IB.van, van)) uit.overslaan.push(d.id); else uit.wacht++; continue; }
-    if (!(Number.isInteger(e.id) && e.id > 0 && e.id <= gezienTot)) { uit.wacht++; continue; }
+    if (!echt) { if (Object.hasOwn(IB.van, van)) { delete uit.pogingen[d.id]; uit.overslaan.push(d.id); } else valAf(d.id); continue; }
+    if (!(Number.isInteger(e.id) && e.id > 0 && e.id <= gezienTot)) { uit.wacht_david++; continue; }   // wacht op Davids blik, zonder teller
     const titel = kaartVeld(k.titel, GRENS.titel), wat = kaartVeld(k.wat, 400), waarom = kaartVeld(k.waarom, 200);
     const status = IB.status.indexOf(String(k.status || '').toLowerCase()) >= 0 ? String(k.status).toLowerCase() : '';   // Fable #4
-    if (titel.length < 3 || wat.length < 10) { uit.wacht++; continue; }
+    if (titel.length < 3 || wat.length < 10) { valAf(d.id); continue; }
+    delete uit.pogingen[d.id];
     const datum = Date.parse(dr.gemaakt_op);
     uit.items.push({ id: 'draad:' + d.id, titel: titel, link: IB.link, datum: Number.isFinite(datum) ? new Date(datum).toISOString() : null,
       tekst: (wat + (waarom ? ' Waarom: ' + waarom : '') + (status ? ' Status: ' + status : '') + ' (van ' + van + ')').slice(0, GRENS.item_tekst) });
@@ -508,7 +519,8 @@ function maak(deps) {
       bronnen: (b.bronnen || []).map(function (y) {
         const st = s.bronnen[y.id] || {};
         return { id: y.id, naam: y.naam, soort: y.soort, adres: y.adres, host: y.adres ? host(y.adres) : '', aan: y.aan, aan_tekst: y.aan_tekst,
-          gelezen: st.gelezen || null, fout: st.fout || null, fouten_op_rij: st.fouten_op_rij || 0, nieuw: telBron[y.id] || 0 };
+          gelezen: st.gelezen || null, fout: st.fout || null, fouten_op_rij: st.fouten_op_rij || 0, nieuw: telBron[y.id] || 0,
+          ...(y.soort === 'ideeenbeurs' ? { wacht_david: st.wacht_david || 0 } : {}) };   // kaarten die wachten tot David ze in de tab zag (diffreview #3)
       }),
       bronnen_fout: b.ok ? (b.fouten || []) : [b.fout], bronnen_dicht: b.dicht || (b.ok && !b.schrijfbaar ? 'de kop van de bronnentabel wijkt af (nodig: id, naam, soort, adres, aan)' : null),
       ronde: s.ronde || null, bus_ok: bus.ok,
@@ -634,15 +646,15 @@ function maak(deps) {
       try {
         if (!deps.forum) throw new Error('geen forumlezer in deze pod');
         const gt = deps.ideeenGezien ? Number(deps.ideeenGezien()) || 0 : 0;
-        const p = await leesIdeeenbeurs(deps.forum, new Set(bs.gezien), gt, f.id, rest, klok);
-        if (!bs.gelezen && !bs.gezien.length) zaai(s, f.id, p.items);
-        const gezien = new Set(bs.gezien);
-        p.items.forEach(function (i) { if (!gezien.has(sleutel(f.id, i.id))) nieuw.push({ bron: f, item: i }); });
+        // geen zaaien: elke kaart van buiten die David zag, telt (er zijn er weinig; diffreview #5)
+        const p = await leesIdeeenbeurs(deps.forum, new Set(bs.gezien), bs.pogingen, gt, f.id, rest, klok);
+        p.items.forEach(function (i) { nieuw.push({ bron: f, item: i }); });
         ibOns[f.id] = p.overslaan;
+        bs.pogingen = p.pogingen; bs.wacht_david = p.wacht_david;
         bs.fout = p.fouten ? p.fouten + (p.fouten === 1 ? ' kaart' : ' kaarten') + ' niet te lezen' : null;
-        bs.fouten_op_rij = 0; bs.gelezen = new Date(klok()).toISOString();
+        bs.fouten_op_rij = 0; bs.gelezen = new Date(klok()).toISOString();   // de lijst kwam binnen; een kapotte draad telt apart (≥ 3 keer = regel; diffreview #1)
         uit.bronnen++;
-        if (p.fouten) uit.bronnen_fout.push({ id: f.id, naam: f.naam, fout: bs.fout, op_rij: 0 });
+        if (p.fouten) uit.bronnen_fout.push({ id: f.id, naam: f.naam, fout: bs.fout, op_rij: p.kapot_op_rij });
       } catch (e) {
         bs.fout = String(e && e.message || e).slice(0, 160); bs.fouten_op_rij = (bs.fouten_op_rij || 0) + 1;
         uit.bronnen_fout.push({ id: f.id, naam: f.naam, fout: bs.fout, op_rij: bs.fouten_op_rij });
