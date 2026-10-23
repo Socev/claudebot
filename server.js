@@ -15007,6 +15007,7 @@ let bankRondeLaatste = null;   // { begin, eind, uitkomst }
 // genoom-pijplijn bevragen). Fout → 502 met alleen de soort fout en de exitcode, nooit stdout/stderr van het script.
 // DEKT NIET: wat het script zelf doet (review F5, ontwerp Health-pod § 15).
 const HEALTH_RAPPORTEN_BIN = process.env.HEALTH_RAPPORTEN_BIN || '/opt/data/bin/healthrapporten.py';   // alleen de toets wijst elders heen
+const HEALTH_RAPPORTEN_CWD = process.env.HEALTH_RAPPORTEN_CWD || '/opt/data';   // idem: in CI bestaat /opt/data niet (spawn ENOENT, run 209/210)
 const HEALTH_RAPPORTEN_ENV = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'CLAUDE_CODE_OAUTH_TOKEN'];
 const HEALTH_RAPPORTEN_MS = Number(process.env.HEALTH_RAPPORTEN_MS) || 240000;
 let healthRapportenBezig = false;
@@ -15016,7 +15017,7 @@ function healthRapportenStart(klaar) {
   const env = {};
   HEALTH_RAPPORTEN_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
   require('child_process').execFile('python3', [HEALTH_RAPPORTEN_BIN, 'start'],
-    { env: env, cwd: '/opt/data', timeout: HEALTH_RAPPORTEN_MS, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 },
+    { env: env, cwd: HEALTH_RAPPORTEN_CWD, timeout: HEALTH_RAPPORTEN_MS, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 },
     function (err, stdout) {
       healthRapportenBezig = false;
       const m = /(GESTART|LOOPT NOG)[^\n]*/.exec(String(stdout || ''));

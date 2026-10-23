@@ -17,7 +17,7 @@ const blok = src.slice(a, b) + '\nthis.healthRapportenStart = healthRapportenSta
 function script(naam, py) { const p = path.join(W, naam); fs.writeFileSync(p, py); return p; }
 const logs = [];
 function laad(bin, ms) {
-  const env = Object.assign({}, process.env, { HEALTH_RAPPORTEN_BIN: bin, HEALTH_RAPPORTEN_MS: String(ms || 5000), API_SECRET: 'geheim-x', N8N_API_KEY: 'n8n-x', CLAUDE_CODE_OAUTH_TOKEN: 'tok-x' });
+  const env = Object.assign({}, process.env, { HEALTH_RAPPORTEN_BIN: bin, HEALTH_RAPPORTEN_CWD: W, HEALTH_RAPPORTEN_MS: String(ms || 5000), API_SECRET: 'geheim-x', N8N_API_KEY: 'n8n-x', CLAUDE_CODE_OAUTH_TOKEN: 'tok-x' });
   const ctx = { require: require, process: { env: env }, logError: function (w, e) { logs.push(w + ': ' + e.message); }, Math: Math, Number: Number, String: String };
   vm.createContext(ctx); vm.runInContext(blok, ctx); return ctx.healthRapportenStart;
 }
