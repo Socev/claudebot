@@ -8854,6 +8854,7 @@ async function appVoorJouRoute(req, res, a) {
   const sleutels = [];
   lijst.forEach(function (p) { sleutels.push('k:' + p.id); if (p.deadline && p.deadline < vandaag) sleutels.push('k:' + p.id + ':over'); });
   (moet || []).forEach(function (m) { sleutels.push(m.punt); });
+  appMoetGezienOpruim(punten, nu, vandaag);
   appStuur(res, 200, { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: !!(a && a.soort === 'vast'),
     bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null, moet_iets: moet, moet_fout: moetFout, gezien: appMoetGezien(sleutels) });
 }
@@ -8862,8 +8863,11 @@ async function appVoorJouRoute(req, res, a) {
 // voorjou), wachtende agenda-✅ (uitvoeren open en nog niet verlopen) en dag-berichten van vandaag in het hoofdkanaal (meld dag,
 // of zonder meld: dringend; de briefing niet, die heeft een eigen kaart bovenaan Voor jou). Ontdubbeld tegen open kaarten: eerst de
 // koppeling (herkomst.vraag = job:hash, appVjGekoppeld; review wv588 M3-rest), dan een wv-nummer in de vraagzin dat in een open
-// kaarttitel staat. Per punt de volle berichttekst (de app toont hem pas na "Lees en beantwoord"), begrensd. Puur: getoetst in 27c.
-const APP_MOET_BERICHT_MAX = 20000;
+// kaarttitel staat. Per punt de berichttekst (de app toont hem pas na "Lees en beantwoord"), begrensd. Puur: getoetst in 9d.
+// review wv594 #6: hooguit 6000 tekens per bericht (30 punten ≈ 180 kB per lading); een dag-punt alleen een kort begin (de app toont
+// er één regel van). Langer = afgekapt: true; de app zet er dan geen knoppen onder maar verwijst naar het gesprek (review #7).
+const APP_MOET_BERICHT_MAX = 6000;
+const APP_MOET_DAG_MAX = 600;
 const APP_MOET_MAX = 30;
 const APP_MOET_WV_RE = /\bwv\s?(\d{2,4})\b/gi;
 function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu) {
@@ -8885,7 +8889,7 @@ function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu) {
       if (e && e.kanaal === kanaal) {
         const vorm = appAgendaVorm(e, nu);
         if (vorm.knoppen.some(function (k) { return k.knop === 'uitvoeren' && k.open && Date.parse(k.verloopt) > nu; })) {
-          uit.push(Object.assign({ punt: 'a:' + x.job_id, soort: 'agenda', bericht: appMoetBericht(x.antwoord), agenda: vorm }, basis));
+          uit.push(Object.assign({ punt: 'a:' + x.job_id, soort: 'agenda', bericht: appMoetBericht(x.antwoord), afgekapt: appMoetAf(x.antwoord), agenda: vorm }, basis));
           return;
         }
       }
@@ -8898,18 +8902,19 @@ function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu) {
         let wv = false;
         v.tekst.replace(APP_MOET_WV_RE, function (m, n) { if (kaartWv[n]) wv = true; return m; });   // alleen de vraagzin: een rapport noemt vaak tientallen wv-nummers
         if (wv) return;
-        uit.push(Object.assign({ punt: 'v:' + id, soort: 'vraag', hash: x.vraag_hash, tekst: v.tekst, gevoelig: r.gevoelig !== false, bericht: appMoetBericht(x.antwoord) }, basis));
+        uit.push(Object.assign({ punt: 'v:' + id, soort: 'vraag', hash: x.vraag_hash, tekst: v.tekst, gevoelig: r.gevoelig !== false, bericht: appMoetBericht(x.antwoord), afgekapt: appMoetAf(x.antwoord) }, basis));
         return;
       }
       const dag = x.meld ? x.meld === 'dag' : x.klasse === 'dringend';
       if (kanaal === 'hoofd' && x.soort === 'socev' && dag && x.klasse !== 'stil' && x.bron !== 'briefing' && x.ok !== false && appYmd(t) === vandaag)
-        uit.push(Object.assign({ punt: 'd:' + x.job_id, soort: 'dag', bericht: appMoetBericht(x.antwoord) }, basis));
+        uit.push(Object.assign({ punt: 'd:' + x.job_id, soort: 'dag', bericht: appMoetBericht(x.antwoord, APP_MOET_DAG_MAX), afgekapt: appMoetAf(x.antwoord, APP_MOET_DAG_MAX) }, basis));
     });
   });
   const rang = { dag: 0, agenda: 1, vraag: 2 };
   return uit.sort(function (p, q) { return rang[p.soort] - rang[q.soort] || q.t.localeCompare(p.t); }).slice(0, APP_MOET_MAX);
 }
-function appMoetBericht(t) { t = String(t || ''); return t.length > APP_MOET_BERICHT_MAX ? t.slice(0, APP_MOET_BERICHT_MAX) + '\n\n…' : t; }
+function appMoetBericht(t, max) { t = String(t || ''); max = max || APP_MOET_BERICHT_MAX; return t.length > max ? t.slice(0, max) + '\n\n…' : t; }
+function appMoetAf(t, max) { return String(t || '').length > (max || APP_MOET_BERICHT_MAX); }
 // Het app-log van de laatste 73 uur, bewaard op mtime + grootte (GET /app/voor-jou leest elke paar minuten per apparaat).
 async function appMoetLog(kanaal) {
   let st;
@@ -8929,6 +8934,29 @@ async function appMoetIets(kaarten, nu) {
     per[k] = r.items;
   }
   return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu);
+}
+// review wv594 #2: een kaart die niet meer op David wacht (dicht, of later met een datum na vandaag) gaat uit gezien-david.json, zodat
+// hij opnieuw telt als hij terugkomt (heropend, later verlopen); zoals gezienBijwerken in de app. Alleen kaarten die de lijst echt
+// noemt (een lege of halve lijst wist niets) en niet in de ↩️-minuut (een ongedaan gemaakte keuze is niet nieuw). Schrijft alleen als
+// er iets weg moet.
+function appMoetGezienOpruim(punten, nu, vandaag) {
+  try {
+    const weg = [];
+    (punten || []).forEach(function (p) {
+      if (!p || p.id == null) return;
+      const wacht = p.status === 'open' || (p.status === 'later' && !(String(p.later_tot || '') > vandaag));
+      const t = appStaat.vjTerug && appStaat.vjTerug[p.id];
+      if (wacht || (t && t.tot > nu)) return;
+      const g = Date.parse(p.gesloten_op || '') || 0;
+      if (g && nu - g < APP_VJ_DOORZET_MS) return;   // net gekozen: na een pod-herstart kent vjTerug hem niet meer
+      weg.push('k:' + p.id, 'k:' + p.id + ':over');
+    });
+    if (!weg.length) return;
+    const g = appGezienDavid();
+    if (!g || !weg.some(function (k) { return g.punten[k]; })) return;
+    weg.forEach(function (k) { delete g.punten[k]; });
+    appSchrijfJson(APP_GEZIEN_DAVID, g);
+  } catch (e) { logError('gezien-david', e); }
 }
 // Gezien door David (gezien-david.json, fase 3) voor de sleutels die Voor jou nu toont; null = bestand onleesbaar (app: onbekend).
 function appMoetGezien(sleutels) {

@@ -1531,6 +1531,14 @@ async function bewijs(o) {
       // wv594: de hele tekst (Lees in Voor jou) en de gesproken briefing alleen meereizend; zonder bewaard bestand audio null
       toets('9c wv594: meereizend de hele tekst (met de vijfde regel), audio null zonder bestand; geen stem-lijst naar de app', b && typeof b.tekst === 'string' && /Vijfde regel/.test(b.tekst) && b.audio === null && !('stem' in b), JSON.stringify(b && Object.keys(b)));
       toets('9c wv594: vaste plek zonder tekst en audio', uitV && uitV.tekst === null && uitV.audio === null);
+      // wv594 review #3: met een bewaard geluidsbestand bij de 🔊-regel geeft de route audio {job_id, n, naam} (meereizend); vaste plek niet
+      H.appStaat.bestandenIndex = { op: Date.now(), items: [{ job_id: 'b0b0b0b0b0b0b0b3', bestanden: [{ naam: 'briefing.txt', n: 1 }, { naam: 'Ochtendbriefing 23 oktober.mp3', n: 2 }] }] };
+      H.appStaat.briefing = null;
+      r = await vraag('GET', '/app/briefing', undefined, { pot: P.jar });
+      const au = r.j.briefing && r.j.briefing.audio;
+      toets('9c wv594: gesproken briefing via de route: audio met job_id van de 🔊-regel, bestandsnummer en naam', r.status === 200 && au && au.job_id === 'b0b0b0b0b0b0b0b3' && au.n === 2 && au.naam === 'Ochtendbriefing 23 oktober.mp3', JSON.stringify(r.j.briefing && r.j.briefing.audio));
+      toets('9c wv594: vaste plek ook met bestand zonder audio', H.appBriefingVoor(Object.assign({}, H.appStaat.briefing.b), { soort: 'vast' }).audio === null);
+      H.appStaat.bestandenIndex = null; H.appStaat.briefing = null;
       if (hVoor === null) fs.unlinkSync(HP); else fs.writeFileSync(HP, hVoor);
       r = await vraag('GET', '/app/briefing', undefined, { pot: P.jar });
       toets('9c log zonder briefing: briefing null (geen fout)', r.status === 200 && r.j.briefing === null && r.j.fout === null, JSON.stringify(r.j));
@@ -5564,6 +5572,69 @@ async function bewijs(o) {
       let nr = nepRes();
       await H.appVoorJouRoute({}, nr, { id: 'x', soort: 'vast' });
       toets('27 vaste plek: privé-punt niet in de lijst', nr.st === 200 && !nr.b.punten.some((x) => x.id === 9) && nr.b.punten.length === 7 && nr.b.vaste_plek === true, JSON.stringify(nr.b.punten.map((x) => x.id)));
+      // ── 27 wv594 (review #2, #3, #6, #7): Moet iets en gezien via de route, met echte log-, vragen- en gezien-bestanden ──
+      {
+        const GDP = path.join(DATA, 'gezien-david.json'), VJP = path.join(DATA, 'vragen.json');
+        const HP = path.join(LOGDIR, 'hoofd.jsonl'), MP = path.join(LOGDIR, 'machinekamer.jsonl');
+        const bewaar = [GDP, VJP, HP, MP].map((f) => [f, fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null]);
+        const GD = () => JSON.parse(fs.readFileSync(GDP, 'utf8'));
+        const tq = new Date(Date.now() - 600000).toISOString();
+        const regel = (o) => JSON.stringify(Object.assign({ soort: 'socev', ok: true, tekst: '', t: tq }, o)) + '\n';
+        const q = (zin, voor) => (voor || 'Rapport.') + '\n\nVRAAG AAN DAVID: ' + zin;
+        const JH = 'd7d7d7d7d7d7d7d1', JM = 'd7d7d7d7d7d7d7d2', JL = 'd7d7d7d7d7d7d7d3', JD = 'd7d7d7d7d7d7d7d4', JN = 'd7d7d7d7d7d7d7d5';
+        const aH = q('Zal ik de proef 27 bewaren?'), aM = q('Mag de machinekamerproef 27 door?'), aL = q('Lange proefvraag 27?', 'x'.repeat(7000)), aN = q('Nieuwe proefvraag 27?');
+        const hH = H.appVraagUit(aH).hash, hM = H.appVraagUit(aM).hash, hL = H.appVraagUit(aL).hash, hN = H.appVraagUit(aN).hash;
+        fs.mkdirSync(LOGDIR, { recursive: true });
+        fs.appendFileSync(HP, regel({ job_id: JH, antwoord: aH, vraag_hash: hH }) + regel({ job_id: JL, antwoord: aL, vraag_hash: hL })
+          + regel({ job_id: JD, bron: 'foutmelder', klasse: 'dringend', meld: 'dag', antwoord: '⚠️ WhatsApp ligt eruit. ' + 'y'.repeat(2000) }));
+        fs.appendFileSync(MP, regel({ job_id: JM, antwoord: aM, vraag_hash: hM }));
+        const rijV = (kanaal) => ({ kanaal: kanaal, t: tq, antwoord: null, gevoelig: false, soort: 'socev' });
+        const vj = bewaar[1][1] ? JSON.parse(bewaar[1][1]) : {};
+        vj[JH + ':' + hH] = rijV('hoofd'); vj[JL + ':' + hL] = rijV('hoofd'); vj[JM + ':' + hM] = rijV('machinekamer');
+        fs.writeFileSync(VJP, JSON.stringify(vj));
+        const vH = 'v:' + JH + ':' + hH;
+        fs.writeFileSync(GDP, JSON.stringify({ versie: 1, tabs: {}, punten: { 'k:1': tq, 'k:4:over': tq, 'k:7': tq, 'k:10': tq, [vH]: tq }, bron: {} }));
+        H.appStaat.moetLog = null; H.appStaat.vjCache = null;
+        const route = async (soort) => { const n = nepRes(); await H.appVoorJouRoute({}, n, { id: 'x', soort: soort || 'reist' }); return n; };
+        let n27 = await route();
+        let ms = (n27.b.moet_iets || []).map((x) => x.punt);
+        toets('27 wv594 #3: open vragen uit het hoofdkanaal en de machinekamer komen via de route in moet_iets, de storing van vandaag ook', n27.st === 200 && ms.includes(vH) && ms.includes('v:' + JM + ':' + hM) && ms.includes('d:' + JD) && n27.b.moet_fout === null, JSON.stringify(ms));
+        toets('27 wv594 #3: gezien komt echt uit gezien-david.json (k:1, k:4:over en de vraag), alleen voor wat Voor jou toont', n27.b.gezien && n27.b.gezien['k:1'] === tq && n27.b.gezien['k:4:over'] === tq && n27.b.gezien[vH] === tq && !('k:7' in n27.b.gezien) && !('k:10' in n27.b.gezien), JSON.stringify(n27.b.gezien));
+        toets('27 wv594 #2: later-kaart (7) gaat uit gezien-david.json; open kaart (1) en de net gesloten kaart (10, in de ↩️-tijd) blijven', !GD().punten['k:7'] && !!GD().punten['k:1'] && !!GD().punten['k:10'] && !!GD().punten['k:4:over'], JSON.stringify(GD().punten));
+        const ML = n27.b.moet_iets.find((x) => x.punt === 'v:' + JL + ':' + hL), MH = n27.b.moet_iets.find((x) => x.punt === vH), MD = n27.b.moet_iets.find((x) => x.punt === 'd:' + JD);
+        toets('27 wv594 #6/#7: een lang bericht is afgekapt op 6000 tekens met afgekapt: true; een kort niet', ML && ML.bericht.length <= 6003 && ML.afgekapt === true && MH && MH.afgekapt === false && /Rapport\./.test(MH.bericht), JSON.stringify([ML && ML.bericht.length, ML && ML.afgekapt, MH && MH.afgekapt]));
+        toets('27 wv594 #6: een dag-punt geeft alleen een kort begin (≤ 600 tekens)', MD && MD.bericht.length <= 603 && MD.afgekapt === true && /WhatsApp ligt eruit/.test(MD.bericht), MD && MD.bericht.length);
+        toets('27 wv594 #6: hele lading Moet iets blijft klein (< 30 kB hier)', JSON.stringify(n27.b.moet_iets).length < 30000, JSON.stringify(n27.b.moet_iets).length);
+        // de kaart die langer dan de ↩️-tijd dicht is, gaat eruit; heropend telt hij dan opnieuw
+        const v10 = Object.assign({}, sbStaat.vj[9]);
+        sbStaat.vj[9].gesloten_op = new Date(Date.now() - 10 * 60000).toISOString(); H.appStaat.vjCache = null;
+        n27 = await route();
+        toets('27 wv594 #2: kaart 10 langer dan de ↩️-tijd dicht -> uit gezien-david.json', !GD().punten['k:10'] && !!GD().punten['k:1'], JSON.stringify(GD().punten));
+        sbStaat.vj[9].status = 'open'; sbStaat.vj[9].gesloten_op = null; H.appStaat.vjCache = null;
+        n27 = await route();
+        toets('27 wv594 #2: heropend: kaart 10 staat in de lijst en heeft geen gezien (telt opnieuw); 1 nog wel', n27.b.punten.some((x) => x.id === 10) && !n27.b.gezien['k:10'] && n27.b.gezien['k:1'] === tq, JSON.stringify(n27.b.gezien));
+        sbStaat.vj[9] = v10; H.appStaat.vjCache = null;
+        // vaste plek: geen hoofdkanaal in Moet iets
+        n27 = await route('vast');
+        ms = (n27.b.moet_iets || []).map((x) => x.punt);
+        toets('27 wv594 #3: vaste plek: geen hoofdkanaal in moet_iets (ook geen storing), de machinekamervraag wel', n27.st === 200 && !(n27.b.moet_iets || []).some((x) => x.kanaal === 'hoofd') && ms.includes('v:' + JM + ':' + hM), JSON.stringify(ms));
+        // cache van appMoetLog: zelfde bestand = geen nieuwe lezing; een nieuwe regel = verse lezing
+        const op1 = H.appStaat.moetLog && H.appStaat.moetLog.hoofd && H.appStaat.moetLog.hoofd.op;
+        await slaap(5);
+        n27 = await route();
+        toets('27 wv594 #3: logcache: onveranderd bestand -> uit het geheugen', !!op1 && H.appStaat.moetLog.hoofd.op === op1, [op1, H.appStaat.moetLog.hoofd.op].join());
+        fs.appendFileSync(HP, regel({ job_id: JN, antwoord: aN, vraag_hash: hN }));
+        const vj2 = JSON.parse(fs.readFileSync(VJP, 'utf8')); vj2[JN + ':' + hN] = rijV('hoofd'); fs.writeFileSync(VJP, JSON.stringify(vj2));
+        n27 = await route();
+        toets('27 wv594 #3: logcache: een nieuwe regel in het log -> verse lezing, de nieuwe vraag staat erin', H.appStaat.moetLog.hoofd.op !== op1 && n27.b.moet_iets.some((x) => x.punt === 'v:' + JN + ':' + hN), JSON.stringify(n27.b.moet_iets.map((x) => x.punt)));
+        // moet_fout: vragen onleesbaar -> de kaarten blijven, moet_iets null met een reden
+        fs.writeFileSync(VJP, '{kapot');
+        n27 = await route();
+        toets('27 wv594 #3: vragen onleesbaar -> 200, kaarten blijven, moet_iets null en moet_fout gezet', n27.st === 200 && n27.b.punten.length > 0 && n27.b.moet_iets === null && typeof n27.b.moet_fout === 'string' && n27.b.fout === null, JSON.stringify([n27.b.moet_iets, n27.b.moet_fout]));
+        logs.splice(0, logs.length, ...logs.filter((l) => !/^app-voor-jou|^app-vragen/.test(l)));
+        for (const [f, inh] of bewaar) { if (inh === null) { try { fs.unlinkSync(f); } catch (e) {} } else fs.writeFileSync(f, inh); }
+        H.appStaat.moetLog = null; H.appStaat.vjCache = null;
+      }
       // details
       r = await vraag('GET', '/app/voor-jou/1', undefined, { pot: P.jar });
       const D = r.j;
