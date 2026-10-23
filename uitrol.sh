@@ -6,6 +6,7 @@
 #           omgeving: UITROL_NU=1 (niet wachten), UITROL_WACHT_MAX=<s> (standaard 1800),
 #           UITROL_DROOG=1 (niet omzetten, voor toetsen), UITROL_MARKER=<pad> (standaard /opt/data/uitrol-wacht),
 #           UITROL_NACONTROLE=0 (geen echt-nacontrole), UITROL_NACONTROLE_MAX=<s> (standaard 90), UITROL_BOX=<pad>
+#           UITROL_DATAKAART=0 (datakaart-poort uit, nood), UITROL_DATAKAART_PAD=<pad>, UITROL_POORT_ALLEEN=1 (stop na de poort, toets)
 #           exit 1 = mislukt, ook als de nacontrole terugzette (wv358)
 #
 # WAAROM DIT EEN SCRIPT IS EN GEEN REGEL IN EEN PROMPT. De uitrol bestaat uit
@@ -85,6 +86,32 @@ SHA="$(git -C "$BRON_REPO" rev-parse --verify --quiet "origin/${REF}^{commit}" \
   || fout "kan $REF niet oplossen naar een commit"
 KORT="${SHA:0:12}"
 DOEL="$RELEASES/$KORT"
+
+# ── 1b. datakaart-poort (wv844, Data Manager; Fable-review wv844 #1) ────────────────────────────────────────────────────
+# Nieuwe opslag bestaat pas met een regel in 00_Systeem/datakaart.json. Een .sqlite/.jsonl-basisnaam in de release-bestanden
+# van deze commit die NIET in de draaiende release staat en ook in geen `pod_bestanden` van de Datakaart, stopt de uitrol.
+# Alleen namen die nieuw zijn t.o.v. current: zo blokkeert een terugrol of een herhaalde uitrol nooit. Grens: een naam zonder
+# vaste vorm (`${x}.jsonl`) glipt erdoor; de weekronde van de Data Manager vangt de rest. Nood: UITROL_DATAKAART=0.
+DATAKAART="${UITROL_DATAKAART_PAD:-/opt/data/AI_SecondBrain/00_Systeem/datakaart.json}"
+if [ "${UITROL_DATAKAART:-1}" = "0" ]; then
+  log "datakaart-poort UIT (UITROL_DATAKAART=0)"
+elif [ -f "$DOEL/server.js" ]; then
+  log "datakaart-poort: release $KORT stond er al (terugrol of herhaling) - niet getoetst"
+elif [ ! -f "$DATAKAART" ]; then
+  log "datakaart-poort: $DATAKAART ontbreekt (uitwijkkant?) - niet getoetst"
+else
+  ONBEKEND="$(for b in $RELEASE_BESTANDEN $RELEASE_OPTIONEEL; do git -C "$BRON_REPO" show "$SHA:$b" 2>/dev/null; echo; done \
+    | python3 -c 'import glob,json,re,sys
+R=re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:sqlite|jsonl))(?![A-Za-z0-9_])")
+nieuw=set(R.findall(sys.stdin.read()))
+nu=set()
+for f in glob.glob(sys.argv[2]+"/*.js"): nu|=set(R.findall(open(f,errors="ignore").read()))
+kaart=set(b for p in json.load(open(sys.argv[1])).get("plekken",[]) for b in p.get("pod_bestanden") or [])
+print(" ".join(sorted(nieuw-nu-kaart)))' "$DATAKAART" "$CURRENT")" || fout "datakaart-poort: datakaart.json onleesbaar (of de poort faalde); herstel de JSON of zet UITROL_DATAKAART=0"
+  [ -z "$ONBEKEND" ] || fout "datakaart-poort: nieuw opslagpad zonder regel in datakaart.json: $ONBEKEND - geef de plek eerst een regel (pod_bestanden), of in nood UITROL_DATAKAART=0"
+  log "datakaart-poort: groen"
+fi
+if [ "${UITROL_POORT_ALLEEN:-0}" = "1" ]; then log "poort-alleen: gestopt na de datakaart-poort"; exit 0; fi
 
 # ── 2. release neerzetten ───────────────────────────────────────────────────
 # Eerst in een tijdelijke map bouwen en daarna hernoemen: een half uitgepakte

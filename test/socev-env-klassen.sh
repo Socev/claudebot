@@ -124,6 +124,9 @@ rpc.listen(0, '127.0.0.1', async function () {
     await run('he', 'telegram-debug');
     const se = await wachtOp('he');
     toets('D machinekamer telegram-debug: wel N8N_API_KEY, N8N_MCP_TOKEN, API_SECRET, SUPABASE_SERVICE_ROLE', se && ['N8N_API_KEY', 'N8N_MCP_TOKEN', 'API_SECRET', 'SUPABASE_SERVICE_ROLE'].every((k) => se.env.includes(k)), se ? lekVan(se).join(',') : 'geen spawn');
+    await run('hdm', 'data-manager');   // wv844: weekronde Data Manager draait als machinekamer
+    const sdm = await wachtOp('hdm');
+    toets('D data-manager: wel SUPABASE_MCP_TOKEN, N8N_API_KEY, CLOUDFLARE_API_TOKEN', sdm && ['SUPABASE_MCP_TOKEN', 'N8N_API_KEY', 'CLOUDFLARE_API_TOKEN'].every((k) => sdm.env.includes(k)), sdm ? lekVan(sdm).join(',') : 'geen spawn');
     await run('hf', 'telegram-debug', { workspace: 'ghawa' });
     const sf = await wachtOp('hf');
     toets('D telegram-debug in een andere werkruimte (ghawa): smal', sf && lekVan(sf).length === 0, sf ? lekVan(sf).join(',') : 'geen spawn');

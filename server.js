@@ -2214,7 +2214,8 @@ const LESSEN_DOMEIN = {
   'dagplan': 'pa', 'parro': 'pa', 'signal': 'pa', 'cijfermeester': 'geen', 'cijfer-meester': 'beide',
   'telegram-debug': 'machine', 'structuur-wachter': 'machine', 'werkkamer': 'machine',
   'vault-concierge': 'machine', 'site-verversing': 'machine', 'kaizen-review': 'machine',
-  'pod-uitrol': 'machine', 'webhook-bewaker': 'machine', 'keten-attest': 'machine', 'ciso': 'machine'
+  'pod-uitrol': 'machine', 'webhook-bewaker': 'machine', 'keten-attest': 'machine', 'ciso': 'machine',
+  'data-manager': 'machine'   // wv844
 };
 
 function lessenDomein(chatId, label) {
@@ -14277,6 +14278,7 @@ const AUTO_AGENT_ENV_MAG = [
 const MK_SESSIES = new Set([
   'telegram-debug',                                   // debug-bot, droomronde, app-kanaal machinekamer
   'ciso', 'kaizen-review', 'structuur-wachter', 'socev-site',
+  'data-manager',                                     // wv844: weekronde Data Manager (inventaris.py leest Supabase, n8n, Cloudflare)
   'n8n-git-backup',                                   // node n8n-git-backup.mjs (N8N_API_KEY)
   'keten-attest',                                     // ciso-dag.mjs, olares-login-check.py (SUPABASE_SERVICE_ROLE)
   'tokenmeting',                                      // mk-scripts/tokens/*.mjs (SUPABASE_SERVICE_ROLE; wv784)
