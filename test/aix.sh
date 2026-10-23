@@ -162,6 +162,19 @@ const W = fs.mkdtempSync(path.join(os.tmpdir(), 'aix-toets-'));
   u = await X.goedkeurRonde(Object.assign({}, deps, { droog: true }));
   toets('5 droog: besluiten berekend, niets uitgevoerd of bewaard', u.toegelaten.length === 1 && u.kaarten.length === 1 && u.afgewezen.length === 1 && toegelaten.length === nT3 && kaarten.length === nK3 && afgewezen.length === nA3 && JSON.stringify(staat) === '{}', u);
 
+  // Fable wv942 #9/#10/#11
+  staat = {}; kaarten.length = 0; afgewezen.length = 0; toegelaten.length = 0;
+  aanvragen = [mk(40, { eigenaar_email: 'nieuw@proef.nl' }), mk(41, { eigenaar_email: 'nieuw@proef.nl' }), mk(42, { eigenaar_email: 'nieuw@proef.nl' }), mk(43, { eigenaar_email: 'nieuw@proef.nl' }),
+    mk(44, { bekende_eigenaar: true, eigenaar_email: 'bezet@proef.nl' }), mk(45, { eigenaar_email: 'wv12@proef.md' })];
+  const nepB = Object.assign({}, nep, { toelaten: async (x) => (x === id(44) ? { ok: false, status: 409, fout: 'naam is inmiddels bezet' } : nep.toelaten(x)) });
+  let eersteWeigert = true;
+  u = await X.goedkeurRonde(Object.assign({}, deps, { aix: nepB, voorJou: async (p) => { if (p.sleutel === X.KAART_SLEUTEL(id(45)) && eersteWeigert) { eersteWeigert = false; throw new Error('waarom: een werkvoorraadnummer'); } kaarten.push(p); } }));
+  toets('5 #11 nieuwe eigenaar met vier aanvragen: alle vier naar David (geen afwijzing te-veel)', afgewezen.every((x) => x[1] !== 'te-veel-agents') && kaarten.filter((p) => /aix-aanvraag-0+4[0-3]$/.test(p.sleutel)).length === 4, { afgewezen, k: kaarten.map((p) => p.sleutel) });
+  toets('5 #10 toelaten 409 "naam is inmiddels bezet" = afwijzen naam-bezet', afgewezen.some((x) => x[0] === id(44) && x[1] === 'naam-bezet'), afgewezen);
+  const k45 = kaarten.find((p) => p.sleutel === X.KAART_SLEUTEL(id(45)));
+  toets('5 #9 databank weigert de kaart: opnieuw zonder adres', k45 && /E-mailadres eigenaar: staat bij de aanvraag op AIX/.test(k45.waarom), k45 && k45.waarom);
+  toets('5 #9 adres dat op een verwijzing lijkt: "[at]" op de kaart', X.adresOpKaart('wv12@proef.nl') === 'wv12 [at] proef.nl' && X.adresOpKaart('a@b.md') === 'a [at] b.md' && X.adresOpKaart('albert@proef.nl') === 'albert@proef.nl');
+
   // ── 6. contactopzoeking ──
   const VV = path.join(W, 'vault'); fs.mkdirSync(path.join(VV, '20_Prive/Contacten'), { recursive: true });
   fs.writeFileSync(path.join(VV, '20_Prive/Contacten/Contacten.md'), '- **Albert Proef** - tel: +31600000000 | mail: albert@proef.nl, a2@proef.nl | labels: x\n- **Iemand Anders** - mail: xalbert@proef.nl\n- **Geen Mail** - tel: 1\n');
@@ -234,8 +247,13 @@ const W = fs.mkdtempSync(path.join(os.tmpdir(), 'aix-toets-'));
   await S.aixUurRonde();
   const boxNa = fs.readFileSync(BOX, 'utf8');
   toets('7 AIX plat: ronde zonder melding en zonder box-rij (nog geen dag)', S.aixInfo().plat_sinds && !/AIX al meer dan een dag/.test(boxNa) && S.ideeenInfo().ronde.plat === true, S.ideeenInfo().ronde);
-  toets('7 box-rij na meer dan een dag: boven de eerste echte rij, niet in het codeblok, één keer', S.aixBoxRij(new Date(tPlat - 2 * 86400000).toISOString()) &&
-    /```\n## \[kop\][\s\S]*```\n\n## \[direct\] [^\n]*AIX al meer dan een dag niet bereikbaar/.test(fs.readFileSync(BOX, 'utf8')), fs.readFileSync(BOX, 'utf8').slice(0, 600));
+  const RJ = path.join(W, 'srv-aix-winkel', 'ronde.json');
+  toets('7 niet gelukt: niet_ok_sinds in ronde.json en in /health; fout-veld', !!JSON.parse(fs.readFileSync(RJ, 'utf8')).niet_ok_sinds && S.ideeenInfo().ronde.niet_ok_sinds && S.ideeenInfo().ronde.fout, S.ideeenInfo().ronde);
+  const rj = JSON.parse(fs.readFileSync(RJ, 'utf8')); rj.niet_ok_sinds = new Date(tPlat - 2 * 86400000).toISOString(); fs.writeFileSync(RJ, JSON.stringify(rj));
+  await S.aixUurRonde();
+  toets('7 box-rij na meer dan een dag: boven de eerste echte rij, niet in het codeblok', /```\n## \[kop\][\s\S]*```\n\n## \[direct\] [^\n]*AIX-ronde al meer dan een dag niet bereikbaar/.test(fs.readFileSync(BOX, 'utf8')) && JSON.parse(fs.readFileSync(RJ, 'utf8')).box === rj.niet_ok_sinds, fs.readFileSync(BOX, 'utf8').slice(0, 600));
+  await S.aixUurRonde();
+  toets('7 box-rij één keer per periode (ook in ronde.json bewaard)', (fs.readFileSync(BOX, 'utf8').match(/AIX-ronde al meer dan een dag/g) || []).length === 1);
   const g2 = { st: 200, j: await S.ideeen.lijst(true) };   // vers (de App heeft 30 s cache)
   toets('7 App bij AIX plat: bereikbaar false en "AIX is nu niet bereikbaar", geen uitzondering', g2.st === 200 && g2.j.bereikbaar === false && g2.j.fout === 'AIX is nu niet bereikbaar' && g2.j.buiten.length === 0, g2.j);
   srv.close();

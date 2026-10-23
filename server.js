@@ -9304,7 +9304,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   if (ib && ib.afgehandeld) ctxIb = context + ' (AIX: deze bundel is al afgehandeld op ' + ib.afgehandeld + '; de pod plaatst niets meer. Jij plaatst ook niets op AIX. Zeg David wat er destijds geplaatst is (/health, ideeen.plaatsing).)';   // Fable wv861 #5
   else if (ib) ctxIb = context + (keuze === 'nee' ? ' (AIX: Nee, dus de pod plaatst niets; de bundel is dicht en de kaarten blijven als concept in de catalogus. Zeg dat kort.)'
     : keuze !== 'ja' ? ' (AIX: geen Ja, dus de pod plaatst niets; de kaarten blijven klaarstaan in de App AIX. Zeg dat kort.)'
-    : a.soort !== 'vast' ? ' (AIX: de pod plaatst nu zelf de ' + ib.aangevinkt + ' stuk(ken) die op Deel staan in Socevs winkel op aix.socev.dev. Jij plaatst niets en hebt geen toegang tot AIX. Kijk na een minuut in /health (ideeen.plaatsing), werk in de catalogus "gedeeld op" en "aix" bij en bevestig het David in één zin.)'
+    : a.soort !== 'vast' ? ' (AIX: de pod plaatst nu zelf de ' + ib.aangevinkt + ' stuk(ken) die op Deel staan in Socevs winkel op aix.socev.dev en zet zelf "gedeeld op" in de catalogus. Jij plaatst niets, hebt geen toegang tot AIX en hoeft de catalogus niet te openen. Kijk na een minuut in /health (ideeen.plaatsing) en bevestig het David in één zin.)'
       : ' (AIX: NIET geplaatst, want deze Ja kwam van een vaste plek. Jij plaatst niets. Laat David op de telefoon drukken: heropen deze kaart met voor-jou-beheer.)');
   // wv921 en wv861 sluiten elkaar uit (pot-vrijgave-N vs. de sleutel in bundel.json); de haak van de ene of de andere
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
@@ -13943,10 +13943,12 @@ function aixStaatSchrijf(s) {
   fs.mkdirSync(IDEEEN_DIR, { recursive: true, mode: 0o700 });
   const tmp = aixStaatPad() + '.' + process.pid; fs.writeFileSync(tmp, JSON.stringify(s, null, 1), { mode: 0o600 }); fs.renameSync(tmp, aixStaatPad());
 }
-// Eén box-rij als AIX meer dan een dag niet bereikbaar is; één per plat-periode (tekst van de pod zelf)
-function aixBoxRij(sinds) {
+// Eén box-rij als de ronde meer dan een dag niet lukt (AIX plat, of een blijvende weigering zoals een ingetrokken sleutel); één per periode,
+// onthouden in ronde.json (Fable wv942 #3/#7). Tekst van de pod zelf; schrijven atomair met een mtime-controle (#8).
+function aixBoxRij(sinds, plat) {
   try {
     const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const st = fs.statSync(pad);
     const t = fs.readFileSync(pad, 'utf8');
     // eerste echte rij: een regel "## [soort] JJJJ-MM-DD" buiten een codeblok (een voorbeeld in een codeblok telt niet)
     let eerste = null;
@@ -13954,11 +13956,15 @@ function aixBoxRij(sinds) {
     for (let m; (m = re.exec(t));) { if (((t.slice(0, m.index).match(/^```/gm) || []).length % 2) === 0) { eerste = m; break; } }
     if (!eerste) return false;
     const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
-    const rij = '\n## [direct] ' + tijd + ' — AIX al meer dan een dag niet bereikbaar (pod aix-ronde, automatisch)\n- status: open\n' +
-      '- van: pod aix-ronde (server.js, elk uur; hooguit één rij per periode)\n- gemeten: niet bereikbaar sinds ' + String(sinds).slice(0, 16) + ' UTC; laatste fout ' + String(aix ? aix.info().laatste_fout : '-').slice(0, 60) + '\n' +
+    const rij = '\n## [direct] ' + tijd + ' — AIX-ronde al meer dan een dag ' + (plat === false ? 'geweigerd' : 'niet bereikbaar') + ' (pod aix-ronde, automatisch)\n- status: open\n' +
+      '- van: pod aix-ronde (server.js, elk uur; hooguit één rij per periode)\n- gemeten: niet gelukt sinds ' + String(sinds).slice(0, 16) + ' UTC; laatste fout ' + String(aix ? aix.info().laatste_fout : '-').slice(0, 60) + '\n' +
       '- gevolg als er niets gebeurt: de App AIX toont "niet bereikbaar", aanvragen van nieuwe agents blijven liggen en de weekbundel slaat over. David merkt verder niets.\n' +
       '- voorstel: `node /app/aix.js ik` in de pod (leest alleen); Worker `aix` en het domein aix.socev.dev in Cloudflare nakijken; daarna `/health` aix.plat_sinds.\n';
-    fs.writeFileSync(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
+    const tmp = path.join(path.dirname(pad), '.machinekamer.md.' + process.pid + '.aix.tmp');
+    fs.writeFileSync(tmp, t.slice(0, eerste.index) + rij + t.slice(eerste.index), { mode: st.mode & 0o777 });
+    const st2 = fs.statSync(pad);
+    if (st2.mtimeMs !== st.mtimeMs || st2.size !== st.size) { fs.unlinkSync(tmp); return false; }   // net door iemand anders geschreven: volgend uur opnieuw
+    fs.renameSync(tmp, pad);
     return true;
   } catch (e) { logError('aix-box', e); return false; }
 }
@@ -13973,10 +13979,17 @@ async function aixUurRonde() {
     try { b = await ideeen.zorgBundelKaart(); } catch (e) { logError('aix-bundel', e); b = { fout: String(e && e.message || e).slice(0, 120) }; }
     // geen nieuwe hangende plaatsing laten staan: na een herstart nakijken (alleen als er iets hangt; nakijk doet dan zelf niets)
     try { if (u.ok) await ideeen.nakijk(); } catch (e) { logError('aix-nakijk', e); }
-    const i = aix.info();
-    if (i.plat_sinds && Date.now() - Date.parse(i.plat_sinds) > 86400000 && aixRonde.box !== i.plat_sinds) { if (aixBoxRij(i.plat_sinds)) aixRonde.box = i.plat_sinds; }
-    aixRonde.laatste = { op: u.op, ok: u.ok, plat: !!u.plat, bekeken: u.bekeken, afgewezen: u.afgewezen.length, toegelaten: u.toegelaten.length, kaarten: u.kaarten.length,
-      gesloten: u.gesloten.length, signalen: u.signalen.length, fouten: u.fouten.length, bundelkaart: b && b.gezet ? b.kaart : null };
+    // niet gelukt (plat of blijvend geweigerd): sinds wanneer, en na meer dan een dag één box-rij per periode (in ronde.json, overleeft een herstart)
+    const rs = aixStaatLees();
+    if (u.ok) { if (rs.niet_ok_sinds) { delete rs.niet_ok_sinds; aixStaatSchrijf(rs); } }
+    else {
+      if (!rs.niet_ok_sinds) rs.niet_ok_sinds = u.op;
+      if (Date.now() - Date.parse(rs.niet_ok_sinds) > 86400000 && rs.box !== rs.niet_ok_sinds && aixBoxRij(rs.niet_ok_sinds, !!u.plat)) rs.box = rs.niet_ok_sinds;
+      aixStaatSchrijf(rs);
+      if (!u.plat) logError('aix-ronde', new Error('ronde niet gelukt: ' + String(u.fout || '').slice(0, 120)));   // geweigerd (bv. 401/403) is geen plat: wel in de fouten
+    }
+    aixRonde.laatste = { op: u.op, ok: u.ok, plat: !!u.plat, fout: u.ok ? null : String(u.fout || '').slice(0, 120), niet_ok_sinds: rs.niet_ok_sinds || null, bekeken: u.bekeken, afgewezen: u.afgewezen.length,
+      toegelaten: u.toegelaten.length, kaarten: u.kaarten.length, gesloten: u.gesloten.length, signalen: u.signalen.length, fouten: u.fouten.length, bundelkaart: b && b.gezet ? b.kaart : null };
     if (u.fouten.length) logError('aix-ronde', new Error(u.fouten.slice(0, 3).join('; ')));
     schrijfLog(nu() + ' aix-ronde ' + velden(aixRonde.laatste));
     return u;
@@ -13992,13 +14005,15 @@ if (AIX_TIKKEN) {
   setTimeout(function () { if (rolPrimair()) aixUurRonde(); }, 5 * 60000).unref();   // eerste ronde 5 min na de start (bundelkaart, nakijk)
   setInterval(function () {
     if (!rolPrimair()) return;
-    aixUurRonde();
+    // eerst het weekritme (zondag vanaf 11:00, één keer; eigen bestand, zodat de uurronde het niet overschrijft — Fable wv942 #5)
     try {
       const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' }));
       const dag = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
-      const s = aixStaatLees();
-      if (d.getDay() === 0 && d.getHours() >= 11 && s.week_dag !== dag) { s.week_dag = dag; aixStaatSchrijf(s); aixWeekRonde(); }   // zondag vanaf 11:00, één keer
+      const wp = path.join(IDEEEN_DIR, 'week.json');
+      let w = {}; try { w = JSON.parse(fs.readFileSync(wp, 'utf8')) || {}; } catch (e) { w = {}; }
+      if (d.getDay() === 0 && d.getHours() >= 11 && w.dag !== dag) { fs.writeFileSync(wp, JSON.stringify({ dag: dag }), { mode: 0o600 }); aixWeekRonde(); }
     } catch (e) { logError('aix-week', e); }
+    aixUurRonde();
   }, 60 * 60000).unref();
 }
 function ideeenInfo() {

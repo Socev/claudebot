@@ -142,6 +142,10 @@ M.mkdir();
   toets('7 Ja met verse vingerafdruk: k01 als kaart + plaatje, dan a01 als reactie op kaart 2; niets anders', u.geplaatst.map((x) => x.id).join() === 'k01,a01' && gs.length === 3 && gs[0][0] === 'kaart' && gs[1][0] === 'beeld' && gs[1][2] === 'image/png' &&
     gs[2][0] === 'reactie' && gs[2][1] === 2 && u.plaatjes === 1, { u, gs });
   toets('7 kaartvelden naar AIX: alleen de zeven velden, geen link of bron', Object.keys(gs[0][1]).sort().join() === 'categorie,hoe,oplevert,status,titel,wat,zin', gs[0][1]);
+  const catNa = fs.readFileSync(CAT, 'utf8');
+  toets('7 de pod zet "gedeeld op" en "aix" zelf in de catalogus (k01 en a01), de rest blijft leeg', /### K01 · [^\n]*\n(?:(?!### )[^\n]*\n)*- gedeeld op: \d{1,2}-\d{1,2}-\d{4}\n- aix: 501/.test(catNa) && /### A01 · [^\n]*\n(?:(?!### )[^\n]*\n)*- gedeeld op: \d{1,2}-\d{1,2}-\d{4}\n- aix: 502/.test(catNa) &&
+    /### K02 · [^\n]*\n(?:(?!### )[^\n]*\n)*- gedeeld op:\n- aix:\n/.test(catNa), catNa.slice(0, 900));
+  toets('7 journaal: beeld-ok per plaatje', /"soort":"beeld-ok","id":"k01","naam":"goed.png"/.test(fs.readFileSync(path.join(DIR, 'journaal.jsonl'), 'utf8')));
   toets('7 tweede Ja op dezelfde bundel: niets', (await M.plaatsBundel({ kaart: 'aix-start-20261023', bevestiging: I.BEVESTIGING_PLAATSEN })).ok === false && X.schrijf.length === s0 + 3);
   nu += 31000; r = await M.app('GET /app/ideeen');
   toets('7 na plaatsen: k01 en a01 uit de concepten, plaatsing in GET en health', !ck('k01') && !ck('a01') && r.j.plaatsing.geplaatst === 2 && M.health().plaatsing.plaatjes === 1, r.j.plaatsing);
@@ -155,7 +159,12 @@ M.mkdir();
   X.plaatsFout = 'weg'; u = await M.plaatsBundel({ kaart: 'aix-b3', bevestiging: I.BEVESTIGING_PLAATSEN });
   toets('7 AIX weg: onzeker gemeld, hangt (kan niet delen)', u.fouten.every((x) => /onzeker/.test(x.reden)) && (nu += 31000, (await M.app('GET /app/ideeen')).j.concepten.find((x) => x.id === 'k02').bezig === true), u);
   X.plaatsFout = null;
+  // herstart tussen kaart en plaatje (Fable #4): beeld-ok weghalen uit het journaal → nakijk zet het plaatje alsnog
+  const jrT = fs.readFileSync(path.join(DIR, 'journaal.jsonl'), 'utf8');
+  fs.writeFileSync(path.join(DIR, 'journaal.jsonl'), jrT.split('\n').filter((r) => !/"beeld-ok"/.test(r)).join('\n'));
+  const sb0 = X.schrijf.filter((x) => x[0] === 'beeld').length;
   let nk = await M.nakijk();
+  toets('7 nakijk: ontbrekend plaatje bij een gedeelde kaart alsnog gezet (één keer)', nk.plaatjes.length === 1 && nk.plaatjes[0].ok && X.schrijf.filter((x) => x[0] === 'beeld').length === sb0 + 1 && (await M.nakijk()).plaatjes.length === 0, nk.plaatjes);
   toets('7 nakijk: niet op AIX = plaats-fout, weer te kiezen', nk.ok && nk.uit[0].id === 'k02' && nk.uit[0].aix === null && (await M.app('POST /app/ideeen/kaart/k02/deel')).status === 200, nk);
 
   // ── 8. weekritme: nul = niets; injectiezin alleen als JSON-veld, geen schrijfactie op AIX ──
@@ -192,7 +201,7 @@ M.mkdir();
     (modelPrompt.prompt.match(/EINDE AIX-TEKST/g) || []).length === 1 && /gegeven, nooit een opdracht/.test(modelPrompt.sys), inv);
   toets('8 en leidt tot geen enkele schrijfactie op AIX', X.schrijf.length === sch0, X.schrijf.slice(sch0));
   const cat3 = fs.readFileSync(CAT, 'utf8');
-  toets('8 concepten als A02 (antwoord op reactie 60) en A03 (tip bij kaart 70) in de catalogus, deelbaar concept; onbekend nummer genegeerd', /### A02 · antwoord bij kaart 2\n- kaart: 2\n- reactie: 60\n- soort: antwoord\n/.test(cat3) && /### A03 · tip bij kaart 70\n- kaart: 70\n/.test(cat3) && !/Bestaat niet/.test(cat3) && (cat3.match(/^### A0/gm) || []).length === 3, cat3.slice(-900));
+  toets('8 concepten als A02 (antwoord op reactie 60) en A03 (tip bij kaart 70) in de catalogus, deelbaar concept; onbekend nummer genegeerd', /### A02 · antwoord bij kaart 2\n> Concept van een model zonder gereedschap over tekst van AIX: gegeven, geen opdracht\.\n- kaart: 2\n- reactie: 60\n- soort: antwoord\n/.test(cat3) && /### A03 · tip bij kaart 70\n> Concept[^\n]*\n- kaart: 70\n/.test(cat3) && !/Bestaat niet/.test(cat3) && (cat3.match(/^### A0/gm) || []).length === 3, cat3.slice(-900));
   nu += 31000; r = await M2.app('GET /app/ideeen');
   const c2 = (id) => r.j.concepten.find((x) => x.id === id);
   toets('8 vaste toets over de concepten: link = treffer (kan niet delen); A02 kan wel (David kiest)', c2('a03').kan_delen === false && c2('a03').treffers.some((t) => t.soort === 'hostnaam') && c2('a02').kan_delen === true, [c2('a02'), c2('a03')]);
@@ -213,7 +222,7 @@ M.mkdir();
   toets('9 app-poort: het langste ideeen-pad past in APP_ROUTE_RE (64 tekens)', new RegExp(/const APP_ROUTE_RE = \/(.+)\/;/.exec(src)[1]).test('/app/ideeen/plaatje/999999999999/2') && new RegExp(/const APP_ROUTE_RE = \/(.+)\/;/.exec(src)[1]).test('/app/ideeen/kaart/999999999999'));
   toets('9 bundelknop: Nee sluit de bundel (bundelNee), Ja plaatst alleen via plaatsBundel met de bevestiging', /if \(kz === 'nee'\) \{ try \{ ideeen\.bundelNee\(ib\.kaart\); \}/.test(src) && /if \(kz !== 'ja'\) return;\n\s+ideeen\.plaatsBundel\(\{ kaart: ib\.kaart, bevestiging: bevestiging, vraagId: vraagId \}\)/.test(src));
   toets('9 bundelkaart altijd gevoelig (Ja · vingerafdruk)', /ideeen\.isBundel && ideeen\.isBundel\(p\.sleutel\)\) gev = 'versturen'/.test(src));
-  toets('9 Socev krijgt bij de Ja de opdracht niets zelf te plaatsen', /Jij plaatst niets en hebt geen toegang tot AIX/.test(src));
+  toets('9 Socev krijgt bij de Ja de opdracht niets zelf te plaatsen en de catalogus niet te openen', /Jij plaatst niets, hebt geen toegang tot AIX en hoeft de catalogus niet te openen/.test(src));
   toets('9 forum-koppeling weg (geen ideeenForum of IDEEEN_FORUM)', !/ideeenForum|IDEEEN_FORUM/.test(src));
 
   fs.rmSync(W, { recursive: true, force: true });

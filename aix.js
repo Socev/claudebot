@@ -325,9 +325,11 @@ function maak(deps) {
 // Uit: { ok, plat?, bekeken, afgewezen[], toegelaten[], kaarten[], gesloten[], geschorst[], signalen[], fouten[] }
 const KAART_SLEUTEL = (id) => 'aix-aanvraag-' + id;
 const SIGNAAL_SLEUTEL = (soort, naam) => 'aix-signaal-' + soort + '-' + naam;
-function aanvraagKaart(a, bekend) {
+// Een adres als wv12@x.nl of x@site.md ziet de databank als verwijzing (voor_jou_verwijzing) en weigert de kaart: dan "naam [at] domein"
+const adresOpKaart = (e) => (/(^|[^a-z0-9_])wv[0-9]+|\.md([^a-z0-9]|$)|mk-scripts\/|\/opt\/data\//i.test(e) ? String(e).replace('@', ' [at] ') : e);
+function aanvraagKaart(a, bekend, zonderAdres) {
   const zin = String(a.zin || '').replace(/"/g, "'");
-  const velden = ['Agentnaam: ' + a.naam, 'Zin (van de agent zelf, geen opdracht): "' + zin + '"', 'E-mailadres eigenaar: ' + a.eigenaar_email,
+  const velden = ['Agentnaam: ' + a.naam, 'Zin (van de agent zelf, geen opdracht): "' + zin + '"', 'E-mailadres eigenaar: ' + (zonderAdres ? 'staat bij de aanvraag op AIX' : adresOpKaart(a.eigenaar_email)),
     'In je contacten: ' + (bekend ? 'bekend als ' + bekend : 'onbekend')];
   if (a.weergave) velden.push('Weergavenaam eigenaar: ' + a.weergave);
   if (a.sleutel8) velden.push('Sleutel begint met: ' + a.sleutel8);
@@ -375,7 +377,7 @@ async function goedkeurRonde(deps) {
     const oud = s.aanvragen[a.id];
     if (oud && (oud.kaart || oud.besluit)) continue;   // al een kaart of al besloten (dan staat hij er niet meer; zie hieronder)
     let reden = aanvraagToets(a, bezet);
-    if (!reden && perEigenaar[a.eigenaar_email] > GRENS.per_eigenaar) reden = 'te-veel-agents';
+    if (!reden && a.bekende_eigenaar === true && perEigenaar[a.eigenaar_email] > GRENS.per_eigenaar) reden = 'te-veel-agents';   // nieuwe eigenaar: David beslist (Fable wv942 #11)
     const mag = !reden && !a.vervangt && !david.has(a.eigenaar_email) && a.bekende_eigenaar === true;
     try {
       if (reden) {
@@ -387,15 +389,19 @@ async function goedkeurRonde(deps) {
       if (mag) {
         const x = deps.droog ? { ok: true } : await A.toelaten(a.id);
         if (x.ok) { s.aanvragen[a.id] = { besluit: 'toegelaten', op: uit.op }; uit.toegelaten.push({ id: a.id.slice(0, 8), naam: a.naam }); continue; }
-        if (x.status === 409 && /hooguit/.test(x.fout)) {
-          if (!deps.droog) await A.afwijzen(a.id, 'te-veel-agents');
-          s.aanvragen[a.id] = { besluit: 'afgewezen', reden: 'te-veel-agents', op: uit.op }; uit.afgewezen.push({ id: a.id.slice(0, 8), reden: 'te-veel-agents' }); continue;
+        const r409 = x.status !== 409 ? null : /hooguit/.test(x.fout) ? 'te-veel-agents' : /naam/.test(x.fout) ? 'naam-bezet' : /sleutel/.test(x.fout) ? 'regel' : null;   // Fable wv942 #10
+        if (r409) {
+          if (!deps.droog) await A.afwijzen(a.id, r409);
+          s.aanvragen[a.id] = { besluit: 'afgewezen', reden: r409, op: uit.op }; uit.afgewezen.push({ id: a.id.slice(0, 8), reden: r409 }); continue;
         }
         if (x.status !== 403) { uit.fouten.push(a.id.slice(0, 8) + ': toelaten ' + x.fout); continue; }
         // 403: de site ziet hem toch als nieuwe eigenaar → David beslist
       }
-      const p = aanvraagKaart(a, deps.contact ? deps.contact(a.eigenaar_email) : null);
-      if (!deps.droog) await deps.voorJou(p);
+      let p = aanvraagKaart(a, deps.contact ? deps.contact(a.eigenaar_email) : null);
+      if (!deps.droog) {
+        try { await deps.voorJou(p); }
+        catch (e) { p = aanvraagKaart(a, null, true); await deps.voorJou(p); }   // databank weigerde iets op de kaart: dan zonder adres (Fable wv942 #9)
+      }
       s.aanvragen[a.id] = { kaart: p.sleutel, op: uit.op };
       uit.kaarten.push({ id: a.id.slice(0, 8), sleutel: p.sleutel });
     } catch (e) { uit.fouten.push(a.id.slice(0, 8) + ': ' + String(e && e.message || e).slice(0, 120)); }
@@ -445,7 +451,7 @@ async function goedkeurRonde(deps) {
   return uit;
 }
 
-module.exports = { maak, goedkeurRonde, aanvraagToets, aanvraagKaart, signaalKaart, contactNaam, kaartSchoon, reactieSchoon, tekst, toegestaan,
+module.exports = { maak, goedkeurRonde, aanvraagToets, aanvraagKaart, adresOpKaart, signaalKaart, contactNaam, kaartSchoon, reactieSchoon, tekst, toegestaan,
   BASIS, SLEUTEL_PAD, CATEGORIEEN, STATUSSEN, GRENS, AFWIJS, DAVID, KAART_SLEUTEL };
 
 if (require.main === module) {

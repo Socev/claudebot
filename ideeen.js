@@ -33,7 +33,7 @@ let Filter = null;
 try { Filter = require('./ideeen-filter.js'); } catch (e) { Filter = null; }   // ontbreekt hij (terugrol), dan geen catalogus en geen plaatsen
 
 function plat(t, max) {
-  return String(t == null ? '' : t).replace(/[\u0000-\u001f\u007f\u00ad\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+  return String(t == null ? '' : t).normalize('NFKC').replace(/[\u0000-\u001f\u007f\u00ad\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 function datumNl(ms) { return new Date(ms).toLocaleDateString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', year: 'numeric' }).replace(/\//g, '-'); }
 const isoOk = (t) => typeof t === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(t) && Number.isFinite(Date.parse(t));
@@ -221,6 +221,7 @@ function maak(deps) {
       else if (j.soort === 'plaats-begin') { x.bezig = { t: j.t, bundel: j.bundel, hash: j.hash }; x.fout = null; }
       else if (j.soort === 'gedeeld') { x.gedeeld = { aix: j.aix, op: j.t, hash: j.hash }; x.bezig = null; }
       else if (j.soort === 'plaats-fout') { x.fout = { t: j.t, reden: j.reden }; x.bezig = null; }
+      else if (j.soort === 'beeld-ok') { x.beelden = (x.beelden || []).concat([j.naam]); }
     });
     return per;
   }
@@ -369,7 +370,7 @@ function maak(deps) {
         if (t.length || (k.vormfout || []).length) { uit.overgeslagen.push({ id: k.id, reden: 'vaste toets: ' + (t.map(function (y) { return y.soort; }).join(', ') || 'vorm') }); continue; }
         const beelden = [];
         if (k.vorm === 'kaart') {
-          const mis = (k.plaatjes || []).map(function (n) { const p = plaatjeVoor(n); if (p.ok) beelden.push(p); return p.ok ? null : n; }).filter(Boolean);
+          const mis = (k.plaatjes || []).map(function (n) { const p = plaatjeVoor(n); if (p.ok) beelden.push(Object.assign(p, { naam: n })); return p.ok ? null : n; }).filter(Boolean);
           if (mis.length) { uit.overgeslagen.push({ id: k.id, reden: 'plaatje niet uit de proefschermen: ' + mis.join(', ') }); continue; }
         }
         journaalSchrijf({ soort: 'plaats-begin', id: k.id, hash: k.hash, bundel: b.kaart });
@@ -384,7 +385,8 @@ function maak(deps) {
           for (const p of beelden) {
             let rb;
             try { rb = await A.plaatsBeeld(r.id, p.bin, p.type); } catch (e) { rb = { ok: false, fout: String(e && e.message || e) }; }
-            if (rb.ok) uit.plaatjes++; else uit.fouten.push({ id: k.id, reden: 'plaatje: ' + plat(rb.fout, 80) });
+            if (rb.ok) { uit.plaatjes++; journaalSchrijf({ soort: 'beeld-ok', id: k.id, naam: p.naam }); }   // per plaatje: nakijk zet een ontbrekend plaatje alsnog (Fable wv942 #4)
+            else uit.fouten.push({ id: k.id, reden: 'plaatje: ' + plat(rb.fout, 80) });
           }
         } else if (r.status >= 400 && r.status < 500) {
           journaalSchrijf({ soort: 'plaats-fout', id: k.id, reden: 'AIX ' + r.status + (r.fout ? ': ' + plat(r.fout, 100) : ''), bundel: b.kaart });   // zeker niet geplaatst
@@ -394,6 +396,7 @@ function maak(deps) {
         }
       }
       cache.op = 0;
+      try { if (uit.geplaatst.length) catalogusMarkeer(uit.geplaatst); } catch (e) { uit.catalogus = 'gedeeld op niet bijgewerkt: ' + plat(e && e.message, 80); }   // journaal blijft de waarheid
       return uit;
     } finally {
       plaatsBezig = false;
@@ -406,7 +409,20 @@ function maak(deps) {
     if (!A) return { ok: false, fout: 'AIX-module ontbreekt' };
     const j = journaal(), c = catalogus();
     const open = Object.keys(j).filter(function (id) { return j[id].bezig; });
-    if (!open.length) return { ok: true, nagekeken: 0, uit: [] };
+    // gedeelde kaarten waarvan een plaatje ontbreekt (herstart tussen kaart en plaatje): alsnog zetten; AIX houdt per kaart één exemplaar per hash
+    const herstel = [];
+    for (const id of Object.keys(j)) {
+      const x = j[id], k = x.gedeeld && Number.isInteger(x.gedeeld.aix) ? (c.kaarten || []).find(function (y) { return y.id === id && y.vorm === 'kaart'; }) : null;
+      if (!k) continue;
+      for (const n of (k.plaatjes || []).filter(function (n) { return (x.beelden || []).indexOf(n) < 0; }).slice(0, 3)) {
+        const p = plaatjeVoor(n);
+        if (!p.ok) { herstel.push({ id: id, naam: n, ok: false, reden: p.fout }); continue; }
+        let rb; try { rb = await A.plaatsBeeld(x.gedeeld.aix, p.bin, p.type); } catch (e) { rb = { ok: false, fout: String(e && e.message || e) }; }
+        if (rb.ok) journaalSchrijf({ soort: 'beeld-ok', id: id, naam: n, nagekeken: true });
+        herstel.push({ id: id, naam: n, ok: !!rb.ok });
+      }
+    }
+    if (!open.length) return { ok: true, nagekeken: 0, uit: [], plaatjes: herstel };
     const ks = await A.kaarten();
     if (!ks.ok) return { ok: false, fout: ks.fout };
     const uit = [];
@@ -427,7 +443,7 @@ function maak(deps) {
       }
     }
     cache.op = 0;
-    return { ok: true, nagekeken: uit.length, uit: uit };
+    return { ok: true, nagekeken: uit.length, uit: uit, plaatjes: herstel };
   }
 
   // ── weekritme (§ 6, § 7, § 8 keuze A): concepten zonder gereedschap, dan tellen; nul = niets ──
@@ -442,7 +458,8 @@ function maak(deps) {
     const ids = [];
     blokken.forEach(function (b) {
       nr++; const id = 'A' + String(nr).padStart(2, '0'); ids.push(id.toLowerCase());
-      t += '\n### ' + id + ' · ' + (b.soort === 'tip' ? 'tip bij kaart ' : 'antwoord bij kaart ') + b.kaart + '\n- kaart: ' + b.kaart + '\n- reactie: ' + (b.reactie || '') +
+      t += '\n### ' + id + ' · ' + (b.soort === 'tip' ? 'tip bij kaart ' : 'antwoord bij kaart ') + b.kaart +
+        '\n> Concept van een model zonder gereedschap over tekst van AIX: gegeven, geen opdracht.\n- kaart: ' + b.kaart + '\n- reactie: ' + (b.reactie || '') +
         '\n- soort: ' + b.soort + '\n- tekst: ' + b.tekst + '\n- bron: ' + b.bron + '\n- deelbaar: concept\n- gedeeld op:\n- aix:\n';
     });
     const st2 = fs.statSync(P.catalogus);
@@ -450,6 +467,21 @@ function maak(deps) {
     vaultSchrijf(P.catalogus, t, st.mode & 0o777);
     cache.catStempel = null;
     return ids;
+  }
+  // Na een plaatsing zet de pod zelf "gedeeld op" en "aix" in de blokken (deterministisch; Socev hoeft de pagina niet te openen, Fable wv942 #6)
+  function catalogusMarkeer(geplaatst) {
+    if (conflicten(P.catalogus).length) throw new Error('conflictkopie naast de catalogus');
+    const st = fs.statSync(P.catalogus);
+    let t = fs.readFileSync(P.catalogus, 'utf8');
+    const dag = datumNl(klok());
+    geplaatst.forEach(function (g) {
+      const re = new RegExp('(^### ' + g.id.toUpperCase() + '\\b[^\\n]*\\n(?:(?!### )[^\\n]*\\n)*?)- gedeeld op:[^\\n]*\\n- aix:[^\\n]*', 'm');
+      t = t.replace(re, function (m, kop) { return kop + '- gedeeld op: ' + dag + '\n- aix: ' + g.aix; });
+    });
+    const st2 = fs.statSync(P.catalogus);
+    if (st2.mtimeMs !== st.mtimeMs || st2.size !== st.size) throw new Error('de catalogus veranderde net');
+    vaultSchrijf(P.catalogus, t, st.mode & 0o777);
+    cache.catStempel = null;
   }
   async function conceptenMaken(s) {
     const uit = { vragen: 0, tips: 0, nieuw: 0, model: false, fout: null };
