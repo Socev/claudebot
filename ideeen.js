@@ -326,23 +326,27 @@ function maak(deps) {
   function deelKaart(b, n) {
     const wat = b.alleen_kaarten === false ? (n === 1 ? 'stuk' : 'stukken') : (n === 1 ? 'kaart' : 'kaarten');
     return { sleutel: b.kaart, soort: 'besluit', titel: 'Socevs winkel op AIX — ' + n + ' ' + wat + ' op Deel plaatsen?',
-      waarom: kap('Er staan ' + n + ' ' + wat + ' op Deel die nog niet in Socevs winkel op aix.socev.dev staan: ze kwamen op Deel nadat de vorige vraag over AIX al was afgehandeld, ' +
-        'dus ging er niets naar AIX. Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen of webadressen. Bank, gezondheid en beveiliging blijven privé.', 400),
+      waarom: kap('Er staan ' + n + ' ' + wat + ' op Deel die nog niet in Socevs winkel op aix.socev.dev staan. Minstens één kwam op Deel nadat de vorige vraag over AIX al was ' +
+        'afgehandeld, dus ging daarvan nog niets naar AIX. Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen of webadressen. Bank, gezondheid en beveiliging blijven privé.', 400),
       stappen: ['Moet er een niet mee? Zet hem in de app bij Apps › AIX, tab Klaar om te delen, op Niet.',
         'Ja met vingerafdruk (op de telefoon): de pod zet wat op Deel staat in Socevs winkel op AIX, als Socev. Nee: er gaat niets naar AIX.'],
       waar: 'overal', prive: false, duur_min: 2, volgorde: 20, herkomst: { handmatig: 'aix-bundel', soort: 'deel' } };
   }
   function deelNaAfhandeling(b) {
     const t = Date.parse(b.afgehandeld);
-    if (!Number.isFinite(t) || plaatsBezig) return null;
+    if (!Number.isFinite(t)) { fout('aix-bundel', new Error('bundel ' + b.kaart + ': afgehandeld onleesbaar; geen nieuwe bundel')); return null; }   // Fable wv965 #6
+    if (plaatsBezig) return null;
     const c = concepten();
     if (!c.ok) return null;
     const j = journaal();
     const op = c.concepten.filter(function (k) { return k.keuze === 'deel' && k.kan_delen; });
     if (!op.some(function (k) { return Date.parse((j[k.id] || {}).keuze_op) > t; })) return null;
     const d = new Date(klok()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).replace(/[-: ]/g, '').slice(0, 12);
-    return { kaart: 'aix-deel-' + d.slice(0, 8) + '-' + d.slice(8), soort: 'deel', gemaakt: new Date(klok()).toISOString(), na: b.kaart, nieuw: op.length,
-      alleen_kaarten: op.every(function (k) { return k.vorm === 'kaart'; }) };
+    let kaart = 'aix-deel-' + d.slice(0, 8) + '-' + d.slice(8);
+    if (kaart === b.kaart || (b.vorige && kaart === b.vorige.kaart)) kaart += '-' + crypto.randomBytes(2).toString('hex');   // Fable wv965 #3: zelfde minuut (of wintertijd)
+    return { kaart: kaart, soort: 'deel', gemaakt: new Date(klok()).toISOString(), na: b.kaart, nieuw: op.length,
+      alleen_kaarten: op.every(function (k) { return k.vorm === 'kaart'; }),
+      vorige: { kaart: b.kaart, soort: b.soort || null, afgehandeld: b.afgehandeld, uitkomst: b.uitkomst || null, vraag_id: b.vraag_id || null } };   // Fable wv965 #4
   }
   // Zet de bundelkaart in Voor jou als dat nog niet gebeurde (uurronde; overleeft een herstart). Alles wat nu concept is, telt als aangeboden.
   async function zorgBundelKaart() {
@@ -359,7 +363,9 @@ function maak(deps) {
     b.kaart_gezet = new Date(klok()).toISOString();
     schrijfJson(P.bundel, b);
     const s = staatLees();
-    (catalogus().kaarten || []).forEach(function (k) { if (k.deelbaar === 'concept') s.aangeboden[k.id] = k.hash; });
+    // Fable wv965 #1: een deel-bundel biedt alleen de Deel-stukken aan; nieuwe concepten wachten op de weekbundel
+    const deel = b.soort === 'deel' ? new Set(c.concepten.filter(function (k) { return k.keuze === 'deel'; }).map(function (k) { return k.id; })) : null;
+    (catalogus().kaarten || []).forEach(function (k) { if (k.deelbaar === 'concept' && (!deel || deel.has(k.id))) s.aangeboden[k.id] = k.hash; });
     schrijfJson(P.staat, s);
     return { gezet: true, kaart: b.kaart, n: c.concepten.length };
   }

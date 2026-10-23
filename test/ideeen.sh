@@ -259,6 +259,9 @@ M.mkdir();
     toets('11 Deel na de afhandeling: nieuwe bundel (soort deel) met een eigen besluitkaart "… 2 … op Deel plaatsen?"', z.gezet && vj.length === 1 && k.soort === 'besluit' && /^aix-deel-\d{8}-\d{4}$/.test(k.sleutel) &&
       /^Socevs winkel op AIX — 2 (kaarten|stukken) op Deel plaatsen\?$/.test(k.titel) && bundel().kaart === k.sleutel && bundel().na === 'aix-start-20261023', { z, k, b: bundel() });
     toets('11 kaart binnen de grenzen, stappen in de kaart, geen pad of wv-nummer', lengte(k.waarom) <= 400 && lengte(k.titel) <= 90 && k.stappen.length >= 2 && !/wv\d|\/opt\/|\.md\b/.test(JSON.stringify(k)) && /vingerafdruk/.test(k.stappen.join(' ')), k);
+    const stA = JSON.parse(fs.readFileSync(path.join(D3, 'staat.json'), 'utf8')).aangeboden || {};
+    toets('11 deel-bundel telt alleen de Deel-stukken als aangeboden (nieuwe concepten wachten op de weekbundel)', Object.keys(stA).sort().join() === [deelbaar[0], deelbaar[1]].sort().join(), stA);
+    toets('11 de vorige bundel staat in de nieuwe (kaart, uitkomst)', bundel().vorige && bundel().vorige.kaart === 'aix-start-20261023' && bundel().vorige.uitkomst === 'ja', bundel());
     toets('11 isBundel en bundelVoor kennen de nieuwe bundel (dus altijd gevoelig, Ja plaatst)', M3.isBundel(k.sleutel) && M3.bundelVoor(k.sleutel).aangevinkt === 2 && !M3.bundelVoor(k.sleutel).afgehandeld);
     z = await M3.zorgBundelKaart();
     toets('11 niet dubbel', !z.gezet && vj.length === 1);
