@@ -3529,6 +3529,7 @@ function handleRequest(req, res) {
       pot_verzend: typeof potVzInfo === 'function' ? potVzInfo() : { aan: false },   // wv911: POT-app nota's als Gmail-concept (schakelaar, laatste tik, aantallen; geen inhoud)
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
+      gezondheid: gezondheidInfo(),   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
@@ -9564,6 +9565,44 @@ async function appFinancien(req, res, a) {
   return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d));
 }
 
+// ── App Gezondheid (wv937; ontwerp + Fable-review mk-scripts/wv937): Davids eigen gezondheid, alleen lezen ──
+// WAAROM. David 23-10-2026: "We moeten de health pod ook nog toegankelijk maken via een App hier in OVIS." De pod-pagina zit achter de
+// Olares-login; de App toont hetzelfde in Socev-blauw. gezondheid-app.js haalt het bij de health-pod (leessleutel, vaste host, alleen GET)
+// en de knie-app (Socev-servicetoken, alleen /api/samenvatting) en bouwt het antwoord veld voor veld op. Hier alleen: niet op een vaste
+// plek (gezondheid niet op de spreekkamer-pc; zoals Financiën), een auditregel per keer openen (route, apparaat, status; geen inhoud),
+// 60 s in het geheugen tegen Ververs-spam en hooguit 30 min als terugval als de health-pod even weg is (de App zegt dan "van HH:MM").
+// Een half antwoord (een blok faalde) wordt niet bewaard. Niets op schijf. Opgaven: niet hier — de App vult het gesprek met Davids
+// eigen zin en Socev gebruikt de bestaande opgaveroute (skill health-pod; Fable wv937 #11: geen tweede schrijfweg).
+const gezondheid = (function () {
+  const p = path.join(__dirname, 'gezondheid-app.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ fout: logError }); } catch (e) { logError('gezondheid', e); return null; }
+})();
+function gezondheidInfo() {
+  if (!gezondheid) return { aan: false };
+  try { return gezondheid.health(); } catch (e) { return { aan: true, fout: true }; }
+}
+const APP_GEZ_CACHE_MS = 60000, APP_GEZ_TERUGVAL_MS = 30 * 60000;
+const appGezCache = {};   // route -> { op, j }
+async function appGezondheid(req, res, a, route) {
+  res._app.reden = route === 'GET /app/gezondheid' ? 'gezondheid' : 'gezondheid genoom';
+  if (!gezondheid) return appWeiger(res, 404, 'Gezondheid zit niet in deze versie van de pod', 'gezondheid ontbreekt');
+  if (a.soort === 'vast') return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'Gezondheid staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' });
+  const nu = Date.now(), c = appGezCache[route];
+  if (c && nu - c.op < APP_GEZ_CACHE_MS) return appStuur(res, 200, Object.assign({}, c.j, { vaste_plek: false, bijgewerkt: new Date(c.op).toISOString() }));
+  let r;
+  try { r = await (route === 'GET /app/gezondheid' ? gezondheid.overzicht() : gezondheid.genoom()); }
+  catch (e) { logError('app-gezondheid', new Error('onverwacht')); r = { status: 503, j: { ok: false, fout: 'Gezondheid is nu niet te lezen; probeer het zo opnieuw.' } }; }
+  if (r.status !== 200) {
+    if (c && nu - c.op < APP_GEZ_TERUGVAL_MS) return appStuur(res, 200, Object.assign({}, c.j, { vaste_plek: false, bijgewerkt: new Date(c.op).toISOString(), oud: true }));
+    res._app.reden += ' weg';
+    return appStuur(res, r.status, r.j);
+  }
+  if (r.j.fouten && r.j.fouten.length) { res._app.reden += ' half (' + r.j.fouten.map(function (f) { return f.blok; }).join(',') + ')'; delete appGezCache[route]; }
+  else appGezCache[route] = { op: nu, j: r.j };
+  return appStuur(res, 200, Object.assign({}, r.j, { vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }));
+}
+
 // ── wv787: POT-afschriften (App POT-afschriften; bouwplan vault 01_Ontwikkeling/POT-afschriften - bouwplan (App, 22-10-2026).md) ──
 // WAAROM. David 22-10-2026: "een functie … die 1x per maand én op verzoek de transacties in de gewenste formaten naar de boekhouder
 // stuurt per mail (MT940, PDF)". André (Acta Synergia) krijgt de POT-afschriften niet vanzelf: de rekening staat op Davids naam.
@@ -10853,6 +10892,7 @@ function handleApp(req, res) {
           return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App Ideeën van buitenaf
         if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
+        if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
         if (route === 'GET /app/pot-afschriften') return appPotAfschriften(req, res, a);       // wv787: App POT-afschriften (alleen David, geen vaste plek)
         if (route === 'POST /app/pot-afschriften/maak') return appPotMaak(req, res, a, d);
         if (route === 'POST /app/pot-afschriften/concept') return appPotConcept(req, res, a, s, d);

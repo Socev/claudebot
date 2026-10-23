@@ -248,6 +248,8 @@ jobs:
         run: bash test/harvester.sh
       - name: "secondbrain (wv832, App Second Brain)"
         run: bash test/secondbrain.sh
+      - name: "gezondheid-app (wv937, App Gezondheid)"
+        run: bash test/gezondheid-app.sh
       # Health-rapporten (wv811): start zonder taalmodel — alleen de startregel terug, omgeving-allowlist, tijdgrens, één tegelijk.
       - name: "health-rapporten (wv811, start zonder taalmodel)"
         run: bash test/health-rapporten-start.sh

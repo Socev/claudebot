@@ -158,6 +158,7 @@ COPY studio.js /app/release-bootstrap/studio.js
 COPY bandjes.js /app/release-bootstrap/bandjes.js
 COPY harvester.js /app/release-bootstrap/harvester.js
 COPY secondbrain.js /app/release-bootstrap/secondbrain.js
+COPY gezondheid-app.js /app/release-bootstrap/gezondheid-app.js
 COPY ideeen.js /app/release-bootstrap/ideeen.js
 COPY ideeen-filter.js /app/release-bootstrap/ideeen-filter.js
 COPY audio.js /app/release-bootstrap/audio.js
