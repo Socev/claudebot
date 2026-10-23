@@ -579,6 +579,10 @@ function sessionKey(ws, chatId) {
 }
 
 const jobs = {};
+// wv895 (Fable #1): per sessiesleutel de tijd van de laatste /reset. Een beurt die al liep toen de reset kwam, bewaart zijn sessie-id
+// niet meer (anders zette hij na afloop de gewiste sessie terug en ging de volgende beurt — de weekronde na een afroep, of na de
+// 03:00-reset — gewoon verder in de oude sessie).
+const sessieResetOp = {};
 const chatChains = {};
 
 // ── verharding: grote uitvoer naar schijf i.p.v. in het geheugen ────────────
@@ -2338,6 +2342,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     const lezen = gereedschap === 'lezen';
     // Gereedschap 'lezen': geen sessiegeheugen en geen lessenblok (machinale klus); cwd = de eigen jobmap.
     const sKey = lezen ? '' : sessieSleutel(key, keuze.runtime);
+    const sessieGelezen = Date.now();   // wv895 (Fable diffreview #4): een /reset ná dit moment wint, ook als hij vóór j.started valt
     const sessionId = lezen ? '' : (explicitSession || (sKey ? chatSessions[sKey] : '') || '');
     const lesblok = lezen ? '' : await lessenBlok(prompt, chatId, '');
     // 'lezen' werkt in de jobmap, niet in de workspace: altijd de kale map-hint (de ghawa-hint noemt een repo).
@@ -2371,7 +2376,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     }
     r.workspace = ws;
     if (keuze.model && !r.fallback_van) r.model = keuze.model;
-    if (sKey && r.session_id) { chatSessions[sKey] = r.session_id; saveSessions(); }
+    if (sKey && r.session_id && !((sessieResetOp[key] || 0) > sessieGelezen)) { chatSessions[sKey] = r.session_id; saveSessions(); }   // wv895: een reset tijdens de beurt wint
     j.status = 'done'; j.done_at = Date.now(); j.result = spillIfLarge(jobId, r);
     jobEindLog(jobId, j, ws);
   } catch (e) {
@@ -3515,6 +3520,7 @@ function handleRequest(req, res) {
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
+      managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761: App Ideeën van buitenaf (laatste lezing, fout, aantal kaarten; geen inhoud)
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
@@ -3917,7 +3923,7 @@ function handleRequest(req, res) {
       const key = sessionKey(ws, chatId);
       res._log = { chat_id: chatId, workspace: ws };
       // Alle breinen: een reset is een reset, welk brein er ook aan stond.
-      if (key) { RUNTIMES_LIJST.forEach(function (rt) { delete chatSessions[sessieSleutel(key, rt)]; }); saveSessions(); }
+      if (key) { RUNTIMES_LIJST.forEach(function (rt) { delete chatSessions[sessieSleutel(key, rt)]; }); saveSessions(); sessieResetOp[key] = Date.now(); }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, reset: chatId, workspace: ws }));
     });
@@ -4541,6 +4547,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/reactie', 'POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: reageren of naar de bus = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
@@ -4643,7 +4650,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
 const APP_BSN_SYS = '[Systeem: in Davids invoer stond een BSN-achtig getal (9 cijfers die de elfproef halen); de pod heeft het weggelaten (' + APP_BSN_MASKER + '). Vraag er niet naar; meestal was het een ander nummer.]';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], managers: [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -10711,6 +10718,7 @@ function handleApp(req, res) {
         if (route.indexOf(' /app/studio/') > 0) return typeof appStudio === 'function' ? appStudio(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'studio');   // wv707
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
         if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
+        if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
         if (route === 'GET /app/ideeen' || route.indexOf('GET /app/ideeen/plaatje/') === 0 || route === 'POST /app/ideeen/reactie' || route === 'POST /app/ideeen/gezien' || route === 'POST /app/ideeen/naar-ideeenbus')
           return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App Ideeën van buitenaf
@@ -11498,6 +11506,7 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'proef', 'droomronde', 'ideeenm
   'droomronde-wachter',   // wv390: Wachter melden van de droomronde (wv299). Bewust NIET 'echt-alarm' (Werkvoorraad-tikker, wv358): dat alarm
                           // meldt juist een pod in een wegwerpmap, waar /bericht 200 geeft in lege data; het blijft op Telegram (§ 4.6).
   'bank-ronde',           // wv685: één regel in het hoofdkanaal als een banktoestemming verlopen is (AI - Bank-ronde)
+  'manager',              // wv895: rapport van een manager-ronde op afroep (machinekamer; soort antwoord als David of Socev hem startte)
   'dagsamenvatting']);    // wv589: dagsamenvatting "Gebeurd" 07:15 (idee 13 § 4.6): machinekamer, geen MELD_SOORT-regel = archief, geen seintje
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
@@ -11851,6 +11860,20 @@ async function berichtNieuw(res, d) {
     agenda: ag ? true : undefined, soort: soort, seintje: seintje });
   if (plan.direct && plan.gebundeld) setTimeout(function () { berichtBundelAf(kanaal); }, 0);   // Fable wv292 #3: met de wachtende mee
   else if (plan.direct) setTimeout(function () { berichtPushNu(kanaal, [id]).catch(function (e) { logError('bericht-push', e); }); }, 0);
+}
+
+// wv895: een bericht van de pod zelf (manager-ronde op afroep), via precies dezelfde weg als POST /bericht: een kleine stand-in voor res
+// (berichtStuur gebruikt alleen headersSent, writeHead en end; res._log mag). Geeft {status, j}; na 30 s zonder antwoord {status: 0}.
+function berichtIntern(d) {
+  return new Promise(function (klaar) {
+    let status = 0, af = false;
+    const eind = function (x) { if (!af) { af = true; clearTimeout(tm); klaar(x); } };
+    const tm = setTimeout(function () { eind({ status: 0, j: null }); }, 30000);
+    const res = { headersSent: false, _log: null,
+      writeHead: function (st) { status = st; this.headersSent = true; },
+      end: function (b) { let j = null; try { j = JSON.parse(b); } catch (e) {} eind({ status: status, j: j }); } };
+    Promise.resolve().then(function () { return berichtNieuw(res, d); }).catch(function (e) { logError('bericht-intern', e); eind({ status: 500, j: null }); });
+  });
 }
 
 async function berichtBestand(res, d) {
@@ -13426,6 +13449,98 @@ async function appHarvester(req, res, a, d, route) {
 }
 // ── einde harvester ──
 
+// ── Managers op afroep (wv895, 23-10-2026; ontwerp + Fable-review: mk-scripts/wv895/ontwerp.md) ──
+// App "Managers": per manager (Data, Design, CISO) wat hij bewaakt, laatste en volgende ronde, open bevindingen en Nu draaien. Logica in
+// managers.js; hier de koppeling: routes /app/managers(*) na de app-poort, POST /smal/manager-ronde (Socev alleen met Davids verse Ja-knop
+// op een vraag die de manager noemt; de machinekamer met API_SECRET direct), de run op de eigen sessie van de manager (zoals n8n: sessie
+// wissen, dan dezelfde processJob; dus dezelfde omgeving via runIsMk/SOCEV_ENV_EXTRA), het rapport naar de machinekamer (bron manager) en
+// /health.managers. Ontbreekt managers.js in de release (terugrol), dan 404 op de routes en managers.aan=false in /health.
+const MANAGERS_DIR = serverPad('managers', process.env.MANAGERS_DIR, '/opt/data/managers', serverProefDeel('managers'));
+function managersStartRun(o) {
+  const ws = DEFAULT_WS, key = sessionKey(ws, o.sessie);
+  if (key) { RUNTIMES_LIJST.forEach(function (rt) { delete chatSessions[sessieSleutel(key, rt)]; }); saveSessions(); sessieResetOp[key] = Date.now(); }
+  const keuze = resolveKeuze(o.model ? { model: o.model } : {});
+  if (keuze.fout) throw new Error('model: ' + (keuze.fout.melding || keuze.fout.error));
+  const jobId = crypto.randomBytes(8).toString('hex');
+  jobs[jobId] = { status: 'pending', created: Date.now(), workspace: ws, chat_id: o.sessie, runtime: keuze.runtime, manager: true };
+  schrijfLog(nu() + ' manager-ronde ' + velden({ job: jobId, sessie: o.sessie, runtime: keuze.runtime, model: keuze.model || '(default)' }));
+  const klaar = new Promise(function (resolve) {
+    enqueue(key, function () {
+      // Fable diffreview #5: kwam er intussen een weekronde vóór in de rij, dan nooit verder in díe sessie: hier opnieuw wissen
+      if (key) { RUNTIMES_LIJST.forEach(function (rt) { delete chatSessions[sessieSleutel(key, rt)]; }); saveSessions(); sessieResetOp[key] = Date.now(); }
+      return processJob(jobId, o.prompt, undefined, undefined, o.sessie, ws, keuze, undefined).then(function () {
+        const j = jobs[jobId];
+        if (!j) return resolve({ ok: false, error: 'job verdwenen' });
+        j.opgehaald = Date.now();   // niemand haalt hem via /result op; anders wacht een uitrol er 10 min op
+        const r = Object.assign({}, j.result || {});
+        if (r.output_file) { try { r.output = fs.readFileSync(r.output_file, 'utf8'); } catch (e) { r.output = ''; } }
+        resolve(r);
+      }, function (e) { resolve({ ok: false, error: String(e && e.message || e).slice(0, 200) }); });
+    });
+  });
+  return { job_id: jobId, klaar: klaar };
+}
+function managersJobs(sessie) {
+  return Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j && !j.agent && j.chat_id === sessie && j.workspace === DEFAULT_WS; })
+    .map(function (id) { return { id: id, status: jobs[id].status, created: jobs[id].created }; });
+}
+// Davids Ja (app-knop) op een vraag in het hoofdkanaal, op vraag-id (de 8 tekens die in de [KNOP]-beurt staan; een hash van de vraagzin,
+// dus dezelfde zin op een andere dag heeft hetzelfde id): de nieuwste Ja die nog niet gebruikt is. Leest het vragenregister van de pod
+// in /opt/data/socev-app-data. Kanttekening (Fable diffreview wv895 #1): zolang het hoofdkanaal als dezelfde uid draait, kan een
+// gemanipuleerde Socev-sessie dat bestand schrijven; pas met de loper voor het hoofdkanaal is dit een grens (zie managers.js).
+async function managersKnopJa(hash, gebruikt) {
+  let v;
+  try { v = appVragen(); } catch (e) { return { ok: false, fout: 'vragenregister onleesbaar' }; }
+  const rijen = Object.keys(v).filter(function (x) { return x.slice(-9) === ':' + hash && v[x] && v[x].kanaal === 'hoofd'; });
+  if (!rijen.length) return { ok: false, fout: 'die vraag ken ik niet (alleen een vraag in het hoofdkanaal met Davids app-knop telt)' };
+  const ja = rijen.map(function (x) { return { k: x, an: appAntwoord(v[x]) }; })
+    .filter(function (r) { return r.an && r.an.keuze === 'ja' && (gebruikt || []).indexOf(r.k) < 0; })
+    .sort(function (a, b) { return Date.parse(b.an.t) - Date.parse(a.an.t); })[0];
+  if (!ja) return { ok: false, fout: rijen.some(function (x) { const an = appAntwoord(v[x]); return an && an.keuze === 'ja'; }) ? 'die Ja is al gebruikt voor een ronde' : 'David drukte geen Ja op die vraag' };
+  const k = ja.k, an = ja.an;
+  const vt = await appKnopVraagTekst(k.split(':')[0], 'hoofd', hash);
+  if (!vt) return { ok: false, fout: 'de vraagzin is niet meer leesbaar' };
+  return { ok: true, tekst: String(vt.tekst || ''), t: Date.parse(an.t), sleutel: k };
+}
+const MANAGERS_MOD = (function () { const p = path.join(__dirname, 'managers.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('managers', e); return null; } })();
+const managers = (function () {
+  if (!MANAGERS_MOD) return null;
+  try {
+    return MANAGERS_MOD.maak({ dir: MANAGERS_DIR, fout: logError, jobsOpSessie: managersJobs, startRun: managersStartRun, knopJa: managersKnopJa,
+      rolPrimair: rolPrimair, uitrolWacht: function () { return !!uitrolWacht().wacht; }, vangnet: account1Vangnet,
+      bericht: function (b) {
+        return berichtIntern({ kanaal: 'machinekamer', bron: 'manager', klasse: 'normaal', soort: b.soort, tekst: b.tekst, sleutel: b.sleutel }).then(function (r) {
+          if (r.status !== 200) logError('manager-bericht', new Error('bericht gaf ' + r.status + ' ' + JSON.stringify(r.j || {}).slice(0, 160)));
+          return r;
+        });
+      } });
+  } catch (e) { logError('managers', e); return null; }
+})();
+// na een herstart: een afgebroken ronde op afroep krijgt één regel (na 60 s: app en rol zijn dan klaar)
+if (managers) setTimeout(function () { try { managers.opstart(); } catch (e) { logError('managers-opstart', e); } }, 60000).unref();
+function managersInfo() { if (!managers) return { aan: false }; try { return managers.health(); } catch (e) { return { aan: true, fout: true }; } }
+async function appManagers(req, res, a, d, route) {
+  if (!managers) return appWeiger(res, 404, 'Managers zit niet in deze versie van de pod', 'managers ontbreekt');
+  if (route === 'GET /app/managers') {
+    res._app.stil = true;   // de App ververst elke 30 s zolang er een ronde loopt
+    let sb = null, fout = null;
+    try { sb = await appSbRpc('mk_managers_stand', { p_managers: MANAGERS_MOD.rpcInvoer() }); }
+    catch (e) { logError('app-managers', e); fout = 'bevindingen en hartslag zijn nu niet leesbaar'; }
+    return appStuur(res, 200, { ok: true, managers: managers.stand(sb, { vast: a.soort === 'vast' }), fout: fout, vast: a.soort === 'vast' });
+  }
+  if (route === 'POST /app/managers/ronde') {
+    if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+    if (!appTeller('managers', 20, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 20)', 'grens managers');
+    let r;
+    try { r = await managers.start(String(d && d.id || ''), 'david', 'david-vroeg'); }
+    catch (e) { logError('app-managers', e); return appWeiger(res, 500, 'fout op de pod', 'managers uitzondering'); }
+    res._app.reden = 'manager-ronde ' + String(d && d.id || '').slice(0, 20) + ' ' + r.status;
+    return appStuur(res, r.status === 202 ? 200 : r.status, r.j);
+  }
+  return appWeiger(res, 404, 'onbekend', 'managers route');
+}
+// ── einde managers ──
+
 // ── Ideeënbeurs (wv761, 23-10-2026; bouwplan "01_Ontwikkeling/Ideeënbeurs met Albert van der Veer (ontwerp 22-10-2026).md" § 8) ──
 // App "Ideeën van buitenaf": kaarten in het afgeschermde forumonderdeel `ideeen` (forum.socev.dev) lezen en er als David op reageren,
 // een kaart van buiten naar de Ideeënbus (geparkeerd). Logica in ideeen.js; hier de koppeling: routes /app/ideeen(*) na de app-poort,
@@ -14367,13 +14482,15 @@ function socevSmalOpts(runOpts, chatId) {
 //   POST /smal/fin-sql      {sql, params} -> D1 fin, alleen één SELECT/WITH zonder schrijfwoorden (laden blijft machinekamer)
 //   POST /smal/telegram     {opdracht: dialogen|lees, chat, dagen, aantal} -> telegram-reader.js (zelf alleen-lezen)
 //   POST /smal/health-opgaven  {} -> health-import.py --alleen-opgaven als claude (wv887; zie healthOpgaven)
+//   POST /smal/manager-ronde   {naam, reden?, vraag_id?} -> ronde op afroep van een manager (wv895; zie managers.js): Socev alleen met
+//                              het vraag-id van Davids verse Ja-knop; API_SECRET (machinekamer) direct. Rapport in de machinekamer.
 // Fable wv424b: géén script uit de vault met de volle omgeving (de vault is schrijfbaar voor elke smalle sessie: drie regels
 // erin en de hele omgeving kwam terug). Lessen schrijft server.js zelf; telegram-reader.js komt uit de release en krijgt alleen
 // zijn eigen drie sleutels. Een les via deze route is altijd domein 'pa' (een machine-les zou anders als persistente injectie in
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30, 'health-opgaven': 20, 'harvester/kaart': 8 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30, 'health-opgaven': 20, 'manager-ronde': 6, 'harvester/kaart': 8 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
 const SMAL_CF_ACCOUNT = '23df9b0607bb70f6d7f15a63ec843d6d';
 const SMAL_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen
@@ -14498,6 +14615,11 @@ async function smalActie(actie, d) {
     return harvester.smal('kaart', d);
   }
   if (actie === 'bandjes/voorstel') return bandjes ? bandjes.smal('voorstel', d) : { status: 404, j: { ok: false, fout: 'Bandjes zit niet in deze versie van de pod' } };
+  // wv895: een manager-ronde op afroep. Socev-sleutel = door socev (alleen met vraag_id van Davids verse Ja); API_SECRET = machinekamer.
+  if (actie === 'manager-ronde') {
+    if (!managers) return { status: 404, j: { ok: false, fout: 'Managers zit niet in deze versie van de pod' } };
+    return managers.start(String(d.naam || ''), socevAgentSleutelOk(d.secret) ? 'socev' : 'machinekamer', d.reden, d.vraag_id);
+  }
   return { status: 404, j: { ok: false, fout: 'onbekende smalle route' } };
 }
 // wv740: Socev (SOCEV_AGENT_SLEUTEL) en de machinekamer (API_SECRET) hebben elk een eigen uurteller per route. 22-10 08:19 liep de

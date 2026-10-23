@@ -60,7 +60,7 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 #   /opt/data/facturen/backup/ van vóór de uitrol terugzetten, of vooruit herstellen.
 # secondbrain.js (wv832): App Second Brain, routes /app/secondbrain* (ontbreekt hij, dan 404 en secondbrain.aan=false in /health).
 # ideeen.js (wv761): App Ideeën van buitenaf (Ideeënbeurs), door server.js geladen (ontbreekt hij, dan 404 op /app/ideeen* en ideeen.aan=false in /health).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js secondbrain.js ideeen.js"
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js secondbrain.js ideeen.js managers.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }
