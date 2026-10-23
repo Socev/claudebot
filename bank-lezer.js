@@ -1233,7 +1233,8 @@ const opdrachten = {
     return { ok: true, maand: maand, nieuw: !oud, veranderd: veranderd, pdf_veranderd: pdfVeranderd, gemaakt: meta.gemaakt, aantal: meta.aantal, begin: meta.begin, eind: meta.eind,
       bij: meta.bij, af: meta.af, stuk_open: meta.stuk_open, ingekort86: meta.ingekort86, sha256: r.sha256,
       bestanden: [{ soort: 'mt940', naam: r.bestandsnamen.mt940, grootte: Buffer.byteLength(r.mt940, 'latin1') }, { soort: 'pdf', naam: r.bestandsnamen.pdf, grootte: r.pdf.length }],
-      mail: P.mailConcept(maand, t), mail_correctie: P.mailConcept(maand, t, { correctie: true }), ontvanger: x.A.metaLees(x.a, 'pot_afschrift_ontvanger') || null };
+      mail: P.mailConcept(maand, t), mail_correctie: P.mailConcept(maand, t, { correctie: true }), ontvanger: x.A.metaLees(x.a, 'pot_afschrift_ontvanger') || null,
+      rek: inv.rek };   // wv959: de bankluis-sleutel van de rekening, zodat de pod de POT-rekening in Facturen vindt (rekening.bankluis_rek); niet naar de App
   },
   // wv815: POT-posten voor Davids datahub (server.js potDatahubRonde na de bank-ronde); alleen de pod (BANK_LOKAAL), niet via /smal/bank.
   // Uitvoer naar de pod (geheugen), nooit naar een sessie of log: de pod schrijft ze met parameters in D1 `fin`.

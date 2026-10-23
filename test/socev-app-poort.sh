@@ -4132,6 +4132,125 @@ async function bewijs(o) {
       toets('20h onbekende factuur -> 404; geen onverwachte fouten in logError', r.status === 404 && !logs.some((l) => /^facturen/.test(l)), JSON.stringify(logs.filter((l) => /facturen/.test(l))));
     }
 
+    // ── 20i. wv959: POT-afschrift via de Facturen-wachtrij (F5, overdracht F4 #4): knop → één opdracht boekhouder_afschrift naar afschrift_doel,
+    //         tweede druk geen tweede, Facturen uit → mailconcept-terugval, per maand nooit beide routes ──
+    {
+      const FA = ctx.__fa, fdbI = FA.facturenOpen(), FR = vm.runInContext('facturenRoutes', ctx);
+      const sPi = () => H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
+      const shaI = (b) => crypto.createHash('sha256').update(b).digest('hex');
+      const PAD = path.join(W, 'bank', 'pot-afschriften');
+      const podI = () => JSON.parse(fs.readFileSync(path.join(PAD, 'pod.json'), 'utf8'));
+      const doelPot = fdbI.db.prepare("SELECT afschrift_doel FROM entiteit WHERE sleutel = 'pot'").get().afschrift_doel;
+      const opn = (m) => fdbI.db.prepare("SELECT o.* FROM opdracht o JOIN pot_afschrift a ON a.id = o.afschrift WHERE o.soort = 'boekhouder_afschrift' AND a.periode = ? ORDER BY o.aangemaakt_op, o.rowid").all(m);
+      const kindVan = {};
+      const maakMaand = (m, o) => {
+        o = o || {};
+        const d = path.join(PAD, m); fs.mkdirSync(d, { recursive: true });
+        const pdfI = o.pdf || Buffer.from('%PDF-1.4 nep ' + m), mtI = Buffer.from(':20:ABN AMRO BANK NV\r\n:28C:' + m + '\r\n');
+        fs.writeFileSync(path.join(d, 'POT-' + m + '.sta'), mtI); fs.writeFileSync(path.join(d, 'POT-afschrift ' + m + '.pdf'), pdfI);
+        fs.writeFileSync(path.join(d, 'meta.json'), JSON.stringify({ maand: m, bestanden: { mt940: 'POT-' + m + '.sta', pdf: 'POT-afschrift ' + m + '.pdf' }, sha_mt940: shaI(mtI), sha_pdf: shaI(pdfI) }));
+        kindVan[m] = { code: 0, j: { ok: true, maand: m, nieuw: false, veranderd: false, gemaakt: '2026-10-22T19:00:00Z', aantal: 12, begin: 1, eind: 2, bij: 3, af: 4, stuk_open: 0, ingekort86: 0,
+          sha256: { mt940: shaI(mtI), pdf: shaI(pdfI) }, bestanden: [{ soort: 'mt940', naam: 'POT-' + m + '.sta', grootte: mtI.length }, { soort: 'pdf', naam: 'POT-afschrift ' + m + '.pdf', grootte: pdfI.length }],
+          mail: { onderwerp: 'POT POH-GGZ: afschrift ' + m, bericht: 'Hoi André,\n\nHierbij.\n\nGroet,\nDavid' }, ontvanger: 'boekhouder@voorbeeld.nl', rek: o.rek === undefined ? 'proef-pot' : o.rek } };
+        return { mtI, pdfI };
+      };
+      ctx.bankKind = async (args) => (args[0] === 'pot-afschrift' ? kindVan[args[2]] : args[0] === 'pot-afschrift-maanden' ? { code: 0, j: { ok: true, ontvanger_gezet: true,
+        maanden: Object.keys(kindVan).map((m) => ({ maand: m, aantal: 12, compleet: true, gemaakt: { op: '2026-10-22T19:00:00Z', aantal: 12, sha_mt940: kindVan[m].j.sha256.mt940 } })) } } : { code: 1, j: { ok: false } });
+      const hook = { calls: [] }, oudFetchI = ctx.fetch, oudUrlI = ctx.appWebhookUrl;
+      ctx.appWebhookUrl = async () => 'https://mailconcept.toets/webhook/x';
+      ctx.fetch = async (url, opt) => {
+        if (String(url).startsWith('https://mailconcept.toets/')) { const b = JSON.parse(opt.body); hook.calls.push(b); return { ok: true, status: 200, json: async () => ({ ok: true, concept_id: 'i-' + hook.calls.length, bijlagen: (b.bijlagen || []).length }) }; }
+        return oudFetchI(url, opt);
+      };
+      const druk = async (m, nogmaals) => { sPi().vers_tot = Date.now() + 60000; return vraag('POST', '/app/pot-afschriften/concept', nogmaals ? { maand: m, nogmaals: true } : { maand: m }, { pot: P.jar }); };
+      toets('20i opzet: facturendatabase open, POT heeft een afschriftadres, routes kennen afschrift', !!fdbI && !!doelPot && typeof FR.afschrift === 'function');
+      // 1. eerste druk: precies één opdracht naar afschrift_doel, geen mailconcept
+      const b10 = maakMaand('2026-10');
+      r = await druk('2026-10');
+      let o10 = opn('2026-10');
+      const doc = (id) => fdbI.db.prepare('SELECT sha256 FROM document WHERE id = ?').get(id).sha256;
+      const a10 = o10[0] && fdbI.db.prepare('SELECT * FROM pot_afschrift WHERE id = ?').get(o10[0].afschrift);
+      toets('20i knop → 200 route facturen: precies één opdracht boekhouder_afschrift, doeladres = afschrift_doel, status wacht, geen mailconcept',
+        r.status === 200 && r.j.route === 'facturen' && r.j.facturen.status === 'wachtrij' && o10.length === 1 && o10[0].doeladres === doelPot && o10[0].status === 'wacht' &&
+        o10[0].entiteit === 'pot' && hook.calls.length === 0 && /Facturen-wachtrij/.test(r.j.melding) && /nakijken en versturen doe je zelf/.test(r.j.melding), JSON.stringify([r.status, r.j, o10.length]).slice(0, 400));
+      toets('20i de stukken in Facturen zijn byte-gelijk aan de MT940 en de PDF; pot_afschrift in_wachtrij; pod.json onthoudt de opdracht, geen concept_id',
+        a10 && a10.status === 'in_wachtrij' && doc(a10.mt940_document) === shaI(b10.mtI) && doc(a10.pdf_document) === shaI(b10.pdfI) &&
+        podI().maanden['2026-10'].facturen.opdracht === o10[0].id && !podI().maanden['2026-10'].concept_id && !podI().maanden['2026-10'].aangevraagd, JSON.stringify(podI().maanden['2026-10']));
+      toets('20i vingerafdruk verbruikt; geen bestandsinhoud of adres in het antwoord', sPi().vers_tot === 0 && !/%PDF|:20:|acta\.invalid|proef-pot/.test(JSON.stringify(r.j)), JSON.stringify(r.j).slice(0, 300));
+      // 2. tweede druk (en met "nogmaals"): geen tweede opdracht, geen mailconcept
+      r = await druk('2026-10');
+      const r2i = await druk('2026-10', true);
+      o10 = opn('2026-10');
+      toets('20i tweede druk → 409 "staat al in de Facturen-wachtrij", ook met nogmaals; nog steeds één opdracht, geen mailconcept',
+        r.status === 409 && r.j.route === 'facturen' && r.j.facturen.status === 'wachtrij' && /al in de Facturen-wachtrij/.test(r.j.fout) && r2i.status === 409 && o10.length === 1 && hook.calls.length === 0,
+        JSON.stringify([r.status, r.j, r2i.status, o10.length]));
+      // stand in de POT-App en in Facturen stap 4
+      r = await vraag('GET', '/app/pot-afschriften', undefined, { pot: P.jar });
+      const s10 = r.j.maanden && r.j.maanden.find((x) => x.maand === '2026-10');
+      const ru = await vraag('GET', '/app/facturen/uploads', undefined, { pot: P.jar });
+      const u10 = ru.j.pot && ru.j.pot.find((x) => x.periode === '2026-10');
+      toets('20i stand: POT-App toont facturen wachtrij; Facturen stap 4 toont het afschrift met opdracht_status wacht',
+        s10 && s10.facturen && s10.facturen.status === 'wachtrij' && u10 && u10.status === 'in_wachtrij' && u10.opdracht_status === 'wacht' && !!u10.verstuur_na, JSON.stringify([s10, u10]));
+      // 3. een maand die Facturen al verstuurde (zaad 2026-08, geen pod.json): nooit een los concept
+      maakMaand('2026-08');
+      const n08 = opn('2026-08').length;
+      r = await druk('2026-08', true);
+      toets('20i maand al verstuurd via Facturen → 409 "al verstuurd", geen mailconcept, geen nieuwe opdracht', r.status === 409 && /al verstuurd/.test(r.j.fout) && hook.calls.length === 0 && opn('2026-08').length === n08, JSON.stringify(r.j));
+      // 4. een maand die via het losse mailconcept ging (pod.json concept_id): blijft op die route, nooit naar Facturen
+      const b07 = maakMaand('2026-07');
+      { const st7 = podI(); st7.maanden['2026-07'] = { concept_id: 'oud', concept_op: '2026-10-22T21:02:35.953Z', concept_sha: shaI(b07.mtI) }; fs.writeFileSync(path.join(PAD, 'pod.json'), JSON.stringify(st7)); }
+      r = await druk('2026-07');
+      const r07b = await druk('2026-07', true);
+      toets('20i maand met een los concept → 409 al_klaar; met nogmaals een nieuw mailconcept; nooit een Facturen-opdracht',
+        r.status === 409 && r.j.al_klaar === true && r07b.status === 200 && r07b.j.route === 'mailconcept' && hook.calls.length === 1 && opn('2026-07').length === 0 &&
+        !fdbI.db.prepare("SELECT 1 FROM pot_afschrift WHERE periode = '2026-07'").get(), JSON.stringify([r.status, r.j, r07b.status, r07b.j]).slice(0, 300));
+      // 5. Facturen uit (module zonder afschrift = terugrol) → mailconcept-terugval; daarna blijft die maand op het mailconcept
+      const afs = FR.afschrift; delete FR.afschrift;
+      maakMaand('2026-06');
+      r = await druk('2026-06');
+      toets('20i Facturen uit → 200 route mailconcept met de reden, één mailconcept, geen Facturen-rij',
+        r.status === 200 && r.j.route === 'mailconcept' && /Facturen/.test(r.j.route_reden) && /niet via de Facturen-wachtrij/.test(r.j.melding) && hook.calls.length === 2 &&
+        !fdbI.db.prepare("SELECT 1 FROM pot_afschrift WHERE periode = '2026-06'").get(), JSON.stringify([r.status, r.j]).slice(0, 300));
+      // 5b. Facturen weg terwijl een maand al in de wachtrij stond → 503, geen los concept
+      r = await druk('2026-10');
+      toets('20i Facturen weg, maand stond in de wachtrij (pod.json) → 503, geen mailconcept', r.status === 503 && /niet bereikbaar/.test(r.j.fout) && hook.calls.length === 2 && opn('2026-10').length === 1, JSON.stringify(r.j));
+      FR.afschrift = afs;
+      r = await druk('2026-06');
+      toets('20i Facturen weer aan: de maand van de terugval gaat niet alsnog naar Facturen (409 al_klaar)', r.status === 409 && r.j.al_klaar === true && hook.calls.length === 2 &&
+        !fdbI.db.prepare("SELECT 1 FROM pot_afschrift WHERE periode = '2026-06'").get(), JSON.stringify(r.j));
+      // 6. de wachtrij weigert (PDF is geen PDF) → terugval naar het mailconcept, zonder Facturen-rij
+      maakMaand('2026-05', { pdf: Buffer.from('geen pdf') });
+      r = await druk('2026-05');
+      toets('20i Facturen weigert het afschrift → mailconcept-terugval met "Facturen weigerde", geen Facturen-rij of opdracht',
+        r.status === 200 && r.j.route === 'mailconcept' && /Facturen weigerde/.test(r.j.route_reden) && hook.calls.length === 3 && opn('2026-05').length === 0 &&
+        !fdbI.db.prepare("SELECT 1 FROM pot_afschrift WHERE periode = '2026-05'").get(), JSON.stringify([r.status, r.j]).slice(0, 300));
+      // 7. geen POT-rekening met afschriftadres in Facturen → terugval
+      fdbI.db.prepare("UPDATE entiteit SET afschrift_doel = NULL WHERE sleutel = 'pot'").run();
+      maakMaand('2026-04');
+      r = await druk('2026-04');
+      fdbI.db.prepare("UPDATE entiteit SET afschrift_doel = ? WHERE sleutel = 'pot'").run(doelPot);
+      toets('20i POT zonder afschriftadres → mailconcept-terugval', r.status === 200 && r.j.route === 'mailconcept' && /afschriftadres/.test(r.j.route_reden) && hook.calls.length === 4 && opn('2026-04').length === 0, JSON.stringify(r.j).slice(0, 300));
+      // 8. de opdracht werd geweigerd (afschrift terug naar klaar): de knop zet hem opnieuw in Facturen, niet als los concept
+      fdbI.db.prepare("UPDATE opdracht SET status = 'geweigerd', fout = 'proef', bijgewerkt_op = ? WHERE id = ?").run(new Date().toISOString(), o10[0].id);
+      fdbI.db.prepare("UPDATE pot_afschrift SET status = 'klaar' WHERE id = ?").run(o10[0].afschrift);
+      r = await vraag('GET', '/app/pot-afschriften', undefined, { pot: P.jar });
+      const s10b = r.j.maanden.find((x) => x.maand === '2026-10');
+      r = await druk('2026-10');
+      o10 = opn('2026-10');
+      toets('20i na een geweigerde opdracht: overzicht "mislukt"; de knop zet een nieuwe opdracht in Facturen (één levend), geen mailconcept',
+        s10b.facturen.status === 'mislukt' && r.status === 200 && r.j.route === 'facturen' && o10.length === 2 && o10.filter((x) => x.status === 'wacht').length === 1 && hook.calls.length === 4,
+        JSON.stringify([s10b.facturen, r.status, o10.map((x) => x.status)]));
+      // 9. oudere bank-lezer (geen rek) bij een nieuwe maand → terugval, met de reden
+      maakMaand('2026-03', { rek: null });
+      r = await druk('2026-03');
+      toets('20i bank-lezer zonder rek → mailconcept-terugval', r.status === 200 && r.j.route === 'mailconcept' && /bank-lezer/.test(r.j.route_reden) && hook.calls.length === 5, JSON.stringify(r.j).slice(0, 300));
+      // nooit beide: per maand óf Facturen-opdrachten óf mailconcepten
+      const beide = ['2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-10'].filter((m) => opn(m).length && hook.calls.some((c) => c.onderwerp.indexOf(m) >= 0));
+      toets('20i per maand nooit beide routes', beide.length === 0, JSON.stringify(beide));
+      ctx.fetch = oudFetchI; if (oudUrlI) ctx.appWebhookUrl = oudUrlI; else delete ctx.appWebhookUrl;
+      delete ctx.bankKind;
+    }
+
     // ── 21. wv201: app naast Telegram (fase 7, meetpunt 6): alleen tellingen per dag, nooit inhoud ──
     {
       const D = '2026-10-07', Z = (h, m) => new Date(Date.UTC(2026, 9, 6, 22 + h, m || 0)).toISOString();   // Z(0) = 7-10 00:00 Amsterdam

@@ -9824,12 +9824,18 @@ async function appPotAfschriften(req, res, a) {
   }
   const st = potAfStaat();
   const g = function (n) { return typeof n === 'number' && Number.isFinite(n) ? Math.round(n * 100) / 100 : null; };
+  // wv959: de stand in de Facturen-wachtrij per maand (database leidend; pod.json als Facturen nu dicht is)
+  const fac = potAfFacturen(), facVan = function (maand) {
+    if (fac.fdb) { try { return potAfFacKort(potAfFacStand(fac.fdb, maand)); } catch (e) { return null; } }
+    const f = (st.maanden[maand] || {}).facturen;
+    return f ? { status: 'onbekend', op: f.op } : null;
+  };
   const maanden = (Array.isArray(j.maanden) ? j.maanden : []).filter(function (m) { return m && POT_AF_MAAND_RE.test(String(m.maand)); }).slice(0, 18).map(function (m) {
     const sm = st.maanden[m.maand] || {}, gm = m.gemaakt;
     return { maand: m.maand, naam: potAfMaandNaam(m.maand), aantal: m.aantal, loopt_nog: m.loopt_nog === true, compleet: m.compleet === true, eerste: m.eerste === true,
       gemaakt: gm ? { op: gm.op, aantal: gm.aantal, begin: g(gm.begin), eind: g(gm.eind), bij: g(gm.bij), af: g(gm.af), stuk_open: gm.stuk_open, vervangen_op: gm.vervangen_op || null } : null,
       concept: sm.concept_op ? { op: sm.concept_op, actueel: !!(gm && sm.concept_sha === gm.sha_mt940), bijlagen: sm.bijlagen === 2 ? 2 : 0 } : null,   // wv835: concepten van vóór 23-10 hebben geen bijlagen
-      aangevraagd: sm.aangevraagd && !sm.concept_id ? sm.aangevraagd : null };
+      aangevraagd: sm.aangevraagd && !sm.concept_id ? sm.aangevraagd : null, facturen: facVan(m.maand) };
   });
   appStuur(res, 200, { ok: true, vaste_plek: false, ontvanger_gezet: j.ontvanger_gezet === true, laatst_gelezen: j.laatst_gelezen || null, maanden: maanden });
 }
@@ -9867,10 +9873,10 @@ async function appPotBestand(req, res, a, rest) {
   res._app.reden = 'pot-bestand ' + m0[1] + ' ' + m0[2];
   appStuur(res, 200, { ok: true, naam: naam, type: m0[2] === 'pdf' ? 'application/pdf' : 'text/plain', grootte: inhoud.length, sha256: sha, inhoud: inhoud.toString('base64') });
 }
-// wv835: de twee bestanden van het afschrift dat het kind net teruggaf, als bijlagen voor het mailluik ({naam, mime, inhoud_base64}).
+// wv835: de twee bestanden van het afschrift dat het kind net teruggaf ({soort, naam, mime, bytes}; wv959: ook voor de Facturen-wachtrij).
 // Zelfde toets als appPotBestand: meta.json van die maand, een veilige naam, en de sha256 van de inhoud gelijk aan meta én aan het kind.
 // Klopt er iets niet, dan null: geen concept (niet half, niet zonder bijlagen).
-async function potAfBijlagen(maand, j) {
+async function potAfBestanden(maand, j) {
   let meta;
   try { meta = JSON.parse(await fs.promises.readFile(path.join(POT_AF_DIR, maand, 'meta.json'), 'utf8')); } catch (e) { return null; }
   if (!meta || meta.maand !== maand || !meta.bestanden || !j || !j.sha256) return null;
@@ -9887,9 +9893,56 @@ async function potAfBijlagen(maand, j) {
     } catch (e) { return null; }
     if (!inhoud.length || crypto.createHash('sha256').update(inhoud).digest('hex') !== sha) return null;
     totaal += inhoud.length;
-    uit.push({ naam: naam, mime: soort === 'pdf' ? 'application/pdf' : 'application/octet-stream', inhoud_base64: inhoud.toString('base64') });
+    uit.push({ soort: soort, naam: naam, mime: soort === 'pdf' ? 'application/pdf' : 'application/octet-stream', bytes: inhoud });
   }
   return totaal <= POT_AF_BIJLAGE_MAX ? uit : null;
+}
+// Als bijlagen voor het mailluik ({naam, mime, inhoud_base64}).
+async function potAfBijlagen(maand, j) {
+  const b = await potAfBestanden(maand, j);
+  return b ? b.map(function (x) { return { naam: x.naam, mime: x.mime, inhoud_base64: x.bytes.toString('base64') }; }) : null;
+}
+// ── wv959 (Facturen F5, overdracht F4 #4; bouwplan Facturen-app § 4.4 en § 5): één uitgaande route naar Acta ──
+// De knop zet het afschrift in de verzendwachtrij van Facturen (facturen.js afschriftKlaarzetten → opdracht boekhouder_afschrift naar
+// entiteit.afschrift_doel van de POT); de koerier maakt er op het volgende hele uur via AI - Facturen-verzender een Gmail-concept van, met de
+// MT940 en de PDF, na de consistentiecontrole, de witte lijst en het plafond. Het mailconcept-pad (wv787/wv835) blijft de terugval als Facturen
+// er niet is (module weg, passieve kant, database dicht, geen POT-rekening met afschriftadres) of de wachtrij het afschrift weigert.
+// Nooit beide routes voor dezelfde maand (idempotent op rekening + periode): een maand die ooit in Facturen stond (pot_afschrift-rij of
+// pod.json facturen), krijgt nooit een los concept; een maand met een los concept (concept_id/aangevraagd) gaat niet meer naar Facturen.
+function potAfFacturen() {
+  if (typeof facturenRoutes === 'undefined' || !facturenRoutes || typeof facturenRoutes.afschrift !== 'function') return { reden: 'Facturen zit niet in deze versie van de pod' };
+  if (!rolPrimair()) return { reden: 'Facturen draait alleen op de primaire kant' };
+  let fdb = null;
+  try { fdb = facturenOpen(); } catch (e) { fdb = null; }
+  return fdb ? { fdb: fdb } : { reden: 'de facturendatabase is nu niet te openen' };
+}
+// De POT-rij van deze maand in Facturen, met de laatste opdracht (of null).
+function potAfFacStand(fdb, maand) {
+  return fdb.db.prepare('SELECT a.id, a.status, a.bijgewerkt_op, d.sha256 AS sha_mt940, o.id AS opdracht, o.status AS op_status, o.modus, o.verstuur_na, o.bijgewerkt_op AS op_bijgewerkt ' +
+    'FROM pot_afschrift a JOIN rekening r ON r.id = a.rekening LEFT JOIN document d ON d.id = a.mt940_document ' +
+    'LEFT JOIN opdracht o ON o.id = (SELECT id FROM opdracht WHERE afschrift = a.id ORDER BY aangemaakt_op DESC, rowid DESC LIMIT 1) ' +
+    "WHERE r.entiteit = 'pot' AND a.periode = ? ORDER BY a.bijgewerkt_op DESC LIMIT 1").get(maand) || null;
+}
+// Telt als "deze maand ging via Facturen": er is ooit een opdracht gemaakt, of de rij staat in de wachtrij of is verstuurd.
+function potAfFacLevend(f) { return !!(f && (f.opdracht || f.status === 'in_wachtrij' || f.status === 'verstuurd' || f.status === 'onbekend')); }
+// Kort voor de App: wachtrij (op = verstuur_na) · concept (staat in Gmail) · verstuurd · mislukt (terug naar klaar: de knop mag opnieuw).
+function potAfFacKort(f) {
+  if (!f || f.status === 'onvolledig') return null;
+  if (f.status === 'verstuurd') return { status: 'verstuurd', op: f.bijgewerkt_op };
+  if (f.status === 'klaar') return { status: 'mislukt', op: f.op_bijgewerkt || f.bijgewerkt_op };
+  if (f.op_status === 'gelukt') return { status: f.modus === 'versturen' ? 'verstuurd' : 'concept', op: f.op_bijgewerkt };
+  return { status: 'wachtrij', op: f.verstuur_na };
+}
+function potAfFacTekst(f, sha) {
+  const k = potAfFacKort(f);
+  const oud = f && f.sha_mt940 && sha && f.sha_mt940 !== sha
+    ? ' Let op: het afschrift veranderde daarna (een late boeking); stuur André na dat concept de nieuwe PDF en MT940 als correctie.' : '';
+  if (!k) return null;
+  if (k.status === 'verstuurd') return 'Dit afschrift is al verstuurd (via Facturen).' + oud;
+  if (k.status === 'concept') return 'Het concept aan André staat al in Gmail (via Facturen, sinds ' + potAfWanneer(k.op) + '); kijk het na en verstuur.' + oud;
+  if (k.status === 'wachtrij') return 'Dit afschrift staat al in de Facturen-wachtrij; ' + (k.op && Date.parse(k.op) > Date.now() ? 'rond ' + potAfWanneer(k.op) : 'binnen het uur') +
+    ' zet Facturen het concept aan André in Gmail.' + oud;
+  return null;
 }
 async function appPotConcept(req, res, a, s, d) {
   if (a.soort === 'vast') return appWeiger(res, 403, 'een mailconcept klaarzetten kan niet vanaf een pc met een vaste plek; gebruik je telefoon of laptop', 'pot vast');
@@ -9910,8 +9963,35 @@ async function appPotConcept(req, res, a, s, d) {
     if (j.nieuw || j.veranderd) return appStuur(res, 409, { ok: false, veranderd: true, afschrift: potAfAntwoord(j),
       fout: j.veranderd ? 'Het afschrift is veranderd sinds je het maakte (een late boeking). Download de nieuwe bestanden, kijk ze na en druk dan nog eens.'
         : 'Het afschrift is nu pas gemaakt. Kijk het eerst na en druk dan nog eens.' });
-    if (!j.ontvanger || !/^[^@\s]+@[^@\s]+$/.test(j.ontvanger)) return appWeiger(res, 409, 'de ontvanger (André) is op de pod nog niet ingesteld; vraag de machinekamer', 'pot geen ontvanger');
     const st = potAfStaat(), sm = st.maanden[maand] || {};
+    // wv959: route kiezen (Facturen-wachtrij of het losse mailconcept), per maand één route
+    const fac = potAfFacturen();
+    let fst = null;
+    if (fac.fdb) {
+      // niet te lezen = niet te weten of deze maand al in de wachtrij staat: dan geen route (ook geen terugval)
+      try { fst = potAfFacStand(fac.fdb, maand); }
+      catch (e) { logError('pot-facturen', new Error(String(e && e.message || e).slice(0, 120))); return appWeiger(res, 503, 'de Facturen-wachtrij is nu niet te lezen; probeer het zo opnieuw', 'pot facturen onleesbaar'); }
+    }
+    const viaMail = !!(sm.concept_id || sm.aangevraagd), viaFac = !!(sm.facturen || potAfFacLevend(fst));
+    let routeReden = null;
+    if (viaFac) {
+      const tekst = potAfFacTekst(fst, j.sha256.mt940);
+      if (tekst) { res._app.reden = 'pot-concept ' + maand + ' al in facturen'; return appStuur(res, 409, { ok: false, route: 'facturen', facturen: potAfFacKort(fst), fout: tekst }); }
+      if (!fac.fdb) return appWeiger(res, 503, 'Dit afschrift ging eerder via de Facturen-wachtrij, maar die is nu niet bereikbaar (' + fac.reden + '). Probeer het later opnieuw; een los mailconcept maakt Socev voor deze maand niet.', 'pot facturen weg');
+    }
+    if (viaFac || (!viaMail && fac.fdb)) {
+      const fr = await potAfNaarFacturen(fac.fdb, a, maand, j);
+      if (fr.klaar) return appStuur(res, fr.status, fr.j);
+      // geweigerd vóór de wachtrij: alleen terugvallen als deze maand nooit in Facturen stond (ook niet na de weigering)
+      let nu2 = null;
+      try { nu2 = potAfFacStand(fac.fdb, maand); } catch (e) { nu2 = { status: 'onbekend' }; }
+      if (viaFac || potAfFacLevend(nu2)) {
+        const tekst = potAfFacTekst(nu2, j.sha256.mt940);
+        return appStuur(res, 409, { ok: false, route: 'facturen', facturen: potAfFacKort(nu2), fout: tekst || ('De Facturen-wachtrij nam het afschrift niet aan (' + fr.reden + '). Vraag de machinekamer; een los mailconcept maakt Socev voor deze maand niet.') });
+      }
+      routeReden = fr.reden;
+    } else if (!viaMail) routeReden = fac.reden;
+    if (!j.ontvanger || !/^[^@\s]+@[^@\s]+$/.test(j.ontvanger)) return appWeiger(res, 409, 'de ontvanger (André) is op de pod nog niet ingesteld; vraag de machinekamer', 'pot geen ontvanger');
     // Fable wv787 #14: niet twee concepten door een dubbele druk of een verloren antwoord
     if (!nogmaals && sm.concept_id && sm.concept_sha === j.sha256.mt940)
       return appStuur(res, 409, { ok: false, al_klaar: true, concept_op: sm.concept_op, fout: 'Er staat al een concept voor dit afschrift in Gmail (van ' + potAfWanneer(sm.concept_op) + ').' });
@@ -9948,8 +10028,9 @@ async function appPotConcept(req, res, a, s, d) {
     Object.assign(sm2, { concept_id: antw.concept_id.slice(0, 60), concept_op: new Date().toISOString(), concept_sha: j.sha256.mt940, correctie: correctie || undefined, bijlagen: bijlagen.length });
     delete sm2.aangevraagd; st2.maanden[maand] = sm2; potAfStaatZet(st2);
     if (typeof potAfKaartConcept === 'function') potAfKaartConcept(maand).catch(function (e) { logError('pot-kaart', new Error(String(e && e.message || e).slice(0, 120))); });
-    res._app.reden = 'pot-concept ' + maand + ' klaar';
-    return appStuur(res, 200, { ok: true, concept_op: sm2.concept_op, gmail: APP_GMAIL_CONCEPTEN, onderwerp: onderwerp, bijlagen: bijlagen.length, afschrift: potAfAntwoord(j) });
+    res._app.reden = 'pot-concept ' + maand + ' klaar' + (routeReden ? ' (terugval)' : '');
+    return appStuur(res, 200, { ok: true, route: 'mailconcept', route_reden: routeReden || undefined, concept_op: sm2.concept_op, gmail: APP_GMAIL_CONCEPTEN, onderwerp: onderwerp, bijlagen: bijlagen.length,
+      melding: routeReden ? 'Het mailconcept staat in Gmail. Het ging nu niet via de Facturen-wachtrij: ' + routeReden + '.' : 'Het mailconcept staat in Gmail.', afschrift: potAfAntwoord(j) });
   } catch (e) {
     logError('pot-concept', new Error(String(e && e.message || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)));
     if (e && e.geenConcept) {
@@ -9958,6 +10039,35 @@ async function appPotConcept(req, res, a, s, d) {
     }
     return appWeiger(res, 502, 'het mailconcept kon niet gemaakt worden; probeer het later opnieuw', 'pot concept fout');
   } finally { potAfBezig = false; }
+}
+// wv959: het afschrift in de Facturen-wachtrij. → { klaar: true, status, j } (antwoord voor de App: in de wachtrij, of de bestanden kloppen
+// niet) of { reden } (de wachtrij weigerde of kon niet: de aanroeper beslist over de terugval). Synchroon na het lezen van de bestanden.
+async function potAfNaarFacturen(fdb, a, maand, j) {
+  let rek = null;
+  try {
+    rek = j.rek ? fdb.db.prepare("SELECT r.id FROM rekening r JOIN entiteit e ON e.sleutel = r.entiteit WHERE r.entiteit = 'pot' AND r.bank_formaat = 'bankluis' " +
+      'AND r.afschrift_doorsturen = 1 AND r.bankluis_rek = ? AND e.afschrift_doel IS NOT NULL').get(String(j.rek)) : null;
+  } catch (e) { return { reden: 'de facturendatabase is nu niet te lezen' }; }
+  if (!rek) return { reden: j.rek ? 'Facturen kent de POT-rekening niet met een afschriftadres' : 'de bank-lezer is nog van vóór deze koppeling' };
+  const best = await potAfBestanden(maand, j);
+  if (!best) return { klaar: true, status: 409, j: { ok: false, fout: 'de bestanden van dit afschrift kloppen niet (meer); tik op Maak opnieuw en probeer het dan nog eens' } };
+  const deel = function (soort) { const x = best.find(function (b) { return b.soort === soort; }); return { naam: x.naam, bytes: x.bytes }; };
+  const rol = facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' });
+  const r = facturenRoutes.afschrift(fdb, rol, { rekening: rek.id, periode: maand, mt940: deel('mt940'), pdf: deel('pdf') }, { nu: Date.now() });
+  if (r.status !== 200 || !r.j || !r.j.opdracht) return { reden: 'Facturen weigerde: ' + String(r.j && r.j.fout || 'fout ' + r.status).replace(/[\r\n]+/g, ' ').slice(0, 120) };
+  const verstuurNa = String(r.j.opdracht.verstuur_na || '');
+  try {
+    const st = potAfStaat(), sm = st.maanden[maand] || {};
+    sm.facturen = { op: new Date().toISOString(), afschrift: String(r.j.afschrift).slice(0, 16), opdracht: String(r.j.opdracht.id).slice(0, 16), verstuur_na: verstuurNa, sha: j.sha256.mt940 };
+    st.maanden[maand] = sm; potAfStaatZet(st);
+  } catch (e) { logError('pot-staat', e); }   // de facturendatabase is leidend (potAfFacStand); pod.json is het tweede geheugen
+  const versturen = r.j.verzendmodus === 'versturen';
+  const melding = 'Staat in de Facturen-wachtrij. Rond ' + potAfWanneer(verstuurNa) + (versturen
+    ? ' verstuurt Facturen het afschrift aan André, met de MT940 en de PDF.'
+    : ' zet Facturen het mailconcept aan André in Gmail (Concepten), met de MT940 en de PDF eraan; nakijken en versturen doe je zelf.');
+  if (typeof potAfKaartConcept === 'function') potAfKaartConcept(maand, melding).catch(function (e) { logError('pot-kaart', new Error(String(e && e.message || e).slice(0, 120))); });
+  return { klaar: true, status: 200, j: { ok: true, route: 'facturen', facturen: { status: 'wachtrij', op: verstuurNa }, verzendmodus: r.j.verzendmodus || null, melding: melding,
+    gmail: APP_GMAIL_CONCEPTEN, afschrift: potAfAntwoord(j) } };
 }
 // ── Projecten (wv373, bouwplan § 4.9d): per entiteit de komende deadlines en de lopende zaken, alleen lezen ──
 // Bronnen: 00_Systeem/Deadlines.md (tabel onder "## Actueel") en 00_Systeem/actueel.md (§ Lopende zaken). Deterministisch
@@ -16238,14 +16348,15 @@ function potAfKaartNiet(maand, reden) {
     meting: bankNuKort() + ': Het afschrift van ' + n + ' kon Socev niet maken.' };
 }
 // Na het concept: de meting op een open kaart van die maand bijwerken (een kaart die David al dichtzette, blijft dicht).
-async function potAfKaartConcept(maand) {
+// wv959: meting = de melding van de Facturen-route (in de wachtrij); zonder: het losse mailconcept staat in Gmail.
+async function potAfKaartConcept(maand, meting) {
   const rd = potAfStaat().ronde[maand];
   if (!rd || !rd.kaart) return;
   const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
   const pnt = ((j && j.punten) || []).find(function (p) { return p.sleutel === rd.kaart; });
   if (!pnt || (pnt.status !== 'open' && pnt.status !== 'later')) return;
   const p = potAfKaartDoen(maand);
-  p.meting = bankNuKort() + ': Het mailconcept aan André staat in Gmail, met beide bestanden eraan; nakijken en versturen doe je zelf.';
+  p.meting = bankNuKort() + ': ' + (meting || 'Het mailconcept aan André staat in Gmail, met beide bestanden eraan; nakijken en versturen doe je zelf.');
   await appSbRpc('mk_voor_jou_zet', { p: p });
 }
 // Maandronde, na de bank-ronde. Antwoord naar n8n: alleen maand en uitkomst.
@@ -16261,6 +16372,7 @@ async function potAfschriftRonde(o) {
   if (rd.kaart || rd.niet_kaart || rd.overgeslagen) return { gedaan: false, reden: 'al gedaan', maand: mnd };
   const bewaar = function () { st.ronde[mnd] = rd; st.laatste_ronde = new Date().toISOString(); try { potAfStaatZet(st); } catch (e) { logError('pot-staat', e); } };
   if ((st.maanden[mnd] || {}).concept_id) { rd.overgeslagen = 'concept al gemaakt'; bewaar(); return { gedaan: false, reden: 'concept al gemaakt', maand: mnd }; }
+  if ((st.maanden[mnd] || {}).facturen) { rd.overgeslagen = 'in de Facturen-wachtrij'; bewaar(); return { gedaan: false, reden: 'in de Facturen-wachtrij', maand: mnd }; }   // wv959
   const box = function (reden) { if (rd.box !== reden) { rd.box = reden; bankBoxRij({ bron: 'pot-afschrift', maand: mnd, tekst: reden }); } };
   potAfBezig = true;
   try {

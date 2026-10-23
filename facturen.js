@@ -372,7 +372,9 @@ function uploads(fdb, r, nu) {
     'FROM document d LEFT JOIN factuur f ON f.document = d.id OR f.ubl_document = d.id WHERE d.geupload_door IS NOT NULL ORDER BY d.aangemaakt_op DESC LIMIT 60').all()
     .filter((d) => (d.factuur ? magFactuur(r, d) : isEig(r) || d.geupload_door === r.wie))
     .slice(0, 30).map((d) => ({ id: d.id, naam: d.naam, soort: d.soort, te_lezen: !!d.te_lezen, factuur: d.factuur, status: d.status, geupload_op: d.aangemaakt_op }));
-  const pot = isEig(r) ? fdb.db.prepare('SELECT a.id, a.periode, a.status, a.bijgewerkt_op FROM pot_afschrift a ORDER BY a.periode DESC LIMIT 6').all() : undefined;
+  // wv959: met de stand van de laatste opdracht (wacht · opgehaald · gelukt · mislukt · geweigerd), zodat stap 4 laat zien waar het afschrift is
+  const pot = isEig(r) ? fdb.db.prepare('SELECT a.id, a.periode, a.status, a.bijgewerkt_op, o.status AS opdracht_status, o.modus AS opdracht_modus, o.verstuur_na ' +
+    'FROM pot_afschrift a LEFT JOIN opdracht o ON o.id = (SELECT id FROM opdracht WHERE afschrift = a.id ORDER BY aangemaakt_op DESC, rowid DESC LIMIT 1) ORDER BY a.periode DESC LIMIT 6').all() : undefined;
   return { bankbestanden: bestanden, stukken: docs, rekeningen: gezondheid(fdb, r, nu).rekeningen, pot };
 }
 function leveranciers(fdb, r) {
@@ -1440,7 +1442,7 @@ function backupNodig(fdb, nu) {
  * POT-afschrift in de verzendwachtrij (bouwplan § 4.4 en § 5; F4): de twee gemaakte bestanden van de afschriftmaker (wv787, MT940 + PDF)
  * als stukken opslaan (nooit als bankbestand inlezen), pot_afschrift → in_wachtrij en een opdracht boekhouder_afschrift naar het
  * afschriftadres van de entiteit van de rekening (de database dwingt adres en entiteit af). Alleen de eigenaar; wie = Davids klik.
- * Nog door niets aangeroepen: de POT-App gebruikt tot F5 het mailconcept-pad (de POT heeft nog geen afschriftadres; stamgegeven F5).
+ * Sinds wv959 (F5) roept de knop van de POT-App (server.js appPotConcept) dit aan via maak().afschrift; het mailconcept-pad is daar de terugval.
  * invoer = { rekening (id), periode (JJJJ-MM), mt940: { naam, bytes }, pdf: { naam, bytes } }.
  */
 function afschriftKlaarzetten(fdb, r, invoer, o) {
@@ -1567,7 +1569,12 @@ function maak(opties) {
       weiger(404, 'onbekend');
     } catch (e) { return alsFout(e, opties.fout); }
   }
-  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
+  // wv959: het POT-afschrift in de wachtrij (afschriftKlaarzetten) met dezelfde foutvertaling als de routes; + de verzendmodus voor de melding
+  const afschrift = (fdb, r, invoer, o) => {
+    try { return ok(Object.assign(afschriftKlaarzetten(fdb, r, invoer, o || {}), { verzendmodus: D.metaLees(fdb, 'verzendmodus') }), 'afschrift ' + kort(invoer && invoer.periode, 7)); }
+    catch (e) { return alsFout(e, opties.fout); }
+  };
+  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }
 function ok(j, reden) { return { status: 200, j: Object.assign({ ok: true }, j), reden: reden || null }; }
 // Fouten naar een status. Triggers van facturen-db.js geven vaste teksten ("opdracht_prive: …"): die mogen door. Een CHECK of UNIQUE noemt
