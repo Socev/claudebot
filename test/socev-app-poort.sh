@@ -1575,7 +1575,7 @@ async function bewijs(o) {
         rij(5, 'hoofd', { naar_telegram: true }), rij(6, 'hoofd'), rij(8, 'machinekamer'), rij(9, 'machinekamer', { soort: undefined })]);
       const ag = { [J(20)]: { kanaal: 'hoofd', t: iso(uur), knoppen: { uitvoeren: { verloopt: nu + uur, stand: 'open' } } },
         [J(21)]: { kanaal: 'hoofd', t: iso(uur), knoppen: { uitvoeren: { verloopt: nu - 10 * 60000, stand: 'open' } } } };
-      const kaarten = [{ id: 1, status: 'open', titel: 'Werkvoorraad wv812 — afsluiten', herkomst: {} }, { id: 2, status: 'open', titel: 'Gekoppeld', herkomst: { vraag: J(6) + ':' + hash(qs[6]) } },
+      const kaarten = [{ id: 1, status: 'open', soort: 'besluit', titel: 'Werkvoorraad wv812 — afsluiten?', herkomst: {} }, { id: 2, status: 'open', titel: 'Gekoppeld', herkomst: { vraag: J(6) + ':' + hash(qs[6]) } },
         { id: 3, status: 'gedaan', titel: 'Dicht', herkomst: { vraag: J(8) + ':' + hash(qs[8]) } }, { id: 4, status: 'later', titel: 'Geparkeerd', herkomst: { vraag: J(1) + ':' + hash(qs[1]) } }];
       const mLater = H.appMoetIetsUit({ hoofd: hoofd, machinekamer: mk }, vragen, ag, kaarten, nu);
       toets('9d wv594 review #1: een kaart op later verbergt zijn gekoppelde vraag ook', !mLater.some((x) => x.punt.includes(J(1))), JSON.stringify(mLater.map((x) => x.punt)));
@@ -1590,6 +1590,8 @@ async function bewijs(o) {
       toets('9d wv594: agenda-✅ alleen als hij nog niet verlopen is', sl.includes('a:' + J(20)) && !sl.some((s) => s.includes(J(21))) && m.find((x) => x.punt === 'a:' + J(20)).agenda.knoppen[0].knop === 'uitvoeren', JSON.stringify(sl));
       toets('9d wv594: volgorde dag → agenda → vraag', m.map((x) => x.soort).join(',').replace(/(\w+)(,\1)+/g, '$1') === 'dag,agenda,vraag', m.map((x) => x.soort).join(','));
       toets('9d wv594: sleutels passen op de gezien-regel van de pod (APP_GEZIEN_PUNT_RE)', sl.every((s) => /^[a-z0-9:_-]{1,80}$/.test(s)), JSON.stringify(sl));
+      const mDoe = H.appMoetIetsUit({ hoofd: hoofd, machinekamer: mk }, vragen, ag, kaarten.map((k) => (k.id === 1 ? Object.assign({}, k, { soort: 'doen' }) : k)), nu);
+      toets('9d wv926 Fable #6: een doe-kaart met hetzelfde wv-nummer verbergt de vraag niet (alleen een besluitkaart)', mDoe.some((x) => x.punt.includes(J(2))), JSON.stringify(mDoe.map((x) => x.punt)));
       const leeg = H.appMoetIetsUit({}, {}, {}, [], nu);
       toets('9d wv594: zonder gegevens een lege lijst', Array.isArray(leeg) && leeg.length === 0);
     }
@@ -5555,10 +5557,12 @@ async function bewijs(o) {
       const nAu = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
       const n0 = nRpc();
       r = await vraag('GET', '/app/voor-jou', undefined, { pot: P.jar });
+      toets('27 wv926 Fable #1: GET /app/voor-jou (zonder proef) zonder moet_iets en gezien, zoals main', r.status === 200 && !('moet_iets' in r.j) && !('gezien' in r.j) && !('moet_fout' in r.j), Object.keys(r.j).join());
+      const rK = await vraag('GET', '/app/voor-jou/kanaal', undefined, { pot: P.jar });
       const ids = (r.j.punten || []).map((x) => x.id);
       toets('27 lijst: open + later-vandaag, zonder later-toekomst en gesloten; volgorde van de tabel; privé wel op de telefoon', r.status === 200 && ids.join() === '1,2,3,4,5,6,8,9' && r.j.zichtbaar === 5 && r.j.meer === 3, JSON.stringify(ids) + ' ' + r.j.meer);
       toets('27 later-toekomst niet in de lijst (ook het tweede)', !ids.includes(11));
-      toets('27 wv594: moet_iets is een lijst en gezien een object met alleen sleutels die Voor jou toont (k:<id>, k:<id>:over, v:/a:/d:)', Array.isArray(r.j.moet_iets) && r.j.moet_fout === null && r.j.gezien && typeof r.j.gezien === 'object' && Object.keys(r.j.gezien).every((k) => /^(k:\d+(:over)?|[vad]:[a-f0-9:]+)$/.test(k)), JSON.stringify([r.j.moet_iets, r.j.moet_fout, r.j.gezien]));
+      toets('27 wv594: /app/voor-jou/kanaal: moet_iets is een lijst en gezien een object met alleen sleutels die Voor jou toont (k:<id>, k:<id>:over, v:/a:/d:); kaarten gelijk', rK.status === 200 && Array.isArray(rK.j.moet_iets) && rK.j.moet_fout === null && rK.j.gezien && typeof rK.j.gezien === 'object' && Object.keys(rK.j.gezien).every((k) => /^(k:\d+(:over)?|[vad]:[a-f0-9:]+)$/.test(k)) && JSON.stringify(rK.j.punten) === JSON.stringify(r.j.punten), JSON.stringify([rK.status, rK.j.moet_iets, rK.j.moet_fout, rK.j.gezien]));
       toets('27 later-toekomst apart met datum', (r.j.later || []).length === 2 && r.j.later[0].id === 7 && r.j.later[0].later_tot === plus(V, 3), JSON.stringify(r.j.later));
       const L = Object.fromEntries((r.j.punten || []).map((x) => [x.id, x]));
       toets('27 regel 2: wanneer · waar · duur', L[1].regel2 === 'uiterlijk ' + dm(plus(V, 9)) + ' · op de praktijk · ± 15 min' && L[2].regel2 === 'vandaag · op je telefoon · ± 1,5 u' && L[3].regel2 === 'uiterlijk morgen · op de pc · ± 5 min'
@@ -5593,13 +5597,14 @@ async function bewijs(o) {
         vj[JH + ':' + hH] = rijV('hoofd'); vj[JL + ':' + hL] = rijV('hoofd'); vj[JM + ':' + hM] = rijV('machinekamer');
         fs.writeFileSync(VJP, JSON.stringify(vj));
         const vH = 'v:' + JH + ':' + hH;
-        fs.writeFileSync(GDP, JSON.stringify({ versie: 1, tabs: {}, punten: { 'k:1': tq, 'k:4:over': tq, 'k:7': tq, 'k:10': tq, [vH]: tq }, bron: {} }));
+        fs.writeFileSync(GDP, JSON.stringify({ versie: 1, tabs: {}, punten: { 'k:1': tq, 'k:4:over': tq, 'k:7': tq, 'k:10': tq, 'k:999': tq, 'k:998:over': tq, [vH]: tq }, bron: {} }));
         H.appStaat.moetLog = null; H.appStaat.vjCache = null;
-        const route = async (soort) => { const n = nepRes(); await H.appVoorJouRoute({}, n, { id: 'x', soort: soort || 'reist' }); return n; };
+        const route = async (soort) => { const n = nepRes(); await H.appVoorJouRoute({}, n, { id: 'x', soort: soort || 'reist' }, true); return n; };
         let n27 = await route();
         let ms = (n27.b.moet_iets || []).map((x) => x.punt);
         toets('27 wv594 #3: open vragen uit het hoofdkanaal en de machinekamer komen via de route in moet_iets, de storing van vandaag ook', n27.st === 200 && ms.includes(vH) && ms.includes('v:' + JM + ':' + hM) && ms.includes('d:' + JD) && n27.b.moet_fout === null, JSON.stringify(ms));
         toets('27 wv594 #3: gezien komt echt uit gezien-david.json (k:1, k:4:over en de vraag), alleen voor wat Voor jou toont', n27.b.gezien && n27.b.gezien['k:1'] === tq && n27.b.gezien['k:4:over'] === tq && n27.b.gezien[vH] === tq && !('k:7' in n27.b.gezien) && !('k:10' in n27.b.gezien), JSON.stringify(n27.b.gezien));
+        toets('27 wv926 Fable #5: k:-sleutels van kaarten die de lijst niet meer noemt (999, 998:over) gaan eruit', !GD().punten['k:999'] && !GD().punten['k:998:over'], JSON.stringify(Object.keys(GD().punten)));
         toets('27 wv594 #2: later-kaart (7) gaat uit gezien-david.json; open kaart (1) en de net gesloten kaart (10, in de ↩️-tijd) blijven', !GD().punten['k:7'] && !!GD().punten['k:1'] && !!GD().punten['k:10'] && !!GD().punten['k:4:over'], JSON.stringify(GD().punten));
         const ML = n27.b.moet_iets.find((x) => x.punt === 'v:' + JL + ':' + hL), MH = n27.b.moet_iets.find((x) => x.punt === vH), MD = n27.b.moet_iets.find((x) => x.punt === 'd:' + JD);
         toets('27 wv594 #6/#7: een lang bericht is afgekapt op 6000 tekens met afgekapt: true; een kort niet', ML && ML.bericht.length <= 6003 && ML.afgekapt === true && MH && MH.afgekapt === false && /Rapport\./.test(MH.bericht), JSON.stringify([ML && ML.bericht.length, ML && ML.afgekapt, MH && MH.afgekapt]));

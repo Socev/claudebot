@@ -8826,7 +8826,7 @@ function appVjTerugMs(id, nu, apparaat) {
   const t = appStaat.vjTerug[id];
   return t && t.tot > nu && t.apparaat === apparaat ? t.tot - nu : 0;
 }
-async function appVoorJouRoute(req, res, a) {
+async function appVoorJouRoute(req, res, a, kanaal) {
   res._app.stil = true;   // de app leest bij openen van Vandaag en op Ververs
   let punten;
   try { punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appStuur(res, 200, { ok: true, punten: [], later: [], meer: 0, fout: 'de lijst is nu niet te lezen' }); }
@@ -8847,7 +8847,11 @@ async function appVoorJouRoute(req, res, a) {
   let vr = {};
   try { vr = appVragen(); } catch (e) { vr = {}; }
   const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr) }); });
-  // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten)
+  // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten).
+  // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (de app met de proefschakelaar); /app/voor-jou blijft zoals main.
+  const basisAntwoord = { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: !!(a && a.soort === 'vast'),
+    bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null };
+  if (!kanaal) return appStuur(res, 200, basisAntwoord);
   let moet = null, moetFout = null;
   // review wv594 #1: ontdubbelen tegen ALLE kaarten (ook privé, die een vaste plek niet toont); op een vaste plek geen hoofdkanaal
   try { moet = (await appMoetIets(punten, nu)).filter(function (m) { return !(a && a.soort === 'vast' && m.kanaal === 'hoofd'); }); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
@@ -8855,8 +8859,7 @@ async function appVoorJouRoute(req, res, a) {
   lijst.forEach(function (p) { sleutels.push('k:' + p.id); if (p.deadline && p.deadline < vandaag) sleutels.push('k:' + p.id + ':over'); });
   (moet || []).forEach(function (m) { sleutels.push(m.punt); });
   appMoetGezienOpruim(punten, nu, vandaag);
-  appStuur(res, 200, { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: !!(a && a.soort === 'vast'),
-    bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null, moet_iets: moet, moet_fout: moetFout, gezien: appMoetGezien(sleutels) });
+  appStuur(res, 200, Object.assign(basisAntwoord, { moet_iets: moet, moet_fout: moetFout, gezien: appMoetGezien(sleutels) }));
 }
 // ── wv594: één meldingenkanaal fase 4 (bouwplan "Eén meldingenkanaal" § 4.5; fase 3 punt a, ontwerp wv804 § 0) ──
 // Moet iets: open app-vragen (< 72 u, onbeantwoord, niet naar Telegram, geen Telegram-beurt; soort leeg of socev, dus geen
@@ -8876,7 +8879,8 @@ function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu) {
     if (!p || (p.status !== 'open' && p.status !== 'later')) return;   // review wv594 #1: ook een geparkeerde kaart verbergt zijn vraag
     const g = appVjGekoppeld(p);
     if (g) gekoppeld[g] = 1;
-    String(p.titel || '').replace(APP_MOET_WV_RE, function (m, n) { kaartWv[n] = 1; return m; });
+    // Fable-diffreview wv926 #6: alleen een besluitkaart neemt een vraag met hetzelfde wv-nummer over (een doe-kaart is een andere vraag)
+    if (p.soort === 'besluit') String(p.titel || '').replace(APP_MOET_WV_RE, function (m, n) { kaartWv[n] = 1; return m; });
   });
   const uit = [];
   ['hoofd', 'machinekamer'].forEach(function (kanaal) {
@@ -8937,7 +8941,7 @@ async function appMoetIets(kaarten, nu) {
 }
 // review wv594 #2: een kaart die niet meer op David wacht (dicht, of later met een datum na vandaag) gaat uit gezien-david.json, zodat
 // hij opnieuw telt als hij terugkomt (heropend, later verlopen); zoals gezienBijwerken in de app. Alleen kaarten die de lijst echt
-// noemt (een lege of halve lijst wist niets) en niet in de ↩️-minuut (een ongedaan gemaakte keuze is niet nieuw). Schrijft alleen als
+// noemt of die er langer dan 7 dagen dicht uit is (een lege lijst wist niets) en niet in de ↩️-minuut (een ongedaan gemaakte keuze is niet nieuw). Schrijft alleen als
 // er iets weg moet.
 function appMoetGezienOpruim(punten, nu, vandaag) {
   try {
@@ -8951,9 +8955,13 @@ function appMoetGezienOpruim(punten, nu, vandaag) {
       if (g && nu - g < APP_VJ_DOORZET_MS) return;   // net gekozen: na een pod-herstart kent vjTerug hem niet meer
       weg.push('k:' + p.id, 'k:' + p.id + ':over');
     });
-    if (!weg.length) return;
     const g = appGezienDavid();
-    if (!g || !weg.some(function (k) { return g.punten[k]; })) return;
+    if (!g) return;
+    // Fable-diffreview wv926 #5: een kaart die de lijst niet meer noemt (langer dan 7 dagen dicht) ook; alleen bij een niet-lege lijst
+    const ids = {};
+    (punten || []).forEach(function (p) { if (p && p.id != null) ids[String(p.id)] = 1; });
+    if (Object.keys(ids).length) Object.keys(g.punten).forEach(function (k) { const m = /^k:(\d+)(:over)?$/.exec(k); if (m && !ids[m[1]]) weg.push(k); });
+    if (!weg.some(function (k) { return g.punten[k]; })) return;
     weg.forEach(function (k) { delete g.punten[k]; });
     appSchrijfJson(APP_GEZIEN_DAVID, g);
   } catch (e) { logError('gezien-david', e); }
@@ -11015,6 +11023,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/projecten') return appProjectenRoute(req, res, a);   // wv373
         if (route === 'POST /app/actie') return appActieRoute(req, res, a, d);
         if (route === 'GET /app/voor-jou') return appVoorJouRoute(req, res, a);   // wv335
+        if (route === 'GET /app/voor-jou/kanaal') return appVoorJouRoute(req, res, a, true);   // wv926 (Fable #1): Moet iets alleen voor de proef
         if (route.indexOf('GET /app/voor-jou/') === 0) return appVoorJouDetail(req, res, a, route.slice('GET /app/voor-jou/'.length));
         if (route === 'POST /app/voor-jou/keuze') return appVoorJouKeuze(req, res, a, d);
         if (route === 'POST /app/voor-jou/knop') return appVoorJouKnop(req, res, reg, a, s, d);   // wv404
