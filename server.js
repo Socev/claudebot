@@ -949,9 +949,9 @@ function loperOp(verzoek, timeoutMs) {
 const LOPER_SYNC_JS = "const n=require('net');let i='';process.stdin.on('data',d=>i+=d).on('end',()=>{const s=n.connect(process.argv[1]);" +
   "let r='';s.on('connect',()=>s.write(i.trim()+'\\n'));s.setEncoding('utf8');s.on('data',d=>{r+=d;const k=r.indexOf('\\n');" +
   "if(k>=0){process.stdout.write(r.slice(0,k));s.destroy();}});s.on('error',e=>process.stdout.write(JSON.stringify({ok:false,fout:'verbind-'+(e.code||'')})));});";
-function loperSync(verzoek) {
+function loperSync(verzoek, timeoutMs) {
   const uit = require('child_process').execFileSync(process.execPath, ['-e', LOPER_SYNC_JS, LOPER_SOCK],
-    { input: JSON.stringify(Object.assign({}, verzoek, { nr: 1 })), timeout: 20000, maxBuffer: 16 * 1024 * 1024, env: { PATH: process.env.PATH || '/usr/bin:/bin' } });
+    { input: JSON.stringify(Object.assign({}, verzoek, { nr: 1 })), timeout: timeoutMs || 20000, maxBuffer: 16 * 1024 * 1024, env: { PATH: process.env.PATH || '/usr/bin:/bin' } });
   return JSON.parse(uit.toString('utf8'));
 }
 // Transcript lezen: van socev (0600, onleesbaar voor 1001) via de loper, anders gewoon. Gooit bij een fout (zoals readFileSync).
@@ -13242,6 +13242,14 @@ function telAanwezig() {
   if (!telSessieOk(t)) return { ok: false, reden: 'geen app-sessie' };
   return { ok: true, t: t };
 }
+// Fable wv886 #2: een rij telt alleen als beide kanten loopback zijn (127.0.0.1, ::ffff:127.0.0.1 of ::1); anders kan een
+// uitgaande verbinding naar een andere :8080 met dezelfde lokale poort de rij zijn.
+const TEL_LOOPBACK_HEX = ['0100007F', '0000000000000000FFFF00000100007F', '00000000000000000000000001000000'];
+function telLoopbackRij(k, zijn, onze) {
+  const l = k[1].split(':'), a = k[2].split(':');
+  return l.length === 2 && a.length === 2 && ':' + l[1] === zijn && ':' + a[1] === onze &&
+    TEL_LOOPBACK_HEX.indexOf(l[0].toUpperCase()) >= 0 && TEL_LOOPBACK_HEX.indexOf(a[0].toUpperCase()) >= 0;
+}
 // Welk proces zit achter deze lokale verbinding? De client-rij in /proc/net/tcp(6) (lokaal = zijn poort, op afstand = onze
 // poort) geeft de socket-inode; het proces met die socket als fd is de aanvrager. Fail-closed: null.
 function telVerbindingProces(req) {
@@ -13254,7 +13262,7 @@ function telVerbindingProces(req) {
     let t = ''; try { t = fs.readFileSync(f, 'utf8'); } catch (e) { return false; }
     return t.split('\n').slice(1).some(function (r) {
       const k = r.trim().split(/\s+/);
-      if (k.length > 9 && k[1].slice(-5) === zijn && k[2].slice(-5) === onze && k[9] !== '0') { inode = k[9]; return true; }
+      if (k.length > 9 && telLoopbackRij(k, zijn, onze) && k[9] !== '0') { inode = k[9]; return true; }
       return false;
     });
   });
@@ -13283,7 +13291,7 @@ function telVerbindingSocket(req) {
     let t = ''; try { t = fs.readFileSync(f, 'utf8'); } catch (e) { return false; }
     return t.split('\n').slice(1).some(function (r) {
       const k = r.trim().split(/\s+/);
-      if (k.length > 9 && k[1].slice(-5) === zijn && k[2].slice(-5) === onze) { uit = { uid: Number(k[7]), inode: /^[1-9]\d{0,19}$/.test(k[9]) ? k[9] : null }; return true; }
+      if (k.length > 9 && telLoopbackRij(k, zijn, onze)) { uit = { uid: Number(k[7]), inode: /^[1-9]\d{0,19}$/.test(k[9]) ? k[9] : null }; return true; }
       return false;
     });
   });
@@ -13296,7 +13304,8 @@ function telVerbindingSocket(req) {
 function telBeurtViaLoper(v) {
   if (!v.inode) return { fout: 'geen socket-inode' };
   let r;
-  try { r = loperSync({ op: 'socket-eigenaar', inode: v.inode }); } catch (e) { return { fout: 'loper: ' + String((e && e.code) || 'fout').slice(0, 40) }; }
+  // /agent-pad: hooguit 3 s stil als de loper hangt (Fable wv886 #3)
+  try { r = loperSync({ op: 'socket-eigenaar', inode: v.inode }, 3000); } catch (e) { return { fout: 'loper: ' + String((e && e.code) || 'fout').slice(0, 40) }; }
   if (!r || r.ok !== true) return { fout: 'loper: ' + String((r && r.fout) || 'geen antwoord').slice(0, 40) };
   if (!r.pid || !/^[0-9a-f]{16}$/.test(String(r.waarde || ''))) return { fout: 'geen tel-beurt' };
   const j = jobs[r.waarde];

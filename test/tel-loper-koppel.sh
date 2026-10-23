@@ -9,7 +9,8 @@
 #  3  een andere socev-sessie zonder marker terwijl de [AUTO]-beurt loopt → NIET gekoppeld (was het gat: "precies één tel-beurt")
 #  4  marker van een beurt die niet via de loper liep / niet bestaat → niet gekoppeld
 #  5  andere uid dan de loper → 'proces niet gevonden'
-#  6  loper weg → fout 'loper: …', geen uitzondering
+#  6  loper weg → fout "loper: …", geen uitzondering; 7 loper hangt → fout binnen ± 3 s
+#  8  alleen loopback-rijen uit /proc/net/tcp tellen (zelfde poort, ander adres → geen rij)
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node - <<'JS'
@@ -37,10 +38,10 @@ os.execve(sys.argv[2], [sys.argv[2], sys.argv[3]], {"PATH": os.environ["PATH"], 
 const src = fs.readFileSync('server.js', 'utf8');
 const knip = (van, tot) => { const a = src.indexOf(van), b = src.indexOf(tot, a + 1); if (a < 0 || b < 0) { toets('knip gevonden: ' + van, false); return ''; } return src.slice(a, b); };
 const deel = knip('const LOPER_SYNC_JS =', '// Transcript lezen:') + '\n' +
-  knip('// Welk proces zit achter deze lokale verbinding?', '// Vanuit POST /agent, vóór het antwoord.');
+  knip('// Fable wv886 #2: een rij telt alleen', '// Vanuit POST /agent, vóór het antwoord.');
 const jobs = {};
 const ctx = vm.createContext({ require, fs, process, JSON, Number, String, RegExp, Object, LOPER_SOCK: SOCK, LOPER_UID: process.getuid(), jobs });
-vm.runInContext(deel + '\n;globalThis.__h = { telBeurtVanVerzoek };', ctx, { filename: 'server.js#tel-loper' });
+vm.runInContext(deel + '\n;globalThis.__h = { telBeurtVanVerzoek, telLoopbackRij };', ctx, { filename: 'server.js#tel-loper' });
 ctx.telVerbindingProces = () => null;   // 1001 ziet de fd's van een 1002-proces niet
 const H = ctx.__h;
 
@@ -81,6 +82,22 @@ const kind = (env, viaSh) => new Promise((ok) => {
   loper.kill('SIGKILL'); await slaap(300); try { fs.unlinkSync(SOCK); } catch (e) {}
   r = await kind({ SOCEV_TEL_BEURT: idT });
   toets('6 loper weg → fout "loper: …", geen uitzondering', r && !r.beurt && /^loper: /.test(r.fout || ''), r);
+  // 7: loper hangt (accepteert, antwoordt nooit) → fout binnen ± 3 s, niet 20 s (Fable wv886 #3)
+  const hang = net.createServer(() => {}).listen(SOCK);
+  await slaap(200);
+  const t0 = Date.now();
+  r = await kind({ SOCEV_TEL_BEURT: idT });
+  const duur = Date.now() - t0;
+  toets('7 loper hangt → fout na hooguit ± 3 s (' + duur + ' ms)', r && !r.beurt && /^loper: /.test(r.fout || '') && duur < 6000, { r, duur });
+  hang.close();
+  // 8: alleen loopback-rijen tellen (Fable wv886 #2): zelfde poorten, ander adres → geen rij
+  const rij = (l, a) => ['0:', l, a, '01', '0:0', '0:0', '0', '1002', '0', '12345'];
+  toets('8a loopback v4 met de juiste poorten → rij', H.telLoopbackRij(rij('0100007F:C350', '0100007F:1F90'), ':C350', ':1F90') === true);
+  toets('8b ::ffff:127.0.0.1 en ::1 → rij', H.telLoopbackRij(rij('0000000000000000FFFF00000100007F:C350', '0000000000000000FFFF00000100007F:1F90'), ':C350', ':1F90') === true &&
+    H.telLoopbackRij(rij('00000000000000000000000001000000:C350', '00000000000000000000000001000000:1F90'), ':C350', ':1F90') === true);
+  toets('8c uitgaand naar een andere :8080 (pod-adres → 10.x) met dezelfde lokale poort → geen rij', H.telLoopbackRij(rij('0A01A8C0:C350', '0B01A8C0:1F90'), ':C350', ':1F90') === false &&
+    H.telLoopbackRij(rij('0100007F:C350', '0B01A8C0:1F90'), ':C350', ':1F90') === false);
+  toets('8d andere poort → geen rij', H.telLoopbackRij(rij('0100007F:C351', '0100007F:1F90'), ':C350', ':1F90') === false);
   srv.close();
   try { fs.rmSync(W, { recursive: true, force: true }); } catch (e) {}
   console.log(fout ? fout + ' ROOD, ' + goed + ' GROEN' : 'TOETS GROEN (' + goed + ')');
