@@ -3520,8 +3520,8 @@ function handleRequest(req, res) {
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
-      managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },
-      ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
+      managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
+      ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761: App Ideeën van buitenaf (laatste lezing, fout, aantal kaarten; geen inhoud)
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
