@@ -15,7 +15,9 @@
  * - Een opdracht is na het aanmaken onveranderlijk in wat er verstuurd wordt (doel, bijlagen, vingerafdruk, sleutel); hooguit één levende
  *   opdracht per factuur of afschrift, en een verstuurde factuur krijgt nooit een tweede.
  * - Een document is hooguit één factuur (splitsen bestaat niet); een factuur heeft precies één entiteit (één kolom).
- * - Regels van een rekening met controle 0 (Privé) worden nooit opgeslagen; POT-regels houden alleen_eigenaar (trigger).
+ * - Regels van een rekening met controle 0 (Privé) worden nooit als regel opgeslagen; POT-regels houden alleen_eigenaar (trigger), en een
+ *   alleen-eigenaar-regel (POT, personeel, historie) wordt dat nooit meer af (wv944). Het ruwe bankbestand bewaren we sinds wv944 wél als
+ *   bron in bankbron/ (Davids keuze 23-10-2026), nooit via een route te zien.
  * - Een praktijkmanager kan niet aan Privé gekoppeld worden (trigger). Het auditlog is alleen-toevoegen (trigger).
  * - Geen kolom voor factuurtekst of mailtekst: alleen velden, besluitrijen en audit.
  *
@@ -542,15 +544,60 @@ WHEN NEW.ingang = 'fac' AND (NEW.rol <> 'praktijkmanager' OR NEW.email IS NULL O
 BEGIN SELECT RAISE(ABORT, 'gebruiker_fac: via de smalle ingang alleen praktijkmanager, met een e-mailadres in kleine letters'); END;
 `;
 
+// wv944 (bankhistorie definitief + validatie, David 23-10-2026): bank_bestand krijgt herkomst (upload, historisch, archief_fv2), bank,
+// periode, saldocontrole en of het ruwe bestand bewaard is; een bankregel die alleen-eigenaar is (POT, personeel, historie) wordt dat nooit
+// meer af (Fable wv944 #6); factuur_archief bewaart de FV2-facturen als velden (geen stuk, geen tekst) voor de validatie; meta.startdatum
+// (eerste dag dat Facturen echt draait) moet een datum zijn. LET OP terugrol: een release van vóór wv944 opent deze database niet meer
+// (schema_nieuwer); terugrollen = ook de database terugzetten (backup/ van vóór de uitrol) of vooruit herstellen.
+const M4 = `
+ALTER TABLE bank_bestand ADD COLUMN modus TEXT NOT NULL DEFAULT 'upload' CHECK (modus IN ('upload','historisch','archief_fv2'));
+ALTER TABLE bank_bestand ADD COLUMN bank TEXT CHECK (bank IS NULL OR bank IN ('ABN','ING'));
+ALTER TABLE bank_bestand ADD COLUMN periode_van TEXT ${DATUM('periode_van')};
+ALTER TABLE bank_bestand ADD COLUMN periode_tot TEXT ${DATUM('periode_tot')};
+ALTER TABLE bank_bestand ADD COLUMN saldo TEXT ${JSONO('saldo')};
+ALTER TABLE bank_bestand ADD COLUMN bron_bewaard INTEGER NOT NULL DEFAULT 0 ${BOOL('bron_bewaard')};
+ALTER TABLE bank_bestand ADD COLUMN herkomst TEXT CHECK (herkomst IS NULL OR length(herkomst) <= 300);
+CREATE TRIGGER transactie_eigenaar_blijft BEFORE UPDATE OF alleen_eigenaar ON bank_transactie
+WHEN NEW.alleen_eigenaar < OLD.alleen_eigenaar
+BEGIN SELECT RAISE(ABORT, 'transactie_eigenaar: een regel die alleen voor de eigenaar is, blijft dat'); END;
+CREATE INDEX transactie_datum ON bank_transactie (boekdatum);
+CREATE INDEX transactie_incassant ON bank_transactie (incassant_id);
+CREATE TABLE factuur_archief (
+  id TEXT PRIMARY KEY ${ID('id')},
+  herkomst TEXT NOT NULL CHECK (herkomst IN ('fv2')),
+  extern_id TEXT NOT NULL CHECK (length(extern_id) BETWEEN 1 AND 64),
+  entiteit TEXT NOT NULL REFERENCES entiteit(sleutel) CHECK (entiteit <> 'prive'),
+  leverancier_naam TEXT CHECK (leverancier_naam IS NULL OR length(leverancier_naam) <= 200),
+  nummer TEXT CHECK (nummer IS NULL OR length(nummer) <= 100),
+  factuurdatum TEXT ${DATUM('factuurdatum')},
+  vervaldatum TEXT ${DATUM('vervaldatum')},
+  incl INTEGER,
+  valuta TEXT NOT NULL DEFAULT 'EUR' CHECK (length(valuta) = 3),
+  iban TEXT ${IBAN('iban')},
+  kenmerk TEXT CHECK (kenmerk IS NULL OR length(kenmerk) <= 100),
+  betaalwijze TEXT CHECK (betaalwijze IS NULL OR length(betaalwijze) <= 30),
+  status TEXT CHECK (status IS NULL OR length(status) <= 40),
+  alleen_eigenaar INTEGER NOT NULL DEFAULT 0 ${BOOL('alleen_eigenaar')},
+  aangemaakt_op TEXT NOT NULL,
+  UNIQUE (herkomst, extern_id)
+);
+CREATE INDEX factuur_archief_ent ON factuur_archief (entiteit, factuurdatum);
+CREATE TRIGGER meta_startdatum_ins BEFORE INSERT ON meta WHEN NEW.sleutel = 'startdatum' AND (NEW.waarde IS NULL OR NEW.waarde NOT GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]')
+BEGIN SELECT RAISE(ABORT, 'startdatum: JJJJ-MM-DD'); END;
+CREATE TRIGGER meta_startdatum_upd BEFORE UPDATE ON meta WHEN NEW.sleutel = 'startdatum' AND (NEW.waarde IS NULL OR NEW.waarde NOT GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]')
+BEGIN SELECT RAISE(ABORT, 'startdatum: JJJJ-MM-DD'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
   { versie: 3, naam: 'smalle ingang: fac-gebruiker alleen praktijkmanager (wv856)', sql: M3 },
+  { versie: 4, naam: 'bankhistorie definitief, factuurarchief, startdatum (wv944)', sql: M4 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
-  'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit'];
+  'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 
@@ -957,7 +1004,7 @@ function verzondenGezien(fdb, opId, o) {
 
 // ───────────────────────────── stukken (bestanden) ─────────────────────────────
 
-function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+function sha256(buf) { return crypto.createHash('sha256').update(alsBuffer(buf)).digest('hex'); }
 function stukPad(fdb, sha) {
   if (!SHA_RE.test(String(sha || ''))) throw new DbFout('sha256', 'stuk: sha256 is 64 hex kleine letters');
   return path.join(fdb.stukken, sha.slice(0, 2), sha);
@@ -972,8 +1019,29 @@ function alsBuffer(b) {
 function stukSchrijf(fdb, bytes) {
   const buf = alsBuffer(bytes);
   if (buf.length > MAX_STUK) throw new DbFout('te_groot', 'stuk groter dan 20 MB');
-  const sha = sha256(buf), p = stukPad(fdb, sha), map = path.dirname(p);
-  maakMap(fdb.stukken); maakMap(map);
+  const sha = sha256(buf), p = stukPad(fdb, sha);
+  maakMap(fdb.stukken);
+  return schrijfAtomair(p, sha, buf);
+}
+/*
+ * wv944: het ruwe bankbestand als bron bewaren (David 23-10-2026: "definitief"), ook als er Privé-regels in staan. bankbron/<sha256>
+ * (map 700, bestand 600), atomair, nooit overschreven met andere inhoud. Geen route serveert deze map; offsite gaat hij versleuteld mee
+ * met de nachtelijke podstaat-ronde (bin/podstaat-offsite.sh → vaultcrypt:facturen-bankbron/). → { sha256, bytes, nieuw }
+ */
+function bronPad(fdb, sha) {
+  if (!SHA_RE.test(String(sha || ''))) throw new DbFout('sha256', 'bron: sha256 is 64 hex kleine letters');
+  return path.join(fdb.dir, 'bankbron', sha);
+}
+function bronSchrijf(fdb, bytes) {
+  const buf = alsBuffer(bytes);
+  if (buf.length > MAX_STUK) throw new DbFout('te_groot', 'bankbestand groter dan 20 MB');
+  const sha = sha256(buf), p = bronPad(fdb, sha);
+  return schrijfAtomair(p, sha, buf);
+}
+function bronBestaat(fdb, sha) { try { return fs.statSync(bronPad(fdb, sha)).isFile(); } catch (e) { return false; } }
+function schrijfAtomair(p, sha, buf) {
+  const map = path.dirname(p);
+  maakMap(map);
   try {
     if (sha256(fs.readFileSync(p)) === sha) { fs.chmodSync(p, 0o600); return { sha256: sha, bytes: buf.length, nieuw: false }; }
   } catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -1073,6 +1141,6 @@ module.exports = {
   DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
   terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
-  stukPad, stukSchrijf, stukLees, stukBestaat, sha256,
+  stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,
   backup, herstel, tellingen, health,
 };

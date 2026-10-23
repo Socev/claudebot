@@ -14859,7 +14859,7 @@ function socevSmalOpts(runOpts, chatId) {
 // machinekamer-beurten landen) en kan geen andere les vervangen (vervangt_id schakelde ook grondlessen uit). Machine- of
 // beide-lessen: box-rij in 00_Systeem/Meldingen/machinekamer.md, de machinekamer legt ze vast.
 // DEKT NIET: dezelfde uid (zie MK_SESSIES).
-const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30, 'health-opgaven': 20, 'manager-ronde': 6, 'harvester/kaart': 8 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
+const SMAL_GRENS = { les: 30, 'vault-zoek': 120, 'fin-sql': 300, telegram: 30, bank: 60, 'bandjes/voorstel': 30, 'health-opgaven': 20, 'manager-ronde': 6, 'harvester/kaart': 8, facturen: 60 };   // per uur (harvester/kaart ook 8 per dag, in harvester.js)
 const smalTellers = {};
 const SMAL_CF_ACCOUNT = '23df9b0607bb70f6d7f15a63ec843d6d';
 const SMAL_CF_BASIS = process.env.SMAL_CF_BASIS || 'https://api.cloudflare.com';   // alleen de toets wijst elders heen
@@ -14988,6 +14988,14 @@ async function smalActie(actie, d) {
   if (actie === 'manager-ronde') {
     if (!managers) return { status: 404, j: { ok: false, fout: 'Managers zit niet in deze versie van de pod' } };
     return managers.start(String(d.naam || ''), socevAgentSleutelOk(d.secret) ? 'socev' : 'machinekamer', d.reden, d.vraag_id);
+  }
+  // wv944: Facturen lezen voor Socev (skill facturen-lezen): zoeken, hoe wordt X betaald, is een factuur betaald, controles. Alleen lezen,
+  // alleen op de primaire Olares-kant (facturenOpen geeft anders null → 409). Personeelsregels (salaris, loon) alleen met API_SECRET
+  // (machinekamer), nooit met de Socev-sleutel: het hoofdkanaal leest ook mail van buiten (Fable wv944 #10).
+  if (actie === 'facturen') {
+    if (!facturenRoutes || typeof facturenRoutes.lees !== 'function') return { status: 404, j: { ok: false, fout: 'Facturen zit niet in deze versie van de pod' } };
+    const socev = socevAgentSleutelOk(d.secret);
+    return facturenRoutes.lees(facturenOpen(), d, { wie: socev ? 'socev' : 'machinekamer', personeel: !socev && d.personeel === true });
   }
   return { status: 404, j: { ok: false, fout: 'onbekende smalle route' } };
 }

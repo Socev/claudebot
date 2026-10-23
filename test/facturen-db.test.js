@@ -311,7 +311,7 @@ test('een document is hooguit één factuur (splitsen bestaat niet)', () => {
   const f = basis();
   const t = factuur(f);
   gooit(() => D.voegToe(f, 'factuur', { id: D.nieuwId(), document: t.doc, status: 'te_beoordelen', aangemaakt_op: 'x', bijgewerkt_op: 'x' }), /UNIQUE/);
-  gooit(() => D.voegToe(f, 'factuur', { id: D.nieuwId(), document: t.doc.replace(/.$/, 'f'), status: 'te_beoordelen', aangemaakt_op: 'x', bijgewerkt_op: 'x' }), /FOREIGN KEY/);
+  gooit(() => D.voegToe(f, 'factuur', { id: D.nieuwId(), document: t.doc.replace(/.$/, (c) => (c === 'f' ? 'e' : 'f')), status: 'te_beoordelen', aangemaakt_op: 'x', bijgewerkt_op: 'x' }), /FOREIGN KEY/);
   D.sluit(f);
 });
 

@@ -208,7 +208,7 @@ function leesAbnTab(tekst) {
       eigen_iban_ruw: ibanFromAbnAccount(acct), boekdatum, tegenpartij_iban: v.tegenpartij_iban, tegenpartij_naam: v.tegenpartij_naam,
       bedrag, valuta: (p[1] || '').trim().toUpperCase() || 'EUR', oms_hash: (v.oms || '').slice(0, OMS_HASH) || null, kenmerk: v.kenmerk,
       transactietype: 'ABN:' + (v.ttype === null ? 'None' : v.ttype), is_incasso: v.is_incasso, incassant_id: v.incassant_id,
-      machtiging: v.machtiging, saldo_na: p[4], regel: i + 1,
+      machtiging: v.machtiging, saldo_na: p[4], saldo_begin: p[3], regel: i + 1,
     });
   });
   return uit;
@@ -239,6 +239,50 @@ function leesAbnMt940(tekst) {
   return uit;
 }
 
+// ───────────────────────────── saldocontrole (wv944) ─────────────────────────────
+
+/*
+ * Saldocontrole per rekening over de regels van één bestand (entry_ref verandert er niet door). ABN-TAB: per regel begin + bedrag = eind,
+ * en de keten tussen opeenvolgende regels; ING-CSV met "Saldo na mutatie": de keten; ING zonder die kolom: niet te controleren; MT940:
+ * de parser weigert al een afschrift dat niet sluit. De keten is richtingloos (oudste of nieuwste eerst): de richting met de minste breuken
+ * telt, zonder aanname over gelijke datums (Fable wv944 #9). Een breuk weigert het bestand niet (losse perioden kunnen overlappen of gaten
+ * hebben), maar staat in de uitkomst. → { [iban]: { gecontroleerd, sluit, breuken, regels, begin_centen?, eind_centen? } }
+ */
+function saldoControle(rijen, formaat) {
+  const per = new Map();
+  for (const r of rijen) { const k = ibanNorm(r.eigen_iban_ruw); if (!per.has(k)) per.set(k, []); per.get(k).push(r); }
+  const c = (x) => { const v = normBedrag(x); return v === null ? null : centenVan(v); };
+  const uit = {};
+  for (const [iban, lijst] of per) {
+    const n = lijst.length;
+    if (formaat === 'abn_mt940') { uit[iban] = { gecontroleerd: true, sluit: true, breuken: 0, regels: n, per_afschrift: true }; continue; }
+    if (formaat === 'abn_tab') {
+      const b = lijst.map((r) => c(r.saldo_begin)), e = lijst.map((r) => c(r.saldo_na)), m = lijst.map((r) => centenVan(r.bedrag));
+      if (b.some((x) => x === null) || e.some((x) => x === null)) { uit[iban] = { gecontroleerd: false, sluit: null, breuken: null, regels: n, reden: 'saldo ontbreekt' }; continue; }
+      let regel = 0;
+      for (let i = 0; i < n; i++) if (b[i] + m[i] !== e[i]) regel++;
+      let vooruit = 0, achteruit = 0;
+      for (let i = 0; i + 1 < n; i++) { if (e[i] !== b[i + 1]) vooruit++; if (b[i] !== e[i + 1]) achteruit++; }
+      const v = vooruit <= achteruit;
+      const breuken = regel + Math.min(vooruit, achteruit);
+      uit[iban] = { gecontroleerd: true, sluit: breuken === 0, breuken, regels: n, begin_centen: v ? b[0] : b[n - 1], eind_centen: v ? e[n - 1] : e[0] };
+      continue;
+    }
+    // ING-CSV
+    const s = lijst.map((r) => (r.saldo_na === '' || r.saldo_na == null ? null : c(r.saldo_na))), m = lijst.map((r) => centenVan(r.bedrag));
+    if (s.every((x) => x === null)) { uit[iban] = { gecontroleerd: false, sluit: null, breuken: null, regels: n, reden: 'geen kolom Saldo na mutatie' }; continue; }
+    if (s.some((x) => x === null)) { uit[iban] = { gecontroleerd: false, sluit: null, breuken: null, regels: n, reden: 'saldo ontbreekt op een regel' }; continue; }
+    let oud = 0, nieuw = 0;   // oud = oudste eerst, nieuw = nieuwste eerst (de gewone ING-export)
+    for (let i = 0; i + 1 < n; i++) { if (s[i] + m[i + 1] !== s[i + 1]) oud++; if (s[i] - m[i] !== s[i + 1]) nieuw++; }
+    const o = oud < nieuw;
+    const breuken = Math.min(oud, nieuw);
+    uit[iban] = { gecontroleerd: true, sluit: breuken === 0, breuken, regels: n,
+      begin_centen: o ? s[0] - m[0] : s[n - 1] - m[n - 1], eind_centen: o ? s[n - 1] : s[0] };
+  }
+  return uit;
+}
+function refBasis(ref) { return String(ref || '').replace(/-\d+$/, ''); }
+
 // ───────────────────────────── bestand → genormaliseerde transacties ─────────────────────────────
 
 // Ruwe parserrij → normalisatie uit het contract. omschrijving pas NA de hash ingekort tot 200.
@@ -249,6 +293,7 @@ function normaliseer(r, formaat, rekening) {
     tegenpartij_iban: r.tegenpartij_iban, tegenpartij_naam: r.tegenpartij_naam, bedrag: r.bedrag, bedrag_centen: centenVan(r.bedrag),
     valuta: r.valuta, omschrijving: oms, kenmerk: r.kenmerk, transactietype: r.transactietype === null ? null : r.transactietype.slice(0, TYPE_OPSLAG),
     is_incasso: !!r.is_incasso, incassant_id: r.incassant_id || null, machtiging: r.machtiging || null, entry_ref: r.entry_ref, formaat,
+    ref_basis: refBasis(r.entry_ref),
   };
 }
 
@@ -295,7 +340,12 @@ function leesBestand(invoer, opties) {
     transacties.push(normaliseer(r, formaat, rk));
     per[iban] = (per[iban] || 0) + 1;
   }
-  return { ok: true, formaat, transacties, prive_weggegooid: prive, per_rekening: per };
+  // wv944: saldocontrole en periode alleen over de zakelijke rekeningen (Privé laat geen spoor na, ook geen saldo of datum)
+  const zakelijk = rijen.filter((r) => controleVan(rekeningen.get(ibanNorm(r.eigen_iban_ruw))) === 1);
+  const saldo = saldoControle(zakelijk, formaat);
+  const datums = transacties.map((t) => t.boekdatum).sort();
+  const periode = datums.length ? { van: datums[0], tot: datums[datums.length - 1] } : null;
+  return { ok: true, formaat, transacties, prive_weggegooid: prive, per_rekening: per, saldo, periode };
 }
 
 // Bankluis-bron (F2 leest transacties.sqlite read-only): één post naar dezelfde normalisatie. Alleen status 'booked' en niet vervangen;
@@ -956,7 +1006,7 @@ function bankcontrole(inv) {
 module.exports = {
   BankWeigering, FORMATEN, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
   // parsers
-  pyStr, mkRef, kenEntryRefsToe, normBedrag, herkenFormaat, csvRijen, leesIng, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
+  pyStr, mkRef, kenEntryRefsToe, refBasis, saldoControle, normBedrag, herkenFormaat, csvRijen, leesIng, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
   // controle
   uitzonderingVoor, uitzonderingPast, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
   // signalen

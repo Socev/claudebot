@@ -24,6 +24,7 @@
 const fs = require('fs');
 const K = require('./facturen-kern.js');
 const B = require('./facturen-bank.js');
+const V = require('./facturen-validatie.js');
 const D = require('./facturen-db.js');
 
 const ID_RE = /^[0-9a-f]{16}$/;
@@ -38,9 +39,9 @@ const STAPPEN = { beoordelen: ['te_beoordelen'], wachtrij: ['in_wachtrij', 'word
   dubbel: ['dubbel'], mislukt: ['verzending_mislukt'], verstuurd: ['concept_klaar', 'verstuurd'] };
 // Alle routes (de toets controleert ze tegen APP_ROUTE_RE van server.js en de doorgeef-Function: [a-z0-9/-]{1,64}).
 const ROUTES = {
-  GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'kandidaten/<id>', 'betalen', 'bank', 'uploads', 'leveranciers', 'instellingen'],
+  GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'kandidaten/<id>', 'betalen', 'bank', 'uploads', 'leveranciers', 'instellingen', 'validatie'],
   POST: ['bevestig', 'terugdraaien', 'nagebeld', 'geen-factuur', 'toch-factuur', 'wijzig', 'ingevoerd', 'ingevoerd-ongedaan', 'opnieuw',
-    'terug-naar-beoordelen', 'signaal', 'voorstel', 'koppel', 'upload', 'leverancier', 'bankluis',
+    'terug-naar-beoordelen', 'signaal', 'voorstel', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (nooit vanaf een vaste plek) én die hier een verse vingerafdruk vragen.
@@ -344,7 +345,8 @@ function bank(fdb, r, nu) {
       facturen: (json(v.facturen, []) || []).map((id) => fq.get(id, ...fp)).filter(Boolean).map((f) => factuurKort(f)) }));
   // balk per week (laatste 8 weken, afschrijvingen): bij een factuur / bekende uitzondering / te bekijken
   const [tf, tp] = eigenaarFilter(r, 't');
-  const van = K.plusDagen(vandaag, -56);
+  const start = startdatumVan(fdb), van56 = K.plusDagen(vandaag, -56);
+  const van = start && start > van56 ? start : van56;   // wv944: historie telt niet als 'te bekijken' (Fable #5)
   const weken = {};
   for (const t of fdb.db.prepare('SELECT t.id, t.boekdatum, t.categorie, (SELECT count(*) FROM koppeling k WHERE k.transactie = t.id) AS k FROM bank_transactie t ' +
     'WHERE t.verwijderd_op IS NULL AND t.bedrag_centen < 0 AND t.boekdatum >= ? AND ' + tf).all(van, ...tp)) {
@@ -801,7 +803,12 @@ function bankcontroleToepassen(fdb, nu) {
     tel.betaald_gezien += fdb.db.prepare('UPDATE factuur SET betaalspoor = ?, betaald_gezien_op = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND betaalspoor = ?')
       .run(b.naar, tx ? tx.boekdatum : vandaag, wanneer, b.factuur, b.van).changes;
   }
-  for (const s of uit.signalen) tel.signalen += signaalInvoegen(fdb, s, wanneer);
+  // wv944: geen signaal over historie. Een signaal mét bankregels die allemaal vóór de startdatum liggen valt weg (archief, wel doorzoekbaar);
+  // signalen zonder bankregels (factuursignalen) blijven altijd (Fable wv944 #1). Zonder startdatum: ongewijzigd.
+  const start = startdatumVan(fdb);
+  const historie = (s) => !!start && Array.isArray(s.transacties) && s.transacties.length > 0 &&
+    s.transacties.every((id) => { const t = txMap.get(id); return !!t && t.boekdatum < start; });
+  for (const s of uit.signalen) { if (historie(s)) { tel.historie_stil = (tel.historie_stil || 0) + 1; continue; } tel.signalen += signaalInvoegen(fdb, s, wanneer); }
   for (const h of uit.heropenen) tel.heropend += fdb.db.prepare("UPDATE signaal SET status = 'open', sluimer_tot = NULL WHERE sleutel = ? AND status = 'afgehandeld'").run(h.sleutel).changes;
   return tel;
 }
@@ -826,33 +833,283 @@ function transactieInvoegen(fdb, t) {
 /*
  * Bankbestand: herkennen en lezen (facturen-bank.js), Privé-regels weg zonder opslag, onbekende rekening of verkeerd formaat → het hele
  * bestand geweigerd (422, niets opgeslagen). Hetzelfde bestand nog eens (sha256) of dezelfde regels in een ander bestand (entry_ref uniek)
- * stapelen niets. Het ruwe bestand wordt nooit bewaard (er kan Privé in staan); alleen de zakelijke regels. Daarna de bankcontrole.
+ * stapelen niets. Daarna de bankcontrole.
+ *
+ * wv944 (David 23-10-2026: bankexports "definitief" erin, voor validatie). Sinds deze stap:
+ * - het ruwe bestand wordt bewaard als bron (bankbron/, alleen na een geslaagde lezing; ook bij een herhaalde upload), nooit via een route;
+ * - een regel vóór meta.startdatum is archief: alleen-eigenaar, geen signaal (bankcontroleToepassen), wel doorzoekbaar en in de validatie;
+ * - personeelsregels (facturen-validatie.js isPersoneel, en alles naar een IBAN die ooit zo'n regel ontving) zijn alleen-eigenaar;
+ * - een regel die er al is (FV2-archief, eerdere upload) krijgt alleen lege velden aangevuld (incassant, machtiging), nooit overschreven;
+ * - saldocontrole en periode per bestand in bank_bestand; modus 'historisch' (machinekamer, tools/facturen-historie.js) eist een startdatum;
+ * - droogloop tegen dubbel inlezen (Fable wv944 #2/#3): regels vóór de start die "mogelijk al binnen" zijn onder een andere entry_ref
+ *   (zelfde rekening, dag, bedrag, tegenpartij) en entry_ref-bases met een ander aantal -n dan in de database. Boven de drempel geweigerd
+ *   (409) tot de machinekamer het nagerekend heeft (opties.forceer). Na de start doet het signaal mogelijk_dubbel_geupload dat werk al.
+ * opties: { modus: 'upload'|'historisch', herkomst, forceer, droog }.
  */
-function verwerkBankbestand(fdb, r, bytes, naam, nu) {
+function startdatumVan(fdb) { const v = D.metaLees(fdb, 'startdatum'); return v && K.isIsoDatum(v) ? v : null; }
+function personeelSet(fdb, extra) {
+  const set = V.personeelIbans(fdb.db.prepare("SELECT tegenpartij_iban, transactietype, omschrijving, tegenpartij_naam FROM bank_transactie WHERE categorie = 'loon' OR alleen_eigenaar = 1").all());
+  for (const i of V.personeelIbans(extra || [])) set.add(i);
+  return set;
+}
+function isPersoneelRegel(t, set) { return V.isPersoneel(t) || (!!t.tegenpartij_iban && set.has(K.ibanNorm(t.tegenpartij_iban))); }
+// Alle regels naar of van een geleerde personeels-IBAN alleen-eigenaar (nooit terug, trigger transactie_eigenaar_blijft).
+function personeelBijwerken(fdb) {
+  const set = personeelSet(fdb);
+  let n = 0;
+  const upd = fdb.db.prepare('UPDATE bank_transactie SET alleen_eigenaar = 1 WHERE alleen_eigenaar = 0 AND tegenpartij_iban = ?');
+  for (const i of set) n += upd.run(i).changes;
+  // woordregels die nog niet alleen-eigenaar waren (bv. categorie loon uit de bankcontrole)
+  for (const t of fdb.db.prepare("SELECT id, transactietype, omschrijving, tegenpartij_naam FROM bank_transactie WHERE alleen_eigenaar = 0").all())
+    if (V.isPersoneel(t)) n += fdb.db.prepare('UPDATE bank_transactie SET alleen_eigenaar = 1 WHERE id = ?').run(t.id).changes;
+  return n;
+}
+const DUBBEL_DREMPEL = (n) => Math.max(2, Math.ceil(n * 0.02));
+function historieCheck(fdb, transacties, start) {
+  const bestaat = fdb.db.prepare('SELECT 1 FROM bank_transactie WHERE entry_ref = ?');
+  const perBasis = new Map();
+  let al = 0;
+  const nieuw = [];
+  for (const t of transacties) {
+    perBasis.set(t.ref_basis, (perBasis.get(t.ref_basis) || 0) + 1);
+    if (bestaat.get(t.entry_ref)) al++; else nieuw.push(t);
+  }
+  const telBasis = fdb.db.prepare("SELECT count(*) AS n FROM bank_transactie WHERE entry_ref = ? OR entry_ref GLOB ?");
+  let suffix = 0;
+  for (const [b, n] of perBasis) { const d = Number(telBasis.get(b, b + '-*').n); if (d > 0 && d !== n) suffix++; }
+  const zelfde = fdb.db.prepare('SELECT entry_ref, tegenpartij_iban, tegenpartij_naam FROM bank_transactie WHERE eigen_iban = ? AND boekdatum = ? AND bedrag_centen = ? AND verwijderd_op IS NULL');
+  const tp = (x) => K.ibanNorm(x.tegenpartij_iban) || K.normNaam(x.tegenpartij_naam);
+  let dubbel = 0;
+  for (const t of nieuw) {
+    if (start && t.boekdatum >= start) continue;   // na de start: het signaal mogelijk_dubbel_geupload
+    if (zelfde.all(t.eigen_iban, t.boekdatum, t.bedrag_centen).some((x) => x.entry_ref !== t.entry_ref && tp(x) === tp(t))) dubbel++;
+  }
+  return { regels: transacties.length, al_bekend: al, nieuw: nieuw.length, mogelijk_dubbel: dubbel, suffix_verschil: suffix,
+    drempel: DUBBEL_DREMPEL(nieuw.length), boven_drempel: dubbel > DUBBEL_DREMPEL(nieuw.length) };
+}
+function bankVan(formaat) { return formaat === 'ing_csv' ? 'ING' : 'ABN'; }
+function saldoKort(saldo) {
+  const uit = {};
+  for (const [iban, x] of Object.entries(saldo || {})) uit[eind4(iban)] = x;
+  return uit;
+}
+function verwerkBankbestand(fdb, r, bytes, naam, nu, opties) {
+  opties = opties || {};
+  const modus = opties.modus === 'historisch' ? 'historisch' : 'upload';
+  const start = startdatumVan(fdb);
+  if (modus === 'historisch' && !start) weiger(409, 'zet eerst de startdatum van Facturen (historie zonder startdatum zou duizenden signalen geven)');
+  if (modus === 'historisch') eisEigenaar(r);
   const sha = D.sha256(bytes);
+  const rekeningen = fdb.db.prepare('SELECT id, iban, entiteit, bank_formaat, controle, alleen_eigenaar FROM rekening').all();
+  const lees = B.leesBankbestand(new Uint8Array(bytes), { rekeningen });
+  if (!lees.ok) weiger(422, lees.uitleg, { code: lees.fout });
+  if (!isEig(r) && lees.transacties.some((t) => t.alleen_eigenaar || !magEntiteit(r, t.entiteit))) weiger(403, 'dit bestand bevat een rekening die alleen de eigenaar mag inlezen');
+  // het ruwe bestand als bron (idempotent; ook als het bestand al bekend is: dan ontbrak de bron misschien nog)
+  const bron = opties.droog ? null : D.bronSchrijf(fdb, Buffer.from(bytes));
   return D.transactie(fdb, function () {
-    if (fdb.db.prepare('SELECT 1 FROM bank_bestand WHERE sha256 = ?').get(sha)) return { soort: 'bank', al_bekend: true, nieuw: 0 };
-    const rekeningen = fdb.db.prepare('SELECT id, iban, entiteit, bank_formaat, controle, alleen_eigenaar FROM rekening').all();
-    const lees = B.leesBankbestand(new Uint8Array(bytes), { rekeningen });
-    if (!lees.ok) weiger(422, lees.uitleg, { code: lees.fout });
-    if (!isEig(r) && lees.transacties.some((t) => t.alleen_eigenaar || !magEntiteit(r, t.entiteit))) weiger(403, 'dit bestand bevat een rekening die alleen de eigenaar mag inlezen');
+    const bekend = fdb.db.prepare('SELECT id FROM bank_bestand WHERE sha256 = ?').get(sha);
+    if (bekend) {
+      if (bron) fdb.db.prepare('UPDATE bank_bestand SET bron_bewaard = 1 WHERE id = ? AND bron_bewaard = 0').run(bekend.id);
+      return { soort: 'bank', al_bekend: true, nieuw: 0, bestand: bekend.id };
+    }
+    const check = historieCheck(fdb, lees.transacties, start);
+    const kort_ = { soort: 'bank', formaat: lees.formaat, modus, periode: lees.periode, saldo: saldoKort(lees.saldo), check,
+      rekeningen: Object.entries(lees.per_rekening).map(([iban, n]) => ({ rekening: eind4(iban), aantal: n })), prive_weggegooid: lees.prive_weggegooid };
+    if (opties.droog) return Object.assign({ droog: true }, kort_);
+    if (check.boven_drempel && !opties.forceer) {
+      weiger(409, 'dit bestand lijkt voor een deel al binnen te zijn onder een andere sleutel (' + check.mogelijk_dubbel + ' regels); de machinekamer rekent het na',
+        { code: 'mogelijk_dubbel', check });
+    }
     const wanneer = nuIso(nu), bid = D.nieuwId();
     const perId = new Map(rekeningen.map((k) => [K.ibanNorm(k.iban), k]));
     D.voegToe(fdb, 'bank_bestand', { id: bid, sha256: sha, formaat: lees.formaat, naam: kort(naam, 255), aantal: lees.transacties.length, prive_weggegooid: lees.prive_weggegooid,
-      per_rekening: lees.per_rekening, geupload_door: r.wie, geupload_op: wanneer });
-    let nieuw = 0;
+      per_rekening: lees.per_rekening, geupload_door: r.wie, geupload_op: wanneer, modus, bank: bankVan(lees.formaat),
+      periode_van: lees.periode ? lees.periode.van : null, periode_tot: lees.periode ? lees.periode.tot : null, saldo: lees.saldo || null,
+      bron_bewaard: bron ? 1 : 0, herkomst: kort(opties.herkomst || (modus === 'historisch' ? 'machinekamer' : 'app-upload'), 300) });
+    const pset = personeelSet(fdb, lees.transacties);
+    const aanvul = fdb.db.prepare('UPDATE bank_transactie SET incassant_id = coalesce(incassant_id, ?), machtiging = coalesce(machtiging, ?) WHERE entry_ref = ? AND (incassant_id IS NULL OR machtiging IS NULL)');
+    let nieuw = 0, aangevuld = 0, archief = 0, personeel = 0;
     for (const t of lees.transacties) {
       const k = perId.get(t.eigen_iban);
-      nieuw += transactieInvoegen(fdb, Object.assign({}, t, { id: D.nieuwId(), bestand: bid, rekening: k.id, bankluis_sleutel: null, bestand_op: wanneer, aangemaakt_op: wanneer }));
+      const hist = !!start && t.boekdatum < start, pers = isPersoneelRegel(t, pset);
+      const rij = Object.assign({}, t, { id: D.nieuwId(), bestand: bid, rekening: k.id, bankluis_sleutel: null, bestand_op: wanneer, aangemaakt_op: wanneer,
+        alleen_eigenaar: !!(t.alleen_eigenaar || hist || pers) });
+      const n = transactieInvoegen(fdb, rij);
+      nieuw += n;
+      if (n) { if (hist) archief++; if (pers) personeel++; }
+      else if (t.incassant_id || t.machtiging) aangevuld += aanvul.run(t.incassant_id || null, t.machtiging || null, t.entry_ref).changes;
     }
     for (const iban of Object.keys(lees.per_rekening)) fdb.db.prepare('UPDATE rekening SET laatste_invoer_op = ? WHERE iban = ?').run(wanneer, iban);
+    personeel += personeelBijwerken(fdb);
     const controle = bankcontroleToepassen(fdb, nu);
-    D.audit(fdb, { wie: r.wie, wat: 'bankbestand_upload', object_soort: 'bank_bestand', object_id: bid,
-      na: { formaat: lees.formaat, aantal: lees.transacties.length, nieuw, prive_weggegooid: lees.prive_weggegooid }, wanneer });
-    return { soort: 'bank', formaat: lees.formaat, bestand: bid, aantal: lees.transacties.length, nieuw, al_bekend_regels: lees.transacties.length - nieuw,
-      prive_weggegooid: lees.prive_weggegooid, rekeningen: Object.entries(lees.per_rekening).map(([iban, n]) => ({ rekening: eind4(iban), aantal: n })), controle };
+    D.audit(fdb, { wie: r.wie, wat: modus === 'historisch' ? 'bankbestand_historisch' : 'bankbestand_upload', object_soort: 'bank_bestand', object_id: bid,
+      na: { formaat: lees.formaat, aantal: lees.transacties.length, nieuw, archief, aangevuld, prive_weggegooid: lees.prive_weggegooid,
+        mogelijk_dubbel: check.mogelijk_dubbel, suffix_verschil: check.suffix_verschil, geforceerd: !!(check.boven_drempel && opties.forceer) }, wanneer });
+    return Object.assign(kort_, { bestand: bid, aantal: lees.transacties.length, nieuw, al_bekend_regels: lees.transacties.length - nieuw, aangevuld, archief,
+      personeel, bron_bewaard: !!bron, controle });
   });
 }
+
+/*
+ * FV2-archief (wv944): de zakelijke bankregels en facturen uit Supabase facturen.* (FV2, juli–augustus 2026, bankregels vanaf januari 2025)
+ * als archief in Facturen. Eén bank_bestand per entiteit (modus archief_fv2, sha256 over de canonieke regels, formaat van de rekening,
+ * bestand_op = het FV2-moment, zodat bij "Is hetzelfde" een latere upload weggaat en de archiefrij blijft; Fable #11). entry_ref van FV2
+ * blijft (zelfde algoritme als de parsers). Alles alleen-eigenaar en vóór de startdatum: geen signalen. Privé en de POT (bankluis) nooit.
+ * inv = { entiteit, regels: [{ entry_ref, boekdatum, bedrag (euro), tegenpartij_iban, tegenpartij_naam, omschrijving, betalingskenmerk,
+ * transactietype, is_incasso }], facturen: [{ extern_id, leverancier_naam, factuurnummer, factuurdatum, vervaldatum, bedrag_incl (euro), valuta,
+ * iban_begunstigde, betalingskenmerk, betaalwijze, status }], herkomst, bestand_op }
+ */
+function archiefInvoeren(fdb, r, inv, nu) {
+  eisEigenaar(r);
+  const start = startdatumVan(fdb);
+  if (!start) weiger(409, 'zet eerst de startdatum van Facturen');
+  const ent = String(inv && inv.entiteit || '');
+  if (!ent || ent === 'prive') weiger(400, 'archief alleen voor zakelijke entiteiten');
+  if (!fdb.db.prepare('SELECT 1 FROM entiteit WHERE sleutel = ?').get(ent)) weiger(400, 'onbekende entiteit');
+  // bankregels alleen voor een rekening met bankexport; de POT (bankluis) krijgt alleen zijn facturen (de bankluis is daar de bron)
+  const metRegels = (inv.regels || []).length > 0;
+  const rk = fdb.db.prepare("SELECT * FROM rekening WHERE entiteit = ? AND controle = 1 AND bank_formaat <> 'bankluis'").all(ent);
+  if (metRegels && rk.length !== 1) weiger(400, 'archiefregels alleen voor een entiteit met precies één rekening met bankexport (niet de bankkoppeling)');
+  const k = rk[0] || null, wanneer = nuIso(nu);
+  const ct = (e) => { const v = Number(e); if (!Number.isFinite(v)) return null; const c = Math.round(v * 100); return Object.is(c, -0) ? 0 : c; };
+  const regels = (inv.regels || []).map((x) => ({
+    entry_ref: String(x.entry_ref || ''), boekdatum: String(x.boekdatum || '').slice(0, 10), bedrag_centen: ct(x.bedrag),
+    tegenpartij_iban: K.ibanNorm(x.tegenpartij_iban) || null, tegenpartij_naam: kort(x.tegenpartij_naam, 200) || null, omschrijving: kort(x.omschrijving, 200) || null,
+    kenmerk: kort(x.betalingskenmerk, 200) || null, transactietype: kort(x.transactietype, 60) || null, is_incasso: !!x.is_incasso,
+  })).filter((x) => /^[0-9a-f]{20}(-\d+)?$/.test(x.entry_ref) && K.isIsoDatum(x.boekdatum) && x.bedrag_centen !== null)
+    .sort((a, b) => (a.entry_ref < b.entry_ref ? -1 : 1));
+  const weg = (inv.regels || []).length - regels.length;
+  const facturen = (inv.facturen || []).filter((f) => f && f.extern_id);
+  const sha = D.sha256(Buffer.from(JSON.stringify({ entiteit: ent, regels, facturen: facturen.map((f) => f.extern_id).sort() })));
+  return D.transactie(fdb, function () {
+    if (metRegels && fdb.db.prepare('SELECT 1 FROM bank_bestand WHERE sha256 = ?').get(sha)) return { entiteit: ent, al_bekend: true, nieuw: 0 };
+    let bid = null, nieuw = 0, na_start = 0, check = null;
+    if (metRegels) {
+    const datums = regels.map((x) => x.boekdatum).sort();
+    bid = D.nieuwId();
+    check = historieCheck(fdb, regels.map((x) => Object.assign({ eigen_iban: K.ibanNorm(k.iban), ref_basis: B.refBasis(x.entry_ref) }, x)), start);
+    D.voegToe(fdb, 'bank_bestand', { id: bid, sha256: sha, formaat: k.bank_formaat, naam: kort('FV2-archief ' + ent, 255), aantal: regels.length, prive_weggegooid: 0,
+      per_rekening: { [K.ibanNorm(k.iban)]: regels.length }, geupload_door: r.wie, geupload_op: wanneer, modus: 'archief_fv2', bank: k.bank || bankVan(k.bank_formaat),
+      periode_van: datums[0] || null, periode_tot: datums[datums.length - 1] || null, saldo: null, bron_bewaard: 0,
+      herkomst: kort(inv.herkomst || 'FV2 Supabase facturen.bank_transactions', 300) });
+    const op = inv.bestand_op && /^\d{4}-\d\d-\d\dT/.test(inv.bestand_op) ? inv.bestand_op : wanneer;
+    for (const x of regels) {
+      if (x.boekdatum >= start) na_start++;
+      nieuw += transactieInvoegen(fdb, Object.assign({}, x, { id: D.nieuwId(), bestand: bid, rekening: k.id, entiteit: ent, eigen_iban: K.ibanNorm(k.iban), valuta: 'EUR',
+        incassant_id: null, machtiging: null, formaat: k.bank_formaat, bankluis_sleutel: null, bestand_op: op, alleen_eigenaar: true, aangemaakt_op: wanneer }));
+    }
+    }
+    let fnieuw = 0;
+    const fins = fdb.db.prepare('INSERT INTO factuur_archief (id, herkomst, extern_id, entiteit, leverancier_naam, nummer, factuurdatum, vervaldatum, incl, valuta, iban, kenmerk, betaalwijze, status, alleen_eigenaar, aangemaakt_op) ' +
+      "VALUES (?, 'fv2', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT (herkomst, extern_id) DO NOTHING");
+    for (const f of facturen) {
+      const iban = K.ibanNorm(f.iban_begunstigde);
+      fnieuw += fins.run(D.nieuwId(), kort(f.extern_id, 64), ent, kort(f.leverancier_naam, 200), kort(f.factuurnummer, 100), K.isIsoDatum(f.factuurdatum) ? f.factuurdatum : null,
+        K.isIsoDatum(f.vervaldatum) ? f.vervaldatum : null, ct(f.bedrag_incl), /^[A-Z]{3}$/.test(f.valuta || '') ? f.valuta : 'EUR',
+        iban && /^[A-Z0-9]{15,34}$/.test(iban) ? iban : null, kort(f.betalingskenmerk, 100), kort(f.betaalwijze, 30), kort(f.status, 40), wanneer).changes;
+    }
+    const personeel = personeelBijwerken(fdb);
+    const controle = bankcontroleToepassen(fdb, nu);
+    D.audit(fdb, { wie: r.wie, wat: 'archief_fv2', object_soort: bid ? 'bank_bestand' : 'factuur_archief', object_id: bid || ent, entiteit: ent,
+      na: { regels: regels.length, nieuw, overgeslagen: weg, facturen: fnieuw, na_start, mogelijk_dubbel: check ? check.mogelijk_dubbel : 0 }, wanneer });
+    return { entiteit: ent, bestand: bid, regels: regels.length, nieuw, overgeslagen: weg, na_start, facturen: fnieuw, personeel, check, controle };
+  });
+}
+
+// ───────────────────────────── validatie en zoeken (wv944) ─────────────────────────────
+
+/*
+ * Factuurvalidatie op de bankhistorie (facturen-validatie.js, puur), op aanvraag. Rol en entiteitfilter zoals overal: een praktijkmanager
+ * ziet geen alleen-eigenaar-regels (POT, personeel, historie) en geen archieffacturen. opties.personeel: false laat personeelsregels weg
+ * (de Socev-leesroute zonder API_SECRET; Fable wv944 #10).
+ */
+function validatieInvoer(fdb, r, opties) {
+  opties = opties || {};
+  const [tf, tp] = eigenaarFilter(r, 't');
+  let txs = fdb.db.prepare('SELECT t.id, t.entiteit, t.eigen_iban, t.boekdatum, t.bedrag_centen, t.tegenpartij_naam, t.tegenpartij_iban, t.omschrijving, t.kenmerk, t.transactietype, ' +
+    't.is_incasso, t.incassant_id, t.machtiging, t.categorie, t.alleen_eigenaar, t.bestand, t.formaat FROM bank_transactie t WHERE t.verwijderd_op IS NULL AND ' + tf).all(...tp)
+    .map((t) => Object.assign(t, { is_incasso: t.is_incasso === 1, alleen_eigenaar: t.alleen_eigenaar === 1 }));
+  if (opties.personeel === false) { const set = personeelSet(fdb); txs = txs.filter((t) => t.categorie !== 'loon' && !isPersoneelRegel(t, set)); }
+  const [ff, fp] = factuurFilter(r, 'f');
+  const lev = new Map(fdb.db.prepare('SELECT id, incassant_ids FROM leverancier').all().map((l) => [l.id, json(l.incassant_ids, []) || []]));
+  const kop = new Map();
+  for (const k of fdb.db.prepare('SELECT factuur, transactie FROM koppeling').all()) { if (!kop.has(k.factuur)) kop.set(k.factuur, []); kop.get(k.factuur).push(k.transactie); }
+  const facturen = fdb.db.prepare("SELECT f.id, f.entiteit, f.leverancier, f.leverancier_naam, f.nummer, f.kenmerk, f.incl, f.iban, f.factuurdatum, f.vervaldatum, f.betaalspoor, f.status, f.alleen_eigenaar " +
+    "FROM factuur f WHERE f.entiteit IS NOT NULL AND f.entiteit <> 'prive' AND " + ff).all(...fp)
+    .map((f) => Object.assign(f, { herkomst: 'facturen', incassant_ids: lev.get(f.leverancier) || [], koppelingen: kop.get(f.id) || [] }));
+  const archief = isEig(r) ? fdb.db.prepare('SELECT id, entiteit, leverancier_naam, nummer, kenmerk, incl, iban, factuurdatum, vervaldatum, status, alleen_eigenaar FROM factuur_archief').all()
+    .map((f) => Object.assign(f, { herkomst: 'fv2', incassant_ids: [], koppelingen: [] })) : [];
+  return { txs, facturen: facturen.concat(archief), start: startdatumVan(fdb) };
+}
+function txUit(t) {
+  return { id: t.id, entiteit: t.entiteit, datum: t.boekdatum, bedrag_centen: t.bedrag_centen, naam: t.tegenpartij_naam, iban: t.tegenpartij_iban,
+    omschrijving: t.omschrijving, kenmerk: t.kenmerk, betaalwijze: V.betaalwijzeVan(t), incassant_id: t.incassant_id, alleen_eigenaar: !!t.alleen_eigenaar };
+}
+function profielUit(p) {
+  return Object.assign({}, p, { ibans: p.ibans.slice(0, 5), incassant_ids: p.incassant_ids.slice(0, 5) });
+}
+function validatie(fdb, r, d, nu, opties) {
+  const vandaag = dagAmsterdam(nu);
+  const soort = String(d && d.soort || 'overzicht');
+  const inv = validatieInvoer(fdb, r, opties);
+  const tekst = kort(String(d && d.tekst || '').trim(), 100);
+  const datum = (x) => (x && K.isIsoDatum(String(x)) ? String(x) : null);
+  if (soort === 'zoek') {
+    const z = V.zoek(inv.txs, { tekst, sinds: datum(d.sinds), tot: datum(d.tot), entiteit: d.entiteit ? String(d.entiteit) : null, richting: d.richting, max: d.max });
+    return { soort, tekst, aantal: z.aantal, afgekapt: z.afgekapt, totaal_af_centen: z.totaal_af_centen, totaal_bij_centen: z.totaal_bij_centen, per_jaar: z.per_jaar,
+      regels: z.regels.map(txUit) };
+  }
+  if (soort === 'tegenpartij' || soort === 'hoe') {
+    if (tekst.length < 2) weiger(400, 'zoektekst ontbreekt');
+    const z = V.zoek(inv.txs, { tekst, richting: 'af', max: 500, entiteit: d.entiteit ? String(d.entiteit) : null });
+    const alle = inv.txs.filter((t) => t.bedrag_centen < 0);
+    const sleutels = new Set(z.regels.map(V.tegenpartijSleutel).filter(Boolean));
+    const ps = Array.from(V.profielen(alle.filter((t) => sleutels.has(V.tegenpartijSleutel(t)))).values()).sort((a, b) => b.totaal_centen - a.totaal_centen).slice(0, 10);
+    return { soort: 'tegenpartij', tekst, profielen: ps.map(profielUit) };
+  }
+  if (soort === 'factuur') {
+    const id = String(d && d.id || '');
+    const f = inv.facturen.find((x) => x.id === id);
+    if (!f) weiger(404, 'factuur niet gevonden');
+    const b = V.betalingVan(f, inv.txs, { koppelingen: f.koppelingen });
+    return { soort, factuur: { id: f.id, herkomst: f.herkomst, entiteit: f.entiteit, leverancier: f.leverancier_naam, nummer: f.nummer, incl_centen: f.incl,
+      factuurdatum: f.factuurdatum, vervaldatum: f.vervaldatum }, betaling: Object.assign({}, b, { regels: inv.txs.filter((t) => b.transacties.includes(t.id)).map(txUit) }) };
+  }
+  if (soort !== 'overzicht') weiger(400, 'soort is overzicht, zoek, tegenpartij of factuur');
+  for (const f of inv.facturen) f.betaling = V.betalingVan(f, inv.txs, { koppelingen: f.koppelingen });
+  const dekking = inv.start ? [{ van: inv.start, tot: null }] : [];
+  if (d && d.dekking_fv2 === true) {
+    const fv = inv.facturen.filter((f) => f.herkomst === 'fv2' && f.factuurdatum).map((f) => f.factuurdatum).sort();
+    if (fv.length) dekking.push({ van: fv[0], tot: fv[fv.length - 1] });
+  }
+  const c = V.controles({ vandaag, transacties: inv.txs, facturen: inv.facturen, dekking, venster_dagen: Number(d && d.venster_dagen) > 0 ? Math.min(730, Number(d.venster_dagen)) : 120 });
+  const jaar = K.plusDagen(vandaag, -365);
+  const top = Array.from(V.profielen(inv.txs.filter((t) => t.boekdatum >= jaar)).values()).sort((a, b) => b.totaal_centen - a.totaal_centen).slice(0, 25).map(profielUit);
+  const datums = inv.txs.map((t) => t.boekdatum).sort();
+  const betaald = inv.facturen.filter((f) => f.betaling && f.betaling.betaald).length;
+  return { soort, vandaag, startdatum: inv.start, dekking, bank: { regels: inv.txs.length, van: datums[0] || null, tot: datums[datums.length - 1] || null },
+    facturen: { totaal: inv.facturen.length, betaald_gevonden: betaald, archief: inv.facturen.filter((f) => f.herkomst === 'fv2').length },
+    controles: { incasso_zonder_factuur: c.incasso_zonder_factuur.slice(0, 50), facturen_zonder_betaling: c.facturen_zonder_betaling.slice(0, 100),
+      dubbele_betalingen: c.dubbele_betalingen.slice(0, 50), afwijkend_bedrag: c.afwijkend_bedrag.slice(0, 50), nieuwe_iban: isEig(r) ? c.nieuwe_iban.slice(0, 50) : [] },
+    tellingen: { incasso_zonder_factuur: c.incasso_zonder_factuur.length, facturen_zonder_betaling: c.facturen_zonder_betaling.length,
+      dubbele_betalingen: c.dubbele_betalingen.length, afwijkend_bedrag: c.afwijkend_bedrag.length, nieuwe_iban: isEig(r) ? c.nieuwe_iban.length : 0 },
+    top_tegenpartijen: top };
+}
+// Socev-leesroute (/smal/facturen in server.js): alleen lezen, rol eigenaar met wie 'socev'. personeel alleen als de beller het mag.
+const LEES_OPDRACHTEN = { zoek: 'zoek', hoe: 'tegenpartij', tegenpartij: 'tegenpartij', factuur: 'factuur', controles: 'overzicht', overzicht: 'overzicht' };
+function lees(fdb, d, opties) {
+  opties = opties || {};
+  try {
+    if (!fdb) weiger(409, 'Facturen draait alleen op de primaire kant');
+    const op = LEES_OPDRACHTEN[String(d && d.opdracht || '')];
+    if (!op) weiger(400, 'opdracht is zoek, hoe, factuur of controles');
+    const r = { soort: 'eigenaar', wie: kort(opties.wie || 'socev', 40), entiteiten: null, ingang: 'smal' };
+    const nu = Number.isFinite(opties.nu) ? opties.nu : Date.now();
+    const uit = validatie(fdb, r, Object.assign({}, d, { soort: op, max: Math.min(Number(d && d.max) || 50, 200) }), nu, { personeel: opties.personeel === true });
+    return { status: 200, j: Object.assign({ ok: true, personeel: opties.personeel === true }, uit) };
+  } catch (e) { return alsFout(e, opties.fout); }
+}
+
 function soortVan(bytes, naam) {
   const kop = bytes.subarray(0, 8);
   if (kop.subarray(0, 5).toString('latin1') === '%PDF-') return 'pdf';
@@ -1284,6 +1541,7 @@ function maak(opties) {
         if (rest === 'uploads') return ok(uploads(fdb, r, nu));
         if (rest === 'leveranciers') return ok(leveranciers(fdb, r));
         if (rest === 'instellingen') return ok(instellingen(fdb, r));
+        if (rest === 'validatie') return ok(validatie(fdb, r, { soort: 'overzicht' }, nu));
         weiger(404, 'onbekend');
       }
       if (v.methode !== 'POST') weiger(404, 'onbekend');
@@ -1308,6 +1566,7 @@ function maak(opties) {
         case 'upload': return ok(upload(fdb, r, d, nu, vo), 'upload');
         case 'leverancier': return ok(leverancierRoute(fdb, r, d, nu));
         case 'bankluis': eisEigenaar(r); return ok(bankluisRonde(fdb, { nu, pad: v.bankluisPad }), 'bankluis');
+        case 'validatie': return ok(validatie(fdb, r, d, nu), 'validatie ' + kort(d.soort, 20));
         case 'instellingen/adres': return ok(adres(fdb, r, d, nu, vo), 'adres ' + kort(d.entiteit, 20));
         case 'instellingen/modus': return ok(modus(fdb, r, d, nu, vo), 'modus ' + kort(d.modus, 10));
         case 'instellingen/verzendmoment': return ok(verzendmoment(fdb, r, d, nu));
@@ -1317,7 +1576,7 @@ function maak(opties) {
       weiger(404, 'onbekend');
     } catch (e) { return alsFout(e, opties.fout); }
   }
-  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, ROUTES, BEHEER };
+  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }
 function ok(j, reden) { return { status: 200, j: Object.assign({ ok: true }, j), reden: reden || null }; }
 // Fouten naar een status. Triggers van facturen-db.js geven vaste teksten ("opdracht_prive: …"): die mogen door. Een CHECK of UNIQUE noemt
@@ -1337,4 +1596,4 @@ function alsFout(e, log) {
   return { status: 500, j: { ok: false, fout: 'fout op de pod' }, reden: 'uitzondering' };
 }
 
-module.exports = { maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };
+module.exports = { maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, personeelBijwerken, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };

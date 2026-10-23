@@ -49,6 +49,7 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # pot-afschrift.js + mt940-lezer.js (wv787): App POT-afschriften, door bank-lezer.js geladen bij pot-afschrift (ontbreken ze, dan 503 op /app/pot-afschriften en pot_afschrift.aan=false in /health).
 # facturen-kern.js (wv797): kern van de Facturen-app (puur); nog door niets geladen, F1c/F2 koppelen hem (ontbreekt hij, dan geen Facturen).
 # facturen-bank.js (wv798): bankparsers, matching en signalen van de Facturen-app (puur, laadt facturen-kern.js + mt940-lezer.js); F2 koppelt hem.
+# facturen-validatie.js (wv944): factuurvalidatie op de bankhistorie (puur, laadt facturen-kern.js); facturen.js laadt hem (ontbreekt hij, dan geen Facturen).
 # pot-datahub.js (wv815): POT-posten naar Davids datahub, door server.js geladen in potDatahubRonde na de bank-ronde (ontbreekt hij, dan faalt alleen die stap: box-rij, de ronde loopt door).
 # pot-verzend.js (wv911): nota's uit de POT-app als Gmail-concept, door server.js geladen in potVzTik (ontbreekt hij, dan pot_verzend.module=false in /health en blijven rijen wachten).
 # facturen-db.js (wv824): opslag van de Facturen-app (SQLite /opt/data/facturen, migraties, triggers, stukken, back-up); server.js opent hem alleen
@@ -59,11 +60,12 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # facturen-ingang.js (wv856): smalle ingang /fac/* voor de praktijkmanager (facturen.socev.dev); door server.js geladen, slapend (404) tot de inrichting (ontbreekt hij, dan 404 op /fac).
 #   Met wv856 krijgt de facturendatabase migratie 3: een terugrol naar een release van vóór wv856 opent hem niet meer (schema_nieuwer) — dan ook
 #   /opt/data/facturen/backup/ van vóór de uitrol terugzetten, of vooruit herstellen.
+#   Met wv944 komt migratie 4 (bankhistorie, factuurarchief, startdatum): idem voor een terugrol naar een release van vóór wv944.
 # secondbrain.js (wv832): App Second Brain, routes /app/secondbrain* (ontbreekt hij, dan 404 en secondbrain.aan=false in /health).
 # gezondheid-app.js (wv937): App Gezondheid, routes GET /app/gezondheid(/genoom) (ontbreekt hij, dan 404 en gezondheid.aan=false in /health).
 # ideeen.js (wv761): App Ideeën van buitenaf (Ideeënbeurs), door server.js geladen (ontbreekt hij, dan 404 op /app/ideeen* en ideeen.aan=false in /health).
 # ideeen-filter.js (wv861): de vaste toets van de Ideeënbeurs, door ideeen.js geladen (ontbreekt hij, dan geen catalogus, geen Deel en geen plaatsen: ideeen.catalogus=false).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js secondbrain.js ideeen.js ideeen-filter.js managers.js ringkaart.js gezondheid-app.js"
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js secondbrain.js ideeen.js ideeen-filter.js managers.js ringkaart.js gezondheid-app.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

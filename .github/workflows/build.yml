@@ -94,7 +94,7 @@ jobs:
       # (facturen-kern.js, mt940-lezer.js). Een signaal geeft hooguit een tekst om te kopiëren: niets betaalt of mailt.
       - name: facturen-kern.js en facturen-bank.js moeten puur blijven
         run: |
-          for f in facturen-kern.js facturen-bank.js; do
+          for f in facturen-kern.js facturen-bank.js facturen-validatie.js; do
             C=$(grep -vE '^\s*(\*|//)' "$f")
             if echo "$C" | grep -nE "require\([\`'\"](node:)?(fs(/promises)?|os|http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.|import\("; then
               echo "::error::$f laadt een bestand-, netwerk- of procesmodule; de kern moet puur blijven"; exit 1
@@ -108,7 +108,11 @@ jobs:
           if grep -vE '^\s*(\*|//)' facturen-bank.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|\./mt940-lezer\.js|\./facturen-kern\.js)'\)$"; then
             echo "::error::facturen-bank.js laadt een module buiten crypto, mt940-lezer.js en facturen-kern.js"; exit 1
           fi
-          echo "facturen-kern.js en facturen-bank.js: puur."
+          # facturen-validatie.js (wv944): factuurvalidatie op de bankhistorie; laadt alleen de kern
+          if grep -vE '^\s*(\*|//)' facturen-validatie.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('\./facturen-kern\.js'\)$"; then
+            echo "::error::facturen-validatie.js laadt een module buiten facturen-kern.js"; exit 1
+          fi
+          echo "facturen-kern.js, facturen-bank.js en facturen-validatie.js: puur."
 
       # pot-datahub.js (wv815): POT-posten naar Davids datahub. Puur: geen bestand-, netwerk- of procesmodule, geen fetch en geen klok
       # (vandaag komt van server.js); alleen crypto en mt940-lezer.js. Schrijven in D1 doet server.js, altijd met parameters.
@@ -162,7 +166,7 @@ jobs:
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\("; then
             echo "::error::facturen.js laadt een netwerk- of procesmodule; de routes moeten lokaal blijven"; exit 1
           fi
-          if grep -vE '^\s*(\*|//)' facturen.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js|\./facturen-db\.js)'\)$"; then
+          if grep -vE '^\s*(\*|//)' facturen.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js|\./facturen-db\.js|\./facturen-validatie\.js)'\)$"; then
             echo "::error::facturen.js laadt een module buiten fs, node:sqlite en de Facturen-buren"; exit 1
           fi
           echo "facturen.js: alleen lokaal."
@@ -235,6 +239,7 @@ jobs:
           bash test/facturen-bank.sh   # wv798: bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
           bash test/facturen-db.sh   # wv824: opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
           bash test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
+          bash test/facturen-validatie.sh   # wv944: bankhistorie (startdatum, droogloop, bron, personeel, FV2-archief) en validatie (profielen, betaling, controles, zoeken)
           command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils)   # de koerier roept /usr/bin/pdftotext echt aan
           bash test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads
           bash test/facturen-ingang.sh   # wv856: smalle ingang /fac — poortgeheim, servicetoken- en gebruikers-JWT, nooit eigenaar, praktijkmanager-scope, uploads, audit
