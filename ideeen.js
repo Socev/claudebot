@@ -30,7 +30,7 @@ const BUS_PAD = '01_Ontwikkeling/Ideeënbus David - vibecoden.md';
 const GENRE = 'uit de Ideeënbeurs';
 const ONS = ['socev', 'david', 'pod', 'n8n'];
 const HERKOMST = { albert: 'Albert van der Veer', appie: 'Appie (assistent van Albert van der Veer)' };
-const GRENS = { draden: 60, reactie: 800, titel: 70, wat: 300, waarom: 160, parallel: 6, cache_ms: 20000, catalogus_bytes: 300000, bundel_max: 25, toets: 2000 };
+const GRENS = { draden: 60, reactie: 800, titel: 70, wat: 300, waarom: 160, parallel: 6, cache_ms: 20000, catalogus_bytes: 300000, bundel_max: 25, toets: 2000, forum_lijst: 200 };
 const CATALOGUS = '01_Ontwikkeling/Ideeënbeurs - catalogus.md';
 const BEVESTIGING_PLAATSEN = 'knop-ja-vers-kaart';   // server.js appKnopBevestiging: Ja op een Voor jou-kaart, verse vingerafdruk, niet van een vaste plek
 let Filter = null;
@@ -341,9 +341,11 @@ function maak(deps) {
     const uit = [];
     open.forEach(function (id) {
       const k = (c.kaarten || []).find(function (x) { return x.id === id; });
-      const d = k && r.j.draden.find(function (x) { return String(x.forum).toLowerCase() === FORUM && x.titel === k.titel && ONS.indexOf(String(x.gemaakt_door || '').toLowerCase()) >= 0; });
+      // natoets Fable: vergelijken op de platte titel (het forum maakt hem vlak); "niet gevonden" telt alleen als de lijst volledig is
+      const d = k && r.j.draden.find(function (x) { return String(x.forum).toLowerCase() === FORUM && plat(x.titel, 200) === plat(k.titel, 200) && ONS.indexOf(String(x.gemaakt_door || '').toLowerCase()) >= 0; });
       if (d) { journaalSchrijf({ soort: 'gedeeld', id: id, draad: d.id, hash: k.hash, bundel: j[id].bezig.bundel, nagekeken: true }); uit.push({ id: id, draad: d.id }); }
-      else { journaalSchrijf({ soort: 'plaats-fout', id: id, reden: 'niet op het forum gevonden (nagekeken)', bundel: j[id].bezig.bundel }); uit.push({ id: id, draad: null }); }
+      else if (k && r.j.draden.length < GRENS.forum_lijst) { journaalSchrijf({ soort: 'plaats-fout', id: id, reden: 'niet op het forum gevonden (nagekeken)', bundel: j[id].bezig.bundel }); uit.push({ id: id, draad: null }); }
+      else uit.push({ id: id, draad: null, onzeker: k ? 'forumlijst mogelijk afgekapt; kijk zelf op het forum' : 'kaart niet meer in de catalogus' });
     });
     cache.op = 0;
     return { ok: true, nagekeken: uit.length, uit: uit };

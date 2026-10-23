@@ -75,6 +75,7 @@ toets('Fable #1: bezitsvormen (Davids, Cynthia\'s, Cynthia’s) = naam', hd('Dav
 toets('Fable #2: zachte afbreking / nulbreedte / breedtevariant: naam én "onzichtbaar teken"', hd('Da\u00ADvid Sch\u00ADaap belde', 'naam') && hd('Da\u00ADvid Sch\u00ADaap belde', 'onzichtbaar teken') && hd('Da\u200Bvid kwam', 'naam') && hd('Ｄavid kwam', 'naam'));
 toets('Fable #3: elke domeinnaam (ook .eu, .de, github.com)', heeft('zie voorbeeld.eu', 'hostnaam') && heeft('kijk op github.com/x', 'hostnaam') && heeft('iets.de', 'hostnaam'));
 toets('Fable #11: wv 861, 06 12 34 56 78, 06 1234 5678, 45,-, €45 heel', heeft('in wv 861', 'werkvoorraadnummer') && heeft('bel 06 12 34 56 78', 'telefoonnummer') && heeft('bel 06 1234 5678', 'telefoonnummer') && heeft('kost 45,- per maand', 'bedrag') && f.toets('kost €45').some((x) => x.soort === 'bedrag' && x.treffer === '€45'));
+toets('natoets: Lees/Meer/Huis/Ronde als zinsbegin geen naam; vergeten spatie na punt geen hostnaam', !heeft('Lees het voor.', 'naam') && !heeft('Meer weten?', 'naam') && !heeft('Huis en tuin.', 'naam') && !heeft('Ronde twee.', 'naam') && !heeft('in de kennisbank.Daarna verder', 'hostnaam'));
 toets('gewone afkortingen (o.a., i.p.v., bijv.) geen hostnaam', !heeft('o.a. knoppen, i.p.v. tekst, bijv. een lijst', 'hostnaam'));
 toets('leeg en null zijn schoon', f.toets('').length === 0 && f.toets(null).length === 0);
 

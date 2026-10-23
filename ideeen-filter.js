@@ -27,7 +27,7 @@ const VRIJ = new Set(['socev', 'claude', 'gemini', 'whisper', 'telegram', 'whats
   'dhr', 'mevr', 'mw', 'mr', 'mrs', 'dr', 'drs', 'ing', 'ir', 'prof', 'jr', 'sr', 'bv', 'b.v', 'vof', 'nv', 'mail', 'tel', 'fax', 'www', 'com', 'nl',
   'appie', 'albert',
   // gewone zinsbegin-woorden die ook als voornaam in de contacten staan (gemeten 23-10: alleen deze); echte achternamen (Groot, Bos …) blijven tegengehouden
-  'eén', 'één', 'een', 'wil', 'wij', 'niet', 'dag', 'drie', 'snel']);
+  'eén', 'één', 'een', 'wil', 'wij', 'niet', 'dag', 'drie', 'snel', 'meer', 'lees', 'huis', 'ronde']);   // natoets Fable: Meer/Lees/Huis/Ronde als kaartopening
 // Albert en Appie zijn de ontvangers: hun naam in een reactie is gewoon. In een kaart hoort hij niet, maar dat is laag 2 (inhoudsregel).
 const ENTITEITEN = [/\bgroenhouten\b/i, /\btolgaarde\b/i, /\bPOT\b/, /\bPOH[- ]?(GGZ|S|J|jeugd|ouderen)?\b/i, /\bhagro\b/i, /\bsloel\b/i, /\bDBH\b/,
   /\bontie\b/i, /\bghawa\b/i, /\beemwerk\b/i, /\bourmind\b/i, /\bkostenmaatschap\b/i, /\bpraktijkhouders\b/i, /\bholding\b/i, /\bSEL\b/,
@@ -37,7 +37,7 @@ const PRAKTIJKWOORD = /(praktijk|patiënt|patient|omzet|winst|declar|inschrijv|f
 const PATRONEN = [
   ['e-mailadres', /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/],
   ['hostnaam', /\b(?:[a-z0-9-]+\.)*(?:socev\.dev|olares\.com|huisdokter\.dev)\b/i],
-  ['hostnaam', /\b[a-z0-9-]{2,}(?:\.[a-z0-9-]{2,})*\.[a-z]{2,6}\b/i],   // Fable wv861 #3: elke domeinnaam, niet alleen .nl/.com
+  ['hostnaam', /\b[a-zA-Z0-9-]{2,}(?:\.[a-zA-Z0-9-]{2,})*\.[a-z]{2,6}\b/],   // Fable wv861 #3: elke domeinnaam; extensie in kleine letters (natoets: "kennisbank.Daarna" is geen host)
   ['pad', /(?:^|[\s(\["'`])(?:~|\.{1,2})?\/(?:[\w.@-]+\/)+[\w.@-]*/],
   ['pad', /\b\d{2}_[A-Z][\w-]*\//],
   ['pad', /\b[\w-]+\.(?:md|js|mjs|ts|tsx|py|sh|json|jsonl|sql|yml|yaml|env)\b/i],
@@ -129,7 +129,7 @@ function maak(o) {
     for (const w of woorden) {
       if (w[0] !== w[0].toUpperCase() || w[0] === w[0].toLowerCase()) continue;
       const k = zonderBezit(w.replace(/[-]+$/, '').toLowerCase());
-      const kaal = k.length > 3 && /s$/.test(k) ? k.slice(0, -1) : null;   // "Davids" → "david"
+      const kaal = k.length > 4 && /s$/.test(k) ? k.slice(0, -1) : null;   // "Davids" → "david"; stam ≥ 4 letters (natoets: "Lees" niet → "lee")
       if (n.los.has(k) || (kaal && n.los.has(kaal))) zet('naam', w);
       else if (k.indexOf('-') > 0 && k.split('-').some(function (d) { return n.los.has(zonderBezit(d)); })) zet('naam', w);
     }
