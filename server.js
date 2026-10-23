@@ -3513,6 +3513,7 @@ function handleRequest(req, res) {
       bandjes: bandjesInfo(),
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
+      ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761: App Ideeën van buitenaf (laatste lezing, fout, aantal kaarten; geen inhoud)
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
@@ -4535,6 +4536,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
+['POST /app/ideeen/reactie', 'POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: reageren of naar de bus = David die werkt
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
@@ -10690,6 +10692,8 @@ function handleApp(req, res) {
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
         if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
+        if (route === 'GET /app/ideeen' || route.indexOf('GET /app/ideeen/plaatje/') === 0 || route === 'POST /app/ideeen/reactie' || route === 'POST /app/ideeen/gezien' || route === 'POST /app/ideeen/naar-ideeenbus')
+          return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App Ideeën van buitenaf
         if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
         if (route === 'GET /app/pot-afschriften') return appPotAfschriften(req, res, a);       // wv787: App POT-afschriften (alleen David, geen vaste plek)
@@ -13359,6 +13363,60 @@ async function appHarvester(req, res, a, d, route) {
   return appStuur(res, r.status, r.j);
 }
 // ── einde harvester ──
+
+// ── Ideeënbeurs (wv761, 23-10-2026; bouwplan "01_Ontwikkeling/Ideeënbeurs met Albert van der Veer (ontwerp 22-10-2026).md" § 8) ──
+// App "Ideeën van buitenaf": kaarten in het afgeschermde forumonderdeel `ideeen` (forum.socev.dev) lezen en er als David op reageren,
+// een kaart van buiten naar de Ideeënbus (geparkeerd). Logica in ideeen.js; hier de koppeling: routes /app/ideeen(*) na de app-poort,
+// de forumaanroep met de podsleutel (WERKKAMER_SLEUTEL_POD; ideeen.js raakt alleen forum `ideeen`) en /health.ideeen. Schrijven alleen
+// op de primaire kant. Ontbreekt ideeen.js in de release (terugrol), dan 404 op de routes en ideeen.aan=false in /health.
+const IDEEEN_DIR = serverPad('ideeenbeurs', process.env.IDEEEN_DIR, '/opt/data/ideeenbeurs', serverProefDeel('ideeenbeurs'));
+const IDEEEN_FORUM = process.env.IDEEEN_FORUM_BASIS || 'https://forum.socev.dev/api/';   // alleen de toets wijst elders heen
+async function ideeenForum(methode, pad, body) {
+  const sleutel = process.env.WERKKAMER_SLEUTEL_POD || '';
+  if (!sleutel) return { status: 503, j: { ok: false, fout: 'geen forumsleutel op de pod' } };
+  const r = await fetch(IDEEEN_FORUM + pad, { method: methode, signal: AbortSignal.timeout(20000),
+    headers: Object.assign({ 'X-Werkkamer-Sleutel': sleutel }, body ? { 'Content-Type': 'application/json' } : {}), body: body ? JSON.stringify(body) : undefined });
+  const type = String(r.headers.get('content-type') || '').split(';')[0].trim();
+  if (/^image\//.test(type)) { const buf = Buffer.from(await r.arrayBuffer()); return { status: r.status, bin: buf.length <= 600 * 1024 ? buf : null, type: type }; }
+  let j = null; try { j = await r.json(); } catch (e) {}
+  return { status: r.status, j: j };
+}
+const ideeen = (function () {
+  const p = path.join(__dirname, 'ideeen.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const I = require(p);
+    let Hmod = null; try { Hmod = require(path.join(__dirname, 'harvester.js')); } catch (e) {}
+    const i = I.maak({ vault: VAULT, dir: IDEEEN_DIR, forum: ideeenForum, fout: logError, harvester: Hmod });
+    i.mkdir();   // /opt/data/ideeenbeurs en tmp/ op 0700; staat 0600
+    return i;
+  } catch (e) { logError('ideeen', e); return null; }
+})();
+['ideeen', 'ideeen-reactie', 'ideeen-plaatje'].forEach(function (k) { if (!appStaat.tellers[k]) appStaat.tellers[k] = []; });
+function ideeenInfo() {
+  if (!ideeen) return { aan: false };
+  try { return ideeen.health(); } catch (e) { return { aan: true, fout: true }; }
+}
+async function appIdeeen(req, res, a, d, route) {
+  if (!ideeen) return appWeiger(res, 404, 'De Ideeënbeurs zit niet in deze versie van de pod', 'ideeen ontbreekt');
+  if (route.indexOf('GET ') === 0 || route === 'POST /app/ideeen/gezien') res._app.stil = true;
+  if (route.indexOf('POST ') === 0) {
+    if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+    if (!appTeller('ideeen', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens ideeen');
+    if (route === 'POST /app/ideeen/reactie') {
+      if (!appTeller('ideeen-reactie', 20, 3600000)) return appWeiger(res, 429, 'te veel reacties dit uur (max 20)', 'grens ideeen-reactie');
+      // wv464: op een vaste plek een BSN-achtig getal maskeren, nooit weigeren
+      if (a.soort === 'vast' && d && typeof d.tekst === 'string' && appBsnAchtig(d.tekst)) { d.tekst = appBsnMasker(d.tekst); res._app.bsnWeg = true; }
+    }
+  } else if (route.indexOf('GET /app/ideeen/plaatje/') === 0 && !appTeller('ideeen-plaatje', 200, 3600000)) return appWeiger(res, 429, 'te veel plaatjes dit uur (max 200)', 'grens ideeen-plaatje');
+  let r;
+  try { r = await ideeen.app(route, d || {}); }
+  catch (e) { logError('app-ideeen', e); return appWeiger(res, 502, 'het forum is nu niet bereikbaar', 'ideeen uitzondering'); }
+  if (r.status !== 200) res._app.reden = 'ideeen: ' + String(r.j && r.j.fout || '').slice(0, 60);
+  else if (route.indexOf('POST ') === 0 && route !== 'POST /app/ideeen/gezien') res._app.reden = 'ideeen ' + route.slice('POST /app/ideeen/'.length) + ' draad ' + String(d && d.draad || '').slice(0, 10);
+  return appStuur(res, r.status, r.j);
+}
+// ── einde ideeënbeurs ──
 
 // ── Second Brain (wv832; bouwplan vault 01_Ontwikkeling/Second Brain - Obsidian-browser in de app (bouwplan 22-10-2026).md) ──
 // WAAROM. David 22-10-2026: "dat je kan klikken op een betaling en dat je dan naar de Obsidian Browser gaat … (App: "Second Brain", met in

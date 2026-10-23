@@ -55,7 +55,8 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # facturen-koerier.js (wv855): de koerier (verzend-detectie, consistentiecontrole, verzender, uploads, postvak), door server.js geladen bij POST
 #   /facturen-ronde (ontbreekt hij, dan doet de ronde alleen de back-up en /health.facturen.koerier.aan=false).
 # secondbrain.js (wv832): App Second Brain, routes /app/secondbrain* (ontbreekt hij, dan 404 en secondbrain.aan=false in /health).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js harvester.js facturen-db.js facturen.js facturen-koerier.js secondbrain.js"
+# ideeen.js (wv761): App Ideeën van buitenaf (Ideeënbeurs), door server.js geladen (ontbreekt hij, dan 404 op /app/ideeen* en ideeen.aan=false in /health).
+RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js harvester.js facturen-db.js facturen.js facturen-koerier.js secondbrain.js ideeen.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }
