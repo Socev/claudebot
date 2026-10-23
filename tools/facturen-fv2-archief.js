@@ -84,7 +84,7 @@ async function hoofd(argv) {
         const r = F.archiefInvoeren(fdb, rol, { entiteit: p.entiteit, regels: p.regels, facturen: p.facturen, bestand_op: p.bestand_op,
           herkomst: 'FV2 Supabase facturen.bank_transactions/invoices (' + p.regels.length + ' regels, ' + p.facturen.length + ' facturen)' }, Date.now());
         uit.entiteiten.push({ entiteit: p.entiteit, regels: p.regels.length, nieuw: r.nieuw, al_bekend: !!r.al_bekend, overgeslagen: r.overgeslagen, na_start: r.na_start,
-          facturen: r.facturen, personeel: r.personeel, mogelijk_dubbel: r.check ? r.check.mogelijk_dubbel : 0, signalen: r.controle ? r.controle.signalen : 0 });
+          facturen: r.facturen, mogelijk_dubbel: r.check ? r.check.mogelijk_dubbel : 0, signalen: r.controle ? r.controle.signalen : 0 });
       } catch (e) {
         if (e instanceof F.RouteFout) { uit.entiteiten.push({ entiteit: p.entiteit, fout: e.fout, status: e.status }); continue; }
         throw e;

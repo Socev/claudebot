@@ -1,5 +1,5 @@
 'use strict';
-// Toetsen voor wv944: bankhistorie definitief in Facturen (startdatum, droogloop, bron bewaren, personeel, aanvullen, FV2-archief) en de
+// Toetsen voor wv944: bankhistorie definitief in Facturen (startdatum, droogloop, bron bewaren, salaris zichtbaar (wv945), aanvullen, FV2-archief) en de
 // factuurvalidatie (facturen-validatie.js: profielen, betaling, controles, zoeken; route en Socev-leesroute). Alles verzonnen: IBAN's met
 // bankcode TEST, "Leverancier A B.V.", bedragen bedacht. Raakt /opt/data/facturen, de kluis, mail en de vault niet (alles in TMPDIR).
 const test = require('node:test');
@@ -194,36 +194,58 @@ test('droogloop: dezelfde posten onder een andere entry_ref (ander saldo) worden
   assert.equal(een.check.al_bekend, 1);
 });
 
-test('personeel: salarisregels en alles naar die IBAN alleen-eigenaar (ook na de start), nooit terug; praktijkmanager en Socev zonder personeel zien ze niet', () => {
+test('salaris (wv945): salarisregels op een praktijkrekening zijn gewone regels, zichtbaar voor eigenaar, praktijkmanager en Socev; historie en POT blijven alleen-eigenaar', () => {
   const t = opzet();
   const u = hist(t, tab([
     ['20250125', -250000, ov(LEV.P, 'J. Proef', 'Salaris januari')],
-    ['20250210', -4500, ov(LEV.P, 'J. Proef', 'declaratie parkeren')],
-    ['20250125', -90000, ov(LEV.Q, 'Belastingdienst', 'loonheffing januari')],
-    ['20261010', -260000, ov(LEV.P, 'J. Proef', 'oktober')],
+    ['20261010', -260000, ov(LEV.P, 'J. Proef', 'Salaris oktober')],
+    ['20261012', -4500, ov(LEV.P, 'J. Proef', 'declaratie parkeren')],
     ['20261011', -1200, ov(LEV.A, 'Leverancier A B.V.', 'salarisadministratie oktober')],
   ]));
-  assert.equal(u.nieuw, 5);
+  assert.equal(u.nieuw, 4);
+  assert.equal(u.personeel, undefined, 'geen personeelsteller meer');
   const ae = (remi) => t.fdb.db.prepare("SELECT alleen_eigenaar a FROM bank_transactie WHERE omschrijving LIKE ?").get('%' + remi + '%').a;
-  assert.equal(ae('Salaris januari'), 1);
-  assert.equal(ae('declaratie parkeren'), 1, 'zelfde IBAN als een salarisregel');
-  assert.equal(ae('oktober'), 1, 'na de start, maar naar een personeels-IBAN');
-  assert.equal(ae('salarisadministratie'), 0, 'salarisadministratie is geen loon');
-  assert.equal(ae('loonheffing'), 1, 'historie is altijd alleen-eigenaar');
-  assert.throws(() => t.fdb.db.prepare('UPDATE bank_transactie SET alleen_eigenaar = 0').run(), /transactie_eigenaar/);
-  // praktijkmanager: zoeken vindt geen personeel en geen historie
-  const pmz = F.validatie(t.fdb, t.pm, { soort: 'zoek', tekst: 'proef' }, NU);
-  assert.equal(pmz.aantal, 0);
+  assert.equal(ae('Salaris oktober'), 0, 'salaris na de start is een gewone regel');
+  assert.equal(ae('declaratie parkeren'), 0, 'zelfde IBAN als een salarisregel: ook gewoon');
+  assert.equal(ae('salarisadministratie'), 0);
+  assert.equal(ae('Salaris januari'), 1, 'historie (vóór de start) blijft alleen-eigenaar, zoals elke historische regel');
+  // categorie loon zegt niets over zichtbaarheid; een tweede upload met nog een loonregel: ook gewoon
+  t.fdb.db.prepare("UPDATE bank_transactie SET categorie = 'loon' WHERE omschrijving = 'Salaris oktober'").run();
+  hist(t, tab([['20261020', -10000, ov(LEV.Q, 'K. Proef', 'netto loon oktober')]], 500000), 'twee.tab');
+  assert.equal(ae('netto loon'), 0);
+  assert.equal(ae('Salaris oktober'), 0, 'een volgende upload zet niets terug op alleen-eigenaar');
+  // POT: een regel op de POT-rekening (alleen-eigenaar via de rekening) — praktijkmanager ziet hem nooit
+  const pot = t.fdb.db.prepare("SELECT id, iban FROM rekening WHERE entiteit = 'pot'").get();
+  t.fdb.db.prepare('INSERT INTO bank_transactie (id, rekening, entiteit, eigen_iban, boekdatum, bedrag_centen, valuta, tegenpartij_iban, tegenpartij_naam, omschrijving, ' +
+    "entry_ref, formaat, bankluis_sleutel, alleen_eigenaar, aangemaakt_op) VALUES (?, ?, 'pot', ?, '2026-10-15', -310000, 'EUR', ?, 'J. Proef', 'Salaris POT oktober', ?, 'bankluis', 'proef-pot-1', 1, '2026-10-15T10:00:00Z')")
+    .run(D.nieuwId(), pot.id, pot.iban, LEV.P, 'b'.repeat(20));
+  // eigenaar ziet alles na de start + historie
+  const eig = F.validatie(t.fdb, t.eig, { soort: 'zoek', tekst: 'salaris' }, NU);
+  assert.deepEqual(eig.regels.map((r) => r.omschrijving).sort(), ['Salaris POT oktober', 'Salaris januari', 'Salaris oktober', 'salarisadministratie oktober']);
+  // praktijkmanager (Tolgaarde): salaris op de praktijkrekening wél, historie en POT niet
+  const pmz = F.validatie(t.fdb, t.pm, { soort: 'zoek', tekst: 'salaris' }, NU);
+  assert.deepEqual(pmz.regels.map((r) => r.omschrijving).sort(), ['Salaris oktober', 'salarisadministratie oktober']);
   const pmall = F.validatie(t.fdb, t.pm, { soort: 'zoek' }, NU);
-  assert.deepEqual(pmall.regels.map((r) => r.omschrijving), ['salarisadministratie oktober']);
-  // Socev-leesroute: zonder personeel geen loonregels (wel de rest van de historie), met personeel wel
+  assert.ok(!pmall.regels.some((r) => r.entiteit === 'pot' || r.entiteit === 'prive'), 'geen POT of Privé voor de praktijkmanager');
+  assert.equal(pmall.aantal, 4, 'oktober-salaris, declaratie, salarisadministratie, netto loon');
+  const pmt = F.validatie(t.fdb, t.pm, { soort: 'tegenpartij', tekst: 'j. proef' }, NU);
+  assert.equal(pmt.profielen.length, 1);
+  assert.equal(pmt.profielen[0].aantal, 2, 'alleen de twee praktijkregels na de start');
+  // Socev-leesroute: salarisregels gewoon mee (ook zonder machinekamer-sleutel), geen personeel-veld meer
   const routes = F.maak({ fout: () => {} });
-  const z = routes.lees(t.fdb, { opdracht: 'zoek', tekst: '' }, { nu: NU });
+  const z = routes.lees(t.fdb, { opdracht: 'zoek', tekst: 'loon' }, { nu: NU });
   assert.equal(z.status, 200);
-  assert.equal(z.j.personeel, false);
-  assert.deepEqual(z.j.regels.map((r) => r.omschrijving).sort(), ['loonheffing januari', 'salarisadministratie oktober']);
-  const zp = routes.lees(t.fdb, { opdracht: 'zoek', tekst: '' }, { nu: NU, personeel: true });
-  assert.equal(zp.j.regels.length, 5);
+  assert.equal(z.j.personeel, undefined);
+  assert.deepEqual(z.j.regels.map((r) => r.omschrijving), ['netto loon oktober']);
+  assert.equal(routes.lees(t.fdb, { opdracht: 'zoek', tekst: 'salaris' }, { nu: NU }).j.aantal, 4);
+  // App-route (POST /app/facturen/validatie): dezelfde zichtbaarheid per rol
+  const call = (rol) => routes.app(t.fdb, { methode: 'POST', pad: '/app/facturen/validatie', d: { soort: 'zoek', tekst: 'salaris' }, rol, primair: true, nu: NU });
+  const ae_ = call(t.eig), ap_ = call(t.pm);
+  assert.equal(ae_.status, 200); assert.equal(ap_.status, 200, JSON.stringify(ap_.j));
+  assert.ok(ae_.j.regels.some((r) => r.omschrijving === 'Salaris oktober') && ae_.j.regels.some((r) => r.omschrijving === 'Salaris POT oktober'));
+  assert.ok(ap_.j.regels.some((r) => r.omschrijving === 'Salaris oktober'), 'praktijkmanager ziet het salaris op de praktijkrekening');
+  assert.ok(!ap_.j.regels.some((r) => r.entiteit === 'pot' || r.entiteit === 'prive'), 'praktijkmanager ziet de POT niet');
+  assert.throws(() => t.fdb.db.prepare('UPDATE bank_transactie SET alleen_eigenaar = 0').run(), /transactie_eigenaar/, 'historie en POT blijven alleen-eigenaar');
   assert.equal(routes.lees(null, { opdracht: 'zoek' }, {}).status, 409, 'passieve kant');
   assert.equal(routes.lees(t.fdb, { opdracht: 'wis' }, {}).status, 400);
 });
@@ -376,13 +398,9 @@ test('zoeken: tekst, IBAN, periode, richting, totalen per jaar; "kpn" is geen IB
   assert.equal(V.zoek(tx, { tekst: 'kpn' }).aantal, 0);
   assert.equal(V.zoek(tx, { richting: 'bij' }).aantal, 1);
   assert.equal(V.zoek(tx, { max: 2 }).regels.length, 2);
-  assert.equal(V.isPersoneel({ omschrijving: 'Loonheffing sept' }), false);
-  assert.equal(V.isPersoneel({ omschrijving: 'netto loon sept' }), true);
-  assert.equal(V.isPersoneel({ transactietype: 'ABN:SEPA Batch Salaris' }), true);
-  assert.equal(V.isPersoneel({ tegenpartij_naam: 'Proef Salaris en Advies B.V.', omschrijving: 'factuur 2026-10' }), false, 'bedrijfsnaam is geen loon');
 });
 
-test('routes: GET/POST validatie voor de eigenaar; praktijkmanager ziet geen historie, personeel of nieuwe IBAN; route-id past', () => {
+test('routes: GET/POST validatie voor de eigenaar; praktijkmanager ziet geen historie of nieuwe IBAN; route-id past', () => {
   const t = opzet();
   hist(t, tab([['20250102', -8412, inc(LEV.C, 'Leverancier C B.V.', 'Termijn jan')], ['20261015', -500, ov(LEV.A, 'Leverancier A B.V.', 'na start')]]));
   const routes = F.maak({ fout: () => {} });

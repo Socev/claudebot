@@ -15103,12 +15103,12 @@ async function smalActie(actie, d) {
     return managers.start(String(d.naam || ''), socevAgentSleutelOk(d.secret) ? 'socev' : 'machinekamer', d.reden, d.vraag_id);
   }
   // wv944: Facturen lezen voor Socev (skill facturen-lezen): zoeken, hoe wordt X betaald, is een factuur betaald, controles. Alleen lezen,
-  // alleen op de primaire Olares-kant (facturenOpen geeft anders null → 409). Personeelsregels (salaris, loon) alleen met API_SECRET
-  // (machinekamer), nooit met de Socev-sleutel: het hoofdkanaal leest ook mail van buiten (Fable wv944 #10).
+  // alleen op de primaire Olares-kant (facturenOpen geeft anders null → 409). Salarisregels op zakelijke rekeningen gewoon mee (David
+  // 23-10-2026, wv945); de POT-rekening en Privé staan hier niet in de weg: die zijn alleen-eigenaar en Socev leest als eigenaar.
   if (actie === 'facturen') {
     if (!facturenRoutes || typeof facturenRoutes.lees !== 'function') return { status: 404, j: { ok: false, fout: 'Facturen zit niet in deze versie van de pod' } };
     const socev = socevAgentSleutelOk(d.secret);
-    return facturenRoutes.lees(facturenOpen(), d, { wie: socev ? 'socev' : 'machinekamer', personeel: !socev && d.personeel === true });
+    return facturenRoutes.lees(facturenOpen(), d, { wie: socev ? 'socev' : 'machinekamer' });
   }
   return { status: 404, j: { ok: false, fout: 'onbekende smalle route' } };
 }

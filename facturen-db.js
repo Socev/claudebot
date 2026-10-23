@@ -16,7 +16,7 @@
  *   opdracht per factuur of afschrift, en een verstuurde factuur krijgt nooit een tweede.
  * - Een document is hooguit één factuur (splitsen bestaat niet); een factuur heeft precies één entiteit (één kolom).
  * - Regels van een rekening met controle 0 (Privé) worden nooit als regel opgeslagen; POT-regels houden alleen_eigenaar (trigger), en een
- *   alleen-eigenaar-regel (POT, personeel, historie) wordt dat nooit meer af (wv944). Het ruwe bankbestand bewaren we sinds wv944 wél als
+ *   alleen-eigenaar-regel (POT, historie; personeel sinds wv945 niet meer) wordt dat nooit meer af (wv944). Het ruwe bankbestand bewaren we sinds wv944 wél als
  *   bron in bankbron/ (Davids keuze 23-10-2026), nooit via een route te zien.
  * - Een praktijkmanager kan niet aan Privé gekoppeld worden (trigger). Het auditlog is alleen-toevoegen (trigger).
  * - Geen kolom voor factuurtekst of mailtekst: alleen velden, besluitrijen en audit.
@@ -545,7 +545,7 @@ BEGIN SELECT RAISE(ABORT, 'gebruiker_fac: via de smalle ingang alleen praktijkma
 `;
 
 // wv944 (bankhistorie definitief + validatie, David 23-10-2026): bank_bestand krijgt herkomst (upload, historisch, archief_fv2), bank,
-// periode, saldocontrole en of het ruwe bestand bewaard is; een bankregel die alleen-eigenaar is (POT, personeel, historie) wordt dat nooit
+// periode, saldocontrole en of het ruwe bestand bewaard is; een bankregel die alleen-eigenaar is (POT, historie; personeel sinds wv945 niet meer) wordt dat nooit
 // meer af (Fable wv944 #6); factuur_archief bewaart de FV2-facturen als velden (geen stuk, geen tekst) voor de validatie; meta.startdatum
 // (eerste dag dat Facturen echt draait) moet een datum zijn. LET OP terugrol: een release van vóór wv944 opent deze database niet meer
 // (schema_nieuwer); terugrollen = ook de database terugzetten (backup/ van vóór de uitrol) of vooruit herstellen.

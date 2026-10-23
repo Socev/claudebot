@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Toetst wv944 (23-10-2026; bouwplan vault 01_Ontwikkeling/Facturen-app - bouwplan (App, 22-10-2026).md § 11): bankhistorie definitief in
-# Facturen (startdatum, geen signalen voor historie, droogloop tegen dubbel inlezen, ruwe bron bewaard, personeel alleen-eigenaar, aanvullen,
+# Facturen (startdatum, geen signalen voor historie, droogloop tegen dubbel inlezen, ruwe bron bewaard, salarisregels zichtbaar (wv945), aanvullen,
 # FV2-archief) en de factuurvalidatie (facturen-validatie.js: profielen met de hand nagerekend, betaling, controles, zoeken, routes,
 # Socev-leesroute). Eerst de CI-poort (facturen-validatie.js puur). Raakt /opt/data/facturen, de kluis, mail en de vault niet.
 # Gebruik: bash test/facturen-validatie.sh

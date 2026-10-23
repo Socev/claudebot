@@ -15,22 +15,7 @@
  */
 const { ibanNorm, normNaam, dagenTussen, plusDagen, isIsoDatum } = require('./facturen-kern.js');
 
-// ───────────────────────────── personeelsgegevens ─────────────────────────────
-
-// Loon en salaris als los woord (niet "loonheffing", "salarisadministratie" of "loonstrook"): personeelsgegevens, alleen voor David.
-const PERSONEEL_RE = /\b(salaris|loon|nettoloon|netto ?salaris|vakantiegeld|vakantietoeslag|eindejaarsuitkering|13e maand|dertiende maand|reiskostenvergoeding|thuiswerkvergoeding)\b/i;
-function isPersoneel(t) {
-  if (!t) return false;
-  if (/\bSalaris\b/i.test(String(t.transactietype || ''))) return true;
-  // alleen de omschrijving: een bedrijfsnaam als "… Salaris en Advies" (salarisadministrateur) is geen loonbetaling
-  return PERSONEEL_RE.test(String(t.omschrijving || ''));
-}
-// IBAN's die ooit een personeelsregel ontvingen: elke regel naar of van die IBAN is personeelsgegeven (ook een los nettoloon zonder woord).
-function personeelIbans(transacties) {
-  const s = new Set();
-  for (const t of transacties || []) if (isPersoneel(t)) { const i = ibanNorm(t.tegenpartij_iban); if (i) s.add(i); }
-  return s;
-}
+// Salaris- en personeelsregels zijn hier gewone regels (wv945, David 23-10-2026: "Salarisbetalingen mogen gewoon ingezien").
 
 // ───────────────────────────── tegenpartij ─────────────────────────────
 
@@ -297,6 +282,6 @@ function zoek(transacties, vraag) {
 }
 
 module.exports = {
-  PERSONEEL_RE, isPersoneel, personeelIbans, tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan,
+  tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan,
   genormKenmerk, echtKenmerk, betalingVan, controles, zoek,
 };

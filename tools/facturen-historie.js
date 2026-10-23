@@ -40,7 +40,7 @@ function samenvatting(naam, u) {
   return {
     bestand: path.basename(naam), al_bekend: !!u.al_bekend, droog: !!u.droog, formaat: u.formaat, periode: u.periode,
     rekeningen: u.rekeningen, prive_weggegooid: u.prive_weggegooid, nieuw: u.nieuw, al_bekend_regels: u.al_bekend_regels, aangevuld: u.aangevuld,
-    archief: u.archief, personeel: u.personeel, bron_bewaard: u.bron_bewaard, saldo: s || undefined, check: u.check,
+    archief: u.archief, bron_bewaard: u.bron_bewaard, saldo: s || undefined, check: u.check,
     signalen: u.controle ? u.controle.signalen : undefined, historie_stil: u.controle ? u.controle.historie_stil || 0 : undefined,
   };
 }
