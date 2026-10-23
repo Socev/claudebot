@@ -285,6 +285,10 @@ jobs:
       # wees over een herstart, sessie-overgang, dicht bij uitval). Loper en server als dezelfde gebruiker; EPERM nagebootst.
       - name: "loper fase 2 (wv715, server.js via de socev-loper)"
         run: bash test/loper-fase2.sh
+      # wv886 (Fable wv715 #5): /agent uit een [AUTO]-beurt via de loper koppelt alleen het proces dat de marker draagt
+      # (loper socket-eigenaar), niet elke andere socev-sessie die tegelijk loopt.
+      - name: "tel-koppeling via de loper (wv886)"
+        run: bash test/tel-loper-koppel.sh
 
       - uses: docker/login-action@v3
         with:

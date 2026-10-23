@@ -11194,6 +11194,15 @@ const APP_RUNTIME_LET_OP = {
   codex: 'Codex leest CLAUDE.md en de MCP-koppelingen, maar kent de Socev-skills niet: nachtelijke routines (nachtconsolidatie, wachters, verwerking) en skills als agenda-schrijven draaien dan zonder hun werkbeschrijving. Het tempo van de werkvoorraad blijft aan de Claude-meting hangen; het Codex-verbruik meet Socev niet.',
   gemini: 'Gemini laadt de Socev-skills, maar draaide hier tot nu toe alleen proefbeurten; het tempo van de werkvoorraad blijft aan de Claude-meting hangen en het Gemini-verbruik meet Socev niet.',
 };
+// wv886: draait het hoofdkanaal afgeschermd (via de loper, uid socev), dan kan Codex daar niet (codex-smal-uit, voorwaarde d):
+// een wissel naar Codex laat dan elke hoofdkanaalbeurt falen. Waarschuwen, niet weigeren (de machinekamer kan Codex wel).
+const APP_CODEX_LOPER = 'Let op: Socev draait nu afgeschermd en daar werkt Codex niet. Met Codex als standaard of terugval falen de beurten in het hoofdkanaal, de app en de nachtroutines; alleen de machinekamer werkt dan.';
+function appRuntimeLetOp(rt) {
+  const vast = APP_RUNTIME_LET_OP[rt] || null;
+  let afgeschermd = false;
+  try { afgeschermd = rt === 'codex' && typeof loperVoorRun === 'function' && loperVoorRun(APP_KANALEN.hoofd); } catch (e) {}
+  return afgeschermd ? APP_CODEX_LOPER + (vast ? ' ' + vast : '') : vast;
+}
 const APP_MODELLEN_LOG = path.join(APP_DATA, 'modellen.jsonl');
 const APP_MODELLEN_PER_UUR = 10;
 function appRuntimeUit(info) {
@@ -11216,7 +11225,7 @@ function appModellenStand() {
   const runtimes = RUNTIMES_LIJST.map(function (rt) {
     const huidig = typeof info.models[rt] === 'string' ? info.models[rt] : '';
     const keuzes = APP_MODEL_KEUZES[rt] || [];
-    return { id: rt, naam: APP_RUNTIME_NAAM[rt] || rt, uit: uit[rt], let_op: APP_RUNTIME_LET_OP[rt] || null, modellen: keuzes, model: huidig,
+    return { id: rt, naam: APP_RUNTIME_NAAM[rt] || rt, uit: uit[rt], let_op: appRuntimeLetOp(rt), modellen: keuzes, model: huidig,
       model_buiten_lijst: !keuzes.some(function (k) { return k.id === huidig; }) };
   });
   return { ok: true, standaard: info.default, terugval: info.fallback || '', runtimes: runtimes,
@@ -13262,31 +13271,45 @@ function telVerbindingProces(req) {
   }
   return null;
 }
-// wv715: een verbinding van een socev-proces (uid 1002): /proc/<pid>/fd en environ zijn voor 1001 dicht. De uid van de socket
-// staat wel in /proc/net/tcp; is er precies één lopende [AUTO]-beurt via de loper, dan is het die.
-function telVerbindingUid(req) {
+// wv715: een verbinding van een socev-proces (uid 1002): /proc/<pid>/fd en environ zijn voor 1001 dicht. De uid en de inode van
+// de socket staan wel in /proc/net/tcp (client-rij: lokaal = zijn poort, op afstand = onze poort).
+function telVerbindingSocket(req) {
   const s = req && req.socket;
   if (!s) return null;
   const hex = function (n) { return ('0000' + Number(n).toString(16).toUpperCase()).slice(-4); };
   const zijn = ':' + hex(s.remotePort), onze = ':' + hex(s.localPort);
-  let uid = null;
+  let uit = null;
   ['/proc/net/tcp', '/proc/net/tcp6'].some(function (f) {
     let t = ''; try { t = fs.readFileSync(f, 'utf8'); } catch (e) { return false; }
     return t.split('\n').slice(1).some(function (r) {
       const k = r.trim().split(/\s+/);
-      if (k.length > 9 && k[1].slice(-5) === zijn && k[2].slice(-5) === onze) { uid = Number(k[7]); return true; }
+      if (k.length > 9 && k[1].slice(-5) === zijn && k[2].slice(-5) === onze) { uit = { uid: Number(k[7]), inode: /^[1-9]\d{0,19}$/.test(k[9]) ? k[9] : null }; return true; }
       return false;
     });
   });
-  return uid;
+  return uit;
+}
+// wv886 (Fable wv715 #5): welk 1002-proces houdt die socket open, en welke SOCEV_TEL_BEURT draagt het? Dat zoekt de loper (zelf
+// 1002) op (op socket-eigenaar, loper wv785-1). Zo koppelt alleen een proces uit de [AUTO]-beurt zelf (curl uit zijn Bash erft
+// de marker), niet een andere socev-sessie die toevallig tegelijk loopt (was: "precies één lopende [AUTO]-beurt"). Hint, geen
+// bewijs: elk 1002-proces kan de marker zetten (gevolg hooguit een rapport dat in de auto wordt voorgelezen). Fail-closed.
+function telBeurtViaLoper(v) {
+  if (!v.inode) return { fout: 'geen socket-inode' };
+  let r;
+  try { r = loperSync({ op: 'socket-eigenaar', inode: v.inode }); } catch (e) { return { fout: 'loper: ' + String((e && e.code) || 'fout').slice(0, 40) }; }
+  if (!r || r.ok !== true) return { fout: 'loper: ' + String((r && r.fout) || 'geen antwoord').slice(0, 40) };
+  if (!r.pid || !/^[0-9a-f]{16}$/.test(String(r.waarde || ''))) return { fout: 'geen tel-beurt' };
+  const j = jobs[r.waarde];
+  if (!j || j.gebruiker !== 'socev') return { fout: 'tel-beurt niet via de loper' };
+  return { beurt: r.waarde };
 }
 function telBeurtVanVerzoek(req) {
   const pid = telVerbindingProces(req);
-  if (!pid && telVerbindingUid(req) === LOPER_UID) {
-    const tel = Object.keys(jobs).filter(function (id) { const j = jobs[id]; return j && j.app && j.app.soort === 'tel' && j.status === 'running' && j.gebruiker === 'socev'; });
-    return tel.length === 1 ? { beurt: tel[0] } : { fout: tel.length ? 'meer dan één tel-beurt via de loper' : 'geen tel-beurt via de loper' };
+  if (!pid) {
+    const v = telVerbindingSocket(req);
+    if (v && v.uid === LOPER_UID) return telBeurtViaLoper(v);
+    return { fout: 'proces niet gevonden' };
   }
-  if (!pid) return { fout: 'proces niet gevonden' };
   let env;
   try { env = fs.readFileSync('/proc/' + pid + '/environ').toString('latin1'); } catch (e) { return { fout: 'omgeving onleesbaar' }; }
   const m = /(?:^|\0)SOCEV_TEL_BEURT=([0-9a-f]{16})(?:\0|$)/.exec(env);
