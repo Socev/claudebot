@@ -1568,7 +1568,10 @@ async function bewijs(o) {
       const ag = { [J(20)]: { kanaal: 'hoofd', t: iso(uur), knoppen: { uitvoeren: { verloopt: nu + uur, stand: 'open' } } },
         [J(21)]: { kanaal: 'hoofd', t: iso(uur), knoppen: { uitvoeren: { verloopt: nu - 10 * 60000, stand: 'open' } } } };
       const kaarten = [{ id: 1, status: 'open', titel: 'Werkvoorraad wv812 — afsluiten', herkomst: {} }, { id: 2, status: 'open', titel: 'Gekoppeld', herkomst: { vraag: J(6) + ':' + hash(qs[6]) } },
-        { id: 3, status: 'gedaan', titel: 'Dicht', herkomst: { vraag: J(8) + ':' + hash(qs[8]) } }];
+        { id: 3, status: 'gedaan', titel: 'Dicht', herkomst: { vraag: J(8) + ':' + hash(qs[8]) } }, { id: 4, status: 'later', titel: 'Geparkeerd', herkomst: { vraag: J(1) + ':' + hash(qs[1]) } }];
+      const mLater = H.appMoetIetsUit({ hoofd: hoofd, machinekamer: mk }, vragen, ag, kaarten, nu);
+      toets('9d wv594 review #1: een kaart op later verbergt zijn gekoppelde vraag ook', !mLater.some((x) => x.punt.includes(J(1))), JSON.stringify(mLater.map((x) => x.punt)));
+      kaarten.pop();
       const m = H.appMoetIetsUit({ hoofd: hoofd, machinekamer: mk }, vragen, ag, kaarten, nu);
       const sl = m.map((x) => x.punt);
       toets('9d wv594: open vraag (<72 u, onbeantwoord) in Moet iets met kanaal, hash, tekst, gevoelig en het hele bericht', m.some((x) => x.punt === 'v:' + J(1) + ':' + hash(qs[1]) && x.soort === 'vraag' && x.kanaal === 'hoofd' && x.tekst === qs[1] && x.gevoelig === false && /Tekst van het bericht/.test(x.bericht) && x.socev === true), JSON.stringify(m.slice(0, 3)));

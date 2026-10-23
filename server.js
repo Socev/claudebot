@@ -7270,7 +7270,7 @@ function appBriefingAudio(stem) {
     let m = null;
     try { m = appBewaardVan(job); } catch (e) { return null; }
     const i = m && Array.isArray(m.bestanden) ? m.bestanden.findIndex(function (f) { return f && /\.(mp3|ogg|oga|opus|wav|m4a|aac|webm)$/i.test(String(f.naam || '')); }) : -1;
-    if (i >= 0) return { job_id: job, n: i + 1, naam: m.bestanden[i].naam };
+    if (i >= 0) return { job_id: job, n: Number(m.bestanden[i].n) > 0 ? Number(m.bestanden[i].n) : i + 1, naam: m.bestanden[i].naam };   // review #9
   }
   return null;
 }
@@ -8849,7 +8849,8 @@ async function appVoorJouRoute(req, res, a) {
   const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr) }); });
   // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten)
   let moet = null, moetFout = null;
-  try { moet = await appMoetIets(eigen, nu); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
+  // review wv594 #1: ontdubbelen tegen ALLE kaarten (ook privé, die een vaste plek niet toont); op een vaste plek geen hoofdkanaal
+  try { moet = (await appMoetIets(punten, nu)).filter(function (m) { return !(a && a.soort === 'vast' && m.kanaal === 'hoofd'); }); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
   const sleutels = [];
   lijst.forEach(function (p) { sleutels.push('k:' + p.id); if (p.deadline && p.deadline < vandaag) sleutels.push('k:' + p.id + ':over'); });
   (moet || []).forEach(function (m) { sleutels.push(m.punt); });
@@ -8868,7 +8869,7 @@ const APP_MOET_WV_RE = /\bwv\s?(\d{2,4})\b/gi;
 function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu) {
   const vandaag = appYmd(nu), gekoppeld = {}, kaartWv = {};
   (kaarten || []).forEach(function (p) {
-    if (!p || p.status !== 'open') return;
+    if (!p || (p.status !== 'open' && p.status !== 'later')) return;   // review wv594 #1: ook een geparkeerde kaart verbergt zijn vraag
     const g = appVjGekoppeld(p);
     if (g) gekoppeld[g] = 1;
     String(p.titel || '').replace(APP_MOET_WV_RE, function (m, n) { kaartWv[n] = 1; return m; });
@@ -8914,7 +8915,7 @@ async function appMoetLog(kanaal) {
   let st;
   try { st = await fs.promises.stat(appLogPad(kanaal)); } catch (e) { if (e && e.code === 'ENOENT') return []; throw e; }
   const c = (appStaat.moetLog = appStaat.moetLog || {})[kanaal];
-  if (c && c.mtime === st.mtimeMs && c.size === st.size && Date.now() - c.op < 3600000) return c.items;
+  if (c && c.mtime === st.mtimeMs && c.size === st.size && Date.now() - c.op < 3600000) return c.items.slice();   // review #4: appGeschiedenisRuw vult en sorteert
   const grens = Date.now() - APP_VRAAG_GELDIG_MS - 3600000;
   const items = (await appLogLees(kanaal)).filter(function (x) { return Date.parse(x.t) >= grens; });
   appStaat.moetLog[kanaal] = { mtime: st.mtimeMs, size: st.size, op: Date.now(), items: items };
