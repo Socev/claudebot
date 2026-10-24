@@ -35,14 +35,16 @@ function config(V, D) {
   const S = path.join(V, '.claude', 'skills');
   const wachter = path.join(S, 'personeels-wachter', 'wachter-state.py');
   const wv = path.join(D, 'mk-scripts', 'werkvoorraad.py');
+  // wv900: werkvoorraad.py, ciso-dag.mjs, datakaart.js en de datamanager-scripts laden mk-scripts/veilig (vault zonder symlinks)
+  const vv = path.join(D, 'mk-scripts', 'veilig');
   return {
     ciso: { slot: [path.join(S, 'ciso'), wachter, path.join(S, 'health-pod', 'hp.py')],
-      code: [path.join(D, 'mk-scripts', 'mk-curl'), path.join(D, 'socev-site', 'secretpoort.js'), path.join(D, 'bin', 'health-import.py')] },
+      code: [path.join(D, 'mk-scripts', 'mk-curl'), path.join(D, 'socev-site', 'secretpoort.js'), path.join(D, 'bin', 'health-import.py'), vv] },
     'data-manager': { slot: [path.join(S, 'data-manager'), wachter, path.join(S, 'breed-zoeken', 'woordenlijst.py')],
-      code: [path.join(D, 'mk-scripts', 'datamanager'), wv] },
-    'design-manager': { slot: [path.join(S, 'design-manager'), wachter], code: [path.join(D, 'mk-scripts', 'design-manager'), wv] },
+      code: [path.join(D, 'mk-scripts', 'datamanager'), wv, vv] },
+    'design-manager': { slot: [path.join(S, 'design-manager'), wachter], code: [path.join(D, 'mk-scripts', 'design-manager'), wv, vv] },
     'ui-manager': { slot: [path.join(S, 'ui-manager'), wachter],
-      code: [path.join(D, 'mk-scripts', 'ui-manager'), wv, path.join(D, 'socev-site', 'secretpoort.js')] }
+      code: [path.join(D, 'mk-scripts', 'ui-manager'), wv, path.join(D, 'socev-site', 'secretpoort.js'), vv] }
   };
 }
 

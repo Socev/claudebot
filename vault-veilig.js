@@ -30,6 +30,9 @@ const C = fs.constants;
 const TMP_ACHTER = '.vv.tmp';
 const TMP_PATROON = /^\..*\.[0-9a-f]{16}\.vv\.tmp$/;
 
+// Naamdeel voor het tijdelijke bestand: hooguit n bytes UTF-8 (een naam met veel € gaf anders ENAMETOOLONG; Fable wv900 natoets #6)
+function kortOpBytes(t, n) { let uit = ''; for (const c of t) { if (Buffer.byteLength(uit + c) > n) break; uit += c; } return uit; }
+
 function fout(tekst, code) { const e = new Error(tekst); e.code = code; return e; }
 
 // Waar een geopende descriptor écht naar wijst moet precies het opgegeven pad zijn: dan zat er geen symlink onderweg.
@@ -86,7 +89,7 @@ function ruimOp(m) {
 function schrijfIn(m, inhoud, o) {
   const oud = statGewoon(m.binnen(m.naam));
   const modus = o.modus != null ? o.modus : (oud ? (oud.mode & 0o777) : 0o660);
-  const tmp = '.' + m.naam.slice(0, 80) + '.' + crypto.randomBytes(8).toString('hex') + TMP_ACHTER;
+  const tmp = '.' + kortOpBytes(m.naam, 80) + '.' + crypto.randomBytes(8).toString('hex') + TMP_ACHTER;
   const fd = fs.openSync(m.binnen(tmp), C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, 0o600);
   let open = true, klaar = false;
   try {

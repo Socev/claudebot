@@ -109,6 +109,15 @@ if (heeft('setfacl') && heeft('getfacl')) {
   toets('L omleiding midden in het schrijven: linkdoel leeg, echte map heeft het bestand', ok && fs.readdirSync(RA).length === 0
     && fs.readFileSync(path.join(RM + '-echt', 'box.md'), 'utf8') === 'x', fs.readdirSync(RA).join(','));
 }
+// M  lange naam met veel multibyte-tekens (tmp-naam op bytes afgekapt) en wijzig met herkansing als iemand tussendoor schreef
+{
+  const lang = path.join(M, '€'.repeat(84) + '.md');
+  let ok = true; try { VV.schrijf(lang, 'x'); } catch (e) { ok = false; }
+  toets('M lange multibyte-naam: geschreven', ok && fs.readFileSync(lang, 'utf8') === 'x');
+  const b = path.join(M, 'herkans.md'); fs.writeFileSync(b, 'a'); let n = 0;
+  const r = VV.wijzig(b, (t) => { n++; if (n === 1) fs.utimesSync(b, 1, 1); return t + 'x'; });
+  toets('M wijzig: tussendoor geschreven → opnieuw gelezen', r === true && n === 2 && fs.readFileSync(b, 'utf8') === 'ax', n);
+}
 // I
 const oud = path.join(M, '.machinekamer.md.0123456789abcdef.vv.tmp'), jong = path.join(M, '.machinekamer.md.fedcba9876543210.vv.tmp');
 fs.writeFileSync(oud, 'x'); fs.writeFileSync(jong, 'x');
@@ -232,6 +241,21 @@ except OSError:
 os.replace = echt_replace
 toets("L omleiding midden in het schrijven: linkdoel leeg, echte map heeft het bestand",
       ok and not os.listdir(RA) and open(os.path.join(RM + "-echt", "box.md")).read() == "x", os.listdir(RA))
+# M  lange multibyte-naam, wijzig met herkansing, symlink als laatste component = SymlinkFout
+lang = os.path.join(M, "€" * 84 + ".md")
+try:
+    VV.schrijf(lang, "x"); ok = True
+except OSError:
+    ok = False
+toets("M lange multibyte-naam: geschreven", ok and lees(lang) == "x")
+b = os.path.join(M, "herkans.md"); open(b, "w").write("a"); n = [0]
+def f(t):
+    n[0] += 1
+    if n[0] == 1:
+        os.utime(b, (1, 1))
+    return t + "x"
+toets("M wijzig: tussendoor geschreven → opnieuw gelezen", VV.wijzig(b, f) and n[0] == 2 and lees(b) == "ax", n)
+toets("M symlink als laatste component: SymlinkFout", gooit(lambda: VV.lees(link), VV.SymlinkFout) and gooit(lambda: VV.voeg_toe(link, "x"), VV.SymlinkFout))
 # I
 oud = os.path.join(M, ".machinekamer.md.0123456789abcdef.vv.tmp"); jong = os.path.join(M, ".machinekamer.md.fedcba9876543210.vv.tmp")
 open(oud, "w").write("x"); open(jong, "w").write("x")

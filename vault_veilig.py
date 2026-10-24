@@ -17,6 +17,7 @@ anders 0660; aanvullen O_APPEND|O_NOFOLLOW. `wijzig` doet lezen-wijzigen-schrijv
 Canonieke bron: claudebot-src (getoetst in CI, test/vault-veilig.sh). Kopie: /opt/data/mk-scripts/veilig/vault_veilig.py
 (byte-gelijk; CISO C7-kopie-drift bewaakt dat).
 """
+import errno
 import fcntl
 import os
 import re
@@ -52,8 +53,17 @@ def open_map(map_):
     return dfd
 
 
+def _open_nofollow(naam, vlaggen, modus, dfd, pad):
+    try:
+        return os.open(naam, vlaggen | os.O_NOFOLLOW, modus, dir_fd=dfd)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise SymlinkFout(f"pad is een symlink: {pad}") from e
+        raise
+
+
 def _lees_fd(dfd, naam, pad, binair):
-    fd = os.open(naam, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+    fd = _open_nofollow(naam, os.O_RDONLY | os.O_NONBLOCK, 0o777, dfd, pad)
     with os.fdopen(fd, "rb") as f:
         if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
             raise OSError(f"geen gewoon bestand: {pad}")
@@ -84,11 +94,21 @@ def _ruim_op(dfd):
         pass
 
 
-def _schrijf_fd(dfd, naam, data, modus):
+def _kort_op_bytes(t, n):
+    """Naamdeel voor het tijdelijke bestand: hooguit n bytes UTF-8 (een naam met veel € gaf anders ENAMETOOLONG)."""
+    return t.encode("utf-8")[:n].decode("utf-8", "ignore")
+
+
+def _stempel(st):
+    return (st.st_ino, st.st_size, st.st_mtime_ns) if st else None
+
+
+def _schrijf_fd(dfd, naam, data, modus, als_gelijk=False):
+    """als_gelijk: stempel (inode, grootte, mtime) die het bestand vlak voor de rename nog moet hebben; False = niet toetsen."""
     oud = _stat_gewoon(dfd, naam)
     if modus is None:
         modus = (oud.st_mode & 0o777) if oud else 0o660
-    tmp = f".{naam[:80]}.{os.urandom(8).hex()}{TMP_ACHTER}"
+    tmp = f".{_kort_op_bytes(naam, 80)}.{os.urandom(8).hex()}{TMP_ACHTER}"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
     try:
         with os.fdopen(fd, "wb") as f:
@@ -96,6 +116,9 @@ def _schrijf_fd(dfd, naam, data, modus):
             f.flush()
             os.fchmod(f.fileno(), modus)
             os.fsync(f.fileno())
+        if als_gelijk is not False and _stempel(_stat_gewoon(dfd, naam)) != als_gelijk:
+            os.unlink(tmp, dir_fd=dfd)
+            return False
         os.replace(tmp, naam, src_dir_fd=dfd, dst_dir_fd=dfd)
     except BaseException:
         try:
@@ -104,6 +127,7 @@ def _schrijf_fd(dfd, naam, data, modus):
             pass
         raise
     _ruim_op(dfd)
+    return True
 
 
 def _data(inhoud):
@@ -134,8 +158,8 @@ def voeg_toe(pad, tekst, maak=False, modus=0o660):
     map_, naam = os.path.split(os.path.abspath(pad))
     dfd = open_map(map_)
     try:
-        fl = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_CREAT if maak else 0)
-        fd = os.open(naam, fl, modus, dir_fd=dfd)
+        fl = os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK | (os.O_CREAT if maak else 0)
+        fd = _open_nofollow(naam, fl, modus, dfd, pad)
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise OSError(f"geen gewoon bestand: {pad}")
@@ -149,16 +173,20 @@ def voeg_toe(pad, tekst, maak=False, modus=0o660):
 def wijzig(pad, functie, modus=None, grendel=True):
     """Lees pad, laat functie(tekst) de nieuwe tekst geven (None = niets doen) en schrijf die weg, alles relatief aan één
     getoetste mapdescriptor en (standaard) onder flock op die map, zodat twee Python-schrijvers elkaars rij niet verliezen.
-    Geeft True als er geschreven is."""
+    Geeft True als er geschreven is. Schreef een JS-schrijver (zonder flock) tussen lezen en rename, dan opnieuw (tot 3 keer;
+    zelfde toets op inode, grootte en mtime als vault-veilig.js; Fable wv900 natoets #3)."""
     map_, naam = os.path.split(os.path.abspath(pad))
     dfd = open_map(map_)
     try:
         if grendel:
             fcntl.flock(dfd, fcntl.LOCK_EX)
-        nieuw = functie(_lees_fd(dfd, naam, pad, False))
-        if nieuw is None:
-            return False
-        _schrijf_fd(dfd, naam, _data(nieuw), modus)
-        return True
+        for _ in range(3):
+            voor = _stempel(_stat_gewoon(dfd, naam))
+            nieuw = functie(_lees_fd(dfd, naam, pad, False))
+            if nieuw is None:
+                return False
+            if _schrijf_fd(dfd, naam, _data(nieuw), modus, als_gelijk=voor):
+                return True
+        return False
     finally:
         os.close(dfd)

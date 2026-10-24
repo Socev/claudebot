@@ -22,6 +22,8 @@
 # Tijdelijke bestanden van vault-veilig.js/vault_veilig.py (wv900): een gedode schrijver kan `.<naam>.<16 hex>.vv.tmp` laten staan
 # tot de volgende schrijfactie in die map (≥ 1 uur); die horen niet op Drive (Fable wv900 #6).
 - {{\..*\.[0-9a-f]{16}\.vv\.tmp[. ]*}}
+# idem de box-tmp van health-pod import_vault.py/rapporten.py (`.box-<pid>-<12 hex>.aanvoer|genoom.tmp`; Fable wv900 natoets #2)
+- {{\.box-[0-9]+-[0-9a-f]{12}\.(aanvoer|genoom)\.tmp[. ]*}}
 + /.claude/**
 + /.obsidian/**
 # Config-mappen elders: Claude Code (hooks), VS Code (taken bij openen), Codex en Obsidian voeren die op de pc uit.
