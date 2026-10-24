@@ -290,7 +290,7 @@ weiger('IBAN ongeldig → geweigerd', basis({ rekening: { iban: 'x' } }), /geldi
   const p1 = src.indexOf('// ── wv787: POT-afschriften (App'), p2 = src.indexOf('// ── Projecten (wv373');
   const BD = path.join(W, 'ronde-bank'); fs.mkdirSync(BD, { mode: 0o700 });
   const logs = [], rpc = [], box = [], kind = [];
-  const g = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT: W, SECRET: 'x'.repeat(40),
+  const g = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT: W, SECRET: 'x'.repeat(40),
     __dirname: process.cwd(), process: { env: { BANK_DIR: BD, POT_AF_CODE_DIR: process.cwd(), TZ: 'Europe/Amsterdam' }, execPath: process.execPath, pid: process.pid },
     spawn: () => { throw new Error('geen kind'); }, fetch: async () => { throw new Error('geen netwerk'); },
     logError: (w, e) => logs.push(w + ': ' + (e && e.message || e)), schrijfLog: (x) => logs.push(x), nu: () => 'NU', velden: (o) => JSON.stringify(o),

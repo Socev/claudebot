@@ -65,8 +65,10 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # gezondheid-app.js (wv937): App Gezondheid, routes GET /app/gezondheid(/genoom) (ontbreekt hij, dan 404 en gezondheid.aan=false in /health).
 # ideeen.js (wv761): App Ideeën van buitenaf (Ideeënbeurs), door server.js geladen (ontbreekt hij, dan 404 op /app/ideeen* en ideeen.aan=false in /health).
 # ideeen-filter.js (wv861): de vaste toets van de Ideeënbeurs, door ideeen.js geladen (ontbreekt hij, dan geen catalogus, geen Deel en geen plaatsen: ideeen.catalogus=false).
+# vault-veilig.js (wv900): lezen/schrijven/aanvullen in de vault zonder een symlink te volgen; server.js laadt hem lui, bandjes.js, ideeen.js en harvester.js
+#   bij het laden (ontbreekt hij, dan schrijft server.js geen box-rij meer (logError) en laden die drie niet: 404 op hun routes).
 # aix.js (wv942): de pod-kant van AIX (ondertekenen, lezen, goedkeuringsronde), door server.js geladen (ontbreekt hij, dan aix.aan=false en geen uurronde).
-RELEASE_OPTIONEEL="bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js managers-poort.js ringkaart.js gezondheid-app.js"
+RELEASE_OPTIONEEL="vault-veilig.js bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js managers-poort.js ringkaart.js gezondheid-app.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }
@@ -241,21 +243,23 @@ try:
   print(str(j.get("versie","")) + " " + ("nee" if False in e else ("ja" if True in e else "onbekend")))
 except Exception: print("- onbekend")' 2>/dev/null || echo "- onbekend"; }
 box_rij(){ [ -f "$BOX" ] || { log "LET OP: box $BOX bestaat niet - geen rij geschreven"; return 0; }
-  python3 - "$BOX" "$1" "$2" "$3" "$4" <<'PYBOX' || log "LET OP: kon geen rij in de box schrijven"
+  python3 -I -B - "$BOX" "$1" "$2" "$3" "$4" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$BRON_REPO" <<'PYBOX' || log "LET OP: kon geen rij in de box schrijven"
 import sys, datetime
-p, titel, zag, status, kost = sys.argv[1:6]
-s = open(p, encoding='utf-8').read()
-i = s.find('**Formaat**')
-if i < 0: sys.exit(1)
-j = s.index('\n', i) + 1
+p, titel, zag, status, kost, hier = sys.argv[1:7]
+# wv900: de box staat in de vault, schrijfbaar voor socev; een vaste tijdelijke naam (vroeger .machinekamer.md.uitrol.tmp)
+# volgde een symlink die socev daar zette. Nu vault_veilig.wijzig: getoetste mapdescriptor, eigen tmp met O_EXCL, rename, flock.
+sys.path[:0] = hier.split(':')   # naast dit script, anders de werkboom (BRON_REPO)
+import vault_veilig
 nu = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 rij = ('\n## [log] %s — %s\n- status: %s\n- van: uitrol.sh (nacontrole wv358)\n- wat ik zag: %s\n'
        '- wat het David kost als het blijft liggen: %s\n'
        '- voorstel: oorzaak zoeken in /opt/data/bin/uitrol.log, supervisor.log en de release; niet opnieuw uitrollen voor het verklaard is.\n') % (nu, titel, status, zag, kost)
-import os
-tmp = os.path.join(os.path.dirname(p), '.' + os.path.basename(p) + '.uitrol.tmp')   # punt ervoor: Obsidian/rclone negeren hem
-open(tmp, 'w', encoding='utf-8').write(s[:j] + rij + s[j:])
-os.replace(tmp, p)
+def erin(s):
+    i = s.find('**Formaat**')
+    if i < 0: sys.exit(1)
+    j = s.index('\n', i) + 1
+    return s[:j] + rij + s[j:]
+vault_veilig.wijzig(p, erin)
 PYBOX
 }
 if [ "${UITROL_NACONTROLE:-1}" = "1" ] && [ -n "$PIDS" ] && [ -n "$HUIDIG" ]; then

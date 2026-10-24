@@ -30,7 +30,7 @@ const a = src.indexOf('// ── wv680: bankluis'), b = src.indexOf('// ── e
 const k1 = src.indexOf('function smalKind('), k2 = src.indexOf('async function smalSbRpc(');
 const logs = [];
 const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD };
-const g = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT: VAULT, SECRET: 'x'.repeat(40),
+const g = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT: VAULT, SECRET: 'x'.repeat(40),
   __dirname: process.cwd(), process: { env: env, execPath: process.execPath, pid: process.pid }, spawn: spawn,
   fetch: async function () { throw new Error('geen kluis in deze toets'); }, appSbRpc: async function () { throw new Error('geen rpc in deze toets'); },
   logError: (w, e) => logs.push(w + ': ' + (e && e.message || e)), schrijfLog: (x) => logs.push(x), nu: () => 'NU', velden: (o) => JSON.stringify(o),

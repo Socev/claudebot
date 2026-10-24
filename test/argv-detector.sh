@@ -22,7 +22,7 @@ const src = fs.readFileSync('server.js', 'utf8');
 const a = src.indexOf('// ── argv-detector (wv698)'), b = src.indexOf('// ── einde argv-detector');
 if (a < 0 || b < 0) { console.log(JSON.stringify({ fout: 'blok niet gevonden' })); process.exit(0); }
 const log = [];
-const g = { require, fs, path, crypto, Buffer, process, setInterval, clearInterval, setTimeout, Date, JSON, Map, Set, Promise,
+const g = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, process, setInterval, clearInterval, setTimeout, Date, JSON, Map, Set, Promise,
   logError: (w, e) => log.push('fout ' + w + ' ' + (e && e.code)), schrijfLog: (s) => log.push(s),
   velden: (o) => Object.keys(o).map(k => k + '=' + o[k]).join(' '), nu: () => new Date().toISOString() };
 vm.createContext(g);

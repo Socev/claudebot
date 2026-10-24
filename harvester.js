@@ -16,6 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const VV = require('./vault-veilig.js');   // wv900: vault lezen en schrijven zonder een symlink te volgen
 const https = require('https');
 const dns = require('dns');
 const net = require('net');
@@ -431,24 +432,14 @@ function maak(deps) {
     catch (e) { return []; }
   }
   // Atomisch schrijven in de vault: tijdelijk bestand buiten de vault (zelfde schijf), modus van het origineel.
-  function vaultSchrijf(f, inhoud, modus) {
-    mkdir();
-    const tmp = path.join(DIR, 'tmp', path.basename(f) + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex'));
-    fs.writeFileSync(tmp, inhoud, { mode: modus || 0o644 });
-    try { fs.chmodSync(tmp, modus || 0o644); } catch (e) {}
-    try { fs.renameSync(tmp, f); }
-    catch (e) {
-      try { fs.unlinkSync(tmp); } catch (x) {}
-      if (!e || e.code !== 'EXDEV') throw e;
-      const naast = path.join(path.dirname(f), '.' + path.basename(f) + '.' + crypto.randomBytes(4).toString('hex') + '.tmp');
-      fs.writeFileSync(naast, inhoud, { mode: modus || 0o644 }); fs.renameSync(naast, f);
-    }
-  }
+  // wv900: eigen tmp met O_EXCL in de getoetste vaultmap + rename (vault-veilig.js). Vroeger een tmp buiten de vault + rename:
+  // dat volgde een map die socev door een symlink verving (rename naar een map naar keuze).
+  function vaultSchrijf(f, inhoud, modus) { VV.schrijf(f, inhoud, { modus: modus || 0o644 }); }
 
   // ── bronnen ──
   function bronnenStand() {
     let md;
-    try { md = fs.readFileSync(P.bronnen, 'utf8'); } catch (e) { return { ok: false, fout: 'bronnenpagina ontbreekt', bronnen: [], dicht: 'bronnenpagina ontbreekt' }; }
+    try { md = VV.lees(P.bronnen); } catch (e) { return { ok: false, fout: 'bronnenpagina ontbreekt', bronnen: [], dicht: 'bronnenpagina ontbreekt' }; }
     const b = leesBronnen(md);
     if (!b.ok) return { ok: false, fout: b.fout, bronnen: [], dicht: b.fout };
     const conf = conflicten(P.bronnen);
@@ -460,12 +451,12 @@ function maak(deps) {
   function bronnenSchrijf(b, wijzig) {
     const regels = b.regels.slice();
     wijzig(regels);
-    const st = fs.statSync(P.bronnen);
+    const st = fs.lstatSync(P.bronnen);
     vaultSchrijf(P.bronnen, regels.join('\n'), st.mode & 0o777);
   }
   // ── kaarten met controle "staat het nog op de bus" ──
   function busLees() {
-    try { return leesBus(fs.readFileSync(P.bus, 'utf8')); } catch (e) { return { ok: false, fout: 'ideeënbus niet leesbaar' }; }
+    try { return leesBus(VV.lees(P.bus)); } catch (e) { return { ok: false, fout: 'ideeënbus niet leesbaar' }; }
   }
   function lijst() {
     const k = kaartenLees(), bus = busLees();
@@ -499,7 +490,7 @@ function maak(deps) {
     const conf = conflicten(P.bus);
     if (conf.length) return { ok: false, status: 409, fout: 'er staat een conflictkopie naast de Ideeënbus; los die eerst op' };
     let st, md;
-    try { st = fs.statSync(P.bus); md = fs.readFileSync(P.bus, 'utf8'); } catch (e) { return { ok: false, status: 503, fout: 'de Ideeënbus is nu niet leesbaar' }; }
+    try { st = fs.lstatSync(P.bus); md = VV.lees(P.bus); } catch (e) { return { ok: false, status: 503, fout: 'de Ideeënbus is nu niet leesbaar' }; }
     const bus = leesBus(md);
     if (!bus.ok) return { ok: false, status: 409, fout: bus.fout };
     const nr = Math.max(0, ...bus.ideeen.map(function (i) { return i.nr; })) + 1;
@@ -524,7 +515,7 @@ function maak(deps) {
     t = t.replace(/\s*$/, '\n') + blok;
     // vlak voor het schrijven: niet veranderd sinds het lezen (agents en de ideeënmotor schrijven ook; Fable #7)
     let st2;
-    try { st2 = fs.statSync(P.bus); } catch (e) { return { ok: false, status: 503, fout: 'de Ideeënbus is nu niet leesbaar' }; }
+    try { st2 = fs.lstatSync(P.bus); } catch (e) { return { ok: false, status: 503, fout: 'de Ideeënbus is nu niet leesbaar' }; }
     if (st2.mtimeMs !== st.mtimeMs || st2.size !== st.size) return { ok: false, status: 409, fout: 'de Ideeënbus veranderde net; probeer het zo nog eens' };
     vaultSchrijf(P.bus, t, st.mode & 0o777);
     return { ok: true, nr: nr, titel: titel };
@@ -545,7 +536,7 @@ function maak(deps) {
         '> Bronnen: [[' + BRONNEN_PAD.replace(/\.md$/, '') + ']]. Bouwplan: [[01_Ontwikkeling/Harvester - ideeën oogsten (bouwplan 22-10-2026)]].\n\n' +
         '## Nieuw (' + nieuw.length + ')\n\n' + (nieuw.map(r).join('\n') || '(geen)') + '\n\n## Naar de Broedstoof (' + bs.length + ')\n\n' + (bs.map(r).join('\n') || '(geen)') + '\n\n' +
         'Weggegooid: ' + k.filter(function (x) { return x.status === 'weg'; }).length + ' (na 90 dagen verwijderd).\n';
-      let oud = null; try { oud = fs.readFileSync(P.spiegel, 'utf8'); } catch (e) {}
+      let oud = null; try { oud = VV.lees(P.spiegel); } catch (e) {}
       if (oud !== null && oud.replace(/^bijgewerkt: .*$/m, '') === t.replace(/^bijgewerkt: .*$/m, '')) return;
       if (conflicten(P.spiegel).length) return;
       vaultSchrijf(P.spiegel, t, 0o644);

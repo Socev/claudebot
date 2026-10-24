@@ -218,7 +218,7 @@ const W = fs.mkdtempSync(path.join(os.tmpdir(), 'aix-toets-'));
   const rpc = []; const logs = [];
   const appStaat = { tellers: {} };
   const timers = [];
-  const ctx = vm.createContext({ require, process: Object.assign({}, process, { env: Object.assign({}, process.env, { AIX_BASIS: basis, AIX_SLEUTEL: path.join(sleutelMap, 'sleutel') }) }),
+  const ctx = vm.createContext({ VV: () => require(require('path').resolve('vault-veilig.js')), require, process: Object.assign({}, process, { env: Object.assign({}, process.env, { AIX_BASIS: basis, AIX_SLEUTEL: path.join(sleutelMap, 'sleutel') }) }),
     fs, path, Buffer, console, JSON, Date, Promise, URL, AbortSignal, crypto,
     setTimeout: (f, ms) => { timers.push(ms); return { unref() {} }; }, setInterval: (f, ms) => { timers.push(ms); return { unref() {} }; },
     __dirname: process.cwd(), VAULT, SERVER_ECHT: false, rolPrimair: () => true, serverPad: (n) => path.join(W, 'srv-' + n), serverProefDeel: (d) => d,

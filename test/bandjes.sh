@@ -227,7 +227,16 @@ toets('dubbel id in de pagina: dicht en niets geschreven', l.dicht && /twee keer
 
 // ── bestanden ──
 const tmpDir = path.join(DIR, 'tmp');
-toets('tijdelijk bestand buiten de vault, niets achtergebleven', fs.existsSync(tmpDir) && fs.readdirSync(tmpDir).length === 0 && !fs.readdirSync(path.dirname(TG)).some((n) => n !== 'Bandjes.md'));
+// wv900: het tijdelijke bestand staat nu (willekeurige naam, O_EXCL) in de getoetste vaultmap zelf; na het schrijven is het weg
+toets('geen tijdelijk bestand achtergebleven (vaultmap en pod-tmp)', (!fs.existsSync(tmpDir) || fs.readdirSync(tmpDir).length === 0) && !fs.readdirSync(path.dirname(TG)).some((n) => n !== 'Bandjes.md'));
+{ // wv900: een map-symlink onderweg (socev) wordt niet gevolgd; een link op de registernaam ook niet
+  const echt = path.dirname(TG), ander = fs.mkdtempSync(path.join(require('os').tmpdir(), 'bandjes-ander-'));
+  fs.renameSync(echt, echt + '-weg'); fs.symlinkSync(ander, echt);
+  let geweigerd = false; try { S.nieuw('groenhouten', { naam: 'Via link' }); } catch (e) { geweigerd = true; }
+  const leeg = fs.readdirSync(ander).length === 0;
+  fs.unlinkSync(echt); fs.renameSync(echt + '-weg', echt); fs.rmSync(ander, { recursive: true, force: true });
+  toets('wv900 map-symlink: niets geschreven in de doelmap', leeg, geweigerd);
+}
 toets('registerpagina 0644', (fs.statSync(path.join(VAULT, B.PRAKTIJKEN.groenhouten.pad.replace('Bandjes.md', 'Bandjes.md'))).mode & 0o777) === 0o644 || (fs.statSync(TG).mode & 0o777) === 0o644, (fs.statSync(TG).mode & 0o777).toString(8));
 toets('journaal 0600 buiten de vault', (fs.statSync(path.join(DIR, 'journaal.jsonl')).mode & 0o777) === 0o600 && !path.join(DIR, 'journaal.jsonl').startsWith(VAULT));
 
