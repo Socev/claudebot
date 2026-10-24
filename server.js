@@ -116,6 +116,55 @@ const LOPER_STAND_PAD = serverPad('loper_stand', process.env.SOCEV_LOPER_STAND, 
 const LOPER_HERKANS_MS = Number((!SERVER_ECHT && process.env.SOCEV_LOPER_HERKANS_MS) || 30 * 1000);
 const LOPER_DAVID_NA_MS = 10 * 60 * 1000;
 
+// ── wv904: voorpoort vóór elke managerronde (managers-poort.js; ontwerp + Fable-review mk-scripts/wv904/ontwerp.md) ─────────────
+// WAAROM. CISO, Data, Design en UI Manager draaien met beheersleutels een skill uit de vault plus scripts; een misleid Socev-gesprek
+// mag die niet kunnen laten uitvoeren (Fable diffreview wv895 #1). HOE. processJob vraagt voor deze vier sessies eerst de poort
+// (socev-rechten na-ronde, ACL-toets, zegel als slot op de skill); niet groen = geen ronde, box-rij (1×/dag per sessie), /health.
+// Ontbreekt managers-poort.js in de release, dan ook geen ronde (dicht). Herzegelen na een skillwijziging (machinekamer):
+// node /opt/data/app/current/managers-poort.js zegel <sessie|alle> --door "<wvNNN: wat>"
+const MANAGER_POORT_SESSIES = new Set(['ciso', 'data-manager', 'design-manager', 'ui-manager']);
+const MANAGERS_ZEGEL = serverPad('managers_zegel', process.env.MANAGERS_ZEGEL, '/opt/data/managers/zegel.json', serverProefDeel('managers-zegel.json'));
+const MANAGERS_POORT = (function () {
+  const p = path.join(__dirname, 'managers-poort.js');
+  try {
+    return fs.existsSync(p) ? require(p).maak({ vault: VAULT, zegel: MANAGERS_ZEGEL,
+      rechten: SERVER_ECHT ? '/app/socev-rechten.sh' : (process.env.MANAGERS_POORT_RECHTEN || '') }) : null;
+  } catch (e) { logError('managers-poort', e); return null; }
+})();
+const managersPoortBoxDag = {};
+async function managersPoortToets(chatId) {
+  if (!MANAGERS_POORT) return { ok: false, fouten: ['managers-poort.js ontbreekt in deze release'] };
+  try {
+    const r = await MANAGERS_POORT.toets(String(chatId));
+    // dubbele lijst (hier en in managers-poort.js): kent de poort de sessie niet, dan dicht (Fable diffreview #3)
+    return (r && r.bewaakt === false) ? { ok: false, fouten: ['sessie ' + chatId + ' staat niet in managers-poort.js'] } : r;
+  }
+  catch (e) { return { ok: false, fouten: ['poort-uitzondering: ' + String(e && e.message || e).slice(0, 160)] }; }
+}
+function managersPoortBox(chatId, p) {
+  const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  if (managersPoortBoxDag[chatId] === dag) return;
+  managersPoortBoxDag[chatId] = dag;
+  try {
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const t = fs.readFileSync(pad, 'utf8');
+    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
+    if (!eerste) return;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const kort = function (x) { return String(x).replace(/[\r\n`]/g, ' ').replace(/\/opt\/data\/AI_SecondBrain\//g, '').slice(0, 200); };
+    const rij = '\n## [direct] ' + tijd + ' — managerronde ' + chatId + ' niet gestart: voorpoort niet groen (automatisch, wv904)\n' +
+      '- status: open\n- van: pod server.js (managers-poort, hooguit 1×/dag per manager)\n' +
+      '- gemeten: ' + (p.fouten || []).length + ' afwijking(en): ' + (p.fouten || []).slice(0, 5).map(kort).join('; ') + '\n' +
+      '- gevolg als er niets gebeurt: deze manager draait niet (weekronde en op afroep); /health.managers_poort toont de stand.\n' +
+      '- voorstel: gewijzigd door de machinekamer zelf? Dan controleren en herzegelen: `node /opt/data/app/current/managers-poort.js zegel ' + chatId +
+      ' --door "<wvNNN: wat>"`. Niet door ons gewijzigd, of ACL/eigenaar/symlink: niet herzegelen, eerst uitzoeken wie schreef (git/ctime, ' +
+      'bin/socev-rechten.log) — mogelijk een misleid Socev-gesprek.\n';
+    const tmp = path.join(path.dirname(pad), '.machinekamer.md.poort-' + crypto.randomBytes(4).toString('hex') + '.tmp');
+    fs.writeFileSync(tmp, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
+    fs.renameSync(tmp, pad);
+  } catch (e) { logError('managers-poort-box', e); }
+}
+
 // ── v2: tijdslimieten ───────────────────────────────────────────────────────
 // Inactiviteit: ruim boven de langste gemeten tool-call (Fable-review 544 s).
 // Voorgrond-bovengrens 30 min zolang de n8n-lus bij ~15,3 min stopt (fase 2 is
@@ -2349,6 +2398,18 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
       }
     }
     const lezen = gereedschap === 'lezen';
+    // wv904: een managerronde (weekronde via /run of op afroep) alleen na een groene voorpoort; anders geen ronde (dicht).
+    if (!lezen && MANAGER_POORT_SESSIES.has(String(chatId || ''))) {
+      const poort = await managersPoortToets(chatId);
+      if (!poort.ok) {
+        managersPoortBox(String(chatId), poort);
+        j.status = 'done'; j.done_at = Date.now();
+        j.result = { ok: false, error: 'manager-poort', output: 'Managerronde ' + chatId + ' niet gestart: de voorpoort (wv904) zag ' + (poort.fouten || []).length +
+          ' afwijking(en), eerste: ' + String((poort.fouten || [])[0] || '?').slice(0, 200) + '. Zie de box-rij in de machinekamer.', files: [] };
+        jobEindLog(jobId, j, ws);
+        return;
+      }
+    }
     // Gereedschap 'lezen': geen sessiegeheugen en geen lessenblok (machinale klus); cwd = de eigen jobmap.
     const sKey = lezen ? '' : sessieSleutel(key, keuze.runtime);
     const sessieGelezen = Date.now();   // wv895 (Fable diffreview #4): een /reset ná dit moment wint, ook als hij vóór j.started valt
@@ -3531,6 +3592,7 @@ function handleRequest(req, res) {
       bandjes: bandjesInfo(),
       gezondheid: typeof gezondheidInfo === 'function' ? gezondheidInfo() : { aan: false },   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
+      managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
