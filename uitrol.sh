@@ -68,7 +68,8 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # vault-veilig.js (wv900): lezen/schrijven/aanvullen in de vault zonder een symlink te volgen; server.js laadt hem lui, bandjes.js, ideeen.js en harvester.js
 #   bij het laden (ontbreekt hij, dan schrijft server.js geen box-rij meer (logError) en laden die drie niet: 404 op hun routes).
 # aix.js (wv942): de pod-kant van AIX (ondertekenen, lezen, goedkeuringsronde), door server.js geladen (ontbreekt hij, dan aix.aan=false en geen uurronde).
-RELEASE_OPTIONEEL="vault-veilig.js bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js managers-poort.js mk-tekst.js ringkaart.js gezondheid-app.js ovis-register.js ovis-run.js"
+# app-vast.js (wv1051, OVIS M1b): vastzetten in het menu, GET/POST /app/vast (ontbreekt hij, dan 404 en toont de app de standaard).
+RELEASE_OPTIONEEL="vault-veilig.js bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js managers-poort.js mk-tekst.js ringkaart.js gezondheid-app.js ovis-register.js ovis-run.js app-vast.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

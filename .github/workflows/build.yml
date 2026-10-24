@@ -311,6 +311,9 @@ jobs:
       - name: "gezondheid-app (wv937, App Gezondheid)"
         if: ${{ !cancelled() }}
         run: bash test/gezondheid-app.sh
+      - name: "app-vast (wv1051, OVIS M1b: vastzetten in het menu)"
+        if: ${{ !cancelled() }}
+        run: bash test/app-vast.sh
       # Health-rapporten (wv811): start zonder taalmodel — alleen de startregel terug, omgeving-allowlist, tijdgrens, één tegelijk.
       - name: "health-rapporten (wv811, start zonder taalmodel)"
         if: ${{ !cancelled() }}

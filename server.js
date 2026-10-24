@@ -4703,6 +4703,11 @@ const APP_POORT_PAD = path.join(APP_DATA, 'geheim', 'poort.key');
 const APP_HEROPEND = path.join(APP_DATA, 'koppel-heropend');      // machinekamer: eerste-apparaatroute opnieuw open
 const APP_HERSTEL_VERVALT = path.join(APP_DATA, 'herstel-vervalt'); // machinekamer: herstelcode én telefoon kwijt (bouwplan § 4.4c)
 const APP_SESSIES = path.join(APP_DATA, 'sessies.json');          // wv231: sessies over een herstart (alleen hash, geen token; § 4.4e)
+const APP_VAST = path.join(APP_DATA, 'vast.json');                // wv1051 (OVIS M1b): vastgezette plekken en Apps, alleen id's
+// § 4.3: de ene lijst privé-App-id's (catalogus src/modules.ts). Nooit op een apparaat met een vaste plek: de drie routes hieronder
+// weigeren dan, en vast.json gaat daar zonder deze id's naar de app (geen privé-App in het menu, ook geen lege kopregel).
+const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften'];
+function appPriveDicht(a, id) { return !!(a && a.soort === 'vast') && APP_PRIVE_MODULES.indexOf(id) >= 0; }
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
 const APP_CODE_MS = 10 * 60 * 1000;
@@ -10006,7 +10011,7 @@ const APP_FIN_CACHE_MS = 60000, APP_FIN_MAX_MS = 20000, APP_FIN_TERUGVAL_MS = 30
 let appFinCache = null;   // { op, d }
 async function appFinancien(req, res, a) {
   res._app.reden = 'financien';
-  if (a.soort === 'vast') return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'Financiën staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' });
+  if (appPriveDicht(a, 'financien')) return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'Financiën staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' });
   const nu = Date.now();
   if (appFinCache && nu - appFinCache.op < APP_FIN_CACHE_MS) return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString() }, appFinCache.d));
   let r;
@@ -10056,7 +10061,7 @@ async function appGezondheid(req, res, a, route) {
   res._app.reden = route === 'GET /app/gezondheid' ? 'gezondheid' : 'gezondheid genoom';
   const gezondheid = gezondheidMod();
   if (!gezondheid) return appWeiger(res, 404, 'Gezondheid zit niet in deze versie van de pod', 'gezondheid ontbreekt');
-  if (a.soort === 'vast') return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'Gezondheid staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' });
+  if (appPriveDicht(a, 'gezondheid')) return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'Gezondheid staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' });
   const nu = Date.now(), c = appGezCache[route];
   if (c && nu - c.op < APP_GEZ_CACHE_MS) return appStuur(res, 200, Object.assign({}, c.j, { vaste_plek: false, bijgewerkt: new Date(c.op).toISOString() }));
   let r;
@@ -10133,7 +10138,7 @@ function potAfAntwoord(j) {
 }
 async function appPotAfschriften(req, res, a) {
   res._app.reden = 'pot-afschriften';
-  if (a.soort === 'vast') return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'POT-afschriften staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek (er staan salarisgegevens in).' });
+  if (appPriveDicht(a, 'pot-afschriften')) return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'POT-afschriften staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek (er staan salarisgegevens in).' });
   if (!potAfAan()) return appWeiger(res, 503, 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten', 'pot uit');
   let r;
   try { r = await bankKind(['pot-afschrift-maanden'], {}, POT_AF_MAX_MS); } catch (e) { r = null; }
@@ -11482,6 +11487,7 @@ function handleApp(req, res) {
         if (route.indexOf(' /app/studio/') > 0) return typeof appStudio === 'function' ? appStudio(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'studio');   // wv707
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
         if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
+        if (route === 'GET /app/vast' || route === 'POST /app/vast') return appVastRoute(req, res, a, d);   // wv1051 (OVIS M1b): vastzetten
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
@@ -14497,6 +14503,29 @@ async function appManagers(req, res, a, d, route) {
 // ── einde managers ──
 
 // ── Ringkaart (wv888, 23-10-2026; bouwplan "01_Ontwikkeling/Ringkaart van Socev - tandwielweergave (bouwplan 23-10-2026).md") ──
+// ── wv1051 (OVIS M1b, ontwerplijnen § 2.3/§ 4.2/§ 4.3): GET/POST /app/vast. De logica staat in app-vast.js (zonder opslag of HTTP);
+// hier alleen lezen, schrijven (atomisch, alleen dit proces) en antwoorden. Ontbreekt app-vast.js in de release (terugrol), dan 404
+// en toont de app de standaard (Facturen en Bestanden). Een kapot bestand = de standaard (de volgende wijziging schrijft hem opnieuw).
+const APP_VAST_MOD = (function () { const p = path.join(__dirname, 'app-vast.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('app-vast', e); return null; } })();
+function appVastRoute(req, res, a, d) {
+  if (!APP_VAST_MOD) return appWeiger(res, 404, 'onbekend', 'vast ontbreekt');
+  const L = APP_VAST_MOD, vp = !!(a && a.soort === 'vast');
+  let j = null;
+  try { j = appLeesStreng(APP_VAST, null); } catch (e) { logError('vast.json', e); }
+  const nu = L.uitBestand(j);
+  const antwoord = function (lijst, standaard) {
+    appStuur(res, 200, { ok: true, vast: L.voorApparaat(lijst, vp, APP_PRIVE_MODULES), standaard: standaard, vaste_plek: vp, per_plek: 5 });
+  };
+  if (req.method !== 'POST') { res._app.reden = 'vast'; res._app.stil = true; return antwoord(nu.lijst, nu.standaard); }   // de app vraagt dit om de paar minuten
+  const u = L.pas(nu.lijst, d, vp);
+  if (!u.ok) return appWeiger(res, u.status, u.fout, u.reden);
+  res._app.reden = 'vast ' + d.actie + ' ' + String(d.scherm).slice(0, 40) + (u.veranderd ? '' : ' (al zo)');
+  if (!u.veranderd) return antwoord(nu.lijst, nu.standaard);
+  try { appSchrijfJson(APP_VAST, { versie: 1, bijgewerkt: new Date().toISOString(), vast: u.lijst }); }
+  catch (e) { logError('vast.json schrijven', e); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo nog eens', 'vast schrijven'); }
+  return antwoord(u.lijst, false);
+}
+
 // GET /app/ringkaart: wachters (hartslagtabel via RPC mk_hartslag_stand, service_role, 60 s buffer), skills en kanalen (ringkaart.js,
 // uit de vault). Alleen lezen. Op een vaste plek geen beschrijvingen (Fable wv888 #4). Stil in het auditlog bij 200 (de app ververst
 // elke 2 min zolang de ringen in beeld zijn). Ontbreekt ringkaart.js in de release (terugrol), dan 404 en tekent de app de ringen zonder.
