@@ -420,19 +420,54 @@ test('routes: GET/POST validatie voor de eigenaar; praktijkmanager ziet geen his
   assert.ok(F.ROUTES.GET.includes('validatie') && F.ROUTES.POST.includes('validatie'));
 });
 
-test('prestaties: overzicht met 1.500 facturen en 30.000 regels blijft onder 3 s (diffreview #1)', () => {
+// Prestaties (diffreview #1; wv1225: ook los van de snelheid van de runner). Drie toetsen op één meting:
+// 1. absoluut: 1.500 facturen × 30.000 regels onder 3 s (× TOETS_TIJDFACTOR op CI);
+// 2. schaal: twee keer zoveel regels kost hooguit 3,2× zoveel tijd (lineair ± 2–2,5×; een kwadratische uitschieter ± 4×);
+// 3. ijkwerk: het overzicht kost hooguit 3× de kale doorloop die betalingVan minstens moet doen (filter op entiteit, venster als tekst en
+//    bedrag, drie keer per factuur) op dezelfde runner en dezelfde gegevens. Een constante vertraging (Date-objecten in venster() maakte
+//    het ± 10× trager) verandert de schaalverhouding niet, maar deze wel. Bij 2 en 3 telt de trage van twee metingen in de noemer, zodat
+//    een drukke runner de toets niet rood maakt.
+function prestatieGegevens(nTx) {
   const tx = [], fs_ = [];
-  for (let i = 0; i < 30000; i++) {
+  for (let i = 0; i < nTx; i++) {
     const d = K.plusDagen('2024-01-01', i % 900);
     tx.push({ id: 'x' + i, entiteit: i % 2 ? 'tolgaarde' : 'groenhouten', boekdatum: d, bedrag_centen: -(1000 + (i % 97) * 10), tegenpartij_iban: maakIban('NL', 'TEST', String(1000 + (i % 400)).padStart(10, '0')),
       tegenpartij_naam: 'Leverancier ' + (i % 400), is_incasso: i % 3 === 0, incassant_id: i % 3 === 0 ? 'NL00ZZZ' + (i % 400) : null, omschrijving: 'factuur ' + i });
   }
   for (let j = 0; j < 1500; j++) fs_.push({ id: 'f' + j, entiteit: j % 2 ? 'tolgaarde' : 'groenhouten', nummer: 'N' + j, incl: 1000 + (j % 97) * 10,
     iban: maakIban('NL', 'TEST', String(1000 + (j % 400)).padStart(10, '0')), factuurdatum: K.plusDagen('2024-01-01', j % 900) });
-  const t0 = Date.now();
-  for (const f of fs_) f.betaling = V.betalingVan(f, tx, {});
-  V.controles({ vandaag: '2026-10-22', transacties: tx, facturen: fs_, dekking: [] });
-  V.profielen(tx);
-  const ms = Date.now() - t0;
-  assert.ok(ms < 3000 * TIJDFACTOR, 'duurde ' + ms + ' ms (grens ' + 3000 * TIJDFACTOR + ' ms)');
+  return { tx, fs_ };
+}
+function msVan(f) { const t0 = process.hrtime.bigint(); f(); return Number(process.hrtime.bigint() - t0) / 1e6; }
+function overzichtMs({ tx, fs_ }) {
+  return msVan(() => {
+    for (const f of fs_) f.betaling = V.betalingVan(f, tx, {});
+    V.controles({ vandaag: '2026-10-22', transacties: tx, facturen: fs_, dekking: [] });
+    V.profielen(tx);
+  });
+}
+function ijkMs({ tx, fs_ }) {
+  let n = 0;
+  const ms = msVan(() => {
+    for (const f of fs_) {
+      const van = K.plusDagen(f.factuurdatum, -45), tot = K.plusDagen(f.factuurdatum, 120);
+      for (let r = 0; r < 3; r++) n += tx.filter((t) => t.entiteit === f.entiteit && t.bedrag_centen < 0 && t.boekdatum >= van && t.boekdatum <= tot && Math.abs(t.bedrag_centen) === f.incl).length;
+    }
+  });
+  assert.ok(n > 0, 'ijkwerk vond niets (gegevens veranderd?)');
+  return ms;
+}
+
+test('prestaties: overzicht met 1.500 facturen en 30.000 regels blijft onder 3 s, schaalt lineair en blijft dicht bij het ijkwerk (diffreview #1, wv1225)', (t) => {
+  const vol = prestatieGegevens(30000), half = prestatieGegevens(15000);
+  overzichtMs(prestatieGegevens(1500));   // opwarmen
+  const ijk1 = ijkMs(half), half1 = overzichtMs(half);
+  const ms = overzichtMs(vol);
+  const half2 = overzichtMs(half), ijk2 = ijkMs(half);
+  const meting = 'vol ' + Math.round(ms) + ' ms, half ' + Math.round(half1) + '/' + Math.round(half2) + ' ms, ijk ' + Math.round(ijk1) + '/' + Math.round(ijk2) + ' ms';
+  t.diagnostic(meting);   // in de CI-log: hoe ver de runner van de grenzen zit
+  assert.ok(ms < 3000 * TIJDFACTOR, 'duurde ' + Math.round(ms) + ' ms (grens ' + 3000 * TIJDFACTOR + ' ms; ' + meting + ')');
+  const schaal = ms / Math.max(half1, half2), ijk = Math.min(half1, half2) / Math.max(ijk1, ijk2);
+  assert.ok(schaal < 3.2, 'dubbel zoveel regels kost ' + schaal.toFixed(2) + '× zoveel tijd (grens 3,2; ' + meting + ')');
+  assert.ok(ijk < 3, 'overzicht kost ' + ijk.toFixed(2) + '× het ijkwerk (grens 3; ' + meting + ')');
 });

@@ -7,9 +7,17 @@
 # Raakt de pod, de kluis, de echte vault en /opt/data/bank niet. Gebruik: bash test/bunq-poort.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
-node --no-warnings - <<'JS'
+node --no-warnings --require ./test/vaste-klok.cjs - <<'JS'   # wv1225: TOETS_NU=<ISO> = vast moment
 const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto'), http = require('http'), vm = require('vm');
 const { spawn } = require('child_process');
+// wv1225: TOETS_NU=<ISO> draait de toets én elk bank-lezer.js-kind (ook via smalKind in server.js) op dezelfde vaste klok
+// (test/vaste-klok.cjs); zonder TOETS_NU doet klokSpawn precies wat spawn doet.
+const KLOK = path.resolve('test/vaste-klok.cjs');
+function klokSpawn(cmd, args, o) {
+  if (!process.env.TOETS_KLOK_DELTA || cmd !== process.execPath) return spawn(cmd, args, o);
+  const env = o && o.env ? Object.assign({}, o.env, { TOETS_KLOK_DELTA: process.env.TOETS_KLOK_DELTA }) : undefined;
+  return spawn(cmd, ['--require', KLOK].concat(args), Object.assign({}, o, env ? { env: env } : {}));
+}
 let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (!ok && extra !== undefined ? '  [' + JSON.stringify(extra).slice(0, 500) + ']' : '')); }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'bunqpoort-'));
@@ -51,7 +59,7 @@ let kluisQuery = '', kluisWeg = false;
 api.listen(0, '127.0.0.1', async function () {
   const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD, BUNQ_API_BASIS: 'http://127.0.0.1:' + api.address().port, BUNQ_PAUZE_MS: '0',
     SUPABASE_URL: 'https://abcdef.supabase.co', SUPABASE_MCP_TOKEN: 'pat-geheim' };
-  const g = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, spawn, VAULT: W, SECRET: SECRET,
+  const g = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, spawn: klokSpawn, VAULT: W, SECRET: SECRET,
     __dirname: process.cwd(), process: { env: env, execPath: process.execPath },
     fetch: async function (url, o) {
       if (kluisWeg) throw new Error('netwerk weg');

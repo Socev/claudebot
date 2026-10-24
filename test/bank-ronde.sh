@@ -7,9 +7,17 @@
 # Raakt de echte banken, de kluis, Supabase en /opt/data/bank niet. Gebruik: bash test/bank-ronde.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
-node --no-warnings - <<'JS'
+node --no-warnings --require ./test/vaste-klok.cjs - <<'JS'   # wv1225: TOETS_NU=<ISO> = vast moment
 const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto'), http = require('http'), vm = require('vm');
 const { spawn } = require('child_process');
+// wv1225: TOETS_NU=<ISO> draait de toets én elk bank-lezer.js-kind (ook via smalKind in server.js) op dezelfde vaste klok
+// (test/vaste-klok.cjs); zonder TOETS_NU doet klokSpawn precies wat spawn doet.
+const KLOK = path.resolve('test/vaste-klok.cjs');
+function klokSpawn(cmd, args, o) {
+  if (!process.env.TOETS_KLOK_DELTA || cmd !== process.execPath) return spawn(cmd, args, o);
+  const env = o && o.env ? Object.assign({}, o.env, { TOETS_KLOK_DELTA: process.env.TOETS_KLOK_DELTA }) : undefined;
+  return spawn(cmd, ['--require', KLOK].concat(args), Object.assign({}, o, env ? { env: env } : {}));
+}
 let fouten = 0, goed = 0;
 function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok ? 'GROEN ' : 'ROOD  ') + naam + (!ok && extra !== undefined ? '  [' + JSON.stringify(extra).slice(0, 700) + ']' : '')); }
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'bankronde-'));
@@ -89,7 +97,7 @@ const bunqApi = http.createServer(function (req, res) {
 
 function draai(args, stdin, extra) {
   return new Promise(function (klaar) {
-    const k = spawn(process.execPath, ['--no-warnings', 'bank-lezer.js'].concat(args), { env: Object.assign({ PATH: process.env.PATH, TZ: 'Europe/Amsterdam', BANK_DIR: BD,
+    const k = klokSpawn(process.execPath, ['--no-warnings', 'bank-lezer.js'].concat(args), { env: Object.assign({ PATH: process.env.PATH, TZ: 'Europe/Amsterdam', BANK_DIR: BD,
       BANK_API_BASIS: 'http://127.0.0.1:' + ebApi.address().port, BUNQ_API_BASIS: 'http://127.0.0.1:' + bunqApi.address().port, BUNQ_PAUZE_MS: '0', BANK_RONDE_VERS_MS: '0' }, extra || {}) });
     let o = '', e = '';
     k.stdout.on('data', (c) => o += c); k.stderr.on('data', (c) => e += c);
@@ -221,7 +229,7 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
       },
       logError: (w, e) => logs.push(w + ': ' + (e && e.message || e)), schrijfLog: (x) => logs.push(x), nu: () => 'NU', velden: (o) => JSON.stringify(o),
       reqPath: (req) => (req.url || '').split('?')[0], rolPoort: (res, verder) => verder(), rol: { eerste: true }, rolPrimair: () => true, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 50 };
-    g.spawn = spawn;
+    g.spawn = klokSpawn;
     const ctx = vm.createContext(g);
     vm.runInContext(src.slice(k1, k2) + '\n' + src.slice(a, b) + '\n;globalThis.__h = { bankRonde, bankKaarten, bankRondeStart, bankRondeUitkomst };', ctx, { filename: 'server.js#bank' });
     const h = ctx.__h;
@@ -328,7 +336,7 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
     toets('route /bank-ronde(/uitkomst): secret met timingSafeEqual, leeg SECRET weigert, achter rolPoort', /req\.url === '\/bank-ronde\/uitkomst'\)\)[\s\S]{0,120}rolPoort[\s\S]{0,200}!SECRET \|\|[\s\S]{0,200}timingSafeEqual/.test(srv), null);
     toets('ronde niet via /smal/bank (geen Socev-sleutel)', !/BANK_OPDRACHTEN = \[[^\]]*'ronde'/.test(srv), null);
   } catch (e) { fouten++; console.log('ROOD  uitzondering: ' + (e && e.stack || e)); }
-  ebApi.close(); bunqApi.close(); fs.rmSync(W, { recursive: true, force: true });
+  ebApi.close(); bunqApi.close(); fs.rmSync(W, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });   // wv1225: een nalopende schrijver gaf 1× ENOTEMPTY (1-1 00:30 NL)
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
 }));

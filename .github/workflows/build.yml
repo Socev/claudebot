@@ -239,6 +239,11 @@ jobs:
           t test/bank-lezer.sh
           t test/bankluis-poort.sh
           t test/bank-ronde.sh
+          # wv1225: de drie bankluis-toetsen ook op vaste momenten (toets én elk bank-lezer.js-kind op dezelfde klok): 00:30 NL met de UTC-datum
+          # nog op gisteren, 1-1 00:30 NL (jaarwissel), na de zomertijdwissel, en op dag 1–9 van een maand
+          for nu in 2026-12-15T23:30:00Z 2026-12-31T23:30:00Z 2027-04-10T22:30:00Z 2026-11-03T10:00:00Z; do
+            for f in test/bunq-poort.sh test/bankluis-poort.sh test/bank-ronde.sh; do TOETS_NU=$nu t $f; done
+          done
           t test/bank-archief.sh
           t test/vaste-lasten-ronde.sh   # wv776: maandronde vaste lasten (binnenblok vault, poort nieuwste post, box 1× per maand per reden)
           t test/paypal-laag.sh
