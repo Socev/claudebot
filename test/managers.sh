@@ -247,7 +247,7 @@ const wacht = () => new Promise((r) => setImmediate(r));
   toets('10 bron manager in BERICHT_BRONNEN, geen MELD_SOORT-regel', /\n  'manager',\s+\/\/ wv895/.test(s) && !/MELD_SOORT = \{[^}]*manager/.test(s));
   toets('10 rapport altijd kanaal machinekamer', /berichtIntern\(\{ kanaal: 'machinekamer', bron: 'manager'/.test(s) && !/kanaal: 'hoofd', bron: 'manager'/.test(s));
   toets('10 reset noteert tijd; processJob bewaart sessie niet na een reset tijdens de beurt',
-    /saveSessions\(\); sessieResetOp\[key\] = Date\.now\(\); \}\n      res\.writeHead\(200/.test(s) && /const sessieGelezen = Date\.now\(\);[^\n]*\n\s*const sessionId = /.test(s) && /if \(sKey && r\.session_id && !\(\(sessieResetOp\[key\] \|\| 0\) > sessieGelezen\)\)/.test(s));
+    /saveSessions\(\); sessieResetOp\[key\] = Date\.now\(\); \}\n      res\.writeHead\(200/.test(s) && /const sessieGelezen = Date\.now\(\);[^\n]*\n\s*(?:const|let) sessionId = /.test(s) && /if \(sKey && r\.session_id && !\(\(sessieResetOp\[key\] \|\| 0\) > sessieGelezen\)\)/.test(s));
   toets('10 managersStartRun: sessie wissen, opgehaald zetten, output_file lezen', /function managersStartRun[\s\S]{0,400}delete chatSessions[\s\S]{0,1600}j\.opgehaald = Date\.now\(\)[\s\S]{0,300}output_file/.test(s));
   toets('10 vangnet = account1Vangnet, uitrol = uitrolWacht', /vangnet: account1Vangnet/.test(s) && /uitrolWacht: function \(\) \{ return !!uitrolWacht\(\)\.wacht; \}/.test(s));
   toets('10 knopJa leest alleen hoofdkanaal en Ja', /x\.slice\(-9\) === ':' \+ hash && v\[x\] && v\[x\]\.kanaal === 'hoofd'/.test(s) && /r\.an\.keuze === 'ja'/.test(s));

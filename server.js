@@ -128,10 +128,13 @@ const LOPER_DAVID_NA_MS = 10 * 60 * 1000;
 // node /opt/data/app/current/managers-poort.js zegel <sessie|alle> --door "<wvNNN: wat>"
 const MANAGER_POORT_SESSIES = new Set(['ciso', 'data-manager', 'design-manager', 'ui-manager']);
 const MANAGERS_ZEGEL = serverPad('managers_zegel', process.env.MANAGERS_ZEGEL, '/opt/data/managers/zegel.json', serverProefDeel('managers-zegel.json'));
+// wv998: de vier draaien met cwd = een eigen werkmap buiten de vault (vaste CLAUDE.md uit de release, eigen geheugen); de poort maakt
+// en toetst hem. Zo laadt een ronde geen vault-CLAUDE.md, geneste CLAUDE.md of gedeeld auto-memory (socev-schrijfbaar). ws blijft vault.
+const MANAGERS_WERKMAP = serverPad('managers_werkmap', process.env.MANAGERS_WERKMAP, '/opt/data/managers/werkmap', serverProefDeel('managers-werkmap'));
 const MANAGERS_POORT = (function () {
   const p = path.join(__dirname, 'managers-poort.js');
   try {
-    return fs.existsSync(p) ? require(p).maak({ vault: VAULT, zegel: MANAGERS_ZEGEL,
+    return fs.existsSync(p) ? require(p).maak({ vault: VAULT, zegel: MANAGERS_ZEGEL, werkmap: MANAGERS_WERKMAP, projects: path.join(HOME, '.claude', 'projects'),   // = PROJECTS_DIR (staat lager)
       rechten: SERVER_ECHT ? '/app/socev-rechten.sh' : (process.env.MANAGERS_POORT_RECHTEN || '') }) : null;
   } catch (e) { logError('managers-poort', e); return null; }
 })();
@@ -141,7 +144,10 @@ async function managersPoortToets(chatId) {
   try {
     const r = await MANAGERS_POORT.toets(String(chatId));
     // dubbele lijst (hier en in managers-poort.js): kent de poort de sessie niet, dan dicht (Fable diffreview #3)
-    return (r && r.bewaakt === false) ? { ok: false, fouten: ['sessie ' + chatId + ' staat niet in managers-poort.js'] } : r;
+    if (r && r.bewaakt === false) return { ok: false, fouten: ['sessie ' + chatId + ' staat niet in managers-poort.js'] };
+    // wv998: groen zonder werkmap (oude managers-poort.js naast deze server.js) = dicht: dan zou de ronde in de vault draaien
+    if (r && r.ok && !(r.werkmap && r.werkmap.pad)) return { ok: false, fouten: ['de poort gaf geen werkmap (managers-poort.js te oud)'] };
+    return r;
   }
   catch (e) { return { ok: false, fouten: ['poort-uitzondering: ' + String(e && e.message || e).slice(0, 160)] }; }
 }
@@ -2401,6 +2407,8 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     }
     const lezen = gereedschap === 'lezen';
     // wv904: een managerronde (weekronde via /run of op afroep) alleen na een groene voorpoort; anders geen ronde (dicht).
+    // wv998: de ronde draait dan in de werkmap die de poort net maakte en toetste (cwd), niet in de vault.
+    let managerCwd = '';
     if (!lezen && MANAGER_POORT_SESSIES.has(String(chatId || ''))) {
       const poort = await managersPoortToets(chatId);
       if (!poort.ok) {
@@ -2411,11 +2419,17 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
         jobEindLog(jobId, j, ws);
         return;
       }
+      managerCwd = poort.werkmap.pad;
     }
     // Gereedschap 'lezen': geen sessiegeheugen en geen lessenblok (machinale klus); cwd = de eigen jobmap.
     const sKey = lezen ? '' : sessieSleutel(key, keuze.runtime);
     const sessieGelezen = Date.now();   // wv895 (Fable diffreview #4): een /reset ná dit moment wint, ook als hij vóór j.started valt
-    const sessionId = lezen ? '' : (explicitSession || (sKey ? chatSessions[sKey] : '') || '');
+    let sessionId = lezen ? '' : (explicitSession || (sKey ? chatSessions[sKey] : '') || '');
+    // wv998 (Fable #3): een sessie van vóór de werkmap (of zonder transcript) hervat niet maar begint vers; --resume faalde anders
+    if (managerCwd && sessionId && (keuze.runtime || 'claude') === 'claude' && !fs.existsSync(path.join(projectDirFor(managerCwd), sessionId + '.jsonl'))) {
+      schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'sessie-zonder-transcript', sessie: String(chatId).slice(0, 40) }));
+      sessionId = '';
+    }
     const lesblok = lezen ? '' : await lessenBlok(prompt, chatId, '');
     // 'lezen' werkt in de jobmap, niet in de workspace: altijd de kale map-hint (de ghawa-hint noemt een repo).
     const misRegel = invoerMis.length ? '\n\n[Systeem: ' + invoerMis.length + ' meegestuurd(e) bestand(en) kon(den) niet in de invoermap worden gezet: ' + invoerMis.join(', ') + '. Zeg dat tegen David.]' : '';
@@ -2437,7 +2451,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
       loperJobmap(base);
     }
     if (j.app) runOpts.opSpawn = function (i) { appLopendSpawn(jobId, i); };   // wv716: pid en transcript in beurt-lopend.json
-    const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, lezen ? base : space.dir, runOpts);
+    const r = await runMetFallback(keuze, fullPrompt, sessionId, outdir, lezen ? base : (managerCwd || space.dir), runOpts);
     if (lezen) r.gereedschap = 'lezen';
     r.files = collectFiles(outdir);
     if (lezen) {
