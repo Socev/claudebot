@@ -248,6 +248,117 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('6 health zonder inhoud', JSON.stringify(k.ovisInfo()).indexOf('Tolgaarde') < 0 && k.ovisInfo().aan === true);
     toets('6 alleen de bewust mislukte nacht gelogd', fouten_.length === 1 && /^ovis-nacht /.test(fouten_[0]), fouten_);
   }
+
+  // ── 7. kaarten (wv1253): bundel, kritiek, Bibliothecaris, Anders, uitkomst, haak ──
+  { const src = fs.readFileSync('server.js', 'utf8');
+    const gm = /const APP_GEVOELIG = \[([\s\S]*?)\n\];/.exec(src);
+    const GEV = eval('[' + gm[1] + ']');
+    const gevoelig = (t) => { t = String(t).normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase(); for (const [r, re] of GEV) if (re.test(t)) return r; return null; };
+    // kopie van machinekamer.voor_jou_verwijzing (gemeten 24-10-2026)
+    const verwijzing = (t) => /(^|[^a-z0-9_])wv[0-9]+/i.test(t) || /(mk-scripts\/|\/opt\/data\/)/i.test(t) || /(^|[\s("'‘“/])[0-9]{2}_[A-Z][A-Za-z]+/.test(t) || /[\]a-z0-9)]\.md([^a-z0-9]|$)/i.test(t);
+    const grenzen = (k) => k.titel.length >= 3 && k.titel.length <= 90 && k.waarom.length <= 400 && k.stappen.length <= 12 && k.sleutel.length <= 61 && R.KAART_SLEUTEL_RE.test(k.sleutel)
+      && ![k.titel, k.waarom].concat(k.stappen).some(verwijzing);
+    // eruitUit (Fable #4): alleen met een uitsluitwoord
+    const E = (t, n) => JSON.stringify(R.eruitUit(t, n || 12));
+    toets('7 Anders "zonder 3 en 7"', E('zonder 3 en 7') === '[3,7]');
+    toets('7 Anders "3, 7 eruit" / "niet 2-4." / "regel 5 weg" / "ja, alles behalve 3"', E('3, 7 eruit') === '[3,7]' && E('niet 2-4.') === '[2,3,4]' && E('regel 5 weg') === '[5]' && E('ja, alles behalve 3') === '[3]');
+    toets('7 Anders zonder uitsluitwoord of met ander woord = niets', ['3 en 7', 'alleen 3', '3 wel 5 niet', 'zonder 3 maar 7 wel', 'wacht nog even', '', 'zonder 13', 'zonder 0', 'niet 4-2'].every((t) => R.eruitUit(t, 12) === null));
+    const pag = (pad, regels) => { const t = ['---', 'type: entiteit'].concat(regels, ['---', 'tekst', '']).join('\n'); const p = R.leesPagina(pad, t); return p; };
+    const pTG = pag('10_Zakelijk/Tolgaarde/Entiteit - TG.md', ['entiteit_id: TG', 'soort: eigen', 'status: vast', 'naam: "Huisartsenpraktijk Tolgaarde B.V."', 'domeinen: [huisartsentolgaarde.nl]', 'ovis:', '  db: ["supabase:secondbrain/knoop#TG"]']);
+    const pA = pag('10_Zakelijk/_Gedeeld/Relaties/Gemeente Leusden.md', ['entiteit_id: org:gemeente-leusden', 'soort: instantie', 'status: concept', 'naam: Gemeente Leusden', 'domeinen: [leusden.nl]', 'zaad: ["domein leusden.nl: praktijkmail, 5 mails (sep–okt 2026)"]', 'ovis:', '  db: ["supabase:secondbrain/knoop#org:gemeente-leusden"]']);
+    const pB = pag('20_Prive/Relaties/Aon.md', ['entiteit_id: org:aon', 'soort: verzekeraar', 'status: concept', 'naam: Aon', 'domeinen: [aon.nl]', 'aliassen: ["Aon Nederland"]', 'zaad: ["domein aon.nl: praktijkmail, 1 mail"]', 'ovis:', '  db: ["supabase:secondbrain/knoop#org:aon"]']);
+    const pC = pag('10_Zakelijk/_Gedeeld/Relaties/Dubbel.md', ['entiteit_id: org:dubbel', 'soort: leverancier', 'status: concept', 'naam: Dubbel', 'domeinen: [leusden.nl]', 'ovis:', '  db: ["supabase:secondbrain/knoop#org:dubbel"]']);
+    toets('7 fixtures lezen zonder fouten, zaad gelezen', [pTG, pA, pB, pC].every((p) => !p.fouten.length) && pA.zaad.length === 1, [pTG.fouten, pA.fouten, pB.fouten, pC.fouten]);
+    const NU = Date.parse('2026-10-26T02:30:00+01:00');
+    const regBasis = () => ({
+      knopen: [{ id: 'TG', soort: 'entiteit', naam: 'Huisartsenpraktijk Tolgaarde B.V.', vault_pagina: pTG.pad, bron_sha: pTG.sha, agb: null, iban: null },
+        { id: 'org:gemeente-leusden', soort: 'organisatie', naam: 'Gemeente Leusden', vault_pagina: pA.pad, bron_sha: pA.sha },
+        { id: 'org:aon', soort: 'organisatie', naam: 'Aon', vault_pagina: pB.pad, bron_sha: pB.sha },
+        { id: 'org:dubbel', soort: 'organisatie', naam: 'Dubbel', vault_pagina: pC.pad, bron_sha: pC.sha }],
+      handvatten: [{ id: 1, knoop: 'TG', soort: 'domein', waarde: 'huisartsentolgaarde.nl', waarde_norm: 'huisartsentolgaarde.nl', status: 'voorgesteld', herkomst: { bron: 'pagina', sha: 'x1' } },
+        { id: 2, knoop: 'org:gemeente-leusden', soort: 'domein', waarde: 'leusden.nl', waarde_norm: 'leusden.nl', status: 'voorgesteld', herkomst: { bron: 'pagina', sha: 'x2' } },
+        { id: 3, knoop: 'org:aon', soort: 'domein', waarde: 'aon.nl', waarde_norm: 'aon.nl', status: 'voorgesteld', herkomst: { bron: 'pagina', sha: 'x3' } },
+        { id: 4, knoop: 'org:aon', soort: 'alias', waarde: 'Aon Nederland', waarde_norm: 'aon nederland', status: 'voorgesteld', herkomst: { bron: 'pagina', sha: 'x3' } },
+        { id: 5, knoop: 'org:dubbel', soort: 'domein', waarde: 'leusden.nl', waarde_norm: 'leusden.nl', status: 'voorgesteld', herkomst: { bron: 'pagina', sha: 'x5' } },
+        { id: 6, knoop: 'TG', soort: 'kvk', waarde: '84185171', waarde_norm: '84185171', status: 'actief', herkomst: { bron: 'migratie-0002' } }],
+      contact: [], bevindingen: [], kaarten: [] });
+    const P = [pTG, pA, pB, pC];
+    let b = R.kaartBundel(regBasis(), P, { nu: NU });
+    toets('7 bundel: sleutel per week, binnen de grenzen, geen pad', b.kaart && b.kaart.sleutel === 'intake-handvat-2026-44' && grenzen(b.kaart), b);
+    toets('7 bundel: eigen entiteit eerst, BB5-dubbel (leusden.nl bij twee) niet op de kaart', b.kaart.stappen[0].indexOf('Tolgaarde') > 0 && !b.kaart.regels.some((r) => r.id === 2 || r.id === 5) && b.kaart.regels.length === 3, b.kaart);
+    toets('7 bundel: titel zegt "organisaties" en is niet gevoelig (Fable #12)', /bij 2 organisaties/.test(b.kaart.titel) && gevoelig(b.kaart.titel) === null, b.kaart.titel);
+    toets('7 bundel: herkomst in gewone taal, privé-organisatie = prive', /mail van @aon\.nl \(praktijkmail, 1 mail\)/.test(b.kaart.stappen.join(' ')) && /op de pagina gezet/.test(b.kaart.stappen[0]) && b.kaart.prive === true, b.kaart.stappen);
+    toets('7 bundel: één nummer per organisatie (Aon: twee kenmerken op regel 2)', b.kaart.regels.filter((r) => r.nr === 2).length === 2 && b.kaart.regels.every((r) => r.actie === 'activeer' && r.tabel === 'handvat'));
+    let reg = regBasis(); reg.kaarten = [{ sleutel: 'intake-handvat-2026-44', soort: 'bundel', status: 'ja', regels: [] }];
+    toets('7 bundel: hooguit één per week', !R.kaartBundel(reg, P, { nu: NU }).kaart);
+    reg = regBasis(); reg.kaarten = [{ sleutel: 'intake-handvat-2026-43', soort: 'bundel', status: 'open', regels: [{ nr: 1, tabel: 'handvat', id: '1' }] }];
+    toets('7 bundel: geen nieuwe zolang er een open bundel is', /open/.test(R.kaartBundel(reg, P, { nu: NU }).reden));
+    reg = regBasis(); reg.kaarten = [{ sleutel: 'intake-handvat-2026-43', soort: 'bundel', status: 'nee', beslist_op: new Date(NU - 5 * 86400000).toISOString(), regels: [{ nr: 1, tabel: 'handvat', id: '3', sha: 'x3' }] }];
+    b = R.kaartBundel(reg, P, { nu: NU });
+    toets('7 bundel: Nee = vier weken rust voor die regels', b.kaart && !b.kaart.regels.some((r) => r.id === 3) && b.kaart.regels.some((r) => r.id === 4), b.kaart && b.kaart.regels);
+    reg.kaarten[0].beslist_op = new Date(NU - 30 * 86400000).toISOString();
+    toets('7 bundel: na 28 dagen komt hij terug', R.kaartBundel(reg, P, { nu: NU }).kaart.regels.some((r) => r.id === 3));
+    reg = regBasis(); reg.kaarten = [{ sleutel: 'intake-handvat-2026-43', soort: 'bundel', status: 'anders', eruit: [1], beslist_op: new Date(NU - 60 * 86400000).toISOString(), regels: [{ nr: 1, tabel: 'handvat', id: '1', sha: 'x1' }] }];
+    toets('7 bundel: eruit-regel blijft weg zolang het kenmerk hetzelfde is', !R.kaartBundel(reg, P, { nu: NU }).kaart.regels.some((r) => r.id === 1));
+    reg.handvatten[0].herkomst.sha = 'nieuw';
+    toets('7 bundel: eruit-regel terug als de pagina het kenmerk opnieuw voorstelt', R.kaartBundel(reg, P, { nu: NU }).kaart.regels.some((r) => r.id === 1));
+    reg = regBasis(); reg.knopen[2].bron_sha = 'oud';
+    toets('7 bundel: niet-bijgewerkte pagina wacht', !R.kaartBundel(reg, P, { nu: NU }).kaart.regels.some((r) => r.knoop === 'org:aon'));
+    // veel organisaties: hooguit 12 stappen, rest volgende week
+    reg = regBasis(); const veel = [];
+    for (let i = 0; i < 20; i++) { const id = 'org:o' + i; const pp = pag('10_Zakelijk/_Gedeeld/Relaties/O' + i + '.md', ['entiteit_id: ' + id, 'soort: leverancier', 'status: concept', 'naam: Organisatie ' + i, 'domeinen: [o' + i + '.nl]']);
+      veel.push(pp); reg.knopen.push({ id: id, soort: 'organisatie', naam: 'Organisatie ' + i, vault_pagina: pp.pad, bron_sha: pp.sha }); reg.handvatten.push({ id: 100 + i, knoop: id, soort: 'domein', waarde: 'o' + i + '.nl', waarde_norm: 'o' + i + '.nl', status: 'voorgesteld', herkomst: { sha: 's' } }); }
+    b = R.kaartBundel(reg, P.concat(veel), { nu: NU });
+    toets('7 bundel: hooguit 12 organisaties, de waarom noemt de rest', b.kaart.stappen.length === 12 && /Nog 10 organisaties volgen/.test(b.kaart.waarom) && grenzen(b.kaart), [b.kaart.stappen.length, b.kaart.waarom]);
+    // kritiek
+    reg = regBasis(); reg.contact = [{ id: 11, knoop: 'org:gemeente-leusden', veld: 'factuuradres', waarde: 'Postbus 1, 3830 AA Leusden', status: 'actief', intrekking: true, herkomst: { vraag_id: 'aaaaaaaa' } },
+      { id: 12, knoop: 'org:gemeente-leusden', veld: 'factuuradres', waarde: 'Postbus 2, 3830 AA Leusden', status: 'voorgesteld', herkomst: { sha: 'z' } },
+      { id: 13, knoop: 'org:aon', veld: 'telefoon', waarde: '020-0000000', status: 'voorgesteld', herkomst: { sha: 'z' } }];
+    reg.handvatten.push({ id: 7, knoop: 'org:aon', soort: 'domein', waarde: 'aon.com', waarde_norm: 'aon.com', status: 'actief', intrekking: true, herkomst: { vraag_id: 'bbbbbbbb' } });
+    const pTG2 = Object.assign({}, pTG, { naam: 'Huisartsenpraktijk Tolgaarde BV' });
+    let kr = R.kaartenKritiek(reg, [pTG2, pA, pB, pC], { nu: NU });
+    const kf = kr.find((k) => /factuuradres/.test(k.sleutel)), kn = kr.find((k) => /-naam-/.test(k.sleutel)), kk = kr.find((k) => /-kenmerk-/.test(k.sleutel));
+    toets('7 kritiek: factuuradres oud → nieuw op één kaart, oud vervalt, nieuw actief', kf && kf.regels.length === 2 && kf.regels[0].actie === 'vervallen' && kf.regels[1].actie === 'activeer' && /Oud, vervalt: Postbus 1/.test(kf.stappen.join(' ')) && /Nieuw: Postbus 2/.test(kf.stappen.join(' ')) && /vingerafdruk/.test(kf.waarom), kr);
+    toets('7 kritiek: eerste telefoonnummer zonder vaste waarde = geen kaart', !kr.some((k) => /telefoon/.test(k.sleutel)));
+    toets('7 kritiek: naamwijziging eigen entiteit en ingetrokken kenmerk elk een kaart', kn && kn.regels[0].actie === 'zet' && kn.regels[0].oud === 'Huisartsenpraktijk Tolgaarde B.V.' && kk && kk.regels[0].actie === 'vervallen', kr.map((k) => k.sleutel));
+    toets('7 kritiek: alle kaarten binnen de grenzen', kr.every(grenzen), kr.map((k) => [k.sleutel, k.titel]));
+    reg.kaarten = [{ sleutel: kf.sleutel, soort: 'kritiek', status: 'nee', beslist_op: new Date(NU - 40 * 86400000).toISOString(), regels: [] }];
+    toets('7 kritiek: Nee = niet opnieuw zolang het voorstel gelijk is', !R.kaartenKritiek(reg, [pTG2, pA, pB, pC], { nu: NU }).some((k) => /factuuradres/.test(k.sleutel)));
+    reg.kaarten = [{ sleutel: kf.sleutel, soort: 'kritiek', status: 'weg', beslist_op: new Date(NU - 1 * 86400000).toISOString(), regels: [] }];
+    toets('7 kritiek: na weg opnieuw met volgnummer', R.kaartenKritiek(reg, [pTG2, pA, pB, pC], { nu: NU }).some((k) => k.sleutel === kf.sleutel + '-2'));
+    // Bibliothecaris
+    reg = regBasis(); reg.bevindingen = [{ bevinding_id: 'BB2-org:aon-geen-pagina', check_id: 'BB2', status: 'open', samenvatting: 'x' }, { bevinding_id: 'BB3-TG-naam', check_id: 'BB3', status: 'open', ernst: 'warning' },
+      { bevinding_id: 'BB3-org:aon-contact-telefoon', check_id: 'BB3', status: 'open', ernst: 'serious' }, { bevinding_id: 'BB5-org:aon-org:dubbel-1234abcd', check_id: 'BB5', status: 'open', samenvatting: 'domein staat bij twee entiteiten (org:aon/org:dubbel)' }];
+    b = R.kaartBiblio(reg, { nu: NU });
+    toets('7 Bibliothecaris: één kaart per week met voorstel in gewone taal, kritiek en naam niet erop', b.kaart && b.kaart.regels.length === 2 && /Aon: staat in het register maar heeft geen pagina/.test(b.kaart.stappen[0]) && /\(Aon en Dubbel\)/.test(b.kaart.stappen[1]) && grenzen(b.kaart) && gevoelig(b.kaart.titel) === null, b);
+    // index.md in Relaties telt niet als entiteitpagina; het zaad (proefmap) leest zonder fouten
+    { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ovis-rel-')); fs.mkdirSync(path.join(d, '10_Zakelijk/_Gedeeld/Relaties'), { recursive: true }); fs.mkdirSync(path.join(d, '20_Prive/Relaties'), { recursive: true });
+      fs.writeFileSync(path.join(d, '10_Zakelijk/_Gedeeld/Relaties/index.md'), '---\ntype: index\n---\n'); fs.writeFileSync(path.join(d, '10_Zakelijk/_Gedeeld/Relaties/Aon.md'), 'x');
+      const m = R.maak({ vault: d, sbRpc: async () => ({}), lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: () => {} });
+      toets('7 index.md in Relaties wordt overgeslagen', JSON.stringify(m.vind()) === '["10_Zakelijk/_Gedeeld/Relaties/Aon.md"]', m.vind()); }
+    // uitkomst voor Socev
+    const U = R.uitkomstZin;
+    toets('7 uitkomst: Ja met aantallen, Nee, al beslist, fout, vaste plek', /de pod heeft 3 gegevens vastgezet/.test(U('bundel', 'ja', { ok: true, status: 'ja', actief: 3, overgeslagen: [] }))
+      && /niets vastgezet; deze kenmerken komen over vier weken/.test(U('bundel', 'nee', { ok: true, status: 'nee' })) && /al beslist \(ja\)/.test(U('bundel', 'ja', { ok: false, al: 'ja' }))
+      && /NIET vastgelegd/.test(U('bundel', 'ja', { fout_pod: true })) && /vaste plek/.test(U('kritiek', 'ja', { ok: true, status: 'ja', actief: 0, overgeslagen: [{ nr: 1, reden: 'geen verse vingerafdruk' }] }, true))
+      && /nog geen antwoord/.test(U('bundel', 'ja', null)) && /Anders zonder nummers/.test(U('bundel', 'anders', { ok: true, status: 'anders', eruit: null })));
+    // de haak in server.js (Fable #1): naStart start de RPC, de staart wacht op de echte uitkomst; herkansing bij een netwerkfout
+    const b2 = src.indexOf('// ── wv1253: kaarten in Overzicht'), e2 = src.indexOf('// ── einde OVIS-register ──');
+    const hk = { rpc: [], fout: 0, berichten: [] };
+    const fn2 = new Function('OVIS_MOD', 'appSbRpc', 'berichtIntern', 'schrijfLog', 'nu', 'velden', 'logError', 'ovisStaatZet', 'ovisStaatLees', 'ovis', 'appStaat', 'appVjFnv',
+      src.slice(b2, e2) + '\nreturn { ovisKnopHaak, ovisKaartHerkomst, ovisActiveerPoging };');
+    const H = fn2(R, async (f, body) => { hk.rpc.push([f, body]); if (hk.fout-- > 0) throw new Error('fetch failed'); return { ok: true, status: body.p.keuze, actief: 2, vervallen: 0, gezet: 0, overgeslagen: [], eruit: body.p.eruit }; },
+      async (d) => { hk.berichten.push(d); return { status: 200 }; }, () => {}, () => 'nu', (o) => JSON.stringify(o), () => {}, () => {}, () => ({}), {}, {}, () => 'abcd1234');
+    const kaartP = { sleutel: 'intake-handvat-2026-44', titel: 't', herkomst: { module: 'intake', ovis: { kaart: 'intake-handvat-2026-44', soort: 'bundel', regels: [{ nr: 1 }, { nr: 2 }, { nr: 3 }] } } };
+    toets('7 haak herkent alleen een echte intake-kaart', H.ovisKaartHerkomst(kaartP) && !H.ovisKaartHerkomst(Object.assign({}, kaartP, { sleutel: 'intake-handvat-2026-45' })) && !H.ovisKaartHerkomst({ sleutel: 'pot-vrijgave-1', herkomst: { module: 'intake', ovis: { kaart: 'pot-vrijgave-1' } } }));
+    let h = H.ovisKnopHaak(kaartP, 'zonder 2');
+    const staartP = h.staart({ soort: 'telefoon' }); h.naStart('anders', false, { id: 'tel' }, 'knop-anders', 'abcd1234');
+    const st1 = await staartP;
+    toets('7 haak: Anders "zonder 2" → eruit [2] naar de databank, staart met de echte uitkomst', hk.rpc.length === 1 && JSON.stringify(hk.rpc[0][1].p.eruit) === '[2]' && hk.rpc[0][1].p.vraag_id === 'abcd1234' && /de pod heeft 2 gegevens vastgezet \(zonder nummer\(s\) 2\)/.test(st1), [hk.rpc, st1]);
+    h = H.ovisKnopHaak(kaartP, 'alleen 2'); h.naStart('anders', false, {}, 'knop-anders', 'abcd1234');
+    toets('7 haak: Anders "alleen 2" → eruit null (niets vast)', hk.rpc[1][1].p.eruit === null);
+    console.log('       (herkansing: 30 s wachten wordt niet getoetst; alleen de eerste poging)');
+  }
   console.log(goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
 })().catch((e) => { console.log('ROOD  uitzondering ' + (e && e.stack || e)); process.exit(1); });

@@ -6996,7 +6996,8 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   // het bewijs (knop-ja-vers, "met verse vingerafdruk bevestigd") reist mee en verloopt in de rij niet.
   const bijStart = function () {
     appKnopRijZet(sleutel, jobId2, function (x) { x.antwoord.gestart = true; });
-    if (kaart && kaart.bijStart) { try { kaart.bijStart(keuze); } catch (e) { logError('app-voor-jou', e); } }   // wv404: kaart op beantwoord
+    let kaartStaart = null;   // wv1253: een kaart-haak kan een staart voor de prompt teruggeven (belofte van tekst), bv. de uitkomst van OVIS
+    if (kaart && kaart.bijStart) { try { kaartStaart = kaart.bijStart(keuze); } catch (e) { logError('app-voor-jou', e); } }   // wv404: kaart op beantwoord
     else appVjSluitGekoppeld(sleutel, keuze);   // wv1018 (Fable diffreview #1): een antwoord in het gesprek sluit ook de gekoppelde kaart
     // Fable-diffreview wv405 #1: het antwoord van de vorige beurt kan in dezelfde milliseconde in chat_log zijn gezet; dan zou
     // de Poortwachter de druk aan dát antwoord koppelen. Altijd ná de laatst geschreven rij.
@@ -7007,7 +7008,11 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
       { rol: 'david', ts: nu, bevestiging: appKnopBevestiging(keuze, gevoeligJa, a, !!kaart),
         tekst: (keuze === 'anders' ? 'Anders' : keuze === 'nee' ? 'Nee' : 'Ja') + ' (knop ' + (kaart ? 'op een Voor jou-kaart ' : '') + 'in de app' + (gevoeligJa ? ', met verse vingerafdruk' : '') + ') op de vraag: ' + JSON.stringify(vz) +
           (keuze === 'anders' ? ' — toelichting: ' + appOntmasker(toel) : '') + '\n(vraag-id ' + hash + ')' }])
-      .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); });
+      .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); })
+      .then(function (st) {
+        if (!kaartStaart || typeof kaartStaart.then !== 'function') return st;
+        return kaartStaart.then(function (x) { return st + (typeof x === 'string' ? x : ''); }, function (e) { logError('app-voor-jou', e); return st; });
+      });
   };
   // vervalt hij in de rij (noodstop), dan staat de vraag weer open; de vingerafdruk is dan verbruikt (nieuwe druk = nieuwe)
   const bijVerval = function () {
@@ -9427,6 +9432,8 @@ function appVjKnopStand(p, rv, afgeleid) {
   let gev = appGevoelig(tekst + (voorstel ? '\n' + voorstel : ''));
   // wv861 (Fable #4): de bundelkaart van de Ideeënbeurs is altijd gevoelig (Ja · vingerafdruk), welke woorden Socev ook koos
   if (gev === null) { try { if (typeof ideeen !== 'undefined' && ideeen && ideeen.isBundel && ideeen.isBundel(p.sleutel)) gev = 'versturen'; } catch (e) {} }
+  // wv1253: OVIS-kaart met een rekeningnummer of adres waarnaar verstuurd wordt (de databank eist zelf een verse vingerafdruk per regel)
+  if (gev === null && typeof ovisKaartHerkomst === 'function' && ovisKaartHerkomst(p) && p.herkomst.ovis.gevoelig === true) gev = 'geld';
   // gekoppeld en bruikbaar: de druk loopt via die vraag (ook de knoppen onder het oorspronkelijke bericht tonen dan beantwoord)
   const gekBruik = !!(gekRij && !appNaarTelegramNu(gekRij) && Date.now() - Date.parse(gekRij.t || 0) <= APP_VRAAG_GELDIG_MS);
   // wv1018 (Fable diffreview #2): appKnop eist een vingerafdruk zodra de chatvraag gevoelig is (rij zonder gevoelig: false); zeg het de app vooraf
@@ -9627,10 +9634,14 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
     : keuze !== 'ja' ? ' (AIX: geen Ja, dus de pod plaatst niets; de kaarten blijven klaarstaan in de App AIX. Zeg dat kort.)'
     : a.soort !== 'vast' ? ' (AIX: de pod plaatst nu zelf de ' + ib.aangevinkt + ' stuk(ken) die op Deel staan in Socevs winkel op aix.socev.dev en zet zelf "gedeeld op" in de catalogus. Jij plaatst niets, hebt geen toegang tot AIX en hoeft de catalogus niet te openen. Kijk na een minuut in /health (ideeen.plaatsing) en bevestig het David in één zin.)'
       : ' (AIX: NIET geplaatst, want deze Ja kwam van een vaste plek. Jij plaatst niets. Laat David op de telefoon drukken: heropen deze kaart met voor-jou-beheer.)');
-  // wv921 en wv861 sluiten elkaar uit (pot-vrijgave-N vs. de sleutel in bundel.json); de haak van de ene of de andere
+  // wv1253: OVIS-kaart (herkenningskenmerken, kritiek veld, Bibliothecaris). De pod legt Davids keuze zelf vast via ovis_handvat_activeer
+  // (precies de bevroren lijst; nooit het taalmodel); Socev hoort in de staart wat er werkelijk gebeurde.
+  const ov = !pot && !ib && typeof ovisKaartHerkomst === 'function' && ovisKaartHerkomst(p) ? ovisKnopHaak(p, d.toelichting) : null;
+  // wv921, wv861 en wv1253 sluiten elkaar uit (pot-vrijgave-N, de sleutel in bundel.json, intake-…); de haak van de een of de ander
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
-    { tekst: tekst, bericht: bericht, context: pot ? ctx : ctxIb, bijStart: bijStart, gevoelig: k.gevoelig || (!pot && !!ib),
-      naStart: pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
+    { tekst: tekst, bericht: bericht, context: pot ? ctx : ov ? context + ov.context : ctxIb, gevoelig: k.gevoelig || (!pot && !!ib),
+      bijStart: ov ? function (kz) { bijStart(kz); return ov.staart(a); } : bijStart,
+      naStart: ov ? ov.naStart : pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
         : !pot && ib && !ib.afgehandeld ? function (kz, gevoeligJa, ap, bevestiging, vraagId) {
           if (kz === 'nee') { try { ideeen.bundelNee(ib.kaart); } catch (e) { logError('ideeen-plaats', e); } return; }
           if (kz !== 'ja') return;
@@ -14413,6 +14424,8 @@ async function ovisTik() {
       }
       ovisStaatZet({ biblio_datum: t.datum, biblio: { t: new Date().toISOString(), uitkomst: b.uitkomst, zin: b.zin, open: b.open, nieuw: b.nieuw, opgelost: b.opgelost, per_check: b.per_check, tel: b.tel } });
       if (b.nieuw > 0) ovisBoxRij(OVIS_MOD.boxRij(b, t.klok));
+      ovisLoopt.nu = 'kaarten';
+      try { await ovisKaartenZet(['kritiek', 'bundel', 'biblio']); } catch (e) { logError('ovis-kaarten', e); }   // wv1253
       return;
     }
     // overdag én na de Bibliothecaris (diffreview #4): alleen de databank
@@ -14421,6 +14434,8 @@ async function ovisTik() {
     if (r.gestuurd || r.fouten.length || !s.dag || Date.now() - Date.parse(s.dag.t || 0) > 3600000) {
       ovisStaatZet({ dag: { t: new Date().toISOString(), paginas: r.paginas, gestuurd: r.gestuurd, nieuw: r.nieuw, fouten: r.fouten.length, voorstellen: r.voorstellen, kritiek: r.kritiek } });
     }
+    // wv1253 (Fable #13): kritiek meteen, niet pas om 02:30
+    if (r.kritiek || r.ingetrokken || r.voorstellen) { ovisLoopt.nu = 'kaarten'; try { await ovisKaartenZet(['kritiek']); } catch (e) { logError('ovis-kaarten', e); } }
   } catch (e) { logError('ovis-tik', e); }
   finally { ovisLoopt.nu = null; }
 }
@@ -14439,7 +14454,68 @@ function ovisInfo() {
   if (!ovis) return { aan: false };
   const s = ovisStaatLees();
   return { aan: true, echt: SERVER_ECHT, loopt: ovisLoopt.nu, dag: s.dag || null, nacht: s.nacht || null, nacht_datum: s.nacht_datum || null,
-    biblio: s.biblio ? { t: s.biblio.t, uitkomst: s.biblio.uitkomst, open: s.biblio.open, nieuw: s.biblio.nieuw } : null, biblio_datum: s.biblio_datum || null };
+    biblio: s.biblio ? { t: s.biblio.t, uitkomst: s.biblio.uitkomst, open: s.biblio.open, nieuw: s.biblio.nieuw } : null, biblio_datum: s.biblio_datum || null,
+    kaarten: { aan: ovisKaartenAan(), laatst: s.kaarten || null, knop: s.knop || null } };
+}
+
+// ── wv1253: kaarten in Overzicht en de haak op Davids knop (ontwerp + Fable-review vooraf: mk-scripts/wv1253/ontwerp.md) ──
+// De lijst op een kaart wordt door de databank bevroren (public.ovis_kaart_zet → secondbrain.ovis_kaart + machinekamer.voor_jou); Davids
+// Ja/Nee/Anders gaat via public.ovis_handvat_activeer, de enige plek waar ovis.activeer = ja. Schakelaar: OVIS_KAARTEN=uit (env) of
+// kaarten_uit: true in staat.json. Terugrol naar een pod zonder dit blok: een Ja op een open intake-kaart doet dan niets; de nieuwe pod
+// sluit zo'n kaart na een uur als weg en de punten komen op een volgende kaart terug.
+function ovisKaartenAan() { return !!(ovis && OVIS_MOD && typeof OVIS_MOD.plan === 'function' && process.env.OVIS_KAARTEN !== 'uit' && ovisStaatLees().kaarten_uit !== true); }
+function ovisKaartHerkomst(p) {
+  const h = p && p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : null;
+  return !!(OVIS_MOD && OVIS_MOD.KAART_SLEUTEL_RE && h && h.module === 'intake' && h.ovis && typeof h.ovis === 'object' && h.ovis.kaart === p.sleutel && OVIS_MOD.KAART_SLEUTEL_RE.test(String(p.sleutel || '')));
+}
+async function ovisKaartenZet(soorten) {
+  if (!ovisKaartenAan()) return null;
+  const r = await ovis.kaarten({ soorten: soorten, vraagId: function (sl) { return appVjFnv('voorjou:' + sl + ':kaart'); } });   // = appVjKaartSleutel zonder registerrij
+  if (r.gezet.length || r.weg || r.fouten.length) {
+    appStaat.vjCache = null;
+    ovisStaatZet({ kaarten: { t: new Date().toISOString(), gezet: r.gezet, weg: r.weg, fouten: r.fouten.length, eerste_fout: r.fouten.length ? String(r.fouten[0].fout).slice(0, 120) : null } });
+  }
+  if (r.fouten.length) logError('ovis-kaarten', new Error(r.fouten.map(function (x) { return x.sleutel + ': ' + x.fout; }).join('; ').slice(0, 300)));
+  return r;
+}
+// Eén RPC met herkansing bij een netwerk- of serverfout (niet bij een weigering: die is definitief). Klaar(r): r van de databank, of
+// { fout_pod: true } na de laatste poging.
+function ovisActiveerPoging(body, poging, klaar) {
+  appSbRpc('ovis_handvat_activeer', body).then(klaar, function (e) {
+    const m = String(e && e.message || e);
+    if (/http 4\d\d/.test(m) || poging >= 3) { logError('ovis-knop', new Error(m.slice(0, 160))); return klaar({ fout_pod: true, fout: m.slice(0, 160) }); }
+    setTimeout(function () { ovisActiveerPoging(body, poging + 1, klaar); }, [30000, 120000, 300000][poging]).unref();
+  });
+}
+function ovisKnopHaak(p, toelichting) {
+  const o = p.herkomst.ovis, soort = String(o.soort || '');
+  const n = (Array.isArray(o.regels) ? o.regels : []).reduce(function (m, x) { return Math.max(m, Number(x && x.nr) || 0); }, 0);
+  let los, uitslag = null, staartZonderUitslag = false;
+  const belofte = new Promise(function (r) { los = r; });
+  return {
+    context: ' (OVIS-kaart: de pod legt Davids keuze zelf vast in het entiteitenregister; jij zet niets in de databank en kunt dat ook niet. Wat er werkelijk gebeurde staat onderaan deze opdracht.)',
+    naStart: function (kz, gevoeligJa, ap, bevestiging, vraagId) {
+      const eruit = kz === 'anders' ? OVIS_MOD.eruitUit(toelichting, n) : null;
+      const body = { p: { sleutel: p.sleutel, keuze: kz, eruit: eruit, vraag_id: vraagId, bevestiging: bevestiging, apparaat: ap && ap.id ? String(ap.id).slice(0, 80) : null } };
+      ovisActiveerPoging(body, 0, function (r) {
+        uitslag = r; los(r);
+        schrijfLog(nu() + ' ovis-knop ' + velden({ kaart: p.sleutel, keuze: kz, status: r && r.status, actief: r && r.actief, overgeslagen: r && r.overgeslagen ? r.overgeslagen.length : 0, al: r && r.al, fout: r && (r.fout || r.fout_pod) ? 1 : 0 }));
+        ovisStaatZet({ knop: { t: new Date().toISOString(), kaart: p.sleutel, keuze: kz, status: (r && r.status) || (r && r.al ? 'al ' + r.al : 'fout') } });
+        // Fable wv1253 #1: kreeg Socev de uitkomst niet mee en lukte het niet, dan hoort David het rechtstreeks (geen taalmodel)
+        if (staartZonderUitslag && r && (r.fout_pod || (r.ok === false && !r.al))) {
+          berichtIntern({ kanaal: soort === 'biblio' ? 'machinekamer' : 'hoofd', bron: 'ovis', klasse: 'normaal', sleutel: 'ovis-knop-' + p.sleutel,
+            tekst: 'Je keuze op de kaart "' + String(p.titel || '').slice(0, 90) + '" kon ik niet vastleggen. Er is niets vastgezet; de punten komen op een volgende kaart terug.' })
+            .catch(function (e) { logError('ovis-knop', e); });
+        }
+      });
+    },
+    staart: function (ap) {
+      return Promise.race([belofte, new Promise(function (r) { setTimeout(function () { r(null); }, 8000).unref(); })]).then(function (r) {
+        if (!r) staartZonderUitslag = true;
+        return OVIS_MOD.uitkomstZin(soort, null, r || uitslag, !!(ap && ap.soort === 'vast'));
+      });
+    }
+  };
 }
 // ── einde OVIS-register ──
 

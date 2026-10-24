@@ -20,7 +20,7 @@ const path = require('path');
 
 const BLOK_BEGIN = '<!-- ovis:blok begin -->', BLOK_EIND = '<!-- ovis:blok eind -->';
 const MAX_PAGINAS = 2000, MAX_BYTES = 256 * 1024;
-const SCHRIJVERS_OK = ['compiler', 'migratie-0002', 'activeer'];
+const SCHRIJVERS_OK = ['compiler', 'migratie-0002', 'activeer', 'kaart'];
 const SOORTEN = ['eigen', 'leverancier', 'instantie', 'bank', 'verzekeraar', 'praktijk', 'zorgpartner', 'afzender'];
 const CONTACT = ['adres', 'factuuradres', 'boekhoudadres', 'afschriftadres', 'telefoon', 'email', 'website', 'contactpersoon'];
 const PUBLIEK_DOMEIN = new Set(['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'hotmail.nl', 'live.com', 'live.nl', 'msn.com',
@@ -155,6 +155,8 @@ function leesPagina(rel, tekst) {
     if (CONTACT.indexOf(veld) < 0) { f.push('onbekend contactveld ' + veld); return; }
     lijst(c[veld]).forEach(function (w) { if (w.trim()) uit.contact.push({ veld: veld, waarde: w.trim() }); });
   });
+  // wv1253: waar elk kenmerk vandaan kwam ("domein leusden.nl: praktijkmail, 5 mails"), alleen voor de tekst op de kaart; stuurt niets
+  uit.zaad = lijst(v.zaad).filter(function (x) { return x.length <= 200; });
   const ov = v.ovis && typeof v.ovis === 'object' && !Array.isArray(v.ovis) ? v.ovis : {};
   uit.db = lijst(ov.db);
   // validatie (ontwerp § 1; Fable wv979 #1, #3, #10)
@@ -354,6 +356,9 @@ function checks(paginas, reg, compileerFouten) {
   (reg.handvatten || []).concat(reg.contact || []).forEach(function (h) {
     const hk = h.herkomst || {};
     if (h.status === 'actief' && !hk.vraag_id && hk.bron !== 'migratie-0002') bev('BB7', h.knoop + '-actief-' + h.id, 'actief kenmerk van ' + h.knoop + ' zonder Ja', 'rij ' + h.id + ' (' + (h.soort || h.veld) + '). Voorstel: terug naar voorgesteld.', 'serious');
+    // wv1253: een Ja hoort bij een kaart die met die vraag-id beslist is (de pod-haak); anders is hij buiten de knop om gezet
+    else if (h.status === 'actief' && hk.vraag_id && hk.bron !== 'migratie-0002' && Array.isArray(reg.kaarten) && !reg.kaarten.some(function (k) { return k.sleutel === hk.kaart && k.beslist_vraag_id === hk.vraag_id; }))
+      bev('BB7', h.knoop + '-actief-zonder-kaart-' + h.id, 'actief kenmerk van ' + h.knoop + ' zonder beslist kaart', 'rij ' + h.id + ' (' + (h.soort || h.veld) + ') noemt kaart ' + schoon(hk.kaart, 70) + '. Voorstel: nagaan wie activeerde; terug naar voorgesteld.', 'serious');
     else if (!hk.vraag_id && ['pagina', 'migratie-0002'].indexOf(hk.bron) < 0) bev('BB7', h.knoop + '-herkomst-' + h.id, 'kenmerk van ' + h.knoop + ' met onbekende herkomst', 'rij ' + h.id + '. Voorstel: nagaan wie schreef.');
   });
   // diffreview #1: een pagina die de databank blijvend weigert, mag niet stil als "verouderd" blijven staan
@@ -364,6 +369,239 @@ function checks(paginas, reg, compileerFouten) {
   return { bevindingen: Object.keys(uniek).sort().map(function (k) { return uniek[k]; }), tel: tel };
 }
 
+// ── Kaarten in Overzicht (wv1253; ontwerp + Fable-review vooraf: mk-scripts/wv1253/ontwerp.md) ──
+// Pure functies: wat er op een kaart moet (bundel per week, kritiek per veld, Bibliothecaris per week), de Anders-ontleding en de zin
+// voor Socev na Davids druk. De databank (public.ovis_kaart_zet) controleert en bevriest de lijst; public.ovis_handvat_activeer voert
+// Davids keuze uit. Kaarttekst in gewone taal, zonder pad of wv-nummer (machinekamer.voor_jou_verwijzing weigert die).
+const KAART_STAPPEN = 12, KAART_TITEL = 90, KAART_WAAROM = 400, NEE_RUST_MS = 28 * 86400000;
+const KENMERK_WOORD = { kvk: 'KvK', alias: 'naam', domein: 'website', mail: 'mailadres', kenmerkpatroon: 'nummerpatroon', 'niet-dezelfde-als': 'niet dezelfde als' };
+const VELD_WOORD = { adres: 'adres', factuuradres: 'factuuradres', boekhoudadres: 'boekhoudadres', afschriftadres: 'adres voor afschriften', telefoon: 'telefoonnummer',
+  email: 'mailadres', website: 'website', contactpersoon: 'contactpersoon', naam: 'naam', agb: 'AGB-code', iban: 'rekeningnummer' };
+function isoWeek(ms) {
+  const d = new Date(new Date(ms).toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' }));
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dag = t.getUTCDay() || 7; t.setUTCDate(t.getUTCDate() + 4 - dag);
+  const j = t.getUTCFullYear(), w = Math.ceil(((t - Date.UTC(j, 0, 1)) / 86400000 + 1) / 7);
+  return { jaar: j, week: w, tekst: j + '-' + String(w).padStart(2, '0') };
+}
+function kort(s, n) { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1).replace(/\s+\S*$/, '') + '…' : s; }
+function fnv6(t) { return crypto.createHash('sha256').update(String(t)).digest('hex').slice(0, 6); }
+// Anders → welke nummers eruit (Fable wv1253 #4): alleen met een uitsluitwoord en verder niets dan nummers en verbindingswoorden.
+// "zonder 3 en 7", "3, 7 eruit", "niet 2-4", "regel 5 weg". Kale nummers of een ander woord ("alleen 3") → null (niets vastzetten).
+function eruitUit(toelichting, n) {
+  const t = String(toelichting || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[.!]+\s*$/, '').trim();
+  if (!t || t.length > 120) return null;
+  if (!/\b(zonder|niet|behalve|eruit|weg|uit)\b/.test(t)) return null;
+  const woorden = t.replace(/(\d+)\s*(?:-|–|t\/m|tot en met)\s*(\d+)/g, ' $1-$2 ').split(/[\s,;:+&]+/).filter(Boolean);
+  const uit = new Set();
+  for (const w of woorden) {
+    if (/^(zonder|niet|behalve|eruit|weg|uit|haal|halen|regel|regels|nummer|nummers|nr|nrs|en|ook|graag|de|het|ja|alles|a\.?u\.?b\.?)$/.test(w)) continue;
+    let m = /^(\d{1,2})-(\d{1,2})$/.exec(w);
+    if (m) { const a = Number(m[1]), b = Number(m[2]); if (a < 1 || b > n || a > b) return null; for (let i = a; i <= b; i++) uit.add(i); continue; }
+    m = /^(\d{1,2})$/.exec(w);
+    if (m) { const x = Number(m[1]); if (x < 1 || x > n) return null; uit.add(x); continue; }
+    return null;
+  }
+  return uit.size ? Array.from(uit).sort(function (a, b) { return a - b; }) : null;
+}
+// zaad-regel van de pagina bij een kenmerk: "domein leusden.nl: praktijkmail, 5 mails" → "praktijkmail, 5 mails"
+function zaadVan(p, soort, waardeNorm) {
+  const z = (p && p.zaad || []).map(function (x) { const i = x.indexOf(':'); return i > 0 ? { sleutel: x.slice(0, i).trim().toLowerCase(), tekst: x.slice(i + 1).trim() } : null; }).filter(Boolean);
+  const hit = z.find(function (x) { return x.sleutel === (soort + ' ' + waardeNorm).toLowerCase(); });
+  return hit ? hit.tekst : null;
+}
+function gewichtVan(p) { return (p && p.zaad || []).reduce(function (a, x) { const m = /(\d+)\s*(×|x|keer|mails?|facturen|factuur)/i.exec(x); return a + (m ? Number(m[1]) : 0); }, 0); }
+function priveKnoop(k, p) { return k.id === 'PRIVE' || /^20_Prive\//.test(String(p && p.pad || k.vault_pagina || '')); }
+function kenmerkTekst(h, p) {
+  const z = zaadVan(p, h.soort, h.waarde_norm);
+  const wat = h.soort === 'domein' ? 'mail van @' + h.waarde : h.soort === 'mail' ? 'mail van ' + h.waarde : KENMERK_WOORD[h.soort] + ' ' + (h.soort === 'alias' ? '"' + h.waarde + '"' : h.waarde);
+  return wat + ' (' + (z ? kort(z.replace(/[()]/g, ''), 60) : 'op de pagina gezet') + ')';
+}
+// Wat al op een kaart staat of (nog) niet terug mag (Fable wv1253 #7): open kaart = bezet; Nee = 28 dagen rust; eruit-regel = tot het
+// kenmerk verandert (andere herkomst-sha); weg en Anders-zonder-nummers = mag weer.
+function kaartGeheugen(reg, nu) {
+  const open = new Set(), rust = new Set(), sleutels = new Set();
+  (reg.kaarten || []).forEach(function (k) {
+    sleutels.add(k.sleutel);
+    (k.regels || []).forEach(function (r) {
+      const sl = r.tabel + '#' + r.id, metSha = sl + '#' + (r.sha || '');
+      if (k.status === 'open') open.add(sl);
+      else if (k.status === 'nee' && Date.parse(k.beslist_op) > nu - NEE_RUST_MS) rust.add(metSha);
+      else if ((k.status === 'anders' || k.status === 'ja') && Array.isArray(k.eruit) && k.eruit.indexOf(Number(r.nr)) >= 0) rust.add(metSha);
+    });
+  });
+  return { open: open, rust: rust, sleutels: sleutels };
+}
+// Ankers: geldige, bijgewerkte pagina per knoop-id
+function ankers(paginas, knopen) {
+  const per = {}, a = {};
+  paginas.forEach(function (p) { if (!p.fouten || !p.fouten.length) (per[p.id] = per[p.id] || []).push(p); });
+  Object.keys(per).forEach(function (id) { const k = knopen[id]; if (!k) return; const p = per[id].find(function (x) { return x.pad === k.vault_pagina; }); if (p && k.bron_sha === p.sha) a[id] = p; });
+  return a;
+}
+
+function kaartBundel(reg, paginas, o) {
+  const nu = o.nu, knopen = {}; (reg.knopen || []).forEach(function (k) { knopen[k.id] = k; });
+  const geh = kaartGeheugen(reg, nu), anker = ankers(paginas, knopen), wk = isoWeek(nu);
+  const sleutel = 'intake-handvat-' + wk.jaar + '-' + String(wk.week).padStart(2, '0');
+  if (geh.sleutels.has(sleutel)) return { reden: 'deze week al een bundel' };
+  if ((reg.kaarten || []).some(function (k) { return k.soort === 'bundel' && k.status === 'open'; })) return { reden: 'er staat nog een bundel open' };
+  const harde = {};
+  (reg.handvatten || []).forEach(function (h) { if (['kvk', 'domein', 'mail'].indexOf(h.soort) >= 0 && h.status !== 'vervallen') { const s = h.soort + '|' + h.waarde_norm; (harde[s] = harde[s] || new Set()).add(h.knoop); } });
+  const per = {};
+  (reg.handvatten || []).forEach(function (h) {
+    if (h.status !== 'voorgesteld' || !anker[h.knoop]) return;
+    const sl = 'handvat#' + h.id;
+    if (geh.open.has(sl) || geh.rust.has(sl + '#' + ((h.herkomst || {}).sha || ''))) return;
+    if (harde[h.soort + '|' + h.waarde_norm] && harde[h.soort + '|' + h.waarde_norm].size > 1) return;   // BB5: eerst uitzoeken bij wie het hoort
+    (per[h.knoop] = per[h.knoop] || []).push(h);
+  });
+  const ids = Object.keys(per).sort(function (a, b) {
+    const ka = knopen[a], kb = knopen[b];
+    if ((ka.soort === 'entiteit') !== (kb.soort === 'entiteit')) return ka.soort === 'entiteit' ? -1 : 1;
+    return gewichtVan(anker[b]) - gewichtVan(anker[a]) || String(ka.naam).localeCompare(String(kb.naam), 'nl');
+  });
+  const stappen = [], regels = []; let prive = false, kenmerken = 0;
+  for (const id of ids) {
+    if (stappen.length >= KAART_STAPPEN) break;
+    const k = knopen[id], p = anker[id], nr = stappen.length + 1;
+    let tekst = nr + '. ' + kort(k.naam, 60) + ': ';
+    const mee = [];
+    for (const h of per[id].sort(function (a, b) { return a.id - b.id; })) {
+      const t = kenmerkTekst(h, p);
+      if ((tekst + mee.concat(t).join('; ')).length > 320) break;   // een kenmerk dat niet past komt volgende keer; nooit half getoond
+      mee.push(t); regels.push({ nr: nr, actie: 'activeer', tabel: 'handvat', id: h.id, knoop: h.knoop, soort: h.soort, waarde_norm: h.waarde_norm });
+    }
+    if (!mee.length) continue;
+    stappen.push(tekst + mee.join('; ')); kenmerken += mee.length;
+    if (priveKnoop(k, p)) prive = true;
+  }
+  if (!stappen.length) return { reden: 'geen nieuwe kenmerken' };
+  const restOrg = ids.length - stappen.length;
+  const titel = kenmerken === 1 && stappen.length === 1 ? '1 nieuw herkenningskenmerk bij 1 organisatie — zo vastzetten?'
+    : kenmerken + ' nieuwe herkenningskenmerken bij ' + stappen.length + (stappen.length === 1 ? ' organisatie' : ' organisaties') + ' — zo vastzetten?';
+  const waarom = 'Hiermee herkent Socev straks wie een mail, factuur of brief stuurde. Een kenmerk telt pas na jouw Ja; anders kan een mail zich als bekende afzender voordoen. '
+    + 'Ja: alles hieronder vast. Nee: niets vast (komt over vier weken terug). Anders: typ welke nummers eruit moeten, bijvoorbeeld "zonder 3 en 7"; de rest wordt vast.'
+    + (restOrg > 0 ? ' Nog ' + restOrg + (restOrg === 1 ? ' organisatie volgt' : ' organisaties volgen') + ' in de komende weken.' : '');
+  return { kaart: { sleutel: sleutel, soort: 'bundel', titel: titel, waarom: kort(waarom, KAART_WAAROM), stappen: stappen, prive: prive, regels: regels } };
+}
+
+function kaartenKritiek(reg, paginas, o) {
+  const nu = o.nu, knopen = {}; (reg.knopen || []).forEach(function (k) { knopen[k.id] = k; });
+  const geh = kaartGeheugen(reg, nu), anker = ankers(paginas, knopen), uit = [];
+  function maak(k, p, veld, regels, stappen, titelWoord, uitleg) {
+    if (!regels.length || regels.length > 6) return;
+    if (regels.some(function (r) { return geh.open.has(r.tabel + '#' + (r.tabel === 'knoop' ? r.knoop + '#' + r.veld : r.id)); })) return;
+    // zelfde voorstel (zelfde regels, waarden en herkomst) = zelfde basissleutel. Nee = niet opnieuw tot de pagina iets anders zegt; open = wacht;
+    // eerder zonder uitkomst (weg, Anders, overgeslagen zonder vingerafdruk) = opnieuw met een volgnummer
+    const slug = slugKort(k.id), basis = 'intake-kritiek-' + slug + '-' + veld.replace(/[^a-z]/g, '').slice(0, 12) + '-' + fnv6(JSON.stringify(regels));
+    const eerder = (reg.kaarten || []).filter(function (x) { return x.sleutel === basis || x.sleutel.indexOf(basis + '-') === 0; });
+    if (eerder.some(function (x) { return x.status === 'open' || x.status === 'nee'; })) return;
+    let sleutel = basis;
+    for (let i = 2; geh.sleutels.has(sleutel) && i < 10; i++) sleutel = basis + '-' + i;
+    if (geh.sleutels.has(sleutel) || sleutel.length > 61) return;
+    const titel = kort(kort(k.naam, 40) + ': ' + titelWoord + ' — zo vastzetten?', KAART_TITEL);
+    const gev = regels.some(function (r) { return r.veld === 'iban' || ['factuuradres', 'boekhoudadres', 'afschriftadres'].indexOf(r.veld) >= 0; });
+    const waarom = uitleg + ' Ja: zoals hieronder. Nee: alles blijft zoals het nu is.' + (gev ? ' De app vraagt je vingerafdruk.' : '');
+    uit.push({ sleutel: sleutel, soort: 'kritiek', titel: titel, waarom: waarom, stappen: stappen.slice(0, KAART_STAPPEN), prive: priveKnoop(k, p), regels: regels.map(function (r) { const x = Object.assign({}, r); delete x.sha; return x; }) });
+  }
+  Object.keys(anker).forEach(function (id) {
+    const k = knopen[id], p = anker[id];
+    // contact: nieuwe waarde naast een vaste, of een vaste die van de pagina verdween
+    const ct = (reg.contact || []).filter(function (c) { return c.knoop === id && c.status !== 'vervallen'; });
+    CONTACT.forEach(function (veld) {
+      const act = ct.filter(function (c) { return c.veld === veld && c.status === 'actief'; }), vg = ct.filter(function (c) { return c.veld === veld && c.status === 'voorgesteld'; });
+      const weg = act.filter(function (c) { return c.intrekking; });
+      if (!act.length || (!vg.length && !weg.length)) return;   // eerste gebruik: geen kaart (bouwplan § 4.4 punt 3)
+      const regels = [], stappen = [];
+      let nr = 0;
+      act.filter(function (c) { return !c.intrekking; }).forEach(function (c) { stappen.push('Blijft: ' + kort(c.waarde, 300)); });
+      weg.forEach(function (c) { nr++; regels.push({ nr: nr, actie: 'vervallen', tabel: 'contact', id: c.id, knoop: id, veld: veld, waarde: c.waarde, sha: '' }); stappen.push(nr + '. Oud, vervalt: ' + kort(c.waarde, 300)); });
+      vg.forEach(function (c) { nr++; regels.push({ nr: nr, actie: 'activeer', tabel: 'contact', id: c.id, knoop: id, veld: veld, waarde: c.waarde, sha: (c.herkomst || {}).sha || '' }); stappen.push(nr + '. Nieuw: ' + kort(c.waarde, 300)); });
+      maak(k, p, veld, regels, stappen, VELD_WOORD[veld] + (vg.length ? ' wijzigen' : ' laten vervallen'),
+        'Dit gegeven gebruikt Socev om naartoe te schrijven, te bellen, te sturen of te betalen; daarom vraag ik elke wijziging per gegeven.');
+    });
+    // een vast kenmerk dat van de pagina verdween
+    const ingetrokken = (reg.handvatten || []).filter(function (h) { return h.knoop === id && h.status === 'actief' && h.intrekking; });
+    if (ingetrokken.length) {
+      const r = ingetrokken.slice(0, 6).map(function (h, i) { return { nr: i + 1, actie: 'vervallen', tabel: 'handvat', id: h.id, knoop: id, soort: h.soort, waarde_norm: h.waarde_norm, sha: '' }; });
+      maak(k, p, 'kenmerk', r, ingetrokken.slice(0, 6).map(function (h, i) { return (i + 1) + '. ' + KENMERK_WOORD[h.soort] + ' ' + h.waarde + ' vervalt (staat niet meer op de pagina)'; }), ingetrokken.length === 1 ? 'kenmerk laten vervallen' : ingetrokken.length + ' kenmerken laten vervallen',
+        'Dit staat niet meer op de pagina. Tot jouw Ja herkent Socev de afzender er nog aan.');
+    }
+    // naam, AGB, rekeningnummer van een bestaande knoop
+    [['naam', p.naam, k.naam], ['agb', p.agb, k.agb], ['iban', k.soort === 'entiteit' ? p.iban : '', k.iban]].forEach(function (x) {
+      const veld = x[0], nieuw = x[1] || '', oud = x[2] || '';
+      if (!nieuw || nieuw === oud) return;
+      maak(k, p, veld, [{ nr: 1, actie: 'zet', tabel: 'knoop', knoop: id, veld: veld, oud: oud || null, nieuw: nieuw, sha: nieuw }],
+        ['Nu: ' + (oud || '(leeg)'), 'Wordt: ' + nieuw], VELD_WOORD[veld] + ' wijzigen',
+        veld === 'iban' ? 'Op de pagina staat een ander rekeningnummer dan in het register; naar dit nummer kan geld gaan.'
+          : 'Op de pagina staat een andere ' + VELD_WOORD[veld] + ' dan in het register. Een vast gegeven van een bekende organisatie verander ik pas na jouw Ja.');
+    });
+  });
+  return uit;
+}
+function slugKort(id) { return String(id).replace(/^org:/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20).replace(/-+$/, '') || 'x'; }
+
+// Bibliothecaris: open bevindingen met een voorstel in gewone taal (BB4 alleen log; kritiek BB3 heeft een eigen kaart)
+function kaartBiblio(reg, o) {
+  const nu = o.nu, geh = kaartGeheugen(reg, nu), wk = isoWeek(nu);
+  const sleutel = 'intake-biblio-' + wk.jaar + '-' + String(wk.week).padStart(2, '0');
+  if (geh.sleutels.has(sleutel)) return { reden: 'deze week al een Bibliothecariskaart' };
+  if ((reg.kaarten || []).some(function (k) { return k.soort === 'biblio' && k.status === 'open'; })) return { reden: 'er staat nog een Bibliothecariskaart open' };
+  const knopen = (reg.knopen || []).slice().sort(function (a, b) { return b.id.length - a.id.length; });
+  function naamUit(bid) { const rest = bid.replace(/^BB\d-/, ''); const k = knopen.find(function (x) { return rest === x.id || rest.indexOf(x.id + '-') === 0; }); return k ? kort(k.naam, 50) : null; }
+  const kandidaten = (reg.bevindingen || []).filter(function (b) {
+    if (!/^BB[123567]$/.test(b.check_id) || (b.check_id === 'BB3' && b.ernst === 'serious')) return false;
+    if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart
+    return !geh.open.has('structuur_state#' + b.bevinding_id) && !geh.rust.has('structuur_state#' + b.bevinding_id + '#');
+  }).slice(0, KAART_STAPPEN);
+  if (!kandidaten.length) return { reden: 'geen open verschillen' };
+  const stappen = kandidaten.map(function (b, i) {
+    const nm = naamUit(b.bevinding_id) || 'een pagina in het register', nr = i + 1;
+    const z = { BB1: nm + ': de verwijzing naar het register op de pagina klopt niet. Ik zet hem goed.',
+      BB2: /-verhuisd$/.test(b.bevinding_id) ? nm + ': de pagina is verplaatst. Ik zet het register op de nieuwe plek.' : nm + ': staat in het register maar heeft geen pagina. Ik maak een conceptpagina.',
+      BB3: nm + ': pagina en register lopen uiteen. Ik werk het register bij en zoek uit waarom.',
+      BB5: 'Een kenmerk staat bij twee organisaties (' + kort(String(b.samenvatting || '').replace(/^.*\(/, '').replace(/\).*$/, '').split('/').map(function (id) { const k = knopen.find(function (x) { return x.id === id; }); return k ? k.naam : id.replace(/^org:/, ''); }).join(' en '), 80) + '). Ik zoek uit bij wie het hoort en haal het bij de ander van de pagina.',
+      BB6: nm + ': de pagina is niet te lezen. Ik herstel hem.',
+      BB7: nm + ': is buiten de gewone weg gewijzigd. Ik zet het terug zoals de pagina zegt.' }[b.check_id];
+    return nr + '. ' + z;
+  });
+  return { kaart: { sleutel: sleutel, soort: 'biblio', titel: kandidaten.length + (kandidaten.length === 1 ? ' verschil' : ' verschillen') + ' in het entiteitenregister — zo oplossen?',
+    waarom: 'De Bibliothecaris vergelijkt elke nacht de pagina\'s over organisaties met het register en lost niets stil op. Ja: Socev lost ze op zoals hieronder. Nee: alles blijft zoals het is. Anders: typ welke nummers niet, bijvoorbeeld "zonder 2".',
+    stappen: stappen, prive: false, regels: kandidaten.map(function (b, i) { return { nr: i + 1, actie: 'biblio', tabel: 'structuur_state', id: b.bevinding_id }; }) } };
+}
+
+// Wat Socev na de druk hoort (staart van de prompt; Fable wv1253 #1): de echte uitkomst van de databank, niet wat er zou gebeuren
+function uitkomstZin(soort, keuze, r, vast) {
+  if (!r) return '\n(OVIS: de pod kreeg nog geen antwoord van de databank. Zeg David alleen dat zijn keuze is ontvangen; zet zelf niets in de databank.)';
+  if (r.fout_pod) return '\n(OVIS: NIET vastgelegd, de databank gaf een fout. Zeg David in één zin dat er niets is vastgezet en dat de punten op een volgende kaart terugkomen. Jij zet niets in de databank.)';
+  if (r.ok === false && r.al) return '\n(OVIS: deze kaart was al beslist (' + r.al + '); de pod heeft niets veranderd. Zeg dat kort.)';
+  if (r.ok === false) return '\n(OVIS: NIET vastgezet: ' + kort(r.fout, 120) + '. Zeg David in één zin dat er niets is vastgezet; de punten komen op een volgende kaart terug. Jij zet niets in de databank.)';
+  if (r.status === 'nee') return '\n(OVIS: Nee — de pod heeft niets vastgezet' + (soort === 'bundel' ? '; deze kenmerken komen over vier weken weer op een kaart' : '') + '. Zeg dat kort.)';
+  if (r.status === 'anders' && !r.eruit) return '\n(OVIS: Anders zonder nummers om eruit te halen, of op een kaart met een adres of rekeningnummer — de pod heeft niets vastgezet. ' + (soort === 'bundel' ? 'Vraag David kort wat hij bedoelt; de kenmerken komen volgende week op een nieuwe kaart, waar hij met Anders "zonder 3" kan antwoorden.' : 'Vraag David kort wat hij bedoelt.') + ' Jij kunt niets vastzetten.)';
+  if (soort === 'biblio') return '\n(Bibliothecaris: David gaf ' + (r.eruit ? 'Ja behalve nummer(s) ' + r.eruit.join(', ') : 'Ja') + ' op de voorstellen. Voer ze uit in de machinekamer (bevindingen in secondbrain.structuur_state, prefix BB) en zet de rij in de box bij. Bevestig David in één zin.)';
+  const over = (r.overgeslagen || []);
+  const vf = over.filter(function (x) { return /vingerafdruk/.test(x.reden); }).length;
+  const delen = [];
+  if (r.actief) delen.push(r.actief + ' ' + (r.actief === 1 ? 'gegeven' : 'gegevens') + ' vastgezet');
+  if (r.vervallen) delen.push(r.vervallen + ' laten vervallen');
+  if (r.gezet) delen.push(r.gezet + ' gewijzigd');
+  if (!delen.length) delen.push('niets vastgezet');
+  return '\n(OVIS: de pod heeft ' + delen.join(', ') + (r.eruit ? ' (zonder nummer(s) ' + r.eruit.join(', ') + ')' : '') + '.' +
+    (over.length ? ' Niet gelukt: ' + over.length + ' (' + Array.from(new Set(over.map(function (x) { return x.reden; }))).map(function (x) { return kort(x, 60); }).join('; ') + ')' +
+      (vf && vast ? '; de Ja kwam van een vaste plek, daar telt een rekeningnummer of adres niet: de kaart komt terug, druk dan op je telefoon' : '') + '.' : '') +
+    ' Jij zet niets in de databank. Bevestig het David in één zin.)';
+}
+
+// Alle kaarten die er nu bij moeten (pure functie): kritiek eerst (meteen), dan de weekbundel, dan de Bibliothecaris
+function plan(reg, paginas, o) {
+  const soorten = o.soorten || ['kritiek', 'bundel', 'biblio'], uit = { kaarten: [], redenen: {} };
+  if (soorten.indexOf('kritiek') >= 0) kaartenKritiek(reg, paginas, o).forEach(function (k) { uit.kaarten.push(k); });
+  if (soorten.indexOf('bundel') >= 0) { const b = kaartBundel(reg, paginas, o); if (b.kaart) uit.kaarten.push(b.kaart); else uit.redenen.bundel = b.reden; }
+  if (soorten.indexOf('biblio') >= 0) { const b = kaartBiblio(reg, o); if (b.kaart) uit.kaarten.push(b.kaart); else uit.redenen.biblio = b.reden; }
+  return uit;
+}
+
 // ── de module ──
 // Map lezen zonder een symlink als map of bestand te zien (Dirent kijkt niet door een link).
 function lijstMapVan(vault) {
@@ -371,6 +609,8 @@ function lijstMapVan(vault) {
     return fs.readdirSync(path.join(vault, rel), { withFileTypes: true }).map(function (d) { return { naam: d.name, map: d.isDirectory(), bestand: d.isFile() }; });
   };
 }
+// wv1253: index.md in een Relaties-map is de inhoudsopgave, geen entiteitpagina
+function relatiePagina(x) { return x.bestand && x.naam.endsWith('.md') && x.naam.toLowerCase() !== 'index.md'; }
 function maak(o) {
   const vault = o.vault, nu = o.nu || Date.now, log = o.log || function () {};
   o.lijst = o.lijst || lijstMapVan(vault);
@@ -379,11 +619,11 @@ function maak(o) {
     function lijstMap(rel) { try { return o.lijst(rel); } catch (e) { return []; } }
     lijstMap('10_Zakelijk').forEach(function (m) {
       if (!m.map || m.naam.startsWith('.')) return;
-      if (m.naam === '_Gedeeld') { lijstMap('10_Zakelijk/_Gedeeld/Relaties').forEach(function (x) { if (x.bestand && x.naam.endsWith('.md')) uit.push('10_Zakelijk/_Gedeeld/Relaties/' + x.naam); }); return; }
+      if (m.naam === '_Gedeeld') { lijstMap('10_Zakelijk/_Gedeeld/Relaties').forEach(function (x) { if (relatiePagina(x)) uit.push('10_Zakelijk/_Gedeeld/Relaties/' + x.naam); }); return; }
       lijstMap('10_Zakelijk/' + m.naam).forEach(function (x) { if (x.bestand && /^Entiteit - .+\.md$/.test(x.naam)) uit.push('10_Zakelijk/' + m.naam + '/' + x.naam); });
     });
     lijstMap('20_Prive').forEach(function (x) { if (x.bestand && /^Entiteit - .+\.md$/.test(x.naam)) uit.push('20_Prive/' + x.naam); });
-    lijstMap('20_Prive/Relaties').forEach(function (x) { if (x.bestand && x.naam.endsWith('.md')) uit.push('20_Prive/Relaties/' + x.naam); });
+    lijstMap('20_Prive/Relaties').forEach(function (x) { if (relatiePagina(x)) uit.push('20_Prive/Relaties/' + x.naam); });
     return uit.sort().slice(0, MAX_PAGINAS);
   }
   function leesAlles() {
@@ -483,7 +723,33 @@ function maak(o) {
     log('ovis-bibliothecaris ' + JSON.stringify({ open: onverklaard, nieuw: nieuw.length, opgelost: opgelost.length, afroep: !!opties.afroep, droog: !!opties.droog }));
     return uit;
   }
-  return { vind: vind, leesAlles: leesAlles, compileer: compileer, bibliothecaris: bibliothecaris, register: register };
+  // wv1253: kaarten in Overzicht. Eerst open kaarten zonder uitkomst opruimen (de databank beslist of dat mag: weg, zonder druk gesloten
+  // na 1 uur, 21 dagen open), dan zetten wat plan() geeft. opties: { soorten: ['kritiek','bundel','biblio'], vraagId(sleutel) → 8 hex, droog }.
+  // Een fout bij één kaart stopt de andere niet.
+  async function kaarten(opties) {
+    opties = opties || {};
+    const soorten = opties.soorten || ['kritiek', 'bundel', 'biblio'], uit = { gezet: [], fouten: [], weg: 0, redenen: {} };
+    let reg = await register();
+    const t = nu();
+    for (const k of (reg.kaarten || []).filter(function (x) { return x.status === 'open' && Date.parse(x.aangemaakt) < t - 3600000; })) {
+      if (opties.droog) continue;
+      try { const r = await o.sbRpc('ovis_handvat_activeer', { p: { sleutel: k.sleutel, keuze: 'weg' } }); if (r && r.ok) uit.weg++; }
+      catch (e) { uit.fouten.push({ sleutel: k.sleutel, fout: 'weg: ' + String(e && e.message || e).slice(0, 120) }); }
+    }
+    if (uit.weg) reg = await register();
+    const p = plan(reg, leesAlles(), { nu: t, soorten: soorten });
+    uit.redenen = p.redenen;
+    for (const k of p.kaarten) {
+      if (opties.droog) { uit.gezet.push(k.sleutel); continue; }
+      try {
+        const r = await o.sbRpc('ovis_kaart_zet', { p: Object.assign({}, k, { vraag_id: opties.vraagId(k.sleutel) }) });
+        if (r && r.ok && r.nieuw) uit.gezet.push(k.sleutel);
+      } catch (e) { uit.fouten.push({ sleutel: k.sleutel, fout: String(e && e.message || e).slice(0, 160) }); }
+    }
+    log('ovis-kaarten ' + JSON.stringify({ gezet: uit.gezet, weg: uit.weg, fouten: uit.fouten.length, droog: !!opties.droog }));
+    return uit;
+  }
+  return { vind: vind, leesAlles: leesAlles, compileer: compileer, bibliothecaris: bibliothecaris, register: register, kaarten: kaarten };
 }
 
 // Box-rij bij nieuwe bevindingen (de aanroeper schrijft hem met vault-veilig; geen waarden van contactvelden, Fable wv979 #10)
@@ -504,4 +770,6 @@ function boxRijFout(fout, tijd) {
 
 module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina, frontmatter: frontmatter, vingerafdruk: vingerafdruk, checks: checks, blokTekst: blokTekst,
   zetBlok: zetBlok, huidigBlok: huidigBlok, rpcInvoer: rpcInvoer, handvattenVan: handvattenVan, normHandvat: normHandvat, boxRij: boxRij, slug: slug,
-  BLOK_BEGIN: BLOK_BEGIN, BLOK_EIND: BLOK_EIND, SCHRIJVERS_OK: SCHRIJVERS_OK };
+  BLOK_BEGIN: BLOK_BEGIN, BLOK_EIND: BLOK_EIND, SCHRIJVERS_OK: SCHRIJVERS_OK,
+  plan: plan, kaartBundel: kaartBundel, kaartenKritiek: kaartenKritiek, kaartBiblio: kaartBiblio, eruitUit: eruitUit, uitkomstZin: uitkomstZin, isoWeek: isoWeek,
+  KAART_SLEUTEL_RE: /^intake-(handvat|kritiek|biblio)-[a-z0-9]+(-[a-z0-9]+)*$/ };
