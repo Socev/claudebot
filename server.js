@@ -138,6 +138,47 @@ const MANAGERS_POORT = (function () {
       rechten: SERVER_ECHT ? '/app/socev-rechten.sh' : (process.env.MANAGERS_POORT_RECHTEN || '') }) : null;
   } catch (e) { logError('managers-poort', e); return null; }
 })();
+// wv1001: mk-runs (volle omgeving, cwd = vault: runIsMk / agentIsMk) laden geen tekst die socev kan schrijven. runClaude zet er
+// --settings (claudeMdExcludes: alle CLAUDE.md/CLAUDE.local.md/AGENTS.md + de vault; autoMemoryDirectory: MK_GEHEUGEN) en
+// --append-system-prompt (vaste machinekamer-instructie uit de release) bij; smalle vault-runs sluiten alleen geneste
+// instructiebestanden uit. Ontbreekt mk-tekst.js, dan mk zonder vaulttekst én zonder geheugen (dicht). Codex/gemini weigeren een
+// mk-run. Ontwerp + Fable: /opt/data/mk-scripts/wv1001/ontwerp.md. Na een CLI-update: mk-scripts/wv1001/proef-cli2.sh opnieuw.
+const MK_GEHEUGEN = serverPad('mk_geheugen', process.env.MK_GEHEUGEN, '/opt/data/.claude/mk-geheugen', serverProefDeel('mk-geheugen'));
+const MK_TEKST = (function () {
+  const p = path.join(__dirname, 'mk-tekst.js');
+  try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('mk-tekst', e); return null; }
+})();
+const mkTekstStand = { mk_runs: 0, smal_runs: 0, zonder_geheugen: 0, geheugen: null, geheugen_t: null, drift: null, drift_t: 0 };
+let mkTekstLaatsteReden = '';
+function mkTekstArgs(opts) {
+  const soort = opts && opts.tekst;
+  if (soort !== 'mk' && soort !== 'smal') return [];
+  if (soort === 'smal') { mkTekstStand.smal_runs++; return MK_TEKST ? MK_TEKST.args('smal', { vault: VAULT }) : []; }
+  mkTekstStand.mk_runs++;
+  if (!MK_TEKST) {
+    mkTekstStand.zonder_geheugen++;
+    return ['--settings', JSON.stringify({ claudeMdExcludes: ['/**/CLAUDE.md', '/**/CLAUDE.local.md', '/**/AGENTS.md', VAULT + '/**'], autoMemoryEnabled: false })];
+  }
+  const t = MK_TEKST.geheugenToets(MK_GEHEUGEN);
+  mkTekstStand.geheugen = t.ok ? 'ok' : 'dicht: ' + String(t.reden).slice(0, 200); mkTekstStand.geheugen_t = new Date().toISOString();
+  if (!t.ok) {
+    mkTekstStand.zonder_geheugen++;
+    if (t.reden !== mkTekstLaatsteReden) schrijfLog(JSON.stringify({ t: mkTekstStand.geheugen_t, soort: 'mk-geheugen-dicht', reden: String(t.reden).slice(0, 200) }));
+  }
+  mkTekstLaatsteReden = t.ok ? '' : t.reden;
+  return MK_TEKST.args('mk', { vault: VAULT, geheugen: MK_GEHEUGEN, geheugenOk: t.ok });
+}
+// /health.mk_tekst: geen inhoud; drift van de grondwet hooguit eens per 10 minuten gemeten (/health wordt elke 10 s gevraagd)
+function mkTekstHealth() {
+  if (MK_TEKST && Date.now() - mkTekstStand.drift_t > 10 * 60 * 1000) {
+    mkTekstStand.drift_t = Date.now();
+    try { mkTekstStand.drift = MK_TEKST.grondwetDrift(path.join(VAULT, '00_Systeem', 'Grondwet-kern.md'), SERVER_ECHT ? '/opt/data/mk-scripts/grondwet-blok.txt' : ''); }
+    catch (e) { mkTekstStand.drift = { drift: true, fout: 'niet te meten' }; }
+  }
+  return { module: !!MK_TEKST, geheugen_pad: MK_GEHEUGEN, geheugen: mkTekstStand.geheugen, geheugen_t: mkTekstStand.geheugen_t, mk_runs: mkTekstStand.mk_runs,
+    smal_runs: mkTekstStand.smal_runs, zonder_geheugen: mkTekstStand.zonder_geheugen, grondwet_drift: mkTekstStand.drift ? !!mkTekstStand.drift.drift : null,
+    grondwet: mkTekstStand.drift };
+}
 const managersPoortBoxDag = {};
 async function managersPoortToets(chatId) {
   if (!MANAGERS_POORT) return { ok: false, fouten: ['managers-poort.js ontbreekt in deze release'] };
@@ -1336,6 +1377,7 @@ function runClaude(prompt, sessionId, outdir, cwd, model, opts) {
     // Beperkte agent (spraakkastje, 4-10-2026): verboden tools gelden ook onder bypassPermissions (gemeten 4-10).
     if (opts && opts.disallowedTools) args.push('--disallowedTools', opts.disallowedTools);
     if (opts && opts.advisor) args.push('--advisor', opts.advisor);   // wv479: alleen achtergrondagents, waarde al getoetst (ontleedAdviseur)
+    args.push.apply(args, mkTekstArgs(opts));   // wv1001: welke instructiebestanden en welk geheugen (opts.tekst mk | smal)
     args.push('--', prompt);
     const extra = { OUTDIR: outdir };
     if (model) extra.ANTHROPIC_MODEL = model;
@@ -1957,6 +1999,9 @@ function agyVersieMeten() {
 // output/session_id; bij een limietfout markeren we die ook als 'limiet'
 // zodat de fallback in processJob voor beide gelijk werkt.
 function runBrein(runtime, prompt, sessionId, outdir, cwd, model, opts) {
+  // wv1001: een mk-run alleen op claude; codex en gemini laden de vault-CLAUDE.md (~/.codex/AGENTS.md en ~/.gemini/GEMINI.md zijn er links naar)
+  if (opts && opts.tekst === 'mk' && (runtime === 'codex' || runtime === 'gemini')) return Promise.resolve({ ok: false, error: 'mk-alleen-claude', runtime: runtime,
+    output: 'Een machinekamer-beurt draait alleen op claude (wv1001): ' + runtime + ' laadt de vault-CLAUDE.md als instructie. Kies claude.' });
   if (runtime === 'codex') return runCodex(prompt, sessionId, outdir, cwd, model, opts);
   if (runtime === 'gemini') return runGemini(prompt, sessionId, outdir, cwd, model, opts);
   function merk(r) {
@@ -2443,6 +2488,9 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     runOpts.env = Object.assign({}, runOpts.env || {}, { SOCEV_SESSIE: String(chatId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'onbekend' });
     // wv424: buiten de machinekamer geen beheersleutels (zie MK_SESSIES).
     if (!lezen && !runIsMk(chatId, ws)) socevSmalOpts(runOpts, chatId);
+    // wv1001: mk = eigen instructie en geheugen, geen vaulttekst; smal = Socevs eigen CLAUDE.md en geheugen, geen geneste. Managers hebben
+    // hun werkmap (wv998), lezen de jobmap; andere workspaces (ghawa) houden hun repo-CLAUDE.md.
+    if (!lezen && !managerCwd && ws === DEFAULT_WS) runOpts.tekst = runIsMk(chatId, ws) ? 'mk' : 'smal';
     j.omgeving = lezen ? 'lezen' : (runIsMk(chatId, ws) ? 'mk' : 'smal');
     // wv715: smal en in de stand → als socev via de loper; de jobmap gaat dan open voor socev (faalt dat: de beurt faalt, dicht)
     if (j.omgeving === 'smal' && loperVoorRun(chatId)) {
@@ -2907,6 +2955,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     // en alle andere labels draaien smal, ook in de hervatting van de eindcontrole (runOpts gaat mee).
     // Geen SOCEV_ENV_EXTRA voor agents: chat_id is daar vrij invulbaar (Fable wv424 #1: chat_id 'cijfer-meester' gaf anders de Supabase-MCP).
     else if (!agentIsMk(entry.label, j.smal, j.beperkt)) socevSmalOpts(runOpts, '');
+    if (ws === DEFAULT_WS) runOpts.tekst = agentIsMk(entry.label, j.smal, j.beperkt) ? 'mk' : 'smal';   // wv1001 (ook in de hervattingen)
     // wv715: smalle agents (ook beperkt=auto) als socev via de loper als de stand 'agents' of 'alles' zegt; jobmap open, anders dicht
     if (runOpts.envMag && loperVoorAgent(j.smal)) { runOpts.loper = true; loperJobmap(base); }
     // Vroege levenscontrole (alleen de eerste run; hervattingen in de eindcontrole niet): geen
@@ -3608,6 +3657,7 @@ function handleRequest(req, res) {
       bandjes: bandjesInfo(),
       gezondheid: typeof gezondheidInfo === 'function' ? gezondheidInfo() : { aan: false },   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
+      mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
@@ -16864,12 +16914,11 @@ let autoWachtTimer = null;
 let autoInVlucht = 0;             // directe starts waarvan /agent nog niet antwoordde (tellen mee voor de dag)
 const autoInternWacht = new Map();
 
+// wv1001: het blok uit de release (vaste kopie in mk-tekst.js), niet uit de vault (00_Systeem/Grondwet-kern.md is socev-schrijfbaar).
+// Ontbreekt de module, dan geen blok en dus geen auto-agent (dicht, zoals vroeger bij een onleesbare pagina).
 function autoGrondwet() {
-  let tekst;
-  try { tekst = fs.readFileSync(path.join(VAULT, '00_Systeem', 'Grondwet-kern.md'), 'utf8'); } catch (e) { return null; }
-  const i = tekst.indexOf('## Het blok');
-  const m = i < 0 ? null : /```\n([\s\S]*?)\n```/.exec(tekst.slice(i));
-  return m && m[1].indexOf('GRONDWET-KERN v1') === 0 ? m[1] : null;
+  const b = MK_TEKST && MK_TEKST.GRONDWET;
+  return typeof b === 'string' && b.indexOf('GRONDWET-KERN v1') === 0 ? b : null;
 }
 
 function autoOnderwerp(s) { return autoSchoon(s, 40).replace(/[^\p{L}\p{N} \-]/gu, '').trim() || 'opdracht'; }

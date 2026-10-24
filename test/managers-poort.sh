@@ -333,7 +333,7 @@ function omgeving() {
   // ── 9. server.js en uitrol.sh ──
   { const s = fs.readFileSync('server.js', 'utf8');
     toets('9 sessielijst server.js = config', /MANAGER_POORT_SESSIES = new Set\(\['ciso', 'data-manager', 'design-manager', 'ui-manager'\]\)/.test(s));
-    const pj = s.slice(s.indexOf('async function processJob('), s.indexOf('async function processJob(') + 6000);
+    const pj = s.slice(s.indexOf('async function processJob('), s.indexOf('async function processAgent('));   // hele functie (wv1001: 6000 tekens was te krap)
     const iPoort = pj.indexOf('MANAGER_POORT_SESSIES.has('), iRun = pj.indexOf('runMetFallback('), iRunning = pj.indexOf("j.status = 'running'");
     toets('9 poort in processJob vóór running en vóór de run', iPoort > 0 && iPoort < iRunning && iPoort < iRun);
     toets('9 poort niet groen → return met manager-poort', /error: 'manager-poort'[\s\S]{0,400}return;/.test(pj));

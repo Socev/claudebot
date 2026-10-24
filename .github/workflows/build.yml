@@ -252,6 +252,12 @@ jobs:
         run: |
           sudo apt-get install -y -qq acl >/dev/null 2>&1 || true
           bash test/vault-veilig.sh
+      # wv1001: machinekamer-runs laden geen tekst die socev kan schrijven (claudeMdExcludes + eigen geheugen + vaste instructie, geheugentoets,
+      # codex/gemini geweigerd, autoGrondwet uit de release, koppeling in server.js in een vm).
+      - name: "mk-tekst (wv1001, machinekamer zonder vaulttekst)"
+        run: |
+          sudo apt-get install -y -qq acl >/dev/null 2>&1 || true
+          bash test/mk-tekst.sh
       # Bandjes (wv739/wv743): register lezen/schrijven, routes, Studio-koppeling (nep-Piper), naKlaar, /smal, box-rij, server.js-blok in een vm.
       - name: "bandjes (wv743, mini-app Bandjes)"
         run: bash test/bandjes.sh
