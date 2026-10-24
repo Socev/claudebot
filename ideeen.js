@@ -197,14 +197,14 @@ function maak(deps) {
     if (conflicten(P.catalogus).length) return { ok: false, fout: 'er staat een conflictkopie naast de catalogus; Socev lost die eerst op', kaarten: [] };
     // wv954: de herkomstlijst hoort bij de stempel; een vervangen plaatje (zelfde naam, andere sha256) geeft een nieuwe hash
     let hst = 'geen';
-    try { const h = fs.lstatSync(P.herkomst); hst = h.mtimeMs + ':' + h.size; } catch (e) { hst = 'geen'; }
+    try { const h = fs.lstatSync(P.herkomst); hst = h.isSymbolicLink() ? 'koppeling' : h.mtimeMs + ':' + h.size; } catch (e) { hst = 'geen'; }   // Fable wv954 #5
     const stempel = st.mtimeMs + ':' + st.size + '|' + hst;
     if (cache.cat && cache.catStempel === stempel) return cache.cat;
     let c;
     try { c = Filter.leesCatalogus(fs.readFileSync(P.catalogus, 'utf8')); } catch (e) { return { ok: false, fout: 'de catalogus is nu niet leesbaar', kaarten: [] }; }
-    const hk = (leesJson(P.herkomst, {}) || {}).bestanden || {};
+    const hk = herkomstLees();
     c.kaarten.forEach(function (k) { k.hash = kaartHash(k, hk); });
-    cache.cat = { ok: true, kaarten: c.kaarten, fouten: c.fouten, mtime: st.mtimeMs, size: st.size }; cache.catStempel = stempel;
+    cache.cat = { ok: true, kaarten: c.kaarten, fouten: c.fouten, mtime: st.mtimeMs, size: st.size, hk: hk }; cache.catStempel = stempel;
     return cache.cat;
   }
   // Wat AIX zou tonen: verandert dat, dan geldt een eerdere Deel niet meer. Plaatjes tellen mee met hun sha256 uit de herkomstlijst (wv954):
@@ -248,7 +248,7 @@ function maak(deps) {
       const treffers = treffersVan(k);
       const geldig = x.keuze && x.keuze_hash === k.hash;
       const pf = k.vorm === 'kaart' ? (k.plaatjes || []).map(function (n) { const p = plaatjeVoor(n); return p.ok ? null : n + ': ' + p.fout; }).filter(Boolean) : [];
-      const basis = { id: k.id, vorm: k.vorm, keuze: geldig ? x.keuze : null, gewijzigd: !!(x.keuze && !geldig), treffers: treffers, vormfout: (k.vormfout || []).concat(pf),
+      const basis = { id: k.id, vorm: k.vorm, hash: k.hash, keuze: geldig ? x.keuze : null, gewijzigd: !!(x.keuze && !geldig), treffers: treffers, vormfout: (k.vormfout || []).concat(pf),
         kan_delen: !treffers.length && !(k.vormfout || []).length && !pf.length && !x.bezig, bezig: !!x.bezig, fout: x.fout ? plat(x.fout.reden, 160) : null };
       if (k.vorm === 'antwoord') return Object.assign(basis, { kaart: k.kaart_id, reactie: k.reactie_id, soort: k.soort, tekst: String(k.tekst || '').slice(0, 900), titel: (k.soort === 'tip' ? 'Tip bij kaart ' : 'Antwoord bij kaart ') + k.kaart_id });
       return Object.assign(basis, { titel: plat(k.titel, 120), zin: plat(k.zin, 200), wat: plat(k.wat, 500), oplevert: plat(k.oplevert, 400), hoe: plat(k.hoe, 600),
@@ -276,7 +276,14 @@ function maak(deps) {
   }
 
   // ── plaatjes: alleen proefschermen met herkomst (padcheck) ──
-  function plaatjeVoor(naam) {
+  // herkomst.json als gewoon bestand; een koppeling telt als geen herkomst (Fable wv954 #5)
+  function herkomstLees() {
+    try { if (fs.lstatSync(P.herkomst).isSymbolicLink()) return {}; } catch (e) { return {}; }
+    const b = (leesJson(P.herkomst, {}) || {}).bestanden;
+    return b && typeof b === 'object' ? b : {};
+  }
+  // verwacht: de sha256 die in de kaarthash zat toen David Deel koos (plaatsBundel); dan gaat alleen precies dat beeld mee (Fable wv954 #6)
+  function plaatjeVoor(naam, verwacht) {
     if (!Filter || !Filter.PLAATJE.test(String(naam))) return { ok: false, fout: 'geen geldige bestandsnaam' };
     const basis = path.resolve(PLAATJES);
     const f = path.resolve(basis, naam);
@@ -285,11 +292,13 @@ function maak(deps) {
     try { st = fs.lstatSync(f); echt = fs.realpathSync(f); } catch (e) { return { ok: false, fout: 'staat niet in de map met proefschermen' }; }
     if (!st.isFile() || st.isSymbolicLink() || path.dirname(echt) !== fs.realpathSync(basis)) return { ok: false, fout: 'geen gewoon bestand in de map met proefschermen' };
     if (st.size > GRENS.plaatje_bytes) return { ok: false, fout: 'groter dan 2 MB' };
-    const herkomst = leesJson(P.herkomst, {});
-    const h = herkomst && herkomst.bestanden && herkomst.bestanden[naam];
+    const herkomst = herkomstLees();
+    const h = Object.hasOwn(herkomst, naam) ? herkomst[naam] : null;
     if (!h || h.bron !== 'proefomgeving' || !/^[0-9a-f]{64}$/.test(String(h.sha256 || ''))) return { ok: false, fout: 'niet gemaakt door het schermscript (geen herkomst)' };
     const bin = fs.readFileSync(f);
-    if (crypto.createHash('sha256').update(bin).digest('hex') !== h.sha256) return { ok: false, fout: 'veranderd sinds het schermscript hem maakte' };
+    const sha = crypto.createHash('sha256').update(bin).digest('hex');
+    if (sha !== h.sha256) return { ok: false, fout: 'veranderd sinds het schermscript hem maakte' };
+    if (verwacht !== undefined && sha !== verwacht) return { ok: false, fout: 'veranderd sinds je Deel koos' };
     const type = bin.slice(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ? 'image/png' : bin.slice(0, 3).equals(Buffer.from('ffd8ff', 'hex')) ? 'image/jpeg'
       : bin.slice(0, 4).toString('latin1') === 'RIFF' && bin.slice(8, 12).toString('latin1') === 'WEBP' ? 'image/webp' : null;
     if (!type) return { ok: false, fout: 'geen PNG, JPEG of WebP' };
@@ -417,7 +426,7 @@ function maak(deps) {
         if (t.length || (k.vormfout || []).length) { uit.overgeslagen.push({ id: k.id, reden: 'vaste toets: ' + (t.map(function (y) { return y.soort; }).join(', ') || 'vorm') }); continue; }
         const beelden = [];
         if (k.vorm === 'kaart') {
-          const mis = (k.plaatjes || []).map(function (n) { const p = plaatjeVoor(n); if (p.ok) beelden.push(Object.assign(p, { naam: n })); return p.ok ? null : n; }).filter(Boolean);
+          const mis = (k.plaatjes || []).map(function (n) { const p = plaatjeVoor(n, String(((c.hk || {})[n] || {}).sha256 || '')); if (p.ok) beelden.push(Object.assign(p, { naam: n })); return p.ok ? null : n; }).filter(Boolean);
           if (mis.length) { uit.overgeslagen.push({ id: k.id, reden: 'plaatje niet uit de proefschermen: ' + mis.join(', ') }); continue; }
         }
         journaalSchrijf({ soort: 'plaats-begin', id: k.id, hash: k.hash, bundel: b.kaart });
@@ -461,7 +470,11 @@ function maak(deps) {
     for (const id of Object.keys(j)) {
       const x = j[id], k = x.gedeeld && Number.isInteger(x.gedeeld.aix) ? (c.kaarten || []).find(function (y) { return y.id === id && y.vorm === 'kaart'; }) : null;
       // wv954: alleen plaatjes die David zag toen hij Deel koos (zelfde hash als bij het plaatsen); een later toegevoegd plaatje gaat nooit vanzelf mee
-      if (!k || x.gedeeld.hash !== k.hash) continue;
+      if (!k) continue;
+      if (x.gedeeld.hash !== k.hash) {   // Fable wv954 #4: zeggen dat het plaatje niet vanzelf meegaat
+        (k.plaatjes || []).filter(function (n) { return (x.beelden || []).indexOf(n) < 0; }).slice(0, 3).forEach(function (n) { herstel.push({ id: id, naam: n, ok: false, reden: 'kaart veranderd sinds het delen; plaatje niet gezet' }); });
+        continue;
+      }
       for (const n of (k.plaatjes || []).filter(function (n) { return (x.beelden || []).indexOf(n) < 0; }).slice(0, 3)) {
         const p = plaatjeVoor(n);
         if (!p.ok) { herstel.push({ id: id, naam: n, ok: false, reden: p.fout }); continue; }

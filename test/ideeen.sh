@@ -145,6 +145,16 @@ M.mkdir();
     nu += 31000; const rt = await M.app('GET /app/ideeen');
     toets('6 terug naar het oude beeld: Deel weer geldig', rt.j.concepten.find((x) => x.id === 'k01').keuze === 'deel', rt.j.concepten.find((x) => x.id === 'k01'));
   }
+  toets('6 plaatjeVoor met verwachte sha: gelijk = ok, anders "veranderd sinds je Deel koos"', M.plaatjeVoor('goed.png', crypto.createHash('sha256').update(fs.readFileSync(path.join(PROEF, 'goed.png'))).digest('hex')).ok && /Deel koos/.test(M.plaatjeVoor('goed.png', 'b'.repeat(64)).fout));
+  {   // Fable wv954 #5: herkomst.json als koppeling telt niet
+    const hkP = path.join(PROEF, 'herkomst.json'), echt = path.join(W, 'herkomst-elders.json');
+    fs.renameSync(hkP, echt); fs.symlinkSync(echt, hkP);
+    const pk = M.plaatjeVoor('goed.png');
+    fs.unlinkSync(hkP); fs.renameSync(echt, hkP);
+    toets('6 herkomst.json als koppeling = geen herkomst', !pk.ok && /herkomst/.test(pk.fout), pk);
+  }
+  nu += 31000;
+  toets('6 concepten geven de hash mee (de app laadt een vervangen plaatje opnieuw)', /^[a-f0-9]{16}$/.test(((await M.app('GET /app/ideeen')).j.concepten.find((x) => x.id === 'k01') || {}).hash || ''));
   toets('6 padcheck: pad met map, ../ of onbekende extensie = weigeren', !M.plaatjeVoor('../buiten.png').ok && !M.plaatjeVoor('x/goed.png').ok && !M.plaatjeVoor('goed.svg').ok && M.plaatjeVoor('goed.png').ok);
 
   // ── 7. bundel: kaart, Nee, Ja zonder vingerafdruk, Ja ──
@@ -201,7 +211,7 @@ M.mkdir();
   fs.writeFileSync(CAT, fs.readFileSync(CAT, 'utf8').replace('- plaatje: goed.png\n', '- plaatje: goed.png, twee.png\n'));
   const sb1 = X.schrijf.filter((x) => x[0] === 'beeld').length;
   nk = await M.nakijk();
-  toets('7 nakijk: plaatje toegevoegd na het delen = niet naar AIX (geen Ja op dat plaatje)', nk.plaatjes.length === 0 && X.schrijf.filter((x) => x[0] === 'beeld').length === sb1 && /goed\.png, twee\.png/.test(fs.readFileSync(CAT, 'utf8')), nk.plaatjes);
+  toets('7 nakijk: plaatje toegevoegd na het delen = niet naar AIX (geen Ja op dat plaatje), wel gemeld', nk.plaatjes.length === 1 && nk.plaatjes[0].ok === false && /veranderd sinds het delen/.test(nk.plaatjes[0].reden) && X.schrijf.filter((x) => x[0] === 'beeld').length === sb1 && /goed\.png, twee\.png/.test(fs.readFileSync(CAT, 'utf8')), nk.plaatjes);
 
   // ── 8. weekritme: nul = niets; injectiezin alleen als JSON-veld, geen schrijfactie op AIX ──
   fs.writeFileSync(path.join(DIR, 'bundel.json'), JSON.stringify({ kaart: 'aix-oud', afgehandeld: '2026-10-23T12:00:00Z' }));
