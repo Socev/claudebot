@@ -270,6 +270,9 @@ jobs:
       # Health-rapporten (wv811): start zonder taalmodel — alleen de startregel terug, omgeving-allowlist, tijdgrens, één tegelijk.
       - name: "health-rapporten (wv811, start zonder taalmodel)"
         run: bash test/health-rapporten-start.sh
+      # Health-kaartverzoek (wv1033): verzoek van de nachtimport → werkvoorraadrij; alleen gewoon bestand, primair, env-allowlist.
+      - name: "health-kaartverzoek (wv1033, nachtimport geeft kaartronde door)"
+        run: bash test/health-kaartverzoek.sh
       # Health-opgaven (wv887): Socevs opgaven zonder schrijfsleutel — vast commando, omgeving-allowlist, alleen tellers terug.
       - name: "health-opgaven (wv887, /smal/health-opgaven)"
         run: bash test/health-opgaven-smal.sh

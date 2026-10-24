@@ -3907,6 +3907,8 @@ function handleRequest(req, res) {
         reqLogExtra(res, { health_rapporten: r.j.ok ? r.j.regel.slice(0, 7) : 'fout' });
         res.writeHead(r.status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(r.j));
+        // wv1033: ook na 409/502 (Fable #9); het verzoek van de nachtimport als werkvoorraadrij laten zetten
+        healthKaartVerzoek().catch(function (e) { logError('health-kaartverzoek', e); });
       });
     }); });
   }
@@ -16180,6 +16182,39 @@ function healthOpgavenUitslag(r) {
   logError('health-opgaven', new Error('importeur: ' + soort));
   return { status: 502, j: { ok: false, fout: r.signaal ? 'de importeur duurde langer dan ' + Math.round(HEALTH_OPGAVEN_MS / 1000) + ' s'
     : gestopt ? gestopt[0].slice(0, 300) : 'de importeur faalde (exit ' + r.code + ')' } };
+}
+// ── wv1033: de nachtimport geeft zijn vervolgklus "importkaart bijwerken" door aan de machinekamer ─────────────────────────
+// WAAROM. health-import.py --nacht draait (via healthrapporten.py, hierboven) zonder beheersleutels; zijn eigen
+// `werkvoorraad.py zet` faalde daardoor elke keer (24-10 04:23: "SUPABASE_URL ontbreekt", wv424) en Davids gezondheidsoverzicht
+// liep achter tot iemand de rij met de hand zette. JA David 24-10 07:38 (vraag-id 684de153).
+// HOE. De importer schrijft dan alleen een verzoek in zijn eigen 0700-map (/opt/data/.health-pod/kaartverzoek.json: versie,
+// datum, reden met tellingen). Na elke uurronde (route /health-rapporten, ook bij 409/502) start de pod, alleen als dat bestand
+// er ligt (lstat, in welke vorm ook) en alleen op de primaire kant, `python3 -I health-import.py --kaartverzoek` met PATH/HOME/TZ/LANG/
+// LC_ALL plus SUPABASE_URL en SUPABASE_SERVICE_ROLE. Het script toetst het verzoek zelf (geen link, vast formaat, ≤ 1 KB),
+// zet hooguit één rij `machinekamer:health-kaart-bijwerken-<datum>` met de vaste opdracht, en meldt een weigering of fout één
+// keer in de box. Eén tegelijk, 90 s. In de foutlog alleen de exitcode, nooit stdout/stderr.
+// DEKT NIET: wie als claude (1001) schrijft kan het verzoek vervalsen, maar heeft de sleutels dan al. Ontwerp + Fable:
+// /opt/data/mk-scripts/wv1033/.
+const HEALTH_KAARTVERZOEK = process.env.HEALTH_KAARTVERZOEK || '/opt/data/.health-pod/kaartverzoek.json';   // alleen de toets wijst elders heen
+const HEALTH_KAARTVERZOEK_ENV = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE'];
+const HEALTH_KAARTVERZOEK_MS = Number(process.env.HEALTH_KAARTVERZOEK_MS) || 90000;
+let healthKaartVerzoekBezig = false;
+async function healthKaartVerzoek() {
+  if (healthKaartVerzoekBezig || !rolPrimair()) return null;
+  try { require('fs').lstatSync(HEALTH_KAARTVERZOEK); } catch (e) { return null; }   // lstat: volgt geen link
+  // Ook een link, map of fifo op die plek: het script weigert hem, ruimt hem op en meldt het één keer (Fable wv1033 diff #3).
+  healthKaartVerzoekBezig = true;
+  try {
+    const env = {};
+    HEALTH_KAARTVERZOEK_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
+    const r = await smalKind('python3', ['-I', HEALTH_OPGAVEN_BIN, '--kaartverzoek'], '', HEALTH_KAARTVERZOEK_MS, env);
+    if (r.code !== 0) {
+      const e = new Error('kaartverzoek');
+      e.code = r.signaal ? 'tijdgrens' : 'exit ' + r.code;   // logError schrijft alleen name/code/status (Fable wv1033 #4)
+      logError('health-kaartverzoek', e);
+    }
+    return r.code;
+  } finally { healthKaartVerzoekBezig = false; }
 }
 function bankRondeStart() {
   if (bankRondeBezig) return { status: 409, j: { ok: false, fout: 'er loopt al een bank-ronde', begin: bankRondeLaatste && bankRondeLaatste.begin } };
