@@ -98,6 +98,17 @@ if (heeft('setfacl') && heeft('getfacl')) {
     toets('G na herschrijven nog steeds masker rw', acl.includes('mask::rw-'), acl.replace(/\n/g, ' '));
   } else console.log('OVERGESLAGEN js G (setfacl werkt niet op dit bestandssysteem)');
 } else console.log('OVERGESLAGEN js G (geen setfacl)');
+// L  map omgeleid NA de maptoets maar vóór de rename (Fable wv900 #4): de schrijfactie landt in de echte map, niets in het linkdoel
+{
+  const R = path.join(W, 'js-race'), RM = path.join(R, 'M'), RA = path.join(R, 'A');
+  fs.mkdirSync(RM, { recursive: true }); fs.mkdirSync(RA);
+  const orig = fs.renameSync;
+  fs.renameSync = function (a, b) { fs.renameSync = orig; orig(RM, RM + '-echt'); fs.symlinkSync(RA, RM); return orig(a, b); };
+  let ok = true; try { VV.schrijf(path.join(RM, 'box.md'), 'x'); } catch (e) { ok = false; }
+  fs.renameSync = orig;
+  toets('L omleiding midden in het schrijven: linkdoel leeg, echte map heeft het bestand', ok && fs.readdirSync(RA).length === 0
+    && fs.readFileSync(path.join(RM + '-echt', 'box.md'), 'utf8') === 'x', fs.readdirSync(RA).join(','));
+}
 // I
 const oud = path.join(M, '.machinekamer.md.0123456789abcdef.vv.tmp'), jong = path.join(M, '.machinekamer.md.fedcba9876543210.vv.tmp');
 fs.writeFileSync(oud, 'x'); fs.writeFileSync(jong, 'x');
@@ -205,6 +216,22 @@ def rij(i):
 th = [threading.Thread(target=rij, args=(i,)) for i in range(20)]
 [t.start() for t in th]; [t.join() for t in th]
 toets("H 20 gelijktijdige wijzigingen: geen rij kwijt", all(f"rij {i}\n" in lees(box) for i in range(20)), lees(box).count("rij"))
+# L  map omgeleid NA de maptoets maar vóór de rename: alles relatief aan de mapdescriptor, dus niets in het linkdoel
+R = os.path.join(W, "py-race"); RM = os.path.join(R, "M"); RA = os.path.join(R, "A")
+os.makedirs(RM); os.makedirs(RA)
+echt_replace = os.replace
+def omleiden(*a, **k):
+    os.replace = echt_replace
+    echt_replace(RM, RM + "-echt"); os.symlink(RA, RM)
+    return echt_replace(*a, **k)
+os.replace = omleiden
+try:
+    VV.schrijf(os.path.join(RM, "box.md"), "x"); ok = True
+except OSError:
+    ok = False
+os.replace = echt_replace
+toets("L omleiding midden in het schrijven: linkdoel leeg, echte map heeft het bestand",
+      ok and not os.listdir(RA) and open(os.path.join(RM + "-echt", "box.md")).read() == "x", os.listdir(RA))
 # I
 oud = os.path.join(M, ".machinekamer.md.0123456789abcdef.vv.tmp"); jong = os.path.join(M, ".machinekamer.md.fedcba9876543210.vv.tmp")
 open(oud, "w").write("x"); open(jong, "w").write("x")

@@ -19,6 +19,9 @@
 #
 # Uitzondering: .claude/ en .obsidian/ in de vaultwortel. Daar kan socev niet schrijven (r-X; de wortel is r-x, dus ook niet
 # weg te hernoemen), en daar staan de skills en de Obsidian-instellingen die op de pc wél mee moeten.
+# Tijdelijke bestanden van vault-veilig.js/vault_veilig.py (wv900): een gedode schrijver kan `.<naam>.<16 hex>.vv.tmp` laten staan
+# tot de volgende schrijfactie in die map (≥ 1 uur); die horen niet op Drive (Fable wv900 #6).
+- {{\..*\.[0-9a-f]{16}\.vv\.tmp[. ]*}}
 + /.claude/**
 + /.obsidian/**
 # Config-mappen elders: Claude Code (hooks), VS Code (taken bij openen), Codex en Obsidian voeren die op de pc uit.

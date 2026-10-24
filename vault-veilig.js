@@ -9,14 +9,16 @@
 // link vervangt, wordt ook gevolgd (O_NOFOLLOW dekt alleen de laatste component; Fable wv887 MOET 1).
 //
 // Het patroon (zelfde als vault_veilig.py en health-pod import_vault.py `_box_rij`):
-//   - geen enkele padcomponent mag een symlink zijn; dat toetsen we op de GEOPENDE descriptor (/proc/self/fd/N), niet vooraf;
+//   - de map openen als descriptor (O_DIRECTORY | O_NOFOLLOW) en via /proc/self/fd/N toetsen dat hij precies op het opgegeven
+//     pad staat: geen enkele padcomponent is een symlink;
+//   - alles daarna via /proc/self/fd/N/<naam>: dat is de openat van Node (de kernel volgt de descriptor naar de mapinode),
+//     dus een map die socev ná de toets omleidt, raakt deze schrijfactie niet meer (Fable wv900 #4);
 //   - lezen: O_NOFOLLOW | O_NONBLOCK (een fifo blijft niet hangen), alleen een gewoon bestand;
 //   - schrijven: eigen tijdelijk bestand met een willekeurige naam, O_CREAT | O_EXCL | O_NOFOLLOW (kan niet vooraf als link
-//     klaarliggen), daarna rename in dezelfde map (vervangt een link, volgt hem niet). Modus: die van het bestaande bestand
-//     (de groepsbits zijn het ACL-masker, dus socev houdt zijn rw op de box), anders 0660;
-//   - aanvullen: O_APPEND | O_NOFOLLOW op het bestand zelf, daarna dezelfde descriptor-toets.
-// Node kent geen openat; daarom de toets achteraf. Wordt een map ná de toets omgeleid, dan vindt rename het tijdelijke bestand
-// daar niet (ENOENT) en blijft de vault zoals hij was.
+//     klaarliggen), daarna rename binnen die map (vervangt een link, volgt hem niet). Modus: die van het bestaande bestand
+//     (de groepsbits zijn het ACL-masker, dus socev houdt zijn rechten), anders 0660 — tenzij de aanroeper o.modus geeft
+//     (bandjes, ideeen en harvester houden 0644: masker r--, socev leest tot de na-ronde);
+//   - aanvullen: O_APPEND | O_NOFOLLOW op het bestand zelf.
 //
 // Canonieke bron: claudebot-src (getoetst in CI, test/vault-veilig.sh). Kopie: /opt/data/mk-scripts/veilig/vault-veilig.cjs
 // (byte-gelijk; CISO C7-kopie-drift bewaakt dat).
@@ -37,88 +39,111 @@ function opPlek(fd, pad) {
   return echt === path.resolve(pad);
 }
 
-function lees(pad, codering) {
-  const enc = codering === undefined ? 'utf8' : codering;
-  const fd = fs.openSync(pad, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
+// Descriptor van de map van pad, getoetst; geeft { dfd, naam, binnen(n) } met binnen(n) = pad van n in díe map.
+function openMap(pad) {
+  const abs = path.resolve(pad);
+  const map = path.dirname(abs), naam = path.basename(abs);
+  let dfd;
+  try { dfd = fs.openSync(map, C.O_RDONLY | C.O_DIRECTORY | C.O_NOFOLLOW); }
+  catch (e) {
+    let link = false; try { link = fs.lstatSync(map).isSymbolicLink(); } catch (x) { /* weg */ }
+    if (e && (e.code === 'ELOOP' || (e.code === 'ENOTDIR' && link))) throw fout('map is een symlink: ' + map, 'ESYMLINK');
+    throw e;
+  }
+  if (!opPlek(dfd, map)) { fs.closeSync(dfd); throw fout('map loopt via een symlink: ' + map, 'ESYMLINK'); }
+  return { dfd: dfd, naam: naam, binnen: function (n) { return '/proc/self/fd/' + dfd + '/' + n; } };
+}
+
+function metMap(pad, f) {
+  const m = openMap(pad);
+  try { return f(m); } finally { fs.closeSync(m.dfd); }
+}
+
+// stat zonder te volgen; null als het bestand er niet is of geen gewoon bestand is
+function statGewoon(p) {
+  try { const st = fs.lstatSync(p); return st.isFile() ? st : null; } catch (e) { return null; }
+}
+
+function leesIn(m, enc) {
+  const fd = fs.openSync(m.binnen(m.naam), C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
   try {
-    if (!opPlek(fd, pad)) throw fout('pad loopt via een symlink: ' + pad, 'ESYMLINK');
-    if (!fs.fstatSync(fd).isFile()) throw fout('geen gewoon bestand: ' + pad, 'ENOTREG');
+    if (!fs.fstatSync(fd).isFile()) throw fout('geen gewoon bestand: ' + m.naam, 'ENOTREG');
     return fs.readFileSync(fd, enc);
   } finally { fs.closeSync(fd); }
 }
 
-// stat zonder te volgen; null als het bestand er niet is of geen gewoon bestand is
-function statGewoon(pad) {
-  try { const st = fs.lstatSync(pad); return st.isFile() ? st : null; } catch (e) { return null; }
-}
-
-function ruimOp(map) {
+function ruimOp(m) {
   // een tijdelijk bestand dat een gedode schrijver achterliet (SIGKILL) en ouder is dan een uur
   try {
     const nu = Date.now();
-    for (const n of fs.readdirSync(map)) {
+    for (const n of fs.readdirSync(m.binnen(''))) {
       if (!TMP_PATROON.test(n)) continue;
-      const p = path.join(map, n);
-      try { const st = fs.lstatSync(p); if (st.isFile() && nu - st.mtimeMs > 3600000) fs.unlinkSync(p); } catch (e) { /* weg of niet van ons */ }
+      try { const st = fs.lstatSync(m.binnen(n)); if (st.isFile() && nu - st.mtimeMs > 3600000) fs.unlinkSync(m.binnen(n)); } catch (e) { /* weg */ }
     }
   } catch (e) { /* opruimen is bijzaak */ }
+}
+
+function schrijfIn(m, inhoud, o) {
+  const oud = statGewoon(m.binnen(m.naam));
+  const modus = o.modus != null ? o.modus : (oud ? (oud.mode & 0o777) : 0o660);
+  const tmp = '.' + m.naam.slice(0, 80) + '.' + crypto.randomBytes(8).toString('hex') + TMP_ACHTER;
+  const fd = fs.openSync(m.binnen(tmp), C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, 0o600);
+  let open = true, klaar = false;
+  try {
+    fs.writeFileSync(fd, inhoud);
+    fs.fchmodSync(fd, modus);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd); open = false;
+    if (o.alsGelijk && !o.alsGelijk(statGewoon(m.binnen(m.naam)))) return false;
+    fs.renameSync(m.binnen(tmp), m.binnen(m.naam));
+    klaar = true;
+  } finally {
+    if (open) { try { fs.closeSync(fd); } catch (e) { /* al dicht */ } }
+    if (!klaar) { try { fs.unlinkSync(m.binnen(tmp)); } catch (e) { /* weg */ } }
+  }
+  ruimOp(m);
+  return true;
+}
+
+function lees(pad, codering) {
+  return metMap(pad, function (m) { return leesIn(m, codering === undefined ? 'utf8' : codering); });
 }
 
 // Schrijf inhoud naar pad via een eigen tijdelijk bestand + rename. o.modus overschrijft de modus; o.alsGelijk(st) mag vlak
 // voor de rename false geven (iemand schreef intussen): dan niets vervangen en false terug.
 function schrijf(pad, inhoud, o) {
-  o = o || {};
-  const abs = path.resolve(pad);
-  const map = path.dirname(abs);
-  const oud = statGewoon(abs);
-  const modus = o.modus != null ? o.modus : (oud ? (oud.mode & 0o777) : 0o660);
-  const tmp = path.join(map, '.' + path.basename(abs).slice(0, 80) + '.' + crypto.randomBytes(8).toString('hex') + TMP_ACHTER);
-  const fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, 0o600);
-  let open = true, klaar = false;
-  try {
-    if (!opPlek(fd, tmp)) throw fout('map loopt via een symlink: ' + map, 'ESYMLINK');
-    fs.writeFileSync(fd, inhoud);
-    fs.fchmodSync(fd, modus);
-    fs.fsyncSync(fd);
-    fs.closeSync(fd); open = false;
-    if (o.alsGelijk && !o.alsGelijk(statGewoon(abs))) return false;
-    fs.renameSync(tmp, abs);
-    klaar = true;
-  } finally {
-    if (open) { try { fs.closeSync(fd); } catch (e) { /* al dicht */ } }
-    if (!klaar) { try { fs.unlinkSync(tmp); } catch (e) { /* weg */ } }
-  }
-  ruimOp(map);
-  return true;
+  return metMap(pad, function (m) { return schrijfIn(m, inhoud, o || {}); });
 }
 
 // Vul aan (één write, O_APPEND). o.maak: bestand aanmaken als het ontbreekt (modus 0660), nooit via een hangende link.
 function voegToe(pad, tekst, o) {
   o = o || {};
-  const fl = C.O_WRONLY | C.O_APPEND | C.O_NOFOLLOW | C.O_NONBLOCK | (o.maak ? C.O_CREAT : 0);
-  const fd = fs.openSync(pad, fl, o.modus != null ? o.modus : 0o660);
-  try {
-    if (!opPlek(fd, pad)) throw fout('pad loopt via een symlink: ' + pad, 'ESYMLINK');
-    if (!fs.fstatSync(fd).isFile()) throw fout('geen gewoon bestand: ' + pad, 'ENOTREG');
-    fs.writeSync(fd, tekst);
-  } finally { fs.closeSync(fd); }
+  metMap(pad, function (m) {
+    const fl = C.O_WRONLY | C.O_APPEND | C.O_NOFOLLOW | C.O_NONBLOCK | (o.maak ? C.O_CREAT : 0);
+    const fd = fs.openSync(m.binnen(m.naam), fl, o.modus != null ? o.modus : 0o660);
+    try {
+      if (!fs.fstatSync(fd).isFile()) throw fout('geen gewoon bestand: ' + m.naam, 'ENOTREG');
+      fs.writeSync(fd, tekst);
+    } finally { fs.closeSync(fd); }
+  });
 }
 
 // Lees, laat functie(tekst) de nieuwe tekst geven (null/undefined = niets doen) en schrijf die weg als het bestand intussen
 // niet veranderde (zelfde inode, grootte en mtime); anders tot drie keer opnieuw. Geeft true als er geschreven is.
 function wijzig(pad, functie, o) {
   o = o || {};
-  for (let poging = 0; poging < 3; poging++) {
-    const voor = statGewoon(pad);
-    const t = lees(pad);
-    const nieuw = functie(t);
-    if (nieuw == null) return false;
-    const ok = schrijf(pad, nieuw, Object.assign({}, o, {
-      alsGelijk: function (st) { return !!(st && voor && st.size === voor.size && st.mtimeMs === voor.mtimeMs && st.ino === voor.ino); },
-    }));
-    if (ok) return true;
-  }
-  return false;
+  return metMap(pad, function (m) {
+    for (let poging = 0; poging < 3; poging++) {
+      const voor = statGewoon(m.binnen(m.naam));
+      const nieuw = functie(leesIn(m, 'utf8'));
+      if (nieuw == null) return false;
+      const ok = schrijfIn(m, nieuw, Object.assign({}, o, {
+        alsGelijk: function (st) { return !!(st && voor && st.size === voor.size && st.mtimeMs === voor.mtimeMs && st.ino === voor.ino); },
+      }));
+      if (ok) return true;
+    }
+    return false;
+  });
 }
 
 module.exports = { lees, schrijf, voegToe, wijzig, opPlek, TMP_PATROON };

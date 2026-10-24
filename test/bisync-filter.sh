@@ -60,6 +60,7 @@ echo x > "$V/00_Systeem/evil.msı"; mkdir -p "$V/00_Systeem/repo/.git"; echo '[c
 echo 'print(3)' >> "$V/01_Ontwikkeling/0b-werkmap/outlook_meelezen.py"   # bestaand script gewijzigd
 echo 'nieuw' >> "$V/00_Systeem/a.md"                                       # gewone wijziging
 echo 'vanpc' > "$D/00_Systeem/vanpc.py"; echo 'pc-notitie' > "$D/00_Systeem/pc.md"   # pc-kant
+echo half > "$V/00_Systeem/.a.md.0123456789abcdef.vv.tmp"   # wv900: achtergebleven tijdelijk bestand van vault-veilig
 ok "gewone bisync-ronde met het filter" "bis"
 ok "  geleend eigendom (md → .ps1) niet op Drive"            "[ ! -e \$D/00_Systeem/geleend.ps1 ]"
 ok "  en de oude naam is van Drive weg (hernoemen = verwijderen + nieuw)" "[ ! -e \$D/00_Systeem/leen.md ]"
@@ -67,6 +68,7 @@ ok "  verzamel-claude.mjs (wat de pc-taak draaide) niet op Drive" "[ ! -e \$D/00
 ok "  Windows-varianten (tokens_pc.PS1. , Start.CmD., .lnk) niet op Drive" "[ -z \"\$(ls \$D/00_Systeem/Tokens | grep -i ps1)\" ] && [ -z \"\$(ls \$D/00_Systeem | grep -iE 'cmd|lnk')\" ]"
 ok "  geneste .Claude/.vscode/.git, desktop.ini en .msı (Turkse ı) niet op Drive" "[ ! -e \$D/00_Systeem/.Claude ] && [ ! -e \$D/00_Systeem/.vscode ] && [ ! -e \$D/00_Systeem/desktop.ini ] && [ ! -e \$D/00_Systeem/repo/.git/config ] && [ -z \"\$(ls \$D/00_Systeem | grep 'evil')\" ]"
 ok "  gewijzigd script niet over, gewone wijziging wel"       "[ ! -e \$D/01_Ontwikkeling/0b-werkmap/outlook_meelezen.py ] && grep -q nieuw \$D/00_Systeem/a.md"
+ok "  achtergebleven .vv.tmp (wv900) niet op Drive"          "[ ! -e \$D/00_Systeem/.a.md.0123456789abcdef.vv.tmp ]"
 ok "  pc-kant: notitie wel in de vault, .py niet"             "[ -f \$V/00_Systeem/pc.md ] && [ ! -e \$V/00_Systeem/vanpc.py ]"
 ok "  niets gewist: vault-kant houdt al zijn bestanden"       "[ -f \$V/00_Systeem/geleend.ps1 ] && [ -f \$V/00_Systeem/Tokens/verzamel-claude.mjs ] && [ -f \$V/01_Ontwikkeling/0b-werkmap/taak.ps1 ] && [ -f \$D/00_Systeem/vanpc.py ]"
 ok "zelfherstel-resync met het filter zet ze ook niet over"   "bis --resync --resync-mode newer && [ ! -e \$D/00_Systeem/geleend.ps1 ] && [ ! -e \$D/00_Systeem/Tokens/verzamel-claude.mjs ]"

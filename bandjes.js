@@ -502,8 +502,14 @@ function maak(deps) {
     let st;
     try { st = fs.lstatSync(f); } catch (e) { return { status: 200, praktijk: pr, ontbreekt: true, bandjes: [], instellingen: {}, fouten: [], dicht: 'de registerpagina ontbreekt' }; }
     let c = cache[pr];
+    // wv900 (Fable #7): een symlink of iets anders dan een gewoon bestand op de registerplek = dicht (met box-rij), niet een 500
+    const nietGewoon = { status: 200, praktijk: pr, bandjes: [], instellingen: {}, fouten: ['de registerpagina is een symlink of geen gewoon bestand'],
+      dicht: 'de registerpagina is een symlink of geen gewoon bestand' };
+    if (!st.isFile()) return nietGewoon;
     if (!c || c.mtime !== st.mtimeMs || c.grootte !== st.size) {   // gelijkheid, niet "nieuwer": een teruggezette kopie is ouder (Fable #2)
-      c = cache[pr] = { mtime: st.mtimeMs, grootte: st.size, p: parse(VV.lees(f), PRAKTIJKEN[pr].voorvoegsel) };
+      let md;
+      try { md = VV.lees(f); } catch (e) { if (e && /^(ELOOP|ESYMLINK|ENOTREG)$/.test(e.code)) return nietGewoon; throw e; }
+      c = cache[pr] = { mtime: st.mtimeMs, grootte: st.size, p: parse(md, PRAKTIJKEN[pr].voorvoegsel) };
     }
     const p = c.p;
     const redenen = [];

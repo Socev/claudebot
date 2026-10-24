@@ -230,12 +230,19 @@ const tmpDir = path.join(DIR, 'tmp');
 // wv900: het tijdelijke bestand staat nu (willekeurige naam, O_EXCL) in de getoetste vaultmap zelf; na het schrijven is het weg
 toets('geen tijdelijk bestand achtergebleven (vaultmap en pod-tmp)', (!fs.existsSync(tmpDir) || fs.readdirSync(tmpDir).length === 0) && !fs.readdirSync(path.dirname(TG)).some((n) => n !== 'Bandjes.md'));
 { // wv900: een map-symlink onderweg (socev) wordt niet gevolgd; een link op de registernaam ook niet
-  const echt = path.dirname(TG), ander = fs.mkdtempSync(path.join(require('os').tmpdir(), 'bandjes-ander-'));
+  const echt = path.dirname(GH), ander = fs.mkdtempSync(path.join(require('os').tmpdir(), 'bandjes-ander-'));
+  fs.copyFileSync(GH, path.join(ander, path.basename(GH))); const kopie = fs.readFileSync(GH, 'utf8');
   fs.renameSync(echt, echt + '-weg'); fs.symlinkSync(ander, echt);
-  let geweigerd = false; try { S.nieuw('groenhouten', { naam: 'Via link' }); } catch (e) { geweigerd = true; }
-  const leeg = fs.readdirSync(ander).length === 0;
+  let geweigerd = false, r0 = null; try { r0 = S.nieuw('groenhouten', { naam: 'Via link' }); } catch (e) { geweigerd = true; }
+  const leeg = fs.readdirSync(ander).length === 1 && fs.readFileSync(path.join(ander, path.basename(GH)), 'utf8') === kopie;
   fs.unlinkSync(echt); fs.renameSync(echt + '-weg', echt); fs.rmSync(ander, { recursive: true, force: true });
   toets('wv900 map-symlink: niets geschreven in de doelmap', leeg, geweigerd);
+  // wv900 (Fable #7): symlink op de registerpagina zelf → dicht met reden, geen uitzondering
+  const geheim = path.join(ander + '-g'); fs.writeFileSync(geheim, 'SLEUTEL=x\n');
+  const bewaard = fs.readFileSync(GH); fs.unlinkSync(GH); fs.symlinkSync(geheim, GH);
+  let l2 = null, gooit = false; try { l2 = S.lees('groenhouten'); } catch (e) { gooit = true; }
+  fs.unlinkSync(GH); fs.writeFileSync(GH, bewaard); fs.rmSync(geheim, { force: true });
+  toets('wv900 symlink op de registerpagina: dicht, geen uitzondering', !gooit && l2 && /symlink/.test(l2.dicht || '') && l2.bandjes.length === 0, gooit || l2);
 }
 toets('registerpagina 0644', (fs.statSync(path.join(VAULT, B.PRAKTIJKEN.groenhouten.pad.replace('Bandjes.md', 'Bandjes.md'))).mode & 0o777) === 0o644 || (fs.statSync(TG).mode & 0o777) === 0o644, (fs.statSync(TG).mode & 0o777).toString(8));
 toets('journaal 0600 buiten de vault', (fs.statSync(path.join(DIR, 'journaal.jsonl')).mode & 0o777) === 0o600 && !path.join(DIR, 'journaal.jsonl').startsWith(VAULT));

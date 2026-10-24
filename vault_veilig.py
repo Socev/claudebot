@@ -40,7 +40,12 @@ def _op_plek(fd, pad):
 
 def open_map(map_):
     """Descriptor van een map waarvan vaststaat dat geen enkele component een symlink is."""
-    dfd = os.open(map_, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        dfd = os.open(map_, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except (NotADirectoryError, OSError) as e:
+        if os.path.islink(map_):
+            raise SymlinkFout(f"map is een symlink: {map_}") from e
+        raise
     if not _op_plek(dfd, map_):
         os.close(dfd)
         raise SymlinkFout(f"map loopt via een symlink: {map_}")

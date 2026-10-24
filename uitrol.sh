@@ -243,12 +243,12 @@ try:
   print(str(j.get("versie","")) + " " + ("nee" if False in e else ("ja" if True in e else "onbekend")))
 except Exception: print("- onbekend")' 2>/dev/null || echo "- onbekend"; }
 box_rij(){ [ -f "$BOX" ] || { log "LET OP: box $BOX bestaat niet - geen rij geschreven"; return 0; }
-  python3 -I -B - "$BOX" "$1" "$2" "$3" "$4" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$BRON_REPO" <<'PYBOX' || log "LET OP: kon geen rij in de box schrijven"
+  python3 -I -B - "$BOX" "$1" "$2" "$3" "$4" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$BRON_REPO:/opt/data/mk-scripts/veilig" <<'PYBOX' || log "LET OP: kon geen rij in de box schrijven"
 import sys, datetime
 p, titel, zag, status, kost, hier = sys.argv[1:7]
 # wv900: de box staat in de vault, schrijfbaar voor socev; een vaste tijdelijke naam (vroeger .machinekamer.md.uitrol.tmp)
 # volgde een symlink die socev daar zette. Nu vault_veilig.wijzig: getoetste mapdescriptor, eigen tmp met O_EXCL, rename, flock.
-sys.path[:0] = hier.split(':')   # naast dit script, anders de werkboom (BRON_REPO)
+sys.path[:0] = hier.split(':')   # naast dit script, dan de werkboom (BRON_REPO), dan de kopie in mk-scripts (Fable wv900 #5)
 import vault_veilig
 nu = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 rij = ('\n## [log] %s — %s\n- status: %s\n- van: uitrol.sh (nacontrole wv358)\n- wat ik zag: %s\n'
