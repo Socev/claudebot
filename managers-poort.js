@@ -77,7 +77,7 @@ const WERKMAP_TEKST = [
   "- Stuur David nooit zelf iets via Telegram of api.telegram.org; alleen langs de wegen die je skill voorschrijft (box-rij,",
   "  werkvoorraad, Voor jou-kaart, de bundel, python3 /opt/data/mk-scripts/bericht.py).",
   "- Een vraag aan David begint met \"VRAAG AAN DAVID: <één zin, ja/nee>\"; daarna per punt hooguit drie korte regels in gewone taal.",
-  "  Geen reflectie of techniekverslag naar David; dat hoort in de box.",
+  "  Geen vraag? Dan geen VRAAG AAN DAVID-regel (ook niet 'geen'). Geen reflectie of techniekverslag naar David; dat hoort in de box.",
   "- Een Voor jou-kaart heeft de stappen in de kaart zelf, in gewone taal, zonder wv-nummer, podpad of vaultpad; geen",
   "  patiëntgegevens, geen sleutels.",
   "- Gevoelig gaat altijd langs David: niets naar buiten, geen toezeggingen, geen geld, niets onomkeerbaars, geen workflows",

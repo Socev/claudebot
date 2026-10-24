@@ -640,6 +640,7 @@ srv.listen(0, '127.0.0.1', async () => {
     // opname herkennen
     toets('6 opname: MPEG4 duur uit mvhd, WAV uit de kop, rest null', Math.abs(H.telOpname(mp4Maak(12.5)).s - 12.5) < 0.01 && Math.abs(H.telOpname(wavMaak(2)).s - 2) < 0.01 && H.telOpname(Buffer.from('#!AMR\n')) === null);
     toets('6 spreektekst zonder inhoud: vaste zin', H.telSpreektekst('Verder in de app:\nalles') === 'Ik heb een antwoord voor je in de app.');
+    toets('6 wv1035: "VRAAG AAN DAVID: geen." -> geen "ik heb een vraag"', H.telSpreektekst('Klaar.\n\n**VRAAG AAN DAVID:** geen.') === 'Klaar.' && /Ik heb een vraag voor je in de app\.$/.test(H.telSpreektekst('Klaar.\n\nVRAAG AAN DAVID: Zal ik verder?')), JSON.stringify([H.telSpreektekst('Klaar.\n\n**VRAAG AAN DAVID:** geen.'), H.telSpreektekst('Klaar.\n\nVRAAG AAN DAVID: Zal ik verder?')]));
     toets('6 spreektekst: oude regel "Verder in Telegram" knipt nog (wv571)', H.telSpreektekst('Kern.\n\nVerder in Telegram:\n- bedrag') === 'Kern.', H.telSpreektekst('Kern.\n\nVerder in Telegram:\n- bedrag'));
     toets('6 geen onverwachte fouten in logError', !logs.some((l) => !/^(app-|tel-whisper|tel-deel)/.test(l) || /uitzondering/.test(l)), logs);
   } catch (e) { toets('uitzondering in de toets', false, e && e.stack); }

@@ -3324,7 +3324,7 @@ async function appVerlorenAfronden(id, x) {
   if (ok) {
     let t = e.tekst;
     if (t.length > APP_SPIEGEL_ANTWOORD_MAX) t = t.slice(0, APP_SPIEGEL_ANTWOORD_MAX) + ' …';   // C10
-    antwoord = APP_VERLOREN_KOP + (/VRAAG AAN DAVID:/.test(t) ? ' _(de knoppen onder de vraag vervallen; typ je antwoord)_' : '') + '\n\n' + t;
+    antwoord = APP_VERLOREN_KOP + (Array.from(t.matchAll(/^[^\S\n]*[*_]*VRAAG AAN DAVID:[*_]*[^\S\n]*(.*)$/gm)).some(function (m) { return !appVraagLeeg(m[1]); }) ? ' _(de knoppen onder de vraag vervallen; typ je antwoord)_' : '') + '\n\n' + t;
   } else {
     fout = e.limiet ? 'limiet-na-herstart' : 'verloren-na-herstart';
     if (x.soort === 'knop' && x.knop) appKnopRijZet(x.knop, id, function (v) { v.antwoord = null; });   // C6: de vraag weer open
@@ -6073,10 +6073,18 @@ function appOmlijsting() {
 }
 // Zelfde herkenning als de hoofdbot (n8n "Claude via Telegram" > Opmaak): precies één regel VRAAG AAN DAVID:, niet
 // genummerd. Hash = FNV-1a van de vraagregel (zelfde als vraag_id in Telegram).
+// wv1035: "VRAAG AAN DAVID: geen." (24-10 07:01, agentrapport wv900) is geen vraag en krijgt geen knoppen. Leeg telt als geen
+// vraag, en zo ook de hele regel geen / geen vraag(en) (deze keer, nu, vandaag) / niets / niks / nee / none / nvt / n.v.t. / - / — /
+// (geen), met of zonder punt of opmaak (Fable-diffreview wv1035). "Geen bezwaar als ik X doe?" blijft een vraag: alleen de hele regel telt.
+function appVraagLeeg(zin) {
+  let s = String(zin || '').replace(/[*_`]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+  s = s.replace(/[\s.!;:,]+$/, '').replace(/^\(\s*(.*?)\s*\)$/, '$1').replace(/[\s.!;:,]+$/, '');
+  return !s || /^(?:geen(?: vra(?:ag|gen))?(?: (?:deze keer|nu|vandaag|voor nu))?|niets|niks|nee|none|no|n\.? ?v\.? ?t|[-\u2010-\u2015]+)$/.test(s);
+}
 function appVraagUit(raw) {
   raw = String(raw || '');
   const vq = /^[^\S\n]*[*_]*VRAAG AAN DAVID:[*_]*[^\S\n]*(.+)$/m.exec(raw);
-  if (!vq || (raw.match(/^[^\S\n]*[*_]*VRAAG AAN DAVID:/gm) || []).length !== 1 || /^\(?\d+[.)]/.test(vq[1].replace(/^[*_\s]+/, ''))) return null;
+  if (!vq || (raw.match(/^[^\S\n]*[*_]*VRAAG AAN DAVID:/gm) || []).length !== 1 || /^\(?\d+[.)]/.test(vq[1].replace(/^[*_\s]+/, '')) || appVraagLeeg(vq[1])) return null;
   let h = 0x811c9dc5;
   for (const ch of vq[1]) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
   return { hash: h.toString(16).padStart(8, '0'), tekst: vq[1].replace(/[*_]+\s*$/, '').trim() };
@@ -6811,7 +6819,7 @@ async function appTussendoor(kanaal, j, metCitaat) {
     const ag = x.agent_job && typeof agentsReg === 'object' && agentsReg ? agentsReg[x.agent_job] : null;
     const label = ag && ag.label ? String(ag.label).replace(/^(machinekamer|socev)\s*:\s*/, '') : eerste;
     return String(x.bron || 'bericht').replace(/-/g, ' ') + ' ' + JSON.stringify(appEenRegel(label, 80)) + ' (' + appKlok(x.t) + ', ' +
-      (vq ? 'met vraag: ' + JSON.stringify(appEenRegel(vq[1].replace(/[*_]+\s*$/, ''), 200)) : 'zonder vraag') + ')';
+      (vq && !appVraagLeeg(vq[1]) ? 'met vraag: ' + JSON.stringify(appEenRegel(vq[1].replace(/[*_]+\s*$/, ''), 200)) : 'zonder vraag') + ')';
   });
   const van = onder ? (ondergrensIs === 'antwoord' ? 'je antwoord van ' + appKlok(new Date(onder).toISOString()) : 'zijn vorige bericht (getypt ' + appKlok(new Date(onder).toISOString()) + ')') : 'de ' + Math.round(APP_TUSSENDOOR_ZONDER_MS / 3600000) + ' uur vóór';
   return '\n[Systeem: tussen ' + van + ' en dit bericht (getypt ' + appKlok(new Date(getypt).toISOString()) + ') kwam in de app binnen: ' + delen.join('; ') +
@@ -8209,7 +8217,10 @@ function appBusMaxNr() { try { return appBusLees().ideeen.reduce(function (m, i)
 function appInklapRapport(kanaal, x) {
   if (kanaal !== 'machinekamer' || x.soort !== 'socev' || x.bron !== 'agentrapport' || x.vraag_hash) return false;
   const a = String(x.antwoord || '');
-  return /^\s*🤖 Agentrapport — /.test(a) && !/^[^\S\n]*[*_]*VRAAG AAN DAVID:/m.test(a);
+  // wv1035: een regel "VRAAG AAN DAVID: geen." telt niet als vraagregel
+  const vr = /^[^\S\n]*[*_]*VRAAG AAN DAVID:[*_]*[^\S\n]*(.*)$/gm;
+  for (let m; (m = vr.exec(a));) if (!appVraagLeeg(m[1])) return false;
+  return /^\s*🤖 Agentrapport — /.test(a);
 }
 // soort: true = Telegram-beurten, 'zacht' = ingeklapte rapporten (wv894; zitten ook in de gewone lijst), anders de rest
 async function appLogTijden(kanaal, telegram) {
@@ -11965,7 +11976,7 @@ function appSpreektekst(t) {
   s = s.replace(/^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/gm, '');
   s = s.replace(/^[ \t]*(?:[-*+•]|\d{1,2}[.)])[ \t]+/gm, '');
   s = s.replace(/\*\*|__|~~|\*/g, '').replace(/(^|[\s(])_([^_\n]+)_(?=[\s.,;:!?)]|$)/g, '$1$2');
-  s = s.replace(/^VRAAG AAN DAVID:[ \t]*/gm, 'Mijn vraag aan je: ');
+  s = s.replace(/^VRAAG AAN DAVID:[ \t]*(.*)$/gm, function (r, z) { return appVraagLeeg(z) ? '' : 'Mijn vraag aan je: ' + z; });   // wv1035
   s = s.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu, '');
   s = s.split('\n').map(function (r) { return r.replace(/[ \t]+/g, ' ').trim(); }).filter(function (r) { return /[\p{L}\p{N}]/u.test(r); })
     .map(function (r) { return /[.!?:;…,]$/.test(r) ? r : r + '.'; }).join('\n');
@@ -13232,7 +13243,7 @@ function telSpreektekst(antwoord, waar) {
   const m = /^[^\S\n]*[*_]*Verder in (de app|Telegram)\s*:/im.exec(t);
   if (m) t = t.slice(0, m.index);
   let vraag = false;
-  t = t.replace(/^[^\S\n]*[*_]*VRAAG AAN DAVID:.*$/gm, function () { vraag = true; return ''; });
+  t = t.replace(/^[^\S\n]*[*_]*VRAAG AAN DAVID:[*_]*(.*)$/gm, function (r, z) { if (!appVraagLeeg(z)) vraag = true; return ''; });   // wv1035: 'geen' is geen vraag
   let s = appSpreektekst(t);
   if (s.length > APP_VOORLEES_TEKST_MAX) s = s.slice(0, APP_VOORLEES_TEKST_MAX);
   if (vraag) s = (s ? s + '\n' : '') + 'Ik heb een vraag voor je in ' + waar + '.';

@@ -4720,6 +4720,17 @@ async function bewijs(o) {
       r = await vraag('POST', '/app/knop', { job_id: idT, vraag_hash: gT.vraag.hash, keuze: 'nee' }, { pot: P.jar });
       toets('23 knop na naar-telegram -> 409 "beantwoord je in Telegram"', r.status === 409 && r.j.naar_telegram === true, JSON.stringify(r.j));
 
+      // wv1035: "VRAAG AAN DAVID: geen." via /bericht met knoppen:true -> geen vraag in het register, geen knoppen in de geschiedenis
+      await slaap(BUNDEL23 + 50);
+      const vragenVoor1035 = Object.keys(JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))).length;
+      r = await bq('/bericht', B({ tekst: '🤖 Agentrapport — wv1035 proef\n\nKlaar.\n\n**VRAAG AAN DAVID:** geen.', knoppen: true, sleutel: 'wv1035-geen' }));
+      const id1035 = r.j.id, st1035 = r.status;
+      r = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+      const g1035 = (r.j.items || []).find((x) => x.job_id === id1035);
+      const vragenNa1035 = JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'));
+      toets('23 wv1035: /bericht met "VRAAG AAN DAVID: geen." -> bezorgd zonder vraag (geen knoppen, niets in vragen.json)',
+        st1035 === 200 && g1035 && !g1035.vraag && Object.keys(vragenNa1035).length === vragenVoor1035 && !Object.keys(vragenNa1035).some((k) => k.indexOf(id1035) === 0),
+        JSON.stringify([st1035, g1035 && g1035.vraag, vragenVoor1035, Object.keys(vragenNa1035).length]));
       // gezien_pixel en getikt
       st = await bq('/bericht/stand', { secret: GEH, id: idT });
       const gezAlle = JSON.parse(fs.readFileSync(path.join(DATA, 'gezien.json'), 'utf8'));
@@ -5182,6 +5193,20 @@ async function bewijs(o) {
         toets('23 wv894: appInklapRapport alleen machinekamer, bron agentrapport, zonder vraag(regel), niet mislukt',
           ink('machinekamer', {}) === true && ink('hoofd', {}) === false && ink('machinekamer', { vraag_hash: 'h' }) === false && ink('machinekamer', { bron: 'agentrapport-david' }) === false
           && ink('machinekamer', { antwoord: '⚠️ Agent mislukt — x\n\nFout' }) === false && ink('machinekamer', { antwoord: '🤖 Agentrapport — x\n\n**VRAAG AAN DAVID:** ja?' }) === false && ink('machinekamer', { soort: 'bericht' }) === false, '');
+        // wv1035: "VRAAG AAN DAVID: geen." is geen vraag (24-10 07:01, agentrapport wv900, David: "Je vraagt niets, dus waarom de ja/nee?")
+        const geen1035 = ['VRAAG AAN DAVID: geen.', '**VRAAG AAN DAVID:** geen', '**VRAAG AAN DAVID: geen.**', 'VRAAG AAN DAVID: n.v.t.', 'VRAAG AAN DAVID: nvt', 'VRAAG AAN DAVID: Geen vraag.',
+          'VRAAG AAN DAVID: geen vragen', 'VRAAG AAN DAVID: niets', 'VRAAG AAN DAVID: -', 'VRAAG AAN DAVID: —', 'VRAAG AAN DAVID: (geen)', 'VRAAG AAN DAVID: (geen).', 'VRAAG AAN DAVID: GEEN!', '_VRAAG AAN DAVID:_ _geen_', 'VRAAG AAN DAVID: **', 'VRAAG AAN DAVID: N.v.t',
+          'VRAAG AAN DAVID: niks', 'VRAAG AAN DAVID: Nee.', 'VRAAG AAN DAVID: none', 'VRAAG AAN DAVID: geen vraag deze keer.', 'VRAAG AAN DAVID: Geen vragen voor nu', 'VRAAG AAN DAVID: \u2015', 'VRAAG AAN DAVID: \u2010'];
+        const fout1035 = geen1035.filter((r) => H.appVraagUit('🤖 Agentrapport — x\n\n' + r + '\n\nKlaar.') !== null);
+        toets('23 wv1035: "VRAAG AAN DAVID: geen." en verwanten geven geen vraag (' + geen1035.length + ' varianten)', fout1035.length === 0, JSON.stringify(fout1035));
+        const wel1035 = ['VRAAG AAN DAVID: Geen bezwaar als ik de taak verwijder?', 'VRAAG AAN DAVID: Geen idee of dit klopt, zal ik het nameten?', 'VRAAG AAN DAVID: Niets doen?', 'VRAAG AAN DAVID: Zal ik geen mail sturen?', 'VRAAG AAN DAVID: Geen. Maar wil je X?', 'VRAAG AAN DAVID: Nee of ja: zal ik het nameten?'];
+        const wv1035 = wel1035.map((r) => H.appVraagUit('Rapport.\n\n' + r));
+        toets('23 wv1035: een echte vraag die met Geen/Niets begint blijft een vraag', wv1035.every((v) => v && /^[0-9a-f]{8}$/.test(v.hash)), JSON.stringify(wv1035));
+        toets('23 wv1035: "Geen bezwaar als ik de taak verwijder?" blijft gevoelig (verwijderen)', H.appGevoelig(wv1035[0].tekst) === 'verwijderen', String(H.appGevoelig(wv1035[0].tekst)));
+        toets('23 wv1035: rapport met alleen "VRAAG AAN DAVID: geen." klapt in (geen vraagregel)', ink('machinekamer', { antwoord: '🤖 Agentrapport — x\n\nKlaar.\n\n**VRAAG AAN DAVID:** geen.' }) === true
+          && ink('machinekamer', { antwoord: '🤖 Agentrapport — x\n\nVRAAG AAN DAVID: geen.\nVRAAG AAN DAVID: Mag ik?' }) === false, '');
+        const sp1035 = H.appSpreektekst('Klaar.\n\n**VRAAG AAN DAVID:** geen.'), sp1035b = H.appSpreektekst('Klaar.\n\nVRAAG AAN DAVID: Zal ik verder?');
+        toets('23 wv1035: Voorlezen slaat "VRAAG AAN DAVID: geen." over, een echte vraag niet', !/vraag/i.test(sp1035) && /Mijn vraag aan je: Zal ik verder\?/.test(sp1035b), JSON.stringify([sp1035, sp1035b]));
       }
       toets('23 /health appInfo noemt berichten', H.appInfo().berichten && typeof H.appInfo().berichten.laatste_48u === 'number', JSON.stringify(H.appInfo().berichten));
 

@@ -118,6 +118,7 @@ const MK_INSTRUCTIE = [
   '- Schrijf voor David, niet voor jezelf. Vraag je iets: begin met "VRAAG AAN DAVID: <één zin, ja/nee>" (één per bericht; krijgt',
   '  Ja/Nee/Anders), daarna per punt hooguit drie korte regels: wat (met executie-id of bestand), gevolg als er niets gebeurt, gedaan',
   '  of nodig. Wat al gemeld is en niet veranderde laat je weg. Geen reflectie of techniekverslag naar David; dat hoort in de box.',
+  "  Geen vraag? Dan geen VRAAG AAN DAVID-regel (ook niet 'geen').",
   '- Een knopdruk ([KNOP] / [APP] [KNOP] / [REPLY OP VRAAG]) is Davids antwoord op precies die vraag: registerrij in Open vragen op',
   '  beantwoord, wachtende werkvoorraadrij vrijgeven of bijzetten. Een getypt antwoord is nooit een knopdruk.',
   '- Stuur je proefberichten naar een kanaal van David: één regel vooraf, één erna, en ruim de wegwerp-workflow dezelfde beurt op.',
