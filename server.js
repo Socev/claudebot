@@ -13888,6 +13888,36 @@ function telBelletje(wav) {
 }
 // ── einde telefoon-poort ──────────────────────────────────────────────────────────────────────────────
 
+// ── wv1051 (OVIS M1b, ontwerplijnen § 2.3/§ 4.2/§ 4.3): GET/POST /app/vast. De logica staat in app-vast.js (zonder opslag of HTTP);
+// hier alleen lezen, schrijven (atomisch, alleen dit proces) en antwoorden. Ontbreekt app-vast.js in de release (terugrol), dan 404
+// en toont de app de standaard (Facturen en Bestanden). Een kapot bestand = de standaard (de volgende wijziging schrijft hem opnieuw).
+// Lui geladen (binnen de poort, zoals de rest van /app/*); niet gevonden = volgende keer opnieuw kijken (alleen bij deze route).
+let appVastMod = null;
+function appVastModule() {
+  if (appVastMod) return appVastMod;
+  try { const p = path.join(__dirname, 'app-vast.js'); if (fs.existsSync(p)) appVastMod = require(p); } catch (e) { logError('app-vast', e); }
+  return appVastMod;
+}
+function appVastRoute(req, res, a, d) {
+  const L = appVastModule();
+  if (!L) return appWeiger(res, 404, 'onbekend', 'vast ontbreekt');
+  const vp = !!(a && a.soort === 'vast');
+  let j = null;
+  try { j = appLeesStreng(APP_VAST, null); } catch (e) { logError('vast.json', e); }
+  const nu = L.uitBestand(j);
+  const antwoord = function (lijst, standaard) {
+    appStuur(res, 200, { ok: true, vast: L.voorApparaat(lijst, vp, APP_PRIVE_MODULES), standaard: standaard, vaste_plek: vp, per_plek: 5 });
+  };
+  if (req.method !== 'POST') { res._app.reden = 'vast'; res._app.stil = true; return antwoord(nu.lijst, nu.standaard); }   // de app vraagt dit om de paar minuten
+  const u = L.pas(nu.lijst, d, vp);
+  if (!u.ok) return appWeiger(res, u.status, u.fout, u.reden);
+  res._app.reden = 'vast ' + d.actie + ' ' + String(d.scherm).slice(0, 40) + (u.veranderd ? '' : ' (al zo)');
+  if (!u.veranderd) return antwoord(nu.lijst, nu.standaard);
+  try { appSchrijfJson(APP_VAST, { versie: 1, bijgewerkt: new Date().toISOString(), vast: u.lijst }); }
+  catch (e) { logError('vast.json schrijven', e); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo nog eens', 'vast schrijven'); }
+  return antwoord(u.lijst, false);
+}
+
 // ── einde socev-app poort ─────────────────────────────────────────────────────────────────────────
 
 // ── Studio (wv707, fase 1, 21-10-2026; bouwplan "Studio - ComfyUI in de Socev-app (bouwplan 21-10-2026)") ──
@@ -14503,29 +14533,6 @@ async function appManagers(req, res, a, d, route) {
 // ── einde managers ──
 
 // ── Ringkaart (wv888, 23-10-2026; bouwplan "01_Ontwikkeling/Ringkaart van Socev - tandwielweergave (bouwplan 23-10-2026).md") ──
-// ── wv1051 (OVIS M1b, ontwerplijnen § 2.3/§ 4.2/§ 4.3): GET/POST /app/vast. De logica staat in app-vast.js (zonder opslag of HTTP);
-// hier alleen lezen, schrijven (atomisch, alleen dit proces) en antwoorden. Ontbreekt app-vast.js in de release (terugrol), dan 404
-// en toont de app de standaard (Facturen en Bestanden). Een kapot bestand = de standaard (de volgende wijziging schrijft hem opnieuw).
-const APP_VAST_MOD = (function () { const p = path.join(__dirname, 'app-vast.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('app-vast', e); return null; } })();
-function appVastRoute(req, res, a, d) {
-  if (!APP_VAST_MOD) return appWeiger(res, 404, 'onbekend', 'vast ontbreekt');
-  const L = APP_VAST_MOD, vp = !!(a && a.soort === 'vast');
-  let j = null;
-  try { j = appLeesStreng(APP_VAST, null); } catch (e) { logError('vast.json', e); }
-  const nu = L.uitBestand(j);
-  const antwoord = function (lijst, standaard) {
-    appStuur(res, 200, { ok: true, vast: L.voorApparaat(lijst, vp, APP_PRIVE_MODULES), standaard: standaard, vaste_plek: vp, per_plek: 5 });
-  };
-  if (req.method !== 'POST') { res._app.reden = 'vast'; res._app.stil = true; return antwoord(nu.lijst, nu.standaard); }   // de app vraagt dit om de paar minuten
-  const u = L.pas(nu.lijst, d, vp);
-  if (!u.ok) return appWeiger(res, u.status, u.fout, u.reden);
-  res._app.reden = 'vast ' + d.actie + ' ' + String(d.scherm).slice(0, 40) + (u.veranderd ? '' : ' (al zo)');
-  if (!u.veranderd) return antwoord(nu.lijst, nu.standaard);
-  try { appSchrijfJson(APP_VAST, { versie: 1, bijgewerkt: new Date().toISOString(), vast: u.lijst }); }
-  catch (e) { logError('vast.json schrijven', e); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo nog eens', 'vast schrijven'); }
-  return antwoord(u.lijst, false);
-}
-
 // GET /app/ringkaart: wachters (hartslagtabel via RPC mk_hartslag_stand, service_role, 60 s buffer), skills en kanalen (ringkaart.js,
 // uit de vault). Alleen lezen. Op een vaste plek geen beschrijvingen (Fable wv888 #4). Stil in het auditlog bij 200 (de app ververst
 // elke 2 min zolang de ringen in beeld zijn). Ontbreekt ringkaart.js in de release (terugrol), dan 404 en tekent de app de ringen zonder.

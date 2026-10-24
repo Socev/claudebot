@@ -56,7 +56,7 @@ toets('10b meereizend: alles', L.voorApparaat(alle, false, PRIVE).length === 6);
 const src = fs.readFileSync('server.js', 'utf8');
 const W = fs.mkdtempSync(path.join(os.tmpdir(), 'appvast-'));
 const VAST = path.join(W, 'vast.json');
-const a0 = src.indexOf('const APP_VAST_MOD = '), b0 = src.indexOf('// GET /app/ringkaart: wachters', a0);
+const a0 = src.indexOf('let appVastMod = null;'), b0 = src.indexOf('// ── einde socev-app poort', a0);
 toets('11 blok gevonden', a0 > 0 && b0 > a0);
 const p0 = src.indexOf('const APP_PRIVE_MODULES'), p1 = src.indexOf('\n', src.indexOf('function appPriveDicht', p0));
 function lees(f, leeg) { let t; try { t = fs.readFileSync(f, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return leeg; throw e; } return JSON.parse(t); }
@@ -64,7 +64,7 @@ function schrijf(f, d) { schrijfTel++; fs.writeFileSync(f, JSON.stringify(d)); }
 let schrijfTel = 0, antw = [], flog = [];
 function maakCtx(metModule) {
   const ctx = { require: (p) => (metModule ? require(p) : null), path: path, fs: { existsSync: () => metModule }, __dirname: process.cwd(), APP_VAST: VAST,
-    logError: (w) => flog.push(w), appLeesStreng: lees, appSchrijfJson: schrijf, Date: Date, String: String, JSON: JSON,
+    logError: (w) => flog.push(w), console: console, appLeesStreng: lees, appSchrijfJson: schrijf, Date: Date, String: String, JSON: JSON,
     appStuur: (res, st, o) => antw.push({ st, o }), appWeiger: (res, st, f, reden) => { res._app.reden = reden; antw.push({ st, o: { ok: false, fout: f } }); } };
   vm.createContext(ctx);
   vm.runInContext(src.slice(p0, p1) + '\n' + src.slice(a0, b0) + '\nthis.appVastRoute = appVastRoute; this.appPriveDicht = appPriveDicht;', ctx);
