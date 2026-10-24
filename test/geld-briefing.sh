@@ -69,7 +69,7 @@ const k1 = src.indexOf('function smalKind('), k2 = src.indexOf('async function s
 const logs = [], zend = [], rpc = [];
 let zendFout = null, rpcFout = null, leesFout = null; const tabel = [];
 const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD, N8N_API_KEY: 'k' };
-const g2 = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT: VAULT, SECRET: 'x'.repeat(40),
+const g2 = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT: VAULT, SECRET: 'x'.repeat(40),
   __dirname: process.cwd(), process: { env: env, execPath: process.execPath, pid: process.pid }, spawn: spawn, APP_MELD_TABEL: 'TABEL',
   appN8nBasis: () => 'http://n8n.test', appN8nZend: async function (m, p, body) {
     if (m === 'GET') { if (leesFout) throw new Error(leesFout); return { data: tabel.slice(), nextCursor: null }; }

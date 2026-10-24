@@ -235,7 +235,7 @@ function scenario() {
     let d1Fout = null, d1Batches = 0;
     const logs = [];
     const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD, CLOUDFLARE_API_TOKEN: 'cf-test' };
-    const g2 = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT, SECRET: 'x'.repeat(40),
+    const g2 = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT, SECRET: 'x'.repeat(40),
       __dirname: process.cwd(), process: { env, execPath: process.execPath, pid: process.pid }, spawn, APP_CF_ACCOUNT: 'acc', APP_FIN_DB: 'db',
       fetch: async function (url, o) {
         if (!/\/d1\/database\/db\/query$/.test(url) || o.headers.Authorization !== 'Bearer cf-test') throw new Error('onverwachte url');
