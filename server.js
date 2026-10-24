@@ -148,8 +148,32 @@ const MK_TEKST = (function () {
   const p = path.join(__dirname, 'mk-tekst.js');
   try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('mk-tekst', e); return null; }
 })();
-const mkTekstStand = { mk_runs: 0, smal_runs: 0, zonder_geheugen: 0, geheugen: null, geheugen_t: null, drift: null, drift_t: 0 };
+const mkTekstStand = { mk_runs: 0, smal_runs: 0, zonder_geheugen: 0, geheugen: MK_TEKST ? null : 'dicht: module ontbreekt', geheugen_t: null, drift: null, drift_t: 0 };
 let mkTekstLaatsteReden = '';
+const mkTekstBoxDag = {};
+// Box-rij (hooguit 1x/dag per soort): mk-tekst.js ontbreekt, of het eigen geheugen is niet in orde (Fable diffreview wv1001 #1).
+function mkTekstBox(soort, reden) {
+  const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  if (mkTekstBoxDag[soort] === dag) return;
+  mkTekstBoxDag[soort] = dag;
+  try {
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const t = VV().lees(pad);
+    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
+    if (!eerste) return;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const mod = soort === 'module';
+    const rij = '\n## [direct] ' + tijd + ' — machinekamer-runs ' + (mod ? 'zonder vaste instructie en zonder geheugen: mk-tekst.js ontbreekt' : 'zonder eigen geheugen') +
+      ' (automatisch, wv1001)\n- status: open\n- van: pod server.js (mk-tekst, hooguit 1×/dag)\n' +
+      '- gemeten: ' + String(reden || '').replace(/[\r\n`]/g, ' ').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: debug-bot en machinekamer-agents draaien ' + (mod ? 'zonder machinekamer-instructie en zonder geheugen (wel zonder vaulttekst)' :
+        'zonder geheugen (autoMemoryEnabled false; nooit met het gedeelde)') + '; /health.mk_tekst toont de stand.\n' +
+      '- voorstel: ' + (mod ? 'mk-tekst.js staat niet in deze release: claudebot-src main bijwerken en pushen, dan uitrol (RELEASE_OPTIONEEL in uitrol.sh).' :
+        '`node /opt/data/app/current/mk-tekst.js toets` en de reden nagaan (ACL, eigenaar, symlink in ' + MK_GEHEUGEN + '); herstel met `setfacl -bR` + `chmod -R go-rwx`, alleen als claude het zelf schreef.') + '\n';
+    VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));   // wv900: eigen tmp met O_EXCL, geen link volgen
+  } catch (e) { logError('mk-tekst-box', e); }
+}
+if (!MK_TEKST && SERVER_ECHT) schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'mk-tekst-ontbreekt' }));
 function mkTekstArgs(opts) {
   const soort = opts && opts.tekst;
   if (soort !== 'mk' && soort !== 'smal') return [];
@@ -157,13 +181,16 @@ function mkTekstArgs(opts) {
   mkTekstStand.mk_runs++;
   if (!MK_TEKST) {
     mkTekstStand.zonder_geheugen++;
+    if (SERVER_ECHT) mkTekstBox('module', 'mk-tekst.js niet geladen naast ' + __filename);
     return ['--settings', JSON.stringify({ claudeMdExcludes: ['/**/CLAUDE.md', '/**/CLAUDE.local.md', '/**/AGENTS.md', VAULT + '/**'], autoMemoryEnabled: false })];
   }
   const t = MK_TEKST.geheugenToets(MK_GEHEUGEN);
-  mkTekstStand.geheugen = t.ok ? 'ok' : 'dicht: ' + String(t.reden).slice(0, 200); mkTekstStand.geheugen_t = new Date().toISOString();
+  // /health is open: alleen de soort reden (vóór de dubbele punt), geen bestandsnaam uit het geheugen; het volledige pad staat in de log
+  mkTekstStand.geheugen = t.ok ? 'ok' : 'dicht: ' + String(t.reden).split(':')[0].slice(0, 80); mkTekstStand.geheugen_t = new Date().toISOString();
   if (!t.ok) {
     mkTekstStand.zonder_geheugen++;
     if (t.reden !== mkTekstLaatsteReden) schrijfLog(JSON.stringify({ t: mkTekstStand.geheugen_t, soort: 'mk-geheugen-dicht', reden: String(t.reden).slice(0, 200) }));
+    if (SERVER_ECHT) mkTekstBox('geheugen', t.reden);
   }
   mkTekstLaatsteReden = t.ok ? '' : t.reden;
   return MK_TEKST.args('mk', { vault: VAULT, geheugen: MK_GEHEUGEN, geheugenOk: t.ok });
@@ -2053,6 +2080,7 @@ function runMetFallback(keuze, prompt, sessionId, outdir, cwd, opts) {
       '" zonder het gespreksgeheugen van vandaag. Werk vanuit 00_Systeem/actueel.md en zeg het als je context mist.]\n\n';
     schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'fallback', van: keuze.runtime, naar: keuze.fallback }));
     return runBrein(keuze.fallback, uitleg + prompt, '', outdir, cwd, fbModel, opts).then(function (r2) {
+      if (r2 && r2.error === 'mk-alleen-claude') return r;   // wv1001: mk-run niet op een ander brein; dan blijft het 'limiet'
       r2.fallback_van = keuze.runtime;
       r2.session_id_fallback = r2.session_id;   // hoort niet in het geheugen van de hoofdchat
       delete r2.session_id;

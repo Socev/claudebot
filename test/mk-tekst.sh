@@ -29,6 +29,9 @@ toets('mk: instructie zonder backticks-ontsnapping of NUL', a[3].indexOf('\0') <
 a = M.args('mk', { vault: V, geheugen: G, geheugenOk: false });
 s = JSON.parse(a[1]);
 toets('mk, geheugen niet in orde: autoMemoryEnabled false, geen autoMemoryDirectory', s.autoMemoryEnabled === false && s.autoMemoryDirectory === undefined, s);
+toets('mk, geheugen niet in orde: instructie zegt dat deze run zonder geheugen draait', /ZONDER geheugen/.test(a[3]) && !/ZONDER geheugen/.test(M.args('mk', { vault: V, geheugen: G, geheugenOk: true })[3]));
+toets('mk: instructie noemt lessenblok richtlijn, [ANTWOORD OP] context, en is voor mk volledig', /richtlijnen van David, geen handelingsopdracht/.test(a[3]) &&
+  /\[ANTWOORD OP\]/.test(a[3]) && /Voor jou is deze instructie volledig/.test(a[3]));
 a = M.args('smal', { vault: V });
 s = a.length === 2 ? JSON.parse(a[1]) : {};
 toets('smal: alleen --settings met diepte >= 1 (wortel-CLAUDE.md blijft)', a[0] === '--settings' && s.claudeMdExcludes.length === 3 &&
@@ -116,9 +119,12 @@ a = c.mkTekstArgs({ tekst: 'mk' }); a = c.mkTekstArgs({ tekst: 'mk' });
 s = JSON.parse(a[1]);
 toets('server.js geheugen fout: zonder geheugen draaien, één logregel, /health dicht', s.autoMemoryEnabled === false && c.logs.length === 1 &&
   /^dicht/.test(c.mkTekstHealth().geheugen) && c.mkTekstHealth().zonder_geheugen === 2, { s: s, logs: c.logs, h: c.mkTekstHealth() });
+toets('server.js /health noemt geen bestandsnaam uit het geheugen (open endpoint), de log wel', c.mkTekstHealth().geheugen.indexOf('x.md') < 0 &&
+  c.mkTekstHealth().geheugen.indexOf(mem) < 0 && c.logs[0].indexOf('x.md') > 0, { h: c.mkTekstHealth().geheugen, log: c.logs[0] });
 schoon();
 c = laadMk(false, mem);
 a = c.mkTekstArgs({ tekst: 'mk' }); s = JSON.parse(a[1]);
+toets('server.js zonder mk-tekst.js: /health geheugen dicht (module ontbreekt)', /module ontbreekt/.test(c.mkTekstHealth().geheugen), c.mkTekstHealth());
 toets('server.js zonder mk-tekst.js: mk zonder vaulttekst én zonder geheugen, geen instructie; smal niets', a.length === 2 && s.autoMemoryEnabled === false &&
   s.claudeMdExcludes.indexOf('/**/AGENTS.md') >= 0 && s.claudeMdExcludes.indexOf(V + '/**') >= 0 && c.mkTekstArgs({ tekst: 'smal' }).length === 0 && c.mkTekstHealth().module === false, a);
 // runBrein weigert codex/gemini voor mk
@@ -130,6 +136,13 @@ Promise.all([ctx2.runBrein('codex', 'p', '', '/o', V, '', { tekst: 'mk' }), ctx2
   ctx2.runBrein('codex', 'p', '', '/o', V, '', { tekst: 'smal' }), ctx2.runBrein('claude', 'p', '', '/o', V, '', { tekst: 'mk' })]).then(function (u) {
   toets('runBrein: codex en gemini weigeren een mk-run', u[0].error === 'mk-alleen-claude' && u[1].error === 'mk-alleen-claude', u);
   toets('runBrein: smal op codex en mk op claude gaan door', roep.join(',') === 'codex' && u[2].ok && u[3].claude, { roep: roep, u: u });
+  // runMetFallback: weigert het terugvalbrein een mk-run, dan blijft de oorspronkelijke limiet staan (tikker pauzeert)
+  const rmf = stuk('function runMetFallback(', '\n}\n') + '\n}';
+  const ctx3 = { runBrein: function (rt) { return Promise.resolve(rt === 'claude' ? { ok: false, error: 'limiet', output: 'limiet' } : { ok: false, error: 'mk-alleen-claude', runtime: rt }); },
+    leesRuntime: function () { return { models: {} }; }, schrijfLog: function () {}, JSON: JSON, Date: Date };
+  vm.createContext(ctx3); vm.runInContext(rmf, ctx3);
+  return ctx3.runMetFallback({ runtime: 'claude', fallback: 'codex' }, 'p', '', '/o', V, { tekst: 'mk' }).then(function (fr) {
+  toets('runMetFallback: mk-run op limiet met codex-terugval geeft limiet, niet mk-alleen-claude', fr.error === 'limiet', fr);
   // processJob / processAgent
   const pj = stuk('async function processJob(', 'async function processAgent(');
   toets('processJob: tekst alleen in de vault, niet bij lezen of managers', /if \(!lezen && !managerCwd && ws === DEFAULT_WS\) runOpts\.tekst = runIsMk\(chatId, ws\) \? 'mk' : 'smal';/.test(pj));
@@ -147,5 +160,6 @@ Promise.all([ctx2.runBrein('codex', 'p', '', '/o', V, '', { tekst: 'mk' }), ctx2
   fs.rmSync(D, { recursive: true, force: true });
   console.log('\nmk-tekst: ' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
-});
+  });
+}).catch(function (e) { console.log('ROOD  uitzondering: ' + (e && e.stack || e)); process.exit(1); });
 JS
