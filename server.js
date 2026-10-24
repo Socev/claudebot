@@ -6969,7 +6969,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   if (appKnopInRij(rij.kanaal) >= APP_KNOP_RIJ_MAX) { terug(); return appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol'); }   // Fable #4: na de awaits opnieuw
   const tijd = appKlok();
   const kanaalNaam = ({ hoofd: 'het hoofdkanaal', machinekamer: 'de machinekamer', 'cijfer-meester': 'de Cijfer-Meester' })[rij.kanaal] || rij.kanaal;   // Fable-review wv200 K1
-  const waarIn = kaart ? 'op de Voor jou-kaart in de app (tab Voor jou, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
+  const waarIn = kaart ? 'op de Voor jou-kaart in de app (Overzicht, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
   const tekst = (keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
     : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '') + (res._app.bsnWeg && keuze === 'anders' ? '\n' + APP_BSN_SYS : '');
@@ -16345,7 +16345,7 @@ function bankVerrijkStart(maxBatches) {
 // ── wv765: PayPal-laag (bouwplan privé-financiën § 9) ─────────────────────────────────────────────────────────────
 // WAAROM. Op het afschrift staat bij een PayPal-incasso alleen "PayPal"; David (22-10-2026): "lees mijn mail mee, Afzender
 // "service@paypal.nl", eerste woord onderwerp "Ontvangstbewijs", gericht aan d.schaap@gmail.com". De pod leest die mails via het
-// bestaande lees-luik (mail_zoeken + mail_lezen van AI - Agenda-Wachter API, alleen lezen; zelfde route als de tab Vandaag), leest
+// bestaande lees-luik (mail_zoeken + mail_lezen van AI - Agenda-Wachter API, alleen lezen; zelfde route als Voor jou in het Overzicht), leest
 // ze uit met vaste regels (paypal-bewijs.js leesMail, geen taalmodel) en geeft alleen de uitgelezen velden aan bank-lezer.js
 // (paypal-bij: bewaren in de transactiedatabase + koppelen aan de PayPal-posten). De mailtekst gaat nergens anders heen.
 // Ronde: na elke bank-ronde de laatste 10 dagen; historie alleen machinekamer (bank.py paypal-ronde van=…). Alleen nieuwe mails
