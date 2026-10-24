@@ -114,11 +114,37 @@ M.mkdir();
   toets('6 antwoordconcept: titel "Antwoord bij kaart 2", tekst, kan delen', ck('a01').vorm === 'antwoord' && ck('a01').titel === 'Antwoord bij kaart 2' && ck('a01').kan_delen === true, ck('a01'));
   toets('6 Deel op kaart en antwoord: 200; met treffer 409; privé/onbekend 404', (await M.app('POST /app/ideeen/kaart/k01/deel', { __apparaat: 'tel1' })).status === 200 && (await M.app('POST /app/ideeen/kaart/a01/deel')).status === 200 &&
     (await M.app('POST /app/ideeen/kaart/k03/deel')).status === 409 && (await M.app('POST /app/ideeen/kaart/k06/deel')).status === 409 && (await M.app('POST /app/ideeen/kaart/k04/deel')).status === 404 && (await M.app('POST /app/ideeen/kaart/k99/deel')).status === 404);
+  // wv954: voorbeeld van het plaatje in Klaar om te delen (alleen een conceptkaart uit de catalogus, alleen via de padcheck)
+  const pp = await M.app('GET /app/ideeen/proefplaatje/k01/0');
+  toets('6 proefplaatje: conceptkaart met herkomst = 200, het bestand zelf (naam, PNG)', pp.status === 200 && pp.j.type === 'image/png' && pp.j.naam === 'goed.png' && pp.j.inhoud === png.toString('base64'), pp.status);
+  const pps = await Promise.all(['k01/1', 'k06/0', 'k07/0', 'k04/0', 'k02/0', 'k99/0'].map((x) => M.app('GET /app/ideeen/proefplaatje/' + x)));
+  toets('6 proefplaatje: ander volgnummer, zonder herkomst, symlink, privé, zonder plaatje, onbekend = 404', pps.every((x) => x.status === 404) && /herkomst/.test(pps[1].j.fout) && /gewoon bestand/.test(pps[2].j.fout), pps.map((x) => x.status + ' ' + x.j.fout));
+  toets('6 proefplaatje: geen antwoordconcept, geen pad of hash in de route', ['a01/0', 'k01/3', '../k01/0', 'k1/0', 'goed.png/0'].every((x) => !/^GET \/app\/ideeen\/proefplaatje\/(k\d{2,3})\/([0-2])$/.test('GET /app/ideeen/proefplaatje/' + x)) && true);
+  for (const x of ['a01/0', 'k01/3']) { const q = await M.app('GET /app/ideeen/proefplaatje/' + x); if (q.status !== 404) toets('6 proefplaatje ' + x + ' = 404', false, q.status); }
+  const pv = fs.readFileSync(path.join(PROEF, 'goed.png')); fs.writeFileSync(path.join(PROEF, 'goed.png'), Buffer.concat([pv, Buffer.from('x')]));
+  const ppv = await M.app('GET /app/ideeen/proefplaatje/k01/0'); fs.writeFileSync(path.join(PROEF, 'goed.png'), pv);
+  toets('6 proefplaatje: veranderd sinds het schermscript = 404 (sha256)', ppv.status === 404 && /veranderd/.test(ppv.j.fout), ppv.j);
   await M.app('POST /app/ideeen/kaart/k02/deel'); await M.app('POST /app/ideeen/kaart/k02/niet'); await M.app('POST /app/ideeen/kaart/k02/deel');
   fs.writeFileSync(CAT, catTekst.replace('### K02 · Voorlezen\n- titel: Voorlezen', '### K02 · Voorlezen\n- titel: Voorlezen in een stem'));
   nu += 31000; r = await M.app('GET /app/ideeen');
   toets('6 tekst gewijzigd na Deel: keuze vervalt (gewijzigd), aangevinkt 2 (k01, a01)', ck('k02').keuze === null && ck('k02').gewijzigd === true && r.j.bundel.aangevinkt === 2, [ck('k02'), r.j.bundel]);
   toets('6 journaal 0600 met hash en apparaat', (fs.statSync(path.join(DIR, 'journaal.jsonl')).mode & 0o777) === 0o600 && /"id":"k01","keuze":"deel","hash":"[a-f0-9]{16}","apparaat":"tel1"/.test(fs.readFileSync(path.join(DIR, 'journaal.jsonl'), 'utf8')));
+  {   // wv954: een ander beeld onder dezelfde naam (schermscript opnieuw gedraaid) = de Deel op die kaart vervalt; zonder plaatje blijft de hash gelijk aan vóór wv954
+    const oudeHash = (k) => crypto.createHash('sha256').update(JSON.stringify(['k', k.titel, k.zin, k.wat, k.oplevert, k.hoe, k.categorie, k.status, (k.plaatjes || []).join(',')])).digest('hex').slice(0, 16);
+    const k2 = Filter.leesCatalogus(fs.readFileSync(CAT, 'utf8')).kaarten.find((x) => x.id === 'k02');
+    await M.app('POST /app/ideeen/kaart/k02/niet');
+    const jr = fs.readFileSync(path.join(DIR, 'journaal.jsonl'), 'utf8').trim().split('\n').map((r) => JSON.parse(r)).filter((r) => r.id === 'k02' && r.soort === 'keuze').pop();
+    toets('6 kaart zonder plaatje: hash gelijk aan de formule van vóór wv954 (bestaande Deel-keuzes blijven geldig)', jr && jr.hash === oudeHash(k2), [jr && jr.hash, oudeHash(k2)]);
+    const hkP = path.join(PROEF, 'herkomst.json'), hkOud = fs.readFileSync(hkP, 'utf8'), gOud = fs.readFileSync(path.join(PROEF, 'goed.png'));
+    const nieuwBeeld = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), crypto.randomBytes(40)]);
+    fs.writeFileSync(path.join(PROEF, 'goed.png'), nieuwBeeld);
+    const hk = JSON.parse(hkOud); hk.bestanden['goed.png'].sha256 = crypto.createHash('sha256').update(nieuwBeeld).digest('hex'); fs.writeFileSync(hkP, JSON.stringify(hk));
+    nu += 31000; const rv = await M.app('GET /app/ideeen'); const kv = rv.j.concepten.find((x) => x.id === 'k01');
+    toets('6 ander beeld onder dezelfde naam (herkomst bijgewerkt): Deel vervalt (gewijzigd), plaatje wel geldig', kv.keuze === null && kv.gewijzigd === true && kv.kan_delen === true, kv);
+    fs.writeFileSync(path.join(PROEF, 'goed.png'), gOud); fs.writeFileSync(hkP, hkOud);
+    nu += 31000; const rt = await M.app('GET /app/ideeen');
+    toets('6 terug naar het oude beeld: Deel weer geldig', rt.j.concepten.find((x) => x.id === 'k01').keuze === 'deel', rt.j.concepten.find((x) => x.id === 'k01'));
+  }
   toets('6 padcheck: pad met map, ../ of onbekende extensie = weigeren', !M.plaatjeVoor('../buiten.png').ok && !M.plaatjeVoor('x/goed.png').ok && !M.plaatjeVoor('goed.svg').ok && M.plaatjeVoor('goed.png').ok);
 
   // ── 7. bundel: kaart, Nee, Ja zonder vingerafdruk, Ja ──
@@ -167,6 +193,15 @@ M.mkdir();
   let nk = await M.nakijk();
   toets('7 nakijk: ontbrekend plaatje bij een gedeelde kaart alsnog gezet (één keer)', nk.plaatjes.length === 1 && nk.plaatjes[0].ok && X.schrijf.filter((x) => x[0] === 'beeld').length === sb0 + 1 && (await M.nakijk()).plaatjes.length === 0, nk.plaatjes);
   toets('7 nakijk: niet op AIX = plaats-fout, weer te kiezen', nk.ok && nk.uit[0].id === 'k02' && nk.uit[0].aix === null && (await M.app('POST /app/ideeen/kaart/k02/deel')).status === 200, nk);
+  // wv954 (Fable-diffreview #14): een plaatje dat later bij een al gedeelde kaart komt, gaat nooit vanzelf mee (nakijk alleen bij dezelfde hash)
+  const twee = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), crypto.randomBytes(40)]);
+  fs.writeFileSync(path.join(PROEF, 'twee.png'), twee);
+  const hk = JSON.parse(fs.readFileSync(path.join(PROEF, 'herkomst.json'), 'utf8')); hk.bestanden['twee.png'] = { bron: 'proefomgeving', sha256: crypto.createHash('sha256').update(twee).digest('hex') };
+  fs.writeFileSync(path.join(PROEF, 'herkomst.json'), JSON.stringify(hk));
+  fs.writeFileSync(CAT, fs.readFileSync(CAT, 'utf8').replace('- plaatje: goed.png\n', '- plaatje: goed.png, twee.png\n'));
+  const sb1 = X.schrijf.filter((x) => x[0] === 'beeld').length;
+  nk = await M.nakijk();
+  toets('7 nakijk: plaatje toegevoegd na het delen = niet naar AIX (geen Ja op dat plaatje)', nk.plaatjes.length === 0 && X.schrijf.filter((x) => x[0] === 'beeld').length === sb1 && /goed\.png, twee\.png/.test(fs.readFileSync(CAT, 'utf8')), nk.plaatjes);
 
   // ── 8. weekritme: nul = niets; injectiezin alleen als JSON-veld, geen schrijfactie op AIX ──
   fs.writeFileSync(path.join(DIR, 'bundel.json'), JSON.stringify({ kaart: 'aix-oud', afgehandeld: '2026-10-23T12:00:00Z' }));
@@ -180,7 +215,8 @@ M.mkdir();
   const st2 = JSON.parse(fs.readFileSync(path.join(DIR, 'staat.json'), 'utf8'));
   M2.concepten().concepten.forEach(() => {});
   const cat2 = Filter.leesCatalogus(fs.readFileSync(CAT, 'utf8'));
-  cat2.kaarten.forEach((k) => { st2.aangeboden[k.id] = require('crypto').createHash('sha256').update(JSON.stringify(k.vorm === 'antwoord' ? ['a', k.kaart_id, k.reactie_id, k.soort, k.tekst] : ['k', k.titel, k.zin, k.wat, k.oplevert, k.hoe, k.categorie, k.status, (k.plaatjes || []).join(',')])).digest('hex').slice(0, 16); });
+  const hk2 = JSON.parse(fs.readFileSync(path.join(PROEF, 'herkomst.json'), 'utf8')).bestanden;   // wv954: plaatjes tellen mee met hun sha256
+  cat2.kaarten.forEach((k) => { st2.aangeboden[k.id] = require('crypto').createHash('sha256').update(JSON.stringify(k.vorm === 'antwoord' ? ['a', k.kaart_id, k.reactie_id, k.soort, k.tekst] : ['k', k.titel, k.zin, k.wat, k.oplevert, k.hoe, k.categorie, k.status, (k.plaatjes || []).map((n) => n + '@' + (hk2[n] ? hk2[n].sha256 : '')).join(',')])).digest('hex').slice(0, 16); });
   fs.writeFileSync(path.join(DIR, 'staat.json'), JSON.stringify(st2));
   const vj0 = voorJou.length, s1 = X.schrijf.length;
   nu += 7 * 86400000;
@@ -217,10 +253,11 @@ M.mkdir();
 
   // ── 9. server.js-koppeling (bron) ──
   const src = fs.readFileSync('server.js', 'utf8');
-  toets('9 dispatch: lezen, detail, plaatje (kaart/volgnummer), gezien, naar-ideeenbus, Deel/Niet voor k en a; geen reactie- of toetsroute meer',
-    src.includes("route === 'GET /app/ideeen' || /^GET \\/app\\/ideeen\\/(plaatje\\/[1-9][0-9]{0,11}\\/[0-2]|kaart\\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||") &&
+  toets('9 dispatch: lezen, detail, plaatje (kaart/volgnummer), proefplaatje (wv954), gezien, naar-ideeenbus, Deel/Niet voor k en a; geen reactie- of toetsroute meer',
+    src.includes("route === 'GET /app/ideeen' || /^GET \\/app\\/ideeen\\/(plaatje\\/[1-9][0-9]{0,11}\\/[0-2]|proefplaatje\\/k\\d{2,3}\\/[0-2]|kaart\\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||") &&
     src.includes("/^POST \\/app\\/ideeen\\/kaart\\/[ka]\\d{2,3}\\/(deel|niet)$/.test(route)") && !/app\/ideeen\/reactie'|app\/ideeen\/toets'/.test(src));
-  toets('9 app-poort: het langste ideeen-pad past in APP_ROUTE_RE (64 tekens)', new RegExp(/const APP_ROUTE_RE = \/(.+)\/;/.exec(src)[1]).test('/app/ideeen/plaatje/999999999999/2') && new RegExp(/const APP_ROUTE_RE = \/(.+)\/;/.exec(src)[1]).test('/app/ideeen/kaart/999999999999'));
+  toets('9 app-poort: het langste ideeen-pad past in APP_ROUTE_RE (64 tekens)', new RegExp(/const APP_ROUTE_RE = \/(.+)\/;/.exec(src)[1]).test('/app/ideeen/plaatje/999999999999/2') && new RegExp(/const APP_ROUTE_RE = \/(.+)\/;/.exec(src)[1]).test('/app/ideeen/kaart/999999999999') && new RegExp(/const APP_ROUTE_RE = \/(.+)\/;/.exec(src)[1]).test('/app/ideeen/proefplaatje/k999/2'));
+  toets('9 proefplaatje telt mee in de plaatjesgrens (200 per uur)', src.includes("route.indexOf('GET /app/ideeen/proefplaatje/') === 0) && !appTeller('ideeen-plaatje', 200, 3600000)"));
   toets('9 bundelknop: Nee sluit de bundel (bundelNee), Ja plaatst alleen via plaatsBundel met de bevestiging', /if \(kz === 'nee'\) \{ try \{ ideeen\.bundelNee\(ib\.kaart\); \}/.test(src) && /if \(kz !== 'ja'\) return;\n\s+ideeen\.plaatsBundel\(\{ kaart: ib\.kaart, bevestiging: bevestiging, vraagId: vraagId \}\)/.test(src));
   toets('9 bundelkaart altijd gevoelig (Ja · vingerafdruk)', /ideeen\.isBundel && ideeen\.isBundel\(p\.sleutel\)\) gev = 'versturen'/.test(src));
   toets('9 Socev krijgt bij de Ja de opdracht niets zelf te plaatsen en de catalogus niet te openen', /Jij plaatst niets, hebt geen toegang tot AIX en hoeft de catalogus niet te openen/.test(src));

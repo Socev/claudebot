@@ -195,17 +195,23 @@ function maak(deps) {
     try { st = fs.statSync(P.catalogus); } catch (e) { return { ok: false, fout: 'de catalogus staat er (nog) niet', kaarten: [] }; }
     if (st.size > GRENS.catalogus_bytes) return { ok: false, fout: 'de catalogus is te groot om te lezen', kaarten: [] };
     if (conflicten(P.catalogus).length) return { ok: false, fout: 'er staat een conflictkopie naast de catalogus; Socev lost die eerst op', kaarten: [] };
-    const stempel = st.mtimeMs + ':' + st.size;
+    // wv954: de herkomstlijst hoort bij de stempel; een vervangen plaatje (zelfde naam, andere sha256) geeft een nieuwe hash
+    let hst = 'geen';
+    try { const h = fs.lstatSync(P.herkomst); hst = h.mtimeMs + ':' + h.size; } catch (e) { hst = 'geen'; }
+    const stempel = st.mtimeMs + ':' + st.size + '|' + hst;
     if (cache.cat && cache.catStempel === stempel) return cache.cat;
     let c;
     try { c = Filter.leesCatalogus(fs.readFileSync(P.catalogus, 'utf8')); } catch (e) { return { ok: false, fout: 'de catalogus is nu niet leesbaar', kaarten: [] }; }
-    c.kaarten.forEach(function (k) { k.hash = kaartHash(k); });
+    const hk = (leesJson(P.herkomst, {}) || {}).bestanden || {};
+    c.kaarten.forEach(function (k) { k.hash = kaartHash(k, hk); });
     cache.cat = { ok: true, kaarten: c.kaarten, fouten: c.fouten, mtime: st.mtimeMs, size: st.size }; cache.catStempel = stempel;
     return cache.cat;
   }
-  // Wat AIX zou tonen: verandert dat, dan geldt een eerdere Deel niet meer
-  function kaartHash(k) {
-    const x = k.vorm === 'antwoord' ? ['a', k.kaart_id, k.reactie_id, k.soort, k.tekst] : ['k', k.titel, k.zin, k.wat, k.oplevert, k.hoe, k.categorie, k.status, (k.plaatjes || []).join(',')];
+  // Wat AIX zou tonen: verandert dat, dan geldt een eerdere Deel niet meer. Plaatjes tellen mee met hun sha256 uit de herkomstlijst (wv954):
+  // een ander beeld onder dezelfde naam is een andere kaart. Zonder plaatjes blijft de hash wat hij was (bestaande Deel-keuzes blijven geldig).
+  function kaartHash(k, hk) {
+    const pl = (k.plaatjes || []).map(function (n) { const h = hk && Object.hasOwn(hk, n) && hk[n] ? String(hk[n].sha256 || '') : ''; return n + '@' + h; }).join(',');
+    const x = k.vorm === 'antwoord' ? ['a', k.kaart_id, k.reactie_id, k.soort, k.tekst] : ['k', k.titel, k.zin, k.wat, k.oplevert, k.hoe, k.categorie, k.status, pl];
     return crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex').slice(0, 16);
   }
   function journaal() {
@@ -454,7 +460,8 @@ function maak(deps) {
     const herstel = [];
     for (const id of Object.keys(j)) {
       const x = j[id], k = x.gedeeld && Number.isInteger(x.gedeeld.aix) ? (c.kaarten || []).find(function (y) { return y.id === id && y.vorm === 'kaart'; }) : null;
-      if (!k) continue;
+      // wv954: alleen plaatjes die David zag toen hij Deel koos (zelfde hash als bij het plaatsen); een later toegevoegd plaatje gaat nooit vanzelf mee
+      if (!k || x.gedeeld.hash !== k.hash) continue;
       for (const n of (k.plaatjes || []).filter(function (n) { return (x.beelden || []).indexOf(n) < 0; }).slice(0, 3)) {
         const p = plaatjeVoor(n);
         if (!p.ok) { herstel.push({ id: id, naam: n, ok: false, reden: p.fout }); continue; }
@@ -615,6 +622,17 @@ function maak(deps) {
       const r = await A.beeld(b.hash);
       if (!r.ok) return { status: 404, j: { ok: false, fout: 'plaatje niet te laden' } };
       return { status: 200, j: { ok: true, type: r.type, inhoud: r.bin.toString('base64') } };
+    }
+    if ((m = /^GET \/app\/ideeen\/proefplaatje\/(k\d{2,3})\/([0-2])$/.exec(route))) {
+      // wv954: voorbeeld in Klaar om te delen — het plaatje dat bij Deel mee zou gaan; alleen een conceptkaart uit de catalogus, alleen via de padcheck
+      const c = catalogus();
+      if (!c.ok) return { status: 503, j: { ok: false, fout: c.fout } };
+      const k = c.kaarten.find(function (x) { return x.id === m[1] && x.vorm === 'kaart' && x.deelbaar === 'concept'; });
+      const naam = k && (k.plaatjes || [])[Number(m[2])];
+      if (!naam) return { status: 404, j: { ok: false, fout: 'onbekend plaatje' } };
+      const p = plaatjeVoor(naam);
+      if (!p.ok) return { status: 404, j: { ok: false, fout: 'plaatje niet te tonen: ' + p.fout } };
+      return { status: 200, j: { ok: true, naam: naam, type: p.type, inhoud: p.bin.toString('base64') } };
     }
     if (route === 'POST /app/ideeen/gezien') {
       if (!isoOk(d.tot) || Date.parse(d.tot) > klok() + 60000) return { status: 400, j: { ok: false, fout: 'tot ontbreekt' } };

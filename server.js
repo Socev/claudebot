@@ -11170,7 +11170,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
-        if (route === 'GET /app/ideeen' || /^GET \/app\/ideeen\/(plaatje\/[1-9][0-9]{0,11}\/[0-2]|kaart\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||
+        if (route === 'GET /app/ideeen' || /^GET \/app\/ideeen\/(plaatje\/[1-9][0-9]{0,11}\/[0-2]|proefplaatje\/k\d{2,3}\/[0-2]|kaart\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||
           route === 'POST /app/ideeen/naar-ideeenbus' || /^POST \/app\/ideeen\/kaart\/[ka]\d{2,3}\/(deel|niet)$/.test(route))   // wv942: AIX lezen, Deel/Niet per kaart of antwoord
           return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App AIX (was Ideeën van buitenaf)
         if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
@@ -14189,7 +14189,7 @@ async function appIdeeen(req, res, a, d, route) {
   if (route.indexOf('POST ') === 0) {
     if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
     if (!appTeller('ideeen', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens ideeen');
-  } else if (route.indexOf('GET /app/ideeen/plaatje/') === 0 && !appTeller('ideeen-plaatje', 200, 3600000)) return appWeiger(res, 429, 'te veel plaatjes dit uur (max 200)', 'grens ideeen-plaatje');
+  } else if ((route.indexOf('GET /app/ideeen/plaatje/') === 0 || route.indexOf('GET /app/ideeen/proefplaatje/') === 0) && !appTeller('ideeen-plaatje', 200, 3600000)) return appWeiger(res, 429, 'te veel plaatjes dit uur (max 200)', 'grens ideeen-plaatje');
   let r;
   try { r = await ideeen.app(route, Object.assign({}, d || {}, { __apparaat: a && a.id })); }   // apparaat alleen voor het journaal van Deel/Niet
   catch (e) { logError('app-ideeen', e); return appWeiger(res, 502, 'AIX is nu niet bereikbaar', 'ideeen uitzondering'); }
