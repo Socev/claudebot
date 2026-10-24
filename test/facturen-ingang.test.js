@@ -270,7 +270,7 @@ test('praktijkmanager: geen Privé, geen POT-rekening, geen Instellingen, geen N
   } finally { await sluit(t); }
 });
 
-test('mag_bevestigen 0 → Bevestigen 403; anders gewoon bevestigen (naar de wachtrij)', async () => {
+test('mag_bevestigen 0 → Bevestigen 403, validatie (lezen) 200; anders gewoon bevestigen (naar de wachtrij)', async () => {
   const t = await opzet();
   try {
     const f = t.fdb.db.prepare("SELECT id, entiteit, versie FROM factuur WHERE status = 'te_beoordelen' AND entiteit IN ('tolgaarde','groenhouten') AND patientkenmerk = 0 AND alleen_eigenaar = 0 AND iban_nieuw = 0 ORDER BY id").all();
@@ -293,6 +293,32 @@ test('mag_bevestigen 0 → Bevestigen 403; anders gewoon bevestigen (naar de wac
     assert.equal((await t.vraag('GET', '/fac/facturen/lijst/beoordelen')).status, 200);
     assert.equal((await t.vraag('POST', '/fac/upload/beurt-0099/1', { ruw: Buffer.from('x'), koppen: { 'X-App-Naam': 'a.tab' } })).status, 200);
     assert.notEqual((await t.vraag('POST', '/fac/facturen/upload', { d: { beurt: 'beurt-0099', n: 1 } })).status, 403);
+    // de validatie-POST is lezen (Historie, wv991): zoeken, profiel, hoe, betaald-regel en overzicht 200, met de rolfilters van facturen.js
+    const val = (d) => t.vraag('POST', '/fac/facturen/validatie', { d });
+    const schrijf = () => t.fdb.db.prepare('SELECT total_changes() AS n').get().n;   // elke schrijfactie op deze verbinding, ook een auditrij
+    const voor = schrijf();
+    const zk = await val({ soort: 'zoek', tekst: 'proef' });
+    assert.equal(zk.status, 200, zk.tekst);
+    assert.ok(zk.j.aantal > 0, 'zoeken vindt bankregels');
+    assert.ok(zk.j.regels.every((x) => x.entiteit !== 'pot' && x.entiteit !== 'prive' && !x.alleen_eigenaar), 'geen POT, Privé of alleen-eigenaar');
+    assert.equal((await val({ soort: 'zoek', tekst: 'Salarisbatch POT' })).j.aantal, 0);
+    const tp = await val({ soort: 'tegenpartij', tekst: 'Webwinkel' });
+    assert.equal(tp.status, 200, tp.tekst); assert.ok(tp.j.profielen.length >= 1);
+    assert.equal((await val({ soort: 'hoe', tekst: 'Webwinkel' })).j.soort, 'tegenpartij');
+    const fv = await val({ soort: 'factuur', id: gelukt.id });
+    assert.equal(fv.status, 200, fv.tekst); assert.equal(fv.j.factuur.id, gelukt.id);
+    const ov = await val({ soort: 'overzicht' });
+    assert.equal(ov.status, 200, ov.tekst); assert.deepEqual(ov.j.controles.nieuwe_iban, []); assert.equal(ov.j.tellingen.nieuwe_iban, 0);
+    assert.equal((await val({})).j.soort, 'overzicht');
+    assert.equal((await val({ soort: 'tegenpartij', tekst: 'x' })).status, 400);   // de 400 van facturen.js komt gewoon door
+    assert.equal((await val({ soort: 0 })).j.soort, 'overzicht');   // zelfde lezing als facturen.js: String(soort || 'overzicht')
+    assert.equal(schrijf(), voor, 'de validatie-POST schreef niets');
+    // een andere soort of een ander pad blijft dicht
+    for (const d of [{ soort: 'wis' }, { soort: 'bevestig', id: gelukt.id }, { soort: ['bevestig'] }, { soort: 'controles' }]) {
+      const r2 = await val(d);
+      assert.equal(r2.status, 403, JSON.stringify(d)); assert.match(r2.j.fout, /alleen kijken en uploaden/);
+    }
+    assert.equal((await t.vraag('POST', '/fac/facturen/validatie/', { d: { soort: 'zoek', tekst: 'proef' } })).status, 403);
     // en in facturen.js zelf (tweede laag): Bevestigen weigert bij mag_bevestigen 0
     const pm = F.rolVoor(t.fdb, { ingang: 'fac', email: PM });
     const b = t.routes.app(t.fdb, { methode: 'POST', pad: '/app/facturen/bevestig', d: { id: ander.id, entiteit: ander.entiteit, betaalwijze: 'incasso' }, rol: pm, primair: true, versOk: () => false, versVerbruik: () => {} });

@@ -39,6 +39,10 @@ const crypto = require('crypto');
 
 const PAD_RE = /^\/fac\/[a-z0-9/-]{1,64}$/;
 const UPLOAD_RE = /^\/fac\/upload\/([a-z0-9-]{8,64}\/[1-9][0-9]?)$/;
+// POST /fac/facturen/validatie is een leesvraag (Historie: zoeken, profiel, betaald-regel; wv952/wv991); een ontbrekende soort is
+// overzicht, net als in facturen.js. Een andere soort (ook de alias controles van het Socev-luik) valt voor "alleen kijken" onder de gewone 403.
+const VALIDATIE_PAD = '/fac/facturen/validatie';
+const LEES_SOORTEN = new Set(['overzicht', 'zoek', 'tegenpartij', 'hoe', 'factuur']);
 const JWT_MAX = 8192;
 const JWT_DEEL_RE = /^[A-Za-z0-9_-]+$/;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -209,9 +213,11 @@ function maak(o) {
       res._app.apparaat = 'fac-' + rol.id;
       if (!teller(rol.id, 'alles', VERZOEKEN_PER_UUR)) return weiger(429, 'te veel verzoeken dit uur', 'grens alles');
       const pseudo = { id: 'fac-' + rol.id };
-      // mag_bevestigen = 0: alleen kijken en uploaden (lezen, ruwe upload en de overname); elke andere handeling 403 (diffreview wv856 #4)
-      if (rol.mag_bevestigen === false && req.method === 'POST' && !UPLOAD_RE.test(p) && p !== '/fac/facturen/upload')
-        return weiger(403, 'je kunt in Facturen alleen kijken en uploaden; vraag het David', 'alleen kijken');
+      // mag_bevestigen = 0: alleen kijken en uploaden (lezen, ruwe upload en de overname); elke andere handeling 403 (diffreview wv856 #4).
+      // De validatie-POST is lezen; de soort staat in de body en wordt hieronder na het lezen ervan getoetst (wv991).
+      const alleenKijken = rol.mag_bevestigen === false && req.method === 'POST';
+      const kijkWeiger = () => weiger(403, 'je kunt in Facturen alleen kijken en uploaden; vraag het David', 'alleen kijken');
+      if (alleenKijken && !UPLOAD_RE.test(p) && p !== '/fac/facturen/upload' && p !== VALIDATIE_PAD) return kijkWeiger();
 
       // ruwe upload (één bestand per verzoek); de route van server.js schrijft naar een eigen map per gebruiker
       const up = UPLOAD_RE.exec(p);
@@ -241,6 +247,11 @@ function maak(o) {
         o.body(req, function (fout, data) { ok(fout ? { fout } : { data: data || {} }); });
       });
       if (d.fout) return weiger(400, 'ongeldig verzoek', 'body ' + d.fout);
+      if (alleenKijken && p === VALIDATIE_PAD) {
+        // dezelfde lezing als facturen.js: geen object → {}, geen soort → overzicht
+        const dd = d.data && typeof d.data === 'object' ? d.data : {};
+        if (!LEES_SOORTEN.has(String(dd.soort || 'overzicht'))) return kijkWeiger();
+      }
       const pad = '/app' + p.slice('/fac'.length);
       const r = o.routes.app(fdb, { methode: req.method, pad, d: d.data, rol, primair: o.primair(),
         versOk: function () { return false; }, versVerbruik: function () {},
