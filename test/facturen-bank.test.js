@@ -5,6 +5,9 @@
 // Raakt geen pod, kluis, bank, mail of vault. Draaien: bash test/facturen-bank.sh
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+// Prestatiegrenzen gelden voor de pod; een CI-runner is trager en wisselt (wv1044: 3115–3882 ms tegen een grens van 3 s in de
+// runs 239–253). build.yml zet TOETS_TIJDFACTOR=3; lokaal blijft de grens zoals hij is. Een kwadratische uitschieter valt er nog steeds uit.
+const TIJDFACTOR = Math.max(1, Number(process.env.TOETS_TIJDFACTOR) || 1);
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -660,7 +663,7 @@ test('subset-som: hooguit 20 open facturen per IBAN (de dichtstbijzijnde), snel 
   const ver = tx({ boekdatum: '2026-09-15', bedrag_centen: -(1000 + 1007), tegenpartij_iban: LEV.A });
   const t0 = Date.now();
   const k = B.matchTransactie(ver, veel, { leveranciers: LEVS });
-  assert.ok(Date.now() - t0 < 2000);
+  assert.ok(Date.now() - t0 < 2000 * TIJDFACTOR, 'te traag: ' + (Date.now() - t0) + ' ms');
   assert.ok(!k.some((x) => x.methode === 'subset' && x.facturen.includes('s0') && x.facturen.includes('s1')));
   // dichtbij wel
   const dicht = tx({ boekdatum: '2026-09-15', bedrag_centen: -((1000 + 23 * 7) + (1000 + 24 * 7)), tegenpartij_iban: LEV.A });
@@ -758,7 +761,7 @@ test('#9 alleen_eigenaar ook op uitzonderingen en op koppelingen/voorstellen met
 test('#10 MT940 met een lange reeks spaties: lineair (geen ReDoS)', () => {
   const t0 = Date.now();
   B.leesBankbestand(':20:X\n:25:' + MT_IBAN + '\n:60F:C261230EUR1,00\n:61:' + ' '.repeat(400000) + 'x\n:62F:C261231EUR1,00\n-', { rekeningen: REKENINGEN });
-  assert.ok(Date.now() - t0 < 1500, 'te traag: ' + (Date.now() - t0) + ' ms');
+  assert.ok(Date.now() - t0 < 1500 * TIJDFACTOR, 'te traag: ' + (Date.now() - t0) + ' ms');
 });
 
 test('#13 een uitzondering op naam zet het fraudesignaal niet uit', () => {

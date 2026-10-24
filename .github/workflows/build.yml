@@ -10,6 +10,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # wv1044: prestatiegrenzen in de toetsen gelden voor de pod; deze runner is trager en wisselt (runs 239–253 rood op 3,1–3,9 s
+    # tegen 3 s). De toetsen vermenigvuldigen hun tijdgrens met deze factor; lokaal is hij 1.
+    env:
+      TOETS_TIJDFACTOR: '3'
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +24,7 @@ jobs:
       # in een image terecht. koppel-telegram.js valt hier bewust buiten: dat
       # script moet wel kunnen inloggen (signIn).
       - name: telegram-reader.js moet alleen-lezen blijven
+        if: ${{ !cancelled() }}
         run: |
           if grep -nE 'sendMessage|forwardMessages|readHistory|markAsRead|sendFile' telegram-reader.js; then
             echo "::error::telegram-reader.js bevat een verzend- of markeerfunctie. Dit luik is alleen-lezen."
@@ -30,6 +35,7 @@ jobs:
       # Zelfde poort voor de bankluis (wv680): bank-lezer.js mag alleen lezen. Geen betaal-endpoint van Enable Banking
       # (/payments, /payment-…) en geen andere schrijvende methode dan POST /auth, POST /sessions en DELETE /sessions.
       - name: bank-lezer.js moet alleen-lezen blijven
+        if: ${{ !cancelled() }}
         run: |
           if grep -nEi "payment|['\"](PUT|PATCH)['\"]" bank-lezer.js | grep -vE '^\s*[0-9]+:\s*(\*|//)'; then
             echo "::error::bank-lezer.js bevat een betaal- of schrijfroute. Dit luik is alleen-lezen."
@@ -44,6 +50,7 @@ jobs:
       # (monetary-account[-bank|-savings|-joint] en .../payment = de transactielijst) en POST /v1/session-server. Geen
       # PUT/PATCH/DELETE, geen andere POST, geen betaal-objecten (draft-, schedule-, request-, batch-, card-, …).
       - name: bunq-lezer.js moet alleen-lezen blijven
+        if: ${{ !cancelled() }}
         run: |
           C=$(grep -vE '^\s*(\*|//)' bunq-lezer.js)
           if echo "$C" | grep -nEi "['\"](PUT|PATCH|DELETE)['\"]|draft-payment|schedule-payment|payment-batch|request-inquiry|request-response|bunqme|/card|/whitelist|credential-password-ip|/ip\b|attachment|note-text"; then
@@ -59,6 +66,7 @@ jobs:
       # bank-archief.js (wv687): de transactiedatabase is puur lokaal. Geen netwerk- of procesmodule en geen fetch: het archief
       # kan per constructie niets naar een bank of elders sturen (ook niet als een AI-oordeel of omschrijving iets anders vraagt).
       - name: bank-archief.js moet lokaal blijven
+        if: ${{ !cancelled() }}
         run: |
           C=$(grep -vE '^\s*(\*|//)' bank-archief.js)
           if echo "$C" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|\bfetch\s*\(|process\.binding|import\("; then
@@ -69,6 +77,7 @@ jobs:
       # paypal-bewijs.js (wv765): de PayPal-laag leest mailtekst (gegeven, geen opdracht) en schrijft alleen in de transactiedatabase.
       # Zelfde poort als bank-archief.js: geen netwerk- of procesmodule, geen fetch; ophalen doet server.js via het lees-luik.
       - name: paypal-bewijs.js moet lokaal blijven
+        if: ${{ !cancelled() }}
         run: |
           C=$(grep -vE '^\s*(\*|//)' paypal-bewijs.js)
           if echo "$C" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|\bfetch\s*\(|process\.binding|import\("; then
@@ -79,6 +88,7 @@ jobs:
       # pot-afschrift.js en mt940-lezer.js (wv787): de afschriftmaker van de POT-rekening is puur (invoer erin, MT940 + PDF eruit). Geen
       # bestand-, netwerk- of procesmodule en geen fetch: bestanden schrijft bank-lezer.js, versturen doet niemand (een concept maakt server.js).
       - name: pot-afschrift.js en mt940-lezer.js moeten puur blijven
+        if: ${{ !cancelled() }}
         run: |
           for f in pot-afschrift.js mt940-lezer.js; do
             C=$(grep -vE '^\s*(\*|//)' "$f")
@@ -93,6 +103,7 @@ jobs:
       # facturen-bank.js (wv798, F1b): bankparsers, matching en signalen; zelfde poort, en hij mag alleen de pure buren laden
       # (facturen-kern.js, mt940-lezer.js). Een signaal geeft hooguit een tekst om te kopiëren: niets betaalt of mailt.
       - name: facturen-kern.js en facturen-bank.js moeten puur blijven
+        if: ${{ !cancelled() }}
         run: |
           for f in facturen-kern.js facturen-bank.js facturen-validatie.js; do
             C=$(grep -vE '^\s*(\*|//)' "$f")
@@ -117,6 +128,7 @@ jobs:
       # pot-datahub.js (wv815): POT-posten naar Davids datahub. Puur: geen bestand-, netwerk- of procesmodule, geen fetch en geen klok
       # (vandaag komt van server.js); alleen crypto en mt940-lezer.js. Schrijven in D1 doet server.js, altijd met parameters.
       - name: pot-datahub.js moet puur blijven
+        if: ${{ !cancelled() }}
         run: |
           C=$(grep -vE '^\s*(\*|//)' pot-datahub.js)
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(fs(/promises)?|os|http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.|import\("; then
@@ -132,6 +144,7 @@ jobs:
       # pot-verzend.js (wv911): nota's uit Davids POT-app als Gmail-concept klaarzetten. Puur: alleen crypto; D1, lees-luik, mailluik,
       # pdftotext, vault, Voor jou en het conceptregister komen van server.js (io). Geen eigen klok: tijden komen van D1.
       - name: pot-verzend.js moet puur blijven
+        if: ${{ !cancelled() }}
         run: |
           C=$(grep -vE '^\s*(\*|//)' pot-verzend.js)
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(fs(/promises)?|os|http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.|import\("; then
@@ -148,6 +161,7 @@ jobs:
       # facturen-db.js (wv824, F1c): de opslag van de Facturen-app is lokaal (SQLite + stukken op de pod). Geen netwerk- of procesmodule en
       # geen fetch; hij laadt alleen fs, path, crypto, node:sqlite en de pure buren. Versturen doet de koerier (F4), nooit de opslag.
       - name: facturen-db.js moet lokaal blijven
+        if: ${{ !cancelled() }}
         run: |
           C=$(grep -vE '^\s*(\*|//)' facturen-db.js)
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\("; then
@@ -161,6 +175,7 @@ jobs:
       # facturen.js (wv833, F2): de routes van de Facturen-app. Ook lokaal: geen netwerk- of procesmodule en geen fetch (versturen doet de
       # koerier in F4); hij laadt alleen fs, node:sqlite (de read-only bankluis-verbinding) en de drie Facturen-buren.
       - name: facturen.js moet lokaal blijven
+        if: ${{ !cancelled() }}
         run: |
           C=$(grep -vE '^\s*(\*|//)' facturen.js)
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\("; then
@@ -175,6 +190,7 @@ jobs:
       # /usr/bin/pdftotext, PDF op stdin, tekst op stdout) en de Facturen-buren; geen fetch en geen fs: het lees-luik en de verzender komen als
       # functies uit server.js, de stukken leest facturen-db.js. Zo kan hij niets anders aanroepen dan pdftotext.
       - name: facturen-koerier.js alleen pdftotext
+        if: ${{ !cancelled() }}
         run: |
           C=$(grep -vE '^\s*(\*|//)' facturen-koerier.js)
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|worker_threads|cluster|vm|undici|fs|fs/promises)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\(|execSync|spawnSync|\bspawn\s*\(|[^.]\bexec\s*\("; then
@@ -191,6 +207,7 @@ jobs:
       # console (de certs van Access komen uit server.js); de gebruikers-JWT en het Access-bewijs gaan alleen naar controleerJwt, nooit
       # in een log, audit of antwoord (Fable wv856 #3).
       - name: facturen-ingang.js moet lokaal blijven en geen JWT doorgeven
+        if: ${{ !cancelled() }}
         run: |
           C=$(grep -vE '^\s*(\*|//)' facturen-ingang.js)
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\(|console\."; then
@@ -207,102 +224,130 @@ jobs:
       # De witte lijst en de handtekeningcontrole echt toetsen (nagebootste bunq en Enable Banking op 127.0.0.1); node:sqlite
       # vraagt Node 22 (zelfde hoofdversie als de pod).
       - uses: actions/setup-node@v4
+        if: ${{ !cancelled() }}
         with:
           node-version: '22'
       - name: bankluis-toetsen (Enable Banking + bunq)
+        if: ${{ !cancelled() }}
         run: |
-          bash test/bunq-lezer.sh
-          bash test/bunq-poort.sh
-          bash test/bank-lezer.sh
-          bash test/bankluis-poort.sh
-          bash test/bank-ronde.sh
-          bash test/bank-archief.sh
-          bash test/vaste-lasten-ronde.sh   # wv776: maandronde vaste lasten (binnenblok vault, poort nieuwste post, box 1× per maand per reden)
-          bash test/paypal-laag.sh
-          bash test/bank-pot.sh   # wv786: POT-rekening afgescheiden van privé, indeling zonder taalmodel
-          bash test/financien-app.sh   # wv771: App Financiën — veld-allowlist, signalen, opzeglinks met host-allowlist
-          bash test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
+          # wv1044: elke toets draait, ook na een rode; de stap faalt aan het eind als er één rood was (namen in de annotaties).
+          rood=0; t() { bash "$@" || { echo "::error::$* rood"; rood=1; }; }
+          t test/bunq-lezer.sh
+          TOETS_NU=2026-12-15T23:30:00Z t test/bunq-lezer.sh   # wv1044: ook om 00:30 Nederlandse tijd, als de UTC-datum nog op gisteren staat (runs 241/242 rood)
+          t test/bunq-poort.sh
+          t test/bank-lezer.sh
+          t test/bankluis-poort.sh
+          t test/bank-ronde.sh
+          t test/bank-archief.sh
+          t test/vaste-lasten-ronde.sh   # wv776: maandronde vaste lasten (binnenblok vault, poort nieuwste post, box 1× per maand per reden)
+          t test/paypal-laag.sh
+          t test/bank-pot.sh   # wv786: POT-rekening afgescheiden van privé, indeling zonder taalmodel
+          t test/financien-app.sh   # wv771: App Financiën — veld-allowlist, signalen, opzeglinks met host-allowlist
+          t test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
-          bash test/pot-verzend.sh   # wv911: POT-nota's als Gmail-concept — frontmatter, adres, PDF-controle, claim, onzeker-herstel, voorcontrole, kaarten
-          bash test/pot-auto.sh   # wv921: automatisch versturen — vrijgave, kaart-hash, venster zomer/winter/weekend/feestdag, onzeker nooit terug, plafond, twee pods
-          bash test/pot-auto-pod.sh   # wv921: knoproute (alleen knop-ja-vers-kaart, intrekken bij verval), verzendgeheim buiten de Socev-omgeving, noodstop
-          bash test/verzender-toetsen.sh   # wv921: Toetsen-code van AI - Facturen-verzender (bron pot, eigen geheim, witte lijst, cc, plafond) + hash in het image
-          bash test/pot-datahub.sh   # wv815: POT-posten naar Davids datahub — koppelen, grens, Davids vorm, toewijzing, grootboek, D1-batch met parameters
-          bash test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
+          t test/pot-verzend.sh   # wv911: POT-nota's als Gmail-concept — frontmatter, adres, PDF-controle, claim, onzeker-herstel, voorcontrole, kaarten
+          t test/pot-auto.sh   # wv921: automatisch versturen — vrijgave, kaart-hash, venster zomer/winter/weekend/feestdag, onzeker nooit terug, plafond, twee pods
+          t test/pot-auto-pod.sh   # wv921: knoproute (alleen knop-ja-vers-kaart, intrekken bij verval), verzendgeheim buiten de Socev-omgeving, noodstop
+          t test/verzender-toetsen.sh   # wv921: Toetsen-code van AI - Facturen-verzender (bron pot, eigen geheim, witte lijst, cc, plafond) + hash in het image
+          t test/pot-datahub.sh   # wv815: POT-posten naar Davids datahub — koppelen, grens, Davids vorm, toewijzing, grootboek, D1-batch met parameters
+          t test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
+          exit $rood
       # Facturen-app (wv797–wv833) in een eigen stap die ook draait als een eerdere stap rood is: een rode bankluis-toets mag de Facturen-toetsen
       # niet verbergen (sinds run 200 stopte de bankluis-stap op test/bunq-lezer.sh en draaiden ze niet meer).
       - name: "facturen (wv797–wv855: kern, bank, opslag, routes, koerier)"
         if: ${{ !cancelled() }}
         run: |
+          # wv1044: elke toets draait, ook na een rode; de stap faalt aan het eind als er één rood was (namen in de annotaties).
+          rood=0; t() { bash "$@" || { echo "::error::$* rood"; rood=1; }; }
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
-          bash test/facturen-kern.sh   # wv797: kern — besliskader, UBL, validators, IBAN-poort, patiëntkenmerk, overgangen, vingerafdruk
-          bash test/facturen-bank.sh   # wv798: bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
-          bash test/facturen-db.sh   # wv824: opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
-          bash test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
-          bash test/facturen-validatie.sh   # wv944: bankhistorie (startdatum, droogloop, bron, personeel, FV2-archief) en validatie (profielen, betaling, controles, zoeken)
+          t test/facturen-kern.sh   # wv797: kern — besliskader, UBL, validators, IBAN-poort, patiëntkenmerk, overgangen, vingerafdruk
+          t test/facturen-bank.sh   # wv798: bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
+          t test/facturen-db.sh   # wv824: opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
+          t test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
+          t test/facturen-validatie.sh   # wv944: bankhistorie (startdatum, droogloop, bron, personeel, FV2-archief) en validatie (profielen, betaling, controles, zoeken)
           command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils)   # de koerier roept /usr/bin/pdftotext echt aan
-          bash test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads
-          bash test/facturen-ingang.sh   # wv856: smalle ingang /fac — poortgeheim, servicetoken- en gebruikers-JWT, nooit eigenaar, praktijkmanager-scope, uploads, audit
+          t test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads
+          t test/facturen-ingang.sh   # wv856: smalle ingang /fac — poortgeheim, servicetoken- en gebruikers-JWT, nooit eigenaar, praktijkmanager-scope, uploads, audit
+          exit $rood
       # Studio (wv707): catalogus uit een nagebootste Olares Router, knopentoets, gedeelde ComfyUI, grenzen, proef/Activeer (nep-Piper).
       - name: "studio (wv707, tab Studio fase 1)"
+        if: ${{ !cancelled() }}
         run: bash test/studio.sh
       # Vault zonder symlinks (wv900): vault-veilig.js/vault_veilig.py — link op de doelnaam, map-symlink, hangende link, vaste tmp-namen,
       # fifo, ACL-masker, flock; potVzRegister uit server.js in een vm; geen vaste tmp-naam of append op een vaultpad meer in server.js.
       - name: "vault-veilig (wv900, geen symlink volgen in de vault)"
+        if: ${{ !cancelled() }}
         run: |
           sudo apt-get install -y -qq acl >/dev/null 2>&1 || true
           bash test/vault-veilig.sh
       # wv1001: machinekamer-runs laden geen tekst die socev kan schrijven (claudeMdExcludes + eigen geheugen + vaste instructie, geheugentoets,
       # codex/gemini geweigerd, autoGrondwet uit de release, koppeling in server.js in een vm).
       - name: "mk-tekst (wv1001, machinekamer zonder vaulttekst)"
+        if: ${{ !cancelled() }}
         run: |
           sudo apt-get install -y -qq acl >/dev/null 2>&1 || true
           bash test/mk-tekst.sh
       # Bandjes (wv739/wv743): register lezen/schrijven, routes, Studio-koppeling (nep-Piper), naKlaar, /smal, box-rij, server.js-blok in een vm.
       - name: "bandjes (wv743, mini-app Bandjes)"
+        if: ${{ !cancelled() }}
         run: bash test/bandjes.sh
       - name: "harvester (wv820, App Harvester)"
+        if: ${{ !cancelled() }}
         run: bash test/harvester.sh
       - name: "secondbrain (wv832, App Second Brain)"
+        if: ${{ !cancelled() }}
         run: bash test/secondbrain.sh
       - name: "gezondheid-app (wv937, App Gezondheid)"
+        if: ${{ !cancelled() }}
         run: bash test/gezondheid-app.sh
       # Health-rapporten (wv811): start zonder taalmodel — alleen de startregel terug, omgeving-allowlist, tijdgrens, één tegelijk.
       - name: "health-rapporten (wv811, start zonder taalmodel)"
+        if: ${{ !cancelled() }}
         run: bash test/health-rapporten-start.sh
       # Health-kaartverzoek (wv1033): verzoek van de nachtimport → werkvoorraadrij; alleen gewoon bestand, primair, env-allowlist.
       - name: "health-kaartverzoek (wv1033, nachtimport geeft kaartronde door)"
+        if: ${{ !cancelled() }}
         run: bash test/health-kaartverzoek.sh
       # Health-opgaven (wv887): Socevs opgaven zonder schrijfsleutel — vast commando, omgeving-allowlist, alleen tellers terug.
       - name: "health-opgaven (wv887, /smal/health-opgaven)"
+        if: ${{ !cancelled() }}
         run: bash test/health-opgaven-smal.sh
       # Telefoonversie (wv743): 1 kHz/3 kHz doorlaat, 6 kHz → 2 kHz-spiegeling ≤ −40 dB, lengte, WAV-kop, µ-law binnen de G.711-fout.
       - name: "audio (wv743, telefoonversie 8 kHz PCM + µ-law)"
+        if: ${{ !cancelled() }}
         run: bash test/audio.sh
       # ElevenLabs via Router (wv782): nep-Router, vingerafdruk per taak, reservering/verrekening/plafond, herstart, Bandjes-stemmen.
       - name: "elevenlabs (wv782, Studio fase 2 deel stem)"
+        if: ${{ !cancelled() }}
         run: bash test/elevenlabs.sh
       # Spreektekst (wv803): nummers/websites uitgeschreven, pauzes per model, uitspraaklijst; origineel op sterkte (audio.normaliseer).
       - name: "spreektekst (wv803, Bandjes uitspraak en pauzes)"
+        if: ${{ !cancelled() }}
         run: bash test/spreektekst.sh
       - name: "argv-detector (wv698, sleutelwaarden in /proc/*/cmdline)"
+        if: ${{ !cancelled() }}
         run: bash test/argv-detector.sh
       # Twee abonnementen (wv781): agents op account 2, /run op 1, terugval met Davids vangnet, schakelaar, /tank?account=2 (nep-claude).
       - name: "twee-accounts (wv781, tweede Max-abonnement)"
+        if: ${{ !cancelled() }}
         run: bash test/twee-accounts.sh
       # Uid-scheiding fase 1 (wv699): het protocol en de weigeringen van de socev-loper (zonder docker), en de argv-hook die
       # sinds wv699 als managed settings in het image zit (24 weigeren + 22 doorlaten, nepsleutels).
       - name: "socev-loper (wv699, protocol en weigeringen)"
+        if: ${{ !cancelled() }}
         run: python3 test/socev-loper.py
       - name: "argv-hook (wv698/wv699, managed settings)"
+        if: ${{ !cancelled() }}
         run: python3 test/argv-hook-toets.py ./argv-wacht.py
       # Uid-scheiding fase 2 (wv715): server.js start smalle beurten via de echte loper (stand, jobmap-ACL, stop via de loper,
       # wees over een herstart, sessie-overgang, dicht bij uitval). Loper en server als dezelfde gebruiker; EPERM nagebootst.
       - name: "loper fase 2 (wv715, server.js via de socev-loper)"
+        if: ${{ !cancelled() }}
         run: bash test/loper-fase2.sh
       # wv886 (Fable wv715 #5): /agent uit een [AUTO]-beurt via de loper koppelt alleen het proces dat de marker draagt
       # (loper socket-eigenaar), niet elke andere socev-sessie die tegelijk loopt.
       - name: "tel-koppeling via de loper (wv886)"
+        if: ${{ !cancelled() }}
         run: bash test/tel-loper-koppel.sh
 
       - uses: docker/login-action@v3

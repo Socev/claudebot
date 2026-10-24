@@ -49,7 +49,8 @@ mnd.forEach((ym, k) => {
   if (k < 10) q(VL, dg(ym, 28), -200, 'Gemeente Huizen', inc('000000043562', 'Gemeente Huizen'));
   else q(VL, dg(ym, 28), -205, 'GEM HUIZEN BELASTINGEN', inc('43562', 'GEM HUIZEN BELASTINGEN'));                   // naamwissel, zelfde machtiging
   q(VL, dg(ym, 20), -350, 'D. Schaap', 'Periodieke overb Geld', { tegen_iban: IV.el });                               // steun (externe rekening)
-  EL.push(p('el:' + ym, dg(ym, 20), 350, 'D SCHAAP CJ', 'Geld', { tegen_iban: IV.vl }));
+  // alleen tot vandaag, net als q(): een post in de toekomst schuift de peildag van het archief op (wv1044: rood op dag 1–9 van elke maand)
+  if (dg(ym, 20) <= vandaag) EL.push(p('el:' + ym, dg(ym, 20), 350, 'D SCHAAP CJ', 'Geld', { tegen_iban: IV.vl }));
   q(VL, dg(ym, 19), 5000, 'D. Schaap', 'vaste storting', { tegen_iban: IV.pr });
   if (dg(ym, 19) <= vandaag) PR.push(p('pr:' + ym, dg(ym, 19), -5000, 'D. Schaap', 'vaste storting', { tegen_iban: IV.vl }));
   if (dg(ym, 3) <= vandaag) { PR.push(p('prs:' + ym, dg(ym, 3), -500, 'Spaar', 'sparen', { tegen_iban: IV.sp })); SP.push(p('sp:' + ym, dg(ym, 3), 500, 'D. Schaap', 'sparen', { tegen_iban: IV.pr })); }
