@@ -2513,7 +2513,9 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     // wv275: een [AUTO]-beurt van de telefoon draagt zijn id in de omgeving; POST /agent leest hem daar terug (telMerkAgent).
     if (j.app && j.app.soort === 'tel') runOpts.env = { SOCEV_TEL_BEURT: jobId };
     // wv698: de sessienaam in de omgeving, zodat de argv-detector een lek aan een sessie kan koppelen (geen sleutel)
-    runOpts.env = Object.assign({}, runOpts.env || {}, { SOCEV_SESSIE: String(chatId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'onbekend' });
+    // wv1018: en de eigen job-id, zodat werkvoorraad.py een kaart aan deze beurt kan hangen (herkomst.beurt; de vraag in het antwoord
+    // van deze beurt heeft dezelfde job_id in het app-log)
+    runOpts.env = Object.assign({}, runOpts.env || {}, { SOCEV_SESSIE: String(chatId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'onbekend', SOCEV_BEURT: jobId });
     // wv424: buiten de machinekamer geen beheersleutels (zie MK_SESSIES).
     if (!lezen && !runIsMk(chatId, ws)) socevSmalOpts(runOpts, chatId);
     // wv1001: mk = eigen instructie en geheugen, geen vaulttekst; smal = Socevs eigen CLAUDE.md en geheugen, geen geneste. Managers hebben
@@ -6978,6 +6980,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const bijStart = function () {
     appKnopRijZet(sleutel, jobId2, function (x) { x.antwoord.gestart = true; });
     if (kaart && kaart.bijStart) { try { kaart.bijStart(keuze); } catch (e) { logError('app-voor-jou', e); } }   // wv404: kaart op beantwoord
+    else appVjSluitGekoppeld(sleutel, keuze);   // wv1018 (Fable diffreview #1): een antwoord in het gesprek sluit ook de gekoppelde kaart
     // Fable-diffreview wv405 #1: het antwoord van de vorige beurt kan in dezelfde milliseconde in chat_log zijn gezet; dan zou
     // de Poortwachter de druk aan dát antwoord koppelen. Altijd ná de laatst geschreven rij.
     const nu = Math.max(Date.now(), (appStaat.chatlogLaatsteTs || 0) + 2);
@@ -9022,7 +9025,8 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   });
   let vr = {};
   try { vr = appVragen(); } catch (e) { vr = {}; }
-  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr) }); });
+  const af = await appVjAfgeleid(punten, nu);   // wv1018: vóór de lijst (beantwoord leest de afgeleide koppeling ook)
+  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map) }); });
   // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten).
   // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (sinds wv946 de enige weg van de app); /app/voor-jou blijft zoals main.
   const basisAntwoord = { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: !!(a && a.soort === 'vast'),
@@ -9030,7 +9034,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   if (!kanaal) return appStuur(res, 200, basisAntwoord);
   let moet = null, moetFout = null;
   // review wv594 #1: ontdubbelen tegen ALLE kaarten (ook privé, die een vaste plek niet toont); op een vaste plek geen hoofdkanaal
-  try { moet = (await appMoetIets(punten, nu)).filter(function (m) { return !(a && a.soort === 'vast' && m.kanaal === 'hoofd'); }); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
+  try { moet = (await appMoetIets(punten, nu, af)).filter(function (m) { return !(a && a.soort === 'vast' && m.kanaal === 'hoofd'); }); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
   const sleutels = [];
   lijst.forEach(function (p) { sleutels.push('k:' + p.id); if (p.deadline && p.deadline < vandaag) sleutels.push('k:' + p.id + ':over'); });
   (moet || []).forEach(function (m) { sleutels.push(m.punt); });
@@ -9053,13 +9057,13 @@ const APP_MOET_BERICHT_MAX = 6000;
 const APP_MOET_DAG_MAX = 600;
 const APP_MOET_MAX = 30;
 const APP_MOET_WV_RE = /\bwv\s?(\d{2,4})\b/gi;
-function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs) {
+function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs, afgeleid) {
   const vandaag = appYmd(nu), gekoppeld = {}, kaartWv = {}, kaartJob = {};
   // tot = tot wanneer gestelde vragen wijken: open of later (review wv594 #1: ook geparkeerd) = altijd, dicht = tot gesloten_op
   const totZet = function (o, k, tot) { if (!(o[k] >= tot)) o[k] = tot; };
   (kaarten || []).forEach(function (p) {
     if (!p || !p.status) return;
-    const wacht = p.status === 'open' || p.status === 'later', g = appVjGekoppeld(p);
+    const wacht = p.status === 'open' || p.status === 'later', g = appVjGekoppeld(p, afgeleid);   // wv1018: ook de afgeleide koppeling
     if (g) gekoppeld[g] = 1;
     // Fable-diffreview wv926 #6: alleen een besluitkaart neemt een vraag met hetzelfde wv-nummer of van dezelfde klus over
     if (p.soort !== 'besluit') return;
@@ -9116,16 +9120,19 @@ async function appMoetLog(kanaal) {
   appStaat.moetLog[kanaal] = { mtime: st.mtimeMs, size: st.size, op: Date.now(), items: items };
   return items;
 }
-async function appMoetIets(kaarten, nu) {
-  const per = {};
-  for (const k of ['hoofd', 'machinekamer']) {
-    const r = await appGeschiedenisRuw(k, appMoetLog);
-    if (r.fout) throw r.fout;
-    per[k] = r.items;
+async function appMoetIets(kaarten, nu, af) {
+  let per = af && af.per;   // wv1018: al gelezen door appVjAfgeleid
+  if (!per) {
+    per = {};
+    for (const k of ['hoofd', 'machinekamer']) {
+      const r = await appGeschiedenisRuw(k, appMoetLog);
+      if (r.fout) throw r.fout;
+      per[k] = r.items;
+    }
   }
-  let jobs = {};
-  try { jobs = await appVjVraagJobs(); } catch (e) { logError('app-voor-jou', e); jobs = {}; }   // dan zoals voor wv1004: alleen koppeling en wv-nummer
-  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu, jobs);
+  let jobs = af && af.jobs;
+  if (!jobs) { try { jobs = await appVjVraagJobs(); } catch (e) { logError('app-voor-jou', e); jobs = {}; } }   // dan zoals voor wv1004: alleen koppeling en wv-nummer
+  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu, jobs, af && af.map);
 }
 // review wv594 #2: een kaart die niet meer op David wacht (dicht, of later met een datum na vandaag) gaat uit gezien-david.json, zodat
 // hij opnieuw telt als hij terugkomt (heropend, later verlopen); zoals gezienBijwerken in de app. Alleen kaarten die de lijst echt
@@ -9163,11 +9170,11 @@ function appMoetGezien(sleutels) {
   return uit;
 }
 // wv404: {keuze, t} als dit besluit via een knop beantwoord is (kaartdruk in het bewijs, of een antwoord in vragen.json), anders null
-function appVjBeantwoordKort(p, vr) {
+function appVjBeantwoordKort(p, vr, afgeleid) {
   if (p.soort !== 'besluit') return null;
   const b = APP_VJ_KNOP_BEWIJS_RE.exec(String(p.bewijs || ''));
   if (b && p.status === 'gedaan') return { keuze: b[1].toLowerCase(), t: p.gesloten_op || null };
-  const ks = appVjKaartSleutel(p), gek = appVjGekoppeld(p);
+  const ks = appVjKaartSleutel(p), gek = appVjGekoppeld(p, afgeleid);
   const eigen = vr[ks.job + ':' + ks.hash];
   const x = (appVjEigenVerouderd(p, eigen) ? null : appAntwoord(eigen)) || (gek ? appAntwoord(vr[gek]) : null);
   return x ? { keuze: x.keuze, t: x.t } : null;
@@ -9256,10 +9263,114 @@ function appVjKaartSleutel(p) {
   return { job: appSha('voorjou:' + p.sleutel).slice(0, 16), hash: appVjFnv('voorjou:' + p.sleutel + ':' + bron) };
 }
 // herkomst.vraag = "<job>:<hash>" van een bestaande app-vraag (vragen.json), als een agent of de ronde die meegaf
-function appVjGekoppeld(p) {
+function appVjHerkomstVraag(p) {
   const h = p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
   const l = (Array.isArray(h.vraag) ? h.vraag : [h.vraag]).map(String).filter(function (x) { return /^[a-f0-9]{16}:[a-f0-9]{8}$/.test(x); });
   return l[0] || null;
+}
+// wv1018: herkomst.vraag, anders de afgeleide koppeling (appVjAfleidUit, als kaart-id -> "job:hash" meegegeven)
+function appVjGekoppeld(p, afgeleid) {
+  return appVjHerkomstVraag(p) || (afgeleid && p && Object.prototype.hasOwnProperty.call(afgeleid, p.id) ? afgeleid[p.id] : null);
+}
+// ── wv1018: afgeleide koppeling besluitkaart <-> chatvraag (Fable wv1004 #5/#6, ontwerp mk-scripts/wv1018/ontwerp.md) ──
+// David zag dezelfde vraag als kaart én als chatvraag met knoppen; een Ja op de kaart liet de knoppen in het gesprek actief (21-10:
+// kaart Ja, drie minuten later Anders in het gesprek). Zonder herkomst.vraag koppelt de pod een besluitkaart aan een chatvraag als:
+// dezelfde klus (ouder_job van de rij = agent_job van het rapport; of herkomst.beurt = de beurt/run die de kaart zette = job_id van
+// het antwoord of bron_job van een /bericht), de vraag niet vóór het aanmaken van de kaart kwam (2 min marge) en bij een dichte kaart
+// vóór het sluiten (Fable wv1018 MOET 2), kaart (titel + waarom) en vraagzin ten minste twee inhoudswoorden (>= 3 letters, buiten de stoplijst) delen, en ten minste een derde van de
+// kleinste van beide woordensets (Fable MOET 1: zelfde klus, andere
+// vraag koppelt niet), en het 1-op-1 is (de kaart heeft één kandidaat en die vraag één kaart). Dan loopt een druk op de kaart via de
+// chatvraag (de bestaande gek-route) en omgekeerd: één vraag, één antwoord. Puur: getoetst in 9d.
+const APP_VJ_AFLEID_MARGE_MS = 2 * 60 * 1000;
+const APP_VJ_AFLEID_STOP = new Set(('voortaan socev david klus klussen deze door eerst zodat maar niet meer alleen voor naar jouw jij wil wilt willen graag ' +
+  'wordt worden kunnen kan moet moeten gaan zijn heeft hebben omdat zoals alle alles elke iets andere ander nieuwe nieuw vanaf over onder ' +
+  'zelf weer straks vandaag morgen bouwen bouw laten laat maken maak zetten stap stappen eerste kaart kaarten vraag vragen antwoord akkoord zodra ' +
+  'beginnen begin even daarna dan wat welke hoe waar wanneer echt gewoon mogen mag zal zou zouden nog toch ook hier daar ' +
+  'een het die dat met van bij tot uit aan toe als dus wie jou mij hem zij wij jullie zie per of en de te in op om er al nu je ik').split(' '));
+function appVjAfleidWoorden(t) {
+  const uit = new Set();
+  String(t || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).forEach(function (w) {
+    if ((w.length >= 3 || /^\d{2,}$/.test(w)) && !APP_VJ_AFLEID_STOP.has(w)) uit.add(w);   // 3: app, pot, n8n tellen mee
+  });
+  return uit;
+}
+function appVjAfleidUit(kaarten, perKanaal, vragen, kaartJobs, nu) {
+  const klus = {}, kaartW = {}, kand = {}, perVraag = {};
+  (kaarten || []).forEach(function (p) {
+    if (!p || p.soort !== 'besluit' || !Number.isInteger(p.id) || appVjHerkomstVraag(p)) return;
+    const js = ((kaartJobs && kaartJobs[p.id]) || []).map(String);
+    const b = p.herkomst && typeof p.herkomst === 'object' ? String(p.herkomst.beurt || '') : '';
+    if (APP_JOB_RE.test(b)) js.push(b);
+    js.forEach(function (j) { if (APP_JOB_RE.test(j) && (klus[j] = klus[j] || []).indexOf(p) < 0) klus[j].push(p); });
+  });
+  if (!Object.keys(klus).length) return {};
+  ['hoofd', 'machinekamer'].forEach(function (kanaal) {
+    ((perKanaal && perKanaal[kanaal]) || []).forEach(function (x) {
+      if (!x || !x.vraag_hash || x.soort === 'telegram' || !APP_JOB_RE.test(String(x.job_id || ''))) return;
+      const prod = [x.agent_job, x.job_id, x.bron_job].map(String).filter(function (j) { return klus[j]; });
+      if (!prod.length) return;
+      const t = Date.parse(x.t), id = x.job_id + ':' + x.vraag_hash, r = vragen && vragen[id];
+      if (!isFinite(t) || !r || (r.soort && r.soort !== 'socev') || r.kanaal !== kanaal || appNaarTelegramNu(r, nu)) return;
+      if (!(nu - Date.parse(r.t || x.t) < APP_VRAAG_GELDIG_MS)) return;
+      const v = appVraagUit(x.antwoord);
+      if (!v || v.hash !== x.vraag_hash) return;
+      const vw = appVjAfleidWoorden(v.tekst), gehad = {};
+      prod.forEach(function (j) {
+        klus[j].forEach(function (p) {
+          if (gehad[p.id]) return;
+          gehad[p.id] = 1;
+          if (!(t >= Date.parse(p.aangemaakt || '') - APP_VJ_AFLEID_MARGE_MS)) return;
+          if (p.status !== 'open' && p.status !== 'later' && !(t < Date.parse(p.gesloten_op || ''))) return;
+          const kw = kaartW[p.id] || (kaartW[p.id] = appVjAfleidWoorden(String(p.titel || '') + ' ' + String(p.waarom || '')));
+          let n = 0;
+          vw.forEach(function (w) { if (kw.has(w)) n++; });
+          if (n < 2 || n * 3 < Math.min(kw.size, vw.size)) return;   // Fable diffreview #3: ook ≥ ⅓ van de kleinste woordenset
+          (kand[p.id] = kand[p.id] || []).push(id);
+          (perVraag[id] = perVraag[id] || []).push(p.id);
+        });
+      });
+    });
+  });
+  const uit = {};
+  Object.keys(kand).forEach(function (k) { if (kand[k].length === 1 && perVraag[kand[k][0]].length === 1) uit[k] = kand[k][0]; });
+  return uit;
+}
+// wv1018 (Fable diffreview #1): David antwoordde in het gesprek op een chatvraag. Een open besluitkaart die aan precies die vraag hangt
+// (herkomst.vraag of afgeleid) gaat op gedaan, zoals na een kaartdruk; anders valt de koppeling na 72 u weg en is de kaart weer drukbaar.
+// Op de achtergrond en nooit fataal: de beurt loopt al.
+function appVjSluitGekoppeld(sleutel, keuze) {
+  (async function () {
+    appStaat.vjCache = null;
+    const punten = await appVjPunten(), nu = Date.now(), af = await appVjAfgeleid(punten, nu, true);
+    const tijd = 'app ' + appVjDag(appYmd(nu)) + ' ' + appKlok(new Date(nu).toISOString());
+    for (const p of punten) {
+      if (p.soort !== 'besluit' || (p.status !== 'open' && p.status !== 'later') || appVjGekoppeld(p, af.map) !== sleutel) continue;
+      const r = await appSbRpc('mk_voor_jou_status', { p_sleutel: p.sleutel, p_van: p.status, p_naar: 'gedaan', p_door: 'david', p_later_tot: null,
+        p_bewijs: tijd + ': David drukte ' + (keuze === 'ja' ? 'Ja' : keuze === 'nee' ? 'Nee' : 'Anders') + ' in het gesprek op de gekoppelde vraag (vraag-id ' + String(sleutel).split(':')[1] + ')' });
+      appStaat.vjCache = null;
+      if (!r || r.ok !== true) logError('app-voor-jou', new Error('kaart ' + p.sleutel + ' niet dicht na antwoord in het gesprek: ' + (r && r.nu)));
+    }
+  })().catch(function (e) { appStaat.vjCache = null; logError('app-voor-jou', e); });
+}
+// Leest de invoer voor appVjAfleidUit (app-log via de Moet iets-cache, vragen.json, klussen). vers = de klussen niet uit de cache
+// (Fable MOET 3: een kaartdruk op een kaart van < 1 min moet de koppeling al zien). Een fout = geen afgeleide koppeling (gedrag als vóór
+// wv1018) + logregel; de per-kanaal-items en klussen gaan mee naar appMoetIets (één keer lezen).
+async function appVjAfgeleid(punten, nu, vers) {
+  const uit = { per: null, jobs: null, map: {} };
+  if (!(punten || []).some(function (p) { return p && p.soort === 'besluit' && !appVjHerkomstVraag(p); })) return uit;   // Fable diffreview #5
+  try {
+    const per = {};
+    for (const k of ['hoofd', 'machinekamer']) {
+      const r = await appGeschiedenisRuw(k, appMoetLog);
+      if (r.fout) throw r.fout;
+      per[k] = r.items;
+    }
+    uit.per = per;
+  } catch (e) { logError('app-voor-jou', e); return uit; }
+  if (vers) appStaat.vjVraagJobsCache = null;
+  try { uit.jobs = await appVjVraagJobs(); } catch (e) { logError('app-voor-jou', e); uit.jobs = null; }   // herkomst.beurt telt dan nog
+  try { uit.map = appVjAfleidUit(punten, uit.per, appVragen(), uit.jobs || {}, nu); } catch (e) { logError('app-voor-jou', e); uit.map = {}; }
+  return uit;
 }
 // Kanaal van de beurt: gekoppelde vraag -> zijn kanaal; registerkanaal; anders privé = hoofdkanaal, de rest = machinekamer
 function appVjKanaal(p, rv, gekRij) {
@@ -9280,8 +9391,8 @@ function appVjEigenVerouderd(p, rij) {
 // Bewijsregel van een kaartdruk (ook het herkenningsteken in de lijst)
 const APP_VJ_KNOP_BEWIJS_RE = /David drukte (Ja|Nee|Anders) op de kaart \(vraag-id ([a-f0-9]{8})\)/;
 // Stand van de knoppen onder een besluit: vraag-id, kan er gedrukt worden, al beantwoord (hier of elders), gevoelig.
-function appVjKnopStand(p, rv) {
-  const ks = appVjKaartSleutel(p), gek = appVjGekoppeld(p);
+function appVjKnopStand(p, rv, afgeleid) {
+  const ks = appVjKaartSleutel(p), gek = appVjGekoppeld(p, afgeleid);
   let v = {};
   let vragenOk = true;
   try { v = appVragen(); } catch (e) { vragenOk = false; }
@@ -9298,6 +9409,8 @@ function appVjKnopStand(p, rv) {
   if (gev === null) { try { if (typeof ideeen !== 'undefined' && ideeen && ideeen.isBundel && ideeen.isBundel(p.sleutel)) gev = 'versturen'; } catch (e) {} }
   // gekoppeld en bruikbaar: de druk loopt via die vraag (ook de knoppen onder het oorspronkelijke bericht tonen dan beantwoord)
   const gekBruik = !!(gekRij && !appNaarTelegramNu(gekRij) && Date.now() - Date.parse(gekRij.t || 0) <= APP_VRAAG_GELDIG_MS);
+  // wv1018 (Fable diffreview #2): appKnop eist een vingerafdruk zodra de chatvraag gevoelig is (rij zonder gevoelig: false); zeg het de app vooraf
+  if (gev === null && gekBruik && gekRij.gevoelig !== false) gev = gekRij.gevoelig_reden || 'versturen';
   let elders = null, waaromNiet = null;
   const knopBewijs = APP_VJ_KNOP_BEWIJS_RE.exec(String(p.bewijs || ''));
   if (!beantwoord && knopBewijs && p.status === 'gedaan') beantwoord = { keuze: knopBewijs[1].toLowerCase(), t: p.gesloten_op || null };
@@ -9366,7 +9479,7 @@ async function appVoorJouDetail(req, res, a, idTekst) {
     waarom: p.waarom ? appKort(appVjGewoon(p.waarom), 600) : null, stappen: stappen, herkomst: herkomst, vraag: vraag,
     meting: p.meting ? appKort(appVjGewoon(p.meting), 400) : null, laatst_gemeten: p.laatst_gemeten || null,
     bewijs: p.bewijs ? appKort(appVjGewoon(p.bewijs), 400) : null, gesloten_door: p.gesloten_door || null, gesloten_op: p.gesloten_op || null,
-    terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' ? appVjKnopVorm(appVjKnopStand(p, rv)) : undefined }));
+    terug_ms: appVjTerugMs(p.id, nu, a.id), knop: p.soort === 'besluit' ? appVjKnopVorm(appVjKnopStand(p, rv, (await appVjAfgeleid(punten, nu)).map)) : undefined }));   // wv1018
 }
 // POST /app/voor-jou/keuze {id, van, keuze: gedaan|later|vervallen|terug, tot?}. Onder het invoerslot (niet in APP_SLOT_VRIJ),
 // sessie glijdt, alleen de primaire kant, 60 per uur, auditregel zonder tekst. ↩️ alleen binnen een minuut na een keuze op deze pod.
@@ -9438,7 +9551,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'voor-jou ' + id + ' weg');
   if (p.soort !== 'besluit') return appWeiger(res, 400, 'alleen een besluit heeft Ja / Nee / Anders', 'voor-jou knop geen besluit');
   const rv = await appVjRegisterVraag(p);
-  const k = appVjKnopStand(p, rv);
+  const k = appVjKnopStand(p, rv, (await appVjAfgeleid(punten, Date.now(), true)).map);   // wv1018: klussen vers (Fable MOET 3)
   if (k.beantwoord) { res._app.reden = 'voor-jou knop al beantwoord #' + id; return appStuur(res, 409, { ok: false, fout: 'al beantwoord: ' + (k.beantwoord.keuze === 'ja' ? 'Ja' : k.beantwoord.keuze === 'nee' ? 'Nee' : 'Anders') + ' ' + appKlok(k.beantwoord.t), beantwoord: k.beantwoord }); }
   if (k.elders) { res._app.reden = 'voor-jou knop elders #' + id; return appStuur(res, 409, { ok: false, fout: 'al beantwoord' + (k.elders.t ? ' op ' + k.elders.t : ''), elders: k.elders }); }
   if (k.waaromNiet) { res._app.reden = 'voor-jou knop kan niet #' + id; return appStuur(res, 409, { ok: false, fout: k.waaromNiet }); }
@@ -12493,8 +12606,10 @@ async function berichtNieuw(res, d) {
     if (!appAgendaKnoppenBewaar()) { delete agk[id]; return berichtStuur(res, 500, { ok: false, fout: 'agendaknop niet op te slaan', terugval: true }); }
   }
   const agentJob = d.agent_job ? String(d.agent_job) : undefined;
+  let bronJob;   // wv1018: de /run die deze vraag schreef (ideeënmotor, droomronde …), voor de koppeling met de kaart die die run zette
+  if (vraag && !agentJob) { try { bronJob = berichtBronJob(vraag.tekst, nu) || undefined; } catch (e) { logError('bericht-bronjob', e); } }
   const goed = await appLogSchrijf(kanaal, { t: t, job_id: id, soort: 'socev', bron: bron, klasse: klasse, tekst: '', antwoord: tekst, ok: true,
-    vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, bestanden: [], meld: soort });   // wv804: meld = soort (fase 4 c)
+    vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, bron_job: bronJob, bestanden: [], meld: soort });   // wv804: meld = soort (fase 4 c)
   if (!goed) {
     if (vsl) { try { const v = appVragen(); delete v[vsl]; appVragenSchrijf(v); } catch (e) { logError('bericht-vragen', e); } }
     if (ag) { delete agk[id]; appAgendaKnoppenBewaar(); }   // wv315
@@ -12512,6 +12627,28 @@ async function berichtNieuw(res, d) {
     agenda: ag ? true : undefined, soort: soort, seintje: seintje });
   if (plan.direct && plan.gebundeld) setTimeout(function () { berichtBundelAf(kanaal); }, 0);   // Fable wv292 #3: met de wachtende mee
   else if (plan.direct) setTimeout(function () { berichtPushNu(kanaal, [id]).catch(function (e) { logError('bericht-push', e); }); }, 0);
+}
+
+// wv1018: n8n zet de vraag van een /run (ideeënmotor, droomronde) via POST /bericht met een nieuw id; welke run het was, staat er niet
+// bij. De pod zoekt hem op inhoud: een afgeronde job (geen agent, geen app-beurt, niet het hoofdkanaal of de Cijfer-Meester: daar
+// citeert Socev zelf), < 2 u, waarvan de uitvoer de vraagzin (>= 20 tekens) bevat, zonder opmaak en HTML. Alleen bij precies één
+// zo'n job (Fable wv1018: niet "de jongste"); anders niets. Geen n8n-wijziging nodig.
+const BERICHT_BRONJOB_MS = 2 * 60 * 60 * 1000;   // = DONE_TTL_MS: langer blijft een afgeronde job niet in jobs[]
+function berichtNorm(t) { return String(t || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/[*_`~]+/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
+function berichtBronJob(zin, nu, lijst) {
+  const z = berichtNorm(zin);
+  if (z.length < 20) return null;
+  const alle = lijst || jobs, raak = [];
+  Object.keys(alle).forEach(function (id) {
+    const j = alle[id];
+    if (!j || j.agent || j.app || j.status !== 'done' || (j.result && j.result.ok === false) || !APP_JOB_RE.test(id)) return;   // alleen geslaagd afgerond (Fable #6)
+    if (j.chat_id === APP_KANALEN.hoofd || j.chat_id === APP_KANALEN['cijfer-meester']) return;
+    if (!(nu - (j.done_at || 0) < BERICHT_BRONJOB_MS)) return;
+    let out = '';
+    try { out = appUitvoer(j); } catch (e) { out = ''; }
+    if (out && berichtNorm(out).indexOf(z) >= 0) raak.push(id);
+  });
+  return raak.length === 1 ? raak[0] : null;
 }
 
 // wv895: een bericht van de pod zelf (manager-ronde op afroep), via precies dezelfde weg als POST /bericht: een kleine stand-in voor res

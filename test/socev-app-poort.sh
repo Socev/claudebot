@@ -399,7 +399,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -1635,6 +1635,72 @@ async function bewijs(o) {
         toets('9d wv1004: zonder klussen (RPC kapot) alleen koppeling en wv-nummer, zoals voorheen', m3.some((s) => s.includes(J(30))) && !m3.some((s) => s.includes(J(35))), JSON.stringify(m3));
         const m4 = H.appMoetIetsUit({ machinekamer: mk2 }, vragen2, {}, k2.map((k) => (k.id === 56 ? Object.assign({}, k, { soort: 'doen' }) : k)), nu, jobs2).map((x) => x.punt);
         toets('9d wv1004: een open doe-kaart van dezelfde klus verbergt niets', m4.some((s) => s.includes(J(38))), JSON.stringify(m4));
+      }
+      // wv1018: afgeleide koppeling besluitkaart <-> chatvraag (klus + inhoud + 1-op-1; ontwerp mk-scripts/wv1018/ontwerp.md)
+      {
+        const A = (n) => 'b2b2b2b2b2b2b2' + String(n).padStart(2, '0'), B = (n) => 'd3d3d3d3d3d3d3' + String(n).padStart(2, '0');
+        const q3 = { 60: 'Zal ik de hele Socev-app in Socev-blauw zetten, en daarna socev.dev?', 61: 'Mag ik ondertussen de oude backups opruimen?',
+          62: 'Mag een idee dat 48 uur stilligt alleen omdat het weekbudget te krap is toch voor in de rij?', 63: 'Mag ik nieuwe afschrijvingen van de POT-rekening voortaan zelf in je POT-app zetten?',
+          64: 'Wil je nu al met een vragenlijst uitzoeken hoe de POT-afhandeling en pot.leusdocs.nl moeten werken?', 65: 'Mag ik de Tasker-melding voor de knie testen?',
+          66: 'Mag ik de Tasker-melding voor de knie nog eens testen?', 67: 'Mag ik de nachtelijke Supabase-backup tabellen één voor één laten maken?', 68: 'Mag ik de POT-afschrijvingen elke nacht ophalen?' };
+        const uurA = 3600000, t0 = nu - 5 * uurA, isoA = (ms) => new Date(t0 + ms).toISOString();
+        const mk3 = [
+          it(60, { agent_job: A(1), t: isoA(10 * 60000) }),            // 1 klus, 2 kaarten (614/615): de tekst kiest 70
+          it(61, { soort: 'bericht', t: isoA(20 * 60000) }),            // a: beurt-vraag zonder overlap met kaart 72 (andere vraag) -> niets
+          it(62, { agent_job: A(2), t: isoA(10 * 60000) }),            // 618: pas met waarom
+          it(63, { agent_job: A(3), t: isoA(10 * 60000) }),            // gewoon paar
+          it(64, { bron: 'ideeenmotor', bron_job: B(1), t: isoA(10 * 60000) }),   // b: ideeënmotor via bron_job
+          it(65, { agent_job: A(4), t: isoA(10 * 60000) }), it(66, { agent_job: A(4), t: isoA(12 * 60000) }),   // twee vragen, één kaart -> niets
+          it(67, { agent_job: A(5), t: isoA(-30 * 60000) }),           // vraag van vóór de kaart -> niets
+          it(68, { agent_job: A(6), t: isoA(4 * uurA) }),              // na het sluiten van de kaart -> niets
+        ].map((x, i) => { const n = 60 + i; return Object.assign(x, { antwoord: 'Rapport met wv1 en wv2.\n\nVRAAG AAN DAVID: ' + q3[n], vraag_hash: H.appVraagUit('VRAAG AAN DAVID: ' + q3[n]).hash }); });
+        mk3[1].job_id = B(2);   // a: de beurt zelf (job_id = herkomst.beurt van kaart 72)
+        const vragen3 = Object.fromEntries(mk3.map((x) => [x.job_id + ':' + x.vraag_hash, { kanaal: 'machinekamer', t: x.t, antwoord: null, gevoelig: true, soort: x.soort === 'bericht' ? undefined : 'socev' }]));
+        const ka = (id, o) => Object.assign({ id: id, status: 'open', soort: 'besluit', aangemaakt: new Date(t0).toISOString(), herkomst: { wv: [900 + id] } }, o);
+        const k3 = [ka(70, { titel: 'Socev-app — helemaal in Socev-blauw zetten?' }), ka(71, { titel: 'Overzicht — bovenaan Voor jou zetten in plaats van onder Meer?' }),
+          ka(72, { titel: 'Tasker — mag ik de knie-melding proberen?', herkomst: { wv: [972], beurt: B(2) } }),
+          ka(73, { titel: 'Ideeënmotor — mag een stilstaand idee voor in de rij?', waarom: 'Een idee ligt 48 uur stil omdat het weekbudget op is.' }),
+          ka(74, { titel: 'POT — afschrijvingen voortaan zelf in de POT-app zetten?', status: 'gedaan', gesloten_op: isoA(uurA) }),
+          ka(75, { titel: 'POT-automatisering en pot.leusdocs.nl — nu samen uitzoeken of na je herstel?', herkomst: { wv: [975], beurt: B(1) } }),
+          ka(76, { titel: 'Knie — de Tasker-melding testen?' }), ka(77, { titel: 'Nachtelijke Supabase-backup — tabellen één voor één?' }),
+          ka(78, { titel: 'POT — afschrijvingen elke nacht ophalen?', status: 'gedaan', gesloten_op: isoA(uurA) }),
+          ka(79, { titel: 'Gekoppeld — expliciet?', herkomst: { wv: [979], vraag: A(9) + ':abcdef12' } })];
+        const jobs3 = { 70: [A(1)], 71: [A(1)], 73: [A(2)], 74: [A(3)], 76: [A(4)], 77: [A(5)], 78: [A(6)], 79: [A(7)] };
+        const af = H.appVjAfleidUit(k3, { machinekamer: mk3 }, vragen3, jobs3, nu), id = (x) => x.job_id + ':' + x.vraag_hash;
+        toets('9d wv1018: één klus, twee kaarten, één vraag -> de tekst kiest de juiste kaart (614/615)', af[70] === id(mk3[0]) && af[71] === undefined, JSON.stringify(af));
+        toets('9d wv1018 Fable MOET 1: zelfde beurt, andere vraag (geen twee gedeelde woorden) -> geen koppeling', af[72] === undefined, JSON.stringify(af));
+        toets('9d wv1018: titel + waarom samen (paar 618)', af[73] === id(mk3[2]), JSON.stringify(af));
+        toets('9d wv1018: dichte kaart koppelt aan een vraag van vóór het sluiten (beide richtingen)', af[74] === id(mk3[3]), JSON.stringify(af));
+        toets('9d wv1018: ideeënmotor (b): herkomst.beurt = bron_job van het /bericht', af[75] === id(mk3[4]), JSON.stringify(af));
+        toets('9d wv1018: twee kandidaat-vragen voor één kaart -> geen koppeling', af[76] === undefined, JSON.stringify(af));
+        toets('9d wv1018: vraag van vóór het aanmaken / ná het sluiten -> geen koppeling; herkomst.vraag gaat voor', af[77] === undefined && af[78] === undefined && af[79] === undefined, JSON.stringify(af));
+        const mk3a = mk3.slice(); mk3a[1] = Object.assign({}, mk3[1], { antwoord: 'Gedaan.\n\nVRAAG AAN DAVID: Mag ik de knie-melding in Tasker nu proberen?', vraag_hash: H.appVraagUit('VRAAG AAN DAVID: Mag ik de knie-melding in Tasker nu proberen?').hash });
+        const vragen3a = Object.assign({}, vragen3, { [id(mk3a[1])]: { kanaal: 'machinekamer', t: mk3a[1].t, antwoord: null, gevoelig: true } });
+        toets('9d wv1018: machinekamerbeurt (a): kaart met herkomst.beurt = job_id van het antwoord, zelfde vraag -> koppeling', H.appVjAfleidUit(k3, { machinekamer: mk3a }, vragen3a, jobs3, nu)[72] === id(mk3a[1]));
+        const tg = mk3.map((x) => Object.assign({}, x, { soort: 'telegram' }));
+        const vrTg = Object.fromEntries(Object.entries(vragen3).map(([k, v]) => [k, Object.assign({}, v, { naar_telegram: new Date(nu).toISOString() })]));
+        const vrVj = Object.fromEntries(Object.entries(vragen3).map(([k, v]) => [k, Object.assign({}, v, { soort: 'voorjou' })]));
+        toets('9d wv1018: Telegram-beurt, naar Telegram, kaartvraag (soort voorjou) of ouder dan 72 u -> geen koppeling',
+          !Object.keys(H.appVjAfleidUit(k3, { machinekamer: tg }, vragen3, jobs3, nu)).length && !Object.keys(H.appVjAfleidUit(k3, { machinekamer: mk3 }, vrTg, jobs3, nu)).length
+          && !Object.keys(H.appVjAfleidUit(k3, { machinekamer: mk3 }, vrVj, jobs3, nu)).length && !Object.keys(H.appVjAfleidUit(k3, { machinekamer: mk3 }, vragen3, jobs3, nu + 80 * uurA)).length);
+        toets('9d wv1018: zonder klussen (RPC kapot) alleen herkomst.beurt', JSON.stringify(Object.keys(H.appVjAfleidUit(k3, { machinekamer: mk3 }, vragen3, {}, nu))) === '["75"]');
+        toets('9d wv1018: doe-kaart koppelt nooit', H.appVjAfleidUit(k3.map((k) => Object.assign({}, k, { soort: 'doen' })), { machinekamer: mk3 }, vragen3, jobs3, nu)[70] === undefined);
+        toets('9d wv1018: appVjGekoppeld = herkomst.vraag, anders de afgeleide', H.appVjGekoppeld(k3[9], af) === A(9) + ':abcdef12' && H.appVjGekoppeld(k3[0], af) === id(mk3[0]) && H.appVjGekoppeld(k3[0]) === null);
+        const m5 = H.appMoetIetsUit({ machinekamer: mk3 }, vragen3, {}, k3, nu, {}, af).map((x) => x.punt);
+        toets('9d wv1018: Moet iets verbergt een afgeleid gekoppelde vraag (ook zonder klussen), de rest blijft', !m5.includes('v:' + id(mk3[0])) && !m5.includes('v:' + id(mk3[4])) && m5.includes('v:' + id(mk3[1])), JSON.stringify(m5));
+        const W = H.appVjAfleidWoorden('Mag ik de POT-app voortaan zelf bouwen? 48 uur');
+        toets('9d wv1018: inhoudswoorden (>= 3 letters) zonder stopwoorden, getallen tellen', W.has('pot') && W.has('app') && !W.has('mag') && W.has('48') && !W.has('voortaan') && !W.has('bouwen') && !W.has('zelf'), JSON.stringify([...W]));
+        // b: welke /run schreef de vraag (berichtBronJob)
+        const nuB = Date.now(), zin = 'Wil je nu al met een vragenlijst uitzoeken hoe de POT-afhandeling werkt?';
+        const jl = { e4e4e4e4e4e4e401: { status: 'done', chat_id: 'ideeenmotor', done_at: nuB - 60000, result: { output: '**VRAAG AAN DAVID: Wil je nu al met een <b>vragenlijst</b> uitzoeken hoe de POT-afhandeling werkt?**\nWaarom: …' } },
+          e4e4e4e4e4e4e402: { status: 'done', chat_id: 'telegram-debug', done_at: nuB - 60000, result: { output: 'Iets anders' } } };
+        toets('9d wv1018: berichtBronJob vindt de ene run waarvan de uitvoer de vraagzin bevat (opmaak en HTML weg)', H.berichtBronJob(zin, nuB, jl) === 'e4e4e4e4e4e4e401');
+        const jl2 = Object.assign({}, jl, { e4e4e4e4e4e4e403: { status: 'done', chat_id: 'telegram-debug', done_at: nuB - 1000, result: { output: 'Citaat: ' + zin } } });
+        const jl3 = { e4e4e4e4e4e4e404: Object.assign({}, jl.e4e4e4e4e4e4e401, { chat_id: '40687' }), e4e4e4e4e4e4e405: Object.assign({}, jl.e4e4e4e4e4e4e401, { agent: true }),
+          e4e4e4e4e4e4e406: Object.assign({}, jl.e4e4e4e4e4e4e401, { app: { kanaal: 'machinekamer' } }), e4e4e4e4e4e4e407: Object.assign({}, jl.e4e4e4e4e4e4e401, { done_at: nuB - 3 * 3600000 }),
+          e4e4e4e4e4e4e408: Object.assign({}, jl.e4e4e4e4e4e4e401, { status: 'running' }) };
+        toets('9d wv1018: berichtBronJob: twee passende runs -> niets (Fable: niet de jongste); hoofdkanaal, agent, app-beurt, > 2 u, lopend -> niets; zin < 20 tekens -> niets',
+          H.berichtBronJob(zin, nuB, jl2) === null && H.berichtBronJob(zin, nuB, jl3) === null && H.berichtBronJob('Mag het?', nuB, { e4e4e4e4e4e4e409: { status: 'done', chat_id: 'x', done_at: nuB, result: { output: 'Mag het?' } } }) === null);
       }
     }
 
@@ -6351,6 +6417,68 @@ async function bewijs(o) {
       await slaap(40);
       toets('27b heropende kaart: nieuwe druk -> 200 en één nieuwe beurt', r.status === 200 && gestart.length === nH + 1 && /David drukte NEE/.test(gestart[gestart.length - 1].prompt), r.status + JSON.stringify(r.j));
       afmaken[gestart[gestart.length - 1].jobId]('ok'); await slaap(40);
+      // wv1018: afgeleide koppeling in de routes. Kaart 48 (klus f1…01) en de chatvraag uit het agentrapport van die klus: een druk op de
+      // kaart beantwoordt de chatvraag (knoppen in het gesprek dicht, tweede druk 409); kaart 49: eerst in het gesprek, dan is de kaart beantwoord.
+      {
+        const nu18 = Date.now(), AJ = (n) => 'f1f1f1f1f1f1f1' + String(n).padStart(2, '0'), CJ = (n) => 'e1e1e1e1e1e1e1' + String(n).padStart(2, '0');
+        const v48 = 'Mag ik de nachtelijke backup per tabel laten lopen?', v49 = 'Mag de wachtrij de knie-proef morgenochtend inplannen?';
+        const regel = (n, v) => ({ t: new Date(nu18 - 60000).toISOString(), job_id: CJ(n), soort: 'socev', bron: 'agentrapport', klasse: 'normaal', agent_job: AJ(n), tekst: '', ok: true,
+          antwoord: 'Rapport van de klus.\n\nVRAAG AAN DAVID: ' + v, vraag_hash: H.appVraagUit('VRAAG AAN DAVID: ' + v).hash, bestanden: [] });
+        const l48 = regel(48, v48), l49 = regel(49, v49);
+        fs.appendFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), JSON.stringify(l48) + '\n' + JSON.stringify(l49) + '\n');
+        const vrX = vrLees();
+        vrX[CJ(48) + ':' + l48.vraag_hash] = { kanaal: 'machinekamer', t: l48.t, antwoord: null, gevoelig: false, soort: 'socev' };
+        vrX[CJ(49) + ':' + l49.vraag_hash] = { kanaal: 'machinekamer', t: l49.t, antwoord: null, gevoelig: false, soort: 'socev' };
+        fs.writeFileSync(vrPad, JSON.stringify(vrX));
+        sbStaat.wvItems = (sbStaat.wvItems || []).concat([{ id: 1848, ouder_job: AJ(48), status: 'geblokkeerd' }, { id: 1849, ouder_job: AJ(49), status: 'geblokkeerd' }, { id: 1850, ouder_job: AJ(48), status: 'geblokkeerd' }]);
+        const vers18 = new Date(nu18 - 5 * 60000).toISOString();
+        sbStaat.vj.push(pk(48, 'kaart-afgeleid', { titel: 'Backup — per tabel laten lopen?', aangemaakt: vers18, herkomst: { wv: [1848], auto: 'wv' } }),
+          pk(49, 'kaart-afgeleid-chat', { titel: 'Knie-proef — morgenochtend inplannen in de wachtrij?', aangemaakt: vers18, herkomst: { wv: [1849], auto: 'wv' } }),
+          pk(50, 'kaart-zelfde-klus-ander', { titel: 'Werkkamer — oude tegels opruimen?', aangemaakt: vers18, herkomst: { wv: [1850], auto: 'wv' } }));
+        H.appStaat.vjCache = null; H.appStaat.vjVraagJobsCache = null;
+        let d48 = await D(48), d50 = await D(50);
+        toets('27b wv1018: kaart koppelt afgeleid aan de chatvraag van zijn klus (vraag-id = hash van de chatvraag); andere kaart van dezelfde klus niet',
+          d48.status === 200 && d48.j.knop.kan === true && d48.j.knop.vraag_id === l48.vraag_hash && d50.j.knop.vraag_id !== l48.vraag_hash, JSON.stringify([d48.j.knop, d50.j.knop]));
+        geenVers();
+        const n48 = gestart.length;
+        r = await KN({ id: 48, keuze: 'ja', tekst_id: d48.j.knop.tekst_id });
+        await slaap(40);
+        const na48 = vrLees()[CJ(48) + ':' + l48.vraag_hash];
+        toets('27b wv1018 (c): Ja op de kaart -> één beurt, de chatvraag in vragen.json beantwoord (Ja)', r.status === 200 && gestart.length === n48 + 1 && na48.antwoord && na48.antwoord.keuze === 'ja', r.status + JSON.stringify([r.j, na48]));
+        if (gestart.length > n48) { afmaken[gestart[gestart.length - 1].jobId]('ok'); await slaap(40); }
+        r = await vraag('POST', '/app/knop', { job_id: CJ(48), vraag_hash: l48.vraag_hash, keuze: 'nee' }, { pot: P.jar });
+        const hist = await vraag('GET', '/app/geschiedenis/machinekamer', undefined, { pot: P.jar });
+        const hx = hist.j && (hist.j.items || hist.j.berichten || []).find((x) => x.job_id === CJ(48));
+        toets('27b wv1018 (c): daarna in het gesprek op dezelfde vraag -> 409 al beantwoord, geschiedenis toont beantwoord', r.status === 409 && /al beantwoord: Ja/.test(r.j.fout) && (!hx || (hx.vraag && hx.vraag.beantwoord && hx.vraag.beantwoord.keuze === 'ja')),
+          r.status + JSON.stringify(r.j) + JSON.stringify(hx && hx.vraag));
+        const n49 = gestart.length;
+        r = await vraag('POST', '/app/knop', { job_id: CJ(49), vraag_hash: l49.vraag_hash, keuze: 'nee' }, { pot: P.jar });
+        await slaap(40);
+        if (gestart.length > n49) { afmaken[gestart[gestart.length - 1].jobId]('ok'); await slaap(40); }
+        H.appStaat.vjCache = null;
+        const d49 = await D(49);
+        r = await KN({ id: 49, keuze: 'ja', tekst_id: d49.j.knop.tekst_id });
+        const lijst49 = await vraag('GET', '/app/voor-jou/kanaal', undefined, { pot: P.jar });
+        const p49 = lijst49.j && (lijst49.j.punten || []).find((x) => x.id === 49);
+        const k49 = sbStaat.vj.find((x) => x.id === 49);
+        toets('27b wv1018 Fable diffreview #1: antwoord in het gesprek zet de gekoppelde kaart op gedaan (door david, bewijs "in het gesprek")', k49.status === 'gedaan' && k49.gesloten_door === 'david' && /in het gesprek op de gekoppelde vraag \(vraag-id [a-f0-9]{8}\)/.test(k49.bewijs || ''), JSON.stringify(k49));
+        toets('27b wv1018: eerst Nee in het gesprek -> kaart toont beantwoord (Nee), kaartdruk 409, geen tweede beurt', d49.j.knop.beantwoord && d49.j.knop.beantwoord.keuze === 'nee' && d49.j.knop.kan === false
+          && r.status === 409 && gestart.length === n49 + 1 && (!p49 || (p49.beantwoord && p49.beantwoord.keuze === 'nee')), JSON.stringify([d49.j.knop, r.status, r.j, p49 && p49.beantwoord]));
+        // Fable diffreview #2: gevoelige chatvraag, niet-gevoelige kaarttekst -> de kaartknop zegt vooraf "gevoelig" (vingerafdruk)
+        const v51 = 'Mag ik de logboekregels van de wachtrij inkorten?', l51 = Object.assign(regel(51, v51), { t: new Date(nu18 - 30000).toISOString() });
+        fs.appendFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), JSON.stringify(l51) + '\n');
+        const vrY = vrLees(); vrY[CJ(51) + ':' + l51.vraag_hash] = { kanaal: 'machinekamer', t: l51.t, antwoord: null, gevoelig: true, gevoelig_reden: 'verwijderen', soort: 'socev' }; fs.writeFileSync(vrPad, JSON.stringify(vrY));
+        sbStaat.wvItems.push({ id: 1851, ouder_job: AJ(51), status: 'geblokkeerd' });
+        sbStaat.vj.push(pk(51, 'kaart-afgeleid-gevoelig', { titel: 'Wachtrij — logboekregels korter maken?', aangemaakt: vers18, herkomst: { wv: [1851], auto: 'wv' } }));
+        H.appStaat.vjCache = null; H.appStaat.vjVraagJobsCache = null;
+        const d51 = await D(51);
+        toets('27b wv1018 Fable diffreview #2: gekoppelde gevoelige chatvraag -> kaartknop gevoelig', d51.j.knop.vraag_id === l51.vraag_hash && d51.j.knop.gevoelig === true, JSON.stringify(d51.j.knop));
+        sbStaat.vjJobsKapot = true; H.appStaat.vjVraagJobsCache = null; H.appStaat.vjCache = null;
+        const d48k = await D(50);
+        sbStaat.vjJobsKapot = false; H.appStaat.vjVraagJobsCache = null;
+        toets('27b wv1018: klussen-RPC kapot -> kaart zonder afgeleide koppeling, 200 (gedrag als voorheen)', d48k.status === 200 && d48k.j.knop && d48k.j.knop.vraag_id !== l48.vraag_hash, d48k.status);
+        sbStaat.vj = sbStaat.vj.filter((x) => [48, 49, 50, 51].indexOf(x.id) < 0); sbStaat.wvItems = sbStaat.wvItems.filter((x) => [1848, 1849, 1850, 1851].indexOf(x.id) < 0); H.appStaat.vjCache = null;
+      }
       // privé-kaart op een vaste plek, reservekant, invoerslot
       const nepRes = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
       sbStaat.vj.push(pk(31, 'kaart-prive-vast', { prive: true, herkomst: { register: ['2026-10-11 16:00'] } })); H.appStaat.vjCache = null;
