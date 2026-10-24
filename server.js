@@ -5983,6 +5983,7 @@ function appInvoerRoute(route, upload, d, a) {
   if (route.indexOf('POST ') !== 0 || APP_SLOT_VRIJ.has(route)) return false;
   if (route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id) return false;
   if (route === 'POST /app/concept' && !String(d.tekst == null ? '' : d.tekst).trim()) return false;   // wv159: concept wissen mag altijd
+  if (route === 'POST /app/vast' && d.actie === 'los') return false;   // wv1051 (Fable diff #3): losmaken in het menu is geen invoer; vastzetten weigert de route op een vaste plek zelf
   if (/^POST \/app\/studio\/stop\/[a-f0-9]{16}$/.test(route)) return false;   // wv707 (Fable #8): stoppen is geen invoer
   return true;
 }
@@ -13903,7 +13904,11 @@ function appVastRoute(req, res, a, d) {
   if (!L) return appWeiger(res, 404, 'onbekend', 'vast ontbreekt');
   const vp = !!(a && a.soort === 'vast');
   let j = null;
-  try { j = appLeesStreng(APP_VAST, null); } catch (e) { logError('vast.json', e); }
+  try { j = appLeesStreng(APP_VAST, null); }
+  catch (e) {   // Fable diff #5: kapot = apart zetten (één keer loggen, met de hand te herstellen), dan de standaard
+    logError('vast.json', e);
+    try { fs.renameSync(APP_VAST, APP_VAST + '.kapot-' + Date.now()); } catch (e2) {}
+  }
   const nu = L.uitBestand(j);
   const antwoord = function (lijst, standaard) {
     appStuur(res, 200, { ok: true, vast: L.voorApparaat(lijst, vp, APP_PRIVE_MODULES), standaard: standaard, vaste_plek: vp, per_plek: 5 });

@@ -57,14 +57,15 @@ function pas(lijst, d, vastePlek) {
     return { ok: true, lijst: nieuw, veranderd: true };
   }
   if (vastePlek) return { ok: false, status: 403, fout: 'Vastzetten doe je op je telefoon of een meereizend apparaat; hier zie je maar een deel van de lijst.', reden: 'vast zet vanaf vaste plek' };
-  if (i >= 0) return { ok: true, lijst: nieuw, veranderd: false };
-  if (d.vervang !== undefined) {
+  if (d.vervang !== undefined) {   // vóór "al zo" (Fable diff #2): na een race tussen twee apparaten kan r al (onzichtbaar) vast staan
     const v = regel(d.vervang);
     const j = v ? nieuw.findIndex(function (y) { return zelfde(y, v); }) : -1;
     if (j < 0) return { ok: false, status: 409, fout: 'die regel staat niet (meer) vast; probeer het opnieuw', reden: 'vast vervang weg' };
+    if (i >= 0) { nieuw.splice(j, 1); return { ok: true, lijst: nieuw, veranderd: true }; }
     nieuw.splice(j, 1, r);   // op de plek van de oude: de volgorde in het menu blijft
     return { ok: true, lijst: nieuw, veranderd: true };
   }
+  if (i >= 0) return { ok: true, lijst: nieuw, veranderd: false };
   if (nieuw.length >= MAX) return { ok: false, status: 409, fout: 'er staat al te veel vast', reden: 'vast vol' };
   nieuw.push(r);
   return { ok: true, lijst: nieuw, veranderd: true };

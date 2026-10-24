@@ -32,6 +32,8 @@ r = L.pas([{ scherm: 'a1' }, { scherm: 'a2' }, { scherm: 'a3' }], { actie: 'zet'
 toets('4 vervang: op de plek van de oude (zesde vraagt welke eraf)', r.ok && r.lijst.map((x) => x.scherm).join() === 'a1,nieuw,a3', r);
 r = L.pas([{ scherm: 'a1' }], { actie: 'zet', scherm: 'nieuw', vervang: { scherm: 'weg' } }, false);
 toets('4b vervang van iets wat niet vast staat → 409', !r.ok && r.status === 409, r);
+r = L.pas([{ scherm: 'a1' }, { scherm: 'a2' }, { scherm: 'nieuw' }], { actie: 'zet', scherm: 'nieuw', vervang: { scherm: 'a1' } }, false);
+toets('4c race: staat al (onzichtbaar) vast + vervang → de gekozen gaat eraf', r.ok && r.veranderd && r.lijst.map((x) => x.scherm).join() === 'a2,nieuw', r);
 r = L.pas([{ scherm: 'a1' }, { scherm: 'a2' }], { actie: 'los', scherm: 'a1' }, false);
 toets('5 los haalt weg', r.ok && r.veranderd && r.lijst.map((x) => x.scherm).join() === 'a2');
 r = L.pas([{ scherm: 'a1' }], { actie: 'los', scherm: 'a9' }, false);
@@ -63,7 +65,7 @@ function lees(f, leeg) { let t; try { t = fs.readFileSync(f, 'utf8'); } catch (e
 function schrijf(f, d) { schrijfTel++; fs.writeFileSync(f, JSON.stringify(d)); }
 let schrijfTel = 0, antw = [], flog = [];
 function maakCtx(metModule) {
-  const ctx = { require: (p) => (metModule ? require(p) : null), path: path, fs: { existsSync: () => metModule }, __dirname: process.cwd(), APP_VAST: VAST,
+  const ctx = { require: (p) => (metModule ? require(p) : null), path: path, fs: { existsSync: () => metModule, renameSync: fs.renameSync }, __dirname: process.cwd(), APP_VAST: VAST,
     logError: (w) => flog.push(w), console: console, appLeesStreng: lees, appSchrijfJson: schrijf, Date: Date, String: String, JSON: JSON,
     appStuur: (res, st, o) => antw.push({ st, o }), appWeiger: (res, st, f, reden) => { res._app.reden = reden; antw.push({ st, o: { ok: false, fout: f } }); } };
   vm.createContext(ctx);
@@ -101,7 +103,7 @@ toets('18 ongeldig → 400', antw[0].st === 400);
 fs.writeFileSync(VAST, '{kapot');
 antw = []; flog = [];
 C.appVastRoute({ method: 'GET' }, res(), A, {});
-toets('19 kapot bestand → standaard + foutlog', antw[0].st === 200 && antw[0].o.standaard === true && flog.indexOf('vast.json') >= 0, { antw, flog });
+toets('19 kapot bestand → standaard + foutlog + apart gezet (niet stil overschreven)', antw[0].st === 200 && antw[0].o.standaard === true && flog.indexOf('vast.json') >= 0 && !fs.existsSync(VAST) && fs.readdirSync(W).some((n) => /^vast\.json\.kapot-\d+$/.test(n)), { antw, flog, d: fs.readdirSync(W) });
 const C2 = maakCtx(false);
 antw = [];
 C2.appVastRoute({ method: 'GET' }, res(), A, {});
@@ -113,6 +115,7 @@ toets('22 route GET en POST /app/vast in de routetabel', /route === 'GET \/app\/
 toets('23 de drie vaste-plekweigeringen gebruiken de ene privélijst', /if \(appPriveDicht\(a, 'financien'\)\) return appStuur/.test(src) && /if \(appPriveDicht\(a, 'gezondheid'\)\) return appStuur/.test(src) && /if \(appPriveDicht\(a, 'pot-afschriften'\)\) return appStuur/.test(src));
 toets('23b geen losse a.soort === \'vast\'-weigering meer in die drie', !/if \(a\.soort === 'vast'\) return appStuur\(res, 200, \{ ok: true, vaste_plek: true, melding: '(Financiën|Gezondheid|POT-afschriften) staat/.test(src));
 toets('24 uitrol.sh: app-vast.js optioneel in de release', /^RELEASE_OPTIONEEL="[^"]*\bapp-vast\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
+toets('26 losmaken valt niet onder het invoerslot, vastzetten wel', /if \(route === 'POST \/app\/vast' && d\.actie === 'los'\) return false;/.test(src));
 toets('25 Dockerfile: app-vast.js in release-bootstrap', /COPY app-vast\.js \/app\/release-bootstrap\/app-vast\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
 fs.rmSync(W, { recursive: true, force: true });
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');
