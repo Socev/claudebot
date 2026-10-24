@@ -231,9 +231,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           # wv1044: elke toets draait, ook na een rode; de stap faalt aan het eind als er één rood was (namen in de annotaties).
-          rood=0; t() { bash "$@" || { echo "::error::$* rood"; rood=1; }; }
+          rood=0; t() { bash "$@" || { echo "::error::${TOETS_NU:+TOETS_NU=$TOETS_NU }$* rood"; rood=1; }; }
           t test/bunq-lezer.sh
           TOETS_NU=2026-12-15T23:30:00Z t test/bunq-lezer.sh   # wv1044: ook om 00:30 Nederlandse tijd, als de UTC-datum nog op gisteren staat (runs 241/242 rood)
+          TOETS_NU=2027-04-10T22:30:00Z t test/bunq-lezer.sh   # wv1044: en na de zomertijdwissel (400 × 24 uur terug is dan geen 400 kalenderdagen)
           t test/bunq-poort.sh
           t test/bank-lezer.sh
           t test/bankluis-poort.sh
@@ -243,6 +244,7 @@ jobs:
           t test/paypal-laag.sh
           t test/bank-pot.sh   # wv786: POT-rekening afgescheiden van privé, indeling zonder taalmodel
           t test/financien-app.sh   # wv771: App Financiën — veld-allowlist, signalen, opzeglinks met host-allowlist
+          TOETS_NU=2026-11-03T10:00:00Z t test/financien-app.sh   # wv1044: ook op dag 1–9 van een maand (een toetspost in de toekomst schoof de peildag op)
           t test/geld-briefing.sh   # wv777: Geld deze maand — signalen, dedupe, briefingdag, ronde (klok, poort, rij teruglezen, kaarten)
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
           t test/pot-verzend.sh   # wv911: POT-nota's als Gmail-concept — frontmatter, adres, PDF-controle, claim, onzeker-herstel, voorcontrole, kaarten
@@ -258,14 +260,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           # wv1044: elke toets draait, ook na een rode; de stap faalt aan het eind als er één rood was (namen in de annotaties).
-          rood=0; t() { bash "$@" || { echo "::error::$* rood"; rood=1; }; }
+          rood=0; t() { bash "$@" || { echo "::error::${TOETS_NU:+TOETS_NU=$TOETS_NU }$* rood"; rood=1; }; }
           pip install --quiet --user --break-system-packages mt-940==5.1.1 2>/dev/null || pip install --quiet mt-940==5.1.1 || echo "mt-940 niet te installeren: de onafhankelijke MT940-lezer wordt overgeslagen"
           t test/facturen-kern.sh   # wv797: kern — besliskader, UBL, validators, IBAN-poort, patiëntkenmerk, overgangen, vingerafdruk
           t test/facturen-bank.sh   # wv798: bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
           t test/facturen-db.sh   # wv824: opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
           t test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
           t test/facturen-validatie.sh   # wv944: bankhistorie (startdatum, droogloop, bron, personeel, FV2-archief) en validatie (profielen, betaling, controles, zoeken)
-          command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils)   # de koerier roept /usr/bin/pdftotext echt aan
+          command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils) || echo "::warning::pdftotext niet te installeren"   # de koerier roept /usr/bin/pdftotext echt aan
           t test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads
           t test/facturen-ingang.sh   # wv856: smalle ingang /fac — poortgeheim, servicetoken- en gebruikers-JWT, nooit eigenaar, praktijkmanager-scope, uploads, audit
           exit $rood

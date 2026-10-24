@@ -9,7 +9,7 @@
 # Raakt de pod, de kluis, de bank, de vault en /opt/data/bank niet. Gebruik: bash test/financien-app.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
-node --no-warnings - <<'JS'
+node --no-warnings --require ./test/vaste-klok.cjs - <<'JS'   # wv1044: TOETS_NU=<ISO> draait de toets (en bank-lezer.js) op een vast moment
 const fs = require('fs'), path = require('path'), os = require('os');
 const { spawnSync } = require('child_process');
 let fouten = 0, goed = 0;
@@ -176,7 +176,7 @@ toets('bewust: PayPal-dubbel gedempt; rij zonder woord van David dempt niets (Kr
 // ── via bank-lezer.js (zoals de pod het aanroept): lokaal, zonder kluis ──
 {
   a.db.close();
-  const r = spawnSync(process.execPath, ['--no-warnings', 'bank-lezer.js', 'app-financien'], { input: '{}', env: { PATH: process.env.PATH, BANK_DIR: BD, VAULT_DIR: VAULT, TZ: 'Europe/Amsterdam' }, encoding: 'utf8', timeout: 60000 });
+  const r = spawnSync(process.execPath, ['--no-warnings', '--require', './test/vaste-klok.cjs', 'bank-lezer.js', 'app-financien'], { input: '{}', env: { PATH: process.env.PATH, BANK_DIR: BD, VAULT_DIR: VAULT, TZ: 'Europe/Amsterdam', TOETS_KLOK_DELTA: process.env.TOETS_KLOK_DELTA || '' }, encoding: 'utf8', timeout: 60000 });
   let j = null; try { j = JSON.parse(String(r.stdout).trim().split('\n').pop()); } catch (e) {}
   toets('bank-lezer app-financien: ok, zonder kluissleutels, zelfde vorm', r.status === 0 && j && j.ok === true && j.vaste_lasten && Array.isArray(j.signalen) && j.paypal && j.paypal.actief === 0, [r.status, String(r.stderr).slice(0, 300), j && Object.keys(j)]);
   const srv = fs.readFileSync('server.js', 'utf8');

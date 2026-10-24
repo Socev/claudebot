@@ -9,6 +9,8 @@ const Echt = Date;
 let delta = Number(process.env.TOETS_KLOK_DELTA);
 if (!process.env.TOETS_KLOK_DELTA || !Number.isFinite(delta)) {
   const doel = Echt.parse(process.env.TOETS_NU || '');
+  // een onleesbare TOETS_NU mag niet stil op de echte tijd draaien (dan is een groene vaste-klokrun niets waard)
+  if (process.env.TOETS_NU && isNaN(doel)) throw new Error('vaste-klok: TOETS_NU onleesbaar: ' + process.env.TOETS_NU);
   delta = isNaN(doel) ? null : doel - Echt.now();
   if (delta !== null) process.env.TOETS_KLOK_DELTA = String(delta);
 }
