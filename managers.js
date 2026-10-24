@@ -42,6 +42,11 @@ const MANAGERS = [
     bewaakt: 'De beveiliging: sleutels, toegang, versies en wat er van buitenaf bereikbaar is.',
     rooster: { dag: 1, uur: 6, min: 0 }, slot: 'CISO', slotRe: /^CISO \d{4}-\d{2}-\d{2}: \d+ checks/,
     slotFormaat: 'CISO <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open (<k> nieuw), bundel <id of geen>' },
+  // wv979 Bibliothecaris (OVIS): geen sessie maar een script (ovis-run.js bibliothecaris, geen taalmodel), elke nacht 02:30 via de
+  // pod-tijdklok in server.js. Op afroep: geen quotumtoets (geen model), wel dezelfde grenzen; geen hartslagstempel en geen box-rij.
+  { id: 'bibliothecaris', naam: 'Bibliothecaris', soort: 'script', model: 'geen', hartslag: 'bibliothecaris', patroon: '^BB[0-9]',
+    bewaakt: 'Of je Second Brain en de databank hetzelfde zeggen over elke entiteit (stamgegevens, herkenningskenmerken, contactgegevens).',
+    rooster: { dagelijks: true, uur: 2, min: 30 }, voorMs: 30 * 60000 },
 ];
 const PER_ID = {};
 MANAGERS.forEach(function (m) { PER_ID[m.id] = m; });
@@ -72,7 +77,7 @@ function volgendeWeekronde(m, t) {
   const x = amsDelen(t);
   for (let i = 0; i <= 7; i++) {
     const dag = new Date(Date.UTC(x.j, x.m - 1, x.d + i));
-    if (dag.getUTCDay() !== m.rooster.dag) continue;
+    if (!m.rooster.dagelijks && dag.getUTCDay() !== m.rooster.dag) continue;
     const ms = amsNaarMs(dag.getUTCFullYear(), dag.getUTCMonth() + 1, dag.getUTCDate(), m.rooster.uur, m.rooster.min);
     if (ms >= t) return ms;
   }
@@ -81,7 +86,7 @@ function volgendeWeekronde(m, t) {
 const DAGNAMEN = ['zondag', 'maandag', 'dinsdag', 'woensdag', 'donderdag', 'vrijdag', 'zaterdag'];
 // De vaste vraagzin voor Socev (skills § Op afroep); alleen een Ja op precies deze zin geeft een ronde vrij (Fable diffreview #3).
 function vraagZin(m) { return 'Zal ik de ' + m.naam + ' nu een ronde laten draaien?'; }
-function roosterTekst(m) { return 'elke ' + DAGNAMEN[m.rooster.dag] + ' ' + String(m.rooster.uur).padStart(2, '0') + ':' + String(m.rooster.min).padStart(2, '0'); }
+function roosterTekst(m) { return (m.rooster.dagelijks ? 'elke nacht' : 'elke ' + DAGNAMEN[m.rooster.dag]) + ' ' + String(m.rooster.uur).padStart(2, '0') + ':' + String(m.rooster.min).padStart(2, '0'); }
 
 // ── de prompt (vast; alleen naam en wie) ──
 function prompt(m, door, nu) {
@@ -112,6 +117,7 @@ function maak(o) {
   const nu = o.nu || Date.now;
   const pad = path.join(o.dir, 'staat.json');
   const bezig = {};   // id → true tijdens de async start (geen twee starts tegelijk)
+  const scriptLoopt = {};   // wv979: id → { job_id, created } zolang een scriptmanager draait (geen sessie, dus geen job in de rij)
   function lees() {
     try { const s = JSON.parse(fs.readFileSync(pad, 'utf8')); if (s && Array.isArray(s.afroepen)) return s; } catch (e) {}
     return { afroepen: [] };
@@ -125,8 +131,10 @@ function maak(o) {
     fs.renameSync(tmp, pad);
   }
   function lopendJob(m) {
+    if (m.soort === 'script') { const x = scriptLoopt[m.id] || (o.scriptLoopt && o.scriptLoopt(m.id)); return x ? { id: x.job_id, status: 'running', created: x.created } : null; }
     return (o.jobsOpSessie(m.sessie) || []).find(function (j) { return j.status === 'pending' || j.status === 'running'; }) || null;
   }
+  function jobsVan(m) { return m.soort === 'script' ? [] : (o.jobsOpSessie(m.sessie) || []); }
   // Mag het nu? Synchroon (zonder de quotumtoets). {ok:true} of {status, fout, weer_om?}
   function kan(m, door, eigenStart) {
     const t = nu();
@@ -134,9 +142,9 @@ function maak(o) {
     if (o.uitrolWacht()) return { status: 503, fout: 'Socev wordt net bijgewerkt; probeer het over een paar minuten' };
     if ((bezig[m.id] && !eigenStart) || lopendJob(m)) return { status: 409, fout: m.naam + ' loopt al', loopt: true };
     const vw = volgendeWeekronde(m, t);
-    if (vw && vw - t < VOOR_WEEKRONDE_MS) return { status: 409, fout: 'de weekronde komt om ' + amsKlok(vw) + '; dan draait hij vanzelf', weer_om: vw + UUR };
+    if (vw && vw - t < (m.voorMs || VOOR_WEEKRONDE_MS)) return { status: 409, fout: 'de weekronde komt om ' + amsKlok(vw) + '; dan draait hij vanzelf', weer_om: vw + UUR };
     const s = lees();
-    const recentJob = (o.jobsOpSessie(m.sessie) || []).reduce(function (x, j) { return Math.max(x, j.created || 0); }, 0);
+    const recentJob = jobsVan(m).reduce(function (x, j) { return Math.max(x, j.created || 0); }, 0);
     const recentAfroep = s.afroepen.filter(function (a) { return a.id === m.id; }).reduce(function (x, a) { return Math.max(x, a.t); }, 0);
     const laatst = Math.max(recentJob, recentAfroep);
     if (laatst && t - laatst < UUR) return { status: 429, fout: m.naam + ' draaide net; hooguit één keer per uur', weer_om: laatst + UUR };
@@ -157,7 +165,7 @@ function maak(o) {
   function naRun(m, a, r) {
     const s = lees();
     const x = s.afroepen.find(function (y) { return y.job_id === a.job_id; });
-    const rr = rapportRegels(r && r.output, m);
+    const rr = m.soort === 'script' ? { goed: !!(r && r.ok), regels: r && r.zin ? [String(r.zin).slice(0, 300)] : [], telling: r ? (Number(r.open) || 0) + ' open (' + (Number(r.nieuw) || 0) + ' nieuw)' : '' } : rapportRegels(r && r.output, m);
     const goed = !!r && r.ok !== false && rr.goed;
     if (x) { x.uitkomst = goed ? 'goed' : 'fout'; x.klaar = nu(); try { schrijf(s); } catch (e) { o.fout('manager-staat', e); } }
     let tekst;
@@ -193,13 +201,19 @@ function maak(o) {
         if (typeof ja === 'string') return { status: 403, j: { ok: false, fout: ja } };
       }
       let v;
-      try { v = await o.vangnet(); } catch (e) { v = { mag: false, reden: 'quotum niet te meten' }; }
+      if (m.soort === 'script') v = { mag: true };   // geen taalmodel, dus geen weekquotum
+      else try { v = await o.vangnet(); } catch (e) { v = { mag: false, reden: 'quotum niet te meten' }; }
       if (!v || !v.mag) return { status: 429, j: { ok: false, fout: 'geen ruimte in het weekquotum (' + String(v && v.reden || 'onbekend') + '); de weekronde draait wel' } };
       // Fable diffreview #5/#7: na de wachtmomenten opnieuw toetsen; vanaf hier geen await meer tot de afroep in staat.json staat
       const k2 = kan(m, door, true);
       if (!k2.ok) return { status: k2.status, j: { ok: false, fout: k2.fout, weer_om: k2.weer_om ? new Date(k2.weer_om).toISOString() : undefined } };
       const t = nu();
-      const run = o.startRun({ sessie: m.sessie, model: m.model, prompt: prompt(m, door, t) });
+      if (m.soort === 'script' && typeof o.startScript !== 'function') return { status: 503, j: { ok: false, fout: m.naam + ' kan in deze versie niet op afroep' } };
+      const run = m.soort === 'script' ? o.startScript(m, { door: door }) : o.startRun({ sessie: m.sessie, model: m.model, prompt: prompt(m, door, t) });
+      if (m.soort === 'script') {
+        scriptLoopt[m.id] = { job_id: run.job_id, created: t };
+        Promise.resolve(run.klaar).then(function () { delete scriptLoopt[m.id]; }, function () { delete scriptLoopt[m.id]; });
+      }
       const a = { id: m.id, t: t, door: door, reden: rd, job_id: run.job_id, uitkomst: null };
       const s = lees(); s.afroepen.push(a);
       if (ja) s.gebruikt = (s.gebruikt || []).concat([ja.sleutel]).slice(-100);
@@ -211,7 +225,7 @@ function maak(o) {
   // Na een herstart: afroepen zonder uitkomst zijn afgebroken (jobs leven alleen in het geheugen). David/Socev krijgen één regel.
   function opstart() {
     const s = lees();
-    const open = s.afroepen.filter(function (a) { return a.uitkomst === null && !(o.jobsOpSessie((PER_ID[a.id] || {}).sessie || '') || []).some(function (j) { return j.id === a.job_id; }); });
+    const open = s.afroepen.filter(function (a) { return a.uitkomst === null && !(PER_ID[a.id] && PER_ID[a.id].soort === 'script' ? [] : (o.jobsOpSessie((PER_ID[a.id] || {}).sessie || '') || [])).some(function (j) { return j.id === a.job_id; }); });
     if (!open.length) return 0;
     open.forEach(function (a) { a.uitkomst = 'afgebroken'; a.klaar = nu(); });
     try { schrijf(s); } catch (e) { o.fout('manager-staat', e); }
@@ -243,7 +257,7 @@ function maak(o) {
         });
         bev = { aantal: Number(d.aantal) || 0, per_ernst: d.per_ernst || {}, top: vast && m.id === 'ciso' ? [] : top.slice(0, 5), verborgen: vast };
       }
-      return { id: m.id, naam: m.naam, bewaakt: m.bewaakt, rooster: roosterTekst(m),
+      return { id: m.id, naam: m.naam, bewaakt: m.bewaakt, rooster: roosterTekst(m), soort: m.soort || 'sessie',
         volgende: (function () { const v = volgendeWeekronde(m, t); return v ? new Date(v).toISOString() : null; })(),
         weekronde: hl ? new Date(hl).toISOString() : null, hartslag: hst,
         laatste_ronde: (function () { const x = Math.max(hl, laatsteGoed); return x ? new Date(x).toISOString() : null; })(),

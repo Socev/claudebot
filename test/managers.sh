@@ -115,7 +115,7 @@ const wacht = () => new Promise((r) => setImmediate(r));
     st.knop = { hash: 'ffff0000', antwoord: { ok: true, tekst: '  zal ik de CISO nu een ronde laten draaien?', t: st.nu - 60000, sleutel: 'j2:ffff0000' } };
     r = await m.start('ciso', 'socev', 'controle', 'ffff0000');
     toets('3 CISO: vaste zin (hoofdletters en spaties maken niet uit)', r.status === 202, r);
-    toets('3 vraagZin per manager', M.MANAGERS.map((x) => M.vraagZin(x)).join('|') === 'Zal ik de Data Manager nu een ronde laten draaien?|Zal ik de Design Manager nu een ronde laten draaien?|Zal ik de UI Manager nu een ronde laten draaien?|Zal ik de CISO nu een ronde laten draaien?');
+    toets('3 vraagZin per manager', M.MANAGERS.map((x) => M.vraagZin(x)).join('|') === 'Zal ik de Data Manager nu een ronde laten draaien?|Zal ik de Design Manager nu een ronde laten draaien?|Zal ik de UI Manager nu een ronde laten draaien?|Zal ik de CISO nu een ronde laten draaien?|Zal ik de Bibliothecaris nu een ronde laten draaien?');
     toets('3 ongeldig vraag-id → 403 zonder register te lezen', (await m.start('data', 'socev', '', '../../x')).status === 403);
   }
   // ── 4. twee tegelijk ──
@@ -198,10 +198,11 @@ const wacht = () => new Promise((r) => setImmediate(r));
     const sb = { ciso: { aantal: 2, per_ernst: { warning: 2 }, hartslag: { laatste_ronde: '2026-10-19T04:07:10Z', drempel_min: 12960 },
       top: [{ id: 'C1-x', ernst: 'warning', status: 'open', samenvatting: 'laag: iets', detail: 'pad /opt/data/x', eerst_gezien: '2026-10-05T10:00:00Z' }] },
       data: { aantal: 0, per_ernst: {}, hartslag: { laatste_ronde: '2026-10-01T03:00:00Z', drempel_min: 12960 }, top: [] },
-      design: { aantal: 0, per_ernst: {}, hartslag: null, top: [] }, ui: { aantal: 0, per_ernst: {}, hartslag: null, top: [] } };
+      design: { aantal: 0, per_ernst: {}, hartslag: null, top: [] }, ui: { aantal: 0, per_ernst: {}, hartslag: null, top: [] },
+      bibliothecaris: { aantal: 0, per_ernst: {}, hartslag: null, top: [] } };
     let k = m.stand(sb, { vast: false });
     const c = k.find((x) => x.id === 'ciso'), d = k.find((x) => x.id === 'data'), ds = k.find((x) => x.id === 'design');
-    toets('8 vier kaarten in vaste volgorde', k.map((x) => x.id).join() === 'data,design,ui,ciso', k.map((x) => x.id));
+    toets('8 vijf kaarten in vaste volgorde', k.map((x) => x.id).join() === 'data,design,ui,ciso,bibliothecaris', k.map((x) => x.id));
     toets('8 hartslag op tijd / te laat / nog nooit', c.hartslag === 'op tijd' && d.hartslag === 'te laat' && ds.hartslag === 'nog nooit', k.map((x) => x.hartslag));
     toets('8 CISO: top met detail op de telefoon, kan draaien, rooster', c.bevindingen.top.length === 1 && c.bevindingen.top[0].detail === 'pad /opt/data/x' && c.kan === true && c.rooster === 'elke maandag 06:00', c);
     k = m.stand(sb, { vast: true });
@@ -235,6 +236,34 @@ const wacht = () => new Promise((r) => setImmediate(r));
       && /for \(let i = LOG_GENERATIES - 1; i >= 1; i--\) \{ try \{ fs\.renameSync\(API_LOG \+ '\.' \+ i, API_LOG \+ '\.' \+ \(i \+ 1\)\); \} catch \(e\) \{\} \}\n\s+try \{ fs\.renameSync\(API_LOG, API_LOG \+ '\.1'\);/.test(s2));
   }
   // ── 9. rpc-invoer ──
+  // ── 8c. wv979: scriptmanager (Bibliothecaris) ──
+  { const b = M.MANAGERS.find((x) => x.id === 'bibliothecaris');
+    toets('8c Bibliothecaris: script, geen sessie/skill, hartslag bibliothecaris, patroon ^BB[0-9]', b && b.soort === 'script' && !b.sessie && !b.skill && b.hartslag === 'bibliothecaris' && b.patroon === '^BB[0-9]' && b.model === 'geen');
+    // 25-10-2026 is de wisselnacht: 02:30 bestaat twee keer (00:30Z CEST en 01:30Z CET); beide zijn goed
+    toets('8c dagelijks 02:30: op 24-10 23:00Z → 25-10 02:30 (wisselnacht)', ['2026-10-25T00:30:00.000Z', '2026-10-25T01:30:00.000Z'].indexOf(new Date(M.volgendeWeekronde(b, ms('2026-10-24T23:00:00Z'))).toISOString()) >= 0);
+    toets('8c dagelijks 02:30 gewone nacht: 27-10 12:00Z → 28-10 01:30Z', new Date(M.volgendeWeekronde(b, ms('2026-10-27T12:00:00Z'))).toISOString() === '2026-10-28T01:30:00.000Z');
+    toets('8c dagelijks over de zomertijdwissel: 25-10 12:00Z → 26-10 02:30 CET = 01:30Z', new Date(M.volgendeWeekronde(b, ms('2026-10-25T12:00:00Z'))).toISOString() === '2026-10-26T01:30:00.000Z');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mgr-'));
+    const st = { nu: ms('2026-10-25T10:00:00Z'), scripts: [], berichten: [], vangnet: 0 };
+    const m = M.maak({ dir, nu: () => st.nu, fout: () => {}, jobsOpSessie: () => [{ id: 'x', status: 'running', created: st.nu }], startRun: () => { throw new Error('geen sessie'); },
+      knopJa: async () => ({ ok: false }), rolPrimair: () => true, uitrolWacht: () => false, vangnet: async () => { st.vangnet++; return { mag: false, reden: 'leeg' }; },
+      startScript: (mm, o) => { let los; const klaar = new Promise((r) => { los = r; }); st.scripts.push({ mm, o, los }); return { job_id: 'script' + st.scripts.length, klaar }; },
+      bericht: async (x) => { st.berichten.push(x); return { status: 200 }; } });
+    let r = await m.start('bibliothecaris', 'david');
+    toets('8c afroep start het script, zonder quotumtoets, ook als een sessiejob loopt', r.status === 202 && st.scripts.length === 1 && st.vangnet === 0, r);
+    let k = m.stand({ bibliothecaris: { aantal: 0, per_ernst: {}, hartslag: null, top: [] } }, {}).find((x) => x.id === 'bibliothecaris');
+    toets('8c loopt: kan niet, soort script, rooster elke nacht 02:30', k.lopend && k.kan === false && k.soort === 'script' && k.rooster === 'elke nacht 02:30', k);
+    toets('8c tweede start terwijl hij loopt → 409', (await m.start('bibliothecaris', 'david')).status === 409);
+    st.scripts[0].los({ ok: true, zin: 'register en pagina\'s gelijk (12 pagina\'s)', open: 0, nieuw: 0 }); await wacht(); await wacht();
+    toets('8c rapport naar David: klaar + zin + telling', st.berichten.length === 1 && /Bibliothecaris\*\* — ronde op afroep/.test(st.berichten[0].tekst) && /gelijk/.test(st.berichten[0].tekst) && /0 open \(0 nieuw\)/.test(st.berichten[0].tekst), st.berichten);
+    toets('8c daarna binnen het uur → 429', (await m.start('bibliothecaris', 'david')).status === 429);
+    st.nu = ms('2026-10-26T01:10:00Z');
+    toets('8c 30 min vóór de nachtronde → 409', (await m.start('bibliothecaris', 'machinekamer')).status === 409);
+    const m2 = M.maak({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'mgr-')), nu: () => st.nu, fout: () => {}, jobsOpSessie: () => [], startRun: () => {}, knopJa: async () => ({}),
+      rolPrimair: () => true, uitrolWacht: () => false, vangnet: async () => ({ mag: true }), bericht: async () => ({ status: 200 }) });
+    st.nu = ms('2026-10-25T12:00:00Z');
+    toets('8c zonder startScript (oude server) → 503', (await m2.start('bibliothecaris', 'david')).status === 503);
+  }
   toets('9 rpc-invoer: vaste patronen die de RPC accepteert', M.rpcInvoer().every((x) => /^[a-z]{2,20}$/.test(x.id) && /^\^[A-Z]{1,3}\[0-9\]$/.test(x.patroon)), M.rpcInvoer());
 
   // ── 10. server.js-koppeling (tekst) ──

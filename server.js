@@ -3689,6 +3689,7 @@ function handleRequest(req, res) {
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
+      ovis: typeof ovisInfo === 'function' ? ovisInfo() : { aan: false },   // wv979: OVIS-register (laatste dag-, nacht- en Bibliothecarisronde; aantallen, geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
@@ -14270,6 +14271,140 @@ async function appHarvester(req, res, a, d, route) {
 }
 // ── einde harvester ──
 
+// ── OVIS-register (wv979, 24-10-2026; ontwerp + Fable-review vooraf: mk-scripts/wv979/ontwerp.md; bouwplan OVIS Intake § 4) ──
+// Logica in ovis-register.js (compiler vault → secondbrain.knoop, Bibliothecaris BB1–BB7), opdrachtregel ovis-run.js. Hier alleen de
+// koppeling: de pod-tijdklok (elke 5 min, alleen de echte pod met rol primair, Fable wv979 #6):
+//   - overdag (niet 01:00–02:00): pagina's waarvan de vingerafdruk afwijkt → alleen de databank, nooit terug in de pagina;
+//   - 01:00–01:59 de nachtronde als kind onder `flock -w 300 <vault.lock>` (de bisync-grendel; alles compileren + gegenereerd blok in de
+//     pagina's); "gedaan" pas na een geslaagde ronde, anders herkansen bij de volgende tik tot 01:59;
+//   - 02:30–05:59 de Bibliothecaris (eenmaal per datum na een geslaagde ronde): hartslag bibliothecaris, box-rij alleen bij nieuwe
+//     bevindingen of een fout. Kaarten in Overzicht volgen met vervolgrij A (haak op de Ja).
+// Op afroep (App Managers › Nu draaien, managers.js soort script): Bibliothecaris zonder stempel en zonder box-rij.
+// Waarom de pod en niet n8n (ontwerp § 4; ontwerplijnen § 6.2 bijgewerkt): 5-minutenritme, de grendel bestaat alleen in de pod, rol-toets.
+// Stand in OVIS_DIR/staat.json (0600) en /health.ovis (aantallen, geen inhoud). Ontbreekt ovis-register.js of ovis-run.js in de
+// release (terugrol), dan staat dit uit en is ovis.aan=false in /health.
+const OVIS_DIR = serverPad('ovis', process.env.OVIS_DIR, '/opt/data/ovis', serverProefDeel('ovis'));
+const OVIS_LOCK = process.env.OVIS_LOCK || '/opt/data/bin/.vault.lock';
+const OVIS_TIK_MS = 5 * 60000, OVIS_NACHT_MAX_MS = 20 * 60000;
+const OVIS_MOD = (function () {
+  const p = path.join(__dirname, 'ovis-register.js');
+  try { return fs.existsSync(p) && fs.existsSync(path.join(__dirname, 'ovis-run.js')) ? require(p) : null; } catch (e) { logError('ovis', e); return null; }
+})();
+const ovis = (function () {
+  if (!OVIS_MOD) return null;
+  try {
+    return OVIS_MOD.maak({ vault: VAULT, sbRpc: appSbRpc, lees: function (p) { return VV().lees(p, 'utf8'); },
+      schrijf: function () { throw new Error('overdag schrijft de pod geen entiteitpagina'); }, log: function (r) { schrijfLog(nu() + ' ' + r); } });
+  } catch (e) { logError('ovis', e); return null; }
+})();
+const ovisLoopt = { nu: null, sinds: 0 };
+function ovisStaatPad() { return path.join(OVIS_DIR, 'staat.json'); }
+function ovisStaatLees() { try { const s = JSON.parse(fs.readFileSync(ovisStaatPad(), 'utf8')); return s && typeof s === 'object' ? s : {}; } catch (e) { return {}; } }
+function ovisStaatSchrijf(s) {
+  try {
+    fs.mkdirSync(OVIS_DIR, { recursive: true, mode: 0o700 });
+    const tmp = ovisStaatPad() + '.' + crypto.randomBytes(4).toString('hex') + '.nieuw';
+    fs.writeFileSync(tmp, JSON.stringify(s), { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tmp, ovisStaatPad());
+  } catch (e) { logError('ovis-staat', e); }
+}
+function ovisAms() {
+  const p = {};
+  new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    .formatToParts(new Date()).forEach(function (x) { p[x.type] = x.value; });
+  return { datum: p.year + '-' + p.month + '-' + p.day, uur: Number(p.hour), min: Number(p.minute), klok: p.year + '-' + p.month + '-' + p.day + ' ' + p.hour + ':' + p.minute };
+}
+// De nachtronde als kind onder de grendel: { ok, j } met j de JSON-regel van ovis-run.js
+function ovisNachtKind() {
+  return new Promise(function (resolve) {
+    let uit = '', klaar = false;
+    const env = Object.assign({}, process.env, { VAULT_DIR: VAULT, OVIS_LOCK: OVIS_LOCK });
+    let k;
+    try { k = spawn('flock', ['-w', '300', OVIS_LOCK, process.execPath, path.join(__dirname, 'ovis-run.js'), 'nacht'], { env: env, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (e) { return resolve({ ok: false, j: { fout: 'start: ' + String(e && e.message || e).slice(0, 120) } }); }
+    const tijd = setTimeout(function () { try { k.kill('SIGTERM'); } catch (e) {} }, OVIS_NACHT_MAX_MS);
+    k.stdout.on('data', function (d) { if (uit.length < 200000) uit += d; });
+    k.stderr.on('data', function () {});
+    k.on('error', function (e) { if (klaar) return; klaar = true; clearTimeout(tijd); resolve({ ok: false, j: { fout: String(e && e.message || e).slice(0, 120) } }); });
+    k.on('close', function (code) {
+      if (klaar) return; klaar = true; clearTimeout(tijd);
+      let j = null; try { j = JSON.parse(uit.trim().split('\n').pop()); } catch (e) {}
+      resolve({ ok: code === 0 && !!j && j.ok === true, j: j || { fout: code === 1 && !uit ? 'grendel niet gekregen of fout (exit ' + code + ')' : 'exit ' + code } });
+    });
+  });
+}
+function ovisBoxRij(tekst) {
+  try {
+    VV().wijzig(path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), function (t) {
+      const eerste = /\n## \[[a-z]{2,16}\] \d{4}-\d{2}-\d{2}/.exec(t);
+      return eerste ? t.slice(0, eerste.index) + tekst + t.slice(eerste.index) : null;
+    });
+  } catch (e) { logError('ovis-box', e); }
+}
+async function ovisTik() {
+  if (!ovis || !SERVER_ECHT || !rolPrimair()) return;
+  if (ovisLoopt.nu && Date.now() - ovisLoopt.sinds < OVIS_NACHT_MAX_MS + 60000) return;
+  const t = ovisAms(), s = ovisStaatLees();
+  ovisLoopt.nu = 'tik'; ovisLoopt.sinds = Date.now();
+  try {
+    if (t.uur === 1) {
+      if (s.nacht_datum === t.datum) return;
+      ovisLoopt.nu = 'nacht';
+      const r = await ovisNachtKind();
+      s.nacht = { t: new Date().toISOString(), ok: r.ok, paginas: r.j.paginas, gestuurd: r.j.gestuurd, blokken: r.j.blokken, fouten: Array.isArray(r.j.fouten) ? r.j.fouten.length : (r.j.fout ? 1 : 0) };
+      if (r.ok) s.nacht_datum = t.datum; else logError('ovis-nacht', new Error(String(r.j.fout || (r.j.fouten || []).map(function (f) { return f.fout; }).join('; ')).slice(0, 200)));
+      ovisStaatSchrijf(s);
+      return;
+    }
+    if (t.uur >= 2 && t.uur < 6 && (t.uur > 2 || t.min >= 30)) {
+      if (s.biblio_datum === t.datum) return;
+      ovisLoopt.nu = 'bibliothecaris';
+      let b;
+      try { b = await ovis.bibliothecaris({}); }
+      catch (e) {
+        logError('ovis-bibliothecaris', e);
+        s.biblio = { t: new Date().toISOString(), uitkomst: 'fout', zin: String(e && e.message || e).slice(0, 160) };
+        if (s.biblio_fout_datum !== t.datum) {
+          s.biblio_fout_datum = t.datum;
+          ovisBoxRij(OVIS_MOD.boxRijFout(String(e && e.message || e), t.klok));
+        }
+        ovisStaatSchrijf(s);
+        return;
+      }
+      s.biblio_datum = t.datum;
+      s.biblio = { t: new Date().toISOString(), uitkomst: b.uitkomst, zin: b.zin, open: b.open, nieuw: b.nieuw, opgelost: b.opgelost, per_check: b.per_check, tel: b.tel };
+      if (b.nieuw > 0) ovisBoxRij(OVIS_MOD.boxRij(b, t.klok));
+      ovisStaatSchrijf(s);
+      return;
+    }
+    ovisLoopt.nu = 'dag';
+    const r = await ovis.compileer('dag');
+    if (r.gestuurd || r.fouten.length || !s.dag || Date.now() - Date.parse(s.dag.t || 0) > 3600000) {
+      s.dag = { t: new Date().toISOString(), paginas: r.paginas, gestuurd: r.gestuurd, nieuw: r.nieuw, fouten: r.fouten.length, voorstellen: r.voorstellen, kritiek: r.kritiek };
+      ovisStaatSchrijf(s);
+    }
+  } catch (e) { logError('ovis-tik', e); }
+  finally { ovisLoopt.nu = null; }
+}
+if (ovis && SERVER_ECHT) { setTimeout(function () { ovisTik(); }, 90000).unref(); setInterval(function () { ovisTik(); }, OVIS_TIK_MS).unref(); }
+// managers.js soort script: Nu draaien (geen stempel, geen box-rij; het rapport gaat via managers.js naar de machinekamer)
+function ovisStartScript(m) {
+  if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');
+  const job = 'ovis' + crypto.randomBytes(6).toString('hex');
+  const klaar = ovis.bibliothecaris({ afroep: true }).then(function (b) {
+    const s = ovisStaatLees(); s.afroep = { t: new Date().toISOString(), zin: b.zin, open: b.open }; ovisStaatSchrijf(s);
+    return { ok: true, zin: b.zin, open: b.open, nieuw: b.nieuw };
+  }, function (e) { logError('ovis-afroep', e); return { ok: false, error: String(e && e.message || e).slice(0, 160) }; });
+  return { job_id: job, klaar: klaar };
+}
+function ovisInfo() {
+  if (!ovis) return { aan: false };
+  const s = ovisStaatLees();
+  return { aan: true, echt: SERVER_ECHT, loopt: ovisLoopt.nu, dag: s.dag || null, nacht: s.nacht || null, nacht_datum: s.nacht_datum || null,
+    biblio: s.biblio ? { t: s.biblio.t, uitkomst: s.biblio.uitkomst, open: s.biblio.open, nieuw: s.biblio.nieuw } : null, biblio_datum: s.biblio_datum || null };
+}
+// ── einde OVIS-register ──
+
 // ── Managers op afroep (wv895, 23-10-2026; ontwerp + Fable-review: mk-scripts/wv895/ontwerp.md) ──
 // App "Managers": per manager (Data, Design, CISO) wat hij bewaakt, laatste en volgende ronde, open bevindingen en Nu draaien. Logica in
 // managers.js; hier de koppeling: routes /app/managers(*) na de app-poort, POST /smal/manager-ronde (Socev alleen met Davids verse Ja-knop
@@ -14328,6 +14463,7 @@ const managers = (function () {
   if (!MANAGERS_MOD) return null;
   try {
     return MANAGERS_MOD.maak({ dir: MANAGERS_DIR, fout: logError, jobsOpSessie: managersJobs, startRun: managersStartRun, knopJa: managersKnopJa,
+      startScript: ovisStartScript,   // wv979: Bibliothecaris (soort script)
       rolPrimair: rolPrimair, uitrolWacht: function () { return !!uitrolWacht().wacht; }, vangnet: account1Vangnet,
       bericht: function (b) {
         return berichtIntern({ kanaal: 'machinekamer', bron: 'manager', klasse: 'normaal', soort: b.soort, tekst: b.tekst, sleutel: b.sleutel }).then(function (r) {
