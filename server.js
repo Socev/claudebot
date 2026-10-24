@@ -9403,6 +9403,8 @@ function appVjKanaal(p, rv, gekRij) {
   const k = rv && rv.vraag ? rv.vraag.kanaalRuw.trim().toLowerCase() : '';
   if (/^(debug|machinekamer|box)/.test(k)) return 'machinekamer';
   if (/^(hoofd|socev|auto)/.test(k)) return 'hoofd';
+  // wv1253 (Fable diffreview #5): een kenmerken- of kritiek-kaart is Davids besluit over zijn partijen; de bevestiging hoort in het hoofdkanaal
+  if (typeof ovisKaartHerkomst === 'function' && ovisKaartHerkomst(p) && p.herkomst.ovis.soort !== 'biblio') return 'hoofd';
   return p.prive === true ? 'hoofd' : 'machinekamer';
 }
 // Fable wv404 #3: het eigen kaartantwoord telt niet meer als de kaart ná een gestarte druk weer open is gezet (heropend door de ronde
@@ -12295,7 +12297,7 @@ const BERICHT_NIEUW_LAATST = path.join(APP_DATA, 'nieuw-laatst.json');
 const BERICHT_KANALEN = { hoofd: true, machinekamer: true };
 const BERICHT_KLASSEN = { stil: true, normaal: true, dringend: true };
 // Vaste lijst (bouwplan § 3, fasen 1–5); een nieuwe bron vraagt een regel hier, net als een rij in bericht_route.
-const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'proef', 'droomronde', 'ideeenmotor', 'ciso', 'research-scout', 'quotumalarm', 'voorwerk',
+const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef', 'droomronde', 'ideeenmotor', 'ciso', 'research-scout', 'quotumalarm', 'voorwerk',
   'stiltewachter', 'meelezer', 'nachtwerk', 'werkkamer-toegang', 'foutmelder', 'script', 'socev-spreekt', 'heartbeat', 'vergaderbriefing',
   'parro', 'signal', 'teams', 'gambia', 'raw-input', 'files-portaal', 'voorlezen', 'briefing', 'actielijst', 'agenda', 'actie-bewaker',
   'agenda-wachter', 'correspondentie-wachter', 'dienstwaarschuwer', 'waarnemingzoeker',
@@ -14476,6 +14478,14 @@ async function ovisKaartenZet(soorten) {
     ovisStaatZet({ kaarten: { t: new Date().toISOString(), gezet: r.gezet, weg: r.weg, fouten: r.fouten.length, eerste_fout: r.fouten.length ? String(r.fouten[0].fout).slice(0, 120) : null } });
   }
   if (r.fouten.length) logError('ovis-kaarten', new Error(r.fouten.map(function (x) { return x.sleutel + ': ' + x.fout; }).join('; ').slice(0, 300)));
+  // Fable diffreview #4: een druk die nooit in de databank kwam (herstart, drie mislukte pogingen) → David en de box horen het
+  (r.verloren || []).forEach(function (sl) {
+    ovisBericht(/^intake-biblio-/.test(sl) ? 'biblio' : 'bundel', sl, 'Een keuze die je op een kaart over herkenningskenmerken gaf, is niet vastgelegd. Er is niets vastgezet; de punten komen op een volgende kaart terug.', 'normaal');
+    const t = ovisAms();
+    ovisBoxRij('\n## [ovis] ' + t.klok + ' — Davids druk op ' + sl + ' niet verwerkt (automatisch, wv1253)\n- status: open\n- van: pod (OVIS-kaarten)\n' +
+      '- gemeten: de kaart staat dicht (David drukte), maar secondbrain.ovis_kaart bleef open; na 1 uur gesloten als weg.\n' +
+      '- gevolg als er niets gebeurt: de punten komen op een volgende kaart terug; David hoorde het in de app.\n- voorstel: logregels ovis-knop en ovis_handvat_activeer nalopen.\n');
+  });
   return r;
 }
 // Eén RPC met herkansing bij een netwerk- of serverfout (niet bij een weigering: die is definitief). Klaar(r): r van de databank, of
@@ -14486,6 +14496,11 @@ function ovisActiveerPoging(body, poging, klaar) {
     if (/http 4\d\d/.test(m) || poging >= 3) { logError('ovis-knop', new Error(m.slice(0, 160))); return klaar({ fout_pod: true, fout: m.slice(0, 160) }); }
     setTimeout(function () { ovisActiveerPoging(body, poging + 1, klaar); }, [30000, 120000, 300000][poging]).unref();
   });
+}
+function ovisBericht(soort, sleutel, tekst, klasse) {
+  berichtIntern({ kanaal: soort === 'biblio' ? 'machinekamer' : 'hoofd', bron: 'ovis', klasse: klasse || 'normaal', sleutel: 'ovis-' + crypto.createHash('sha256').update(sleutel + '|' + tekst).digest('hex').slice(0, 16), tekst: tekst })
+    .then(function (x) { if (!x || x.status !== 200) logError('ovis-bericht', new Error('bericht niet bezorgd (' + (x && x.status) + ')')); })
+    .catch(function (e) { logError('ovis-bericht', e); });
 }
 function ovisKnopHaak(p, toelichting) {
   const o = p.herkomst.ovis, soort = String(o.soort || '');
@@ -14501,16 +14516,17 @@ function ovisKnopHaak(p, toelichting) {
         uitslag = r; los(r);
         schrijfLog(nu() + ' ovis-knop ' + velden({ kaart: p.sleutel, keuze: kz, status: r && r.status, actief: r && r.actief, overgeslagen: r && r.overgeslagen ? r.overgeslagen.length : 0, al: r && r.al, fout: r && (r.fout || r.fout_pod) ? 1 : 0 }));
         ovisStaatZet({ knop: { t: new Date().toISOString(), kaart: p.sleutel, keuze: kz, status: (r && r.status) || (r && r.al ? 'al ' + r.al : 'fout') } });
-        // Fable wv1253 #1: kreeg Socev de uitkomst niet mee en lukte het niet, dan hoort David het rechtstreeks (geen taalmodel)
-        if (staartZonderUitslag && r && (r.fout_pod || (r.ok === false && !r.al))) {
-          berichtIntern({ kanaal: soort === 'biblio' ? 'machinekamer' : 'hoofd', bron: 'ovis', klasse: 'normaal', sleutel: 'ovis-knop-' + p.sleutel,
-            tekst: 'Je keuze op de kaart "' + String(p.titel || '').slice(0, 90) + '" kon ik niet vastleggen. Er is niets vastgezet; de punten komen op een volgende kaart terug.' })
-            .catch(function (e) { logError('ovis-knop', e); });
+        // Fable wv1253 #1 en diffreview #7: kreeg Socev de uitkomst niet mee, dan hoort David hem rechtstreeks (geen taalmodel; één regel)
+        if (staartZonderUitslag && r) {
+          const mis = r.fout_pod || (r.ok === false && !r.al);
+          const tekst = mis ? 'Je keuze op de kaart "' + String(p.titel || '').slice(0, 90) + '" kon ik niet vastleggen. Er is niets vastgezet; de punten komen op een volgende kaart terug.'
+            : r.ok && (r.actief || r.vervallen || r.gezet) ? 'Vastgelegd na je keuze op "' + String(p.titel || '').slice(0, 90) + '": ' + [r.actief ? r.actief + ' vastgezet' : '', r.vervallen ? r.vervallen + ' vervallen' : '', r.gezet ? r.gezet + ' gewijzigd' : ''].filter(Boolean).join(', ') + '.' : null;
+          if (tekst) ovisBericht(soort, p.sleutel, tekst, mis ? 'normaal' : 'stil');
         }
       });
     },
     staart: function (ap) {
-      return Promise.race([belofte, new Promise(function (r) { setTimeout(function () { r(null); }, 8000).unref(); })]).then(function (r) {
+      return Promise.race([belofte, new Promise(function (r) { setTimeout(function () { r(null); }, 15000).unref(); })]).then(function (r) {
         if (!r) staartZonderUitslag = true;
         return OVIS_MOD.uitkomstZin(soort, null, r || uitslag, !!(ap && ap.soort === 'vast'));
       });

@@ -428,6 +428,7 @@ function kaartGeheugen(reg, nu) {
       if (k.status === 'open') open.add(sl);
       else if (k.status === 'nee' && Date.parse(k.beslist_op) > nu - NEE_RUST_MS) rust.add(metSha);
       else if ((k.status === 'anders' || k.status === 'ja') && Array.isArray(k.eruit) && k.eruit.indexOf(Number(r.nr)) >= 0) rust.add(metSha);
+      else if (k.soort === 'biblio' && (k.status === 'ja' || k.status === 'anders') && Date.parse(k.beslist_op) > nu - NEE_RUST_MS) rust.add(metSha);   // diffreview #9
     });
   });
   return { open: open, rust: rust, sleutels: sleutels };
@@ -469,7 +470,7 @@ function kaartBundel(reg, paginas, o) {
     const mee = [];
     for (const h of per[id].sort(function (a, b) { return a.id - b.id; })) {
       const t = kenmerkTekst(h, p);
-      if ((tekst + mee.concat(t).join('; ')).length > 320) break;   // een kenmerk dat niet past komt volgende keer; nooit half getoond
+      if ((tekst + mee.concat(t).join('; ')).length > 320 || regels.length >= 40) break;   // een kenmerk dat niet past komt volgende keer; nooit half getoond
       mee.push(t); regels.push({ nr: nr, actie: 'activeer', tabel: 'handvat', id: h.id, knoop: h.knoop, soort: h.soort, waarde_norm: h.waarde_norm });
     }
     if (!mee.length) continue;
@@ -490,7 +491,7 @@ function kaartenKritiek(reg, paginas, o) {
   const nu = o.nu, knopen = {}; (reg.knopen || []).forEach(function (k) { knopen[k.id] = k; });
   const geh = kaartGeheugen(reg, nu), anker = ankers(paginas, knopen), uit = [];
   function maak(k, p, veld, regels, stappen, titelWoord, uitleg) {
-    if (!regels.length || regels.length > 6) return;
+    if (!regels.length || regels.length > 6 || stappen.length > KAART_STAPPEN) return;   // diffreview #3: nooit een regel die David niet ziet
     if (regels.some(function (r) { return geh.open.has(r.tabel + '#' + (r.tabel === 'knoop' ? r.knoop + '#' + r.veld : r.id)); })) return;
     // zelfde voorstel (zelfde regels, waarden en herkomst) = zelfde basissleutel. Nee = niet opnieuw tot de pagina iets anders zegt; open = wacht;
     // eerder zonder uitkomst (weg, Anders, overgeslagen zonder vingerafdruk) = opnieuw met een volgnummer
@@ -503,7 +504,7 @@ function kaartenKritiek(reg, paginas, o) {
     const titel = kort(kort(k.naam, 40) + ': ' + titelWoord + ' — zo vastzetten?', KAART_TITEL);
     const gev = regels.some(function (r) { return r.veld === 'iban' || ['factuuradres', 'boekhoudadres', 'afschriftadres'].indexOf(r.veld) >= 0; });
     const waarom = uitleg + ' Ja: zoals hieronder. Nee: alles blijft zoals het nu is.' + (gev ? ' De app vraagt je vingerafdruk.' : '');
-    uit.push({ sleutel: sleutel, soort: 'kritiek', titel: titel, waarom: waarom, stappen: stappen.slice(0, KAART_STAPPEN), prive: priveKnoop(k, p), regels: regels.map(function (r) { const x = Object.assign({}, r); delete x.sha; return x; }) });
+    uit.push({ sleutel: sleutel, soort: 'kritiek', titel: titel, waarom: waarom, stappen: stappen, prive: priveKnoop(k, p), regels: regels.map(function (r) { const x = Object.assign({}, r); delete x.sha; return x; }) });
   }
   Object.keys(anker).forEach(function (id) {
     const k = knopen[id], p = anker[id];
@@ -515,7 +516,7 @@ function kaartenKritiek(reg, paginas, o) {
       if (!act.length || (!vg.length && !weg.length)) return;   // eerste gebruik: geen kaart (bouwplan § 4.4 punt 3)
       const regels = [], stappen = [];
       let nr = 0;
-      act.filter(function (c) { return !c.intrekking; }).forEach(function (c) { stappen.push('Blijft: ' + kort(c.waarde, 300)); });
+      act.filter(function (c) { return !c.intrekking; }).slice(0, 4).forEach(function (c) { stappen.push('Blijft: ' + kort(c.waarde, 300)); });
       weg.forEach(function (c) { nr++; regels.push({ nr: nr, actie: 'vervallen', tabel: 'contact', id: c.id, knoop: id, veld: veld, waarde: c.waarde, sha: '' }); stappen.push(nr + '. Oud, vervalt: ' + kort(c.waarde, 300)); });
       vg.forEach(function (c) { nr++; regels.push({ nr: nr, actie: 'activeer', tabel: 'contact', id: c.id, knoop: id, veld: veld, waarde: c.waarde, sha: (c.herkomst || {}).sha || '' }); stappen.push(nr + '. Nieuw: ' + kort(c.waarde, 300)); });
       maak(k, p, veld, regels, stappen, VELD_WOORD[veld] + (vg.length ? ' wijzigen' : ' laten vervallen'),
@@ -575,7 +576,11 @@ function kaartBiblio(reg, o) {
 function uitkomstZin(soort, keuze, r, vast) {
   if (!r) return '\n(OVIS: de pod kreeg nog geen antwoord van de databank. Zeg David alleen dat zijn keuze is ontvangen; zet zelf niets in de databank.)';
   if (r.fout_pod) return '\n(OVIS: NIET vastgelegd, de databank gaf een fout. Zeg David in één zin dat er niets is vastgezet en dat de punten op een volgende kaart terugkomen. Jij zet niets in de databank.)';
-  if (r.ok === false && r.al) return '\n(OVIS: deze kaart was al beslist (' + r.al + '); de pod heeft niets veranderd. Zeg dat kort.)';
+  if (r.ok === false && r.al) {
+    const u = r.uitkomst || {};   // diffreview #6: een herkansing na een geslaagde eerste poging ziet zijn eigen beslissing
+    if (u.actief || u.vervallen || u.gezet) return '\n(OVIS: vastgelegd (' + r.al + '): ' + [u.actief ? u.actief + ' vastgezet' : '', u.vervallen ? u.vervallen + ' vervallen' : '', u.gezet ? u.gezet + ' gewijzigd' : ''].filter(Boolean).join(', ') + '. Jij zet niets in de databank. Bevestig het David in één zin.)';
+    return '\n(OVIS: deze kaart was al beslist (' + r.al + '); de pod heeft niets veranderd. Zeg dat kort.)';
+  }
   if (r.ok === false) return '\n(OVIS: NIET vastgezet: ' + kort(r.fout, 120) + '. Zeg David in één zin dat er niets is vastgezet; de punten komen op een volgende kaart terug. Jij zet niets in de databank.)';
   if (r.status === 'nee') return '\n(OVIS: Nee — de pod heeft niets vastgezet' + (soort === 'bundel' ? '; deze kenmerken komen over vier weken weer op een kaart' : '') + '. Zeg dat kort.)';
   if (r.status === 'anders' && !r.eruit) return '\n(OVIS: Anders zonder nummers om eruit te halen, of op een kaart met een adres of rekeningnummer — de pod heeft niets vastgezet. ' + (soort === 'bundel' ? 'Vraag David kort wat hij bedoelt; de kenmerken komen volgende week op een nieuwe kaart, waar hij met Anders "zonder 3" kan antwoorden.' : 'Vraag David kort wat hij bedoelt.') + ' Jij kunt niets vastzetten.)';
@@ -733,7 +738,10 @@ function maak(o) {
     const t = nu();
     for (const k of (reg.kaarten || []).filter(function (x) { return x.status === 'open' && Date.parse(x.aangemaakt) < t - 3600000; })) {
       if (opties.droog) continue;
-      try { const r = await o.sbRpc('ovis_handvat_activeer', { p: { sleutel: k.sleutel, keuze: 'weg' } }); if (r && r.ok) uit.weg++; }
+      try {
+        const r = await o.sbRpc('ovis_handvat_activeer', { p: { sleutel: k.sleutel, keuze: 'weg' } });
+        if (r && r.ok) { uit.weg++; if (r.reden === 'druk niet verwerkt') (uit.verloren = uit.verloren || []).push(k.sleutel); }
+      }
       catch (e) { uit.fouten.push({ sleutel: k.sleutel, fout: 'weg: ' + String(e && e.message || e).slice(0, 120) }); }
     }
     if (uit.weg) reg = await register();

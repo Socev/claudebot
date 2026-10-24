@@ -326,6 +326,12 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('7 kritiek: Nee = niet opnieuw zolang het voorstel gelijk is', !R.kaartenKritiek(reg, [pTG2, pA, pB, pC], { nu: NU }).some((k) => /factuuradres/.test(k.sleutel)));
     reg.kaarten = [{ sleutel: kf.sleutel, soort: 'kritiek', status: 'weg', beslist_op: new Date(NU - 1 * 86400000).toISOString(), regels: [] }];
     toets('7 kritiek: na weg opnieuw met volgnummer', R.kaartenKritiek(reg, [pTG2, pA, pB, pC], { nu: NU }).some((k) => k.sleutel === kf.sleutel + '-2'));
+    // diffreview #3: een kritiek-kaart met meer dan 12 stappen wordt niet gezet (nooit een regel die David niet ziet)
+    reg = regBasis(); reg.contact = [];
+    for (let i = 0; i < 4; i++) reg.contact.push({ id: 200 + i, knoop: 'org:aon', veld: 'telefoon', waarde: '020-000000' + i, status: 'actief', intrekking: false, herkomst: { vraag_id: 'cccccccc' } });
+    for (let i = 0; i < 6; i++) reg.contact.push({ id: 300 + i, knoop: 'org:aon', veld: 'telefoon', waarde: '030-000000' + i, status: 'actief', intrekking: true, herkomst: { vraag_id: 'cccccccc' } });
+    for (let i = 0; i < 3; i++) reg.contact.push({ id: 400 + i, knoop: 'org:aon', veld: 'telefoon', waarde: '040-000000' + i, status: 'voorgesteld', herkomst: { sha: 'q' } });
+    toets('7 kritiek: te veel regels = geen kaart (niets afgeknipt)', !R.kaartenKritiek(reg, [pTG, pA, pB, pC], { nu: NU }).some((k) => /telefoon/.test(k.sleutel)));
     // Bibliothecaris
     reg = regBasis(); reg.bevindingen = [{ bevinding_id: 'BB2-org:aon-geen-pagina', check_id: 'BB2', status: 'open', samenvatting: 'x' }, { bevinding_id: 'BB3-TG-naam', check_id: 'BB3', status: 'open', ernst: 'warning' },
       { bevinding_id: 'BB3-org:aon-contact-telefoon', check_id: 'BB3', status: 'open', ernst: 'serious' }, { bevinding_id: 'BB5-org:aon-org:dubbel-1234abcd', check_id: 'BB5', status: 'open', samenvatting: 'domein staat bij twee entiteiten (org:aon/org:dubbel)' }];
@@ -336,12 +342,15 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
       fs.writeFileSync(path.join(d, '10_Zakelijk/_Gedeeld/Relaties/index.md'), '---\ntype: index\n---\n'); fs.writeFileSync(path.join(d, '10_Zakelijk/_Gedeeld/Relaties/Aon.md'), 'x');
       const m = R.maak({ vault: d, sbRpc: async () => ({}), lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: () => {} });
       toets('7 index.md in Relaties wordt overgeslagen', JSON.stringify(m.vind()) === '["10_Zakelijk/_Gedeeld/Relaties/Aon.md"]', m.vind()); }
+    reg = regBasis(); reg.bevindingen = [{ bevinding_id: 'BB2-org:aon-geen-pagina', check_id: 'BB2', status: 'open', samenvatting: 'x' }];
+    reg.kaarten = [{ sleutel: 'intake-biblio-2026-43', soort: 'biblio', status: 'ja', beslist_op: new Date(NU - 3 * 86400000).toISOString(), regels: [{ nr: 1, tabel: 'structuur_state', id: 'BB2-org:aon-geen-pagina' }] }];
+    toets('7 Bibliothecaris: na een Ja 28 dagen niet opnieuw op de kaart (diffreview #9)', !R.kaartBiblio(reg, { nu: NU }).kaart);
     // uitkomst voor Socev
     const U = R.uitkomstZin;
     toets('7 uitkomst: Ja met aantallen, Nee, al beslist, fout, vaste plek', /de pod heeft 3 gegevens vastgezet/.test(U('bundel', 'ja', { ok: true, status: 'ja', actief: 3, overgeslagen: [] }))
       && /niets vastgezet; deze kenmerken komen over vier weken/.test(U('bundel', 'nee', { ok: true, status: 'nee' })) && /al beslist \(ja\)/.test(U('bundel', 'ja', { ok: false, al: 'ja' }))
       && /NIET vastgelegd/.test(U('bundel', 'ja', { fout_pod: true })) && /vaste plek/.test(U('kritiek', 'ja', { ok: true, status: 'ja', actief: 0, overgeslagen: [{ nr: 1, reden: 'geen verse vingerafdruk' }] }, true))
-      && /nog geen antwoord/.test(U('bundel', 'ja', null)) && /Anders zonder nummers/.test(U('bundel', 'anders', { ok: true, status: 'anders', eruit: null })));
+      && /nog geen antwoord/.test(U('bundel', 'ja', null)) && /vastgelegd \(ja\): 3 vastgezet/.test(U('bundel', 'ja', { ok: false, al: 'ja', uitkomst: { actief: 3 } })) && /Anders zonder nummers/.test(U('bundel', 'anders', { ok: true, status: 'anders', eruit: null })));
     // de haak in server.js (Fable #1): naStart start de RPC, de staart wacht op de echte uitkomst; herkansing bij een netwerkfout
     const b2 = src.indexOf('// ── wv1253: kaarten in Overzicht'), e2 = src.indexOf('// ── einde OVIS-register ──');
     const hk = { rpc: [], fout: 0, berichten: [] };
