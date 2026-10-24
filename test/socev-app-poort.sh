@@ -341,6 +341,15 @@ async function nepFetch(url, opt) {
       if (sbStaat.vjKapot || sbStaat.vjWvKapot) return antw(500, { message: 'kapot' });
       return antw(200, { wv: [...new Set((sbStaat.vj || []).flatMap((x) => ((x.herkomst && x.herkomst.wv) || []).map(Number)))], op: new Date().toISOString() });
     }
+    if (fn === 'mk_voor_jou_vraag_jobs') {   // wv1004: per kaart de ouder_job van de rijen in herkomst.wv
+      if (sbStaat.vjKapot || sbStaat.vjJobsKapot) return antw(500, { message: 'kapot' });
+      const kaarten = {};
+      (sbStaat.vj || []).forEach((x) => {
+        const jobs = [...new Set(((x.herkomst && x.herkomst.wv) || []).map((n) => ((sbStaat.wvItems || []).find((y) => y.id === Number(n)) || {}).ouder_job).filter(Boolean))];
+        if (jobs.length) kaarten[String(x.id)] = jobs;
+      });
+      return antw(200, { kaarten, op: new Date().toISOString() });
+    }
     if (fn === 'mk_app_verbruik') return antw(200, sbStaat.verbruik || { nu: new Date().toISOString(), laatste: null, reeks: [] });
     if (fn === 'sb_app_vapid_lezen') return sbStaat.geenVapid ? antw(200, null) : antw(200, VAPID_W);
     if (fn === 'mk_werkvoorraad_stand') return antw(200, { items: sbStaat.wvItems || [], stand: { aan: true }, ruimte: { mag: true, pad: 'vrij', reden: 'vrije periode tot 10-10 23:00' } });
@@ -1584,7 +1593,8 @@ async function bewijs(o) {
       const sl = m.map((x) => x.punt);
       toets('9d wv594: open vraag (<72 u, onbeantwoord) in Moet iets met kanaal, hash, tekst, gevoelig en het hele bericht', m.some((x) => x.punt === 'v:' + J(1) + ':' + hash(qs[1]) && x.soort === 'vraag' && x.kanaal === 'hoofd' && x.tekst === qs[1] && x.gevoelig === false && /Tekst van het bericht/.test(x.bericht) && x.socev === true), JSON.stringify(m.slice(0, 3)));
       toets('9d wv594: niet: ouder dan 72 u, beantwoord, naar Telegram, Telegram-beurt', !sl.some((s) => [3, 4, 5, 7].some((n) => s.includes(J(n)))), JSON.stringify(sl));
-      toets('9d wv594: ontdubbeld op de koppeling herkomst.vraag (M3-rest) en op een wv-nummer in de vraagzin; een dichte kaart verbergt niets', !sl.some((s) => s.includes(J(6)) || s.includes(J(2))) && sl.some((s) => s.includes(J(8))), JSON.stringify(sl));
+      toets('9d wv594: ontdubbeld op de koppeling herkomst.vraag (M3-rest) en op een wv-nummer in de vraagzin', !sl.some((s) => s.includes(J(6)) || s.includes(J(2))), JSON.stringify(sl));
+      toets('9d wv1004: een dichte kaart verbergt zijn gekoppelde vraag ook (was: verbergt niets)', !sl.some((s) => s.includes(J(8))), JSON.stringify(sl));
       toets('9d wv594: machinekamervraag van een app-beurt (geen soort) telt ook', sl.some((s) => s.includes(J(9))), JSON.stringify(sl));
       toets('9d wv594: dag-bericht van vandaag (meld dag; zonder meld: dringend), niet de briefing, archief of gisteren', sl.includes('d:' + J(10)) && sl.includes('d:' + J(13)) && !sl.some((s) => [11, 12, 14].some((n) => s.includes(J(n)))), JSON.stringify(sl));
       toets('9d wv594: agenda-✅ alleen als hij nog niet verlopen is', sl.includes('a:' + J(20)) && !sl.some((s) => s.includes(J(21))) && m.find((x) => x.punt === 'a:' + J(20)).agenda.knoppen[0].knop === 'uitvoeren', JSON.stringify(sl));
@@ -1594,6 +1604,38 @@ async function bewijs(o) {
       toets('9d wv926 Fable #6: een doe-kaart met hetzelfde wv-nummer verbergt de vraag niet (alleen een besluitkaart)', mDoe.some((x) => x.punt.includes(J(2))), JSON.stringify(mDoe.map((x) => x.punt)));
       const leeg = H.appMoetIetsUit({}, {}, {}, [], nu);
       toets('9d wv594: zonder gegevens een lege lijst', Array.isArray(leeg) && leeg.length === 0);
+      // wv1004 (David 24-10): een kaart die David via Ja / Nee / Anders beantwoordde, verbergt de chatversie van dezelfde vraag.
+      // Koppeling: kaartJobs (ouder_job van de rij die de kaart zette) = agent_job van het agentrapport; of een wv-nummer in de titel.
+      {
+        const A = (n) => 'a1a1a1a1a1a1a1' + String(n).padStart(2, '0');
+        const q2 = { 30: 'Zal ik de hele app blauw maken?', 31: 'Mag een stil idee voor?', 32: 'Andere vraag na het sluiten?', 33: 'Doe-kaartvraag?', 34: 'Vraag zonder kaart?',
+          35: 'Mag ik wv901 afronden?', 36: 'Nieuwe vraag over wv901?', 37: 'Vervallen kaartvraag?', 38: 'Open kaart, zelfde klus?' };
+        const mk2 = [it(30, { agent_job: A(1), t: iso(3 * uur) }), it(31, { agent_job: A(2), t: iso(3 * uur) }), it(32, { agent_job: A(1), t: iso(uur) }), it(33, { agent_job: A(3), t: iso(3 * uur) }),
+          it(34, { agent_job: A(4), t: iso(3 * uur) }), it(35, { t: iso(3 * uur) }), it(36, { t: iso(uur) }), it(37, { agent_job: A(5), t: iso(3 * uur) }), it(38, { agent_job: A(6), t: iso(uur) })]
+          .map((x, i) => { const n = 30 + i; return Object.assign(x, { antwoord: vr(q2[n]), vraag_hash: hash(q2[n]) }); });
+        const vragen2 = Object.fromEntries(mk2.map((x) => [x.job_id + ':' + x.vraag_hash, { kanaal: 'machinekamer', t: x.t, antwoord: null, gevoelig: true, soort: 'socev' }]));
+        const dicht = iso(2 * uur);
+        const k2 = [{ id: 50, status: 'gedaan', soort: 'besluit', titel: 'Socev-app — helemaal blauw?', gesloten_op: dicht, herkomst: { wv: [737] } },
+          { id: 51, status: 'gedaan', soort: 'besluit', titel: 'Tweede kaart van dezelfde klus?', gesloten_op: dicht, herkomst: { wv: [738] } },
+          { id: 52, status: 'gedaan', soort: 'besluit', titel: 'Ideeënmotor — stil idee voor?', gesloten_op: dicht, herkomst: { wv: [747] } },
+          { id: 53, status: 'gedaan', soort: 'doen', titel: 'Iets doen', gesloten_op: dicht, herkomst: { wv: [750] } },
+          { id: 54, status: 'gedaan', soort: 'besluit', titel: 'Werkvoorraad wv901 — afronden?', gesloten_op: dicht, herkomst: {} },
+          { id: 55, status: 'vervallen', soort: 'besluit', titel: 'Vervallen', gesloten_op: dicht, herkomst: { wv: [760] } },
+          { id: 56, status: 'open', soort: 'besluit', titel: 'Open kaart', herkomst: { wv: [770] } }];
+        const jobs2 = { 50: [A(1)], 51: [A(1)], 52: [A(2)], 53: [A(3)], 55: [A(5)], 56: [A(6)] };
+        const m2 = H.appMoetIetsUit({ machinekamer: mk2 }, vragen2, {}, k2, nu, jobs2), s2 = m2.map((x) => x.punt);
+        const heeft = (n) => s2.some((s) => s.includes(J(n)));
+        toets('9d wv1004: een beantwoorde besluitkaart (gedaan) verbergt de chatvraag van dezelfde klus, ook bij twee kaarten uit één klus', !heeft(30) && !heeft(31), JSON.stringify(s2));
+        toets('9d wv1004: een vervallen besluitkaart verbergt zijn chatvraag ook; een open kaart van dezelfde klus idem', !heeft(37) && !heeft(38), JSON.stringify(s2));
+        toets('9d wv1004 Fable #1: een vraag van dezelfde klus ná het sluiten van de kaart blijft staan', heeft(32), JSON.stringify(s2));
+        toets('9d wv1004: een doe-kaart van dezelfde klus verbergt niets', heeft(33), JSON.stringify(s2));
+        toets('9d wv1004: een open vraag zonder kaart blijft zichtbaar', heeft(34), JSON.stringify(s2));
+        toets('9d wv1004: dichte besluitkaart met wv-nummer verbergt de vraag van vóór het sluiten, niet een latere met hetzelfde nummer', !heeft(35) && heeft(36), JSON.stringify(s2));
+        const m3 = H.appMoetIetsUit({ machinekamer: mk2 }, vragen2, {}, k2, nu).map((x) => x.punt);
+        toets('9d wv1004: zonder klussen (RPC kapot) alleen koppeling en wv-nummer, zoals voorheen', m3.some((s) => s.includes(J(30))) && !m3.some((s) => s.includes(J(35))), JSON.stringify(m3));
+        const m4 = H.appMoetIetsUit({ machinekamer: mk2 }, vragen2, {}, k2.map((k) => (k.id === 56 ? Object.assign({}, k, { soort: 'doen' }) : k)), nu, jobs2).map((x) => x.punt);
+        toets('9d wv1004: een open doe-kaart van dezelfde klus verbergt niets', m4.some((s) => s.includes(J(38))), JSON.stringify(m4));
+      }
     }
 
     // ── 11. fase 5a: tabs Agents en Bestanden (wv98) ──
@@ -5716,6 +5758,15 @@ async function bewijs(o) {
       toets('27 lijst: open + later-vandaag, zonder later-toekomst en gesloten; volgorde van de tabel; privé wel op de telefoon', r.status === 200 && ids.join() === '1,2,3,4,5,6,8,9' && r.j.zichtbaar === 5 && r.j.meer === 3, JSON.stringify(ids) + ' ' + r.j.meer);
       toets('27 later-toekomst niet in de lijst (ook het tweede)', !ids.includes(11));
       toets('27 wv594: /app/voor-jou/kanaal: moet_iets is een lijst en gezien een object met alleen sleutels die Voor jou toont (k:<id>, k:<id>:over, v:/a:/d:); kaarten gelijk', rK.status === 200 && Array.isArray(rK.j.moet_iets) && rK.j.moet_fout === null && rK.j.gezien && typeof rK.j.gezien === 'object' && Object.keys(rK.j.gezien).every((k) => /^(k:\d+(:over)?|[vad]:[a-f0-9:]+)$/.test(k)) && JSON.stringify(rK.j.punten) === JSON.stringify(r.j.punten), JSON.stringify([rK.status, rK.j.moet_iets, rK.j.moet_fout, rK.j.gezien]));
+      {   // wv1004 Fable #2: klussen-RPC kapot -> Moet iets gewoon (zonder die ontdubbeling), kaarten ongewijzigd, één logregel
+        const nL = logs.length;
+        sbStaat.vjJobsKapot = true; H.appStaat.vjVraagJobsCache = null;
+        const rJ = await vraag('GET', '/app/voor-jou/kanaal', undefined, { pot: P.jar });
+        sbStaat.vjJobsKapot = false; H.appStaat.vjVraagJobsCache = null;
+        const nieuwL = logs.slice(nL);
+        toets('27 wv1004: mk_voor_jou_vraag_jobs kapot -> 200, moet_iets een lijst, kaarten gelijk, logError app-voor-jou', rJ.status === 200 && Array.isArray(rJ.j.moet_iets) && rJ.j.moet_fout === null && JSON.stringify(rJ.j.punten) === JSON.stringify(rK.j.punten) && nieuwL.some((l) => /^app-voor-jou: /.test(l)), JSON.stringify([rJ.status, rJ.j.moet_fout, nieuwL]));
+        logs.splice(nL, logs.length - nL);
+      }
       toets('27 later-toekomst apart met datum', (r.j.later || []).length === 2 && r.j.later[0].id === 7 && r.j.later[0].later_tot === plus(V, 3), JSON.stringify(r.j.later));
       const L = Object.fromEntries((r.j.punten || []).map((x) => [x.id, x]));
       toets('27 regel 2: wanneer · waar · duur', L[1].regel2 === 'uiterlijk ' + dm(plus(V, 9)) + ' · op de praktijk · ± 15 min' && L[2].regel2 === 'vandaag · op je telefoon · ± 1,5 u' && L[3].regel2 === 'uiterlijk morgen · op de pc · ± 5 min'

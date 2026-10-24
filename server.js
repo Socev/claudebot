@@ -8867,6 +8867,26 @@ async function appVjWvGekoppeld() {
   }).catch(function (e) { st.bezig = null; st.data = null; st.foutOp = Date.now(); throw e; });
   return st.bezig;
 }
+// wv1004: per kaart (open/later of < 7 dagen dicht) de klus(sen) die hem zetten: ouder_job van de werkvoorraadrijen in herkomst.wv.
+// Gelijk aan agent_job van het agentrapport dat dezelfde vraag in de chat stelde; alleen voor het ontdubbelen in Moet iets. Een kaart
+// verandert niet van klus, dus een keuze hoeft de cache niet te wissen; een nieuwe kaart telt hooguit een minuut later mee.
+async function appVjVraagJobs() {
+  const c = appStaat.vjVraagJobsCache;
+  if (c && c.data && Date.now() - c.op < APP_VJ_CACHE_MS) return c.data;
+  if (c && c.bezig) return c.bezig;
+  if (c && c.foutOp && Date.now() - c.foutOp < APP_VJ_FOUT_MS) return Promise.reject(new Error('voor_jou-klussen kort geleden niet leesbaar'));
+  const st = appStaat.vjVraagJobsCache = { data: null, op: 0, bezig: null, foutOp: 0 };
+  st.bezig = appSbRpc('mk_voor_jou_vraag_jobs', {}).then(function (j) {
+    if (!j || !j.kaarten || typeof j.kaarten !== 'object' || Array.isArray(j.kaarten)) throw new Error('voor_jou-klussen zonder kaarten');
+    const d = {};
+    Object.keys(j.kaarten).forEach(function (k) {
+      const id = Number(k), l = j.kaarten[k];
+      if (Number.isInteger(id) && id > 0 && Array.isArray(l)) d[id] = l.map(String).filter(function (x) { return APP_JOB_RE.test(x); });
+    });
+    st.data = d; st.op = Date.now(); st.bezig = null; return d;
+  }).catch(function (e) { st.bezig = null; st.data = null; st.foutOp = Date.now(); throw e; });
+  return st.bezig;
+}
 // wv506 (David JA 15-10 06:25): "Niet meer nodig" sluit ook de klus erachter. Pas na de ↩️-minuut; de databank toetst zelf (alleen
 // door David met exact app-bewijs "Niet meer nodig", ≥ 120 s dicht, rij wacht nog op David; een andere kaart voor dezelfde rij die
 // open, nieuwer of door David gedaan is wint) en zet de rij via
@@ -8944,21 +8964,31 @@ async function appVoorJouRoute(req, res, a, kanaal) {
 // voorjou), wachtende agenda-✅ (uitvoeren open en nog niet verlopen) en dag-berichten van vandaag in het hoofdkanaal (meld dag,
 // of zonder meld: dringend; de briefing niet, die heeft een eigen kaart bovenaan Voor jou). Ontdubbeld tegen open kaarten: eerst de
 // koppeling (herkomst.vraag = job:hash, appVjGekoppeld; review wv588 M3-rest), dan een wv-nummer in de vraagzin dat in een open
-// kaarttitel staat. Per punt de berichttekst (de app toont hem pas na "Lees en beantwoord"), begrensd. Puur: getoetst in 9d.
+// kaarttitel staat. wv1004 (David 24-10: na een Ja op de kaart kwam de chatversie van dezelfde vraag juist tevoorschijn): ook dichte
+// kaarten (appVjPunten geeft < 7 dagen dicht mee); de koppeling herkomst.vraag bij elke status, een wv-nummer of de klus (kaartJobs:
+// ouder_job van de rij die de kaart zette = agent_job van het agentrapport) bij een dichte besluitkaart alleen voor een vraag van vóór
+// het sluiten (een latere vraag is een nieuwe; Fable wv1004 #1). Doe-kaarten nemen via wv of klus niets over (Fable wv926 #6).
+// Een verborgen vraag houdt zijn v:-sleutel in gezien-david.json (de opruim doet alleen k:); onschadelijk. Per punt de berichttekst (de app toont hem pas na "Lees en beantwoord"), begrensd. Puur: getoetst in 9d.
 // review wv594 #6: hooguit 6000 tekens per bericht (30 punten ≈ 180 kB per lading); een dag-punt alleen een kort begin (de app toont
 // er één regel van). Langer = afgekapt: true; de app zet er dan geen knoppen onder maar verwijst naar het gesprek (review #7).
 const APP_MOET_BERICHT_MAX = 6000;
 const APP_MOET_DAG_MAX = 600;
 const APP_MOET_MAX = 30;
 const APP_MOET_WV_RE = /\bwv\s?(\d{2,4})\b/gi;
-function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu) {
-  const vandaag = appYmd(nu), gekoppeld = {}, kaartWv = {};
+function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu, kaartJobs) {
+  const vandaag = appYmd(nu), gekoppeld = {}, kaartWv = {}, kaartJob = {};
+  // tot = tot wanneer gestelde vragen wijken: open of later (review wv594 #1: ook geparkeerd) = altijd, dicht = tot gesloten_op
+  const totZet = function (o, k, tot) { if (!(o[k] >= tot)) o[k] = tot; };
   (kaarten || []).forEach(function (p) {
-    if (!p || (p.status !== 'open' && p.status !== 'later')) return;   // review wv594 #1: ook een geparkeerde kaart verbergt zijn vraag
-    const g = appVjGekoppeld(p);
+    if (!p || !p.status) return;
+    const wacht = p.status === 'open' || p.status === 'later', g = appVjGekoppeld(p);
     if (g) gekoppeld[g] = 1;
-    // Fable-diffreview wv926 #6: alleen een besluitkaart neemt een vraag met hetzelfde wv-nummer over (een doe-kaart is een andere vraag)
-    if (p.soort === 'besluit') String(p.titel || '').replace(APP_MOET_WV_RE, function (m, n) { kaartWv[n] = 1; return m; });
+    // Fable-diffreview wv926 #6: alleen een besluitkaart neemt een vraag met hetzelfde wv-nummer of van dezelfde klus over
+    if (p.soort !== 'besluit') return;
+    const tot = wacht ? Infinity : Date.parse(p.gesloten_op || '');
+    if (!(tot > 0)) return;   // dicht zonder sluittijd: niets
+    String(p.titel || '').replace(APP_MOET_WV_RE, function (m, n) { totZet(kaartWv, n, tot); return m; });
+    ((kaartJobs && kaartJobs[p.id]) || []).forEach(function (j) { totZet(kaartJob, j, tot); });
   });
   const uit = [];
   ['hoofd', 'machinekamer'].forEach(function (kanaal) {
@@ -8982,8 +9012,8 @@ function appMoetIetsUit(perKanaal, vragen, agendaKnoppen, kaarten, nu) {
         const v = appVraagUit(x.antwoord);
         if (!v || v.hash !== x.vraag_hash || gekoppeld[id]) return;
         let wv = false;
-        v.tekst.replace(APP_MOET_WV_RE, function (m, n) { if (kaartWv[n]) wv = true; return m; });   // alleen de vraagzin: een rapport noemt vaak tientallen wv-nummers
-        if (wv) return;
+        v.tekst.replace(APP_MOET_WV_RE, function (m, n) { if (t < kaartWv[n]) wv = true; return m; });   // alleen de vraagzin: een rapport noemt vaak tientallen wv-nummers
+        if (wv || (x.agent_job && t < kaartJob[x.agent_job])) return;
         uit.push(Object.assign({ punt: 'v:' + id, soort: 'vraag', hash: x.vraag_hash, tekst: v.tekst, gevoelig: r.gevoelig !== false, bericht: appMoetBericht(x.antwoord), afgekapt: appMoetAf(x.antwoord) }, basis));
         return;
       }
@@ -9015,7 +9045,9 @@ async function appMoetIets(kaarten, nu) {
     if (r.fout) throw r.fout;
     per[k] = r.items;
   }
-  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu);
+  let jobs = {};
+  try { jobs = await appVjVraagJobs(); } catch (e) { logError('app-voor-jou', e); jobs = {}; }   // dan zoals voor wv1004: alleen koppeling en wv-nummer
+  return appMoetIetsUit(per, appVragen(), appAgendaKnoppen(), kaarten, nu, jobs);
 }
 // review wv594 #2: een kaart die niet meer op David wacht (dicht, of later met een datum na vandaag) gaat uit gezien-david.json, zodat
 // hij opnieuw telt als hij terugkomt (heropend, later verlopen); zoals gezienBijwerken in de app. Alleen kaarten die de lijst echt
