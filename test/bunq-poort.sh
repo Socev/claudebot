@@ -51,7 +51,7 @@ let kluisQuery = '', kluisWeg = false;
 api.listen(0, '127.0.0.1', async function () {
   const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD, BUNQ_API_BASIS: 'http://127.0.0.1:' + api.address().port, BUNQ_PAUZE_MS: '0',
     SUPABASE_URL: 'https://abcdef.supabase.co', SUPABASE_MCP_TOKEN: 'pat-geheim' };
-  const g = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, spawn, VAULT: W, SECRET: SECRET,
+  const g = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, spawn, VAULT: W, SECRET: SECRET,
     __dirname: process.cwd(), process: { env: env, execPath: process.execPath },
     fetch: async function (url, o) {
       if (kluisWeg) throw new Error('netwerk weg');

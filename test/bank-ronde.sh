@@ -202,7 +202,7 @@ ebApi.listen(0, '127.0.0.1', () => bunqApi.listen(0, '127.0.0.1', async function
     const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD, BANK_API_BASIS: 'http://127.0.0.1:' + ebApi.address().port,
       BUNQ_API_BASIS: 'http://127.0.0.1:' + bunqApi.address().port, BUNQ_PAUZE_MS: '0', SUPABASE_URL: 'https://abcdef.supabase.co', SUPABASE_MCP_TOKEN: 'pat' };
     let kluisFout = false;
-    const g = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT: VAULT, SECRET: 'x'.repeat(40),
+    const g = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, AbortSignal, Promise, JSON, Date, VAULT: VAULT, SECRET: 'x'.repeat(40),
       __dirname: process.cwd(), process: { env: env, execPath: process.execPath, pid: process.pid },
       fetch: async function () { if (kluisFout) throw new Error('weg'); return { ok: true, json: async () => [{ name: 'enablebanking_app_key', w: PEM }, { name: 'enablebanking_app_id', w: APP }, { name: 'bunq_api_key', w: BSLEUTEL }] }; },
       appSbRpc: async function (fn, body) {

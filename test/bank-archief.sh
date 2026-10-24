@@ -549,7 +549,7 @@ process.stdout.write(JSON.stringify({ type: 'result', is_error: false, usage: { 
 `, { mode: 0o700 });
     const env = { PATH: process.env.PATH, HOME: W, TZ: 'Europe/Amsterdam', BANK_DIR: BD, BANK_CLAUDE_BIN: nep, CLAUDE_CODE_OAUTH_TOKEN: 'oauth-mag-mee',
       SUPABASE_URL: 'https://abcdef.supabase.co', SUPABASE_MCP_TOKEN: 'pat-geheim', ANDERE_SLEUTEL: 'mag-niet-mee' };
-    const g = { require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, setInterval, AbortSignal, Promise, JSON, Date, spawn, VAULT: W, SECRET: SECRET,
+    const g = { VV: () => require(require('path').resolve('vault-veilig.js')), require, fs, path, crypto, Buffer, console, URL, setTimeout, clearTimeout, setInterval, AbortSignal, Promise, JSON, Date, spawn, VAULT: W, SECRET: SECRET,
       __dirname: process.cwd(), process: { env: env, execPath: process.execPath, pid: process.pid },
       fetch: async function () { kluis++; return { ok: true, json: async () => [] }; },
       logError: (w, e) => logs.push(w + ': ' + (e && e.message || e)), schrijfLog: (r) => logs.push(r), nu: () => 'NU', velden: (o) => JSON.stringify(o),

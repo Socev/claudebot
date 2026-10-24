@@ -17,6 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const VV = require('./vault-veilig.js');   // wv900: vault lezen en schrijven zonder een symlink te volgen
 const SPREEK = require('./spreektekst.js');   // wv803
 
 const PRAKTIJKEN = {
@@ -499,10 +500,10 @@ function maak(deps) {
     if (!PRAKTIJKEN[pr]) return { status: 404, fout: 'onbekende praktijk' };
     const f = pad(pr);
     let st;
-    try { st = fs.statSync(f); } catch (e) { return { status: 200, praktijk: pr, ontbreekt: true, bandjes: [], instellingen: {}, fouten: [], dicht: 'de registerpagina ontbreekt' }; }
+    try { st = fs.lstatSync(f); } catch (e) { return { status: 200, praktijk: pr, ontbreekt: true, bandjes: [], instellingen: {}, fouten: [], dicht: 'de registerpagina ontbreekt' }; }
     let c = cache[pr];
     if (!c || c.mtime !== st.mtimeMs || c.grootte !== st.size) {   // gelijkheid, niet "nieuwer": een teruggezette kopie is ouder (Fable #2)
-      c = cache[pr] = { mtime: st.mtimeMs, grootte: st.size, p: parse(fs.readFileSync(f, 'utf8'), PRAKTIJKEN[pr].voorvoegsel) };
+      c = cache[pr] = { mtime: st.mtimeMs, grootte: st.size, p: parse(VV.lees(f), PRAKTIJKEN[pr].voorvoegsel) };
     }
     const p = c.p;
     const redenen = [];
@@ -522,30 +523,17 @@ function maak(deps) {
     return { status: 200, praktijk: pr, naam: PRAKTIJKEN[pr].naam, instellingen: p.instellingen, bandjes: p.bandjes.map(bandjeUit),
       fouten: p.fouten, conflicten: conf, teruggezet: teruggezet, dicht: redenen.length ? redenen.join(' · ') : null };
   }
-  function schrijfAtomair(f, inhoud) {
-    const tmpDir = path.join(DIR, 'tmp');
-    mkdir(tmpDir);
-    const tmp = path.join(tmpDir, path.basename(f) + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex'));
-    fs.writeFileSync(tmp, inhoud, { mode: 0o644 });
-    try { fs.chmodSync(tmp, 0o644); } catch (e) {}
-    try { fs.renameSync(tmp, f); }          // zelfde schijf als de vault (gemeten 22-10, device 64514): atomair
-    catch (e) {
-      if (!e || e.code !== 'EXDEV') { try { fs.unlinkSync(tmp); } catch (x) {} throw e; }
-      // andere schijf (alleen in een proefopstelling): tijdelijk bestand naast de pagina, dan rename (kort zichtbaar voor bisync)
-      try { fs.unlinkSync(tmp); } catch (x) {}
-      const naast = path.join(path.dirname(f), '.' + path.basename(f) + '.' + crypto.randomBytes(4).toString('hex') + '.tmp');
-      fs.writeFileSync(naast, inhoud, { mode: 0o644 });
-      fs.renameSync(naast, f);
-      fout('bandjes-exdev', new Error('tmp op een andere schijf dan de vault; naast de pagina geschreven'));
-    }
-  }
+  // wv900: eigen tmp met O_EXCL in de getoetste vaultmap + rename (vault-veilig.js). Vroeger een tmp buiten de vault + rename:
+  // dat volgde een map die socev door een symlink verving (rename naar een map naar keuze).
+  function schrijfAtomair(f, inhoud) { VV.schrijf(f, inhoud, { modus: 0o644 }); }
+
   // Voert een mutatie uit: lezen, toetsen, schrijven, journaal — allemaal synchroon.
   function muteer(pr, actie, fn) {
     const l = lees(pr);
     if (l.status !== 200) return l;
     if (l.dicht) return { status: 409, fout: l.dicht, dicht: true };
     const f = pad(pr);
-    const md = fs.readFileSync(f, 'utf8');
+    const md = VV.lees(f);
     const r = fn(md, PRAKTIJKEN[pr].voorvoegsel);
     if (r.status !== 200 || r.ongewijzigd) return r;
     schrijfAtomair(f, r.md);
@@ -583,10 +571,7 @@ function maak(deps) {
       mkdir(path.join(DIR, 'tmp'));
       lijst.forEach(function (x) {
         const doel = path.join(map, basis + x.achter);
-        const tmp = path.join(DIR, 'tmp', basis + x.achter + '.' + crypto.randomBytes(4).toString('hex'));
-        fs.copyFileSync(x.bron, tmp);
-        fs.chmodSync(tmp, 0o644);
-        try { fs.renameSync(tmp, doel); } catch (e) { if (e && e.code === 'EXDEV') { fs.copyFileSync(tmp, doel); fs.unlinkSync(tmp); } else { try { fs.unlinkSync(tmp); } catch (y) {} throw e; } }
+        VV.schrijf(doel, fs.readFileSync(x.bron), { modus: 0o644 });   // wv900: bron = Bestanden op de pod; doel in de getoetste vaultmap
         geschreven.push(doel);
       });
       const v = b.velden;
@@ -612,7 +597,7 @@ function maak(deps) {
     const l = lees(pr);
     if (l.status !== 200) return l;
     if (l.dicht) return { status: 409, fout: l.dicht, dicht: true };
-    const md = fs.readFileSync(pad(pr), 'utf8');
+    const md = VV.lees(pad(pr));
     const vv = PRAKTIJKEN[pr].voorvoegsel;
     const b = zoek(parse(md, vv), id);
     if (!b) return { status: 404, fout: 'dit bandje staat niet in het register' };
@@ -740,7 +725,7 @@ function routes(deps) {
   }
   function schrijfBoxRij(l, soort, gemeten) {
     try {
-      const t = fs.readFileSync(deps.boxPad, 'utf8');
+      const t = VV.lees(deps.boxPad);
       const anker = eersteRij(t);   // eerste echte rij, niet een kop in een codeblok erboven
       if (anker < 0) return false;
       const tijd = new Date(klok()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
@@ -753,15 +738,7 @@ function routes(deps) {
         '- voorstel: ' + (soort === 'teruggezet' ? 'de laatst bewaarde tekst en velden staan in `' + path.join(deps.dir, 'journaal.jsonl') + '`; zet ze terug in `' + pagina + '` met een versie ≥ die uit het journaal (of hoog de versie met 1 op als de pagina zo goed is; bij "eerdere tekst van vN" of "in centrale" staan de versies al gelijk: dan versie ophogen of de tekst/het veld in centrale rechtzetten). Daarna gaat de mini-app vanzelf weer open.'
           : soort === 'conflict' ? 'vergelijk de conflictkopie met `' + pagina + '`, neem wat ontbreekt over en verwijder de kopie; daarna gaat de mini-app vanzelf weer open.'
           : 'dubbel of verkeerd id in `' + pagina + '` rechtzetten (ids zijn onveranderlijk; hernoem de dubbele).') + '\n';
-      // tmp buiten de vault (zelfde schijf; niet zichtbaar voor bisync) met de modus van het origineel (umask 077 in run.sh; Fable wv743 #5)
-      const modus = fs.statSync(deps.boxPad).mode & 0o777;
-      const tmpDir = path.join(deps.dir, 'tmp');
-      fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
-      const tmp = path.join(tmpDir, 'machinekamer.md.' + crypto.randomBytes(4).toString('hex'));
-      fs.writeFileSync(tmp, t.slice(0, anker) + rij + t.slice(anker), { mode: modus });
-      fs.chmodSync(tmp, modus);
-      try { fs.renameSync(tmp, deps.boxPad); }
-      catch (e) { try { fs.unlinkSync(tmp); } catch (x) {} if (e && e.code === 'EXDEV') { fs.writeFileSync(deps.boxPad, t.slice(0, anker) + rij + t.slice(anker)); } else throw e; }
+      VV.schrijf(deps.boxPad, t.slice(0, anker) + rij + t.slice(anker));   // wv900: modus van het origineel, eigen tmp met O_EXCL, geen link volgen
       log('bandjes box-rij praktijk=' + l.praktijk + ' soort=' + soort);
       return true;
     } catch (e) { fout('bandjes-box', e); return false; }

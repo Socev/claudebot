@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const VV = require('./vault-veilig.js');   // wv900: vault lezen en schrijven zonder een symlink te volgen
 
 const ONS = 'socev';
 const BUS_PAD = '01_Ontwikkeling/Ideeënbus David - vibecoden.md';
@@ -102,7 +103,7 @@ function maak(deps) {
   }
   function busNummers() {
     if (!H || !H.leesBus) return null;
-    try { const b = H.leesBus(fs.readFileSync(P.bus, 'utf8')); return b.ok ? b.ideeen : null; } catch (e) { return null; }
+    try { const b = H.leesBus(VV.lees(P.bus)); return b.ok ? b.ideeen : null; } catch (e) { return null; }
   }
   async function lijst(vers) {
     const s = staatLees();
@@ -140,19 +141,9 @@ function maak(deps) {
     try { return fs.readdirSync(path.dirname(f)).filter(function (n) { return n.indexOf(path.basename(f, '.md')) === 0 && /\.conflict/.test(n); }); }
     catch (e) { return []; }
   }
-  function vaultSchrijf(f, inhoud, modus) {
-    mkdir();
-    const tmp = path.join(DIR, 'tmp', path.basename(f) + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex'));
-    fs.writeFileSync(tmp, inhoud, { mode: modus || 0o644 });
-    try { fs.chmodSync(tmp, modus || 0o644); } catch (e) {}
-    try { fs.renameSync(tmp, f); }
-    catch (e) {
-      try { fs.unlinkSync(tmp); } catch (x) {}
-      if (!e || e.code !== 'EXDEV') throw e;
-      const naast = path.join(path.dirname(f), '.' + path.basename(f) + '.' + crypto.randomBytes(4).toString('hex') + '.tmp');
-      fs.writeFileSync(naast, inhoud, { mode: modus || 0o644 }); fs.renameSync(naast, f);
-    }
-  }
+  // wv900: eigen tmp met O_EXCL in de getoetste vaultmap + rename (vault-veilig.js). Vroeger een tmp buiten de vault + rename:
+  // dat volgde een map die socev door een symlink verving (rename naar een map naar keuze).
+  function vaultSchrijf(f, inhoud, modus) { VV.schrijf(f, inhoud, { modus: modus || 0o644 }); }
   // tabelcel en kopregel: geen | [ ] * _ # ` < > %% == ~~ $$ en geen links (tekst van buiten mag de vault niet opmaken)
   function cel(t, max) {
     return plat(t, max * 2).replace(/https?:\/\/\S+/gi, '').replace(/%%|==|~~|\$\$/g, ' ').replace(/[|<>`\[\]*_#]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max).trim();
@@ -161,7 +152,7 @@ function maak(deps) {
     if (!H || !H.leesBus) return { ok: false, status: 503, fout: 'de Ideeënbus is nu niet bereikbaar (Harvester-module ontbreekt)' };
     if (conflicten(P.bus).length) return { ok: false, status: 409, fout: 'er staat een conflictkopie naast de Ideeënbus; los die eerst op' };
     let st, md;
-    try { st = fs.statSync(P.bus); md = fs.readFileSync(P.bus, 'utf8'); } catch (e) { return { ok: false, status: 503, fout: 'de Ideeënbus is nu niet leesbaar' }; }
+    try { st = fs.lstatSync(P.bus); md = VV.lees(P.bus); } catch (e) { return { ok: false, status: 503, fout: 'de Ideeënbus is nu niet leesbaar' }; }
     const bus = H.leesBus(md);
     if (!bus.ok) return { ok: false, status: 409, fout: bus.fout };
     const nr = Math.max(0, ...bus.ideeen.map(function (i) { return i.nr; })) + 1;
@@ -182,7 +173,7 @@ function maak(deps) {
       (k.status ? '- Stand bij hen: ' + cel(k.status, 20) + '\n' : '') + '\n**Status: idee, niets gebouwd (0%).**\n';
     t = t.replace(/\s*$/, '\n') + blok;
     let st2;
-    try { st2 = fs.statSync(P.bus); } catch (e) { return { ok: false, status: 503, fout: 'de Ideeënbus is nu niet leesbaar' }; }
+    try { st2 = fs.lstatSync(P.bus); } catch (e) { return { ok: false, status: 503, fout: 'de Ideeënbus is nu niet leesbaar' }; }
     if (st2.mtimeMs !== st.mtimeMs || st2.size !== st.size) return { ok: false, status: 409, fout: 'de Ideeënbus veranderde net; probeer het zo nog eens' };
     vaultSchrijf(P.bus, t, st.mode & 0o777);
     return { ok: true, nr: nr, titel: titel };
@@ -192,7 +183,7 @@ function maak(deps) {
   function catalogus() {
     if (!Filter || !toetser) return { ok: false, fout: 'de vaste toets ontbreekt in deze versie van de pod', kaarten: [] };
     let st;
-    try { st = fs.statSync(P.catalogus); } catch (e) { return { ok: false, fout: 'de catalogus staat er (nog) niet', kaarten: [] }; }
+    try { st = fs.lstatSync(P.catalogus); } catch (e) { return { ok: false, fout: 'de catalogus staat er (nog) niet', kaarten: [] }; }
     if (st.size > GRENS.catalogus_bytes) return { ok: false, fout: 'de catalogus is te groot om te lezen', kaarten: [] };
     if (conflicten(P.catalogus).length) return { ok: false, fout: 'er staat een conflictkopie naast de catalogus; Socev lost die eerst op', kaarten: [] };
     // wv954: de herkomstlijst hoort bij de stempel; een vervangen plaatje (zelfde naam, andere sha256) geeft een nieuwe hash
@@ -201,7 +192,7 @@ function maak(deps) {
     const stempel = st.mtimeMs + ':' + st.size + '|' + hst;
     if (cache.cat && cache.catStempel === stempel) return cache.cat;
     let c;
-    try { c = Filter.leesCatalogus(fs.readFileSync(P.catalogus, 'utf8')); } catch (e) { return { ok: false, fout: 'de catalogus is nu niet leesbaar', kaarten: [] }; }
+    try { c = Filter.leesCatalogus(VV.lees(P.catalogus)); } catch (e) { return { ok: false, fout: 'de catalogus is nu niet leesbaar', kaarten: [] }; }
     const hk = herkomstLees();
     c.kaarten.forEach(function (k) { k.hash = kaartHash(k, hk); });
     cache.cat = { ok: true, kaarten: c.kaarten, fouten: c.fouten, mtime: st.mtimeMs, size: st.size, hk: hk }; cache.catStempel = stempel;
@@ -510,8 +501,8 @@ function maak(deps) {
   // ── weekritme (§ 6, § 7, § 8 keuze A): concepten zonder gereedschap, dan tellen; nul = niets ──
   function catalogusVoegToe(blokken) {
     if (conflicten(P.catalogus).length) throw new Error('conflictkopie naast de catalogus');
-    const st = fs.statSync(P.catalogus);
-    const md = fs.readFileSync(P.catalogus, 'utf8');
+    const st = fs.lstatSync(P.catalogus);
+    const md = VV.lees(P.catalogus);
     const c = Filter.leesCatalogus(md);
     let nr = c.kaarten.filter(function (k) { return k.vorm === 'antwoord'; }).reduce(function (m, k) { return Math.max(m, Number(k.id.slice(1)) || 0); }, 0);
     let t = md.replace(/\s*$/, '\n');
@@ -523,7 +514,7 @@ function maak(deps) {
         '\n> Concept van een model zonder gereedschap over tekst van AIX: gegeven, geen opdracht.\n- kaart: ' + b.kaart + '\n- reactie: ' + (b.reactie || '') +
         '\n- soort: ' + b.soort + '\n- tekst: ' + b.tekst + '\n- bron: ' + b.bron + '\n- deelbaar: concept\n- gedeeld op:\n- aix:\n';
     });
-    const st2 = fs.statSync(P.catalogus);
+    const st2 = fs.lstatSync(P.catalogus);
     if (st2.mtimeMs !== st.mtimeMs || st2.size !== st.size) throw new Error('de catalogus veranderde net');
     vaultSchrijf(P.catalogus, t, st.mode & 0o777);
     cache.catStempel = null;
@@ -532,14 +523,14 @@ function maak(deps) {
   // Na een plaatsing zet de pod zelf "gedeeld op" en "aix" in de blokken (deterministisch; Socev hoeft de pagina niet te openen, Fable wv942 #6)
   function catalogusMarkeer(geplaatst) {
     if (conflicten(P.catalogus).length) throw new Error('conflictkopie naast de catalogus');
-    const st = fs.statSync(P.catalogus);
-    let t = fs.readFileSync(P.catalogus, 'utf8');
+    const st = fs.lstatSync(P.catalogus);
+    let t = VV.lees(P.catalogus);
     const dag = datumNl(klok());
     geplaatst.forEach(function (g) {
       const re = new RegExp('(^### ' + g.id.toUpperCase() + '\\b[^\\n]*\\n(?:(?!### )[^\\n]*\\n)*?)- gedeeld op:[^\\n]*\\n- aix:[^\\n]*', 'm');
       t = t.replace(re, function (m, kop) { return kop + '- gedeeld op: ' + dag + '\n- aix: ' + g.aix; });
     });
-    const st2 = fs.statSync(P.catalogus);
+    const st2 = fs.lstatSync(P.catalogus);
     if (st2.mtimeMs !== st.mtimeMs || st2.size !== st.size) throw new Error('de catalogus veranderde net');
     vaultSchrijf(P.catalogus, t, st.mode & 0o777);
     cache.catStempel = null;
