@@ -3686,6 +3686,7 @@ function handleRequest(req, res) {
       pot_afschrift: potAfInfo(),   // wv787: App POT-afschriften (pot-afschrift.js in deze release?, laatste maandronde; geen inhoud)
       bandjes: bandjesInfo(),
       gezondheid: typeof gezondheidInfo === 'function' ? gezondheidInfo() : { aan: false },   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
+      zoek_snel: typeof zoekSnelInfo === 'function' ? zoekSnelInfo() : { aan: false },   // wv1252: Zoek snel (module, schakelaar, laatste uitkomst en duur; geen inhoud)
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
@@ -4727,6 +4728,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
 APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
+APP_GLIJD_ROUTES.add('POST /app/zoek-snel');   // wv1252: Zoek snel = David die typt (onder het invoerslot op een vaste plek: niet in APP_SLOT_VRIJ)
 const APP_HEROPEND_MS = 24 * 60 * 60 * 1000;   // koppel-heropend verloopt (Fable-review 7-10 #8)
 // wv205 (David 8-10 ± 16:30, bouwplan § 4.4e): op een meereizend apparaat hooguit één vingerafdruk per dagdeel. De sessie
 // geldt tot het einde van het dagdeel (06/12/18/24 u Amsterdamse tijd) van de vingerafdruk, nooit langer dan 6 u; vlak voor
@@ -4829,7 +4831,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
 const APP_BSN_SYS = '[Systeem: in Davids invoer stond een BSN-achtig getal (9 cijfers die de elfproef halen); de pod heeft het weggelaten (' + APP_BSN_MASKER + '). Vraag er niet naar; meestal was het een ander nummer.]';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], managers: [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], managers: [], 'zoek-snel': [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -6718,7 +6720,8 @@ async function appBeurt(req, res, reg, a, s, d) {
       st = appStartBeurt(a, kanaal, promptTekst, { beurt_id: bid, soort: 'bericht', tekst: tekst, upload: upload, rij: rijAan || undefined,
         antwoord_op: antwOp ? antwOp.x.job_id : undefined,
         // wv628 (§ 4.2 1a/1b): rijregel en tussendoor-regel pas bij de start (wat er dan afrondde of binnenkwam)
-        bijStart: kanaal === 'machinekamer' ? function () { return appRijStaart(jidRef, kanaal, !!antwOp); } : undefined });
+        bijStart: kanaal === 'machinekamer' ? function () { return appRijStaart(jidRef, kanaal, !!antwOp); }
+          : kanaal === 'hoofd' ? function () { return typeof zoekSnelStaart === 'function' ? zoekSnelStaart() : ''; } : undefined });   // wv1252: wat David intussen via Zoek snel vroeg
       jidRef = st.job_id || null;
     }
   } finally { delete appStaat.beurtStartend[bh]; klaarJob(st && st.job_id || null); }
@@ -8243,7 +8246,10 @@ async function appLogTijden(kanaal, telegram) {
   const kies = function (c) { return telegram === 'zacht' ? c.z : telegram ? c.tg : c.t; };
   if (c && c.mtime === st.mtimeMs && c.size === st.size) return kies(c);
   const t = [], tg = [], z = [];
-  (await appLogLees(kanaal)).forEach(function (x) { (x.soort === 'telegram' ? tg : t).push(Date.parse(x.t)); if (appInklapRapport(kanaal, x)) z.push(Date.parse(x.t)); });
+  (await appLogLees(kanaal)).forEach(function (x) {
+    if (x.soort === 'zoek') return;   // wv1252 (Fable #7): een zoekvraag deed David zelf; geen "nieuw" op zijn andere apparaten
+    (x.soort === 'telegram' ? tg : t).push(Date.parse(x.t)); if (appInklapRapport(kanaal, x)) z.push(Date.parse(x.t));
+  });
   appStaat.logTijden[kanaal] = { mtime: st.mtimeMs, size: st.size, t: t, tg: tg, z: z };
   return kies(appStaat.logTijden[kanaal]);
 }
@@ -11455,6 +11461,7 @@ function handleApp(req, res) {
         if (route === 'POST /app/rij/terug') return appRijTerug(req, res, a, d);   // wv628
         if (route.indexOf('GET /app/geschiedenis/') === 0) return appGeschiedenis(req, res, reg, a, route.slice('GET /app/geschiedenis/'.length));
         if (route === 'POST /app/zoek') return appZoek(req, res, a, d);   // wv350
+        if (route === 'POST /app/zoek-snel') return typeof appZoekSnel === 'function' ? appZoekSnel(req, res, a, d) : appWeiger(res, 404, 'onbekend', 'zoek-snel');   // wv1252
         if (route === 'GET /app/broedstoof') return appBroedstoof(req, res, a);   // wv891: apparaat (privé-kaart op een vaste plek)
         if (route === 'GET /app/briefing') return appBriefingRoute(req, res, a);   // wv891
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
@@ -12918,7 +12925,7 @@ async function appReactieZet(kanaal, sl, duim, x) {
   if (!appTeller('reactie', APP_REACTIE_PER_UUR, 3600000)) return { status: 429, fout: 'te veel reacties dit uur', reden: 'grens reactie' };
   const geheim = process.env.N8N_WEBHOOK_VERBETERLOG || '';
   if (!geheim) return { status: 503, fout: 'verbeterlog niet ingericht', reden: 'geen verbeterlog-geheim' };
-  const soort = x.soort === 'socev' ? (x.bron || 'socev') : x.soort === 'telegram' ? 'telegram' : 'app';
+  const soort = x.soort === 'socev' ? (x.bron || 'socev') : x.soort === 'telegram' ? 'telegram' : x.soort === 'zoek' ? 'zoek-snel' : 'app';   // wv1252
   let r;
   try {
     r = await appSbRpc('sb_verbeterlog_toevoegen', { p: { secret: geheim, bron: 'app-reactie', soort: 'reactie', outputsoort: (kanaal + '/' + soort).slice(0, 60),
@@ -14240,7 +14247,8 @@ const HARVESTER_BIN = process.env.HARVESTER_CLAUDE_BIN || 'claude';   // alleen 
 const HARVESTER_ENV = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'NODE_VERSION'];
 // Eén claude -p-aanroep zoals de bankindeling (Fable wv820 #10): geen tools, geen MCP, geen sessie, lege map, prompt via stdin.
 // Account 2 (zoals de agents); kan dat niet, dan account 1 alleen als Davids reserve daar over is (account1Vangnet), anders niet.
-async function harvesterClaude(systeem, prompt, schema) {
+// wv1252 (Fable #14): o.timeoutMs voor Zoek snel (12 s); standaard 360 s zoals de Harvester. verbruik.kosten = total_cost_usd (equivalent).
+async function harvesterClaude(systeem, prompt, schema, o) {
   let tok = '', account = kiesAccount({ account: 2 });
   if (account === 2) { try { tok = await account2Token(); } catch (e) { tok = ''; } }
   if (!tok) {
@@ -14263,7 +14271,7 @@ async function harvesterClaude(systeem, prompt, schema) {
     catch (e) { opruim(); return klaar({ ok: false, fout: 'claude start niet' }); }
     k.stdin.on('error', function () {});
     try { k.stdin.end(prompt); } catch (e) {}
-    const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, 360000);
+    const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, (o && o.timeoutMs) || 360000);
     k.stdout.setEncoding('utf8'); k.stderr.setEncoding('utf8');
     k.stdout.on('data', function (c) { if (uit.length < 4e6) uit += c; });
     k.stderr.on('data', function (c) { if (fout.length < 1e4) fout += c; });
@@ -14277,7 +14285,8 @@ async function harvesterClaude(systeem, prompt, schema) {
       let s = j.structured_output;
       if (!s && typeof j.result === 'string') { const m = /\{[\s\S]*\}/.exec(j.result); if (m) { try { s = JSON.parse(m[0]); } catch (e) {} } }
       if (!s || typeof s !== 'object') return klaar({ ok: false, fout: 'antwoord zonder kaarten' });
-      klaar({ ok: true, data: s, verbruik: { account: account, in: (j.usage || {}).input_tokens || 0, uit: (j.usage || {}).output_tokens || 0, ms: j.duration_ms || null } });
+      klaar({ ok: true, data: s, verbruik: { account: account, in: (j.usage || {}).input_tokens || 0, uit: (j.usage || {}).output_tokens || 0, ms: j.duration_ms || null,
+        kosten: typeof j.total_cost_usd === 'number' ? j.total_cost_usd : null } });
     });
   });
 }
@@ -14868,6 +14877,136 @@ function secondbrainFinPagina(d) {
   } catch (e) { logError('secondbrain-financien', e); }
 }
 // ── einde secondbrain ──
+
+// ── Zoek snel (wv1252, 24/25-10-2026; ontwerp "01_Ontwikkeling/Snelle feitvragen - ontwerp (24-10-2026).md" § 7, Fable vooraf § 7.7) ──
+// David (24-10 23:41): een "Zoek snel"-veld achter het OVIS-logo, Sonnet zonder skills, alleen in de Brain, antwoord kopieerbaar. Logica in
+// zoek-snel.js (zoeken via een geopende map, masker, één Sonnet-aanroep zonder tools, natoets). Hier alleen de koppeling:
+// - POST /app/zoek-snel {tekst, zoek_id} na de app-poort (vingerafdruk). Niet in APP_SLOT_VRIJ: op een vaste plek onder het invoerslot,
+//   met het BSN-masker op de vraag (veld tekst) en in zoek-snel.js alleen 10_Zakelijk zonder personeel, uitvoer gemaskeerd (Fable #3).
+// - schakelaar ZOEK_SNEL_SCHAKELAAR {aan: true}; ontbreekt of onleesbaar = uit (podconventie, Fable #9). Grens 60 per uur, één tegelijk per
+//   apparaat; dezelfde zoek_id binnen 10 min = hetzelfde antwoord (geen tweede aanroep).
+// - geschiedenis: één regel in het app-log hoofd.jsonl (soort zoek, job_id = zoek_id), zodat het gesprek, de duimpjes en het gesprek-zoeken
+//   hem kennen. NIET in chat_log: de Poortwachter paart daar Davids laatste rij met Socevs rij ervóór (Fable vooraf #6; ontwerp § 1 #1).
+// - Socev weet het via een systeemregel achteraan de eerstvolgende getypte hoofdbeurt in de app (lijst op schijf, hooguit 5, tot de
+//   nachtreset van 03:00; tekst door appEenRegel: geen haken of markeringen uit een vaultpagina in Socevs sessie, Fable #2 en #8).
+// - api.log ziet alleen uitkomst en duur, nooit vraag of antwoord.
+// Ontbreekt zoek-snel.js in de release (terugrol), dan 404 op de route en zoek_snel.aan=false in /health.
+const ZOEK_SNEL_SCHAKELAAR = process.env.ZOEK_SNEL_SCHAKELAAR || '/opt/data/zoek-snel.json';
+const ZOEK_SNEL_REGELS = path.join(APP_DATA, 'zoek-snel-regels.json');
+const ZOEK_SNEL_PER_UUR = 60, ZOEK_SNEL_HERHAAL_MS = 10 * 60000, ZOEK_SNEL_REGELS_MAX = 5, ZOEK_SNEL_MODEL_MS = 12000, ZOEK_SNEL_MAX = 200;
+const zoekSnel = (function () {
+  const p = path.join(__dirname, 'zoek-snel.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ vault: VAULT, fout: logError, bsnMasker: function (t) { return appBsnMasker(t); },
+      claude: function (systeem, prompt, schema) { return harvesterClaude(systeem, prompt, schema, { timeoutMs: ZOEK_SNEL_MODEL_MS }); } });
+  } catch (e) { logError('zoek-snel', e); return null; }
+})();
+function zoekSnelAan() {
+  try { const j = JSON.parse(fs.readFileSync(ZOEK_SNEL_SCHAKELAAR, 'utf8')); return !!(j && j.aan === true); } catch (e) { return false; }
+}
+function zoekSnelInfo() {
+  const l = appStaat.zoekSnelLaatst || null;
+  return { aan: !!zoekSnel && zoekSnelAan(), module: !!zoekSnel, schakelaar: zoekSnelAan(), laatste: l ? { t: l.t, uitkomst: l.uitkomst, ms: l.ms } : null };
+}
+// Tekst voor de geschiedenis van het gesprek (de app toont daar markdown): het feit, de waarden en de bron.
+function zoekSnelTekst(r) {
+  const bron = (r.bronnen || []).map(function (b) { return b.naam + (b.updated ? ' (bijgewerkt ' + b.updated + ')' : ''); }).join(' · ');
+  if (r.soort === 'antwoord') {
+    return r.tekst + (r.waarden.length ? '\n\n' + r.waarden.map(function (w) { return '- ' + (w.label ? w.label + ': ' : '') + '`' + String(w.waarde).replace(/`/g, "'") + '`'; }).join('\n') : '') +
+      (bron ? '\n\nBron: ' + bron : '');
+  }
+  return (r.melding || 'Niet gevonden.') + (r.tekst ? ' ' + r.tekst : '') + (bron ? '\n\nKijk zelf: ' + bron : '');
+}
+// Geldig tot de eerstvolgende 03:00 Nederlandse tijd (de nachtreset van de hoofdsessie).
+function zoekSnelTot(t) {
+  try {
+    const nl = new Date(new Date(t).toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' }));
+    const doel = new Date(nl.getTime()); doel.setHours(3, 0, 0, 0);
+    if (doel <= nl) doel.setDate(doel.getDate() + 1);
+    return t + (doel - nl);
+  } catch (e) { return t + 12 * 3600000; }
+}
+function zoekSnelRegelsLees() {
+  let j = null;
+  try { j = appLeesStreng(ZOEK_SNEL_REGELS, { regels: [] }); } catch (e) { logError('zoek-snel-regels', e); return []; }
+  const nu = Date.now();
+  return (Array.isArray(j.regels) ? j.regels : []).filter(function (x) { return x && x.tot > nu; });
+}
+function zoekSnelRegelZet(r) {
+  try {
+    const kort = r.soort === 'antwoord' ? r.tekst : (r.melding || '') + (r.tekst ? ' ' + r.tekst : '');
+    const regels = zoekSnelRegelsLees();
+    regels.push({ t: Date.now(), tot: zoekSnelTot(Date.now()), uitkomst: r.soort, vraag: appEenRegel(r.vraag, 120), antwoord: appEenRegel(kort, 200),
+      bron: r.bronnen && r.bronnen[0] ? appEenRegel(r.bronnen[0].pad, 120) : '' });
+    appSchrijfJson(ZOEK_SNEL_REGELS, { regels: regels.slice(-ZOEK_SNEL_REGELS_MAX) });
+  } catch (e) { logError('zoek-snel-regels', e); }
+}
+// Bij de start van een getypte hoofdbeurt (bijStart): de regels als staart van de prompt, en de lijst leeg.
+function zoekSnelStaart() {
+  const regels = zoekSnelRegelsLees();
+  if (!regels.length) return '';
+  try { appSchrijfJson(ZOEK_SNEL_REGELS, { regels: [] }); } catch (e) { logError('zoek-snel-regels', e); }
+  return regels.map(function (x) {
+    return '\n[Systeem: om ' + appTijdKort(x.t) + ' zocht David zelf via Zoek snel (OVIS-logo in de app) "' + x.vraag + '" en kreeg: "' + x.antwoord + '"' +
+      (x.bron ? ' (bron ' + x.bron + ')' : '') + '. Dat staat ook in de geschiedenis van dit gesprek.]';
+  }).join('');
+}
+async function zoekSnelVoer(a, id, vraag) {
+  const t0 = Date.now();
+  let r;
+  try { r = await zoekSnel.zoek(vraag, { vast: a.soort === 'vast' }); }
+  catch (e) { logError('zoek-snel', e); r = null; }
+  if (!r) r = { soort: 'fout', vraag: vraag, tekst: '', waarden: [], bronnen: [], gelezen_als: [], melding: 'Zoek snel lukte nu niet.', reden: 'uitzondering', ms: {} };
+  const ms = Date.now() - t0;
+  const v = r.verbruik || {};
+  appStaat.zoekSnelLaatst = { t: new Date().toISOString(), uitkomst: r.soort, ms: ms };
+  const gelogd = await appLogSchrijf('hoofd', { t: new Date().toISOString(), getypt: new Date(t0).toISOString(), job_id: id, soort: 'zoek', apparaat: a.id, tekst: vraag,
+    antwoord: zoekSnelTekst(r), ok: r.soort !== 'fout', fout: r.soort === 'fout' ? String(r.reden || 'fout').slice(0, 200) : undefined, bestanden: [],
+    zoek: { uitkomst: r.soort, reden: r.reden || undefined, ms: ms, zoek_ms: r.ms.zoek, model_ms: r.ms.model, account: v.account, kosten: v.kosten, tokens_uit: v.uit,
+      bronnen: (r.bronnen || []).map(function (b) { return b.pad; }), weggelaten: r.weggelaten || undefined, natoets_mis: r.natoets_mis || undefined, vast: a.soort === 'vast' || undefined } });
+  zoekSnelRegelZet(r);
+  return { status: 200, j: { ok: true, job_id: id, soort: r.soort, tekst: r.tekst, waarden: r.waarden, weggelaten: r.weggelaten || 0,
+    bronnen: (r.bronnen || []).map(function (b) { return { pad: b.pad, naam: b.naam, updated: b.updated || null }; }), gelezen_als: r.gelezen_als || [],
+    melding: r.melding || null, ms: ms, gelogd: gelogd } };
+}
+async function appZoekSnel(req, res, a, d) {
+  if (!zoekSnel) return appWeiger(res, 404, 'Zoek snel zit niet in deze versie van de pod', 'zoek-snel ontbreekt');
+  if (!zoekSnelAan()) { res._app.reden = 'zoek-snel uit'; return appStuur(res, 409, { ok: false, uit: true, fout: 'Zoek snel staat uit', melding: 'Zoek snel staat uit.' }); }
+  const id = String(d.zoek_id || '');
+  if (!APP_JOB_RE.test(id)) return appWeiger(res, 400, 'zoek_id ontbreekt', 'zoek-snel id');
+  const vraag = String(d.tekst == null ? '' : d.tekst).replace(/\s+/g, ' ').trim();
+  if (!vraag) return appWeiger(res, 400, 'typ een vraag', 'zoek-snel leeg');
+  if (vraag.length > ZOEK_SNEL_MAX) return appWeiger(res, 413, 'vraag te lang (max ' + ZOEK_SNEL_MAX + ' tekens)', 'zoek-snel te lang');
+  if (jobs[id]) return appWeiger(res, 409, 'deze zoek_id is al een beurt', 'zoek-snel id is job');   // nooit dezelfde id als een gewone beurt in het log
+  const st = appStaat.zoekSnel = appStaat.zoekSnel || { ids: {}, bezig: {} };
+  const nu = Date.now();
+  Object.keys(st.ids).forEach(function (k) { if (nu - st.ids[k].t > ZOEK_SNEL_HERHAAL_MS) delete st.ids[k]; });
+  const eerder = st.ids[id];
+  if (eerder) {
+    if (eerder.apparaat !== a.id) return appWeiger(res, 409, 'deze zoekvraag hoort bij een ander apparaat', 'zoek-snel id ander apparaat');
+    const r = await eerder.p;
+    res._app.reden = 'zoek-snel herhaling';
+    return appStuur(res, r.status, Object.assign({}, r.j, { al: true }));
+  }
+  if (st.bezig[a.id]) return appWeiger(res, 429, 'er loopt al een zoekvraag; even geduld', 'zoek-snel bezig');
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
+  if (st.ids[id] && st.ids[id].apparaat === a.id) {   // dezelfde zoek_id kwam tijdens de rolcheck binnen: hetzelfde antwoord
+    const r0 = await st.ids[id].p;
+    res._app.reden = 'zoek-snel herhaling';
+    return appStuur(res, r0.status, Object.assign({}, r0.j, { al: true }));
+  }
+  if (st.bezig[a.id] || st.ids[id]) return appWeiger(res, 429, 'er loopt al een zoekvraag; even geduld', 'zoek-snel bezig');   // tweede kwam tijdens de rolcheck
+  if (!appTeller('zoek-snel', ZOEK_SNEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + ZOEK_SNEL_PER_UUR + ')', 'grens zoek-snel');
+  st.bezig[a.id] = true;
+  const p = zoekSnelVoer(a, id, vraag).catch(function (e) { logError('zoek-snel', e); return { status: 500, j: { ok: false, fout: 'fout op de pod' } }; });
+  st.ids[id] = { t: nu, apparaat: a.id, p: p };
+  let r;
+  try { r = await p; } finally { delete st.bezig[a.id]; }
+  res._app.reden = 'zoek-snel ' + String(r.j && r.j.soort || r.status) + ' ' + String(r.j && r.j.ms || 0) + ' ms';
+  return appStuur(res, r.status, r.j);
+}
+// ── einde Zoek snel ──
 
 
 // ── Rolwachter (uitwijk stap 3, 6-10-2026) ─────────────────────────────────────────────────────────

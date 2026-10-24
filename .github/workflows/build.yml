@@ -314,6 +314,9 @@ jobs:
       - name: "app-vast (wv1051, OVIS M1b: vastzetten in het menu)"
         if: ${{ !cancelled() }}
         run: bash test/app-vast.sh
+      - name: "zoek-snel (wv1252, Zoek snel achter het OVIS-logo)"
+        if: ${{ !cancelled() }}
+        run: bash test/zoek-snel.sh
       # Health-rapporten (wv811): start zonder taalmodel — alleen de startregel terug, omgeving-allowlist, tijdgrens, één tegelijk.
       - name: "health-rapporten (wv811, start zonder taalmodel)"
         if: ${{ !cancelled() }}

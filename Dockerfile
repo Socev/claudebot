@@ -159,6 +159,7 @@ COPY studio.js /app/release-bootstrap/studio.js
 COPY bandjes.js /app/release-bootstrap/bandjes.js
 COPY harvester.js /app/release-bootstrap/harvester.js
 COPY secondbrain.js /app/release-bootstrap/secondbrain.js
+COPY zoek-snel.js /app/release-bootstrap/zoek-snel.js
 COPY gezondheid-app.js /app/release-bootstrap/gezondheid-app.js
 COPY app-vast.js /app/release-bootstrap/app-vast.js
 COPY ideeen.js /app/release-bootstrap/ideeen.js
