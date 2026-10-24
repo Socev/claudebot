@@ -160,7 +160,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('5 BB3 naam', /BB3-TG-naam/.test(ids), ids);
     toets('5 BB5 kvk bij twee knopen', /BB5-GH-TG-/.test(ids), ids);
     toets('5 BB6 kapotte pagina', /BB6-/.test(ids), ids);
-    toets('5 BB7 laatst_door en spoor', /BB7-GH-laatst-door/.test(ids) && /BB7-GH-spoor/.test(ids), ids);
+    toets('5 BB7 laatst_door en spoor', /BB7-GH-laatst-door/.test(ids) && /BB7-GH-spoor-20261024/.test(ids), ids);
     toets('5 nieuwe rijen hebben soort, status open', n.calls.filter((c) => c.fn === 'ovis_bibliothecaris_zet')[0].body.p_rijen.every((r) => r.soort === 'bibliothecaris' && r.status === 'open'));
     // BB5 niet bij niet-dezelfde-als
     db2.handvatten.push({ id: 10, knoop: 'GH', soort: 'niet-dezelfde-als', waarde: 'TG', waarde_norm: 'TG', status: 'voorgesteld', herkomst: { bron: 'pagina' } });
@@ -170,7 +170,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     fs.unlinkSync(path.join(v, '10_Zakelijk/SEL/Entiteit - SEL.md'));
     b = await m.bibliothecaris();
     const over = n.db.bevindingen.map((x) => x.bevinding_id);
-    toets('5 opgelost; BB7-spoor blijft open', b.open === 0 && b.opgelost >= 5 && over.length === 1 && over[0] === 'BB7-GH-spoor', over);
+    toets('5 opgelost; BB7-spoor blijft open', b.open === 0 && b.opgelost >= 5 && over.length === 1 && over[0] === 'BB7-GH-spoor-20261024', over);
     // droog schrijft niets
     const voor = n.calls.length; b = await m.bibliothecaris({ droog: true });
     toets('5 droog: alleen lezen', n.calls.slice(voor).every((c) => c.fn === 'ovis_register_lees'));
@@ -186,6 +186,20 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('5 kritiek contact = BB3 serious', b.bevindingen.some((x) => x.bevinding_id === 'BB3-TG-contact-telefoon' && x.ernst === 'serious'), b.bevindingen);
     toets('5 box-rij zonder waarden', rij.indexOf('033-') < 0 && /\[bibliothecaris\]/.test(rij), rij);
   }
+  // ── 5b. diffreview wv979 ──
+  { const f = (t, pad) => R.leesPagina(pad || TGP, t).fouten.join(' | ');
+    toets('5b eigen entiteit nooit concept', /nooit concept/.test(f(TG.replace('status: vast', 'status: concept'))));
+    toets('5b voor alleen codes', /voor noemt/.test(f(TG.replace('contact: {}', 'contact: {}\nvoor: ["Tolgaarde"]'))) && f(TG.replace('contact: {}', 'contact: {}\nvoor: [GH]')) === '');
+    toets('5b named group geweigerd', /named group/.test(f(TG.replace('contact: {}', 'contact: {}\nkenmerkpatronen: ["(?<n>[0-9]+)"]'))));
+    toets('5b slotregels tellen niet', R.vingerafdruk(TG).sha === R.vingerafdruk(TG + '\n\n\n').sha && R.vingerafdruk(TG).sha === R.vingerafdruk(TG.replace(/\n+$/, '')).sha);
+    const sha = R.vingerafdruk(TG).sha;
+    const reg = { knopen: [Object.assign({}, TGRIJ, { bron_sha: 'x'.repeat(64), laatst_door: 'compiler' })], handvatten: TGH, contact: [], vertaling: VERT, bevindingen: [], log: [] };
+    const c = R.checks([R.leesPagina(TGP, TG)], reg, [{ pad: TGP, fout: 'databank: rpc ovis_pagina_zet http 400: niet-dezelfde-als onbekend' }]);
+    toets('5b databankweigering wordt BB6 (niet stil verouderd)', c.bevindingen.some((x) => /^BB6-compileer-/.test(x.bevinding_id)) && c.tel.verouderd === 1, c.bevindingen);
+    const verhuisd = R.checks([R.leesPagina('10_Zakelijk/Tolgaarde_oud/Entiteit - TG.md', TG)], { knopen: [Object.assign({}, TGRIJ, { bron_sha: sha })], handvatten: TGH, contact: [], vertaling: VERT, log: [] });
+    const vid = verhuisd.bevindingen.map((x) => x.bevinding_id).join(' ');
+    toets('5b verhuisde pagina = één BB2 verhuisd, geen BB5', /BB2-TG-verhuisd/.test(vid) && !/BB5/.test(vid), vid);
+  }
   // ── 6. koppeling in server.js (blok in een functie met nepomgeving) ──
   { const src = fs.readFileSync('server.js', 'utf8');
     const b = src.indexOf('// ── OVIS-register (wv979'), e = src.indexOf('// ── einde OVIS-register ──');
@@ -199,7 +213,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const nepSpawn = function (cmd, args) {
       st.spawns.push([cmd].concat(args));
       const ee = new (require('events'))(); ee.stdout = new (require('events'))(); ee.stderr = new (require('events'))(); ee.kill = () => {};
-      setImmediate(() => { ee.stdout.emit('data', st.kind.uit); ee.emit('close', st.kind.code); });
+      setImmediate(() => { ee.stdout.emit('data', st.kind.uit); ee.emit('exit', st.kind.code); });
       return ee;
     };
     const fn = new Function('require', 'path', 'fs', 'crypto', 'spawn', 'logError', 'schrijfLog', 'nu', 'serverPad', 'serverProefDeel', 'appSbRpc', 'VV', 'VAULT', 'SERVER_ECHT', 'rolPrimair', '__dirname', 'st',
@@ -212,7 +226,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const k = fn(require, path, fs, require('crypto'), nepSpawn, (w, x) => fouten_.push(w + ' ' + (x && x.message)), () => {}, () => 'nu',
       (n, env, echt, proef) => path.join(dir, n), (d) => path.join(dir, d), nepRpc, () => require('./vault-veilig.js'), path.join(dir, 'vault'), true, () => st.primair, process.cwd(), st);
     await k.ovisTik();
-    toets('6 01:15: nachtronde als kind onder flock -w 300 met ovis-run.js nacht', st.spawns.length === 1 && st.spawns[0][0] === 'flock' && st.spawns[0][2] === '300' && /ovis-run\.js$/.test(st.spawns[0][5]) && st.spawns[0][6] === 'nacht', st.spawns);
+    toets('6 01:15: nachtronde als kind onder flock -w 300 met ovis-run.js nacht', st.spawns.length === 1 && st.spawns[0][0] === 'flock' && st.spawns[0][1] === '-F' && st.spawns[0][3] === '300' && /ovis-run\.js$/.test(st.spawns[0][6]) && st.spawns[0][7] === 'nacht', st.spawns);
     await k.ovisTik();
     toets('6 tweede tik dezelfde nacht: niet opnieuw', st.spawns.length === 1 && k.ovisStaatLees().nacht_datum === '2026-10-25');
     st.klok = { datum: '2026-10-26', uur: 1, min: 5, klok: '2026-10-26 01:05' }; st.kind = { code: 1, uit: '' };
@@ -221,8 +235,8 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     st.klok = { datum: '2026-10-25', uur: 2, min: 31, klok: '2026-10-25 02:31' };
     await k.ovisTik();
     toets('6 02:31: Bibliothecaris met stempel', st.rpc.indexOf('mk_hartslag_stempel') >= 0 && k.ovisStaatLees().biblio_datum === '2026-10-25', st.rpc);
-    const n = st.rpc.length; await k.ovisTik();
-    toets('6 02:36: niet nog eens', st.rpc.length === n);
+    const n = st.rpc.filter((x) => x === 'mk_hartslag_stempel').length; await k.ovisTik();
+    toets('6 02:36: geen tweede Bibliothecaris, wel de dagcompilatie (diffreview #4)', st.rpc.filter((x) => x === 'mk_hartslag_stempel').length === n && st.rpc[st.rpc.length - 1] === 'ovis_register_lees');
     toets('6 geen box-rij zonder nieuwe bevindingen', fs.readFileSync(box, 'utf8').indexOf('[bibliothecaris]') < 0);
     st.klok = { datum: '2026-10-25', uur: 10, min: 0, klok: '2026-10-25 10:00' }; st.primair = false;
     const n2 = st.rpc.length; await k.ovisTik();

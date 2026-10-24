@@ -115,7 +115,7 @@ function vingerafdruk(tekst) {
   const regels = zonder.split('\n');
   let eind = -1;
   if (regels[0] === '---') for (let i = 1; i < regels.length; i++) if (regels[i] === '---') { eind = i; break; }
-  const kern = regels.filter(function (r, i) { return !(eind > 0 && i > 0 && i < eind && /^updated:/.test(r)); }).join('\n');
+  const kern = regels.filter(function (r, i) { return !(eind > 0 && i > 0 && i < eind && /^updated:/.test(r)); }).join('\n').replace(/\n+$/, '');   // diffreview #8
   return { sha: crypto.createHash('sha256').update(kern, 'utf8').digest('hex') };
 }
 
@@ -170,6 +170,8 @@ function leesPagina(rel, tekst) {
     if (uit.iban) f.push('iban hoort niet op een organisatiepagina (rekeningnummers van derden blijven op de pod)');
   }
   if (!uit.status) f.push('status moet vast of concept zijn');
+  if (uit.soort === 'eigen' && uit.status === 'concept') f.push('een eigen entiteit is nooit concept');   // diffreview #5
+  uit.voor.forEach(function (x) { if (!/^[A-Z][A-Z0-9_]{1,15}$/.test(x)) f.push('voor noemt geen code van een eigen entiteit'); });   // diffreview #6
   if (!uit.naam || uit.naam.length > 200) f.push('naam leeg of te lang');
   if (uit.kvk && !/^[0-9]{8}$/.test(uit.kvk)) f.push('kvk is geen 8 cijfers');
   if (uit.agb && !/^[0-9]{8}$/.test(uit.agb)) f.push('agb is geen 8 cijfers');
@@ -181,7 +183,11 @@ function leesPagina(rel, tekst) {
     else if (PUBLIEK_DOMEIN.has(d)) f.push('publiek maildomein ' + d + ' is geen herkenningskenmerk');
   });
   uit.mailadressen.forEach(function (a) { if (!/^[^@\s]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(a)) f.push('mailadres ongeldig'); });
-  uit.kenmerkpatronen.forEach(function (p) { if (p.length > 120) f.push('kenmerkpatroon te lang'); else { try { new RegExp(p); } catch (e) { f.push('kenmerkpatroon is geen geldige regex'); } } });
+  uit.kenmerkpatronen.forEach(function (p) {
+    if (p.length > 120) f.push('kenmerkpatroon te lang');
+    else if (/\(\?<|\\[pPk][{<]/.test(p)) f.push('kenmerkpatroon gebruikt iets wat de databank niet kent (named group of \\p{})');   // diffreview #12
+    else { try { new RegExp(p); } catch (e) { f.push('kenmerkpatroon is geen geldige regex'); } }
+  });
   uit.niet_dezelfde_als.forEach(function (x) { if (x === uit.id) f.push('niet_dezelfde_als naar zichzelf'); });
   uit.contact.forEach(function (x) {
     if (x.waarde.length > 300) f.push('contactveld ' + x.veld + ' te lang');
@@ -248,7 +254,7 @@ function huidigBlok(tekst) {
 // ── Bibliothecaris: de checks (pure functie over pagina's en register) ──
 function kortHash(s) { return crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 8); }
 function schoon(s, n) { s = String(s == null ? '' : s).replace(/[\r\n`|]/g, ' ').slice(0, n || 300); return SLEUTEL_RE.test(s) ? '(weggelaten: leek op een sleutel)' : s; }
-function checks(paginas, reg) {
+function checks(paginas, reg, compileerFouten) {
   const b = [], tel = { paginas: paginas.length, geldig: 0, verouderd: 0, niet_getoetst: 0, wacht_op_ja: 0 };
   const knopen = {}; (reg.knopen || []).forEach(function (k) { knopen[k.id] = k; });
   const hv = {}; (reg.handvatten || []).forEach(function (h) { (hv[h.knoop] = hv[h.knoop] || []).push(h); });
@@ -267,6 +273,7 @@ function checks(paginas, reg) {
     const ps = perId[id], k = knopen[id];
     const a = k ? ps.find(function (p) { return p.pad === k.vault_pagina; }) : (ps.length === 1 ? ps[0] : null);
     if (a) anker[id] = a;
+    if (!a && k && ps.length === 1) return;   // één pagina op een ander pad = verhuisd; BB2 hieronder zegt dat (diffreview #10)
     ps.filter(function (p) { return p !== a; }).forEach(function (p) {
       bev('BB5', id + '-pagina-' + kortHash(p.pad), 'tweede pagina voor ' + id, p.pad + ' noemt zich ' + id + ', maar ' + (k ? 'de knoop staat op ' + k.vault_pagina : 'er zijn meer pagina\'s met dit id') + '. Voorstel: deze pagina hernoemen of samenvoegen; verhuizen is een machinekamerstap.');
     });
@@ -315,7 +322,8 @@ function checks(paginas, reg) {
     if (k.actief === false || k.soort === 'persoon') return;
     if (anker[id]) return;
     const elders = (perId[id] || []).map(function (p) { return p.pad; });
-    bev('BB2', id + '-geen-pagina', 'register kent ' + id + ' maar er is geen geldige pagina', (k.vault_pagina || '(geen vault_pagina)') + (elders.length ? '; wel pagina op ' + elders.join(', ') : '') + '. Voorstel: pagina aanmaken (concept) of de rij inactief zetten.');
+    if (elders.length === 1) bev('BB2', id + '-verhuisd', 'pagina van ' + id + ' is verhuisd', 'register: ' + (k.vault_pagina || '(geen)') + ', pagina nu op ' + elders[0] + '. Voorstel: de machinekamer zet de verankering om (of de pagina terug).');
+    else bev('BB2', id + '-geen-pagina', 'register kent ' + id + ' maar er is geen geldige pagina', (k.vault_pagina || '(geen vault_pagina)') + (elders.length ? '; wel pagina op ' + elders.join(', ') : '') + '. Voorstel: pagina aanmaken (concept) of de rij inactief zetten.');
   });
   // BB5 hetzelfde harde kenmerk bij twee knopen (Fable wv979 #5: niet bij een paar dat elkaar als niet-dezelfde-als noemt)
   const nda = {};
@@ -341,12 +349,16 @@ function checks(paginas, reg) {
   (reg.log || []).forEach(function (l) { if (SCHRIJVERS_OK.indexOf(l.wie) < 0) { const s = String(l.sleutel).split('#')[0]; (buiten[s] = buiten[s] || []).push(l); } });
   Object.keys(buiten).forEach(function (s) {
     const ls = buiten[s];
-    bev('BB7', s + '-spoor', ls.length + ' wijziging(en) aan ' + s + ' buiten de compiler', ls.slice(0, 5).map(function (l) { return l.tabel + ' ' + l.op + ' door ' + l.wie + ' ' + String(l.wanneer).slice(0, 16) + ' [' + (l.kolommen || []).join(',') + ']'; }).join('; ') + '. Voorstel: nagaan wie schreef; terugzetten of de pagina bijwerken.');
+    bev('BB7', s + '-spoor-' + String(ls[0].wanneer || '').slice(0, 10).replace(/-/g, ''), ls.length + ' wijziging(en) aan ' + s + ' buiten de compiler', ls.slice(0, 5).map(function (l) { return l.tabel + ' ' + l.op + ' door ' + l.wie + ' ' + String(l.wanneer).slice(0, 16) + ' [' + (l.kolommen || []).join(',') + ']'; }).join('; ') + '. Voorstel: nagaan wie schreef; terugzetten of de pagina bijwerken.');
   });
   (reg.handvatten || []).concat(reg.contact || []).forEach(function (h) {
     const hk = h.herkomst || {};
     if (h.status === 'actief' && !hk.vraag_id && hk.bron !== 'migratie-0002') bev('BB7', h.knoop + '-actief-' + h.id, 'actief kenmerk van ' + h.knoop + ' zonder Ja', 'rij ' + h.id + ' (' + (h.soort || h.veld) + '). Voorstel: terug naar voorgesteld.', 'serious');
     else if (!hk.vraag_id && ['pagina', 'migratie-0002'].indexOf(hk.bron) < 0) bev('BB7', h.knoop + '-herkomst-' + h.id, 'kenmerk van ' + h.knoop + ' met onbekende herkomst', 'rij ' + h.id + '. Voorstel: nagaan wie schreef.');
+  });
+  // diffreview #1: een pagina die de databank blijvend weigert, mag niet stil als "verouderd" blijven staan
+  (compileerFouten || []).forEach(function (cf) {
+    if (/^databank: /.test(cf.fout)) bev('BB6', 'compileer-' + kortHash(cf.pad), 'pagina niet gecompileerd: ' + String(cf.fout).slice(10, 120), cf.pad + ': ' + cf.fout + '. Voorstel: pagina herstellen (Socev) of de machinekamer laat de databankfunctie nalopen.');
   });
   const uniek = {}; b.forEach(function (x) { uniek[x.bevinding_id] = x; });
   return { bevindingen: Object.keys(uniek).sort().map(function (k) { return uniek[k]; }), tel: tel };
@@ -443,9 +455,10 @@ function maak(o) {
   // Bibliothecaris: leest, vergelijkt, schrijft bevindingen (BB), stempelt (niet op afroep). opties.sinds = log sinds (ISO).
   async function bibliothecaris(opties) {
     opties = opties || {};
+    const c = await compileer('afroep', { droog: !!opties.droog });   // diffreview #1: eerst bijwerken (alleen databank), fouten worden BB6
     const reg = await register(opties.sinds || new Date(nu() - 36 * 3600000).toISOString());
     const paginas = leesAlles();
-    const r = checks(paginas, reg);
+    const r = checks(paginas, reg, c.fouten);
     const open = {}; (reg.bevindingen || []).forEach(function (x) { open[x.bevinding_id] = x; });
     const nu_ = new Date(nu()).toISOString();
     const rijen = [], nieuw = [];
@@ -455,12 +468,12 @@ function maak(o) {
     });
     const gezien = new Set(r.bevindingen.map(function (x) { return x.bevinding_id; }));
     // BB7-spoor blijft open tot iemand hem afhandelt: het logvenster schuift door, de wijziging is niet weg (Fable wv979 #8)
-    const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor$/.test(id); });
+    const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor-\d{8}$/.test(id); });
     opgelost.forEach(function (id) { rijen.push({ bevinding_id: id, status: 'opgelost', laatst_gezien: nu_, detail_erbij: ' | ' + nu_.slice(0, 10) + ': niet meer gezien door de Bibliothecaris' }); });
     if (!opties.droog) for (let i = 0; i < rijen.length; i += 100) await o.sbRpc('ovis_bibliothecaris_zet', { p_rijen: rijen.slice(i, i + 100) });
     const onverklaard = r.bevindingen.length;
     const zin = onverklaard ? onverklaard + ' verschil(len) tussen pagina\'s en register (' + nieuw.length + ' nieuw, ' + opgelost.length + ' opgelost)'
-      : 'register en pagina\'s gelijk (' + r.tel.geldig + ' pagina\'s' + (r.tel.wacht_op_ja ? ', ' + r.tel.wacht_op_ja + (r.tel.wacht_op_ja === 1 ? ' kenmerk wacht' : ' kenmerken wachten') + ' op Davids Ja' : '') + ')';
+      : 'register en pagina\'s gelijk (' + r.tel.geldig + ' pagina\'s' + (r.tel.verouderd ? ', ' + r.tel.verouderd + ' nog niet gecompileerd' : '') + (r.tel.wacht_op_ja ? ', ' + r.tel.wacht_op_ja + (r.tel.wacht_op_ja === 1 ? ' kenmerk wacht' : ' kenmerken wachten') + ' op Davids Ja' : '') + ')';
     const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin, tel: r.tel, open: onverklaard, nieuw: nieuw.length, opgelost: opgelost.length,
       per_check: r.bevindingen.reduce(function (a, x) { a[x.check_id] = (a[x.check_id] || 0) + 1; return a; }, {}), bevindingen: r.bevindingen, nieuwe: nieuw };
     if (!opties.droog && !opties.afroep) {

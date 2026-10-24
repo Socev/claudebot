@@ -36,7 +36,7 @@ async function sbRpc(fn, body) {
 function uurAmsterdam() { return Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(new Date())); }
 // Houdt de ouder de grendel vast? Een eigen `flock -n` op hetzelfde bestand moet dan falen (andere open file description).
 function grendelVast() {
-  if (fs.realpathSync(VAULT) !== ECHTE_VAULT) return true;   // proefmap: geen bisync
+  if (fs.realpathSync(VAULT) !== fs.realpathSync(ECHTE_VAULT)) return true;   // proefmap: geen bisync (diffreview #7: beide via realpath)
   const r = spawnSync('flock', ['-n', LOCK, 'true'], { timeout: 5000 });
   return r.status === 1;
 }

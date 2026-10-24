@@ -14274,9 +14274,9 @@ async function appHarvester(req, res, a, d, route) {
 // ── OVIS-register (wv979, 24-10-2026; ontwerp + Fable-review vooraf: mk-scripts/wv979/ontwerp.md; bouwplan OVIS Intake § 4) ──
 // Logica in ovis-register.js (compiler vault → secondbrain.knoop, Bibliothecaris BB1–BB7), opdrachtregel ovis-run.js. Hier alleen de
 // koppeling: de pod-tijdklok (elke 5 min, alleen de echte pod met rol primair, Fable wv979 #6):
-//   - overdag (niet 01:00–02:00): pagina's waarvan de vingerafdruk afwijkt → alleen de databank, nooit terug in de pagina;
-//   - 01:00–01:59 de nachtronde als kind onder `flock -w 300 <vault.lock>` (de bisync-grendel; alles compileren + gegenereerd blok in de
-//     pagina's); "gedaan" pas na een geslaagde ronde, anders herkansen bij de volgende tik tot 01:59;
+//   - buiten 01:00–02:00: pagina's waarvan de vingerafdruk afwijkt → alleen de databank, nooit terug in de pagina;
+//   - 01:00–01:59 de nachtronde als kind onder `flock -F -w 300 <vault.lock>` (de bisync-grendel; gewijzigde pagina's compileren + het
+//     gegenereerde blok in álle pagina's bijwerken); "gedaan" pas na een geslaagde ronde, anders herkansen bij de volgende tik tot 01:59;
 //   - 02:30–05:59 de Bibliothecaris (eenmaal per datum na een geslaagde ronde): hartslag bibliothecaris, box-rij alleen bij nieuwe
 //     bevindingen of een fout. Kaarten in Overzicht volgen met vervolgrij A (haak op de Ja).
 // Op afroep (App Managers › Nu draaien, managers.js soort script): Bibliothecaris zonder stempel en zonder box-rij.
@@ -14300,6 +14300,8 @@ const ovis = (function () {
 const ovisLoopt = { nu: null, sinds: 0 };
 function ovisStaatPad() { return path.join(OVIS_DIR, 'staat.json'); }
 function ovisStaatLees() { try { const s = JSON.parse(fs.readFileSync(ovisStaatPad(), 'utf8')); return s && typeof s === 'object' ? s : {}; } catch (e) { return {}; } }
+// Vers lezen en alleen de eigen sleutels zetten (diffreview #3: een late tik schrijft geen oude staat terug)
+function ovisStaatZet(delen) { const s = ovisStaatLees(); Object.assign(s, delen); ovisStaatSchrijf(s); }
 function ovisStaatSchrijf(s) {
   try {
     fs.mkdirSync(OVIS_DIR, { recursive: true, mode: 0o700 });
@@ -14320,13 +14322,14 @@ function ovisNachtKind() {
     let uit = '', klaar = false;
     const env = Object.assign({}, process.env, { VAULT_DIR: VAULT, OVIS_LOCK: OVIS_LOCK });
     let k;
-    try { k = spawn('flock', ['-w', '300', OVIS_LOCK, process.execPath, path.join(__dirname, 'ovis-run.js'), 'nacht'], { env: env, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    // -F: flock forkt niet, dus de time-out raakt node zelf (diffreview #3)
+    try { k = spawn('flock', ['-F', '-w', '300', OVIS_LOCK, process.execPath, path.join(__dirname, 'ovis-run.js'), 'nacht'], { env: env, stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch (e) { return resolve({ ok: false, j: { fout: 'start: ' + String(e && e.message || e).slice(0, 120) } }); }
-    const tijd = setTimeout(function () { try { k.kill('SIGTERM'); } catch (e) {} }, OVIS_NACHT_MAX_MS);
+    const tijd = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, OVIS_NACHT_MAX_MS);
     k.stdout.on('data', function (d) { if (uit.length < 200000) uit += d; });
     k.stderr.on('data', function () {});
     k.on('error', function (e) { if (klaar) return; klaar = true; clearTimeout(tijd); resolve({ ok: false, j: { fout: String(e && e.message || e).slice(0, 120) } }); });
-    k.on('close', function (code) {
+    k.on('exit', function (code) {
       if (klaar) return; klaar = true; clearTimeout(tijd);
       let j = null; try { j = JSON.parse(uit.trim().split('\n').pop()); } catch (e) {}
       resolve({ ok: code === 0 && !!j && j.ok === true, j: j || { fout: code === 1 && !uit ? 'grendel niet gekregen of fout (exit ' + code + ')' : 'exit ' + code } });
@@ -14351,37 +14354,31 @@ async function ovisTik() {
       if (s.nacht_datum === t.datum) return;
       ovisLoopt.nu = 'nacht';
       const r = await ovisNachtKind();
-      s.nacht = { t: new Date().toISOString(), ok: r.ok, paginas: r.j.paginas, gestuurd: r.j.gestuurd, blokken: r.j.blokken, fouten: Array.isArray(r.j.fouten) ? r.j.fouten.length : (r.j.fout ? 1 : 0) };
-      if (r.ok) s.nacht_datum = t.datum; else logError('ovis-nacht', new Error(String(r.j.fout || (r.j.fouten || []).map(function (f) { return f.fout; }).join('; ')).slice(0, 200)));
-      ovisStaatSchrijf(s);
+      const nacht = { t: new Date().toISOString(), ok: r.ok, paginas: r.j.paginas, gestuurd: r.j.gestuurd, blokken: r.j.blokken, fouten: Array.isArray(r.j.fouten) ? r.j.fouten.length : (r.j.fout ? 1 : 0) };
+      if (r.ok) ovisStaatZet({ nacht: nacht, nacht_datum: t.datum });
+      else { ovisStaatZet({ nacht: nacht }); logError('ovis-nacht', new Error(String(r.j.fout || (r.j.fouten || []).map(function (f) { return f.fout; }).join('; ')).slice(0, 200))); }
       return;
     }
-    if (t.uur >= 2 && t.uur < 6 && (t.uur > 2 || t.min >= 30)) {
-      if (s.biblio_datum === t.datum) return;
+    if (t.uur >= 2 && t.uur < 6 && (t.uur > 2 || t.min >= 30) && s.biblio_datum !== t.datum) {
       ovisLoopt.nu = 'bibliothecaris';
       let b;
       try { b = await ovis.bibliothecaris({}); }
       catch (e) {
         logError('ovis-bibliothecaris', e);
-        s.biblio = { t: new Date().toISOString(), uitkomst: 'fout', zin: String(e && e.message || e).slice(0, 160) };
-        if (s.biblio_fout_datum !== t.datum) {
-          s.biblio_fout_datum = t.datum;
-          ovisBoxRij(OVIS_MOD.boxRijFout(String(e && e.message || e), t.klok));
-        }
-        ovisStaatSchrijf(s);
+        const fout = { biblio: { t: new Date().toISOString(), uitkomst: 'fout', zin: String(e && e.message || e).slice(0, 160) } };
+        if (s.biblio_fout_datum !== t.datum) { fout.biblio_fout_datum = t.datum; ovisBoxRij(OVIS_MOD.boxRijFout(String(e && e.message || e), t.klok)); }
+        ovisStaatZet(fout);
         return;
       }
-      s.biblio_datum = t.datum;
-      s.biblio = { t: new Date().toISOString(), uitkomst: b.uitkomst, zin: b.zin, open: b.open, nieuw: b.nieuw, opgelost: b.opgelost, per_check: b.per_check, tel: b.tel };
+      ovisStaatZet({ biblio_datum: t.datum, biblio: { t: new Date().toISOString(), uitkomst: b.uitkomst, zin: b.zin, open: b.open, nieuw: b.nieuw, opgelost: b.opgelost, per_check: b.per_check, tel: b.tel } });
       if (b.nieuw > 0) ovisBoxRij(OVIS_MOD.boxRij(b, t.klok));
-      ovisStaatSchrijf(s);
       return;
     }
+    // overdag én na de Bibliothecaris (diffreview #4): alleen de databank
     ovisLoopt.nu = 'dag';
     const r = await ovis.compileer('dag');
     if (r.gestuurd || r.fouten.length || !s.dag || Date.now() - Date.parse(s.dag.t || 0) > 3600000) {
-      s.dag = { t: new Date().toISOString(), paginas: r.paginas, gestuurd: r.gestuurd, nieuw: r.nieuw, fouten: r.fouten.length, voorstellen: r.voorstellen, kritiek: r.kritiek };
-      ovisStaatSchrijf(s);
+      ovisStaatZet({ dag: { t: new Date().toISOString(), paginas: r.paginas, gestuurd: r.gestuurd, nieuw: r.nieuw, fouten: r.fouten.length, voorstellen: r.voorstellen, kritiek: r.kritiek } });
     }
   } catch (e) { logError('ovis-tik', e); }
   finally { ovisLoopt.nu = null; }
@@ -14392,7 +14389,7 @@ function ovisStartScript(m) {
   if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');
   const job = 'ovis' + crypto.randomBytes(6).toString('hex');
   const klaar = ovis.bibliothecaris({ afroep: true }).then(function (b) {
-    const s = ovisStaatLees(); s.afroep = { t: new Date().toISOString(), zin: b.zin, open: b.open }; ovisStaatSchrijf(s);
+    ovisStaatZet({ afroep: { t: new Date().toISOString(), zin: b.zin, open: b.open } });
     return { ok: true, zin: b.zin, open: b.open, nieuw: b.nieuw };
   }, function (e) { logError('ovis-afroep', e); return { ok: false, error: String(e && e.message || e).slice(0, 160) }; });
   return { job_id: job, klaar: klaar };
@@ -14464,6 +14461,7 @@ const managers = (function () {
   try {
     return MANAGERS_MOD.maak({ dir: MANAGERS_DIR, fout: logError, jobsOpSessie: managersJobs, startRun: managersStartRun, knopJa: managersKnopJa,
       startScript: ovisStartScript,   // wv979: Bibliothecaris (soort script)
+      scriptLoopt: function (id) { return id === 'bibliothecaris' && ovisLoopt.nu === 'bibliothecaris' ? { job_id: 'tijdklok', created: ovisLoopt.sinds } : null; },   // diffreview #11
       rolPrimair: rolPrimair, uitrolWacht: function () { return !!uitrolWacht().wacht; }, vangnet: account1Vangnet,
       bericht: function (b) {
         return berichtIntern({ kanaal: 'machinekamer', bron: 'manager', klasse: 'normaal', soort: b.soort, tekst: b.tekst, sleutel: b.sleutel }).then(function (r) {
