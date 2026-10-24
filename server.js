@@ -6757,6 +6757,7 @@ function appBerichtBron(x) {
   }
   if (x.soort === 'telegram') return 'je antwoord in Telegram';
   if (x.soort === 'tel') return 'je antwoord op een ingesproken bericht';
+  if (x.soort === 'zoek') return 'Zoek snel';   // wv1252
   return 'je antwoord';
 }
 // Eén regel, zonder markeringen die David of een rapport kan nadoen (appOntmasker), afgekapt.
@@ -7179,6 +7180,7 @@ function appZoekLabel(x, bel) {
   if (x.soort === 'telegram') return 'via Telegram';
   if (x.soort === 'tel') return bel === 'david' ? 'ingesproken' : 'antwoord op ingesproken';
   if (x.soort === 'knop') return bel === 'david' ? 'knop' : null;
+  if (x.soort === 'zoek') return 'Zoek snel';   // wv1252
   return null;
 }
 // Staart van het log (≤ APP_ZOEK_LEES_MAX), vanaf de eerste hele regel; afgekapt als er meer was.

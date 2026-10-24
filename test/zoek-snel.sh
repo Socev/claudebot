@@ -29,6 +29,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     '- **TG** · Tolgaarde · Huisartsenpraktijk Tolgaarde [knoop:TG] — [[10_Zakelijk/Tolgaarde/index]]',
     '- Sevilay Baructu-Aydin · Sevilay · Sev · Baructu-Aydin — [[10_Zakelijk/Groenhouten/Medewerkers/Sevilay Baructu-Aydin]]',
     '- Bakary Jallow · Bakary — [[20_Prive/Gambia/Bakary Jallow]]',
+    '- Pietje Puk · Kleintje — [[20_Prive/Familie/Pietje Puk]]',
     '- ? Onbevestigd · Spook — [[20_Prive/Spook]]', ''].join('\n'));
   zet('10_Zakelijk/Tolgaarde/index.md', ['---', 'type: index', 'updated: 2026-10-24', '---', '# Huisartsenpraktijk Tolgaarde — Hub', '',
     '| KvK | 84185171 |', '| BTW-nummer | NL863125190B01 |', '| IBAN | NL98 ABNA 0106 4653 17 |', '| Telefoon | 033 - 494 12 34 |',
@@ -39,6 +40,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   zet('10_Zakelijk/Groenhouten/Medewerkers/Sevilay Baructu-Aydin.md', ['---', 'updated: 2026-10-13', 'aliases: ["Sev"]', '---', '# Sevilay Baructu-Aydin', '',
     '| Roepnaam | Sevilay / Sev |', '| Geboortedatum | 24-08-1980 |', '| BSN | 123456782 |', ''].join('\n'));
   zet('10_Zakelijk/Groenhouten/Maarsseveen.md', 'Uitje naar Maarsseveen, geboren idee\n');
+  zet('10_Zakelijk/Groenhouten/Uitje.md', 'Kleintje kwam ook mee\n');
   zet('10_Zakelijk/Groenhouten/index.md', '| IBAN | NL06 ABNA 0126 8194 16 |\nGroenhouten btw NL222222222B22\n');
   zet('20_Prive/Auto.md', '---\nupdated: 2026-10-15\n---\n# Auto\n| Kenteken | GJL-11-J |\n');
   zet('20_Prive/Gezondheid/knie.md', 'kenteken GEZOND-1\n');
@@ -76,7 +78,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
 
   // ── 2. woordenlijst ──
   const wg = Z.woordenlijstGroepen(fs.readFileSync(path.join(VAULT, '00_Systeem/Woordenlijst.md'), 'utf8'));
-  toets('2 woordenlijst: drie groepen, "- ?" telt niet', wg.length === 3 && !wg.some((g) => g.varianten.indexOf('Spook') >= 0), wg);
+  toets('2 woordenlijst: vier groepen, "- ?" telt niet', wg.length === 4 && !wg.some((g) => g.varianten.indexOf('Spook') >= 0), wg);
   const sev = Z.woordenlijstVarianten(wg, 'Sev');
   toets('2 Sev → Sevilay Baructu-Aydin (gelezen als)', sev.length === 1 && sev[0].naam === 'Sevilay Baructu-Aydin' && sev[0].zoek.indexOf('Baructu-Aydin') >= 0, sev);
   toets('2 Tolgaarde: geen "gelezen als index", code TG mee', Z.woordenlijstVarianten(wg, 'Tolgaarde')[0].naam === null && Z.woordenlijstVarianten(wg, 'Tolgaarde')[0].zoek.indexOf('TG') >= 0);
@@ -119,6 +121,11 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   const p4 = laatsteprompt ? laatsteprompt.prompt : '';
   const r4 = await z.zoek('Wat is de geboortedatum van Sev', { vast: true });
   toets('4 vaste plek: geen personeelspagina en geen "gelezen als" naar personeel', !/24-08-1980|123456782/.test(JSON.stringify(r4)) && r4.gelezen_als.length === 0, r4);
+  laatsteprompt = null;
+  const r4k = await z.zoek('Wanneer is Kleintje geboren', { vast: true });
+  toets('4 vaste plek: geen privénaam uit de woordenlijst in de prompt of "gelezen als" (Fable diff #4)', !!laatsteprompt && /Kleintje kwam ook/.test(laatsteprompt.prompt) && !/Pietje Puk/.test(laatsteprompt.prompt) && r4k.gelezen_als.length === 0, laatsteprompt && laatsteprompt.prompt);
+  await z.zoek('Wanneer is Kleintje geboren');
+  toets('4 meereizend: "gelezen als" privénaam wel in de prompt', /GELEZEN ALS \(woordenlijst\): Kleintje → Pietje Puk/.test(laatsteprompt.prompt), laatsteprompt.prompt);
   await z.zoek('Wat is het IBAN van Groenhouten', { vast: true });
   const p4b = laatsteprompt.prompt;
   toets('4 vaste plek: IBAN gemaskeerd in de context', /IBAN weggelaten/.test(p4b) && !/0126 8194 16/.test(p4b), p4b);
@@ -179,6 +186,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   toets('6 niet in APP_SLOT_VRIJ (vaste plek: onder het invoerslot)', slotVrij && slotVrij[1].indexOf('zoek-snel') < 0);
   toets('6 bijStart in het hoofdkanaal geeft de zoekregels mee', /: kanaal === 'hoofd' \? function \(\) \{ return typeof zoekSnelStaart === 'function' \? zoekSnelStaart\(\) : ''; \} : undefined \}\);/.test(src));
   toets('6 nieuw-telling slaat soort zoek over', /if \(x\.soort === 'zoek'\) return;/.test(src));
+  toets('6 Antwoord hierop en gesprek-zoeken kennen Zoek snel', /if \(x\.soort === 'zoek'\) return 'Zoek snel';   \/\/ wv1252\n  return 'je antwoord';/.test(src) && /if \(x\.soort === 'zoek'\) return 'Zoek snel';   \/\/ wv1252\n  return null;/.test(src));
   toets('6 uitrol.sh en Dockerfile kennen zoek-snel.js', /RELEASE_OPTIONEEL="[^"]* zoek-snel\.js[ "]/.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY zoek-snel\.js \/app\/release-bootstrap\/zoek-snel\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
   toets('6 harvesterClaude kent een time-out per aanroep', /async function harvesterClaude\(systeem, prompt, schema, o\)/.test(src) && /\(o && o\.timeoutMs\) \|\| 360000/.test(src));
 
