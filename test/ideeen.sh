@@ -7,7 +7,8 @@
 # dicht, Ja zonder verse vingerafdruk = niets, Ja = alleen Deel-stukken als Socev (geen link, kaart dan plaatje, antwoord als reactie),
 # AIX weigert = plaats-fout, AIX weg = onzeker en nakijk, het weekritme (nul = niets en geen model; een injectiezin in een proefkaart komt
 # alleen als JSON-veld bij het model zonder gereedschap en leidt tot geen enkele schrijfactie op AIX; concept in de catalogus, vaste toets
-# eroverheen, dan een weekbundel), en de server.js-koppeling (dispatch, Nee-haak, bundel altijd gevoelig). Raakt de echte vault en AIX niet.
+# eroverheen, dan een weekbundel), de deel-bundel na een afgehandelde bundel (wv965) en voor wat bij een Ja niet aan de beurt kwam (wv970: meer dan
+# 30 of herstart; plaats-fout niet), en de server.js-koppeling (dispatch, Nee-haak, bundel altijd gevoelig). Raakt de echte vault en AIX niet.
 # Gebruik: bash test/ideeen.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -337,6 +338,98 @@ M.mkdir();
     const Ig = I.maak({ vault: VAULT, dir: path.join(W, 'grens2') });
     const kg = [Ig.bundelKaart({ kaart: 'aix-deel-x', soort: 'deel' }, 99999), Ig.bundelKaart({ kaart: 'aix-deel-x', soort: 'deel', alleen_kaarten: false }, 1)];
     toets('11 deel-kaart bij grote aantallen binnen de grenzen; enkelvoud "1 stuk"', kg.every((x) => lengte(x.waarom) <= 400 && lengte(x.titel) <= 90) && /— 1 stuk op Deel/.test(kg[1].titel), kg.map((x) => [lengte(x.waarom), x.titel]));
+  }
+
+  // ── 12. wv970 (Fable wv965 #2): Deel-stukken die bij een Ja niet aan de beurt kwamen (meer dan 30, of herstart midden in de plaatsing) ──
+  {
+    const lengte = (t) => [...String(t || '')].length;
+    const kluis = (naam, n) => { const v = path.join(W, naam); fs.mkdirSync(path.join(v, '01_Ontwikkeling'), { recursive: true });
+      fs.writeFileSync(path.join(v, I.CATALOGUS), '# Catalogus\n\n' + Array.from({ length: n }, (_, i) => blok('K' + (10 + i), 'Handig idee ' + (10 + i))).join('\n')); return v; };
+    const weiger = new Set(); let hang = null, pogingen = 0;
+    const aix4 = Object.assign({}, aix, { plaatsKaart: async (v) => { pogingen++; if (v.titel === hang) return new Promise(() => {}); if (weiger.has(v.titel)) return fout(422);
+      const id = ++X.idTeller; return { ok: true, id, geplaatst: true }; } });
+    const maak = (v, d, vj) => I.maak({ vault: v, dir: d, aix: aix4, klok: () => nu, harvester: H, filter: naamToets, plaatjes: PROEF, claude, voorJou: async (p) => { vj.push(p); return { sleutel: p.sleutel }; } });
+    const V4 = kluis('kluis-wv970', 35), D4 = path.join(W, 'staat-wv970'), vj4 = [];
+    const M4 = maak(V4, D4, vj4); M4.mkdir();
+    const bundel4 = () => JSON.parse(fs.readFileSync(path.join(D4, 'bundel.json'), 'utf8'));
+    nu += 3600000;
+    fs.writeFileSync(path.join(D4, 'bundel.json'), JSON.stringify({ kaart: 'aix-week-20261024', soort: 'week', kaart_gezet: new Date(nu).toISOString() }));
+    const alle4 = M4.concepten().concepten.filter((k) => k.kan_delen).map((k) => k.id);
+    for (const id of alle4) await M4.app('POST /app/ideeen/kaart/' + id + '/deel');
+    toets('12 35 kaarten op Deel', alle4.length === 35 && M4.bundelVoor('aix-week-20261024').aangevinkt === 35, alle4.length);
+    nu += 60000; weiger.add('Handig idee 12');
+    let u = await M4.plaatsBundel({ kaart: 'aix-week-20261024', bevestiging: I.BEVESTIGING_PLAATSEN, vraagId: 'wv970aaa' });
+    toets('12 Ja: 29 geplaatst, k12 geweigerd (422), 5 overgeslagen (meer dan 30)', u.geplaatst.length === 29 && u.fouten.map((x) => x.id).join() === 'k12' &&
+      u.overgeslagen.length === 5 && u.overgeslagen.every((x) => /^meer dan 30/.test(x.reden)) && pogingen === 30, { g: u.geplaatst.length, f: u.fouten, o: u.overgeslagen });
+    nu += 3600000;
+    let z = await M4.zorgBundelKaart();
+    const k4 = vj4[0] || {};
+    toets('12 uurronde: deel-bundel voor wat niet aan de beurt kwam (5 liggen; k12 staat nog op Deel en telt mee in de kaart: 6)', z.gezet && vj4.length === 1 && bundel4().soort === 'deel' &&
+      bundel4().reden === 'liggen' && bundel4().liggen === 5 && bundel4().na === 'aix-week-20261024' && /^Socevs winkel op AIX — 6 kaarten op Deel plaatsen\?$/.test(k4.titel), { z, b: bundel4(), t: k4.titel });
+    toets('12 kaarttekst: niet aan de beurt (hooguit 30), niet "nadat afgehandeld"; binnen de grenzen, geen pad of wv-nummer', /kwamen er 5 niet aan de beurt \(hooguit 30 per keer/.test(k4.waarom) && /de andere 1 staan nog op Deel/.test(k4.waarom) &&
+      !/nadat de vorige vraag/.test(k4.waarom) && lengte(k4.waarom) <= 400 && lengte(k4.titel) <= 90 && !/wv\d|\/opt\/|\.md\b/.test(JSON.stringify(k4)), k4.waarom);
+    toets('12 niet dubbel', !(await M4.zorgBundelKaart()).gezet && vj4.length === 1);
+    // tweede Ja: de 5 plus k12; k12 weigert opnieuw → daarna geen nieuwe bundel (plaats-fout komt niet elk uur terug)
+    nu += 60000; pogingen = 0;
+    u = await M4.plaatsBundel({ kaart: k4.sleutel, bevestiging: I.BEVESTIGING_PLAATSEN, vraagId: 'wv970bbb' });
+    toets('12 tweede Ja: de 5 geplaatst, k12 weer geweigerd', u.geplaatst.length === 5 && u.fouten.map((x) => x.id).join() === 'k12' && u.overgeslagen.length === 0 && pogingen === 6, u);
+    nu += 3600000; z = await M4.zorgBundelKaart();
+    toets('12 plaats-fout alleen brengt geen nieuwe bundel', !z.gezet && vj4.length === 1 && bundel4().kaart === k4.sleutel && bundel4().uitkomst === 'ja', { z, b: bundel4() });
+    nu += 3600000; z = await M4.zorgBundelKaart();
+    toets('12 ook een uur later niet', !z.gezet && vj4.length === 1);
+    // Nee op een deel-bundel met wat bleef liggen: komt niet terug
+    const sNee = JSON.parse(fs.readFileSync(path.join(D4, 'staat.json'), 'utf8'));
+    sNee.plaatsing.details.overgeslagen = [{ id: 'k12', reden: 'meer dan 30 in één bundel' }];
+    fs.writeFileSync(path.join(D4, 'staat.json'), JSON.stringify(sNee));
+    const bNee = bundel4(); bNee.uitkomst = 'nee'; fs.writeFileSync(path.join(D4, 'bundel.json'), JSON.stringify(bNee));
+    nu += 3600000; z = await M4.zorgBundelKaart();
+    toets('12 na een Nee telt "niet aan de beurt" niet (alleen na een Ja)', !z.gezet && vj4.length === 1);
+    bNee.uitkomst = 'ja'; fs.writeFileSync(path.join(D4, 'bundel.json'), JSON.stringify(bNee));
+    z = await M4.zorgBundelKaart();
+    toets('12 (tegenproef) dezelfde stand na een Ja: k12 overgeslagen wegens meer dan 30, maar met een plaats-fout sinds de Ja → geen bundel', !z.gezet && vj4.length === 1);
+    // plaatsing van dezelfde bundel maar een ander moment (eerdere poging, catalogus onleesbaar): telt als niet afgelopen → k12 geweigerd sinds de Ja, verder niets
+    sNee.plaatsing.op = iso(200); fs.writeFileSync(path.join(D4, 'staat.json'), JSON.stringify(sNee));
+    toets('12 plaatsing met ander tijdstip = niet deze; alleen de weigering sinds de Ja → geen bundel', !(await M4.zorgBundelKaart()).gezet && vj4.length === 1);
+    // nakijk vond hem niet op AIX (sinds de Ja): wel opnieuw aanbieden (Fable wv970 #1)
+    fs.appendFileSync(path.join(D4, 'journaal.jsonl'), JSON.stringify({ t: new Date(nu).toISOString(), soort: 'plaats-fout', id: 'k12', reden: 'niet op AIX gevonden (nagekeken)', bundel: bNee.kaart }) + '\n');
+    nu += 31000; z = await M4.zorgBundelKaart();
+    toets('12 nakijk vond k12 niet op AIX: nieuwe deel-bundel (1 liggen)', z.gezet && vj4.length === 2 && bundel4().reden === 'liggen' && bundel4().liggen === 1 && /kwam er één niet aan de beurt/.test(vj4[1].waarom), { z, b: bundel4() });
+    weiger.clear();
+
+    // herstart midden in de plaatsing: k10 geplaatst, k11 geweigerd, k13 hangt (bezig), k14–k17 niet geprobeerd
+    const V5 = kluis('kluis-wv970b', 8), D5 = path.join(W, 'staat-wv970b'), vj5 = [];
+    const M5 = maak(V5, D5, vj5); M5.mkdir();
+    const bundel5 = () => JSON.parse(fs.readFileSync(path.join(D5, 'bundel.json'), 'utf8'));
+    nu += 3600000;
+    fs.writeFileSync(path.join(D5, 'bundel.json'), JSON.stringify({ kaart: 'aix-week-20261025', soort: 'week', kaart_gezet: new Date(nu).toISOString() }));
+    for (const id of M5.concepten().concepten.filter((k) => k.kan_delen).map((k) => k.id)) await M5.app('POST /app/ideeen/kaart/' + id + '/deel');
+    // een oude plaatsing van een andere bundel in de staat: telt niet voor deze bundel
+    const s5 = fs.existsSync(path.join(D5, 'staat.json')) ? JSON.parse(fs.readFileSync(path.join(D5, 'staat.json'), 'utf8')) : {};
+    s5.plaatsing = { op: iso(100), bundel: 'aix-oud', geplaatst: 1, overgeslagen: 0, fouten: 0, details: { geplaatst: [{ id: 'k14' }], overgeslagen: [], fouten: [] } };
+    fs.writeFileSync(path.join(D5, 'staat.json'), JSON.stringify(s5));
+    nu += 60000; weiger.add('Handig idee 11'); hang = 'Handig idee 13'; pogingen = 0;
+    M5.plaatsBundel({ kaart: 'aix-week-20261025', bevestiging: I.BEVESTIGING_PLAATSEN, vraagId: 'wv970ccc' });
+    for (let i = 0; i < 50 && pogingen < 4; i++) await new Promise((r2) => setImmediate(r2));
+    nu += 3600000;
+    toets('12 tijdens de plaatsing (zelfde pod): geen nieuwe bundel', pogingen === 4 && !(await M5.zorgBundelKaart()).gezet && vj5.length === 0, pogingen);
+    const M6 = maak(V5, D5, vj5);   // herstart
+    nu += 3600000; z = await M6.zorgBundelKaart();
+    const k6 = vj5[0] || {};
+    toets('12 na een herstart: deel-bundel voor k14–k17 (4 liggen); k13 hangt (nakijk), k11 geweigerd', z.gezet && bundel5().soort === 'deel' && bundel5().reden === 'liggen' && bundel5().liggen === 4 &&
+      M6.concepten().concepten.find((x) => x.id === 'k13').bezig === true && /— 5 kaarten op Deel/.test(k6.titel) && /kwamen er 4 niet aan de beurt/.test(k6.waarom), { z, b: bundel5(), t: k6.titel });
+    hang = null; weiger.clear();
+    // gemengd: na de Ja nog een nieuwe Deel-keuze → reden nieuw (oude zin); keuze precies op het tijdstip van de Ja telt als liggen, niet als nieuwer
+    const b6 = bundel5(); delete b6.kaart_gezet; b6.afgehandeld = new Date(nu).toISOString(); b6.uitkomst = 'ja'; fs.writeFileSync(path.join(D5, 'bundel.json'), JSON.stringify(b6));
+    await M6.app('POST /app/ideeen/kaart/k14/niet'); await M6.app('POST /app/ideeen/kaart/k14/deel');   // keuze_op === afgehandeld
+    z = await M6.zorgBundelKaart();
+    toets('12 keuze op hetzelfde tijdstip als de Ja telt als liggen (niet als nieuwer)', z.gezet && bundel5().reden === 'liggen' && bundel5().liggen >= 1, bundel5());
+    const b7 = bundel5(); b7.afgehandeld = new Date(nu).toISOString(); b7.uitkomst = 'ja'; fs.writeFileSync(path.join(D5, 'bundel.json'), JSON.stringify(b7));
+    nu += 60000; await M6.app('POST /app/ideeen/kaart/k15/niet'); await M6.app('POST /app/ideeen/kaart/k15/deel');
+    z = await M6.zorgBundelKaart();
+    toets('12 gemengd (nieuwe keuze én liggen): reden nieuw, de zin van wv965', z.gezet && bundel5().reden === 'nieuw' && bundel5().liggen >= 1 && /nadat de vorige vraag/.test(vj5[vj5.length - 1].waarom), { b: bundel5(), w: (vj5[vj5.length - 1] || {}).waarom });
+    const kg = [I.maak({ vault: VAULT, dir: path.join(W, 'grens3') }).bundelKaart({ kaart: 'aix-deel-x', soort: 'deel', reden: 'liggen', liggen: 99999 }, 99999),
+      I.maak({ vault: VAULT, dir: path.join(W, 'grens4') }).bundelKaart({ kaart: 'aix-deel-x', soort: 'deel', reden: 'liggen', liggen: 1, alleen_kaarten: false }, 1)];
+    toets('12 liggen-kaart binnen de grenzen; enkelvoud "kwam er één"', kg.every((x) => lengte(x.waarom) <= 400 && lengte(x.titel) <= 90) && /kwam er één niet aan de beurt/.test(kg[1].waarom), kg.map((x) => [lengte(x.waarom), x.waarom]));
   }
 
   fs.rmSync(W, { recursive: true, force: true });

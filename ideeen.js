@@ -341,11 +341,34 @@ function maak(deps) {
   function deelKaart(b, n) {
     const wat = b.alleen_kaarten === false ? (n === 1 ? 'stuk' : 'stukken') : (n === 1 ? 'kaart' : 'kaarten');
     return { sleutel: b.kaart, soort: 'besluit', titel: 'Socevs winkel op AIX — ' + n + ' ' + wat + ' op Deel plaatsen?',
-      waarom: kap('Er staan ' + n + ' ' + wat + ' op Deel die nog niet in Socevs winkel op aix.socev.dev staan. Minstens één kwam op Deel nadat de vorige vraag over AIX al was ' +
-        'afgehandeld, dus ging daarvan nog niets naar AIX. Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen of webadressen. Bank, gezondheid en beveiliging blijven privé.', 400),
+      waarom: kap('Er staan ' + n + ' ' + wat + ' op Deel die nog niet in Socevs winkel op aix.socev.dev staan. ' + (b.reden === 'liggen'
+        ? 'Bij de vorige plaatsing kwam' + (b.liggen === 1 ? ' er één' : 'en er ' + b.liggen) + ' niet aan de beurt (hooguit ' + GRENS.bundel_max + ' per keer, of de pod werd onderbroken)' +
+          (n > b.liggen ? '; de andere ' + (n - b.liggen) + ' staan nog op Deel van een eerdere poging en gaan ook mee. ' : '. ')
+        : 'Minstens één kwam op Deel nadat de vorige vraag over AIX al was afgehandeld, dus ging daarvan nog niets naar AIX. ') +
+        'Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen of webadressen. Bank, gezondheid en beveiliging blijven privé.', 400),
       stappen: ['Moet er een niet mee? Zet hem in de app bij Apps › AIX, tab Klaar om te delen, op Niet.',
         'Ja met vingerafdruk (op de telefoon): de pod zet wat op Deel staat in Socevs winkel op AIX, als Socev. Nee: er gaat niets naar AIX.'],
       waar: 'overal', prive: false, duur_min: 2, volgorde: 20, herkomst: { handmatig: 'aix-bundel', soort: 'deel' } };
+  }
+  // wv970 (Fable wv965 #2): na een Ja ook de Deel-stukken die bij die plaatsing niet aan de beurt kwamen: overgeslagen omdat er meer dan
+  // bundel_max op Deel stonden, of nergens in de plaatsing omdat de pod midden in de plaatsing herstartte (dan schreef de finally geen
+  // plaatsing voor deze bundel), of door nakijk niet op AIX gevonden. Niet: wat bezig is (nakijk), een weigering van AIX sinds de Ja (anders
+  // elk uur terug), en wat om een andere reden werd overgeslagen (tekst veranderd, vaste toets, plaatje; David kiest dan opnieuw Deel).
+  function blevenLiggen(b, t, op, j) {
+    const p = staatLees().plaatsing;
+    const d = p && p.bundel === b.kaart && p.op === b.afgehandeld && p.details ? p.details : null;   // null = deze plaatsing liep niet af
+    const ids = function (l) { return new Set((Array.isArray(l) ? l : []).map(function (x) { return x && x.id; })); };
+    const teVeel = new Set((d && Array.isArray(d.overgeslagen) ? d.overgeslagen : []).filter(function (x) { return x && /^meer dan /.test(String(x.reden || '')); }).map(function (x) { return x.id; }));
+    const gezien = d ? new Set([...ids(d.geplaatst), ...ids(d.overgeslagen), ...ids(d.fouten)]) : new Set();
+    return op.filter(function (k) {
+      const x = j[k.id] || {};
+      if (!(Date.parse(x.keuze_op) <= t) || x.bezig) return false;   // nieuwere keuzes tellen al; bezig = nakijk
+      // nakijk vond hem niet op AIX: nooit (zeker) aangekomen, dus opnieuw aanbieden; elke herhaling vraagt een nieuwe Ja (Fable wv970 #1)
+      const nagekeken = x.fout && /\(nagekeken\)$/.test(String(x.fout.reden || '')) && Date.parse(x.fout.t) >= t;
+      if (nagekeken) return true;
+      if (x.fout && Date.parse(x.fout.t) >= t) return false;          // AIX weigerde (4xx) sinds de Ja: niet elk uur terug
+      return teVeel.has(k.id) || !gezien.has(k.id);
+    }).length;
   }
   function deelNaAfhandeling(b) {
     const t = Date.parse(b.afgehandeld);
@@ -355,11 +378,13 @@ function maak(deps) {
     if (!c.ok) return null;
     const j = journaal();
     const op = c.concepten.filter(function (k) { return k.keuze === 'deel' && k.kan_delen; });
-    if (!op.some(function (k) { return Date.parse((j[k.id] || {}).keuze_op) > t; })) return null;
+    const nieuwer = op.filter(function (k) { return Date.parse((j[k.id] || {}).keuze_op) > t; }).length;
+    const liggen = b.uitkomst === 'ja' ? blevenLiggen(b, t, op, j) : 0;
+    if (!nieuwer && !liggen) return null;
     const d = new Date(klok()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).replace(/[-: ]/g, '').slice(0, 12);
     let kaart = 'aix-deel-' + d.slice(0, 8) + '-' + d.slice(8);
     if (kaart === b.kaart || (b.vorige && kaart === b.vorige.kaart)) kaart += '-' + crypto.randomBytes(2).toString('hex');   // Fable wv965 #3: zelfde minuut (of wintertijd)
-    return { kaart: kaart, soort: 'deel', gemaakt: new Date(klok()).toISOString(), na: b.kaart, nieuw: op.length,
+    return { kaart: kaart, soort: 'deel', gemaakt: new Date(klok()).toISOString(), na: b.kaart, nieuw: op.length, reden: nieuwer ? 'nieuw' : 'liggen', liggen: liggen,
       alleen_kaarten: op.every(function (k) { return k.vorm === 'kaart'; }),
       vorige: { kaart: b.kaart, soort: b.soort || null, afgehandeld: b.afgehandeld, uitkomst: b.uitkomst || null, vraag_id: b.vraag_id || null } };   // Fable wv965 #4
   }
