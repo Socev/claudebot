@@ -573,6 +573,26 @@ jobs:
           docker run --rm -v "$PWD":/src:ro --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} \
             /src/test/bisync-filter.sh /app/bisync-filter.txt /app/run.sh
 
+      # WAAROM (wv1277, 25-10-2026). De vault gaat ook via Syncthing naar de Synology en Davids pc's. syncthing-stignore.txt moet
+      # weglaten wat bisync-filter.txt weglaat; run.sh start Syncthing alleen als syncthing-filter-toets.py groen is. Deze stap
+      # haalt dezelfde Syncthing-release als de pod (vaste sha256, gelijk aan ST_SHA256 in run.sh) en draait in het image: de
+      # filtertoets op /app, de tegenproeven (kapotte filters moeten rood zijn), rechten/symlink/filter met twee echte
+      # instanties, en het Syncthing-blok van run.sh in scenario's.
+      - name: "Rooktest - Syncthing-filter en -poort (wv1277)"
+        run: |
+          curl -fsSL -o /tmp/st.tgz https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-linux-amd64-v2.1.7.tar.gz
+          echo "2edc416e7ed136b7c858ed5f3f02a3b8316589605e54c380228ceea7acbf0142  /tmp/st.tgz" | sha256sum -c -
+          mkdir -p /tmp/stbin && tar -xzf /tmp/st.tgz -C /tmp/stbin --strip-components=1 syncthing-linux-amd64-v2.1.7/syncthing
+          PIN=$(grep -oE '^ST_SHA256=[0-9a-f]{64}' run.sh | cut -d= -f2)
+          [ "$(sha256sum /tmp/stbin/syncthing | cut -d' ' -f1)" = "$PIN" ] || { echo "::error::ST_SHA256 in run.sh is niet de sha256 van syncthing v2.1.7"; exit 1; }
+          chmod 0755 /tmp/stbin /tmp/stbin/syncthing
+          docker run --rm -v "$PWD":/src:ro -v /tmp/stbin:/stbin:ro --user claude --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} -c '
+            set -e
+            python3 -I /app/syncthing-filter-toets.py --stignore /app/syncthing-stignore.txt --bisync /app/bisync-filter.txt --rechten /app/socev-rechten.sh --syncthing /stbin/syncthing
+            bash /src/test/syncthing-filter.sh /stbin/syncthing /app/syncthing-stignore.txt /app/bisync-filter.txt
+            bash /src/test/syncthing-rechten.sh /stbin/syncthing /app/syncthing-stignore.txt
+            bash /src/test/syncthing-runsh.sh /stbin/syncthing'
+
       - name: "Rooktest - uid-scheiding (wv699)"
         run: |
           bash test/uid-scheiding.sh ghcr.io/socev/claudebot:${{ github.run_number }} /tmp/chart.env

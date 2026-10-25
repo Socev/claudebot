@@ -3687,6 +3687,7 @@ function handleRequest(req, res) {
       bandjes: bandjesInfo(),
       gezondheid: typeof gezondheidInfo === 'function' ? gezondheidInfo() : { aan: false },   // wv937: App Gezondheid (gezondheid-app.js in deze release? tellers, geen inhoud)
       doorgeefluik: typeof doorgeefInfo === 'function' ? doorgeefInfo() : { aan: false },   // wv1267: schakelaar en laatste uitkomst (geen inhoud)
+      syncthing: typeof syncthingInfo === 'function' ? syncthingInfo() : { aan: false },   // wv1277: Syncthing (schakelaar, poort, map, apparaten, filtertoets; geen inhoud of sleutel)
       zoek_snel: typeof zoekSnelInfo === 'function' ? zoekSnelInfo() : { aan: false },   // wv1252: Zoek snel (module, schakelaar, laatste uitkomst en duur; geen inhoud)
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
@@ -14890,6 +14891,96 @@ function secondbrainFinPagina(d) {
   } catch (e) { logError('secondbrain-financien', e); }
 }
 // ── einde secondbrain ──
+
+// ── Syncthing (wv1277, 25-10-2026) ─────────────────────────────────────────────────────────────────────────────────────────
+// run.sh start en bewaakt Syncthing (vault ↔ Synology thuis, laptop, werk-pc) en schrijft /opt/data/syncthing/status.json; hier
+// alleen meten voor /health.syncthing en het levensteken machinekamer.hartslag component 'syncthing' (elke 30 min, alleen op
+// de primaire kant, alleen als Syncthing antwoordt en de vaultmap niet in fout staat). REST alleen 127.0.0.1 met de API-sleutel
+// uit config.xml (0600, claude); die gaat nooit in /health of een log. Geen inhoud: aantallen, staat, apparaatnamen.
+const ST_DIR = process.env.ST_DIR || '/opt/data/syncthing';
+const ST_MAP = 'socev-vault';
+const ST_MEET_MS = 5 * 60 * 1000;
+const ST_HARTSLAG_MS = 30 * 60 * 1000;
+const stStand = { gemeten: 0, data: null, fout: null, hartslag: 0, cfgMtime: 0, cfg: null };
+function stCfg() {
+  const p = path.join(ST_DIR, 'home', 'config.xml');
+  const st = fs.statSync(p);
+  if (st.mtimeMs !== stStand.cfgMtime) {
+    const x = fs.readFileSync(p, 'utf8');
+    const gui = (/<gui\b[\s\S]*?<\/gui>/.exec(x) || [''])[0];
+    const adres = (/<address>([^<]+)<\/address>/.exec(gui) || [])[1] || '';
+    const sleutel = (/<apikey>([^<]+)<\/apikey>/.exec(gui) || [])[1] || '';
+    const namen = {};
+    const re = /<device id="([A-Z0-9-]+)" name="([^"]*)"/g; let m;
+    while ((m = re.exec(x))) namen[m[1]] = m[2];
+    stStand.cfg = { adres: adres, sleutel: sleutel, namen: namen };
+    stStand.cfgMtime = st.mtimeMs;
+  }
+  return stStand.cfg;
+}
+function stGet(cfg, pad) {
+  return new Promise(function (resolve, reject) {
+    const hp = /^(127\.0\.0\.1):(\d+)$/.exec(cfg.adres);
+    if (!hp || !cfg.sleutel) return reject(new Error('GUI-adres of sleutel onbruikbaar'));
+    const r = http.get({ host: hp[1], port: Number(hp[2]), path: pad, timeout: 5000, headers: { 'X-API-Key': cfg.sleutel } }, function (res) {
+      let b = ''; res.setEncoding('utf8');
+      res.on('data', function (c) { if (b.length < 2e6) b += c; });
+      res.on('end', function () {
+        if (res.statusCode !== 200) return reject(new Error(pad.split('?')[0] + ' gaf ' + res.statusCode));
+        try { resolve(JSON.parse(b)); } catch (e) { reject(e); }
+      });
+    });
+    r.on('timeout', function () { r.destroy(new Error('time-out')); });
+    r.on('error', reject);
+  });
+}
+function stLeesJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; } }
+async function stMeet() {
+  const run = stLeesJson(path.join(ST_DIR, 'status.json'));
+  const ft = stLeesJson(path.join(ST_DIR, 'filtertoets.json'));
+  let ftTijd = null; try { ftTijd = new Date(fs.statSync(path.join(ST_DIR, 'filtertoets.json')).mtimeMs).toISOString(); } catch (e) { /* geen toets */ }
+  const d = { run: run, filtertoets: ft ? { ok: ft.ok === true, tijd: ftTijd, vault_bestanden: ft.vault_bestanden,
+    vault_bisync_mee: ft.vault_bisync_mee, vault_syncthing_mee: ft.vault_syncthing_mee,
+    alleen_syncthing_weg: ft.vault_alleen_syncthing_weg, alleen_bisync_weg: ft.vault_alleen_bisync_weg } : null };
+  let fout = null;
+  try {
+    const cfg = stCfg();
+    const [ver, sys, con, map] = await Promise.all([stGet(cfg, '/rest/system/version'), stGet(cfg, '/rest/system/status'),
+      stGet(cfg, '/rest/system/connections'), stGet(cfg, '/rest/db/status?folder=' + ST_MAP).catch(function () { return null; })]);
+    d.versie = ver && ver.version; d.apparaat = sys && sys.myID ? sys.myID.slice(0, 7) : null;
+    d.sinds = sys && sys.startTime || null;
+    d.apparaten = [];
+    for (const id in (con && con.connections) || {}) {
+      if (id === (sys && sys.myID)) continue;
+      const c = con.connections[id];
+      const a = { naam: cfg.namen[id] || id.slice(0, 7), id: id.slice(0, 7), verbonden: !!c.connected, soort: c.type || null };
+      if (map) { try { const k = await stGet(cfg, '/rest/db/completion?folder=' + ST_MAP + '&device=' + encodeURIComponent(id));
+        a.voltooid = Math.round(k.completion * 10) / 10; a.nog_bytes = k.needBytes; a.nog_items = k.needItems; } catch (e) { a.voltooid = null; } }
+      d.apparaten.push(a);
+    }
+    d.map = map ? { staat: map.state, fout: map.error || null, bestanden: map.localFiles, bytes: map.localBytes,
+      globaal: map.globalFiles, nog_bestanden: map.needFiles, nog_bytes: map.needBytes, fouten: (map.errors || 0) + (map.pullErrors || 0) } : null;
+    const gezond = !!map && map.state !== 'error' && !map.error;
+    if (gezond && SERVER_ECHT && rolPrimair() && Date.now() - stStand.hartslag >= ST_HARTSLAG_MS) {
+      try { await appSbRpc('mk_hartslag_stempel', { p_component: 'syncthing', p_gemeten_rijen: map.localFiles || 0, p_bevindingen: d.map.fouten });
+        stStand.hartslag = Date.now(); }
+      catch (e) { logError('syncthing-hartslag', e); }
+    }
+  } catch (e) { fout = (e && e.code === 'ENOENT') ? 'geen config' : String(e && e.message || e).slice(0, 120); }
+  stStand.data = d; stStand.fout = fout; stStand.gemeten = Date.now();
+}
+function syncthingInfo() {
+  const d = stStand.data || {};
+  const r = d.run || {};
+  return { aan: r.aan === true, loopt: r.loopt === true, reden: r.reden || null, poort: r.poort || null, herstarts: r.herstarts || 0,
+    versie: d.versie || null, apparaat: d.apparaat || null, map: d.map || null, apparaten: d.apparaten || [], filtertoets: d.filtertoets || null,
+    meetfout: stStand.fout, gemeten: stStand.gemeten ? new Date(stStand.gemeten).toISOString() : null,
+    hartslag: stStand.hartslag ? new Date(stStand.hartslag).toISOString() : null };
+}
+if (SERVER_ECHT) {
+  setTimeout(function () { stMeet().catch(function (e) { logError('syncthing', e); }); }, 45000).unref();
+  setInterval(function () { stMeet().catch(function (e) { logError('syncthing', e); }); }, ST_MEET_MS).unref();
+}
 
 // ── Doorgeefluik (wv1267, 25-10-2026; ontwerp "01_Ontwikkeling/Doorgeefluik Socev naar machinekamer (ontwerp 25-10-2026).md", Fable vooraf) ──
 // David (25-10): "Ik ben nu de loopjongen, Socev zet het klaar en verteld mij wat ik jou moet vertellen". Socev vraagt in het hoofdkanaal

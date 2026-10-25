@@ -2,6 +2,7 @@
 # run.sh — draait als gebruiker 'claude'. Start + bewaakt:
 #   - de Claude-API (server.js)         altijd
 #   - de vault-sync (rclone bisync)     altijd
+#   - Syncthing (vault ↔ Davids apparaten) alleen met schakelaar /opt/data/syncthing.json aan (wv1277)
 #   - de git-repo van de GHAWA-site     alleen als GIT_REPO_URL is gezet
 #   - de Telegram-bot (telegram-claude-bot.js)  alleen als TG_TOKEN is gezet
 # Zo kun je de in-container bot uitzetten door simpelweg TG_TOKEN leeg te maken
@@ -270,6 +271,142 @@ socev_vol_indien_nodig(){
   socev_rechten vol   # schrijft zelf de marker
 }
 
+# ── Syncthing (wv1277, 25-10-2026; Davids plan "Opslag en sync", akkoord 25-10 14:21) ───────────────────────────────────────────
+# WAAROM. De vault gaat sinds 25-10 ook via Syncthing naar de Synology thuis, de laptop en de werk-pc: daar is het een gewone,
+# snelle map in plaats van Drive-streaming. bisync met Drive blijft draaien (n8n schrijft nog op Drive, fase-0-bouwplan § 2.2).
+# HOE. Binary en home op het volume (/opt/data/syncthing; apparaatsleutel = het apparaat-ID dat Davids apparaten kennen), proces
+# als kind van dit script, GUI/REST alleen op 127.0.0.1 met wachtwoord, geen statistiek, geen zelf-update (vaste sha256 hieronder;
+# bijwerken = nieuwe binary + nieuwe sha256 in een image). Alleen op de primaire kant (rolbestand, zoals bisync).
+# Schakelaar /opt/data/syncthing.json {"aan": true}: ontbreekt of uit = Syncthing gestopt; bisync merkt daar niets van.
+# POORT (fail-closed): vóór elke start (1) binary met de vaste sha256, (2) de vault-.stignore is een symlink naar het filter in
+# /app (root, alleen-lezen; socev kan de wortel en dat bestand niet schrijven), (3) syncthing-filter-toets.py groen: het filter
+# laat weg wat bisync-filter.txt weglaat, op een proefboom én op een spiegel van de echte vaultnamen, (4) de config: GUI alleen
+# 127.0.0.1 met wachtwoord, geen statistiek of zelf-update, geen automatisch accepteren of introducer, en de vaultmap met
+# ignorePerms en zonder eigenaar/xattr-sync. Rood = niet starten, regel in syncthing-run.log en status.json, over een uur opnieuw.
+# Tijdens het draaien: elke ronde (30 s) de symlink nagaan; anders meteen stoppen.
+ST_DIR="${ST_DIR:-/opt/data/syncthing}"
+ST_BIN="$ST_DIR/bin/syncthing"
+ST_HOME="$ST_DIR/home"
+ST_LOG="$ST_DIR/syncthing.log"
+ST_RUNLOG="$ST_DIR/syncthing-run.log"
+ST_STATUS="$ST_DIR/status.json"
+ST_SCHAKELAAR="${ST_SCHAKELAAR:-/opt/data/syncthing.json}"
+ST_IGNORE=/app/syncthing-stignore.txt
+ST_TOETS=/app/syncthing-filter-toets.py
+ST_MAP_ID=socev-vault
+ST_SHA256=f5c12679f2bad1b5eff619ba7b04ead1a457e439a1e55dc640d4d8995d7f4dbd   # syncthing v2.1.7 linux-amd64 (GitHub-release, 20-10-2026)
+ST_PID=""; ST_VOLGENDE=0; ST_CRASH=0; ST_REDEN="nog niet gestart"; ST_POORT="niet gedraaid"; ST_GESTART=0
+stlog(){
+  if [ -f "$ST_RUNLOG" ] && [ "$(stat -c %s "$ST_RUNLOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then mv -f "$ST_RUNLOG" "$ST_RUNLOG.1"; fi
+  printf '%s %s\n' "$(date '+%F %T')" "$1" >> "$ST_RUNLOG" 2>/dev/null
+}
+st_status(){
+  [ -d "$ST_DIR" ] || return 0
+  python3 -I - "$ST_STATUS" "${ST_PID:-}" "$ST_REDEN" "$ST_POORT" "$ST_GESTART" "$ST_CRASH" "$(st_schakelaar_aan && echo 1 || echo 0)" <<'PY' 2>/dev/null || true
+import json,os,sys,time
+p,pid,reden,poort,gestart,crash,aan=sys.argv[1:]
+d={'aan':aan=='1','pid':int(pid) if pid else None,'loopt':bool(pid),'reden':reden,'poort':poort,
+   'gestart':int(gestart) or None,'herstarts':int(crash),'tijd':int(time.time())}
+with open(p+'.nieuw','w') as f: json.dump(d,f)
+os.replace(p+'.nieuw',p)
+PY
+}
+st_schakelaar_aan(){ [ -f "$ST_SCHAKELAAR" ] && python3 -I -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("aan") is True else 1)' "$ST_SCHAKELAAR" 2>/dev/null; }
+st_vault_in_config(){ grep -q "<folder id=\"$ST_MAP_ID\"" "$ST_HOME/config.xml" 2>/dev/null; }
+# De symlink vault/.stignore -> /app/syncthing-stignore.txt (atomisch neerzetten; de wortel is van claude, socev heeft r-x).
+st_ignore_goed(){ [ -L "$VAULT/.stignore" ] && [ "$(readlink "$VAULT/.stignore")" = "$ST_IGNORE" ] && [ -r "$ST_IGNORE" ]; }
+st_ignore_zet(){
+  st_ignore_goed && return 0
+  [ -r "$ST_IGNORE" ] || return 1
+  ln -sfn "$ST_IGNORE" "$VAULT/.stignore.nieuw.$$" && mv -fT "$VAULT/.stignore.nieuw.$$" "$VAULT/.stignore" || { rm -f "$VAULT/.stignore.nieuw.$$"; return 1; }
+  st_ignore_goed
+}
+st_config_ok(){
+  python3 -I - "$ST_HOME/config.xml" "$ST_MAP_ID" "$VAULT" <<'PY'
+import sys,os,xml.etree.ElementTree as ET
+cfg,mid,vault=sys.argv[1:]
+r=ET.parse(cfg).getroot(); fout=[]
+g=r.find('gui')
+if g is None or (g.findtext('address') or '').split(':')[0] not in ('127.0.0.1',): fout.append('GUI niet alleen op 127.0.0.1')
+if g is not None and not (g.findtext('user') or '').strip(): fout.append('GUI zonder gebruiker')
+if g is not None and not (g.findtext('password') or '').strip(): fout.append('GUI zonder wachtwoord')
+o=r.find('options')
+def opt(k): return (o.findtext(k) or '').strip() if o is not None else ''
+if opt('urAccepted') not in ('-1',): fout.append('gebruiksstatistiek niet uit (urAccepted %s)'%opt('urAccepted'))
+if opt('autoUpgradeIntervalH') not in ('0',): fout.append('zelf-update niet uit')
+if opt('crashReportingEnabled')!='false': fout.append('crashrapporten niet uit')
+for d in r.findall('device'):
+    if d.get('autoAcceptFolders')=='true': fout.append('apparaat %s accepteert mappen automatisch'%d.get('id','')[:7])
+    if d.get('introducer')=='true': fout.append('apparaat %s is introducer'%d.get('id','')[:7])
+dd=r.find('defaults/device')
+if dd is not None and dd.get('autoAcceptFolders')=='true': fout.append('standaardapparaat accepteert mappen automatisch')
+rv=os.path.realpath(vault)
+for f in r.findall('folder'):
+    p=os.path.realpath(os.path.expanduser(f.get('path','')))
+    if f.get('id')==mid:
+        if p!=rv: fout.append('vaultmap wijst naar %s'%p)
+        if f.get('ignorePerms')!='true': fout.append('vaultmap zonder ignorePerms')
+        for k in ('syncOwnership','sendOwnership','syncXattrs','sendXattrs'):
+            if (f.findtext(k) or 'false').strip()!='false': fout.append('vaultmap: %s aan'%k)
+        if f.get('type') not in ('sendreceive','sendonly'): fout.append('vaultmap type %s'%f.get('type'))
+    elif p==rv or p.startswith(rv+os.sep) or rv.startswith(p+os.sep):
+        fout.append('map %s overlapt de vault'%f.get('id'))
+if fout: print('; '.join(fout)); sys.exit(1)
+PY
+}
+st_poort(){
+  local uit
+  [ -x "$ST_BIN" ] || { ST_POORT="rood: binary ontbreekt ($ST_BIN)"; return 1; }
+  [ "$(sha256sum "$ST_BIN" 2>/dev/null | cut -d' ' -f1)" = "$ST_SHA256" ] || { ST_POORT="rood: binary heeft niet de vaste sha256"; return 1; }
+  [ -r "$ST_IGNORE" ] && [ -r "$ST_TOETS" ] || { ST_POORT="rood: filter of toets ontbreekt in /app"; return 1; }
+  [ -f "$ST_HOME/config.xml" ] || { ST_POORT="rood: geen config ($ST_HOME)"; return 1; }
+  if st_vault_in_config; then
+    st_ignore_zet || { ST_POORT="rood: kan vault/.stignore niet als symlink naar $ST_IGNORE zetten"; return 1; }
+  fi
+  if ! uit="$(timeout 600 python3 -I "$ST_TOETS" --stignore "$ST_IGNORE" --bisync "$SYNC_FILTER" --rechten /app/socev-rechten.sh \
+               --syncthing "$ST_BIN" --vault "$VAULT" --json "$ST_DIR/filtertoets.json" 2>&1)"; then
+    ST_POORT="rood: filtertoets - $(printf '%s' "$uit" | tail -3 | tr '\n' ' ' | cut -c1-400)"; return 1
+  fi
+  stlog "$uit"
+  if ! uit="$(st_config_ok 2>&1)"; then ST_POORT="rood: config - $(printf '%s' "$uit" | cut -c1-300)"; return 1; fi
+  ST_POORT="groen $(date '+%F %T')"
+  return 0
+}
+st_start(){
+  ( STNOUPGRADE=1 STNORESTART=1 exec "$ST_BIN" serve --home="$ST_HOME" --no-browser --no-restart --no-upgrade \
+      --log-file="$ST_LOG" --log-max-size=5000000 --log-max-old-files=2 >/dev/null 2>&1 ) &
+  ST_PID=$!; ST_GESTART=$(date +%s); ST_REDEN="loopt"
+  stlog "gestart (pid $ST_PID)"; log "syncthing gestart (pid $ST_PID)"
+}
+st_stop(){
+  [ -n "$ST_PID" ] || return 0
+  kill -TERM "$ST_PID" 2>/dev/null
+  for _ in $(seq 1 20); do kill -0 "$ST_PID" 2>/dev/null || break; sleep 0.5; done
+  kill -0 "$ST_PID" 2>/dev/null && kill -KILL "$ST_PID" 2>/dev/null
+  stlog "gestopt (pid $ST_PID): $1"; log "syncthing gestopt: $1"
+  ST_PID=""; ST_REDEN="$1"
+}
+st_bewaak(){
+  local nu wil=1 waarom=""
+  nu=$(date +%s)
+  if ! st_schakelaar_aan; then wil=0; waarom="schakelaar uit"; elif ! rol_primair; then wil=0; waarom="pod niet primair"; fi
+  if [ -n "$ST_PID" ]; then
+    if [ "$wil" = 0 ]; then st_stop "$waarom"
+    elif ! kill -0 "$ST_PID" 2>/dev/null; then
+      ST_CRASH=$((ST_CRASH + 1)); ST_PID=""; ST_REDEN="proces gestopt (herstart $ST_CRASH)"
+      local wacht=$(( 60 * (1 << (ST_CRASH > 5 ? 5 : ST_CRASH)) )); [ "$wacht" -gt 1800 ] && wacht=1800
+      ST_VOLGENDE=$(( nu + wacht )); stlog "proces weg; opnieuw na ${wacht}s"
+    elif st_vault_in_config && ! st_ignore_goed; then
+      st_stop "vault/.stignore is geen symlink meer naar het filter in /app"; ST_VOLGENDE=$(( nu + 60 ))
+    fi
+  elif [ "$wil" = 1 ] && [ "$nu" -ge "$ST_VOLGENDE" ]; then
+    if st_poort; then st_start
+    else ST_REDEN="poort rood"; ST_VOLGENDE=$(( nu + 3600 )); stlog "$ST_POORT"; log "syncthing niet gestart: $ST_POORT"; fi
+  elif [ "$wil" = 0 ]; then ST_REDEN="$waarom"
+  fi
+  st_status
+}
+
 start_sync(){
   sync_lus &
   SYNC_PID=$!; log "sync gestart (pid $SYNC_PID) — $BRON <-> $VAULT, elke ${SYNC_INTERVAL}s"
@@ -535,6 +672,7 @@ afsluiten(){
   [ "$STOPPEN" = "1" ] && return
   STOPPEN=1
   log "SIGTERM ontvangen — doorgeven aan de supervisor (pid ${API_PID:-onbekend})"
+  [ -n "${ST_PID:-}" ] && st_stop "podstop (SIGTERM)"   # wv1277: Syncthing netjes laten afsluiten (index op het volume)
   [ -n "${API_PID:-}" ] && kill -TERM "$API_PID" 2>/dev/null
   for _ in $(seq 1 40); do
     kill -0 "${API_PID:-0}" 2>/dev/null || { log "supervisor is gestopt — run.sh stopt"; exit 0; }
@@ -561,5 +699,6 @@ while true; do
   vault_snapshot_indien_nodig
   socev_vol_indien_nodig
   socev_na_ronde_indien_nodig
+  st_bewaak   # wv1277: Syncthing (schakelaar, rol, poort, symlink)
   sleep 30
 done

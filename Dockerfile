@@ -123,6 +123,9 @@ COPY socev-voorbereiding.sh socev-rechten.sh socev-thuis.py loper-bind.py socev-
 # Syncfilter van de vault (wv813): scripts en Windows-code niet naar Drive/Davids pc; run.sh toetst het vóór de eerste bisync.
 # Root-eigendom en in het image: socev noch een uitrol kan het filter verruimen.
 COPY bisync-filter.txt bisync-filter-toets.sh /app/
+# Syncthing-filter van de vault (wv1277): zelfde effect als bisync-filter.txt, voor de Synology en Davids pc's. De vault-.stignore
+# is een symlink hierheen (root, alleen-lezen); run.sh draait de toets vóór elke start van Syncthing (fail-closed).
+COPY syncthing-stignore.txt syncthing-filter-toets.py /app/
 # argv-hook als managed settings (Fable wv698 #4): root-eigendom, dus geen sessie kan hem uitzetten of omzeilen, en hij
 # geldt ook voor sessies met een andere HOME. allowManagedHooksOnly: hooks uit HOME of de vault worden genegeerd.
 COPY argv-wacht.py /app/argv-wacht.py
@@ -183,9 +186,9 @@ RUN npm install --omit=dev --no-audit --no-fund \
 RUN chmod +x /app/run.sh /app/entrypoint.sh /app/fetch-secrets.sh /app/uitrol.sh \
       /app/socev-voorbereiding.sh /app/socev-rechten.sh /app/playwright-mcp.sh \
  && chmod 0644 /app/socev-loper.js /app/loper-bind.py /app/socev-thuis.py /app/argv-wacht.py /etc/claude-code/managed-settings.json \
-      /app/bisync-filter.txt /app/bisync-filter-toets.sh \
+      /app/bisync-filter.txt /app/bisync-filter-toets.sh /app/syncthing-stignore.txt /app/syncthing-filter-toets.py \
  && chown -R root:root /app/socev-* /app/loper-bind.py /app/argv-wacht.py /app/playwright-mcp.sh /etc/claude-code \
-      /app/bisync-filter.txt /app/bisync-filter-toets.sh
+      /app/bisync-filter.txt /app/bisync-filter-toets.sh /app/syncthing-stignore.txt /app/syncthing-filter-toets.py
 
 EXPOSE 8080
 # entrypoint draait als root (chown volume), zakt dan naar 'claude'
