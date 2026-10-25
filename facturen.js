@@ -847,10 +847,17 @@ function transactieInvoegen(fdb, t) {
  * - droogloop tegen dubbel inlezen (Fable wv944 #2/#3): regels vóór de start die "mogelijk al binnen" zijn onder een andere entry_ref
  *   (zelfde rekening, dag, bedrag, tegenpartij) en entry_ref-bases met een ander aantal -n dan in de database. Boven de drempel geweigerd
  *   (409) tot de machinekamer het nagerekend heeft (opties.forceer). Na de start doet het signaal mogelijk_dubbel_geupload dat werk al.
- * opties: { modus: 'upload'|'historisch', herkomst, forceer, droog }.
+ * opties: { modus: 'upload'|'historisch', herkomst, forceer, droog, koppel (wv951: zie historieKoppeling) }.
  */
 function startdatumVan(fdb) { const v = D.metaLees(fdb, 'startdatum'); return v && K.isIsoDatum(v) ? v : null; }
 const DUBBEL_DREMPEL = (n) => Math.max(2, Math.ceil(n * 0.02));
+// zelfde tegenpartij: IBAN als beide er een hebben, anders de naam (wv951: een ABN-incasso heeft in de TAB-export geen IBAN, in FV2 wel)
+function zelfdeTegenpartij(x, t) {
+  const a = K.ibanNorm(x.tegenpartij_iban), b = K.ibanNorm(t.tegenpartij_iban);
+  if (a && b) return a === b;
+  const na = K.normNaam(x.tegenpartij_naam), nb = K.normNaam(t.tegenpartij_naam);
+  return na ? na === nb : !a && !b && !nb;
+}
 function historieCheck(fdb, transacties, start) {
   const bestaat = fdb.db.prepare('SELECT 1 FROM bank_transactie WHERE entry_ref = ?');
   const perBasis = new Map();
@@ -864,16 +871,44 @@ function historieCheck(fdb, transacties, start) {
   let suffix = 0;
   for (const [b, n] of perBasis) { const d = Number(telBasis.get(b, b + '-*').n); if (d > 0 && d !== n) suffix++; }
   const zelfde = fdb.db.prepare('SELECT entry_ref, tegenpartij_iban, tegenpartij_naam FROM bank_transactie WHERE eigen_iban = ? AND boekdatum = ? AND bedrag_centen = ? AND verwijderd_op IS NULL');
-  const tp = (x) => K.ibanNorm(x.tegenpartij_iban) || K.normNaam(x.tegenpartij_naam);
   let dubbel = 0;
   for (const t of nieuw) {
     // alleen historie (vóór de start): na de start doet het signaal mogelijk_dubbel_geupload dit werk, en zonder startdatum blijft het
     // gedrag van vóór wv944 (Fable diffreview wv944 #2)
     if (!start || t.boekdatum >= start) continue;
-    if (zelfde.all(t.eigen_iban, t.boekdatum, t.bedrag_centen).some((x) => x.entry_ref !== t.entry_ref && tp(x) === tp(t))) dubbel++;
+    if (zelfde.all(t.eigen_iban, t.boekdatum, t.bedrag_centen).some((x) => x.entry_ref !== t.entry_ref && zelfdeTegenpartij(x, t))) dubbel++;
   }
   return { regels: transacties.length, al_bekend: al, nieuw: nieuw.length, mogelijk_dubbel: dubbel, suffix_verschil: suffix,
     drempel: DUBBEL_DREMPEL(nieuw.length), boven_drempel: dubbel > DUBBEL_DREMPEL(nieuw.length) };
+}
+// wv951: een historieregel die al binnen is onder een andere entry_ref (FV2 las de ABN-rekeningen vanaf april 2026 uit een ander formaat)
+// één-op-één koppelen aan een bestaande regel met dezelfde rekening, boekdatum, bedrag en tegenpartij, waarvan de eigen sleutel niet in dit
+// bestand staat (anders is die regel al door een andere regel van dit bestand gedekt). Alleen vóór de start. Een gekoppelde regel wordt niet
+// ingevoegd: de bestaande regel krijgt de sleutel van het bestand (dan is een latere export van dezelfde periode gewoon "al bekend") en
+// hooguit incassant-id en machtiging erbij. Meer dan één kandidaat: eerst op gelijk kenmerk; blijft het onbeslist, dan wel koppelen
+// (anders dubbel) maar niet aanvullen (review wv951: geen kruislingse machtiging). → Map(entry_ref uit het bestand → { ref, aanvul })
+function historieKoppeling(fdb, transacties, start) {
+  const uit = new Map();
+  if (!start) return uit;
+  const inBestand = new Set(transacties.map((t) => t.entry_ref));
+  const bestaat = fdb.db.prepare('SELECT 1 FROM bank_transactie WHERE entry_ref = ?');
+  const zelfde = fdb.db.prepare('SELECT entry_ref, tegenpartij_iban, tegenpartij_naam, kenmerk FROM bank_transactie WHERE eigen_iban = ? AND boekdatum = ? AND bedrag_centen = ? AND verwijderd_op IS NULL ORDER BY entry_ref');
+  const gebruikt = new Set();
+  for (const t of transacties) {
+    if (t.boekdatum >= start || bestaat.get(t.entry_ref)) continue;
+    const alle = zelfde.all(t.eigen_iban, t.boekdatum, t.bedrag_centen)
+      .filter((y) => y.entry_ref !== t.entry_ref && !inBestand.has(y.entry_ref) && zelfdeTegenpartij(y, t));
+    const vrij = alle.filter((y) => !gebruikt.has(y.entry_ref));
+    if (!vrij.length) continue;
+    let x = vrij[0], aanvul = alle.length === 1;
+    if (!aanvul && t.kenmerk) {
+      const km = vrij.filter((y) => y.kenmerk === t.kenmerk);
+      if (km.length === 1 && alle.filter((y) => y.kenmerk === t.kenmerk).length === 1) { x = km[0]; aanvul = true; }
+    }
+    gebruikt.add(x.entry_ref);
+    uit.set(t.entry_ref, { ref: x.entry_ref, aanvul });
+  }
+  return uit;
 }
 function bankVan(formaat) { return formaat === 'ing_csv' ? 'ING' : 'ABN'; }
 function saldoKort(saldo) {
@@ -910,6 +945,14 @@ function verwerkBankbestandTx(fdb, r, lees, sha, bron, naam, nu, opties, modus, 
       return { soort: 'bank', al_bekend: true, nieuw: 0, bestand: bekend.id };
     }
     const check = historieCheck(fdb, lees.transacties, start);
+    // --koppel (wv951, alleen historisch): gekoppelde regels tellen niet meer als mogelijk dubbel; de rest moet onder de drempel blijven
+    const koppel = opties.koppel && modus === 'historisch' ? historieKoppeling(fdb, lees.transacties, start) : null;
+    if (koppel) {
+      check.te_koppelen = koppel.size;
+      check.onbeslist = [...koppel.values()].filter((x) => !x.aanvul).length;
+      check.drempel = DUBBEL_DREMPEL(check.nieuw - koppel.size);
+      check.boven_drempel = check.mogelijk_dubbel - koppel.size > check.drempel;
+    }
     const kort_ = { soort: 'bank', formaat: lees.formaat, modus, periode: lees.periode, saldo: saldoKort(lees.saldo), check,
       rekeningen: Object.entries(lees.per_rekening).map(([iban, n]) => ({ rekening: eind4(iban), aantal: n })), prive_weggegooid: lees.prive_weggegooid };
     if (opties.droog) return Object.assign({ droog: true }, kort_);
@@ -924,8 +967,18 @@ function verwerkBankbestandTx(fdb, r, lees, sha, bron, naam, nu, opties, modus, 
       periode_van: lees.periode ? lees.periode.van : null, periode_tot: lees.periode ? lees.periode.tot : null, saldo: lees.saldo || null,
       bron_bewaard: bron ? 1 : 0, herkomst: kort(opties.herkomst || (modus === 'historisch' ? 'machinekamer' : 'app-upload'), 300) });
     const aanvul = fdb.db.prepare('UPDATE bank_transactie SET incassant_id = coalesce(incassant_id, ?), machtiging = coalesce(machtiging, ?) WHERE entry_ref = ? AND (incassant_id IS NULL OR machtiging IS NULL)');
-    let nieuw = 0, aangevuld = 0, archief = 0;
+    const herkey = fdb.db.prepare('UPDATE bank_transactie SET entry_ref = ? WHERE entry_ref = ?');
+    const sleutels = [];
+    let nieuw = 0, aangevuld = 0, archief = 0, gekoppeld = 0;
     for (const t of lees.transacties) {
+      if (koppel && koppel.has(t.entry_ref)) {
+        const x = koppel.get(t.entry_ref);
+        if (herkey.run(t.entry_ref, x.ref).changes !== 1) throw new Error('koppelen: bestaande regel niet gevonden');
+        sleutels.push([x.ref, t.entry_ref]);
+        gekoppeld++;
+        if (x.aanvul && (t.incassant_id || t.machtiging)) aangevuld += aanvul.run(t.incassant_id || null, t.machtiging || null, t.entry_ref).changes;
+        continue;
+      }
       const k = perId.get(t.eigen_iban);
       const hist = !!start && t.boekdatum < start;
       const rij = Object.assign({}, t, { id: D.nieuwId(), bestand: bid, rekening: k.id, bankluis_sleutel: null, bestand_op: wanneer, aangemaakt_op: wanneer,
@@ -939,8 +992,9 @@ function verwerkBankbestandTx(fdb, r, lees, sha, bron, naam, nu, opties, modus, 
     const controle = bankcontroleToepassen(fdb, nu);
     D.audit(fdb, { wie: r.wie, wat: modus === 'historisch' ? 'bankbestand_historisch' : 'bankbestand_upload', object_soort: 'bank_bestand', object_id: bid,
       na: { formaat: lees.formaat, aantal: lees.transacties.length, nieuw, archief, aangevuld, prive_weggegooid: lees.prive_weggegooid,
-        mogelijk_dubbel: check.mogelijk_dubbel, suffix_verschil: check.suffix_verschil, geforceerd: !!(check.boven_drempel && opties.forceer) }, wanneer });
-    return Object.assign(kort_, { bestand: bid, aantal: lees.transacties.length, nieuw, al_bekend_regels: lees.transacties.length - nieuw, aangevuld, archief,
+        mogelijk_dubbel: check.mogelijk_dubbel, suffix_verschil: check.suffix_verschil, geforceerd: !!(check.boven_drempel && opties.forceer), gekoppeld,
+        sleutels: sleutels.length ? sleutels : undefined }, wanneer });
+    return Object.assign(kort_, { bestand: bid, aantal: lees.transacties.length, nieuw, al_bekend_regels: lees.transacties.length - nieuw - gekoppeld, gekoppeld, aangevuld, archief,
       bron_bewaard: !!bron, controle });
   });
 }

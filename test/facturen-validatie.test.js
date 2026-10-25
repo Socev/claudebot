@@ -197,6 +197,80 @@ test('droogloop: dezelfde posten onder een andere entry_ref (ander saldo) worden
   assert.equal(een.check.al_bekend, 1);
 });
 
+test('koppelen (wv951): dezelfde post onder een andere sleutel één-op-één gekoppeld, niet dubbel; incassant aangevuld; na de start nooit', () => {
+  const t = opzet();
+  // "FV2": vier posten, waarvan twee identiek op dezelfde dag; andere sleutel dan het nieuwe bestand (ander beginsaldo)
+  const a = tab([['20250105', -1000, ov(LEV.A, 'Leverancier A B.V.', 'f1')], ['20250106', -2000, ov(LEV.A, 'Leverancier A B.V.', 'f2')],
+    ['20250107', -500, ov(LEV.A, 'Leverancier A B.V.', 'dag')], ['20250107', -500, ov(LEV.A, 'Leverancier A B.V.', 'dag')]], 500000);
+  hist(t, a);
+  // een bestaande regel na de start onder een andere sleutel: wordt nooit gekoppeld
+  F.verwerkBankbestand(t.fdb, t.eig, Buffer.from(tab([['20261005', -1000, ov(LEV.A, 'Leverancier A B.V.', 'f1')]], 300000)), 'na.tab', NU);
+  t.fdb.db.prepare('UPDATE bank_transactie SET incassant_id = NULL, machtiging = NULL').run();
+  // één kant zonder IBAN (ABN-incasso in de TAB-export): dan telt de naam
+  t.fdb.db.prepare("UPDATE bank_transactie SET tegenpartij_iban = NULL WHERE boekdatum = '2025-01-06'").run();
+  // nieuw bestand: f1 als incasso (krijgt incassant), f2, drie keer "dag" (één meer dan in de database), één echt nieuwe post, één na de start
+  const b = tab([['20250105', -1000, inc(LEV.A, 'Leverancier A B.V.', 'f1')], ['20250106', -2000, ov(LEV.A, 'Leverancier A B.V.', 'f2')],
+    ['20250107', -500, ov(LEV.A, 'Leverancier A B.V.', 'dag')], ['20250107', -500, ov(LEV.A, 'Leverancier A B.V.', 'dag')], ['20250107', -500, ov(LEV.A, 'Leverancier A B.V.', 'dag')],
+    ['20250201', -700, ov(LEV.A, 'Leverancier A B.V.', 'nieuw')], ['20261005', -1000, ov(LEV.A, 'Leverancier A B.V.', 'f1')]], 700000);
+  const zonder = hist(t, b, 'b.tab', { droog: true });
+  assert.equal(zonder.check.mogelijk_dubbel, 5);
+  assert.equal(zonder.check.boven_drempel, true);
+  assert.equal(zonder.check.te_koppelen, undefined, 'zonder --koppel geen koppeling');
+  const droog = hist(t, b, 'b.tab', { droog: true, koppel: true });
+  assert.equal(droog.check.te_koppelen, 4);
+  assert.equal(droog.check.boven_drempel, false, '5 mogelijk dubbel, 4 gekoppeld: 1 rest onder de drempel van 2');
+  assert.equal(t.n('SELECT count(*) n FROM bank_transactie'), 5, 'droog schrijft niets');
+  // --koppel in een gewone upload doet niets
+  assert.equal(F.verwerkBankbestand(t.fdb, t.eig, Buffer.from(b), 'b.tab', NU, { koppel: true, droog: true }).check.te_koppelen, undefined);
+  const u = hist(t, b, 'b.tab', { koppel: true });
+  assert.equal(u.gekoppeld, 4);
+  assert.equal(u.nieuw, 3, 'derde "dag", de nieuwe post en de post na de start');
+  assert.equal(u.al_bekend_regels, 0);
+  assert.equal(u.aangevuld, 1);
+  assert.equal(t.n('SELECT count(*) n FROM bank_transactie'), 8);
+  assert.equal(t.n("SELECT count(*) n FROM bank_transactie WHERE boekdatum = '2025-01-07'"), 3);
+  assert.equal(t.n("SELECT count(*) n FROM bank_transactie WHERE boekdatum = '2025-01-05' AND incassant_id = 'NL00ZZZTEST0000000301' AND machtiging = 'MTEST001'"), 1);
+  assert.equal(t.n("SELECT count(*) n FROM bank_transactie WHERE boekdatum = '2025-01-05'"), 1);
+  assert.equal(t.n("SELECT count(*) n FROM bank_transactie WHERE boekdatum = '2026-10-05'"), 2, 'na de start nooit gekoppeld (de bestaande regel op die dag blijft, de nieuwe komt erbij)');
+  const au = JSON.parse(t.fdb.db.prepare("SELECT na FROM audit WHERE wat = 'bankbestand_historisch' ORDER BY wanneer DESC, rowid DESC LIMIT 1").get().na);
+  assert.equal(au.gekoppeld, 4); assert.equal(au.sleutels.length, 4);
+  // de gekoppelde regels dragen nu de sleutel van het bestand
+  const refsB = B.leesBankbestand(b, { rekeningen: t.fdb.db.prepare('SELECT iban, entiteit, bank_formaat, controle, alleen_eigenaar FROM rekening').all() }).transacties.map((x) => x.entry_ref);
+  assert.equal(t.n('SELECT count(*) n FROM bank_transactie WHERE entry_ref IN (' + refsB.map(() => '?').join(',') + ')', refsB), 7);
+  // nog eens: al bekend
+  assert.equal(hist(t, b, 'b.tab', { koppel: true }).al_bekend, true);
+  // een ander bestand met dezelfde posten (andere bytes) zonder --koppel, en als App-upload: alles al bekend, niets dubbel (review wv951 #1)
+  const b2 = b + tab([['20250301', -100, ov(LEV.A, 'Leverancier A B.V.', 'nog een')]], 100000);
+  const w2 = hist(t, b2, 'b2.tab');
+  assert.equal(w2.nieuw, 1); assert.equal(w2.check.mogelijk_dubbel, 0); assert.equal(w2.al_bekend_regels, 7);
+  assert.equal(F.verwerkBankbestand(t.fdb, t.eig, Buffer.from(b2 + tab([['20250302', -1, 'BEA, Betaalpas x']], 0)), 'app.tab', NU).nieuw, 1);
+  assert.equal(t.n('SELECT count(*) n FROM bank_transactie'), 10, '8 + de nieuwe post uit b2 + de BEA-regel uit de App-upload');
+  // een bestaande regel die zelf in het bestand staat wordt nooit gekoppeld (die is al gedekt): A opnieuw plus een kopie van f1 met ander saldo
+  const t2 = opzet();
+  hist(t2, a);
+  const c = a + tab([['20250105', -1000, ov(LEV.A, 'Leverancier A B.V.', 'f1')]], 900000);
+  const v = hist(t2, c, 'c.tab', { koppel: true });
+  assert.equal(v.gekoppeld, 0); assert.equal(v.nieuw, 1);
+  // twee incasso's op één dag, zelfde incassant en bedrag, elk een eigen machtiging; de database heeft ze zonder: koppelen, niet aanvullen
+  const t3 = opzet();
+  hist(t3, tab([['20250110', -900, ov(LEV.A, 'Leverancier A B.V.', 'abo')], ['20250110', -900, ov(LEV.A, 'Leverancier A B.V.', 'abo')]], 400000));
+  const d = tab([['20250110', -900, inc(LEV.A, 'Leverancier A B.V.', 'abo een', null, 'M-EEN')], ['20250110', -900, inc(LEV.A, 'Leverancier A B.V.', 'abo twee', null, 'M-TWEE')]], 800000);
+  const dd = hist(t3, d, 'd.tab', { koppel: true, droog: true });
+  assert.equal(dd.check.te_koppelen, 2); assert.equal(dd.check.onbeslist, 2);
+  const vd = hist(t3, d, 'd.tab', { koppel: true });
+  assert.equal(vd.gekoppeld, 2); assert.equal(vd.aangevuld, 0); assert.equal(vd.nieuw, 0);
+  assert.equal(t3.n('SELECT count(*) n FROM bank_transactie WHERE machtiging IS NOT NULL'), 0);
+  // na koppelen nog boven de drempel: geweigerd, niets veranderd
+  const t4 = opzet();
+  hist(t4, tab([['20250105', -1000, ov(LEV.A, 'Leverancier A B.V.', 'x1')], ['20250106', -2000, ov(LEV.A, 'Leverancier A B.V.', 'x2')], ['20250107', -3000, ov(LEV.A, 'Leverancier A B.V.', 'x3')]], 500000));
+  const e = tab([['20250105', -1000, ov(LEV.A, 'Leverancier A B.V.', 'x1')], ['20250106', -2000, ov(LEV.A, 'Leverancier A B.V.', 'x2')], ['20250107', -3000, ov(LEV.A, 'Leverancier A B.V.', 'x3')]], 600000)
+    + tab([['20250105', -1000, ov(LEV.A, 'Leverancier A B.V.', 'x1b')], ['20250106', -2000, ov(LEV.A, 'Leverancier A B.V.', 'x2b')], ['20250107', -3000, ov(LEV.A, 'Leverancier A B.V.', 'x3b')]], 700000);
+  let fout = null;
+  try { hist(t4, e, 'e.tab', { koppel: true }); } catch (x) { fout = x; }
+  assert.ok(fout && fout.status === 409 && fout.extra.check.te_koppelen === 3, String(fout && fout.fout));
+  assert.equal(t4.n('SELECT count(*) n FROM bank_transactie'), 3);
+});
+
 test('salaris (wv945): salarisregels op een praktijkrekening zijn gewone regels, zichtbaar voor eigenaar, praktijkmanager en Socev; historie en POT blijven alleen-eigenaar', () => {
   const t = opzet();
   const u = hist(t, tab([

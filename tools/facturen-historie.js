@@ -7,9 +7,12 @@
  * verwerking als een upload in de App (facturen.js verwerkBankbestand), maar in modus 'historisch': startdatum verplicht, regels vóór de
  * start zijn archief (alleen-eigenaar, geen signalen), het ruwe bestand gaat naar bankbron/ (offsite versleuteld via de podstaat-ronde).
  *
- *   node tools/facturen-historie.js [--droog] [--forceer] [--verplaats] [--herkomst "<tekst>"] <bestand> [<bestand> …]
+ *   node tools/facturen-historie.js [--droog] [--forceer] [--koppel] [--verplaats] [--herkomst "<tekst>"] <bestand> [<bestand> …]
  *     --droog      alleen lezen en tellen (al bekend, nieuw, mogelijk dubbel, suffixverschil, saldo); niets schrijven
  *     --forceer    ook boven de drempel "mogelijk dubbel" inlezen (pas nadat je de entry_refs hebt nagerekend; staat in de audit)
+ *     --koppel     (wv951) een regel vóór de start die al binnen is onder een andere entry_ref (zelfde rekening, datum, bedrag, tegenpartij;
+ *                  één-op-één, die sleutel niet in dit bestand) niet invoegen maar koppelen: de bestaande regel krijgt de sleutel van het
+ *                  bestand en incassant/machtiging (niet bij twee of meer gelijke kandidaten zonder beslissend kenmerk; audit: oude → nieuwe sleutel)
  *     --verplaats  na een geslaagde invoer (of "al bekend") het bestand uit de invoermap halen; alleen als de bron in bankbron/ staat
  *   node tools/facturen-historie.js startdatum [JJJJ-MM-DD]   toon of zet de startdatum (eerste dag dat Facturen echt draait)
  *
@@ -39,7 +42,7 @@ function samenvatting(naam, u) {
   const s = Object.entries(u.saldo || {}).map(([r, x]) => r + ' ' + (x.gecontroleerd ? (x.sluit ? 'saldo sluit' : 'saldo ' + x.breuken + ' breuk(en)') : 'saldo niet te controleren')).join('; ');
   return {
     bestand: path.basename(naam), al_bekend: !!u.al_bekend, droog: !!u.droog, formaat: u.formaat, periode: u.periode,
-    rekeningen: u.rekeningen, prive_weggegooid: u.prive_weggegooid, nieuw: u.nieuw, al_bekend_regels: u.al_bekend_regels, aangevuld: u.aangevuld,
+    rekeningen: u.rekeningen, prive_weggegooid: u.prive_weggegooid, nieuw: u.nieuw, al_bekend_regels: u.al_bekend_regels, gekoppeld: u.gekoppeld, aangevuld: u.aangevuld,
     archief: u.archief, bron_bewaard: u.bron_bewaard, saldo: s || undefined, check: u.check,
     signalen: u.controle ? u.controle.signalen : undefined, historie_stil: u.controle ? u.controle.historie_stil || 0 : undefined,
   };
@@ -59,9 +62,9 @@ function hoofd(argv) {
       return { startdatum: D.metaLees(fdb, 'startdatum') };
     } finally { D.sluit(fdb); }
   }
-  const droog = vlag('--droog'), forceer = vlag('--forceer'), verplaats = vlag('--verplaats');
+  const droog = vlag('--droog'), forceer = vlag('--forceer'), koppel = vlag('--koppel'), verplaats = vlag('--verplaats');
   const herkomst = waarde('--herkomst');
-  if (!argv.length) throw new Error('gebruik: [--droog] [--forceer] [--verplaats] [--herkomst …] <bestand> … | startdatum [JJJJ-MM-DD]');
+  if (!argv.length) throw new Error('gebruik: [--droog] [--forceer] [--koppel] [--verplaats] [--herkomst …] <bestand> … | startdatum [JJJJ-MM-DD]');
   const fdb = openGoed();
   const rol = F.rolVoor(fdb, { ingang: 'app', wie: 'machinekamer' });
   const uit = [];
@@ -70,7 +73,7 @@ function hoofd(argv) {
       const bytes = fs.readFileSync(p);
       let u;
       try {
-        u = F.verwerkBankbestand(fdb, rol, bytes, path.basename(p), Date.now(), { modus: 'historisch', droog, forceer, herkomst: herkomst || ('machinekamer: ' + path.basename(p)) });
+        u = F.verwerkBankbestand(fdb, rol, bytes, path.basename(p), Date.now(), { modus: 'historisch', droog, forceer, koppel, herkomst: herkomst || ('machinekamer: ' + path.basename(p)) });
       } catch (e) {
         if (e instanceof F.RouteFout) { uit.push({ bestand: path.basename(p), ok: false, status: e.status, fout: e.fout, check: e.extra && e.extra.check }); continue; }
         throw e;
