@@ -6,14 +6,14 @@
   "whatsapp:nl"
  ],
  "bron_id": {
-  "vorm": "^[0-9]{5,22}(-[0-9]{5,12})?@(g|c|lid)\\.us/[0-9]{9,11}-[0-9]{9,11}$",
+  "vorm": "^[0-9]{5,22}(-[0-9]{5,12})?@(g\\.us|c\\.us|lid)/[0-9]{9,11}-[0-9]{9,11}$",
   "uitleg": "chat-id / tijd van het eerste en het laatste bericht (unix-seconden)"
  },
  "herzienbaar": false,
  "meta": {
   "chat_id": {
    "type": "tekst",
-   "vorm": "^[0-9]{5,22}(-[0-9]{5,12})?@(g|c|lid)\\.us$",
+   "vorm": "^[0-9]{5,22}(-[0-9]{5,12})?@(g\\.us|c\\.us|lid)$",
    "verplicht": true
   },
   "chat_naam": {

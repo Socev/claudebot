@@ -664,3 +664,39 @@ test('review wv1282: scan zonder tekstlaag naast een representatie, vasthouden +
     assert.strictEqual(o.ing.telling('2026-10-24T00:00:00Z', '2026-10-27T00:00:00Z').open.mislukt, 1);
   } finally { await o.sluit(); }
 });
+
+test('wv1286: WAHA-id met @lid, dubbel geeft het echte pad, weggeruimd mediabestand komt terug (alleen media)', async () => {
+  const o = await omgeving();
+  try {
+    const g = gevallen()[4];
+    // groepsbericht: WAHA zet de afzender als …@lid achter het id (zonder .us)
+    const e = g.env(); e.bron_id = 'false_31600000000-1397673733@g.us_3A4D51FF93FB0DCB6041_90241624969433@lid'; e.meta.chat_id = '31600000000-1397673733@g.us'; e.meta.soort_chat = 'groep';
+    const r = await post(o, g.sleutel, e);
+    assert.strictEqual(r.status, 201, JSON.stringify(r.j));
+    const p = await put(o, g.sleutel, r.j.stuk_id, 'b1', g.put[0][1], 'application/pdf');
+    assert.strictEqual(p.j.uitkomst, 'compleet'); assert.strictEqual(p.j.pad, g.verwacht[0]);
+    const lid = g.env(); lid.bron_id = 'false_123456789012345@lid_3EB0ABCDEF999999'; lid.meta.chat_id = '123456789012345@lid'; lid.overgang.bestandsnaam = lid.overgang.bestandsnaam.replace('.pdf', ' lid.pdf');
+    assert.strictEqual((await post(o, g.sleutel, lid)).status, 201);
+    // de Chat Reader levert hetzelfde bericht onder een andere naam: dubbel met het pad van de nacht
+    const c = JSON.parse(JSON.stringify(e)); c.meta.chat_naam = 'Andere naam'; c.overgang.bestandsnaam = '2026-10-24_2112 - Andere naam - notulen (CDEF1234).pdf';
+    const d = await post(o, K.lezer, c);
+    assert.strictEqual(d.j.uitkomst, 'dubbel'); assert.strictEqual(d.j.pad, g.verwacht[0]); assert.strictEqual(d.j.hersteld, undefined);
+    assert.ok(!fs.existsSync(path.join(o.vault, '30_Conversaties/WhatsApp/Media/Documenten', c.overgang.bestandsnaam)));
+    // de consolidatie haalde het bestand weg: dubbel schrijft het opnieuw op dezelfde plek
+    fs.unlinkSync(path.join(o.vault, g.verwacht[0]));
+    const d2 = await post(o, K.lezer, c);
+    assert.strictEqual(d2.j.uitkomst, 'dubbel'); assert.strictEqual(d2.j.hersteld, true); assert.strictEqual(d2.j.pad, g.verwacht[0]);
+    assert.ok(fs.readFileSync(path.join(o.vault, g.verwacht[0])).equals(g.put[0][1]));
+    // een dump (zonder herstel_bij_dubbel) komt niet terug: vault 'weg'
+    const w = gevallen()[2];
+    const w1 = await post(o, w.sleutel, w.env()); assert.strictEqual(w1.j.vault, 'geschreven');
+    assert.strictEqual((await post(o, w.sleutel, w.env())).j.pad, w.verwacht[0]);
+    fs.unlinkSync(path.join(o.vault, w.verwacht[0]));
+    const w2 = await post(o, w.sleutel, w.env());
+    assert.strictEqual(w2.j.vault, 'weg'); assert.strictEqual(w2.j.pad, undefined); assert.ok(!fs.existsSync(path.join(o.vault, w.verwacht[0])));
+    // stand dubbel (schaduw) geeft geen vaultpad
+    const t = gevallen()[6]; const te = t.env(); te.overgang.stand = 'dubbel';
+    await post(o, t.sleutel, te);
+    const t2 = await post(o, t.sleutel, te); assert.strictEqual(t2.j.uitkomst, 'dubbel'); assert.strictEqual(t2.j.pad, undefined);
+  } finally { await o.sluit(); }
+});

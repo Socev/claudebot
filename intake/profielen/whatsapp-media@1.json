@@ -7,14 +7,14 @@
   "whatsapp:gambia"
  ],
  "bron_id": {
-  "vorm": "^(true|false)_[0-9]{5,22}(-[0-9]{5,12})?@(g|c|lid)\\.us_[A-Za-z0-9]{6,64}(_[0-9]{5,22}@(c|lid)\\.us)?$",
+  "vorm": "^(true|false)_[0-9]{5,22}(-[0-9]{5,12})?@(g\\.us|c\\.us|lid)_[A-Za-z0-9]{6,64}(_[0-9]{5,22}@(c\\.us|lid))?$",
   "uitleg": "WAHA-bericht-id"
  },
  "herzienbaar": false,
  "meta": {
   "chat_id": {
    "type": "tekst",
-   "vorm": "^[0-9]{5,22}(-[0-9]{5,12})?@(g|c|lid)\\.us$",
+   "vorm": "^[0-9]{5,22}(-[0-9]{5,12})?@(g\\.us|c\\.us|lid)$",
    "verplicht": true
   },
   "chat_naam": {
@@ -112,6 +112,7 @@
  },
  "archief": {
   "schrijf_rol": "bijlage",
+  "herstel_bij_dubbel": true,
   "map_sleutel": [
    "bron",
    "meta.berichttype"

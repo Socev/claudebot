@@ -622,6 +622,27 @@ function maak(o) {
     q.status.run(om ? 'geschreven' : 'schaduw', stukRij.stuk_id);
     return { vault: om ? 'geschreven' : 'schaduw', pad: geschreven.length === 1 ? geschreven[0] : geschreven };
   }
+  /*
+   * Dubbel (wv1286): een tweede route (de Chat Reader na de nacht, of andersom) kent alleen zijn eigen bestandsnaam; het antwoord geeft
+   * het pad van het eerder geschreven bestand, zodat zijn verwijzing klopt. Bij archief.herstel_bij_dubbel (media die de consolidatie na
+   * het duiden weghaalt) eerst opnieuw schrijven als het bestand weg is en de blob er nog is. Alleen stand om + status geschreven.
+   */
+  function padBijDubbel(s, profiel) {
+    if (!s || s.stand !== 'om' || s.status !== 'geschreven' || !profiel.archief) return {};
+    const per = {};
+    for (const r of db.prepare("SELECT deel, pad FROM overgang WHERE stuk_id = ? AND stand = 'om' AND pad IS NOT NULL ORDER BY id").all(s.stuk_id)) per[r.deel] = r.pad;
+    const paden = Object.values(per);
+    if (!paden.length) return {};
+    const weg = paden.some((p) => !fs.existsSync(path.join(o.vault, p)));
+    if (!weg) return { pad: paden.length === 1 ? paden[0] : paden };
+    const delen = q.delen.all(s.stuk_id).filter((d) => d.rol === profiel.archief.schrijf_rol);
+    if (!profiel.archief.herstel_bij_dubbel || !delen.every((d) => blobAanwezig(d.sha256))) return { vault: 'weg' };
+    const v = schrijfOvergang(s, false);
+    const uit = { vault: v.vault };
+    if (v.vault === 'geschreven') uit.hersteld = true;
+    if (typeof v.pad === 'string' || (Array.isArray(v.pad) && v.pad.length)) uit.pad = v.pad;
+    return uit;
+  }
   // ovis_stuk/ovis_profiel/ovis_vrij als laatste regels van de frontmatter (§ 4.2); zonder frontmatter ongewijzigd.
   function metOvisKop(buf, stukRij) {
     const t = buf.toString('utf8');
@@ -850,6 +871,7 @@ function maak(o) {
         if (mist.length) uit.ontbreekt = mist;
         if (!zelfde) { uit.afwijkend = true; spoor.reden = 'afwijkend'; }
         if (zelfde && !mist.length && (bestaand.status === 'open' || bestaand.status === 'onvolledig')) Object.assign(uit, maakCompleet(bestaand.stuk_id).extra);
+        else if (!mist.length) Object.assign(uit, padBijDubbel(q.stuk.get(bestaand.stuk_id), profiel));
         return antwoord(200, uit);
       }
       versie = bestaand.versie + 1;
