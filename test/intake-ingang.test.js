@@ -698,5 +698,28 @@ test('wv1286: WAHA-id met @lid, dubbel geeft het echte pad, weggeruimd mediabest
     const t = gevallen()[6]; const te = t.env(); te.overgang.stand = 'dubbel';
     await post(o, t.sleutel, te);
     const t2 = await post(o, t.sleutel, te); assert.strictEqual(t2.j.uitkomst, 'dubbel'); assert.strictEqual(t2.j.pad, undefined);
+    // review Z3: het eerste stuk wacht nog (onderhoud): dubbel geeft het geplande pad met vault 'wacht'
+    fs.writeFileSync(path.join(o.dir, 'onderhoud'), '1');
+    const q1 = g.env(); q1.bron_id = 'false_31600000000@c.us_3EB0WACHT0001'; q1.overgang.bestandsnaam = q1.overgang.bestandsnaam.replace('.pdf', ' wacht.pdf');
+    const qr = await post(o, g.sleutel, q1); const qp = qr.j.nodig ? await put(o, g.sleutel, qr.j.stuk_id, 'b1', g.put[0][1], 'application/pdf') : qr;   // bytes al bekend: POST is meteen compleet
+    assert.strictEqual(qp.status, 202); assert.strictEqual(qp.j.vault, 'wacht');
+    const qd = await post(o, K.lezer, q1);
+    assert.strictEqual(qd.j.uitkomst, 'dubbel'); assert.strictEqual(qd.j.vault, 'wacht'); assert.strictEqual(qd.j.pad, '30_Conversaties/WhatsApp/Media/Documenten/' + q1.overgang.bestandsnaam);
+    fs.unlinkSync(path.join(o.dir, 'onderhoud'));
+    // review K1: marker houdt vast en het stuk is gemarkeerd → niet herstellen (geen doodlopende wacht_marker)
+    o.ing._db.prepare("UPDATE stuk SET marker_patient = 'niet_te_lezen' WHERE stuk_id = ?").run(r.j.stuk_id);
+    fs.writeFileSync(path.join(o.dir, 'marker.json'), JSON.stringify({ stand: 'vasthouden' }));
+    fs.unlinkSync(path.join(o.vault, g.verwacht[0]));
+    const k1 = await post(o, K.lezer, c);
+    assert.strictEqual(k1.j.vault, 'weg'); assert.strictEqual(o.ing._db.prepare('SELECT status FROM stuk WHERE stuk_id = ?').get(r.j.stuk_id).status, 'geschreven');
+    // review K2: het origineel verliep (blob weg); de route levert de bytes opnieuw → compleet met het pad (en het bestand terug)
+    fs.unlinkSync(path.join(o.dir, 'marker.json'));
+    const bsha = o.ing._db.prepare("SELECT sha256 FROM onderdeel WHERE stuk_id = ? AND deel = 'b1'").get(r.j.stuk_id).sha256;
+    fs.unlinkSync(path.join(o.dir, 'blob', bsha.slice(0, 2), bsha));
+    const k2 = await post(o, K.lezer, c);
+    assert.deepStrictEqual(k2.j.ontbreekt, ['b1']);
+    const k2p = await put(o, K.lezer, r.j.stuk_id, 'b1', g.put[0][1], 'application/pdf');
+    assert.strictEqual(k2p.j.uitkomst, 'compleet'); assert.strictEqual(k2p.j.vault, 'geschreven'); assert.strictEqual(k2p.j.pad, g.verwacht[0]);
+    assert.ok(fs.existsSync(path.join(o.vault, g.verwacht[0])));
   } finally { await o.sluit(); }
 });

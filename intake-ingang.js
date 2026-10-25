@@ -628,15 +628,27 @@ function maak(o) {
    * het duiden weghaalt) eerst opnieuw schrijven als het bestand weg is en de blob er nog is. Alleen stand om + status geschreven.
    */
   function padBijDubbel(s, profiel) {
-    if (!s || s.stand !== 'om' || s.status !== 'geschreven' || !profiel.archief) return {};
+    if (!s || s.stand !== 'om' || !profiel.archief) return {};
+    const schrijfDelen = () => q.delen.all(s.stuk_id).filter((d) => d.rol === profiel.archief.schrijf_rol);
+    if (s.status === 'wacht' || s.status === 'wacht_marker') {
+      // nog niet geschreven: het geplande pad (map uit het profiel + de bestandsnaam van de eerste route), zodat de verwijzing klopt zodra
+      // de herhaalronde schrijft (Opus-review wv1286 Z3)
+      const env = { bron: s.bron, meta: JSON.parse(s.meta || '{}') };
+      const delen = schrijfDelen();
+      const paden = delen.map((d) => { const m = doelMap(profiel, env, { meta: d.meta ? JSON.parse(d.meta) : null }); return m == null ? null : path.join(m, delen.length === 1 && s.bestandsnaam ? s.bestandsnaam : d.naam); }).filter(Boolean);
+      return paden.length ? { vault: 'wacht', pad: paden.length === 1 ? paden[0] : paden } : { vault: 'wacht' };
+    }
+    if (s.status !== 'geschreven') return { vault: s.status };
     const per = {};
     for (const r of db.prepare("SELECT deel, pad FROM overgang WHERE stuk_id = ? AND stand = 'om' AND pad IS NOT NULL ORDER BY id").all(s.stuk_id)) per[r.deel] = r.pad;
     const paden = Object.values(per);
     if (!paden.length) return {};
     const weg = paden.some((p) => !fs.existsSync(path.join(o.vault, p)));
     if (!weg) return { pad: paden.length === 1 ? paden[0] : paden };
-    const delen = q.delen.all(s.stuk_id).filter((d) => d.rol === profiel.archief.schrijf_rol);
-    if (!profiel.archief.herstel_bij_dubbel || !delen.every((d) => blobAanwezig(d.sha256))) return { vault: 'weg' };
+    // herstel alleen als het mag en kan: profielvlag, blob nog op de pod, en de marker houdt het stuk niet vast (anders blijft het in
+    // wacht_marker hangen: de marker draait niet opnieuw; Opus-review wv1286 K1)
+    if (!profiel.archief.herstel_bij_dubbel || !schrijfDelen().every((d) => blobAanwezig(d.sha256))) return { vault: 'weg' };
+    if (houdtVast(s.bron) && s.marker_patient !== 'geen') return { vault: 'weg' };
     const v = schrijfOvergang(s, false);
     const uit = { vault: v.vault };
     if (v.vault === 'geschreven') uit.hersteld = true;
@@ -719,6 +731,7 @@ function maak(o) {
     let s = q.stuk.get(stukId);
     let v = { vault: 'geen' };
     if (r.changes || s.status === 'wacht') v = schrijfOvergang(s, false);
+    else if (s.stand === 'om' && s.status === 'geschreven' && profielen.get(s.profiel)) v = Object.assign({ vault: 'geschreven' }, padBijDubbel(s, profielen.get(s.profiel)));   // Opus-review wv1286 K2
     s = q.stuk.get(stukId);
     setImmediate(function () { markeer(stukId).catch(function (e) { if (o.fout) o.fout('intake-marker', e); }); });
     const extra = { compleet: true };
