@@ -6902,7 +6902,9 @@ function appUitslag(req, res, reg, a, s, d) {
       running_ms: (j.progress && j.progress.running_ms) || 0, last_activity_ms: (j.progress && j.progress.last_activity_ms) || 0 });
   }
   if (!j.opgehaald) j.opgehaald = Date.now();
-  appGezienDoor(id, a.id);   // dit apparaat haalde het antwoord op (fase 5c: seintje alleen als niemand / de vrager niet keek)
+  // wv1243 (OVIS M1c, ontwerplijnen § 2.5): het gesprek staat op de laptop vast rechts en haalt het antwoord ook op als David elders typt;
+  // met X-App-Niet-Gezien: 1 telt ophalen dan niet als gezien (het seintje blijft). Alleen die richting: de kop kan nooit een seintje onderdrukken.
+  if (!appNietGezien(req)) appGezienDoor(id, a.id);   // dit apparaat haalde het antwoord op (fase 5c: seintje alleen als niemand / de vrager niet keek)
   const r = j.result || {};
   const out = appUitvoer(j);
   const vraag = j.app.vraag !== undefined ? j.app.vraag : appVraagVan(j.app.kanaal, out);
@@ -7128,7 +7130,7 @@ async function appGeschiedenis(req, res, reg, a, pad) {
       agenda: agendaKnoppen[x.job_id] && agendaKnoppen[x.job_id].kanaal === kanaal ? appAgendaVorm(agendaKnoppen[x.job_id], agNu) : undefined };
   });
   // wie de geschiedenis met een afgerond antwoord ophaalt, heeft het gezien (fase 5c, Fable-review wv100 B2)
-  items.forEach(function (x) { if (jobs[x.job_id] && jobs[x.job_id].app && jobs[x.job_id].status === 'done') appGezienDoor(x.job_id, a.id); });
+  if (!appNietGezien(req)) items.forEach(function (x) { if (jobs[x.job_id] && jobs[x.job_id].app && jobs[x.job_id].status === 'done') appGezienDoor(x.job_id, a.id); });   // wv1243
   const uit = { ok: true, kanaal: kanaal, items: items, lopend: lopend, fout: fout, reacties: !!reacties };
   // wv628: wat deze pod kent (de app zet de Stuur-knop alleen open en toont Antwoord hierop als het er staat; oude pod = oud gedrag)
   if (appRijAan(kanaal)) { uit.rij_getypt = true; uit.rij_max = APP_RIJ_GETYPT_MAX; }
@@ -11052,6 +11054,8 @@ async function appPushAlle(soort, reden, filter) {
   for (const id of ids) uit.push(await appPushStuur(id, reden));
   return uit;
 }
+// wv1243: de app haalde op, maar het gesprek is niet in beeld (paneel rechts ingeklapt, of David typt elders): niet als gezien tellen
+function appNietGezien(req) { return !!(req && req.headers && req.headers['x-app-niet-gezien'] === '1'); }
 // Na een app-beurt: haalt de app het antwoord niet binnen 20 s op, dan is hij dicht of op de achtergrond -> seintje.
 function appGezienDoor(jobId, apparaatId) {
   const j = jobs[jobId];
