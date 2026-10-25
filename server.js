@@ -14941,7 +14941,8 @@ async function stMeet() {
   let ftTijd = null; try { ftTijd = new Date(fs.statSync(path.join(ST_DIR, 'filtertoets.json')).mtimeMs).toISOString(); } catch (e) { /* geen toets */ }
   const d = { run: run, filtertoets: ft ? { ok: ft.ok === true, tijd: ftTijd, vault_bestanden: ft.vault_bestanden,
     vault_bisync_mee: ft.vault_bisync_mee, vault_syncthing_mee: ft.vault_syncthing_mee,
-    alleen_syncthing_weg: ft.vault_alleen_syncthing_weg, alleen_bisync_weg: ft.vault_alleen_bisync_weg } : null };
+    alleen_syncthing_weg: ft.vault_alleen_syncthing_weg, alleen_bisync_weg: ft.vault_alleen_bisync_weg,
+    windows_namen: ft.vault_windows_namen || 0, windows_voorbeelden: (ft.vault_windows_voorbeelden || []).slice(0, 3) } : null };
   let fout = null;
   try {
     const cfg = stCfg();
@@ -14968,6 +14969,55 @@ async function stMeet() {
     }
   } catch (e) { fout = (e && e.code === 'ENOENT') ? 'geen config' : String(e && e.message || e).slice(0, 120); }
   stStand.data = d; stStand.fout = fout; stStand.gemeten = Date.now();
+  try { stMeldingen(d); } catch (e) { logError('syncthing-melding', e); }
+}
+// Eén box-rij per toestand (Fable wv1277 #2): Syncthing staat aan maar draait al een uur niet (poort rood, gecrasht), de bewaker
+// (run.sh of de brug) schrijft geen status meer, of de vault heeft namen die Windows weigert. Onthouden in melding.json; een
+// toestand die herstelt, mag later opnieuw een rij geven. Geen inhoud: reden, aantallen en hooguit 3 paden van vaultnamen.
+function stMeldingen(d) {
+  if (!SERVER_ECHT || !rolPrimair()) return;
+  const pad = path.join(ST_DIR, 'melding.json');
+  const st = stLeesJson(pad) || {};
+  const r = d.run || {}, ft = d.filtertoets || {};
+  const nu = Date.now(), uit = {};
+  const statusOud = r.tijd ? nu - r.tijd * 1000 > 10 * 60 * 1000 : false;
+  if (r.aan && statusOud) uit['bewaker-stil'] = { kop: 'Syncthing-bewaker schrijft geen status meer', regels: ['- gemeten: status.json laatst ' +
+    new Date(r.tijd * 1000).toISOString().slice(0, 16) + ' UTC (run.sh of de brug draait niet; Syncthing zelf ' + (d.versie ? 'antwoordt nog, onbewaakt' : 'antwoordt niet') + ')',
+    '- gevolg: schakelaar, rol, filter-symlink en config worden niet bewaakt, of Davids apparaten krijgen niets meer van de pod.',
+    '- voorstel: /opt/data/syncthing/syncthing-run.log en api.log nakijken; na een podherstart hoort run.sh het over te nemen.'] };
+  else if (r.aan && !r.loopt && r.reden !== 'pod niet primair' && r.gestart !== undefined && (!st.stil_sinds || st.stil_reden !== r.reden)) { st.stil_sinds = nu; st.stil_reden = r.reden; }
+  if (r.loopt || !r.aan) { delete st.stil_sinds; delete st.stil_reden; }
+  if (r.aan && !r.loopt && st.stil_sinds && nu - st.stil_sinds > 60 * 60 * 1000) uit['stil:' + r.reden] = { kop: 'Syncthing staat aan maar draait al een uur niet',
+    regels: ['- gemeten: reden "' + String(r.reden || '').slice(0, 120) + '"; poort: ' + String(r.poort || '').slice(0, 300),
+      '- gevolg: wijzigingen van de pod komen niet op de Synology en Davids pc\'s, en hun wijzigingen niet op de pod (Drive loopt wel door).',
+      '- voorstel: /opt/data/syncthing/syncthing-run.log en filtertoets.json nakijken; filter of config herstellen, niet de poort omzeilen.'] };
+  const wn = Number(ft.windows_namen || 0);
+  if (wn > 0) uit['windows:' + wn] = { kop: wn + ' vaultnaam/-namen die Windows weigert (Syncthing kan ze niet op de pc zetten)',
+    regels: ['- gemeten: filtertoets van ' + String(ft.tijd || '').slice(0, 16) + '; voorbeelden: ' + (ft.windows_voorbeelden || []).slice(0, 3).map(function (x) { return '`' + String(x).slice(0, 160) + '`'; }).join(', '),
+      '- gevolg: die bestanden ontbreken op de laptop en de werk-pc (de voltooiing blijft onder 100%).',
+      '- voorstel: hernoemen (dubbele punt wordt " -", pad onder 240 tekens) en verwijzingen meenemen; de bron-skill verwerk-raw-input kent de regel sinds 25-10.'] };
+  st.gemeld = st.gemeld || {};
+  for (const k in st.gemeld) if (!uit[k]) delete st.gemeld[k];
+  for (const k in uit) {
+    if (st.gemeld[k]) continue;
+    if (stBoxRij(uit[k].kop, uit[k].regels)) st.gemeld[k] = new Date(nu).toISOString();
+  }
+  try { const tmp = pad + '.' + process.pid; fs.writeFileSync(tmp, JSON.stringify(st), { mode: 0o600 }); fs.renameSync(tmp, pad); } catch (e) { logError('syncthing-melding', e); }
+}
+function stBoxRij(kop, regels) {
+  try {
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const st = fs.lstatSync(pad);
+    const t = VV().lees(pad);
+    let eerste = null;
+    const re = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/g;
+    for (let m; (m = re.exec(t));) { if (((t.slice(0, m.index).match(/^```/gm) || []).length % 2) === 0) { eerste = m; break; } }
+    if (!eerste) return false;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const rij = '\n## [direct] ' + tijd + ' — ' + kop + ' (pod syncthing, automatisch)\n- status: open\n- van: pod syncthing (server.js, elke 5 min; één rij per toestand)\n' + regels.join('\n') + '\n';
+    return VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index),
+      { alsGelijk: function (st2) { return !!st2 && st2.mtimeMs === st.mtimeMs && st2.size === st.size; } });
+  } catch (e) { logError('syncthing-box', e); return false; }
 }
 function syncthingInfo() {
   const d = stStand.data || {};

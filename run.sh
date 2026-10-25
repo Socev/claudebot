@@ -295,7 +295,7 @@ ST_IGNORE=/app/syncthing-stignore.txt
 ST_TOETS=/app/syncthing-filter-toets.py
 ST_MAP_ID=socev-vault
 ST_SHA256=f5c12679f2bad1b5eff619ba7b04ead1a457e439a1e55dc640d4d8995d7f4dbd   # syncthing v2.1.7 linux-amd64 (GitHub-release, 20-10-2026)
-ST_PID=""; ST_VOLGENDE=0; ST_CRASH=0; ST_REDEN="nog niet gestart"; ST_POORT="niet gedraaid"; ST_GESTART=0
+ST_PID=""; ST_VINGER=""; ST_VOLGENDE=0; ST_CRASH=0; ST_REDEN="nog niet gestart"; ST_POORT="niet gedraaid"; ST_GESTART=0
 stlog(){
   if [ -f "$ST_RUNLOG" ] && [ "$(stat -c %s "$ST_RUNLOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then mv -f "$ST_RUNLOG" "$ST_RUNLOG.1"; fi
   printf '%s %s\n' "$(date '+%F %T')" "$1" >> "$ST_RUNLOG" 2>/dev/null
@@ -321,15 +321,29 @@ st_ignore_zet(){
   ln -sfn "$ST_IGNORE" "$VAULT/.stignore.nieuw.$$" && mv -fT "$VAULT/.stignore.nieuw.$$" "$VAULT/.stignore" || { rm -f "$VAULT/.stignore.nieuw.$$"; return 1; }
   st_ignore_goed
 }
+# st_config_ok [vinger]: zonder argument de controle (exit 1 + reden); met 'vinger' een sha256 over wat er tijdens het draaien niet
+# ongemerkt mag veranderen (apparaten, mappen met pad/type/delen, GUI, onveilige vlaggen). Elke ronde nagelopen (Fable wv1277 #3):
+# wie de API-sleutel heeft (elk claude-proces) kan via REST een apparaat of map toevoegen; dan stopt Syncthing en gaat de volgende
+# start weer door de poort.
 st_config_ok(){
-  python3 -I - "$ST_HOME/config.xml" "$ST_MAP_ID" "$VAULT" <<'PY'
-import sys,os,xml.etree.ElementTree as ET
-cfg,mid,vault=sys.argv[1:]
+  python3 -I - "$ST_HOME/config.xml" "$ST_MAP_ID" "$VAULT" "${1:-}" <<'PY'
+import sys,os,hashlib,xml.etree.ElementTree as ET
+cfg,mid,vault,modus=sys.argv[1:]
 r=ET.parse(cfg).getroot(); fout=[]
 g=r.find('gui')
+if modus=='vinger':
+    v=[]
+    for d in sorted(r.findall('device'),key=lambda d:d.get('id','')): v.append(('d',d.get('id'),d.get('introducer'),d.get('autoAcceptFolders')))
+    for f in sorted(r.findall('folder'),key=lambda f:f.get('id','')):
+        v.append(('f',f.get('id'),f.get('path'),f.get('type'),f.get('ignorePerms'),tuple(sorted(x.get('id','') for x in f.findall('device')))))
+    if g is not None: v.append(('g',g.findtext('address'),g.findtext('user'),g.findtext('password'),g.findtext('insecureAdminAccess'),
+                                g.findtext('insecureSkipHostcheck'),g.get('enabled')))
+    print(hashlib.sha256(repr(v).encode()).hexdigest()); sys.exit(0)
 if g is None or (g.findtext('address') or '').split(':')[0] not in ('127.0.0.1',): fout.append('GUI niet alleen op 127.0.0.1')
 if g is not None and not (g.findtext('user') or '').strip(): fout.append('GUI zonder gebruiker')
 if g is not None and not (g.findtext('password') or '').strip(): fout.append('GUI zonder wachtwoord')
+for k in ('insecureAdminAccess','insecureSkipHostcheck','insecureAllowFrameLoading'):
+    if g is not None and (g.findtext(k) or 'false').strip()=='true': fout.append('GUI: %s aan'%k)
 o=r.find('options')
 def opt(k): return (o.findtext(k) or '').strip() if o is not None else ''
 if opt('urAccepted') not in ('-1',): fout.append('gebruiksstatistiek niet uit (urAccepted %s)'%opt('urAccepted'))
@@ -363,27 +377,41 @@ st_poort(){
   if st_vault_in_config; then
     st_ignore_zet || { ST_POORT="rood: kan vault/.stignore niet als symlink naar $ST_IGNORE zetten"; return 1; }
   fi
-  if ! uit="$(timeout 600 python3 -I "$ST_TOETS" --stignore "$ST_IGNORE" --bisync "$SYNC_FILTER" --rechten /app/socev-rechten.sh \
-               --syncthing "$ST_BIN" --vault "$VAULT" --json "$ST_DIR/filtertoets.json" 2>&1)"; then
-    ST_POORT="rood: filtertoets - $(printf '%s' "$uit" | tail -3 | tr '\n' ' ' | cut -c1-400)"; return 1
+  # Op de achtergrond + wait (Fable wv1277 #4): een SIGTERM van Kubernetes wacht dan niet op de toets (± 7 s, grens 120 s).
+  timeout 120 python3 -I "$ST_TOETS" --stignore "$ST_IGNORE" --bisync "$SYNC_FILTER" --rechten /app/socev-rechten.sh \
+    --syncthing "$ST_BIN" --vault "$VAULT" --json "$ST_DIR/filtertoets.json" > "$ST_DIR/filtertoets.uit" 2>&1 &
+  if ! wait $!; then
+    ST_POORT="rood: filtertoets - $(tail -3 "$ST_DIR/filtertoets.uit" 2>/dev/null | tr '\n' ' ' | cut -c1-400)"; return 1
   fi
-  stlog "$uit"
+  stlog "$(tail -1 "$ST_DIR/filtertoets.uit" 2>/dev/null)"
   if ! uit="$(st_config_ok 2>&1)"; then ST_POORT="rood: config - $(printf '%s' "$uit" | cut -c1-300)"; return 1; fi
+  ST_VINGER="$(st_config_ok vinger 2>/dev/null)"
   ST_POORT="groen $(date '+%F %T')"
   return 0
 }
 st_start(){
+  local p
+  for p in $(st_pids); do kill -KILL "$p" 2>/dev/null && stlog "rest van een Syncthing-proces opgeruimd vóór de start (pid $p)"; done
   ( STNOUPGRADE=1 STNORESTART=1 exec "$ST_BIN" serve --home="$ST_HOME" --no-browser --no-restart --no-upgrade \
       --log-file="$ST_LOG" --log-max-size=5000000 --log-max-old-files=2 >/dev/null 2>&1 ) &
   ST_PID=$!; ST_GESTART=$(date +%s); ST_REDEN="loopt"
   stlog "gestart (pid $ST_PID)"; log "syncthing gestart (pid $ST_PID)"
 }
+# Syncthing 2.x draait als monitor + kind (ook met --no-restart; Fable wv1277 #1): stoppen raakt beide, en vóór een start
+# worden resten van een eerder proces op hetzelfde home opgeruimd (een verweesd kind houdt de databank vast en synct onbewaakt).
+# Alleen processen die echt syncthing heten (comm) én dit home hebben: een shell met dezelfde tekst in zijn opdrachtregel blijft heel.
+st_pids(){ local p; for p in $(pgrep -u "$(id -u)" -x syncthing 2>/dev/null); do
+  tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null | grep -qxF -- "--home=$ST_HOME" && echo "$p"; done; }
 st_stop(){
-  [ -n "$ST_PID" ] || return 0
-  kill -TERM "$ST_PID" 2>/dev/null
-  for _ in $(seq 1 20); do kill -0 "$ST_PID" 2>/dev/null || break; sleep 0.5; done
-  kill -0 "$ST_PID" 2>/dev/null && kill -KILL "$ST_PID" 2>/dev/null
-  stlog "gestopt (pid $ST_PID): $1"; log "syncthing gestopt: $1"
+  local p kinderen
+  if [ -n "$ST_PID" ]; then
+    kinderen="$(pgrep -P "$ST_PID" 2>/dev/null | tr '\n' ' ')"
+    kill -TERM "$ST_PID" 2>/dev/null
+    for _ in $(seq 1 20); do kill -0 "$ST_PID" 2>/dev/null || break; sleep 0.5; done
+    for p in $ST_PID $kinderen; do kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null; done
+  fi
+  for p in $(st_pids); do kill -KILL "$p" 2>/dev/null && stlog "rest van een Syncthing-proces opgeruimd (pid $p)"; done
+  [ -n "$ST_PID" ] && { stlog "gestopt (pid $ST_PID): $1"; log "syncthing gestopt: $1"; }
   ST_PID=""; ST_REDEN="$1"
 }
 st_bewaak(){
@@ -398,6 +426,8 @@ st_bewaak(){
       ST_VOLGENDE=$(( nu + wacht )); stlog "proces weg; opnieuw na ${wacht}s"
     elif st_vault_in_config && ! st_ignore_goed; then
       st_stop "vault/.stignore is geen symlink meer naar het filter in /app"; ST_VOLGENDE=$(( nu + 60 ))
+    elif ! st_config_ok >/dev/null 2>&1 || [ "$(st_config_ok vinger 2>/dev/null)" != "$ST_VINGER" ]; then
+      st_stop "config veranderd tijdens het draaien (apparaat, map of GUI): opnieuw door de poort"; ST_VOLGENDE=$(( nu + 60 ))
     fi
   elif [ "$wil" = 1 ] && [ "$nu" -ge "$ST_VOLGENDE" ]; then
     if st_poort; then st_start

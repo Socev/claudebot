@@ -22,6 +22,8 @@
 /.obsidian/cache
 (?i)*.tmp
 (?i)*.temp
+// rclone schrijft een kopie van Drive eerst als naam.XXXX.partial (Fable wv1277 #6)
+(?i)*.partial
 .~lock.*
 ~$*
 @eaDir

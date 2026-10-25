@@ -82,8 +82,20 @@ ST_VOLGENDE=0; st_bewaak; ok "  volgende ronde: symlink hersteld en weer gestart
 echo '{"aan": false}' > "$ST_SCHAKELAAR"; st_bewaak; ok "schakelaar uit tijdens het draaien: gestopt" '! loopt && [ "$ST_REDEN" = "schakelaar uit" ]'
 echo '{"aan": true}' > "$ST_SCHAKELAAR"; st_bewaak; ok "schakelaar weer aan: gestart" 'loopt'
 ROL=passief; st_bewaak; ok "rol wordt passief: gestopt" '! loopt'
-ROL=primair; ST_VOLGENDE=0; st_bewaak; kill -9 "$ST_PID"; sleep 1; st_bewaak
-ok "proces gecrasht: niet meteen opnieuw (wacht ≥ 60 s), telt herstarts" '! loopt && [ "$ST_CRASH" = 1 ] && [ "$ST_VOLGENDE" -gt $(( $(date +%s) + 60 )) ]'
+ROL=primair; ST_VOLGENDE=0; st_bewaak; sleep 2
+ok "  monitor + kind draaien (2 processen op dit home)" '[ "$(st_pids | wc -l)" = 2 ]'
+st_stop proef; sleep 1; ok "st_stop laat geen verweesd kind achter (Fable #1)" '[ -z "$(st_pids)" ]'
+ST_VOLGENDE=0; st_bewaak; sleep 2; kill -9 "$ST_PID"; sleep 1; st_bewaak
+ok "proces gecrasht (alleen de monitor gedood): niet meteen opnieuw (wacht ≥ 60 s), telt herstarts" '! loopt && [ "$ST_CRASH" = 1 ] && [ "$ST_VOLGENDE" -gt $(( $(date +%s) + 60 )) ]'
+ok "  het verweesde kind draait nog (zo gedraagt Syncthing zich)" '[ -n "$(st_pids)" ]'
+ST_VOLGENDE=0; st_bewaak; sleep 2
+ok "  volgende start ruimt de wees op: weer precies 2 processen, eigen pid" 'loopt && [ "$(st_pids | wc -l)" = 2 ] && [[ " $(st_pids | tr "\n" " ") " == *" $ST_PID "* ]]'
+python3 -c "import sys;p=sys.argv[1];s=open(p).read();open(p,'w').write(s.replace('</configuration>','<device id=\"AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA\" name=\"indringer\" introducer=\"false\" autoAcceptFolders=\"false\"></device></configuration>'))" "$ST_HOME/config.xml"
+st_bewaak; ok "apparaat toegevoegd tijdens het draaien: gestopt (Fable #3)" '! loopt && [[ "$ST_REDEN" == config* ]] && [ -z "$(st_pids)" ]'
+ST_VOLGENDE=0; st_bewaak; ok "  volgende ronde: door de poort en weer gestart (nieuwe vingerafdruk)" 'loopt'
+reset; sed -i 's#</gui>#<insecureAdminAccess>true</insecureAdminAccess></gui>#' "$ST_HOME/config.xml"
+st_bewaak; ok "GUI met insecureAdminAccess: niet gestart" '! loopt && [[ "$ST_POORT" == *insecureAdminAccess* ]]'
+reset
 ok "run.sh stopt Syncthing bij SIGTERM (afsluiten)" 'grep -q "st_stop \"podstop (SIGTERM)\"" "$HIER/run.sh"'
 ok "run.sh roept st_bewaak aan in de bewakerlus" 'grep -qE "^  st_bewaak" "$HIER/run.sh"'
 echo "syncthing-runsh: $goed OK, $fout fout(en)"

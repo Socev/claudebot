@@ -94,7 +94,7 @@ streng_voorbeelden = [".sync-id", ".obsidian/workspace.json", ".obsidian/workspa
                       "map/#recycle/x.md", "map/#snapshot/x.md", "map/.DS_Store", "map/Thumbs.db", "map/.venv/x.md",
                       ".claude/skills/x/__pycache__/m.pyc", ".claude/node_modules/p/i.md", "map/naam.", "map/naam ",
                       "map2/.git", ".claude/x.tmp", "Dossier.Ünal/brief.docx", "map/.box-12-0123456789ab.genoom.tmp",
-                      "map/.a.md.0123456789abcdef.vv.tmp"]
+                      "map/.a.md.0123456789abcdef.vv.tmp", "map/groot.pdf.a1b2c3.partial"]
 onschuldig_voorbeelden = ["map/c.sync-conflict-20261025-142233-FYQS3IF.md", "map/a.ü.b.mdé"]
 for e in EXTS:
     nooit += ["ext/w." + e, "ext/W." + e.upper(), "ext/w." + e + ".", "ext/w." + e + " .", "ext/ü.x." + e]
@@ -120,7 +120,7 @@ def strenger(p):
     delen = p.split('/')
     for c in delen:
         cl = c.lower()
-        if cl.endswith('.tmp') or cl.endswith('.temp') or c.startswith('.~lock.') or c.startswith('~$') or cl in STRENG_COMP:
+        if cl.endswith('.tmp') or cl.endswith('.temp') or cl.endswith('.partial') or c.startswith('.~lock.') or c.startswith('~$') or cl in STRENG_COMP:
             return True
         if c.endswith('.') or c.endswith(' '):
             return True
@@ -167,6 +167,12 @@ try:
                 elif n in files:
                     spiegel.append(os.path.normpath(os.path.join(rel, n)))
             dirs[:] = [x for x in dirs if not os.path.islink(os.path.join(root, x))]
+        # Namen die Windows weigert (Fable wv1277 #7): verboden tekens, punt/spatie aan het eind. Alleen geteld (in de JSON, voor
+        # /health en een box-rij), geen poort. Lange paden (> 260 met C:\\AI_SecondBrain\\) zet Syncthing wel neer (\\?\\-pad).
+        win = sorted(p for p in spiegel if re.search(r'[<>:"|?*\\\x00-\x1f]', p)
+                     or any(c.endswith('.') or c.endswith(' ') for c in p.split('/')))
+        uitkomst['vault_windows_namen'] = len(win)
+        uitkomst['vault_windows_voorbeelden'] = win[:5]
         uitkomst['vault_bestanden'] = len(spiegel)
         uitkomst['vault_symlinks'] = links
         mappen['vault'] = (os.path.join(T, 'vault'), sorted(spiegel))
