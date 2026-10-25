@@ -111,8 +111,10 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   fs.symlinkSync(path.join(W, 'buiten'), path.join(VAULT, '20_Prive'));
   const wortelFout = [];
   const z2 = Z.maak({ vault: VAULT, claude: nepClaude, fout: (w, e) => wortelFout.push(w) });
-  await z2.zoek('Wat is het kenteken van al mijn auto\'s');
+  const r3w = await z2.zoek('Wat is het kenteken van al mijn auto\'s');
   toets('3 wortel als symlink: overgeslagen (en gemeld)', !/LEKT-0[12]/.test(laatsteprompt ? laatsteprompt.prompt : '') && wortelFout.indexOf('zoek-snel-wortel') >= 0, wortelFout);
+  toets('3 wortel overgeslagen: dekking niet volledig en de melding noemt Privé (review wv1289 #4)', r3w.dekking && r3w.dekking.grens === true && r3w.dekking.volledig === false &&
+    /kon nu niet in Privé zoeken/.test(r3w.melding) && !/^Niet gevonden|^Niets gevonden\. /.test(r3w.melding), r3w);
   fs.unlinkSync(path.join(VAULT, '20_Prive'));
   fs.renameSync(path.join(VAULT, '20_Prive-echt'), path.join(VAULT, '20_Prive'));
 
@@ -181,7 +183,10 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   // ── 8. blokcontext en dekking (wv1289; David 25-10: "Zoeken en DENKEN dat je alles kreeg, is schadelijk") ──
   zet('10_Zakelijk/Tolgaarde/Auto\'s.md', ['---', 'updated: 2026-10-22', 'aliases: ["Wagenpark"]', '---', '# Auto\'s — Tolgaarde', '', 'De gezinsauto\'s staan zakelijk verzekerd.', '',
     '## Auto\'s (kort)', '', '| Auto | Kenteken | Bouwjaar |', '|---|---|---|', '| Volvo XC90 | KJH-23-J | 2026 |', '| Mini JCW | JFJ-37-S | 2025 |',
-    '| Subaru Forester | TD-RG-01 | 1998 |', '| Spook | NL000000000B00 voorgesteld |', '| Koppeling | ' + SLEUTEL + ' |', '', 'Losse alinea zonder iets.', ''].join('\n'));
+    '| Subaru Forester | TD-RG-01 | 1998 |', '| Koppeling | ' + SLEUTEL + ' |', '', 'Losse alinea zonder iets.', ''].join('\n'));
+  // blokken die dicht blijven (review wv1289 #1/#2): wachtwoordkolom, en een tabel onder een kop met "voorgesteld"
+  zet('10_Zakelijk/Tolgaarde/Parkeren.md', ['# Parkeren', '', '| Kenteken | Wachtwoord portaal |', '|---|---|', '| PRK-01-X | hunter2geheim |', '',
+    '## Voorgestelde vergunningen (niet besloten)', '', '| Wie | Kenteken |', '|---|---|', '| Andere | VG-55-66 |', ''].join('\n'));
   zet('10_Zakelijk/Tolgaarde/ICT en mail.md', ['---', 'updated: 2026-10-07', '---', '# ICT en mail — Tolgaarde', '', '## ZorgMail- en Edifact-adressen', '',
     '- **Praktijk:** Huisartsenpraktijk Tolgaarde, Edifact `500151868@lms.lifeline.nl`, ZorgMail', '  `huisartsenpraktijktolgaarde@zorgmail.nl`.',
     '- **David persoonlijk:** ZorgMail `d.schaap2@zorgmail.nl`.', '', '## Iets anders', '', 'Over de printer.', ''].join('\n'));
@@ -191,10 +196,12 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   let p8 = laatsteprompt.prompt;
   toets('8 kentekens: de hele tabel mee, ook rijen zonder het zoekwoord (alle vier de auto\'s, ook GJL-11-J)', ['KJH-23-J', 'JFJ-37-S', 'TD-RG-01', 'GJL-11-J'].every((k) => p8.indexOf(k) >= 0), p8);
   toets('8 blok: kop van de tabel en de kop erboven mee', /: \| Auto \| Kenteken \| Bouwjaar \|/.test(p8) && /: ## Auto's \(kort\)/.test(p8), p8);
-  toets('8 blok: "voorgesteld" en sleutel ook binnen een tabel niet naar het model', !/NL000000000B00/.test(p8) && p8.indexOf(SLEUTEL) < 0 && /sleutel weggelaten/.test(p8), p8);
+  toets('8 blok: sleutel in een buurrij gemaskeerd', p8.indexOf(SLEUTEL) < 0 && /sleutel weggelaten/.test(p8), p8);
+  toets('8 blok dicht: wachtwoordkolom en tabel onder "voorgesteld" geven alleen de treffer, geen buurrijen (review #1/#2)', !/hunter2geheim|PRK-01-X|VG-55-66|Andere/.test(p8) &&
+    /: \| Kenteken \| Wachtwoord portaal \|/.test(p8), p8);
   toets('8 blok: losse alinea buiten het blok blijft buiten', !/Losse alinea/.test(p8), p8);
   const reus = (p8.split('### 10_Zakelijk/Groenhouten/Reus.md')[1] || '').split('\n### ')[0];
-  toets('8 reuzentabel: eigen grens (≤ 24 regels, ≤ ± 2 kB), de andere pagina\'s blijven erin', reus.length > 0 && reus.split('\n').filter((l) => /^\d+: /.test(l)).length <= 26 &&
+  toets('8 reuzentabel: eigen grens (≤ 24 regels, ≤ ± 2 kB), de andere pagina\'s blijven erin', reus.length > 0 && reus.split('\n').filter((l) => /^\d+: /.test(l)).length <= 27 &&
     Buffer.byteLength(reus) < 2600 && /GJL-11-J/.test(p8) && /KJH-23-J/.test(p8), { bytes: Buffer.byteLength(reus), regels: reus.split('\n').length });
   toets('8 reuzentabel geknipt = grens geraakt (in de dekking)', r8.dekking.grens === true && r8.dekking.volledig === false, r8.dekking);
   met({ soort: 'antwoord', tekst: 'Volvo XC90 KJH-23-J, Mini JCW JFJ-37-S, Subaru Forester TD-RG-01 en de privé-auto GJL-11-J.', waarden: [{ label: 'Volvo', waarde: 'KJH-23-J' }, { label: 'Mini', waarde: 'JFJ-37-S' },
@@ -202,6 +209,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   r8 = await z.zoek('kentekens');
   toets('8 antwoord na een geraakte grens: zegt dat er meer kan staan, waarden blijven', r8.soort === 'antwoord' && r8.waarden.length === 4 && /\(Ik bekeek .*; er kan meer staan\.\)$/.test(r8.tekst), r8);
   fs.rmSync(path.join(VAULT, '10_Zakelijk/Groenhouten/Reus.md'));
+  fs.rmSync(path.join(VAULT, '10_Zakelijk/Tolgaarde/Parkeren.md'));
   r8 = await z.zoek('kentekens');
   toets('8 zonder reuzentabel: volledig bekeken, geen dekkingszin in het antwoord', r8.soort === 'antwoord' && r8.dekking.volledig === true && !/Ik bekeek/.test(r8.tekst), r8);
   // pagina's op relevantie: titel- of aliastreffer eerst
@@ -227,6 +235,25 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   toets('8 meldingVoor: afgekapt nooit "niet gevonden", wel "vraag het Socev"', ['geen', 'onzeker'].every((sr) => !/niet gevonden|niets gevonden/i.test(Z.meldingVoor(sr, dk, false)) && /Vraag het Socev/.test(Z.meldingVoor(sr, dk, false))) &&
     /niet alles doorzoeken/.test(Z.meldingVoor('geen', dk, false)) && /^Niets gevonden in wat ik kon doorzoeken/.test(Z.meldingVoor('leeg', { paginas: 0, paginas_mee: 0, afgekapt: true }, false)),
     ['geen', 'onzeker'].map((sr) => Z.meldingVoor(sr, dk, false)));
+  // vaste plek: eerst maskeren, dan inkorten (review #3: een BSN op ± 290 tekens werd een stuk van 7 cijfers dat het masker niet zag)
+  zet('10_Zakelijk/Tolgaarde/Lang.md', '# Lang\n\n| Zeppelin | Opmerking |\n|---|---|\n| x | ' + 'a'.repeat(285) + ' 123456782 en verder ' + 'b'.repeat(60) + ' |\n');
+  antwoordVan = null;
+  await z.zoek('Zeppelin', { vast: true });
+  toets('8 vaste plek: lange buurregel eerst gemaskeerd, geen stuk BSN', !/123456/.test(laatsteprompt.prompt) && /\| x \| a/.test(laatsteprompt.prompt), laatsteprompt.prompt);
+  fs.rmSync(path.join(VAULT, '10_Zakelijk/Tolgaarde/Lang.md'));
+  // CRLF-pagina's worden gevonden, en hun tabel gaat mee (review #6)
+  zet('10_Zakelijk/Tolgaarde/Crlf.md', '---\r\nupdated: 2026-10-01\r\n---\r\n# Crlf\r\n\r\n| Zeppelin | Code |\r\n|---|---|\r\n| Graf | ZP-77-Q |\r\n');
+  await z.zoek('Zeppelin');
+  toets('8 CRLF-pagina: gevonden, tabelrij zonder zoekwoord mee, updated gelezen', /ZP-77-Q/.test(laatsteprompt.prompt) && !/\r/.test(laatsteprompt.prompt), laatsteprompt.prompt);
+  fs.rmSync(path.join(VAULT, '10_Zakelijk/Tolgaarde/Crlf.md'));
+  toets('8 streepje: namen ("Anne-Marie", "Noord-Holland") niet gesplitst (review #10)', z.groepen('Anne-Marie')[0].varianten.indexOf('Anne') < 0 && z.groepen('Noord-Holland')[0].varianten.indexOf('Noord') < 0);
+  // een lange alinea: klein venster rond de treffer, geen grens
+  zet('10_Zakelijk/Tolgaarde/Verhaal.md', '# Verhaal\n\n' + Array.from({ length: 20 }, (_, i) => 'verhaalregel ' + i + (i === 10 ? ' over de Zeppelin' : '')).join('\n') + '\n');
+  antwoordVan = null;
+  const r8a = await z.zoek('Zeppelin');
+  toets('8 lange alinea: alleen ± 3 regels rond de treffer, telt niet als grens', /verhaalregel 8\b/.test(laatsteprompt.prompt) && /verhaalregel 13\b/.test(laatsteprompt.prompt) &&
+    !/verhaalregel 7\b|verhaalregel 14\b/.test(laatsteprompt.prompt) && r8a.dekking.volledig === true, { p: laatsteprompt.prompt, d: r8a.dekking });
+  fs.rmSync(path.join(VAULT, '10_Zakelijk/Tolgaarde/Verhaal.md'));
   // frontmatter-treffer: niet uitbreiden naar de hele frontmatter
   zet('10_Zakelijk/Tolgaarde/Front.md', '---\ntitle: Zeppelin\nsleutelveld: ' + 'X'.repeat(10) + '\n---\n# Iets\n');
   antwoordVan = null;
@@ -268,7 +295,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     appLeesStreng: (f, l) => { let t; try { t = fs.readFileSync(f, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return l; throw e; } return JSON.parse(t); },
     appSchrijfJson: (f, d) => fs.writeFileSync(f, JSON.stringify(d)),
     appEenRegel: eenRegel, appTijdKort: (ms) => new Date(ms).toISOString().slice(11, 16),
-    harvesterClaude: async (sys, prompt, schema, o) => { modelN++; if (o.timeoutMs !== 12000) return { ok: false, fout: 'time-out niet 12 s' }; return modelVan ? modelVan(prompt, schema) : { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; } });
+    harvesterClaude: async (sys, prompt, schema, o) => { modelN++; if (o.timeoutMs !== 20000) return { ok: false, fout: 'time-out niet 20 s' }; return modelVan ? modelVan(prompt, schema) : { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; } });
   vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
   const S = ctx.__z;
   toets('6 module geladen', !!S.zoekSnel);

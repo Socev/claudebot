@@ -28,7 +28,7 @@ const MAX_TERMEN = 6;
 const MAX_REGELS = 40, MAX_CONTEXT = 8 * 1024, MAX_REGEL = 300, KOP_REGELS = 25, MAX_PAGINAS = 12;
 // wv1289: grens per tabel/lijst/alinea (MAX_BLOK), zodat één reuzentabel de rest niet verdringt; in de eerste ronde krijgt elke pagina
 // eerst een kleiner stuk (MAX_BLOK_EERST), zodat er ruimte blijft voor de breedte. MAX_CONTEXT 6 → 8 kB: blokken nemen meer plaats.
-const MAX_BLOK_REGELS = 24, MAX_BLOK = 2048, MAX_BLOK_EERST = 800;
+const MAX_BLOK_REGELS = 24, MAX_BLOK = 2048, MAX_BLOK_EERST = 800, MAX_ALINEA_REGELS = 6;
 const GREP_MS = 3000, GREP_MAX_UIT = 4 * 1024 * 1024, GREP_PER_BESTAND = 200;
 const WORTELS = ['10_Zakelijk', '20_Prive'];
 const WORTELS_VAST = ['10_Zakelijk'];
@@ -228,20 +228,25 @@ const MELDING = {
 };
 // Dekking in gewone taal (wv1289, David 25-10: "Zoeken en DENKEN dat je alles kreeg, is schadelijk"). Een geraakte grens eindigt nooit als
 // "niet gevonden"; ook zonder treffers zegt de melding welke delen van het Brein doorzocht zijn.
+const WORTEL_NAAM = { '10_Zakelijk': 'Zakelijk', '20_Prive': 'Privé' };
+const BLOK_DICHT = /voorgesteld|wachtwoord|password|passwd|pincode|\bpin\b|token|secret|api[-_ ]?key|sleutel|credential|inloggegevens/i;
 const DOORZOCHT = 'Ik zocht in Zakelijk en Privé, niet in bronnen, notulen, gesprekken, gezondheid, archief en systeempagina\'s.';
 const DOORZOCHT_VAST = 'Ik zocht op dit apparaat alleen in Zakelijk (zonder personeel en financiën), niet in bronnen, notulen, gesprekken en archief.';
 const VOLLEDIG = 'Vraag het Socev voor een volledige zoektocht.';
 const pag = function (n) { return n + (n === 1 ? ' pagina' : ' pagina\'s'); };
 function dekkingZin(d) {
-  if (d.afgekapt && !d.paginas_mee) return 'Ik kon niet alles doorzoeken.';
+  const mis = d.ontbreekt_naam ? ', en ik kon nu niet in ' + d.ontbreekt_naam + ' zoeken' : '';
+  if ((d.afgekapt || d.bestand_vol) && !d.paginas_mee) return 'Ik kon niet alles doorzoeken' + mis + '.';
+  if (!d.paginas) return mis ? 'Ik kon nu niet in ' + d.ontbreekt_naam + ' zoeken.' : '';
   const kern = d.paginas_mee < d.paginas ? 'Ik bekeek ' + d.paginas_mee + ' van de ' + pag(d.paginas) + ' met een treffer'
     : (d.paginas === 1 ? 'Ik bekeek de pagina met een treffer' : 'Ik bekeek alle ' + pag(d.paginas) + ' met een treffer') +
       (d.regels_mee < d.regels ? ', maar niet elke treffer' : ', van sommige alleen een deel');
-  return kern + (d.afgekapt || d.bestand_vol ? ', en ik kon niet alles doorzoeken' : '') + '.';
+  return kern + (d.afgekapt || d.bestand_vol ? ', en ik kon niet alles doorzoeken' : '') + mis + '.';
 }
 function meldingVoor(soort, d, vast) {
   const waar = vast ? DOORZOCHT_VAST : DOORZOCHT;
-  if (soort === 'leeg') return d && d.afgekapt ? 'Niets gevonden in wat ik kon doorzoeken. ' + waar + ' ' + VOLLEDIG : 'Niets gevonden. ' + waar;
+  if (soort === 'leeg') return d && (d.afgekapt || d.bestand_vol || d.ontbreekt) ? 'Niets gevonden in wat ik kon doorzoeken. ' + dekkingZin(d) + ' ' + waar + ' ' + VOLLEDIG
+    : 'Niets gevonden. ' + waar;
   if (!d) return MELDING[soort] || null;
   if (soort === 'geen') return d.volledig ? 'Niet gevonden in de ' + pag(d.paginas) + ' met een treffer. ' + waar
     : 'Niet in wat ik bekeek. ' + dekkingZin(d) + ' ' + VOLLEDIG;   // nooit "niet gevonden" na een geraakte grens
@@ -280,16 +285,16 @@ function maak(opt) {
       const varianten = [term];
       (SYNONIEM[k] || []).forEach(function (s) { varianten.push(s); });
       if (/'s$/.test(k)) varianten.push(term.slice(0, -2));
-      // wv1289: een samenstelling met streepje ("Zorgmail-adres") staat zelden zo op de pagina; ook het eerste deel en de losse schrijfwijze
-      const delen = k.split('-').filter(Boolean);
-      if (!SYNONIEM[k] && delen.length > 1 && delen[0].replace(/[^a-z0-9]/g, '').length >= 4 && !STOPWOORD.has(delen[0]) && !FEITWOORD.has(delen[0])) {
-        varianten.push(term.split('-')[0], term.split('-').join(' '));
-      }
       const gelezen = [];
       if (!FEITWOORD.has(k)) woordenlijstVarianten(wg, term).forEach(function (h) {
         h.zoek.forEach(function (v) { varianten.push(v); });
         if (h.naam) gelezen.push({ term: term, naam: h.naam, pagina: h.pagina });
       });
+      // wv1289: een samenstelling met streepje ("Zorgmail-adres") staat zelden zo op de pagina; ook het eerste deel en de losse schrijfwijze.
+      // Niet bij namen ("Anne-Marie", "Noord-Holland": hoofdletter na het streepje) en ná de woordenlijst (review #10).
+      const delen = term.split('-').filter(Boolean);
+      if (!SYNONIEM[k] && delen.length === 2 && /^[a-z]/.test(delen[1]) && delen[0].replace(/[^A-Za-z0-9]/g, '').length >= 4 && !STOPWOORD.has(delen[0].toLowerCase()) &&
+        !FEITWOORD.has(delen[0].toLowerCase())) varianten.push(delen[0], delen.join(' '));
       const uniek = [];
       varianten.forEach(function (v) { if (v && !uniek.some(function (x) { return x.toLowerCase() === v.toLowerCase(); })) uniek.push(v); });
       return { term: term, feit: FEITWOORD.has(k), varianten: uniek.slice(0, 12), gelezen: gelezen };
@@ -336,6 +341,7 @@ function maak(opt) {
         clearTimeout(tm);
         const regels = [];
         uit.split('\n').forEach(function (r) {
+          r = r.replace(/\r$/, '');   // CRLF-pagina's (review wv1289 #6: '.' matcht geen \r, zulke regels vielen weg)
           const m = /^\/dev\/fd\/(\d+)\/(.+?\.md):(\d+):(.*)$/.exec(r);
           if (!m) return;
           const w = wortels[Number(m[1]) - 3];
@@ -345,7 +351,7 @@ function maak(opt) {
           if (vast && isVastDicht(pad)) return;
           regels.push({ pad: pad, nr: Number(m[3]), tekst: m[4] });
         });
-        klaar({ regels: regels, afgekapt: te, code: code });
+        klaar({ regels: regels, afgekapt: te, code: code, wortels: wortels.map(function (w) { return w.wortel; }) });
       });
     });
   }
@@ -458,30 +464,46 @@ function maak(opt) {
     let bytes = 0, nRegels = 0, grens = kandidaat.length > gekozen.length;
     gekozen.forEach(function (x) {
       const pagina = leesPagina(x.pad);
-      x.lijnen = pagina ? pagina.split('\n') : [];
+      x.lijnen = pagina ? pagina.split(/\r?\n/) : [];
       x.fmEind = 0;
       if (x.lijnen[0] === '---') { const e = x.lijnen.indexOf('---', 1); x.fmEind = e > 0 ? e + 1 : 0; }
       x.upd = updatedVan(pagina);
       x.mee = new Map();   // nr -> tekst
       x.bytes = 0;
     });
-    const regelTekst = function (t) { return masker(kort(t, gr), vast, bsnMasker); };
+    // eerst maskeren, dan inkorten: anders knipt kort() een BSN of IBAN tot een stuk dat het masker niet meer herkent (review wv1289 #3)
+    const regelTekst = function (t) { return kort(masker(String(t).replace(/\r$/, ''), vast, bsnMasker), gr); };
     // Neem het blok rond treffer r mee (tot maxBlok bytes; een tweede aanroep vult het blok verder aan); false als de treffer zelf niet past.
     function neemBlok(x, r, maxBlok) {
       const i = r.nr - 1;
       let nrs = [r.nr], geknipt = false;
-      if (x.lijnen.length && i < x.lijnen.length && x.lijnen[i].replace(/\s+$/, '') === String(r.tekst).replace(/\s+$/, '')) {
-        const vt = blokRond(x.lijnen, i, x.fmEind);
+      const zelfde = x.lijnen.length && i < x.lijnen.length && x.lijnen[i].replace(/\s+$/, '') === String(r.tekst).replace(/\s+$/, '');
+      if (!zelfde) geknipt = true;   // pagina onleesbaar of sinds grep veranderd: alleen de treffer, en dat telt als grens (review #7)
+      let vt = zelfde ? blokRond(x.lijnen, i, x.fmEind) : null, kopBoven = -1;
+      if (vt) for (let k = vt[0] - 1; k >= x.fmEind && k >= vt[0] - 40; k--) { if (lijnSoort(x.lijnen[k]) === 'kop') { kopBoven = k; break; } }
+      // Een blok onder of met "voorgesteld", of met een wachtwoord-, sleutel- of tokenwoord: geen buurregels, alleen de treffer zelf (zoals
+      // vóór wv1289). masker() werkt per regel en ziet een wachtwoord in een tabelkolom of vervolgregel niet (review #1 en #2).
+      if (vt) {
+        for (let k = vt[0]; k <= vt[1]; k++) if (BLOK_DICHT.test(x.lijnen[k])) { vt = null; break; }
+        if (vt && kopBoven >= 0 && BLOK_DICHT.test(x.lijnen[kopBoven])) vt = null;
+      }
+      if (vt) {
         let van = vt[0], tot = vt[1];
+        // een citaat of losse alinea is meestal verhaal, geen feitenblok: alleen een klein venster rond de treffer (tabellen en lijsten heel)
+        const ls = lijnSoort(x.lijnen[i]);
+        // (± 2 à 3 regels vangt een omgebroken zin; telt daarom niet als grens)
+        if ((ls === 'citaat' || ls === 'alinea') && tot - van + 1 > MAX_ALINEA_REGELS) { van = Math.max(van, i - 2); tot = Math.min(tot, i + 3); }
         const kopTabel = lijnSoort(x.lijnen[van]) === 'tabel' ? [van, van + 1].filter(function (k) { return k <= tot && k !== i; }) : [];
-        if (tot - van + 1 > MAX_BLOK_REGELS) { geknipt = true; van = Math.max(van, i - Math.floor(MAX_BLOK_REGELS / 3)); tot = Math.min(tot, van + MAX_BLOK_REGELS - 1); }
+        if (tot - van + 1 > MAX_BLOK_REGELS) {   // venster rond de treffer; onderaan schuift het terug naar boven (review #9)
+          geknipt = true;
+          van = Math.max(van, i - Math.floor(MAX_BLOK_REGELS / 3)); tot = Math.min(tot, van + MAX_BLOK_REGELS - 1); van = Math.max(vt[0], tot - MAX_BLOK_REGELS + 1);
+        }
         // dichtst bij de treffer eerst, kopregels van een tabel altijd
         const rest = [];
         for (let k = van; k <= tot; k++) if (k !== i && kopTabel.indexOf(k) < 0) rest.push(k);
         rest.sort(function (a, b) { return Math.abs(a - i) - Math.abs(b - i) || a - b; });
         nrs = [i].concat(kopTabel, rest).map(function (k) { return k + 1; });
-        // de dichtstbijzijnde kop erboven, voor het verband
-        for (let k = vt[0] - 1; k >= x.fmEind && k >= vt[0] - 40; k--) { if (lijnSoort(x.lijnen[k]) === 'kop') { nrs.splice(1, 0, k + 1); break; } }
+        if (kopBoven >= 0) nrs.splice(1, 0, kopBoven + 1);   // de dichtstbijzijnde kop erboven, voor het verband
       }
       let blokBytes = 0, eerste = !x.mee.has(r.nr), vol = false;
       for (const nr of nrs) {
@@ -521,9 +543,12 @@ function maak(opt) {
     });
     let vol = 0;
     perBestand.forEach(function (n) { if (n >= GREP_PER_BESTAND) vol++; });
+    // een zoekmap die niet geopend kon worden (niet op zijn plek), telt als grens en wordt genoemd (review #4)
+    const ontbreekt = Array.isArray(gv.wortels) ? (vast ? WORTELS_VAST : WORTELS).filter(function (w) { return gv.wortels.indexOf(w) < 0; }) : [];
     const dekking = { paginas: paginas.length, paginas_mee: paginasMee, regels: regelsTotaal, regels_mee: regelsMee,
-      afgekapt: !!gv.afgekapt || undefined, bestand_vol: vol || undefined };
-    dekking.grens = !!(grens || gv.afgekapt || vol);
+      afgekapt: !!gv.afgekapt || undefined, bestand_vol: vol || undefined, ontbreekt: ontbreekt.length ? ontbreekt.length : undefined,
+      ontbreekt_naam: ontbreekt.length ? ontbreekt.map(function (w) { return WORTEL_NAAM[w] || 'een deel'; }).join(' en ') : undefined };
+    dekking.grens = !!(grens || gv.afgekapt || vol || ontbreekt.length);
     dekking.volledig = !dekking.grens && paginasMee === paginas.length && regelsMee === regelsTotaal;
     return { tekst: blokken.join('\n\n'), bronnen: bronnen, regels: nRegels, dekking: dekking };
   }
@@ -587,8 +612,8 @@ function maak(opt) {
     const nt = natoets({ tekst: tekst, waarden: ruweWaarden }, ctx.tekst);
     if (!nt.ok) return uit('geen', { reden: 'natoets: ' + nt.mis.length + ' waarde(n) niet in de bron', natoets_mis: nt.mis.slice(0, 3).map(function (x) { return String(x).slice(0, 60); }),
       model_tekst: tekst, bronnen: bron, melding: meldingVoor('onzeker', dk, vast), dekking: dk, gelezen_als: gelezenUit, ms: ms, verbruik: verbruik });
-    // na de natoets: is er een grens geraakt, dan zegt het antwoord dat er meer kan staan (de app toont tekst; kopiëren neemt hem mee)
-    const tekstUit = dk.grens ? (tekst + ' (' + dekkingZin(dk).replace(/\.$/, '') + '; er kan meer staan.)').slice(0, 600) : tekst;
+    // na de natoets: is niet alles bekeken (grens, of pagina's buiten de band van de beste treffers; review #5), dan zegt het antwoord dat er meer kan staan (de app toont tekst; kopiëren neemt hem mee)
+    const tekstUit = !dk.volledig ? (tekst + ' (' + dekkingZin(dk).replace(/\.$/, '') + '; er kan meer staan.)').slice(0, 600) : tekst;
     return uit('antwoord', { tekst: tekstUit, waarden: nt.waarden, weggelaten: nt.weg.length || undefined, bronnen: bron, dekking: dk, gelezen_als: gelezenUit, melding: null, ms: ms, verbruik: verbruik });
   }
 

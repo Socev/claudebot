@@ -14334,7 +14334,7 @@ const HARVESTER_BIN = process.env.HARVESTER_CLAUDE_BIN || 'claude';   // alleen 
 const HARVESTER_ENV = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL', 'TMPDIR', 'NODE_VERSION'];
 // Eén claude -p-aanroep zoals de bankindeling (Fable wv820 #10): geen tools, geen MCP, geen sessie, lege map, prompt via stdin.
 // Account 2 (zoals de agents); kan dat niet, dan account 1 alleen als Davids reserve daar over is (account1Vangnet), anders niet.
-// wv1252 (Fable #14): o.timeoutMs voor Zoek snel (12 s); standaard 360 s zoals de Harvester. verbruik.kosten = total_cost_usd (equivalent).
+// wv1252 (Fable #14): o.timeoutMs voor Zoek snel (12 s, sinds wv1289 20 s); standaard 360 s zoals de Harvester. verbruik.kosten = total_cost_usd (equivalent).
 async function harvesterClaude(systeem, prompt, schema, o) {
   let tok = '', account = kiesAccount({ account: 2 });
   if (account === 2) { try { tok = await account2Token(); } catch (e) { tok = ''; } }
@@ -15304,7 +15304,7 @@ function doorgeefKnop(sleutel, jobId, hash, zin, tDruk) {
 // Ontbreekt zoek-snel.js in de release (terugrol), dan 404 op de route en zoek_snel.aan=false in /health.
 const ZOEK_SNEL_SCHAKELAAR = process.env.ZOEK_SNEL_SCHAKELAAR || '/opt/data/zoek-snel.json';
 const ZOEK_SNEL_REGELS = path.join(APP_DATA, 'zoek-snel-regels.json');
-const ZOEK_SNEL_PER_UUR = 60, ZOEK_SNEL_HERHAAL_MS = 10 * 60000, ZOEK_SNEL_REGELS_MAX = 5, ZOEK_SNEL_MODEL_MS = 12000, ZOEK_SNEL_MAX = 200;
+const ZOEK_SNEL_PER_UUR = 60, ZOEK_SNEL_HERHAAL_MS = 10 * 60000, ZOEK_SNEL_REGELS_MAX = 5, ZOEK_SNEL_MODEL_MS = 20000, ZOEK_SNEL_MAX = 200;   // wv1289: 12 → 20 s (blokcontext: een lijstvraag kost Sonnet gemeten 5–11 s)
 const zoekSnel = (function () {
   const p = path.join(__dirname, 'zoek-snel.js');
   if (!fs.existsSync(p)) return null;
