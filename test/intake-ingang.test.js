@@ -117,7 +117,7 @@ function gevallen() {
   const mid = '<CAProef123@mail.gmail.com>';
   const mailNaamMail = naam.mail('2026-10-24', 'Overleg', '', mid, 'mail');
   const mailNaamPdf = naam.mail('2026-10-24', 'Facturen', 'Factuur 2026-0412.pdf', mid, 'pdf');
-  const pdf = PDF('Factuur printpapier, totaal EUR 51,43');
+  const pdf = PDF('Factuur 2026-0412 voor vijf dozen printpapier A4, totaal EUR 51,43, te betalen binnen dertig dagen.');
   const waId = 'false_31600000000@c.us_3EB0ABCDEF123456';
   const mediaNaam = naam.media('2026-10-24_2112', 'Voorbeeld: groep', 'notulen.pdf', waId, 'pdf');
   return [
@@ -624,5 +624,43 @@ test('telling en info: alleen aantallen, nooit inhoud of sleutels', async () => 
     const alles = JSON.stringify(t) + JSON.stringify(i);
     for (const k of Object.values(K)) assert.ok(!alles.includes(k) && !alles.includes(sha(k)));
     assert.ok(!alles.includes('Proefgroep'));
+  } finally { await o.sluit(); }
+});
+
+test('review wv1282: scan zonder tekstlaag naast een representatie, vasthouden + onderhoud, onbekende soort, herhaalplafond', async () => {
+  const o = await omgeving();
+  try {
+    // #1: mail met een scan-pdf (geen tekstlaag) en een representatie: niet_te_lezen, niet offsite
+    const g = gevallen()[0]; const e = g.env(); e.bron_id = '19a2b3c4d5e6f799'; e.meta.gmail_id = '19a2b3c4d5e6f799';
+    const scan = PDF(''); e.onderdelen[0] = bdeel('b1', 'bijlage', 'Factuur 2026-0412.pdf', scan, 'application/pdf');
+    const r = await post(o, K.mail, e); await put(o, K.mail, r.j.stuk_id, 'b1', scan, 'application/pdf');
+    await o.ing.markeer(r.j.stuk_id);
+    assert.strictEqual(o.ing._db.prepare('SELECT marker_patient FROM stuk WHERE stuk_id = ?').get(r.j.stuk_id).marker_patient, 'niet_te_lezen');
+    assert.strictEqual(o.ing._db.prepare('SELECT offsite FROM blob WHERE sha256 = ?').get(sha(scan)).offsite, 0);
+    // #2: vasthouden + onderhoud: na de marker en het einde van het onderhoud wordt het ongemarkeerde stuk alsnog geschreven
+    fs.writeFileSync(path.join(o.dir, 'marker.json'), JSON.stringify({ stand: 'vasthouden' }));
+    fs.writeFileSync(path.join(o.dir, 'onderhoud'), '');
+    const sg = gevallen()[5]; const rs = await post(o, sg.sleutel, sg.env());
+    assert.strictEqual(rs.status, 202);
+    await o.ing.markeer(rs.j.stuk_id);
+    await o.ing.ronde();
+    fs.unlinkSync(path.join(o.dir, 'onderhoud'));
+    await o.ing.ronde();
+    assert.strictEqual(o.ing._db.prepare('SELECT status FROM stuk WHERE stuk_id = ?').get(rs.j.stuk_id).status, 'geschreven');
+    assert.ok(fs.existsSync(path.join(o.vault, sg.verwacht[0])));
+    fs.unlinkSync(path.join(o.dir, 'marker.json'));
+    // #5: scriptbare of onbekende soorten
+    const m = gevallen()[4];
+    for (const [naam, mime, reden] of [['x.svg', 'application/pdf', 'soort_klopt_niet'], ['x.htm', 'application/pdf', 'soort_klopt_niet'], ['x.bin', 'application/pdf', 'soort_onbekend'], ['zonder', 'application/pdf', 'soort_onbekend']]) {
+      const me = m.env(); me.onderdelen[0].naam = naam; me.onderdelen[0].mime = mime;
+      const x = await post(o, m.sleutel, me); assert.strictEqual(x.status, 415, naam); assert.ok(x.j.reden.indexOf(reden) === 0, naam + ' ' + x.j.reden);
+    }
+    // #6: na 50 mislukte schrijfpogingen niet meer stil herhalen
+    const t = gevallen()[6];
+    fs.rmSync(path.join(o.vault, '30_Conversaties/Teams'), { recursive: true }); fs.symlinkSync(o.basis, path.join(o.vault, '30_Conversaties/Teams'));
+    const rt = await post(o, t.sleutel, t.env()); assert.strictEqual(rt.status, 202);
+    o.ing._db.prepare('UPDATE stuk SET pogingen = 50 WHERE stuk_id = ?').run(rt.j.stuk_id);
+    const ro = await o.ing.ronde(); assert.strictEqual(ro.mislukt, 1);
+    assert.strictEqual(o.ing.telling('2026-10-24T00:00:00Z', '2026-10-27T00:00:00Z').open.mislukt, 1);
   } finally { await o.sluit(); }
 });

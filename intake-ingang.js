@@ -107,6 +107,11 @@ const SOORTEN = {
   txt: { mime: ['text/plain', 'text/markdown'], magie: null },
   csv: { mime: ['text/csv', 'text/plain'], magie: null },
   html: { mime: ['text/html'], magie: null },
+  htm: { mime: ['text/html'], magie: null },
+  xhtml: { mime: ['application/xhtml+xml'], magie: null },
+  svg: { mime: ['image/svg+xml'], magie: null },
+  odp: { mime: ['application/vnd.oasis.opendocument.presentation'], magie: [PK] },
+  heif: { mime: ['image/heif', 'image/heic'], magie: null, binair: true },
   eml: { mime: ['message/rfc822'], magie: null },
 };
 const TEKST_MIME = /^(text\/(plain|markdown|csv|html)|message\/rfc822)$/;
@@ -314,7 +319,8 @@ function toetsEnvelop(env, profielen, sleutel, soorten) {
     if (np) return weiger(np === 'soort_niet_toegestaan' ? 415 : 400, np + ':' + w + '.naam');
     if (typeof d.mime !== 'string' || !r.mime.includes(kaleMime(d.mime))) return weiger(400, 'mime:' + w);
     const soort = SOORTEN[extVan(d.naam)];
-    if (soort && !soort.mime.includes(kaleMime(d.mime))) return weiger(415, 'soort_klopt_niet:' + w);
+    if (!soort) return weiger(415, 'soort_onbekend:' + w);     // alleen soorten die de kern kent en op de eerste bytes kan toetsen (Fable wv1282 #5)
+    if (!soort.mime.includes(kaleMime(d.mime))) return weiger(415, 'soort_klopt_niet:' + w);
     if (!Number.isInteger(d.grootte) || d.grootte < 0) return weiger(400, 'type:' + w + '.grootte');
     const max = Math.min(DEEL_MAX, (r.max_mb || 25) * MB);
     if (d.grootte > max) return weiger(413, 'te_groot:' + w);
@@ -382,7 +388,7 @@ function toetsEnvelop(env, profielen, sleutel, soorten) {
       const naam = o.bestandsnaam != null ? o.bestandsnaam : d.naam;
       if (!profiel.archief._re.test(naam)) return weiger(400, 'naamvorm:' + d.deel);
       const ex = extVan(naam);
-      if (ex !== extVan(d.naam) && !(SOORTEN[ex] && SOORTEN[ex].mime.includes(kaleMime(d.mime)))) return weiger(415, 'soort_klopt_niet:overgang.bestandsnaam');
+      if (!SOORTEN[ex] || !SOORTEN[ex].mime.includes(kaleMime(d.mime))) return weiger(415, 'soort_klopt_niet:overgang.bestandsnaam');
     }
   }
   const envZonderTekst = Object.assign({}, env, { onderdelen: delen.map((d) => { const c = Object.assign({}, d); delete c.tekst; return c; }) });
@@ -583,7 +589,7 @@ function maak(o) {
     const profiel = profielen.get(stukRij.profiel);
     if (!profiel || !stukRij.stand || !profiel.archief) return { vault: 'geen' };
     if (stukRij.status === 'vastgehouden') return { vault: 'vastgehouden' };
-    if (stukRij.stand === 'om' && houdtVast(stukRij.bron) && !metMarker) {
+    if (stukRij.stand === 'om' && houdtVast(stukRij.bron) && !metMarker && stukRij.marker_patient !== 'geen') {   // Fable wv1282 #2
       q.status.run('wacht_marker', stukRij.stuk_id);
       return { vault: 'wacht', reden: 'marker' };
     }
@@ -701,7 +707,8 @@ function maak(o) {
 
   /*
    * Patiëntmarker (§ 4.3): lokaal, geen model, alleen soorten in het logboek. Leest tekstonderdelen (≤ 2 MB elk), vrije velden, het
-   * onderwerp en pdftotext van pdf's. Onleesbaar (scan zonder tekst, spraak, afbeelding, office zonder representatie) → niet_te_lezen.
+   * onderwerp en pdftotext van pdf's. Een binair onderdeel dat de marker niet kan lezen (scan zonder tekstlaag, spraak, afbeelding, office,
+   * zip) maakt het stuk niet_te_lezen, ook als er een representatie naast staat (Fable wv1282 #1).
    * Daarna de bewaarregel: gemarkeerd/niet_te_lezen → blobs alleen pod, 90 dagen; geen → blobs mogen offsite.
    */
   async function markeer(stukId) {
@@ -714,7 +721,6 @@ function maak(o) {
       const meta = JSON.parse(s.meta || '{}');
       const teksten = [], namen = [];
       let onleesbaar = false;
-      const heeftRepr = delen.some((d) => d.rol === 'representatie' || d.rol === 'hoofdtekst');
       for (const d of delen) {
         namen.push(d.naam);
         const km = kaleMime(d.mime);
@@ -724,8 +730,8 @@ function maak(o) {
         } else if (km === 'application/pdf' && o.pdftekst) {
           const t = await o.pdftekst(blobPad(d.sha256));
           if (t && t.replace(/\s/g, '').length >= (o.marker.MIN_TEKST || 40)) teksten.push(t);
-          else if (!heeftRepr) onleesbaar = true;
-        } else if (!heeftRepr) onleesbaar = true;
+          else onleesbaar = true;     // scan zonder tekstlaag: ook met een representatie ernaast (die maakte een model; Fable wv1282 #1)
+        } else onleesbaar = true;     // office, afbeelding, audio, zip: de marker kan de bytes niet lezen → alleen pod, 90 dagen
       }
       const vrij = db.prepare('SELECT omschrijving, waarde FROM vrij_veld WHERE stuk_id = ?').all(stukId);
       for (const v of vrij) teksten.push(v.omschrijving + ': ' + (v.waarde || ''));
@@ -961,6 +967,8 @@ function maak(o) {
     const grens = nuIso(t - OPEN_MS);
     uit.onvolledig = db.prepare("UPDATE stuk SET status = 'onvolledig' WHERE status = 'open' AND aangemaakt < ?").run(grens).changes;
     for (const s of db.prepare("SELECT * FROM stuk WHERE status = 'wacht' ORDER BY aangemaakt LIMIT 200").all()) {
+      // na 50 mislukte pogingen (± 4 uur) niet meer stil herhalen: mislukt, telt als zorg in de dagtelling (Fable wv1282 #6)
+      if (s.pogingen >= 50) { q.status.run('mislukt', s.stuk_id); uit.mislukt = (uit.mislukt || 0) + 1; continue; }
       const r = schrijfOvergang(s, false);
       if (r.vault === 'geschreven' || r.vault === 'schaduw') uit.herschreven++; else uit.wacht++;
     }
@@ -972,6 +980,7 @@ function maak(o) {
       tx(() => { db.prepare('UPDATE blob SET weg = ? WHERE sha256 = ?').run(nuIso(t), b.sha256); q.spoor.run(nuIso(t), 'bewaartermijn', b.sha256, null, null); });
       uit.weg++;
     }
+    db.prepare('DELETE FROM aanlevering WHERE tijd < ?').run(nuIso(t - 180 * 86400000));   // het spoor per aanroep; stuk/onderdeel/blob blijven (Fable wv1282 #4)
     try { for (const f of fs.readdirSync(TMP)) { const pp = path.join(TMP, f); try { if (t - fs.statSync(pp).mtimeMs > OPEN_MS) fs.unlinkSync(pp); } catch (e) { /* weg */ } } } catch (e) { /* bijzaak */ }
     return uit;
   }
@@ -991,7 +1000,7 @@ function maak(o) {
       const b = per[r.bron] = per[r.bron] || { aanleveringen: 0, geweigerd: 0, dubbel: 0, afwijkend: 0 };
       b['marker_' + (r.m || 'nog_niet')] = r.n;
     }
-    const open = db.prepare("SELECT status, count(*) n FROM stuk WHERE status IN ('onvolledig', 'wacht', 'wacht_marker', 'vastgehouden') GROUP BY status").all();
+    const open = db.prepare("SELECT status, count(*) n FROM stuk WHERE status IN ('onvolledig', 'wacht', 'wacht_marker', 'vastgehouden', 'mislukt') GROUP BY status").all();
     return { per_bron: per, open: Object.fromEntries(open.map((r) => [r.status, r.n])) };
   }
 
