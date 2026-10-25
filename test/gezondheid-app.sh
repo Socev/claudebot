@@ -174,7 +174,9 @@ const srv = http.createServer(function (req, res) {
   toets('uitrol.sh: gezondheid-app.js optioneel in de release', /RELEASE_OPTIONEEL="[^"]*\bgezondheid-app\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));
   toets('Dockerfile: gezondheid-app.js in release-bootstrap', /COPY gezondheid-app\.js \/app\/release-bootstrap\/gezondheid-app\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
   const a0 = src.indexOf('let appGezMod;'), b0 = src.indexOf('// ── wv787: POT-afschriften', a0);
-  const blok = src.slice(a0, b0) + '\nthis.appGezondheid = appGezondheid; this.gezondheidInfo = gezondheidInfo;';
+  // wv1051 bracht appPriveDicht + APP_PRIVE_MODULES buiten dit blok; de echte regels meenemen (CI 274/275 rood op ReferenceError)
+  const prive = (src.match(/^const APP_PRIVE_MODULES = [^\n]*/m) || [''])[0] + '\n' + (src.match(/^function appPriveDicht\([^\n]*/m) || [''])[0] + '\n';
+  const blok = prive + src.slice(a0, b0) + '\nthis.appGezondheid = appGezondheid; this.gezondheidInfo = gezondheidInfo;';
   let antw = [];
   let nep = { aanroepen: 0, volgende: null };
   const ctx = { require: function (p) { if (/gezondheid-app\.js$/.test(p)) return { maak: function () { return {
