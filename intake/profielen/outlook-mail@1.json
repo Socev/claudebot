@@ -1,0 +1,141 @@
+{
+ "profiel": "outlook-mail",
+ "versie": 1,
+ "omschrijving": "Eén Outlook-mail van Tolgaarde zoals de pc-route hem aanlevert (na het Qwen-filter; zakelijk of twijfel). Bijlagen alleen als namenlijst.",
+ "bronnen": [
+  "outlook:tolgaarde"
+ ],
+ "bron_id": {
+  "vorm": "^[!-~]{8,300}$",
+  "uitleg": "Outlook-bericht-id (m.id)"
+ },
+ "herzienbaar": false,
+ "meta": {
+  "internet_message_id": {
+   "type": "tekst",
+   "max": 998,
+   "verplicht": false
+  },
+  "thread_id": {
+   "type": "tekst",
+   "max": 300,
+   "verplicht": false
+  },
+  "van": {
+   "type": "adres",
+   "verplicht": false
+  },
+  "van_naam": {
+   "type": "tekst",
+   "max": 300,
+   "verplicht": false
+  },
+  "aan": {
+   "type": "tekst",
+   "max": 2000,
+   "verplicht": false
+  },
+  "onderwerp": {
+   "type": "tekst",
+   "max": 998,
+   "verplicht": true
+  },
+  "ontvangen": {
+   "type": "tijd",
+   "verplicht": false
+  },
+  "classificatie": {
+   "type": "keuze",
+   "waarden": [
+    "zakelijk",
+    "twijfel"
+   ],
+   "verplicht": true
+  },
+  "filterversie": {
+   "type": "tekst",
+   "max": 40,
+   "verplicht": true
+  },
+  "bijlage_namen": {
+   "type": "lijst",
+   "max": 100,
+   "item_max": 300,
+   "verplicht": false
+  },
+  "map": {
+   "type": "tekst",
+   "max": 100,
+   "verplicht": false
+  },
+  "entiteit": {
+   "type": "keuze",
+   "waarden": [
+    "tolgaarde",
+    "groenhouten",
+    "hagro",
+    "pot",
+    "holding",
+    "phbv",
+    "sel",
+    "dbh",
+    "prive",
+    "inbox"
+   ],
+   "verplicht": true
+  }
+ },
+ "onderdelen": {
+  "hoofdtekst": {
+   "min": 0,
+   "max": 1,
+   "mime": [
+    "text/plain",
+    "text/html",
+    "text/markdown"
+   ],
+   "max_mb": 2
+  },
+  "representatie": {
+   "min": 1,
+   "max": 1,
+   "mime": [
+    "text/markdown"
+   ],
+   "max_mb": 2,
+   "alleen_overgang": true
+  }
+ },
+ "privacy": {
+  "access_context": {
+   "prive": "strikt_prive",
+   "*": "zakelijk_intern"
+  }
+ },
+ "archief": {
+  "schrijf_rol": "representatie",
+  "map_sleutel": [
+   "meta.entiteit"
+  ],
+  "mappen": {
+   "tolgaarde": "10_Zakelijk/Tolgaarde/raw_input",
+   "groenhouten": "10_Zakelijk/Groenhouten/raw_input",
+   "hagro": "10_Zakelijk/HAGRO/raw_input",
+   "pot": "10_Zakelijk/POT_POH_GGZ/raw_input",
+   "holding": "10_Zakelijk/Holding/raw_input",
+   "phbv": "10_Zakelijk/Praktijkhouders_BV/raw_input",
+   "sel": "10_Zakelijk/SEL/raw_input",
+   "dbh": "10_Zakelijk/DBH/raw_input",
+   "prive": "20_Prive/raw_input",
+   "inbox": "_INBOX"
+  },
+  "standaard": "inbox",
+  "naam": "^([0-9]{4}-[0-9]{2}-[0-9]{2}(_[0-9]{4})?|onbekende-datum)_outlook_[A-Za-z0-9-]{1,60}(_[0-9]+)?\\.md$"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "second-brain-verwerk-raw-input",
+  "correspondentie-wachter",
+  "breed-zoeken"
+ ]
+}

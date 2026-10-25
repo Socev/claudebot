@@ -1,0 +1,114 @@
+{
+ "profiel": "whatsapp-dump",
+ "versie": 1,
+ "omschrijving": "Dagdump van één gevolgd WhatsApp-gesprek op het NL-nummer (Nachtextractie 04:30).",
+ "bronnen": [
+  "whatsapp:nl"
+ ],
+ "bron_id": {
+  "vorm": "^[0-9]{5,22}(-[0-9]{5,12})?@(g|c|lid)\\.us/[0-9]{9,11}-[0-9]{9,11}$",
+  "uitleg": "chat-id / tijd van het eerste en het laatste bericht (unix-seconden)"
+ },
+ "herzienbaar": false,
+ "meta": {
+  "chat_id": {
+   "type": "tekst",
+   "vorm": "^[0-9]{5,22}(-[0-9]{5,12})?@(g|c|lid)\\.us$",
+   "verplicht": true
+  },
+  "chat_naam": {
+   "type": "tekst",
+   "max": 200,
+   "verplicht": true
+  },
+  "soort_chat": {
+   "type": "keuze",
+   "waarden": [
+    "groep",
+    "1-op-1"
+   ],
+   "verplicht": true
+  },
+  "entiteit": {
+   "type": "keuze",
+   "waarden": [
+    "tolgaarde",
+    "groenhouten",
+    "hagro",
+    "pot",
+    "holding",
+    "phbv",
+    "sel",
+    "dbh",
+    "ghawa",
+    "prive"
+   ],
+   "verplicht": true
+  },
+  "modus": {
+   "type": "keuze",
+   "waarden": [
+    "info",
+    "actie"
+   ],
+   "verplicht": false
+  },
+  "periode": {
+   "type": "periode",
+   "verplicht": true
+  },
+  "berichten": {
+   "type": "geheel",
+   "min": 1,
+   "verplicht": true
+  },
+  "bijlagen": {
+   "type": "geheel",
+   "min": 0,
+   "verplicht": false
+  },
+  "media": {
+   "type": "lijst",
+   "max": 200,
+   "verplicht": false
+  }
+ },
+ "onderdelen": {
+  "hoofdtekst": {
+   "min": 0,
+   "max": 1,
+   "mime": [
+    "text/markdown",
+    "text/plain"
+   ],
+   "max_mb": 2
+  },
+  "representatie": {
+   "min": 1,
+   "max": 1,
+   "mime": [
+    "text/markdown"
+   ],
+   "max_mb": 2,
+   "alleen_overgang": true
+  }
+ },
+ "privacy": {
+  "access_context": {
+   "prive": "strikt_prive",
+   "*": "zakelijk_intern"
+  }
+ },
+ "archief": {
+  "schrijf_rol": "representatie",
+  "map": "30_Conversaties/WhatsApp",
+  "naam": "^WhatsApp - .{1,160} - [0-9]{4}-[0-9]{2}-[0-9]{2}\\.md$"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "whatsapp-conversatie-consolidatie",
+  "actie-bewaker",
+  "breed-zoeken",
+  "vault-concierge"
+ ]
+}

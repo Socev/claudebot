@@ -1,0 +1,196 @@
+{
+ "profiel": "mail",
+ "versie": 1,
+ "omschrijving": "Eén Gmail-mail met al zijn bijlagen (Mail Processor, accounts david en groenhouten). In de overgang: per document (mail en elke bijlage) de markdown die de route nu maakt als representatie, elk met zijn eigen bestandsnaam en entiteit.",
+ "bronnen": [
+  "gmail:david",
+  "gmail:groenhouten"
+ ],
+ "bron_id": {
+  "vorm": "^[0-9a-f]{12,24}$",
+  "uitleg": "Gmail-bericht-id (hex)"
+ },
+ "herzienbaar": false,
+ "meta": {
+  "gmail_id": {
+   "type": "tekst",
+   "vorm": "^[0-9a-f]{12,24}$",
+   "verplicht": true
+  },
+  "message_id": {
+   "type": "tekst",
+   "max": 998,
+   "verplicht": true
+  },
+  "thread_id": {
+   "type": "tekst",
+   "vorm": "^[0-9a-f]{12,24}$",
+   "verplicht": true
+  },
+  "van": {
+   "type": "adres",
+   "verplicht": true
+  },
+  "van_naam": {
+   "type": "tekst",
+   "max": 300,
+   "verplicht": false
+  },
+  "aan": {
+   "type": "adressen",
+   "verplicht": true
+  },
+  "cc": {
+   "type": "adressen",
+   "verplicht": false
+  },
+  "onderwerp": {
+   "type": "tekst",
+   "max": 998,
+   "verplicht": true
+  },
+  "verzonden": {
+   "type": "tijd",
+   "verplicht": false
+  },
+  "labels": {
+   "type": "lijst",
+   "max": 100,
+   "item_max": 200,
+   "verplicht": true
+  },
+  "authentication_results": {
+   "type": "ruwe_kop",
+   "verplicht": false
+  },
+  "entiteit": {
+   "type": "keuze",
+   "waarden": [
+    "tolgaarde",
+    "groenhouten",
+    "hagro",
+    "pot",
+    "holding",
+    "phbv",
+    "sel",
+    "dbh",
+    "ghawa",
+    "prive",
+    "inbox"
+   ],
+   "verplicht": false,
+   "per_deel": true
+  },
+  "categorie": {
+   "type": "tekst",
+   "max": 80,
+   "verplicht": false,
+   "per_deel": true
+  },
+  "documentbron": {
+   "type": "keuze",
+   "waarden": [
+    "mail",
+    "pdf",
+    "docx",
+    "plaud"
+   ],
+   "verplicht": false,
+   "per_deel": true
+  }
+ },
+ "onderdelen": {
+  "origineel": {
+   "min": 0,
+   "max": 1,
+   "mime": [
+    "message/rfc822"
+   ],
+   "max_mb": 25
+  },
+  "hoofdtekst": {
+   "min": 0,
+   "max": 1,
+   "mime": [
+    "text/plain",
+    "text/html",
+    "text/markdown"
+   ],
+   "max_mb": 2
+  },
+  "bijlage": {
+   "min": 0,
+   "max": 38,
+   "mime": [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.spreadsheet",
+    "text/plain",
+    "text/csv",
+    "text/markdown",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+    "application/zip",
+    "message/rfc822"
+   ],
+   "max_mb": 25
+  },
+  "representatie": {
+   "min": 1,
+   "max": 39,
+   "mime": [
+    "text/markdown"
+   ],
+   "max_mb": 2,
+   "alleen_overgang": true
+  }
+ },
+ "privacy": {
+  "access_context": {
+   "prive": "strikt_prive",
+   "*": "zakelijk_intern"
+  }
+ },
+ "archief": {
+  "schrijf_rol": "representatie",
+  "map_sleutel": [
+   "deel.meta.entiteit"
+  ],
+  "mappen": {
+   "tolgaarde": "10_Zakelijk/Tolgaarde/raw_input",
+   "groenhouten": "10_Zakelijk/Groenhouten/raw_input",
+   "hagro": "10_Zakelijk/HAGRO/raw_input",
+   "pot": "10_Zakelijk/POT_POH_GGZ/raw_input",
+   "holding": "10_Zakelijk/Holding/raw_input",
+   "phbv": "10_Zakelijk/Praktijkhouders_BV/raw_input",
+   "sel": "10_Zakelijk/SEL/raw_input",
+   "dbh": "10_Zakelijk/DBH/raw_input",
+   "ghawa": "10_Zakelijk/GHAWA-ECG/raw_input",
+   "prive": "20_Prive/raw_input",
+   "inbox": "_INBOX"
+  },
+  "standaard": "inbox",
+  "naam": "^([0-9]{4}-[0-9]{2}-[0-9]{2}|onbekende-datum)_[A-Za-z0-9_-]{1,180}__[0-9a-f]{10}(-[0-9]+)?\\.md$"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "second-brain-verwerk-raw-input",
+  "personeelsgesprek-verwerken",
+  "fin-datahub",
+  "actie-bewaker",
+  "agenda-wachter",
+  "correspondentie-wachter",
+  "personeels-wachter",
+  "breed-zoeken"
+ ]
+}

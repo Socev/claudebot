@@ -1,0 +1,55 @@
+{
+ "profiel": "contacten-export",
+ "versie": 1,
+ "omschrijving": "De compacte contactenlijst uit Google Contacts (Contacten Sync, alleen bij wijziging). Herzienbaar: elke nieuwe inhoud is een nieuwe versie die het bestand vervangt.",
+ "bronnen": [
+  "contacten:google"
+ ],
+ "bron_id": {
+  "vorm": "^contacten$",
+  "uitleg": "vast: er is één lijst"
+ },
+ "herzienbaar": true,
+ "meta": {
+  "aantal": {
+   "type": "geheel",
+   "min": 0,
+   "verplicht": true
+  },
+  "gemeten_op": {
+   "type": "tijd",
+   "verplicht": true
+  },
+  "bron": {
+   "type": "keuze",
+   "waarden": [
+    "google-people"
+   ],
+   "verplicht": true
+  }
+ },
+ "onderdelen": {
+  "representatie": {
+   "min": 1,
+   "max": 1,
+   "mime": [
+    "text/markdown"
+   ],
+   "max_mb": 2,
+   "alleen_overgang": true
+  }
+ },
+ "privacy": {
+  "access_context": "strikt_prive"
+ },
+ "archief": {
+  "schrijf_rol": "representatie",
+  "map": "20_Prive/Contacten",
+  "naam": "^Contacten\\.md$"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "contacten-opzoeken",
+  "whatsapp-chat-uitlezen"
+ ]
+}

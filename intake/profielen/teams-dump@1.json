@@ -1,0 +1,86 @@
+{
+ "profiel": "teams-dump",
+ "versie": 1,
+ "omschrijving": "Dump van één Teams-gesprek (extractie 4x per dag, na het Qwen-filter).",
+ "bronnen": [
+  "teams"
+ ],
+ "bron_id": {
+  "vorm": "^[!-~]{3,300}/[0-9]{12,14}$",
+  "uitleg": "conversation-id / hoogste verwerkte berichttijd (unix-ms)"
+ },
+ "herzienbaar": false,
+ "meta": {
+  "conversation_id": {
+   "type": "tekst",
+   "max": 300,
+   "verplicht": true
+  },
+  "gesprek": {
+   "type": "tekst",
+   "max": 200,
+   "verplicht": true
+  },
+  "soort": {
+   "type": "keuze",
+   "waarden": [
+    "chat",
+    "kanaal",
+    "vergadering"
+   ],
+   "verplicht": true
+  },
+  "periode": {
+   "type": "tekst",
+   "max": 100,
+   "verplicht": true
+  },
+  "berichten": {
+   "type": "geheel",
+   "min": 1,
+   "verplicht": true
+  },
+  "twijfel": {
+   "type": "geheel",
+   "min": 0,
+   "verplicht": true
+  },
+  "filterversie": {
+   "type": "tekst",
+   "max": 40,
+   "verplicht": false
+  }
+ },
+ "onderdelen": {
+  "hoofdtekst": {
+   "min": 0,
+   "max": 1,
+   "mime": [
+    "text/markdown",
+    "text/plain"
+   ],
+   "max_mb": 2
+  },
+  "representatie": {
+   "min": 1,
+   "max": 1,
+   "mime": [
+    "text/markdown"
+   ],
+   "max_mb": 2,
+   "alleen_overgang": true
+  }
+ },
+ "privacy": {
+  "access_context": "zakelijk_intern"
+ },
+ "archief": {
+  "schrijf_rol": "representatie",
+  "map": "30_Conversaties/Teams",
+  "naam": "^Teams - .{1,80}( \\[[0-9a-z]{1,6}\\])? - [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{4}\\.md$"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "teams-conversatie-consolidatie"
+ ]
+}

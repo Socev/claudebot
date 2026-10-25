@@ -294,6 +294,12 @@ jobs:
         run: |
           sudo apt-get install -y -qq acl >/dev/null 2>&1 || true
           bash test/mk-tekst.sh
+      # OVIS Intake, aanleverweg (wv1282): CI-poort (alleen fs/path/crypto/node:sqlite, Authorization alleen naar de hash, register alleen in de
+      # module), sleutels, envelop per veldtype, naampoort (elke WINCODE-soort), bytes, dubbel/afwijkend, herzienbaar, padpoging, onvolledig,
+      # onderhoud, vrije velden, leesluik, de 23 markergevallen + bewaarregel, en per profiel voorbeeld, weigering en rondreis.
+      - name: "intake-ingang (wv1282, aanleverweg OVIS Intake)"
+        if: ${{ !cancelled() }}
+        run: bash test/intake-ingang.sh
       # OVIS-register (wv979): frontmatter als tekst, vingerafdruk, validatie, compileer tegen een nep-databank, Bibliothecaris BB1-BB7.
       - name: "ovis-register (wv979, compiler + Bibliothecaris)"
         if: ${{ !cancelled() }}

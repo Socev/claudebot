@@ -3700,6 +3700,7 @@ function handleRequest(req, res) {
       aix: typeof aixInfo === 'function' ? aixInfo() : { aan: false },   // wv942: aix.js (sleutel bruikbaar?, laatst bereikbaar, plat sinds; nooit de sleutel)
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
       facturen_ingang: facturenIngangInfo(),   // wv856: smalle ingang /fac (ingericht?, uit?; geen inhoud, geen gebruikers)
+      intake: intakeInfo(),   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
       server: SERVER_ECHT ? { echt: true, paden: { home: serverPaden.home, io: serverPaden.io, jobout: serverPaden.jobout } }
@@ -14249,6 +14250,78 @@ function facturenIngangUploadBytes() {
 function facturenIngangIsPad(req) { const p = reqPath(req); return p === '/fac' || p.indexOf('/fac/') === 0; }
 function facturenIngangInfo() { if (!facturenIngang) return { aan: false }; try { return Object.assign({ aan: true }, facturenIngang.info()); } catch (e) { return { aan: true, fout: true }; } }
 
+// ── OVIS Intake: de aanleverweg /intake/* (wv1282, bouwstap A, 25-10-2026) ──
+// Ontwerp + Fable-review vooraf: vault "01_Ontwikkeling/OVIS Intake - aanleverprotocol (ontwerp 25-10-2026).md". Logica, sloten en waarom in
+// intake-ingang.js; profielen in intake/profielen/; marker = intake/patientpoort.js (patientpoort-2.0, telstand tenzij INTAKE_DIR/marker.json
+// iets anders zegt). Hier alleen de koppeling: de route (vóór handleRequest; de pod-credential van /run werkt hier niet: alleen Bearer-
+// sleutels uit INTAKE_DIR/sleutels.json, en die werken nergens anders), pdftotext voor de marker, de ronde elke 5 min (onvolledig na
+// een uur, herhaalronde, bewaartermijn) en één dagtelling in de box (alleen als er iets binnenkwam of openstaat). Ontbreekt
+// intake-ingang.js in de release (terugrol), dan 404 op /intake/* en intake.aan=false in /health.
+const INTAKE_DIR = serverPad('intake', process.env.INTAKE_DIR, '/opt/data/intake', serverProefDeel('intake'));
+function intakeStuur(res, status, obj, kop) {
+  const h = Object.assign({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }, kop || {});
+  let body;
+  if (Buffer.isBuffer(obj) || typeof obj === 'string') { body = obj; if (!h['Content-Type']) h['Content-Type'] = 'application/octet-stream'; }
+  else { body = JSON.stringify(obj); h['Content-Type'] = 'application/json'; }
+  try { res.writeHead(status, h); res.end(body); } catch (e) { logError('intake-stuur', e); }
+}
+function intakePdfTekst(pad) {
+  return new Promise(function (klaar) {
+    let k, uit = '', af = false;
+    const eind = function (t) { if (!af) { af = true; klaar(t); } };
+    try { k = spawn('pdftotext', ['-q', '-l', '40', '-enc', 'UTF-8', pad, '-'], { stdio: ['ignore', 'pipe', 'ignore'] }); } catch (e) { return eind(null); }
+    const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind(null); }, 30000);
+    k.stdout.setEncoding('utf8');
+    k.stdout.on('data', function (c) { if (uit.length < 2e6) uit += c; });
+    k.on('error', function () { clearTimeout(tm); eind(null); });
+    k.on('close', function (code) { clearTimeout(tm); eind(code === 0 ? uit : null); });
+  });
+}
+const intake = (function () {
+  const p = path.join(__dirname, 'intake-ingang.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ dir: INTAKE_DIR, vault: VAULT, profielenDir: path.join(__dirname, 'intake', 'profielen'),
+      filterPad: fs.existsSync(path.join(__dirname, 'bisync-filter.txt')) ? path.join(__dirname, 'bisync-filter.txt') : '/app/bisync-filter.txt',   // release: het filter van het image (wv813)
+      primair: function () { return rolPrimair(); }, vv: VV(), stuur: intakeStuur,
+      fout: logError, pdftekst: intakePdfTekst, nachtgrendel: function () { return ovisAms().uur === 1; },
+      vrijeBytes: function (d) { try { const st = fs.statfsSync(d); return st.bavail * st.bsize; } catch (e) { return null; } },
+      marker: require(path.join(__dirname, 'intake', 'patientpoort.js')) });
+  } catch (e) { logError('intake', e); return null; }
+})();
+function intakeIsPad(req) { const p = reqPath(req); return p === '/intake' || p.indexOf('/intake/') === 0; }
+function intakeInfo() { if (!intake) return { aan: false }; try { return Object.assign({ aan: true }, intake.info()); } catch (e) { return { aan: true, fout: true }; } }
+// Dagtelling (ontwerp § 4.3/§ 5.2): één box-rij per dag over gisteren, stil als er niets binnenkwam en niets openstaat.
+function intakeDagTelling() {
+  const t = ovisAms();
+  if (t.uur < 7) return;
+  const stempel = path.join(INTAKE_DIR, 'telling-dag');
+  let laatst = '';
+  try { laatst = fs.readFileSync(stempel, 'utf8').trim(); } catch (e) {}
+  if (laatst === t.datum) return;
+  try { fs.writeFileSync(stempel, t.datum, { mode: 0o600 }); } catch (e) { logError('intake-telling', e); return; }
+  // Nederlandse middernacht van vandaag in UTC (verschil klok Amsterdam − UTC, in minuten)
+  const n = new Date(), ver = ((t.uur * 60 + t.min) - (n.getUTCHours() * 60 + n.getUTCMinutes()) + 1440 + 720) % 1440 - 720;
+  const tot = new Date(t.datum + 'T00:00:00Z').getTime() - ver * 60000;
+  const r = intake.telling(new Date(tot - 86400000).toISOString(), new Date(tot).toISOString());
+  const bronnen = Object.keys(r.per_bron);
+  const open = Object.keys(r.open);
+  const regels = bronnen.map(function (b) { const x = r.per_bron[b]; return b + ': ' + Object.keys(x).filter(function (k) { return x[k]; }).map(function (k) { return k + ' ' + x[k]; }).join(', '); });
+  // Stil (ontwerp § 4.3, grondwet 10): alleen een rij als er iets geweigerd, afwijkend, gemarkeerd of blijven liggen is; zorg = status open
+  const zorg = open.length > 0 || bronnen.some(function (b) { return r.per_bron[b].geweigerd || r.per_bron[b].afwijkend; });
+  const markers = bronnen.some(function (b) { return r.per_bron[b].marker_gemarkeerd || r.per_bron[b].marker_niet_te_lezen; });
+  if (!zorg && !markers) return;
+  ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Intake: dagtelling aanleveringen\n- status: ' + (zorg ? 'open' : 'afgehandeld') + '\n- van: pod:intake — bevinding_id intake-telling-' + t.datum +
+    '\n- wat ik zag: ' + (regels.join('; ') || 'geen aanleveringen') + (open.length ? '; open: ' + open.map(function (k) { return k + ' ' + r.open[k]; }).join(', ') : '') +
+    '\n- voorstel: niets bij alleen dubbel/0 geweigerd; anders stuk-id in intake.sqlite (tabel aanlevering) nalopen\n');
+}
+async function intakeTik() {
+  if (!intake || !rolPrimair()) return;
+  try { await intake.ronde(); } catch (e) { logError('intake-ronde', e); }
+  try { intakeDagTelling(); } catch (e) { logError('intake-telling', e); }
+}
+if (intake && SERVER_ECHT) { setTimeout(function () { intakeTik(); }, 120000).unref(); setInterval(function () { intakeTik(); }, 5 * 60000).unref(); }
+
 // ── Harvester (wv820, 22-10-2026; bouwplan "01_Ontwikkeling/Harvester - ideeën oogsten (bouwplan 22-10-2026).md") ──
 // App Harvester: ideeën van gevolgde bronnen (RSS/Atom) met een cijfer voor gaaf, handig en complex; "Naar Broedstoof" zet een idee
 // geparkeerd op de Ideeënbus. Logica in harvester.js; hier de koppeling: routes /app/harvester(*) na de app-poort, POST
@@ -15536,6 +15609,10 @@ const server = http.createServer(function (req, res) {
     if (facturenIngangIsPad(req)) {   // wv856: smalle ingang Facturen (praktijkmanager); zonder module 404, nooit door naar handleRequest
       if (facturenIngang) return facturenIngang.verwerk(req, res);
       req.resume(); res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); return res.end('{"ok":false,"fout":"onbekend"}');
+    }
+    if (intakeIsPad(req)) {   // wv1282: aanleverweg OVIS Intake (eigen Bearer-sleutels); zonder module 404, nooit door naar handleRequest
+      if (intake) return intake.verwerk(req, res);
+      req.resume(); res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); return res.end('{"ok":false,"uitkomst":"geweigerd","reden":"onbekend"}');
     }
     if (telIsPad(req)) return handleTel(req, res);   // wv264: spraak via de telefoon (Tasker)
     if (berichtIsPad(req)) return berichtRoute(req, res);   // wv263: bericht aan David (intern, API_SECRET)

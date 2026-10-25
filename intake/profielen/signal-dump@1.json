@@ -1,0 +1,76 @@
+{
+ "profiel": "signal-dump",
+ "versie": 1,
+ "omschrijving": "Dagdump van één gevolgd Signal-gesprek (Nachtextractie 03:20).",
+ "bronnen": [
+  "signal"
+ ],
+ "bron_id": {
+  "vorm": "^[!-~]{3,200}/[0-9]{12,14}-[0-9]{12,14}$",
+  "uitleg": "gesprek-id / envelop-tijd van het eerste en het laatste bericht (unix-ms)"
+ },
+ "herzienbaar": false,
+ "meta": {
+  "gesprek_id": {
+   "type": "tekst",
+   "max": 200,
+   "verplicht": true
+  },
+  "gesprek": {
+   "type": "tekst",
+   "max": 200,
+   "verplicht": true
+  },
+  "soort": {
+   "type": "keuze",
+   "waarden": [
+    "groep",
+    "contact"
+   ],
+   "verplicht": true
+  },
+  "periode": {
+   "type": "periode",
+   "verplicht": true
+  },
+  "berichten": {
+   "type": "geheel",
+   "min": 1,
+   "verplicht": true
+  }
+ },
+ "onderdelen": {
+  "hoofdtekst": {
+   "min": 0,
+   "max": 1,
+   "mime": [
+    "text/markdown",
+    "text/plain"
+   ],
+   "max_mb": 2
+  },
+  "representatie": {
+   "min": 1,
+   "max": 1,
+   "mime": [
+    "text/markdown"
+   ],
+   "max_mb": 2,
+   "alleen_overgang": true
+  }
+ },
+ "privacy": {
+  "access_context": "zakelijk_intern"
+ },
+ "archief": {
+  "schrijf_rol": "representatie",
+  "map": "30_Conversaties/Signal",
+  "naam": "^Signal - .{1,60} - [0-9]{4}-[0-9]{2}-[0-9]{2}\\.md$"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "actie-bewaker",
+  "agenda-wachter",
+  "correspondentie-wachter"
+ ]
+}

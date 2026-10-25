@@ -1,0 +1,133 @@
+{
+ "profiel": "whatsapp-media",
+ "versie": 1,
+ "omschrijving": "Eén WhatsApp-bericht met een bestand (document, afbeelding of spraak), gedeeld door de nachtextractie, de Gambia-weekextractie en de Chat Reader: zelfde WAHA-bericht-id = dubbel, ook als de chatnaam per route anders is. Spraak alleen als origineel op de pod.",
+ "bronnen": [
+  "whatsapp:nl",
+  "whatsapp:gambia"
+ ],
+ "bron_id": {
+  "vorm": "^(true|false)_[0-9]{5,22}(-[0-9]{5,12})?@(g|c|lid)\\.us_[A-Za-z0-9]{6,64}(_[0-9]{5,22}@(c|lid)\\.us)?$",
+  "uitleg": "WAHA-bericht-id"
+ },
+ "herzienbaar": false,
+ "meta": {
+  "chat_id": {
+   "type": "tekst",
+   "vorm": "^[0-9]{5,22}(-[0-9]{5,12})?@(g|c|lid)\\.us$",
+   "verplicht": true
+  },
+  "chat_naam": {
+   "type": "tekst",
+   "max": 200,
+   "verplicht": true
+  },
+  "soort_chat": {
+   "type": "keuze",
+   "waarden": [
+    "groep",
+    "1-op-1"
+   ],
+   "verplicht": true
+  },
+  "afzender_naam": {
+   "type": "tekst",
+   "max": 200,
+   "verplicht": false
+  },
+  "afzender_id": {
+   "type": "tekst",
+   "max": 80,
+   "verplicht": false
+  },
+  "bericht_tijd": {
+   "type": "tijd",
+   "verplicht": true
+  },
+  "berichttype": {
+   "type": "keuze",
+   "waarden": [
+    "document",
+    "afbeelding",
+    "spraak"
+   ],
+   "verplicht": true
+  },
+  "originele_naam": {
+   "type": "tekst",
+   "max": 255,
+   "verplicht": false
+  },
+  "bijschrift": {
+   "type": "tekst",
+   "max": 4096,
+   "verplicht": false
+  }
+ },
+ "onderdelen": {
+  "bijlage": {
+   "min": 0,
+   "max": 1,
+   "mime": [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.spreadsheet",
+    "text/plain",
+    "text/csv",
+    "text/markdown",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+    "application/zip",
+    "application/x-zip-compressed"
+   ],
+   "max_mb": 25
+  },
+  "origineel": {
+   "min": 0,
+   "max": 1,
+   "mime": [
+    "audio/ogg",
+    "audio/opus",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/aac"
+   ],
+   "max_mb": 25
+  }
+ },
+ "privacy": {
+  "access_context": {
+   "*": "zakelijk_intern"
+  }
+ },
+ "archief": {
+  "schrijf_rol": "bijlage",
+  "map_sleutel": [
+   "bron",
+   "meta.berichttype"
+  ],
+  "mappen": {
+   "whatsapp:nl|document": "30_Conversaties/WhatsApp/Media/Documenten",
+   "whatsapp:nl|afbeelding": "30_Conversaties/WhatsApp/Media/_te_duiden",
+   "whatsapp:gambia|document": "30_Conversaties/WhatsApp-Gambia/Media/Documenten",
+   "whatsapp:gambia|afbeelding": "30_Conversaties/WhatsApp-Gambia/Media/_te_duiden"
+  },
+  "naam": "^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4} - .{1,150}\\.[a-z0-9]{1,10}$"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "whatsapp-conversatie-consolidatie",
+  "gambia-weekreview",
+  "whatsapp-chat-uitlezen"
+ ]
+}
