@@ -630,7 +630,7 @@ function maak(o) {
   function padBijDubbel(s, profiel) {
     if (!s || s.stand !== 'om' || !profiel.archief) return {};
     const schrijfDelen = () => q.delen.all(s.stuk_id).filter((d) => d.rol === profiel.archief.schrijf_rol);
-    if (s.status === 'wacht' || s.status === 'wacht_marker') {
+    if (s.status === 'wacht') {   // niet wacht_marker: dat stuk kan nog vastgehouden worden (dan zou de verwijzing nergens heen wijzen)
       // nog niet geschreven: het geplande pad (map uit het profiel + de bestandsnaam van de eerste route), zodat de verwijzing klopt zodra
       // de herhaalronde schrijft (Opus-review wv1286 Z3)
       const env = { bron: s.bron, meta: JSON.parse(s.meta || '{}') };
@@ -736,6 +736,7 @@ function maak(o) {
     setImmediate(function () { markeer(stukId).catch(function (e) { if (o.fout) o.fout('intake-marker', e); }); });
     const extra = { compleet: true };
     if (s.stand) { extra.vault = v.vault; if (v.pad) extra.pad = v.pad; if (v.vault === 'geschreven') extra.geschreven = true; }
+    if (s.stand === 'om' && s.status === 'wacht' && !extra.pad && profielen.get(s.profiel)) { const pb = padBijDubbel(s, profielen.get(s.profiel)); if (pb.pad) extra.pad = pb.pad; }   // gepland pad (wv1286)
     return { status: v.vault === 'wacht' ? 202 : null, extra };
   }
 

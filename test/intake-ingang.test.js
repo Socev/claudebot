@@ -702,7 +702,7 @@ test('wv1286: WAHA-id met @lid, dubbel geeft het echte pad, weggeruimd mediabest
     fs.writeFileSync(path.join(o.dir, 'onderhoud'), '1');
     const q1 = g.env(); q1.bron_id = 'false_31600000000@c.us_3EB0WACHT0001'; q1.overgang.bestandsnaam = q1.overgang.bestandsnaam.replace('.pdf', ' wacht.pdf');
     const qr = await post(o, g.sleutel, q1); const qp = qr.j.nodig ? await put(o, g.sleutel, qr.j.stuk_id, 'b1', g.put[0][1], 'application/pdf') : qr;   // bytes al bekend: POST is meteen compleet
-    assert.strictEqual(qp.status, 202); assert.strictEqual(qp.j.vault, 'wacht');
+    assert.strictEqual(qp.status, 202); assert.strictEqual(qp.j.vault, 'wacht'); assert.strictEqual(qp.j.pad, '30_Conversaties/WhatsApp/Media/Documenten/' + q1.overgang.bestandsnaam);
     const qd = await post(o, K.lezer, q1);
     assert.strictEqual(qd.j.uitkomst, 'dubbel'); assert.strictEqual(qd.j.vault, 'wacht'); assert.strictEqual(qd.j.pad, '30_Conversaties/WhatsApp/Media/Documenten/' + q1.overgang.bestandsnaam);
     fs.unlinkSync(path.join(o.dir, 'onderhoud'));
