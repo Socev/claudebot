@@ -105,7 +105,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   toets('3 Sev: woordgrens (Maarsseveen niet), medewerkerpagina wel, "gelezen als" in de prompt', !/Maarsseveen/.test(p3c) && /24-08-1980/.test(p3c) && /GELEZEN ALS \(woordenlijst\): Sev → Sevilay Baructu-Aydin/.test(p3c), p3c);
   aanroepen = 0;
   const leeg = await z.zoek('Wat is de wifi-code van de camper');
-  toets('3 geen treffers: geen modelaanroep, melding "niets gevonden"', leeg.soort === 'geen' && aanroepen === 0 && leeg.melding === Z.MELDING.leeg, leeg);
+  toets('3 geen treffers: geen modelaanroep, melding "niets gevonden" met de doorzochte delen (wv1289)', leeg.soort === 'geen' && aanroepen === 0 && /^Niets gevonden\. Ik zocht in Zakelijk en Privé, niet in bronnen, notulen, gesprekken/.test(leeg.melding) && leeg.dekking.paginas === 0, leeg);
   // een zoekwortel die socev door een link vervangt, wordt niet gevolgd (Fable vooraf #1)
   fs.renameSync(path.join(VAULT, '20_Prive'), path.join(VAULT, '20_Prive-echt'));
   fs.symlinkSync(path.join(W, 'buiten'), path.join(VAULT, '20_Prive'));
@@ -172,9 +172,67 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   for (let i = 0; i < 2000; i++) zet('10_Zakelijk/Massa/p' + i + '.md', '# p' + i + '\nregel over Tolgaarde btw ' + i + '\n' + 'vulling '.repeat(200) + '\n');
   met({ soort: 'geen', tekst: '', waarden: [], bronnen: [] });
   const t0 = Date.now(); r = await z.zoek('Wat is het btw-nummer van Tolgaarde'); const msM = Date.now() - t0;
-  toets('5 2000 pagina\'s: zoeken < 1,5 s, context begrensd (≤ 8 kB, ≤ 12 pagina\'s)', msM < 1500 * Math.max(1, Number(process.env.TOETS_TIJDFACTOR) || 1) &&
-    Buffer.byteLength(laatsteprompt.prompt) < 9000 && (laatsteprompt.prompt.match(/^### /gm) || []).length <= 12, { ms: msM, bytes: Buffer.byteLength(laatsteprompt.prompt) });
+  toets('5 2000 pagina\'s: zoeken < 1,5 s, context begrensd (≤ 12 kB sinds wv1289, ≤ 12 pagina\'s)', msM < 1500 * Math.max(1, Number(process.env.TOETS_TIJDFACTOR) || 1) &&
+    Buffer.byteLength(laatsteprompt.prompt) < 12000 && (laatsteprompt.prompt.match(/^### /gm) || []).length <= 12, { ms: msM, bytes: Buffer.byteLength(laatsteprompt.prompt) });
+  toets('5 2000 pagina\'s: dekking telt alles, grens geraakt, "geen" wordt "niet in wat ik bekeek"', r.dekking.paginas >= 2000 && r.dekking.paginas_mee <= 12 && r.dekking.grens === true &&
+    /^Niet in wat ik bekeek\. Ik bekeek \d+ van de \d+ pagina's met een treffer\. Vraag het Socev voor een volledige zoektocht\.$/.test(r.melding) && !/niet gevonden|niets gevonden/i.test(r.melding), { m: r.melding, d: r.dekking });
   fs.rmSync(path.join(VAULT, '10_Zakelijk/Massa'), { recursive: true, force: true });
+
+  // ── 8. blokcontext en dekking (wv1289; David 25-10: "Zoeken en DENKEN dat je alles kreeg, is schadelijk") ──
+  zet('10_Zakelijk/Tolgaarde/Auto\'s.md', ['---', 'updated: 2026-10-22', 'aliases: ["Wagenpark"]', '---', '# Auto\'s — Tolgaarde', '', 'De gezinsauto\'s staan zakelijk verzekerd.', '',
+    '## Auto\'s (kort)', '', '| Auto | Kenteken | Bouwjaar |', '|---|---|---|', '| Volvo XC90 | KJH-23-J | 2026 |', '| Mini JCW | JFJ-37-S | 2025 |',
+    '| Subaru Forester | TD-RG-01 | 1998 |', '| Spook | NL000000000B00 voorgesteld |', '| Koppeling | ' + SLEUTEL + ' |', '', 'Losse alinea zonder iets.', ''].join('\n'));
+  zet('10_Zakelijk/Tolgaarde/ICT en mail.md', ['---', 'updated: 2026-10-07', '---', '# ICT en mail — Tolgaarde', '', '## ZorgMail- en Edifact-adressen', '',
+    '- **Praktijk:** Huisartsenpraktijk Tolgaarde, Edifact `500151868@lms.lifeline.nl`, ZorgMail', '  `huisartsenpraktijktolgaarde@zorgmail.nl`.',
+    '- **David persoonlijk:** ZorgMail `d.schaap2@zorgmail.nl`.', '', '## Iets anders', '', 'Over de printer.', ''].join('\n'));
+  zet('10_Zakelijk/Groenhouten/Reus.md', '# Reus\n\n| Kenteken | Naam |\n|---|---|\n' + Array.from({ length: 300 }, (_, i) => '| RS-' + String(i).padStart(3, '0') + '-X | rij ' + i + ' ' + 'opvulling '.repeat(4) + '|').join('\n') + '\n');
+  antwoordVan = null; laatsteprompt = null;
+  let r8 = await z.zoek('kentekens');
+  let p8 = laatsteprompt.prompt;
+  toets('8 kentekens: de hele tabel mee, ook rijen zonder het zoekwoord (alle vier de auto\'s, ook GJL-11-J)', ['KJH-23-J', 'JFJ-37-S', 'TD-RG-01', 'GJL-11-J'].every((k) => p8.indexOf(k) >= 0), p8);
+  toets('8 blok: kop van de tabel en de kop erboven mee', /: \| Auto \| Kenteken \| Bouwjaar \|/.test(p8) && /: ## Auto's \(kort\)/.test(p8), p8);
+  toets('8 blok: "voorgesteld" en sleutel ook binnen een tabel niet naar het model', !/NL000000000B00/.test(p8) && p8.indexOf(SLEUTEL) < 0 && /sleutel weggelaten/.test(p8), p8);
+  toets('8 blok: losse alinea buiten het blok blijft buiten', !/Losse alinea/.test(p8), p8);
+  const reus = (p8.split('### 10_Zakelijk/Groenhouten/Reus.md')[1] || '').split('\n### ')[0];
+  toets('8 reuzentabel: eigen grens (≤ 24 regels, ≤ ± 2 kB), de andere pagina\'s blijven erin', reus.length > 0 && reus.split('\n').filter((l) => /^\d+: /.test(l)).length <= 26 &&
+    Buffer.byteLength(reus) < 2600 && /GJL-11-J/.test(p8) && /KJH-23-J/.test(p8), { bytes: Buffer.byteLength(reus), regels: reus.split('\n').length });
+  toets('8 reuzentabel geknipt = grens geraakt (in de dekking)', r8.dekking.grens === true && r8.dekking.volledig === false, r8.dekking);
+  met({ soort: 'antwoord', tekst: 'Volvo XC90 KJH-23-J, Mini JCW JFJ-37-S, Subaru Forester TD-RG-01 en de privé-auto GJL-11-J.', waarden: [{ label: 'Volvo', waarde: 'KJH-23-J' }, { label: 'Mini', waarde: 'JFJ-37-S' },
+    { label: 'Subaru', waarde: 'TD-RG-01' }, { label: 'Privé', waarde: 'GJL-11-J' }], bronnen: ['10_Zakelijk/Tolgaarde/Auto\'s.md', '20_Prive/Auto.md'] });
+  r8 = await z.zoek('kentekens');
+  toets('8 antwoord na een geraakte grens: zegt dat er meer kan staan, waarden blijven', r8.soort === 'antwoord' && r8.waarden.length === 4 && /\(Ik bekeek .*; er kan meer staan\.\)$/.test(r8.tekst), r8);
+  fs.rmSync(path.join(VAULT, '10_Zakelijk/Groenhouten/Reus.md'));
+  r8 = await z.zoek('kentekens');
+  toets('8 zonder reuzentabel: volledig bekeken, geen dekkingszin in het antwoord', r8.soort === 'antwoord' && r8.dekking.volledig === true && !/Ik bekeek/.test(r8.tekst), r8);
+  // pagina's op relevantie: titel- of aliastreffer eerst
+  antwoordVan = null;
+  await z.zoek('Wagenpark kenteken');
+  toets('8 relevantie: aliastreffer eerst', /^### 10_Zakelijk\/Tolgaarde\/Auto's\.md/m.test(laatsteprompt.prompt) && laatsteprompt.prompt.indexOf("### 10_Zakelijk/Tolgaarde/Auto's.md") < laatsteprompt.prompt.indexOf('### 20_Prive/Auto.md'), laatsteprompt.prompt);
+  // Zorgmail-adres: samenstelling met streepje, kop-treffer neemt de lijst eronder mee
+  await z.zoek('Wat is het Zorgmail-adres van de praktijk');
+  p8 = laatsteprompt.prompt;
+  toets('8 Zorgmail-adres: kop + lijst eronder mee, praktijkadres in de context', /huisartsenpraktijktolgaarde@zorgmail\.nl/.test(p8) && /## ZorgMail- en Edifact-adressen/.test(p8) && !/Over de printer/.test(p8), p8);
+  toets('8 samenstelling: "Zorgmail-adres" zoekt ook op "Zorgmail"', z.groepen('Zorgmail-adres praktijk')[0].varianten.indexOf('Zorgmail') >= 0 && z.groepen('btw-nummer')[0].varianten.indexOf('btw') >= 0 &&
+    z.groepen('btw-nummer')[0].varianten.indexOf('nummer') < 0, z.groepen('Zorgmail-adres praktijk'));
+  met({ soort: 'geen', tekst: 'Er staat geen Zorgmail-adres.', waarden: [], bronnen: [] });
+  r8 = await z.zoek('Wat is het Zorgmail-adres van Tolgaarde');
+  toets('8 "geen" bij volledige dekking: "niet gevonden in de N pagina\'s" met de doorzochte delen', r8.dekking.volledig === true && /^Niet gevonden in de \d+ pagina('s)? met een treffer\. Ik zocht in Zakelijk en Privé/.test(r8.melding), r8);
+  r8 = await z.zoek('Wat is het Zorgmail-adres van Tolgaarde', { vast: true });
+  toets('8 vaste plek: de melding noemt alleen Zakelijk', /Ik zocht op dit apparaat alleen in Zakelijk/.test(r8.melding), r8);
+  aanroepen = 0;
+  r8 = await z.zoek('Wat is de code van de zeppelinhangar', { vast: true });
+  toets('8 nul treffers op een vaste plek: doorzochte delen genoemd, geen model', aanroepen === 0 && /^Niets gevonden\. Ik zocht op dit apparaat alleen in Zakelijk/.test(r8.melding), r8);
+  // afgekapt zoeken (grep-grens): nooit "niet gevonden"
+  const dk = { paginas: 5, paginas_mee: 5, regels: 9, regels_mee: 9, afgekapt: true, grens: true, volledig: false };
+  toets('8 meldingVoor: afgekapt nooit "niet gevonden", wel "vraag het Socev"', ['geen', 'onzeker'].every((sr) => !/niet gevonden|niets gevonden/i.test(Z.meldingVoor(sr, dk, false)) && /Vraag het Socev/.test(Z.meldingVoor(sr, dk, false))) &&
+    /niet alles doorzoeken/.test(Z.meldingVoor('geen', dk, false)) && /^Niets gevonden in wat ik kon doorzoeken/.test(Z.meldingVoor('leeg', { paginas: 0, paginas_mee: 0, afgekapt: true }, false)),
+    ['geen', 'onzeker'].map((sr) => Z.meldingVoor(sr, dk, false)));
+  // frontmatter-treffer: niet uitbreiden naar de hele frontmatter
+  zet('10_Zakelijk/Tolgaarde/Front.md', '---\ntitle: Zeppelin\nsleutelveld: ' + 'X'.repeat(10) + '\n---\n# Iets\n');
+  antwoordVan = null;
+  await z.zoek('Zeppelin');
+  toets('8 frontmatter-treffer: alleen die regel, niet de rest van de kop', /: title: Zeppelin/.test(laatsteprompt.prompt) && !/sleutelveld/.test(laatsteprompt.prompt), laatsteprompt.prompt);
+  fs.rmSync(path.join(VAULT, '10_Zakelijk/Tolgaarde/Front.md'));
 
   // ── 6. server.js-koppeling (vm, nagebootste omgeving) ──
   const src = fs.readFileSync('server.js', 'utf8');
@@ -250,6 +308,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   const z3 = log.filter((x) => x.o.job_id === id('3'));
   toets('6 app-log: één regel hoofd, soort zoek, job_id, vraag, antwoord met waarde en bron, duur en kosten', z3.length === 1 && z3[0].k === 'hoofd' && z3[0].o.soort === 'zoek' && z3[0].o.tekst === 'Wat is het btw-nummer van Tolgaarde' &&
     /`NL863125190B01`/.test(z3[0].o.antwoord) && /Bron: index \(bijgewerkt 2026-10-24\)/.test(z3[0].o.antwoord) && z3[0].o.zoek.kosten === 0.02 && z3[0].o.zoek.ms >= 0 && z3[0].o.apparaat === 'pixel', z3);
+  toets('6 app-log: dekking als tellingen, zonder inhoud (wv1289)', z3[0].o.zoek.dekking && typeof z3[0].o.zoek.dekking.paginas === 'number' && Object.keys(z3[0].o.zoek.dekking).every((k) => typeof z3[0].o.zoek.dekking[k] !== 'string'), z3[0].o.zoek);
   toets('6 niet in chat_log (Poortwachter)', chatlog.length === 0 && !/appChatLog/.test(src.slice(s1, s2)));
   // systeemregel voor Socev
   const staart = S.zoekSnelStaart();

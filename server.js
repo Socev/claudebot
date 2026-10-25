@@ -15375,7 +15375,8 @@ async function zoekSnelVoer(a, id, vraag) {
   const gelogd = await appLogSchrijf('hoofd', { t: new Date().toISOString(), getypt: new Date(t0).toISOString(), job_id: id, soort: 'zoek', apparaat: a.id, tekst: vraag,
     antwoord: zoekSnelTekst(r), ok: r.soort !== 'fout', fout: r.soort === 'fout' ? String(r.reden || 'fout').slice(0, 200) : undefined, bestanden: [],
     zoek: { uitkomst: r.soort, reden: r.reden || undefined, ms: ms, zoek_ms: r.ms.zoek, model_ms: r.ms.model, account: v.account, kosten: v.kosten, tokens_uit: v.uit,
-      bronnen: (r.bronnen || []).map(function (b) { return b.pad; }), weggelaten: r.weggelaten || undefined, natoets_mis: r.natoets_mis || undefined, vast: a.soort === 'vast' || undefined } });
+      bronnen: (r.bronnen || []).map(function (b) { return b.pad; }), weggelaten: r.weggelaten || undefined, natoets_mis: r.natoets_mis || undefined, vast: a.soort === 'vast' || undefined,
+      dekking: r.dekking || undefined } });   // wv1289: alleen tellingen (pagina's/regels, grens), geen inhoud
   zoekSnelRegelZet(r);
   return { status: 200, j: { ok: true, job_id: id, soort: r.soort, tekst: r.tekst, waarden: r.waarden, weggelaten: r.weggelaten || 0,
     bronnen: (r.bronnen || []).map(function (b) { return { pad: b.pad, naam: b.naam, updated: b.updated || null }; }), gelezen_als: r.gelezen_als || [],
