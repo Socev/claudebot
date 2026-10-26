@@ -910,7 +910,7 @@ function historieKoppeling(fdb, transacties, start) {
   }
   return uit;
 }
-function bankVan(formaat) { return formaat === 'ing_csv' ? 'ING' : 'ABN'; }
+function bankVan(formaat) { return formaat === 'ing_csv' ? 'ING' : formaat === 'triodos_csv' ? 'TRIODOS' : 'ABN'; }
 function saldoKort(saldo) {
   const uit = {};
   for (const [iban, x] of Object.entries(saldo || {})) uit[eind4(iban)] = x;

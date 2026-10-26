@@ -208,6 +208,100 @@ test('ING-CSV oude komma-variant (zonder saldo en tag, "MutatieSoort"): eigen pa
   assert.notEqual(nieuw.transacties[0].entry_ref, r.transacties[0].entry_ref);
 });
 
+// Triodos-CSV (wv1299): geen kop, komma, alles gequote, CRLF, negen kolommen, meerdere rekeningen door elkaar (elk oudste eerst).
+const TRI_SEL = maakIban('NL', 'TRIO', '0000000041'), TRI_SEL_SP = maakIban('NL', 'TRIO', '0000000042'), TRI_GH = maakIban('NL', 'TRIO', '0000000043');
+const TRI_REK = REKENINGEN.concat([
+  { iban: TRI_SEL, entiteit: 'sel', bank_formaat: 'triodos_csv', controle: 1 },
+  { iban: TRI_SEL_SP, entiteit: 'sel', bank_formaat: 'triodos_csv', controle: 1 },
+  { iban: TRI_GH, entiteit: 'ghawa', bank_formaat: 'triodos_csv', controle: 1 },
+]);
+const triRij = (d, eigen, b, dc, naam, tegen, code, oms, saldo) => [d, eigen, b, dc, naam, tegen, code, oms, saldo].map((x) => '"' + x + '"').join(',');
+const TRI_CSV = [
+  triRij('23-04-2017', TRI_SEL, '20,00', 'Debet', '', '', 'KN', 'Pasbijdrage Testpas periode 2017', '-20,00'),
+  triRij('01-05-2017', TRI_SEL, '1.234,56', 'Credit', 'Leverancier A B.V.', 'TESTNL2A ' + LEV.A, 'ET', 'Factuur VB-2017-0001', '1.214,56'),
+  triRij('02-05-2017', TRI_GH, '100,00', 'Credit', 'Iemand', 'TESTNL2AXXX ' + LEV.B, 'ET', 'Gift', '100,00'),
+  triRij('03-05-2017', TRI_SEL, '84,12', 'Debet', 'Leverancier C B.V.', 'TESTNL2A ' + LEV.C, 'EI', 'NL00ZZZTEST0000000301 2017 00001', '1.130,44'),
+  triRij('04-05-2017', TRI_SEL, '30,00', 'Debet', 'Oude Partij', '12.34.56.789', 'VV', 'Verrekening', '1.100,44'),
+  triRij('04-05-2017', TRI_SEL_SP, '500,00', 'Credit', 'SEL', 'TESTNL2A ' + TRI_SEL, 'ET', 'Naar spaar', '500,00'),
+  triRij('05-05-2017', TRI_GH, '0,00', 'Debet', '', '', 'RE', 'Rente', '100,00'),
+  triRij('05-05-2017', TRI_GH, '0,00', 'Debet', '', '', 'RE', 'Rente', '100,00'),
+].join('\r\n') + '\r\n';
+
+test('Triodos-CSV (wv1299): herkenning, teken uit Debet/Credit, tegenrekening uit "BIC IBAN", incassant bij EI; entry_ref door Python nagerekend', () => {
+  assert.equal(B.herkenFormaat(TRI_CSV), 'triodos_csv');
+  assert.equal(B.herkenFormaat('﻿' + TRI_CSV), 'triodos_csv');
+  assert.equal(B.herkenFormaat(ING_CSV), 'ing_csv');
+  const r = B.leesBankbestand(TRI_CSV, { rekeningen: TRI_REK });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.formaat, 'triodos_csv');
+  assert.equal(r.transacties.length, 8);
+  assert.deepEqual(r.per_rekening, { [TRI_SEL]: 4, [TRI_SEL_SP]: 1, [TRI_GH]: 3 });
+  const t = r.transacties;
+  assert.deepEqual(t.map((x) => x.bedrag_centen), [-2000, 123456, 10000, -8412, -3000, 50000, 0, 0]);
+  assert.equal(Object.is(t[6].bedrag, -0), false);
+  assert.deepEqual(t.map((x) => x.tegenpartij_iban), [null, LEV.A, LEV.B, LEV.C, '12.34.56.789', TRI_SEL, null, null]);
+  assert.deepEqual(t.map((x) => x.tegenpartij_naam), [null, 'Leverancier A B.V.', 'Iemand', 'Leverancier C B.V.', 'Oude Partij', 'SEL', null, null]);
+  assert.deepEqual(t.map((x) => x.transactietype), ['TRIODOS:KN', 'TRIODOS:ET', 'TRIODOS:ET', 'TRIODOS:EI', 'TRIODOS:VV', 'TRIODOS:ET', 'TRIODOS:RE', 'TRIODOS:RE']);
+  assert.deepEqual(t.map((x) => x.is_incasso), [false, false, false, true, false, false, false, false]);
+  assert.equal(t[3].incassant_id, 'NL00ZZZTEST0000000301');
+  assert.equal(t[3].machtiging, null);
+  assert.equal(t[1].omschrijving, 'Factuur VB-2017-0001');
+  assert.equal(t[1].boekdatum, '2017-05-01');
+  assert.equal(t[1].entiteit, 'sel'); assert.equal(t[2].entiteit, 'ghawa');
+  assert.ok(t[7].entry_ref.endsWith('-1') && t[7].ref_basis === t[6].entry_ref, 'duplicaat binnen het bestand → -1');
+  assert.deepEqual(r.periode, { van: '2017-04-23', tot: '2017-05-05' });
+  // saldo: per rekening de keten, ook als de rekeningen door elkaar staan
+  for (const iban of [TRI_SEL, TRI_SEL_SP, TRI_GH]) assert.equal(r.saldo[iban].sluit, true, iban.slice(-4) + ' ' + JSON.stringify(r.saldo[iban]));
+  assert.equal(r.saldo[TRI_SEL].begin_centen, 0); assert.equal(r.saldo[TRI_SEL].eind_centen, 110044);
+  if (PY) {
+    const py = pyRefs([
+      [TRI_SEL, '2017-04-23', -20.0, '-20,00', 'Pasbijdrage Testpas periode 2017', null],
+      [TRI_SEL, '2017-05-01', 1234.56, '1.214,56', 'Factuur VB-2017-0001', LEV.A],
+      [TRI_GH, '2017-05-02', 100.0, '100,00', 'Gift', LEV.B],
+      [TRI_SEL, '2017-05-03', -84.12, '1.130,44', 'NL00ZZZTEST0000000301 2017 00001', LEV.C],
+      [TRI_SEL, '2017-05-04', -30.0, '1.100,44', 'Verrekening', '12.34.56.789'],
+      [TRI_SEL_SP, '2017-05-04', 500.0, '500,00', 'Naar spaar', TRI_SEL],
+      [TRI_GH, '2017-05-05', 0.0, '100,00', 'Rente', null],
+      [TRI_GH, '2017-05-05', 0.0, '100,00', 'Rente', null],
+    ]);
+    assert.deepEqual(t.map((x) => x.entry_ref), py);
+  }
+  // deterministisch: dezelfde export opnieuw (ook als bytes, LF in plaats van CRLF) geeft dezelfde sleutels
+  const twee = B.leesBankbestand(Buffer.from(TRI_CSV.replace(/\r\n/g, '\n'), 'utf8'), { rekeningen: TRI_REK });
+  assert.deepEqual(twee.transacties.map((x) => x.entry_ref), t.map((x) => x.entry_ref));
+  // een breuk in de keten staat in de uitkomst (bestand niet geweigerd)
+  const breuk = B.leesBankbestand(TRI_CSV.replace('"1.130,44"', '"1.130,45"'), { rekeningen: TRI_REK });
+  assert.equal(breuk.ok, true); assert.equal(breuk.saldo[TRI_SEL].sluit, false); assert.ok(breuk.saldo[TRI_SEL].breuken >= 1);
+});
+
+test('Triodos-CSV (wv1299): weigeren — onbekende of verkeerd vastgelegde rekening, kolommen, Debet/Credit, bedrag, datum, tegenrekening; nooit een bedrag of naam in de uitleg', () => {
+  const rek = (wijzig) => TRI_REK.map((x) => (x.iban === TRI_GH ? Object.assign({}, x, wijzig) : x));
+  const zonderGh = TRI_REK.filter((x) => x.iban !== TRI_GH);
+  const o = B.leesBankbestand(TRI_CSV, { rekeningen: zonderGh });
+  assert.equal(o.ok, false); assert.equal(o.fout, 'onbekende_rekening'); assert.ok(o.uitleg.includes(TRI_GH.slice(-4)) && !o.uitleg.includes(TRI_GH));
+  assert.equal(B.leesBankbestand(TRI_CSV, { rekeningen: rek({ bank_formaat: 'ing_csv' }) }).fout, 'verkeerd_formaat');
+  // Privé-rekening in een Triodos-bestand: weg zonder spoor, rest ongewijzigd
+  const p = B.leesBankbestand(TRI_CSV, { rekeningen: rek({ controle: 0 }) });
+  assert.equal(p.ok, true); assert.equal(p.prive_weggegooid, 3); assert.equal(p.transacties.length, 5);
+  assert.deepEqual(p.transacties.map((x) => x.entry_ref), B.leesBankbestand(TRI_CSV, { rekeningen: TRI_REK }).transacties.filter((x) => x.eigen_iban !== TRI_GH).map((x) => x.entry_ref));
+  const eerste = TRI_CSV.split('\r\n')[0];
+  const fout = (regel) => B.leesBankbestand(eerste + '\r\n' + regel + '\r\n', { rekeningen: TRI_REK });
+  const goed = ['05-05-2017', TRI_SEL, '1,00', 'Credit', 'Iemand', 'TESTNL2A ' + LEV.B, 'ET', 'x', '1,00'];
+  const met = (i, w) => { const v = goed.slice(); v[i] = w; return v.map((x) => '"' + x + '"').join(','); };
+  assert.equal(fout(goed.map((x) => '"' + x + '"').join(',')).ok, true);
+  const gevallen = [
+    met(3, 'Af'), met(3, ''), met(2, '-1,00'), met(2, 'twaalf'), met(0, '2017-05-05'), met(0, '31-02-2017'), met(5, 'Iemand anders'),
+    met(6, ''), met(8, 'veel'), met(1, 'GEEN-IBAN'), goed.slice(0, 8).map((x) => '"' + x + '"').join(','), goed.concat(['x']).map((x) => '"' + x + '"').join(','),
+  ];
+  for (const g of gevallen) {
+    const u = fout(g);
+    assert.equal(u.ok, false, g); assert.equal(u.fout, 'regel_ongeldig', g + ' → ' + u.fout);
+    assert.ok(!/Leverancier|Iemand|\d+,\d{2}/.test(u.uitleg), u.uitleg);
+  }
+  // een Triodos-achtige regel zonder TRIO-rekening is geen Triodos (en ook geen ander formaat)
+  assert.equal(B.herkenFormaat(met(1, LEV.A)), null);
+});
+
 // MT940: twee afschriften (IBAN en 10 cijfers), storno RC/RD, vervolgregels :86: zonder tussenteken (afgebroken midden in een woord),
 // boekdatum met jaarwissel, duplicaat.
 const MT_IBAN = ABN_GH;

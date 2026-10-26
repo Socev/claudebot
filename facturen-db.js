@@ -42,6 +42,8 @@ class DbFout extends Error {
 
 // ───────────────────────────── schema (genummerde migraties) ─────────────────────────────
 // De lijsten staan hier bevroren (een migratie verandert nooit); de toets vergelijkt ze met facturen-kern.js en facturen-bank.js.
+// formaat: M1 maakte de tabellen met FORMAAT_V1; migratie 5 (wv1299) verruimt die CHECKs met triodos_csv. L.formaat is de huidige lijst.
+const FORMAAT_V1 = ['ing_csv', 'abn_tab', 'abn_mt940', 'bankluis'];
 const L = {
   status: ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'],
   onderweg: ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'],
@@ -49,7 +51,7 @@ const L = {
   betaalwijze: ['zelf', 'incasso', 'betaald', 'onbekend'],
   opdrachtStatus: ['wacht', 'opgehaald', 'gelukt', 'mislukt', 'geweigerd', 'teruggedraaid'],
   besluitBron: ['anker', 'leverancier', 'regel', 'bank', 'model', 'mens'],
-  formaat: ['ing_csv', 'abn_tab', 'abn_mt940', 'bankluis'],
+  formaat: ['ing_csv', 'abn_tab', 'abn_mt940', 'triodos_csv', 'bankluis'],
   categorie: ['loon', 'loonheffing', 'btw', 'belasting', 'declaraties', 'rekening_courant', 'eigen_overboeking', 'bankkosten', 'creditcard',
     'prive_opname', 'abonnement_zonder_factuur', 'subsidie', 'rente', 'overig'],
   signaal: ['geen_factuur', 'dubbel_betaald', 'dubbele_factuur', 'verzending_mislukt', 'incasso_niet_gezien', 'te_betalen_niet_betaald',
@@ -87,7 +89,7 @@ CREATE TABLE rekening (
   entiteit TEXT NOT NULL REFERENCES entiteit(sleutel),
   iban TEXT NOT NULL UNIQUE ${IBAN('iban')},
   bank TEXT CHECK (bank IS NULL OR bank IN ('ABN','ING')),
-  bank_formaat TEXT NOT NULL CHECK (bank_formaat IN ${IN(L.formaat)}),
+  bank_formaat TEXT NOT NULL CHECK (bank_formaat IN ${IN(FORMAAT_V1)}),
   bankluis_rek TEXT,
   afschrift_doorsturen INTEGER NOT NULL DEFAULT 0 ${BOOL('afschrift_doorsturen')},
   controle INTEGER NOT NULL ${BOOL('controle')},
@@ -322,7 +324,7 @@ CREATE TABLE bank_transactie (
   is_incasso INTEGER NOT NULL DEFAULT 0 ${BOOL('is_incasso')},
   incassant_id TEXT, machtiging TEXT,
   entry_ref TEXT NOT NULL UNIQUE,
-  formaat TEXT NOT NULL CHECK (formaat IN ${IN(L.formaat)}),
+  formaat TEXT NOT NULL CHECK (formaat IN ${IN(FORMAAT_V1)}),
   bankluis_sleutel TEXT,
   bestand_op TEXT,
   alleen_eigenaar INTEGER NOT NULL DEFAULT 0 ${BOOL('alleen_eigenaar')},
@@ -588,11 +590,58 @@ CREATE TRIGGER meta_startdatum_upd BEFORE UPDATE ON meta WHEN NEW.sleutel = 'sta
 BEGIN SELECT RAISE(ABORT, 'startdatum: JJJJ-MM-DD'); END;
 `;
 
+/*
+ * wv1299 (Triodos, David 26-10-2026: "alle banken erin"; GHAWA en SEL bankieren bij Triodos): de CHECK-lijsten van bank en formaat in
+ * rekening, bank_bestand en bank_transactie krijgen 'TRIODOS' en 'triodos_csv' erbij. SQLite kan een CHECK niet wijzigen met ALTER; een
+ * herbouw van drie tabellen met triggers en verwijzingen is groter dan de wijziging. Een CHECK verruimen verandert niets aan de opgeslagen
+ * rijen (alle bestaande waarden blijven geldig), dus volgens de SQLite-documentatie (ALTER TABLE § "making other kinds of table schema
+ * changes") mag het via writable_schema: de tekst in sqlite_master vervangen, schema_version ophogen, controleren. Binnen de BEGIN IMMEDIATE
+ * van migreer: mislukt iets, dan rolt alles terug. Elke vervanging moet precies één keer passen (anders weigeren, niets half), na afloop
+ * integrity_check en een nieuwe lezing van de tabellen. LET OP terugrol: een release van vóór wv1299 opent deze database niet meer
+ * (schema_nieuwer); terugrollen = ook de database terugzetten (backup/ van vóór de uitrol) of vooruit herstellen.
+ */
+const M5_VERVANG = [
+  ['rekening', "bank IN ('ABN','ING')", "bank IN ('ABN','ING','TRIODOS')"],
+  ['rekening', 'bank_formaat IN ' + IN(FORMAAT_V1), 'bank_formaat IN ' + IN(L.formaat)],
+  ['bank_bestand', "formaat IN ('ing_csv','abn_tab','abn_mt940')", "formaat IN ('ing_csv','abn_tab','abn_mt940','triodos_csv')"],
+  ['bank_bestand', "bank IN ('ABN','ING')", "bank IN ('ABN','ING','TRIODOS')"],
+  ['bank_transactie', 'formaat IN ' + IN(FORMAAT_V1), 'formaat IN ' + IN(L.formaat)],
+];
+function M5(db) {
+  const tel = (hooi, naald) => hooi.split(naald).length - 1;
+  const nieuw = new Map();
+  for (const [tabel, oud, wordt] of M5_VERVANG) {
+    if (!nieuw.has(tabel)) {
+      const r = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(tabel);
+      if (!r || !r.sql) throw new DbFout('migratie_5', 'tabel ' + tabel + ' niet gevonden');
+      nieuw.set(tabel, r.sql);
+    }
+    const sql = nieuw.get(tabel);
+    if (tel(sql, oud) !== 1) throw new DbFout('migratie_5', tabel + ': CHECK-tekst ' + oud.slice(0, 40) + ' staat er ' + tel(sql, oud) + ' keer');
+    nieuw.set(tabel, sql.replace(oud, wordt));
+  }
+  const versie = Number(db.prepare('PRAGMA schema_version').get().schema_version);
+  db.exec('PRAGMA writable_schema = ON');
+  try {
+    const zet = db.prepare("UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = ?");
+    for (const [tabel, sql] of nieuw) if (zet.run(sql, tabel).changes !== 1) throw new DbFout('migratie_5', tabel + ': schema niet bijgewerkt');
+    db.exec('PRAGMA schema_version = ' + (versie + 1));
+  } finally { db.exec('PRAGMA writable_schema = OFF'); }
+  const ic = db.prepare('PRAGMA integrity_check').all().map((x) => x.integrity_check);
+  if (ic.length !== 1 || ic[0] !== 'ok') throw new DbFout('migratie_5', 'integrity_check: ' + ic.slice(0, 3).join('; '));
+  for (const tabel of nieuw.keys()) {
+    db.prepare('SELECT * FROM ' + tabel + ' LIMIT 1').all();
+    const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(tabel).sql;
+    if (sql !== nieuw.get(tabel)) throw new DbFout('migratie_5', tabel + ': schema na het bijwerken niet zoals bedoeld');
+  }
+}
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
   { versie: 3, naam: 'smalle ingang: fac-gebruiker alleen praktijkmanager (wv856)', sql: M3 },
   { versie: 4, naam: 'bankhistorie definitief, factuurarchief, startdatum (wv944)', sql: M4 },
+  { versie: 5, naam: 'Triodos: bank TRIODOS en formaat triodos_csv in de CHECKs (wv1299)', fn: M5 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -617,7 +666,7 @@ function migreer(db) {
     db.exec('BEGIN IMMEDIATE');
     try {
       if (!db.prepare('SELECT 1 FROM schema_migratie WHERE versie = ?').get(m.versie)) {
-        db.exec(m.sql);
+        if (m.fn) m.fn(db); else db.exec(m.sql);
         db.prepare('INSERT INTO schema_migratie (versie, naam, toegepast_op) VALUES (?, ?, ?)').run(m.versie, m.naam, nuIso());
         toegepast.push(m.versie);
       }

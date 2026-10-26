@@ -61,6 +61,7 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 #   Met wv856 krijgt de facturendatabase migratie 3: een terugrol naar een release van vóór wv856 opent hem niet meer (schema_nieuwer) — dan ook
 #   /opt/data/facturen/backup/ van vóór de uitrol terugzetten, of vooruit herstellen.
 #   Met wv944 komt migratie 4 (bankhistorie, factuurarchief, startdatum): idem voor een terugrol naar een release van vóór wv944.
+#   Met wv1299 komt migratie 5 (Triodos: bank/formaat-CHECKs verruimd via writable_schema): idem voor een terugrol naar een release van vóór wv1299.
 # secondbrain.js (wv832): App Second Brain, routes /app/secondbrain* (ontbreekt hij, dan 404 en secondbrain.aan=false in /health).
 # gezondheid-app.js (wv937): App Gezondheid, routes GET /app/gezondheid(/genoom) (ontbreekt hij, dan 404 en gezondheid.aan=false in /health).
 # ideeen.js (wv761): App Ideeën van buitenaf (Ideeënbeurs), door server.js geladen (ontbreekt hij, dan 404 op /app/ideeen* en ideeen.aan=false in /health).

@@ -151,6 +151,75 @@ test('geen kolom voor factuur- of mailtekst', () => {
   D.sluit(f);
 });
 
+// wv1299: migratie 5 verruimt de CHECKs van bank en formaat (Triodos) via writable_schema. Een database op schema 4 met regels erin.
+function dbOpSchema4(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(path.join(dir, D.BESTAND));
+  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON;');
+  db.exec('CREATE TABLE schema_migratie (versie INTEGER PRIMARY KEY, naam TEXT NOT NULL, toegepast_op TEXT NOT NULL)');
+  for (const m of D.MIGRATIES.filter((x) => x.versie <= 4)) {
+    db.exec('BEGIN'); db.exec(m.sql);
+    db.prepare('INSERT INTO schema_migratie VALUES (?, ?, ?)').run(m.versie, m.naam, iso(NU)); db.exec('COMMIT');
+  }
+  db.exec("INSERT INTO entiteit (sleutel, naam) VALUES ('kostenmaatschap', 'KM (proef)'), ('sel', 'SEL (proef)')");
+  db.prepare("INSERT INTO rekening (id, entiteit, iban, bank, bank_formaat, controle) VALUES ('aaaaaaaaaaaa0016', 'kostenmaatschap', ?, 'ING', 'ing_csv', 1)").run(Z.maakIban('NL', 'TEST', '0000000016'));
+  db.prepare("INSERT INTO bank_bestand (id, sha256, formaat, geupload_door, geupload_op, bank, modus) VALUES ('ffffffffffff0016', ?, 'ing_csv', 'toets', ?, 'ING', 'historisch')").run('e'.repeat(64), iso(NU));
+  db.prepare("INSERT INTO bank_transactie (id, bestand, rekening, entiteit, eigen_iban, boekdatum, bedrag_centen, entry_ref, formaat, aangemaakt_op) VALUES ('cccccccccccc0016', 'ffffffffffff0016', 'aaaaaaaaaaaa0016', 'kostenmaatschap', ?, '2020-01-02', -100, 'r-oud', 'ing_csv', ?)").run(Z.maakIban('NL', 'TEST', '0000000016'), iso(NU));
+  return db;
+}
+const tabelSql = (db) => Object.fromEntries(db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('rekening','bank_bestand','bank_transactie') ORDER BY name").all().map((x) => [x.name, x.sql]));
+
+test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/triodos_csv; regels blijven, onzin blijft geweigerd, schema = nieuw aangemaakt', () => {
+  const dir = map('m5');
+  dbOpSchema4(dir).close();
+  const f = D.open(dir);
+  assert.deepEqual(f.toegepast, [5]);
+  assert.equal(f.schema, 5);
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM bank_transactie WHERE entry_ref = 'r-oud'").get().n, 1);
+  const tri = Z.maakIban('NL', 'TRIO', '0000000041');
+  D.transactie(f, () => {
+    D.voegToe(f, 'rekening', { id: 'aaaaaaaaaaaa0041', entiteit: 'sel', iban: tri, bank: 'TRIODOS', bank_formaat: 'triodos_csv', controle: 1 });
+    D.voegToe(f, 'bank_bestand', { id: 'ffffffffffff0041', sha256: 'd'.repeat(64), formaat: 'triodos_csv', bank: 'TRIODOS', modus: 'historisch', geupload_door: 'toets', geupload_op: iso(NU) });
+    D.voegToe(f, 'bank_transactie', { id: 'cccccccccccc0041', bestand: 'ffffffffffff0041', rekening: 'aaaaaaaaaaaa0041', entiteit: 'sel', eigen_iban: tri, boekdatum: '2017-05-01',
+      bedrag_centen: 100, entry_ref: 'r-tri', formaat: 'triodos_csv', aangemaakt_op: iso(NU) });
+  });
+  gooit(() => D.voegToe(f, 'rekening', { id: 'aaaaaaaaaaaa0042', entiteit: 'sel', iban: Z.maakIban('NL', 'TRIO', '0000000042'), bank: 'Triodos', bank_formaat: 'triodos_csv', controle: 1 }), /CHECK/);
+  gooit(() => D.voegToe(f, 'rekening', { id: 'aaaaaaaaaaaa0043', entiteit: 'sel', iban: Z.maakIban('NL', 'TRIO', '0000000043'), bank: 'TRIODOS', bank_formaat: 'triodos', controle: 1 }), /CHECK/);
+  gooit(() => D.voegToe(f, 'bank_bestand', { id: 'ffffffffffff0042', sha256: 'c'.repeat(64), formaat: 'bankluis', geupload_door: 'toets', geupload_op: iso(NU) }), /CHECK/);
+  gooit(() => f.db.prepare("UPDATE bank_transactie SET formaat = 'onzin' WHERE id = 'cccccccccccc0041'").run(), /CHECK/);
+  // de bestaande triggers werken nog (Privé, entiteit)
+  gooit(() => D.voegToe(f, 'bank_transactie', { id: 'cccccccccccc0042', bestand: 'ffffffffffff0041', rekening: 'aaaaaaaaaaaa0041', entiteit: 'kostenmaatschap', eigen_iban: tri,
+    boekdatum: '2017-05-02', bedrag_centen: 1, entry_ref: 'r-tri-2', formaat: 'triodos_csv', aangemaakt_op: iso(NU) }), /transactie_entiteit/);
+  const gemigreerd = tabelSql(f.db);
+  D.sluit(f);
+  const nieuw = D.open(map('m5-nieuw'));
+  assert.deepEqual(tabelSql(nieuw.db), gemigreerd);
+  for (const sql of Object.values(gemigreerd)) assert.ok(sql.includes('triodos_csv'), sql.slice(0, 60));
+  D.sluit(nieuw);
+  // opnieuw openen: niets meer toe te passen
+  const f2 = D.open(dir); assert.deepEqual(f2.toegepast, []); D.sluit(f2);
+});
+
+test('migratie 5 (wv1299): past de CHECK-tekst niet precies één keer, dan weigeren en volledig terugrollen (schema blijft 4)', () => {
+  const dir = map('m5-mis');
+  const db = dbOpSchema4(dir);
+  // simuleer een afwijkend schema: de bank-CHECK van rekening staat er anders
+  const v = db.prepare('PRAGMA schema_version').get().schema_version;
+  db.exec('PRAGMA writable_schema = ON');
+  db.prepare("UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = 'rekening'").run("bank IN ('ABN','ING')", "bank IN ('ING','ABN')");
+  db.exec('PRAGMA schema_version = ' + (v + 1)); db.exec('PRAGMA writable_schema = OFF');
+  db.close();
+  const { DatabaseSync } = require('node:sqlite');
+  const lees = () => { const d = new DatabaseSync(path.join(dir, D.BESTAND), { readOnly: true }); try { return tabelSql(d); } finally { d.close(); } };
+  const voor = lees();
+  gooit(() => D.open(dir), /migratie_5|staat er 0 keer/);
+  assert.deepEqual(lees(), voor);
+  const r = D.open(dir, { alleenLezen: true }); assert.equal(r.schema, 4); D.sluit(r);
+});
+
 // ───────────────────────────── Privé nooit naar de boekhouder ─────────────────────────────
 
 test('Privé: entiteit prive heeft nooit een boekhoud- of afschriftadres (CHECK, insert en update)', () => {

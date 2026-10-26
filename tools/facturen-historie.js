@@ -17,6 +17,7 @@
  *   node tools/facturen-historie.js startdatum [JJJJ-MM-DD]   toon of zet de startdatum (eerste dag dat Facturen echt draait)
  *
  * Uitvoer: alleen aantallen, periode, laatste 4 van de rekening, saldocontrole (sluit/breuken) — geen bedragen, namen of omschrijvingen.
+ * Formaten: ING-CSV, ABN-TAB, ABN-MT940 en (wv1299) Triodos-CSV; de rekening moet in Facturen staan met dat formaat.
  * Weigert als de database een ouder schema heeft dan deze code (de pod draait dan nog een oudere release; eerst uitrollen).
  */
 'use strict';

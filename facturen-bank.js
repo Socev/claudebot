@@ -25,7 +25,7 @@ class BankWeigering extends Error {
   constructor(code, uitleg) { super(uitleg || code); this.code = code; this.uitleg = uitleg || code; }
 }
 const MAX_BESTAND = 20 * 1024 * 1024;
-const FORMATEN = ['ing_csv', 'abn_tab', 'abn_mt940', 'bankluis'];
+const FORMATEN = ['ing_csv', 'abn_tab', 'abn_mt940', 'triodos_csv', 'bankluis'];
 const OMS_HASH = 500, OMS_OPSLAG = 200, TYPE_OPSLAG = 60;
 // controle: 1 = zakelijk (inlezen), 0 = Privé (weggooien). Alles anders (NULL, leeg, onzin) is een onvolledige rekening: weigeren, nooit
 // stil als Privé behandelen (diffreview wv798 #5).
@@ -82,13 +82,14 @@ function alsTekst(invoer) {
   throw new BankWeigering('geen_bestand', 'geen bestandsinhoud');
 }
 
-// → 'ing_csv' | 'abn_tab' | 'abn_mt940' | 'camt053' | null. Alleen de vorm, nooit de rekening.
+// → 'ing_csv' | 'abn_tab' | 'abn_mt940' | 'triodos_csv' | 'camt053' | null. Alleen de vorm, nooit de rekening.
 function herkenFormaat(invoer) {
   const t = alsTekst(invoer).replace(/^﻿/, '');
   const eerste = t.split('\n', 1)[0];
   if (eerste.indexOf('"Datum";') !== -1 || eerste.indexOf('"Datum",') !== -1) return 'ing_csv';
   if (/^\s*<\?xml|<BkToCstmrStmt\b/.test(t.slice(0, 2000))) return 'camt053';
   if (/^:20:/m.test(t) && /^:25:/m.test(t) && /^:6[02][FM]:/m.test(t)) return 'abn_mt940';
+  if (TRIODOS_REGEL.test(t.split('\n').find((r) => r.trim()) || '')) return 'triodos_csv';
   const regel = t.split('\n').find((r) => r.trim());
   if (regel) {
     const p = regel.split('\t');
@@ -171,6 +172,58 @@ function leesIng(tekst) {
   return uit;
 }
 
+// ───────────────────────────── Triodos-CSV (wv1299) ─────────────────────────────
+
+/*
+ * Triodos "Download mutaties" als CSV (gemeten 26-10-2026 op Davids export van vier rekeningen): GEEN kop, komma, elk veld tussen
+ * aanhalingstekens, CRLF, UTF-8, negen kolommen: datum (DD-MM-JJJJ), eigen IBAN, bedrag (NL-notatie, altijd positief), Debet|Credit,
+ * naam tegenpartij, "BIC IBAN" van de tegenpartij (oude mutaties: een oud rekeningnummer met punten; kosten en rente: leeg), code (ET
+ * overboeking, EI incasso, ID iDEAL, KN kosten, RE rente, …; storno met ST erachter), omschrijving, saldo na mutatie. Meerdere rekeningen
+ * door elkaar in één bestand, per rekening oudste eerst. Geen FV2-referentie: de entry_ref is dezelfde sha1 over dezelfde velden als bij
+ * ING en ABN (eigen IBAN, datum, bedrag, saldo na, omschrijving, tegenpartij), dus deterministisch; een tweede export van dezelfde periode
+ * geeft dezelfde sleutels. Bij EI staat het incassant-ID vooraan in de omschrijving; een machtigingskenmerk is niet eenduidig te herkennen
+ * (niet geraden: leeg).
+ */
+const TRIODOS_REGEL = /^"\d{2}-\d{2}-\d{4}","[A-Z]{2}\d{2}TRIO\d{10}","[\d.]*\d,\d{2}","(Debet|Credit)",/;
+const TRIODOS_KOLOMMEN = 9;
+function leesTriodos(tekst) {
+  if (tekst.charCodeAt(0) === 0xfeff) tekst = tekst.slice(1);
+  const ruw = csvRijen(tekst, ',').filter((r) => r.length > 0 && !(r.length === 1 && r[0] === ''));
+  const uit = [];
+  ruw.forEach(function (v, ri) {
+    const nr = ri + 1;
+    if (v.length !== TRIODOS_KOLOMMEN) throw new BankWeigering('regel_ongeldig', 'Triodos-CSV regel ' + nr + ': ' + v.length + ' kolommen in plaats van ' + TRIODOS_KOLOMMEN);
+    const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(v[0]);
+    if (!m) throw new BankWeigering('regel_ongeldig', 'Triodos-CSV regel ' + nr + ': datum is geen DD-MM-JJJJ');
+    const boekdatum = m[3] + '-' + m[2] + '-' + m[1];
+    if (!isIsoDatum(boekdatum)) throw new BankWeigering('regel_ongeldig', 'Triodos-CSV regel ' + nr + ': ongeldige datum');
+    const eigenRuw = v[1].trim();
+    if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(eigenRuw)) throw new BankWeigering('regel_ongeldig', 'Triodos-CSV regel ' + nr + ': eigen rekening is geen IBAN');
+    let bedrag = normBedrag(v[2]);
+    if (bedrag === null || bedrag < 0 || /^\s*[+-]/.test(v[2])) throw new BankWeigering('regel_ongeldig', 'Triodos-CSV regel ' + nr + ': ongeldig bedrag');
+    if (v[3] === 'Debet') bedrag = bedrag === 0 ? 0 : -bedrag;
+    else if (v[3] !== 'Credit') throw new BankWeigering('regel_ongeldig', 'Triodos-CSV regel ' + nr + ': Debet/Credit ontbreekt');
+    if (normBedrag(v[8]) === null) throw new BankWeigering('regel_ongeldig', 'Triodos-CSV regel ' + nr + ': ongeldig saldo');
+    // tegenpartij: "BIC IBAN" of alleen een IBAN → het IBAN; een oud rekeningnummer (cijfers en punten) blijft zoals het staat; leeg → null
+    const tp = v[5].trim();
+    const bi = /^(?:[A-Z0-9]{8}(?:[A-Z0-9]{3})? )?([A-Z]{2}\d{2}[A-Z0-9]{11,30})$/.exec(tp);
+    let tegen = null;
+    if (bi) tegen = bi[1];
+    else if (/^\d[\d.]*\d$/.test(tp)) tegen = tp;
+    else if (tp) throw new BankWeigering('regel_ongeldig', 'Triodos-CSV regel ' + nr + ': tegenrekening niet herkend');
+    const code = v[6].trim();
+    if (!/^[A-Z]{1,6}$/.test(code)) throw new BankWeigering('regel_ongeldig', 'Triodos-CSV regel ' + nr + ': code ontbreekt');
+    const oms = v[7].trim();
+    const inc = code === 'EI' ? /^([A-Z]{2}\d{2}[A-Z0-9]{3}[A-Z0-9]{1,28})(?:\s|$)/.exec(oms) : null;
+    uit.push({
+      eigen_iban_ruw: eigenRuw, boekdatum, tegenpartij_iban: tegen, tegenpartij_naam: v[4].trim() || null, bedrag, valuta: 'EUR',
+      oms_hash: oms.slice(0, OMS_HASH) || null, kenmerk: null, transactietype: 'TRIODOS:' + code, is_incasso: code === 'EI',
+      incassant_id: inc ? inc[1] : null, machtiging: null, saldo_na: v[8].trim(), regel: nr,
+    });
+  });
+  return uit;
+}
+
 // ───────────────────────────── ABN-TAB en ABN-MT940 ─────────────────────────────
 
 // Incassant-id en machtiging uit een ABN-omschrijving (SEPA-gestructureerd of vrije tekst); parseAbnDesc geeft ze niet.
@@ -243,7 +296,7 @@ function leesAbnMt940(tekst) {
 
 /*
  * Saldocontrole per rekening over de regels van één bestand (entry_ref verandert er niet door). ABN-TAB: per regel begin + bedrag = eind,
- * en de keten tussen opeenvolgende regels; ING-CSV met "Saldo na mutatie": de keten; ING zonder die kolom: niet te controleren; MT940:
+ * en de keten tussen opeenvolgende regels; ING-CSV met "Saldo na mutatie" en Triodos-CSV (wv1299): de keten; ING zonder die kolom: niet te controleren; MT940:
  * de parser weigert al een afschrift dat niet sluit. De keten is richtingloos (oudste of nieuwste eerst): de richting met de minste breuken
  * telt, zonder aanname over gelijke datums (Fable wv944 #9). Een breuk weigert het bestand niet (losse perioden kunnen overlappen of gaten
  * hebben), maar staat in de uitkomst. → { [iban]: { gecontroleerd, sluit, breuken, regels, begin_centen?, eind_centen? } }
@@ -268,7 +321,7 @@ function saldoControle(rijen, formaat) {
       uit[iban] = { gecontroleerd: true, sluit: breuken === 0, breuken, regels: n, begin_centen: v ? b[0] : b[n - 1], eind_centen: v ? e[n - 1] : e[0] };
       continue;
     }
-    // ING-CSV
+    // ING-CSV en Triodos-CSV (saldo na mutatie per regel)
     const s = lijst.map((r) => (r.saldo_na === '' || r.saldo_na == null ? null : c(r.saldo_na))), m = lijst.map((r) => centenVan(r.bedrag));
     if (s.every((x) => x === null)) { uit[iban] = { gecontroleerd: false, sluit: null, breuken: null, regels: n, reden: 'geen kolom Saldo na mutatie' }; continue; }
     if (s.some((x) => x === null)) { uit[iban] = { gecontroleerd: false, sluit: null, breuken: null, regels: n, reden: 'saldo ontbreekt op een regel' }; continue; }
@@ -315,8 +368,8 @@ function leesBestand(invoer, opties) {
   if (tekst.length > MAX_BESTAND) throw new BankWeigering('te_groot', 'het bestand is groter dan 20 MB');
   const formaat = herkenFormaat(tekst);
   if (formaat === 'camt053') throw new BankWeigering('formaat_onbekend', 'CAMT.053 lezen we nog niet; exporteer als MT940, TAB of CSV');
-  if (!formaat) throw new BankWeigering('formaat_onbekend', 'geen ING-CSV, ABN-TAB of ABN-MT940 herkend');
-  const rijen = formaat === 'ing_csv' ? leesIng(tekst) : formaat === 'abn_tab' ? leesAbnTab(tekst) : leesAbnMt940(tekst);
+  if (!formaat) throw new BankWeigering('formaat_onbekend', 'geen ING-CSV, ABN-TAB, ABN-MT940 of Triodos-CSV herkend');
+  const rijen = formaat === 'ing_csv' ? leesIng(tekst) : formaat === 'abn_tab' ? leesAbnTab(tekst) : formaat === 'triodos_csv' ? leesTriodos(tekst) : leesAbnMt940(tekst);
   if (!rijen.length) throw new BankWeigering('leeg', 'geen transacties in het bestand');
   const rekeningen = new Map((opties.rekeningen || []).map((r) => [ibanNorm(r.iban), r]));
   // eerst het hele bestand toetsen, dan pas iets teruggeven: één onbekende rekening of één verkeerd formaat weigert alles
@@ -1006,7 +1059,7 @@ function bankcontrole(inv) {
 module.exports = {
   BankWeigering, FORMATEN, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
   // parsers
-  pyStr, mkRef, kenEntryRefsToe, refBasis, saldoControle, normBedrag, herkenFormaat, csvRijen, leesIng, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
+  pyStr, mkRef, kenEntryRefsToe, refBasis, saldoControle, normBedrag, herkenFormaat, csvRijen, leesIng, leesTriodos, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
   // controle
   uitzonderingVoor, uitzonderingPast, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
   // signalen
