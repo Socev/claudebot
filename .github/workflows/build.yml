@@ -330,6 +330,9 @@ jobs:
       - name: "secondbrain (wv832, App Second Brain)"
         if: ${{ !cancelled() }}
         run: bash test/secondbrain.sh
+      - name: "docs (wv1378, OVIS Docs bewerken en opslaan)"
+        if: ${{ !cancelled() }}
+        run: bash test/docs.sh
       - name: "gezondheid-app (wv937, App Gezondheid)"
         if: ${{ !cancelled() }}
         run: bash test/gezondheid-app.sh

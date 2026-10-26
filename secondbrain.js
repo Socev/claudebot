@@ -188,7 +188,7 @@ function maak(opt) {
         if (e.isSymbolicLink()) continue;
         if (e.isDirectory()) { if (!nooitMap(r)) stap(path.join(abs, naam), r); continue; }
         if (!e.isFile()) continue;
-        if (/\.conflict\d*($|\.)/i.test(naam) || /\.conflict/i.test(naam)) continue;
+        if (/\.conflict\d*($|\.)/i.test(naam) || /\.conflict/i.test(naam) || /sync-conflict/i.test(naam)) continue;   // wv1378: ook Syncthing-conflictkopieën (review #4)
         const soort = SOORT[extVan(naam)];
         if (!soort) continue;
         let st;
@@ -414,6 +414,96 @@ function maak(opt) {
     } finally { bestandBezig--; }
   }
 
+  // ── OVIS Docs (wv1378; bouwplan "01_Ontwikkeling/OVIS Docs - bouwplan (26-10-2026).md" § 3.2, Opus-review § 7) ─────────────────
+  // bewerk: de tekst onder de frontmatter, ongemaskeerd alleen als de pagina bewerkbaar is (anders zou opslaan de echte waarde achter het
+  // masker overschrijven), met versie = sha256 van het hele bestand. bewaar: beslist alles opnieuw op wat er nú staat (review #3), schrijft
+  // alleen als de versie nog klopt (409), via opt.wijzig (vault-veilig: symlinkvrij, eigen tmp + rename), zet BOM, regeleinden en de
+  // frontmatter-bytes van het bestand terug, en bewaart de vorige inhoud buiten de vault (opt.versieDir, 0600, laatste 10; review #2).
+  const MAX_BEWERK = 512 * 1024, MAX_NIEUW = 1024 * 1024, VERSIES = 10;
+  const ALLEEN_LEZEN_NAAM = ['actueel.md', 'claude.md', 'claude.local.md', 'agents.md'];
+  const sha = function (t) { return crypto.createHash('sha256').update(Buffer.from(String(t), 'utf8')).digest('hex').slice(0, 32); };
+  function delen(t) {
+    const bom = t.charCodeAt(0) === 0xFEFF ? '﻿' : '';
+    let r = bom ? t.slice(1) : t;
+    const f = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/.exec(r);
+    const fm = f ? f[0] : '';
+    r = r.slice(fm.length);
+    return { bom: bom, fm: fm, fmTekst: f ? f[1] : '', body: r, crlf: /\r\n/.test(r) || (!r && /\r\n/.test(fm)) };
+  }
+  // Waarom deze pagina niet in Docs bewerkt kan worden (null = wel). t = de hele inhoud zoals die nu op schijf staat.
+  function nietBewerkbaar(z, t, ctx) {
+    if (ctx.vast) return 'op een vaste plek kun je hier alleen lezen';
+    const p = z.b.p, naam = p.split('/').pop().toLowerCase();
+    if (p.indexOf('00_Systeem/') === 0) return 'systeempagina\'s houden Socev en de wachters bij';
+    if (ALLEEN_LEZEN_NAAM.indexOf(naam) >= 0) return 'deze pagina houdt Socev zelf bij';
+    if (isVerborgen(p)) return 'bronnen blijven zoals ze binnenkwamen';
+    if (z.st.size > MAX_BEWERK) return 'deze pagina is te groot om hier te bewerken';
+    if (Buffer.byteLength(t, 'utf8') !== z.st.size) return 'deze pagina bevat tekens die hier niet veilig te bewaren zijn';
+    if (masker(t, false, null) !== t) return 'er staat iets in dat op een sleutel lijkt; dat blijft afgeschermd';
+    return null;
+  }
+  function docsBewerk(d, ctx) {
+    const z = zoekPad(d && d.pad, ctx);
+    if (!z || z.b.s !== 'md') return { status: 404, j: { ok: false, fout: 'deze pagina is er niet (meer)' }, audit: audit(null, d && d.pad) };
+    if (z.st.size > MAX_MD) return { status: 413, j: { ok: false, fout: 'deze pagina is te groot om hier te tonen' }, audit: audit(z.b) };
+    let t;
+    try { t = opt.lees ? opt.lees(z.abs) : fs.readFileSync(z.abs, 'utf8'); } catch (e) { return { status: 404, j: { ok: false, fout: 'niet te lezen' }, audit: audit(z.b) }; }
+    const reden = nietBewerkbaar(z, t, ctx);
+    const dl = delen(t);
+    const body = dl.body.replace(/\r\n/g, '\n');
+    return { status: 200, audit: audit(z.b), j: { ok: true, pad: z.b.p, versie: sha(t), bewerkbaar: !reden, reden: reden,
+      eigenschappen: dl.fmTekst ? eigenschappen(dl.fmTekst, ctx) : [], md: reden ? masker(body, ctx.vast, bsnMasker) : body } };
+  }
+  function bewaarVorige(p, t) {
+    if (!opt.versieDir) return;
+    const map = path.join(opt.versieDir, hmac(p));
+    fs.mkdirSync(map, { recursive: true, mode: 0o700 });
+    const naam = new Date(nu()).toISOString().replace(/[:.]/g, '-') + '-' + crypto.randomBytes(3).toString('hex') + '.md';
+    fs.writeFileSync(path.join(map, naam), t, { mode: 0o600, flag: 'wx' });
+    const oud = fs.readdirSync(map).filter(function (n) { return /\.md$/.test(n); }).sort();
+    oud.slice(0, Math.max(0, oud.length - VERSIES)).forEach(function (n) { try { fs.unlinkSync(path.join(map, n)); } catch (e) { /* weg */ } });
+  }
+  function docsBewaar(d, ctx) {
+    const md = d && d.md, versie = d && d.versie;
+    if (typeof md !== 'string' || typeof versie !== 'string' || !/^[0-9a-f]{32}$/.test(versie))
+      return { status: 400, j: { ok: false, fout: 'onvolledig verzoek' }, audit: audit(null, d && d.pad) };
+    if (Buffer.byteLength(md, 'utf8') > MAX_NIEUW || md.indexOf('\u0000') >= 0)
+      return { status: 413, j: { ok: false, fout: 'deze tekst is te groot om op te slaan' }, audit: audit(null, d && d.pad) };
+    const z = zoekPad(d.pad, ctx);
+    if (!z || z.b.s !== 'md') return { status: 404, j: { ok: false, fout: 'deze pagina is er niet meer; misschien is hij verplaatst. Je tekst staat nog hier.' }, audit: audit(null, d.pad) };
+    if (ctx.vast) return { status: 403, j: { ok: false, fout: 'op een vaste plek kun je hier alleen lezen' }, audit: audit(z.b) };
+    if (opt.onderhoud && opt.onderhoud()) return { status: 423, j: { ok: false, fout: 'de vault staat even in onderhoud; probeer het later opnieuw. Je tekst staat nog hier.' }, audit: audit(z.b) };
+    if (opt.grendelVrij && !opt.grendelVrij()) return { status: 423, j: { ok: false, fout: 'er loopt net een synchronisatie; probeer het over een minuut opnieuw. Je tekst staat nog hier.' }, audit: audit(z.b) };
+    if (masker(md, false, null) !== md) return { status: 422, j: { ok: false, fout: 'in je tekst staat iets dat op een sleutel lijkt; sleutels horen niet in de vault' }, audit: audit(z.b) };
+    if (!opt.wijzig) return { status: 503, j: { ok: false, fout: 'opslaan kan in deze versie van de pod niet' }, audit: audit(z.b) };
+    let uitkomst = null, nieuweVersie = null, geschreven = false;
+    try {
+      geschreven = opt.wijzig(z.abs, function (oud) {
+        if (sha(oud) !== versie) { uitkomst = 'conflict'; return null; }
+        const reden = nietBewerkbaar(Object.assign({}, z, { st: { size: Buffer.byteLength(oud, 'utf8') } }), oud, ctx);
+        if (reden) { uitkomst = reden; return null; }
+        const dl = delen(oud);
+        let body = md.replace(/\r\n/g, '\n');
+        if (/\n$/.test(dl.body) && !/\n$/.test(body)) body += '\n';
+        if (dl.crlf) body = body.replace(/\n/g, '\r\n');
+        const nieuw = dl.bom + dl.fm + body;
+        if (nieuw === oud) { uitkomst = 'gelijk'; nieuweVersie = versie; return null; }
+        bewaarVorige(z.b.p, oud);
+        nieuweVersie = sha(nieuw);
+        uitkomst = 'ok';
+        return nieuw;
+      });
+    } catch (e) {
+      if (e && e.code === 'ENOENT') return { status: 404, j: { ok: false, fout: 'deze pagina is er niet meer; misschien is hij verplaatst. Je tekst staat nog hier.' }, audit: audit(z.b) };
+      fout('docs-bewaar', e);
+      return { status: 500, j: { ok: false, fout: 'opslaan lukte niet; je tekst staat nog hier' }, audit: audit(z.b) };
+    }
+    if (uitkomst === 'conflict') return { status: 409, j: { ok: false, fout: 'deze pagina is intussen veranderd (Socev of een agent schreef erin). Je tekst staat nog hier: kopieer hem, of laad de nieuwe versie.' }, audit: audit(z.b) };
+    if ((uitkomst === 'ok' && geschreven) || uitkomst === 'gelijk') return { status: 200, j: { ok: true, versie: nieuweVersie, gewijzigd: uitkomst === 'ok' }, audit: audit(z.b) };
+    if (uitkomst && uitkomst !== 'ok') return { status: 403, j: { ok: false, fout: uitkomst }, audit: audit(z.b) };
+    return { status: 409, j: { ok: false, fout: 'de pagina veranderde tijdens het opslaan; laad hem opnieuw. Je tekst staat nog hier.' }, audit: audit(z.b) };
+  }
+
   const plat = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   // Eerst een ruim stuk maskeren en dan pas knippen: anders verliest een sleutel op de knipgrens zijn kop en herkent het masker
   // de staart niet meer (Fable diffreview K4).
@@ -547,6 +637,8 @@ function maak(opt) {
     if (route === 'POST /app/secondbrain/open') return open(d, ctx);
     if (route === 'POST /app/secondbrain/bestand') return bestand(d, ctx);
     if (route === 'POST /app/secondbrain/zoek') return zoek(d, ctx);
+    if (route === 'POST /app/secondbrain/bewerk') return docsBewerk(d, ctx);   // wv1378: OVIS Docs
+    if (route === 'POST /app/secondbrain/bewaar') return docsBewaar(d, ctx);   // wv1378: OVIS Docs
     return { status: 404, j: { ok: false, fout: 'onbekend' } };
   }
 

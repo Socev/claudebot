@@ -15036,6 +15036,15 @@ const secondbrain = (function () {
   try {
     const S = require(p);
     const s = S.maak({ vault: VAULT, dir: SB_DIR, fout: logError, bsnMasker: function (t) { return appBsnMasker(t); },
+      // wv1378 OVIS Docs: opslaan via vault-veilig (symlinkvrij, eigen tmp + rename), niet tijdens onderhoud of een lopende sync
+      // (vault-grendel vast = bisync, vault-tar of OVIS-nachtronde; Opus-review #5), vorige versies buiten de vault (0600, laatste 10)
+      lees: function (p) { return VV().lees(p, 'utf8'); }, wijzig: function (p, f) { return VV().wijzig(p, f); },
+      versieDir: path.join(SB_DIR, 'versies'),
+      onderhoud: function () { try { return !!onderhoud.stand().aan; } catch (e) { return true; } },
+      grendelVrij: function () {
+        try { return require('child_process').spawnSync('flock', ['-n', ONDERHOUD_LOCK, 'true'], { timeout: 2000 }).status === 0; }
+        catch (e) { return false; }
+      },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
       betekenis: async function (q) {
         if (!process.env.CLOUDFLARE_API_TOKEN) return null;
