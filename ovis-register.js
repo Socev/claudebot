@@ -254,7 +254,46 @@ function rpcInvoer(p, compilatie) {
 const SOORT_WOORD = { kvk: 'KvK', alias: 'alias', domein: 'domein', mail: 'mailadres', kenmerkpatroon: 'kenmerk', 'niet-dezelfde-als': 'niet dezelfde als' };
 const STATUS_WOORD = { actief: 'vast', voorgesteld: 'voorgesteld, wacht op Davids Ja' };
 function datumNl(iso) { const d = new Date(iso); if (isNaN(d)) return '?'; const x = d.toLocaleDateString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', year: 'numeric' }); return x.replace(/\//g, '-'); }
-function blokTekst(knoop, handvatten, contact) {
+// wv1360 (David 26-10-2026 18:35, op "mag ik bij alle organisaties die we al vaker betaalden het rekeningnummer uit de bank vastleggen en op hun
+// pagina tonen?"): "ELKE entiteit naar wie we al eens hebben betaald, mag beschouwd als correct gekoppeld. Dus ELK nummer wat al eens betaald
+// is, is een geaccepteerd nummer" — ook van medewerkers. De nummers staan in de Facturen-database (leverancier_iban + feit, de IBAN-poort);
+// de aanroeper geeft ze mee als o.rekeningen() → [{ iban, doel?, naam, aantal, eerste, laatste }] (doel = knoop-id of medewerkerpagina).
+// Ze komen alleen in het gegenereerde blok, nooit in de frontmatter (leesPagina weigert iban op een organisatiepagina nog steeds).
+const REK_KOP = '- Rekeningnummers (al eens betaald vanaf een eigen zakelijke rekening, dus geaccepteerd; nabellen niet nodig): ';
+const MDW_RE = /^10_Zakelijk\/[^/]+\/Medewerkers\/[^/]+\.md$/;
+const IBAN_VOL = /^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$/;
+function ibanLeesbaar(i) { return String(i).replace(/(.{4})/g, '$1 ').trim(); }
+function rekeningTekst(r) {
+  return ibanLeesbaar(r.iban) + (r.aantal > 0 && /^\d{4}-\d{2}-\d{2}$/.test(String(r.eerste)) ? ' (betaald sinds ' + datumNl(r.eerste + 'T12:00:00Z') + ', ' + r.aantal + ' keer)' : ' (nagebeld, nog niet betaald)');
+}
+function rekeningLijst(lijst) {
+  return (lijst || []).filter(function (r) { return r && IBAN_VOL.test(String(r.iban)); })
+    .sort(function (a, b) { return (b.aantal || 0) - (a.aantal || 0) || (a.iban < b.iban ? -1 : 1); });
+}
+function rekeningRegel(lijst) { const l = rekeningLijst(lijst); return l.length ? REK_KOP + l.map(rekeningTekst).join(' · ') : null; }
+function mdwBlokTekst(pad, lijst) {
+  const binnen = '\n' + ['## Rekeningnummers uit de bank', '',
+    '*Gegenereerd door de OVIS-compiler (nacht) uit de Facturen-database; niet met de hand bewerken. Een rekeningnummer waar een eigen zakelijke rekening al eens naar betaalde, geldt als geaccepteerd (David 26-10-2026): nabellen is dan niet nodig.*', '']
+    .concat(rekeningLijst(lijst).map(function (r) { return '- ' + rekeningTekst(r); })).join('\n') + '\n';
+  const id = ('mdw:' + slug(path.basename(String(pad), '.md'))).slice(0, 80);
+  return '<!-- ovis:blok begin id="' + id + '" content_hash="' + blokHash(binnen) + '" -->' + binnen + BLOK_EIND;
+}
+// Rekeningen zonder doel (bv. nagebeld in Beoordelen) horen bij een knoop als de leveranciersnaam precies één knoop noemt (naam, alias).
+function rekeningenPerDoel(rek, knopen, handvatten) {
+  const per = {}, opNaam = {};
+  function norm(s) { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
+  function zet(n, id) { const x = norm(n); if (x.length < 3) return; (opNaam[x] = opNaam[x] || new Set()).add(id); }
+  (knopen || []).forEach(function (k) { if (k.rol === 'eigen' || k.soort === 'entiteit') return; zet(k.naam, k.id); (k.aliassen || []).forEach(function (a) { zet(a, k.id); }); });
+  const org = new Set((knopen || []).filter(function (k) { return k.rol !== 'eigen' && k.soort !== 'entiteit'; }).map(function (k) { return k.id; }));
+  (handvatten || []).forEach(function (h) { if (h.soort === 'alias' && h.status !== 'vervallen' && org.has(h.knoop)) zet(h.waarde, h.knoop); });
+  (rek || []).forEach(function (r) {
+    let doel = r && typeof r.doel === 'string' ? r.doel : null;
+    if (!doel && r && r.naam) { const s = opNaam[norm(r.naam)]; if (s && s.size === 1) doel = Array.from(s)[0]; }
+    if (doel) (per[doel] = per[doel] || []).push(r);
+  });
+  return per;
+}
+function blokTekst(knoop, handvatten, contact, rekeningen) {
   const h = handvatten.filter(function (x) { return x.status !== 'vervallen'; }).map(function (x) {
     return SOORT_WOORD[x.soort] + ' ' + (x.soort === 'alias' ? '"' + x.waarde + '"' : x.waarde) + ' (' + STATUS_WOORD[x.status] + (x.intrekking ? '; van de pagina gehaald, wacht op Davids Ja' : '') + ')';
   });
@@ -264,9 +303,9 @@ function blokTekst(knoop, handvatten, contact) {
   const binnen = '\n' + ['## Wat OVIS van deze partij weet', '',
     '*Gegenereerd door de OVIS-compiler (nacht); niet met de hand bewerken. Bron is de frontmatter hierboven; een nieuw kenmerk of contactgegeven telt pas na Davids Ja.*', '',
     '- Herkenningskenmerken: ' + (h.length ? h.join(' · ') : 'geen'),
-    '- Contactgegevens in het register: ' + (c.length ? c.join(' · ') : 'geen'),
+    '- Contactgegevens in het register: ' + (c.length ? c.join(' · ') : 'geen')].concat(rekeningRegel(rekeningen) ? [rekeningRegel(rekeningen)] : []).concat([
     '- Register: ' + (knoop.concept ? 'concept · ' : '') + 'compilatie ' + (knoop.compilatienummer || '–') + ', laatst gewijzigd ' + (knoop.gecompileerd_op ? datumNl(knoop.gecompileerd_op) : '–')
-  ].join('\n') + '\n';
+  ]).join('\n') + '\n';
   const id = String(knoop.id || '').replace(/[^A-Za-z0-9:_.-]/g, '').slice(0, 80) || 'onbekend';
   return '<!-- ovis:blok begin id="' + id + '" content_hash="' + blokHash(binnen) + '" -->' + binnen + BLOK_EIND;
 }
@@ -706,12 +745,22 @@ function maak(o) {
       reg2.knopen.forEach(function (k) { k2[k.id] = k; });
       reg2.handvatten.forEach(function (h) { (h2[h.knoop] = h2[h.knoop] || []).push(h); });
       reg2.contact.forEach(function (c) { (c2[c.knoop] = c2[c.knoop] || []).push(c); });
+      // wv1360: rekeningnummers uit Facturen. Niet te lezen → null: dan blijft een blok dat al nummers toont staan (niet stil weghalen).
+      let rek = null;
+      if (typeof o.rekeningen === 'function') {
+        try { rek = o.rekeningen(); if (rek !== null && !Array.isArray(rek)) throw new Error('geen lijst'); }
+        catch (e) { rek = null; uit.fouten.push({ pad: '(facturen)', fout: 'rekeningnummers niet te lezen: ' + String(e && e.message || e).slice(0, 80) }); }
+      }
+      const perDoel = rek ? rekeningenPerDoel(rek, reg2.knopen, reg2.handvatten) : {};
+      uit.rekeningen = rek ? rek.length : null;
       for (const id of Object.keys(perId)) {
         const k = k2[id]; if (!k) continue;
         const p = perId[id].find(function (x) { return x.pad === k.vault_pagina; });
         if (!p || k.bron_sha !== p.sha) continue;
-        const blok = blokTekst(k, h2[id] || [], c2[id] || []);
-        if (huidigBlok(p.tekst) === blok) continue;
+        const hb = huidigBlok(p.tekst);
+        if (!rek && hb && hb.indexOf(REK_KOP) >= 0) continue;
+        const blok = blokTekst(k, h2[id] || [], c2[id] || [], rek && k.rol !== 'eigen' && k.soort !== 'entiteit' ? perDoel[id] : undefined);
+        if (hb === blok) continue;
         if (blokHandwerk(p.tekst)) { uit.handwerk++; continue; }   // K2: niet overschrijven; de Bibliothecaris meldt het (BB8)
         if (opties.droog) { uit.blokken++; continue; }
         try {
@@ -724,9 +773,30 @@ function maak(o) {
           uit.blokken++;
         } catch (e) { uit.fouten.push({ pad: p.pad, fout: 'blok schrijven: ' + String(e && e.code || e && e.message || e).slice(0, 80) }); }
       }
+      // wv1360: medewerkerpagina's (geen knoop; alleen dit blok). Zelfde regels: handwerk niet overschrijven, opnieuw lezen vlak voor het schrijven.
+      uit.medewerkerblokken = 0;
+      for (const doel of Object.keys(perDoel).filter(function (d) { return MDW_RE.test(d) && d.split('/').indexOf('..') < 0; }).sort()) {
+        try {
+          const vol = path.join(vault, doel);
+          const t = o.lees(vol);
+          const fm = frontmatter(t);
+          if (fm.fout || !fm.velden || fm.velden.type !== 'medewerker') { uit.fouten.push({ pad: doel, fout: 'geen medewerkerpagina (type)' }); continue; }
+          const va = vingerafdruk(t);
+          if (va.fout) { uit.fouten.push({ pad: doel, fout: va.fout }); continue; }
+          const blok = mdwBlokTekst(doel, perDoel[doel]);
+          if (huidigBlok(t) === blok) continue;
+          if (blokHandwerk(t)) { uit.handwerk++; continue; }
+          if (opties.droog) { uit.medewerkerblokken++; continue; }
+          const vers = o.lees(vol);
+          if (vingerafdruk(vers).sha !== va.sha) { uit.fouten.push({ pad: doel, fout: 'pagina veranderde tijdens de ronde; blok volgende nacht' }); continue; }
+          if (blokHandwerk(vers)) { uit.handwerk++; continue; }
+          o.schrijf(vol, zetBlok(vers, blok));
+          uit.medewerkerblokken++;
+        } catch (e) { uit.fouten.push({ pad: doel, fout: 'medewerkerblok: ' + String(e && e.code || e && e.message || e).slice(0, 80) }); }
+      }
     }
     uit.ms = nu() - t0;
-    log('ovis-compileer ' + JSON.stringify({ modus: modus, paginas: uit.paginas, gestuurd: uit.gestuurd, nieuw: uit.nieuw, fouten: uit.fouten.length, blokken: uit.blokken, handwerk: uit.handwerk }));
+    log('ovis-compileer ' + JSON.stringify({ modus: modus, paginas: uit.paginas, gestuurd: uit.gestuurd, nieuw: uit.nieuw, fouten: uit.fouten.length, blokken: uit.blokken, handwerk: uit.handwerk, medewerkerblokken: uit.medewerkerblokken }));
     return uit;
   }
   // Bibliothecaris: leest, vergelijkt, schrijft bevindingen (BB), stempelt (niet op afroep). opties.sinds = log sinds (ISO).
@@ -810,6 +880,7 @@ function boxRijFout(fout, tijd) {
 
 module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina, frontmatter: frontmatter, vingerafdruk: vingerafdruk, checks: checks, blokTekst: blokTekst,
   blokHandwerk: blokHandwerk, blokHash: blokHash, blokPlek: blokPlek,
+  rekeningRegel: rekeningRegel, rekeningenPerDoel: rekeningenPerDoel, mdwBlokTekst: mdwBlokTekst, REK_KOP: REK_KOP,
   zetBlok: zetBlok, huidigBlok: huidigBlok, rpcInvoer: rpcInvoer, handvattenVan: handvattenVan, normHandvat: normHandvat, boxRij: boxRij, slug: slug,
   BLOK_BEGIN: BLOK_BEGIN, BLOK_EIND: BLOK_EIND, SCHRIJVERS_OK: SCHRIJVERS_OK,
   plan: plan, kaartBundel: kaartBundel, kaartenKritiek: kaartenKritiek, kaartBiblio: kaartBiblio, eruitUit: eruitUit, uitkomstZin: uitkomstZin, isoWeek: isoWeek,

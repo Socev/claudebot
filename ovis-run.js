@@ -33,6 +33,33 @@ async function sbRpc(fn, body) {
   if (!r.ok) { let m = ''; try { m = JSON.parse(t).message || ''; } catch (e) {} throw new Error('rpc ' + fn + ' http ' + r.status + (m ? ': ' + String(m).slice(0, 200) : '')); }
   return t ? JSON.parse(t) : null;
 }
+// wv1360: geaccepteerde rekeningnummers uit de Facturen-database (alleen lezen) voor het gegenereerde blok. Per rekening: de herkomst die bij
+// het vastleggen in feit.bewijs kwam (ook POT-historie uit de bankluis en Triodos) plus wat de bank daarna nog aan betalingen liet zien.
+// Geen database (uitwijkkant, terugrol) → null: de compiler laat bestaande nummers dan staan.
+function rekeningen() {
+  const pad = path.join(process.env.FACTUREN_DIR || '/opt/data/facturen', 'facturen.sqlite');
+  if (!fs.existsSync(pad)) return null;
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(pad, { readOnly: true });
+  try {
+    const eigen = new Set(db.prepare('SELECT iban FROM rekening').all().map(function (r) { return r.iban; }));
+    const alle = db.prepare('SELECT count(*) AS n, min(boekdatum) AS eerste, max(boekdatum) AS laatste FROM bank_transactie WHERE tegenpartij_iban = ? AND bedrag_centen < 0 AND verwijderd_op IS NULL');
+    const na = db.prepare('SELECT count(*) AS n, max(boekdatum) AS laatste FROM bank_transactie WHERE tegenpartij_iban = ? AND bedrag_centen < 0 AND verwijderd_op IS NULL AND boekdatum > ?');
+    const uit = [];
+    for (const r of db.prepare('SELECT li.iban, l.naam, f.bewijs FROM leverancier_iban li JOIN leverancier l ON l.id = li.leverancier LEFT JOIN feit f ON f.id = li.feit ORDER BY li.iban').all()) {
+      if (eigen.has(r.iban)) continue;
+      let b = null; try { b = r.bewijs ? JSON.parse(r.bewijs) : null; } catch (e) { b = null; }
+      const a = alle.get(r.iban);
+      let aantal = a.n, eerste = a.eerste, laatste = a.laatste;
+      if (b && Number.isInteger(b.aantal) && /^\d{4}-\d{2}-\d{2}$/.test(String(b.eerste)) && /^\d{4}-\d{2}-\d{2}$/.test(String(b.laatste))) {
+        const n = na.get(r.iban, b.laatste);
+        aantal = Math.max(a.n, b.aantal + n.n); eerste = a.eerste && a.eerste < b.eerste ? a.eerste : b.eerste; laatste = n.laatste || b.laatste;
+      }
+      uit.push({ iban: r.iban, naam: r.naam, doel: b && typeof b.doel === 'string' ? b.doel : null, aantal: aantal, eerste: eerste, laatste: laatste });
+    }
+    return uit;
+  } finally { db.close(); }
+}
 function uurAmsterdam() { return Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(new Date())); }
 // Houdt de ouder de grendel vast? Een eigen `flock -n` op hetzelfde bestand moet dan falen (andere open file description).
 function grendelVast() {
@@ -44,7 +71,7 @@ function grendelVast() {
 (async function () {
   if (['dag', 'afroep', 'nacht', 'bibliothecaris', 'export'].indexOf(modus) < 0) stop(2, { ok: false, fout: 'gebruik: dag|afroep|nacht|bibliothecaris|export <pad>' });
   const reg = R.maak({ vault: VAULT, sbRpc: sbRpc, lees: function (p) { return VV.lees(p, 'utf8'); },
-    schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {} });
+    schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen });
   try {
     if (modus === 'nacht') {
       if (arg.indexOf('--buiten-venster') < 0 && uurAmsterdam() !== 1) stop(1, { ok: false, fout: 'nachtronde alleen 01:00-02:00 (Amsterdam); --buiten-venster om af te wijken' });

@@ -663,6 +663,15 @@ test('betaald aan onbekend IBAN: bekende incassant op een ander IBAN → fraudes
   assert.ok(!soorten(controle({ transacties: [t2], facturen: [] })).includes('onbekend_iban'));
 });
 
+test('wv1360: betaald via een betaaldienst of derdengeldenrekening → geen onbekend-IBAN-signaal; een gewone vreemde rekening wel', () => {
+  const basis = { boekdatum: '2026-10-10', bedrag_centen: -6000, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000301', tegenpartij_iban: LEV.VREEMD };
+  const via = tx(Object.assign({}, basis, { tegenpartij_naam: 'Leverancier C B.V. via Stichting Mollie Payments' }));
+  assert.ok(!soorten(controle({ transacties: [via], facturen: [] })).includes('onbekend_iban'));
+  const lijst = tx(Object.assign({}, basis, { tegenpartij_naam: 'Leverancier C B.V.' }));
+  assert.ok(!soorten(controle({ transacties: [lijst], facturen: [], verzamelIbans: [LEV.VREEMD] })).includes('onbekend_iban'));
+  assert.ok(soorten(controle({ transacties: [lijst], facturen: [], verzamelIbans: ['NL02ABNA0123456789'] })).includes('onbekend_iban'));
+});
+
 test('zelfde periode in twee bestanden (oude en nieuwe ING-variant): andere entry_ref → signaal mogelijk dubbel geüpload; zelfde bestand → niets', () => {
   const nieuwBestand = B.leesBankbestand(ING_KOP + '\n' + ingRij({ datum: '20261001', naam: 'Leverancier F B.V.', tegen: LEV.F, bedrag: '45,00', med: 'Factuur F-9', saldo: '100,00' }), { rekeningen: REKENINGEN });
   const oudKop = '"Datum","Naam / Omschrijving","Rekening","Tegenrekening","Code","Af Bij","Bedrag (EUR)","MutatieSoort","Mededelingen"';

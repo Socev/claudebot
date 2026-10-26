@@ -965,6 +965,24 @@ function feitRoute(fdb, r, d, nu, o) {
  * automatische koppelingen, voorstellen, uitzonderingen, betaalspoor, nieuwe signalen en heropende gesluimerde signalen. Nooit twee keer
  * hetzelfde signaal (sleutel uniek).
  */
+// wv1360: rekeningnummers waar in de hele bankhistorie (afschrijvingen) een betaaldienst- of derdengeldennaam bij staat, of namen die niet bij
+// elkaar horen (één rekening, veel winkels). Daarop betalen we veel partijen; een betaling eraan is geen "onbekend IBAN" van die partij.
+function verzamelIbans(fdb) {
+  const per = new Map();
+  for (const r of fdb.db.prepare('SELECT tegenpartij_iban AS iban, tegenpartij_naam AS naam, count(*) AS n FROM bank_transactie WHERE verwijderd_op IS NULL AND bedrag_centen < 0 ' +
+    "AND tegenpartij_iban IS NOT NULL AND tegenpartij_naam IS NOT NULL AND tegenpartij_naam <> '' GROUP BY tegenpartij_iban, tegenpartij_naam").all()) {
+    if (!per.has(r.iban)) per.set(r.iban, []);
+    per.get(r.iban).push(r);
+  }
+  const uit = [];
+  for (const [iban, namen] of per) {
+    namen.sort((a, b) => b.n - a.n || (a.naam < b.naam ? -1 : 1));
+    const hoofd = namen[0].naam;
+    if (namen.some((x) => V.VERZAMEL_RE.test(String(x.naam).normalize('NFKD').replace(/[\u0300-\u036f]/g, ''))) ||
+      namen.some((x) => K.normNaam(x.naam) !== K.normNaam(hoofd) && !V.naamVerwant(x.naam, hoofd))) uit.push(iban);
+  }
+  return uit;
+}
 function bankcontroleToepassen(fdb, nu) {
   const vandaag = dagAmsterdam(nu), van = K.plusDagen(vandaag, -BANK_DAGEN), wanneer = nuIso(nu);
   const transacties = fdb.db.prepare('SELECT * FROM bank_transactie WHERE verwijderd_op IS NULL AND boekdatum >= ?').all(van).map((t) => Object.assign({}, t, {
@@ -983,6 +1001,7 @@ function bankcontroleToepassen(fdb, nu) {
     opdrachten: fdb.db.prepare('SELECT id, factuur, entiteit, status, poging FROM opdracht WHERE factuur IS NOT NULL').all(),
     bestaandeSignalen: fdb.db.prepare('SELECT sleutel, status, sluimer_tot FROM signaal').all(),
     afgewezenVoorstellen: fdb.db.prepare("SELECT sleutel FROM voorstel WHERE status = 'afgewezen'").all().map((v) => v.sleutel),
+    verzamelIbans: verzamelIbans(fdb),
   };
   const uit = B.bankcontrole(inv);
   const tel = { koppelingen: 0, voorstellen: 0, uitzonderingen: 0, betaald_gezien: 0, signalen: 0, heropend: 0 };

@@ -167,6 +167,58 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     r = await m.compileer('nacht', { grendel: true });
     toets('4 blok weer onaangeraakt: nacht vernieuwt het', r.handwerk === 0 && r.blokken === 1 && /compilatie 99/.test(fs.readFileSync(path.join(v, TGP), 'utf8')), r);
   }
+  // ── 4c. rekeningnummers uit Facturen (wv1360) ──
+  { const ORGP = '10_Zakelijk/_Gedeeld/Relaties/Proef Energie.md';
+    const ORGT = ['---', 'type: entiteit', 'entiteit_id: org:proef-energie', 'soort: leverancier', 'status: concept', 'naam: Proef Energie', 'aliases: ["Proef Energie Levering"]',
+      'domeinen: [proef-energie.nl]', '---', '# Proef Energie', ''].join('\n');
+    const MDWP = '10_Zakelijk/Tolgaarde/Medewerkers/Proef Medewerker.md';
+    const MDWT = ['---', 'type: medewerker', 'entiteit_id: TG', 'status: actief', '---', '# Proef Medewerker', '', 'Tekst.', ''].join('\n');
+    const NIETP = '10_Zakelijk/Tolgaarde/Medewerkers/Index.md';
+    const NIETT = ['---', 'type: index', '---', '# Index', ''].join('\n');
+    const sha = R.vingerafdruk(ORGT).sha;
+    const knoop = { id: 'org:proef-energie', soort: 'organisatie', rol: 'leverancier', naam: 'Proef Energie', aliassen: [], vault_pagina: ORGP, bron_sha: sha, concept: true, compilatienummer: 4, laatst_door: 'compiler' };
+    const leeg = R.blokTekst(knoop, [], []);
+    toets('4c zonder rekeningen: blok gelijk aan vroeger (ook met lege lijst)', R.blokTekst(knoop, [], [], []) === leeg && leeg.indexOf('Rekeningnummers') < 0);
+    const rek = [{ iban: 'NL91ABNA0417164300', doel: 'org:proef-energie', aantal: 24, eerste: '2022-02-03' }, { iban: 'NL20INGB0001234567', doel: null, naam: 'Proef Energie Levering', aantal: 0, eerste: null },
+      { iban: 'NL02ABNA0123456789', doel: MDWP, aantal: 7, eerste: '2023-05-01' }, { iban: 'NL44RABO0123456789', doel: NIETP, aantal: 1, eerste: '2024-01-01' },
+      { iban: 'NL55RABO0123456789', doel: '10_Zakelijk/../Medewerkers/x.md', aantal: 1, eerste: '2024-01-01' }, { iban: 'NL66RABO0123456789', naam: 'Onbekend BV', aantal: 2, eerste: '2024-01-01' }];
+    const HV = [{ id: 9, knoop: 'org:proef-energie', soort: 'alias', waarde: 'Proef Energie Levering', waarde_norm: 'proef energie levering', status: 'voorgesteld' }];
+    const met = R.blokTekst(knoop, [], [], R.rekeningenPerDoel(rek, [knoop], HV)['org:proef-energie']);
+    toets('4c regel met nummer in groepjes, sinds en aantal; doel via alias', /NL91 ABNA 0417 1643 00 \(betaald sinds 3-2-2022, 24 keer\) · NL20 INGB 0001 2345 67 \(nagebeld, nog niet betaald\)/.test(met), met);
+    const pd = R.rekeningenPerDoel(rek, [knoop, Object.assign({}, knoop, { id: 'org:twee', naam: 'Onbekend BV' }), { id: 'TG', soort: 'entiteit', rol: 'eigen', naam: 'Proef Energie Levering' }], HV);
+    toets('4c rekening zonder doel: alleen bij precies één knoop, nooit een eigen entiteit', pd['org:proef-energie'].length === 2 && pd['org:twee'].length === 1 && !pd.TG, Object.keys(pd));
+    const v = wegwerpVault({ [ORGP]: ORGT, [MDWP]: MDWT, [NIETP]: NIETT });
+    const n = nepDb({ knopen: [knoop], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [] });
+    let bron = rek;
+    const m = R.maak({ vault: v, sbRpc: n.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t), rekeningen: () => { if (bron instanceof Error) throw bron; return bron; } });
+    let r = await m.compileer('nacht', { grendel: true });
+    const o1 = fs.readFileSync(path.join(v, ORGP), 'utf8'), m1 = fs.readFileSync(path.join(v, MDWP), 'utf8');
+    toets('4c nacht: organisatie krijgt de rekeningregel', r.blokken === 1 && /NL91 ABNA 0417 1643 00 \(betaald sinds 3-2-2022, 24 keer\)/.test(o1) && !R.blokHandwerk(o1), r);
+    toets('4c nacht: medewerkerpagina krijgt een eigen blok, frontmatter onaangeroerd', r.medewerkerblokken === 1 && /<!-- ovis:blok begin id="mdw:proef-medewerker" content_hash="[0-9a-f]{16}" -->/.test(m1)
+      && /- NL02 ABNA 0123 4567 89 \(betaald sinds 1-5-2023, 7 keer\)/.test(m1) && m1.startsWith(MDWT.replace(/\n$/, '')) && R.vingerafdruk(m1).sha === R.vingerafdruk(MDWT).sha, m1);
+    toets('4c geen medewerkertype → geen blok, wel gemeld; pad met .. genegeerd', fs.readFileSync(path.join(v, NIETP), 'utf8') === NIETT && r.fouten.some((f) => f.pad === NIETP) && !r.fouten.some((f) => /\.\./.test(f.pad)), r.fouten);
+    r = await m.compileer('nacht', { grendel: true });
+    toets('4c tweede nacht: niets herschreven', r.blokken === 0 && r.medewerkerblokken === 0 && fs.readFileSync(path.join(v, ORGP), 'utf8') === o1 && fs.readFileSync(path.join(v, MDWP), 'utf8') === m1, r);
+    bron = new Error('kapot');
+    n.db.knopen[0].compilatienummer = 5;   // het blok zou anders opnieuw geschreven worden
+    r = await m.compileer('nacht', { grendel: true });
+    toets('4c Facturen niet te lezen: blok met nummers blijft staan, fout gemeld', r.blokken === 0 && fs.readFileSync(path.join(v, ORGP), 'utf8') === o1 && r.fouten.some((f) => /rekeningnummers niet te lezen/.test(f.fout)), r);
+    bron = null;
+    r = await m.compileer('nacht', { grendel: true });
+    toets('4c geen Facturen-database (null): idem', r.blokken === 0 && fs.readFileSync(path.join(v, ORGP), 'utf8') === o1, r);
+    bron = rek.map((x) => x.iban === 'NL02ABNA0123456789' ? Object.assign({}, x, { aantal: 8 }) : x);
+    fs.writeFileSync(path.join(v, MDWP), m1.replace('7 keer)', '7 keer, klopt)'));
+    r = await m.compileer('nacht', { grendel: true });
+    toets('4c handwerk in het medewerkerblok: niet overschreven', r.medewerkerblokken === 0 && r.handwerk === 1 && /klopt\)/.test(fs.readFileSync(path.join(v, MDWP), 'utf8')), r);
+    fs.writeFileSync(path.join(v, MDWP), m1);
+    r = await m.compileer('nacht', { grendel: true });
+    toets('4c nieuw aantal: medewerkerblok vernieuwd', r.medewerkerblokken === 1 && /8 keer\)/.test(fs.readFileSync(path.join(v, MDWP), 'utf8')), r);
+    const o2 = fs.readFileSync(path.join(v, ORGP), 'utf8');
+    const m0 = R.maak({ vault: v, sbRpc: n.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t) });
+    n.db.knopen[0].compilatienummer = 6;
+    r = await m0.compileer('nacht', { grendel: true });
+    toets('4c zonder bron (oude aanroeper): blok met nummers blijft staan', r.blokken === 0 && fs.readFileSync(path.join(v, ORGP), 'utf8') === o2 && /24 keer/.test(o2), r);
+  }
   // ── 5. Bibliothecaris ──
   { const sha = R.vingerafdruk(TG).sha;
     const basis = { knopen: [Object.assign({}, TGRIJ, { bron_sha: sha, laatst_door: 'compiler' })], handvatten: TGH, contact: [], vertaling: VERT, bevindingen: [], log: [] };

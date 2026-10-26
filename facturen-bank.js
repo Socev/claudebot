@@ -20,6 +20,7 @@
 const crypto = require('crypto');
 const { leesMt940, parseAbnDesc, ibanFromAbnAccount, Mt940Fout, ABN_TYPES } = require('./mt940-lezer.js');
 const { ibanNorm, normNaam, normNummer, dagenTussen, plusDagen, isIsoDatum } = require('./facturen-kern.js');
+const { VERZAMEL_RE } = require('./facturen-validatie.js');
 
 class BankWeigering extends Error {
   constructor(code, uitleg) { super(uitleg || code); this.code = code; this.uitleg = uitleg || code; }
@@ -997,6 +998,8 @@ function bankcontrole(inv) {
   const vandaag = inv && inv.vandaag;
   if (!isIsoDatum(vandaag)) throw new BankWeigering('vandaag', 'vandaag ontbreekt');
   const ctx = { leveranciers: inv.leveranciers || [], uitzonderingen: inv.uitzonderingen || [], entiteiten: inv.entiteiten || [], rekeningen: inv.rekeningen || [], koersen: inv.koersen || {} };
+  // wv1360: rekeningen van betaaldiensten en derdengelden (de beller bepaalt ze uit de hele bankhistorie): daar betalen we veel partijen op
+  const verzamel = new Set((inv.verzamelIbans || []).map(ibanNorm));
   const txs = (inv.transacties || []).slice().sort((a, b) => (a.boekdatum < b.boekdatum ? -1 : a.boekdatum > b.boekdatum ? 1 : String(a.entry_ref).localeCompare(String(b.entry_ref))));
   const facturen = inv.facturen || [];
   const fMap = new Map(facturen.map((f) => [f.id, f]));
@@ -1075,8 +1078,11 @@ function bankcontrole(inv) {
     const basis = { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lt ? lt.leverancier.naam : tx.tegenpartij_naam,
       tegenpartij_iban: tx.tegenpartij_iban, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar, leverancier: lt ? lt.leverancier.id : null };
     // betaald aan onbekend IBAN: de tegenpartij is een bekende leverancier (incassant of naam), het IBAN niet. Vóór de uitzonderingen,
-    // zodat een uitzondering op naam het fraudesignaal nooit uitzet (diffreview wv798 #13).
-    if (richtingVan(tx) === 'af' && tegen && lt && lt.via !== 'iban' && levIbans(lt.leverancier).size && !eigenIbanMap(ctx).has(tegen)) {
+    // zodat een uitzondering op naam het fraudesignaal nooit uitzet (diffreview wv798 #13). wv1360: niet als het geld via een betaaldienst
+    // of derdengeldenrekening ging ("X via Mollie", PayPal, Amazon Payments …): dat rekeningnummer is niet van X, en sinds de bekende
+    // rekeningen uit de bankhistorie gaf dat op de archieftoets ± 8 loze meldingen per maand.
+    if (richtingVan(tx) === 'af' && tegen && lt && lt.via !== 'iban' && levIbans(lt.leverancier).size && !eigenIbanMap(ctx).has(tegen)
+      && !verzamel.has(tegen) && !VERZAMEL_RE.test(String(tx.tegenpartij_naam || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, ''))) {
       signalen.push(maakSignaal('onbekend_iban', Object.assign({}, basis, { details: { via: lt.via } })));
     }
     const u = uitzonderingVoor(tx, ctx);
