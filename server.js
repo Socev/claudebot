@@ -15110,12 +15110,55 @@ function secondbrainFinPagina(d) {
 const DOCS_DIR = process.env.DOCS_DIR || '/opt/data/docs';
 const DOCS_HOST = 'deel.socev.dev';
 const DOCS_D1_ID = process.env.DOCS_D1_ID || 'eb5cdcb8-ce36-4452-aeeb-9a04baf9b857';
+// wv1383 (stap d, Beveiligd): Access-apps per deling met het pod-token (geen nieuw token). Toestaanlijst ook hier (review #9): alleen
+// accounts/<id>/access/apps[/<uuid>] en het zoekfilter op één /b/-domein; een body moet precies één bestemming deel.socev.dev/b/<22 tekens>
+// hebben, alleen One-time PIN, een allow-beleid met alleen losse mailadressen. docs-delen.js haalt een app eerst op en vergelijkt het domein.
+const DOCS_OTP_IDP = process.env.DOCS_OTP_IDP || 'e9e612dc-1f11-4c07-bd74-5929e4704eec';   // Access-identity provider One-time PIN (gemeten 26-10)
+const DOCS_B_DOMEIN = /^deel\.socev\.dev\/b\/[A-Za-z0-9_-]{22}$/;
+function docsAccessBodyOk(b) {
+  if (!b || typeof b !== 'object' || !DOCS_B_DOMEIN.test(String(b.domain))) return false;
+  if (!Array.isArray(b.destinations) || b.destinations.length !== 1 || b.destinations[0].uri !== b.domain || b.destinations[0].type !== 'public') return false;
+  if (b.self_hosted_domains !== undefined || b.type !== 'self_hosted' || !Array.isArray(b.allowed_idps) || b.allowed_idps.length !== 1 || b.allowed_idps[0] !== DOCS_OTP_IDP) return false;
+  if (!Array.isArray(b.policies) || b.policies.length !== 1) return false;
+  const pol = b.policies[0];
+  if (pol.decision !== 'allow' || (pol.exclude && pol.exclude.length) || (pol.require && pol.require.length) || !Array.isArray(pol.include) || !pol.include.length || pol.include.length > 10) return false;
+  return pol.include.every(function (i) { return i && Object.keys(i).length === 1 && i.email && Object.keys(i.email).length === 1 && /^[^@\s*]+@[^@\s*]+\.[^@\s*]+$/.test(String(i.email.email)); });
+}
+async function docsCf(methode, achter, body) {
+  if (!/^\/access\/apps(\/[0-9a-f-]{36}|\?domain=deel\.socev\.dev%2Fb%2F[A-Za-z0-9_-]{22})?$/.test(achter)) throw new Error('docs-access: pad buiten de toestaanlijst');
+  if ((methode === 'POST' || methode === 'PUT') !== !!body) throw new Error('docs-access: body hoort alleen bij maken of wijzigen');
+  if (body && !docsAccessBodyOk(body)) throw new Error('docs-access: body buiten de toestaanlijst');
+  if (methode === 'POST' && achter !== '/access/apps') throw new Error('docs-access: maken alleen op de lijst');
+  if ((methode === 'PUT' || methode === 'DELETE') && !/^\/access\/apps\/[0-9a-f-]{36}$/.test(achter)) throw new Error('docs-access: wijzigen alleen op één app');
+  const r = await fetch(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + achter, { method: methode,
+    headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30000) });
+  let j = null; try { j = await r.json(); } catch (e) {}
+  if (!(j && j.success) && !(r.status === 404 || (j && Array.isArray(j.errors) && j.errors.some(function (e) { return e && e.code === 11021; }))))
+    logError('docs-access', new Error(methode + ' gaf HTTP ' + r.status + (j && j.errors ? ' ' + JSON.stringify(j.errors).slice(0, 200) : '')));
+  return { status: r.status, j: j };
+}
+const docsAccess = process.env.CLOUDFLARE_API_TOKEN ? {
+  idp: DOCS_OTP_IDP,
+  maak: async function (body) { const r = await docsCf('POST', '/access/apps', body); const x = r.j && r.j.success && r.j.result;
+    return x && x.id && x.aud && x.domain === body.domain ? { ok: true, id: x.id, aud: x.aud } : { ok: false }; },
+  wijzig: async function (id, body) { const r = await docsCf('PUT', '/access/apps/' + id, body); const x = r.j && r.j.success && r.j.result;
+    return x && x.id === id && x.domain === body.domain ? { ok: true, aud: x.aud } : { ok: false }; },
+  haal: async function (id) { const r = await docsCf('GET', '/access/apps/' + id); const x = r.j && r.j.success && r.j.result;
+    if (x && x.id === id) return { ok: true, domein: x.domain };
+    const weg = r.status === 404 || !!(r.j && Array.isArray(r.j.errors) && r.j.errors.some(function (e) { return e && e.code === 11021; }));
+    return weg ? { ok: false, weg: true } : { ok: false }; },
+  weg: async function (id) { const r = await docsCf('DELETE', '/access/apps/' + id); return { ok: !!(r.j && r.j.success) }; },
+  zoek: async function (domein) { const r = await docsCf('GET', '/access/apps?domain=' + encodeURIComponent(domein));
+    if (!(r.j && r.j.success && Array.isArray(r.j.result))) return { ok: false };
+    return { ok: true, ids: r.j.result.filter(function (x) { return x && x.domain === domein && typeof x.id === 'string'; }).map(function (x) { return x.id; }) }; }
+} : null;
 const docsDelen = (function () {
   const p = path.join(__dirname, 'docs-delen.js');
   if (!fs.existsSync(p) || !secondbrain || typeof secondbrain.bron !== 'function') return null;
   try {
     const S = require(path.join(__dirname, 'secondbrain.js'));
-    return require(p).maak({ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: logError, bron: secondbrain.bron,
+    return require(p).maak({ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: logError, bron: secondbrain.bron, access: docsAccess,
       masker: S.masker, isVastDicht: S.isVastDicht, isVerborgen: S.isVerborgen, bsnMasker: function (t) { return appBsnMasker(t); },
       lees: function (x) { return VV().lees(x, 'utf8'); },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },

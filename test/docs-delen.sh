@@ -59,8 +59,9 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
   let d1Stuk = false;
   const d1 = async (sql, p) => {
     if (d1Stuk) return { ok: false, rijen: null };
-    if (/^INSERT INTO deel/.test(sql)) { const oud = db.get(p[0]); db.set(p[0], { slug: p[0], soort: p[1], titel: p[2], html: p[3], sinds: oud ? oud.sinds : p[4], bijgewerkt: p[5] }); return { ok: true, rijen: [] }; }
+    if (/^INSERT INTO deel \(slug, soort, titel, html, sinds, bijgewerkt, aud, ontvangers, access_app\)/.test(sql)) { const oud = db.get(p[0]); db.set(p[0], { slug: p[0], soort: p[1], titel: p[2], html: p[3], sinds: oud ? oud.sinds : p[4], bijgewerkt: p[5], aud: p[6], ontvangers: p[7], access_app: p[8] }); return { ok: true, rijen: [] }; }
     if (/^DELETE FROM deel/.test(sql)) { db.delete(p[0]); return { ok: true, rijen: [] }; }
+    if (/^SELECT soort, access_app FROM deel WHERE slug = \?1$/.test(sql)) { const r = db.get(p[0]); return { ok: true, rijen: r ? [{ soort: r.soort, access_app: r.access_app || null }] : [] }; }
     if (/^SELECT slug, soort, titel, sinds, bijgewerkt FROM deel/.test(sql)) return { ok: true, rijen: Array.from(db.values()).map((r) => ({ slug: r.slug, soort: r.soort, titel: r.titel, sinds: r.sinds, bijgewerkt: r.bijgewerkt })) };
     throw new Error('onbekende sql ' + sql);
   };
@@ -121,8 +122,10 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
 
   // ── 3. delen, register, bijwerken, intrekken ──
   v = await app('voorbeeld', { pad: '01_Ontwikkeling/Reis.md' });
-  let r = await app('delen', { pad: '01_Ontwikkeling/Reis.md', soort: 'beveiligd', sha: v.j.sha });
-  toets('3 beveiligd: volgt nog (400)', r.status === 400 && /volgt/.test(r.j.fout), r);
+  let r = await app('delen', { pad: '01_Ontwikkeling/Reis.md', soort: 'beveiligd', sha: v.j.sha, ontvangers: ['a@example.org'] });
+  toets('3 beveiligd zonder Access op de pod: 503, niets gedeeld', r.status === 503 && db.size === 0, r);
+  r = await app('delen', { pad: '01_Ontwikkeling/Reis.md', soort: 'iets', sha: v.j.sha });
+  toets('3 onbekende soort: 400', r.status === 400, r);
   r = await app('delen', { pad: '01_Ontwikkeling/Reis.md', soort: 'openbaar', sha: 'f'.repeat(64) });
   toets('3 andere sha dan het voorbeeld: 409, niets in D1', r.status === 409 && db.size === 0, r);
   d1Stuk = true;
@@ -202,6 +205,124 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
   t = await sbapp('versies', { pad: '01_Ontwikkeling/Plan.md' }, vast);
   toets('4 versies op een vaste plek: 403', t.status === 403, t);
 
+  // ── 6. beveiligd (wv1383): Access-app per deling, toestaanlijst, intrekken ruimt alles op ──
+  const OTP = 'e9e612dc-1f11-4c07-bd74-5929e4704eec';
+  const apps = new Map();   // id → body + aud
+  const accLog = [];
+  let accStuk = {};   // { maak, wijzig, weg, haal, zoek } = true → faalt
+  const nieuwId = () => crypto.randomUUID();
+  apps.set('11111111-1111-4111-8111-111111111111', { domain: 'deel.socev.dev', aud: 'davidaud' });   // de app van David op het hele subdomein
+  apps.set('22222222-2222-4222-8222-222222222222', { domain: 'deel.socev.dev/p/*', aud: 'bypass' });
+  const access = { idp: OTP,
+    maak: async (body) => { accLog.push(['maak', body.domain]); if (accStuk.maak) return { ok: false }; const id = nieuwId(); apps.set(id, Object.assign({}, body, { aud: 'aud-' + id.slice(0, 8) })); return { ok: true, id, aud: 'aud-' + id.slice(0, 8) }; },
+    wijzig: async (id, body) => { accLog.push(['wijzig', id]); if (accStuk.wijzig || !apps.has(id)) return { ok: false }; apps.set(id, Object.assign({}, body, { aud: apps.get(id).aud })); return { ok: true, aud: apps.get(id).aud }; },
+    haal: async (id) => { accLog.push(['haal', id]); if (accStuk.haal) return { ok: false }; return apps.has(id) ? { ok: true, domein: apps.get(id).domain } : { ok: false, weg: true }; },
+    weg: async (id) => { accLog.push(['weg', id]); if (accStuk.weg) return { ok: false }; apps.delete(id); return { ok: true }; },
+    zoek: async (dom) => { accLog.push(['zoek', dom]); if (accStuk.zoek) return { ok: false }; return { ok: true, ids: Array.from(apps.entries()).filter(([, b]) => b.domain === dom).map(([i]) => i) }; } };
+  const DD3 = path.join(W, 'docs3');
+  const db3 = new Map();
+  let d1Stuk3 = false;
+  const d13 = async (sql, p) => { if (d1Stuk3) return { ok: false, rijen: null }; db.clear(); for (const [k, v2] of db3) db.set(k, v2); const r = await d1(sql, p); db3.clear(); for (const [k, v2] of db) db3.set(k, v2); return r; };
+  const ddb = D.maak({ dir: DD3, vault: V, host: 'deel.socev.dev', fout: () => {}, bron: sb.bron, masker: S.masker, bsnMasker, isVastDicht: S.isVastDicht,
+    isVerborgen: S.isVerborgen, hmac: (p) => crypto.createHmac('sha256', 'proef').update(p).digest('hex').slice(0, 16), d1: d13, lees: (p) => fs.readFileSync(p, 'utf8'), access });
+  const appb = (r, d, c) => ddb.app(r === 'gedeeld' ? 'GET /app/docs/gedeeld' : 'POST /app/docs/' + r, d, c || tel);
+  const reg3 = () => { try { return JSON.parse(fs.readFileSync(path.join(DD3, 'gedeeld.json'), 'utf8')).delingen; } catch (e) { return []; } };
+  const pApps = () => Array.from(apps.values()).filter((b) => /\/b\//.test(b.domain));
+  const P = '01_Ontwikkeling/Plan.md';
+  let vb3 = await appb('voorbeeld', { pad: P });
+  toets('6 voorbeeld meldt dat beveiligd kan', vb3.status === 200 && vb3.j.beveiligd === true, vb3.j);
+  for (const [o, re, waarom] of [[[], /minstens/, 'geen adres'], [['geen-adres'], /geen mailadres/, 'onzin'], [['*@example.org'], /geen mailadres/, 'jokerteken'],
+    [['a@example'], /geen mailadres/, 'zonder punt in het domein'], [['a..b@example.org'], /geen mailadres/, 'twee punten'], [Array.from({ length: 11 }, (_, i) => 'p' + i + '@example.org'), /hooguit 10/, '11 adressen']]) {
+    r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: o });
+    toets('6 ontvangers geweigerd: ' + waarom + ' (400, niets bij Access)', r.status === 400 && re.test(r.j.fout) && accLog.length === 0, r);
+  }
+  toets('6 ontvangers: kleine letters, uniek, ook als tekst met komma\'s', JSON.stringify(D.ontvangersUit('A@Example.org, a@example.org; b@x.nl').lijst) === '["a@example.org","b@x.nl"]');
+  accStuk = { maak: true };
+  r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: ['proef@example.org'] });
+  toets('6 Access-app maken faalt: 502, niets in register of D1', r.status === 502 && reg3().length === 0 && db3.size === 0, r);
+  accStuk = {};
+  d1Stuk3 = true;
+  r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: ['proef@example.org'] });
+  toets('6 D1 faalt na de Access-app: app weer weg, register leeg', r.status === 502 && pApps().length === 0 && reg3().length === 0, { r, apps: pApps() });
+  d1Stuk3 = false;
+  accLog.length = 0;
+  r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: ['Proef@Example.org', 'tweede@example.org'] });
+  const bs = r.j && r.j.gedeeld && r.j.gedeeld.slug;
+  toets('6 beveiligd delen: 200, link deel.socev.dev/b/<22>, ontvangers terug', r.status === 200 && /^https:\/\/deel\.socev\.dev\/b\/[A-Za-z0-9_-]{22}$/.test(r.j.gedeeld.url) &&
+    JSON.stringify(r.j.gedeeld.ontvangers) === '["proef@example.org","tweede@example.org"]', r);
+  const ap = pApps();
+  toets('6 één Access-app op precies deel.socev.dev/b/<slug>: alleen One-time PIN, 24 u, beleid = de twee adressen', ap.length === 1 && ap[0].domain === 'deel.socev.dev/b/' + bs &&
+    ap[0].destinations.length === 1 && ap[0].destinations[0].uri === ap[0].domain && JSON.stringify(ap[0].allowed_idps) === JSON.stringify([OTP]) && ap[0].session_duration === '24h' &&
+    ap[0].policies.length === 1 && ap[0].policies[0].decision === 'allow' && JSON.stringify(ap[0].policies[0].include) === JSON.stringify([{ email: { email: 'proef@example.org' } }, { email: { email: 'tweede@example.org' } }]) &&
+    !/plan/i.test(ap[0].name), ap);
+  const rij3 = db3.get(bs);
+  toets('6 D1: soort beveiligd, aud van die app, alleen hashes van de adressen', rij3 && rij3.soort === 'beveiligd' && rij3.aud === ap[0].aud && rij3.access_app &&
+    JSON.stringify(JSON.parse(rij3.ontvangers)) === JSON.stringify([D.mailHash('proef@example.org'), D.mailHash('tweede@example.org')]) && rij3.ontvangers.indexOf('@') < 0, rij3);
+  toets('6 register: soort, ontvangers, app-id, aud (0600)', reg3().length === 1 && reg3()[0].access_app === rij3.access_app && reg3()[0].aud === rij3.aud &&
+    (fs.statSync(path.join(DD3, 'gedeeld.json')).mode & 0o777) === 0o600, reg3());
+  r = await appb('delen', { pad: P, soort: 'openbaar', sha: vb3.j.sha });
+  toets('6 van soort wisselen: 409 (eerst intrekken), niets veranderd', r.status === 409 && r.j.soort_anders === true && db3.get(bs).soort === 'beveiligd' && pApps().length === 1, r);
+  accLog.length = 0;
+  r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: ['tweede@example.org', 'proef@example.org'] });
+  toets('6 opnieuw delen met dezelfde adressen: zelfde slug, app alleen opgehaald (niet gewijzigd)', r.status === 200 && r.j.bijgewerkt && r.j.gedeeld.slug === bs &&
+    accLog.every((x) => x[0] === 'haal') && accLog.length === 1, { r, accLog });
+  accLog.length = 0;
+  r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: ['derde@example.org'] });
+  toets('6 andere adressen: beleid van dezelfde app bijgewerkt, D1-hashes mee', r.status === 200 && pApps().length === 1 && JSON.stringify(pApps()[0].policies[0].include) === JSON.stringify([{ email: { email: 'derde@example.org' } }]) &&
+    JSON.parse(db3.get(bs).ontvangers)[0] === D.mailHash('derde@example.org') && pApps()[0].aud === rij3.aud, { r, accLog });
+  d1Stuk3 = true;
+  r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: ['vierde@example.org'] });
+  d1Stuk3 = false;
+  toets('6 D1 faalt bij andere adressen: beleid terug naar de vorige adressen, register ongewijzigd', r.status === 502 &&
+    JSON.stringify(pApps()[0].policies[0].include) === JSON.stringify([{ email: { email: 'derde@example.org' } }]) && JSON.stringify(reg3()[0].ontvangers) === '["derde@example.org"]', { r, inc: pApps()[0].policies[0].include });
+  let g3 = await appb('gedeeld', {});
+  toets('6 gedeeld: beveiligd met de ontvangers', g3.j.delingen.length === 1 && g3.j.delingen[0].soort === 'beveiligd' && JSON.stringify(g3.j.delingen[0].ontvangers) === '["derde@example.org"]', g3.j);
+  // toestaanlijst: een vervalst app-id in het register raakt een andere app niet
+  const echt = reg3()[0].access_app;
+  const rr = JSON.parse(fs.readFileSync(path.join(DD3, 'gedeeld.json'), 'utf8'));
+  rr.delingen[0].access_app = '11111111-1111-4111-8111-111111111111';
+  fs.writeFileSync(path.join(DD3, 'gedeeld.json'), JSON.stringify(rr), { mode: 0o600 });
+  accLog.length = 0;
+  r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: ['vijfde@example.org'] });
+  toets('6 toestaanlijst: app-id van een andere app (domein klopt niet) wordt niet gewijzigd', r.status === 502 && apps.get('11111111-1111-4111-8111-111111111111').domain === 'deel.socev.dev' &&
+    !apps.get('11111111-1111-4111-8111-111111111111').policies && !accLog.some((x) => x[0] !== 'haal'), { r, accLog });
+  r = await appb('intrekken', { slug: bs });
+  toets('6 toestaanlijst: intrekken met dat vervalste id laat die app staan; de echte (via zoeken) gaat weg', r.status === 200 && apps.has('11111111-1111-4111-8111-111111111111') &&
+    !apps.has(echt) && pApps().length === 0 && !db3.has(bs) && reg3().length === 0, { r, accLog });
+  // intrekken: Access faalt → pagina toch weg, regel blijft, tweede keer ruimt op
+  vb3 = await appb('voorbeeld', { pad: P });
+  r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: ['proef@example.org'] });
+  const bs2 = r.j.gedeeld.slug;
+  toets('6 nieuwe deling na intrekken krijgt een nieuwe slug', r.status === 200 && bs2 !== bs && pApps().length === 1, r);
+  accStuk = { weg: true };
+  r = await appb('intrekken', { slug: bs2 });
+  toets('6 intrekken, Access faalt: D1-rij weg (link dood), 502 deels, regel blijft met access_open', r.status === 502 && r.j.deels === true && !db3.has(bs2) && reg3().length === 1 && reg3()[0].access_open === true && pApps().length === 1, r);
+  accStuk = {};
+  r = await appb('intrekken', { slug: bs2 });
+  toets('6 nog eens intrekken: app weg, regel weg', r.status === 200 && pApps().length === 0 && reg3().length === 0, r);
+  // wees-app: D1-rij beveiligd buiten het register (register kwijt) → intrekken ruimt app via D1-id op
+  const wees = 'Wwwwwwwwwwwwwwwwwwwwww';
+  const wid = nieuwId();
+  apps.set(wid, { domain: 'deel.socev.dev/b/' + wees, aud: 'w' });
+  db3.set(wees, { slug: wees, soort: 'beveiligd', titel: 't', html: 'x', sinds: 's', bijgewerkt: 's', aud: 'w', ontvangers: '[]', access_app: wid });
+  r = await appb('intrekken', { slug: wees });
+  toets('6 D1-rij buiten het register: intrekken haalt rij en app weg (D1 = deelregister)', r.status === 200 && !apps.has(wid) && !db3.has(wees), r);
+  const vreemd = 'Vvvvvvvvvvvvvvvvvvvvvv';
+  apps.set('33333333-3333-4333-8333-333333333333', { domain: 'deel.socev.dev/b/' + vreemd, aud: 'v' });
+  r = await appb('intrekken', { slug: vreemd });
+  toets('6 toestaanlijst: slug in geen enkel register = geen Access-aanroep op die app', r.status === 200 && apps.has('33333333-3333-4333-8333-333333333333'), r);
+  apps.delete('33333333-3333-4333-8333-333333333333');
+  // app met de hand weggehaald → opnieuw delen maakt een nieuwe
+  vb3 = await appb('voorbeeld', { pad: P });
+  r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: ['proef@example.org'] });
+  const bs3 = r.j.gedeeld.slug;
+  apps.delete(reg3()[0].access_app);
+  r = await appb('delen', { pad: P, soort: 'beveiligd', sha: vb3.j.sha, ontvangers: ['proef@example.org'] });
+  toets('6 app met de hand weggehaald: opnieuw delen maakt een nieuwe (nieuwe aud in D1)', r.status === 200 && pApps().length === 1 && db3.get(bs3).access_app === reg3()[0].access_app && db3.get(bs3).aud === pApps()[0].aud, r);
+  r = await appb('intrekken', { slug: bs3 }, vast);
+  toets('6 intrekken (ook vaste plek) laat niets achter: geen /b/-app, geen D1-rij, geen regel', r.status === 200 && pApps().length === 0 && db3.size === 0 && reg3().length === 0, r);
+  toets('6 health telt beveiligd, zonder links', ddb.health().beveiligd === 0 && ddb.health().beveiligd_aan === true && JSON.stringify(ddb.health()).indexOf(bs3) < 0, ddb.health());
+
   // ── 5. server.js ──
   const src = fs.readFileSync('server.js', 'utf8');
   const beheer = /const APP_BEHEER_ROUTES = new Set\(\[([\s\S]*?)\]\);/.exec(src)[1];
@@ -217,12 +338,15 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
   const db0 = src.indexOf('// ── OVIS Docs › Delen (wv1382'), de = src.indexOf('// ── einde docs delen');
   const gestuurd = [];
   const cfAanroep = [];
+  const fetchLog = [];
+  let fetchAntw = () => ({ success: true, result: {} });
   const ctx = vm.createContext({ require, process: { env: { SECONDBRAIN_DIR: path.join(W, 'sd2'), DOCS_DIR: path.join(W, 'docs2'), CLOUDFLARE_API_TOKEN: 'proef' } }, __dirname: process.cwd(), path, fs, crypto, console,
     setInterval: () => ({ unref() {} }), VAULT: V, logError: () => {}, appBsnMasker: bsnMasker, appPoortGeheim: () => 'proefgeheim', VV: () => VV, onderhoud: { stand: () => ({ aan: false }) }, ONDERHOUD_LOCK: '/tmp/x',
     smalCf: async (url, body) => { cfAanroep.push({ url, body }); return { status: 200, j: { success: true, result: [{ success: true, results: [] }] } }; },
     SMAL_CF_BASIS: 'https://cf', SMAL_CF_ACCOUNT: 'acc', appTeller: () => true, appVersOk: (a, s) => s.vers === true,
-    appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Date, Promise, JSON, String, Number, Array, Object, Math, Buffer, Map, Set });
-  vm.runInContext(src.slice(hb, he) + '\n' + src.slice(db0, de) + ';globalThis.__dd = { docsDelen, appDocs, docsDelenInfo };', ctx, { filename: 'server.js#docs' });
+    appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Date, Promise, JSON, String, Number, Array, Object, Math, Buffer, Map, Set,
+    AbortSignal, encodeURIComponent, fetch: async (url, o) => { fetchLog.push({ url, o }); return { status: 200, json: async () => fetchAntw(url, o) }; } });
+  vm.runInContext(src.slice(hb, he) + '\n' + src.slice(db0, de) + ';globalThis.__dd = { docsDelen, appDocs, docsDelenInfo, docsCf, docsAccess, docsAccessBodyOk };', ctx, { filename: 'server.js#docs' });
   toets('5 koppeling laadt (docsDelen aan)', !!ctx.__dd.docsDelen && ctx.__dd.docsDelenInfo().aan === true, ctx.__dd.docsDelenInfo());
   let res = { _app: {} };
   await ctx.__dd.appDocs({}, res, { soort: 'meereizend' }, { vers: false }, { pad: '01_Ontwikkeling/Reis.md', soort: 'openbaar', sha: 'a'.repeat(64) }, 'POST /app/docs/delen');
@@ -238,6 +362,43 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
   toets('5 delen met verse vingerafdruk: 200, D1-query naar de juiste databank, vingerafdruk verbruikt', dl.s === 200 && cfAanroep.length === 1 &&
     /^https:\/\/cf\/client\/v4\/accounts\/acc\/d1\/database\/[0-9a-f-]{36}\/query$/.test(cfAanroep[0].url) && /^INSERT INTO deel/.test(cfAanroep[0].body.sql) && sess.vers_tot === 0, { dl, cf: cfAanroep[0] && cfAanroep[0].url });
   toets('5 audit: geen pad en geen link in de reden', res._app.reden.indexOf(dl.j.gedeeld.slug) < 0 && res._app.reden.indexOf('Reis') < 0, res._app.reden);
+  // wv1383: Access-toestaanlijst in server.js
+  const X = ctx.__dd;
+  toets('5 Access-koppeling aan met het pod-token, One-time PIN', !!X.docsAccess && X.docsAccess.idp === 'e9e612dc-1f11-4c07-bd74-5929e4704eec' && X.docsDelenInfo().beveiligd_aan === true, X.docsDelenInfo());
+  const goedB = { name: 'Gedeelde pagina', type: 'self_hosted', domain: 'deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA', destinations: [{ type: 'public', uri: 'deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA' }],
+    session_duration: '24h', allowed_idps: ['e9e612dc-1f11-4c07-bd74-5929e4704eec'], policies: [{ name: 'Ontvangers', decision: 'allow', precedence: 1, include: [{ email: { email: 'a@example.org' } }] }] };
+  const kopie = (f) => { const b = JSON.parse(JSON.stringify(goedB)); f(b); return b; };
+  toets('5 body: de goede wordt toegestaan', X.docsAccessBodyOk(goedB));
+  for (const [naam, b] of [['ander domein', kopie((b) => { b.domain = 'deel.socev.dev'; b.destinations[0].uri = 'deel.socev.dev'; })],
+    ['/p/', kopie((b) => { b.domain = b.destinations[0].uri = 'deel.socev.dev/p/AAAAAAAAAAAAAAAAAAAAAA'; })],
+    ['jokerteken in het pad', kopie((b) => { b.domain = b.destinations[0].uri = 'deel.socev.dev/b/*'; })],
+    ['tweede bestemming', kopie((b) => { b.destinations.push({ type: 'public', uri: 'socev.dev' }); })],
+    ['self_hosted_domains erbij', kopie((b) => { b.self_hosted_domains = ['socev.dev']; })],
+    ['andere identity provider (Google)', kopie((b) => { b.allowed_idps = ['c1e59597-0ceb-47c6-b6e8-76ae4c903b0d']; })],
+    ['bypass-beleid', kopie((b) => { b.policies[0].decision = 'bypass'; })],
+    ['iedereen', kopie((b) => { b.policies[0].include = [{ everyone: {} }]; })],
+    ['heel een maildomein', kopie((b) => { b.policies[0].include = [{ email_domain: { domain: 'example.org' } }]; })],
+    ['jokerteken in het adres', kopie((b) => { b.policies[0].include = [{ email: { email: '*@example.org' } }]; })],
+    ['twee beleidsregels', kopie((b) => { b.policies.push(b.policies[0]); })]]) toets('5 body geweigerd: ' + naam, !X.docsAccessBodyOk(b));
+  let gooit = 0;
+  for (const [m, a, b] of [['GET', '/access/service_tokens'], ['DELETE', '/access/apps'], ['POST', '/access/apps/11111111-1111-4111-8111-111111111111', goedB],
+    ['PUT', '/access/apps', goedB], ['POST', '/access/apps', kopie((b) => { b.policies[0].decision = 'bypass'; })], ['GET', '/access/apps?domain=deel.socev.dev%2Fp%2F*'],
+    ['GET', '/access/identity_providers'], ['DELETE', '/access/apps/11111111-1111-4111-8111-111111111111', goedB], ['POST', '/access/apps']]) {
+    try { await X.docsCf(m, a, b); } catch (e) { gooit++; }
+  }
+  toets('5 docsCf weigert alles buiten de toestaanlijst vóór er iets de deur uit gaat (9 van 9)', gooit === 9 && fetchLog.length === 0, { gooit, n: fetchLog.length });
+  fetchAntw = () => ({ success: true, result: { id: '44444444-4444-4444-8444-444444444444', aud: 'x', domain: goedB.domain } });
+  const mk = await X.docsAccess.maak(goedB);
+  toets('5 maak: POST naar accounts/<id>/access/apps met het pod-token', mk.ok && mk.id === '44444444-4444-4444-8444-444444444444' && fetchLog.length === 1 && fetchLog[0].url === 'https://cf/client/v4/accounts/acc/access/apps' &&
+    fetchLog[0].o.method === 'POST' && fetchLog[0].o.headers.Authorization === 'Bearer proef', fetchLog[0] && fetchLog[0].url);
+  fetchAntw = () => ({ success: true, result: { id: '44444444-4444-4444-8444-444444444444', aud: 'x', domain: 'deel.socev.dev' } });
+  toets('5 maak: antwoord met een ander domein telt niet als gelukt', (await X.docsAccess.maak(goedB)).ok === false);
+  fetchAntw = () => ({ success: false, errors: [{ code: 11021, message: 'access.api.error.unknown_application' }] });
+  const hw = await X.docsAccess.haal('44444444-4444-4444-8444-444444444444');
+  toets('5 haal: onbekende app (11021) = weg', hw.ok === false && hw.weg === true, hw);
+  fetchAntw = () => ({ success: true, result: [{ id: 'a1', domain: 'deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA' }, { id: 'a2', domain: 'deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA/x' }] });
+  const zq = await X.docsAccess.zoek('deel.socev.dev/b/AAAAAAAAAAAAAAAAAAAAAA');
+  toets('5 zoek: alleen precies dat domein', zq.ok && JSON.stringify(zq.ids) === '["a1"]' && /\?domain=deel\.socev\.dev%2Fb%2FAAAAAAAAAAAAAAAAAAAAAA$/.test(fetchLog[fetchLog.length - 1].url), zq);
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

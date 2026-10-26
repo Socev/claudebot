@@ -18,6 +18,14 @@
 //   expliciet (niet zelf weghalen: geheugen publiceren-niet-zelf-sanitiseren). Is de namenlijst niet te lezen, dan is de poort dicht.
 // Slug alleen willekeurig (geen naam in de URL). Register /opt/data/docs/gedeeld.json (0600): pad-HMAC ↔ slug, soort, titel, sinds, sha256.
 // Het register bevat de slugs (= de links); het auditlog nooit (alleen domein + HMAC van het pad).
+//
+// Beveiligd (wv1383, stap d; bouwplan § 3.4, review #7 en #9). David kiest 1–10 mailadressen; per deling maakt de pod een eigen
+// Cloudflare Access-app op deel.socev.dev/b/<slug> (beleid: precies die adressen, alleen One-time PIN, sessie 24 u). Een padspecifieke app
+// wint van de app op het hele subdomein (alleen David). De Function controleert daarnaast zelf de Access-JWT (aud van die app, mail in de
+// ontvangers: D1 bewaart alleen sha256 van elk adres). Toestaanlijst (review #9): de pod raakt alleen Access-apps waarvan het domein precies
+// deel.socev.dev/b/<slug> is, met een slug die in het deelregister staat (gedeeld.json, of D1 bij opruimen); bij wijzigen en verwijderen eerst
+// de app ophalen en het domein vergelijken. server.js bewaakt het nog eens (alleen access/apps[/<uuid>], alleen dat domein in de body).
+// Geen nieuwe sleutels of credentials: het pod-token dat de Access-apps al beheerde. Van soort wisselen kan niet (eerst intrekken).
 
 const fs = require('fs');
 const path = require('path');
@@ -29,6 +37,24 @@ const NAMEN_VERS_MS = 10 * 60 * 1000;
 const ALLEEN_LEZEN_NAAM = ['actueel.md', 'claude.md', 'claude.local.md', 'agents.md'];
 const NOOIT_MAPDEEL = /(beveiliging|dossier|patient|patiënt|client|cliënt|sollicit|medewerker|personeel|gesprek)/i;
 const SLUG_RE = /^[A-Za-z0-9_-]{22}$/;
+const MAX_ONTVANGERS = 10;
+const MAIL_RE = /^[a-z0-9._%+'-]{1,64}@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+const mailHash = (m) => crypto.createHash('sha256').update(String(m).trim().toLowerCase(), 'utf8').digest('hex');
+
+// Mailadressen van David → schone lijst (kleine letters, uniek) of een fout in gewone taal.
+function ontvangersUit(lijst) {
+  const ruw = Array.isArray(lijst) ? lijst : typeof lijst === 'string' ? lijst.split(/[\s,;]+/) : [];
+  const uit = [];
+  for (const x of ruw) {
+    const m = String(x == null ? '' : x).trim().toLowerCase();
+    if (!m) continue;
+    if (m.length > 254 || !MAIL_RE.test(m) || m.indexOf('..') >= 0) return { fout: '"' + String(x).slice(0, 80) + '" is geen mailadres' };
+    if (uit.indexOf(m) < 0) uit.push(m);
+  }
+  if (!uit.length) return { fout: 'vul minstens één mailadres in' };
+  if (uit.length > MAX_ONTVANGERS) return { fout: 'hooguit ' + MAX_ONTVANGERS + ' mailadressen per pagina' };
+  return { lijst: uit };
+}
 
 // ── renderer ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // Bewust klein en voorspelbaar (zoals build.js): eerst alles escapen, daarna alleen vaste tags invoegen. Geen ruwe HTML, geen scripts,
@@ -282,7 +308,9 @@ function namenIn(volledig, tekst) {
 
 // ── de module ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // opt: { dir, vault, bron(pad, ctx) → {p, d, tekst} | null, masker(t, vast, bsn), bsnMasker, isVastDicht, isVerborgen, hmac, d1(sql, params),
-//        host, lees(abs) (namenlijst), nu, fout }
+//        host, lees(abs) (namenlijst), nu, fout,
+//        access (beveiligd; weg = beveiligd delen uit): { idp, maak(body) → {ok, id, aud}, wijzig(id, body) → {ok, aud}, haal(id) → {ok, domein} |
+//        {ok: false, weg: true}, weg(id) → {ok}, zoek(domein) → {ok, ids} } }
 function maak(opt) {
   const DIR = opt.dir;
   const REG = path.join(DIR, 'gedeeld.json');
@@ -306,6 +334,52 @@ function maak(opt) {
     fs.renameSync(tmp, REG);
   }
   const url = (slug, soort) => 'https://' + HOST + '/' + (soort === 'beveiligd' ? 'b' : 'p') + '/' + slug;
+  const ACC = opt.access || null;
+
+  // ── Access-apps, alleen via de toestaanlijst (review #9) ──
+  // bekend = slugs die buiten de registerlijst om bekend zijn (D1-rij van soort beveiligd, bij intrekken/opruimen)
+  const accDomein = (slug) => HOST + '/b/' + slug;
+  function accMag(slug, bekend) {
+    if (typeof slug !== 'string' || !SLUG_RE.test(slug)) return false;
+    if (leesRegister().delingen.some((x) => x.slug === slug && x.soort === 'beveiligd')) return true;
+    return !!(bekend && bekend.indexOf(slug) >= 0);
+  }
+  function accBody(slug, ontvangers) {
+    return { name: 'Gedeelde pagina', type: 'self_hosted', domain: accDomein(slug), destinations: [{ type: 'public', uri: accDomein(slug) }],
+      session_duration: '24h', allowed_idps: [ACC.idp], auto_redirect_to_identity: true, app_launcher_visible: false,
+      http_only_cookie_attribute: true, same_site_cookie_attribute: 'lax',
+      policies: [{ name: 'Ontvangers', decision: 'allow', precedence: 1, include: ontvangers.map((m) => ({ email: { email: m } })) }] };
+  }
+  async function accMaak(slug, ontvangers) {
+    if (!accMag(slug)) { fout('docs-access', new Error('toestaanlijst: maken geweigerd')); return { ok: false }; }
+    try { const r = await ACC.maak(accBody(slug, ontvangers)); return r && r.ok && r.id && r.aud ? r : { ok: false }; } catch (e) { fout('docs-access-maak', e); return { ok: false }; }
+  }
+  // haal eerst: alleen een app met precies het domein van deze slug wordt gewijzigd of verwijderd
+  async function accEigen(id, slug, bekend) {
+    if (!accMag(slug, bekend) || typeof id !== 'string' || !/^[0-9a-f-]{36}$/.test(id)) return { ok: false, geweigerd: true };
+    let h;
+    try { h = await ACC.haal(id); } catch (e) { fout('docs-access-haal', e); return { ok: false }; }
+    if (h && h.weg) return { ok: true, weg: true };
+    if (!h || !h.ok) return { ok: false };
+    if (h.domein !== accDomein(slug)) { fout('docs-access', new Error('toestaanlijst: app ' + id.slice(0, 8) + ' hoort niet bij deze deling')); return { ok: false, geweigerd: true }; }
+    return { ok: true };
+  }
+  async function accWijzig(id, slug, ontvangers) {
+    const e = await accEigen(id, slug);
+    if (!e.ok || e.weg) return { ok: false };
+    try { const r = await ACC.wijzig(id, accBody(slug, ontvangers)); return r && r.ok ? r : { ok: false }; } catch (x) { fout('docs-access-wijzig', x); return { ok: false }; }
+  }
+  async function accWeg(id, slug, bekend) {
+    const e = await accEigen(id, slug, bekend);
+    if (!e.ok) return { ok: false };
+    if (e.weg) return { ok: true };
+    try { const r = await ACC.weg(id); return { ok: !!(r && r.ok) }; } catch (x) { fout('docs-access-weg', x); return { ok: false }; }
+  }
+  // apps op het domein van deze slug (ook een app waarvan de pod het id kwijt is: crash tussen maken en register)
+  async function accZoek(slug, bekend) {
+    if (!accMag(slug, bekend)) return { ok: false };
+    try { const r = await ACC.zoek(accDomein(slug)); return r && r.ok && Array.isArray(r.ids) ? r : { ok: false }; } catch (e) { fout('docs-access-zoek', e); return { ok: false }; }
+  }
 
   function namenSet() {
     if (namen && nu() - namen.op < NAMEN_VERS_MS) return namen.set;
@@ -343,7 +417,8 @@ function maak(opt) {
   }
 
   function huidigeDeling(reg, h) { return reg.delingen.find((x) => x.h === h) || null; }
-  const naarApp = (x) => x ? { slug: x.slug, url: url(x.slug, x.soort), soort: x.soort, titel: x.titel, sinds: x.sinds, bijgewerkt: x.bijgewerkt || x.sinds } : null;
+  const naarApp = (x) => x ? Object.assign({ slug: x.slug, url: url(x.slug, x.soort), soort: x.soort, titel: x.titel, sinds: x.sinds, bijgewerkt: x.bijgewerkt || x.sinds },
+    x.soort === 'beveiligd' ? { ontvangers: Array.isArray(x.ontvangers) ? x.ontvangers.slice() : [] } : {}) : null;
 
   // Is deze pagina gedeeld, en kan hij gedeeld worden? (licht: geen render)
   function stand(d, ctx) {
@@ -362,11 +437,24 @@ function maak(opt) {
     if (v.status !== 200) return { status: v.status, j: v.j, audit: v.audit };
     const x = huidigeDeling(leesRegister(), v.audit.h);
     return { status: 200, audit: v.audit, j: { ok: true, titel: v.r.titel, body: v.r.body, sha: v.r.sha, namen: v.namen, gedeeld: naarApp(x),
-      host: HOST } };
+      host: HOST, beveiligd: !!ACC } };
   }
 
+  const D1_ZET = 'INSERT INTO deel (slug, soort, titel, html, sinds, bijgewerkt, aud, ontvangers, access_app) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ' +
+    'ON CONFLICT(slug) DO UPDATE SET soort = excluded.soort, titel = excluded.titel, html = excluded.html, bijgewerkt = excluded.bijgewerkt, ' +
+    'aud = excluded.aud, ontvangers = excluded.ontvangers, access_app = excluded.access_app';
+  const zelfde = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x) => b.indexOf(x) >= 0);
+
   async function delen(d, ctx) {
-    if (!d || d.soort !== 'openbaar') return { status: 400, j: { ok: false, fout: d && d.soort === 'beveiligd' ? 'beveiligd delen volgt nog' : 'kies Openbaar' } };
+    const soort = d && d.soort;
+    if (soort !== 'openbaar' && soort !== 'beveiligd') return { status: 400, j: { ok: false, fout: 'kies Openbaar of Beveiligd' } };
+    let ontvangers = null;
+    if (soort === 'beveiligd') {
+      if (!ACC) return { status: 503, j: { ok: false, fout: 'beveiligd delen werkt nu niet op de pod' } };
+      const o = ontvangersUit(d.ontvangers);
+      if (o.fout) return { status: 400, j: { ok: false, fout: o.fout } };
+      ontvangers = o.lijst;
+    }
     if (typeof d.sha !== 'string' || !/^[0-9a-f]{64}$/.test(d.sha)) return { status: 400, j: { ok: false, fout: 'onvolledig verzoek' } };
     const v = bekijk(d, ctx);
     if (v.status !== 200) return { status: v.status, j: v.j, audit: v.audit };
@@ -378,25 +466,55 @@ function maak(opt) {
     }
     const reg = leesRegister();
     const oud = huidigeDeling(reg, v.audit.h);
+    if (oud && oud.soort !== soort)
+      return { status: 409, j: { ok: false, soort_anders: true, fout: 'deze pagina is al ' + oud.soort + ' gedeeld; trek die deling eerst in (onder Gedeeld) en deel hem dan ' + soort }, audit: v.audit };
     const tijd = new Date(nu()).toISOString();
     const slug = oud ? oud.slug : crypto.randomBytes(16).toString('base64url');
     const bronSha = crypto.createHash('sha256').update(String(v.b.tekst), 'utf8').digest('hex');
-    const nieuw = { h: v.audit.h, slug: slug, soort: 'openbaar', titel: v.r.titel, sinds: oud ? oud.sinds : tijd, bijgewerkt: tijd, sha: v.r.sha,
+    const nieuw = { h: v.audit.h, slug: slug, soort: soort, titel: v.r.titel, sinds: oud ? oud.sinds : tijd, bijgewerkt: tijd, sha: v.r.sha,
       bron_sha: bronSha, namen_bevestigd: v.namen.length };
-    // eerst het register (dan staat elke deling die buiten kan staan erin, ook als D1 daarna faalt), dan D1
+    if (soort === 'beveiligd') Object.assign(nieuw, { ontvangers: ontvangers, access_app: oud ? oud.access_app || null : null, aud: oud ? oud.aud || null : null });
+    // eerst het register (dan staat elke deling die buiten kan staan erin, ook als D1 daarna faalt; en de toestaanlijst kent de slug), dan
+    // bij beveiligd de Access-app, dan D1. Mislukt een latere stap, dan gaat wat er al stond terug.
     const vorige = reg.delingen.slice();
-    reg.delingen = reg.delingen.filter((x) => x.h !== v.audit.h).concat([nieuw]);
-    try { schrijfRegister(reg); } catch (e) { fout('docs-register', e); return { status: 500, j: { ok: false, fout: 'het deelregister kon niet worden bijgewerkt; er is niets gedeeld' }, audit: v.audit }; }
+    const zet = () => { reg.delingen = vorige.filter((x) => x.h !== v.audit.h).concat([nieuw]); schrijfRegister(reg); };
+    const terug = () => { try { reg.delingen = vorige; schrijfRegister(reg); } catch (e) { fout('docs-register-terug', e); } };
+    try { zet(); } catch (e) { fout('docs-register', e); return { status: 500, j: { ok: false, fout: 'het deelregister kon niet worden bijgewerkt; er is niets gedeeld' }, audit: v.audit }; }
+    const misCf = { status: 502, j: { ok: false, fout: 'delen lukte niet (Cloudflare gaf geen goed antwoord); probeer het zo nog eens' }, audit: v.audit };
+    let acc = null;   // 'nieuw' | 'gewijzigd' | null
+    if (soort === 'beveiligd') {
+      if (!nieuw.access_app) {
+        const m = await accMaak(slug, ontvangers);
+        if (!m.ok) { terug(); return misCf; }
+        nieuw.access_app = m.id; nieuw.aud = m.aud; acc = 'nieuw';
+        try { zet(); } catch (e) { fout('docs-register', e); await accWeg(m.id, slug); terug(); return misCf; }
+      } else {
+        // bestaat de app nog? (met de hand weggehaald = opnieuw maken; de oude aud werkt dan niet meer)
+        const e = await accEigen(nieuw.access_app, slug);
+        if (!e.ok) { terug(); return misCf; }
+        if (e.weg) {
+          const m = await accMaak(slug, ontvangers);
+          if (!m.ok) { terug(); return misCf; }
+          nieuw.access_app = m.id; nieuw.aud = m.aud; acc = 'nieuw';
+          try { zet(); } catch (x) { fout('docs-register', x); await accWeg(m.id, slug); terug(); return misCf; }
+        } else if (!zelfde(oud.ontvangers, ontvangers)) {
+          const w = await accWijzig(nieuw.access_app, slug, ontvangers);
+          if (!w.ok) { terug(); return misCf; }
+          acc = 'gewijzigd';
+        }
+      }
+    }
     let ok = false;
     try {
-      const q = await opt.d1('INSERT INTO deel (slug, soort, titel, html, sinds, bijgewerkt) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ' +
-        'ON CONFLICT(slug) DO UPDATE SET soort = excluded.soort, titel = excluded.titel, html = excluded.html, bijgewerkt = excluded.bijgewerkt',
-        [slug, 'openbaar', v.r.titel, v.r.html, nieuw.sinds, tijd]);
+      const q = await opt.d1(D1_ZET, [slug, soort, v.r.titel, v.r.html, nieuw.sinds, tijd, soort === 'beveiligd' ? nieuw.aud : null,
+        soort === 'beveiligd' ? JSON.stringify(ontvangers.map(mailHash)) : null, soort === 'beveiligd' ? nieuw.access_app : null]);
       ok = !!(q && q.ok);
     } catch (e) { fout('docs-d1', e); }
     if (!ok) {
-      try { reg.delingen = vorige; schrijfRegister(reg); } catch (e) { fout('docs-register-terug', e); }
-      return { status: 502, j: { ok: false, fout: 'delen lukte niet (Cloudflare gaf geen goed antwoord); probeer het zo nog eens' }, audit: v.audit };
+      if (acc === 'nieuw') { const w = await accWeg(nieuw.access_app, slug); if (!w.ok) fout('docs-access', new Error('app na D1-fout niet weg')); }
+      if (acc === 'gewijzigd') { const w = await accWijzig(nieuw.access_app, slug, oud.ontvangers); if (!w.ok) fout('docs-access', new Error('ontvangers na D1-fout niet terug')); }
+      terug();
+      return misCf;
     }
     return { status: 200, audit: v.audit, j: { ok: true, bijgewerkt: !!oud, gedeeld: naarApp(nieuw) } };
   }
@@ -415,7 +533,9 @@ function maak(opt) {
     if (rijen) {
       for (const r of rijen) {
         const x = perSlug.get(r.slug);
-        uit.push({ slug: r.slug, url: url(r.slug, r.soort), soort: r.soort, titel: r.titel, sinds: r.sinds, bijgewerkt: r.bijgewerkt, in_register: !!x });
+        const rij = { slug: r.slug, url: url(r.slug, r.soort), soort: r.soort, titel: r.titel, sinds: r.sinds, bijgewerkt: r.bijgewerkt, in_register: !!x };
+        if (r.soort === 'beveiligd') rij.ontvangers = x && Array.isArray(x.ontvangers) ? x.ontvangers.slice() : [];
+        uit.push(rij);
         perSlug.delete(r.slug);
       }
     }
@@ -423,14 +543,36 @@ function maak(opt) {
     return { status: 200, j: { ok: true, delingen: uit, d1: !!rijen } };
   }
 
+  // Volgorde: eerst de inhoud weg (D1-rij: de volgende aanvraag is 404), dan bij beveiligd de Access-app, dan de registerregel. Lukt het
+  // opruimen bij Access niet, dan blijft de regel staan (de toestaanlijst kent de slug dan nog) en zegt de App: nog eens op Intrekken.
   async function intrekken(d) {
     const slug = d && d.slug;
     if (typeof slug !== 'string' || !SLUG_RE.test(slug)) return { status: 400, j: { ok: false, fout: 'onbekende deling' } };
-    let ok = false;
-    try { const q = await opt.d1('DELETE FROM deel WHERE slug = ?1', [slug]); ok = !!(q && q.ok); } catch (e) { fout('docs-d1-weg', e); }
-    if (!ok) return { status: 502, j: { ok: false, fout: 'intrekken lukte niet (Cloudflare gaf geen goed antwoord); de pagina staat nog buiten. Probeer het zo nog eens.' } };
     const reg = leesRegister();
-    const x = reg.delingen.find((y) => y.slug === slug);
+    const x = reg.delingen.find((y) => y.slug === slug) || null;
+    let rij = null, ok = false;
+    try {
+      const q = await opt.d1('SELECT soort, access_app FROM deel WHERE slug = ?1', [slug]);
+      if (q && q.ok) { rij = q.rijen && q.rijen[0] || null; const w = await opt.d1('DELETE FROM deel WHERE slug = ?1', [slug]); ok = !!(w && w.ok); }
+    } catch (e) { fout('docs-d1-weg', e); }
+    if (!ok) return { status: 502, j: { ok: false, fout: 'intrekken lukte niet (Cloudflare gaf geen goed antwoord); de pagina staat nog buiten. Probeer het zo nog eens.' } };
+    const beveiligd = (x && x.soort === 'beveiligd') || (rij && rij.soort === 'beveiligd');
+    if (beveiligd) {
+      if (!ACC) return { status: 502, j: { ok: false, fout: 'de pagina is weg (de link werkt niet meer), maar het opruimen bij Cloudflare kan nu niet; probeer het later nog eens' } };
+      const bekend = rij && rij.soort === 'beveiligd' ? [slug] : null;
+      const ids = [x && x.access_app, rij && rij.access_app].filter((i, n, a) => typeof i === 'string' && a.indexOf(i) === n);
+      let schoon = true;
+      // een id dat niet bij deze slug hoort (toestaanlijst) blijft onaangeroerd en telt niet als fout: het zoeken op het domein hieronder beslist
+      for (const id of ids) { const e = await accEigen(id, slug, bekend); if (e.geweigerd) continue; const w = e.ok ? await accWeg(id, slug, bekend) : e; if (!w.ok) schoon = false; }
+      const z = await accZoek(slug, bekend);   // ook een app waarvan het id nergens staat
+      if (!z.ok) schoon = false;
+      else for (const id of z.ids) { if (ids.indexOf(id) >= 0) continue; const w = await accWeg(id, slug, bekend); if (!w.ok) schoon = false; }
+      if (!schoon) {
+        if (x) { x.access_open = true; try { schrijfRegister(reg); } catch (e) { fout('docs-register', e); } }
+        return { status: 502, audit: { domein: null, h: x ? x.h : null }, j: { ok: false, deels: true,
+          fout: 'de pagina is weg (de link werkt niet meer), maar het opruimen bij Cloudflare lukte niet helemaal; druk nog eens op Intrekken' } };
+      }
+    }
     if (x) {
       reg.delingen = reg.delingen.filter((y) => y.slug !== slug);
       try { schrijfRegister(reg); } catch (e) { fout('docs-register', e); }
@@ -450,10 +592,12 @@ function maak(opt) {
 
   function health() {
     const reg = leesRegister();
-    return { aan: true, host: HOST, gedeeld: reg.delingen.length };
+    return { aan: true, host: HOST, gedeeld: reg.delingen.length, beveiligd: reg.delingen.filter((x) => x.soort === 'beveiligd').length,
+      beveiligd_aan: !!ACC, opruimen_open: reg.delingen.filter((x) => x.access_open).length };
   }
 
   return { app: app, health: health };
 }
 
-module.exports = { maak: maak, render: render, namenIn: namenIn, bouwNamen: bouwNamen, voorbewerk: voorbewerk, SLUG_RE: SLUG_RE };
+module.exports = { maak: maak, render: render, namenIn: namenIn, bouwNamen: bouwNamen, voorbewerk: voorbewerk, SLUG_RE: SLUG_RE, ontvangersUit: ontvangersUit,
+  mailHash: mailHash };
