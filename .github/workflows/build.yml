@@ -339,6 +339,9 @@ jobs:
       - name: "app-vast (wv1051, OVIS M1b: vastzetten in het menu)"
         if: ${{ !cancelled() }}
         run: bash test/app-vast.sh
+      - name: "intake-telling (wv1244, OVIS M1d: Intake-plek met tellingen)"
+        if: ${{ !cancelled() }}
+        run: bash test/intake-telling.sh
       - name: "zoek-snel (wv1252, Zoek snel achter het OVIS-logo)"
         if: ${{ !cancelled() }}
         run: bash test/zoek-snel.sh

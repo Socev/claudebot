@@ -11560,6 +11560,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/vast' || route === 'POST /app/vast') return appVastRoute(req, res, a, d);   // wv1051 (OVIS M1b): vastzetten
         if (route === 'GET /app/mediatheek' || /^GET \/app\/mediatheek\/bestand\/[a-f0-9]{16}$/.test(route)) return typeof appMediatheek === 'function' ? appMediatheek(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mediatheek');   // wv1269: App Mediatheek (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
+        if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
         if (route === 'GET /app/ideeen' || /^GET \/app\/ideeen\/(plaatje\/[1-9][0-9]{0,11}\/[0-2]|proefplaatje\/k\d{2,3}\/[0-2]|kaart\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||
@@ -14850,6 +14851,33 @@ async function appRingkaart(req, res, a) {
   return appStuur(res, 200, uit);
 }
 // ── einde ringkaart ──
+
+// ── Intake-plek: tellingen (wv1244, OVIS M1d; ontwerplijnen § 2.1 rij Intake, Fable #19) ──
+// GET /app/intake: per bron en entiteit hoeveel er vandaag en deze week binnenkwam (maillog via RPC ovis_intake_telling, facturen-postvak,
+// raw_input in de vault, de nieuwe aanleverweg in schaduw). Alleen aantallen: geen onderwerp, afzender, bestandsnaam of id (intake-telling.js).
+// Vaste plek: entiteit privé valt weg. Ontbreekt intake-telling.js in de release (terugrol), dan 404 en toont de app "komt eraan".
+const INTAKE_TELLING_MOD = (function () { const p = path.join(__dirname, 'intake-telling.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('intake-telling', e); return null; } })();
+let intakeTelling = null;
+function intakeTellingMaak() {
+  if (intakeTelling || !INTAKE_TELLING_MOD) return intakeTelling;
+  try {
+    intakeTelling = INTAKE_TELLING_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, facturenPad: path.join(FACTUREN_DIR, 'facturen.sqlite'),
+      intakePad: path.join(INTAKE_DIR, 'intake.sqlite'), rpc: (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE) ? appSbRpc : null });
+  } catch (e) { logError('intake-telling', e); }
+  return intakeTelling;
+}
+async function appIntakeTelling(req, res, a) {
+  const T = intakeTellingMaak();
+  if (!T) return appWeiger(res, 404, 'De Intake-tellingen zitten niet in deze versie van de pod', 'intake-telling ontbreekt');
+  appStaat.tellers.intake = appStaat.tellers.intake || [];
+  if (!appTeller('intake', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens intake');
+  let uit;
+  try { uit = await T.telling(!!(a && a.soort === 'vast')); }
+  catch (e) { logError('app-intake', e); return appWeiger(res, 500, 'fout op de pod', 'intake uitzondering'); }
+  res._app.stil = true;
+  return appStuur(res, 200, uit);
+}
+// ── einde Intake-plek ──
 
 // ── Mediatheek (wv1269, 26-10-2026; opdracht David 24-10 17:02, box-rij "Opdracht David: Mediatheek-app in de Socev-app") ──
 // App Mediatheek: de liedjes en andere artistieke uitingen uit 20_Prive/Mediatheek.md, per onderwerp, afspelen en downloaden. Logica en

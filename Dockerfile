@@ -166,6 +166,7 @@ COPY docs-delen.js /app/release-bootstrap/docs-delen.js
 COPY zoek-snel.js /app/release-bootstrap/zoek-snel.js
 COPY gezondheid-app.js /app/release-bootstrap/gezondheid-app.js
 COPY app-vast.js /app/release-bootstrap/app-vast.js
+COPY intake-telling.js /app/release-bootstrap/intake-telling.js
 COPY ideeen.js /app/release-bootstrap/ideeen.js
 COPY ideeen-filter.js /app/release-bootstrap/ideeen-filter.js
 COPY aix.js /app/release-bootstrap/aix.js

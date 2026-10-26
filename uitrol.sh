@@ -78,7 +78,7 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # scansnap.js (wv1343): ScanSnap-scans uit Google Drive → OVIS Intake + Voor jou-kaart, door server.js geladen (ontbreekt hij, dan geen tik, geen
 #   knop-haak en scansnap.module=false in /health).
 RELEASE_MAPPEN="intake"
-RELEASE_OPTIONEEL="intake-ingang.js vault-veilig.js bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js managers-poort.js mk-tekst.js ringkaart.js mediatheek.js gezondheid-app.js ovis-register.js ovis-run.js app-vast.js zoek-snel.js onderhoud.js datums.js scansnap.js sb2-nacht.js docs-delen.js"
+RELEASE_OPTIONEEL="intake-ingang.js vault-veilig.js bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js managers-poort.js mk-tekst.js ringkaart.js mediatheek.js gezondheid-app.js ovis-register.js ovis-run.js app-vast.js intake-telling.js zoek-snel.js onderhoud.js datums.js scansnap.js sb2-nacht.js docs-delen.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }
