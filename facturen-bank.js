@@ -1232,14 +1232,17 @@ function feitUitleg(k) {
     (andere.length ? ' (ook gespeld als ' + andere.slice(0, 3).join(', ') + ')' : '') + '.';
   const fs = (k.facturen || []).filter(Boolean);
   const fTekst = (f) => (f.nummer || 'zonder nummer') + (f.leverancier_naam ? ' van ' + f.leverancier_naam : '') + (Number.isSafeInteger(f.incl) ? ' (' + eurTekst(Math.abs(f.incl)) + ')' : '');
-  const aanleiding = fs.length === 1 ? 'Factuur ' + fTekst(fs[0]) + ' noemt deze rekening; die moet nu eerst nagebeld worden.'
-    : fs.length + ' facturen noemen deze rekening (' + fs.slice(0, 3).map(fTekst).join('; ') + (fs.length > 3 ? '; …' : '') + '); die moeten nu eerst nagebeld worden.';
+  const aanleiding = (fs.length === 1 ? 'Factuur ' + fTekst(fs[0]) + ' noemt deze rekening; die moet nu eerst nagebeld worden.'
+    : fs.length + ' facturen noemen deze rekening (' + fs.slice(0, 3).map(fTekst).join('; ') + (fs.length > 3 ? '; …' : '') + '); die moeten nu eerst nagebeld worden.') +
+    (k.zonder_naam ? ' Let op: op ' + (fs.length === 1 ? 'de factuur' : 'een van de facturen') + ' is geen leveranciersnaam herkend; kijk op het stuk of hij van ' + k.naam +
+      ' komt. Ja maakt ' + k.naam + ' de leverancier.' : '') +
+    (k.nog_onbekend ? ' Let op: er staat nog een andere onbekende rekening op; die blijft nabellen.' : '');
   return {
     zin: rek + ' is van ' + k.naam + '.',
     bron,
     aanleiding,
     ja: 'Ja: ' + (k.leverancier_bestaat ? k.naam + ' krijgt deze rekening erbij' : k.naam + ' wordt een bekende leverancier met deze rekening') +
-      '. Facturen met deze rekening hoeven dan niet meer nagebeld te worden, en betalingen eraan worden aan hun factuur gekoppeld.',
+      '. Facturen met deze rekening hoeven dan niet meer nagebeld te worden, en betalingen eraan worden aan hun factuur gekoppeld. Een betaling onder deze naam aan een ander rekeningnummer wordt voortaan gemeld als mogelijke fraude.',
     nee: 'Nee: er wordt niets vastgelegd en deze kaart komt niet terug; nabellen blijft nodig.',
   };
 }

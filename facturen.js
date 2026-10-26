@@ -838,14 +838,21 @@ function feitKaarten(fdb, r, nu) {
   const entNamen = new Map(ctx.entiteiten.map((e) => [e.sleutel, e.naam_kort || e.naam]));
   const besloten = fdb.db.prepare('SELECT 1 FROM feit WHERE sleutel = ?');
   const bekend = fdb.db.prepare('SELECT 1 FROM leverancier_iban WHERE iban = ? LIMIT 1');
-  const hist = fdb.db.prepare('SELECT boekdatum, bedrag_centen, tegenpartij_naam, entiteit FROM bank_transactie WHERE tegenpartij_iban = ? AND bedrag_centen < 0 AND verwijderd_op IS NULL');
+  // alleen historie die niet uit een upload van de smalle ingang komt: de bankluis, of een bestand van David of de machinekamer (diffreview
+  // wv1323 MOET 1: anders kon een praktijkmanager met een verzonnen export zelf de historie maken en zo het nabellen omzeilen)
+  const hist = fdb.db.prepare('SELECT t.boekdatum, t.bedrag_centen, t.tegenpartij_naam, t.entiteit FROM bank_transactie t LEFT JOIN bank_bestand b ON b.id = t.bestand ' +
+    "WHERE t.tegenpartij_iban = ? AND t.bedrag_centen < 0 AND t.verwijderd_op IS NULL AND (t.bestand IS NULL OR (b.geupload_door NOT LIKE '%@%' " +
+    "AND NOT EXISTS (SELECT 1 FROM gebruiker g WHERE g.ingang = 'fac' AND g.email = b.geupload_door)))");
   const levOpNaam = fdb.db.prepare('SELECT id, naam FROM leverancier WHERE genormaliseerd = ? ORDER BY aangemaakt_op, id LIMIT 2');
   const perIban = new Map();
   for (const x of fdb.db.prepare("SELECT id FROM factuur WHERE status = 'te_beoordelen' ORDER BY aangemaakt_op, id LIMIT " + FEIT_FACTUREN_MAX).all()) {
     const f = D.factuurVoorKern(fdb, x.id);
     if (!f) continue;
     const lev = leverancierKern(fdb, f.leverancier_id);
-    for (const iban of K.ibanPoort(f, lev, ctx).onbekend) {
+    // alleen als nabellen Bevestigen nu echt tegenhoudt (een al nagebelde factuur zonder leverancier niet; diffreview KAN 8)
+    if (!K.magBevestigen(Object.assign({}, f, { status: 'te_beoordelen' }), { leverancier: lev, ctx }).redenen.some((x) => /nabellen/.test(x))) continue;
+    const onbekend = K.ibanPoort(f, lev, ctx).onbekend;
+    for (const iban of onbekend) {
       if (eigen.has(iban)) continue;
       if (!perIban.has(iban)) {
         let k = null;
@@ -858,9 +865,14 @@ function feitKaarten(fdb, r, nu) {
       const k = perIban.get(iban);
       if (!k) continue;
       const naam = lev ? lev.naam : f.leverancier_naam;
-      if (naam && !V.naamVerwant(naam, k.h.naam)) k.botsing = true;
+      // geen naam op de factuur en geen leverancier: niets in de gegevens verbindt de afzender met de rekeninghouder (diffreview ZOU 3). Wel
+      // een kaart (Davids eigen voorbeeld, de huurfactuur, heeft geen herkende naam; geld naar een rekening met deze historie levert een
+      // vervalser niets op), maar de kaart zegt het hardop: kijk op het stuk, Ja maakt deze naam de leverancier van deze factuur.
+      if (!naam) k.zonderNaam = true;
+      else if (!V.naamVerwant(naam, k.h.naam)) k.botsing = true;
       if (lev) k.levs.set(lev.id, lev.naam);
       k.facturen.push(f);
+      if (onbekend.length > 1) k.meer = true;
     }
   }
   const uit = [];
@@ -868,7 +880,7 @@ function feitKaarten(fdb, r, nu) {
     // twee verschillende leveranciers voor één rekening, of een factuur met een andere naam: geen kaart, nabellen
     if (!k || k.botsing || k.levs.size > 1 || !k.facturen.length) continue;
     let leverancier = k.levs.size ? { id: [...k.levs.keys()][0], naam: [...k.levs.values()][0] } : null;
-    const naam = leverancier ? leverancier.naam : kort((k.facturen.find((f) => f.leverancier_naam) || {}).leverancier_naam || k.h.naam, 200);
+    const naam = leverancier ? leverancier.naam : kort(V.vollereNaam((k.facturen.find((f) => f.leverancier_naam) || {}).leverancier_naam, k.h.naam), 200);
     if (!leverancier) {
       const l = levOpNaam.all(K.normNaam(naam));
       if (l.length > 1) continue;   // twee leveranciers met dezelfde naam: niet raden
@@ -876,8 +888,10 @@ function feitKaarten(fdb, r, nu) {
     }
     const facturen = k.facturen.map((f) => ({ id: f.id, nummer: f.nummer, leverancier_naam: f.leverancier_naam, incl: f.incl, valuta: f.valuta, entiteit: f.entiteit }));
     const kaart = { iban: k.iban, naam: leverancier ? leverancier.naam : naam, bank_naam: k.h.naam, namen: k.h.namen, aantal: k.h.aantal, eerste: k.h.eerste,
-      laatste: k.h.laatste, entiteiten: k.h.entiteiten.map((e) => entNamen.get(e) || e), facturen, leverancier_bestaat: !!leverancier };
-    uit.push({ sleutel: 'iban:' + k.iban, soort: 'iban', rekening: eind4(k.iban), naam: kaart.naam, bank_naam: kaart.bank_naam, aantal: k.h.aantal, eerste: k.h.eerste,
+      laatste: k.h.laatste, entiteiten: k.h.entiteiten.map((e) => entNamen.get(e) || e), facturen, leverancier_bestaat: !!leverancier, nog_onbekend: !!k.meer, zonder_naam: !!k.zonderNaam };
+    // wat David akkordeert, vast: naam, leverancier en de facturen die vrijkomen; Ja geldt alleen voor precies deze kaart (diffreview MOET 2)
+    const versie = D.sha256(Buffer.from(JSON.stringify([k.iban, kaart.naam, leverancier ? leverancier.id : null, k.h.naam, facturen.map((f) => f.id).sort()]), 'utf8')).slice(0, 16);
+    uit.push({ sleutel: 'iban:' + k.iban, versie, soort: 'iban', rekening: eind4(k.iban), naam: kaart.naam, bank_naam: kaart.bank_naam, aantal: k.h.aantal, eerste: k.h.eerste,
       laatste: k.h.laatste, dagen: k.h.dagen, namen: k.h.namen, entiteiten: k.h.entiteiten, facturen, leverancier, uitleg: B.feitUitleg(kaart) });
   }
   return uit;
@@ -891,12 +905,14 @@ function feitRoute(fdb, r, d, nu, o) {
   if (!/^iban:[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(sleutel)) weiger(400, 'sleutel ontbreekt of is ongeldig');
   const keuze = d.keuze;
   if (!['bevestig', 'afwijs'].includes(keuze)) weiger(400, 'keuze is bevestig of afwijs');
+  if (!/^[0-9a-f]{16}$/.test(String(d.versie || ''))) weiger(400, 'versie van de kaart ontbreekt');
   return D.transactie(fdb, function () {
     const k = feitKaarten(fdb, r, nu).find((x) => x.sleutel === sleutel);
     if (!k) {
       const b = fdb.db.prepare('SELECT status FROM feit WHERE sleutel = ?').get(sleutel);
       weiger(409, b ? 'over deze rekening besliste je al (' + (b.status === 'bevestigd' ? 'ja' : 'nee') + ')' : 'deze kaart geldt niet meer; ververs de lijst');
     }
+    if (k.versie !== d.versie) weiger(409, 'de kaart is intussen veranderd (naam of facturen); bekijk hem opnieuw', { kaart_veranderd: true });
     if (keuze === 'bevestig') {
       if (!o.versOk()) weiger(403, 'bevestig met je vingerafdruk', { vers_nodig: true });
       o.versVerbruik();
@@ -923,9 +939,13 @@ function feitRoute(fdb, r, d, nu, o) {
       const f = D.factuurVoorKern(fdb, fk.id);
       if (!f || f.status !== 'te_beoordelen') continue;
       const levId = f.leverancier_id || lev.id;
-      const ip = K.ibanPoort(f, levId === lev.id ? levKern : leverancierKern(fdb, levId), ctx);
-      const u = fdb.db.prepare('UPDATE factuur SET leverancier = ?, iban_nieuw = ?, ibans_onbekend = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND versie = ? AND status = \'te_beoordelen\'')
-        .run(levId, ip.iban_nieuw ? 1 : 0, JSON.stringify(ip.onbekend), wanneer, f.id, f.versie);
+      const lk = levId === lev.id ? levKern : leverancierKern(fdb, levId);
+      const nieuwF = Object.assign({}, f, { leverancier_id: levId });
+      // controles opnieuw zoals bij wijzig (een bestaande leverancier brengt bv. zijn mediaan mee; diffreview ZOU 7)
+      const va = K.valideer(nieuwF, ctx, { leverancier: lk });
+      const ip = K.ibanPoort(nieuwF, lk, ctx);
+      const u = fdb.db.prepare('UPDATE factuur SET leverancier = ?, controles = ?, intern = ?, iban_nieuw = ?, ibans_onbekend = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND versie = ? AND status = \'te_beoordelen\'')
+        .run(levId, JSON.stringify(va.controles), va.intern ? 1 : 0, ip.iban_nieuw ? 1 : 0, JSON.stringify(ip.onbekend), wanneer, f.id, f.versie);
       if (u.changes !== 1) weiger(409, 'een factuur is intussen gewijzigd; ververs de lijst');
       besluitRij(fdb, f.id, K.besluit('iban', 'bankhistorie', iban, 'mens', 'rekening ' + eind4(iban) + ' is van ' + lev.naam + ' (' + k.aantal + ' betalingen sinds ' + k.eerste +
         '); bevestigd in Bankcontrole' + (f.leverancier_id ? '' : '; leverancier gezet')), r.wie, wanneer);

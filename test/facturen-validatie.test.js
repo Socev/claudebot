@@ -620,4 +620,11 @@ test('wv1323: ibanHistorie en naamVerwant — ≥ 3 afschrijvingen met een naam 
   assert.equal(V.ibanHistorie([t('2026-01-01', null), t('2026-02-01', 'X Proef'), t('2026-03-15', 'X Proef')]).ok, false);
   assert.equal(V.ibanHistorie([t('2026-01-01', 'X', { bedrag_centen: 1 })]).aantal, 0);
   assert.equal(V.ibanHistorie([t('2026-01-01', 'X Proef'), t('2026-01-31', 'X Proef'), t('2026-03-02', 'X Proef')]).ok, true, 'precies 60 dagen telt');
+  // verzamelrekeningen (betaaldienst, derdengelden): nooit
+  for (const n of ['Stichting Mollie Payments', 'St. Beheer Derdengelden Notaris', 'Webwinkel via Adyen', 'PAY.NL'])
+    assert.equal(V.ibanHistorie([t('2026-01-01', n), t('2026-02-01', n), t('2026-03-15', n)]).reden, 'verzamelrekening (betaaldienst of derdengelden)', n);
+  assert.equal(V.vollereNaam('Gemeente', 'Gemeente Leusden'), 'Gemeente Leusden');
+  assert.equal(V.vollereNaam('Mattijs Volman', 'M. Volman'), 'Mattijs Volman');
+  assert.equal(V.vollereNaam('Mediq Nederland B.V.', 'MEDIQ'), 'Mediq Nederland B.V.');
+  assert.equal(V.vollereNaam(null, 'Bank Naam'), 'Bank Naam');
 });

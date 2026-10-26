@@ -994,5 +994,11 @@ test('migratie 7 (wv1323): schema 4 → 7 maakt feit + leverancier_iban.bron/fei
   const a = D.open(dir), b = D.open(map('m7-nieuw'));
   assert.deepEqual(sql(a.db), sql(b.db));
   assert.deepEqual(a.toegepast, []);
-  D.sluit(a); D.sluit(b);
+  // lichte terugrol (rij 7 weg) en weer vooruit: M7 maakt alleen wat ontbreekt, de feiten blijven (diffreview ZOU 6)
+  a.db.exec('DELETE FROM schema_migratie WHERE versie = 7');
+  D.sluit(a);
+  const c = D.open(dir);
+  assert.deepEqual(c.toegepast, [7]); assert.equal(c.db.prepare('SELECT count(*) AS n FROM feit').get().n, 2);
+  assert.deepEqual(sql(c.db), sql(b.db));
+  D.sluit(c); D.sluit(b);
 });

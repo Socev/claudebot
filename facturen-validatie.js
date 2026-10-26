@@ -131,7 +131,19 @@ function bedragPatroon(lijst, vandaag, bedrag, opties) {
  * salarisbureau onder twee bedrijfsnamen niet — die blijven nabellen). Verwant is bewust streng: een twijfelgeval kost een telefoontje.
  */
 const FEIT_MIN_BETALINGEN = 3, FEIT_MIN_DAGEN = 60, FEIT_MIN_NAAM = 3;
+// Verzamelrekeningen zijn niet "uniek van bedrijf Z": een betaaldienst of derdengeldenrekening ontvangt voor velen (diffreview wv1323 ZOU 4).
+// Staat zo'n naam in de historie, dan nooit een kaart: nabellen.
+const VERZAMEL_RE = /derdengeld|\b(mollie|stripe|adyen|paypal|buckaroo|multisafepay|pay\.nl|payvision|worldline|klarna|sumup|tikkie|online payment platform|opp|ccv|ingenico|icepay|targetpay|sisow|paynl|mangopay|betaaldienst|payment ?services?)\b|\bvia\b/i;
 function compactNaam(s) { return normNaam(s).replace(/ /g, ''); }
+function zonderAccentenEnz(s) { return String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, ''); }
+// Welke naam wordt de leverancier: de vollere van factuurnaam en banknaam (diffreview wv1323 ZOU 5: factuur "Gemeente", bank "Gemeente
+// Leusden" → "Gemeente Leusden"; een kortere naam herkent later te veel). Voorletters in de bank, voluit op de factuur: de factuurnaam.
+function vollereNaam(factuurNaam, bankNaam) {
+  if (!factuurNaam) return bankNaam || null;
+  if (!bankNaam) return factuurNaam;
+  const f = compactNaam(factuurNaam), b = compactNaam(bankNaam);
+  return f.indexOf(b) < 0 && b.indexOf(f) >= 0 ? bankNaam : factuurNaam;
+}
 // Voorletters + achternaam ("M. den Uijl") tegen een voluit geschreven naam ("Marijke den Uijl", "Mattijs Volman Waarnemend Huisarts"): de
 // rest na de voorletters (≥ 4 tekens) staat erin en de eerste letter klopt (gemeten 26-10: zo spellen bank en waarnemersfactuur dezelfde persoon).
 function voorletterVerwant(kort, lang) {
@@ -166,6 +178,7 @@ function ibanHistorie(lijst) {
   if (l.length < FEIT_MIN_BETALINGEN) uit.reden = 'minder dan ' + FEIT_MIN_BETALINGEN + ' betalingen';
   else if (dagen < FEIT_MIN_DAGEN) uit.reden = 'korter dan ' + FEIT_MIN_DAGEN + ' dagen';
   else if (namen.some((n) => !naamVerwant(n.naam, hoofd))) uit.reden = 'verschillende namen';
+  else if (namen.some((n) => VERZAMEL_RE.test(zonderAccentenEnz(n.naam)))) uit.reden = 'verzamelrekening (betaaldienst of derdengelden)';
   else uit.ok = true;
   return uit;
 }
@@ -359,6 +372,6 @@ function zoek(transacties, vraag) {
 
 module.exports = {
   tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan, bedragPatroon,
-  naamVerwant, ibanHistorie, FEIT_MIN_BETALINGEN, FEIT_MIN_DAGEN,
+  naamVerwant, vollereNaam, ibanHistorie, FEIT_MIN_BETALINGEN, FEIT_MIN_DAGEN, VERZAMEL_RE,
   genormKenmerk, echtKenmerk, betalingVan, controles, zoek,
 };

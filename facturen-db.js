@@ -666,9 +666,9 @@ function M6(db, vervang) { return M5(db, vervang || M6_VERVANG, 'migratie_6'); }
  * leverancier_iban krijgt de bron erbij: 'nagebeld' (de bestaande weg, standaard) of 'bankhistorie' (alleen met een bevestigd feit).
  * LET OP terugrol: een release van vóór wv1323 opent deze database niet meer (schema_nieuwer). Lichtste terugrol is
  * `DELETE FROM schema_migratie WHERE versie = 7`: de oude code noemt bij leverancier_iban de kolommen bij naam en hindert de nieuwe tabel en
- * kolommen niet. Weer vooruit: dan eerst die rij 7 met de hand terugzetten (M7 is niet herhaalbaar: de tabel feit bestaat dan al).
+ * kolommen niet (de nieuwe kolom bron krijgt dan gewoon 'nagebeld'). Weer vooruit: M7 maakt alleen wat ontbreekt.
  */
-const M7 = `
+const M7_FEIT = `
 CREATE TABLE feit (
   id INTEGER PRIMARY KEY,
   soort TEXT NOT NULL CHECK (soort IN ('iban')),
@@ -682,19 +682,29 @@ CREATE TABLE feit (
   wie TEXT NOT NULL, wanneer TEXT NOT NULL,
   CHECK (soort <> 'iban' OR (iban IS NOT NULL AND sleutel = 'iban:' || iban)),
   CHECK (status <> 'bevestigd' OR leverancier IS NOT NULL)
-);
-CREATE TRIGGER feit_vast BEFORE UPDATE ON feit BEGIN SELECT RAISE(ABORT, 'feit_vast: een besluit over een feit verandert niet meer'); END;
-ALTER TABLE leverancier_iban ADD COLUMN bron TEXT NOT NULL DEFAULT 'nagebeld' CHECK (bron IN ('nagebeld','bankhistorie'));
-ALTER TABLE leverancier_iban ADD COLUMN feit INTEGER REFERENCES feit(id);
+);`;
+const M7_KOLOMMEN = {
+  bron: "ALTER TABLE leverancier_iban ADD COLUMN bron TEXT NOT NULL DEFAULT 'nagebeld' CHECK (bron IN ('nagebeld','bankhistorie'))",
+  feit: 'ALTER TABLE leverancier_iban ADD COLUMN feit INTEGER REFERENCES feit(id)',
+};
+const M7_REST = `
+CREATE TRIGGER IF NOT EXISTS feit_vast BEFORE UPDATE ON feit BEGIN SELECT RAISE(ABORT, 'feit_vast: een besluit over een feit verandert niet meer'); END;
 -- een rekening uit de bankhistorie alleen met een bevestigd feit over precies die rekening en die leverancier
-CREATE TRIGGER leverancier_iban_bankhistorie BEFORE INSERT ON leverancier_iban
+CREATE TRIGGER IF NOT EXISTS leverancier_iban_bankhistorie BEFORE INSERT ON leverancier_iban
 WHEN NEW.bron = 'bankhistorie' AND NOT EXISTS (SELECT 1 FROM feit WHERE id = NEW.feit AND status = 'bevestigd' AND iban = NEW.iban AND leverancier = NEW.leverancier)
 BEGIN SELECT RAISE(ABORT, 'leverancier_iban_bron: een rekening uit de bankhistorie vraagt een bevestigd feit'); END;
-CREATE TRIGGER leverancier_iban_bron_upd BEFORE UPDATE OF bron, feit, iban, leverancier ON leverancier_iban
+CREATE TRIGGER IF NOT EXISTS leverancier_iban_bron_upd BEFORE UPDATE OF bron, feit, iban, leverancier ON leverancier_iban
 WHEN NEW.bron = 'bankhistorie' AND NOT EXISTS (SELECT 1 FROM feit WHERE id = NEW.feit AND status = 'bevestigd' AND iban = NEW.iban AND leverancier = NEW.leverancier)
 BEGIN SELECT RAISE(ABORT, 'leverancier_iban_bron: een rekening uit de bankhistorie vraagt een bevestigd feit'); END;
-CREATE INDEX feit_iban ON feit (iban);
+CREATE INDEX IF NOT EXISTS feit_iban ON feit (iban);
 `;
+// herhaalbaar (diffreview wv1323 ZOU 6): na een lichte terugrol (rij 7 weg) maakt opnieuw uitrollen alleen wat ontbreekt
+function M7(db) {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'feit'").get()) db.exec(M7_FEIT);
+  const kol = new Set(db.prepare('PRAGMA table_info(leverancier_iban)').all().map((x) => x.name));
+  for (const [k, sql] of Object.entries(M7_KOLOMMEN)) if (!kol.has(k)) db.exec(sql);
+  db.exec(M7_REST);
+}
 
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
@@ -703,7 +713,7 @@ const MIGRATIES = [
   { versie: 4, naam: 'bankhistorie definitief, factuurarchief, startdatum (wv944)', sql: M4 },
   { versie: 5, naam: 'Triodos: bank TRIODOS en formaat triodos_csv in de CHECKs (wv1299)', fn: (db) => M5(db) },
   { versie: 6, naam: "voorstel: status 'vervallen' bij herbeoordeling (wv1317)", fn: (db) => M6(db) },
-  { versie: 7, naam: 'feiten: rekening is van leverancier, uit de bankhistorie (wv1323)', sql: M7 },
+  { versie: 7, naam: 'feiten: rekening is van leverancier, uit de bankhistorie (wv1323)', fn: (db) => M7(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1249,7 +1259,7 @@ function health(fdb) {
 }
 
 module.exports = {
-  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M6_VERVANG, _M6: M6,
+  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M6_VERVANG, _M6: M6, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
   terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,

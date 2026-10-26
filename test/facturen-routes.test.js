@@ -806,7 +806,11 @@ test('wv1317: een open voorstel waarvan de bankregel buiten het venster van 400 
 function betalingen(t, iban, namen, stap, o) {
   o = o || {};
   const rek = t.fdb.db.prepare("SELECT id, iban FROM rekening WHERE entiteit = ? LIMIT 1").get(o.entiteit || 'tolgaarde');
-  const best = t.fdb.db.prepare('SELECT id FROM bank_bestand LIMIT 1').get();
+  let best = t.fdb.db.prepare('SELECT id FROM bank_bestand LIMIT 1').get();
+  if (o.uploader) {
+    best = { id: crypto.randomBytes(8).toString('hex') };
+    D.voegToe(t.fdb, 'bank_bestand', { id: best.id, sha256: crypto.randomBytes(32).toString('hex'), formaat: 'abn_mt940', geupload_door: o.uploader, geupload_op: '2026-10-22T10:00:00Z' });
+  }
   namen.forEach((naam, i) => D.voegToe(t.fdb, 'bank_transactie', { id: crypto.randomBytes(8).toString('hex'), bestand: best.id, rekening: rek.id, entiteit: o.entiteit || 'tolgaarde',
     eigen_iban: rek.iban, boekdatum: K.plusDagen('2026-10-01', -stap * i), bedrag_centen: o.bij ? 5000 : -12345, valuta: 'EUR', tegenpartij_naam: naam, tegenpartij_iban: iban,
     entry_ref: 'wv1323-' + crypto.randomBytes(6).toString('hex'), formaat: 'abn_mt940', aangemaakt_op: '2026-10-22T10:00:00Z' }));
@@ -851,18 +855,24 @@ test('wv1323: feitkaart uit de bankhistorie; Ja vraagt een verse vingerafdruk, m
   const pm = t.pm();
   assert.deepEqual(t.call('GET', 'bank', null, { rol: pm }).j.feiten, []);
   assert.equal(t.call('GET', '', null, { rol: pm }).j.tellers.feiten, 0);
-  assert.equal(t.call('POST', 'feit', { sleutel: k.sleutel, keuze: 'bevestig' }, { rol: pm }).status, 403);
-  assert.equal(t.call('POST', 'feit', { sleutel: k.sleutel, keuze: 'afwijs' }, { rol: pm }).status, 403);
+  assert.equal(t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'bevestig' }, { rol: pm }).status, 403);
+  assert.equal(t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'afwijs' }, { rol: pm }).status, 403);
+  // Ja geldt alleen voor de kaart die David zag (diffreview MOET 2): zonder versie 400, met een andere versie 409, niets geschreven
+  t.vers.ok = true;
+  assert.equal(t.call('POST', 'feit', { sleutel: k.sleutel, keuze: 'bevestig' }).status, 400);
+  const anders = t.call('POST', 'feit', { sleutel: k.sleutel, versie: '0123456789abcdef', keuze: 'bevestig' });
+  assert.equal(anders.status, 409); assert.equal(anders.j.kaart_veranderd, true);
+  assert.equal(t.vers.verbruikt, 0, 'geen vingerafdruk verbruikt voor een veranderde kaart');
   // geen verse vingerafdruk: 403 en niets geschreven
   const levVoor = t.n('SELECT count(*) AS n FROM leverancier');
   t.vers.ok = false;
-  const zonder = t.call('POST', 'feit', { sleutel: k.sleutel, keuze: 'bevestig' });
+  const zonder = t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'bevestig' });
   assert.equal(zonder.status, 403); assert.equal(zonder.j.vers_nodig, true);
   assert.equal(t.n('SELECT count(*) AS n FROM leverancier'), levVoor);
   assert.equal(t.n('SELECT count(*) AS n FROM feit'), 0);
   assert.equal(t.call('POST', 'bevestig', { id: f.id }).status, 409, 'nog steeds eerst nabellen');
   t.vers.ok = true;
-  const ja = t.call('POST', 'feit', { sleutel: k.sleutel, keuze: 'bevestig' });
+  const ja = t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'bevestig' });
   assert.equal(ja.status, 200, JSON.stringify(ja.j));
   assert.equal(t.vers.verbruikt, 1);
   assert.equal(ja.j.leverancier.nieuw, true); assert.equal(ja.j.leverancier.naam, 'Proef Leverancier B.V.');
@@ -883,47 +893,99 @@ test('wv1323: feitkaart uit de bankhistorie; Ja vraagt een verse vingerafdruk, m
   assert.deepEqual(bank2.feiten, []);
   assert.ok(bank2.geleerd_regels.some((g) => g.soort === 'feit_bevestigd' && /1 rekening vastgelegd/.test(g.tekst)), JSON.stringify(bank2.geleerd_regels));
   t.vers.ok = true;
-  const weer = t.call('POST', 'feit', { sleutel: k.sleutel, keuze: 'afwijs' });
+  const weer = t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'afwijs' });
   assert.equal(weer.status, 409); assert.match(weer.j.fout, /besliste je al \(ja\)/);
   assert.equal(t.call('POST', 'bevestig', { id: f.id }).status, 200);
   // een besluit verandert niet meer (trigger)
   assert.throws(() => t.fdb.db.prepare("UPDATE feit SET status = 'afgewezen'").run(), /feit_vast/);
 });
 
-test('wv1323: Nee zonder vingerafdruk (nabellen blijft, kaart komt niet terug); geen kaart bij te weinig historie, andere namen of een andere naam op de factuur', () => {
+test('wv1323: Nee zonder vingerafdruk (nabellen blijft, kaart komt niet terug); geen kaart bij te weinig historie, andere namen, een andere naam op de factuur, een verzamelrekening of historie uit een upload van de praktijkmanager; zonder naam een waarschuwing', () => {
   const t = opzet();
-  const [a, b, c, d, e] = ['0555000011', '0555000012', '0555000013', '0555000014', '0555000015'].map((n) => Z.maakIban('NL', 'TEST', n));
-  const fa = nabelFactuur(t, a, null);   // factuur zonder leveranciersnaam: de banknaam wordt het voorstel
-  betalingen(t, a, ['Proef Twee', 'Proef Twee', 'Proef Twee'], 31);
-  nabelFactuur(t, b, 'Proef Drie');
-  betalingen(t, b, ['Proef Drie', 'Proef Drie', 'Proef Drie', 'Proef Drie'], 10);   // 30 dagen: te kort
-  nabelFactuur(t, c, 'Proef Vier');
-  betalingen(t, c, ['Proef Vier', 'Heel Iets Anders BV', 'Proef Vier', 'Proef Vier'], 40);   // twee rekeninghouders
-  nabelFactuur(t, d, 'Team Proefsalaris');
-  betalingen(t, d, ['Belasting Proefdienst', 'Belasting Proefdienst', 'Belasting Proefdienst'], 40);   // factuur noemt een andere naam
-  nabelFactuur(t, e, 'Proef Vijf');
-  betalingen(t, e, ['Proef Vijf', 'Proef Vijf', 'Proef Vijf'], 40, { bij: true });   // alleen bijschrijvingen tellen niet
+  const ib = (n) => Z.maakIban('NL', 'TEST', '05550000' + n);
+  const fa = nabelFactuur(t, ib('11'), 'Proef Twee');
+  betalingen(t, ib('11'), ['Proef Twee', 'Proef Twee', 'Proef Twee'], 31);
+  nabelFactuur(t, ib('12'), 'Proef Drie');
+  betalingen(t, ib('12'), ['Proef Drie', 'Proef Drie', 'Proef Drie', 'Proef Drie'], 10);   // 30 dagen: te kort
+  nabelFactuur(t, ib('13'), 'Proef Vier');
+  betalingen(t, ib('13'), ['Proef Vier', 'Heel Iets Anders BV', 'Proef Vier', 'Proef Vier'], 40);   // twee rekeninghouders
+  nabelFactuur(t, ib('14'), 'Team Proefsalaris');
+  betalingen(t, ib('14'), ['Belasting Proefdienst', 'Belasting Proefdienst', 'Belasting Proefdienst'], 40);   // factuur noemt een andere naam
+  nabelFactuur(t, ib('15'), 'Proef Vijf');
+  betalingen(t, ib('15'), ['Proef Vijf', 'Proef Vijf', 'Proef Vijf'], 40, { bij: true });   // alleen bijschrijvingen tellen niet
+  const f16 = nabelFactuur(t, ib('16'), null);
+  betalingen(t, ib('16'), ['Proef Zes', 'Proef Zes', 'Proef Zes'], 40);   // factuur zonder naam en zonder leverancier: kaart mét waarschuwing (ZOU 3)
+  nabelFactuur(t, ib('17'), 'Webshop Proef');
+  betalingen(t, ib('17'), ['Stichting Mollie Payments', 'Stichting Mollie Payments', 'Stichting Mollie Payments'], 40);   // verzamelrekening (ZOU 4)
+  nabelFactuur(t, ib('18'), 'Proef Acht');
+  betalingen(t, ib('18'), ['Proef Acht', 'Proef Acht', 'Proef Acht'], 40, { uploader: 'praktijkmanager@voorbeeld.invalid' });   // MOET 1
+  nabelFactuur(t, ib('19'), 'Proef Negen');
+  betalingen(t, ib('19'), ['Proef Negen', 'Proef Negen', 'Proef Negen'], 40, { uploader: 'iemand@voorbeeld.invalid' });   // upload met een e-mailadres: nooit
   const kaarten = t.call('GET', 'bank').j.feiten;
-  assert.deepEqual(kaarten.map((k) => k.sleutel), ['iban:' + a], JSON.stringify(kaarten.map((k) => [k.sleutel, k.naam])));
-  assert.equal(kaarten[0].naam, 'Proef Twee');
-  assert.match(kaarten[0].uitleg.aanleiding, new RegExp('^Factuur ' + fa.nummer + ' \\(€ '));
+  assert.deepEqual(kaarten.map((k) => k.sleutel).sort(), ['iban:' + ib('11'), 'iban:' + ib('16')].sort(), JSON.stringify(kaarten.map((k) => [k.sleutel, k.naam])));
+  const k = kaarten.find((x) => x.sleutel === 'iban:' + ib('11')), k16 = kaarten.find((x) => x.sleutel === 'iban:' + ib('16'));
+  assert.equal(k16.naam, 'Proef Zes');
+  assert.match(k16.uitleg.aanleiding, new RegExp('^Factuur ' + f16.nummer + ' \\(€ [^)]*\\) noemt deze rekening; die moet nu eerst nagebeld worden\\. Let op: op de factuur is geen leveranciersnaam herkend; kijk op het stuk of hij van Proef Zes komt\\. Ja maakt Proef Zes de leverancier\\.$'));
+  assert.doesNotMatch(k.uitleg.aanleiding, /geen leveranciersnaam/);
+  assert.equal(k.naam, 'Proef Twee');
+  assert.match(k.uitleg.aanleiding, new RegExp('^Factuur ' + fa.nummer + ' van Proef Twee \\(€ '));
+  // dezelfde historie van de bankluis of van David telt wél: de upload van de praktijkmanager haalt alleen zijn eigen regels weg
+  betalingen(t, ib('18'), ['Proef Acht', 'Proef Acht', 'Proef Acht'], 41, { uploader: 'david (proef)' });
+  assert.ok(t.call('GET', 'bank').j.feiten.some((x) => x.sleutel === 'iban:' + ib('18')));
   // ongeldige vragen
-  assert.equal(t.call('POST', 'feit', { sleutel: 'iban:onzin', keuze: 'afwijs' }).status, 400);
-  assert.equal(t.call('POST', 'feit', { sleutel: 'iban:' + a, keuze: 'misschien' }).status, 400);
-  const weg = t.call('POST', 'feit', { sleutel: 'iban:' + b, keuze: 'afwijs' });
+  assert.equal(t.call('POST', 'feit', { sleutel: 'iban:onzin', versie: k.versie, keuze: 'afwijs' }).status, 400);
+  assert.equal(t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'misschien' }).status, 400);
+  const weg = t.call('POST', 'feit', { sleutel: 'iban:' + ib('12'), versie: k.versie, keuze: 'afwijs' });
   assert.equal(weg.status, 409); assert.match(weg.j.fout, /geldt niet meer/);
   // Nee: geen vingerafdruk nodig, niets bij de leverancier, nabellen blijft, de kaart komt niet terug
   t.vers.ok = false;
-  const nee = t.call('POST', 'feit', { sleutel: 'iban:' + a, keuze: 'afwijs' });
+  const nee = t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'afwijs' });
   assert.equal(nee.status, 200, JSON.stringify(nee.j)); assert.equal(t.vers.verbruikt, 0);
-  assert.equal(t.fdb.db.prepare('SELECT status FROM feit WHERE sleutel = ?').get('iban:' + a).status, 'afgewezen');
-  assert.equal(t.n('SELECT count(*) AS n FROM leverancier_iban WHERE iban = ?', [a]), 0);
-  assert.deepEqual(t.call('GET', 'bank').j.feiten, []);
+  assert.equal(t.fdb.db.prepare('SELECT status FROM feit WHERE sleutel = ?').get(k.sleutel).status, 'afgewezen');
+  assert.equal(t.n('SELECT count(*) AS n FROM leverancier_iban WHERE iban = ?', [ib('11')]), 0);
+  assert.ok(!t.call('GET', 'bank').j.feiten.some((x) => x.sleutel === k.sleutel));
   assert.ok(t.call('GET', 'factuur/' + fa.id).j.bevestigen.redenen.some((r) => /nabellen/.test(r)));
-  assert.equal(t.call('POST', 'feit', { sleutel: 'iban:' + a, keuze: 'bevestig' }).status, 409);
-  // nabellen kan nog gewoon (de bestaande weg)
+  assert.equal(t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'bevestig' }).status, 409);
+  // nabellen kan nog gewoon (de bestaande weg); een nagebelde factuur zonder leverancier krijgt geen kaart meer (KAN 8)
   t.vers.ok = true;
   assert.equal(t.call('POST', 'nagebeld', { id: fa.id }).status, 200);
+  const k18 = t.call('GET', 'bank').j.feiten.find((x) => x.sleutel === 'iban:' + ib('18'));
+  const f18 = t.fdb.db.prepare('SELECT id FROM factuur WHERE iban = ?').get(ib('18'));
+  t.vers.ok = true;
+  assert.equal(t.call('POST', 'nagebeld', { id: f18.id }).status, 200);
+  assert.ok(k18 && !t.call('GET', 'bank').j.feiten.some((x) => x.sleutel === 'iban:' + ib('18')));
+});
+
+test('wv1323: de vollere naam wordt de leverancier; een tweede onbekende rekening op de factuur staat in de aanleiding; controles opnieuw', () => {
+  const t = opzet();
+  const iban = Z.maakIban('NL', 'TEST', '0555000031'), tweede = Z.maakIban('NL', 'TEST', '0555000032');
+  const f = nabelFactuur(t, iban, 'Proef Gemeente');
+  t.fdb.db.prepare('UPDATE factuur SET ibans_betaal = ? WHERE id = ?').run(JSON.stringify([iban, tweede]), f.id);
+  betalingen(t, iban, ['Proef Gemeente Leusden', 'Proef Gemeente Leusden', 'Proef Gemeente Leusden'], 40);
+  const k = t.call('GET', 'bank').j.feiten[0];
+  assert.equal(k.naam, 'Proef Gemeente Leusden');
+  assert.match(k.uitleg.aanleiding, /Let op: er staat nog een andere onbekende rekening op; die blijft nabellen\./);
+  assert.match(k.uitleg.ja, /aan een ander rekeningnummer wordt voortaan gemeld als mogelijke fraude/);
+  t.fdb.db.prepare("UPDATE factuur SET controles = '[]' WHERE id = ?").run(f.id);
+  const voor = t.fdb.db.prepare('SELECT versie FROM factuur WHERE id = ?').get(f.id).versie;
+  t.vers.ok = true;
+  const ja = t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'bevestig' });
+  assert.equal(ja.status, 200, JSON.stringify(ja.j));
+  assert.ok(ja.j.facturen[0].bevestigen.redenen.some((r) => /nabellen/.test(r)), 'de tweede rekening blijft nabellen');
+  const na = t.fdb.db.prepare('SELECT controles, versie, ibans_onbekend FROM factuur WHERE id = ?').get(f.id);
+  assert.ok(JSON.parse(na.controles).length > 0, 'controles opnieuw berekend'); assert.equal(na.versie, voor + 1);
+  assert.deepEqual(JSON.parse(na.ibans_onbekend), [tweede]);
+  // de kaart verandert als er een factuur bijkomt: de oude versie geldt niet meer
+  const iban2 = Z.maakIban('NL', 'TEST', '0555000033');
+  nabelFactuur(t, iban2, 'Proef Tien');
+  betalingen(t, iban2, ['Proef Tien', 'Proef Tien', 'Proef Tien'], 40);
+  const k2 = t.call('GET', 'bank').j.feiten.find((x) => x.sleutel === 'iban:' + iban2);
+  nabelFactuur(t, iban2, 'Proef Tien B.V.');
+  const k3 = t.call('GET', 'bank').j.feiten.find((x) => x.sleutel === 'iban:' + iban2);
+  assert.notEqual(k2.versie, k3.versie); assert.equal(k3.facturen.length, 2);
+  t.vers.ok = true;
+  assert.equal(t.call('POST', 'feit', { sleutel: k2.sleutel, versie: k2.versie, keuze: 'bevestig' }).status, 409);
+  assert.equal(t.call('POST', 'feit', { sleutel: k3.sleutel, versie: k3.versie, keuze: 'bevestig' }).status, 200);
 });
 
 test('wv1323: factuur met een bekende leverancier: Ja zet de rekening bij die leverancier (geen nieuwe), alleen als de banknaam past', () => {
@@ -938,7 +1000,7 @@ test('wv1323: factuur met een bekende leverancier: Ja zet de rekening bij die le
   assert.match(k.uitleg.ja, new RegExp('^Ja: ' + lev.naam.replace(/\./g, '\\.') + ' krijgt deze rekening erbij'));
   const levVoor = t.n('SELECT count(*) AS n FROM leverancier');
   t.vers.ok = true;
-  const ja = t.call('POST', 'feit', { sleutel: k.sleutel, keuze: 'bevestig' });
+  const ja = t.call('POST', 'feit', { sleutel: k.sleutel, versie: k.versie, keuze: 'bevestig' });
   assert.equal(ja.status, 200, JSON.stringify(ja.j)); assert.equal(ja.j.leverancier.nieuw, false);
   assert.equal(t.n('SELECT count(*) AS n FROM leverancier'), levVoor);
   assert.equal(t.n("SELECT count(*) AS n FROM leverancier_iban WHERE iban = ? AND leverancier = ? AND bron = 'bankhistorie'", [iban, lev.id]), 1);
