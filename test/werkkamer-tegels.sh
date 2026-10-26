@@ -134,8 +134,8 @@ process.on('exit', () => { if (!klaar) { console.log('ROOD  toets eindigde voort
   mk('10_Zakelijk/HAGRO/echt.md', fm('2026-10-01') + 'Echte regel\n');
   fs.symlinkSync(path.join(V, '10_Zakelijk/HAGRO/echt.md'), path.join(V, '10_Zakelijk/HAGRO/symlink.md'));
   mk('10_Zakelijk/DBH/Sleutel sk-abcdefghijklmnopqrstuvwxyz0123.md', fm('2026-10-01') + 'Tekst met sk-abcdefghijklmnopqrstuvwxyz0123 erin\n');
-  // rclone-cache vooraf gevuld voor één map (de route gebruikt verouderde cache gewoon)
-  H.appStaat.projDrive.mappen['10_Zakelijk/Groenhouten/Map1'] = { op: Date.now() - 3 * 3600 * 1000, ids: { 'Doc 10.md': 'ABCDEFGHIJ1234567890' } };
+  // wv1308: geen Drive-links meer (de Drive-kopie wordt bevroren); een rclone die zou hangen mag nooit meer aangeroepen worden
+  const RC0 = path.join(H.W, 'hang-rclone'), RC0LOG = path.join(H.W, 'hang-rclone.log'); fs.writeFileSync(RC0, '#!/bin/sh\necho "$@" >> ' + RC0LOG + '\nsleep 30\n', { mode: 0o755 }); H.g.process.env.APP_RCLONE_BIN = RC0;
   const t0 = Date.now();
   const docs = await H.wkDocumenten(Date.now() + 38000);
   const E = (n) => docs.find((x) => x.entiteit === n);
@@ -144,29 +144,19 @@ process.on('exit', () => { if (!klaar) { console.log('ROOD  toets eindigde voort
   toets('3c zonder updated: mtime als datum; calloutkop overgeslagen; afgebroken wikilink heel', (function () { const x = E('Tolgaarde').items.find((i) => i.titel === 'Zonder fm'); return x && x.updated === '2026-10-18' && x.eerste_regel === 'Eerste regel van Stichting De Tolgaarde en meer.'; })(), E('Tolgaarde').items);
   toets('3d BSN gemaskeerd in titel en eerste regel; vet-only kopje overgeslagen', (function () { const x = E('Tolgaarde').items.find((i) => /^BSN/.test(i.titel)); return x && !/111222333/.test(JSON.stringify(x)) && /^Patiënt/.test(x.eerste_regel); })(), E('Tolgaarde').items);
   toets('3e Privé zonder Gambia; Gambia apart; Systeem uit 00_ en 01_; lege map -> items [] met melding', E('Privé').items.length === 1 && E('Privé').items[0].titel === 'Huis' && E('Gambia').items[0].titel === 'G' && E('Systeem').items[0].titel === 'Plan' && E('POT').items.length === 0 && /geen documenten/.test(E('POT').melding));
-  toets('3f link uit (verouderde) cache, zonder ID geen link; rclone afwezig hangt niet (' + (Date.now() - t0) + ' ms)', E('Groenhouten').items[0].link === 'https://drive.google.com/file/d/ABCDEFGHIJ1234567890/view' && !('link' in E('Groenhouten').items[1]) && Date.now() - t0 < 9500, E('Groenhouten').items.slice(0, 2));
+  toets('3f geen Drive-link meer en geen rclone-aanroep (wv1308); antwoord meteen (' + (Date.now() - t0) + ' ms)', !JSON.stringify(docs).includes('drive.google.com') && docs.every((d) => d.items.every((x) => !('link' in x))) && !fs.existsSync(RC0LOG) && Date.now() - t0 < 2000, E('Groenhouten').items.slice(0, 2));
   toets('3h symlink-map en symlink-.md overgeslagen', E('HAGRO').items.length === 1 && E('HAGRO').items[0].titel === 'echt', E('HAGRO').items.map((x) => x.pad));
   toets('3i sleutelvorm gemaskeerd in titel, pad en eerste regel', E('DBH').items.length === 1 && !/sk-abcdefghij/.test(JSON.stringify(E('DBH').items)), E('DBH').items);
   // mtime verandert -> opnieuw gelezen; gekozen bestand ontbreekt in > 10 min oude cache -> voorrang (op 0)
   mk('20_Prive/Huis.md', fm('2026-10-04') + 'Nieuwe huisregel\n', new Date(Date.now() + 5000));
-  H.appStaat.projDrive.mappen['20_Prive'] = { op: Date.now() - 20 * 60 * 1000, ids: { 'Ander.md': 'ZZZZZZZZZZZZZZZZZZZZ' } };
-  H.appStaat.projDrive.mappen['01_Ontwikkeling'] = { op: Date.now() - 20 * 60 * 1000, ids: { 'Plan.md': 'PPPPPPPPPPPPPPPPPPPP' } };
   const docs2 = await H.wkDocumenten(Date.now() + 38000), E2 = (n) => docs2.find((x) => x.entiteit === n);
   toets('3j gewijzigde mtime -> nieuwe eerste regel (cache op mtime)', E2('Privé').items[0].eerste_regel === 'Nieuwe huisregel', E2('Privé').items[0]);
-  toets('3k map waarin een gekozen bestand ontbreekt (cache > 10 min) krijgt voorrang; volledige map niet', H.appStaat.projDrive.mappen['20_Prive'].op === 0 && H.appStaat.projDrive.mappen['01_Ontwikkeling'].op > 0 && E2('Systeem').items[0].link === 'https://drive.google.com/file/d/PPPPPPPPPPPPPPPPPPPP/view');
   fs.unlinkSync(path.join(V, '01_Ontwikkeling/Plan.md'));
   await H.wkDocumenten(Date.now() + 38000);
   toets('3l verdwenen bestand uit de documentcache', !Object.keys(H.appStaat.wkDocs).some((p) => /Plan\.md$/.test(p)) && Object.keys(H.appStaat.wkDocs).some((p) => /Huis\.md$/.test(p)));
   mk('01_Ontwikkeling/Plan.md', fm('2026-10-02') + 'Plan-regel\n');
-  // trage rclone: wachten hooguit 8 s, alleen bij mappen zonder cache
-  const RC = path.join(H.W, 'trage-rclone'); fs.writeFileSync(RC, '#!/bin/sh\nsleep 30\n', { mode: 0o755 });
-  H.g.process.env.APP_RCLONE_BIN = RC; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
-  let t2 = Date.now(); await H.wkDocumenten(Date.now() + 38000); const duur1 = Date.now() - t2;
-  H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
-  t2 = Date.now(); await H.wkDocumenten(Date.now() + 6000); const duur2 = Date.now() - t2;
-  toets('3m trage rclone: wacht begrensd op 8 s (' + duur1 + ' ms) en door de totaalgrens (' + duur2 + ' ms bij 6 s rest)', duur1 >= 7500 && duur1 < 9500 && duur2 >= 3500 && duur2 < 5000, [duur1, duur2]);
   H.g.process.env.APP_RCLONE_BIN = path.join(H.W, 'geen-rclone');
-  toets('3g geen veld fout bij gezonde documenten; velden exact', docs.every((d) => !d.fout) && E('Groenhouten').items.every((x) => /^(titel,pad,updated,eerste_regel)(,link)?$/.test(Object.keys(x).join(','))));
+  toets('3g geen veld fout bij gezonde documenten; velden exact', docs.every((d) => !d.fout) && E('Groenhouten').items.every((x) => /^titel,pad,updated,eerste_regel$/.test(Object.keys(x).join(','))));
 
   // ── 4. Todoist (nagebootst) ──
   const taken = [];

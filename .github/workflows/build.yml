@@ -585,6 +585,15 @@ jobs:
           docker run --rm -v "$PWD":/src:ro --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} \
             /src/test/bisync-filter.sh /app/bisync-filter.txt /app/run.sh
 
+      # WAAROM (wv1308, 26-10-2026). bisync met Drive gaat uit via het schakelbestand /opt/data/bisync.json (ontwerp OVIS Intake
+      # § 11.4 stap 0). Een ontbrekend of kapot bestand, {"aan": false} of de onderhoudsstand van de vault mag nooit een ronde,
+      # zelfherstel-resync of eerste koppeling geven; de stand wordt ook onder de vault-grendel gelezen. Deze stap draait het
+      # sync-deel van /app/run.sh in scenario's met een nep-rclone (als root: ook "andere eigenaar") en /health.sync uit server.js.
+      - name: "Rooktest - schakelbestand bisync (wv1308)"
+        run: |
+          docker run --rm -v "$PWD":/src:ro --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} \
+            /src/test/bisync-schakelaar.sh /app/run.sh
+
       # WAAROM (wv1277, 25-10-2026). De vault gaat ook via Syncthing naar de Synology en Davids pc's. syncthing-stignore.txt moet
       # weglaten wat bisync-filter.txt weglaat; run.sh start Syncthing alleen als syncthing-filter-toets.py groen is. Deze stap
       # haalt dezelfde Syncthing-release als de pod (vaste sha256, gelijk aan ST_SHA256 in run.sh) en draait in het image: de

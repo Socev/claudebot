@@ -6721,14 +6721,14 @@ async function bewijs(o) {
         '- **Wachtend op anderen:** Kooloos, Meander.',
         '', '## Komende dagen', '- **Za:** niets', ''].join('\n'));
       fs.mkdirSync(path.join(VAULT_T, '20_Prive', 'Familie'), { recursive: true }); fs.writeFileSync(path.join(VAULT_T, '20_Prive', 'Familie', 'Ilvy.md'), '# Ilvy\n');
-      // nep-rclone: lsjson van een map -> IDs; 'traag' in de map laat hem 7 s slapen
+      // nep-rclone (wv1308): de Drive-links zijn weg; hij legt alleen vast óf hij nog aangeroepen wordt (dat mag niet meer)
       const RC = path.join(W, 'nep-rclone.sh'), RCLOG = path.join(W, 'nep-rclone.log');
       fs.writeFileSync(RC, '#!/bin/bash\necho "$@" >> ' + RCLOG + '\nm="${@: -1}"\ncase "$m" in *traag*) sleep 7;; esac\ncase "$m" in\n' +
         '  */10_Zakelijk/POT_POH_GGZ) echo \'[{"Path":"jeugd-ggz.md","Name":"jeugd-ggz.md","ID":"1PotJeugdGgzAbc"}]\';;\n' +
         '  */10_Zakelijk/Groenhouten) echo \'[{"Path":"Leveranciers en ICT-contracten.md","Name":"Leveranciers en ICT-contracten.md","ID":"1GhLevAbcdef"}]\';;\n' +
         '  *) echo \'[]\';;\nesac\n', { mode: 0o755 });
       ctx.process.env.APP_RCLONE_BIN = RC; ctx.process.env.APP_DRIVE_REMOTE = 'nep:AI_SecondBrain';
-      H.appStaat.projecten = null; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
+      H.appStaat.projecten = null;
       const dataVoor = fs.readdirSync(DATA).sort().join(',');
       const nAudit = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
       r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
@@ -6750,14 +6750,12 @@ async function bewijs(o) {
       const lo = (c) => (E[c] ? E[c].lopend.map((x) => x.titel) : []);
       toets('29 lopend: per wikilinkpad, anders op woorden; Tasker/machinekamer weg; voornaam uit Familie -> Privé; rest Overig', lo('TG').includes('Knietraject') && lo('GH').includes('Glas op de balie Groenhouten') && lo('GH').includes('Tweede voorschot POH-Jeugd Groenhouten') && lo('POT').includes('Tweede voorschot POH-Jeugd Groenhouten') && lo('PRIVE').includes('Ilvy') && lo('OVERIG').includes('Wachtend op anderen') && !JSON.stringify(j).includes('Tasker'), JSON.stringify([lo('TG'), lo('GH'), lo('PRIVE'), lo('OVERIG')]));
       const glas = E.GH.lopend.find((x) => /Glas/.test(x.titel));
-      toets('29 Drive-link uit rclone lsjson (zelfde map, zelfde naam), anders null; geen markdown in de tekst', glas && glas.bron && glas.bron.link === 'https://drive.google.com/file/d/1GhLevAbcdef/view' && E.POT.deadlines.find((x) => /Subsidieaanvraag/.test(x.titel)).bron.link === 'https://drive.google.com/file/d/1PotJeugdGgzAbc/view' && E.PROJ.deadlines[0].bron.link === null && !/\*\*|\[\[/.test(JSON.stringify(j)), JSON.stringify([glas && glas.bron, E.PROJ.deadlines[0].bron]));
-      const rcRegels = fs.readFileSync(RCLOG, 'utf8').trim().split('\n');
-      toets('29 rclone: alleen lsjson --files-only met -- vóór het pad, één keer per map', rcRegels.every((l) => /^lsjson --files-only --no-modtime --no-mimetype -- nep:AI_SecondBrain\/(00|01|10|20|30)_/.test(l)) && new Set(rcRegels).size === rcRegels.length, rcRegels.join(' | '));
+      toets('29 geen Drive-link meer (wv1308: Drive-kopie bevroren): bron.link null, naam blijft, geen rclone-aanroep; geen markdown in de tekst', glas && glas.bron && glas.bron.naam && glas.bron.link === null && !JSON.stringify(j).includes('drive.google.com') && !fs.existsSync(RCLOG) && !/\*\*|\[\[/.test(JSON.stringify(j)), JSON.stringify([glas && glas.bron, E.PROJ.deadlines[0].bron]));
       toets('29 200 schrijft geen auditregel en niets in de datamap', fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length === nAudit && fs.readdirSync(DATA).sort().join(',') === dataVoor);
-      // cache: zelfde mtime -> zelfde data, geen nieuwe rclone-aanroep binnen het uur; mtime anders -> opnieuw gelezen
-      const d1 = H.appStaat.projecten.data, nRc = rcRegels.length;
+      // cache: zelfde mtime -> zelfde data; mtime anders -> opnieuw gelezen
+      const d1 = H.appStaat.projecten.data;
       r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
-      toets('29 tweede keer uit het geheugen (geen nieuwe lezing, geen rclone)', r.status === 200 && H.appStaat.projecten.data === d1 && fs.readFileSync(RCLOG, 'utf8').trim().split('\n').length === nRc);
+      toets('29 tweede keer uit het geheugen (geen nieuwe lezing, geen rclone)', r.status === 200 && H.appStaat.projecten.data === d1 && !fs.existsSync(RCLOG));
       fs.writeFileSync(AC, fs.readFileSync(AC, 'utf8').replace('\n\n## Komende dagen', '\n- **Nieuw in Groenhouten** iets\n\n## Komende dagen')); const tt = new Date(Date.now() + 2000); fs.utimesSync(AC, tt, tt);
       r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
       toets('29 mtime anders -> opnieuw gelezen', r.status === 200 && H.appStaat.projecten.data !== d1 && JSON.stringify(r.j).includes('Nieuw in Groenhouten'));
@@ -6766,17 +6764,6 @@ async function bewijs(o) {
       await H.appProjectenRoute({}, nep, { id: 'x', soort: 'vast' });
       const vb = nep.b || {};
       toets('29 vaste plek: alleen zakelijk, geen personeelszaken (Medewerkers-bron of woord: Roos, Detachering, Jacqueline) en geen privébron (Waarneming), geen lopend', nep.st === 200 && vb.vaste_plek === true && vb.entiteiten.every((e) => !e.prive && e.lopend.length === 0) && !vb.entiteiten.some((e) => /^(PRIVE|OVERIG)$/.test(e.code)) && !/Roos|Detachering|Jacqueline|Waarneming|Cynthia is jarig/.test(JSON.stringify(vb)) && JSON.stringify(j).includes('Detachering van Belinda') && JSON.stringify(j).includes('Waarneming regelen'), JSON.stringify(vb.entiteiten && vb.entiteiten.map((e) => e.code)));
-      // traag rclone: antwoord binnen ± 5 s zonder link; rclone weg: geen link, geen fout naar de app
-      fs.appendFileSync(DL, ''); H.appStaat.projecten = null; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
-      fs.writeFileSync(AC, fs.readFileSync(AC, 'utf8').replace('Leveranciers en ICT-contracten]]', 'traag/Leveranciers]]'));
-      let t0 = Date.now();
-      r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
-      const msT = Date.now() - t0, glasT = (r.j.entiteiten.find((e) => e.code === 'GH') || { lopend: [] }).lopend.find((x) => /Glas/.test(x.titel));
-      toets('29 trage rclone: antwoord na ± 5 s (≤ 6,5 s), die link ontbreekt, de rest komt (' + msT + ' ms)', r.status === 200 && msT >= 4500 && msT < 6500 && glasT && glasT.bron.link === null, JSON.stringify([msT, glasT && glasT.bron]));
-      await new Promise((ok) => setTimeout(ok, 3000));   // de trage aanroep loopt af
-      H.appStaat.projecten = null; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 }; ctx.process.env.APP_RCLONE_BIN = path.join(W, 'bestaat-niet-rclone');
-      r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
-      toets('29 geen rclone: geen links, geen fout naar de app, een uur niet opnieuw', r.status === 200 && r.j.fouten.length === 1 && !JSON.stringify(r.j).includes('drive.google.com') && H.appStaat.projDrive.uitTot > Date.now() + 50 * 60000, JSON.stringify(r.j.fouten));
       // één bron weg -> regel in fouten; beide weg -> 503 (met auditregel)
       const acBewaar = fs.readFileSync(AC, 'utf8'), dlBewaar = fs.readFileSync(DL, 'utf8');
       fs.unlinkSync(AC); H.appStaat.projecten = null;
@@ -6786,7 +6773,7 @@ async function bewijs(o) {
       const nA2 = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length;
       r = await vraag('GET', '/app/projecten', undefined, { pot: P.jar });
       toets('29 beide bronnen weg -> 503 in gewone taal, mét auditregel (niet stil)', r.status === 503 && /projecten zijn nu niet te lezen/.test(r.j.fout) && fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8').split('\n').length > nA2, r.status + ' ' + JSON.stringify(r.j));
-      fs.writeFileSync(AC, acBewaar); fs.writeFileSync(DL, dlBewaar); H.appStaat.projecten = null; H.appStaat.projDrive = { mappen: {}, bezig: null, uitTot: 0 };
+      fs.writeFileSync(AC, acBewaar); fs.writeFileSync(DL, dlBewaar); H.appStaat.projecten = null;
       delete ctx.process.env.APP_RCLONE_BIN; delete ctx.process.env.APP_DRIVE_REMOTE;
     }
 

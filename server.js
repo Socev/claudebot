@@ -56,7 +56,7 @@ const { EventEmitter } = require('events');
 // (HOME=/opt/data is geërfd, niet gekozen). Fail-closed: valt productie hier op false, dan draait hij in een wegwerpmap;
 // /health toont het (server.echt, server.paden). Dezelfde toets als APP_ECHT in het app-blok (wv318), dat hem overneemt.
 // Bewust NIET omgeleid: VAULT_DIR en REPO_DIR (de werkruimte van de beurten zelf) en alleen-lezen statusbronnen
-// (SYNC_LOG, laatste-zelfherstel, /app/run.sh). Ook niet afgeschermd: wat een proef met de volle pod-env extern doet
+// (SYNC_LOG, BISYNC_SCHAKELAAR, laatste-zelfherstel, /app/run.sh). Ook niet afgeschermd: wat een proef met de volle pod-env extern doet
 // (AGENT_WEBHOOK_URL, SUPABASE_*, N8N_WEBHOOK_*: alleen op verzoek, niet bij de start) en wat claude-kinderen met de
 // echte HOME schrijven (transcripten). En een kopie die vanuit de release-map zelf start (node /opt/data/app/current/
 // server.js) is wél echt: een extra ouder-toets zou productie een nieuwe manier geven om in de wegwerpmap te vallen
@@ -98,6 +98,8 @@ const IO = serverPad('io', process.env.IO_DIR, '/opt/data/io', serverProefDeel('
 const MAX_FILE = (parseInt(process.env.MAX_FILE_MB || '20', 10)) * 1024 * 1024;
 const SESS_FILE = path.join(HOME, 'chat_sessions.json');
 const SYNC_LOG = process.env.SYNC_LOG || '/opt/data/bin/bisync.log';
+// wv1308: schakelbestand van bisync (run.sh leest het per ronde; alleen {"aan": true} van claude = rondes). Alleen gelezen.
+const BISYNC_SCHAKELAAR = process.env.BISYNC_SCHAKELAAR || '/opt/data/bisync.json';
 // ── wv715: uid-scheiding fase 2 — smalle gesprekken als gebruiker socev (1002) via de socev-loper ────────────────────────────
 // WAAROM. Alles in de pod draaide als één gebruiker (claude, 1001): een Socev-gesprek dat via een prompt-injectie een paar
 // Bash-commando's draait, kon /proc/<pid>/environ van server.js of PID 1 lezen en zo bij de kluissleutel (bunq kan betalen).
@@ -2119,8 +2121,22 @@ function collectFiles(dir) {
 }
 
 // ── Informatie voor de wachters (GET /health) ───────────────────────────────
+// Stand van het schakelbestand zoals run.sh hem leest (wv1308): aan | uit | ontbreekt | ongeldig. Alleen 'aan' geeft rondes.
+function bisyncSchakelaar() {
+  let st;
+  try { st = fs.lstatSync(BISYNC_SCHAKELAAR); } catch (e) { return e.code === 'ENOENT' ? 'ontbreekt' : 'ongeldig'; }
+  if (!st.isFile() || (process.getuid && st.uid !== process.getuid())) return 'ongeldig';
+  try {
+    const m = JSON.parse(fs.readFileSync(BISYNC_SCHAKELAAR, 'utf8'));
+    if (m && typeof m === 'object' && !Array.isArray(m) && typeof m.aan === 'boolean') return m.aan ? 'aan' : 'uit';
+  } catch (e) {}
+  return 'ongeldig';
+}
 function syncInfo() {
-  const info = { log_mtime: null, minuten_stil: null, sync_id: null, laatste_ronde_ok: null };
+  // uit: true = run.sh draait geen bisync-rondes (schakelbestand uit, ontbrekend of ongeldig); de vaultsync zelf staat in
+  // /health.syncthing. De onderhoudsstand (ook geen rondes) staat apart in /health.onderhoud.
+  const schakelaar = bisyncSchakelaar();
+  const info = { log_mtime: null, minuten_stil: null, sync_id: null, laatste_ronde_ok: null, uit: schakelaar !== 'aan', schakelaar: schakelaar };
   try {
     const st = fs.statSync(SYNC_LOG);
     info.log_mtime = st.mtimeMs;
@@ -10649,48 +10665,9 @@ function appProjecten() {
   appStaat.projecten = { sleutel: sleutel, data: data };
   return data;
 }
-// ── Drive-link per bronpagina (zoals werkkamer-verversen): rclone lsjson van de map, alleen-lezen, één tegelijk ──
-const APP_PROJ_DRIVE_MS = 60 * 60 * 1000, APP_PROJ_RCLONE_MS = 15000, APP_PROJ_WACHT_MS = 5000, APP_PROJ_MAPPEN = 30;
-appStaat.projDrive = appStaat.projDrive || { mappen: {}, bezig: null, uitTot: 0 };
-function appProjMapOk(m) { return /^(00|01|10|20|30)_[^\0]*$/.test(m) && m.split('/').every(function (s) { return s && s !== '..' && s !== '.' && s[0] !== '-'; }); }
-function appProjLsjson(map) {
-  return new Promise(function (ok) {
-    const remote = (process.env.APP_DRIVE_REMOTE || 'gdrive:AI_SecondBrain') + '/' + map;
-    require('child_process').execFile(process.env.APP_RCLONE_BIN || 'rclone', ['lsjson', '--files-only', '--no-modtime', '--no-mimetype', '--', remote],
-      { timeout: APP_PROJ_RCLONE_MS, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, windowsHide: true }, function (e, uit) {
-        if (e) { logError('app-projecten-drive', e); return ok(e.code === 'ENOENT' ? 'weg' : null); }
-        try {
-          const l = JSON.parse(uit), ids = {};
-          (Array.isArray(l) ? l : []).forEach(function (x) { if (x && typeof x.Name === 'string' && /^[A-Za-z0-9_-]{10,}$/.test(String(x.ID || ''))) ids[x.Name] = x.ID; });
-          ok(ids);
-        } catch (e2) { logError('app-projecten-drive', e2); ok(null); }
-      });
-  });
-}
-function appProjDriveVul(mappen) {
-  const D = appStaat.projDrive;
-  if (D.bezig) return D.bezig;
-  if (Date.now() < D.uitTot) return Promise.resolve();
-  const nodig = mappen.filter(function (m) { const x = D.mappen[m]; return !x || Date.now() - x.op > APP_PROJ_DRIVE_MS; }).slice(0, APP_PROJ_MAPPEN);
-  if (!nodig.length) return Promise.resolve();
-  D.bezig = (async function () {
-    let mis = 0;
-    for (const m of nodig) {
-      const r = await appProjLsjson(m);
-      if (r === 'weg') { D.uitTot = Date.now() + APP_PROJ_DRIVE_MS; break; }   // geen rclone: een uur niet opnieuw
-      if (r === null && ++mis >= 3) { D.uitTot = Date.now() + APP_PROJ_DRIVE_MS; D.mappen[m] = { op: Date.now(), ids: null }; break; }   // remote stuk: niet 30 x 15 s (Fable #3)
-      if (r !== null) mis = 0;
-      D.mappen[m] = { op: Date.now(), ids: r };   // null = fout: ook een uur niet opnieuw (Fable wv373 M5)
-    }
-  })().finally(function () { D.bezig = null; });
-  return D.bezig;
-}
-function appProjLink(pad) {
-  if (!pad || pad.indexOf('/') < 0) return null;
-  const map = pad.slice(0, pad.lastIndexOf('/')), naam = pad.slice(pad.lastIndexOf('/') + 1) + '.md';
-  const x = appStaat.projDrive.mappen[map];
-  return x && x.ids && x.ids[naam] ? 'https://drive.google.com/file/d/' + x.ids[naam] + '/view' : null;
-}
+// Drive-links per bronpagina zijn weg (wv1308, 26-10-2026): de Drive-vaultmap wordt bevroren zodra bisync uit gaat (ontwerp OVIS
+// Intake § 11.3 rij 9), een link zou dan naar een oude kopie wijzen. bron.link blijft in het antwoord (altijd null): de app toont
+// dan de naam zonder link.
 async function appProjectenRoute(req, res, a) {
   res._app.stil = true;   // de app leest bij openen en op Ververs
   let d;
@@ -10712,18 +10689,7 @@ async function appProjectenRoute(req, res, a) {
   });
   if (!vast) d.lopend.forEach(function (x) { x.ents.forEach(function (e) { per[e].lopend.push({ titel: x.titel, tekst: x.tekst, bron: x.bron }); }); });
   const lijst = APP_PROJ_ENT.map(function (e) { return per[e.code]; }).filter(function (e) { return zicht(e.code) && (e.deadlines.length || e.lopend.length); });
-  // Drive-links: hooguit 5 s wachten, daarna zonder (de volgende Ververs heeft ze)
-  const mappen = [];
-  lijst.forEach(function (e) { e.deadlines.concat(e.lopend).forEach(function (x) { const p = x.bron && x.bron.pad; if (p && p.indexOf('/') > 0) { const m = p.slice(0, p.lastIndexOf('/')); if (appProjMapOk(m) && mappen.indexOf(m) < 0) mappen.push(m); } }); });
-  // Alleen wachten (hooguit 5 s) als er nog bijna niets bekend is; anders vult hij op de achtergrond aan en geldt de volgende Ververs.
-  const bekend = mappen.filter(function (m) { return appStaat.projDrive.mappen[m]; }).length;
-  const vul = appProjDriveVul(mappen).catch(function (e) { logError('app-projecten-drive', e); });
-  if (bekend * 2 < mappen.length) {
-    let klok = null;
-    await Promise.race([vul, new Promise(function (ok) { klok = setTimeout(ok, APP_PROJ_WACHT_MS); })]);
-    clearTimeout(klok);
-  }
-  const metLink = function (b) { return b ? { naam: b.naam, link: appProjLink(b.pad) } : null; };
+  const metLink = function (b) { return b ? { naam: b.naam, link: null } : null; };
   lijst.forEach(function (e) {
     e.deadlines = e.deadlines.map(function (x) { return Object.assign({}, x, { bron: metLink(x.bron) }); });
     e.lopend = e.lopend.map(function (x) { return Object.assign({}, x, { bron: metLink(x.bron) }); });
@@ -10739,7 +10705,7 @@ async function appProjectenRoute(req, res, a) {
 // tegel blijft staan) en `melding` (niet-fataal: scheve rijen, afgekapt; n8n zet hem als fout-tekst óp de tegel). De kern
 // van de app-parser (cellen, titel, plat) is gedeeld; het filter is eigen: de Werkkamer is privé (besluit David 19-8) en
 // wil Privé, Gambia en Systeem wél, en "geen actie (ter info)"-rijen blijven zichtbaar (ontwerp regel 6).
-const WK_TOTAAL_MS = 38000, WK_DRIVE_WACHT_MS = 8000, WK_TODOIST_MS = 8000, WK_TODOIST_PAGINAS = 3;
+const WK_TOTAAL_MS = 38000, WK_TODOIST_MS = 8000, WK_TODOIST_PAGINAS = 3;
 const WK_MAX_TODOIST = 80, WK_MAX_DEADLINES = 40, WK_MAX_DOCS = 8, WK_TERUG = 7, WK_VOORUIT = 60;
 const WK_DICHT = /^(AFGEHANDELD|AFGEROND|VERVALLEN|AFGEZIEN|BETAALD|VERLOPEN|INGEDIEND|AFGELOPEN|LOSGELATEN|OPGELOST)\b/;
 // Statuslijst voor de titel: die van de app plus UPDATE/AANVULLING/LOSGELATEN/"Oorspronkelijk:" (ontwerp regel 5); de app zelf
@@ -10890,29 +10856,12 @@ function wkDocKeuze(vault) {
     return { naam: e.naam, gekozen: l.slice(0, WK_MAX_DOCS), leeg: !paden.length, gezien: gezien };
   });
 }
-async function wkDocumenten(eind) {
+async function wkDocumenten() {
   const vault = appProjVault(), keuze = wkDocKeuze(vault);
   // cache opruimen: paden die niet meer bestaan
   const gezien = keuze.length ? keuze[0].gezien : {};
   Object.keys(appStaat.wkDocs).forEach(function (p) { if (!gezien[p]) delete appStaat.wkDocs[p]; });
-  const D = appStaat.projDrive, mappen = [];
-  keuze.forEach(function (e) { e.gekozen.forEach(function (x) { const m = x.pad.slice(0, x.pad.lastIndexOf('/')); if (appProjMapOk(m) && mappen.indexOf(m) < 0) mappen.push(m); }); });
-  // Verouderde cache gewoon gebruiken (Drive-ID's zijn stabiel), op de achtergrond verversen, oudste eerst (Fable 7). Mist een
-  // gekozen bestand in een map die al > 10 min oud is (nieuw bestand), dan die map voorrang geven bij het verversen.
-  mappen.forEach(function (m) {
-    const x = D.mappen[m];
-    if (x && x.ids && Date.now() - x.op > 10 * 60 * 1000 && keuze.some(function (e) { return e.gekozen.some(function (g) { return g.pad.slice(0, g.pad.lastIndexOf('/')) === m && !x.ids[g.pad.slice(g.pad.lastIndexOf('/') + 1)]; }); })) x.op = 0;
-  });
-  const leeftijd = function (m) { const x = D.mappen[m]; return x ? x.op : -1; };
-  const volg = mappen.slice().sort(function (a, b) { return leeftijd(a) - leeftijd(b); });
-  const zonderCache = mappen.filter(function (m) { return !D.mappen[m]; }).length;
-  const vul = appProjDriveVul(volg).catch(function (e) { logError('werkkamer-drive', e); });
-  const wacht = Math.min(WK_DRIVE_WACHT_MS, eind - Date.now() - 2000);
-  if (zonderCache && wacht > 0) {   // alleen wachten op mappen zonder enige cache; nooit await op D.bezig zelf
-    let klok = null;
-    await Promise.race([vul, new Promise(function (ok) { klok = setTimeout(ok, wacht); })]);
-    clearTimeout(klok);
-  }
+  // Geen Drive-link meer per document (wv1308: de Drive-kopie wordt bevroren).
   return keuze.map(function (e) {
     const items = e.gekozen.map(function (x) {
       if (x.info.eerste === null) {
@@ -10920,8 +10869,6 @@ async function wkDocumenten(eind) {
       }
       const it = { titel: wkTekst(x.pad.slice(x.pad.lastIndexOf('/') + 1).replace(/\.md$/i, ''), 160), pad: appSleutelMasker(appBsnMasker(x.pad)), updated: x.info.updated,
         eerste_regel: wkTekst(x.info.eerste, 140) };
-      const link = appProjLink(x.pad.replace(/\.md$/i, ''));
-      if (link) it.link = link;
       return it;
     });
     const uit = { entiteit: e.naam, items: items };
@@ -10987,7 +10934,7 @@ async function werkkamerTegels(eind) {
   try { deadlines = wkDeadlines(fs.readFileSync(path.join(appProjVault(), '00_Systeem', 'Deadlines.md'), 'utf8'), vandaag); }
   catch (e) { logError('werkkamer-deadlines', e); deadlines = { items: [], fout: 'het deadline-register is nu niet te lezen' }; }
   let documenten;
-  try { documenten = await wkDocumenten(eind); }
+  try { documenten = await wkDocumenten(); }
   catch (e) { logError('werkkamer-documenten', e); documenten = WK_DOC_ENT.map(function (x) { return { entiteit: x.naam, items: [], fout: 'de documenten zijn nu niet te lezen' }; }); }
   return { ok: true, vandaag: vandaag, todoist: await todo, deadlines: deadlines, documenten: documenten, duur_ms: Date.now() - begin };
 }

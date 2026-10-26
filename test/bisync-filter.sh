@@ -85,7 +85,7 @@ ok "  zelftoets vóór de eerste bisync, anders SYNC STOP"     "awk '/^sync_lus\
 # codeplek_dicht uit run.sh, los gedraaid op een proefvault (Fable wv813 #6)
 sed -n '/^codeplek_dicht()/,/^}/p' "$RUN" > "$T/grendel.sh"; export GV="$T/gv"
 mkdir -p "$GV/.claude/skills/x" "$GV/.obsidian"; echo s > "$GV/.claude/skills/x/SKILL.md"
-ok "  grendel in de lus vóór sync_ronde/zelfherstel, en vóór SYNC_INIT" "awk '/^sync_lus\\(\\)/{s=1} s&&/if ! codeplek_dicht/{g=NR} s&&/if sync_ronde/{r=NR} END{exit !(g && r && g<r)}' \"\$RUN\" && grep -q 'SYNC_INIT\" = \"1\" \] && \[ ! -f \"\$MARKER\" \] && codeplek_dicht' \"\$RUN\""
+ok "  grendel in de lus vóór sync_ronde/zelfherstel, en vóór SYNC_INIT" "awk '/^sync_lus\\(\\)/{s=1} s&&/if ! codeplek_dicht/{g=NR} s&&/if sync_ronde|sync_ronde; RC=/{r=NR} END{exit !(g && r && g<r)}' \"\$RUN\" && grep -q 'SYNC_INIT\" = \"1\" \] && \[ ! -f \"\$MARKER\" \] && codeplek_dicht' \"\$RUN\""
 ok "  codeplek_dicht: .claude/.obsidian zonder socev-schrijfrecht = dicht" "VAULT=\$GV; . \$T/grendel.sh; codeplek_dicht"
 if id socev >/dev/null 2>&1 && command -v setfacl >/dev/null; then
   ok "  codeplek_dicht: socev rw op een skillbestand = open (ronde overslaan)" "setfacl -m u:socev:rw \$GV/.claude/skills/x/SKILL.md && VAULT=\$GV; . \$T/grendel.sh; ! codeplek_dicht"

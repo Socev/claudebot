@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run.sh — draait als gebruiker 'claude'. Start + bewaakt:
 #   - de Claude-API (server.js)         altijd
-#   - de vault-sync (rclone bisync)     altijd
+#   - de vault-sync (rclone bisync)     altijd, per ronde alleen met schakelbestand /opt/data/bisync.json {"aan": true} (wv1308)
 #   - Syncthing (vault ↔ Davids apparaten) alleen met schakelaar /opt/data/syncthing.json aan (wv1277)
 #   - de git-repo van de GHAWA-site     alleen als GIT_REPO_URL is gezet
 #   - de Telegram-bot (telegram-claude-bot.js)  alleen als TG_TOKEN is gezet
@@ -21,6 +21,8 @@
 #   SYNC_PATH      AI_SecondBrain (default) — pad binnen die remote
 #   SYNC_INTERVAL  300 (default)         — seconden tussen twee rondes
 #   SYNC_INIT      0 (default)           — 1 = eenmalig een resync toestaan
+# Naast SYNC_ENABLED (env, alleen bij de start gelezen) telt sinds wv1308 het schakelbestand /opt/data/bisync.json, per ronde
+# gelezen: alleen {"aan": true} laat bisync draaien (zie "Schakelbestand bisync" hieronder).
 set -u
 # Uid-scheiding (wv699, 21-10-2026): wat de pod-gebruiker voortaan maakt, is privé (0600/0700), ook /tmp/agy-mcp_config.json
 # e.d. In de vault en de memory-map telt de standaard-ACL (die geeft socev en claude rwX), niet deze umask. Supervisor en
@@ -121,14 +123,83 @@ rol_reset_podstart(){
     && mv -f "$ROL_BESTAND.tmp" "$ROL_BESTAND"
 }
 
+# ── Schakelbestand bisync (wv1308, 26-10-2026; ontwerp OVIS Intake § 11.4 stap 0, Fable MOET #1) ─────────────────────────────
+# WAAROM. Sinds 26-10 schrijft geen n8n-koppeling meer via Drive in de vault; de vault gaat via Syncthing naar Davids apparaten en
+# de R230. bisync met Drive gaat daarom uit (Davids punt 9: Drive alleen nog voor de versleutelde back-up). Uitzetten moet zonder
+# image of chart kunnen, en een ONTBREKEND of kapot schakelbestand mag bisync nooit aanzetten: een (zelfherstel-)resync tegen
+# een bevroren Drive-map haalt gewiste bestanden terug en Syncthing duwt ze dan naar alle apparaten.
+# HOE. Vóór elke ronde, vóór de zelfherstel-resync en vóór de eerste koppeling, en nog eens ONDER de vault-grendel:
+#   - onderhoudsstand van de vault (wv1271, onderhoud.js; Second Brain 2.0 § 7.1a): staat ONDERHOUD_BESTAND er als gewoon
+#     bestand van deze gebruiker en zegt hij niet {"aan": false}, dan geen ronde (onderhoud.js houdt dan ook de grendel vast);
+#   - BISYNC_SCHAKELAAR: alleen een gewoon bestand van deze gebruiker met {"aan": true} = ronde. {"aan": false} = uit;
+#     ontbreekt, onleesbaar, andere eigenaar of geen true/false = ook geen ronde (fail-closed).
+# Geen ronde = één regel (UIT of ONDERHOUD) per uur en bij elke wisseling in bisync.log; geen "ronde mislukt", dus geen zelfherstel.
+# /health.sync toont de stand (velden uit en schakelaar, server.js syncInfo).
+BISYNC_SCHAKELAAR="${BISYNC_SCHAKELAAR:-/opt/data/bisync.json}"
+ONDERHOUD_BESTAND="${ONDERHOUD_BESTAND:-/opt/data/onderhoudsstand.json}"
+GEEN_RONDE=99   # afspraak tussen de subshell onder de grendel en de lus; rclone zelf geeft 0–10
+# bisync_stand: aan | uit | ontbreekt | ongeldig | onderhoud (altijd één woord; bij twijfel nooit 'aan').
+bisync_stand(){
+  local s
+  s="$(python3 -I -c '
+import json,os,stat,sys
+sch,oh=sys.argv[1:]; uid=os.getuid()
+def lees(p):
+    try: s=os.lstat(p)
+    except FileNotFoundError: return "weg",None
+    except OSError: return "fout",None
+    if not stat.S_ISREG(s.st_mode) or s.st_uid!=uid: return "vreemd",None
+    try:
+        with open(p,encoding="utf-8") as f: return "ok",json.load(f)
+    except Exception: return "fout",None
+w,m=lees(oh)
+if w=="fout" or (w=="ok" and not (isinstance(m,dict) and m.get("aan") is False)): print("onderhoud"); sys.exit()
+w,m=lees(sch)
+if w=="weg": print("ontbreekt")
+elif w!="ok" or not isinstance(m,dict) or not isinstance(m.get("aan"),bool): print("ongeldig")
+else: print("aan" if m["aan"] else "uit")
+' "$BISYNC_SCHAKELAAR" "$ONDERHOUD_BESTAND" 2>/dev/null)"
+  case "$s" in (aan|uit|ontbreekt|ongeldig|onderhoud) echo "$s" ;; (*) echo ongeldig ;; esac
+}
+BS_VORIG=""; BS_GEMELD=0
+# bisync_niet <stand>: de regel in bisync.log, bij een wisseling meteen en verder hooguit één per uur.
+bisync_niet(){
+  local nu; nu=$(date +%s)
+  [ "$1" = "$BS_VORIG" ] && [ $(( nu - BS_GEMELD )) -lt 3600 ] && return 0
+  case "$1" in
+    uit)       echo "$(date '+%F %T') UIT: bisync staat uit (schakelbestand $BISYNC_SCHAKELAAR zegt aan=false) - geen ronde" >> "$SYNCLOG" ;;
+    ontbreekt) echo "$(date '+%F %T') UIT: schakelbestand $BISYNC_SCHAKELAAR ontbreekt - geen ronde (aanzetten: {\"aan\": true})" >> "$SYNCLOG" ;;
+    onderhoud) echo "$(date '+%F %T') ONDERHOUD: onderhoudsstand van de vault staat aan ($ONDERHOUD_BESTAND) - geen ronde" >> "$SYNCLOG" ;;
+    *)         echo "$(date '+%F %T') UIT: schakelbestand $BISYNC_SCHAKELAAR ongeldig (geen gewoon bestand van $(id -un) met {\"aan\": true|false}) - geen ronde" >> "$SYNCLOG" ;;
+  esac
+  BS_VORIG="$1"; BS_GEMELD=$nu
+}
+# bisync_mag: 0 als er een ronde mag; anders de regel en 1. Na een periode zonder ronde één regel AAN.
+bisync_mag(){
+  local s; s="$(bisync_stand)"
+  if [ "$s" = aan ]; then
+    [ -n "$BS_VORIG" ] && [ "$BS_VORIG" != aan ] && echo "$(date '+%F %T') AAN: bisync hervat (schakelbestand aan, geen onderhoudsstand)" >> "$SYNCLOG"
+    BS_VORIG=aan; return 0
+  fi
+  bisync_niet "$s"; return 1
+}
+
+# sync_ronde: 0 = RONDE OK, $GEEN_RONDE = onder de grendel bleek bisync uit of in onderhoud (geen fout), anders mislukt.
+# De stand wordt ONDER de grendel opnieuw gelezen: wie hem tussen de controle en de grendel uitzet (of de onderhoudsstand die
+# de grendel pakt), krijgt daarna geen ronde meer achteraan (wv1308).
 sync_ronde(){
-  if flock "$VAULT_LOCK" rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" \
+  local rc
+  ( flock 9 || exit 1
+    [ "$(bisync_stand)" = aan ] || exit "$GEEN_RONDE"
+    rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" \
        --create-empty-src-dirs --conflict-resolve newer \
-       --resilient --recover --max-lock 2m >> "$SYNCLOG" 2>&1; then
+       --resilient --recover --max-lock 2m >> "$SYNCLOG" 2>&1 ) 9>>"$VAULT_LOCK"
+  rc=$?
+  if [ "$rc" = 0 ]; then
     echo "$(date '+%F %T') RONDE OK" >> "$SYNCLOG"
     return 0
   fi
-  return 1
+  return "$rc"
 }
 
 zelfherstel(){
@@ -145,9 +216,20 @@ zelfherstel(){
       return 1
     fi
   fi
+  # Schakelbestand en onderhoudsstand ook hier, en de resync onder dezelfde grendel als sync_ronde (wv1308; wv1271 Fable ZOU 5).
+  bisync_mag || return 1
   echo "$(date '+%F %T') ZELFHERSTEL: resync met --resync-mode newer (nieuwste wint, niets wordt verwijderd)" >> "$SYNCLOG"
-  if rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" \
-       --resync --resync-mode newer --create-empty-src-dirs >> "$SYNCLOG" 2>&1; then
+  local rc
+  ( flock 9 || exit 1
+    [ "$(bisync_stand)" = aan ] || exit "$GEEN_RONDE"
+    rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" \
+       --resync --resync-mode newer --create-empty-src-dirs >> "$SYNCLOG" 2>&1 ) 9>>"$VAULT_LOCK"
+  rc=$?
+  if [ "$rc" = "$GEEN_RONDE" ]; then
+    echo "$(date '+%F %T') ZELFHERSTEL niet gedaan: bisync bleek onder de grendel uit of in onderhoud" >> "$SYNCLOG"
+    return 1
+  fi
+  if [ "$rc" = 0 ]; then
     touch "$ZELFHERSTEL_MARKER"
     [ -f "$MARKER" ] || printf '%s' "$BRON" > "$MARKER"
     echo "$(date '+%F %T') ZELFHERSTEL geslaagd - sync loopt weer" >> "$SYNCLOG"
@@ -187,10 +269,11 @@ sync_lus(){
   # Allereerste koppeling: bisync heeft nog geen vergelijkingslijsten en weigert.
   # Die eerste --resync kan bestanden overschrijven, dus die doen we NOOIT
   # vanzelf. Zet SYNC_INIT=1 als je hem bewust wilt.
-  if [ "$SYNC_INIT" = "1" ] && [ ! -f "$MARKER" ] && codeplek_dicht; then
+  if [ "$SYNC_INIT" = "1" ] && [ ! -f "$MARKER" ] && codeplek_dicht && bisync_mag; then
     echo "$(date) eerste koppeling met $BRON — resync, nieuwste bestand wint" >> "$SYNCLOG"
-    if rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" --resync --resync-mode newer \
-         --create-empty-src-dirs >> "$SYNCLOG" 2>&1; then
+    if ( flock 9 || exit 1; [ "$(bisync_stand)" = aan ] || exit "$GEEN_RONDE"
+         rclone bisync "$BRON" "$VAULT" "${FILTER[@]}" --resync --resync-mode newer \
+         --create-empty-src-dirs >> "$SYNCLOG" 2>&1 ) 9>>"$VAULT_LOCK"; then
       printf '%s' "$BRON" > "$MARKER"
       echo "$(date) koppeling vastgelegd in .sync-id" >> "$SYNCLOG"
     else
@@ -213,17 +296,22 @@ sync_lus(){
     fi
     [ "$ROL_VORIG" = "passief" ] && echo "$(date '+%F %T') PRIMAIR: bisync hervat" >> "$SYNCLOG"
     ROL_VORIG=primair
+    # Schakelbestand en onderhoudsstand (wv1308): geen ronde, geen fout, geen zelfherstel.
+    if ! bisync_mag; then sleep "$SYNC_INTERVAL"; continue; fi
     # Grendel vóór élke bisync, ook het zelfherstel (Fable-natoets wv813 #1): kan socev in .claude/.obsidian schrijven, dan
     # deze ronde niet; geen "ronde mislukt" (dat zou zelfherstel starten), wel elke keer een regel, en RONDE OK blijft uit.
     if ! codeplek_dicht; then
       echo "$(date '+%F %T') LET OP: socev kan schrijven in .claude/ of .obsidian/ van de vault - ronde overgeslagen (syncfilter wv813)" >> "$SYNCLOG"
       sleep "$SYNC_INTERVAL"; continue
     fi
-    if sync_ronde; then
+    sync_ronde; RC=$?
+    if [ "$RC" = 0 ]; then
       FOUTEN=0
       # Na een geslaagde ronde de koppeling vastleggen als dat nog niet gebeurd is.
       # Zo krijgt ook een bestaande pod de grendel zonder dat iemand iets doet.
       [ -f "$MARKER" ] || printf '%s' "$BRON" > "$MARKER"
+    elif [ "$RC" = "$GEEN_RONDE" ]; then
+      bisync_mag || true   # de regel UIT/ONDERHOUD; geen fout en geen zelfherstel
     elif zelfherstel; then
       FOUTEN=0
     else
