@@ -3729,7 +3729,8 @@ function handleRequest(req, res) {
       doorgeefluik: typeof doorgeefInfo === 'function' ? doorgeefInfo() : { aan: false },   // wv1267: schakelaar en laatste uitkomst (geen inhoud)
       syncthing: typeof syncthingInfo === 'function' ? syncthingInfo() : { aan: false },   // wv1277: Syncthing (schakelaar, poort, map, apparaten, filtertoets; geen inhoud of sleutel)
       zoek_snel: typeof zoekSnelInfo === 'function' ? zoekSnelInfo() : { aan: false },   // wv1252: Zoek snel (module, schakelaar, laatste uitkomst en duur; geen inhoud)
-      secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
+      secondbrain: secondbrainInfo(),
+      docs_delen: docsDelenInfo(),   // wv1382: OVIS Docs › Delen (aan? host, aantal delingen; geen links)   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
       sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
@@ -4899,7 +4900,7 @@ const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
 // gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
 // wv446 (Fable #1): meldingen/af is omkeerbaar en geen invoer naar Socev, net als gezien
-const APP_SLOT_VRIJ = new Set(['POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
+const APP_SLOT_VRIJ = new Set(['POST /app/docs/intrekken', 'POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
@@ -4907,14 +4908,15 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/sleutels/vervang',    // wv157: sleutels alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot
   'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
   'POST /app/agenda',      // wv315 (zie hieronder)
-  'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus']);    // wv833: boekhoud-/afschriftadres en verzendmodus alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk)
+  'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus',
+  'POST /app/docs/delen']);    // wv1382: een pagina naar buiten zetten alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk; review #10). Intrekken staat in APP_SLOT_VRIJ: dat maakt alleen dichter    // wv833: boekhoud-/afschriftadres en verzendmodus alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk)
 // wv315: agenda-✅/↩️ alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot (§ 4.13)
 // wv464 (David 12-10: "Jij mag mij nooit blokkeren … Die haal je desnoods later maar uit mijn text!"): op een vaste plek gaat
 // een bericht met een BSN-achtig getal gewoon door; het getal wordt vóór opslag en doorsturen vervangen (§ 4.11).
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
 const APP_BSN_SYS = '[Systeem: in Davids invoer stond een BSN-achtig getal (9 cijfers die de elfproef halen); de pod heeft het weggelaten (' + APP_BSN_MASKER + '). Vraag er niet naar; meestal was het een ander nummer.]';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], managers: [], 'zoek-snel': [], mediatheek: [], 'mediatheek-bestand': [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], docs: [], managers: [], 'zoek-snel': [], mediatheek: [], 'mediatheek-bestand': [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -11478,7 +11480,7 @@ function handleApp(req, res) {
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en het
         // BSN-masker (§ 4.11; wv464: maskeren, nooit weigeren). Daarna verder met slotKlaar = true (apparaat en sessie opnieuw gecontroleerd).
         if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
-          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
+          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
@@ -11563,6 +11565,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/ideeen' || /^GET \/app\/ideeen\/(plaatje\/[1-9][0-9]{0,11}\/[0-2]|proefplaatje\/k\d{2,3}\/[0-2]|kaart\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||
           route === 'POST /app/ideeen/naar-ideeenbus' || /^POST \/app\/ideeen\/kaart\/[ka]\d{2,3}\/(deel|niet)$/.test(route))   // wv942: AIX lezen, Deel/Niet per kaart of antwoord
           return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App AIX (was Ideeën van buitenaf)
+        if (route === 'GET /app/docs/gedeeld' || route.indexOf('POST /app/docs/') === 0) return typeof appDocs === 'function' ? appDocs(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'docs');   // wv1382: OVIS Docs › Delen
         if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
@@ -15097,6 +15100,52 @@ function secondbrainFinPagina(d) {
   } catch (e) { logError('secondbrain-financien', e); }
 }
 // ── einde secondbrain ──
+
+// ── OVIS Docs › Delen (wv1382; bouwplan vault 01_Ontwikkeling/OVIS Docs - bouwplan (26-10-2026).md § 3.3, Opus-review § 7 #7–#11) ──
+// WAAROM. David 26-10-2026: "Nu zet ik vaak dingen over in PDF om te delen met anderen - maar PDF moet de wereld uit". docs-delen.js
+// rendert een vaultpagina (bron = secondbrain.bron: zelfde padregels), poort (nooit-mappen, masker met IBAN/BSN, namen ter bevestiging) en
+// zet de HTML via de D1-API in databank `deel`; de Pages Function op deel.socev.dev (socev-app/deel) serveert /p/<slug>. Hier alleen:
+// grens, verse vingerafdruk bij delen (nooit vanaf een vaste plek: APP_BEHEER_ROUTES), de D1-aanroep en de audit (domein + HMAC, nooit
+// pad of link). Intrekken mag altijd (APP_SLOT_VRIJ).
+const DOCS_DIR = process.env.DOCS_DIR || '/opt/data/docs';
+const DOCS_HOST = 'deel.socev.dev';
+const DOCS_D1_ID = process.env.DOCS_D1_ID || 'eb5cdcb8-ce36-4452-aeeb-9a04baf9b857';
+const docsDelen = (function () {
+  const p = path.join(__dirname, 'docs-delen.js');
+  if (!fs.existsSync(p) || !secondbrain || typeof secondbrain.bron !== 'function') return null;
+  try {
+    const S = require(path.join(__dirname, 'secondbrain.js'));
+    return require(p).maak({ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: logError, bron: secondbrain.bron,
+      masker: S.masker, isVastDicht: S.isVastDicht, isVerborgen: S.isVerborgen, bsnMasker: function (t) { return appBsnMasker(t); },
+      lees: function (x) { return VV().lees(x, 'utf8'); },
+      hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
+      d1: async function (sql, params) {
+        if (!process.env.CLOUDFLARE_API_TOKEN) return { ok: false, rijen: null };
+        const r = await smalCf(SMAL_CF_BASIS + '/client/v4/accounts/' + SMAL_CF_ACCOUNT + '/d1/database/' + DOCS_D1_ID + '/query', { sql: sql, params: params || [] });
+        const q = r.status === 200 && r.j && r.j.success && Array.isArray(r.j.result) ? r.j.result[0] : null;
+        if (!q || !q.success) logError('docs-d1', new Error('D1 gaf HTTP ' + r.status + (r.j && r.j.errors ? ' ' + JSON.stringify(r.j.errors).slice(0, 200) : '')));
+        return { ok: !!(q && q.success), rijen: q && Array.isArray(q.results) ? q.results : null };
+      } });
+  } catch (e) { logError('docs-delen', e); return null; }
+})();
+function docsDelenInfo() {
+  if (!docsDelen) return { aan: false };
+  try { return docsDelen.health(); } catch (e) { return { aan: true, fout: true }; }
+}
+async function appDocs(req, res, a, s, d, route) {
+  if (!docsDelen) return appWeiger(res, 404, 'Delen zit niet in deze versie van de pod', 'docs ontbreekt');
+  if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');
+  if (route === 'POST /app/docs/delen' && !appVersOk(a, s)) { res._app.reden = 'docs delen, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); }
+  let r;
+  try { r = await docsDelen.app(route, d || {}, { vast: a.soort === 'vast' }); }
+  catch (e) { logError('app-docs', e); return appWeiger(res, 500, 'fout op de pod', 'docs uitzondering'); }
+  if (route === 'POST /app/docs/delen' && r.status === 200) s.vers_tot = 0;   // elke deling een eigen vingerafdruk
+  const actie = route === 'GET /app/docs/gedeeld' ? 'gedeeld' : route.slice('POST /app/docs/'.length);
+  const au = r.audit || {};
+  res._app.reden = 'docs ' + actie + (au.domein ? ' ' + au.domein : '') + (au.h ? ' h=' + au.h : '') + (r.status !== 200 ? ' (' + r.status + ')' : '');
+  return appStuur(res, r.status, r.j);
+}
+// ── einde docs delen ──
 
 // ── Syncthing (wv1277, 25-10-2026) ─────────────────────────────────────────────────────────────────────────────────────────
 // run.sh start en bewaakt Syncthing (vault ↔ Synology thuis, laptop, werk-pc) en schrijft /opt/data/syncthing/status.json; hier
