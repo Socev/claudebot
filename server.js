@@ -3732,6 +3732,7 @@ function handleRequest(req, res) {
       secondbrain: secondbrainInfo(),   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
+      sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
       ovis: typeof ovisInfo === 'function' ? ovisInfo() : { aan: false },   // wv979: OVIS-register (laatste dag-, nacht- en Bibliothecarisronde; aantallen, geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
@@ -14596,6 +14597,28 @@ async function ovisTik() {
   finally { ovisLoopt.nu = null; }
 }
 if (ovis && SERVER_ECHT) { setTimeout(function () { ovisTik(); }, 90000).unref(); setInterval(function () { ovisTik(); }, OVIS_TIK_MS).unref(); }
+// ── SB2 nachtelijke linter + manifest (wv1321, Second Brain 2.0 fase 1a; bouwplan § 7.1 punt 6 en § 7.1a) ──
+// Logica en waarom in sb2-nacht.js. Hier alleen de klok: elke 5 min (echte pod, rol primair), werk alleen 02:00–02:29 en eenmaal per
+// datum; niet tijdens de onderhoudsstand en niet zolang de OVIS-nachtronde nog loopt. Altijd via socev-run (hartslag sb2_linter).
+// Ontbreekt sb2-nacht.js in de release (terugrol), dan geen tik en /health.sb2_nacht.aan=false.
+const sb2Nacht = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ staatMap: serverPad('sb2_nacht', process.env.SB2_NACHT_DIR, '/opt/data/scripts-staat/sb2-nacht', serverProefDeel('sb2-nacht')),
+      manifestMap: '/opt/data/scripts-staat/sb2-manifest', socevRun: '/opt/data/scripts/huidig/bin/socev-run',
+      sb2Src: '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2', env: Object.assign({}, process.env, { VAULT_DIR: VAULT }), fout: logError });
+  } catch (e) { logError('sb2-nacht', e); return null; }
+})();
+function sb2NachtInfo() { if (!sb2Nacht) return { aan: false }; try { return sb2Nacht.info(); } catch (e) { return { fout: true }; } }
+async function sb2NachtTik() {
+  if (!sb2Nacht || !SERVER_ECHT || !rolPrimair()) return;
+  try {
+    const u = await sb2Nacht.tik({ ams: ovisAms(), onderhoud: !!onderhoud.stand().aan, ovisNacht: ovisLoopt.nu === 'nacht' });
+    if (u && u.datum) schrijfLog(nu() + ' sb2-nacht ' + velden({ ok: u.ok ? 1 : 0, linter: u.linter.exit, manifest: u.manifest.exit === null ? 'al' : u.manifest.exit, verschil: u.verschil && typeof u.verschil.totaal === 'number' ? u.verschil.totaal : '-', opgeruimd: u.opgeruimd || 0 }));
+  } catch (e) { logError('sb2-nacht-tik', e); }
+}
+if (sb2Nacht && SERVER_ECHT) { setInterval(function () { sb2NachtTik(); }, 5 * 60000).unref(); }
 // managers.js soort script: Nu draaien (geen stempel, geen box-rij; het rapport gaat via managers.js naar de machinekamer)
 function ovisStartScript(m) {
   if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');
