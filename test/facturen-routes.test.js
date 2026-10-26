@@ -730,7 +730,9 @@ test('wv1317: een open voorstel dat niet meer klopt gaat op vervallen (reden + a
   assert.equal(JSON.parse(na.details).vervallen_reden, 'vooruit');
   assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'voorstel_vervallen' AND object_id = ?", [String(v.id)]), 1);
   // David kan er niet meer op drukken
-  assert.equal(t.call('POST', 'voorstel', { id: v.id, keuze: 'bevestig' }).status, 409);
+  const klik = t.call('POST', 'voorstel', { id: v.id, keuze: 'bevestig' });
+  assert.equal(klik.status, 409);
+  assert.match(JSON.stringify(klik), /voorstel verviel: de betaling lag ruim vóór de factuurdatum/);
   const b = t.call('GET', 'bank').j;
   assert.ok(b.geleerd_regels.some((g) => g.tekst === '1 koppelvoorstel verviel: de betaling lag ruim vóór de factuurdatum.' ||
     /koppelvoorstellen vervielen: de betaling lag ruim vóór de factuurdatum/.test(g.tekst)), JSON.stringify(b.geleerd_regels));
@@ -780,4 +782,20 @@ test('wv1317: factuurdetail toont het bedragpatroon van het IBAN (alleen met ≥
   assert.equal(p.oordeel, 'binnen');
   assert.equal(p.rekening, '…' + K.ibanNorm(f.iban).slice(-4));
   assert.ok(leeg.bedragpatroon === null || leeg.bedragpatroon.aantal < p.aantal);
+  // een alleen-eigenaar-regel naar hetzelfde IBAN telt voor de eigenaar mee, nooit voor de praktijkmanager
+  D.voegToe(t.fdb, 'bank_transactie', { id: 'b131700000000009', bestand: best.id, rekening: rek.id, entiteit: 'tolgaarde', eigen_iban: rek.iban, boekdatum: '2026-09-15',
+    bedrag_centen: -f.incl, valuta: 'EUR', tegenpartij_iban: K.ibanNorm(f.iban), entry_ref: 'wv1317-9', formaat: 'abn_mt940', alleen_eigenaar: 1, aangemaakt_op: '2026-10-22T10:00:00Z' });
+  assert.equal(t.call('GET', 'factuur/' + f.id).j.bedragpatroon.aantal, p.aantal + 1);
+  const pm = t.pm();
+  const alsPm = t.call('GET', 'factuur/' + f.id, null, { rol: pm });
+  assert.equal(alsPm.status, 200, JSON.stringify(alsPm.j));
+  assert.equal(alsPm.j.bedragpatroon.aantal, p.aantal);
+});
+
+test('wv1317: een open voorstel waarvan de bankregel buiten het venster van 400 dagen valt, blijft open (diffreview ZOU 3)', () => {
+  const t = opzet();
+  const v = t.fdb.db.prepare("SELECT * FROM voorstel WHERE status = 'open' ORDER BY id LIMIT 1").get();
+  t.fdb.db.prepare("UPDATE bank_transactie SET boekdatum = '2024-01-02' WHERE id = ?").run(v.transactie);
+  D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.equal(t.fdb.db.prepare('SELECT status FROM voorstel WHERE id = ?').get(v.id).status, 'open');
 });

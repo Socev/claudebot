@@ -649,8 +649,8 @@ function M5(db, vervang, code) {
  * wv1317 (David 26-10-2026, koppelvoorstellen): een voorstel dat bij herbeoordeling niet meer klopt (betaling vóór de factuurdatum, ander
  * factuurnummer, factuur al betaald) gaat niet stil weg en ook niet op 'afgewezen' (dat zei David niet), maar op 'vervallen' met de reden in
  * details en een auditrij. Zelfde weg als M5 (writable_schema, één vervanging, al verruimd = overslaan). LET OP terugrol: een release van
- * vóór wv1317 opent deze database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 6` — maar
- * alleen als er geen voorstel op 'vervallen' staat (de oude code kent die status niet in zijn lijsten; de CHECK hindert hem niet).
+ * vóór wv1317 opent deze database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 6`: de
+ * verruimde CHECK hindert de oude code niet, en rijen op 'vervallen' ook niet (die leest alleen 'open' en 'afgewezen'; diffreview ZOU 8).
  */
 const M6_VERVANG = [
   ['voorstel', "status IN ('open','bevestigd','afgewezen')", "status IN ('open','bevestigd','afgewezen','vervallen')"],

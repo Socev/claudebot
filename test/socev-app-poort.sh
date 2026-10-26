@@ -4181,7 +4181,7 @@ async function bewijs(o) {
       r = await vraag('GET', '/app/facturen', undefined, { pot: P.jar });
       toets('20h met sessie: 200, rol eigenaar, tellers', r.status === 200 && r.j.rol === 'eigenaar' && r.j.tellers.beoordelen > 0 && r.j.verzendmodus === 'concept', JSON.stringify(r.j).slice(0, 300));
       const hf = FA.facturenInfo();
-      toets('20h /health.facturen: aan, schema 4 (wv944), routes', hf.aan === true && hf.schema === 4 && hf.routes === true, JSON.stringify(hf));
+      toets('20h /health.facturen: aan, schema = code (≥ 6 sinds wv1317; stond nog op 4 sinds wv1299), routes', hf.aan === true && hf.schema === hf.schema_code && hf.schema >= 6 && hf.routes === true, JSON.stringify(hf));
       // Bevestigen: één klik (geen vingerafdruk nodig)
       const sPf = () => H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')];
       sPf().vers_tot = 0;

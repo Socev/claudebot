@@ -392,7 +392,7 @@ function bank(fdb, r, nu) {
   for (const g of fdb.db.prepare("SELECT t.entiteit, v.status, count(*) AS n FROM voorstel v JOIN bank_transactie t ON t.id = v.transactie WHERE v.status IN ('bevestigd','afgewezen') AND " +
     'substr(v.afgehandeld_op, 1, 7) = ? AND ' + vf + ' GROUP BY t.entiteit, v.status').all(maand, ...vp)) {
     geleerd_regels.push({ tekst: g.status === 'bevestigd' ? g.n + (g.n === 1 ? ' koppeling' : ' koppelingen') + ' bevestigd.' :
-      g.n + (g.n === 1 ? ' koppelvoorstel' : ' koppelvoorstellen') + ' afgewezen; die komen niet terug.', aantal: g.n, soort: 'voorstel_' + g.status, entiteit: g.entiteit || null });
+      g.n + (g.n === 1 ? ' koppelvoorstel' : ' koppelvoorstellen') + ' afgewezen; dezelfde koppeling wordt niet opnieuw voorgesteld.', aantal: g.n, soort: 'voorstel_' + g.status, entiteit: g.entiteit || null });
   }
   return { signalen: open.map(signaalKort), geleerd: geleerd.slice(0, 50).map(signaalKort), geleerd_regels, voorstellen, weken: Object.values(weken).sort((a, b) => (a.week < b.week ? -1 : 1)) };
 }
@@ -795,6 +795,7 @@ function voorstelRoute(fdb, r, d, nu) {
   return D.transactie(fdb, function () {
     const v = fdb.db.prepare('SELECT v.*, t.entiteit FROM voorstel v JOIN bank_transactie t ON t.id = v.transactie WHERE v.id = ?').get(id);
     if (!v || (!isEig(r) && (v.alleen_eigenaar || !magEntiteit(r, v.entiteit)))) weiger(404, 'voorstel niet gevonden');
+    if (v.status === 'vervallen') weiger(409, 'dit voorstel verviel: ' + (B.VERVAL_TEKST[(json(v.details, {}) || {}).vervallen_reden] || B.VERVAL_TEKST.geen_match) + '; ververs de lijst');
     if (v.status !== 'open') weiger(409, 'het voorstel is al afgehandeld');
     const wanneer = nuIso(nu);
     const uit = { koppelingen: [] };
@@ -842,10 +843,14 @@ function bankcontroleToepassen(fdb, nu) {
         JSON.stringify({ alternatieven: v.alternatieven || [], tegenpartij_geborgd: !!v.tegenpartij_geborgd, verschil_centen: v.verschil_centen, creditnota: v.creditnota, reden: v.reden }),
         v.alleen_eigenaar ? 1 : 0, wanneer).changes;
     tel.voorstellen += n;
-    // wv1317: een vervallen voorstel dat de controle weer precies zo voorstelt, gaat weer open (de stand veranderde terug)
+    // wv1317: een open voorstel krijgt de verse methode, zekerheid en details (alternatieven kunnen wegvallen); een vervallen voorstel dat de
+    // controle weer precies zo voorstelt, gaat weer open (de stand veranderde terug), zonder de oude vervalreden (diffreview MOET 2)
     if (!n) {
+      const vers = JSON.stringify({ alternatieven: v.alternatieven || [], tegenpartij_geborgd: !!v.tegenpartij_geborgd, verschil_centen: v.verschil_centen, creditnota: v.creditnota, reden: v.reden });
+      fdb.db.prepare("UPDATE voorstel SET methode = ?, zekerheid = ?, details = ? WHERE sleutel = ? AND status = 'open'").run(v.methode || null, v.zekerheid == null ? null : v.zekerheid, vers, v.sleutel);
       const oud = fdb.db.prepare("SELECT id FROM voorstel WHERE sleutel = ? AND status = 'vervallen'").get(v.sleutel);
-      if (oud && fdb.db.prepare("UPDATE voorstel SET status = 'open', afgehandeld_door = NULL, afgehandeld_op = NULL WHERE id = ? AND status = 'vervallen'").run(oud.id).changes) {
+      if (oud && fdb.db.prepare("UPDATE voorstel SET status = 'open', afgehandeld_door = NULL, afgehandeld_op = NULL, methode = ?, zekerheid = ?, details = ? WHERE id = ? AND status = 'vervallen'")
+        .run(v.methode || null, v.zekerheid == null ? null : v.zekerheid, vers, oud.id).changes) {
         tel.voorstellen_heropend = (tel.voorstellen_heropend || 0) + 1;
         D.audit(fdb, { wie: 'bankcontrole', wat: 'voorstel_heropend', object_soort: 'voorstel', object_id: String(oud.id), voor: { status: 'vervallen' }, na: { status: 'open' }, wanneer });
       }
@@ -888,7 +893,9 @@ function voorstellenHerbeoordelen(fdb, uit, txMap, facturen, wanneer) {
     const redenen = [];
     if (!tx || fs.length !== fids.length) {
       const t = tx ? null : fdb.db.prepare('SELECT verwijderd_op FROM bank_transactie WHERE id = ?').get(v.transactie);
-      redenen.push(fs.length !== fids.length || !t || t.verwijderd_op ? 'weg' : 'geen_match');   // buiten het venster van de controle: geen match meer
+      // bankregel bestaat nog maar valt buiten het venster van de controle (400 dagen): niets over te zeggen, voorstel blijft open (ZOU 3)
+      if (!tx && t && !t.verwijderd_op && fs.length === fids.length) continue;
+      redenen.push('weg');
     }
     else {
       const ref = B.referentieStukken(tx);
@@ -1638,9 +1645,10 @@ function afschriftKlaarzetten(fdb, r, invoer, o) {
   });
 }
 // POST /facturen-ronde: de back-up (VACUUM INTO, 14 dagen); de koerier (facturen-koerier.js) roept dit aan als backupNodig.
-// Na een wijziging in de koppelregels (facturen-bank.js) beoordeelt de eerstvolgende ronde de stand één keer opnieuw, ná de back-up: zo
-// vervallen voorstellen die onder de oude regels ontstonden zonder te wachten op een nieuwe bankupload (wv1317). Mislukt het, dan
-// probeert de volgende ronde het opnieuw (de meta-sleutel wordt pas gezet na een geslaagde transactie).
+// Na een wijziging in de koppelregels (facturen-bank.js) beoordeelt de eerstvolgende back-upronde (de eerste tik na 02:00) de stand één
+// keer opnieuw, ná de back-up: zo vervallen voorstellen die onder de oude regels ontstonden, ook zonder nieuwe bankupload (elke upload en
+// bankluis-ronde doet hetzelfde al via bankcontroleToepassen). Mislukt het: ok = false (de koerier meldt 'herbeoordeling') en de volgende
+// back-upronde probeert het opnieuw; de meta-sleutel wordt pas gezet na een geslaagde transactie (wv1317).
 const BANK_REGELS = 'wv1317';
 function ronde(fdb, o) {
   const nu = o.nu || Date.now();
@@ -1655,7 +1663,7 @@ function ronde(fdb, o) {
         D.audit(fdb, { wie: 'bankcontrole', wat: 'herbeoordeling', object_soort: 'meta', object_id: 'bank_regels', na: Object.assign({ regels: BANK_REGELS }, c), wanneer: nuIso(nu) });
         return Object.assign({ ok: true, regels: BANK_REGELS }, c);
       });
-    } catch (e) { uit.herbeoordeling = { ok: false, fout: kort(e && (e.code || e.message) || 'fout', 80) }; }
+    } catch (e) { uit.ok = false; uit.herbeoordeling = { ok: false, fout: kort(e && (e.code || e.message) || 'fout', 80) }; }
   }
   return uit;
 }

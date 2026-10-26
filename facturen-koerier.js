@@ -237,7 +237,11 @@ async function ronde(fdb, io, o) {
   const fout = (wat, e) => { uit.ok = false; uit.fouten.push({ wat, soort: foutSoort(e) }); };
 
   // 0. back-up (eerste ronde na 02:00 op een dag zonder back-up)
-  if (F.backupNodig(fdb, start)) { const b = F.ronde(fdb, { nu: start }); uit.backup = b.backup; if (!b.ok) fout('backup', { code: 'backup' }); }
+  if (F.backupNodig(fdb, start)) {
+    const b = F.ronde(fdb, { nu: start }); uit.backup = b.backup;
+    if (!b.backup || !b.backup.ok) fout('backup', { code: 'backup' });
+    if (b.herbeoordeling) { uit.herbeoordeling = b.herbeoordeling; if (!b.herbeoordeling.ok) fout('herbeoordeling', { code: 'herbeoordeling' }); }   // wv1317
+  }
 
   // 1. voorronde: opgehaald > 30 min mét reservering → eerst zoeken (anders maakt de claim hem bij poging 3 stil "mislukt" terwijl het
   //    concept er staat, of verstuurt hij opnieuw; Fable F4 MOET 2)

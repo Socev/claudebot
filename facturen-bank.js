@@ -564,24 +564,41 @@ function noemtFactuur(ref, f) {
 // dan 7 dagen. Zo koppelde de huur van september en oktober aan de factuur van november (voorstel 1 en 2, 25-10).
 const VOORUIT_MARGE = 7;
 function vooruitBetaald(tx, f) { return !!(f.factuurdatum && isIsoDatum(f.factuurdatum) && dagenTussen(tx.boekdatum, f.factuurdatum) > VOORUIT_MARGE); }
-// Noemt de betaling een ánder factuurnummer? (1) na het woord factuur/factuurnummer/invoice/nota volgt een nummer dat dit factuurnummer
-// niet bevat (de bank knipt een omschrijving soms met spaties: "53. 73.00303", dus genormaliseerd vergelijken); (2) een los stuk uit
-// dezelfde nummerreeks (even lang, zelfde eerste helft, bv. 3.2026.00819 tegen 3.2026.00982). Dan is het een betaling van die andere factuur.
-const FACTUURWOORD = /\b(?:factuur(?:nummer|nr)?|fact(?:uur)?\.?\s*nr|invoice(?:\s*(?:no|nr|number))?|nota(?:nummer)?)\b\.?\s*[:#]?\s*([^\n]{0,40})/gi;
+// Noemt de betaling een ánder factuurnummer? Bewust smal (diffreview wv1317 MOET 1: een te grove regel liet juiste koppelingen vallen):
+// (1) het EERSTE nummerstuk direct na het woord factuur/factuurnummer/invoice/nota (de bank knipt soms met spaties: "53. 73.00303") met
+// minstens 3 cijfers, geen datum (01-10-2026, 2026-10, 10-2026) en geen los betalingskenmerk van ≥ 14 cijfers, en dat niet in het
+// factuurnummer zit, het factuurnummer niet bevat en ook niet op dezelfde vier cijfers eindigt ("Invoice 12345" ↔ INV-12345, een
+// afgeknipt "3.2026.0098" en "factuur 00982" tellen als hetzelfde); (2) een los stuk uit dezelfde nummerreeks (even lang, zelfde eerste
+// helft, geen datum), bv. 3.2026.00819 tegen 3.2026.00982.
+const FACTUURWOORD = /\b(?:factuur(?:nummer|nr)?|fact(?:uur)?\.?\s*nr|invoice(?:\s*(?:no|nr|number))?|nota(?:nummer)?)\b\.?\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9.\-/]{0,30}(?: [0-9][0-9.\-/]{0,20}){0,2})/gi;
+const DATUMSTUK = /^(?:\d{1,2}[-./]\d{1,2}[-./]\d{2,4}|\d{4}[-./]\d{1,2}(?:[-./]\d{1,2})?|\d{1,2}[-./]\d{4}|\d{8})$/;
+function cijfers(s) { return String(s || '').replace(/\D/g, ''); }
+function zelfdeNummer(a, n) {
+  if (a.indexOf(n) >= 0 || n.indexOf(a) >= 0) return true;
+  const ca = cijfers(a), cn = cijfers(n);
+  return ca.length >= 4 && cn.length >= 4 && ca.slice(-4) === cn.slice(-4);
+}
 function andereFactuurGenoemd(tx, f, ref) {
   const n = normNummer(f.nummer);
   if (!n || n.length < 4 || !/\d/.test(n)) return false;
   ref = ref || referentieStukken(tx);
   if (noemtFactuur(ref, f)) return false;
-  const tekst = [tx.omschrijving, tx.kenmerk].filter(Boolean).join(' ');
+  const tekst = [tx.omschrijving, tx.kenmerk].filter(Boolean).join(' ').slice(0, 600);
   FACTUURWOORD.lastIndex = 0;
   for (let m = FACTUURWOORD.exec(tekst); m; m = FACTUURWOORD.exec(tekst)) {
-    const rest = normNummer(m[1]) || '';
-    if (/\d/.test(rest.slice(0, 6)) && rest.length >= 4 && rest.indexOf(n) < 0) return true;
+    const ruw = m[1].replace(/[.\-/]+$/, '');
+    const stuk = normNummer(ruw) || '';
+    const eerste = ruw.split(' ')[0];   // "d.d. 01-10-2026": het eerste stuk is een woord, geen nummer
+    if (!/\d/.test(eerste) || cijfers(stuk).length < 3 || DATUMSTUK.test(eerste) || DATUMSTUK.test(ruw.replace(/\s+/g, '')) || /^\d{14,}$/.test(stuk)) continue;
+    if (!zelfdeNummer(stuk, n)) return true;
   }
   if (n.length >= 6) {
     const helft = n.slice(0, Math.ceil(n.length / 2));
-    for (const s of ref.stukken) if (s !== n && s.length === n.length && /\d/.test(s) && s.slice(0, helft.length) === helft) return true;
+    for (const ruw of tekst.split(/[\s,;:()]+/)) {
+      const s2 = normNummer(ruw.replace(/[.\-/]+$/, ''));
+      if (!s2 || s2 === n || s2.length !== n.length || !/\d/.test(s2) || DATUMSTUK.test(ruw.replace(/[.\-/]+$/, ''))) continue;
+      if (s2.slice(0, helft.length) === helft && !zelfdeNummer(s2, n)) return true;
+    }
   }
   return false;
 }
@@ -640,7 +657,7 @@ function matchTransactie(tx, facturen, ctx) {
   const lt = leverancierBijTx(tx, ctx);
   const tegen = ibanNorm(tx.tegenpartij_iban);
   const uit = [];
-  const opDatum = (lijst) => lijst.slice().sort((a, b) => afstand(tx, a) - afstand(tx, b));
+  const opDatum = (lijst) => lijst.slice().sort((a, b) => afstand(tx, a) - afstand(tx, b) || String(a.id).localeCompare(String(b.id)));
 
   // (1) kenmerk / factuurnummer
   const ref = referentieStukken(tx);
@@ -1021,7 +1038,15 @@ function bankcontrole(inv) {
     if (kand.length) { wensen.push({ tx, kand, basis }); continue; }
     if (richtingVan(tx) === 'af' && dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));
   }
-  const afstandVan = (w) => afstand(w.tx, fMap.get(w.kand[0].facturen[0]) || {});
+  // afstand tot de periode van de factuur: 0 tussen factuur- en vervaldatum, anders tot de dichtstbijzijnde grens (diffreview wv1317 ZOU 4)
+  const afstandVan = (w) => {
+    const f = fMap.get(w.kand[0].facturen[0]) || {}, d = w.tx.boekdatum;
+    const van = isIsoDatum(f.factuurdatum) ? f.factuurdatum : null, tot = isIsoDatum(f.vervaldatum) ? f.vervaldatum : van;
+    if (!van && !tot) return 9999;
+    if (van && d < van) return dagenTussen(d, van);
+    if (tot && d > tot) return dagenTussen(tot, d);
+    return 0;
+  };
   wensen.sort((a, b) => b.kand[0].zekerheid - a.kand[0].zekerheid || afstandVan(a) - afstandVan(b) || (a.tx.boekdatum < b.tx.boekdatum ? -1 : a.tx.boekdatum > b.tx.boekdatum ? 1 : 0) ||
     String(a.tx.id).localeCompare(String(b.tx.id)));
   const bezet = new Set();
@@ -1037,8 +1062,8 @@ function bankcontrole(inv) {
       alle.forEach((f) => voorgesteld.add(f));   // ook de alternatieven: een mens kiest, geen vals signaal ernaast
       continue;
     }
-    // elke kandidaat-factuur is al voorgesteld bij een betere betaling: deze afschrijving heeft (nog) geen eigen factuur
-    if (richtingVan(tx) === 'af' && dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));
+    // elke kandidaat-factuur is al voorgesteld bij een betere betaling: geen voorstel en ook (nog) geen "geen factuur" — wijst David de
+    // winnaar af, dan krijgt deze betaling bij de volgende controle het voorstel; bevestigt hij, dan volgt het signaal vanzelf (ZOU 4)
   }
 
   // signalen per factuur — alleen voor entiteiten waarvan de app een bank ziet (rekening met controle 1); Privé-regels worden niet
@@ -1134,12 +1159,17 @@ function voorstelUitleg(v, tx, facturen, alternatieven, patroon) {
   const waarom = [];
   const f0 = facturen[0] || {};
   const zelfdeIban = !!(tx.tegenpartij_iban && f0.iban && ibanNorm(tx.tegenpartij_iban) === ibanNorm(f0.iban));
+  // bedrag en verschil zelf uitrekenen, niet uit opgeslagen details (een voorstel van vóór wv1317 of een heropend voorstel heeft ze niet;
+  // diffreview wv1317 MOET 2): wat hier staat is wat David akkordeert
+  const betaald = -tx.bedrag_centen, som = facturen.reduce((x, f) => x + teBetalen(f), 0), verschil = som - betaald;
+  const verschilTekst = (vs) => 'bedrag ' + eurTekst(Math.abs(vs)) + ' ' + (vs > 0 ? 'lager' : 'hoger') + ' dan ' + (facturen.length > 1 ? 'de facturen samen' : 'de factuur');
   switch (v.methode) {
-    case 'kenmerk': waarom.push(v.reden ? 'het factuurnummer staat in de omschrijving van de betaling, maar het bedrag klopt niet' : 'het factuurnummer staat in de omschrijving van de betaling' +
-      (facturen.length > 1 ? ' en de facturen tellen precies op tot het bedrag' : ' en het bedrag klopt precies')); break;
-    case 'iban_bedrag': waarom.push((zelfdeIban ? 'zelfde rekeningnummer als op de factuur' : 'rekening van deze leverancier') + ' en precies hetzelfde bedrag'); break;
-    case 'incasso': waarom.push('incasso van deze leverancier' + (v.verschil_centen ? ', bedrag ' + eurTekst(Math.abs(v.verschil_centen)) + ' ' + (v.verschil_centen > 0 ? 'lager' : 'hoger') + ' dan de factuur (binnen de marge)' : ', zelfde bedrag')); break;
-    case 'subset': waarom.push('één betaling voor ' + facturen.length + ' facturen van deze leverancier; samen precies het bedrag' + (v.creditnota ? ' (een creditnota is verrekend)' : '')); break;
+    case 'kenmerk': waarom.push('het factuurnummer staat in de omschrijving van de betaling' + (verschil ? '; ' + verschilTekst(verschil) :
+      facturen.length > 1 ? ' en de facturen tellen precies op tot het bedrag' : ' en het bedrag klopt precies')); break;
+    case 'iban_bedrag': waarom.push((zelfdeIban ? 'zelfde rekeningnummer als op de factuur' : 'rekening van deze leverancier') + (verschil ? '; ' + verschilTekst(verschil) : ' en precies hetzelfde bedrag')); break;
+    case 'incasso': waarom.push('incasso van deze leverancier' + (verschil ? ', ' + verschilTekst(verschil) + ' (binnen de marge)' : ', zelfde bedrag')); break;
+    case 'subset': waarom.push('één betaling voor ' + facturen.length + ' facturen van deze leverancier; ' + (verschil ? verschilTekst(verschil) : 'samen precies het bedrag') +
+      (facturen.some(credit) ? ' (een creditnota is verrekend)' : '')); break;
     case 'valuta': waarom.push('factuur in vreemde valuta; omgerekend bedrag binnen 3 %'); break;
     default: break;
   }
@@ -1148,7 +1178,8 @@ function voorstelUitleg(v, tx, facturen, alternatieven, patroon) {
   const let_op = [];
   if ((alternatieven || []).length) let_op.push('er staat nog ' + (alternatieven.length === 1 ? 'een factuur' : alternatieven.length + ' facturen') + ' met hetzelfde bedrag open (' +
     alternatieven.map((f) => f.nummer || 'zonder nummer').join(', ') + '); kies je Ja, dan hoort deze betaling bij ' + (f0.nummer || 'de eerste'));
-  if (!v.tegenpartij_geborgd && af) let_op.push(f0.leverancier_naam ? 'rekening ' + eind4(tx.tegenpartij_iban) + ' is nog niet als rekening van ' + f0.leverancier_naam + ' bevestigd'
+  if (!v.tegenpartij_geborgd && af) let_op.push(f0.leverancier_naam ? (tx.tegenpartij_iban ? 'rekening ' + eind4(tx.tegenpartij_iban) : 'deze tegenpartij') + ' is nog niet als ' +
+    (tx.tegenpartij_iban ? 'rekening' : 'incassant') + ' van ' + f0.leverancier_naam + ' bevestigd'
     : 'de leverancier van deze factuur is nog niet bekend; Ja koppelt alleen deze betaling aan deze factuur');
   if (patroon && patroon.aantal) {
     const band = eurTekst(patroon.laag_centen) + (patroon.hoog_centen !== patroon.laag_centen ? ' – ' + eurTekst(patroon.hoog_centen) : '');
