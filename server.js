@@ -14321,7 +14321,7 @@ const intake = (function () {
     return require(p).maak({ dir: INTAKE_DIR, vault: VAULT, profielenDir: path.join(__dirname, 'intake', 'profielen'),
       filterPad: fs.existsSync(path.join(__dirname, 'bisync-filter.txt')) ? path.join(__dirname, 'bisync-filter.txt') : '/app/bisync-filter.txt',   // release: het filter van het image (wv813)
       primair: function () { return rolPrimair(); }, vv: VV(), stuur: intakeStuur,
-      fout: logError, pdftekst: intakePdfTekst, nachtgrendel: function () { return ovisAms().uur === 1; },
+      fout: logError, pdftekst: intakePdfTekst, nachtgrendel: function () { return ovisAms().uur === 1; }, meld: intakeMeldHangers,
       vrijeBytes: function (d) { try { const st = fs.statfsSync(d); return st.bavail * st.bsize; } catch (e) { return null; } },
       marker: require(path.join(__dirname, 'intake', 'patientpoort.js')) });
   } catch (e) { logError('intake', e); return null; }
@@ -14351,6 +14351,18 @@ function intakeDagTelling() {
   ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Intake: dagtelling aanleveringen\n- status: ' + (zorg ? 'open' : 'afgehandeld') + '\n- van: pod:intake — bevinding_id intake-telling-' + t.datum +
     '\n- wat ik zag: ' + (regels.join('; ') || 'geen aanleveringen') + (open.length ? '; open: ' + open.map(function (k) { return k + ' ' + r.open[k]; }).join(', ') : '') +
     '\n- voorstel: niets bij alleen dubbel/0 geweigerd; anders stuk-id in intake.sqlite (tabel aanlevering) nalopen\n');
+}
+// Hangers (wv1303): stukken die > 1 u op 'wacht' staan of 'mislukt' zijn; de aanleverende workflow kreeg 202 en ziet dat niet. Eén rij met
+// stuk-id, profiel, bron en status (nooit inhoud); intake-ingang.js zet ze pas op gemeld als deze functie true geeft.
+let intakeMeldFoutDag = '';
+function intakeMeldHangers(h) {
+  const t = ovisAms(), TOON = 10;
+  const stand = function (x) { return x.stuk_id + ' (' + x.profiel + ', ' + x.bron + ', ' + x.status + ', binnen ' + String(x.sinds || '').slice(0, 16).replace('T', ' ') + ' UTC' + (x.pogingen ? ', ' + x.pogingen + ' schrijfpogingen' : '') + ')'; };
+  const ok = ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Intake: ' + h.length + (h.length === 1 ? ' stuk blijft' : ' stukken blijven') + ' hangen (vault niet geschreven)\n- status: open\n- van: pod:intake — bevinding_id intake-hangt-' + h[0].stuk_id +
+    '\n- wat ik zag: ' + h.slice(0, TOON).map(stand).join('; ') + (h.length > TOON ? '; en ' + (h.length - TOON) + ' meer (in intake.sqlite: kolom gemeld met dezelfde tijd)' : '') +
+    '\n- voorstel: oorzaak nalopen in het podlog (intake-schrijf) en /health intake (onderhoud, schijf, symlink); stuk in intake.sqlite (tabel stuk/overgang). wacht wordt elke 5 min opnieuw geprobeerd; mislukt niet meer: na herstel status wacht, pogingen 0 en gemeld leeg zetten\n') === true;
+  if (!ok && intakeMeldFoutDag !== t.datum) { intakeMeldFoutDag = t.datum; logError('intake-meld', new Error('box-rij over ' + h.length + ' hangende stukken niet geschreven; volgende ronde opnieuw')); }
+  return ok;
 }
 async function intakeTik() {
   if (!intake || !rolPrimair()) return;
@@ -14547,13 +14559,13 @@ function ovisNachtKind() {
     });
   });
 }
-function ovisBoxRij(tekst) {
+function ovisBoxRij(tekst) {   // → true als de rij in de box staat (wv1303: de intake-hangers melden alleen dan het stuk als gemeld)
   try {
-    VV().wijzig(path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), function (t) {
+    return VV().wijzig(path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), function (t) {
       const eerste = /\n## \[[a-z]{2,16}\] \d{4}-\d{2}-\d{2}/.exec(t);
       return eerste ? t.slice(0, eerste.index) + tekst + t.slice(eerste.index) : null;
     });
-  } catch (e) { logError('ovis-box', e); }
+  } catch (e) { logError('ovis-box', e); return false; }
 }
 async function ovisTik() {
   if (!ovis || !SERVER_ECHT || !rolPrimair()) return;

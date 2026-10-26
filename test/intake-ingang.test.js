@@ -724,3 +724,57 @@ test('wv1286: WAHA-id met @lid, dubbel geeft het echte pad, weggeruimd mediabest
     assert.ok(fs.existsSync(path.join(o.vault, g.verwacht[0])));
   } finally { await o.sluit(); }
 });
+
+test('wv1303: hangende stukken (wacht > 1 u, onderhoud > 6 u, mislukt) → één box-rij per stuk, alleen kale velden, hooguit één rij per 6 u', async () => {
+  const meldingen = []; let antwoord = true;
+  const o = await omgeving({ meld: (h) => { meldingen.push(JSON.parse(JSON.stringify(h))); return antwoord; } });
+  try {
+    const H = 3600000;
+    const status = (id) => o.ing._db.prepare('SELECT status, gemeld FROM stuk WHERE stuk_id = ?').get(id);
+    // onderhoud: stuk gaat op wacht; binnen 6 u geen melding, ook niet na 1 u
+    fs.writeFileSync(path.join(o.dir, 'onderhoud'), '');
+    const s = gevallen()[5]; const w = await post(o, s.sleutel, s.env());
+    assert.strictEqual(w.status, 202);
+    o.klok.t += 2 * H; assert.strictEqual((await o.ing.ronde()).gemeld, 0); assert.strictEqual(meldingen.length, 0);
+    // na 6 u onderhoud wel, met alleen stuk-id, profiel, bron, status, sinds, pogingen
+    o.klok.t += 4 * H + 60000;
+    assert.strictEqual((await o.ing.ronde()).gemeld, 1);
+    assert.strictEqual(meldingen.length, 1);
+    assert.deepStrictEqual(Object.keys(meldingen[0][0]).sort(), ['bron', 'pogingen', 'profiel', 'sinds', 'status', 'stuk_id']);
+    assert.strictEqual(meldingen[0][0].stuk_id, w.j.stuk_id); assert.strictEqual(meldingen[0][0].status, 'wacht'); assert.strictEqual(meldingen[0][0].profiel, s.profiel);
+    assert.ok(status(w.j.stuk_id).gemeld);
+    // per stuk één keer
+    o.klok.t += 7 * H; assert.strictEqual((await o.ing.ronde()).gemeld, 0); assert.strictEqual(meldingen.length, 1);
+    fs.unlinkSync(path.join(o.dir, 'onderhoud'));
+    assert.strictEqual((await o.ing.ronde()).herschreven, 1);
+    // buiten onderhoud: een stuk dat bij het schrijven faalt (symlink) en > 1 u wacht → melding; < 1 u niet
+    const t = gevallen()[6];
+    fs.rmSync(path.join(o.vault, '30_Conversaties/Teams'), { recursive: true }); fs.symlinkSync(o.basis, path.join(o.vault, '30_Conversaties/Teams'));
+    const rt = await post(o, t.sleutel, t.env()); assert.strictEqual(rt.status, 202);
+    o.klok.t += 59 * 60000; assert.strictEqual((await o.ing.ronde()).gemeld, 0);
+    // de box-rij lukt niet → niet gemeld, volgende ronde opnieuw
+    o.klok.t += 2 * 60000; antwoord = false;
+    assert.strictEqual((await o.ing.ronde()).gemeld, 0); assert.strictEqual(meldingen.length, 2); assert.strictEqual(status(rt.j.stuk_id).gemeld, null);
+    antwoord = true;
+    assert.strictEqual((await o.ing.ronde()).gemeld, 1); assert.strictEqual(meldingen.length, 3);
+    assert.strictEqual(meldingen[2].length, 1); assert.strictEqual(meldingen[2][0].stuk_id, rt.j.stuk_id);
+    // een ander stuk wordt mislukt binnen 6 u na de vorige rij: wacht tot de pauze om is, dan één rij
+    const m = gevallen()[0]; const me = m.env(); me.bron_id = '19a2b3c4d5e6f7aa'; me.meta.gmail_id = '19a2b3c4d5e6f7aa';
+    const rm = await post(o, m.sleutel, me); await put(o, m.sleutel, rm.j.stuk_id, 'b1', m.put[0][1], 'application/pdf');
+    o.ing._db.prepare("UPDATE stuk SET status = 'mislukt' WHERE stuk_id = ?").run(rm.j.stuk_id);
+    // het al als wacht gemelde stuk raakt zijn 50 pogingen op → mislukt, gemeld weer leeg (review ZOU 1)
+    o.ing._db.prepare('UPDATE stuk SET pogingen = 50 WHERE stuk_id = ?').run(rt.j.stuk_id);
+    o.klok.t += H; const rx = await o.ing.ronde(); assert.strictEqual(rx.mislukt, 1); assert.strictEqual(rx.gemeld, 0); assert.strictEqual(meldingen.length, 3);
+    assert.deepStrictEqual({ ...status(rt.j.stuk_id) }, { status: 'mislukt', gemeld: null });
+    o.klok.t += 5 * H + 60000; assert.strictEqual((await o.ing.ronde()).gemeld, 2);
+    assert.deepStrictEqual(meldingen[3].map((x) => x.stuk_id + ':' + x.status).sort(), [rm.j.stuk_id + ':mislukt', rt.j.stuk_id + ':mislukt'].sort());
+    o.klok.t += 7 * H; assert.strictEqual((await o.ing.ronde()).gemeld, 0); assert.strictEqual(meldingen.length, 4);
+    // geen inhoud: geen onderwerp, naam of tekst in de melding
+    assert.ok(!/Proefmail|iemand@voorbeeld|factuurtekst|mailtekst/.test(JSON.stringify(meldingen)));
+    // zonder o.meld blijft de ronde gewoon werken (bestaande toetsen) en de kolom bestaat na een herstart
+    o.ing.sluit();
+    const o2 = I.maak(Object.assign({}, o.cfg, { meld: undefined }));
+    assert.strictEqual((await o2.ronde()).gemeld, 0); o2.sluit();
+    o.ing = I.maak(o.cfg);
+  } finally { await o.sluit(); }
+});

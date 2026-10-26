@@ -71,6 +71,10 @@ const NAAM_MAX = 200;
 const PER_UUR = 600;                     // aanleveringen (POST) per sleutel per uur
 const BYTES_PER_DAG = 2 * 1024 * MB;     // per sleutel
 const OPEN_MS = 3600000;                 // daarna onvolledig
+const HANG_MS = 3600000;                 // wacht langer dan dit (sinds compleet) → box-rij (wv1303)
+const HANG_PAUZE_MS = 6 * 3600000;       // idem tijdens onderhoud of nachtgrendel: dan is wachten de bedoeling
+const MELD_PAUZE_MS = 6 * 3600000;       // hooguit één hangers-rij per zes uur; wat daarna blijft hangen gaat mee in de volgende
+const MELD_MAX = 1000;                   // stukken per ronde (de rij noemt er een paar en telt de rest)
 const VRIJ_MIN_BYTES = 5 * 1024 * MB;    // minder vrij op de intakeschijf → 507
 const BEWAAR_GEMARKEERD_MS = 90 * 86400000;
 const META_TEKST_MAX = 4096, RUWE_KOP_MAX = 16 * 1024, LIJST_MAX = 500, LIJST_ITEM_MAX = 300;
@@ -433,6 +437,7 @@ CREATE TABLE IF NOT EXISTS spoor (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL, so
  * maak(o) → { isPad, verwerk, ronde, telling, info, sluit }.
  * o = { dir (/opt/data/intake), vault, profielenDir, filterPad (bisync-filter.txt), primair() → bool, vv (vault-veilig: lees/schrijf),
  *       stuur(res, status, obj, kop?), fout(label, e), nu() → ms, pdftekst(pad) → Promise<string|null>, nachtgrendel() → bool,
+ *       meld?(hangers) → true als de box-rij geschreven is (hangers = [{ stuk_id, profiel, bron, status, sinds, pogingen }], geen inhoud),
  *       vrijeBytes(dir) → number | null, marker (patientpoort: { beoordeel, MIN_TEKST, VERSIE }), grenzen? ({ perUur, bytesPerDag }: alleen de toets) }
  */
 function maak(o) {
@@ -440,7 +445,7 @@ function maak(o) {
   const nu = typeof o.nu === 'function' ? o.nu : Date.now;
   const BLOB = path.join(dir, 'blob'), TMP = path.join(dir, 'tmp'), SCHADUW = path.join(dir, 'schaduw');
   const UIT = path.join(dir, 'uit'), ONDERHOUD = path.join(dir, 'onderhoud');
-  const SLEUTELS = path.join(dir, 'sleutels.json'), MARKER = path.join(dir, 'marker.json');
+  const SLEUTELS = path.join(dir, 'sleutels.json'), MARKER = path.join(dir, 'marker.json'), MELD_STEMPEL = path.join(dir, 'hangers-gemeld');
   for (const d of [dir, BLOB, TMP, SCHADUW]) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
   const profielen = laadProfielen(o.profielenDir);
   const soorten = laadSoortenlijst(o.filterPad);
@@ -449,6 +454,8 @@ function maak(o) {
   try { fs.chmodSync(path.join(dir, 'intake.sqlite'), 0o600); } catch (e) { /* bestaat */ }
   db.exec('PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  // wv1303: gemeld = tijdstip van de box-rij over dit hangende stuk (per stuk één keer)
+  if (!db.prepare('PRAGMA table_info(stuk)').all().some((k) => k.name === 'gemeld')) db.exec('ALTER TABLE stuk ADD COLUMN gemeld TEXT');
   const tellers = {};            // sleutel-id → { uur: [t], dag: { d, bytes } }
   const perUur = (o.grenzen && o.grenzen.perUur) || PER_UUR, perDag = (o.grenzen && o.grenzen.bytesPerDag) || BYTES_PER_DAG;
   let sleutelCache = null;
@@ -1070,8 +1077,33 @@ function maak(o) {
   }
 
   /*
-   * Ronde (elke 5 min vanuit server.js): open > 1 uur → onvolledig; wacht → opnieuw schrijven; marker die nog niet draaide; blobs over
-   * hun bewaartermijn weg (spoorregel); oude tmp-bestanden weg. → tellingen (geen inhoud).
+   * Hangers (wv1303): een stuk dat na de herhaalronde nog > 1 uur op 'wacht' staat (tijdens onderhoud of nachtgrendel > 6 uur), of
+   * 'mislukt' is, ziet de aanleverende workflow niet meer (die kreeg 202). Eén box-rij via o.meld met stuk-id, profiel, bron en status,
+   * nooit inhoud; per stuk één keer (kolom gemeld; een gemeld wacht-stuk dat mislukt wordt, nog één keer), hooguit één rij per zes uur. 'sinds' = compleet_op (dan ging het naar wacht), anders
+   * aangemaakt. Lukt de rij niet (o.meld ≠ true), dan volgende ronde opnieuw.
+   */
+  function meldHangers(t) {
+    if (typeof o.meld !== 'function') return 0;
+    const pauze = fs.existsSync(ONDERHOUD) || !!(o.nachtgrendel && o.nachtgrendel());
+    const rijen = db.prepare(`SELECT stuk_id, profiel, bron, status, pogingen, coalesce(compleet_op, aangemaakt) sinds FROM stuk WHERE gemeld IS NULL
+      AND (status = 'mislukt' OR (status = 'wacht' AND coalesce(compleet_op, aangemaakt) < ?)) ORDER BY aangemaakt LIMIT ${MELD_MAX}`).all(nuIso(t - (pauze ? HANG_PAUZE_MS : HANG_MS)));
+    if (!rijen.length) return 0;
+    let laatst = NaN;   // tijd van de vorige rij; eigen stempel (gemeld kan weer leeg worden bij mislukt)
+    try { laatst = Date.parse(fs.readFileSync(MELD_STEMPEL, 'utf8').trim()); } catch (e) { /* nog nooit gemeld */ }
+    if (t - laatst < MELD_PAUZE_MS) return 0;
+    let ok = false;
+    try { ok = o.meld(rijen.map((r) => ({ stuk_id: r.stuk_id, profiel: r.profiel, bron: r.bron, status: r.status, sinds: r.sinds, pogingen: r.pogingen }))) === true; }
+    catch (e) { if (o.fout) o.fout('intake-meld', e); }
+    if (!ok) return 0;
+    const zet = db.prepare('UPDATE stuk SET gemeld = ? WHERE stuk_id = ?');
+    tx(() => { for (const r of rijen) zet.run(nuIso(t), r.stuk_id); });
+    try { fs.writeFileSync(MELD_STEMPEL, nuIso(t), { mode: 0o600 }); } catch (e) { if (o.fout) o.fout('intake-meld', e); }
+    return rijen.length;
+  }
+
+  /*
+   * Ronde (elke 5 min vanuit server.js): open > 1 uur → onvolledig; wacht → opnieuw schrijven; marker die nog niet draaide; hangers →
+   * één box-rij (wv1303); blobs over hun bewaartermijn weg (spoorregel); oude tmp-bestanden weg. → tellingen (geen inhoud).
    */
   async function ronde() {
     const t = nu();
@@ -1080,13 +1112,15 @@ function maak(o) {
     uit.onvolledig = db.prepare("UPDATE stuk SET status = 'onvolledig' WHERE status = 'open' AND aangemaakt < ?").run(grens).changes;
     for (const s of db.prepare("SELECT * FROM stuk WHERE status = 'wacht' ORDER BY aangemaakt LIMIT 200").all()) {
       // na 50 mislukte pogingen (± 4 uur) niet meer stil herhalen: mislukt, telt als zorg in de dagtelling (Fable wv1282 #6)
-      if (s.pogingen >= 50) { q.status.run('mislukt', s.stuk_id); uit.mislukt = (uit.mislukt || 0) + 1; continue; }
+      // gemeld leeg: was het al als 'wacht' gemeld, dan volgt één rij met de eindstand mislukt (Opus-review wv1303 ZOU 1)
+      if (s.pogingen >= 50) { q.status.run('mislukt', s.stuk_id); db.prepare('UPDATE stuk SET gemeld = NULL WHERE stuk_id = ?').run(s.stuk_id); uit.mislukt = (uit.mislukt || 0) + 1; continue; }
       const r = schrijfOvergang(s, false);
       if (r.vault === 'geschreven' || r.vault === 'schaduw') uit.herschreven++; else uit.wacht++;
     }
     for (const s of db.prepare("SELECT stuk_id FROM stuk WHERE marker_op IS NULL AND status NOT IN ('open', 'onvolledig') ORDER BY aangemaakt LIMIT 50").all()) {
       try { const m = await markeer(s.stuk_id); if (m && m !== 'geen') uit.gemarkeerd++; } catch (e) { if (o.fout) o.fout('intake-marker', e); }
     }
+    uit.gemeld = meldHangers(t);
     for (const b of db.prepare('SELECT sha256 FROM blob WHERE weg IS NULL AND bewaar_tot IS NOT NULL AND bewaar_tot < ?').all(nuIso(t))) {
       try { fs.unlinkSync(blobPad(b.sha256)); } catch (e) { if (!e || e.code !== 'ENOENT') { if (o.fout) o.fout('intake-bewaar', e); continue; } }
       tx(() => { db.prepare('UPDATE blob SET weg = ? WHERE sha256 = ?').run(nuIso(t), b.sha256); q.spoor.run(nuIso(t), 'bewaartermijn', b.sha256, null, null); });
