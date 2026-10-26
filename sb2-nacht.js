@@ -9,13 +9,20 @@
  *
  * - Eén poging per datum, 02:00–02:29 Nederlandse tijd: na de OVIS-nachtronde (01:00–01:59, die schrijft de gegenereerde blokken
  *   in de entiteitpagina's) en vóór de Bibliothecaris (02:30) en de drukte van 02:45–06:30. Loopt de OVIS-nachtronde nog, dan
- *   wacht deze tik op de volgende. Niet tijdens de onderhoudsstand (dan geen poging en geen stempel; de volgende nacht telt weer).
+ *   wacht deze tik op de volgende. Niet tijdens de onderhoudsstand (dan geen poging en geen stempel; de volgende nacht telt weer);
+ *   de stand wordt vóór elke stap opnieuw gelezen, en linter en manifest draaien onder de vault-grendel (flock, zoals de
+ *   OVIS-nachtronde), zodat een onderhoudsstand die halverwege aangaat op hen wacht of hen tegenhoudt (exit 75, review wv1321 #2).
+ *   De nacht waarin de zomertijd ingaat kent geen 02:xx: die nacht geen ronde (gat van ± 47 u, onder de hartslagdrempel van 48 u).
  * - Altijd via het vangnet socev-run: linter met hartslag (drempelrij machinekamer.hartslag sb2_linter, 48 u), daarna het manifest
  *   (eigen naam sb2-manifest, zonder hartslag). Een mislukte run geeft via socev-run één box-rij + één bericht per foutsoort;
  *   deze module schrijft zelf geen box-rij en geen bericht (stilte is de default).
  * - Manifest: <manifestMap>/manifest-JJJJMMDD-nacht + EXT (gzip-JSONL). Daarna een vergelijking met de vorige nacht (alleen aantallen per
  *   soort in de staat en /health, nooit paden) en opruimen: alleen bestanden met precies dat naampatroon, de 14 nieuwste blijven.
  *   Handmatige manifesten (nulmeting, snapshots van de onderhoudsstand) vallen buiten het patroon en blijven altijd staan.
+ *   Opruimen alleen na een geslaagd manifest van vannacht met bestanden > 0 en niet minder dan de helft van de vorige nacht
+ *   (een lege of half gekoppelde vault mag de reeks niet wegdrukken, review #3); achtergebleven .tmp-<pid> ouder dan een dag gaan weg.
+ * - Tijdslimiet: socev-run --max-min gaat voor (die schrijft zijn eindregel en meldt); node wacht de grendel + die limiet + 90 s
+ *   en stuurt dan SIGTERM (socev-run geeft hem door aan zijn procesgroep), 20 s later SIGKILL (review #1).
  * - Staat in <staatMap>/staat.json (map 0700, bestand 0600): laatste datum, uitkomst per stap, verschil-aantallen.
  */
 const fs = require('fs');
@@ -26,6 +33,7 @@ const { spawn } = require('child_process');
 const BEWAAR = 14;
 const EXT = '.jsonl.gz';
 const PATROON = /^manifest-(\d{8})-nacht\.jsonl\.gz$/;
+const TMP = /^manifest-\d{8}-nacht\.jsonl\.gz\.tmp-\d+$/;
 const VENSTER = { uur: 2, totMin: 30 };
 
 function maak(o) {
@@ -35,7 +43,13 @@ function maak(o) {
   const sb2 = o.sb2Src;                // /opt/data/scripts/huidig/packages/sb2/src/socev_sb2
   const env = o.env || process.env;
   const fout = o.fout || function () {};
-  const maxMs = o.maxMs || { linter: 5 * 60000, manifest: 10 * 60000, vergelijk: 5 * 60000 };
+  const vault = o.vault;
+  const grendel = o.grendel || null;   // flock-pad (de vault-grendel); null = zonder grendel (alleen in de toets)
+  const wacht = o.grendelWachtS === undefined ? 300 : o.grendelWachtS;
+  const maxMin = o.maxMin || { linter: 5, manifest: 10 };
+  const marge = o.margeMs === undefined ? 90000 : o.margeMs;
+  const limiet = function (min) { return (grendel ? wacht * 1000 : 0) + min * 60000 + marge; };
+  const metGrendel = function (args) { return grendel ? ['flock', '-F', '-E', '75', '-w', String(wacht), grendel].concat(args) : args; };
   let loopt = false;
 
   function staatPad() { return path.join(staatMap, 'staat.json'); }
@@ -54,11 +68,16 @@ function maak(o) {
       let uit = '', klaar = false, k;
       try { k = spawn(args[0], args.slice(1), { env: env, stdio: ['ignore', 'pipe', 'pipe'] }); }
       catch (e) { return resolve({ code: 127, uit: '', ms: 0, fout: String(e && e.message || e).slice(0, 120) }); }
-      const tijd = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, limiet);
+      let hard = null;
+      const tijd = setTimeout(function () {
+        try { k.kill('SIGTERM'); } catch (e) {}
+        hard = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, 20000);
+      }, limiet);
+      const stop = function () { clearTimeout(tijd); if (hard) clearTimeout(hard); };
       k.stdout.on('data', function (d) { if (uit.length < 100000) uit += d; });
       k.stderr.on('data', function () {});
-      k.on('error', function (e) { if (klaar) return; klaar = true; clearTimeout(tijd); resolve({ code: 127, uit: '', ms: Date.now() - t0, fout: String(e && e.message || e).slice(0, 120) }); });
-      k.on('exit', function (code, sig) { if (klaar) return; klaar = true; clearTimeout(tijd); resolve({ code: code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code, uit: uit, ms: Date.now() - t0 }); });
+      k.on('error', function (e) { if (klaar) return; klaar = true; stop(); resolve({ code: 127, uit: '', ms: Date.now() - t0, fout: String(e && e.message || e).slice(0, 120) }); });
+      k.on('exit', function (code, sig) { if (klaar) return; klaar = true; stop(); resolve({ code: code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code, uit: uit, ms: Date.now() - t0 }); });
     });
   }
   function laatsteJson(uit) { try { return JSON.parse(String(uit).trim().split('\n').pop()); } catch (e) { return null; } }
@@ -77,14 +96,15 @@ function maak(o) {
     return { totaal: Number(r[1]), soorten: soorten };
   }
 
-  // ctx: { ams: {datum, uur, min}, onderhoud: bool, ovisNacht: bool }. Geeft null (niets te doen), { overgeslagen } of de uitkomst.
+  // ctx: { ams: {datum, uur, min}, onderhoud: bool of functie (per stap opnieuw gelezen), ovisNacht: bool }. Geeft null (niets te doen), { overgeslagen } of de uitkomst.
   async function tik(ctx) {
     const a = ctx.ams;
     if (a.uur !== VENSTER.uur || a.min >= VENSTER.totMin) return null;
     if (loopt) return null;
     const s = lees();
     if (s.datum === a.datum) return null;
-    if (ctx.onderhoud) return { overgeslagen: 'onderhoud' };
+    const inOnderhoud = typeof ctx.onderhoud === 'function' ? ctx.onderhoud : function () { return !!ctx.onderhoud; };
+    if (inOnderhoud()) return { overgeslagen: 'onderhoud' };
     if (ctx.ovisNacht) return { overgeslagen: 'ovis-nacht' };
     loopt = true;
     try {
@@ -93,8 +113,8 @@ function maak(o) {
       // eerst de datum vastleggen: één poging per nacht, ook als de pod halverwege herstart
       schrijf(Object.assign({}, s, { datum: a.datum, bezig: u.t }));
 
-      const l = await kind([run, '--naam', 'sb2-linter', '--hartslag', 'sb2_linter', '--max-min', '5', '--',
-        'python3', '-I', path.join(sb2, 'linter.py')], maxMs.linter);
+      const l = await kind(metGrendel([run, '--naam', 'sb2-linter', '--hartslag', 'sb2_linter', '--max-min', String(maxMin.linter), '--',
+        'python3', '-I', path.join(sb2, 'linter.py'), '--vault', vault]), limiet(maxMin.linter));
       u.linter = { exit: l.code, ms: l.ms };
       const lj = laatsteJson(l.uit);
       if (lj && typeof lj["pagina's"] === 'number') u.linter.paginas = lj["pagina's"];
@@ -103,9 +123,11 @@ function maak(o) {
       const nieuw = path.join(manifestMap, 'manifest-' + dag + '-nacht' + EXT);
       let mexit = null;
       if (fs.existsSync(nieuw)) u.manifest = { exit: null, al_aanwezig: true };
+      else if (inOnderhoud()) u.manifest = { exit: null, overgeslagen: 'onderhoud' };
       else {
-        const m = await kind([run, '--naam', 'sb2-manifest', '--max-min', '10', '--',
-          'python3', '-I', path.join(sb2, 'manifest.py'), 'maak', '--uit', nieuw, '--label', 'nacht ' + a.datum + ' (sb2-nacht.js)'], maxMs.manifest);
+        const m = await kind(metGrendel([run, '--naam', 'sb2-manifest', '--max-min', String(maxMin.manifest), '--',
+          'python3', '-I', path.join(sb2, 'manifest.py'), 'maak', '--vault', vault, '--uit', nieuw, '--label', 'nacht ' + a.datum + ' (sb2-nacht.js)']),
+          limiet(maxMin.manifest));
         mexit = m.code;
         u.manifest = { exit: m.code, ms: m.ms };
         const mj = laatsteJson(m.uit);
@@ -113,12 +135,17 @@ function maak(o) {
       }
       if ((mexit === 0 || u.manifest.al_aanwezig) && vorige) {
         // niet via socev-run: exit 1 betekent hier "er zijn verschillen", geen storing
-        const v = await kind(['python3', '-I', path.join(sb2, 'manifest.py'), 'vergelijk', path.join(manifestMap, vorige), nieuw, '--max', '0'], maxMs.vergelijk);
+        const v = await kind(['python3', '-I', path.join(sb2, 'manifest.py'), 'vergelijk', path.join(manifestMap, vorige), nieuw, '--max', '0'], 5 * 60000);
         const vs = leesVerschil(v.uit);
         u.verschil = vs ? Object.assign({ sinds: vorige.slice(9, 13) + '-' + vorige.slice(13, 15) + '-' + vorige.slice(15, 17) }, vs) : { fout: 'exit ' + v.code };
       }
-      // opruimen alleen na een geslaagd manifest van vannacht, en alleen het eigen naampatroon
-      if (mexit === 0 && fs.existsSync(nieuw)) {
+      // opruimen alleen na een geslaagd, niet verdacht klein manifest van vannacht, en alleen het eigen naampatroon
+      // ijkpunt = het laatste geslaagde manifest met bestanden > 0 (ook een verdacht kleine: een echte halvering herstelt zich zo na één nacht)
+      const vorigTal = typeof s.ijk_bestanden === 'number' ? s.ijk_bestanden : null;
+      const tal = u.manifest.bestanden;
+      const ijk = mexit === 0 && typeof tal === 'number' && tal > 0 ? tal : vorigTal;
+      if (mexit === 0 && !(typeof tal === 'number' && tal > 0 && (vorigTal === null || tal * 2 >= vorigTal))) u.opruimen = 'overgeslagen: manifest verdacht klein';
+      else if (mexit === 0 && fs.existsSync(nieuw)) {
         const alle = nachtManifesten();
         const weg = alle.slice(0, Math.max(0, alle.length - BEWAAR));
         let n = 0;
@@ -126,10 +153,16 @@ function maak(o) {
         u.opgeruimd = n;
         u.bewaard = alle.length - n;
       }
-      u.ok = u.linter.exit === 0 && (mexit === 0 || !!u.manifest.al_aanwezig);
+      try {
+        fs.readdirSync(manifestMap).filter(function (x) { return TMP.test(x); }).forEach(function (x) {
+          const p = path.join(manifestMap, x);
+          if (Date.now() - fs.statSync(p).mtimeMs > 86400000) { fs.unlinkSync(p); u.tmp_weg = (u.tmp_weg || 0) + 1; }
+        });
+      } catch (e) { fout('sb2-nacht-tmp', e); }
+      u.ok = u.linter.exit === 0 && (mexit === 0 || !!u.manifest.al_aanwezig) && !u.opruimen;
       const s2 = lees();
       delete s2.bezig;
-      schrijf(Object.assign(s2, { datum: a.datum, laatste: u }));
+      schrijf(Object.assign(s2, { datum: a.datum, laatste: u }, ijk === null ? {} : { ijk_bestanden: ijk }));
       return u;
     } finally { loopt = false; }
   }

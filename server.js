@@ -14599,7 +14599,7 @@ async function ovisTik() {
 if (ovis && SERVER_ECHT) { setTimeout(function () { ovisTik(); }, 90000).unref(); setInterval(function () { ovisTik(); }, OVIS_TIK_MS).unref(); }
 // ── SB2 nachtelijke linter + manifest (wv1321, Second Brain 2.0 fase 1a; bouwplan § 7.1 punt 6 en § 7.1a) ──
 // Logica en waarom in sb2-nacht.js. Hier alleen de klok: elke 5 min (echte pod, rol primair), werk alleen 02:00–02:29 en eenmaal per
-// datum; niet tijdens de onderhoudsstand en niet zolang de OVIS-nachtronde nog loopt. Altijd via socev-run (hartslag sb2_linter).
+// datum; niet tijdens de onderhoudsstand (per stap gelezen) en niet zolang de OVIS-nachtronde loopt. Via socev-run onder de vault-grendel.
 // Ontbreekt sb2-nacht.js in de release (terugrol), dan geen tik en /health.sb2_nacht.aan=false.
 const sb2Nacht = (function () {
   const p = path.join(__dirname, 'sb2-nacht.js');
@@ -14607,14 +14607,15 @@ const sb2Nacht = (function () {
   try {
     return require(p).maak({ staatMap: serverPad('sb2_nacht', process.env.SB2_NACHT_DIR, '/opt/data/scripts-staat/sb2-nacht', serverProefDeel('sb2-nacht')),
       manifestMap: '/opt/data/scripts-staat/sb2-manifest', socevRun: '/opt/data/scripts/huidig/bin/socev-run',
-      sb2Src: '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2', env: Object.assign({}, process.env, { VAULT_DIR: VAULT }), fout: logError });
+      sb2Src: '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2', vault: VAULT, grendel: OVIS_LOCK,
+      env: Object.assign({}, process.env, { VAULT_DIR: VAULT }), fout: logError });
   } catch (e) { logError('sb2-nacht', e); return null; }
 })();
 function sb2NachtInfo() { if (!sb2Nacht) return { aan: false }; try { return sb2Nacht.info(); } catch (e) { return { fout: true }; } }
 async function sb2NachtTik() {
   if (!sb2Nacht || !SERVER_ECHT || !rolPrimair()) return;
   try {
-    const u = await sb2Nacht.tik({ ams: ovisAms(), onderhoud: !!onderhoud.stand().aan, ovisNacht: ovisLoopt.nu === 'nacht' });
+    const u = await sb2Nacht.tik({ ams: ovisAms(), onderhoud: function () { return !!onderhoud.stand().aan; }, ovisNacht: ovisLoopt.nu === 'nacht' });
     if (u && u.datum) schrijfLog(nu() + ' sb2-nacht ' + velden({ ok: u.ok ? 1 : 0, linter: u.linter.exit, manifest: u.manifest.exit === null ? 'al' : u.manifest.exit, verschil: u.verschil && typeof u.verschil.totaal === 'number' ? u.verschil.totaal : '-', opgeruimd: u.opgeruimd || 0 }));
   } catch (e) { logError('sb2-nacht-tik', e); }
 }

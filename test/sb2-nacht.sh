@@ -21,7 +21,9 @@ while [ "$1" != "--" ]; do shift; done; shift
 exec "$@"
 `, { mode: 0o755 });
 fs.writeFileSync(path.join(src, 'linter.py'), `import json, os, sys
+import time
 if os.environ.get("NEP_LINTER_FOUT"): sys.exit(1)
+if os.environ.get("NEP_LINTER_SLAAP"): time.sleep(30)
 print(json.dumps({"rapport": "x", "pagina's": 42}))
 `);
 fs.writeFileSync(path.join(src, 'manifest.py'), `import json, os, sys
@@ -30,15 +32,16 @@ if a[0] == "maak":
     if os.environ.get("NEP_MANIFEST_FOUT"): sys.exit(1)
     uit = a[a.index("--uit") + 1]
     open(uit, "w").write("x")
-    print(json.dumps({"manifest": uit, "bestanden": 7, "mappen": 2, "koppelingen": 0, "fouten": 0, "bytes": 1}))
+    print(json.dumps({"manifest": uit, "bestanden": int(os.environ.get("NEP_BESTANDEN", "7")), "mappen": 2, "koppelingen": 0, "fouten": 0, "bytes": 1}))
 elif a[0] == "vergelijk":
     open("${path.join(d, 'vergelijk.log')}", "a").write(os.path.basename(a[1]) + " " + os.path.basename(a[2]) + "\\n")
     print("verschillen: 5 (verwacht 0, onverwacht 5) — inhoud 3, nieuw 2")
     sys.exit(1)
 `);
 const env = Object.assign({}, process.env);
-delete env.NEP_LINTER_FOUT; delete env.NEP_MANIFEST_FOUT;
-function nieuw(extraEnv) { return N.maak({ staatMap: staat, manifestMap: mf, socevRun: path.join(d, 'socev-run'), sb2Src: src, env: Object.assign({}, env, extraEnv || {}) }); }
+['NEP_LINTER_FOUT', 'NEP_MANIFEST_FOUT', 'NEP_LINTER_SLAAP', 'NEP_BESTANDEN'].forEach(k => delete env[k]);
+const kluis = path.join(d, 'vault'); fs.mkdirSync(kluis);
+function nieuw(extraEnv, extra) { return N.maak(Object.assign({ staatMap: staat, manifestMap: mf, socevRun: path.join(d, 'socev-run'), sb2Src: src, vault: kluis, env: Object.assign({}, env, extraEnv || {}) }, extra || {})); }
 const ams = (datum, uur, min) => ({ datum: datum, uur: uur, min: min });
 function aanroepen() { try { return fs.readFileSync(log, 'utf8').trim().split('\n'); } catch (e) { return []; } }
 
@@ -61,8 +64,8 @@ function aanroepen() { try { return fs.readFileSync(log, 'utf8').trim().split('\
   u = await m.tik({ ams: ams('2026-10-27', 2, 10) });
   toets('ronde gedraaid en ok', u && u.ok === true && u.datum === '2026-10-27', u);
   const a = aanroepen();
-  toets('linter via socev-run met hartslag sb2_linter', /^--naam sb2-linter --hartslag sb2_linter --max-min 5 -- python3 -I .*linter\.py$/.test(a[0] || ''), a);
-  toets('manifest via socev-run zonder hartslag, nachtnaam', /^--naam sb2-manifest --max-min 10 -- python3 -I .*manifest\.py maak --uit .*manifest-20261027-nacht\.jsonl\.gz --label nacht 2026-10-27/.test(a[1] || '') && !/hartslag/.test(a[1] || ''), a);
+  toets('linter via socev-run met hartslag sb2_linter', /^--naam sb2-linter --hartslag sb2_linter --max-min 5 -- python3 -I .*linter\.py --vault .*\/vault$/.test(a[0] || ''), a);
+  toets('manifest via socev-run zonder hartslag, nachtnaam', /^--naam sb2-manifest --max-min 10 -- python3 -I .*manifest\.py maak --vault .*\/vault --uit .*manifest-20261027-nacht\.jsonl\.gz --label nacht 2026-10-27/.test(a[1] || '') && !/hartslag/.test(a[1] || ''), a);
   toets('vergelijking niet via socev-run', a.length === 2, a);
   toets('linter: pagina-aantal in de uitkomst', u.linter.exit === 0 && u.linter.paginas === 42, u.linter);
   toets('manifest: aantallen in de uitkomst', u.manifest.exit === 0 && u.manifest.bestanden === 7, u.manifest);
@@ -94,7 +97,45 @@ function aanroepen() { try { return fs.readFileSync(log, 'utf8').trim().split('\
   // manifest van vannacht bestond al (bv. met de hand): niet overschrijven, wel vergelijken, niet opruimen
   fs.writeFileSync(path.join(mf, 'manifest-20261030-nacht.jsonl.gz'), 'eigen');
   u = await nieuw().tik({ ams: ams('2026-10-30', 2, 0) });
-  toets('al aanwezig: niet overschreven, ok', u.ok === true && u.manifest.al_aanwezig === true && fs.readFileSync(path.join(mf, 'manifest-20261030-nacht.jsonl.gz'), 'utf8') === 'eigen', u);
+  toets('al aanwezig: niet overschreven, ok, niets opgeruimd', u.ok === true && u.manifest.al_aanwezig === true && u.opruimen === undefined && u.opgeruimd === undefined
+    && fs.readFileSync(path.join(mf, 'manifest-20261030-nacht.jsonl.gz'), 'utf8') === 'eigen', u);
+  // verdacht klein manifest (vorige nacht 7 bestanden, nu 3): niet opruimen; 0 bestanden idem
+  for (let i = 1; i <= 3; i++) fs.writeFileSync(path.join(mf, 'manifest-202608' + String(i).padStart(2, '0') + '-nacht.jsonl.gz'), 'x');
+  const voor = fs.readdirSync(mf).filter(n => N.PATROON.test(n)).length;
+  u = await nieuw({ NEP_BESTANDEN: '3' }).tik({ ams: ams('2026-11-01', 2, 0) });
+  toets('verdacht klein: niets opgeruimd, ok=false', u.ok === false && /verdacht/.test(u.opruimen || '') && fs.readdirSync(mf).filter(n => N.PATROON.test(n)).length === voor + 1, u);
+  u = await nieuw({ NEP_BESTANDEN: '0' }).tik({ ams: ams('2026-11-02', 2, 0) });
+  toets('0 bestanden: niets opgeruimd', /verdacht/.test(u.opruimen || '') && fs.readdirSync(mf).filter(n => N.PATROON.test(n)).length === voor + 2, u);
+  u = await nieuw({ NEP_BESTANDEN: '7' }).tik({ ams: ams('2026-11-03', 2, 0) });
+  toets('daarna weer normaal: opgeruimd tot 14 (vergelijkt met de laatste aantallen 0 → geen drempel)', u.ok === true && fs.readdirSync(mf).filter(n => N.PATROON.test(n)).length === 14, u);
+  // onderhoudsstand gaat aan tussen linter en manifest
+  let keer = 0;
+  const v0 = aanroepen().length;
+  u = await nieuw().tik({ ams: ams('2026-11-04', 2, 0), onderhoud: function () { return keer++ > 0; } });
+  toets('onderhoud halverwege: linter wel, manifest niet, niets opgeruimd', u.linter.exit === 0 && u.manifest.overgeslagen === 'onderhoud' && u.ok === false && u.opgeruimd === undefined
+    && aanroepen().length === v0 + 1 && !fs.existsSync(path.join(mf, 'manifest-20261104-nacht.jsonl.gz')), u);
+  // tmp-resten: ouder dan een dag weg, vers blijft
+  const oudTmp = path.join(mf, 'manifest-20261020-nacht.jsonl.gz.tmp-123'), versTmp = path.join(mf, 'manifest-20261105-nacht.jsonl.gz.tmp-456');
+  fs.writeFileSync(oudTmp, 'x'); fs.writeFileSync(versTmp, 'x');
+  fs.utimesSync(oudTmp, new Date(Date.now() - 2 * 86400000), new Date(Date.now() - 2 * 86400000));
+  fs.writeFileSync(path.join(mf, 'iets.tmp-9'), 'x'); fs.utimesSync(path.join(mf, 'iets.tmp-9'), new Date(0), new Date(0));
+  u = await nieuw().tik({ ams: ams('2026-11-05', 2, 0) });
+  toets('tmp-rest ouder dan een dag weg, verse en vreemde blijven', !fs.existsSync(oudTmp) && fs.existsSync(versTmp) && fs.existsSync(path.join(mf, 'iets.tmp-9')) && u.tmp_weg === 1, u);
+  // vault-grendel bezet: flock geeft 75, socev-run start niet
+  const slot = path.join(d, 'vault.lock');
+  const houder = require('child_process').spawn('flock', ['-F', slot, 'sleep', '6'], { stdio: 'ignore' });
+  await new Promise(r => setTimeout(r, 300));
+  const v1 = aanroepen().length;
+  u = await nieuw({}, { grendel: slot, grendelWachtS: 1 }).tik({ ams: ams('2026-11-06', 2, 0) });
+  toets('grendel bezet: linter en manifest exit 75, geen socev-run, niets opgeruimd', u.linter.exit === 75 && u.manifest.exit === 75 && aanroepen().length === v1 && u.opgeruimd === undefined, u);
+  houder.kill('SIGKILL');
+  await new Promise(r => setTimeout(r, 200));
+  u = await nieuw({}, { grendel: slot, grendelWachtS: 1 }).tik({ ams: ams('2026-11-07', 2, 0) });
+  toets('grendel vrij: via flock gewoon gedraaid', u.ok === true && aanroepen().length === v1 + 2, u);
+  // tijdslimiet: node stuurt SIGTERM na grendel + max-min + marge
+  const t0 = Date.now();
+  u = await nieuw({ NEP_LINTER_SLAAP: '1' }, { maxMin: { linter: 0.01, manifest: 10 }, margeMs: 0 }).tik({ ams: ams('2026-11-08', 2, 0) });
+  toets('tijdslimiet: linter afgebroken met SIGTERM (143), manifest draait daarna', u.linter.exit === 143 && u.manifest.exit === 0 && Date.now() - t0 < 10000, [u, Date.now() - t0]);
   // socev-run ontbreekt
   u = await N.maak({ staatMap: path.join(d, 'staat2'), manifestMap: mf, socevRun: path.join(d, 'bestaat-niet'), sb2Src: src, env: env }).tik({ ams: ams('2026-10-31', 2, 0) });
   toets('socev-run ontbreekt: ok=false, geen crash', u && u.ok === false && u.linter.exit === 127, u);
@@ -123,7 +164,8 @@ function aanroepen() { try { return fs.readFileSync(log, 'utf8').trim().split('\
   // koppeling
   const s = fs.readFileSync('server.js', 'utf8'), ur = fs.readFileSync('uitrol.sh', 'utf8');
   toets('server.js: tik alleen echt + primair, onderhoud en OVIS-nacht doorgegeven', /if \(!sb2Nacht \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s)
-    && /onderhoud: !!onderhoud\.stand\(\)\.aan, ovisNacht: ovisLoopt\.nu === 'nacht'/.test(s));
+    && /onderhoud: function \(\) \{ return !!onderhoud\.stand\(\)\.aan; \}, ovisNacht: ovisLoopt\.nu === 'nacht'/.test(s)
+    && /vault: VAULT, grendel: OVIS_LOCK/.test(s));
   toets('server.js: /health sb2_nacht', /sb2_nacht: typeof sb2NachtInfo === 'function'/.test(s));
   toets('uitrol.sh: sb2-nacht.js in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bsb2-nacht\.js\b/.test(ur));
   fs.rmSync(d, { recursive: true, force: true });
