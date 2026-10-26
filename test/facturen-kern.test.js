@@ -799,3 +799,20 @@ test('patiëntkenmerk: patiënt met oude datum op één regel en "Geb:"', () => 
   assert.ok(K.stapPatientkenmerk(['Naam patiënt: Voorbeeld\nGeb: 01-02-1950']).kenmerk);
   assert.equal(K.stapPatientkenmerk(['Aantal patiënten oktober 2026: 3']).kenmerk, false);
 });
+
+test('wv1360: herkennen op een bekend IBAN alleen als de naam op de factuur bij de leverancier past', () => {
+  const K2 = K;
+  const iban = 'NL91ABNA0417164300';
+  const lev = { id: 'm1', naam: 'Anja Proefmedewerker', namen: ['A.J. Proefmedewerker'], ibans: [iban], ibans_naamtoets: [iban], domeinen: [] };
+  const ctx = { leveranciers: [lev], entiteiten: [] };
+  const v = (naam) => ({ leverancier_naam: naam, ibans_betaal: [iban], kvks: [], btwnrs: [] });
+  assert.equal(K2.herkenLeverancier(v('Leverancier X B.V.'), null, ctx).leverancier, null);
+  assert.equal(K2.herkenLeverancier(v(null), null, ctx).leverancier, null);
+  assert.equal(K2.herkenLeverancier(v('A. Proefmedewerker'), null, ctx).via, 'iban');
+  assert.equal(K2.herkenLeverancier(v('A.J. Proefmedewerker'), null, ctx).via, 'iban');
+  assert.equal(K2.herkenLeverancier(v('Anja Proefmedewerker'), null, ctx).via, 'iban');
+  // nagebeld (geen naamtoets): zoals voorheen ook zonder naam herkend
+  assert.equal(K2.herkenLeverancier(v(null), null, { leveranciers: [Object.assign({}, lev, { ibans_naamtoets: [] })], entiteiten: [] }).via, 'iban');
+  // naam op de factuur zonder IBAN-match: gewoon de naamweg zoals voorheen
+  assert.equal(K2.herkenLeverancier({ leverancier_naam: 'Anja Proefmedewerker', ibans_betaal: [], kvks: [], btwnrs: [] }, null, ctx).via, 'naam');
+});

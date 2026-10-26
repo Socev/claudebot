@@ -42,6 +42,7 @@ function rekeningen() {
   const { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync(pad, { readOnly: true });
   try {
+    db.exec('PRAGMA busy_timeout = 5000');
     const eigen = new Set(db.prepare('SELECT iban FROM rekening').all().map(function (r) { return r.iban; }));
     const alle = db.prepare('SELECT count(*) AS n, min(boekdatum) AS eerste, max(boekdatum) AS laatste FROM bank_transactie WHERE tegenpartij_iban = ? AND bedrag_centen < 0 AND verwijderd_op IS NULL');
     const na = db.prepare('SELECT count(*) AS n, max(boekdatum) AS laatste FROM bank_transactie WHERE tegenpartij_iban = ? AND bedrag_centen < 0 AND verwijderd_op IS NULL AND boekdatum > ?');

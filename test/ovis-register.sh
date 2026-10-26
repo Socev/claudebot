@@ -202,10 +202,13 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     bron = new Error('kapot');
     n.db.knopen[0].compilatienummer = 5;   // het blok zou anders opnieuw geschreven worden
     r = await m.compileer('nacht', { grendel: true });
-    toets('4c Facturen niet te lezen: blok met nummers blijft staan, fout gemeld', r.blokken === 0 && fs.readFileSync(path.join(v, ORGP), 'utf8') === o1 && r.fouten.some((f) => /rekeningnummers niet te lezen/.test(f.fout)), r);
+    const regel = (x) => x.split('\n').find((l) => l.indexOf(R.REK_KOP) === 0);
+    let o3 = fs.readFileSync(path.join(v, ORGP), 'utf8');
+    toets('4c Facturen niet te lezen: rest van het blok vernieuwd, rekeningregel overgenomen, fout gemeld', r.blokken === 1 && regel(o3) === regel(o1) && /compilatie 5/.test(o3) && !R.blokHandwerk(o3)
+      && r.fouten.some((f) => /rekeningnummers niet te lezen/.test(f.fout)) && fs.readFileSync(path.join(v, MDWP), 'utf8') === m1, r);
     bron = null;
     r = await m.compileer('nacht', { grendel: true });
-    toets('4c geen Facturen-database (null): idem', r.blokken === 0 && fs.readFileSync(path.join(v, ORGP), 'utf8') === o1, r);
+    toets('4c geen Facturen-database (null): niets veranderd (idempotent met overgenomen regel)', r.blokken === 0 && fs.readFileSync(path.join(v, ORGP), 'utf8') === o3, r);
     bron = rek.map((x) => x.iban === 'NL02ABNA0123456789' ? Object.assign({}, x, { aantal: 8 }) : x);
     fs.writeFileSync(path.join(v, MDWP), m1.replace('7 keer)', '7 keer, klopt)'));
     r = await m.compileer('nacht', { grendel: true });
@@ -217,7 +220,21 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const m0 = R.maak({ vault: v, sbRpc: n.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t) });
     n.db.knopen[0].compilatienummer = 6;
     r = await m0.compileer('nacht', { grendel: true });
-    toets('4c zonder bron (oude aanroeper): blok met nummers blijft staan', r.blokken === 0 && fs.readFileSync(path.join(v, ORGP), 'utf8') === o2 && /24 keer/.test(o2), r);
+    toets('4c zonder bron (oude aanroeper): rekeningregel blijft staan', r.blokken === 1 && regel(fs.readFileSync(path.join(v, ORGP), 'utf8')) === regel(o2) && /24 keer/.test(o2), r);
+    // nummer weg uit Facturen: medewerkerblok verdwijnt (alleen ons blok), vingerafdruk gelijk; verhuisde pagina op bestandsnaam gevonden
+    const MDW2 = '10_Zakelijk/Groenhouten/Medewerkers/Proef Medewerker.md';
+    fs.mkdirSync(path.dirname(path.join(v, MDW2)), { recursive: true });
+    fs.renameSync(path.join(v, MDWP), path.join(v, MDW2));
+    bron = rek.filter((x) => x.doel !== NIETP);
+    r = await m.compileer('nacht', { grendel: true });
+    toets('4c verhuisde medewerkerpagina: op bestandsnaam gevonden, blok bijgewerkt (7 keer)', /7 keer\)/.test(fs.readFileSync(path.join(v, MDW2), 'utf8')) && /mdw:proef-medewerker/.test(fs.readFileSync(path.join(v, MDW2), 'utf8')) && !r.fouten.some((f) => /niet gevonden/.test(f.fout)), r);
+    bron = rek.filter((x) => x.doel !== MDWP && x.doel !== NIETP);
+    r = await m.compileer('nacht', { grendel: true });
+    const m3 = fs.readFileSync(path.join(v, MDW2), 'utf8');
+    toets('4c nummer weg: medewerkerblok weggehaald, rest van de pagina gelijk', r.medewerkerblokken === 1 && m3.indexOf('ovis:blok') < 0 && R.vingerafdruk(m3).sha === R.vingerafdruk(MDWT).sha, [r, m3]);
+    bron = rek.filter((x) => x.doel !== NIETP).map((x) => x.doel === MDWP ? Object.assign({}, x, { doel: '10_Zakelijk/Tolgaarde/Medewerkers/Weg.md' }) : x);
+    r = await m.compileer('nacht', { grendel: true });
+    toets('4c doel niet te vinden: één gebundelde melding', r.fouten.filter((f) => /niet gevonden/.test(f.fout)).length === 1, r.fouten);
   }
   // ── 5. Bibliothecaris ──
   { const sha = R.vingerafdruk(TG).sha;

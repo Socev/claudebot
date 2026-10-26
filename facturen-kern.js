@@ -534,6 +534,33 @@ function eigenIbans(ctx) {
   return m;
 }
 
+// Naamverwantschap en verzamelrekeningnamen (wv1323, verhuisd uit facturen-validatie in wv1360 zodat kern en bankcontrole ze zelf kunnen gebruiken)
+const NAAM_MIN = 3;
+const VERZAMEL_RE = /derdengeld|\b(mollie|stripe|adyen|paypal|buckaroo|multisafepay|pay\.nl|payvision|worldline|klarna|sumup|tikkie|online payment platform|opp|ccv|ingenico|icepay|targetpay|sisow|paynl|mangopay|betaaldienst|payment ?services?)\b|\bvia\b/i;
+function compactNaam(s) { return normNaam(s).replace(/ /g, ''); }
+// Voorletters + achternaam ("M. den Uijl") tegen een voluit geschreven naam ("Marijke den Uijl", "Mattijs Volman Waarnemend Huisarts"): de
+// rest na de voorletters (≥ 4 tekens) staat erin en de eerste letter klopt (gemeten 26-10: zo spellen bank en waarnemersfactuur dezelfde persoon).
+function voorletterVerwant(kort, lang) {
+  const w = normNaam(kort).split(' ').filter(Boolean);
+  let i = 0;
+  while (i < w.length - 1 && w[i].length === 1) i++;
+  if (i === 0) return false;
+  const rest = w.slice(i).join(''), l = compactNaam(lang);
+  return rest.length >= 4 && l.indexOf(rest) > 0 && l[0] === w[0];
+}
+function naamVerwant(a, b) {
+  const x = compactNaam(a), y = compactNaam(b);
+  if (x.length < NAAM_MIN || y.length < NAAM_MIN) return false;
+  return x === y || x.indexOf(y) >= 0 || y.indexOf(x) >= 0 || voorletterVerwant(a, b) || voorletterVerwant(b, a);
+}
+// wv1360: een rekening uit de bankhistorie (bron bankhistorie, l.ibans_naamtoets) herkent alleen met een passende naam op de factuur;
+// een nagebelde rekening (een mens belde voor precies deze leverancier) blijft zonder naam herkennen, zoals voorheen.
+function ibanNaamPast(naam, l, iban) {
+  if (!l) return false;
+  if (!(l.ibans_naamtoets || []).map(ibanNorm).includes(iban)) return true;
+  if (!naam) return false;
+  return [l.naam].concat(l.namen || []).filter(Boolean).some((n) => normNaam(n) === normNaam(naam) || naamVerwant(naam, n));
+}
 function herkenLeverancier(velden, bericht, ctx) {
   const lijst = (ctx && ctx.leveranciers) || [];
   const eigen = eigenKvks(ctx);
@@ -543,8 +570,11 @@ function herkenLeverancier(velden, bericht, ctx) {
   for (const b of btws) { const l = lijst.find((x) => x.btw && x.btw.toUpperCase() === b); if (l) return { leverancier: l, via: 'btw' }; }
   const dom = domeinVan(bericht && bericht.afzender);
   if (dom) { const l = lijst.find((x) => (x.domeinen || []).some((d) => dom === d.toLowerCase() || dom.endsWith('.' + d.toLowerCase()))); if (l) return { leverancier: l, via: 'domein' }; }
+  // wv1360 (diffreview MOET 1): sinds elk al eens betaald rekeningnummer bekend is (ook van medewerkers en zelfstandigen), telt een bekend
+  // IBAN alleen als de naam op de factuur bij die leverancier past (zijn naam of een naam waaronder we die rekening betaalden). Anders kon
+  // een factuur met andermans naam en het rekeningnummer van een medewerker het nabellen omzeilen.
   const ibans = (velden.ibans_betaal || []).filter((i) => ibanMod97(i));
-  for (const i of ibans) { const l = lijst.find((x) => (x.ibans || []).map(ibanNorm).includes(i)); if (l) return { leverancier: l, via: 'iban' }; }
+  for (const i of ibans) { const l = lijst.find((x) => (x.ibans || []).map(ibanNorm).includes(i)); if (l && ibanNaamPast(velden.leverancier_naam, l, i)) return { leverancier: l, via: 'iban' }; }
   const naam = velden.leverancier_naam ? normNaam(velden.leverancier_naam) : null;
   if (naam) { const l = lijst.find((x) => normNaam(x.naam) === naam); if (l) return { leverancier: l, via: 'naam' }; }
   return { leverancier: null, via: null };
@@ -1149,7 +1179,7 @@ module.exports = {
   // lezers
   leesXml, leesUbl, leesPdfTekst,
   // besliskader per stap (§ 4.5)
-  stapDubbelBestand, stapDubbelInhoud, factuurSleutel, stapSoort, groepeerBericht, stapPatientkenmerk, stapVelden, herkenLeverancier,
+  stapDubbelBestand, stapDubbelInhoud, factuurSleutel, stapSoort, groepeerBericht, stapPatientkenmerk, stapVelden, herkenLeverancier, compactNaam, naamVerwant, ibanNaamPast, VERZAMEL_RE,
   stapEntiteit, stapGeenFactuur, stapBetaalwijze, valideer, ibanPoort, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN,
   // leren
   leerUitBevestiging,

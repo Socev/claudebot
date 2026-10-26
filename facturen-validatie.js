@@ -13,7 +13,7 @@
  *
  * Bedragen in centen; afschrijvingen zijn negatief in de bankregels, in de uitkomst positief ("betaald").
  */
-const { ibanNorm, normNaam, dagenTussen, plusDagen, isIsoDatum } = require('./facturen-kern.js');
+const { ibanNorm, normNaam, dagenTussen, plusDagen, isIsoDatum, compactNaam, naamVerwant, VERZAMEL_RE } = require('./facturen-kern.js');
 
 // Salaris- en personeelsregels zijn hier gewone regels (wv945, David 23-10-2026: "Salarisbetalingen mogen gewoon ingezien").
 
@@ -132,9 +132,7 @@ function bedragPatroon(lijst, vandaag, bedrag, opties) {
  */
 const FEIT_MIN_BETALINGEN = 3, FEIT_MIN_DAGEN = 60, FEIT_MIN_NAAM = 3;
 // Verzamelrekeningen zijn niet "uniek van bedrijf Z": een betaaldienst of derdengeldenrekening ontvangt voor velen (diffreview wv1323 ZOU 4).
-// Staat zo'n naam in de historie, dan nooit een kaart: nabellen.
-const VERZAMEL_RE = /derdengeld|\b(mollie|stripe|adyen|paypal|buckaroo|multisafepay|pay\.nl|payvision|worldline|klarna|sumup|tikkie|online payment platform|opp|ccv|ingenico|icepay|targetpay|sisow|paynl|mangopay|betaaldienst|payment ?services?)\b|\bvia\b/i;
-function compactNaam(s) { return normNaam(s).replace(/ /g, ''); }
+// Staat zo'n naam in de historie, dan nooit een kaart: nabellen. (VERZAMEL_RE staat sinds wv1360 in facturen-kern.js.)
 function zonderAccentenEnz(s) { return String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, ''); }
 // Welke naam wordt de leverancier: de vollere van factuurnaam en banknaam (diffreview wv1323 ZOU 5: factuur "Gemeente", bank "Gemeente
 // Leusden" → "Gemeente Leusden"; een kortere naam herkent later te veel). Voorletters in de bank, voluit op de factuur: de factuurnaam.
@@ -143,21 +141,6 @@ function vollereNaam(factuurNaam, bankNaam) {
   if (!bankNaam) return factuurNaam;
   const f = compactNaam(factuurNaam), b = compactNaam(bankNaam);
   return f.indexOf(b) < 0 && b.indexOf(f) >= 0 ? bankNaam : factuurNaam;
-}
-// Voorletters + achternaam ("M. den Uijl") tegen een voluit geschreven naam ("Marijke den Uijl", "Mattijs Volman Waarnemend Huisarts"): de
-// rest na de voorletters (≥ 4 tekens) staat erin en de eerste letter klopt (gemeten 26-10: zo spellen bank en waarnemersfactuur dezelfde persoon).
-function voorletterVerwant(kort, lang) {
-  const w = normNaam(kort).split(' ').filter(Boolean);
-  let i = 0;
-  while (i < w.length - 1 && w[i].length === 1) i++;
-  if (i === 0) return false;
-  const rest = w.slice(i).join(''), l = compactNaam(lang);
-  return rest.length >= 4 && l.indexOf(rest) > 0 && l[0] === w[0];
-}
-function naamVerwant(a, b) {
-  const x = compactNaam(a), y = compactNaam(b);
-  if (x.length < FEIT_MIN_NAAM || y.length < FEIT_MIN_NAAM) return false;
-  return x === y || x.indexOf(y) >= 0 || y.indexOf(x) >= 0 || voorletterVerwant(a, b) || voorletterVerwant(b, a);
 }
 /*
  * lijst = bankregels met tegenpartij_iban = dit IBAN (alle entiteiten; de beller filtert verwijderde regels en de richting niet: dat doet

@@ -129,11 +129,23 @@ function kernCtx(fdb, nu) {
   };
 }
 function leverancierLijst(fdb) {
-  const ibans = {};
-  for (const r of fdb.db.prepare('SELECT leverancier, iban FROM leverancier_iban').all()) (ibans[r.leverancier] = ibans[r.leverancier] || []).push(r.iban);
+  const ibans = {}, namen = {}, naamtoets = {};
+  for (const r of fdb.db.prepare('SELECT leverancier, iban, bron FROM leverancier_iban').all()) {
+    (ibans[r.leverancier] = ibans[r.leverancier] || []).push(r.iban);
+    if (r.bron === 'bankhistorie') (naamtoets[r.leverancier] = naamtoets[r.leverancier] || []).push(r.iban);
+  }
+  // wv1360: de namen waaronder we een rekening van deze leverancier betaalden (uit het feit), voor de naamtoets bij herkennen op IBAN
+  for (const f of fdb.db.prepare("SELECT leverancier, naam, bewijs FROM feit WHERE status = 'bevestigd' AND leverancier IS NOT NULL").all()) {
+    const n = namen[f.leverancier] = namen[f.leverancier] || [];
+    if (f.naam) n.push(f.naam);
+    const b = json(f.bewijs, {}) || {};
+    for (const x of Array.isArray(b.namen) ? b.namen : []) { const t = typeof x === 'string' ? x : x && x.naam; if (t) n.push(String(t)); }
+  }
   return fdb.db.prepare('SELECT * FROM leverancier').all().map((r) => {
     const l = D.leesJson(r);
     l.ibans = ibans[l.id] || [];
+    l.namen = Array.from(new Set(namen[l.id] || [])).slice(0, 12);
+    l.ibans_naamtoets = naamtoets[l.id] || [];
     return l;
   });
 }
@@ -960,29 +972,24 @@ function feitRoute(fdb, r, d, nu, o) {
 
 // ───────────────────────────── bankcontrole toepassen ─────────────────────────────
 
+// wv1360 (diffreview MOET 2): rekeningen van betaaldiensten en derdengelden, alleen op naam ("X via Mollie", PayPal, Amazon Payments …): per
+// rekening het aantal afschrijvingen met zo'n naam. De bankcontrole telt de post zelf niet mee, zodat één getypte naam een rekening niet
+// tot verzamelrekening maakt. Niet op "verschillende namen": dat is juist het fraudepatroon (bekende naam op andermans rekening).
+const VERZAMEL_EXTRA = /\b(amazon payments|alipay|unzer|ppro|nuvei|paysera|riverty|afterpay|worldpay|globalcollect|global collect|gc re|pay-nxt|unifiedpost|cm\.com|betaalverzoek|ticketingpayments)\b/i;
+function verzamelNaam(n) { const t = String(n || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, ''); return V.VERZAMEL_RE.test(t) || VERZAMEL_EXTRA.test(t); }
+function verzamelTellingen(fdb) {
+  const uit = {};
+  for (const r of fdb.db.prepare('SELECT tegenpartij_iban AS iban, tegenpartij_naam AS naam, count(*) AS n FROM bank_transactie WHERE verwijderd_op IS NULL AND bedrag_centen < 0 ' +
+    "AND tegenpartij_iban IS NOT NULL AND tegenpartij_naam IS NOT NULL AND tegenpartij_naam <> '' GROUP BY tegenpartij_iban, tegenpartij_naam").all()) {
+    if (verzamelNaam(r.naam)) uit[r.iban] = (uit[r.iban] || 0) + r.n;
+  }
+  return uit;
+}
 /*
  * De bankcontrole (facturen-bank.js, puur) over de stand van de laatste 400 dagen, en de uitkomst toepassen in de lopende transactie:
  * automatische koppelingen, voorstellen, uitzonderingen, betaalspoor, nieuwe signalen en heropende gesluimerde signalen. Nooit twee keer
  * hetzelfde signaal (sleutel uniek).
  */
-// wv1360: rekeningnummers waar in de hele bankhistorie (afschrijvingen) een betaaldienst- of derdengeldennaam bij staat, of namen die niet bij
-// elkaar horen (één rekening, veel winkels). Daarop betalen we veel partijen; een betaling eraan is geen "onbekend IBAN" van die partij.
-function verzamelIbans(fdb) {
-  const per = new Map();
-  for (const r of fdb.db.prepare('SELECT tegenpartij_iban AS iban, tegenpartij_naam AS naam, count(*) AS n FROM bank_transactie WHERE verwijderd_op IS NULL AND bedrag_centen < 0 ' +
-    "AND tegenpartij_iban IS NOT NULL AND tegenpartij_naam IS NOT NULL AND tegenpartij_naam <> '' GROUP BY tegenpartij_iban, tegenpartij_naam").all()) {
-    if (!per.has(r.iban)) per.set(r.iban, []);
-    per.get(r.iban).push(r);
-  }
-  const uit = [];
-  for (const [iban, namen] of per) {
-    namen.sort((a, b) => b.n - a.n || (a.naam < b.naam ? -1 : 1));
-    const hoofd = namen[0].naam;
-    if (namen.some((x) => V.VERZAMEL_RE.test(String(x.naam).normalize('NFKD').replace(/[\u0300-\u036f]/g, ''))) ||
-      namen.some((x) => K.normNaam(x.naam) !== K.normNaam(hoofd) && !V.naamVerwant(x.naam, hoofd))) uit.push(iban);
-  }
-  return uit;
-}
 function bankcontroleToepassen(fdb, nu) {
   const vandaag = dagAmsterdam(nu), van = K.plusDagen(vandaag, -BANK_DAGEN), wanneer = nuIso(nu);
   const transacties = fdb.db.prepare('SELECT * FROM bank_transactie WHERE verwijderd_op IS NULL AND boekdatum >= ?').all(van).map((t) => Object.assign({}, t, {
@@ -1001,7 +1008,7 @@ function bankcontroleToepassen(fdb, nu) {
     opdrachten: fdb.db.prepare('SELECT id, factuur, entiteit, status, poging FROM opdracht WHERE factuur IS NOT NULL').all(),
     bestaandeSignalen: fdb.db.prepare('SELECT sleutel, status, sluimer_tot FROM signaal').all(),
     afgewezenVoorstellen: fdb.db.prepare("SELECT sleutel FROM voorstel WHERE status = 'afgewezen'").all().map((v) => v.sleutel),
-    verzamelIbans: verzamelIbans(fdb),
+    verzamelTel: verzamelTellingen(fdb), verzamelNaam,
   };
   const uit = B.bankcontrole(inv);
   const tel = { koppelingen: 0, voorstellen: 0, uitzonderingen: 0, betaald_gezien: 0, signalen: 0, heropend: 0 };

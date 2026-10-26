@@ -19,8 +19,7 @@
  */
 const crypto = require('crypto');
 const { leesMt940, parseAbnDesc, ibanFromAbnAccount, Mt940Fout, ABN_TYPES } = require('./mt940-lezer.js');
-const { ibanNorm, normNaam, normNummer, dagenTussen, plusDagen, isIsoDatum } = require('./facturen-kern.js');
-const { VERZAMEL_RE } = require('./facturen-validatie.js');
+const { ibanNorm, normNaam, normNummer, dagenTussen, plusDagen, isIsoDatum, ibanNaamPast, VERZAMEL_RE } = require('./facturen-kern.js');
 
 class BankWeigering extends Error {
   constructor(code, uitleg) { super(uitleg || code); this.code = code; this.uitleg = uitleg || code; }
@@ -601,7 +600,9 @@ function levIbans(l) { return new Set(((l && l.ibans) || []).map(ibanNorm).filte
 function leverancierBijTx(tx, ctx) {
   const lijst = (ctx && ctx.leveranciers) || [];
   const tegen = ibanNorm(tx.tegenpartij_iban);
-  if (tegen) { const l = lijst.find((x) => levIbans(x).has(tegen)); if (l) return { leverancier: l, via: 'iban' }; }
+  // wv1360 (diffreview MOET 1): een rekening uit de bankhistorie hoort alleen bij deze leverancier als de naam bij de post past (of er geen
+  // naam is); anders verder op incassant en naam, zodat "Leverancier X" naar andermans bekende rekening het onbekend-IBAN-signaal geeft
+  if (tegen) { const l = lijst.find((x) => levIbans(x).has(tegen)); if (l && (!tx.tegenpartij_naam || ibanNaamPast(tx.tegenpartij_naam, l, tegen))) return { leverancier: l, via: 'iban' }; }
   if (tx.incassant_id) { const l = lijst.find((x) => (x.incassant_ids || []).includes(tx.incassant_id)); if (l) return { leverancier: l, via: 'incassant' }; }
   const n = normNaam(tx.tegenpartij_naam);
   if (n.length >= 4) {
@@ -998,8 +999,9 @@ function bankcontrole(inv) {
   const vandaag = inv && inv.vandaag;
   if (!isIsoDatum(vandaag)) throw new BankWeigering('vandaag', 'vandaag ontbreekt');
   const ctx = { leveranciers: inv.leveranciers || [], uitzonderingen: inv.uitzonderingen || [], entiteiten: inv.entiteiten || [], rekeningen: inv.rekeningen || [], koersen: inv.koersen || {} };
-  // wv1360: rekeningen van betaaldiensten en derdengelden (de beller bepaalt ze uit de hele bankhistorie): daar betalen we veel partijen op
-  const verzamel = new Set((inv.verzamelIbans || []).map(ibanNorm));
+  // wv1360: rekeningen van betaaldiensten en derdengelden (de beller telt per rekening de afschrijvingen met zo'n naam in de hele bankhistorie)
+  const verzamelTel = inv.verzamelTel || {}, verzamelNaam = typeof inv.verzamelNaam === 'function' ? inv.verzamelNaam : (n) => VERZAMEL_RE.test(String(n || ''));
+  const isVerzamel = (tx, tegen) => (verzamelTel[tegen] || 0) - (verzamelNaam(tx.tegenpartij_naam) ? 1 : 0) > 0 || (!!tx.is_incasso && verzamelNaam(tx.tegenpartij_naam));
   const txs = (inv.transacties || []).slice().sort((a, b) => (a.boekdatum < b.boekdatum ? -1 : a.boekdatum > b.boekdatum ? 1 : String(a.entry_ref).localeCompare(String(b.entry_ref))));
   const facturen = inv.facturen || [];
   const fMap = new Map(facturen.map((f) => [f.id, f]));
@@ -1078,11 +1080,11 @@ function bankcontrole(inv) {
     const basis = { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lt ? lt.leverancier.naam : tx.tegenpartij_naam,
       tegenpartij_iban: tx.tegenpartij_iban, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar, leverancier: lt ? lt.leverancier.id : null };
     // betaald aan onbekend IBAN: de tegenpartij is een bekende leverancier (incassant of naam), het IBAN niet. Vóór de uitzonderingen,
-    // zodat een uitzondering op naam het fraudesignaal nooit uitzet (diffreview wv798 #13). wv1360: niet als het geld via een betaaldienst
-    // of derdengeldenrekening ging ("X via Mollie", PayPal, Amazon Payments …): dat rekeningnummer is niet van X, en sinds de bekende
-    // rekeningen uit de bankhistorie gaf dat op de archieftoets ± 8 loze meldingen per maand.
+    // zodat een uitzondering op naam het fraudesignaal nooit uitzet (diffreview wv798 #13). wv1360: niet als die rekening al eerder als
+    // betaaldienst of derdengeldenrekening betaald werd ("X via Mollie", PayPal, Amazon Payments …), of bij een incasso van zo'n dienst:
+    // dat rekeningnummer is niet van X (archieftoets: anders ± 8 loze meldingen per maand).
     if (richtingVan(tx) === 'af' && tegen && lt && lt.via !== 'iban' && levIbans(lt.leverancier).size && !eigenIbanMap(ctx).has(tegen)
-      && !verzamel.has(tegen) && !VERZAMEL_RE.test(String(tx.tegenpartij_naam || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, ''))) {
+      && !isVerzamel(tx, tegen)) {
       signalen.push(maakSignaal('onbekend_iban', Object.assign({}, basis, { details: { via: lt.via } })));
     }
     const u = uitzonderingVoor(tx, ctx);

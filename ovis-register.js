@@ -259,7 +259,7 @@ function datumNl(iso) { const d = new Date(iso); if (isNaN(d)) return '?'; const
 // is, is een geaccepteerd nummer" — ook van medewerkers. De nummers staan in de Facturen-database (leverancier_iban + feit, de IBAN-poort);
 // de aanroeper geeft ze mee als o.rekeningen() → [{ iban, doel?, naam, aantal, eerste, laatste }] (doel = knoop-id of medewerkerpagina).
 // Ze komen alleen in het gegenereerde blok, nooit in de frontmatter (leesPagina weigert iban op een organisatiepagina nog steeds).
-const REK_KOP = '- Rekeningnummers (al eens betaald vanaf een eigen zakelijke rekening, dus geaccepteerd; nabellen niet nodig): ';
+const REK_KOP = '- Rekeningnummers (geaccepteerd: al eens betaald vanaf een eigen zakelijke rekening of nagebeld; nabellen niet nodig): ';
 const MDW_RE = /^10_Zakelijk\/[^/]+\/Medewerkers\/[^/]+\.md$/;
 const IBAN_VOL = /^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$/;
 function ibanLeesbaar(i) { return String(i).replace(/(.{4})/g, '$1 ').trim(); }
@@ -293,6 +293,12 @@ function rekeningenPerDoel(rek, knopen, handvatten) {
   });
   return per;
 }
+// Blok weghalen (alleen ons eigen medewerkerblok, wv1360 diffreview ZOU 4): de vingerafdruk van de pagina blijft gelijk.
+function zonderBlok(tekst) {
+  const t = String(tekst).replace(/\r\n?/g, '\n'), pl = blokPlek(t);
+  if (pl.b === undefined) return t;
+  return t.slice(0, pl.b).replace(/\n+$/, '\n') + t.slice(pl.e + BLOK_EIND.length).replace(/^\n+/, '');
+}
 function blokTekst(knoop, handvatten, contact, rekeningen) {
   const h = handvatten.filter(function (x) { return x.status !== 'vervallen'; }).map(function (x) {
     return SOORT_WOORD[x.soort] + ' ' + (x.soort === 'alias' ? '"' + x.waarde + '"' : x.waarde) + ' (' + STATUS_WOORD[x.status] + (x.intrekking ? '; van de pagina gehaald, wacht op Davids Ja' : '') + ')';
@@ -300,10 +306,12 @@ function blokTekst(knoop, handvatten, contact, rekeningen) {
   const c = contact.filter(function (x) { return x.status !== 'vervallen'; }).map(function (x) {
     return x.veld + ' (' + STATUS_WOORD[x.status] + (x.intrekking ? '; van de pagina gehaald' : '') + ')';
   });
+  // rekeningen: lijst (wv1360) of de bestaande regel als tekst (bron even niet te lezen: overnemen, rest van het blok wel vernieuwen)
+  const rr = typeof rekeningen === 'string' ? (rekeningen.indexOf(REK_KOP) === 0 && rekeningen.indexOf('\n') < 0 ? rekeningen : null) : rekeningRegel(rekeningen);
   const binnen = '\n' + ['## Wat OVIS van deze partij weet', '',
     '*Gegenereerd door de OVIS-compiler (nacht); niet met de hand bewerken. Bron is de frontmatter hierboven; een nieuw kenmerk of contactgegeven telt pas na Davids Ja.*', '',
     '- Herkenningskenmerken: ' + (h.length ? h.join(' · ') : 'geen'),
-    '- Contactgegevens in het register: ' + (c.length ? c.join(' · ') : 'geen')].concat(rekeningRegel(rekeningen) ? [rekeningRegel(rekeningen)] : []).concat([
+    '- Contactgegevens in het register: ' + (c.length ? c.join(' · ') : 'geen')].concat(rr ? [rr] : []).concat([
     '- Register: ' + (knoop.concept ? 'concept · ' : '') + 'compilatie ' + (knoop.compilatienummer || '–') + ', laatst gewijzigd ' + (knoop.gecompileerd_op ? datumNl(knoop.gecompileerd_op) : '–')
   ]).join('\n') + '\n';
   const id = String(knoop.id || '').replace(/[^A-Za-z0-9:_.-]/g, '').slice(0, 80) || 'onbekend';
@@ -758,8 +766,8 @@ function maak(o) {
         const p = perId[id].find(function (x) { return x.pad === k.vault_pagina; });
         if (!p || k.bron_sha !== p.sha) continue;
         const hb = huidigBlok(p.tekst);
-        if (!rek && hb && hb.indexOf(REK_KOP) >= 0) continue;
-        const blok = blokTekst(k, h2[id] || [], c2[id] || [], rek && k.rol !== 'eigen' && k.soort !== 'entiteit' ? perDoel[id] : undefined);
+        const oudeRegel = !rek && hb ? (hb.split('\n').find(function (r) { return r.indexOf(REK_KOP) === 0; }) || undefined) : undefined;
+        const blok = blokTekst(k, h2[id] || [], c2[id] || [], rek ? (k.rol !== 'eigen' && k.soort !== 'entiteit' ? perDoel[id] : undefined) : oudeRegel);
         if (hb === blok) continue;
         if (blokHandwerk(p.tekst)) { uit.handwerk++; continue; }   // K2: niet overschrijven; de Bibliothecaris meldt het (BB8)
         if (opties.droog) { uit.blokken++; continue; }
@@ -775,22 +783,44 @@ function maak(o) {
       }
       // wv1360: medewerkerpagina's (geen knoop; alleen dit blok). Zelfde regels: handwerk niet overschrijven, opnieuw lezen vlak voor het schrijven.
       uit.medewerkerblokken = 0;
-      for (const doel of Object.keys(perDoel).filter(function (d) { return MDW_RE.test(d) && d.split('/').indexOf('..') < 0; }).sort()) {
+      // alle medewerkerpagina's (vaste plek); een doel dat verhuisde wordt op bestandsnaam teruggevonden (diffreview ZOU 5)
+      const mdw = {}, opNaam = {};
+      if (rek) {
+        let mappen = [];
+        try { mappen = o.lijst('10_Zakelijk'); } catch (e) { mappen = []; }
+        mappen.forEach(function (m) {
+          if (!m.map || m.naam.startsWith('.')) return;
+          let xs = [];
+          try { xs = o.lijst('10_Zakelijk/' + m.naam + '/Medewerkers'); } catch (e) { xs = []; }
+          xs.forEach(function (x) { if (x.bestand && x.naam.endsWith('.md')) { const rel = '10_Zakelijk/' + m.naam + '/Medewerkers/' + x.naam; mdw[rel] = []; (opNaam[x.naam] = opNaam[x.naam] || []).push(rel); } });
+        });
+        let zoek = 0;
+        Object.keys(perDoel).filter(function (d) { return MDW_RE.test(d) && d.split('/').indexOf('..') < 0; }).forEach(function (d) {
+          const naam = path.basename(d), echt = mdw[d] ? d : (opNaam[naam] && opNaam[naam].length === 1 ? opNaam[naam][0] : null);
+          if (echt) mdw[echt] = mdw[echt].concat(perDoel[d]); else zoek++;
+        });
+        if (zoek) uit.fouten.push({ pad: '(medewerkerpagina\'s)', fout: zoek + ' rekening-doel(en) niet gevonden (verhuisd of weg)' });
+      }
+      for (const doel of Object.keys(mdw).sort()) {
         try {
           const vol = path.join(vault, doel);
           const t = o.lees(vol);
+          const pl = blokPlek(t);
+          const leeg = !mdw[doel].length;
+          if (leeg && !(pl.id && /^mdw:/.test(pl.id))) continue;   // niets te tonen en geen blok van ons: niet aanraken
           const fm = frontmatter(t);
-          if (fm.fout || !fm.velden || fm.velden.type !== 'medewerker') { uit.fouten.push({ pad: doel, fout: 'geen medewerkerpagina (type)' }); continue; }
+          if (fm.fout || !fm.velden || fm.velden.type !== 'medewerker') { if (!leeg) uit.fouten.push({ pad: doel, fout: 'geen medewerkerpagina (type)' }); continue; }
+          if (pl.id && !/^mdw:/.test(pl.id)) { uit.fouten.push({ pad: doel, fout: 'er staat al een ander gegenereerd blok' }); continue; }
           const va = vingerafdruk(t);
           if (va.fout) { uit.fouten.push({ pad: doel, fout: va.fout }); continue; }
-          const blok = mdwBlokTekst(doel, perDoel[doel]);
-          if (huidigBlok(t) === blok) continue;
+          const blok = leeg ? null : mdwBlokTekst(doel, mdw[doel]);
+          if (!leeg && huidigBlok(t) === blok) continue;
           if (blokHandwerk(t)) { uit.handwerk++; continue; }
           if (opties.droog) { uit.medewerkerblokken++; continue; }
           const vers = o.lees(vol);
           if (vingerafdruk(vers).sha !== va.sha) { uit.fouten.push({ pad: doel, fout: 'pagina veranderde tijdens de ronde; blok volgende nacht' }); continue; }
           if (blokHandwerk(vers)) { uit.handwerk++; continue; }
-          o.schrijf(vol, zetBlok(vers, blok));
+          o.schrijf(vol, leeg ? zonderBlok(vers) : zetBlok(vers, blok));
           uit.medewerkerblokken++;
         } catch (e) { uit.fouten.push({ pad: doel, fout: 'medewerkerblok: ' + String(e && e.code || e && e.message || e).slice(0, 80) }); }
       }

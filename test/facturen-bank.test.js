@@ -666,10 +666,26 @@ test('betaald aan onbekend IBAN: bekende incassant op een ander IBAN → fraudes
 test('wv1360: betaald via een betaaldienst of derdengeldenrekening → geen onbekend-IBAN-signaal; een gewone vreemde rekening wel', () => {
   const basis = { boekdatum: '2026-10-10', bedrag_centen: -6000, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000301', tegenpartij_iban: LEV.VREEMD };
   const via = tx(Object.assign({}, basis, { tegenpartij_naam: 'Leverancier C B.V. via Stichting Mollie Payments' }));
+  // incasso via een betaaldienst: geen signaal
   assert.ok(!soorten(controle({ transacties: [via], facturen: [] })).includes('onbekend_iban'));
-  const lijst = tx(Object.assign({}, basis, { tegenpartij_naam: 'Leverancier C B.V.' }));
-  assert.ok(!soorten(controle({ transacties: [lijst], facturen: [], verzamelIbans: [LEV.VREEMD] })).includes('onbekend_iban'));
-  assert.ok(soorten(controle({ transacties: [lijst], facturen: [], verzamelIbans: ['NL02ABNA0123456789'] })).includes('onbekend_iban'));
+  // overboeking met "via" in de (zelf getypte) naam, rekening nooit eerder als betaaldienst betaald (alleen deze post): wél een signaal
+  const viaOver = tx(Object.assign({}, basis, { is_incasso: false, incassant_id: null, tegenpartij_naam: 'Leverancier C B.V. via Mollie' }));
+  assert.ok(soorten(controle({ transacties: [viaOver], facturen: [], verzamelTel: { [LEV.VREEMD]: 1 } })).includes('onbekend_iban'));
+  // rekening al eerder als betaaldienst betaald: geen signaal
+  assert.ok(!soorten(controle({ transacties: [viaOver], facturen: [], verzamelTel: { [LEV.VREEMD]: 3 } })).includes('onbekend_iban'));
+  const gewoon = tx(Object.assign({}, basis, { tegenpartij_naam: 'Leverancier C B.V.' }));
+  assert.ok(!soorten(controle({ transacties: [gewoon], facturen: [], verzamelTel: { [LEV.VREEMD]: 2 } })).includes('onbekend_iban'));
+  assert.ok(soorten(controle({ transacties: [gewoon], facturen: [], verzamelTel: { NL02ABNA0123456789: 5 } })).includes('onbekend_iban'));
+});
+
+test('wv1360: rekening uit de bankhistorie met een andere naam op de post → niet die leverancier; bekende naam elders → onbekend-IBAN-signaal', () => {
+  const levs = LEVS.concat([{ id: 'mw', naam: 'Proef Medewerker', namen: ['P. Medewerker'], ibans: ['NL02ABNA0123456789'], ibans_naamtoets: ['NL02ABNA0123456789'], incassant_ids: [] }]);
+  const naarMw = tx({ boekdatum: '2026-10-10', bedrag_centen: -6000, tegenpartij_iban: 'NL02ABNA0123456789', tegenpartij_naam: 'Leverancier C B.V.' });
+  assert.equal(B.leverancierBijTx(naarMw, { leveranciers: levs }).leverancier.id, 'lc');
+  assert.ok(soorten(controle({ transacties: [naarMw], facturen: [], leveranciers: levs })).includes('onbekend_iban'));
+  const salaris = tx({ boekdatum: '2026-10-10', bedrag_centen: -6000, tegenpartij_iban: 'NL02ABNA0123456789', tegenpartij_naam: 'P. Medewerker' });
+  assert.equal(B.leverancierBijTx(salaris, { leveranciers: levs }).via, 'iban');
+  assert.ok(!soorten(controle({ transacties: [salaris], facturen: [], leveranciers: levs })).includes('onbekend_iban'));
 });
 
 test('zelfde periode in twee bestanden (oude en nieuwe ING-variant): andere entry_ref → signaal mogelijk dubbel geüpload; zelfde bestand → niets', () => {
