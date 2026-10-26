@@ -114,6 +114,26 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('3h 20_Prive als koppeling naar een andere map: bestand onbereikbaar', s2.status === 200 && s2.j.tel.bestanden === 0 && m2.bestand(M.idVan('20_Prive/g.mp3')).status === 404, s2.j && s2.j.tel);
   toets('3i zonder pagina: 503 met uitleg', M.maak({ vault: path.join(W, 'leeg') }).stand().status === 503);
 
+  // ── 3b. review wv1269: md-link met haakjes, hardlink, FIFO, (idem), geweigerd ──
+  const L = M.leesItem('**X** — Y, 1-2-2026. Bestand [mp3](20_Prive/Bronnen/Shizzle/Lied A (Sven).mp3) en [pdf](<20_Prive/Bronnen/Shizzle/Hoes.pdf>).');
+  toets('3j md-link met haakjes in de naam en <…>-vorm', L.bestanden.length === 2 && L.bestanden[0].pad === '20_Prive/Bronnen/Shizzle/Lied A (Sven).mp3' && L.bestanden[1].pad === '20_Prive/Bronnen/Shizzle/Hoes.pdf' && L.paginas.length === 0 && L.omschrijving === null, L);
+  toets('3k leesItem telt een link naar een soort die de App niet geeft', M.leesItem('**X** — Bestand [[20_Prive/a.html|h]] [[../a.mp3|m]].').geweigerd === 2);
+  const O2 = M.leesPagina('## A\n- **Een** — Z, 1-1-2026.\n  *Nog geen bestand:* kwam als spraakbericht.\n- **Twee** — Z, 1-1-2026. *Nog geen bestand* (idem).\n');
+  toets('3l "(idem)" = de noot van het vorige item', O2[0].items[1].noot === 'kwam als spraakbericht.', O2[0].items[1]);
+  toets('3m lijst: geweigerde links tellen per item (buiten 20_Prive en .md/.html)', it(2, 0).geweigerd === 6 && it(2, 1).geweigerd === 1, [it(2, 0).geweigerd, it(2, 1).geweigerd]);
+  fs.linkSync(path.join(V, '10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3'), path.join(V, '20_Prive/Hard.mp3'));
+  require('child_process').execFileSync('mkfifo', [path.join(V, '20_Prive/Fifo.mp3')]);
+  zet('20_Prive/Mediatheek.md', pagina + '\n## Aanval\n- **H** — x, 1-1-2026. Bestand [[20_Prive/Hard.mp3|mp3]] [[20_Prive/Fifo.mp3|mp3]].\n');
+  const sA = m.stand().j.onderwerpen[3].items[0].bestanden;
+  const t0 = Date.now();
+  toets('3n hardlink naar een gesprek buiten 20_Prive = 404', m.bestand(M.idVan('20_Prive/Hard.mp3')).status === 404, sA);
+  toets('3o FIFO = ontbreekt in de lijst en 404, zonder te blokkeren', sA.find((b) => b.naam === 'Fifo.mp3').ontbreekt === true && m.bestand(M.idVan('20_Prive/Fifo.mp3')).status === 404 && Date.now() - t0 < 2000, sA);
+  // inode gewisseld na de controle: lijst() en bestand() lopen in één aanroep, dus nabootsen via een kapotte perId-ingang is niet nodig;
+  // wel: een bestand dat tussen twee aanroepen vervangen is, wordt opnieuw gecontroleerd (pagina en bestand worden elke keer gelezen)
+  fs.unlinkSync(path.join(V, '20_Prive/Bronnen/Shizzle/Lied B.mp3')); fs.symlinkSync(path.join(V, '10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3'), path.join(V, '20_Prive/Bronnen/Shizzle/Lied B.mp3'));
+  toets('3p bestand vervangen door een symlink na de lijst = 404', m.bestand(M.idVan('20_Prive/Bronnen/Shizzle/Lied B.mp3')).status === 404);
+  zet('20_Prive/Mediatheek.md', pagina);
+
   // ── 4. health ──
   const h = m.health();
   toets('4 /health: alleen aantallen', h.aan && h.pagina && h.items === 8 && h.bestanden >= 3 && Object.keys(h).length === 5, h);
@@ -145,6 +165,17 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   await ctx.__mt.appMediatheek({}, { _app: {} }, { soort: 'vast' }, 'GET /app/mediatheek/bestand/' + id);
   toets('5j vaste plek: bestand 403', gestuurd[3].s === 403, gestuurd[3]);
   toets('5k info', ctx.__mt.mediatheekInfo().items === 8);
+  // review wv1269 ZOU 2: hooguit twee antwoorden tegelijk onderweg; de teller zakt pas bij 'close'
+  const EE = require('events');
+  const open = [new EE(), new EE()]; open.forEach((r) => { r._app = {}; });
+  const idA = id;   // Lied A (Lied B is in 3p een symlink geworden)
+  for (const r of open) await ctx.__mt.appMediatheek({}, r, { soort: 'meereizend' }, 'GET /app/mediatheek/bestand/' + idA);
+  const n0 = gestuurd.length;
+  await ctx.__mt.appMediatheek({}, Object.assign(new EE(), { _app: {} }), { soort: 'meereizend' }, 'GET /app/mediatheek/bestand/' + idA);
+  toets('5l derde tegelijk = 429', gestuurd[n0].s === 429, gestuurd[n0]);
+  open[0].emit('close'); open[0].emit('close');
+  await ctx.__mt.appMediatheek({}, Object.assign(new EE(), { _app: {} }), { soort: 'meereizend' }, 'GET /app/mediatheek/bestand/' + idA);
+  toets('5m na close (één keer geteld) weer plek', gestuurd[n0 + 1].s === 200, gestuurd[n0 + 1] && gestuurd[n0 + 1].s);
 
   fs.rmSync(W, { recursive: true, force: true });
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');

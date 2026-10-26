@@ -11,7 +11,8 @@
 // - M2 het doel ligt onder dezelfde bovenmap als de pagina (20_Prive): een link naar 10_Zakelijk (personeelsgesprekken, Plaud-opnames)
 //   of 00_Systeem levert niets op, ook als iemand hem op de pagina zet. Geen punt-mappen, geen '..', geen absoluut pad.
 // - M3 alleen de extensies hieronder (geluid om af te spelen, een paar soorten om te downloaden); geen md/html/svg/code.
-// - M4 realpath binnen de vault én binnen die bovenmap, lstat: gewoon bestand, geen symlink; hooguit 20 MB (base64 in JSON).
+// - M4 realpath binnen de vault én binnen die bovenmap, lstat: gewoon bestand, geen symlink; lezen via één fd met O_NOFOLLOW en
+//   O_NONBLOCK, fstat = zelfde inode, nlink 1 (geen hardlink naar buiten); hooguit 20 MB (base64 in JSON).
 // Alles alleen lezen; de module schrijft niets. Op een apparaat met een vaste plek gaat de App niet open (server.js, privé-module).
 
 const fs = require('fs');
@@ -42,7 +43,8 @@ function schoonDoel(t) {
 // Links in een stuk tekst: [[doel|alias]] en [alias](doel). Geeft { doel, naam, van, tot }.
 function links(t) {
   const uit = [];
-  const re = /\[\[([^\]\n]+?)\]\]|\[([^\]\n]*)\]\(([^)\n]+)\)/g;
+  // md-link: <doel met spaties> of een doel met hooguit één niveau haakjes ("Lied A (Sven).mp3"; review wv1269 ZOU 3)
+  const re = /\[\[([^\]\n]+?)\]\]|\[([^\]\n]*)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)/g;
   let m;
   while ((m = re.exec(t))) {
     if (m[1] !== undefined) {
@@ -57,7 +59,7 @@ function links(t) {
 function plat(t) {
   return String(t)
     .replace(/\[\[([^\]\n]+?)\]\]/g, (_, x) => { const d = x.split('|'); return (d.length > 1 ? d.slice(1).join('|') : d[0].split('/').pop()).trim(); })
-    .replace(/\[([^\]\n]*)\]\(([^)\n]+)\)/g, '$1')
+    .replace(/\[([^\]\n]*)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)/g, '$1')
     .replace(/\*\*|__|`/g, '').replace(/(^|[\s(])[*_]([^*_\n]+)[*_](?=[\s).,;:!?]|$)/g, '$1$2')
     .replace(/\s+/g, ' ').trim();
 }
@@ -79,15 +81,17 @@ function leesItem(ruw) {
   if (kop) { titel = kop[1]; rest = t.slice(kop[0].length); } else { titel = null; rest = t; }
   const ls = links(rest);
   const bestanden = [], paginas = [];
+  let geweigerd = 0;
   for (const l of ls) {
     const p = schoonDoel(l.doel);
-    if (!p) continue;
+    if (!p) { if (/\.[a-z0-9]{1,5}(#|\||$)/i.test(l.doel) && !/^[a-z]+:/i.test(l.doel)) geweigerd++; continue; }
     const ext = extVan(p);
     if (AUDIO[ext] || ANDERS[ext]) bestanden.push({ pad: p, ext: ext, label: l.naam || ext });
     else if (!ext || ext === 'md') paginas.push({ pad: /\.md$/i.test(p) ? p : p + '.md', naam: plat(l.naam || p.split('/').pop()) });
+    else geweigerd++;
   }
   // "Bestand [[…]]" / "Bestanden [[…]] en [[…]]" hoort niet in de omschrijving: de App toont de knoppen
-  let tekst = rest.replace(/\s*\bBestand(en)?\b:?\s*((\[\[[^\]]+\]\]|\[[^\]]*\]\([^)]+\))(\s*(,|en|of)\s*)?)+\.?/g, (x) => {
+  let tekst = rest.replace(/\s*\bBestand(en)?\b:?\s*((\[\[[^\]]+\]\]|\[[^\]]*\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\))(\s*(,|en|of)\s*)?)+\.?/g, (x) => {
     return links(x).every((l) => { const p = schoonDoel(l.doel); const e = p ? extVan(p) : ''; return !!(AUDIO[e] || ANDERS[e]); }) ? '' : x;
   });
   let noot = null;
@@ -101,7 +105,7 @@ function leesItem(ruw) {
   return {
     titel: plat(titel || '').replace(/^["“”„']+|["“”„']+$/g, '') || (bestanden[0] ? bestanden[0].pad.split('/').pop() : plat(t).slice(0, 80)),
     wie: wie, datum: datum, datum_tekst: datumTekst && !datum ? datumTekst : null,
-    omschrijving: omschrijving || null, noot: noot, bestanden: bestanden, paginas: paginas,
+    omschrijving: omschrijving || null, noot: noot, bestanden: bestanden, paginas: paginas, geweigerd: geweigerd,
   };
 }
 
@@ -111,7 +115,15 @@ function leesPagina(md) {
   if (t.startsWith('---\n')) { const e = t.indexOf('\n---', 4); if (e > 0) t = t.slice(t.indexOf('\n', e + 1) + 1); }
   const onderwerpen = [];
   let huidig = null, item = null, para = [];
-  const sluitItem = () => { if (item !== null && huidig) huidig.items.push(leesItem(item)); item = null; };
+  const sluitItem = () => {
+    if (item !== null && huidig) {
+      const it = leesItem(item);
+      const vorig = huidig.items[huidig.items.length - 1];
+      if (it.noot && /^\(?idem\)?\.?$/i.test(it.noot) && vorig && vorig.noot) it.noot = vorig.noot;   // "*Nog geen bestand* (idem)."
+      huidig.items.push(it);
+    }
+    item = null;
+  };
   const sluitPara = () => { if (para.length && huidig) { const p = plat(para.join(' ')); if (p) huidig.uitleg.push(p); } para = []; };
   for (const regel of t.split('\n')) {
     const h = /^##\s+(.+?)\s*#*\s*$/.exec(regel);
@@ -169,7 +181,7 @@ function maak(opt) {
       const e = echt();
       const r = fs.realpathSync(abs);
       if (r.indexOf(e.vault + path.sep) !== 0 || r.indexOf(e.top + path.sep) !== 0) return { weg: 'buiten' };
-      return { abs: r, grootte: st.size, m: st.mtimeMs };
+      return { abs: r, grootte: st.size, m: st.mtimeMs, dev: st.dev, ino: st.ino, nlink: st.nlink };
     } catch (e) { return { weg: 'ontbreekt' }; }
   }
 
@@ -187,19 +199,20 @@ function maak(opt) {
       return { naam: o.naam, uitleg: o.uitleg, items: o.items.map(function (it) {
         n++;
         const bs = [];
+        let geweigerd = it.geweigerd;
         for (const b of it.bestanden) {
           const z = zoekBestand(b.pad);
-          if (z.weg === 'buiten' || z.weg === 'soort') continue;   // M2/M3: bestaat voor de App niet
+          if (z.weg === 'buiten' || z.weg === 'soort') { geweigerd++; continue; }   // M2/M3: bestaat voor de App niet (alleen geteld)
           const id = idVan(b.pad);
           const soort = AUDIO[b.ext] ? 'audio' : 'bestand';
           const rij = { id: id, naam: b.pad.split('/').pop(), ext: b.ext, soort: soort, label: plat(b.label),
             grootte: z.abs ? z.grootte : null, ontbreekt: !z.abs, te_groot: !!(z.abs && z.grootte > MAX_BESTAND) };
-          if (z.abs) { perId.set(id, { pad: b.pad, abs: z.abs, ext: b.ext, grootte: z.grootte }); nb++; } else nweg++;
+          if (z.abs) { perId.set(id, { pad: b.pad, abs: z.abs, ext: b.ext, grootte: z.grootte, dev: z.dev, ino: z.ino }); nb++; } else nweg++;
           if (!bs.some((x) => x.id === id)) bs.push(rij);
         }
         const ps = it.paginas.filter((p) => p.pad.split('/')[0] === TOP).map((p) => ({ pad: p.pad, naam: p.naam }));
         return { titel: it.titel, wie: it.wie, datum: it.datum, datum_tekst: it.datum_tekst, omschrijving: it.omschrijving, noot: it.noot,
-          bestanden: bs, paginas: ps };
+          bestanden: bs, paginas: ps, geweigerd: geweigerd };
       }) };
     });
     return { ok: true, pagina: PAD, bijgewerkt: new Date(st.mtimeMs).toISOString(), onderwerpen: uit,
@@ -214,12 +227,22 @@ function maak(opt) {
     const b = l._perId.get(id);
     if (!b) return { status: 404, j: { ok: false, fout: 'dit bestand staat niet (meer) in de mediatheek' } };
     if (b.grootte > MAX_BESTAND) return { status: 413, j: { ok: false, fout: 'te groot voor de app (meer dan 20 MB)' } };
+    // Lezen via één fd (review wv1269 ZOU 1): O_NOFOLLOW (intussen een symlink = weigeren), O_NONBLOCK (een FIFO blokkeert de pod niet),
+    // fstat: gewoon bestand, dezelfde inode als bij de controle, geen hardlink (nlink 1), en precies die grootte lezen.
+    let fd = null;
     try {
-      const buf = fs.readFileSync(b.abs);
-      if (buf.length > MAX_BESTAND) return { status: 413, j: { ok: false, fout: 'te groot voor de app (meer dan 20 MB)' } };
+      fd = fs.openSync(b.abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      const st = fs.fstatSync(fd);
+      if (!st.isFile() || st.nlink !== 1 || st.dev !== b.dev || st.ino !== b.ino) return { status: 404, j: { ok: false, fout: 'niet te lezen' } };
+      if (st.size > MAX_BESTAND) return { status: 413, j: { ok: false, fout: 'te groot voor de app (meer dan 20 MB)' } };
+      const buf = Buffer.alloc(st.size);
+      let n = 0;
+      while (n < st.size) { const k = fs.readSync(fd, buf, n, st.size - n, n); if (k <= 0) break; n += k; }
+      if (n !== st.size) return { status: 404, j: { ok: false, fout: 'niet te lezen' } };
       return { status: 200, ext: b.ext, j: { ok: true, naam: b.pad.split('/').pop(), type: AUDIO[b.ext] || ANDERS[b.ext], grootte: buf.length,
         inhoud: buf.toString('base64') } };
     } catch (e) { fout('mediatheek-bestand', e); return { status: 404, j: { ok: false, fout: 'niet te lezen' } }; }
+    finally { if (fd !== null) try { fs.closeSync(fd); } catch (e) { /* al dicht */ } }
   }
 
   function stand() {

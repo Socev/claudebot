@@ -14788,12 +14788,15 @@ async function appMediatheek(req, res, a, route) {
     return appStuur(res, r.status, Object.assign({ vaste_plek: false }, r.j));
   }
   if (!appTeller('mediatheek-bestand', 120, 3600000)) return appWeiger(res, 429, 'te veel bestanden dit uur (max 120)', 'grens mediatheek-bestand');
+  // hooguit twee antwoorden tegelijk onderweg (± 27 MB JSON elk bij 20 MB): de teller zakt pas als het antwoord weg is (review wv1269 ZOU 2)
   if (mediatheekBezig >= 2) return appWeiger(res, 429, 'even geduld: er worden al twee bestanden geladen', 'mediatheek bezig');
   const id = route.slice('GET /app/mediatheek/bestand/'.length);
   mediatheekBezig++;
+  let los = false;
+  const laatLos = function () { if (!los) { los = true; mediatheekBezig--; } };
   let r;
   try { r = mediatheek.bestand(id); } catch (e) { logError('app-mediatheek', e); r = { status: 500, j: { ok: false, fout: 'fout op de pod' } }; }
-  finally { mediatheekBezig--; }
+  if (typeof res.once === 'function') res.once('close', laatLos); else laatLos();
   res._app.reden = 'mediatheek bestand ' + id + (r.ext ? ' ' + r.ext : '') + (r.status !== 200 ? ' (' + r.status + ')' : '');
   return appStuur(res, r.status, r.j);
 }
