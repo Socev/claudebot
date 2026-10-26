@@ -276,7 +276,19 @@ function detail(fdb, r, id, nu) {
       .all(f.id, ...kp).map((k) => Object.assign(txKort(k), { koppeling: { bron: k.bron, methode: k.methode, zekerheid: k.zekerheid, volledig: k.volledig } })),
     entiteiten: ents,
     verzendmodus: D.metaLees(fdb, 'verzendmodus'),
+    bedragpatroon: bedragpatroonVoor(fdb, r, f, ctx.vandaag),
   };
+}
+// wv1317: gebruikelijke bandbreedte van de betalingen aan het IBAN van deze factuur (laatste 12 maanden, eigen entiteit), met het oordeel
+// over het factuurbedrag. Alleen over bankregels die deze rol mag zien; zonder IBAN of met < 3 betalingen: null.
+function bedragpatroonVoor(fdb, r, f, vandaag) {
+  const iban = K.ibanNorm(f.iban);
+  if (!iban || !f.entiteit || !Number.isSafeInteger(f.incl) || f.incl <= 0) return null;
+  const [tf, tp] = eigenaarFilter(r, 't');
+  const lijst = fdb.db.prepare('SELECT id, boekdatum, bedrag_centen FROM bank_transactie t WHERE t.verwijderd_op IS NULL AND t.bedrag_centen < 0 AND t.entiteit = ? AND t.tegenpartij_iban = ? ' +
+    'AND t.boekdatum >= ? AND ' + tf).all(f.entiteit, iban, K.plusDagen(vandaag, -365), ...tp);
+  const p = V.bedragPatroon(lijst, vandaag, f.incl);
+  return p ? Object.assign({ rekening: eind4(iban) }, p) : null;
 }
 // Documentinzage: JSON met base64 (de App tekent met pdf.js); rolcontrole via de factuur of het POT-afschrift; elke inzage een auditrij.
 function document(fdb, r, id, o) {
@@ -340,9 +352,23 @@ function bank(fdb, r, nu) {
   const tx = fdb.db.prepare('SELECT * FROM bank_transactie WHERE id = ?');
   const [ff, fp] = factuurFilter(r, 'f');
   const fq = fdb.db.prepare('SELECT f.* FROM factuur f WHERE f.id = ? AND ' + ff);
+  const [tf0, tp0] = eigenaarFilter(r, 't');
+  const zelfde = fdb.db.prepare('SELECT id, boekdatum, bedrag_centen FROM bank_transactie t WHERE t.verwijderd_op IS NULL AND t.bedrag_centen < 0 AND t.entiteit = ? AND t.tegenpartij_iban = ? ' +
+    'AND t.boekdatum >= ? AND ' + tf0);
+  const levNaam = fdb.db.prepare('SELECT naam FROM leverancier WHERE id = ?');
+  const kortMetNaam = (f) => { const l = f.leverancier ? levNaam.get(f.leverancier) : null; return factuurKort(f, l ? l.naam : null); };
   const voorstellen = fdb.db.prepare("SELECT v.* FROM voorstel v JOIN bank_transactie t ON t.id = v.transactie WHERE v.status = 'open' AND t.verwijderd_op IS NULL AND " + vf + ' ORDER BY v.id LIMIT ' + LIJST_MAX)
-    .all(...vp).map((v) => ({ id: v.id, methode: v.methode, zekerheid: v.zekerheid, transactie: txKort(tx.get(v.transactie)),
-      facturen: (json(v.facturen, []) || []).map((id) => fq.get(id, ...fp)).filter(Boolean).map((f) => factuurKort(f)) }));
+    .all(...vp).map((v) => {
+      const t = tx.get(v.transactie), det = json(v.details, {}) || {};
+      const fs = (json(v.facturen, []) || []).map((id) => fq.get(id, ...fp)).filter(Boolean);
+      const alt = (det.alternatieven || []).map((id) => fq.get(id, ...fp)).filter(Boolean);
+      // wv1317: bandbreedte van de betalingen aan deze rekening (laatste 12 maanden, zonder deze regel), alleen over regels die deze rol mag zien
+      const patroon = t.tegenpartij_iban && t.bedrag_centen < 0
+        ? V.bedragPatroon(zelfde.all(t.entiteit, t.tegenpartij_iban, K.plusDagen(vandaag, -365), ...tp0), vandaag, -t.bedrag_centen, { zonder: t.id }) : null;
+      const uitleg = B.voorstelUitleg({ methode: v.methode, zekerheid: v.zekerheid, tegenpartij_geborgd: !!det.tegenpartij_geborgd, verschil_centen: det.verschil_centen,
+        creditnota: det.creditnota, reden: det.reden }, t, fs.map((f) => Object.assign(kortMetNaam(f), { iban: f.iban })), alt.map(kortMetNaam), patroon);
+      return { id: v.id, methode: v.methode, zekerheid: v.zekerheid, transactie: txKort(t), facturen: fs.map(kortMetNaam), alternatieven: alt.map(kortMetNaam), uitleg, patroon };
+    });
   // balk per week (laatste 8 weken, afschrijvingen): bij een factuur / bekende uitzondering / te bekijken
   const [tf, tp] = eigenaarFilter(r, 't');
   const start = startdatumVan(fdb), van56 = K.plusDagen(vandaag, -56);
@@ -354,8 +380,23 @@ function bank(fdb, r, nu) {
     const x = weken[w] = weken[w] || { week: w, factuur: 0, uitzondering: 0, te_bekijken: 0 };
     if (t.k > 0) x.factuur++; else if (t.categorie) x.uitzondering++; else x.te_bekijken++;
   }
-  return { signalen: open.map(signaalKort), geleerd: geleerd.map(signaalKort), voorstellen, weken: Object.values(weken).sort((a, b) => (a.week < b.week ? -1 : 1)) };
+  // wv1317: "wat we deze maand leerden" gegroepeerd en in gewone taal (ook de koppelvoorstellen die vervielen), nooit een interne code
+  // per entiteit, zodat de App op een vaste plek (spreekkamer) Privé en POT kan weglaten zoals bij de signalen
+  const groepen = fdb.db.prepare("SELECT s.entiteit, s.soort, s.titel, s.afhandeling, s.les, count(*) AS aantal, max(s.wanneer) AS laatst FROM signaal s WHERE s.status = 'afgehandeld' AND " +
+    'substr(s.wanneer, 1, 7) = ? AND ' + sf + ' GROUP BY s.entiteit, s.soort, s.titel, s.afhandeling, s.les ORDER BY laatst DESC LIMIT 100').all(maand, ...sp);
+  const geleerd_regels = groepen.map((g) => ({ tekst: B.leerRegel(g), aantal: g.aantal, soort: g.soort, entiteit: g.entiteit || null }));
+  const verval = new Map();
+  for (const v of fdb.db.prepare("SELECT v.details, t.entiteit FROM voorstel v JOIN bank_transactie t ON t.id = v.transactie WHERE v.status = 'vervallen' AND substr(v.afgehandeld_op, 1, 7) = ? AND " + vf)
+    .all(maand, ...vp)) { const k = t2(v.entiteit, (json(v.details, {}) || {}).vervallen_reden || 'geen_match'); verval.set(k, (verval.get(k) || 0) + 1); }
+  for (const [k, n] of verval) { const [ent, rd] = JSON.parse(k); geleerd_regels.push({ tekst: B.vervalRegel(rd, n), aantal: n, soort: 'voorstel_vervallen', entiteit: ent }); }
+  for (const g of fdb.db.prepare("SELECT t.entiteit, v.status, count(*) AS n FROM voorstel v JOIN bank_transactie t ON t.id = v.transactie WHERE v.status IN ('bevestigd','afgewezen') AND " +
+    'substr(v.afgehandeld_op, 1, 7) = ? AND ' + vf + ' GROUP BY t.entiteit, v.status').all(maand, ...vp)) {
+    geleerd_regels.push({ tekst: g.status === 'bevestigd' ? g.n + (g.n === 1 ? ' koppeling' : ' koppelingen') + ' bevestigd.' :
+      g.n + (g.n === 1 ? ' koppelvoorstel' : ' koppelvoorstellen') + ' afgewezen; die komen niet terug.', aantal: g.n, soort: 'voorstel_' + g.status, entiteit: g.entiteit || null });
+  }
+  return { signalen: open.map(signaalKort), geleerd: geleerd.slice(0, 50).map(signaalKort), geleerd_regels, voorstellen, weken: Object.values(weken).sort((a, b) => (a.week < b.week ? -1 : 1)) };
 }
+function t2(a, b) { return JSON.stringify([a || null, b]); }
 function isoWeek(d) {
   const t = new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)));
   const dag = (t.getUTCDay() + 6) % 7;
@@ -795,9 +836,22 @@ function bankcontroleToepassen(fdb, nu) {
   const txMap = new Map(transacties.map((t) => [t.id, t]));
   for (const k of uit.koppelingen) tel.koppelingen += fdb.db.prepare('INSERT INTO koppeling (transactie, factuur, bron, methode, zekerheid, alleen_eigenaar, wanneer) VALUES (?, ?, \'auto\', ?, ?, ?, ?) ON CONFLICT DO NOTHING')
     .run(k.transactie, k.factuur, k.methode || null, k.zekerheid == null ? null : Math.min(1, Math.max(0, k.zekerheid)), k.alleen_eigenaar ? 1 : 0, wanneer).changes;
-  for (const v of uit.voorstellen) tel.voorstellen += fdb.db.prepare('INSERT INTO voorstel (sleutel, transactie, facturen, methode, zekerheid, details, alleen_eigenaar, aangemaakt_op) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (sleutel) DO NOTHING')
-    .run(v.sleutel, v.transactie, JSON.stringify(v.facturen), v.methode || null, v.zekerheid == null ? null : v.zekerheid,
-      JSON.stringify({ alternatieven: v.alternatieven || [], tegenpartij_geborgd: !!v.tegenpartij_geborgd }), v.alleen_eigenaar ? 1 : 0, wanneer).changes;
+  for (const v of uit.voorstellen) {
+    const n = fdb.db.prepare('INSERT INTO voorstel (sleutel, transactie, facturen, methode, zekerheid, details, alleen_eigenaar, aangemaakt_op) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (sleutel) DO NOTHING')
+      .run(v.sleutel, v.transactie, JSON.stringify(v.facturen), v.methode || null, v.zekerheid == null ? null : v.zekerheid,
+        JSON.stringify({ alternatieven: v.alternatieven || [], tegenpartij_geborgd: !!v.tegenpartij_geborgd, verschil_centen: v.verschil_centen, creditnota: v.creditnota, reden: v.reden }),
+        v.alleen_eigenaar ? 1 : 0, wanneer).changes;
+    tel.voorstellen += n;
+    // wv1317: een vervallen voorstel dat de controle weer precies zo voorstelt, gaat weer open (de stand veranderde terug)
+    if (!n) {
+      const oud = fdb.db.prepare("SELECT id FROM voorstel WHERE sleutel = ? AND status = 'vervallen'").get(v.sleutel);
+      if (oud && fdb.db.prepare("UPDATE voorstel SET status = 'open', afgehandeld_door = NULL, afgehandeld_op = NULL WHERE id = ? AND status = 'vervallen'").run(oud.id).changes) {
+        tel.voorstellen_heropend = (tel.voorstellen_heropend || 0) + 1;
+        D.audit(fdb, { wie: 'bankcontrole', wat: 'voorstel_heropend', object_soort: 'voorstel', object_id: String(oud.id), voor: { status: 'vervallen' }, na: { status: 'open' }, wanneer });
+      }
+    }
+  }
+  tel.voorstellen_vervallen = voorstellenHerbeoordelen(fdb, uit, txMap, facturen, wanneer);
   for (const u of uit.uitzonderingen) tel.uitzonderingen += fdb.db.prepare('UPDATE bank_transactie SET categorie = ?, uitzondering = ? WHERE id = ? AND categorie IS NULL')
     .run(u.categorie, u.uitzondering || null, u.transactie).changes;
   for (const b of uit.betaalspoor) {
@@ -813,6 +867,46 @@ function bankcontroleToepassen(fdb, nu) {
   for (const s of uit.signalen) { if (historie(s)) { tel.historie_stil = (tel.historie_stil || 0) + 1; continue; } tel.signalen += signaalInvoegen(fdb, s, wanneer); }
   for (const h of uit.heropenen) tel.heropend += fdb.db.prepare("UPDATE signaal SET status = 'open', sluimer_tot = NULL WHERE sleutel = ? AND status = 'afgehandeld'").run(h.sleutel).changes;
   return tel;
+}
+/*
+ * wv1317 (David 26-10-2026): elk open voorstel dat de controle nu niet meer zo voorstelt, gaat op 'vervallen' met de reden in details en een
+ * auditrij — nooit stil weg, nooit 'afgewezen' (dat zei David niet). Alleen open voorstellen waar nog niemand op drukte; de UPDATE eist
+ * status = 'open', dus een gelijktijdige klik van David wint of verliest netjes (409 "al afgehandeld").
+ */
+function voorstellenHerbeoordelen(fdb, uit, txMap, facturen, wanneer) {
+  const nu = new Set(uit.voorstellen.map((v) => v.sleutel));
+  const fMap = new Map(facturen.map((f) => [f.id, f]));
+  const elders = new Set();
+  for (const v of uit.voorstellen) for (const fid of v.facturen) elders.add(fid);
+  const gekoppeld = fdb.db.prepare('SELECT 1 FROM koppeling WHERE factuur = ? LIMIT 1');
+  let n = 0;
+  for (const v of fdb.db.prepare("SELECT v.*, t.entiteit FROM voorstel v LEFT JOIN bank_transactie t ON t.id = v.transactie WHERE v.status = 'open'").all()) {
+    if (nu.has(v.sleutel)) continue;
+    const tx = txMap.get(v.transactie);
+    const fids = json(v.facturen, []) || [];
+    const fs = fids.map((id) => fMap.get(id) || D.factuurVoorKern(fdb, id)).filter(Boolean);
+    const redenen = [];
+    if (!tx || fs.length !== fids.length) {
+      const t = tx ? null : fdb.db.prepare('SELECT verwijderd_op FROM bank_transactie WHERE id = ?').get(v.transactie);
+      redenen.push(fs.length !== fids.length || !t || t.verwijderd_op ? 'weg' : 'geen_match');   // buiten het venster van de controle: geen match meer
+    }
+    else {
+      const ref = B.referentieStukken(tx);
+      if (fs.some((f) => B.vooruitBetaald(tx, f))) redenen.push('vooruit');
+      if (fs.some((f) => B.andereFactuurGenoemd(tx, f, ref))) redenen.push('ander_nummer');
+      if (fids.some((id) => gekoppeld.get(id))) redenen.push('al_betaald');
+      if (fids.some((id) => elders.has(id))) redenen.push('andere_betaling');
+    }
+    if (!redenen.length) redenen.push('geen_match');
+    const details = Object.assign({}, json(v.details, {}) || {}, { vervallen_reden: redenen[0], vervallen_redenen: redenen });
+    const u = fdb.db.prepare("UPDATE voorstel SET status = 'vervallen', afgehandeld_door = 'bankcontrole', afgehandeld_op = ?, details = ? WHERE id = ? AND status = 'open'")
+      .run(wanneer, JSON.stringify(details), v.id);
+    if (!u.changes) continue;
+    n++;
+    D.audit(fdb, { wie: 'bankcontrole', wat: 'voorstel_vervallen', object_soort: 'voorstel', object_id: String(v.id), entiteit: v.entiteit || null,
+      voor: { status: 'open' }, na: { status: 'vervallen', redenen }, wanneer });
+  }
+  return n;
 }
 function signaalInvoegen(fdb, s, wanneer) {
   const lev = s.leverancier && fdb.db.prepare('SELECT 1 FROM leverancier WHERE id = ?').get(s.leverancier) ? s.leverancier : null;
@@ -1544,11 +1638,25 @@ function afschriftKlaarzetten(fdb, r, invoer, o) {
   });
 }
 // POST /facturen-ronde: de back-up (VACUUM INTO, 14 dagen); de koerier (facturen-koerier.js) roept dit aan als backupNodig.
+// Na een wijziging in de koppelregels (facturen-bank.js) beoordeelt de eerstvolgende ronde de stand één keer opnieuw, ná de back-up: zo
+// vervallen voorstellen die onder de oude regels ontstonden zonder te wachten op een nieuwe bankupload (wv1317). Mislukt het, dan
+// probeert de volgende ronde het opnieuw (de meta-sleutel wordt pas gezet na een geslaagde transactie).
+const BANK_REGELS = 'wv1317';
 function ronde(fdb, o) {
   const nu = o.nu || Date.now();
   const uit = { ok: true };
   try { const b = D.backup(fdb, { nu }); uit.backup = { ok: true, dag: b.dag, bytes: b.bytes, verwijderd: b.verwijderd.length }; }
   catch (e) { uit.ok = false; uit.backup = { ok: false, fout: kort(e && e.code || 'fout', 60) }; }
+  if (uit.backup.ok && D.metaLees(fdb, 'bank_regels') !== BANK_REGELS) {
+    try {
+      uit.herbeoordeling = D.transactie(fdb, function () {
+        const c = bankcontroleToepassen(fdb, nu);
+        D.metaZet(fdb, 'bank_regels', BANK_REGELS);
+        D.audit(fdb, { wie: 'bankcontrole', wat: 'herbeoordeling', object_soort: 'meta', object_id: 'bank_regels', na: Object.assign({ regels: BANK_REGELS }, c), wanneer: nuIso(nu) });
+        return Object.assign({ ok: true, regels: BANK_REGELS }, c);
+      });
+    } catch (e) { uit.herbeoordeling = { ok: false, fout: kort(e && (e.code || e.message) || 'fout', 80) }; }
+  }
   return uit;
 }
 

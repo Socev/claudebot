@@ -611,18 +611,19 @@ const M5_VERVANG = [
   ['bank_bestand', "bank IN ('ABN','ING')", "bank IN ('ABN','ING','TRIODOS')"],
   ['bank_transactie', 'formaat IN ' + IN(FORMAAT_V1), 'formaat IN ' + IN(L.formaat)],
 ];
-function M5(db, vervang) {
+function M5(db, vervang, code) {
+  code = code || 'migratie_5';
   const tel = (hooi, naald) => hooi.split(naald).length - 1;
   const nieuw = new Map(), gewijzigd = new Set();
   for (const [tabel, oud, wordt] of vervang || M5_VERVANG) {
     if (!nieuw.has(tabel)) {
       const r = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(tabel);
-      if (!r || !r.sql) throw new DbFout('migratie_5', 'tabel ' + tabel + ' niet gevonden');
+      if (!r || !r.sql) throw new DbFout(code, 'tabel ' + tabel + ' niet gevonden');
       nieuw.set(tabel, r.sql);
     }
     const sql = nieuw.get(tabel);
     if (tel(sql, oud) === 0 && tel(sql, wordt) === 1) continue;   // al verruimd
-    if (tel(sql, oud) !== 1) throw new DbFout('migratie_5', tabel + ': CHECK-tekst ' + oud.slice(0, 40) + ' staat er ' + tel(sql, oud) + ' keer');
+    if (tel(sql, oud) !== 1) throw new DbFout(code, tabel + ': CHECK-tekst ' + oud.slice(0, 40) + ' staat er ' + tel(sql, oud) + ' keer');
     nieuw.set(tabel, sql.replace(oud, wordt));
     gewijzigd.add(tabel);
   }
@@ -632,24 +633,37 @@ function M5(db, vervang) {
   db.exec('PRAGMA writable_schema = ON');
   try {
     const zet = db.prepare("UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = ?");
-    for (const [tabel, sql] of nieuw) if (zet.run(sql, tabel).changes !== 1) throw new DbFout('migratie_5', tabel + ': schema niet bijgewerkt');
+    for (const [tabel, sql] of nieuw) if (zet.run(sql, tabel).changes !== 1) throw new DbFout(code, tabel + ': schema niet bijgewerkt');
     db.exec('PRAGMA schema_version = ' + (versie + 1));
   } finally { db.exec('PRAGMA writable_schema = OFF'); }
   const ic = db.prepare('PRAGMA integrity_check').all().map((x) => x.integrity_check);
-  if (ic.length !== 1 || ic[0] !== 'ok') throw new DbFout('migratie_5', 'integrity_check: ' + ic.slice(0, 3).join('; '));
+  if (ic.length !== 1 || ic[0] !== 'ok') throw new DbFout(code, 'integrity_check: ' + ic.slice(0, 3).join('; '));
   for (const tabel of nieuw.keys()) {
     db.prepare('SELECT * FROM ' + tabel + ' LIMIT 1').all();
     const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(tabel).sql;
-    if (sql !== nieuw.get(tabel)) throw new DbFout('migratie_5', tabel + ': schema na het bijwerken niet zoals bedoeld');
+    if (sql !== nieuw.get(tabel)) throw new DbFout(code, tabel + ': schema na het bijwerken niet zoals bedoeld');
   }
 }
+
+/*
+ * wv1317 (David 26-10-2026, koppelvoorstellen): een voorstel dat bij herbeoordeling niet meer klopt (betaling vóór de factuurdatum, ander
+ * factuurnummer, factuur al betaald) gaat niet stil weg en ook niet op 'afgewezen' (dat zei David niet), maar op 'vervallen' met de reden in
+ * details en een auditrij. Zelfde weg als M5 (writable_schema, één vervanging, al verruimd = overslaan). LET OP terugrol: een release van
+ * vóór wv1317 opent deze database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 6` — maar
+ * alleen als er geen voorstel op 'vervallen' staat (de oude code kent die status niet in zijn lijsten; de CHECK hindert hem niet).
+ */
+const M6_VERVANG = [
+  ['voorstel', "status IN ('open','bevestigd','afgewezen')", "status IN ('open','bevestigd','afgewezen','vervallen')"],
+];
+function M6(db, vervang) { return M5(db, vervang || M6_VERVANG, 'migratie_6'); }
 
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
   { versie: 3, naam: 'smalle ingang: fac-gebruiker alleen praktijkmanager (wv856)', sql: M3 },
   { versie: 4, naam: 'bankhistorie definitief, factuurarchief, startdatum (wv944)', sql: M4 },
-  { versie: 5, naam: 'Triodos: bank TRIODOS en formaat triodos_csv in de CHECKs (wv1299)', fn: M5 },
+  { versie: 5, naam: 'Triodos: bank TRIODOS en formaat triodos_csv in de CHECKs (wv1299)', fn: (db) => M5(db) },
+  { versie: 6, naam: "voorstel: status 'vervallen' bij herbeoordeling (wv1317)", fn: (db) => M6(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1195,7 +1209,7 @@ function health(fdb) {
 }
 
 module.exports = {
-  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5,
+  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M6_VERVANG, _M6: M6,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
   terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,

@@ -581,3 +581,21 @@ test('prestaties: overzicht met 1.500 facturen en 30.000 regels blijft onder 3 s
   assert.ok(schaal < 3.2, 'dubbel zoveel regels kost ' + schaal.toFixed(2) + '× zoveel tijd (grens 3,2; ' + meting + ')');
   assert.ok(ijk < 3, 'overzicht kost ' + ijk.toFixed(2) + '× het ijkwerk (grens 3; ' + meting + ')');
 });
+
+test('wv1317 bedragpatroon: band = 10e–90e percentiel plus de laatste drie (indexatie hoort erbij), uitschieter erbuiten; < 3 betalingen geen patroon', () => {
+  const huur = [];
+  const maand = (i) => { const d = new Date(Date.UTC(2025, 10 + i, 27)); return d.toISOString().slice(0, 10); };
+  for (let i = 0; i < 11; i++) huur.push({ id: 'h' + i, boekdatum: maand(i), bedrag_centen: -(i < 3 ? 825996 : i < 9 ? 833655 : 852221) });
+  huur.push({ id: 'los', boekdatum: '2026-01-22', bedrag_centen: -212647 });   // losse naheffing: valt buiten de band
+  const p = V.bedragPatroon(huur, '2026-10-26', 852221);
+  assert.equal(p.aantal, 12);
+  assert.equal(p.laag_centen, 825996); assert.equal(p.hoog_centen, 852221);
+  assert.equal(p.oordeel, 'binnen');
+  assert.equal(V.bedragPatroon(huur, '2026-10-26', 1000000).oordeel, 'boven');
+  assert.equal(V.bedragPatroon(huur, '2026-10-26', 300000).oordeel, 'onder');
+  assert.equal(V.bedragPatroon(huur, '2026-10-26', null).oordeel, null);
+  // de regel zelf telt niet mee; ouder dan 12 maanden en bijschrijvingen tellen niet
+  assert.equal(V.bedragPatroon(huur, '2026-10-26', 852221, { zonder: 'h10' }).aantal, 11);
+  assert.equal(V.bedragPatroon([{ id: 'a', boekdatum: '2024-01-01', bedrag_centen: -100 }, { id: 'b', boekdatum: '2026-10-01', bedrag_centen: -100 }, { id: 'c', boekdatum: '2026-10-02', bedrag_centen: 100 }], '2026-10-26', 100), null);
+  assert.equal(V.bedragPatroon(huur, 'gisteren', 1), null);
+});

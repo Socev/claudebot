@@ -94,6 +94,33 @@ function profielVan(k, lijst) {
   };
 }
 
+// ───────────────────────────── bedragpatroon (wv1317) ─────────────────────────────
+
+/*
+ * Gebruikelijke bandbreedte van de betalingen aan één tegenpartij (David 26-10-2026: "Wat is de gebruikelijke range, en waarbuiten is het
+ * afwijkend?"). lijst = afschrijvingen aan die tegenpartij (alle data mag mee; alleen de laatste 12 maanden tellen), vandaag = JJJJ-MM-DD,
+ * bedrag = het te beoordelen bedrag in centen (positief, mag ontbreken), opties.zonder = id van de regel zelf (telt niet mee).
+ * Band: 10e tot 90e percentiel (een losse uitschieter valt erbuiten), opgerekt tot de laatste drie betalingen (een indexatie of nieuwe
+ * maandprijs hoort er meteen bij); afwijkend = buiten de band met een marge van max(€ 5, 3 % van de mediaan). Minder dan drie betalingen:
+ * geen patroon (null). → { aantal, laag_centen, hoog_centen, mediaan_centen, marge_centen, frequentie, sinds, oordeel ('binnen'|'boven'|'onder'|null) }
+ */
+function bedragPatroon(lijst, vandaag, bedrag, opties) {
+  if (!isIsoDatum(vandaag)) return null;
+  const zonder = opties && opties.zonder;
+  const van = plusDagen(vandaag, -365);
+  const l = (lijst || []).filter((t) => !t.verwijderd_op && t.bedrag_centen < 0 && t.id !== zonder && isIsoDatum(t.boekdatum) && t.boekdatum >= van && t.boekdatum <= vandaag)
+    .sort((a, b) => (a.boekdatum < b.boekdatum ? -1 : a.boekdatum > b.boekdatum ? 1 : 0));
+  if (l.length < 3) return null;
+  const b = l.map((t) => -t.bedrag_centen), s = b.slice().sort((x, y) => x - y);
+  const pct = (p) => s[Math.floor(p * (s.length - 1))];
+  const laatste = b.slice(-3);
+  const laag = Math.min(pct(0.1), ...laatste), hoog = Math.max(pct(0.9), ...laatste);
+  const med = mediaan(b), marge = Math.max(500, Math.round(med * 0.03));
+  const x = Number.isSafeInteger(bedrag) ? Math.abs(bedrag) : null;
+  return { aantal: l.length, laag_centen: laag, hoog_centen: hoog, mediaan_centen: med, marge_centen: marge, frequentie: frequentieVan(l.map((t) => t.boekdatum)).soort,
+    sinds: l[0].boekdatum, oordeel: x === null ? null : x > hoog + marge ? 'boven' : x < laag - marge ? 'onder' : 'binnen' };
+}
+
 // ───────────────────────────── betaling van een factuur ─────────────────────────────
 
 function genormKenmerk(s) { return String(s || '').replace(/[\s.\-/]/g, '').toUpperCase(); }
@@ -282,6 +309,6 @@ function zoek(transacties, vraag) {
 }
 
 module.exports = {
-  tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan,
+  tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan, bedragPatroon,
   genormKenmerk, echtKenmerk, betalingVan, controles, zoek,
 };

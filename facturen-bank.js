@@ -559,6 +559,35 @@ function noemtFactuur(ref, f) {
   }
   return false;
 }
+// wv1317 (David 26-10-2026): een betaling ruim vóór de factuurdatum is geen betaling van die factuur, tenzij de omschrijving het nummer
+// noemt (stap 1). Gemeten op 153 zekere paren (kenmerk + bedrag) uit het FV2-archief: 2 vóór de factuurdatum (4 en 6 dagen), 0 meer
+// dan 7 dagen. Zo koppelde de huur van september en oktober aan de factuur van november (voorstel 1 en 2, 25-10).
+const VOORUIT_MARGE = 7;
+function vooruitBetaald(tx, f) { return !!(f.factuurdatum && isIsoDatum(f.factuurdatum) && dagenTussen(tx.boekdatum, f.factuurdatum) > VOORUIT_MARGE); }
+// Noemt de betaling een ánder factuurnummer? (1) na het woord factuur/factuurnummer/invoice/nota volgt een nummer dat dit factuurnummer
+// niet bevat (de bank knipt een omschrijving soms met spaties: "53. 73.00303", dus genormaliseerd vergelijken); (2) een los stuk uit
+// dezelfde nummerreeks (even lang, zelfde eerste helft, bv. 3.2026.00819 tegen 3.2026.00982). Dan is het een betaling van die andere factuur.
+const FACTUURWOORD = /\b(?:factuur(?:nummer|nr)?|fact(?:uur)?\.?\s*nr|invoice(?:\s*(?:no|nr|number))?|nota(?:nummer)?)\b\.?\s*[:#]?\s*([^\n]{0,40})/gi;
+function andereFactuurGenoemd(tx, f, ref) {
+  const n = normNummer(f.nummer);
+  if (!n || n.length < 4 || !/\d/.test(n)) return false;
+  ref = ref || referentieStukken(tx);
+  if (noemtFactuur(ref, f)) return false;
+  const tekst = [tx.omschrijving, tx.kenmerk].filter(Boolean).join(' ');
+  FACTUURWOORD.lastIndex = 0;
+  for (let m = FACTUURWOORD.exec(tekst); m; m = FACTUURWOORD.exec(tekst)) {
+    const rest = normNummer(m[1]) || '';
+    if (/\d/.test(rest.slice(0, 6)) && rest.length >= 4 && rest.indexOf(n) < 0) return true;
+  }
+  if (n.length >= 6) {
+    const helft = n.slice(0, Math.ceil(n.length / 2));
+    for (const s of ref.stukken) if (s !== n && s.length === n.length && /\d/.test(s) && s.slice(0, helft.length) === helft) return true;
+  }
+  return false;
+}
+// Mag deze factuur zonder genoemd nummer (IBAN + bedrag, incasso, valuta) bij deze betaling horen?
+function zonderNummerMogelijk(tx, f, ref) { return !vooruitBetaald(tx, f) && !andereFactuurGenoemd(tx, f, ref); }
+function voorstelSleutel(txId, facturen) { return 'voorstel:' + txId + '|' + facturen.slice().sort().join(','); }
 function kandidaat(methode, facturen, zekerheid, tx, extra) {
   return Object.assign({ methode, facturen: facturen.map((f) => f.id), zekerheid: rond(zekerheid), ter_bevestiging: zekerheid < AUTO_ZEKERHEID }, extra || {});
 }
@@ -599,7 +628,8 @@ function subsetSom(facturen, doel) {
  * Kandidaten voor één transactie, beste eerst. facturen = alle facturen van de entiteit die nog niet (helemaal) betaald gezien zijn.
  * Volgorde (§ 4.6): (1) kenmerk of factuurnummer in de omschrijving, (2) IBAN + exact bedrag, (3) incasso via incassant-id of IBAN met
  * tolerantie, (4) subset-som per IBAN (verzamelbetaling, factuur min creditnota; ≤ 20 open facturen), (5) valuta: tegenpartij + bedrag
- * ± 3 % (altijd ter bevestiging). Handmatig koppelen (6) doet een mens. Geen hard datumvenster: aflopende zekerheid.
+ * ± 3 % (altijd ter bevestiging). Handmatig koppelen (6) doet een mens. Geen hard datumvenster: aflopende zekerheid. Zonder genoemd
+ * nummer (2, 3, 5) nooit een factuur van ruim ná de betaling of als de betaling een ander factuurnummer noemt (wv1317).
  */
 function matchTransactie(tx, facturen, ctx) {
   const r = richtingVan(tx);
@@ -624,7 +654,8 @@ function matchTransactie(tx, facturen, ctx) {
   }
   // (2) IBAN + exact bedrag
   if (tegen) {
-    const vanIban = eur.filter((f) => (ibanNorm(f.iban) === tegen || (lt && lt.via === 'iban' && f.leverancier === lt.leverancier.id)) && teBetalen(f) === bedrag);
+    const vanIban = eur.filter((f) => (ibanNorm(f.iban) === tegen || (lt && lt.via === 'iban' && f.leverancier === lt.leverancier.id)) && teBetalen(f) === bedrag &&
+      zonderNummerMogelijk(tx, f, ref));
     if (vanIban.length) {
       const g = opDatum(vanIban);
       // meer opeisbare facturen met hetzelfde bedrag: niet gokken welke (abonnement september of oktober?) — een mens kiest (diffreview
@@ -637,7 +668,7 @@ function matchTransactie(tx, facturen, ctx) {
   // (3) incasso met tolerantie
   if (tx.is_incasso && lt && r === 'af') {
     const l = lt.leverancier;
-    const vanLev = eur.filter((f) => f.leverancier === l.id && teBetalen(f) > 0);
+    const vanLev = eur.filter((f) => f.leverancier === l.id && teBetalen(f) > 0 && zonderNummerMogelijk(tx, f, ref));
     const binnen = vanLev.map((f) => ({ f, diff: Math.abs(teBetalen(f) - bedrag), tol: incassoTolerantie(l, teBetalen(f)) }))
       .filter((x) => x.diff <= x.tol).sort((a, b) => a.diff - b.diff || afstand(tx, a.f) - afstand(tx, b.f));
     if (binnen.length) {
@@ -651,7 +682,7 @@ function matchTransactie(tx, facturen, ctx) {
   }
   // (4) subset-som per IBAN (of incassant): verzamelbetaling, factuur min creditnota
   if (lt && (lt.via === 'iban' || lt.via === 'incassant')) {
-    const vanLev = opDatum(eur.filter((f) => f.leverancier === lt.leverancier.id)).slice(0, SUBSET_MAX);
+    const vanLev = opDatum(eur.filter((f) => f.leverancier === lt.leverancier.id && (!vooruitBetaald(tx, f) || noemtFactuur(ref, f)))).slice(0, SUBSET_MAX);
     const s = subsetSom(vanLev, bedrag);
     if (s) {
       const f0 = Math.min.apply(null, s.subset.map((f) => datumFactor(tx, f)));
@@ -664,7 +695,7 @@ function matchTransactie(tx, facturen, ctx) {
   // (5) vreemde valuta: alleen met een koers (van de factuur of van de beller), ± 3 %, altijd ter bevestiging
   if (lt && r === 'af') {
     const koersen = (ctx && ctx.koersen) || {};
-    for (const f of open.filter((x) => x.valuta && x.valuta !== tx.valuta && x.leverancier === lt.leverancier.id)) {
+    for (const f of open.filter((x) => x.valuta && x.valuta !== tx.valuta && x.leverancier === lt.leverancier.id && zonderNummerMogelijk(tx, x, ref))) {
       const verwacht = Number.isFinite(Number(f.incl_eur)) && f.incl_eur ? Number(f.incl_eur) : (koersen[f.valuta] ? Math.round(teBetalen(f) * Number(koersen[f.valuta])) : null);
       if (!verwacht) continue;
       if (Math.abs(bedrag - verwacht) <= Math.round(Math.abs(verwacht) * VALUTA_MARGE)) {
@@ -903,6 +934,7 @@ function bankcontrole(inv) {
   const uit = { koppelingen: [], voorstellen: [], uitzonderingen: [], betaalspoor: [], signalen: [], heropenen: [] };
   const signalen = [];
   const voorgesteld = new Set();
+  const wensen = [];
 
   // Ronde 1: alleen de zekere koppelingen (geborgde tegenpartij, ≥ 0,8, geen gelijkwaardig alternatief). Zo hangt "dubbel betaald" niet
   // af van de volgorde in het bestand: een incasso die maar net binnen de tolerantie valt, ziet in ronde 2 de exacte handbetaling al
@@ -983,18 +1015,29 @@ function bankcontrole(inv) {
         continue;
       }
     }
-    const kand = matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx);
-    if (kand.length) {
-      const k = kand[0];
-      const sleutel = 'voorstel:' + tx.id + '|' + k.facturen.slice().sort().join(',');
-      if (!afgewezen.has(sleutel)) {
-        const geborgd = k.facturen.every((fid) => fMap.has(fid) && tegenpartijGeborgd(tx, fMap.get(fid), ctx));
-        const alle = k.facturen.concat(k.alternatieven || []);
-        uit.voorstellen.push(Object.assign({ sleutel, transactie: tx.id }, k, { ter_bevestiging: true, tegenpartij_geborgd: geborgd, alleen_eigenaar: eigenaarVan(tx, alle) }));
-        alle.forEach((f) => voorgesteld.add(f));   // ook de alternatieven: een mens kiest, geen vals signaal ernaast
-        continue;
-      }
+    // wv1317: eerst alle wensen verzamelen; daarna krijgt elke factuur hooguit één open voorstel (de beste betaling, dan de dichtstbijzijnde)
+    const kand = matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx)
+      .map((k) => Object.assign({ sleutel: voorstelSleutel(tx.id, k.facturen) }, k)).filter((k) => !afgewezen.has(k.sleutel));
+    if (kand.length) { wensen.push({ tx, kand, basis }); continue; }
+    if (richtingVan(tx) === 'af' && dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));
+  }
+  const afstandVan = (w) => afstand(w.tx, fMap.get(w.kand[0].facturen[0]) || {});
+  wensen.sort((a, b) => b.kand[0].zekerheid - a.kand[0].zekerheid || afstandVan(a) - afstandVan(b) || (a.tx.boekdatum < b.tx.boekdatum ? -1 : a.tx.boekdatum > b.tx.boekdatum ? 1 : 0) ||
+    String(a.tx.id).localeCompare(String(b.tx.id)));
+  const bezet = new Set();
+  for (const { tx, kand, basis } of wensen) {
+    const k = kand.find((x) => x.facturen.every((fid) => !bezet.has(fid)));
+    if (k) {
+      const geborgd = k.facturen.every((fid) => fMap.has(fid) && tegenpartijGeborgd(tx, fMap.get(fid), ctx));
+      const alt = (k.alternatieven || []).filter((fid) => !bezet.has(fid) && !k.facturen.includes(fid));
+      const alle = k.facturen.concat(alt);
+      uit.voorstellen.push(Object.assign({ transactie: tx.id }, k, { alternatieven: alt.length ? alt : undefined, ter_bevestiging: true, tegenpartij_geborgd: geborgd,
+        alleen_eigenaar: eigenaarVan(tx, alle) }));
+      k.facturen.forEach((f) => bezet.add(f));
+      alle.forEach((f) => voorgesteld.add(f));   // ook de alternatieven: een mens kiest, geen vals signaal ernaast
+      continue;
     }
+    // elke kandidaat-factuur is al voorgesteld bij een betere betaling: deze afschrijving heeft (nog) geen eigen factuur
     if (richtingVan(tx) === 'af' && dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));
   }
 
@@ -1056,6 +1099,94 @@ function bankcontrole(inv) {
   return uit;
 }
 
+// ───────────────────────────── uitleg in gewone taal (wv1317) ─────────────────────────────
+
+/*
+ * Wat David akkordeert als hij op "Ja, koppel" drukt, in één zin, met het waarom en de zekerheid in woorden (David 26-10-2026: "Als ik ja
+ * geef op een koppeling, moet heel duidelijk zijn wat ik akkordeer"). v = { methode, zekerheid, tegenpartij_geborgd, verschil_centen?,
+ * verwacht_centen? }; tx = bankregel; facturen = [{ nummer, factuurdatum, vervaldatum, incl, valuta, leverancier_naam, iban }];
+ * alternatieven = idem; patroon = uitkomst van facturen-validatie.bedragPatroon (of null).
+ * → { zin, waarom: [..], let_op: [..], zekerheid_tekst }. Geen bedragen of namen buiten wat David in de App al ziet.
+ */
+function zekerheidTekst(z) {
+  return z >= 0.9 ? 'vrijwel zeker' : z >= 0.75 ? 'waarschijnlijk' : z >= 0.55 ? 'mogelijk: kijk even na' : 'twijfelachtig: kijk goed na';
+}
+function datumZin(tx, f) {
+  if (!f || !isIsoDatum(f.factuurdatum)) return null;
+  const d = dagenTussen(f.factuurdatum, tx.boekdatum);
+  if (d === 0) return 'betaald op de factuurdatum';
+  if (d > 0) return 'betaald ' + d + (d === 1 ? ' dag' : ' dagen') + ' na de factuurdatum';
+  return 'betaald ' + -d + (d === -1 ? ' dag' : ' dagen') + ' vóór de factuurdatum';
+}
+function voorstelUitleg(v, tx, facturen, alternatieven, patroon) {
+  facturen = (facturen || []).filter(Boolean);
+  const af = tx.bedrag_centen < 0;
+  const rek = tx.tegenpartij_iban ? ' (rekening ' + eind4(tx.tegenpartij_iban) + ')' : '';
+  const wie = (tx.tegenpartij_naam || 'een onbekende tegenpartij') + rek;
+  const levNaam = (f) => (f.leverancier_naam ? 'van ' + f.leverancier_naam : 'leverancier nog niet bekend');
+  const credit = (f) => f.soort === 'creditnota' || teBetalen(f) < 0;
+  const fTekst = (f) => (credit(f) ? 'creditnota ' : 'factuur ') + (f.nummer || 'zonder nummer') + ' (' + levNaam(f) + ', factuurdatum ' + dagNL(f.factuurdatum) + ', ' +
+    eurTekst(Math.abs(teBetalen(f))) + ')';
+  const wat = facturen.length > 1 ? 'betaling van ' + facturen.length + ' stukken samen: ' + facturen.map(fTekst).join('; ')
+    : facturen.length ? (credit(facturen[0]) ? 'terugbetaling van ' : 'betaling van ') + fTekst(facturen[0]) : 'een factuur';
+  const zin = (af ? 'Afschrijving van ' + dagNL(tx.boekdatum) + ' van ' + eurTekst(-tx.bedrag_centen) + ' aan ' : 'Bijschrijving van ' + dagNL(tx.boekdatum) + ' van ' +
+    eurTekst(tx.bedrag_centen) + ' van ') + wie + ' = ' + wat + '.';
+  const waarom = [];
+  const f0 = facturen[0] || {};
+  const zelfdeIban = !!(tx.tegenpartij_iban && f0.iban && ibanNorm(tx.tegenpartij_iban) === ibanNorm(f0.iban));
+  switch (v.methode) {
+    case 'kenmerk': waarom.push(v.reden ? 'het factuurnummer staat in de omschrijving van de betaling, maar het bedrag klopt niet' : 'het factuurnummer staat in de omschrijving van de betaling' +
+      (facturen.length > 1 ? ' en de facturen tellen precies op tot het bedrag' : ' en het bedrag klopt precies')); break;
+    case 'iban_bedrag': waarom.push((zelfdeIban ? 'zelfde rekeningnummer als op de factuur' : 'rekening van deze leverancier') + ' en precies hetzelfde bedrag'); break;
+    case 'incasso': waarom.push('incasso van deze leverancier' + (v.verschil_centen ? ', bedrag ' + eurTekst(Math.abs(v.verschil_centen)) + ' ' + (v.verschil_centen > 0 ? 'lager' : 'hoger') + ' dan de factuur (binnen de marge)' : ', zelfde bedrag')); break;
+    case 'subset': waarom.push('één betaling voor ' + facturen.length + ' facturen van deze leverancier; samen precies het bedrag' + (v.creditnota ? ' (een creditnota is verrekend)' : '')); break;
+    case 'valuta': waarom.push('factuur in vreemde valuta; omgerekend bedrag binnen 3 %'); break;
+    default: break;
+  }
+  const dz = datumZin(tx, f0);
+  if (dz) waarom.push(dz);
+  const let_op = [];
+  if ((alternatieven || []).length) let_op.push('er staat nog ' + (alternatieven.length === 1 ? 'een factuur' : alternatieven.length + ' facturen') + ' met hetzelfde bedrag open (' +
+    alternatieven.map((f) => f.nummer || 'zonder nummer').join(', ') + '); kies je Ja, dan hoort deze betaling bij ' + (f0.nummer || 'de eerste'));
+  if (!v.tegenpartij_geborgd && af) let_op.push(f0.leverancier_naam ? 'rekening ' + eind4(tx.tegenpartij_iban) + ' is nog niet als rekening van ' + f0.leverancier_naam + ' bevestigd'
+    : 'de leverancier van deze factuur is nog niet bekend; Ja koppelt alleen deze betaling aan deze factuur');
+  if (patroon && patroon.aantal) {
+    const band = eurTekst(patroon.laag_centen) + (patroon.hoog_centen !== patroon.laag_centen ? ' – ' + eurTekst(patroon.hoog_centen) : '');
+    const per = patroon.frequentie && FREQ_TEKST[patroon.frequentie] ? ' ' + FREQ_TEKST[patroon.frequentie] : '';
+    waarom.push('gebruikelijk aan deze rekening: ' + band + per + ' (' + patroon.aantal + ' betalingen in 12 maanden)');
+    if (patroon.oordeel === 'boven' || patroon.oordeel === 'onder') let_op.push('bedrag ligt ' + (patroon.oordeel === 'boven' ? 'boven' : 'onder') + ' het gebruikelijke (' + band + ')');
+  }
+  return { zin, waarom, let_op, zekerheid_tekst: zekerheidTekst(Number(v.zekerheid) || 0) };
+}
+const FREQ_TEKST = { week: 'per week', twee_weken: 'per twee weken', maand: 'per maand', twee_maanden: 'per twee maanden', kwartaal: 'per kwartaal', halfjaar: 'per half jaar', jaar: 'per jaar' };
+
+/*
+ * "Wat we deze maand leerden" gegroepeerd en in gewone taal (wv1317: 200 losse regels "Afschrijving zonder factuur: historie_voor_start").
+ * groep = { soort, titel, afhandeling, les, aantal }. Interne codes komen nooit in de tekst.
+ */
+const AFHANDELING_TEKST = {
+  historie_voor_start: (n) => n + (n === 1 ? ' afschrijving' : ' afschrijvingen') + ' van vóór de start van de App zonder factuur: genegeerd (oude historie).',
+  transactie_verwijderd: (n) => n + (n === 1 ? ' melding verviel' : ' meldingen vervielen') + ': de bankregel was dubbel binnengekomen en is weggehaald.',
+};
+function leerRegel(g) {
+  const n = Number(g.aantal) || 1;
+  if (g.les) return n > 1 ? g.les + ' (' + n + '×)' : g.les;
+  if (AFHANDELING_TEKST[g.afhandeling]) return AFHANDELING_TEKST[g.afhandeling](n);
+  const knop = g.soort && SIGNALEN[g.soort] && SIGNALEN[g.soort].knoppen[g.afhandeling];
+  return (g.titel || 'Melding') + ': ' + (knop ? '"' + knop.label + '"' : 'afgehandeld') + (n > 1 ? ' (' + n + '×)' : '') + '.';
+}
+const VERVAL_TEKST = {
+  vooruit: 'de betaling lag ruim vóór de factuurdatum',
+  ander_nummer: 'de betaling noemt een ander factuurnummer',
+  al_betaald: 'de factuur is al aan een andere betaling gekoppeld',
+  andere_betaling: 'een betere betaling kreeg deze factuur',
+  weg: 'de bankregel of factuur is er niet meer',
+  geen_match: 'bij herbeoordeling past de betaling niet meer bij de factuur',
+};
+function vervalRegel(reden, n) {
+  return n + (n === 1 ? ' koppelvoorstel verviel' : ' koppelvoorstellen vervielen') + ': ' + (VERVAL_TEKST[reden] || VERVAL_TEKST.geen_match) + '.';
+}
+
 module.exports = {
   BankWeigering, FORMATEN, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
   // parsers
@@ -1064,4 +1195,6 @@ module.exports = {
   uitzonderingVoor, uitzonderingPast, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
   // signalen
   maakSignaal, signaalSleutel, afhandelSignaal, terugvraagTekst,
+  // uitleg (wv1317)
+  VOORUIT_MARGE, vooruitBetaald, andereFactuurGenoemd, referentieStukken, voorstelSleutel, voorstelUitleg, zekerheidTekst, leerRegel, vervalRegel, VERVAL_TEKST,
 };

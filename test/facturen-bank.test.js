@@ -917,3 +917,96 @@ test('natoets #6/#7: bestand 10 is jonger dan bestand 9; de weg te halen post kr
   assert.equal(s.details.te_verwijderen, 'nieuw');
   assert.deepEqual(r.signalen.filter((x) => x.soort === 'geen_factuur').map((x) => x.transacties[0]), ['oud']);
 });
+
+// ═════════════════════════════ wv1317: koppelvoorstellen kloppen en zeggen wat David akkordeert ═════════════════════════════
+
+test('wv1317 huurpatroon: betalingen van september en oktober (elk met een eigen factuurnummer) horen niet bij de huurfactuur van november', () => {
+  const nov = () => fac({ id: 'hnov', leverancier: null, nummer: '3.2026.00982', incl: 852221, iban: LEV.VREEMD, factuurdatum: '2026-11-01', vervaldatum: '2026-11-01', status: 'te_beoordelen', betaalspoor: null });
+  const sep = tx({ boekdatum: '2026-08-27', bedrag_centen: -852221, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Verhuurder Proef', omschrijving: 'Factuurnummer 3.2026.00689', kenmerk: 'NOTPROVIDED' });
+  const okt = tx({ boekdatum: '2026-10-01', bedrag_centen: -852221, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Verhuurder Proef', omschrijving: 'Factuurnummer 3.2026.00819', kenmerk: 'NOTPROVIDED' });
+  const r = controle({ transacties: [sep, okt], facturen: [nov()] });
+  assert.deepEqual(r.voorstellen, []); assert.deepEqual(r.koppelingen, []);
+  assert.deepEqual(soorten(r), ['geen_factuur', 'geen_factuur']);
+  // ook zonder omschrijving: 31 dagen vóór de factuurdatum is geen betaling van die factuur
+  const kaal = tx({ boekdatum: '2026-10-01', bedrag_centen: -852221, tegenpartij_iban: LEV.VREEMD });
+  assert.equal(B.matchTransactie(kaal, [nov()], { leveranciers: LEVS }).length, 0);
+  // binnen de marge (4 dagen vóór) wel, als voorstel (leverancier onbekend = niet geborgd)
+  const op = tx({ boekdatum: '2026-10-28', bedrag_centen: -852221, tegenpartij_iban: LEV.VREEMD });
+  const r2 = controle({ vandaag: '2026-11-10', transacties: [op], facturen: [nov()] });
+  assert.deepEqual(r2.voorstellen.map((v) => [v.transactie, v.facturen[0], v.methode]), [[op.id, 'hnov', 'iban_bedrag']]);
+  // vooruitbetaling mét het nummer in de omschrijving blijft gewoon gevonden
+  const vooruit = tx({ boekdatum: '2026-09-20', bedrag_centen: -852221, tegenpartij_iban: LEV.VREEMD, omschrijving: 'Factuurnummer 3.2026.00982 vooruit' });
+  assert.equal(B.matchTransactie(vooruit, [nov()], { leveranciers: LEVS })[0].methode, 'kenmerk');
+  assert.equal(B.VOORUIT_MARGE, 7);
+});
+
+test('wv1317 ander factuurnummer genoemd (ook door de bank geknipt, of een los nummer uit dezelfde reeks) → geen IBAN+bedrag-kandidaat', () => {
+  const f = { nummer: '3.2026.00982' };
+  assert.equal(B.andereFactuurGenoemd({ omschrijving: 'Factuurnummer 3.2026.00819' }, f), true);
+  assert.equal(B.andereFactuurGenoemd({ omschrijving: 'Factuurnummer : 3.2026.00308' }, f), true);
+  assert.equal(B.andereFactuurGenoemd({ omschrijving: '3.2026.00192' }, f), true);
+  assert.equal(B.andereFactuurGenoemd({ omschrijving: 'Factuurnummer 3.2026.00982' }, f), false);
+  assert.equal(B.andereFactuurGenoemd({ omschrijving: 'Factuurnummer 53. 73.00303' }, { nummer: '53.73.00303' }), false);
+  assert.equal(B.andereFactuurGenoemd({ omschrijving: 'Factuurnummer 53. 73.00303' }, { nummer: '53.73.00573' }), true);
+  assert.equal(B.andereFactuurGenoemd({ omschrijving: 'factuur van september' }, f), false);
+  assert.equal(B.andereFactuurGenoemd({ omschrijving: 'huur kantoor' }, f), false);
+  assert.equal(B.andereFactuurGenoemd({ omschrijving: 'Factuur 9999' }, { nummer: '12' }), false);   // te kort nummer: geen oordeel
+  const fa = fac({ id: 'an', leverancier: null, nummer: 'R-2026-0412', incl: 5000, iban: LEV.VREEMD, factuurdatum: '2026-10-01', vervaldatum: '2026-10-15', status: 'te_beoordelen', betaalspoor: null });
+  assert.equal(B.matchTransactie(tx({ boekdatum: '2026-10-05', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD, omschrijving: 'Invoice R-2026-0399' }), [fa], {}).length, 0);
+  assert.equal(B.matchTransactie(tx({ boekdatum: '2026-10-05', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD, omschrijving: 'betaling' }), [fa], {})[0].methode, 'iban_bedrag');
+});
+
+test('wv1317 één open voorstel per factuur: de dichtstbijzijnde betaling krijgt hem; maandreeks koppelt per periode, zonder valse alternatieven', () => {
+  const e = fac({ id: 'e1', leverancier: null, nummer: 'E-1', incl: 5000, iban: LEV.VREEMD, factuurdatum: '2026-09-01', vervaldatum: '2026-09-15', status: 'te_beoordelen', betaalspoor: null });
+  const t1 = tx({ boekdatum: '2026-09-14', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD });
+  const t2 = tx({ boekdatum: '2026-10-10', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD });
+  const r = controle({ transacties: [t2, t1], facturen: [e] });
+  assert.deepEqual(r.voorstellen.map((v) => [v.transactie, v.facturen[0]]), [[t1.id, 'e1']]);
+  assert.deepEqual(r.signalen.filter((s) => s.soort === 'geen_factuur').map((s) => s.transacties[0]), [t2.id]);
+  // maandreeks: september en oktober, zelfde bedrag
+  const sep = fac({ id: 'ms', leverancier: null, nummer: 'M-09', incl: 7000, iban: LEV.VREEMD, factuurdatum: '2026-09-01', vervaldatum: '2026-09-15', status: 'te_beoordelen', betaalspoor: null });
+  const okt = fac({ id: 'mo', leverancier: null, nummer: 'M-10', incl: 7000, iban: LEV.VREEMD, factuurdatum: '2026-10-01', vervaldatum: '2026-10-15', status: 'te_beoordelen', betaalspoor: null });
+  const ps = tx({ boekdatum: '2026-09-03', bedrag_centen: -7000, tegenpartij_iban: LEV.VREEMD });
+  const po = tx({ boekdatum: '2026-10-03', bedrag_centen: -7000, tegenpartij_iban: LEV.VREEMD });
+  const m = controle({ transacties: [ps, po], facturen: [sep, okt] });
+  assert.deepEqual(m.voorstellen.map((v) => [v.transactie, v.facturen[0]]).sort(), [[ps.id, 'ms'], [po.id, 'mo']].sort());
+  assert.ok(m.voorstellen.every((v) => !v.alternatieven || !v.alternatieven.length), 'een al voorgestelde factuur is geen alternatief meer');
+  const fs = new Set(); for (const v of m.voorstellen) for (const f of v.facturen) { assert.ok(!fs.has(f), 'factuur twee keer voorgesteld'); fs.add(f); }
+});
+
+test('wv1317 uitleg: één zin met datum, bedrag, tegenpartij, rekening en factuur; waarom en zekerheid in woorden; nooit een "?"', () => {
+  const t = { boekdatum: '2026-10-28', bedrag_centen: -852221, tegenpartij_naam: 'Verhuurder Proef', tegenpartij_iban: LEV.VREEMD };
+  const u = B.voorstelUitleg({ methode: 'iban_bedrag', zekerheid: 0.95, tegenpartij_geborgd: false }, t,
+    [{ nummer: '3.2026.00982', factuurdatum: '2026-11-01', incl: 852221, iban: LEV.VREEMD, leverancier_naam: null }], [],
+    { aantal: 11, laag_centen: 825996, hoog_centen: 852221, frequentie: 'maand', oordeel: 'binnen' });
+  assert.equal(u.zin, 'Afschrijving van 28-10-2026 van € 8.522,21 aan Verhuurder Proef (rekening …' + LEV.VREEMD.slice(-4) + ') = betaling van factuur 3.2026.00982 ' +
+    '(leverancier nog niet bekend, factuurdatum 1-11-2026, € 8.522,21).');
+  assert.deepEqual(u.waarom, ['zelfde rekeningnummer als op de factuur en precies hetzelfde bedrag', 'betaald 4 dagen vóór de factuurdatum',
+    'gebruikelijk aan deze rekening: € 8.259,96 – € 8.522,21 per maand (11 betalingen in 12 maanden)']);
+  assert.equal(u.zekerheid_tekst, 'vrijwel zeker');
+  assert.ok(u.let_op.some((x) => /leverancier van deze factuur is nog niet bekend/.test(x)));
+  assert.ok(!/\?/.test(JSON.stringify(u)));
+  const g = B.voorstelUitleg({ methode: 'iban_bedrag', zekerheid: 0.6, tegenpartij_geborgd: true }, t,
+    [{ nummer: 'A-2', factuurdatum: '2026-10-01', incl: 852221, iban: LEV.VREEMD, leverancier_naam: 'Verhuurder Proef B.V.' }], [{ nummer: 'A-1' }],
+    { aantal: 5, laag_centen: 100000, hoog_centen: 120000, frequentie: 'onregelmatig', oordeel: 'boven' });
+  assert.match(g.zin, /van Verhuurder Proef B\.V\./);
+  assert.ok(g.let_op.some((x) => /A-1/.test(x) && /bij A-2/.test(x)));
+  assert.ok(g.let_op.some((x) => /boven het gebruikelijke/.test(x)));
+  assert.equal(g.zekerheid_tekst, 'mogelijk: kijk even na');
+  const c = B.voorstelUitleg({ methode: 'subset', zekerheid: 0.88, tegenpartij_geborgd: true, creditnota: true }, Object.assign({}, t, { bedrag_centen: -40000 }),
+    [{ nummer: 'B-10', factuurdatum: '2026-10-01', incl: 50000, leverancier_naam: 'L' }, { nummer: 'CN-3', soort: 'creditnota', factuurdatum: '2026-10-05', incl: -10000, leverancier_naam: 'L' }], [], null);
+  assert.match(c.zin, /betaling van 2 stukken samen: factuur B-10 .*; creditnota CN-3 .*€ 100,00\)/);
+  assert.match(c.waarom[0], /creditnota is verrekend/);
+});
+
+test('wv1317 wat we leerden: gegroepeerd in gewone taal, geen interne codes', () => {
+  const h = B.leerRegel({ soort: 'geen_factuur', titel: 'Afschrijving zonder factuur', afhandeling: 'historie_voor_start', les: null, aantal: 257 });
+  assert.equal(h, '257 afschrijvingen van vóór de start van de App zonder factuur: genegeerd (oude historie).');
+  assert.equal(B.leerRegel({ soort: 'geen_factuur', afhandeling: 'factuur_uploaden', les: 'Les X.', aantal: 1 }), 'Les X.');
+  assert.equal(B.leerRegel({ soort: 'geen_factuur', afhandeling: 'factuur_uploaden', les: 'Les X.', aantal: 3 }), 'Les X. (3×)');
+  assert.equal(B.leerRegel({ soort: 'dubbel_betaald', titel: 'Dubbel betaald', afhandeling: 'geen_dubbel', les: null, aantal: 2 }), 'Dubbel betaald: "Geen dubbel" (2×).');
+  assert.equal(B.leerRegel({ soort: 'x', titel: 'Iets', afhandeling: 'interne_code_123', les: null, aantal: 1 }), 'Iets: afgehandeld.');
+  assert.equal(B.vervalRegel('vooruit', 2), '2 koppelvoorstellen vervielen: de betaling lag ruim vóór de factuurdatum.');
+  assert.equal(B.vervalRegel('onzin', 1), '1 koppelvoorstel verviel: bij herbeoordeling past de betaling niet meer bij de factuur.');
+  for (const r of [h, B.vervalRegel('ander_nummer', 1)]) assert.ok(!/_/.test(r), r);
+});

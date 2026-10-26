@@ -712,3 +712,72 @@ test('fouten lekken geen inhoud; onbekende route 404; iso-week klopt', () => {
   const bron = fs.readFileSync(path.join(ROOT, 'facturen.js'), 'utf8').split('\n').filter((r) => !/^\s*(\*|\/\/)/.test(r)).join('\n');
   assert.doesNotMatch(bron, /require\(['"`](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)['"`]\)|\bfetch\s*\(/);
 });
+
+// ───────────────────────────── wv1317: herbeoordeling, uitleg, wat we leerden ─────────────────────────────
+
+test('wv1317: een open voorstel dat niet meer klopt gaat op vervallen (reden + audit), niet stil weg; GET bank geeft uitleg en leerregels', () => {
+  const t = opzet();
+  const v = t.fdb.db.prepare("SELECT * FROM voorstel WHERE status = 'open' ORDER BY id LIMIT 1").get();
+  const fid = JSON.parse(v.facturen)[0];
+  const tb = t.fdb.db.prepare('SELECT boekdatum FROM bank_transactie WHERE id = ?').get(v.transactie).boekdatum;
+  // de factuur blijkt pas 40 dagen ná de betaling gedateerd (zoals de huur van november tegen de betaling van oktober)
+  t.fdb.db.prepare('UPDATE factuur SET factuurdatum = ?, vervaldatum = ? WHERE id = ?').run(K.plusDagen(tb, 40), K.plusDagen(tb, 40), fid);
+  const tel = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.ok(tel.voorstellen_vervallen >= 1, JSON.stringify(tel));
+  const na = t.fdb.db.prepare('SELECT * FROM voorstel WHERE id = ?').get(v.id);
+  assert.equal(na.status, 'vervallen');
+  assert.equal(na.afgehandeld_door, 'bankcontrole');
+  assert.equal(JSON.parse(na.details).vervallen_reden, 'vooruit');
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'voorstel_vervallen' AND object_id = ?", [String(v.id)]), 1);
+  // David kan er niet meer op drukken
+  assert.equal(t.call('POST', 'voorstel', { id: v.id, keuze: 'bevestig' }).status, 409);
+  const b = t.call('GET', 'bank').j;
+  assert.ok(b.geleerd_regels.some((g) => g.tekst === '1 koppelvoorstel verviel: de betaling lag ruim vóór de factuurdatum.' ||
+    /koppelvoorstellen vervielen: de betaling lag ruim vóór de factuurdatum/.test(g.tekst)), JSON.stringify(b.geleerd_regels));
+  for (const g of b.geleerd_regels) assert.ok(!/[a-z]_[a-z]/.test(g.tekst), 'interne code in ' + g.tekst);
+  assert.ok(!b.voorstellen.some((x) => x.id === v.id));
+  for (const x of b.voorstellen) {
+    assert.match(x.uitleg.zin, /^(Afschrijving|Bijschrijving) van \d{1,2}-\d{1,2}-\d{4} van € [\d.]+,\d\d (aan|van) .* = .*factuur/);
+    assert.ok(!/\?/.test(x.uitleg.zin), x.uitleg.zin);
+    assert.ok(x.uitleg.waarom.length >= 1 && typeof x.uitleg.zekerheid_tekst === 'string');
+  }
+  // dezelfde stand nog eens: niets nieuws te vervallen, geen tweede auditrij
+  const tel2 = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.equal(tel2.voorstellen_vervallen, 0);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'voorstel_vervallen' AND object_id = ?", [String(v.id)]), 1);
+  // klopt het weer (factuurdatum terug) en is de tegenpartij niet geborgd, dan gaat hetzelfde voorstel weer open (auditrij voorstel_heropend)
+  t.fdb.db.prepare('DELETE FROM leverancier_iban WHERE leverancier = (SELECT leverancier FROM factuur WHERE id = ?)').run(fid);
+  t.fdb.db.prepare('UPDATE factuur SET factuurdatum = ?, vervaldatum = ? WHERE id = ?').run(K.plusDagen(tb, -5), K.plusDagen(tb, 9), fid);
+  const tel3 = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.equal(t.fdb.db.prepare('SELECT status FROM voorstel WHERE sleutel = ?').get(v.sleutel).status, 'open', JSON.stringify(tel3));
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'voorstel_heropend' AND object_id = ?", [String(v.id)]), 1);
+  assert.equal(t.n('SELECT count(*) AS n FROM koppeling WHERE factuur = ?', [fid]), 0);
+});
+
+test('wv1317: de ronde beoordeelt na een regelwijziging één keer opnieuw (ná de back-up), daarna niet meer', () => {
+  const t = opzet();
+  const r = F.ronde(t.fdb, { nu: NU });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.herbeoordeling.ok, true, JSON.stringify(r.herbeoordeling));
+  assert.equal(D.metaLees(t.fdb, 'bank_regels'), 'wv1317');
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'herbeoordeling'"), 1);
+  const r2 = F.ronde(t.fdb, { nu: NU + 60000 });
+  assert.equal(r2.herbeoordeling, undefined);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'herbeoordeling'"), 1);
+});
+
+test('wv1317: factuurdetail toont het bedragpatroon van het IBAN (alleen met ≥ 3 betalingen in 12 maanden)', () => {
+  const t = opzet();
+  const f = t.f("iban IS NOT NULL AND incl > 0 AND entiteit = 'tolgaarde'");
+  assert.ok(f, 'zaad heeft een Tolgaarde-factuur met IBAN');
+  const leeg = t.call('GET', 'factuur/' + f.id).j;
+  const rek = t.fdb.db.prepare("SELECT id, iban FROM rekening WHERE entiteit = 'tolgaarde' LIMIT 1").get();
+  const best = t.fdb.db.prepare("SELECT id FROM bank_bestand LIMIT 1").get();
+  for (let i = 0; i < 4; i++) D.voegToe(t.fdb, 'bank_transactie', { id: 'b13170000000000' + i, bestand: best.id, rekening: rek.id, entiteit: 'tolgaarde', eigen_iban: rek.iban,
+    boekdatum: K.plusDagen('2026-10-01', -30 * i), bedrag_centen: -f.incl, valuta: 'EUR', tegenpartij_iban: K.ibanNorm(f.iban), entry_ref: 'wv1317-' + i, formaat: 'abn_mt940', aangemaakt_op: '2026-10-22T10:00:00Z' });
+  const p = t.call('GET', 'factuur/' + f.id).j.bedragpatroon;
+  assert.ok(p && p.aantal >= 4, JSON.stringify(p));
+  assert.equal(p.oordeel, 'binnen');
+  assert.equal(p.rekening, '…' + K.ibanNorm(f.iban).slice(-4));
+  assert.ok(leeg.bedragpatroon === null || leeg.bedragpatroon.aantal < p.aantal);
+});

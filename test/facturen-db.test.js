@@ -174,8 +174,8 @@ test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/trio
   const dir = map('m5');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.deepEqual(f.toegepast, [5]);
-  assert.equal(f.schema, 5);
+  assert.deepEqual(f.toegepast, [5, 6]);
+  assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
   assert.equal(f.db.prepare("SELECT count(*) AS n FROM bank_transactie WHERE entry_ref = 'r-oud'").get().n, 1);
@@ -232,7 +232,7 @@ test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt vol
   assert.deepEqual(tabelSql(db), voor);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   db.close();
-  const f = D.open(dir); assert.deepEqual(f.toegepast, [5]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
 });
 
 test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {
@@ -241,11 +241,56 @@ test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt 
   const na = tabelSql(f.db);
   f.db.exec('DELETE FROM schema_migratie WHERE versie = 5');
   D.sluit(f);
-  const r = D.open(dir, { alleenLezen: true }); assert.equal(r.schema, 4); D.sluit(r);
+  const r = D.open(dir, { alleenLezen: true }); assert.equal(r.schema, 6);   // max(versie): 6 staat er nog D.sluit(r);
   const f2 = D.open(dir);
   assert.deepEqual(f2.toegepast, [5]);
   assert.deepEqual(tabelSql(f2.db), na);
   D.sluit(f2);
+});
+
+test("migratie 6 (wv1317): voorstel krijgt status 'vervallen' (met afgehandeld_door/op), onzin blijft geweigerd; schema 4 → 6 = nieuw aangemaakt", () => {
+  const voorstelSql = (db) => db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'voorstel'").get().sql;
+  const dir = map('m6');
+  dbOpSchema4(dir).close();
+  const f = D.open(dir);
+  assert.equal(f.schema, 6);
+  assert.ok(voorstelSql(f.db).includes("'vervallen'"));
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  const tx = f.db.prepare('SELECT id FROM bank_transactie LIMIT 1').get();
+  assert.ok(tx, 'schema-4-helper heeft een bankregel');
+  const zet = (sleutel, status, door) => f.db.prepare("INSERT INTO voorstel (sleutel, transactie, facturen, status, aangemaakt_op, afgehandeld_door, afgehandeld_op) VALUES (?, ?, '[]', ?, ?, ?, ?)")
+    .run(sleutel, tx.id, status, iso(NU), door, door ? iso(NU) : null);
+  zet('v1', 'vervallen', 'bankcontrole');
+  gooit(() => zet('v2', 'vervallen', null), /CHECK/);
+  gooit(() => zet('v3', 'weg', 'bankcontrole'), /CHECK/);
+  const gemigreerd = voorstelSql(f.db);
+  D.sluit(f);
+  const nieuw = D.open(map('m6-nieuw'));
+  assert.equal(voorstelSql(nieuw.db), gemigreerd);
+  D.sluit(nieuw);
+  const f2 = D.open(dir); assert.deepEqual(f2.toegepast, []); D.sluit(f2);
+});
+
+test('migratie 6 (wv1317): afwijkende CHECK-tekst → weigeren en volledig terugrollen; al verruimd zonder rij → opnieuw toepassen verandert niets', () => {
+  const dir = map('m6-mis');
+  const f = D.open(dir);
+  f.db.exec('DELETE FROM schema_migratie WHERE versie = 6');
+  const v = f.db.prepare('PRAGMA schema_version').get().schema_version;
+  f.db.exec('PRAGMA writable_schema = ON');
+  f.db.prepare("UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = 'voorstel'").run("status IN ('open','bevestigd','afgewezen','vervallen')", "status IN ('open','afgewezen','bevestigd')");
+  f.db.exec('PRAGMA schema_version = ' + (v + 1)); f.db.exec('PRAGMA writable_schema = OFF');
+  D.sluit(f);
+  gooit(() => D.open(dir), /migratie_6|staat er 0 keer/);
+  const r = D.open(dir, { alleenLezen: true }); assert.equal(r.schema, 5); D.sluit(r);
+  const dir2 = map('m6-weer');
+  const g = D.open(dir2);
+  const na = g.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'voorstel'").get().sql;
+  g.db.exec('DELETE FROM schema_migratie WHERE versie = 6');
+  D.sluit(g);
+  const g2 = D.open(dir2);
+  assert.deepEqual(g2.toegepast, [6]);
+  assert.equal(g2.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'voorstel'").get().sql, na);
+  D.sluit(g2);
 });
 
 // ───────────────────────────── Privé nooit naar de boekhouder ─────────────────────────────
