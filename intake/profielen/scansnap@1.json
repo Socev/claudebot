@@ -1,0 +1,57 @@
+{
+ "profiel": "scansnap",
+ "versie": 1,
+ "omschrijving": "Eén scan van Davids ScanSnap (Google Drive, Mijn Drive/ScanSnap), opgehaald door de pod-tik in scansnap.js (wv1343). Alleen intern aan te leveren, blijft op de pod (niet in de vault, niet offsite) tot David op zijn Voor jou-kaart kiest wat ermee moet; daarna 14 dagen.",
+ "bronnen": [
+  "scanner:scansnap"
+ ],
+ "bron_id": {
+  "vorm": "^[A-Za-z0-9_-]{20,100}$",
+  "uitleg": "Google Drive-bestands-ID"
+ },
+ "herzienbaar": false,
+ "alleen_intern": true,
+ "bewaren": "tot_keuze",
+ "meta": {
+  "drive_tijd": {
+   "type": "tijd",
+   "verplicht": true
+  },
+  "map": {
+   "type": "keuze",
+   "waarden": [
+    "ScanSnap"
+   ],
+   "verplicht": true
+  },
+  "paginas": {
+   "type": "geheel",
+   "min": 0,
+   "verplicht": false
+  },
+  "md5": {
+   "type": "tekst",
+   "vorm": "^[0-9a-f]{32}$",
+   "verplicht": false
+  }
+ },
+ "onderdelen": {
+  "origineel": {
+   "min": 1,
+   "max": 1,
+   "mime": [
+    "application/pdf",
+    "image/jpeg"
+   ],
+   "max_mb": 25
+  }
+ },
+ "privacy": {
+  "access_context": "strikt_prive"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "scansnap.js (kaart in Voor jou)",
+  "Socev (knopbeurt na Davids keuze)"
+ ]
+}

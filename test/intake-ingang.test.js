@@ -184,7 +184,8 @@ test('profielen: 8 stuks, elk met voorbeeld, weigering en rondreis naar de huidi
   const o = await omgeving();
   try {
     const g = gevallen();
-    assert.deepStrictEqual(g.map((x) => x.profiel).sort(), Array.from(o.ing._profielen.keys()).sort());
+    // alleen-interne profielen (scansnap@1, wv1343) hebben geen routesleutel en geen Drive-plek: die toetst test/scansnap.sh
+    assert.deepStrictEqual(g.map((x) => x.profiel).sort(), Array.from(o.ing._profielen.keys()).filter((k) => o.ing._profielen.get(k).alleen_intern !== true).sort());
     for (const x of g) {
       const w = x.env(); const reden = x.weiger(w);
       const rw = await post(o, x.sleutel, w);
@@ -620,7 +621,7 @@ test('telling en info: alleen aantallen, nooit inhoud of sleutels', async () => 
     const t = o.ing.telling('2026-10-24T00:00:00Z', '2026-10-27T00:00:00Z');
     assert.strictEqual(t.per_bron.signal.aanleveringen, 2); assert.strictEqual(t.per_bron.signal.dubbel, 1);
     const i = o.ing.info();
-    assert.strictEqual(i.sleutels, 9); assert.strictEqual(i.profielen.length, 8); assert.strictEqual(i.marker, 'tellen');
+    assert.strictEqual(i.sleutels, 9); assert.strictEqual(i.profielen.length, 9); assert.strictEqual(i.marker, 'tellen');
     const alles = JSON.stringify(t) + JSON.stringify(i);
     for (const k of Object.values(K)) assert.ok(!alles.includes(k) && !alles.includes(sha(k)));
     assert.ok(!alles.includes('Proefgroep'));

@@ -773,9 +773,13 @@ function maak(o) {
       const uit = o.marker.beoordeel({ teksten, bijlagenamen: namen, onderwerp: typeof meta.onderwerp === 'string' ? meta.onderwerp : '',
         afzender: typeof meta.van === 'string' ? meta.van : '', leesbaar: onleesbaar ? false : undefined }, {});
       const patient = !uit.tegenhouden ? 'geen' : (uit.regel === 6 ? 'niet_te_lezen' : 'gemarkeerd');
+      // wv1343: een profiel met bewaren 'tot_keuze' (scansnap@1) houdt zijn blobs alleen op de pod, zonder termijn, tot David kiest
+      // (bewaarNa zet dan de termijn); de bron is dan al uit Drive (Opus-review wv1343 MOET 1)
+      const totKeuze = !!(profielen.get(s.profiel) && profielen.get(s.profiel).bewaren === 'tot_keuze');
       tx(function () {
         q.marker.run(patient, JSON.stringify(uit.soorten || []), uit.versie || null, nuIso(nu()), stukId);
         for (const d of delen) {
+          if (totKeuze) { db.prepare('UPDATE blob SET offsite = 0 WHERE sha256 = ?').run(d.sha256); continue; }
           if (patient === 'geen') {
             // offsite alleen als geen enkel stuk met deze bytes gemarkeerd of onleesbaar is; bewaren doet de blob hoe dan ook (een ongemarkeerd stuk heeft hem)
             const gem = db.prepare(`SELECT 1 FROM onderdeel o JOIN stuk s ON s.stuk_id = o.stuk_id WHERE o.sha256 = ? AND s.marker_patient IN ('gemarkeerd', 'niet_te_lezen') LIMIT 1`).get(d.sha256);
@@ -861,6 +865,7 @@ function maak(o) {
     const t = toetsEnvelop(env, profielen, sleutel, soorten);
     if (!t.ok) return weiger(t.status, t.reden);
     const { profiel, delen, vrij, meta } = t;
+    if (profiel.alleen_intern === true && sleutel.intern !== true) return weiger(403, 'profiel_alleen_intern');   // wv1343: nooit via een routesleutel
     spoor.bron = env.bron;
     const a = isObj(env.aanlevering) ? env.aanlevering : {};
     spoor.wf = a.workflow; spoor.ex = a.execution; spoor.kn = a.knoop;
@@ -930,6 +935,7 @@ function maak(o) {
     spoor.bron = s.bron;
     // de sleutel moet dit profiel en deze bron mogen (een andere route kan geen bytes in andermans stuk zetten)
     if (!sleutel.profielen.includes(s.profiel) || !sleutel.bronnen.includes(s.bron)) return weiger(403, 'profiel_niet_voor_deze_sleutel');
+    if (profielen.get(s.profiel) && profielen.get(s.profiel).alleen_intern === true && sleutel.intern !== true) return weiger(403, 'profiel_alleen_intern');
     const d = q.deel.get(stukId, deelCode);
     if (!d) return weiger(404, 'deel_onbekend');
     if (d.binnen && blobAanwezig(d.sha256)) {
@@ -994,6 +1000,76 @@ function maak(o) {
   }
 
   /*
+   * Interne aanlevering (wv1343): een pod-module (scansnap.js) levert een stuk zonder HTTP en zonder routesleutel aan, langs precies
+   * dezelfde toetsen als POST /intake/stuk + PUT (postStuk/putDeel met een nagemaakt verzoek). De sleutel staat hier vast en komt nooit
+   * in sleutels.json; verwerk() kent hem niet (Opus-review wv1343 MOET 3). → { http, uitkomst, ...antwoord } (laatste antwoord).
+   */
+  const INTERN = { scansnap: { id: 'intern-scansnap', route: 'scansnap', profielen: ['scansnap@1'], bronnen: ['scanner:scansnap'], lezen: [], intern: true } };
+  function nepReq(method, headers, buf) {
+    const h = {};
+    const r = { method, url: '/intake/intern', headers, complete: true, resume() {}, on(ev, f) {
+      (h[ev] = h[ev] || []).push(f);
+      if (ev === 'end' && !r._los) { r._los = true; setImmediate(function () { if (buf.length) (h.data || []).forEach((g) => g(buf)); (h.end || []).forEach((g) => g()); }); }
+      return r;
+    } };
+    return r;
+  }
+  async function leverIntern(route, env, bytes) {
+    const sleutel = INTERN[route];
+    if (!sleutel) throw new Error('onbekende interne route');
+    const spoor = { m: 'INTERN', http: 0, uitkomst: null, reden: null, sleutel: sleutel.id, stuk: null, deel: null, bron: null };
+    let laatst = null;
+    const antwoord = function (status, obj) {
+      spoor.http = status; spoor.uitkomst = obj.uitkomst || null;
+      if (obj.reden) spoor.reden = obj.reden;
+      if (obj.stuk_id) spoor.stuk = obj.stuk_id;
+      log(spoor);
+      laatst = Object.assign({ http: status }, obj);
+      return laatst;
+    };
+    const weiger = function (status, reden) { return antwoord(status, { ok: false, uitkomst: 'geweigerd', reden, stuk_id: spoor.stuk || undefined }); };
+    if (fs.existsSync(UIT)) return weiger(503, 'uit');
+    if (o.primair && !o.primair()) return weiger(503, 'niet_primair');
+    if (o.vrijeBytes) { const v = o.vrijeBytes(dir); if (v != null && v < VRIJ_MIN_BYTES) return weiger(507, 'vol'); }
+    const body = Buffer.from(JSON.stringify(env), 'utf8');
+    await postStuk(nepReq('POST', { 'content-type': 'application/json', 'content-length': String(body.length) }, body), sleutel, spoor, antwoord, weiger);
+    if (!laatst || !laatst.ok || !Array.isArray(laatst.nodig)) return laatst;
+    const stukId = laatst.stuk_id;
+    for (const deel of laatst.nodig) {
+      const d = q.deel.get(stukId, deel), b = bytes[deel];
+      if (!d || !Buffer.isBuffer(b)) return weiger(400, 'deel_ontbreekt:' + deel);
+      spoor.deel = deel;
+      await putDeel(nepReq('PUT', { 'content-type': d.mime, 'content-length': String(b.length) }, b), sleutel, stukId, deel, spoor, antwoord, weiger);
+      if (!laatst.ok) return laatst;
+    }
+    return laatst;
+  }
+  // Blob van het enige origineel/bijlage van een stuk, met de sha opnieuw gemeten op schijf. → { sha256, pad, grootte, mime, naam } of null
+  function blobVan(stukId) {
+    const d = q.delen.all(stukId).filter((x) => x.binnen)[0];
+    if (!d || !blobAanwezig(d.sha256)) return null;
+    const b = q.blob.get(d.sha256);
+    if (!b || b.weg) return null;
+    const gemeten = sha256(fs.readFileSync(blobPad(d.sha256)));
+    if (gemeten !== d.sha256) return null;
+    return { sha256: d.sha256, pad: blobPad(d.sha256), grootte: d.grootte, mime: d.mime, naam: d.naam };
+  }
+  // Bewaartermijn na Davids keuze (wv1343): ms = moment, null = terug naar zonder termijn. Een blob die ook bij een ander stuk hoort,
+  // krijgt geen termijn (zelfde toets als markeer; Opus-review wv1343 MOET 5).
+  function bewaarNa(stukId, ms) {
+    return tx(function () {
+      let n = 0;
+      for (const d of q.delen.all(stukId)) {
+        const ander = db.prepare('SELECT 1 FROM onderdeel WHERE sha256 = ? AND stuk_id != ? LIMIT 1').get(d.sha256, stukId);
+        if (ander) continue;
+        n += db.prepare('UPDATE blob SET bewaar_tot = ? WHERE sha256 = ? AND weg IS NULL').run(ms == null ? null : nuIso(ms), d.sha256).changes;
+      }
+      q.spoor.run(nuIso(nu()), ms == null ? 'keuze_terug' : 'keuze', null, stukId, null);
+      return n;
+    });
+  }
+
+  /*
    * Ronde (elke 5 min vanuit server.js): open > 1 uur → onvolledig; wacht → opnieuw schrijven; marker die nog niet draaide; blobs over
    * hun bewaartermijn weg (spoorregel); oude tmp-bestanden weg. → tellingen (geen inhoud).
    */
@@ -1053,7 +1129,7 @@ function maak(o) {
 
   function sluit() { try { db.close(); } catch (e) { /* al dicht */ } }
 
-  return { isPad, verwerk, ronde, telling, info, sluit, markeer, _db: db, _profielen: profielen, _soorten: soorten };
+  return { isPad, verwerk, ronde, telling, info, sluit, markeer, leverIntern, blobVan, bewaarNa, _db: db, _profielen: profielen, _soorten: soorten };
 }
 
 /*

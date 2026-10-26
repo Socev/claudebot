@@ -3741,7 +3741,8 @@ function handleRequest(req, res) {
       aix: typeof aixInfo === 'function' ? aixInfo() : { aan: false },   // wv942: aix.js (sleutel bruikbaar?, laatst bereikbaar, plat sinds; nooit de sleutel)
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
       facturen_ingang: facturenIngangInfo(),   // wv856: smalle ingang /fac (ingericht?, uit?; geen inhoud, geen gebruikers)
-      intake: intakeInfo(),   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
+      intake: intakeInfo(),
+      scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
       server: SERVER_ECHT ? { echt: true, paden: { home: serverPaden.home, io: serverPaden.io, jobout: serverPaden.jobout } }
@@ -6364,7 +6365,10 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
       fs.writeFileSync(path.join(APP_IO, jobId, APP_IO_MERK), '', { mode: 0o600 });
       meta.upload.lijst.forEach(function (x) {
         const van = path.join(meta.upload.dir, String(x.n)), naar = path.join(indir, x.doel);
-        try { fs.linkSync(van, naar); } catch (e) { if (e && e.code === 'EXDEV') fs.copyFileSync(van, naar, fs.constants.COPYFILE_EXCL); else throw e; }
+        // wv1343: kopie: true (scan uit de Intake-blobopslag) = altijd een eigen inode; loperJobmap zet een ACL voor socev op de jobmap,
+        // en die mag nooit op de blob zelf komen (Opus-review wv1343 MOET 2)
+        if (meta.upload.kopie === true) fs.copyFileSync(van, naar, fs.constants.COPYFILE_EXCL);
+        else { try { fs.linkSync(van, naar); } catch (e) { if (e && e.code === 'EXDEV') fs.copyFileSync(van, naar, fs.constants.COPYFILE_EXCL); else throw e; } }
       });
     } catch (e) {
       logError('app-upload-zet', e);
@@ -7115,6 +7119,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
       .then(function (x) { return (x[0] || '') + (x[1] || ''); });
   };
   const st = appStartBeurt(a, rij.kanaal, tekst, { soort: 'knop', job_id: jobId2, bijStart: bijStartMet, bijVerval: bijVerval, knop_sleutel: sleutel,
+    upload: kaart && kaart.upload ? kaart.upload : undefined,   // wv1343: scankaart geeft Socev de scan mee (kopie)
     tekst: (keuze === 'ja' ? '✓ Ja' + (gevoeligJa ? ' (vingerafdruk)' : '') : keuze === 'nee' ? '✗ Nee' : '✎ Anders: ' + toel) + ' — op de vraag: ' + vz });
   if (!st.job_id) {
     // niet gestart: de vraag is dan ook niet beantwoord, en de vingerafdruk niet gebruikt
@@ -9739,6 +9744,20 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   // wv1253: OVIS-kaart (herkenningskenmerken, kritiek veld, Bibliothecaris). De pod legt Davids keuze zelf vast via ovis_handvat_activeer
   // (precies de bevroren lijst; nooit het taalmodel); Socev hoort in de staart wat er werkelijk gebeurde.
   const ov = !pot && !ib && typeof ovisKaartHerkomst === 'function' && ovisKaartHerkomst(p) ? ovisKnopHaak(p, d.toelichting) : null;
+  // wv1343: scankaart van scansnap.js. Alleen uit de eigen tabel van de pod (nooit uit de kaarttekst); Ja/Anders: kopie van de scan in de
+  // invoermap van de knopbeurt; de keuze telt bij de start en gaat terug als de druk vervalt.
+  let ss = null;
+  try { ss = !pot && !ib && !ov && typeof scansnap !== 'undefined' && scansnap ? scansnap.knop(p.sleutel, keuze, d.toelichting) : null; } catch (e) { logError('scansnap-knop', e); ss = null; }
+  if (ss) {
+    const ssCtx = context + ss.context, ssStart = bijStart;
+    const knopSs = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
+      { tekst: tekst, bericht: bericht, context: ssCtx, gevoelig: k.gevoelig, upload: ss.upload || undefined,
+        bijStart: function (kz) { try { ss.bijStart(); } catch (e) { logError('scansnap-knop', e); } return ssStart(kz); },
+        bijVerval: function () { try { ss.bijVerval(); } catch (e) { logError('scansnap-knop', e); } } });
+    await knopSs;
+    if (res._app) res._app.reden = 'voor-jou knop #' + id + ' scansnap ' + (res._app.reden || '');
+    return;
+  }
   // wv921, wv861 en wv1253 sluiten elkaar uit (pot-vrijgave-N, de sleutel in bundel.json, intake-…); de haak van de een of de ander
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
     { tekst: tekst, bericht: bericht, context: pot ? ctx : ov ? context + ov.context : ctxIb, gevoelig: k.gevoelig || (!pot && !!ib),
@@ -14335,6 +14354,30 @@ async function intakeTik() {
   try { intakeDagTelling(); } catch (e) { logError('intake-telling', e); }
 }
 if (intake && SERVER_ECHT) { setTimeout(function () { intakeTik(); }, 120000).unref(); setInterval(function () { intakeTik(); }, 5 * 60000).unref(); }
+
+// ── ScanSnap → OVIS Intake (wv1343, 26-10-2026; bouwplan vault "01_Ontwikkeling/OVIS Intake - ScanSnap-scans (bouwplan 26-10-2026).md") ──
+// Elk kwartier (echte pod, primaire kant, schakelaar INTAKE_DIR/scansnap.json {"aan": true}): nieuwe scans uit gdrive:ScanSnap via rclone
+// intern in de Intake-kern (profiel scansnap@1, alleen op de pod), in Drive verplaatst naar ScanSnap/_opgehaald, per scan een Voor jou-kaart.
+// Logica in scansnap.js; de knop-haak staat in appVoorJouKnop. Ontbreekt scansnap.js (terugrol), dan geen tik en geen haak.
+const scansnap = (function () {
+  const p = path.join(__dirname, 'scansnap.js');
+  if (!intake || !fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ intake: intake, dir: INTAKE_DIR, remote: process.env.SCANSNAP_REMOTE || 'gdrive:ScanSnap', pdftekst: intakePdfTekst,
+      marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
+      model: function (systeem, prompt, schema) { return harvesterClaude(systeem, prompt, schema, { timeoutMs: 180000 }); },
+      kaartZet: async function (p) { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); appStaat.vjCache = null; if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet'); return r; },
+      kaartLijst: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); const m = {}; ((j && j.punten) || []).forEach(function (x) { m[x.sleutel] = x.status; }); return m; },
+      box: function (t) { ovisBoxRij(t); }, fout: logError });
+  } catch (e) { logError('scansnap', e); return null; }
+})();
+function scansnapInfo() { if (!scansnap) return { aan: false, module: false }; try { return scansnap.info(); } catch (e) { return { fout: true }; } }
+async function scansnapTik() {
+  if (!scansnap || !rolPrimair()) return;
+  try { const u = await scansnap.tik(); if (u && (u.opgehaald || u.kaarten || u.fout)) schrijfLog(nu() + ' scansnap ' + velden({ opgehaald: u.opgehaald || 0, verplaatst: u.verplaatst || 0, kaarten: u.kaarten || 0, model: u.model || 0, fout: u.fout || 0 })); }
+  catch (e) { logError('scansnap-tik', e); }
+}
+if (scansnap && SERVER_ECHT) { setTimeout(function () { scansnapTik(); }, 180000).unref(); setInterval(function () { scansnapTik(); }, 15 * 60000).unref(); }
 
 // ── Harvester (wv820, 22-10-2026; bouwplan "01_Ontwikkeling/Harvester - ideeën oogsten (bouwplan 22-10-2026).md") ──
 // App Harvester: ideeën van gevolgde bronnen (RSS/Atom) met een cijfer voor gaaf, handig en complex; "Naar Broedstoof" zet een idee
