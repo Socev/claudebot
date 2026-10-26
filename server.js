@@ -2271,6 +2271,8 @@ function uitrolWacht() {
 // Zetten en opheffen: socev-scripts sb2 onderhoud.py.
 const ONDERHOUD_BESTAND = serverPad('onderhoud', process.env.ONDERHOUD_BESTAND, '/opt/data/onderhoudsstand.json', serverProefDeel('onderhoudsstand.json'));
 const ONDERHOUD_LOCK = serverPad('onderhoud_lock', process.env.ONDERHOUD_LOCK, '/opt/data/bin/.vault.lock', serverProefDeel('vault.lock'));
+// wv1275: POST /datums (datumdetector uit de scripts-release; schaduwlog voor de Mail Processor). Zonder module: 404.
+const datums = (function () { try { return require('./datums.js').maak({ fout: logError }); } catch (e) { logError('datums-module', e); return null; } })();
 const ONDERHOUD_MOD = (function () { try { return require('./onderhoud.js'); } catch (e) { logError('onderhoud-module', e); return null; } })();
 // Zonder module (oude release-inhoud): nooit wachten, stand 'onbekend' in /health.
 const onderhoud = !ONDERHOUD_MOD ? { stand: function () { return { aan: false, onbekend: true }; }, houdtTegen: function () { return false; },
@@ -3939,6 +3941,23 @@ function handleRequest(req, res) {
         .catch(function (e) { logError('facturen-ronde', e); stuur(500, { ok: false, fout: 'facturen-ronde faalde in de pod' }); })
         .finally(function () { if (facturenRondeBezig === mijn) facturenRondeBezig = null; });
     }); });
+  }
+
+  // ── wv1275: datumdetector (SB2 fase 2). Body-secret zoals /run; geen rolPoort: alleen rekenen (en het schaduwlog), dus op beide
+  // kanten. Uitkomst = socev-datum uit de scripts-release van dat moment (datums.js). 404 als de module niet in de release zit.
+  if (req.method === 'POST' && reqPath(req) === '/datums') {
+    return readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
+          !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
+      const stuur = function (st, j) {
+        reqLogExtra(res, { datums: j && j.ok ? (j.schaduw ? 'schaduw' : 'ok') : 'fout', aantal: j && (j.aantal != null ? j.aantal : (j.treffers || []).length) });
+        res.writeHead(st, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(j));
+      };
+      if (!datums) return stuur(404, { ok: false, fout: 'datumdetector zit niet in deze versie van de pod' });
+      datums.verwerk(d).then(function (r) { stuur(r.status, r.j); })
+        .catch(function (e) { logError('datums', e); stuur(500, { ok: false, fout: 'datums faalde in de pod' }); });
+    });
   }
 
   // ── wv820: wekelijkse Harvester-ronde (n8n AI - Harvester-ronde; body-secret zoals /run; geen andere invoer) ──

@@ -306,6 +306,11 @@ jobs:
       - name: "ovis-register (wv979, compiler + Bibliothecaris)"
         if: ${{ !cancelled() }}
         run: bash test/ovis-register.sh
+      # Datumdetector-route (wv1275, SB2 fase 2): POST /datums met een nep-detector — realpath per aanroep, kaal milieu, grenzen,
+      # schaduwlog zonder tekst/geboortedatum (0700/0600, geen symlink, 30 dagen), koppeling in server.js en uitrol.sh.
+      - name: "datums (wv1275, POST /datums)"
+        if: ${{ !cancelled() }}
+        run: bash test/datums.sh
       # Onderhoudsstand van de vault (wv1271, SB2 fase 1a): wie wacht, echte flock-grendel, uit = los, alarm na 2 uur één keer.
       - name: "onderhoud (wv1271, onderhoudsstand vault)"
         if: ${{ !cancelled() }}
