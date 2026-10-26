@@ -1032,3 +1032,19 @@ test('wv1317 wat we leerden: gegroepeerd in gewone taal, geen interne codes', ()
   assert.equal(B.vervalRegel('onzin', 1), '1 koppelvoorstel verviel: bij herbeoordeling past de betaling niet meer bij de factuur.');
   for (const r of [h, B.vervalRegel('ander_nummer', 1)]) assert.ok(!/_/.test(r), r);
 });
+
+test('wv1323: feitUitleg — zin, bron met entiteiten en andere spellingen, aanleiding bij één of meer facturen, nooit het hele IBAN', () => {
+  const k = { iban: 'NL91TEST0000001234', naam: 'Proef B.V.', bank_naam: 'Proef BV', namen: [{ naam: 'Proef BV', aantal: 20 }, { naam: 'Proef', aantal: 4 }], aantal: 24,
+    eerste: '2025-02-20', laatste: '2026-10-03', entiteiten: ['Tolgaarde', 'Groenhouten', 'Holding'], facturen: [{ nummer: 'F-1', leverancier_naam: 'Proef B.V.', incl: 123456 }] };
+  const u = B.feitUitleg(k);
+  assert.equal(u.zin, 'Rekening …1234 is van Proef B.V..');
+  assert.equal(u.bron, '24 betalingen sinds 20-2-2025 (laatste 3-10-2026) vanaf Tolgaarde, Groenhouten en Holding, steeds aan Proef BV (ook gespeld als Proef).');
+  assert.equal(u.aanleiding, 'Factuur F-1 van Proef B.V. (€ 1.234,56) noemt deze rekening; die moet nu eerst nagebeld worden.');
+  assert.match(u.ja, /^Ja: Proef B\.V\. wordt een bekende leverancier/);
+  const meer = B.feitUitleg(Object.assign({}, k, { leverancier_bestaat: true, entiteiten: ['Tolgaarde'], namen: [{ naam: 'Proef BV', aantal: 24 }],
+    facturen: [1, 2, 3, 4].map((i) => ({ nummer: 'F-' + i, incl: 100 })) }));
+  assert.equal(meer.bron, '24 betalingen sinds 20-2-2025 (laatste 3-10-2026) vanaf Tolgaarde, steeds aan Proef BV.');
+  assert.match(meer.aanleiding, /^4 facturen noemen deze rekening \(F-1 \(€ 1,00\); F-2 \(€ 1,00\); F-3 \(€ 1,00\); …\)/);
+  assert.match(meer.ja, /^Ja: Proef B\.V\. krijgt deze rekening erbij/);
+  assert.ok(!JSON.stringify([u, meer]).includes('NL91TEST'));
+});

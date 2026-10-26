@@ -121,6 +121,55 @@ function bedragPatroon(lijst, vandaag, bedrag, opties) {
     sinds: l[0].boekdatum, oordeel: x === null ? null : x > hoog + marge ? 'boven' : x < laag - marge ? 'onder' : 'binnen' };
 }
 
+// ───────────────────────────── rekening uit de bankhistorie (wv1323) ─────────────────────────────
+/*
+ * David 26-10-2026: "'Dit IBAN is van bedrijf Z' (wat een 100% koppeling oplevert qua entiteit, want uniek)"; 12:31 Ja: een vaak betaald
+ * rekeningnummer mag na zijn Ja het nabellen vervangen, een echt nieuw nummer blijft nabellen. De eis: ≥ 3 afschrijvingen met een naam, de
+ * eerste en de laatste ≥ 60 dagen uit elkaar, en steeds dezelfde naam. "Dezelfde naam" = elke gespelde naam is verwant aan de meest
+ * gebruikte: zonder rechtsvorm, leestekens en spaties staat de een in de ander (gemeten 26-10 op de echte bankregels: "Mediq Nederland B.V." /
+ * "Mediq", "A.M.C. Roskott" / "AMC Roskott", "LvN" / "LvN Huisartswaarneming" tellen als één naam; "Xebia" / "G-company" en een
+ * salarisbureau onder twee bedrijfsnamen niet — die blijven nabellen). Verwant is bewust streng: een twijfelgeval kost een telefoontje.
+ */
+const FEIT_MIN_BETALINGEN = 3, FEIT_MIN_DAGEN = 60, FEIT_MIN_NAAM = 3;
+function compactNaam(s) { return normNaam(s).replace(/ /g, ''); }
+// Voorletters + achternaam ("M. den Uijl") tegen een voluit geschreven naam ("Marijke den Uijl", "Mattijs Volman Waarnemend Huisarts"): de
+// rest na de voorletters (≥ 4 tekens) staat erin en de eerste letter klopt (gemeten 26-10: zo spellen bank en waarnemersfactuur dezelfde persoon).
+function voorletterVerwant(kort, lang) {
+  const w = normNaam(kort).split(' ').filter(Boolean);
+  let i = 0;
+  while (i < w.length - 1 && w[i].length === 1) i++;
+  if (i === 0) return false;
+  const rest = w.slice(i).join(''), l = compactNaam(lang);
+  return rest.length >= 4 && l.indexOf(rest) > 0 && l[0] === w[0];
+}
+function naamVerwant(a, b) {
+  const x = compactNaam(a), y = compactNaam(b);
+  if (x.length < FEIT_MIN_NAAM || y.length < FEIT_MIN_NAAM) return false;
+  return x === y || x.indexOf(y) >= 0 || y.indexOf(x) >= 0 || voorletterVerwant(a, b) || voorletterVerwant(b, a);
+}
+/*
+ * lijst = bankregels met tegenpartij_iban = dit IBAN (alle entiteiten; de beller filtert verwijderde regels en de richting niet: dat doet
+ * deze functie). → { aantal, eerste, laatste, dagen, naam (meest gebruikte spelling), namen: [{ naam, aantal }] (≤ 4), entiteiten, ok, reden }
+ */
+function ibanHistorie(lijst) {
+  const l = (lijst || []).filter((t) => !t.verwijderd_op && t.bedrag_centen < 0 && isIsoDatum(t.boekdatum) && compactNaam(t.tegenpartij_naam).length >= FEIT_MIN_NAAM)
+    .sort((a, b) => (a.boekdatum < b.boekdatum ? -1 : a.boekdatum > b.boekdatum ? 1 : 0));
+  if (!l.length) return { aantal: 0, ok: false, reden: 'geen betalingen met een naam' };
+  const tel = new Map();
+  for (const t of l) { const n = String(t.tegenpartij_naam).trim(); tel.set(n, (tel.get(n) || 0) + 1); }
+  // meest gebruikt; bij gelijkspel de langste (meestal de volledige naam), dan alfabetisch (vaste uitkomst)
+  const namen = Array.from(tel, ([naam, aantal]) => ({ naam, aantal })).sort((a, b) => b.aantal - a.aantal || b.naam.length - a.naam.length || (a.naam < b.naam ? -1 : 1));
+  const hoofd = namen[0].naam;
+  const eerste = l[0].boekdatum, laatste = l[l.length - 1].boekdatum, dagen = dagenTussen(eerste, laatste);
+  const uit = { aantal: l.length, eerste, laatste, dagen, naam: hoofd, namen: namen.slice(0, 4), aantal_namen: namen.length,
+    entiteiten: Array.from(new Set(l.map((t) => t.entiteit).filter(Boolean))).sort(), ok: false, reden: null };
+  if (l.length < FEIT_MIN_BETALINGEN) uit.reden = 'minder dan ' + FEIT_MIN_BETALINGEN + ' betalingen';
+  else if (dagen < FEIT_MIN_DAGEN) uit.reden = 'korter dan ' + FEIT_MIN_DAGEN + ' dagen';
+  else if (namen.some((n) => !naamVerwant(n.naam, hoofd))) uit.reden = 'verschillende namen';
+  else uit.ok = true;
+  return uit;
+}
+
 // ───────────────────────────── betaling van een factuur ─────────────────────────────
 
 function genormKenmerk(s) { return String(s || '').replace(/[\s.\-/]/g, '').toUpperCase(); }
@@ -310,5 +359,6 @@ function zoek(transacties, vraag) {
 
 module.exports = {
   tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan, bedragPatroon,
+  naamVerwant, ibanHistorie, FEIT_MIN_BETALINGEN, FEIT_MIN_DAGEN,
   genormKenmerk, echtKenmerk, betalingVan, controles, zoek,
 };

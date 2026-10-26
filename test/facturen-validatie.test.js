@@ -599,3 +599,25 @@ test('wv1317 bedragpatroon: band = 10e–90e percentiel plus de laatste drie (in
   assert.equal(V.bedragPatroon([{ id: 'a', boekdatum: '2024-01-01', bedrag_centen: -100 }, { id: 'b', boekdatum: '2026-10-01', bedrag_centen: -100 }, { id: 'c', boekdatum: '2026-10-02', bedrag_centen: 100 }], '2026-10-26', 100), null);
   assert.equal(V.bedragPatroon(huur, 'gisteren', 1), null);
 });
+
+test('wv1323: ibanHistorie en naamVerwant — ≥ 3 afschrijvingen met een naam over ≥ 60 dagen, steeds dezelfde (verwante) naam', () => {
+  const t = (d, naam, o) => Object.assign({ boekdatum: d, bedrag_centen: -1000, tegenpartij_naam: naam, entiteit: 'tolgaarde' }, o || {});
+  // verwant: rechtsvorm, leestekens, afkorting binnen de naam, voorletters + achternaam
+  for (const [a, b] of [['Mediq Nederland B.V.', 'Mediq'], ['A.M.C. Roskott', 'AMC Roskott'], ["Lot's Waarneming", 'Lots Waarneming'], ['LvN', 'LvN Huisartswaarneming'],
+    ['M. den Uijl', 'Marijke den Uijl'], ['M. Volman', 'Mattijs Volman Waarnemend Huisarts'], ['Qli Chef', 'Qlichef']]) assert.equal(V.naamVerwant(a, b), true, a + ' ~ ' + b);
+  for (const [a, b] of [['Xebia', 'G-company B.V.'], ['Aurore Salaris', 'Actasynergia'], ['T. van Riessen', 'Tim Mobiel Waarnemen'], ['M. Volman', 'Peter Volman'],
+    ['AB', 'AB Groep'], ['', 'Iets'], [null, null], ['Stichting Pensioen', 'Stichting Bewaarder']]) assert.equal(V.naamVerwant(a, b), false, a + ' ≁ ' + b);
+  const ok = V.ibanHistorie([t('2026-01-05', 'Mediq Nederland B.V.'), t('2026-03-10', 'Mediq'), t('2026-02-02', 'Mediq Nederland B.V.', { entiteit: 'groenhouten' }),
+    t('2026-04-01', 'Mediq', { bedrag_centen: 500 }), t('2026-04-02', 'Mediq', { verwijderd_op: 'x' })]);
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.equal(ok.aantal, 3); assert.equal(ok.eerste, '2026-01-05'); assert.equal(ok.laatste, '2026-03-10'); assert.equal(ok.dagen, 64);
+  assert.equal(ok.naam, 'Mediq Nederland B.V.'); assert.deepEqual(ok.entiteiten, ['groenhouten', 'tolgaarde']);
+  assert.deepEqual(ok.namen, [{ naam: 'Mediq Nederland B.V.', aantal: 2 }, { naam: 'Mediq', aantal: 1 }]);
+  assert.equal(V.ibanHistorie([t('2026-01-01', 'X Proef'), t('2026-03-15', 'X Proef')]).reden, 'minder dan 3 betalingen');
+  assert.equal(V.ibanHistorie([t('2026-01-01', 'X Proef'), t('2026-02-01', 'X Proef'), t('2026-02-28', 'X Proef')]).reden, 'korter dan 60 dagen');
+  assert.equal(V.ibanHistorie([t('2026-01-01', 'X Proef'), t('2026-02-01', 'Y Anders'), t('2026-03-15', 'X Proef')]).reden, 'verschillende namen');
+  // zonder naam telt een betaling niet; alleen bijschrijvingen: niets
+  assert.equal(V.ibanHistorie([t('2026-01-01', null), t('2026-02-01', 'X Proef'), t('2026-03-15', 'X Proef')]).ok, false);
+  assert.equal(V.ibanHistorie([t('2026-01-01', 'X', { bedrag_centen: 1 })]).aantal, 0);
+  assert.equal(V.ibanHistorie([t('2026-01-01', 'X Proef'), t('2026-01-31', 'X Proef'), t('2026-03-02', 'X Proef')]).ok, true, 'precies 60 dagen telt');
+});

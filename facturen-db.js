@@ -657,6 +657,45 @@ const M6_VERVANG = [
 ];
 function M6(db, vervang) { return M5(db, vervang || M6_VERVANG, 'migratie_6'); }
 
+/*
+ * wv1323 (David 26-10-2026 11:39: "Dit IBAN is van bedrijf Z (wat een 100% koppeling oplevert qua entiteit, want uniek)"; 12:31 Ja op "mag een
+ * vaak betaald rekeningnummer na jouw Ja het nabellen vervangen?"): feitkaarten. Een kaart "rekening …1234 is van <naam>" volgt uit de
+ * bankhistorie (≥ 3 betalingen over ≥ 60 dagen, steeds dezelfde naam) en een factuur met dat IBAN; de kaart zelf wordt steeds vers berekend,
+ * alleen Davids besluit wordt hier vastgelegd (bevestigd of afgewezen, één keer per IBAN: een afgewezen kaart komt niet terug). Een besluit
+ * verandert niet meer (opnieuw beslissen = de rij met de hand weghalen; een bevestigde rij zit vast aan zijn leverancier_iban).
+ * leverancier_iban krijgt de bron erbij: 'nagebeld' (de bestaande weg, standaard) of 'bankhistorie' (alleen met een bevestigd feit).
+ * LET OP terugrol: een release van vóór wv1323 opent deze database niet meer (schema_nieuwer). Lichtste terugrol is
+ * `DELETE FROM schema_migratie WHERE versie = 7`: de oude code noemt bij leverancier_iban de kolommen bij naam en hindert de nieuwe tabel en
+ * kolommen niet. Weer vooruit: dan eerst die rij 7 met de hand terugzetten (M7 is niet herhaalbaar: de tabel feit bestaat dan al).
+ */
+const M7 = `
+CREATE TABLE feit (
+  id INTEGER PRIMARY KEY,
+  soort TEXT NOT NULL CHECK (soort IN ('iban')),
+  sleutel TEXT NOT NULL UNIQUE CHECK (length(sleutel) BETWEEN 3 AND 80),
+  iban TEXT ${IBAN('iban')},
+  leverancier TEXT REFERENCES leverancier(id),
+  factuur TEXT REFERENCES factuur(id),
+  naam TEXT CHECK (naam IS NULL OR length(naam) <= 200),
+  bewijs TEXT ${JSONO('bewijs')},
+  status TEXT NOT NULL CHECK (status IN ('bevestigd','afgewezen')),
+  wie TEXT NOT NULL, wanneer TEXT NOT NULL,
+  CHECK (soort <> 'iban' OR (iban IS NOT NULL AND sleutel = 'iban:' || iban)),
+  CHECK (status <> 'bevestigd' OR leverancier IS NOT NULL)
+);
+CREATE TRIGGER feit_vast BEFORE UPDATE ON feit BEGIN SELECT RAISE(ABORT, 'feit_vast: een besluit over een feit verandert niet meer'); END;
+ALTER TABLE leverancier_iban ADD COLUMN bron TEXT NOT NULL DEFAULT 'nagebeld' CHECK (bron IN ('nagebeld','bankhistorie'));
+ALTER TABLE leverancier_iban ADD COLUMN feit INTEGER REFERENCES feit(id);
+-- een rekening uit de bankhistorie alleen met een bevestigd feit over precies die rekening en die leverancier
+CREATE TRIGGER leverancier_iban_bankhistorie BEFORE INSERT ON leverancier_iban
+WHEN NEW.bron = 'bankhistorie' AND NOT EXISTS (SELECT 1 FROM feit WHERE id = NEW.feit AND status = 'bevestigd' AND iban = NEW.iban AND leverancier = NEW.leverancier)
+BEGIN SELECT RAISE(ABORT, 'leverancier_iban_bron: een rekening uit de bankhistorie vraagt een bevestigd feit'); END;
+CREATE TRIGGER leverancier_iban_bron_upd BEFORE UPDATE OF bron, feit, iban, leverancier ON leverancier_iban
+WHEN NEW.bron = 'bankhistorie' AND NOT EXISTS (SELECT 1 FROM feit WHERE id = NEW.feit AND status = 'bevestigd' AND iban = NEW.iban AND leverancier = NEW.leverancier)
+BEGIN SELECT RAISE(ABORT, 'leverancier_iban_bron: een rekening uit de bankhistorie vraagt een bevestigd feit'); END;
+CREATE INDEX feit_iban ON feit (iban);
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -664,11 +703,12 @@ const MIGRATIES = [
   { versie: 4, naam: 'bankhistorie definitief, factuurarchief, startdatum (wv944)', sql: M4 },
   { versie: 5, naam: 'Triodos: bank TRIODOS en formaat triodos_csv in de CHECKs (wv1299)', fn: (db) => M5(db) },
   { versie: 6, naam: "voorstel: status 'vervallen' bij herbeoordeling (wv1317)", fn: (db) => M6(db) },
+  { versie: 7, naam: 'feiten: rekening is van leverancier, uit de bankhistorie (wv1323)', sql: M7 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
-  'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief'];
+  'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 

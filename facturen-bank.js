@@ -1218,6 +1218,32 @@ function vervalRegel(reden, n) {
   return n + (n === 1 ? ' koppelvoorstel verviel' : ' koppelvoorstellen vervielen') + ': ' + (VERVAL_TEKST[reden] || VERVAL_TEKST.geen_match) + '.';
 }
 
+/*
+ * wv1323: feitkaart "rekening …1234 is van <naam>" in gewone taal (David 26-10-2026: "moet heel duidelijk zijn wat ik akkordeer"). k =
+ * { iban, naam (wordt de leverancier), bank_naam, namen: [{ naam, aantal }], aantal, eerste, laatste, entiteiten: [naam], facturen:
+ * [{ nummer, leverancier_naam, incl, valuta }], leverancier_bestaat (naam of null) }. → { zin, bron, aanleiding, ja, nee }.
+ */
+function feitUitleg(k) {
+  const rek = 'Rekening ' + eind4(k.iban);
+  const andere = (k.namen || []).map((n) => n.naam).filter((n) => n !== k.bank_naam);
+  const ents = (k.entiteiten || []).filter(Boolean);
+  const entTekst = ents.length ? ' vanaf ' + (ents.length > 1 ? ents.slice(0, -1).join(', ') + ' en ' + ents[ents.length - 1] : ents[0]) : '';
+  const bron = k.aantal + ' betalingen sinds ' + dagNL(k.eerste) + ' (laatste ' + dagNL(k.laatste) + ')' + entTekst + ', steeds aan ' + k.bank_naam +
+    (andere.length ? ' (ook gespeld als ' + andere.slice(0, 3).join(', ') + ')' : '') + '.';
+  const fs = (k.facturen || []).filter(Boolean);
+  const fTekst = (f) => (f.nummer || 'zonder nummer') + (f.leverancier_naam ? ' van ' + f.leverancier_naam : '') + (Number.isSafeInteger(f.incl) ? ' (' + eurTekst(Math.abs(f.incl)) + ')' : '');
+  const aanleiding = fs.length === 1 ? 'Factuur ' + fTekst(fs[0]) + ' noemt deze rekening; die moet nu eerst nagebeld worden.'
+    : fs.length + ' facturen noemen deze rekening (' + fs.slice(0, 3).map(fTekst).join('; ') + (fs.length > 3 ? '; …' : '') + '); die moeten nu eerst nagebeld worden.';
+  return {
+    zin: rek + ' is van ' + k.naam + '.',
+    bron,
+    aanleiding,
+    ja: 'Ja: ' + (k.leverancier_bestaat ? k.naam + ' krijgt deze rekening erbij' : k.naam + ' wordt een bekende leverancier met deze rekening') +
+      '. Facturen met deze rekening hoeven dan niet meer nagebeld te worden, en betalingen eraan worden aan hun factuur gekoppeld.',
+    nee: 'Nee: er wordt niets vastgelegd en deze kaart komt niet terug; nabellen blijft nodig.',
+  };
+}
+
 module.exports = {
   BankWeigering, FORMATEN, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
   // parsers
@@ -1228,4 +1254,6 @@ module.exports = {
   maakSignaal, signaalSleutel, afhandelSignaal, terugvraagTekst,
   // uitleg (wv1317)
   VOORUIT_MARGE, vooruitBetaald, andereFactuurGenoemd, referentieStukken, voorstelSleutel, voorstelUitleg, zekerheidTekst, leerRegel, vervalRegel, VERVAL_TEKST,
+  // feitkaarten (wv1323)
+  feitUitleg,
 };

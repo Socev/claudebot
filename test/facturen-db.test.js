@@ -174,7 +174,7 @@ test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/trio
   const dir = map('m5');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.deepEqual(f.toegepast, [5, 6]);
+  assert.deepEqual(f.toegepast, [5, 6, 7]);
   assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
@@ -232,7 +232,7 @@ test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt vol
   assert.deepEqual(tabelSql(db), voor);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   db.close();
-  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
 });
 
 test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {
@@ -241,7 +241,7 @@ test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt 
   const na = tabelSql(f.db);
   f.db.exec('DELETE FROM schema_migratie WHERE versie = 5');
   D.sluit(f);
-  const r = D.open(dir, { alleenLezen: true }); assert.equal(r.schema, 6);   // max(versie): 6 staat er nog D.sluit(r);
+  const r = D.open(dir, { alleenLezen: true }); assert.equal(r.schema, D.SCHEMA_VERSIE);   // max(versie): de laatste staat er nog D.sluit(r);
   const f2 = D.open(dir);
   assert.deepEqual(f2.toegepast, [5]);
   assert.deepEqual(tabelSql(f2.db), na);
@@ -253,7 +253,7 @@ test("migratie 6 (wv1317): voorstel krijgt status 'vervallen' (met afgehandeld_d
   const dir = map('m6');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.equal(f.schema, 6);
+  assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.ok(voorstelSql(f.db).includes("'vervallen'"));
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   const tx = f.db.prepare('SELECT id FROM bank_transactie LIMIT 1').get();
@@ -281,7 +281,7 @@ test('migratie 6 (wv1317): afwijkende CHECK-tekst → weigeren en volledig terug
   f.db.exec('PRAGMA schema_version = ' + (v + 1)); f.db.exec('PRAGMA writable_schema = OFF');
   D.sluit(f);
   gooit(() => D.open(dir), /migratie_6|staat er 0 keer/);
-  const r = D.open(dir, { alleenLezen: true }); assert.equal(r.schema, 5); D.sluit(r);
+  const r = D.open(dir, { alleenLezen: true }); assert.equal(r.schema, D.SCHEMA_VERSIE); D.sluit(r);   // max(versie): 7 staat er nog
   const dir2 = map('m6-weer');
   const g = D.open(dir2);
   const na = g.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'voorstel'").get().sql;
@@ -958,4 +958,41 @@ test('natoets: de koerier kan een mislukking altijd vastleggen, ook na een adres
   assert.deepEqual(c.geweigerd.map((x) => x.id), [t.opdracht]);
   assert.equal(f.db.prepare('SELECT status FROM factuur WHERE id = ?').get(t.id).status, 'verzending_mislukt');
   D.sluit(f);
+});
+
+test('migratie 7 (wv1323): schema 4 → 7 maakt feit + leverancier_iban.bron/feit; een rekening uit de bankhistorie alleen met een bevestigd feit; besluit vast', () => {
+  const dir = map('m7');
+  dbOpSchema4(dir).close();
+  const f = D.open(dir);
+  assert.equal(f.schema, 7); assert.ok(f.toegepast.includes(7));
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  const iban = Z.maakIban('NL', 'TEST', '0000000071'), ander = Z.maakIban('NL', 'TEST', '0000000072');
+  D.voegToe(f, 'leverancier', { id: 'bbbbbbbbbbbb0071', naam: 'Proef 71', genormaliseerd: 'proef 71', aangemaakt_op: iso(NU) });
+  D.voegToe(f, 'leverancier', { id: 'bbbbbbbbbbbb0072', naam: 'Proef 72', genormaliseerd: 'proef 72', aangemaakt_op: iso(NU) });
+  // de bestaande weg (nagebeld) blijft zoals hij was: bron standaard 'nagebeld', geen feit nodig
+  f.db.prepare('INSERT INTO leverancier_iban (leverancier, iban, toegevoegd_door, toegevoegd_op) VALUES (?, ?, ?, ?)').run('bbbbbbbbbbbb0072', ander, 'toets', iso(NU));
+  assert.equal(f.db.prepare('SELECT bron FROM leverancier_iban WHERE iban = ?').get(ander).bron, 'nagebeld');
+  const lb = (lev, i, feit) => f.db.prepare("INSERT INTO leverancier_iban (leverancier, iban, toegevoegd_door, toegevoegd_op, bron, feit) VALUES (?, ?, 'toets', ?, 'bankhistorie', ?)").run(lev, i, iso(NU), feit);
+  gooit(() => lb('bbbbbbbbbbbb0071', iban, null), /leverancier_iban_bron/);
+  const zet = (o) => D.voegToe(f, 'feit', Object.assign({ soort: 'iban', sleutel: 'iban:' + iban, iban, status: 'bevestigd', leverancier: 'bbbbbbbbbbbb0071', wie: 'toets', wanneer: iso(NU) }, o));
+  gooit(() => zet({ sleutel: 'iban:' + ander }), /CHECK/);           // sleutel past niet bij het IBAN
+  gooit(() => zet({ leverancier: null }), /CHECK/);                   // bevestigd zonder leverancier
+  gooit(() => zet({ status: 'misschien' }), /CHECK/);
+  const afg = D.voegToe(f, 'feit', { soort: 'iban', sleutel: 'iban:' + ander, iban: ander, status: 'afgewezen', wie: 'toets', wanneer: iso(NU) });
+  gooit(() => lb('bbbbbbbbbbbb0072', ander + '', afg), /leverancier_iban_bron|UNIQUE/);   // afgewezen feit draagt niets
+  const id = zet({});
+  gooit(() => zet({}), /UNIQUE/);                                     // één besluit per IBAN
+  gooit(() => lb('bbbbbbbbbbbb0072', iban, id), /leverancier_iban_bron/);   // feit hoort bij een andere leverancier
+  lb('bbbbbbbbbbbb0071', iban, id);
+  assert.equal(f.db.prepare('SELECT bron, feit FROM leverancier_iban WHERE iban = ?').get(iban).feit, id);
+  gooit(() => f.db.prepare("UPDATE leverancier_iban SET feit = ? WHERE iban = ?").run(afg, iban), /leverancier_iban_bron/);
+  gooit(() => f.db.prepare("UPDATE feit SET status = 'afgewezen' WHERE id = ?").run(id), /feit_vast/);
+  gooit(() => f.db.prepare('DELETE FROM feit WHERE id = ?').run(id), /FOREIGN KEY/);
+  D.sluit(f);
+  // nieuw aangemaakt = gemigreerd
+  const sql = (db) => db.prepare("SELECT name, sql FROM sqlite_master WHERE name IN ('feit','leverancier_iban','leverancier_iban_bankhistorie','feit_vast') ORDER BY name").all().map((x) => x.sql);
+  const a = D.open(dir), b = D.open(map('m7-nieuw'));
+  assert.deepEqual(sql(a.db), sql(b.db));
+  assert.deepEqual(a.toegepast, []);
+  D.sluit(a); D.sluit(b);
 });
