@@ -220,6 +220,34 @@ test('migratie 5 (wv1299): past de CHECK-tekst niet precies één keer, dan weig
   const r = D.open(dir, { alleenLezen: true }); assert.equal(r.schema, 4); D.sluit(r);
 });
 
+test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt volledig terug; daarna migreert de volgende open gewoon', () => {
+  const dir = map('m5-na');
+  const db = dbOpSchema4(dir);
+  const voor = tabelSql(db);
+  // de eerste vervanging klopt, de tweede maakt de CHECK kapot (haakje weg): pas na writable_schema merkt SQLite het
+  const kapot = [D.M5_VERVANG[0], ['bank_bestand', "bank IN ('ABN','ING')", "bank IN ('ABN','ING','TRIODOS'"]];
+  db.exec('BEGIN IMMEDIATE');
+  gooit(() => D._M5(db, kapot), /malformed|syntax|migratie_5|incomplete/i);
+  db.exec('ROLLBACK');
+  assert.deepEqual(tabelSql(db), voor);
+  assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  db.close();
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+});
+
+test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {
+  const dir = map('m5-weer');
+  const f = D.open(dir);
+  const na = tabelSql(f.db);
+  f.db.exec('DELETE FROM schema_migratie WHERE versie = 5');
+  D.sluit(f);
+  const r = D.open(dir, { alleenLezen: true }); assert.equal(r.schema, 4); D.sluit(r);
+  const f2 = D.open(dir);
+  assert.deepEqual(f2.toegepast, [5]);
+  assert.deepEqual(tabelSql(f2.db), na);
+  D.sluit(f2);
+});
+
 // ───────────────────────────── Privé nooit naar de boekhouder ─────────────────────────────
 
 test('Privé: entiteit prive heeft nooit een boekhoud- of afschriftadres (CHECK, insert en update)', () => {

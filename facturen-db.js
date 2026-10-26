@@ -596,9 +596,13 @@ BEGIN SELECT RAISE(ABORT, 'startdatum: JJJJ-MM-DD'); END;
  * herbouw van drie tabellen met triggers en verwijzingen is groter dan de wijziging. Een CHECK verruimen verandert niets aan de opgeslagen
  * rijen (alle bestaande waarden blijven geldig), dus volgens de SQLite-documentatie (ALTER TABLE § "making other kinds of table schema
  * changes") mag het via writable_schema: de tekst in sqlite_master vervangen, schema_version ophogen, controleren. Binnen de BEGIN IMMEDIATE
- * van migreer: mislukt iets, dan rolt alles terug. Elke vervanging moet precies één keer passen (anders weigeren, niets half), na afloop
- * integrity_check en een nieuwe lezing van de tabellen. LET OP terugrol: een release van vóór wv1299 opent deze database niet meer
- * (schema_nieuwer); terugrollen = ook de database terugzetten (backup/ van vóór de uitrol) of vooruit herstellen.
+ * van migreer: mislukt iets, dan rolt alles terug. Elke vervanging moet precies één keer passen; staat de nieuwe tekst er al precies
+ * één keer en de oude niet (CHECK al verruimd, alleen de rij in schema_migratie ontbrak), dan overslaan; anders weigeren, niets half.
+ * Na afloop integrity_check en een nieuwe lezing van de tabellen. writable_schema vraagt dat SQLite niet in defensive mode staat (Node 22:
+ * niet; zou een latere Node het standaard aanzetten, dan faalt M5 veilig met een terugrol en blijft Facturen dicht tot dit is aangepast).
+ * LET OP terugrol: een release van vóór wv1299 opent deze database niet meer (schema_nieuwer). De verruimde CHECKs hinderen een oudere
+ * release niet: lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 5` (opnieuw uitrollen past M5 dan zonder wijziging toe),
+ * anders de database terugzetten (backup/ van vóór de uitrol) of vooruit herstellen.
  */
 const M5_VERVANG = [
   ['rekening', "bank IN ('ABN','ING')", "bank IN ('ABN','ING','TRIODOS')"],
@@ -607,19 +611,23 @@ const M5_VERVANG = [
   ['bank_bestand', "bank IN ('ABN','ING')", "bank IN ('ABN','ING','TRIODOS')"],
   ['bank_transactie', 'formaat IN ' + IN(FORMAAT_V1), 'formaat IN ' + IN(L.formaat)],
 ];
-function M5(db) {
+function M5(db, vervang) {
   const tel = (hooi, naald) => hooi.split(naald).length - 1;
-  const nieuw = new Map();
-  for (const [tabel, oud, wordt] of M5_VERVANG) {
+  const nieuw = new Map(), gewijzigd = new Set();
+  for (const [tabel, oud, wordt] of vervang || M5_VERVANG) {
     if (!nieuw.has(tabel)) {
       const r = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(tabel);
       if (!r || !r.sql) throw new DbFout('migratie_5', 'tabel ' + tabel + ' niet gevonden');
       nieuw.set(tabel, r.sql);
     }
     const sql = nieuw.get(tabel);
+    if (tel(sql, oud) === 0 && tel(sql, wordt) === 1) continue;   // al verruimd
     if (tel(sql, oud) !== 1) throw new DbFout('migratie_5', tabel + ': CHECK-tekst ' + oud.slice(0, 40) + ' staat er ' + tel(sql, oud) + ' keer');
     nieuw.set(tabel, sql.replace(oud, wordt));
+    gewijzigd.add(tabel);
   }
+  for (const tabel of [...nieuw.keys()]) if (!gewijzigd.has(tabel)) nieuw.delete(tabel);
+  if (!nieuw.size) return;
   const versie = Number(db.prepare('PRAGMA schema_version').get().schema_version);
   db.exec('PRAGMA writable_schema = ON');
   try {
@@ -1187,7 +1195,7 @@ function health(fdb) {
 }
 
 module.exports = {
-  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN,
+  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
   terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,

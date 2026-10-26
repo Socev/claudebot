@@ -68,6 +68,42 @@ const inc = (iban, naam, remi, csid, marf) => '/TRTP/SEPA Incasso algemeen doorl
   '/REMI/' + remi + '/IBAN/' + iban + '/BIC/TESTNL2A/EREF/' + remi.replace(/\s/g, '');
 const hist = (t, bytes, naam, extra) => F.verwerkBankbestand(t.fdb, t.eig, Buffer.from(bytes), naam || 'export.tab', NU, Object.assign({ modus: 'historisch', herkomst: 'toets' }, extra || {}));
 
+test('Triodos-CSV (wv1299) historisch via verwerkBankbestand: bank TRIODOS en formaat triodos_csv in de database, Privé weg, saldo per rekening, tweede keer al bekend', () => {
+  const t = opzet();
+  const SEL = maakIban('NL', 'TRIO', '0000000041'), SELP = maakIban('NL', 'TRIO', '0000000042'), PRT = maakIban('NL', 'TRIO', '0000000049');
+  D.transactie(t.fdb, () => {
+    D.voegToe(t.fdb, 'entiteit', { sleutel: 'sel', naam: 'Stichting Proef' });
+    D.voegToe(t.fdb, 'rekening', { id: D.nieuwId(), entiteit: 'sel', iban: SEL, bank: 'TRIODOS', bank_formaat: 'triodos_csv', controle: 1, alleen_eigenaar: 0 });
+    D.voegToe(t.fdb, 'rekening', { id: D.nieuwId(), entiteit: 'sel', iban: SELP, bank: 'TRIODOS', bank_formaat: 'triodos_csv', controle: 1, alleen_eigenaar: 0 });
+    D.voegToe(t.fdb, 'rekening', { id: D.nieuwId(), entiteit: 'prive', iban: PRT, bank: 'TRIODOS', bank_formaat: 'triodos_csv', controle: 0, alleen_eigenaar: 1 });
+  });
+  const r = (d, e, b, dc, n, tp, c, o, s) => [d, e, b, dc, n, tp, c, o, s].map((x) => '"' + x + '"').join(',');
+  const csv = [
+    r('03-01-2020', SEL, '250,00', 'Credit', 'Leverancier A B.V.', 'TESTNL2A ' + LEV.A, 'ET', 'terugbetaling', '250,00'),
+    r('04-01-2020', PRT, '10,00', 'Debet', 'Winkel', 'TESTNL2A ' + LEV.P, 'ET', 'privé', '-10,00'),
+    r('05-01-2020', SELP, '100,00', 'Credit', 'Stichting Proef', 'TESTNL2A ' + SEL, 'ET', 'sparen', '100,00'),
+    r('05-01-2020', SEL, '100,00', 'Debet', 'Stichting Proef', 'TESTNL2A ' + SELP, 'ET', 'sparen', '150,00'),
+    r('06-01-2020', SEL, '12,10', 'Debet', 'Leverancier C B.V.', 'TESTNL2A ' + LEV.C, 'EI', 'NL00ZZZTEST0000000301 2020 1', '137,90'),
+    r('02-10-2026', SEL, '5,00', 'Debet', '', '', 'KN', 'Kosten', '132,90'),
+  ].join('\r\n') + '\r\n';
+  const u = hist(t, csv, 'mutations.csv');
+  assert.equal(u.formaat, 'triodos_csv');
+  assert.equal(u.nieuw, 5); assert.equal(u.prive_weggegooid, 1); assert.equal(u.archief, 4);
+  for (const x of Object.values(u.saldo)) assert.equal(x.sluit, true, JSON.stringify(u.saldo));
+  const bb = t.fdb.db.prepare('SELECT formaat, bank, modus, aantal, periode_van, periode_tot FROM bank_bestand').get();
+  assert.deepEqual(Object.assign({}, bb), { formaat: 'triodos_csv', bank: 'TRIODOS', modus: 'historisch', aantal: 5, periode_van: '2020-01-03', periode_tot: '2026-10-02' });
+  assert.equal(t.n("SELECT count(*) AS n FROM bank_transactie WHERE formaat = 'triodos_csv' AND entiteit = 'sel'"), 5);
+  assert.equal(t.n('SELECT count(*) AS n FROM bank_transactie WHERE eigen_iban = ?', [PRT]), 0);
+  assert.equal(t.n("SELECT count(*) AS n FROM bank_transactie WHERE is_incasso = 1 AND incassant_id = 'NL00ZZZTEST0000000301'"), 1);
+  assert.equal(t.n("SELECT count(*) AS n FROM bank_transactie WHERE formaat = 'triodos_csv' AND boekdatum < ? AND alleen_eigenaar = 1", [START]), 4);
+  const twee = hist(t, csv, 'mutations.csv');
+  assert.equal(twee.al_bekend, true); assert.equal(twee.nieuw, 0);
+  // dezelfde mutaties in een nieuwe export (LF, andere bytes): niets nieuw
+  const drie = hist(t, csv.replace(/\r\n/g, '\n'), 'mutations2.csv');
+  assert.equal(drie.nieuw, 0); assert.equal(drie.al_bekend_regels, 5);
+  D.sluit(t.fdb);
+});
+
 // ───────────────────────────── parser: saldocontrole ─────────────────────────────
 
 test('saldocontrole: ABN-TAB sluit (ook nieuwste eerst), een gat is een breuk maar geen weigering; ING met en zonder saldokolom', () => {
