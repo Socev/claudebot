@@ -19,6 +19,11 @@ const fs = require('fs');
 const path = require('path');
 
 const BLOK_BEGIN = '<!-- ovis:blok begin -->', BLOK_EIND = '<!-- ovis:blok eind -->';
+// SB2 fase 1a (wv1271, bouwplan Second Brain 2.0 § 6 K2): het begin draagt id + content_hash (16 hex van sha256 over de tekst tussen begin
+// en eind). Klopt de hash niet meer, dan heeft iemand binnen het blok getypt: de compiler overschrijft het dan NIET (eerder ging dat 's nachts
+// stil verloren) en de Bibliothecaris meldt het als BB8. Een blok zonder hash (vóór 26-10-2026) is van de compiler en wordt één keer
+// vervangen door de nieuwe vorm.
+const BLOK_BEGIN_RE = /<!-- ovis:blok begin(?: id="([^"<>]{1,80})" content_hash="([0-9a-f]{16})")? -->/;
 const MAX_PAGINAS = 2000, MAX_BYTES = 256 * 1024;
 const SCHRIJVERS_OK = ['compiler', 'migratie-0002', 'activeer', 'kaart'];
 const SOORTEN = ['eigen', 'leverancier', 'instantie', 'bank', 'verzekeraar', 'praktijk', 'zorgpartner', 'afzender'];
@@ -106,12 +111,31 @@ function frontmatter(tekst) {
   return { velden: velden, eind: eind, regels: regels };
 }
 
+// Waar staat het blok? { geen } | { fout } | { b, bin (na het begin), e (begin van het eind), id, hash }. Zelfde regels als vóór wv1271:
+// begin zonder eind (of omgekeerd), eind vóór begin of twee keer een begin = half of dubbel.
+function blokPlek(tekst) {
+  const t = String(tekst);
+  const re = new RegExp(BLOK_BEGIN_RE.source, 'g'), ms = [];
+  let m;
+  while ((m = re.exec(t)) !== null) ms.push(m);
+  const e = t.indexOf(BLOK_EIND);
+  if (!ms.length && e < 0) return { geen: true };
+  if (ms.length !== 1 || e < 0 || e < ms[0].index) return { fout: 'gegenereerd blok half of dubbel' };
+  return { b: ms[0].index, bin: ms[0].index + ms[0][0].length, e: e, id: ms[0][1] || null, hash: ms[0][2] || null };
+}
+function blokHash(binnen) { return crypto.createHash('sha256').update(String(binnen), 'utf8').digest('hex').slice(0, 16); }
+// true = er staat een blok mét hash en de tekst erbinnen is niet meer wat de compiler schreef (handwerk; K2).
+function blokHandwerk(tekst) {
+  const t = String(tekst).replace(/\r\n?/g, '\n'), pl = blokPlek(t);
+  return !!(pl.hash && blokHash(t.slice(pl.bin, pl.e)) !== pl.hash);
+}
+
 // Vingerafdruk zonder het gegenereerde blok en zonder `updated:` in de frontmatter (Fable wv979 #13).
 function vingerafdruk(tekst) {
   const t = String(tekst).replace(/\r\n?/g, '\n');
-  const b = t.indexOf(BLOK_BEGIN), e = t.indexOf(BLOK_EIND);
-  if ((b >= 0) !== (e >= 0) || (b >= 0 && e < b) || (b >= 0 && t.indexOf(BLOK_BEGIN, b + 1) >= 0)) return { fout: 'gegenereerd blok half of dubbel' };
-  const zonder = b >= 0 ? t.slice(0, b).replace(/\n+$/, '\n') + t.slice(e + BLOK_EIND.length).replace(/^\n+/, '') : t;
+  const pl = blokPlek(t);
+  if (pl.fout) return { fout: pl.fout };
+  const zonder = !pl.geen ? t.slice(0, pl.b).replace(/\n+$/, '\n') + t.slice(pl.e + BLOK_EIND.length).replace(/^\n+/, '') : t;
   const regels = zonder.split('\n');
   let eind = -1;
   if (regels[0] === '---') for (let i = 1; i < regels.length; i++) if (regels[i] === '---') { eind = i; break; }
@@ -138,7 +162,10 @@ function leesPagina(rel, tekst) {
   uit.soort = typeof v.soort === 'string' ? v.soort : '';
   uit.status = v.status === 'concept' ? 'concept' : v.status === 'vast' ? 'vast' : '';
   uit.naam = typeof v.naam === 'string' ? v.naam : '';
-  uit.aliassen = lijst(v.aliassen);
+  // SB2 fase 1a (wv1271): het veld heet voortaan `aliases` (zoals op de andere 1.236 pagina's en in Obsidian); `aliassen` blijft gelezen
+  // tot alle entiteitpagina's om zijn. Allebei = fout: welke lijst telt, beslist niemand stil.
+  if (v.aliases !== undefined && v.aliassen !== undefined) f.push('aliases en aliassen staan er allebei: hou alleen aliases');
+  uit.aliassen = lijst(v.aliases !== undefined ? v.aliases : v.aliassen);
   uit.kvk = typeof v.kvk === 'string' ? v.kvk.replace(/\s/g, '') : '';
   uit.agb = typeof v.agb === 'string' ? v.agb.replace(/\s/g, '') : '';
   uit.iban = typeof v.iban === 'string' ? v.iban.replace(/\s/g, '').toUpperCase() : '';
@@ -234,23 +261,23 @@ function blokTekst(knoop, handvatten, contact) {
   const c = contact.filter(function (x) { return x.status !== 'vervallen'; }).map(function (x) {
     return x.veld + ' (' + STATUS_WOORD[x.status] + (x.intrekking ? '; van de pagina gehaald' : '') + ')';
   });
-  return [BLOK_BEGIN, '## Wat OVIS van deze partij weet', '',
+  const binnen = '\n' + ['## Wat OVIS van deze partij weet', '',
     '*Gegenereerd door de OVIS-compiler (nacht); niet met de hand bewerken. Bron is de frontmatter hierboven; een nieuw kenmerk of contactgegeven telt pas na Davids Ja.*', '',
     '- Herkenningskenmerken: ' + (h.length ? h.join(' · ') : 'geen'),
     '- Contactgegevens in het register: ' + (c.length ? c.join(' · ') : 'geen'),
-    '- Register: ' + (knoop.concept ? 'concept · ' : '') + 'compilatie ' + (knoop.compilatienummer || '–') + ', laatst gewijzigd ' + (knoop.gecompileerd_op ? datumNl(knoop.gecompileerd_op) : '–'),
-    BLOK_EIND].join('\n');
+    '- Register: ' + (knoop.concept ? 'concept · ' : '') + 'compilatie ' + (knoop.compilatienummer || '–') + ', laatst gewijzigd ' + (knoop.gecompileerd_op ? datumNl(knoop.gecompileerd_op) : '–')
+  ].join('\n') + '\n';
+  const id = String(knoop.id || '').replace(/[^A-Za-z0-9:_.-]/g, '').slice(0, 80) || 'onbekend';
+  return '<!-- ovis:blok begin id="' + id + '" content_hash="' + blokHash(binnen) + '" -->' + binnen + BLOK_EIND;
 }
 function zetBlok(tekst, blok) {
-  const t = String(tekst).replace(/\r\n?/g, '\n');
-  const b = t.indexOf(BLOK_BEGIN), e = t.indexOf(BLOK_EIND);
-  if (b >= 0 && e > b) return t.slice(0, b) + blok + t.slice(e + BLOK_EIND.length);
+  const t = String(tekst).replace(/\r\n?/g, '\n'), pl = blokPlek(t);
+  if (pl.b !== undefined) return t.slice(0, pl.b) + blok + t.slice(pl.e + BLOK_EIND.length);
   return t.replace(/\n*$/, '\n\n') + blok + '\n';
 }
 function huidigBlok(tekst) {
-  const t = String(tekst).replace(/\r\n?/g, '\n');
-  const b = t.indexOf(BLOK_BEGIN), e = t.indexOf(BLOK_EIND);
-  return b >= 0 && e > b ? t.slice(b, e + BLOK_EIND.length) : null;
+  const t = String(tekst).replace(/\r\n?/g, '\n'), pl = blokPlek(t);
+  return pl.b !== undefined ? t.slice(pl.b, pl.e + BLOK_EIND.length) : null;
 }
 
 // ── Bibliothecaris: de checks (pure functie over pagina's en register) ──
@@ -283,6 +310,8 @@ function checks(paginas, reg, compileerFouten) {
   Object.keys(anker).forEach(function (id) {
     const p = anker[id], k = knopen[id];
     tel.geldig++;
+    // BB8 (wv1271, K2): iemand typte binnen het gegenereerde blok; de compiler laat het staan tot het is opgelost
+    if (p.tekst !== undefined && blokHandwerk(p.tekst)) bev('BB8', id + '-blok', 'gegenereerd blok van ' + id + ' is met de hand gewijzigd', p.pad + ': de tekst binnen het OVIS-blok is niet meer wat de compiler schreef; hij overschrijft het niet. Voorstel: wat erin getypt is naar de frontmatter (de bron) zetten, daarna het blok laten vernieuwen.');
     if (!k) { tel.verouderd++; return; }   // nog niet gecompileerd (BB4: alleen telling)
     if (k.bron_sha !== p.sha) tel.verouderd++;
     // BB1 sleutels
@@ -552,7 +581,7 @@ function kaartBiblio(reg, o) {
   const knopen = (reg.knopen || []).slice().sort(function (a, b) { return b.id.length - a.id.length; });
   function naamUit(bid) { const rest = bid.replace(/^BB\d-/, ''); const k = knopen.find(function (x) { return rest === x.id || rest.indexOf(x.id + '-') === 0; }); return k ? kort(k.naam, 50) : null; }
   const kandidaten = (reg.bevindingen || []).filter(function (b) {
-    if (!/^BB[123567]$/.test(b.check_id) || (b.check_id === 'BB3' && b.ernst === 'serious')) return false;
+    if (!/^BB[1235678]$/.test(b.check_id) || (b.check_id === 'BB3' && b.ernst === 'serious')) return false;
     if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart
     return !geh.open.has('structuur_state#' + b.bevinding_id) && !geh.rust.has('structuur_state#' + b.bevinding_id + '#');
   }).slice(0, KAART_STAPPEN);
@@ -564,7 +593,8 @@ function kaartBiblio(reg, o) {
       BB3: nm + ': pagina en register lopen uiteen. Ik werk het register bij en zoek uit waarom.',
       BB5: 'Een kenmerk staat bij twee organisaties (' + kort(String(b.samenvatting || '').replace(/^.*\(/, '').replace(/\).*$/, '').split('/').map(function (id) { const k = knopen.find(function (x) { return x.id === id; }); return k ? k.naam : id.replace(/^org:/, ''); }).join(' en '), 80) + '). Ik zoek uit bij wie het hoort en haal het bij de ander van de pagina.',
       BB6: nm + ': de pagina is niet te lezen. Ik herstel hem.',
-      BB7: nm + ': is buiten de gewone weg gewijzigd. Ik zet het terug zoals de pagina zegt.' }[b.check_id];
+      BB7: nm + ': is buiten de gewone weg gewijzigd. Ik zet het terug zoals de pagina zegt.',
+      BB8: nm + ': in het automatische blok onderaan de pagina is met de hand iets veranderd. Ik zet dat in de pagina zelf; daarna maakt OVIS het blok opnieuw.' }[b.check_id];
     return nr + '. ' + z;
   });
   return { kaart: { sleutel: sleutel, soort: 'biblio', titel: kandidaten.length + (kandidaten.length === 1 ? ' verschil' : ' verschillen') + ' in het entiteitenregister — zo oplossen?',
@@ -650,7 +680,7 @@ function maak(o) {
     const t0 = nu(), reg = await register(), knopen = {};
     reg.knopen.forEach(function (k) { knopen[k.id] = k; });
     const comp = reg.knopen.reduce(function (x, k) { return Math.max(x, Number(k.compilatienummer) || 0); }, 0) + 1;
-    const paginas = leesAlles(), uit = { modus: modus, paginas: paginas.length, gestuurd: 0, nieuw: 0, fouten: [], voorstellen: 0, ingetrokken: 0, kritiek: 0, blokken: 0, overgeslagen: 0 };
+    const paginas = leesAlles(), uit = { modus: modus, paginas: paginas.length, gestuurd: 0, nieuw: 0, fouten: [], voorstellen: 0, ingetrokken: 0, kritiek: 0, blokken: 0, overgeslagen: 0, handwerk: 0 };
     const perId = {};
     paginas.forEach(function (p) { if (!p.fouten.length) (perId[p.id] = perId[p.id] || []).push(p); else uit.fouten.push({ pad: p.pad, fout: p.fouten[0] }); });
     const te = [];
@@ -682,19 +712,21 @@ function maak(o) {
         if (!p || k.bron_sha !== p.sha) continue;
         const blok = blokTekst(k, h2[id] || [], c2[id] || []);
         if (huidigBlok(p.tekst) === blok) continue;
+        if (blokHandwerk(p.tekst)) { uit.handwerk++; continue; }   // K2: niet overschrijven; de Bibliothecaris meldt het (BB8)
         if (opties.droog) { uit.blokken++; continue; }
         try {
           // opnieuw lezen vlak voor het schrijven: alleen als de inhoud (zonder blok) niet veranderde
           const vers = o.lees(path.join(vault, p.pad));
           const va = vingerafdruk(vers);
           if (va.sha !== p.sha) { uit.fouten.push({ pad: p.pad, fout: 'pagina veranderde tijdens de ronde; blok volgende nacht' }); continue; }
+          if (blokHandwerk(vers)) { uit.handwerk++; continue; }
           o.schrijf(path.join(vault, p.pad), zetBlok(vers, blok));
           uit.blokken++;
         } catch (e) { uit.fouten.push({ pad: p.pad, fout: 'blok schrijven: ' + String(e && e.code || e && e.message || e).slice(0, 80) }); }
       }
     }
     uit.ms = nu() - t0;
-    log('ovis-compileer ' + JSON.stringify({ modus: modus, paginas: uit.paginas, gestuurd: uit.gestuurd, nieuw: uit.nieuw, fouten: uit.fouten.length, blokken: uit.blokken }));
+    log('ovis-compileer ' + JSON.stringify({ modus: modus, paginas: uit.paginas, gestuurd: uit.gestuurd, nieuw: uit.nieuw, fouten: uit.fouten.length, blokken: uit.blokken, handwerk: uit.handwerk }));
     return uit;
   }
   // Bibliothecaris: leest, vergelijkt, schrijft bevindingen (BB), stempelt (niet op afroep). opties.sinds = log sinds (ISO).
@@ -777,6 +809,7 @@ function boxRijFout(fout, tijd) {
 }
 
 module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina, frontmatter: frontmatter, vingerafdruk: vingerafdruk, checks: checks, blokTekst: blokTekst,
+  blokHandwerk: blokHandwerk, blokHash: blokHash, blokPlek: blokPlek,
   zetBlok: zetBlok, huidigBlok: huidigBlok, rpcInvoer: rpcInvoer, handvattenVan: handvattenVan, normHandvat: normHandvat, boxRij: boxRij, slug: slug,
   BLOK_BEGIN: BLOK_BEGIN, BLOK_EIND: BLOK_EIND, SCHRIJVERS_OK: SCHRIJVERS_OK,
   plan: plan, kaartBundel: kaartBundel, kaartenKritiek: kaartenKritiek, kaartBiblio: kaartBiblio, eruitUit: eruitUit, uitkomstZin: uitkomstZin, isoWeek: isoWeek,

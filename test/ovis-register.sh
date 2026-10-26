@@ -48,6 +48,24 @@ const TGP = '10_Zakelijk/Tolgaarde/Entiteit - TG.md';
   toets('2 half blok = fout', !!R.vingerafdruk(TG + '\n' + R.BLOK_BEGIN + '\n').fout);
   toets('2 echte wijziging telt', R.vingerafdruk(TG.replace('Tekst.', 'Tekst!')).sha !== a);
   toets('2 zetBlok idempotent', R.zetBlok(metBlok, R.huidigBlok(metBlok)) === metBlok);
+  // wv1271 (K2): oud blok zonder hash en nieuw blok met hash; handwerk binnen het blok
+  const oudBlok = TG + '\n' + R.BLOK_BEGIN + '\n## Wat OVIS van deze partij weet\n\n- oud\n' + R.BLOK_EIND + '\n';
+  toets('2 oud blok (zonder hash) telt niet mee en is geen handwerk', R.vingerafdruk(oudBlok).sha === a && !R.blokHandwerk(oudBlok));
+  toets('2 oud blok wordt vervangen door de nieuwe vorm', /content_hash="/.test(R.zetBlok(oudBlok, R.blokTekst({ id: 'TG' }, [], []))) && R.zetBlok(oudBlok, R.blokTekst({ id: 'TG' }, [], [])).indexOf('- oud') < 0);
+  const nieuwBlok = R.zetBlok(TG, R.blokTekst({ id: 'TG', compilatienummer: 3 }, [], []));
+  const hand = nieuwBlok.replace('- Herkenningskenmerken: geen', '- Herkenningskenmerken: geen (David: ook "TG Leusden")');
+  toets('2 nieuw blok onaangeraakt = geen handwerk', !R.blokHandwerk(nieuwBlok) && R.blokPlek(nieuwBlok).id === 'TG');
+  toets('2 getypt binnen het blok = handwerk, vingerafdruk gelijk', R.blokHandwerk(hand) && R.vingerafdruk(hand).sha === a);
+  toets('2 CRLF verandert niets aan de hash', !R.blokHandwerk(nieuwBlok.replace(/\n/g, '\r\n')));
+  toets('2 twee keer een begin (oud + nieuw) = fout', !!R.vingerafdruk(nieuwBlok + '\n' + R.BLOK_BEGIN + '\n' + R.BLOK_EIND + '\n').fout);
+  toets('2 org-id in het blok', R.blokPlek(R.blokTekst({ id: 'org:proef-energie' }, [], [])).id === 'org:proef-energie');
+}
+// ── 2b. aliases (wv1271): beide namen gelezen, allebei = fout ──
+{ const nieuw = R.leesPagina(TGP, TG.replace('aliassen:', 'aliases:'));
+  toets('2b aliases gelezen', nieuw.fouten.length === 0 && JSON.stringify(nieuw.aliassen) === '["Tolgaarde","Huisartsenpraktijk Tolgaarde"]', nieuw);
+  toets('2b aliases geeft dezelfde handvatten als aliassen', JSON.stringify(R.handvattenVan(nieuw)) === JSON.stringify(R.handvattenVan(R.leesPagina(TGP, TG))));
+  const beide = R.leesPagina(TGP, TG.replace('aliassen:', 'aliases: [X]\naliassen:'));
+  toets('2b aliases én aliassen = fout', beide.fouten.some((f) => /allebei/.test(f)), beide.fouten);
 }
 // ── 3. validatie ──
 { const f = function (t, pad) { return R.leesPagina(pad || TGP, t).fouten.join(' | '); };
@@ -123,7 +141,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('4 nacht droog schrijft niets', r.blokken === 1 && fs.readFileSync(path.join(v, TGP), 'utf8') === TG, r);
     r = await m.compileer('nacht', { grendel: true });
     const na = fs.readFileSync(path.join(v, TGP), 'utf8');
-    toets('4 nacht schrijft het blok', r.blokken === 1 && na.indexOf(R.BLOK_BEGIN) > 0 && /KvK 84185171 \(vast\)/.test(na), r);
+    toets('4 nacht schrijft het blok (met id + content_hash, wv1271)', r.blokken === 1 && /<!-- ovis:blok begin id="TG" content_hash="[0-9a-f]{16}" -->/.test(na) && /KvK 84185171 \(vast\)/.test(na) && !R.blokHandwerk(na), r);
     r = await m.compileer('nacht', { grendel: true });
     toets('4 nacht tweede keer: blok ongewijzigd (idempotent)', r.blokken === 0 && r.gestuurd === 0 && fs.readFileSync(path.join(v, TGP), 'utf8') === na, r);
     toets('4 blok verandert de vingerafdruk niet', R.vingerafdruk(na).sha === n.db.knopen[0].bron_sha);
@@ -134,6 +152,20 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const m2 = R.maak({ vault: v2, sbRpc: n2.sbRpc, lees: (p) => { teller++; return teller > 1 ? TG.replace('Tekst.', 'Nieuw.') : fs.readFileSync(p, 'utf8'); }, schrijf: (p, t) => fs.writeFileSync(p, t) });
     r = await m2.compileer('nacht', { grendel: true });
     toets('4 pagina veranderde tijdens de ronde: geen blok', r.blokken === 0 && r.fouten.some((f) => /veranderde/.test(f.fout)), r);
+    // wv1271 K2: handwerk binnen het blok wordt 's nachts niet overschreven; Bibliothecaris BB8
+    const met = fs.readFileSync(path.join(v, TGP), 'utf8');
+    const hand = met.replace('KvK 84185171 (vast)', 'KvK 84185171 (vast, nagekeken door David)');
+    fs.writeFileSync(path.join(v, TGP), hand);
+    n.db.knopen[0].compilatienummer = 99;   // het blok zou anders opnieuw geschreven worden
+    r = await m.compileer('nacht', { grendel: true });
+    toets('4 handwerk in het blok: niet overschreven', r.blokken === 0 && r.handwerk === 1 && fs.readFileSync(path.join(v, TGP), 'utf8') === hand, r);
+    const bb = R.checks(m.leesAlles(), { knopen: n.db.knopen, handvatten: TGH, contact: [], vertaling: VERT, log: [] }).bevindingen;
+    toets('4 Bibliothecaris meldt BB8', bb.some((x) => x.check_id === 'BB8' && x.bevinding_id === 'BB8-TG-blok'), bb.map((x) => x.bevinding_id));
+    const kb = R.kaartBiblio({ knopen: n.db.knopen, bevindingen: [{ check_id: 'BB8', bevinding_id: 'BB8-TG-blok', ernst: 'warning' }], kaarten: [], log: [] }, { nu: Date.parse('2026-10-26T10:00:00Z') });
+    toets('4 BB8 komt op de Bibliothecariskaart', kb.kaart && kb.kaart.stappen.length === 1 && /met de hand/.test(kb.kaart.stappen[0]), kb);
+    fs.writeFileSync(path.join(v, TGP), met);
+    r = await m.compileer('nacht', { grendel: true });
+    toets('4 blok weer onaangeraakt: nacht vernieuwt het', r.handwerk === 0 && r.blokken === 1 && /compilatie 99/.test(fs.readFileSync(path.join(v, TGP), 'utf8')), r);
   }
   // ── 5. Bibliothecaris ──
   { const sha = R.vingerafdruk(TG).sha;

@@ -2248,6 +2248,27 @@ function uitrolWacht() {
   return info;
 }
 
+// ── Onderhoudsstand van de vault (wv1271, Second Brain 2.0 fase 1a; bouwplan § 7.1 punt 1 en § 8) ──────────────
+// Schakelbestand (alleen claude): zolang het aan staat wachten automatische /run-beurten vóór hun start (geen limiet), starten geen
+// machinekamer-agents of managerrondes, en houdt de pod de vault-grendel vast (bisync, vault-tar en OVIS-nachtronde wachten). Na 2 uur
+// één alarm in de machinekamer; nooit vanzelf hervatten (Fable MOET 4). Zetten en opheffen: socev-scripts sb2 onderhoud.py.
+const ONDERHOUD_BESTAND = serverPad('onderhoud', process.env.ONDERHOUD_BESTAND, '/opt/data/onderhoudsstand.json', serverProefDeel('onderhoudsstand.json'));
+const ONDERHOUD_LOCK = serverPad('onderhoud_lock', process.env.ONDERHOUD_LOCK, '/opt/data/bin/.vault.lock', serverProefDeel('vault.lock'));
+const ONDERHOUD_MOD = (function () { try { return require('./onderhoud.js'); } catch (e) { logError('onderhoud-module', e); return null; } })();
+// Zonder module (oude release-inhoud): nooit wachten, stand 'onbekend' in /health.
+const onderhoud = !ONDERHOUD_MOD ? { stand: function () { return { aan: false, onbekend: true }; }, moetWachten: function () { return false; },
+  wacht: function () { return Promise.resolve(); }, tik: function () { return Promise.resolve({}); } } : ONDERHOUD_MOD.maak({ bestand: ONDERHOUD_BESTAND, lock: ONDERHOUD_LOCK, houderBestand: ONDERHOUD_BESTAND + '.houder',
+  alarmBestand: ONDERHOUD_BESTAND + '.alarm', spawn: spawn, fout: logError, log: function (s) { schrijfLog(nu() + ' ' + s); },
+  tijdNl: function (iso) { return new Date(iso).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' }); },
+  bericht: function (tekst) {
+    return berichtIntern({ kanaal: 'machinekamer', bron: 'onderhoud', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: 'onderhoudsstand-alarm' }).then(function (r) {
+      if (r.status !== 200) throw new Error('bericht gaf ' + r.status);
+      return r;
+    });
+  } });
+setTimeout(function () { onderhoud.tik().catch(function (e) { logError('onderhoud-tik', e); }); }, 5000).unref();
+setInterval(function () { onderhoud.tik().catch(function (e) { logError('onderhoud-tik', e); }); }, 30 * 1000).unref();
+
 // Eén regel op het moment dat een job zijn eindstatus krijgt. Bewust GEEN
 // uitvoer, alleen de omvang ervan: de uitvoer kan patientgegevens of
 // persoonsgegevens bevatten en hoort niet op schijf in een logbestand.
@@ -3733,7 +3754,12 @@ function handleRequest(req, res) {
       kluis_overgeslagen: process.env.KLUIS_OVERGESLAGEN === '1',
       brein: breinInfo(),
       // wacht een uitrol op stilte? Dan start de werkvoorraad-tikker niets (wv91, 7-10-2026)
-      uitrol: uitrolWacht(),
+      // wv1271: tijdens de onderhoudsstand van de vault staat ook uitrol.wacht op true (door: 'onderhoud'): de werkvoorraad-tikker
+      // (n8n, Tik-invoer) leest alleen dat veld en claimt dan niets — zonder wijziging in n8n. uitrol.sh leest het veld niet.
+      uitrol: (function () { const u = uitrolWacht(), oh = onderhoud.stand();
+        return oh.aan && !u.wacht ? Object.assign({}, u, { wacht: true, wacht_sinds: oh.sinds, door: 'onderhoud' }) : u; })(),
+      // wv1271: onderhoudsstand van de vault (aan, sinds, reden, grendel vast/wacht, wachtende runs)
+      onderhoud: onderhoud.stand(),
       // wv701: levensbewaking (bewaker.js); leeft false = de bewaker stopte (zie supervisor.log, regels 'bewaker[')
       bewaker: bewakerInfo(),
       // wv698: argv-detector (sleutelwaarden in /proc/*/cmdline); treffers_24u > 0 = er lekt iets, zie de box
@@ -3841,7 +3867,9 @@ function handleRequest(req, res) {
       // Serieel per chat, ongeacht het brein: één gesprek, één beurt tegelijk.
       // De spiegel niet teruggeven: een trage schijf mag de volgende beurt niet ophouden, en een fout raakt de beurt nooit (fail-open).
       enqueue(sessionKey(ws, chatId), function () {
-        return processJob(jobId, telHint + prompt, d.session_id, d.files, chatId, ws, keuze, gereedschap).then(function () {
+        // wv1271: onderhoudsstand — automatische beurten wachten hier (in hun eigen keten, dus de volgorde blijft) tot de stand uit is
+        const wacht = onderhoud.moetWachten({ bron: spiegel ? 'telegram' : '', gereedschap: gereedschap }) ? onderhoud.wacht(jobId) : Promise.resolve();
+        return wacht.then(function () { return processJob(jobId, telHint + prompt, d.session_id, d.files, chatId, ws, keuze, gereedschap); }).then(function () {
           if (telHint) { try { telZelfNaRun(jobId); } catch (e) { logError('tel-zelf-na', e); } }
           if (spiegel) { try { appTelegramSpiegel(jobId, prompt, d.files).catch(function (e) { logError('app-spiegel', e); }); } catch (e) { logError('app-spiegel', e); } }
         });
@@ -3953,6 +3981,12 @@ function handleRequest(req, res) {
       // het spraakkastje (beperkt=auto: David spreekt zelf) starten gewoon.
       if (/^\s*machinekamer:/i.test(label) && d.beperkt !== 'auto') {
         const u = uitrolWacht();
+        const oh = onderhoud.stand();   // wv1271: ook niet tijdens de onderhoudsstand van de vault
+        if (oh.aan) {
+          res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '600' });
+          return res.end(JSON.stringify({ ok: false, error: 'onderhoud', sinds: oh.sinds,
+            uitleg: 'De vault staat in de onderhoudsstand; machinekamer-agents starten pas als die uit is. Zet het in de werkvoorraad.' }));
+        }
         if (u.wacht) {
           res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '600' });
           return res.end(JSON.stringify({ ok: false, error: 'uitrol-wacht', wacht_sinds: u.wacht_sinds, sha: u.sha,
@@ -14697,7 +14731,7 @@ const managers = (function () {
     return MANAGERS_MOD.maak({ dir: MANAGERS_DIR, fout: logError, jobsOpSessie: managersJobs, startRun: managersStartRun, knopJa: managersKnopJa,
       startScript: ovisStartScript,   // wv979: Bibliothecaris (soort script)
       scriptLoopt: function (id) { return id === 'bibliothecaris' && ovisLoopt.nu === 'bibliothecaris' ? { job_id: 'tijdklok', created: ovisLoopt.sinds } : null; },   // diffreview #11
-      rolPrimair: rolPrimair, uitrolWacht: function () { return !!uitrolWacht().wacht; }, vangnet: account1Vangnet,
+      rolPrimair: rolPrimair, uitrolWacht: function () { return !!uitrolWacht().wacht || onderhoud.stand().aan; }, vangnet: account1Vangnet,   // wv1271: ook onderhoudsstand
       bericht: function (b) {
         return berichtIntern({ kanaal: 'machinekamer', bron: 'manager', klasse: 'normaal', soort: b.soort, tekst: b.tekst, sleutel: b.sleutel }).then(function (r) {
           if (r.status !== 200) logError('manager-bericht', new Error('bericht gaf ' + r.status + ' ' + JSON.stringify(r.j || {}).slice(0, 160)));

@@ -300,10 +300,15 @@ jobs:
       - name: "intake-ingang (wv1282, aanleverweg OVIS Intake)"
         if: ${{ !cancelled() }}
         run: bash test/intake-ingang.sh
-      # OVIS-register (wv979): frontmatter als tekst, vingerafdruk, validatie, compileer tegen een nep-databank, Bibliothecaris BB1-BB7.
+      # OVIS-register (wv979): frontmatter als tekst, vingerafdruk, validatie, compileer tegen een nep-databank, Bibliothecaris BB1-BB8.
+      # wv1271: aliases/aliassen, blok met id + content_hash, handwerk niet overschrijven (BB8).
       - name: "ovis-register (wv979, compiler + Bibliothecaris)"
         if: ${{ !cancelled() }}
         run: bash test/ovis-register.sh
+      # Onderhoudsstand van de vault (wv1271, SB2 fase 1a): wie wacht, echte flock-grendel, uit = los, alarm na 2 uur één keer.
+      - name: "onderhoud (wv1271, onderhoudsstand vault)"
+        if: ${{ !cancelled() }}
+        run: bash test/onderhoud.sh
       # Bandjes (wv739/wv743): register lezen/schrijven, routes, Studio-koppeling (nep-Piper), naKlaar, /smal, box-rij, server.js-blok in een vm.
       - name: "bandjes (wv743, mini-app Bandjes)"
         if: ${{ !cancelled() }}
