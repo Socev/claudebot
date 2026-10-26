@@ -3695,6 +3695,7 @@ function handleRequest(req, res) {
       ovis: typeof ovisInfo === 'function' ? ovisInfo() : { aan: false },   // wv979: OVIS-register (laatste dag-, nacht- en Bibliothecarisronde; aantallen, geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
+      mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },   // wv1269: App Mediatheek (aantallen, geen inhoud)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761/wv942: App AIX (laatste lezing, catalogus, plaatsing, uur- en weekronde; geen inhoud)
       aix: typeof aixInfo === 'function' ? aixInfo() : { aan: false },   // wv942: aix.js (sleutel bruikbaar?, laatst bereikbaar, plat sinds; nooit de sleutel)
@@ -4710,7 +4711,7 @@ const APP_SESSIES = path.join(APP_DATA, 'sessies.json');          // wv231: sess
 const APP_VAST = path.join(APP_DATA, 'vast.json');                // wv1051 (OVIS M1b): vastgezette plekken en Apps, alleen id's
 // § 4.3: de ene lijst privé-App-id's (catalogus src/modules.ts). Nooit op een apparaat met een vaste plek: de drie routes hieronder
 // weigeren dan, en vast.json gaat daar zonder deze id's naar de app (geen privé-App in het menu, ook geen lege kopregel).
-const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften'];
+const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften', 'mediatheek'];   // wv1269: Mediatheek (20_Prive)
 function appPriveDicht(a, id) { return !!(a && a.soort === 'vast') && APP_PRIVE_MODULES.indexOf(id) >= 0; }
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
@@ -4834,7 +4835,7 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
 const APP_BSN_SYS = '[Systeem: in Davids invoer stond een BSN-achtig getal (9 cijfers die de elfproef halen); de pod heeft het weggelaten (' + APP_BSN_MASKER + '). Vraag er niet naar; meestal was het een ander nummer.]';
 
-const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], managers: [], 'zoek-snel': [] },
+const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], managers: [], 'zoek-snel': [], mediatheek: [], 'mediatheek-bestand': [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
   auditVoorAuth: { minuut: 0, n: 0, overgeslagen: 0 },
   webauthn: null, webauthnFout: null, registerCache: null, locatie: {}, bestandenTotaal: 0, bestandenGemeten: false, bestandenIndex: null, wvCache: null, autoCache: null };
@@ -11527,6 +11528,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/bandjes' || route.indexOf('POST /app/bandjes/') === 0) return typeof appBandjes === 'function' ? appBandjes(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'bandjes');   // wv743
         if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
         if (route === 'GET /app/vast' || route === 'POST /app/vast') return appVastRoute(req, res, a, d);   // wv1051 (OVIS M1b): vastzetten
+        if (route === 'GET /app/mediatheek' || /^GET \/app\/mediatheek\/bestand\/[a-f0-9]{16}$/.test(route)) return typeof appMediatheek === 'function' ? appMediatheek(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mediatheek');   // wv1269: App Mediatheek (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
@@ -14757,6 +14759,45 @@ async function appRingkaart(req, res, a) {
   return appStuur(res, 200, uit);
 }
 // ── einde ringkaart ──
+
+// ── Mediatheek (wv1269, 26-10-2026; opdracht David 24-10 17:02, box-rij "Opdracht David: Mediatheek-app in de Socev-app") ──
+// App Mediatheek: de liedjes en andere artistieke uitingen uit 20_Prive/Mediatheek.md, per onderwerp, afspelen en downloaden. Logica en
+// padcontrole in mediatheek.js (alleen bestanden waar de pagina naar linkt, alleen onder 20_Prive, vaste extensies, realpath, geen
+// symlink, ≤ 20 MB). Hier: GET /app/mediatheek (lijst, stil bij 200) en GET /app/mediatheek/bestand/<id> (base64 in JSON, zoals
+// /app/bestand: de app speelt het af als blob, dus geen Range nodig, ook niet in Safari). Privé-module: op een apparaat met een vaste plek
+// dicht. Ontbreekt mediatheek.js in de release (terugrol), dan 404 en /health.mediatheek.aan=false.
+const MEDIATHEEK_MOD = (function () { const p = path.join(__dirname, 'mediatheek.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('mediatheek', e); return null; } })();
+const mediatheek = (function () { try { return MEDIATHEEK_MOD ? MEDIATHEEK_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, fout: logError }) : null; } catch (e) { logError('mediatheek', e); return null; } })();
+let mediatheekBezig = 0;
+function mediatheekInfo() {
+  if (!mediatheek) return { aan: false };
+  try { return mediatheek.health(); } catch (e) { return { aan: true, fout: true }; }
+}
+async function appMediatheek(req, res, a, route) {
+  if (!mediatheek) return appWeiger(res, 404, 'De Mediatheek zit niet in deze versie van de pod', 'mediatheek ontbreekt');
+  const lijst = route === 'GET /app/mediatheek';
+  if (appPriveDicht(a, 'mediatheek'))
+    return lijst ? appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'De Mediatheek staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' })
+      : appWeiger(res, 403, 'niet op een apparaat met een vaste plek', 'mediatheek vaste plek');
+  if (!appTeller('mediatheek', 300, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 300)', 'grens mediatheek');
+  if (lijst) {
+    let r;
+    try { r = mediatheek.stand(); } catch (e) { logError('app-mediatheek', e); return appWeiger(res, 500, 'fout op de pod', 'mediatheek uitzondering'); }
+    if (r.status === 200) res._app.stil = true;
+    else res._app.reden = 'mediatheek lijst (' + r.status + ')';
+    return appStuur(res, r.status, Object.assign({ vaste_plek: false }, r.j));
+  }
+  if (!appTeller('mediatheek-bestand', 120, 3600000)) return appWeiger(res, 429, 'te veel bestanden dit uur (max 120)', 'grens mediatheek-bestand');
+  if (mediatheekBezig >= 2) return appWeiger(res, 429, 'even geduld: er worden al twee bestanden geladen', 'mediatheek bezig');
+  const id = route.slice('GET /app/mediatheek/bestand/'.length);
+  mediatheekBezig++;
+  let r;
+  try { r = mediatheek.bestand(id); } catch (e) { logError('app-mediatheek', e); r = { status: 500, j: { ok: false, fout: 'fout op de pod' } }; }
+  finally { mediatheekBezig--; }
+  res._app.reden = 'mediatheek bestand ' + id + (r.ext ? ' ' + r.ext : '') + (r.status !== 200 ? ' (' + r.status + ')' : '');
+  return appStuur(res, r.status, r.j);
+}
+// ── einde mediatheek ──
 
 // ── Ideeënbeurs → AIX (wv761, wv861; sinds wv942 AIX: bouwplan "01_Ontwikkeling/AIX - Agentic Ideas eXchange (ontwerp 23-10-2026).md" § 5.3–§ 8) ──
 // App AIX (zelfde tegel als "Ideeën van buitenaf"): lezen wat andere agents etaleren, Socevs eigen winkel, en Klaar om te delen (Deel/Niet per

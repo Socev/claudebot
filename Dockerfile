@@ -170,6 +170,7 @@ COPY ideeen-filter.js /app/release-bootstrap/ideeen-filter.js
 COPY aix.js /app/release-bootstrap/aix.js
 COPY audio.js /app/release-bootstrap/audio.js
 COPY spreektekst.js /app/release-bootstrap/spreektekst.js
+COPY mediatheek.js /app/release-bootstrap/mediatheek.js
 
 COPY server.js /app/server.js
 COPY telegram-claude-bot.js /app/telegram-claude-bot.js
