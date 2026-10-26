@@ -1263,8 +1263,13 @@ function verwerkBankbestandTx(fdb, r, lees, sha, bron, naam, nu, opties, modus, 
     const kort_ = { soort: 'bank', formaat: lees.formaat, modus, periode: lees.periode, saldo: saldoKort(lees.saldo), check,
       rekeningen: Object.entries(lees.per_rekening).map(([iban, n]) => ({ rekening: eind4(iban), aantal: n })), prive_weggegooid: lees.prive_weggegooid };
     if (opties.droog) return Object.assign({ droog: true }, kort_);
+    // wv1329 (review #3): bij een overzetting uit PDF's is de saldoketen de bewaking tegen een verkeerd gelezen bedrag; breekt hij, niet inlezen
+    if (hist && !opties.forceer && Object.values(lees.saldo || {}).some((x) => !x.gecontroleerd || !x.sluit)) {
+      weiger(409, 'de saldoketen van dit historiebestand sluit niet; de machinekamer rekent het na', { code: 'saldo_sluit_niet', saldo: saldoKort(lees.saldo) });
+    }
     if (check.boven_drempel && !opties.forceer) {
-      if (dekking) weiger(409, 'bestand en database sluiten niet op elkaar aan (' + dekking.in_venster + ' nieuwe regels binnen de bestaande periode, ' + dekking.bestaand_rest + ' bestaande regels zonder tegenhanger); de machinekamer rekent het na', { code: 'dekking_sluit_niet', check });
+      // review wv1329 #6: regels na de laatste bestaande dag horen niet geforceerd binnen (een latere TAB zou ze opnieuw geven): bestand inkorten
+      if (dekking) weiger(409, 'bestand en database sluiten niet op elkaar aan (' + dekking.in_venster + ' nieuwe regels binnen de bestaande periode, ' + dekking.bestaand_rest + ' bestaande regels zonder tegenhanger); de machinekamer rekent het na (regels na de laatste bestaande dag: bestand daar inkorten, niet forceren)', { code: 'dekking_sluit_niet', check });
       weiger(409, 'dit bestand lijkt voor een deel al binnen te zijn onder een andere sleutel (' + check.mogelijk_dubbel + ' regels); de machinekamer rekent het na',
         { code: 'mogelijk_dubbel', check });
     }

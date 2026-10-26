@@ -105,3 +105,28 @@ test('tools/bank-historie.js: leest het CSV, weigert een gebroken saldoketen en 
   const b = A.open(dir);
   assert.equal(b.db.prepare("SELECT omschrijving FROM transacties WHERE herkomst_rij = 'abn-historie'").get().omschrijving.indexOf('|'), -1);
 });
+
+test('review wv1329 #1/#2: een tweede overzetting met andere Mutatie-ID\'s verdubbelt niet; nieuw binnen een eerdere overzetting geweigerd; bankdatum vóór het afschrift dekt niet af; strikt op tegenpartij eerst', () => {
+  const { a } = opzet();
+  A.bij(a, 'gez', [post('b1', '2025-05-02', -50, 950)]);
+  const eerste = [rij('X-2025-004-001', '2025-04-01', 1000, 1000), rij('X-2025-004-002', '2025-04-20', -5, 995)];
+  assert.equal(A.historieBij(a, 'gez', eerste).nieuw, 2);
+  // gecorrigeerde run: dezelfde regels onder andere nummers → afgedekt door de eerdere overzetting, niets nieuw
+  const tweede = [rij('X-2025-004-011', '2025-04-01', 1000, 1000), rij('X-2025-004-012', '2025-04-20', -5, 995)];
+  const t2 = A.historieBij(a, 'gez', tweede);
+  assert.deepEqual([t2.nieuw, t2.gedekt, t2.sluit], [0, 2, true]);
+  // een extra regel midden in de periode van de eerdere overzetting: geweigerd met de datum erbij
+  const t3 = A.historieBij(a, 'gez', tweede.concat([rij('X-2025-004-013', '2025-04-10', -7, 988)]));
+  assert.deepEqual([t3.geweigerd, t3.in_historie, t3.datums_in_historie], [true, 1, ['2025-04-10']]);
+  // bankdatum vóór de afschriftdatum telt niet als dezelfde boeking (gemeten: de bank dateert 0-2 dagen later, nooit eerder)
+  const { a: b } = opzet();
+  A.bij(b, 'gez', [post('b1', '2025-05-01', -50, 950)]);
+  const vroeg = A.historieBij(b, 'gez', [rij('Y-1', '2025-04-29', -50, 950), rij('Y-2', '2025-05-04', -50, 900)], { droog: true });
+  assert.deepEqual([vroeg.gedekt, vroeg.nieuw, vroeg.in_venster], [1, 1, 1]);
+  assert.deepEqual(vroeg.datums_in_venster, ['2025-05-04']);
+  // strikt eerst: twee bankposten met hetzelfde bedrag op dezelfde dag, de historieregel hoort bij de tweede tegenpartij
+  const { a: c } = opzet();
+  A.bij(c, 'gez', [Object.assign(post('c1', '2025-05-02', -50), { tegen_iban: ibanFromAbnAccount('0000000201'), tegenpartij: 'Ander' }), post('c2', '2025-05-02', -50)]);
+  const s = A.historieBij(c, 'gez', [rij('Z-1', '2025-05-02', -50, 950)], { droog: true });
+  assert.deepEqual([s.gedekt, s.bestaand_rest], [1, 1]);
+});

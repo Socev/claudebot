@@ -313,42 +313,60 @@ function bij(a, rek, lijst, opties) {
 // ── historie uit afschriften (wv1329) ──────────────────────────────────────
 // De ABN-historie vanaf rekeningstart (David 26-10-2026; overzetting van de PDF-afschriften, per regel een Mutatie-ID). Enable Banking
 // geeft ± 13 maanden; dit vult de jaren ervoor. rijen = [{ mutatie_id, datum (boekdatum), valutadatum, bedrag, tegenpartij, tegen_iban,
-// omschrijving, saldo_na }]. Een regel die de bank al gaf (zelfde rekening en bedrag, datum hooguit HIST_MARGE dagen verschoven: de bankluis zet
-// soms de transactiedag, het afschrift de boekdag; gemeten: Privé 742 van 780 op de dag zelf, de rest 1-5 dagen) wordt één-op-één
-// afgedekt en niet ingevoegd: wat de bank gaf blijft de bron (met zijn ruwe JSON). Eerst de exacte dag, dan 1, 2, … dagen ernaast.
-// Nieuw: sleutel 'abnhist|<Mutatie-ID>', status booked, herkomst_rij 'abn-historie', zonder ruwe JSON, met het saldo na mutatie van het
-// afschrift (de keten sluit per regel; het POT-afschrift eist een saldo op elke post en kan zo ook oude maanden maken).
+// omschrijving, saldo_na }]. Een regel die er al is wordt één-op-één afgedekt en niet ingevoegd: wat de bank gaf blijft de bron (met zijn
+// ruwe JSON), en een eerdere overzetting met andere Mutatie-ID's telt ook als "er al" (review wv1329 #1: anders verdubbelt een gecorrigeerde
+// run). Afdekken: zelfde rekening en bedrag, de bankdatum 0 tot HIST_MARGE dagen ná de afschriftdatum (gemeten 26-10-2026: Privé 742/25/13,
+// POT 458/22/32 op 0/1/2 dagen, nooit ervóór); eerst met dezelfde tegenrekening of naam, dan zonder, telkens de kleinste afstand eerst
+// (review #2). Nieuw: sleutel 'abnhist|<Mutatie-ID>', status booked, herkomst_rij 'abn-historie', zonder ruwe JSON, met het saldo na
+// mutatie van het afschrift (de keten sluit per regel; het POT-afschrift eist een saldo op elke post en kan zo ook oude maanden maken).
 // De datahub-koppeling (potDatahubInvoer) slaat deze regels over: die zet alleen wat de bankkoppeling ná Davids eigen lading gaf.
-// Nagekeken (opties.forceer om toch in te voegen): een bankpost binnen de periode van de lijst zonder tegenhanger (bestaand_rest) of meer dan
-// HIST_VENSTER_MAX nieuwe regels op of na de eerste bankdag (in_venster; Privé: één boeking die Enable Banking niet gaf).
-const HIST_MARGE = 5, HIST_VENSTER_MAX = 3;
+// Geweigerd (opties.forceer om toch in te voegen): een bestaande post binnen de periode van de lijst zonder tegenhanger (bestaand_rest), een
+// nieuwe regel binnen de periode van een eerdere overzetting (in_historie), of meer dan HIST_VENSTER_MAX nieuwe regels op of na de eerste
+// bankdag (in_venster; Privé: één boeking die Enable Banking niet gaf). De datums van die regels staan in de uitkomst (geen bedrag of naam).
+const HIST_MARGE = 3, HIST_VENSTER_MAX = 3;
+function zelfdeTegen(r, b) {
+  const x = ibanNorm(r.tegen_iban), y = ibanNorm(b.tegen_iban);
+  if (x && y) return x === y;
+  const n = naamNorm(r.tegenpartij);
+  return !!n && n === naamNorm(b.tegenpartij);
+}
 function historieBij(a, rek, rijen, opties) {
   const o = opties || {}, nu = nuIso();
   if (!a.db.prepare('SELECT 1 FROM rekeningen WHERE rek = ?').get(rek)) throw new Error('onbekende rekening');
   const lijst = (rijen || []).slice().sort(function (x, y) { return x.datum < y.datum ? -1 : x.datum > y.datum ? 1 : 0; });
-  if (!lijst.length) return { regels: 0, nieuw: 0, al_bekend: 0, gedekt: 0, in_venster: 0, bestaand_rest: 0 };
+  if (!lijst.length) return { regels: 0, nieuw: 0, al_bekend: 0, gedekt: 0, in_venster: 0, in_historie: 0, bestaand_rest: 0 };
   const van = lijst[0].datum, tot = lijst[lijst.length - 1].datum;
   const cent = function (b) { return Math.round(Number(b) * 100); };
+  const eigen = new Set(lijst.map(function (r) { return 'abnhist|' + r.mutatie_id; }));
   const bestaat = a.db.prepare('SELECT 1 FROM transacties WHERE rek = ? AND sleutel = ?');
-  const bank = a.db.prepare("SELECT nr, datum, bedrag FROM transacties WHERE rek = ? AND status = 'booked' AND vervangen_door IS NULL AND herkomst_rij <> 'abn-historie'" +
-    ' AND datum >= ? AND datum <= ? ORDER BY datum, nr').all(rek, plusDagen(van, -HIST_MARGE), plusDagen(tot, HIST_MARGE));
+  // kandidaten: wat de bank gaf en historieregels van een andere overzetting (sleutel niet in deze lijst)
+  const best = a.db.prepare("SELECT nr, sleutel, datum, bedrag, tegen_iban, tegenpartij, herkomst_rij FROM transacties WHERE rek = ? AND status = 'booked' AND vervangen_door IS NULL" +
+    ' AND datum >= ? AND datum <= ? ORDER BY datum, nr').all(rek, van, plusDagen(tot, HIST_MARGE)).filter(function (b) { return !eigen.has(b.sleutel); });
   const eersteBank = (a.db.prepare("SELECT min(datum) d FROM transacties WHERE rek = ? AND status = 'booked' AND herkomst_rij <> 'abn-historie'").get(rek) || {}).d || null;
+  const anderHist = a.db.prepare("SELECT min(datum) v, max(datum) t FROM transacties WHERE rek = ? AND herkomst_rij = 'abn-historie' AND sleutel NOT IN (SELECT value FROM json_each(?))")
+    .get(rek, JSON.stringify(Array.from(eigen))) || {};
   const perBedrag = new Map();
-  bank.forEach(function (b) { const k = cent(b.bedrag); if (!perBedrag.has(k)) perBedrag.set(k, []); perBedrag.get(k).push(b); });
+  best.forEach(function (b) { const k = cent(b.bedrag); if (!perBedrag.has(k)) perBedrag.set(k, []); perBedrag.get(k).push(b); });
   const open_ = lijst.filter(function (r) { return !bestaat.get(rek, 'abnhist|' + r.mutatie_id); });
   const al = lijst.length - open_.length, gedekt = new Set(), gebruikt = new Set();
-  for (let d = 0; d <= HIST_MARGE; d++) {
-    open_.forEach(function (r) {
-      if (gedekt.has(r.mutatie_id)) return;
-      const k = (perBedrag.get(cent(r.bedrag)) || []).find(function (b) { return !gebruikt.has(b.nr) && Math.abs(dagVerschil(r.datum, b.datum)) === d; });
-      if (k) { gebruikt.add(k.nr); gedekt.add(r.mutatie_id); }
-    });
-  }
+  [true, false].forEach(function (strikt) {
+    for (let d = 0; d <= HIST_MARGE; d++) {
+      open_.forEach(function (r) {
+        if (gedekt.has(r.mutatie_id)) return;
+        const k = (perBedrag.get(cent(r.bedrag)) || []).find(function (b) { return !gebruikt.has(b.nr) && dagVerschil(r.datum, b.datum) === d && (!strikt || zelfdeTegen(r, b)); });
+        if (k) { gebruikt.add(k.nr); gedekt.add(r.mutatie_id); }
+      });
+    }
+  });
   const nieuw = open_.filter(function (r) { return !gedekt.has(r.mutatie_id); });
-  const in_venster = eersteBank ? nieuw.filter(function (r) { return r.datum >= eersteBank; }).length : 0;
-  const bestaand_rest = bank.filter(function (b) { return !gebruikt.has(b.nr) && b.datum >= van && b.datum <= tot; }).length;
-  const uit = { regels: lijst.length, nieuw: nieuw.length, al_bekend: al, gedekt: gedekt.size, in_venster: in_venster, bestaand_rest: bestaand_rest, van: van, tot: tot,
-    eerste_bankdag: eersteBank, sluit: in_venster <= HIST_VENSTER_MAX && bestaand_rest === 0 };
+  const venster = eersteBank ? nieuw.filter(function (r) { return r.datum >= eersteBank; }) : [];
+  const inHist = anderHist.v ? nieuw.filter(function (r) { return r.datum >= anderHist.v && r.datum <= anderHist.t; }) : [];
+  const rest = best.filter(function (b) { return !gebruikt.has(b.nr) && b.datum <= tot; });
+  const datums = function (l) { return l.slice(0, 10).map(function (x) { return x.datum; }); };
+  const uit = { regels: lijst.length, nieuw: nieuw.length, al_bekend: al, gedekt: gedekt.size, in_venster: venster.length, in_historie: inHist.length, bestaand_rest: rest.length,
+    van: van, tot: tot, eerste_bankdag: eersteBank, sluit: venster.length <= HIST_VENSTER_MAX && inHist.length === 0 && rest.length === 0,
+    datums_in_venster: venster.length ? datums(venster) : undefined, datums_in_historie: inHist.length ? datums(inHist) : undefined,
+    datums_bestaand_rest: rest.length ? datums(rest) : undefined };
   if (o.droog) return Object.assign(uit, { droog: true });
   if (!uit.sluit && !o.forceer) return Object.assign(uit, { geweigerd: true });
   const zet = a.db.prepare('INSERT INTO transacties (rek, sleutel, bron_id, status, datum, valutadatum, bedrag, valuta, tegenpartij, tegen_iban, omschrijving, saldo_na,' +

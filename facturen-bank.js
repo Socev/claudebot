@@ -27,8 +27,9 @@ class BankWeigering extends Error {
 const MAX_BESTAND = 20 * 1024 * 1024;
 const FORMATEN = ['ing_csv', 'abn_tab', 'abn_mt940', 'triodos_csv', 'bankluis'];
 // wv1329: invoerformaten die geen eigen bank_formaat zijn. Het ABN-historiebestand is een overzetting van ABN-afschriften; de regels
-// worden opgeslagen onder het formaat van de rekening (abn_tab of abn_mt940), zonder schemawijziging.
-const HISTORIE_FORMATEN = { abn_historie_csv: ['abn_tab', 'abn_mt940'] };
+// worden opgeslagen onder het formaat van de rekening, zonder schemawijziging. Alleen abn_tab: die neemt net als de historie de
+// rentedatum als boekdatum (de MT940-lezer de boekdatum; review wv1329 #4), anders zou het afdekken op de dag niet kloppen.
+const HISTORIE_FORMATEN = { abn_historie_csv: ['abn_tab'] };
 const OMS_HASH = 500, OMS_OPSLAG = 200, TYPE_OPSLAG = 60;
 // controle: 1 = zakelijk (inlezen), 0 = Privé (weggooien). Alles anders (NULL, leeg, onzin) is een onvolledige rekening: weigeren, nooit
 // stil als Privé behandelen (diffreview wv798 #5).
@@ -466,6 +467,8 @@ function leesBestand(invoer, opties) {
     transacties.push(normaliseer(r, HISTORIE_FORMATEN[formaat] ? rk.bank_formaat : formaat, rk));
     per[iban] = (per[iban] || 0) + 1;
   }
+  // wv1329 (review #5): een historiebestand van alleen Privé hoort in de bankluis, niet hier (anders bleef het ruwe bestand als bron staan)
+  if (HISTORIE_FORMATEN[formaat] && !transacties.length) throw new BankWeigering('prive_historie', 'dit historiebestand is van een rekening die Facturen niet inleest (Privé); die historie hoort in de bankluis (tools/bank-historie.js)');
   // wv944: saldocontrole en periode alleen over de zakelijke rekeningen (Privé laat geen spoor na, ook geen saldo of datum)
   const zakelijk = rijen.filter((r) => controleVan(rekeningen.get(ibanNorm(r.eigen_iban_ruw))) === 1);
   const saldo = saldoControle(zakelijk, formaat);   // abn_historie_csv: de keten over Saldo na mutatie, oudste eerst (zoals ING/Triodos)

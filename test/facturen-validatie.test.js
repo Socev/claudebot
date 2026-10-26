@@ -708,9 +708,26 @@ test('ABN-historie (wv1329): parser weigert afwijkingen met regelnummer, nooit e
   assert.match(B.leesBankbestand(dubbel, { rekeningen: rek }).uitleg, /regel 3: Mutatie-ID dubbel/);
   const g = B.leesBankbestand(goed.replace(';Af;', ';Bij;'), { rekeningen: rek });
   assert.ok(!/1000|10,00|Leverancier/.test(g.uitleg), g.uitleg);
-  // rekening met een ander formaat (ING) weigert; Privé (controle 0) gaat weg zonder spoor
+  // rekening met een ander formaat (ING) weigert; een Privé-historie (controle 0) hoort in de bankluis
   assert.equal(B.leesBankbestand(goed, { rekeningen: [{ iban: TG, entiteit: 'tolgaarde', bank_formaat: 'ing_csv', controle: 1 }] }).fout, 'verkeerd_formaat');
-  assert.equal(B.leesBankbestand(goed, { rekeningen: [{ iban: TG, entiteit: 'prive', bank_formaat: 'abn_tab', controle: 0 }] }).prive_weggegooid, 1);
+  assert.equal(B.leesBankbestand(goed, { rekeningen: [{ iban: TG, entiteit: 'prive', bank_formaat: 'abn_tab', controle: 0 }] }).fout, 'prive_historie');
   // boekdatum = Rentedatum (zoals de TAB)
   assert.equal(B.leesBankbestand(hcsv([['2025-01-05', -1000, LEV.A, 'A', 'x', '2025-01-06']]), { rekeningen: rek }).transacties[0].boekdatum, '2025-01-06');
+});
+
+test('review wv1329 #3/#4/#5: historie met gebroken saldoketen → 409 (forceer wel); een abn_mt940-rekening en een Privé-historie worden geweigerd zonder bron', () => {
+  const t = opzet();
+  const goed = hcsv([['2025-01-05', -1000, LEV.A, 'Leverancier A B.V.', 'a'], ['2025-01-06', -2000, LEV.A, 'Leverancier A B.V.', 'b'], ['2025-01-07', -3000, LEV.A, 'Leverancier A B.V.', 'c']]);
+  const regels = goed.split('\r\n');
+  regels[2] = regels[2].replace(/;([\d-]+,\d\d);2025-01-06;/, (m, s) => ';' + s.replace(/\d,/, (x) => String((Number(x[0]) + 1) % 10) + ',') + ';2025-01-06;');
+  const stuk = regels.join('\r\n');
+  assert.notEqual(stuk, goed);
+  assert.throws(() => hist(t, stuk, 'stuk.csv'), (e) => e.status === 409 && /saldoketen/.test(e.message));
+  assert.equal(t.n('SELECT count(*) n FROM bank_bestand'), 0);
+  assert.equal(hist(t, stuk, 'stuk.csv', { forceer: true }).nieuw, 3);
+  const mt = [{ iban: TG, entiteit: 'tolgaarde', bank_formaat: 'abn_mt940', controle: 1 }];
+  assert.equal(B.leesBankbestand(goed, { rekeningen: mt }).fout, 'verkeerd_formaat');
+  const prive = hcsv([['2025-01-05', -1000, LEV.A, 'Winkel', 'x']], 1000000, { rek: PR });
+  assert.throws(() => hist(t, prive, 'prive.csv'), (e) => e.status === 422 && /bankluis/.test(e.message));
+  assert.ok(!D.bronBestaat(t.fdb, D.sha256(Buffer.from(prive))), 'geen Privé-bron in Facturen');
 });
