@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Toetst onderhoud.js (wv1271, onderhoudsstand van de vault; Second Brain 2.0 fase 1a): stand uit/aan/onleesbaar/andere eigenaar, wie wacht
-# (automatisch ja; Telegram van David en alleen-lezen nee), wacht lost pas op na uit, grendelproces houdt een echte flock vast en stopt bij uit,
-# na een herstart opnieuw gestart, alarm na 2 uur precies één keer per aan-periode (ook na herstart), geen alarm bij uit.
+# Toetst onderhoud.js (wv1271, onderhoudsstand van de vault; Second Brain 2.0 fase 1a): stand uit/aan/onleesbaar/andere eigenaar, wie wordt
+# tegengehouden (automatisch ja; Telegram van David en alleen-lezen nee), grendelproces houdt een echte flock vast en stopt bij uit, na een
+# herstart herkend, alarm na 2 uur precies één keer per aan-periode (ook na herstart), mislukt bericht = later opnieuw, sleutel per periode.
 # Raakt niets buiten een wegwerpmap. Gebruik: bash test/onderhoud.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -16,34 +16,25 @@ const d = fs.mkdtempSync(path.join(os.tmpdir(), 'onderhoud-'));
 const B = path.join(d, 'onderhoudsstand.json'), L = path.join(d, 'vault.lock');
 fs.writeFileSync(L, '');
 let klok = Date.parse('2026-10-26T20:00:00Z');
-const berichten = [];
+const berichten = [], sleutels = [];
 function mod(extra) {
   return O.maak(Object.assign({ bestand: B, lock: L, houderBestand: B + '.houder', alarmBestand: B + '.alarm', spawn: spawn, nu: () => klok,
-    wachtStapMs: 50, houderSlaapS: 0.2, tijdNl: (x) => x, bericht: async (t) => { berichten.push(t); return { status: 200 }; } }, extra || {}));
+    houderSlaapS: 0.2, tijdNl: (x) => x, bericht: async (t, s) => { berichten.push(t); sleutels.push(s); return { status: 200 }; } }, extra || {}));
 }
 function vrij() { return spawnSync('flock', ['-n', L, 'true']).status === 0; }
 function zet(obj) { fs.writeFileSync(B, typeof obj === 'string' ? obj : JSON.stringify(obj)); }
 (async function () {
   const wakker = setInterval(() => {}, 1000);   // de wachttimers zijn unref (in de pod houdt de server het proces in leven)
   let m = mod();
-  toets('1 geen bestand = uit', m.stand().aan === false && m.moetWachten({}) === false);
+  toets('1 geen bestand = uit', m.stand().aan === false && m.houdtTegen({}) === false);
   zet({ aan: true, sinds: '2026-10-26T20:00:00Z', reden: 'proef', door: 'toets' });
   toets('1 aan', m.stand().aan === true && m.stand().reden === 'proef' && m.stand().grendel === 'wacht', m.stand());
-  toets('1 automatische beurt wacht', m.moetWachten({ bron: '' }) === true);
-  toets('1 Telegram van David wacht niet', m.moetWachten({ bron: 'telegram' }) === false);
-  toets('1 alleen-lezen wacht niet', m.moetWachten({ gereedschap: 'lezen' }) === false);
+  toets('1 automatische beurt tegengehouden', m.houdtTegen({ bron: '' }) === true);
+  toets('1 Telegram van David niet', m.houdtTegen({ bron: 'telegram' }) === false);
+  toets('1 alleen-lezen niet', m.houdtTegen({ gereedschap: 'lezen' }) === false);
   toets('1 bestand van een andere eigenaar telt niet', mod({ uid: 4242 }).stand().aan === false && !!mod({ uid: 4242 }).stand().genegeerd);
   zet('{kapot'); toets('1 onleesbaar = aan (veilige kant)', m.stand().aan === true && m.stand().onleesbaar === true);
   zet({ aan: false }); toets('1 aan:false = uit', m.stand().aan === false);
-  // 2. wachten
-  zet({ aan: true, sinds: '2026-10-26T20:00:00Z' });
-  let klaar = false;
-  const w = m.wacht('job1').then(() => { klaar = true; });
-  await slaap(200);
-  toets('2 wacht zolang aan', klaar === false && m.stand().wachtend === 1);
-  fs.unlinkSync(B);
-  await w;
-  toets('2 door na uit', klaar === true && m.stand().wachtend === 0);
   // 3. grendel
   zet({ aan: true, sinds: '2026-10-26T20:00:00Z' });
   let r = await m.tik();
@@ -62,12 +53,17 @@ function zet(obj) { fs.writeFileSync(B, typeof obj === 'string' ? obj : JSON.str
   zet({ aan: true, sinds: '2026-10-26T20:00:00Z', reden: 'verhuizen' });
   klok = Date.parse('2026-10-26T21:59:00Z'); r = await m.tik();
   toets('4 geen alarm vóór 2 uur', !r.alarm && berichten.length === 0);
-  klok = Date.parse('2026-10-26T22:00:30Z'); r = await m.tik();
-  toets('4 alarm na 2 uur', r.alarm === true && berichten.length === 1 && /2 uur/.test(berichten[0]) && /niets hervat vanzelf/.test(berichten[0]), berichten);
+  klok = Date.parse('2026-10-26T22:00:30Z');
+  let mislukt = 0;
+  r = await mod({ bericht: async () => { mislukt++; throw new Error('bericht gaf 0'); } }).tik();
+  toets('4 mislukt bericht: niet vastgelegd', !r.alarm && mislukt === 1 && !fs.existsSync(B + '.alarm'));
+  r = await m.tik();
+  toets('4 alarm na 2 uur (opnieuw geprobeerd)', r.alarm === true && berichten.length === 1 && /2 uur/.test(berichten[0]) && /niets hervat vanzelf/.test(berichten[0]), berichten);
+  toets('4 sleutel per aan-periode', sleutels[0] === 'onderhoudsstand-alarm-2026-10-26T20:00:00.000Z', sleutels);
   r = await m.tik(); r = await mod().tik();
   toets('4 geen tweede alarm (ook niet na herstart)', berichten.length === 1);
   zet({ aan: true, sinds: '2026-10-27T08:00:00Z' }); klok = Date.parse('2026-10-27T10:05:00Z'); r = await m.tik();
-  toets('4 nieuwe aan-periode: nieuw alarm', berichten.length === 2);
+  toets('4 nieuwe aan-periode: nieuw alarm met eigen sleutel', berichten.length === 2 && sleutels[1] !== sleutels[0]);
   toets('4 stand blijft aan na het alarm (geen vanzelf hervatten)', m.stand().aan === true);
   fs.unlinkSync(B);
   for (let i = 0; i < 40 && !vrij(); i++) await slaap(50);

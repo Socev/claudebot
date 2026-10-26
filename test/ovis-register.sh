@@ -248,7 +248,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
       setImmediate(() => { ee.stdout.emit('data', st.kind.uit); ee.emit('exit', st.kind.code); });
       return ee;
     };
-    const fn = new Function('require', 'path', 'fs', 'crypto', 'spawn', 'logError', 'schrijfLog', 'nu', 'serverPad', 'serverProefDeel', 'appSbRpc', 'VV', 'VAULT', 'SERVER_ECHT', 'rolPrimair', '__dirname', 'st',
+    const fn = new Function('require', 'path', 'fs', 'crypto', 'spawn', 'logError', 'schrijfLog', 'nu', 'serverPad', 'serverProefDeel', 'appSbRpc', 'VV', 'VAULT', 'SERVER_ECHT', 'rolPrimair', '__dirname', 'st', 'onderhoud',
       src.slice(b, e).replace('if (ovis && SERVER_ECHT) { setTimeout', 'if (false) { setTimeout') +
       '\novisAms = function () { return st.klok; };\nreturn { ovisTik, ovisInfo, ovisStartScript, ovisStaatLees, ovis };');
     const fouten_ = [];
@@ -256,7 +256,10 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
       if (f === 'ovis_register_lees') return { knopen: [], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [] };
       if (f === 'mk_hartslag_stempel') return [{}]; if (f === 'ovis_bibliothecaris_zet') return { ok: true }; throw new Error('?'); };
     const k = fn(require, path, fs, require('crypto'), nepSpawn, (w, x) => fouten_.push(w + ' ' + (x && x.message)), () => {}, () => 'nu',
-      (n, env, echt, proef) => path.join(dir, n), (d) => path.join(dir, d), nepRpc, () => require('./vault-veilig.js'), path.join(dir, 'vault'), true, () => st.primair, process.cwd(), st);
+      (n, env, echt, proef) => path.join(dir, n), (d) => path.join(dir, d), nepRpc, () => require('./vault-veilig.js'), path.join(dir, 'vault'), true, () => st.primair, process.cwd(), st, { stand: () => ({ aan: !!st.onderhoud }) });
+    st.onderhoud = true; await k.ovisTik();
+    toets('6 onderhoudsstand (wv1271): geen nachtronde, geen tik', st.spawns.length === 0 && st.rpc.length === 0);
+    st.onderhoud = false;
     await k.ovisTik();
     toets('6 01:15: nachtronde als kind onder flock -w 300 met ovis-run.js nacht', st.spawns.length === 1 && st.spawns[0][0] === 'flock' && st.spawns[0][1] === '-F' && st.spawns[0][3] === '300' && /ovis-run\.js$/.test(st.spawns[0][6]) && st.spawns[0][7] === 'nacht', st.spawns);
     await k.ovisTik();

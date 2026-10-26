@@ -2249,19 +2249,20 @@ function uitrolWacht() {
 }
 
 // ── Onderhoudsstand van de vault (wv1271, Second Brain 2.0 fase 1a; bouwplan § 7.1 punt 1 en § 8) ──────────────
-// Schakelbestand (alleen claude): zolang het aan staat wachten automatische /run-beurten vóór hun start (geen limiet), starten geen
-// machinekamer-agents of managerrondes, en houdt de pod de vault-grendel vast (bisync, vault-tar en OVIS-nachtronde wachten). Na 2 uur
-// één alarm in de machinekamer; nooit vanzelf hervatten (Fable MOET 4). Zetten en opheffen: socev-scripts sb2 onderhoud.py.
+// Schakelbestand (alleen claude): zolang het aan staat weigert /run automatische beurten (503 'onderhoud'; Telegram van David en
+// alleen-lezen gaan door), starten geen machinekamer-agents, managerrondes of OVIS-tikken, en houdt de pod de vault-grendel vast
+// (bisync, vault-tar en OVIS-nachtronde wachten). Na 2 uur één alarm in de machinekamer; nooit vanzelf hervatten (Fable MOET 4).
+// Zetten en opheffen: socev-scripts sb2 onderhoud.py.
 const ONDERHOUD_BESTAND = serverPad('onderhoud', process.env.ONDERHOUD_BESTAND, '/opt/data/onderhoudsstand.json', serverProefDeel('onderhoudsstand.json'));
 const ONDERHOUD_LOCK = serverPad('onderhoud_lock', process.env.ONDERHOUD_LOCK, '/opt/data/bin/.vault.lock', serverProefDeel('vault.lock'));
 const ONDERHOUD_MOD = (function () { try { return require('./onderhoud.js'); } catch (e) { logError('onderhoud-module', e); return null; } })();
 // Zonder module (oude release-inhoud): nooit wachten, stand 'onbekend' in /health.
-const onderhoud = !ONDERHOUD_MOD ? { stand: function () { return { aan: false, onbekend: true }; }, moetWachten: function () { return false; },
-  wacht: function () { return Promise.resolve(); }, tik: function () { return Promise.resolve({}); } } : ONDERHOUD_MOD.maak({ bestand: ONDERHOUD_BESTAND, lock: ONDERHOUD_LOCK, houderBestand: ONDERHOUD_BESTAND + '.houder',
+const onderhoud = !ONDERHOUD_MOD ? { stand: function () { return { aan: false, onbekend: true }; }, houdtTegen: function () { return false; },
+  tik: function () { return Promise.resolve({}); } } : ONDERHOUD_MOD.maak({ bestand: ONDERHOUD_BESTAND, lock: ONDERHOUD_LOCK, houderBestand: ONDERHOUD_BESTAND + '.houder',
   alarmBestand: ONDERHOUD_BESTAND + '.alarm', spawn: spawn, fout: logError, log: function (s) { schrijfLog(nu() + ' ' + s); },
   tijdNl: function (iso) { return new Date(iso).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' }); },
-  bericht: function (tekst) {
-    return berichtIntern({ kanaal: 'machinekamer', bron: 'onderhoud', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: 'onderhoudsstand-alarm' }).then(function (r) {
+  bericht: function (tekst, sleutel) {
+    return berichtIntern({ kanaal: 'machinekamer', bron: 'onderhoud', klasse: 'normaal', soort: 'melding', tekst: tekst, sleutel: sleutel }).then(function (r) {
       if (r.status !== 200) throw new Error('bericht gaf ' + r.status);
       return r;
     });
@@ -3758,7 +3759,7 @@ function handleRequest(req, res) {
       // (n8n, Tik-invoer) leest alleen dat veld en claimt dan niets — zonder wijziging in n8n. uitrol.sh leest het veld niet.
       uitrol: (function () { const u = uitrolWacht(), oh = onderhoud.stand();
         return oh.aan && !u.wacht ? Object.assign({}, u, { wacht: true, wacht_sinds: oh.sinds, door: 'onderhoud' }) : u; })(),
-      // wv1271: onderhoudsstand van de vault (aan, sinds, reden, grendel vast/wacht, wachtende runs)
+      // wv1271: onderhoudsstand van de vault (aan, sinds, reden, grendel vast/wacht)
       onderhoud: onderhoud.stand(),
       // wv701: levensbewaking (bewaker.js); leeft false = de bewaker stopte (zie supervisor.log, regels 'bewaker[')
       bewaker: bewakerInfo(),
@@ -3855,6 +3856,15 @@ function handleRequest(req, res) {
         }
         keuze = { runtime: 'claude', model: keuze.model, fallback: '' };
       }
+      // wv1271: onderhoudsstand — automatische beurten niet starten (n8n-run faalt snel en komt via de Foutmelder in de machinekamer;
+      // de volgende geplande run haalt het in). Telegram van David en alleen-lezen gaan door.
+      if (onderhoud.houdtTegen({ bron: d.bron === 'telegram' ? 'telegram' : '', gereedschap: gereedschap })) {
+        const oh = onderhoud.stand();
+        res._log = { chat_id: chatId, geweigerd: 'onderhoud' };
+        res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '1800' });
+        return res.end(JSON.stringify({ ok: false, error: 'onderhoud', sinds: oh.sinds,
+          uitleg: 'De vault staat in de onderhoudsstand (verhuizing of migratie); automatische beurten starten pas als die uit is.' }));
+      }
       const jobId = crypto.randomBytes(8).toString('hex');
       // wv277: bron "telegram" (alleen de twee Telegram-workflows) -> na afloop ook in het app-log (appTelegramSpiegel). Elke andere waarde telt niet.
       const spiegel = d.bron === 'telegram';
@@ -3867,9 +3877,7 @@ function handleRequest(req, res) {
       // Serieel per chat, ongeacht het brein: één gesprek, één beurt tegelijk.
       // De spiegel niet teruggeven: een trage schijf mag de volgende beurt niet ophouden, en een fout raakt de beurt nooit (fail-open).
       enqueue(sessionKey(ws, chatId), function () {
-        // wv1271: onderhoudsstand — automatische beurten wachten hier (in hun eigen keten, dus de volgorde blijft) tot de stand uit is
-        const wacht = onderhoud.moetWachten({ bron: spiegel ? 'telegram' : '', gereedschap: gereedschap }) ? onderhoud.wacht(jobId) : Promise.resolve();
-        return wacht.then(function () { return processJob(jobId, telHint + prompt, d.session_id, d.files, chatId, ws, keuze, gereedschap); }).then(function () {
+        return processJob(jobId, telHint + prompt, d.session_id, d.files, chatId, ws, keuze, gereedschap).then(function () {
           if (telHint) { try { telZelfNaRun(jobId); } catch (e) { logError('tel-zelf-na', e); } }
           if (spiegel) { try { appTelegramSpiegel(jobId, prompt, d.files).catch(function (e) { logError('app-spiegel', e); }); } catch (e) { logError('app-spiegel', e); } }
         });
@@ -14536,6 +14544,7 @@ function ovisBoxRij(tekst) {
 }
 async function ovisTik() {
   if (!ovis || !SERVER_ECHT || !rolPrimair()) return;
+  if (onderhoud.stand().aan) return;   // wv1271 (Fable MOET 3): geen compileer/Bibliothecaris op een half verhuisde boom; na uit haalt de volgende tik het in
   if (ovisLoopt.nu && Date.now() - ovisLoopt.sinds < OVIS_NACHT_MAX_MS + 60000) return;
   const t = ovisAms(), s = ovisStaatLees();
   ovisLoopt.nu = 'tik'; ovisLoopt.sinds = Date.now();
