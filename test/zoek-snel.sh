@@ -266,7 +266,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   const s1 = src.indexOf('// ── Zoek snel (wv1252'), s2 = src.indexOf('// ── einde Zoek snel ──');
   toets('6 server.js: blok Zoek snel gevonden', s1 > 0 && s2 > s1);
   toets('6 dispatch, glijdroute, teller, health', /if \(route === 'POST \/app\/zoek-snel'\) return typeof appZoekSnel === 'function' \? appZoekSnel\(req, res, a, d\)/.test(src) &&
-    /APP_GLIJD_ROUTES\.add\('POST \/app\/zoek-snel'\)/.test(src) && /'zoek-snel': \[\] \}/.test(src) && /zoek_snel: typeof zoekSnelInfo === 'function' \? zoekSnelInfo\(\)/.test(src));
+    /APP_GLIJD_ROUTES\.add\('POST \/app\/zoek-snel'\)/.test(src) && /'zoek-snel': \[\][,}]/.test(src) && /zoek_snel: typeof zoekSnelInfo === 'function' \? zoekSnelInfo\(\)/.test(src));
   const slotVrij = /const APP_SLOT_VRIJ = new Set\(\[([^\]]*)\]\)/.exec(src);
   toets('6 niet in APP_SLOT_VRIJ (vaste plek: onder het invoerslot)', slotVrij && slotVrij[1].indexOf('zoek-snel') < 0);
   toets('6 bijStart in het hoofdkanaal geeft de zoekregels mee', /: kanaal === 'hoofd' \? function \(\) \{ return typeof zoekSnelStaart === 'function' \? zoekSnelStaart\(\) : ''; \} : undefined \}\);/.test(src));
