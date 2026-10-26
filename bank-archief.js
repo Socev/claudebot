@@ -310,6 +310,60 @@ function bij(a, rek, lijst, opties) {
   });
 }
 
+// ── historie uit afschriften (wv1329) ──────────────────────────────────────
+// De ABN-historie vanaf rekeningstart (David 26-10-2026; overzetting van de PDF-afschriften, per regel een Mutatie-ID). Enable Banking
+// geeft ± 13 maanden; dit vult de jaren ervoor. rijen = [{ mutatie_id, datum (boekdatum), valutadatum, bedrag, tegenpartij, tegen_iban,
+// omschrijving, saldo_na }]. Een regel die de bank al gaf (zelfde rekening en bedrag, datum hooguit HIST_MARGE dagen verschoven: de bankluis zet
+// soms de transactiedag, het afschrift de boekdag; gemeten: Privé 742 van 780 op de dag zelf, de rest 1-5 dagen) wordt één-op-één
+// afgedekt en niet ingevoegd: wat de bank gaf blijft de bron (met zijn ruwe JSON). Eerst de exacte dag, dan 1, 2, … dagen ernaast.
+// Nieuw: sleutel 'abnhist|<Mutatie-ID>', status booked, herkomst_rij 'abn-historie', zonder ruwe JSON, met het saldo na mutatie van het
+// afschrift (de keten sluit per regel; het POT-afschrift eist een saldo op elke post en kan zo ook oude maanden maken).
+// De datahub-koppeling (potDatahubInvoer) slaat deze regels over: die zet alleen wat de bankkoppeling ná Davids eigen lading gaf.
+// Nagekeken (opties.forceer om toch in te voegen): een bankpost binnen de periode van de lijst zonder tegenhanger (bestaand_rest) of meer dan
+// HIST_VENSTER_MAX nieuwe regels op of na de eerste bankdag (in_venster; Privé: één boeking die Enable Banking niet gaf).
+const HIST_MARGE = 5, HIST_VENSTER_MAX = 3;
+function historieBij(a, rek, rijen, opties) {
+  const o = opties || {}, nu = nuIso();
+  if (!a.db.prepare('SELECT 1 FROM rekeningen WHERE rek = ?').get(rek)) throw new Error('onbekende rekening');
+  const lijst = (rijen || []).slice().sort(function (x, y) { return x.datum < y.datum ? -1 : x.datum > y.datum ? 1 : 0; });
+  if (!lijst.length) return { regels: 0, nieuw: 0, al_bekend: 0, gedekt: 0, in_venster: 0, bestaand_rest: 0 };
+  const van = lijst[0].datum, tot = lijst[lijst.length - 1].datum;
+  const cent = function (b) { return Math.round(Number(b) * 100); };
+  const bestaat = a.db.prepare('SELECT 1 FROM transacties WHERE rek = ? AND sleutel = ?');
+  const bank = a.db.prepare("SELECT nr, datum, bedrag FROM transacties WHERE rek = ? AND status = 'booked' AND vervangen_door IS NULL AND herkomst_rij <> 'abn-historie'" +
+    ' AND datum >= ? AND datum <= ? ORDER BY datum, nr').all(rek, plusDagen(van, -HIST_MARGE), plusDagen(tot, HIST_MARGE));
+  const eersteBank = (a.db.prepare("SELECT min(datum) d FROM transacties WHERE rek = ? AND status = 'booked' AND herkomst_rij <> 'abn-historie'").get(rek) || {}).d || null;
+  const perBedrag = new Map();
+  bank.forEach(function (b) { const k = cent(b.bedrag); if (!perBedrag.has(k)) perBedrag.set(k, []); perBedrag.get(k).push(b); });
+  const open_ = lijst.filter(function (r) { return !bestaat.get(rek, 'abnhist|' + r.mutatie_id); });
+  const al = lijst.length - open_.length, gedekt = new Set(), gebruikt = new Set();
+  for (let d = 0; d <= HIST_MARGE; d++) {
+    open_.forEach(function (r) {
+      if (gedekt.has(r.mutatie_id)) return;
+      const k = (perBedrag.get(cent(r.bedrag)) || []).find(function (b) { return !gebruikt.has(b.nr) && Math.abs(dagVerschil(r.datum, b.datum)) === d; });
+      if (k) { gebruikt.add(k.nr); gedekt.add(r.mutatie_id); }
+    });
+  }
+  const nieuw = open_.filter(function (r) { return !gedekt.has(r.mutatie_id); });
+  const in_venster = eersteBank ? nieuw.filter(function (r) { return r.datum >= eersteBank; }).length : 0;
+  const bestaand_rest = bank.filter(function (b) { return !gebruikt.has(b.nr) && b.datum >= van && b.datum <= tot; }).length;
+  const uit = { regels: lijst.length, nieuw: nieuw.length, al_bekend: al, gedekt: gedekt.size, in_venster: in_venster, bestaand_rest: bestaand_rest, van: van, tot: tot,
+    eerste_bankdag: eersteBank, sluit: in_venster <= HIST_VENSTER_MAX && bestaand_rest === 0 };
+  if (o.droog) return Object.assign(uit, { droog: true });
+  if (!uit.sluit && !o.forceer) return Object.assign(uit, { geweigerd: true });
+  const zet = a.db.prepare('INSERT INTO transacties (rek, sleutel, bron_id, status, datum, valutadatum, bedrag, valuta, tegenpartij, tegen_iban, omschrijving, saldo_na,' +
+    " mcc, ruwe_json, herkomst_rij, eerste_gezien, laatst_gezien) VALUES (?, ?, ?, 'booked', ?, ?, ?, 'EUR', ?, ?, ?, ?, NULL, NULL, 'abn-historie', ?, ?) ON CONFLICT (rek, sleutel) DO NOTHING");
+  let n = 0;
+  inTransactie(a, function () {
+    nieuw.forEach(function (r) {
+      n += Number(zet.run(rek, 'abnhist|' + r.mutatie_id, r.mutatie_id, r.datum, r.valutadatum || null, Number(r.bedrag), r.tegenpartij || null, ibanNorm(r.tegen_iban),
+        r.omschrijving || null, r.saldo_na == null || !Number.isFinite(Number(r.saldo_na)) ? null : Number(r.saldo_na), nu, nu).changes);
+    });
+    metaZet(a, 'vuil', '1');
+  });
+  return Object.assign(uit, { nieuw: n });
+}
+
 // Cache → archief, incrementeel op 'opgehaald' (idempotent: INSERT OR IGNORE op de unieke sleutel). Zonder ruwe JSON (die
 // bewaarde de cache niet); een latere opvraag van dezelfde post vult hem aan.
 function migreerCache(a, cachePad) {
@@ -1518,7 +1572,7 @@ function potAfschriftMaanden(a) {
 function potDatahubInvoer(a, van) {
   const rk = potRekeningEen(a);
   const rijen = a.db.prepare('SELECT t.nr, t.sleutel, t.datum, t.valutadatum, t.bedrag, t.tegen_iban, t.tegenpartij, t.omschrijving, t.ruwe_json FROM transacties t' +
-    ' WHERE t.rek = ? AND ' + POT_BOEKT + ' AND t.datum IS NOT NULL ORDER BY t.datum, t.nr').all(rk.rek);
+    " WHERE t.rek = ? AND " + POT_BOEKT + " AND t.datum IS NOT NULL AND t.herkomst_rij <> 'abn-historie' ORDER BY t.datum, t.nr").all(rk.rek);   // wv1329
   return { iban: ibanNorm(rk.iban), posten: rijen.map(function (r) {
     const p = { nr: r.nr, sleutel: r.sleutel, datum: r.datum, valutadatum: r.valutadatum || null, bedrag: r.bedrag, tegen_iban: r.tegen_iban ? ibanNorm(r.tegen_iban) : null,
       tegenpartij: r.tegenpartij || '' };
@@ -1561,6 +1615,6 @@ function stand(a) {
   };
 }
 
-module.exports = { open, rekeningenSync, markeerOntkoppeld, bij, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
+module.exports = { open, rekeningenSync, markeerOntkoppeld, bij, historieBij, HIST_MARGE, migreerCache, verrijk, verrijkAlsVuil, aiOpen, aiZet, corrigeer, zoek, maand, internLijst, abonnementen, vasteLasten, stroom, stand, maskerZet,
   zakelijkZet, zakelijkeIbans, potRekeningen, potOverzicht, potCategorie, potAfschriftInvoer, potAfschriftMaanden, potDatahubInvoer, metaLees, metaZet, isAfgescheiden, POT, CAT_POT, LET_OP_POT,
   categorieen, externeRekeningen, woordSleutel, groepSleutel, maskeer, reeksenBereken, vastePosten, rijenVan, rijHoort, paypalStap, paypalNaam, ppTitel, rijTekst, archiefStart, machtigingVan, naamNorm, CAT_UIT, CAT_IN, CAT_OVER, TYPES, EIGENAREN, EXTERN, LET_OP_EXTERN, SCHEMA_VERSIE };

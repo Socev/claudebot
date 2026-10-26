@@ -272,6 +272,7 @@ jobs:
           t test/facturen-db.sh   # wv824: opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
           t test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
           t test/facturen-validatie.sh   # wv944: bankhistorie (startdatum, droogloop, bron, personeel, FV2-archief) en validatie (profielen, betaling, controles, zoeken)
+          t test/abn-historie.sh   # wv1329: ABN-historie (PDF-afschriften) in de bankluis — afdekken wat de bank gaf, saldo, POT-afschrift, niet naar de datahub
           command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils) || echo "::warning::pdftotext niet te installeren"   # de koerier roept /usr/bin/pdftotext echt aan
           t test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads
           t test/facturen-ingang.sh   # wv856: smalle ingang /fac — poortgeheim, servicetoken- en gebruikers-JWT, nooit eigenaar, praktijkmanager-scope, uploads, audit

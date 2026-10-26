@@ -628,3 +628,89 @@ test('wv1323: ibanHistorie en naamVerwant — ≥ 3 afschrijvingen met een naam 
   assert.equal(V.vollereNaam('Mediq Nederland B.V.', 'MEDIQ'), 'Mediq Nederland B.V.');
   assert.equal(V.vollereNaam(null, 'Bank Naam'), 'Bank Naam');
 });
+
+// ───────────────────────────── ABN-historie-CSV (wv1329) ─────────────────────────────
+
+const HKOP = 'Mutatie-ID;Rekening;Boekdatum;Rentedatum;Bedrag;Af Bij;Type;Tegenrekening;BIC;Naam;Omschrijving;Kenmerk;Betalingskenmerk;Incassant;Machtiging;Volledige omschrijving;Saldo na mutatie;Afschrift datum;Afschrift volgnr;Pagina;Bronbestand';
+// r = [datum JJJJ-MM-DD, bedrag in centen, tegen-IBAN, naam, omschrijving, rentedatum?]; oudste eerst, lopend saldo, CRLF en BOM zoals de echte bestanden
+function hcsv(rijen, beginCenten, o) {
+  o = o || {};
+  let saldo = beginCenten == null ? 1000000 : beginCenten;
+  const per = {};
+  return '﻿' + HKOP + '\r\n' + rijen.map(([d, c, tegen, naam, oms, rd], i) => {
+    saldo += c;
+    const afs = d.slice(0, 4) + '-' + d.slice(5, 7).padStart(3, '0');
+    per[afs] = (per[afs] || 0) + 1;
+    const id = (o.rek || TG) + '-' + afs + '-' + String(per[afs]).padStart(3, '0');
+    return [id, o.rek || TG, d, rd || d, fmt(c), c < 0 ? 'Af' : 'Bij', 'SEPA Overboeking', tegen || '', tegen ? 'TESTNL2A' : '', naam || '', oms || '', '', '', '', '',
+      'SEPA Overboeking | IBAN: ' + (tegen || '') + ' | Naam: ' + (naam || '') + ' | Omschrijving: ' + (oms || ''), fmt(saldo), d, afs, '1', 'proef.pdf'].join(';');
+  }).join('\r\n') + '\r\n';
+}
+
+test('ABN-historie (wv1329): herkend, opgeslagen als abn_tab, overlap met TAB afgedekt zonder de TAB-sleutels te raken; tweede keer al bekend; TAB opnieuw niets dubbel', () => {
+  const t = opzet();
+  // de TAB gaf september 2026 al (twee regels, waarvan één zonder tegenpartij zoals een betaalautomaat)
+  const tabBytes = tab([['20260905', -1500, ov(LEV.A, 'Leverancier A B.V.', 'f9')], ['20260907', -400, 'BEA, Betaalpas  WINKEL PROEF,PAS123']], 1000000);
+  const ut = hist(t, tabBytes, 'sep.tab');
+  assert.equal(ut.nieuw, 2);
+  const tabRefs = t.fdb.db.prepare('SELECT entry_ref FROM bank_transactie ORDER BY entry_ref').all().map((x) => x.entry_ref);
+  // de historie: twee oude regels en dezelfde twee van september (de betaalautomaat hier met een naam)
+  const h = hcsv([['2025-01-05', -1000, LEV.A, 'Leverancier A B.V.', 'oud'], ['2025-02-05', 5000, LEV.C, 'Klant C', 'ontvangst'],
+    ['2026-09-05', -1500, LEV.A, 'Leverancier A B.V.', 'f9'], ['2026-09-07', -400, '', 'WINKEL PROEF', 'pas']], 1000000 + 1000 - 5000);
+  assert.equal(B.herkenFormaat(h), 'abn_historie_csv');
+  const droog = hist(t, h, 'h.csv', { droog: true });
+  assert.equal(droog.formaat, 'abn_historie_csv');
+  assert.deepEqual([droog.check.te_dekken, droog.check.in_venster, droog.check.bestaand_rest, droog.check.boven_drempel], [2, 0, 0, false]);
+  assert.equal(droog.saldo['…' + TG.slice(-4)].sluit, true);
+  const u = hist(t, h, 'h.csv');
+  assert.deepEqual([u.nieuw, u.gedekt, u.archief, u.al_bekend_regels], [2, 2, 2, 0]);
+  assert.deepEqual(t.fdb.db.prepare('SELECT entry_ref FROM bank_transactie WHERE entry_ref IN (' + tabRefs.map(() => '?').join(',') + ')').all(...tabRefs).length, 2, 'TAB-sleutels onaangeroerd');
+  assert.equal(t.n("SELECT count(*) n FROM bank_transactie WHERE formaat = 'abn_tab'"), 4);
+  assert.equal(t.fdb.db.prepare("SELECT formaat FROM bank_bestand WHERE naam = 'h.csv'").get().formaat, 'abn_tab');
+  // per (datum, bedrag) gelijk aan het bestand
+  assert.deepEqual(t.fdb.db.prepare('SELECT boekdatum, bedrag_centen FROM bank_transactie ORDER BY boekdatum').all().map((x) => x.boekdatum + ':' + x.bedrag_centen),
+    ['2025-01-05:-1000', '2025-02-05:5000', '2026-09-05:-1500', '2026-09-07:-400']);
+  // zelfde bestand: al bekend; andere regeleinden: dezelfde sleutels, niets nieuw
+  assert.equal(hist(t, h, 'h.csv').al_bekend, true);
+  const lf = hist(t, h.replace(/\r\n/g, '\n'), 'h-lf.csv');
+  assert.deepEqual([lf.nieuw, lf.gedekt, lf.al_bekend_regels], [0, 2, 2]);
+  // de TAB later nog eens (andere bytes): niets nieuw
+  assert.equal(F.verwerkBankbestand(t.fdb, t.eig, Buffer.from(tabBytes + '\n'), 'sep2.tab', NU, { modus: 'upload' }).nieuw, 0);
+  // een historiebestand via de app (upload): geweigerd
+  assert.throws(() => F.verwerkBankbestand(t.fdb, t.eig, Buffer.from(h), 'h.csv', NU, { modus: 'upload' }), (e) => e.status === 422 && /machinekamer/.test(e.message));
+});
+
+test('ABN-historie (wv1329): sluit het bestand niet op de database (bestaande regel zonder tegenhanger, nieuwe regel binnen de bestaande periode) → 409, niets ingelezen; --forceer wel', () => {
+  const t = opzet();
+  hist(t, tab([['20260905', -1500, ov(LEV.A, 'Leverancier A B.V.', 'f9')], ['20260906', -700, ov(LEV.A, 'Leverancier A B.V.', 'f10')], ['20260920', -50, ov(LEV.A, 'Leverancier A B.V.', 'f11')]], 1000000), 'sep.tab');
+  // het bestand mist de regel van 6-9 (binnen zijn eigen periode); de regel van 20-9 ligt erbuiten en telt niet
+  const mist = hcsv([['2025-01-05', -1000, LEV.A, 'Leverancier A B.V.', 'oud'], ['2026-09-05', -1500, LEV.A, 'Leverancier A B.V.', 'f9'], ['2026-09-07', -10, LEV.C, 'Klant C', 'x']], 1001000);
+  assert.throws(() => hist(t, mist, 'mist.csv'), (e) => e.status === 409 && /sluiten niet/.test(e.message));
+  const dm = hist(t, mist, 'mist.csv', { droog: true });
+  assert.deepEqual([dm.check.te_dekken, dm.check.in_venster, dm.check.bestaand_rest], [1, 1, 1]);
+  assert.equal(t.n('SELECT count(*) n FROM bank_transactie'), 3);
+  const extra = hcsv([['2026-09-05', -1500, LEV.A, 'Leverancier A B.V.', 'f9'], ['2026-09-06', -700, LEV.A, 'Leverancier A B.V.', 'f10'], ['2026-09-06', -33, LEV.C, 'Klant C', 'nieuw']], 1001500);
+  const d = hist(t, extra, 'extra.csv', { droog: true });
+  assert.deepEqual([d.check.te_dekken, d.check.in_venster, d.check.bestaand_rest, d.check.boven_drempel], [2, 1, 0, true]);
+  assert.throws(() => hist(t, extra, 'extra.csv'), (e) => e.status === 409);
+  assert.equal(hist(t, extra, 'extra.csv', { forceer: true }).nieuw, 1);
+});
+
+test('ABN-historie (wv1329): parser weigert afwijkingen met regelnummer, nooit een waarde', () => {
+  const goed = hcsv([['2025-01-05', -1000, LEV.A, 'Leverancier A B.V.', 'oud']]);
+  const rek = [{ iban: TG, entiteit: 'tolgaarde', bank_formaat: 'abn_tab', controle: 1 }];
+  assert.equal(B.leesBankbestand(goed, { rekeningen: rek }).ok, true);
+  const r1 = B.leesBankbestand(goed, { rekeningen: rek }).transacties[0];
+  assert.equal(r1.formaat, 'abn_tab'); assert.match(r1.entry_ref, /^[0-9a-f]{20}$/);
+  assert.equal(B.leesBankbestand(goed.replace(';Af;', ';Bij;'), { rekeningen: rek }).fout, 'regel_ongeldig');
+  assert.equal(B.leesBankbestand(goed.replace('Mutatie-ID;', 'MutatieID;'), { rekeningen: rek }).fout, 'formaat_onbekend');
+  const dubbel = goed + goed.split('\r\n')[1] + '\r\n';
+  assert.match(B.leesBankbestand(dubbel, { rekeningen: rek }).uitleg, /regel 3: Mutatie-ID dubbel/);
+  const g = B.leesBankbestand(goed.replace(';Af;', ';Bij;'), { rekeningen: rek });
+  assert.ok(!/1000|10,00|Leverancier/.test(g.uitleg), g.uitleg);
+  // rekening met een ander formaat (ING) weigert; Privé (controle 0) gaat weg zonder spoor
+  assert.equal(B.leesBankbestand(goed, { rekeningen: [{ iban: TG, entiteit: 'tolgaarde', bank_formaat: 'ing_csv', controle: 1 }] }).fout, 'verkeerd_formaat');
+  assert.equal(B.leesBankbestand(goed, { rekeningen: [{ iban: TG, entiteit: 'prive', bank_formaat: 'abn_tab', controle: 0 }] }).prive_weggegooid, 1);
+  // boekdatum = Rentedatum (zoals de TAB)
+  assert.equal(B.leesBankbestand(hcsv([['2025-01-05', -1000, LEV.A, 'A', 'x', '2025-01-06']]), { rekeningen: rek }).transacties[0].boekdatum, '2025-01-06');
+});

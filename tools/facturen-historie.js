@@ -18,6 +18,9 @@
  *
  * Uitvoer: alleen aantallen, periode, laatste 4 van de rekening, saldocontrole (sluit/breuken) — geen bedragen, namen of omschrijvingen.
  * Formaten: ING-CSV, ABN-TAB, ABN-MT940 en (wv1299) Triodos-CSV; de rekening moet in Facturen staan met dat formaat.
+ * wv1329: ook het ABN-historiebestand (overzetting van de PDF-afschriften, 21 kolommen met Mutatie-ID) voor een rekening met abn_tab of
+ * abn_mt940: regels die al binnen zijn (TAB, FV2-archief) worden afgedekt (gedekt) en houden hun eigen sleutel; sluit het bestand niet op
+ * de database binnen zijn eigen periode, dan 409 (dekking_sluit_niet). --koppel doet daar niets. Privé en de POT: tools/bank-historie.js.
  * Weigert als de database een ouder schema heeft dan deze code (de pod draait dan nog een oudere release; eerst uitrollen).
  */
 'use strict';
@@ -43,7 +46,7 @@ function samenvatting(naam, u) {
   const s = Object.entries(u.saldo || {}).map(([r, x]) => r + ' ' + (x.gecontroleerd ? (x.sluit ? 'saldo sluit' : 'saldo ' + x.breuken + ' breuk(en)') : 'saldo niet te controleren')).join('; ');
   return {
     bestand: path.basename(naam), al_bekend: !!u.al_bekend, droog: !!u.droog, formaat: u.formaat, periode: u.periode,
-    rekeningen: u.rekeningen, prive_weggegooid: u.prive_weggegooid, nieuw: u.nieuw, al_bekend_regels: u.al_bekend_regels, gekoppeld: u.gekoppeld, aangevuld: u.aangevuld,
+    rekeningen: u.rekeningen, prive_weggegooid: u.prive_weggegooid, nieuw: u.nieuw, al_bekend_regels: u.al_bekend_regels, gekoppeld: u.gekoppeld, gedekt: u.gedekt, aangevuld: u.aangevuld,
     archief: u.archief, bron_bewaard: u.bron_bewaard, saldo: s || undefined, check: u.check,
     signalen: u.controle ? u.controle.signalen : undefined, historie_stil: u.controle ? u.controle.historie_stil || 0 : undefined,
   };

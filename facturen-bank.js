@@ -26,6 +26,9 @@ class BankWeigering extends Error {
 }
 const MAX_BESTAND = 20 * 1024 * 1024;
 const FORMATEN = ['ing_csv', 'abn_tab', 'abn_mt940', 'triodos_csv', 'bankluis'];
+// wv1329: invoerformaten die geen eigen bank_formaat zijn. Het ABN-historiebestand is een overzetting van ABN-afschriften; de regels
+// worden opgeslagen onder het formaat van de rekening (abn_tab of abn_mt940), zonder schemawijziging.
+const HISTORIE_FORMATEN = { abn_historie_csv: ['abn_tab', 'abn_mt940'] };
 const OMS_HASH = 500, OMS_OPSLAG = 200, TYPE_OPSLAG = 60;
 // controle: 1 = zakelijk (inlezen), 0 = Privé (weggooien). Alles anders (NULL, leeg, onzin) is een onvolledige rekening: weigeren, nooit
 // stil als Privé behandelen (diffreview wv798 #5).
@@ -82,10 +85,11 @@ function alsTekst(invoer) {
   throw new BankWeigering('geen_bestand', 'geen bestandsinhoud');
 }
 
-// → 'ing_csv' | 'abn_tab' | 'abn_mt940' | 'triodos_csv' | 'camt053' | null. Alleen de vorm, nooit de rekening.
+// → 'ing_csv' | 'abn_tab' | 'abn_mt940' | 'triodos_csv' | 'abn_historie_csv' | 'camt053' | null. Alleen de vorm, nooit de rekening.
 function herkenFormaat(invoer) {
   const t = alsTekst(invoer).replace(/^﻿/, '');
   const eerste = t.split('\n', 1)[0];
+  if (eerste.replace(/\r$/, '') === ABN_HISTORIE_KOP.join(';')) return 'abn_historie_csv';
   if (eerste.indexOf('"Datum";') !== -1 || eerste.indexOf('"Datum",') !== -1) return 'ing_csv';
   if (/^\s*<\?xml|<BkToCstmrStmt\b/.test(t.slice(0, 2000))) return 'camt053';
   if (/^:20:/m.test(t) && /^:25:/m.test(t) && /^:6[02][FM]:/m.test(t)) return 'abn_mt940';
@@ -222,6 +226,72 @@ function leesTriodos(tekst) {
     });
   });
   return uit;
+}
+
+// ───────────────────────────── ABN-historie-CSV (wv1329) ─────────────────────────────
+
+/*
+ * De volledige ABN-historie vanaf rekeningstart (David 26-10-2026, via Claude Desktop uit de PDF-afschriften overgezet; per rekening een
+ * CSV en een controleverslag). Gemeten op de zes bestanden: vaste kop van 21 kolommen, puntkomma, UTF-8 met BOM, één rekening per bestand,
+ * oudste eerst, Bedrag met minteken bij Af (geen duizendtallen), Saldo na mutatie op elke regel (keten sluit per regel), Mutatie-ID
+ * <IBAN>-<jaar>-<afschrift>-<regel> uniek. Geen bankexport: alleen de machinekamer leest het in (modus historisch).
+ * boekdatum = Rentedatum, zoals de TAB-parser en FV2 (gemeten: met Rentedatum vallen alle bestaande regels van Tolgaarde samen, met
+ * Boekdatum één niet). entry_ref = sha1 over 'ABN-HISTORIE' en de Mutatie-ID: een tweede overzetting van dezelfde afschriften geeft
+ * dezelfde sleutels. Regels die al binnen zijn (TAB, FV2-archief) krijgen hun sleutel niet: facturen.js dekt ze af (historieDekking).
+ */
+const ABN_HISTORIE_KOP = ['Mutatie-ID', 'Rekening', 'Boekdatum', 'Rentedatum', 'Bedrag', 'Af Bij', 'Type', 'Tegenrekening', 'BIC', 'Naam', 'Omschrijving',
+  'Kenmerk', 'Betalingskenmerk', 'Incassant', 'Machtiging', 'Volledige omschrijving', 'Saldo na mutatie', 'Afschrift datum', 'Afschrift volgnr', 'Pagina', 'Bronbestand'];
+const IBAN_RE = /^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/;
+// → [{ mutatie_id, rekening, boekdatum, rentedatum, bedrag (euro), type, tegen_iban, naam, omschrijving, kenmerk, betalingskenmerk, incassant,
+//      machtiging, volledig, saldo_na (tekst), regel }]; weigert het hele bestand bij één afwijking (regelnummer en veld, nooit een waarde)
+function leesAbnHistorie(tekst) {
+  tekst = alsTekst(tekst);
+  if (tekst.charCodeAt(0) === 0xfeff) tekst = tekst.slice(1);
+  const ruw = csvRijen(tekst, ';').filter((r) => r.length > 0 && !(r.length === 1 && r[0] === ''));
+  if (!ruw.length || ruw[0].join(';') !== ABN_HISTORIE_KOP.join(';')) throw new BankWeigering('kop_ongeldig', 'ABN-historie: kop wijkt af van de 21 vaste kolommen');
+  const uit = [], ids = new Set();
+  let rekening = null;
+  for (let ri = 1; ri < ruw.length; ri++) {
+    const v = ruw[ri], nr = ri + 1;
+    const fout = (wat) => { throw new BankWeigering('regel_ongeldig', 'ABN-historie regel ' + nr + ': ' + wat); };
+    if (v.length !== ABN_HISTORIE_KOP.length) fout(v.length + ' kolommen in plaats van ' + ABN_HISTORIE_KOP.length);
+    const k = (naam) => String(v[ABN_HISTORIE_KOP.indexOf(naam)]).trim();
+    const rek = k('Rekening');
+    if (!IBAN_RE.test(rek)) fout('rekening is geen IBAN');
+    if (rekening === null) rekening = rek; else if (rek !== rekening) fout('meer dan één rekening in het bestand');
+    const id = k('Mutatie-ID');
+    if (!/^[A-Z0-9]+-\d{4}-\d{3}-\d{3}$/.test(id) || !id.startsWith(rek + '-')) fout('Mutatie-ID ongeldig');
+    if (ids.has(id)) fout('Mutatie-ID dubbel');
+    ids.add(id);
+    const bd = k('Boekdatum'), rd = k('Rentedatum');
+    if (!isIsoDatum(bd) || !isIsoDatum(rd)) fout('datum is geen JJJJ-MM-DD');
+    const bTekst = k('Bedrag');
+    if (!/^-?\d+,\d{2}$/.test(bTekst)) fout('ongeldig bedrag');
+    const bedrag = normBedrag(bTekst);
+    const afBij = k('Af Bij');
+    if (afBij !== 'Af' && afBij !== 'Bij') fout('Af Bij is geen Af of Bij');
+    if ((afBij === 'Af') !== bedrag < 0) fout('teken van het bedrag past niet bij Af Bij');
+    const saldo = k('Saldo na mutatie');
+    if (!/^-?\d+,\d{2}$/.test(saldo)) fout('ongeldig saldo');
+    const tegen = k('Tegenrekening');
+    if (tegen && !IBAN_RE.test(tegen)) fout('tegenrekening is geen IBAN');
+    uit.push({
+      mutatie_id: id, rekening: rek, boekdatum: bd, rentedatum: rd, bedrag: bedrag === 0 ? 0 : bedrag, type: k('Type'), tegen_iban: tegen || null,
+      naam: k('Naam') || null, omschrijving: k('Omschrijving') || null, kenmerk: k('Kenmerk') || null, betalingskenmerk: k('Betalingskenmerk') || null,
+      incassant: k('Incassant') || null, machtiging: k('Machtiging') || null, volledig: k('Volledige omschrijving') || null, saldo_na: saldo, regel: nr,
+    });
+  }
+  return uit;
+}
+// historieregel → ruwe parserrij zoals de andere formaten (normaliseer). Betalingskenmerk boven het end-to-end-kenmerk: daarop matcht de
+// factuurcontrole.
+function abnHistorieRij(h) {
+  return {
+    eigen_iban_ruw: h.rekening, boekdatum: h.rentedatum, tegenpartij_iban: h.tegen_iban, tegenpartij_naam: h.naam, bedrag: h.bedrag, valuta: 'EUR',
+    oms_hash: (h.omschrijving || '').slice(0, OMS_HASH) || null, kenmerk: h.betalingskenmerk || h.kenmerk, transactietype: 'ABN:' + (h.type || 'None'),
+    is_incasso: /incasso/i.test(h.type || ''), incassant_id: h.incassant, machtiging: h.machtiging, saldo_na: h.saldo_na, regel: h.regel,
+    entry_ref: mkRef(['ABN-HISTORIE', h.mutatie_id]),
+  };
 }
 
 // ───────────────────────────── ABN-TAB en ABN-MT940 ─────────────────────────────
@@ -369,7 +439,8 @@ function leesBestand(invoer, opties) {
   const formaat = herkenFormaat(tekst);
   if (formaat === 'camt053') throw new BankWeigering('formaat_onbekend', 'CAMT.053 lezen we nog niet; exporteer als MT940, TAB of CSV');
   if (!formaat) throw new BankWeigering('formaat_onbekend', 'geen ING-CSV, ABN-TAB, ABN-MT940 of Triodos-CSV herkend');
-  const rijen = formaat === 'ing_csv' ? leesIng(tekst) : formaat === 'abn_tab' ? leesAbnTab(tekst) : formaat === 'triodos_csv' ? leesTriodos(tekst) : leesAbnMt940(tekst);
+  const rijen = formaat === 'ing_csv' ? leesIng(tekst) : formaat === 'abn_tab' ? leesAbnTab(tekst) : formaat === 'triodos_csv' ? leesTriodos(tekst)
+    : formaat === 'abn_historie_csv' ? leesAbnHistorie(tekst).map(abnHistorieRij) : leesAbnMt940(tekst);
   if (!rijen.length) throw new BankWeigering('leeg', 'geen transacties in het bestand');
   const rekeningen = new Map((opties.rekeningen || []).map((r) => [ibanNorm(r.iban), r]));
   // eerst het hele bestand toetsen, dan pas iets teruggeven: één onbekende rekening of één verkeerd formaat weigert alles
@@ -382,23 +453,27 @@ function leesBestand(invoer, opties) {
     const rk = rekeningen.get(iban);
     if (controleVan(rk) === 0) continue;   // Privé: formaat doet er niet toe, de regels gaan hieronder weg
     if (rk.bank_formaat === 'bankluis') throw new BankWeigering('verkeerd_formaat', 'rekening ' + eind4(iban) + ' komt via de bankkoppeling binnen; een upload zou dubbel tellen');
-    if (rk.bank_formaat !== formaat) throw new BankWeigering('verkeerd_formaat', 'rekening ' + eind4(iban) + ' leest de app als ' + rk.bank_formaat + ', dit bestand is ' + formaat + '; exporteer in het vaste formaat van die rekening');
+    const past = HISTORIE_FORMATEN[formaat] ? HISTORIE_FORMATEN[formaat].includes(rk.bank_formaat) : rk.bank_formaat === formaat;
+    if (!past) throw new BankWeigering('verkeerd_formaat', 'rekening ' + eind4(iban) + ' leest de app als ' + rk.bank_formaat + ', dit bestand is ' + formaat + '; exporteer in het vaste formaat van die rekening');
   }
-  kenEntryRefsToe(rijen);   // over het hele bestand, zoals FV2 (Privé zit in de eigen IBAN van de hash, dus geen verschuiving)
+  // over het hele bestand, zoals FV2 (Privé zit in de eigen IBAN van de hash, dus geen verschuiving); de ABN-historie heeft al een sleutel
+  if (formaat !== 'abn_historie_csv') kenEntryRefsToe(rijen);
   const transacties = [], per = {};
   let prive = 0;
   for (const r of rijen) {
     const iban = ibanNorm(r.eigen_iban_ruw), rk = rekeningen.get(iban);
     if (controleVan(rk) === 0) { prive++; continue; }   // weg zonder opslag: geen veld, geen hash blijft over
-    transacties.push(normaliseer(r, formaat, rk));
+    transacties.push(normaliseer(r, HISTORIE_FORMATEN[formaat] ? rk.bank_formaat : formaat, rk));
     per[iban] = (per[iban] || 0) + 1;
   }
   // wv944: saldocontrole en periode alleen over de zakelijke rekeningen (Privé laat geen spoor na, ook geen saldo of datum)
   const zakelijk = rijen.filter((r) => controleVan(rekeningen.get(ibanNorm(r.eigen_iban_ruw))) === 1);
-  const saldo = saldoControle(zakelijk, formaat);
+  const saldo = saldoControle(zakelijk, formaat);   // abn_historie_csv: de keten over Saldo na mutatie, oudste eerst (zoals ING/Triodos)
   const datums = transacties.map((t) => t.boekdatum).sort();
   const periode = datums.length ? { van: datums[0], tot: datums[datums.length - 1] } : null;
-  return { ok: true, formaat, transacties, prive_weggegooid: prive, per_rekening: per, saldo, periode };
+  // wv1329: een historieformaat wordt opgeslagen als het formaat van de rekening (één per bestand: de parser weigert een tweede rekening)
+  const opslag_formaat = HISTORIE_FORMATEN[formaat] ? [...new Set([...gezien].map((i) => rekeningen.get(i).bank_formaat))].join(',') : formaat;
+  return { ok: true, formaat, opslag_formaat, transacties, prive_weggegooid: prive, per_rekening: per, saldo, periode };
 }
 
 // Bankluis-bron (F2 leest transacties.sqlite read-only): één post naar dezelfde normalisatie. Alleen status 'booked' en niet vervangen;
@@ -1248,7 +1323,7 @@ function feitUitleg(k) {
 }
 
 module.exports = {
-  BankWeigering, FORMATEN, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
+  BankWeigering, FORMATEN, HISTORIE_FORMATEN, ABN_HISTORIE_KOP, leesAbnHistorie, CATEGORIEEN, RICHTINGEN, SIGNALEN, SIGNAAL_SOORTEN, AUTO_ZEKERHEID, SUBSET_MAX, SUBSET_AUTO_MAX,
   // parsers
   pyStr, mkRef, kenEntryRefsToe, refBasis, saldoControle, normBedrag, herkenFormaat, csvRijen, leesIng, leesTriodos, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
   // controle
