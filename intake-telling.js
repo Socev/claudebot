@@ -22,13 +22,20 @@ function maandagVan(dag) {
   return new Date(d.getTime() - wd * 86400000).toISOString().slice(0, 10);
 }
 
-// één vaste set codes, zodat Gmail, facturen en de vault dezelfde entiteit dezelfde naam geven
-const ENTITEIT_ALIAS = { praktijkhouders_bv: 'phbv', 'praktijkhouders bv': 'phbv', 'ghawa-ecg': 'ghawa', pot_poh_ggz: 'pot', _inbox: 'inbox', '': 'onbekend' };
+// één vaste set codes, zodat Gmail, facturen en de vault dezelfde entiteit dezelfde naam geven. Alleen codes uit de lijst gaan door
+// (review #1): de entiteit in mail_verwerkt en in de meta van een stuk is vrije tekst (taalmodel), dus een los woord als een
+// achternaam mag nooit als "entiteit" in beeld komen.
+const ENTITEIT_ALIAS = { praktijkhouders_bv: 'phbv', 'praktijkhouders bv': 'phbv', 'ghawa-ecg': 'ghawa', pot_poh_ggz: 'pot', _inbox: 'inbox', _gedeeld: 'gedeeld' };
+const ENTITEITEN = new Set(['tolgaarde', 'groenhouten', 'hagro', 'holding', 'sel', 'prive', 'pot', 'phbv', 'dbh', 'ghawa', 'kostenmaatschap', 'sloel',
+  'inbox', 'projecten', 'gedeeld', 'onbekend']);
+const ACCOUNTS = new Set(['david', 'groenhouten', 'dm']);   // Gmail-accounts van de Mail Processor; anders "overig"
 function entiteitCode(x) {
-  const s = String(x == null ? '' : x).trim().toLowerCase();
-  if (Object.prototype.hasOwnProperty.call(ENTITEIT_ALIAS, s)) return ENTITEIT_ALIAS[s];
-  return /^[a-z0-9_-]{1,40}$/.test(s) ? s : 'onbekend';
+  let s = String(x == null ? '' : x).trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(ENTITEIT_ALIAS, s)) s = ENTITEIT_ALIAS[s];
+  return ENTITEITEN.has(s) ? s : 'onbekend';
 }
+// op een vaste plek (werk-pc) geen privé en geen schaduwtellingen van WhatsApp en Signal (review #6)
+function priveBron(id) { return /^intake:(whatsapp|signal)/.test(id); }
 
 // raw_input-mappen → entiteit (alleen de mapnaam, nooit wat erin staat)
 function rawMappen(vault) {
@@ -59,9 +66,9 @@ function telMap(dir, rij, vandaag, weekVan) {
     for (const e of lijst) {
       if (e.name.startsWith('.') || e.isSymbolicLink()) continue;
       const p = path.join(d, e.name);
+      if (++n > MAX_BESTANDEN) { rij.afgekapt = true; return; }   // mappen tellen mee in de grens (review #4)
       if (e.isDirectory()) { stapel.push(p); continue; }
       if (!e.isFile()) continue;
-      if (++n > MAX_BESTANDEN) { rij.afgekapt = true; return; }
       rij.wachtend++;
       let st;
       try { st = fs.statSync(p); } catch (x) { continue; }
@@ -93,7 +100,7 @@ function maak(o) {
   const vault = o.vault, facturenPad = o.facturenPad || null, intakePad = o.intakePad || null;
   const nu = typeof o.nu === 'function' ? o.nu : Date.now;
   const rpc = o.rpc;   // async (fn, body) → rijen; null = geen Supabase
-  let cache = null;
+  let cache = null;   // { t, p: Promise<meting> } — ook de lopende meting, zodat twee vragen tegelijk één keer meten (review #3)
 
   async function meet() {
     const t = nu();
@@ -117,7 +124,8 @@ function maak(o) {
         const rijen = await rpc('ovis_intake_telling', { p_van: vanIso });
         if (!Array.isArray(rijen)) throw new Error('geen lijst');
         for (const r of rijen) {
-          const id = r.bron === 'outlook' ? 'outlook' : 'gmail:' + entiteitCode(r.account);
+          const acc = String(r.account || '').toLowerCase();
+          const id = r.bron === 'outlook' ? 'outlook' : 'gmail:' + (ACCOUNTS.has(acc) ? acc : 'overig');
           tel(bron(id, 'mail'), r.entiteit, String(r.dag || '').slice(0, 10), Number(r.aantal) || 0);
         }
       } catch (e) {
@@ -149,9 +157,9 @@ function maak(o) {
 
     // 4 nieuwe aanleverweg (schaduw)
     try {
-      const rijen = leesSqlite(intakePad, "SELECT bron, json_extract(meta, '$.entiteit') AS ent, aangemaakt AS op FROM stuk WHERE aangemaakt >= ?", [vanIso]);
+      const rijen = leesSqlite(intakePad, "SELECT bron, json_extract(meta, '$.entiteit') AS ent, aangemaakt AS op FROM stuk WHERE versie = 1 AND aangemaakt >= ?", [vanIso]);
       if (rijen) for (const r of rijen) {
-        const id = 'intake:' + String(r.bron || '').toLowerCase().replace(/[^a-z0-9:_-]/g, '').slice(0, 40);
+        const id = 'intake:' + (/^[a-z]+(:[a-z0-9_-]{1,30})?$/.test(String(r.bron || '')) ? r.bron : 'overig');
         const ms = Date.parse(r.op);
         if (ms) tel(bron(id, 'ingang'), r.ent, dagVan(ms), 1);
       }
@@ -161,7 +169,7 @@ function maak(o) {
   }
 
   function vorm(m, vastePlek) {
-    const bronnen = m.bronnen.map((b) => {
+    const bronnen = m.bronnen.filter((b) => !(vastePlek && priveBron(b.id))).map((b) => {
       const entiteiten = [...b.ent.entries()].filter(([e]) => !(vastePlek && e === 'prive'))
         .map(([entiteit, r]) => ({ entiteit, vandaag: r.vandaag, week: r.week, ...(b.id === 'raw_input' ? { wachtend: r.wachtend } : {}) }))
         .filter((r) => r.week > 0 || r.vandaag > 0 || r.wachtend > 0)
@@ -178,8 +186,12 @@ function maak(o) {
   }
 
   async function telling(vastePlek) {
-    if (!cache || nu() - cache.t > CACHE_MS) cache = { t: nu(), m: await meet() };
-    return vorm(cache.m, vastePlek);
+    if (!cache || nu() - cache.t > CACHE_MS) {
+      const c = { t: nu(), p: meet() };
+      cache = c;
+      c.p.catch(() => { if (cache === c) cache = null; });
+    }
+    return vorm(await cache.p, vastePlek);
   }
   return { telling, _meet: meet, _vorm: vorm };
 }
