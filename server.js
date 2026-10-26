@@ -15057,8 +15057,9 @@ async function stMeet() {
   let fout = null;
   try {
     const cfg = stCfg();
-    const [ver, sys, con, map] = await Promise.all([stGet(cfg, '/rest/system/version'), stGet(cfg, '/rest/system/status'),
-      stGet(cfg, '/rest/system/connections'), stGet(cfg, '/rest/db/status?folder=' + ST_MAP).catch(function () { return null; })]);
+    const [ver, sys, con, map, stats] = await Promise.all([stGet(cfg, '/rest/system/version'), stGet(cfg, '/rest/system/status'),
+      stGet(cfg, '/rest/system/connections'), stGet(cfg, '/rest/db/status?folder=' + ST_MAP).catch(function () { return null; }),
+      stGet(cfg, '/rest/stats/device').catch(function () { return null; })]);   // wv1308: laatst gezien per apparaat (Keten-attest: ≤ 2 u)
     d.versie = ver && ver.version; d.apparaat = sys && sys.myID ? sys.myID.slice(0, 7) : null;
     d.sinds = sys && sys.startTime || null;
     d.apparaten = [];
@@ -15066,6 +15067,8 @@ async function stMeet() {
       if (id === (sys && sys.myID)) continue;
       const c = con.connections[id];
       const a = { naam: cfg.namen[id] || id.slice(0, 7), id: id.slice(0, 7), verbonden: !!c.connected, soort: c.type || null };
+      const zien = stats && stats[id] && Date.parse(stats[id].lastSeen);   // Syncthing werkt lastSeen bij zolang het apparaat verbonden is
+      a.laatst_gezien = zien && zien > Date.UTC(2020, 0, 1) ? new Date(zien).toISOString() : null;
       if (map) { try { const k = await stGet(cfg, '/rest/db/completion?folder=' + ST_MAP + '&device=' + encodeURIComponent(id));
         a.voltooid = Math.round(k.completion * 10) / 10; a.nog_bytes = k.needBytes; a.nog_items = k.needItems; } catch (e) { a.voltooid = null; } }
       d.apparaten.push(a);
