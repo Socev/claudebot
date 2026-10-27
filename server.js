@@ -3734,6 +3734,7 @@ function handleRequest(req, res) {
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
       sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
+      scripts_veeg: typeof scriptsVeegInfo === 'function' ? scriptsVeegInfo() : { aan: false },   // wv1311: opruimronde socev-run --veeg (exit, aantal opgeveegd; geen namen)
       ovis: typeof ovisInfo === 'function' ? ovisInfo() : { aan: false },   // wv979: OVIS-register (laatste dag-, nacht- en Bibliothecarisronde; aantallen, geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
@@ -14636,6 +14637,25 @@ async function sb2NachtTik() {
   } catch (e) { logError('sb2-nacht-tik', e); }
 }
 if (sb2Nacht && SERVER_ECHT) { setInterval(function () { sb2NachtTik(); }, 5 * 60000).unref(); }
+// ── Opruimronde van het crash-vangnet socev-run --veeg (wv1311; waarom en grenzen in sb2-nacht.js maakVeeg) ──
+// Elke 5 min (echte pod, rol primair); werk alleen 03:50–04:49 en eenmaal per datum; zelf via socev-run met hartslag socev-run-veeg.
+const scriptsVeeg = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakVeeg === 'function' ? m.maakVeeg({ socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env }) : null;
+  } catch (e) { logError('scripts-veeg', e); return null; }
+})();
+function scriptsVeegInfo() { if (!scriptsVeeg) return { aan: false }; try { return scriptsVeeg.info(); } catch (e) { return { fout: true }; } }
+async function scriptsVeegTik() {
+  if (!scriptsVeeg || !SERVER_ECHT || !rolPrimair()) return;
+  try {
+    const u = await scriptsVeeg.tik({ ams: ovisAms() });
+    if (u) schrijfLog(nu() + ' scripts-veeg ' + velden({ exit: u.exit, opgeveegd: u.opgeveegd === null ? '-' : u.opgeveegd, ms: u.ms }));
+  } catch (e) { logError('scripts-veeg-tik', e); }
+}
+if (scriptsVeeg && SERVER_ECHT) { setInterval(function () { scriptsVeegTik(); }, 5 * 60000).unref(); }
 // managers.js soort script: Nu draaien (geen stempel, geen box-rij; het rapport gaat via managers.js naar de machinekamer)
 function ovisStartScript(m) {
   if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');

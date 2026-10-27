@@ -2,7 +2,8 @@
 # Toetst sb2-nacht.js (wv1321, SB2 fase 1a: nachtelijke linter + manifest) met een nep-socev-run en nep-scripts in een wegwerpmap:
 # venster 02:00–02:29 en eenmaal per datum, onderhoudsstand en lopende OVIS-nachtronde slaan over, linter met hartslag sb2_linter,
 # manifest op de nachtnaam, vergelijking met de vorige nacht (alleen aantallen), opruimen tot 14 nachtmanifesten (handmatige blijven),
-# geen opruimen na een mislukt manifest; daarna de uitvoer van de echte manifest.py (vergelijk) en de koppeling in server.js + uitrol.sh.
+# geen opruimen na een mislukt manifest; de opruimronde maakVeeg (wv1311: venster 03:50–04:49, socev-run --veeg, ook met de echte socev-run);
+# daarna de uitvoer van de echte manifest.py (vergelijk) en de koppeling in server.js + uitrol.sh.
 # Gebruik: bash test/sb2-nacht.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -161,12 +162,56 @@ function aanroepen() { try { return fs.readFileSync(log, 'utf8').trim().split('\
     toets('echte vergelijk: geen paden in de uitkomst', !/een\.md|drie|twee/.test(JSON.stringify(r)));
   } else console.log('OVERGESLAGEN echte manifest.py (geen release op deze machine)');
 
+  // ── opruimronde maakVeeg (wv1311) ──
+  toets('veegvenster: 03:49 nee, 03:50 ja, 04:49 ja, 04:50 nee, 02:10 nee',
+    !N.inVeegVenster(ams('x', 3, 49)) && N.inVeegVenster(ams('x', 3, 50)) && N.inVeegVenster(ams('x', 4, 49)) && !N.inVeegVenster(ams('x', 4, 50)) && !N.inVeegVenster(ams('x', 2, 10)));
+  const vlog = path.join(d, 'veeg-aanroepen.log');
+  fs.writeFileSync(path.join(d, 'veeg-run'), `#!/usr/bin/env bash
+echo "$*" >> ${vlog}
+if [ "$1" = "--veeg" ]; then [ -n "\${NEP_VEEG_FOUT:-}" ] && exit 1; echo '{"opgeveegd": 2}'; exit 0; fi
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done; shift
+exec "$@"
+`, { mode: 0o755 });
+  const vAanroep = () => { try { return fs.readFileSync(vlog, 'utf8').trim().split('\n'); } catch (e) { return []; } };
+  let w = N.maakVeeg({ socevRun: path.join(d, 'veeg-run'), env: env });
+  toets('veeg buiten het venster: niets', await w.tik({ ams: ams('2026-10-27', 3, 0) }) === null && vAanroep().length === 0);
+  u = await w.tik({ ams: ams('2026-10-27', 3, 55) });
+  const va = vAanroep();
+  toets('veeg: via socev-run met eigen naam en hartslag, dan --veeg', va[0] === '--naam socev-run-veeg --hartslag socev-run-veeg --max-min 5 -- ' + path.join(d, 'veeg-run') + ' --veeg' && va[1] === '--veeg', va);
+  toets('veeg: uitkomst exit 0, opgeveegd 2', u && u.exit === 0 && u.opgeveegd === 2 && u.datum === '2026-10-27', u);
+  toets('veeg: tweede tik zelfde datum niets', await w.tik({ ams: ams('2026-10-27', 4, 10) }) === null && vAanroep().length === 2);
+  toets('veeg: info zonder namen', JSON.stringify(Object.keys(w.info().laatste)) === JSON.stringify(['datum', 't', 'exit', 'ms', 'opgeveegd']) && w.info().loopt === false, w.info());
+  u = await N.maakVeeg({ socevRun: path.join(d, 'veeg-run'), env: Object.assign({}, env, { NEP_VEEG_FOUT: '1' }) }).tik({ ams: ams('2026-10-28', 4, 0) });
+  toets('veeg mislukt: exit 1, opgeveegd null, geen crash', u && u.exit === 1 && u.opgeveegd === null, u);
+  u = await N.maakVeeg({ socevRun: path.join(d, 'bestaat-niet'), env: env }).tik({ ams: ams('2026-10-28', 4, 0) });
+  toets('veeg: socev-run ontbreekt = 127', u && u.exit === 127, u);
+  // de echte socev-run uit de release, in een wegwerp-logmap: een dode run wordt opgeveegd, de eigen (levende) run niet
+  const echtRun = '/opt/data/scripts/huidig/bin/socev-run';
+  const nep = '/opt/data/scripts/huidig/packages/vangnet/tests/nep';
+  if (fs.existsSync(echtRun) && fs.existsSync(path.join(nep, 'vault_veilig.py'))) {
+    const lm = path.join(d, 'scripts-log'); fs.mkdirSync(lm, { mode: 0o755 });
+    const box = path.join(d, 'box.md'); fs.writeFileSync(box, '---\nupdated: 2026-10-01\n---\n# box\n\n## [x] oud\n- status: open\n');
+    const uid = String(process.getuid());
+    fs.mkdirSync(path.join(lm, uid), { mode: 0o700 });
+    fs.writeFileSync(path.join(lm, uid, 'dood.jsonl'), JSON.stringify({ t: 'start', run: 'aaaa', naam: 'dood', ts: '2026-10-26T01:00:00+01:00', pid: 999999, pid_start: 1, boot: 'ander' }) + '\n', { mode: 0o600 });
+    const venv = Object.assign({}, env, { SOCEV_RUN_LOGMAP: lm, SOCEV_RUN_BOX: box, SOCEV_RUN_BERICHT: 'true', SOCEV_RUN_VEILIG: nep, SOCEV_RUN_HARTSLAG: 'http://127.0.0.1:9' });
+    u = await N.maakVeeg({ socevRun: echtRun, env: venv }).tik({ ams: ams('2026-10-27', 3, 50) });
+    const dood = fs.readFileSync(path.join(lm, uid, 'dood.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const eigen = fs.readFileSync(path.join(lm, uid, 'socev-run-veeg.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    toets('echte socev-run: exit 0, 1 opgeveegd', u && u.exit === 0 && u.opgeveegd === 1, u);
+    toets('echte socev-run: dode run afgesloten als afgebroken', dood.length === 2 && dood[1].uitkomst === 'afgebroken' && dood[1].opgeveegd === true, dood);
+    toets('echte socev-run: eigen run geslaagd, niet opgeveegd', eigen.length === 2 && eigen[1].uitkomst === 'geslaagd' && !eigen.some(r => r.uitkomst === 'afgebroken'), eigen);
+    toets('echte socev-run: één box-rij voor de dode run', (fs.readFileSync(box, 'utf8').match(/Script dood: afgebroken zonder eind/g) || []).length === 1);
+  } else console.log('OVERGESLAGEN echte socev-run (geen release op deze machine)');
+
   // koppeling
   const s = fs.readFileSync('server.js', 'utf8'), ur = fs.readFileSync('uitrol.sh', 'utf8');
   toets('server.js: tik alleen echt + primair, onderhoud en OVIS-nacht doorgegeven', /if \(!sb2Nacht \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s)
     && /onderhoud: function \(\) \{ return !!onderhoud\.stand\(\)\.aan; \}, ovisNacht: ovisLoopt\.nu === 'nacht'/.test(s)
     && /vault: VAULT, grendel: OVIS_LOCK/.test(s));
   toets('server.js: /health sb2_nacht', /sb2_nacht: typeof sb2NachtInfo === 'function'/.test(s));
+  toets('server.js: veegtik alleen echt + primair, /health scripts_veeg, eigen klok', /if \(!scriptsVeeg \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s)
+    && /scripts_veeg: typeof scriptsVeegInfo === 'function'/.test(s) && /setInterval\(function \(\) \{ scriptsVeegTik\(\); \}, 5 \* 60000\)/.test(s));
   toets('uitrol.sh: sb2-nacht.js in RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bsb2-nacht\.js\b/.test(ur));
   fs.rmSync(d, { recursive: true, force: true });
   console.log(`\n${goed} groen, ${fouten} rood`);

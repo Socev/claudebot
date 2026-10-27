@@ -24,6 +24,7 @@
  * - Tijdslimiet: socev-run --max-min gaat voor (die schrijft zijn eindregel en meldt); node wacht de grendel + die limiet + 90 s
  *   en stuurt dan SIGTERM (socev-run geeft hem door aan zijn procesgroep), 20 s later SIGKILL (review #1).
  * - Staat in <staatMap>/staat.json (map 0700, bestand 0600): laatste datum, uitkomst per stap, verschil-aantallen.
+ * - Tweede, losse klok in dit bestand: maakVeeg (wv1311), de opruimronde socev-run --veeg om 03:50–04:49; zie onderaan.
  */
 const fs = require('fs');
 const path = require('path');
@@ -35,6 +36,27 @@ const EXT = '.jsonl.gz';
 const PATROON = /^manifest-(\d{8})-nacht\.jsonl\.gz$/;
 const TMP = /^manifest-\d{8}-nacht\.jsonl\.gz\.tmp-\d+$/;
 const VENSTER = { uur: 2, totMin: 30 };
+
+// Kind zonder shell; { code, uit, ms }. De tijdslimiet van socev-run (--max-min) gaat voor; dit is het vangnet daarachter.
+function kindProces(env, args, limiet) {
+  return new Promise(function (resolve) {
+    const t0 = Date.now();
+    let uit = '', klaar = false, k;
+    try { k = spawn(args[0], args.slice(1), { env: env, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (e) { return resolve({ code: 127, uit: '', ms: 0, fout: String(e && e.message || e).slice(0, 120) }); }
+    let hard = null;
+    const tijd = setTimeout(function () {
+      try { k.kill('SIGTERM'); } catch (e) {}
+      hard = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, 20000);
+    }, limiet);
+    const stop = function () { clearTimeout(tijd); if (hard) clearTimeout(hard); };
+    k.stdout.on('data', function (d) { if (uit.length < 100000) uit += d; });
+    k.stderr.on('data', function () {});
+    k.on('error', function (e) { if (klaar) return; klaar = true; stop(); resolve({ code: 127, uit: '', ms: Date.now() - t0, fout: String(e && e.message || e).slice(0, 120) }); });
+    k.on('exit', function (code, sig) { if (klaar) return; klaar = true; stop(); resolve({ code: code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code, uit: uit, ms: Date.now() - t0 }); });
+  });
+}
+function laatsteJson(uit) { try { return JSON.parse(String(uit).trim().split('\n').pop()); } catch (e) { return null; } }
 
 function maak(o) {
   const staatMap = o.staatMap;
@@ -61,26 +83,7 @@ function maak(o) {
     fs.renameSync(tmp, staatPad());
   }
 
-  // Kind zonder shell; { code, uit, ms }. De tijdslimiet van socev-run (--max-min) gaat voor; dit is het vangnet daarachter.
-  function kind(args, limiet) {
-    return new Promise(function (resolve) {
-      const t0 = Date.now();
-      let uit = '', klaar = false, k;
-      try { k = spawn(args[0], args.slice(1), { env: env, stdio: ['ignore', 'pipe', 'pipe'] }); }
-      catch (e) { return resolve({ code: 127, uit: '', ms: 0, fout: String(e && e.message || e).slice(0, 120) }); }
-      let hard = null;
-      const tijd = setTimeout(function () {
-        try { k.kill('SIGTERM'); } catch (e) {}
-        hard = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, 20000);
-      }, limiet);
-      const stop = function () { clearTimeout(tijd); if (hard) clearTimeout(hard); };
-      k.stdout.on('data', function (d) { if (uit.length < 100000) uit += d; });
-      k.stderr.on('data', function () {});
-      k.on('error', function (e) { if (klaar) return; klaar = true; stop(); resolve({ code: 127, uit: '', ms: Date.now() - t0, fout: String(e && e.message || e).slice(0, 120) }); });
-      k.on('exit', function (code, sig) { if (klaar) return; klaar = true; stop(); resolve({ code: code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code, uit: uit, ms: Date.now() - t0 }); });
-    });
-  }
-  function laatsteJson(uit) { try { return JSON.parse(String(uit).trim().split('\n').pop()); } catch (e) { return null; } }
+  function kind(args, limiet) { return kindProces(env, args, limiet); }
 
   function nachtManifesten() {
     let namen = [];
@@ -175,4 +178,41 @@ function maak(o) {
   return { tik: tik, info: info, _leesVerschil: leesVerschil };
 }
 
-module.exports = { maak: maak, BEWAAR: BEWAAR, PATROON: PATROON };
+// ── Opruimronde van het crash-vangnet (wv1311; ontwerp scripts-repo § 3.7) ──
+// WAAROM. `socev-run --veeg` sluit runs met een start maar zonder eind (pod-herstart, SIGKILL) af als "afgebroken" (= één box-rij + één
+// bericht via socev-run) en houdt de logs op 30 dagen. Zonder deze ronde ziet het vangnet een gestorven run pas bij de volgende run van
+// hetzelfde script. Eén poging per datum, 03:50–04:49 Nederlandse tijd (na de nachtconsolidatie en de correspondentie-wachter; het venster
+// bestaat ook in de wisselnachten). Zelf ook via socev-run, met hartslag socev-run-veeg (drempelrij machinekamer.hartslag, 36 u). Een
+// levend proces wordt nooit opgeveegd (pid + starttijd + boot-id); de eigen run van deze ronde dus ook niet. Datum alleen in het geheugen:
+// een herstart in het venster geeft hooguit een tweede, onschadelijke ronde. Niet afhankelijk van de onderhoudsstand (raakt de vault niet).
+const VEEG = { van: [3, 50], tot: [4, 50] };   // [uur, min), Europe/Amsterdam
+function inVeegVenster(a) {
+  const m = a.uur * 60 + a.min;
+  return m >= VEEG.van[0] * 60 + VEEG.van[1] && m < VEEG.tot[0] * 60 + VEEG.tot[1];
+}
+function maakVeeg(o) {
+  const run = o.socevRun;              // /opt/data/scripts/huidig/bin/socev-run
+  const env = o.env || process.env;
+  const maxMin = o.maxMin || 5;
+  const marge = o.margeMs === undefined ? 90000 : o.margeMs;
+  let datum = null, loopt = false, laatste = null;
+  // ctx: { ams: {datum, uur, min} }. Geeft null (niets te doen) of { datum, t, exit, ms, opgeveegd }.
+  async function tik(ctx) {
+    const a = ctx.ams;
+    if (!inVeegVenster(a) || loopt || datum === a.datum) return null;
+    loopt = true;
+    datum = a.datum;
+    try {
+      const t = new Date().toISOString();
+      const k = await kindProces(env, [run, '--naam', 'socev-run-veeg', '--hartslag', 'socev-run-veeg', '--max-min', String(maxMin), '--', run, '--veeg'],
+        maxMin * 60000 + marge);
+      const j = laatsteJson(k.uit);
+      laatste = { datum: a.datum, t: t, exit: k.code, ms: k.ms, opgeveegd: j && typeof j.opgeveegd === 'number' ? j.opgeveegd : null };
+      return laatste;
+    } finally { loopt = false; }
+  }
+  function info() { return { aan: true, loopt: loopt, laatste: laatste }; }
+  return { tik: tik, info: info };
+}
+
+module.exports = { maak: maak, maakVeeg: maakVeeg, inVeegVenster: inVeegVenster, BEWAAR: BEWAAR, PATROON: PATROON };
