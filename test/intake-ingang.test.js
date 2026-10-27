@@ -778,3 +778,42 @@ test('wv1303: hangende stukken (wacht > 1 u, onderhoud > 6 u, mislukt) → één
     o.ing = I.maak(o.cfg);
   } finally { await o.sluit(); }
 });
+
+test('wv1717: Outlook-bijlage als eigen stuk (outlook-mail@1, representatie + bijlage), xlsx toegestaan, xlsm en tweede bijlage niet', async () => {
+  const o = await omgeving();
+  try {
+    const mailId = '<proef-0001@voorbeeld.nl>';
+    const pdf = PDF('rooster van de praktijk in november');
+    const rep = naam.outlook('2026-10-27', '21:05', 'bijlage-Rooster-november');
+    const env = () => ({ protocol: 'ovis-intake/1', profiel: 'outlook-mail@1', bron: 'outlook:tolgaarde', bron_id: mailId + '#bijlage-' + sha(pdf).slice(0, 16), ontvangen: nuOff,
+      meta: { onderwerp: 'Bijlage: Rooster november.pdf', classificatie: 'zakelijk', filterversie: 'qwen3.8-27b+ion-wv1056+bijlage', entiteit: 'tolgaarde', internet_message_id: mailId },
+      vrij: [{ omschrijving: 'bijlage bij mail', waarde: mailId }],
+      onderdelen: [tdeel('r1', 'representatie', rep, '---\ndatum: 2026-10-27\n---\n\nrooster van de praktijk in november\n'),
+        bdeel('b1', 'bijlage', 'Rooster november.pdf', pdf, 'application/pdf')], overgang: { stand: 'om' } });
+    const r = await post(o, K.outlook, env());
+    assert.strictEqual(r.status, 201, JSON.stringify(r.j));
+    assert.deepStrictEqual(r.j.nodig, ['b1']);
+    const p = await put(o, K.outlook, r.j.stuk_id, 'b1', pdf, 'application/pdf');
+    assert.strictEqual(p.status, 200, JSON.stringify(p.j));
+    assert.strictEqual(p.j.compleet, true); assert.strictEqual(p.j.vault, 'geschreven');
+    assert.deepStrictEqual([].concat(p.j.pad), ['10_Zakelijk/Tolgaarde/raw_input/' + rep]);
+    // alleen de representatie in de vault, het bestand zelf alleen op de pod
+    assert.ok(!fs.existsSync(path.join(o.vault, '10_Zakelijk/Tolgaarde/raw_input/Rooster november.pdf')));
+    // nog een keer = dubbel, niets nodig
+    const d = await post(o, K.outlook, env());
+    assert.strictEqual(d.status, 200); assert.strictEqual(d.j.uitkomst, 'dubbel'); assert.ok(!(d.j.ontbreekt && d.j.ontbreekt.length));
+    // de gewone mail (alleen representatie) blijft werken
+    const m = env(); m.bron_id = mailId; m.onderdelen = [m.onderdelen[0]]; m.onderdelen[0] = tdeel('r1', 'representatie', naam.outlook('2026-10-27', '21:04', 'Rooster'), '---\n---\n\nmail\n');
+    assert.strictEqual((await post(o, K.outlook, m)).status, 201);
+    // xlsx mag, xlsm niet (naampoort), twee bijlagen niet, een afbeelding niet
+    const x = env(); x.bron_id = mailId + '#bijlage-x'; x.onderdelen[0] = tdeel('r1', 'representatie', naam.outlook('2026-10-27', '21:06', 'bijlage-x'), '---\n---\n\nx\n');
+    x.onderdelen[1] = bdeel('b1', 'bijlage', 'Rooster.xlsx', Buffer.from('PK\u0003\u0004proef'), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    assert.strictEqual((await post(o, K.outlook, x)).status, 201);
+    const y = env(); y.bron_id = mailId + '#bijlage-y'; y.onderdelen[1] = bdeel('b1', 'bijlage', 'Rooster.xlsm', Buffer.from('PK\u0003\u0004proef'), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    assert.strictEqual((await post(o, K.outlook, y)).status, 415);
+    const z = env(); z.bron_id = mailId + '#bijlage-z'; z.onderdelen.push(bdeel('b2', 'bijlage', 'tweede.pdf', PDF('x'), 'application/pdf'));
+    const rz = await post(o, K.outlook, z); assert.strictEqual(rz.status, 400); assert.strictEqual(rz.j.reden, 'te_veel:bijlage');
+    const f = env(); f.bron_id = mailId + '#bijlage-f'; f.onderdelen[1] = bdeel('b1', 'bijlage', 'scan.jpg', Buffer.from([0xff, 0xd8, 0xff, 0]), 'image/jpeg');
+    assert.strictEqual((await post(o, K.outlook, f)).status, 400);
+  } finally { await o.sluit(); }
+});

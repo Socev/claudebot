@@ -1,7 +1,7 @@
 {
  "profiel": "outlook-mail",
  "versie": 1,
- "omschrijving": "Eén Outlook-mail van Tolgaarde zoals de pc-route hem aanlevert (na het Qwen-filter; zakelijk of twijfel). Bijlagen alleen als namenlijst.",
+ "omschrijving": "Eén Outlook-mail van Tolgaarde na het Qwen-filter (zakelijk of twijfel), of één bijlage daarvan (wv1717, meeleespod B3): bron_id <mail-id>#bijlage-<sha16>, representatie = de tekst uit de bijlage, bijlage = het bestand (alleen pdf/docx/xlsx met tekstlaag, eigen Qwen-oordeel in n8n). Bij de mail zelf alleen de namenlijst.",
  "bronnen": [
   "outlook:tolgaarde"
  ],
@@ -95,6 +95,16 @@
     "text/markdown"
    ],
    "max_mb": 2
+  },
+  "bijlage": {
+   "min": 0,
+   "max": 1,
+   "mime": [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+   ],
+   "max_mb": 18
   },
   "representatie": {
    "min": 1,
