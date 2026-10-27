@@ -38,7 +38,7 @@ const MANAGERS = [
     bewaakt: 'Hoe je de app echt gebruikt: wat je opent, waar je vastloopt of iets zoekt, wat traag is of niets doet.',
     rooster: { dag: 5, uur: 10, min: 0 }, slot: 'UI-MANAGER', slotRe: /^UI-MANAGER \d{4}-\d{2}-\d{2}: \d+ checks/,
     slotFormaat: 'UI-MANAGER <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open (<k> nieuw), voorstellen <v>, kaart geen, wv geen' },
-  { id: 'ciso', naam: 'CISO', skill: 'ciso', sessie: 'ciso', model: '', hartslag: 'ciso', patroon: '^C[0-9]',
+  { id: 'ciso', naam: 'CISO', skill: 'ciso', sessie: 'ciso', model: 'claude-opus-5-5', hartslag: 'ciso', patroon: '^C[0-9]',
     bewaakt: 'De beveiliging: sleutels, toegang, versies en wat er van buitenaf bereikbaar is.',
     rooster: { dag: 1, uur: 6, min: 0 }, slot: 'CISO', slotRe: /^CISO \d{4}-\d{2}-\d{2}: \d+ checks/,
     slotFormaat: 'CISO <JJJJ-MM-DD>: <n> checks, <m> niet vast te stellen, <N> open (<k> nieuw), bundel <id of geen>' },

@@ -11940,6 +11940,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
+        if (route === 'POST /app/werkers/schakel') return typeof appWerkerSchakel === 'function' ? appWerkerSchakel(req, res, a, s, d) : appWeiger(res, 404, 'onbekend', 'schakel');   // wv1733 (OVIS M4b): schakelaar per werker
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
         if (route === 'GET /app/ideeen' || /^GET \/app\/ideeen\/(plaatje\/[1-9][0-9]{0,11}\/[0-2]|proefplaatje\/k\d{2,3}\/[0-2]|kaart\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||
           route === 'POST /app/ideeen/naar-ideeenbus' || /^POST \/app\/ideeen\/kaart\/[ka]\d{2,3}\/(deel|niet)$/.test(route))   // wv942: AIX lezen, Deel/Niet per kaart of antwoord
@@ -15568,7 +15569,8 @@ async function appWerkers(req, res, a) {
   try {
     const wf = await werkersWorkflows();
     const hs = typeof ringkaartRijen === 'function' ? await ringkaartRijen() : null;
-    uit = WERKERS_MOD.stand({ workflows: wf, hartslag: hs, vast: !!(a && a.soort === 'vast') });
+    const sk = await werkersSchakelaars(false);   // wv1733
+    uit = WERKERS_MOD.stand({ workflows: wf, hartslag: hs, schakelaars: sk, vast: !!(a && a.soort === 'vast') });
     const c = uit.check;
     werkersLaatst = { t: new Date().toISOString(), n8n_actief: c.n8n_actief, ontbreekt: c.ontbreekt ? c.ontbreekt.length : null,
       niet_actief: c.niet_actief ? c.niet_actief.length : null, hartslag_zonder_werker: c.hartslag_zonder_werker ? c.hartslag_zonder_werker.length : null };
@@ -15577,6 +15579,119 @@ async function appWerkers(req, res, a) {
   return appStuur(res, 200, Object.assign({ ok: true, vast: !!(a && a.soort === 'vast') }, uit));
 }
 function werkersInfo() { return { aan: !!WERKERS_MOD, werkers: WERKERS_MOD ? WERKERS_MOD.WERKERS.length : 0, laatst: werkersLaatst }; }
+// ── wv1733 (OVIS M4b): schakelaar per werker (ontwerplijnen § 6.2) ──
+// POST /app/werkers/schakel {id, actie: uit|pauze|aan}. uit = één knop (alleen uitzetbare n8n-werkers); pauze = 1 uur, alleen voor wat
+// niet uit mag, met vingerafdruk; aan = altijd met vingerafdruk. De stand staat in Supabase machinekamer.schakelaar (RPC's
+// mk_schakelaar_*): de Stiltewachter en de Data Manager lezen daar "uit door David" en alarmeren dan niet. Uit/pauze schrijft eerst de
+// rij en deactiveert dan n8n (mislukt dat, dan gaat de rij weer weg); aan activeert eerst en wist dan de rij. n8n publiceert bij
+// activeren de nieuwste versie (gemeten 27-10 op een wegwerpworkflow): staat er sinds het uitzetten een concept klaar, dan weigert
+// aanzetten en gaat het via de machinekamer. Nooit archiveren of verwijderen (grondwet 6). Een verlopen pauze zet de pod-tik aan.
+const WERKERS_SCHAKEL_MS = 30 * 1000;
+let werkersSchakel = null;   // { t, l } ; l = rijen of null bij een meetfout
+async function werkersSchakelaars(vers) {
+  if (!vers && werkersSchakel && Date.now() - werkersSchakel.t < WERKERS_SCHAKEL_MS) return werkersSchakel.l;
+  let l = null;
+  try { const j = await appSbRpc('mk_schakelaar_stand', {}); l = j && Array.isArray(j.rijen) ? j.rijen : null; if (!l) throw new Error('schakelaarstand zonder rijen'); }
+  catch (e) { logError('werkers-schakel', e); l = null; }
+  werkersSchakel = { t: l ? Date.now() : Date.now() - WERKERS_SCHAKEL_MS + 5000, l: l };   // een meetfout maar 5 s bewaren
+  return l;
+}
+function werkerBoxRij(kop, regels) {
+  try {
+    return VV().wijzig(path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), function (t) {
+      const eerste = /\n## \[[a-z]{2,16}\] \d{4}-\d{2}-\d{2}/.exec(t);
+      const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+      return eerste ? t.slice(0, eerste.index) + '\n## [log] ' + tijd + ' — ' + kop + '\n' + regels.map(function (r) { return '- ' + r; }).join('\n') + '\n' + t.slice(eerste.index) : null;
+    });
+  } catch (e) { logError('werkers-box', e); return false; }
+}
+const werkerKlok = function (iso) { return new Date(iso).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' }); };
+// → { ok, al } of { fout }
+async function werkerAanzetten(w, sk) {
+  const wf = await appN8n('/workflows/' + encodeURIComponent(w.n8n));
+  if (wf && wf.isArchived) return { fout: 'de workflow is gearchiveerd in n8n' };
+  if (wf && wf.active) { await appSbRpc('mk_schakelaar_wis', { p_werker: w.id }); return { ok: true, al: true }; }
+  if (!sk || !sk.versie || !wf || wf.versionId !== sk.versie)
+    return { fout: 'in n8n staat sinds het uitzetten een nieuwe, niet-gepubliceerde versie klaar; aanzetten zou die meteen live zetten. Dat gaat via de machinekamer' };
+  await appN8nZend('POST', '/workflows/' + encodeURIComponent(w.n8n) + '/activate');
+  await appSbRpc('mk_schakelaar_wis', { p_werker: w.id });
+  return { ok: true };
+}
+async function appWerkerSchakel(req, res, a, s, d) {
+  if (!WERKERS_MOD || typeof WERKERS_MOD.schakelKeuze !== 'function') return appWeiger(res, 404, 'De schakelaar zit niet in deze versie van de pod', 'schakel ontbreekt');
+  if (a && a.soort === 'vast') return appWeiger(res, 403, 'niet op een vaste plek', 'schakel vaste plek');
+  const id = String(d.id == null ? '' : d.id).slice(0, 80), actie = String(d.actie == null ? '' : d.actie);
+  const w = Object.prototype.hasOwnProperty.call(WERKERS_MOD.PER_ID, id) ? WERKERS_MOD.PER_ID[id] : null;
+  const rijen = await werkersSchakelaars(true);
+  if (!rijen) return appWeiger(res, 503, 'de schakelaarstand is nu niet leesbaar; probeer het zo nog eens', 'schakel stand onleesbaar');
+  const sk = rijen.filter(function (r) { return r && r.werker === id; })[0] || null;
+  const k = WERKERS_MOD.schakelKeuze(w, actie, sk);
+  if (k.fout) return appWeiger(res, k.status || 400, k.fout, 'schakel ' + actie);
+  if (k.al) return appStuur(res, 200, { ok: true, al: true, id: id });
+  // pas na de keuzeregels: geen vingerafdruk verspillen aan iets dat toch niet mag (zoals de modellenwissel)
+  if (k.vers && !appVersOk(a, s)) { res._app.reden = 'schakel, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
+  appStaat.tellers.schakel = appStaat.tellers.schakel || [];
+  if (!appTeller('schakel', 20, 3600000)) return appWeiger(res, 429, 'te vaak geschakeld dit uur', 'grens schakel');
+  if (k.vers) s.vers_tot = 0;   // één vingerafdruk = één schakeling
+  const door = 'David (app, ' + String(a && a.naam || 'apparaat').slice(0, 60) + ')';
+  try {
+    if (actie === 'aan') {
+      const r = await werkerAanzetten(w, sk);
+      if (r.fout) return appWeiger(res, 409, r.fout, 'schakel aan geweigerd');
+      res._app.reden = 'schakel aan ' + w.id;
+    } else {
+      const wf = await appN8n('/workflows/' + encodeURIComponent(w.n8n));
+      if (!wf || !wf.active) return appWeiger(res, 409, 'staat al uit in n8n, niet via deze knop; aanzetten gaat via de machinekamer', 'schakel al inactief');
+      if (!wf.activeVersionId) return appWeiger(res, 409, 'n8n geeft geen gepubliceerde versie; uitzetten via de machinekamer', 'schakel geen versie');
+      const tot = actie === 'pauze' ? new Date(Date.now() + WERKERS_MOD.PAUZE_MS).toISOString() : null;
+      await appSbRpc('mk_schakelaar_zet', { p_werker: w.id, p_n8n_id: w.n8n, p_stand: actie, p_tot: tot, p_componenten: w.hartslag || [],
+        p_versie: String(wf.activeVersionId), p_door: door, p_notitie: actie === 'uit' ? 'uit door David' : 'pauze door David' });
+      try { await appN8nZend('POST', '/workflows/' + encodeURIComponent(w.n8n) + '/deactivate'); }
+      catch (e) {
+        logError('werkers-schakel', e);
+        await appSbRpc('mk_schakelaar_wis', { p_werker: w.id }).catch(function (e2) { logError('werkers-schakel', e2); });
+        return appWeiger(res, 502, 'n8n weigerde het uitzetten; er is niets veranderd', 'schakel deactivate');
+      }
+      werkerBoxRij(w.naam + (actie === 'uit' ? ' uitgezet' : ' gepauzeerd tot ' + werkerKlok(tot)) + ' door David (Ploeg-schakelaar, automatisch)', [
+        'status: afgehandeld (ter kennis; ' + (actie === 'uit' ? 'aanzetten kan David in de app, Machinekamer › Ploeg' : 'de pod zet hem na het uur zelf weer aan') + ')',
+        'van: pod werkers-schakelaar (server.js, wv1733), ' + door,
+        'gemeten: n8n-workflow `' + w.n8n + '` gedeactiveerd; gepubliceerde versie bewaard in machinekamer.schakelaar' + ((w.hartslag || []).length ? '; hartslag ' + w.hartslag.join(', ') : '; geen hartslagcomponent'),
+        'gevolg: ' + w.naam + ' start geen runs ' + (actie === 'uit' ? 'tot David hem aanzet' : 'tot ' + werkerKlok(tot)) + '. Stiltewachter en Data Manager tellen dit niet als storing.']);
+      res._app.reden = 'schakel ' + actie + ' ' + w.id;
+    }
+  } catch (e) { logError('werkers-schakel', e); return appWeiger(res, 502, 'n8n of de databank gaf een fout; kijk zo in de Ploeg wat de stand is', 'schakel uitzondering'); }
+  werkersN8n = null; werkersSchakel = null;
+  return appStuur(res, 200, { ok: true, id: id, actie: actie });
+}
+// Verlopen pauze: de pod zet hem weer aan (elke 2 min, alleen de primaire echte pod). Lukt het niet, één box-rij per pauze; de
+// Stiltewachter ziet een pauze 30 min na het einde weer als gewone stilte.
+const werkersPauzeGemeld = new Set();
+let werkersPauzeBezig = false;
+async function werkersPauzeTik() {
+  if (!WERKERS_MOD || typeof WERKERS_MOD.schakelKeuze !== 'function' || !SERVER_ECHT || !rolPrimair() || werkersPauzeBezig) return;
+  werkersPauzeBezig = true;
+  try {
+    const rijen = await werkersSchakelaars(true);
+    for (const r of (rijen || [])) {
+      if (!r || r.stand !== 'pauze' || !r.verlopen) continue;
+      const w = WERKERS_MOD.PER_ID[r.werker];
+      let uit;
+      try { uit = w && w.n8n ? await werkerAanzetten(w, r) : { fout: 'werker niet (meer) in het register' }; }
+      catch (e) { uit = { fout: String(e && e.message || e).slice(0, 160) }; }
+      if (uit.ok) { werkersN8n = null; schrijfLog(nu() + ' werkers: pauze voorbij, ' + r.werker + ' weer aan'); continue; }
+      const sleutel = r.werker + '|' + r.sinds;
+      if (werkersPauzeGemeld.has(sleutel)) continue;
+      werkersPauzeGemeld.add(sleutel);
+      werkerBoxRij((w ? w.naam : r.werker) + ': pauze voorbij maar niet weer aangezet (Ploeg-schakelaar, automatisch)', [
+        'status: open', 'van: pod werkers-pauze (server.js, wv1733)',
+        'gemeten: pauze tot ' + werkerKlok(r.tot) + '; aanzetten mislukte: ' + uit.fout,
+        'gevolg als er niets gebeurt: ' + (w ? w.naam : r.werker) + ' blijft uit; de Stiltewachter telt hem 30 min na het einde weer als stil',
+        'voorstel: in n8n nakijken en activeren, dan `mk_schakelaar_wis(\'' + r.werker + '\')`']);
+    }
+  } catch (e) { logError('werkers-pauze', e); }
+  finally { werkersPauzeBezig = false; }
+}
+if (typeof SERVER_ECHT !== "undefined" && SERVER_ECHT) { setInterval(function () { werkersPauzeTik(); }, 2 * 60000).unref(); }
 // ── einde Ploeg-register ──
 
 // ── Intake-plek: tellingen (wv1244, OVIS M1d; ontwerplijnen § 2.1 rij Intake, Fable #19) ──

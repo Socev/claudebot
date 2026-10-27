@@ -10,6 +10,8 @@
 // Een nieuwe werker = één regel hier (+ test/werkers.sh telt mee). Geen netwerk in maak/stand; alleen de CLI (ronde) leest n8n en
 // Supabase met de sleutels uit de omgeving van de aanroeper. Geen sleutels of inhoud in dit bestand.
 // model: 'pod-standaard' = de workflow geeft geen model mee en draait op de standaard van de pod (§ 6.2 wil het altijd ingevuld: M4b).
+// wv1733 (M4b, groep managers): de vijf managers zonder hartslag stempelen nu (n8n-knopen Run gelukt? + Hartslag stempel) en geven, net als
+// de CISO, model claude-opus-5-5 mee in de workflow. De andere groepen volgen (box-rij machinekamer 27-10).
 const fs = require('fs');
 const path = require('path');
 
@@ -23,7 +25,7 @@ const N8N = [
   {"id": "n8n-J3JXCQYONcio5CtV", "naam": "Bank-ronde", "soort": "routine", "module": "financien", "n8n": "J3JXCQYONcio5CtV", "model": "geen", "hartslag": ["bank-ronde", "paypal-ronde"], "uitkomst": "Bericht aan David (hoofd) alleen bij nieuws/fout"},
   {"id": "n8n-Oo1wBLEJJYpua3UP", "naam": "Bericht-foutteller", "soort": "routine", "n8n": "Oo1wBLEJJYpua3UP", "model": "geen", "hartslag": [], "uitkomst": "Telegram"},
   {"id": "n8n-I33oOyrHzUdK1hSM", "naam": "CISO-bezorger", "soort": "routine", "n8n": "I33oOyrHzUdK1hSM", "model": "geen", "hartslag": ["ciso_bezorger"], "uitkomst": "Bericht aan David (machinekamer)"},
-  {"id": "n8n-FyzsteLHpvRHhrdk", "naam": "CISO-ronde", "soort": "manager", "n8n": "FyzsteLHpvRHhrdk", "sessie": "ciso", "skill": "ciso", "model": "pod-standaard", "hartslag": ["ciso"], "uitkomst": "box + Bericht aan David (machinekamer)", "manager": "ciso"},
+  {"id": "n8n-FyzsteLHpvRHhrdk", "naam": "CISO-ronde", "soort": "manager", "n8n": "FyzsteLHpvRHhrdk", "sessie": "ciso", "skill": "ciso", "model": "claude-opus-5-5", "hartslag": ["ciso"], "uitkomst": "box + Bericht aan David (machinekamer)", "manager": "ciso"},
   {"id": "n8n-8o2bg3RXj6EJ02yF", "naam": "Contacten Sync (Google → Supabase)", "soort": "routine", "n8n": "8o2bg3RXj6EJ02yF", "model": "geen", "hartslag": [], "uitkomst": "Supabase secondbrain.contacten"},
   {"id": "n8n-s671dCP1OdjwzBGU", "naam": "Correspondentie-Wachter", "soort": "wachter", "n8n": "s671dCP1OdjwzBGU", "sessie": "hoofd", "skill": "correspondentie-wachter", "model": "pod-standaard", "hartslag": ["wachter-correspondentie"], "uitkomst": "ochtend_buffer + Bericht aan David (hoofd)"},
   {"id": "n8n-xQuUyrEKLe0CsSqJ", "naam": "Dagsamenvatting", "soort": "wachter", "n8n": "xQuUyrEKLe0CsSqJ", "sessie": "dagsamenvatting", "model": "claude-sonnet-5-5", "hartslag": [], "uitkomst": "Bericht aan David (machinekamer)"},
@@ -33,12 +35,12 @@ const N8N = [
   {"id": "n8n-JG9l6rX2YTDsIKwl", "naam": "Gambia Weekreview", "soort": "wachter", "n8n": "JG9l6rX2YTDsIKwl", "sessie": "hoofd", "skill": "gambia-weekreview", "model": "pod-standaard", "hartslag": [], "uitkomst": "Bericht aan David (hoofd)"},
   {"id": "n8n-Em9VynFMj1RpmZMJ", "naam": "Harvester-ronde", "soort": "routine", "module": "harvester", "n8n": "Em9VynFMj1RpmZMJ", "model": "claude-sonnet-5-5", "hartslag": ["harvester-ronde"], "uitkomst": "Bericht aan David (machinekamer)"},
   {"id": "n8n-MU9HdXpIpESnM7tB", "naam": "Health-rapporten", "soort": "routine", "module": "gezondheid", "n8n": "MU9HdXpIpESnM7tB", "model": "geen", "hartslag": [], "uitkomst": "health-pod"},
-  {"id": "n8n-1LjJcxpO8ZJ6y6iQ", "naam": "Ideeënmotor", "soort": "manager", "n8n": "1LjJcxpO8ZJ6y6iQ", "sessie": "ideeenmotor", "model": "pod-standaard", "hartslag": [], "uitkomst": "werkvoorraad + Bericht aan David (machinekamer)"},
+  {"id": "n8n-1LjJcxpO8ZJ6y6iQ", "naam": "Ideeënmotor", "soort": "manager", "n8n": "1LjJcxpO8ZJ6y6iQ", "sessie": "ideeenmotor", "model": "claude-opus-5-5", "hartslag": ["ideeenmotor"], "uitkomst": "werkvoorraad + Bericht aan David (machinekamer)"},
   {"id": "n8n-1w4T7mdQ1NqYSxJP", "naam": "Keten-attest", "soort": "manager", "n8n": "1w4T7mdQ1NqYSxJP", "sessie": "keten-attest", "model": "pod-standaard", "hartslag": ["ciso_dag", "olares_login"], "uitkomst": "hartslag + n8n-datatabel"},
   {"id": "n8n-2vnKvuZ4Cu3SEcNJ", "naam": "Locatie (Tasker)", "soort": "routine", "n8n": "2vnKvuZ4Cu3SEcNJ", "model": "geen", "hartslag": ["locatie"], "uitkomst": "Supabase locatie"},
   {"id": "n8n-DDk9idnKqy6fnRYv", "naam": "Machinekamer droomronde", "soort": "manager", "n8n": "DDk9idnKqy6fnRYv", "sessie": "telegram-debug", "model": "pod-standaard", "hartslag": ["droomronde"], "uitkomst": "Bericht aan David (machinekamer)"},
   {"id": "n8n-9tOfRu1yQeycCwrk", "naam": "Mail volgen", "soort": "wachter", "n8n": "9tOfRu1yQeycCwrk", "sessie": "hoofd", "skill": "achtergrondagent", "model": "pod-standaard", "hartslag": [], "uitkomst": "label Socev-volgt + achtergrondagent (mailconcept)"},
-  {"id": "n8n-9att2bGQ1e6TlxoB", "naam": "MCP-gezondheidscheck", "soort": "manager", "n8n": "9att2bGQ1e6TlxoB", "sessie": "mcp-check", "model": "pod-standaard", "hartslag": [], "uitkomst": "n8n-datatabel"},
+  {"id": "n8n-9att2bGQ1e6TlxoB", "naam": "MCP-gezondheidscheck", "soort": "manager", "n8n": "9att2bGQ1e6TlxoB", "sessie": "mcp-check", "model": "claude-opus-5-5", "hartslag": ["mcp_check"], "uitkomst": "n8n-datatabel"},
   {"id": "n8n-ZxyRaseEh3qE4iO9", "naam": "n8n Backup (nachtelijk)", "soort": "routine", "n8n": "ZxyRaseEh3qE4iO9", "model": "geen", "hartslag": [], "uitkomst": "back-up", "uitzetbaar": false},
   {"id": "n8n-KsFUIOHcYScyCqBQ", "naam": "n8n Backup Data Tables (nachtelijk)", "soort": "routine", "n8n": "KsFUIOHcYScyCqBQ", "model": "geen", "hartslag": [], "uitkomst": "back-up", "uitzetbaar": false},
   {"id": "n8n-vGPtvfzNhqVDVjgX", "naam": "n8n Git-backup (nachtelijk)", "soort": "routine", "n8n": "vGPtvfzNhqVDVjgX", "sessie": "n8n-git-backup", "model": "pod-standaard", "hartslag": [], "uitkomst": "git", "uitzetbaar": false},
@@ -46,19 +48,19 @@ const N8N = [
   {"id": "n8n-zbotiGO4UHG8w10j", "naam": "Parro meelezen", "soort": "routine", "n8n": "zbotiGO4UHG8w10j", "sessie": "parro", "model": "pod-standaard", "hartslag": ["parro"], "uitkomst": "Bericht aan David (hoofd/machinekamer)"},
   {"id": "n8n-ExKOlDQ012gyJRuB", "naam": "Personeels-Wachter", "soort": "wachter", "n8n": "ExKOlDQ012gyJRuB", "sessie": "personeels-wachter", "skill": "personeels-wachter", "model": "pod-standaard", "hartslag": ["wachter-personeel"], "uitkomst": "ochtend_buffer + meldingenbestand"},
   {"id": "n8n-8cvqdjorQoOYFcrF", "naam": "Quotumalarm (weeklimiet Claude)", "soort": "routine", "n8n": "8cvqdjorQoOYFcrF", "model": "geen", "hartslag": [], "uitkomst": "Bericht aan David (machinekamer)"},
-  {"id": "n8n-OcLEvP7xgEd9khA3", "naam": "Research-scout", "soort": "manager", "n8n": "OcLEvP7xgEd9khA3", "sessie": "research-scout", "model": "pod-standaard", "hartslag": [], "uitkomst": "Bericht aan David (machinekamer)"},
+  {"id": "n8n-OcLEvP7xgEd9khA3", "naam": "Research-scout", "soort": "manager", "n8n": "OcLEvP7xgEd9khA3", "sessie": "research-scout", "model": "claude-opus-5-5", "hartslag": ["research_scout"], "uitkomst": "Bericht aan David (machinekamer)"},
   {"id": "n8n-BIDXbs6nAN3vWLcJ", "naam": "Second Brain - Mail Processor", "soort": "routine", "module": "intake", "n8n": "BIDXbs6nAN3vWLcJ", "sessie": "hoofd", "model": "claude-sonnet-5-5", "hartslag": [], "uitkomst": "raw_input in de vault + mail_verwerkt"},
   {"id": "n8n-8swfS8Km2fhuJSdT", "naam": "Signal meelezen", "soort": "routine", "n8n": "8swfS8Km2fhuJSdT", "model": "geen", "hartslag": [], "uitkomst": "Supabase signal_* + Bericht (machinekamer)"},
   {"id": "n8n-5yl8k8SWT4sK4spi", "naam": "Signal Nachtextractie", "soort": "wachter", "n8n": "5yl8k8SWT4sK4spi", "sessie": "signal", "model": "pod-standaard", "hartslag": [], "uitkomst": "vault + Bericht (hoofd/machinekamer)"},
   {"id": "n8n-fknxVgWDPcDAa4ZP", "naam": "Site-verversing", "soort": "routine", "n8n": "fknxVgWDPcDAa4ZP", "sessie": "site-verversing", "model": "pod-standaard", "hartslag": [], "uitkomst": "socev.dev"},
   {"id": "n8n-9aiWD9tXz448nS7E", "naam": "SMS Gateway", "soort": "routine", "n8n": "9aiWD9tXz448nS7E", "model": "geen", "hartslag": ["sms_aanvoer"], "uitkomst": "n8n-datatabel sms_inbox"},
   {"id": "n8n-W87J5NxDVGJOUagb", "naam": "Stiltewachter", "soort": "routine", "n8n": "W87J5NxDVGJOUagb", "model": "geen", "hartslag": ["stiltewachter"], "uitkomst": "Bericht aan David (hoofd/machinekamer)", "uitzetbaar": false},
-  {"id": "n8n-I8Zp1BVfmcknTGmp", "naam": "Systeemrapport", "soort": "manager", "n8n": "I8Zp1BVfmcknTGmp", "sessie": "structuur-wachter", "skill": "systeemrapport", "model": "pod-standaard", "hartslag": [], "uitkomst": "socev.dev + meldingenbestand"},
+  {"id": "n8n-I8Zp1BVfmcknTGmp", "naam": "Systeemrapport", "soort": "manager", "n8n": "I8Zp1BVfmcknTGmp", "sessie": "structuur-wachter", "skill": "systeemrapport", "model": "claude-opus-5-5", "hartslag": ["systeemrapport"], "uitkomst": "socev.dev + meldingenbestand"},
   {"id": "n8n-vmFrhWxNc7KrpdIL", "naam": "Teams extractie + consolidatie", "soort": "wachter", "n8n": "vmFrhWxNc7KrpdIL", "sessie": "hoofd", "skill": "teams-conversatie-consolidatie", "model": "pod-standaard", "hartslag": [], "uitkomst": "vault + Bericht (hoofd)"},
   {"id": "n8n-eS05MJkluKyINPls", "naam": "Teams meelezen", "soort": "routine", "n8n": "eS05MJkluKyINPls", "model": "Qwen", "hartslag": ["teams"], "uitkomst": "Supabase teams_berichten + Bericht (machinekamer)"},
   {"id": "n8n-gNfADWC3tXqGpgBo", "naam": "Tokenboekhouding (nachtelijk)", "soort": "routine", "n8n": "gNfADWC3tXqGpgBo", "sessie": "tokenmeting", "model": "pod-standaard", "hartslag": [], "uitkomst": "n8n-datatabel"},
   {"id": "n8n-fyOInqi5keQTUG5Y", "naam": "UI Manager", "soort": "manager", "n8n": "fyOInqi5keQTUG5Y", "sessie": "ui-manager", "skill": "ui-manager", "model": "claude-sonnet-5-5", "hartslag": ["ui_manager"], "uitkomst": "box + ≤ 1 kaart + Bericht (machinekamer)", "manager": "ui"},
-  {"id": "n8n-sYkXgXKcZx4nDndO", "naam": "Vault-Conciërge", "soort": "manager", "n8n": "sYkXgXKcZx4nDndO", "sessie": "vault-concierge", "skill": "vault-concierge", "model": "pod-standaard", "hartslag": [], "uitkomst": "meldingenbestand + zondagsbriefing"},
+  {"id": "n8n-sYkXgXKcZx4nDndO", "naam": "Vault-Conciërge", "soort": "manager", "n8n": "sYkXgXKcZx4nDndO", "sessie": "vault-concierge", "skill": "vault-concierge", "model": "claude-opus-5-5", "hartslag": ["vault_concierge"], "uitkomst": "meldingenbestand + zondagsbriefing"},
   {"id": "n8n-gxtTrqieHdEFSMmy", "naam": "Voor jou-beheer", "soort": "wachter", "n8n": "gxtTrqieHdEFSMmy", "sessie": "voor-jou", "skill": "voor-jou-beheer", "model": "claude-sonnet-5-5", "hartslag": ["voor_jou"], "uitkomst": "Voor jou + Bericht (machinekamer)"},
   {"id": "n8n-1e5YVrDUV5aOAJaf", "naam": "Voorwerk (acties in porties)", "soort": "wachter", "n8n": "1e5YVrDUV5aOAJaf", "model": "geen", "hartslag": ["voorwerk_acties"], "uitkomst": "Telegram + Bericht (hoofd/machinekamer)"},
   {"id": "n8n-vzW6OWQfr8kbZdFR", "naam": "Voorwerk (herinneringsconcepten)", "soort": "wachter", "n8n": "vzW6OWQfr8kbZdFR", "sessie": "voorwerk-herinnering", "model": "pod-standaard", "hartslag": ["voorwerk_mail"], "uitkomst": "Voor jou-kaarten + Bericht (machinekamer)"},
@@ -223,6 +225,7 @@ function stand(o) {
   (Array.isArray(o.workflows) ? o.workflows : []).forEach(function (w) { if (w && w.id) wf[w.id] = w; });
   const hs = {};
   (Array.isArray(o.hartslag) ? o.hartslag : []).forEach(function (r) { if (r && r.component) hs[r.component] = r; });
+  const sch = schakelPerWerker(o.schakelaars);
   const kaarten = WERKERS.map(function (w) {
     const live = w.n8n ? wf[w.n8n] : null;
     const slagen = (w.hartslag || []).map(function (c) {
@@ -231,7 +234,10 @@ function stand(o) {
         drempel: r && typeof r.drempel_min === 'number' ? r.drempel_min : null };
     });
     let status;
-    if (w.n8n && o.workflows && (!live || !live.active)) status = 'uit';
+    const sk = sch ? sch[w.id] || null : null;
+    if (sk && sk.stand === 'uit') status = 'uit door David';
+    else if (sk && sk.stand === 'pauze') status = sk.verlopen ? 'pauze voorbij, nog uit' : 'pauze';
+    else if (w.n8n && o.workflows && (!live || !live.active)) status = 'uit';
     else if (!slagen.length) status = 'geen hartslag';
     else {
       const ergst = slagen.reduce(function (x, s) { return ERG[s.oordeel] > ERG[x] ? s.oordeel : x; }, 'vers');
@@ -242,31 +248,36 @@ function stand(o) {
       rooster: w.n8n ? (live && live.active ? rooster(live) || 'geen rooster (alleen met de hand)' : (o.workflows ? 'staat uit in n8n' : 'n8n nu niet leesbaar')) : (w.rooster || ''),
       actief: w.n8n ? (o.workflows ? !!(live && live.active) : null) : true,
       model: w.model, uitkomst: w.uitkomst, uitzetbaar: w.uitzetbaar !== false, status: status, laatst: laatst, hartslag: slagen,
-      manager: w.manager || null, n8n: w.n8n || null };
+      manager: w.manager || null, n8n: w.n8n || null,
+      // wv1733 (OVIS M4b): schakelaar. kan = wat de knop mag (leeg op een vaste plek, buiten n8n of als de stand niet leesbaar is)
+      schakelaar: sk ? { stand: sk.stand, sinds: sk.sinds || null, tot: sk.tot || null } : null,
+      kan: vast || !w.n8n || !sch ? [] : sk ? ['aan'] : (w.uitzetbaar === false ? ['pauze'] : ['uit']) };
     if (!vast) { k.sessie = w.sessie || null; k.skill = w.skill || null; k.bron = w.bron || null; }
     else { k.uitkomst = ''; k.n8n = null; }   // vaste plek: geen beschrijving en geen id's (zoals de ringkaart, Fable wv888 #4)
     return k;
   });
   const groepen = {};
   SOORTEN.forEach(function (s) { groepen[s] = kaarten.filter(function (k) { return k.soort === s; }); });
-  let c = check(o.workflows, o.hartslag);
+  let c = check(o.workflows, o.hartslag, o.schakelaars);
   if (vast) c = { n8n_actief: c.n8n_actief, ontbreekt: c.ontbreekt && c.ontbreekt.map(function () { return { id: '', naam: '' }; }),
     niet_actief: c.niet_actief && c.niet_actief.map(function () { return { id: '', naam: '' }; }), hartslag_zonder_werker: c.hartslag_zonder_werker && c.hartslag_zonder_werker.map(function () { return ''; }) };
   return { groepen: groepen, overig: { aantal: OVERIG.length, per_soort: telPer(OVERIG) }, check: c,
-    fout: { n8n: o.workflows ? null : 'het rooster uit n8n is nu niet leesbaar', hartslag: o.hartslag ? null : 'de hartslag is nu niet leesbaar' } };
+    fout: { n8n: o.workflows ? null : 'het rooster uit n8n is nu niet leesbaar', hartslag: o.hartslag ? null : 'de hartslag is nu niet leesbaar',
+      schakelaar: sch ? null : 'de schakelaarstand is nu niet leesbaar' } };
 }
 function telPer(l) { const t = {}; l.forEach(function (w) { t[w.soort] = (t[w.soort] || 0) + 1; }); return t; }
 
 // check: elke actieve n8n-workflow staat in het register (als werker of als overig); elke n8n-werker is actief; elke hartslagcomponent
 // hoort bij een werker (proefrijen niet). null-velden = niet gemeten.
-function check(workflows, hartslag) {
+function check(workflows, hartslag, schakelaars) {
   const uit = { n8n_actief: null, ontbreekt: null, niet_actief: null, hartslag_zonder_werker: null };
+  const sch = schakelPerWerker(schakelaars) || {};   // wv1733: door David uitgezet of gepauzeerd = geen bevinding (wel een verlopen pauze)
   if (Array.isArray(workflows)) {
     const actief = workflows.filter(function (w) { return w && w.active && !w.isArchived; });
     const ids = new Set(actief.map(function (w) { return w.id; }));
     uit.n8n_actief = actief.length;
     uit.ontbreekt = actief.filter(function (w) { return !BEKEND_N8N.has(w.id); }).map(function (w) { return { id: w.id, naam: String(w.name || '').slice(0, 80) }; });
-    uit.niet_actief = N8N.filter(function (w) { return !ids.has(w.n8n); }).map(function (w) { return { id: w.n8n, naam: w.naam }; })
+    uit.niet_actief = N8N.filter(function (w) { return !ids.has(w.n8n) && !(sch[w.id] && sch[w.id].geldig && !sch[w.id].verlopen); }).map(function (w) { return { id: w.n8n, naam: w.naam }; })
       .concat(OVERIG.filter(function (w) { return !ids.has(w.n8n); }).map(function (w) { return { id: w.n8n, naam: w.naam, overig: true }; }));
   }
   if (Array.isArray(hartslag)) {
@@ -277,6 +288,30 @@ function check(workflows, hartslag) {
   }
   return uit;
 }
+
+// ── schakelaar (wv1733, OVIS M4b; ontwerplijnen § 6.2) ──
+// Stand in Supabase machinekamer.schakelaar (RPC mk_schakelaar_stand → {rijen}); geen rij = aan. uit = n8n gedeactiveerd door David
+// (één knop), pauze = 1 uur uit voor wat niet uit mag (kanalen, back-ups, beveiliging; vingerafdruk), daarna zet de pod hem zelf aan.
+// Aanzetten altijd met vingerafdruk. Alleen n8n-werkers: pod-werkers krijgen hun schakelaar in een volgende stap.
+function schakelPerWerker(rijen) {
+  if (!Array.isArray(rijen)) return null;
+  const m = {};
+  rijen.forEach(function (r) { if (r && typeof r.werker === 'string' && (r.stand === 'uit' || r.stand === 'pauze')) m[r.werker] = r; });
+  return m;
+}
+const SCHAKEL_ACTIES = ['uit', 'aan', 'pauze'];
+// schakelKeuze(werker, actie, huidige rij of null) → { fout, status } of { actie, vers, al }
+function schakelKeuze(w, actie, sk) {
+  if (!w) return { fout: 'onbekende werker', status: 404 };
+  if (SCHAKEL_ACTIES.indexOf(actie) < 0) return { fout: 'ongeldige keuze', status: 400 };
+  if (!w.n8n) return { fout: w.naam + ' draait niet in n8n; zijn schakelaar volgt', status: 409 };
+  if (actie === 'aan') return sk ? { actie: 'aan', vers: true } : { actie: 'aan', al: true };
+  if (sk) return sk.stand === actie ? { actie: actie, al: true } : { fout: 'staat al ' + (sk.stand === 'uit' ? 'uit' : 'op pauze') + '; zet hem eerst aan', status: 409 };
+  if (actie === 'uit' && w.uitzetbaar === false) return { fout: w.naam + ' mag niet uit (kanaal, back-up of beveiliging); alleen pauze van een uur', status: 409 };
+  if (actie === 'pauze' && w.uitzetbaar !== false) return { fout: 'pauze is alleen voor wat niet uit mag; gebruik uitzetten', status: 409 };
+  return { actie: actie, vers: actie === 'pauze' };
+}
+const PAUZE_MS = 60 * 60 * 1000;
 
 // ── 00_Systeem/Ploeg.md (gegenereerd; zelfde patroon als de Datakaart) ──
 const AMS_TIJD = new Intl.DateTimeFormat('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -342,6 +377,19 @@ async function haalHartslag() {
   if (!Array.isArray(j)) throw new Error('supabase: antwoord is geen lijst');
   return j;
 }
+// wv1733: schakelaarstand (dezelfde RPC als de pod); fout = null, dan telt een uitgezette werker als 'uit of weg' en staat er een fout bij
+async function haalSchakelaars() {
+  const t = process.env.SUPABASE_MCP_TOKEN;
+  if (!t) throw new Error('SUPABASE_MCP_TOKEN ontbreekt');
+  const r = await fetch('https://api.supabase.com/v1/projects/' + SB_PROJECT + '/database/query', { method: 'POST',
+    headers: { authorization: 'Bearer ' + t, 'content-type': 'application/json', 'user-agent': 'socev-werkers/1.0' },
+    body: JSON.stringify({ query: 'select public.mk_schakelaar_stand() as s' }), signal: AbortSignal.timeout(30000) });
+  if (!r.ok) throw new Error('supabase schakelaar http ' + r.status);
+  const j = await r.json();
+  const s = Array.isArray(j) && j[0] ? j[0].s : null;
+  if (!s || !Array.isArray(s.rijen)) throw new Error('supabase: schakelaarstand zonder rijen');
+  return s.rijen;
+}
 async function cli(argv) {
   const arg = function (n) { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : null; };
   if (argv[0] !== 'ronde') { process.stderr.write('gebruik: node werkers.js ronde [--md <pad>] [--json <pad>]\n'); return 2; }
@@ -349,7 +397,9 @@ async function cli(argv) {
   const fout = [];
   try { wf = await haalN8n(); } catch (e) { fout.push(String(e.message || e)); }
   try { hs = await haalHartslag(); } catch (e) { fout.push(String(e.message || e)); }
-  const st = stand({ workflows: wf, hartslag: hs });
+  let sk = null;
+  try { sk = await haalSchakelaars(); } catch (e) { fout.push(String(e.message || e)); }
+  const st = stand({ workflows: wf, hartslag: hs, schakelaars: sk });
   const datum = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam' }).format(new Date());
   if (arg('--json')) fs.writeFileSync(arg('--json'), JSON.stringify(st, null, 1));
   if (arg('--md') && wf) {
@@ -367,6 +417,6 @@ async function cli(argv) {
 }
 
 module.exports = { WERKERS: WERKERS, OVERIG: OVERIG, SOORTEN: SOORTEN, PER_ID: PER_ID, rooster: rooster, intervalTekst: intervalTekst, oordeel: oordeel,
-  stand: stand, check: check, markdown: markdown, kaal: kaal };
+  stand: stand, check: check, markdown: markdown, kaal: kaal, schakelKeuze: schakelKeuze, schakelPerWerker: schakelPerWerker, PAUZE_MS: PAUZE_MS };
 
 if (require.main === module) cli(process.argv.slice(2)).then(function (c) { process.exitCode = c; }, function (e) { process.stderr.write(String(e && e.stack || e) + '\n'); process.exitCode = 2; });

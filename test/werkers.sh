@@ -113,12 +113,42 @@ toets('6d2 één lezing tegelijk (gedeelde promise), vreemde vorm = fout', /werk
 const wsrc = fs.readFileSync('werkers.js', 'utf8');
 toets('6j CLI schrijft alleen via vault-veilig.js uit de release', /require\(path\.join\(__dirname, 'vault-veilig\.js'\)\)/.test(wsrc) && !/writeFileSync\(tmp/.test(wsrc) && !/mk-scripts\/veilig/.test(wsrc));
 toets('6k CLI: hartslag via mk_hartslag_stand (één definitie)', /from public\.mk_hartslag_stand\(\)/.test(wsrc));
-toets('6e vaste plek doorgegeven', /WERKERS_MOD\.stand\(\{ workflows: wf, hartslag: hs, vast: !!\(a && a\.soort === 'vast'\) \}\)/.test(s));
+toets('6e vaste plek en schakelaars doorgegeven', /WERKERS_MOD\.stand\(\{ workflows: wf, hartslag: hs, schakelaars: sk, vast: !!\(a && a\.soort === 'vast'\) \}\)/.test(s));
 toets('6f stil in het auditlog', /appWerkers[\s\S]{0,1600}res\._app\.stil = true/.test(s));
 const u = fs.readFileSync('uitrol.sh', 'utf8');
 toets('6g RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bwerkers\.js\b/.test(u));
 toets('6h Dockerfile', /COPY werkers\.js \/app\/release-bootstrap\/werkers\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
 toets('6i CI-stap', /bash test\/werkers\.sh/.test(fs.readFileSync('.github/workflows/build.yml', 'utf8')));
+
+// 7 schakelaar (wv1733, OVIS M4b)
+const uitzetbaar = W.WERKERS.find((w) => w.n8n && w.uitzetbaar !== false), nietUit = W.WERKERS.find((w) => w.n8n && w.uitzetbaar === false), pod = W.WERKERS.find((w) => !w.n8n);
+const sk = W.schakelKeuze;
+toets('7a uit: uitzetbaar, zonder vingerafdruk', JSON.stringify(sk(uitzetbaar, 'uit', null)) === JSON.stringify({ actie: 'uit', vers: false }));
+toets('7b uit: niet-uitzetbaar geweigerd', sk(nietUit, 'uit', null).status === 409);
+toets('7c pauze: alleen niet-uitzetbaar, met vingerafdruk', sk(nietUit, 'pauze', null).vers === true && sk(uitzetbaar, 'pauze', null).status === 409);
+toets('7d aan: alleen met rij, met vingerafdruk; zonder rij = al aan', sk(uitzetbaar, 'aan', { stand: 'uit' }).vers === true && sk(uitzetbaar, 'aan', null).al === true);
+toets('7e pod-werker: schakelaar volgt', sk(pod, 'uit', null).status === 409);
+toets('7f onbekend en ongeldig', sk(null, 'uit', null).status === 404 && sk(uitzetbaar, 'weg', null).status === 400 && sk(uitzetbaar, 'archiveer', null).status === 400);
+toets('7g al uit = al; pauze op uit = eerst aan', sk(uitzetbaar, 'uit', { stand: 'uit' }).al === true && sk(nietUit, 'pauze', { stand: 'uit' }).status === 409);
+const live7 = live.filter((w) => w.id !== nietUit.n8n && w.id !== uitzetbaar.n8n);
+const rij = [{ werker: uitzetbaar.id, stand: 'uit', geldig: true, verlopen: false, sinds: '2026-11-02T10:00:00Z' },
+  { werker: nietUit.id, stand: 'pauze', geldig: true, verlopen: true, tot: '2026-11-02T11:50:00Z' }];
+const s7 = W.stand({ workflows: live7, hartslag: hs, schakelaars: rij, nu: NU });
+const a7 = [].concat(...W.SOORTEN.map((x) => s7.groepen[x]));
+const ku = a7.find((x) => x.id === uitzetbaar.id), kn = a7.find((x) => x.id === nietUit.id);
+toets('7h kaart: uit door David, knop aan', ku.status === 'uit door David' && JSON.stringify(ku.kan) === '["aan"]' && ku.schakelaar.stand === 'uit', ku);
+toets('7i kaart: verlopen pauze zichtbaar', kn.status === 'pauze voorbij, nog uit' && JSON.stringify(kn.kan) === '["aan"]', kn);
+toets('7j check: uit door David is geen bevinding, verlopen pauze wel', !s7.check.niet_actief.some((x) => x.id === uitzetbaar.n8n) && s7.check.niet_actief.some((x) => x.id === nietUit.n8n));
+toets('7k knoppen: uitzetbaar uit, anders pauze, pod-werker en vaste plek geen', a7.find((x) => x.n8n && x.id !== uitzetbaar.id && x.uitzetbaar && x.actief).kan[0] === 'uit' &&
+  a7.find((x) => x.id === pod.id).kan.length === 0 && [].concat(...W.SOORTEN.map((x) => W.stand({ workflows: live7, hartslag: hs, schakelaars: rij, nu: NU, vast: true }).groepen[x])).every((x) => x.kan.length === 0));
+const s7f = W.stand({ workflows: live7, hartslag: hs, schakelaars: null, nu: NU });
+toets('7l schakelaarstand onleesbaar: geen knoppen, fout gemeld', [].concat(...W.SOORTEN.map((x) => s7f.groepen[x])).every((x) => x.kan.length === 0) && !!s7f.fout.schakelaar);
+toets('7m server: route, vingerafdruk pas na de keuzeregels, één per schakeling, nooit archiveren',
+  /route === 'POST \/app\/werkers\/schakel'\) return typeof appWerkerSchakel/.test(s) && /schakelKeuze\(w, actie, sk\)[\s\S]{0,400}if \(k\.vers && !appVersOk\(a, s\)\)/.test(s) &&
+  /if \(k\.vers\) s\.vers_tot = 0/.test(s) && !/\/archive|DELETE', '\/workflows/.test(s.slice(s.indexOf('wv1733 (OVIS M4b): schakelaar per werker'), s.indexOf('werkersPauzeTik(); }, 2'))));
+toets('7n server: aanzetten alleen als de gepubliceerde versie gelijk is', /wf\.versionId !== sk\.versie/.test(s) && /p_versie: String\(wf\.activeVersionId\)/.test(s));
+toets('7o server: rij eerst, mislukt deactiveren = rij weg', /mk_schakelaar_zet[\s\S]{0,400}\/deactivate'\); \}\s*catch[\s\S]{0,200}mk_schakelaar_wis/.test(s));
+toets('7p server: vaste plek geweigerd', /appWerkerSchakel[\s\S]{0,300}a\.soort === 'vast'\) return appWeiger\(res, 403/.test(s));
 
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');
 process.exit(fouten ? 1 : 0);

@@ -45,7 +45,7 @@ const wacht = () => new Promise((r) => setImmediate(r));
       /OP AFROEP/.test(p.prompt) && /skill `design-manager`/.test(p.prompt) && /GEEN Voor jou-kaart, GEEN bundel, GEEN rij in Open vragen aan David en GEEN werkvoorraadrij/.test(p.prompt)
       && /GEEN hartslagstempel/.test(p.prompt) && /DESIGN-MANAGER <JJJJ-MM-DD>: <n> checks/.test(p.prompt) && /DATUM = 2026-10-21/.test(p.prompt), p.prompt);
     toets('1 reden staat niet in de prompt', !/bouwstap/.test(p.prompt));
-    toets('1 CISO zonder model (standaard), Data op Sonnet', M.MANAGERS.find((x) => x.id === 'ciso').model === '' && M.MANAGERS.find((x) => x.id === 'data').model === 'claude-sonnet-5-5');
+    toets('1 CISO op Opus (wv1733: model altijd ingevuld), Data op Sonnet', M.MANAGERS.find((x) => x.id === 'ciso').model === 'claude-opus-5-5' && M.MANAGERS.find((x) => x.id === 'data').model === 'claude-sonnet-5-5');
   }
   // ── 2. loopt al, uurgrens, weekvenster, tellers ──
   { const { m, st } = omgeving();
