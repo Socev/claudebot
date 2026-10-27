@@ -141,13 +141,21 @@ toets('7i kaart: verlopen pauze zichtbaar', kn.status === 'pauze voorbij, nog ui
 toets('7j check: uit door David is geen bevinding, verlopen pauze wel', !s7.check.niet_actief.some((x) => x.id === uitzetbaar.n8n) && s7.check.niet_actief.some((x) => x.id === nietUit.n8n));
 toets('7k knoppen: uitzetbaar uit, anders pauze, pod-werker en vaste plek geen', a7.find((x) => x.n8n && x.id !== uitzetbaar.id && x.uitzetbaar && x.actief).kan[0] === 'uit' &&
   a7.find((x) => x.id === pod.id).kan.length === 0 && [].concat(...W.SOORTEN.map((x) => W.stand({ workflows: live7, hartslag: hs, schakelaars: rij, nu: NU, vast: true }).groepen[x])).every((x) => x.kan.length === 0));
+const s7z = W.stand({ workflows: live.concat([{ id: uitzetbaar.n8n, name: 'x', active: true, nodes: [] }]), hartslag: hs, schakelaars: [{ werker: uitzetbaar.id, stand: 'uit', geldig: true }], nu: NU });
+const kz = [].concat(...W.SOORTEN.map((x) => s7z.groepen[x])).find((x) => x.id === uitzetbaar.id);
+toets('7q uit-rij maar n8n actief: rij telt niet (Opus Z2)', kz.status !== 'uit door David' && kz.schakelaar === null && JSON.stringify(kz.kan) === '["uit"]', kz);
+const kgeen = [].concat(...W.SOORTEN.map((x) => W.stand({ workflows: live7, hartslag: hs, schakelaars: [], nu: NU }).groepen[x])).find((x) => x.id === uitzetbaar.id);
+toets('7r zonder rij al uit in n8n: geen knop (Opus KAN-4)', kgeen.status === 'uit' && kgeen.kan.length === 0, kgeen);
+toets('7s beveiliging, foutteller en Locatie alleen pauze (Opus M4)', ['n8n-I33oOyrHzUdK1hSM', 'n8n-FyzsteLHpvRHhrdk', 'n8n-1w4T7mdQ1NqYSxJP', 'n8n-Oo1wBLEJJYpua3UP', 'n8n-2vnKvuZ4Cu3SEcNJ'].every((i) => W.PER_ID[i].uitzetbaar === false));
+toets('7t server: concept klaar = weigeren, time-out = opnieuw lezen, slot per werker, bericht bij mislukte pauze',
+  /wf\.versionId !== wf\.activeVersionId\) return appWeiger\(res, 409/.test(s) && /nog\.active !== false/.test(s) && /werkersSchakelBezig\.has\(id\)/.test(s) && /w\.uitzetbaar === false && typeof appTelegram === 'function'/.test(s));
 const s7f = W.stand({ workflows: live7, hartslag: hs, schakelaars: null, nu: NU });
 toets('7l schakelaarstand onleesbaar: geen knoppen, fout gemeld', [].concat(...W.SOORTEN.map((x) => s7f.groepen[x])).every((x) => x.kan.length === 0) && !!s7f.fout.schakelaar);
 toets('7m server: route, vingerafdruk pas na de keuzeregels, één per schakeling, nooit archiveren',
-  /route === 'POST \/app\/werkers\/schakel'\) return typeof appWerkerSchakel/.test(s) && /schakelKeuze\(w, actie, sk\)[\s\S]{0,400}if \(k\.vers && !appVersOk\(a, s\)\)/.test(s) &&
+  /route === 'POST \/app\/werkers\/schakel'\) return typeof appWerkerSchakel/.test(s) && /schakelKeuze\(w, actie, sk\)[\s\S]{0,800}if \(k\.vers && !appVersOk\(a, s\)\)/.test(s) &&
   /if \(k\.vers\) s\.vers_tot = 0/.test(s) && !/\/archive|DELETE', '\/workflows/.test(s.slice(s.indexOf('wv1733 (OVIS M4b): schakelaar per werker'), s.indexOf('werkersPauzeTik(); }, 2'))));
 toets('7n server: aanzetten alleen als de gepubliceerde versie gelijk is', /wf\.versionId !== sk\.versie/.test(s) && /p_versie: String\(wf\.activeVersionId\)/.test(s));
-toets('7o server: rij eerst, mislukt deactiveren = rij weg', /mk_schakelaar_zet[\s\S]{0,400}\/deactivate'\); \}\s*catch[\s\S]{0,200}mk_schakelaar_wis/.test(s));
+toets('7o server: rij eerst, mislukt deactiveren = rij weg', /mk_schakelaar_zet[\s\S]{0,900}\/deactivate'\); \}\s*catch[\s\S]{0,900}mk_schakelaar_wis/.test(s));
 toets('7p server: vaste plek geweigerd', /appWerkerSchakel[\s\S]{0,300}a\.soort === 'vast'\) return appWeiger\(res, 403/.test(s));
 
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');
