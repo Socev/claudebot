@@ -1347,16 +1347,22 @@ function bankcontroleToepassen(fdb, nu) {
 function afwijkendVoorControle(fdb, vandaag) {
   const start = startdatumVan(fdb);
   if (!start) return [];
+  // beoordeeld worden de incasso's van het venster van de bankcontrole (400 dagen), nooit van vóór de start (diffreview wv1326 KLEIN 6)
+  const van = K.plusDagen(vandaag, -BANK_DAGEN), vanaf = start > van ? start : van;
   const txs = fdb.db.prepare('SELECT * FROM bank_transactie WHERE verwijderd_op IS NULL AND is_incasso = 1 AND bedrag_centen < 0 AND boekdatum >= ?')
-    .all(K.plusDagen(start, -366)).map((t) => Object.assign({}, t, { alleen_eigenaar: !!t.alleen_eigenaar, is_incasso: !!t.is_incasso }));
+    .all(K.plusDagen(vanaf, -366)).map((t) => Object.assign({}, t, { alleen_eigenaar: !!t.alleen_eigenaar, is_incasso: !!t.is_incasso }));
   const eigenNamen = [];
   for (const e of fdb.db.prepare('SELECT naam, naam_kort, aliassen FROM entiteit').all())
     eigenNamen.push(e.naam, e.naam_kort, ...((json(e.aliassen, []) || []).map((a) => (typeof a === 'string' ? a : a && a.tekst))));
-  const nietMeetellen = [];
-  for (const s of fdb.db.prepare("SELECT transacties FROM signaal WHERE soort = 'afwijkend_bedrag' AND status = 'afgehandeld' AND afhandeling = 'uitzoeken'").all())
-    nietMeetellen.push(...(json(s.transacties, []) || []));
-  return V.afwijkendeIncassos(txs, { vanaf: start, vandaag, eigenIbans: fdb.db.prepare('SELECT iban FROM rekening').all().map((r) => r.iban),
-    eigenNamen: eigenNamen.filter(Boolean), nietMeetellen });
+  // al gemeld (elke status): die bankregel nooit opnieuw, ook niet als zijn groep later verandert (aanvullen van de incassant; diffreview KLEIN 7)
+  const nietMeetellen = [], gemeld = new Set();
+  for (const s of fdb.db.prepare("SELECT transacties, status, afhandeling FROM signaal WHERE soort = 'afwijkend_bedrag'").all()) {
+    const ids = json(s.transacties, []) || [];
+    ids.forEach((id) => gemeld.add(id));
+    if (s.status === 'afgehandeld' && s.afhandeling === 'uitzoeken') nietMeetellen.push(...ids);
+  }
+  return V.afwijkendeIncassos(txs, { vanaf, vandaag, eigenIbans: fdb.db.prepare('SELECT iban FROM rekening').all().map((r) => r.iban),
+    eigenNamen: eigenNamen.filter(Boolean), nietMeetellen }).filter((a) => !gemeld.has(a.tx.id));
 }
 /*
  * wv1317 (David 26-10-2026): elk open voorstel dat de controle nu niet meer zo voorstelt, gaat op 'vervallen' met de reden in details en een

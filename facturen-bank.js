@@ -1425,11 +1425,15 @@ function bankcontrole(inv) {
    * de startdatum, de band uit het jaar ervoor). Eén signaal per tegenpartij per entiteit per maand (de sleutel noemt de tegenpartij alleen als
    * hash); niet naast een ander signaal over dezelfde bankregel (dubbel betaald, onbekend IBAN, dubbel geüpload: die zeggen al meer).
    */
+  const AFWIJKEND_NIET = ['eigen_overboeking', 'rekening_courant', 'prive_opname', 'creditcard'];
   const alGemeld = new Set();
   for (const s of signalen) for (const id of s.transacties || []) alGemeld.add(id);
   for (const a of inv.afwijkend || []) {
     const tx = a && a.tx, p = a && a.patroon;
     if (!tx || !p || !tx.id || richtingVan(tx) !== 'af' || !tx.is_incasso || alGemeld.has(tx.id) || overslaan.has(tx.id) || sepaAf.has(tx.id)) continue;
+    // een uitzondering die deze ronde pas de categorie zet (creditcard, eigen rekening): geen signaal (diffreview wv1326 MOET 1)
+    const uz = uitzonderingVoor(tx, ctx);
+    if (uz && AFWIJKEND_NIET.includes(uz.categorie)) continue;
     const lt = leverancierBijTx(tx, ctx);
     const tp = crypto.createHash('sha1').update(String(a.tegenpartij || ''), 'utf8').digest('hex').slice(0, 16);
     signalen.push(maakSignaal('afwijkend_bedrag', { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lt ? lt.leverancier.naam : tx.tegenpartij_naam,

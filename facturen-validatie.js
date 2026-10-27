@@ -126,18 +126,23 @@ function bedragPatroon(lijst, vandaag, bedrag, opties) {
 /*
  * David 26-10-2026 11:39: "per entiteit moet er natuurlijk ook een bedrag-range bijgehouden: Wat is de gebruikelijke range, en waarbuiten is
  * het afwijkend?" Een los signaal mocht pas als het minder dan 5 % van de tegenpartijen raakt (grondwet 10). Gemeten 26/27-10 op een kopie
- * van de echte bankregels (mk-scripts wv1323/wv1326): over alle afschrijvingen raakt de band van bedragPatroon 15 % van de tegenpartijen,
- * vooral salarissen en vakantiegeld; met alleen regelmatige incasso's (maand of kwartaal, ≥ 6 eerdere van dezelfde tegenpartij in 12
- * maanden), alleen erboven met een ruimere marge (max(€ 5, 10 % van de mediaan)), zonder creditcard, eigen rekeningen en betaaldiensten:
- * 0 van 29 tegenpartijen bij de laatste betaling en 4 signalen in 180 dagen (pensioenfonds jaarafrekening, boekhouder dubbel bedrag,
- * mobiliteit). Onder de band (goedkoper) is nooit een signaal.
+ * van de bankregels (machinekamer): over alle afschrijvingen valt ruim 10 % van de tegenpartijen buiten de band van bedragPatroon (vooral
+ * salarissen); met alleen maandelijkse incasso's (≥ 6 eerdere van dezelfde incassant in 12 maanden), alleen erboven met een ruimere marge
+ * (max(€ 5, 10 % van de mediaan)), zonder creditcard, eigen rekeningen en betaaldiensten: 0 % bij de laatste betaling en minder dan één
+ * signaal per maand over een half jaar. Onder de band (goedkoper) is nooit een signaal.
  * transacties = bankregels (alle entiteiten; de beller geeft de incasso's vanaf een jaar vóór `vanaf`), opties = { vanaf (startdatum: alleen
  * incasso's op of na die dag; zonder startdatum niets), vandaag, eigenIbans: [iban], eigenNamen: [naam] (entiteiten en hun aliassen; een
  * tegenpartij met precies die naam is een eigen rekening), nietMeetellen: [transactie-id] (David zei bij "Uitzoeken" dat het bedrag niet
  * klopte: telt niet mee in de band) }.
- * → [{ tx, tegenpartij (sleutel), patroon (bedragPatroon), drempel_centen, alleen_eigenaar }], oudste eerst.
+ * → [{ tx, tegenpartij (groepsleutel: incassant, anders IBAN/naam), patroon (bedragPatroon), drempel_centen, alleen_eigenaar }], oudste eerst.
  */
-const AFWIJKEND_MIN = 6, AFWIJKEND_FREQ = ['maand', 'kwartaal'], AFWIJKEND_MARGE = 0.10, AFWIJKEND_MARGE_MIN = 500;
+// alleen maandelijks: een kwartaalincasso haalt geen zes eerdere in 12 maanden (diffreview wv1326 ZOU 3); die blijft bij de band van wv1317
+const AFWIJKEND_MIN = 6, AFWIJKEND_FREQ = ['maand'], AFWIJKEND_MARGE = 0.10, AFWIJKEND_MARGE_MIN = 500;
+// Groep van een incasso: de incassant (vaste identiteit; een oudere ABN-export noemt soms geen IBAN, diffreview ZOU 4), anders als elders.
+function incassoGroep(t) {
+  const inc = t && t.incassant_id ? String(t.incassant_id).trim().toUpperCase() : '';
+  return inc ? 'inc:' + inc : tegenpartijSleutel(t);
+}
 const CREDITCARD_RE = /\bics\b|card services|american express|amex|creditcard|credit card|mastercard|\bvisa\b/i;
 const EIGEN_CATEGORIEEN = ['eigen_overboeking', 'rekening_courant', 'prive_opname', 'creditcard'];
 function afwijkendeIncassos(transacties, opties) {
@@ -157,19 +162,27 @@ function afwijkendeIncassos(transacties, opties) {
   const groepen = new Map();
   for (const t of transacties || []) {
     if (!telt(t)) continue;
-    const k = tegenpartijSleutel(t);
+    const k = incassoGroep(t);
     if (!k) continue;
     const g = t.entiteit + '|' + k;
     if (!groepen.has(g)) groepen.set(g, { tegenpartij: k, lijst: [] });
     groepen.get(g).lijst.push(t);
   }
   const uit = [];
+  const opDatum = (a, b) => (a.boekdatum < b.boekdatum ? -1 : a.boekdatum > b.boekdatum ? 1 : 0);
   for (const { tegenpartij, lijst } of groepen.values()) {
-    for (const t of lijst) {
-      if (t.boekdatum < vanaf || t.boekdatum > vandaag || uitgesloten(t)) continue;
+    // een groep die ooit als creditcard of eigen rekening is aangemerkt (ook via een uitzondering): nooit (diffreview wv1326 MOET 1)
+    if (lijst.some((x) => EIGEN_CATEGORIEEN.includes(x.categorie))) continue;
+    lijst.sort(opDatum);
+    let begin = 0;
+    for (let i = 0; i < lijst.length; i++) {
+      const t = lijst[i];
       // de band uit de incasso's van vóór deze dag (12 maanden); zelfde dag telt niet mee (twee contracten op één dag beoordelen elkaar niet)
       const van = plusDagen(t.boekdatum, -365);
-      const voor = lijst.filter((x) => x.boekdatum < t.boekdatum && x.boekdatum >= van && !weg.has(x.id));
+      while (begin < i && lijst[begin].boekdatum < van) begin++;
+      if (t.boekdatum < vanaf || t.boekdatum > vandaag || uitgesloten(t)) continue;
+      const voor = [];
+      for (let j = begin; j < i && lijst[j].boekdatum < t.boekdatum; j++) if (!weg.has(lijst[j].id)) voor.push(lijst[j]);
       if (voor.length < AFWIJKEND_MIN || !AFWIJKEND_FREQ.includes(frequentieVan(voor.map((x) => x.boekdatum)).soort)) continue;
       const bedrag = -t.bedrag_centen, p = bedragPatroon(voor, t.boekdatum, bedrag);
       if (!p) continue;
@@ -178,7 +191,7 @@ function afwijkendeIncassos(transacties, opties) {
       if (bedrag > drempel) uit.push({ tx: t, tegenpartij, patroon: p, drempel_centen: drempel, alleen_eigenaar: voor.some((x) => !!x.alleen_eigenaar) });
     }
   }
-  return uit.sort((a, b) => (a.tx.boekdatum < b.tx.boekdatum ? -1 : a.tx.boekdatum > b.tx.boekdatum ? 1 : String(a.tx.id).localeCompare(String(b.tx.id))));
+  return uit.sort((a, b) => opDatum(a.tx, b.tx) || String(a.tx.id).localeCompare(String(b.tx.id)));
 }
 
 // ───────────────────────────── rekening uit de bankhistorie (wv1323) ─────────────────────────────
@@ -416,7 +429,7 @@ function zoek(transacties, vraag) {
 }
 
 module.exports = {
-  tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan, bedragPatroon, afwijkendeIncassos, AFWIJKEND_MIN, AFWIJKEND_MARGE,
+  tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan, bedragPatroon, afwijkendeIncassos, incassoGroep, AFWIJKEND_MIN, AFWIJKEND_MARGE,
   naamVerwant, vollereNaam, ibanHistorie, FEIT_MIN_BETALINGEN, FEIT_MIN_DAGEN, VERZAMEL_RE,
   genormKenmerk, echtKenmerk, betalingVan, controles, zoek,
 };

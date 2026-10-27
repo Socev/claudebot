@@ -756,7 +756,14 @@ test('wv1326: afwijkendeIncassos — alleen regelmatige incasso ná de start, ru
   assert.equal(r[0].patroon.laag_centen, 20000); assert.equal(r[0].patroon.hoog_centen, 20000); assert.equal(r[0].patroon.frequentie, 'maand');
   assert.equal(r[0].drempel_centen, 22000, 'hoog + 10 % van de mediaan');
   assert.equal(r[0].alleen_eigenaar, true, 'band rust op historie van vóór de start → alleen de eigenaar');
-  assert.equal(r[0].tegenpartij, 'iban:' + LEV.A);
+  assert.equal(r[0].tegenpartij, 'inc:NL00ZZZ000000000001', 'groep = de incassant');
+  // diffreview wv1326: historie zonder IBAN (oudere export) hoort bij dezelfde incassant; een eerdere regel als creditcard → de hele groep nooit;
+  // een kwartaalincasso haalt de zes eerdere niet en blijft stil
+  assert.equal(V.afwijkendeIncassos(maandIncasso().map((x) => Object.assign({}, x, { tegenpartij_iban: null })).concat([nu1326()]), OPT1326).length, 1, 'historie zonder IBAN');
+  const hcc = maandIncasso(); hcc[3] = Object.assign({}, hcc[3], { categorie: 'creditcard' });
+  assert.equal(V.afwijkendeIncassos(hcc.concat([nu1326()]), OPT1326).length, 0, 'groep ooit als creditcard aangemerkt');
+  const kw = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => Object.assign({}, maandIncasso()[0], { id: 'a' + String(i).padStart(15, '0'), boekdatum: K.plusDagen('2026-10-15', -91 * i) }));
+  assert.equal(V.afwijkendeIncassos(kw.concat([nu1326({ bedrag_centen: -90000 })]), OPT1326).length, 0, 'kwartaal: stil');
   const een = (tx, h, o) => V.afwijkendeIncassos((h || maandIncasso()).concat([tx]), Object.assign({}, OPT1326, o || {})).length;
   assert.equal(een(nu1326({ bedrag_centen: -22000 })), 0, 'op de drempel: geen signaal');
   assert.equal(een(nu1326({ bedrag_centen: -22001 })), 1, 'net erboven');
@@ -819,6 +826,11 @@ test('wv1326: bankcontrole maakt afwijkend_bedrag — één per tegenpartij per 
   const lev = { id: 'lev0000000000001', naam: 'Leverancier A B.V.', ibans: [LEV.C], incassant_ids: [], namen: [] };
   const metOnbekend = B.bankcontrole(inv({ leveranciers: [lev], uitzonderingen: [] })).signalen.map((x) => x.soort);
   assert.ok(metOnbekend.includes('onbekend_iban'), JSON.stringify(metOnbekend)); assert.ok(!metOnbekend.includes('afwijkend_bedrag'), 'niet naast onbekend IBAN');
+  // een uitzondering die deze ronde de categorie creditcard zet → geen signaal (diffreview wv1326 MOET 1)
+  assert.equal(B.bankcontrole(inv({ uitzonderingen: [{ id: 'u2', richting: 'af', tegenpartij: LEV.A, categorie: 'creditcard', actief: 1 }] })).signalen
+    .filter((x) => x.soort === 'afwijkend_bedrag').length, 0, 'uitzondering creditcard');
+  assert.equal(B.bankcontrole(inv({ uitzonderingen: [], entiteiten: [{ sleutel: 'tolgaarde', ibans: [TG, LEV.A] }] })).signalen
+    .filter((x) => x.soort === 'afwijkend_bedrag').length, 0, 'tegenpartij is een eigen rekening');
   // afhandelen
   const kl = B.afhandelSignaal(s[0], 'klopt', { wie: 'david (proef)', nu: '2026-10-22T10:00:00Z' });
   assert.equal(kl.ok, true); assert.deepEqual(kl.gevolgen, []);
@@ -854,6 +866,11 @@ test('wv1326: in de echte bankcontrole — historie nooit, na de start één sig
   assert.equal(t.n("SELECT count(*) n FROM signaal WHERE soort = 'afwijkend_bedrag'"), 1);
   D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
   assert.equal(t.n("SELECT count(*) n FROM signaal WHERE soort = 'afwijkend_bedrag'"), 1, 'tweede ronde: niet opnieuw');
+  // de incassant wordt later aangevuld (andere groep, andere sleutel): dezelfde bankregel krijgt geen tweede signaal (diffreview KLEIN 7)
+  t.fdb.db.prepare("UPDATE bank_transactie SET incassant_id = 'NL00ZZZ000000000009' WHERE id = 'f000000000000001'").run();
+  D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.equal(t.n("SELECT count(*) n FROM signaal WHERE soort = 'afwijkend_bedrag'"), 1, 'al gemeld: niet opnieuw');
+  t.fdb.db.prepare("UPDATE bank_transactie SET incassant_id = 'NL00ZZZ000000000001' WHERE id = 'f000000000000001'").run();
   const routes = F.maak({ fout: () => {} });
   const bank = (rol) => routes.app(t.fdb, { methode: 'GET', pad: '/app/facturen/bank', d: {}, rol, primair: true, nu: NU });
   const be = bank(t.eig);

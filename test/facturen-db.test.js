@@ -1078,4 +1078,14 @@ test("migratie 11 (wv1326): signaal krijgt soort 'afwijkend_bedrag'; vanaf schem
   D.sluit(weer);
   gooit(() => D.open(dir), /migratie_11|staat er 0 keer/);
   const r = D.open(dir, { alleenLezen: true }); assert.equal(sigSql(r.db), voor); assert.equal(r.schema, 10); D.sluit(r);
+  // diffreview wv1326 ZOU 2: een database op schema 10 waarvan de rij van M10 weg is (lichte terugrol van wv1415): M10 slaat over, M11 past toe
+  const d2 = D.open(map('m11-terug10'));
+  zetSql(d2.db, ",'teruggeboekt','afwijkend_bedrag')", ",'teruggeboekt')");
+  d2.db.exec('DELETE FROM schema_migratie WHERE versie >= 10');
+  const dir2 = path.dirname(d2.pad);
+  D.sluit(d2);
+  const e2 = D.open(dir2);
+  assert.deepEqual(e2.toegepast, [10, 11]);
+  assert.equal(sigSql(e2.db), vers);
+  D.sluit(e2);
 });

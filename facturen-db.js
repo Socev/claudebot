@@ -49,6 +49,7 @@ const FORMAAT_V1 = ['ing_csv', 'abn_tab', 'abn_mt940', 'bankluis'];
 const SIGNAAL_V1 = ['geen_factuur', 'dubbel_betaald', 'dubbele_factuur', 'verzending_mislukt', 'incasso_niet_gezien', 'te_betalen_niet_betaald',
   'ingevoerd_niet_gezien', 'onbekend_iban', 'mogelijk_dubbel_geupload'];
 const SIGNAAL_V10 = SIGNAAL_V1.concat(['teruggeboekt']);
+const SIGNAAL_V11 = SIGNAAL_V10.concat(['afwijkend_bedrag']);
 const L = {
   status: ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'],
   onderweg: ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'],
@@ -59,7 +60,7 @@ const L = {
   formaat: ['ing_csv', 'abn_tab', 'abn_mt940', 'triodos_csv', 'bankluis'],
   categorie: ['loon', 'loonheffing', 'btw', 'belasting', 'declaraties', 'rekening_courant', 'eigen_overboeking', 'bankkosten', 'creditcard',
     'prive_opname', 'abonnement_zonder_factuur', 'subsidie', 'rente', 'overig'],
-  signaal: SIGNAAL_V10.concat(['afwijkend_bedrag']),
+  signaal: SIGNAAL_V11,
 };
 const IN = (l) => '(' + l.map((x) => "'" + x + "'").join(',') + ')';
 const ID = (k) => 'CHECK (length(' + k + ') = 16 AND ' + k + " NOT GLOB '*[^0-9a-f]*')";
@@ -615,18 +616,20 @@ const M5_VERVANG = [
   ['bank_bestand', "bank IN ('ABN','ING')", "bank IN ('ABN','ING','TRIODOS')"],
   ['bank_transactie', 'formaat IN ' + IN(FORMAAT_V1), 'formaat IN ' + IN(L.formaat)],
 ];
+// Een vervanging mag een vierde element hebben: teksten van latere migraties die er al mogen staan (de CHECK is al verder verruimd, alleen
+// de rij van deze migratie ontbrak; wv1326 diffreview ZOU 2: M10 ligt vast op V1 → V10, en na M11 staat er V11).
 function M5(db, vervang, code) {
   code = code || 'migratie_5';
   const tel = (hooi, naald) => hooi.split(naald).length - 1;
   const nieuw = new Map(), gewijzigd = new Set();
-  for (const [tabel, oud, wordt] of vervang || M5_VERVANG) {
+  for (const [tabel, oud, wordt, verder] of vervang || M5_VERVANG) {
     if (!nieuw.has(tabel)) {
       const r = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(tabel);
       if (!r || !r.sql) throw new DbFout(code, 'tabel ' + tabel + ' niet gevonden');
       nieuw.set(tabel, r.sql);
     }
     const sql = nieuw.get(tabel);
-    if (tel(sql, oud) === 0 && tel(sql, wordt) === 1) continue;   // al verruimd
+    if (tel(sql, oud) === 0 && (tel(sql, wordt) === 1 || (verder || []).some((v) => tel(sql, v) === 1))) continue;   // al verruimd
     if (tel(sql, oud) !== 1) throw new DbFout(code, tabel + ': CHECK-tekst ' + oud.slice(0, 40) + ' staat er ' + tel(sql, oud) + ' keer');
     nieuw.set(tabel, sql.replace(oud, wordt));
     gewijzigd.add(tabel);
@@ -669,19 +672,19 @@ function M6(db, vervang) { return M5(db, vervang || M6_VERVANG, 'migratie_6'); }
  * code zonder knoppen (SIGNALEN kent hem niet) en een koppeling met methode 'sepa_terug' telt hij als gewone betaling.
  */
 const M10_VERVANG = [
-  ['signaal', 'soort IN ' + IN(SIGNAAL_V1), 'soort IN ' + IN(L.signaal)],
+  ['signaal', 'soort IN ' + IN(SIGNAAL_V1), 'soort IN ' + IN(SIGNAAL_V10), ['soort IN ' + IN(SIGNAAL_V11)]],
 ];
 function M10(db, vervang) { return M5(db, vervang || M10_VERVANG, 'migratie_10'); }
 
 /*
  * wv1326 (David 26-10-2026 11:39: "Wat is de gebruikelijke range, en waarbuiten is het afwijkend?"): signaal 'afwijkend_bedrag' — een
  * regelmatige incasso ná de startdatum ligt ruim boven zijn gebruikelijke band. Zelfde weg als M5/M6/M10 (writable_schema, één vervanging, al
- * verruimd = overslaan). Een nieuwe database krijgt via M10 meteen de hele lijst; M11 slaat dan over. LET OP terugrol: een release van vóór
+ * verruimd = overslaan). M10 ligt vast op V1 → V10 (en accepteert V11 als al verder), M11 doet V10 → V11. LET OP terugrol: een release van vóór
  * wv1326 opent deze database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 11`: de verruimde
  * CHECK hindert de oude code niet; een signaalrij 'afwijkend_bedrag' toont de oude code zonder knoppen (SIGNALEN kent hem niet).
  */
 const M11_VERVANG = [
-  ['signaal', 'soort IN ' + IN(SIGNAAL_V10), 'soort IN ' + IN(L.signaal)],
+  ['signaal', 'soort IN ' + IN(SIGNAAL_V10), 'soort IN ' + IN(SIGNAAL_V11)],
 ];
 function M11(db, vervang) { return M5(db, vervang || M11_VERVANG, 'migratie_11'); }
 
