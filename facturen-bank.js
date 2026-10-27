@@ -1048,6 +1048,7 @@ function bankcontrole(inv) {
   const eigenaarVan = (tx, fids) => !!(tx && tx.alleen_eigenaar) || (fids || []).some((id) => isPrive(fMap.get(id)));
   const afgewezen = new Set(inv.afgewezenVoorstellen || []);
   const uit = { koppelingen: [], voorstellen: [], uitzonderingen: [], betaalspoor: [], signalen: [], heropenen: [] };
+  const signalen = [];
   /*
    * wv1405: batches uit de Facturen-app (inv.sepa: per PmtInf de eigen rekening, uitvoerdatum, totaal en regels). Een afschrijving op die
    * rekening die het batch-id noemt (ABN: PREF → kenmerk) en precies het totaal is, hoort bij alle facturen van dat blok; een losse betaling
@@ -1060,12 +1061,22 @@ function bankcontrole(inv) {
     if (richtingVan(tx) !== 'af' || !sepa.length) return null;
     const bedrag = -tx.bedrag_centen, eigen = ibanNorm(tx.eigen_iban), bank = [tx.kenmerk, tx.omschrijving].filter(Boolean).join(' ');
     const ken = String(tx.kenmerk || '').trim().toLowerCase();
-    const open = (ids) => ids.every((id) => fMap.has(id) && !voldaan(fMap.get(id)) && fMap.get(id).entiteit === tx.entiteit);
+    const bekend = (ids) => ids.every((id) => fMap.has(id) && fMap.get(id).entiteit === tx.entiteit);
+    const open = (ids) => bekend(ids) && ids.every((id) => !voldaan(fMap.get(id)));
+    const klopt = (x) => teBetalen(fMap.get(x.factuur)) === x.centen;   // de factuur is na de batch niet van bedrag veranderd (diffreview ZOU 5)
     const opRek = sepa.filter((p) => ibanNorm(p.eigen_iban) === eigen);
     for (const p of opRek) {
       const ids = p.regels.map((x) => x.factuur);
-      if (bedrag === p.centen && noemtBatchId(bank, p.pmtinf_id) && open(ids)) return kandidaat('sepa_batch', ids.map((id) => fMap.get(id)), 1, tx, { pmtinf_id: p.pmtinf_id });
-      for (const x of p.regels) if (ken && ken === x.factuur && bedrag === x.centen && open([x.factuur])) return kandidaat('sepa_e2e', [fMap.get(x.factuur)], 1, tx, { pmtinf_id: p.pmtinf_id });
+      if (bedrag === p.centen && noemtBatchId(bank, p.pmtinf_id)) {
+        if (open(ids)) return p.regels.every(klopt) ? kandidaat('sepa_batch', ids.map((id) => fMap.get(id)), 1, tx, { pmtinf_id: p.pmtinf_id })
+          : Object.assign(kandidaat('sepa_batch', ids.map((id) => fMap.get(id)), 0.6, tx, { pmtinf_id: p.pmtinf_id }), { ter_bevestiging: true });
+        // dezelfde batch nog een keer afgeschreven (twee keer geüpload en ondertekend): dubbel betaald (diffreview ZOU 4)
+        if (bekend(ids) && ids.every((id) => voldaan(fMap.get(id)))) return { dubbel: p.regels.map((x) => x.factuur), pmtinf_id: p.pmtinf_id };
+      }
+      for (const x of p.regels) if (ken && ken === x.factuur && bedrag === x.centen) {
+        if (open([x.factuur]) && klopt(x)) return kandidaat('sepa_e2e', [fMap.get(x.factuur)], 1, tx, { pmtinf_id: p.pmtinf_id });
+        if (bekend([x.factuur]) && voldaan(fMap.get(x.factuur)) && !(betaald.get(x.factuur) || []).some((k) => k.tx === tx.id)) return { dubbel: [x.factuur], pmtinf_id: p.pmtinf_id };
+      }
     }
     if (tx.tegenpartij_iban || opRek.some((p) => noemtBatchId(bank, p.pmtinf_id))) return null;
     const kan = opRek.filter((p) => p.regels.length > 1 && bedrag === p.centen && isIsoDatum(p.datum) && dagenTussen(p.datum, tx.boekdatum) >= -3 &&
@@ -1076,9 +1087,21 @@ function bankcontrole(inv) {
     return k;
   };
   // Ronde 0: eigen batches (vóór ronde 1: zo pakt geen andere regel een factuur uit een batch die de bank als één post boekte)
+  const sepaAf = new Set();   // afschrijvingen die hier al een signaal kregen (dubbel uitgevoerde batch): niet ook nog "geen factuur"
   for (const tx of txs) {
     if (txFacturen.has(tx.id)) continue;
     const k = sepaKand(tx);
+    if (k && k.dubbel) {
+      sepaAf.add(tx.id);
+      for (const fid of k.dubbel) {
+        const f = fMap.get(fid), l = levVan(f.leverancier, ctx);
+        const eerdere = (betaald.get(fid) || []).map((x) => txMap.get(x.tx)).filter(Boolean);
+        signalen.push(maakSignaal('dubbel_betaald', { transacties: eerdere.map((e) => e.id).concat([tx.id]), facturen: [fid], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit,
+          naam: l ? l.naam : null, leverancier: f.leverancier || null, bedrag_centen: teBetalen(f), datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar || isPrive(f),
+          details: { nummer: f.nummer, datums: eerdere.map((e) => e.boekdatum).concat([tx.boekdatum]), batch: k.pmtinf_id } }));
+      }
+      continue;
+    }
     if (!k || k.ter_bevestiging) continue;
     const eigenaar = eigenaarVan(tx, k.facturen);
     for (const fid of k.facturen) {
@@ -1088,7 +1111,6 @@ function bankcontrole(inv) {
       if (f && f.betaalspoor && f.betaalspoor !== 'betaald_gezien') uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'bankmatch', van: f.betaalspoor, naar: 'betaald_gezien' });
     }
   }
-  const signalen = [];
   const voorgesteld = new Set();
   const wensen = [];
 
@@ -1130,7 +1152,7 @@ function bankcontrole(inv) {
 
   // Ronde 2: wat over is → fraudesignaal, uitzondering, voorstel, dubbel betaald of geen factuur
   for (const tx of txs) {
-    if (txFacturen.has(tx.id) || overslaan.has(tx.id)) continue;
+    if (txFacturen.has(tx.id) || overslaan.has(tx.id) || sepaAf.has(tx.id)) continue;
     const lt = leverancierBijTx(tx, ctx);
     const tegen = ibanNorm(tx.tegenpartij_iban);
     const basis = { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lt ? lt.leverancier.naam : tx.tegenpartij_naam,
@@ -1176,7 +1198,7 @@ function bankcontrole(inv) {
     }
     // wv1317: eerst alle wensen verzamelen; daarna krijgt elke factuur hooguit één open voorstel (de beste betaling, dan de dichtstbijzijnde)
     const sk = sepaKand(tx);
-    const kand = (sk && sk.ter_bevestiging ? [sk] : []).concat(matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx))
+    const kand = (sk && !sk.dubbel && sk.ter_bevestiging ? [sk] : []).concat(matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx))
       .map((k) => Object.assign({ sleutel: voorstelSleutel(tx.id, k.facturen) }, k)).filter((k) => !afgewezen.has(k.sleutel));
     if (kand.length) { wensen.push({ tx, kand, basis }); continue; }
     if (richtingVan(tx) === 'af' && dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));

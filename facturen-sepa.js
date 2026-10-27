@@ -109,10 +109,12 @@ function rfOk(r) {
   for (const ch of s) { const v = ch >= 'A' && ch <= 'Z' ? String(ch.charCodeAt(0) - 55) : ch; for (const x of v) rest = (rest * 10 + Number(x)) % 97; }
   return rest === 1;
 }
+// Letters die NFKD niet opsplitst (diffreview wv1405 #11: anders werd "Łódź" "odz")
+const LETTER = { ß: 'ss', Æ: 'AE', æ: 'ae', Ø: 'O', ø: 'o', Ł: 'L', ł: 'l', Đ: 'D', đ: 'd', Þ: 'TH', þ: 'th', Œ: 'OE', œ: 'oe', ı: 'i' };
 // Basis-Latijnse set van de EPC: a-z A-Z 0-9 / - ? : ( ) . , ' + spatie. Accenten weg, ß → ss, & → en, de rest een spatie.
 function tekst(s, max) {
-  let t = String(s == null ? '' : s).normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/ß/g, 'ss').replace(/[Ææ]/g, (x) => (x === 'Æ' ? 'AE' : 'ae'))
-    .replace(/[Øø]/g, (x) => (x === 'Ø' ? 'O' : 'o')).replace(/&/g, ' en ').replace(/[‘’`´]/g, "'");
+  let t = String(s == null ? '' : s).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[ßÆæØøŁłĐđÞþŒœı]/g, (x) => LETTER[x])
+    .replace(/&/g, ' en ').replace(/[\u2018\u2019`\u00b4]/g, "'");
   t = t.replace(/[^A-Za-z0-9/\-?:().,'+ ]/g, ' ').replace(/\s+/g, ' ').trim();
   return t.slice(0, max).trim();
 }

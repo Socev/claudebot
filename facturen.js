@@ -355,6 +355,7 @@ function betalen(fdb, r, nu) {
       incl: f.incl, valuta: f.valuta, ingevoerd_door: f.ingevoerd_door, ingevoerd_op: f.ingevoerd_op };
     // wv1405: uitvoerdatum en of hij in een SEPA-batch kan (alleen de eigenaar maakt batches; de praktijkmanager ziet de lijst zoals voorheen)
     if (isEig(r)) Object.assign(rij, sepaBetaalInfo(fdb, f, lev, ctx, vandaag), f.betaalspoor === 'ingevoerd' ? { uitvoer_op: f.uitvoer_op || null } : {});
+    if (f.betaalspoor === 'ingevoerd') rij.in_batch = !!f.uitvoer_op;   // ook de praktijkmanager: geen Ongedaan op een batchregel (MOET 2)
     // een factuur met een openstaande IBAN-blokkade staat er niet op (ontwerp v2 § 3), met een verwijzing naar Beoordelen
     if (K.isCreditnota(f)) continue;   // een creditnota hoort nooit op de betaallijst (wv855; staat er een oude op te_betalen, dan niet tonen)
     if (K.magBevestigen(Object.assign({}, f, { status: 'te_beoordelen' }), { leverancier: lev, ctx }).redenen.some((x) => /IBAN/.test(x))) { geblokkeerd.push({ id: f.id, reden: 'IBAN nog niet nagebeld' }); continue; }
@@ -674,6 +675,14 @@ function ingevoerd(fdb, r, d, nu, ongedaan) {
   return D.transactie(fdb, function () {
     const f = factuurOf404(fdb, r, id);
     if (!BETAAL_STATUS.includes(f.status)) weiger(409, 'de factuur is nog niet bevestigd');
+    // wv1405 (diffreview MOET 2): een betaling in een SEPA-batch terugzetten kan alleen David in zijn app, en pas als hij zegt dat hij hem
+    // uit de batch in de bank haalde (of dat de batch niet is geüpload); anders voert de bank hem later toch uit en wordt hij dubbel betaald
+    if (ongedaan && f.betaalspoor === 'ingevoerd' && f.uitvoer_op) {
+      const eerder = sepaEerder(fdb, f.id);
+      if (!isEig(r) || r.ingang !== 'app') weiger(403, 'deze betaling staat in een SEPA-batch van David; alleen hij kan hem terugzetten', { code: 'in_batch' });
+      if (d.uit_bank !== true) weiger(409, 'deze betaling staat in een SEPA-batch: haal hem eerst uit de batch in de bank (of kijk na dat die batch niet is geüpload) en bevestig dan',
+        { code: 'in_batch', in_batch: eerder ? { msg_id: eerder.msg_id, wanneer: eerder.wanneer, uitvoerdatum: eerder.uitvoerdatum } : null });
+    }
     const ov = K.betaalspoorOvergang(f.betaalspoor, ongedaan ? 'ongedaan' : 'ingevoerd_in_bank');
     if (!ov.ok) weiger(409, 'kan niet: ' + ov.reden);
     const wanneer = nuIso(nu);
@@ -705,6 +714,9 @@ function ingevoerd(fdb, r, d, nu, ongedaan) {
  * elfproef niet haalt. Redenen noemen nooit een bedrag of naam.
  */
 const SEPA_OPNIEUW_DAGEN = 30;
+// Een regel "loopt" nog in zijn batch: de factuur staat op ingevoerd met de uitvoerdatum van deze regel, en dit is zijn laatste batch
+// (diffreview wv1405 MOET 1: na Ongedaan of een nieuwe batch is het oude bestand niet meer opnieuw te geven).
+const SEPA_LOPEND = "f.betaalspoor = 'ingevoerd' AND f.uitvoer_op = r.uitvoerdatum AND r.id = (SELECT max(r2.id) FROM sepa_regel r2 WHERE r2.factuur = r.factuur)";
 const ONDERWEG_BETAAL = ONDERWEG;   // Privé (prive_archief) staat op de betaallijst maar kan nooit in een batch
 const SEPA_WAARSCHUWING = {
   eerder_in_batch: 'zat al in een batch; alleen opnieuw als je zeker weet dat die batch niet is uitgevoerd',
@@ -772,11 +784,11 @@ function sepaBetaalInfo(fdb, f, lev, ctx, vandaag) {
 function sepaOverzicht(fdb, nu) {
   const g = S.grenzen(dagAmsterdam(nu));
   const rek = sepaRekeningen(fdb).map((k) => ({ id: k.id, entiteit: k.entiteit, rekening: eind4(k.iban), bank: k.bank }));
-  const batches = fdb.db.prepare('SELECT b.*, (SELECT count(*) FROM sepa_regel r JOIN factuur f ON f.id = r.factuur WHERE r.batch = b.id AND f.betaalspoor = \'ingevoerd\') AS nog, ' +
+  const batches = fdb.db.prepare('SELECT b.*, (SELECT count(*) FROM sepa_regel r JOIN factuur f ON f.id = r.factuur WHERE r.batch = b.id AND ' + SEPA_LOPEND + ') AS nog, ' +
     '(SELECT min(uitvoerdatum) FROM sepa_regel r WHERE r.batch = b.id) AS van, (SELECT max(uitvoerdatum) FROM sepa_regel r WHERE r.batch = b.id) AS tot FROM sepa_batch b ' +
     'WHERE b.wanneer >= ? ORDER BY b.wanneer DESC LIMIT 10').all(nuIso(nu - 60 * 86400000)).map((b) => ({ id: b.id, msg_id: b.msg_id, entiteit: b.entiteit, rekening: eind4(b.dbtr_iban),
     aantal: b.aantal, totaal_centen: b.totaal_centen, wanneer: b.wanneer, van: b.van, tot: b.tot, nog_ingevoerd: b.nog,
-    opnieuw_kan: nu - Date.parse(b.wanneer) <= SEPA_OPNIEUW_DAGEN * 86400000 }));
+    opnieuw_kan: nu - Date.parse(b.wanneer) <= SEPA_OPNIEUW_DAGEN * 86400000 && b.nog === b.aantal }));
   return { formaat: S.FORMAAT, vroegst: g.vroegst, uiterst: g.uiterst, rekeningen: rek, batches };
 }
 // POST betaaldatum { id, datum | null }: de uitvoerdatum voor de batch (null = terug naar de standaard). Alleen de eigenaar (review wv1405 #11).
@@ -806,7 +818,8 @@ function sepaSamenstellen(fdb, r, d, nu) {
   if (lijst.length > S.MAX_REGELS) weiger(400, 'hooguit ' + S.MAX_REGELS + ' facturen per batch');
   if (lijst.some((x) => !ID_RE.test(x))) weiger(400, 'factuur-id ongeldig');
   if (new Set(lijst).size !== lijst.length) weiger(400, 'een factuur staat er twee keer in');
-  const bewust = new Set(Array.isArray(d.bewust) ? d.bewust.map(String).filter((x) => ID_RE.test(x)) : []);
+  // bewust per factuur én waarschuwing ("<id>:<code>"; diffreview ZOU 3): een akkoord op het ene dekt geen ander dat er later bij kwam
+  const bewust = new Set(Array.isArray(d.bewust) ? d.bewust.map(String).filter((x) => /^[0-9a-f]{16}:[a-z_]{3,30}$/.test(x)) : []);
   const vandaag = dagAmsterdam(nu), ctx = kernCtx(fdb, nu);
   const e = fdb.db.prepare('SELECT * FROM entiteit WHERE sleutel = ?').get(rek.entiteit);
   const regels = [], geweigerd = [];
@@ -815,9 +828,9 @@ function sepaSamenstellen(fdb, r, d, nu) {
     if (!f || !magFactuur(r, f)) { geweigerd.push({ id, reden: 'factuur niet gevonden' }); continue; }
     const b = sepaBeoordeel(fdb, f, leverancierKern(fdb, f.leverancier_id), ctx, vandaag, rek);
     if (b.reden) { geweigerd.push({ id, reden: b.reden }); continue; }
-    const open = b.waarschuwingen.filter((c) => !bewust.has(id));
+    const open = b.waarschuwingen.filter((c) => !bewust.has(id + ':' + c));
     if (open.length) { geweigerd.push({ id, reden: 'vraagt een uitdrukkelijke keuze: ' + open.map((c) => SEPA_WAARSCHUWING[c]).join('; '), bewust_nodig: open }); continue; }
-    regels.push(b.regel);
+    regels.push(Object.assign({ waarschuwingen: b.waarschuwingen.slice().sort() }, b.regel));
   }
   regels.sort((a, b) => (a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : 0) || a.naam.localeCompare(b.naam, 'nl') || a.factuur.localeCompare(b.factuur));
   const naam = S.tekst(e.naam, 70) || S.tekst(e.naam_kort, 70) || e.sleutel;
@@ -825,11 +838,12 @@ function sepaSamenstellen(fdb, r, d, nu) {
   const kaal = regels.map((x) => ({ factuur: x.factuur, datum: x.datum, centen: x.centen, iban: x.iban, naam: x.naam, rmt: x.rmt }));
   const per = new Map();
   for (const x of kaal) { const p = per.get(x.datum) || { datum: x.datum, aantal: 0, totaal_centen: 0 }; p.aantal++; p.totaal_centen += x.centen; per.set(x.datum, p); }
-  return { rek, e, kop, regels: kaal, geweigerd, sleutel: regels.length ? S.inhoudSleutel(kop, kaal) : null,
+  const sleutel = regels.length ? S.sha256(S.inhoudSleutel(kop, kaal) + '|' + JSON.stringify(regels.map((x) => [x.factuur, x.waarschuwingen]))) : null;
+  return { rek, e, kop, regels: kaal, geweigerd, sleutel,
     overzicht: { rekening: eind4(rek.iban), bank: rek.bank, entiteit: rek.entiteit, aantal: kaal.length, totaal_centen: kaal.reduce((s, x) => s + x.centen, 0),
       vroegste: kaal.length ? kaal[0].datum : null, laatste: kaal.length ? kaal[kaal.length - 1].datum : null, per_datum: [...per.values()],
       regels: regels.map((x) => ({ id: x.factuur, naam: x.naam, rekening: eind4(x.iban), centen: x.centen, datum: x.datum,
-        omschrijving: x.rmt ? (x.rmt.strd ? x.rmt.strd.ref + ' (betalingskenmerk)' : x.rmt.ustrd) : null })) } };
+        omschrijving: x.rmt ? (x.rmt.strd ? x.rmt.strd.ref + ' (betalingskenmerk)' : x.rmt.ustrd) : null, waarschuwingen: x.waarschuwingen })) } };
 }
 function sepaBestandNaam(e, vandaag, msgId) { return 'SEPA ' + (S.tekst(e.naam_kort || e.sleutel, 30) || 'batch') + ' ' + vandaag + ' ' + msgId.slice(-8) + '.xml'; }
 function sepaBatch(fdb, r, d, nu, o) {
@@ -867,7 +881,7 @@ function sepaBatch(fdb, r, d, nu, o) {
         voor: { betaalspoor: 'te_betalen' }, na: { betaalspoor: 'ingevoerd', batch: batchId, uitvoerdatum: t.datum }, wanneer });
     }
     D.audit(fdb, { wie: r.wie, wat: 'sepa_batch', object_soort: 'sepa_batch', object_id: batchId, entiteit: s.rek.entiteit,
-      na: { msg_id: msgId, rekening: s.rek.id, rekening_eind: eind4(s.rek.iban), formaat: S.FORMAAT, aantal: s.regels.length, totaal_centen: s.overzicht.totaal_centen,
+      na: { msg_id: msgId, rekening: s.rek.id, rekening_eind: eind4(s.rek.iban), formaat: S.FORMAAT, aantal: s.regels.length,
         per_datum: s.overzicht.per_datum.map((p) => [p.datum, p.aantal]), facturen: s.regels.map((t) => t.factuur), sha256: sha, bewust: Array.isArray(d.bewust) ? d.bewust.length : 0 }, wanneer });
     return { batch: batchId, msg_id: msgId, bestand: { naam: sepaBestandNaam(s.e, vandaag, msgId), type: 'application/xml', inhoud: x.tekst, sha256: sha }, overzicht: s.overzicht };
   });
@@ -881,6 +895,9 @@ function sepaBestand(fdb, r, d, nu, o) {
   const b = fdb.db.prepare('SELECT * FROM sepa_batch WHERE id = ?').get(id);
   if (!b) weiger(404, 'batch niet gevonden');
   if (nu - Date.parse(b.wanneer) > SEPA_OPNIEUW_DAGEN * 86400000) weiger(409, 'deze batch is ouder dan ' + SEPA_OPNIEUW_DAGEN + ' dagen');
+  const lopend = Number(fdb.db.prepare('SELECT count(*) AS n FROM sepa_regel r JOIN factuur f ON f.id = r.factuur WHERE r.batch = ? AND ' + SEPA_LOPEND).get(b.id).n);
+  if (lopend !== b.aantal) weiger(409, 'niet meer hetzelfde: een betaling uit deze batch is intussen ongedaan gemaakt, in een nieuwe batch gezet of al op de bank gezien; ' +
+    'kijk in de bank wat er met deze batch is gebeurd', { code: 'veranderd' });
   if (!o.versOk()) weiger(403, 'bevestig met je vingerafdruk', { vers_nodig: true });
   o.versVerbruik();
   const regels = fdb.db.prepare('SELECT * FROM sepa_regel WHERE batch = ? ORDER BY positie').all(b.id)

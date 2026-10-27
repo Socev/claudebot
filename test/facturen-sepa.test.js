@@ -84,6 +84,7 @@ test('betalingskenmerk (elfproef, met de hand uitgerekend) en RF-referentie (ISO
 test('tekens: basis-Latijnse set van de EPC (accenten weg, & → en, rest een spatie); id zonder begin- of eind-/ en zonder //', () => {
   assert.equal(S.tekst('Café Ærø & Søn — “test” ß', 70), "Cafe AEro en Son - test ss".replace(' - ', ' '));
   assert.equal(S.tekst('a<b>c"d', 70), 'a b c d');
+  assert.equal(S.tekst('Łódź Đurđevac Œuvre', 70), 'Lodz Durdevac OEuvre', 'letters die NFKD niet opsplitst (diffreview #11)');
   assert.equal(S.tekst('x'.repeat(80), 70).length, 70);
   assert.equal(S.id('//ab//cd/', 35), 'ab/cd');
   assert.equal(S.bedrag(12345), '123.45');

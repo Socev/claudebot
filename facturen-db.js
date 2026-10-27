@@ -776,8 +776,9 @@ WHEN NOT EXISTS (SELECT 1 FROM rekening r WHERE r.id = NEW.rekening AND r.entite
   AND r.iban = NEW.dbtr_iban AND r.entiteit NOT IN ('prive','pot'))
 BEGIN SELECT RAISE(ABORT, 'sepa_rekening: de rekening hoort niet bij deze entiteit of kan geen batch'); END;
 CREATE TRIGGER IF NOT EXISTS sepa_regel_factuur_ent BEFORE INSERT ON sepa_regel
-WHEN NOT EXISTS (SELECT 1 FROM factuur f JOIN sepa_batch b ON b.id = NEW.batch WHERE f.id = NEW.factuur AND f.entiteit = b.entiteit AND f.soort = 'factuur')
-BEGIN SELECT RAISE(ABORT, 'sepa_regel: de factuur hoort niet bij de entiteit van de batch of is een creditnota'); END;
+WHEN NOT EXISTS (SELECT 1 FROM factuur f JOIN sepa_batch b ON b.id = NEW.batch WHERE f.id = NEW.factuur AND f.entiteit = b.entiteit AND f.soort = 'factuur'
+  AND f.betaalspoor = 'te_betalen' AND f.valuta = 'EUR' AND f.incl = NEW.centen AND f.iban = NEW.iban)
+BEGIN SELECT RAISE(ABORT, 'sepa_regel: de factuur hoort niet bij de batch (entiteit, te betalen, euro, bedrag en rekeningnummer moeten kloppen)'); END;
 `;
 function M9(db) {
   const kol = new Set(db.prepare('PRAGMA table_info(factuur)').all().map((x) => x.name));
