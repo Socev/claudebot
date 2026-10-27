@@ -84,16 +84,16 @@ const boxRijen = () => (fs.readFileSync(BOX, 'utf8').match(/^## \[log\] .*Uitrol
     const sha = {};
     for (const [n, veld] of [['A', 1], ['B', 1], ['C', 0], ['D', 1]]) {
       fs.writeFileSync(path.join(K, 'server.js'), server(veld, n));
-      for (const b of ['telegram-claude-bot.js', 'telegram-reader.js', 'koppel-telegram.js']) fs.writeFileSync(path.join(K, b), '// ' + n + '\n');
+      for (const b of ['telegram-reader.js', 'koppel-telegram.js']) fs.writeFileSync(path.join(K, b), '// ' + n + '\n');
       fs.writeFileSync(path.join(K, 'package.json'), '{}\n');
-      sh('git add server.js telegram-claude-bot.js telegram-reader.js koppel-telegram.js package.json && git commit -q -m ' + n, K);
+      sh('git add server.js telegram-reader.js koppel-telegram.js package.json && git commit -q -m ' + n, K);
       sha[n] = sh('git rev-parse HEAD', K);
     }
     sh('git push -q origin HEAD:main', K);
     const kort = (n) => sha[n].slice(0, 12);
     // Begintoestand: release A draait, vorige = A.
     fs.mkdirSync(path.join(REL, kort('A')), { recursive: true });
-    for (const b of ['server.js', 'telegram-claude-bot.js', 'telegram-reader.js', 'koppel-telegram.js', 'package.json'])
+    for (const b of ['server.js', 'telegram-reader.js', 'koppel-telegram.js', 'package.json'])
       fs.writeFileSync(path.join(REL, kort('A'), b), sh('git show ' + sha.A + ':' + b, K) + '\n');
     fs.symlinkSync('releases/' + kort('A'), path.join(APP, 'current')); fs.symlinkSync('releases/' + kort('A'), path.join(APP, 'vorige'));
     fs.writeFileSync(BOX, '# box\n\n**Formaat** (nieuwste bovenaan): zie het voorbeeld onder de rijen.\n\n## [log] oud\n');

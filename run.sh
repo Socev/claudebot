@@ -4,9 +4,8 @@
 #   - de vault-sync (rclone bisync)     altijd, per ronde alleen met schakelbestand /opt/data/bisync.json {"aan": true} (wv1308)
 #   - Syncthing (vault ↔ Davids apparaten) alleen met schakelaar /opt/data/syncthing.json aan (wv1277)
 #   - de git-repo van de GHAWA-site     alleen als GIT_REPO_URL is gezet
-#   - de Telegram-bot (telegram-claude-bot.js)  alleen als TG_TOKEN is gezet
-# Zo kun je de in-container bot uitzetten door simpelweg TG_TOKEN leeg te maken
-# in Studio (geen rebuild nodig) zodra n8n de Telegram-route overneemt.
+# De oude in-container Telegram-bot (telegram-claude-bot.js, alleen met TG_TOKEN) is weg sinds wv1021: n8n doet de
+# Telegram-route, en de bot startte claude met de volle omgeving en cwd = vault zonder de machinekamer-args.
 #
 # Extra env voor de GHAWA-website-workspace (in Olares Studio in te stellen):
 #   GIT_REPO_URL   bv. https://github.com/Socev/ghawa-site.git  (leeg = git-deel uit)
@@ -537,10 +536,6 @@ start_api(){
   node /app/supervisor.js >> "$BIN/api.log" 2>&1 &
   API_PID=$!; log "supervisor gestart (pid $API_PID) — API draait vanaf /opt/data/app/current"
 }
-start_bot(){
-  node /app/telegram-claude-bot.js >> "$BIN/bot.log" 2>&1 &
-  BOT_PID=$!; log "telegram-bot gestart (pid $BOT_PID)"
-}
 
 # ── Git-workspace (GHAWA-site) — alleen actief als GIT_REPO_URL is gezet ─────
 # Het credentialbestand van de GHAWA-clone. Wordt hier NIET aangemaakt: de
@@ -672,7 +667,7 @@ else
   log "GIT_REPO_URL leeg: GHAWA-workspace uit."
 fi
 start_api
-[ -n "${TG_TOKEN:-}" ] && start_bot || log "TG_TOKEN leeg: in-container bot uit (n8n verwacht)."
+[ -n "${TG_TOKEN:-}" ] && log "TG_TOKEN gezet, maar de in-container bot bestaat niet meer (wv1021): n8n doet Telegram."
 
 # ── Vault-snapshot ───────────────────────────────────────────────────────────
 # Waarom dit bestaat: bisync is SYNCHRONISATIE, geen backup. Een verwijdering
@@ -807,9 +802,6 @@ while true; do
   [ "$STOPPEN" = "1" ] && break
   kill -0 "$SYNC_PID" 2>/dev/null || { log "sync herstart"; start_sync; }
   kill -0 "$API_PID"  2>/dev/null || { log "api herstart";  start_api;  }
-  if [ -n "${TG_TOKEN:-}" ]; then
-    kill -0 "${BOT_PID:-0}" 2>/dev/null || { log "bot herstart"; start_bot; }
-  fi
   if [ -n "$REPO_URL" ]; then
     now=$(date +%s)
     if [ $(( now - last_git )) -ge "$GIT_EVERY" ]; then rol_primair && sync_repo; last_git=$now; fi

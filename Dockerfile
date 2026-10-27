@@ -137,7 +137,6 @@ COPY managed-settings.json /etc/claude-code/managed-settings.json
 # aanroepen (koppel-telegram, telegram-reader vanaf de opdrachtregel) ernaar
 # verwijzen; die zijn geen onderdeel van de draaiende API.
 COPY server.js /app/release-bootstrap/server.js
-COPY telegram-claude-bot.js /app/release-bootstrap/telegram-claude-bot.js
 COPY telegram-reader.js /app/release-bootstrap/telegram-reader.js
 COPY koppel-telegram.js /app/release-bootstrap/koppel-telegram.js
 COPY package.json /app/release-bootstrap/package.json
@@ -178,7 +177,6 @@ COPY mediatheek.js /app/release-bootstrap/mediatheek.js
 COPY ovis-register.js /app/release-bootstrap/ovis-register.js
 
 COPY server.js /app/server.js
-COPY telegram-claude-bot.js /app/telegram-claude-bot.js
 COPY telegram-reader.js /app/telegram-reader.js
 COPY koppel-telegram.js /app/koppel-telegram.js
 

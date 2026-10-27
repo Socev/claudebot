@@ -33,7 +33,10 @@ LOG="${BIN_DIR:-/opt/data/bin}/uitrol.log"
 # Alleen deze bestanden vormen een release. Bewust een expliciete lijst en geen
 # `cp -r` van de hele repo: dan zouden .github, Dockerfile en losse testbestanden
 # meeverhuizen naar een map die als applicatie wordt gedraaid.
-RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-telegram.js package.json"
+RELEASE_BESTANDEN="server.js telegram-reader.js koppel-telegram.js package.json"
+# telegram-claude-bot.js (de oude in-container bot) is weg sinds wv1021: draaide niet meer (geen TG_TOKEN, bot.log stil sinds 26-6),
+# maar startte claude met de volle omgeving en cwd = vault zonder de mk-args van mk-tekst.js. Terugrollen naar een oudere commit
+# blijft kunnen: dat bestand gaat dan gewoon niet mee.
 # Optioneel: gaat mee als het in de commit staat; een oudere commit zonder dit bestand blijft uitrolbaar (terugrollen).
 # bank-lezer.js (wv680): alleen-lezen bankluis, aangeroepen door server.js (/smal/bank, /bank/terug).
 # bunq-lezer.js (wv683): bunq-bron van de bankluis, door bank-lezer.js geladen (ontbreekt hij, dan alleen Enable Banking).

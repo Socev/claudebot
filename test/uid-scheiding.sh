@@ -43,6 +43,7 @@ docker run --rm -v "$VOL":/opt/data --entrypoint /bin/bash "$IMAGE" -c '
   echo "console.log(1)" > AI_SecondBrain/00_Systeem/Lessen/les-vastleggen.mjs
   echo "gdrive:AI_SecondBrain" > AI_SecondBrain/.sync-id
   echo "inhoud" > AI_SecondBrain/00_Systeem/a.md; echo "persona" > AI_SecondBrain/CLAUDE.md
+  echo "conventies" > AI_SecondBrain/AGENTS.md; echo "genest" > AI_SecondBrain/00_Systeem/CLAUDE.md
   echo "uitvoer machinekamer" > io/mkjob/out/r.txt
   echo "ronde ok" > bin/bisync.log; printf "#!/bin/sh\necho olares\n" > bin/olares-cli; chmod 755 bin/olares-cli
   echo "geheugen" > .claude/projects/-opt-data-AI-SecondBrain/memory/m.md
@@ -136,7 +137,10 @@ niet "script in de vault (les-vastleggen.mjs) wijzigen"      "$(s "echo x >> $V/
 ok   "script in de vault lezen"                              "$(s "cat $V/00_Systeem/Lessen/les-vastleggen.mjs")"
 ok   "DEKT NIET: script verwijderen en opnieuw schrijven lukt (map is rwX; signaal in het log, geen slot; fase 2: scripts verhuizen)" "$(s "cp $V/00_Systeem/Lessen/les-vastleggen.mjs /tmp/l.mjs && rm -f $V/00_Systeem/Lessen/les-vastleggen.mjs && cp /tmp/l.mjs $V/00_Systeem/Lessen/les-vastleggen.mjs")"
 niet "CLAUDE.md in de wortel verwijderen"                    "$(s "rm -f $V/CLAUDE.md; [ ! -e $V/CLAUDE.md ]")"
-ok   "CLAUDE.md in de wortel bewerken (in place)"            "$(s "echo socev >> $V/CLAUDE.md")"
+niet "CLAUDE.md in de wortel bewerken (wv1021: alleen lezen)" "$(s "echo socev >> $V/CLAUDE.md")"
+niet "AGENTS.md in de wortel bewerken (wv1021)"              "$(s "echo socev >> $V/AGENTS.md")"
+ok   "CLAUDE.md en AGENTS.md in de wortel lezen"             "$(s "grep -q persona $V/CLAUDE.md && grep -q conventies $V/AGENTS.md")"
+ok   "geneste CLAUDE.md (00_Systeem) blijft bewerkbaar: alleen de wortel" "$(s "echo socev >> $V/00_Systeem/CLAUDE.md")"
 ok   "nieuw bestand in 00_Systeem"                           "$(s "echo nieuw > $V/00_Systeem/socev.md")"
 ok   "bestaand bestand in 00_Systeem wijzigen"               "$(s "echo erbij >> $V/00_Systeem/a.md")"
 ok   "submap + bestand maken"                                "$(s "mkdir -p $V/00_Systeem/sub && echo y > $V/00_Systeem/sub/f.md")"
@@ -161,9 +165,12 @@ ok   "1002 zet Windows-code, bytecode en een zip in de vault (wv785)" "$(s "echo
 ok   "1002 probeert de uitzondering: x.socev-geblokkeerd-9.ps1, map *.socev-geblokkeerd-1/ met .bat, en een .js" "$(s "echo x > $V/00_Systeem/x.socev-geblokkeerd-9.ps1 && mkdir -p $V/00_Systeem/m.socev-geblokkeerd-1 && echo x > $V/00_Systeem/m.socev-geblokkeerd-1/y.bat && echo x > $V/00_Systeem/z.js")"
 ok   "geleend eigendom — 1002 vult een bestand van 1001 en hernoemt het naar .ps1 (kan; het syncfilter houdt het van Drive, wv813)" "$(a "echo leen > $V/00_Systeem/leen.md") && $(s "echo 'Write-Host x' > $V/00_Systeem/leen.md && mv $V/00_Systeem/leen.md $V/00_Systeem/geleend.ps1")"
 ok   "DEKT NIET: 1002 hernoemt __pycache__ van 1001 weg en zet een eigen neer (map is rwX)" "$(s "mv $V/00_Systeem/py/__pycache__ $V/00_Systeem/py/pyc-weg && mkdir $V/00_Systeem/py/__pycache__ && echo vals > $V/00_Systeem/py/__pycache__/m.cpython-311.pyc")"
+ok   "1001 vervangt CLAUDE.md in de wortel met tmp + rename (nieuw inode erft de standaard-ACL)" "$(a "umask 077; echo persona2 > $V/.CLAUDE.md.tmp && mv $V/.CLAUDE.md.tmp $V/CLAUDE.md")"
 ok   "na-ronde (als 1001)"                                   "$(a "bash /app/socev-rechten.sh na-ronde > /tmp/na-ronde.log 2>&1")"
 r 'cat /tmp/na-ronde.log' | sed 's/^/    | /' | head -20
 ok   "  1002 kan cp -p-bestand na maskerherstel wijzigen"    "$(s "echo s >> $V/00_Systeem/cpp.md")"
+niet "  1002 bewerkt de vervangen CLAUDE.md na de na-ronde (wv1021)" "$(s "echo socev >> $V/CLAUDE.md")"
+ok   "  1002 leest de vervangen CLAUDE.md"                   "$(s "grep -q persona2 $V/CLAUDE.md")"
 ok   "  symlinks niet gevolgd: .claude.json en mk-scripts zonder socev-ACL" "$(a "! getfacl -cp /opt/data/.claude.json /opt/data/mk-scripts 2>/dev/null | grep -q socev")"
 niet "  1002 leest .claude.json via de symlink"              "$(s "cat $V/00_Systeem/naar-claude-json")"
 ok   "  .claude van socev in de submap hernoemd"             "$(a "[ ! -e $V/00_Systeem/.claude ] && ls -d $V/00_Systeem/.claude.socev-geblokkeerd-*")"

@@ -16,6 +16,7 @@
 #   /opt/data               alleen doorlopen (0711), niet opsommen; alle andere entries o-rwx
 #   AI_SecondBrain          lezen en schrijven (ACL u:socev:rwX + standaard-ACL u:socev,u:claude), MAAR:
 #     - de vault-wortel zelf alleen r-x: geen .mcp.json, .codex of nieuwe .claude ernaast, .claude niet weg te hernoemen
+#     - CLAUDE.md en AGENTS.md in de wortel alleen lezen (wv1021): Socevs werkinstructie wijzigt alleen via de machinekamer
 #     - code-plekken op elke diepte alleen r-X: .claude/, .obsidian/, .codex/, .vscode/, .mcp.json, .sync-id en scripts
 #       (*.js, *.mjs, *.py, *.sh …) (Fable wv689 #1 en wv699 #3/#4: code en hookconfig die de machinekamer draait,
 #       Obsidian-plug-ins die op Davids pc draaien); wat socev zelf zo noemt krijgt een andere naam
@@ -59,11 +60,13 @@ WINCODE=( -o -iname '*.ps1' -o -iname '*.psm1' -o -iname '*.psd1' -o -iname '*.c
 # Code-plekken: wat 1001 (machinekamer) of Davids pc als code of config uitvoert. Op elke diepte (Fable wv699 #3:
 # 10_Zakelijk/.../huisbot/.claude), plus losse scripts (Fable wv699 #4) en sinds wv785 Python-bytecode en -pakketten
 # (sys.path) en Windows-code. Voor socev alleen lezen. *.ts hoofdlettergevoelig: *.TS is meestal video.
+# Sinds wv1021 ook de werkinstructie in de wortel (CLAUDE.md, AGENTS.md; alleen de wortel, die is r-x voor socev, dus geen
+# hernoemen-erin): Socev kan zijn eigen werkinstructie niet blijvend wijzigen vanuit een misleid gesprek (ontwerp wv1001 § 3d).
 CODEPLEK=( -path '*/.claude' -o -path '*/.claude/*' -o -path '*/.obsidian' -o -path '*/.obsidian/*' -o -name .mcp.json
   -o -path '*/.codex' -o -path '*/.codex/*' -o -path '*/.vscode' -o -path '*/.vscode/*' -o -name .sync-id
   -o -iname '*.js' -o -iname '*.mjs' -o -iname '*.cjs' -o -name '*.ts' -o -iname '*.py' -o -iname '*.sh' -o -iname '*.bash'
   -o -path '*/__pycache__' -o -path '*/__pycache__/*' -o -iname '*.pyc' -o -iname '*.pyo' -o -iname '*.zip' -o -iname '*.whl'
-  -o -iname '*.egg' "${WINCODE[@]}" )
+  -o -iname '*.egg' "${WINCODE[@]}" -o -path "$V/CLAUDE.md" -o -path "$V/AGENTS.md" )
 # Alle rondes met -execdir: find houdt de map vast en geeft ./naam door, zodat een map die socev tussendoor door een
 # symlink vervangt de wijziging niet buiten de vault kan laten landen (Fable wv699 #1; xargs met volle paden kon dat wel).
 # vault_acl <acl> [extra find-voorwaarden]: eigen bestanden en mappen buiten de code-plekken.
