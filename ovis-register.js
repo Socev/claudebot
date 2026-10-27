@@ -330,7 +330,7 @@ function huidigBlok(tekst) {
 // ── Bibliothecaris: de checks (pure functie over pagina's en register) ──
 function kortHash(s) { return crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 8); }
 function schoon(s, n) { s = String(s == null ? '' : s).replace(/[\r\n`|]/g, ' ').slice(0, n || 300); return SLEUTEL_RE.test(s) ? '(weggelaten: leek op een sleutel)' : s; }
-function checks(paginas, reg, compileerFouten) {
+function checks(paginas, reg, compileerFouten, pot) {
   const b = [], tel = { paginas: paginas.length, geldig: 0, verouderd: 0, niet_getoetst: 0, wacht_op_ja: 0 };
   const knopen = {}; (reg.knopen || []).forEach(function (k) { knopen[k.id] = k; });
   const hv = {}; (reg.handvatten || []).forEach(function (h) { (hv[h.knoop] = hv[h.knoop] || []).push(h); });
@@ -368,6 +368,7 @@ function checks(paginas, reg, compileerFouten) {
       if (m) { if (!knopen[m[1]] || m[1] !== id) bev('BB1', id + '-' + kortHash(s), 'sleutel op de pagina van ' + id + ' wijst niet naar zijn rij', p.pad + ': ' + s + '. Voorstel: sleutel weghalen of rij aanmaken.'); return; }
       m = /^supabase:secondbrain\/knoop_vertaling#(.+)$/.exec(s);
       if (m) { const ids = vert[m[1]]; if (!ids || ids.indexOf(id) < 0) bev('BB1', id + '-' + kortHash(s), 'vertaalsleutel op de pagina van ' + id + ' bestaat niet', p.pad + ': ' + s + '. Voorstel: vertaling laden (laad.py) of sleutel weghalen.'); return; }
+      if (POT_SLEUTEL_RE.test(s)) return;   // wv981: plek 4, getoetst in potChecks (ook op een pagina die nog niet gecompileerd is)
       tel.niet_getoetst++;
     });
     if (k.bron_sha !== p.sha) return;   // verouderd: de vergelijking hieronder pas na de volgende compilatie
@@ -441,8 +442,139 @@ function checks(paginas, reg, compileerFouten) {
   (compileerFouten || []).forEach(function (cf) {
     if (/^databank: /.test(cf.fout)) bev('BB6', 'compileer-' + kortHash(cf.pad), 'pagina niet gecompileerd: ' + String(cf.fout).slice(10, 120), cf.pad + ': ' + cf.fout + '. Voorstel: pagina herstellen (Socev) of de machinekamer laat de databankfunctie nalopen.');
   });
+  const pc = potChecks(anker, pot, bev, tel);   // wv981
   const uniek = {}; b.forEach(function (x) { uniek[x.bevinding_id] = x; });
-  return { bevindingen: Object.keys(uniek).sort().map(function (k) { return uniek[k]; }), tel: tel };
+  return { bevindingen: Object.keys(uniek).sort().map(function (k) { return uniek[k]; }), tel: tel, pot: pc };
+}
+
+// ── wv981: koppelregel plek 4 (POT in D1 fin; architectuur § 4 rij 4; ontwerp + Fable vooraf mk-scripts/wv981/ontwerp.md) ──
+// De stampagina van de ontvangende praktijk is de bron van het factuuradres (contact.factuuradres, kritiek veld) en noemt haar POT-praktijk
+// met ovis.db "cloudflare:d1-fin/praktijk#Pxx". De Bibliothecaris legt dat naast wat de POT-verzender gebruikt: het adres dat David in de
+// POT-app bevestigde (praktijk.email), de dossierpagina die pot-verzend.js nu leest (facturen_aan, zelfde parser) en elke open nota met
+// een adres. Alleen lezen: dit raakt de verzender niet, en niets hier maakt een adres actief of bevestigd. Een kant die niet te meten is,
+// is "niet gemeten", nooit een verschil (Fable #1). P9x zijn proefpraktijken en tellen nergens mee.
+const POT_SLEUTEL_RE = /^cloudflare:d1-fin\/praktijk#(P\d{2})$/, POT_PROEF_RE = /^P9\d$/;
+const POT_OPEN = ['wacht_op_adres', 'concept', 'auto_gevraagd', 'auto_vrij', 'verzenden', 'onzeker'];
+// Alleen deze twee SELECT's; potMeting weigert alles wat geen SELECT is (Fable #4: het D1-eindpunt kan ook schrijven)
+const POT_SQL = [
+  { sql: 'select id, naam, naam_brief, email from praktijk order by id', params: [] },
+  { sql: 'select id, nummer, praktijk_id, status, aan, cc from nota_verzending where status in (' + POT_OPEN.map(function (x) { return "'" + x + "'"; }).join(',') + ') order by id', params: [] },
+];
+// io: { d1(batch) → [{ results }], dossier() → { per, problemen } (pot-verzend.ontvangers over de dossierpagina's) } → meting of { fout }
+async function potMeting(io) {
+  try {
+    if (!io || typeof io.d1 !== 'function' || typeof io.dossier !== 'function') return { fout: 'geen POT-lezer' };
+    if (POT_SQL.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return { fout: 'alleen lezen' };
+    const r = await io.d1(POT_SQL.map(function (q) { return { sql: q.sql, params: q.params.slice() }; }));
+    if (!Array.isArray(r) || r.length !== 2 || !r.every(function (x) { return x && Array.isArray(x.results); })) return { fout: 'D1 gaf geen resultaat' };
+    if (!r[0].results.length) return { fout: 'D1 gaf geen praktijken' };   // diffreview #2: leeg is niet gemeten (anders alles BB1 en alles "opgelost")
+    const d = io.dossier();
+    if (!d || typeof d.per !== 'object' || typeof d.problemen !== 'object') return { fout: 'dossierpagina\'s niet te lezen' };
+    return { praktijken: r[0].results, open: r[1].results, dossier: d };
+  } catch (e) { return { fout: String(e && e.message || e).replace(/\d{6,}/g, '#').slice(0, 120) }; }
+}
+// zelfde normalisatie als pot-verzend.adresNorm (kleine letters, gesplitst op komma/puntkomma/spatie, volgorde blijft), zodat de
+// Bibliothecaris en de verzender hetzelfde "gelijk" kennen (diffreview #5)
+function potAdressen(x) {
+  return (Array.isArray(x) ? x : [x]).join(',').split(/[,;\s]+/).map(function (a) { return a.trim().toLowerCase(); }).filter(Boolean);
+}
+function potGelijk(a, b) { return a.join(',') === b.join(','); }
+// → { gemeten, verschillen: [{ knoop, naam, px, stam, app, dossier, nota: [{ nummer, status, aan }], wacht_op_adres }] } (adressen alleen
+// hier, voor de kaart; nooit in bevinding of box, Fable wv979 #10)
+function potChecks(anker, pot, bev, tel) {
+  const claims = {};
+  Object.keys(anker).forEach(function (id) {
+    (anker[id].db || []).forEach(function (s) { const m = POT_SLEUTEL_RE.exec(s); if (m && !POT_PROEF_RE.test(m[1]) && (claims[m[1]] = claims[m[1]] || []).indexOf(id) < 0) claims[m[1]].push(id); });
+  });
+  if (!pot || pot.fout) { tel.pot = 'niet gemeten'; return { gemeten: false, reden: pot ? pot.fout : 'geen POT-lezer', verschillen: [] }; }
+  const prak = {}; (pot.praktijken || []).forEach(function (r) { prak[r.id] = r; });
+  const uit = { gemeten: true, verschillen: [] };
+  tel.pot = 0; tel.pot_verschil = 0;
+  Object.keys(claims).sort().forEach(function (px) {
+    const ids = claims[px];
+    if (ids.length > 1) { bev('BB5', 'pot-' + px + '-twee', 'POT-praktijk ' + px + ' staat op twee stampagina\'s', ids.join(' en ') + ' noemen allebei cloudflare:d1-fin/praktijk#' + px + '. Voorstel: de sleutel alleen laten staan op de pagina van de praktijk zelf.'); return; }
+    const id = ids[0], p = anker[id];
+    if (!prak[px]) { bev('BB1', id + '-pot-' + px, 'pagina van ' + id + ' verwijst naar een POT-praktijk die de POT-app niet kent', p.pad + ': cloudflare:d1-fin/praktijk#' + px + '. Voorstel: sleutel weghalen of de juiste praktijkcode zetten.'); return; }
+    tel.pot++;
+    const stam = potAdressen(p.contact.filter(function (c) { return c.veld === 'factuuradres'; }).map(function (c) { return c.waarde; }));
+    const app = potAdressen(prak[px].email || '');
+    const dd = pot.dossier.per[px], dp = pot.dossier.problemen[px];
+    const dossier = dd ? potAdressen(dd.aan) : [];
+    const nota = (pot.open || []).filter(function (r) { return r.praktijk_id === px; });
+    const kanten = [];
+    if (!potGelijk(stam, app)) kanten.push('het adres dat David in de POT-app bevestigde');
+    if (dp && /onleesbaar|twee pagina/.test(dp)) kanten.push('de dossierpagina (' + (/twee/.test(dp) ? 'twee pagina\'s geven een ander adres' : 'adres onleesbaar') + ')');
+    else if (!potGelijk(stam, dossier)) kanten.push('de dossierpagina die de verzender leest');
+    const notaAnders = nota.filter(function (r) { return r.aan && !potGelijk(stam, potAdressen(r.aan)); });   // een rij zonder adres (geen_adres) vergelijkt niets
+    if (notaAnders.length) kanten.push(notaAnders.length + ' open nota(\'s) (' + Array.from(new Set(notaAnders.map(function (r) { return r.status; }))).join(', ') + ')');
+    const cc = (dd && dd.cc && dd.cc.length) || nota.some(function (r) { return potAdressen(r.cc || '').length; });
+    if (cc) bev('BB3', id + '-pot-cc-' + px, 'cc op de factuur van ' + px + ' staat nog niet op de stampagina', 'de dossierpagina of een open nota gebruikt een cc; de stampagina kent (nog) geen cc-veld. Voorstel: laten staan tot fase 2 (verzender leest de stampagina), dan een cc-veld toevoegen.');
+    if (!kanten.length) return;
+    tel.pot_verschil++;
+    bev('BB3', id + '-pot-factuuradres-' + px, 'factuuradres van ' + (p.naam || id) + ' (' + px + ') verschilt tussen stampagina en POT-verzender (kritiek)',
+      p.pad + ': stampagina (bron, veldkaart plek 4) ≠ ' + kanten.join('; ') + (stam.length ? '' : '; de stampagina heeft geen factuuradres') + '. Adressen niet in deze melding. Voorstel: David zegt welk adres klopt; Socev zet de stampagina en de dossierpagina gelijk; de POT-app vraagt bij de volgende nota zelf om bevestiging.', 'serious');
+    uit.verschillen.push({ knoop: id, naam: p.naam || id, px: px, stam: stam, app: app, dossier: dd ? dossier : null, dossier_probleem: dp || null,
+      nota: notaAnders.map(function (r) { return { nummer: r.nummer, status: r.status, aan: potAdressen(r.aan) }; }),
+      wacht_op_adres: nota.some(function (r) { return r.status === 'wacht_op_adres'; }) });
+  });
+  (pot.praktijken || []).forEach(function (r) {
+    if (!POT_PROEF_RE.test(r.id) && !claims[r.id]) bev('BB2', 'pot-' + r.id + '-geen-pagina', 'POT-praktijk ' + r.id + ' heeft geen stampagina die naar hem verwijst', 'D1 fin.praktijk ' + r.id + ' (' + schoon(r.naam_brief || r.naam || '', 60) + '). Voorstel: de sleutel cloudflare:d1-fin/praktijk#' + r.id + ' op de stampagina van die praktijk zetten.');
+  });
+  return uit;
+}
+// Bevindingen van plek 4 (om ze niet "opgelost" te noemen als de POT-kant niet gemeten is, Fable #1)
+const POT_BEVINDING_RE = /^BB\d-(pot-P\d{2}-|.+-pot-(factuuradres-|cc-)?P\d{2}$)/;
+
+// De kaart bij een kritiek verschil (Fable #2, #3, #6, #9, #11): één Voor jou-kaart per stampagina, sleutel = stampagina + de adressen
+// zelf (zelfde situatie = zelfde kaart, Davids "gedaan" blijft staan), geen kaart zolang pot-verzend voor die praktijk al een adreskaart
+// heeft (nota in wacht_op_adres), dicht alleen als de POT-kant gemeten is en het verschil weg is. Buiten de ovis_kaart-machinerie:
+// geen haak, geen knop die iets vastzet; herkomst handmatig bibliothecaris (nooit module intake of een sleutel die met pot- begint).
+function potLijst(l) { return l && l.length ? l.join(', ') : 'leeg'; }
+function kaartPot(meting, stand, nuKort) {
+  const uit = { zet: [], dicht: [] };
+  if (!meting || !meting.gemeten) return uit;
+  const open = function (s) { return stand[s] === 'open' || stand[s] === 'later'; };
+  const per = {};
+  meting.verschillen.forEach(function (v) { (per[v.knoop] = per[v.knoop] || []).push(v); });
+  const nodig = new Set(), overgenomen = new Set();
+  Object.keys(per).sort().forEach(function (id) {
+    const vv = per[id];
+    if (vv.some(function (v) { return v.wacht_op_adres; })) { overgenomen.add(slugKort(id)); return; }   // pot-verzend heeft al een adreskaart (Fable #2)
+    // diffreview #3: de nota's niet in de sleutel (een statusovergang is geen nieuwe situatie)
+    const sleutel = 'ovis-pot-adres-' + slugKort(id) + '-' + fnv6(JSON.stringify(vv.map(function (v) { return [v.px, v.stam, v.app, v.dossier, v.dossier_probleem]; })));
+    nodig.add(sleutel);
+    if (stand[sleutel]) return;   // staat er al (open), of David zette hem dicht: niet opnieuw
+    const naam = kort(vv[0].naam, 50), v0 = vv[0], pxs = vv.map(function (v) { return v.px; });
+    // houdt de verzender deze praktijk nu al tegen? (pot-verzend eist praktijkpagina == POT-app == adres van de nota)
+    const geblokkeerd = vv.some(function (v) { return !v.dossier || !v.app.length || !potGelijk(v.dossier, v.app); });
+    const alleenNota = !geblokkeerd && vv.every(function (v) { return potGelijk(v.stam, v.app); });   // stamkaart = pagina = POT-app; alleen een open nota wijkt af
+    const stappen = ['Zeg tegen Socev welk adres klopt, bijvoorbeeld: "factuuradres ' + kort(naam, 40) + ' is …". Socev zet de Second Brain dan op één adres.'];
+    if (vv.some(function (v) { return !potGelijk(v.stam, v.app); })) stappen.push('Het adres in de POT-app hoef je nu niet aan te passen: bij de volgende nota vraagt de POT-app je het adres te bevestigen.');
+    vv.forEach(function (v) { v.nota.forEach(function (n) {
+      if (n.status === 'concept') stappen.push('Nota ' + n.nummer + ' staat als concept in Gmail met ' + potLijst(n.aan) + '. Klopt dat niet: gooi het concept weg en zet de nota in de POT-app opnieuw klaar.');
+      else if (n.status === 'auto_gevraagd' || n.status === 'auto_vrij') stappen.push('Nota ' + n.nummer + ' staat klaar om vanzelf te gaan. Met een ander adres gaat hij niet vanzelf; op de verzenddag wordt het een concept dat je zelf nakijkt.');
+      else stappen.push('Nota ' + n.nummer + ' (' + n.status + ') heeft ' + potLijst(n.aan) + '; kijk in de POT-app of dat klopt.');
+    }); });
+    stappen.push('Deze kaart gaat de ochtend nadat het overal gelijk is vanzelf dicht.');
+    const meting_ = vv.map(function (v) { return v.px + ': Second Brain ' + potLijst(v.stam) + '; POT-app ' + potLijst(v.app) + (v.dossier_probleem && !v.dossier ? '; praktijkpagina ' + kort(v.dossier_probleem, 60) : v.dossier && !potGelijk(v.dossier, v.stam) ? '; praktijkpagina ' + potLijst(v.dossier) : ''); }).join(' · ');
+    uit.zet.push({ sleutel: sleutel, soort: 'doen', volgorde: 22, waar: 'overal', prive: true, duur_min: 3,
+      titel: kort(naam + ' — factuuradres gelijktrekken', KAART_TITEL),
+      herkomst: { handmatig: 'bibliothecaris', soort: 'pot-adres', knoop: id, praktijken: pxs },
+      waarom: kort('Het factuuradres van ' + naam + ' staat niet overal hetzelfde. Naar dat adres gaan de POT-nota\'s (SLOEL soms vanzelf). ' +
+        (geblokkeerd ? 'Zolang de praktijkpagina en de POT-app verschillen, zet Socev voor deze praktijk geen nota klaar en gaat er niets vanzelf.'
+          : alleenNota ? 'Een nota die al klaarstaat heeft nog een ander adres dan de Second Brain.'
+            : 'Nota\'s gaan nu nog naar ' + potLijst(v0.app) + ' (praktijkpagina en POT-app); de stamkaart in de Second Brain zegt iets anders.') + ' De Second Brain is de bron.', KAART_WAAROM),
+      stappen: stappen.slice(0, KAART_STAPPEN).map(function (x) { return kort(x, 400); }),
+      meting: kort(nuKort + ': ' + meting_, 300) });
+  });
+  Object.keys(stand).forEach(function (s) {
+    if (!/^ovis-pot-adres-/.test(s) || !open(s) || nodig.has(s)) return;
+    const slug = s.replace(/^ovis-pot-adres-/, '').replace(/-[0-9a-f]{6}$/, '');   // diffreview #4: het bewijs zegt waarom hij dichtgaat
+    const nieuwe = Array.from(nodig).some(function (n) { return n.indexOf('ovis-pot-adres-' + slug + '-') === 0; });
+    uit.dicht.push({ sleutel: s, van: stand[s], bewijs: nuKort + ': ' + (overgenomen.has(slug) ? 'er wacht nu een nota op het adres; de kaart van de POT-app neemt het over.'
+      : nieuwe ? 'de adressen zijn veranderd; er staat een nieuwe kaart.' : 'de Bibliothecaris ziet dit verschil niet meer (factuuradres overal gelijk).') });
+  });
+  return uit;
 }
 
 // ── Kaarten in Overzicht (wv1253; ontwerp + Fable-review vooraf: mk-scripts/wv1253/ontwerp.md) ──
@@ -629,12 +761,18 @@ function kaartBiblio(reg, o) {
   function naamUit(bid) { const rest = bid.replace(/^BB\d-/, ''); const k = knopen.find(function (x) { return rest === x.id || rest.indexOf(x.id + '-') === 0; }); return k ? kort(k.naam, 50) : null; }
   const kandidaten = (reg.bevindingen || []).filter(function (b) {
     if (!/^BB[1235678]$/.test(b.check_id) || (b.check_id === 'BB3' && b.ernst === 'serious')) return false;
-    if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart
+    if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart; wv981: pot-cc wacht op fase 2
     return !geh.open.has('structuur_state#' + b.bevinding_id) && !geh.rust.has('structuur_state#' + b.bevinding_id + '#');
   }).slice(0, KAART_STAPPEN);
   if (!kandidaten.length) return { reden: 'geen open verschillen' };
   const stappen = kandidaten.map(function (b, i) {
     const nm = naamUit(b.bevinding_id) || 'een pagina in het register', nr = i + 1;
+    const px = /pot-(P\d{2})/.exec(b.bevinding_id);
+    if (px && POT_BEVINDING_RE.test(b.bevinding_id)) {   // wv981: plek 4
+      if (b.check_id === 'BB2') return nr + '. POT-praktijk ' + px[1] + ' is nog aan geen pagina in het register gekoppeld. Ik zet de verwijzing op de pagina van die praktijk.';
+      if (b.check_id === 'BB5') return nr + '. Twee pagina\'s noemen POT-praktijk ' + px[1] + '. Ik laat de verwijzing alleen staan op de pagina van de praktijk zelf.';
+      if (b.check_id === 'BB1') return nr + '. ' + nm + ': verwijst naar een POT-praktijk (' + px[1] + ') die de POT-app niet kent. Ik haal de verwijzing weg.';
+    }
     const z = { BB1: nm + ': de verwijzing naar het register op de pagina klopt niet. Ik zet hem goed.',
       BB2: /-verhuisd$/.test(b.bevinding_id) ? nm + ': de pagina is verplaatst. Ik zet het register op de nieuwe plek.' : nm + ': staat in het register maar heeft geen pagina. Ik maak een conceptpagina.',
       BB3: nm + ': pagina en register lopen uiteen. Ik werk het register bij en zoek uit waarom.',
@@ -835,7 +973,8 @@ function maak(o) {
     const c = await compileer('afroep', { droog: !!opties.droog });   // diffreview #1: eerst bijwerken (alleen databank), fouten worden BB6
     const reg = await register(opties.sinds || new Date(nu() - 36 * 3600000).toISOString());
     const paginas = leesAlles();
-    const r = checks(paginas, reg, c.fouten);
+    const pot = o.pot ? await potMeting(o.pot) : null;   // wv981: plek 4 (alleen lezen); o.pot = { d1(batch), dossier() }
+    const r = checks(paginas, reg, c.fouten, pot);
     const open = {}; (reg.bevindingen || []).forEach(function (x) { open[x.bevinding_id] = x; });
     const nu_ = new Date(nu()).toISOString();
     const rijen = [], nieuw = [];
@@ -845,13 +984,15 @@ function maak(o) {
     });
     const gezien = new Set(r.bevindingen.map(function (x) { return x.bevinding_id; }));
     // BB7-spoor blijft open tot iemand hem afhandelt: het logvenster schuift door, de wijziging is niet weg (Fable wv979 #8)
-    const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor-\d{8}$/.test(id); });
+    // wv981 (Fable #1): niet gemeten is niet opgelost — zonder POT-meting blijven de bevindingen van plek 4 open
+    const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor-\d{8}$/.test(id) && (r.pot.gemeten || !POT_BEVINDING_RE.test(id)); });
     opgelost.forEach(function (id) { rijen.push({ bevinding_id: id, status: 'opgelost', laatst_gezien: nu_, detail_erbij: ' | ' + nu_.slice(0, 10) + ': niet meer gezien door de Bibliothecaris' }); });
     if (!opties.droog) for (let i = 0; i < rijen.length; i += 100) await o.sbRpc('ovis_bibliothecaris_zet', { p_rijen: rijen.slice(i, i + 100) });
     const onverklaard = r.bevindingen.length;
     const zin = onverklaard ? onverklaard + ' verschil(len) tussen pagina\'s en register (' + nieuw.length + ' nieuw, ' + opgelost.length + ' opgelost)'
       : 'register en pagina\'s gelijk (' + r.tel.geldig + ' pagina\'s' + (r.tel.verouderd ? ', ' + r.tel.verouderd + ' nog niet gecompileerd' : '') + (r.tel.wacht_op_ja ? ', ' + r.tel.wacht_op_ja + (r.tel.wacht_op_ja === 1 ? ' kenmerk wacht' : ' kenmerken wachten') + ' op Davids Ja' : '') + ')';
-    const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin, tel: r.tel, open: onverklaard, nieuw: nieuw.length, opgelost: opgelost.length,
+    const potZin = r.pot.gemeten ? '; POT-factuuradressen: ' + r.tel.pot + ' praktijk(en) gemeten, ' + r.tel.pot_verschil + ' met een verschil' : '; POT-factuuradressen niet gemeten (' + schoon(r.pot.reden || '?', 80) + ')';
+    const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin + potZin, tel: r.tel, pot: r.pot, open: onverklaard, nieuw: nieuw.length, opgelost: opgelost.length,
       per_check: r.bevindingen.reduce(function (a, x) { a[x.check_id] = (a[x.check_id] || 0) + 1; return a; }, {}), bevindingen: r.bevindingen, nieuwe: nieuw };
     if (!opties.droog && !opties.afroep) {
       await o.sbRpc('mk_hartslag_stempel', { p_component: 'bibliothecaris', p_gemeten_rijen: r.tel.paginas, p_bevindingen: onverklaard });
@@ -913,5 +1054,6 @@ module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina, f
   rekeningRegel: rekeningRegel, rekeningenPerDoel: rekeningenPerDoel, mdwBlokTekst: mdwBlokTekst, REK_KOP: REK_KOP,
   zetBlok: zetBlok, huidigBlok: huidigBlok, rpcInvoer: rpcInvoer, handvattenVan: handvattenVan, normHandvat: normHandvat, boxRij: boxRij, slug: slug,
   BLOK_BEGIN: BLOK_BEGIN, BLOK_EIND: BLOK_EIND, SCHRIJVERS_OK: SCHRIJVERS_OK,
+  potMeting: potMeting, potChecks: potChecks, kaartPot: kaartPot, POT_SQL: POT_SQL, POT_BEVINDING_RE: POT_BEVINDING_RE,
   plan: plan, kaartBundel: kaartBundel, kaartenKritiek: kaartenKritiek, kaartBiblio: kaartBiblio, eruitUit: eruitUit, uitkomstZin: uitkomstZin, isoWeek: isoWeek,
   KAART_SLEUTEL_RE: /^intake-(handvat|kritiek|biblio)-[a-z0-9]+(-[a-z0-9]+)*$/ };

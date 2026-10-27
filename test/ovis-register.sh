@@ -6,6 +6,7 @@
 # nep-databank (alleen gewijzigde pagina's; tweede pagina met hetzelfde id telt niet; nacht zonder grendel schrijft geen blok; blok
 # idempotent; pagina die tijdens de ronde verandert krijgt geen blok), Bibliothecaris BB1-BB7 met vaste gegevens (en BB5 niet bij
 # niet-dezelfde-als), opgelost/BB7-spoor blijft, afroep stempelt niet, droog schrijft niets, boxRij zonder contactwaarden.
+# wv981 (blok 8): plek 4 POT-factuuradres — vergelijking stampagina ⇄ POT-app/dossier/open nota, BB1/BB2/BB5, niet gemeten ≠ opgelost, kaart.
 # Raakt niets buiten een wegwerpmap. Gebruik: bash test/ovis-register.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -471,6 +472,117 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     h = H.ovisKnopHaak(kaartP, 'alleen 2'); h.naStart('anders', false, {}, 'knop-anders', 'abcd1234');
     toets('7 haak: Anders "alleen 2" → eruit null (niets vast)', hk.rpc[1][1].p.eruit === null);
     console.log('       (herkansing: 30 s wachten wordt niet getoetst; alleen de eerste poging)');
+  }
+  // ── 8. plek 4: POT-factuuradres (wv981; Fable vooraf mk-scripts/wv981/ontwerp.md) — verzonnen praktijken en adressen ──
+  {
+    const org = (slug, adr, pxs) => ['---', 'type: entiteit', 'entiteit_id: org:' + slug, 'soort: praktijk', 'status: concept', 'naam: "Praktijk ' + slug + '"',
+      'aliases: []', 'domeinen: []', 'voor: [SLOEL]', adr ? 'contact:\n  factuuradres: ' + adr : 'contact: {}', 'ovis:',
+      '  db: ["supabase:secondbrain/knoop#org:' + slug + '"' + pxs.map((p) => ', "cloudflare:d1-fin/praktijk#' + p + '"').join('') + ']', 'updated: 2026-10-27', '---', '# P', ''].join('\n');
+    const pad = (slug) => '10_Zakelijk/_Gedeeld/Relaties/Praktijk ' + slug + '.md';
+    const pg = (slug, adr, pxs) => { const p = R.leesPagina(pad(slug), org(slug, adr, pxs)); return p; };
+    const reg = (ids) => ({ knopen: ids.map((id) => ({ id: 'org:' + id, soort: 'organisatie', naam: 'Praktijk ' + id, vault_pagina: pad(id), concept: true, laatst_door: 'compiler', bron_sha: pg(id, null, []).sha })), handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [] });
+    const PR = [{ id: 'P01', naam: 'A1', email: 'factuur@a.test' }, { id: 'P02', naam: 'A2', email: 'factuur@a.test' }, { id: 'P03', naam: 'A3', email: 'factuur@a.test' },
+      { id: 'P04', naam: 'B', email: 'Factuur@B.test' }, { id: 'P09', naam: 'C', email: null }, { id: 'P90', naam: 'Proef', email: 'proef@x.test' }];
+    const DOS = () => ({ per: { P01: { aan: ['factuur@a.test'], cc: [] }, P02: { aan: ['factuur@a.test'], cc: [] }, P03: { aan: ['factuur@a.test'], cc: [] }, P04: { aan: ['factuur@b.test'], cc: [] } },
+      problemen: { P09: 'op de pagina C staat nog geen factuuradres (veld facturen_aan)' } });
+    const basis = () => [pg('a', 'factuur@a.test', ['P01', 'P02', 'P03']), pg('b', 'factuur@b.test', ['P04']), pg('c', null, ['P09'])];
+    const pot = (o) => Object.assign({ praktijken: JSON.parse(JSON.stringify(PR)), open: [], dossier: DOS() }, o || {});
+    const C = (paginas, p) => R.checks(paginas, reg(['a', 'b', 'c', 'd']), [], p);
+    const potB = (r) => r.bevindingen.filter((b) => /pot-/.test(b.bevinding_id));
+    let r = C(basis(), pot());
+    toets('8 alles gelijk (ook hoofdletters, lege P09, P90 zonder pagina): 0 bevindingen, 5 praktijken gemeten', potB(r).length === 0 && r.tel.pot === 5 && r.tel.pot_verschil === 0 && r.pot.gemeten, [potB(r), r.tel]);
+    toets('8 de sleutel telt niet meer als niet getoetst', r.tel.niet_getoetst === 0, r.tel);
+    const p2 = pot(); p2.praktijken[1].email = 'nieuw@a.test';
+    r = C(basis(), p2);
+    toets('8 P02 anders in de POT-app: precies één kritieke BB3 (P02)', potB(r).length === 1 && potB(r)[0].bevinding_id === 'BB3-org:a-pot-factuuradres-P02' && potB(r)[0].ernst === 'serious', potB(r));
+    toets('8 geen adressen in bevinding (samenvatting en detail)', !/@/.test(JSON.stringify(r.bevindingen)), r.bevindingen);
+    toets('8 verschil voor de kaart draagt wél de adressen', r.pot.verschillen.length === 1 && r.pot.verschillen[0].app[0] === 'nieuw@a.test' && r.pot.verschillen[0].stam[0] === 'factuur@a.test', r.pot.verschillen);
+    r = C(basis().concat([pg('d', 'factuur@b.test', ['P04'])]), pot());
+    toets('8 twee stampagina\'s op P04: BB5, geen BB3', potB(r).length === 1 && potB(r)[0].check_id === 'BB5', potB(r));
+    r = C([pg('a', 'factuur@a.test', ['P01', 'P02', 'P03']), pg('c', null, ['P09'])], pot());
+    toets('8 POT-praktijk zonder stampagina: BB2 (P04), niet voor P90', potB(r).length === 1 && potB(r)[0].bevinding_id === 'BB2-pot-P04-geen-pagina', potB(r));
+    r = C(basis().concat([pg('d', 'x@d.test', ['P07'])]), pot());
+    toets('8 sleutel naar een onbekende praktijk: BB1', potB(r).some((b) => b.bevinding_id === 'BB1-org:d-pot-P07'), potB(r));
+    const pc = pot(); pc.dossier.per.P04.cc = ['boekhouding@b.test'];
+    r = C(basis(), pc);
+    toets('8 cc op de dossierpagina: waarschuwing, niet kritiek', potB(r).length === 1 && potB(r)[0].ernst === 'warning' && /pot-cc-P04/.test(potB(r)[0].bevinding_id), potB(r));
+    const pn = pot({ open: [{ id: 1, nummer: 'SL-0001', praktijk_id: 'P04', status: 'concept', aan: 'oud@b.test', cc: null }, { id: 2, nummer: 'SL-0002', praktijk_id: 'P90', status: 'concept', aan: 'iets@x.test' }] });
+    r = C(basis(), pn);
+    toets('8 open concept met een ander adres: kritiek, P90-nota telt niet', potB(r).length === 1 && /pot-factuuradres-P04/.test(potB(r)[0].bevinding_id) && r.pot.verschillen[0].nota.length === 1, [potB(r), r.pot.verschillen]);
+    const pd = pot(); delete pd.dossier.per.P04;
+    r = C(basis(), pd);
+    toets('8 dossierpagina zonder adres voor P04: verschil (de verzender zou niets sturen)', potB(r).length === 1 && /de dossierpagina/.test(potB(r)[0].detail), potB(r));
+    r = C(basis(), { fout: 'D1 http 503' });
+    toets('8 POT niet te lezen: geen bevindingen van plek 4, gemeten false', potB(r).length === 0 && r.pot.gemeten === false && r.tel.pot === 'niet gemeten', r.pot);
+    // potMeting: alleen de twee SELECT's, fouten worden { fout }
+    const gezien = [];
+    let m = await R.potMeting({ d1: async (b) => { gezien.push(...b.map((q) => q.sql)); return [{ results: PR }, { results: [] }]; }, dossier: DOS });
+    toets('8 potMeting: alleen SELECT, resultaat compleet', gezien.length === 2 && gezien.every((q) => /^select /i.test(q)) && m.praktijken.length === 6 && m.dossier.per.P01, gezien);
+    m = await R.potMeting({ d1: async () => { throw new Error('D1 http 500 1234567890'); }, dossier: DOS });
+    toets('8 potMeting: D1-fout → fout zonder lange cijferreeks', m.fout && !/1234567/.test(m.fout), m);
+    m = await R.potMeting({ d1: async () => [{ results: [] }, { results: [] }], dossier: () => { throw new Error('ENOENT'); } });
+    toets('8 potMeting: dossier niet te lezen → fout', !!m.fout, m);
+    toets('8 potMeting zonder lezer → fout', !!(await R.potMeting(null)).fout);
+    // Bibliothecaris: niet gemeten is niet opgelost (Fable #1)
+    { const v = wegwerpVault({ [pad('a')]: org('a', 'factuur@a.test', ['P01', 'P02', 'P03']), [pad('b')]: org('b', 'factuur@b.test', ['P04']), [pad('c')]: org('c', null, ['P09']) });
+      const n = nepDb({ knopen: [], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [] });
+      let potIo = { d1: async () => [{ results: p2.praktijken }, { results: [] }], dossier: DOS };
+      const mm = R.maak({ vault: v, sbRpc: n.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: () => {}, nu: () => Date.parse('2026-10-27T01:30:00Z'), get pot() { return potIo; } });
+      let b = await mm.bibliothecaris();
+      const id = 'BB3-org:a-pot-factuuradres-P02';
+      toets('8 biblio: verschil wordt een open bevinding', n.db.bevindingen.some((x) => x.bevinding_id === id && x.status === 'open') && /POT-factuuradressen: 5 praktijk/.test(b.zin), [n.db.bevindingen.map((x) => x.bevinding_id), b.zin]);
+      potIo = { d1: async () => { throw new Error('D1 http 503'); }, dossier: DOS };
+      b = await mm.bibliothecaris();
+      toets('8 biblio: D1 weg → bevinding blijft open, zin zegt niet gemeten', n.db.bevindingen.some((x) => x.bevinding_id === id && x.status === 'open') && b.opgelost === 0 && /niet gemeten/.test(b.zin), [b.opgelost, b.zin]);
+      potIo = { d1: async () => [{ results: PR }, { results: [] }], dossier: DOS };
+      b = await mm.bibliothecaris();
+      toets('8 biblio: gemeten en gelijk → opgelost', !n.db.bevindingen.some((x) => x.bevinding_id === id) && b.opgelost >= 1, [n.db.bevindingen.map((x) => x.bevinding_id), b.opgelost]);
+      fs.rmSync(v, { recursive: true, force: true });
+    }
+    // kaartPot
+    r = C(basis(), p2);
+    let k = R.kaartPot(r.pot, {}, '27-10 02:31');
+    const kp = k.zet[0];
+    toets('8 kaart: één, soort doen, prive, herkomst bibliothecaris, sleutel ovis-pot-adres-', k.zet.length === 1 && kp.soort === 'doen' && kp.prive === true && kp.herkomst.handmatig === 'bibliothecaris' && /^ovis-pot-adres-a-[0-9a-f]{6}$/.test(kp.sleutel), kp);
+    toets('8 kaart binnen de grenzen, geen .md, adressen in meting', kp.titel.length <= 90 && kp.waarom.length <= 400 && kp.meting.length <= 300 && kp.stappen.length <= 12 && kp.stappen.every((s) => s.length <= 400)
+      && !/\.md\b/.test(JSON.stringify(kp)) && /nieuw@a\.test/.test(kp.meting) && !/Obsidian/.test(JSON.stringify(kp)), kp);
+    toets('8 kaart: verzender houdt P02 al tegen (pagina ≠ POT-app) → dat staat in waarom', /geen nota klaar/.test(kp.waarom), kp.waarom);
+    const pAlleenStam = pot(); const bs = basis(); bs[1] = pg('b', 'ander@b.test', ['P04']);
+    const kS = R.kaartPot(C(bs, pAlleenStam).pot, {}, '27-10 02:31').zet[0];
+    toets('8 kaart: alleen de stamkaart wijkt af → nota\'s gaan nog naar het oude adres (waarom zegt dat)', /gaan nu nog naar factuur@b\.test/.test(kS.waarom), kS.waarom);
+    const pon = pot({ open: [{ id: 4, nummer: 'SL-0004', praktijk_id: 'P04', status: 'auto_vrij', aan: 'oud@b.test' }] });
+    const kN = R.kaartPot(C(basis(), pon).pot, {}, 'x').zet[0];
+    toets('8 kaart: alleen een open nota wijkt af → waarom zegt dat, niet "verzender houdt tegen"', /al klaarstaat heeft nog een ander adres/.test(kN.waarom) && !/geen nota klaar/.test(kN.waarom) && kN.stappen.some((x) => /niet vanzelf/.test(x)), kN);
+    const pg0 = pot({ open: [{ id: 5, nummer: 'SL-0005', praktijk_id: 'P02', status: 'wacht_op_adres', aan: null, cc: null }] }); pg0.praktijken[1].email = 'nieuw@a.test';
+    toets('8 kaart: wacht_op_adres zonder adres (geen_adres) → geen tweede kaart', R.kaartPot(C(basis(), pg0).pot, {}, 'x').zet.length === 0, C(basis(), pg0).pot);
+    const pS1 = pot({ open: [{ id: 6, nummer: 'SL-0006', praktijk_id: 'P02', status: 'concept', aan: 'oud@a.test' }] }); pS1.praktijken[1].email = 'nieuw@a.test';
+    const pS2 = pot({ open: [{ id: 6, nummer: 'SL-0006', praktijk_id: 'P02', status: 'auto_vrij', aan: 'oud@a.test' }] }); pS2.praktijken[1].email = 'nieuw@a.test';
+    toets('8 kaart: sleutel gelijk als alleen een notastatus wijzigt', R.kaartPot(C(basis(), pS1).pot, {}, 'x').zet[0].sleutel === R.kaartPot(C(basis(), pS2).pot, {}, 'x').zet[0].sleutel);
+    const kv = R.kaartPot(C(basis(), pg0).pot, { [kp.sleutel]: 'open' }, 'x');
+    toets('8 kaart: dicht omdat de POT-app het overneemt → bewijs zegt dat', kv.dicht.length === 1 && /neemt het over/.test(kv.dicht[0].bewijs), kv);
+    const pV = pot(); pV.praktijken[1].email = 'ander@a.test';
+    const kV = R.kaartPot(C(basis(), pV).pot, { [kp.sleutel]: 'open' }, 'x');
+    toets('8 kaart: andere adressen → oude dicht met "nieuwe kaart", nieuwe gezet', kV.zet.length === 1 && kV.dicht.length === 1 && /nieuwe kaart/.test(kV.dicht[0].bewijs), kV);
+    const pO = pot(); pO.dossier.per.P04.aan = ['factuur@b.test', 'tweede@b.test']; pO.praktijken[3].email = 'tweede@b.test, factuur@b.test';
+    const bsO = basis(); bsO[1] = R.leesPagina(pad('b'), org('b', null, ['P04']).replace('contact: {}', 'contact:\n  factuuradres:\n    - factuur@b.test\n    - tweede@b.test'));
+    toets('8 volgorde telt zoals bij de verzender (a, b ≠ b, a)', potB(C(bsO, pO)).some((b) => /pot-factuuradres-P04/.test(b.bevinding_id)), potB(C(bsO, pO)));
+    toets('8 checks zonder pot-argument: niet gemeten, niets kapot', (() => { const x = R.checks(basis(), reg(['a', 'b', 'c']), []); return x.pot.gemeten === false && x.tel.pot === 'niet gemeten' && potB(x).length === 0; })());
+    toets('8 potMeting: nul praktijken = niet gemeten', !!(await R.potMeting({ d1: async () => [{ results: [] }, { results: [] }], dossier: DOS })).fout);
+    const kbc = R.kaartBiblio({ knopen: [], kaarten: [], bevindingen: [{ bevinding_id: 'BB3-org:b-pot-cc-P04', check_id: 'BB3', ernst: 'warning', status: 'open' }] }, { nu: Date.parse('2026-10-27T02:31:00Z') });
+    toets('8 weekkaart: cc-waarschuwing komt er niet op', !kbc.kaart, kbc);
+    toets('8 kaart: zelfde situatie, David zette hem dicht → niet opnieuw', R.kaartPot(r.pot, { [kp.sleutel]: 'gedaan' }, 'x').zet.length === 0);
+    toets('8 kaart: staat al open → niet opnieuw, niet dicht', (() => { const x = R.kaartPot(r.pot, { [kp.sleutel]: 'open' }, 'x'); return x.zet.length === 0 && x.dicht.length === 0; })());
+    const pw = pot({ open: [{ id: 3, nummer: 'SL-0003', praktijk_id: 'P02', status: 'wacht_op_adres', aan: 'nieuw@a.test' }] }); pw.praktijken[1].email = 'nieuw@a.test';
+    toets('8 kaart: pot-verzend heeft al een adreskaart (wacht_op_adres) → geen tweede', R.kaartPot(C(basis(), pw).pot, {}, 'x').zet.length === 0);
+    k = R.kaartPot(C(basis(), pot()).pot, { [kp.sleutel]: 'open', 'ovis-pot-adres-z-abcdef': 'gedaan', 'pot-verzend-adres-1': 'open' }, '28-10 02:31');
+    toets('8 kaart: verschil weg → open kaart dicht met bewijs; andere kaarten ongemoeid', k.dicht.length === 1 && k.dicht[0].sleutel === kp.sleutel && /niet meer/.test(k.dicht[0].bewijs), k);
+    k = R.kaartPot({ gemeten: false, verschillen: [] }, { [kp.sleutel]: 'open' }, 'x');
+    toets('8 kaart: niet gemeten → niets zetten en niets dicht', k.zet.length === 0 && k.dicht.length === 0);
+    toets('8 POT_BEVINDING_RE: herkent plek 4, niet een gewone org met pot in de naam', R.POT_BEVINDING_RE.test('BB3-org:a-pot-factuuradres-P02') && R.POT_BEVINDING_RE.test('BB2-pot-P04-geen-pagina')
+      && R.POT_BEVINDING_RE.test('BB5-pot-P04-twee') && R.POT_BEVINDING_RE.test('BB1-org:d-pot-P07') && !R.POT_BEVINDING_RE.test('BB3-org:de-pot-bakker-naam'));
+    // de Bibliothecariskaart van de week zegt bij plek 4 iets dat klopt
+    const kb = R.kaartBiblio({ knopen: [], kaarten: [], bevindingen: [{ bevinding_id: 'BB2-pot-P04-geen-pagina', check_id: 'BB2', ernst: 'warning', status: 'open' }] }, { nu: Date.parse('2026-10-27T02:31:00Z') });
+    toets('8 weekkaart: BB2 van plek 4 in gewone taal', kb.kaart && /POT-praktijk P04 is nog aan geen pagina/.test(kb.kaart.stappen[0]), kb);
   }
   console.log(goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

@@ -15158,7 +15158,10 @@ const ovis = (function () {
   if (!OVIS_MOD) return null;
   try {
     return OVIS_MOD.maak({ vault: VAULT, sbRpc: appSbRpc, lees: function (p) { return VV().lees(p, 'utf8'); },
-      schrijf: function () { throw new Error('overdag schrijft de pod geen entiteitpagina'); }, log: function (r) { schrijfLog(nu() + ' ' + r); } });
+      schrijf: function () { throw new Error('overdag schrijft de pod geen entiteitpagina'); }, log: function (r) { schrijfLog(nu() + ' ' + r); },
+      // wv981: plek 4 (POT-factuuradres) — D1 fin alleen lezen (Fable #4) en de dossierpagina's met de parser van de verzender zelf
+      pot: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); },
+        dossier: function () { if (!POT_VZ_MOD) throw new Error('pot-verzend ontbreekt'); return POT_VZ_MOD.ontvangers(potVzVault()); } } });
   } catch (e) { logError('ovis', e); return null; }
 })();
 const ovisLoopt = { nu: null, sinds: 0 };
@@ -15208,6 +15211,22 @@ function ovisBoxRij(tekst) {   // → true als de rij in de box staat (wv1303: d
     });
   } catch (e) { logError('ovis-box', e); return false; }
 }
+// wv981: Voor jou-kaart bij een kritiek verschil in het POT-factuuradres (plek 4), alleen na een nachtronde waarin de POT-kant gemeten is;
+// dicht als het verschil weg is. Wat erop moet beslist OVIS_MOD.kaartPot (puur); geen haak en geen knop die iets vastzet.
+async function ovisPotKaarten(b) {
+  if (!b || !b.pot || !b.pot.gemeten || typeof OVIS_MOD.kaartPot !== 'function') return null;
+  const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+  const stand = {}; ((j && j.punten) || []).forEach(function (p) { stand[p.sleutel] = p.status; });
+  const k = ovisAms().klok, nuKort = Number(k.slice(8, 10)) + '-' + Number(k.slice(5, 7)) + ' ' + k.slice(11, 16);
+  const plan = OVIS_MOD.kaartPot(b.pot, stand, nuKort), uit = { gezet: 0, dicht: 0, fouten: 0 };
+  for (const p of plan.zet) { try { await appSbRpc('mk_voor_jou_zet', { p: p }); uit.gezet++; } catch (e) { uit.fouten++; logError('ovis-pot-kaart', e); } }
+  for (const d of plan.dicht) {
+    try { await appSbRpc('mk_voor_jou_status', { p_sleutel: d.sleutel, p_van: d.van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: d.bewijs, p_reden: 'bibliothecaris: verschil weg' }); uit.dicht++; }
+    catch (e) { uit.fouten++; logError('ovis-pot-kaart', e); }
+  }
+  if (uit.gezet || uit.dicht || uit.fouten) schrijfLog(nu() + ' ovis-pot-kaart ' + velden(uit));
+  return uit;
+}
 async function ovisTik() {
   if (!ovis || !SERVER_ECHT || !rolPrimair()) return;
   if (onderhoud.stand().aan) return;   // wv1271 (Fable MOET 3): geen compileer/Bibliothecaris op een half verhuisde boom; na uit haalt de volgende tik het in
@@ -15239,6 +15258,7 @@ async function ovisTik() {
       if (b.nieuw > 0) ovisBoxRij(OVIS_MOD.boxRij(b, t.klok));
       ovisLoopt.nu = 'kaarten';
       try { await ovisKaartenZet(['kritiek', 'bundel', 'biblio']); } catch (e) { logError('ovis-kaarten', e); }   // wv1253
+      try { const pk = await ovisPotKaarten(b); if (pk) ovisStaatZet({ pot_kaarten: Object.assign({ t: new Date().toISOString() }, pk) }); } catch (e) { logError('ovis-pot-kaart', e); }   // wv981
       return;
     }
     // overdag én na de Bibliothecaris (diffreview #4): alleen de databank

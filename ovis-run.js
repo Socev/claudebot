@@ -10,7 +10,8 @@
 //   node ovis-run.js bibliothecaris [--afroep]  BB1-BB7; --afroep: geen hartslagstempel (en de aanroeper geen box-rij)
 //   node ovis-run.js export <register.json>     knopen uit de databank in register.json (sleutels/vertaling blijven); alleen bij verschil
 //   --droog: niets schrijven (databank noch vault)
-// Omgeving: VAULT_DIR (standaard de vault), SUPABASE_URL + SUPABASE_SERVICE_ROLE (nooit als argument), OVIS_LOCK (standaard
+// Omgeving: VAULT_DIR (standaard de vault), SUPABASE_URL + SUPABASE_SERVICE_ROLE (nooit als argument), CLOUDFLARE_API_TOKEN (wv981: D1 fin
+// alleen lezen voor plek 4; ontbreekt hij, dan "POT niet gemeten"), CF_ACCOUNT_ID/APP_FIN_DB (zoals server.js), OVIS_LOCK (standaard
 // /opt/data/bin/.vault.lock). Uitvoer: één JSON-regel; uitgang 0 = gelukt, 1 = fout, 2 = gebruik.
 const fs = require('fs');
 const path = require('path');
@@ -61,6 +62,32 @@ function rekeningen() {
     return uit;
   } finally { db.close(); }
 }
+// wv981: plek 4 (POT-factuuradres). D1 fin alleen lezen (elk statement moet een SELECT zijn, Fable #4) en de dossierpagina's met de parser
+// van de verzender zelf (pot-verzend.ontvangers), zodat de Bibliothecaris hetzelfde leest als wat er verstuurd wordt.
+function potLezer() {
+  const tok = process.env.CLOUDFLARE_API_TOKEN;
+  let PV = null; try { PV = require('./pot-verzend.js'); } catch (e) { PV = null; }
+  if (!tok || !PV) return null;
+  const acc = process.env.CF_ACCOUNT_ID || '23df9b0607bb70f6d7f15a63ec843d6d', db = process.env.APP_FIN_DB || 'ffcb09ad-fc50-4c83-aa7b-ad6409b44e03';
+  return {
+    d1: async function (batch) {
+      if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) throw new Error('alleen lezen');
+      const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + acc + '/d1/database/' + db + '/query', { method: 'POST',
+        headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ batch: batch }), signal: AbortSignal.timeout(30000) });
+      const j = await r.json().catch(function () { return null; });
+      if (!r.ok || !j || j.success !== true || !Array.isArray(j.result) || j.result.length !== batch.length || !j.result.every(function (x) { return x && x.success !== false; })) throw new Error('D1 http ' + r.status);
+      return j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [] }; });
+    },
+    dossier: function () {
+      const map = path.join('10_Zakelijk', 'HAGRO', 'Praktijken');
+      const paden = fs.readdirSync(path.join(VAULT, map)).filter(function (n) { return /\.md$/.test(n); }).map(function (n) { return path.join(map, n); })
+        .concat([path.join('10_Zakelijk', 'Groenhouten', 'index.md'), path.join('10_Zakelijk', 'Tolgaarde', 'index.md')]);
+      const pg = [];
+      paden.forEach(function (rel) { try { pg.push({ pad: rel, tekst: VV.lees(path.join(VAULT, rel), 'utf8').slice(0, 20000) }); } catch (e) { /* zoals potVzVault */ } });
+      return PV.ontvangers(pg);
+    },
+  };
+}
 function uurAmsterdam() { return Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(new Date())); }
 // Houdt de ouder de grendel vast? Een eigen `flock -n` op hetzelfde bestand moet dan falen (andere open file description).
 function grendelVast() {
@@ -72,7 +99,7 @@ function grendelVast() {
 (async function () {
   if (['dag', 'afroep', 'nacht', 'bibliothecaris', 'export'].indexOf(modus) < 0) stop(2, { ok: false, fout: 'gebruik: dag|afroep|nacht|bibliothecaris|export <pad>' });
   const reg = R.maak({ vault: VAULT, sbRpc: sbRpc, lees: function (p) { return VV.lees(p, 'utf8'); },
-    schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen });
+    schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen, pot: potLezer() });
   try {
     if (modus === 'nacht') {
       if (arg.indexOf('--buiten-venster') < 0 && uurAmsterdam() !== 1) stop(1, { ok: false, fout: 'nachtronde alleen 01:00-02:00 (Amsterdam); --buiten-venster om af te wijken' });
@@ -82,7 +109,8 @@ function grendelVast() {
     if (modus === 'dag' || modus === 'afroep') stop(0, Object.assign({ ok: true }, await reg.compileer(modus, { droog: droog })));
     if (modus === 'bibliothecaris') {
       const b = await reg.bibliothecaris({ droog: droog, afroep: arg.indexOf('--afroep') >= 0 });
-      stop(0, Object.assign({ ok: true }, b, { bevindingen: b.bevindingen.map(function (x) { return { id: x.bevinding_id, check: x.check_id, ernst: x.ernst, samenvatting: x.samenvatting }; }) }));
+      const potTel = { gemeten: b.pot.gemeten, reden: b.pot.reden || null, verschillen: b.pot.verschillen.length };   // geen adressen op stdout
+      stop(0, Object.assign({ ok: true }, b, { pot: potTel, bevindingen: b.bevindingen.map(function (x) { return { id: x.bevinding_id, check: x.check_id, ernst: x.ernst, samenvatting: x.samenvatting }; }) }));
     }
     if (modus === 'export') {
       const doel = arg[1];
