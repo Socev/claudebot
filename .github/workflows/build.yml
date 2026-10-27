@@ -336,6 +336,9 @@ jobs:
       - name: "gezondheid-app (wv937, App Gezondheid)"
         if: ${{ !cancelled() }}
         run: bash test/gezondheid-app.sh
+      - name: "financien-vault (wv1337, App Financiën: Hypotheek, Belasting, Holding)"
+        if: ${{ !cancelled() }}
+        run: bash test/financien-vault.sh
       - name: "app-vast (wv1051, OVIS M1b: vastzetten in het menu)"
         if: ${{ !cancelled() }}
         run: bash test/app-vast.sh

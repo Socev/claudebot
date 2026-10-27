@@ -10146,11 +10146,40 @@ async function appPraktijkenRoute(req, res, a) {
 // als de database even bezet is (bankronde); niets op schijf. Grens 20 s (Fable #13).
 const APP_FIN_CACHE_MS = 60000, APP_FIN_MAX_MS = 20000, APP_FIN_TERUGVAL_MS = 30 * 60000;
 let appFinCache = null;   // { op, d }
+// wv1337 (bouwplan Privé-financiën § 13): de tabbladen Hypotheek, Belasting en Holding lezen uit de vault (financien-vault.js: pagina's en
+// de aangeleverde json's, elk getal met zijn bron; geen IBAN, lening-, polis- of BSN-nummer). Zelfde route, dus dezelfde poort (sessie, niet
+// op een vaste plek, auditregel). Los van het bankdeel (Opus-review wv1337 #5): eigen 60 s geheugen, en een kapot vaultblok zet het
+// geheugen en de terugval van de bank niet uit. Een kapot blok komt in fouten en geeft één regel zonder detail in api.log (hooguit één per
+// minuut). Lui geladen: het app-blok draait in de poort- en UI-toets in een vm zonder __dirname; ontbreekt het bestand (oudere release), dan
+// blijven de drie velden null en zegt de App dat.
+let appFinVaultMod;   // undefined = nog niet geprobeerd, null = niet in deze release
+let appFinVaultCache = null;   // { op, v }
+function appFinVault(nu) {
+  if (appFinVaultMod === undefined) {
+    appFinVaultMod = null;
+    try { const p = typeof __dirname === 'string' ? path.join(__dirname, 'financien-vault.js') : ''; if (p && fs.existsSync(p)) appFinVaultMod = require(p); } catch (e) { logError('financien-vault', new Error('laden faalde')); }
+  }
+  const leeg = { hypotheek: null, belasting: null, dga: null, fouten: [] };
+  if (!appFinVaultMod) return leeg;
+  if (appFinVaultCache && nu - appFinVaultCache.op < APP_FIN_CACHE_MS) return appFinVaultCache.v;
+  let v;
+  try {
+    const l = appFinVaultMod.lees(appProjVault());
+    v = { hypotheek: l.hypotheek || null, belasting: l.belasting || null, dga: l.dga || null, fouten: Array.isArray(l.fouten) ? l.fouten.slice() : [] };
+  } catch (e) { v = { hypotheek: null, belasting: null, dga: null, fouten: ['hypotheek', 'belasting', 'dga'] }; }
+  if (v.fouten.length) logError('financien-vault', new Error('niet te lezen: ' + v.fouten.join(',')));   // alleen bloknamen: geen bedrag of pad
+  appFinVaultCache = { op: nu, v: v };
+  return v;
+}
+// bankdeel + vaultdeel; fouten van beide samen
+function appFinSamen(basis, d, v) {
+  return Object.assign(basis, d, { hypotheek: v.hypotheek, belasting: v.belasting, dga: v.dga, fouten: (Array.isArray(d.fouten) ? d.fouten : []).concat(v.fouten) });
+}
 async function appFinancien(req, res, a) {
   res._app.reden = 'financien';
   if (appPriveDicht(a, 'financien')) return appStuur(res, 200, { ok: true, vaste_plek: true, melding: 'Financiën staat alleen op je telefoon of een meereizend apparaat, niet op een pc met een vaste plek.' });
   const nu = Date.now();
-  if (appFinCache && nu - appFinCache.op < APP_FIN_CACHE_MS) return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString() }, appFinCache.d));
+  if (appFinCache && nu - appFinCache.op < APP_FIN_CACHE_MS) return appStuur(res, 200, appFinSamen({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString() }, appFinCache.d, appFinVault(nu)));
   let r;
   try { r = await bankKind(['app-financien'], {}, APP_FIN_MAX_MS); } catch (e) { logError('app-financien', new Error('bankkind faalde')); r = null; }
   const j = r && r.j;
@@ -10158,14 +10187,14 @@ async function appFinancien(req, res, a) {
     // een oudere bank-lezer.js kent de opdracht niet (gebruik: …): de pod wordt bijgewerkt (Fable #12)
     const oud = j && typeof j.fout === 'string' && /^gebruik:/.test(j.fout);
     // terugval op het geheugen hooguit 30 min oud; de app zegt dan "cijfers van HH:MM" (Fable diffreview #2)
-    if (appFinCache && nu - appFinCache.op < APP_FIN_TERUGVAL_MS) return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString(), oud: true }, appFinCache.d));
+    if (appFinCache && nu - appFinCache.op < APP_FIN_TERUGVAL_MS) return appStuur(res, 200, appFinSamen({ ok: true, vaste_plek: false, bijgewerkt: new Date(appFinCache.op).toISOString(), oud: true }, appFinCache.d, appFinVault(nu)));
     return appWeiger(res, 503, oud ? 'Financiën wordt net bijgewerkt; probeer het over een paar minuten' : 'de cijfers zijn nu niet te lezen; probeer het zo opnieuw', oud ? 'financien oud' : 'financien fout');
   }
   const d = {};
   ['peildatum', 'maand', 'deze_maand', 'vorige_maand', 'verloop', 'vaste_lasten', 'buffer', 'stroom', 'paypal', 'signalen', 'links', 'fouten'].forEach(function (k) { d[k] = j[k] === undefined ? null : j[k]; });
   if (typeof secondbrainFinPagina === 'function') secondbrainFinPagina(d);   // wv832: link naar de vaultpagina (koppeltabel)
   appFinCache = Array.isArray(d.fouten) && d.fouten.length ? null : { op: nu, d: d };   // half overzicht niet bewaren (Fable diffreview #4)
-  return appStuur(res, 200, Object.assign({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d));
+  return appStuur(res, 200, appFinSamen({ ok: true, vaste_plek: false, bijgewerkt: new Date(nu).toISOString() }, d, appFinVault(nu)));   // wv1337: + vault
 }
 
 // ── App Gezondheid (wv937; ontwerp + Fable-review mk-scripts/wv937): Davids eigen gezondheid, alleen lezen ──

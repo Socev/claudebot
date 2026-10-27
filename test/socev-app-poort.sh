@@ -3987,6 +3987,27 @@ async function bewijs(o) {
       kAntw = { code: 1, j: { ok: false, fout: 'interne fout: X' } };
       r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
       toets('20f fout in het kind: 503 in gewone taal, geen foutdetail naar de app', r.status === 503 && /niet te lezen/.test(r.j.fout) && !/interne/.test(r.j.fout), JSON.stringify(r.j));
+      // wv1337: Hypotheek, Belasting en Holding uit financien-vault.js (hier nagebootst, verzonnen bedrag; het bestand zelf: test/financien-vault.sh)
+      kAntw = { code: 0, j: { ok: true, peildatum: '2026-10-27', maand: '2026-10', signalen: [], fouten: [] } };
+      let nV = 0;
+      ctx.__fv1337 = { lees: () => { nV++; return { hypotheek: { bank: { restschuld: 123456.7 } }, belasting: null, dga: { planning: [] }, fouten: ['belasting'] }; } };
+      vm.runInContext('appFinCache = null; appFinVaultCache = null; appFinVaultMod = __fv1337', ctx); nK = 0;
+      r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
+      toets('20f wv1337: hypotheek en dga uit de vault doorgegeven, kapot blok (belasting) in fouten', r.status === 200 && r.j.hypotheek.bank.restschuld === 123456.7 && r.j.belasting === null && Array.isArray(r.j.dga.planning) && r.j.fouten.includes('belasting') && r.j.deze_maand === null, JSON.stringify(r.j).slice(0, 300));
+      r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
+      toets('20f wv1337: kapot vaultblok zet het bankgeheugen niet uit (één bankkind), vault ook 60 s in het geheugen, fout blijft zichtbaar', r.status === 200 && nK === 1 && nV === 1 && r.j.fouten.includes('belasting'), [nK, nV, r.j.fouten]);
+      vm.runInContext('appFinCache = null; appFinVaultCache = null; appFinVaultMod = { lees() { throw new Error("pad /geheim/NL00ABNA0123456789") } }', ctx);
+      r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
+      toets('20f wv1337: uitzondering in financien-vault: 200, de drie blokken null en in fouten, geen detail', r.status === 200 && r.j.hypotheek === null && r.j.dga === null && ['hypotheek', 'belasting', 'dga'].every((b) => r.j.fouten.includes(b)) && !/geheim|NL00/.test(JSON.stringify(r.j)), JSON.stringify(r.j).slice(0, 300));
+      kAntw = { code: 1, j: { ok: false, fout: 'interne fout: X' } };
+      vm.runInContext('appFinVaultCache = null; appFinVaultMod = __fv1337; appFinCache.op = Date.now() - 5 * 60000', ctx);
+      r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
+      toets('20f wv1337: bank bezet, terugval op het bankgeheugen (oud) mét de vaultblokken', r.status === 200 && r.j.oud === true && r.j.hypotheek.bank.restschuld === 123456.7, JSON.stringify(r.j).slice(0, 300));
+      kAntw = { code: 0, j: { ok: true, peildatum: '2026-10-27', maand: '2026-10', signalen: [], fouten: [] } };
+      vm.runInContext('appFinCache = null; appFinVaultCache = null; appFinVaultMod = null', ctx);
+      r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
+      toets('20f wv1337: zonder financien-vault.js (oudere release): velden null, geen fout', r.status === 200 && r.j.hypotheek === null && r.j.belasting === null && r.j.fouten.length === 0, JSON.stringify(r.j).slice(0, 300));
+      delete ctx.__fv1337; vm.runInContext('appFinVaultMod = undefined; appFinVaultCache = null', ctx);
       delete ctx.bankKind; vm.runInContext('appFinCache = null', ctx);
     }
 
