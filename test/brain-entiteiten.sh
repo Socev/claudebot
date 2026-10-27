@@ -101,6 +101,11 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   T.vergeet(); rpcFout = true;
   let gooit = false; try { await T.lijst(false); } catch (x) { gooit = true; }
   toets('20 register weg: fout (route geeft 503), geen oude lijst', gooit);
+  rpcFout = false;
+  const sl = l.knopen.find((k) => k.id === 'org:voorbeeld-energie').sleutel;
+  toets('20b detail op de sleutel uit de lijst (12 hex), past in APP_ROUTE_RE', /^[0-9a-f]{12}$/.test(sl) && (await T.detail(sl, false)).j.knoop.id === 'org:voorbeeld-energie' && /^\/app\/[a-z0-9/-]{1,64}$/.test('/app/brain/entiteit/' + sl));
+  T.vergeet(); rpcFout = false;
+  toets('20c privépersoon ook niet via zijn sleutel', (await T.detail(B.sleutelVan('per:jan-verzonnen'), false)).status === 404);
   toets('21 maskeerIban laat gewone woorden staan', B.maskeerIban('KvK 12345678 en AB12 CDEF') === 'KvK 12345678 en AB12 CDEF');
 
   const srv = fs.readFileSync('server.js', 'utf8');

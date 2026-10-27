@@ -15749,7 +15749,7 @@ async function appIntakeTelling(req, res, a) {
 // ── einde Intake-plek ──
 
 // ── Brain › Entiteiten & Personen (wv1734, OVIS M5; ontwerplijnen § 7) ──
-// GET /app/brain/entiteiten: lijst uit het OVIS-register (RPC ovis_register_lees); GET /app/brain/entiteit/<knoop-id, ~ voor :>: de stampagina
+// GET /app/brain/entiteiten: lijst uit het OVIS-register (RPC ovis_register_lees); GET /app/brain/entiteit/<sleutel, 12 hex uit de lijst>: de stampagina
 // (zonder frontmatter en zonder het gegenereerde blok met rekeningnummers) en Wat OVIS weet (kenmerken, facturen, deadlines). Alleen lezen.
 // Privacygrens en vaste plek in brain-entiteiten.js. Ontbreekt brain-entiteiten.js in de release (terugrol), dan 404 en toont de app
 // "komt eraan".
@@ -15772,9 +15772,8 @@ async function appBrainEntiteiten(req, res, a, route) {
   const vast = !!(a && a.soort === 'vast');
   try {
     if (route === 'GET /app/brain/entiteiten') { const uit = await B.lijst(vast); res._app.stil = true; return appStuur(res, 200, uit); }
-    const ruw = route.slice('GET /app/brain/entiteit/'.length);   // knoop-id met ~ voor : (de app tekent het pad zonder %-codering)
-    if (!/^[A-Za-z0-9~_.-]{1,80}$/.test(ruw)) return appWeiger(res, 400, 'geen geldige id', 'brain-entiteit id');
-    const id = ruw.replace(/~/g, ':');
+    const id = route.slice('GET /app/brain/entiteit/'.length);   // sleutel uit de lijst (12 hex; APP_ROUTE_RE laat geen knoop-id door)
+    if (!/^[0-9a-f]{12}$/.test(id)) return appWeiger(res, 400, 'geen geldige sleutel', 'brain-entiteit sleutel');
     const r = await B.detail(id, vast);
     if (r.status === 200) res._app.stil = true; else res._app.reden = 'brain-entiteit ' + r.status;
     return appStuur(res, r.status, r.j);

@@ -10,6 +10,7 @@
 //   - geen HR, gezin of gezondheid in Wat OVIS weet: deadlines met personeelswoorden (hr) gaan niet mee;
 //   - vaste plek (praktijk-pc): alleen organisaties aan de zakelijke kant (geen 20_Prive, geen PRIVE, geen personen) en zonder facturen.
 const path = require('path');
+const crypto = require('crypto');
 
 const CACHE_MS = 60000;
 const PAGINA_RE = /^(10_Zakelijk|20_Prive)\/(?:[^/\0]+\/)*[^/\0]+\.md$/;
@@ -26,6 +27,8 @@ const HANDVAT_WOORD = { kvk: 'KvK', domein: 'domein', mail: 'mailadres', kenmerk
   'niet-dezelfde-als': 'niet dezelfde als' };
 const STATUS_WOORD = { actief: 'actief', voorgesteld: 'wacht op je Ja', vervallen: 'vervallen' };
 
+// Sleutel voor de detailroute: de pod staat alleen /app/[a-z0-9/-]{1,64} toe en een knoop-id draagt hoofdletters en ':' (tot 57 tekens)
+function sleutelVan(id) { return crypto.createHash('sha256').update(String(id), 'utf8').digest('hex').slice(0, 12); }
 function isPersoon(k) { return k.soort === 'persoon' || /^per:/.test(String(k.id)); }
 function isEigen(k) { return k.rol === 'eigen' || k.soort === 'entiteit'; }
 function priveKant(k) { return String(k.vault_pagina || '').indexOf('20_Prive/') === 0 || k.id === 'PRIVE'; }
@@ -133,7 +136,7 @@ function maak(o) {
   async function lijst(vast) {
     const reg = await register();
     const uit = reg.knopen.filter(function (k) { return zichtbaar(k, vast); }).map(function (k) {
-      return { id: k.id, naam: k.naam, groep: groepVan(k), rol: ROL_WOORD[k.rol] || k.rol || null, concept: !!k.concept,
+      return { id: k.id, sleutel: sleutelVan(k.id), naam: k.naam, groep: groepVan(k), rol: ROL_WOORD[k.rol] || k.rol || null, concept: !!k.concept,
         voor: Array.isArray(k.voor) ? k.voor.filter(function (c) { return !(vast && c === 'PRIVE'); }) : [],
         aliassen: (k.aliassen || []).slice(0, 5), prive: priveKant(k), pagina: !!k.vault_pagina, handvatten: (reg.handvatten[k.id] || []).length };
     }).sort(function (a, b) { return (a.groep === 'eigen' ? 0 : 1) - (b.groep === 'eigen' ? 0 : 1) || a.naam.localeCompare(b.naam, 'nl'); });
@@ -142,9 +145,10 @@ function maak(o) {
     return { ok: true, vaste_plek: !!vast, knopen: uit, groepen: groepen, totaal: uit.length, gemeten_op: new Date(nu()).toISOString() };
   }
 
+  // detail op knoop-id of op de sleutel uit de lijst (12 hex)
   async function detail(id, vast) {
     const reg = await register();
-    const k = reg.knopen.find(function (x) { return x.id === id; });
+    const k = reg.knopen.find(function (x) { return x.id === id; }) || (/^[0-9a-f]{12}$/.test(String(id)) ? reg.knopen.find(function (x) { return sleutelVan(x.id) === id; }) : undefined);
     if (!k || !zichtbaar(k, vast)) return { status: 404, j: { ok: false, fout: 'niet gevonden' } };
     const eigen = isEigen(k);
     let tekst = null, paginaFout = null;
@@ -175,4 +179,4 @@ function maak(o) {
   return { lijst: lijst, detail: detail, vergeet: function () { cache = null; } };
 }
 
-module.exports = { maak: maak, paginaTekst: paginaTekst, maskeerIban: maskeerIban, zichtbaar: zichtbaar, groepVan: groepVan, nooit: nooit };
+module.exports = { maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, maskeerIban: maskeerIban, zichtbaar: zichtbaar, groepVan: groepVan, nooit: nooit };
