@@ -18,7 +18,7 @@ const IBAN = 'NL00TEST0123456789';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wv1734-'));
 const vault = path.join(tmp, 'vault');
 const zet = (rel, t) => { fs.mkdirSync(path.dirname(path.join(vault, rel)), { recursive: true }); fs.writeFileSync(path.join(vault, rel), t); };
-zet('10_Zakelijk/Voorbeeld/Entiteit - VB.md', '---\ntype: entiteit\nentiteit_id: VB\nkvk: "00000000"\n---\n# Voorbeeldpraktijk\n\nEigen rekening ' + IBAN + '.\n');
+zet('10_Zakelijk/Voorbeeld/Entiteit - VB.md', '---\ntype: entiteit\nentiteit_id: VB\nkvk: "00000000"\n---\n# Voorbeeldpraktijk\n\nEigen rekening ' + IBAN + '. Huur naar nl11 test 0000 1111 22.\n');
 zet('10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Energie.md', '---\ntype: entiteit\ncontact:\n  telefoon: "0300-000000"\n---\n# Voorbeeld Energie\n\nBetaal naar NL00 TEST 0123 4567 89 of [[10_Zakelijk/_Gedeeld/Relaties/Ander|de ander]].\n\n' +
   '<!-- ovis:blok begin id="org:voorbeeld-energie" content_hash="0000000000000000" -->\n## Wat OVIS van deze partij weet\n- Rekeningnummers (geaccepteerd): ' + IBAN + '\n<!-- ovis:blok eind -->\n\nNa het blok.\n');
 zet('20_Prive/Relaties/Voorbeeld Streaming.md', '# Voorbeeld Streaming\n');
@@ -32,8 +32,10 @@ const knopen = [
   { id: 'org:voorbeeld-energie', soort: 'organisatie', rol: 'leverancier', naam: 'Voorbeeld Energie', aliassen: ['VE Zakelijk'], vault_pagina: '10_Zakelijk/_Gedeeld/Relaties/Voorbeeld Energie.md', actief: true, concept: true, voor: ['VB', 'PRIVE'] },
   { id: 'org:voorbeeld-streaming', soort: 'organisatie', rol: 'leverancier', naam: 'Voorbeeld Streaming', vault_pagina: '20_Prive/Relaties/Voorbeeld Streaming.md', actief: true, voor: ['PRIVE'] },
   { id: 'org:weg', soort: 'organisatie', rol: 'instantie', naam: 'Opgeheven', vault_pagina: '10_Zakelijk/_Gedeeld/Relaties/Opgeheven.md', actief: false },
+  { id: 'per:kind-verzonnen', soort: 'persoon', rol: 'persoon', naam: 'Kind Verzonnen', vault_pagina: null, vault_pad: '20_Prive/Familie/Kind Verzonnen', actief: true },
+  { id: 'per:vriend-verzonnen', soort: 'persoon', rol: 'persoon', naam: 'Vriend Verzonnen', vault_pagina: '10_Zakelijk/_Gedeeld/Relaties/Vriend Verzonnen.md', voor: ['PRIVE'], actief: true },
   { id: 'per:jan-verzonnen', soort: 'persoon', rol: 'persoon', naam: 'Jan Verzonnen', vault_pagina: '20_Prive/Relaties/Jan Verzonnen.md', actief: true },
-  { id: 'per:piet-verzonnen', soort: 'persoon', rol: 'persoon', naam: 'Piet Verzonnen', vault_pagina: '10_Zakelijk/Voorbeeld/Medewerkers/Piet Verzonnen.md', actief: true },
+  { id: 'per:piet-verzonnen', soort: 'persoon', rol: 'persoon', naam: 'Piet Verzonnen', vault_pagina: '10_Zakelijk/Voorbeeld/Medewerkers/Piet Verzonnen.md', actief: true, opmerking: 'contract tot later, ziek sinds gisteren', kvk: '99999999' },
   { id: 'per:notaris-verzonnen', soort: 'persoon', rol: 'afzender', naam: 'Notaris Verzonnen', vault_pagina: '10_Zakelijk/_Gedeeld/Relaties/Notaris Verzonnen.md', actief: true },
   { id: 'org:kapot', soort: 'organisatie', rol: 'bank', naam: 'Kapotte Pagina', vault_pagina: '../buiten.md', actief: true },
 ];
@@ -41,6 +43,8 @@ const handvatten = [
   { knoop: 'org:voorbeeld-energie', soort: 'domein', waarde: 'voorbeeld-energie.nl', status: 'actief' },
   { knoop: 'org:voorbeeld-energie', soort: 'alias', waarde: 'Voorbeeld Energie Levering', status: 'voorgesteld' },
   { knoop: 'org:voorbeeld-energie', soort: 'mail', waarde: 'oud@voorbeeld-energie.nl', status: 'vervallen' },
+  { knoop: 'org:kapot', soort: 'kenmerkpatroon', waarde: 'NL00TEST0123456789', status: 'voorgesteld' },
+  { knoop: 'per:piet-verzonnen', soort: 'mail', waarde: 'piet@verzonnen.nl', status: 'actief' },
 ];
 let rpcAanroepen = 0, rpcFout = false;
 const rpc = async (fn, body) => { rpcAanroepen++; if (rpcFout) throw new Error('weg'); if (fn !== 'ovis_register_lees') throw new Error('onverwacht ' + fn); return { knopen, handvatten, contact: [] }; };
@@ -50,12 +54,13 @@ const fpad = path.join(tmp, 'facturen.sqlite');
 const db = new DatabaseSync(fpad);
 db.exec('CREATE TABLE leverancier (id INTEGER PRIMARY KEY, naam TEXT, knoop_id TEXT); CREATE TABLE factuur (id INTEGER PRIMARY KEY, leverancier INTEGER, entiteit TEXT, factuurdatum TEXT, incl_eur INTEGER, status TEXT, patientkenmerk INTEGER, intern INTEGER, alleen_eigenaar INTEGER); ' +
   'CREATE TABLE factuur_archief (id INTEGER PRIMARY KEY, leverancier_naam TEXT, entiteit TEXT, factuurdatum TEXT, incl INTEGER, status TEXT, alleen_eigenaar INTEGER);');
-db.exec("INSERT INTO leverancier VALUES (1, 'Voorbeeld Energie Levering', NULL), (2, 'Iets Anders', 'org:voorbeeld-energie'), (3, 'Niemand', NULL)");
-db.exec("INSERT INTO factuur VALUES (1, 1, 'tolgaarde', '2026-10-01', 12345, 'beslist', 0, 0, 0), (2, 2, 'tolgaarde', '2026-10-05', 500, 'beslist', 0, 0, 1), (3, 1, 'tolgaarde', '2026-10-06', 999, 'beslist', 1, 0, 0), (4, 3, 'tolgaarde', '2026-10-07', 1, 'beslist', 0, 0, 0)");
+db.exec("INSERT INTO leverancier VALUES (1, 'Voorbeeld Energie Levering', NULL), (2, 'Iets Anders', 'org:voorbeeld-energie'), (3, 'Niemand', NULL), (4, 'Piet Verzonnen', 'per:piet-verzonnen')");
+db.exec("INSERT INTO factuur VALUES (9, 4, 'tolgaarde', '2026-10-02', 300000, 'beslist', 0, 0, 0), (1, 1, 'tolgaarde', '2026-10-01', 12345, 'beslist', 0, 0, 0), (2, 2, 'tolgaarde', '2026-10-05', 500, 'beslist', 0, 0, 1), (3, 1, 'tolgaarde', '2026-10-06', 999, 'beslist', 1, 0, 0), (4, 3, 'tolgaarde', '2026-10-07', 1, 'beslist', 0, 0, 0)");
 db.exec("INSERT INTO factuur_archief VALUES (1, 'VE Zakelijk', 'tolgaarde', '2026-05-01', 700, 'beslist', 1), (2, 'Niemand', 'tolgaarde', '2026-05-02', 1, 'beslist', 1)");
 db.close();
 
 const deadlines = () => [
+  { ents: ['PRIVE'], dagen: 5, datum: '2026-11-01', titel: 'Verjaardag familielid (verzonnen)', hr: false },
   { ents: ['VB'], dagen: 10, datum: '2026-11-06', titel: 'Aangifte omzetbelasting', hr: false },
   { ents: ['VB'], dagen: 12, datum: '2026-11-08', titel: 'Aanzegging contract medewerker', hr: true },
   { ents: ['VB'], dagen: -30, datum: '2026-09-27', titel: 'Lang verlopen', hr: false },
@@ -66,6 +71,7 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   const l = await T.lijst(false), v = await T.lijst(true);
   const ids = l.knopen.map((k) => k.id), vids = v.knopen.map((k) => k.id);
   toets('1 elke actieve knoop (behalve privépersoon) heeft een regel', ['VB', 'PRIVE', 'org:voorbeeld-energie', 'org:voorbeeld-streaming', 'per:piet-verzonnen', 'per:notaris-verzonnen', 'org:kapot'].every((i) => ids.includes(i)) && l.totaal === 7, ids);
+  toets('2b persoon zonder zakelijke pagina (vault_pad privé, of alleen voor PRIVE): nooit (witte lijst)', !ids.includes('per:kind-verzonnen') && !ids.includes('per:vriend-verzonnen') && (await T.detail('per:kind-verzonnen', false)).status === 404);
   toets('2 privépersoon nooit, ook niet op de telefoon', !ids.includes('per:jan-verzonnen') && !JSON.stringify(l).includes('Jan Verzonnen'));
   toets('3 inactieve knoop niet', !ids.includes('org:weg'));
   toets('4 vaste plek: alleen organisaties aan de zakelijke kant', JSON.stringify(vids.sort()) === JSON.stringify(['VB', 'org:kapot', 'org:voorbeeld-energie'].sort()) && v.vaste_plek === true, vids);
@@ -85,7 +91,8 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('11b facturen zonder leveranciersnaam', !/Levering|Iets Anders|Niemand/.test(JSON.stringify(f)));
 
   const e = await T.detail('VB', false);
-  toets('12 eigen entiteit: eigen rekening niet gemaskeerd op de pagina, iban-veld niet mee', e.status === 200 && e.j.tekst.includes(IBAN) && !('iban' in e.j.knoop) && !('iban' in e.j.weet));
+  toets('12 eigen entiteit: eigen rekening niet gemaskeerd, die van een derde (kleine letters, spaties) wel; iban-veld niet mee', e.status === 200 && e.j.tekst.includes(IBAN) && !/nl11/i.test(e.j.tekst) && /Huur naar \[rekeningnummer\]/.test(e.j.tekst) && !('iban' in e.j.knoop) && !('iban' in e.j.weet), e.j.tekst);
+  toets('12b PRIVE: geen deadlines (gezin, familie)', (await T.detail('PRIVE', false)).j.weet.deadlines === null);
   toets('13 deadlines: geen HR, niet lang verlopen', e.j.weet.deadlines.length === 1 && e.j.weet.deadlines[0].titel === 'Aangifte omzetbelasting', e.j.weet.deadlines);
   toets('13b facturen van een eigen entiteit zonder code-afbeelding: 0', e.j.weet.facturen && e.j.weet.facturen.aantal === 0, e.j.weet.facturen);
 
@@ -94,8 +101,9 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('15 vaste plek: privékant en personen 404', (await T.detail('org:voorbeeld-streaming', true)).status === 404 && (await T.detail('PRIVE', true)).status === 404 && (await T.detail('per:notaris-verzonnen', true)).status === 404);
   toets('16 privépersoon 404, ook op de telefoon', (await T.detail('per:jan-verzonnen', false)).status === 404);
   const m = await T.detail('per:piet-verzonnen', false);
-  toets('17 medewerker: alleen stamregel, geen pagina', m.status === 200 && m.j.tekst === null && !/Contract en verzuim/.test(JSON.stringify(m.j)));
+  toets('17 medewerker: alleen stamregel — geen pagina, opmerking, kenmerken, KvK of facturen', m.status === 200 && m.j.tekst === null && !/Contract en verzuim|ziek|contract tot|piet@|99999999/.test(JSON.stringify(m.j)) && m.j.weet.facturen === null && m.j.weet.handvatten.length === 0, m.j);
   const k = await T.detail('org:kapot', false);
+  toets('17b kenmerkpatroon met een rekeningnummer: gemaskeerd', !/NL00TEST/.test(JSON.stringify((await T.detail('org:kapot', false)).j)));
   toets('18 pagina buiten de vault: niet gelezen', k.status === 200 && k.j.tekst === null && k.j.knoop.pagina_pad === null);
   toets('19 onbekende id 404', (await T.detail('org:bestaat-niet', false)).status === 404);
   T.vergeet(); rpcFout = true;

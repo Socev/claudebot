@@ -14,7 +14,7 @@ const crypto = require('crypto');
 
 const CACHE_MS = 60000;
 const PAGINA_RE = /^(10_Zakelijk|20_Prive)\/(?:[^/\0]+\/)*[^/\0]+\.md$/;
-const IBAN_IN_TEKST = /\b[A-Z]{2}[0-9]{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,4})?\b/g;
+const IBAN_IN_TEKST = /\b[A-Z]{2}[0-9]{2}(?:[\s.\-\u00a0]?[A-Z0-9]{4}){2,7}(?:[\s.\-\u00a0]?[A-Z0-9]{1,4})?\b/gi;   // diffreview ZOU 6: ook kleine letters, punt, streep
 const BLOK_RE = /<!-- ovis:blok begin[^>]*-->[\s\S]*?<!-- ovis:blok eind -->\n?/g;
 const MAX_TEKST = 60000;
 
@@ -31,10 +31,17 @@ const STATUS_WOORD = { actief: 'actief', voorgesteld: 'wacht op je Ja', vervalle
 function sleutelVan(id) { return crypto.createHash('sha256').update(String(id), 'utf8').digest('hex').slice(0, 12); }
 function isPersoon(k) { return k.soort === 'persoon' || /^per:/.test(String(k.id)); }
 function isEigen(k) { return k.rol === 'eigen' || k.soort === 'entiteit'; }
-function priveKant(k) { return String(k.vault_pagina || '').indexOf('20_Prive/') === 0 || k.id === 'PRIVE'; }
-function medewerker(k) { return /\/Medewerkers\//.test(String(k.vault_pagina || '')); }
-// Wie er nooit in komt, ook niet op de telefoon: privépersonen (persoonsknoop aan de privékant)
-function nooit(k) { return isPersoon(k) && priveKant(k); }
+// Privékant: pagina of vault_pad onder 20_Prive, de entiteit PRIVE zelf, of alleen voor PRIVE (diffreview ZOU 7)
+function priveKant(k) {
+  const voor = Array.isArray(k.voor) ? k.voor : [];
+  return String(k.vault_pagina || '').indexOf('20_Prive/') === 0 || String(k.vault_pad || '').indexOf('20_Prive/') === 0 || k.id === 'PRIVE' ||
+    (voor.length > 0 && voor.every(function (c) { return c === 'PRIVE'; }));
+}
+// Medewerker (of ander personeel): alleen de stamregel (diffreview MOET 3)
+function medewerker(k) { return /\/(Medewerkers|Personeel|Personen)\//.test(String(k.vault_pagina || '') + ' ' + String(k.vault_pad || '')); }
+// Wie er nooit in komt, ook niet op de telefoon: elke persoon die niet aantoonbaar zakelijk is. Witte lijst (diffreview MOET 2): een
+// persoonsknoop alleen met een pagina onder 10_Zakelijk/ en niet aan de privékant.
+function nooit(k) { return isPersoon(k) && (String(k.vault_pagina || '').indexOf('10_Zakelijk/') !== 0 || priveKant(k)); }
 // Op een vaste plek alleen organisaties aan de zakelijke kant
 function zichtbaar(k, vast) {
   if (!k || k.actief === false || nooit(k)) return false;
@@ -43,15 +50,24 @@ function zichtbaar(k, vast) {
 }
 function groepVan(k) { return isPersoon(k) ? 'persoon' : (GROEP[k.rol] || (isEigen(k) ? 'eigen' : 'leverancier')); }
 function norm(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
-function maskeerIban(t) { return String(t).replace(IBAN_IN_TEKST, function (m) { return /\d{6}/.test(m.replace(/ /g, '')) ? '[rekeningnummer]' : m; }); }
+function ibanNorm(x) { return String(x || '').replace(/[\s.\-\u00a0]/g, '').toUpperCase(); }
+// eigen: het eigen rekeningnummer van een eigen entiteit blijft staan, elk ander wordt gemaskeerd (diffreview ZOU 5)
+function maskeerIban(t, eigen) {
+  return String(t).replace(IBAN_IN_TEKST, function (m) {
+    const n = ibanNorm(m);
+    if (!/\d{6}/.test(n)) return m;
+    return eigen && ibanNorm(eigen) === n ? m : '[rekeningnummer]';
+  });
+}
 
 // Stampagina: frontmatter eraf (de stamgegevens komen uit het register), het gegenereerde blok eraf (rekeningnummers; Wat OVIS weet
-// komt hier vers uit de databank), wikilinks als gewone tekst, bij een derde elk IBAN gemaskeerd.
-function paginaTekst(ruw, eigen) {
+// komt hier vers uit de databank), wikilinks als gewone tekst, elk IBAN gemaskeerd behalve het eigen nummer van een eigen entiteit
+// (eigenIban: k.iban van een knoop met rol eigen, anders null).
+function paginaTekst(ruw, eigenIban) {
   let t = String(ruw).replace(/\r\n?/g, '\n');
   if (t.indexOf('---\n') === 0) { const e = t.indexOf('\n---', 4); if (e > 0) t = t.slice(t.indexOf('\n', e + 1) + 1 || t.length); }
   t = t.replace(BLOK_RE, '').replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2').replace(/\[\[([^\]]+)\]\]/g, function (m, p) { return String(p).split('/').pop().replace(/\.md$/, ''); });
-  if (!eigen) t = maskeerIban(t);
+  t = maskeerIban(t, eigenIban || null);
   t = t.replace(/\n{3,}/g, '\n\n').trim();
   return t.length > MAX_TEKST ? t.slice(0, MAX_TEKST) + '\n\n…' : t;
 }
@@ -124,7 +140,7 @@ function maak(o) {
   }
 
   function deadlinesVan(k) {
-    if (!isEigen(k)) return null;
+    if (!isEigen(k) || priveKant(k)) return null;   // diffreview MOET 1: privé (gezin, familie) nooit in Wat OVIS weet
     let d;
     try { d = deadlines(); } catch (e) { return null; }
     if (!Array.isArray(d)) return null;
@@ -150,29 +166,29 @@ function maak(o) {
     const reg = await register();
     const k = reg.knopen.find(function (x) { return x.id === id; }) || (/^[0-9a-f]{12}$/.test(String(id)) ? reg.knopen.find(function (x) { return sleutelVan(x.id) === id; }) : undefined);
     if (!k || !zichtbaar(k, vast)) return { status: 404, j: { ok: false, fout: 'niet gevonden' } };
-    const eigen = isEigen(k);
+    const eigen = isEigen(k), stam = isPersoon(k) && medewerker(k);
     let tekst = null, paginaFout = null;
     const rel = String(k.vault_pagina || '');
-    if (isPersoon(k) && medewerker(k)) paginaFout = 'Van medewerkers staat hier alleen de stamregel.';
+    if (stam) paginaFout = 'Van medewerkers staat hier alleen de stamregel.';
     else if (!PAGINA_RE.test(rel) || rel.split('/').indexOf('..') >= 0) paginaFout = 'Geen stampagina in het register.';
     else {
-      try { tekst = paginaTekst(lees(path.join(vault, rel)), eigen); }
+      try { tekst = paginaTekst(lees(path.join(vault, rel)), eigen ? k.iban : null); }
       catch (e) { paginaFout = 'De pagina is nu niet te lezen.'; }
     }
-    const h = (reg.handvatten[k.id] || []).map(function (x) {
-      return { soort: HANDVAT_WOORD[x.soort] || x.soort, waarde: x.soort === 'kenmerkpatroon' ? String(x.waarde).slice(0, 60) : maskeerIban(String(x.waarde)).slice(0, 120),
+    const h = stam ? [] : (reg.handvatten[k.id] || []).map(function (x) {
+      return { soort: HANDVAT_WOORD[x.soort] || x.soort, waarde: maskeerIban(String(x.waarde)).slice(0, x.soort === 'kenmerkpatroon' ? 60 : 120),
         status: STATUS_WOORD[x.status] || x.status, intrekking: !!x.intrekking };
     });
     const weet = { handvatten: h,
-      kvk: k.kvk || null, agb: eigen ? (k.agb || null) : null,
-      facturen: vast ? null : facturenVan(k, reg),
-      deadlines: vast ? null : deadlinesVan(k),
+      kvk: stam ? null : (k.kvk || null), agb: eigen ? (k.agb || null) : null,
+      facturen: vast || stam ? null : facturenVan(k, reg),
+      deadlines: vast || stam ? null : deadlinesVan(k),
       stukken: null,   // komt met OVIS Intake (stap 2); nu nog geen logboek per partij
       register: { concept: !!k.concept, compilatie: k.compilatienummer || null, gecompileerd_op: k.gecompileerd_op || null } };
     return { status: 200, j: { ok: true, vaste_plek: !!vast,
       knoop: { id: k.id, naam: k.naam, groep: groepVan(k), rol: ROL_WOORD[k.rol] || k.rol || null, concept: !!k.concept,
         voor: Array.isArray(k.voor) ? k.voor.filter(function (c) { return !(vast && c === 'PRIVE'); }) : [], aliassen: k.aliassen || [], prive: priveKant(k),
-        pagina_pad: paginaFout ? null : rel, opmerking: k.opmerking ? String(k.opmerking).slice(0, 400) : null },
+        pagina_pad: paginaFout ? null : rel, opmerking: !stam && k.opmerking ? maskeerIban(String(k.opmerking)).slice(0, 400) : null },
       tekst: tekst, pagina_fout: paginaFout, weet: weet } };
   }
 
