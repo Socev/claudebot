@@ -9352,6 +9352,88 @@ function appVjDoorzetLater(id, sleutel) {
   }, APP_VJ_DOORZET_MS);
   if (t && t.unref) t.unref();
 }
+// wv1229 (David 24-10, vraag-id 5e57425b): een kaart met een voorwaarde (kolom voorwaarde, bv. "claudebot herstarten" met
+// {veld: versie, waarde: <sha>}) gaat bij Gedaan pas dicht als deze pod de voorwaarde waar meet. Niet waar: kaart blijft open met
+// "Nog niet gelukt…" (mk_voor_jou_nog_niet bewaart de tik), dus de beheerronde geeft de werkvoorraadrij niet vrij. De opstartronde
+// sluit zo'n getikte kaart na de herstart zelf, met de oorspronkelijke tik als bewijs (david_naloop geeft de rij dan vrij).
+// Niet vast te stellen (git kent de commit niet, /proc onleesbaar) = zoals vóór wv1229: dicht, met die kanttekening (Fable vooraf #7).
+// versie/image_versie: de draaiende sha begint met de waarde of is er een nakomeling van (git merge-base --is-ancestor in de werkboom);
+// herstart_na: de container (PID 1) startte na de tijd; olares_herstart_na: de machine startte na de tijd. uitrol.sh herstart alleen
+// het node-kind, dus herstart_na meet een echte herstart in Olares.
+const APP_VJ_GIT_DIR = process.env.APP_VJ_GIT_DIR || '/opt/data/claudebot-src';
+const APP_VJ_VELDNAAM = { versie: 'de app', image_versie: 'de app', herstart_na: 'de app', olares_herstart_na: 'Olares' };
+const appVjBron = {
+  versie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || ''; },
+  image_versie: function () { return process.env.IMAGE_SHA || ''; },
+  // starttijden in ms uit /proc (btime + starttijd PID 1 in kloktikken; 100 per seconde op Linux)
+  herstart_na: function () {
+    const bt = Number((/^btime (\d+)$/m.exec(fs.readFileSync('/proc/stat', 'utf8')) || [])[1]);
+    const st = Number(fs.readFileSync('/proc/1/stat', 'utf8').split(')').pop().trim().split(/\s+/)[19]);
+    return bt > 0 && st >= 0 ? bt * 1000 + Math.round(st * 10) : NaN;
+  },
+  olares_herstart_na: function () { return Number((/^btime (\d+)$/m.exec(fs.readFileSync('/proc/stat', 'utf8')) || [])[1]) * 1000; },
+  voorouder: function (oud, nieuw) {   // true / false / null (niet vast te stellen)
+    return new Promise(function (ok) {
+      require('child_process').execFile('git', ['-C', APP_VJ_GIT_DIR, 'merge-base', '--is-ancestor', oud, nieuw], { timeout: 5000 }, function (e) {
+        ok(!e ? true : e.code === 1 ? false : null);
+      });
+    });
+  },
+};
+async function appVjVoorwaardeMeet(v) {
+  const veld = v && v.veld, w = String((v && v.waarde) || '');
+  try {
+    if (veld === 'versie' || veld === 'image_versie') {
+      const nu = String(appVjBron[veld]() || '').toLowerCase();
+      if (!/^[0-9a-f]{7,40}$/.test(nu) || !/^[0-9a-f]{7,40}$/.test(w)) return { waar: null, spoor: veld + ' ' + (nu || 'onbekend') };
+      if (nu.indexOf(w) === 0 || w.indexOf(nu) === 0) return { waar: true, spoor: veld + ' ' + nu.slice(0, 12) + ' = ' + w };
+      const a = await appVjBron.voorouder(w, nu);
+      return { waar: a, spoor: veld + ' ' + nu.slice(0, 12) + (a === true ? ' nieuwer dan ' : a === false ? ' niet na ' : ' ? ') + w };
+    }
+    if (veld === 'herstart_na' || veld === 'olares_herstart_na') {
+      const start = appVjBron[veld](), t = Date.parse(w);
+      if (!(start > 0) || !(t > 0)) return { waar: null, spoor: veld + ' onleesbaar' };
+      return { waar: start > t, spoor: veld + ': gestart ' + new Date(start).toISOString() + ' na ' + w + ': ' + (start > t) };
+    }
+  } catch (e) { return { waar: null, spoor: veld + ' fout: ' + String(e && e.message || e).slice(0, 80) }; }
+  return { waar: null, spoor: 'onbekend veld' };
+}
+function appVjNogNietTekst(v) {
+  const wie = APP_VJ_VELDNAAM[v && v.veld] || 'de app';
+  if (v && (v.veld === 'versie' || v.veld === 'image_versie')) return 'Nog niet gelukt: de app draait nog de vorige versie. Herstart hem (nog eens) in Olares; zodra de nieuwe versie draait, gaat deze kaart vanzelf dicht. Lukt het na een herstart nog niet, zeg het Socev.';
+  return 'Nog niet gelukt: ik zie nog geen herstart van ' + wie + ' na ' + appVjDag(appYmd(Date.parse(v.waarde))) + ' ' + appKlok(new Date(Date.parse(v.waarde)).toISOString())
+    + '. Zodra die er is, gaat deze kaart vanzelf dicht. Lukt het na een herstart nog niet, zeg het Socev.';
+}
+// Opstartronde: getikte kaarten met een voorwaarde die nu waar is, dicht (door david: zijn tik, nu bewezen). Een voorwaarde kan
+// alleen bij een (her)start waar worden, dus bij de start is genoeg; bij een leesfout nog een paar keer. Conflict = niet opnieuw.
+async function appVjVoorwaardeRonde() {
+  if (!(await appRolOk())) return ['reservekant: niets'];
+  appStaat.vjCache = null;
+  const punten = await appVjPunten(), nu = Date.now(), uit = [];
+  for (const p of punten) {
+    const v = p.voorwaarde;
+    if (!v || typeof v !== 'object' || !v.getikt || (p.status !== 'open' && p.status !== 'later')) continue;
+    const m = await appVjVoorwaardeMeet(v);
+    if (m.waar !== true) { uit.push(p.sleutel + ': ' + m.waar); continue; }
+    const r = await appSbRpc('mk_voor_jou_status', { p_sleutel: p.sleutel, p_van: p.status, p_naar: 'gedaan', p_door: 'david', p_later_tot: null,
+      p_bewijs: v.getikt + ' (dicht zodra ' + (APP_VJ_VELDNAAM[v.veld] || 'de app') + ' op de nieuwe versie draaide, gemeten ' + appVjDag(appYmd(nu)) + ' ' + appKlok(new Date(nu).toISOString()) + ')',
+      p_reden: 'pod-opstartronde wv1229: ' + m.spoor + '; tik: ' + v.getikt });
+    appStaat.vjCache = null;
+    uit.push(p.sleutel + ': ' + (r && r.ok === true ? 'dicht' : 'conflict ' + (r && r.nu)));
+    if (!r || r.ok !== true) logError('app-voor-jou', new Error('voorwaarde-ronde: ' + p.sleutel + ' niet dicht (' + (r && r.nu) + ')'));
+  }
+  return uit;
+}
+function appVjVoorwaardeStart(poging) {
+  const t = setTimeout(function () {
+    appVjVoorwaardeRonde().catch(function (e) {
+      logError('app-voor-jou', e);
+      if (poging < 6) appVjVoorwaardeStart(poging + 1);
+    });
+  }, poging ? 5 * 60 * 1000 : 60 * 1000);
+  if (t && t.unref) t.unref();
+}
+if (APP_ECHT) appVjVoorwaardeStart(0);
 function appVjVoorApparaat(punten, a) { const vast = !!(a && a.soort === 'vast'); return punten.filter(function (p) { return !(vast && p.prive === true); }); }
 function appVjKort(p, vandaag) {
   return { id: p.id, soort: ['doen', 'besluit', 'proef'].indexOf(p.soort) >= 0 ? p.soort : 'doen', titel: appKort(appVjGewoon(p.titel), 120), regel2: appVjRegel2(p, vandaag),
@@ -9886,6 +9968,30 @@ async function appVoorJouKeuze(req, res, a, d) {
     body = { p_sleutel: p.sleutel, p_van: t.naar, p_naar: t.van, p_door: 'david', p_bewijs: bewijs, p_later_tot: t.van === 'later' ? t.later_tot : null };
   } else {
     body = { p_sleutel: p.sleutel, p_van: van, p_naar: keuze, p_door: 'david', p_bewijs: bewijs, p_later_tot: tot };
+  }
+  // wv1229: Gedaan op een kaart met een voorwaarde (bv. herstart naar een nieuwe versie) telt pas als die nu waar is
+  const vw = keuze === 'gedaan' && p.voorwaarde && typeof p.voorwaarde === 'object' && p.voorwaarde.veld ? p.voorwaarde : null;
+  if (vw) {
+    const m = await appVjVoorwaardeMeet(vw);
+    if (m.waar === false) {
+      const tekst = appVjNogNietTekst(vw);
+      let rn;
+      try { rn = await appSbRpc('mk_voor_jou_nog_niet', { p_sleutel: p.sleutel, p_van: van, p_tik: bewijs, p_meting: tekst }); } catch (e) {
+        logError('app-voor-jou', e); appStaat.vjCache = null;
+        return appWeiger(res, 503, 'opslaan lukte nu niet; probeer het zo opnieuw', 'voor-jou rpc');
+      }
+      appStaat.vjCache = null;
+      res._app.reden = 'voor-jou gedaan #' + id + ' -> nog niet (voorwaarde)';
+      if (!rn || rn.ok !== true) return appStuur(res, 409, { ok: false, fout: 'dit punt is intussen veranderd; ververs de lijst', nu: rn && typeof rn.nu === 'string' ? rn.nu : null });
+      const n = Number(rn.punt && rn.punt.voorwaarde && rn.punt.voorwaarde.nog_niet_n) || 1;
+      if (n >= 2) logError('app-voor-jou', new Error('voorwaarde ' + p.sleutel + ' al ' + n + 'x niet waar bij Gedaan: ' + m.spoor));   // Fable vooraf #1: de ronde ziet dit
+      return appStuur(res, 409, { ok: false, fout: tekst, nog_niet: true, nu: van });
+    }
+    if (m.waar === null) {   // niet vast te stellen: David niet vastzetten op een meetfout (zoals vóór wv1229), wel een spoor
+      body.p_bewijs = bewijs + ' (nieuwe versie niet vast te stellen)';
+      body.p_reden = 'wv1229 voorwaarde niet vast te stellen: ' + m.spoor;
+      logError('app-voor-jou', new Error('voorwaarde ' + p.sleutel + ' niet vast te stellen: ' + m.spoor));
+    } else body.p_reden = 'wv1229 voorwaarde waar: ' + m.spoor;
   }
   let r;
   try { r = await appSbRpc('mk_voor_jou_status', body); } catch (e) {

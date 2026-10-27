@@ -324,6 +324,13 @@ async function nepFetch(url, opt) {
         gesloten_op: ['gedaan', 'vervallen'].includes(b.p_naar) ? new Date().toISOString() : null, bewijs: b.p_bewijs != null ? b.p_bewijs : x.bewijs });
       return antw(200, { ok: true, punt: Object.assign({}, x) });
     }
+    if (fn === 'mk_voor_jou_nog_niet') {   // wv1229: zoals de echte (compare-and-set, tik + teller in voorwaarde, meting)
+      const x = (sbStaat.vj || []).find((y) => y.sleutel === b.p_sleutel);
+      if (!/^app \d{1,2}-\d{1,2} \d{1,2}:\d{2}: David tikte Gedaan$/.test(b.p_tik || '')) return antw(400, { message: 'tik' });
+      if (!x || x.status !== b.p_van || !x.voorwaarde) return antw(200, { ok: false, fout: 'conflict', nu: x ? x.status : null });
+      x.voorwaarde = Object.assign({}, x.voorwaarde, { getikt: b.p_tik, nog_niet_n: (x.voorwaarde.nog_niet_n || 0) + 1 }); x.meting = b.p_meting;
+      return antw(200, { ok: true, punt: Object.assign({}, x) });
+    }
     if (fn === 'mk_voor_jou_vervallen_doorzetten') {   // wv506: zoals de echte (door David, "Niet meer nodig", rij wacht op David, aan geen ander open punt; de 60 s toetst de databank)
       if (sbStaat.vjKapot) return antw(500, { message: 'kapot' });
       const uit = [];
@@ -399,7 +406,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart, appVjBron, appVjVoorwaardeMeet, appVjVoorwaardeRonde };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -6196,6 +6203,65 @@ async function bewijs(o) {
       toets('27 een ander apparaat krijgt geen ↩️ en ziet het gedane punt niet meer (Fable #4)', nr.st === 200 && !nr.b.punten.some((x) => x.id === 2), JSON.stringify(nr.b.punten.map((x) => [x.id, x.terug_ms])));
       r = await K({ id: 2, van: 'open', keuze: 'gedaan' });
       toets('27 tweede Gedaan op hetzelfde punt (van klopt niet meer) -> 409 met de stand', r.status === 409 && r.j.nu === 'gedaan', JSON.stringify(r.j));
+      { // wv1229: Gedaan op een kaart met een voorwaarde (herstart naar een nieuwe versie) telt pas als de pod die waar meet
+        const telBewaar = H.appStaat.tellers.voorjou.splice(0), bronBewaar = Object.assign({}, H.appVjBron), vjN0 = sbStaat.vj.length;
+        const nN = () => sbRpc.filter((x) => x.fn === 'mk_voor_jou_nog_niet');
+        const vwPunt = (id, vw) => sbStaat.vj.push({ id, sleutel: 'wv' + id, soort: 'doen', titel: 'Socev-app — één keer herstarten in Olares', status: 'open', waar: 'overal', prive: false,
+          stappen: ['Herstart claudebot in Olares.'], herkomst: { wv: [id], auto: 'wv' }, voorwaarde: vw, aangemaakt: new Date().toISOString(), bijgewerkt: new Date().toISOString() });
+        vwPunt(9101, { bron: 'health', veld: 'versie', waarde: 'f38ce3f' });
+        vwPunt(9102, { bron: 'health', veld: 'image_versie', waarde: 'abcdef1' });
+        vwPunt(9103, { bron: 'health', veld: 'herstart_na', waarde: '2026-10-27T18:30:00+01:00' });
+        vwPunt(9104, { bron: 'health', veld: 'versie', waarde: 'f38ce3f' });
+        let gevr = [];
+        H.appVjBron.versie = () => '91e5636aaaaa'; H.appVjBron.voorouder = async (o, n) => { gevr.push([o, n]); return false; };
+        H.appStaat.vjCache = null;
+        const nS0 = nS().length;
+        r = await K({ id: 9101, van: 'open', keuze: 'gedaan' });
+        const x1 = sbStaat.vj.find((y) => y.id === 9101), n1 = nN()[nN().length - 1];
+        toets('wv1229 Gedaan, app draait nog de vorige versie -> 409 "Nog niet gelukt", kaart open met meting en tik, geen status-RPC', r.status === 409 && r.j.nog_niet === true
+          && /^Nog niet gelukt: de app draait nog de vorige versie/.test(r.j.fout) && x1.status === 'open' && /^Nog niet gelukt/.test(x1.meting) && /^app \d+-\d+ \d\d:\d\d: David tikte Gedaan$/.test(x1.voorwaarde.getikt)
+          && nS().length === nS0 && n1 && n1.b.p_van === 'open' && gevr.length === 1 && gevr[0][0] === 'f38ce3f' && gevr[0][1] === '91e5636aaaaa', JSON.stringify([r.status, r.j, x1, gevr]));
+        r = await vraag('GET', '/app/voor-jou/9101', undefined, { pot: P.jar });
+        toets('wv1229 details tonen de meting "Nog niet gelukt…"', r.status === 200 && /^Nog niet gelukt: de app draait nog de vorige versie/.test(r.j.meting), JSON.stringify(r.j && r.j.meting));
+        // ronde zonder nieuwe versie: niets dicht
+        let ronde = await H.appVjVoorwaardeRonde();
+        toets('wv1229 opstartronde, nog steeds de oude versie -> kaart blijft open, geen status-RPC', x1.status === 'open' && nS().length === nS0 && ronde.join() === 'wv9101: false', JSON.stringify(ronde));
+        // na de herstart: de draaiende versie is een nakomeling
+        H.appVjBron.versie = () => 'f99aa11bbbbb'; H.appVjBron.voorouder = async (o, n) => { gevr.push([o, n]); return o === 'f38ce3f' && n === 'f99aa11bbbbb'; };
+        ronde = await H.appVjVoorwaardeRonde();
+        const sR = nS()[nS().length - 1];
+        toets('wv1229 opstartronde na de herstart (nieuwere versie) -> gedaan door david, bewijs begint met de oorspronkelijke tik (david_naloop), spoor in p_reden',
+          x1.status === 'gedaan' && x1.gesloten_door === 'david' && sR.b.p_sleutel === 'wv9101' && sR.b.p_bewijs.indexOf(x1.voorwaarde.getikt + ' (dicht zodra de app op de nieuwe versie draaide') === 0
+          && /^app \d{1,2}-\d{1,2} \d{1,2}:\d{2}: David tikte Gedaan/.test(sR.b.p_bewijs) && /f99aa11bbbbb nieuwer dan f38ce3f/.test(sR.b.p_reden) && ronde.join() === 'wv9101: dicht', JSON.stringify([ronde, sR.b]));
+        // gelijke versie (prefix) bij de tik zelf -> meteen gedaan, zonder git
+        H.appVjBron.versie = () => 'f38ce3f00000'; gevr = [];
+        r = await K({ id: 9104, van: 'open', keuze: 'gedaan' });
+        const s4 = nS()[nS().length - 1].b;
+        toets('wv1229 Gedaan als de nieuwe versie al draait -> 200 gedaan zoals gewoon, bewijs ongewijzigd, geen git', r.status === 200 && r.j.punt.status === 'gedaan' && s4.p_sleutel === 'wv9104'
+          && /^app \d+-\d+ \d\d:\d\d: David tikte Gedaan$/.test(s4.p_bewijs) && /voorwaarde waar/.test(s4.p_reden) && gevr.length === 0, JSON.stringify([r.status, s4]));
+        // niet vast te stellen (git kent de commit niet) -> dicht zoals vóór wv1229, met kanttekening
+        H.appVjBron.image_versie = () => '1234567890abcdef1234567890abcdef12345678'; H.appVjBron.voorouder = async () => null;
+        const nL = logs.length;
+        r = await K({ id: 9102, van: 'open', keuze: 'gedaan' });
+        const s5 = nS()[nS().length - 1].b;
+        toets('wv1229 voorwaarde niet vast te stellen -> gedaan met "(nieuwe versie niet vast te stellen)" + logregel (nooit vastzetten)', r.status === 200 && s5.p_sleutel === 'wv9102'
+          && /David tikte Gedaan \(nieuwe versie niet vast te stellen\)$/.test(s5.p_bewijs) && logs.slice(nL).some((l) => /niet vast te stellen/.test(l)), JSON.stringify([r.status, s5, logs.slice(nL)]));
+        // herstart_na: container nog van vóór de tijd -> nog niet; tekst noemt de tijd
+        H.appVjBron.herstart_na = () => Date.parse('2026-10-27T10:49:49+01:00');
+        r = await K({ id: 9103, van: 'open', keuze: 'gedaan' });
+        const x3 = sbStaat.vj.find((y) => y.id === 9103);
+        toets('wv1229 herstart_na: geen herstart na de tijd -> 409 "ik zie nog geen herstart van de app na 27-10 18:30"', r.status === 409 && /^Nog niet gelukt: ik zie nog geen herstart van de app na 27-10 18:30\./.test(r.j.fout) && x3.status === 'open', JSON.stringify([r.status, r.j]));
+        r = await K({ id: 9103, van: 'open', keuze: 'gedaan' });
+        toets('wv1229 tweede Gedaan zonder herstart -> weer 409, teller 2, logregel voor de beheerronde (Fable vooraf #1)', r.status === 409 && x3.voorwaarde.nog_niet_n === 2 && logs.some((l) => /wv9103 al 2x niet waar/.test(l)), JSON.stringify([r.status, x3.voorwaarde]));
+        H.appVjBron.herstart_na = () => Date.parse('2026-10-27T19:02:00+01:00');
+        r = await K({ id: 9103, van: 'open', keuze: 'gedaan' });
+        toets('wv1229 herstart_na: na de herstart -> gedaan', r.status === 200 && x3.status === 'gedaan', JSON.stringify([r.status, r.j]));
+        const mm = await H.appVjVoorwaardeMeet({ veld: 'herstart_na', waarde: 'onzin' }), mo = await H.appVjVoorwaardeMeet({ veld: 'uptime', waarde: '1' });
+        toets('wv1229 meet: onleesbare tijd en onbekend veld -> null (niet vast te stellen)', mm.waar === null && mo.waar === null, JSON.stringify([mm, mo]));
+        Object.assign(H.appVjBron, bronBewaar); sbStaat.vj.length = vjN0; H.appStaat.vjCache = null;
+        [9101, 9102, 9103, 9104].forEach((i) => { delete H.appStaat.vjTerug[i]; });
+        H.appStaat.tellers.voorjou.splice(0, H.appStaat.tellers.voorjou.length, ...telBewaar);
+      }
       r = await K({ id: 2, keuze: 'terug' });
       const s2 = nS()[nS().length - 1].b;
       toets('27 ↩️ binnen de minuut -> van gedaan naar open', r.status === 200 && r.j.punt.status === 'open' && s2.p_van === 'gedaan' && s2.p_naar === 'open' && sbStaat.vj[1].status === 'open', JSON.stringify([r.j, s2]));
