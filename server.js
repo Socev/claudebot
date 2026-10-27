@@ -14329,7 +14329,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartAan() ? (facturenKaartStaat.laatste || { aan: true }) : { aan: false } } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo() } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -14451,6 +14451,8 @@ function appVjModuleKaart(p) {
   return !!h.module && !bron(h.wv) && !bron(h.register) && !bron(h.todoist);
 }
 const facturenKaartStaat = { bezig: false, opnieuw: false, timer: null, vorige: null, laatste: null };
+// /health.facturen.kaart; nooit een fout in /health (ook niet als het Facturen-blok los in een toets-vm draait)
+function facturenKaartInfo() { try { return facturenKaartAan() ? (facturenKaartStaat.laatste || { aan: true }) : { aan: false }; } catch (e) { return undefined; } }
 function facturenKaartAan() { return !!(facturenKaartMod && facturenRoutes && SERVER_ECHT && rolPrimair() && process.env.FACTUREN_KAART !== 'uit'); }
 function facturenKaartPlan(ms) {
   if (!facturenKaartAan() || facturenKaartStaat.timer) return;
