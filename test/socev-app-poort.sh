@@ -3258,6 +3258,15 @@ async function bewijs(o) {
       const rsN = await H.appPushStuur(pid, 'antwoord machinekamer');   // zoals appPushNaBeurt hem echt stuurt
       r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
       toets('15 de pod stuurde een antwoord-seintje (machinekamer) -> seintje.tab machinekamer (reden niet afgekapt; review #2)', rsN.ok && r.j.seintje && r.j.seintje.tab === 'machinekamer', JSON.stringify(rsN) + JSON.stringify(r.j.seintje));
+      // wv1393 (OVIS M2c): naast tab het doel in catalogusnamen, voor elk van de vier seintjes; zonder focus
+      const doel93 = {};
+      for (const reden of ['antwoord hoofd', 'antwoord machinekamer', 'antwoord cijfer-meester', 'meldingen']) {
+        pjN.apparaten[pid].laatst = { op: new Date().toISOString(), status: 201, reden: reden }; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pjN));
+        const r93 = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
+        doel93[reden] = r93.j.seintje;
+      }
+      toets('15 wv1393 seintje.doel = { scherm } naast tab (hoofd, machinekamer, cijfer-meester, meldingen), geen focus',
+        Object.values(doel93).every((x) => x && x.doel && x.doel.scherm === x.tab && Object.keys(x.doel).join() === 'scherm') && Object.values(doel93).map((x) => x.tab).join() === 'hoofd,machinekamer,cijfer-meester,meldingen', JSON.stringify(doel93));
       pjN.apparaten[pid].laatst = { op: new Date().toISOString(), status: 201, reden: 'proef' }; fs.writeFileSync(path.join(DATA, 'push.json'), JSON.stringify(pjN));
       r = await vraag('GET', '/app/nieuw', undefined, { pot: P.jar });
       const s1 = r.j.seintje;

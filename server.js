@@ -8577,6 +8577,10 @@ async function appNieuwBronnen() {
   uit.autokastje = auto ? auto.filter(function (x) { return x.klaar_op; }).map(function (x) { return Date.parse(x.klaar_op); }) : null;
   return uit;
 }
+// OVIS M2c (wv1393, ontwerplijnen § 3.5): naast de oude tab-naam het doel { scherm, focus? } in de namen van de app-catalogus
+// (src/modules.ts: GESPREK.id en module-id's). Een app van vóór M2c leest alleen tab; een nieuwe app leest doel en valt op tab terug.
+// Focus geeft de pod (nog) niet: een seintje zegt alleen welk gesprek of welke lijst, nooit een stuk (geen id in de push-weg).
+const APP_SEINTJE_DOEL = { hoofd: 'hoofd', machinekamer: 'machinekamer', 'cijfer-meester': 'cijfer-meester', meldingen: 'meldingen' };
 function appSeintjeTab(id) {
   let s = null;
   try { s = appPushLees().apparaten[id] || null; } catch (e) { return null; }
@@ -8584,7 +8588,7 @@ function appSeintjeTab(id) {
   if (!l || !(l.status >= 200 && l.status < 300) || !(Date.now() - Date.parse(l.op) < APP_SEINTJE_TAB_MS)) return null;
   const m = /^antwoord (hoofd|machinekamer|cijfer-meester)$/.exec(String(l.reden || ''));
   const tab = m ? m[1] : l.reden === 'meldingen' ? 'meldingen' : null;
-  return tab ? { tab: tab, op: l.op } : null;
+  return tab ? { tab: tab, doel: { scherm: APP_SEINTJE_DOEL[tab] }, op: l.op } : null;
 }
 async function appNieuwRoute(req, res, a) {
   res._app.stil = true;   // elke minuut per apparaat: geen auditregel bij 200
@@ -9339,6 +9343,11 @@ async function appVjTelling(a) {
 function appVjTerugMs(id, nu, apparaat) {
   const t = appStaat.vjTerug[id];
   return t && t.tot > nu && t.apparaat === apparaat ? t.tot - nu : 0;
+}
+// wv1393: in het poortblok (de toetsen draaien dat blok los in een vm). Modulekaart (ontwerplijnen § 4.1, voor-jou.py modulekaart): herkomst.module zonder wv/register/todoist = de module beheert hem zelf
+function appVjModuleKaart(p) {
+  const h = (p && p.herkomst) || {}, bron = function (v) { return Array.isArray(v) ? v.length > 0 : !!v; };
+  return !!h.module && !bron(h.wv) && !bron(h.register) && !bron(h.todoist);
 }
 async function appVoorJouRoute(req, res, a, kanaal) {
   res._app.stil = true;   // de app leest bij openen van Vandaag en op Ververs
@@ -14449,11 +14458,6 @@ const facturenKaartMod = (function () {
   if (!fs.existsSync(p)) return null;
   try { return require(p); } catch (e) { logError('facturen-kaart', e); return null; }
 })();
-// Modulekaart (ontwerplijnen § 4.1, voor-jou.py modulekaart): herkomst.module zonder wv/register/todoist = de module beheert hem zelf
-function appVjModuleKaart(p) {
-  const h = (p && p.herkomst) || {}, bron = function (v) { return Array.isArray(v) ? v.length > 0 : !!v; };
-  return !!h.module && !bron(h.wv) && !bron(h.register) && !bron(h.todoist);
-}
 const facturenKaartStaat = { bezig: false, opnieuw: false, timer: null, vorige: null, laatste: null };
 // /health.facturen.kaart; nooit een fout in /health (ook niet als het Facturen-blok los in een toets-vm draait)
 function facturenKaartInfo() { try { return facturenKaartAan() ? (facturenKaartStaat.laatste || { aan: true }) : { aan: false }; } catch (e) { return undefined; } }
