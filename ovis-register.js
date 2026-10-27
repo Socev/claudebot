@@ -927,7 +927,7 @@ function leesRekening(rel, tekst) {
   if (['PRIVE', 'POT'].indexOf(uit.entiteit_id) < 0) f.push('entiteit_id moet PRIVE of POT zijn');
   else if ((uit.entiteit_id === 'PRIVE') !== /^20_Prive\//.test(rel)) f.push('een privérekening hoort in de privémap, een POT-rekening bij de entiteit');
   if (uit.doel.length > 300) f.push('doel langer dan 300 tekens');
-  if (['vast', 'concept'].indexOf(v.status) < 0) f.push('status moet vast of concept zijn');
+  if (['actueel', 'vast', 'concept'].indexOf(v.status) < 0) f.push('status moet actueel, vast of concept zijn');   // actueel = vaultstandaard (SB2-linter)
   return uit;
 }
 // Bankregels-pagina: de weergave; wat erboven of eronder met "- ?" staat is een voorstel
@@ -945,17 +945,39 @@ function leesBankregels(tekst) {
   uit.voorstellen = buiten.split('\n').slice(fm.eind + 1).filter(function (r) { return /^\s*[-*]\s*\?/.test(r); });
   return uit;
 }
-// Organisatie in het register op naam (naam, alias op de knoop, alias-kenmerk): precies één, anders niets. Alleen organisaties.
+// Organisatie in het register op naam (naam, alias op de knoop, alias-kenmerk): precies één, anders niets. Alleen organisaties. Alleen
+// voor weergave (een link in een gegenereerd blok; stuurt niets). Eerst exact, dan op de naamkern (rechtsvorm eraf) en dan op voorvoegsel:
+// de bank kapt namen af ("Waterschap Amstel, Gooi") of zet er iets achter ("… Netherlands B.V."). Voorvoegsel alleen met een kern van
+// ≥ 5 tekens (een afgekapte banknaam ≥ 10) en alleen als de langste kandidaat bij precies één organisatie hoort.
 function orgOpNaam(reg) {
-  function norm(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
-  const per = {}, knopen = {};
-  function zet(n, id) { const x = norm(n); if (x.length < 3) return; (per[x] = per[x] || new Set()).add(id); }
+  function woorden(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\b([bn])\.\s?v\b\.?/g, '$1v').split(/[^a-z0-9]+/).filter(Boolean); }
+  function norm(s) { return woorden(s).join(''); }
+  function kern(s) {
+    const w = woorden(s);
+    if (w.length > 1 && w[0] === 'nv') w.shift();
+    if (w.length > 1 && ['bv', 'nv', 'bvba', 'gmbh', 'ltd', 'inc', 'ua', 'sa', 'ag'].indexOf(w[w.length - 1]) >= 0) w.pop();
+    return w.join('');
+  }
+  const per = {}, perKern = {}, knopen = {};
+  function zet(n, id) { const x = norm(n), k = kern(n); if (x.length >= 3) (per[x] = per[x] || new Set()).add(id); if (k.length >= 3) (perKern[k] = perKern[k] || new Set()).add(id); }
   (reg && reg.knopen || []).forEach(function (k) {
     if (k.rol === 'eigen' || k.soort !== 'organisatie' || k.actief === false || !k.vault_pagina) return;
     knopen[k.id] = k; zet(k.naam, k.id); (k.aliassen || []).forEach(function (a) { zet(a, k.id); });
   });
   (reg && reg.handvatten || []).forEach(function (h) { if (h.soort === 'alias' && h.status !== 'vervallen' && knopen[h.knoop]) zet(h.waarde, h.knoop); });
-  return function (naam) { const s = per[norm(naam)]; return s && s.size === 1 ? knopen[Array.from(s)[0]] : null; };
+  const kernen = Object.keys(perKern);
+  function een(s) { return s && s.size === 1 ? knopen[Array.from(s)[0]] : null; }
+  return function (naam) {
+    const s = per[norm(naam)];
+    if (s) return een(s);
+    const b = kern(naam);
+    if (b.length < 3) return null;
+    if (perKern[b]) return een(perKern[b]);
+    const kand = kernen.filter(function (k) { return (k.length >= 5 && b.indexOf(k) === 0) || (b.length >= 10 && k.indexOf(b) === 0); })
+      .sort(function (x, y) { return y.length - x.length; });
+    if (!kand.length || (kand.length > 1 && kand[1].length === kand[0].length)) return null;
+    return een(perKern[kand[0]]);
+  };
 }
 function orgLink(k) { return '[[' + String(k.vault_pagina).replace(/\.md$/, '') + '|' + String(k.naam).replace(/[\[\]|\n]/g, ' ') + ']]'; }
 function maandNl(d) { const m = /^(\d{4})-(\d{2})/.exec(String(d || '')); return m ? Number(m[2]) + '-' + m[1] : '?'; }
@@ -990,11 +1012,12 @@ function bankBlokTekst(p, m, orgVan) {
     '- Posten in de bank: ' + (po && po.n ? 'van ' + maandNl(po.van) + ' t/m ' + maandNl(po.tot) : 'nog geen') + ' (bedragen, saldo en tegenpartijen blijven in de bank)'];
   const ab = (m.abonnementen || []).filter(function (a) { return a.rek === rk.rek && Number(a.actief) === 1; });
   if (ab.length) {
-    const links = [], gezien = new Set(); let rest = 0;
+    const links = [], gezien = new Set(), zonder = new Set();
     ab.forEach(function (a) {
       const k = !bankBeperkt(rk) && BANK_STIL.indexOf(a.categorie) < 0 ? orgVan(a.naam) : null;
-      if (k && !gezien.has(k.id)) { gezien.add(k.id); links.push(orgLink(k)); } else if (!k) rest++;
+      if (k && !gezien.has(k.id)) { gezien.add(k.id); links.push(orgLink(k)); } else if (!k) zonder.add(String(a.naam || a.id).toLowerCase());
     });
+    const rest = zonder.size;   // unieke namen, niet elke machtiging apart
     links.sort();
     r.push('- Lopende vaste lasten en abonnementen: ' + (links.length ? links.join(' · ') + (rest ? ' · en ' + rest + ' zonder pagina in het register' : '') : rest + ' (geen met een pagina in het register)'));
   }

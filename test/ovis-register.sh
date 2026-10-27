@@ -744,7 +744,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const IA = 'NL00TEST0000000011', IB = 'NL00TEST0000000022', IC = 'NL00TEST0000000033', IP = 'NL00TEST0000000044', IX = 'NL00TEST0000000055';
     const REKP = (naam, e) => '20_Prive/Financien/Rekeningen/Rekening - ' + naam + ' (' + e + ').md';
     const POTP = '10_Zakelijk/POT_POH_GGZ/Rekening - POT (0044).md';
-    const rekTekst = (iban, ent, extra) => ['---', 'type: rekening', 'iban: "' + iban + '"', 'entiteit_id: ' + ent, 'doel: ""', 'status: vast', 'updated: 2026-10-27', 'ovis:',
+    const rekTekst = (iban, ent, extra) => ['---', 'type: rekening', 'iban: "' + iban + '"', 'entiteit_id: ' + ent, 'doel: ""', 'status: actueel', 'updated: 2026-10-27', 'ovis:',
       '  db: ["pod:bank-transacties/rekening#' + iban + '"]', '---', '# Rekening', '', 'Stampagina.', extra || ''].join('\n');
     const REGELS_T = ['---', 'type: gegenereerd', 'ovis:', '  db: ["pod:bank-transacties/regels"]', '---', '# Bankregels', '', 'Uitleg.', ''].join('\n');
     const M = () => ({
@@ -837,6 +837,14 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
       && /R2 · betalingen met een tegenpartij \(naam blijft in de bank\)/.test(bR) && !/jan de proef|medewerker|R4 /i.test(bR) && /Op de POT-rekening: 1 regel/.test(bR) && /Ingetrokken.*: 1/.test(bR)
       && /gezet door de machinekamer/.test(bR) && /gezet via het gesprek met Socev/.test(bR) && /raakte 3 posten, laatst 10-2026/.test(bR) && !/rb|ra\b/.test(bR.replace(/[a-z]+rb|ra[a-z]/g, '')), bR);
     toets('10 blokken idempotent (zelfde invoer = zelfde tekst)', R.bankBlokTekst(PAG()[0], M(), orgVan) === bA && R.bankRegelsBlokTekst(M(), PAG(), orgVan) === bR);
+    // naam → organisatie (alleen weergave): kern zonder rechtsvorm, voorvoegsel in één richting, alleen bij precies één kandidaat
+    { const kn = (id, naam) => ({ id: 'org:' + id, soort: 'organisatie', rol: 'leverancier', naam: naam, vault_pagina: '20_Prive/Relaties/' + naam + '.md', aliassen: [] });
+      const ov = R.orgOpNaam({ knopen: [kn('ps', 'ProefStroom'), kn('pw', 'Proefwaterschap Amstel en Vecht'), kn('pz', 'Proefzorg'), kn('bn', 'Proefbank Noord'), kn('bz', 'Proefbank Zuid'), kn('kp', 'Kop'), kn('e', 'Eigen BV')].concat([{ id: 'TG', soort: 'entiteit', rol: 'eigen', naam: 'Proefpraktijk', vault_pagina: 'x.md' }]), handvatten: [] });
+      const id = (n) => (ov(n) || {}).id || null;
+      toets('10 naamkern: achtervoegsel, afgekapt, NV vooraan', id('ProefStroom Netherlands B.V.') === 'org:ps' && id('Proefwaterschap Amstel') === 'org:pw' && id('NV Proefzorg') === 'org:pz' && id('PROEFSTROOM') === 'org:ps',
+        [id('ProefStroom Netherlands B.V.'), id('Proefwaterschap Amstel'), id('NV Proefzorg')]);
+      toets('10 naamkern: twijfel blijft los (twee kandidaten, te kort, eigen entiteit)', id('Proefbank') === null && id('Proefbank Noord Holding') === 'org:bn' && id('Kop Mobiel') === null && id('Proefpraktijk') === null && id('Eigen') === 'org:e',
+        [id('Proefbank'), id('Proefbank Noord Holding'), id('Kop Mobiel'), id('Proefpraktijk'), id('Eigen')]); }
     // de echte lezer op een wegwerp-SQLite: alleen SELECT, alleen lezen
     const dbPad = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ovis-bank-')), 'transacties.sqlite');
     { const { DatabaseSync } = require('node:sqlite'); const d = new DatabaseSync(dbPad);
