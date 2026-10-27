@@ -174,7 +174,7 @@ test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/trio
   const dir = map('m5');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.deepEqual(f.toegepast, [5, 6, 7, 8]);
+  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9]);
   assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
@@ -232,7 +232,7 @@ test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt vol
   assert.deepEqual(tabelSql(db), voor);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   db.close();
-  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
 });
 
 test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {

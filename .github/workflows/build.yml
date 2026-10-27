@@ -105,7 +105,7 @@ jobs:
       - name: facturen-kern.js en facturen-bank.js moeten puur blijven
         if: ${{ !cancelled() }}
         run: |
-          for f in facturen-kern.js facturen-bank.js facturen-validatie.js; do
+          for f in facturen-kern.js facturen-bank.js facturen-validatie.js facturen-sepa.js; do
             C=$(grep -vE '^\s*(\*|//)' "$f")
             if echo "$C" | grep -nE "require\([\`'\"](node:)?(fs(/promises)?|os|http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.|import\("; then
               echo "::error::$f laadt een bestand-, netwerk- of procesmodule; de kern moet puur blijven"; exit 1
@@ -123,7 +123,11 @@ jobs:
           if grep -vE '^\s*(\*|//)' facturen-validatie.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('\./facturen-kern\.js'\)$"; then
             echo "::error::facturen-validatie.js laadt een module buiten facturen-kern.js"; exit 1
           fi
-          echo "facturen-kern.js, facturen-bank.js en facturen-validatie.js: puur."
+          # facturen-sepa.js (wv1405): maakt het pain.001-bestand van de SEPA-batch; laadt alleen crypto (sha256). Betaalt of verstuurt niets.
+          if grep -vE '^\s*(\*|//)' facturen-sepa.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('crypto'\)$"; then
+            echo "::error::facturen-sepa.js laadt een module buiten crypto"; exit 1
+          fi
+          echo "facturen-kern.js, facturen-bank.js, facturen-validatie.js en facturen-sepa.js: puur."
 
       # pot-datahub.js (wv815): POT-posten naar Davids datahub. Puur: geen bestand-, netwerk- of procesmodule, geen fetch en geen klok
       # (vandaag komt van server.js); alleen crypto en mt940-lezer.js. Schrijven in D1 doet server.js, altijd met parameters.

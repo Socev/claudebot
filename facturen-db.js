@@ -719,6 +719,72 @@ function M8(db) {
   db.exec('CREATE INDEX IF NOT EXISTS leverancier_knoop ON leverancier (knoop_id)');
 }
 
+/*
+ * wv1405 (SEPA-batch, David 27-10-2026: "Met keuze voor aanpasbare betaaldatum voor elke betaling"): factuur.betaal_op (de zelf gekozen
+ * uitvoerdatum; leeg = standaard, de vervaldatum) en factuur.uitvoer_op (de uitvoerdatum in de laatste batch; leeg na Ongedaan; de
+ * bankcontrole telt "ingevoerd, niet gezien" pas vanaf die dag). sepa_batch + sepa_regel leggen vast wat er in elk bestand stond, zodat
+ * (1) "al eerder in een batch" voor altijd te zien is, (2) hetzelfde bestand byte voor byte opnieuw te maken is (zelfde MsgId: de bank ziet
+ * een dubbele upload) en (3) de bankcontrole de batchafschrijving (PmtInfId + totaal) aan de facturen koppelt. Alleen toevoegen (triggers),
+ * zoals de audit; het bestand zelf wordt niet bewaard. De database dwingt af: nooit POT of Privé, de rekening hoort bij de entiteit en is een
+ * gewone rekening met controle (geen bankluis), de factuur hoort bij die entiteit. LET OP terugrol: een release van vóór wv1405 opent deze
+ * database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 9` (de oude code noemt de kolommen
+ * bij naam en kent de twee tabellen niet). Herhaalbaar: na zo'n terugrol voegt M9 alleen toe wat ontbreekt.
+ */
+const M9_KOLOMMEN = {
+  betaal_op: 'ALTER TABLE factuur ADD COLUMN betaal_op TEXT ' + DATUM('betaal_op'),
+  uitvoer_op: 'ALTER TABLE factuur ADD COLUMN uitvoer_op TEXT ' + DATUM('uitvoer_op'),
+};
+const M9_REST = `
+CREATE TABLE IF NOT EXISTS sepa_batch (
+  id TEXT PRIMARY KEY ${ID('id')},
+  rekening TEXT NOT NULL REFERENCES rekening(id),
+  entiteit TEXT NOT NULL REFERENCES entiteit(sleutel) CHECK (entiteit NOT IN ('prive','pot')),
+  formaat TEXT NOT NULL CHECK (formaat IN ('pain.001.001.09')),
+  msg_id TEXT NOT NULL UNIQUE CHECK (length(msg_id) BETWEEN 1 AND 35),
+  cre_dt_tm TEXT NOT NULL CHECK (length(cre_dt_tm) = 19),
+  initg_naam TEXT NOT NULL CHECK (length(initg_naam) BETWEEN 1 AND 70),
+  dbtr_naam TEXT NOT NULL CHECK (length(dbtr_naam) BETWEEN 1 AND 70),
+  dbtr_iban TEXT NOT NULL ${IBAN('dbtr_iban')},
+  dbtr_bic TEXT CHECK (dbtr_bic IS NULL OR length(dbtr_bic) IN (8, 11)),
+  aantal INTEGER NOT NULL CHECK (aantal BETWEEN 1 AND 500),
+  totaal_centen INTEGER NOT NULL CHECK (totaal_centen > 0),
+  sha256 TEXT NOT NULL ${SHA('sha256')},
+  wie TEXT NOT NULL, wanneer TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sepa_regel (
+  id INTEGER PRIMARY KEY,
+  batch TEXT NOT NULL REFERENCES sepa_batch(id),
+  factuur TEXT NOT NULL REFERENCES factuur(id),
+  pmtinf_id TEXT NOT NULL CHECK (length(pmtinf_id) BETWEEN 1 AND 35),
+  volgnr INTEGER NOT NULL CHECK (volgnr >= 1),
+  positie INTEGER NOT NULL CHECK (positie >= 1),
+  uitvoerdatum TEXT NOT NULL ${DATUM('uitvoerdatum')},
+  centen INTEGER NOT NULL CHECK (centen > 0),
+  iban TEXT NOT NULL ${IBAN('iban')},
+  naam TEXT NOT NULL CHECK (length(naam) BETWEEN 1 AND 70),
+  rmt TEXT ${JSONO('rmt')},
+  UNIQUE (batch, factuur), UNIQUE (batch, positie)
+);
+CREATE INDEX IF NOT EXISTS sepa_regel_factuur ON sepa_regel (factuur);
+CREATE INDEX IF NOT EXISTS sepa_regel_pmtinf ON sepa_regel (pmtinf_id);
+CREATE TRIGGER IF NOT EXISTS sepa_batch_vast BEFORE UPDATE ON sepa_batch BEGIN SELECT RAISE(ABORT, 'sepa_vast: een batch verandert niet meer'); END;
+CREATE TRIGGER IF NOT EXISTS sepa_batch_weg BEFORE DELETE ON sepa_batch BEGIN SELECT RAISE(ABORT, 'sepa_vast: een batch verandert niet meer'); END;
+CREATE TRIGGER IF NOT EXISTS sepa_regel_vast BEFORE UPDATE ON sepa_regel BEGIN SELECT RAISE(ABORT, 'sepa_vast: een batch verandert niet meer'); END;
+CREATE TRIGGER IF NOT EXISTS sepa_regel_weg BEFORE DELETE ON sepa_regel BEGIN SELECT RAISE(ABORT, 'sepa_vast: een batch verandert niet meer'); END;
+CREATE TRIGGER IF NOT EXISTS sepa_batch_rekening BEFORE INSERT ON sepa_batch
+WHEN NOT EXISTS (SELECT 1 FROM rekening r WHERE r.id = NEW.rekening AND r.entiteit = NEW.entiteit AND r.controle = 1 AND r.bank_formaat <> 'bankluis'
+  AND r.iban = NEW.dbtr_iban AND r.entiteit NOT IN ('prive','pot'))
+BEGIN SELECT RAISE(ABORT, 'sepa_rekening: de rekening hoort niet bij deze entiteit of kan geen batch'); END;
+CREATE TRIGGER IF NOT EXISTS sepa_regel_factuur_ent BEFORE INSERT ON sepa_regel
+WHEN NOT EXISTS (SELECT 1 FROM factuur f JOIN sepa_batch b ON b.id = NEW.batch WHERE f.id = NEW.factuur AND f.entiteit = b.entiteit AND f.soort = 'factuur')
+BEGIN SELECT RAISE(ABORT, 'sepa_regel: de factuur hoort niet bij de entiteit van de batch of is een creditnota'); END;
+`;
+function M9(db) {
+  const kol = new Set(db.prepare('PRAGMA table_info(factuur)').all().map((x) => x.name));
+  for (const [k, sql] of Object.entries(M9_KOLOMMEN)) if (!kol.has(k)) db.exec(sql);
+  db.exec(M9_REST);
+}
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -727,12 +793,12 @@ const MIGRATIES = [
   { versie: 5, naam: 'Triodos: bank TRIODOS en formaat triodos_csv in de CHECKs (wv1299)', fn: (db) => M5(db) },
   { versie: 6, naam: "voorstel: status 'vervallen' bij herbeoordeling (wv1317)", fn: (db) => M6(db) },
   { versie: 7, naam: 'feiten: rekening is van leverancier, uit de bankhistorie (wv1323)', fn: (db) => M7(db) },
-  { versie: 8, naam: 'leverancier.knoop_id: koppeling met het OVIS-register (wv980)', fn: (db) => M8(db) },
+  { versie: 8, naam: 'leverancier.knoop_id: koppeling met het OVIS-register (wv980)', fn: (db) => M8(db) },  { versie: 9, naam: 'SEPA-batch: betaal_op/uitvoer_op op de factuur, sepa_batch en sepa_regel (wv1405)', fn: (db) => M9(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
-  'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit'];
+  'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 

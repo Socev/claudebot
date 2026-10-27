@@ -11,6 +11,7 @@ const ROOT = path.resolve(__dirname, '..');
 const D = require(path.join(ROOT, 'facturen-db.js'));
 const K = require(path.join(ROOT, 'facturen-kern.js'));
 const F = require(path.join(ROOT, 'facturen.js'));
+const B = require(path.join(ROOT, 'facturen-bank.js'));
 const Z = require(path.join(ROOT, 'test', 'facturen-zaad.js'));
 const { ibanFromAbnAccount } = require(path.join(ROOT, 'mt940-lezer.js'));
 
@@ -1010,4 +1011,270 @@ test('wv1323: factuur met een bekende leverancier: Ja zet de rekening bij die le
   nabelFactuur(t, vreemd, null, true);
   betalingen(t, vreemd, ['Iemand Anders', 'Iemand Anders', 'Iemand Anders'], 45);
   assert.equal(t.call('GET', 'bank').j.feiten.filter((x) => x.sleutel === 'iban:' + vreemd).length, 0);
+});
+
+// ───────────────────────────── SEPA-batch (wv1405) ─────────────────────────────
+
+const { spawnSync } = require('child_process');
+const SEPA_XSD = path.join(__dirname, 'schema', 'pain.001.001.09.xsd');
+function sepaXsd(tekst) {
+  const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sepa-r-')), 'b.xml');
+  fs.writeFileSync(p, tekst);
+  const r = spawnSync('python3', ['-I', '-c', 'import sys\nfrom lxml import etree\ns=etree.XMLSchema(etree.parse(sys.argv[1]))\nprint("OK" if s.validate(etree.parse(sys.argv[2])) else "FOUT " + str(s.error_log))',
+    SEPA_XSD, p], { encoding: 'utf8' });
+  fs.rmSync(path.dirname(p), { recursive: true, force: true });
+  if (r.status !== 0 && /No module named/.test(r.stderr || '')) return 'OK';   // zonder lxml toetst test/facturen-sepa.sh het schema (en meldt dat)
+  return (r.stdout || '').trim() || r.stderr;
+}
+// Een bevestigde factuur op de betaallijst, met een bekend IBAN van een leverancier van die entiteit (geen IBAN-blokkade). Alles verzonnen.
+let sepaVolg = 0;
+function teBetalenFactuur(t, o) {
+  o = o || {};
+  const ent = o.entiteit || 'tolgaarde';
+  const lev = t.fdb.db.prepare("SELECT l.id, l.naam, (SELECT iban FROM leverancier_iban WHERE leverancier = l.id ORDER BY iban LIMIT 1) AS iban FROM leverancier l WHERE l.standaard_entiteit = ? " +
+    "AND l.standaard_betaalwijze = 'zelf' ORDER BY l.naam LIMIT 1").get(ent);
+  sepaVolg++;
+  const st = D.stukSchrijf(t.fdb, Buffer.from('sepa-proef ' + sepaVolg + ' ' + crypto.randomBytes(4).toString('hex')));
+  const did = D.nieuwId(), id = D.nieuwId(), w = new Date(NU).toISOString();
+  D.voegToe(t.fdb, 'document', { id: did, sha256: st.sha256, naam: 'proef.pdf', mime: 'application/pdf', bytes: st.bytes, soort: 'pdf', aangemaakt_op: w });
+  const incl = o.incl === undefined ? 90000 + sepaVolg * 7 : o.incl;
+  D.voegToe(t.fdb, 'factuur', Object.assign({ id, document: did, soort: 'factuur', leverancier: lev.id, leverancier_naam: lev.naam, nummer: 'SP-' + String(sepaVolg).padStart(4, '0'),
+    factuurdatum: '2026-10-15', vervaldatum: '2026-11-05', excl: Math.round(incl / 1.21), btw: incl - Math.round(incl / 1.21), incl, valuta: 'EUR', iban: lev.iban, ibans_betaal: [lev.iban],
+    betaalwijze: 'zelf', entiteit: ent, status: 'in_wachtrij', bevestigd_door: 'proef', bevestigd_op: w, betaalspoor: 'te_betalen', aangemaakt_op: w, bijgewerkt_op: w }, o.velden || {}));
+  return id;
+}
+function sepaRek(t, entiteit) { return t.call('GET', 'betalen').j.sepa.rekeningen.filter((k) => k.entiteit === entiteit); }
+function sepaDownload(t, rekening, facturen, bewust, x) {
+  const v = t.call('POST', 'sepa-batch', { rekening, facturen, bewust, voorbeeld: true }, x);
+  assert.equal(v.status, 200, JSON.stringify(v.j));
+  t.vers.ok = true;
+  return { v, r: t.call('POST', 'sepa-batch', { rekening, facturen, bewust, sleutel: v.j.sleutel }, x) };
+}
+
+test('wv1405 SEPA: voorbeeld → download met verse vingerafdruk; bestand geldig (XSD); facturen op ingevoerd met uitvoerdatum; batch vast; hetzelfde bestand opnieuw', () => {
+  const t = opzet();
+  const a = teBetalenFactuur(t);
+  const b = teBetalenFactuur(t, { velden: { vervaldatum: '2026-11-01', kenmerk: '9000 0000 0000 0001' } });   // zondag → vrijdag 30-10
+  const bet = t.call('GET', 'betalen').j;
+  const ra = bet.te_betalen.find((x) => x.id === a), rb = bet.te_betalen.find((x) => x.id === b);
+  assert.deepEqual([ra.uitvoer, ra.uitvoer_bron, ra.batch_reden], ['2026-11-05', 'vervaldatum', null]);
+  assert.deepEqual([rb.uitvoer, rb.uitvoer_bron], ['2026-10-30', 'werkdag_ervoor']);
+  assert.equal(bet.sepa.vroegst, '2026-10-22');
+  assert.ok(!bet.sepa.rekeningen.some((k) => ['pot', 'prive'].includes(k.entiteit)), 'POT en Privé niet als batchrekening');
+  const [rek] = sepaRek(t, 'tolgaarde');
+  const v = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [a, b], voorbeeld: true });
+  assert.equal(v.status, 200, JSON.stringify(v.j));
+  assert.deepEqual([v.j.aantal, v.j.vroegste, v.j.laatste, v.j.per_datum.length, v.j.geweigerd.length], [2, '2026-10-30', '2026-11-05', 2, 0]);
+  assert.equal(v.j.totaal_centen, t.f('id = ?', [a]).incl + t.f('id = ?', [b]).incl);
+  assert.match(v.j.regels.find((x) => x.id === b).omschrijving, /9000000000000001 \(betalingskenmerk\)/);
+  // zonder verse vingerafdruk: 403; met een andere sleutel: 409 en niets gebeurd
+  assert.equal(t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [a, b], sleutel: v.j.sleutel }).j.vers_nodig, true);
+  t.vers.ok = true;
+  const mis = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [a, b], sleutel: 'f'.repeat(64) });
+  assert.equal(mis.status, 409); assert.equal(mis.j.code, 'veranderd');
+  assert.equal(t.vers.verbruikt, 1, 'de vingerafdruk is verbruikt');
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_batch'), 0);
+  t.vers.ok = true;
+  const r = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [a, b], sleutel: v.j.sleutel });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.match(r.j.msg_id, /^SOCEV-20261022-[0-9a-f]{8}$/);
+  assert.match(r.j.bestand.naam, /^SEPA Tolgaarde 2026-10-22 [0-9a-f]{8}\.xml$/);
+  assert.equal(sepaXsd(r.j.bestand.inhoud), 'OK');
+  assert.equal((r.j.bestand.inhoud.match(/<PmtInf>/g) || []).length, 2);
+  assert.match(r.j.bestand.inhoud, /<EndToEndId>/);
+  assert.match(r.j.bestand.inhoud, /<Issr>CUR<\/Issr><\/Tp><Ref>9000000000000001<\/Ref>/);
+  assert.deepEqual(['betaalspoor', 'uitvoer_op'].map((k) => t.f('id = ?', [a])[k]), ['ingevoerd', '2026-11-05']);
+  assert.equal(t.f('id = ?', [b]).uitvoer_op, '2026-10-30');
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_regel WHERE batch = ?', [r.j.batch]), 2);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'sepa_batch' AND object_id = ?", [r.j.batch]), 1);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'sepa_batch_regel'"), 2);
+  // het bestand staat nergens in de database (alleen de sha256)
+  assert.doesNotMatch(JSON.stringify(t.fdb.db.prepare('SELECT * FROM sepa_batch').all()) + JSON.stringify(t.fdb.db.prepare("SELECT * FROM audit WHERE wat LIKE 'sepa%'").all()), /CstmrCdtTrfInitn/);
+  // nog een keer downloaden: 409 (al ingevoerd), geen tweede batch
+  t.vers.ok = true;
+  const twee = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [a, b], sleutel: v.j.sleutel });
+  assert.equal(twee.status, 409); assert.match(JSON.stringify(twee.j.geweigerd), /al ingevoerd/);
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_batch'), 1);
+  // de batch verandert niet meer
+  assert.throws(() => t.fdb.db.prepare('UPDATE sepa_batch SET aantal = 1').run(), /sepa_vast/);
+  assert.throws(() => t.fdb.db.prepare('DELETE FROM sepa_regel').run(), /sepa_vast/);
+  // hetzelfde bestand opnieuw (verse vingerafdruk), byte voor byte
+  assert.equal(t.call('POST', 'sepa-bestand', { batch: r.j.batch }).status, 403);
+  t.vers.ok = true;
+  const op = t.call('POST', 'sepa-bestand', { batch: r.j.batch });
+  assert.equal(op.status, 200, JSON.stringify(op.j));
+  assert.equal(op.j.bestand.inhoud, r.j.bestand.inhoud);
+  assert.equal(op.j.bestand.sha256, r.j.bestand.sha256);
+  t.vers.ok = true;
+  assert.equal(t.call('POST', 'sepa-bestand', { batch: r.j.batch }, { nu: NU + 31 * 86400000 }).status, 409, 'na 30 dagen niet meer');
+  const na = t.call('GET', 'betalen').j;
+  assert.equal(na.sepa.batches[0].nog_ingevoerd, 2);
+  assert.ok(na.ingevoerd_niet_gezien.some((x) => x.id === a && x.uitvoer_op === '2026-11-05'));
+});
+
+test('wv1405 SEPA: weigeringen (creditnota, IBAN niet nagebeld, valuta, buiten de EER, al gekoppeld, open voorstel, te ver, andere entiteit) — alles of niets, zonder bedrag of naam', () => {
+  const t = opzet();
+  const goed = teBetalenFactuur(t);
+  const credit = teBetalenFactuur(t, { incl: -12100, velden: { soort: 'creditnota' } });
+  const usd = teBetalenFactuur(t, { velden: { valuta: 'USD' } });
+  const nieuwIban = Z.maakIban('NL', 'TEST', '0912345678');
+  const blok = teBetalenFactuur(t, { velden: { iban: nieuwIban, ibans_betaal: [nieuwIban], iban_nieuw: 1, ibans_onbekend: [nieuwIban] } });
+  const gb = teBetalenFactuur(t, { velden: { iban: 'GB33BUKB20201555555555' } });   // het voorbeeld-IBAN uit de documentatie
+  const ver = teBetalenFactuur(t, { velden: { vervaldatum: '2062-10-01' } });
+  const gekop = teBetalenFactuur(t);
+  const tx = t.fdb.db.prepare("SELECT id FROM bank_transactie WHERE entiteit = 'tolgaarde' AND bedrag_centen < 0 ORDER BY id LIMIT 1").get();
+  t.fdb.db.prepare("INSERT INTO koppeling (transactie, factuur, bron, methode, zekerheid, alleen_eigenaar, wie, wanneer) VALUES (?, ?, 'mens', 'handmatig', 1, 0, 'proef', ?)").run(tx.id, gekop, new Date(NU).toISOString());
+  const vrs = teBetalenFactuur(t);
+  D.voegToe(t.fdb, 'voorstel', { sleutel: 'proef:' + vrs, transactie: tx.id, facturen: [vrs], methode: 'iban_bedrag', zekerheid: 0.7, aangemaakt_op: new Date(NU).toISOString() });
+  const hold = teBetalenFactuur(t, { entiteit: 'holding' });
+  const [rek] = sepaRek(t, 'tolgaarde');
+  const alle = [goed, credit, usd, blok, gb, ver, gekop, vrs, hold];
+  const v = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: alle, voorbeeld: true });
+  assert.equal(v.status, 200, JSON.stringify(v.j));
+  assert.equal(v.j.aantal, 1);
+  const reden = (id) => (v.j.geweigerd.find((g) => g.id === id) || {}).reden;
+  assert.match(reden(credit), /creditnota/);
+  assert.match(reden(usd), /valuta/);
+  assert.match(reden(blok), /nagebeld/);
+  assert.match(reden(gb), /buiten de EER/);
+  assert.match(reden(ver), /364 dagen/);
+  assert.match(reden(gekop), /bankbetaling aan gekoppeld/);
+  assert.match(reden(vrs), /koppelvoorstel/);
+  assert.match(reden(hold), /andere entiteit/);
+  const tekst = v.j.geweigerd.map((g) => g.reden).join(' | ');
+  assert.doesNotMatch(tekst, /Leverancier|B\.V\.|\d+[.,]\d{2}|NL\d\d/, 'redenen zonder naam, bedrag of rekeningnummer');
+  for (const id of alle) assert.ok(!tekst.includes(String(Math.abs(t.f('id = ?', [id]).incl))), 'geen bedrag in centen');
+  // de download weigert het geheel; niets veranderd
+  t.vers.ok = true;
+  const r = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: alle, sleutel: v.j.sleutel });
+  assert.equal(r.status, 409);
+  assert.equal(t.f('id = ?', [goed]).betaalspoor, 'te_betalen');
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_batch'), 0);
+  // POT- en Privé-rekening, een onbekende rekening: nooit
+  for (const ent of ['pot', 'prive']) {
+    const k = t.fdb.db.prepare('SELECT id FROM rekening WHERE entiteit = ?').get(ent);
+    assert.equal(t.call('POST', 'sepa-batch', { rekening: k.id, facturen: [goed], voorbeeld: true }).status, 409, ent);
+  }
+  assert.equal(t.call('POST', 'sepa-batch', { rekening: '0123456789abcdef', facturen: [goed], voorbeeld: true }).status, 409);
+  // de database weigert een batch op de POT-rekening ook als de code zich vergist
+  const pot = t.fdb.db.prepare("SELECT * FROM rekening WHERE entiteit = 'pot'").get();
+  assert.throws(() => D.voegToe(t.fdb, 'sepa_batch', { id: D.nieuwId(), rekening: pot.id, entiteit: 'tolgaarde', formaat: 'pain.001.001.09', msg_id: 'X', cre_dt_tm: '2026-10-22T10:00:00',
+    initg_naam: 'x', dbtr_naam: 'x', dbtr_iban: pot.iban, aantal: 1, totaal_centen: 1, sha256: 'a'.repeat(64), wie: 'x', wanneer: 'x' }), /sepa_rekening/);
+  // praktijkmanager, de smalle ingang, de passieve kant, dubbele id's, te veel
+  const pm = t.pm();
+  assert.equal(t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [goed], voorbeeld: true }, { rol: pm }).status, 403);
+  assert.equal(t.call('POST', 'betaaldatum', { id: goed, datum: '2026-11-10' }, { rol: pm }).status, 403);
+  assert.equal(t.call('GET', 'betalen', null, { rol: pm }).j.sepa, undefined, 'de praktijkmanager ziet geen batchgegevens');
+  assert.equal(t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [goed], voorbeeld: true }, { primair: false }).status, 409);
+  assert.equal(t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [goed, goed], voorbeeld: true }).status, 400);
+  assert.equal(t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [], voorbeeld: true }).status, 400);
+  assert.equal(t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: Array.from({ length: 501 }, () => D.nieuwId()), voorbeeld: true }).status, 400);
+});
+
+test('wv1405 SEPA: uitdrukkelijke keuze bij al eerder in een batch (na Ongedaan), mogelijk al betaald en een fout kenmerk; Ongedaan noemt de batch', () => {
+  const t = opzet();
+  const [rek] = sepaRek(t, 'tolgaarde');
+  const a = teBetalenFactuur(t);
+  assert.equal(sepaDownload(t, rek.id, [a]).r.status, 200);
+  const o = t.call('POST', 'ingevoerd-ongedaan', { id: a });
+  assert.equal(o.status, 200, JSON.stringify(o.j));
+  assert.match(o.j.in_batch.msg_id, /^SOCEV-/);
+  assert.match(o.j.in_batch.let_op, /haal hem ook uit de bank/);
+  assert.equal(t.f('id = ?', [a]).uitvoer_op, null);
+  const rij = t.call('GET', 'betalen').j.te_betalen.find((x) => x.id === a);
+  assert.ok(rij.eerder_in_batch && rij.eerder_in_batch.msg_id === o.j.in_batch.msg_id);
+  assert.deepEqual(rij.waarschuwingen.map((w) => w.code), ['eerder_in_batch']);
+  const v = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [a], voorbeeld: true });
+  assert.equal(v.j.aantal, 0); assert.deepEqual(v.j.geweigerd[0].bewust_nodig, ['eerder_in_batch']);
+  const tweede = sepaDownload(t, rek.id, [a], [a]);
+  assert.equal(tweede.r.status, 200, JSON.stringify(tweede.r.j));
+  assert.notEqual(tweede.r.j.msg_id, o.j.in_batch.msg_id, 'een nieuwe batch heeft een nieuwe MsgId');
+  // mogelijk al betaald: een afschrijving naar hetzelfde IBAN met hetzelfde bedrag sinds de factuurdatum, niet gekoppeld
+  const m = teBetalenFactuur(t, { incl: 77701 });
+  const f = t.f('id = ?', [m]);
+  const zaadRek = t.fdb.db.prepare("SELECT * FROM rekening WHERE entiteit = 'tolgaarde'").get();
+  const bestand = t.fdb.db.prepare('SELECT id FROM bank_bestand ORDER BY id LIMIT 1').get().id;
+  D.voegToe(t.fdb, 'bank_transactie', { id: D.nieuwId(), bestand, rekening: zaadRek.id, entiteit: 'tolgaarde', eigen_iban: zaadRek.iban, boekdatum: '2026-10-22', bedrag_centen: -77701,
+    valuta: 'EUR', tegenpartij_iban: f.iban, tegenpartij_naam: 'Banknaam Proef', entry_ref: 'proef-mb', formaat: zaadRek.bank_formaat, aangemaakt_op: new Date(NU).toISOString() });
+  const k = teBetalenFactuur(t, { velden: { kenmerk: '8000000000000001' } });
+  const v2 = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [m, k], voorbeeld: true });
+  assert.deepEqual(v2.j.geweigerd.map((g) => [g.id, g.bewust_nodig]).sort(), [[m, ['mogelijk_betaald']], [k, ['kenmerk_fout']]].sort());
+  const v3 = t.call('POST', 'sepa-batch', { rekening: rek.id, facturen: [m, k], bewust: [m, k], voorbeeld: true });
+  assert.equal(v3.j.aantal, 2);
+  assert.equal(v3.j.regels.find((x) => x.id === m).naam, 'Banknaam Proef', 'de naam die de bank bij dit IBAN kent (naam-nummercheck)');
+  assert.match(v3.j.regels.find((x) => x.id === k).omschrijving, /8000000000000001/);
+});
+
+test('wv1405 betaaldatum: werkdag, niet voorbij, hooguit 364 dagen; leeg = standaard; alleen bij te betalen; audit', () => {
+  const t = opzet();
+  const a = teBetalenFactuur(t);
+  assert.match(t.call('POST', 'betaaldatum', { id: a, datum: '2026-10-24' }).j.fout, /bankwerkdag/, 'zaterdag');
+  assert.match(t.call('POST', 'betaaldatum', { id: a, datum: '2026-10-21' }).j.fout, /voorbij/);
+  assert.match(t.call('POST', 'betaaldatum', { id: a, datum: '2027-10-22' }).j.fout, /364/);
+  assert.match(t.call('POST', 'betaaldatum', { id: a, datum: '2026-12-25' }).j.fout, /bankwerkdag/, 'Kerst');
+  const r = t.call('POST', 'betaaldatum', { id: a, datum: '2026-12-15' });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(r.j.uitvoer.datum, '2026-12-15');
+  const rij = () => t.call('GET', 'betalen').j.te_betalen.find((x) => x.id === a);
+  assert.deepEqual([rij().betaal_op, rij().uitvoer, rij().uitvoer_bron], ['2026-12-15', '2026-12-15', 'gekozen']);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'betaaldatum' AND object_id = ?", [a]), 1);
+  // een gekozen datum die voorbij is, wordt bij de batch de eerstvolgende werkdag
+  assert.deepEqual([t.call('GET', 'betalen', null, { nu: Date.parse('2026-12-19T10:00:00Z') }).j.te_betalen.find((x) => x.id === a).uitvoer], ['2026-12-21']);
+  assert.equal(t.call('POST', 'betaaldatum', { id: a, datum: null }).j.betaal_op, null);
+  assert.deepEqual([rij().uitvoer, rij().uitvoer_bron], ['2026-11-05', 'vervaldatum']);
+  assert.equal(t.call('POST', 'ingevoerd', { id: a }).status, 200);
+  assert.equal(t.call('POST', 'betaaldatum', { id: a, datum: '2026-12-15' }).status, 409, 'niet voor een ingevoerde factuur');
+});
+
+test('wv1405 twee rekeningen bij één entiteit; ABN-afschrift met PREF koppelt de hele batch; zonder kenmerk alleen een voorstel; losse betaling op EndToEndId; signaal pas vanaf de uitvoerdatum', () => {
+  const t = opzet();
+  const b = bankOpzet(t);   // tweede tolgaarde-rekening (abn_tab, ABN-rekeningnummer 31)
+  const reks = sepaRek(t, 'tolgaarde');
+  assert.equal(reks.length, 2, 'twee rekeningen: David kiest');
+  const abn = reks.find((k) => k.rekening === '…' + b.tg.slice(-4));
+  const a1 = teBetalenFactuur(t), a2 = teBetalenFactuur(t);
+  const { r } = sepaDownload(t, abn.id, [a1, a2]);
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.match(r.j.bestand.inhoud, new RegExp('<DbtrAcct><Id><IBAN>' + b.tg + '</IBAN>'));
+  const pmt = t.fdb.db.prepare('SELECT pmtinf_id, sum(centen) AS som FROM sepa_regel WHERE batch = ? GROUP BY pmtinf_id').get(r.j.batch);
+  // het afschrift: één afschrijving voor het blok, met de PmtInfId als PREF (zo staat een batch in de ABN-export, gemeten 27-10)
+  const bedrag = '-' + (pmt.som / 100).toFixed(2).replace('.', ',');
+  const regel = tabRij('0000000031', '20261105', bedrag, '/TRTP/SEPA Batch/PREF/' + pmt.pmtinf_id + '/NRTX/2');
+  assert.equal(B.leesAbnTab(regel + '\n')[0].kenmerk, pmt.pmtinf_id);
+  t.zetKlaar('beurt-sepa1', 1, 'export.tab', regel + '\n');
+  const up = t.call('POST', 'upload', { beurt: 'beurt-sepa1', n: 1, soort: 'auto' }, { nu: Date.parse('2026-11-06T10:00:00Z') });
+  assert.equal(up.status, 200, JSON.stringify(up.j));
+  for (const id of [a1, a2]) assert.equal(t.f('id = ?', [id]).betaalspoor, 'betaald_gezien', id);
+  assert.equal(t.n("SELECT count(*) AS n FROM koppeling WHERE methode = 'sepa_batch'"), 2);
+  // zonder kenmerk (andere bank, ander formaat): alleen een voorstel, met beide facturen
+  const c1 = teBetalenFactuur(t), c2 = teBetalenFactuur(t);
+  const tweede = sepaDownload(t, abn.id, [c1, c2]).r;
+  const som2 = t.n('SELECT sum(centen) AS n FROM sepa_regel WHERE batch = ?', [tweede.j.batch]);
+  t.zetKlaar('beurt-sepa2', 1, 'export.tab', tabRij('0000000031', '20261106', '-' + (som2 / 100).toFixed(2).replace('.', ','), 'SEPA Batch zonder kenmerk') + '\n');
+  assert.equal(t.call('POST', 'upload', { beurt: 'beurt-sepa2', n: 1, soort: 'auto' }, { nu: Date.parse('2026-11-07T10:00:00Z') }).status, 200);
+  const vs = t.fdb.db.prepare("SELECT * FROM voorstel WHERE methode = 'sepa_bedrag' AND status = 'open'").get();
+  assert.ok(vs, 'voorstel');
+  assert.deepEqual(JSON.parse(vs.facturen).sort(), [c1, c2].sort());
+  assert.equal(t.f('id = ?', [c1]).betaalspoor, 'ingevoerd', 'niet automatisch');
+  const uitleg = t.call('GET', 'bank', null, { nu: Date.parse('2026-11-07T10:00:00Z') }).j.voorstellen.find((x) => x.id === vs.id).uitleg;
+  assert.match(uitleg.let_op.join(' '), /batchkenmerk niet/);
+  assert.equal(t.call('POST', 'voorstel', { id: vs.id, keuze: 'bevestig' }).status, 200);
+  assert.equal(t.f('id = ?', [c2]).betaalspoor, 'betaald_gezien');
+  // één betaling in een blok: ABN boekt hem los, met de EndToEndId (factuur-id) als kenmerk
+  const e = teBetalenFactuur(t);
+  const derde = sepaDownload(t, abn.id, [e]).r;
+  assert.equal(derde.status, 200);
+  const fe = t.f('id = ?', [e]);
+  t.zetKlaar('beurt-sepa3', 1, 'export.tab', tabRij('0000000031', '20261105', '-' + (fe.incl / 100).toFixed(2).replace('.', ','),
+    '/TRTP/SEPA OVERBOEKING/IBAN/' + fe.iban + '/BIC/TESTNL2A/NAME/Proef/REMI/' + fe.nummer + '/EREF/' + e) + '\n');
+  assert.equal(t.call('POST', 'upload', { beurt: 'beurt-sepa3', n: 1, soort: 'auto' }, { nu: Date.parse('2026-11-07T10:00:00Z') }).status, 200);
+  assert.equal(t.f('id = ?', [e]).betaalspoor, 'betaald_gezien');
+  assert.equal(t.fdb.db.prepare('SELECT methode FROM koppeling WHERE factuur = ?').get(e).methode, 'sepa_e2e');
+  // signaal "ingevoerd, niet gezien" telt vanaf de uitvoerdatum (een batch voor over twee maanden geeft geen vals signaal)
+  const l = teBetalenFactuur(t);
+  assert.equal(t.call('POST', 'betaaldatum', { id: l, datum: '2026-12-21' }).status, 200);
+  assert.equal(sepaDownload(t, abn.id, [l]).r.status, 200);
+  const sig = (nu) => { F.bankcontroleToepassen(t.fdb, nu); return t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'ingevoerd_niet_gezien' AND EXISTS (SELECT 1 FROM json_each(facturen) j WHERE j.value = ?)", [l]); };
+  assert.equal(sig(Date.parse('2026-11-20T10:00:00Z')), 0, 'vóór de uitvoerdatum');
+  assert.equal(sig(Date.parse('2026-12-31T10:00:00Z')), 1, 'ruim 5 werkdagen ná de uitvoerdatum');
 });

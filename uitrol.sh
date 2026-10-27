@@ -50,6 +50,7 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # facturen-kern.js (wv797): kern van de Facturen-app (puur); nog door niets geladen, F1c/F2 koppelen hem (ontbreekt hij, dan geen Facturen).
 # facturen-bank.js (wv798): bankparsers, matching en signalen van de Facturen-app (puur, laadt facturen-kern.js + mt940-lezer.js); F2 koppelt hem.
 # facturen-validatie.js (wv944): factuurvalidatie op de bankhistorie (puur, laadt facturen-kern.js); facturen.js laadt hem (ontbreekt hij, dan geen Facturen).
+# facturen-sepa.js (wv1405): het pain.001-bestand van de SEPA-batch (puur, laadt alleen crypto); facturen.js laadt hem (ontbreekt hij, dan geen Facturen).
 # pot-datahub.js (wv815): POT-posten naar Davids datahub, door server.js geladen in potDatahubRonde na de bank-ronde (ontbreekt hij, dan faalt alleen die stap: box-rij, de ronde loopt door).
 # pot-verzend.js (wv911): nota's uit de POT-app als Gmail-concept, door server.js geladen in potVzTik (ontbreekt hij, dan pot_verzend.module=false in /health en blijven rijen wachten).
 # facturen-db.js (wv824): opslag van de Facturen-app (SQLite /opt/data/facturen, migraties, triggers, stukken, back-up); server.js opent hem alleen
@@ -79,7 +80,7 @@ RELEASE_BESTANDEN="server.js telegram-claude-bot.js telegram-reader.js koppel-te
 # scansnap.js (wv1343): ScanSnap-scans uit Google Drive → OVIS Intake + Voor jou-kaart, door server.js geladen (ontbreekt hij, dan geen tik, geen
 #   knop-haak en scansnap.module=false in /health).
 RELEASE_MAPPEN="intake"
-RELEASE_OPTIONEEL="intake-ingang.js intake-router.js vault-veilig.js bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js managers-poort.js mk-tekst.js ringkaart.js mediatheek.js gezondheid-app.js ovis-register.js ovis-run.js app-vast.js intake-telling.js zoek-snel.js onderhoud.js datums.js scansnap.js sb2-nacht.js docs-delen.js financien-vault.js"
+RELEASE_OPTIONEEL="intake-ingang.js intake-router.js vault-veilig.js bank-lezer.js bunq-lezer.js bewaker.js bank-archief.js studio.js bandjes.js audio.js spreektekst.js paypal-bewijs.js financien-app.js pot-afschrift.js mt940-lezer.js facturen-kern.js facturen-bank.js pot-datahub.js pot-verzend.js harvester.js facturen-db.js facturen.js facturen-koerier.js facturen-ingang.js facturen-validatie.js facturen-sepa.js secondbrain.js ideeen.js ideeen-filter.js aix.js managers.js managers-poort.js mk-tekst.js ringkaart.js mediatheek.js gezondheid-app.js ovis-register.js ovis-run.js app-vast.js intake-telling.js zoek-snel.js onderhoud.js datums.js scansnap.js sb2-nacht.js docs-delen.js financien-vault.js"
 
 log(){ printf '%s uitrol: %s\n' "$(date '+%F %T')" "$1" | tee -a "$LOG"; }
 fout(){ log "FOUT: $1"; exit 1; }

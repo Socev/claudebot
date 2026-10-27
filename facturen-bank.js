@@ -307,10 +307,19 @@ function abnIncasso(desc) {
   const inc = d.match(/Incassant: (\S+)/), mach = d.match(/Machtiging: (\S+)/);
   return { incassant_id: inc ? inc[1] : null, machtiging: mach ? mach[1] : null };
 }
+// wv1405: een batchafschrijving ("/TRTP/SEPA Batch/PREF/<PmtInfId>/NRTX/<aantal>", gemeten 27-10 in de ABN-exports) heeft geen EREF; de PREF
+// (de PmtInfId uit het pain.001-bestand) wordt dan het kenmerk, zodat de bankcontrole de batch aan zijn facturen kan koppelen. parseAbnDesc
+// blijft letterlijk de referentie; entry_ref hangt niet van het kenmerk af (geen dubbele regels bij opnieuw inlezen).
+function abnPref(desc, ttype) {
+  if (!/^SEPA Batch/.test(String(ttype || ''))) return null;
+  const m = String(desc || '').replace(/\s+/g, ' ').match(/\/PREF\/([^/]+?)\s*(?=\/[A-Z]{4}\/|$)/);
+  return m ? m[1].trim() || null : null;
+}
 function abnVelden(desc) {
   const o = parseAbnDesc(desc);
   const x = abnIncasso(desc);
-  return { ttype: o[0], tegenpartij_iban: o[1], tegenpartij_naam: o[2], oms: o[3], kenmerk: o[4], is_incasso: o[5], incassant_id: x.incassant_id, machtiging: x.machtiging };
+  return { ttype: o[0], tegenpartij_iban: o[1], tegenpartij_naam: o[2], oms: o[3], kenmerk: o[4] || abnPref(desc, o[0]), is_incasso: o[5], incassant_id: x.incassant_id,
+    machtiging: x.machtiging };
 }
 
 function leesAbnTab(tekst) {
@@ -995,6 +1004,13 @@ function dubbelGeupload(transacties) {
  * Automatisch koppelen alleen als de tegenpartij geborgd is (bekend IBAN of incassant van die leverancier) én de zekerheid ≥ 0,8 én er
  * geen gelijkwaardig alternatief is; al het andere wordt een voorstel dat een mens bevestigt.
  */
+// Komt een batch-id (PmtInfId) als los stuk in de tekst van de bank voor? Hoofdletterongevoelig; "…-1" telt niet in "…-10" (wv1405).
+function noemtBatchId(tekst, id) {
+  if (!tekst || !id) return false;
+  const t = String(tekst).toUpperCase(), p = String(id).toUpperCase();
+  for (let i = t.indexOf(p); i >= 0; i = t.indexOf(p, i + 1)) if (!/[0-9A-Z]/.test(t.charAt(i - 1)) && !/[0-9A-Z]/.test(t.charAt(i + p.length))) return true;
+  return false;
+}
 function bankcontrole(inv) {
   const vandaag = inv && inv.vandaag;
   if (!isIsoDatum(vandaag)) throw new BankWeigering('vandaag', 'vandaag ontbreekt');
@@ -1032,6 +1048,46 @@ function bankcontrole(inv) {
   const eigenaarVan = (tx, fids) => !!(tx && tx.alleen_eigenaar) || (fids || []).some((id) => isPrive(fMap.get(id)));
   const afgewezen = new Set(inv.afgewezenVoorstellen || []);
   const uit = { koppelingen: [], voorstellen: [], uitzonderingen: [], betaalspoor: [], signalen: [], heropenen: [] };
+  /*
+   * wv1405: batches uit de Facturen-app (inv.sepa: per PmtInf de eigen rekening, uitvoerdatum, totaal en regels). Een afschrijving op die
+   * rekening die het batch-id noemt (ABN: PREF → kenmerk) en precies het totaal is, hoort bij alle facturen van dat blok; een losse betaling
+   * met de factuur-id als kenmerk (EndToEndId; ABN boekt een blok van één betaling los) bij die ene. Ons eigen kenmerk is de borging, dus
+   * automatisch, ook zonder tegenpartij. Noemt de bank het batch-id niet (andere bank, ander exportformaat), dan alleen een voorstel als er
+   * precies één blok is met dat totaal op die rekening rond de uitvoerdatum (−3 … +10 dagen) en de regel geen tegenpartij heeft.
+   */
+  const sepa = (inv.sepa || []).filter((p) => p && p.pmtinf_id && p.eigen_iban && Array.isArray(p.regels) && p.regels.length);
+  const sepaKand = (tx) => {
+    if (richtingVan(tx) !== 'af' || !sepa.length) return null;
+    const bedrag = -tx.bedrag_centen, eigen = ibanNorm(tx.eigen_iban), bank = [tx.kenmerk, tx.omschrijving].filter(Boolean).join(' ');
+    const ken = String(tx.kenmerk || '').trim().toLowerCase();
+    const open = (ids) => ids.every((id) => fMap.has(id) && !voldaan(fMap.get(id)) && fMap.get(id).entiteit === tx.entiteit);
+    const opRek = sepa.filter((p) => ibanNorm(p.eigen_iban) === eigen);
+    for (const p of opRek) {
+      const ids = p.regels.map((x) => x.factuur);
+      if (bedrag === p.centen && noemtBatchId(bank, p.pmtinf_id) && open(ids)) return kandidaat('sepa_batch', ids.map((id) => fMap.get(id)), 1, tx, { pmtinf_id: p.pmtinf_id });
+      for (const x of p.regels) if (ken && ken === x.factuur && bedrag === x.centen && open([x.factuur])) return kandidaat('sepa_e2e', [fMap.get(x.factuur)], 1, tx, { pmtinf_id: p.pmtinf_id });
+    }
+    if (tx.tegenpartij_iban || opRek.some((p) => noemtBatchId(bank, p.pmtinf_id))) return null;
+    const kan = opRek.filter((p) => p.regels.length > 1 && bedrag === p.centen && isIsoDatum(p.datum) && dagenTussen(p.datum, tx.boekdatum) >= -3 &&
+      dagenTussen(p.datum, tx.boekdatum) <= 10 && open(p.regels.map((x) => x.factuur)));
+    if (kan.length !== 1) return null;
+    const k = kandidaat('sepa_bedrag', kan[0].regels.map((x) => fMap.get(x.factuur)), 0.7, tx, { pmtinf_id: kan[0].pmtinf_id });
+    k.ter_bevestiging = true;
+    return k;
+  };
+  // Ronde 0: eigen batches (vóór ronde 1: zo pakt geen andere regel een factuur uit een batch die de bank als één post boekte)
+  for (const tx of txs) {
+    if (txFacturen.has(tx.id)) continue;
+    const k = sepaKand(tx);
+    if (!k || k.ter_bevestiging) continue;
+    const eigenaar = eigenaarVan(tx, k.facturen);
+    for (const fid of k.facturen) {
+      uit.koppelingen.push({ transactie: tx.id, factuur: fid, bron: 'auto', methode: k.methode, zekerheid: k.zekerheid, alleen_eigenaar: eigenaar });
+      koppel(tx.id, fid, k.methode, 'auto');
+      const f = fMap.get(fid);
+      if (f && f.betaalspoor && f.betaalspoor !== 'betaald_gezien') uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'bankmatch', van: f.betaalspoor, naar: 'betaald_gezien' });
+    }
+  }
   const signalen = [];
   const voorgesteld = new Set();
   const wensen = [];
@@ -1119,7 +1175,8 @@ function bankcontrole(inv) {
       }
     }
     // wv1317: eerst alle wensen verzamelen; daarna krijgt elke factuur hooguit één open voorstel (de beste betaling, dan de dichtstbijzijnde)
-    const kand = matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx)
+    const sk = sepaKand(tx);
+    const kand = (sk && sk.ter_bevestiging ? [sk] : []).concat(matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx))
       .map((k) => Object.assign({ sleutel: voorstelSleutel(tx.id, k.facturen) }, k)).filter((k) => !afgewezen.has(k.sleutel));
     if (kand.length) { wensen.push({ tx, kand, basis }); continue; }
     if (richtingVan(tx) === 'af' && dagenTussen(tx.boekdatum, vandaag) > 7) signalen.push(maakSignaal('geen_factuur', basis));
@@ -1166,8 +1223,11 @@ function bankcontrole(inv) {
     const verval = f.vervaldatum && isIsoDatum(f.vervaldatum) ? f.vervaldatum : (f.factuurdatum && isIsoDatum(f.factuurdatum) ? plusDagen(f.factuurdatum, 14) : null);
     if (f.betaalspoor === 'incasso_verwacht' && verval && dagenTussen(verval, vandaag) > 14) signalen.push(maakSignaal('incasso_niet_gezien', basis));
     else if (f.betaalspoor === 'te_betalen' && verval && vandaag > verval) signalen.push(maakSignaal('te_betalen_niet_betaald', basis));
-    else if (f.betaalspoor === 'ingevoerd' && f.ingevoerd_op && isIsoDatum(String(f.ingevoerd_op).slice(0, 10)) && werkdagenTussen(String(f.ingevoerd_op).slice(0, 10), vandaag) > 5)
-      signalen.push(maakSignaal('ingevoerd_niet_gezien', basis));
+    // wv1405: een betaling die in een batch met een latere uitvoerdatum staat, telt pas vanaf die datum (anders een vals signaal per regel)
+    else if (f.betaalspoor === 'ingevoerd' && f.ingevoerd_op && isIsoDatum(String(f.ingevoerd_op).slice(0, 10))) {
+      const ing = String(f.ingevoerd_op).slice(0, 10), start = isIsoDatum(f.uitvoer_op) && f.uitvoer_op > ing ? f.uitvoer_op : ing;
+      if (start <= vandaag && werkdagenTussen(start, vandaag) > 5) signalen.push(maakSignaal('ingevoerd_niet_gezien', basis));
+    }
   }
   for (const f of facturen) {
     if (f.status === 'dubbel' && f.dubbel_van) {
@@ -1257,6 +1317,8 @@ function voorstelUitleg(v, tx, facturen, alternatieven, patroon) {
     case 'subset': waarom.push('één betaling voor ' + facturen.length + ' facturen van deze leverancier; ' + (verschil ? verschilTekst(verschil) : 'samen precies het bedrag') +
       (facturen.some(credit) ? ' (een creditnota is verrekend)' : '')); break;
     case 'valuta': waarom.push('factuur in vreemde valuta; omgerekend bedrag binnen 3 %'); break;
+    case 'sepa_batch': case 'sepa_e2e': waarom.push('de bank noemt het kenmerk van een batch die je met de Facturen-app maakte, en het bedrag klopt precies'); break;
+    case 'sepa_bedrag': waarom.push('één afschrijving voor ' + facturen.length + ' betalingen uit een batch van de Facturen-app; ' + (verschil ? verschilTekst(verschil) : 'samen precies het bedrag')); break;
     default: break;
   }
   const dz = datumZin(tx, f0);
@@ -1264,7 +1326,8 @@ function voorstelUitleg(v, tx, facturen, alternatieven, patroon) {
   const let_op = [];
   if ((alternatieven || []).length) let_op.push('er staat nog ' + (alternatieven.length === 1 ? 'een factuur' : alternatieven.length + ' facturen') + ' met hetzelfde bedrag open (' +
     alternatieven.map((f) => f.nummer || 'zonder nummer').join(', ') + '); kies je Ja, dan hoort deze betaling bij ' + (f0.nummer || 'de eerste'));
-  if (!v.tegenpartij_geborgd && af) let_op.push(f0.leverancier_naam ? (tx.tegenpartij_iban ? 'rekening ' + eind4(tx.tegenpartij_iban) : 'deze tegenpartij') + ' is nog niet als ' +
+  if (v.methode === 'sepa_bedrag') let_op.push('de bank noemt het batchkenmerk niet; kijk in je bank of dit de batch met deze uitvoerdatum is');
+  else if (!v.tegenpartij_geborgd && af) let_op.push(f0.leverancier_naam ? (tx.tegenpartij_iban ? 'rekening ' + eind4(tx.tegenpartij_iban) : 'deze tegenpartij') + ' is nog niet als ' +
     (tx.tegenpartij_iban ? 'rekening' : 'incassant') + ' van ' + f0.leverancier_naam + ' bevestigd'
     : 'de leverancier van deze factuur is nog niet bekend; Ja koppelt alleen deze betaling aan deze factuur');
   if (patroon && patroon.aantal) {
