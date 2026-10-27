@@ -184,7 +184,9 @@ function maak(o) {
 // hetzelfde script. Eén poging per datum, 03:50–04:49 Nederlandse tijd (na de nachtconsolidatie en de correspondentie-wachter; het venster
 // bestaat ook in de wisselnachten). Zelf ook via socev-run, met hartslag socev-run-veeg (drempelrij machinekamer.hartslag, 36 u). Een
 // levend proces wordt nooit opgeveegd (pid + starttijd + boot-id); de eigen run van deze ronde dus ook niet. Datum alleen in het geheugen:
-// een herstart in het venster geeft hooguit een tweede, onschadelijke ronde. Niet afhankelijk van de onderhoudsstand (raakt de vault niet).
+// een herstart in het venster geeft hooguit een tweede ronde (en veegt dan de eerste, onderbroken ronde terecht op: één box-rij). Niet
+// afhankelijk van de onderhoudsstand: de ronde zelf leest alleen logs; alleen een opgeveegde run schrijft (via socev-run) één box-rij,
+// buiten de vault-grendel, zoals elke mislukte socev-run. Alleen de logs van de pod-uid (1001); runs als socev worden niet opgeveegd.
 const VEEG = { van: [3, 50], tot: [4, 50] };   // [uur, min), Europe/Amsterdam
 function inVeegVenster(a) {
   const m = a.uur * 60 + a.min;
