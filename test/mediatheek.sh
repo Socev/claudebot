@@ -206,9 +206,71 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   // oude vorm (alleen nog voor de overzetting): leesPagina blijft werken
   toets('3q leesPagina (oude vorm) leest nog', M.leesPagina(pagina)[0].items[0].titel === 'Lied A!');
 
+  // ── 3c. review wv1397: races tussen controle en open, de kaft als koppeling of FIFO, [[x]] zonder aanhalingstekens, afkappen ──
+  const EV = fs.realpathSync(V);
+  const RD = path.join(EV, '20_Prive/Bronnen/Race'), ZD = path.join(EV, '10_Zakelijk/Race');
+  zet('20_Prive/Bronnen/Race/Race.mp3', MP3); zet('20_Prive/Bronnen/Race/Race.md', besch(['categorie: Shizzle'].concat(bl('20_Prive/Bronnen/Race/Race.mp3'))));
+  const GEHEIM = Buffer.from('ID3 gesprek uit 10_Zakelijk');
+  zet('10_Zakelijk/Race/Race.mp3', GEHEIM); zet('10_Zakelijk/Race/Race.md', fs.readFileSync(path.join(RD, 'Race.md')));
+  const RT = path.join(RD, 'Race.mp3'), rid = M.idVan('20_Prive/Bronnen/Race/Race.mp3');
+  const wissel = (koppeling) => {   // Race is een echte map of een koppeling naar 10_Zakelijk/Race
+    const isK = fs.lstatSync(RD).isSymbolicLink();
+    if (koppeling && !isK) { fs.renameSync(RD, RD + '-echt'); fs.symlinkSync(ZD, RD); }
+    if (!koppeling && isK) { fs.unlinkSync(RD); fs.renameSync(RD + '-echt', RD); }
+  };
+  const echtFs = { openSync: fs.openSync, lstatSync: fs.lstatSync, realpathSync: fs.realpathSync };
+  const haak = (f) => { fs.openSync = function (p, ...a) { f('open', p); return echtFs.openSync.call(fs, p, ...a); };
+    fs.lstatSync = function (p, ...a) { f('lstat', p); return echtFs.lstatSync.call(fs, p, ...a); };
+    fs.realpathSync = function (p, ...a) { f('realpath', p); return echtFs.realpathSync.call(fs, p, ...a); }; };
+  const haakLos = () => Object.assign(fs, echtFs);
+  const mr = M.maak({ vault: V, cacheMs: 600000 });
+  toets('3r race-proef: zonder ingreep 200 met het eigen bestand', mr.bestand(rid).status === 200 && Buffer.from(mr.bestand(rid).j.inhoud, 'base64').equals(MP3));
+  // lstat ziet de koppeling (inode van het gesprek), realpath de echte map, open weer de koppeling (review MOET 1)
+  let r3s;
+  haak((w, p) => { if (p !== RT) return; if (w === 'lstat' || w === 'open') wissel(true); if (w === 'realpath') wissel(false); });
+  try { r3s = mr.bestand(rid); } finally { haakLos(); wissel(false); }
+  toets('3s tussenmap wordt een koppeling tussen de controles: 404, geen inhoud uit 10_Zakelijk', r3s.status === 404 && !r3s.j.inhoud, r3s.status);
+  // tussen controle en open een hardlink erbij, of een ander bestand op die naam
+  haak((w, p) => { if (w === 'open' && p === RT) fs.linkSync(RT, RT + '.tweede'); });
+  try { r3s = mr.bestand(rid); } finally { haakLos(); try { fs.unlinkSync(RT + '.tweede'); } catch (e) { /* weg */ } }
+  toets('3t hardlink tussen controle en open: 404 (fstat nlink)', r3s.status === 404, r3s.status);
+  haak((w, p) => { if (w === 'open' && p === RT) { fs.unlinkSync(RT); fs.writeFileSync(RT, GEHEIM); } });
+  try { r3s = mr.bestand(rid); } finally { haakLos(); fs.writeFileSync(RT, MP3); }
+  toets('3u ander bestand op dezelfde naam tussen controle en open: 404 (fstat inode)', r3s.status === 404, r3s.status);
+  // de kaft als koppeling naar een pagina buiten 20_Prive: niet gelezen
+  const KAFT = path.join(EV, '20_Prive/Mediatheek.md'), kaftTekst = fs.readFileSync(KAFT);
+  zet('10_Zakelijk/Pers/gesprek.md', '## Geheime kop\n\nVertrouwelijke alinea.\n');
+  fs.unlinkSync(KAFT); fs.symlinkSync(path.join(EV, '10_Zakelijk/Pers/gesprek.md'), KAFT);
+  const sk = m.stand().j;
+  toets('3v kaft als koppeling naar 10_Zakelijk: kaft false, geen kop of tekst van buiten', sk.kaft === false && !JSON.stringify(sk).includes('Geheim') && !JSON.stringify(sk).includes('Vertrouwelijk'), sk.onderwerpen.map((o) => o.naam));
+  fs.unlinkSync(KAFT); require('child_process').execFileSync('mkfifo', [KAFT]);
+  let t1 = Date.now();
+  const sf = m.stand().j;
+  toets('3w kaft is een FIFO: kaft false, zonder te blokkeren', sf.kaft === false && Date.now() - t1 < 2000);
+  fs.unlinkSync(KAFT); fs.writeFileSync(KAFT, kaftTekst);
+  haak((w, p) => { if (w === 'open' && p === KAFT) { fs.unlinkSync(KAFT); require('child_process').execFileSync('mkfifo', [KAFT]); } });
+  t1 = Date.now();
+  let sf2;
+  try { sf2 = m.stand().j; } finally { haakLos(); fs.unlinkSync(KAFT); fs.writeFileSync(KAFT, kaftTekst); }
+  toets('3x kaft wordt een FIFO vlak voor het openen: geen blokkade, kaft false, stukken blijven', sf2.kaft === false && sf2.tel.items === 6 && Date.now() - t1 < 2000, sf2.tel);
+  // bestanden: [[x]] zonder aanhalingstekens (inline) en een beschrijving met lange frontmatter vóór bron_soort
+  zet('20_Prive/Bronnen/Race/Inline.mp3', MP3);
+  zet('20_Prive/Bronnen/Race/Inline.md', '---\nbron_soort: mediatheek\ncategorie: Shizzle\nbestanden: [[20_Prive/Bronnen/Race/Inline.mp3]]\n---\n');
+  zet('20_Prive/Bronnen/Race/Lang.mp3', MP3);
+  zet('20_Prive/Bronnen/Race/Lang.md', '---\nnotitie: "' + 'x'.repeat(6000) + '"\nbron_soort: mediatheek\ncategorie: Shizzle\nbestanden:\n  - "[[20_Prive/Bronnen/Race/Lang.mp3]]"\n---\n');
+  const si = m.stand().j, tit = si.onderwerpen.find((o) => o.naam === 'Shizzle').items.map((i) => i.titel);
+  toets('3y bestanden: [[x]] zonder aanhalingstekens en lange frontmatter vóór bron_soort worden herkend', tit.includes('Inline') && tit.includes('Lang'), [tit, si.te_herstellen.filter((t) => /Inline|Lang/.test(t.naam))]);
+  // afkappen wordt gemeld
+  const kb = fs.readFileSync('./mediatheek.js', 'utf8').replace('MAX_INGANGEN = 60000', 'MAX_INGANGEN = 20');
+  const kpa = path.join(process.cwd(), '.mt-kap-' + process.pid + '.js'); fs.writeFileSync(kpa, kb);
+  let ha;
+  try { ha = require(kpa).maak({ vault: V, cacheMs: 0 }).health(); } finally { fs.unlinkSync(kpa); }
+  toets('3z zoektocht afgekapt: afgekapt true in /health', ha.afgekapt === true && m.health().afgekapt === false, ha);
+  for (const n of ['Race.md', 'Inline.md', 'Lang.md']) fs.unlinkSync(path.join(RD, n));
+
   // ── 4. health ──
   const h = m.health();
-  toets('4 /health: alleen aantallen, met te_herstellen en zonder_beschrijving', h.aan && h.pagina === true && h.items === 5 && h.te_herstellen === 17 && h.zonder_beschrijving === 3 && Object.keys(h).length === 7, h);
+  toets('4 /health: alleen aantallen, met te_herstellen en zonder_beschrijving', h.aan && h.pagina === true && h.items === 5 && h.te_herstellen === 17 && h.zonder_beschrijving === 3 && h.afgekapt === false && Object.keys(h).length === 8, h);
 
   // ── 5. server.js ──
   const src = fs.readFileSync('server.js', 'utf8');

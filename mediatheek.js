@@ -18,8 +18,8 @@
 //   Plaud-opnames) of 00_Systeem maakt de beschrijving "te herstellen", nooit een bestand.
 // - M3 alleen de extensies hieronder (geluid om af te spelen, een paar soorten om te downloaden); geen md/html/svg/code.
 // - M4 realpath binnen de vault én binnen die bovenmap, lstat: gewoon bestand, geen symlink, nlink 1; lezen via één fd met O_NOFOLLOW
-//   en O_NONBLOCK, fstat = zelfde inode, nlink 1 (geen hardlink naar buiten); hooguit 20 MB (base64 in JSON). De beschrijving zelf
-//   ook: geen symlink, gelezen met O_NOFOLLOW, hooguit 64 kB.
+//   en O_NONBLOCK, /proc/self/fd = het verwachte echte pad (geen tussenmap die intussen een koppeling werd), fstat = zelfde inode,
+//   nlink 1 (geen hardlink naar buiten); hooguit 20 MB (base64 in JSON). De beschrijving en de kaft ook: zelfde leesweg, ≤ 64 kB / 1 MB.
 // Eén fout = één stuk: een beschrijving die niet klopt komt in `te_herstellen` (bestandsnaam + reden in gewone taal), de rest staat er.
 // Alles alleen lezen; de module schrijft niets. Op een apparaat met een vaste plek gaat de App niet open (server.js, privé-module).
 
@@ -206,8 +206,14 @@ function fmLezer() {
 // code-blok. Een pagina die het sjabloon in een code-blok toont (de kaft) telt dus niet.
 function noemtMediatheek(tekst) {
   const t = String(tekst).replace(/\r\n?/g, '\n');
-  if (t.startsWith('---\n')) { const e = t.indexOf('\n---', 3); if (e > 0) return BRON_RE.test(t.slice(4, e + 1)); }
+  if (t.startsWith('---\n')) { const e = t.indexOf('\n---', 3); if (e > 0) return BRON_RE.test(t.slice(4, e + 1)); return BRON_RE.test(t); }
   return BRON_RE.test(t.replace(/^(```|~~~)[^\n]*\n[\s\S]*?(^\1[^\n]*$|(?![\s\S]))/gm, ''));
+}
+
+// Review wv1397 MOET 1: O_NOFOLLOW kijkt alleen naar het laatste deel van het pad. Na elke open toetsen we via /proc/self/fd dat de fd
+// echt het verwachte (realpath-)pad is; een tussenmap die tussen controle en open door een koppeling is vervangen, valt zo af.
+function fdOpPlek(fd, verwacht) {
+  try { return fs.readlinkSync('/proc/self/fd/' + fd) === verwacht; } catch (e) { return false; }
 }
 
 const geldigeDatum = (iso) => { const d = new Date(iso + 'T12:00:00Z'); return !isNaN(d) && d.toISOString().slice(0, 10) === iso; };
@@ -240,7 +246,8 @@ function leesBeschrijving(tekst, map) {
   if (typeof bs === 'string') bs = bs ? [bs] : [];
   if (!Array.isArray(bs) || !bs.length) return { reden: 'bestanden ontbreekt (de link naar het mediabestand)' };
   const bestanden = [];
-  for (const ruw of bs) {
+  for (let ruw of bs) {
+    if (/^\[[^[\]]+\]$/.test(String(ruw).trim())) ruw = '[' + String(ruw).trim() + ']';   // bestanden: [[x]] zonder aanhalingstekens leest de lezer als lijst "[x]"
     const ls = links(String(ruw));
     const doel = ls.length === 1 ? ls[0].doel : ls.length === 0 ? String(ruw).trim() : null;
     if (doel === null) return { reden: 'een regel bij bestanden heeft meer dan één link' };
@@ -264,8 +271,8 @@ function leesBeschrijving(tekst, map) {
 }
 
 const MAX_BESCHRIJVING = 64 * 1024;
-const KOP = 4096;                 // zoveel leest de zoektocht van elke .md om bron_soort: mediatheek te herkennen
-const MAX_DIEPTE = 12, MAX_INGANGEN = 60000;
+const KOP = 16384;                // zoveel leest de zoektocht van elke .md om bron_soort: mediatheek te herkennen
+const MAX_DIEPTE = 12, MAX_INGANGEN = 60000, MAX_ZOEK_MS = 3000;
 const BRON_RE = /^bron_soort:\s*["']?mediatheek["']?\s*(#.*)?$/m;
 const MEDIA_EXT = Object.keys(AUDIO).concat(Object.keys(ANDERS));
 const WEG = { ontbreekt: 'ontbreekt', 'geen bestand': 'is geen gewoon bestand (koppeling of map)', hardlink: 'heeft nog een tweede naam ergens anders (hardlink)',
@@ -291,14 +298,16 @@ function maak(opt) {
     return { vault: echteVault, top: echteTop };
   }
 
-  // Klein bestand lezen via één fd, zonder een koppeling te volgen; max bytes (null = alles tot de grens is een fout)
+  // Klein bestand lezen via één fd, zonder een koppeling te volgen (ook niet in een tussenmap: fdOpPlek), niet blokkerend (FIFO);
+  // abs moet een echt pad zijn (realpath van de vault erin). kop: alleen de eerste max bytes; anders is groter dan max een fout.
   function leesKlein(abs, max, kop) {
     let fd = null;
     try {
       fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      if (!fdOpPlek(fd, abs)) return { fout: 'de beschrijving staat niet op haar plek (koppeling)' };
       const st = fs.fstatSync(fd);
       if (!st.isFile()) return { fout: 'de beschrijving is geen gewoon bestand' };
-      if (!kop && st.size > max) return { fout: 'de beschrijving is te groot (meer dan 64 kB)' };
+      if (!kop && st.size > max) return { fout: 'de beschrijving is te groot (meer dan ' + Math.round(max / 1024) + ' kB)' };
       const n = Math.min(st.size, max), buf = Buffer.alloc(n);
       let g = 0;
       while (g < n) { const k = fs.readSync(fd, buf, g, n - g, g); if (k <= 0) break; g += k; }
@@ -346,37 +355,49 @@ function maak(opt) {
     return { stuk: r.stuk, rijen: rijen, mtimeMs: t.mtimeMs };
   }
 
-  // Zoektocht door 20_Prive: geen punt-mappen, geen koppelingen (Dirent: symlink is geen map en geen bestand), begrensd.
+  // Zoektocht door 20_Prive: geen punt-mappen, geen koppelingen (Dirent: symlink is geen map en geen bestand), begrensd in ingangen, diepte
+  // en tijd (review wv1397 ZOU 1: map per ingang lezen met opendir, niet eerst alles in het geheugen). Kapt hij af, dan zegt hij dat
+  // (afgekapt in tel en /health): dan kan er een stuk ontbreken.
   function zoek() {
+    const e = echt();
     const gevonden = [], audio = new Map(), nieuweKop = new Map();
-    let n = 0;
+    let n = 0, afgekapt = false;
+    const t0 = Date.now();
     const stapel = [[TOP, 0]];
-    while (stapel.length && n < MAX_INGANGEN) {
+    while (stapel.length) {
+      if (n > MAX_INGANGEN || Date.now() - t0 > MAX_ZOEK_MS) { afgekapt = true; break; }
       const [rel, diepte] = stapel.pop();
-      let ds;
-      try { ds = fs.readdirSync(path.join(VAULT, rel), { withFileTypes: true }); } catch (x) { continue; }
+      const ds = [];
+      let dir = null;
+      try {
+        dir = fs.opendirSync(path.join(e.vault, rel));
+        let d;
+        while ((d = dir.readSync()) !== null) { if (++n > MAX_INGANGEN) { afgekapt = true; break; } ds.push(d); }
+      } catch (x) { /* map onleesbaar of intussen weg */ }
+      finally { if (dir) try { dir.closeSync(); } catch (x) { /* al dicht */ } }
+      if (afgekapt) break;
       const media = new Set();
       for (const d of ds) { const x = extVan(d.name); if (!d.isDirectory() && MEDIA_EXT.indexOf(x) >= 0) media.add(d.name.slice(0, -x.length - 1).normalize('NFC')); }
       for (const d of ds) {
-        if (++n > MAX_INGANGEN) break;
         if (d.name[0] === '.') continue;
-        if (d.isDirectory()) { if (diepte < MAX_DIEPTE) stapel.push([rel + '/' + d.name, diepte + 1]); continue; }
+        if (d.isDirectory()) { if (diepte < MAX_DIEPTE) stapel.push([rel + '/' + d.name, diepte + 1]); else afgekapt = true; continue; }
         if (!d.isFile()) continue;
         const ext = extVan(d.name), r = rel + '/' + d.name;
         if (AUDIO[ext]) { if (!audio.has(rel)) audio.set(rel, []); audio.get(rel).push(r.normalize('NFC')); continue; }
         if (ext !== 'md' || r === PAD) continue;
         let st;
-        try { st = fs.lstatSync(path.join(VAULT, r)); } catch (x) { continue; }
+        try { st = fs.lstatSync(path.join(e.vault, r)); } catch (x) { continue; }
         if (!st.isFile()) continue;
         const k = st.ino + ':' + st.size + ':' + st.mtimeMs;
         let c = kopCache.get(r);
-        if (!c || c.k !== k) { const t = leesKlein(path.join(VAULT, r), KOP, true); c = { k: k, mt: !t.fout && noemtMediatheek(t.tekst) }; }
+        if (!c || c.k !== k) { const t = leesKlein(path.join(e.vault, r), KOP, true); c = { k: k, mt: !t.fout && noemtMediatheek(t.tekst) }; }
         nieuweKop.set(r, c);
         if (c.mt) gevonden.push({ map: rel, naam: d.name, zus: media.has(d.name.slice(0, -3).normalize('NFC')) });
       }
     }
     kopCache = nieuweKop;
-    return { gevonden: gevonden, audio: audio };
+    gevonden.sort((a, b) => (a.map + '/' + a.naam < b.map + '/' + b.naam ? -1 : 1));   // vaste volgorde (review O3: naam van een categorie zonder kop)
+    return { gevonden: gevonden, audio: audio, afgekapt: afgekapt };
   }
 
   function bereken() {
@@ -385,11 +406,10 @@ function maak(opt) {
       if (!st.isDirectory()) return { ok: false, fout: 'de mediatheekmap is niet te lezen' };
       echt();
     } catch (e) { return { ok: false, fout: 'de mediatheekmap staat niet op de verwachte plek' }; }
+    // de kaft: zelfde leesweg als een beschrijving (review wv1397 MOET 2/3: geen koppeling volgen, niet blokkeren op een FIFO)
     let kaft = null, kaftM = 0;
-    try {
-      const st = fs.statSync(path.join(VAULT, PAD));
-      if (st.isFile() && st.size <= MAX_PAGINA) { kaft = leesKaft(fs.readFileSync(path.join(VAULT, PAD), 'utf8')); kaftM = st.mtimeMs; }
-    } catch (e) { kaft = null; }
+    const kt = leesKlein(path.join(echt().vault, PAD), MAX_PAGINA, false);
+    if (!kt.fout) { kaft = leesKaft(kt.tekst); kaftM = kt.mtimeMs; }
     const z = zoek();
     const perId = new Map(), perCat = new Map(), teHerstellen = [], geclaimd = new Set(), mtMappen = new Set();
     let nb = 0, nweg = 0, laatst = kaftM;
@@ -434,7 +454,7 @@ function maak(opt) {
     teHerstellen.sort((a, b) => nl(a.naam, b.naam));
     const n = onderwerpen.reduce((t, o) => t + o.items.length, 0);
     return { ok: true, pagina: PAD, kaft: !!kaft, bijgewerkt: new Date(laatst || Date.now()).toISOString(), onderwerpen: onderwerpen, te_herstellen: teHerstellen,
-      tel: { items: n, bestanden: nb, ontbreekt: nweg, te_herstellen: teHerstellen.length, zonder_beschrijving: zonder }, _perId: perId };
+      tel: { items: n, bestanden: nb, ontbreekt: nweg, te_herstellen: teHerstellen.length, zonder_beschrijving: zonder, afgekapt: z.afgekapt }, _perId: perId };
   }
 
   // De lijst hooguit CACHE_MS oud (20_Prive heeft ± 1.600 pagina's; alleen gewijzigde .md worden opnieuw gelezen)
@@ -464,6 +484,7 @@ function maak(opt) {
     let fd = null;
     try {
       fd = fs.openSync(b.abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      if (!fdOpPlek(fd, b.abs)) return { status: 404, j: { ok: false, fout: 'niet te lezen' } };   // review wv1397 MOET 1
       const st = fs.fstatSync(fd);
       if (!st.isFile() || st.nlink !== 1 || st.dev !== b.dev || st.ino !== b.ino) return { status: 404, j: { ok: false, fout: 'niet te lezen' } };
       if (st.size > MAX_BESTAND) return { status: 413, j: { ok: false, fout: 'te groot voor de app (meer dan 20 MB)' } };
@@ -488,7 +509,7 @@ function maak(opt) {
   function health() {
     const l = lijst();
     return l.ok ? { aan: true, pagina: l.kaft, items: l.tel.items, bestanden: l.tel.bestanden, ontbreekt: l.tel.ontbreekt,
-      te_herstellen: l.tel.te_herstellen, zonder_beschrijving: l.tel.zonder_beschrijving } : { aan: true, pagina: false };
+      te_herstellen: l.tel.te_herstellen, zonder_beschrijving: l.tel.zonder_beschrijving, afgekapt: l.tel.afgekapt } : { aan: true, pagina: false };
   }
 
   return { stand: stand, bestand: bestand, health: health, lijst: lijst };
