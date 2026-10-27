@@ -44,9 +44,11 @@ class DbFout extends Error {
 // De lijsten staan hier bevroren (een migratie verandert nooit); de toets vergelijkt ze met facturen-kern.js en facturen-bank.js.
 // formaat: M1 maakte de tabellen met FORMAAT_V1; migratie 5 (wv1299) verruimt die CHECKs met triodos_csv. L.formaat is de huidige lijst.
 const FORMAAT_V1 = ['ing_csv', 'abn_tab', 'abn_mt940', 'bankluis'];
-// signaal: M1 maakte de tabel met SIGNAAL_V1; migratie 10 (wv1415) verruimt die CHECK met teruggeboekt. L.signaal is de huidige lijst.
+// signaal: M1 maakte de tabel met SIGNAAL_V1; migratie 10 (wv1415) verruimt die CHECK met teruggeboekt (SIGNAAL_V10), migratie 11 (wv1326)
+// met afwijkend_bedrag. L.signaal is de huidige lijst.
 const SIGNAAL_V1 = ['geen_factuur', 'dubbel_betaald', 'dubbele_factuur', 'verzending_mislukt', 'incasso_niet_gezien', 'te_betalen_niet_betaald',
   'ingevoerd_niet_gezien', 'onbekend_iban', 'mogelijk_dubbel_geupload'];
+const SIGNAAL_V10 = SIGNAAL_V1.concat(['teruggeboekt']);
 const L = {
   status: ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'],
   onderweg: ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'],
@@ -57,7 +59,7 @@ const L = {
   formaat: ['ing_csv', 'abn_tab', 'abn_mt940', 'triodos_csv', 'bankluis'],
   categorie: ['loon', 'loonheffing', 'btw', 'belasting', 'declaraties', 'rekening_courant', 'eigen_overboeking', 'bankkosten', 'creditcard',
     'prive_opname', 'abonnement_zonder_factuur', 'subsidie', 'rente', 'overig'],
-  signaal: SIGNAAL_V1.concat(['teruggeboekt']),
+  signaal: SIGNAAL_V10.concat(['afwijkend_bedrag']),
 };
 const IN = (l) => '(' + l.map((x) => "'" + x + "'").join(',') + ')';
 const ID = (k) => 'CHECK (length(' + k + ') = 16 AND ' + k + " NOT GLOB '*[^0-9a-f]*')";
@@ -672,6 +674,18 @@ const M10_VERVANG = [
 function M10(db, vervang) { return M5(db, vervang || M10_VERVANG, 'migratie_10'); }
 
 /*
+ * wv1326 (David 26-10-2026 11:39: "Wat is de gebruikelijke range, en waarbuiten is het afwijkend?"): signaal 'afwijkend_bedrag' — een
+ * regelmatige incasso ná de startdatum ligt ruim boven zijn gebruikelijke band. Zelfde weg als M5/M6/M10 (writable_schema, één vervanging, al
+ * verruimd = overslaan). Een nieuwe database krijgt via M10 meteen de hele lijst; M11 slaat dan over. LET OP terugrol: een release van vóór
+ * wv1326 opent deze database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 11`: de verruimde
+ * CHECK hindert de oude code niet; een signaalrij 'afwijkend_bedrag' toont de oude code zonder knoppen (SIGNALEN kent hem niet).
+ */
+const M11_VERVANG = [
+  ['signaal', 'soort IN ' + IN(SIGNAAL_V10), 'soort IN ' + IN(L.signaal)],
+];
+function M11(db, vervang) { return M5(db, vervang || M11_VERVANG, 'migratie_11'); }
+
+/*
  * wv1323 (David 26-10-2026 11:39: "Dit IBAN is van bedrijf Z (wat een 100% koppeling oplevert qua entiteit, want uniek)"; 12:31 Ja op "mag een
  * vaak betaald rekeningnummer na jouw Ja het nabellen vervangen?"): feitkaarten. Een kaart "rekening …1234 is van <naam>" volgt uit de
  * bankhistorie (≥ 3 betalingen over ≥ 60 dagen, steeds dezelfde naam) en een factuur met dat IBAN; de kaart zelf wordt steeds vers berekend,
@@ -810,6 +824,7 @@ const MIGRATIES = [
   { versie: 7, naam: 'feiten: rekening is van leverancier, uit de bankhistorie (wv1323)', fn: (db) => M7(db) },
   { versie: 8, naam: 'leverancier.knoop_id: koppeling met het OVIS-register (wv980)', fn: (db) => M8(db) },  { versie: 9, naam: 'SEPA-batch: betaal_op/uitvoer_op op de factuur, sepa_batch en sepa_regel (wv1405)', fn: (db) => M9(db) },
   { versie: 10, naam: "signaal: soort 'teruggeboekt' (wv1415)", fn: (db) => M10(db) },
+  { versie: 11, naam: "signaal: soort 'afwijkend_bedrag' (wv1326)", fn: (db) => M11(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
@@ -1355,7 +1370,7 @@ function health(fdb) {
 }
 
 module.exports = {
-  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, _M7: M7,
+  DbFout, SCHEMA_VERSIE, MIGRATIES, TABELLEN, LIJSTEN: L, BESTAND, MAX_STUK, BACKUP_DAGEN, M5_VERVANG, _M5: M5, M6_VERVANG, _M6: M6, M10_VERVANG, _M10: M10, M11_VERVANG, _M11: M11, _M7: M7,
   open, sluit, migreer, transactie, nieuwId, voegToe, audit, metaLees, metaZet, leesJson, factuurVoorKern,
   terugdraaien, claimOpdrachten, weigerOpdracht, reserveer, opdrachtResultaat, verzondenGezien,
   stukPad, stukSchrijf, stukLees, stukBestaat, sha256, bronPad, bronSchrijf, bronBestaat,

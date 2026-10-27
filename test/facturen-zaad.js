@@ -359,6 +359,10 @@ function zaai(fdb, o) {
     const terugF = facturen.filter((f) => f.betaalspoor === 'te_betalen')[1];   // een andere factuur dan het signaal hieronder (diffreview KLEIN 2)
     if (terugF) signaal(B.maakSignaal('teruggeboekt', { entiteit: terugF.entiteit, leverancier: terugF.l.id, facturen: [terugF.id], bedrag_centen: terugF.incl,
       details: { nummer: terugF.nummer || null, automatisch: true } }), tijd(0, 6));
+    // wv1326: een incasso ruim boven zijn gebruikelijke band (verzonnen bedragen)
+    const ab = tx('tolgaarde', { boekdatum: dag(-2), bedrag_centen: -39950, tegenpartij_naam: lev.B.naam, tegenpartij_iban: lev.B.iban, omschrijving: 'incasso maand (proef)', is_incasso: 1, incassant_id: lev.B.incassant });
+    if (ab) signaal(B.maakSignaal('afwijkend_bedrag', { entiteit: 'tolgaarde', leverancier: lev.B.id, transacties: [ab.id], bedrag_centen: ab.bedrag_centen, sleutel_vast: 'tolgaarde|proef|' + ab.boekdatum.slice(0, 7),
+      details: { laag_centen: 18015, hoog_centen: 18490, mediaan_centen: 18250, frequentie: 'maand', aantal: 8, sinds: dag(-300), datum: ab.boekdatum, naam: lev.B.naam } }), tijd(0, 6));
     if (teBetalen) signaal(B.maakSignaal('te_betalen_niet_betaald', { entiteit: teBetalen.entiteit, leverancier: teBetalen.l.id, facturen: [teBetalen.id], bedrag_centen: teBetalen.incl }), tijd(0, 6));
     if (ingevoerd) signaal(B.maakSignaal('ingevoerd_niet_gezien', { entiteit: ingevoerd.entiteit, leverancier: ingevoerd.l.id, facturen: [ingevoerd.id], bedrag_centen: ingevoerd.incl }), tijd(-10, 6),
       { afhandeling: 'opnieuw_kijken', les: 'Betaling aan ' + ingevoerd.l.naam + ' nog niet op de bank; over drie dagen opnieuw kijken.', sluimer_tot: dag(-7), wanneer: tijd(-10, 9) });

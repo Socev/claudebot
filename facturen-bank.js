@@ -825,6 +825,21 @@ function eurTekst(c) {
   return '€ ' + (c < 0 ? '-' : '') + e + ',' + String(a % 100).padStart(2, '0');
 }
 function dagNL(d) { return d && isIsoDatum(d) ? Number(d.slice(8, 10)) + '-' + Number(d.slice(5, 7)) + '-' + d.slice(0, 4) : '?'; }
+// wv1326: de gebruikelijke band in gewone taal ("gebruikelijk € 180,15 – € 184,90 per maand"); d = details van het signaal
+const PER_FREQ = { maand: 'per maand', kwartaal: 'per kwartaal' };
+function bandTekst(d) {
+  d = d || {};
+  if (!Number.isSafeInteger(d.laag_centen) || !Number.isSafeInteger(d.hoog_centen)) return 'gebruikelijk bedrag onbekend';
+  return 'gebruikelijk ' + (d.laag_centen === d.hoog_centen ? eurTekst(d.laag_centen) : eurTekst(d.laag_centen) + ' – ' + eurTekst(d.hoog_centen)) +
+    (PER_FREQ[d.frequentie] ? ' ' + PER_FREQ[d.frequentie] : '');
+}
+// Eén zin bij een signaal voor de kaart in de App (nu alleen afwijkend_bedrag; andere soorten: null). s = signaal met details en bedrag_centen.
+function signaalUitleg(s) {
+  if (!s || s.soort !== 'afwijkend_bedrag') return null;
+  const d = s.details || {};
+  return bandTekst(d).replace(/^g/, 'G') + ', nu ' + eurTekst(Math.abs(Number(s.bedrag_centen) || 0)) + (d.datum ? ' op ' + dagNL(d.datum) : '') + '.' +
+    (Number.isSafeInteger(d.aantal) ? ' Gerekend over ' + d.aantal + ' eerdere incasso\'s' + (d.sinds ? ' sinds ' + dagNL(d.sinds) : '') + '.' : '');
+}
 
 // Per soort: titel en knoppen. Elke knop: wat hij vraagt (vereist), welke gevolgen F2 uitvoert (declaratief: de kern voert niets uit),
 // de les die bij "wat we leerden" verschijnt, en eventueel een sluimertijd (signaal komt dan terug als het probleem blijft).
@@ -941,6 +956,18 @@ const SIGNALEN = {
         les: (s) => naamVan(s) + ' stuurde een betaling terug omdat hij zelf incasseert: voortaan op incasso, niet meer zelf betalen.' },
     },
   },
+  // wv1326 (David 26-10-2026: "Wat is de gebruikelijke range, en waarbuiten is het afwijkend?"): een regelmatige incasso ruim boven zijn
+  // gebruikelijke band (facturen-validatie.afwijkendeIncassos). "Klopt" legt de nieuwe prijs vast: het bedrag telt mee in de band, die dus
+  // meeschuift (de band rekt op tot de laatste drie betalingen). "Uitzoeken" vraagt wat David vond; dat bedrag telt daarna niet meer mee.
+  afwijkend_bedrag: {
+    titel: 'Incasso hoger dan gebruikelijk',
+    knoppen: {
+      klopt: { label: 'Klopt (nieuwe prijs)', vereist: [], gevolgen: () => [],
+        les: (s) => naamVan(s) + ' incasseerde ' + eurTekst(Math.abs(s.bedrag_centen)) + ' (' + bandTekst(s.details) + '); dat klopt: het telt mee in de gebruikelijke band.' },
+      uitzoeken: { label: 'Uitzoeken', vereist: ['toelichting'], gevolgen: () => [],
+        les: (s, o) => 'Hogere incasso van ' + naamVan(s) + ' uitgezocht: ' + String(o.toelichting).slice(0, 160) },
+    },
+  },
 };
 const SIGNAAL_SOORTEN = Object.keys(SIGNALEN);
 
@@ -949,8 +976,9 @@ function signaalSleutel(soort, transacties, facturen, extra) {
 }
 function maakSignaal(soort, o) {
   const s = Object.assign({ soort, titel: SIGNALEN[soort].titel, transacties: [], facturen: [], status: 'open' }, o);
-  s.sleutel = signaalSleutel(soort, s.transacties, s.facturen, s.sleutel_extra);
-  delete s.sleutel_extra;
+  // wv1326: sleutel_vast = een eigen sleutel los van de bankregels (afwijkend_bedrag: één signaal per tegenpartij per maand)
+  s.sleutel = s.sleutel_vast ? soort + ':' + s.sleutel_vast : signaalSleutel(soort, s.transacties, s.facturen, s.sleutel_extra);
+  delete s.sleutel_extra; delete s.sleutel_vast;
   s.knoppen = Object.keys(SIGNALEN[soort].knoppen);
   s.alleen_eigenaar = !!s.alleen_eigenaar;
   return s;
@@ -1017,7 +1045,7 @@ function dubbelGeupload(transacties) {
 /*
  * De bankcontrole over de hele stand (puur; F2 roept hem na elke upload en bankluis-ronde aan).
  * inv = { vandaag, transacties, facturen, leveranciers, uitzonderingen, entiteiten, rekeningen, koppelingen, opdrachten, bestaandeSignalen,
- *         afgewezenVoorstellen, koersen }.
+ *         afgewezenVoorstellen, koersen, afwijkend (wv1326: kandidaten uit facturen-validatie.afwijkendeIncassos) }.
  *   transacties: genormaliseerd + { id, bestand, bestand_op? }; facturen: { id, entiteit, leverancier, nummer, kenmerk, incl (centen,
  *   creditnota negatief), valuta, incl_eur?, iban, factuurdatum, vervaldatum, betaalwijze, betaalspoor, status, ingevoerd_op, dubbel_van?,
  *   patientkenmerk?, alleen_eigenaar? }; koppelingen: { transactie, factuur, bron ('auto'|'mens'), methode? }.
@@ -1392,6 +1420,26 @@ function bankcontrole(inv) {
       bedrag_centen: a.bedrag_centen, datum: a.boekdatum, alleen_eigenaar: !!(a.alleen_eigenaar || b.alleen_eigenaar), details: { te_verwijderen: weg ? weg.id : null } }));
   }
 
+  /*
+   * wv1326: afwijkend bedrag. inv.afwijkend = uitkomst van facturen-validatie.afwijkendeIncassos (de beller rekent: alleen incasso's op of na
+   * de startdatum, de band uit het jaar ervoor). Eén signaal per tegenpartij per entiteit per maand (de sleutel noemt de tegenpartij alleen als
+   * hash); niet naast een ander signaal over dezelfde bankregel (dubbel betaald, onbekend IBAN, dubbel geüpload: die zeggen al meer).
+   */
+  const alGemeld = new Set();
+  for (const s of signalen) for (const id of s.transacties || []) alGemeld.add(id);
+  for (const a of inv.afwijkend || []) {
+    const tx = a && a.tx, p = a && a.patroon;
+    if (!tx || !p || !tx.id || richtingVan(tx) !== 'af' || !tx.is_incasso || alGemeld.has(tx.id) || overslaan.has(tx.id) || sepaAf.has(tx.id)) continue;
+    const lt = leverancierBijTx(tx, ctx);
+    const tp = crypto.createHash('sha1').update(String(a.tegenpartij || ''), 'utf8').digest('hex').slice(0, 16);
+    signalen.push(maakSignaal('afwijkend_bedrag', { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lt ? lt.leverancier.naam : tx.tegenpartij_naam,
+      leverancier: lt ? lt.leverancier.id : null, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar || !!a.alleen_eigenaar,
+      sleutel_vast: tx.entiteit + '|' + tp + '|' + tx.boekdatum.slice(0, 7),
+      details: { laag_centen: p.laag_centen, hoog_centen: p.hoog_centen, mediaan_centen: p.mediaan_centen, frequentie: p.frequentie, aantal: p.aantal, sinds: p.sinds,
+        drempel_centen: a.drempel_centen } }));
+    alGemeld.add(tx.id);
+  }
+
   // nooit twee keer dezelfde melding (grondwet 10). Bestaande sleutel → niet opnieuw. Een gesluimerd signaal waarvan de sluimer voorbij is
   // en waarvan het probleem blijft, gaat naar `heropenen` (zelfde rij weer open; geen tweede rij met dezelfde sleutel). Staat dezelfde
   // sleutel er zowel open als afgehandeld, dan wint open (diffreview wv798 #8).
@@ -1544,7 +1592,7 @@ module.exports = {
   // controle
   uitzonderingVoor, uitzonderingPast, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
   // signalen
-  maakSignaal, signaalSleutel, afhandelSignaal, terugvraagTekst,
+  maakSignaal, signaalSleutel, afhandelSignaal, terugvraagTekst, bandTekst, signaalUitleg,
   // uitleg (wv1317)
   VOORUIT_MARGE, vooruitBetaald, andereFactuurGenoemd, referentieStukken, voorstelSleutel, voorstelUitleg, zekerheidTekst, leerRegel, vervalRegel, VERVAL_TEKST,
   // feitkaarten (wv1323)

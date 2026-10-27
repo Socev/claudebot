@@ -174,7 +174,7 @@ test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/trio
   const dir = map('m5');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10]);
+  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11]);
   assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
@@ -232,7 +232,7 @@ test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt vol
   assert.deepEqual(tabelSql(db), voor);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   db.close();
-  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
 });
 
 test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {
@@ -1027,14 +1027,55 @@ test("migratie 10 (wv1415): signaal krijgt soort 'teruggeboekt'; bestaande signa
   const weer = D.open(path.join(path.dirname(nieuw.pad)));
   assert.deepEqual(weer.toegepast, [10]);
   assert.equal(sigSql(weer.db), gemigreerd);
-  // afwijkende CHECK-tekst → weigeren, niets half
-  weer.db.exec('DELETE FROM schema_migratie WHERE versie = 10');
+  // afwijkende CHECK-tekst → weigeren, niets half (rij 11 ook weg: wv1326, anders meldt het schema 11)
+  weer.db.exec('DELETE FROM schema_migratie WHERE versie >= 10');
   const v = weer.db.prepare('PRAGMA schema_version').get().schema_version;
   weer.db.exec('PRAGMA writable_schema = ON');
-  weer.db.prepare("UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = 'signaal'").run(",'teruggeboekt')", ",'iets_anders')");
+  weer.db.prepare("UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = 'signaal'").run(",'afwijkend_bedrag')", ",'iets_anders')");   // wv1326: de lijst eindigt sinds M11 op afwijkend_bedrag
   weer.db.exec('PRAGMA schema_version = ' + (v + 1)); weer.db.exec('PRAGMA writable_schema = OFF');
   const voor = sigSql(weer.db);
   D.sluit(weer);
   gooit(() => D.open(path.dirname(nieuw.pad)), /migratie_10|staat er 0 keer/);
   const r = D.open(path.dirname(nieuw.pad), { alleenLezen: true }); assert.equal(sigSql(r.db), voor); assert.equal(r.schema, 9); D.sluit(r);
+});
+
+test("migratie 11 (wv1326): signaal krijgt soort 'afwijkend_bedrag'; vanaf schema 10 = nieuw aangemaakt; al verruimd → overslaan; afwijkend → terugrollen", () => {
+  const sigSql = (db) => db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'signaal'").get().sql;
+  const zetSql = (db, oud, nieuw) => {
+    const v = db.prepare('PRAGMA schema_version').get().schema_version;
+    db.exec('PRAGMA writable_schema = ON');
+    db.prepare("UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = 'signaal'").run(oud, nieuw);
+    db.exec('PRAGMA schema_version = ' + (v + 1)); db.exec('PRAGMA writable_schema = OFF');
+  };
+  const nieuw = D.open(map('m11-nieuw'));
+  const vers = sigSql(nieuw.db);
+  assert.ok(vers.includes(",'teruggeboekt','afwijkend_bedrag')"));
+  const dir = path.dirname(nieuw.pad);
+  // terug naar de stand van schema 10 (CHECK zonder afwijkend_bedrag, rij 11 weg), met een bestaand signaal
+  zetSql(nieuw.db, ",'teruggeboekt','afwijkend_bedrag')", ",'teruggeboekt')");
+  nieuw.db.exec('DELETE FROM schema_migratie WHERE versie = 11');
+  nieuw.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, aangemaakt_op) VALUES ('dddddddddddd0020', 's-oud', 'teruggeboekt', 'oud (proef)', ?)").run(iso(NU));
+  gooit(() => nieuw.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, aangemaakt_op) VALUES ('dddddddddddd0021', 's-te-vroeg', 'afwijkend_bedrag', 'proef', ?)").run(iso(NU)), /CHECK/);
+  D.sluit(nieuw);
+  const f = D.open(dir);
+  assert.deepEqual(f.toegepast, [11]);
+  assert.equal(sigSql(f.db), vers, 'gemigreerd = nieuw aangemaakt');
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.equal(f.db.prepare("SELECT soort FROM signaal WHERE sleutel = 's-oud'").get().soort, 'teruggeboekt');
+  f.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, aangemaakt_op) VALUES ('dddddddddddd0022', 's-nieuw', 'afwijkend_bedrag', 'proef', ?)").run(iso(NU));
+  gooit(() => f.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, aangemaakt_op) VALUES ('dddddddddddd0023', 's-onzin', 'onzin', 'proef', ?)").run(iso(NU)), /CHECK/);
+  // al verruimd maar de rij ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets
+  f.db.exec('DELETE FROM schema_migratie WHERE versie = 11');
+  D.sluit(f);
+  const weer = D.open(dir);
+  assert.deepEqual(weer.toegepast, [11]);
+  assert.equal(sigSql(weer.db), vers);
+  // afwijkende CHECK-tekst → weigeren, niets half
+  weer.db.exec('DELETE FROM schema_migratie WHERE versie = 11');
+  weer.db.exec("DELETE FROM signaal WHERE soort = 'afwijkend_bedrag'");
+  zetSql(weer.db, ",'teruggeboekt','afwijkend_bedrag')", ",'teruggeboekt','iets_anders')");
+  const voor = sigSql(weer.db);
+  D.sluit(weer);
+  gooit(() => D.open(dir), /migratie_11|staat er 0 keer/);
+  const r = D.open(dir, { alleenLezen: true }); assert.equal(sigSql(r.db), voor); assert.equal(r.schema, 10); D.sluit(r);
 });

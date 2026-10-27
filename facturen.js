@@ -196,7 +196,8 @@ function signaalKort(s) {
   const knoppen = B.SIGNALEN[s.soort] ? Object.entries(B.SIGNALEN[s.soort].knoppen).map(([k, v]) => ({ knop: k, label: v.label, vereist: v.vereist })) : [];
   return { id: s.id, soort: s.soort, titel: s.titel, entiteit: s.entiteit, leverancier: s.leverancier, naam: d.naam || null, transacties: json(s.transacties, []),
     facturen: json(s.facturen, []), bedrag_centen: s.bedrag_centen, status: s.status, afhandeling: s.afhandeling, les: s.les, wie: s.wie, wanneer: s.wanneer,
-    sluimer_tot: s.sluimer_tot, aangemaakt_op: s.aangemaakt_op, knoppen };
+    sluimer_tot: s.sluimer_tot, aangemaakt_op: s.aangemaakt_op, knoppen,
+    uitleg: B.signaalUitleg({ soort: s.soort, bedrag_centen: s.bedrag_centen, details: d }) || undefined };   // wv1326: de band in gewone taal
 }
 
 // ───────────────────────────── GET-routes ─────────────────────────────
@@ -1286,6 +1287,7 @@ function bankcontroleToepassen(fdb, nu) {
     afgewezenVoorstellen: fdb.db.prepare("SELECT sleutel FROM voorstel WHERE status = 'afgewezen'").all().map((v) => v.sleutel),
     verzamelTel: verzamelTellingen(fdb), verzamelNaam,
     sepa: sepaVoorControle(fdb, nuIso(Date.parse(van + 'T00:00:00Z'))),   // wv1405: eigen batches (PmtInfId + totaal)
+    afwijkend: afwijkendVoorControle(fdb, vandaag),   // wv1326: incasso's ruim boven hun gebruikelijke band (alleen na de startdatum)
   };
   const uit = B.bankcontrole(inv);
   const tel = { koppelingen: 0, voorstellen: 0, uitzonderingen: 0, betaald_gezien: 0, signalen: 0, heropend: 0 };
@@ -1335,6 +1337,26 @@ function bankcontroleToepassen(fdb, nu) {
   for (const s of uit.signalen) { if (historie(s)) { tel.historie_stil = (tel.historie_stil || 0) + 1; continue; } tel.signalen += signaalInvoegen(fdb, s, wanneer); }
   for (const h of uit.heropenen) tel.heropend += fdb.db.prepare("UPDATE signaal SET status = 'open', sluimer_tot = NULL WHERE sleutel = ? AND status = 'afgehandeld'").run(h.sleutel).changes;
   return tel;
+}
+/*
+ * wv1326: kandidaten voor het signaal afwijkend_bedrag (facturen-validatie.afwijkendeIncassos). Eigen lezing, los van het venster van 400
+ * dagen: de incasso's vanaf een jaar vóór de startdatum (een incasso ná de start krijgt zo altijd zijn hele jaar als band, ook bij een late
+ * upload). Zonder startdatum niets (historie geeft nooit een signaal). Eigen rekeningen = alle rekeningen in Facturen; eigen namen = de
+ * entiteiten met hun korte naam en aliassen (ook Privé). Bedragen waarvan David bij "Uitzoeken" zei dat ze niet klopten, tellen niet mee.
+ */
+function afwijkendVoorControle(fdb, vandaag) {
+  const start = startdatumVan(fdb);
+  if (!start) return [];
+  const txs = fdb.db.prepare('SELECT * FROM bank_transactie WHERE verwijderd_op IS NULL AND is_incasso = 1 AND bedrag_centen < 0 AND boekdatum >= ?')
+    .all(K.plusDagen(start, -366)).map((t) => Object.assign({}, t, { alleen_eigenaar: !!t.alleen_eigenaar, is_incasso: !!t.is_incasso }));
+  const eigenNamen = [];
+  for (const e of fdb.db.prepare('SELECT naam, naam_kort, aliassen FROM entiteit').all())
+    eigenNamen.push(e.naam, e.naam_kort, ...((json(e.aliassen, []) || []).map((a) => (typeof a === 'string' ? a : a && a.tekst))));
+  const nietMeetellen = [];
+  for (const s of fdb.db.prepare("SELECT transacties FROM signaal WHERE soort = 'afwijkend_bedrag' AND status = 'afgehandeld' AND afhandeling = 'uitzoeken'").all())
+    nietMeetellen.push(...(json(s.transacties, []) || []));
+  return V.afwijkendeIncassos(txs, { vanaf: start, vandaag, eigenIbans: fdb.db.prepare('SELECT iban FROM rekening').all().map((r) => r.iban),
+    eigenNamen: eigenNamen.filter(Boolean), nietMeetellen });
 }
 /*
  * wv1317 (David 26-10-2026): elk open voorstel dat de controle nu niet meer zo voorstelt, gaat op 'vervallen' met de reden in details en een

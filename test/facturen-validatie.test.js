@@ -731,3 +731,176 @@ test('review wv1329 #3/#4/#5: historie met gebroken saldoketen → 409 (forceer 
   assert.throws(() => hist(t, prive, 'prive.csv'), (e) => e.status === 422 && /bankluis/.test(e.message));
   assert.ok(!D.bronBestaat(t.fdb, D.sha256(Buffer.from(prive))), 'geen Privé-bron in Facturen');
 });
+
+// ───────────────────────────── wv1326: afwijkend bedrag bij incasso's ─────────────────────────────
+// verzonnen: maandelijkse incasso van € 200 (Leverancier A), band 10e–90e percentiel + laatste drie, drempel = hoog + max(€ 5, 10 % van de mediaan)
+function maandIncasso(o) {
+  o = o || {};
+  const uit = [];
+  const n = o.n || 10, bedrag = o.bedrag || 20000;
+  for (let i = n; i >= 1; i--) {
+    const d = K.plusDagen(o.tot || '2026-10-15', -30 * i);
+    uit.push({ id: 'h' + String(i).padStart(15, '0'), entiteit: o.entiteit || 'tolgaarde', boekdatum: d, bedrag_centen: -bedrag, is_incasso: true, tegenpartij_iban: o.iban || LEV.A,
+      tegenpartij_naam: o.naam || 'Leverancier A B.V.', incassant_id: 'NL00ZZZ000000000001', alleen_eigenaar: d < START });
+  }
+  return uit;
+}
+const nu1326 = (o) => Object.assign({ id: 'n000000000000001', entiteit: 'tolgaarde', boekdatum: '2026-10-15', bedrag_centen: -41000, is_incasso: true, tegenpartij_iban: LEV.A,
+  tegenpartij_naam: 'Leverancier A B.V.', incassant_id: 'NL00ZZZ000000000001', alleen_eigenaar: false }, o || {});
+const OPT1326 = { vanaf: START, vandaag: '2026-10-22', eigenIbans: [TG, KM, PR], eigenNamen: ['Huisartsenpraktijk Proef B.V.', 'Privé', 'J. Eigenaar'] };
+
+test('wv1326: afwijkendeIncassos — alleen regelmatige incasso ná de start, ruim boven de band; creditcard, eigen rekening/naam, betaaldienst, onder de band en te weinig historie nooit', () => {
+  const r = V.afwijkendeIncassos(maandIncasso().concat([nu1326()]), OPT1326);
+  assert.equal(r.length, 1);
+  assert.equal(r[0].tx.id, 'n000000000000001');
+  assert.equal(r[0].patroon.laag_centen, 20000); assert.equal(r[0].patroon.hoog_centen, 20000); assert.equal(r[0].patroon.frequentie, 'maand');
+  assert.equal(r[0].drempel_centen, 22000, 'hoog + 10 % van de mediaan');
+  assert.equal(r[0].alleen_eigenaar, true, 'band rust op historie van vóór de start → alleen de eigenaar');
+  assert.equal(r[0].tegenpartij, 'iban:' + LEV.A);
+  const een = (tx, h, o) => V.afwijkendeIncassos((h || maandIncasso()).concat([tx]), Object.assign({}, OPT1326, o || {})).length;
+  assert.equal(een(nu1326({ bedrag_centen: -22000 })), 0, 'op de drempel: geen signaal');
+  assert.equal(een(nu1326({ bedrag_centen: -22001 })), 1, 'net erboven');
+  assert.equal(een(nu1326({ bedrag_centen: -9000 })), 0, 'goedkoper: nooit');
+  assert.equal(een(nu1326({ is_incasso: false })), 0, 'overboeking: nooit');
+  assert.equal(een(nu1326({ boekdatum: '2026-09-30' })), 0, 'vóór de start (historie): nooit');
+  assert.equal(een(nu1326({ boekdatum: '2026-10-23' })), 0, 'na vandaag: niet');
+  assert.equal(een(nu1326(), maandIncasso({ n: 5 })), 0, 'minder dan zes eerdere');
+  assert.equal(een(nu1326(), maandIncasso({ n: 6 })), 1, 'zes eerdere');
+  assert.equal(een(nu1326(), null, { vanaf: null }), 0, 'zonder startdatum: niets');
+  // creditcard, eigen rekening, eigen naam, betaaldienst
+  const cc = { tegenpartij_iban: LEV.C, tegenpartij_naam: 'International Card Services' };
+  assert.equal(een(nu1326(cc), maandIncasso({ iban: LEV.C, naam: cc.tegenpartij_naam })), 0, 'creditcard');
+  assert.equal(een(nu1326({ categorie: 'creditcard' })), 0, 'categorie creditcard');
+  assert.equal(een(nu1326({ tegenpartij_iban: KM }), maandIncasso({ iban: KM })), 0, 'eigen rekening');
+  assert.equal(een(nu1326({ tegenpartij_iban: LEV.P, tegenpartij_naam: 'J. Eigenaar' }), maandIncasso({ iban: LEV.P, naam: 'J. Eigenaar' })), 0, 'eigen naam (alias)');
+  assert.equal(een(nu1326({ tegenpartij_iban: LEV.P, tegenpartij_naam: 'Administratiekantoor J. Eigenaar' }), maandIncasso({ iban: LEV.P, naam: 'Administratiekantoor J. Eigenaar' })), 1,
+    'een naam waar de eigen naam in staat is niet de eigen naam');
+  assert.equal(een(nu1326({ tegenpartij_iban: LEV.Q, tegenpartij_naam: 'Stichting Mollie Payments' }), maandIncasso({ iban: LEV.Q, naam: 'Stichting Mollie Payments' })), 0, 'betaaldienst');
+  // onregelmatig: tussenpozen die alle kanten op gaan
+  const onr = [5, 40, 47, 140, 150, 230, 300].map((d, i) => Object.assign(maandIncasso()[0], { id: 'o' + String(i).padStart(15, '0'), boekdatum: K.plusDagen('2026-10-15', -d) }));
+  assert.equal(een(nu1326(), onr), 0, 'onregelmatig');
+  // een andere entiteit heeft een eigen band
+  assert.equal(een(nu1326({ entiteit: 'kostenmaatschap' })), 0, 'zonder eigen historie bij die entiteit');
+  // "Uitzoeken": het bedrag telt daarna niet mee; zonder dat rekt de band op en volgt geen tweede signaal
+  const h = maandIncasso().concat([nu1326()]);
+  const volgende = nu1326({ id: 'n000000000000002', boekdatum: '2026-10-20' });
+  assert.equal(V.afwijkendeIncassos(h.concat([volgende]), OPT1326).length, 1, 'het hogere bedrag zit nu in de band: alleen het eerste signaal');
+  assert.equal(V.afwijkendeIncassos(h.concat([volgende]), Object.assign({}, OPT1326, { nietMeetellen: ['n000000000000001'] })).length, 2, 'na Uitzoeken telt hij niet mee');
+  // alleen regels na de start in de band → ook voor de praktijkmanager
+  const r2 = V.afwijkendeIncassos(maandIncasso({ tot: '2027-06-15', n: 8 }).concat([nu1326({ boekdatum: '2027-06-15' })]), Object.assign({}, OPT1326, { vandaag: '2027-06-20' }));
+  assert.equal(r2.length, 1); assert.equal(r2[0].alleen_eigenaar, false);
+});
+
+test('wv1326: bankcontrole maakt afwijkend_bedrag — één per tegenpartij per maand, niet naast een ander signaal over dezelfde regel; knoppen, les en uitleg', () => {
+  const tx = nu1326({ eigen_iban: TG, entry_ref: 'r1', formaat: 'bankluis', bestand: null });
+  const tx2 = nu1326({ id: 'n000000000000002', boekdatum: '2026-10-20', eigen_iban: TG, entry_ref: 'r2', formaat: 'bankluis', bestand: null });
+  const a = V.afwijkendeIncassos(maandIncasso().concat([tx]), OPT1326);
+  const inv = (o) => Object.assign({ vandaag: '2026-10-22', transacties: [tx], facturen: [], leveranciers: [], uitzonderingen: [{ id: 'u1', richting: 'af', tegenpartij: LEV.A, categorie: 'abonnement_zonder_factuur', actief: 1 }],
+    entiteiten: [{ sleutel: 'tolgaarde', ibans: [TG] }], rekeningen: [{ iban: TG, entiteit: 'tolgaarde', controle: 1 }], afwijkend: a }, o || {});
+  const u = B.bankcontrole(inv());
+  const s = u.signalen.filter((x) => x.soort === 'afwijkend_bedrag');
+  assert.equal(s.length, 1);
+  assert.deepEqual(s[0].transacties, [tx.id]);
+  assert.match(s[0].sleutel, /^afwijkend_bedrag:tolgaarde\|[0-9a-f]{16}\|2026-10$/);
+  assert.ok(!s[0].sleutel.includes(LEV.A), 'het rekeningnummer staat niet in de sleutel');
+  assert.equal(s[0].alleen_eigenaar, true);
+  assert.deepEqual(s[0].knoppen, ['klopt', 'uitzoeken']);
+  assert.equal(s[0].details.laag_centen, 20000); assert.equal(s[0].details.frequentie, 'maand');
+  // dezelfde tegenpartij nog een keer in dezelfde maand: zelfde sleutel → geen tweede signaal; een bestaand signaal → niet opnieuw
+  const a2 = a.concat([{ tx: tx2, tegenpartij: a[0].tegenpartij, patroon: a[0].patroon, drempel_centen: a[0].drempel_centen }]);
+  assert.equal(B.bankcontrole(inv({ transacties: [tx, tx2], afwijkend: a2 })).signalen.filter((x) => x.soort === 'afwijkend_bedrag').length, 1);
+  assert.equal(B.bankcontrole(inv({ bestaandeSignalen: [{ sleutel: s[0].sleutel, status: 'afgehandeld' }] })).signalen.filter((x) => x.soort === 'afwijkend_bedrag').length, 0);
+  // een andere maand is een nieuwe sleutel
+  const tx3 = Object.assign({}, tx2, { id: 'n000000000000003', boekdatum: '2026-11-15', entry_ref: 'r3' });
+  const s3 = B.bankcontrole(inv({ vandaag: '2026-11-20', transacties: [tx3], afwijkend: [Object.assign({}, a[0], { tx: tx3 })] })).signalen.filter((x) => x.soort === 'afwijkend_bedrag');
+  assert.equal(s3.length, 1); assert.notEqual(s3[0].sleutel, s[0].sleutel);
+  // geen afwijkend: zonder kandidaten niets; zelfde regel met een ander signaal (onbekend IBAN: leverancier op naam, ander IBAN) → alleen dat
+  assert.equal(B.bankcontrole(inv({ afwijkend: [] })).signalen.filter((x) => x.soort === 'afwijkend_bedrag').length, 0);
+  const lev = { id: 'lev0000000000001', naam: 'Leverancier A B.V.', ibans: [LEV.C], incassant_ids: [], namen: [] };
+  const metOnbekend = B.bankcontrole(inv({ leveranciers: [lev], uitzonderingen: [] })).signalen.map((x) => x.soort);
+  assert.ok(metOnbekend.includes('onbekend_iban'), JSON.stringify(metOnbekend)); assert.ok(!metOnbekend.includes('afwijkend_bedrag'), 'niet naast onbekend IBAN');
+  // afhandelen
+  const kl = B.afhandelSignaal(s[0], 'klopt', { wie: 'david (proef)', nu: '2026-10-22T10:00:00Z' });
+  assert.equal(kl.ok, true); assert.deepEqual(kl.gevolgen, []);
+  assert.match(kl.signaal.les, /incasseerde € 410,00 \(gebruikelijk € 200,00 per maand\); dat klopt/);
+  assert.equal(B.afhandelSignaal(s[0], 'uitzoeken', { wie: 'david (proef)', nu: '2026-10-22T10:00:00Z' }).fout, 'vereist', 'Uitzoeken vraagt wat David vond');
+  const uz = B.afhandelSignaal(s[0], 'uitzoeken', { wie: 'david (proef)', nu: '2026-10-22T10:00:00Z', toelichting: 'dubbel geïncasseerd, teruggevraagd' });
+  assert.equal(uz.ok, true); assert.match(uz.signaal.les, /uitgezocht: dubbel geïncasseerd/); assert.equal(uz.signaal.sluimer_tot, undefined);
+  // uitleg in gewone taal
+  assert.equal(B.signaalUitleg({ soort: 'afwijkend_bedrag', bedrag_centen: -39950, details: { laag_centen: 18015, hoog_centen: 18490, frequentie: 'maand', aantal: 8, sinds: '2025-11-15', datum: '2026-10-15' } }),
+    "Gebruikelijk € 180,15 – € 184,90 per maand, nu € 399,50 op 15-10-2026. Gerekend over 8 eerdere incasso's sinds 15-11-2025.");
+  assert.equal(B.signaalUitleg({ soort: 'geen_factuur', details: {} }), null);
+  assert.match(B.signaalUitleg({ soort: 'afwijkend_bedrag', bedrag_centen: -500, details: {} }), /^Gebruikelijk bedrag onbekend, nu € 5,00\.$/);
+});
+
+test('wv1326: in de echte bankcontrole — historie nooit, na de start één signaal (alleen de eigenaar ziet het bij een band uit de historie), uitleg in de lijst, Uitzoeken haalt het bedrag uit de band', () => {
+  const t = opzet();
+  const rek = t.fdb.db.prepare("SELECT id FROM rekening WHERE entiteit = 'tolgaarde'").get().id;
+  let n = 0;
+  const zet = (r) => D.voegToe(t.fdb, 'bank_transactie', { id: r.id || ('e' + String(++n).padStart(15, '0')), rekening: rek, entiteit: 'tolgaarde', eigen_iban: TG, boekdatum: r.boekdatum,
+    bedrag_centen: r.bedrag_centen, tegenpartij_naam: r.tegenpartij_naam, tegenpartij_iban: r.tegenpartij_iban, incassant_id: r.incassant_id, is_incasso: r.is_incasso ? 1 : 0,
+    transactietype: 'ABN:SEPA Incasso algemeen doorlopend', entry_ref: 'proef-' + (r.id || n), formaat: 'bankluis', bankluis_sleutel: 'proef-' + (r.id || n),
+    alleen_eigenaar: r.boekdatum < START ? 1 : 0, aangemaakt_op: new Date(NU).toISOString() });
+  // historie: 10 maanden € 200 en een uitschieter vóór de start (die mag nooit een signaal geven)
+  D.transactie(t.fdb, () => {
+    for (const r of maandIncasso({ tot: '2026-09-25' })) zet(Object.assign({}, r, { id: undefined }));
+    zet(nu1326({ id: undefined, boekdatum: '2026-09-28' }));
+  });
+  const c0 = D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.equal(t.n("SELECT count(*) n FROM signaal WHERE soort = 'afwijkend_bedrag'"), 0, 'historie: nooit');
+  // na de start: een incasso ruim erboven
+  D.transactie(t.fdb, () => zet(nu1326({ id: 'f000000000000001', boekdatum: '2026-10-15', bedrag_centen: -45000 })));
+  D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.equal(t.n("SELECT count(*) n FROM signaal WHERE soort = 'afwijkend_bedrag'"), 1);
+  D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.equal(t.n("SELECT count(*) n FROM signaal WHERE soort = 'afwijkend_bedrag'"), 1, 'tweede ronde: niet opnieuw');
+  const routes = F.maak({ fout: () => {} });
+  const bank = (rol) => routes.app(t.fdb, { methode: 'GET', pad: '/app/facturen/bank', d: {}, rol, primair: true, nu: NU });
+  const be = bank(t.eig);
+  assert.equal(be.status, 200);
+  const s = be.j.signalen.find((x) => x.soort === 'afwijkend_bedrag');
+  assert.ok(s, 'de eigenaar ziet het signaal');
+  assert.match(s.uitleg, /^Gebruikelijk € 200,00 – € 410,00 per maand, nu € 450,00 op 15-10-2026\./, 'de uitschieter van vóór de start zit in de band (laatste drie)');
+  assert.deepEqual(s.knoppen.map((k) => k.knop), ['klopt', 'uitzoeken']);
+  assert.ok(!JSON.stringify(s).includes(LEV.A), 'geen rekeningnummer van de tegenpartij in het signaal');
+  const bp = bank(t.pm);
+  assert.equal(bp.status, 200);
+  assert.ok(!bp.j.signalen.some((x) => x.soort === 'afwijkend_bedrag'), 'band rust op historie: praktijkmanager ziet hem niet');
+  // Uitzoeken → dat bedrag telt niet meer mee
+  const uz = routes.app(t.fdb, { methode: 'POST', pad: '/app/facturen/signaal', d: { id: s.id, knop: 'uitzoeken', toelichting: 'dubbel geïncasseerd (proef)' }, rol: t.eig, primair: true, nu: NU });
+  assert.equal(uz.status, 200, JSON.stringify(uz.j));
+  assert.match(uz.j.les, /uitgezocht: dubbel geïncasseerd/);
+  // november weer € 450: zonder Uitzoeken zat oktober in de band (geen signaal); nu telt oktober niet mee → wel een signaal (nieuwe maand)
+  const NOV = Date.parse('2026-11-20T12:00:00Z');
+  D.transactie(t.fdb, () => zet(nu1326({ id: 'f000000000000002', boekdatum: '2026-11-15', bedrag_centen: -45000 })));
+  D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NOV));
+  const nov = t.fdb.db.prepare("SELECT transacties, status FROM signaal WHERE soort = 'afwijkend_bedrag' ORDER BY aangemaakt_op, id").all();
+  assert.equal(nov.length, 2, 'na Uitzoeken telt het bedrag van oktober niet mee in de band');
+  assert.ok(nov.some((x) => x.transacties.includes('f000000000000002') && x.status === 'open'));
+  void c0;
+});
+
+test('wv1326: zonder Uitzoeken (Klopt) schuift de band mee — volgende maand hetzelfde hogere bedrag geeft geen signaal', () => {
+  const t = opzet();
+  const rek = t.fdb.db.prepare("SELECT id FROM rekening WHERE entiteit = 'tolgaarde'").get().id;
+  let n = 0;
+  const zet = (r) => D.voegToe(t.fdb, 'bank_transactie', { id: r.id || ('c' + String(++n).padStart(15, '0')), rekening: rek, entiteit: 'tolgaarde', eigen_iban: TG, boekdatum: r.boekdatum,
+    bedrag_centen: r.bedrag_centen, tegenpartij_naam: r.tegenpartij_naam, tegenpartij_iban: r.tegenpartij_iban, incassant_id: r.incassant_id, is_incasso: 1,
+    transactietype: 'ABN:SEPA Incasso algemeen doorlopend', entry_ref: 'proef-' + (r.id || n), formaat: 'bankluis', bankluis_sleutel: 'proef-' + (r.id || n),
+    alleen_eigenaar: r.boekdatum < START ? 1 : 0, aangemaakt_op: new Date(NU).toISOString() });
+  D.transactie(t.fdb, () => { for (const r of maandIncasso({ tot: '2026-10-15' })) zet(Object.assign({}, r, { id: undefined })); zet(nu1326({ id: 'b000000000000001' })); });
+  D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  const s = t.fdb.db.prepare("SELECT id FROM signaal WHERE soort = 'afwijkend_bedrag'").get();
+  assert.ok(s);
+  const routes = F.maak({ fout: () => {} });
+  const kl = routes.app(t.fdb, { methode: 'POST', pad: '/app/facturen/signaal', d: { id: s.id, knop: 'klopt' }, rol: t.eig, primair: true, nu: NU });
+  assert.equal(kl.status, 200, JSON.stringify(kl.j));
+  assert.match(kl.j.les, /dat klopt: het telt mee in de gebruikelijke band/);
+  const NOV = Date.parse('2026-11-20T12:00:00Z');
+  D.transactie(t.fdb, () => zet(nu1326({ id: 'b000000000000002', boekdatum: '2026-11-15' })));
+  D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NOV));
+  assert.equal(t.n("SELECT count(*) n FROM signaal WHERE soort = 'afwijkend_bedrag'"), 1, 'de nieuwe prijs hoort bij de band');
+  // geleerd: de les staat in de lijst
+  const b = routes.app(t.fdb, { methode: 'GET', pad: '/app/facturen/bank', d: {}, rol: t.eig, primair: true, nu: NU });
+  assert.ok(b.j.geleerd_regels.some((g) => /dat klopt/.test(g.tekst)), JSON.stringify(b.j.geleerd_regels));
+});

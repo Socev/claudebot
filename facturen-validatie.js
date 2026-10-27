@@ -9,7 +9,8 @@
  *
  * PUUR (zelfde CI-poort als facturen-kern.js en facturen-bank.js): geen bestand-, netwerk- of procesmodule, geen klok. `vandaag` komt van de
  * beller. Alles wordt op aanvraag berekend uit de bankregels (Facturen-database) en de facturen (Facturen + het FV2-archief); er komt geen
- * signaal of melding uit voort. Rollen filtert facturen.js vóór de aanroep (alleen-eigenaar-regels gaan nooit naar een praktijkmanager).
+ * signaal of melding uit voort, met één uitzondering: afwijkendeIncassos (wv1326) levert de kandidaten voor het signaal afwijkend_bedrag, dat
+ * facturen-bank.bankcontrole maakt. Rollen filtert facturen.js vóór de aanroep (alleen-eigenaar-regels gaan nooit naar een praktijkmanager).
  *
  * Bedragen in centen; afschrijvingen zijn negatief in de bankregels, in de uitkomst positief ("betaald").
  */
@@ -119,6 +120,65 @@ function bedragPatroon(lijst, vandaag, bedrag, opties) {
   const x = Number.isSafeInteger(bedrag) ? Math.abs(bedrag) : null;
   return { aantal: l.length, laag_centen: laag, hoog_centen: hoog, mediaan_centen: med, marge_centen: marge, frequentie: frequentieVan(l.map((t) => t.boekdatum)).soort,
     sinds: l[0].boekdatum, oordeel: x === null ? null : x > hoog + marge ? 'boven' : x < laag - marge ? 'onder' : 'binnen' };
+}
+
+// ───────────────────────────── afwijkende incasso (wv1326) ─────────────────────────────
+/*
+ * David 26-10-2026 11:39: "per entiteit moet er natuurlijk ook een bedrag-range bijgehouden: Wat is de gebruikelijke range, en waarbuiten is
+ * het afwijkend?" Een los signaal mocht pas als het minder dan 5 % van de tegenpartijen raakt (grondwet 10). Gemeten 26/27-10 op een kopie
+ * van de echte bankregels (mk-scripts wv1323/wv1326): over alle afschrijvingen raakt de band van bedragPatroon 15 % van de tegenpartijen,
+ * vooral salarissen en vakantiegeld; met alleen regelmatige incasso's (maand of kwartaal, ≥ 6 eerdere van dezelfde tegenpartij in 12
+ * maanden), alleen erboven met een ruimere marge (max(€ 5, 10 % van de mediaan)), zonder creditcard, eigen rekeningen en betaaldiensten:
+ * 0 van 29 tegenpartijen bij de laatste betaling en 4 signalen in 180 dagen (pensioenfonds jaarafrekening, boekhouder dubbel bedrag,
+ * mobiliteit). Onder de band (goedkoper) is nooit een signaal.
+ * transacties = bankregels (alle entiteiten; de beller geeft de incasso's vanaf een jaar vóór `vanaf`), opties = { vanaf (startdatum: alleen
+ * incasso's op of na die dag; zonder startdatum niets), vandaag, eigenIbans: [iban], eigenNamen: [naam] (entiteiten en hun aliassen; een
+ * tegenpartij met precies die naam is een eigen rekening), nietMeetellen: [transactie-id] (David zei bij "Uitzoeken" dat het bedrag niet
+ * klopte: telt niet mee in de band) }.
+ * → [{ tx, tegenpartij (sleutel), patroon (bedragPatroon), drempel_centen, alleen_eigenaar }], oudste eerst.
+ */
+const AFWIJKEND_MIN = 6, AFWIJKEND_FREQ = ['maand', 'kwartaal'], AFWIJKEND_MARGE = 0.10, AFWIJKEND_MARGE_MIN = 500;
+const CREDITCARD_RE = /\bics\b|card services|american express|amex|creditcard|credit card|mastercard|\bvisa\b/i;
+const EIGEN_CATEGORIEEN = ['eigen_overboeking', 'rekening_courant', 'prive_opname', 'creditcard'];
+function afwijkendeIncassos(transacties, opties) {
+  opties = opties || {};
+  const vanaf = isIsoDatum(opties.vanaf) ? opties.vanaf : null, vandaag = isIsoDatum(opties.vandaag) ? opties.vandaag : null;
+  if (!vanaf || !vandaag) return [];
+  const eigenIbans = new Set((opties.eigenIbans || []).map(ibanNorm).filter(Boolean));
+  const eigenNamen = new Set((opties.eigenNamen || []).map(compactNaam).filter((n) => n.length >= 5));
+  const weg = new Set(opties.nietMeetellen || []);
+  const telt = (t) => !t.verwijderd_op && !!t.is_incasso && t.bedrag_centen < 0 && isIsoDatum(t.boekdatum);
+  const uitgesloten = (t) => {
+    const naam = String(t.tegenpartij_naam || ''), tekst = naam + ' ' + String(t.transactietype || '');
+    if (EIGEN_CATEGORIEEN.includes(t.categorie) || CREDITCARD_RE.test(tekst) || VERZAMEL_RE.test(zonderAccentenEnz(naam))) return true;
+    const iban = ibanNorm(t.tegenpartij_iban);
+    return !!(iban && eigenIbans.has(iban)) || eigenNamen.has(compactNaam(naam));
+  };
+  const groepen = new Map();
+  for (const t of transacties || []) {
+    if (!telt(t)) continue;
+    const k = tegenpartijSleutel(t);
+    if (!k) continue;
+    const g = t.entiteit + '|' + k;
+    if (!groepen.has(g)) groepen.set(g, { tegenpartij: k, lijst: [] });
+    groepen.get(g).lijst.push(t);
+  }
+  const uit = [];
+  for (const { tegenpartij, lijst } of groepen.values()) {
+    for (const t of lijst) {
+      if (t.boekdatum < vanaf || t.boekdatum > vandaag || uitgesloten(t)) continue;
+      // de band uit de incasso's van vóór deze dag (12 maanden); zelfde dag telt niet mee (twee contracten op één dag beoordelen elkaar niet)
+      const van = plusDagen(t.boekdatum, -365);
+      const voor = lijst.filter((x) => x.boekdatum < t.boekdatum && x.boekdatum >= van && !weg.has(x.id));
+      if (voor.length < AFWIJKEND_MIN || !AFWIJKEND_FREQ.includes(frequentieVan(voor.map((x) => x.boekdatum)).soort)) continue;
+      const bedrag = -t.bedrag_centen, p = bedragPatroon(voor, t.boekdatum, bedrag);
+      if (!p) continue;
+      const drempel = p.hoog_centen + Math.max(AFWIJKEND_MARGE_MIN, Math.round(p.mediaan_centen * AFWIJKEND_MARGE));
+      // alleen_eigenaar: de band rust op een regel die een praktijkmanager niet ziet (historie, POT) → het signaal ook niet (zoals wv1317)
+      if (bedrag > drempel) uit.push({ tx: t, tegenpartij, patroon: p, drempel_centen: drempel, alleen_eigenaar: voor.some((x) => !!x.alleen_eigenaar) });
+    }
+  }
+  return uit.sort((a, b) => (a.tx.boekdatum < b.tx.boekdatum ? -1 : a.tx.boekdatum > b.tx.boekdatum ? 1 : String(a.tx.id).localeCompare(String(b.tx.id))));
 }
 
 // ───────────────────────────── rekening uit de bankhistorie (wv1323) ─────────────────────────────
@@ -356,7 +416,7 @@ function zoek(transacties, vraag) {
 }
 
 module.exports = {
-  tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan, bedragPatroon,
+  tegenpartijSleutel, betaalwijzeVan, mediaan, frequentieVan, profielen, profielVan, bedragPatroon, afwijkendeIncassos, AFWIJKEND_MIN, AFWIJKEND_MARGE,
   naamVerwant, vollereNaam, ibanHistorie, FEIT_MIN_BETALINGEN, FEIT_MIN_DAGEN, VERZAMEL_RE,
   genormKenmerk, echtKenmerk, betalingVan, controles, zoek,
 };

@@ -757,7 +757,7 @@ test('alle signalen: elke knop geeft een les, onbekende knop/zonder wie geweiger
     dubbele_factuur: ['is_dubbel', 'toch_factuur'], verzending_mislukt: ['opnieuw_proberen', 'terug_naar_beoordelen'], incasso_niet_gezien: ['toch_zelf_betalen', 'afwachten'],
     te_betalen_niet_betaald: ['naar_betaallijst', 'is_al_betaald'], ingevoerd_niet_gezien: ['opnieuw_kijken', 'koppelen'], onbekend_iban: ['uitzoeken'],
     mogelijk_dubbel_geupload: ['is_hetzelfde', 'zijn_er_twee'],
-    teruggeboekt: ['opnieuw_betalen', 'leverancier_incasseert'],
+    teruggeboekt: ['opnieuw_betalen', 'leverancier_incasseert'], afwijkend_bedrag: ['klopt', 'uitzoeken'],
   });
 });
 
