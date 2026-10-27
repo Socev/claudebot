@@ -693,7 +693,7 @@ toets('B opgelost: weer open', JSON.stringify(R2.health()) === JSON.stringify({ 
   toets('S server.js: blok Bandjes en appStudioCtx gevonden', a > 0 && e > a && !!ctxRegel);
   toets('S server.js: appStudio gebruikt dezelfde ctx-functie', /async function appStudio\(req, res, a, s, d, route\) \{\n[^\n]*\n  const ctx = appStudioCtx\(a, s\);/.test(src));
   toets('S server.js: dispatch, smalle route, grens en /health', /route === 'GET \/app\/bandjes' \|\| route\.indexOf\('POST \/app\/bandjes\/'\) === 0\) return typeof appBandjes === 'function'/.test(src) &&
-    /'bandjes\/voorstel': 30/.test(src) && /if \(actie === 'bandjes\/voorstel'\) return bandjes \? bandjes\.smal\('voorstel', d\)/.test(src) && /bandjes: bandjesInfo\(\),/.test(src) &&
+    /'bandjes\/voorstel': 30/.test(src) && /if \(actie === 'bandjes\/voorstel'\) \{\n    if \(!bandjes\) return \{ status: 404[^\n]*\n    const r = bandjes\.smal\('voorstel', d\);/.test(src) && /bandjes: bandjesInfo\(\),/.test(src) &&
     /naKlaar: function \(t\) \{ return bandjes \? bandjes\.naKlaar\(t\) : null; \}/.test(src));
   const V3 = path.join(W2, 'vault3'); fs.mkdirSync(path.dirname(path.join(V3, B.PRAKTIJKEN.tolgaarde.pad)), { recursive: true }); fs.mkdirSync(path.dirname(path.join(V3, B.PRAKTIJKEN.groenhouten.pad)), { recursive: true });
   fs.writeFileSync(path.join(V3, B.PRAKTIJKEN.tolgaarde.pad), fs.readFileSync(TG2)); fs.writeFileSync(path.join(V3, B.PRAKTIJKEN.groenhouten.pad), fs.readFileSync(GH2));

@@ -2582,6 +2582,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
       r.files = r.files.filter(function (f) { tot += f.size || 0; return tot <= GEREEDSCHAP_LEZEN_MAX_UIT; });
       if (r.files.length < voor) r.bestanden_weggelaten = voor - r.files.length;
     }
+    if (!lezen && typeof appOpenNaRun === 'function') appOpenNaRun(jobId, j, r);   // wv1712 (OVIS M6-pod): [OPEN …] uit de uitvoer, veld alleen bij een eigen app-beurt
     r.workspace = ws;
     if (keuze.model && !r.fallback_van) r.model = keuze.model;
     if (sKey && r.session_id && !((sessieResetOp[key] || 0) > sessieGelezen)) { chatSessions[sKey] = r.session_id; saveSessions(); }   // wv895: een reset tijdens de beurt wint
@@ -3071,6 +3072,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     r = await eindcontrole(jobId, keuze, r, outdir, space.dir, runOpts, t0, maxMs, entry);
     // Achteraan, zodat een eventuele "LET OP: tussenstand"-kop van de eindcontrole bovenaan blijft.
     if (herstartRegel && r) r.output = String(r.output || '').replace(/\s+$/, '') + '\n\n' + herstartRegel;
+    if (r && typeof r.output === 'string' && typeof appOpenKnip === 'function') r.output = appOpenKnip(r.output);   // wv1712: een agentrapport stuurt nooit de weergave
     r.files = collectFiles(outdir);
     r.workspace = ws;
     // Let op de volgorde: spillIfLarge leegt r.output als die naar schijf gaat,
@@ -3116,7 +3118,7 @@ const WEES_GEEN_TEKST = '(Geen afgeronde eindtekst in de sessie: de agent stopte
 // Al het andere (tool_use halverwege, een API-fout, een oude beurt uit een hervatte sessie) is geen eindtekst.
 function weesEindtekst(a) {
   if (!a.transcript) {
-    if (a.runtime === 'codex') { try { return { tekst: fs.readFileSync(path.join(IO, a.job_id, 'codex-last.md'), 'utf8').trim() }; } catch (e) {} }
+    if (a.runtime === 'codex') { try { return { tekst: weesOpenKnip(fs.readFileSync(path.join(IO, a.job_id, 'codex-last.md'), 'utf8').trim()) }; } catch (e) {} }
     return { tekst: '' };
   }
   // wv715: een socev-transcript via de loper; appVerlorenAfronden leest het vooraf asynchroon (a.tekst_vooraf)
@@ -3142,8 +3144,10 @@ function weesEindtekst(a) {
     if (t) delen.unshift(t);
     if (!msgId) break;   // zonder id geen samenhang te bewijzen: alleen deze regel
   }
-  return { tekst: delen.join('\n\n').trim() };
+  return { tekst: weesOpenKnip(delen.join('\n\n').trim()) };
 }
+// wv1712: ook een antwoord na een herstart (wees-agent, verloren app-beurt) zonder [OPEN …]-regel en zonder veld
+function weesOpenKnip(t) { return typeof appOpenKnip === 'function' ? appOpenKnip(t) : t; }
 
 // wv716 (Fable wv703 C1): een hoofdkanaal-transcript is van het kanaal, niet van de beurt: na een herstart hervat de volgende
 // beurt (heartbeat, Telegram, app) dezelfde sessie binnen seconden en schrijft in hetzelfde bestand. Alleen de regels vanaf de
@@ -6218,7 +6222,7 @@ function appOntmasker(t, merk) {
   // anders glipt "​[KNOP]" erdoor (Fable-review diff wv135 #2). Daarna ELKE markering, waar ook in de tekst (ook na "> " of
   // "**"), en niet alleen aan het begin van een regel.
   return String(t).replace(/\p{Cf}/gu, '').normalize('NFKC')
-    .replace(/\[(\s*)(KNOP|APP|AUTO|REPLY OP VRAAG|ANTWOORD\s*OP|FILES-PORTAAL|MACHINEKAMER|Systeem|WERKVOORRAAD|HEARTBEAT)\b/gi, '(' + (merk || 'getypt') + ') [$1$2');   // wv628: ANTWOORD OP
+    .replace(/\[(\s*)(KNOP|APP|AUTO|REPLY OP VRAAG|ANTWOORD\s*OP|FILES-PORTAAL|MACHINEKAMER|Systeem|WERKVOORRAAD|HEARTBEAT|OPEN)\b/gi, '(' + (merk || 'getypt') + ') [$1$2');   // wv628: ANTWOORD OP; wv1712: OPEN (Socev stuurt de weergave, § 3.6)
 }
 
 function appUitvoer(j) {
@@ -6316,7 +6320,8 @@ async function appNaBeurt(jobId) {
     const goed = await appLogSchrijf(j.app.kanaal, { t: new Date().toISOString(), job_id: jobId, beurt_id: j.app.beurt_id, soort: j.app.soort,
       getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined,   // wv628: typtijd (sorteren) en Antwoord hierop
       apparaat: j.app.apparaat, tekst: j.app.tekst, invoer: (j.app.invoer && j.app.invoer.length) ? j.app.invoer : undefined, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined,
-      vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
+      vraag_hash: vraag ? vraag.hash : undefined, bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [],
+      open: j.app.open || undefined });   // wv1712: alleen het veld; uitgeleverd alleen aan j.app.apparaat (appGeschiedenis)
     j.app.gelogd = goed;
     // wv264: een beurt van de telefoon zet eerst zijn uit-item op schijf; pas dan telt hij als opgehaald (anders gooit een
     // uitrol het antwoord tussen klaar en bewaard weg). Luistert de telefoon, dan geen seintje: het antwoord klinkt al.
@@ -7003,7 +7008,8 @@ function appUitslag(req, res, reg, a, s, d) {
   appStuur(res, 200, { ok: true, gevonden: true, klaar: true, kanaal: j.app.kanaal, job_id: id, gelukt: r.ok !== false,
     antwoord: out, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : null,
     vraag: vraag ? { hash: vraag.hash, tekst: vraag.tekst, beantwoord: appBeantwoord(id, vraag.hash), gevoelig: appVraagGevoelig(id, vraag.hash) } : null,
-    bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
+    bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [],
+    open: j.app.open && typeof appOpenVoor === 'function' ? appOpenVoor(j.app.open, j.app.apparaat, a, Date.now() - (j.done_at || 0) <= APP_OPEN_VERS_MS) : undefined });   // wv1712 (§ 3.6)
 }
 
 // Vraagzin en het hele bericht waaronder gedrukt is (wv171: dat bericht gaat als Socev-rij naar chat_log, net als in Telegram).
@@ -7164,6 +7170,7 @@ async function appGeschiedenisRuw(kanaal, lees) {
     if (!j.app || j.app.kanaal !== kanaal || j.status !== 'done' || j.app.gelogd === true || inLog[id] || j.app.teruggehaald || j.app.rijVerloren) return;   // wv628: teruggehaald staat nergens; verloren schrijft zijn eigen regel
     const r = j.result || {}, out = appUitvoer(j), v = appVraagVan(kanaal, out);
     items.push({ t: new Date(j.done_at || j.created).toISOString(), getypt: new Date(j.created).toISOString(), antwoord_op: j.app.antwoord_op || undefined, job_id: id, beurt_id: j.app.beurt_id, soort: j.app.soort, tekst: j.app.tekst,
+      apparaat: j.app.apparaat, open: j.app.open || undefined,   // wv1712
       invoer: j.app.invoer, antwoord: out, ok: r.ok !== false, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : undefined, vraag_hash: v ? v.hash : undefined,
       bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [] });
   });
@@ -7220,7 +7227,8 @@ async function appGeschiedenis(req, res, reg, a, pad) {
         : tv ? { hash: tv.hash, tekst: tv.tekst, beantwoord: null, gevoelig: true, naar_telegram: true, verlopen: agNu - Date.parse(x.t) > APP_VRAAG_GELDIG_MS || undefined } : null,
       bestanden: bnamen, bron: bericht ? x.bron || null : undefined, klasse: bericht ? x.klasse || null : undefined, agent_job: bericht ? x.agent_job || null : undefined,
       reactie: reacties && reacties[kanaal + ':' + x.job_id] ? reacties[kanaal + ':' + x.job_id].duim : null,
-      agenda: agendaKnoppen[x.job_id] && agendaKnoppen[x.job_id].kanaal === kanaal ? appAgendaVorm(agendaKnoppen[x.job_id], agNu) : undefined };
+      agenda: agendaKnoppen[x.job_id] && agendaKnoppen[x.job_id].kanaal === kanaal ? appAgendaVorm(agendaKnoppen[x.job_id], agNu) : undefined,
+      open: x.open && typeof appOpenVoor === 'function' ? appOpenVoor(x.open, x.apparaat, a, false) : undefined };   // wv1712: alleen het typende apparaat, uit de geschiedenis nooit een wissel
   });
   // wie de geschiedenis met een afgerond antwoord ophaalt, heeft het gezien (fase 5c, Fable-review wv100 B2)
   if (!appNietGezien(req)) items.forEach(function (x) { if (jobs[x.job_id] && jobs[x.job_id].app && jobs[x.job_id].status === 'done') appGezienDoor(x.job_id, a.id); });   // wv1243
@@ -12924,7 +12932,8 @@ async function berichtNieuw(res, d) {
     ag = appAgendaUitBericht(d.agenda, Date.now());
     if (typeof ag === 'string') return berichtStuur(res, 400, { ok: false, fout: ag });
   }
-  const tekst = d.tekst.replace(/\r\n?/g, '\n');
+  const tekst = typeof appOpenKnip === 'function' ? appOpenKnip(d.tekst.replace(/\r\n?/g, '\n')) : d.tekst.replace(/\r\n?/g, '\n');   // wv1712: een bericht stuurt nooit de weergave
+  if (!tekst.trim()) return berichtStuur(res, 400, { ok: false, fout: 'geen tekst' });
   const idx = berichtIndex(), nu = Date.now();
   const sl = d.sleutel ? appSha('bericht:' + d.sleutel) : null;
   if (sl) {
@@ -14253,6 +14262,58 @@ function appVastRoute(req, res, a, d) {
   try { appSchrijfJson(APP_VAST, { versie: 1, bijgewerkt: new Date().toISOString(), vast: u.lijst }); }
   catch (e) { logError('vast.json schrijven', e); return appWeiger(res, 500, 'opslaan lukte niet; probeer het zo nog eens', 'vast schrijven'); }
   return antwoord(u.lijst, false);
+}
+
+// ── wv1712 (OVIS M6-pod, ontwerplijnen § 3.6): Socev stuurt de weergave. De logica staat in app-open.js; hier knippen, registreren
+// wat de pod in een beurt maakte en uitleveren. Socev zet als laatste regel [OPEN scherm=… focus=…]; die regel gaat uit ALLE uitvoer
+// (processJob: app, Telegram, heartbeat; processAgent; /bericht; antwoorden na een herstart). Alleen een getypte app-beurt in het
+// hoofdgesprek krijgt hem als veld (job.app.open, ook in het app-log), en alleen het apparaat van die beurt krijgt het veld terug
+// (/app/uitslag en /app/geschiedenis). Een wissel (vorm 3) alleen bij focus leeg of iets wat de pod in deze beurt maakte, en alleen
+// in het verse antwoord (APP_OPEN_VERS_MS); al het andere is een kaartlink (vorm 1). Ontbreekt app-open.js (terugrol): de tekst
+// blijft zoals hij was en er komt geen veld (de app van vóór M6 kent het veld niet).
+const APP_OPEN_VERS_MS = 2 * 60 * 1000;
+const APP_OPEN_GEMAAKT_MS = 2 * 60 * 60 * 1000, APP_OPEN_GEMAAKT_MAX = 50;
+let appOpenMod = null, appOpenGezocht = false;
+function appOpenModule() {
+  if (appOpenMod || appOpenGezocht) return appOpenMod;
+  appOpenGezocht = true;
+  try { const p = path.join(__dirname, 'app-open.js'); if (fs.existsSync(p)) appOpenMod = require(p); } catch (e) { logError('app-open', e); }
+  return appOpenMod;
+}
+function appOpenKnip(tekst) {
+  const L = appOpenModule();
+  if (!L || typeof tekst !== 'string') return tekst;
+  try { return L.uit(tekst).tekst; } catch (e) { logError('app-open', e); return tekst; }
+}
+// Wat de pod zelf maakte (nu: een bandjesvoorstel via /smal/bandjes/voorstel), met de beurt die het vroeg (SOCEV_BEURT) als die meekwam.
+function appOpenGemaaktZet(focus, beurt) {
+  const l = (appStaat.openGemaakt = (appStaat.openGemaakt || []).filter(function (x) { return Date.now() - x.t < APP_OPEN_GEMAAKT_MS; }));
+  l.push({ focus: String(focus), t: Date.now(), beurt: APP_JOB_RE.test(String(beurt || '')) ? String(beurt) : null });
+  if (l.length > APP_OPEN_GEMAAKT_MAX) l.splice(0, l.length - APP_OPEN_GEMAAKT_MAX);
+}
+function appOpenGemaaktVan(jobId, j) {
+  const van = (j && j.started) || 0, nu = Date.now();
+  return (appStaat.openGemaakt || []).filter(function (x) { return x.beurt ? x.beurt === jobId : (van && x.t >= van && x.t <= nu); }).map(function (x) { return x.focus; });
+}
+// Na runMetFallback in processJob (vóór spillIfLarge): knippen, en bij een eigen beurt het veld zetten.
+function appOpenNaRun(jobId, j, r) {
+  const L = appOpenModule();
+  if (!L || !r || typeof r.output !== 'string') return;
+  let u;
+  try { u = L.uit(r.output); } catch (e) { logError('app-open', e); return; }
+  if (!u.weg) return;
+  r.output = u.tekst;
+  const app = j && j.app;
+  const t = L.toets(u.regel, { kanaal: app && app.kanaal, soort: app && app.soort, job: jobId, bestanden: Array.isArray(r.files) ? r.files.length : 0,
+    gemaakt: app ? appOpenGemaaktVan(jobId, j) : [] });
+  if (app && t.open) app.open = t.open;
+  schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'app-open', job: jobId, kanaal: app ? app.kanaal : null, weg: u.weg,
+    scherm: u.regel ? u.regel.scherm : null, vorm: t.open ? t.open.vorm : null, reden: t.reden }));
+}
+function appOpenVoor(open, beurtApparaat, a, vers) {
+  const L = appOpenModule();
+  if (!L || !open) return undefined;
+  try { return L.voorApparaat(open, beurtApparaat, a, APP_PRIVE_MODULES, vers) || undefined; } catch (e) { logError('app-open', e); return undefined; }
 }
 
 // ── einde socev-app poort ─────────────────────────────────────────────────────────────────────────
@@ -17267,7 +17328,17 @@ async function smalActie(actie, d, wie) {
     if (!rolPrimair()) return { status: 409, j: { ok: false, fout: 'Socev draait nu op de reservekant' } };
     return harvester.smal('kaart', d);
   }
-  if (actie === 'bandjes/voorstel') return bandjes ? bandjes.smal('voorstel', d) : { status: 404, j: { ok: false, fout: 'Bandjes zit niet in deze versie van de pod' } };
+  if (actie === 'bandjes/voorstel') {
+    if (!bandjes) return { status: 404, j: { ok: false, fout: 'Bandjes zit niet in deze versie van de pod' } };
+    const r = bandjes.smal('voorstel', d);
+    // wv1712 (§ 3.6): onthouden dat de pod dit voorstel maakte, zodat [OPEN scherm=bandjes focus=voorstel:<praktijk>/<bandje>] van
+    // deze beurt het scherm mag openen (de skill geeft SOCEV_BEURT mee als beurt; zonder: het tijdvenster van de lopende beurt)
+    try {
+      const q = r && r.status === 200 && r.j && typeof r.j.link === 'string' ? new URL(r.j.link).searchParams : null;
+      if (q && q.get('praktijk') && q.get('bandje') && typeof appOpenGemaaktZet === 'function') appOpenGemaaktZet('voorstel:' + q.get('praktijk') + '/' + q.get('bandje'), d.beurt);
+    } catch (e) { logError('app-open', e); }
+    return r;
+  }
   // wv895: een manager-ronde op afroep. Socev-sleutel = door socev (alleen met vraag_id van Davids verse Ja); API_SECRET = machinekamer.
   if (actie === 'manager-ronde') {
     if (!managers) return { status: 404, j: { ok: false, fout: 'Managers zit niet in deze versie van de pod' } };
