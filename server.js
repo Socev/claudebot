@@ -8577,9 +8577,10 @@ async function appNieuwBronnen() {
   uit.autokastje = auto ? auto.filter(function (x) { return x.klaar_op; }).map(function (x) { return Date.parse(x.klaar_op); }) : null;
   return uit;
 }
-// OVIS M2c (wv1393, ontwerplijnen § 3.5): naast de oude tab-naam het doel { scherm, focus? } in de namen van de app-catalogus
-// (src/modules.ts: GESPREK.id en module-id's). Een app van vóór M2c leest alleen tab; een nieuwe app leest doel en valt op tab terug.
-// Focus geeft de pod (nog) niet: een seintje zegt alleen welk gesprek of welke lijst, nooit een stuk (geen id in de push-weg).
+// OVIS M2c (wv1393, ontwerplijnen § 3.5): naast de oude tab-naam het doel { scherm, focus? }; scherm = een schermnaam van de app
+// (src/modules.ts SCHERMEN: plekken, 'hoofd', modules met een eigen scherm). Een app van vóór M2c leest alleen tab; een nieuwe app leest
+// doel en valt op tab terug. Nu is doel bij alle vier gelijk aan tab; de tabel is de plek voor een later afwijkend doel. Focus geeft de
+// pod (nog) niet: een seintje zegt alleen welk gesprek of welke lijst, nooit een stuk (geen id in de push-weg).
 const APP_SEINTJE_DOEL = { hoofd: 'hoofd', machinekamer: 'machinekamer', 'cijfer-meester': 'cijfer-meester', meldingen: 'meldingen' };
 function appSeintjeTab(id) {
   let s = null;
