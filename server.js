@@ -11938,6 +11938,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/mediatheek' || /^GET \/app\/mediatheek\/bestand\/[a-f0-9]{16}$/.test(route)) return typeof appMediatheek === 'function' ? appMediatheek(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mediatheek');   // wv1269: App Mediatheek (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
+        if (route === 'GET /app/brain/entiteiten' || route.indexOf('GET /app/brain/entiteit/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
         if (route === 'POST /app/werkers/schakel') return typeof appWerkerSchakel === 'function' ? appWerkerSchakel(req, res, a, s, d) : appWeiger(res, 404, 'onbekend', 'schakel');   // wv1733 (OVIS M4b): schakelaar per werker
@@ -15746,6 +15747,40 @@ async function appIntakeTelling(req, res, a) {
   return appStuur(res, 200, uit);
 }
 // ── einde Intake-plek ──
+
+// ── Brain › Entiteiten & Personen (wv1734, OVIS M5; ontwerplijnen § 7) ──
+// GET /app/brain/entiteiten: lijst uit het OVIS-register (RPC ovis_register_lees); GET /app/brain/entiteit/<knoop-id, ~ voor :>: de stampagina
+// (zonder frontmatter en zonder het gegenereerde blok met rekeningnummers) en Wat OVIS weet (kenmerken, facturen, deadlines). Alleen lezen.
+// Privacygrens en vaste plek in brain-entiteiten.js. Ontbreekt brain-entiteiten.js in de release (terugrol), dan 404 en toont de app
+// "komt eraan".
+const BRAIN_ENT_MOD = (function () { const p = path.join(__dirname, 'brain-entiteiten.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('brain-entiteiten', e); return null; } })();
+let brainEnt = null;
+function brainEntMaak() {
+  if (brainEnt || !BRAIN_ENT_MOD) return brainEnt;
+  try {
+    brainEnt = BRAIN_ENT_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, lees: function (p) { return VV().lees(p, 'utf8'); },
+      facturenPad: path.join(FACTUREN_DIR, 'facturen.sqlite'), deadlines: function () { return appProjecten().deadlines; },
+      rpc: (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE) ? appSbRpc : null });
+  } catch (e) { logError('brain-entiteiten', e); }
+  return brainEnt;
+}
+async function appBrainEntiteiten(req, res, a, route) {
+  const B = brainEntMaak();
+  if (!B) return appWeiger(res, 404, 'Entiteiten & Personen zit niet in deze versie van de pod', 'brain-entiteiten ontbreekt');
+  appStaat.tellers['brain-entiteiten'] = appStaat.tellers['brain-entiteiten'] || [];
+  if (!appTeller('brain-entiteiten', 900, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens brain-entiteiten');
+  const vast = !!(a && a.soort === 'vast');
+  try {
+    if (route === 'GET /app/brain/entiteiten') { const uit = await B.lijst(vast); res._app.stil = true; return appStuur(res, 200, uit); }
+    const ruw = route.slice('GET /app/brain/entiteit/'.length);   // knoop-id met ~ voor : (de app tekent het pad zonder %-codering)
+    if (!/^[A-Za-z0-9~_.-]{1,80}$/.test(ruw)) return appWeiger(res, 400, 'geen geldige id', 'brain-entiteit id');
+    const id = ruw.replace(/~/g, ':');
+    const r = await B.detail(id, vast);
+    if (r.status === 200) res._app.stil = true; else res._app.reden = 'brain-entiteit ' + r.status;
+    return appStuur(res, r.status, r.j);
+  } catch (e) { logError('app-brain-entiteiten', e); return appWeiger(res, 503, 'het register is nu niet te lezen', 'brain-entiteiten fout'); }
+}
+// ── einde Brain › Entiteiten & Personen ──
 
 // ── Mediatheek (wv1269, 26-10-2026; opdracht David 24-10 17:02, box-rij "Opdracht David: Mediatheek-app in de Socev-app") ──
 // App Mediatheek: de liedjes en andere artistieke uitingen, per categorie, afspelen en downloaden. Sinds wv1397 (27-10) één beschrijving

@@ -353,6 +353,9 @@ jobs:
       - name: "intake-telling (wv1244, OVIS M1d: Intake-plek met tellingen)"
         if: ${{ !cancelled() }}
         run: bash test/intake-telling.sh
+      - name: "brain-entiteiten (wv1734, OVIS M5: Brain › Entiteiten & Personen)"
+        if: ${{ !cancelled() }}
+        run: bash test/brain-entiteiten.sh
       - name: "werkers (wv1707, OVIS M4a: Ploeg-register)"
         if: ${{ !cancelled() }}
         run: bash test/werkers.sh

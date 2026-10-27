@@ -168,6 +168,7 @@ COPY financien-vault.js /app/release-bootstrap/financien-vault.js
 COPY app-vast.js /app/release-bootstrap/app-vast.js
 COPY app-open.js /app/release-bootstrap/app-open.js
 COPY intake-telling.js /app/release-bootstrap/intake-telling.js
+COPY brain-entiteiten.js /app/release-bootstrap/brain-entiteiten.js
 COPY werkers.js /app/release-bootstrap/werkers.js
 COPY intake-router.js /app/release-bootstrap/intake-router.js
 COPY ideeen.js /app/release-bootstrap/ideeen.js
