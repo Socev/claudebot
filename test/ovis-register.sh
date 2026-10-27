@@ -10,6 +10,8 @@
 # wv1010 (blok 10): plek 6 bank — rekeningpagina ⇄ bank (entiteit, hoofdrekening), Bankregels, blokken, niet gemeten ≠ opgelost, privacy, lezer.
 # wv1011 (blok 11): plek 7 personen — persoonspagina met ovis-blok en zegel, privégrens, alleen gekende soorten sturen (fase B hercompileert),
 #   geen blok op een persoonspagina, zegel kapot = niets sturen + BB6 (geen BB2), BB1-object, BB5 object/kenmerk, Google-telefoon, kaarten.
+# wv1012 (blok 12): plek 8 D1 fin — entiteit (kvk/map, rekeningnummer ⇄ register kritiek + kaart), medewerker (in/uit dienst alleen uit loonstroken,
+# per maand, laatste loonrun als nu, functie), kerncijferblok (schrijven, idempotent, handwerk, niet krimpen), niet gemeten ≠ opgelost, privacy.
 # Raakt niets buiten een wegwerpmap. Gebruik: bash test/ovis-register.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -1052,6 +1054,156 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const kbb = R.kaartBiblio({ knopen: [{ id: 'per:pim-proef', naam: 'Pim Proef' }], kaarten: [], bevindingen: [{ bevinding_id: 'BB6-per:pim-proef-zegel', check_id: 'BB6', ernst: 'warning', status: 'open' }] }, { nu: Date.parse('2026-10-28T02:31:00Z') });
     toets('11 Bibliothecariskaart: zegel in gewone taal, privé', kbb.kaart && kbb.kaart.prive === true && /Pim Proef: op de pagina is buiten mij om/.test(kbb.kaart.stappen[0]), kbb.kaart);
     toets('11 bevinding-id personen herkend', R.PER_BEVINDING_RE.test('BB5-org:a-b-per:c-1') && R.PER_BEVINDING_RE.test('BB6-per:x-zegel') && !R.PER_BEVINDING_RE.test('BB3-org:per-x-handvatten'));
+  }
+  // ── 12. plek 8: D1 fin (wv1012; Fable vooraf mk-scripts/wv1012/ontwerp.md) — verzonnen entiteiten, medewerkers en cijfers ──
+  {
+    const STAM = (code, map, kvk, iban, extraDb) => ['---', 'type: entiteit', 'entiteit_id: ' + code, 'soort: eigen', 'status: vast', 'naam: "Proef ' + code + '"',
+      'kvk: "' + kvk + '"', 'iban: "' + iban + '"', 'contact: {}', 'ovis:', '  db: ["supabase:secondbrain/knoop#' + code + '", "cloudflare:d1-fin/entiteit#' + code + '"' + (extraDb || '') + ']', '---', '# ' + code, ''].join('\n');
+    const SP = { TG: '10_Zakelijk/Tolgaarde/Entiteit - TG.md', POT: '10_Zakelijk/POT_POH_GGZ/Entiteit - POT.md' };
+    const IREG = 'NL00TEST0000000101', IOUD = 'NL00TEST0000000202';
+    const anker = (o) => ({ TG: R.leesPagina(SP.TG, STAM('TG', '10_Zakelijk/Tolgaarde', '11112222', 'NL00TEST0000000303')), POT: R.leesPagina(SP.POT, STAM('POT', '10_Zakelijk/POT_POH_GGZ', '33334444', IREG)), ...(o || {}) });
+    const MW = '10_Zakelijk/POT_POH_GGZ/Medewerkers/';
+    const mdw = (id, velden, db) => ['---', 'type: medewerker'].concat(velden).concat(db === null ? [] : ['ovis:', '  db: [' + (db || '"cloudflare:d1-fin/medewerker#' + id + '"') + ']']).concat(['---', '# Proef', '']).join('\n');
+    const MDW = () => [
+      R.leesMedewerker(MW + 'Proef Een.md', mdw(1, ['status: actief', 'medewerker_nr: 41', 'functie: "PO GGZ"', 'in_dienst: 01-03-2025', 'uit_dienst: 30-06-2026'])),   // uit vóór de laatste loonrun, loonstroken lopen door
+      R.leesMedewerker(MW + 'Proef Twee.md', mdw(2, ['status: uit_dienst', 'medewerker_nr: "42, 43"', 'functie: "POH-GGZ"', 'in_dienst: 01-01-2025', 'uit_dienst: 31-05-2026'])),
+      R.leesMedewerker(MW + 'Proef Drie.md', mdw(3, ['status: uit_dienst', 'functie: "Medewerker"', 'in_dienst: 01-01-2016', 'uit_dienst: 31-08-2024'], '"supabase:secondbrain/knoop#per:proef-drie", "cloudflare:d1-fin/medewerker#3"')),
+      R.leesMedewerker(MW + 'Proef Vier.md', mdw(4, ['status: actief', 'medewerker_nr: 44', 'functie: "PO GGZ"', 'in_dienst: 15-08-2026', 'uit_dienst: 14-02-2027'])),   // einde in de toekomst
+      R.leesMedewerker(MW + 'Proef Vijf.md', mdw(5, ['status: uit_dienst', 'medewerker_nr: 45', 'functie: "PO GGZ"', 'in_dienst: 01-02-2026', 'uit_dienst: 30-09-2026'])),   // vertrekt in de maand van de laatste loonrun
+      R.leesMedewerker(MW + 'Proef Zes.md', mdw(6, ['status: actief', 'medewerker_nr: 46', 'functie: "PO GGZ"', 'in_dienst: 01-11-2026'])),   // begint na de laatste loonrun
+    ];
+    const M = () => ({
+      entiteiten: [{ code: 'TG', kvk: '11112222', agb: null, iban: null, vault_pad: '10_Zakelijk/Tolgaarde' }, { code: 'POT', kvk: null, agb: null, iban: IREG, vault_pad: '10_Zakelijk/POT_POH_GGZ' },
+        { code: 'PROEF', kvk: null, agb: null, iban: null, vault_pad: null }],
+      medewerkers: [1, 2, 3, 4, 5, 6].map((id) => ({ id })),
+      dienst: [{ id: 11, medewerker_id: 1, entiteit: 'POT', functie: 'PO GGZ', begin: '2025-03-01', einde: null, personeelsnummer: '41', herkomst: 'loonstrook' },
+        { id: 21, medewerker_id: 2, entiteit: 'POT', functie: 'POH-GGZ', begin: '2025-01-01', einde: '2025-12-31', personeelsnummer: '42', herkomst: 'loonstrook' },
+        { id: 22, medewerker_id: 2, entiteit: 'POT', functie: 'PO GGZ', begin: '2026-01-01', einde: '2026-05-31', personeelsnummer: '43', herkomst: 'loonstrook' },
+        { id: 31, medewerker_id: 3, entiteit: 'POT', functie: 'POH-GGZ', begin: '2024-01-01', einde: '2025-09-30', personeelsnummer: null, herkomst: 'journaalposten' },
+        { id: 41, medewerker_id: 4, entiteit: 'POT', functie: 'PO GGZ', begin: '2026-08-15', einde: null, personeelsnummer: '44', herkomst: 'loonstrook' },
+        { id: 51, medewerker_id: 5, entiteit: 'POT', functie: 'PO GGZ', begin: '2026-02-01', einde: null, personeelsnummer: '45', herkomst: 'loonstrook' }],
+      loonrun: 202609,
+      reeks: [{ entiteit: 'TG', rubriek: 'omzet_totaal', jaar: 2024, bedrag: 1000000.4, bron_id: 1 }, { entiteit: 'TG', rubriek: 'omzet_totaal', jaar: 2025, bedrag: 1100000, bron_id: 2 },
+        { entiteit: 'TG', rubriek: 'k_lonen', jaar: 2025, bedrag: 300000, bron_id: 2 }, { entiteit: 'TG', rubriek: 'k_soc', jaar: 2025, bedrag: 50000, bron_id: 2 },
+        { entiteit: 'TG', rubriek: 'resultaat', jaar: 2025, bedrag: -1234.6, bron_id: 2 }] });
+    const KERNT = (code) => ['---', 'type: gegenereerd', 'status: actueel', 'ovis:', '  db: ["cloudflare:d1-fin/reeks#' + code + '"]', '---', '# Kerncijfers', '', 'Uitleg.', ''].join('\n');
+    const KP = '10_Zakelijk/Tolgaarde/Financieel/Kerncijfers - TG.md';
+    const REG = () => ({ knopen: [{ id: 'TG', soort: 'entiteit', rol: 'eigen', naam: 'Proef TG', iban: 'NL00TEST0000000303' }, { id: 'POT', soort: 'entiteit', rol: 'eigen', naam: 'Proef POT', iban: IREG }], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [] });
+    const FIN = (o) => Object.assign({ meting: M(), mdw: MDW(), kern: [R.leesKern(KP, KERNT('TG'))] }, o || {});
+    const finB = (r) => r.bevindingen.filter((b) => R.FIN_BEVINDING_RE.test(b.bevinding_id));
+    const ids = (r) => finB(r).map((b) => b.bevinding_id).join(' ');
+    const C = (fin, ank, reg) => { const tel = {}, b = []; const bev = (c, s, sa, d, e) => b.push({ bevinding_id: c + '-' + s, check_id: c, samenvatting: sa, detail: d, ernst: e || 'warning' });
+      const f = R.finChecks(ank || anker(), fin, reg || REG(), bev, tel); return { bevindingen: b, tel, fin: f }; };
+    // parser
+    const PT = (db) => ['---', 'type: medewerker', 'object_id: 0b0e1d2c-3a4b-4c5d-8e6f-7a8b9c0d1e2f', 'ovis:', '  db: [' + db + ']', '  status: concept', '---', '# Proef', ''].join('\n');
+    const lp = R.leesPersoon(MW + 'Proef Een.md', PT('"supabase:secondbrain/knoop#per:proef-een", "cloudflare:d1-fin/medewerker#1"'), 'ab'.repeat(32));
+    toets('12 personenlezer (wv1011) accepteert één datahub-medewerker in ovis.db; zegel dekt hem', lp && !lp.fouten.some((x) => /onbekende sleutel|datahub/.test(x)) && lp.fouten.some((x) => /zegel/.test(x)), lp && lp.fouten);
+    toets('12 personenlezer: twee datahub-medewerkers = fout', R.leesPersoon(MW + 'Proef Een.md', PT('"supabase:secondbrain/knoop#per:proef-een", "cloudflare:d1-fin/medewerker#1", "cloudflare:d1-fin/medewerker#2"'), 'ab'.repeat(32)).fouten.some((x) => /meer dan één datahub/.test(x)));
+    toets('12 medewerkerpagina geldig (ook met een knoop#per:-sleutel ernaast)', MDW().every((p) => p.fouten.length === 0) && MDW()[2].id === 3, MDW().map((p) => p.fouten));
+    toets('12 twee nummers op één pagina gelezen', JSON.stringify(MDW()[1].nrs) === '["42","43"]', MDW()[1].nrs);
+    toets('12 datum onleesbaar = fout', R.leesMedewerker(MW + 'X.md', mdw(9, ['status: actief', 'in_dienst: ergens in 2025'])).fouten.length > 0);
+    toets('12 twee medewerker-sleutels = fout', R.leesMedewerker(MW + 'X.md', mdw(9, ['status: actief'], '"cloudflare:d1-fin/medewerker#9", "cloudflare:d1-fin/medewerker#8"')).fouten.length > 0);
+    toets('12 kerncijferpagina buiten Financieel = fout', R.leesKern('10_Zakelijk/Tolgaarde/Kerncijfers - TG.md', KERNT('TG')).fouten.length > 0 && R.leesKern(KP, KERNT('GH')).fouten.length > 0);
+    toets('12 finMaand leest DD-MM-JJJJ en JJJJ-MM-DD', R.finMaand('30-06-2026') === 202606 && R.finMaand('2026-06-30') === 202606 && R.finMaand('') === null && Number.isNaN(R.finMaand('juni')));
+    // vergelijking
+    let r = C(FIN());
+    toets('12 medewerkers: alleen #1 (einde op de pagina vóór de laatste loonrun, loonstroken lopen door) en geen kerncijferblok (BB4-telling)',
+      ids(r) === 'BB3-fin-mdw-1-uit' && r.tel.fin_mdw === 6 && r.tel.fin_verouderd === 1 && r.tel.fin === 2, [ids(r), r.tel]);
+    toets('12 journaalposten tellen niet voor in/uit dienst; "Medewerker" niet als functie vergeleken; vertrek in de maand van de loonrun en begin erna niet te toetsen', r.tel.fin_niet_toetsbaar >= 3, r.tel);
+    toets('12 bevindingen zonder naam of datum', finB(r).every((b) => !/Proef|2026|2025|30-06/.test(b.samenvatting + b.detail)), finB(r));
+    const mU = M(); mU.dienst[0].einde = '2026-06-30';
+    toets('12 loonstroken met hetzelfde einde: geen uit-verschil (wel status: pagina zegt nog actief)', !/mdw-1-uit/.test(ids(C(FIN({ meting: mU })))) && /mdw-1-status/.test(ids(C(FIN({ meting: mU })))), ids(C(FIN({ meting: mU }))));
+    const mS = M(); mS.dienst[0].einde = '2026-04-30';
+    toets('12 ander einde in de loonstroken: BB3 uit, status actief maar loonstroken uit: BB3 status', /BB3-fin-mdw-1-uit/.test(ids(C(FIN({ meting: mS })))) && /BB3-fin-mdw-1-status/.test(ids(C(FIN({ meting: mS })))), ids(C(FIN({ meting: mS }))));
+    const mN = M(); mN.dienst[1].personeelsnummer = '49';
+    toets('12 personeelsnummer niet op de pagina: BB3 nummer', /BB3-fin-mdw-2-nummer/.test(ids(C(FIN({ meting: mN })))));
+    const mF = M(); mF.dienst[4].functie = 'POH-GGZ jeugd';
+    toets('12 andere functie: BB3 functie (PO GGZ = POH-GGZ telt als gelijk)', /BB3-fin-mdw-4-functie/.test(ids(C(FIN({ meting: mF })))) && !/mdw-2-functie/.test(ids(r)));
+    const mI = M(); mI.dienst[0].begin = '2025-04-01';
+    toets('12 andere indiensttreding (loonstrook): BB3 in', /BB3-fin-mdw-1-in/.test(ids(C(FIN({ meting: mI })))));
+    const mB = M(); mB.medewerkers.push({ id: 7 });
+    toets('12 medewerker zonder pagina: BB2; pagina naar onbekende medewerker: BB1; twee pagina\'s: BB5',
+      /BB2-fin-mdw-7-geen-pagina/.test(ids(C(FIN({ meting: mB })))) && /BB1-fin-mdw-9-onbekend/.test(ids(C(FIN({ mdw: MDW().concat([R.leesMedewerker(MW + 'Negen.md', mdw(9, ['status: actief']))]) }))))
+      && /BB5-fin-mdw-4-twee/.test(ids(C(FIN({ mdw: MDW().concat([R.leesMedewerker(MW + 'Vier bis.md', mdw(4, ['status: actief']))]) })))));
+    toets('12 medewerkerpagina bij een andere werkgever: BB6 plek', /BB6-fin-mdw-1-plek/.test(ids(C(FIN({ mdw: [R.leesMedewerker('10_Zakelijk/Tolgaarde/Medewerkers/Proef Een.md', mdw(1, ['status: actief', 'medewerker_nr: 41', 'in_dienst: 01-03-2025']))].concat(MDW().slice(1)) })))));
+    // entiteit
+    const aK = anker({ TG: R.leesPagina(SP.TG, STAM('TG', '', '99998888', 'NL00TEST0000000303')) });
+    toets('12 entiteit: KvK anders in de hub = BB3; KvK leeg in de hub = geen verschil', /BB3-fin-ent-TG-kvk/.test(ids(C(FIN(), aK))) && !/POT-kvk/.test(ids(C(FIN(), aK))), ids(C(FIN(), aK)));
+    const regO = REG(); regO.knopen[1].iban = IOUD;
+    r = C(FIN(), null, regO);
+    toets('12 rekeningnummer in de hub ≠ register: BB3 serious, alleen laatste 4 in melding en verschil', /BB3-fin-ent-POT-iban/.test(ids(r)) && finB(r).find((b) => /iban/.test(b.bevinding_id)).ernst === 'serious'
+      && r.fin.verschillen.length === 1 && r.fin.verschillen[0].d1 === '0101' && r.fin.verschillen[0].reg === '0202' && !/NL00TEST/.test(JSON.stringify(finB(r))), [ids(r), r.fin.verschillen]);
+    toets('12 vergelijkt met het register, niet met de pagina (voorstel op de pagina telt niet)', !/iban/.test(ids(C(FIN(), anker({ POT: R.leesPagina(SP.POT, STAM('POT', '', '33334444', IOUD)) })))));
+    const mE = M(); mE.entiteiten.push({ code: 'GH', kvk: null, agb: null, iban: null, vault_pad: '10_Zakelijk/Groenhouten' });
+    toets('12 hub-entiteit zonder stampagina: BB2; PROEF telt niet', /BB2-fin-ent-GH-geen-pagina/.test(ids(C(FIN({ meting: mE })))) && !/PROEF/.test(ids(C(FIN({ meting: mE })))));
+    toets('12 map in de hub ≠ map van de stampagina: BB3 map', (() => { const m = M(); m.entiteiten[0].vault_pad = '10_Zakelijk/Elders'; return /BB3-fin-ent-TG-map/.test(ids(C(FIN({ meting: m })))); })());
+    // kerncijfers
+    const blok = R.finKernBlokTekst('TG', M());
+    toets('12 kerncijferblok: jaren als kolommen, hele euro\'s, personeel opgeteld, – waar niets is, geen datum', /\| bedragen in hele euro's \| 2024 \| 2025 \|/.test(blok) && /\| Omzet \| 1\.000\.000 \| 1\.100\.000 \|/.test(blok)
+      && /\| Personeelskosten \| – \| 350\.000 \|/.test(blok) && /\| Resultaat \| – \| −1\.235 \|/.test(blok) && /Bron: 2 jaarrekeningen/.test(blok) && blok.indexOf('id="fin:TG"') > 0, blok);
+    const mR = M(); mR.reeks.push({ entiteit: 'POT', rubriek: 'k_som_bruto', jaar: 2025, bedrag: 5, bron_id: 3 });
+    toets('12 entiteit met cijfers zonder kerncijferpagina: BB2 kern', /BB2-fin-kern-POT-geen-pagina/.test(ids(C(FIN({ meting: mR })))));
+    toets('12 kerncijferpagina voor een entiteit zonder cijfers: BB1', /BB1-fin-kern-POT-onbekend/.test(ids(C(FIN({ kern: [R.leesKern(KP, KERNT('TG')), R.leesKern('10_Zakelijk/POT_POH_GGZ/Financieel/Kerncijfers - POT.md', KERNT('POT'))] })))));
+    // niet gemeten, vergelijking die faalt
+    r = C(FIN({ meting: { fout: 'D1 weg' } }));
+    toets('12 D1 weg: niet gemeten, geen bevindingen', r.fin.gemeten === false && finB(r).length === 0 && r.tel.fin === 'niet gemeten');
+    toets('12 finMeting: leeg = niet gemeten; alleen SELECT', (await R.finMeting({ d1: async (b) => b.map(() => ({ results: [] })) })).fout !== undefined && R.FIN_SQL.every((q) => /^\s*select\b/i.test(q.sql)));
+    const kapot = M(); kapot.dienst.push(null);
+    const rc = R.checks([], REG(), [], null, null, null, FIN({ meting: kapot }));
+    toets('12 vergelijking die faalt: niet gemeten, geen halve fin-bevindingen', rc.fin.gemeten === false && /vergelijking faalde/.test(rc.fin.reden) && rc.bevindingen.filter((b) => R.FIN_BEVINDING_RE.test(b.bevinding_id)).length === 0, rc.fin);
+    // weekkaart en kritieke kaart
+    const kb = R.kaartBiblio({ knopen: [], kaarten: [], bevindingen: [{ bevinding_id: 'BB3-fin-mdw-1-uit', check_id: 'BB3', ernst: 'warning', status: 'open' },
+      { bevinding_id: 'BB3-fin-ent-POT-iban', check_id: 'BB3', ernst: 'serious', status: 'open' }, { bevinding_id: 'BB2-fin-kern-GH-geen-pagina', check_id: 'BB2', ernst: 'warning', status: 'open' }] }, { nu: Date.parse('2026-10-28T02:31:00Z') });
+    toets('12 weekkaart: medewerkerverschil zonder nummer, rekeningnummer (kritiek) niet op de weekkaart', kb.kaart && kb.kaart.stappen.length === 2 && /POT-medewerker/.test(kb.kaart.stappen[0]) && !/#1|mdw/.test(kb.kaart.stappen.join(' ')) && /kerncijferpagina/.test(kb.kaart.stappen[1]), kb);
+    const vk = C(FIN(), null, regO).fin;
+    let kf = R.kaartFin(vk, {}, '28-10 02:31');
+    toets('12 kritieke kaart: één doen-kaart, alleen laatste 4 cijfers, stappen in gewone taal', kf.zet.length === 1 && /^ovis-fin-iban-pot-[0-9a-f]{6}$/.test(kf.zet[0].sleutel) && !/NL00TEST/.test(JSON.stringify(kf.zet[0])) && kf.zet[0].titel.length <= 90 && kf.zet[0].waarom.length <= 400, kf.zet[0]);
+    const sl = kf.zet[0].sleutel;
+    toets('12 kritieke kaart staat er al: niet opnieuw; verschil weg: dicht met bewijs', R.kaartFin(vk, { [sl]: 'open' }, 'x').zet.length === 0 && R.kaartFin(C(FIN()).fin, { [sl]: 'open' }, '29-10 02:31').dicht.length === 1
+      && R.kaartFin({ gemeten: false, verschillen: [] }, { [sl]: 'open' }, 'x').dicht.length === 0);
+    // diffreview (Opus, 28-10): herindiensttreding na de loonrun, parallelle contracten, geen loonstroken, hervatting, datum met tijddeel
+    const een = (velden, dienst, extraM) => { const m = Object.assign(M(), extraM || {}); m.dienst = dienst; m.medewerkers = [{ id: 1 }]; return ids(C(FIN({ meting: m, mdw: [R.leesMedewerker(MW + 'Proef Een.md', mdw(1, velden))] }))); };
+    let x = een(['status: actief', 'medewerker_nr: 41', 'in_dienst: 01-11-2026'], [{ id: 1, medewerker_id: 1, entiteit: 'POT', functie: 'PO GGZ', begin: '2024-01-01', einde: '2025-06-30', personeelsnummer: '41', herkomst: 'loonstrook' }]);
+    toets('12 herindiensttreding na de laatste loonrun: niet te toetsen (geen in/uit/status)', !/mdw-1-(in|uit|status)/.test(x), x);
+    x = een(['status: actief', 'medewerker_nr: 41', 'in_dienst: 01-01-2025'], [{ id: 1, medewerker_id: 1, entiteit: 'POT', functie: 'PO GGZ', begin: '2025-01-01', einde: null, personeelsnummer: '41', herkomst: 'loonstrook' },
+      { id: 2, medewerker_id: 1, entiteit: 'POT', functie: 'PO GGZ', begin: '2025-06-01', einde: '2025-12-31', personeelsnummer: '41', herkomst: 'loonstrook' }]);
+    toets('12 parallel contract met einde naast een open contract: in dienst, geen verschil', !/mdw-1-/.test(x), x);
+    x = een(['status: actief', 'functie: "POH-GGZ"'], [{ id: 1, medewerker_id: 1, entiteit: 'POT', functie: 'POH-GGZ', begin: '2021-01-01', einde: null, personeelsnummer: null, herkomst: 'urenregistratie' }]);
+    toets('12 alleen urenregistratie en pagina actief: niet te toetsen', !/mdw-1-/.test(x), x);
+    x = een(['status: actief', 'medewerker_nr: "41, 42"', 'in_dienst: 01-07-2026'], [{ id: 1, medewerker_id: 1, entiteit: 'POT', functie: 'PO GGZ', begin: '2025-01-01', einde: '2026-01-31', personeelsnummer: '41', herkomst: 'loonstrook' },
+      { id: 2, medewerker_id: 1, entiteit: 'POT', functie: 'PO GGZ', begin: '2026-07-06', einde: null, personeelsnummer: '42', herkomst: 'loonstrook' }]);
+    toets('12 hervatting na een gat: pagina met de datum van de herindiensttreding is gelijk', !/mdw-1-/.test(x), x);
+    const mT = M(); mT.dienst[0].einde = '2026-06-30T00:00:00';
+    r = R.checks([], REG(), [], null, null, null, FIN({ meting: mT }));
+    toets('12 datum met tijddeel uit de hub: niet gemeten, geen vals verschil', r.fin.gemeten === false && !r.bevindingen.some((b) => /-fin-/.test(b.bevinding_id)), r.fin);
+    const kv = R.leesKern(KP, KERNT('TG').replace(/\n$/, '') + '\n\n' + R.finKernBlokTekst('TG', M()) + '\n');
+    const mK2 = M(); mK2.reeks = mK2.reeks.filter((y) => y.jaar === 2025);
+    toets('12 hub geeft minder cijfers dan het blok: BB4 krimp (zichtbaar), geen telling', /BB4-fin-kern-TG-krimp/.test(ids(C(FIN({ meting: mK2, kern: [kv] })))) && !/krimp/.test(ids(C(FIN({ kern: [kv] })))), ids(C(FIN({ meting: mK2, kern: [kv] }))));
+    // nacht: blok schrijven, idempotent, handwerk, niet krimpen; Bibliothecaris: opgelost-filter bij niet gemeten
+    const v11 = wegwerpVault({ [KP]: KERNT('TG'), [SP.TG]: STAM('TG', '', '11112222', 'NL00TEST0000000303') });
+    const n11 = nepDb({ knopen: [], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [] });
+    let finIo = { d1: async () => { const m = M(); return [m.entiteiten, m.medewerkers, m.dienst, [{ m: m.loonrun }], m.reeks].map((x) => ({ results: x })); } };
+    const m11 = R.maak({ vault: v11, sbRpc: n11.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t), nu: () => Date.parse('2026-10-28T01:15:00Z'), fin: { d1: (b) => finIo.d1(b) } });
+    let c11 = await m11.compileer('nacht', { grendel: true });
+    const na = fs.readFileSync(path.join(v11, KP), 'utf8');
+    toets('12 nacht: kerncijferblok geschreven, vingerafdruk gelijk', c11.finblokken === 1 && na.indexOf('id="fin:TG"') > 0 && R.vingerafdruk(na).sha === R.leesKern(KP, KERNT('TG')).sha, c11);
+    c11 = await m11.compileer('nacht', { grendel: true });
+    toets('12 nacht tweede keer: niets geschreven', c11.finblokken === 0 && fs.readFileSync(path.join(v11, KP), 'utf8') === na, c11);
+    const krimp = finIo.d1;
+    finIo = { d1: async (b) => { const r0 = await krimp(b); r0[4].results = r0[4].results.filter((x) => x.jaar === 2025); return r0; } };
+    c11 = await m11.compileer('nacht', { grendel: true });
+    toets('12 nacht: minder cijfers dan nu = niet geschreven, fout gemeld', c11.finblokken === 0 && c11.fouten.some((f) => /minder cijfers/.test(f.fout)) && fs.readFileSync(path.join(v11, KP), 'utf8') === na, c11.fouten);
+    finIo = { d1: krimp };
+    fs.writeFileSync(path.join(v11, KP), na.replace('| Omzet |', '| Omzet (met de hand) |'));
+    c11 = await m11.compileer('nacht', { grendel: true });
+    let b11 = await m11.bibliothecaris({ afroep: true });
+    toets('12 handwerk: niet overschreven, BB8 kern', fs.readFileSync(path.join(v11, KP), 'utf8').indexOf('met de hand') > 0 && b11.bevindingen.some((b) => b.bevinding_id === 'BB8-fin-kern-TG-blok'), b11.bevindingen.map((b) => b.bevinding_id));
+    finIo = { d1: async () => { throw new Error('weg'); } };
+    const voor11 = n11.db.bevindingen.filter((b) => /-fin-/.test(b.bevinding_id)).length;
+    b11 = await m11.bibliothecaris({ afroep: true });
+    toets('12 D1 weg: fin-bevindingen blijven open, zin zegt niet gemeten', voor11 > 0 && n11.db.bevindingen.filter((b) => /-fin-/.test(b.bevinding_id)).length === voor11 && /D1 fin niet gemeten/.test(b11.zin), [voor11, b11.zin]);
+    c11 = await m11.compileer('nacht', { grendel: true });
+    toets('12 D1 weg: nacht raakt geen kerncijferpagina aan, meldt de fout', c11.finblokken === 0 && c11.fouten.some((f) => f.pad === '(D1 fin)'), c11.fouten);
   }
   console.log(goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

@@ -307,7 +307,9 @@ function leesPersoon(rel, tekst, sleutel) {
   if (!PER_PLEK_RE.test(rel) || rel.split('/').some(function (d) { return PER_MAP_UIT.indexOf(d) >= 0; })) f.push('persoonsknoop alleen voor een zakelijke persoonspagina onder 10_Zakelijk (geen privépersonen)');
   if (ids.length !== 1) f.push('ovis.db moet precies één sleutel supabase:secondbrain/knoop#per:<slug> noemen');
   else if (!PER_ID_RE.test(uit.id) || uit.id.length > 64) f.push('id van een persoon moet per:<slug> zijn');
-  db.forEach(function (s) { if (!PER_SLEUTEL_RE.test(s) && !GOOGLE_SLEUTEL_RE.test(s)) f.push('onbekende sleutel in ovis.db'); });
+  // wv1012: een medewerkerpagina mag daarnaast precies één datahub-medewerker noemen (plek 8; finChecks toetst hem)
+  db.forEach(function (s) { if (!PER_SLEUTEL_RE.test(s) && !GOOGLE_SLEUTEL_RE.test(s) && !(uit.type === 'medewerker' && FIN_MDW_RE.test(s))) f.push('onbekende sleutel in ovis.db'); });
+  if (db.filter(function (s) { return FIN_MDW_RE.test(s); }).length > 1) f.push('meer dan één datahub-medewerker in ovis.db');
   if (uit.google.length > 1) f.push('meer dan één Google-contact in ovis.db');
   Object.keys(ov).forEach(function (k) { if (PER_OVIS_VELDEN.indexOf(k) < 0) f.push('onbekend veld in het ovis-blok: ' + k); });
   if (v.contact !== undefined && v.contact !== '' && !(typeof v.contact === 'object' && !Array.isArray(v.contact) && !Object.keys(v.contact).length))
@@ -470,7 +472,7 @@ function huidigBlok(tekst) {
 // ── Bibliothecaris: de checks (pure functie over pagina's en register) ──
 function kortHash(s) { return crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 8); }
 function schoon(s, n) { s = String(s == null ? '' : s).replace(/[\r\n`|]/g, ' ').slice(0, n || 300); return SLEUTEL_RE.test(s) ? '(weggelaten: leek op een sleutel)' : s; }
-function checks(paginas, reg, compileerFouten, pot, bank, personen) {
+function checks(paginas, reg, compileerFouten, pot, bank, personen, fin) {
   const b = [], tel = { paginas: paginas.length, geldig: 0, verouderd: 0, niet_getoetst: 0, wacht_op_ja: 0 };
   const soorten = soortenVan(reg);   // wv1011: alleen soorten die de databank kent tellen in de vergelijking
   const knopen = {}; (reg.knopen || []).forEach(function (k) { knopen[k.id] = k; });
@@ -529,6 +531,7 @@ function checks(paginas, reg, compileerFouten, pot, bank, personen) {
       m = /^supabase:secondbrain\/knoop_vertaling#(.+)$/.exec(s);
       if (m) { const ids = vert[m[1]]; if (!ids || ids.indexOf(id) < 0) bev('BB1', id + '-' + kortHash(s), 'vertaalsleutel op de pagina van ' + id + ' bestaat niet', p.pad + ': ' + s + '. Voorstel: vertaling laden (laad.py) of sleutel weghalen.'); return; }
       if (POT_SLEUTEL_RE.test(s)) return;   // wv981: plek 4, getoetst in potChecks (ook op een pagina die nog niet gecompileerd is)
+      if (FIN_ENT_RE.test(s)) return;   // wv1012: plek 8, getoetst in finChecks
       m = GOOGLE_SLEUTEL_RE.exec(s);   // wv1011: plek 7, alleen als de personen gemeten zijn
       if (m && p.persoon && personen && Array.isArray(personen.contacten)) { if (!gc[m[1]]) bev('BB1', id + '-google', 'Google-contact op de pagina van ' + id + ' bestaat niet (meer)', p.pad + ': ovis.db noemt een Google-contact dat niet in de kopie van de contacten staat. Voorstel: de koppeling weghalen of het juiste contact zoeken (Google blijft de bron).'); return; }
       tel.niet_getoetst++;
@@ -635,11 +638,15 @@ function checks(paginas, reg, compileerFouten, pot, bank, personen) {
   let bc;   // wv1010; diffreview ZOU 2: een onverwachte vorm breekt de andere plekken niet
   try { bc = bankChecks(bank, reg, bev, tel); }
   catch (e) { for (let i = b.length - 1; i >= 0; i--) if (BANK_BEVINDING_RE.test(b[i].bevinding_id)) b.splice(i, 1); tel.bank = 'niet gemeten'; bc = { gemeten: false, reden: 'vergelijking faalde: ' + String(e && e.message || e).replace(/[A-Z]{2}\d{2}[A-Z0-9]{8,}/g, '…').slice(0, 80), paden: {} }; }
+  let fc;   // wv1012: plek 8 (Fable #6: een onverwachte vorm breekt de andere plekken niet; geen halve bevindingen)
+  try { fc = finChecks(anker, fin, reg, bev, tel); }
+  catch (e) { for (let i = b.length - 1; i >= 0; i--) if (FIN_BEVINDING_RE.test(b[i].bevinding_id)) b.splice(i, 1); tel.fin = 'niet gemeten'; fc = { gemeten: false, reden: 'vergelijking faalde: ' + String(e && e.message || e).replace(/[A-Z]{2}\d{2}[A-Z0-9]{8,}/g, '…').slice(0, 80), verschillen: [], paden: {} }; }
   const uniek = {}; b.forEach(function (x) { uniek[x.bevinding_id] = x; });
   tel.personen = tel.personen || 0;
   tel.per_verschil = Object.keys(uniek).filter(function (k) { return PER_BEVINDING_RE.test(k); }).length;   // wv1011: groen = 0
   if (bc.gemeten) tel.bank_verschil = Object.keys(uniek).filter(function (k) { return BANK_BEVINDING_RE.test(k); }).length;   // na het ontdubbelen (KAN 9)
-  return { bevindingen: Object.keys(uniek).sort().map(function (k) { return uniek[k]; }), tel: tel, pot: pc, bank: bc, perFout: Array.from(perFout) };
+  if (fc.gemeten) tel.fin_verschil = Object.keys(uniek).filter(function (k) { return FIN_BEVINDING_RE.test(k); }).length;
+  return { bevindingen: Object.keys(uniek).sort().map(function (k) { return uniek[k]; }), tel: tel, pot: pc, bank: bc, fin: fc, perFout: Array.from(perFout) };
 }
 
 // ── wv981: koppelregel plek 4 (POT in D1 fin; architectuur § 4 rij 4; ontwerp + Fable vooraf mk-scripts/wv981/ontwerp.md) ──
@@ -1336,6 +1343,336 @@ function bankChecks(bank, reg, bev, tel) {
   return { gemeten: true, paden: paden };
 }
 
+// ── wv1012: koppelregel plek 8 (D1 fin; architectuur § 4 rij 8; ontwerp + Fable vooraf mk-scripts/wv1012/ontwerp.md) ──
+// Drie koppelingen met de financiële datahub, allemaal alleen lezen (D1 krijgt geen schrijfpad; de datahub-migraties blijven de schrijver):
+//  - entiteit: de stampagina noemt `cloudflare:d1-fin/entiteit#<code>`; kvk, agb en map moeten in D1 hetzelfde zijn als op de pagina (D1 leeg =
+//    de hub houdt het veld niet bij), en het rekeningnummer dat de hub op de POT-nota's zet moet het nummer in het register zijn (knoop.iban,
+//    alleen gewijzigd na Davids Ja; Fable #5): elk verschil is kritiek en krijgt meteen een eigen Voor jou-kaart (kaartFin).
+//  - medewerker (HR: alleen in/uit dienst en functie): de medewerkerpagina noemt `cloudflare:d1-fin/medewerker#<id>`. De pagina is de bron
+//    (de afspraak); de loonstroken in D1 toetsen achteraf alleen het verleden (Fable #8). Alleen dienstverbanden uit loonstroken tellen voor
+//    in/uit dienst (journaalposten en urenregistratie beginnen en eindigen op de grens van die gegevens, Fable #1); vergelijken per maand, en
+//    "nu" = de laatste verloonde maand in D1, nooit de podklok (Fable #2, #3). Uit D1 alleen id's, functie, datums, personeelsnummer en
+//    herkomst: geen naam, salaris, uren of geboortejaar. Bevindingen noemen nooit naam, datum of nummer (structuur_state, weekkaart).
+//  - kerncijfers: per entiteit een pagina `<map>/Financieel/Kerncijfers - <code>.md` met één gegenereerd blok uit D1 `reeks` (werkelijk,
+//    totalen; zelfde kernrubrieken en regels als de tab Praktijken in server.js, wv174). Het blok wordt alleen 's nachts geschreven.
+// D1 in één batch gelezen, alles of niets; leeg = niet gemeten (Fable #6). Bevindingen BB…-fin-… blijven open zolang D1 niet gemeten is.
+const FIN_ENT_RE = /^cloudflare:d1-fin\/entiteit#([A-Z][A-Z0-9_]{1,15})$/, FIN_MDW_RE = /^cloudflare:d1-fin\/medewerker#([1-9][0-9]{0,8})$/;
+const FIN_KERN_RE = /^cloudflare:d1-fin\/reeks#([A-Z][A-Z0-9_]{1,15})$/, FIN_MDW_SLEUTEL = 'cloudflare:d1-fin/medewerker#';
+const FIN_MDW_PAD_RE = /^(10_Zakelijk\/[^/]+)\/Medewerkers\/[^/]+\.md$/, FIN_KERN_PAD_RE = /^(10_Zakelijk\/[^/]+)\/Financieel\/Kerncijfers - ([A-Z][A-Z0-9_]{1,15})\.md$/;
+const FIN_KERN_NAAM_RE = /^Kerncijfers - [A-Z][A-Z0-9_]{1,15}\.md$/;
+const FIN_BEVINDING_RE = /^BB\d-fin-/;
+const FIN_PROEF = ['PROEF'];   // proefentiteit van de POT-app (wv921): telt nergens mee
+const FIN_JAREN = 6;
+// Zelfde kernrubrieken en noten als APP_PRAKTIJKEN in server.js (wv174); PHBV en SLOEL erbij, zonder personeelskosten: daar is dat in
+// sommige jaren het loon van één of twee personen (Fable #12).
+const FIN_LABEL = { omzet_totaal: 'Omzet', resultaat: 'Resultaat', personeel: 'Personeelskosten', uitbesteed: 'Waarneming en uitbesteed werk',
+  k_huisv: 'Huisvesting', liquide: 'Liquide middelen', ev_totaal: 'Eigen vermogen', k_som_bruto: 'Kosten vóór bijdrage deelnemers',
+  bijdrage_maten: 'Bijdrage van de deelnemers', omzet_managementfee: 'Managementvergoeding', res_deelneming_tg: 'Resultaat deelneming Tolgaarde',
+  res_deelneming_phbv: 'Resultaat deelneming Praktijkhouders B.V.', res_deelnemingen: 'Resultaat deelnemingen', k_som: 'Som der kosten' };
+const FIN_KERN = {
+  TG: { kern: ['omzet_totaal', 'resultaat', 'personeel', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal'],
+    noten: ['Personeelskosten: t/m 2021 staat alleen het totaal in de jaarrekening; vanaf 2022 opgeteld uit lonen, sociale lasten, pensioen en overige personeelskosten.', 'De jaarrekening 2021 is met OCR ingelezen.'] },
+  GH: { kern: ['omzet_totaal', 'resultaat', 'personeel', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal'], noten: ['Resultaat = winst van de maatschap, vóór verdeling over de maten.'] },
+  POT: { kern: ['k_som_bruto', 'bijdrage_maten', 'personeel', 'liquide'], omkeren: ['bijdrage_maten'],
+    noten: ['Kosten vóór bijdrage = wat de POH-GGZ-constructie werkelijk kost; de deelnemende praktijken dragen dat via hun bijdrage.', '2016 boekte de bijdrage als omzet (2017 herrubriceerde dat).'] },
+  KM: { kern: ['k_som_bruto', 'bijdrage_maten', 'k_huisv', 'liquide'], omkeren: ['bijdrage_maten'], van: 2017,
+    noten: ['2016 boekte de bijdrage als omzet en is daarom weggelaten.', 'De jaarrekening 2025 sluit in het document niet helemaal (2.444 tegen 2.446).'] },
+  HOLD: { kern: ['omzet_managementfee', 'resultaat', 'res_deelnemingen', 'res_deelneming_tg', 'res_deelneming_phbv', 'ev_totaal', 'liquide'],
+    noten: ['De holding hield t/m 2024 50% van Praktijkhouders B.V.', '2022: alleen het totaal van de deelnemingen (geen splitsing per deelneming).'] },
+  PHBV: { kern: ['omzet_totaal', 'resultaat', 'k_som', 'k_huisv', 'liquide', 'ev_totaal'], noten: ['Het boekjaar 2022-2023 staat onder 2023.'] },
+  SLOEL: { kern: ['omzet_totaal', 'resultaat', 'k_som', 'k_huisv', 'liquide', 'ev_totaal'], noten: ['2015 was nog het hele project; 2019 en 2020 komen uit vergelijkende cijfers.'] },
+};
+const FIN_KERN_STANDAARD = { kern: ['omzet_totaal', 'resultaat', 'k_som', 'liquide', 'ev_totaal'], noten: [] };
+const FIN_RUBRIEKEN = ['omzet_totaal', 'resultaat', 'k_lonen', 'k_soc', 'k_pens', 'k_ovpers', 'k_personeel_tot', 'uitbesteed', 'k_huisv', 'liquide', 'ev_totaal',
+  'k_som_bruto', 'bijdrage_maten', 'omzet_managementfee', 'res_deelneming_tg', 'res_deelneming_phbv', 'res_deelnemingen', 'k_som'];
+// Alleen deze SELECT's; finMeting weigert alles wat geen SELECT is (het D1-eindpunt kan ook schrijven).
+const FIN_SQL = [
+  { sql: 'select code, kvk, agb, iban, vault_pad from entiteit order by code', params: [] },
+  { sql: 'select id from medewerker order by id', params: [] },
+  { sql: 'select id, medewerker_id, entiteit, functie, begin, einde, personeelsnummer, herkomst from dienstverband order by medewerker_id, begin, id', params: [] },
+  { sql: "select max(jaar * 100 + maand) as m from dienstverband_maand where herkomst = 'loonstrook' and in_dienst = 1", params: [] },
+  { sql: "select entiteit, rubriek, jaar, bedrag, bron_id from reeks where versie = 'jaarrekening' and maat is null and kwartaal is null and rubriek in (" +
+    FIN_RUBRIEKEN.map(function (x) { return "'" + x + "'"; }).join(',') + ') order by entiteit, rubriek, jaar', params: [] },
+];
+// io: { d1(batch) → [{ results }] } → { entiteiten, medewerkers, dienst, loonrun (JJJJMM), reeks } of { fout }
+async function finMeting(io) {
+  try {
+    if (!io || typeof io.d1 !== 'function') return { fout: 'geen D1-lezer' };
+    if (FIN_SQL.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return { fout: 'alleen lezen' };
+    const r = await io.d1(FIN_SQL.map(function (q) { return { sql: q.sql, params: q.params.slice() }; }));
+    if (!Array.isArray(r) || r.length !== FIN_SQL.length || !r.every(function (x) { return x && Array.isArray(x.results); })) return { fout: 'D1 gaf geen resultaat' };
+    const m = { entiteiten: r[0].results, medewerkers: r[1].results, dienst: r[2].results, loonrun: r[3].results[0] ? Number(r[3].results[0].m) : NaN, reeks: r[4].results };
+    if (!m.entiteiten.length || !m.medewerkers.length || !m.dienst.length || !m.reeks.length || !(m.loonrun > 200000)) return { fout: 'D1 gaf (deels) niets terug' };   // leeg = niet gemeten
+    return m;
+  } catch (e) { return { fout: String(e && e.message || e).replace(/[A-Z]{2}\d{2}[A-Z0-9]{8,}/g, '…').replace(/\d{6,}/g, '#').slice(0, 120) }; }
+}
+// DD-MM-JJJJ (zo staan ze op de medewerkerpagina's) of JJJJ-MM-DD → JJJJMM (getal); leeg → null; onleesbaar → NaN
+function finMaand(d) {
+  const s = String(d == null ? '' : d).trim();
+  if (!s) return null;
+  let m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(s);
+  if (m) return Number(m[3]) * 100 + Number(m[2]);
+  m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  return m ? Number(m[1]) * 100 + Number(m[2]) : NaN;
+}
+function finFunctie(s) { const x = String(s || '').toLowerCase().replace(/[^a-z]/g, ''); return x === 'poggz' ? 'pohggz' : x; }
+// Medewerkerpagina → alleen wat de vergelijking nodig heeft (HR-velden blijven buiten de uitkomst; geen tekst bewaard)
+function leesMedewerker(rel, tekst) {
+  const uit = { pad: rel, fouten: [] };
+  if (Buffer.byteLength(String(tekst)) > MAX_BYTES) { uit.fouten.push('pagina groter dan 256 kB'); return uit; }
+  const fm = frontmatter(tekst);
+  if (fm.fout) { uit.fouten.push(fm.fout); return uit; }
+  const v = fm.velden, f = uit.fouten;
+  const ov = v.ovis && typeof v.ovis === 'object' && !Array.isArray(v.ovis) ? v.ovis : {};
+  const sl = lijst(ov.db).filter(function (s) { return s.indexOf(FIN_MDW_SLEUTEL) === 0; });   // alleen medewerker-sleutels (wv1011 zet er knoop#per: naast)
+  if (v.type !== 'medewerker') f.push('type is niet medewerker');
+  if (!FIN_MDW_PAD_RE.test(rel)) f.push('medewerkerpagina staat niet in een map Medewerkers');
+  if (sl.length !== 1 || !FIN_MDW_RE.test(sl[0])) f.push('ovis.db noemt niet precies één medewerker uit de datahub');
+  else uit.id = Number(FIN_MDW_RE.exec(sl[0])[1]);
+  uit.map = (FIN_MDW_PAD_RE.exec(rel) || [])[1] || '';
+  uit.nrs = [].concat.apply([], lijst(v.medewerker_nr).map(function (x) { return x.split(/[,;\s]+/); })).filter(Boolean);
+  uit.actief = v.status === 'actief';
+  uit.functie = typeof v.functie === 'string' ? v.functie : '';
+  uit.in = finMaand(v.in_dienst); uit.uit = finMaand(v.uit_dienst);
+  if (Number.isNaN(uit.in) || Number.isNaN(uit.uit)) f.push('in_dienst of uit_dienst is geen datum (DD-MM-JJJJ)');
+  return uit;
+}
+function leesKern(rel, tekst) {
+  const uit = { pad: rel, fouten: [], tekst: tekst };
+  if (Buffer.byteLength(String(tekst)) > MAX_BYTES) { uit.fouten.push('pagina groter dan 256 kB'); return uit; }
+  const fm = frontmatter(tekst);
+  if (fm.fout) { uit.fouten.push(fm.fout); return uit; }
+  const va = vingerafdruk(tekst);
+  if (va.fout) { uit.fouten.push(va.fout); return uit; }
+  uit.sha = va.sha;
+  const v = fm.velden, f = uit.fouten, pm = FIN_KERN_PAD_RE.exec(rel);
+  const ov = v.ovis && typeof v.ovis === 'object' && !Array.isArray(v.ovis) ? v.ovis : {};
+  const sl = lijst(ov.db).map(function (s) { return FIN_KERN_RE.exec(s); }).filter(Boolean);
+  if (v.type !== 'gegenereerd') f.push('type is niet gegenereerd');
+  if (!pm) f.push('kerncijferpagina staat niet op de vaste plek (<map>/Financieel/Kerncijfers - <code>.md)');
+  if (sl.length !== 1 || (pm && sl[0][1] !== pm[2])) f.push('ovis.db noemt niet precies één reeks, gelijk aan de code in de bestandsnaam');
+  if (['actueel', 'concept'].indexOf(v.status) < 0) f.push('status moet actueel of concept zijn');
+  uit.code = pm ? pm[2] : ''; uit.map = pm ? pm[1] : '';
+  return uit;
+}
+// { rubriek: { jaar: { w, bron } } } voor één entiteit, met personeel en omkeren zoals appFinReeksen (server.js)
+function finReeksen(m, code, def) {
+  const r = {};
+  (m.reeks || []).forEach(function (x) {
+    if (x.entiteit !== code || typeof x.bedrag !== 'number' || !isFinite(x.bedrag) || !Number.isInteger(Number(x.jaar))) return;
+    if (def.van && x.jaar < def.van) return;
+    (r[x.rubriek] = r[x.rubriek] || {})[x.jaar] = { w: x.bedrag, bron: [x.bron_id] };
+  });
+  const p = {}, jaren = new Set();
+  ['k_personeel_tot', 'k_lonen'].forEach(function (k) { Object.keys(r[k] || {}).forEach(function (j) { jaren.add(j); }); });
+  jaren.forEach(function (j) {
+    if (r.k_personeel_tot && r.k_personeel_tot[j]) { p[j] = r.k_personeel_tot[j]; return; }
+    let w = 0; const b = [];
+    ['k_lonen', 'k_soc', 'k_pens', 'k_ovpers'].forEach(function (k) { const c = r[k] && r[k][j]; if (c) { w += c.w; b.push.apply(b, c.bron); } });
+    p[j] = { w: w, bron: b };
+  });
+  r.personeel = p;
+  (def.omkeren || []).forEach(function (k) { Object.keys(r[k] || {}).forEach(function (j) { r[k][j] = { w: -r[k][j].w, bron: r[k][j].bron }; }); });
+  return r;
+}
+function finEuro(v) {   // hele euro's met punt als duizendtal (los van de taalinstelling van node)
+  const n = Math.round(Number(v)), s = String(Math.abs(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return (n < 0 ? '−' : '') + s;
+}
+function finHeeftReeks(m, code) { return (m.reeks || []).some(function (x) { return x.entiteit === code; }); }
+// Het blok op de kerncijferpagina (puur; geen datum: alleen schrijven als een cijfer veranderde)
+function finKernBlokTekst(code, m) {
+  const def = FIN_KERN[code] || FIN_KERN_STANDAARD, rr = finReeksen(m, code, def);
+  const rubr = def.kern.filter(function (k) { return rr[k] && Object.keys(rr[k]).length; });
+  const alle = new Set(); rubr.forEach(function (k) { Object.keys(rr[k]).forEach(function (j) { alle.add(Number(j)); }); });
+  const jaren = Array.from(alle).sort(function (a, b) { return a - b; }).slice(-FIN_JAREN);
+  const r = ['## Kerncijfers uit de financiële datahub', '',
+    '*Gegenereerd door de OVIS-compiler (nacht) uit de datahub (jaarrekeningen, totalen, werkelijke cijfers; geen modelprognoses); niet met de hand bewerken. Bron is de datahub: een nieuwe jaarrekening komt hier vanzelf bij.*', ''];
+  const bronnen = new Set();
+  if (!jaren.length) r.push('Nog geen jaarrekeningcijfers in de datahub.');
+  else {
+    r.push('| bedragen in hele euro\'s | ' + jaren.join(' | ') + ' |', '|---|' + jaren.map(function () { return '--:'; }).join('|') + '|');
+    rubr.forEach(function (k) {
+      r.push('| ' + (FIN_LABEL[k] || k) + ' | ' + jaren.map(function (j) { const c = rr[k][j]; if (!c) return '–'; c.bron.forEach(function (b) { if (b != null) bronnen.add(b); }); return finEuro(c.w); }).join(' | ') + ' |');
+    });
+    r.push('', '- Bron: ' + bronnen.size + (bronnen.size === 1 ? ' jaarrekening' : ' jaarrekeningen') + ' in de datahub (D1 fin, reeksen); "–" = niet in die jaarrekening.');
+  }
+  (def.noten || []).forEach(function (n) { r.push('- ' + n); });
+  const binnen = '\n' + r.join('\n') + '\n';
+  return '<!-- ovis:blok begin id="fin:' + code + '" content_hash="' + blokHash(binnen) + '" -->' + binnen + BLOK_EIND;
+}
+function finCijfers(blok) { return (String(blok || '').match(/\|\s*−?\d[\d.]*\s*(?=\|)/g) || []).length; }
+// De checks (puur). fin = { meting, mdw: [leesMedewerker], kern: [leesKern] } of null; anker = { id → stampagina } uit checks().
+// → { gemeten, reden?, verschillen: [{ code, naam, d1, reg }] (rekeningnummer, alleen laatste 4), paden: { bevinding_id: pad } (alleen stdout) }
+function finChecks(anker, fin, reg, bev, tel) {
+  if (!fin) { tel.fin = 'niet gemeten'; return { gemeten: false, reden: 'geen D1-lezer', verschillen: [], paden: {} }; }
+  const m = fin.meting;
+  if (!m || m.fout) { tel.fin = 'niet gemeten'; return { gemeten: false, reden: m ? m.fout : 'geen meting', verschillen: [], paden: {} }; }
+  const paden = {}, uit = { gemeten: true, verschillen: [], paden: paden };
+  function metPad(pad) { return function (check, sleutel, samenvatting, detail, ernst) { if (pad) paden[check + '-' + sleutel] = pad; bev(check, sleutel, samenvatting, detail, ernst); }; }
+  tel.fin = 0; tel.fin_mdw = 0; tel.fin_kern = 0; tel.fin_verouderd = 0; tel.fin_niet_toetsbaar = 0;
+  const knopen = {}; (reg && reg.knopen || []).forEach(function (k) { knopen[k.id] = k; });
+  const ent = {}; m.entiteiten.forEach(function (e) { ent[e.code] = e; });
+  // entiteit
+  const claims = {};
+  Object.keys(anker).sort().forEach(function (id) {
+    (anker[id].db || []).forEach(function (s) {
+      const x = FIN_ENT_RE.exec(s); if (!x) return;
+      if (x[1] !== id) { metPad(anker[id].pad)('BB1', 'fin-ent-' + id + '-sleutel', 'stampagina van ' + id + ' verwijst naar een andere entiteit in de datahub', 'ovis.db noemt cloudflare:d1-fin/entiteit#' + x[1] + '. Voorstel: de sleutel gelijkzetten aan de eigen code.'); return; }
+      if (!ent[x[1]]) { metPad(anker[id].pad)('BB1', 'fin-ent-' + id + '-onbekend', 'stampagina van ' + id + ' verwijst naar een entiteit die de datahub niet kent', 'D1 fin.entiteit kent ' + id + ' niet. Voorstel: sleutel weghalen of de entiteit in de datahub aanmaken (migratie).'); return; }
+      (claims[id] = claims[id] || []).push(anker[id]);
+    });
+  });
+  m.entiteiten.forEach(function (e) {
+    if (FIN_PROEF.indexOf(e.code) >= 0) return;
+    if (!claims[e.code]) { metPad(null)('BB2', 'fin-ent-' + e.code + '-geen-pagina', 'datahub-entiteit ' + e.code + ' heeft geen stampagina die naar haar verwijst', 'Voorstel: de sleutel cloudflare:d1-fin/entiteit#' + e.code + ' op de stampagina zetten (of de stampagina maken).'); return; }
+    const p = claims[e.code][0], k = knopen[e.code];
+    tel.fin++;
+    const kvk = String(e.kvk == null ? '' : e.kvk).replace(/\s/g, ''), agb = String(e.agb == null ? '' : e.agb).replace(/\s/g, '');
+    if (kvk && (/^\d{1,8}$/.test(kvk) ? kvk.padStart(8, '0') : kvk) !== p.kvk) metPad(p.pad)('BB3', 'fin-ent-' + e.code + '-kvk', 'KvK van ' + e.code + ' verschilt tussen stampagina en datahub', 'stampagina (bron) ≠ D1 fin.entiteit.kvk. Voorstel: de machinekamer zet de datahub gelijk (migratie), of de stampagina als die fout is.');
+    if (agb && (/^\d{1,8}$/.test(agb) ? agb.padStart(8, '0') : agb) !== p.agb) metPad(p.pad)('BB3', 'fin-ent-' + e.code + '-agb', 'AGB van ' + e.code + ' verschilt tussen stampagina en datahub', 'stampagina (bron) ≠ D1 fin.entiteit.agb. Voorstel: de machinekamer zet de datahub gelijk (migratie).');
+    const vp = String(e.vault_pad || '').replace(/\/+$/, '');   // leeg = de hub houdt het niet bij (diffreview KAN 7)
+    if (vp && vp !== path.posix.dirname(p.pad)) metPad(p.pad)('BB3', 'fin-ent-' + e.code + '-map', 'map van ' + e.code + ' verschilt tussen stampagina en datahub', 'D1 fin.entiteit.vault_pad ≠ de map van de stampagina. Voorstel: de machinekamer zet vault_pad gelijk (migratie).');
+    const di = String(e.iban || '').replace(/\s/g, '').toUpperCase();
+    if (!di) return;
+    const ri = k && k.iban ? String(k.iban).replace(/\s/g, '').toUpperCase() : '';
+    if (!ri) { tel.fin_niet_toetsbaar++; return; }   // register kent (nog) geen nummer: niets om tegen te toetsen
+    if (di === ri) return;
+    metPad(p.pad)('BB3', 'fin-ent-' + e.code + '-iban', 'rekeningnummer van ' + e.code + ' in de datahub (op de POT-nota\'s) is niet het nummer in het register (kritiek)',
+      'datahub …' + e4(di) + ', register …' + e4(ri) + '. Voorstel: David zegt welk nummer klopt; klopt het register, dan zet de machinekamer de datahub gelijk (migratie); klopt de datahub, dan via de gewone kritiek-vraag aan David het register wijzigen.', 'serious');
+    uit.verschillen.push({ code: e.code, naam: (k && k.naam) || p.naam || e.code, d1: e4(di), reg: e4(ri) });
+  });
+  // medewerker
+  const mid = new Set(m.medewerkers.map(function (x) { return Number(x.id); }));
+  const dv = {}; m.dienst.forEach(function (d) { (dv[d.medewerker_id] = dv[d.medewerker_id] || []).push(d); });
+  const L = m.loonrun, opId = {};
+  (fin.mdw || []).forEach(function (p) {
+    if (p.fouten.length) { metPad(p.pad)('BB6', 'fin-mdw-pagina-' + kortHash(p.pad).slice(0, 6), 'medewerkerpagina met een datahub-sleutel niet te lezen: ' + p.fouten[0], 'een medewerkerpagina: ' + p.fouten.join('; ') + '. Pad: zie de machinekamer (ovis-run bibliothecaris --afroep --droog). Voorstel: pagina herstellen (Socev).'); return; }
+    (opId[p.id] = opId[p.id] || []).push(p);
+  });
+  Object.keys(opId).map(Number).sort(function (a, b) { return a - b; }).forEach(function (id) {
+    const ps = opId[id], s = 'fin-mdw-' + id;
+    if (!mid.has(id)) { metPad(ps[0].pad)('BB1', s + '-onbekend', 'medewerkerpagina verwijst naar medewerker #' + id + ' die de datahub niet kent', 'Voorstel: sleutel nakijken (machinekamer) of weghalen.'); return; }
+    if (ps.length > 1) { metPad(ps.map(function (p) { return p.pad; }).join(' | '))('BB5', s + '-twee', 'twee medewerkerpagina\'s noemen medewerker #' + id, 'Voorstel: de sleutel alleen op de pagina van die medewerker laten staan.'); return; }
+    const p = ps[0], ds = (dv[id] || []).slice().sort(function (a, b) { return String(a.begin).localeCompare(String(b.begin)) || a.id - b.id; });
+    tel.fin_mdw++;
+    const kl = metPad(p.pad), ents = Array.from(new Set(ds.map(function (d) { return d.entiteit; })));
+    const wie = 'medewerker #' + id + (ents.length === 1 ? ' (' + ents[0] + ')' : '');
+    if (ents.some(function (c) { return ent[c] && ent[c].vault_pad && ent[c].vault_pad !== p.map; })) kl('BB6', s + '-plek', 'medewerkerpagina van ' + wie + ' staat niet bij de entiteit van het dienstverband', 'de map van de pagina is niet de map van de werkgever in de datahub. Voorstel: pagina verplaatsen of de sleutel nakijken (machinekamer).');
+    const nrs = Array.from(new Set(ds.map(function (d) { return d.personeelsnummer == null ? '' : String(d.personeelsnummer).trim(); }).filter(Boolean)));
+    if (nrs.some(function (n) { return p.nrs.indexOf(n) < 0; })) kl('BB3', s + '-nummer', 'personeelsnummer van ' + wie + ' staat niet op de medewerkerpagina', 'de loonadministratie kent een nummer dat de pagina niet noemt. Voorstel: Socev zet het nummer op de pagina (of de sleutel hoort bij een andere pagina).');
+    const ls = ds.filter(function (d) { return d.herkomst === 'loonstrook'; });
+    // diffreview KAN 10: een datum in een andere vorm (tijddeel) is geen verschil maar een meetfout → catch in checks() → niet gemeten
+    ls.forEach(function (d) { const b0 = finMaand(d.begin), e0 = finMaand(d.einde); if (b0 === null || Number.isNaN(b0) || Number.isNaN(e0)) throw new Error('datum in de datahub onleesbaar'); });
+    const mi = function (x) { return Math.floor(x / 100) * 12 + (x % 100); };
+    // diffreview MOET 1: een (her)indiensttreding na de laatste loonrun is nog niet te toetsen
+    if (p.in !== null && p.in > L) tel.fin_niet_toetsbaar++;
+    else {
+      // in dienst: het begin van het eerste dienstverband (alleen als dat uit loonstroken komt) of een begin na een gat van meer dan een
+      // maand in de loonstroken (herindiensttreding, diffreview ZOU 4); geen kandidaat = niet te toetsen (journaalposten/urenregistratie)
+      const kand = [];
+      if (ds[0] && ds[0].herkomst === 'loonstrook') kand.push(finMaand(ds[0].begin));
+      ls.forEach(function (d, i) {
+        if (!i) return;
+        const voor = ls.slice(0, i), open = voor.some(function (x) { return !x.einde; });
+        const eindVoor = open ? null : Math.max.apply(null, voor.map(function (x) { return finMaand(x.einde); }));
+        if (eindVoor !== null && mi(finMaand(d.begin)) - mi(eindVoor) > 1) kand.push(finMaand(d.begin));
+      });
+      if (!kand.length || p.in === null) tel.fin_niet_toetsbaar++;
+      else if (kand.indexOf(p.in) < 0) kl('BB3', s + '-in', 'indiensttreding van ' + wie + ' verschilt tussen medewerkerpagina en loonstroken', 'maand van in dienst op de pagina ≠ begin van het (eerste of hervatte) loonstrook-dienstverband (datums niet in deze melding). Voorstel: Socev legt de pagina naast contract en eerste loonstrook en zet hem gelijk.');
+      // uit dienst en status over álle loonstrook-dienstverbanden samen (diffreview MOET 2: parallelle contracten): open als er één open is
+      const le = !ls.length ? undefined : ls.some(function (d) { return !d.einde; }) ? null : Math.max.apply(null, ls.map(function (d) { return finMaand(d.einde); }));
+      if (le !== undefined) {
+        if (le !== null && p.uit === null) kl('BB3', s + '-uit', 'uitdiensttreding van ' + wie + ' staat in de loonstroken maar niet op de medewerkerpagina', 'Voorstel: Socev zet de einddatum uit de loonstroken op de pagina (na controle van het contract).');
+        else if (le !== null && p.uit !== le) kl('BB3', s + '-uit', 'uitdiensttreding van ' + wie + ' verschilt tussen medewerkerpagina en loonstroken', 'maand van uit dienst op de pagina ≠ einde van de loonstrook-dienstverbanden (datums niet in deze melding). Voorstel: Socev legt de pagina naast contract en loonstrook en zet hem gelijk.');
+        else if (le === null && p.uit !== null && p.uit < L) kl('BB3', s + '-uit', 'medewerkerpagina zegt dat ' + wie + ' uit dienst is, maar de loonstroken lopen door', 'de pagina noemt een einde vóór de laatste verloonde maand; de loonstroken tonen daarna nog een lopend dienstverband. Voorstel: Socev zoekt de verlenging of het nieuwe contract op en zet de pagina gelijk.');
+      }
+      // status: "nu" = de laatste verloonde maand (L). Geen loonstroken (diffreview MOET 3), een einde in L zelf of een vertrek in/na L = niet te toetsen.
+      const d1 = le === undefined ? '?' : le === null || le > L ? 'in' : le === L ? '?' : 'uit';
+      if (d1 === '?' || (d1 === 'in' && !p.actief && p.uit !== null && p.uit >= L)) tel.fin_niet_toetsbaar++;
+      else if ((d1 === 'in') !== p.actief) kl('BB3', s + '-status', 'status van ' + wie + ' verschilt tussen medewerkerpagina en loonstroken', 'pagina zegt ' + (p.actief ? 'actief' : 'niet actief') + ', de laatste loonrun zegt ' + (d1 === 'in' ? 'in dienst' : 'niet in dienst') + '. Voorstel: Socev zet de status op de pagina gelijk (na controle van het contract).');
+    }
+    const fl = finFunctie(ds.length ? ds[ds.length - 1].functie : ''), fp = finFunctie(p.functie);
+    if (fl && fp && fl !== 'medewerker' && fp !== 'medewerker' && fl !== fp) kl('BB3', s + '-functie', 'functie van ' + wie + ' verschilt tussen medewerkerpagina en loonadministratie', 'Voorstel: Socev zet de functie op de pagina gelijk aan het laatste dienstverband (of meldt waarom niet).');
+  });
+  m.medewerkers.forEach(function (x) {
+    const id = Number(x.id);
+    if (!opId[id]) metPad(null)('BB2', 'fin-mdw-' + id + '-geen-pagina', 'medewerker #' + id + ' uit de datahub heeft geen medewerkerpagina die naar hem of haar verwijst', 'Voorstel: Socev zet de sleutel cloudflare:d1-fin/medewerker#' + id + ' op de juiste medewerkerpagina (of maakt de pagina).');
+  });
+  // kerncijfers
+  const perCode = {};
+  (fin.kern || []).forEach(function (p) {
+    if (p.fouten.length) { metPad(p.pad)('BB6', 'fin-kern-pagina-' + kortHash(p.pad).slice(0, 6), 'kerncijferpagina niet te lezen: ' + p.fouten[0], p.pad + ': ' + p.fouten.join('; ') + '. Voorstel: pagina herstellen (Socev).'); return; }
+    (perCode[p.code] = perCode[p.code] || []).push(p);
+  });
+  Object.keys(perCode).sort().forEach(function (code) {
+    const ps = perCode[code], s = 'fin-kern-' + code;
+    if (ps.length > 1) { metPad(ps.map(function (p) { return p.pad; }).join(' | '))('BB5', s + '-twee', 'twee kerncijferpagina\'s voor ' + code, 'Voorstel: één laten staan.'); return; }
+    const p = ps[0];
+    if (!ent[code] || !finHeeftReeks(m, code)) { metPad(p.pad)('BB1', s + '-onbekend', 'kerncijferpagina ' + code + ' verwijst naar een entiteit zonder jaarrekeningcijfers in de datahub', 'Voorstel: pagina weghalen of de code nakijken.'); return; }
+    tel.fin_kern++;
+    if (ent[code].vault_pad && ent[code].vault_pad !== p.map) metPad(p.pad)('BB6', s + '-plek', 'kerncijferpagina ' + code + ' staat niet in de map van die entiteit', 'D1 fin.entiteit.vault_pad ≠ de map van de pagina. Voorstel: pagina verplaatsen.');
+    if (blokHandwerk(p.tekst)) metPad(p.pad)('BB8', s + '-blok', 'blok op de kerncijferpagina van ' + code + ' is met de hand gewijzigd', 'de compiler overschrijft het niet. Voorstel: opmerkingen boven het blok zetten, daarna het blok laten vernieuwen.');
+    else {
+      const pl = blokPlek(p.tekst), hb = huidigBlok(p.tekst), nb = finKernBlokTekst(code, m);
+      if (pl.id && pl.id !== 'fin:' + code) metPad(p.pad)('BB6', s + '-ander-blok', 'op de kerncijferpagina van ' + code + ' staat een ander gegenereerd blok', 'de compiler schrijft er niet overheen. Voorstel: dat blok weghalen (machinekamer).');
+      else if (hb && hb !== nb && finCijfers(nb) < finCijfers(hb)) metPad(p.pad)('BB4', s + '-krimp', 'kerncijferblok van ' + code + ' zou minder cijfers krijgen dan nu', 'de hub geeft minder jaren of rubrieken dan het blok nu toont (halve herlaad of correctie); de nacht schrijft het niet. Voorstel: de machinekamer kijkt de hub na en haalt bij een bewuste correctie het blok weg, zodat de nacht het opnieuw zet.');
+      else if (hb !== nb) tel.fin_verouderd++;   // BB4: alleen telling; de nacht vernieuwt
+    }
+  });
+  m.entiteiten.forEach(function (e) {
+    if (FIN_PROEF.indexOf(e.code) >= 0 || perCode[e.code] || !finHeeftReeks(m, e.code)) return;
+    metPad(null)('BB2', 'fin-kern-' + e.code + '-geen-pagina', 'entiteit ' + e.code + ' heeft jaarrekeningcijfers in de datahub maar geen kerncijferpagina', 'Voorstel: Socev maakt <map>/Financieel/Kerncijfers - ' + e.code + '.md.');
+  });
+  return uit;
+}
+// wv1012 (Fable #9): de zin op de weekkaart voor een bevinding van plek 8 — zonder naam, datum of nummer van een medewerker
+function finKaartZin(b) {
+  const id = b.bevinding_id, c = /-fin-(?:ent|kern)-([A-Z][A-Z0-9_]*)-/.exec(id), code = c ? c[1] : '';
+  if (/-fin-mdw-/.test(id)) {
+    if (b.check_id === 'BB2') return 'Een POT-medewerker uit de loonadministratie is nog aan geen medewerkerpagina gekoppeld. Ik zet de koppeling op de juiste pagina.';
+    if (b.check_id === 'BB3') return 'Bij een POT-medewerker zeggen de loonstroken iets anders over ' + (/-functie$/.test(id) ? 'de functie' : /-nummer$/.test(id) ? 'het personeelsnummer' : 'de in- of uitdiensttreding') + ' dan het dossier. Ik zoek het contract op en zet het dossier gelijk.';
+    if (b.check_id === 'BB5' || b.check_id === 'BB1') return 'Een koppeling tussen een medewerkerpagina en de loonadministratie klopt niet. Ik zet hem goed.';
+    return 'Een medewerkerpagina met een koppeling naar de loonadministratie is niet te lezen of staat op de verkeerde plek. Ik herstel hem.';
+  }
+  if (/-fin-kern-/.test(id)) {
+    if (b.check_id === 'BB2') return 'Voor ' + code + ' staan er jaarrekeningcijfers in de datahub, maar er is nog geen kerncijferpagina. Ik maak hem.';
+    if (b.check_id === 'BB8') return 'Op de kerncijferpagina van ' + code + ' is in het automatische blok iets met de hand veranderd. Ik zet dat boven het blok.';
+    return 'De kerncijferpagina van ' + (code || 'een entiteit') + ' klopt niet met de datahub. Ik zet hem goed.';
+  }
+  if (b.check_id === 'BB2') return 'Entiteit ' + code + ' in de financiële datahub is nog niet aan haar stampagina gekoppeld. Ik zet de koppeling.';
+  if (b.check_id === 'BB3') return code + ': de financiële datahub zegt over ' + (/-kvk$/.test(id) ? 'het KvK-nummer' : /-agb$/.test(id) ? 'de AGB-code' : 'de map in de Second Brain') + ' iets anders dan de stampagina. Ik zet de datahub gelijk.';
+  return 'De koppeling tussen een stampagina en de financiële datahub klopt niet. Ik zet hem goed.';
+}
+// Fable #5: een verschil in het rekeningnummer dat de datahub op de POT-nota's zet is kritiek → meteen één Voor jou-kaart per verschilset
+// (zoals kaartPot), zonder het volledige nummer, dicht als het verschil weg is. Alleen als D1 gemeten is.
+function kaartFin(meting, stand, nuKort) {
+  const uit = { zet: [], dicht: [] };
+  if (!meting || !meting.gemeten) return uit;
+  const open = function (s) { return stand[s] === 'open' || stand[s] === 'later'; };
+  const nodig = new Set();
+  meting.verschillen.forEach(function (v) {
+    const sleutel = 'ovis-fin-iban-' + v.code.toLowerCase() + '-' + fnv6(JSON.stringify([v.code, v.d1, v.reg]));
+    nodig.add(sleutel);
+    if (stand[sleutel]) return;
+    const naam = kort(v.naam, 50);
+    uit.zet.push({ sleutel: sleutel, soort: 'doen', volgorde: 22, waar: 'overal', prive: true, duur_min: 3,
+      titel: kort(naam + ' — rekeningnummer op de POT-nota\'s nakijken', KAART_TITEL),
+      herkomst: { handmatig: 'bibliothecaris', soort: 'fin-iban', entiteit: v.code },
+      waarom: kort('Het rekeningnummer dat de financiële datahub voor ' + naam + ' op de POT-nota\'s zet (eindigt op ' + v.d1 + ') is niet het nummer in de Second Brain (eindigt op ' + v.reg + '). Naar dat nummer maken de praktijken hun bijdrage over. De Second Brain is de bron.', KAART_WAAROM),
+      stappen: ['Zeg tegen Socev welk nummer klopt (het nummer dat eindigt op ' + v.d1 + ' of op ' + v.reg + ').',
+        'Klopt de Second Brain, dan zet de machinekamer de datahub goed. Klopt de datahub, dan krijg je de gewone vraag om het nummer in de Second Brain te wijzigen, met je vingerafdruk.',
+        'Zet je in de tussentijd een POT-nota klaar: kijk het rekeningnummer op de nota na voordat hij weggaat.',
+        'Deze kaart gaat de ochtend nadat het overal gelijk is vanzelf dicht.'],
+      meting: kort(nuKort + ': datahub …' + v.d1 + ', Second Brain …' + v.reg, 300) });
+  });
+  Object.keys(stand).forEach(function (s) {
+    if (!/^ovis-fin-iban-/.test(s) || !open(s) || nodig.has(s)) return;
+    uit.dicht.push({ sleutel: s, van: stand[s], bewijs: nuKort + ': de Bibliothecaris ziet dit verschil niet meer (rekeningnummer in de datahub gelijk aan de Second Brain).' });
+  });
+  return uit;
+}
+
 // ── Kaarten in Overzicht (wv1253; ontwerp + Fable-review vooraf: mk-scripts/wv1253/ontwerp.md) ──
 // Pure functies: wat er op een kaart moet (bundel per week, kritiek per veld, Bibliothecaris per week), de Anders-ontleding en de zin
 // voor Socev na Davids druk. De databank (public.ovis_kaart_zet) controleert en bevriest de lijst; public.ovis_handvat_activeer voert
@@ -1533,7 +1870,7 @@ function kaartBiblio(reg, o) {
   const kandidaten = (reg.bevindingen || []).filter(function (b) {
     if (!/^BB[1235678]$/.test(b.check_id) || (b.check_id === 'BB3' && b.ernst === 'serious')) return false;
     if (VJ_BEVINDING_RE.test(b.bevinding_id)) return false;   // wv1009: plek 5 is machinestaat; de Voor jou-ronde en de machinekamer handelen het af
-    if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id) && !/^BB3-bank-/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart; wv981: pot-cc wacht op fase 2; wv1010: bank wel
+    if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id) && !/^BB3-bank-/.test(b.bevinding_id) && !/^BB3-fin-/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart; wv981: pot-cc wacht op fase 2; wv1010: bank wel
     return !geh.open.has('structuur_state#' + b.bevinding_id) && !geh.rust.has('structuur_state#' + b.bevinding_id + '#');
   }).slice(0, KAART_STAPPEN);
   if (!kandidaten.length) return { reden: 'geen open verschillen' };
@@ -1551,6 +1888,7 @@ function kaartBiblio(reg, o) {
     if (/^BB2-per:.*-geen-pagina$/.test(b.bevinding_id)) return nr + '. ' + nm + ': de pagina van deze persoon is weg of verplaatst. Ik zoek uit waar hij is; een nieuwe maak ik niet.';
     if (/^BB5-.*-object$/.test(b.bevinding_id)) return nr + '. Twee pagina\'s lijken over dezelfde persoon te gaan. Ik zoek het uit en leg het samenvoegen apart aan je voor.';
     if (/^BB1-per:.*-(object|google|google-weg)$/.test(b.bevinding_id)) return nr + '. ' + nm + ': de koppeling met ' + (/-object$/.test(b.bevinding_id) ? 'de identiteit in het register' : 'je Google-contacten') + ' klopt niet. Ik zoek uit welke de juiste is.';
+    if (FIN_BEVINDING_RE.test(b.bevinding_id)) return nr + '. ' + finKaartZin(b);   // wv1012: plek 8
     const z = { BB1: nm + ': de verwijzing naar het register op de pagina klopt niet. Ik zet hem goed.',
       BB2: /-verhuisd$/.test(b.bevinding_id) ? nm + ': de pagina is verplaatst. Ik zet het register op de nieuwe plek.' : nm + ': staat in het register maar heeft geen pagina. Ik maak een conceptpagina.',
       BB3: nm + ': pagina en register lopen uiteen. Ik werk het register bij en zoek uit waarom.',
@@ -1561,7 +1899,7 @@ function kaartBiblio(reg, o) {
     return nr + '. ' + z;
   });
   return { kaart: { sleutel: sleutel, soort: 'biblio', titel: kandidaten.length + (kandidaten.length === 1 ? ' verschil' : ' verschillen') + ' in het entiteitenregister — zo oplossen?',
-    waarom: 'De Bibliothecaris vergelijkt elke nacht de pagina\'s over organisaties, personen en rekeningen met het register en de bank, en lost niets stil op. Ja: Socev lost ze op zoals hieronder. Nee: alles blijft zoals het is. Anders: typ welke nummers niet, bijvoorbeeld "zonder 2".',
+    waarom: 'De Bibliothecaris vergelijkt elke nacht de pagina\'s over organisaties, personen, rekeningen en de financiële datahub met het register, de bank en de datahub, en lost niets stil op. Ja: Socev lost ze op zoals hieronder. Nee: alles blijft zoals het is. Anders: typ welke nummers niet, bijvoorbeeld "zonder 2".',
     // wv1011: namen van personen nooit op een vaste plek
     stappen: stappen, prive: kandidaten.some(function (b) { return PER_BEVINDING_RE.test(b.bevinding_id); }), regels: kandidaten.map(function (b, i) { return { nr: i + 1, actie: 'biblio', tabel: 'structuur_state', id: b.bevinding_id }; }) } };
 }
@@ -1720,6 +2058,27 @@ function maak(o) {
     });
     return nrs;
   }
+  // wv1012: kerncijferpagina's (vaste plek) en medewerkerpagina's met een datahub-sleutel (andere medewerkerpagina's worden niet ontleed)
+  function leesFin(alleenKern) {
+    const uit = { kern: [], mdw: [] };
+    function lijstMap(rel) { try { return o.lijst(rel); } catch (e) { return []; } }
+    function lees(rel) { try { return o.lees(path.join(vault, rel)); } catch (e) { return null; } }
+    let top;   // diffreview ZOU 5: zonder mappenlijst is er niets gemeten (anders lijkt alles "opgelost")
+    try { top = o.lijst('10_Zakelijk'); } catch (e) { uit.fout = 'vault niet te lezen'; return uit; }
+    top.forEach(function (m) {
+      if (!m.map || m.naam.startsWith('.') || m.naam === '_Gedeeld') return;
+      const fm = '10_Zakelijk/' + m.naam + '/Financieel', mm = '10_Zakelijk/' + m.naam + '/Medewerkers';
+      lijstMap(fm).forEach(function (x) { if (x.bestand && FIN_KERN_NAAM_RE.test(x.naam)) { const t = lees(fm + '/' + x.naam); uit.kern.push(t === null ? { pad: fm + '/' + x.naam, fouten: ['niet te lezen'] } : leesKern(fm + '/' + x.naam, t)); } });
+      if (alleenKern) return;
+      lijstMap(mm).forEach(function (x) {
+        if (!x.bestand || !x.naam.endsWith('.md') || uit.mdw.length >= 500) return;
+        const t = lees(mm + '/' + x.naam);
+        if (t === null) uit.mdw.push({ pad: mm + '/' + x.naam, fouten: ['niet te lezen'] });   // diffreview ZOU 5: niet stil overslaan
+        else if (t.indexOf(FIN_MDW_SLEUTEL) >= 0) uit.mdw.push(leesMedewerker(mm + '/' + x.naam, t));
+      });
+    });
+    return uit;
+  }
   async function register(logSinds) {
     const r = await o.sbRpc('ovis_register_lees', { p_log_sinds: logSinds || null });
     if (!r || !Array.isArray(r.knopen)) throw new Error('ovis_register_lees gaf geen register');
@@ -1862,9 +2221,38 @@ function maak(o) {
           }
         }
       }
+      // wv1012: kerncijferblokken uit D1 fin (één keer gelezen; niet te lezen = niets aanraken). Fable #6: een blok dat minder cijfers zou
+      // krijgen dan het huidige (mislukte of halve herlaad in de hub) wordt niet geschreven maar als fout gemeld.
+      if (o.fin) {
+        uit.finblokken = 0;
+        const fm = await finMeting(o.fin);
+        if (fm.fout) uit.fouten.push({ pad: '(D1 fin)', fout: 'datahub niet te lezen: ' + fm.fout });
+        else {
+          const kp = leesFin(true).kern, tel_ = {};
+          kp.forEach(function (p) { if (!p.fouten.length) tel_[p.code] = (tel_[p.code] || 0) + 1; });
+          for (const p of kp) {
+            if (p.fouten.length || tel_[p.code] !== 1 || !finHeeftReeks(fm, p.code)) continue;
+            let blok;
+            try { blok = finKernBlokTekst(p.code, fm); } catch (e) { uit.fouten.push({ pad: p.pad, fout: 'kerncijferblok opbouwen: ' + String(e && e.message || e).slice(0, 80) }); continue; }
+            const hb = huidigBlok(p.tekst), pid = blokPlek(p.tekst).id;
+            if (hb === blok) continue;
+            if (pid && pid !== 'fin:' + p.code) { uit.fouten.push({ pad: p.pad, fout: 'er staat al een ander gegenereerd blok' }); continue; }
+            if (blokHandwerk(p.tekst)) { uit.handwerk++; continue; }
+            if (hb && finCijfers(blok) < finCijfers(hb)) { uit.fouten.push({ pad: p.pad, fout: 'kerncijferblok zou minder cijfers krijgen (' + finCijfers(blok) + ' < ' + finCijfers(hb) + '); niet geschreven' }); continue; }
+            if (opties.droog) { uit.finblokken++; continue; }
+            try {
+              const vol = path.join(vault, p.pad), vers = o.lees(vol);
+              if (vingerafdruk(vers).sha !== p.sha) { uit.fouten.push({ pad: p.pad, fout: 'pagina veranderde tijdens de ronde; blok volgende nacht' }); continue; }
+              if (blokHandwerk(vers)) { uit.handwerk++; continue; }
+              o.schrijf(vol, zetBlok(vers, blok));
+              uit.finblokken++;
+            } catch (e) { uit.fouten.push({ pad: p.pad, fout: 'kerncijferblok: ' + String(e && e.code || e && e.message || e).slice(0, 80) }); }
+          }
+        }
+      }
     }
     uit.ms = nu() - t0;
-    log('ovis-compileer ' + JSON.stringify({ modus: modus, paginas: uit.paginas, gestuurd: uit.gestuurd, nieuw: uit.nieuw, fouten: uit.fouten.length, blokken: uit.blokken, handwerk: uit.handwerk, medewerkerblokken: uit.medewerkerblokken, bankblokken: uit.bankblokken }));
+    log('ovis-compileer ' + JSON.stringify({ modus: modus, paginas: uit.paginas, gestuurd: uit.gestuurd, nieuw: uit.nieuw, fouten: uit.fouten.length, blokken: uit.blokken, handwerk: uit.handwerk, medewerkerblokken: uit.medewerkerblokken, bankblokken: uit.bankblokken, finblokken: uit.finblokken }));
     return uit;
   }
   // Bibliothecaris: leest, vergelijkt, schrijft bevindingen (BB), stempelt (niet op afroep). opties.sinds = log sinds (ISO).
@@ -1886,7 +2274,9 @@ function maak(o) {
       catch (e) { personen = null; log('ovis-personen niet gemeten: ' + String(e && e.message || e).slice(0, 120)); }
       if (personen) personen.paden = perStand.paden; else personen = { paden: perStand.paden };
     }
-    const r = checks(paginas, reg, c.fouten, pot, bank, personen);
+    let fin = null;   // wv1012: plek 8 (alleen lezen); o.fin = { d1(batch) }
+    if (o.fin) { const lf = leesFin(); fin = Object.assign(lf, { meting: lf.fout ? { fout: lf.fout } : await finMeting(o.fin) }); }
+    const r = checks(paginas, reg, c.fouten, pot, bank, personen, fin);
     r.tel.personen_gemeten = !!(personen && Array.isArray(personen.entity));
     r.tel.personen_gelezen = !(personen && personen.nietGelezen);
     // wv1009: plek 5 (Voor jou ⇄ register), alleen lezen; o.vj = { punten(), register() }
@@ -1905,7 +2295,7 @@ function maak(o) {
     // BB7-spoor blijft open tot iemand hem afhandelt: het logvenster schuift door, de wijziging is niet weg (Fable wv979 #8)
     // wv981 (Fable #1): niet gemeten is niet opgelost — zonder POT-meting blijven de bevindingen van plek 4 open
     // wv1009: idem voor plek 5 zonder Voor jou-meting; wv1010: idem voor plek 6 zonder bankmeting
-    const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor-\d{8}$/.test(id) && (r.pot.gemeten || !POT_BEVINDING_RE.test(id)) && (r.vj.gemeten || !VJ_BEVINDING_RE.test(id)) && (r.bank.gemeten || !BANK_BEVINDING_RE.test(id))
+    const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor-\d{8}$/.test(id) && (r.pot.gemeten || !POT_BEVINDING_RE.test(id)) && (r.vj.gemeten || !VJ_BEVINDING_RE.test(id)) && (r.bank.gemeten || !BANK_BEVINDING_RE.test(id)) && (r.fin.gemeten || !FIN_BEVINDING_RE.test(id))
       && (r.tel.personen_gemeten || !/^BB1-per:.*-(object|google|google-weg)$|^BB3-per:.*-google-tel$/.test(id))
       && (r.tel.personen_gelezen || !PER_BEVINDING_RE.test(id))
       && !(r.perFout || []).some(function (pid) { return id.indexOf(pid + '-') >= 0 || id.slice(-pid.length - 1) === '-' + pid; }); });   // wv1011: niet gemeten ≠ opgelost (KAN 12: ook niet bij een ontzegelde pagina)
@@ -1918,10 +2308,11 @@ function maak(o) {
     const vjZin = r.vj.gemeten ? '; Voor jou ⇄ register: ' + r.vj.tel.kaarten_open + ' open kaart(en), ' + r.vj.tel.rijen_open + ' open vraag/vragen, ' + r.vj.bevindingen.length + ' verschil(len)' : '; Voor jou ⇄ register niet gemeten (' + schoon(r.vj.reden || '?', 80) + ')';
     const perZin = !r.tel.personen_gelezen ? '; personen niet gemeten (zegelsleutel)' : '; personen: ' + (r.tel.personen || 0) + ' gemeten, ' + (r.tel.per_verschil || 0) + ' verschil(len)';   // wv1011
     const bankZin = r.bank.gemeten ? '; bankrekeningen: ' + r.tel.bank + ' gemeten, ' + r.tel.bank_verschil + ' verschil(len)' : '; bankrekeningen niet gemeten (' + schoon(r.bank.reden || '?', 80) + ')';
+    const finZin = r.fin.gemeten ? '; D1 fin: ' + r.tel.fin + ' entiteit(en), ' + r.tel.fin_mdw + ' medewerker(s), ' + r.tel.fin_kern + ' kerncijferpagina(\'s) gemeten, ' + r.tel.fin_verschil + ' verschil(len)' : '; D1 fin niet gemeten (' + schoon(r.fin.reden || '?', 80) + ')';
     r.tel.vj = r.vj.gemeten ? r.vj.bevindingen.length : 'niet gemeten';
     // diffreview #7: wat de Voor jou-ronde om 07:15 zelf rechtzet, hoort niet in de box (nieuw_box/nieuwe zonder die bevindingen)
     const metActie = new Set(r.vj.metActie || []), nieuweBox = nieuw.filter(function (x) { return !metActie.has(x.bevinding_id); });
-    const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin + potZin + vjZin + bankZin + perZin, tel: r.tel, pot: r.pot, bank: r.bank, vj: { gemeten: r.vj.gemeten, reden: r.vj.reden || null, tel: r.vj.tel }, open: onverklaard, nieuw: nieuw.length, nieuw_box: nieuweBox.length, opgelost: opgelost.length,
+    const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin + potZin + vjZin + bankZin + perZin + finZin, tel: r.tel, pot: r.pot, bank: r.bank, fin: r.fin, vj: { gemeten: r.vj.gemeten, reden: r.vj.reden || null, tel: r.vj.tel }, open: onverklaard, nieuw: nieuw.length, nieuw_box: nieuweBox.length, opgelost: opgelost.length,
       per_check: r.bevindingen.reduce(function (a, x) { a[x.check_id] = (a[x.check_id] || 0) + 1; return a; }, {}), bevindingen: r.bevindingen, nieuwe: nieuweBox };
     if (!opties.droog && !opties.afroep) {
       await o.sbRpc('mk_hartslag_stempel', { p_component: 'bibliothecaris', p_gemeten_rijen: r.tel.paginas, p_bevindingen: onverklaard });
@@ -1990,5 +2381,7 @@ module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina,
   vjMeting: vjMeting, vjNu: vjNu, vjKoppel: vjKoppel, vjSchrijf: vjSchrijf, vjRegister: vjRegister, vjGenoemd: vjGenoemd, VJ_BEVINDING_RE: VJ_BEVINDING_RE,
   bankLezer: bankLezer, bankMeting: bankMeting, bankChecks: bankChecks, leesRekening: leesRekening, leesBankregels: leesBankregels, bankBlokTekst: bankBlokTekst,
   bankRegelsBlokTekst: bankRegelsBlokTekst, bankKaartZin: bankKaartZin, orgOpNaam: orgOpNaam, BANK_SQL: BANK_SQL, BANK_BEVINDING_RE: BANK_BEVINDING_RE, BANKREGELS_PAD: BANKREGELS_PAD,
+  finMeting: finMeting, finChecks: finChecks, leesMedewerker: leesMedewerker, leesKern: leesKern, finKernBlokTekst: finKernBlokTekst, finKaartZin: finKaartZin, kaartFin: kaartFin,
+  FIN_SQL: FIN_SQL, FIN_BEVINDING_RE: FIN_BEVINDING_RE, finMaand: finMaand,
   plan: plan, kaartBundel: kaartBundel, kaartenKritiek: kaartenKritiek, kaartBiblio: kaartBiblio, eruitUit: eruitUit, uitkomstZin: uitkomstZin, isoWeek: isoWeek,
   KAART_SLEUTEL_RE: /^intake-(handvat|kritiek|biblio)-[a-z0-9]+(-[a-z0-9]+)*$/ };

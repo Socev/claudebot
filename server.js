@@ -15166,7 +15166,9 @@ const ovis = (function () {
       vj: { punten: function () { return appSbRpc('mk_voor_jou_lijst', { p_alles: true }); }, register: function () { return VV().lees(path.join(VAULT, '00_Systeem', 'Open vragen aan David.md'), 'utf8'); },
         wv: function () { return appSbRpc('mk_werkvoorraad_stand', {}); } },
       // wv1010: plek 6 (bank) — de bankdatabank alleen lezen (readOnly, query_only, alleen SELECT); ontbreekt de lezer (oude module): niet gemeten
-      bank: typeof OVIS_MOD.bankLezer === 'function' ? OVIS_MOD.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')) : null });
+      bank: typeof OVIS_MOD.bankLezer === 'function' ? OVIS_MOD.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')) : null,
+      // wv1012: plek 8 (D1 fin: entiteit, medewerker, kerncijfers) — dezelfde D1-lezer, alleen SELECT
+      fin: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); } } });
   } catch (e) { logError('ovis', e); return null; }
 })();
 const ovisLoopt = { nu: null, sinds: 0 };
@@ -15232,6 +15234,22 @@ async function ovisPotKaarten(b) {
   if (uit.gezet || uit.dicht || uit.fouten) schrijfLog(nu() + ' ovis-pot-kaart ' + velden(uit));
   return uit;
 }
+// wv1012: Voor jou-kaart bij een verschil in het rekeningnummer dat de datahub op de POT-nota's zet (plek 8, kritiek), alleen na een
+// Bibliothecaris waarin D1 gemeten is; dicht als het verschil weg is. Wat erop moet beslist OVIS_MOD.kaartFin (puur).
+async function ovisFinKaarten(b) {
+  if (!b || !b.fin || !b.fin.gemeten || typeof OVIS_MOD.kaartFin !== 'function') return null;
+  const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+  const stand = {}; ((j && j.punten) || []).forEach(function (p) { stand[p.sleutel] = p.status; });
+  const k = ovisAms().klok, nuKort = Number(k.slice(8, 10)) + '-' + Number(k.slice(5, 7)) + ' ' + k.slice(11, 16);
+  const plan = OVIS_MOD.kaartFin(b.fin, stand, nuKort), uit = { gezet: 0, dicht: 0, fouten: 0 };
+  for (const p of plan.zet) { try { await appSbRpc('mk_voor_jou_zet', { p: p }); uit.gezet++; } catch (e) { uit.fouten++; logError('ovis-fin-kaart', e); } }
+  for (const d of plan.dicht) {
+    try { await appSbRpc('mk_voor_jou_status', { p_sleutel: d.sleutel, p_van: d.van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: d.bewijs, p_reden: 'bibliothecaris: verschil weg' }); uit.dicht++; }
+    catch (e) { uit.fouten++; logError('ovis-fin-kaart', e); }
+  }
+  if (uit.gezet || uit.dicht || uit.fouten) schrijfLog(nu() + ' ovis-fin-kaart ' + velden(uit));
+  return uit;
+}
 async function ovisTik() {
   if (!ovis || !SERVER_ECHT || !rolPrimair()) return;
   if (onderhoud.stand().aan) return;   // wv1271 (Fable MOET 3): geen compileer/Bibliothecaris op een half verhuisde boom; na uit haalt de volgende tik het in
@@ -15264,6 +15282,7 @@ async function ovisTik() {
       ovisLoopt.nu = 'kaarten';
       try { await ovisKaartenZet(['kritiek', 'bundel', 'biblio']); } catch (e) { logError('ovis-kaarten', e); }   // wv1253
       try { const pk = await ovisPotKaarten(b); if (pk) ovisStaatZet({ pot_kaarten: Object.assign({ t: new Date().toISOString() }, pk) }); } catch (e) { logError('ovis-pot-kaart', e); }   // wv981
+      try { const fk = await ovisFinKaarten(b); if (fk) ovisStaatZet({ fin_kaarten: Object.assign({ t: new Date().toISOString() }, fk) }); } catch (e) { logError('ovis-fin-kaart', e); }   // wv1012
       return;
     }
     // overdag én na de Bibliothecaris (diffreview #4): alleen de databank

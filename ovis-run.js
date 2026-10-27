@@ -18,7 +18,7 @@
 //                                          ander gebrek; schrijft alleen die ene regel (vault-veilig).
 //   --droog: niets schrijven (databank noch vault)
 // Omgeving: VAULT_DIR (standaard de vault), OVIS_ZEGEL_SLEUTEL (wv1011: pad naar de zegelsleutel, standaard /opt/data/ovis/zegel.sleutel), SUPABASE_URL + SUPABASE_SERVICE_ROLE (nooit als argument), CLOUDFLARE_API_TOKEN (wv981: D1 fin
-// alleen lezen voor plek 4; ontbreekt hij, dan "POT niet gemeten"), CF_ACCOUNT_ID/APP_FIN_DB (zoals server.js), BANK_DIR (wv1010: plek 6,
+// alleen lezen voor plek 4 en (wv1012) plek 8; ontbreekt hij, dan "niet gemeten"), CF_ACCOUNT_ID/APP_FIN_DB (zoals server.js), BANK_DIR (wv1010: plek 6,
 // <BANK_DIR>/transacties.sqlite alleen lezen; standaard /opt/data/bank), OVIS_LOCK (standaard
 // /opt/data/bin/.vault.lock). Uitvoer: één JSON-regel; uitgang 0 = gelukt, 1 = fout, 2 = gebruik.
 const fs = require('fs');
@@ -72,20 +72,26 @@ function rekeningen() {
 }
 // wv981: plek 4 (POT-factuuradres). D1 fin alleen lezen (elk statement moet een SELECT zijn, Fable #4) en de dossierpagina's met de parser
 // van de verzender zelf (pot-verzend.ontvangers), zodat de Bibliothecaris hetzelfde leest als wat er verstuurd wordt.
-function potLezer() {
+// wv1012: dezelfde D1-lezer ook voor plek 8 (entiteit, medewerker, kerncijfers); alleen SELECT. Geen token → null (niet gemeten).
+function finD1() {
   const tok = process.env.CLOUDFLARE_API_TOKEN;
-  let PV = null; try { PV = require('./pot-verzend.js'); } catch (e) { PV = null; }
-  if (!tok || !PV) return null;
+  if (!tok) return null;
   const acc = process.env.CF_ACCOUNT_ID || '23df9b0607bb70f6d7f15a63ec843d6d', db = process.env.APP_FIN_DB || 'ffcb09ad-fc50-4c83-aa7b-ad6409b44e03';
+  return async function (batch) {
+    if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) throw new Error('alleen lezen');
+    const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + acc + '/d1/database/' + db + '/query', { method: 'POST',
+      headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ batch: batch }), signal: AbortSignal.timeout(30000) });
+    const j = await r.json().catch(function () { return null; });
+    if (!r.ok || !j || j.success !== true || !Array.isArray(j.result) || j.result.length !== batch.length || !j.result.every(function (x) { return x && x.success !== false; })) throw new Error('D1 http ' + r.status);
+    return j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [] }; });
+  };
+}
+function potLezer() {
+  let PV = null; try { PV = require('./pot-verzend.js'); } catch (e) { PV = null; }
+  const d1 = finD1();
+  if (!d1 || !PV) return null;
   return {
-    d1: async function (batch) {
-      if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) throw new Error('alleen lezen');
-      const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + acc + '/d1/database/' + db + '/query', { method: 'POST',
-        headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ batch: batch }), signal: AbortSignal.timeout(30000) });
-      const j = await r.json().catch(function () { return null; });
-      if (!r.ok || !j || j.success !== true || !Array.isArray(j.result) || j.result.length !== batch.length || !j.result.every(function (x) { return x && x.success !== false; })) throw new Error('D1 http ' + r.status);
-      return j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [] }; });
-    },
+    d1: d1,
     dossier: function () {
       const map = path.join('10_Zakelijk', 'HAGRO', 'Praktijken');
       const paden = fs.readdirSync(path.join(VAULT, map)).filter(function (n) { return /\.md$/.test(n); }).map(function (n) { return path.join(map, n); })
@@ -130,7 +136,8 @@ function grendelVast() {
   const reg = R.maak({ vault: VAULT, sbRpc: sbRpc, lees: function (p) { return VV.lees(p, 'utf8'); },
     zegelSleutel: function () { return R.zegelSleutelLees(process.env.OVIS_ZEGEL_SLEUTEL || undefined); },   // wv1011
     schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen, pot: potLezer(), vj: vjLezer,
-    bank: R.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')) });   // wv1010: plek 6, alleen lezen
+    bank: R.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')),   // wv1010: plek 6, alleen lezen
+    fin: finD1() ? { d1: finD1() } : null });   // wv1012: plek 8, alleen lezen
   try {
     if (modus === 'nacht') {
       if (arg.indexOf('--buiten-venster') < 0 && uurAmsterdam() !== 1) stop(1, { ok: false, fout: 'nachtronde alleen 01:00-02:00 (Amsterdam); --buiten-venster om af te wijken' });
@@ -143,7 +150,9 @@ function grendelVast() {
       const potTel = { gemeten: b.pot.gemeten, reden: b.pot.reden || null, verschillen: b.pot.verschillen.length };   // geen adressen op stdout
       // wv1010: paden van bankbevindingen alleen hier (machinekamer), nooit in de databank of de box
       const bankTel = { gemeten: b.bank.gemeten, reden: b.bank.reden || null, paden: b.bank.paden || {} };
-      stop(0, Object.assign({ ok: true }, b, { pot: potTel, bank: bankTel, bevindingen: b.bevindingen.map(function (x) { return { id: x.bevinding_id, check: x.check_id, ernst: x.ernst, samenvatting: x.samenvatting }; }) }));
+      // wv1012: paden van fin-bevindingen alleen hier; rekeningnummerverschillen alleen met de laatste 4 cijfers
+      const finTel = b.fin ? { gemeten: b.fin.gemeten, reden: b.fin.reden || null, verschillen: b.fin.verschillen || [], paden: b.fin.paden || {} } : null;
+      stop(0, Object.assign({ ok: true }, b, { pot: potTel, bank: bankTel, fin: finTel, bevindingen: b.bevindingen.map(function (x) { return { id: x.bevinding_id, check: x.check_id, ernst: x.ernst, samenvatting: x.samenvatting }; }) }));
     }
     if (modus === 'voorjou') {
       // databankklok (op van mk_voor_jou_lijst), niet de podklok (die liep eerder dagen mis)
