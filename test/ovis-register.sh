@@ -783,6 +783,13 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     let r = C(BANK());
     toets('10 alles gelijk: 0 bankbevindingen, 3 rekeningen gemeten', bankB(r).length === 0 && r.tel.bank === 3 && r.bank.gemeten, [ids(r), r.tel]);
     toets('10 opgeheven rekening zonder pagina is geen bevinding', !/0033/.test(ids(r)));
+    const mO = M(); mO.rekeningen[2].status = 'ontkoppeld';
+    toets('10 ontkoppelde rekening zonder pagina is geen bevinding (diffreview ZOU 1)', !/0033/.test(ids(C(BANK({ meting: mO })))), ids(C(BANK({ meting: mO }))));
+    const mK = M(); mK.rekeningen = mK.rekeningen.concat([null]);
+    r = C(BANK({ meting: mK }));
+    toets('10 vergelijking die faalt: niet gemeten, geen halve bankbevindingen (diffreview ZOU 2)', r.bank.gemeten === false && /vergelijking faalde/.test(r.bank.reden) && bankB(r).length === 0, r.bank);
+    toets('10 id van een bekende rekening hangt aan het bank-id, niet aan het nummer (diffreview ZOU 3)', (() => { const x = C(BANK({ rek: PAG().slice(0, 2) })); const m2 = M(); m2.rekeningen[3].rek = 'rp2'; const y = C(BANK({ rek: PAG().slice(0, 2), meting: m2 })); const a = bankB(x).find((b) => /geen-pagina/.test(b.bevinding_id)), c = bankB(y).find((b) => /geen-pagina/.test(b.bevinding_id)); return a && c && a.bevinding_id !== c.bevinding_id; })());
+    toets('10 POT-rekeningpagina buiten de POT-map = fout (KAN 7)', R.leesRekening('10_Zakelijk/Tolgaarde/Rekening - POT (0044).md', rekTekst(IP, 'POT')).fouten.length > 0);
     r = C(BANK({ rek: PAG().slice(0, 2) }));
     toets('10 POT-rekening zonder pagina: BB2 + hoofdrekening POT', /BB2-bank-rek-0044-[0-9a-f]{6}-geen-pagina/.test(ids(r)) && /BB3-bank-ent-POT-hoofdrekening/.test(ids(r)) && bankB(r).length === 2, ids(r));
     r = C(BANK({ rek: [R.leesRekening(REKP('Hoofd', '0011'), rekTekst(IA, 'PRIVE')), R.leesRekening(REKP('Kind A Sparen', '0022'), rekTekst(IB, 'PRIVE')), R.leesRekening(POTP, rekTekst(IP, 'POT')), R.leesRekening(REKP('Weg', '0055'), rekTekst(IX, 'PRIVE'))] }));
@@ -835,7 +842,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('10 Bankregels: extern als rekening …0022 met link, organisatie als link, persoon niet bij naam, POT alleen geteld, ingetrokken geteld',
       /R1 · overboekingen naar \[\[20_Prive\/Financien\/Rekeningen\/Rekening - Kind A Sparen \(0022\)\|rekening …0022\]\]/.test(bR) && /R3 · betalingen met \[\[20_Prive\/Relaties\/ProefStroom\|ProefStroom\]\]/.test(bR)
       && /R2 · betalingen met een tegenpartij \(naam blijft in de bank\)/.test(bR) && !/jan de proef|medewerker|R4 /i.test(bR) && /Op de POT-rekening: 1 regel/.test(bR) && /Ingetrokken.*: 1/.test(bR)
-      && /gezet door de machinekamer/.test(bR) && /gezet via het gesprek met Socev/.test(bR) && /raakte 3 posten, laatst 10-2026/.test(bR) && !/rb|ra\b/.test(bR.replace(/[a-z]+rb|ra[a-z]/g, '')), bR);
+      && /gezet door de machinekamer/.test(bR) && /gezet via het gesprek met Socev/.test(bR) && /raakte laatst een post in 10-2026/.test(bR) && !/raakte 3/.test(bR) && !/rb|ra\b/.test(bR.replace(/[a-z]+rb|ra[a-z]/g, '')), bR);
     toets('10 blokken idempotent (zelfde invoer = zelfde tekst)', R.bankBlokTekst(PAG()[0], M(), orgVan) === bA && R.bankRegelsBlokTekst(M(), PAG(), orgVan) === bR);
     // naam → organisatie (alleen weergave): kern zonder rechtsvorm, voorvoegsel in één richting, alleen bij precies één kandidaat
     { const kn = (id, naam) => ({ id: 'org:' + id, soort: 'organisatie', rol: 'leverancier', naam: naam, vault_pagina: '20_Prive/Relaties/' + naam + '.md', aliassen: [] });

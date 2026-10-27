@@ -443,8 +443,11 @@ function checks(paginas, reg, compileerFouten, pot, bank) {
     if (/^databank: /.test(cf.fout)) bev('BB6', 'compileer-' + kortHash(cf.pad), 'pagina niet gecompileerd: ' + String(cf.fout).slice(10, 120), cf.pad + ': ' + cf.fout + '. Voorstel: pagina herstellen (Socev) of de machinekamer laat de databankfunctie nalopen.');
   });
   const pc = potChecks(anker, pot, bev, tel);   // wv981
-  const bc = bankChecks(bank, reg, bev, tel);   // wv1010
+  let bc;   // wv1010; diffreview ZOU 2: een onverwachte vorm breekt de andere plekken niet
+  try { bc = bankChecks(bank, reg, bev, tel); }
+  catch (e) { for (let i = b.length - 1; i >= 0; i--) if (BANK_BEVINDING_RE.test(b[i].bevinding_id)) b.splice(i, 1); tel.bank = 'niet gemeten'; bc = { gemeten: false, reden: 'vergelijking faalde: ' + String(e && e.message || e).replace(/[A-Z]{2}\d{2}[A-Z0-9]{8,}/g, '…').slice(0, 80), paden: {} }; }
   const uniek = {}; b.forEach(function (x) { uniek[x.bevinding_id] = x; });
+  if (bc.gemeten) tel.bank_verschil = Object.keys(uniek).filter(function (k) { return BANK_BEVINDING_RE.test(k); }).length;   // na het ontdubbelen (KAN 9)
   return { bevindingen: Object.keys(uniek).sort().map(function (k) { return uniek[k]; }), tel: tel, pot: pc, bank: bc };
 }
 
@@ -859,7 +862,7 @@ function vjSchrijf(tekst, acties) {
 // regelpatroon (kinderen, derden, medewerkers op de POT-rekening; de Supabase-backup is onversleuteld, Fable #2): alleen "…1234".
 // Bank leeg of niet te lezen = niet gemeten, nooit "opgelost" (Fable #4). Regels van de POT-rekening alleen als aantal (Fable #5).
 const BANK_SLEUTEL_RE = /^pod:bank-transacties\/rekening#([A-Z]{2}[0-9]{2}[A-Z0-9]{11,30})$/, BANK_REGELS_SLEUTEL = 'pod:bank-transacties/regels';
-const REK_RE = /^(20_Prive\/Financien\/Rekeningen|10_Zakelijk\/[^/]+)\/Rekening - [^/]+\.md$/, REK_NAAM_RE = /^Rekening - .+\.md$/;
+const REK_RE = /^(20_Prive\/Financien\/Rekeningen|10_Zakelijk\/POT_POH_GGZ)\/Rekening - [^/]+\.md$/, REK_NAAM_RE = /^Rekening - .+\.md$/;
 const REK_PRIVE_MAP = '20_Prive/Financien/Rekeningen', BANKREGELS_PAD = '20_Prive/Financien/Bankregels.md', FINANCIEN_MAP = '20_Prive/Financien';
 const BANK_VERW_RE = /pod:bank-transacties\/(transactie|regel)#(\d{1,9})\b/g;
 const BANK_BEVINDING_RE = /^BB\d-bank-/;
@@ -903,7 +906,9 @@ function bankMeting(io, nrs) {
   } catch (e) { return { fout: String(e && e.message || e).replace(/[A-Z]{2}\d{2}[A-Z0-9]{8,}/g, '…').replace(/\d{6,}/g, '#').slice(0, 120) }; }
 }
 function e4(iban) { return String(iban || '').slice(-4) || '?'; }
-function rekId(iban) { return 'bank-rek-' + e4(iban) + '-' + kortHash(iban).slice(0, 6); }   // stabiel: van het nummer, niet van het pad (Fable #8)
+// Stabiel: van de rekening, niet van het pad (Fable #8). Kent de bank haar, dan de hash van het opake bank-id (diffreview ZOU 3: een hash van
+// het rekeningnummer is met de laatste 4 cijfers terug te rekenen); alleen een pagina met een nummer dat de bank niet kent hasht het nummer.
+function rekId(iban, rk) { return 'bank-rek-' + e4(iban) + '-' + kortHash(rk && rk.rek ? 'rek:' + rk.rek : iban).slice(0, 6); }
 // Rekeningpagina → gegevens of fouten (zelfde vingerafdruk en parser als de entiteitpagina's)
 function leesRekening(rel, tekst) {
   const uit = { pad: rel, fouten: [], tekst: tekst };
@@ -927,7 +932,7 @@ function leesRekening(rel, tekst) {
   if (['PRIVE', 'POT'].indexOf(uit.entiteit_id) < 0) f.push('entiteit_id moet PRIVE of POT zijn');
   else if ((uit.entiteit_id === 'PRIVE') !== /^20_Prive\//.test(rel)) f.push('een privérekening hoort in de privémap, een POT-rekening bij de entiteit');
   if (uit.doel.length > 300) f.push('doel langer dan 300 tekens');
-  if (['actueel', 'vast', 'concept'].indexOf(v.status) < 0) f.push('status moet actueel, vast of concept zijn');   // actueel = vaultstandaard (SB2-linter)
+  if (['actueel', 'concept'].indexOf(v.status) < 0) f.push('status moet actueel of concept zijn');   // vaultstandaard (SB2-linter)
   return uit;
 }
 // Bankregels-pagina: de weergave; wat erboven of eronder met "- ?" staat is een voorstel
@@ -981,7 +986,8 @@ function orgOpNaam(reg) {
 }
 function orgLink(k) { return '[[' + String(k.vault_pagina).replace(/\.md$/, '') + '|' + String(k.naam).replace(/[\[\]|\n]/g, ' ') + ']]'; }
 function maandNl(d) { const m = /^(\d{4})-(\d{2})/.exec(String(d || '')); return m ? Number(m[2]) + '-' + m[1] : '?'; }
-const BANK_STATUS = { ACTIVE: 'actief', FROZEN: 'bevroren', CANCELLED: 'opgeheven', BLOCKED: 'geblokkeerd' };
+const BANK_STATUS = { ACTIVE: 'actief', FROZEN: 'bevroren', CANCELLED: 'opgeheven', BLOCKED: 'geblokkeerd', ontkoppeld: 'niet meer gekoppeld' };
+const BANK_PAGINA_STATUS = ['ACTIVE', 'FROZEN'];   // alleen deze rekeningen vragen een pagina (paginas.py doet hetzelfde)
 const BANK_HERKOMST = { systeem: 'ingedeeld door het systeem', machinekamer: 'gezet door de machinekamer', david: 'gezet via het gesprek met Socev' };   // Fable #10: 'david' is geen knop
 function bankEntiteit(eigenaar) { return eigenaar === 'POT' ? 'POT' : 'PRIVE'; }
 function bankBeperkt(rk) { return ['POT', 'kind', 'extern'].indexOf(rk && rk.eigenaar) >= 0; }   // daar alleen aantallen, geen namen
@@ -1054,7 +1060,7 @@ function bankRegelsBlokTekst(m, rekPaginas, orgVan) {
       g.subcategorie ? 'subcategorie "' + schoon(g.subcategorie, 40) + '"' : null, g.eigenaar ? 'eigenaar ' + schoon(g.eigenaar, 30) : null].filter(Boolean).join(', ');
     const x = raakt[g.id];
     r.push('- R' + g.id + ' · ' + wat + (g.richting === 'af' ? ' (uitgaand)' : g.richting === 'bij' ? ' (inkomend)' : '') + ' → ' + (ind || 'geen indeling') + ' · ' +
-      (BANK_HERKOMST[g.herkomst] || 'herkomst onbekend') + ' · sinds ' + datumNl(g.aangemaakt) + ' · ' + (x && x.n ? 'raakte ' + x.n + ' ' + (x.n === 1 ? 'post' : 'posten') + ', laatst ' + maandNl(x.laatst) : 'raakte nog geen post'));
+      (BANK_HERKOMST[g.herkomst] || 'herkomst onbekend') + ' · sinds ' + datumNl(g.aangemaakt) + ' · ' + (x && x.n ? 'raakte laatst een post in ' + maandNl(x.laatst) : 'raakte nog geen post'));   // geen aantal: dat zou elke nacht schrijven (diffreview KAN 6)
   });
   if (!zicht.length) r.push('- Nog geen regels buiten de POT-rekening.');
   r.push('- Op de POT-rekening: ' + pot.length + (pot.length === 1 ? ' regel' : ' regels') + ' (alleen geteld: posten en namen van de POT-rekening blijven in de bank)');
@@ -1079,7 +1085,7 @@ function bankChecks(bank, reg, bev, tel) {
     (perIban[p.iban] = perIban[p.iban] || []).push(p);
   });
   Object.keys(perIban).sort().forEach(function (iban) {
-    const ps = perIban[iban], id = rekId(iban), rk = opIban[iban];
+    const rk = opIban[iban], ps = perIban[iban], id = rekId(iban, rk);
     if (ps.length > 1) { metPad(ps.map(function (p) { return p.pad; }).join(' | '))('BB5', id + '-twee', 'twee pagina\'s voor rekening …' + e4(iban), ps.length + ' rekeningpagina\'s noemen hetzelfde rekeningnummer (…' + e4(iban) + '). Voorstel: samenvoegen tot één pagina.'); return; }
     const p = ps[0];
     if (!rk) { metPad(p.pad)('BB1', id + '-onbekend', 'rekeningpagina …' + e4(iban) + ' verwijst naar een rekening die de bank niet kent', 'de bank kent rekening …' + e4(iban) + ' niet (meer). Voorstel: nagaan of het nummer klopt; anders de pagina naar het archief.'); return; }
@@ -1092,8 +1098,8 @@ function bankChecks(bank, reg, bev, tel) {
   });
   m.rekeningen.forEach(function (r) {
     const iban = String(r.iban || '').toUpperCase();
-    if (!IBAN_VOL.test(iban) || r.status === 'CANCELLED' || perIban[iban]) return;
-    metPad(null)('BB2', rekId(iban) + '-geen-pagina', (r.bron === 'abn' ? 'ABN AMRO' : 'bunq') + '-rekening …' + e4(iban) + ' heeft geen pagina', 'de bank kent deze rekening (niet opgeheven), maar geen rekeningpagina noemt haar (of de pagina staat buiten de vaste plek). Voorstel: Socev maakt de pagina.');
+    if (!IBAN_VOL.test(iban) || BANK_PAGINA_STATUS.indexOf(r.status) < 0 || perIban[iban]) return;   // diffreview ZOU 1: ook 'ontkoppeld' niet
+    metPad(null)('BB2', rekId(iban, r) + '-geen-pagina', (r.bron === 'abn' ? 'ABN AMRO' : 'bunq') + '-rekening …' + e4(iban) + ' heeft geen pagina', 'de bank kent deze rekening (niet opgeheven), maar geen rekeningpagina noemt haar (of de pagina staat buiten de vaste plek). Voorstel: Socev maakt de pagina.');
   });
   // het rekeningnummer op de entiteitpagina van PRIVE en POT hoort bij een rekeningpagina van die entiteit (Fable #1)
   (reg && reg.knopen || []).forEach(function (k) {
