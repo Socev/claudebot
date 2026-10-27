@@ -816,3 +816,11 @@ test('wv1360: herkennen op een bekend IBAN alleen als de naam op de factuur bij 
   // naam op de factuur zonder IBAN-match: gewoon de naamweg zoals voorheen
   assert.equal(K2.herkenLeverancier({ leverancier_naam: 'Anja Proefmedewerker', ibans_betaal: [], kvks: [], btwnrs: [] }, null, ctx).via, 'naam');
 });
+
+test('wv1415 betaalspoor: teruggeboekt (betaald gezien of ingevoerd → te betalen) en toch_incasso (te betalen → incasso verwacht); niet vanuit andere sporen', () => {
+  assert.deepEqual(K.betaalspoorOvergang('betaald_gezien', 'teruggeboekt'), { ok: true, naar: 'te_betalen' });
+  assert.deepEqual(K.betaalspoorOvergang('ingevoerd', 'teruggeboekt'), { ok: true, naar: 'te_betalen' });
+  assert.deepEqual(K.betaalspoorOvergang('te_betalen', 'toch_incasso'), { ok: true, naar: 'incasso_verwacht' });
+  for (const [van, g] of [['incasso_verwacht', 'teruggeboekt'], ['betaald_vooraf', 'teruggeboekt'], ['ingevoerd', 'toch_incasso'], ['betaald_gezien', 'toch_incasso']])
+    assert.equal(K.betaalspoorOvergang(van, g).ok, false, van + ' → ' + g);
+});

@@ -1323,3 +1323,91 @@ test('wv1405 twee rekeningen bij één entiteit; ABN-afschrift met PREF koppelt 
   assert.equal(sig(Date.parse('2026-11-20T10:00:00Z')), 0, 'vóór de uitvoerdatum');
   assert.equal(sig(Date.parse('2026-12-31T10:00:00Z')), 1, 'ruim 5 werkdagen ná de uitvoerdatum');
 });
+
+// wv1415: een batchregel die de bank terugboekt (vorm gemeten 27-10 in de ABN-export, batch van 12-8-2026; alle waarden hier verzonnen)
+test('wv1415 terugboeking: afschrijving en terugboeking in één upload → die factuur weer te betalen (batch blijft), signaal met knoppen; opnieuw in een batch alleen met akkoord; idempotent', () => {
+  const t = opzet();
+  const b = bankOpzet(t);
+  const abn = sepaRek(t, 'tolgaarde').find((k) => k.rekening === '…' + b.tg.slice(-4));
+  const a1 = teBetalenFactuur(t), a2 = teBetalenFactuur(t);
+  const { r } = sepaDownload(t, abn.id, [a1, a2]);
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  const pmt = t.fdb.db.prepare('SELECT pmtinf_id, sum(centen) AS som FROM sepa_regel WHERE batch = ? GROUP BY pmtinf_id').get(r.j.batch);
+  const f1 = t.f('id = ?', [a1]);
+  const euro = (c) => (c / 100).toFixed(2).replace('.', ',');
+  const regels = [tabRij('0000000031', '20261105', '-' + euro(pmt.som), '/TRTP/SEPA Batch/PREF/' + pmt.pmtinf_id + '/NRTX/2'),
+    tabRij('0000000031', '20261105', euro(f1.incl), '/TRTP/SEPA Terugboeking/IBAN/' + f1.iban + '/BIC/TESTNL2A   /NAME/Proef/RTRN/MS02/REMI/' + f1.nummer + '/EREF/' + a1)];
+  assert.equal(B.leesAbnTab(regels[1] + '\n')[0].kenmerk, a1, 'EREF wordt het kenmerk');
+  t.zetKlaar('beurt-terug', 1, 'export.tab', regels.join('\n') + '\n');
+  const NA = Date.parse('2026-11-06T10:00:00Z');
+  const up = t.call('POST', 'upload', { beurt: 'beurt-terug', n: 1, soort: 'auto' }, { nu: NA });
+  assert.equal(up.status, 200, JSON.stringify(up.j));
+  const n1 = t.f('id = ?', [a1]);
+  assert.deepEqual([n1.betaalspoor, n1.betaald_gezien_op, n1.ingevoerd_op, n1.uitvoer_op], ['te_betalen', null, null, null]);
+  assert.equal(t.f('id = ?', [a2]).betaalspoor, 'betaald_gezien');
+  assert.deepEqual(t.fdb.db.prepare('SELECT methode FROM koppeling WHERE factuur = ? ORDER BY methode').all(a1).map((x) => x.methode), ['sepa_batch', 'sepa_terug']);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'betaalspoor_teruggeboekt' AND object_id = ?", [a1]), 1);
+  const sig = t.fdb.db.prepare("SELECT * FROM signaal WHERE soort = 'teruggeboekt' AND facturen LIKE ?").all('%' + a1 + '%');
+  assert.equal(sig.length, 1);
+  assert.deepEqual([JSON.parse(sig[0].facturen), sig[0].status, JSON.parse(sig[0].details).batch], [[a1], 'open', pmt.pmtinf_id]);
+  const onze = t.fdb.db.prepare("SELECT id FROM bank_transactie WHERE boekdatum = '2026-11-05'").all().map((x) => x.id);
+  assert.equal(onze.length, 2);
+  assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE soort IN ('geen_factuur','dubbel_betaald') AND EXISTS (SELECT 1 FROM json_each(transacties) j WHERE j.value IN (?, ?))", onze), 0,
+    'geen ander signaal over de batch of de terugboeking');
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_regel WHERE batch = ?', [r.j.batch]), 2, 'de batch blijft staan');
+  // in de app: het signaal met zijn twee knoppen; op de betaallijst weer te betalen, niet geblokkeerd door de oude koppeling, wel "al eerder in een batch"
+  const bank = t.call('GET', 'bank', null, { nu: NA }).j;
+  const s = (bank.signalen || []).find((x) => x.id === sig[0].id);
+  assert.ok(s, JSON.stringify(Object.keys(bank)));
+  assert.deepEqual(s.knoppen.map((k) => k.knop), ['opnieuw_betalen', 'leverancier_incasseert']);
+  const rij = t.call('GET', 'betalen', null, { nu: NA }).j.te_betalen.find((x) => x.id === a1);
+  assert.equal(rij.batch_reden, null);
+  assert.deepEqual(rij.waarschuwingen.map((w) => w.code), ['eerder_in_batch']);
+  // nog een keer de bankcontrole: niets nieuws
+  const tel = F.bankcontroleToepassen(t.fdb, NA + 3600000);
+  assert.deepEqual([tel.koppelingen, tel.signalen, tel.teruggeboekt || 0, tel.betaald_gezien], [0, 0, 0, 0]);
+  // opnieuw in een batch (met akkoord), daarna pas de knop: de nieuwe batch blijft staan
+  const tweede = sepaDownload(t, abn.id, [a1], [a1 + ':eerder_in_batch'], { nu: NA });
+  assert.equal(tweede.r.status, 200, JSON.stringify(tweede.r.j));
+  assert.equal(t.f('id = ?', [a1]).betaalspoor, 'ingevoerd');
+  assert.equal(t.call('POST', 'signaal', { id: sig[0].id, knop: 'leverancier_incasseert' }, { nu: NA }).status, 409, 'staat alweer in een batch');
+  const k = t.call('POST', 'signaal', { id: sig[0].id, knop: 'opnieuw_betalen' }, { nu: NA });
+  assert.equal(k.status, 200, JSON.stringify(k.j));
+  assert.equal(t.f('id = ?', [a1]).betaalspoor, 'ingevoerd', 'knop draait de nieuwe batch niet terug');
+  assert.equal(t.fdb.db.prepare('SELECT status FROM signaal WHERE id = ?').get(sig[0].id).status, 'afgehandeld');
+});
+
+test('wv1415 terugboeking: "Leverancier incasseert" → incasso verwacht en leverancier op incasso; ander bedrag → alleen signaal, de knop zet hem dan terug', () => {
+  const t = opzet();
+  const b = bankOpzet(t);
+  const abn = sepaRek(t, 'tolgaarde').find((k) => k.rekening === '…' + b.tg.slice(-4));
+  const euro = (c) => (c / 100).toFixed(2).replace('.', ',');
+  const NA = Date.parse('2026-11-06T10:00:00Z');
+  // blok van één betaling: ABN boekt hem los met de EndToEndId; de terugboeking volgt een dag later
+  const e = teBetalenFactuur(t);
+  assert.equal(sepaDownload(t, abn.id, [e]).r.status, 200);
+  const fe = t.f('id = ?', [e]);
+  t.zetKlaar('beurt-terug-e', 1, 'export.tab', [tabRij('0000000031', '20261105', '-' + euro(fe.incl), '/TRTP/SEPA OVERBOEKING/IBAN/' + fe.iban + '/BIC/TESTNL2A/NAME/Proef/REMI/' + fe.nummer + '/EREF/' + e),
+    tabRij('0000000031', '20261106', euro(fe.incl), '/TRTP/SEPA Terugboeking/IBAN/' + fe.iban + '/BIC/TESTNL2A/NAME/Proef/RTRN/MS02/REMI/' + fe.nummer + '/EREF/' + e)].join('\n') + '\n');
+  const upE = t.call('POST', 'upload', { beurt: 'beurt-terug-e', n: 1, soort: 'auto' }, { nu: NA }); assert.equal(upE.status, 200, JSON.stringify(upE.j));
+  assert.equal(t.f('id = ?', [e]).betaalspoor, 'te_betalen');
+  const s = t.fdb.db.prepare("SELECT * FROM signaal WHERE soort = 'teruggeboekt' AND facturen LIKE ?").get('%' + e + '%');
+  const k = t.call('POST', 'signaal', { id: s.id, knop: 'leverancier_incasseert' }, { nu: NA });
+  assert.equal(k.status, 200, JSON.stringify(k.j));
+  assert.equal(t.f('id = ?', [e]).betaalspoor, 'incasso_verwacht');
+  assert.equal(t.fdb.db.prepare('SELECT standaard_betaalwijze AS w FROM leverancier WHERE id = ?').get(fe.leverancier).w, 'incasso');
+  // ander bedrag terug (kosten ingehouden): factuur blijft betaald gezien tot David kiest; de knop zet hem dan op te betalen
+  const g = teBetalenFactuur(t);
+  assert.equal(sepaDownload(t, abn.id, [g]).r.status, 200);
+  const fg = t.f('id = ?', [g]);
+  t.zetKlaar('beurt-terug-g', 1, 'export.tab', [tabRij('0000000031', '20261105', '-' + euro(fg.incl), '/TRTP/SEPA OVERBOEKING/IBAN/' + fg.iban + '/BIC/TESTNL2A/NAME/Proef/REMI/' + fg.nummer + '/EREF/' + g),
+    tabRij('0000000031', '20261107', euro(fg.incl - 500), '/TRTP/SEPA Terugboeking/IBAN/' + fg.iban + '/BIC/TESTNL2A/NAME/Proef/RTRN/AC04/REMI/' + fg.nummer + '/EREF/' + g)].join('\n') + '\n');
+  assert.equal(t.call('POST', 'upload', { beurt: 'beurt-terug-g', n: 1, soort: 'auto' }, { nu: Date.parse('2026-11-08T10:00:00Z') }).status, 200);
+  assert.equal(t.f('id = ?', [g]).betaalspoor, 'betaald_gezien');
+  assert.equal(t.n("SELECT count(*) AS n FROM koppeling WHERE factuur = ? AND methode = 'sepa_terug'", [g]), 0);
+  const sg = t.fdb.db.prepare("SELECT * FROM signaal WHERE soort = 'teruggeboekt' AND facturen LIKE ?").get('%' + g + '%');
+  assert.equal(JSON.parse(sg.details).automatisch, false);
+  assert.equal(t.call('POST', 'signaal', { id: sg.id, knop: 'opnieuw_betalen' }, { nu: Date.parse('2026-11-08T10:00:00Z') }).status, 200);
+  const ng = t.f('id = ?', [g]);
+  assert.deepEqual([ng.betaalspoor, ng.betaald_gezien_op], ['te_betalen', null]);
+});

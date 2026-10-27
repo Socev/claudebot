@@ -355,6 +355,9 @@ function zaai(fdb, o) {
     if (du1 && du2) signaal(B.maakSignaal('mogelijk_dubbel_geupload', { entiteit: 'groenhouten', leverancier: lev.D.id, transacties: [du1.id, du2.id], bedrag_centen: 7600, details: { te_verwijderen: du2.id } }), tijd(0, 6));
     if (incasso) signaal(B.maakSignaal('incasso_niet_gezien', { entiteit: incasso.entiteit, leverancier: incasso.l.id, facturen: [incasso.id], bedrag_centen: incasso.incl }), tijd(-3, 6),
       { afhandeling: 'afwachten', les: 'Incasso van ' + incasso.l.naam + ' komt later; over twee weken opnieuw kijken.', sluimer_tot: dag(11), wanneer: tijd(-3, 9) });
+    // wv1415: een teruggeboekte batchbetaling (verzonnen; de factuur staat al weer op te betalen)
+    if (teBetalen) signaal(B.maakSignaal('teruggeboekt', { entiteit: teBetalen.entiteit, leverancier: teBetalen.l.id, facturen: [teBetalen.id], bedrag_centen: teBetalen.incl,
+      details: { nummer: teBetalen.nummer || null, automatisch: true } }), tijd(0, 6));
     if (teBetalen) signaal(B.maakSignaal('te_betalen_niet_betaald', { entiteit: teBetalen.entiteit, leverancier: teBetalen.l.id, facturen: [teBetalen.id], bedrag_centen: teBetalen.incl }), tijd(0, 6));
     if (ingevoerd) signaal(B.maakSignaal('ingevoerd_niet_gezien', { entiteit: ingevoerd.entiteit, leverancier: ingevoerd.l.id, facturen: [ingevoerd.id], bedrag_centen: ingevoerd.incl }), tijd(-10, 6),
       { afhandeling: 'opnieuw_kijken', les: 'Betaling aan ' + ingevoerd.l.naam + ' nog niet op de bank; over drie dagen opnieuw kijken.', sluimer_tot: dag(-7), wanneer: tijd(-10, 9) });

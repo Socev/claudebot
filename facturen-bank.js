@@ -919,6 +919,21 @@ const SIGNALEN = {
         les: (s) => 'Twee gelijke betalingen aan ' + naamVan(s) + ' op één dag waren echt twee betalingen.' },
     },
   },
+  // wv1415: de bank boekte een betaling uit een eigen SEPA-batch terug (ontvanger weigerde, rekening opgeheven, naam klopt niet). De factuur
+  // staat dan al weer op te betalen; David kiest of hij opnieuw betaalt of dat de leverancier zelf incasseert (gemeten 12-8-2026: een
+  // leverancier met incasso stuurde de batchbetaling dezelfde dag terug).
+  teruggeboekt: {
+    titel: 'Betaling teruggeboekt',
+    knoppen: {
+      opnieuw_betalen: { label: 'Opnieuw betalen (betaallijst)', vereist: [],
+        gevolgen: (s) => [{ actie: 'betaalspoor', factuur: s.facturen[0], gebeurtenis: 'teruggeboekt' }, { actie: 'betaallijst', factuur: s.facturen[0] }],
+        les: (s) => 'De bank boekte een betaling aan ' + naamVan(s) + ' terug; weer op de betaallijst (rekeningnummer eerst nagaan).' },
+      leverancier_incasseert: { label: 'Leverancier incasseert', vereist: [],
+        gevolgen: (s) => [{ actie: 'betaalspoor', factuur: s.facturen[0], gebeurtenis: 'teruggeboekt' }, { actie: 'betaalspoor', factuur: s.facturen[0], gebeurtenis: 'toch_incasso' }]
+          .concat(s.leverancier ? [{ actie: 'leverancier_bijwerken', leverancier: s.leverancier, veld: 'standaard_betaalwijze', waarde: 'incasso' }] : []),
+        les: (s) => naamVan(s) + ' stuurde een betaling terug omdat hij zelf incasseert: voortaan op incasso, niet meer zelf betalen.' },
+    },
+  },
 };
 const SIGNAAL_SOORTEN = Object.keys(SIGNALEN);
 
@@ -1036,8 +1051,20 @@ function bankcontrole(inv) {
   // voldaan: de gekoppelde betalingen dekken het bedrag; of een mens koppelde; of de koppeling was een incasso binnen de tolerantie of
   // een valutabetaling (euro tegen vreemde valuta is niet op te tellen); of de factuur zit in een verzamelbetaling (één post voor meer
   // facturen, ook factuur min creditnota: de post dekt dan de groep, niet de factuur los) (diffreview wv798 #2)
+  // wv1415: een terugboeking (methode sepa_terug) heft één betaling van die factuur op (bij voorkeur een SEPA-koppeling): die tellen beide niet.
+  const TERUG = 'sepa_terug';
+  const netto = (fid) => {
+    const ks = betaald.get(fid) || [];
+    let n = ks.filter((k) => k.methode === TERUG).length;
+    if (!n) return ks;
+    const af = ks.filter((k) => k.methode !== TERUG && txMap.has(k.tx) && txMap.get(k.tx).bedrag_centen < 0);
+    const weg = new Set();
+    for (const k of af.filter((x) => /^sepa_/.test(String(x.methode || ''))).concat(af)) { if (!n) break; if (!weg.has(k)) { weg.add(k); n--; } }
+    return ks.filter((k) => k.methode !== TERUG && !weg.has(k));
+  };
+  const heeftTerug = (fid) => (betaald.get(fid) || []).some((k) => k.methode === TERUG);
   const voldaan = (f) => {
-    const ks = betaald.get(f.id) || [];
+    const ks = netto(f.id);
     if (!ks.length) return false;
     // een mens-koppeling telt alleen als volledig als hij dat zegt (termijnbetalingen: de eerste termijn dekt de factuur niet; natoets #3)
     if (ks.some((k) => k.volledig === true || k.methode === 'incasso' || k.methode === 'valuta' || (txFacturen.get(k.tx) || []).length > 1)) return true;
@@ -1108,9 +1135,62 @@ function bankcontrole(inv) {
       uit.koppelingen.push({ transactie: tx.id, factuur: fid, bron: 'auto', methode: k.methode, zekerheid: k.zekerheid, alleen_eigenaar: eigenaar });
       koppel(tx.id, fid, k.methode, 'auto');
       const f = fMap.get(fid);
+      if (f && heeftTerug(fid) && !voldaan(f)) continue;   // wv1415: de bank boekte hem al terug; deze betaling dekt hem niet
       if (f && f.betaalspoor && f.betaalspoor !== 'betaald_gezien') uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'bankmatch', van: f.betaalspoor, naar: 'betaald_gezien' });
     }
   }
+  /*
+   * Ronde 0b (wv1415): terugboekingen van eigen batchregels. Een bijschrijving op de rekening van een batch die de factuur-id noemt (ABN:
+   * "/TRTP/SEPA Terugboeking/…/RTRN/<reden>/REMI/…/EREF/<EndToEndId>", EREF → kenmerk; de afschrift-CSV zet hem los achter de omschrijving;
+   * gemeten 27-10 op een FV2-batch van 12-8-2026). Bedrag precies dat van de regel en (als de bank hem noemt) de rekening van de ontvanger:
+   * koppeling sepa_terug (heft één betaling op), factuur weer op te betalen en een signaal. Klopt het bedrag of de rekening niet, dan alleen
+   * het signaal (David beslist). Nooit vóór de uitvoerdatum − 3 dagen.
+   */
+  const terugKand = (tx) => {
+    if (richtingVan(tx) !== 'bij' || !sepa.length) return null;
+    const eigen = ibanNorm(tx.eigen_iban), ken = String(tx.kenmerk || '').trim().toLowerCase(), tegen = ibanNorm(tx.tegenpartij_iban);
+    let best = null;
+    for (const p of sepa) {
+      if (ibanNorm(p.eigen_iban) !== eigen || (isIsoDatum(p.datum) && dagenTussen(p.datum, tx.boekdatum) < -3)) continue;
+      for (const x of p.regels) {
+        if (!(ken === x.factuur || noemtBatchId(tx.omschrijving, x.factuur))) continue;
+        const f = fMap.get(x.factuur);
+        if (!f || f.entiteit !== tx.entiteit) continue;
+        if (best && !(isIsoDatum(p.datum) && (!isIsoDatum(best.datum) || p.datum > best.datum))) continue;   // de laatste batch met deze factuur
+        best = { factuur: x.factuur, pmtinf_id: p.pmtinf_id, datum: p.datum, centen: x.centen,
+          exact: tx.bedrag_centen === x.centen && (!tegen || !x.iban || tegen === ibanNorm(x.iban)) };
+      }
+    }
+    return best;
+  };
+  const terugSig = new Map();   // factuur → sleutels van zijn terugboekingssignalen (factuursignalen wachten zolang er één open staat)
+  for (const tx of txs) {
+    if (richtingVan(tx) !== 'bij') continue;
+    const k = terugKand(tx);
+    if (!k) continue;
+    const al = txFacturen.get(tx.id) || [];
+    const eigen = (betaald.get(k.factuur) || []).some((e) => e.tx === tx.id && e.methode === TERUG);
+    if (al.length && !eigen) continue;   // met de hand aan iets anders gekoppeld: daar blijft hij
+    const f = fMap.get(k.factuur), l = levVan(f.leverancier, ctx);
+    if (!eigen && k.exact) {
+      const eigenaar = eigenaarVan(tx, [k.factuur]);
+      uit.koppelingen.push({ transactie: tx.id, factuur: k.factuur, bron: 'auto', methode: TERUG, zekerheid: 1, alleen_eigenaar: eigenaar });
+      koppel(tx.id, k.factuur, TERUG, 'auto');
+      // in dezelfde ronde afgeschreven én teruggeboekt: de bankmatch van ronde 0 vervalt (de factuur blijft dan bij zijn oude spoor vandaan)
+      const i = uit.betaalspoor.findIndex((b) => b.factuur === k.factuur && b.gebeurtenis === 'bankmatch');
+      if (i >= 0) uit.betaalspoor.splice(i, 1);
+      if (!voldaan(f) && ['betaald_gezien', 'ingevoerd'].includes(f.betaalspoor)) uit.betaalspoor.push({ factuur: k.factuur, gebeurtenis: 'teruggeboekt', van: f.betaalspoor, naar: 'te_betalen' });
+    }
+    if (!k.exact) sepaAf.add(tx.id);   // geen voorstel of ander signaal naast dit signaal
+    const s = maakSignaal('teruggeboekt', { transacties: [tx.id], facturen: [k.factuur], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: l ? l.naam : tx.tegenpartij_naam,
+      leverancier: f.leverancier || null, tegenpartij_iban: tx.tegenpartij_iban, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar || isPrive(f),
+      details: { nummer: f.nummer, batch: k.pmtinf_id, uitvoerdatum: k.datum, verwacht_centen: k.centen, automatisch: k.exact } });
+    signalen.push(s);
+    terugSig.set(k.factuur, (terugSig.get(k.factuur) || []).concat([s.sleutel]));
+  }
+  const bestaandOpen = new Set((inv.bestaandeSignalen || []).filter((s) => s.status === 'open').map((s) => s.sleutel));
+  const bestaandSleutel = new Set((inv.bestaandeSignalen || []).map((s) => s.sleutel));
+
   const voorgesteld = new Set();
   const wensen = [];
 
@@ -1129,6 +1209,7 @@ function bankcontrole(inv) {
       uit.koppelingen.push({ transactie: tx.id, factuur: fid, bron: 'auto', methode: k.methode, zekerheid: k.zekerheid, alleen_eigenaar: eigenaar });
       koppel(tx.id, fid, k.methode, 'auto');
       const f = fMap.get(fid);
+      if (f && heeftTerug(fid) && !voldaan(f)) continue;   // wv1415: de bank boekte hem al terug; deze betaling dekt hem niet
       if (f && f.betaalspoor && f.betaalspoor !== 'betaald_gezien') uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'bankmatch', van: f.betaalspoor, naar: 'betaald_gezien' });
     }
   };
@@ -1234,14 +1315,19 @@ function bankcontrole(inv) {
   // signalen per factuur — alleen voor entiteiten waarvan de app een bank ziet (rekening met controle 1); Privé-regels worden niet
   // opgeslagen, dus daar zou elk signaal vals zijn (diffreview wv798 #12)
   const zichtbaar = new Set((ctx.rekeningen || []).filter((r) => controleVan(r) === 1).map((r) => r.entiteit));
-  const gekoppeld = (f) => (betaald.get(f.id) || []).length > 0 || voorgesteld.has(f.id);
+  const gekoppeld = (f) => netto(f.id).length > 0 || voorgesteld.has(f.id);
   for (const f of facturen) {
     if (NIET_OPEN.includes(f.status) || gekoppeld(f) || f.entiteit === 'prive' || !zichtbaar.has(f.entiteit)) continue;
     // een creditnota vraagt geen betaling: nooit "te betalen, niet betaald" of "incasso niet gezien" (wv855, overdracht F3 #1)
     if (f.soort === 'creditnota' || (Number.isSafeInteger(Number(f.incl)) && Number(f.incl) < 0)) continue;
+    // wv1415: na een terugboeking spreekt eerst dat signaal; is het afgehandeld, dan het gewone factuursignaal met een eigen sleutel (een
+    // eerder afgehandeld "te betalen, niet betaald" van vóór de batch houdt het anders tegen; grondwet 10 telt per gebeurtenis)
+    const terug = (betaald.get(f.id) || []).filter((k) => k.methode === TERUG).map((k) => txMap.get(k.tx)).filter(Boolean)
+      .sort((a, b) => (a.boekdatum < b.boekdatum ? -1 : a.boekdatum > b.boekdatum ? 1 : String(a.id).localeCompare(String(b.id)))).map((t) => t.id);
+    if ((terugSig.get(f.id) || []).some((sl) => bestaandOpen.has(sl) || !bestaandSleutel.has(sl))) continue;
     const l = levVan(f.leverancier, ctx);
     const basis = { facturen: [f.id], entiteit: f.entiteit, naam: l ? l.naam : null, leverancier: f.leverancier || null, bedrag_centen: teBetalen(f),
-      datum: f.vervaldatum || null, alleen_eigenaar: isPrive(f) };
+      datum: f.vervaldatum || null, alleen_eigenaar: isPrive(f), sleutel_extra: terug.length ? 'na_terug=' + terug[terug.length - 1] : undefined };
     const verval = f.vervaldatum && isIsoDatum(f.vervaldatum) ? f.vervaldatum : (f.factuurdatum && isIsoDatum(f.factuurdatum) ? plusDagen(f.factuurdatum, 14) : null);
     if (f.betaalspoor === 'incasso_verwacht' && verval && dagenTussen(verval, vandaag) > 14) signalen.push(maakSignaal('incasso_niet_gezien', basis));
     else if (f.betaalspoor === 'te_betalen' && verval && vandaag > verval) signalen.push(maakSignaal('te_betalen_niet_betaald', basis));

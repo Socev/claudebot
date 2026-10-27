@@ -714,6 +714,10 @@ function ingevoerd(fdb, r, d, nu, ongedaan) {
  * elfproef niet haalt. Redenen noemen nooit een bedrag of naam.
  */
 const SEPA_OPNIEUW_DAGEN = 30;
+// wv1415: een factuur heeft "netto" een bankbetaling als er meer betalingen dan terugboekingen (methode sepa_terug) aan gekoppeld zijn; zo
+// facturen-bank.js (netto): elke terugboeking heft één betaling op.
+const NETTO_GEKOPPELD = "(SELECT count(*) FROM koppeling k WHERE k.factuur = ?1 AND coalesce(k.methode, '') <> 'sepa_terug') > " +
+  "(SELECT count(*) FROM koppeling k WHERE k.factuur = ?1 AND k.methode = 'sepa_terug')";
 // Een regel "loopt" nog in zijn batch: de factuur staat op ingevoerd met de uitvoerdatum van deze regel, en dit is zijn laatste batch
 // (diffreview wv1405 MOET 1: na Ongedaan of een nieuwe batch is het oude bestand niet meer opnieuw te geven).
 const SEPA_LOPEND = "f.betaalspoor = 'ingevoerd' AND f.uitvoer_op = r.uitvoerdatum AND r.id = (SELECT max(r2.id) FROM sepa_regel r2 WHERE r2.factuur = r.factuur)";
@@ -759,7 +763,7 @@ function sepaBeoordeel(fdb, f, lev, ctx, vandaag, rek) {
   if (!iban || !K.ibanMod97(iban)) return nee('rekeningnummer ontbreekt of klopt niet');
   if (!S.isEer(iban)) return nee('rekening buiten de EER: met de hand (adres en BIC nodig)');
   if (K.magBevestigen(Object.assign({}, f, { status: 'te_beoordelen' }), { leverancier: lev, ctx }).redenen.some((x) => /IBAN/.test(x))) return nee('rekeningnummer nog niet nagebeld');
-  if (fdb.db.prepare('SELECT 1 FROM koppeling WHERE factuur = ? LIMIT 1').get(f.id)) return nee('er is al een bankbetaling aan gekoppeld');
+  if (fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j) return nee('er is al een bankbetaling aan gekoppeld');
   if (fdb.db.prepare("SELECT 1 FROM voorstel v WHERE v.status = 'open' AND EXISTS (SELECT 1 FROM json_each(v.facturen) j WHERE j.value = ?) LIMIT 1").get(f.id))
     return nee('er staat een koppelvoorstel open (Bankcontrole)');
   if (uitvoer.te_ver) return nee('uitvoerdatum ligt meer dan 364 dagen vooruit; kies een datum');
@@ -914,10 +918,10 @@ function sepaBestand(fdb, r, d, nu, o) {
 // Voor de bankcontrole: per PmtInf de eigen rekening, uitvoerdatum, totaal en regels (batches van de laatste 400 dagen).
 function sepaVoorControle(fdb, van) {
   const per = new Map();
-  for (const x of fdb.db.prepare('SELECT r.pmtinf_id, r.factuur, r.centen, r.uitvoerdatum, b.dbtr_iban, b.entiteit FROM sepa_regel r JOIN sepa_batch b ON b.id = r.batch ' +
+  for (const x of fdb.db.prepare('SELECT r.pmtinf_id, r.factuur, r.centen, r.iban, r.uitvoerdatum, b.dbtr_iban, b.entiteit FROM sepa_regel r JOIN sepa_batch b ON b.id = r.batch ' +
     'WHERE b.wanneer >= ? ORDER BY r.batch, r.positie').all(van)) {
     const p = per.get(x.pmtinf_id) || { pmtinf_id: x.pmtinf_id, eigen_iban: x.dbtr_iban, entiteit: x.entiteit, datum: x.uitvoerdatum, centen: 0, regels: [] };
-    p.centen += x.centen; p.regels.push({ factuur: x.factuur, centen: x.centen }); per.set(x.pmtinf_id, p);
+    p.centen += x.centen; p.regels.push({ factuur: x.factuur, centen: x.centen, iban: x.iban }); per.set(x.pmtinf_id, p);
   }
   return [...per.values()];
 }
@@ -956,6 +960,12 @@ function signaalAfhandelen(fdb, r, s, knop, opties, nu) {
   uit.les = af.les; uit.sluimer_tot = af.sluimer_tot || null;
   return uit;
 }
+// wv1415: teruggeboekt → weer te betalen; wie/wanneer ingevoerd, betaald gezien en de uitvoerdatum van de batch gaan weg (zoals Ongedaan; de
+// batch zelf blijft staan, dus "al eerder in een batch" blijft een uitdrukkelijke keuze). → aantal gewijzigde rijen (0 of 1).
+function terugZet(fdb, f, wanneer) {
+  return fdb.db.prepare("UPDATE factuur SET betaalspoor = 'te_betalen', betaald_gezien_op = NULL, ingevoerd_door = NULL, ingevoerd_op = NULL, uitvoer_op = NULL, bijgewerkt_op = ?, " +
+    "versie = versie + 1 WHERE id = ? AND betaalspoor = ? AND betaalspoor IN ('betaald_gezien','ingevoerd')").run(wanneer, f.id, f.betaalspoor).changes;
+}
 function voerGevolgUit(fdb, r, s, g, nu, uit) {
   const wanneer = nuIso(nu);
   switch (g.actie) {
@@ -989,9 +999,14 @@ function voerGevolgUit(fdb, r, s, g, nu, uit) {
       const f = D.factuurVoorKern(fdb, g.factuur);
       if (!f || !magFactuur(r, f)) weiger(404, 'factuur niet gevonden');
       if (f.betaalspoor === 'betaald_gezien' && g.gebeurtenis === 'bankmatch') return { actie: g.actie, factuur: f.id, betaalspoor: f.betaalspoor };
+      // wv1415: de bankcontrole zette een teruggeboekte betaling meestal al op te betalen; de knop zet alleen nog een betaald gezien factuur
+      // terug (bedrag of rekening klopte niet: niet automatisch). Staat hij alweer ingevoerd (nieuwe batch), dan blijft dat zo.
+      if (g.gebeurtenis === 'teruggeboekt' && f.betaalspoor !== 'betaald_gezien') return { actie: g.actie, factuur: f.id, betaalspoor: f.betaalspoor };
+      if (g.gebeurtenis === 'toch_incasso' && f.betaalspoor === 'ingevoerd') weiger(409, 'deze betaling staat alweer ingevoerd (of in een nieuwe batch); zet die eerst terug');
       const ov = K.betaalspoorOvergang(f.betaalspoor, g.gebeurtenis);
       if (!ov.ok) weiger(409, 'betaalspoor: ' + ov.reden);
-      fdb.db.prepare('UPDATE factuur SET betaalspoor = ?, betaald_gezien_op = CASE WHEN ? = \'betaald_gezien\' THEN ? ELSE betaald_gezien_op END, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND betaalspoor = ?')
+      if (g.gebeurtenis === 'teruggeboekt') terugZet(fdb, f, wanneer);
+      else fdb.db.prepare('UPDATE factuur SET betaalspoor = ?, betaald_gezien_op = CASE WHEN ? = \'betaald_gezien\' THEN ? ELSE betaald_gezien_op END, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND betaalspoor = ?')
         .run(ov.naar, ov.naar, dagAmsterdam(nu), wanneer, f.id, f.betaalspoor);
       D.audit(fdb, { wie: r.wie, wat: 'betaalspoor_' + g.gebeurtenis, object_soort: 'factuur', object_id: f.id, entiteit: f.entiteit, voor: { betaalspoor: f.betaalspoor }, na: { betaalspoor: ov.naar }, wanneer });
       return { actie: g.actie, factuur: f.id, betaalspoor: ov.naar };
@@ -1279,6 +1294,12 @@ function bankcontroleToepassen(fdb, nu) {
   for (const u of uit.uitzonderingen) tel.uitzonderingen += fdb.db.prepare('UPDATE bank_transactie SET categorie = ?, uitzondering = ? WHERE id = ? AND categorie IS NULL')
     .run(u.categorie, u.uitzondering || null, u.transactie).changes;
   for (const b of uit.betaalspoor) {
+    if (b.gebeurtenis === 'teruggeboekt') {
+      const n = terugZet(fdb, { id: b.factuur, betaalspoor: b.van }, wanneer);
+      if (n) D.audit(fdb, { wie: 'bankcontrole', wat: 'betaalspoor_teruggeboekt', object_soort: 'factuur', object_id: b.factuur, voor: { betaalspoor: b.van }, na: { betaalspoor: 'te_betalen' }, wanneer });
+      tel.teruggeboekt = (tel.teruggeboekt || 0) + n;
+      continue;
+    }
     const tx = uit.koppelingen.filter((k) => k.factuur === b.factuur).map((k) => txMap.get(k.transactie)).filter(Boolean)[0];
     tel.betaald_gezien += fdb.db.prepare('UPDATE factuur SET betaalspoor = ?, betaald_gezien_op = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND betaalspoor = ?')
       .run(b.naar, tx ? tx.boekdatum : vandaag, wanneer, b.factuur, b.van).changes;
@@ -1302,7 +1323,7 @@ function voorstellenHerbeoordelen(fdb, uit, txMap, facturen, wanneer) {
   const fMap = new Map(facturen.map((f) => [f.id, f]));
   const elders = new Set();
   for (const v of uit.voorstellen) for (const fid of v.facturen) elders.add(fid);
-  const gekoppeld = fdb.db.prepare('SELECT 1 FROM koppeling WHERE factuur = ? LIMIT 1');
+  const gekoppeld = { get: (id) => fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(id).j === 1 };   // wv1415: netto
   let n = 0;
   for (const v of fdb.db.prepare("SELECT v.*, t.entiteit FROM voorstel v LEFT JOIN bank_transactie t ON t.id = v.transactie WHERE v.status = 'open'").all()) {
     if (nu.has(v.sleutel)) continue;

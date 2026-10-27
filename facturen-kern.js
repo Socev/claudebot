@@ -1037,6 +1037,11 @@ const BETAALSPOOR_OVERGANGEN = [
   ['incasso_verwacht', 'bankmatch', 'betaald_gezien'],
   ['incasso_verwacht', 'toch_zelf_betalen', 'te_betalen'],
   ['betaald_vooraf', 'bankmatch', 'betaald_gezien'],
+  // wv1415: de bank boekte een betaling uit een SEPA-batch terug (bijschrijving met de factuur-id als kenmerk): weer te betalen. Uit
+  // ingevoerd als de afschrijving zelf nog niet gezien is. "Leverancier incasseert" (knop bij dat signaal): wachten op de incasso.
+  ['betaald_gezien', 'teruggeboekt', 'te_betalen'],
+  ['ingevoerd', 'teruggeboekt', 'te_betalen'],
+  ['te_betalen', 'toch_incasso', 'incasso_verwacht'],
 ];
 // Een creditnota vraagt nooit een betaalhandeling (wv855, overdracht F3 #1; Fable F4 #7): ongeacht de betaalwijze `betaald_vooraf`
 // ("niets te betalen"); een terugboeking of verrekening in de bank zet hem via bankmatch op betaald_gezien. Een eigen spoor `geen` zou een

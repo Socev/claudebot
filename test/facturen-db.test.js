@@ -174,7 +174,7 @@ test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/trio
   const dir = map('m5');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9]);
+  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10]);
   assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
@@ -232,7 +232,7 @@ test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt vol
   assert.deepEqual(tabelSql(db), voor);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   db.close();
-  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
 });
 
 test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {
@@ -1001,4 +1001,40 @@ test('migratie 7 (wv1323): schema 4 → 7 maakt feit + leverancier_iban.bron/fei
   assert.deepEqual(c.toegepast, [7]); assert.equal(c.db.prepare('SELECT count(*) AS n FROM feit').get().n, 2);
   assert.deepEqual(sql(c.db), sql(b.db));
   D.sluit(c); D.sluit(b);
+});
+
+test("migratie 10 (wv1415): signaal krijgt soort 'teruggeboekt'; bestaande signalen blijven, onzin blijft geweigerd; schema 4 → 10 = nieuw aangemaakt; afwijkend → terugrollen", () => {
+  const sigSql = (db) => db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'signaal'").get().sql;
+  const dir = map('m10');
+  const db4 = dbOpSchema4(dir);
+  db4.prepare("INSERT INTO signaal (id, sleutel, soort, titel, aangemaakt_op) VALUES ('dddddddddddd0010', 's-oud', 'geen_factuur', 'oud (proef)', ?)").run(iso(NU));
+  db4.close();
+  const f = D.open(dir);
+  assert.equal(f.schema, D.SCHEMA_VERSIE);
+  assert.ok(sigSql(f.db).includes("'teruggeboekt'") && sigSql(f.db).includes("'mogelijk_dubbel_geupload'"));
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.equal(f.db.prepare("SELECT soort FROM signaal WHERE sleutel = 's-oud'").get().soort, 'geen_factuur');
+  const zet = (id, soort) => f.db.prepare('INSERT INTO signaal (id, sleutel, soort, titel, aangemaakt_op) VALUES (?, ?, ?, ?, ?)').run(id, 's-' + id, soort, 'proef', iso(NU));
+  zet('dddddddddddd0011', 'teruggeboekt');
+  gooit(() => zet('dddddddddddd0012', 'onzin'), /CHECK/);
+  const gemigreerd = sigSql(f.db);
+  D.sluit(f);
+  const nieuw = D.open(map('m10-nieuw'));
+  assert.equal(sigSql(nieuw.db), gemigreerd, 'gemigreerd = nieuw aangemaakt');
+  // al verruimd maar de rij ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets
+  nieuw.db.exec('DELETE FROM schema_migratie WHERE versie = 10');
+  D.sluit(nieuw);
+  const weer = D.open(path.join(path.dirname(nieuw.pad)));
+  assert.deepEqual(weer.toegepast, [10]);
+  assert.equal(sigSql(weer.db), gemigreerd);
+  // afwijkende CHECK-tekst → weigeren, niets half
+  weer.db.exec('DELETE FROM schema_migratie WHERE versie = 10');
+  const v = weer.db.prepare('PRAGMA schema_version').get().schema_version;
+  weer.db.exec('PRAGMA writable_schema = ON');
+  weer.db.prepare("UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE type = 'table' AND name = 'signaal'").run(",'teruggeboekt')", ",'iets_anders')");
+  weer.db.exec('PRAGMA schema_version = ' + (v + 1)); weer.db.exec('PRAGMA writable_schema = OFF');
+  const voor = sigSql(weer.db);
+  D.sluit(weer);
+  gooit(() => D.open(path.dirname(nieuw.pad)), /migratie_10|staat er 0 keer/);
+  const r = D.open(path.dirname(nieuw.pad), { alleenLezen: true }); assert.equal(sigSql(r.db), voor); assert.equal(r.schema, 9); D.sluit(r);
 });
