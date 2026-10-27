@@ -26,12 +26,37 @@ const proj = path.join(process.env.HOME || '/tmp', '.claude', 'projects', proces
 fs.mkdirSync(proj, { recursive: true });
 fs.writeFileSync(path.join(proj, sid + '.jsonl'), '{}\\n');
 fs.appendFileSync(${JSON.stringify(path.join(W, 'spawns.log'))}, JSON.stringify({ sleutel, args: a, env: Object.keys(process.env).sort() }) + '\\n');
-process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: 'KLAAR ' + sleutel, session_id: sid }));
+const klaar = () => process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: 'KLAAR ' + sleutel, session_id: sid }));
+// wv1030: PASPROEF = tijdens de beurt de eigen beurtpas gebruiken (zoals wachter-state.py/zd.py) en de antwoorden opschrijven.
+if (!/PASPROEF/.test(prompt)) klaar();
+else {
+  const http = require('http');
+  let pas = null; try { pas = fs.readFileSync(path.join(path.dirname(process.env.OUTDIR), 'beurtpas'), 'utf8'); } catch (e) {}
+  const beurt = process.env.SOCEV_BEURT;
+  const post = (pad, body) => new Promise((ok) => { const r = http.request({ host: '127.0.0.1', port: process.env.PORT, path: pad, method: 'POST', headers: { 'content-type': 'application/json' } }, (res) => { let b = ''; res.on('data', (c) => b += c); res.on('end', () => { let j; try { j = JSON.parse(b); } catch (e) { j = {}; } ok({ s: res.statusCode, j }); }); }); r.on('error', () => ok({ s: -1 })); r.end(JSON.stringify(Object.assign({ secret: pas, beurt }, body))); });
+  (async () => {
+    const u = { pas: !!pas, beurt, env_pas: Object.keys(process.env).filter((k) => /PAS/.test(k)) };
+    u.state_lees = await post('/smal/state', { tabel: 'personeel', actie: 'lees' });
+    u.state_zet = await post('/smal/state', { tabel: 'personeel', actie: 'zet', rijen: [{ item_id: 'a', toelichting: "met 'apostrof' en $w$" }] });
+    u.state_ander = await post('/smal/state', { tabel: 'concierge', actie: 'lees' });
+    u.sync = await post('/smal/sync-fouten', {});
+    u.zd_lees = await post('/smal/zorgdata', { sql: 'select code from v_actueel limit 3' });
+    u.zd_schrijf = await post('/smal/zorgdata', { sql: 'with x as (delete from waarden returning 1) select * from x' });
+    u.zd_catalogus = await post('/smal/zorgdata', { sql: 'select prosrc from pg_catalog.pg_proc' });
+    u.zd_schema = await post('/smal/zorgdata', { sql: "select public.sb_contacten_zoek('x') from waarden w" });
+    u.zd_log = await post('/smal/zorgdata', { log: { afzender: 'proef', kanaal: 'app', vraag: 'hoeveel?', antwoordkern: '42' } });
+    u.les = await post('/smal/les', { lessen: { kort: 'een les van tien tekens of meer' } });
+    u.fin = await post('/smal/fin-sql', { sql: 'select 1' });
+    u.ander_beurt = await post('/smal/state', { tabel: 'personeel', actie: 'lees', beurt: 'abcdef0123456789' });
+    fs.writeFileSync(${JSON.stringify(W)} + '/pasproef-' + sleutel + '.json', JSON.stringify(Object.assign(u, { pas_waarde: pas })));
+    klaar();
+  })();
+}
 `, { mode: 0o755 });
 
 // Rol-RPC nabootsen (8-10-2026, wv216): sinds de uitwijk start /agent alleen als primair; zonder ontvanger las de server de
 // echte SUPABASE_URL met een nepsleutel, bleef passief en antwoordde 'passief' (6x rood, ook op main).
-const rapporten = [], cfVragen = [], lesRpc = [];
+const rapporten = [], cfVragen = [], lesRpc = [], mgmt = [];
 const rpc = http.createServer((q, s) => { let b = ''; q.on('data', (c) => b += c); q.on('end', () => {
   if (q.url.indexOf('/rest/v1/rpc/uitwijk_stand_lees') === 0) return s.end(JSON.stringify([{ actieve_kant: 'olares', sinds: null }]));
   if (q.url === '/rest/v1/rpc/mk_les_vast') { lesRpc.push(JSON.parse(b || '{}')); return s.end(String(100 + lesRpc.length)); }   // wv424b
@@ -39,6 +64,14 @@ const rpc = http.createServer((q, s) => { let b = ''; q.on('data', (c) => b += c
   if (q.url === '/rest/v1/rpc/mk_les_embedding_zet') { const r = JSON.parse(b || '{}'); return s.end(JSON.stringify([{ uit_bijgewerkt: (r.p_rijen || []).length }])); }
   if (q.url.indexOf('/ai/run/') > 0) { const r = JSON.parse(b || '{}'); return s.end(JSON.stringify({ success: true, result: { data: (r.text || []).map(() => new Array(1024).fill(0.01)) } })); }
   if (q.url === '/agentrapport') { try { rapporten.push(JSON.parse(b)); } catch (e) {} return s.end('{}'); }   // wv424b #9
+  if (q.url === '/v1/projects/proef/database/query') {   // wv1030: nep-Management-API voor /smal/state en /smal/zorgdata
+    const sql = (JSON.parse(b || '{}').query) || ''; mgmt.push({ sql, auth: q.headers.authorization });
+    if (/_state_zet\(/.test(sql)) return s.end(JSON.stringify([{ uit: { ok: true, bijgewerkt: ['a'], nieuw: [] } }]));
+    if (/json_agg\(t order by/.test(sql)) return s.end(JSON.stringify([{ uit: [{ item_id: 'a' }] }]));
+    if (/zd_sql_lees/.test(sql)) return s.end(JSON.stringify([{ uit: [{ code: 'bevolking_nl' }] }]));
+    if (/zd_log_vraag/.test(sql)) return s.end(JSON.stringify([{ uit: 7 }]));
+    s.statusCode = 400; return s.end(JSON.stringify({ message: 'onbekende proefquery' }));
+  }
   if (q.url.indexOf('/client/v4/') === 0) {   // wv424b: nep-Cloudflare voor /smal/vault-zoek en /smal/fin-sql
     cfVragen.push({ url: q.url, auth: q.headers.authorization, body: JSON.parse(b || '{}') });
     if (q.url.indexOf('/d1/database/') > 0) return s.end(JSON.stringify({ success: true, result: [{ results: [{ een: 1 }] }] }));
@@ -70,7 +103,7 @@ const env = Object.assign({}, process.env, geheim, mag, {
   PORT: String(poort), PATH: path.join(W, 'bin') + ':' + process.env.PATH });
 delete env.SOCEV_AGENT_RUN;
 env.AGENT_WEBHOOK_URL = 'http://127.0.0.1:' + rpc.address().port + '/agentrapport';   // wv424b #9: payload vangen
-env.SMAL_CF_BASIS = 'http://127.0.0.1:' + rpc.address().port; env.SMAL_TG_SCRIPT = path.join(W, 'tg.js');
+env.SMAL_CF_BASIS = 'http://127.0.0.1:' + rpc.address().port; env.SMAL_SB_MGMT = 'http://127.0.0.1:' + rpc.address().port; env.SMAL_TG_SCRIPT = path.join(W, 'tg.js');
 return spawn(process.execPath, [path.join(d, 'server.js')], { env, detached: true, stdio: ['ignore', fs.openSync(path.join(d, 'stdout.log'), 'a'), fs.openSync(path.join(d, 'stdout.log'), 'a')] });
 };
 let p = null;
@@ -115,10 +148,41 @@ rpc.listen(0, '127.0.0.1', async function () {
     toets('B /run zonder chat_id: smal', sb && lekVan(sb).length === 0, sb ? lekVan(sb).join(',') : 'geen spawn');
     toets('B /run met onbekende sessie: smal (fout valt naar minder rechten)', sc && lekVan(sc).length === 0, sc ? lekVan(sc).join(',') : 'geen spawn');
 
-    // C. Extra per sessie: personeels-wachter krijgt alleen de Supabase-MCP erbij.
-    await run('hd', 'personeels-wachter');
+    // C. wv1030: personeels-wachter krijgt geen beheersleutel meer (ook geen SUPABASE_MCP_TOKEN), wel een beurtpas in zijn jobmap.
+    //    Alleen design-/ui-manager houden SOCEV_ENV_EXTRA (3f van mk-scripts/wv1030/ontwerp.md).
+    const c0 = await run('hd PASPROEF', 'personeels-wachter');
     const sd = await wachtOp('hd');
-    toets('C personeels-wachter: SUPABASE_MCP_TOKEN wel, de rest van de beheersleutels niet', sd && sd.env.includes('SUPABASE_MCP_TOKEN') && lekVan(sd).filter((k) => k !== 'SUPABASE_MCP_TOKEN').length === 0, sd ? lekVan(sd).join(',') : 'geen spawn');
+    toets('C personeels-wachter: geen enkele beheersleutel (ook geen SUPABASE_MCP_TOKEN) en geen pas in de omgeving', sd && lekVan(sd).length === 0 && !sd.env.some((k) => /PAS/.test(k)), sd ? lekVan(sd).join(',') : 'geen spawn');
+    let pw = null; for (let i = 0; i < 50 && !pw; i++) { try { pw = JSON.parse(fs.readFileSync(path.join(W, 'pasproef-hd.json'), 'utf8')); } catch (e) { await slaap(200); } }
+    const nZet = mgmt.find((x) => /personeel_state_zet/.test(x.sql)) || {};
+    toets('H personeels-wachter: beurtpas in de jobmap; state personeel lees 200 + zet 200 (dollar-quote, PAT van de pod)',
+      pw && pw.pas && pw.state_lees.s === 200 && pw.state_lees.j.rijen[0].item_id === 'a' && pw.state_zet.s === 200 && pw.state_zet.j.ok === true
+      && /^select secondbrain\.personeel_state_zet\(\$w[0-9a-f]{12}\$\[\{"item_id":"a","toelichting":"met 'apostrof' en \$w\$"\}\]\$w[0-9a-f]{12}\$::jsonb\) as uit$/.test(nZet.sql) && nZet.auth === 'Bearer x',
+      pw ? JSON.stringify({ l: pw.state_lees, z: pw.state_zet, sql: nZet.sql }).slice(0, 300) : 'geen pasproef');
+    toets('H personeels-wachter: andere tabel, sync, zorgdata, les en fin-sql 403; pas met een andere beurt 401',
+      pw && pw.state_ander.s === 403 && pw.sync.s === 403 && pw.zd_lees.s === 403 && pw.les.s === 403 && pw.fin.s === 403 && pw.ander_beurt.s === 401,
+      pw ? [pw.state_ander.s, pw.sync.s, pw.zd_lees.s, pw.les.s, pw.fin.s, pw.ander_beurt.s].join(',') : '');
+    for (let i = 0; i < 50; i++) { const rr = await req('POST', '/result', { secret: 'proef', job_id: c0.job_id }); if (rr.found && rr.status === 'done') break; await slaap(200); }
+    const naAfloop = pw ? await req('POST', '/smal/state', { secret: pw.pas_waarde, beurt: pw.beurt, tabel: 'personeel', actie: 'lees' }) : {};
+    toets('H beurtpas na afloop van de beurt: 401', naAfloop._status === 401, String(naAfloop._status));
+    await run('hz PASPROEF', 'cijfer-meester');
+    let cm = null; for (let i = 0; i < 50 && !cm; i++) { try { cm = JSON.parse(fs.readFileSync(path.join(W, 'pasproef-hz.json'), 'utf8')); } catch (e) { await slaap(200); } }
+    const nZd = mgmt.find((x) => /zd_sql_lees/.test(x.sql)) || {}, nLog = mgmt.find((x) => /zd_log_vraag/.test(x.sql)) || {};
+    toets('H cijfer-meester: zorgdata lezen 200 via zd_sql_lees met time-out, log 200; schrijf-CTE en catalogus 403 (niets naar de databank)',
+      cm && cm.zd_lees.s === 200 && cm.zd_lees.j.rijen[0].code === 'bevolking_nl' && /^set local statement_timeout = '15s'; select public\.zd_sql_lees\(\$w[0-9a-f]{12}\$select code from v_actueel limit 3\$w[0-9a-f]{12}\$\) as uit$/.test(nZd.sql)
+      && cm.zd_log.s === 200 && /"vraag":"hoeveel\?","antwoord_kern":"42"/.test(nLog.sql) && cm.zd_schrijf.s === 403 && cm.zd_catalogus.s === 403 && cm.zd_schema.s === 403
+      && mgmt.filter((x) => /delete|pg_proc/.test(x.sql)).length === 0,
+      cm ? JSON.stringify({ l: cm.zd_lees.s, lg: cm.zd_log.s, w: cm.zd_schrijf.s, c: cm.zd_catalogus.s, sql: nZd.sql }).slice(0, 300) : 'geen pasproef');
+    toets('H cijfer-meester: state, sync en les 403', cm && cm.state_lees.s === 403 && cm.sync.s === 403 && cm.les.s === 403, cm ? [cm.state_lees.s, cm.sync.s, cm.les.s].join(',') : '');
+    const hs = await req('POST', '/smal/state', { secret: SMAL, tabel: 'personeel', actie: 'lees' });
+    const hz = await req('POST', '/smal/zorgdata', { secret: SMAL, sql: 'select 1' });
+    toets('H agent-sleutel (elk smal gesprek) opent state en zorgdata niet: 403', hs._status === 403 && hz._status === 403, hs._status + ',' + hz._status);
+    const hm = await req('POST', '/smal/state', { secret: 'proef', tabel: 'concierge', actie: 'lees' });
+    const hm2 = await req('POST', '/smal/state', { secret: 'proef', tabel: 'structuur', actie: 'lees' });
+    toets('H machinekamer (API_SECRET): state concierge 200; onbekende tabel 400', hm._status === 200 && hm2._status === 400, hm._status + ',' + hm2._status);
+    await agent('hy PASPROEF', { label: 'proef hy', secret: SMAL, chat_id: 'cijfer-meester' });
+    let ay = null; for (let i = 0; i < 50 && !ay; i++) { try { ay = JSON.parse(fs.readFileSync(path.join(W, 'pasproef-hy.json'), 'utf8')); } catch (e) { await slaap(200); } }
+    toets('H smalle agent met chat_id cijfer-meester: geen beurtpas, zorgdata 401', ay && !ay.pas && ay.zd_lees.s === 401, ay ? String(ay.zd_lees.s) : 'geen pasproef');
 
     // D. Machinekamer-sessie: volledige omgeving.
     await run('he', 'telegram-debug');

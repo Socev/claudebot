@@ -4,7 +4,7 @@
 # meet test/uid-scheiding.sh in een container en de nameting in de pod). Een groep van de loper signaleren geeft hier EPERM
 # (nagebootst in de proefkopie: process.kill(-pid) op een proces met HOME=<thuis> gooit EPERM), zoals 1001 → 1002 straks.
 #  S  stand: /run in een sessie uit het standbestand gaat via de loper (HOME = thuis, transcript in thuis, gebruiker socev);
-#     een sessie buiten de stand niet; een sessie uit SOCEV_ENV_EXTRA nooit; codex via de loper → codex-smal-uit
+#     een sessie buiten de stand niet; een sessie uit SOCEV_ENV_EXTRA nooit (sinds wv1030 een nep-sessie extra-proef); codex via de loper → codex-smal-uit
 #  J  jobmap: in/ en out/ krijgen ACL u:<loper>:rwX en een standaard-ACL; het bestand uit OUTDIR komt in het resultaat
 #  K  stop: bovengrens van een /run-beurt → killGroup krijgt EPERM → stop via de loper → afgebroken-bovengrens, proces weg
 #  A  agent (stand agents): register met loper_id, pid_start, gebruiker socev; eindrapport via het transcript (lees via de loper)
@@ -96,7 +96,10 @@ hook.listen(0, '127.0.0.1', async () => {
    ['const WATCH_INTERVAL_MS = 30 * 1000;', 'const WATCH_INTERVAL_MS = 300;'],
    ['const EIND_BEZINK_MS = 5 * 1000;', 'const EIND_BEZINK_MS = 200;'],
    ['const ROL_INTERVAL_MS = 60 * 1000;', 'const ROL_INTERVAL_MS = 400;'],
-   ['const ROL_INTERVAL_FOUT_MS = 15 * 1000;', 'const ROL_INTERVAL_FOUT_MS = 400;']].forEach(([a, b]) => {
+   ['const ROL_INTERVAL_FOUT_MS = 15 * 1000;', 'const ROL_INTERVAL_FOUT_MS = 400;'],
+   // wv1030: personeels-wachter staat niet meer in SOCEV_ENV_EXTRA (beurtpas); de managers daar starten hier niet (geen zegel),
+   // dus een nep-sessie met een EXTRA-sleutel toetst "nooit via de loper".
+   ['const SOCEV_ENV_EXTRA = {', "const SOCEV_ENV_EXTRA = { 'extra-proef': ['SUPABASE_MCP_TOKEN'],"]].forEach(([a, b]) => {
     if (src.indexOf(a) < 0) { console.log('ROOD  vervangregel niet gevonden: ' + a); fout++; } src = src.split(a).join(b); });
   { const nl = src.indexOf('\n') + 1; src = src.slice(0, nl) + kop + src.slice(nl); }
   fs.writeFileSync(path.join(d, 'server.js'), src);
@@ -131,7 +134,7 @@ hook.listen(0, '127.0.0.1', async () => {
   let s1, s2;
   try {
     startLoper(); await slaap(600);
-    fs.writeFileSync(STAND, JSON.stringify({ sessies: ['loper-proef', 'personeels-wachter'], agents: true }));
+    fs.writeFileSync(STAND, JSON.stringify({ sessies: ['loper-proef', 'extra-proef'], agents: true }));
     s1 = start(); await klaar();
     await wachtOp(async () => (await vraag('GET', '/health')).rol === 'primair', 8000);
     // ── S/J ──
@@ -145,11 +148,11 @@ hook.listen(0, '127.0.0.1', async () => {
     toets('J: bestand dat de loper-sessie in OUTDIR zette komt mee in het resultaat', !!f1, JSON.stringify((res1.files || []).map(f => f.name)) + ' ' + starts());
     toets('J: sessienaam en omgeving kwamen door de loper (SOCEV_SESSIE)', f1 && Buffer.from(f1.content_base64 || '', 'base64').toString().indexOf('sessie=loper-proef') >= 0 || /sessie=loper-proef/.test(JSON.stringify(f1 || {})), JSON.stringify(f1 || {}).slice(0, 300));
     const h1 = await vraag('GET', '/health');
-    toets('/health.loper: stand uit het bestand, gestart ≥ 1, nooit = SOCEV_ENV_EXTRA', h1.loper && h1.loper.stand.bron === 'bestand' && h1.loper.gestart >= 1 && h1.loper.nooit.indexOf('personeels-wachter') >= 0, JSON.stringify(h1.loper));
+    toets('/health.loper: stand uit het bestand, gestart ≥ 1, nooit = SOCEV_ENV_EXTRA', h1.loper && h1.loper.stand.bron === 'bestand' && h1.loper.gestart >= 1 && h1.loper.nooit.indexOf('extra-proef') >= 0 && h1.loper.nooit.indexOf('personeels-wachter') < 0, JSON.stringify(h1.loper));
     const r2 = await run('buiten-stand', 'MODUS:GEWOON');
     toets('S: sessie buiten de stand → gewone spawn (HOME = pod-HOME)', (r2.result || r2).ok === true && ((r2.result || r2).output || '').indexOf('home=' + path.join(d, 'home')) >= 0, JSON.stringify(r2).slice(0, 300));
-    const r3 = await run('personeels-wachter', 'MODUS:PW');
-    toets('S: personeels-wachter (SOCEV_ENV_EXTRA) nooit via de loper, ook al staat hij in de stand', (r3.result || r3).ok === true && ((r3.result || r3).output || '').indexOf('home=' + path.join(d, 'home')) >= 0, JSON.stringify(r3).slice(0, 300));
+    const r3 = await run('extra-proef', 'MODUS:PW');
+    toets('S: sessie uit SOCEV_ENV_EXTRA (extra-proef) nooit via de loper, ook al staat hij in de stand', (r3.result || r3).ok === true && ((r3.result || r3).output || '').indexOf('home=' + path.join(d, 'home')) >= 0, JSON.stringify(r3).slice(0, 300));
     const r4 = await run('loper-proef', 'MODUS:CODEX', { runtime: 'codex' });
     toets('S: codex via de loper → codex-smal-uit (dicht, niet als pod-gebruiker)', (r4.result || r4).error === 'codex-smal-uit' && starts().indexOf('CODEX') < 0, JSON.stringify(r4).slice(0, 300));
     // J: ACL op de jobmap terwijl hij loopt
@@ -208,7 +211,7 @@ hook.listen(0, '127.0.0.1', async () => {
     const e2 = reg()[ag2.job_id] || {}, e3 = reg()[ag3.job_id] || {};
     toets('A2: agent gestart met de agent-sleutel → via de loper, ook met agents uit', e2.gebruiker === 'socev' && e2.ok === true, JSON.stringify(ag2) + ' ' + JSON.stringify(e2));
     toets('A2: smalle n8n-agent (API_SECRET) met agents uit → gewone spawn', e3.gebruiker === 'claude' && e3.ok === true, JSON.stringify(e3));
-    fs.writeFileSync(STAND, JSON.stringify({ sessies: ['loper-proef', 'personeels-wachter'], agents: true }));
+    fs.writeFileSync(STAND, JSON.stringify({ sessies: ['loper-proef', 'extra-proef'], agents: true }));
     // ── W: wees over een herstart van server.js ──
     const aw = await vraag('POST', '/agent', { secret: 'proef', label: 'socev: proef wees', prompt: 'MODUS:HANG', chat_id: '40687', workspace: 'vault', runtime: 'claude' });
     await wachtOp(() => { const x = reg()[aw.job_id]; return x && x.pid && x.pid_start && x.loper_id; }, 15000);
