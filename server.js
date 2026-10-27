@@ -14380,7 +14380,8 @@ function intakeDagTelling() {
   const zorg = open.length > 0 || bronnen.some(function (b) { return r.per_bron[b].geweigerd || r.per_bron[b].afwijkend; });
   const markers = bronnen.some(function (b) { return r.per_bron[b].marker_gemarkeerd || r.per_bron[b].marker_niet_te_lezen; });
   let rr = '';
-  if (intakeRouter && intakeRouterStand()) { try { rr = intakeRouter.regel(intakeRouter.telling(new Date(tot - 86400000).toISOString(), new Date(tot).toISOString())); } catch (e) { logError('intake-router-telling', e); } }
+  const ir = intakeRouterStand() ? intakeRouterHaal() : null;
+  if (ir) { try { rr = ir.regel(ir.telling(new Date(tot - 86400000).toISOString(), new Date(tot).toISOString())); } catch (e) { logError('intake-router-telling', e); } }
   if (!zorg && !markers && !rr) return;
   ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Intake: dagtelling aanleveringen\n- status: ' + (zorg ? 'open' : 'afgehandeld') + '\n- van: pod:intake — bevinding_id intake-telling-' + t.datum +
     '\n- wat ik zag: ' + (regels.join('; ') || 'geen aanleveringen') + (open.length ? '; open: ' + open.map(function (k) { return k + ' ' + r.open[k]; }).join(', ') : '') + (rr ? '\n- ' + rr : '') +
@@ -14434,22 +14435,28 @@ async function intakeDocx(pad) {
   return x.replace(/<\/w:p>/g, '\n').replace(/<w:tab\/>/g, ' ').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').slice(0, 2e6);
 }
 function intakeRouterStand() { try { const j = JSON.parse(fs.readFileSync(path.join(INTAKE_DIR, 'router.json'), 'utf8')); return j && j.aan === true ? j : null; } catch (e) { return null; } }
-const intakeRouter = (function () {
+// Pas aangemaakt (tabellen in intake.sqlite) als de schakelaar aan staat (Fable wv980 #5); daarna blijft hij tot een herstart.
+let intakeRouterMod = null;
+function intakeRouterHaal() {
+  if (intakeRouterMod || !intake || !intakeRouterStand()) return intakeRouterMod;
   const p = path.join(__dirname, 'intake-router.js');
-  if (!intake || !fs.existsSync(p)) return null;
+  if (!fs.existsSync(p)) return null;
   try {
-    return require(p).maak({ dir: INTAKE_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
+    intakeRouterMod = require(p).maak({ dir: INTAKE_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       pdfBbox: function (pad) { return intakeProces('pdftotext', ['-q', '-bbox', '-l', '20', '-enc', 'UTF-8', pad, '-'], { ms: 30000 }); },
+      paginas: async function (pad) { const t = await intakeProces('pdfinfo', [pad], { ms: 15000 }); const m = t && /^Pages:\s+(\d+)/m.exec(t); return m ? Number(m[1]) : null; },
       ocr: intakeOcr, docx: intakeDocx,
       handvatten: function () { return appSbRpc('ovis_intake_handvatten', {}); },
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; } });
-  } catch (e) { logError('intake-router', e); return null; }
-})();
-function intakeRouterInfo() { if (!intakeRouter) return { aan: false, module: false }; try { return Object.assign(intakeRouter.info(), { aan: !!intakeRouterStand() }); } catch (e) { return { fout: true }; } }
+  } catch (e) { logError('intake-router', e); intakeRouterMod = null; }
+  return intakeRouterMod;
+}
+function intakeRouterInfo() { const r = intakeRouterMod; if (!r) return { aan: !!intakeRouterStand(), module: fs.existsSync(path.join(__dirname, 'intake-router.js')), geladen: false }; try { return Object.assign(r.info(), { aan: !!intakeRouterStand() }); } catch (e) { return { fout: true }; } }
 async function intakeTik() {
   if (!intake || !rolPrimair()) return;
   try { await intake.ronde(); } catch (e) { logError('intake-ronde', e); }
-  if (intakeRouter && intakeRouterStand()) { try { const u = await intakeRouter.ronde(); if (u && (u.verwerkt || u.fout)) schrijfLog(nu() + ' intake-router ' + velden({ verwerkt: u.verwerkt || 0, vastgehouden: u.vastgehouden || 0, fout: u.fout || 0 })); } catch (e) { logError('intake-router', e); } }
+  const ir = intakeRouterStand() ? intakeRouterHaal() : null;
+  if (ir) { try { const u = await ir.ronde(); if (u && (u.verwerkt || u.fout)) schrijfLog(nu() + ' intake-router ' + velden({ verwerkt: u.verwerkt || 0, vastgehouden: u.vastgehouden || 0, fout: u.fout || 0 })); } catch (e) { logError('intake-router', e); } }
   try { intakeDagTelling(); } catch (e) { logError('intake-telling', e); }
 }
 if (intake && SERVER_ECHT) { setTimeout(function () { intakeTik(); }, 120000).unref(); setInterval(function () { intakeTik(); }, 5 * 60000).unref(); }

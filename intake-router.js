@@ -34,6 +34,7 @@ const PROFIELEN = new Set(['mail@1', 'outlook-mail@1', 'scansnap@1']);   // de r
 const LEES_MAX = 2 * 1024 * 1024;       // per tekstonderdeel
 const TEKST_MIN = 40;                   // tekens zonder witruimte: daaronder geen tekstlaag (gelijk aan de marker)
 const HANDVAT_MS = 10 * 60000;
+const PDF_PAGINAS = 20, OCR_PAGINAS = 5;   // zoveel leest de router (pdftotext -l 20, pdftoppm -l 5); meer = niet volledig gelezen
 const KOP_MAX = 1500;                  // tekens per deel die als kop tellen voor de soortwoorden
 const PER_RONDE = 20;
 const NIVEAU = { geen: 0, zwak: 1, redelijk: 2, hoog: 3 };
@@ -77,7 +78,7 @@ function dkimUitslag(koppen, vanAdres, opties) {
   const top = lijst[0];
   const eerste = top.split(';')[0].trim();
   const vertrouwd = (opties && opties.authserv) || null;
-  if (vertrouwd && !/=/.test(eerste) && eerste.toLowerCase().split(/\s+/)[0] !== vertrouwd) return uit;   // niet van onze ontvanger
+  if (vertrouwd && eerste.toLowerCase().split(/\s+/)[0] !== vertrouwd) return uit;   // RFC 8601: authserv-id eerst; zonder of een andere = niet van onze ontvanger (Fable wv980 #2)
   uit.gelezen = true;
   const vanOrg = orgDomein(domeinVan(vanAdres));
   for (const deel of top.split(';')) {
@@ -123,7 +124,7 @@ function decodeer(buf, cte, charset) {
 }
 function htmlNaarTekst(h) {
   return String(h).replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<br\s*\/?>|<\/(p|div|tr|li|h\d)>/gi, '\n').replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#(\d+);/g, function (m, n) { return String.fromCharCode(Number(n)); })
+    .replace(/&nbsp;/g, ' ').replace(/&euro;/g, '€').replace(/&#x([0-9a-f]+);/gi, function (m, n) { return String.fromCharCode(parseInt(n, 16)); }).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#(\d+);/g, function (m, n) { return String.fromCharCode(Number(n)); })
     .replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n');
 }
 // → { koppen: [[naam, waarde]], tekst, ar: [Authentication-Results bovenste eerst], list_unsubscribe }
@@ -488,6 +489,7 @@ function maak(o) {
   db.exec(SCHEMA);
   const QUAR = path.join(o.dir, 'quarantaine');
   let reg = null, regOp = 0, bezig = false;
+  const mislukt = new Map();   // stuk_id → pogingen; na 3 slaat de router het over tot een herstart (Fable wv980 #3), één logregel per stuk
   const stand = { laatste: null, verwerkt: 0, fouten: 0, laatste_fout: null };
 
   async function registerVers() {
@@ -507,7 +509,7 @@ function maak(o) {
 
   // stap 2: lokale tekst per onderdeel (in het geheugen; OCR-tussenbestanden in de quarantainemap)
   async function lokaleTekst(s, delen) {
-    const uit = { delen: [], onleesbaar: [], ontbreekt: [], ocr: 0, mail: null };
+    const uit = { delen: [], onleesbaar: [], ontbreekt: [], deels: [], ocr: 0, mail: null };
     // Outlook levert (nog) geen hoofdtekst, alleen de markdown van de route: lees dan alleen het lijf, nooit de kop (daarin staat de
     // indeling van het filtermodel). Voor Gmail blijft de representatie dicht (de route zet er een modelsamenvatting in).
     const alleenRep = s.profiel === 'outlook-mail@1' && !delen.some(function (d) { return d.rol === 'hoofdtekst'; });
@@ -534,8 +536,10 @@ function maak(o) {
           const html = o.pdfBbox ? await o.pdfBbox(p) : null;
           let regels = html ? bboxRegels(html) : [];
           let t = regels.map(function (r) { return r.tekst; }).join('\n');
-          if (zonderWit(t) < TEKST_MIN && o.ocr) { const ot = await ocrIn(s.stuk_id, p, km); if (ot) { t = ot; regels = tekstRegels(ot); uit.ocr++; } }
-          if (zonderWit(t) >= TEKST_MIN) uit.delen.push({ deel: d.deel, rol: d.rol, naam: d.naam, tekst: t, regels }); else uit.onleesbaar.push(d.deel);
+          const paginas = o.paginas ? await o.paginas(p) : null;
+          let deels = paginas == null || paginas > PDF_PAGINAS;          // onbekend of meer dan pdftotext leest: niet volledig gelezen
+          if (zonderWit(t) < TEKST_MIN && o.ocr) { const ot = await ocrIn(s.stuk_id, p, km); if (ot) { t = ot; regels = tekstRegels(ot); uit.ocr++; deels = paginas == null || paginas > OCR_PAGINAS; } }
+          if (zonderWit(t) >= TEKST_MIN) { uit.delen.push({ deel: d.deel, rol: d.rol, naam: d.naam, tekst: t, regels }); if (deels) uit.deels.push(d.deel); } else uit.onleesbaar.push(d.deel);
         } else if (/^image\/(jpeg|png|gif|webp)$/.test(km) && o.ocr) {
           const t = await ocrIn(s.stuk_id, p, km);
           if (t && zonderWit(t) >= TEKST_MIN) { uit.ocr++; uit.delen.push({ deel: d.deel, rol: d.rol, naam: d.naam, tekst: t, regels: tekstRegels(t) }); } else uit.onleesbaar.push(d.deel);
@@ -564,7 +568,7 @@ function maak(o) {
     const meta = (function () { try { return JSON.parse(s.meta) || {}; } catch (e) { return {}; } })();
     const resultaat = [];   // [stap, uitkomst, kracht, bewijs]
     const B = function (stap, uitkomst, kracht, bewijs) { resultaat.push([stap, uitkomst, kracht, bewijs]); };
-    let status, sam;
+    let status, sam, bestem = [];
     if (!PROFIELEN.has(s.profiel)) {
       B('ontvangst', 'buiten_router', null, { profiel: s.profiel });
       status = 'buiten_router'; sam = { profiel: s.profiel, bron: s.bron };
@@ -573,22 +577,26 @@ function maak(o) {
         JOIN stuk s2 ON s2.stuk_id = o2.stuk_id WHERE o1.stuk_id = ? AND o1.rol <> 'representatie' AND s2.aangemaakt < ? LIMIT 5`).all(s.stuk_id, s.aangemaakt).map(function (r) { return r.stuk_id; });
       B('ontvangst', 'ontvangen', null, { profiel: s.profiel, bron: s.bron, onderdelen: delen.filter(function (d) { return d.rol !== 'representatie'; }).length, zelfde_document_eerder: eerder });
       const lt = await lokaleTekst(s, delen);
-      B('lokale_tekst', lt.ontbreekt.length ? 'origineel_ontbreekt' : (lt.onleesbaar.length ? 'deels' : 'gelezen'), null, { delen: lt.delen.length, onleesbaar: lt.onleesbaar.length, ocr: lt.ocr, ontbreekt: lt.ontbreekt.length, lijf_van_representatie: !!lt.lijf });
+      B('lokale_tekst', lt.ontbreekt.length ? 'origineel_ontbreekt' : (lt.onleesbaar.length ? 'deels' : 'gelezen'), null, { delen: lt.delen.length, onleesbaar: lt.onleesbaar.length, ocr: lt.ocr, deels: lt.deels.length, ontbreekt: lt.ontbreekt.length, lijf_van_representatie: !!lt.lijf });
       if (lt.ontbreekt.length) { status = 'origineel_ontbreekt'; sam = { profiel: s.profiel, bron: s.bron, ontbreekt: lt.ontbreekt.length }; }
       if (!lt.ontbreekt.length) {
         // stap 3: marker (ontvangstlaag + eigen lokale tekst, ook OCR)
         const ingang = s.marker_patient;
-        const vanAdres = adresVan(meta.van || '');
+        const vanAdres = adresVan(meta.van || (lt.mail ? kopWaarde(lt.mail.koppen, 'from') : ''));   // From-kop als de route hem niet meegaf (Fable wv980 #8)
         const onderwerp = typeof meta.onderwerp === 'string' ? meta.onderwerp : '';
         const namen = delen.filter(function (d) { return d.rol !== 'representatie'; }).map(function (d) { return d.naam; });
         let eigen = null;
         if (o.marker) {
           const vrij = db.prepare('SELECT omschrijving, waarde FROM vrij_veld WHERE stuk_id = ?').all(s.stuk_id).map(function (v) { return v.omschrijving + ': ' + (v.waarde || ''); });
           eigen = o.marker.beoordeel({ teksten: lt.delen.map(function (d) { return d.tekst; }).concat(vrij), bijlagenamen: namen, onderwerp, afzender: vanAdres,
-            leesbaar: lt.onleesbaar.length ? false : undefined, scan: s.profiel === 'scansnap@1' }, {});
+            leesbaar: lt.onleesbaar.length || lt.deels.length ? false : undefined, scan: s.profiel === 'scansnap@1' }, {});
         }
         const routerMarker = !eigen ? 'niet_gedraaid' : (!eigen.tegenhouden ? 'geen' : (eigen.regel === 6 ? 'niet_te_lezen' : 'gemarkeerd'));
-        const marker = ingang === 'gemarkeerd' || routerMarker === 'gemarkeerd' ? 'gemarkeerd' : (routerMarker === 'geen' ? 'geen' : (routerMarker === 'niet_gedraaid' ? (ingang || 'nog_niet') : 'niet_te_lezen'));
+        // De router scherpt alleen aan, nooit versoepelen (Fable wv980 #1): zei de ontvangstlaag 'niet_te_lezen' of 'gemarkeerd', dan blijft dat
+      // zo, ook als de eigen OCR niets vindt (de OCR leest hooguit een deel). Wat de router zelf vond staat als 'router' in het bewijs.
+      let marker;
+      if (ingang !== 'geen') marker = routerMarker === 'gemarkeerd' ? 'gemarkeerd' : (ingang || 'nog_niet');
+      else marker = routerMarker === 'geen' || routerMarker === 'niet_gedraaid' ? 'geen' : routerMarker;
         const soorten = Array.from(new Set([].concat(safeJson(s.marker_soorten) || [], (eigen && eigen.soorten) || [])));
         B('marker', marker, null, { ingang: ingang || null, router: routerMarker, soorten, versie: eigen ? eigen.versie : s.marker_versie, eigen_uitzondering: !!(eigen && eigen.eigen_uitzondering) });
         if (marker !== 'geen') {
@@ -629,11 +637,12 @@ function maak(o) {
             dkim: dkim ? (dkim.uitgelijnd ? 'uitgelijnd' : (dkim.pass ? 'pass' : (dkim.gelezen ? 'geen_pass' : 'geen_uitslag'))) : null,
             entiteit: en.knoop || null, entiteit_kracht: en.kracht, label_route: labels, bestemmingen: bs, twijfel, velden: vd.velden.map(function (v) { return v.veld; }), kenmerken: vd.kenmerken };
           sam.label_gelijk = labels.length ? labels.indexOf(en.knoop) >= 0 : null;
-          tx(function () { for (const b of bs) db.prepare('INSERT OR IGNORE INTO bestemming (stuk_id, versie, lens, doel, zou_auto, reden, status, tijd) VALUES (?,?,?,?,?,?,?,?)').run(s.stuk_id, s.versie, b.lens, b.doel, b.zou_auto ? 1 : 0, b.reden, 'schaduw', nuIso(nu())); });
+          bestem = bs;
         }
       }
     }
-    tx(function () {
+    tx(function () {   // alles van één stuk in één transactie (Fable wv980 #6)
+      for (const b of bestem) db.prepare('INSERT OR IGNORE INTO bestemming (stuk_id, versie, lens, doel, zou_auto, reden, status, tijd) VALUES (?,?,?,?,?,?,?,?)').run(s.stuk_id, s.versie, b.lens, b.doel, b.zou_auto ? 1 : 0, b.reden, 'schaduw', nuIso(nu()));
       for (const b of resultaat) besluit(s.stuk_id, s.versie, b[0], b[1], b[2], b[3]);
       db.prepare('INSERT INTO router_stuk (stuk_id, versie, status, regelversie, compilatienummer, op, samenvatting) VALUES (?,?,?,?,?,?,?)')
         .run(s.stuk_id, s.versie, status, REGELVERSIE, reg ? reg.compilatienummer : null, nuIso(nu()), JSON.stringify(sam));
@@ -651,10 +660,16 @@ function maak(o) {
       fs.mkdirSync(QUAR, { recursive: true, mode: 0o700 });
       for (const n of fs.readdirSync(QUAR)) fs.rmSync(path.join(QUAR, n), { recursive: true, force: true });   // quarantaine leeg na een crash
       const rijen = db.prepare(`SELECT s.stuk_id FROM stuk s WHERE s.compleet_op IS NOT NULL AND s.marker_op IS NOT NULL AND s.status NOT IN ('open','onvolledig')
-        AND NOT EXISTS (SELECT 1 FROM router_stuk r WHERE r.stuk_id = s.stuk_id AND r.versie = s.versie) ORDER BY s.aangemaakt LIMIT ?`).all(PER_RONDE);
+        AND NOT EXISTS (SELECT 1 FROM router_stuk r WHERE r.stuk_id = s.stuk_id AND r.versie = s.versie) ORDER BY s.aangemaakt LIMIT ?`).all(PER_RONDE * 5)
+        .filter(function (r) { return (mislukt.get(r.stuk_id) || 0) < 3; }).slice(0, PER_RONDE);
       for (const r of rijen) {
         try { const v = await verwerkStuk(r.stuk_id); if (v) { uit.verwerkt++; stand.verwerkt++; if (v.status === 'vastgehouden') uit.vastgehouden++; } }
-        catch (e) { uit.fout++; stand.fouten++; stand.laatste_fout = nuIso(nu()); if (o.fout) o.fout('intake-router', e); if (/handvatten/.test(String(e && e.message))) break; }
+        catch (e) {
+          uit.fout++; stand.fouten++; stand.laatste_fout = nuIso(nu());
+          if (/handvatten|rpc /.test(String(e && e.message))) { if (o.fout) o.fout('intake-router', e); break; }   // register weg: geen stuk de schuld geven
+          const n = (mislukt.get(r.stuk_id) || 0) + 1; mislukt.set(r.stuk_id, n);
+          if (n === 1 && o.fout) o.fout('intake-router', e);
+        }
       }
       stand.laatste = nuIso(nu());
     } finally { bezig = false; }
@@ -701,7 +716,7 @@ function maak(o) {
     const wacht = db.prepare(`SELECT count(*) n FROM stuk s WHERE s.compleet_op IS NOT NULL AND s.marker_op IS NOT NULL AND s.status NOT IN ('open','onvolledig')
       AND NOT EXISTS (SELECT 1 FROM router_stuk r WHERE r.stuk_id = s.stuk_id AND r.versie = s.versie)`).get().n;
     const o2 = {}; for (const r of n) o2[r.status] = r.n;
-    return { aan: true, schaduw: true, regelversie: REGELVERSIE, stukken: o2, wacht, laatste: stand.laatste, fouten: stand.fouten, laatste_fout: stand.laatste_fout };
+    return { aan: true, schaduw: true, regelversie: REGELVERSIE, stukken: o2, wacht, overgeslagen: Array.from(mislukt.values()).filter(function (n) { return n >= 3; }).length, laatste: stand.laatste, fouten: stand.fouten, laatste_fout: stand.laatste_fout };
   }
   return { ronde, verwerkStuk, telling, regel, lijst, info, sluit: function () { db.close(); } };
 }

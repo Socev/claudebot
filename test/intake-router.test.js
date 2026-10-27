@@ -190,6 +190,7 @@ function stubs(extra) {
     },
     ocr: async function (p, mime, werk) { fs.writeFileSync(path.join(werk, 'p-1.png'), 'x'); return PATIENT_TEKST; },
     docx: async function () { return null; },
+    paginas: async function () { return 1; },
     handvatten: async function () { return HANDVATTEN; },
     eigenAdressen: function () { return ['david@voorbeeld.example'] },
   }, extra || {});
@@ -292,9 +293,10 @@ test('kaartcode: één twijfel- en markerkaart per dag binnen de kaartgrenzen; d
 
 test('server.js: router alleen met schakelaar, in /health, in de dagtelling; geen kaarten in de schaduw', () => {
   const s = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(s, /intakeRouter && intakeRouterStand\(\)\) \{ try \{ const u = await intakeRouter\.ronde\(\)/);
+  assert.match(s, /const ir = intakeRouterStand\(\) \? intakeRouterHaal\(\) : null;\n  if \(ir\) \{ try \{ const u = await ir\.ronde\(\)/);
+  assert.match(s, /if \(intakeRouterMod \|\| !intake \|\| !intakeRouterStand\(\)\) return intakeRouterMod;/);
   assert.match(s, /router: intakeRouterInfo\(\)/);
-  assert.match(s, /intakeRouter\.regel\(intakeRouter\.telling\(/);
+  assert.match(s, /ir\.regel\(ir\.telling\(/);
   assert.doesNotMatch(s, /kaartenVoorDag|zetKaarten/);
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'uitrol.sh'), 'utf8'), /^RELEASE_OPTIONEEL="[^"]*\bintake-router\.js\b/m);
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf8'), /COPY intake-router\.js \/app\/release-bootstrap\/intake-router\.js/);
@@ -341,4 +343,39 @@ test('origineel ontbreekt op de pod: eigen status, geen marker- of routerstap', 
 test('kennislens: entiteit redelijk alleen is niet genoeg (herhaling: 53 %), hoog of het routelabel wel', () => {
   const b = (k, l) => K.bestemmingen({ soort: 'correspondentie', kracht: 'redelijk' }, { kracht: 'redelijk' }, { knoop: 'TG', kracht: k }, { velden: [], label_entiteit: l })[0].zou_auto;
   assert.equal(b('redelijk', null), false); assert.equal(b('hoog', null), true); assert.equal(b('zwak', 'TG'), true);
+});
+
+test('Fable wv980 #1: de router versoepelt nooit (niet_te_lezen blijft, ook als de OCR niets vindt); te veel pagina\'s = niet volledig gelezen', async () => {
+  const L = logboek();
+  const a = L.zet({ bron: 'scanner:scansnap', profiel: 'scansnap@1', marker: 'niet_te_lezen', delen: [{ rol: 'origineel', mime: 'application/pdf', bytes: '%PDF-scan A' }] });
+  const b = L.zet({ bron: 'scanner:scansnap', profiel: 'scansnap@1', marker: 'geen', delen: [{ rol: 'origineel', mime: 'application/pdf', bytes: FACTUUR_PDF }] });
+  const r = R.maak(Object.assign({ dir: L.dir }, stubs({ ocr: async function () { return 'Factuur Factuurnummer: X-1 alleen onschuldige tekst, ruim veertig tekens lang'; },
+    paginas: async function (p) { return fs.readFileSync(p, 'utf8') === FACTUUR_PDF ? 30 : 1; } })));
+  await r.ronde();
+  const sa = JSON.parse(L.db.prepare('SELECT samenvatting FROM router_stuk WHERE stuk_id = ?').get(a).samenvatting);
+  assert.equal(L.db.prepare('SELECT status FROM router_stuk WHERE stuk_id = ?').get(a).status, 'vastgehouden');
+  assert.equal(sa.marker, 'niet_te_lezen'); assert.equal(sa.marker_router, 'geen');
+  assert.equal(L.db.prepare('SELECT status FROM router_stuk WHERE stuk_id = ?').get(b).status, 'vastgehouden');   // 30 pagina's, pdftotext leest er 20
+  assert.equal(L.db.prepare("SELECT count(*) n FROM besluit WHERE stap = 'velden'").get().n, 0);
+  r.sluit();
+});
+test('Fable wv980 #2: Authentication-Results zonder authserv-id telt niet', () => {
+  const u = K.dkimUitslag(['dkim=pass header.d=voorbeeld-energie.example'], 'facturen@voorbeeld-energie.example', { authserv: 'mx.google.com' });
+  assert.equal(u.gelezen, false); assert.equal(u.uitgelijnd, false);
+});
+test('Fable wv980 #3: een blijvend falend stuk houdt de rest niet tegen; na 3 keer overgeslagen, één logregel', async () => {
+  const L = logboek();
+  const ids = []; for (let i = 0; i < 22; i++) ids.push(L.zet({ bron: 'scanner:scansnap', profiel: 'scansnap@1', delen: [{ rol: 'origineel', mime: 'application/pdf', bytes: i < 21 ? '%PDF-faal ' + i : FACTUUR_PDF }] }));
+  const fouten = [];
+  const marker = { beoordeel: function (x) { if (/faal/.test(JSON.stringify(x.bijlagenamen)) || (x.teksten || []).some((t) => /Factuur/.test(t)) === false) throw new Error('kapot'); return poort.beoordeel(x, {}); } };
+  const r = R.maak(Object.assign({ dir: L.dir, fout: (l, e) => fouten.push(e.message) }, stubs({ marker, ocr: async function () { return null; } })));
+  for (let i = 0; i < 4; i++) await r.ronde();
+  assert.equal(L.db.prepare('SELECT status FROM router_stuk WHERE stuk_id = ?').get(ids[21]).status, 'beoordeeld');
+  assert.equal(fouten.length, 21);
+  assert.equal(r.info().overgeslagen, 20);   // het 21e faalde pas één keer (ronde 4)
+  r.sluit();
+});
+test('Fable wv980 #7: html-entiteiten (&euro;, hex) gedecodeerd', () => {
+  const m = K.mailLees(Buffer.from('Content-Type: text/html; charset=utf-8\r\n\r\n<p>Totaal: &euro; 12,00 &#x2013; klaar</p>', 'latin1'));
+  assert.match(m.tekst, /Totaal: € 12,00 – klaar/);
 });
