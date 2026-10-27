@@ -25,6 +25,7 @@
  *   en stuurt dan SIGTERM (socev-run geeft hem door aan zijn procesgroep), 20 s later SIGKILL (review #1).
  * - Staat in <staatMap>/staat.json (map 0700, bestand 0600): laatste datum, uitkomst per stap, verschil-aantallen.
  * - Tweede, losse klok in dit bestand: maakVeeg (wv1311), de opruimronde socev-run --veeg om 03:50–04:49; zie onderaan.
+ * - Derde, algemene klok: maakDagRonde (wv1385), één socev-run-klus per datum in een venster (OVIS Calendar-feeds 06:35–07:34).
  */
 const fs = require('fs');
 const path = require('path');
@@ -217,4 +218,43 @@ function maakVeeg(o) {
   return { tik: tik, info: info };
 }
 
-module.exports = { maak: maak, maakVeeg: maakVeeg, inVeegVenster: inVeegVenster, BEWAAR: BEWAAR, PATROON: PATROON };
+// ── Dagronde: één socev-run-klus per datum binnen een venster (wv1385, OVIS Calendar) ──
+// WAAROM. Dezelfde vorm als maakVeeg, maar met naam, venster en commando als instelling, zodat een volgende dagelijkse klus uit
+// socev-scripts geen eigen klokcode nodig heeft. Eerste gebruik: kalender_feed.py (ververst de externe kalenders van OVIS Calendar,
+// 06:35–07:34; ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 2 datamodel (ontwerp 26-10-2026).md" § 8). Altijd via socev-run
+// (mislukt = één box-rij + één bericht; hartslag alleen bij geslaagd, met een eigen drempelrij in machinekamer.hartslag). Datum alleen
+// in het geheugen: een herstart in het venster geeft hooguit een tweede ronde; de klus zelf moet daarom idempotent zijn. Niet
+// afhankelijk van de onderhoudsstand: de klus schrijft niet in de vault. info() geeft alleen datum, tijd, exitcode en duur.
+function inDagVenster(v, a) {
+  const m = a.uur * 60 + a.min;
+  return m >= v.van[0] * 60 + v.van[1] && m < v.tot[0] * 60 + v.tot[1];
+}
+function maakDagRonde(o) {
+  if (!o || !/^[a-z][a-z0-9-]{1,40}$/.test(o.naam || '')) throw new Error('dagronde: ongeldige naam');
+  if (!o.venster || !Array.isArray(o.venster.van) || !Array.isArray(o.venster.tot)) throw new Error('dagronde: venster ontbreekt');
+  if (!Array.isArray(o.argv) || !o.argv.length) throw new Error('dagronde: commando ontbreekt');
+  const run = o.socevRun;              // /opt/data/scripts/huidig/bin/socev-run
+  const env = o.env || process.env;
+  const maxMin = o.maxMin || 5;
+  const marge = o.margeMs === undefined ? 90000 : o.margeMs;
+  const voor = ['--naam', o.naam].concat(o.hartslag ? ['--hartslag', o.hartslag] : []).concat(['--max-min', String(maxMin), '--']);
+  let datum = null, loopt = false, laatste = null;
+  // ctx: { ams: {datum, uur, min} }. Geeft null (niets te doen) of { datum, t, exit, ms }.
+  async function tik(ctx) {
+    const a = ctx.ams;
+    if (!inDagVenster(o.venster, a) || loopt || datum === a.datum) return null;
+    loopt = true;
+    datum = a.datum;
+    try {
+      const t = new Date().toISOString();
+      const k = await kindProces(env, [run].concat(voor, o.argv), maxMin * 60000 + marge);
+      laatste = { datum: a.datum, t: t, exit: k.code, ms: k.ms };
+      return laatste;
+    } finally { loopt = false; }
+  }
+  function info() { return { aan: true, loopt: loopt, laatste: laatste }; }
+  return { tik: tik, info: info };
+}
+
+module.exports = { maak: maak, maakVeeg: maakVeeg, inVeegVenster: inVeegVenster, maakDagRonde: maakDagRonde, inDagVenster: inDagVenster,
+  BEWAAR: BEWAAR, PATROON: PATROON };

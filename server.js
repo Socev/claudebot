@@ -3735,6 +3735,7 @@ function handleRequest(req, res) {
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
       sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
       scripts_veeg: typeof scriptsVeegInfo === 'function' ? scriptsVeegInfo() : { aan: false },   // wv1311: opruimronde socev-run --veeg (exit, aantal opgeveegd; geen namen)
+      ovis_kalender: typeof ovisKalenderInfo === 'function' ? ovisKalenderInfo() : { aan: false },   // wv1385: OVIS Calendar-feeds (datum, exit, duur; geen namen of URL's)
       ovis: typeof ovisInfo === 'function' ? ovisInfo() : { aan: false },   // wv979: OVIS-register (laatste dag-, nacht- en Bibliothecarisronde; aantallen, geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
@@ -14685,6 +14686,27 @@ async function scriptsVeegTik() {
   } catch (e) { logError('scripts-veeg-tik', e); }
 }
 if (scriptsVeeg && SERVER_ECHT) { setInterval(function () { scriptsVeegTik(); }, 5 * 60000).unref(); }
+// ── OVIS Calendar: externe kalenders (iCal-feeds) verversen (wv1385; waarom en grenzen in sb2-nacht.js maakDagRonde en kalender_feed.py) ──
+// Elke 5 min (echte pod, rol primair); werk alleen 06:35–07:34 en eenmaal per datum; via socev-run met hartslag ovis-kalender (36 u).
+const ovisKalender = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'ovis-kalender', hartslag: 'ovis-kalender', maxMin: 5,
+      venster: { van: [6, 35], tot: [7, 35] }, socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env,
+      argv: ['python3', '-I', '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2/kalender_feed.py'] }) : null;
+  } catch (e) { logError('ovis-kalender', e); return null; }
+})();
+function ovisKalenderInfo() { if (!ovisKalender) return { aan: false }; try { return ovisKalender.info(); } catch (e) { return { fout: true }; } }
+async function ovisKalenderTik() {
+  if (!ovisKalender || !SERVER_ECHT || !rolPrimair()) return;
+  try {
+    const u = await ovisKalender.tik({ ams: ovisAms() });
+    if (u) schrijfLog(nu() + ' ovis-kalender ' + velden({ exit: u.exit, ms: u.ms }));
+  } catch (e) { logError('ovis-kalender-tik', e); }
+}
+if (ovisKalender && SERVER_ECHT) { setInterval(function () { ovisKalenderTik(); }, 5 * 60000).unref(); }
 // managers.js soort script: Nu draaien (geen stempel, geen box-rij; het rapport gaat via managers.js naar de machinekamer)
 function ovisStartScript(m) {
   if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');

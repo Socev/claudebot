@@ -204,8 +204,41 @@ exec "$@"
     toets('echte socev-run: één box-rij voor de dode run', (fs.readFileSync(box, 'utf8').match(/Script dood: afgebroken zonder eind/g) || []).length === 1);
   } else console.log('OVERGESLAGEN echte socev-run (geen release op deze machine)');
 
+  // ── dagronde maakDagRonde (wv1385, OVIS Calendar) ──
+  const V = { van: [6, 35], tot: [7, 35] };
+  toets('dagvenster: 06:34 nee, 06:35 ja, 07:34 ja, 07:35 nee', !N.inDagVenster(V, ams('x', 6, 34)) && N.inDagVenster(V, ams('x', 6, 35))
+    && N.inDagVenster(V, ams('x', 7, 34)) && !N.inDagVenster(V, ams('x', 7, 35)));
+  const dlog = path.join(d, 'dag-aanroepen.log');
+  fs.writeFileSync(path.join(d, 'dag-run'), `#!/usr/bin/env bash
+echo "$*" >> "${dlog}"
+[ -n "\${NEP_DAG_FOUT:-}" ] && exit 1
+echo '{"ok": true}'; exit 0
+`, { mode: 0o755 });
+  const dAanroep = function () { try { return fs.readFileSync(dlog, 'utf8').trim().split('\n').filter(Boolean); } catch (e) { return []; } };
+  const dag = function (x) { return N.maakDagRonde(Object.assign({ naam: 'ovis-kalender', hartslag: 'ovis-kalender', maxMin: 3, venster: V,
+    socevRun: path.join(d, 'dag-run'), env: env, argv: ['python3', '-I', '/pad/kalender_feed.py'] }, x || {})); };
+  let g = dag();
+  toets('dagronde buiten het venster: niets', await g.tik({ ams: ams('2026-10-28', 6, 0) }) === null && dAanroep().length === 0);
+  u = await g.tik({ ams: ams('2026-10-28', 6, 40) });
+  toets('dagronde: via socev-run met naam, hartslag en tijdslimiet', dAanroep()[0] === '--naam ovis-kalender --hartslag ovis-kalender --max-min 3 -- python3 -I /pad/kalender_feed.py', dAanroep());
+  toets('dagronde: uitkomst exit 0 met datum', u && u.exit === 0 && u.datum === '2026-10-28' && typeof u.ms === 'number', u);
+  toets('dagronde: tweede tik zelfde datum niets', await g.tik({ ams: ams('2026-10-28', 7, 0) }) === null && dAanroep().length === 1);
+  toets('dagronde: volgende datum weer', (await g.tik({ ams: ams('2026-10-29', 6, 35) })) !== null && dAanroep().length === 2);
+  toets('dagronde: info zonder namen', JSON.stringify(Object.keys(g.info().laatste)) === JSON.stringify(['datum', 't', 'exit', 'ms']), g.info());
+  u = await dag({ env: Object.assign({}, env, { NEP_DAG_FOUT: '1' }) }).tik({ ams: ams('2026-10-28', 6, 50) });
+  toets('dagronde mislukt: exit 1, geen crash', u && u.exit === 1, u);
+  u = await dag({ hartslag: null }).tik({ ams: ams('2026-10-30', 6, 50) });
+  toets('dagronde zonder hartslag: geen --hartslag', dAanroep().pop() === '--naam ovis-kalender --max-min 3 -- python3 -I /pad/kalender_feed.py');
+  let w1 = false; try { N.maakDagRonde({ naam: 'Fout Naam', venster: V, argv: ['x'] }); } catch (e) { w1 = true; }
+  let w2 = false; try { N.maakDagRonde({ naam: 'ok', venster: V, argv: [] }); } catch (e) { w2 = true; }
+  toets('dagronde: ongeldige naam of leeg commando geweigerd', w1 && w2);
+
   // koppeling
   const s = fs.readFileSync('server.js', 'utf8'), ur = fs.readFileSync('uitrol.sh', 'utf8');
+  toets('server.js: OVIS Calendar-klok alleen echt + primair, 06:35–07:35, via socev-run met hartslag, /health ovis_kalender',
+    /if \(!ovisKalender \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s) && /venster: \{ van: \[6, 35\], tot: \[7, 35\] \}/.test(s)
+    && /naam: 'ovis-kalender', hartslag: 'ovis-kalender'/.test(s) && /ovis_kalender: typeof ovisKalenderInfo === 'function'/.test(s)
+    && /setInterval\(function \(\) \{ ovisKalenderTik\(\); \}, 5 \* 60000\)/.test(s));
   toets('server.js: tik alleen echt + primair, onderhoud en OVIS-nacht doorgegeven', /if \(!sb2Nacht \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s)
     && /onderhoud: function \(\) \{ return !!onderhoud\.stand\(\)\.aan; \}, ovisNacht: ovisLoopt\.nu === 'nacht'/.test(s)
     && /vault: VAULT, grendel: OVIS_LOCK/.test(s));
