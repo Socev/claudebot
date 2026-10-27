@@ -353,6 +353,9 @@ jobs:
       - name: "intake-telling (wv1244, OVIS M1d: Intake-plek met tellingen)"
         if: ${{ !cancelled() }}
         run: bash test/intake-telling.sh
+      - name: "werkers (wv1707, OVIS M4a: Ploeg-register)"
+        if: ${{ !cancelled() }}
+        run: bash test/werkers.sh
       - name: "intake-router (wv980, OVIS Intake stap 2: router in de schaduw)"
         if: ${{ !cancelled() }}
         run: bash test/intake-router.sh

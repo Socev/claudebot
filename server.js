@@ -3748,6 +3748,7 @@ function handleRequest(req, res) {
       ovis: typeof ovisInfo === 'function' ? ovisInfo() : { aan: false },   // wv979: OVIS-register (laatste dag-, nacht- en Bibliothecarisronde; aantallen, geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
+      werkers: typeof werkersInfo === 'function' ? werkersInfo() : { aan: false },   // wv1707 (OVIS M4a): Ploeg-register (aantal werkers, laatste n8n-lezing, check-aantallen; geen namen)
       mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },   // wv1269: App Mediatheek (aantallen, geen inhoud)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761/wv942: App AIX (laatste lezing, catalogus, plaatsing, uur- en weekronde; geen inhoud)
@@ -11938,6 +11939,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
+        if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
         if (route === 'GET /app/harvester' || route.indexOf('POST /app/harvester/') === 0) return typeof appHarvester === 'function' ? appHarvester(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'harvester');   // wv820: App Harvester
         if (route === 'GET /app/ideeen' || /^GET \/app\/ideeen\/(plaatje\/[1-9][0-9]{0,11}\/[0-2]|proefplaatje\/k\d{2,3}\/[0-2]|kaart\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||
           route === 'POST /app/ideeen/naar-ideeenbus' || /^POST \/app\/ideeen\/kaart\/[ka]\d{2,3}\/(deel|niet)$/.test(route))   // wv942: AIX lezen, Deel/Niet per kaart of antwoord
@@ -15527,6 +15529,49 @@ async function appRingkaart(req, res, a) {
   return appStuur(res, 200, uit);
 }
 // ── einde ringkaart ──
+
+// ── Ploeg-register (wv1707, OVIS M4a; ontwerplijnen § 6) ──
+// GET /app/werkers: alle agents, wachters, managers en routines uit werkers.js, met het live rooster en aan/uit uit n8n (de actieve
+// workflows, alleen hun triggerknopen bewaard, 5 min buffer) en de hartslag (dezelfde 60 s-buffer als de ringkaart). Alleen lezen; Nu draaien blijft /app/managers/ronde. Vaste plek:
+// geen sessie, skill of bron. Ontbreekt werkers.js in de release (terugrol), dan 404 en toont de app de Ploeg zonder register.
+const WERKERS_MOD = (function () { const p = path.join(__dirname, 'werkers.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('werkers', e); return null; } })();
+const WERKERS_N8N_MS = 5 * 60000;
+let werkersN8n = null;   // { t, l } of null; l = null bij een fout
+async function werkersWorkflows() {
+  if (werkersN8n && Date.now() - werkersN8n.t < WERKERS_N8N_MS) return werkersN8n.l;
+  let l = null;
+  try {
+    l = [];
+    let cursor = null, n = 0;
+    do {
+      const j = await appN8n('/workflows?limit=100&active=true' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+      (Array.isArray(j && j.data) ? j.data : []).forEach(function (w) { if (w && w.active && !w.isArchived) l.push(WERKERS_MOD.kaal(w)); });
+      cursor = j && j.nextCursor;
+    } while (cursor && ++n < 20);
+    if (cursor) throw new Error('n8n: meer dan 20 pagina\'s');
+    werkersN8n = { t: Date.now(), l: l };
+  } catch (e) { logError('app-werkers', e); l = null; werkersN8n = { t: Date.now() - WERKERS_N8N_MS + 30000, l: null }; }   // fout: 30 s niet opnieuw
+  return l;
+}
+let werkersLaatst = null;   // voor /health: { t, n8n_actief, ontbreekt, niet_actief, hartslag_zonder_werker }
+async function appWerkers(req, res, a) {
+  if (!WERKERS_MOD) return appWeiger(res, 404, 'Het Ploeg-register zit niet in deze versie van de pod', 'werkers ontbreekt');
+  appStaat.tellers.werkers = appStaat.tellers.werkers || [];
+  if (!appTeller('werkers', 300, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens werkers');
+  let uit;
+  try {
+    const wf = await werkersWorkflows();
+    const hs = typeof ringkaartRijen === 'function' ? await ringkaartRijen() : null;
+    uit = WERKERS_MOD.stand({ workflows: wf, hartslag: hs, vast: !!(a && a.soort === 'vast') });
+    const c = uit.check;
+    werkersLaatst = { t: new Date().toISOString(), n8n_actief: c.n8n_actief, ontbreekt: c.ontbreekt ? c.ontbreekt.length : null,
+      niet_actief: c.niet_actief ? c.niet_actief.length : null, hartslag_zonder_werker: c.hartslag_zonder_werker ? c.hartslag_zonder_werker.length : null };
+  } catch (e) { logError('app-werkers', e); return appWeiger(res, 500, 'fout op de pod', 'werkers uitzondering'); }
+  res._app.stil = true;   // de app ververst zolang de Ploeg in beeld is
+  return appStuur(res, 200, Object.assign({ ok: true, vast: !!(a && a.soort === 'vast') }, uit));
+}
+function werkersInfo() { return { aan: !!WERKERS_MOD, werkers: WERKERS_MOD ? WERKERS_MOD.WERKERS.length : 0, laatst: werkersLaatst }; }
+// ── einde Ploeg-register ──
 
 // ── Intake-plek: tellingen (wv1244, OVIS M1d; ontwerplijnen § 2.1 rij Intake, Fable #19) ──
 // GET /app/intake: per bron en entiteit hoeveel er vandaag en deze week binnenkwam (maillog via RPC ovis_intake_telling, facturen-postvak,
