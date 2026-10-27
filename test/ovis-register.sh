@@ -7,6 +7,7 @@
 # idempotent; pagina die tijdens de ronde verandert krijgt geen blok), Bibliothecaris BB1-BB7 met vaste gegevens (en BB5 niet bij
 # niet-dezelfde-als), opgelost/BB7-spoor blijft, afroep stempelt niet, droog schrijft niets, boxRij zonder contactwaarden.
 # wv981 (blok 8): plek 4 POT-factuuradres — vergelijking stampagina ⇄ POT-app/dossier/open nota, BB1/BB2/BB5, niet gemeten ≠ opgelost, kaart.
+# wv1010 (blok 10): plek 6 bank — rekeningpagina ⇄ bank (entiteit, hoofdrekening), Bankregels, blokken, niet gemeten ≠ opgelost, privacy, lezer.
 # Raakt niets buiten een wegwerpmap. Gebruik: bash test/ovis-register.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -309,6 +310,7 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     toets('6 health.ovis en startScript gekoppeld', /ovis: typeof ovisInfo === 'function' \? ovisInfo\(\)/.test(src) && /startScript: ovisStartScript/.test(src));
     toets('6 in RELEASE_OPTIONEEL', /^RELEASE_OPTIONEEL="[^"]*\bovis-register\.js ovis-run\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ovis-srv-'));
+    process.env.BANK_DIR = path.join(dir, 'bank');   // wv1010: nooit de echte bankdatabank in de toets (ontbreekt = niet gemeten)
     const box = path.join(dir, 'vault/00_Systeem/Meldingen/machinekamer.md');
     fs.mkdirSync(path.dirname(box), { recursive: true }); fs.writeFileSync(box, '# box\n\n## [log] 2026-10-24 10:00 — iets\n- status: open\n');
     const st = { klok: { datum: '2026-10-25', uur: 1, min: 15, klok: '2026-10-25 01:15' }, spawns: [], rpc: [], primair: true, kind: { code: 0, uit: '{"ok":true,"paginas":12,"gestuurd":0,"blokken":12,"fouten":[]}' } };
@@ -736,6 +738,156 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
       toets('9 biblio: gemeten en gelijk → opgelost', !n.db.bevindingen.some((x) => x.bevinding_id === id) && b.opgelost >= 1, [n.db.bevindingen.map((x) => x.bevinding_id), b.opgelost]);
       fs.rmSync(v, { recursive: true, force: true });
     }
+  }
+  // ── 10. plek 6: bank (wv1010; Fable vooraf mk-scripts/wv1010/ontwerp.md) — verzonnen rekeningen, nummers en namen ──
+  {
+    const IA = 'NL00TEST0000000011', IB = 'NL00TEST0000000022', IC = 'NL00TEST0000000033', IP = 'NL00TEST0000000044', IX = 'NL00TEST0000000055';
+    const REKP = (naam, e) => '20_Prive/Financien/Rekeningen/Rekening - ' + naam + ' (' + e + ').md';
+    const POTP = '10_Zakelijk/POT_POH_GGZ/Rekening - POT (0044).md';
+    const rekTekst = (iban, ent, extra) => ['---', 'type: rekening', 'iban: "' + iban + '"', 'entiteit_id: ' + ent, 'doel: ""', 'status: vast', 'updated: 2026-10-27', 'ovis:',
+      '  db: ["pod:bank-transacties/rekening#' + iban + '"]', '---', '# Rekening', '', 'Stampagina.', extra || ''].join('\n');
+    const REGELS_T = ['---', 'type: gegenereerd', 'ovis:', '  db: ["pod:bank-transacties/regels"]', '---', '# Bankregels', '', 'Uitleg.', ''].join('\n');
+    const M = () => ({
+      rekeningen: [{ rek: 'ra', bron: 'bunq', iban: IA, status: 'ACTIVE', gezamenlijk: 0, eigenaar: 'David', eigenaar_herkomst: 'systeem' },
+        { rek: 'rb', bron: 'bunq', iban: IB, status: 'ACTIVE', gezamenlijk: 0, eigenaar: 'kind', eigenaar_herkomst: 'machinekamer' },
+        { rek: 'rc', bron: 'bunq', iban: IC, status: 'CANCELLED', gezamenlijk: 0, eigenaar: 'David', eigenaar_herkomst: 'systeem' },
+        { rek: 'rp', bron: 'abn', iban: IP, status: 'ACTIVE', gezamenlijk: 0, eigenaar: 'POT', eigenaar_herkomst: 'systeem' }],
+      posten: [{ rek: 'ra', n: 10, van: '2019-03-02', tot: '2026-10-20' }, { rek: 'rp', n: 4, van: '2016-09-01', tot: '2026-10-01' }],
+      regels: [{ id: 1, soort: 'extern', patroon: 'rb', rek: null, richting: 'af', type: null, categorie: 'cadeaus', subcategorie: null, eigenaar: null, herkomst: 'machinekamer', actief: 1, aangemaakt: '2026-10-21T14:00:00Z', bron_nr: null },
+        { id: 2, soort: 'tegenpartij', patroon: 'jan de proef', rek: null, richting: 'af', type: null, categorie: 'vrienden', subcategorie: null, eigenaar: null, herkomst: 'david', actief: 1, aangemaakt: '2026-10-22T10:00:00Z', bron_nr: 5 },
+        { id: 3, soort: 'tegenpartij', patroon: 'proefstroom bv', rek: null, richting: 'af', type: null, categorie: 'wonen', subcategorie: null, eigenaar: null, herkomst: 'david', actief: 1, aangemaakt: '2026-10-22T10:00:00Z', bron_nr: 6 },
+        { id: 4, soort: 'tegenpartij', patroon: 'medewerker proef', rek: 'rp', richting: 'af', type: null, categorie: 'salaris', subcategorie: null, eigenaar: null, herkomst: 'david', actief: 1, aangemaakt: '2026-10-22T10:00:00Z', bron_nr: 7 },
+        { id: 5, soort: 'tegenpartij', patroon: 'oud', rek: null, richting: 'af', type: null, categorie: 'x', subcategorie: null, eigenaar: null, herkomst: 'david', actief: 0, aangemaakt: '2026-10-01T10:00:00Z', bron_nr: null }],
+      raakt: [{ id: 1, n: 3, laatst: '2026-10-20' }],
+      bron: [{ id: 2, rek: 'ra' }, { id: 3, rek: 'ra' }, { id: 4, rek: 'rp' }],
+      abonnementen: [{ id: 1, rek: 'ra', naam: 'ProefStroom B.V.', actief: 1, categorie: 'wonen' }, { id: 2, rek: 'ra', naam: 'Proefoptiek', actief: 1, categorie: 'gezondheid' },
+        { id: 3, rek: 'ra', naam: 'Onbekend Abonnement', actief: 1, categorie: 'vrije tijd' }, { id: 4, rek: 'rb', naam: 'ProefStroom B.V.', actief: 1, categorie: 'wonen' }],
+      nrs: new Set([77]) });
+    const REG = () => ({ knopen: [{ id: 'org:proefstroom', soort: 'organisatie', rol: 'leverancier', naam: 'ProefStroom', vault_pagina: '20_Prive/Relaties/ProefStroom.md', aliassen: ['ProefStroom B.V.'] },
+      { id: 'org:proefoptiek', soort: 'organisatie', rol: 'leverancier', naam: 'Proefoptiek', vault_pagina: '20_Prive/Relaties/Proefoptiek.md', aliassen: [] },
+      { id: 'PRIVE', soort: 'entiteit', rol: 'eigen', naam: 'Privé', iban: IA }, { id: 'POT', soort: 'entiteit', rol: 'eigen', naam: 'POT', iban: IP }],
+      handvatten: [{ knoop: 'org:proefstroom', soort: 'alias', waarde: 'proefstroom bv', status: 'voorgesteld' }], contact: [], vertaling: [], bevindingen: [], log: [] });
+    const PAG = () => [R.leesRekening(REKP('Hoofd', '0011'), rekTekst(IA, 'PRIVE')), R.leesRekening(REKP('Kind A Sparen', '0022'), rekTekst(IB, 'PRIVE')), R.leesRekening(POTP, rekTekst(IP, 'POT'))];
+    const BANK = (o) => Object.assign({ meting: M(), rek: PAG(), regels: R.leesBankregels(REGELS_T), overig: [], nu: Date.parse('2026-10-28T02:30:00Z') }, o || {});
+    const C = (b, reg) => R.checks([], reg || REG(), [], null, b);
+    const bankB = (r) => r.bevindingen.filter((b) => R.BANK_BEVINDING_RE.test(b.bevinding_id));
+    const ids = (r) => bankB(r).map((b) => b.bevinding_id).join(' ');
+    // parser
+    toets('10 rekeningpagina geldig', PAG().every((p) => p.fouten.length === 0), PAG().map((p) => p.fouten));
+    toets('10 sleutel ≠ iban = fout', R.leesRekening(REKP('Hoofd', '0011'), rekTekst(IA, 'PRIVE').replace('rekening#' + IA, 'rekening#' + IB)).fouten.length > 0);
+    toets('10 privérekening bij de POT-map = fout', R.leesRekening(POTP, rekTekst(IP, 'PRIVE')).fouten.length > 0);
+    toets('10 buiten de vaste plek = fout', R.leesRekening('20_Prive/Financien/Rekening - Hoofd (0011).md', rekTekst(IA, 'PRIVE')).fouten.length > 0);
+    toets('10 entiteit_id anders dan PRIVE/POT = fout', R.leesRekening(REKP('Hoofd', '0011'), rekTekst(IA, 'TG')).fouten.length > 0);
+    toets('10 Bankregels: voorstel "- ?" buiten het blok gevonden', R.leesBankregels(REGELS_T + '- ? alles van X naar wonen\n').voorstellen.length === 1);
+    // vergelijking
+    let r = C(BANK());
+    toets('10 alles gelijk: 0 bankbevindingen, 3 rekeningen gemeten', bankB(r).length === 0 && r.tel.bank === 3 && r.bank.gemeten, [ids(r), r.tel]);
+    toets('10 opgeheven rekening zonder pagina is geen bevinding', !/0033/.test(ids(r)));
+    r = C(BANK({ rek: PAG().slice(0, 2) }));
+    toets('10 POT-rekening zonder pagina: BB2 + hoofdrekening POT', /BB2-bank-rek-0044-[0-9a-f]{6}-geen-pagina/.test(ids(r)) && /BB3-bank-ent-POT-hoofdrekening/.test(ids(r)) && bankB(r).length === 2, ids(r));
+    r = C(BANK({ rek: [R.leesRekening(REKP('Hoofd', '0011'), rekTekst(IA, 'PRIVE')), R.leesRekening(REKP('Kind A Sparen', '0022'), rekTekst(IB, 'PRIVE')), R.leesRekening(POTP, rekTekst(IP, 'POT')), R.leesRekening(REKP('Weg', '0055'), rekTekst(IX, 'PRIVE'))] }));
+    toets('10 pagina voor een rekening die de bank niet kent: BB1', /BB1-bank-rek-0055-[0-9a-f]{6}-onbekend/.test(ids(r)) && bankB(r).length === 1, ids(r));
+    r = C(BANK({ rek: PAG().concat([R.leesRekening(REKP('Hoofd kopie', '0011'), rekTekst(IA, 'PRIVE'))]) }));
+    toets('10 twee pagina\'s met hetzelfde nummer: BB5 (+ hoofdrekening PRIVE)', /BB5-bank-rek-0011-[0-9a-f]{6}-twee/.test(ids(r)), ids(r));
+    const mE = M(); mE.rekeningen[1].eigenaar = 'POT';
+    r = C(BANK({ meting: mE }));
+    toets('10 eigenaar in de bank POT, pagina PRIVE: BB3 entiteit', /BB3-bank-rek-0022-[0-9a-f]{6}-entiteit/.test(ids(r)), ids(r));
+    const regE = REG(); regE.knopen[2].iban = IP;
+    toets('10 entiteitpagina PRIVE noemt het nummer van de POT-rekening: BB3 hoofdrekening', /BB3-bank-ent-PRIVE-hoofdrekening/.test(ids(C(BANK(), regE))), ids(C(BANK(), regE)));
+    const mH = M(); mH.regels[0].herkomst = 'onbekend';
+    r = C(BANK({ meting: mH }));
+    toets('10 regel met onbekende herkomst: BB7 serious', bankB(r).some((b) => b.bevinding_id === 'BB7-bank-regel-1-herkomst' && b.ernst === 'serious'), ids(r));
+    const mD = M(); mD.regels[0].aangemaakt = '2024-01-01T00:00:00Z'; mD.raakt[0].laatst = '2024-02-01';
+    toets('10 regel die > 400 dagen niets raakte: BB6 dood', /BB6-bank-regel-1-dood/.test(ids(C(BANK({ meting: mD })))), ids(C(BANK({ meting: mD }))));
+    const mJ = M(); mJ.regels[0].aangemaakt = '2025-06-01T00:00:00Z'; mJ.raakt[0].laatst = '2025-11-01';
+    toets('10 jaarregel (laatst 361 dagen geleden): niet dood', !/dood/.test(ids(C(BANK({ meting: mJ })))));
+    r = C(BANK({ regels: null }));
+    toets('10 Bankregels-pagina weg: BB2', /BB2-bank-regels-geen-pagina/.test(ids(r)), ids(r));
+    r = C(BANK({ regels: R.leesBankregels(REGELS_T + '- ? alles van Jan de Proef NL00TEST0000000099 naar vrienden\n') }));
+    toets('10 voorstel op de pagina: BB6, zonder de tekst van het voorstel', /BB6-bank-regel-voorstel-/.test(ids(r)) && !bankB(r).some((b) => /Jan|NL00/.test(b.samenvatting + b.detail)), bankB(r));
+    r = C(BANK({ overig: [{ pad: '20_Prive/Financien/Notitie.md', tekst: 'zie pod:bank-transacties/transactie#77 en pod:bank-transacties/transactie#78 en pod:bank-transacties/regel#9' }] }));
+    toets('10 verwijzing naar een post of regel die niet bestaat: BB8 (2×), bestaande niet', bankB(r).filter((b) => /BB8-bank-verwijzing-/.test(b.bevinding_id)).length === 2, ids(r));
+    r = C(BANK({ overig: [{ pad: '20_Prive/Financien/Oud/Rekening - Hoofd (0011).md', tekst: rekTekst(IA, 'PRIVE') }] }));
+    toets('10 rekeningpagina buiten de vaste plek: BB6', /BB6-bank-buiten-plek-/.test(ids(r)), ids(r));
+    // privacy: geen nummer, pad of rekeningnaam in wat naar de databank gaat (Fable #2)
+    const alle = [C(BANK({ rek: PAG().slice(0, 2) })), C(BANK({ meting: mE })), C(BANK({ meting: mH })), C(BANK({ rek: PAG().concat([R.leesRekening(REKP('Hoofd kopie', '0011'), rekTekst(IA, 'PRIVE'))]) })),
+      C(BANK({ rek: [R.leesRekening(REKP('Kind A Sparen', '0022'), '---\ntype: rekening\n---\n')] }))].map(bankB).flat();
+    toets('10 bevindingen zonder IBAN, pad of rekeningnaam', alle.length >= 5 && !alle.some((b) => /NL00TEST|Rekeningen\/|Kind A|Hoofd kopie|jan de proef|medewerker/i.test(b.bevinding_id + b.samenvatting + b.detail)), alle);
+    toets('10 paden alleen in r.bank.paden (stdout machinekamer)', (() => { const x = C(BANK({ rek: [R.leesRekening(REKP('Kind A Sparen', '0022'), '---\ntype: rekening\n---\n')] })); return Object.values(x.bank.paden).some((p) => /Kind A/.test(p)); })());
+    // niet gemeten
+    r = C(null);
+    toets('10 geen banklezer: niet gemeten, geen bankbevindingen', r.bank.gemeten === false && r.tel.bank === 'niet gemeten' && bankB(r).length === 0, r.tel);
+    r = C(BANK({ meting: { fout: 'bank gaf geen rekeningen' } }));
+    toets('10 meting met fout: niet gemeten', r.bank.gemeten === false && bankB(r).length === 0);
+    toets('10 bankMeting: nul rekeningen = fout', !!R.bankMeting({ meet: (b) => b.map(() => []) }, []).fout);
+    toets('10 bankMeting: zonder lezer = fout', !!R.bankMeting(null, []).fout);
+    // blokken
+    const orgVan = R.orgOpNaam(REG());
+    const bA = R.bankBlokTekst(PAG()[0], M(), orgVan);
+    toets('10 blok: bank, eigenaar, posten op maand, abonnement gekoppeld aan de organisatie, gezondheid niet genoemd', /bunq · actief · niet gezamenlijk/.test(bA) && /ingedeeld door het systeem/.test(bA) && /van 3-2019 t\/m 10-2026/.test(bA)
+      && /\[\[20_Prive\/Relaties\/ProefStroom\|ProefStroom\]\]/.test(bA) && !/Proefoptiek|Onbekend Abonnement/.test(bA) && /en 2 zonder pagina/.test(bA) && /content_hash="[0-9a-f]{16}"/.test(bA), bA);
+    toets('10 blok zonder datum of bedrag (geen churn)', !/\d{1,2}-\d{1,2}-\d{4}|€|saldo [0-9]/.test(bA.replace(/van 3-2019 t\/m 10-2026/, '')), bA);
+    const bB = R.bankBlokTekst(PAG()[1], M(), orgVan);
+    toets('10 blok kind-rekening: abonnement alleen geteld', !/ProefStroom\]\]/.test(bB) && /1 \(geen met een pagina/.test(bB) && /gezet door de machinekamer/.test(bB), bB);
+    const bP = R.bankBlokTekst(PAG()[2], M(), orgVan);
+    toets('10 blok POT: regels alleen geteld, geen link naar Bankregels', /Bankregels voor deze rekening: 1 \(alleen geteld/.test(bP) && !/\[\[20_Prive/.test(bP), bP);
+    const bR = R.bankRegelsBlokTekst(M(), PAG(), orgVan);
+    toets('10 Bankregels: extern als rekening …0022 met link, organisatie als link, persoon niet bij naam, POT alleen geteld, ingetrokken geteld',
+      /R1 · overboekingen naar \[\[20_Prive\/Financien\/Rekeningen\/Rekening - Kind A Sparen \(0022\)\|rekening …0022\]\]/.test(bR) && /R3 · betalingen met \[\[20_Prive\/Relaties\/ProefStroom\|ProefStroom\]\]/.test(bR)
+      && /R2 · betalingen met een tegenpartij \(naam blijft in de bank\)/.test(bR) && !/jan de proef|medewerker|R4 /i.test(bR) && /Op de POT-rekening: 1 regel/.test(bR) && /Ingetrokken.*: 1/.test(bR)
+      && /gezet door de machinekamer/.test(bR) && /gezet via het gesprek met Socev/.test(bR) && /raakte 3 posten, laatst 10-2026/.test(bR) && !/rb|ra\b/.test(bR.replace(/[a-z]+rb|ra[a-z]/g, '')), bR);
+    toets('10 blokken idempotent (zelfde invoer = zelfde tekst)', R.bankBlokTekst(PAG()[0], M(), orgVan) === bA && R.bankRegelsBlokTekst(M(), PAG(), orgVan) === bR);
+    // de echte lezer op een wegwerp-SQLite: alleen SELECT, alleen lezen
+    const dbPad = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ovis-bank-')), 'transacties.sqlite');
+    { const { DatabaseSync } = require('node:sqlite'); const d = new DatabaseSync(dbPad);
+      d.exec("CREATE TABLE rekeningen (rek TEXT PRIMARY KEY, bron TEXT, iban TEXT, status TEXT, gezamenlijk INTEGER, eigenaar TEXT, eigenaar_herkomst TEXT);" +
+        "CREATE TABLE transacties (nr INTEGER PRIMARY KEY, rek TEXT, datum TEXT, vervangen_door INTEGER);" +
+        "CREATE TABLE regels (id INTEGER PRIMARY KEY, soort TEXT, patroon TEXT, rek TEXT, richting TEXT, type TEXT, categorie TEXT, subcategorie TEXT, eigenaar TEXT, herkomst TEXT, actief INTEGER, aangemaakt TEXT, bron_nr INTEGER);" +
+        "CREATE TABLE verrijking (nr INTEGER PRIMARY KEY, regel_id INTEGER);" +
+        "CREATE TABLE abonnementen (id INTEGER PRIMARY KEY, rek TEXT, naam TEXT, actief INTEGER, categorie TEXT);" +
+        "INSERT INTO rekeningen VALUES ('ra','bunq','" + IA + "','ACTIVE',0,'David','systeem');" +
+        "INSERT INTO transacties VALUES (77,'ra','2026-10-01',NULL),(78,'ra','2026-10-02',NULL);" +
+        "INSERT INTO regels VALUES (1,'extern','ra',NULL,'af',NULL,'x',NULL,NULL,'machinekamer',1,'2026-10-21T00:00:00Z',77);" +
+        "INSERT INTO verrijking VALUES (77,1);"); d.close(); }
+    const L = R.bankLezer(dbPad);
+    const lm = R.bankMeting(L, [77, 99]);
+    toets('10 lezer: echte SQLite gelezen, verwijzing 77 bestaat, 99 niet', !lm.fout && lm.rekeningen.length === 1 && lm.raakt[0].n === 1 && lm.bron[0].rek === 'ra' && lm.nrs.has(77) && !lm.nrs.has(99), lm);
+    let geweigerd = false; try { L.meet([{ sql: 'DELETE FROM regels' }]); } catch (e) { geweigerd = /alleen lezen/.test(e.message); }
+    toets('10 lezer weigert alles wat geen SELECT is', geweigerd);
+    let ro = false; try { L.meet([{ sql: 'SELECT 1; DELETE FROM regels' }]); } catch (e) { ro = true; }
+    toets('10 lezer: tweede statement achter een SELECT komt er niet door', ro || (() => { const { DatabaseSync } = require('node:sqlite'); const d = new DatabaseSync(dbPad, { readOnly: true }); const n = d.prepare('SELECT count(*) AS n FROM regels').get().n; d.close(); return n === 1; })());
+    toets('10 lezer: databank weg = fout (niet gemeten)', !!R.bankMeting(R.bankLezer(dbPad + '.weg'), []).fout);
+    // compiler (nacht, grendel) en Bibliothecaris via de module
+    const PROEF = { [REKP('Hoofd', '0011')]: rekTekst(IA, 'PRIVE'), [REKP('Kind A Sparen', '0022')]: rekTekst(IB, 'PRIVE'), [POTP]: rekTekst(IP, 'POT'), '20_Prive/Financien/Bankregels.md': REGELS_T,
+      '20_Prive/Financien/Notitie.md': '# Notitie\n\nGeen verwijzing.\n' };
+    const v9 = wegwerpVault(PROEF);
+    const n9 = nepDb({ knopen: REG().knopen, handvatten: REG().handvatten, contact: [], vertaling: [], bevindingen: [], log: [] });
+    let bankIo = { meet: (b) => { const m = M(); return Object.keys(R.BANK_SQL).map((k) => m[k]).concat(b.length > Object.keys(R.BANK_SQL).length ? [[]] : []); } };
+    const m9 = R.maak({ vault: v9, sbRpc: n9.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t), nu: () => Date.parse('2026-10-28T01:15:00Z'), bank: { meet: (b) => bankIo.meet(b) } });
+    let c9 = await m9.compileer('nacht', { grendel: true });
+    const naA = fs.readFileSync(path.join(v9, REKP('Hoofd', '0011')), 'utf8'), naR = fs.readFileSync(path.join(v9, '20_Prive/Financien/Bankregels.md'), 'utf8');
+    toets('10 nacht: 4 bankblokken geschreven (3 rekeningen + Bankregels)', c9.bankblokken === 4 && naA.indexOf('<!-- ovis:blok begin id="rek:' + IA + '"') > 0 && /R1 · overboekingen/.test(naR), c9);
+    toets('10 nacht: vingerafdruk van de pagina blijft gelijk', R.vingerafdruk(naA).sha === R.leesRekening(REKP('Hoofd', '0011'), rekTekst(IA, 'PRIVE')).sha);
+    c9 = await m9.compileer('nacht', { grendel: true });
+    toets('10 nacht tweede keer: niets geschreven', c9.bankblokken === 0 && fs.readFileSync(path.join(v9, REKP('Hoofd', '0011')), 'utf8') === naA, c9);
+    let b9 = await m9.bibliothecaris({ afroep: true });
+    toets('10 Bibliothecaris na de nacht: 0 bankbevindingen, niets verouderd, zin noemt de bank', b9.bevindingen.filter((b) => R.BANK_BEVINDING_RE.test(b.bevinding_id)).length === 0 && b9.tel.bank === 3 && b9.tel.bank_verouderd === 0 && /bankrekeningen: 3 gemeten, 0 verschil/.test(b9.zin), [b9.zin, b9.tel, b9.bevindingen.map((b) => b.bevinding_id)]);
+    fs.writeFileSync(path.join(v9, REKP('Hoofd', '0011')), naA.replace('- Bij de bank: bunq', '- Bij de bank: bunq (met de hand)'));
+    c9 = await m9.compileer('nacht', { grendel: true });
+    toets('10 handwerk in het blok: niet overschreven', fs.readFileSync(path.join(v9, REKP('Hoofd', '0011')), 'utf8').indexOf('(met de hand)') > 0 && c9.handwerk >= 1, c9);
+    b9 = await m9.bibliothecaris({ afroep: true });
+    toets('10 handwerk: BB8 bank', b9.bevindingen.some((b) => /^BB8-bank-rek-0011-[0-9a-f]{6}-blok$/.test(b.bevinding_id)), b9.bevindingen.map((b) => b.bevinding_id));
+    // niet gemeten ≠ opgelost
+    bankIo = { meet: () => { throw new Error('databank weg'); } };
+    const voor = n9.db.bevindingen.filter((b) => /bank/.test(b.bevinding_id)).length;
+    b9 = await m9.bibliothecaris({ afroep: true });
+    toets('10 bank weg: niet gemeten, open bankbevinding blijft open', voor === 1 && n9.db.bevindingen.filter((b) => /bank/.test(b.bevinding_id)).length === 1 && /bankrekeningen niet gemeten/.test(b9.zin), [voor, b9.zin]);
+    c9 = await m9.compileer('nacht', { grendel: true });
+    toets('10 bank weg: nacht raakt geen pagina aan, meldt de fout', c9.bankblokken === 0 && c9.fouten.some((f) => f.pad === '(bank)'), c9);
+    // weekkaart
+    const kb9 = R.kaartBiblio({ knopen: [], kaarten: [], bevindingen: [{ bevinding_id: 'BB2-bank-rek-0044-abcdef-geen-pagina', check_id: 'BB2', ernst: 'warning', status: 'open' },
+      { bevinding_id: 'BB3-bank-rek-0022-abcdef-entiteit', check_id: 'BB3', ernst: 'warning', status: 'open' }] }, { nu: Date.parse('2026-10-28T02:31:00Z') });
+    toets('10 weekkaart: bank in gewone taal, BB3 bank komt erop', kb9.kaart && kb9.kaart.stappen.length === 2 && /Bankrekening …0044 heeft nog geen pagina/.test(kb9.kaart.stappen[0]) && /Rekening …0022/.test(kb9.kaart.stappen[1]), kb9);
   }
   console.log(goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

@@ -330,7 +330,7 @@ function huidigBlok(tekst) {
 // ── Bibliothecaris: de checks (pure functie over pagina's en register) ──
 function kortHash(s) { return crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 8); }
 function schoon(s, n) { s = String(s == null ? '' : s).replace(/[\r\n`|]/g, ' ').slice(0, n || 300); return SLEUTEL_RE.test(s) ? '(weggelaten: leek op een sleutel)' : s; }
-function checks(paginas, reg, compileerFouten, pot) {
+function checks(paginas, reg, compileerFouten, pot, bank) {
   const b = [], tel = { paginas: paginas.length, geldig: 0, verouderd: 0, niet_getoetst: 0, wacht_op_ja: 0 };
   const knopen = {}; (reg.knopen || []).forEach(function (k) { knopen[k.id] = k; });
   const hv = {}; (reg.handvatten || []).forEach(function (h) { (hv[h.knoop] = hv[h.knoop] || []).push(h); });
@@ -443,8 +443,9 @@ function checks(paginas, reg, compileerFouten, pot) {
     if (/^databank: /.test(cf.fout)) bev('BB6', 'compileer-' + kortHash(cf.pad), 'pagina niet gecompileerd: ' + String(cf.fout).slice(10, 120), cf.pad + ': ' + cf.fout + '. Voorstel: pagina herstellen (Socev) of de machinekamer laat de databankfunctie nalopen.');
   });
   const pc = potChecks(anker, pot, bev, tel);   // wv981
+  const bc = bankChecks(bank, reg, bev, tel);   // wv1010
   const uniek = {}; b.forEach(function (x) { uniek[x.bevinding_id] = x; });
-  return { bevindingen: Object.keys(uniek).sort().map(function (k) { return uniek[k]; }), tel: tel, pot: pc };
+  return { bevindingen: Object.keys(uniek).sort().map(function (k) { return uniek[k]; }), tel: tel, pot: pc, bank: bc };
 }
 
 // ── wv981: koppelregel plek 4 (POT in D1 fin; architectuur § 4 rij 4; ontwerp + Fable vooraf mk-scripts/wv981/ontwerp.md) ──
@@ -849,6 +850,272 @@ function vjSchrijf(tekst, acties) {
   return { tekst: gedaan.length ? regels.join(nl) : null, gedaan: gedaan, overgeslagen: overgeslagen };
 }
 
+// ── wv1010: koppelregel plek 6 (bank; architectuur § 4 rij 6; ontwerp + Fable vooraf mk-scripts/wv1010/ontwerp.md) ──
+// Per eigen rekening een kleine stampagina (type rekening: iban, entiteit_id PRIVE of POT, doel). De bankdatabank op de pod is de bron van
+// al het andere (status, eigenaar, posten, abonnementen, regels) en wordt alleen gelezen (readOnly, alleen SELECT): de compiler zet het
+// 's nachts in een gegenereerd blok op elke rekeningpagina en op de pagina Bankregels, de Bibliothecaris legt pagina's en bank naast elkaar.
+// Eén vergelijking over de grens: entiteit_id op de pagina ⇄ eigenaar in de bank (POT → POT, de rest → PRIVE), plus het rekeningnummer
+// op de entiteitpagina van PRIVE/POT (Fable #1). In bevindingen en kaarten nooit een volledig rekeningnummer, pad, rekeningnaam of
+// regelpatroon (kinderen, derden, medewerkers op de POT-rekening; de Supabase-backup is onversleuteld, Fable #2): alleen "…1234".
+// Bank leeg of niet te lezen = niet gemeten, nooit "opgelost" (Fable #4). Regels van de POT-rekening alleen als aantal (Fable #5).
+const BANK_SLEUTEL_RE = /^pod:bank-transacties\/rekening#([A-Z]{2}[0-9]{2}[A-Z0-9]{11,30})$/, BANK_REGELS_SLEUTEL = 'pod:bank-transacties/regels';
+const REK_RE = /^(20_Prive\/Financien\/Rekeningen|10_Zakelijk\/[^/]+)\/Rekening - [^/]+\.md$/, REK_NAAM_RE = /^Rekening - .+\.md$/;
+const REK_PRIVE_MAP = '20_Prive/Financien/Rekeningen', BANKREGELS_PAD = '20_Prive/Financien/Bankregels.md', FINANCIEN_MAP = '20_Prive/Financien';
+const BANK_VERW_RE = /pod:bank-transacties\/(transactie|regel)#(\d{1,9})\b/g;
+const BANK_BEVINDING_RE = /^BB\d-bank-/;
+const BANK_DOOD_MS = 400 * 86400000;   // Fable #9: een regel voor een jaarpost raakt maar één keer per jaar
+const BANK_REGEL_SOORT = ['extern', 'intern', 'tegen_iban', 'tegenpartij'];
+const BANK_STIL = ['gezondheid', 'kinderen'];   // abonnementen in deze categorieën alleen tellen, nooit noemen (Fable #12)
+const BANK_SQL = {
+  rekeningen: 'SELECT rek, bron, iban, status, gezamenlijk, eigenaar, eigenaar_herkomst FROM rekeningen ORDER BY rek',
+  posten: 'SELECT rek, count(*) AS n, min(datum) AS van, max(datum) AS tot FROM transacties WHERE vervangen_door IS NULL GROUP BY rek',
+  regels: 'SELECT id, soort, patroon, rek, richting, type, categorie, subcategorie, eigenaar, herkomst, actief, aangemaakt, bron_nr FROM regels ORDER BY id',
+  raakt: 'SELECT v.regel_id AS id, count(*) AS n, max(t.datum) AS laatst FROM verrijking v JOIN transacties t ON t.nr = v.nr WHERE v.regel_id IS NOT NULL GROUP BY v.regel_id',
+  bron: 'SELECT r.id, t.rek FROM regels r JOIN transacties t ON t.nr = r.bron_nr',
+  abonnementen: 'SELECT id, rek, naam, actief, categorie FROM abonnementen ORDER BY id',
+};
+// De lezer (server.js en ovis-run.js steken hem erin; Fable #3): readOnly, query_only, alleen SELECT, één open per meting.
+function bankLezer(pad) {
+  return { meet: function (batch) {
+    if (!Array.isArray(batch) || batch.some(function (q) { return !q || !/^\s*select\b/i.test(q.sql); })) throw new Error('alleen lezen');
+    if (!fs.existsSync(pad)) throw new Error('bankdatabank ontbreekt');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(pad, { readOnly: true });
+    try {
+      db.exec('PRAGMA busy_timeout = 5000'); db.exec('PRAGMA query_only = 1');
+      return batch.map(function (q) { const st = db.prepare(q.sql); return st.all.apply(st, q.params || []); });
+    } finally { db.close(); }
+  } };
+}
+// → { rekeningen, posten, regels, raakt, bron, abonnementen, nrs (Set van bestaande gevraagde posten) } of { fout }
+function bankMeting(io, nrs) {
+  try {
+    if (!io || typeof io.meet !== 'function') return { fout: 'geen banklezer' };
+    const namen = Object.keys(BANK_SQL), batch = namen.map(function (n) { return { sql: BANK_SQL[n], params: [] }; });
+    const ns = Array.from(new Set((nrs || []).map(Number).filter(function (x) { return Number.isInteger(x) && x > 0; }))).slice(0, 500);
+    if (ns.length) batch.push({ sql: 'SELECT nr FROM transacties WHERE nr IN (' + ns.map(function () { return '?'; }).join(',') + ')', params: ns });
+    const r = io.meet(batch);
+    if (!Array.isArray(r) || r.length !== batch.length || !r.every(Array.isArray)) return { fout: 'bank gaf geen resultaat' };
+    const m = {}; namen.forEach(function (n, i) { m[n] = r[i]; });
+    if (!m.rekeningen.length) return { fout: 'bank gaf geen rekeningen' };   // leeg is niet gemeten (Fable #4)
+    m.nrs = new Set(ns.length ? r[namen.length].map(function (x) { return Number(x.nr); }) : []);
+    return m;
+  } catch (e) { return { fout: String(e && e.message || e).replace(/[A-Z]{2}\d{2}[A-Z0-9]{8,}/g, '…').replace(/\d{6,}/g, '#').slice(0, 120) }; }
+}
+function e4(iban) { return String(iban || '').slice(-4) || '?'; }
+function rekId(iban) { return 'bank-rek-' + e4(iban) + '-' + kortHash(iban).slice(0, 6); }   // stabiel: van het nummer, niet van het pad (Fable #8)
+// Rekeningpagina → gegevens of fouten (zelfde vingerafdruk en parser als de entiteitpagina's)
+function leesRekening(rel, tekst) {
+  const uit = { pad: rel, fouten: [], tekst: tekst };
+  if (Buffer.byteLength(String(tekst)) > MAX_BYTES) { uit.fouten.push('pagina groter dan 256 kB'); return uit; }
+  const fm = frontmatter(tekst);
+  if (fm.fout) { uit.fouten.push(fm.fout); return uit; }
+  const va = vingerafdruk(tekst);
+  if (va.fout) { uit.fouten.push(va.fout); return uit; }
+  uit.sha = va.sha;
+  const v = fm.velden, f = uit.fouten;
+  if (v.type !== 'rekening') { f.push('type is niet rekening'); return uit; }
+  uit.iban = typeof v.iban === 'string' ? v.iban.replace(/\s/g, '').toUpperCase() : '';
+  uit.entiteit_id = typeof v.entiteit_id === 'string' ? v.entiteit_id : '';
+  uit.doel = typeof v.doel === 'string' ? v.doel : '';
+  const ov = v.ovis && typeof v.ovis === 'object' && !Array.isArray(v.ovis) ? v.ovis : {};
+  uit.db = lijst(ov.db);
+  if (!REK_RE.test(rel)) f.push('rekeningpagina staat niet op een vaste plek');
+  if (!IBAN_VOL.test(uit.iban)) f.push('iban ontbreekt of is ongeldig');
+  const sl = uit.db.map(function (s) { return BANK_SLEUTEL_RE.exec(s); }).filter(Boolean);
+  if (sl.length !== 1 || sl[0][1] !== uit.iban) f.push('ovis.db noemt niet precies één bankrekening, gelijk aan iban');
+  if (['PRIVE', 'POT'].indexOf(uit.entiteit_id) < 0) f.push('entiteit_id moet PRIVE of POT zijn');
+  else if ((uit.entiteit_id === 'PRIVE') !== /^20_Prive\//.test(rel)) f.push('een privérekening hoort in de privémap, een POT-rekening bij de entiteit');
+  if (uit.doel.length > 300) f.push('doel langer dan 300 tekens');
+  if (['vast', 'concept'].indexOf(v.status) < 0) f.push('status moet vast of concept zijn');
+  return uit;
+}
+// Bankregels-pagina: de weergave; wat erboven of eronder met "- ?" staat is een voorstel
+function leesBankregels(tekst) {
+  const uit = { pad: BANKREGELS_PAD, fouten: [], tekst: tekst, voorstellen: [] };
+  const fm = frontmatter(tekst);
+  if (fm.fout) { uit.fouten.push(fm.fout); return uit; }
+  const va = vingerafdruk(tekst);
+  if (va.fout) { uit.fouten.push(va.fout); return uit; }
+  uit.sha = va.sha;
+  const ov = fm.velden.ovis && typeof fm.velden.ovis === 'object' && !Array.isArray(fm.velden.ovis) ? fm.velden.ovis : {};
+  if (lijst(ov.db).indexOf(BANK_REGELS_SLEUTEL) < 0) uit.fouten.push('ovis.db noemt ' + BANK_REGELS_SLEUTEL + ' niet');
+  const t = String(tekst).replace(/\r\n?/g, '\n'), pl = blokPlek(t);
+  const buiten = pl.b !== undefined ? t.slice(0, pl.b) + t.slice(pl.e + BLOK_EIND.length) : t;
+  uit.voorstellen = buiten.split('\n').slice(fm.eind + 1).filter(function (r) { return /^\s*[-*]\s*\?/.test(r); });
+  return uit;
+}
+// Organisatie in het register op naam (naam, alias op de knoop, alias-kenmerk): precies één, anders niets. Alleen organisaties.
+function orgOpNaam(reg) {
+  function norm(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
+  const per = {}, knopen = {};
+  function zet(n, id) { const x = norm(n); if (x.length < 3) return; (per[x] = per[x] || new Set()).add(id); }
+  (reg && reg.knopen || []).forEach(function (k) {
+    if (k.rol === 'eigen' || k.soort !== 'organisatie' || k.actief === false || !k.vault_pagina) return;
+    knopen[k.id] = k; zet(k.naam, k.id); (k.aliassen || []).forEach(function (a) { zet(a, k.id); });
+  });
+  (reg && reg.handvatten || []).forEach(function (h) { if (h.soort === 'alias' && h.status !== 'vervallen' && knopen[h.knoop]) zet(h.waarde, h.knoop); });
+  return function (naam) { const s = per[norm(naam)]; return s && s.size === 1 ? knopen[Array.from(s)[0]] : null; };
+}
+function orgLink(k) { return '[[' + String(k.vault_pagina).replace(/\.md$/, '') + '|' + String(k.naam).replace(/[\[\]|\n]/g, ' ') + ']]'; }
+function maandNl(d) { const m = /^(\d{4})-(\d{2})/.exec(String(d || '')); return m ? Number(m[2]) + '-' + m[1] : '?'; }
+const BANK_STATUS = { ACTIVE: 'actief', FROZEN: 'bevroren', CANCELLED: 'opgeheven', BLOCKED: 'geblokkeerd' };
+const BANK_HERKOMST = { systeem: 'ingedeeld door het systeem', machinekamer: 'gezet door de machinekamer', david: 'gezet via het gesprek met Socev' };   // Fable #10: 'david' is geen knop
+function bankEntiteit(eigenaar) { return eigenaar === 'POT' ? 'POT' : 'PRIVE'; }
+function bankBeperkt(rk) { return ['POT', 'kind', 'extern'].indexOf(rk && rk.eigenaar) >= 0; }   // daar alleen aantallen, geen namen
+// Wat de regels raken: per regel de eigen rekening(en) waarop hij werkt (rek, patroon bij extern/intern, de rekening van de bronpost)
+function regelRekeningen(m) {
+  const bron = {}; (m.bron || []).forEach(function (x) { bron[x.id] = x.rek; });
+  const bekend = new Set(m.rekeningen.map(function (r) { return r.rek; }));
+  const per = {};
+  (m.regels || []).forEach(function (g) {
+    per[g.id] = [g.rek, ['extern', 'intern'].indexOf(g.soort) >= 0 ? g.patroon : null, bron[g.id]].filter(function (x) { return x && bekend.has(x); });
+  });
+  return per;
+}
+function bankPotRek(m) { return new Set(m.rekeningen.filter(function (r) { return r.eigenaar === 'POT'; }).map(function (r) { return r.rek; })); }
+function bankRegelPot(m, perRegel, potRek) { return function (g) { return (perRegel[g.id] || []).some(function (x) { return potRek.has(x); }); }; }
+
+// Het blok op een rekeningpagina (puur; geen datum of compilatienummer: alleen schrijven als er echt iets veranderde, Fable #11)
+function bankBlokTekst(p, m, orgVan) {
+  const rk = m.rekeningen.find(function (r) { return r.iban === p.iban; });
+  if (!rk) return null;
+  const po = (m.posten || []).find(function (x) { return x.rek === rk.rek; });
+  const perRegel = regelRekeningen(m), potRek = bankPotRek(m);
+  const regels = (m.regels || []).filter(function (g) { return Number(g.actief) === 1 && (perRegel[g.id] || []).indexOf(rk.rek) >= 0; });
+  const r = ['## Wat de bank van deze rekening weet', '',
+    '*Gegenereerd door de OVIS-compiler (nacht) uit de bankdatabank op de pod; niet met de hand bewerken. Bron is de bank; entiteit en doel hierboven schrijft Socev.*', '',
+    '- Bij de bank: ' + (rk.bron === 'abn' ? 'ABN AMRO' : rk.bron === 'bunq' ? 'bunq' : schoon(rk.bron, 20)) + ' · ' + (BANK_STATUS[rk.status] || schoon(String(rk.status || 'onbekend').toLowerCase(), 20)) + ' · ' + (Number(rk.gezamenlijk) ? 'gezamenlijk' : 'niet gezamenlijk'),
+    '- Eigenaar in de bank: ' + schoon(rk.eigenaar || 'onbekend', 30) + ' (' + (BANK_HERKOMST[rk.eigenaar_herkomst] || 'herkomst onbekend') + ')',
+    '- Posten in de bank: ' + (po && po.n ? 'van ' + maandNl(po.van) + ' t/m ' + maandNl(po.tot) : 'nog geen') + ' (bedragen, saldo en tegenpartijen blijven in de bank)'];
+  const ab = (m.abonnementen || []).filter(function (a) { return a.rek === rk.rek && Number(a.actief) === 1; });
+  if (ab.length) {
+    const links = [], gezien = new Set(); let rest = 0;
+    ab.forEach(function (a) {
+      const k = !bankBeperkt(rk) && BANK_STIL.indexOf(a.categorie) < 0 ? orgVan(a.naam) : null;
+      if (k && !gezien.has(k.id)) { gezien.add(k.id); links.push(orgLink(k)); } else if (!k) rest++;
+    });
+    links.sort();
+    r.push('- Lopende vaste lasten en abonnementen: ' + (links.length ? links.join(' · ') + (rest ? ' · en ' + rest + ' zonder pagina in het register' : '') : rest + ' (geen met een pagina in het register)'));
+  }
+  r.push('- Bankregels voor deze rekening: ' + regels.length + (regels.length ? (potRek.has(rk.rek) ? ' (alleen geteld: posten en namen van deze rekening blijven in de bank)' : ' — zie [[' + BANKREGELS_PAD.replace(/\.md$/, '') + ']]') : ''));
+  const binnen = '\n' + r.join('\n') + '\n';
+  return '<!-- ovis:blok begin id="rek:' + rk.iban + '" content_hash="' + blokHash(binnen) + '" -->' + binnen + BLOK_EIND;
+}
+// Het blok op de pagina Bankregels (puur). Patronen nooit als tekst: een rekening als "…1234", een tegenpartij alleen als organisatie uit
+// het register, anders "een tegenpartij"; regels van de POT-rekening alleen als aantal (Fable #2, #5).
+function bankRegelsBlokTekst(m, rekPaginas, orgVan) {
+  const opRek = {}; m.rekeningen.forEach(function (r) { opRek[r.rek] = r; });
+  const pagIban = {}; (rekPaginas || []).forEach(function (p) { if (p.iban && !p.fouten.length) pagIban[p.iban] = p; });
+  function rekTekst(rek) {
+    const r = opRek[rek]; if (!r || !r.iban) return 'een eigen rekening';
+    const p = pagIban[r.iban];
+    return p ? '[[' + p.pad.replace(/\.md$/, '') + '|rekening …' + e4(r.iban) + ']]' : 'rekening …' + e4(r.iban);
+  }
+  const raakt = {}; (m.raakt || []).forEach(function (x) { raakt[x.id] = x; });
+  const perRegel = regelRekeningen(m), potRek = bankPotRek(m), opPot = bankRegelPot(m, perRegel, potRek);
+  const actief = (m.regels || []).filter(function (g) { return Number(g.actief) === 1; });
+  const pot = actief.filter(opPot), zicht = actief.filter(function (g) { return !opPot(g); });
+  const r = ['## Regels waarmee de bank posten indeelt', '',
+    '*Gegenereerd door de OVIS-compiler (nacht) uit de bankdatabank op de pod; niet met de hand bewerken. Een regel ontstaat als Socev een correctie van David in de bank zet (in het gesprek) of als de machinekamer er een zet. Wil je een nieuwe regel, schrijf hem dan boven dit blok met "- ?" ervoor: dat is een voorstel dat Socev aan David voorlegt.*', ''];
+  zicht.forEach(function (g) {
+    const naar = g.richting === 'bij' ? 'van' : 'naar';
+    let wat;
+    if (g.soort === 'extern') wat = 'overboekingen ' + naar + ' ' + rekTekst(g.patroon);
+    else if (g.soort === 'intern') wat = 'overboekingen met ' + rekTekst(g.patroon) + (g.rek ? ' vanaf ' + rekTekst(g.rek) : '');
+    else if (g.soort === 'tegen_iban') wat = 'betalingen met een eigen rekening elders (…' + e4(g.patroon) + ')';
+    else if (g.soort === 'tegenpartij') { const k = orgVan(g.patroon); wat = 'betalingen met ' + (k ? orgLink(k) : 'een tegenpartij (naam blijft in de bank)'); }
+    else wat = 'regel van een onbekende soort';
+    if (g.rek && ['intern'].indexOf(g.soort) < 0) wat += ' op ' + rekTekst(g.rek);
+    const ind = [g.type ? 'soort ' + schoon(g.type, 20) : null, g.categorie ? 'categorie "' + schoon(g.categorie, 40) + '"' : null,
+      g.subcategorie ? 'subcategorie "' + schoon(g.subcategorie, 40) + '"' : null, g.eigenaar ? 'eigenaar ' + schoon(g.eigenaar, 30) : null].filter(Boolean).join(', ');
+    const x = raakt[g.id];
+    r.push('- R' + g.id + ' · ' + wat + (g.richting === 'af' ? ' (uitgaand)' : g.richting === 'bij' ? ' (inkomend)' : '') + ' → ' + (ind || 'geen indeling') + ' · ' +
+      (BANK_HERKOMST[g.herkomst] || 'herkomst onbekend') + ' · sinds ' + datumNl(g.aangemaakt) + ' · ' + (x && x.n ? 'raakte ' + x.n + ' ' + (x.n === 1 ? 'post' : 'posten') + ', laatst ' + maandNl(x.laatst) : 'raakte nog geen post'));
+  });
+  if (!zicht.length) r.push('- Nog geen regels buiten de POT-rekening.');
+  r.push('- Op de POT-rekening: ' + pot.length + (pot.length === 1 ? ' regel' : ' regels') + ' (alleen geteld: posten en namen van de POT-rekening blijven in de bank)');
+  r.push('- Ingetrokken regels (vervangen door een nieuwere): ' + ((m.regels || []).length - actief.length));
+  const binnen = '\n' + r.join('\n') + '\n';
+  return '<!-- ovis:blok begin id="bankregels" content_hash="' + blokHash(binnen) + '" -->' + binnen + BLOK_EIND;
+}
+// De checks (puur). bank = { meting, rek: [leesRekening], regels: leesBankregels|null, overig: [{ pad, tekst }] } of null.
+// → { gemeten, reden?, paden: { bevinding_id: pad } (alleen voor de machinekamer op stdout, nooit naar de databank) }
+function bankChecks(bank, reg, bev, tel) {
+  if (!bank) { tel.bank = 'niet gemeten'; return { gemeten: false, reden: 'geen banklezer', paden: {} }; }
+  const m = bank.meting, nu = bank.nu || Date.now();
+  if (!m || m.fout) { tel.bank = 'niet gemeten'; return { gemeten: false, reden: m ? m.fout : 'geen meting', paden: {} }; }
+  const paden = {};
+  function metPad(pad) { return function (check, sleutel, samenvatting, detail, ernst) { if (pad) paden[check + '-' + sleutel] = pad; tel.bank_verschil++; bev(check, sleutel, samenvatting, detail, ernst); }; }
+  tel.bank = 0; tel.bank_verschil = 0; tel.bank_verouderd = 0;
+  const orgVan = orgOpNaam(reg);
+  const opIban = {}; m.rekeningen.forEach(function (r) { if (r.iban) opIban[String(r.iban).toUpperCase()] = r; });
+  const perIban = {};
+  (bank.rek || []).forEach(function (p) {
+    if (p.fouten.length) { metPad(p.pad)('BB6', 'bank-pagina-' + kortHash(p.pad).slice(0, 6), 'rekeningpagina niet te lezen: ' + p.fouten[0], 'een rekeningpagina in de Second Brain: ' + p.fouten.join('; ') + '. Pad: zie de machinekamer (ovis-run bibliothecaris --afroep --droog). Voorstel: pagina herstellen (Socev).'); return; }
+    (perIban[p.iban] = perIban[p.iban] || []).push(p);
+  });
+  Object.keys(perIban).sort().forEach(function (iban) {
+    const ps = perIban[iban], id = rekId(iban), rk = opIban[iban];
+    if (ps.length > 1) { metPad(ps.map(function (p) { return p.pad; }).join(' | '))('BB5', id + '-twee', 'twee pagina\'s voor rekening …' + e4(iban), ps.length + ' rekeningpagina\'s noemen hetzelfde rekeningnummer (…' + e4(iban) + '). Voorstel: samenvoegen tot één pagina.'); return; }
+    const p = ps[0];
+    if (!rk) { metPad(p.pad)('BB1', id + '-onbekend', 'rekeningpagina …' + e4(iban) + ' verwijst naar een rekening die de bank niet kent', 'de bank kent rekening …' + e4(iban) + ' niet (meer). Voorstel: nagaan of het nummer klopt; anders de pagina naar het archief.'); return; }
+    tel.bank++;
+    const ent = bankEntiteit(rk.eigenaar);
+    if (p.entiteit_id !== ent) metPad(p.pad)('BB3', id + '-entiteit', 'rekening …' + e4(iban) + ': entiteit op de pagina past niet bij de eigenaar in de bank',
+      'pagina zegt ' + p.entiteit_id + ', de bank zegt eigenaar "' + schoon(rk.eigenaar || 'onbekend', 20) + '" (= ' + ent + '). Voorstel: de bank is bron voor de eigenaar; pagina gelijkzetten, of David corrigeert de eigenaar in het gesprek.');
+    if (p.tekst !== undefined && blokHandwerk(p.tekst)) metPad(p.pad)('BB8', id + '-blok', 'blok op rekeningpagina …' + e4(iban) + ' is met de hand gewijzigd', 'de tekst binnen het OVIS-blok is niet meer wat de compiler schreef; hij overschrijft het niet. Voorstel: wat erin getypt is naar de frontmatter (doel) zetten, daarna het blok laten vernieuwen.');
+    else if (huidigBlok(p.tekst) !== bankBlokTekst(p, m, orgVan)) tel.bank_verouderd++;   // BB4: alleen telling; de nacht vernieuwt
+  });
+  m.rekeningen.forEach(function (r) {
+    const iban = String(r.iban || '').toUpperCase();
+    if (!IBAN_VOL.test(iban) || r.status === 'CANCELLED' || perIban[iban]) return;
+    metPad(null)('BB2', rekId(iban) + '-geen-pagina', (r.bron === 'abn' ? 'ABN AMRO' : 'bunq') + '-rekening …' + e4(iban) + ' heeft geen pagina', 'de bank kent deze rekening (niet opgeheven), maar geen rekeningpagina noemt haar (of de pagina staat buiten de vaste plek). Voorstel: Socev maakt de pagina.');
+  });
+  // het rekeningnummer op de entiteitpagina van PRIVE en POT hoort bij een rekeningpagina van die entiteit (Fable #1)
+  (reg && reg.knopen || []).forEach(function (k) {
+    if (['PRIVE', 'POT'].indexOf(k.id) < 0 || !k.iban) return;
+    const iban = String(k.iban).replace(/\s/g, '').toUpperCase(), ps = perIban[iban] || [];
+    if (ps.length === 1 && ps[0].entiteit_id === k.id) return;
+    metPad(null)('BB3', 'bank-ent-' + k.id + '-hoofdrekening', 'rekeningnummer op de entiteitpagina van ' + k.id + ' (…' + e4(iban) + ') hoort bij geen rekeningpagina van ' + k.id,
+      (ps.length ? 'de rekeningpagina met dit nummer zegt een andere entiteit' : opIban[iban] ? 'de bank kent de rekening, maar er is geen rekeningpagina' : 'de bank kent dit nummer niet') + '. Voorstel: nagaan welke rekening de hoofdrekening is en de entiteitpagina of de rekeningpagina gelijkzetten.');
+  });
+  // Bankregels
+  const regelIds = new Set((m.regels || []).map(function (g) { return Number(g.id); }));
+  const actief = (m.regels || []).filter(function (g) { return Number(g.actief) === 1; });
+  if (!bank.regels) { if (actief.length) metPad(BANKREGELS_PAD)('BB2', 'bank-regels-geen-pagina', 'de pagina met bankregels ontbreekt', actief.length + ' actieve regel(s) in de bank zonder weergave in de Second Brain. Voorstel: Socev maakt de pagina opnieuw.'); }
+  else if (bank.regels.fouten.length) metPad(BANKREGELS_PAD)('BB6', 'bank-regels-pagina', 'pagina met bankregels niet te lezen: ' + bank.regels.fouten[0], bank.regels.fouten.join('; ') + '. Voorstel: pagina herstellen (Socev).');
+  else {
+    const prs = bankRegelsBlokTekst(m, bank.rek, orgVan);
+    if (blokHandwerk(bank.regels.tekst)) metPad(BANKREGELS_PAD)('BB8', 'bank-regels-blok', 'blok op de pagina met bankregels is met de hand gewijzigd', 'de compiler overschrijft het niet. Voorstel: een gewenste regel boven het blok zetten met "- ?" ervoor, daarna het blok laten vernieuwen.');
+    else if (huidigBlok(bank.regels.tekst) !== prs) tel.bank_verouderd++;
+    bank.regels.voorstellen.forEach(function (x) {
+      metPad(BANKREGELS_PAD)('BB6', 'bank-regel-voorstel-' + kortHash(x.trim()).slice(0, 6), 'voorstel voor een bankregel op de pagina met bankregels', 'er staat een regel met "- ?" (tekst niet in deze melding). Voorstel: Socev legt hem aan David voor; na zijn Ja zet Socev hem in de bank en haalt de regel van de pagina.');
+    });
+  }
+  actief.forEach(function (g) {
+    if (BANK_REGEL_SOORT.indexOf(g.soort) < 0) metPad(null)('BB6', 'bank-regel-' + g.id + '-onleesbaar', 'bankregel R' + g.id + ' heeft een onbekende soort', 'de weergave kan hem niet tonen. Voorstel: de machinekamer zoekt uit waar hij vandaan komt.');
+    if (['david', 'machinekamer'].indexOf(g.herkomst) < 0) metPad(null)('BB7', 'bank-regel-' + g.id + '-herkomst', 'bankregel R' + g.id + ' heeft een onbekende herkomst', 'herkomst is niet David (gesprek) of de machinekamer. Voorstel: nagaan wie hem zette; zo nodig intrekken.', 'serious');
+    const x = (m.raakt || []).find(function (y) { return Number(y.id) === Number(g.id); });
+    const t0 = Date.parse(g.aangemaakt), tl = x && x.laatst ? Date.parse(x.laatst + 'T12:00:00Z') : NaN;
+    if (!isNaN(t0) && nu - t0 > BANK_DOOD_MS && (isNaN(tl) || nu - tl > BANK_DOOD_MS)) metPad(null)('BB6', 'bank-regel-' + g.id + '-dood', 'bankregel R' + g.id + ' raakte al meer dan 400 dagen geen post', 'Voorstel: nakijken of hij nog nodig is (niet vanzelf intrekken).');
+  });
+  // verwijzingen naar posten en regels, en rekeningpagina's buiten de vaste plek (Fable #8)
+  [].concat(bank.rek || [], bank.regels ? [bank.regels] : [], bank.overig || []).forEach(function (p) {
+    const t = String(p.tekst || ''); let mm; const re = new RegExp(BANK_VERW_RE.source, 'g');
+    while ((mm = re.exec(t)) !== null) {
+      const n = Number(mm[2]);
+      if (mm[1] === 'regel' ? !regelIds.has(n) : !m.nrs.has(n)) metPad(p.pad)('BB8', 'bank-verwijzing-' + kortHash(p.pad + '#' + mm[1] + n).slice(0, 8), 'verwijzing naar een bank' + (mm[1] === 'regel' ? 'regel' : 'post') + ' die niet (meer) bestaat',
+        'een pagina in de privé-financiën noemt ' + mm[1] + ' ' + n + '; de bank kent die niet. Voorstel: verwijzing weghalen of goedzetten.');
+    }
+  });
+  (bank.overig || []).forEach(function (p) {
+    if (/^type:\s*rekening\s*$/m.test(String(p.tekst || '').split('\n---')[0]) || /pod:bank-transacties\/rekening#/.test(String(p.tekst || '')))
+      metPad(p.pad)('BB6', 'bank-buiten-plek-' + kortHash(p.pad).slice(0, 6), 'rekeningpagina buiten de vaste plek', 'een pagina met een bankrekening-sleutel staat niet in de map Rekeningen (of bij de POT). Voorstel: terugzetten naar de vaste plek.');
+  });
+  return { gemeten: true, paden: paden };
+}
+
 // ── Kaarten in Overzicht (wv1253; ontwerp + Fable-review vooraf: mk-scripts/wv1253/ontwerp.md) ──
 // Pure functies: wat er op een kaart moet (bundel per week, kritiek per veld, Bibliothecaris per week), de Anders-ontleding en de zin
 // voor Socev na Davids druk. De databank (public.ovis_kaart_zet) controleert en bevriest de lijst; public.ovis_handvat_activeer voert
@@ -1034,7 +1301,7 @@ function kaartBiblio(reg, o) {
   const kandidaten = (reg.bevindingen || []).filter(function (b) {
     if (!/^BB[1235678]$/.test(b.check_id) || (b.check_id === 'BB3' && b.ernst === 'serious')) return false;
     if (VJ_BEVINDING_RE.test(b.bevinding_id)) return false;   // wv1009: plek 5 is machinestaat; de Voor jou-ronde en de machinekamer handelen het af
-    if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart; wv981: pot-cc wacht op fase 2
+    if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id) && !/^BB3-bank-/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart; wv981: pot-cc wacht op fase 2; wv1010: bank wel
     return !geh.open.has('structuur_state#' + b.bevinding_id) && !geh.rust.has('structuur_state#' + b.bevinding_id + '#');
   }).slice(0, KAART_STAPPEN);
   if (!kandidaten.length) return { reden: 'geen open verschillen' };
@@ -1046,6 +1313,7 @@ function kaartBiblio(reg, o) {
       if (b.check_id === 'BB5') return nr + '. Twee pagina\'s noemen POT-praktijk ' + px[1] + '. Ik laat de verwijzing alleen staan op de pagina van de praktijk zelf.';
       if (b.check_id === 'BB1') return nr + '. ' + nm + ': verwijst naar een POT-praktijk (' + px[1] + ') die de POT-app niet kent. Ik haal de verwijzing weg.';
     }
+    if (BANK_BEVINDING_RE.test(b.bevinding_id)) return nr + '. ' + bankKaartZin(b);   // wv1010: plek 6
     const z = { BB1: nm + ': de verwijzing naar het register op de pagina klopt niet. Ik zet hem goed.',
       BB2: /-verhuisd$/.test(b.bevinding_id) ? nm + ': de pagina is verplaatst. Ik zet het register op de nieuwe plek.' : nm + ': staat in het register maar heeft geen pagina. Ik maak een conceptpagina.',
       BB3: nm + ': pagina en register lopen uiteen. Ik werk het register bij en zoek uit waarom.',
@@ -1056,8 +1324,26 @@ function kaartBiblio(reg, o) {
     return nr + '. ' + z;
   });
   return { kaart: { sleutel: sleutel, soort: 'biblio', titel: kandidaten.length + (kandidaten.length === 1 ? ' verschil' : ' verschillen') + ' in het entiteitenregister — zo oplossen?',
-    waarom: 'De Bibliothecaris vergelijkt elke nacht de pagina\'s over organisaties met het register en lost niets stil op. Ja: Socev lost ze op zoals hieronder. Nee: alles blijft zoals het is. Anders: typ welke nummers niet, bijvoorbeeld "zonder 2".',
+    waarom: 'De Bibliothecaris vergelijkt elke nacht de pagina\'s over organisaties en rekeningen met het register en de bank, en lost niets stil op. Ja: Socev lost ze op zoals hieronder. Nee: alles blijft zoals het is. Anders: typ welke nummers niet, bijvoorbeeld "zonder 2".',
     stappen: stappen, prive: false, regels: kandidaten.map(function (b, i) { return { nr: i + 1, actie: 'biblio', tabel: 'structuur_state', id: b.bevinding_id }; }) } };
+}
+
+// wv1010: de zin op de weekkaart voor een bevinding van plek 6 (alleen "…1234" en regelnummers, nooit namen)
+function bankKaartZin(b) {
+  const id = b.bevinding_id, x = /-rek-([A-Z0-9]{4})-/.exec(id), rek = x ? '…' + x[1] : '', g = /-regel-(\d+)-/.exec(id), ent = /-ent-([A-Z]+)-/.exec(id);
+  if (b.check_id === 'BB2') return /bank-regels/.test(id) ? 'De pagina met bankregels ontbreekt. Ik maak hem opnieuw.' : 'Bankrekening ' + rek + ' heeft nog geen pagina in de Second Brain. Ik maak er een.';
+  if (b.check_id === 'BB1') return 'Een rekeningpagina (' + rek + ') verwijst naar een rekening die de bank niet kent. Ik zoek uit welke het is en zet het goed.';
+  if (b.check_id === 'BB3') return ent ? 'Het rekeningnummer op de pagina van ' + ent[1] + ' hoort bij geen rekeningpagina van ' + ent[1] + '. Ik zoek uit welke rekening het is en zet ze gelijk.'
+    : 'Rekening ' + rek + ': de pagina zegt over de eigenaar iets anders dan de bank. Ik zet de pagina gelijk aan de bank.';
+  if (b.check_id === 'BB5') return 'Twee pagina\'s noemen rekening ' + rek + '. Ik voeg ze samen.';
+  if (b.check_id === 'BB7') return 'Bankregel R' + (g ? g[1] : '?') + ' heeft een onbekende herkomst. Ik zoek uit wie hem zette.';
+  if (b.check_id === 'BB8') return /-verwijzing-/.test(id) ? 'Een pagina in je financiën verwijst naar een bankpost of -regel die niet (meer) bestaat. Ik zet de verwijzing goed.'
+    : 'Op ' + (/bank-regels/.test(id) ? 'de pagina met bankregels' : 'een rekeningpagina (' + rek + ')') + ' is in het automatische blok iets met de hand veranderd. Ik zet dat in de pagina zelf.';
+  if (/-voorstel-/.test(id)) return 'Op de pagina met bankregels staat een voorstel voor een nieuwe regel. Ik leg het apart aan je voor.';
+  if (/-dood$/.test(id)) return 'Bankregel R' + (g ? g[1] : '?') + ' deelt al meer dan een jaar niets meer in. Ik kijk of hij weg kan en vraag het je eerst.';
+  if (/-onleesbaar$/.test(id)) return 'Bankregel R' + (g ? g[1] : '?') + ' is van een soort die ik niet kan tonen. Ik zoek uit waar hij vandaan komt.';
+  if (/-buiten-plek-/.test(id)) return 'Een rekeningpagina staat op de verkeerde plek. Ik zet hem terug in de map Rekeningen.';
+  return 'Een pagina over je rekeningen is niet te lezen. Ik herstel hem.';
 }
 
 // Wat Socev na de druk hoort (staart van de prompt; Fable wv1253 #1): de echte uitkomst van de databank, niet wat er zou gebeuren
@@ -1125,6 +1411,43 @@ function maak(o) {
       try { t = o.lees(path.join(vault, rel)); } catch (e) { return { pad: rel, fouten: ['niet te lezen (' + String(e && e.code || e && e.message || e).slice(0, 40) + ')'] }; }
       const p = leesPagina(rel, t); p.tekst = t; return p;
     });
+  }
+  // wv1010: rekeningpagina's (vaste plekken), de pagina Bankregels en de rest van 20_Prive/Financien (alleen voor verwijzingen en pagina's
+  // buiten de plek; tekst alleen bewaard als er iets bank-achtigs in staat)
+  function leesBank() {
+    const uit = { rek: [], regels: null, overig: [] };
+    function lijstMap(rel) { try { return o.lijst(rel); } catch (e) { return []; } }
+    function lees(rel) { try { return o.lees(path.join(vault, rel)); } catch (e) { return null; } }
+    const rels = [];
+    lijstMap(REK_PRIVE_MAP).forEach(function (x) { if (x.bestand && REK_NAAM_RE.test(x.naam)) rels.push(REK_PRIVE_MAP + '/' + x.naam); });
+    lijstMap('10_Zakelijk').forEach(function (m) {
+      if (!m.map || m.naam.startsWith('.') || m.naam === '_Gedeeld') return;
+      lijstMap('10_Zakelijk/' + m.naam).forEach(function (x) { if (x.bestand && REK_NAAM_RE.test(x.naam)) rels.push('10_Zakelijk/' + m.naam + '/' + x.naam); });
+    });
+    rels.sort().slice(0, 200).forEach(function (rel) { const t = lees(rel); uit.rek.push(t === null ? { pad: rel, fouten: ['niet te lezen'] } : leesRekening(rel, t)); });
+    const br = lees(BANKREGELS_PAD);
+    if (br !== null) uit.regels = leesBankregels(br);
+    const gezien = new Set(rels.concat([BANKREGELS_PAD])); let n = 0;
+    (function loop(rel, diepte) {
+      lijstMap(rel).forEach(function (x) {
+        if (n > 400 || x.naam.startsWith('.')) return;
+        const r = rel + '/' + x.naam;
+        if (x.map && diepte < 3 && ['raw_input', 'Bronnen', 'Archief'].indexOf(x.naam) < 0 && r !== REK_PRIVE_MAP) return loop(r, diepte + 1);
+        if (!x.bestand || !x.naam.endsWith('.md') || gezien.has(r)) return;
+        n++;
+        const t = lees(r);
+        if (t !== null && t.indexOf('pod:bank-transacties') >= 0 || t !== null && /^type:\s*rekening\s*$/m.test(t.slice(0, 2000))) uit.overig.push({ pad: r, tekst: t.slice(0, MAX_BYTES) });
+      });
+    })(FINANCIEN_MAP, 0);
+    return uit;
+  }
+  function bankVerwijzingen(lb) {
+    const nrs = [];
+    [].concat(lb.rek, lb.regels ? [lb.regels] : [], lb.overig).forEach(function (p) {
+      const re = new RegExp(BANK_VERW_RE.source, 'g'); let m;
+      while ((m = re.exec(String(p.tekst || ''))) !== null) if (m[1] === 'transactie') nrs.push(Number(m[2]));
+    });
+    return nrs;
   }
   async function register(logSinds) {
     const r = await o.sbRpc('ovis_register_lees', { p_log_sinds: logSinds || null });
@@ -1235,9 +1558,34 @@ function maak(o) {
           uit.medewerkerblokken++;
         } catch (e) { uit.fouten.push({ pad: doel, fout: 'medewerkerblok: ' + String(e && e.code || e && e.message || e).slice(0, 80) }); }
       }
+      // wv1010: blokken op de rekeningpagina's en de pagina Bankregels (bank één keer per ronde gelezen, Fable #13). Bank niet te lezen:
+      // niets aanraken. Zelfde regels als hierboven: handwerk niet overschrijven, opnieuw lezen vlak voor het schrijven.
+      if (o.bank) {
+        uit.bankblokken = 0;
+        const lb = leesBank(), bm = bankMeting(o.bank, []);
+        if (bm.fout) uit.fouten.push({ pad: '(bank)', fout: 'bank niet te lezen: ' + bm.fout });
+        else {
+          const orgVan = orgOpNaam(reg2), telIban = {};
+          lb.rek.forEach(function (p) { if (!p.fouten.length) telIban[p.iban] = (telIban[p.iban] || 0) + 1; });
+          const doelen = lb.rek.filter(function (p) { return !p.fouten.length && telIban[p.iban] === 1; }).map(function (p) { return { p: p, blok: bankBlokTekst(p, bm, orgVan) }; });
+          if (lb.regels && !lb.regels.fouten.length) doelen.push({ p: lb.regels, blok: bankRegelsBlokTekst(bm, lb.rek, orgVan) });
+          for (const d of doelen) {
+            if (!d.blok || huidigBlok(d.p.tekst) === d.blok) continue;
+            if (blokHandwerk(d.p.tekst)) { uit.handwerk++; continue; }
+            if (opties.droog) { uit.bankblokken++; continue; }
+            try {
+              const vol = path.join(vault, d.p.pad), vers = o.lees(vol);
+              if (vingerafdruk(vers).sha !== d.p.sha) { uit.fouten.push({ pad: d.p.pad, fout: 'pagina veranderde tijdens de ronde; blok volgende nacht' }); continue; }
+              if (blokHandwerk(vers)) { uit.handwerk++; continue; }
+              o.schrijf(vol, zetBlok(vers, d.blok));
+              uit.bankblokken++;
+            } catch (e) { uit.fouten.push({ pad: d.p.pad, fout: 'bankblok: ' + String(e && e.code || e && e.message || e).slice(0, 80) }); }
+          }
+        }
+      }
     }
     uit.ms = nu() - t0;
-    log('ovis-compileer ' + JSON.stringify({ modus: modus, paginas: uit.paginas, gestuurd: uit.gestuurd, nieuw: uit.nieuw, fouten: uit.fouten.length, blokken: uit.blokken, handwerk: uit.handwerk, medewerkerblokken: uit.medewerkerblokken }));
+    log('ovis-compileer ' + JSON.stringify({ modus: modus, paginas: uit.paginas, gestuurd: uit.gestuurd, nieuw: uit.nieuw, fouten: uit.fouten.length, blokken: uit.blokken, handwerk: uit.handwerk, medewerkerblokken: uit.medewerkerblokken, bankblokken: uit.bankblokken }));
     return uit;
   }
   // Bibliothecaris: leest, vergelijkt, schrijft bevindingen (BB), stempelt (niet op afroep). opties.sinds = log sinds (ISO).
@@ -1247,7 +1595,9 @@ function maak(o) {
     const reg = await register(opties.sinds || new Date(nu() - 36 * 3600000).toISOString());
     const paginas = leesAlles();
     const pot = o.pot ? await potMeting(o.pot) : null;   // wv981: plek 4 (alleen lezen); o.pot = { d1(batch), dossier() }
-    const r = checks(paginas, reg, c.fouten, pot);
+    let bank = null;   // wv1010: plek 6 (alleen lezen); o.bank = bankLezer(pad)
+    if (o.bank) { const lb = leesBank(); bank = Object.assign(lb, { meting: bankMeting(o.bank, bankVerwijzingen(lb)), nu: nu() }); }
+    const r = checks(paginas, reg, c.fouten, pot, bank);
     // wv1009: plek 5 (Voor jou ⇄ register), alleen lezen; o.vj = { punten(), register() }
     // diffreview #8/#9: een onverwachte vorm breekt de nachtronde niet (dan "niet gemeten"); databankklok voor de rust
     try { const vm = o.vj ? await vjMeting(o.vj) : { fout: 'geen Voor jou-lezer' }; r.vj = vjKoppel(vm, reg.kaarten, vjNu(vm, nu())); }
@@ -1263,8 +1613,8 @@ function maak(o) {
     const gezien = new Set(r.bevindingen.map(function (x) { return x.bevinding_id; }));
     // BB7-spoor blijft open tot iemand hem afhandelt: het logvenster schuift door, de wijziging is niet weg (Fable wv979 #8)
     // wv981 (Fable #1): niet gemeten is niet opgelost — zonder POT-meting blijven de bevindingen van plek 4 open
-    // wv1009: idem voor plek 5 zonder Voor jou-meting
-    const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor-\d{8}$/.test(id) && (r.pot.gemeten || !POT_BEVINDING_RE.test(id)) && (r.vj.gemeten || !VJ_BEVINDING_RE.test(id)); });
+    // wv1009: idem voor plek 5 zonder Voor jou-meting; wv1010: idem voor plek 6 zonder bankmeting
+    const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor-\d{8}$/.test(id) && (r.pot.gemeten || !POT_BEVINDING_RE.test(id)) && (r.vj.gemeten || !VJ_BEVINDING_RE.test(id)) && (r.bank.gemeten || !BANK_BEVINDING_RE.test(id)); });
     opgelost.forEach(function (id) { rijen.push({ bevinding_id: id, status: 'opgelost', laatst_gezien: nu_, detail_erbij: ' | ' + nu_.slice(0, 10) + ': niet meer gezien door de Bibliothecaris' }); });
     if (!opties.droog) for (let i = 0; i < rijen.length; i += 100) await o.sbRpc('ovis_bibliothecaris_zet', { p_rijen: rijen.slice(i, i + 100) });
     const onverklaard = r.bevindingen.length;
@@ -1272,10 +1622,11 @@ function maak(o) {
       : 'register en pagina\'s gelijk (' + r.tel.geldig + ' pagina\'s' + (r.tel.verouderd ? ', ' + r.tel.verouderd + ' nog niet gecompileerd' : '') + (r.tel.wacht_op_ja ? ', ' + r.tel.wacht_op_ja + (r.tel.wacht_op_ja === 1 ? ' kenmerk wacht' : ' kenmerken wachten') + ' op Davids Ja' : '') + ')';
     const potZin = r.pot.gemeten ? '; POT-factuuradressen: ' + r.tel.pot + ' praktijk(en) gemeten, ' + r.tel.pot_verschil + ' met een verschil' : '; POT-factuuradressen niet gemeten (' + schoon(r.pot.reden || '?', 80) + ')';
     const vjZin = r.vj.gemeten ? '; Voor jou ⇄ register: ' + r.vj.tel.kaarten_open + ' open kaart(en), ' + r.vj.tel.rijen_open + ' open vraag/vragen, ' + r.vj.bevindingen.length + ' verschil(len)' : '; Voor jou ⇄ register niet gemeten (' + schoon(r.vj.reden || '?', 80) + ')';
+    const bankZin = r.bank.gemeten ? '; bankrekeningen: ' + r.tel.bank + ' gemeten, ' + r.tel.bank_verschil + ' verschil(len)' : '; bankrekeningen niet gemeten (' + schoon(r.bank.reden || '?', 80) + ')';
     r.tel.vj = r.vj.gemeten ? r.vj.bevindingen.length : 'niet gemeten';
     // diffreview #7: wat de Voor jou-ronde om 07:15 zelf rechtzet, hoort niet in de box (nieuw_box/nieuwe zonder die bevindingen)
     const metActie = new Set(r.vj.metActie || []), nieuweBox = nieuw.filter(function (x) { return !metActie.has(x.bevinding_id); });
-    const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin + potZin + vjZin, tel: r.tel, pot: r.pot, vj: { gemeten: r.vj.gemeten, reden: r.vj.reden || null, tel: r.vj.tel }, open: onverklaard, nieuw: nieuw.length, nieuw_box: nieuweBox.length, opgelost: opgelost.length,
+    const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin + potZin + vjZin + bankZin, tel: r.tel, pot: r.pot, bank: r.bank, vj: { gemeten: r.vj.gemeten, reden: r.vj.reden || null, tel: r.vj.tel }, open: onverklaard, nieuw: nieuw.length, nieuw_box: nieuweBox.length, opgelost: opgelost.length,
       per_check: r.bevindingen.reduce(function (a, x) { a[x.check_id] = (a[x.check_id] || 0) + 1; return a; }, {}), bevindingen: r.bevindingen, nieuwe: nieuweBox };
     if (!opties.droog && !opties.afroep) {
       await o.sbRpc('mk_hartslag_stempel', { p_component: 'bibliothecaris', p_gemeten_rijen: r.tel.paginas, p_bevindingen: onverklaard });
@@ -1340,5 +1691,7 @@ module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina, f
   BLOK_BEGIN: BLOK_BEGIN, BLOK_EIND: BLOK_EIND, SCHRIJVERS_OK: SCHRIJVERS_OK,
   potMeting: potMeting, potChecks: potChecks, kaartPot: kaartPot, POT_SQL: POT_SQL, POT_BEVINDING_RE: POT_BEVINDING_RE,
   vjMeting: vjMeting, vjNu: vjNu, vjKoppel: vjKoppel, vjSchrijf: vjSchrijf, vjRegister: vjRegister, vjGenoemd: vjGenoemd, VJ_BEVINDING_RE: VJ_BEVINDING_RE,
+  bankLezer: bankLezer, bankMeting: bankMeting, bankChecks: bankChecks, leesRekening: leesRekening, leesBankregels: leesBankregels, bankBlokTekst: bankBlokTekst,
+  bankRegelsBlokTekst: bankRegelsBlokTekst, bankKaartZin: bankKaartZin, orgOpNaam: orgOpNaam, BANK_SQL: BANK_SQL, BANK_BEVINDING_RE: BANK_BEVINDING_RE, BANKREGELS_PAD: BANKREGELS_PAD,
   plan: plan, kaartBundel: kaartBundel, kaartenKritiek: kaartenKritiek, kaartBiblio: kaartBiblio, eruitUit: eruitUit, uitkomstZin: uitkomstZin, isoWeek: isoWeek,
   KAART_SLEUTEL_RE: /^intake-(handvat|kritiek|biblio)-[a-z0-9]+(-[a-z0-9]+)*$/ };

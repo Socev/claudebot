@@ -15164,7 +15164,9 @@ const ovis = (function () {
         dossier: function () { if (!POT_VZ_MOD) throw new Error('pot-verzend ontbreekt'); return POT_VZ_MOD.ontvangers(potVzVault()); } },
       // wv1009: plek 5 (Voor jou ⇄ Open vragen aan David) — alleen lezen; de Voor jou-ronde schrijft met ovis-run.js voorjou --schrijf
       vj: { punten: function () { return appSbRpc('mk_voor_jou_lijst', { p_alles: true }); }, register: function () { return VV().lees(path.join(VAULT, '00_Systeem', 'Open vragen aan David.md'), 'utf8'); },
-        wv: function () { return appSbRpc('mk_werkvoorraad_stand', {}); } } });
+        wv: function () { return appSbRpc('mk_werkvoorraad_stand', {}); } },
+      // wv1010: plek 6 (bank) — de bankdatabank alleen lezen (readOnly, query_only, alleen SELECT); ontbreekt de lezer (oude module): niet gemeten
+      bank: typeof OVIS_MOD.bankLezer === 'function' ? OVIS_MOD.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')) : null });
   } catch (e) { logError('ovis', e); return null; }
 })();
 const ovisLoopt = { nu: null, sinds: 0 };

@@ -15,7 +15,8 @@
 //                                          registerplicht). Raakt nooit een kaart.
 //   --droog: niets schrijven (databank noch vault)
 // Omgeving: VAULT_DIR (standaard de vault), SUPABASE_URL + SUPABASE_SERVICE_ROLE (nooit als argument), CLOUDFLARE_API_TOKEN (wv981: D1 fin
-// alleen lezen voor plek 4; ontbreekt hij, dan "POT niet gemeten"), CF_ACCOUNT_ID/APP_FIN_DB (zoals server.js), OVIS_LOCK (standaard
+// alleen lezen voor plek 4; ontbreekt hij, dan "POT niet gemeten"), CF_ACCOUNT_ID/APP_FIN_DB (zoals server.js), BANK_DIR (wv1010: plek 6,
+// <BANK_DIR>/transacties.sqlite alleen lezen; standaard /opt/data/bank), OVIS_LOCK (standaard
 // /opt/data/bin/.vault.lock). Uitvoer: één JSON-regel; uitgang 0 = gelukt, 1 = fout, 2 = gebruik.
 const fs = require('fs');
 const path = require('path');
@@ -107,7 +108,8 @@ function grendelVast() {
 (async function () {
   if (['dag', 'afroep', 'nacht', 'bibliothecaris', 'export', 'voorjou'].indexOf(modus) < 0) stop(2, { ok: false, fout: 'gebruik: dag|afroep|nacht|bibliothecaris|export <pad>|voorjou [--schrijf]' });
   const reg = R.maak({ vault: VAULT, sbRpc: sbRpc, lees: function (p) { return VV.lees(p, 'utf8'); },
-    schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen, pot: potLezer(), vj: vjLezer });
+    schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen, pot: potLezer(), vj: vjLezer,
+    bank: R.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')) });   // wv1010: plek 6, alleen lezen
   try {
     if (modus === 'nacht') {
       if (arg.indexOf('--buiten-venster') < 0 && uurAmsterdam() !== 1) stop(1, { ok: false, fout: 'nachtronde alleen 01:00-02:00 (Amsterdam); --buiten-venster om af te wijken' });
@@ -118,7 +120,9 @@ function grendelVast() {
     if (modus === 'bibliothecaris') {
       const b = await reg.bibliothecaris({ droog: droog, afroep: arg.indexOf('--afroep') >= 0 });
       const potTel = { gemeten: b.pot.gemeten, reden: b.pot.reden || null, verschillen: b.pot.verschillen.length };   // geen adressen op stdout
-      stop(0, Object.assign({ ok: true }, b, { pot: potTel, bevindingen: b.bevindingen.map(function (x) { return { id: x.bevinding_id, check: x.check_id, ernst: x.ernst, samenvatting: x.samenvatting }; }) }));
+      // wv1010: paden van bankbevindingen alleen hier (machinekamer), nooit in de databank of de box
+      const bankTel = { gemeten: b.bank.gemeten, reden: b.bank.reden || null, paden: b.bank.paden || {} };
+      stop(0, Object.assign({ ok: true }, b, { pot: potTel, bank: bankTel, bevindingen: b.bevindingen.map(function (x) { return { id: x.bevinding_id, check: x.check_id, ernst: x.ernst, samenvatting: x.samenvatting }; }) }));
     }
     if (modus === 'voorjou') {
       // databankklok (op van mk_voor_jou_lijst), niet de podklok (die liep eerder dagen mis)
