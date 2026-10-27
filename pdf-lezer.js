@@ -15,7 +15,9 @@
  * PATIËNTREGEL (B2/B3, fail-closed). Een stuk uit Facturen gaat alleen naar Claude als het HELE bericht lokaal gelezen is (tekstlaag per
  * pagina, OCR voor beeldpagina's tot OCR_MAX pagina's, UBL-tekst en een in de UBL ingebedde PDF) en noch facturen-kern.stapPatientkenmerk
  * noch patientpoort-2.0 iets vindt. Iets niet te lezen, OCR mislukt of maar deels: dicht. Intake geeft alleen stukken door die de router
- * al als 'beoordeeld' (marker geen, niet deels gelezen) had. Een oordeel over patiëntgegevens komt nooit van Claude.
+ * al als 'beoordeeld' (marker geen, niet deels gelezen) had, en ook dan leest de lezer elke PDF zelf nog eens per pagina (OCR op elke
+ * beeldpagina en elke pagina met te weinig tekst; een lege OCR-pagina = dicht) en draait hij beide patiëntregels (review wv1431 MOET 1/2).
+ * Een oordeel over patiëntgegevens komt nooit van Claude.
  *
  * GRENS (I4). Reservering vóór de aanroep (pagina's × tokens_per_pagina), grens per maand, per dag en per stuk (pagina's), snelheidsgrens
  * per uur. Werkelijk verbruik met het model UIT HET ANTWOORD (een server-side fallback kan een ander model gebruiken) naar verbruik.jsonl,
@@ -31,12 +33,12 @@ const path = require('path');
 const VERSIE = 'pdf-lezer-1.0';
 const API = 'https://api.anthropic.com';
 const BETA_FALLBACK = 'server-side-fallback-2026-07-01';
-const OCR_MAX = 5;            // beeldpagina's die de lokale OCR leest; meer = deels gelezen = dicht (gelijk aan de Intake-router)
+const OCR_MAX = 10;           // pagina's die de lokale OCR leest (beeld of te weinig tekst); meer = deels gelezen = dicht
 const TEKST_MIN = 40;         // tekens zonder witruimte: daaronder telt een pagina als beeldpagina
 // Prijzen per miljoen tokens (prijspagina 27-10-2026; cache_schrijven = 1,25 × invoer, de standaardregel voor de 5-minutencache). Een model
 // dat hier niet staat, rekent met de duurste regel (DUURST) en krijgt de vlag prijs_onbekend.
 const PRIJZEN = {
-  'claude-sonnet-5-5': { in: 2, uit: 10, cache_lezen: 0.10, cache_schrijven: 2.5, batch_in: 1, batch_uit: 5 },
+  'claude-sonnet-5-5': { in: 2, uit: 10, cache_lezen: 0.20, cache_schrijven: 2.5, batch_in: 1, batch_uit: 5 },   // cache: prijspagina 0,10, skilltabel 0,20 → de hoogste
   'claude-haiku-5-5': { in: 0.10, uit: 0.50, cache_lezen: 0.01, cache_schrijven: 0.125, batch_in: 0.05, batch_uit: 0.25,
     lang: { drempel: 100000, in: 0.50, uit: 2.50, cache_lezen: 0.05, cache_schrijven: 0.625, batch_in: 0.25, batch_uit: 1.25 } },
   'claude-opus-5-5': { in: 4, uit: 20, cache_lezen: 0.20, cache_schrijven: 5, batch_in: 2, batch_uit: 10 },
@@ -155,9 +157,10 @@ function kostenAntwoord(msg, batch) {
   k.modellen = msg && msg.model ? [msg.model] : [];
   return k;
 }
+// Reservering: invoer naar pagina's, uitvoer tot max_tokens (het slechtste geval; review wv1431 KLEIN 7).
 function schatting(inst, model, paginas, markdown, batch) {
   const inT = paginas * inst.tokens_per_pagina + 3000;
-  const uitT = markdown ? paginas * 1500 + 2000 : 2000;
+  const uitT = maxTokens(paginas, markdown);
   return kostenUsage(model, { input_tokens: inT, output_tokens: uitT }, batch).usd;
 }
 function maxTokens(paginas, markdown) {
@@ -215,18 +218,20 @@ function vergelijk(a, b, norm) {
   return x === y ? 'gelijk' : 'anders';
 }
 
-// Ingebedde PDF's uit een UBL (AdditionalDocumentReference/Attachment/EmbeddedDocumentBinaryObject mimeCode=application/pdf).
-function ingebeddePdfs(xml) {
-  const uit = [];
+// Alle ingebedde objecten uit een UBL (EmbeddedDocumentBinaryObject). → { pdfs: [Buffer], anders: n } — een object dat geen PDF is
+// (andere mimeCode, of bytes die niet met %PDF- beginnen) telt als 'anders': de poort sluit dan het bericht (review wv1431 ZOU 4).
+function ingebedde(xml) {
+  const uit = { pdfs: [], anders: 0 };
   const re = /<(?:[\w.-]+:)?EmbeddedDocumentBinaryObject\b([^>]*)>([\s\S]*?)<\/(?:[\w.-]+:)?EmbeddedDocumentBinaryObject>/g;
   let m;
-  while ((m = re.exec(String(xml || ''))) && uit.length < 10) {
-    if (!/mimeCode\s*=\s*["']application\/pdf["']/i.test(m[1])) continue;
+  while ((m = re.exec(String(xml || '')))) {
     const b = Buffer.from(m[2].replace(/\s+/g, ''), 'base64');
-    if (b.length) uit.push(b);
+    if (/mimeCode\s*=\s*["']application\/pdf["']/i.test(m[1]) && b.subarray(0, 5).toString('latin1') === '%PDF-') uit.pdfs.push(b);
+    else uit.anders++;
   }
   return uit;
 }
+function ingebeddePdfs(xml) { return ingebedde(xml).pdfs; }
 function ublTekst(xml) { return String(xml || '').replace(/<(?:[\w.-]+:)?EmbeddedDocumentBinaryObject\b[\s\S]*?<\/(?:[\w.-]+:)?EmbeddedDocumentBinaryObject>/g, ' ').replace(/<[^>]+>/g, '\n').replace(/\n{2,}/g, '\n'); }
 
 // ─────────────────────────── de lezer ───────────────────────────
@@ -251,7 +256,6 @@ function maak(o) {
     try { j = JSON.parse(fs.readFileSync(INSTELLING, 'utf8')) || {}; } catch (e) { j = {}; }
     const r = Object.assign({}, STANDAARD);
     for (const k of Object.keys(STANDAARD)) if (j[k] !== undefined && typeof j[k] === typeof STANDAARD[k]) r[k] = j[k];
-    if (typeof j.basis_url === 'string' && /^http:\/\/127\.0\.0\.1:\d+$/.test(j.basis_url)) r.basis_url = j.basis_url;   // alleen de toets
     instCache = r; instOp = nu();
     return r;
   }
@@ -318,7 +322,9 @@ function maak(o) {
       if (!s) return null;
       sdkKlasse = s.klasse; tel.sdk = s.bron;
     }
-    return new sdkKlasse({ apiKey: sleutel, authToken: null, baseURL: i.basis_url || API, maxRetries: 2, timeout: 10 * 60 * 1000 });
+    // basisUrl alleen uit maak() (de toets), nooit uit het instellingenbestand: wie daar kan schrijven, zou de sleutel kunnen afvangen
+    // (review wv1431 ZOU 5). logLevel uit: ANTHROPIC_LOG=debug zou anders de PDF in het podlog zetten (KLEIN 6).
+    return new sdkKlasse({ apiKey: sleutel, authToken: null, baseURL: o.basisUrl || API, maxRetries: 2, timeout: 10 * 60 * 1000, logLevel: 'off' });
   }
   async function sleutelHaal() {
     try { const s = await o.sleutel(); tel.sleutel = s ? 'aanwezig' : 'ontbreekt'; return s || null; }
@@ -412,27 +418,46 @@ function maak(o) {
     return { ok: true, r: on.r, controle: cv, verbruik: { model: msg.model, usd: rond(k.usd), in: k.in, uit: k.uit, cache_lezen: k.cache_lezen }, ms, paginas };
   }
 
-  // ── lokale lezing per pagina (tekstlaag; beeldpagina's met OCR, hooguit OCR_MAX) ──
-  async function lokaalLezen(bytes, tekst) {
-    let t = tekst;
-    if (t == null) { const r = await o.pdftotext(bytes); if (!r || !r.ok) return { ok: false, reden: 'pdftotext' }; t = r.tekst; }
+  // ── lokale lezing per pagina (review wv1431 MOET 1, ZOU 3) ──
+  // Eigen pdftotext (niet de tekst van de aanroeper: die kan afgekapt zijn). Fail-closed: aantal pagina-einden ≠ pdfinfo, afgekapte tekst,
+  // pdfimages faalt, meer dan OCR_MAX te OCR'en pagina's, of een OCR-pagina met minder dan TEKST_MIN tekens → niet gelezen. OCR gaat over
+  // elke pagina met te weinig tekst ÉN elke pagina met een beeld (een stempel of faxkop is tekst genoeg, de scan eronder niet).
+  async function lokaalLezen(bytes) {
+    let r = null;
+    try { r = await o.pdftotext(bytes); } catch (e) { r = null; }
+    if (!r || !r.ok) return { ok: false, reden: 'pdftotext' };
+    if (r.afgekapt) return { ok: false, reden: 'tekst_afgekapt' };
+    const t = String(r.tekst || '');
     let n = null;
     try { n = await o.paginas(bytes); } catch (e) { n = null; }
     if (!(n > 0)) return { ok: false, reden: 'paginas_onbekend' };
-    const pag = String(t || '').split('\f');
-    const beeld = [];
-    for (let p = 0; p < n; p++) if (zonderWit(pag[p]) < TEKST_MIN) beeld.push(p + 1);
-    if (beeld.length > OCR_MAX) return { ok: false, reden: 'ocr_deels', paginas: n };
+    if ((t.match(/\f/g) || []).length !== n) return { ok: false, reden: 'paginatelling', paginas: n };
+    const pag = t.split('\f');
+    let beelden = null;
+    try { beelden = await o.beeldPaginas(bytes); } catch (e) { beelden = null; }
+    if (!Array.isArray(beelden)) return { ok: false, reden: 'pdfimages', paginas: n };
+    const ocrPag = [];
+    for (let p = 1; p <= n; p++) if (zonderWit(pag[p - 1]) < TEKST_MIN || beelden.indexOf(p) >= 0) ocrPag.push(p);
+    if (ocrPag.length > OCR_MAX) return { ok: false, reden: 'ocr_deels', paginas: n };
     let ocr = '';
-    if (beeld.length) {
-      let r = null;
-      try { r = await o.ocr(bytes, beeld); } catch (e) { r = null; }
-      if (!r || r.gelezen !== beeld.length) return { ok: false, reden: 'ocr_mislukt', paginas: n };
-      ocr = String(r.tekst || '');
+    if (ocrPag.length) {
+      let x = null;
+      try { x = await o.ocr(bytes, ocrPag); } catch (e) { x = null; }
+      if (!x || !Array.isArray(x.per) || x.per.length !== ocrPag.length) return { ok: false, reden: 'ocr_mislukt', paginas: n };
+      if (x.per.some(function (y) { return typeof y !== 'string' || zonderWit(y) < TEKST_MIN; })) return { ok: false, reden: 'ocr_leeg', paginas: n };
+      ocr = x.per.join('\n');
     }
-    const alles = String(t || '') + (ocr ? '\n' + ocr : '');
+    const alles = t + (ocr ? '\n' + ocr : '');
     if (zonderWit(alles) < TEKST_MIN) return { ok: false, reden: 'onleesbaar', paginas: n };
-    return { ok: true, tekst: alles, paginas: n, ocr_paginas: beeld.length };
+    return { ok: true, tekst: alles, paginas: n, ocr_paginas: ocrPag.length };
+  }
+  // Eén lokaal gelezen geheel door beide patiëntregels. → null (open) of { reden, soorten }.
+  function patientDicht(teksten, extra) {
+    const pk = K.stapPatientkenmerk(teksten);
+    if (pk.kenmerk) return { reden: 'kenmerk', soorten: pk.soorten };
+    const pp = o.patientpoort.beoordeel(Object.assign({ teksten }, extra || {}), {});
+    if (pp.tegenhouden) return { reden: 'patientpoort', soorten: pp.soorten };
+    return null;
   }
 
   /*
@@ -443,30 +468,32 @@ function maak(o) {
     const teksten = [], perDoc = {};
     let scan = false;
     const dicht = function (reden, soorten) { return { open: false, reden, soorten: soorten || [] }; };
+    // Een bijlage die de koerier niet doorgaf (te groot, na de 10e, beeld, docx, dubbele naam) is niet gelezen: dan het hele bericht dicht.
+    if (!(job.overgeslagen === 0)) return dicht('onderdeel_overgeslagen');
     for (const d of job.documenten || []) {
       if (d.patientkenmerk_koerier) return dicht('koerier_kenmerk');
       const isPdf = Buffer.isBuffer(d.bytes) && d.bytes.subarray(0, 5).toString('latin1') === '%PDF-';
       if (isPdf) {
-        const l = await lokaalLezen(d.bytes, typeof d.tekst === 'string' ? d.tekst : null);
+        const l = await lokaalLezen(d.bytes);
         if (!l.ok) return dicht(l.reden);
         teksten.push(l.tekst); perDoc[d.sha256] = { tekst: l.tekst, paginas: l.paginas };
         if (l.ocr_paginas) scan = true;
       } else if (typeof d.ubl_xml === 'string') {
         teksten.push(ublTekst(d.ubl_xml));
-        for (const b of ingebeddePdfs(d.ubl_xml)) {
-          if (b.subarray(0, 5).toString('latin1') !== '%PDF-') return dicht('ingebed_geen_pdf');
-          const l = await lokaalLezen(b, null);
+        const ib = ingebedde(d.ubl_xml);
+        if (ib.anders) return dicht('ingebed_geen_pdf');
+        if (ib.pdfs.length > 10) return dicht('ingebed_te_veel');
+        for (const b of ib.pdfs) {
+          const l = await lokaalLezen(b);
           if (!l.ok) return dicht('ingebed_' + l.reden);
           teksten.push(l.tekst);
           if (l.ocr_paginas) scan = true;
         }
       } else return dicht('onbekend_onderdeel');
     }
-    const pk = K.stapPatientkenmerk(teksten);
-    if (pk.kenmerk) return dicht('kenmerk', pk.soorten);
-    const pp = o.patientpoort.beoordeel({ teksten, onderwerp: job.bericht && job.bericht.onderwerp, afzender: job.bericht && job.bericht.afzender,
-      bijlagenamen: (job.documenten || []).map(function (d) { return d.naam; }), scan }, {});
-    if (pp.tegenhouden) return dicht('patientpoort', pp.soorten);
+    const pd = patientDicht(teksten, { onderwerp: job.bericht && job.bericht.onderwerp, afzender: job.bericht && job.bericht.afzender,
+      bijlagenamen: (job.documenten || []).map(function (d) { return d.naam; }), scan });
+    if (pd) return dicht(pd.reden, pd.soorten);
     return { open: true, perDoc };
   }
 
@@ -530,14 +557,19 @@ function maak(o) {
     for (const d of job.delen || []) {
       let bytes;
       try { bytes = fs.readFileSync(d.pad); } catch (e) { continue; }
-      const r = await lees(bytes, { aanroeper: 'intake', entiteiten: ents, lokaleTekst: d.tekst });
-      bytes = null;
       const regel = { t: new Date(nu()).toISOString(), soort: 'intake', versie: VERSIE, stuk: job.stuk_id, deel: d.deel, sha256: d.sha256 };
+      // De router OCR't een PDF alleen als de hele tekst te kort is; een getypte eerste pagina met gescande brieven erachter zag hij als
+      // gelezen (review wv1431 MOET 2). Daarom hier dezelfde lezing per pagina + beide patiëntregels als bij Facturen, vóór de aanroep.
+      const l = await lokaalLezen(bytes);
+      const pd = l.ok ? patientDicht([l.tekst], { scan: l.ocr_paginas > 0 }) : { reden: l.reden, soorten: [] };
+      if (pd) { bytes = null; sch.gesloten++; schrijfRegel(SCHADUW, Object.assign(regel, { gesloten: true, reden: pd.reden, soorten: pd.soorten })); continue; }
+      const r = await lees(bytes, { aanroeper: 'intake', entiteiten: ents, lokaleTekst: l.tekst, paginas: l.paginas });
+      bytes = null;
       if (!r.ok) { sch.terugval++; regel.terugval = r.terugval; schrijfRegel(SCHADUW, regel); continue; }
       sch.gelezen++;
       const ent = r.r.geadresseerde.entiteit;
       regel.claude = { soort: r.r.soort_stuk, datum: r.r.documentdatum, entiteit: ent, knoop: ent ? KNOOP[ent] || null : null, categorie: kort(r.r.categorie_voorstel, 40),
-        leesbaarheid: r.r.leesbaarheid, onzeker: (r.r.onzeker || []).length, markdown_tekens: String(r.r.markdown || '').length, lokaal_tekens: String(d.tekst || '').length };
+        leesbaarheid: r.r.leesbaarheid, onzeker: (r.r.onzeker || []).length, markdown_tekens: String(r.r.markdown || '').length, lokaal_tekens: l.tekst.length };
       regel.router = job.router || null;
       regel.verschil = job.router ? { entiteit: vergelijk(regel.claude.knoop, job.router.entiteit, function (x) { return x; }) } : null;
       regel.controle = r.controle.vlaggen;
@@ -555,10 +587,11 @@ function maak(o) {
   // Openstaande reserveringen van ingediende batches tellen na een herstart weer mee.
   for (const b of leesBatches()) for (const k of Object.keys(b.items || {})) tel.gereserveerd += Number(b.items[k].est) || 0;
   function bijBatch(aanroeper, fn) { ontvangers[aanroeper] = fn; }
-  // job: { aanroeper, sha256, bytes, paginas?, entiteiten }. Alleen stukken die de aanroeper al door zijn patiëntregel haalde.
+  // job: { aanroeper, sha256, bytes, paginas?, entiteiten, patientregel: 'doorgelaten' }. Alleen stukken die de aanroeper al door de
+  // patiëntregel van deze module haalde (poortFacturen of de Intake-lezing); zonder dat expliciete veld weigert de wachtrij.
   function batchWachtrij(job) {
     const i = inst();
-    if (!i.aan || !isObj(job) || !Buffer.isBuffer(job.bytes) || !/^[0-9a-f]{64}$/.test(String(job.sha256 || ''))) return false;
+    if (!i.aan || !isObj(job) || job.patientregel !== 'doorgelaten' || !Buffer.isBuffer(job.bytes) || !/^[0-9a-f]{64}$/.test(String(job.sha256 || ''))) return false;
     if (batchWacht.length >= i.batch_max) return false;
     if (batchWacht.some(function (j) { return j.sha256 === job.sha256 && j.aanroeper === job.aanroeper; })) return true;
     batchWacht.push(job);
@@ -644,4 +677,4 @@ function maak(o) {
   return { lees, schaduw, poortFacturen, lokaalLezen, batchWachtrij, batchTik, bijBatch, health, leeg, _inst: inst };
 }
 
-module.exports = { maak, leegNaarNull, VERSIE, PRIJZEN, STANDAARD, OCR_MAX, KNOOP, schema, systeemTekst, controle, vergelijk, kostenUsage, kostenAntwoord, maxTokens, ingebeddePdfs, ublTekst, sha256 };
+module.exports = { maak, leegNaarNull, VERSIE, PRIJZEN, STANDAARD, OCR_MAX, KNOOP, schema, systeemTekst, controle, vergelijk, kostenUsage, kostenAntwoord, maxTokens, ingebedde, ingebeddePdfs, ublTekst, sha256 };

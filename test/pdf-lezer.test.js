@@ -99,13 +99,14 @@ function nepApi() {
 function lezer(api, extra, inst) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdf-lezer-'));
   WEG.push(dir);
-  fs.writeFileSync(path.join(dir, 'pdf-lezer.json'), JSON.stringify(Object.assign({ aan: true, schaduw: true, basis_url: api.basis }, inst || {})));
+  fs.writeFileSync(path.join(dir, 'pdf-lezer.json'), JSON.stringify(Object.assign({ aan: true, schaduw: true }, inst || {})));
   const meld = [];
   const o = Object.assign({
-    dir, sleutel: async () => NEP_SLEUTEL, sdk: () => (KLASSE ? { klasse: KLASSE, bron: 'toets' } : null), kern: K, patientpoort: POORT_PP,
+    dir, basisUrl: api.basis, sleutel: async () => NEP_SLEUTEL, sdk: () => (KLASSE ? { klasse: KLASSE, bron: 'toets' } : null), kern: K, patientpoort: POORT_PP,
     paginas: async (b) => pagVan(b).length,
-    pdftotext: async (b) => ({ ok: true, tekst: pagVan(b).join('\f') }),
-    ocr: async (b, pag) => ({ tekst: pag.map(() => 'Leverancier B B.V. Factuur 77 Totaal 10,00 onschuldige scantekst').join('\n'), gelezen: pag.length }),
+    pdftotext: async (b) => ({ ok: true, tekst: pagVan(b).map((x) => x + '\f').join('') }),   // zoals pdftotext: \f na elke pagina
+    beeldPaginas: async () => [],
+    ocr: async (b, pag) => ({ per: pag.map(() => 'Leverancier B B.V. Factuur 77 Totaal 10,00 onschuldige scantekst') }),
     melding: (t) => meld.push(t), fout: () => {},
   }, extra || {});
   const l = L.maak(o);
@@ -142,7 +143,7 @@ test('schema per aanroeper: overal additionalProperties false en alles required;
 
 test('kosten: model uit het antwoord, iteraties per poging, batch halve prijs, onbekend model = duurste regel', () => {
   const k = L.kostenUsage('claude-sonnet-5-5', { input_tokens: 1e6, output_tokens: 1e5, cache_read_input_tokens: 1e6 });
-  assert.equal(Math.round(k.usd * 100) / 100, 2 + 1 + 0.1);
+  assert.equal(Math.round(k.usd * 100) / 100, 2 + 1 + 0.2, 'cachetreffer 0,20 (de hoogste van prijspagina en skilltabel)');
   assert.equal(L.kostenUsage('claude-sonnet-5-5', { input_tokens: 1e6 }, true).usd, 1);
   assert.equal(L.kostenUsage('claude-haiku-5-5', { input_tokens: 200000 }).usd, 0.1, 'Haiku boven 100k: $ 0,50');
   assert.equal(L.kostenUsage('claude-onbekend-9', { input_tokens: 1e6 }).onbekend, true);
@@ -187,6 +188,12 @@ test('lees: echte SDK naar de nep-API — expliciete sleutel en basis (niet uit 
   const h = l.health();
   assert.equal(h.aanroepen_vandaag, 3); assert.ok(h.vandaag_usd > 0); assert.equal(h.sleutel, 'aanwezig'); assert.equal(h.gereserveerd_usd, 0);
   assert.ok(!JSON.stringify(h).includes(NEP_SLEUTEL));
+  // review wv1431 ZOU 5: basis_url in het instellingenbestand telt niet (alleen maak({ basisUrl }) uit de toets)
+  const vang = []; const kaper = http.createServer((q, s2) => { vang.push(q.headers.authorization); s2.writeHead(500); s2.end(); }); SERVERS.push(kaper);
+  await new Promise((r9) => kaper.listen(0, '127.0.0.1', r9));
+  const lk = lezer(api, { basisUrl: undefined, sdk: () => ({ klasse: class extends KLASSE { constructor(x) { assert.equal(x.baseURL, 'https://api.anthropic.com'); assert.equal(x.logLevel, 'off'); throw new Error('stop'); } }, bron: 'toets' }) }, { basis_url: 'http://127.0.0.1:' + kaper.address().port });
+  await assert.rejects(lk.lees(b, { aanroeper: 'facturen' }), /stop/);
+  assert.equal(vang.length, 0);
   // Intake: met markdown en meer max_tokens
   api.antwoord = () => ({ json: Object.assign({}, ANTWOORD, { markdown: '# x', categorie_voorstel: null, samenvatting: 'Een factuur.' }) });
   const ri = await l.lees(nepPdf(['a', 'b', 'c']), { aanroeper: 'intake', entiteiten: ENT, lokaleTekst: 'tekst' });
@@ -223,7 +230,7 @@ test('terugval: weigering, afgekapt, ongeldige JSON, HTTP-fout, geen pdf, te vee
 
 test('grens: reservering vóór de aanroep (parallel niet erover), dag- en maandgrens, één melding per maand, telling na een herstart', { skip: !KLASSE && 'SDK niet beschikbaar' }, async () => {
   const api = await nepApi();
-  const een = (() => { const i = Object.assign({}, L.STANDAARD); return L.kostenUsage('claude-sonnet-5-5', { input_tokens: 1 * i.tokens_per_pagina + 3000, output_tokens: 2000 }).usd; })();
+  const een = (() => { const i = Object.assign({}, L.STANDAARD); return L.kostenUsage('claude-sonnet-5-5', { input_tokens: 1 * i.tokens_per_pagina + 3000, output_tokens: L.maxTokens(1, false) }).usd; })();
   const l = lezer(api, {}, { grens_dag_usd: een * 1.5 });
   const b = nepPdf(FACTUUR);
   const [a, c] = await Promise.all([l.lees(b, { aanroeper: 'facturen' }), l.lees(b, { aanroeper: 'facturen' })]);
@@ -248,32 +255,54 @@ test('patiëntregel Facturen (B2/B3): kenmerk, scan zonder of met deels OCR, mis
   const api = await nepApi();
   const l = lezer(api);
   const pdf = (pag) => ({ sha256: L.sha256(nepPdf(pag)), naam: 'f.pdf', mime: 'application/pdf', bytes: nepPdf(pag), tekst: pag.join('\f'), tekstlaag: true });
-  assert.equal((await l.poortFacturen({ documenten: [pdf(FACTUUR)] })).open, true);
-  const bsn = await l.poortFacturen({ documenten: [pdf([FACTUUR[0] + '\nBSN: 111222333'])] });
+  assert.equal((await l.poortFacturen({ overgeslagen: 0, documenten: [pdf(FACTUUR)] })).open, true);
+  const bsn = await l.poortFacturen({ overgeslagen: 0, documenten: [pdf([FACTUUR[0] + '\nBSN: 111222333'])] });
   assert.deepEqual([bsn.open, bsn.reden], [false, 'kenmerk']);
-  const brief = await l.poortFacturen({ documenten: [pdf(['Geachte collega, wij zagen bovengenoemde patiënt op de polikliniek. Diagnose volgt; medicatie aangepast, uitslag lab volgt.'])] });
+  const brief = await l.poortFacturen({ overgeslagen: 0, documenten: [pdf(['Geachte collega, wij zagen bovengenoemde patiënt op de polikliniek. Diagnose volgt; medicatie aangepast, uitslag lab volgt.'])] });
   assert.equal(brief.open, false);
   // scan: OCR leest patiënttaal → dicht
-  const ocrPat = lezer(api, { ocr: async (b, p) => ({ tekst: 'Patiënt geboortedatum 01-02-1950, BSN 111222333', gelezen: p.length }) });
+  const ocrPat = lezer(api, { ocr: async (b, p) => ({ per: p.map(() => 'Patiënt geboortedatum 01-02-1950, BSN 111222333') }) });
   const scan = { sha256: 'a'.repeat(64), naam: 's.pdf', mime: 'application/pdf', bytes: nepPdf(['', '']), tekst: '\f', tekstlaag: false };
-  assert.equal((await ocrPat.poortFacturen({ documenten: [scan] })).open, false);
+  assert.equal((await ocrPat.poortFacturen({ overgeslagen: 0, documenten: [scan] })).open, false);
   const ocrStuk = lezer(api, { ocr: async () => null });
-  assert.equal((await ocrStuk.poortFacturen({ documenten: [scan] })).reden, 'ocr_mislukt');
-  const half = lezer(api, { ocr: async (b, p) => ({ tekst: 'x'.repeat(50), gelezen: p.length - 1 }) });
-  assert.equal((await half.poortFacturen({ documenten: [scan] })).reden, 'ocr_mislukt', 'deels gelezen = dicht');
-  const zes = Object.assign({}, scan, { bytes: nepPdf(new Array(6).fill('')), tekst: new Array(6).fill('').join('\f') });
-  assert.equal((await l.poortFacturen({ documenten: [zes] })).reden, 'ocr_deels');
-  assert.equal((await l.poortFacturen({ documenten: [Object.assign({}, pdf(FACTUUR), { patientkenmerk_koerier: true })] })).reden, 'koerier_kenmerk');
+  assert.equal((await ocrStuk.poortFacturen({ overgeslagen: 0, documenten: [scan] })).reden, 'ocr_mislukt');
+  const half = lezer(api, { ocr: async (b, p) => ({ per: p.slice(1).map(() => 'x'.repeat(50)) }) });
+  assert.equal((await half.poortFacturen({ overgeslagen: 0, documenten: [scan] })).reden, 'ocr_mislukt', 'deels gelezen = dicht');
+  const elf = Object.assign({}, scan, { bytes: nepPdf(new Array(11).fill('')), tekst: '' });
+  assert.equal((await l.poortFacturen({ overgeslagen: 0, documenten: [elf] })).reden, 'ocr_deels');
+  // review wv1431 MOET 1: lege of ruis-OCR op een beeldpagina telt niet als gelezen, ook als de andere pagina genoeg tekst heeft
+  const gemengd = Object.assign({}, scan, { bytes: nepPdf([FACTUUR[0], '']) });
+  for (const t of ['', '| ~ . ,', '   \n  ']) {
+    const lg = lezer(api, { ocr: async (b, p) => ({ per: p.map(() => t) }) });
+    assert.equal((await lg.poortFacturen({ overgeslagen: 0, documenten: [gemengd] })).reden, 'ocr_leeg', JSON.stringify(t));
+  }
+  // ZOU 3: een beeld op een pagina met genoeg tekst wordt ook geOCR'd; pagina-einden ≠ pdfinfo, afgekapte tekst of pdfimages kapot → dicht
+  const gevraagd = [];
+  const metBeeld = lezer(api, { beeldPaginas: async () => [1], ocr: async (b, p) => { gevraagd.push(...p); return { per: p.map(() => 'Geachte collega, wij zagen bovengenoemde patiënt op de polikliniek; medicatie en uitslag lab volgen.') }; } });
+  const r1 = await metBeeld.poortFacturen({ overgeslagen: 0, documenten: [pdf(FACTUUR)] });
+  assert.deepEqual(gevraagd, [1]); assert.equal(r1.open, false, 'de scan onder een tekstpagina ging door de patiëntpoort');
+  const ff = lezer(api, { pdftotext: async (b) => ({ ok: true, tekst: pagVan(b).join('') + '\f' }) });
+  assert.equal((await ff.poortFacturen({ overgeslagen: 0, documenten: [pdf(['a'.repeat(50), 'b'.repeat(50)])] })).reden, 'paginatelling');
+  const kap = lezer(api, { pdftotext: async (b) => ({ ok: true, tekst: pagVan(b).map((x) => x + '\f').join(''), afgekapt: true }) });
+  assert.equal((await kap.poortFacturen({ overgeslagen: 0, documenten: [pdf(FACTUUR)] })).reden, 'tekst_afgekapt');
+  const pi = lezer(api, { beeldPaginas: async () => null });
+  assert.equal((await pi.poortFacturen({ overgeslagen: 0, documenten: [pdf(FACTUUR)] })).reden, 'pdfimages');
+  // ZOU 4: een bijlage die de koerier niet doorgaf (of onbekend aantal) sluit het bericht
+  assert.equal((await l.poortFacturen({ overgeslagen: 1, documenten: [pdf(FACTUUR)] })).reden, 'onderdeel_overgeslagen');
+  assert.equal((await l.poortFacturen({ documenten: [pdf(FACTUUR)] })).reden, 'onderdeel_overgeslagen');
+  assert.equal((await l.poortFacturen({ overgeslagen: 0, documenten: [Object.assign({}, pdf(FACTUUR), { patientkenmerk_koerier: true })] })).reden, 'koerier_kenmerk');
   // UBL met ingebedde PDF waarin een kenmerk staat → het hele bericht dicht (ook de schone PDF ernaast)
   const ingebed = nepPdf(['Patiënt: zie dossier\nBSN: 111222333\nGeboortedatum: 01-02-1950']).toString('base64');
   const ubl = '<Invoice><cac:AdditionalDocumentReference><cac:Attachment><cbc:EmbeddedDocumentBinaryObject mimeCode="application/pdf" filename="x.pdf">' + ingebed +
     '</cbc:EmbeddedDocumentBinaryObject></cac:Attachment></cac:AdditionalDocumentReference><cbc:ID>VB-1</cbc:ID></Invoice>';
-  const r = await l.poortFacturen({ documenten: [pdf(FACTUUR), { sha256: 'b'.repeat(64), naam: 'f.xml', mime: 'application/xml', ubl_xml: ubl }] });
+  const r = await l.poortFacturen({ overgeslagen: 0, documenten: [pdf(FACTUUR), { sha256: 'b'.repeat(64), naam: 'f.xml', mime: 'application/xml', ubl_xml: ubl }] });
   assert.deepEqual([r.open, r.reden], [false, 'kenmerk']);
   assert.deepEqual(L.ingebeddePdfs(ubl).length, 1);
+  const ublAnders = ubl.replace('mimeCode="application/pdf"', 'mimeCode="application/octet-stream"');
+  assert.equal((await l.poortFacturen({ overgeslagen: 0, documenten: [pdf(FACTUUR), { sha256: 'd'.repeat(64), naam: 'f.xml', mime: 'application/xml', ubl_xml: ublAnders }] })).reden, 'ingebed_geen_pdf');
   assert.ok(!/EmbeddedDocumentBinaryObject|QlNO/.test(L.ublTekst(ubl)));
   // onbekend onderdeel (geen PDF, geen UBL) → dicht
-  assert.equal((await l.poortFacturen({ documenten: [{ sha256: 'c'.repeat(64), naam: 'x.bin', mime: 'application/octet-stream' }] })).reden, 'onbekend_onderdeel');
+  assert.equal((await l.poortFacturen({ overgeslagen: 0, documenten: [{ sha256: 'c'.repeat(64), naam: 'x.bin', mime: 'application/octet-stream' }] })).reden, 'onbekend_onderdeel');
   api.sluit();
 });
 
@@ -282,9 +311,9 @@ test('schaduw Facturen: dicht bericht → geen aanroep, alleen reden en soorten;
   const l = lezer(api);
   const pdf = (pag) => ({ sha256: L.sha256(nepPdf(pag)), naam: 'f.pdf', mime: 'application/pdf', bytes: nepPdf(pag), tekst: pag.join('\f'), tekstlaag: true });
   const dicht = pdf([FACTUUR[0] + '\nBSN: 111222333']);
-  assert.equal(l.schaduw({ soort: 'facturen', bericht: { onderwerp: 'Factuur' }, documenten: [dicht], kern: [] }), true);
+  assert.equal(l.schaduw({ soort: 'facturen', overgeslagen: 0, bericht: { onderwerp: 'Factuur' }, documenten: [dicht], kern: [] }), true);
   const open = pdf(FACTUUR);
-  l.schaduw({ soort: 'facturen', bericht: { onderwerp: 'Factuur' }, documenten: [open], entiteiten: ENT,
+  l.schaduw({ soort: 'facturen', overgeslagen: 0, bericht: { onderwerp: 'Factuur' }, documenten: [open], entiteiten: ENT,
     kern: [{ document: open.sha256, status: 'te_beoordelen', nummer: 'VB-2026-0412', factuurdatum: null, incl: 142850, iban: IBAN_A, entiteit: 'groenhouten', scan: false }] });
   await l.leeg();
   assert.equal(api.verzoeken.length, 1, 'alleen het open bericht ging naar de API');
@@ -317,6 +346,16 @@ test('schaduw Intake: leest het blob-pad, logt soort/datum/entiteit (knoop) tege
   assert.deepEqual(s[0].verschil, { entiteit: 'gelijk' });
   assert.equal(s[0].claude.markdown_tekens, '# Geheime markdowntekst'.length);
   assert.ok(!/Geheime markdowntekst|Samenvatting die niet/.test(JSON.stringify(s)));
+  // review wv1431 MOET 2: getypte eerste pagina + gescande patiëntbrief erachter → de lezer OCR't zelf, sluit, en roept de API niet aan
+  const voor = api.verzoeken.length;
+  const l2 = lezer(api, { ocr: async (b, p) => ({ per: p.map(() => 'Geachte collega, wij zagen bovengenoemde patiënt op de polikliniek; medicatie en uitslag lab volgen. ZWAARDVIS') }) });
+  const blob2 = path.join(l2.dir, 'blob2.pdf');
+  fs.writeFileSync(blob2, nepPdf([FACTUUR[0], '']));
+  l2.schaduw({ soort: 'intake', stuk_id: 'stk_2', entiteiten: ENT, delen: [{ deel: 'd0', sha256: 'e'.repeat(64), pad: blob2, tekst: FACTUUR[0] }], router: { soort: 'bewijsstuk', entiteit: 'TG' } });
+  await l2.leeg();
+  assert.equal(api.verzoeken.length, voor, 'geen API-aanroep');
+  const s2 = regels(path.join(l2.dir, 'schaduw.jsonl'));
+  assert.equal(s2[0].gesloten, true); assert.ok(!/ZWAARDVIS/.test(JSON.stringify(s2)));
   api.sluit();
 });
 
@@ -326,7 +365,8 @@ test('batches: indienen zonder fallbacks, reservering tegen batchprijs, ophalen 
   const gekregen = [];
   l.bijBatch('intake', async (sha, r) => gekregen.push([sha, r.ok, r.r && r.r.factuur.nummer]));
   const sha = L.sha256(nepPdf(FACTUUR));
-  assert.equal(l.batchWachtrij({ aanroeper: 'intake', sha256: sha, bytes: nepPdf(FACTUUR), entiteiten: ENT }), true);
+  assert.equal(l.batchWachtrij({ aanroeper: 'intake', sha256: sha, bytes: nepPdf(FACTUUR), entiteiten: ENT }), false, 'zonder patiëntregel geweigerd');
+  assert.equal(l.batchWachtrij({ aanroeper: 'intake', sha256: sha, bytes: nepPdf(FACTUUR), entiteiten: ENT, patientregel: 'doorgelaten' }), true);
   const u = await l.batchTik();
   assert.equal(u.ingediend, 1, JSON.stringify(u));
   const req = api.verzoeken.find((v) => v.url.startsWith('/v1/messages/batches') && v.methode === 'POST').body.requests[0];

@@ -295,6 +295,12 @@ process.stdin.on("end", () => {
         log "GEWEIGERD: $NAAM zou de omgevingsvariabele \$$ENVNAAM overschrijven - overgeslagen"
         continue ;;
     esac
+    # Het hele ANTHROPIC_*-voorvoegsel (ook ANTHROPIC_LOG, ANTHROPIC_CUSTOM_HEADERS, ...) stuurt de SDK of de CLI: nooit uit de kluis.
+    case "$ENVNAAM" in
+      ANTHROPIC_*)
+        log "GEWEIGERD: $NAAM zou de omgevingsvariabele \$$ENVNAAM zetten (ANTHROPIC_* nooit uit de kluis) - overgeslagen"
+        continue ;;
+    esac
     WAARDE="$(printf '%s' "$B64" | base64 -d 2>/dev/null)"
     if [ -z "$WAARDE" ]; then
       # Een lege waarde is meestal een geheim dat wel is aangemaakt maar nog niet

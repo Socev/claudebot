@@ -609,6 +609,7 @@ test('schaduw PDF-lezer (wv1431): na de transactie stukken + kern-uitkomst naar 
   assert.equal(j.kern[0].document, st.sha256);
   assert.equal(j.kern[0].nummer, 'SCHADUW-0001');
   assert.equal(j.kern[0].incl, 6050);
+  assert.equal(j.overgeslagen, 0, 'upload: niets overgeslagen');
   // postvak aan, schaduw gooit: de ronde gaat gewoon door
   assert.equal(t.fdb.db.prepare("UPDATE bron SET actief = 1 WHERE soort = 'verzamelpostvak'").run().changes, 1);
   g.mails.push({ id: 'sch00000000000001', thread_id: 'x', van: 'facturen@leverancier-a.invalid', aan: 'd.schaap+facturen@gmail.com', onderwerp: 'Factuur', labels: ['INBOX'],
@@ -617,4 +618,13 @@ test('schaduw PDF-lezer (wv1431): na de transactie stukken + kern-uitkomst naar 
   const u2 = await t.ronde(g, NU + 10 * MIN, { pdfSchaduw: () => { throw new Error('schaduw stuk'); } });
   assert.equal(u2.postvak.ok, true, JSON.stringify(u2.postvak));
   assert.equal(t.n("SELECT count(*) AS n FROM factuur WHERE nummer = 'SCHADUW-0002'"), 1);
+  // een bijlage die niet als document meegaat (beeld) telt als overgeslagen: de PDF-lezer sluit dan het hele bericht
+  g.mails.push({ id: 'sch00000000000002', thread_id: 'y', van: 'facturen@leverancier-a.invalid', aan: 'd.schaap+facturen@gmail.com', onderwerp: 'Factuur', labels: ['INBOX'],
+    datum: '2026-10-22T09:00:00.000Z', datum_lokaal: '2026-10-22T11:00:00+02:00', dag_lokaal: '2026-10-22' });
+  g.bijlagen.sch00000000000002 = [{ naam: 'f3.pdf', mime: 'application/pdf', bytes: Z.pdf(['Leverancier A B.V.', 'Factuur', 'Factuurnummer: SCHADUW-0003', 'Totaal incl. btw: EUR 80,00', 'IBAN ' + lev.iban]) },
+    { naam: 'logo.png', mime: 'image/png', bytes: Buffer.from('nep-png') }];
+  const gezien3 = [];
+  await t.ronde(g, NU + 20 * MIN, { pdfSchaduw: (job) => gezien3.push(job) });
+  assert.equal(gezien3.length, 1);
+  assert.equal(gezien3[0].overgeslagen, 1);
 });

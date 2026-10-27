@@ -14511,18 +14511,21 @@ const pdfLezer = (function () {
     return require(p).maak({ dir: PDF_LEZER_DIR, sleutel: pdfSleutel, sdk: pdfSdk,
       kern: require(path.join(__dirname, 'facturen-kern.js')), patientpoort: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       paginas: function (bytes) { return pdfTijdelijk(bytes, async function (f) { const t = await intakeProces('pdfinfo', [f], { ms: 15000 }); const m = t && /^Pages:\s+(\d+)/m.exec(t); return m ? Number(m[1]) : null; }); },
-      pdftotext: function (bytes) { return pdfTijdelijk(bytes, async function (f) { const t = await intakeProces('pdftotext', ['-q', '-layout', '-enc', 'UTF-8', f, '-'], { ms: 30000 }); return t == null ? { ok: false } : { ok: true, tekst: t }; }); },
+      // intakeProces kapt stil af op 4 MB: dan afgekapt (de lezer sluit dan, review wv1431 ZOU 3)
+      pdftotext: function (bytes) { return pdfTijdelijk(bytes, async function (f) { const t = await intakeProces('pdftotext', ['-q', '-layout', '-enc', 'UTF-8', f, '-'], { ms: 60000 }); return t == null ? { ok: false } : { ok: true, tekst: t, afgekapt: t.length >= 4e6 }; }); },
+      // pagina's met een beeld (pdfimages -list, kolom page); null = mislukt (de lezer sluit dan)
+      beeldPaginas: function (bytes) { return pdfTijdelijk(bytes, async function (f) { const t = await intakeProces('pdfimages', ['-list', f], { ms: 30000 }); if (t == null) return null;
+        const p = new Set(); t.split('\n').slice(2).forEach(function (r) { const m = /^\s*(\d+)\s/.exec(r); if (m) p.add(Number(m[1])); }); return Array.from(p).sort(function (a, b) { return a - b; }); }); },
+      // OCR per gevraagde pagina, in dezelfde volgorde; een pagina die niet lukt geeft null (de lezer sluit dan)
       ocr: function (bytes, paginas) {
         return pdfTijdelijk(bytes, async function (f, map) {
-          const delen = []; let gelezen = 0;
-          for (const n of paginas.slice(0, 5)) {
+          const per = [];
+          for (const n of paginas) {
             const r = await intakeProces('pdftoppm', ['-q', '-r', '200', '-f', String(n), '-l', String(n), '-png', f, path.join(map, 'p' + n)], { ms: 120000 });
             const png = r == null ? null : fs.readdirSync(map).find(function (x) { return x.indexOf('p' + n + '-') === 0 && /\.png$/.test(x); });
-            if (!png) continue;
-            const t = await intakeProces('tesseract', [path.join(map, png), 'stdout', '-l', 'nld+eng', '--psm', '3'], { ms: 120000 });
-            if (t != null) { gelezen++; delen.push(t); }
+            per.push(png ? await intakeProces('tesseract', [path.join(map, png), 'stdout', '-l', 'nld+eng', '--psm', '3'], { ms: 120000 }) : null);
           }
-          return { tekst: delen.join('\n'), gelezen };
+          return { per };
         });
       },
       melding: function (t) { ovisBoxRij('\n## [log] ' + new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16) + ' — ' + t + '\n- status: open\n- van: pod:pdf-lezer\n'); },

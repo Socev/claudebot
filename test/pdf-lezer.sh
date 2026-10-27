@@ -13,7 +13,9 @@ if [ -z "${PDF_SDK:-}" ]; then
     W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
     V="$(node -e 'console.log(require("./package.json").dependencies["@anthropic-ai/sdk"])')"
     echo '{"private":true}' > "$W/package.json"
-    (cd "$W" && npm install --silent --no-audit --no-fund --ignore-scripts "@anthropic-ai/sdk@$V" >/dev/null 2>&1) && PDF_SDK="$W" || echo "::warning::@anthropic-ai/sdk niet te installeren: SDK-toetsen overgeslagen"
+    if (cd "$W" && npm install --silent --no-audit --no-fund --ignore-scripts "@anthropic-ai/sdk@$V" >/dev/null 2>&1); then PDF_SDK="$W"
+    elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then echo "::error::@anthropic-ai/sdk@$V niet te installeren: SDK-toetsen kunnen niet draaien"; exit 1
+    else echo "WAARSCHUWING: @anthropic-ai/sdk niet te installeren: SDK-toetsen overgeslagen"; fi
   fi
 fi
 PDF_SDK="${PDF_SDK:-}" node --test --test-reporter=spec test/pdf-lezer.test.js

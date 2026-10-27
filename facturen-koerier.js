@@ -380,13 +380,14 @@ async function verstuurEen(fdb, io, op, modus, o, uit) {
 // ───────────────────────────── schaduw PDF-lezer (wv1431) ─────────────────────────────
 
 // Na de transactie, nooit ervoor. De kern-uitkomst per factuur uit de database (alleen de velden die de schaduw vergelijkt).
-function schaduwPdf(fdb, io, berichtId, bericht, documenten, ruw, facturen) {
+// overgeslagen: bijlagen van het bericht die niet als document meegingen (de PDF-lezer sluit dan het hele bericht, review wv1431 ZOU 4).
+function schaduwPdf(fdb, io, berichtId, bericht, documenten, ruw, facturen, overgeslagen) {
   if (typeof io.pdfSchaduw !== 'function' || !documenten.length) return;
   try {
     const q = fdb.db.prepare('SELECT f.status, f.nummer, f.factuurdatum, f.incl, f.iban, f.entiteit, d.sha256 AS document, u.sha256 AS ubl_document, d.tekstlaag ' +
       'FROM factuur f LEFT JOIN document d ON d.id = f.document LEFT JOIN document u ON u.id = f.ubl_document WHERE f.id = ?');
     const kern = (facturen || []).map((f) => q.get(f.id)).filter(Boolean).map((x) => Object.assign({}, x, { scan: x.tekstlaag === 0 }));
-    io.pdfSchaduw({ soort: 'facturen', bericht_id: berichtId || null, bericht: bericht || null, kern,
+    io.pdfSchaduw({ soort: 'facturen', bericht_id: berichtId || null, bericht: bericht || null, kern, overgeslagen: Number.isInteger(overgeslagen) ? overgeslagen : null,
       documenten: documenten.map((d) => ({ sha256: d.sha256, naam: d.naam, mime: d.mime, tekst: d.tekst, tekstlaag: d.tekstlaag, ubl_xml: d.ubl_xml,
         bytes: ruw.get(d.sha256) || null, patientkenmerk_koerier: !!d.patientkenmerk_koerier })) });
   } catch (e) { /* schaduw: nooit de ronde raken */ }
@@ -410,7 +411,7 @@ async function leesUploads(fdb, pdf, o) {
       if (!t.ok) throw Object.assign(new Error('pdftotext'), { code: t.fout });
       const docs = [{ sha256: d.sha256, naam: d.naam, mime: d.mime || 'application/pdf', bytes: d.bytes, tekst: t.tekst, tekstlaag: t.tekstlaag }];
       const v = F.verwerkBericht(fdb, { bericht: null, documenten: docs }, { wie: o.wie, nu: o.klok(), geupload_door: d.geupload_door });
-      schaduwPdf(fdb, o.io || {}, null, null, docs, new Map([[d.sha256, bytes]]), v.facturen);
+      schaduwPdf(fdb, o.io || {}, null, null, docs, new Map([[d.sha256, bytes]]), v.facturen, 0);
       tel.gelezen++; tel.facturen += v.facturen.length;
       delete pogingen[d.id];
     } catch (e) { tel.fout++; pogingen[d.id] = (pogingen[d.id] || 0) + 1; }
@@ -477,6 +478,7 @@ async function leesBericht(fdb, bron, io, pdf, m, eigen, o, tel, nietGelezen) {
   try { lijst = await io.luik({ actie: 'mail_bijlage', id: m.id }); } catch (e) { throw new LuikFout(foutSoort(e)); }
   if (!lijst || typeof lijst !== 'object') throw new LuikFout('geen_lijst');
   const documenten = [];
+  const totaalBijlagen = Array.isArray(lijst.bijlagen) ? lijst.bijlagen.length : 0;
   if (lijst.fout) {
     if (/te groot/i.test(String(lijst.fout))) { tel.te_groot++; nietGelezen.push('bijlagen > 8 MB'); }
     else throw new LuikFout('bijlagenlijst');
@@ -522,7 +524,7 @@ async function leesBericht(fdb, bron, io, pdf, m, eigen, o, tel, nietGelezen) {
     const v = F.verwerkBericht(fdb, { bericht: { id, message_id: m.id, afzender, onderwerp: m.onderwerp }, documenten }, { wie: o.wie, nu: o.klok() });
     n = v.facturen.length; vf = v.facturen;
   });
-  if (vf) schaduwPdf(fdb, io, nieuwId, { afzender, onderwerp: m.onderwerp }, documenten, ruw, vf);
+  if (vf) schaduwPdf(fdb, io, nieuwId, { afzender, onderwerp: m.onderwerp }, documenten, ruw, vf, totaalBijlagen - documenten.length);
   for (const d of documenten) { d.tekst = null; d.ubl_xml = null; }   // vluchtig: weg (de schaduw houdt zijn eigen verwijzing tot hij klaar is)
   ruw.clear();
   return n;
