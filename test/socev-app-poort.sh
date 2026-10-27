@@ -6044,8 +6044,8 @@ async function bewijs(o) {
           && D({ doel: { scherm: 'facturen', focus: 'naam met spatie' } }) === '{"module":null,"doel":{"scherm":"facturen","focus":null}}'
           && D({ doel: 'facturen' }) === '{"module":null,"doel":null}' && D(null) === '{"module":null,"doel":null}'
           && D({ doel: { scherm: 'facturen', focus: 'stap:' + 'x'.repeat(81) } }) === '{"module":null,"doel":{"scherm":"facturen","focus":null}}', D({ doel: { scherm: 'facturen', focus: 'naam met spatie' } }));
-        toets('27 wv1706 vaste plek: geen doel naar financien of pot-afschriften, wel naar facturen', D({ module: 'financien', doel: { scherm: 'financien', focus: null } }, 'vast') === '{"module":"financien","doel":null}'
-          && D({ module: 'pot-afschriften', doel: { scherm: 'pot-afschriften', focus: 'maand:2026-10' } }, 'vast') === '{"module":"pot-afschriften","doel":null}'
+        toets('27 wv1706 vaste plek: geen doel of module-id van financien of pot-afschriften, wel naar facturen', D({ module: 'financien', doel: { scherm: 'financien', focus: null } }, 'vast') === '{"module":null,"doel":null}'
+          && D({ module: 'pot-afschriften', doel: { scherm: 'pot-afschriften', focus: 'maand:2026-10' } }, 'vast') === '{"module":null,"doel":null}'
           && D({ module: 'financien', doel: { scherm: 'financien', focus: null } }) === '{"module":"financien","doel":{"scherm":"financien","focus":null}}'
           && D({ module: 'facturen', doel: { scherm: 'facturen', focus: 'stap:beoordelen' } }, 'vast') === '{"module":"facturen","doel":{"scherm":"facturen","focus":"stap:beoordelen"}}', D({ module: 'financien', doel: { scherm: 'financien' } }, 'vast'));
         toets('27 wv1706 appVjModuleKaart staat in het app-blok', H.appVjModuleKaart({ herkomst: { module: 'facturen' } }) === true && H.appVjModuleKaart({ herkomst: { module: 'facturen', wv: [5] } }) === false);

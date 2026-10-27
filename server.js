@@ -9274,7 +9274,7 @@ function appVjDoel(p, a) {
   const focus = scherm && typeof d.focus === 'string' && APP_VJ_FOCUS_RE.test(d.focus) ? d.focus : null;
   const vast = !!(a && a.soort === 'vast');
   const prive = function (id) { return !!id && APP_PRIVE_MODULES.indexOf(id) >= 0; };
-  if (vast && (prive(m) || prive(scherm))) return { module: m, doel: null };
+  if (vast && (prive(m) || prive(scherm))) return { module: null, doel: null };   // review wv1706 #2: ook het privé-id niet
   return { module: m, doel: scherm ? { scherm: scherm, focus: focus } : null };
 }
 async function appVjPunten() {
