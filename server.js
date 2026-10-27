@@ -14900,9 +14900,10 @@ async function appIntakeTelling(req, res, a) {
 // ── einde Intake-plek ──
 
 // ── Mediatheek (wv1269, 26-10-2026; opdracht David 24-10 17:02, box-rij "Opdracht David: Mediatheek-app in de Socev-app") ──
-// App Mediatheek: de liedjes en andere artistieke uitingen uit 20_Prive/Mediatheek.md, per onderwerp, afspelen en downloaden. Logica en
-// padcontrole in mediatheek.js (alleen bestanden waar de pagina naar linkt, alleen onder 20_Prive, vaste extensies, realpath, geen
-// symlink, ≤ 20 MB). Hier: GET /app/mediatheek (lijst, stil bij 200) en GET /app/mediatheek/bestand/<id> (base64 in JSON, zoals
+// App Mediatheek: de liedjes en andere artistieke uitingen, per categorie, afspelen en downloaden. Sinds wv1397 (27-10) één beschrijving
+// (.md, bron_soort: mediatheek) naast elk bestand in 20_Prive; 20_Prive/Mediatheek.md is de kaft (volgorde en uitleg). Logica en
+// padcontrole in mediatheek.js (alleen bestanden uit `bestanden:` van een geldige beschrijving, in dezelfde map, onder 20_Prive, vaste
+// extensies, realpath, geen symlink of hardlink, ≤ 20 MB; een kapotte beschrijving = "te herstellen", de rest blijft). Hier: GET /app/mediatheek (lijst, stil bij 200) en GET /app/mediatheek/bestand/<id> (base64 in JSON, zoals
 // /app/bestand: de app speelt het af als blob, dus geen Range nodig, ook niet in Safari). Privé-module: op een apparaat met een vaste plek
 // dicht. Ontbreekt mediatheek.js in de release (terugrol), dan 404 en /health.mediatheek.aan=false.
 const MEDIATHEEK_MOD = (function () { const p = path.join(__dirname, 'mediatheek.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('mediatheek', e); return null; } })();

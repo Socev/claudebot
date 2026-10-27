@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Toetst mediatheek.js (wv1269, App Mediatheek; opdracht David 24-10-2026) en de koppeling in server.js. Toetst: lezen van de pagina
-# (frontmatter, onderwerpen, items met vervolgregels, titel zonder quotes, wie + datum in twee vormen, omschrijving zonder "Bestand [[…]]",
-# "Nog geen bestand", paginalinks, uitleg), padcontrole (alleen links van de pagina, alleen onder 20_Prive, '..', absoluut, punt-map,
-# .md/.html niet als bestand, symlink, map, te groot, ontbreekt, id niet op de pagina, onbekend id), bestand (base64, type), /health
-# zonder inhoud, en server.js (dispatch, privé-module dicht op een vaste plek, tellers vooraf, stil bij 200, reden zonder pad, /health,
-# uitrol-lijst, Dockerfile). Raakt de echte vault niet. Gebruik: bash test/mediatheek.sh
+# Toetst mediatheek.js (wv1269, App Mediatheek; opdracht David 24-10-2026; sinds wv1397 één beschrijving per bestand) en de koppeling in
+# server.js. Toetst: de oude paginavorm (alleen nog voor de overzetting), de kaft (koppen, uitleg, paginalinks; oude regels en het sjabloon
+# tellen niet), beschrijvingen (velden, omschrijving, datum, favoriet, twee bestanden, categorie zonder kop achteraan, kaft weg = stukken
+# blijven), één fout = één stuk (geen kop, veld dubbel, lijst, datum, geen categorie, andere map, buiten 20_Prive, soort, ontbreekt,
+# zonder zusterbestand, niet genoemd, symlink, hardlink, FIFO), niet van ons (gewone bronnotitie, symlink-beschrijving, punt-map,
+# koppelmap), NFD-naam, bestand (base64, type, 404 zonder geldige beschrijving, ook uit een warme lijst, 413), /health zonder inhoud,
+# zonder ovis-register.js, en server.js (dispatch, privé-module dicht op een vaste plek, tellers vooraf, stil bij 200, reden zonder pad,
+# /health, uitrol-lijst, Dockerfile). Raakt de echte vault niet. Gebruik: bash test/mediatheek.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node --no-warnings - <<'JS'
@@ -73,70 +75,140 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('1i ### valt onder het lopende onderwerp', O[2].items.length === 4 && O[2].items[3].titel === 'Onder sub' && O[2].items[3].datum === '2026-02-03', O[2].items.map((i) => i.titel));
   toets('1j schoonDoel weigert .., absoluut, punt-map, schema, NUL', ['../a.mp3', '/etc/a.mp3', '20_Prive/.x/a.mp3', 'https://x/a.mp3', 'a\u0000.mp3', '20_Prive//a.mp3'].every((p) => M.schoonDoel(p) === null) && M.schoonDoel('20_Prive/a b.mp3#x|y') === '20_Prive/a b.mp3');
 
-  // ── 2. lijst met padcontrole ──
-  const m = M.maak({ vault: V });
+  // ── 2. wv1397: beschrijvingen naast het bestand ──
+  const SH = '20_Prive/Bronnen/Shizzle', FL = '20_Prive/Bronnen/Archief/Muziek';
+  const besch = (velden, romp) => ['---', 'type: bron', 'bron_soort: mediatheek', 'domein: Prive', 'access_context: strikt_prive', 'status: actueel']
+    .concat(velden, ['---', '', romp === undefined ? 'Omschrijving van het stuk.' : romp, '', 'Meer: [[20_Prive/Shizzle/Index]].', '']).join('\n');
+  const bl = (pad) => ['bestanden:', '  - "[[' + pad + ']]"'];
+  zet(SH + '/Lied C.mp3', MP3);
+  zet(SH + '/Lied C.md', besch(['categorie: Shizzle', 'titel: "Lied C: het vervolg"', 'wie: Sven', 'datum: 2026-10-23   # dag bekend', 'favoriet: true'].concat(bl(SH + '/Lied C.mp3')), '# Kop\n\nSpoken word in de toon\nvan een **rapport**.'));
+  zet(SH + '/Lied D.m4a', MP3); zet(SH + '/Lied D.pdf', '%PDF-1.4');
+  zet(SH + '/Lied D.md', besch(['categorie: shizzle', 'titel: Lied D', 'datum_tekst: oktober 2026', 'bestanden:', '  - "[[' + SH + '/Lied D.m4a]]"', '  - "[[Lied D.pdf]]"']));
+  zet(FL + '/Track 1.mp3', MP3); zet(FL + '/Track 1.md', besch(['categorie: Eigen muziek', 'titel: Track 1', 'wie: David', 'datum: 11-3-2002'].concat(bl(FL + '/Track 1.mp3'))));
+  zet(FL + '/Track zonder.mp3', MP3);   // geen beschrijving: telt bij zonder_beschrijving
+  zet(FL + '/Project.flp', 'flp');     // geen geluid: telt niet
+  zet('20_Prive/Bronnen/Overig/Ding.mp3', MP3); zet('20_Prive/Bronnen/Overig/Ding.md', besch(['categorie: Aardig', 'titel: Ding'].concat(bl('20_Prive/Bronnen/Overig/Ding.mp3'))));
+  // kapot: elk raakt alleen zichzelf
+  const K = '20_Prive/Bronnen/Kapot';
+  zet(K + '/Geen kop.mp3', MP3); zet(K + '/Geen kop.md', 'bron_soort: mediatheek\ncategorie: Shizzle\n\nvergeten streepjes\n');
+  zet(K + '/Dubbel.mp3', MP3); zet(K + '/Dubbel.md', besch(['categorie: Shizzle', 'categorie: Anders'].concat(bl(K + '/Dubbel.mp3'))));
+  zet(K + '/Lijst.mp3', MP3); zet(K + '/Lijst.md', besch(['categorie: [Shizzle, Anders]'].concat(bl(K + '/Lijst.mp3'))));
+  zet(K + '/Datum.mp3', MP3); zet(K + '/Datum.md', besch(['categorie: Shizzle', 'datum: 2026-13-45'].concat(bl(K + '/Datum.mp3'))));
+  zet(K + '/Geen cat.mp3', MP3); zet(K + '/Geen cat.md', besch(bl(K + '/Geen cat.mp3')));
+  zet(K + '/Andere map.mp3', MP3); zet(K + '/Andere map.md', besch(['categorie: Shizzle'].concat(bl(SH + '/Lied C.mp3'))));
+  zet(K + '/Buiten.mp3', MP3); zet(K + '/Buiten.md', besch(['categorie: Shizzle', 'bestanden:', '  - "[[' + K + '/Buiten.mp3]]"', '  - "[[10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3]]"']));
+  zet(K + '/Soort.mp3', MP3); zet(K + '/Soort.html', '<p>x</p>'); zet(K + '/Soort.md', besch(['categorie: Shizzle', 'bestanden:', '  - "[[' + K + '/Soort.mp3]]"', '  - "[[' + K + '/Soort.html]]"']));
+  zet(K + '/Ontbreekt.mp3', MP3); zet(K + '/Ontbreekt.md', besch(['categorie: Shizzle', 'bestanden:', '  - "[[' + K + '/Ontbreekt.mp3]]"', '  - "[[' + K + '/Weg.flp]]"']));
+  zet(K + '/Zonder zus.md', besch(['categorie: Shizzle'].concat(bl(K + '/Bestaat niet.mp3'))));   // losgeraakt: het mp3 is verhuisd
+  zet(K + '/Niet genoemd.mp3', MP3); zet(K + '/Niet genoemd.md', besch(['categorie: Shizzle'].concat(bl(K + '/Dubbel.mp3'))));
+  zet(K + '/Twee links.mp3', MP3); zet(K + '/Twee links.md', besch(['categorie: Shizzle', 'bestanden:', '  - "[[' + K + '/Twee links.mp3]] [[' + K + '/Dubbel.mp3]]"']));
+  zet(K + '/Geen lijst.mp3', MP3); zet(K + '/Geen lijst.md', besch(['categorie: Shizzle']));
+  zet(K + '/Pad.mp3', MP3); zet(K + '/Pad.md', besch(['categorie: Shizzle', 'bestanden:', '  - "[[' + K + '/Pad.mp3]]"', '  - "[[../../10_Zakelijk/x.mp3]]"']));
+  // symlink- en hardlinkbestand
+  fs.symlinkSync(path.join(V, '10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3'), path.join(V, K, 'Link.mp3'));
+  zet(K + '/Link.md', besch(['categorie: Shizzle'].concat(bl(K + '/Link.mp3'))));
+  fs.linkSync(path.join(V, '10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3'), path.join(V, K, 'Hard.mp3'));
+  zet(K + '/Hard.md', besch(['categorie: Shizzle'].concat(bl(K + '/Hard.mp3'))));
+  // niet van ons: een gewone bronnotitie naast een pdf, een beschrijving die zelf een symlink is, een punt-map, een symlink-map
+  zet('20_Prive/Bronnen/Brief.pdf', '%PDF'); zet('20_Prive/Bronnen/Brief.md', '---\ntype: bron\nbron_soort: pdf\n---\nkapot: [\n');
+  zet('20_Prive/Bronnen/Kapotte notitie.pdf', '%PDF'); zet('20_Prive/Bronnen/Kapotte notitie.md', 'geen kop, gewone tekst\n');
+  zet('10_Zakelijk/Besch.md', besch(['categorie: Shizzle'].concat(bl('10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3'))));
+  zet('20_Prive/Bronnen/Gelinkt.mp3', MP3); fs.symlinkSync(path.join(V, '10_Zakelijk/Besch.md'), path.join(V, '20_Prive/Bronnen/Gelinkt.md'));
+  zet('20_Prive/.verborgen/geheim.md', besch(['categorie: Shizzle'].concat(bl('20_Prive/.verborgen/geheim.mp3'))));
+  zet('10_Zakelijk/Map/Opname.mp3', MP3); zet('10_Zakelijk/Map/Opname.md', besch(['categorie: Shizzle'].concat(bl('20_Prive/Koppelmap/Opname.mp3'))));
+  fs.symlinkSync(path.join(V, '10_Zakelijk/Map'), path.join(V, '20_Prive/Koppelmap'));
+  // NFD-naam op schijf, NFC in de beschrijving (Drive/macOS): zelfde bestand
+  zet(SH + '/' + 'Köln.mp3'.normalize('NFD'), MP3); zet(SH + '/Köln.md', besch(['categorie: Shizzle', 'titel: Köln'].concat(bl(SH + '/Köln.mp3'))));
+  // de kaft: koppen, uitleg, oude opsommingsregels en het sjabloon tellen niet
+  const kaft = ['---', 'type: index', '---', '', '# Mediatheek', '', 'Zo werkt het:', '', '```markdown', '---', 'bron_soort: mediatheek', 'categorie: Shizzle', '## Geen kop', '---', '```', '',
+    '## Eigen muziek (Fruityloops, 2001–2005)', '', 'Zelfgemaakt; zie [[20_Prive/Archief/Rommel|Rommel]] en [[10_Zakelijk/X|zakelijk]].', '',
+    '## Shizzle', '', '- **"Oud"** — Sven, 19-10-2026; oude regel. Bestand', '  [[20_Prive/Bronnen/Shizzle/Lied A (Sven).mp3|mp3]].', '', 'Meer over de liedjes: [[20_Prive/Shizzle/Index|Shizzle]].', '',
+    '## Gedichten van David', '', 'Davids bundel: [[20_Prive/Gedichten/Index|Gedichten]].', '', '## Leeg', '', '- alleen een oude regel', ''].join('\n');
+  zet('20_Prive/Mediatheek.md', kaft);
+  const K1 = M.leesKaft(kaft);
+  toets('2a kaft: koppen in volgorde, sjabloon in code-blok telt niet', JSON.stringify(K1.map((k) => k.naam)) === '["Eigen muziek (Fruityloops, 2001–2005)","Shizzle","Gedichten van David","Leeg"]', K1.map((k) => k.naam));
+  toets('2b kaft: oude opsommingsregel is geen uitleg, alinea wel', JSON.stringify(K1[1].uitleg) === '["Meer over de liedjes: Shizzle."]' && K1[3].uitleg.length === 0, K1[1].uitleg);
+  toets('2c kaft: paginalinks uit de uitleg', K1[2].paginas[0].pad === '20_Prive/Gedichten/Index.md' && K1[0].paginas.length === 2, K1.map((k) => k.paginas));
+  toets('2d catSleutel: haakjes, hoofdletters, accenten', M.catSleutel('Eigen muziek (Fruityloops, 2001–2005)') === 'eigen muziek' && M.catSleutel('SHÏZZLE') === 'shizzle');
+
+  const m = M.maak({ vault: V, cacheMs: 0 });
   const st = m.stand();
-  toets('2a stand 200 zonder interne velden', st.status === 200 && !('_perId' in st.j) && st.j.pagina === '20_Prive/Mediatheek.md', st.status);
-  const it = (o, i) => st.j.onderwerpen[o].items[i];
-  toets('2b bestand met id, soort audio, grootte', it(0, 0).bestanden.length === 1 && /^[a-f0-9]{16}$/.test(it(0, 0).bestanden[0].id) && it(0, 0).bestanden[0].soort === 'audio' && it(0, 0).bestanden[0].grootte === MP3.length && !('pad' in it(0, 0).bestanden[0]), it(0, 0).bestanden);
-  toets('2c pdf = soort bestand (alleen downloaden)', it(0, 2).bestanden[1].soort === 'bestand', it(0, 2).bestanden);
-  toets('2d links buiten 20_Prive, .., absoluut, punt-map: bestaan niet voor de App', it(2, 0).bestanden.length === 0, it(2, 0).bestanden);
-  toets('2e .md en .html zijn geen bestand', it(2, 1).bestanden.length === 0, it(2, 1).bestanden);
-  const raar = it(2, 2).bestanden;
-  toets('2f symlink, map en ontbrekend = ontbreekt; %20 = zelfde bestand als Lied B', raar.length === 5 && raar.slice(0, 3).every((b) => b.ontbreekt) && !raar[3].ontbreekt && !raar[4].ontbreekt && raar[4].naam === 'Lied B.mp3', raar);
-  toets('2g paginalink buiten 20_Prive valt weg', it(1, 0).paginas.length === 1, it(1, 0).paginas);
-  toets('2h tellers', st.j.tel.items === 8 && st.j.tel.ontbreekt === 3, st.j.tel);
+  toets('2e stand 200 zonder interne velden', st.status === 200 && !('_perId' in st.j) && st.j.kaft === true, st.status);
+  const O1 = st.j.onderwerpen;
+  toets('2f volgorde: koppen van de kaft, categorie zonder kop achteraan, lege kop weg', JSON.stringify(O1.map((o) => o.naam)) === '["Eigen muziek (Fruityloops, 2001–2005)","Shizzle","Gedichten van David","Aardig"]', O1.map((o) => o.naam));
+  const sz = O1[1].items;
+  toets('2g Shizzle: drie stukken (C, Köln, D; categorie zonder hoofdletter telt mee), op datum, de oude regel niet', JSON.stringify(sz.map((i) => i.titel)) === '["Lied C: het vervolg","Köln","Lied D"]', sz.map((i) => i.titel));
+  const c = sz[0];
+  toets('2h velden: wie, datum, favoriet, omschrijving = eerste alinea zonder kop en opmaak', c.wie === 'Sven' && c.datum === '2026-10-23' && c.favoriet === true && c.omschrijving === 'Spoken word in de toon van een rapport.' && c.datum_tekst === null, c);
+  toets('2i bestand-id = sha256 van het pad (zelfde sleutels als vóór wv1397), geen pad naar buiten', c.bestanden.length === 1 && c.bestanden[0].id === M.idVan(SH + '/Lied C.mp3') && c.bestanden[0].soort === 'audio' && c.bestanden[0].grootte === MP3.length && !('pad' in c.bestanden[0]), c.bestanden);
+  const d = sz[2];
+  toets('2j datum_tekst, twee bestanden (alleen-naam-link in dezelfde map), pdf = bestand', d.datum === null && d.datum_tekst === 'oktober 2026' && d.bestanden.length === 2 && d.bestanden[1].soort === 'bestand' && d.bestanden[1].id === M.idVan(SH + '/Lied D.pdf') && d.favoriet === false, d);
+  toets('2k datum d-m-jjjj wordt ISO', O1[0].items[0].datum === '2002-03-11', O1[0].items[0]);
+  toets('2l Gedichten: alleen uitleg en paginalink, geen stukken; paginalink buiten 20_Prive valt weg', O1[2].items.length === 0 && O1[2].paginas.length === 1 && O1[0].paginas.length === 1 && O1[0].paginas[0].pad === '20_Prive/Archief/Rommel.md', O1.map((o) => o.paginas));
+  toets('2m NFD-naam op schijf, NFC in de beschrijving: zelfde bestand, speelbaar', sz[1].bestanden.length === 1 && sz[1].bestanden[0].id === M.idVan(SH + '/Köln.mp3') && m.bestand(sz[1].bestanden[0].id).status === 200);
+  const TH = Object.fromEntries(st.j.te_herstellen.map((t) => [t.naam, t.reden]));
+  const verwacht = { 'Geen kop.md': /frontmatter/, 'Dubbel.md': /twee keer/, 'Lijst.md': /één waarde/, 'Datum.md': /datum is onleesbaar/, 'Geen cat.md': /categorie ontbreekt/,
+    'Andere map.md': /andere map/, 'Buiten.md': /andere map/, 'Soort.md': /soort bestand/, 'Ontbreekt.md': /Weg\.flp ontbreekt/, 'Zonder zus.md': /geen mediabestand met dezelfde naam/,
+    'Niet genoemd.md': /staat niet bij bestanden/, 'Twee links.md': /meer dan één link/, 'Geen lijst.md': /bestanden ontbreekt/, 'Pad.md': /geen pad/, 'Link.md': /koppeling of map/, 'Hard.md': /hardlink/ };
+  const mis = Object.keys(verwacht).filter((k) => !verwacht[k].test(TH[k] || ''));
+  toets('2n elke kapotte beschrijving in te_herstellen met een reden in gewone taal', !mis.length, mis.map((k) => k + ': ' + TH[k]));
+  toets('2o niet van ons: gewone bronnotitie, kapotte notitie zonder bron_soort, symlink-beschrijving, punt-map, symlink-map', Object.keys(TH).length === Object.keys(verwacht).length, Object.keys(TH));
+  toets('2p tellers: 5 stukken, 6 bestanden, 1 ontbreekt, 16 te herstellen, 3 zonder beschrijving (Track zonder + Lied A en B uit deel 1; geluid naast een kapotte beschrijving telt bij te herstellen)', st.j.tel.items === 5 && st.j.tel.bestanden === 6 && st.j.tel.ontbreekt === 1 && st.j.tel.te_herstellen === 16 && st.j.tel.zonder_beschrijving === 3, st.j.tel);
+  toets('2q de kaft telt niet als beschrijving (sjabloon in code-blok)', !TH['Mediatheek.md']);
 
   // ── 3. bestand ──
-  const id = it(0, 0).bestanden[0].id;
+  const id = c.bestanden[0].id;
   const b = m.bestand(id);
-  toets('3a bestand: base64, type, naam', b.status === 200 && Buffer.from(b.j.inhoud, 'base64').equals(MP3) && b.j.type === 'audio/mpeg' && b.j.naam === 'Lied A (Sven).mp3', b.status);
-  toets('3b id van een niet-gelinkt bestand (zelfde hash-vorm) = 404', m.bestand(M.idVan('20_Prive/Niet gelinkt.mp3')).status === 404);
-  toets('3c id van een gesprek buiten 20_Prive (wel op de pagina) = 404', m.bestand(M.idVan('10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3')).status === 404);
-  toets('3d id van de symlink = 404', m.bestand(M.idVan('20_Prive/Link.mp3')).status === 404);
+  toets('3a bestand: base64, type, naam', b.status === 200 && Buffer.from(b.j.inhoud, 'base64').equals(MP3) && b.j.type === 'audio/mpeg' && b.j.naam === 'Lied C.mp3', b.status);
+  toets('3b id van een bestand zonder beschrijving = 404', m.bestand(M.idVan(FL + '/Track zonder.mp3')).status === 404);
+  toets('3c id van een gesprek buiten 20_Prive (in een kapotte beschrijving) = 404', m.bestand(M.idVan('10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3')).status === 404);
+  toets('3d id van symlink, hardlink, punt-map, koppelmap = 404', [K + '/Link.mp3', K + '/Hard.mp3', '20_Prive/.verborgen/geheim.mp3', '20_Prive/Koppelmap/Opname.mp3', '20_Prive/Bronnen/Gelinkt.mp3', K + '/Buiten.mp3'].every((p) => m.bestand(M.idVan(p)).status === 404));
   toets('3e geen id-vorm = 404', ['', 'x', '../../etc/passwd', 'A'.repeat(16), null].every((x) => m.bestand(x).status === 404));
-  // te groot: grens tijdelijk omlaag via een kopie van de module met een kleinere grens
   const bron = fs.readFileSync('./mediatheek.js', 'utf8').replace('const MAX_BESTAND = 20 * 1024 * 1024;', 'const MAX_BESTAND = 5;');
-  const kp = path.join(W, 'mt-klein.js'); fs.writeFileSync(kp, bron);
-  const mk = require(kp).maak({ vault: V });
-  const kl = mk.stand().j.onderwerpen[2].items[2].bestanden[3];
+  const kp = path.join(process.cwd(), '.mt-klein-' + process.pid + '.js'); fs.writeFileSync(kp, bron);
+  let kl, mk;
+  try { mk = require(kp).maak({ vault: V, cacheMs: 0 }); kl = mk.stand().j.onderwerpen[1].items[0].bestanden[0]; } finally { fs.unlinkSync(kp); }
   toets('3f te groot: in de lijst gemarkeerd, bestand 413', kl.te_groot === true && mk.bestand(kl.id).status === 413, kl);
-  // bestand van de pagina gehaald = meteen weg (pagina wordt elke keer gelezen)
-  zet('20_Prive/Mediatheek.md', pagina.replace('[[20_Prive/Bronnen/Shizzle/Lied A (Sven).mp3|mp3]]', ''));
-  toets('3g link van de pagina weg = 404', m.bestand(id).status === 404);
-  zet('20_Prive/Mediatheek.md', pagina);
-  // realpath-controle: 20_Prive zelf mag geen symlink naar buiten zijn
-  const V2 = path.join(W, 'vault2'); fs.mkdirSync(V2);
-  fs.mkdirSync(path.join(V2, '10_Zakelijk')); fs.writeFileSync(path.join(V2, '10_Zakelijk', 'Mediatheek.md'), '## A\n- **X** — Y, 1-1-2026. Bestand [[20_Prive/g.mp3|mp3]].\n'); fs.writeFileSync(path.join(V2, '10_Zakelijk', 'g.mp3'), MP3);
-  fs.symlinkSync(path.join(V2, '10_Zakelijk'), path.join(V2, '20_Prive'));
-  const m2 = M.maak({ vault: V2 });
-  const s2 = m2.stand();
-  toets('3h 20_Prive als koppeling naar een andere map: bestand onbereikbaar', s2.status === 200 && s2.j.tel.bestanden === 0 && m2.bestand(M.idVan('20_Prive/g.mp3')).status === 404, s2.j && s2.j.tel);
-  toets('3i zonder pagina: 503 met uitleg', M.maak({ vault: path.join(W, 'leeg') }).stand().status === 503);
-
-  // ── 3b. review wv1269: md-link met haakjes, hardlink, FIFO, (idem), geweigerd ──
-  const L = M.leesItem('**X** — Y, 1-2-2026. Bestand [mp3](20_Prive/Bronnen/Shizzle/Lied A (Sven).mp3) en [pdf](<20_Prive/Bronnen/Shizzle/Hoes.pdf>).');
-  toets('3j md-link met haakjes in de naam en <…>-vorm', L.bestanden.length === 2 && L.bestanden[0].pad === '20_Prive/Bronnen/Shizzle/Lied A (Sven).mp3' && L.bestanden[1].pad === '20_Prive/Bronnen/Shizzle/Hoes.pdf' && L.paginas.length === 0 && L.omschrijving === null, L);
-  toets('3k leesItem telt een link naar een soort die de App niet geeft', M.leesItem('**X** — Bestand [[20_Prive/a.html|h]] [[../a.mp3|m]].').geweigerd === 2);
-  const O2 = M.leesPagina('## A\n- **Een** — Z, 1-1-2026.\n  *Nog geen bestand:* kwam als spraakbericht.\n- **Twee** — Z, 1-1-2026. *Nog geen bestand* (idem).\n');
-  toets('3l "(idem)" = de noot van het vorige item', O2[0].items[1].noot === 'kwam als spraakbericht.', O2[0].items[1]);
-  toets('3m lijst: geweigerde links tellen per item (buiten 20_Prive en .md/.html)', it(2, 0).geweigerd === 6 && it(2, 1).geweigerd === 1, [it(2, 0).geweigerd, it(2, 1).geweigerd]);
-  fs.linkSync(path.join(V, '10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3'), path.join(V, '20_Prive/Hard.mp3'));
-  require('child_process').execFileSync('mkfifo', [path.join(V, '20_Prive/Fifo.mp3')]);
-  zet('20_Prive/Mediatheek.md', pagina + '\n## Aanval\n- **H** — x, 1-1-2026. Bestand [[20_Prive/Hard.mp3|mp3]] [[20_Prive/Fifo.mp3|mp3]].\n');
-  const sA = m.stand().j.onderwerpen[3].items[0].bestanden;
+  // de lijst mag een minuut oud zijn, de toegang niet: beschrijving weg = meteen 404, ook met een warme lijst
+  const mc = M.maak({ vault: V, cacheMs: 600000 });
+  toets('3g warme lijst: bestand 200', mc.bestand(id).status === 200);
+  const cTekst = fs.readFileSync(path.join(V, SH, 'Lied C.md'), 'utf8');
+  fs.unlinkSync(path.join(V, SH, 'Lied C.md'));
+  toets('3h beschrijving weg = 404 (ook uit een warme lijst)', mc.bestand(id).status === 404);
+  zet(SH + '/Lied C.md', cTekst.replace(SH + '/Lied C.mp3', K + '/Dubbel.mp3'));
+  toets('3i beschrijving omgezet naar een bestand in een andere map = 404', mc.bestand(id).status === 404);
+  zet(SH + '/Lied C.md', cTekst);
+  toets('3j lijst blijft ± 1 minuut (geen nieuwe zoektocht)', mc.lijst() === mc.lijst());
+  require('child_process').execFileSync('mkfifo', [path.join(V, K, 'Fifo.mp3')]);
+  zet(K + '/Fifo.md', besch(['categorie: Shizzle'].concat(bl(K + '/Fifo.mp3'))));
   const t0 = Date.now();
-  toets('3n hardlink naar een gesprek buiten 20_Prive = 404', m.bestand(M.idVan('20_Prive/Hard.mp3')).status === 404, sA);
-  toets('3o FIFO = ontbreekt in de lijst en 404, zonder te blokkeren', sA.find((b) => b.naam === 'Fifo.mp3').ontbreekt === true && m.bestand(M.idVan('20_Prive/Fifo.mp3')).status === 404 && Date.now() - t0 < 2000, sA);
-  // inode gewisseld na de controle: lijst() en bestand() lopen in één aanroep, dus nabootsen via een kapotte perId-ingang is niet nodig;
-  // wel: een bestand dat tussen twee aanroepen vervangen is, wordt opnieuw gecontroleerd (pagina en bestand worden elke keer gelezen)
-  fs.unlinkSync(path.join(V, '20_Prive/Bronnen/Shizzle/Lied B.mp3')); fs.symlinkSync(path.join(V, '10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3'), path.join(V, '20_Prive/Bronnen/Shizzle/Lied B.mp3'));
-  toets('3p bestand vervangen door een symlink na de lijst = 404', m.bestand(M.idVan('20_Prive/Bronnen/Shizzle/Lied B.mp3')).status === 404);
-  zet('20_Prive/Mediatheek.md', pagina);
+  const sF = m.stand().j;
+  toets('3k FIFO = te herstellen en 404, zonder te blokkeren', /koppeling of map/.test((sF.te_herstellen.find((t) => t.naam === 'Fifo.md') || {}).reden || '') && m.bestand(M.idVan(K + '/Fifo.mp3')).status === 404 && Date.now() - t0 < 2000, sF.te_herstellen);
+  fs.unlinkSync(path.join(V, SH, 'Lied C.mp3')); fs.symlinkSync(path.join(V, '10_Zakelijk/Tolgaarde/Medewerkers/gesprek.mp3'), path.join(V, SH, 'Lied C.mp3'));
+  toets('3l bestand vervangen door een symlink na de lijst = 404', mc.bestand(id).status === 404);
+  fs.unlinkSync(path.join(V, SH, 'Lied C.mp3')); zet(SH + '/Lied C.mp3', MP3);
+  // pagina weg = stukken blijven (zonder uitleg, categorieën op naam)
+  fs.renameSync(path.join(V, '20_Prive/Mediatheek.md'), path.join(W, 'kaft.md'));
+  const zk = m.stand();
+  toets('3m kaft weg: stukken blijven, categorieën op naam, zonder uitleg', zk.status === 200 && zk.j.kaft === false && zk.j.tel.items === 5 && JSON.stringify(zk.j.onderwerpen.map((o) => o.naam)) === '["Aardig","Eigen muziek","Shizzle"]' && zk.j.onderwerpen.every((o) => !o.uitleg.length), zk.j.onderwerpen.map((o) => o.naam));
+  fs.renameSync(path.join(W, 'kaft.md'), path.join(V, '20_Prive/Mediatheek.md'));
+  // 20_Prive zelf een koppeling naar een andere map, of afwezig: 503
+  const V2 = path.join(W, 'vault2'); fs.mkdirSync(path.join(V2, '10_Zakelijk'), { recursive: true });
+  fs.writeFileSync(path.join(V2, '10_Zakelijk', 'g.mp3'), MP3); fs.writeFileSync(path.join(V2, '10_Zakelijk', 'g.md'), besch(['categorie: X'].concat(bl('20_Prive/g.mp3'))));
+  fs.symlinkSync(path.join(V2, '10_Zakelijk'), path.join(V2, '20_Prive'));
+  const m2 = M.maak({ vault: V2, cacheMs: 0 });
+  toets('3n 20_Prive als koppeling: 503, bestand onbereikbaar', m2.stand().status === 503 && m2.bestand(M.idVan('20_Prive/g.mp3')).status === 503);
+  toets('3o zonder 20_Prive: 503 met uitleg', M.maak({ vault: path.join(W, 'leeg') }).stand().status === 503);
+  // zonder ovis-register.js (terugrol van één bestand): elke beschrijving te herstellen, de pod valt niet om
+  const los = path.join(W, 'los'); fs.mkdirSync(los); fs.copyFileSync('./mediatheek.js', path.join(los, 'mediatheek.js'));
+  const sl = require(path.join(los, 'mediatheek.js')).maak({ vault: V, cacheMs: 0 }).stand();
+  toets('3p zonder frontmatter-lezer: 0 stukken, alles te herstellen met reden', sl.status === 200 && sl.j.tel.items === 0 && sl.j.te_herstellen.some((t) => /lezer/.test(t.reden)), sl.j.tel);
+  // oude vorm (alleen nog voor de overzetting): leesPagina blijft werken
+  toets('3q leesPagina (oude vorm) leest nog', M.leesPagina(pagina)[0].items[0].titel === 'Lied A!');
 
   // ── 4. health ──
   const h = m.health();
-  toets('4 /health: alleen aantallen', h.aan && h.pagina && h.items === 8 && h.bestanden >= 3 && Object.keys(h).length === 5, h);
+  toets('4 /health: alleen aantallen, met te_herstellen en zonder_beschrijving', h.aan && h.pagina === true && h.items === 5 && h.te_herstellen === 17 && h.zonder_beschrijving === 3 && Object.keys(h).length === 7, h);
 
   // ── 5. server.js ──
   const src = fs.readFileSync('server.js', 'utf8');
@@ -144,7 +216,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('5b privé-module (vaste plek dicht)', /const APP_PRIVE_MODULES = \[[^\]]*'mediatheek'/.test(src));
   toets('5c tellers vooraf in appStaat', /tellers: \{[^}]*mediatheek: \[\], 'mediatheek-bestand': \[\]/.test(src));
   toets('5d /health.mediatheek', /mediatheek: typeof mediatheekInfo === 'function' \? mediatheekInfo\(\) : \{ aan: false \}/.test(src));
-  toets('5e uitrol-lijst en Dockerfile', /RELEASE_OPTIONEEL="[^"]*\bmediatheek\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY mediatheek\.js \/app\/release-bootstrap\/mediatheek\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
+  toets('5e uitrol-lijst en Dockerfile (ook ovis-register.js: de frontmatter-lezer)', /RELEASE_OPTIONEEL="[^"]*\bmediatheek\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /RELEASE_OPTIONEEL="[^"]*\bovis-register\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY mediatheek\.js \/app\/release-bootstrap\/mediatheek\.js/.test(fs.readFileSync('Dockerfile', 'utf8')) && /COPY ovis-register\.js \/app\/release-bootstrap\/ovis-register\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
   const vm = require('vm');
   const hb = src.indexOf('// ── Mediatheek (wv1269'), he = src.indexOf('// ── einde mediatheek ──');
   toets('5f blokmarkers', hb > 0 && he > hb);
@@ -155,7 +227,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   vm.runInContext(src.slice(hb, he) + ';globalThis.__mt = { appMediatheek, mediatheekInfo };', ctx, { filename: 'server.js#mediatheek' });
   const r1 = { _app: {} };
   await ctx.__mt.appMediatheek({}, r1, { soort: 'meereizend' }, 'GET /app/mediatheek');
-  toets('5g lijst 200, stil, vaste_plek false, APP_VAULT_DIR gebruikt', gestuurd[0].s === 200 && gestuurd[0].j.vaste_plek === false && gestuurd[0].j.onderwerpen.length === 3 && r1._app.stil === true, gestuurd[0].s);
+  toets('5g lijst 200, stil, vaste_plek false, APP_VAULT_DIR gebruikt', gestuurd[0].s === 200 && gestuurd[0].j.vaste_plek === false && gestuurd[0].j.onderwerpen.length === 4 && r1._app.stil === true, gestuurd[0].s);
   const r2 = { _app: {} };
   await ctx.__mt.appMediatheek({}, r2, { soort: 'meereizend' }, 'GET /app/mediatheek/bestand/' + id);
   toets('5h bestand 200, reden met id en extensie, geen pad', gestuurd[1].s === 200 && r2._app.reden === 'mediatheek bestand ' + id + ' mp3' && !/Lied|Prive/.test(r2._app.reden), r2._app.reden);
@@ -164,11 +236,11 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('5i vaste plek: lijst zegt waarom, zonder onderwerpen', gestuurd[2].s === 200 && gestuurd[2].j.vaste_plek === true && !gestuurd[2].j.onderwerpen, gestuurd[2]);
   await ctx.__mt.appMediatheek({}, { _app: {} }, { soort: 'vast' }, 'GET /app/mediatheek/bestand/' + id);
   toets('5j vaste plek: bestand 403', gestuurd[3].s === 403, gestuurd[3]);
-  toets('5k info', ctx.__mt.mediatheekInfo().items === 8);
+  toets('5k info', ctx.__mt.mediatheekInfo().items === 5);
   // review wv1269 ZOU 2: hooguit twee antwoorden tegelijk onderweg; de teller zakt pas bij 'close'
   const EE = require('events');
   const open = [new EE(), new EE()]; open.forEach((r) => { r._app = {}; });
-  const idA = id;   // Lied A (Lied B is in 3p een symlink geworden)
+  const idA = id;   // Lied C (in 3l even een symlink, daarna hersteld)
   for (const r of open) await ctx.__mt.appMediatheek({}, r, { soort: 'meereizend' }, 'GET /app/mediatheek/bestand/' + idA);
   const n0 = gestuurd.length;
   await ctx.__mt.appMediatheek({}, Object.assign(new EE(), { _app: {} }), { soort: 'meereizend' }, 'GET /app/mediatheek/bestand/' + idA);
