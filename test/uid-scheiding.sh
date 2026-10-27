@@ -165,11 +165,15 @@ ok   "1002 zet Windows-code, bytecode en een zip in de vault (wv785)" "$(s "echo
 ok   "1002 probeert de uitzondering: x.socev-geblokkeerd-9.ps1, map *.socev-geblokkeerd-1/ met .bat, en een .js" "$(s "echo x > $V/00_Systeem/x.socev-geblokkeerd-9.ps1 && mkdir -p $V/00_Systeem/m.socev-geblokkeerd-1 && echo x > $V/00_Systeem/m.socev-geblokkeerd-1/y.bat && echo x > $V/00_Systeem/z.js")"
 ok   "geleend eigendom — 1002 vult een bestand van 1001 en hernoemt het naar .ps1 (kan; het syncfilter houdt het van Drive, wv813)" "$(a "echo leen > $V/00_Systeem/leen.md") && $(s "echo 'Write-Host x' > $V/00_Systeem/leen.md && mv $V/00_Systeem/leen.md $V/00_Systeem/geleend.ps1")"
 ok   "DEKT NIET: 1002 hernoemt __pycache__ van 1001 weg en zet een eigen neer (map is rwX)" "$(s "mv $V/00_Systeem/py/__pycache__ $V/00_Systeem/py/pyc-weg && mkdir $V/00_Systeem/py/__pycache__ && echo vals > $V/00_Systeem/py/__pycache__/m.cpython-311.pyc")"
+niet "1002 legt een harde link naar de wortel-CLAUDE.md (protected_hardlinks: geen schrijfrecht meer)" "$(s "ln $V/CLAUDE.md $V/00_Systeem/link-claude.md")"
+r "ln $V/AGENTS.md $V/00_Systeem/oude-link.md"   # zoals een harde link die socev vóór wv1021 kon leggen (toen rwx)
 ok   "1001 vervangt CLAUDE.md in de wortel met tmp + rename (nieuw inode erft de standaard-ACL)" "$(a "umask 077; echo persona2 > $V/.CLAUDE.md.tmp && mv $V/.CLAUDE.md.tmp $V/CLAUDE.md")"
 ok   "na-ronde (als 1001)"                                   "$(a "bash /app/socev-rechten.sh na-ronde > /tmp/na-ronde.log 2>&1")"
 r 'cat /tmp/na-ronde.log' | sed 's/^/    | /' | head -20
 ok   "  1002 kan cp -p-bestand na maskerherstel wijzigen"    "$(s "echo s >> $V/00_Systeem/cpp.md")"
 niet "  1002 bewerkt de vervangen CLAUDE.md na de na-ronde (wv1021)" "$(s "echo socev >> $V/CLAUDE.md")"
+niet "  1002 schrijft via een oude harde link in AGENTS.md (review wv1021 #3)" "$(s "echo socev >> $V/00_Systeem/oude-link.md")"
+ok   "  harde link gemeld"                                   "r 'grep -q \"harde link naar AGENTS.md in de wortel: .*oude-link.md\" /tmp/na-ronde.log'"
 ok   "  1002 leest de vervangen CLAUDE.md"                   "$(s "grep -q persona2 $V/CLAUDE.md")"
 ok   "  symlinks niet gevolgd: .claude.json en mk-scripts zonder socev-ACL" "$(a "! getfacl -cp /opt/data/.claude.json /opt/data/mk-scripts 2>/dev/null | grep -q socev")"
 niet "  1002 leest .claude.json via de symlink"              "$(s "cat $V/00_Systeem/naar-claude-json")"

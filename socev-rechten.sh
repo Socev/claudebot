@@ -16,7 +16,10 @@
 #   /opt/data               alleen doorlopen (0711), niet opsommen; alle andere entries o-rwx
 #   AI_SecondBrain          lezen en schrijven (ACL u:socev:rwX + standaard-ACL u:socev,u:claude), MAAR:
 #     - de vault-wortel zelf alleen r-x: geen .mcp.json, .codex of nieuwe .claude ernaast, .claude niet weg te hernoemen
-#     - CLAUDE.md en AGENTS.md in de wortel alleen lezen (wv1021): Socevs werkinstructie wijzigt alleen via de machinekamer
+#     - CLAUDE.md en AGENTS.md in de wortel alleen lezen (wv1021): Socevs werkinstructie wijzigt alleen via de machinekamer.
+#       DEKT NIET: vervangt claude (of rclone/bisync) zo'n bestand met tmp + rename, dan erft het nieuwe inode de standaard-ACL
+#       van de wortel (rwX) tot de volgende na-ronde (<= 5 min). De standaard-ACL van de wortel bewust niet op rX: dan zouden
+#       ook index.md, heartbeat.md e.d. na elke herschrijving even niet schrijfbaar zijn voor Socev.
 #     - code-plekken op elke diepte alleen r-X: .claude/, .obsidian/, .codex/, .vscode/, .mcp.json, .sync-id en scripts
 #       (*.js, *.mjs, *.py, *.sh …) (Fable wv689 #1 en wv699 #3/#4: code en hookconfig die de machinekamer draait,
 #       Obsidian-plug-ins die op Davids pc draaien); wat socev zelf zo noemt krijgt een andere naam
@@ -78,6 +81,16 @@ vault_acl_d(){ local a="$1"; shift
 code_acl(){
   find "$V" -mindepth 1 ! -type l -user claude \( "${CODEPLEK[@]}" \) "$@" -execdir setfacl -P -m u:socev:rX,m::rwX {} + 2>/dev/null || FOUTEN=$((FOUTEN + 1))
   find "$V" -mindepth 1 -type d -user claude \( "${CODEPLEK[@]}" \) "$@" -execdir setfacl -P -d -m u:socev:rX,u:claude:rwX,m::rwX {} + 2>/dev/null || FOUTEN=$((FOUTEN + 1))
+}
+# Harde links naar de wortel-CLAUDE.md/AGENTS.md (review wv1021 #3): vault_acl ziet zo'n tweede naam als gewoon document en zou het
+# gedeelde inode rwX geven; daarom draait code_acl ook ná vault_acl (alleen lezen wint), en hier een LET OP-regel per link (C11).
+wortel_harde_links(){ local f p
+  for f in "$V/CLAUDE.md" "$V/AGENTS.md"; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    [ "$(stat -c %h -- "$f" 2>/dev/null)" -gt 1 ] 2>/dev/null || continue
+    find "$V" -mindepth 2 -samefile "$f" -printf '%p\n' 2>/dev/null | head -5 | while IFS= read -r p; do
+      log "LET OP: harde link naar $(basename "$f") in de wortel: $(printf %q "$p") (alleen lezen via code_acl)"; done
+  done
 }
 vault_wortel(){
   # Wortel: lezen en doorlopen, niet schrijven (geen .mcp.json/.codex/nieuwe .claude ernaast, .claude niet weg te
@@ -168,6 +181,8 @@ if [ "$WAT" = "vol" ]; then
     code_acl
     vault_acl u:socev:rwX,m::rwX
     vault_acl_d u:socev:rwX,u:claude:rwX,m::rwX
+    code_acl   # nogmaals: een harde link buiten de code-plekken kreeg via vault_acl net rwX op hetzelfde inode (review wv1021 #3)
+    wortel_harde_links
     vreemde_symlinks
     vault_vreemde_codeplekken
     # Een map van socev waar claude niet in kan, verbergt wat erin staat voor de rondes hierboven (alleen melden).
@@ -209,10 +224,12 @@ if [ "$WAT" = "na-ronde" ]; then
     code_acl -cnewer "$STEMPEL"
     vault_acl u:socev:rwX,m::rwX -cnewer "$STEMPEL"
     vault_acl_d u:socev:rwX,u:claude:rwX,m::rwX -cnewer "$STEMPEL"
+    code_acl -cnewer "$STEMPEL"   # nogmaals na vault_acl (harde links, review wv1021 #3); setfacl hierboven gaf het inode een nieuwe ctime
     [ -d "$MEM" ] && { find "$MEM" ! -type l -user claude -cnewer "$STEMPEL" -execdir setfacl -P -m u:socev:rwX,m::rwX {} + 2>/dev/null || true; }
   fi
   # Wortel: is er schrijfrecht voor socev bijgekomen (iemand zette de ACL anders), dan terug.
   getfacl -cp "$V" 2>/dev/null | grep -q '^user:socev:.w' && { log "vault-wortel had schrijfrecht voor socev: hersteld"; vault_wortel; }
+  wortel_harde_links
   vreemde_symlinks
   vault_vreemde_codeplekken
   mv -f "$NIEUW" "$STEMPEL" 2>/dev/null
