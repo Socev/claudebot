@@ -6258,8 +6258,17 @@ async function bewijs(o) {
         toets('wv1229 herstart_na: na de herstart -> gedaan', r.status === 200 && x3.status === 'gedaan', JSON.stringify([r.status, r.j]));
         const mm = await H.appVjVoorwaardeMeet({ veld: 'herstart_na', waarde: 'onzin' }), mo = await H.appVjVoorwaardeMeet({ veld: 'uptime', waarde: '1' });
         toets('wv1229 meet: onleesbare tijd en onbekend veld -> null (niet vast te stellen)', mm.waar === null && mo.waar === null, JSON.stringify([mm, mo]));
+        vwPunt(9105, { bron: 'health', veld: 'versie', waarde: 'f38ce3f' }); sbStaat.vj[sbStaat.vj.length - 1].soort = 'besluit';
+        H.appVjBron.versie = () => '91e5636aaaaa'; H.appVjBron.voorouder = async () => false; H.appStaat.vjCache = null;
+        r = await K({ id: 9105, van: 'open', keuze: 'gedaan' });
+        toets('wv1229 besluit met voorwaarde: Al beantwoord gaat zoals gewoon (geen meting, Fable diffreview #2)', r.status === 200 && r.j.punt.status === 'gedaan', JSON.stringify([r.status, r.j]));
+        vwPunt(9106, { bron: 'health', veld: 'versie', waarde: 'f38ce3f', getikt: 'app 27-10 18:30: David tikte Gedaan' });
+        H.appVjBron.voorouder = async () => true; rolStub.primair = false; H.appStaat.vjCache = null;
+        let rf = null; try { await H.appVjVoorwaardeRonde(); } catch (e) { rf = e; }
+        rolStub.primair = true;
+        toets('wv1229 opstartronde op de reservekant: niets dicht, gooit "reserve" zodat hij blijft herkansen (Fable diffreview #3)', rf && rf.reserve === true && sbStaat.vj.find((y) => y.id === 9106).status === 'open', String(rf));
         Object.assign(H.appVjBron, bronBewaar); sbStaat.vj.length = vjN0; H.appStaat.vjCache = null;
-        [9101, 9102, 9103, 9104].forEach((i) => { delete H.appStaat.vjTerug[i]; });
+        [9101, 9102, 9103, 9104, 9105, 9106].forEach((i) => { delete H.appStaat.vjTerug[i]; });
         H.appStaat.tellers.voorjou.splice(0, H.appStaat.tellers.voorjou.length, ...telBewaar);
       }
       r = await K({ id: 2, keuze: 'terug' });

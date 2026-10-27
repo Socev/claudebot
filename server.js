@@ -9407,7 +9407,7 @@ function appVjNogNietTekst(v) {
 // Opstartronde: getikte kaarten met een voorwaarde die nu waar is, dicht (door david: zijn tik, nu bewezen). Een voorwaarde kan
 // alleen bij een (her)start waar worden, dus bij de start is genoeg; bij een leesfout nog een paar keer. Conflict = niet opnieuw.
 async function appVjVoorwaardeRonde() {
-  if (!(await appRolOk())) return ['reservekant: niets'];
+  if (!(await appRolOk())) { const e = new Error('reservekant'); e.reserve = true; throw e; }
   appStaat.vjCache = null;
   const punten = await appVjPunten(), nu = Date.now(), uit = [];
   for (const p of punten) {
@@ -9427,6 +9427,8 @@ async function appVjVoorwaardeRonde() {
 function appVjVoorwaardeStart(poging) {
   const t = setTimeout(function () {
     appVjVoorwaardeRonde().catch(function (e) {
+      // reservekant: blijven kijken tot deze kant primair is (Fable diffreview #3); een leesfout: nog 6 keer
+      if (e && e.reserve) return appVjVoorwaardeStart(Math.min(poging, 1));
       logError('app-voor-jou', e);
       if (poging < 6) appVjVoorwaardeStart(poging + 1);
     });
@@ -9970,7 +9972,7 @@ async function appVoorJouKeuze(req, res, a, d) {
     body = { p_sleutel: p.sleutel, p_van: van, p_naar: keuze, p_door: 'david', p_bewijs: bewijs, p_later_tot: tot };
   }
   // wv1229: Gedaan op een kaart met een voorwaarde (bv. herstart naar een nieuwe versie) telt pas als die nu waar is
-  const vw = keuze === 'gedaan' && p.voorwaarde && typeof p.voorwaarde === 'object' && p.voorwaarde.veld ? p.voorwaarde : null;
+  const vw = keuze === 'gedaan' && p.soort !== 'besluit' && p.voorwaarde && typeof p.voorwaarde === 'object' && p.voorwaarde.veld ? p.voorwaarde : null;   // Fable diffreview #2
   if (vw) {
     const m = await appVjVoorwaardeMeet(vw);
     if (m.waar === false) {
