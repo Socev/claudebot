@@ -15168,7 +15168,11 @@ const ovis = (function () {
       // wv1010: plek 6 (bank) — de bankdatabank alleen lezen (readOnly, query_only, alleen SELECT); ontbreekt de lezer (oude module): niet gemeten
       bank: typeof OVIS_MOD.bankLezer === 'function' ? OVIS_MOD.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')) : null,
       // wv1012: plek 8 (D1 fin: entiteit, medewerker, kerncijfers) — dezelfde D1-lezer, alleen SELECT
-      fin: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); } } });
+      fin: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); } },
+      // wv1013: plek 9 (R2 fin-bronnen ⇄ D1 fin.bron) — D1 alleen SELECT, R2 alleen de objectlijst; plek 10–12 lezen vault en Supabase (sbRpc)
+      rest: process.env.CLOUDFLARE_API_TOKEN && fs.existsSync(path.join(__dirname, 'ovis-plekken.js')) ? {
+        d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); },
+        r2: function () { return require('./ovis-plekken.js').r2Lijst(fetch, process.env.CLOUDFLARE_API_TOKEN, APP_CF_ACCOUNT, 'fin-bronnen'); } } : null });
   } catch (e) { logError('ovis', e); return null; }
 })();
 const ovisLoopt = { nu: null, sinds: 0 };

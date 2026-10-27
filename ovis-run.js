@@ -102,6 +102,38 @@ function potLezer() {
     },
   };
 }
+// wv1013: plek 9 (R2 fin-bronnen ⇄ D1 fin.bron), alleen lezen: D1 alleen SELECT, R2 alleen de objectlijst. Geen sleutel: niet gemeten.
+function restLezer() {
+  const tok = process.env.CLOUDFLARE_API_TOKEN;
+  if (!tok) return null;
+  let P; try { P = require('./ovis-plekken.js'); } catch (e) { return null; }
+  const acc = process.env.CF_ACCOUNT_ID || '23df9b0607bb70f6d7f15a63ec843d6d', db = process.env.APP_FIN_DB || 'ffcb09ad-fc50-4c83-aa7b-ad6409b44e03';
+  return {
+    d1: async function (batch) {
+      if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) throw new Error('alleen lezen');
+      const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + acc + '/d1/database/' + db + '/query', { method: 'POST',
+        headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ batch: batch }), signal: AbortSignal.timeout(30000) });
+      const j = await r.json().catch(function () { return null; });
+      if (!r.ok || !j || j.success !== true || !Array.isArray(j.result) || j.result.length !== batch.length || !j.result.every(function (x) { return x && x.success !== false; })) throw new Error('D1 http ' + r.status);
+      return j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [] }; });
+    },
+    r2: function () { return P.r2Lijst(fetch, tok, acc, 'fin-bronnen'); },
+  };
+}
+// wv1013: plek 10 — na de nachtronde register.json verversen (de Woordenlijst van de Data Manager bouwt daaruit). Alleen in de echte vault
+// en alleen als het bestand er al is; mislukt = de nachtronde blijft geslaagd (melding in de uitvoer).
+const REGISTER_JSON = process.env.OVIS_REGISTER_JSON || '/opt/data/mk-scripts/datamanager/knoop/register.json';
+async function exporteer(reg, doel, droog) {
+  const huidig = JSON.parse(fs.readFileSync(doel, 'utf8'));
+  const r = await reg.register();
+  const velden = ['id', 'soort', 'naam', 'vault_pad', 'vault_pagina', 'aliassen', 'kvk', 'agb', 'iban', 'opmerking', 'rol', 'concept'];
+  const knopen = r.knopen.map(function (k) { const x = {}; velden.forEach(function (v) { x[v] = k[v] === undefined ? null : k[v]; }); return x; });
+  if (!knopen.length) throw new Error('register leeg; register.json ongemoeid');
+  const tekst = JSON.stringify(Object.assign({}, huidig, { knopen: knopen }), null, 1) + '\n';
+  if (fs.readFileSync(doel, 'utf8') === tekst) return { gewijzigd: false, knopen: knopen.length };
+  if (!droog) { const tmp = doel + '.' + process.pid + '.nieuw'; fs.writeFileSync(tmp, tekst, { mode: 0o600, flag: 'wx' }); fs.renameSync(tmp, doel); }
+  return { gewijzigd: true, knopen: knopen.length, droog: droog };
+}
 // wv1009: plek 5 — Voor jou-punten (alleen lezen) en het register (VV, geen symlink volgen)
 const VJ_REGISTER = path.join(VAULT, '00_Systeem', 'Open vragen aan David.md');
 const vjLezer = { punten: function () { return sbRpc('mk_voor_jou_lijst', { p_alles: true }); }, register: function () { return VV.lees(VJ_REGISTER, 'utf8'); },
@@ -137,12 +169,17 @@ function grendelVast() {
     zegelSleutel: function () { return R.zegelSleutelLees(process.env.OVIS_ZEGEL_SLEUTEL || undefined); },   // wv1011
     schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen, pot: potLezer(), vj: vjLezer,
     bank: R.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')),   // wv1010: plek 6, alleen lezen
-    fin: finD1() ? { d1: finD1() } : null });   // wv1012: plek 8, alleen lezen
+    fin: finD1() ? { d1: finD1() } : null,   // wv1012: plek 8, alleen lezen
+    rest: restLezer() });   // wv1013: plek 9, alleen lezen
   try {
     if (modus === 'nacht') {
       if (arg.indexOf('--buiten-venster') < 0 && uurAmsterdam() !== 1) stop(1, { ok: false, fout: 'nachtronde alleen 01:00-02:00 (Amsterdam); --buiten-venster om af te wijken' });
       if (!grendelVast()) stop(1, { ok: false, fout: 'grendel ' + LOCK + ' niet vastgehouden: start met flock -w 300 ' + LOCK + ' node ovis-run.js nacht' });
-      stop(0, Object.assign({ ok: true }, await reg.compileer('nacht', { droog: droog, grendel: true })));
+      const c = await reg.compileer('nacht', { droog: droog, grendel: true });
+      if (fs.realpathSync(VAULT) === fs.realpathSync(ECHTE_VAULT) && fs.existsSync(REGISTER_JSON)) {   // wv1013: plek 10
+        try { c.register_json = await exporteer(reg, REGISTER_JSON, droog); } catch (e) { c.register_json = { fout: String(e && e.message || e).slice(0, 120) }; }
+      }
+      stop(0, Object.assign({ ok: true }, c));
     }
     if (modus === 'dag' || modus === 'afroep') stop(0, Object.assign({ ok: true }, await reg.compileer(modus, { droog: droog })));
     if (modus === 'bibliothecaris') {
@@ -175,15 +212,7 @@ function grendelVast() {
     if (modus === 'export') {
       const doel = arg[1];
       if (!doel || !/register\.json$/.test(doel)) stop(2, { ok: false, fout: 'export <pad naar register.json>' });
-      const huidig = JSON.parse(fs.readFileSync(doel, 'utf8'));
-      const r = await reg.register();
-      const velden = ['id', 'soort', 'naam', 'vault_pad', 'vault_pagina', 'aliassen', 'kvk', 'agb', 'iban', 'opmerking', 'rol', 'concept'];
-      const knopen = r.knopen.map(function (k) { const x = {}; velden.forEach(function (v) { x[v] = k[v] === undefined ? null : k[v]; }); return x; });
-      const nieuw = Object.assign({}, huidig, { knopen: knopen });
-      const tekst = JSON.stringify(nieuw, null, 1) + '\n';
-      if (fs.readFileSync(doel, 'utf8') === tekst) stop(0, { ok: true, gewijzigd: false, knopen: knopen.length });
-      if (!droog) { const tmp = doel + '.' + process.pid + '.nieuw'; fs.writeFileSync(tmp, tekst, { mode: 0o600, flag: 'wx' }); fs.renameSync(tmp, doel); }
-      stop(0, { ok: true, gewijzigd: true, knopen: knopen.length, droog: droog });
+      stop(0, Object.assign({ ok: true }, await exporteer(reg, doel, droog)));
     }
   } catch (e) { stop(1, { ok: false, fout: String(e && e.message || e).slice(0, 300) }); }
 })();

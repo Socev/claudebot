@@ -1064,6 +1064,10 @@ const REK_RE = /^(20_Prive\/Financien\/Rekeningen|10_Zakelijk\/POT_POH_GGZ)\/Rek
 const REK_PRIVE_MAP = '20_Prive/Financien/Rekeningen', BANKREGELS_PAD = '20_Prive/Financien/Bankregels.md', FINANCIEN_MAP = '20_Prive/Financien';
 const BANK_VERW_RE = /pod:bank-transacties\/(transactie|regel)#(\d{1,9})\b/g;
 const BANK_BEVINDING_RE = /^BB\d-bank-/;
+// wv1013: plek 9–12 staan in ovis-plekken.js (laat geladen: die module gebruikt de blokfuncties van deze)
+const REST_BEVINDING_RE = /^BB\d-(r2|wl|dl|cm)-/;
+function plekken() { return require('./ovis-plekken.js'); }
+function restMag(rest, id) { try { return plekken().magOplossen(rest, id); } catch (e) { return false; } }
 const BANK_DOOD_MS = 400 * 86400000;   // Fable #9: een regel voor een jaarpost raakt maar één keer per jaar
 const BANK_REGEL_SOORT = ['extern', 'intern', 'tegen_iban', 'tegenpartij'];
 const BANK_STIL = ['gezondheid', 'kinderen'];   // abonnementen in deze categorieën alleen tellen, nooit noemen (Fable #12)
@@ -1870,6 +1874,7 @@ function kaartBiblio(reg, o) {
   const kandidaten = (reg.bevindingen || []).filter(function (b) {
     if (!/^BB[1235678]$/.test(b.check_id) || (b.check_id === 'BB3' && b.ernst === 'serious')) return false;
     if (VJ_BEVINDING_RE.test(b.bevinding_id)) return false;   // wv1009: plek 5 is machinestaat; de Voor jou-ronde en de machinekamer handelen het af
+    if (REST_BEVINDING_RE.test(b.bevinding_id)) return false;   // wv1013: plek 9–12 zijn registers en weergaven; de machinekamer zet ze recht (box)
     if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id) && !/^BB3-bank-/.test(b.bevinding_id) && !/^BB3-fin-/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart; wv981: pot-cc wacht op fase 2; wv1010: bank wel
     return !geh.open.has('structuur_state#' + b.bevinding_id) && !geh.rust.has('structuur_state#' + b.bevinding_id + '#');
   }).slice(0, KAART_STAPPEN);
@@ -2251,6 +2256,13 @@ function maak(o) {
         }
       }
     }
+    // wv1013: plek 9 — blok op het bronnenregister van de datahub (D1 fin.bron); alleen 's nachts onder de grendel, zelfde regels
+    if (modus === 'nacht' && opties.grendel === true && o.rest && typeof o.rest.d1 === 'function') {
+      try {
+        const rb = await plekken().nacht({ vault: vault, lees: o.lees, schrijf: o.schrijf, io: o.rest, droog: !!opties.droog });
+        uit.bronblokken = rb.blokken; uit.handwerk += rb.handwerk; rb.fouten.forEach(function (f) { uit.fouten.push(f); });
+      } catch (e) { uit.fouten.push({ pad: '(bronnenregister)', fout: String(e && e.message || e).slice(0, 80) }); }
+    }
     uit.ms = nu() - t0;
     log('ovis-compileer ' + JSON.stringify({ modus: modus, paginas: uit.paginas, gestuurd: uit.gestuurd, nieuw: uit.nieuw, fouten: uit.fouten.length, blokken: uit.blokken, handwerk: uit.handwerk, medewerkerblokken: uit.medewerkerblokken, bankblokken: uit.bankblokken, finblokken: uit.finblokken }));
     return uit;
@@ -2284,6 +2296,15 @@ function maak(o) {
     try { const vm = o.vj ? await vjMeting(o.vj) : { fout: 'geen Voor jou-lezer' }; r.vj = vjKoppel(vm, reg.kaarten, vjNu(vm, nu())); }
     catch (e) { r.vj = { gemeten: false, reden: 'vergelijking faalde: ' + String(e && e.message || e).slice(0, 80), tel: {}, bevindingen: [], acties: [], metActie: [] }; }
     if (r.vj.gemeten) { const al = new Set(r.bevindingen.map(function (x) { return x.bevinding_id; })); r.vj.bevindingen.forEach(function (x) { if (!al.has(x.bevinding_id)) r.bevindingen.push(x); }); }
+    // wv1013: plek 9–12 (R2-bronnen, Woordenlijst, Deadlines, Cijfer-Meester) in ovis-plekken.js; alleen lezen, elke plek los gemeten.
+    // Ontbreekt de module (terugrol) of faalt hij: niets gemeten, dus niets van die plekken opgelost.
+    let rest = null;
+    try {
+      rest = await plekken().bibliothecaris({ vault: vault, lees: o.lees, lijst: o.lijst, knopen: reg.knopen || [], nu: nu(), io: Object.assign({ sbRpc: o.sbRpc }, o.rest || {}),
+        bestaat: o.bestaat || function (rel) { try { return fs.statSync(path.join(vault, rel)).isFile(); } catch (e) { return false; } } });
+    } catch (e) { rest = { plekken: {}, tel: {}, bevindingen: [], fout: String(e && e.message || e).slice(0, 80) }; }
+    { const al = new Set(r.bevindingen.map(function (x) { return x.bevinding_id; })); rest.bevindingen.forEach(function (x) { if (!al.has(x.bevinding_id)) { r.bevindingen.push(x); al.add(x.bevinding_id); } }); }
+    Object.assign(r.tel, rest.tel || {});
     const open = {}; (reg.bevindingen || []).forEach(function (x) { open[x.bevinding_id] = x; });
     const nu_ = new Date(nu()).toISOString();
     const rijen = [], nieuw = [];
@@ -2296,6 +2317,7 @@ function maak(o) {
     // wv981 (Fable #1): niet gemeten is niet opgelost — zonder POT-meting blijven de bevindingen van plek 4 open
     // wv1009: idem voor plek 5 zonder Voor jou-meting; wv1010: idem voor plek 6 zonder bankmeting
     const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor-\d{8}$/.test(id) && (r.pot.gemeten || !POT_BEVINDING_RE.test(id)) && (r.vj.gemeten || !VJ_BEVINDING_RE.test(id)) && (r.bank.gemeten || !BANK_BEVINDING_RE.test(id)) && (r.fin.gemeten || !FIN_BEVINDING_RE.test(id))
+      && (REST_BEVINDING_RE.test(id) ? !!rest.plekken && restMag(rest, id) : true)
       && (r.tel.personen_gemeten || !/^BB1-per:.*-(object|google|google-weg)$|^BB3-per:.*-google-tel$/.test(id))
       && (r.tel.personen_gelezen || !PER_BEVINDING_RE.test(id))
       && !(r.perFout || []).some(function (pid) { return id.indexOf(pid + '-') >= 0 || id.slice(-pid.length - 1) === '-' + pid; }); });   // wv1011: niet gemeten ≠ opgelost (KAN 12: ook niet bij een ontzegelde pagina)
@@ -2310,9 +2332,11 @@ function maak(o) {
     const bankZin = r.bank.gemeten ? '; bankrekeningen: ' + r.tel.bank + ' gemeten, ' + r.tel.bank_verschil + ' verschil(len)' : '; bankrekeningen niet gemeten (' + schoon(r.bank.reden || '?', 80) + ')';
     const finZin = r.fin.gemeten ? '; D1 fin: ' + r.tel.fin + ' entiteit(en), ' + r.tel.fin_mdw + ' medewerker(s), ' + r.tel.fin_kern + ' kerncijferpagina(\'s) gemeten, ' + r.tel.fin_verschil + ' verschil(len)' : '; D1 fin niet gemeten (' + schoon(r.fin.reden || '?', 80) + ')';
     r.tel.vj = r.vj.gemeten ? r.vj.bevindingen.length : 'niet gemeten';
+    let restZin = '; plek 9–12 niet gemeten (' + schoon(rest.fout || '?', 60) + ')';
+    try { if (!rest.fout) restZin = plekken().zin(rest); } catch (e) { /* zin blijft "niet gemeten" */ }
     // diffreview #7: wat de Voor jou-ronde om 07:15 zelf rechtzet, hoort niet in de box (nieuw_box/nieuwe zonder die bevindingen)
     const metActie = new Set(r.vj.metActie || []), nieuweBox = nieuw.filter(function (x) { return !metActie.has(x.bevinding_id); });
-    const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin + potZin + vjZin + bankZin + perZin + finZin, tel: r.tel, pot: r.pot, bank: r.bank, fin: r.fin, vj: { gemeten: r.vj.gemeten, reden: r.vj.reden || null, tel: r.vj.tel }, open: onverklaard, nieuw: nieuw.length, nieuw_box: nieuweBox.length, opgelost: opgelost.length,
+    const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin + potZin + vjZin + bankZin + perZin + finZin + restZin, rest: { plekken: rest.plekken, paden: rest.paden || {} }, tel: r.tel, pot: r.pot, bank: r.bank, fin: r.fin, vj: { gemeten: r.vj.gemeten, reden: r.vj.reden || null, tel: r.vj.tel }, open: onverklaard, nieuw: nieuw.length, nieuw_box: nieuweBox.length, opgelost: opgelost.length,
       per_check: r.bevindingen.reduce(function (a, x) { a[x.check_id] = (a[x.check_id] || 0) + 1; return a; }, {}), bevindingen: r.bevindingen, nieuwe: nieuweBox };
     if (!opties.droog && !opties.afroep) {
       await o.sbRpc('mk_hartslag_stempel', { p_component: 'bibliothecaris', p_gemeten_rijen: r.tel.paginas, p_bevindingen: onverklaard });
@@ -2361,6 +2385,7 @@ function boxRij(b, tijd) {
     '- gemeten: ' + b.zin + '. Nieuw: ' + b.nieuwe.slice(0, 6).map(function (x) { return x.check_id + ' ' + k(x.samenvatting); }).join('; ') + (b.nieuwe.length > 6 ? '; …' : '') + '\n' +
     '- gevolg als er niets gebeurt: de router (stap 2) herkent op een register dat niet gelijk is aan de pagina\'s; kritieke verschillen (rekening, contact) blijven staan.\n' +
     '- voorstel: per bevinding in secondbrain.structuur_state (BB…); de voorstelkaart voor David komt met vervolgrij A. Kritiek (ernst serious) dezelfde dag nalopen.\n' +
+    (b.nieuwe.some(function (x) { return REST_BEVINDING_RE.test(x.bevinding_id); }) ? '- plek 9–12 (BB…-r2/wl/dl/cm-…: R2-bronnen, Woordenlijst, Deadlines, Cijfer-Meester): machinekamerwerk volgens het voorstel per bevinding; geen kaart aan David. Paden: `ovis-run.js bibliothecaris --afroep --droog`.\n' : '') +
     (b.nieuwe.some(function (x) { return VJ_BEVINDING_RE.test(x.bevinding_id); }) ? '- plek 5 (Voor jou ⇄ Open vragen, BB…-vj-…): wat zeker is zet de Voor jou-ronde (07:15/17:15) recht met `voor-jou.py koppel --schrijf`; de rest is machinekamerwerk (geen kaart aan David).\n' : '');
 }
 
@@ -2380,7 +2405,7 @@ module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina,
   potMeting: potMeting, potChecks: potChecks, kaartPot: kaartPot, POT_SQL: POT_SQL, POT_BEVINDING_RE: POT_BEVINDING_RE,
   vjMeting: vjMeting, vjNu: vjNu, vjKoppel: vjKoppel, vjSchrijf: vjSchrijf, vjRegister: vjRegister, vjGenoemd: vjGenoemd, VJ_BEVINDING_RE: VJ_BEVINDING_RE,
   bankLezer: bankLezer, bankMeting: bankMeting, bankChecks: bankChecks, leesRekening: leesRekening, leesBankregels: leesBankregels, bankBlokTekst: bankBlokTekst,
-  bankRegelsBlokTekst: bankRegelsBlokTekst, bankKaartZin: bankKaartZin, orgOpNaam: orgOpNaam, BANK_SQL: BANK_SQL, BANK_BEVINDING_RE: BANK_BEVINDING_RE, BANKREGELS_PAD: BANKREGELS_PAD,
+  bankRegelsBlokTekst: bankRegelsBlokTekst, bankKaartZin: bankKaartZin, orgOpNaam: orgOpNaam, BANK_SQL: BANK_SQL, BANK_BEVINDING_RE: BANK_BEVINDING_RE, REST_BEVINDING_RE: REST_BEVINDING_RE, BANKREGELS_PAD: BANKREGELS_PAD,
   finMeting: finMeting, finChecks: finChecks, leesMedewerker: leesMedewerker, leesKern: leesKern, finKernBlokTekst: finKernBlokTekst, finKaartZin: finKaartZin, kaartFin: kaartFin,
   FIN_SQL: FIN_SQL, FIN_BEVINDING_RE: FIN_BEVINDING_RE, finMaand: finMaand,
   plan: plan, kaartBundel: kaartBundel, kaartenKritiek: kaartenKritiek, kaartBiblio: kaartBiblio, eruitUit: eruitUit, uitkomstZin: uitkomstZin, isoWeek: isoWeek,
