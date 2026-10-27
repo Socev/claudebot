@@ -127,10 +127,12 @@ test('10 teBeoordelen telt alleen status te_beoordelen', () => {
 
 test('11 koppeling server.js, release en schrijvers met module', () => {
   const s = fs.readFileSync('server.js', 'utf8');
-  assert.match(s, /require\(p\)[^\n]*\n[^\n]*\}\)\(\);\nconst facturenKaartStaat/, 'facturen-kaart.js optioneel geladen');
+  assert.match(s, /const p = path\.join\(__dirname, 'facturen-kaart\.js'\);\n  if \(!fs\.existsSync\(p\)\) return null;/, 'facturen-kaart.js optioneel geladen');
   assert.match(s, /SERVER_ECHT && rolPrimair\(\) && process\.env\.FACTUREN_KAART !== 'uit'/, 'alleen echte pod, primair, uit te zetten');
   assert.match(s, /facturenRondeBezig = null; if \(typeof facturenKaartPlan === 'function'\) facturenKaartPlan\(0\)/, 'na de Facturen-ronde');
   assert.match(s, /if \(req\.method !== 'GET' && r\.status === 200\) facturenKaartPlan\(3000\)/, 'na een schrijvende Facturen-route');
+  assert.match(s, /if \(appVjModuleKaart\(p\)\) return m;/, 'modulekaart telt niet als beheerronde (review #3)');
+  assert.match(s, /mk_voor_jou_lijst', \{ p_alles: false \}\);   \/\/ open\/later \+ 7 dagen/, 'lichte lijst (review #7)');
   assert.match(s, /handmatig: 'bank-ronde', bank: t\.sessie_kort, module: 'financien'/);
   assert.match(s, /handmatig: 'geld-briefing', module: 'financien'/);
   assert.strictEqual((s.match(/herkomst: potAfHerkomst\(maand\)/g) || []).length, 3);

@@ -9349,7 +9349,8 @@ async function appVoorJouRoute(req, res, a, kanaal) {
     .map(function (p) { return { id: p.id, titel: appKort(p.titel, 120), later_tot: p.later_tot }; });
   // wv404: een kaart die via Ja / Nee / Anders dicht ging, blijft met "beantwoord" staan tot de volgende beheerronde (die meet elk open
   // punt: max laatst_gemeten = de laatste ronde), hooguit 24 u. Een besluit dat nog open staat maar al een druk heeft (in de rij) idem.
-  const laatsteRonde = punten.reduce(function (m, p) { const t = Date.parse(p.laatst_gemeten || '') || 0; return t > m ? t : m; }, 0);
+  // wv1705 (review #3): een modulekaart (Facturen, bank …) zet zelf laatst_gemeten; die telt niet als ronde
+  const laatsteRonde = punten.reduce(function (m, p) { if (appVjModuleKaart(p)) return m; const t = Date.parse(p.laatst_gemeten || '') || 0; return t > m ? t : m; }, 0);
   const viaKaart = eigen.filter(function (p) {
     const g = Date.parse(p.gesloten_op || '') || 0;
     return p.status === 'gedaan' && APP_VJ_KNOP_BEWIJS_RE.test(String(p.bewijs || '')) && g > laatsteRonde && nu - g < 24 * 3600 * 1000 && net.indexOf(p) < 0;
@@ -14444,6 +14445,11 @@ const facturenKaartMod = (function () {
   if (!fs.existsSync(p)) return null;
   try { return require(p); } catch (e) { logError('facturen-kaart', e); return null; }
 })();
+// Modulekaart (ontwerplijnen § 4.1, voor-jou.py modulekaart): herkomst.module zonder wv/register/todoist = de module beheert hem zelf
+function appVjModuleKaart(p) {
+  const h = (p && p.herkomst) || {}, bron = function (v) { return Array.isArray(v) ? v.length > 0 : !!v; };
+  return !!h.module && !bron(h.wv) && !bron(h.register) && !bron(h.todoist);
+}
 const facturenKaartStaat = { bezig: false, opnieuw: false, timer: null, vorige: null, laatste: null };
 function facturenKaartAan() { return !!(facturenKaartMod && facturenRoutes && SERVER_ECHT && rolPrimair() && process.env.FACTUREN_KAART !== 'uit'); }
 function facturenKaartPlan(ms) {
@@ -14458,7 +14464,7 @@ async function facturenKaartRonde() {
   facturenKaartStaat.bezig = true;
   try {
     const n = facturenKaartMod.teBeoordelen(fdb);
-    const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+    const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: false });   // open/later + 7 dagen gesloten: de kaart van vandaag valt er altijd onder (review #7)
     const punten = ((j && j.punten) || []).map(function (p) { return { sleutel: p.sleutel, status: p.status, gesloten_door: p.gesloten_door }; });
     const uit = await facturenKaartMod.bijwerken({ datum: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), n: n, nuKort: bankNuKort(),
       punten: punten, vorige: facturenKaartStaat.vorige }, {
