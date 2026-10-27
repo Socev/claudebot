@@ -147,7 +147,8 @@ function config(V, D) {
     ciso: { slot: [path.join(S, 'ciso'), wachter, path.join(S, 'health-pod', 'hp.py')],
       code: [path.join(D, 'mk-scripts', 'mk-curl'), path.join(D, 'socev-site', 'secretpoort.js'), path.join(D, 'bin', 'health-import.py'), vv,
         // wv998 (Fable wv904 diffreview #7): ook wat de CISO verder draait
-        path.join(D, 'beveiliging', 'injectie', 'canary', 'canary.mjs'), path.join(D, 'bin', 'healthrapporten.py'), path.join(D, 'mk-scripts', 'wv670')] },
+        path.join(D, 'beveiliging', 'injectie', 'canary', 'canary.mjs'), path.join(D, 'bin', 'healthrapporten.py'), path.join(D, 'mk-scripts', 'wv670'),
+        wv] },   // wv1366: de CISO zet sinds de afwerkronde (26-10) zijn afwerkrij met werkvoorraad.py
     'data-manager': { slot: [path.join(S, 'data-manager'), wachter, path.join(S, 'breed-zoeken', 'woordenlijst.py')],
       code: [path.join(D, 'mk-scripts', 'datamanager'), wv, vv] },
     'design-manager': { slot: [path.join(S, 'design-manager'), wachter], code: [path.join(D, 'mk-scripts', 'design-manager'), wv, vv] },

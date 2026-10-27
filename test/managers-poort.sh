@@ -328,6 +328,7 @@ function omgeving() {
     toets('8 wachter-state.py bij alle vier in het slot', Object.values(c).every((x) => x.slot.includes('/v/.claude/skills/personeels-wachter/wachter-state.py')));
     toets('8 eigen skillmap in elk slot', Object.entries(c).every(([k, x]) => x.slot.includes('/v/.claude/skills/' + k)));
     toets('8 CISO-code: canary, healthrapporten, wv670 (Fable wv904 #7)', ['/d/beveiliging/injectie/canary/canary.mjs', '/d/bin/healthrapporten.py', '/d/mk-scripts/wv670'].every((x) => c.ciso.code.includes(x)));
+    toets('8 werkvoorraad.py in de code van alle vier (wv1366: ook de CISO)', Object.values(c).every((x) => x.code.includes('/d/mk-scripts/werkvoorraad.py')));
     toets('8 UI-code: maak-socev-app.cjs', c['ui-manager'].code.includes('/d/mk-scripts/design-manager/nep/maak-socev-app.cjs'));
   }
   // ── 9. server.js en uitrol.sh ──
