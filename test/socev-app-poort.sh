@@ -1472,6 +1472,16 @@ async function bewijs(o) {
       const kDag = klaarVolgensPod({ code: 'dagmax', mag_david: false, mag_eigen: false, dagmax: true });
       toets('9a draden drift: treden open → startklaar gelijk aan de claim (F3,F5,F6,F7,F8)', kOpen === 'F3,F5,F6,F7,F8', kOpen);
       toets('9a draden drift: dagmaximum → alleen de geldige doorwerk-opdracht (F8)', kDag === 'F8', kDag);
+      // Fable-diffreview #1, #2, #6: doorwerk bij een vroege poort, afwerkrij, leeg register
+      const dw = W({ id: 540, doorwerk_opdracht: '"ga door" — David 24-10-2026' });
+      const vroeg = H.appDradenUit(inv({ items: [dw], stand: { laatste_poort: { code: 'ruimte', mag_david: null, mag_eigen: null } } })).in_de_wacht[0];
+      toets('9a draden: doorwerk bij een vroege tankpoort (mag null) → geen "volgende tik"', vroeg.reden === 'ruimte', JSON.stringify(vroeg));
+      const af1 = W({ id: 541, soort: 'afwerk' }), af2 = W({ id: 542, soort: 'afwerk', status: 'gestart', job_id: 'j000000000000001' });
+      const afE = H.appDradenUit(inv({ items: [af1], stand: { laatste_poort: { code: 'eigen_max', mag_david: true, mag_eigen: true, eigen: 3 } } })).in_de_wacht[0];
+      const afL = H.appDradenUit(inv({ items: [af1, af2], stand: { laatste_poort: { code: 'eigen_max', mag_david: true, mag_eigen: true, eigen: 3 } } })).in_de_wacht[0];
+      toets('9a draden: afwerkrij buiten het eigen maximum → volgende tik; met een lopende afwerkrij → wacht daarop', afE.reden === 'volgende_tik' && afL.reden === 'afwerk', JSON.stringify([afE, afL]));
+      const leeg = H.appDradenUit(inv({ reg: {} }));
+      toets('9a draden: leeg register (na herstart) → gestarte rij zonder job blijft loopt', lijstVan(leeg)[504] === 'loopt', lijstVan(leeg)[504]);
       // Route: 401, stil (geen auditregel bij 200), RPC kapot → 200 met fout en lege lijsten, uitknop → uit
       r = await vraag('GET', '/app/draden', undefined, { pot: pot() });
       toets('9a draden zonder sessie → 401', r.status === 401, r.status);

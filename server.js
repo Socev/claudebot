@@ -7856,7 +7856,7 @@ const APP_DRAAD_ZIN = {
   vijf_uur: 'wacht tot het vijf-uursvenster weer ruimte heeft', ruimte: 'wacht op ruimte in je weekbudget',
   dagmax: 'dagmaximum bereikt, morgen weer', volgende_tik: 'start bij de volgende tik', na_lopend: 'start na een lopende klus',
   na_klus: 'start na een andere klus', bundel: 'gaat mee in de bundelronde (08:30, 13:30 of 18:30)', niet_voor: 'wacht op zijn starttijd',
-  mislukt: 'mislukt', machinekamer: 'wacht op de machinekamer', onbekend: 'wacht op de tikker' };
+  afwerk: 'wacht op de lopende afwerkklus', mislukt: 'mislukt', machinekamer: 'wacht op de machinekamer', onbekend: 'wacht op de tikker' };
 const APP_DRAAD_DAG = ['zo', 'ma', 'di', 'wo', 'do', 'vr', 'za'];
 function appDraadKlok(t) {
   const d = new Date(t);
@@ -7898,7 +7898,14 @@ function appDraadReden(w, poort, byId, reg, nu) {
       return { code: code, zin: 'wacht op een vrije plek: er lopen al ' + (code === 'plekken' ? p.lopend : p.eigen) + ' klussen' };
     return { code: code, zin: APP_DRAAD_ZIN[code] || APP_DRAAD_ZIN.onbekend };
   };
-  if (appDraadDoorwerk(w.doorwerk_opdracht)) return APP_DRAAD_RUIMTE[code] ? { code: 'volgende_tik', zin: APP_DRAAD_ZIN.volgende_tik } : algemeen();
+  // Fable-diffreview wv1029 #1: 'ruimte' komt ook uit de vroege tankpoort (mag_* null, blokkeert ook doorwerk)
+  if (appDraadDoorwerk(w.doorwerk_opdracht) && w.soort !== 'afwerk') return APP_DRAAD_RUIMTE[code] && p.mag_david != null ? { code: 'volgende_tik', zin: APP_DRAAD_ZIN.volgende_tik } : algemeen();
+  // Fable-diffreview wv1029 #2: een afwerkrij (wv1345) start één tegelijk, alleen in Davids trede, ook buiten het eigen maximum
+  if (w.soort === 'afwerk') {
+    if (Object.keys(byId).some(function (k) { const x = byId[k]; return x.soort === 'afwerk' && (x.status === 'starten' || x.status === 'gestart'); })) return { code: 'afwerk', zin: APP_DRAAD_ZIN.afwerk };
+    if ((APP_DRAAD_RUIMTE[code] || code === 'eigen_max') && p.mag_david != null) return p.mag_david ? { code: 'volgende_tik', zin: APP_DRAAD_ZIN.volgende_tik } : p.dagmax === true ? { code: 'dagmax', zin: APP_DRAAD_ZIN.dagmax } : { code: 'ruimte', zin: APP_DRAAD_ZIN.ruimte };
+    return algemeen();
+  }
   const mag = w.herkomst === 'david' ? p.mag_david : p.mag_eigen;
   if (mag === false && APP_DRAAD_RUIMTE[code]) return p.dagmax === true ? { code: 'dagmax', zin: APP_DRAAD_ZIN.dagmax } : { code: 'ruimte', zin: APP_DRAAD_ZIN.ruimte };
   return algemeen();
@@ -7970,7 +7977,8 @@ function appDradenUit(inv) {
     if (w.status === 'starten' || w.status === 'gestart') {
       const loopt = job && (job.status === 'pending' || job.status === 'running');
       const sindsT = w.status === 'starten' ? Date.parse(w.bijgewerkt || '') : Date.parse(w.gestart_op || '');
-      if (loopt || (!job && isFinite(sindsT) && nu - sindsT < APP_DRAAD_STARTEN_MS)) {
+      // Fable-diffreview wv1029 #6: een leeg register (net na een herstart) is geen meting dat de job weg is
+      if (loopt || (!job && ((isFinite(sindsT) && nu - sindsT < APP_DRAAD_STARTEN_MS) || !Object.keys(reg).length))) {
         d = basis(w, 'loopt', null); d.sinds = t(w.gestart_op) || (job && job.started ? new Date(job.started).toISOString() : null) || t(w.bijgewerkt);
         uit.loopt.push(d); return;
       }
@@ -8018,7 +8026,10 @@ async function appDraden(req, res, a) {
   try { const r = await appGeschiedenisRuw('machinekamer', appMoetLog); if (r.fout) throw r.fout; log = r.items; } catch (e) { logError('app-draden', e); log = []; }
   try { vj = await appVjPunten(); } catch (e) { logError('app-draden', e); vj = null; }
   // Zonder kaarten geen betrouwbare ontdubbeling: dan geen open vragen (een klare klus sluit gewoon)
-  if (vj) { try { moet = await appMoetIets(vj, nu, await appVjAfgeleid(vj, nu)); } catch (e) { logError('app-draden', e); moet = []; } }
+  // Fable-diffreview wv1029 #3: de zwaarste stap van Voor jou; hooguit elke 20 s (zoals de werkvoorraad-cache), gedeeld over apparaten
+  const mc = appStaat.dradenMoet;
+  if (vj && mc && nu - mc.op < 20000) moet = mc.moet;
+  else if (vj) { try { moet = await appMoetIets(vj, nu, await appVjAfgeleid(vj, nu)); appStaat.dradenMoet = { op: nu, moet: moet }; } catch (e) { logError('app-draden', e); moet = []; } }
   let uit;
   try { uit = appDradenUit({ items: wv.items, stand: wv.stand, reg: appAgentsReg(), log: log, moet: moet, vj: vj, a: a, nu: nu }); }
   catch (e) { logError('app-draden', e); return appStuur(res, 200, appDradenLeeg('de klussen zijn nu niet in te delen')); }
