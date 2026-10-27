@@ -306,12 +306,12 @@ test('facturen: migratie 8 zet leverancier.knoop_id, herhaalbaar na een lichte t
   const D = require('../facturen-db.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wv980-fac-'));
   let f = D.open(dir);
-  assert.equal(f.schema, 8);
+  assert.equal(f.schema, D.SCHEMA_VERSIE);   // wv1405: na migratie 9 is het schema hoger dan 8; de toets gaat over migratie 8
   assert.ok(f.db.prepare('PRAGMA table_info(leverancier)').all().some((x) => x.name === 'knoop_id'));
   f.db.exec('DELETE FROM schema_migratie WHERE versie = 8');
   D.sluit(f);
   f = D.open(dir);
-  assert.equal(f.schema, 8);
+  assert.deepEqual(f.toegepast, [8]);
   assert.throws(() => f.db.prepare("INSERT INTO leverancier (id, naam, genormaliseerd, knoop_id, aangemaakt_op) VALUES ('aaaaaaaaaaaaaaaa', 'x', 'x', 'org:x y', '2026-10-27')").run());
   D.sluit(f);
 });

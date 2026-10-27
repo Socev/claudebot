@@ -185,7 +185,7 @@ jobs:
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\("; then
             echo "::error::facturen.js laadt een netwerk- of procesmodule; de routes moeten lokaal blijven"; exit 1
           fi
-          if grep -vE '^\s*(\*|//)' facturen.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js|\./facturen-db\.js|\./facturen-validatie\.js)'\)$"; then
+          if grep -vE '^\s*(\*|//)' facturen.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js|\./facturen-db\.js|\./facturen-validatie\.js|\./facturen-sepa\.js)'\)$"; then
             echo "::error::facturen.js laadt een module buiten fs, node:sqlite en de Facturen-buren"; exit 1
           fi
           echo "facturen.js: alleen lokaal."
