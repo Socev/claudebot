@@ -322,7 +322,7 @@ function maak(deps) {
       stappen: ['Open in de app Apps › AIX, tab Klaar om te delen.', 'Lees per stuk en kies Deel of Niet. Wat je niet aanraakt, gaat niet mee.',
         'Ja met vingerafdruk (op de telefoon): de pod zet wat op Deel staat in Socevs winkel op AIX, als Socev. Nee: er gaat niets naar AIX.'],
       waar: 'overal', prive: false, duur_min: start ? 15 : 5, volgorde: 20,
-      herkomst: Object.assign({ handmatig: 'aix-bundel', soort: b.soort || 'week' },
+      herkomst: Object.assign({ handmatig: 'aix-bundel', soort: b.soort || 'week', module: 'ideeen', doel: { scherm: 'ideeen', focus: null } },
         typeof b.register === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}#[^#\s|]{2,60}$/.test(b.register) ? { register: [b.register] } : {}) };   // rij in Open vragen aan David
   }
   // wv965: de bundel opnieuw aanbieden. 23-10 drukte David Ja op de startset vóór hij iets op Deel zette (hij las Ja als "alle"); er ging niets
@@ -339,7 +339,7 @@ function maak(deps) {
         'Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen of webadressen. Bank, gezondheid en beveiliging blijven privé.', 400),
       stappen: ['Moet er een niet mee? Zet hem in de app bij Apps › AIX, tab Klaar om te delen, op Niet.',
         'Ja met vingerafdruk (op de telefoon): de pod zet wat op Deel staat in Socevs winkel op AIX, als Socev. Nee: er gaat niets naar AIX.'],
-      waar: 'overal', prive: false, duur_min: 2, volgorde: 20, herkomst: { handmatig: 'aix-bundel', soort: 'deel' } };
+      waar: 'overal', prive: false, duur_min: 2, volgorde: 20, herkomst: { handmatig: 'aix-bundel', soort: 'deel', module: 'ideeen', doel: { scherm: 'ideeen', focus: null } } };
   }
   // wv970 (Fable wv965 #2): na een Ja ook de Deel-stukken die bij die plaatsing niet aan de beurt kwamen: overgeslagen omdat er meer dan
   // bundel_max op Deel stonden, of nergens in de plaatsing omdat de pod midden in de plaatsing herstartte (dan schreef de finally geen

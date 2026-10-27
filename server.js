@@ -3945,7 +3945,7 @@ function handleRequest(req, res) {
         : Promise.resolve(facturenRoutes.backupNodig(fdb, nu) ? facturenRoutes.ronde(fdb, { nu: nu }) : { ok: true, koerier: false });
       p.then(function (j) { stuur(j && j.ok ? 200 : 500, j); })
         .catch(function (e) { logError('facturen-ronde', e); stuur(500, { ok: false, fout: 'facturen-ronde faalde in de pod' }); })
-        .finally(function () { if (facturenRondeBezig === mijn) facturenRondeBezig = null; });
+        .finally(function () { if (facturenRondeBezig === mijn) facturenRondeBezig = null; if (typeof facturenKaartPlan === 'function') facturenKaartPlan(0); });   // wv1705
     }); });
   }
 
@@ -14328,7 +14328,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f) } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartAan() ? (facturenKaartStaat.laatste || { aan: true }) : { aan: false } } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -14421,6 +14421,7 @@ async function appFacturen(req, res, a, s, d, route) {
     versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; },
     uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS });
   if (req.method === 'GET' && pad.indexOf('/app/facturen/document/') !== 0 && r.status === 200) res._app.stil = true;
+  if (req.method !== 'GET' && r.status === 200) facturenKaartPlan(3000);   // wv1705: verzamelkaart bijwerken (bevestigen, terugdraaien, upload)
   res._app.reden = 'facturen ' + (r.reden || pad.slice('/app/facturen'.length) || '/');
   return appStuur(res, r.status, r.j);
 }
@@ -14432,6 +14433,49 @@ function facturenNaBankRonde() {
   const r = facturenRoutes.bankluisRonde(fdb, { nu: Date.now(), pad: FACTUREN_BANKLUIS });
   if (!r.rekeningen) return null;
   return { ok: r.ok, nieuw: r.nieuw, vervangen: r.vervangen, signalen: r.controle ? r.controle.signalen : undefined, fouten: (r.fouten || []).length || undefined };
+}
+// ── wv1705 (OVIS M3a): verzamelkaart Facturen in Overzicht ──
+// facturen-kaart.js (puur) beslist; hier alleen de I/O. Eén kaart per dag "Facturen — N facturen beoordelen" (sleutel facturen-JJJJ-MM-DD,
+// herkomst.module facturen + doel), bijgewerkt na elke Facturen-ronde (n8n, elk uur) en kort na een schrijvende Facturen-route in de app,
+// dicht bij 0. Alleen in de echte pod op de primaire kant met de Facturen-database; uitzetten: FACTUREN_KAART=uit. Een fout = logregel, de
+// volgende ronde probeert opnieuw. De Voor jou-ronde laat deze kaart met rust (herkomst.module zonder wv/register/todoist).
+const facturenKaartMod = (function () {
+  const p = path.join(__dirname, 'facturen-kaart.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('facturen-kaart', e); return null; }
+})();
+const facturenKaartStaat = { bezig: false, opnieuw: false, timer: null, vorige: null, laatste: null };
+function facturenKaartAan() { return !!(facturenKaartMod && facturenRoutes && SERVER_ECHT && rolPrimair() && process.env.FACTUREN_KAART !== 'uit'); }
+function facturenKaartPlan(ms) {
+  if (!facturenKaartAan() || facturenKaartStaat.timer) return;
+  facturenKaartStaat.timer = setTimeout(function () { facturenKaartStaat.timer = null; facturenKaartRonde().catch(function (e) { logError('facturen-kaart', e); }); }, ms || 0);
+}
+async function facturenKaartRonde() {
+  if (!facturenKaartAan()) return null;
+  if (facturenKaartStaat.bezig) { facturenKaartStaat.opnieuw = true; return null; }
+  const fdb = facturenOpen();
+  if (!fdb) return null;
+  facturenKaartStaat.bezig = true;
+  try {
+    const n = facturenKaartMod.teBeoordelen(fdb);
+    const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+    const punten = ((j && j.punten) || []).map(function (p) { return { sleutel: p.sleutel, status: p.status, gesloten_door: p.gesloten_door }; });
+    const uit = await facturenKaartMod.bijwerken({ datum: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), n: n, nuKort: bankNuKort(),
+      punten: punten, vorige: facturenKaartStaat.vorige }, {
+      zet: async function (p) { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet'); facturenKaartStaat.vorige = { sleutel: p.sleutel, n: n }; },
+      status: function (sleutel, van, naar, x) {
+        return appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: van, p_naar: naar, p_door: 'agent', p_bewijs: x.bewijs || null,
+          p_samengevoegd_in: x.samengevoegd_in || null, p_reden: x.reden || 'facturen-kaart' });
+      } });
+    if (uit.gezet || uit.heropend || uit.samengevoegd.length || uit.gesloten.length) appStaat.vjCache = null;
+    if (n === 0 || uit.gesloten.length) facturenKaartStaat.vorige = null;
+    facturenKaartStaat.laatste = { op: new Date().toISOString(), n: n, gezet: uit.gezet, gesloten: uit.gesloten.length, fouten: uit.fouten.length };
+    if (uit.fouten.length) logError('facturen-kaart', new Error(uit.fouten.join('; ').slice(0, 200)));
+    return uit;
+  } finally {
+    facturenKaartStaat.bezig = false;
+    if (facturenKaartStaat.opnieuw) { facturenKaartStaat.opnieuw = false; facturenKaartPlan(1000); }
+  }
 }
 
 // ── Bandjes (wv743, 22-10-2026; bouwplan "Bandjes - mini-app voor telefoonbandjes (bouwplan 22-10-2026)" § 5) ──
@@ -17470,7 +17514,7 @@ function bankKaart(soort, t, sleutel) {
   const stappen = ["Zeg in de app tegen Socev: 'koppel de bank'.", 'Open de link die Socev je geeft in Chrome (niet in een app-venster); hij is een uur geldig.',
     'Log in bij ' + bank + ' en vink alleen ' + rek + ' aan.', "Klaar als de pagina 'Gekoppeld' zegt; deze kaart gaat daarna vanzelf dicht."];
   const p = { sleutel: sleutel, soort: 'doen', stappen: stappen, waar: 'overal', prive: true, duur_min: 5,
-    herkomst: { handmatig: 'bank-ronde', bank: t.sessie_kort } };
+    herkomst: { handmatig: 'bank-ronde', bank: t.sessie_kort, module: 'financien', doel: { scherm: 'financien', focus: null } } };
   if (soort === 'verlopen') return Object.assign(p, { titel: 'Bank — koppeling ' + bank + ' verlopen: opnieuw koppelen', volgorde: 5,
     deadline: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }),
     waarom: 'De toestemming waarmee Socev ' + rek + ' bij ' + bank + ' leest, geldt niet meer (verlopen of ingetrokken). Socev ziet daar nu geen nieuwe saldi en afschrijvingen meer, tot je opnieuw koppelt.',
@@ -18100,7 +18144,7 @@ async function geldRijZet(datum, tekst) {
 // De kaart. Geen paden, wv-nummers of verwijzingen (mk_voor_jou_zet weigert die); de stappen staan in de kaart zelf.
 function geldKaart(s, peil) {
   const sl = 'geld-' + crypto.createHash('sha256').update(String(s.sleutel)).digest('hex').slice(0, 12);
-  const p = { sleutel: sl, soort: 'doen', waar: 'overal', prive: true, duur_min: 5, volgorde: 40, herkomst: { handmatig: 'geld-briefing' } };
+  const p = { sleutel: sl, soort: 'doen', waar: 'overal', prive: true, duur_min: 5, volgorde: 40, herkomst: { handmatig: 'geld-briefing', module: 'financien', doel: { scherm: 'financien', focus: null } } };
   const eind = (function () { const d = new Date(peil.slice(0, 7) + '-01T12:00:00Z'); d.setUTCMonth(d.getUTCMonth() + 1); d.setUTCDate(0); return d.toISOString().slice(0, 10); })();
   if (s.kaart === 'dekking') return Object.assign(p, { titel: 'Vaste-lastenrekening — bijstorten vóór de 1e', volgorde: 10, deadline: eind,
     waarom: String(s.zin) + ' Op de 1e gaan onder meer hypotheek en lease eraf; staat er dan te weinig op, dan kan een incasso mislukken.',
@@ -18205,10 +18249,12 @@ async function geldKaarten(s) {
 }
 
 // Kaarten (Voor jou). Geen bedrag, naam of saldo; de stappen staan in de kaart zelf (David heeft geen toegang tot onze context).
+// wv1705 (OVIS M3a): kaartherkomst met module en doel (App POT-afschriften, die maand); handmatig blijft (de Voor jou-ronde en sync)
+function potAfHerkomst(maand) { return { handmatig: 'pot-afschrift', maand: maand, module: 'pot-afschriften', doel: { scherm: 'pot-afschriften', focus: 'maand:' + maand } }; }
 function potAfKaartDoen(maand) {
   const n = potAfMaandNaam(maand), dl = new Date(Date.UTC(Number(maand.slice(0, 4)), Number(maand.slice(5, 7)), POT_AF_MELD)).toISOString().slice(0, 10);
   return { sleutel: 'pot-afschrift-' + maand, soort: 'doen', titel: 'POT — afschrift ' + n + ' naar André (Acta Synergia) sturen', volgorde: 30, deadline: dl,
-    waar: 'overal', prive: true, duur_min: 4, herkomst: { handmatig: 'pot-afschrift', maand: maand },
+    waar: 'overal', prive: true, duur_min: 4, herkomst: potAfHerkomst(maand),
     waarom: 'André verwerkt de bankafschriften van de POT. Socev heeft het afschrift van ' + n + ' gemaakt uit de bankkoppeling: een MT940-bestand om in te lezen en een PDF met per regel wat het is. Het mailconcept aan André zet Socev op jouw teken klaar, met beide bestanden eraan; nakijken en versturen doe je zelf.',
     stappen: ['Open in de app Apps › POT-afschriften (op je telefoon of laptop, niet op de praktijk-pc).', 'Kijk de PDF van ' + n + ' even na (knop PDF).',
       "Tik op 'Zet mailconcept klaar voor André' en bevestig met je vingerafdruk.",
@@ -18222,7 +18268,7 @@ function potAfKaartNiet(maand, reden) {
     const vm = new Date(Date.UTC(Number(maand.slice(0, 4)), Number(maand.slice(5, 7)) - 2, 1)).toISOString().slice(0, 7), vn = potAfMaandNaam(vm);
     return { sleutel: 'pot-afschrift-' + maand + '-niet', soort: 'doen', titel: 'POT — afschrift ' + vn + ' opnieuw maken, daarna ' + n + ' naar André', volgorde: 20,
       deadline: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), waar: 'overal', prive: true, duur_min: 8,
-      herkomst: { handmatig: 'pot-afschrift', maand: maand },
+      herkomst: potAfHerkomst(maand),
       waarom: 'Na het maken van het afschrift van ' + vn + ' kwam er bij de bank nog een boeking in die maand bij. Daardoor sluit ' + n + ' niet aan op wat André van ' + vn + ' heeft. Eerst ' + vn + ' opnieuw maken en als correctie sturen; daarna kan ' + n + '.',
       stappen: ['Open in de app Apps › POT-afschriften (op je telefoon of laptop).', 'Kies ' + vn + " en tik op 'Maak opnieuw'.",
         "Tik op 'Zet mailconcept klaar voor André' (het concept zegt dat het een correctie is en heeft PDF en MT940 al eraan), kijk het na in Gmail en verstuur.",
@@ -18231,7 +18277,7 @@ function potAfKaartNiet(maand, reden) {
   }
   return { sleutel: 'pot-afschrift-' + maand + '-niet', soort: 'doen', titel: 'POT — afschrift ' + n + ' zelf bij ABN downloaden en naar André sturen', volgorde: 20,
     deadline: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }), waar: 'overal', prive: true, duur_min: 10,
-    herkomst: { handmatig: 'pot-afschrift', maand: maand },
+    herkomst: potAfHerkomst(maand),
     waarom: 'Socev kon het afschrift van ' + n + ' niet maken uit de bankkoppeling (' + String(reden || 'onbekende reden').replace(/[\r\n]+/g, ' ').slice(0, 160) + '). André wacht op het afschrift; zo stuur je het zelf.',
     stappen: ['Log in bij ABN AMRO (Internet Bankieren op de laptop) en open de POT-rekening.', "Zoek 'Af- en bijschrijvingen downloaden' en kies het formaat MT940, periode 1-" + Number(maand.slice(5, 7)) + ' t/m ' + bankDm(eind, true) + '.',
       'Mail het bestand aan André (Acta Synergia).', 'Klaar? Tik hier op Gedaan.'],

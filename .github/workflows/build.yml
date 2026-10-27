@@ -275,6 +275,7 @@ jobs:
           t test/facturen-bank.sh   # wv798: bank — parsers (oracle FV2, Python), weigeren, Privé weg, bankluis, matching, signalen
           t test/facturen-db.sh   # wv824: opslag — migraties, Privé-CHECK/triggers, terugdraai-race, stukken, back-up, zaad
           t test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
+          t test/facturen-kaart.sh   # wv1705: OVIS M3a — verzamelkaart Facturen in Overzicht (dagsleutel, dicht bij 0, Davids keuze blijft), module + doel bij de schrijvers
           t test/facturen-validatie.sh   # wv944: bankhistorie (startdatum, droogloop, bron, personeel, FV2-archief) en validatie (profielen, betaling, controles, zoeken)
           t test/abn-historie.sh   # wv1329: ABN-historie (PDF-afschriften) in de bankluis — afdekken wat de bank gaf, saldo, POT-afschrift, niet naar de datahub
           command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils) || echo "::warning::pdftotext niet te installeren"   # de koerier roept /usr/bin/pdftotext echt aan

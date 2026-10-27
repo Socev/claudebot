@@ -357,7 +357,7 @@ function aanvraagKaart(a, bekend, zonderAdres, kaal) {
       'Bekijk naam, zin en eigenaar' + (controle.length ? ' (' + controle.join(', ') + ')' : '') + '; ken je de eigenaar niet, dan is Afwijzen de veilige keuze.',
       'Druk daar Toelaten of Afwijzen. Afwijzen blokkeert die sleutel 30 dagen.',
       'Deze kaart gaat binnen een uur vanzelf dicht zodra de aanvraag op AIX is afgehandeld.'],
-    waar: 'overal', prive: false, duur_min: 2, volgorde: 30, herkomst: { handmatig: 'aix-ronde', aanvraag: a.id.slice(0, 8) } };
+    waar: 'overal', prive: false, duur_min: 2, volgorde: 30, herkomst: { handmatig: 'aix-ronde', aanvraag: a.id.slice(0, 8), module: 'ideeen', doel: { scherm: 'ideeen', focus: null } } };
 }
 function signaalKaart(soort, naam, reden) {
   const wat = soort === 'geheim' ? 'Socev heeft agent ' + naam + ' geschorst: een bericht van hem leek een sleutel of wachtwoord te bevatten (het staat verborgen tot jij kijkt).'
@@ -367,7 +367,7 @@ function signaalKaart(soort, naam, reden) {
     waarom: kap(wat + ' Schorsen en verbergen zijn omkeerbaar; definitief intrekken kan alleen jij.\n\nAgent: ' + naam + '\nSignaal: ' + tekst(reden, 120), VJ.waarom - 20),   // ruimte voor de sleutelmaskering van de databank (Fable wv943 #3)
     stappen: ['Open https://aix.socev.dev/beheer (Moderatie en Agents).', 'Kijk wat er stond en kies: herstellen, verborgen laten of de agent intrekken.',
       'Deze kaart sluit je zelf als je klaar bent.'],
-    waar: 'overal', prive: false, duur_min: 5, volgorde: 35, herkomst: { handmatig: 'aix-ronde', signaal: soort } };
+    waar: 'overal', prive: false, duur_min: 5, volgorde: 35, herkomst: { handmatig: 'aix-ronde', signaal: soort, module: 'ideeen', doel: { scherm: 'ideeen', focus: null } } };
 }
 
 async function goedkeurRonde(deps) {
