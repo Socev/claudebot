@@ -706,6 +706,19 @@ function M7(db) {
   db.exec(M7_REST);
 }
 
+/*
+ * wv980 (OVIS Intake stap 2, bouwplan § 3.3/§ 9 #2): leverancier krijgt knoop_id, de id van de organisatie in het OVIS-register
+ * (secondbrain.knoop/entity, bv. 'org:voorbeeld'). Leeg tot de facturen-lens in stap 3 hem vult; de router leest hem niet in de schaduw.
+ * Alleen een vorm-CHECK, geen verwijzing (het register staat in Supabase). LET OP terugrol: een release van vóór wv980 opent deze
+ * database niet meer (schema_nieuwer); lichtste terugrol is `DELETE FROM schema_migratie WHERE versie = 8` (de oude code noemt de
+ * kolommen bij naam en hindert de lege kolom niet). Herhaalbaar: na zo'n terugrol voegt M8 alleen toe wat ontbreekt.
+ */
+function M8(db) {
+  const kol = new Set(db.prepare('PRAGMA table_info(leverancier)').all().map((x) => x.name));
+  if (!kol.has('knoop_id')) db.exec("ALTER TABLE leverancier ADD COLUMN knoop_id TEXT CHECK (knoop_id IS NULL OR (length(knoop_id) BETWEEN 2 AND 120 AND knoop_id NOT GLOB '*[^A-Za-z0-9:._-]*'))");
+  db.exec('CREATE INDEX IF NOT EXISTS leverancier_knoop ON leverancier (knoop_id)');
+}
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -714,6 +727,7 @@ const MIGRATIES = [
   { versie: 5, naam: 'Triodos: bank TRIODOS en formaat triodos_csv in de CHECKs (wv1299)', fn: (db) => M5(db) },
   { versie: 6, naam: "voorstel: status 'vervallen' bij herbeoordeling (wv1317)", fn: (db) => M6(db) },
   { versie: 7, naam: 'feiten: rekening is van leverancier, uit de bankhistorie (wv1323)', fn: (db) => M7(db) },
+  { versie: 8, naam: 'leverancier.knoop_id: koppeling met het OVIS-register (wv980)', fn: (db) => M8(db) },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',

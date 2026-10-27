@@ -14359,7 +14359,7 @@ const intake = (function () {
   } catch (e) { logError('intake', e); return null; }
 })();
 function intakeIsPad(req) { const p = reqPath(req); return p === '/intake' || p.indexOf('/intake/') === 0; }
-function intakeInfo() { if (!intake) return { aan: false }; try { return Object.assign({ aan: true }, intake.info()); } catch (e) { return { aan: true, fout: true }; } }
+function intakeInfo() { if (!intake) return { aan: false }; try { return Object.assign({ aan: true }, intake.info(), { router: intakeRouterInfo() }); } catch (e) { return { aan: true, fout: true }; } }
 // Dagtelling (ontwerp § 4.3/§ 5.2): één box-rij per dag over gisteren, stil als er niets binnenkwam en niets openstaat.
 function intakeDagTelling() {
   const t = ovisAms();
@@ -14379,9 +14379,11 @@ function intakeDagTelling() {
   // Stil (ontwerp § 4.3, grondwet 10): alleen een rij als er iets geweigerd, afwijkend, gemarkeerd of blijven liggen is; zorg = status open
   const zorg = open.length > 0 || bronnen.some(function (b) { return r.per_bron[b].geweigerd || r.per_bron[b].afwijkend; });
   const markers = bronnen.some(function (b) { return r.per_bron[b].marker_gemarkeerd || r.per_bron[b].marker_niet_te_lezen; });
-  if (!zorg && !markers) return;
+  let rr = '';
+  if (intakeRouter && intakeRouterStand()) { try { rr = intakeRouter.regel(intakeRouter.telling(new Date(tot - 86400000).toISOString(), new Date(tot).toISOString())); } catch (e) { logError('intake-router-telling', e); } }
+  if (!zorg && !markers && !rr) return;
   ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Intake: dagtelling aanleveringen\n- status: ' + (zorg ? 'open' : 'afgehandeld') + '\n- van: pod:intake — bevinding_id intake-telling-' + t.datum +
-    '\n- wat ik zag: ' + (regels.join('; ') || 'geen aanleveringen') + (open.length ? '; open: ' + open.map(function (k) { return k + ' ' + r.open[k]; }).join(', ') : '') +
+    '\n- wat ik zag: ' + (regels.join('; ') || 'geen aanleveringen') + (open.length ? '; open: ' + open.map(function (k) { return k + ' ' + r.open[k]; }).join(', ') : '') + (rr ? '\n- ' + rr : '') +
     '\n- voorstel: niets bij alleen dubbel/0 geweigerd; anders stuk-id in intake.sqlite (tabel aanlevering) nalopen\n');
 }
 // Hangers (wv1303): stukken die > 1 u op 'wacht' staan of 'mislukt' zijn; de aanleverende workflow kreeg 202 en ziet dat niet. Eén rij met
@@ -14396,9 +14398,58 @@ function intakeMeldHangers(h) {
   if (!ok && intakeMeldFoutDag !== t.datum) { intakeMeldFoutDag = t.datum; logError('intake-meld', new Error('box-rij over ' + h.length + ' hangende stukken niet geschreven; volgende ronde opnieuw')); }
   return ok;
 }
+// ── OVIS Intake stap 2: de router in de schaduw (wv980, 27-10-2026; bouwplan vault "01_Ontwikkeling/OVIS Intake - één ingang en
+// router (bouwplan 24-10-2026).md" § 3.2, § 7 stap 2) ──
+// Leest elke 5 min de complete stukken uit intake.sqlite en schrijft per stuk wat hij gedaan zóu hebben (router_stuk, besluit, bestemming).
+// Voert niets uit: geen raw_input, geen koerier, geen kaarten, geen model. Schakelaar INTAKE_DIR/router.json {"aan": true, "eigen_adressen": [..]}
+// (Davids eigen adressen: een mail van hem is alleen 'aangeleverd door'); ontbreekt het bestand of intake-router.js (terugrol), dan niets.
+// Lokale tekst: pdftotext -bbox, OCR met tesseract (nld+eng, hooguit 5 pagina's) in de quarantainemap, docx via unzip; niets verlaat de pod.
+function intakeProces(cmd, args, o) {
+  o = o || {};
+  return new Promise(function (klaar) {
+    let k, uit = '', af = false;
+    const eind = function (t) { if (!af) { af = true; klaar(t); } };
+    try { k = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'], cwd: o.cwd }); } catch (e) { return eind(null); }
+    const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} eind(null); }, o.ms || 60000);
+    k.stdout.setEncoding('utf8');
+    k.stdout.on('data', function (c) { if (uit.length < 4e6) uit += c; });
+    k.on('error', function () { clearTimeout(tm); eind(null); });
+    k.on('close', function (code) { clearTimeout(tm); eind(code === 0 ? uit : null); });
+  });
+}
+async function intakeOcr(pad, mime, werk) {
+  if (mime === 'application/pdf') {
+    const r = await intakeProces('pdftoppm', ['-q', '-r', '200', '-l', '5', '-png', pad, path.join(werk, 'p')], { ms: 120000 });
+    if (r == null) return null;
+    const pngs = fs.readdirSync(werk).filter(function (n) { return /^p-\d+\.png$/.test(n); }).sort();
+    const delen = [];
+    for (const n of pngs) { const t = await intakeProces('tesseract', [path.join(werk, n), 'stdout', '-l', 'nld+eng', '--psm', '3'], { ms: 120000 }); if (t) delen.push(t); }
+    return delen.length ? delen.join('\n') : null;
+  }
+  return intakeProces('tesseract', [pad, 'stdout', '-l', 'nld+eng', '--psm', '3'], { ms: 120000, cwd: werk });
+}
+async function intakeDocx(pad) {
+  const x = await intakeProces('unzip', ['-p', pad, 'word/document.xml'], { ms: 30000 });
+  if (x == null) return null;
+  return x.replace(/<\/w:p>/g, '\n').replace(/<w:tab\/>/g, ' ').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').slice(0, 2e6);
+}
+function intakeRouterStand() { try { const j = JSON.parse(fs.readFileSync(path.join(INTAKE_DIR, 'router.json'), 'utf8')); return j && j.aan === true ? j : null; } catch (e) { return null; } }
+const intakeRouter = (function () {
+  const p = path.join(__dirname, 'intake-router.js');
+  if (!intake || !fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ dir: INTAKE_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
+      pdfBbox: function (pad) { return intakeProces('pdftotext', ['-q', '-bbox', '-l', '20', '-enc', 'UTF-8', pad, '-'], { ms: 30000 }); },
+      ocr: intakeOcr, docx: intakeDocx,
+      handvatten: function () { return appSbRpc('ovis_intake_handvatten', {}); },
+      eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; } });
+  } catch (e) { logError('intake-router', e); return null; }
+})();
+function intakeRouterInfo() { if (!intakeRouter) return { aan: false, module: false }; try { return Object.assign(intakeRouter.info(), { aan: !!intakeRouterStand() }); } catch (e) { return { fout: true }; } }
 async function intakeTik() {
   if (!intake || !rolPrimair()) return;
   try { await intake.ronde(); } catch (e) { logError('intake-ronde', e); }
+  if (intakeRouter && intakeRouterStand()) { try { const u = await intakeRouter.ronde(); if (u && (u.verwerkt || u.fout)) schrijfLog(nu() + ' intake-router ' + velden({ verwerkt: u.verwerkt || 0, vastgehouden: u.vastgehouden || 0, fout: u.fout || 0 })); } catch (e) { logError('intake-router', e); } }
   try { intakeDagTelling(); } catch (e) { logError('intake-telling', e); }
 }
 if (intake && SERVER_ECHT) { setTimeout(function () { intakeTik(); }, 120000).unref(); setInterval(function () { intakeTik(); }, 5 * 60000).unref(); }

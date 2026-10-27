@@ -168,6 +168,7 @@ COPY gezondheid-app.js /app/release-bootstrap/gezondheid-app.js
 COPY financien-vault.js /app/release-bootstrap/financien-vault.js
 COPY app-vast.js /app/release-bootstrap/app-vast.js
 COPY intake-telling.js /app/release-bootstrap/intake-telling.js
+COPY intake-router.js /app/release-bootstrap/intake-router.js
 COPY ideeen.js /app/release-bootstrap/ideeen.js
 COPY ideeen-filter.js /app/release-bootstrap/ideeen-filter.js
 COPY aix.js /app/release-bootstrap/aix.js
