@@ -610,7 +610,8 @@ process.stdout.write(JSON.stringify({ type: 'result', is_error: false, usage: { 
       toets('smal-teller: Socev stopt op zijn eigen grens', so === T.SMAL_GRENS.bank, so);
       toets('smal-teller: na een uur weer ruimte', T.smalTel('bank', true, nu0 + 3600000 + 300) && T.smalTel('bank', false, nu0 + 3600000 + 300), null);
       toets('smal-teller: andere route los van bank', T.smalTel('fin-sql', false, nu0), null);
-      toets('smalRoute gebruikt smalTel met de Socev-sleutel als schakelaar', /const socev = socevAgentSleutelOk\(d\.secret\);\s*\n\s*if \(!smalTel\(actie, socev, Date\.now\(\)\)\)/.test(ssrc), null);
+      // wv1030: de socev-schakelaar plus een eigen klasse per beurtpas-sessie
+      toets('smalRoute gebruikt smalTel met de Socev-sleutel als schakelaar', /const socev = sleutelOk && socevAgentSleutelOk\(d\.secret\);/.test(ssrc) && /if \(!smalTel\(actie, socev, Date\.now\(\), pas \? pas\.sessie : ''\)\)/.test(ssrc), null);
     }
     toets('AI-stap klaar: groepen ingedeeld, niets open', !vs.bezig && vs.laatst.groepen_gezet >= 1 && vs.laatst.open_groepen === 0 && !vs.laatst.fout, vs);
     const sp = JSON.parse(fs.readFileSync(spoor, 'utf8'));
