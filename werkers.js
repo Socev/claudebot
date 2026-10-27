@@ -217,6 +217,8 @@ function kaal(w) {
 function stand(o) {
   o = o || {};
   const nu = o.nu || Date.now(), vast = !!o.vast;
+  if (!Array.isArray(o.workflows)) o = Object.assign({}, o, { workflows: null });   // een vreemde vorm telt als niet gemeten (Opus-review #5)
+  if (!Array.isArray(o.hartslag)) o = Object.assign({}, o, { hartslag: null });
   const wf = {};
   (Array.isArray(o.workflows) ? o.workflows : []).forEach(function (w) { if (w && w.id) wf[w.id] = w; });
   const hs = {};
@@ -242,11 +244,15 @@ function stand(o) {
       model: w.model, uitkomst: w.uitkomst, uitzetbaar: w.uitzetbaar !== false, status: status, laatst: laatst, hartslag: slagen,
       manager: w.manager || null, n8n: w.n8n || null };
     if (!vast) { k.sessie = w.sessie || null; k.skill = w.skill || null; k.bron = w.bron || null; }
+    else { k.uitkomst = ''; k.n8n = null; }   // vaste plek: geen beschrijving en geen id's (zoals de ringkaart, Fable wv888 #4)
     return k;
   });
   const groepen = {};
   SOORTEN.forEach(function (s) { groepen[s] = kaarten.filter(function (k) { return k.soort === s; }); });
-  return { groepen: groepen, overig: { aantal: OVERIG.length, per_soort: telPer(OVERIG) }, check: check(o.workflows, o.hartslag),
+  let c = check(o.workflows, o.hartslag);
+  if (vast) c = { n8n_actief: c.n8n_actief, ontbreekt: c.ontbreekt && c.ontbreekt.map(function () { return { id: '', naam: '' }; }),
+    niet_actief: c.niet_actief && c.niet_actief.map(function () { return { id: '', naam: '' }; }), hartslag_zonder_werker: c.hartslag_zonder_werker && c.hartslag_zonder_werker.map(function () { return ''; }) };
+  return { groepen: groepen, overig: { aantal: OVERIG.length, per_soort: telPer(OVERIG) }, check: c,
     fout: { n8n: o.workflows ? null : 'het rooster uit n8n is nu niet leesbaar', hartslag: o.hartslag ? null : 'de hartslag is nu niet leesbaar' } };
 }
 function telPer(l) { const t = {}; l.forEach(function (w) { t[w.soort] = (t[w.soort] || 0) + 1; }); return t; }
@@ -310,16 +316,17 @@ async function haalN8n() {
   if (!basis || !k) throw new Error('n8n-API niet ingesteld (N8N_API_URL/N8N_MCP_URL + N8N_API_KEY)');
   const uit = [];
   let cursor = null;
-  for (let n = 0; n < 20; n++) {
-    const r = await fetch(basis + '/api/v1/workflows?limit=100&active=true' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''),
+  for (let n = 0; n < 40; n++) {
+    const r = await fetch(basis + '/api/v1/workflows?limit=25&active=true&excludePinnedData=true' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''),
       { headers: { 'X-N8N-API-KEY': k, accept: 'application/json' }, signal: AbortSignal.timeout(30000) });
     if (!r.ok) throw new Error('n8n http ' + r.status);
     const j = await r.json();
-    (j.data || []).forEach(function (w) { if (w.active && !w.isArchived) uit.push(kaal(w)); });
+    if (!j || !Array.isArray(j.data)) throw new Error('n8n: antwoord zonder lijst');
+    j.data.forEach(function (w) { if (w && w.active && !w.isArchived) uit.push(kaal(w)); });
     cursor = j.nextCursor;
     if (!cursor) return uit;
   }
-  throw new Error('n8n: meer dan 20 pagina\'s');
+  throw new Error('n8n: meer dan 40 pagina\'s');
 }
 const SB_PROJECT = 'tiwfbqwttnknnblhqpoo';
 async function haalHartslag() {
@@ -327,9 +334,13 @@ async function haalHartslag() {
   if (!t) throw new Error('SUPABASE_MCP_TOKEN ontbreekt');
   const r = await fetch('https://api.supabase.com/v1/projects/' + SB_PROJECT + '/database/query', { method: 'POST',
     headers: { authorization: 'Bearer ' + t, 'content-type': 'application/json', 'user-agent': 'socev-werkers/1.0' },
-    body: JSON.stringify({ query: 'select component, drempel_min, laatste_ronde from machinekamer.hartslag order by component' }), signal: AbortSignal.timeout(30000) });
+    // dezelfde RPC als de app (één definitie van "te laat", Opus-review wv1707 #3). read_only kan hier niet: die rol mag de functie niet
+    // uitvoeren (gemeten 27-10); de querytekst staat vast en leest alleen.
+    body: JSON.stringify({ query: 'select component, drempel_min, laatste_ronde, minuten_sinds, oordeel from public.mk_hartslag_stand()' }), signal: AbortSignal.timeout(30000) });
   if (!r.ok) throw new Error('supabase http ' + r.status);
-  return r.json();
+  const j = await r.json();
+  if (!Array.isArray(j)) throw new Error('supabase: antwoord is geen lijst');
+  return j;
 }
 async function cli(argv) {
   const arg = function (n) { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : null; };
@@ -343,14 +354,15 @@ async function cli(argv) {
   if (arg('--json')) fs.writeFileSync(arg('--json'), JSON.stringify(st, null, 1));
   if (arg('--md') && wf) {
     const md = markdown(st, datum);
+    // vault-veilig.js staat in dezelfde release (byte-gelijk aan de mk-scripts-kopie); zonder die module niet schrijven (Opus-review wv1707 #2)
     let VV = null;
-    try { VV = require('/opt/data/mk-scripts/veilig/vault-veilig.cjs'); } catch (e) { VV = null; }
-    if (VV) VV.schrijf(arg('--md'), md);
-    else { const tmp = arg('--md') + '.' + process.pid + '.' + Date.now() + '.tmp'; fs.writeFileSync(tmp, md, { flag: 'wx' }); fs.renameSync(tmp, arg('--md')); }
+    try { VV = require(path.join(__dirname, 'vault-veilig.js')); } catch (e) { VV = null; }
+    if (!VV || typeof VV.schrijf !== 'function') { fout.push('vault-veilig.js ontbreekt: Ploeg.md niet geschreven'); }
+    else VV.schrijf(arg('--md'), md);
   }
   const telling = {}; SOORTEN.forEach(function (s) { telling[s] = st.groepen[s].length; });
   process.stdout.write(JSON.stringify({ datum: datum, telling: telling, overig: st.overig.aantal, check: st.check, fout: fout }, null, 1) + '\n');
-  if (fout.length) return 2;
+  if (fout.length || st.check.n8n_actief == null || st.check.hartslag_zonder_werker == null) return 2;
   return st.check.ontbreekt.length || st.check.niet_actief.length || (st.check.hartslag_zonder_werker || []).length ? 1 : 0;
 }
 

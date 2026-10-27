@@ -15532,26 +15532,32 @@ async function appRingkaart(req, res, a) {
 
 // ── Ploeg-register (wv1707, OVIS M4a; ontwerplijnen § 6) ──
 // GET /app/werkers: alle agents, wachters, managers en routines uit werkers.js, met het live rooster en aan/uit uit n8n (de actieve
-// workflows, alleen hun triggerknopen bewaard, 5 min buffer) en de hartslag (dezelfde 60 s-buffer als de ringkaart). Alleen lezen; Nu draaien blijft /app/managers/ronde. Vaste plek:
-// geen sessie, skill of bron. Ontbreekt werkers.js in de release (terugrol), dan 404 en toont de app de Ploeg zonder register.
+// workflows, 25 per pagina, alleen hun triggerknopen bewaard, 5 min buffer, één lezing tegelijk) en de hartslag (dezelfde 60 s-buffer als de ringkaart). Alleen lezen; Nu draaien blijft /app/managers/ronde. Vaste plek:
+// geen sessie, skill, bron, uitkomst, id's of namen in de check. Ontbreekt werkers.js in de release (terugrol), dan 404 en toont de app de Ploeg zonder register.
 const WERKERS_MOD = (function () { const p = path.join(__dirname, 'werkers.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('werkers', e); return null; } })();
 const WERKERS_N8N_MS = 5 * 60000;
 let werkersN8n = null;   // { t, l } of null; l = null bij een fout
-async function werkersWorkflows() {
-  if (werkersN8n && Date.now() - werkersN8n.t < WERKERS_N8N_MS) return werkersN8n.l;
+let werkersN8nBezig = null;   // de lopende lezing: gelijktijdige verzoeken delen hem (Opus-review wv1707 #6)
+async function werkersWorkflowsLees() {
   let l = null;
   try {
     l = [];
     let cursor = null, n = 0;
-    do {
-      const j = await appN8n('/workflows?limit=100&active=true' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
-      (Array.isArray(j && j.data) ? j.data : []).forEach(function (w) { if (w && w.active && !w.isArchived) l.push(WERKERS_MOD.kaal(w)); });
-      cursor = j && j.nextCursor;
-    } while (cursor && ++n < 20);
-    if (cursor) throw new Error('n8n: meer dan 20 pagina\'s');
+    do {   // 25 per pagina: elke pagina heeft de eigen 8 s van appN8n (de hele lijst is ± 4,7 MB; Opus-review #7)
+      const j = await appN8n('/workflows?limit=25&active=true&excludePinnedData=true' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+      if (!j || !Array.isArray(j.data)) throw new Error('n8n: antwoord zonder lijst');
+      j.data.forEach(function (w) { if (w && w.active && !w.isArchived) l.push(WERKERS_MOD.kaal(w)); });
+      cursor = j.nextCursor;
+    } while (cursor && ++n < 40);
+    if (cursor) throw new Error('n8n: meer dan 40 pagina\'s');
     werkersN8n = { t: Date.now(), l: l };
   } catch (e) { logError('app-werkers', e); l = null; werkersN8n = { t: Date.now() - WERKERS_N8N_MS + 30000, l: null }; }   // fout: 30 s niet opnieuw
   return l;
+}
+async function werkersWorkflows() {
+  if (werkersN8n && Date.now() - werkersN8n.t < WERKERS_N8N_MS) return werkersN8n.l;
+  if (!werkersN8nBezig) werkersN8nBezig = werkersWorkflowsLees().finally(function () { werkersN8nBezig = null; });
+  return werkersN8nBezig;
 }
 let werkersLaatst = null;   // voor /health: { t, n8n_actief, ontbreekt, niet_actief, hartslag_zonder_werker }
 async function appWerkers(req, res, a) {
