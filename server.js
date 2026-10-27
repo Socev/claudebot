@@ -9261,6 +9261,22 @@ function appVjRegel2(p, vandaag) {
 // Zichtbaar = open, of later met een datum die vandaag of eerder is (K5: later -> vanzelf weer open)
 function appVjZichtbaar(p, vandaag) { return p.status === 'open' || (p.status === 'later' && !(String(p.later_tot || '') > vandaag)); }
 function appVjDichtbij(p, vandaag) { return /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) && p.deadline <= appYmdPlus(vandaag, 1); }   // deadline ≤ 48 u: vandaag, morgen of al over tijd
+// wv1706 (OVIS M3b, ontwerplijnen § 3.4/§ 4.1): het doel van een kaart naar de app — module = catalogus-id, doel = { scherm, focus }.
+// Alleen vaste vormen (id's van kleine letters, focus "<soort>:<waarde>" zonder spaties, hooguit 100 tekens); al het andere = geen doel
+// (de app laat de kaart dan groeien in Overzicht). Op een vaste plek nooit een doel naar een privé-module (APP_PRIVE_MODULES, § 4.3).
+const APP_VJ_MODULE_RE = /^[a-z][a-z0-9-]{1,39}$/;
+const APP_VJ_FOCUS_RE = /^[a-z][a-z-]{0,19}:[A-Za-z0-9._:\/-]{1,80}$/;
+function appVjDoel(p, a) {
+  const h = (p && p.herkomst && typeof p.herkomst === 'object') ? p.herkomst : {};
+  const m = typeof h.module === 'string' && APP_VJ_MODULE_RE.test(h.module) ? h.module : null;
+  const d = h.doel && typeof h.doel === 'object' && !Array.isArray(h.doel) ? h.doel : null;
+  const scherm = d && typeof d.scherm === 'string' && APP_VJ_MODULE_RE.test(d.scherm) ? d.scherm : null;
+  const focus = scherm && typeof d.focus === 'string' && APP_VJ_FOCUS_RE.test(d.focus) ? d.focus : null;
+  const vast = !!(a && a.soort === 'vast');
+  const prive = function (id) { return !!id && APP_PRIVE_MODULES.indexOf(id) >= 0; };
+  if (vast && (prive(m) || prive(scherm))) return { module: m, doel: null };
+  return { module: m, doel: scherm ? { scherm: scherm, focus: focus } : null };
+}
 async function appVjPunten() {
   const c = appStaat.vjCache;
   if (c && c.data && Date.now() - c.op < APP_VJ_CACHE_MS) return c.data;
@@ -9372,7 +9388,7 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   let vr = {};
   try { vr = appVragen(); } catch (e) { vr = {}; }
   const af = await appVjAfgeleid(punten, nu);   // wv1018: vóór de lijst (beantwoord leest de afgeleide koppeling ook)
-  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map) }); });
+  const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map) }); });   // wv1706: module + doel
   // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten).
   // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (sinds wv946 de enige weg van de app); /app/voor-jou blijft zoals main.
   const basisAntwoord = { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: !!(a && a.soort === 'vast'),
