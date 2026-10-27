@@ -47,7 +47,7 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
   toets('9 ovis.db mist de D1-sleutel → BB6-r2-pagina', ids(v.b).join() === 'BB6-r2-pagina', v.b);
   v = verzamel(); tel = {};
   P.r2bChecks({ bron: BRON, r2: R2 }, P.leesR2bPagina(PAG(blok.replace('Jaarrekening 2024 GH', 'Jaarrekening 2024 GH (met de hand)'))), v.bev, tel);
-  toets('9 handwerk in het blok → BB8-r2-blok', ids(v.b).join() === 'BB8-r2-blok', v.b);
+  toets('9 handwerk in het blok → BB6-r2-blok (BB8 neemt de databank nog niet aan)', ids(v.b).join() === 'BB6-r2-blok', v.b);
   v = verzamel(); tel = {};
   P.r2bChecks({ bron: BRON, r2: R2 }, P.leesR2bPagina(null), v.bev, tel);
   toets('9 pagina weg → BB6-r2-pagina', ids(v.b).join() === 'BB6-r2-pagina', v.b);
@@ -116,7 +116,7 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     toets('10 nieuwe actieve alias niet in het blok → telt als achter', tel.wl_verouderd === 1 && ids(v.b).join() === 'BB4-wl-oud', [v.b, tel]);
     v = verzamel(); tel = {};
     P.wlChecks(P.leesWoordenlijst(WL(REG, '2026-10-25', '- Oud · Weg [knoop:GONE] — vervallen')), KN, '2026-10-28', v.bev, tel);
-    toets('10 handmatige regel naar een onbekende knoop → BB1-wl', v.b.length === 1 && v.b[0].check === 'BB1' && /^BB1-wl-GONE-/.test(v.b[0].id), v.b);
+    toets('10 handmatige regel naar een onbekende knoop → BB1-wl-knoop-<hash> (geen naam in het id)', v.b.length === 1 && v.b[0].check === 'BB1' && /^BB1-wl-knoop-[0-9a-f]{6}$/.test(v.b[0].id), v.b);
     v = verzamel(); tel = {};
     P.wlChecks(P.leesWoordenlijst('# zonder blok'), KN, '2026-10-28', v.bev, tel);
     toets('10 blok weg → BB6-wl-blok', ids(v.b).join() === 'BB6-wl-blok', v.b);
@@ -130,19 +130,20 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
   { const rijen = ['| 2026-11-30 | Tolgaarde | **ZK** accepteren | David | 7 | [[10_Zakelijk/TG/notulen\\|Notulen]] |',
       '| 2026-09-01 | Privé | iets met Persoon Jansen | David | 1 | [[20_Prive/Medewerkers/Persoon Jansen]] |',
       '| 2026-09-02 | Privé | **AFGEHANDELD 3-9** klaar | — | 0 | [[20_Prive/x]] |',
+      '| 2026-09-03 | Privé | is gedaan (kleine letters) | — | 0 | [[../buiten]] |',
       '| 2026-10-20 | GH | net verlopen | — | 0 | [[Losse naam]] |',
       '| 2026-09 | Groenhouten | maand | — | 0 | — |'];
     const d = P.leesDeadlines(DL(rijen));
-    toets('11 tabel Actueel gelezen tot de volgende sectie (Kandidaten/Afgehandeld tellen niet)', d.fouten.length === 0 && d.rijen.length === 5, d);
+    toets('11 tabel Actueel gelezen tot de volgende sectie (Kandidaten/Afgehandeld tellen niet)', d.fouten.length === 0 && d.rijen.length === 6, d);
     const v = verzamel(), tel = {}, paden = {};
     P.dlChecks(d, '2026-10-28', bestaat, v.bev, tel, paden);
     const c = ids(v.b);
     toets('11 ongeldige datum → BB6-dl-datum', c.some((x) => /^BB6-dl-datum-/.test(x)), c);
-    const dood = v.b.find((x) => /^BB8-dl-link-/.test(x.id));
-    toets('11 dode link → BB8-dl-link, zonder bestandsnaam (persoon) in de bevinding; pad alleen in paden', !!dood && !/Jansen/.test(dood.z + dood.d) && /20_Prive\/Medewerkers\/…/.test(dood.d) && Object.values(paden).some((p) => /Jansen/.test(p)), [dood, paden]);
+    const dood = v.b.find((x) => /^BB6-dl-link-/.test(x.id));
+    toets('11 dode link → BB6-dl-link, zonder bestandsnaam (persoon) in de bevinding; pad alleen in paden', !!dood && !/Jansen/.test(dood.z + dood.d) && /20_Prive\/Medewerkers\/…/.test(dood.d) && Object.values(paden).some((p) => /Jansen/.test(p)), [dood, paden]);
     const ver = v.b.find((x) => x.id === 'BB6-dl-verlopen');
-    toets('11 verlopen > 14 dagen zonder afhandelwoord: 1 (niet de AFGEHANDELD-regel, niet die van 8 dagen terug), ernst info', !!ver && tel.dl_verlopen === 1 && ver.e === 'info' && /oudste 2026-09-01/.test(ver.d), [ver, tel]);
-    toets('11 losse wikilink zonder pad wordt niet getoetst; links met pad wel', tel.dl_links === 3, tel);
+    toets('11 verlopen > 14 dagen zonder afhandelwoord: 1 (niet de AFGEHANDELD- of gedaan-regel, niet die van 8 dagen terug)', !!ver && tel.dl_verlopen === 1 && ver.e === 'warning' && /oudste 2026-09-01/.test(ver.d), [ver, tel]);
+    toets('11 losse wikilink, .. en absoluut pad worden niet getoetst; links met pad wel', tel.dl_links === 3, tel);
     toets('11 geen Wat-tekst in bevindingen (alleen datum en entiteit)', !v.b.some((x) => /ZK|maand|iets met/.test(x.z + x.d)), v.b);
     const v2 = verzamel(), t2 = {};
     P.dlChecks(P.leesDeadlines('# leeg'), '2026-10-28', bestaat, v2.bev, t2, {});
@@ -159,7 +160,7 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     toets('12 patroon <jaar> dekt beide jaargangen; pad in de hoofdmap telt via bestaat; BB1 bron 4; BB2 los.pdf; Bibliotheek gelijk', ids(v.b).join() === ['BB1-cm-b4-geen-bestand', 'BB2-cm-' + require('crypto').createHash('sha256').update('10_Verwerkt/los.pdf').digest('hex').slice(0, 6) + '-geen-rij'].sort().join(), v.b);
     const v2 = verzamel(), t2 = {};
     P.cmChecks(m, best, { bronnen: 95, producten: 2 }, v2.bev, t2, () => true);
-    toets('12 Bibliotheek zegt iets anders dan de databank → BB4-cm-bibliotheek (info)', v2.b.some((x) => x.id === 'BB4-cm-bibliotheek' && x.e === 'info') && t2.cm_verouderd === 1, v2.b);
+    toets('12 Bibliotheek zegt iets anders dan de databank → BB4-cm-bibliotheek', v2.b.some((x) => x.id === 'BB4-cm-bibliotheek' && x.e === 'warning') && t2.cm_verouderd === 1, v2.b);
     toets('12 patroon: ".." in een pad telt nooit als bestaand', (function () { const v3 = verzamel(); P.cmChecks({ bronnen: [{ id: 9, bestandspad: '../geheim.txt' }], producten: [] }, [], null, v3.bev, {}, () => true); return v3.b.length === 1; })());
     let mm = await P.cmMeting({ sbRpc: async (f) => f === 'ovis_zorgdata_paden' ? { bronnen: m.bronnen, producten: m.producten } : null });
     toets('12 cmMeting via de smalle RPC', mm.bronnen.length === 4 && mm.producten.length === 2, mm);
@@ -180,7 +181,8 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     const sbRpc = async (fn, body) => {
       if (fn === 'ovis_register_lees') return JSON.parse(JSON.stringify(db));
       if (fn === 'ovis_zorgdata_paden') { if (cm instanceof Error) throw cm; return cm; }
-      if (fn === 'ovis_bibliothecaris_zet') { body.p_rijen.forEach((r) => { const b = db.bevindingen.find((x) => x.bevinding_id === r.bevinding_id); if (b) Object.assign(b, r); else db.bevindingen.push(Object.assign({}, r)); }); db.bevindingen = db.bevindingen.filter((x) => x.status !== 'opgelost'); return { ok: true }; }
+      if (fn === 'ovis_bibliothecaris_zet') { body.p_rijen.forEach((r) => { if (!/^BB[1-7]-/.test(r.bevinding_id) || (r.check_id && !/^BB[1-7]$/.test(r.check_id)) || (r.ernst && ['good', 'warning', 'serious', 'critical'].indexOf(r.ernst) < 0)) throw new Error('ovis_bibliothecaris_zet: alleen BB-bevindingen (' + r.bevinding_id + ', ' + r.ernst + ')'); });
+        body.p_rijen.forEach((r) => { const b = db.bevindingen.find((x) => x.bevinding_id === r.bevinding_id); if (b) Object.assign(b, r); else db.bevindingen.push(Object.assign({}, r)); }); db.bevindingen = db.bevindingen.filter((x) => x.status !== 'opgelost'); return { ok: true }; }
       if (fn === 'mk_hartslag_stempel') return [{}];
       throw new Error('onbekende rpc ' + fn);
     };
@@ -188,7 +190,7 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     const m = R.maak({ vault: v, sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: () => {}, nu: () => Date.parse('2026-10-28T01:30:00Z'), get rest() { return rest; } });
     let b = await m.bibliothecaris({ afroep: true });
     const open = () => db.bevindingen.filter((x) => P.REST_BEVINDING_RE.test(x.bevinding_id)).map((x) => x.bevinding_id).sort();
-    toets('haak: plek 9–12 gemeten, alleen de dode [knoop:] als bevinding, zin noemt alle vier', open().length === 1 && /^BB1-wl-GONE-/.test(open()[0]) && /R2-bronnen: 2 bestanden/.test(b.zin) && /Woordenlijst: 1 entiteitregels/.test(b.zin) && /Deadlines: 1 rijen/.test(b.zin) && /Cijfer-Meester: 2 bestanden/.test(b.zin), [open(), b.zin]);
+    toets('haak: plek 9–12 gemeten, alleen de dode [knoop:] als bevinding, zin noemt alle vier', open().length === 1 && /^BB1-wl-knoop-/.test(open()[0]) && /R2-bronnen: 2 bestanden/.test(b.zin) && /Woordenlijst: 1 entiteitregels/.test(b.zin) && /Deadlines: 1 rijen/.test(b.zin) && /Cijfer-Meester: 2 bestanden/.test(b.zin), [open(), b.zin]);
     toets('haak: plekstand in de uitkomst', b.rest && b.rest.plekken.r2.gemeten && b.rest.plekken.cm.gemeten, b.rest);
     rest = { d1: async () => [{ results: BRON }], r2: async () => R2.concat([{ key: 'los.pdf', size: 1 }]) };
     b = await m.bibliothecaris({ afroep: true });
@@ -200,6 +202,27 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     cm = new Error('rpc http 500'); rest = { d1: async () => [{ results: BRON }], r2: async () => R2 };
     b = await m.bibliothecaris({ afroep: true });
     toets('haak: R2 weer gelijk → BB2-r2 opgelost; zorgdata weg → Cijfer-Meester niet gemeten', open().indexOf(bb2) < 0 && /Cijfer-Meester niet gemeten/.test(b.zin), [open(), b.zin]);
+    { const was = fs.readFileSync(path.join(v, P.DL_PAD), 'utf8');
+      fs.writeFileSync(path.join(v, P.DL_PAD), DL(['| 2026-08-01 | TG | oud | — | 1 | — |']));
+      await m.bibliothecaris({ afroep: true });
+      const voor = open().filter((x) => x === 'BB6-dl-verlopen');
+      fs.writeFileSync(path.join(v, P.DL_PAD), '# Deadlines\n\n## Anders\n');
+      b = await m.bibliothecaris({ afroep: true });
+      toets('haak: tabel Actueel weg → BB6-dl-pagina erbij, BB6-dl-verlopen blijft open (half ≠ opgelost), zin zegt niet gemeten', voor.length === 1 && open().indexOf('BB6-dl-verlopen') >= 0 && open().indexOf('BB6-dl-pagina') >= 0 && /Deadlines niet gemeten/.test(b.zin), [open(), b.zin]);
+      fs.writeFileSync(path.join(v, P.DL_PAD), was);
+      b = await m.bibliothecaris({ afroep: true });
+      toets('haak: tabel weer heel → beide opgelost', open().indexOf('BB6-dl-verlopen') < 0 && open().indexOf('BB6-dl-pagina') < 0, open());
+      cm = { bronnen: [{ id: 1, bestandspad: '10_Verwerkt/a.pdf', in_bibliotheek: true }], producten: [{ id: 1, bestandspad: '20_Producten/p.html' }] };
+      fs.writeFileSync(path.join(v, '90_Cijfermeester/Bibliotheek.md'), '---\nbronnen: 7\nproducten: 1\n---\n');
+      await m.bibliothecaris({ afroep: true });
+      const bib = open().indexOf('BB4-cm-bibliotheek') >= 0;
+      fs.unlinkSync(path.join(v, '90_Cijfermeester/Bibliotheek.md'));
+      await m.bibliothecaris({ afroep: true });
+      toets('haak: Bibliotheek.md weg → BB4-cm-bibliotheek blijft open (niet gemeten)', bib && open().indexOf('BB4-cm-bibliotheek') >= 0, open());
+      fs.writeFileSync(path.join(v, '90_Cijfermeester/Bibliotheek.md'), '---\nbronnen: 1\nproducten: 1\n---\n');
+      await m.bibliothecaris({ afroep: true });
+      toets('haak: Bibliotheek weer gelijk → opgelost', open().indexOf('BB4-cm-bibliotheek') < 0, open());
+    }
     toets('haak: geen kaart aan David voor plek 9–12 (wel open rest-bevindingen)', db.bevindingen.some((x) => P.REST_BEVINDING_RE.test(x.bevinding_id)) && !R.kaartBiblio({ knopen: db.knopen, bevindingen: db.bevindingen.filter((x) => P.REST_BEVINDING_RE.test(x.bevinding_id)).map((x) => Object.assign({ status: 'open' }, x)), kaarten: [], log: [] }, { nu: Date.parse('2026-10-28T01:30:00Z') }).kaart);
     const box = R.boxRij({ zin: 'z', nieuw: 1, nieuw_box: 1, nieuwe: [{ bevinding_id: 'BB2-r2-abc-geen-rij', check_id: 'BB2', samenvatting: 's' }] }, '2026-10-28 02:31');
     toets('haak: boxRij noemt plek 9–12 als machinekamerwerk', /plek 9–12/.test(box), box);
@@ -208,6 +231,7 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     toets('haak: zonder R2/D1-lezer → plek 9 niet gemeten, rest gemeten', /R2-bronnen niet gemeten/.test(b.zin) && /Woordenlijst: 1/.test(b.zin), b.zin);
     fs.rmSync(v, { recursive: true, force: true });
   }
+  toets('uitrol-lijst en Dockerfile kennen ovis-plekken.js (anders stil "niet gemeten" na de uitrol)', /^RELEASE_OPTIONEEL="[^"]*\bovis-plekken\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY ovis-plekken\.js \/app\/release-bootstrap\/ovis-plekken\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
   console.log('\n' + goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

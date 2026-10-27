@@ -25,7 +25,7 @@ const WL_PAD = '00_Systeem/Woordenlijst.md';
 const WL_OUD_DAGEN = 8;   // de Data Manager bouwt het blok elke zondag; ouder dan 8 dagen én achter = er draait niets meer
 const DL_PAD = '00_Systeem/Deadlines.md';
 const DL_VERLOPEN_DAGEN = 14;
-const DL_KLAAR_RE = /\b(AFGEHANDELD|LOSGELATEN|VERVALLEN|GEDAAN|AFGEROND|GESLOTEN|INGEDIEND|VERSTUURD|BETAALD|GETEKEND|BESLOTEN|ACHTERHAALD|VERLOPEN)\b/;
+const DL_KLAAR_RE = /\b(AFGEHANDELD|LOSGELATEN|VERVALLEN|GEDAAN|AFGEROND|GESLOTEN|INGEDIEND|VERSTUURD|BETAALD|GETEKEND|BESLOTEN|ACHTERHAALD|VERLOPEN)\b/i;
 const CM_MAP = '90_Cijfermeester';
 const CM_MAPPEN = ['10_Verwerkt', '20_Producten'];
 const CM_BIBLIOTHEEK = '90_Cijfermeester/Bibliotheek.md';
@@ -33,7 +33,7 @@ const REST_BEVINDING_RE = /^BB\d-(r2|wl|dl|cm)-/;
 const PLEK_VAN = { r2: 'r2', wl: 'wl', dl: 'dl', cm: 'cm' };
 
 function h6(s) { return crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 6); }
-function schoon(s, n) { return String(s == null ? '' : s).replace(/[\r\n`|]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n || 200); }
+function schoon(s, n) { return R.schoon(String(s == null ? '' : s).replace(/\s+/g, ' ').trim(), n || 200); }   // met het sleutelfilter van de motor
 function norm(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ''); }
 function amsDatum(ms) {
   const p = {};
@@ -81,8 +81,8 @@ function r2bBlokTekst(bron) {
   });
   const binnen = '\n' + ['## Bronnen in de datahub', '',
     '*Gegenereerd door de OVIS-compiler (nacht) uit D1 `fin.bron`; niet met de hand bewerken. Een nieuwe bron staat hier de nacht na het laden (`intake.py`). ' +
-    'Gecontroleerd = de kolom `gecontroleerd` in D1; Controle = `opmerking`.*', '',
-    '| # | Entiteit | Soort | Titel | Datum | Periode | R2-sleutel | Gecontroleerd | Controle |', '|---|---|---|---|---|---|---|---|---|']
+    'Laadcontrole = D1 `gecontroleerd`: de controle bij het laden sloot (balans, totaal); dat zegt niet dat David het document nakeek. Controle = D1 `opmerking`.*', '',
+    '| # | Entiteit | Soort | Titel | Datum | Periode | R2-sleutel | Laadcontrole | Controle |', '|---|---|---|---|---|---|---|---|---|']
     .concat(rijen.map(function (r) {
       const per = (r.periode_van || r.periode_tot) ? (r.periode_van || '') + ' – ' + (r.periode_tot || '') : '—';
       return '| ' + [r.id, cel(r.entiteit), cel(r.soort), cel(r.titel), cel(r.datum), cel(per), r.r2_sleutel ? '`' + String(r.r2_sleutel).replace(/`/g, '') + '`' : '—',
@@ -121,8 +121,8 @@ function r2bChecks(m, pagina, bev, tel) {
   m.r2.forEach(function (o) {
     if (!perSleutel[o.key]) bev('BB2', 'r2-' + h6(o.key) + '-geen-rij', 'bestand in R2 fin-bronnen zonder bronrij in de datahub', 'R2 fin-bronnen/' + schoon(o.key, 160) + ' staat in geen enkele rij van D1 fin.bron. Voorstel: de rij alsnog laden (intake.py) of het object weghalen na Davids Ja.');
   });
-  if (pagina.fouten.length) bev('BB6', 'r2-pagina', 'bronnenregister van de datahub niet te koppelen: ' + pagina.fouten[0], R2B_PAD + ': ' + pagina.fouten.join('; ') + '. Voorstel: frontmatter herstellen (ovis.db met ' + R2B_SLEUTELS.join(' en ') + ').');
-  else if (R.blokHandwerk(pagina.tekst)) bev('BB8', 'r2-blok', 'in het gegenereerde blok van het bronnenregister is met de hand iets veranderd', R2B_PAD + ': de tekst binnen het OVIS-blok is niet meer wat de compiler schreef; hij overschrijft het niet. Voorstel: wat erin getypt is naar D1 (opmerking/gecontroleerd), daarna het blok laten vernieuwen.');
+  if (pagina.fouten.length) { tel.r2_half = true; bev('BB6', 'r2-pagina', 'bronnenregister van de datahub niet te koppelen: ' + pagina.fouten[0], R2B_PAD + ': ' + pagina.fouten.join('; ') + '. Voorstel: frontmatter herstellen (ovis.db met ' + R2B_SLEUTELS.join(' en ') + ').'); }
+  else if (R.blokHandwerk(pagina.tekst)) bev('BB6', 'r2-blok', 'in het gegenereerde blok van het bronnenregister is met de hand iets veranderd', R2B_PAD + ': de tekst binnen het OVIS-blok is niet meer wat de compiler schreef; hij overschrijft het niet. Voorstel: wat erin getypt is naar D1 (opmerking/gecontroleerd), daarna het blok laten vernieuwen.');
   else if (R.huidigBlok(pagina.tekst) !== r2bBlokTekst(m.bron)) tel.r2_verouderd = 1;   // BB4: alleen telling; de nacht vernieuwt
 }
 
@@ -152,11 +152,11 @@ function leesWoordenlijst(tekst) {
 }
 function wlChecks(wl, knopen, vandaag, bev, tel) {
   tel.wl_regels = 0; tel.wl_verouderd = 0;
-  if (wl.fouten.length) { bev('BB6', 'wl-blok', 'Woordenlijst: ' + wl.fouten[0], WL_PAD + ': ' + wl.fouten.join('; ') + '. Voorstel: `woordenlijst.py bouw` (machinekamer) zet het blok terug.'); return; }
+  if (wl.fouten.length) { bev('BB6', 'wl-blok', 'Woordenlijst: ' + wl.fouten[0], WL_PAD + ': ' + wl.fouten.join('; ') + '. Voorstel: `woordenlijst.py bouw` (machinekamer) zet het blok terug.'); return { half: true }; }
   const reg = {}; knopen.forEach(function (k) { reg[k.id] = k; });
   tel.wl_regels = Object.keys(wl.blok).length;
   Array.from(new Set(wl.verwijzingen)).sort().forEach(function (id) {
-    if (!reg[id]) bev('BB1', 'wl-' + id.replace(/[^A-Za-z0-9]/g, '').slice(0, 20) + '-' + h6(id), 'Woordenlijst noemt [knoop:' + schoon(id, 40) + '], maar die staat niet in het register', WL_PAD + ': een handmatige regel hangt aan een knoop die het entiteitenregister niet kent. Voorstel: de verwijzing goedzetten of weghalen (machinekamer).');
+    if (!reg[id]) bev('BB1', 'wl-knoop-' + h6(id), 'Woordenlijst noemt een knoop die niet in het register staat', WL_PAD + ': een handmatige regel hangt aan [knoop:' + (/^per:/.test(id) ? 'per:…' : schoon(id, 40)) + '], die het entiteitenregister niet kent. Voorstel: de verwijzing goedzetten of weghalen (machinekamer).');
   });
   let achter = 0;
   Object.keys(reg).forEach(function (id) {
@@ -192,7 +192,7 @@ function leesDeadlines(tekst) {
 function linkDoel(l) { return String(l).replace(/\\$/, '').split('|')[0].split('#')[0].trim(); }
 function dlChecks(dl, vandaag, bestaat, bev, tel, paden) {
   tel.dl_rijen = 0; tel.dl_verlopen = 0; tel.dl_links = 0;
-  if (dl.fouten.length) { bev('BB6', 'dl-pagina', 'deadline-register niet te lezen: ' + dl.fouten[0], DL_PAD + ': ' + dl.fouten.join('; ') + '. Voorstel: de tabel onder ## Actueel herstellen.'); return; }
+  if (dl.fouten.length) { bev('BB6', 'dl-pagina', 'deadline-register niet te lezen: ' + dl.fouten[0], DL_PAD + ': ' + dl.fouten.join('; ') + '. Voorstel: de tabel onder ## Actueel herstellen.'); return { half: true }; }
   const verlopen = [];
   dl.rijen.forEach(function (c) {
     tel.dl_rijen++;
@@ -202,17 +202,17 @@ function dlChecks(dl, vandaag, bestaat, bev, tel, paden) {
     const sleutel = h6(datum + '|' + (c[1] || '') + '|' + (links[0] || ''));
     if (!/^\d{4}-\d{2}-\d{2}$/.test(datum)) { bev('BB6', 'dl-datum-' + sleutel, 'deadline zonder geldige datum (' + schoon(datum, 20) + ', ' + ent + ')', DL_PAD + ', Actueel: de kolom Datum moet JJJJ-MM-DD zijn (' + schoon(datum, 20) + ', entiteit ' + ent + '). Voorstel: de juiste dag invullen of de regel naar Kandidaten.'); return; }
     links.forEach(function (l) {
-      if (l.indexOf('/') < 0) return;   // alleen volledige vaultpaden zijn te toetsen (wikilink-conventie)
+      if (l.indexOf('/') < 0 || l.indexOf('..') >= 0 || l.charAt(0) === '/') return;   // alleen volledige vaultpaden zijn te toetsen (wikilink-conventie)
       tel.dl_links++;
       // alleen de map in de bevinding (een bestandsnaam kan een persoon noemen); het volle pad staat in de machinekamer-uitvoer (paden)
-      if (!bestaat(l) && !bestaat(l + '.md')) { if (paden) paden['BB8-dl-link-' + h6(l)] = l; bev('BB8', 'dl-link-' + h6(l), 'deadline verwijst naar een pagina die er niet (meer) is (' + datum + ', ' + ent + ')', DL_PAD + ', Actueel: de bronlink van de deadline van ' + datum + ' (' + ent + ') wijst naar een pagina onder ' + schoon(l.split('/').slice(0, 2).join('/'), 60) + '/… die niet bestaat. Voorstel: de verhuisde pagina zoeken en de link goedzetten.'); }
+      if (!bestaat(l) && !bestaat(l + '.md')) { if (paden) paden['BB6-dl-link-' + h6(l)] = l; bev('BB6', 'dl-link-' + h6(l), 'deadline verwijst naar een pagina die er niet (meer) is (' + datum + ', ' + ent + ')', DL_PAD + ', Actueel: de bronlink van de deadline van ' + datum + ' (' + ent + ') wijst naar een pagina onder ' + schoon(l.split('/').slice(0, 2).join('/'), 60) + '/… die niet bestaat. Voorstel: de verhuisde pagina zoeken en de link goedzetten.'); }
     });
     if (dagenTussen(datum, vandaag) > DL_VERLOPEN_DAGEN && !DL_KLAAR_RE.test(tekst)) verlopen.push(datum);
   });
   tel.dl_verlopen = verlopen.length;
   tel.dl_intake = 'nog geen deadlines uit Intake';   // Intake stap 3: dan eist de Bibliothecaris per Intake-deadline een rij met bron-stuk
   if (verlopen.length) bev('BB6', 'dl-verlopen', verlopen.length + ' deadline(s) in Actueel meer dan ' + DL_VERLOPEN_DAGEN + ' dagen verlopen zonder afhandeling',
-    DL_PAD + ': ' + verlopen.length + ' regel(s) onder Actueel met een datum van meer dan ' + DL_VERLOPEN_DAGEN + ' dagen geleden en geen afhandelwoord (oudste ' + verlopen.slice().sort()[0] + '). Niemand verplaatst ze; de heartbeat leest ze elke keer. Voorstel: per regel nagaan of het gedaan is en naar ## Afgehandeld (machinekamer of nachtconsolidatie), of de datum bijwerken.', 'info');
+    DL_PAD + ': ' + verlopen.length + ' regel(s) onder Actueel met een datum van meer dan ' + DL_VERLOPEN_DAGEN + ' dagen geleden en geen afhandelwoord (oudste ' + verlopen.slice().sort()[0] + '). Niemand verplaatst ze; de heartbeat leest ze elke keer. Voorstel: per regel nagaan of het gedaan is en naar ## Afgehandeld (machinekamer of nachtconsolidatie), of de datum bijwerken.');
 }
 
 // ── plek 12: 90_Cijfermeester ⇄ zorgdata ──
@@ -249,11 +249,12 @@ function cmChecks(m, bestanden, bibliotheek, bev, tel, bestaat) {
     if (gedekt.has(b)) return;
     bev('BB2', 'cm-' + h6(b) + '-geen-rij', 'Cijfer-Meester: bestand zonder rij in zorgdata', CM_MAP + '/' + schoon(b, 160) + ' staat in geen rij van zorgdata.bronnen of .producten. Voorstel: de Cijfer-Meester registreert het (bron of product), of het gaat naar het archief.');
   });
+  if (bibliotheek === null) return { deels: ['BB4-cm-bibliotheek'] };
   if (bibliotheek) {
     const nb = m.bronnen.filter(function (r) { return r.in_bibliotheek === true; }).length;
     if (bibliotheek.bronnen !== nb || bibliotheek.producten !== m.producten.length) {
       tel.cm_verouderd = 1;
-      bev('BB4', 'cm-bibliotheek', 'Bibliotheek van de Cijfer-Meester loopt achter op de databank', CM_BIBLIOTHEEK + ' zegt ' + bibliotheek.bronnen + ' bronnen en ' + bibliotheek.producten + ' producten; zorgdata heeft er ' + nb + ' (in de bibliotheek) en ' + m.producten.length + '. Niemand draait de generator vanzelf. Voorstel: `node 90_Cijfermeester/genereer_bibliotheek.js` (Cijfer-Meester of machinekamer).', 'info');
+      bev('BB4', 'cm-bibliotheek', 'Bibliotheek van de Cijfer-Meester loopt achter op de databank', CM_BIBLIOTHEEK + ' zegt ' + bibliotheek.bronnen + ' bronnen en ' + bibliotheek.producten + ' producten; zorgdata heeft er ' + nb + ' (in de bibliotheek) en ' + m.producten.length + '. Niemand draait de generator vanzelf. Voorstel: `node 90_Cijfermeester/genereer_bibliotheek.js` (Cijfer-Meester of machinekamer).');
     }
   }
 }
@@ -277,7 +278,8 @@ async function bibliothecaris(ctx) {
     try {
       const r = await f(bev);
       if (r && r.fout) { plekken[code] = { gemeten: false, reden: r.fout }; return; }
-      plekken[code] = { gemeten: true, verschil: eigen.length };
+      // half: de pagina zelf is stuk; die bevinding komt erbij, maar wat van deze plek al open stond, blijft open (niet gemeten ≠ opgelost)
+      plekken[code] = { gemeten: !(r && r.half), half: !!(r && r.half), reden: r && r.half ? 'pagina half of niet te ontleden' : undefined, verschil: eigen.length, niet_gemeten_ids: r && r.deels ? r.deels : [] };
       eigen.forEach(function (x) { bevindingen.push(x); });
     } catch (e) { plekken[code] = { gemeten: false, reden: 'vergelijking faalde: ' + String(e && e.message || e).slice(0, 80) }; }
   }
@@ -286,17 +288,18 @@ async function bibliothecaris(ctx) {
     const m = await r2bMeting(io);
     if (m.fout) return m;
     r2bChecks(m, leesR2bPagina(lees(R2B_PAD)), bev, tel);
+    if (tel.r2_half) { delete tel.r2_half; return { half: true }; }
   });
   await plek('wl', async function (bev) {
     if (!Array.isArray(ctx.knopen) || !ctx.knopen.length) return { fout: 'register leeg' };
     const t = lees(WL_PAD);
     if (t === null) return { fout: 'Woordenlijst niet te lezen' };   // weg of onleesbaar: niet gemeten (de Vault-Conciërge ziet een verdwenen pagina)
-    wlChecks(leesWoordenlijst(t), ctx.knopen, vandaag, bev, tel);
+    return wlChecks(leesWoordenlijst(t), ctx.knopen, vandaag, bev, tel);
   });
   await plek('dl', async function (bev) {
     const t = lees(DL_PAD);
     if (t === null) return { fout: 'Deadlines niet te lezen' };
-    dlChecks(leesDeadlines(t), vandaag, ctx.bestaat, bev, tel, paden);
+    return dlChecks(leesDeadlines(t), vandaag, ctx.bestaat, bev, tel, paden);
   });
   await plek('cm', async function (bev) {
     const bestanden = [];   // eerst de mappen: geen 90_Cijfermeester (proefvault, uitwijk) = niet gemeten, zonder databankvraag
@@ -306,7 +309,8 @@ async function bibliothecaris(ctx) {
     }
     const m = await cmMeting(io);
     if (m.fout) return m;
-    cmChecks(m, bestanden, leesBibliotheek(lees(CM_BIBLIOTHEEK)), bev, tel, ctx.bestaat);
+    const dr = cmChecks(m, bestanden, leesBibliotheek(lees(CM_BIBLIOTHEEK)), bev, tel, ctx.bestaat);
+    if (dr && dr.deels) return dr;
   });
   return { plekken: plekken, tel: tel, bevindingen: bevindingen, paden: paden };
 }
@@ -314,7 +318,8 @@ async function bibliothecaris(ctx) {
 function magOplossen(rest, id) {
   const m = REST_BEVINDING_RE.exec(id);
   if (!m) return true;
-  return !!(rest && rest.plekken && rest.plekken[PLEK_VAN[m[1]]] && rest.plekken[PLEK_VAN[m[1]]].gemeten);
+  const p = rest && rest.plekken && rest.plekken[PLEK_VAN[m[1]]];
+  return !!(p && p.gemeten && (p.niet_gemeten_ids || []).indexOf(id) < 0);
 }
 function zin(rest) {
   const p = rest && rest.plekken || {}, t = rest && rest.tel || {};

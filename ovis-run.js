@@ -123,15 +123,28 @@ function restLezer() {
 // wv1013: plek 10 — na de nachtronde register.json verversen (de Woordenlijst van de Data Manager bouwt daaruit). Alleen in de echte vault
 // en alleen als het bestand er al is; mislukt = de nachtronde blijft geslaagd (melding in de uitvoer).
 const REGISTER_JSON = process.env.OVIS_REGISTER_JSON || '/opt/data/mk-scripts/datamanager/knoop/register.json';
-async function exporteer(reg, doel, droog) {
-  const huidig = JSON.parse(fs.readFileSync(doel, 'utf8'));
+// waakt (diffreview wv1013 #4): sleutels/vertaling zijn handwerk → vlak voor het vervangen opnieuw vergelijken met wat gelezen werd; een
+// register dat ineens > 10 % kleiner is of een eigen entiteit kwijt is, is een halve lezing en wordt niet geëxporteerd (opties.nacht).
+async function exporteer(reg, doel, droog, opties) {
+  const oudTekst = fs.readFileSync(doel, 'utf8'), huidig = JSON.parse(oudTekst);
   const r = await reg.register();
   const velden = ['id', 'soort', 'naam', 'vault_pad', 'vault_pagina', 'aliassen', 'kvk', 'agb', 'iban', 'opmerking', 'rol', 'concept'];
   const knopen = r.knopen.map(function (k) { const x = {}; velden.forEach(function (v) { x[v] = k[v] === undefined ? null : k[v]; }); return x; });
   if (!knopen.length) throw new Error('register leeg; register.json ongemoeid');
+  if (opties && opties.nacht) {
+    const oud = Array.isArray(huidig.knopen) ? huidig.knopen : [], ids = new Set(knopen.map(function (k) { return k.id; }));
+    const weg = oud.filter(function (k) { return k && k.concept === false && !ids.has(k.id); }).map(function (k) { return k.id; });
+    if (weg.length) throw new Error('eigen entiteit(en) niet meer in het register (' + weg.slice(0, 3).join(', ') + '); register.json ongemoeid');
+    if (oud.length && knopen.length < oud.length * 0.9) throw new Error('register ' + Math.round(100 - 100 * knopen.length / oud.length) + ' % kleiner; register.json ongemoeid');
+  }
   const tekst = JSON.stringify(Object.assign({}, huidig, { knopen: knopen }), null, 1) + '\n';
-  if (fs.readFileSync(doel, 'utf8') === tekst) return { gewijzigd: false, knopen: knopen.length };
-  if (!droog) { const tmp = doel + '.' + process.pid + '.nieuw'; fs.writeFileSync(tmp, tekst, { mode: 0o600, flag: 'wx' }); fs.renameSync(tmp, doel); }
+  if (oudTekst === tekst) return { gewijzigd: false, knopen: knopen.length };
+  if (!droog) {
+    const tmp = doel + '.' + process.pid + '.nieuw';
+    fs.writeFileSync(tmp, tekst, { mode: 0o600, flag: 'wx' });
+    if (fs.readFileSync(doel, 'utf8') !== oudTekst) { fs.unlinkSync(tmp); throw new Error('register.json veranderde tijdens de export; volgende nacht opnieuw'); }
+    fs.renameSync(tmp, doel);
+  }
   return { gewijzigd: true, knopen: knopen.length, droog: droog };
 }
 // wv1009: plek 5 — Voor jou-punten (alleen lezen) en het register (VV, geen symlink volgen)
@@ -177,7 +190,7 @@ function grendelVast() {
       if (!grendelVast()) stop(1, { ok: false, fout: 'grendel ' + LOCK + ' niet vastgehouden: start met flock -w 300 ' + LOCK + ' node ovis-run.js nacht' });
       const c = await reg.compileer('nacht', { droog: droog, grendel: true });
       if (fs.realpathSync(VAULT) === fs.realpathSync(ECHTE_VAULT) && fs.existsSync(REGISTER_JSON)) {   // wv1013: plek 10
-        try { c.register_json = await exporteer(reg, REGISTER_JSON, droog); } catch (e) { c.register_json = { fout: String(e && e.message || e).slice(0, 120) }; }
+        try { c.register_json = await exporteer(reg, REGISTER_JSON, droog, { nacht: true }); } catch (e) { c.register_json = { fout: String(e && e.message || e).slice(0, 120) }; c.fouten.push({ pad: 'register.json', fout: c.register_json.fout }); }
       }
       stop(0, Object.assign({ ok: true }, c));
     }
