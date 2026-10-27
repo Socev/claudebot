@@ -7770,7 +7770,8 @@ function appBestandenOpruim(nu) {
 setTimeout(function () { appBestandenOpruim(); }, 60 * 1000).unref();
 setInterval(function () { appBestandenOpruim(); }, 60 * 60 * 1000).unref();
 
-// Werkvoorraad (alleen nummer, label, samenvatting, wachttoestand; geen opdracht, bron of notitie). 20 s in het geheugen.
+// Werkvoorraad uit mk_werkvoorraad_stand, 20 s in het geheugen. De RPC geeft ook bron en notitie (voor werkvoorraad.py); geen
+// enkele app-route geeft die door (Agents, Broedstoof, Draden kiezen hun velden zelf).
 async function appWerkvoorraad() {
   const c = appStaat.wvCache;
   if (c && Date.now() - c.op < 20000) return c.d;
@@ -7839,6 +7840,189 @@ async function appAgents(req, res, a) {
   } catch (e) { logError('app-agents', e); voorJou = null; los = null; }
   appStuur(res, 200, { ok: true, max: typeof MAX_AGENTS === 'number' ? MAX_AGENTS : null, lopend: lopend, rij: rij, wacht_op_david: wachtOpDavid,
     voor_jou: voorJou, wacht_op_david_los: los, recent: recent, ruimte: ru, fout: fout });
+}
+// ── wv1029: idee 14 fase 2 — klussen als tabjes in de machinekamer (ontwerp "Machinekamer - parallelle draden" § 4.3.2 a) ──
+// Eén draad = één werkvoorraadrij met label machinekamer:. Rapport → draad via (1) het wv-nummer in het registerlabel, (2)
+// werkvoorraad.job_id, (3) de keten ouder_job (een vervolgrij die job X zette, wijst met ouder_id naar de rij van X); lukt geen
+// van drie, dan is het rapport draadloos. De app krijgt wat Agents al geeft (samenvatting, stand, tijden), nooit prompt, bron,
+// notitie, geblokkeerd_door of het label; een reden is een code met een vaste zin, nooit vrije tekst uit de tikker.
+const APP_DRADEN_UIT = path.join(APP_DATA, 'draden-uit');
+const APP_DRADEN_MAX = { vastgelopen: 20, in_de_wacht: 60, gesloten: 120, berichten: 5 };
+const APP_DRAAD_STARTEN_MS = 15 * 60000;
+const APP_DRAAD_ZIN = {
+  uit: 'tikker staat uit', pod: 'wacht tot de pod weer bereikbaar is', niet_primair: 'wacht tot de pod weer de hoofdkant is',
+  uitrol: 'wacht tot een uitrol klaar is', pauze: 'pauze na een limiet', auto: 'wacht tot de opdrachten uit de auto klaar zijn',
+  plekken: 'wacht op een vrije plek', eigen_max: 'wacht op een vrije plek', quotum: 'wacht op een verse meting van je weekbudget',
+  vijf_uur: 'wacht tot het vijf-uursvenster weer ruimte heeft', ruimte: 'wacht op ruimte in je weekbudget',
+  dagmax: 'dagmaximum bereikt, morgen weer', volgende_tik: 'start bij de volgende tik', na_lopend: 'start na een lopende klus',
+  na_klus: 'start na een andere klus', bundel: 'gaat mee in de bundelronde (08:30, 13:30 of 18:30)', niet_voor: 'wacht op zijn starttijd',
+  mislukt: 'mislukt', machinekamer: 'wacht op de machinekamer', onbekend: 'wacht op de tikker' };
+const APP_DRAAD_DAG = ['zo', 'ma', 'di', 'wo', 'do', 'vr', 'za'];
+function appDraadKlok(t) {
+  const d = new Date(t);
+  return isFinite(d) ? d.toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+}
+function appDraadNietVoor(t, nu) {
+  const d = Date.parse(t);
+  const ymd = appYmd(d), dag = new Date(ymd + 'T12:00:00Z').getUTCDay();
+  if (ymd === appYmd(nu)) return 'niet vóór ' + appDraadKlok(d);
+  if (d - nu < 6 * 86400000) return 'niet vóór ' + APP_DRAAD_DAG[dag] + ' ' + appDraadKlok(d);
+  return 'niet vóór ' + Number(ymd.slice(8, 10)) + '-' + Number(ymd.slice(5, 7)) + ' ' + appDraadKlok(d);
+}
+// Zelfde datumregel als machinekamer.wv_doorwerk_datum (laatste d-m-jjjj in de tekst) en de grens in de claim van de tikker
+function appDraadDoorwerk(t) {
+  if (!t) return false;
+  const m = String(t).match(/(\d{1,2})-(\d{1,2})-(20\d\d)/g);
+  if (!m) return false;
+  const p = /(\d{1,2})-(\d{1,2})-(20\d\d)/.exec(m[m.length - 1]);
+  const ymd = p[3] + '-' + String(p[2]).padStart(2, '0') + '-' + String(p[1]).padStart(2, '0');
+  return ymd >= '2026-10-11';
+}
+const APP_DRAAD_RUIMTE = { gestart: 1, niets_startklaar: 1, dagmax: 1, ruimte: 1 };
+// Reden van een open rij, in de volgorde van § 4.3.2 c: eerst wat de rij zelf tegenhoudt, dan het oordeel van de laatste tik.
+function appDraadReden(w, poort, byId, reg, nu) {
+  const lopend = function (j) { const x = reg[j]; return !!(x && (x.status === 'pending' || x.status === 'running')); };
+  if (w.niet_voor && Date.parse(w.niet_voor) > nu) return { code: 'niet_voor', zin: appDraadNietVoor(w.niet_voor, nu) };
+  const wo = Array.isArray(w.wacht_op) ? w.wacht_op : [];
+  if (w.wacht_item_open === true) {
+    const v = wo.map(function (d) { const m = /^item:(\d+)$/.exec(String(d)); return m ? byId[m[1]] : null; })
+      .filter(function (x) { return x && x.status !== 'klaar'; })[0];
+    return { code: 'na_klus', zin: v && v.samenvatting ? 'start na de klus ' + appKort(String(v.samenvatting), 160) : APP_DRAAD_ZIN.na_klus };
+  }
+  if (wo.some(function (d) { return !/^item:/.test(String(d)) && lopend(String(d)); })) return { code: 'na_lopend', zin: APP_DRAAD_ZIN.na_lopend };
+  if (w.soort === 'nacontrole') return { code: 'bundel', zin: APP_DRAAD_ZIN.bundel };
+  const p = poort || {}, code = APP_DRAAD_ZIN[p.code] || p.code === 'gestart' || p.code === 'niets_startklaar' ? p.code : 'onbekend';
+  const algemeen = function () {
+    if (code === 'gestart' || code === 'niets_startklaar') return { code: 'volgende_tik', zin: APP_DRAAD_ZIN.volgende_tik };
+    if ((code === 'plekken' || code === 'eigen_max') && Number.isInteger(code === 'plekken' ? p.lopend : p.eigen))
+      return { code: code, zin: 'wacht op een vrije plek: er lopen al ' + (code === 'plekken' ? p.lopend : p.eigen) + ' klussen' };
+    return { code: code, zin: APP_DRAAD_ZIN[code] || APP_DRAAD_ZIN.onbekend };
+  };
+  if (appDraadDoorwerk(w.doorwerk_opdracht)) return APP_DRAAD_RUIMTE[code] ? { code: 'volgende_tik', zin: APP_DRAAD_ZIN.volgende_tik } : algemeen();
+  const mag = w.herkomst === 'david' ? p.mag_david : p.mag_eigen;
+  if (mag === false && APP_DRAAD_RUIMTE[code]) return p.dagmax === true ? { code: 'dagmax', zin: APP_DRAAD_ZIN.dagmax } : { code: 'ruimte', zin: APP_DRAAD_ZIN.ruimte };
+  return algemeen();
+}
+// Pure indeling (getoetst in de poorttoets). in: {items, stand, reg, log, moet, vj, a, nu}
+function appDradenUit(inv) {
+  const nu = inv.nu, reg = inv.reg || {}, items = Array.isArray(inv.items) ? inv.items : [];
+  const stand = inv.stand || {}, poort = stand.laatste_poort || null;
+  const byId = {};
+  items.forEach(function (w) { if (w && w.id != null) byId[String(w.id)] = w; });
+  const mk = items.filter(function (w) { return w && /^\s*machinekamer\s*:/i.test(String(w.label || '')); });
+  // Koppeling job → wv: (1) registerlabel, (2) job_id van de rij, (3) ouder_job van een vervolgrij → haar ouder_id
+  const jobWv = {};
+  const zet = function (j, wv) { if (j && wv != null && byId[String(wv)] && jobWv[j] == null) jobWv[j] = Number(wv); };
+  Object.keys(reg).forEach(function (j) { const m = /^(?:machinekamer|socev):wv(\d+) /.exec(String((reg[j] || {}).label || '')); if (m) zet(j, m[1]); });
+  items.forEach(function (w) { if (w.job_id) zet(String(w.job_id), w.id); });
+  items.forEach(function (w) { if (w.ouder_job && w.ouder_id != null) zet(String(w.ouder_job), w.ouder_id); });
+  const jobsVan = {};
+  Object.keys(jobWv).forEach(function (j) { (jobsVan[jobWv[j]] = jobsVan[jobWv[j]] || []).push(j); });
+  // Rapporten per draad (nieuwste eerst, ≤ 5) en de app-log-id → agent_job voor de vragen
+  const berichten = {}, logJob = {};
+  (inv.log || []).slice().sort(function (x, y) { return String(y.t).localeCompare(String(x.t)); }).forEach(function (x) {
+    if (!x || !x.agent_job || !x.job_id) return;
+    logJob[x.job_id] = String(x.agent_job);
+    const wv = jobWv[String(x.agent_job)];
+    if (wv == null) return;
+    const l = berichten[wv] = berichten[wv] || [];
+    if (l.length < APP_DRADEN_MAX.berichten) l.push(x.job_id);
+  });
+  // Open vragen volgens Moet iets (zelfde functie als Voor jou), per draad
+  const vraagVan = {};
+  (inv.moet || []).forEach(function (m) {
+    if (!m || m.soort !== 'vraag' || m.kanaal !== 'machinekamer') return;
+    const wv = jobWv[logJob[m.job_id]];
+    if (wv != null && !vraagVan[wv]) vraagVan[wv] = { punt: m.punt, bericht: m.job_id };
+  });
+  const wachtDavid = function (w) { return w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')); };
+  // Ontdubbelen (review #1): een klare rij met vraag wordt niet 🟠 als een vervolgrij van deze klus al op David wacht
+  const vervolgWacht = function (w) {
+    const js = jobsVan[w.id] || [];
+    return mk.some(function (g) { return wachtDavid(g) && (Number(g.ouder_id) === Number(w.id) || (g.ouder_job && js.indexOf(String(g.ouder_job)) >= 0)); });
+  };
+  const vandaag = appYmd(nu), vast = !!(inv.a && inv.a.soort === 'vast');
+  const t = function (x) { const v = Date.parse(x || ''); return isFinite(v) ? new Date(v).toISOString() : null; };
+  const basis = function (w, stand_, reden) {
+    const d = { wv: Number(w.id), onderwerp: w.samenvatting ? appKort(String(w.samenvatting), 200) : appLabelGewoon(w.label), stand: stand_,
+      reden: reden ? reden.code : null, zin: reden ? reden.zin : null, sinds: null, aangemaakt: t(w.aangemaakt),
+      vervolg_van: w.ouder_id != null && byId[String(w.ouder_id)] ? Number(w.ouder_id) : null, punt: null, vraag: null,
+      berichten: berichten[w.id] || [] };
+    return d;
+  };
+  const uit = { wacht_op_jou: [], loopt: [], vastgelopen: [], in_de_wacht: [], gesloten: [] };
+  mk.forEach(function (w) {
+    const job = w.job_id ? reg[w.job_id] : null;
+    let d;
+    if (wachtDavid(w)) {
+      d = basis(w, 'wacht_op_jou', null); d.sinds = d.aangemaakt;
+      const bw = inv.vj ? appBroedWacht(w, inv.vj, inv.a, vandaag) : [];
+      const open = bw.filter(function (x) { return x.stand === 'open' && x.punt != null; })[0];
+      if (open) d.punt = open.punt;
+      if (vast && bw.some(function (x) { return x.stand === 'prive'; })) d.onderwerp = 'Een privé-punt';
+      uit.wacht_op_jou.push(d); return;
+    }
+    if (w.status === 'klaar' && vraagVan[w.id] && !vervolgWacht(w)) {
+      d = basis(w, 'wacht_op_jou', null); d.sinds = d.aangemaakt; d.vraag = vraagVan[w.id].punt;
+      if (d.berichten.indexOf(vraagVan[w.id].bericht) < 0) d.berichten = [vraagVan[w.id].bericht].concat(d.berichten).slice(0, APP_DRADEN_MAX.berichten);
+      uit.wacht_op_jou.push(d); return;
+    }
+    if (w.status === 'starten' || w.status === 'gestart') {
+      const loopt = job && (job.status === 'pending' || job.status === 'running');
+      const sindsT = w.status === 'starten' ? Date.parse(w.bijgewerkt || '') : Date.parse(w.gestart_op || '');
+      if (loopt || (!job && isFinite(sindsT) && nu - sindsT < APP_DRAAD_STARTEN_MS)) {
+        d = basis(w, 'loopt', null); d.sinds = t(w.gestart_op) || (job && job.started ? new Date(job.started).toISOString() : null) || t(w.bijgewerkt);
+        uit.loopt.push(d); return;
+      }
+      if (job && job.status === 'done' && job.ok) { d = basis(w, 'gesloten', null); d.sinds = job.ended ? new Date(job.ended).toISOString() : t(w.bijgewerkt); uit.gesloten.push(d); return; }
+      d = basis(w, 'vastgelopen', { code: job && job.status === 'done' ? 'mislukt' : 'machinekamer', zin: job && job.status === 'done' ? APP_DRAAD_ZIN.mislukt : APP_DRAAD_ZIN.machinekamer });
+      d.sinds = t(w.bijgewerkt); uit.vastgelopen.push(d); return;
+    }
+    if (w.status === 'mislukt' || w.status === 'geblokkeerd') {
+      d = basis(w, 'vastgelopen', { code: w.status === 'mislukt' ? 'mislukt' : 'machinekamer', zin: w.status === 'mislukt' ? APP_DRAAD_ZIN.mislukt : APP_DRAAD_ZIN.machinekamer });
+      d.sinds = t(w.bijgewerkt); uit.vastgelopen.push(d); return;
+    }
+    if (w.status === 'open') {
+      d = basis(w, 'in_de_wacht', appDraadReden(w, poort, byId, reg, nu));
+      d.sinds = w.niet_voor && Date.parse(w.niet_voor) > nu ? t(w.niet_voor) : d.aangemaakt;
+      uit.in_de_wacht.push(d); return;
+    }
+    if (w.status === 'klaar' || w.status === 'vervallen') {
+      const k = t(w.klaar_op) || t(w.bijgewerkt);
+      if (k && appYmd(Date.parse(k)) === vandaag) { d = basis(w, 'gesloten', null); d.sinds = k; uit.gesloten.push(d); }
+    }
+  });
+  const opT = function (k, omgekeerd) { return function (x, y) { const c = String(x[k] || '').localeCompare(String(y[k] || '')); return omgekeerd ? -c : c; }; };
+  uit.wacht_op_jou.sort(opT('aangemaakt'));
+  uit.loopt.sort(opT('sinds'));
+  uit.vastgelopen.sort(opT('sinds', true));
+  uit.gesloten.sort(opT('sinds', true));
+  const aantal = { vastgelopen: uit.vastgelopen.length, in_de_wacht: uit.in_de_wacht.length, gesloten: uit.gesloten.length };
+  ['vastgelopen', 'in_de_wacht', 'gesloten'].forEach(function (k) { uit[k] = uit[k].slice(0, APP_DRADEN_MAX[k]); });
+  return Object.assign(uit, { aantal: aantal,
+    tikker: { code: poort && poort.code ? (APP_DRAAD_ZIN[poort.code] || poort.code === 'gestart' || poort.code === 'niets_startklaar' ? poort.code : 'onbekend') : null,
+      stand_van: stand.laatste_tik ? appDraadKlok(stand.laatste_tik) : null } });
+}
+function appDradenLeeg(fout) {
+  return { ok: true, fout: fout, wacht_op_jou: [], loopt: [], vastgelopen: [], in_de_wacht: [], gesloten: [],
+    aantal: { vastgelopen: 0, in_de_wacht: 0, gesloten: 0 }, tikker: null };
+}
+async function appDraden(req, res, a) {
+  res._app.stil = true;   // de app ververst elke 30 s zolang de machinekamer zichtbaar is: geen auditregel bij 200
+  if (fs.existsSync(APP_DRADEN_UIT)) return appStuur(res, 200, { ok: true, uit: true });
+  let wv;
+  try { wv = await appWerkvoorraad(); if (!wv || !Array.isArray(wv.items)) throw new Error('werkvoorraad zonder items'); }
+  catch (e) { logError('app-draden', e); return appStuur(res, 200, appDradenLeeg('de klussen zijn nu niet te lezen')); }
+  const nu = Date.now();
+  let log = [], vj = null, moet = [];
+  try { const r = await appGeschiedenisRuw('machinekamer', appMoetLog); if (r.fout) throw r.fout; log = r.items; } catch (e) { logError('app-draden', e); log = []; }
+  try { vj = await appVjPunten(); } catch (e) { logError('app-draden', e); vj = null; }
+  // Zonder kaarten geen betrouwbare ontdubbeling: dan geen open vragen (een klare klus sluit gewoon)
+  if (vj) { try { moet = await appMoetIets(vj, nu, await appVjAfgeleid(vj, nu)); } catch (e) { logError('app-draden', e); moet = []; } }
+  let uit;
+  try { uit = appDradenUit({ items: wv.items, stand: wv.stand, reg: appAgentsReg(), log: log, moet: moet, vj: vj, a: a, nu: nu }); }
+  catch (e) { logError('app-draden', e); return appStuur(res, 200, appDradenLeeg('de klussen zijn nu niet in te delen')); }
+  appStuur(res, 200, Object.assign({ ok: true, fout: null }, uit));
 }
 async function appAgentRapport(req, res, jobId) {
   if (!APP_JOB_RE.test(jobId)) return appWeiger(res, 404, 'onbekend', 'rapport id');
@@ -11547,6 +11731,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/briefing') return appBriefingRoute(req, res, a);   // wv891
         if (route === 'POST /app/broedstoof/voorrang') return appBroedstoofVoorrang(req, res, reg, a, s, d);
         if (route === 'GET /app/agents') return appAgents(req, res, a);
+        if (route === 'GET /app/draden') return appDraden(req, res, a);   // wv1029: klussen als tabjes (idee 14 fase 2)
         if (route.indexOf('GET /app/agent/') === 0) return appAgentRapport(req, res, route.slice('GET /app/agent/'.length));
         if (route === 'GET /app/bestanden') return appBestanden(req, res);
         if (route.indexOf('GET /app/bestand/') === 0) return appBestand(req, res, route.slice('GET /app/bestand/'.length));
