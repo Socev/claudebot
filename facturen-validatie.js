@@ -180,7 +180,9 @@ function echtKenmerk(s) { const k = genormKenmerk(s); return k.length >= 5 && !L
  */
 function betalingVan(f, transacties, opties) {
   opties = opties || {};
-  const txs = (transacties || []).filter((t) => !t.verwijderd_op && t.bedrag_centen < 0 && (!f.entiteit || t.entiteit === f.entiteit));
+  // wv1415: opties.uitgesloten = afschrijvingen die een terugboeking ophief (tellen niet als betaling van deze factuur)
+  const weg = new Set(opties.uitgesloten || []);
+  const txs = (transacties || []).filter((t) => !t.verwijderd_op && t.bedrag_centen < 0 && (!f.entiteit || t.entiteit === f.entiteit) && !weg.has(t.id));
   const uit = (lijst, zekerheid, reden) => ({
     betaald: true, zekerheid, reden, wanneer: lijst.map((t) => t.boekdatum).sort().pop(), hoe: betaalwijzeVan(lijst[0]),
     bedrag_centen: lijst.reduce((a, t) => a + Math.abs(t.bedrag_centen), 0), transacties: lijst.map((t) => t.id),

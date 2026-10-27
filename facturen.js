@@ -741,7 +741,7 @@ function sepaNaam(fdb, iban, levNaam) {
   return n || S.tekst(levNaam, 70) || null;
 }
 function sepaEerder(fdb, id) {
-  return fdb.db.prepare('SELECT b.id, b.msg_id, b.wanneer, r.uitvoerdatum FROM sepa_regel r JOIN sepa_batch b ON b.id = r.batch WHERE r.factuur = ? ORDER BY b.wanneer DESC, r.id DESC LIMIT 1').get(id) || null;
+  return fdb.db.prepare('SELECT b.id, b.msg_id, b.wanneer, r.uitvoerdatum, r.pmtinf_id FROM sepa_regel r JOIN sepa_batch b ON b.id = r.batch WHERE r.factuur = ? ORDER BY b.wanneer DESC, r.id DESC LIMIT 1').get(id) || null;
 }
 /*
  * Beoordeel één factuur voor een batch. → { reden (null = kan mee), waarschuwingen: [code], regel?: { factuur, datum, centen, iban, naam, rmt },
@@ -999,10 +999,17 @@ function voerGevolgUit(fdb, r, s, g, nu, uit) {
       const f = D.factuurVoorKern(fdb, g.factuur);
       if (!f || !magFactuur(r, f)) weiger(404, 'factuur niet gevonden');
       if (f.betaalspoor === 'betaald_gezien' && g.gebeurtenis === 'bankmatch') return { actie: g.actie, factuur: f.id, betaalspoor: f.betaalspoor };
-      // wv1415: de bankcontrole zette een teruggeboekte betaling meestal al op te betalen; de knop zet alleen nog een betaald gezien factuur
-      // terug (bedrag of rekening klopte niet: niet automatisch). Staat hij alweer ingevoerd (nieuwe batch), dan blijft dat zo.
-      if (g.gebeurtenis === 'teruggeboekt' && f.betaalspoor !== 'betaald_gezien') return { actie: g.actie, factuur: f.id, betaalspoor: f.betaalspoor };
-      if (g.gebeurtenis === 'toch_incasso' && f.betaalspoor === 'ingevoerd') weiger(409, 'deze betaling staat alweer ingevoerd (of in een nieuwe batch); zet die eerst terug');
+      // wv1415 (diffreview MOET 2/3): de knop bij een terugboeking verandert het spoor alleen als de factuur netto niet gedekt is (geen
+      // nieuwe, geziene betaling) en nog op de teruggeboekte batch staat; anders laat hij het spoor zoals het is.
+      const gedekt = () => fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j === 1;
+      if (g.gebeurtenis === 'teruggeboekt') {
+        const nogDeze = f.betaalspoor === 'ingevoerd' && g.batch && (() => { const e = sepaEerder(fdb, f.id); return !!e && e.pmtinf_id === g.batch && f.uitvoer_op === e.uitvoerdatum; })();
+        if (gedekt() || !(f.betaalspoor === 'betaald_gezien' || nogDeze)) return { actie: g.actie, factuur: f.id, betaalspoor: f.betaalspoor };
+      }
+      if (g.gebeurtenis === 'toch_incasso') {
+        if (f.betaalspoor === 'ingevoerd') weiger(409, 'deze betaling staat alweer ingevoerd (of in een nieuwe batch); zet die eerst terug');
+        if (gedekt() || f.betaalspoor === 'incasso_verwacht') return { actie: g.actie, factuur: f.id, betaalspoor: f.betaalspoor };
+      }
       const ov = K.betaalspoorOvergang(f.betaalspoor, g.gebeurtenis);
       if (!ov.ok) weiger(409, 'betaalspoor: ' + ov.reden);
       if (g.gebeurtenis === 'teruggeboekt') terugZet(fdb, f, wanneer);
@@ -1013,6 +1020,19 @@ function voerGevolgUit(fdb, r, s, g, nu, uit) {
     }
     case 'betaallijst': return { actie: g.actie, factuur: g.factuur };
     case 'koppelen': return Object.assign({ actie: g.actie }, koppelIntern(fdb, r, String(g.transactie || ''), g.factuur, true, nu));
+    case 'terug_koppelen': {
+      // wv1415: de bijschrijving van een terugboeking aan zijn factuur (heft één betaling op); bestaat hij al (automatisch), dan niets
+      const t = fdb.db.prepare('SELECT * FROM bank_transactie WHERE id = ? AND verwijderd_op IS NULL').get(String(g.transactie || ''));
+      if (!magTransactie(r, t)) weiger(404, 'bankregel niet gevonden');
+      const f = D.factuurVoorKern(fdb, g.factuur);
+      if (!f || !magFactuur(r, f)) weiger(404, 'factuur niet gevonden');
+      if (f.entiteit !== t.entiteit || !(t.bedrag_centen > 0)) weiger(409, 'deze bankregel is geen terugboeking van deze factuur');
+      if (fdb.db.prepare('SELECT 1 FROM koppeling WHERE transactie = ? AND factuur <> ?').get(t.id, f.id)) weiger(409, 'deze bankregel is al aan iets anders gekoppeld');
+      const n = fdb.db.prepare("INSERT INTO koppeling (transactie, factuur, bron, methode, zekerheid, volledig, alleen_eigenaar, wie, wanneer) VALUES (?, ?, 'mens', 'sepa_terug', 1, 0, ?, ?, ?) ON CONFLICT DO NOTHING")
+        .run(t.id, f.id, t.alleen_eigenaar || f.alleen_eigenaar || f.patientkenmerk ? 1 : 0, r.wie, wanneer).changes;
+      if (n) D.audit(fdb, { wie: r.wie, wat: 'terug_koppelen', object_soort: 'koppeling', object_id: t.id + ':' + f.id, entiteit: f.entiteit, wanneer });
+      return { actie: g.actie, nieuw: n === 1 };
+    }
     case 'transactie_verwijderen': return Object.assign({ actie: g.actie }, transactieWeg(fdb, r, g.transactie, nu));
     default: weiger(500, 'onbekend gevolg');
   }
@@ -1028,7 +1048,8 @@ function koppelIntern(fdb, r, txId, fId, volledig, nu) {
   const n = fdb.db.prepare("INSERT INTO koppeling (transactie, factuur, bron, methode, zekerheid, volledig, alleen_eigenaar, wie, wanneer) VALUES (?, ?, 'mens', 'handmatig', 1, ?, ?, ?, ?) ON CONFLICT DO NOTHING")
     .run(t.id, f.id, volledig ? 1 : 0, t.alleen_eigenaar || f.alleen_eigenaar || f.patientkenmerk ? 1 : 0, r.wie, wanneer).changes;
   let spoor = f.betaalspoor;
-  if (volledig && f.betaalspoor && f.betaalspoor !== 'betaald_gezien') {
+  // wv1415 (diffreview MOET 4): niet als een terugboeking deze betaling opheft (bv. "Ja, koppel" op een batchvoorstel na een terugboeking)
+  if (volledig && f.betaalspoor && f.betaalspoor !== 'betaald_gezien' && fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j === 1) {
     const ov = K.betaalspoorOvergang(f.betaalspoor, 'bankmatch');
     if (ov.ok) { fdb.db.prepare('UPDATE factuur SET betaalspoor = ?, betaald_gezien_op = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND betaalspoor = ?').run(ov.naar, t.boekdatum, wanneer, f.id, f.betaalspoor); spoor = ov.naar; }
   }
@@ -1300,7 +1321,9 @@ function bankcontroleToepassen(fdb, nu) {
       tel.teruggeboekt = (tel.teruggeboekt || 0) + n;
       continue;
     }
-    const tx = uit.koppelingen.filter((k) => k.factuur === b.factuur).map((k) => txMap.get(k.transactie)).filter(Boolean)[0];
+    // de laatst geboekte afschrijving onder de nieuwe koppelingen (niet een terugboeking; diffreview wv1415 KLEIN 1)
+    const tx = uit.koppelingen.filter((k) => k.factuur === b.factuur && k.methode !== 'sepa_terug').map((k) => txMap.get(k.transactie)).filter((t) => t && t.bedrag_centen < 0)
+      .sort((x, y) => (x.boekdatum < y.boekdatum ? 1 : x.boekdatum > y.boekdatum ? -1 : 0))[0];
     tel.betaald_gezien += fdb.db.prepare('UPDATE factuur SET betaalspoor = ?, betaald_gezien_op = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND betaalspoor = ?')
       .run(b.naar, tx ? tx.boekdatum : vandaag, wanneer, b.factuur, b.van).changes;
   }
@@ -1679,11 +1702,22 @@ function validatieInvoer(fdb, r) {
     .map((t) => Object.assign(t, { is_incasso: t.is_incasso === 1, alleen_eigenaar: t.alleen_eigenaar === 1 }));
   const [ff, fp] = factuurFilter(r, 'f');
   const lev = new Map(fdb.db.prepare('SELECT id, incassant_ids FROM leverancier').all().map((l) => [l.id, json(l.incassant_ids, []) || []]));
-  const kop = new Map();
-  for (const k of fdb.db.prepare('SELECT factuur, transactie FROM koppeling').all()) { if (!kop.has(k.factuur)) kop.set(k.factuur, []); kop.get(k.factuur).push(k.transactie); }
+  const kop = new Map(), uitgesloten = new Map();
+  const bedragVan = new Map(fdb.db.prepare('SELECT id, bedrag_centen FROM bank_transactie').all().map((t) => [t.id, t.bedrag_centen]));
+  for (const k of fdb.db.prepare('SELECT factuur, transactie, methode FROM koppeling ORDER BY id').all()) { if (!kop.has(k.factuur)) kop.set(k.factuur, []); kop.get(k.factuur).push(k); }
+  // wv1415 (diffreview ZOU 4): netto — een terugboeking (sepa_terug) heft één afschrijving op (bij voorkeur een SEPA-koppeling); beide
+  // tellen dan niet als betaling, ook niet via de factuurnummer-herkenning
+  for (const [fid, ks] of kop) {
+    let n = ks.filter((k) => k.methode === 'sepa_terug').length;
+    const weg = new Set(ks.filter((k) => k.methode === 'sepa_terug').map((k) => k.transactie));
+    const af = ks.filter((k) => k.methode !== 'sepa_terug' && bedragVan.get(k.transactie) < 0);
+    for (const k of af.filter((x) => /^sepa_/.test(String(x.methode || ''))).concat(af)) { if (!n) break; if (!weg.has(k.transactie)) { weg.add(k.transactie); n--; } }
+    kop.set(fid, ks.map((k) => k.transactie).filter((id) => !weg.has(id)));
+    if (weg.size) uitgesloten.set(fid, [...weg]);
+  }
   const facturen = fdb.db.prepare("SELECT f.id, f.entiteit, f.leverancier, f.leverancier_naam, f.nummer, f.kenmerk, f.incl, f.iban, f.factuurdatum, f.vervaldatum, f.betaalspoor, f.status, f.alleen_eigenaar " +
     "FROM factuur f WHERE f.entiteit IS NOT NULL AND f.entiteit <> 'prive' AND " + ff).all(...fp)
-    .map((f) => Object.assign(f, { herkomst: 'facturen', incassant_ids: lev.get(f.leverancier) || [], koppelingen: kop.get(f.id) || [] }));
+    .map((f) => Object.assign(f, { herkomst: 'facturen', incassant_ids: lev.get(f.leverancier) || [], koppelingen: kop.get(f.id) || [], uitgesloten: uitgesloten.get(f.id) || [] }));
   const archief = isEig(r) ? fdb.db.prepare('SELECT id, entiteit, leverancier_naam, nummer, kenmerk, incl, iban, factuurdatum, vervaldatum, status, alleen_eigenaar FROM factuur_archief').all()
     .map((f) => Object.assign(f, { herkomst: 'fv2', incassant_ids: [], koppelingen: [] })) : [];
   return { txs, facturen: facturen.concat(archief), start: startdatumVan(fdb) };
@@ -1718,14 +1752,14 @@ function validatie(fdb, r, d, nu) {
     const id = String(d && d.id || '');
     const f = inv.facturen.find((x) => x.id === id);
     if (!f) weiger(404, 'factuur niet gevonden');
-    const b = V.betalingVan(f, inv.txs, { koppelingen: f.koppelingen });
+    const b = V.betalingVan(f, inv.txs, { koppelingen: f.koppelingen, uitgesloten: f.uitgesloten });
     return { soort, factuur: { id: f.id, herkomst: f.herkomst, entiteit: f.entiteit, leverancier: f.leverancier_naam, nummer: f.nummer, incl_centen: f.incl,
       factuurdatum: f.factuurdatum, vervaldatum: f.vervaldatum }, betaling: Object.assign({}, b, { regels: inv.txs.filter((t) => b.transacties.includes(t.id)).map(txUit) }) };
   }
   if (soort !== 'overzicht') weiger(400, 'soort is overzicht, zoek, tegenpartij of factuur');
   const perEnt = new Map();   // betalingVan kijkt alleen binnen de entiteit: één keer groeperen (diffreview wv944 #1)
   for (const t of inv.txs) { if (!perEnt.has(t.entiteit)) perEnt.set(t.entiteit, []); perEnt.get(t.entiteit).push(t); }
-  for (const f of inv.facturen) f.betaling = V.betalingVan(f, perEnt.get(f.entiteit) || [], { koppelingen: f.koppelingen });
+  for (const f of inv.facturen) f.betaling = V.betalingVan(f, perEnt.get(f.entiteit) || [], { koppelingen: f.koppelingen, uitgesloten: f.uitgesloten });
   const dekking = inv.start ? [{ van: inv.start, tot: null }] : [];
   if (d && d.dekking_fv2 === true) {
     const fv = inv.facturen.filter((f) => f.herkomst === 'fv2' && f.factuurdatum).map((f) => f.factuurdatum).sort();

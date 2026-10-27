@@ -729,7 +729,8 @@ test('dubbele factuur en verzending mislukt: signalen met hun knoppen; gevolgen 
 });
 
 test('alle signalen: elke knop geeft een les, onbekende knop/zonder wie geweigerd, en geen gevolg betaalt, mailt of maakt een IBAN bekend', () => {
-  const TOEGESTAAN = new Set(['upload_openen', 'uitzondering_maken', 'leverancier_bijwerken', 'tekst_tonen', 'factuur_status', 'betaalspoor', 'betaallijst', 'koppelen', 'transactie_verwijderen']);
+  const TOEGESTAAN = new Set(['upload_openen', 'uitzondering_maken', 'leverancier_bijwerken', 'tekst_tonen', 'factuur_status', 'betaalspoor', 'betaallijst', 'koppelen', 'transactie_verwijderen',
+    'terug_koppelen']);   // wv1415: een terugboeking aan zijn factuur koppelen (geen betaling)
   const opties = { wie: 'eigenaar', nu: '2026-10-22T10:00:00Z', categorie: 'overig', leverancier: 'la', transactie: 't1', toelichting: 'uitgezocht en in orde' };
   for (const soort of B.SIGNAAL_SOORTEN) {
     const s = B.maakSignaal(soort, { transacties: ['t1', 't2'], facturen: ['f1'], naam: 'Leverancier A B.V.', leverancier: 'la', bedrag_centen: -1000, eigen_iban: ABN_TG, details: { nummer: 'A-1', datums: ['2026-10-01', '2026-10-05'], te_verwijderen: 't2' } });
@@ -1141,4 +1142,51 @@ test('wv1415 terugboeking: eerst gezien, afschrijving later → geen betaald gez
     const x = controle({ vandaag: '2026-10-05', transacties: [t], facturen: [f], sepa });
     assert.ok(!x.koppelingen.some((k) => k.methode === 'sepa_terug') && !x.signalen.some((s) => s.soort === 'teruggeboekt'), JSON.stringify(o));
   }
+});
+
+test('wv1415 diffreview: terugboeking + handbetaling in één upload → betaald gezien, geen signaal (MOET 1); Ongedaan + nieuwe batch in één upload (ZOU 1); dubbel geüploade terugboeking (ZOU 2); termijn na de terugboeking (ZOU 3); nieuwe batch blijft staan', () => {
+  const F1 = '0000000000000f21';
+  const f = fac({ id: F1, leverancier: 'la', nummer: 'TB-21', incl: 40000, iban: LEV.A, factuurdatum: '2026-09-20', vervaldatum: '2026-10-04', betaalspoor: 'ingevoerd', uitvoer_op: '2026-10-02' });
+  const p1 = { pmtinf_id: 'PROEF-B21-1', eigen_iban: ABN_TG, entiteit: 'tolgaarde', datum: '2026-10-02', centen: 40000, regels: [{ factuur: F1, centen: 40000, iban: LEV.A }] };
+  const af1 = tx({ boekdatum: '2026-10-02', bedrag_centen: -40000, tegenpartij_iban: LEV.A, kenmerk: F1 });
+  const terug = tx({ boekdatum: '2026-10-02', bedrag_centen: 40000, tegenpartij_iban: LEV.A, kenmerk: F1, transactietype: 'ABN:SEPA Terugboeking' });
+  const hand = tx({ boekdatum: '2026-10-06', bedrag_centen: -40000, tegenpartij_iban: LEV.A, omschrijving: 'Factuur TB-21' });
+  // MOET 1: alles in één upload, in elke volgorde → één spoorwissel ingevoerd → betaald gezien, geen terugboekingssignaal, geen dubbel
+  for (const volg of [[af1, terug, hand], [hand, terug, af1], [terug, hand, af1]]) {
+    const r = controle({ vandaag: '2026-10-08', transacties: volg, facturen: [f], sepa: [p1] });
+    assert.deepEqual(r.betaalspoor.map((b) => [b.gebeurtenis, b.van, b.naar]), [['bankmatch', 'ingevoerd', 'betaald_gezien']], volg.map((t) => t.id).join());
+    assert.ok(r.koppelingen.some((k) => k.methode === 'sepa_terug') && r.koppelingen.some((k) => k.transactie === hand.id));
+    assert.deepEqual(soorten(r), []);
+  }
+  // ZOU 1: Ongedaan + nieuwe batch (andere PmtInfId, latere datum) vóór de upload; batch 1, terugboeking en batch 2 in één upload
+  const p2 = { pmtinf_id: 'PROEF-B21-2', eigen_iban: ABN_TG, entiteit: 'tolgaarde', datum: '2026-10-07', centen: 40000, regels: [{ factuur: F1, centen: 40000, iban: LEV.A }] };
+  const af2 = tx({ boekdatum: '2026-10-07', bedrag_centen: -40000, tegenpartij_iban: LEV.A, kenmerk: F1 });
+  const f2 = Object.assign({}, f, { uitvoer_op: '2026-10-07' });
+  const r1 = controle({ vandaag: '2026-10-08', transacties: [af1, terug, af2], facturen: [f2], sepa: [p1, p2] });
+  assert.equal(r1.koppelingen.filter((k) => k.factuur === F1 && k.methode === 'sepa_e2e').length, 2, 'beide afschrijvingen bij de factuur');
+  assert.deepEqual(r1.betaalspoor.map((b) => [b.gebeurtenis, b.naar]), [['bankmatch', 'betaald_gezien']]);
+  assert.deepEqual(soorten(r1), []);
+  // de terugboeking van batch 1 komt pas binnen als batch 2 nog loopt (factuur ingevoerd met de uitvoerdatum van batch 2): spoor blijft staan
+  const r2 = controle({ vandaag: '2026-10-06', transacties: [af1, terug], facturen: [Object.assign({}, f, { betaalspoor: 'betaald_gezien' })], sepa: [p1],
+    koppelingen: [{ transactie: af1.id, factuur: F1, bron: 'auto', methode: 'sepa_e2e' }] });
+  assert.deepEqual(r2.betaalspoor.map((b) => b.naar), ['te_betalen'], 'betaald gezien → te betalen');
+  const r3 = controle({ vandaag: '2026-10-06', transacties: [af1, terug], facturen: [f2], sepa: [p1, Object.assign({}, p2, { datum: '2026-10-20' })],
+    koppelingen: [{ transactie: af1.id, factuur: F1, bron: 'auto', methode: 'sepa_e2e' }] });
+  assert.deepEqual(r3.betaalspoor, [], 'in een nieuwe batch: niet terug naar te betalen');
+  // ZOU 2: dezelfde terugboeking twee keer geüpload (ander bestand) → één sepa_terug; de tweede gaat via "mogelijk dubbel geüpload"
+  const terugB = Object.assign({}, terug, { id: 'tdub', entry_ref: 'ref-dub', bestand: 'bestand2' });
+  const r4 = controle({ vandaag: '2026-10-08', transacties: [af1, terug, terugB], facturen: [f], sepa: [p1] });
+  assert.equal(r4.koppelingen.filter((k) => k.methode === 'sepa_terug').length, 1);
+  assert.equal(r4.signalen.filter((s) => s.soort === 'teruggeboekt').length, 1);
+  assert.ok(r4.signalen.some((s) => s.soort === 'mogelijk_dubbel_geupload'));
+  // ZOU 3: na de terugboeking (en het afgehandelde signaal) telt de termijn vanaf twee weken na de terugboeking
+  const kop = [{ transactie: af1.id, factuur: F1, bron: 'auto', methode: 'sepa_e2e' }, { transactie: terug.id, factuur: F1, bron: 'auto', methode: 'sepa_terug' }];
+  const sl = r2.signalen.find((s) => s.soort === 'teruggeboekt').sleutel;
+  const fi = Object.assign({}, f, { betaalwijze: 'incasso', betaalspoor: 'incasso_verwacht', uitvoer_op: null });
+  const sig = (vandaag, fx) => soorten(controle({ vandaag, transacties: [af1, terug], facturen: [fx], sepa: [p1], koppelingen: kop, bestaandeSignalen: [{ sleutel: sl, status: 'afgehandeld' }] }));
+  assert.deepEqual(sig('2026-10-20', fi), [], 'incasso: nog binnen de termijn');
+  assert.deepEqual(sig('2026-10-31', fi), ['incasso_niet_gezien']);
+  const ft = Object.assign({}, f, { betaalspoor: 'te_betalen', uitvoer_op: null });
+  assert.deepEqual(sig('2026-10-15', ft), []);
+  assert.deepEqual(sig('2026-10-17', ft), ['te_betalen_niet_betaald']);
 });
