@@ -19,7 +19,7 @@
 const STUURBAAR = ['overzicht', 'intake', 'apps', 'brain',
   'praktijken', 'projecten', 'bandjes', 'financien', 'gezondheid', 'facturen', 'docs', 'bestanden', 'pot-afschriften', 'studio',
   'broedstoof', 'mediatheek', 'harvester', 'ideeen', 'flock', 'verbruik', 'secondbrain'];
-// Strikt (de enige vorm die telt): precies zo, op één regel, zonder opmaak eromheen.
+// Strikt (de enige vorm die telt): precies zo, op één regel, vooraan de regel, zonder opmaak eromheen.
 const STRIKT_RE = /^\[OPEN scherm=([a-z][a-z0-9-]{1,39})(?: focus=([^\s\]]{1,100}))?\]$/;
 // Ruim (wat er altijd uit gaat): ook met opmaak eromheen, andere hoofdletters of extra spaties. Wordt getoetst op de genormaliseerde
 // regel (onzichtbare opmaaktekens weg, NFKC: vol-breedte ［ wordt [), zoals appOntmasker.
@@ -53,7 +53,7 @@ function uit(tekst) {
   if (!weg.length) return { tekst: t, regel: null, weg: 0 };
   let regel = null;
   if (!inBlok && laatsteBuiten >= 0 && weg.indexOf(laatsteBuiten) >= 0) {
-    const m = STRIKT_RE.exec(regels[laatsteBuiten].trim());
+    const m = STRIKT_RE.exec(regels[laatsteBuiten].replace(/\s+$/, ''));   // Fable diff #2: niet ingesprongen (4 spaties = code)
     if (m) regel = { scherm: m[1], focus: m[2] || null };
   }
   const blijf = regels.filter(function (_, i) { return weg.indexOf(i) < 0; });

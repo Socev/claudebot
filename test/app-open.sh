@@ -42,6 +42,10 @@ toets('3d na een citaat, zelf geen citaat: telt', u.regel && u.regel.scherm === 
 u = L.uit('Tekst\n[OPEN scherm=Facturen focus=a b]');
 toets('3e ongeldige vorm als laatste regel: weg, telt niet', u.regel === null && u.weg === 1 && u.tekst === 'Tekst', u);
 toets('3f geen tekst = lege tekst', L.uit(undefined).tekst === '' && L.uit(null).regel === null);
+u = L.uit('Klaar.\n\n    [OPEN scherm=facturen]');
+toets('3g ingesprongen (4 spaties = code in markdown): weg, telt niet (Fable diff #2)', u.regel === null && u.weg === 1 && u.tekst === 'Klaar.', u);
+u = L.uit('Klaar.\n[OPEN scherm=docs]\n[OPEN scherm=facturen]');
+toets('3h twee regels: beide weg, alleen de laatste telt', u.weg === 2 && u.regel && u.regel.scherm === 'facturen' && u.tekst === 'Klaar.', u);
 
 // ── toetsen tegen de beurt ──
 const eigen = { kanaal: 'hoofd', soort: 'bericht', job: J, bestanden: 2, gemaakt: ['voorstel:tolgaarde/tg-buiten'] };
@@ -99,8 +103,8 @@ const ctx = vm.createContext({ require, fs, path, __dirname: process.cwd(), cons
   appNietGezien: function () { return false; }, appGezienDoor: function () {}, appVraagVan: function () { return null; },
   appBeantwoord: function () { return null; }, appVraagGevoelig: function () { return true; } });
 vm.runInContext(konst('APP_JOB_RE') + konst('APP_PRIVE_MODULES').replace(/\/\/.*$/, '') +
-  ['appUitvoer', 'appOpenModule', 'appOpenKnip', 'appOpenGemaaktZet', 'appOpenGemaaktVan', 'appOpenNaRun', 'appOpenVoor', 'appUitslag', 'appOntmasker'].map(fn).join('\n') +
-  '\nconst APP_OPEN_VERS_MS = 2 * 60 * 1000, APP_OPEN_GEMAAKT_MS = 2 * 60 * 60 * 1000, APP_OPEN_GEMAAKT_MAX = 50; let appOpenMod = null, appOpenGezocht = false;\n' +
+  ['appUitvoer', 'appOpenModule', 'appOpenKnip', 'appOpenGemaaktZet', 'appOpenGemaaktVan', 'appOpenNaRun', 'appOpenVoor', 'appOpenUitslag', 'appUitslag', 'appOntmasker'].map(fn).join('\n') +
+  '\n' + konst('APP_OPEN_VERS_MS') + konst('APP_OPEN_GEMAAKT_MS') + 'let appOpenMod = null, appOpenGezocht = false;\n' +
   'this.T = { appUitslag, appOpenNaRun, appOpenKnip, appOpenGemaaktZet, appOntmasker, jobs };', ctx);
 const T = ctx.T;
 // beurt in het hoofdgesprek op apparaat A; Socev maakte een voorstel in deze beurt (skill gaf SOCEV_BEURT mee)
@@ -124,9 +128,29 @@ r = { ok: true, output: 'Rapport.\n[OPEN scherm=facturen]', files: [] };
 T.appOpenNaRun(J4, T.jobs[J4], r);
 toets('12 Telegram/heartbeat-beurt: regel weg, geen veld', r.output === 'Rapport.' && !T.jobs[J4].app, r);
 toets('12b AGENTRAPPORT (appOpenKnip): regel weg', T.appOpenKnip('Agent klaar.\n[OPEN scherm=facturen]') === 'Agent klaar.');
+toets('12c alleen de regel: agent/herstel krijgt de vervangtekst, /bericht leeg', T.appOpenKnip('[OPEN scherm=facturen]', 'Klaar.') === 'Klaar.' && T.appOpenKnip('[OPEN scherm=facturen]', '') === '' && T.appOpenKnip('', 'Klaar.') === '');
+// Fable diff #1: een voorstel zonder beurt (parallelle agent) binnen het tijdvenster telt niet als door deze beurt gemaakt
+const J5 = 'eeeeeeeeeeeeeeee';
+T.jobs[J5] = { status: 'done', created: nu - 5000, started: nu - 4000, done_at: nu, app: { kanaal: 'hoofd', apparaat: A.id, soort: 'bericht', tekst: 'lees mijn mail' } };
+T.appOpenGemaaktZet('voorstel:tolgaarde/tg-hap', '');
+r = { ok: true, output: 'Mail gelezen.\n[OPEN scherm=bandjes focus=voorstel:tolgaarde/tg-hap]', files: [] };
+T.appOpenNaRun(J5, T.jobs[J5], r);
+toets('12d voorstel zonder beurt in het venster: geen wissel, kaartlink (Fable diff #1)', T.jobs[J5].app.open && T.jobs[J5].app.open.vorm === 'link', T.jobs[J5].app.open);
+const J6 = 'ffffffffffffffff';
+T.jobs[J6] = { status: 'done', created: nu, started: nu, done_at: nu, app: { kanaal: 'hoofd', apparaat: A.id, soort: 'bericht', tekst: 'x' } };
+r = { ok: false, error: 'kapot', output: 'Fout.\n[OPEN scherm=facturen]', files: [] };
+T.appOpenNaRun(J6, T.jobs[J6], r);
+toets('12e mislukte beurt: regel weg, geen veld (Fable diff #5)', r.output === 'Fout.' && !T.jobs[J6].app.open, T.jobs[J6].app);
+const J7 = '7777777777777777';
+T.jobs[J7] = { status: 'done', created: nu, started: nu, done_at: nu, chat_id: 'telegram' };
+r = { ok: true, output: '[OPEN scherm=facturen]', files: [] };
+T.appOpenNaRun(J7, T.jobs[J7], r);
+toets('12f antwoord was alleen de regel: geen lege tekst (Fable diff #4)', r.output === 'Klaar.', r);
 // uitleveren via /app/uitslag
 gestuurd.length = 0; T.appUitslag({ headers: {} }, { _app: {} }, null, A, null, { job_id: J });
 toets('13 uitslag op apparaat A (vers): open = wissel', gestuurd[0] && gestuurd[0].j.open && gestuurd[0].j.open.vorm === 'wissel' && gestuurd[0].j.antwoord === 'Staat klaar.', gestuurd[0]);
+gestuurd.length = 0; T.appUitslag({ headers: {} }, { _app: {} }, null, A, null, { job_id: J });
+toets('13a tweede ophaling op A binnen 2 min: kaartlink, geen tweede wissel (Fable diff #7)', gestuurd[0] && gestuurd[0].j.open && gestuurd[0].j.open.vorm === 'link', gestuurd[0]);
 gestuurd.length = 0; T.appUitslag({ headers: {} }, { _app: {} }, null, B, null, { job_id: J });
 toets('13b ANDER APPARAAT: zelfde antwoord, geen open-veld', gestuurd[0] && gestuurd[0].j.antwoord === 'Staat klaar.' && gestuurd[0].j.open === undefined, gestuurd[0]);
 T.jobs[J].done_at = nu - 3 * 60 * 1000;
@@ -139,8 +163,9 @@ toets('14b appOntmasker: vol-breedte en onzichtbaar teken ook', T.appOntmasker('
 // ── structuur: de andere knippunten en de uitlevering in de geschiedenis ──
 const pj = fn('processJob'), pa = fn('processAgent'), we = fn('weesEindtekst'), bn = fn('berichtNieuw'), gs = fn('appGeschiedenis'), gr = fn('appGeschiedenisRuw'), nb = fn('appNaBeurt');
 toets('15 processJob roept appOpenNaRun aan na collectFiles, vóór spillIfLarge', pj.indexOf('appOpenNaRun(jobId, j, r)') > pj.indexOf('r.files = collectFiles(outdir)') && pj.indexOf('appOpenNaRun(jobId, j, r)') < pj.indexOf('spillIfLarge(jobId, r)'));
-toets('15b processAgent knipt na de eindcontrole, vóór het rapport', pa.indexOf('appOpenKnip(r.output)') > pa.indexOf('eindcontrole(jobId') && pa.indexOf('appOpenKnip(r.output)') < pa.indexOf('sendReport('));
+toets('15b processAgent knipt na de eindcontrole, vóór het rapport', pa.indexOf('appOpenKnip(r.output, APP_OPEN_LEEG)') > pa.indexOf('eindcontrole(jobId') && pa.indexOf('appOpenKnip(r.output, APP_OPEN_LEEG)') < pa.indexOf('sendReport('));
 toets('15c herstelpad (weesEindtekst) knipt beide uitgangen', (we.match(/weesOpenKnip\(/g) || []).length === 2);
+toets('15c2 tussenstand na herstart knipt vóór sendReport (Fable diff #3)', (function () { const f = fn('naHerstartTussenstand'); return f.indexOf("appOpenKnip(tekst, '')") > 0 && f.indexOf("appOpenKnip(tekst, '')") < f.indexOf('sendReport('); })());
 toets('15d /bericht knipt vóór het opslaan', bn.indexOf('appOpenKnip(') > 0 && bn.indexOf('appOpenKnip(') < bn.indexOf('berichtIndex()'));
 toets('15e app-log krijgt het veld (appNaBeurt) en het geheugenpad apparaat + open', /open: j\.app\.open \|\| undefined/.test(nb) && /apparaat: j\.app\.apparaat, open: j\.app\.open/.test(gr));
 toets('15f geschiedenis: appOpenVoor met x.apparaat, nooit vers', /appOpenVoor\(x\.open, x\.apparaat, a, false\)/.test(gs));

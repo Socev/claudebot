@@ -2943,6 +2943,7 @@ function naHerstartTussenstand() {
     try { fs.rmSync(eindVoorlopigPad(id), { force: true }); } catch (e) {}
     a.eindcontrole = 'tussenstand gemeld na herstart';
     saveAgents();
+    if (typeof appOpenKnip === 'function') tekst = appOpenKnip(tekst, '');   // wv1712 (Fable diff #3): ook de tussenstand zonder [OPEN …]
     const output = EIND_LET_OP_HERSTART + '\n\nWat de agent als laatste schreef:\n' + (tekst.trim() || '(geen tekst)');
     sendReport(a, { ok: true, tussenstand: true, files: files, output: output });
     // wv364: dezelfde bestanden ook in de tab Bestanden (na collectFiles: appBewaar verplaatst ze), dan pas de jobmap weg.
@@ -3072,7 +3073,7 @@ async function processAgent(jobId, prompt, explicitSession, ws, keuze, maxMs) {
     r = await eindcontrole(jobId, keuze, r, outdir, space.dir, runOpts, t0, maxMs, entry);
     // Achteraan, zodat een eventuele "LET OP: tussenstand"-kop van de eindcontrole bovenaan blijft.
     if (herstartRegel && r) r.output = String(r.output || '').replace(/\s+$/, '') + '\n\n' + herstartRegel;
-    if (r && typeof r.output === 'string' && typeof appOpenKnip === 'function') r.output = appOpenKnip(r.output);   // wv1712: een agentrapport stuurt nooit de weergave
+    if (r && typeof r.output === 'string' && typeof appOpenKnip === 'function') r.output = appOpenKnip(r.output, APP_OPEN_LEEG);   // wv1712: een agentrapport stuurt nooit de weergave
     r.files = collectFiles(outdir);
     r.workspace = ws;
     // Let op de volgorde: spillIfLarge leegt r.output als die naar schijf gaat,
@@ -3147,7 +3148,7 @@ function weesEindtekst(a) {
   return { tekst: weesOpenKnip(delen.join('\n\n').trim()) };
 }
 // wv1712: ook een antwoord na een herstart (wees-agent, verloren app-beurt) zonder [OPEN …]-regel en zonder veld
-function weesOpenKnip(t) { return typeof appOpenKnip === 'function' ? appOpenKnip(t) : t; }
+function weesOpenKnip(t) { return typeof appOpenKnip === 'function' ? appOpenKnip(t, APP_OPEN_LEEG) : t; }
 
 // wv716 (Fable wv703 C1): een hoofdkanaal-transcript is van het kanaal, niet van de beurt: na een herstart hervat de volgende
 // beurt (heartbeat, Telegram, app) dezelfde sessie binnen seconden en schrijft in hetzelfde bestand. Alleen de regels vanaf de
@@ -7009,7 +7010,7 @@ function appUitslag(req, res, reg, a, s, d) {
     antwoord: out, fout: r.ok === false ? String(r.error || 'onbekend').slice(0, 200) : null,
     vraag: vraag ? { hash: vraag.hash, tekst: vraag.tekst, beantwoord: appBeantwoord(id, vraag.hash), gevoelig: appVraagGevoelig(id, vraag.hash) } : null,
     bestanden: Array.isArray(r.files) ? r.files.map(function (f) { return f && f.name; }).filter(Boolean) : [],
-    open: j.app.open && typeof appOpenVoor === 'function' ? appOpenVoor(j.app.open, j.app.apparaat, a, Date.now() - (j.done_at || 0) <= APP_OPEN_VERS_MS) : undefined });   // wv1712 (§ 3.6)
+    open: j.app.open && typeof appOpenUitslag === 'function' ? appOpenUitslag(j, a) : undefined });   // wv1712 (§ 3.6)
 }
 
 // Vraagzin en het hele bericht waaronder gedrukt is (wv171: dat bericht gaat als Socev-rij naar chat_log, net als in Telegram).
@@ -14271,7 +14272,7 @@ function appVastRoute(req, res, a, d) {
 // (/app/uitslag en /app/geschiedenis). Een wissel (vorm 3) alleen bij focus leeg of iets wat de pod in deze beurt maakte, en alleen
 // in het verse antwoord (APP_OPEN_VERS_MS); al het andere is een kaartlink (vorm 1). Ontbreekt app-open.js (terugrol): de tekst
 // blijft zoals hij was en er komt geen veld (de app van vóór M6 kent het veld niet).
-const APP_OPEN_VERS_MS = 2 * 60 * 1000;
+const APP_OPEN_VERS_MS = 2 * 60 * 1000, APP_OPEN_LEEG = 'Klaar.';
 const APP_OPEN_GEMAAKT_MS = 2 * 60 * 60 * 1000, APP_OPEN_GEMAAKT_MAX = 50;
 let appOpenMod = null, appOpenGezocht = false;
 function appOpenModule() {
@@ -14280,20 +14281,22 @@ function appOpenModule() {
   try { const p = path.join(__dirname, 'app-open.js'); if (fs.existsSync(p)) appOpenMod = require(p); } catch (e) { logError('app-open', e); }
   return appOpenMod;
 }
-function appOpenKnip(tekst) {
+// leeg: wat er staat als er na het knippen niets overblijft (agentrapport, herstel: 'Klaar.'; /bericht: '' en dan 400)
+function appOpenKnip(tekst, leeg) {
   const L = appOpenModule();
   if (!L || typeof tekst !== 'string') return tekst;
-  try { return L.uit(tekst).tekst; } catch (e) { logError('app-open', e); return tekst; }
+  try { const u = L.uit(tekst); return u.weg && !u.tekst.trim() && leeg !== undefined ? leeg : u.tekst; } catch (e) { logError('app-open', e); return tekst; }
 }
-// Wat de pod zelf maakte (nu: een bandjesvoorstel via /smal/bandjes/voorstel), met de beurt die het vroeg (SOCEV_BEURT) als die meekwam.
+// Wat de pod zelf maakte (nu: een bandjesvoorstel via /smal/bandjes/voorstel), met de beurt die het vroeg (SOCEV_BEURT; zonder telt het niet).
 function appOpenGemaaktZet(focus, beurt) {
   const l = (appStaat.openGemaakt = (appStaat.openGemaakt || []).filter(function (x) { return Date.now() - x.t < APP_OPEN_GEMAAKT_MS; }));
   l.push({ focus: String(focus), t: Date.now(), beurt: APP_JOB_RE.test(String(beurt || '')) ? String(beurt) : null });
   if (l.length > APP_OPEN_GEMAAKT_MAX) l.splice(0, l.length - APP_OPEN_GEMAAKT_MAX);
 }
-function appOpenGemaaktVan(jobId, j) {
-  const van = (j && j.started) || 0, nu = Date.now();
-  return (appStaat.openGemaakt || []).filter(function (x) { return x.beurt ? x.beurt === jobId : (van && x.t >= van && x.t <= nu); }).map(function (x) { return x.focus; });
+// Fable diff #1: alleen met de beurt erbij (SOCEV_BEURT via de skill); geen tijdvenster, anders telde een voorstel van een parallelle
+// agent of andere sessie (die geen SOCEV_BEURT van een app-beurt hebben) voor de lopende hoofd-beurt.
+function appOpenGemaaktVan(jobId) {
+  return (appStaat.openGemaakt || []).filter(function (x) { return x.beurt === jobId; }).map(function (x) { return x.focus; });
 }
 // Na runMetFallback in processJob (vóór spillIfLarge): knippen, en bij een eigen beurt het veld zetten.
 function appOpenNaRun(jobId, j, r) {
@@ -14305,8 +14308,9 @@ function appOpenNaRun(jobId, j, r) {
   r.output = u.tekst;
   const app = j && j.app;
   const t = L.toets(u.regel, { kanaal: app && app.kanaal, soort: app && app.soort, job: jobId, bestanden: Array.isArray(r.files) ? r.files.length : 0,
-    gemaakt: app ? appOpenGemaaktVan(jobId, j) : [] });
-  if (app && t.open) app.open = t.open;
+    gemaakt: app ? appOpenGemaaktVan(jobId) : [] });
+  if (app && t.open && r.ok !== false) app.open = t.open;   // Fable diff #5: een mislukte beurt stuurt niets
+  if (!r.output.trim()) r.output = APP_OPEN_LEEG;   // Fable diff #4: bestond het antwoord alleen uit de regel, dan geen lege tekst (Telegram weigert die)
   schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'app-open', job: jobId, kanaal: app ? app.kanaal : null, weg: u.weg,
     scherm: u.regel ? u.regel.scherm : null, vorm: t.open ? t.open.vorm : null, reden: t.reden }));
 }
@@ -14314,6 +14318,12 @@ function appOpenVoor(open, beurtApparaat, a, vers) {
   const L = appOpenModule();
   if (!L || !open) return undefined;
   try { return L.voorApparaat(open, beurtApparaat, a, APP_PRIVE_MODULES, vers) || undefined; } catch (e) { logError('app-open', e); return undefined; }
+}
+// /app/uitslag: een wissel gaat één keer naar het typende apparaat (Fable diff #7: herladen binnen de 2 min is geen tweede wissel)
+function appOpenUitslag(j, a) {
+  const o = appOpenVoor(j.app.open, j.app.apparaat, a, !j.app.openGeleverd && Date.now() - (j.done_at || 0) <= APP_OPEN_VERS_MS);
+  if (o && o.vorm === 'wissel') j.app.openGeleverd = true;
+  return o;
 }
 
 // ── einde socev-app poort ─────────────────────────────────────────────────────────────────────────
