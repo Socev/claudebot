@@ -15161,7 +15161,10 @@ const ovis = (function () {
       schrijf: function () { throw new Error('overdag schrijft de pod geen entiteitpagina'); }, log: function (r) { schrijfLog(nu() + ' ' + r); },
       // wv981: plek 4 (POT-factuuradres) — D1 fin alleen lezen (Fable #4) en de dossierpagina's met de parser van de verzender zelf
       pot: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); },
-        dossier: function () { if (!POT_VZ_MOD) throw new Error('pot-verzend ontbreekt'); return POT_VZ_MOD.ontvangers(potVzVault()); } } });
+        dossier: function () { if (!POT_VZ_MOD) throw new Error('pot-verzend ontbreekt'); return POT_VZ_MOD.ontvangers(potVzVault()); } },
+      // wv1009: plek 5 (Voor jou ⇄ Open vragen aan David) — alleen lezen; de Voor jou-ronde schrijft met ovis-run.js voorjou --schrijf
+      vj: { punten: function () { return appSbRpc('mk_voor_jou_lijst', { p_alles: true }); }, register: function () { return VV().lees(path.join(VAULT, '00_Systeem', 'Open vragen aan David.md'), 'utf8'); },
+        wv: function () { return appSbRpc('mk_werkvoorraad_stand', {}); } } });
   } catch (e) { logError('ovis', e); return null; }
 })();
 const ovisLoopt = { nu: null, sinds: 0 };
@@ -15255,7 +15258,7 @@ async function ovisTik() {
         return;
       }
       ovisStaatZet({ biblio_datum: t.datum, biblio: { t: new Date().toISOString(), uitkomst: b.uitkomst, zin: b.zin, open: b.open, nieuw: b.nieuw, opgelost: b.opgelost, per_check: b.per_check, tel: b.tel } });
-      if (b.nieuw > 0) ovisBoxRij(OVIS_MOD.boxRij(b, t.klok));
+      if ((b.nieuw_box != null ? b.nieuw_box : b.nieuw) > 0) ovisBoxRij(OVIS_MOD.boxRij(b, t.klok));   // wv1009: wat de Voor jou-ronde zelf rechtzet niet in de box
       ovisLoopt.nu = 'kaarten';
       try { await ovisKaartenZet(['kritiek', 'bundel', 'biblio']); } catch (e) { logError('ovis-kaarten', e); }   // wv1253
       try { const pk = await ovisPotKaarten(b); if (pk) ovisStaatZet({ pot_kaarten: Object.assign({ t: new Date().toISOString() }, pk) }); } catch (e) { logError('ovis-pot-kaart', e); }   // wv981

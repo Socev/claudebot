@@ -9,6 +9,10 @@
 //                                          alleen als de grendel al vastgehouden wordt (anders weigert hij)
 //   node ovis-run.js bibliothecaris [--afroep]  BB1-BB7; --afroep: geen hartslagstempel (en de aanroeper geen box-rij)
 //   node ovis-run.js export <register.json>     knopen uit de databank in register.json (sleutels/vertaling blijven); alleen bij verschil
+//   node ovis-run.js voorjou [--schrijf]   wv1009 plek 5: Voor jou ⇄ Open vragen aan David vergelijken (zelfde regels als de Bibliothecaris);
+//                                          --schrijf (Voor jou-ronde, voor-jou.py koppel --schrijf): wat zeker is in het register zetten
+//                                          (Status-cel van een open rij waarvan David de kaart sloot; registerrij voor een open kaart met
+//                                          registerplicht). Raakt nooit een kaart.
 //   --droog: niets schrijven (databank noch vault)
 // Omgeving: VAULT_DIR (standaard de vault), SUPABASE_URL + SUPABASE_SERVICE_ROLE (nooit als argument), CLOUDFLARE_API_TOKEN (wv981: D1 fin
 // alleen lezen voor plek 4; ontbreekt hij, dan "POT niet gemeten"), CF_ACCOUNT_ID/APP_FIN_DB (zoals server.js), OVIS_LOCK (standaard
@@ -88,6 +92,10 @@ function potLezer() {
     },
   };
 }
+// wv1009: plek 5 — Voor jou-punten (alleen lezen) en het register (VV, geen symlink volgen)
+const VJ_REGISTER = path.join(VAULT, '00_Systeem', 'Open vragen aan David.md');
+const vjLezer = { punten: function () { return sbRpc('mk_voor_jou_lijst', { p_alles: true }); }, register: function () { return VV.lees(VJ_REGISTER, 'utf8'); },
+  wv: function () { return sbRpc('mk_werkvoorraad_stand', {}); } };
 function uurAmsterdam() { return Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(new Date())); }
 // Houdt de ouder de grendel vast? Een eigen `flock -n` op hetzelfde bestand moet dan falen (andere open file description).
 function grendelVast() {
@@ -97,9 +105,9 @@ function grendelVast() {
 }
 
 (async function () {
-  if (['dag', 'afroep', 'nacht', 'bibliothecaris', 'export'].indexOf(modus) < 0) stop(2, { ok: false, fout: 'gebruik: dag|afroep|nacht|bibliothecaris|export <pad>' });
+  if (['dag', 'afroep', 'nacht', 'bibliothecaris', 'export', 'voorjou'].indexOf(modus) < 0) stop(2, { ok: false, fout: 'gebruik: dag|afroep|nacht|bibliothecaris|export <pad>|voorjou [--schrijf]' });
   const reg = R.maak({ vault: VAULT, sbRpc: sbRpc, lees: function (p) { return VV.lees(p, 'utf8'); },
-    schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen, pot: potLezer() });
+    schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen, pot: potLezer(), vj: vjLezer });
   try {
     if (modus === 'nacht') {
       if (arg.indexOf('--buiten-venster') < 0 && uurAmsterdam() !== 1) stop(1, { ok: false, fout: 'nachtronde alleen 01:00-02:00 (Amsterdam); --buiten-venster om af te wijken' });
@@ -111,6 +119,24 @@ function grendelVast() {
       const b = await reg.bibliothecaris({ droog: droog, afroep: arg.indexOf('--afroep') >= 0 });
       const potTel = { gemeten: b.pot.gemeten, reden: b.pot.reden || null, verschillen: b.pot.verschillen.length };   // geen adressen op stdout
       stop(0, Object.assign({ ok: true }, b, { pot: potTel, bevindingen: b.bevindingen.map(function (x) { return { id: x.bevinding_id, check: x.check_id, ernst: x.ernst, samenvatting: x.samenvatting }; }) }));
+    }
+    if (modus === 'voorjou') {
+      // databankklok (op van mk_voor_jou_lijst), niet de podklok (die liep eerder dagen mis)
+      const m = await R.vjMeting(vjLezer);
+      let okaarten = [];
+      try { okaarten = (await reg.register()).kaarten || []; } catch (e) { okaarten = []; }   // alleen voor de OVIS-uitkomst in de Status-tekst
+      const k = R.vjKoppel(m, okaarten, R.vjNu(m, Date.now()));
+      const uit = { ok: true, gemeten: k.gemeten, reden: k.reden || null, tel: k.tel,
+        bevindingen: k.bevindingen.map(function (x) { return { id: x.bevinding_id, samenvatting: x.samenvatting, voorstel: String(x.detail).replace(/^.*Voorstel: /, '') }; }),
+        acties: k.acties.map(function (a) { return { soort: a.soort, gesteld: a.gesteld, kaart: a.kaart, nieuw: a.soort === 'status' ? a.nieuw : 'nieuwe registerrij' }; }) };
+      if (arg.indexOf('--schrijf') >= 0 && !droog && k.gemeten && k.acties.length) {
+        let s = null;
+        // opnieuw toepassen op de verse tekst onder het slot van vault-veilig (compare-and-set per rij in vjSchrijf)
+        const gelukt = VV.wijzig(VJ_REGISTER, function (t) { s = R.vjSchrijf(t, k.acties); return s.tekst; });
+        if (s && s.tekst && !gelukt) uit.geschreven = { gedaan: [], overgeslagen: [{ reden: 'register veranderde drie keer tijdens het schrijven; volgende ronde opnieuw' }] };
+        else uit.geschreven = s ? { gedaan: s.gedaan, overgeslagen: s.overgeslagen } : { gedaan: [], overgeslagen: [{ reden: 'register niet te lezen' }] };
+      }
+      stop(k.gemeten ? 0 : 1, uit);
     }
     if (modus === 'export') {
       const doel = arg[1];

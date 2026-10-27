@@ -577,6 +577,278 @@ function kaartPot(meting, stand, nuKort) {
   return uit;
 }
 
+// ── wv1009: koppelregel plek 5 (Voor jou ⇄ Open vragen aan David; architectuur § 4 rij 5; ontwerp mk-scripts/wv1009/ontwerp.md) ──
+// Machinestaat: machinekamer.voor_jou is de projectie (wat David in de app ziet), het register 00_Systeem/Open vragen aan David.md het spoor van
+// elke vraag. Koppeling per registerrij: de Kanaal-cel noemt "Voor jou-kaart [soort] <sleutel>" (de vorm die agents al schrijven) en/of de
+// kaart noemt de rij in herkomst.register ("JJJJ-MM-DD UU:MM#kenmerk", zelfde regel als voor-jou.py register_match). Een rij die wvN noemt,
+// hangt ook aan de opvolger wvN-2, -3 … en een samengevoegde kaart volgt samengevoegd_in. De status heeft geen enkele bron (knop/tik op de
+// kaart → databank; getypt antwoord → register): elk verschil is een bevinding. Registerplicht voor een open kaart: auto-kaart van de
+// werkvoorraad (slotregel), besluit met een wv/register-bron, en de Intake-bundelkaarten (herkomst.ovis.kaart; aanvulling wv1049/wv1253).
+// Verzamel- en modulekaarten (facturen-, bank-, pot-, aix-, scansnap-, herinnering- …) hebben geen plicht; noemt een rij ze toch, dan geldt
+// de statusregel wel. Alleen lezen; vjSchrijf (alleen voor `ovis-run.js voorjou --schrijf`, de Voor jou-ronde) zet wat zeker is in het
+// register en raakt nooit een kaart (kaart_sha van Intake-kaarten, wv1253). Diffreview (Opus, 27-10) verwerkt: vervangingskaart en
+// "rij noemt de tik al" zoals voor-jou.py (wv768/wv714), Gedaan op een kaart met werkvoorraadrij pas als die rij klaar is, alleen een
+// meting als bewijs van de ronde, losse vermelding van een sleutel = twijfel (geen nieuwe rij), twee open rijen bij één kaart = niets schrijven.
+const VJ_RUST_MS = 6 * 3600000, VJ_RIJ_RUST_MS = 48 * 3600000, VJ_ONDERWEG_MS = 3 * 86400000;
+const VJ_BEVINDING_RE = /^BB\d-vj-/;
+// "Voor jou-kaart doen wv12", "Voor jou wv12", "Voor jou-kaart doen, wv12", "Voor jou-kaart, #wv12" (sleutel met een cijfer: geen gewone woorden).
+// voor-jou.py verzamel gebruikt dezelfde vorm (VJ_KAART) om zulke rijen niet als ongekoppeld te tonen; wijzig beide samen.
+const VJ_KAART_RE = /voor jou(?:-kaart)?(?:[\s,:]+(?:besluit|doen|proef))?[\s,:]+#?((?=[a-z0-9-]*\d)[a-z][a-z0-9]*(?:-[a-z0-9]+)*)/gi;
+const VJ_SLEUTELWOORD_RE = /\bsleutel\s+(intake-[a-z0-9]+(?:-[a-z0-9]+)*)/gi;
+const VJ_WOORD_RE = /(?<![\w-])([a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?![\w-])/gi;
+const VJ_AUTO_BEWIJS = 'Socev wacht hier niet meer op jou';
+// alleen een meting van de ronde of een agent (meet-recept of "<d-m uu:mm>: …") sluit een rij; de sync-zin en module-zinnen niet
+const VJ_MEETBEWIJS_RE = /^(?:(?:Gemeten )?\d{1,2}-\d{1,2} \d{1,2}:\d{2}: |audit\.jsonl: \d+ x |app-log [a-z-]+: \d+ bericht)/;
+function vjCellen(regel) { return regel.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(function (x) { return x.replace(/\\\|/g, '|').trim(); }); }
+// Registerrijen zoals voor-jou.py register_rijen en server.js appVjRegister (\| in een wikilink is geen kolomgrens); i = regelnummer
+function vjRegister(tekst) {
+  const uit = [];
+  String(tekst).replace(/\r\n/g, '\n').split('\n').forEach(function (r, i) {
+    if (r.indexOf('| 20') !== 0) return;
+    const k = vjCellen(r);
+    if (k.length < 6) return;
+    uit.push({ i: i, gesteld: k[0], kanaal: k[1], vraag: k[2], status: k[4].replace(/\*/g, ''), cellen: k.length });
+  });
+  return uit;
+}
+function vjRijOpen(r) { return /^(open|deels|wacht|uitgesteld)/i.test(String(r.status).trim()); }
+function vjRijWacht(r) { return /^(open|deels)/i.test(String(r.status).trim()); }   // wacht/uitgesteld = bewust geparkeerd: geen kaart nodig
+function vjRegMatch(rijen, sl) {
+  const i = String(sl).indexOf('#'), g = i < 0 ? String(sl) : String(sl).slice(0, i), k = i < 0 ? '' : String(sl).slice(i + 1).toLowerCase();
+  return rijen.filter(function (r) { return r.gesteld === g && (!k || (r.kanaal + ' ' + r.vraag).toLowerCase().indexOf(k) >= 0); });
+}
+function vjGenoemd(r) {   // kaartsleutels die de Kanaal-cel als kaart noemt
+  const s = new Set(); let m;
+  VJ_KAART_RE.lastIndex = 0; while ((m = VJ_KAART_RE.exec(r.kanaal))) s.add(m[1].toLowerCase());
+  VJ_SLEUTELWOORD_RE.lastIndex = 0; while ((m = VJ_SLEUTELWOORD_RE.exec(r.kanaal))) s.add(m[1].toLowerCase());
+  return Array.from(s);
+}
+function vjWoorden(t) { const s = new Set(); let m; VJ_WOORD_RE.lastIndex = 0; while ((m = VJ_WOORD_RE.exec(String(t)))) if (/\d/.test(m[1])) s.add(m[1].toLowerCase()); return s; }
+function vjOpenK(p) { return !!p && (p.status === 'open' || p.status === 'later'); }
+function vjWv(p) { const h = p && p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {}; return (Array.isArray(h.wv) ? h.wv : []).map(Number).filter(function (x) { return x > 0; }); }
+function vjPlicht(p) {
+  const h = p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
+  if (h.auto === 'wv') return true;
+  if (h.ovis && typeof h.ovis === 'object' && h.ovis.kaart) return true;
+  return p.soort === 'besluit' && (vjWv(p).length > 0 || (Array.isArray(h.register) && h.register.length > 0));
+}
+function vjRijId(r) { return 'r' + String(r.gesteld).replace(/[^0-9]/g, '').slice(0, 12) + '-' + kortHash(r.kanaal).slice(0, 6); }
+function vjTijd(iso) { const t = Date.parse(iso || ''); return isNaN(t) ? 0 : t; }
+function vjAms(iso, vorm) {   // 'd-m uu:mm' of 'JJJJ-MM-DD UU:MM' in Nederlandse tijd
+  const p = {}; const d = new Date(iso);
+  if (isNaN(d)) return '?';
+  new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    .formatToParts(d).forEach(function (x) { p[x.type] = x.value; });
+  return vorm === 'lang' ? p.year + '-' + p.month + '-' + p.day + ' ' + p.hour + ':' + p.minute : Number(p.day) + '-' + Number(p.month) + ' ' + p.hour + ':' + p.minute;
+}
+function vjCel(s, n) { return kort(String(s == null ? '' : s).replace(/\|/g, '/').replace(/[\r\n]+/g, ' '), n); }
+// Wat de Status-cel van een open rij wordt als de kaart dicht is. → { tekst } (schrijven), { onderweg } (de klus erachter loopt nog: geen
+// bevinding binnen 3 dagen) of { reden } (alleen melden). Zelfde vormen als de skill voorschrijft. wv = { id: status } of null.
+function vjStatusTekst(p, okaart, vandaag, rijStatus, wv) {
+  const b = String(p.bewijs || '');
+  if (p.status === 'gedaan') {
+    let m = /app (\d{1,2}-\d{1,2} \d{1,2}:\d{2}): David drukte (Ja|Nee|Anders) (?:op de kaart|in het gesprek)(?: \(vraag-id ([0-9a-f]{6,16})\))?/.exec(b);
+    if (m) return { tekst: 'beantwoord: ' + m[2].toUpperCase() + ' ' + m[1] + ' (app-kaart' + (m[3] ? ', vraag-id ' + m[3] : '') + (okaart && okaart.status && okaart.status !== 'open' ? '; OVIS-kaart: ' + okaart.status + (okaart.beslist_op ? ' ' + vjAms(okaart.beslist_op) : '') : '') + ')' };
+    if (/David tikte (Al beantwoord|Elders al beantwoord)/.test(b)) return { reden: 'David tikte Al beantwoord, maar het antwoord staat niet in de rij' };
+    m = /app (\d{1,2}-\d{1,2} \d{1,2}:\d{2}): David tikte Gedaan/.exec(b);
+    if (m) {
+      if (String(rijStatus).indexOf(m[1]) >= 0 && /tik/i.test(rijStatus)) return { reden: 'de rij noemt deze tik al (zoals voor-jou.py david_naloop, wv714)' };
+      const ids = vjWv(p);
+      // Gedaan op een kaart met een klus erachter: pas als die klus klaar is (de vervolgagent meet of het echt gedaan is; wv854)
+      if (ids.length) {
+        const st = ids.map(function (i) { return wv && wv[i] ? wv[i] : 'onbekend'; });
+        if (st.some(function (s) { return s === 'vervallen'; })) return { reden: 'de werkvoorraadrij achter de kaart verviel' };
+        if (!st.every(function (s) { return s === 'klaar'; })) return { onderweg: 'de werkvoorraadrij achter de kaart is nog niet klaar (' + st.join(', ') + ')' };
+      }
+      return { tekst: 'afgehandeld ' + vandaag + ' (Voor jou: David tikte Gedaan ' + m[1] + ')' };
+    }
+    if (VJ_MEETBEWIJS_RE.test(b)) return { tekst: 'afgehandeld ' + vandaag + ' (Voor jou: ' + vjCel(b, 140) + ')' };
+    return { reden: 'de kaart ging dicht zonder antwoord van David en zonder meting' };
+  }
+  if (p.status === 'vervallen' && p.gesloten_door === 'david') {
+    const m = /app (\d{1,2}-\d{1,2} \d{1,2}:\d{2}): David tikte Niet meer nodig/.exec(b);
+    if (m) return { tekst: 'vervallen — David ' + m[1] + ' (app, Voor jou)' };   // zelfde vorm als voor-jou.py doorzet
+  }
+  if (p.status === 'vervallen') return { reden: 'alleen voor-jou.py wees sluit een rij van een vervallen kaart (als de werkvoorraadrij ook verviel); anders kijkt de machinekamer of de vraag nog moet' };
+  return { reden: 'kaart ' + p.status + ' zonder open doelkaart' };
+}
+// io: { punten() → { punten, op }, register() → tekst, wv() → { items } (optioneel; mk_werkvoorraad_stand) } → meting of { fout }
+async function vjMeting(io) {
+  try {
+    if (!io || typeof io.punten !== 'function' || typeof io.register !== 'function') return { fout: 'geen Voor jou-lezer' };
+    const lijst = await io.punten();
+    const punten = lijst && Array.isArray(lijst.punten) ? lijst.punten.filter(function (p) { return p && typeof p.sleutel === 'string' && p.sleutel; }) : null;
+    if (!punten || !punten.length) return { fout: 'Voor jou gaf geen punten' };   // leeg is niet gemeten (zoals plek 4)
+    const tekst = io.register();
+    if (typeof tekst !== 'string' || tekst.indexOf('| Gesteld |') < 0) return { fout: 'register niet te lezen' };
+    const rijen = vjRegister(tekst);
+    if (!rijen.length) return { fout: 'register zonder rijen' };
+    let wv = null, wvOuder = {};   // niet te lezen = onbekend: een Gedaan op een kaart met werkvoorraadrij wordt dan niet geschreven
+    if (typeof io.wv === 'function') { try { const s = await io.wv(); if (s && Array.isArray(s.items)) { wv = {}; s.items.forEach(function (w) { if (w && w.id) { wv[w.id] = w.status; if (w.ouder_id) wvOuder[w.id] = Number(w.ouder_id); } }); } } catch (e) { wv = null; } }
+    return { punten: punten, rijen: rijen, op: lijst.op || null, wv: wv, wvOuder: wvOuder };
+  } catch (e) { return { fout: String(e && e.message || e).replace(/\d{6,}/g, '#').slice(0, 120) }; }
+}
+function vjNu(meting, terug) { const t = meting && meting.op ? Date.parse(meting.op) : NaN; return isNaN(t) ? terug : t; }   // databankklok wint
+// Pure vergelijking. meting = vjMeting; ovisKaarten = reg.kaarten (secondbrain.ovis_kaart) of []; nuMs = databankklok.
+// → { gemeten, reden, tel, bevindingen: [{ bevinding_id, check_id, samenvatting, detail, ernst }], acties: [{ soort: 'status'|'nieuw', … }], metActie: [bevinding_id] }
+function vjKoppel(meting, ovisKaarten, nuMs) {
+  if (!meting || meting.fout) return { gemeten: false, reden: meting ? meting.fout : 'geen Voor jou-lezer', tel: {}, bevindingen: [], acties: [], metActie: [] };
+  const punten = meting.punten, rijen = meting.rijen, b = [], acties = [], metActie = [];
+  const ps = {}; punten.forEach(function (p) { ps[p.sleutel] = p; });
+  const ok = {}; (ovisKaarten || []).forEach(function (k) { ok[k.sleutel] = k; });
+  const vandaag = vjAms(new Date(nuMs).toISOString()).split(' ')[0];
+  function bev(check, id, sam, det, ernst) { const x = { bevinding_id: check + '-vj-' + id, check_id: check, samenvatting: schoon(sam, 200), detail: schoon(det, 600), ernst: ernst || 'warning' }; b.push(x); return x; }
+  // opvolger: wvN → wvN-2, -3 … (nieuwste); samengevoegd → samengevoegd_in (hooguit 5 stappen)
+  function volg(sl) {
+    let p = ps[sl];
+    const opv = punten.filter(function (q) { return q.sleutel.indexOf(sl + '-') === 0 && /^\d{1,2}$/.test(q.sleutel.slice(sl.length + 1)); })
+      .sort(function (a, c) { return Number(c.sleutel.slice(sl.length + 1)) - Number(a.sleutel.slice(sl.length + 1)); });
+    if (opv.length && (!p || !vjOpenK(p))) p = opv[0];
+    for (let n = 0; p && p.status === 'samengevoegd' && p.samengevoegd_in && ps[p.samengevoegd_in] && n < 5; n++) p = ps[p.samengevoegd_in];
+    return p || null;
+  }
+  const kaartRijen = {}, rijKaarten = new Map(), genoemdNiet = new Map();   // sleutel → [rij], rij → Set(sleutel)
+  rijen.forEach(function (r) { rijKaarten.set(r, new Set()); });
+  function koppel(r, p) { const l = kaartRijen[p.sleutel] = kaartRijen[p.sleutel] || []; if (l.indexOf(r) < 0) l.push(r); rijKaarten.get(r).add(p.sleutel); }
+  rijen.forEach(function (r) {
+    vjGenoemd(r).forEach(function (sl) { const p = volg(sl); if (p) koppel(r, p); else (genoemdNiet.get(r) || genoemdNiet.set(r, []).get(r)).push(sl); });
+  });
+  // losse vermelding (een sleutel als woord in Kanaal of Status, buiten de vaste vorm): twijfel — geen nieuwe rij en geen "zonder kaart"
+  const los = new Map();   // sleutel → [rij]
+  rijen.forEach(function (r) { vjWoorden(r.kanaal + ' ' + r.status).forEach(function (w) { if (ps[w]) (los.get(w) || los.set(w, []).get(w)).push(r); }); });
+  punten.forEach(function (p) {
+    const reg = p.herkomst && Array.isArray(p.herkomst.register) ? p.herkomst.register : [];
+    reg.forEach(function (sl) {
+      const m = vjRegMatch(rijen, sl);
+      if (m.length === 1) { koppel(m[0], p); return; }
+      if (!vjOpenK(p)) return;
+      if (m.length > 1) bev('BB5', p.sleutel + '-reg-' + kortHash(sl).slice(0, 6), 'Voor jou-kaart ' + p.sleutel + ' wijst naar ' + m.length + ' registerrijen', 'herkomst.register ' + schoon(sl, 80) + ' past op ' + m.length + ' rijen; de app geeft dan geen knoppen. Voorstel: de Voor jou-ronde geeft de rij een #kenmerk (voor-jou.py zet).');
+      else bev('BB1', p.sleutel + '-reg-' + kortHash(sl).slice(0, 6), 'Voor jou-kaart ' + p.sleutel + ' wijst naar een registerrij die er niet is', 'herkomst.register ' + schoon(sl, 80) + ' staat niet (meer) in het register. Voorstel: rij terugzetten of de sleutel op de kaart vervangen (voor-jou.py zet).');
+    });
+  });
+  // vervangingskaart (zoals voor-jou.py register_wees, Fable wv768 MOET 1): een open kaart voor dezelfde handeling — zelfde werkvoorraadrij,
+  // <sleutel>-n, dezelfde titel, een open kaart (of haar werkvoorraadrij) die Kanaal of Status van de rij noemt, of een open kaart van een
+  // kindrij (ouder_id) van de werkvoorraadrij achter de dichte kaart: de klus ging verder in een vervolgrij (hertoets review #1)
+  const wvOuder = meting.wvOuder || {};
+  function vervanger(r, k) {
+    const wvK = vjWv(k).map(String), woorden = vjWoorden(r.kanaal + ' ' + r.status);
+    return punten.find(function (q) {
+      if (q === k || !vjOpenK(q)) return false;
+      const wvQ = vjWv(q).map(String);
+      return wvQ.some(function (i) { return wvK.indexOf(i) >= 0; }) || q.sleutel.indexOf(k.sleutel + '-') === 0 || (q.titel && q.titel === k.titel)
+        || woorden.has(q.sleutel) || wvQ.some(function (i) { return woorden.has('wv' + i) || (wvOuder[i] && wvK.indexOf(String(wvOuder[i])) >= 0); });
+    }) || null;
+  }
+  const tel = { kaarten_open: 0, rijen_open: 0, gekoppeld: 0, zonder_kaart: 0, twijfel: 0, vervangen: 0, onderweg: 0, verschil: 0, acties: 0 };
+  // eerst de vervangingskaarten: een open rij waarvan alle gekoppelde kaarten dicht zijn hangt aan de open vervanger (dan ook geen tweede rij
+  // voor die vervanger; review #1)
+  rijen.forEach(function (r) {
+    if (!vjRijWacht(r)) return;
+    const ks = Array.from(rijKaarten.get(r)).map(function (s) { return ps[s]; });
+    if (!ks.length || ks.some(vjOpenK)) return;
+    const v = ks.map(function (k) { return vervanger(r, k); }).find(Boolean);
+    if (v) { koppel(r, v); tel.vervangen++; }
+  });
+  // kaart-kant
+  punten.forEach(function (p) {
+    if (!vjOpenK(p)) return;
+    tel.kaarten_open++;
+    const rs = kaartRijen[p.sleutel] || [];
+    if (rs.length) tel.gekoppeld++;
+    if (!rs.length) {
+      if (!vjPlicht(p) || nuMs - vjTijd(p.aangemaakt) < VJ_RUST_MS) return;
+      if (los.has(p.sleutel)) { tel.twijfel++; return; }   // een rij noemt de sleutel wel, maar niet in de vaste vorm: niet dubbel inschrijven
+      const x = bev('BB2', p.sleutel, 'open Voor jou-kaart ' + p.sleutel + ' (' + p.soort + ') heeft geen registerrij', 'aangemaakt ' + vjAms(p.aangemaakt) + '. Voorstel: de Voor jou-ronde schrijft de rij in (voor-jou.py koppel --schrijf).');
+      const h = p.herkomst || {}, intake = !!(h.ovis && h.ovis.kaart);
+      acties.push({ soort: 'nieuw', kaart: p.sleutel, gesteld: vjAms(p.aangemaakt, 'lang'),
+        kanaal: (intake ? 'hoofd' : 'machinekamer') + ' (Voor jou-kaart ' + p.soort + ' ' + p.sleutel + (intake ? ', gezet door de pod' : '') + '; ingeschreven door de Voor jou-ronde ' + vandaag + ')',
+        vraag: vjCel(p.titel, 120) + (p.waarom ? ' — ' + vjCel(p.waarom, 420) : ''), aanname: 'zie de kaart in Voor jou', status: 'open',
+        bewijs: 'machinekamer.voor_jou ' + p.sleutel + ' (' + vjAms(p.aangemaakt) + ')' });
+      metActie.push(x.bevinding_id);
+      return;
+    }
+    // een open doen/proef-kaart bij een beantwoorde vraag ("Ja, ik doe het") is gewoon (Fable M2): alleen een besluit telt
+    if (p.soort !== 'besluit' || rs.some(vjRijOpen) || nuMs - vjTijd(p.bijgewerkt || p.aangemaakt) < VJ_RUST_MS) return;
+    tel.verschil++;
+    bev('BB3', p.sleutel + '-dicht', 'Voor jou-besluitkaart ' + p.sleutel + ' staat open, de vraag in het register is al afgehandeld', rs.map(function (r) { return r.gesteld + ': ' + vjCel(r.status, 60); }).join('; ') + '. Voorstel: de machinekamer kijkt of David al antwoordde (dan de kaart sluiten en de werkvoorraadrij vrijgeven) of de rij te vroeg dichtging.');
+  });
+  // rij-kant
+  rijen.forEach(function (r) {
+    if (!vjRijWacht(r)) return;
+    tel.rijen_open++;
+    const ks = Array.from(rijKaarten.get(r)).map(function (s) { return ps[s]; });
+    const niet = genoemdNiet.get(r) || [];
+    if (!ks.length) {
+      if (niet.length) { tel.verschil++; bev('BB1', vjRijId(r), 'registerrij ' + r.gesteld + ' noemt een Voor jou-kaart die niet bestaat', 'Kanaal noemt ' + niet.slice(0, 3).join(', ') + '. Voorstel: de juiste kaartsleutel in Kanaal zetten, of de kaart (opnieuw) maken.'); return; }
+      if (Array.from(vjWoorden(r.kanaal + ' ' + r.status)).some(function (w) { return ps[w]; })) { tel.twijfel++; return; }   // noemt wel een kaart, niet in de vaste vorm
+      tel.zonder_kaart++;
+      const g = Date.parse(String(r.gesteld).replace(' ', 'T') + ':00+01:00');
+      if (!isNaN(g) && nuMs - g > VJ_RIJ_RUST_MS)
+        bev('BB2', vjRijId(r), 'open registerrij ' + r.gesteld + ' heeft geen Voor jou-kaart', 'de vraag staat al meer dan twee dagen open zonder kaart in de app. Voorstel: de Voor jou-ronde maakt een kaart (stap 2), of de rij gaat op wacht met een reden.');
+      return;
+    }
+    if (ks.some(vjOpenK)) return;
+    const laatst = ks.slice().sort(function (a, c) { return vjTijd(c.gesloten_op || c.bijgewerkt) - vjTijd(a.gesloten_op || a.bijgewerkt); })[0];
+    const dicht = vjTijd(laatst.gesloten_op || laatst.bijgewerkt);
+    if (nuMs - dicht < VJ_RUST_MS) return;
+    const okaart = laatst.herkomst && laatst.herkomst.ovis && laatst.herkomst.ovis.kaart ? ok[laatst.herkomst.ovis.kaart] : null;
+    let st = r.cellen === 6 ? vjStatusTekst(laatst, okaart, vandaag, r.status, meting.wv) : { reden: 'rij heeft ' + r.cellen + ' cellen in plaats van 6' };
+    if (st.onderweg && nuMs - dicht < VJ_ONDERWEG_MS) { tel.onderweg++; return; }
+    if (st.onderweg) st = { reden: st.onderweg + ', al meer dan drie dagen' };
+    // twee open rijen bij één besluitkaart: David zag alleen de vraag van herkomst.register[0]; alleen die rij, anders niets schrijven
+    const open2 = (kaartRijen[laatst.sleutel] || []).filter(vjRijWacht);
+    if (st.tekst && open2.length > 1) {
+      const eerste = laatst.herkomst && Array.isArray(laatst.herkomst.register) && laatst.herkomst.register.length ? vjRegMatch(rijen, laatst.herkomst.register[0]) : [];
+      if (!(eerste.length === 1 && eerste[0] === r)) {
+        bev('BB5', laatst.sleutel + '-twee', 'Voor jou-kaart ' + laatst.sleutel + ' hangt aan ' + open2.length + ' open registerrijen', open2.map(function (x) { return x.gesteld; }).join(', ') + '. Voorstel: de machinekamer kijkt welke vraag David beantwoordde.');
+        st = { reden: 'meer open rijen bij deze kaart' };
+      }
+    }
+    tel.verschil++;
+    const x = bev('BB3', vjRijId(r), 'registerrij ' + r.gesteld + ' staat open, de Voor jou-kaart is dicht', 'kaart ' + laatst.sleutel + ' ' + laatst.status + ' door ' + (laatst.gesloten_door || '?') + ' ' + vjAms(laatst.gesloten_op || laatst.bijgewerkt) + '. Voorstel: ' +
+      (st.tekst ? 'de Voor jou-ronde zet de Status op "' + kort(st.tekst, 120) + '" (voor-jou.py koppel --schrijf).' : st.reden + '; de machinekamer zoekt uit waar het antwoord staat.'));
+    if (st.tekst) { acties.push({ soort: 'status', gesteld: r.gesteld, kanaal: r.kanaal, oud: r.status, nieuw: st.tekst, kaart: laatst.sleutel }); metActie.push(x.bevinding_id); }
+  });
+  tel.acties = acties.length;
+  const uniek = {}; b.forEach(function (x) { uniek[x.bevinding_id] = x; });
+  return { gemeten: true, tel: tel, bevindingen: Object.keys(uniek).sort().map(function (k) { return uniek[k]; }), acties: acties, metActie: metActie };
+}
+// Voert de acties uit op de huidige registertekst (pure functie; compare-and-set per rij: zelfde Gesteld + Kanaal, precies één rij, Status
+// nog gelijk aan wat gemeten is en nog open, precies 6 cellen). Nieuwe rijen bovenaan de tabel. → { tekst (null = niets), gedaan, overgeslagen }
+function vjSchrijf(tekst, acties) {
+  const nl = String(tekst).indexOf('\r\n') >= 0 ? '\r\n' : '\n';
+  const regels = String(tekst).split(/\r?\n/), gedaan = [], overgeslagen = [];
+  (acties || []).filter(function (a) { return a.soort === 'status'; }).forEach(function (a) {
+    const hits = [];
+    regels.forEach(function (r, i) { if (r.indexOf('| 20') !== 0) return; const c = vjCellen(r); if (c[0] === a.gesteld && c[1] === a.kanaal) hits.push(i); });
+    if (hits.length !== 1) { overgeslagen.push({ gesteld: a.gesteld, reden: hits.length + ' passende rijen' }); return; }
+    const delen = regels[hits[0]].split(/(?<!\\)\|/);
+    if (delen.length !== 8) { overgeslagen.push({ gesteld: a.gesteld, reden: 'rij heeft ' + (delen.length - 2) + ' cellen in plaats van 6' }); return; }
+    const oud = delen[5].trim();
+    if (oud.replace(/\*/g, '') !== a.oud || !vjRijOpen({ status: oud.replace(/\*/g, '') })) { overgeslagen.push({ gesteld: a.gesteld, reden: 'Status veranderde intussen' }); return; }
+    delen[5] = ' ' + vjCel(a.nieuw, 300) + ' — eerder: ' + oud + ' ';
+    regels[hits[0]] = delen.join('|');
+    gedaan.push({ soort: 'status', gesteld: a.gesteld, kaart: a.kaart });
+  });
+  const nieuw = (acties || []).filter(function (a) { return a.soort === 'nieuw'; }).filter(function (a) {
+    // al ingeschreven of ergens genoemd (een eerdere ronde, of een agent schreef intussen een rij)? dan niet nog eens
+    const al = regels.some(function (r) { if (r.indexOf('| 20') !== 0) return false; const c = vjCellen(r); return vjGenoemd({ kanaal: c[1] || '' }).indexOf(a.kaart) >= 0 || vjWoorden((c[1] || '') + ' ' + (c[4] || '')).has(a.kaart); });
+    if (al) overgeslagen.push({ kaart: a.kaart, reden: 'rij staat er al' });
+    return !al;
+  });
+  if (nieuw.length) {
+    const kop = regels.findIndex(function (r) { return /^\| Gesteld \| Kanaal \|/.test(r); });
+    if (kop < 0 || !/^\|---/.test(regels[kop + 1] || '')) nieuw.forEach(function (a) { overgeslagen.push({ kaart: a.kaart, reden: 'tabelkop niet gevonden' }); });
+    else {
+      regels.splice.apply(regels, [kop + 2, 0].concat(nieuw.map(function (a) {
+        return '| ' + [a.gesteld, vjCel(a.kanaal, 200), vjCel(a.vraag, 600), vjCel(a.aanname, 120), a.status, vjCel(a.bewijs, 200)].join(' | ') + ' |';
+      })));
+      nieuw.forEach(function (a) { gedaan.push({ soort: 'nieuw', gesteld: a.gesteld, kaart: a.kaart }); });
+    }
+  }
+  return { tekst: gedaan.length ? regels.join(nl) : null, gedaan: gedaan, overgeslagen: overgeslagen };
+}
+
 // ── Kaarten in Overzicht (wv1253; ontwerp + Fable-review vooraf: mk-scripts/wv1253/ontwerp.md) ──
 // Pure functies: wat er op een kaart moet (bundel per week, kritiek per veld, Bibliothecaris per week), de Anders-ontleding en de zin
 // voor Socev na Davids druk. De databank (public.ovis_kaart_zet) controleert en bevriest de lijst; public.ovis_handvat_activeer voert
@@ -761,6 +1033,7 @@ function kaartBiblio(reg, o) {
   function naamUit(bid) { const rest = bid.replace(/^BB\d-/, ''); const k = knopen.find(function (x) { return rest === x.id || rest.indexOf(x.id + '-') === 0; }); return k ? kort(k.naam, 50) : null; }
   const kandidaten = (reg.bevindingen || []).filter(function (b) {
     if (!/^BB[1235678]$/.test(b.check_id) || (b.check_id === 'BB3' && b.ernst === 'serious')) return false;
+    if (VJ_BEVINDING_RE.test(b.bevinding_id)) return false;   // wv1009: plek 5 is machinestaat; de Voor jou-ronde en de machinekamer handelen het af
     if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart; wv981: pot-cc wacht op fase 2
     return !geh.open.has('structuur_state#' + b.bevinding_id) && !geh.rust.has('structuur_state#' + b.bevinding_id + '#');
   }).slice(0, KAART_STAPPEN);
@@ -975,6 +1248,11 @@ function maak(o) {
     const paginas = leesAlles();
     const pot = o.pot ? await potMeting(o.pot) : null;   // wv981: plek 4 (alleen lezen); o.pot = { d1(batch), dossier() }
     const r = checks(paginas, reg, c.fouten, pot);
+    // wv1009: plek 5 (Voor jou ⇄ register), alleen lezen; o.vj = { punten(), register() }
+    // diffreview #8/#9: een onverwachte vorm breekt de nachtronde niet (dan "niet gemeten"); databankklok voor de rust
+    try { const vm = o.vj ? await vjMeting(o.vj) : { fout: 'geen Voor jou-lezer' }; r.vj = vjKoppel(vm, reg.kaarten, vjNu(vm, nu())); }
+    catch (e) { r.vj = { gemeten: false, reden: 'vergelijking faalde: ' + String(e && e.message || e).slice(0, 80), tel: {}, bevindingen: [], acties: [], metActie: [] }; }
+    if (r.vj.gemeten) { const al = new Set(r.bevindingen.map(function (x) { return x.bevinding_id; })); r.vj.bevindingen.forEach(function (x) { if (!al.has(x.bevinding_id)) r.bevindingen.push(x); }); }
     const open = {}; (reg.bevindingen || []).forEach(function (x) { open[x.bevinding_id] = x; });
     const nu_ = new Date(nu()).toISOString();
     const rijen = [], nieuw = [];
@@ -985,15 +1263,20 @@ function maak(o) {
     const gezien = new Set(r.bevindingen.map(function (x) { return x.bevinding_id; }));
     // BB7-spoor blijft open tot iemand hem afhandelt: het logvenster schuift door, de wijziging is niet weg (Fable wv979 #8)
     // wv981 (Fable #1): niet gemeten is niet opgelost — zonder POT-meting blijven de bevindingen van plek 4 open
-    const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor-\d{8}$/.test(id) && (r.pot.gemeten || !POT_BEVINDING_RE.test(id)); });
+    // wv1009: idem voor plek 5 zonder Voor jou-meting
+    const opgelost = Object.keys(open).filter(function (id) { return !gezien.has(id) && !/^BB7-.*-spoor-\d{8}$/.test(id) && (r.pot.gemeten || !POT_BEVINDING_RE.test(id)) && (r.vj.gemeten || !VJ_BEVINDING_RE.test(id)); });
     opgelost.forEach(function (id) { rijen.push({ bevinding_id: id, status: 'opgelost', laatst_gezien: nu_, detail_erbij: ' | ' + nu_.slice(0, 10) + ': niet meer gezien door de Bibliothecaris' }); });
     if (!opties.droog) for (let i = 0; i < rijen.length; i += 100) await o.sbRpc('ovis_bibliothecaris_zet', { p_rijen: rijen.slice(i, i + 100) });
     const onverklaard = r.bevindingen.length;
     const zin = onverklaard ? onverklaard + ' verschil(len) tussen pagina\'s en register (' + nieuw.length + ' nieuw, ' + opgelost.length + ' opgelost)'
       : 'register en pagina\'s gelijk (' + r.tel.geldig + ' pagina\'s' + (r.tel.verouderd ? ', ' + r.tel.verouderd + ' nog niet gecompileerd' : '') + (r.tel.wacht_op_ja ? ', ' + r.tel.wacht_op_ja + (r.tel.wacht_op_ja === 1 ? ' kenmerk wacht' : ' kenmerken wachten') + ' op Davids Ja' : '') + ')';
     const potZin = r.pot.gemeten ? '; POT-factuuradressen: ' + r.tel.pot + ' praktijk(en) gemeten, ' + r.tel.pot_verschil + ' met een verschil' : '; POT-factuuradressen niet gemeten (' + schoon(r.pot.reden || '?', 80) + ')';
-    const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin + potZin, tel: r.tel, pot: r.pot, open: onverklaard, nieuw: nieuw.length, opgelost: opgelost.length,
-      per_check: r.bevindingen.reduce(function (a, x) { a[x.check_id] = (a[x.check_id] || 0) + 1; return a; }, {}), bevindingen: r.bevindingen, nieuwe: nieuw };
+    const vjZin = r.vj.gemeten ? '; Voor jou ⇄ register: ' + r.vj.tel.kaarten_open + ' open kaart(en), ' + r.vj.tel.rijen_open + ' open vraag/vragen, ' + r.vj.bevindingen.length + ' verschil(len)' : '; Voor jou ⇄ register niet gemeten (' + schoon(r.vj.reden || '?', 80) + ')';
+    r.tel.vj = r.vj.gemeten ? r.vj.bevindingen.length : 'niet gemeten';
+    // diffreview #7: wat de Voor jou-ronde om 07:15 zelf rechtzet, hoort niet in de box (nieuw_box/nieuwe zonder die bevindingen)
+    const metActie = new Set(r.vj.metActie || []), nieuweBox = nieuw.filter(function (x) { return !metActie.has(x.bevinding_id); });
+    const uit = { uitkomst: onverklaard ? 'bevindingen' : 'ok', zin: zin + potZin + vjZin, tel: r.tel, pot: r.pot, vj: { gemeten: r.vj.gemeten, reden: r.vj.reden || null, tel: r.vj.tel }, open: onverklaard, nieuw: nieuw.length, nieuw_box: nieuweBox.length, opgelost: opgelost.length,
+      per_check: r.bevindingen.reduce(function (a, x) { a[x.check_id] = (a[x.check_id] || 0) + 1; return a; }, {}), bevindingen: r.bevindingen, nieuwe: nieuweBox };
     if (!opties.droog && !opties.afroep) {
       await o.sbRpc('mk_hartslag_stempel', { p_component: 'bibliothecaris', p_gemeten_rijen: r.tel.paginas, p_bevindingen: onverklaard });
       uit.gestempeld = true;
@@ -1036,11 +1319,12 @@ function maak(o) {
 // Box-rij bij nieuwe bevindingen (de aanroeper schrijft hem met vault-veilig; geen waarden van contactvelden, Fable wv979 #10)
 function boxRij(b, tijd) {
   const k = function (x) { return schoon(x, 220); };
-  return '\n## [bibliothecaris] ' + tijd + ' — ' + b.nieuw + ' nieuwe verschil(len) in het entiteitenregister (automatisch, wv979)\n' +
+  return '\n## [bibliothecaris] ' + tijd + ' — ' + (b.nieuw_box != null ? b.nieuw_box : b.nieuw) + ' nieuwe verschil(len) in het OVIS-register (automatisch, wv979)\n' +
     '- status: open\n- van: pod (ovis-register.js, Bibliothecaris 02:30)\n' +
     '- gemeten: ' + b.zin + '. Nieuw: ' + b.nieuwe.slice(0, 6).map(function (x) { return x.check_id + ' ' + k(x.samenvatting); }).join('; ') + (b.nieuwe.length > 6 ? '; …' : '') + '\n' +
     '- gevolg als er niets gebeurt: de router (stap 2) herkent op een register dat niet gelijk is aan de pagina\'s; kritieke verschillen (rekening, contact) blijven staan.\n' +
-    '- voorstel: per bevinding in secondbrain.structuur_state (BB…); de voorstelkaart voor David komt met vervolgrij A. Kritiek (ernst serious) dezelfde dag nalopen.\n';
+    '- voorstel: per bevinding in secondbrain.structuur_state (BB…); de voorstelkaart voor David komt met vervolgrij A. Kritiek (ernst serious) dezelfde dag nalopen.\n' +
+    (b.nieuwe.some(function (x) { return VJ_BEVINDING_RE.test(x.bevinding_id); }) ? '- plek 5 (Voor jou ⇄ Open vragen, BB…-vj-…): wat zeker is zet de Voor jou-ronde (07:15/17:15) recht met `voor-jou.py koppel --schrijf`; de rest is machinekamerwerk (geen kaart aan David).\n' : '');
 }
 
 function boxRijFout(fout, tijd) {
@@ -1055,5 +1339,6 @@ module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina, f
   zetBlok: zetBlok, huidigBlok: huidigBlok, rpcInvoer: rpcInvoer, handvattenVan: handvattenVan, normHandvat: normHandvat, boxRij: boxRij, slug: slug,
   BLOK_BEGIN: BLOK_BEGIN, BLOK_EIND: BLOK_EIND, SCHRIJVERS_OK: SCHRIJVERS_OK,
   potMeting: potMeting, potChecks: potChecks, kaartPot: kaartPot, POT_SQL: POT_SQL, POT_BEVINDING_RE: POT_BEVINDING_RE,
+  vjMeting: vjMeting, vjNu: vjNu, vjKoppel: vjKoppel, vjSchrijf: vjSchrijf, vjRegister: vjRegister, vjGenoemd: vjGenoemd, VJ_BEVINDING_RE: VJ_BEVINDING_RE,
   plan: plan, kaartBundel: kaartBundel, kaartenKritiek: kaartenKritiek, kaartBiblio: kaartBiblio, eruitUit: eruitUit, uitkomstZin: uitkomstZin, isoWeek: isoWeek,
   KAART_SLEUTEL_RE: /^intake-(handvat|kritiek|biblio)-[a-z0-9]+(-[a-z0-9]+)*$/ };

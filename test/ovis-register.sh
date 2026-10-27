@@ -584,6 +584,159 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const kb = R.kaartBiblio({ knopen: [], kaarten: [], bevindingen: [{ bevinding_id: 'BB2-pot-P04-geen-pagina', check_id: 'BB2', ernst: 'warning', status: 'open' }] }, { nu: Date.parse('2026-10-27T02:31:00Z') });
     toets('8 weekkaart: BB2 van plek 4 in gewone taal', kb.kaart && /POT-praktijk P04 is nog aan geen pagina/.test(kb.kaart.stappen[0]), kb);
   }
+  // ── 9. wv1009: plek 5 — Voor jou ⇄ Open vragen aan David ──
+  {
+    const KOP = ['# Open vragen aan David', '', '## Register', '| Gesteld | Kanaal | Vraag (zelfstandig leesbaar) | Mijn aanname | Status | Bewijs / laatste toets |', '|---|---|---|---|---|---|'];
+    const rij = (g, kanaal, status, vraag) => '| ' + g + ' | ' + kanaal + ' | ' + (vraag || 'Mag dit? Zie [[00_Systeem/X\\|x]].') + ' | Ja | ' + status + ' | gemeten |';
+    const NU = Date.parse('2026-10-28T06:15:00Z'), oud = '2026-10-27T10:00:00Z', vers = '2026-10-28T04:00:00Z';
+    const P = (sleutel, x) => Object.assign({ sleutel, soort: 'doen', status: 'open', titel: 'Kaart ' + sleutel, waarom: 'Omdat.', herkomst: { wv: [Number(String(sleutel).replace(/^wv(\d+).*$/, '$1')) || 1], auto: 'wv' }, aangemaakt: oud, bijgewerkt: oud, gesloten_op: null, gesloten_door: null, bewijs: null }, x || {});
+    const WV = Array.from({ length: 200 }, (_, i) => ({ id: i + 1, status: i + 1 === 2 ? 'open' : i + 1 === 3 ? 'vervallen' : 'klaar' }));
+    const meet = async (regels, punten, wv) => R.vjMeting({ punten: async () => ({ punten, op: new Date(NU).toISOString() }), register: () => KOP.concat(regels).join('\n') + '\n', wv: async () => ({ items: wv || WV }) });
+    const K = async (regels, punten, ok, wv) => R.vjKoppel(await meet(regels, punten, wv), ok || [], NU);
+    const ids = (k) => k.bevindingen.map((b) => b.bevinding_id);
+    // parser en kaartverwijzing
+    const rr = R.vjRegister(KOP.concat([rij('2026-10-27 10:00', 'machinekamer (wv5, Voor jou-kaart wv5)', 'open'), '| 2026-10-27 11:00 | te | weinig |']).join('\n'));
+    toets('9 register: \\| in een wikilink is geen kolomgrens, rij met te weinig cellen telt niet', rr.length === 1 && rr[0].cellen === 6 && /X\|x/.test(rr[0].vraag), rr);
+    const g = (k) => R.vjGenoemd({ kanaal: k });
+    toets('9 kaartverwijzing: alleen de sleutel direct na "Voor jou-kaart [soort]"', JSON.stringify(g('machinekamer (Voor jou-kaart doen wv1738, eindrapport wv1716, #x)')) === '["wv1738"]'
+      && g('app (Voor jou-kaart in Overzicht)').length === 0 && g('machinekamer (wv471, Voor jou-kaart, #olares-herstart)').length === 0 && g('machinekamer (box, Voor jou vervallen)').length === 0
+      && JSON.stringify(g('machinekamer (Voor jou-kaart, #wv663 #briefwijzer)')) === '["wv663"]' && JSON.stringify(g('machinekamer (Voor jou-kaart doen, wv88)')) === '["wv88"]' && JSON.stringify(g('machinekamer (wv1414, Voor jou, wv1415)')) === '["wv1415"]'
+      && JSON.stringify(g('machinekamer (wv447 → Voor jou wv513, #x)')) === '["wv513"]'
+      && JSON.stringify(g('hoofd (Voor jou-kaart in Overzicht, gezet door de pod; sleutel intake-handvat-2026-43; wv1253)')) === '["intake-handvat-2026-43"]');
+    // gelijk
+    let k = await K([rij('2026-10-27 10:00', 'machinekamer (wv5, Voor jou-kaart wv5)', 'open')], [P('wv5')]);
+    toets('9 open rij + open kaart: geen bevinding, gekoppeld', k.gemeten && k.bevindingen.length === 0 && k.tel.gekoppeld === 1, k);
+    // rij open, kaart dicht door David
+    const r5 = rij('2026-10-27 10:00', 'machinekamer (wv5, Voor jou-kaart wv5, #x5)', 'open — kaart wv5');
+    k = await K([r5], [P('wv5', { status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bijgewerkt: oud, bewijs: 'app 27-10 11:00: David tikte Gedaan' })]);
+    toets('9 rij open, kaart Gedaan door David (> 6 u) → BB3 + Status afgehandeld', k.bevindingen.length === 1 && k.bevindingen[0].check_id === 'BB3' && k.acties.length === 1
+      && k.acties[0].nieuw === 'afgehandeld 28-10 (Voor jou: David tikte Gedaan 27-10 11:00)', k);
+    k = await K([r5], [P('wv5', { status: 'gedaan', gesloten_door: 'david', gesloten_op: vers, bijgewerkt: vers, bewijs: 'app 28-10 05:00: David tikte Gedaan' })]);
+    toets('9 kaart pas dicht (< 6 u): nog geen bevinding (rust)', k.bevindingen.length === 0 && k.acties.length === 0, k);
+    const knop = P('wv5', { soort: 'besluit', status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David drukte Anders op de kaart (vraag-id ab12cd34)' });
+    k = await K([r5], [knop]);
+    toets('9 knop Anders → "beantwoord: ANDERS … (app-kaart, vraag-id …)"', k.acties[0] && k.acties[0].nieuw === 'beantwoord: ANDERS 27-10 11:00 (app-kaart, vraag-id ab12cd34)', k.acties);
+    const ik = P('intake-handvat-2026-44', { soort: 'besluit', herkomst: { module: 'intake', handmatig: 'intake', ovis: { kaart: 'intake-handvat-2026-44' } }, status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 10:37: David drukte Ja op de kaart (vraag-id ab12cd99)' });
+    k = await K([rij('2026-10-27 02:31', 'hoofd (Voor jou-kaart besluit intake-handvat-2026-44, gezet door de pod)', 'open')], [ik], [{ sleutel: 'intake-handvat-2026-44', status: 'ja', beslist_op: '2026-10-27T09:36:20Z' }]);
+    toets('9 Intake-kaart: uitkomst van de OVIS-kaart als extra bewijs', k.acties[0] && /^beantwoord: JA 27-10 10:37 \(app-kaart, vraag-id ab12cd99; OVIS-kaart: ja 27-10 10:36\)$/.test(k.acties[0].nieuw), k.acties);
+    k = await K([r5], [P('wv5', { status: 'vervallen', gesloten_door: 'agent', gesloten_op: oud, bewijs: 'Socev wacht hier niet meer op jou; of het gedaan is, is niet gemeten.' })]);
+    toets('9 kaart vervallen door de trigger → BB3 melden, niet schrijven (alleen wees)', k.bevindingen.length === 1 && k.acties.length === 0 && /wees/.test(k.bevindingen[0].detail), k);
+    k = await K([r5], [P('wv5', { status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David tikte Al beantwoord' })]);
+    toets('9 Al beantwoord getikt, rij nog open → alleen melden', k.bevindingen.length === 1 && k.acties.length === 0, k);
+    k = await K([r5], [P('wv5', { status: 'vervallen', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David tikte Niet meer nodig' })]);
+    toets('9 Niet meer nodig → zelfde vorm als doorzet', k.acties[0] && k.acties[0].nieuw === 'vervallen — David 27-10 11:00 (app, Voor jou)', k.acties);
+    k = await K([r5], [P('wv5', { status: 'gedaan', gesloten_door: 'beheer', gesloten_op: oud, bewijs: '27-10 12:00: De proefserver is verbonden | met de schijf.' })]);
+    toets('9 gedaan door de ronde met meting → afgehandeld met dat bewijs (pipe weg)', k.acties[0] && k.acties[0].nieuw === 'afgehandeld 28-10 (Voor jou: 27-10 12:00: De proefserver is verbonden / met de schijf.)', k.acties);
+    // opvolging
+    k = await K([r5], [P('wv5', { status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David drukte Ja op de kaart' }), P('wv5-2')]);
+    toets('9 rij noemt wv5, kaart wv5 dicht maar wv5-2 open → gelijk', k.bevindingen.length === 0, k);
+    k = await K([r5], [P('wv5', { status: 'samengevoegd', samengevoegd_in: 'wv9', gesloten_op: oud }), P('wv9')]);
+    toets('9 samengevoegde kaart volgt samengevoegd_in (open) → gelijk', k.bevindingen.length === 0, k);
+    k = await K([rij('2026-10-27 10:00', 'machinekamer (Voor jou-kaart wv77)', 'open')], [P('wv5')]);
+    toets('9 rij noemt een kaart die niet bestaat → BB1', ids(k).filter((x) => /^BB1-/.test(x)).length === 1 && /^BB1-vj-r202610271000-/.test(ids(k).filter((x) => /^BB1-/.test(x))[0]), ids(k));
+    // kaart zonder rij (een register zonder één rij telt als niet gemeten; daarom een losse beantwoorde rij erbij)
+    const LOS = rij('2026-10-01 09:00', 'hoofd (app)', 'beantwoord 1-10: ja');
+    k = await K([LOS], [P('wv6')]);
+    toets('9 open auto-kaart zonder rij (> 6 u) → BB2 + nieuwe rij', ids(k).join() === 'BB2-vj-wv6' && k.acties[0].soort === 'nieuw' && /^machinekamer \(Voor jou-kaart doen wv6;/.test(k.acties[0].kanaal) && k.acties[0].gesteld === '2026-10-27 11:00', k);
+    k = await K([LOS], [P('wv6', { aangemaakt: vers })]);
+    toets('9 kaart net gezet (< 6 u) → nog niets', k.bevindingen.length === 0 && k.acties.length === 0, k);
+    k = await K([LOS], [P('scansnap-ab12cd34ef', { soort: 'besluit', herkomst: { stuk: 'x', handmatig: 'scansnap' } }), P('facturen-2026-10-27', { herkomst: { module: 'facturen' } })]);
+    toets('9 module- en verzamelkaarten zonder rij → geen plicht', k.bevindingen.length === 0, k);
+    k = await K([LOS], [P('intake-handvat-2026-45', { soort: 'besluit', herkomst: { module: 'intake', handmatig: 'intake', ovis: { kaart: 'intake-handvat-2026-45' } } })]);
+    toets('9 Intake-bundelkaart zonder rij → nieuwe rij met Kanaal hoofd en de sleutel', k.acties[0] && /^hoofd \(Voor jou-kaart besluit intake-handvat-2026-45, gezet door de pod;/.test(k.acties[0].kanaal), k.acties);
+    k = await K([LOS], [P('wv7', { soort: 'besluit', herkomst: {} })]);
+    toets('9 besluit zonder wv/register-bron (handmatig, titel met ?) → geen plicht', k.bevindingen.length === 0, k);
+    // herkomst.register
+    const reg2 = [rij('2026-10-27 10:00', 'machinekamer (#a1)', 'open'), rij('2026-10-27 10:00', 'machinekamer (#a2)', 'open')];
+    k = await K(reg2, [P('wv8', { soort: 'besluit', herkomst: { register: ['2026-10-27 10:00'] } })]);
+    toets('9 herkomst.register past op twee rijen → BB5', ids(k).some((x) => /^BB5-vj-wv8-reg-/.test(x)), ids(k));
+    k = await K(reg2, [P('wv8', { soort: 'besluit', herkomst: { register: ['2026-10-27 10:00#a1'] } }), P('wv9', { soort: 'besluit', herkomst: { register: ['2026-10-27 10:00#a2'] } })]);
+    toets('9 herkomst.register met #kenmerk koppelt elk aan zijn eigen rij', k.bevindingen.length === 0 && k.tel.gekoppeld === 2, k);
+    k = await K(reg2, [P('wv8', { soort: 'besluit', herkomst: { register: ['2026-10-26 09:00#weg'] } })]);
+    toets('9 herkomst.register wijst naar een rij die er niet is → BB1 (en BB2: geen rij)', ids(k).some((x) => /^BB1-vj-wv8-reg-/.test(x)) && ids(k).indexOf('BB2-vj-wv8') >= 0, ids(k));
+    // rij dicht, kaart open
+    k = await K([rij('2026-10-27 10:00', 'machinekamer (Voor jou-kaart wv5)', 'beantwoord 27-10 11:00: JA')], [P('wv5', { soort: 'besluit' })]);
+    toets('9 besluitkaart open, rij al beantwoord → BB3 (machinekamer), geen schrijfactie', ids(k).join() === 'BB3-vj-wv5-dicht' && k.acties.length === 0, k);
+    k = await K([rij('2026-10-27 10:00', 'machinekamer (Voor jou-kaart wv5)', 'beantwoord 27-10 11:00: JA, ik doe het')], [P('wv5')]);
+    toets('9 doen-kaart open bij een beantwoorde vraag ("ik doe het") → gewoon, geen bevinding (review #6)', k.bevindingen.length === 0, k);
+    // review #1/#2/#3: vervangingskaart, de tik al in de rij, de klus erachter nog niet klaar, sluiten zonder meting
+    const tik = P('wv5', { status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David tikte Gedaan' });
+    k = await K([rij('2026-10-22 10:00', 'machinekamer (wv74 → Voor jou wv5, #x)', 'open')], [tik, P('wv17', { titel: 'Kaart wv5', herkomst: { wv: [17], auto: 'wv' } })]);
+    toets('9 open vervangingskaart (zelfde titel, ander nummer) → niets schrijven, geen verschil (wv854)', k.bevindingen.length === 0 && k.acties.length === 0 && k.tel.vervangen === 1, k);
+    k = await K([rij('2026-10-22 10:00', 'machinekamer (Voor jou-kaart wv5)', 'open — kaart wv17 vervangt hem')], [tik, P('wv17', { titel: 'Anders', herkomst: { wv: [17], auto: 'wv' } })]);
+    toets('9 Status noemt de open vervangingskaart → niets schrijven', k.acties.length === 0 && k.tel.vervangen === 1, k);
+    k = await K([rij('2026-10-22 10:00', 'machinekamer (Voor jou-kaart wv5)', 'open')], [tik, P('wv17', { titel: 'Iets anders', herkomst: { wv: [17], auto: 'wv' } })], [], WV.map((w) => w.id === 17 ? Object.assign({}, w, { status: 'geblokkeerd', ouder_id: 5 }) : w));
+    toets('9 open kaart van een kindrij (ouder_id) van de klus achter de dichte kaart = vervanger → niets schrijven, geen tweede rij', k.acties.length === 0 && k.bevindingen.length === 0 && k.tel.vervangen === 1, k);
+    k = await K([rij('2026-10-22 10:00', 'machinekamer (Voor jou-kaart wv5)', 'open — de Gedaan-tik van 27-10 11:00 gaf geen herstart')], [tik]);
+    toets('9 rij noemt de tik al → alleen melden (wv714)', k.acties.length === 0 && k.bevindingen.length === 1 && /noemt deze tik al/.test(k.bevindingen[0].detail), k);
+    const tik2 = P('wv5', { herkomst: { wv: [2], auto: 'wv' }, status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David tikte Gedaan' });
+    k = await K([r5], [tik2]);
+    toets('9 Gedaan, werkvoorraadrij nog open → onderweg: geen bevinding, niets schrijven', k.bevindingen.length === 0 && k.acties.length === 0 && k.tel.onderweg === 1, k);
+    k = await K([r5], [Object.assign({}, tik2, { gesloten_op: '2026-10-23T10:00:00Z' })]);
+    toets('9 … na drie dagen nog steeds niet klaar → BB3 melden', k.bevindingen.length === 1 && k.acties.length === 0 && /al meer dan drie dagen/.test(k.bevindingen[0].detail), k);
+    k = await K([r5], [Object.assign({}, tik2, { herkomst: { wv: [3], auto: 'wv' } })]);
+    toets('9 Gedaan, werkvoorraadrij vervallen → alleen melden', k.acties.length === 0 && /verviel/.test(k.bevindingen[0].detail), k);
+    k = await K([r5], [tik2], [], null);
+    toets('9 Gedaan, werkvoorraad niet te lezen → niet schrijven', k.acties.length === 0, k);
+    k = await K([r5], [P('wv5', { soort: 'besluit', status: 'gedaan', gesloten_door: 'agent', gesloten_op: oud, bewijs: 'Er wacht niets meer op jou: de vraag is beantwoord, de taak afgevinkt of de klus erachter is klaar.' })]);
+    toets('9 dicht door sync zonder meting → alleen melden (review #3)', k.acties.length === 0 && k.bevindingen.length === 1, k);
+    k = await K([r5], [P('wv5', { status: 'gedaan', gesloten_door: 'agent', gesloten_op: oud, bewijs: 'Gemeten 26-10 12:12: de proefserver is verbonden.' })]);
+    toets('9 dicht door een agent mét meting ("Gemeten d-m uu:mm: …") → afgehandeld', k.acties.length === 1 && /^afgehandeld 28-10 \(Voor jou: Gemeten 26-10 12:12/.test(k.acties[0].nieuw), k.acties);
+    // review #4: losse vermelding = twijfel
+    k = await K([LOS, rij('2026-10-27 10:00', 'machinekamer (Voor jou-kaart zonder nummer, zie wv6)', 'open')], [P('wv6')]);
+    toets('9 kaart alleen los genoemd (niet in de vaste vorm) → geen nieuwe rij en geen "zonder kaart"', k.acties.length === 0 && k.bevindingen.length === 0 && k.tel.twijfel === 2, k);
+    // review #10: twee open rijen bij één besluitkaart
+    const kn2 = P('wv5', { soort: 'besluit', herkomst: { wv: [1], auto: 'wv', register: ['2026-10-27 10:00#x5'] }, status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David drukte Ja op de kaart (vraag-id ab12cd34)' });
+    k = await K([r5, rij('2026-10-26 10:00', 'machinekamer (Voor jou-kaart wv5, #tweede)', 'open')], [kn2]);
+    toets('9 twee open rijen bij één besluit: alleen de rij van herkomst.register[0] krijgt het antwoord, de ander BB5', k.acties.length === 1 && k.acties[0].gesteld === '2026-10-27 10:00' && ids(k).indexOf('BB5-vj-wv5-twee') >= 0, [k.acties, ids(k)]);
+    // geparkeerd en zonder kaart
+    k = await K([rij('2026-10-08 19:41', 'debug (agentrapport wv20)', 'wacht — pas voorleggen bij …'), rij('2026-10-07 13:30', 'machinekamer (Voor jou-kaart wv5)', 'uitgesteld door David')], [P('wv5', { status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David tikte Gedaan' })]);
+    toets('9 wacht/uitgesteld (geparkeerd) → geen bevinding', k.bevindingen.length === 0, k);
+    k = await K([rij('2026-10-25 10:00', 'hoofd (app)', 'open'), rij('2026-10-28 06:00', 'hoofd (app)', 'open')], [P('wv1', { status: 'gedaan', gesloten_op: oud })]);
+    toets('9 open rij zonder kaart: na 48 u BB2, daarvoor niet', ids(k).length === 1 && /^BB2-vj-r202610251000-/.test(ids(k)[0]), ids(k));
+    // niet gemeten
+    toets('9 vjMeting: nul punten / register onleesbaar = niet gemeten', !!(await R.vjMeting({ punten: async () => ({ punten: [] }), register: () => KOP.join('\n') })).fout
+      && !!(await R.vjMeting({ punten: async () => ({ punten: [P('wv1')] }), register: () => { throw new Error('ENOENT'); } })).fout
+      && R.vjKoppel({ fout: 'x' }, [], NU).gemeten === false);
+    // vjSchrijf
+    const tekst = KOP.concat([r5, rij('2026-10-27 09:00', 'machinekamer (Voor jou-kaart wv6)', 'open')]).join('\n') + '\n';
+    k = await K([r5, rij('2026-10-27 09:00', 'machinekamer (Voor jou-kaart wv6)', 'open')], [P('wv5', { status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David tikte Gedaan' }), P('wv6'), P('wv12')]);
+    let s = R.vjSchrijf(tekst, k.acties);
+    toets('9 vjSchrijf: Status vooraan met "— eerder:", nieuwe rij direct onder de kop', s.gedaan.length === 2 && s.tekst.indexOf('| afgehandeld 28-10 (Voor jou: David tikte Gedaan 27-10 11:00) — eerder: open — kaart wv5 |') > 0
+      && s.tekst.split('\n')[5].indexOf('| 2026-10-27 11:00 | machinekamer (Voor jou-kaart doen wv12;') === 0, s);
+    const k2 = R.vjKoppel(await R.vjMeting({ punten: async () => ({ punten: [P('wv5', { status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David tikte Gedaan' }), P('wv6'), P('wv12')] }), register: () => s.tekst }), [], NU);
+    toets('9 vjSchrijf: tweede ronde vindt niets meer (idempotent)', k2.bevindingen.length === 0 && k2.acties.length === 0, k2);
+    toets('9 vjSchrijf: nieuwe rij niet dubbel als hij er al staat', R.vjSchrijf(s.tekst, k.acties.filter((a) => a.soort === 'nieuw')).tekst === null);
+    s = R.vjSchrijf(tekst.replace('| open — kaart wv5 |', '| beantwoord 28-10 06:00: ja |'), k.acties.filter((a) => a.soort === 'status'));
+    toets('9 vjSchrijf: Status intussen veranderd → niet aanraken', s.tekst === null && /veranderde/.test(s.overgeslagen[0].reden), s);
+    s = R.vjSchrijf(tekst + r5 + '\n', k.acties.filter((a) => a.soort === 'status'));
+    toets('9 vjSchrijf: twee rijen met dezelfde Gesteld en Kanaal → niet aanraken', s.tekst === null && /2 passende/.test(s.overgeslagen[0].reden), s);
+    s = R.vjSchrijf(tekst.replace(/\n/g, '\r\n'), k.acties);
+    toets('9 vjSchrijf: CRLF blijft CRLF', s.tekst && s.tekst.indexOf('\r\n') > 0 && s.tekst.split('\r\n').length === tekst.split('\n').length + 1, s.gedaan);
+    // Bibliothecaris: plek 5 meet mee, niet gemeten = niet opgelost, geen weekkaart voor David
+    { const v = wegwerpVault({ [TGP]: TG });
+      const n = nepDb({ knopen: [], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [] });
+      let vjIo = { punten: async () => ({ punten: [P('wv5', { status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David tikte Gedaan' }), P('wv1', { status: 'gedaan', gesloten_op: oud })] }), register: () => KOP.concat([r5]).join('\n'), wv: async () => ({ items: WV }) };
+      const mm = R.maak({ vault: v, sbRpc: n.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: () => {}, nu: () => NU, get vj() { return vjIo; } });
+      let b = await mm.bibliothecaris();
+      const b0 = b;
+      const id = n.db.bevindingen.map((x) => x.bevinding_id).find((x) => /^BB3-vj-/.test(x));
+      toets('9 biblio: plek-5-verschil wordt een open bevinding, zin noemt Voor jou', !!id && /Voor jou ⇄ register: 0 open kaart\(en\), 1 open vraag/.test(b.zin) && b.vj.gemeten, [n.db.bevindingen.map((x) => x.bevinding_id), b.zin]);
+      vjIo = { punten: async () => { throw new Error('rpc mk_voor_jou_lijst http 503'); }, register: () => '' };
+      b = await mm.bibliothecaris();
+      toets('9 biblio: Voor jou niet te lezen → bevinding blijft open, zin zegt niet gemeten', n.db.bevindingen.some((x) => x.bevinding_id === id && x.status === 'open') && b.opgelost === 0 && /Voor jou ⇄ register niet gemeten/.test(b.zin), [b.opgelost, b.zin]);
+      const kb9 = R.kaartBiblio({ knopen: [], kaarten: [], bevindingen: n.db.bevindingen }, { nu: NU });
+      toets('9 weekkaart: plek 5 komt er niet op (machinestaat)', !kb9.kaart || !kb9.kaart.regels.some((x) => /^BB\d-vj-/.test(x.id)), kb9);
+      const kb9b = R.kaartBiblio({ knopen: [], kaarten: [], bevindingen: [{ bevinding_id: 'BB2-vj-wv6', check_id: 'BB2', ernst: 'warning', status: 'open' }, { bevinding_id: 'BB1-vj-r202610271000-abcdef', check_id: 'BB1', ernst: 'warning', status: 'open' }, { bevinding_id: 'BB5-vj-wv8-reg-abcdef', check_id: 'BB5', ernst: 'warning', status: 'open' }] }, { nu: NU });
+      toets('9 weekkaart: alleen plek-5-bevindingen → geen kaart', !kb9b.kaart && kb9b.reden === 'geen open verschillen', kb9b);
+      toets('9 biblio: wat de ronde zelf rechtzet telt niet voor de box (nieuw_box), wel voor nieuw', b0.nieuw >= 1 && b0.nieuw_box === b0.nieuw - 1 && !b0.nieuwe.some((x) => x.bevinding_id === id), [b0.nieuw, b0.nieuw_box]);
+      toets('9 boxRij: regel voor plek 5 als er een nieuwe vj-bevinding is', /plek 5 \(Voor jou/.test(R.boxRij({ nieuw: 1, zin: 'x', nieuwe: [{ bevinding_id: id, check_id: 'BB3', samenvatting: 's' }] }, 't')));
+      vjIo = { punten: async () => ({ punten: [P('wv5', { status: 'gedaan', gesloten_door: 'david', gesloten_op: oud, bewijs: 'app 27-10 11:00: David tikte Gedaan' })] }), register: () => KOP.concat([r5.replace('| open — kaart wv5 |', '| afgehandeld 28-10 — eerder: open |')]).join('\n'), wv: async () => ({ items: WV }) };
+      b = await mm.bibliothecaris();
+      toets('9 biblio: gemeten en gelijk → opgelost', !n.db.bevindingen.some((x) => x.bevinding_id === id) && b.opgelost >= 1, [n.db.bevindingen.map((x) => x.bevinding_id), b.opgelost]);
+      fs.rmSync(v, { recursive: true, force: true });
+    }
+  }
   console.log(goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);
 })().catch((e) => { console.log('ROOD  uitzondering ' + (e && e.stack || e)); process.exit(1); });
