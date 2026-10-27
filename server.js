@@ -252,7 +252,7 @@ function managersPoortBox(chatId, p) {
 const INACT_MS = 20 * 60 * 1000;
 const FG_MAX_MS = 30 * 60 * 1000;
 const BG_MAX_DEFAULT_MIN = 60;
-const BG_MAX_CAP_MIN = 120;
+const BG_MAX_CAP_MIN = 180;   // 27-10-2026 David: "bovengrens naar 180 minuten" (6 agents stopten sinds 24-10 op 120)
 const DONE_TTL_MS = 2 * 60 * 60 * 1000;
 const KILL_GRACE_MS = 10 * 1000;
 const WATCH_INTERVAL_MS = 30 * 1000;
