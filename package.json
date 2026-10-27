@@ -2,10 +2,11 @@
   "name": "claudebot-pod",
   "version": "1.0.0",
   "private": true,
-  "description": "Runtime-afhankelijkheden van de Claude-pod. GramJS (pakket 'telegram') is nodig voor telegram-reader.js en koppel-telegram.js; @simplewebauthn/server (14.0.3, vast) controleert de passkeys van de Socev-app (server.js handleApp, sinds 7-10-2026); de rest van de pod draait op de standaardbibliotheek van Node.",
+  "description": "Runtime-afhankelijkheden van de Claude-pod. GramJS (pakket 'telegram') is nodig voor telegram-reader.js en koppel-telegram.js; @simplewebauthn/server (14.0.3, vast) controleert de passkeys van de Socev-app (server.js handleApp, sinds 7-10-2026); de rest van de pod draait op de standaardbibliotheek van Node; @anthropic-ai/sdk (1.3.0, vast) leest PDF's via de Claude-API in pdf-lezer.js (wv1431, sleutel expliciet, nooit uit de omgeving).",
   "license": "UNLICENSED",
   "dependencies": {
     "telegram": "^2.26.22",
-    "@simplewebauthn/server": "14.0.3"
+    "@simplewebauthn/server": "14.0.3",
+    "@anthropic-ai/sdk": "1.3.0"
   }
 }

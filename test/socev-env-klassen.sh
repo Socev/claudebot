@@ -52,7 +52,7 @@ fs.writeFileSync(path.join(d, 'server.js'), fs.readFileSync('server.js', 'utf8')
 const poort = vrijePoort();
 // wv424b: nep-telegram-reader.js schrijft alleen op wat hij kreeg (args, NAMEN uit de omgeving).
 fs.writeFileSync(path.join(W, 'tg.js'), `require('fs').writeFileSync(${JSON.stringify(path.join(W, 'tg.uit'))}, JSON.stringify({ args: process.argv.slice(2), env: Object.keys(process.env) })); console.log('dialogen-lijst');`);
-const geheim = { GEHEIM_NEP: 'x', TELEGRAM_SESSIE: 'x', VAULT_BACKUP_CRYPT_WACHTWOORD: 'x', GEMINI_API_KEY_AUTO: 'x',
+const geheim = { GEHEIM_NEP: 'x', TELEGRAM_SESSIE: 'x', VAULT_BACKUP_CRYPT_WACHTWOORD: 'x', GEMINI_API_KEY_AUTO: 'x', ANTHROPIC_API_KEY_AUTO: 'x',
   CLOUDFLARE_AI_TOKEN_AUTO: 'x', N8N_API_KEY: 'x', N8N_WEBHOOK_SMS: 'x', N8N_WEBHOOK_SOCEV_AGENDA: 'x', N8N_WEBHOOK_MAILCONCEPT: 'x',
   SUPABASE_MCP_TOKEN: 'x', SUPABASE_SERVICE_ROLE: 'x', TELEGRAM_DEBUG_BOT_TOKEN: 'x', GIT_REPO_URL: 'x',
   N8N_MCP_TOKEN: 'x', AGENT_WEBHOOK_SECRET: 'x', CLOUDFLARE_API_TOKEN: 'x', CLOUDFLARE_TUNNEL_TOKEN_OLARES: 'x', TELEGRAM_API_HASH: 'x' };
@@ -195,6 +195,11 @@ rpc.listen(0, '127.0.0.1', async function () {
     toets('G onbekende smalle route: 404', g7._status === 404, String(g7._status));
     const rp = {}; rapporten.forEach((r) => { rp[r.label] = r.omgeving; });
     toets('G agentrapport geeft de klasse mee (Fable #9): mk en smal', rp['machinekamer: proef ag'] === 'mk' && rp['machinekamer: proef ah'] === 'smal', JSON.stringify(rp));
+    // wv1431 (review B1 PDF-lezer): geen enkele beurt of agent (hoofdkanaal, smal, machinekamer, /agent mk en smal) krijgt een
+    // Anthropic-API-sleutel, -token of -basis in zijn omgeving; anders liep de claude-CLI op het API-tegoed in plaats van het abonnement.
+    const alle = spawns();
+    const anth = alle.filter((x) => x.env.some((k) => /^ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)$/.test(k)));
+    toets('B1 (wv1431): geen ANTHROPIC_API_KEY/AUTH_TOKEN/BASE_URL in ' + alle.length + ' beurten en agents (ook met ANTHROPIC_API_KEY_AUTO in de pod-omgeving)', alle.length >= 8 && anth.length === 0, anth.map((x) => x.sleutel).join(','));
   } catch (e) { console.log('ROOD  toets brak af: ' + (e && e.stack)); fout++; }
   try { p && process.kill(-p.pid, 'SIGKILL'); } catch (e) {}
   rpc.close();

@@ -587,3 +587,34 @@ test('server.js: /facturen-ronde achter rolPoort + body-secret, één ronde tege
   assert.match(vz, /AbortSignal\.timeout\(120000\)/);
   assert.ok(!/send|versturen\s*=/.test(vz.replace(/zekerNietVerstuurd|fd\.append\('modus', v\.modus\)/g, '')), 'de pod kiest geen eigen verzendroute');
 });
+
+test('schaduw PDF-lezer (wv1431): na de transactie stukken + kern-uitkomst naar io.pdfSchaduw; een fout daar raakt de ronde niet', async () => {
+  const t = opzet(), g = nepGmail();
+  const lev = t.fdb.db.prepare("SELECT l.id, i.iban FROM leverancier l JOIN leverancier_iban i ON i.leverancier = l.id WHERE l.naam = 'Leverancier A B.V.'").get();
+  const bytes = Z.pdf(['Leverancier A B.V.', 'Factuur', 'Factuurnummer: SCHADUW-0001', 'Factuurdatum: 20-10-2026', 'Totaal incl. btw: EUR 60,50',
+    'Huisartsenpraktijk Tolgaarde B.V.', 'IBAN ' + lev.iban]);
+  const st = D.stukSchrijf(t.fdb, bytes);
+  D.voegToe(t.fdb, 'document', { id: D.nieuwId(), sha256: st.sha256, naam: 'portaal.pdf', mime: 'application/pdf', bytes: st.bytes, soort: 'pdf', te_lezen: 1, geupload_door: 'david (proef)', aangemaakt_op: new Date(NU).toISOString() });
+  const gezien = [];
+  let inTransactie = null;
+  const u = await t.ronde(g, NU + MIN, { pdfSchaduw: (job) => { inTransactie = t.fdb.db.isTransaction; gezien.push(job); } });
+  assert.equal(u.upload.gelezen, 1);
+  assert.equal(gezien.length, 1);
+  assert.equal(inTransactie, false, 'pas na de transactie');
+  const j = gezien[0];
+  assert.equal(j.soort, 'facturen');
+  assert.equal(j.documenten[0].sha256, st.sha256);
+  assert.ok(Buffer.isBuffer(j.documenten[0].bytes) && j.documenten[0].bytes.equals(bytes));
+  assert.match(j.documenten[0].tekst, /SCHADUW-0001/);
+  assert.equal(j.kern[0].document, st.sha256);
+  assert.equal(j.kern[0].nummer, 'SCHADUW-0001');
+  assert.equal(j.kern[0].incl, 6050);
+  // postvak aan, schaduw gooit: de ronde gaat gewoon door
+  assert.equal(t.fdb.db.prepare("UPDATE bron SET actief = 1 WHERE soort = 'verzamelpostvak'").run().changes, 1);
+  g.mails.push({ id: 'sch00000000000001', thread_id: 'x', van: 'facturen@leverancier-a.invalid', aan: 'd.schaap+facturen@gmail.com', onderwerp: 'Factuur', labels: ['INBOX'],
+    datum: '2026-10-22T08:00:00.000Z', datum_lokaal: '2026-10-22T10:00:00+02:00', dag_lokaal: '2026-10-22' });
+  g.bijlagen.sch00000000000001 = [{ naam: 'f.pdf', mime: 'application/pdf', bytes: Z.pdf(['Leverancier A B.V.', 'Factuur', 'Factuurnummer: SCHADUW-0002', 'Totaal incl. btw: EUR 70,00', 'IBAN ' + lev.iban]) }];
+  const u2 = await t.ronde(g, NU + 10 * MIN, { pdfSchaduw: () => { throw new Error('schaduw stuk'); } });
+  assert.equal(u2.postvak.ok, true, JSON.stringify(u2.postvak));
+  assert.equal(t.n("SELECT count(*) AS n FROM factuur WHERE nummer = 'SCHADUW-0002'"), 1);
+});

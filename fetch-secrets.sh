@@ -287,7 +287,10 @@ process.stdin.on("end", () => {
     # `ld_preload` wordt LD_PRELOAD - waarmee een kluisregel de pod niet zijn geheim
     # geeft maar zijn uitvoering overneemt. Zolang het laden dynamisch is, is dit de
     # prijs: één regel die zegt wat er nooit uit de kluis mag komen.
-    case " PATH HOME SHELL IFS ENV BASH_ENV LD_PRELOAD LD_LIBRARY_PATH NODE_OPTIONS PYTHONPATH PERL5LIB USER LOGNAME PWD " in
+    # wv1431 (review B1 PDF-lezer): een ANTHROPIC_API_KEY/AUTH_TOKEN/BASE_URL in de pod-omgeving zou de claude-CLI van Socev, de
+    # machinekamer en alle agents van het abonnement naar het API-tegoed (of een andere server) verzetten. API-sleutels leest de pod
+    # alleen via de Management-API (pdf-lezer: anthropic_api_key_pdf), nooit via deze lus.
+    case " PATH HOME SHELL IFS ENV BASH_ENV LD_PRELOAD LD_LIBRARY_PATH NODE_OPTIONS PYTHONPATH PERL5LIB USER LOGNAME PWD ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL " in
       *" $ENVNAAM "*)
         log "GEWEIGERD: $NAAM zou de omgevingsvariabele \$$ENVNAAM overschrijven - overgeslagen"
         continue ;;

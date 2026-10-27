@@ -23,7 +23,8 @@ http.createServer((q, s) => { let b = ""; q.on("data", (d) => b += d); q.on("end
     { naam: "claude_code_oauth_token", waarde: "nep-claude" },
     { naam: "n8n_mcp_token", waarde: "kluis-mcp" },
     { naam: "n8n_api_key", waarde: "kluis-api" },
-    { naam: "cloudflare_tunnel_token_olares", waarde: "kluis-tunnel" } ] })); }); })
+    { naam: "cloudflare_tunnel_token_olares", waarde: "kluis-tunnel" },
+    { naam: "anthropic_api_key", waarde: "nep-api" }, { naam: "anthropic_auth_token", waarde: "nep-auth" }, { naam: "anthropic_base_url", waarde: "http://nep.invalid" } ] })); }); })
   .listen(parseInt(process.argv[1], 10), "127.0.0.1");
 ' "$POORT" "$W/rpc.log" & NEP=$!
 for _ in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$POORT/" && break; sleep 0.1; done
@@ -31,7 +32,7 @@ for _ in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$POORT/" && brea
 # Het commando na fetch-secrets: per naam AFWEZIG of de hash (12 tekens).
 cat > "$W/druk.sh" <<'SH'
 #!/bin/sh
-for n in N8N_MCP_TOKEN N8N_API_KEY CLOUDFLARE_TUNNEL_TOKEN_OLARES UITWIJK_N8N_MCP_TOKEN UITWIJK_N8N_API_KEY POD_BOOTSTRAP_SECRET FETCH_SECRETS_KANT; do
+for n in N8N_MCP_TOKEN N8N_API_KEY CLOUDFLARE_TUNNEL_TOKEN_OLARES UITWIJK_N8N_MCP_TOKEN UITWIJK_N8N_API_KEY POD_BOOTSTRAP_SECRET FETCH_SECRETS_KANT ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL; do
   v="$(printenv "$n")"
   if [ -z "$v" ]; then echo "$n AFWEZIG"; else echo "$n $(printf '%s' "$v" | sha256sum | cut -c1-12)"; fi
 done
@@ -59,6 +60,8 @@ toets 'olares: genegeerd-regel' "$(grep -q 'kant olares: \$UITWIJK_N8N_MCP_TOKEN
 toets 'olares: FETCH_SECRETS_KANT=olares' "$([ "$(waarde olares FETCH_SECRETS_KANT)" = "$(h olares)" ] && echo 1)"
 toets 'olares: tunnelnaam in SECRETS_GELADEN' "$(grep -q '^SECRETS_GELADEN .*cloudflare_tunnel_token_olares' "$W/olares.uit" && echo 1)"
 toets 'olares: bootstrapgeheim niet doorgegeven' "$([ "$(waarde olares POD_BOOTSTRAP_SECRET)" = AFWEZIG ] && echo 1)"
+# wv1431 (review B1): ANTHROPIC_API_KEY/AUTH_TOKEN/BASE_URL komen nooit uit de kluis in de omgeving (zou de CLI naar het API-tegoed zetten)
+toets 'olares: ANTHROPIC_API_KEY/AUTH_TOKEN/BASE_URL geweigerd' "$([ "$(waarde olares ANTHROPIC_API_KEY)" = AFWEZIG ] && [ "$(waarde olares ANTHROPIC_AUTH_TOKEN)" = AFWEZIG ] && [ "$(waarde olares ANTHROPIC_BASE_URL)" = AFWEZIG ] && grep -q 'GEWEIGERD: anthropic_api_key' "$W/olares.log" && echo 1)"
 
 # 2. kant vps met override: VPS-waarden, tunneltoken weg (ook uit de namenlijst)
 draai vps SOCEV_KANT=vps UITWIJK_N8N_MCP_TOKEN=vps-mcp UITWIJK_N8N_API_KEY=vps-api

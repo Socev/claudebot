@@ -12,6 +12,9 @@
  * server.js (io.luik, io.luikBytes, io.verzender); de stukken leest facturen-db.js. De enige procesaanroep is pdftotext met een vast pad,
  * PDF op stdin en tekst op stdout: de tekst blijft in het geheugen, gaat naar het besliskader en valt weg (nooit naar schijf, db of log).
  * CI-poort (.github/workflows/build.yml): alleen crypto, child_process (execFile van /usr/bin/pdftotext) en de Facturen-buren.
+ * SCHADUW PDF-lezer (wv1431): na de transactie van een bericht of upload geeft de koerier de stukken (bytes, vluchtige tekst) en de uitkomst
+ * van de kern door aan io.pdfSchaduw (server.js → pdf-lezer.js, K1: via io, zoals pdftotext). Die bepaalt zelf of het bericht naar Claude
+ * mag (patiëntregel fail-closed) en logt alleen velden en verschilvlaggen. Niets in de app verandert; een fout daar raakt de ronde niet.
  *
  * NIET ONDERHANDELBAAR. Niets gaat naar buiten zonder dat een mens Bevestigen klikte (alleen opdrachten uit de wachtrij, na verstuur_na).
  * Vóór elke verzending de consistentiecontrole (bytes opnieuw → sha256, bijlagen en vingerafdruk opnieuw uit de verse rijen, niet prive,
@@ -308,7 +311,7 @@ async function ronde(fdb, io, o) {
   }
 
   // 4. handmatige PDF-uploads (te_lezen): Davids eigen handeling, dus ook als het postvak uit staat
-  try { uit.upload = await leesUploads(fdb, pdf, { klok, wie, start }); } catch (e) { fout('upload', e); }
+  try { uit.upload = await leesUploads(fdb, pdf, { klok, wie, start, io }); } catch (e) { fout('upload', e); }
 
   // 5. verzamelpostvak (alleen als de bron aan staat; tot F5 uit)
   const bron = fdb.db.prepare("SELECT * FROM bron WHERE soort = 'verzamelpostvak' AND actief = 1 ORDER BY naam LIMIT 1").get();
@@ -374,6 +377,21 @@ async function verstuurEen(fdb, io, op, modus, o, uit) {
   if (r.definitief) uit.verzending.definitief++;
 }
 
+// ───────────────────────────── schaduw PDF-lezer (wv1431) ─────────────────────────────
+
+// Na de transactie, nooit ervoor. De kern-uitkomst per factuur uit de database (alleen de velden die de schaduw vergelijkt).
+function schaduwPdf(fdb, io, berichtId, bericht, documenten, ruw, facturen) {
+  if (typeof io.pdfSchaduw !== 'function' || !documenten.length) return;
+  try {
+    const q = fdb.db.prepare('SELECT f.status, f.nummer, f.factuurdatum, f.incl, f.iban, f.entiteit, d.sha256 AS document, u.sha256 AS ubl_document, d.tekstlaag ' +
+      'FROM factuur f LEFT JOIN document d ON d.id = f.document LEFT JOIN document u ON u.id = f.ubl_document WHERE f.id = ?');
+    const kern = (facturen || []).map((f) => q.get(f.id)).filter(Boolean).map((x) => Object.assign({}, x, { scan: x.tekstlaag === 0 }));
+    io.pdfSchaduw({ soort: 'facturen', bericht_id: berichtId || null, bericht: bericht || null, kern,
+      documenten: documenten.map((d) => ({ sha256: d.sha256, naam: d.naam, mime: d.mime, tekst: d.tekst, tekstlaag: d.tekstlaag, ubl_xml: d.ubl_xml,
+        bytes: ruw.get(d.sha256) || null, patientkenmerk_koerier: !!d.patientkenmerk_koerier })) });
+  } catch (e) { /* schaduw: nooit de ronde raken */ }
+}
+
 // ───────────────────────────── te_lezen-uploads ─────────────────────────────
 
 async function leesUploads(fdb, pdf, o) {
@@ -390,8 +408,9 @@ async function leesUploads(fdb, pdf, o) {
       const bytes = D.stukLees(fdb, d.sha256);
       const t = await pdf(bytes);
       if (!t.ok) throw Object.assign(new Error('pdftotext'), { code: t.fout });
-      const v = F.verwerkBericht(fdb, { bericht: null, documenten: [{ sha256: d.sha256, naam: d.naam, mime: d.mime || 'application/pdf', bytes: d.bytes, tekst: t.tekst, tekstlaag: t.tekstlaag }] },
-        { wie: o.wie, nu: o.klok(), geupload_door: d.geupload_door });
+      const docs = [{ sha256: d.sha256, naam: d.naam, mime: d.mime || 'application/pdf', bytes: d.bytes, tekst: t.tekst, tekstlaag: t.tekstlaag }];
+      const v = F.verwerkBericht(fdb, { bericht: null, documenten: docs }, { wie: o.wie, nu: o.klok(), geupload_door: d.geupload_door });
+      schaduwPdf(fdb, o.io || {}, null, null, docs, new Map([[d.sha256, bytes]]), v.facturen);
       tel.gelezen++; tel.facturen += v.facturen.length;
       delete pogingen[d.id];
     } catch (e) { tel.fout++; pogingen[d.id] = (pogingen[d.id] || 0) + 1; }
@@ -490,18 +509,22 @@ async function leesBericht(fdb, bron, io, pdf, m, eigen, o, tel, nietGelezen) {
     catch (e) { /* dan blijft de doorstuurder de afzender (bronnen.md) */ }
   }
   // stukken eerst naar schijf (atomair, idempotent), dan in één transactie bericht + besliskader
-  for (const d of documenten) { const st = D.stukSchrijf(fdb, d._bytes); d.sha256 = st.sha256; delete d._bytes; }
-  let n = 0;
+  const ruw = new Map();
+  for (const d of documenten) { const st = D.stukSchrijf(fdb, d._bytes); d.sha256 = st.sha256; ruw.set(d.sha256, d._bytes); delete d._bytes; }
+  let n = 0, nieuwId = null, vf = null;
   D.transactie(fdb, function () {
     if (fdb.db.prepare('SELECT 1 FROM bericht WHERE bron = ? AND message_id = ?').get(bron.id, m.id)) return;
     const id = D.nieuwId();
+    nieuwId = id;
     D.voegToe(fdb, 'bericht', { id, bron: bron.id, message_id: kort(m.id, 200), draad_id: kort(m.thread_id, 200), afzender, onderwerp: kort(m.onderwerp, 300),
       datum_lokaal: kort(m.datum_lokaal, 40), bron_link: 'https://mail.google.com/mail/u/0/#all/' + encodeURIComponent(String(m.id).slice(0, 100)), ontvangen_op: nuIso(o.klok()) });
     if (!documenten.length) return;
     const v = F.verwerkBericht(fdb, { bericht: { id, message_id: m.id, afzender, onderwerp: m.onderwerp }, documenten }, { wie: o.wie, nu: o.klok() });
-    n = v.facturen.length;
+    n = v.facturen.length; vf = v.facturen;
   });
-  for (const d of documenten) { d.tekst = null; d.ubl_xml = null; }   // vluchtig: weg
+  if (vf) schaduwPdf(fdb, io, nieuwId, { afzender, onderwerp: m.onderwerp }, documenten, ruw, vf);
+  for (const d of documenten) { d.tekst = null; d.ubl_xml = null; }   // vluchtig: weg (de schaduw houdt zijn eigen verwijzing tot hij klaar is)
+  ruw.clear();
   return n;
 }
 

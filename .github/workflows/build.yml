@@ -352,6 +352,12 @@ jobs:
       - name: "intake-router (wv980, OVIS Intake stap 2: router in de schaduw)"
         if: ${{ !cancelled() }}
         run: bash test/intake-router.sh
+      # PDF-lezer via de Claude-API (wv1431): CI-poort (alleen crypto/fs/path), de echte SDK tegen een nep-API (sleutel en basis expliciet,
+      # fallbacks + beta-kop, effort, structured output, cache_control), terugvallen, grens met reservering en herstart, patiëntregel
+      # fail-closed (kenmerk, OCR, ingebedde PDF), schaduw zonder tekst, batches; koppeling in server.js en uitrol.sh.
+      - name: "pdf-lezer (wv1431, PDF's lezen via de Claude-API, schaduw)"
+        if: ${{ !cancelled() }}
+        run: bash test/pdf-lezer.sh
       - name: "zoek-snel (wv1252, Zoek snel achter het OVIS-logo)"
         if: ${{ !cancelled() }}
         run: bash test/zoek-snel.sh

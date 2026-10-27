@@ -379,3 +379,29 @@ test('Fable wv980 #7: html-entiteiten (&euro;, hex) gedecodeerd', () => {
   const m = K.mailLees(Buffer.from('Content-Type: text/html; charset=utf-8\r\n\r\n<p>Totaal: &euro; 12,00 &#x2013; klaar</p>', 'latin1'));
   assert.match(m.tekst, /Totaal: € 12,00 – klaar/);
 });
+
+test('schaduw PDF-lezer (wv1431): alleen een beoordeeld stuk gaat door (pad + lokale tekst), na de transactie; vastgehouden nooit; fout raakt de router niet', async () => {
+  const L = logboek();
+  const fac = L.zet({ bron: 'scanner:scansnap', profiel: 'scansnap@1', delen: [{ rol: 'origineel', mime: 'application/pdf', bytes: FACTUUR_PDF }] });
+  L.zet({ bron: 'scanner:scansnap', profiel: 'scansnap@1', marker: 'niet_te_lezen', delen: [{ rol: 'origineel', mime: 'application/pdf', bytes: '%PDF-scan zonder tekstlaag' }] });
+  const jobs = [];
+  let rijBestond = null;
+  const r = R.maak(Object.assign({ dir: L.dir }, stubs({ pdfSchaduw: function (j) { rijBestond = !!L.db.prepare('SELECT 1 FROM router_stuk WHERE stuk_id = ?').get(j.stuk_id); jobs.push(j); } })));
+  const u = await r.ronde();
+  assert.equal(u.verwerkt, 2);
+  assert.equal(jobs.length, 1, 'alleen het beoordeelde stuk');
+  assert.equal(rijBestond, true, 'na de transactie');
+  const j = jobs[0];
+  assert.equal(j.soort, 'intake'); assert.equal(j.stuk_id, fac);
+  assert.equal(j.delen.length, 1);
+  assert.equal(fs.readFileSync(j.delen[0].pad, 'utf8'), FACTUUR_PDF);
+  assert.match(j.delen[0].tekst, /VE-2026-0042/);
+  assert.deepEqual(j.router, { soort: 'bewijsstuk', entiteit: 'TG', afzender: 'org:voorbeeld-energie' });
+  r.sluit();
+  const L2 = logboek();
+  L2.zet({ bron: 'scanner:scansnap', profiel: 'scansnap@1', delen: [{ rol: 'origineel', mime: 'application/pdf', bytes: FACTUUR_PDF }] });
+  const r2 = R.maak(Object.assign({ dir: L2.dir }, stubs({ pdfSchaduw: function () { throw new Error('schaduw stuk'); } })));
+  const u2 = await r2.ronde();
+  assert.equal(u2.verwerkt, 1); assert.equal(u2.fout, 0);
+  r2.sluit();
+});

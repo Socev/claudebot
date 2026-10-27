@@ -3746,6 +3746,7 @@ function handleRequest(req, res) {
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
       facturen_ingang: facturenIngangInfo(),   // wv856: smalle ingang /fac (ingericht?, uit?; geen inhoud, geen gebruikers)
       intake: intakeInfo(),
+      pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
@@ -14196,7 +14197,7 @@ async function facturenVerzender(v) {
   }
   throw vooraf('verzender-webhook niet gevonden');
 }
-function facturenIo() { return { luik: appAgendaApi, luikBytes: facturenLuikBytes, verzender: facturenVerzender }; }
+function facturenIo() { return { luik: appAgendaApi, luikBytes: facturenLuikBytes, verzender: facturenVerzender, pdfSchaduw: pdfSchaduw }; }   // wv1431: schaduw PDF-lezer
 function facturenKoerierInfo(fdb) {
   if (!facturenKoerier) return { aan: false };
   let k = null;
@@ -14445,7 +14446,7 @@ function intakeRouterHaal() {
     intakeRouterMod = require(p).maak({ dir: INTAKE_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       pdfBbox: function (pad) { return intakeProces('pdftotext', ['-q', '-bbox', '-l', '20', '-enc', 'UTF-8', pad, '-'], { ms: 30000 }); },
       paginas: async function (pad) { const t = await intakeProces('pdfinfo', [pad], { ms: 15000 }); const m = t && /^Pages:\s+(\d+)/m.exec(t); return m ? Number(m[1]) : null; },
-      ocr: intakeOcr, docx: intakeDocx,
+      ocr: intakeOcr, docx: intakeDocx, pdfSchaduw: pdfSchaduw,   // wv1431: schaduw PDF-lezer (alleen beoordeelde stukken)
       handvatten: function () { return appSbRpc('ovis_intake_handvatten', {}); },
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; } });
   } catch (e) { logError('intake-router', e); intakeRouterMod = null; }
@@ -14458,8 +14459,99 @@ async function intakeTik() {
   const ir = intakeRouterStand() ? intakeRouterHaal() : null;
   if (ir) { try { const u = await ir.ronde(); if (u && (u.verwerkt || u.fout)) schrijfLog(nu() + ' intake-router ' + velden({ verwerkt: u.verwerkt || 0, vastgehouden: u.vastgehouden || 0, fout: u.fout || 0 })); } catch (e) { logError('intake-router', e); } }
   try { intakeDagTelling(); } catch (e) { logError('intake-telling', e); }
+  await pdfBatchTik();   // wv1431: alleen als er een batch openstaat of wacht (anders geen API-aanroep)
 }
 if (intake && SERVER_ECHT) { setTimeout(function () { intakeTik(); }, 120000).unref(); setInterval(function () { intakeTik(); }, 5 * 60000).unref(); }
+
+// ── PDF-lezer via de Claude-API (wv1431, 27-10-2026; bouwplan vault "01_Ontwikkeling/PDF-verwerking via Claude (bouwplan 27-10-2026).md") ──
+// pdf-lezer.js leest een PDF met Claude (Messages API, één aanroep per stuk: velden + entiteit, voor Intake ook markdown). In deze stap
+// alleen IN DE SCHADUW naast de Facturen-koerier (io.pdfSchaduw) en de Intake-router (o.pdfSchaduw): velden, sha256 en verschilvlaggen naar
+// PDF_LEZER_DIR/schaduw.jsonl, verbruik zonder tekst naar verbruik.jsonl; in de app verandert niets. Schakelaar PDF_LEZER_DIR/pdf-lezer.json
+// ({"aan": true, "schaduw": true}; ontbreekt hij: uit). Ontbreekt pdf-lezer.js (terugrol), dan niets en pdf_lezer.aan=false in /health.
+// SLEUTEL (review B1): kluisnaam anthropic_api_key_pdf, NIET op de witte lijst (dus nooit in process.env of bij een kind). De pod leest hem op
+// het moment van gebruik via de Management-API (zelfde route als bankSleutels), 10 min in het geheugen (ontbreekt hij: 2 min), en geeft hem
+// alleen als expliciete apiKey aan de SDK. SDK: @anthropic-ai/sdk uit het image, anders uit de brug PDF_LEZER_DIR/vendor (tot het image
+// hem heeft; zelfde versie als package.json). Lokale lezing voor de patiëntregel en de controle: pdftotext/pdfinfo/pdftoppm/tesseract op een
+// tijdelijk bestand in PDF_LEZER_DIR/tmp (0700), meteen weer weg.
+const PDF_LEZER_DIR = serverPad('pdf_lezer', process.env.PDF_LEZER_DIR, '/opt/data/pdf-lezer', serverProefDeel('pdf-lezer'));
+const PDF_SLEUTEL_NAAM = 'anthropic_api_key_pdf';
+let pdfSleutelCache = null;   // { w, tot }; alleen in het geheugen
+async function pdfSleutel() {
+  if (pdfSleutelCache && Date.now() < pdfSleutelCache.tot) return pdfSleutelCache.w;
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) return null;
+  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
+    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-pdf-lezer/1' },
+    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + PDF_SLEUTEL_NAAM + "'" }),
+    signal: AbortSignal.timeout(20000) });
+  if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
+  const rijen = await r.json();
+  const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
+  pdfSleutelCache = { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 };
+  return pdfSleutelCache.w;
+}
+function pdfSdk() {
+  const klasse = function (x) { return x && (x.Anthropic || x.default || x); };
+  try { return { klasse: klasse(require('@anthropic-ai/sdk')), bron: 'image' }; } catch (e) {}
+  try { return { klasse: klasse(require('module').createRequire(path.join(PDF_LEZER_DIR, 'vendor', 'package.json'))('@anthropic-ai/sdk')), bron: 'brug' }; }
+  catch (e) { return null; }
+}
+// Een PDF even op schijf voor pdfinfo/pdftoppm (die lezen geen stdin); map 0700, bestand 0600, altijd weer weg.
+async function pdfTijdelijk(bytes, fn) {
+  const map = path.join(PDF_LEZER_DIR, 'tmp', crypto.randomBytes(8).toString('hex'));
+  fs.mkdirSync(map, { recursive: true, mode: 0o700 });
+  try { const p = path.join(map, 'stuk.pdf'); fs.writeFileSync(p, bytes, { mode: 0o600 }); return await fn(p, map); }
+  finally { try { fs.rmSync(map, { recursive: true, force: true }); } catch (e) { logError('pdf-lezer-tmp', e); } }
+}
+const pdfLezer = (function () {
+  const p = path.join(__dirname, 'pdf-lezer.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ dir: PDF_LEZER_DIR, sleutel: pdfSleutel, sdk: pdfSdk,
+      kern: require(path.join(__dirname, 'facturen-kern.js')), patientpoort: require(path.join(__dirname, 'intake', 'patientpoort.js')),
+      paginas: function (bytes) { return pdfTijdelijk(bytes, async function (f) { const t = await intakeProces('pdfinfo', [f], { ms: 15000 }); const m = t && /^Pages:\s+(\d+)/m.exec(t); return m ? Number(m[1]) : null; }); },
+      pdftotext: function (bytes) { return pdfTijdelijk(bytes, async function (f) { const t = await intakeProces('pdftotext', ['-q', '-layout', '-enc', 'UTF-8', f, '-'], { ms: 30000 }); return t == null ? { ok: false } : { ok: true, tekst: t }; }); },
+      ocr: function (bytes, paginas) {
+        return pdfTijdelijk(bytes, async function (f, map) {
+          const delen = []; let gelezen = 0;
+          for (const n of paginas.slice(0, 5)) {
+            const r = await intakeProces('pdftoppm', ['-q', '-r', '200', '-f', String(n), '-l', String(n), '-png', f, path.join(map, 'p' + n)], { ms: 120000 });
+            const png = r == null ? null : fs.readdirSync(map).find(function (x) { return x.indexOf('p' + n + '-') === 0 && /\.png$/.test(x); });
+            if (!png) continue;
+            const t = await intakeProces('tesseract', [path.join(map, png), 'stdout', '-l', 'nld+eng', '--psm', '3'], { ms: 120000 });
+            if (t != null) { gelezen++; delen.push(t); }
+          }
+          return { tekst: delen.join('\n'), gelezen };
+        });
+      },
+      melding: function (t) { ovisBoxRij('\n## [log] ' + new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16) + ' — ' + t + '\n- status: open\n- van: pod:pdf-lezer\n'); },
+      log: function (r) { schrijfLog(nu() + ' pdf-lezer ' + r); }, fout: logError });
+  } catch (e) { logError('pdf-lezer', e); return null; }
+})();
+// Entiteiten voor de leesopdracht (sleutel, naam, KvK, aliassen) uit de Facturen-database; 10 min in het geheugen.
+let pdfEntCache = null;
+function pdfEntiteiten() {
+  if (pdfEntCache && Date.now() - pdfEntCache.op < 10 * 60000) return pdfEntCache.l;
+  let l = [];
+  try {
+    const fdb = facturenRoutes ? facturenOpen() : null;
+    if (fdb) l = fdb.db.prepare('SELECT sleutel, naam, naam_kort, kvk, aliassen FROM entiteit WHERE actief = 1 ORDER BY sleutel').all().map(function (e) {
+      let al = []; try { al = JSON.parse(e.aliassen || '[]') || []; } catch (x) { al = []; }
+      return { sleutel: e.sleutel, naam: e.naam, naam_kort: e.naam_kort, kvk: e.kvk || null, aliassen: Array.isArray(al) ? al : [] };
+    });
+  } catch (e) { logError('pdf-lezer-entiteiten', e); }
+  pdfEntCache = { op: Date.now(), l };
+  return l;
+}
+function pdfSchaduw(job) { if (!pdfLezer || !rolPrimair()) return false; job.entiteiten = pdfEntiteiten(); return pdfLezer.schaduw(job); }
+function pdfLezerInfo() { if (!pdfLezer) return { aan: false, module: false }; try { return pdfLezer.health(); } catch (e) { return { fout: true }; } }
+let pdfBatchOp = 0;
+async function pdfBatchTik() {
+  if (!pdfLezer || !rolPrimair() || Date.now() - pdfBatchOp < 15 * 60000) return;
+  pdfBatchOp = Date.now();
+  try { const u = await pdfLezer.batchTik(); if (u && (u.opgehaald || u.ingediend || u.fout)) schrijfLog(nu() + ' pdf-lezer batch ' + velden(u)); } catch (e) { logError('pdf-lezer-batch', e); }
+}
 
 // ── ScanSnap → OVIS Intake (wv1343, 26-10-2026; bouwplan vault "01_Ontwikkeling/OVIS Intake - ScanSnap-scans (bouwplan 26-10-2026).md") ──
 // Elk kwartier (echte pod, primaire kant, schakelaar INTAKE_DIR/scansnap.json {"aan": true}): nieuwe scans uit gdrive:ScanSnap via rclone
@@ -16318,7 +16410,8 @@ if (OFFSITE_INTERVAL_MIN > 0 && !offsiteDoorRunsh()) {
 // start van server.js; AUTO_UIT=1 in dat bestand weigert alle gesprekken bij de volgende start van het kind).
 // Het kind erft NIET de pod-omgeving: alleen een witte lijst, met als enige sleutels CLOUDFLARE_AI_TOKEN_AUTO (een
 // token met alleen Workers AI-rechten; ZONDER dat token start het kind niet - het brede CLOUDFLARE_API_TOKEN gaat
-// bewust nooit naar een proces achter een publiek pad, review Fable 3-10), ANTHROPIC_API_KEY_AUTO als die bestaat, en
+// bewust nooit naar een proces achter een publiek pad, review Fable 3-10), en (wv1431, review B1: geen Anthropic-sleutel meer naar dit kind;
+// anthropic_api_key_auto is van de witte lijst)
 // sinds 4-10-2026 avond GEMINI_API_KEY_AUTO als GEMINI_API_KEY (kluisnaam gemini_api_key_auto, eigen sleutel voor de
 // stem van het kastje, David: "dezelfde als de ochtendbriefing"; zonder sleutel spreekt Piper).
 // Valt server.js weg, dan sluit het ipc-kanaal en stopt het kind zelf (geen wees met oude code op de poort).
@@ -16374,7 +16467,6 @@ function autoStart() {
   }, cfg, { PORT: String(AUTO_POORT), AUTO_HOST: '127.0.0.1' });
   delete env.AUTO_PROCES;
   env.CF_AI_TOKEN = process.env.CLOUDFLARE_AI_TOKEN_AUTO;
-  if (process.env.ANTHROPIC_API_KEY_AUTO) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY_AUTO;
   if (process.env.GEMINI_API_KEY_AUTO) env.GEMINI_API_KEY = process.env.GEMINI_API_KEY_AUTO;
   if (!env.CF_ACCOUNT_ID) env.CF_ACCOUNT_ID = LESSEN_CF_ACCOUNT;   // geen geheim; staat ook bij de lessen-injectie
   let k;

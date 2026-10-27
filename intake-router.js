@@ -22,6 +22,9 @@
  *   8 eigen entiteit · 9 bestemmingen (lenzen) · 10 zeker genoeg? (automatisch alleen bij soort én afzender hoog zonder marker; kennislens:
  *     de huidige indeling als regel).
  *
+ * SCHADUW PDF-lezer (wv1431): een stuk dat de router 'beoordeeld' had (marker geen, alles lokaal gelezen) gaat met zijn PDF-onderdelen
+ *   (pad + de lokale tekst als controle) naar o.pdfSchaduw (pdf-lezer.js via server.js), ná de transactie. De router blijft op zijn eigen
+ *   lokale tekst beslissen (I3: de letterlijk-toets sluit modeluitvoer uit); een vastgehouden stuk gaat nooit mee.
  * VORM. Alleen fs, path, crypto en node:sqlite (CI-poort, zie test/intake-router.sh). Processen (pdftotext, tesseract, unzip), Supabase
  * en de kaarten komen van server.js via maak({...}). De zuivere kern (K) is los te gebruiken (herhaling over het archief, toets a).
  */
@@ -568,7 +571,7 @@ function maak(o) {
     const meta = (function () { try { return JSON.parse(s.meta) || {}; } catch (e) { return {}; } })();
     const resultaat = [];   // [stap, uitkomst, kracht, bewijs]
     const B = function (stap, uitkomst, kracht, bewijs) { resultaat.push([stap, uitkomst, kracht, bewijs]); };
-    let status, sam, bestem = [];
+    let status, sam, bestem = [], schaduwJob = null;
     if (!PROFIELEN.has(s.profiel)) {
       B('ontvangst', 'buiten_router', null, { profiel: s.profiel });
       status = 'buiten_router'; sam = { profiel: s.profiel, bron: s.bron };
@@ -638,6 +641,12 @@ function maak(o) {
             entiteit: en.knoop || null, entiteit_kracht: en.kracht, label_route: labels, bestemmingen: bs, twijfel, velden: vd.velden.map(function (v) { return v.veld; }), kenmerken: vd.kenmerken };
           sam.label_gelijk = labels.length ? labels.indexOf(en.knoop) >= 0 : null;
           bestem = bs;
+          if (o.pdfSchaduw && !lt.deels.length && !lt.onleesbaar.length) {
+            const pdfs = delen.filter(function (d) { return d.rol !== 'representatie' && String(d.mime || '').toLowerCase() === 'application/pdf'; });
+            const tekstVan = function (deel) { const x = lt.delen.find(function (y) { return y.deel === deel; }); return x ? x.tekst : null; };
+            const ds = pdfs.map(function (d) { return { deel: d.deel, sha256: d.sha256, pad: blobPad(d.sha256), tekst: tekstVan(d.deel) }; }).filter(function (d) { return d.tekst; });
+            if (ds.length) schaduwJob = { soort: 'intake', stuk_id: s.stuk_id, delen: ds, router: { soort: so.soort, entiteit: en.knoop || null, afzender: af.knoop || null } };
+          }
         }
       }
     }
@@ -647,6 +656,7 @@ function maak(o) {
       db.prepare('INSERT INTO router_stuk (stuk_id, versie, status, regelversie, compilatienummer, op, samenvatting) VALUES (?,?,?,?,?,?,?)')
         .run(s.stuk_id, s.versie, status, REGELVERSIE, reg ? reg.compilatienummer : null, nuIso(nu()), JSON.stringify(sam));
     });
+    if (schaduwJob) { try { o.pdfSchaduw(schaduwJob); } catch (e) { /* schaduw: nooit de router raken */ } }
     return Object.assign({ stuk_id: s.stuk_id, status }, sam);
   }
   function tx(f) { db.exec('BEGIN IMMEDIATE'); try { f(); db.exec('COMMIT'); } catch (e) { try { db.exec('ROLLBACK'); } catch (e2) {} throw e; } }

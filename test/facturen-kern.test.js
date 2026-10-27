@@ -377,7 +377,7 @@ test('fixture scan zonder tekstlaag → te_beoordelen, geen velden, wel leveranc
 test('fixture patiëntkenmerk → alleen eigenaar, geen model, geen kenmerk in redenen', () => {
   const t = pdfA({ extra: 'Betreft patiënt: zie dossier\nBSN: 111222333\nGeboortedatum: 01-02-1950' });
   const mk = { factuurnummer: 'MODEL-1', entiteit_hint: 'groenhouten' };
-  const r = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t)], model_kandidaat: mk }, ctxBasis());
+  const r = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t, { model_kandidaat: mk })] }, ctxBasis());
   const f = r.facturen[0];
   assert.equal(f.patientkenmerk, true);
   assert.deepEqual(f.patientkenmerk_soorten, ['bsn', 'patient_geboortedatum']);
@@ -396,7 +396,7 @@ test('fixture patiëntkenmerk → alleen eigenaar, geen model, geen kenmerk in r
   assert.equal(K.stapPatientkenmerk(['Aantal patiënten: 3']).kenmerk, false);
   assert.equal(K.stapPatientkenmerk(['x'], true).soorten[0], 'koerier');
   // zonder kenmerk telt de modelkandidaat wel als één stem en vult hij alleen lege velden
-  const r2 = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(pdfA())], model_kandidaat: mk }, ctxBasis());
+  const r2 = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(pdfA(), { model_kandidaat: mk })] }, ctxBasis());
   const f2 = r2.facturen[0];
   assert.equal(f2.nummer, 'VB-2026-0412', 'deterministische waarde wint');
   assert.equal(f2.entiteit, 'tolgaarde');
@@ -823,4 +823,105 @@ test('wv1415 betaalspoor: teruggeboekt (betaald gezien of ingevoerd → te betal
   assert.deepEqual(K.betaalspoorOvergang('te_betalen', 'toch_incasso'), { ok: true, naar: 'incasso_verwacht' });
   for (const [van, g] of [['incasso_verwacht', 'teruggeboekt'], ['betaald_vooraf', 'teruggeboekt'], ['ingevoerd', 'toch_incasso'], ['betaald_gezien', 'toch_incasso']])
     assert.equal(K.betaalspoorOvergang(van, g).ok, false, van + ' → ' + g);
+});
+
+// ── PDF via Claude (wv1431): modelkandidaat per document (B4), fail-closed (B2/B3), IBAN en Bevestigen (I1), entiteitsgewicht (I2) ──
+
+test('lokaleSteun: bedrag, IBAN, KvK en nummer in de lokale tekst', () => {
+  const t = pdfA();
+  assert.equal(K.lokaleSteun('incl', '1428.50', t), true);
+  assert.equal(K.lokaleSteun('incl', 142850, t), true);
+  assert.equal(K.lokaleSteun('incl', '1428.51', t), false);
+  assert.equal(K.lokaleSteun('iban', IBAN.A, t), true, 'IBAN met spaties in de tekst');
+  assert.equal(K.lokaleSteun('iban', IBAN.B, t), false);
+  assert.equal(K.lokaleSteun('kvk', '99100001', t), true);
+  assert.equal(K.lokaleSteun('kvk', '99100009', t), false);
+  assert.equal(K.lokaleSteun('nummer', 'VB-2026-0412', t), true);
+  assert.equal(K.lokaleSteun('nummer', 'VB-2026-9999', t), false);
+  assert.equal(K.lokaleSteun('nummer', '15', 'Order 2615 geleverd'), false, 'kort nummer alleen als los woord');
+  assert.equal(K.lokaleSteun('nummer', '15', 'Factuur 15 van oktober'), true);
+  assert.equal(K.lokaleSteun('incl', '10.00', ''), false, 'zonder lokale tekst nooit gesteund');
+});
+
+test('B4: twee facturen in één mail krijgen elk hun eigen modelkandidaat', () => {
+  const t1 = pdfA({ nummer: 'VB-1', incl: 'zie bijlage', excl: '-', btw: '-' });
+  const t2 = pdfA({ nummer: 'VB-2', incl: 'zie bijlage', excl: '-', btw: '-' });
+  const r = K.beslisBericht({ bericht: BERICHT_A, documenten: [
+    doc(t1, { naam: 'a.pdf', model_kandidaat: { bedrag_incl: '111.00' } }),
+    doc(t2, { naam: 'b.pdf', model_kandidaat: { bedrag_incl: '222.00' } }) ] }, ctxBasis());
+  assert.equal(r.facturen.length, 2);
+  const per = Object.fromEntries(r.facturen.map((f) => [f.nummer, f.incl]));
+  assert.deepEqual(per, { 'VB-1': 11100, 'VB-2': 22200 });
+  // geen van beide bedragen staat in de lokale tekst → Bevestigen geblokkeerd
+  for (const f of r.facturen) {
+    assert.deepEqual(f.model_zonder_steun, ['incl']);
+    assert.ok(f.bevestigen.redenen.some((x) => /alleen door Claude gelezen \(incl\)/.test(x)));
+  }
+  // een kandidaat op bericht-niveau telt niet meer (oude vorm)
+  const oud = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t1)], model_kandidaat: { bedrag_incl: '111.00' } }, ctxBasis());
+  assert.equal(oud.facturen[0].incl, null);
+});
+
+test('B2: scan zonder OCR-tekst → kandidaat genegeerd; met OCR-tekst zonder kenmerk → velden; OCR met kenmerk → genegeerd', () => {
+  const scan = (o) => Object.assign({ sha256: sha('scan' + JSON.stringify(o)), naam: 'scan.pdf', mime: 'application/pdf', tekst: '', tekstlaag: false }, o);
+  const mk = { factuurnummer: 'S-77', bedrag_incl: '1428.50', entiteit_hint: 'groenhouten' };
+  const zonder = K.beslisBericht({ bericht: BERICHT_A, documenten: [scan({ model_kandidaat: mk })] }, ctxBasis()).facturen[0];
+  assert.equal(zonder.nummer, null);
+  assert.equal(zonder.incl, null);
+  assert.ok(zonder.besluiten.some((b) => b.veld === 'model_kandidaat' && /scan zonder lokale OCR-tekst/.test(b.toelichting)));
+  const ocr = pdfA({ nummer: 'S-77' });
+  const met = K.beslisBericht({ bericht: BERICHT_A, documenten: [scan({ model_kandidaat: mk, ocr_tekst: ocr })] }, ctxBasis()).facturen[0];
+  assert.equal(met.nummer, 'S-77');
+  assert.equal(met.incl, 142850);
+  assert.deepEqual(met.model_zonder_steun, [], 'bedrag staat in de OCR-tekst');
+  const pat = K.beslisBericht({ bericht: BERICHT_A, documenten: [scan({ model_kandidaat: mk, ocr_tekst: ocr + '\nBSN: 111222333' })] }, ctxBasis()).facturen[0];
+  assert.equal(pat.nummer, null);
+  assert.ok(!pat.besluiten.some((b) => b.bron === 'model'));
+});
+
+test('B3: kenmerk in een ánder onderdeel (UBL) of een ongelezen ingebedde PDF sluit de kandidaat van het hele bericht', () => {
+  const mk = { bedrag_incl: '999.00' };
+  const t = pdfA({ incl: 'zie bijlage', excl: '-', btw: '-' });
+  const xmlKenmerk = ubl({ nummer: 'VB-9', notitie: 'Patiënt geboortedatum 01-02-1950 BSN 111222333' });
+  const r = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t, { model_kandidaat: mk }), { sha256: sha('x1'), naam: 'f.xml', mime: 'application/xml', ubl_xml: xmlKenmerk }] }, ctxBasis());
+  const f = r.facturen.find((x) => x.document === sha(t + JSON.stringify({ model_kandidaat: mk })));
+  assert.equal(f.incl, null, 'kenmerk in de UBL sluit ook de PDF');
+  assert.ok(!f.besluiten.some((b) => b.bron === 'model'));
+  const xmlPdf = ubl({ nummer: 'VB-8', pdf: 'bijlage.pdf' });
+  const r2 = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t, { model_kandidaat: mk }), { sha256: sha('x2'), naam: 'g.xml', mime: 'application/xml', ubl_xml: xmlPdf }] }, ctxBasis());
+  assert.ok(r2.facturen.every((x) => x.incl !== 99900), 'ingebedde PDF zonder lokale tekst: dicht');
+  const r3 = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t, { model_kandidaat: mk }), { sha256: sha('x3'), naam: 'g.xml', mime: 'application/xml', ubl_xml: xmlPdf, ingebed_tekst: pdfA({ nummer: 'VB-8' }) }] }, ctxBasis());
+  assert.ok(r3.facturen.some((x) => x.incl === 99900), 'ingebedde PDF lokaal gelezen, geen kenmerk: kandidaat telt');
+  assert.equal(K.modelPoort([doc(t, { model_kandidaat: mk, patientkenmerk_koerier: true })]), 'kenmerk van patiëntgegevens in het bericht');
+  assert.equal(K.modelPoort([doc(t)]), null, 'zonder kandidaat niets te sluiten');
+});
+
+test('I1: regex-IBAN wint van het model-IBAN; model-IBAN alleen bij leeg, door de IBAN-poort, en zonder lokale steun geblokkeerd tot afvinken', () => {
+  const t = pdfA();
+  const f = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(t, { model_kandidaat: { iban: IBAN.B } })] }, ctxBasis()).facturen[0];
+  assert.equal(f.iban, IBAN.A, 'regex wint');
+  assert.ok(!f.besluiten.some((b) => b.bron === 'model' && b.veld === 'iban'));
+  const zonderIban = pdfA({ betaalzin: 'Betaling volgens afspraak.' });
+  const g = K.beslisBericht({ bericht: BERICHT_A, documenten: [doc(zonderIban, { model_kandidaat: { iban: IBAN.B } })] }, ctxBasis()).facturen[0];
+  assert.equal(g.iban, IBAN.B);
+  assert.ok(g.besluiten.some((b) => b.bron === 'model' && b.veld === 'iban'));
+  assert.equal(g.iban_nieuw, true, 'onbekend IBAN voor leverancier A: nabellen');
+  assert.deepEqual(g.model_zonder_steun, ['iban']);
+  const blok = K.bevestigBlokkades(Object.assign({}, g, { betaalwijze: 'zelf', nagebeld_op: '2026-10-27', nagebeld_ibans: [IBAN.B] }));
+  assert.ok(blok.some((x) => /alleen door Claude gelezen \(iban\)/.test(x)));
+  const af = K.bevestigBlokkades(Object.assign({}, g, { betaalwijze: 'zelf', nagebeld_op: '2026-10-27', nagebeld_ibans: [IBAN.B], model_afgevinkt: ['iban'] }));
+  assert.ok(!af.some((x) => /alleen door Claude/.test(x)), 'afgevinkt: geen blokkade meer');
+});
+
+test('I2: entiteitsstem van het model weegt 3 met naam of KvK op het stuk, anders 1', () => {
+  const zonderNaam = pdfA().replace('Aan: Huisartsenpraktijk Tolgaarde B.V.', 'Aan: de klant').replace('t.a.v. D. Schaap', '');
+  const ctx = ctxBasis({ leveranciers: [] });
+  const zwak = K.beslisBericht({ bericht: null, documenten: [doc(zonderNaam, { model_kandidaat: { entiteit_hint: 'groenhouten' } })] }, ctx).facturen[0];
+  assert.ok(zwak.besluiten.some((b) => b.bron === 'model' && b.veld === 'entiteit' && /\(1\)$/.test(b.toelichting)));
+  const metNaam = zonderNaam + '\nLeveradres: Huisartsenpraktijk Groenhouten';
+  const sterk = K.beslisBericht({ bericht: null, documenten: [doc(metNaam, { model_kandidaat: { entiteit_hint: 'groenhouten' } })] }, ctx).facturen[0];
+  assert.ok(sterk.besluiten.some((b) => b.bron === 'model' && b.veld === 'entiteit' && /op het stuk\) \(3\)$/.test(b.toelichting)));
+  // een ingevoegde modelstem zonder steun wint niet van een naam op de factuur (2 tegen 1)
+  const tg = K.beslisBericht({ bericht: null, documenten: [doc(pdfA(), { model_kandidaat: { entiteit_hint: 'groenhouten' } })] }, ctx).facturen[0];
+  assert.equal(tg.entiteit, 'tolgaarde');
 });

@@ -175,6 +175,7 @@ COPY audio.js /app/release-bootstrap/audio.js
 COPY spreektekst.js /app/release-bootstrap/spreektekst.js
 COPY mediatheek.js /app/release-bootstrap/mediatheek.js
 COPY ovis-register.js /app/release-bootstrap/ovis-register.js
+COPY pdf-lezer.js /app/release-bootstrap/pdf-lezer.js
 
 COPY server.js /app/server.js
 COPY telegram-reader.js /app/telegram-reader.js

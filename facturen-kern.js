@@ -24,6 +24,7 @@ class KernFout extends Error {
 
 // ───────────────────────────── basis: tekst, bedragen, datums ─────────────────────────────
 
+function isObj(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
 function zonderAccenten(s) { return String(s == null ? '' : s).normalize('NFKD').replace(/[̀-ͯ]/g, ''); }
 // Onzichtbare opmaaktekens weg, NBSP en smalle spaties gewoon, NFKC (zoals appBsnMasker in server.js). Witruimte ingeklapt (hooguit één
 // spatie, hooguit één lege regel) en begrensd op 200.000 tekens (contract koerier-api.md): zo kan geen regex in deze kern op een lange
@@ -210,6 +211,28 @@ function stapPatientkenmerk(teksten, koerierVlag) {
     soorten: lijst,
     besluiten: [besluit('patientkenmerk', 'patientkenmerk', lijst.length > 0 ? 1 : 0, 'regel', lijst.length ? 'soort: ' + lijst.join(', ') : 'geen kenmerk')],
   };
+}
+
+// ───────────────────────────── lokale steun voor een modelwaarde (PDF via Claude, I1/I2) ─────────────────────────────
+
+// Staat een waarde die het model las ook in de lokale tekst (pdftotext of OCR)? Bedragen als centen op een regel, IBAN zonder spaties,
+// KvK als 8 cijfers, nummer/kenmerk op letters en cijfers (kort nummer: als los woord). Zonder lokale tekst: nooit gesteund.
+function lokaleSteun(veld, waarde, tekst) {
+  if (waarde == null || waarde === '') return false;
+  const t = schoon(tekst || '');
+  if (!/\S/.test(t)) return false;
+  if (veld === 'iban') { const i = ibanNorm(waarde); return !!i && t.replace(/\s+/g, '').toUpperCase().indexOf(i) >= 0; }
+  if (veld === 'incl' || veld === 'excl' || veld === 'btw') {
+    const c = typeof waarde === 'number' ? waarde : decimaalNaarCenten(String(waarde));
+    if (c == null) return false;
+    for (const r of t.split('\n')) for (const b of bedragenIn(r)) if (Math.abs(typeof b === 'number' ? b : b.c) === Math.abs(c)) return true;
+    return false;
+  }
+  if (veld === 'kvk') { const k = String(waarde).replace(/\D/g, ''); return k.length === 8 && t.replace(/[\s.]/g, '').indexOf(k) >= 0; }
+  const n = normNummer(waarde);
+  if (!n) return false;
+  if (n.length >= 4) return (normNummer(t) || '').indexOf(n) >= 0;
+  return new RegExp('(^|[^A-Z0-9])' + n + '($|[^A-Z0-9])').test(t.toUpperCase());
 }
 
 // ───────────────────────────── UBL 2.1 / SI-UBL 2.0 ─────────────────────────────
@@ -616,18 +639,29 @@ function stapVelden(groep, ctx, opties) {
   }
   // Het betaal-IBAN uit de PDF kiest kiesBetaalIban zodra de leverancier bekend is (beslisBericht).
   if (!uit.leverancier_naam && opties && opties.bericht) uit.leverancier_naam = weergaveNaam(opties.bericht.afzender);
+  // Modelkandidaat (Claude, één per document; B4) vult alleen lege velden. Het IBAN niet hier: kiesBetaalIban kiest eerst uit de regex (I1),
+  // pas daarna mag het model-IBAN (beslisBericht). Een bedrag zonder lokale steun komt in model_zonder_steun: dat blokkeert Bevestigen (I1).
   const mk = opties && opties.model_kandidaat;
+  const zonder = [];
   if (mk && !(opties && opties.patientkenmerk)) {
-    const kaart = { nummer: 'factuurnummer', factuurdatum: 'factuurdatum', vervaldatum: 'vervaldatum', kenmerk: 'kenmerk', iban: 'iban', valuta: 'valuta' };
-    for (const v of Object.keys(kaart)) if (uit[v] == null && mk[kaart[v]] != null) { uit[v] = v === 'iban' ? ibanNorm(mk.iban) : String(mk[kaart[v]]); besluiten.push(besluit('velden', v, uit[v], 'model', 'modelkandidaat (deterministisch leeg)')); }
+    const kaart = { nummer: 'factuurnummer', factuurdatum: 'factuurdatum', vervaldatum: 'vervaldatum', kenmerk: 'kenmerk', valuta: 'valuta' };
+    for (const v of Object.keys(kaart)) if (uit[v] == null && mk[kaart[v]] != null) { uit[v] = String(mk[kaart[v]]); besluiten.push(besluit('velden', v, uit[v], 'model', 'modelkandidaat (deterministisch leeg)')); }
     for (const [v, k] of [['excl', 'bedrag_excl'], ['btw', 'btw'], ['incl', 'bedrag_incl']]) {
-      if (uit[v] == null && mk[k] != null) { const c = decimaalNaarCenten(String(mk[k])); if (c != null) { uit[v] = c; besluiten.push(besluit('velden', v, c, 'model', 'modelkandidaat (deterministisch leeg)')); } }
+      if (uit[v] == null && mk[k] != null) {
+        const c = decimaalNaarCenten(String(mk[k]));
+        if (c == null) continue;
+        uit[v] = c;
+        const steun = lokaleSteun(v, c, opties.steun_tekst);
+        if (!steun) zonder.push(v);
+        besluiten.push(besluit('velden', v, c, 'model', 'modelkandidaat (deterministisch leeg)' + (steun ? '' : ', niet in de lokale tekst gevonden')));
+      }
     }
+    if (mk.iban != null) uit.model_iban = ibanNorm(mk.iban);
     if (!uit.leverancier_naam && mk.leverancier_naam) uit.leverancier_naam = String(mk.leverancier_naam);
   }
   if (!uit.soort) uit.soort = 'factuur';
   if (!uit.valuta) uit.valuta = 'EUR';
-  return { velden: uit, besluiten };
+  return { velden: uit, besluiten, model_zonder_steun: zonder };
 }
 
 // Betaal-IBAN: een vreemd (niet-eigen) IBAN dat de leverancier nog niet kent gaat voor, want dat moet nagebeld worden ("rekeningnummer
@@ -641,7 +675,7 @@ function kiesBetaalIban(velden, leverancier, ctx) {
 
 // ───────────────────────────── stap 5: entiteit (stemmen) ─────────────────────────────
 
-const GEWICHT = { anker: 3, kvk: 4, naam: 2, ubl_klant_kvk: 5, ubl_klant_naam: 3, klant_iban: 3, leverancier: 2, iban_historie: 1, model: 1 };
+const GEWICHT = { anker: 3, kvk: 4, naam: 2, ubl_klant_kvk: 5, ubl_klant_naam: 3, klant_iban: 3, leverancier: 2, iban_historie: 1, model: 1, model_gesteund: 3 };
 function bevat(tekstNorm, frase) {
   const f = zonderAccenten(frase).toLowerCase().replace(/\s+/g, ' ').trim();
   if (!f) return false;
@@ -685,7 +719,15 @@ function stapEntiteit(velden, tekst, ctx, opties) {
     if (top && hist[top] >= 2) stem(top, 'betaling', 'bank', GEWICHT.iban_historie, 'Dit IBAN werd eerder betaald door ' + entNaam(ctx, top));
   }
   const mk = opties && opties.model_kandidaat;
-  if (mk && mk.entiteit_hint && !(opties && opties.patientkenmerk)) stem(mk.entiteit_hint, 'model', 'model', GEWICHT.model, 'Modelkandidaat noemt ' + entNaam(ctx, mk.entiteit_hint));
+  // I2: gewicht 3 alleen als naam of KvK van die entiteit lokaal op het stuk staat (ook OCR); anders 1. Zo stuurt een ingevoegde regel in
+  // een PDF de entiteit niet.
+  if (mk && mk.entiteit_hint && !(opties && opties.patientkenmerk)) {
+    const e = ents.find((x) => x.sleutel === mk.entiteit_hint);
+    const st = zonderAccenten(schoon((opties && opties.steun_tekst) || '')).toLowerCase().replace(/\s+/g, ' ');
+    const steun = !!e && ((e.kvk && lokaleSteun('kvk', e.kvk, opties.steun_tekst)) ||
+      [e.naam].concat((e.aliassen || []).map((a) => (typeof a === 'string' ? a : a && a.tekst))).some((n) => n && bevat(st, n)));
+    stem(mk.entiteit_hint, 'model', 'model', steun ? GEWICHT.model_gesteund : GEWICHT.model, 'Modelkandidaat noemt ' + entNaam(ctx, mk.entiteit_hint) + (steun ? ' (naam of KvK op het stuk)' : ''));
+  }
   const score = {};
   for (const s of stemmen) score[s.entiteit] = (score[s.entiteit] || 0) + s.gewicht;
   const volgorde = Object.keys(score).sort((a, b) => score[b] - score[a]);
@@ -860,6 +902,9 @@ function bevestigBlokkades(f, poort) {
   if (!f.entiteit) r.push('geen entiteit');
   if (!f.betaalwijze || f.betaalwijze === 'onbekend') r.push('betaalwijze onbekend');
   if (!ibanGeborgd(f, poort)) r.push('nieuw IBAN: eerst nabellen');
+  // I1: een bedrag of IBAN dat alleen het model las (niet in de lokale tekst) houdt Bevestigen tegen tot een mens het afvinkt.
+  const nakijken = (Array.isArray(f.model_zonder_steun) ? f.model_zonder_steun : []).filter((v) => !(Array.isArray(f.model_afgevinkt) ? f.model_afgevinkt : []).includes(v));
+  if (nakijken.length) r.push('alleen door Claude gelezen (' + nakijken.join(', ') + '): eerst nakijken');
   if (f.betaalwijze === 'zelf') {
     if (!f.iban) r.push('zelf betalen zonder IBAN');
     else if (!ibanMod97(f.iban) || (f.controles || []).some((c) => !c.ok && c.ernst === 'fout' && /^iban/.test(c.naam))) r.push('IBAN-fout bij zelf betalen');
@@ -888,9 +933,35 @@ function nagebeld(f, wie, wanneer) {
 // ───────────────────────────── het besliskader (§ 4.5) ─────────────────────────────
 
 // invoer: { bericht: {message_id, afzender, onderwerp} | null, documenten: [{ sha256, naam, mime, tekst?, tekstlaag?, ubl_xml?,
-//           patientkenmerk_koerier? }], model_kandidaat? }
+//           patientkenmerk_koerier?, model_kandidaat?, ocr_tekst?, ingebed_tekst? }] }
+// model_kandidaat staat per document (B4, PDF via Claude): een mail met twee facturen krijgt per factuur zijn eigen kandidaat. Eén kenmerk
+// van patiëntgegevens ergens in het bericht, of één onderdeel dat niet lokaal gelezen is (scan zonder OCR-tekst, UBL met een ingebedde PDF
+// zonder tekst), schakelt alle kandidaten van het bericht uit (B2/B3, fail-closed).
 // ctx:    { vandaag, entiteiten, leveranciers, tekstankers, geenFactuur, bekendeSha256, bestaandeFacturen, ibanHistorie }
 // uit:    { documenten: [{ sha256, uitkomst, factuur }], facturen: [ … ], signalen: [ … ] } — zonder tekst.
+// B2/B3: mag een modelkandidaat in dit bericht meetellen? → null (ja) of de reden waarom niet. Kijkt naar ALLE onderdelen.
+function modelPoort(documenten) {
+  if (!documenten.some((d) => isObj(d.model_kandidaat))) return null;
+  const teksten = [];
+  for (const d of documenten) {
+    if (d.patientkenmerk_koerier) return 'kenmerk van patiëntgegevens in het bericht';
+    const s = stapSoort(d);
+    if (s.soort === 'pdf') teksten.push(d.tekst);
+    if (s.soort === 'scan') {
+      if (typeof d.ocr_tekst !== 'string' || d.ocr_tekst.replace(/\s/g, '').length < 40) return 'scan zonder lokale OCR-tekst';
+      teksten.push(d.ocr_tekst);
+    }
+    if (s.soort === 'ubl') {
+      teksten.push(s.ubl._tekst);
+      if (s.ubl.heeft_pdf) {
+        if (typeof d.ingebed_tekst !== 'string' || d.ingebed_tekst.replace(/\s/g, '').length < 40) return 'ingebedde PDF niet lokaal gelezen';
+        teksten.push(d.ingebed_tekst);
+      }
+    }
+    if (s.soort === 'overig') teksten.push(String(d.tekst || d.ubl_xml || '').replace(/<[^>]+>/g, ' '));
+  }
+  return stapPatientkenmerk(teksten).kenmerk ? 'kenmerk van patiëntgegevens in het bericht' : null;
+}
 function beslisBericht(invoer, ctx) {
   ctx = ctx || {};
   const bericht = invoer.bericht || null;
@@ -900,11 +971,13 @@ function beslisBericht(invoer, ctx) {
     const db = stapDubbelBestand(d.sha256, ctx);
     if (db.dubbel) { docUit.push({ sha256: d.sha256, uitkomst: 'dubbel', reden: 'zelfde bestand al bekend', besluiten: db.besluiten }); signalen.push({ soort: 'dubbele_factuur', sha256: d.sha256, zelfde_bestand: true }); continue; }
     const s = stapSoort(d);
-    const doc = { sha256: d.sha256, naam: d.naam || null, soort: s.soort, ubl: s.ubl || null, tekst: s.soort === 'pdf' ? d.tekst : null, koerier: !!d.patientkenmerk_koerier, besluiten: db.besluiten.concat(s.besluiten) };
+    const doc = { sha256: d.sha256, naam: d.naam || null, soort: s.soort, ubl: s.ubl || null, tekst: s.soort === 'pdf' ? d.tekst : null, koerier: !!d.patientkenmerk_koerier, besluiten: db.besluiten.concat(s.besluiten),
+      model_kandidaat: isObj(d.model_kandidaat) ? d.model_kandidaat : null, ocr_tekst: typeof d.ocr_tekst === 'string' ? d.ocr_tekst : null };
     if (s.soort === 'pdf') doc.velden = leesPdfTekst(d.tekst);
     if (s.soort === 'overig') { docUit.push({ sha256: d.sha256, uitkomst: 'geen_factuur', reden: s.reden, besluiten: doc.besluiten }); continue; }
     docs.push(doc);
   }
+  const mkDicht = modelPoort(invoer.documenten || []);
   for (const g of groepeerBericht(docs)) {
     const hoofd = g.pdf || g.ubl;
     const teksten = [g.pdf && g.pdf.tekst, g.ubl && g.ubl.ubl._tekst].filter(Boolean);
@@ -913,16 +986,27 @@ function beslisBericht(invoer, ctx) {
     const redenen = [];
     const pk = stapPatientkenmerk(teksten, (g.pdf && g.pdf.koerier) || (g.ubl && g.ubl.koerier));
     besluiten.push(...pk.besluiten);
+    let mk = g.pdf && g.pdf.model_kandidaat;
+    if (mk && mkDicht) { besluiten.push(besluit('velden', 'model_kandidaat', 0, 'regel', 'modelkandidaat niet gebruikt: ' + mkDicht)); mk = null; }
+    const steunTekst = [g.pdf && g.pdf.tekst, g.pdf && g.pdf.ocr_tekst, g.ubl && g.ubl.ubl._tekst].filter(Boolean).join('\n');
     if (pk.kenmerk) redenen.push('Kenmerk van patiëntgegevens: alleen de eigenaar ziet deze factuur, geen taalmodel');
     const scan = !!(g.pdf && g.pdf.soort === 'scan' && !g.ubl);
     if (scan) redenen.push('Scan zonder tekstlaag: velden met de hand invullen');
-    const sv = stapVelden(g, ctx, { bericht, model_kandidaat: invoer.model_kandidaat, patientkenmerk: pk.kenmerk });
+    const sv = stapVelden(g, ctx, { bericht, model_kandidaat: mk, patientkenmerk: pk.kenmerk, steun_tekst: steunTekst });
     const v = sv.velden; besluiten.push(...sv.besluiten);
+    const modelZonder = sv.model_zonder_steun.slice();
     if (g.pdf && g.ubl) redenen.push('PDF en UBL uit hetzelfde bericht: één factuur, velden uit de UBL');
     const hl = herkenLeverancier(v, bericht, ctx);
     const lev = hl.leverancier;
     besluiten.push(besluit('leverancier', 'leverancier', lev ? lev.id : null, lev ? 'leverancier' : 'regel', lev ? 'herkend via ' + hl.via : 'onbekende leverancier'));
     if (v.iban == null) { v.iban = kiesBetaalIban(v, lev, ctx); if (v.iban) besluiten.push(besluit('velden', 'iban', v.iban, 'regel', g.ubl ? 'uit PDF (ontbrak in UBL)' : 'uit PDF-tekst')); }
+    // I1: het model-IBAN alleen als de regex niets vond; het gaat door de IBAN-poort zoals elk IBAN (nieuw = nabellen).
+    if (v.iban == null && v.model_iban && !pk.kenmerk) {
+      v.iban = v.model_iban;
+      const steun = lokaleSteun('iban', v.iban, steunTekst);
+      if (!steun) modelZonder.push('iban');
+      besluiten.push(besluit('velden', 'iban', v.iban, 'model', 'modelkandidaat (regex vond geen IBAN)' + (steun ? '' : ', niet in de lokale tekst gevonden')));
+    }
     const basis = {
       document: hoofd.sha256, ubl_document: g.pdf && g.ubl ? g.ubl.sha256 : null,
       soort: v.soort, leverancier_id: lev ? lev.id : null, leverancier_naam: lev ? lev.naam : v.leverancier_naam, leverancier_kvk: lev ? lev.kvk || v.leverancier_kvk : v.leverancier_kvk,
@@ -931,7 +1015,7 @@ function beslisBericht(invoer, ctx) {
     };
     const di = stapDubbelInhoud(basis, ctx);
     besluiten.push(...di.besluiten);
-    const se = stapEntiteit(v, scan ? '' : tekst, ctx, { leverancier: lev, model_kandidaat: invoer.model_kandidaat, patientkenmerk: pk.kenmerk });
+    const se = stapEntiteit(v, scan ? '' : tekst, ctx, { leverancier: lev, model_kandidaat: mk, patientkenmerk: pk.kenmerk, steun_tekst: steunTekst });
     besluiten.push(...se.besluiten);
     let status = 'te_beoordelen';
     if (di.dubbel) { status = 'dubbel'; redenen.unshift('Zelfde leverancier, nummer en bedrag als een bestaande factuur'); signalen.push({ soort: 'dubbele_factuur', factuur_document: hoofd.sha256, van: di.van }); }
@@ -946,6 +1030,8 @@ function beslisBericht(invoer, ctx) {
     const va = valideer(f, ctx, { leverancier: lev });
     const ip = ibanPoort(f, lev, ctx);
     f.intern = va.intern; f.iban_nieuw = ip.iban_nieuw; f.ibans_onbekend = ip.onbekend; f.controles = va.controles;
+    f.model_zonder_steun = modelZonder;
+    if (modelZonder.length) redenen.push('Alleen door Claude gelezen, niet in de lokale tekst: ' + modelZonder.join(', ') + ' — eerst nakijken');
     besluiten.push(besluit('validatie', 'iban_nieuw', ip.iban_nieuw ? 1 : 0, 'regel', ip.reden));
     for (const c of va.controles) besluiten.push(besluit('validatie', c.naam, c.ok ? 1 : 0, 'regel', c.reden));
     if (ip.iban_nieuw) redenen.push(ip.reden);
@@ -1185,7 +1271,7 @@ module.exports = {
   leesXml, leesUbl, leesPdfTekst,
   // besliskader per stap (§ 4.5)
   stapDubbelBestand, stapDubbelInhoud, factuurSleutel, stapSoort, groepeerBericht, stapPatientkenmerk, stapVelden, herkenLeverancier, compactNaam, naamVerwant, ibanNaamPast, VERZAMEL_RE,
-  stapEntiteit, stapGeenFactuur, stapBetaalwijze, valideer, ibanPoort, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN,
+  stapEntiteit, stapGeenFactuur, stapBetaalwijze, valideer, ibanPoort, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
   // leren
   leerUitBevestiging,
   // overgangen (§ 4.4)
