@@ -1223,7 +1223,8 @@ function bankcontrole(inv) {
   /*
    * wv1415: één spoorbesluit per factuur met een terugboeking, uit de eindstand van deze ronde en steeds vanaf het opgeslagen spoor (zo
    * hangt het niet af van de volgorde in het bestand): netto gedekt → bankmatch; niet gedekt en deze ronde teruggeboekt → weer te betalen
-   * (vanaf ingevoerd alleen als de factuur nog op de teruggeboekte batch staat, niet als hij intussen in een nieuwe batch zit). Het signaal
+   * (vanaf ingevoerd alleen als de factuur nog op de teruggeboekte batch staat, niet als hij intussen in een nieuwe batch zit of na
+   * Ongedaan met de hand is ingevoerd: uitvoer_op leeg; natoets wv1415). Het signaal
    * alleen als de factuur niet al opnieuw betaald is, of als de terugboeking niet exact klopte.
    */
   for (const fid of new Set([...naTerug, ...nieuwTerug.keys()])) {
@@ -1231,7 +1232,7 @@ function bankcontrole(inv) {
     if (!f || !f.betaalspoor) continue;
     if (voldaan(f)) { if (f.betaalspoor !== 'betaald_gezien') uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'bankmatch', van: f.betaalspoor, naar: 'betaald_gezien' }); continue; }
     const k = nieuwTerug.get(fid);
-    if (k && (f.betaalspoor === 'betaald_gezien' || (f.betaalspoor === 'ingevoerd' && (!f.uitvoer_op || f.uitvoer_op === k.datum))))
+    if (k && (f.betaalspoor === 'betaald_gezien' || (f.betaalspoor === 'ingevoerd' && f.uitvoer_op === k.datum)))
       uit.betaalspoor.push({ factuur: fid, gebeurtenis: 'teruggeboekt', van: f.betaalspoor, naar: 'te_betalen' });
   }
   const terugSig = new Map();   // factuur → sleutels van zijn terugboekingssignalen (factuursignalen wachten zolang er één open staat)

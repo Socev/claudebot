@@ -1081,8 +1081,8 @@ test('wv1323: feitUitleg — zin, bron met entiteiten en andere spellingen, aanl
 // dezelfde dag als de batchafschrijving. Alle waarden hieronder verzonnen.
 test('wv1415 terugboeking: bijschrijving met de factuur-id → sepa_terug, factuur weer te betalen, signaal; verrekend (geen dubbel betaald bij een nieuwe betaling)', () => {
   const F1 = '0000000000000f01', F2 = '0000000000000f02';
-  const fx = [fac({ id: F1, leverancier: 'la', nummer: 'TB-1', incl: 50000, iban: LEV.A, factuurdatum: '2026-09-20', vervaldatum: '2026-10-04', betaalspoor: 'ingevoerd' }),
-    fac({ id: F2, leverancier: 'lb', nummer: 'TB-2', incl: 20000, iban: LEV.B, factuurdatum: '2026-09-20', vervaldatum: '2026-10-04', betaalspoor: 'ingevoerd' })];
+  const fx = [fac({ id: F1, leverancier: 'la', nummer: 'TB-1', incl: 50000, iban: LEV.A, factuurdatum: '2026-09-20', vervaldatum: '2026-10-04', betaalspoor: 'ingevoerd', uitvoer_op: '2026-10-02' }),
+    fac({ id: F2, leverancier: 'lb', nummer: 'TB-2', incl: 20000, iban: LEV.B, factuurdatum: '2026-09-20', vervaldatum: '2026-10-04', betaalspoor: 'ingevoerd', uitvoer_op: '2026-10-02' })];
   const sepa = [{ pmtinf_id: 'PROEF-BATCH-1', eigen_iban: ABN_TG, entiteit: 'tolgaarde', datum: '2026-10-02', centen: 70000,
     regels: [{ factuur: F1, centen: 50000, iban: LEV.A }, { factuur: F2, centen: 20000, iban: LEV.B }] }];
   const af = tx({ boekdatum: '2026-10-02', bedrag_centen: -70000, kenmerk: 'PROEF-BATCH-1', transactietype: 'ABN:SEPA Batch' });
@@ -1115,7 +1115,7 @@ test('wv1415 terugboeking: bijschrijving met de factuur-id → sepa_terug, factu
 
 test('wv1415 terugboeking: eerst gezien, afschrijving later → geen betaald gezien; ander bedrag of andere rekening → alleen signaal; vóór de uitvoerdatum of andere rekening → niets', () => {
   const F1 = '0000000000000f11';
-  const f = fac({ id: F1, leverancier: 'la', nummer: 'TB-11', incl: 30000, iban: LEV.A, factuurdatum: '2026-09-20', vervaldatum: '2026-10-04', betaalspoor: 'ingevoerd' });
+  const f = fac({ id: F1, leverancier: 'la', nummer: 'TB-11', incl: 30000, iban: LEV.A, factuurdatum: '2026-09-20', vervaldatum: '2026-10-04', betaalspoor: 'ingevoerd', uitvoer_op: '2026-10-02' });
   const sepa = [{ pmtinf_id: 'PROEF-BATCH-11', eigen_iban: ABN_TG, entiteit: 'tolgaarde', datum: '2026-10-02', centen: 30000, regels: [{ factuur: F1, centen: 30000, iban: LEV.A }] }];
   // afschrift-CSV-variant: geen kenmerk, de EndToEndId los in de omschrijving
   const terug = tx({ boekdatum: '2026-10-03', bedrag_centen: 30000, omschrijving: 'Geannuleerd door opdrachtgever TB-11 ' + F1, transactietype: 'ABN:Overig' });
@@ -1173,6 +1173,9 @@ test('wv1415 diffreview: terugboeking + handbetaling in één upload → betaald
   const r3 = controle({ vandaag: '2026-10-06', transacties: [af1, terug], facturen: [f2], sepa: [p1, Object.assign({}, p2, { datum: '2026-10-20' })],
     koppelingen: [{ transactie: af1.id, factuur: F1, bron: 'auto', methode: 'sepa_e2e' }] });
   assert.deepEqual(r3.betaalspoor, [], 'in een nieuwe batch: niet terug naar te betalen');
+  // na Ongedaan met de hand ingevoerd (geen uitvoerdatum), handbetaling nog niet op de bank: ook niet terug naar te betalen (natoets)
+  const r3b = controle({ vandaag: '2026-10-06', transacties: [af1, terug], facturen: [Object.assign({}, f, { uitvoer_op: null })], sepa: [p1] });
+  assert.deepEqual(r3b.betaalspoor, [], 'met de hand ingevoerd na Ongedaan');
   // ZOU 2: dezelfde terugboeking twee keer geüpload (ander bestand) → één sepa_terug; de tweede gaat via "mogelijk dubbel geüpload"
   const terugB = Object.assign({}, terug, { id: 'tdub', entry_ref: 'ref-dub', bestand: 'bestand2' });
   const r4 = controle({ vandaag: '2026-10-08', transacties: [af1, terug, terugB], facturen: [f], sepa: [p1] });
