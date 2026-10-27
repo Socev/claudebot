@@ -13,8 +13,11 @@
 //                                          --schrijf (Voor jou-ronde, voor-jou.py koppel --schrijf): wat zeker is in het register zetten
 //                                          (Status-cel van een open rij waarvan David de kaart sloot; registerrij voor een open kaart met
 //                                          registerplicht). Raakt nooit een kaart.
+//   node ovis-run.js zegel <pad> [--droog]   wv1011 plek 7: zegel van het ovis-blok op een zakelijke persoonspagina zetten na een bewuste
+//                                          wijziging door de machinekamer of Socev (nooit voor iets uit een gelezen stuk). Weigert bij een
+//                                          ander gebrek; schrijft alleen die ene regel (vault-veilig).
 //   --droog: niets schrijven (databank noch vault)
-// Omgeving: VAULT_DIR (standaard de vault), SUPABASE_URL + SUPABASE_SERVICE_ROLE (nooit als argument), CLOUDFLARE_API_TOKEN (wv981: D1 fin
+// Omgeving: VAULT_DIR (standaard de vault), OVIS_ZEGEL_SLEUTEL (wv1011: pad naar de zegelsleutel, standaard /opt/data/ovis/zegel.sleutel), SUPABASE_URL + SUPABASE_SERVICE_ROLE (nooit als argument), CLOUDFLARE_API_TOKEN (wv981: D1 fin
 // alleen lezen voor plek 4; ontbreekt hij, dan "POT niet gemeten"), CF_ACCOUNT_ID/APP_FIN_DB (zoals server.js), BANK_DIR (wv1010: plek 6,
 // <BANK_DIR>/transacties.sqlite alleen lezen; standaard /opt/data/bank), OVIS_LOCK (standaard
 // /opt/data/bin/.vault.lock). Uitvoer: één JSON-regel; uitgang 0 = gelukt, 1 = fout, 2 = gebruik.
@@ -106,8 +109,26 @@ function grendelVast() {
 }
 
 (async function () {
-  if (['dag', 'afroep', 'nacht', 'bibliothecaris', 'export', 'voorjou'].indexOf(modus) < 0) stop(2, { ok: false, fout: 'gebruik: dag|afroep|nacht|bibliothecaris|export <pad>|voorjou [--schrijf]' });
+  if (['dag', 'afroep', 'nacht', 'bibliothecaris', 'export', 'voorjou', 'zegel'].indexOf(modus) < 0) stop(2, { ok: false, fout: 'gebruik: dag|afroep|nacht|bibliothecaris|export <pad>|voorjou [--schrijf]|zegel <pad>' });
+  if (modus === 'zegel') {   // wv1011: geen databank nodig; alleen claude kan de zegelsleutel lezen; schrijven alleen onder de vault-grendel
+    const rel = String(arg[1] || '');
+    if (!/^10_Zakelijk\/[^\0]+\.md$/.test(rel) || rel.split('/').indexOf('..') >= 0 || rel.indexOf('\\') >= 0) stop(2, { ok: false, fout: 'zegel: pad onder 10_Zakelijk/ naar een .md' });
+    if (!droog && !grendelVast()) stop(1, { ok: false, fout: 'zegel: alleen onder de vault-grendel (flock -w 300 ' + LOCK + ' node ovis-run.js zegel …)' });
+    try {
+      const sleutel = R.zegelSleutelLees(process.env.OVIS_ZEGEL_SLEUTEL || undefined);
+      const vol = path.join(VAULT, rel);
+      const z = R.persoonMetZegel(rel, VV.lees(vol, 'utf8'), sleutel);
+      if (z.fout) stop(1, { ok: false, fout: z.fout });
+      if (droog) stop(0, { ok: true, droog: true, zegel: z.zegel });
+      let fout = null, ongewijzigd = false;
+      const gelukt = VV.wijzig(vol, function (t) { const y = R.persoonMetZegel(rel, t, sleutel); if (y.fout) { fout = y.fout; return null; } if (y.tekst === t) { ongewijzigd = true; return null; } return y.tekst; });
+      if (fout) stop(1, { ok: false, fout: fout });
+      if (!gelukt && !ongewijzigd) stop(1, { ok: false, fout: 'zegel: niet geschreven (pagina veranderde steeds tijdens het schrijven)' });   // diffreview KAN 8
+      stop(0, { ok: true, zegel: z.zegel, ongewijzigd: ongewijzigd });
+    } catch (e) { stop(1, { ok: false, fout: String(e && e.message || e).slice(0, 200) }); }
+  }
   const reg = R.maak({ vault: VAULT, sbRpc: sbRpc, lees: function (p) { return VV.lees(p, 'utf8'); },
+    zegelSleutel: function () { return R.zegelSleutelLees(process.env.OVIS_ZEGEL_SLEUTEL || undefined); },   // wv1011
     schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen, pot: potLezer(), vj: vjLezer,
     bank: R.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')) });   // wv1010: plek 6, alleen lezen
   try {

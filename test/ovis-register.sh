@@ -8,6 +8,8 @@
 # niet-dezelfde-als), opgelost/BB7-spoor blijft, afroep stempelt niet, droog schrijft niets, boxRij zonder contactwaarden.
 # wv981 (blok 8): plek 4 POT-factuuradres — vergelijking stampagina ⇄ POT-app/dossier/open nota, BB1/BB2/BB5, niet gemeten ≠ opgelost, kaart.
 # wv1010 (blok 10): plek 6 bank — rekeningpagina ⇄ bank (entiteit, hoofdrekening), Bankregels, blokken, niet gemeten ≠ opgelost, privacy, lezer.
+# wv1011 (blok 11): plek 7 personen — persoonspagina met ovis-blok en zegel, privégrens, alleen gekende soorten sturen (fase B hercompileert),
+#   geen blok op een persoonspagina, zegel kapot = niets sturen + BB6 (geen BB2), BB1-object, BB5 object/kenmerk, Google-telefoon, kaarten.
 # Raakt niets buiten een wegwerpmap. Gebruik: bash test/ovis-register.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -100,7 +102,9 @@ function nepDb(start) {
     if (fn === 'ovis_register_lees') return JSON.parse(JSON.stringify(db));
     if (fn === 'ovis_pagina_zet') {
       const p = body.p; let k = db.knopen.find((x) => x.id === p.id); const nieuw = !k;
-      if (!k) { k = { id: p.id, soort: p.soort, naam: p.naam, vault_pagina: p.vault_pagina, concept: true, laatst_door: 'compiler' }; db.knopen.push(k); }
+      if (!k) { k = { id: p.id, soort: p.soort, naam: p.naam, vault_pagina: p.vault_pagina, concept: true, laatst_door: 'compiler' }; db.knopen.push(k);
+        if (p.soort === 'persoon') { db.personen = db.personen || { entity: [], contacten: [] }; db.personen.entity.push({ k: p.id, o: p.object_id, status: 'voorgesteld', samengevoegd: false }); } }
+      if (p.soort === 'persoon') (db.persoonInvoer = db.persoonInvoer || []).push(p);
       k.bron_sha = p.bron_sha; k.compilatienummer = p.compilatie; k.gecompileerd_op = '2026-10-24T23:00:00Z';
       p.handvatten.forEach((h) => { const n = R.normHandvat(h.soort, h.waarde); if (!db.handvatten.find((x) => x.knoop === p.id && x.soort === h.soort && x.waarde_norm === n))
         db.handvatten.push({ id: db.handvatten.length + 100, knoop: p.id, soort: h.soort, waarde: h.waarde, waarde_norm: n, status: 'voorgesteld', herkomst: { bron: 'pagina' } }); });
@@ -109,6 +113,7 @@ function nepDb(start) {
     if (fn === 'ovis_bibliothecaris_zet') { body.p_rijen.forEach((r) => { const b = db.bevindingen.find((x) => x.bevinding_id === r.bevinding_id);
       if (b) Object.assign(b, r); else db.bevindingen.push(Object.assign({}, r)); }); db.bevindingen = db.bevindingen.filter((x) => x.status !== 'opgelost'); return { ok: true }; }
     if (fn === 'mk_hartslag_stempel') return [{ uit_component: body.p_component }];
+    if (fn === 'ovis_personen_lees') { if (db.personenFout) throw new Error('weg'); return JSON.parse(JSON.stringify(db.personen || { entity: [], contacten: [] })); }   // wv1011
     throw new Error('onbekende rpc ' + fn);
   } };
 }
@@ -903,6 +908,150 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const kb9 = R.kaartBiblio({ knopen: [], kaarten: [], bevindingen: [{ bevinding_id: 'BB2-bank-rek-0044-abcdef-geen-pagina', check_id: 'BB2', ernst: 'warning', status: 'open' },
       { bevinding_id: 'BB3-bank-rek-0022-abcdef-entiteit', check_id: 'BB3', ernst: 'warning', status: 'open' }] }, { nu: Date.parse('2026-10-28T02:31:00Z') });
     toets('10 weekkaart: bank in gewone taal, BB3 bank komt erop', kb9.kaart && kb9.kaart.stappen.length === 2 && /Bankrekening …0044 heeft nog geen pagina/.test(kb9.kaart.stappen[0]) && /Rekening …0022/.test(kb9.kaart.stappen[1]), kb9);
+  }
+
+  // ── 11. wv1011: plek 7 personen ──
+  {
+    const KEY = 'ab'.repeat(32), KEY2 = 'cd'.repeat(32);
+    const OID = '0b0e1d2c-3a4b-4c5d-8e6f-7a8b9c0d1e2f', OID2 = '1c1f2e3d-4b5c-4d6e-9f70-8b9cad0e1f30';
+    const PP = '10_Zakelijk/Voorbeeldpraktijk/Medewerkers/Pim Proef - assistent.md';
+    function persoon(o) {
+      o = Object.assign({ type: 'medewerker', id: 'per:pim-proef', oid: OID, status: 'concept', mail: ['pim.proef@voorbeeldpraktijk.nl'], tel: [], nda: [], google: null, extra: '', naam: null, ent: 'TG' }, o || {});
+      const fm = ['---', 'type: ' + o.type, 'entiteit_id: ' + o.ent, 'object_id: ' + o.oid].concat(o.naam ? ['naam: "' + o.naam + '"'] : []).concat([
+        'aliases: ["Pim Proef", "Pim"]', 'geboortedatum: 1990-01-01', 'ovis:',
+        '  db: ["supabase:secondbrain/knoop#' + o.id + '"' + (o.google ? ', "supabase:secondbrain/contacten#' + o.google + '"' : '') + ']',
+        '  status: ' + o.status, '  mailadressen: [' + o.mail.join(', ') + ']', '  telefoons: [' + o.tel.map((x) => '"' + x + '"').join(', ') + ']',
+        '  niet_dezelfde_als: [' + o.nda.join(', ') + ']', '  zaad: ["mail pim.proef@voorbeeldpraktijk.nl: mailkaart, 12 mails"]']).concat(o.extra ? [o.extra] : []).concat(['updated: 2026-10-27', '---', '# Pim Proef', '', 'Dossiertekst.', '']);
+      const t = fm.join('\n'), z = R.persoonMetZegel(PP, t, KEY);
+      return z.tekst || t;
+    }
+    // parser, zegel, vingerafdruk
+    const t1 = persoon(), p1 = R.leesPersoon(PP, t1, KEY);
+    toets('11 persoonspagina geldig, naam uit de bestandsnaam', p1 && p1.fouten.length === 0 && p1.naam === 'Pim Proef' && p1.id === 'per:pim-proef' && p1.object_id === OID, p1);
+    toets('11 pagina zonder ovis-blok is geen OVIS-persoon', R.leesPersoon(PP, '---\ntype: medewerker\nnaam: X\n---\n', KEY) === null);
+    toets('11 dossiertekst wijzigen verandert de vingerafdruk niet', R.leesPersoon(PP, t1.replace('Dossiertekst.', 'Nieuwe kennis van vannacht.'), KEY).sha === p1.sha);
+    toets('11 aliases en geboortedatum worden geen kenmerk', JSON.stringify(R.handvattenVan(p1).map((h) => h.soort)) === '["mail"]', R.handvattenVan(p1));
+    const kapot = t1.replace('mailadressen: [pim.proef@voorbeeldpraktijk.nl]', 'mailadressen: [pim.proef@voorbeeldpraktijk.nl, valse@aanvaller.example]');
+    const pk = R.leesPersoon(PP, kapot, KEY);
+    toets('11 ovis-blok buiten Socev om gewijzigd = zegelfout', pk.zegelFout === true && pk.fouten.length === 1, pk.fouten);
+    const hz = R.persoonMetZegel(PP, kapot, KEY);
+    toets('11 persoonMetZegel herstelt het zegel (één regel)', hz.tekst && R.leesPersoon(PP, hz.tekst, KEY).fouten.length === 0 && hz.tekst.split('\n').length === kapot.split('\n').length, hz);
+    toets('11 privépagina wordt nooit een knoop', R.leesPersoon('20_Prive/Familie/Pim Proef.md', t1, KEY).fouten.some((f) => /zakelijke persoonspagina/.test(f)));
+    toets('11 persoonspagina in Bronnen telt niet', R.leesPersoon('10_Zakelijk/Voorbeeldpraktijk/Bronnen/Pim.md', t1, KEY).fouten.some((f) => /zakelijke persoonspagina/.test(f)));
+    toets('11 contact op een persoonspagina = fout (Google is de bron)', R.leesPersoon(PP, persoon({ extra: 'contact:\n  telefoon: "0612345678"' }), KEY).fouten.some((f) => /Google/.test(f)));
+    toets('11 zonder object_id = fout', R.leesPersoon(PP, persoon({ oid: 'geen' }), KEY).fouten.some((f) => /object_id/.test(f)));
+    toets('11 onbekend veld in het ovis-blok = fout', R.leesPersoon(PP, t1.replace('  status: concept', '  status: concept\n  iban: NL00TEST0000000000'), KEY).fouten.some((f) => /onbekend veld/.test(f)));
+    toets('11 normTel', R.normTel('+31 (0)6-1234 5678') === '0612345678' && R.normTel('0031 6 1234 5678') === '0612345678' && R.normTel('+220 712 3456') === '002207123456');
+    toets('11 BSN-lang nummer is geen telefoon', R.leesPersoon(PP, persoon({ tel: ['123456789'] }), KEY).fouten.some((f) => /telefoonnummer ongeldig/.test(f)));
+    // rpcInvoer
+    const ri = R.rpcInvoer(R.leesPersoon(PP, persoon({ tel: ['06 1234 5678'] }), KEY), 7, { soorten: ['kvk', 'domein', 'mail', 'kenmerkpatroon', 'alias', 'niet-dezelfde-als'], eigen: new Set(['GH']) });
+    toets('11 rpcInvoer persoon: telefoon wacht (fase B), voor alleen bestaande eigen entiteit, personeel', ri.soort === 'persoon' && ri.object_id === OID && ri.handvatten.length === 1
+      && ri.handvatten[0].soort === 'mail' && ri.voor.length === 0 && ri.access_context === 'zakelijk_personeel' && ri.contact.length === 0, ri);
+    // compileer tegen de nep-databank
+    const PP2 = '10_Zakelijk/Voorbeeldpraktijk/Roos Voorbeeld.md';
+    const t2 = persoon({ type: 'persoon', id: 'per:roos-voorbeeld', oid: OID2, mail: ['roos@voorbeeldpraktijk.nl'], naam: 'Roos Voorbeeld' }).replace(/Pim Proef/g, 'Roos Voorbeeld');
+    const t2z = R.persoonMetZegel(PP2, t2, KEY).tekst;
+    const v11 = wegwerpVault({ [TGP]: TG, [PP]: persoon({ tel: ['0612345678'] }), [PP2]: t2z, '10_Zakelijk/Voorbeeldpraktijk/Medewerkers/Zonder Ovis.md': '---\ntype: medewerker\n---\nx\n' });
+    const n11 = nepDb({ knopen: [TGRIJ], handvatten: TGH.slice(), contact: [], vertaling: [], bevindingen: [], log: [] });
+    let sleutel11 = KEY;
+    const m11 = R.maak({ vault: v11, sbRpc: n11.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: (p, t) => fs.writeFileSync(p, t), nu: () => Date.parse('2026-10-28T01:15:00Z'), zegelSleutel: () => sleutel11 });
+    const c11 = await m11.compileer('dag');
+    toets('11 compileer: twee personen gestuurd, telefoon wacht op de databank', n11.db.knopen.filter((k) => k.soort === 'persoon').length === 2 && c11.wacht_soort === 1 && c11.fouten.length === 0, c11);
+    toets('11 de pagina zonder ovis-blok is niet gestuurd', !n11.db.knopen.some((k) => /zonder/.test(k.id)));
+    const voorTekst = fs.readFileSync(path.join(v11, PP), 'utf8');
+    const cn = await m11.compileer('nacht', { grendel: true });
+    toets('11 nacht: geen gegenereerd blok op een persoonspagina', fs.readFileSync(path.join(v11, PP), 'utf8') === voorTekst && fs.readFileSync(path.join(v11, PP2), 'utf8') === t2z, cn);
+    const c11b = await m11.compileer('dag');
+    toets('11 ongewijzigd = niet opnieuw gestuurd', c11b.gestuurd === 0, c11b);
+    // fase B: de databank kent telefoon → de ongewijzigde pagina gaat opnieuw
+    n11.db.handvat_soorten = ['kvk', 'domein', 'mail', 'kenmerkpatroon', 'alias', 'niet-dezelfde-als', 'telefoon', 'whatsapp', 'signal', 'google'];
+    const c11c = await m11.compileer('dag');
+    toets('11 fase B: ongewijzigde pagina met telefoon opnieuw gestuurd', c11c.gestuurd === 1 && n11.db.handvatten.some((h) => h.knoop === 'per:pim-proef' && h.soort === 'telefoon' && h.waarde_norm === '0612345678'), c11c);
+    const c11d = await m11.compileer('dag');
+    toets('11 fase B: daarna rust', c11d.gestuurd === 0, c11d);
+    // Bibliothecaris
+    let b11 = await m11.bibliothecaris({ afroep: true });
+    toets('11 Bibliothecaris: personen groen', b11.tel.per_verschil === 0 && b11.tel.personen === 2 && b11.tel.personen_gemeten === true, [b11.tel, b11.bevindingen.map((x) => x.bevinding_id)]);
+    // zegel kapot: niets sturen, BB6-zegel, geen BB2
+    fs.writeFileSync(path.join(v11, PP2), t2z.replace('roos@voorbeeldpraktijk.nl]', 'roos@voorbeeldpraktijk.nl, x@aanvaller.example]'));
+    const voorH = n11.db.handvatten.length;
+    b11 = await m11.bibliothecaris({ afroep: true });
+    const ids11 = b11.bevindingen.map((x) => x.bevinding_id);
+    toets('11 zegel kapot: BB6-zegel, geen BB2, niets gestuurd of vervallen', ids11.indexOf('BB6-per:roos-voorbeeld-zegel') >= 0 && !ids11.some((i) => /^BB2-per:roos/.test(i))
+      && n11.db.handvatten.length === voorH && !n11.db.handvatten.some((h) => h.knoop === 'per:roos-voorbeeld' && h.status === 'vervallen'), ids11);
+    fs.writeFileSync(path.join(v11, PP2), t2z);
+    // identiteit: entity met ander object_id → BB1-object; personen niet te lezen → niet opgelost
+    n11.db.personen.entity.find((e) => e.k === 'per:pim-proef').o = OID2;
+    b11 = await m11.bibliothecaris({ afroep: true });
+    toets('11 BB1-object bij een ander object_id', b11.bevindingen.some((x) => x.bevinding_id === 'BB1-per:pim-proef-object'), b11.bevindingen.map((x) => x.bevinding_id));
+    n11.db.personenFout = true;
+    b11 = await m11.bibliothecaris({ afroep: true });
+    toets('11 personen niet gemeten: BB1-object blijft open', n11.db.bevindingen.some((x) => x.bevinding_id === 'BB1-per:pim-proef-object') && b11.tel.personen_gemeten === false, b11.tel);
+    n11.db.personenFout = false; n11.db.personen.entity.find((e) => e.k === 'per:pim-proef').o = OID;
+    b11 = await m11.bibliothecaris({ afroep: true });
+    toets('11 hersteld: opgelost', !n11.db.bevindingen.some((x) => /per:/.test(x.bevinding_id)), n11.db.bevindingen);
+    // BB5: zelfde mailadres bij een persoon en een organisatie; twee pagina's met hetzelfde object_id
+    n11.db.handvatten.push({ id: 900, knoop: 'TG', soort: 'mail', waarde: 'roos@voorbeeldpraktijk.nl', waarde_norm: 'roos@voorbeeldpraktijk.nl', status: 'voorgesteld', herkomst: { bron: 'pagina' } });
+    const pr = R.checks([R.leesPersoon(PP, persoon(), KEY), Object.assign(R.leesPersoon(PP2, t2z, KEY))], n11.db, [], null, null, n11.db.personen);
+    toets('11 BB5 mail persoon ⇄ organisatie', pr.bevindingen.some((x) => x.check_id === 'BB5' && /per:roos-voorbeeld/.test(x.bevinding_id) && /TG/.test(x.bevinding_id)), pr.bevindingen.map((x) => x.bevinding_id));
+    n11.db.handvatten.pop();
+    const t3 = R.persoonMetZegel(PP2, t2.replace(OID2, OID), KEY).tekst;
+    const pr2 = R.checks([R.leesPersoon(PP, persoon(), KEY), R.leesPersoon(PP2, t3, KEY)], n11.db, [], null, null, n11.db.personen);
+    toets('11 BB5 twee pagina\'s met hetzelfde object_id', pr2.bevindingen.some((x) => x.bevinding_id === 'BB5-per:pim-proef-per:roos-voorbeeld-object'), pr2.bevindingen.map((x) => x.bevinding_id));
+    // BB2: persoonsknoop zonder pagina
+    const pr3 = R.checks([R.leesPersoon(PP, persoon(), KEY)], n11.db, [], null, null, n11.db.personen);
+    toets('11 BB2 persoonsknoop zonder pagina', pr3.bevindingen.some((x) => x.bevinding_id === 'BB2-per:roos-voorbeeld-geen-pagina'), pr3.bevindingen.map((x) => x.bevinding_id));
+    // Google: actieve koppeling, nummer op de pagina staat niet in Google
+    const tg = persoon({ tel: ['0612345678'], google: 'people/c123' });
+    const pg = R.leesPersoon(PP, tg, KEY);
+    const regG = JSON.parse(JSON.stringify(n11.db)); regG.handvat_soorten = n11.db.handvat_soorten;
+    regG.knopen.find((k) => k.id === 'per:pim-proef').bron_sha = pg.sha;
+    regG.handvatten = regG.handvatten.filter((h) => h.knoop !== 'per:pim-proef').concat([
+      { id: 801, knoop: 'per:pim-proef', soort: 'mail', waarde: 'pim.proef@voorbeeldpraktijk.nl', waarde_norm: 'pim.proef@voorbeeldpraktijk.nl', status: 'voorgesteld', herkomst: { bron: 'pagina' } },
+      { id: 802, knoop: 'per:pim-proef', soort: 'telefoon', waarde: '0612345678', waarde_norm: '0612345678', status: 'voorgesteld', herkomst: { bron: 'pagina' } },
+      { id: 803, knoop: 'per:pim-proef', soort: 'google', waarde: 'people/c123', waarde_norm: 'people/c123', status: 'actief', herkomst: { bron: 'pagina', vraag_id: 'abcd1234', kaart: 'k' } }]);
+    regG.kaarten = [{ sleutel: 'k', beslist_vraag_id: 'abcd1234', status: 'ja', regels: [] }];
+    const prG = R.checks([pg], regG, [], null, null, { entity: [{ k: 'per:pim-proef', o: OID }], contacten: [{ r: 'people/c123', mail: [], tel: ['+31687654321'] }] });
+    toets('11 Google: nummer op de pagina niet in Google → BB3-google-tel', prG.bevindingen.some((x) => x.bevinding_id === 'BB3-per:pim-proef-google-tel'), prG.bevindingen.map((x) => x.bevinding_id));
+    const prG2 = R.checks([pg], regG, [], null, null, { entity: [{ k: 'per:pim-proef', o: OID }], contacten: [{ r: 'people/c123', mail: [], tel: ['+31612345678'] }] });
+    toets('11 Google: nummer staat erin → geen bevinding', !prG2.bevindingen.some((x) => /google/.test(x.bevinding_id)), prG2.bevindingen.map((x) => x.bevinding_id));
+    const prG3 = R.checks([pg], regG, [], null, null, { entity: [{ k: 'per:pim-proef', o: OID }], contacten: [] });
+    toets('11 Google: contact weg → BB1', prG3.bevindingen.some((x) => x.bevinding_id === 'BB1-per:pim-proef-google') && prG3.bevindingen.some((x) => x.bevinding_id === 'BB1-per:pim-proef-google-weg'), prG3.bevindingen.map((x) => x.bevinding_id));
+
+    // zegel = HMAC: met een andere sleutel klopt het niet; zonder sleutel geen zegel
+    toets('11 zegel met een andere sleutel klopt niet', R.leesPersoon(PP, t1, KEY2).zegelFout === true && R.leesPersoon(PP, t1).zegelFout === true);
+    toets('11 persoonMetZegel zonder sleutel weigert', !!R.persoonMetZegel(PP, t1).fout);
+    // zonder zegelsleutel: personen niet gelezen, niets gestuurd, geen BB2, open persoonsbevinding blijft
+    n11.db.bevindingen.push({ bevinding_id: 'BB3-per:pim-proef-handvatten', check_id: 'BB3', status: 'open', ernst: 'warning' });
+    sleutel11 = null;
+    const cz = await m11.compileer('dag');
+    const bz = await m11.bibliothecaris({ afroep: true });
+    toets('11 zonder zegelsleutel: niets gestuurd, fout gemeld, geen BB2, bevinding blijft open', cz.gestuurd === 0 && cz.fouten.some((f) => f.pad === '(personen)')
+      && !bz.bevindingen.some((x) => /^BB2-per:/.test(x.bevinding_id)) && n11.db.bevindingen.some((x) => x.bevinding_id === 'BB3-per:pim-proef-handvatten') && /personen niet gemeten/.test(bz.zin), [cz.fouten, bz.zin]);
+    sleutel11 = KEY;
+    n11.db.bevindingen = n11.db.bevindingen.filter((x) => x.bevinding_id !== 'BB3-per:pim-proef-handvatten');
+    // BB2: pagina bestaat nog maar het blok is weg → blok-weg (nooit "conceptpagina maken")
+    fs.writeFileSync(path.join(v11, PP2), '---\ntype: persoon\nnaam: "Roos Voorbeeld"\n---\nTekst.\n');
+    const bw = await m11.bibliothecaris({ afroep: true });
+    toets('11 blok weg op een bestaande pagina: BB2-blok-weg', bw.bevindingen.some((x) => x.bevinding_id === 'BB2-per:roos-voorbeeld-blok-weg') && !bw.bevindingen.some((x) => x.bevinding_id === 'BB2-per:roos-voorbeeld-geen-pagina'), bw.bevindingen.map((x) => x.bevinding_id));
+    const kbw = R.kaartBiblio({ knopen: [{ id: 'per:roos-voorbeeld', naam: 'Roos Voorbeeld' }], kaarten: [], bevindingen: [{ bevinding_id: 'BB2-per:roos-voorbeeld-blok-weg', check_id: 'BB2', ernst: 'warning', status: 'open' }] }, { nu: Date.parse('2026-10-28T02:31:00Z') });
+    toets('11 kaart bij blok-weg maakt geen nieuwe pagina', kbw.kaart && /Ik zet het terug/.test(kbw.kaart.stappen[0]) && !/conceptpagina/.test(kbw.kaart.stappen[0]), kbw.kaart && kbw.kaart.stappen);
+    fs.writeFileSync(path.join(v11, PP2), t2z);
+    // databank weigert een persoon → BB6-per:…-compileer (telt mee in per_verschil)
+    const prc = R.checks([R.leesPersoon(PP, persoon(), KEY)], n11.db, [{ pad: PP, fout: 'databank: object_id hoort niet', persoon: 'per:pim-proef' }], null, null, n11.db.personen);
+    toets('11 compileerfout persoon telt mee', prc.bevindingen.some((x) => x.bevinding_id === 'BB6-per:pim-proef-compileer') && prc.tel.per_verschil >= 1, prc.bevindingen.map((x) => x.bevinding_id));
+    // kaarten: personen hooguit 6 van 12 zolang organisaties wachten; privé-vlag; titel
+    const kn = [], hv = [], pgs = [];
+    for (let i = 0; i < 9; i++) { const id = 'org:org-' + i; kn.push({ id, soort: 'organisatie', naam: 'Org ' + i, vault_pagina: '10_Zakelijk/_Gedeeld/Relaties/Org ' + i + '.md', bron_sha: 's' + i }); pgs.push({ id, pad: '10_Zakelijk/_Gedeeld/Relaties/Org ' + i + '.md', sha: 's' + i, fouten: [], zaad: [] }); hv.push({ id: 1000 + i, knoop: id, soort: 'domein', waarde: 'org' + i + '.example', waarde_norm: 'org' + i + '.example', status: 'voorgesteld', herkomst: { sha: 'x' } }); }
+    for (let i = 0; i < 9; i++) { const id = 'per:p-' + i; kn.push({ id, soort: 'persoon', naam: 'Persoon ' + i, vault_pagina: '10_Zakelijk/X/P' + i + '.md', bron_sha: 'q' + i }); pgs.push({ id, pad: '10_Zakelijk/X/P' + i + '.md', sha: 'q' + i, fouten: [], zaad: ['mail p' + i + '@x.example: mailkaart, 900 mails'], persoon: true }); hv.push({ id: 2000 + i, knoop: id, soort: 'mail', waarde: 'p' + i + '@x.example', waarde_norm: 'p' + i + '@x.example', status: 'voorgesteld', herkomst: { sha: 'y' } }); }
+    const kb = R.kaartBundel({ knopen: kn, handvatten: hv, kaarten: [] }, pgs, { nu: Date.parse('2026-10-28T02:31:00Z') });
+    const nP = kb.kaart ? kb.kaart.stappen.filter((x) => /Persoon/.test(x)).length : -1;
+    toets('11 bundel: 6 personen + 6 organisaties, privé, titel noemt beide', kb.kaart && kb.kaart.stappen.length === 12 && nP === 6 && kb.kaart.prive === true && /organisaties en personen/.test(kb.kaart.titel), kb.kaart && [kb.kaart.titel, nP, kb.kaart.prive]);
+    const kb2 = R.kaartBundel({ knopen: kn.filter((k) => k.soort === 'persoon'), handvatten: hv.filter((h) => /^per:/.test(h.knoop)), kaarten: [] }, pgs.filter((p) => p.persoon), { nu: Date.parse('2026-10-28T02:31:00Z') });
+    toets('11 bundel alleen personen: vult aan tot 9, titel personen', kb2.kaart && kb2.kaart.stappen.length === 9 && /bij 9 personen/.test(kb2.kaart.titel), kb2.kaart && kb2.kaart.titel);
+    const kbb = R.kaartBiblio({ knopen: [{ id: 'per:pim-proef', naam: 'Pim Proef' }], kaarten: [], bevindingen: [{ bevinding_id: 'BB6-per:pim-proef-zegel', check_id: 'BB6', ernst: 'warning', status: 'open' }] }, { nu: Date.parse('2026-10-28T02:31:00Z') });
+    toets('11 Bibliothecariskaart: zegel in gewone taal, privé', kbb.kaart && kbb.kaart.prive === true && /Pim Proef: op de pagina is buiten mij om/.test(kbb.kaart.stappen[0]), kbb.kaart);
+    toets('11 bevinding-id personen herkend', R.PER_BEVINDING_RE.test('BB5-org:a-b-per:c-1') && R.PER_BEVINDING_RE.test('BB6-per:x-zegel') && !R.PER_BEVINDING_RE.test('BB3-org:per-x-handvatten'));
   }
   console.log(goed + ' groen, ' + fouten + ' rood');
   process.exit(fouten ? 1 : 0);

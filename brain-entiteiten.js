@@ -24,7 +24,7 @@ const GROEP = { eigen: 'eigen', leverancier: 'leverancier', instantie: 'instanti
 const ROL_WOORD = { eigen: 'eigen entiteit', leverancier: 'leverancier', instantie: 'instantie', bank: 'bank', verzekeraar: 'verzekeraar',
   praktijk: 'praktijk', zorgpartner: 'zorgpartner', afzender: 'afzender', persoon: 'persoon' };
 const HANDVAT_WOORD = { kvk: 'KvK', domein: 'domein', mail: 'mailadres', kenmerkpatroon: 'kenmerkpatroon', alias: 'ook bekend als',
-  'niet-dezelfde-als': 'niet dezelfde als' };
+  'niet-dezelfde-als': 'niet dezelfde als', telefoon: 'telefoonnummer', whatsapp: 'WhatsApp', signal: 'Signal', google: 'Google-contact' };   // wv1011
 const STATUS_WOORD = { actief: 'actief', voorgesteld: 'wacht op je Ja', vervallen: 'vervallen' };
 
 // Sleutel voor de detailroute: de pod staat alleen /app/[a-z0-9/-]{1,64} toe en een knoop-id draagt hoofdletters en ':' (tot 57 tekens)
