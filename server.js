@@ -13128,17 +13128,17 @@ async function berichtNieuw(res, d) {
   if (!tekst.trim()) return berichtStuur(res, 400, { ok: false, fout: 'geen tekst' });
   const idx = berichtIndex(), nu = Date.now();
   const sl = d.sleutel ? appSha('bericht:' + d.sleutel) : null;
-  if (sl) {
-    const al = Object.keys(idx).find(function (id) { return idx[id].sleutel === sl && nu - Date.parse(idx[id].t) < BERICHT_SLEUTEL_MS; });
-    if (al) {
-      res._log = { bericht: al, dubbel: true };
-      // wv315: dubbel = niets nieuws, ook geen tweede agendaknop; agenda true als de eerste er een kreeg
-      const agAl = ag && appAgendaKnoppen()[al] ? true : undefined;
-      const soAl = idx[al].soort || null;   // wv804: soort van het eerste
-      return berichtStuur(res, 200, { ok: true, id: al, dubbel: true, push: { gewenst: berichtPushGewenst(), gestart: false }, uitgesteld: null, app_actief: berichtAppActief(), agenda: agAl,
-        soort: soAl, seintje: soAl ? meldSeintje(idx[al].kanaal, soAl) : null });
-    }
-  }
+  const dubbelVan = function (tNu) { return sl ? Object.keys(idx).find(function (id) { return idx[id].sleutel === sl && tNu - Date.parse(idx[id].t) < BERICHT_SLEUTEL_MS; }) : null; };
+  const stuurDubbel = function (al) {
+    res._log = { bericht: al, dubbel: true };
+    // wv315: dubbel = niets nieuws, ook geen tweede agendaknop; agenda true als de eerste er een kreeg
+    const agAl = ag && appAgendaKnoppen()[al] ? true : undefined;
+    const soAl = idx[al].soort || null;   // wv804: soort van het eerste
+    return berichtStuur(res, 200, { ok: true, id: al, dubbel: true, push: { gewenst: berichtPushGewenst(), gestart: false }, uitgesteld: null, app_actief: berichtAppActief(), agenda: agAl,
+      soort: soAl, seintje: soAl ? meldSeintje(idx[al].kanaal, soAl) : null });
+  };
+  const al0 = dubbelVan(nu);
+  if (al0) return stuurDubbel(al0);
   const id = crypto.randomBytes(8).toString('hex'), t = new Date(nu).toISOString();
   // Vraag eerst (anders staat er een bericht in de app waarvan de knoppen niet werken); dan het log; lukt dat niet, de vraag weg.
   // knoppen:false (schaduwfase, terugval 2): de vraag wél vastleggen, maar met naar_telegram, zodat de app "Beantwoord in Telegram"
@@ -13151,7 +13151,10 @@ async function berichtNieuw(res, d) {
   // wv1820: zette dezelfde klus al een besluitkaart voor deze vraag, dan geen tweede knoppenset; de tekst blijft, met één zin erbij
   let opKaart = null;
   if (vraag && (agentJob || bronJob)) {
-    try { opKaart = await berichtVraagKaartLees(vraag.tekst, [agentJob || bronJob]); } catch (e) { logError('bericht-vraag-kaart', e); }
+    const budget = Math.min(BERICHT_KAART_MS, BERICHT_KAART_TOT_MS - (Date.now() - (BERICHT_T0.get(res) || nu)));
+    if (budget >= 300) { try { opKaart = await berichtVraagKaartLees(vraag.tekst, [agentJob || bronJob], budget); } catch (e) { logError('bericht-vraag-kaart', e); } }
+    const al1 = dubbelVan(Date.now());   // review #5: tijdens het wachten kan hetzelfde bericht (zelfde sleutel) al binnengekomen zijn
+    if (al1) return stuurDubbel(al1);
     if (opKaart) {
       const zin = berichtKaartZin(opKaart);
       tekst = tekst.replace(/^[^\S\n]*[*_]*VRAAG AAN DAVID:[*_]*[^\S\n]*.+$/m, function (m) { return m + '\n' + zin; });
@@ -13159,7 +13162,7 @@ async function berichtNieuw(res, d) {
     }
   }
   const vsl = vraag ? id + ':' + vraag.hash : null;
-  const soort = meldSoort(kanaal, bron, klasse, !!vraag, !!ag, d.soort), seintje = meldSeintje(kanaal, soort);   // wv804 (ontwerp § 1)
+  const soort = meldSoort(kanaal, bron, klasse, !!vraag, !!ag, opKaart && d.soort === 'vraag' ? undefined : d.soort), seintje = meldSeintje(kanaal, soort);   // wv804 (ontwerp § 1)
   if (vraag) {
     const gev = appGevoelig(vraag.tekst);
     try { const v = appVragen(); v[vsl] = { kanaal: kanaal, t: t, antwoord: null, gevoelig: !!gev, gevoelig_reden: gev || undefined, soort: 'socev', naar_telegram: d.knoppen === true ? undefined : t }; appVragenSchrijf(v); }
@@ -13218,33 +13221,42 @@ function berichtBronJob(zin, nu, lijst) {
 // ── wv1820: één vraag, één plek (David 28-10 07:58: "De vraag stond er twee keer in, een andere vraag ook") ──
 // Een agentrapport of /run met een VRAAG AAN DAVID-regel krijgt geen knoppen als dezelfde klus al een besluitkaart in Voor jou zette
 // voor dezelfde vraag. Zelfde klus = ouder_job van een rij in herkomst.wv (mk_voor_jou_vraag_jobs) of herkomst.beurt = agent_job (of
-// bron_job); dezelfde vraag = de woordtoets van wv1018 (>= 2 gedeelde inhoudswoorden en >= 1/3 van de kleinste set). Anders dan wv1018
-// telt de tijd niet: een in de stille uren vastgehouden rapport komt na de kaart, soms na Davids antwoord, binnen (28-10: kaart Ja
-// 06:25, rapport 07:02 bezorgd met knoppen). Een doe-kaart neemt nooit een vraag over (Fable wv926 #6). Puur: getoetst in 23.
+// bron_job). Dezelfde vraag, strenger dan wv1018 omdat tijd en 1-op-1 hier niet meetellen (Opus-diffreview wv1820 MOET 1: "mag ik de
+// oude versie wissen?" van dezelfde klus mag niet onder een Ja op "mag ik de nachtsync repareren?" verdwijnen): de vraag deelt ten
+// minste twee inhoudswoorden met de kaarttitel, ten minste de helft van zijn woorden met titel + waarom, en heeft dezelfde
+// gevoeligheidssoort (appGevoelig: versturen/verwijderen/agenda/geld of geen) als de titel. Alleen een kaart die nog open of later
+// is, die David beantwoordde of die hij dichtzette (review ZOU 2: een door een agent of de ronde ingetrokken kaart neemt niets over).
+// Anders dan wv1018 telt de tijd niet: een in de stille uren vastgehouden rapport komt na de kaart, soms na Davids antwoord, binnen
+// (28-10: kaart Ja 06:25, rapport 07:02 bezorgd met knoppen). Een doe-kaart neemt nooit een vraag over (Fable wv926 #6). Puur: getoetst in 23.
 function berichtVraagOpKaart(zin, klusJobs, kaarten, kaartJobs) {
   const klus = new Set((klusJobs || []).map(String).filter(function (j) { return APP_JOB_RE.test(j); }));
-  const vw = appVjAfleidWoorden(zin);
-  if (!klus.size || !vw.size) return null;
+  const vw = appVjAfleidWoorden(zin), gev = appGevoelig(zin);
+  if (!klus.size || vw.size < 2) return null;
   let best = null, bestN = 0;
   (kaarten || []).forEach(function (p) {
     if (!p || p.soort !== 'besluit' || !Number.isInteger(p.id)) return;
+    if (p.status !== 'open' && p.status !== 'later' && p.gesloten_door !== 'david') return;
     const js = ((kaartJobs && kaartJobs[p.id]) || []).map(String);
     if (p.herkomst && typeof p.herkomst === 'object' && p.herkomst.beurt) js.push(String(p.herkomst.beurt));
     if (!js.some(function (j) { return klus.has(j); })) return;
-    const kw = appVjAfleidWoorden(String(p.titel || '') + ' ' + String(p.waarom || ''));
-    let n = 0;
-    vw.forEach(function (w) { if (kw.has(w)) n++; });
-    if (n < 2 || n * 3 < Math.min(kw.size, vw.size)) return;
+    const tw = appVjAfleidWoorden(p.titel), kw = appVjAfleidWoorden(String(p.titel || '') + ' ' + String(p.waarom || ''));
+    let n = 0, nt = 0;
+    vw.forEach(function (w) { if (kw.has(w)) n++; if (tw.has(w)) nt++; });
+    if (nt < 2 || n * 2 < vw.size || appGevoelig(p.titel) !== gev) return;
     if (n > bestN) { best = p; bestN = n; }
   });
   return best;
 }
 // Vers uit de databank (een agent zet zijn kaart vaak vlak voor zijn rapport; de caches zijn tot een minuut oud). Hooguit 3 s: n8n
 // wacht 8 s op /bericht en valt daarna terug op Telegram. Niet te lezen of te laat = null: dan zoals vóór wv1820 (wel knoppen).
-const BERICHT_KAART_MS = 3000;
-async function berichtVraagKaartLees(zin, klusJobs) {
+// Review #3: de grens telt vanaf het begin van het verzoek (berichtRoute wacht eerst op appRolOk, na een herstart tot 6 s): samen
+// hooguit BERICHT_KAART_TOT_MS; minder dan 300 ms over = niet lezen.
+const BERICHT_KAART_MS = 3000, BERICHT_KAART_TOT_MS = 6500;
+const BERICHT_T0 = new WeakMap();
+async function berichtVraagKaartLees(zin, klusJobs, ms) {
   let tm;
-  const te = new Promise(function (_, nee) { tm = setTimeout(function () { nee(new Error('voor_jou niet binnen ' + BERICHT_KAART_MS + ' ms')); }, BERICHT_KAART_MS); });
+  ms = ms || BERICHT_KAART_MS;
+  const te = new Promise(function (_, nee) { tm = setTimeout(function () { nee(new Error('voor_jou niet binnen ' + ms + ' ms')); }, ms); });
   try {
     const [l, j] = await Promise.race([Promise.all([appSbRpc('mk_voor_jou_lijst', { p_alles: false }), appSbRpc('mk_voor_jou_vraag_jobs', {})]), te]);
     if (!l || !Array.isArray(l.punten)) throw new Error('voor_jou zonder punten');
@@ -13252,12 +13264,15 @@ async function berichtVraagKaartLees(zin, klusJobs) {
   } finally { clearTimeout(tm); }
 }
 // De zin onder de vraagregel: beantwoord (knop op de kaart of de eigen vraag van de kaart), nog open, of anders dicht.
+// Met de kaarttitel (niet bij een privé-kaart), zodat David een verkeerde koppeling ziet (review MOET 1).
 function berichtKaartZin(p) {
   let b = null;
   try { b = appVjBeantwoordKort(p, appVragen(), null); } catch (e) { b = null; }
-  if (b && b.keuze) return '(al beantwoord op de kaart: ' + b.keuze.charAt(0).toUpperCase() + b.keuze.slice(1) + ')';
-  if (p.status === 'open' || p.status === 'later') return '(deze vraag staat als kaart in Voor jou; antwoord daar)';
-  return '(al afgehandeld op de kaart in Voor jou)';
+  const titel = p.prive ? '' : appKort(appVjGewoon(appVjOpmaakWeg(p.titel)), 90);
+  const kaart = titel ? 'de kaart "' + titel + '"' : 'de kaart';
+  if (b && b.keuze) return '(al beantwoord op ' + kaart + ': ' + b.keuze.charAt(0).toUpperCase() + b.keuze.slice(1) + ')';
+  if (p.status === 'open' || p.status === 'later') return '(deze vraag staat als kaart in Voor jou' + (titel ? ': "' + titel + '"' : '') + '; antwoord daar)';
+  return '(al afgehandeld op ' + kaart + ' in Voor jou)';
 }
 
 // wv895: een bericht van de pod zelf (manager-ronde op afroep), via precies dezelfde weg als POST /bericht: een kleine stand-in voor res
@@ -13389,6 +13404,7 @@ function berichtNaarTelegram(res, d) {
 // Aangeroepen door de server vóór handleRequest. Volgorde van weigeren: methode, noodstop (503), body, geheim (401), rol (409).
 function berichtRoute(req, res) {
   const p = reqPath(req);
+  BERICHT_T0.set(res, Date.now());   // wv1820 (review #3): de kaartlezing in berichtNieuw rekent vanaf hier (n8n wacht 8 s)
   if (req.method !== 'POST') { req.resume(); return berichtStuur(res, 405, { ok: false, fout: 'alleen POST' }); }
   // wv292 (Fable wv263 #10): stand en naar-telegram ook tijdens de noodstop, zodat n8n wat al in de app stond naar Telegram haalt
   const naUit = p === '/bericht/stand' || p === '/bericht/naar-telegram';
