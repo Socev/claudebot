@@ -38,7 +38,15 @@ class FinFout extends Error { constructor(code, uitleg) { super(code + ': ' + ui
 function sqlite() { return require('node:sqlite').DatabaseSync; }
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 function canon(x) { return JSON.stringify(x); }
-function maakMap(p) { fs.mkdirSync(p, { recursive: true, mode: 0o700 }); fs.chmodSync(p, 0o700); }
+// Map 700. Een bestaande map die niet van ons is (geen reken.sqlite/snapshot, niet leeg, bv. een verkeerde --dir als /opt/data) raken we niet aan.
+function maakMap(p) {
+  if (fs.existsSync(p)) {
+    const inhoud = fs.readdirSync(p);
+    const eigen = inhoud.every((n) => /^(reken\.sqlite(-journal|-wal|-shm)?|snapshot|\.tmp-.*|[0-9a-f]{64}\.sqlite)$/.test(n));
+    if (!eigen) throw new FinFout('map_onveilig', 'de map bevat bestanden die niet van de aansluiting zijn; kies een eigen map');
+  }
+  fs.mkdirSync(p, { recursive: true, mode: 0o700 }); fs.chmodSync(p, 0o700);
+}
 function dagAmsterdam(ms) { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms)); }
 function tijdAmsterdam(ms) {
   const p = new Intl.DateTimeFormat('nl-NL', { timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(ms));
@@ -115,6 +123,7 @@ function openReken(dir) {
   const DB = sqlite();
   const db = new DB(p);
   try { fs.chmodSync(p, 0o600); } catch (e) { /* net aangemaakt door SQLite: hieronder nog eens */ }
+  db.exec('PRAGMA busy_timeout = 15000');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(SCHEMA);
   fs.chmodSync(p, 0o600);
@@ -184,21 +193,23 @@ function keten(rijen, formaat) {
     for (const r of rijen) if (r.b + r.c !== r.e) breuk.add(r.dag);
     const voor = [], achter = [];
     for (let i = 0; i + 1 < n; i++) { if (rijen[i].e !== rijen[i + 1].b) voor.push(i); if (rijen[i].b !== rijen[i + 1].e) achter.push(i); }
-    for (const i of voor.length <= achter.length ? voor : achter) reeks(rijen[i].dag, rijen[i + 1].dag);
-    return { gecontroleerd: true, breuk };
+    const v = voor.length <= achter.length;
+    for (const i of v ? voor : achter) reeks(rijen[i].dag, rijen[i + 1].dag);
+    return { gecontroleerd: true, breuk, begin: n ? (v ? rijen[0].b : rijen[n - 1].b) : null, eind: n ? (v ? rijen[n - 1].e : rijen[0].e) : null };
   }
   if (rijen.some((r) => r.e === null || r.e === undefined)) return { gecontroleerd: false, breuk };
   const oud = [], nieuw = [];
   for (let i = 0; i + 1 < n; i++) { if (rijen[i].e + rijen[i + 1].c !== rijen[i + 1].e) oud.push(i); if (rijen[i].e - rijen[i].c !== rijen[i + 1].e) nieuw.push(i); }
-  for (const i of oud.length <= nieuw.length ? oud : nieuw) reeks(rijen[i].dag, rijen[i + 1].dag);
-  return { gecontroleerd: true, breuk };
+  const o = oud.length <= nieuw.length;
+  for (const i of o ? oud : nieuw) reeks(rijen[i].dag, rijen[i + 1].dag);
+  return { gecontroleerd: true, breuk, begin: n ? (o ? rijen[0].e - rijen[0].c : rijen[n - 1].e - rijen[n - 1].c) : null, eind: n ? (o ? rijen[n - 1].e : rijen[0].e) : null };
 }
-// Wanneer is het bestand gemaakt (dag)? ABN-export: TXTjjmmddhhmmss in de naam; anders de uploaddag (bovengrens: gemaakt vóór of op die dag).
+// Wanneer is het bestand gemaakt (dag)? Alleen de ABN-export zegt het zelf: TXTjjmmddhhmmss in de naam. De uploaddag is een bovengrens, geen
+// bewijs dat het bestand ná zijn laatste regeldag gemaakt is (review wv1864 ZOU 6): zonder TXT-naam → null, en dan telt de laatste dag niet.
 function gemaaktOp(b) {
   const m = /TXT(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(String(b.naam || ''));
   if (m) { const d = '20' + m[1] + '-' + m[2] + '-' + m[3]; if (K.isIsoDatum(d)) return d; }
-  const u = String(b.geupload_op || '').slice(0, 10);
-  return K.isIsoDatum(u) ? u : null;
+  return null;
 }
 /*
  * Dekking per dag voor één rekening over [van, tot] → { dagen: [{ dag, status, reden, db_regels, db_som_centen }], status(dag), bank_tm,
@@ -226,22 +237,33 @@ function dekkingRekening(snap, rekening, van, tot, bankbronDir, peilVan) {
     const dagen = br.rijen.map((r) => r.dag).sort();
     info.van = dagen[0]; info.tot = dagen[dagen.length - 1];
     const gemaakt = gemaaktOp(b);
-    info.eind = gemaakt && gemaakt <= info.tot ? K.plusDagen(info.tot, -1) : info.tot;
+    info.eind = !gemaakt || gemaakt <= info.tot ? K.plusDagen(info.tot, -1) : info.tot;
     const k = keten(br.rijen, br.formaat);
     info.gecontroleerd = k.gecontroleerd;
     if (!k.gecontroleerd) info.fout = 'saldo_niet_te_controleren';
     const perDag = new Map();
     for (const r of br.rijen) { const x = perDag.get(r.dag) || { n: 0, som: 0 }; x.n++; x.som += r.c; perDag.set(r.dag, x); }
-    info._dag = perDag; info._breuk = k.breuk;
+    info._dag = perDag; info._breuk = k.breuk; info._begin = k.begin; info._eind = k.eind;
+  }
+  // De eerste dag van een bestand kan half zijn (export "sinds de vorige download"): hij telt alleen als het beginsaldo aansluit op het eindsaldo
+  // van een eerder bestand, of als een ander bestand die dag midden in zijn eigen periode heeft (review wv1864 ZOU 6). MT940: per afschrift.
+  for (const s of bronnen) {
+    if (!s._dag || !s.gecontroleerd) continue;
+    s.start = s.van;
+    if (s.formaat === 'abn_mt940') continue;
+    const sluit = bronnen.some((y) => y !== s && y._dag && y.gecontroleerd && y.tot < s.van && y._eind !== null && y._eind === s._begin);
+    const binnen = bronnen.some((y) => y !== s && y._dag && y.gecontroleerd && y.van < s.van && s.van <= y.eind);
+    if (!sluit && !binnen) s.start = K.plusDagen(s.van, 1);
   }
   const dagen = [];
   for (const d of dagReeks(van, tot)) {
     const dv = db.get(d) || { n: 0, som: 0 };
-    const dekt = bronnen.filter((s) => s._dag && s.gecontroleerd && d >= s.van && d <= s.eind);
+    const dekt = bronnen.filter((s) => s._dag && s.gecontroleerd && d >= s.start && d <= s.eind);
     let status, reden;
     if (!dekt.length) {
       status = dv.n ? 'alleen_databank' : 'ontbreekt';
       reden = bronnen.some((s) => s._dag && s.gecontroleerd && d === s.tot && s.eind < s.tot) ? 'exportdag'
+        : bronnen.some((s) => s._dag && s.gecontroleerd && d === s.van && s.start > s.van) ? 'eerste_dag_onzeker'
         : bronnen.some((s) => s._dag && !s.gecontroleerd && d >= s.van && d <= s.tot) ? 'saldo_niet_te_controleren' : 'geen_bronbestand';
     } else if (dekt.some((s) => s._breuk.has(d))) { status = 'afwijkend'; reden = 'saldoketen'; }
     else if (dekt.some((s) => { const x = s._dag.get(d) || { n: 0, som: 0 }; return x.n !== dv.n || x.som !== dv.som; })) { status = 'afwijkend'; reden = 'databank_wijkt_af'; }
@@ -255,7 +277,7 @@ function dekkingRekening(snap, rekening, van, tot, bankbronDir, peilVan) {
   for (const x of dagen) { if (peilVan && x.dag < peilVan) continue; if (x.status !== 'gedekt') break; bank_tm = x.dag; }
   let laatst_gedekt = null;
   for (const x of dagen) if (x.status === 'gedekt') laatst_gedekt = x.dag;
-  for (const s of bronnen) { delete s._dag; delete s._breuk; }
+  for (const s of bronnen) { delete s._dag; delete s._breuk; delete s._begin; delete s._eind; }
   return { dagen, status: (d) => per.get(d) || null, bank_tm, laatst_gedekt, bronnen, peil_van: peilVan || van };
 }
 
@@ -323,7 +345,10 @@ function run(opties) {
     const label = eind4(rekening.iban);
     const fv = facturenVan(sdb, o.entiteit, o.periode || {});
     const datums = fv.lijst.map((f) => f.factuurdatum).filter((d) => d && K.isIsoDatum(d)).sort();
-    const vandaag = dagAmsterdam(o.nu);
+    // het einde van de dekkingstabel volgt uit de momentopname zelf (laatste boekdag of uploaddag), niet uit de klok: dezelfde momentopname
+    // geeft een dag later dezelfde tabellen (review wv1864 KAN 10); dagen erna zijn per definitie niet gedekt
+    const eindDb = sdb.prepare("SELECT max(d) AS d FROM (SELECT max(boekdatum) AS d FROM bank_transactie WHERE rekening = ? UNION ALL SELECT max(substr(geupload_op, 1, 10)) FROM bank_bestand)").get(rekening.id).d;
+    const vandaag = eindDb && K.isIsoDatum(eindDb) && eindDb < dagAmsterdam(o.nu) ? eindDb : dagAmsterdam(o.nu);
     const scope = { entiteit: o.entiteit, rekening_label: label, periode_van: (o.periode || {}).van || null, periode_tot: (o.periode || {}).tot || null,
       facturenset: 'fv2_archief_beslist+facturen_vanaf_verstuurd', dekking_van: datums.length ? K.plusDagen(datums[0], -T.VENSTER_VOOR) : K.plusDagen(vandaag, -365), dekking_tot: vandaag };
     scope.peil_van = datums.length ? K.plusDagen(datums[0], -T.VOORUIT_ZONDER_SLEUTEL) : scope.dekking_van;
@@ -430,7 +455,8 @@ function laatste(dir, opties) {
   } finally { db.close(); }
 }
 
-// Momentopnamen zonder run in de laatste 90 dagen weg; halve tijdelijke bestanden (> 1 uur) ook. → { weg: n }
+// Momentopnamen opruimen: zonder run in de laatste 90 dagen weg, ouder dan 7 dagen hooguit één per dag; halve tijdelijke bestanden (> 1 uur) ook.
+// Een run waarvan de momentopname weg is, blijft leesbaar maar is niet meer na te rekenen. → { weg: n }
 function opruim(dir, nu) {
   const snap = path.join(dir, 'snapshot');
   if (!fs.existsSync(snap)) return { weg: 0 };
@@ -439,8 +465,16 @@ function opruim(dir, nu) {
   if (fs.existsSync(p)) {
     const DB = sqlite();
     const db = new DB(p, { readOnly: true });
-    try { for (const r of db.prepare('SELECT DISTINCT snapshot_sha256 AS s FROM reken_run WHERE gestart_op >= ?').all(new Date(nu - BEWAAR_DAGEN * 86400000).toISOString())) nodig.add(r.s); }
-    finally { db.close(); }
+    // laatste 7 dagen: elke momentopname met een run; daarvoor tot 90 dagen: alleen die van de laatste run per dag (review wv1864 ZOU 8: elke
+    // vers-run maakt een volledige kopie van ± 10 MB)
+    try {
+      const grens = new Date(nu - 7 * 86400000).toISOString();
+      const perDag = new Map();
+      for (const r of db.prepare('SELECT id, snapshot_sha256 AS s, gestart_op AS g FROM reken_run WHERE gestart_op >= ? ORDER BY id').all(new Date(nu - BEWAAR_DAGEN * 86400000).toISOString())) {
+        if (r.g >= grens) nodig.add(r.s); else perDag.set(r.g.slice(0, 10), r.s);
+      }
+      for (const sha of perDag.values()) nodig.add(sha);
+    } finally { db.close(); }
   }
   let weg = 0;
   for (const n of fs.readdirSync(snap)) {

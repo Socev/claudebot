@@ -96,7 +96,21 @@ function stornoVoorbewerking(transacties, koppelingen) {
   const af = transacties.filter((t) => t.bedrag_centen < 0).sort(txVolg);
   const bij = transacties.filter((t) => t.bedrag_centen > 0).sort(txVolg);
   const weg = new Set(), paren = [], terug = new Set();
-  for (const k of koppelingen || []) if (k.methode === 'sepa_terug') { weg.add(k.entry_ref); terug.add(k.factuur_ref); }
+  // Een terugboeking (koppeling sepa_terug, Facturen-app) heft één afschrijving van die factuur op (review wv1864 MOET 3): bij voorkeur een
+  // gekoppelde afschrijving van dezelfde factuur met hetzelfde bedrag, anders de laatste eerdere afschrijving van dezelfde tegenpartij en bedrag.
+  const byRef = new Map(transacties.map((t) => [t.entry_ref, t]));
+  const ks = (koppelingen || []).slice().sort((a, b) => cmp(a.entry_ref, b.entry_ref) || cmp(a.factuur_ref, b.factuur_ref));
+  for (const k of ks.filter((x) => x.methode === 'sepa_terug')) {
+    const c = byRef.get(k.entry_ref);
+    weg.add(k.entry_ref); terug.add(k.factuur_ref);
+    if (!c || c.bedrag_centen <= 0) continue;
+    const gekoppeld = ks.filter((x) => x.factuur_ref === k.factuur_ref && x.methode !== 'sepa_terug').map((x) => byRef.get(x.entry_ref))
+      .filter((t) => t && !weg.has(t.entry_ref) && t.bedrag_centen === -c.bedrag_centen).sort(txVolg);
+    const s = tegenSleutel(c);
+    const zelfde = af.filter((t) => !weg.has(t.entry_ref) && t.bedrag_centen === -c.bedrag_centen && t.boekdatum <= c.boekdatum && s && tegenSleutel(t) === s);
+    const a = gekoppeld[0] || zelfde[zelfde.length - 1];
+    if (a) { weg.add(a.entry_ref); paren.push([a.entry_ref, c.entry_ref]); }
+  }
   const bijPer = new Map();
   for (const b of bij) {
     if (weg.has(b.entry_ref)) continue;
@@ -107,6 +121,7 @@ function stornoVoorbewerking(transacties, koppelingen) {
     bijPer.get(k).push(b);
   }
   for (const a of af) {
+    if (weg.has(a.entry_ref)) continue;
     const s = tegenSleutel(a);
     if (!s) continue;
     const lijst = bijPer.get(s + '|' + (-a.bedrag_centen));
@@ -179,18 +194,25 @@ function sluitAan(invoer) {
   };
 
   // ── laag 0: besluiten ──
-  for (const b of invoer.besluiten || []) if (b.oordeel === 'nee') for (const e of b.entry_refs || []) verboden.add(b.factuur_ref + '|' + e);
+  // Per paar (factuur, regel) telt het laatste besluit in de volgorde van de invoer (koppelingen uit de app eerst, dan reken.sqlite op id):
+  // een later 'nee' heft een eerder 'ja' op (review wv1864 MOET 4).
+  const oordeel = new Map();
+  for (const b of invoer.besluiten || []) for (const e of b.entry_refs || []) oordeel.set(b.factuur_ref + '|' + e, b.oordeel);
   const jaPer = new Map();
-  for (const b of (invoer.besluiten || []).filter((x) => x.oordeel === 'ja')) {
-    if (!jaPer.has(b.factuur_ref)) jaPer.set(b.factuur_ref, new Set());
-    for (const e of b.entry_refs || []) jaPer.get(b.factuur_ref).add(e);
+  for (const [k, o] of oordeel) {
+    const i = k.lastIndexOf('|'), ref = k.slice(0, i), e = k.slice(i + 1);
+    if (o === 'nee') { verboden.add(k); continue; }
+    if (o !== 'ja') continue;
+    if (!jaPer.has(ref)) jaPer.set(ref, new Set());
+    jaPer.get(ref).add(e);
   }
   const jaClaims = new Map();
   for (const [ref, set] of jaPer) for (const e of set) { if (!jaClaims.has(e)) jaClaims.set(e, new Set()); jaClaims.get(e).add(ref); }
   for (const f of facturen) {
     if (!geldig(f) || !jaPer.has(f.ref)) continue;
-    const refs = [...jaPer.get(f.ref)].filter((e) => txByRef.has(e) && txByRef.get(e).bedrag_centen < 0).sort();
-    if (!refs.length) { kand(f, 'besluit_zonder_regel', []); continue; }
+    const alle = [...jaPer.get(f.ref)].filter((e) => txByRef.has(e) && txByRef.get(e).bedrag_centen < 0).sort();
+    const refs = alle.filter((e) => !st.weg.has(e));   // een teruggeboekte (storno/sepa_terug) afschrijving is geen betaling, ook niet met een ja
+    if (!refs.length) { kand(f, alle.length ? 'besluit_teruggeboekt' : 'besluit_zonder_regel', alle); continue; }
     if (refs.some((e) => jaClaims.get(e).size > 1)) { kand(f, 'besluit_conflict', refs); continue; }
     koppel(f, 0, refs, 'besluit');
   }
@@ -241,6 +263,8 @@ function sluitAan(invoer) {
     if (v.buiten) continue;   // sleutel alleen buiten het venster: laag 2 mag nog, anders laag 3
     if (claimsL1.get(v.primair).length > 1) { kand(f, 'verzamelbetaling', [v.primair]); gereserveerd.add(v.primair); continue; }
     koppel(f, 1, [v.primair], 'sleutel');
+    // sleutel + bedrag, maar de tegenpartij past niet (betaaldienst, andere handelsnaam): telt, als aanname vastgelegd (review wv1864)
+    if (!partijPast(f, txByRef.get(v.primair))) aannames.add('sleutel_en_bedrag_bij_andere_tegenpartij');
     for (const e of v.extra) if (!gebruikt.has(e)) dubbel.set(e, f.ref);
   }
 
@@ -274,6 +298,11 @@ function sluitAan(invoer) {
     const fs = g.f.map((r) => fByRef.get(r)).sort(fVolg), ts = g.t.map((e) => txByRef.get(e)).sort(txVolg);
     const past = fs.length === ts.length && fs.every((f, i) => randen.get(f.ref).indexOf(ts[i].entry_ref) >= 0);
     if (!past) { for (const f of fs) kand(f, 'meerduidig', randen.get(f.ref)); continue; }
+    // Komt hetzelfde IBAN + bedrag in de historie vaker voor dan deze groep regels heeft (vaste opdracht, maandhuur), dan kan een betaling van
+    // een factuur buiten de set (de volgende maand) deze factuur "betalen" en schuift alles een maand op (review wv1864 MOET 2) → kandidaat.
+    // Grens: een gloednieuwe leverancier met precies evenveel regels als facturen in de set is zo niet te herkennen (zelfde vorm als proef 3f).
+    const vaker = fs.some((f) => f.ibans.map(K.ibanNorm).filter(Boolean).some((i) => (perIbanBedrag.get(i + '|' + f.bedrag_centen) || []).filter((t) => !st.weg.has(t.entry_ref)).length > ts.length));
+    if (vaker) { for (const f of fs) kand(f, 'terugkerend_bedrag', randen.get(f.ref)); continue; }
     if (fs.length > 1) aannames.add('gelijke_facturen_op_volgorde');
     fs.forEach((f, i) => koppel(f, 2, [ts[i].entry_ref], fs.length > 1 ? 'iban_bedrag_volgorde' : 'iban_bedrag'));
   }
@@ -304,7 +333,8 @@ function sluitAan(invoer) {
     const deel = breed.filter((t) => -t.bedrag_centen === f.bedrag_centen && sleutelsVan.get(f.ref).some((k) => stukken.get(t.entry_ref).plat.indexOf(k) >= 0));
     if (deel.length) { kand(f, 'sleutel_deel_bedrag', deel.map((t) => t.entry_ref)); continue; }
     const ibans = new Set((f.ibans || []).map(K.ibanNorm).filter(Boolean));
-    const venster = breed.filter((t) => inBetaalVenster(f, t) && !anderNummer(f, t));
+    const betaal = breed.filter((t) => inBetaalVenster(f, t));
+    const venster = betaal.filter((t) => !anderNummer(f, t));
     const naamBedrag = venster.filter((t) => -t.bedrag_centen === f.bedrag_centen && naamPast(f.leverancier, t.tegenpartij_naam));
     if (naamBedrag.length) { kand(f, 'naam_bedrag', naamBedrag.map((t) => t.entry_ref)); continue; }
     const zelfde = venster.filter((t) => (ibans.size && ibans.has(K.ibanNorm(t.tegenpartij_iban))) || naamPast(f.leverancier, t.tegenpartij_naam));
@@ -315,6 +345,10 @@ function sluitAan(invoer) {
     // precies het bedrag, binnen 3 dagen rond de factuurdatum, onder een andere naam (webshop via een betaaldienst; steekproef 28-10)
     const rond = venster.filter((t) => -t.bedrag_centen === f.bedrag_centen && Math.abs(K.dagenTussen(f.factuurdatum, t.boekdatum)) <= ROND_DAGEN && !t.categorie);
     if (rond.length) { kand(f, 'bedrag_rond_factuurdatum', rond.map((t) => t.entry_ref)); continue; }
+    // een afschrijving naar dezelfde IBAN/naam die een ánder factuurnummer noemt: waarschijnlijk een andere factuur, maar niet uitgesloten
+    // (verschrijving, verzamelbetaling) → kandidaat, nooit 'open' (review wv1864 MOET 1; ontwerp § 3.5 status 3)
+    const ander = betaal.filter((t) => anderNummer(f, t) && onverklaardKan(t) && ((ibans.size && ibans.has(K.ibanNorm(t.tegenpartij_iban))) || naamPast(f.leverancier, t.tegenpartij_naam)));
+    if (ander.length) { kand(f, 'noemt_ander_nummer', ander.map((t) => t.entry_ref)); continue; }
   }
 
   // ── status per factuur (§ 3.5, voorrang) ──
@@ -351,6 +385,10 @@ function sluitAan(invoer) {
     const d = dagenGedekt(dekking, K.plusDagen(f.factuurdatum, -VOORUIT_ZONDER_SLEUTEL), eind);
     if (d === 'gat') { r.status = 'onbepaald_dekking'; r.reden = 'dag_niet_gedekt'; continue; }
     if (d === 'toekomst') { r.status = 'nog_niet_te_beoordelen'; r.reden = isIsoGeldig(f.vervaldatum) ? 'vervaldatum_14_na_bank_tm' : 'factuurdatum_44_na_bank_tm'; continue; }
+    // een late betaling (tot +120, zoals laag 2 zoekt) in een gat ná de vervaldatum zou 'open' vals maken (review wv1864 ZOU 5)
+    const laat = K.plusDagen(f.factuurdatum, VENSTER_NA);
+    const tot = dekking.laatst_gedekt && dekking.laatst_gedekt < laat ? dekking.laatst_gedekt : laat;
+    if (tot > eind && dagenGedekt(dekking, K.plusDagen(eind, 1), tot) === 'gat') { r.status = 'onbepaald_dekking'; r.reden = 'gat_na_vervaldatum'; continue; }
     r.status = 'open'; r.reden = 'geen_betaling_van_deze_rekening';
   }
 

@@ -14939,7 +14939,9 @@ async function finAansluiting(d) {
   const fr = finReconcileMod();
   if (!fr) return { status: 404, j: { ok: false, fout: 'de aansluiting zit niet in deze versie van de pod' } };
   if (!facturenMagOpenen()) return { status: 409, j: { ok: false, fout: 'Facturen draait alleen op de primaire kant' } };
-  const entiteit = /^[a-z_]{2,32}$/.test(String(d.entiteit || '')) ? String(d.entiteit) : 'tolgaarde';
+  // pilot: alleen Tolgaarde (ontwerp § 1); een tweede rekening is een eigen kaart
+  if (d.entiteit !== undefined && d.entiteit !== 'tolgaarde') return { status: 400, j: { ok: false, fout: 'de aansluiting bestaat nu alleen voor tolgaarde' } };
+  const entiteit = 'tolgaarde';
   let vers;
   if (d.vers === true) {
     if (Date.now() - finRunLaatst < 600000) vers = { ok: false, fout: 'hooguit één nieuwe run per 10 minuten; hieronder de laatste' };

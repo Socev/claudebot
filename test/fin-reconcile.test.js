@@ -79,7 +79,7 @@ function zetBron(t, rijen, o) {
   const lees = B.leesBankbestand(new Uint8Array(Buffer.from(alle.join('\n') + '\n')), { rekeningen: t.rekeningen });
   assert.ok(lees.ok, JSON.stringify(lees));
   const bid = D.nieuwId();
-  D.voegToe(t.fdb, 'bank_bestand', { id: bid, sha256: sha, formaat: 'abn_tab', naam: o.naam || 'proef.tab', aantal: inBestand.length, per_rekening: JSON.stringify({ [TG]: inBestand.length }),
+  D.voegToe(t.fdb, 'bank_bestand', { id: bid, sha256: sha, formaat: 'abn_tab', naam: o.naam || 'proef TXT261020100000.TAB', aantal: inBestand.length, per_rekening: JSON.stringify({ [TG]: inBestand.length }),
     geupload_door: 'toets', geupload_op: o.op || '2026-10-20T10:00:00.000Z', modus: 'historisch', bank: 'ABN', bron_bewaard: 1 });
   if (o.db !== false) for (const x of lees.transacties) zetTx(t, x, bid);
   return { sha, bid, transacties: lees.transacties };
@@ -286,7 +286,7 @@ function jaar(t, o) {
     const begin = saldo;
     saldo += rijen.reduce((a, r) => a + r[1], 0);
     if ((o.zonder || []).includes(m)) continue;
-    const naam = m === 12 && o.laatsteNaam ? o.laatsteNaam : 'maand-' + mm + '.tab';
+    const naam = m === 12 && o.laatsteNaam ? o.laatsteNaam : 'maand-' + mm + ' TXT261020100000.TAB';
     bronnen[m] = zetBron(t, rijen, { begin, naam, zonder: o.breuk && o.breuk[m] !== undefined ? [o.breuk[m]] : [] });
     if ((o.zonderBron || []).includes(m)) fs.unlinkSync(path.join(t.fdb.dir, 'bankbron', bronnen[m].sha));
   }
@@ -311,7 +311,9 @@ test('6a: twaalf maanden sluitend, twintig facturen, alles aanwezig → antwoord
   assert.equal(tot.open_centen, j.facturen.filter((f) => !f.betaald).reduce((a, f) => a + f.incl, 0));
   assert.equal(tot.betaald_centen, j.facturen.filter((f) => f.betaald).reduce((a, f) => a + f.incl, 0));
   assert.equal(x.run.bank_tm, '2025-12-31');
-  for (const d of dagenVan('2025-01-01', '2025-12-31')) assert.equal(x.dek.get(d) ? x.dek.get(d).status : 'gedekt', 'gedekt', d);
+  // de eerste dag van het allereerste bestand is onzeker (geen eerder bestand om op aan te sluiten); vanaf 2-1 alles gedekt
+  assert.equal(x.dek.get('2025-01-01').reden, 'eerste_dag_onzeker');
+  for (const d of dagenVan('2025-01-02', '2025-12-31')) assert.equal(x.dek.get(d).status, 'gedekt', d);
   assert.match(x.run.dekkingsregel, /alles gedekt/);
 });
 
@@ -336,7 +338,9 @@ test('6b: juni weggelaten (regels én bronbestand) → onvolledig / INCOMPLETE_C
   });
   assert.ok(geraakt >= 2, 'er zijn facturen die juni nodig hebben');
   assert.equal(x.run.bank_tm, '2025-05-31');
-  assert.match(x.run.dekkingsregel, /niet gedekt: 1-6-2025 t\/m 30-6-2025/);
+  // ook 1-7 telt niet: het juli-bestand sluit met zijn beginsaldo niet aan op mei (de juni-mutaties ontbreken)
+  assert.equal(x.dek.get('2025-07-01').reden, 'eerste_dag_onzeker');
+  assert.match(x.run.dekkingsregel, /niet gedekt: 1-6-2025 t\/m 1-7-2025/);
 });
 
 test('6c: juni-regels in de databank, bronbestand weg → alleen_databank; onvolledig', () => {
@@ -364,11 +368,11 @@ test('6d: saldoketen in juni gebroken (één regel weg uit het bestand) → afwi
 test('6e: één extra regel in de databank die niet in het bronbestand staat → die dag afwijkend; onvolledig', () => {
   const t = opzet();
   // 5-6 hoort bij de dagen die de onbetaalde factuur PRF-1008 (14-5, vervaldatum + 14 = 11-6) nodig heeft → onvolledig; een extra regel op
-  // een dag die geen factuur nodig heeft (20-6) maakt die dag afwijkend maar de uitkomst niet onvolledig (§ 3.5: alleen wat het antwoord raakt)
+  // een dag die geen factuur nodig heeft (20-1, vóór elke factuurdatum − 7) maakt die dag afwijkend maar de uitkomst niet onvolledig (§ 3.5)
   const t0 = opzet();
-  jaar(t0, { extra: [['2025-06-20', -777]] });
+  jaar(t0, { extra: [['2025-01-20', -777]] });
   const r0 = draai(t0);
-  assert.equal(lees(t0, r0.run).dek.get('2025-06-20').status, 'afwijkend');
+  assert.equal(lees(t0, r0.run).dek.get('2025-01-20').status, 'afwijkend');
   assert.equal(r0.uitkomst, 'antwoord');
   const j = jaar(t, { extra: [['2025-06-05', -777]] });
   const r = draai(t);
@@ -386,7 +390,21 @@ test('6f: bronbestand juni begint halverwege → de dagen ervóór ontbreken', (
   const r = draai(t);
   const x = lees(t, r.run);
   for (const d of dagenVan('2025-06-01', '2025-06-15')) assert.equal(x.dek.get(d).status, 'ontbreekt', d);
+  // hier had juni vóór de 16e geen mutaties: het beginsaldo sluit aan op mei, dus de eerste dag telt wel (de dagen ertussen niet)
   assert.equal(x.dek.get('2025-06-16').status, 'gedekt');
+  // een bestand waarvan het beginsaldo niet aansluit (er ontbreken mutaties ervóór): de eerste dag is onzeker
+  const t3 = opzet();
+  zetBron(t3, [['2026-01-02', -100, ov(LEV.Z, 'Bank Proef', 'k')], ['2026-01-30', 100, ov(LEV.Z, 'Klant Z', 'o')]], { begin: 1000000 });
+  zetBron(t3, [['2026-03-10', -100, ov(LEV.Z, 'Bank Proef', 'k')], ['2026-03-31', 100, ov(LEV.Z, 'Klant Z', 'o')]], { begin: 1234500 });
+  zetFactuur(t3, { nummer: 'A-7001', datum: '2026-03-20', verval: '2026-03-25', incl: 1000, iban: LEV.A });
+  const x3 = lees(t3, draai(t3).run);
+  assert.equal(x3.dek.get('2026-03-10').status, 'alleen_databank');
+  assert.equal(x3.dek.get('2026-03-10').reden, 'eerste_dag_onzeker');
+  assert.equal(x3.dek.get('2026-03-11').status, 'gedekt');
+  // in 6a sluit elk maandbestand aan op het vorige: elke eerste dag telt
+  const t2 = opzet();
+  jaar(t2);
+  assert.equal(lees(t2, draai(t2).run).dek.get('2025-06-01').status, 'gedekt');
 });
 
 test('6g: laatste exportdag, bestand op die dag zelf gemaakt → "bank t/m" is de dag ervoor', () => {
@@ -398,7 +416,11 @@ test('6g: laatste exportdag, bestand op die dag zelf gemaakt → "bank t/m" is d
   assert.equal(x.dek.get('2025-12-31').status, 'alleen_databank');
   assert.equal(x.dek.get('2025-12-31').reden, 'exportdag');
   assert.equal(FR.gemaaktOp({ naam: 'TXT251231140000.TAB', geupload_op: '2026-01-05T10:00:00Z' }), '2025-12-31');
-  assert.equal(FR.gemaaktOp({ naam: 'export.tab', geupload_op: '2026-01-05T10:00:00Z' }), '2026-01-05');
+  assert.equal(FR.gemaaktOp({ naam: 'export.tab', geupload_op: '2026-01-05T10:00:00Z' }), null, 'uploaddag bewijst niets');
+  // zonder TXT-naam telt de laatste dag niet (onbekend wanneer het bestand die dag gemaakt is)
+  const t2 = opzet();
+  jaar(t2, { laatsteNaam: 'december.tab' });
+  assert.equal(draai(t2).bank_tm, '2025-12-30');
 });
 
 test('6h: regel met verwijderd_op telt niet; dag gedekt als het bestand hem niet heeft, afwijkend als het bestand hem wel heeft', () => {
@@ -470,10 +492,54 @@ test('kern: een kort nummer bij een andere tegenpartij met een ander bedrag is g
   assert.equal(st(u, 'archief:0000000000000002').reden, 'sleutel_andere_partij');
 });
 
-test('kern: een betaling die een ánder factuurnummer noemt telt niet via IBAN + bedrag en niet als mogelijke verzamelbetaling', () => {
+test('kern: een betaling die een ánder factuurnummer noemt telt niet via IBAN + bedrag, maar maakt de factuur kandidaat (nooit open)', () => {
   const t1 = tx('2026-03-10', -10000, LEV.A, 'Leverancier A B.V.', 'Factuurnummer 2026-9120');
   const u = kern([fk('archief:0000000000000003', { nummer: '2026-9100' })], [t1]);
-  assert.equal(st(u, 'archief:0000000000000003').status, 'open');
+  assert.equal(st(u, 'archief:0000000000000003').status, 'kandidaat');
+  assert.equal(st(u, 'archief:0000000000000003').reden, 'noemt_ander_nummer');
+  assert.equal(st(u, 'archief:0000000000000003').laag, null);
+  // zonder enige afschrijving naar die leverancier: open
+  assert.equal(st(kern([fk('archief:0000000000000003', { nummer: '2026-9100' })], [tx('2026-03-10', -10000, LEV.E, 'Iemand Anders', 'iets')]), 'archief:0000000000000003').status, 'open');
+});
+
+test('review P1/P1b: terugkerend IBAN + bedrag (vaste opdracht) schuift geen betaling op naar een onbetaalde factuur → kandidaat', () => {
+  // oktober onbetaald, november betaald, de decemberfactuur staat niet in de set maar de betaling wel
+  const okt = fk('archief:00000000000000a1', { factuurdatum: '2025-10-01', vervaldatum: '2025-10-15' }), nov = fk('archief:00000000000000a2', { factuurdatum: '2025-11-01', vervaldatum: '2025-11-15' });
+  // een vaste opdracht heeft eerdere maanden in de historie (hier september); zonder die historie is het patroon niet te zien (grens, zie de kern)
+  const ts = [tx('2025-09-05', -10000, LEV.A, 'Leverancier A B.V.', 'huur'), tx('2025-11-05', -10000, LEV.A, 'Leverancier A B.V.', 'huur'), tx('2025-12-05', -10000, LEV.A, 'Leverancier A B.V.', 'huur')];
+  const u = kern([okt, nov], ts, { aanname: {}, scope: {} });
+  assert.notEqual(st(u, okt.ref).status, 'betaald');
+  assert.equal(st(u, okt.ref).reden, 'terugkerend_bedrag');
+  const u1 = kern([okt], [tx('2025-11-05', -10000, LEV.A, 'Leverancier A B.V.', 'huur')].concat([tx('2025-09-05', -10000, LEV.A, 'Leverancier A B.V.', 'huur')]), { aanname: {}, scope: {} });
+  assert.notEqual(st(u1, okt.ref).status, 'betaald');
+});
+
+test('review P3/P4: terugboeking (sepa_terug) heft de afschrijving op — geen betaling via laag 0 en de regel betaalt niet de volgende factuur', () => {
+  const f1 = fk('factuur:00000000000000b1', {}), f2 = fk('factuur:00000000000000b2', { factuurdatum: '2026-03-20', vervaldatum: '2026-04-03' });
+  const af1 = tx('2026-03-10', -10000, LEV.A, 'Leverancier A B.V.', 'batch'), terugB = tx('2026-03-14', 10000, LEV.A, 'Leverancier A B.V.', 'terugboeking');
+  const kop = [{ entry_ref: af1.entry_ref, factuur_ref: f1.ref, methode: 'sepa_batch' }, { entry_ref: terugB.entry_ref, factuur_ref: f1.ref, methode: 'sepa_terug' }];
+  const u = kern([f1, f2], [af1, terugB], { koppelingen: kop, besluiten: [{ factuur_ref: f1.ref, entry_refs: [af1.entry_ref], oordeel: 'ja' }] });
+  assert.equal(st(u, f1.ref).status, 'kandidaat');
+  assert.equal(st(u, f1.ref).reden, 'besluit_teruggeboekt');
+  assert.notEqual(st(u, f2.ref).status, 'betaald', 'de teruggeboekte regel betaalt de volgende factuur niet');
+  const u2 = kern([f1, f2], [af1, terugB], { koppelingen: kop });
+  assert.notEqual(st(u2, f2.ref).status, 'betaald');
+});
+
+test('review P2: een later besluit nee heft een eerder ja op hetzelfde paar op', () => {
+  const t1 = tx('2026-03-10', -10000, LEV.E, 'Iemand Anders', 'losse betaling');
+  const f = fk('archief:00000000000000c1', {});
+  const u = kern([f], [t1], { besluiten: [{ factuur_ref: f.ref, entry_refs: [t1.entry_ref], oordeel: 'ja' }, { factuur_ref: f.ref, entry_refs: [t1.entry_ref], oordeel: 'nee' }] });
+  assert.notEqual(st(u, f.ref).status, 'betaald');
+  assert.notEqual(st(u, f.ref).laag, 0);
+});
+
+test('review P5: een gat in de bank ná vervaldatum + 14 maar binnen +120 (vóór de laatste gedekte dag) maakt open onzeker → onbepaald_dekking', () => {
+  const dek = { status: (d) => (d >= '2026-04-10' && d <= '2026-04-20' ? 'ontbreekt' : 'gedekt'), laatst_gedekt: '2026-12-31' };
+  const u = kern([fk('archief:00000000000000d1', {})], [], { dekking: dek });
+  assert.equal(st(u, 'archief:00000000000000d1').status, 'onbepaald_dekking');
+  assert.equal(st(u, 'archief:00000000000000d1').reden, 'gat_na_vervaldatum');
+  assert.equal(u.uitkomst, 'onvolledig');
 });
 
 test('kern: twee facturen met elk een uniek nummer in dezelfde afschrijving → beide kandidaat (verzamelbetaling), de som telt niet', () => {
@@ -562,6 +628,21 @@ test('momentopname en reken.sqlite: map 700, bestand 600, sha256 als naam; de Fa
   assert.equal(FR.opruim(t.rk, NU).weg, 1);
   assert.ok(fs.existsSync(snap));
   assert.throws(() => FR.snapshotPad(t.rk, 'f'.repeat(64)), /snapshot_ontbreekt/);
+  // een verkeerde --dir (een map met andere bestanden) wordt niet aangeraakt
+  const vreemd = path.join(t.dir, 'vreemd');
+  fs.mkdirSync(vreemd); fs.chmodSync(vreemd, 0o755); fs.writeFileSync(path.join(vreemd, 'iets.txt'), 'x');
+  assert.throws(() => draai(t, { dir: vreemd }), /map_onveilig/);
+  assert.equal(fs.statSync(vreemd).mode & 0o777, 0o755);
+  // bewaren: ouder dan 7 dagen hooguit één momentopname per dag (de laatste run van die dag)
+  const db = new DatabaseSync(path.join(t.rk, 'reken.sqlite'));
+  const oud = new Date(NU - 10 * 86400000).toISOString();
+  const kol = "(soort, entiteit, rekening_label, snapshot_sha256, invoer_vingerafdruk, scope, regels_versie, regels_hash, gestart_op, klaar_op) VALUES ('finance.reconcile', 'tolgaarde', 'x', ?, ?, '{}', 'v', 'h', ?, ?)";
+  for (const c of ['a', 'b']) { fs.writeFileSync(path.join(t.rk, 'snapshot', c.repeat(64) + '.sqlite'), c); db.prepare('INSERT INTO reken_run ' + kol).run(c.repeat(64), 'e'.repeat(64), oud, oud); }
+  db.close();
+  FR.opruim(t.rk, NU);
+  assert.ok(!fs.existsSync(path.join(t.rk, 'snapshot', 'a'.repeat(64) + '.sqlite')), 'eerdere van dezelfde dag weg');
+  assert.ok(fs.existsSync(path.join(t.rk, 'snapshot', 'b'.repeat(64) + '.sqlite')), 'laatste van die dag blijft');
+  assert.ok(fs.existsSync(snap), 'recente blijft');
 });
 
 test('laatste(): statustelling, lijst per status en de dekkingsregel; besluit() schrijft alleen in reken.sqlite en telt in de volgende run', () => {
@@ -577,7 +658,7 @@ test('laatste(): statustelling, lijst per status en de dekkingsregel; besluit() 
   // David zegt: de open factuur 3 is betaald met de kostenregel van die maand (verzonnen) → besluit ja
   const open = j.facturen.find((f) => !f.betaald);
   const ref = j.refs[open.i];
-  const kosten = new DatabaseSync(t.pad, { readOnly: true }).prepare("SELECT entry_ref FROM bank_transactie WHERE bedrag_centen = -500 ORDER BY boekdatum LIMIT 1").get().entry_ref;
+  const kosten = new DatabaseSync(t.pad, { readOnly: true }).prepare("SELECT entry_ref FROM bank_transactie WHERE bedrag_centen = -500 ORDER BY boekdatum LIMIT 1 OFFSET 3").get().entry_ref;
   assert.throws(() => FR.besluit(t.rk, { factuur_ref: ref, entry_refs: [kosten], oordeel: 'misschien', wie: 'david', bron: 'Open vragen proef' }, NU), /besluit_ongeldig/);
   FR.besluit(t.rk, { factuur_ref: ref, entry_refs: [kosten], oordeel: 'ja', wie: 'david', bron: 'Open vragen proef' }, NU);
   const r2 = draai(t, { snapshot: r.snapshot });
