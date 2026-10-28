@@ -1466,3 +1466,156 @@ test('wv1415 diffreview: knop na een nieuwe, geziene betaling verandert niets (M
   assert.equal(v.betaling.betaald, false, JSON.stringify(v.betaling));
   assert.equal(F.validatie(t.fdb, t.eig, { soort: 'factuur', id: g }, Date.parse('2026-11-13T11:00:00Z')).betaling.betaald, true, 'opnieuw betaald: wel');
 });
+
+// ───────────────────────────── wv1917: leveranciersnaam met de hand, regels per afzender ─────────────────────────────
+
+test('wv1917: naam invullen koppelt een leverancier (nagebeld IBAN gaat mee); "Onthoud voor deze afzender" gaat bij het volgende stuk vóór het tekstanker; weghalen', () => {
+  const t = opzet();
+  const bron = t.fdb.db.prepare("SELECT id FROM bron WHERE soort = 'verzamelpostvak'").get().id;
+  D.voegToe(t.fdb, 'tekstanker', { tekst: 'Oude Eenmanszaak Proef', entiteit: 'holding', aangemaakt_door: 'proef', aangemaakt_op: '2026-10-01T00:00:00Z' });
+  const iban = Z.maakIban('NL', 'TEST', '0917000001');
+  const stuur = (afzender, nr) => {
+    const bid = D.nieuwId();
+    D.voegToe(t.fdb, 'bericht', { id: bid, bron, message_id: 'wv1917-' + nr, afzender, onderwerp: 'Factuur ' + nr, ontvangen_op: '2026-10-22T10:00:00Z' });
+    const tekst = ['Factuur', 'Oude Eenmanszaak Proef', 'Factuurnummer ' + nr, 'Factuurdatum 22-10-2026', 'Vervaldatum 05-11-2026', 'Totaal € 45,82',
+      'IBAN ' + iban.replace(/(.{4})/g, '$1 ').trim(), 'Deze factuur is al betaald.'].join('\n');
+    const v = F.verwerkBericht(t.fdb, { bericht: { id: bid, message_id: 'wv1917-' + nr, afzender, onderwerp: 'Factuur ' + nr },
+      documenten: [{ sha256: crypto.createHash('sha256').update(tekst).digest('hex'), naam: nr + '.pdf', mime: 'application/pdf', tekst }] }, { nu: NU, wie: 'koerier' });
+    return t.f('id = ?', [v.facturen[0].id]);
+  };
+  const f1 = stuur('noreply@hostingproef.invalid', 'WV1917-1');
+  assert.equal(f1.leverancier, null);
+  assert.equal(f1.entiteit, 'holding', 'tekstanker beslist zonder regel');
+  assert.equal(f1.betaalwijze, 'zelf', '"al betaald" op het stuk is geen bewijs');
+  assert.ok(JSON.parse(f1.redenen).some((r) => r.includes(K.ZEGT_BETAALD)));
+  // nabellen vóór er een leverancier is: het IBAN kan nog nergens bekend worden
+  t.vers.ok = true;
+  assert.equal(t.call('POST', 'nagebeld', { id: f1.id }).status, 200);
+  assert.equal(t.n('SELECT count(*) n FROM leverancier_iban WHERE iban = ?', [iban]), 0);
+  // regel kan pas met een leverancier
+  assert.equal(t.call('POST', 'regel', { factuur: f1.id, soort: 'domein' }).status, 409);
+  // naam invullen (eigenaar): nieuwe leverancier, het nagebelde IBAN gaat mee
+  let r = t.call('POST', 'wijzig', { id: f1.id, versie: t.f('id = ?', [f1.id]).versie, velden: { leverancier_naam: '  Hostingproef  B.V. ' } });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  const f1b = t.f('id = ?', [f1.id]);
+  assert.ok(f1b.leverancier);
+  assert.equal(f1b.leverancier_naam, 'Hostingproef B.V.');
+  assert.equal(t.n('SELECT count(*) n FROM leverancier_iban WHERE leverancier = ? AND iban = ?', [f1b.leverancier, iban]), 1);
+  assert.equal(r.j.iban_poort.iban_nieuw, false);
+  // dezelfde naam nog eens (andere schrijfwijze) koppelt dezelfde leverancier, geen tweede
+  r = t.call('POST', 'wijzig', { id: f1.id, versie: f1b.versie, velden: { leverancier_naam: 'HOSTINGPROEF B.V.' } });
+  assert.equal(r.status, 200);
+  assert.equal(t.n("SELECT count(*) n FROM leverancier WHERE genormaliseerd = ?", [K.normNaam('Hostingproef B.V.')]), 1);
+  // detail toont de afzender (eigenaar)
+  let d = t.call('GET', 'factuur/' + f1.id).j;
+  assert.deepEqual([d.afzender.adres, d.afzender.domein, d.afzender.domein_mag, d.afzender.regel], ['noreply@hostingproef.invalid', 'hostingproef.invalid', true, null]);
+  // praktijkmanager: geen regels
+  assert.equal(t.call('POST', 'regel', { factuur: f1.id, soort: 'domein' }, { rol: t.pm() }).status, 403);
+  assert.equal(t.call('GET', 'regels', null, { rol: t.pm() }).status, 403);
+  // onthouden voor het hele domein → Tolgaarde, zelf betalen
+  r = t.call('POST', 'regel', { factuur: f1.id, soort: 'domein', entiteit: 'tolgaarde', betaalwijze: 'zelf' });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(r.j.regel.patroon, 'hostingproef.invalid');
+  d = t.call('GET', 'factuur/' + f1.id).j;
+  assert.equal(d.afzender.regel.entiteit, 'tolgaarde');
+  const lijst = t.call('GET', 'regels').j.regels;
+  assert.deepEqual(lijst.map((x) => [x.patroon, x.leverancier_naam, x.entiteit, x.betaalwijze]), [['hostingproef.invalid', 'Hostingproef B.V.', 'tolgaarde', 'zelf']]);
+  // het volgende stuk van dat domein: leverancier en entiteit uit de regel, het nagebelde IBAN is bekend
+  const f2 = stuur('Facturen <Facturen@Mail.HostingProef.invalid>', 'WV1917-2');
+  assert.equal(f2.leverancier, f1b.leverancier);
+  assert.equal(f2.entiteit, 'tolgaarde');
+  assert.equal(f2.betaalwijze, 'zelf');
+  assert.equal(f2.iban_nieuw, 0);
+  assert.ok(JSON.parse(f2.redenen).some((x) => /Regel voor afzender hostingproef\.invalid: Tolgaarde/.test(x)));
+  // weghalen: het stuk daarna valt weer terug op het tekstanker
+  assert.equal(t.call('POST', 'regel-weg', { id: lijst[0].id }).status, 200);
+  assert.equal(t.call('GET', 'regels').j.regels.length, 0);
+  assert.equal(stuur('noreply@hostingproef.invalid', 'WV1917-3').entiteit, 'holding');
+  assert.equal(t.n("SELECT count(*) n FROM audit WHERE object_soort = 'afzender_regel'"), 2);
+  // algemene mailaanbieder: geen domeinregel, wel op het adres
+  const f4 = stuur('iemand@gmail.com', 'WV1917-4');
+  t.call('POST', 'wijzig', { id: f4.id, versie: f4.versie, velden: { leverancier_naam: 'Hostingproef B.V.' } });
+  assert.equal(t.call('POST', 'regel', { factuur: f4.id, soort: 'domein' }).status, 400);
+  assert.equal(t.call('POST', 'regel', { factuur: f4.id, soort: 'adres', entiteit: 'holding' }).status, 200);
+  assert.equal(t.call('GET', 'regels').j.regels[0].patroon, 'iemand@gmail.com');
+  // ongeldige invoer
+  assert.equal(t.call('POST', 'wijzig', { id: f4.id, velden: { leverancier_naam: 'x' } }).status, 400);
+  assert.equal(t.call('POST', 'regel', { factuur: f4.id, soort: 'adres', betaalwijze: 'onbekend' }).status, 400);
+  assert.equal(t.call('POST', 'regel', { factuur: f4.id, soort: 'adres', entiteit: 'bestaatniet' }).status, 400);
+});
+
+test('wv1917: onbetaald(fdb) leest alleen bevestigde, zakelijke, niet-gekoppelde facturen met een open betaalspoor, met de bankstand van de entiteit', () => {
+  const t = opzet();
+  const KA = require(path.join(ROOT, 'facturen-kaart.js'));
+  const rijen = KA.onbetaald(t.fdb);
+  assert.ok(rijen.length > 0, 'zaad heeft open facturen');
+  for (const r of rijen) {
+    const f = t.f('id = ?', [r.id]);
+    assert.ok(['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'].includes(f.status));
+    assert.ok(f.entiteit !== 'prive' && f.soort === 'factuur' && f.incl > 0);
+    assert.ok(['te_betalen', 'ingevoerd', 'incasso_verwacht', 'betaald_vooraf'].includes(f.betaalspoor));
+    assert.equal(t.n('SELECT count(*) n FROM koppeling WHERE factuur = ?', [r.id]), 0);
+  }
+  // een koppeling haalt hem eruit
+  const tx = t.fdb.db.prepare("SELECT t.id FROM bank_transactie t JOIN rekening r ON r.id = t.rekening WHERE r.entiteit = ? LIMIT 1").get(rijen[0].entiteit);
+  if (tx) {
+    t.fdb.db.prepare("INSERT INTO koppeling (transactie, factuur, bron, wie, wanneer) VALUES (?, ?, 'mens', 'proef', '2026-10-22T10:00:00Z')").run(tx.id, rijen[0].id);
+    assert.ok(!KA.onbetaald(t.fdb).some((r) => r.id === rijen[0].id));
+  }
+  assert.ok(rijen.some((r) => r.bank_tot), 'bankstand per entiteit');
+});
+
+test('wv1917 diffreview: nagebeld IBAN gaat nooit mee naar een bestaande leverancier of bij een wissel; "zegt al betaald" waarschuwt op de betaallijst en in de batch', () => {
+  const t = opzet();
+  const KA = require(path.join(ROOT, 'facturen-kaart.js'));
+  const bron = t.fdb.db.prepare("SELECT id FROM bron WHERE soort = 'verzamelpostvak'").get().id;
+  let nr = 0;
+  const stuur = (iban, extra) => {
+    const bid = D.nieuwId(); nr++;
+    D.voegToe(t.fdb, 'bericht', { id: bid, bron, message_id: 'wv1917r-' + nr, afzender: 'a@b-proef.invalid', onderwerp: 'F', ontvangen_op: '2026-10-22T10:00:00Z' });
+    const tekst = ['Factuur', 'Factuurnummer R' + nr, 'Factuurdatum 22-10-2026', 'Vervaldatum 05-11-2026', 'Totaal € 12,10', 'IBAN ' + iban.replace(/(.{4})/g, '$1 ').trim(), extra || ''].join('\n');
+    const v = F.verwerkBericht(t.fdb, { bericht: { id: bid, message_id: 'wv1917r-' + nr, afzender: 'a@b-proef.invalid', onderwerp: 'F' },
+      documenten: [{ sha256: crypto.createHash('sha256').update(tekst).digest('hex'), naam: 'r.pdf', mime: 'application/pdf', tekst }] }, { nu: NU, wie: 'koerier' });
+    return t.f('id = ?', [v.facturen[0].id]);
+  };
+  t.vers.ok = true;
+  // bestaande leverancier B: naam invullen na nabellen → IBAN niet bij B
+  const bestaand = t.fdb.db.prepare('SELECT id, naam FROM leverancier ORDER BY aangemaakt_op LIMIT 1').get();
+  const iban1 = Z.maakIban('NL', 'TEST', '0917100001');
+  const f1 = stuur(iban1);
+  t.vers.ok = true; assert.equal(t.call('POST', 'nagebeld', { id: f1.id }).status, 200);
+  let r = t.call('POST', 'wijzig', { id: f1.id, velden: { leverancier_naam: bestaand.naam } });
+  assert.equal(r.status, 200); assert.equal(r.j.leverancier_bekend, 0);
+  assert.equal(t.n('SELECT count(*) n FROM leverancier_iban WHERE iban = ?', [iban1]), 0);
+  assert.equal(r.j.iban_poort.iban_nieuw, true, 'opnieuw nabellen bij de bestaande leverancier');
+  // wissel: factuur had al een (nieuwe) leverancier → naar een tweede nieuwe naam: niets mee
+  const iban2 = Z.maakIban('NL', 'TEST', '0917100002');
+  const f2 = stuur(iban2);
+  t.call('POST', 'wijzig', { id: f2.id, velden: { leverancier_naam: 'Eerste Proefnaam B.V.' } });
+  t.vers.ok = true; assert.equal(t.call('POST', 'nagebeld', { id: f2.id }).status, 200);
+  const na = t.n('SELECT count(*) n FROM leverancier_iban WHERE iban = ?', [iban2]);
+  r = t.call('POST', 'wijzig', { id: f2.id, velden: { leverancier_naam: 'Tweede Proefnaam B.V.' } });
+  assert.equal(r.status, 200); assert.equal(r.j.leverancier_bekend, 0);
+  assert.equal(t.n('SELECT count(*) n FROM leverancier_iban WHERE iban = ?', [iban2]), na, 'geen extra rij bij de tweede leverancier');
+  // nieuwe leverancier, factuur zonder leverancier: wel mee, met auditrij (alleen de laatste vier tekens)
+  const iban3 = Z.maakIban('NL', 'TEST', '0917100003');
+  const f3 = stuur(iban3, 'Deze factuur is al betaald.');
+  t.vers.ok = true; assert.equal(t.call('POST', 'nagebeld', { id: f3.id }).status, 200);
+  r = t.call('POST', 'wijzig', { id: f3.id, velden: { leverancier_naam: 'Derde Proefnaam B.V.' } });
+  assert.equal(r.j.leverancier_bekend, 1);
+  const au = t.fdb.db.prepare("SELECT na FROM audit WHERE wat = 'nagebeld_meegenomen' ORDER BY id DESC LIMIT 1").get();
+  assert.ok(au && au.na.includes('…' + iban3.slice(-4)) && !au.na.includes(iban3));
+  // "zegt al betaald": bevestigen (entiteit kiezen) → betaallijst met zegt_betaald en SEPA-waarschuwing
+  const f3b = t.f('id = ?', [f3.id]);
+  r = t.call('POST', 'bevestig', { id: f3.id, versie: f3b.versie, entiteit: 'tolgaarde', betaalwijze: 'zelf' });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  const bl = t.call('GET', 'betalen').j.te_betalen.find((x) => x.id === f3.id);
+  assert.ok(bl && bl.zegt_betaald === true, JSON.stringify(bl));
+  assert.ok((bl.waarschuwingen || []).some((w) => w.code === 'zegt_betaald'), JSON.stringify(bl.waarschuwingen));
+  assert.ok(t.call('GET', 'betalen').j.te_betalen.filter((x) => x.id !== f3.id).every((x) => !(x.waarschuwingen || []).some((w) => w.code === 'zegt_betaald')));
+  // open koppelvoorstel → geen onbetaald-kandidaat
+  assert.ok(KA.onbetaald(t.fdb).some((x) => x.id === f3.id));
+  const tx = t.fdb.db.prepare("SELECT t.id FROM bank_transactie t WHERE t.entiteit = 'tolgaarde' LIMIT 1").get();
+  t.fdb.db.prepare("INSERT INTO voorstel (sleutel, transactie, facturen, methode, zekerheid, aangemaakt_op) VALUES ('wv1917-proef', ?, ?, 'iban_bedrag', 0.6, '2026-10-22T10:00:00Z')").run(tx.id, JSON.stringify([f3.id]));
+  assert.ok(!KA.onbetaald(t.fdb).some((x) => x.id === f3.id));
+});

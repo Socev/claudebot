@@ -141,3 +141,60 @@ test('11 koppeling server.js, release en schrijvers met module', () => {
   assert.match(fs.readFileSync('uitrol.sh', 'utf8'), /^RELEASE_OPTIONEEL="[^"]*\bfacturen-kaart\.js\b/m);
   assert.match(fs.readFileSync('Dockerfile', 'utf8'), /COPY facturen-kaart\.js \/app\/release-bootstrap\/facturen-kaart\.js/);
 });
+
+// ───────────────────────────── wv1917: vangnet niet betaald ─────────────────────────────
+const rij = (o) => Object.assign({ id: 'a'.repeat(16), naam: 'Hostingproef B.V.', nummer: '2026-1', incl: 4582, entiteit: 'tolgaarde', ent_naam: 'Tolgaarde',
+  vervaldatum: '2026-11-11', factuurdatum: '2026-10-28', betaalspoor: 'te_betalen', bank_tot: '2026-11-20' }, o || {});
+
+test('wv1917 onbetaald: kaart pas ná vervaldatum + 7 en alleen als de bank tot die grens is ingelezen; tekst binnen de grenzen', () => {
+  assert.strictEqual(K.onbetaaldPlan({ rijen: [rij()], punten: [], vandaag: '2026-11-18', nuKort: NK }).zet.length, 0, 'op de grens nog niet');
+  const p = K.onbetaaldPlan({ rijen: [rij()], punten: [], vandaag: '2026-11-19', nuKort: NK });
+  assert.strictEqual(p.zet.length, 1);
+  const k = p.zet[0];
+  assert.strictEqual(k.sleutel, 'facturen-onbetaald-' + 'a'.repeat(16));
+  assert.ok(k.titel.length >= 3 && k.titel.length <= 90 && k.waarom.length <= 400 && k.meting.length <= 300 && k.stappen.length <= 12);
+  assert.ok(k.stappen.every((x) => x.length <= 400));
+  assert.match(k.waarom, /€ 45,82/);
+  assert.match(k.waarom, /11-11-2026/);
+  assert.deepStrictEqual(k.herkomst, { module: 'facturen', handmatig: 'facturen', doel: { scherm: 'facturen', focus: 'factuur:' + 'a'.repeat(16) } });
+  assert.ok(!/\bwv\d|\/opt\/|\.md\b|https?:/.test(JSON.stringify(k)), 'geen paden of wv-nummers');
+  assert.ok(k.soort === 'doen' && k.waar === 'overal' && k.prive === false);
+  // bank nog niet ingelezen tot de grens: niets (niet vast te stellen)
+  const w = K.onbetaaldPlan({ rijen: [rij({ bank_tot: '2026-11-17' })], punten: [], vandaag: '2026-12-01', nuKort: NK });
+  assert.deepStrictEqual([w.zet.length, w.wacht_op_bank], [0, 1]);
+  // zonder vervaldatum: factuurdatum + 14 + 7
+  assert.strictEqual(K.onbetaaldPlan({ rijen: [rij({ vervaldatum: null, factuurdatum: '2026-10-01', bank_tot: '2026-10-30' })], punten: [], vandaag: '2026-10-23' }).zet.length, 1);
+  assert.strictEqual(K.onbetaaldPlan({ rijen: [rij({ vervaldatum: null, factuurdatum: '2026-10-01', bank_tot: '2026-10-30' })], punten: [], vandaag: '2026-10-22' }).zet.length, 0);
+});
+
+test('wv1917 onbetaald: "al betaald" telt ook (bewering), betaald gezien niet; hooguit één kaart per factuur, ook na Davids gedaan; max per ronde', () => {
+  const b = K.onbetaaldPlan({ rijen: [rij({ betaalspoor: 'betaald_vooraf' })], punten: [], vandaag: '2026-11-25' });
+  assert.match(b.zet[0].waarom, /staat als al betaald, maar/);
+  assert.strictEqual(K.onbetaaldPlan({ rijen: [rij({ betaalspoor: 'betaald_gezien' })], punten: [], vandaag: '2026-11-25' }).zet.length, 0);
+  for (const st of ['open', 'later', 'gedaan', 'vervallen']) {
+    assert.strictEqual(K.onbetaaldPlan({ rijen: [rij()], punten: [{ sleutel: 'facturen-onbetaald-' + 'a'.repeat(16), status: st }], vandaag: '2026-11-25' }).zet.length, 0, st);
+  }
+  const veel = Array.from({ length: 9 }, (_, i) => rij({ id: String(i).repeat(16) }));
+  assert.strictEqual(K.onbetaaldPlan({ rijen: veel, punten: [], vandaag: '2026-11-25' }).zet.length, 5);
+});
+
+test('wv1917 onbetaald: is de factuur gekoppeld of niet meer open, dan gaat een open of geparkeerde kaart dicht; Davids gedaan en andere kaarten ongemoeid', () => {
+  const s = (c) => 'facturen-onbetaald-' + c.repeat(16);
+  const p = K.onbetaaldPlan({ rijen: [rij({ id: 'b'.repeat(16) })], vandaag: '2026-11-25', nuKort: NK,
+    punten: [{ sleutel: s('a'), status: 'open' }, { sleutel: s('c'), status: 'later' }, { sleutel: s('d'), status: 'gedaan' }, { sleutel: s('b'), status: 'open' }, { sleutel: 'facturen-2026-11-25', status: 'open' }] });
+  assert.deepStrictEqual(p.dicht.map((d) => [d.sleutel, d.van]), [[s('a'), 'open'], [s('c'), 'later']]);
+  assert.ok(p.dicht.every((d) => /gekoppeld/.test(d.bewijs)));
+  assert.strictEqual(p.zet.length, 0, 'b heeft al een kaart');
+});
+
+test('wv1917 onbetaald: koppeling in server.js (eens per half uur, eigen schakelaar FACTUREN_KAART)', () => {
+  const server = fs.readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /facturenKaartMod\.onbetaaldPlan\(\{ rijen: facturenKaartMod\.onbetaald\(fdb\)/);
+  assert.match(server, /p_reden: 'facturen-onbetaald: betaling gekoppeld of niet meer open'/);
+});
+
+test('wv1917 diffreview: in een batch met latere uitvoerdatum telt de grens vanaf die datum', () => {
+  const r = rij({ betaalspoor: 'ingevoerd', uitvoer_op: '2026-11-20', bank_tot: '2026-12-31' });
+  assert.strictEqual(K.onbetaaldPlan({ rijen: [r], punten: [], vandaag: '2026-11-26' }).zet.length, 0);
+  assert.strictEqual(K.onbetaaldPlan({ rijen: [r], punten: [], vandaag: '2026-11-28' }).zet.length, 1);
+});

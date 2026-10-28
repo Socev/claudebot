@@ -15124,6 +15124,24 @@ async function facturenKaartRonde() {
     if (n === 0 || uit.gesloten.length) facturenKaartStaat.vorige = null;
     facturenKaartStaat.laatste = { op: new Date().toISOString(), n: n, gezet: uit.gezet, gesloten: uit.gesloten.length, fouten: uit.fouten.length };
     if (uit.fouten.length) logError('facturen-kaart', new Error(uit.fouten.join('; ').slice(0, 200)));
+    // wv1917: vangnet niet betaald — één kaart per factuur 7 dagen na de vervaldatum zonder gekoppelde betaling (facturen-kaart.js beslist)
+    if (typeof facturenKaartMod.onbetaaldPlan === 'function' && Date.now() - (facturenKaartStaat.onbetaaldOp || 0) > 30 * 60000) {
+      facturenKaartStaat.onbetaaldOp = Date.now();   // hooguit eens per half uur (de ronde loopt ook na elke schrijvende Facturen-route)
+      try {
+        const alle = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+        const plan = facturenKaartMod.onbetaaldPlan({ rijen: facturenKaartMod.onbetaald(fdb), vandaag: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }),
+          nuKort: bankNuKort(), punten: ((alle && alle.punten) || []).map(function (p) { return { sleutel: p.sleutel, status: p.status }; }) });
+        const ob = { gezet: 0, dicht: 0, wacht_op_bank: plan.wacht_op_bank, fouten: 0 };
+        for (const k of plan.zet) { try { const r = await appSbRpc('mk_voor_jou_zet', { p: k }); if (r && r.sleutel) ob.gezet++; else ob.fouten++; } catch (e) { ob.fouten++; logError('facturen-onbetaald', e); } }
+        for (const d of plan.dicht) {
+          try { await appSbRpc('mk_voor_jou_status', { p_sleutel: d.sleutel, p_van: d.van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: d.bewijs, p_reden: 'facturen-onbetaald: betaling gekoppeld of niet meer open' }); ob.dicht++; }
+          catch (e) { ob.fouten++; logError('facturen-onbetaald', e); }
+        }
+        if (ob.gezet || ob.dicht) appStaat.vjCache = null;
+        if (ob.gezet || ob.dicht || ob.fouten) schrijfLog(nu() + ' facturen-onbetaald ' + velden(ob));
+        facturenKaartStaat.laatste.onbetaald = ob;
+      } catch (e) { logError('facturen-onbetaald', e); }
+    }
     return uit;
   } finally {
     facturenKaartStaat.bezig = false;

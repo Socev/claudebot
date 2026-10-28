@@ -436,11 +436,12 @@ test('entiteit: UBL-klant-KvK, tekstanker, staking, inactieve entiteit, klant-IB
   assert.ok(f.redenen.includes('Rekening van Groenhouten staat op de factuur als af te schrijven rekening'));
 });
 
+const pick = (r) => [r.betaalwijze, r.reden];
 test('betaalwijze: tekst → leverancierstandaard → bankhistorie → onbekend', () => {
   const v = {};
   assert.equal(K.stapBetaalwijze('Het totaalbedrag wordt automatisch geïncasseerd.', v, {}, {}).betaalwijze, 'incasso');
-  assert.equal(K.stapBetaalwijze('Voldaan via iDEAL', v, {}, {}).betaalwijze, 'betaald');
-  assert.equal(K.stapBetaalwijze('Nog te betalen: € 0,00', v, {}, {}).betaalwijze, 'betaald');
+  // wv1917: "al betaald" op het stuk is geen bewijs: zelf betalen met de opmerking (de bankcontrole koppelt een echte betaling later)
+  for (const t of ['Voldaan via iDEAL', 'Nog te betalen: € 0,00']) assert.deepEqual(pick(K.stapBetaalwijze(t, v, {}, {})), ['zelf', K.ZEGT_BETAALD], t);
   assert.equal(K.stapBetaalwijze('Gelieve binnen 30 dagen te voldoen', v, {}, {}).betaalwijze, 'zelf');
   assert.equal(K.stapBetaalwijze('Dit bedrag dient binnen 14 dagen te worden voldaan; te betalen vóór 1-11', v, {}, {}).betaalwijze, 'zelf');
   assert.equal(K.stapBetaalwijze('', v, {}, { leverancier: LEV_B }).betaalwijze, 'incasso');
@@ -677,12 +678,12 @@ test('betaalwijze: voorwaardelijke en mogelijke vormen zijn geen "al betaald"; i
     'Amount paid € 0,00\nAmount due € 121,00',
     'Het bedrag wordt niet automatisch afgeschreven. Graag overmaken op de rekening hieronder.',
   ];
-  for (const t of nietBetaald) assert.notEqual(K.stapBetaalwijze(t, {}, {}, {}).betaalwijze, 'betaald', t);
+  for (const t of nietBetaald) assert.notEqual(K.stapBetaalwijze(t, {}, {}, {}).reden, K.ZEGT_BETAALD, t);
   assert.equal(K.stapBetaalwijze('Wij verzoeken u het bedrag binnen 14 dagen over te maken. Liever automatische incasso? Vraag een machtiging aan.', {}, {}, {}).betaalwijze, 'zelf');
   assert.equal(K.stapBetaalwijze('Het bedrag wordt omstreeks 5 november van uw rekening afgeschreven.', {}, {}, {}).betaalwijze, 'incasso');
   assert.equal(K.stapBetaalwijze('Betaalwijze: automatische incasso', {}, {}, {}).betaalwijze, 'incasso');
-  assert.equal(K.stapBetaalwijze('Deze factuur is reeds voldaan.', {}, {}, {}).betaalwijze, 'betaald');
-  assert.equal(K.stapBetaalwijze('Betaald op 03-10-2026 via iDEAL', {}, {}, {}).betaalwijze, 'betaald');
+  assert.deepEqual(pick(K.stapBetaalwijze('Deze factuur is reeds voldaan.', {}, {}, {})), ['zelf', K.ZEGT_BETAALD]);
+  assert.deepEqual(pick(K.stapBetaalwijze('Betaald op 03-10-2026 via iDEAL', {}, {}, {})), ['zelf', K.ZEGT_BETAALD]);
   const tegen = K.stapBetaalwijze('Het bedrag wordt automatisch geïncasseerd. Gelieve binnen 14 dagen over te maken.', {}, {}, {});
   assert.deepEqual([tegen.betaalwijze, /tegenstrijdig/.test(tegen.reden)], ['onbekend', true]);
   assert.equal(K.stapBetaalwijze('Het bedrag wordt automatisch geïncasseerd. Gelieve binnen 14 dagen over te maken.', {}, {}, { leverancier: LEV_B }).betaalwijze, 'incasso');
@@ -762,7 +763,7 @@ test('IBAN-lezer: btw-nummer + woord is nooit een IBAN; onbekend land weigeren; 
 
 test('betaalwijze: "reeds betaald € 0,00", vorige factuur en rentebeding zijn geen betaald; "niets afgeschreven" geen incasso', () => {
   for (const t of ['Reeds betaald: € 0,00\nNog te betalen: € 121,00', 'Uw vorige factuur is betaald, bedankt!', 'Over facturen die na de vervaldatum zijn voldaan, rekenen wij rente.']) {
-    assert.notEqual(K.stapBetaalwijze(t, {}, {}, {}).betaalwijze, 'betaald', t);
+    assert.notEqual(K.stapBetaalwijze(t, {}, {}, {}).reden, K.ZEGT_BETAALD, t);
     assert.equal(K.stapBetaalwijze(t, {}, {}, { leverancier: LEV_A }).betaalwijze, 'zelf', t);
   }
   assert.notEqual(K.stapBetaalwijze('Er wordt niets afgeschreven; maak het bedrag zelf over.', {}, {}, {}).betaalwijze, 'incasso');
@@ -924,4 +925,79 @@ test('I2: entiteitsstem van het model weegt 3 met naam of KvK op het stuk, ander
   // een ingevoegde modelstem zonder steun wint niet van een naam op de factuur (2 tegen 1)
   const tg = K.beslisBericht({ bericht: null, documenten: [doc(pdfA(), { model_kandidaat: { entiteit_hint: 'groenhouten' } })] }, ctx).facturen[0];
   assert.equal(tg.entiteit, 'tolgaarde');
+});
+
+// ───────────────────────────── wv1917: regel per afzender, "al betaald" alleen op bewijs ─────────────────────────────
+
+test('wv1917 betaalwijze: "voldaan wanneer wij uw betaling ontvangen" is geen claim; een echte claim wordt zelf betalen, behalve bij een menselijke standaard', () => {
+  const yh = 'Betaal de factuur vóór 11-11-2026. Betaal je handmatig? Vermeld dan onderstaande gegevens. De factuur is voldaan wanneer wij jouw betaling hebben ontvangen\nen verwerkt.';
+  assert.notEqual(K.stapBetaalwijze(yh, {}, {}, {}).reden, K.ZEGT_BETAALD);
+  // "Machtig ons voor automatische incasso" is een aanbod; "Betaal de factuur vóór" is het betaalverzoek
+  assert.equal(K.stapBetaalwijze(yh + '\nAutomatische incasso\nMachtig ons voor automatische incasso om deze kosten te voorkomen.', {}, {}, {}).betaalwijze, 'zelf');
+  assert.notEqual(K.stapBetaalwijze('Het bedrag is voldaan zodra het op onze rekening staat.', {}, {}, {}).reden, K.ZEGT_BETAALD);
+  const claim = 'Deze factuur is al betaald via iDEAL.';
+  assert.deepEqual(pick(K.stapBetaalwijze(claim, {}, {}, {})), ['zelf', K.ZEGT_BETAALD]);
+  assert.equal(K.stapBetaalwijze(claim, {}, {}, { leverancier: { standaard_betaalwijze: 'incasso' } }).betaalwijze, 'incasso');
+  assert.equal(K.stapBetaalwijze(claim, {}, {}, { leverancier: { standaard_betaalwijze: 'betaald' } }).betaalwijze, 'betaald');
+  assert.equal(K.stapBetaalwijze(claim, {}, {}, { leverancier: { standaard_betaalwijze: 'zelf' } }).betaalwijze, 'zelf');
+  // incasso blijft de bestaande herkenning
+  assert.equal(K.stapBetaalwijze('Het totaalbedrag wordt automatisch geïncasseerd.', {}, {}, {}).betaalwijze, 'incasso');
+  // een regel voor de afzender gaat voor de tekst
+  assert.deepEqual(pick(K.stapBetaalwijze(claim, {}, {}, { regel: { patroon: 'x.nl', betaalwijze: 'incasso' } })), ['incasso', 'regel voor afzender x.nl']);
+});
+
+test('wv1917 regelVoorAfzender: adres gaat voor domein, subdomein telt, hoofdletters en weergavenaam doen niet mee', () => {
+  const ctx = { afzenderRegels: [
+    { soort: 'domein', patroon: 'yourhosting.nl', leverancier_id: 'a'.repeat(16), entiteit: 'tolgaarde', betaalwijze: null },
+    { soort: 'adres', patroon: 'facturen@yourhosting.nl', leverancier_id: 'b'.repeat(16), entiteit: 'holding', betaalwijze: 'zelf' },
+  ] };
+  assert.equal(K.adresVanAfzender('"Your Hosting" <NoReply@YourHosting.nl>'), 'noreply@yourhosting.nl');
+  assert.equal(K.regelVoorAfzender({ afzender: 'noreply@yourhosting.nl' }, ctx).entiteit, 'tolgaarde');
+  assert.equal(K.regelVoorAfzender({ afzender: 'Facturen <FACTUREN@yourhosting.nl>' }, ctx).entiteit, 'holding');
+  assert.equal(K.regelVoorAfzender({ afzender: 'x@mail.yourhosting.nl' }, ctx).entiteit, 'tolgaarde');
+  assert.equal(K.regelVoorAfzender({ afzender: 'x@notyourhosting.nl' }, ctx), null);
+  assert.equal(K.regelVoorAfzender(null, ctx), null);
+});
+
+test('wv1917 beslisBericht: regel voor de afzender kiest leverancier en entiteit vóór het tekstanker; het IBAN gaat nog steeds door de poort', () => {
+  const ents = [{ sleutel: 'holding', naam: 'Primum Non Nocere Holding B.V.', naam_kort: 'Holding', aliassen: [], kvk: null, actief: true, ibans: [] },
+    { sleutel: 'tolgaarde', naam: 'Huisartsenpraktijk Tolgaarde B.V.', naam_kort: 'Tolgaarde', aliassen: [], kvk: null, actief: true, ibans: [] }];
+  const lev = { id: 'c'.repeat(16), naam: 'Your Hosting B.V.', kvk: null, btw: null, domeinen: [], ibans: [], standaard_entiteit: null, standaard_betaalwijze: null };
+  const tekst = 'Factuur\nPrimum Non Nocere\nFactuurnummer 20260000001\nFactuurdatum 28-10-2026\nVervaldatum 11-11-2026\nTotaal € 45,82\nIBAN ' + spatie(IBAN.A) + '\nDeze factuur is al betaald.';
+  const invoer = { bericht: { message_id: 'm1', afzender: 'noreply@yourhosting.nl', onderwerp: 'Factuur' }, documenten: [{ sha256: 'd'.repeat(64), naam: 'f.pdf', mime: 'application/pdf', tekst }] };
+  const basis = { vandaag: '2026-10-28', entiteiten: ents, leveranciers: [lev], tekstankers: [{ tekst: 'primum non nocere', entiteit: 'holding' }] };
+  const zonder = K.beslisBericht(invoer, basis).facturen[0];
+  assert.equal(zonder.entiteit, 'holding');
+  assert.equal(zonder.leverancier_id, null);
+  assert.equal(zonder.betaalwijze, 'zelf');
+  assert.ok(zonder.redenen.some((r) => r.includes(K.ZEGT_BETAALD)));
+  const met = K.beslisBericht(invoer, Object.assign({}, basis, { afzenderRegels: [{ soort: 'domein', patroon: 'yourhosting.nl', leverancier_id: lev.id, entiteit: 'tolgaarde', betaalwijze: 'zelf' }] })).facturen[0];
+  assert.equal(met.leverancier_id, lev.id);
+  assert.equal(met.leverancier_naam, 'Your Hosting B.V.');
+  assert.equal(met.entiteit, 'tolgaarde');
+  assert.equal(met.betaalwijze, 'zelf');
+  assert.ok(met.redenen.some((r) => /Regel voor afzender yourhosting\.nl: Tolgaarde/.test(r)));
+  assert.ok(met.redenen.some((r) => /ook naar Holding/.test(r)));
+  assert.equal(met.iban_nieuw, true, 'een regel omzeilt het nabellen niet');
+  // een regel naar een leverancier die niet (meer) bestaat doet niets
+  const wees = K.beslisBericht(invoer, Object.assign({}, basis, { afzenderRegels: [{ soort: 'domein', patroon: 'yourhosting.nl', leverancier_id: 'e'.repeat(16), entiteit: 'tolgaarde', betaalwijze: null }] })).facturen[0];
+  assert.equal(wees.entiteit, 'holding');
+});
+
+test('wv1917 diffreview: regel botst met het stuk → een mens kiest (betaalwijze en sterke entiteitstem); UBL "betaald" is geen bewijs', () => {
+  const rg = { patroon: 'x.nl', betaalwijze: 'zelf', entiteit: 'tolgaarde' };
+  const b = K.stapBetaalwijze('Het totaalbedrag wordt automatisch geïncasseerd.', {}, {}, { regel: rg });
+  assert.equal(b.betaalwijze, 'onbekend'); assert.match(b.reden, /regel voor afzender x\.nl zegt zelf, het stuk zegt incasso/);
+  assert.equal(K.stapBetaalwijze('', { betaalwijze_hint: 'incasso' }, {}, { regel: rg }).betaalwijze, 'onbekend');
+  assert.equal(K.stapBetaalwijze('Gelieve binnen 14 dagen over te maken.', {}, {}, { regel: rg }).betaalwijze, 'zelf', 'geen botsing');
+  assert.deepEqual(pick(K.stapBetaalwijze('', { betaalwijze_hint: 'betaald' }, {}, {})), ['zelf', K.ZEGT_BETAALD_UBL]);
+  assert.equal(K.stapBetaalwijze('', { betaalwijze_hint: 'betaald' }, {}, { leverancier: { standaard_betaalwijze: 'betaald' } }).betaalwijze, 'betaald');
+  const ents = [{ sleutel: 'holding', naam: 'Holding BV', naam_kort: 'Holding', kvk: '11112222', aliassen: [], actief: true },
+    { sleutel: 'tolgaarde', naam: 'Tolgaarde BV', naam_kort: 'Tolgaarde', kvk: null, aliassen: [], actief: true }];
+  const ctx = { entiteiten: ents, tekstankers: [{ tekst: 'oude naam', entiteit: 'holding' }] };
+  // KvK van de Holding op het stuk = sterk → geen regel-entiteit
+  const sterk = K.stapEntiteit({ kvks: ['11112222'] }, 'factuur aan oude naam', ctx, { regel: rg });
+  assert.equal(sterk.entiteit, null); assert.ok(sterk.redenen.some((r) => /kies met de hand/.test(r)));
+  // alleen het tekstanker (de oude bedrijfsnaam) = niet sterk → de regel wint
+  assert.equal(K.stapEntiteit({ kvks: [] }, 'factuur aan oude naam', ctx, { regel: rg }).entiteit, 'tolgaarde');
 });

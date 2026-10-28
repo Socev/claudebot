@@ -817,6 +817,28 @@ function M9(db) {
   db.exec(M9_REST);
 }
 
+/*
+ * wv1917 (David 28-10-2026 20:41: "Dit is er typisch eentje waar ik regels aan moet kunnen koppelen, bijvoorbeeld obv afzenderadres, en de
+ * optie om handmatig aan te kunnen passen"): regels per afzender. Een regel koppelt een afzenderadres (of een heel domein) aan een
+ * leverancier en zo nodig een entiteit en betaalwijze; hij gaat vóór tekstankers en tekst (facturen-kern beslisBericht). Alleen de eigenaar
+ * maakt of verwijdert een regel (facturen.js, met een auditrij); een regel omzeilt nooit de IBAN-poort (een nieuw IBAN blijft nabellen).
+ * LET OP terugrol: een release van vóór wv1917 opent deze database niet meer (schema_nieuwer); terugrollen = ook de database terugzetten
+ * (backup/ van vóór de uitrol) of vooruit herstellen.
+ */
+const M12 = `
+CREATE TABLE IF NOT EXISTS afzender_regel (
+  id INTEGER PRIMARY KEY,
+  soort TEXT NOT NULL CHECK (soort IN ('adres','domein')),
+  patroon TEXT NOT NULL UNIQUE CHECK (length(patroon) BETWEEN 3 AND 254 AND patroon = lower(patroon) AND patroon NOT GLOB '*[ ,;<>"]*'
+    AND ((soort = 'adres' AND patroon LIKE '%_@_%._%') OR (soort = 'domein' AND patroon NOT LIKE '%@%' AND patroon LIKE '%_._%'))),
+  leverancier TEXT NOT NULL REFERENCES leverancier(id),
+  entiteit TEXT REFERENCES entiteit(sleutel),
+  betaalwijze TEXT CHECK (betaalwijze IS NULL OR betaalwijze IN ('zelf','incasso','betaald')),
+  aangemaakt_door TEXT NOT NULL, aangemaakt_op TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS afzender_regel_leverancier ON afzender_regel (leverancier);
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -828,11 +850,12 @@ const MIGRATIES = [
   { versie: 8, naam: 'leverancier.knoop_id: koppeling met het OVIS-register (wv980)', fn: (db) => M8(db) },  { versie: 9, naam: 'SEPA-batch: betaal_op/uitvoer_op op de factuur, sepa_batch en sepa_regel (wv1405)', fn: (db) => M9(db) },
   { versie: 10, naam: "signaal: soort 'teruggeboekt' (wv1415)", fn: (db) => M10(db) },
   { versie: 11, naam: "signaal: soort 'afwijkend_bedrag' (wv1326)", fn: (db) => M11(db) },
+  { versie: 12, naam: 'regels per afzender: afzender_regel (wv1917)', sql: M12 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
-  'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel'];
+  'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 

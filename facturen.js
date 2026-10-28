@@ -40,11 +40,11 @@ const STAPPEN = { beoordelen: ['te_beoordelen'], wachtrij: ['in_wachtrij', 'word
   dubbel: ['dubbel'], mislukt: ['verzending_mislukt'], verstuurd: ['concept_klaar', 'verstuurd'] };
 // Alle routes (de toets controleert ze tegen APP_ROUTE_RE van server.js en de doorgeef-Function: [a-z0-9/-]{1,64}).
 const ROUTES = {
-  GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'kandidaten/<id>', 'betalen', 'bank', 'uploads', 'leveranciers', 'instellingen', 'validatie'],
+  GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'kandidaten/<id>', 'betalen', 'bank', 'uploads', 'leveranciers', 'instellingen', 'validatie', 'regels'],
   POST: ['bevestig', 'terugdraaien', 'nagebeld', 'geen-factuur', 'toch-factuur', 'wijzig', 'ingevoerd', 'ingevoerd-ongedaan', 'opnieuw',
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
-    'betaaldatum', 'sepa-batch', 'sepa-bestand'],
+    'betaaldatum', 'sepa-batch', 'sepa-bestand', 'regel', 'regel-weg'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (nooit vanaf een vaste plek) én die hier een verse vingerafdruk vragen.
 const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus'];
@@ -293,6 +293,7 @@ function detail(fdb, r, id, nu) {
     entiteiten: ents,
     verzendmodus: D.metaLees(fdb, 'verzendmodus'),
     bedragpatroon: bedragpatroonVoor(fdb, r, f, ctx.vandaag),
+    afzender: isEig(r) ? afzenderVan(fdb, f) : undefined,   // wv1917: voor "Onthoud voor deze afzender"
     // wv1323: een feitkaart voor een rekening op deze factuur (alleen de eigenaar; de factuur moet nagebeld worden)
     feiten: ip.iban_nieuw && f.status === 'te_beoordelen' ? feitKaarten(fdb, r, nu).filter((k) => k.facturen.some((x) => x.id === f.id)) : [],
   };
@@ -353,7 +354,7 @@ function betalen(fdb, r, nu) {
     const lev = leverancierKern(fdb, f.leverancier_id);
     const rij = { id: f.id, entiteit: f.entiteit, leverancier_naam: lev ? lev.naam : f.leverancier_naam, iban: f.iban, vervaldatum: f.vervaldatum,
       dringend: !!(f.vervaldatum && K.dagenTussen(vandaag, f.vervaldatum) <= 3), omschrijving: [f.nummer, f.kenmerk].filter(Boolean).join(' ') || null,
-      incl: f.incl, valuta: f.valuta, ingevoerd_door: f.ingevoerd_door, ingevoerd_op: f.ingevoerd_op };
+      incl: f.incl, valuta: f.valuta, ingevoerd_door: f.ingevoerd_door, ingevoerd_op: f.ingevoerd_op, zegt_betaald: zegtBetaald(fdb, f.id) };
     // wv1405: uitvoerdatum en of hij in een SEPA-batch kan (alleen de eigenaar maakt batches; de praktijkmanager ziet de lijst zoals voorheen)
     if (isEig(r)) Object.assign(rij, sepaBetaalInfo(fdb, f, lev, ctx, vandaag), f.betaalspoor === 'ingevoerd' ? { uitvoer_op: f.uitvoer_op || null } : {});
     if (f.betaalspoor === 'ingevoerd') rij.in_batch = !!f.uitvoer_op;   // ook de praktijkmanager: geen Ongedaan op een batchregel (MOET 2)
@@ -601,7 +602,22 @@ function wijzig(fdb, r, d, nu) {
     if (d.versie !== undefined && d.versie !== f.versie) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw', { versie: f.versie });
     if (f.status !== 'te_beoordelen') weiger(409, 'alleen in Beoordelen te wijzigen (status ' + f.status + ')');
     const nieuw = Object.assign({}, f), voor = {}, na = {};
+    const wanneer0 = nuIso(nu);
+    // wv1917: de leveranciersnaam met de hand. De eigenaar koppelt zo een leverancier (bestaand op naam, anders nieuw); een praktijkmanager
+    // zet alleen de naam op de factuur. Een nieuw IBAN blijft nabellen, tenzij precies dat IBAN op deze factuur al nagebeld is.
+    let levNieuw = null;
+    if (Object.hasOwn(velden, 'leverancier_naam')) {
+      const naam = String(velden.leverancier_naam == null ? '' : velden.leverancier_naam).replace(/\s+/g, ' ').trim();
+      if (naam.length < 2 || naam.length > 200) weiger(400, 'leveranciersnaam: 2 tot 200 tekens');
+      if (Object.hasOwn(velden, 'leverancier')) weiger(400, 'leverancier en leveranciersnaam niet tegelijk');
+      if (naam !== (f.leverancier_naam || '')) { voor.leverancier_naam = f.leverancier_naam || null; na.leverancier_naam = naam; nieuw.leverancier_naam = naam; }
+      if (isEig(r)) {
+        levNieuw = leverancierOpNaam(fdb, naam, r, wanneer0);
+        if (levNieuw.id !== f.leverancier_id) { voor.leverancier = f.leverancier_id; na.leverancier = levNieuw.id; nieuw.leverancier_id = levNieuw.id; nieuw.leverancier_naam = levNieuw.naam; }
+      }
+    }
     for (const k of Object.keys(velden)) {
+      if (k === 'leverancier_naam') continue;
       if (!WIJZIG[k]) weiger(400, 'veld ' + kort(k, 30) + ' is niet te wijzigen');
       const v = WIJZIG[k](velden[k], fdb, r);
       const huidig = k === 'leverancier' ? f.leverancier_id : f[k];
@@ -611,14 +627,26 @@ function wijzig(fdb, r, d, nu) {
     }
     if (!Object.keys(na).length) return { gewijzigd: false };
     const ctx = kernCtx(fdb, nu);
+    // wv1917: was het IBAN van deze factuur al nagebeld toen hij nog geen leverancier had, dan wordt het bekend bij de leverancier die nu met
+    // die naam NIEUW ontstaat (zoals Nagebeld had gedaan als de leverancier bekend was). Nooit bij een bestaande leverancier en nooit bij een
+    // wissel van leverancier (diffreview MOET 1): daar loopt een nieuw IBAN gewoon weer langs "Nagebeld" met de vingerafdruk.
+    let bekend = [];
+    if (levNieuw && levNieuw.nieuw && na.leverancier && !f.leverancier_id && f.nagebeld_op && f.nagebeld_door) {
+      for (const iban of (Array.isArray(f.nagebeld_ibans) ? f.nagebeld_ibans : json(f.nagebeld_ibans, []) || [])) {
+        if (fdb.db.prepare('INSERT INTO leverancier_iban (leverancier, iban, toegevoegd_door, toegevoegd_op) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING')
+          .run(levNieuw.id, iban, f.nagebeld_door, f.nagebeld_op).changes) bekend.push(iban);
+      }
+      if (bekend.length) D.audit(fdb, { wie: r.wie, wat: 'nagebeld_meegenomen', object_soort: 'leverancier', object_id: levNieuw.id, entiteit: f.entiteit,
+        na: { factuur: f.id, ibans: bekend.map(eind4), nagebeld_door: f.nagebeld_door }, wanneer: wanneer0 });
+    }
     const lev = leverancierKern(fdb, nieuw.leverancier_id);
     const va = K.valideer(nieuw, ctx, { leverancier: lev });
     const ip = K.ibanPoort(nieuw, lev, ctx);
     const wanneer = nuIso(nu);
     const u = fdb.db.prepare('UPDATE factuur SET entiteit = ?, betaalwijze = ?, iban = ?, nummer = ?, kenmerk = ?, factuurdatum = ?, vervaldatum = ?, excl = ?, btw = ?, incl = ?, ' +
-      'soort = ?, leverancier = ?, controles = ?, intern = ?, iban_nieuw = ?, ibans_onbekend = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND versie = ? AND status = ?')
+      'soort = ?, leverancier = ?, leverancier_naam = ?, controles = ?, intern = ?, iban_nieuw = ?, ibans_onbekend = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND versie = ? AND status = ?')
       .run(nieuw.entiteit || null, nieuw.betaalwijze, nieuw.iban || null, nieuw.nummer || null, nieuw.kenmerk || null, nieuw.factuurdatum || null, nieuw.vervaldatum || null,
-        nieuw.excl, nieuw.btw, nieuw.incl, nieuw.soort, nieuw.leverancier_id || null, JSON.stringify(va.controles), va.intern ? 1 : 0, ip.iban_nieuw ? 1 : 0,
+        nieuw.excl, nieuw.btw, nieuw.incl, nieuw.soort, nieuw.leverancier_id || null, kort(nieuw.leverancier_naam, 200) || null, JSON.stringify(va.controles), va.intern ? 1 : 0, ip.iban_nieuw ? 1 : 0,
         JSON.stringify(ip.onbekend), wanneer, f.id, f.versie, 'te_beoordelen');
     if (u.changes !== 1) weiger(409, 'de factuur is intussen gewijzigd; laad hem opnieuw');
     for (const k of Object.keys(na)) besluitRij(fdb, f.id, K.besluit('wijzigen', k, na[k] == null ? null : (k === 'iban' ? eind4(na[k]) : na[k]), 'mens', 'met de hand gewijzigd'), r.wie, wanneer);
@@ -626,7 +654,85 @@ function wijzig(fdb, r, d, nu) {
     D.audit(fdb, { wie: r.wie, wat: 'factuur_wijzigen', object_soort: 'factuur', object_id: f.id, entiteit: nieuw.entiteit || f.entiteit,
       na: { velden: Object.keys(na) }, wanneer });
     const nu2 = D.factuurVoorKern(fdb, f.id);
-    return { gewijzigd: true, iban_poort: { iban_nieuw: ip.iban_nieuw, reden: ip.reden }, bevestigen: K.magBevestigen(nu2, { leverancier: lev, ctx }), versie: nu2.versie };
+    return { gewijzigd: true, iban_poort: { iban_nieuw: ip.iban_nieuw, reden: ip.reden }, bevestigen: K.magBevestigen(nu2, { leverancier: lev, ctx }), versie: nu2.versie,
+      leverancier_bekend: bekend.length };
+  });
+}
+
+// ───────────────────────────── wv1917: leverancier op naam, regels per afzender ─────────────────────────────
+
+// Bestaande leverancier met dezelfde genormaliseerde naam (de oudste), anders een nieuwe. Alleen de eigenaar (wijzig controleert dat).
+function leverancierOpNaam(fdb, naam, r, wanneer) {
+  const norm = K.normNaam(naam);
+  if (!norm) weiger(400, 'leveranciersnaam zonder letters of cijfers');
+  const b = fdb.db.prepare('SELECT id, naam FROM leverancier WHERE genormaliseerd = ? ORDER BY aangemaakt_op, id LIMIT 1').get(norm);
+  if (b) return { id: b.id, naam: b.naam, nieuw: false };
+  const id = D.nieuwId();
+  D.voegToe(fdb, 'leverancier', { id, naam, genormaliseerd: norm, aangemaakt_op: wanneer });
+  D.audit(fdb, { wie: r.wie, wat: 'leverancier_nieuw', object_soort: 'leverancier', object_id: id, na: { naam }, wanneer });
+  return { id, naam, nieuw: true };
+}
+function afzenderRegels(fdb) {
+  return fdb.db.prepare('SELECT soort, patroon, leverancier AS leverancier_id, entiteit, betaalwijze FROM afzender_regel').all();
+}
+// Algemene mailaanbieders: daar is een domeinregel nooit goed (iedereen mailt vanaf gmail.com); een regel op het precieze adres mag wel.
+const ALGEMEEN_DOMEIN = /^(?:gmail\.com|googlemail\.com|hotmail\.[a-z.]+|outlook\.[a-z.]+|live\.[a-z.]+|msn\.com|icloud\.com|me\.com|mac\.com|yahoo\.[a-z.]+|ziggo\.nl|kpnmail\.nl|kpnplanet\.nl|planet\.nl|xs4all\.nl|home\.nl|hetnet\.nl|chello\.nl|caiway\.nl|proton\.me|protonmail\.com|gmx\.[a-z.]+)$/;
+function afzenderVan(fdb, f) {
+  const b = f.bericht;
+  const rij = b ? fdb.db.prepare('SELECT afzender FROM bericht WHERE id = ?').get(b) : null;
+  const adres = rij ? K.adresVanAfzender(rij.afzender) : null;
+  if (!adres) return null;
+  const domein = adres.slice(adres.indexOf('@') + 1);
+  const regel = K.regelVoorAfzender({ afzender: adres }, { afzenderRegels: fdb.db.prepare('SELECT id, soort, patroon, leverancier AS leverancier_id, entiteit, betaalwijze FROM afzender_regel').all() });
+  return { adres, domein, domein_mag: !ALGEMEEN_DOMEIN.test(domein), regel: regel ? { id: regel.id, soort: regel.soort, patroon: regel.patroon, entiteit: regel.entiteit, betaalwijze: regel.betaalwijze } : null };
+}
+function regelsLijst(fdb, r) {
+  eisEigenaar(r);
+  return { regels: fdb.db.prepare('SELECT a.id, a.soort, a.patroon, a.leverancier, l.naam AS leverancier_naam, a.entiteit, a.betaalwijze, a.aangemaakt_door, a.aangemaakt_op ' +
+    'FROM afzender_regel a JOIN leverancier l ON l.id = a.leverancier ORDER BY a.patroon').all() };
+}
+// "Onthoud voor deze afzender": afzender van de factuur (adres of heel het domein) → leverancier van de factuur + entiteit + betaalwijze.
+// Een bestaande regel op hetzelfde patroon wordt bijgewerkt. Alleen de eigenaar; de leverancier moet op de factuur staan (eerst de naam).
+function regelRoute(fdb, r, d, nu) {
+  eisEigenaar(r);
+  const id = vraagId(d, 'factuur');
+  if (!['adres', 'domein'].includes(d.soort)) weiger(400, 'kies adres of domein');
+  return D.transactie(fdb, function () {
+    const f = factuurOf404(fdb, r, id);
+    if (!f.leverancier_id) weiger(409, 'vul eerst de leveranciersnaam in (Velden verbeteren)');
+    const af = afzenderVan(fdb, f);
+    if (!af) weiger(409, 'deze factuur kwam niet per mail binnen: er is geen afzender om te onthouden');
+    if (d.soort === 'domein' && !af.domein_mag) weiger(400, af.domein + ' is een algemene mailaanbieder; onthoud alleen dit adres');
+    const entiteit = d.entiteit == null || d.entiteit === '' ? null : String(d.entiteit);
+    if (entiteit) { const e = fdb.db.prepare('SELECT sleutel, actief FROM entiteit WHERE sleutel = ?').get(entiteit); if (!e) weiger(400, 'onbekende entiteit'); if (e.actief !== 1) weiger(409, 'entiteit staat niet actief'); }
+    const betaalwijze = d.betaalwijze == null || d.betaalwijze === '' ? null : d.betaalwijze;
+    if (betaalwijze !== null && !['zelf', 'incasso', 'betaald'].includes(betaalwijze)) weiger(400, 'onbekende betaalwijze');
+    const patroon = d.soort === 'adres' ? af.adres : af.domein;
+    const wanneer = nuIso(nu);
+    const oud = fdb.db.prepare('SELECT * FROM afzender_regel WHERE patroon = ?').get(patroon);
+    if (oud) fdb.db.prepare('UPDATE afzender_regel SET soort = ?, leverancier = ?, entiteit = ?, betaalwijze = ?, aangemaakt_door = ?, aangemaakt_op = ? WHERE id = ?')
+      .run(d.soort, f.leverancier_id, entiteit, betaalwijze, r.wie, wanneer, oud.id);
+    else fdb.db.prepare('INSERT INTO afzender_regel (soort, patroon, leverancier, entiteit, betaalwijze, aangemaakt_door, aangemaakt_op) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(d.soort, patroon, f.leverancier_id, entiteit, betaalwijze, r.wie, wanneer);
+    const rij = fdb.db.prepare('SELECT id FROM afzender_regel WHERE patroon = ?').get(patroon);
+    D.audit(fdb, { wie: r.wie, wat: oud ? 'regel_bijwerken' : 'regel_nieuw', object_soort: 'afzender_regel', object_id: String(rij.id), entiteit,
+      voor: oud ? { leverancier: oud.leverancier, entiteit: oud.entiteit, betaalwijze: oud.betaalwijze } : null,
+      na: { soort: d.soort, patroon, leverancier: f.leverancier_id, entiteit, betaalwijze, factuur: f.id }, wanneer });
+    besluitRij(fdb, f.id, K.besluit('regel', 'afzender', patroon, 'mens', 'onthouden voor volgende stukken: ' + [entiteit, betaalwijze].filter(Boolean).join(', ')), r.wie, wanneer);
+    return { regel: { id: rij.id, soort: d.soort, patroon, entiteit, betaalwijze }, bijgewerkt: !!oud };
+  });
+}
+function regelWeg(fdb, r, d, nu) {
+  eisEigenaar(r);
+  const id = Number(d.id);
+  if (!Number.isSafeInteger(id) || id < 1) weiger(400, 'id ontbreekt');
+  return D.transactie(fdb, function () {
+    const oud = fdb.db.prepare('SELECT * FROM afzender_regel WHERE id = ?').get(id);
+    if (!oud) weiger(404, 'regel niet gevonden');
+    fdb.db.prepare('DELETE FROM afzender_regel WHERE id = ?').run(id);
+    D.audit(fdb, { wie: r.wie, wat: 'regel_weg', object_soort: 'afzender_regel', object_id: String(id), entiteit: oud.entiteit,
+      voor: { soort: oud.soort, patroon: oud.patroon, leverancier: oud.leverancier, entiteit: oud.entiteit, betaalwijze: oud.betaalwijze }, wanneer: nuIso(nu) });
+    return { weg: id };
   });
 }
 
@@ -726,6 +832,7 @@ const ONDERWEG_BETAAL = ONDERWEG;   // Privé (prive_archief) staat op de betaal
 const SEPA_WAARSCHUWING = {
   eerder_in_batch: 'zat al in een batch; alleen opnieuw als je zeker weet dat die batch niet is uitgevoerd',
   mogelijk_betaald: 'er staat al een afschrijving naar dit rekeningnummer met dit bedrag; misschien al betaald',
+  zegt_betaald: 'het stuk zegt dat hij al betaald is (niet gevonden in de bank); alleen betalen als je zeker weet dat het niet al gebeurd is',
   kenmerk_fout: 'het betalingskenmerk (16 cijfers) klopt niet volgens de controle; gaat als vrije tekst mee',
 };
 function sepaRekeningen(fdb) {
@@ -772,12 +879,17 @@ function sepaBeoordeel(fdb, f, lev, ctx, vandaag, rek) {
   if (!naam) return nee('begunstigde ontbreekt');
   const rmt = S.omschrijving(f);
   if (eerder) uit.waarschuwingen.push('eerder_in_batch');
+  if (zegtBetaald(fdb, f.id)) uit.waarschuwingen.push('zegt_betaald');   // wv1917 (diffreview MOET 2)
   if (rmt.waarschuwing) uit.waarschuwingen.push(rmt.waarschuwing);
   if (fdb.db.prepare('SELECT 1 FROM bank_transactie t WHERE t.tegenpartij_iban = ? AND t.bedrag_centen = ? AND t.verwijderd_op IS NULL AND t.boekdatum >= ? ' +
     'AND NOT EXISTS (SELECT 1 FROM koppeling k WHERE k.transactie = t.id) LIMIT 1').get(iban, -f.incl, f.factuurdatum && K.isIsoDatum(f.factuurdatum) ? f.factuurdatum : K.plusDagen(vandaag, -60)))
     uit.waarschuwingen.push('mogelijk_betaald');
   uit.regel = { factuur: f.id, datum: uitvoer.datum, centen: f.incl, iban, naam, rmt: rmt.strd ? { strd: rmt.strd } : rmt.ustrd ? { ustrd: rmt.ustrd } : null };
   return uit;
+}
+// wv1917: zei het stuk "al betaald" zonder dat de bank het liet zien (kern ZEGT_BETAALD/ZEGT_BETAALD_UBL in de besluitrij van de betaalwijze)?
+function zegtBetaald(fdb, id) {
+  return !!fdb.db.prepare("SELECT 1 FROM besluit WHERE factuur = ? AND stap = 'betaalwijze' AND toelichting LIKE '%al betaald, niet gevonden in de bank' LIMIT 1").get(id);
 }
 function sepaBetaalInfo(fdb, f, lev, ctx, vandaag) {
   const b = sepaBeoordeel(fdb, f, lev, ctx, vandaag, null);
@@ -1865,6 +1977,7 @@ function verwerkBericht(fdb, invoer, o) {
     const ctx = Object.assign(kernCtx(fdb, nu), {
       leveranciers: leverancierLijst(fdb),
       tekstankers: fdb.db.prepare('SELECT tekst, entiteit FROM tekstanker WHERE actief = 1').all(),
+      afzenderRegels: afzenderRegels(fdb),   // wv1917: gaat vóór tekstankers (kern beslisBericht)
       geenFactuur: fdb.db.prepare('SELECT patroon, leverancier AS leverancier_id FROM geen_factuur WHERE actief = 1').all(),
       bekendeSha256: [],
       bestaandeFacturen: fdb.db.prepare("SELECT id, leverancier AS leverancier_id, leverancier_kvk, leverancier_naam, nummer, incl FROM factuur WHERE status <> 'geen_factuur'").all(),
@@ -2268,6 +2381,7 @@ function maak(opties) {
         if (rest === 'leveranciers') return ok(leveranciers(fdb, r));
         if (rest === 'instellingen') return ok(instellingen(fdb, r));
         if (rest === 'validatie') return ok(validatie(fdb, r, { soort: 'overzicht' }, nu));
+        if (rest === 'regels') return ok(regelsLijst(fdb, r));
         weiger(404, 'onbekend');
       }
       if (v.methode !== 'POST') weiger(404, 'onbekend');
@@ -2295,6 +2409,8 @@ function maak(opties) {
         case 'koppel': return ok(D.transactie(fdb, () => koppelIntern(fdb, r, String(d.transactie || ''), d.factuur, d.volledig !== false, nu)));
         case 'upload': return ok(upload(fdb, r, d, nu, vo), 'upload');
         case 'leverancier': return ok(leverancierRoute(fdb, r, d, nu));
+        case 'regel': return ok(regelRoute(fdb, r, d, nu), 'regel ' + kort(d.soort, 6));
+        case 'regel-weg': return ok(regelWeg(fdb, r, d, nu), 'regel weg');
         case 'bankluis': eisEigenaar(r); return ok(bankluisRonde(fdb, { nu, pad: v.bankluisPad }), 'bankluis');
         case 'validatie': return ok(validatie(fdb, r, d, nu), 'validatie ' + kort(d.soort, 20));
         case 'instellingen/adres': return ok(adres(fdb, r, d, nu, vo), 'adres ' + kort(d.entiteit, 20));

@@ -174,7 +174,7 @@ test('migratie 5 (wv1299): schema 4 → 5 verruimt bank/formaat met TRIODOS/trio
   const dir = map('m5');
   dbOpSchema4(dir).close();
   const f = D.open(dir);
-  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12]);
   assert.equal(f.schema, D.SCHEMA_VERSIE);
   assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
@@ -232,7 +232,7 @@ test('migratie 5 (wv1299): een fout ná het bijwerken van sqlite_master rolt vol
   assert.deepEqual(tabelSql(db), voor);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   db.close();
-  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
+  const f = D.open(dir); assert.deepEqual(f.toegepast, [5, 6, 7, 8, 9, 10, 11, 12]); assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok'); D.sluit(f);
 });
 
 test('migratie 5 (wv1299): al verruimd maar de rij in schema_migratie ontbreekt (lichte terugrol) → opnieuw toepassen verandert niets', () => {
@@ -1077,7 +1077,7 @@ test("migratie 11 (wv1326): signaal krijgt soort 'afwijkend_bedrag'; vanaf schem
   const voor = sigSql(weer.db);
   D.sluit(weer);
   gooit(() => D.open(dir), /migratie_11|staat er 0 keer/);
-  const r = D.open(dir, { alleenLezen: true }); assert.equal(sigSql(r.db), voor); assert.equal(r.schema, 10); D.sluit(r);
+  const r = D.open(dir, { alleenLezen: true }); assert.equal(sigSql(r.db), voor); assert.equal(r.schema, 12); D.sluit(r);
   // diffreview wv1326 ZOU 2: een database op schema 10 waarvan de rij van M10 weg is (lichte terugrol van wv1415): M10 slaat over, M11 past toe
   const d2 = D.open(map('m11-terug10'));
   zetSql(d2.db, ",'teruggeboekt','afwijkend_bedrag')", ",'teruggeboekt')");
@@ -1085,7 +1085,7 @@ test("migratie 11 (wv1326): signaal krijgt soort 'afwijkend_bedrag'; vanaf schem
   const dir2 = path.dirname(d2.pad);
   D.sluit(d2);
   const e2 = D.open(dir2);
-  assert.deepEqual(e2.toegepast, [10, 11]);
+  assert.deepEqual(e2.toegepast, [10, 11, 12]);
   assert.equal(sigSql(e2.db), vers);
   D.sluit(e2);
 });

@@ -603,6 +603,21 @@ function herkenLeverancier(velden, bericht, ctx) {
   return { leverancier: null, via: null };
 }
 
+// wv1917: regel per afzender (David: "regels koppelen obv afzenderadres"). Een regel op het precieze adres gaat voor een domeinregel; een
+// domeinregel geldt ook voor subdomeinen. ctx.afzenderRegels: [{ soort: 'adres'|'domein', patroon, leverancier_id, entiteit, betaalwijze }].
+function adresVanAfzender(afzender) {
+  const m = /<?([^\s<>@"]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})>?\s*$/.exec(String(afzender || ''));
+  return m ? m[1].toLowerCase() : null;
+}
+function regelVoorAfzender(bericht, ctx) {
+  const regels = (ctx && ctx.afzenderRegels) || [];
+  const adres = adresVanAfzender(bericht && bericht.afzender);
+  if (!adres || !regels.length) return null;
+  const dom = adres.slice(adres.indexOf('@') + 1);
+  return regels.find((r) => r.soort === 'adres' && r.patroon === adres) ||
+    regels.filter((r) => r.soort === 'domein' && (dom === r.patroon || dom.endsWith('.' + r.patroon))).sort((a, b) => b.patroon.length - a.patroon.length)[0] || null;
+}
+
 // ───────────────────────────── stap 4: velden samenvoegen ─────────────────────────────
 
 const VELDEN = ['soort', 'nummer', 'factuurdatum', 'vervaldatum', 'excl', 'btw', 'incl', 'valuta', 'iban', 'kenmerk'];
@@ -734,6 +749,23 @@ function stapEntiteit(velden, tekst, ctx, opties) {
   const besluiten = stemmen.map((s) => besluit('entiteit', 'entiteit', s.entiteit, s.bron, s.reden + ' (' + s.gewicht + ')'));
   const redenen = [];
   let entiteit = null;
+  // wv1917: een regel voor deze afzender gaat vóór tekstankers en andere stemmen (bijv. een oude bedrijfsnaam die nu de Holding is)
+  const rg = opties && opties.regel;
+  // wv1917 (diffreview ZOU 7): een sterke stem uit het stuk zelf (KvK, klant in de UBL, af te schrijven eigen rekening) voor een andere entiteit
+  // gaat niet onder de regel door: dan kiest een mens. Een tekstanker of losse naam is niet sterk (precies het geval van de oude bedrijfsnaam).
+  const sterkAnders = rg && rg.entiteit ? stemmen.filter((x) => x.entiteit !== rg.entiteit && x.bron === 'regel' && (x.soort === 'document' || x.soort === 'betaling') && x.gewicht >= 3) : [];
+  if (rg && rg.entiteit && sterkAnders.length) {
+    redenen.push('Regel voor afzender ' + rg.patroon + ' zegt ' + entNaam(ctx, rg.entiteit) + ', maar het stuk zelf wijst naar ' + [...new Set(sterkAnders.map((x) => entNaam(ctx, x.entiteit)))].join(', ') + ' (' + sterkAnders[0].reden + '): kies met de hand');
+    besluiten.push(besluit('entiteit', 'voorstel', null, 'regel', 'regel voor afzender ' + rg.patroon + ' botst met ' + sterkAnders[0].reden));
+    return { entiteit: null, stemmen, score, redenen, besluiten };
+  }
+  if (rg && rg.entiteit && ents.some((e) => e.sleutel === rg.entiteit)) {
+    const ander = volgorde.filter((k) => k !== rg.entiteit);
+    redenen.push('Regel voor afzender ' + rg.patroon + ': ' + entNaam(ctx, rg.entiteit) + ' (gaat vóór tekstankers)');
+    if (ander.length) redenen.push('Tekst op het stuk wijst ook naar ' + ander.map((k) => entNaam(ctx, k)).join(', '));
+    besluiten.push(besluit('entiteit', 'voorstel', rg.entiteit, 'regel', 'regel voor afzender ' + rg.patroon + (volgorde.length ? '; stemmen ' + volgorde.map((k) => k + '=' + score[k]).join(' · ') : '')));
+    return { entiteit: rg.entiteit, stemmen, score, redenen, besluiten };
+  }
   if (!volgorde.length) redenen.push('Geen aanwijzing voor de entiteit: kies hem met de hand');
   else if (volgorde.length > 1 && score[volgorde[0]] === score[volgorde[1]]) redenen.push('Stemmen staken tussen ' + entNaam(ctx, volgorde[0]) + ' en ' + entNaam(ctx, volgorde[1]) + ': kies met de hand');
   else entiteit = volgorde[0];
@@ -773,6 +805,7 @@ const TEKST_ZELF = [
   /\bte\s+(?:betalen|voldoen)\s+(?:voor|binnen)\b/i,
   /\bbinnen\s+\d+\s+dagen\b[^\n]{0,40}\b(?:over\s+te\s+maken|te\s+voldoen|te\s+betalen|betalen)\b/i,
   /\bplease\s+(?:pay|transfer|remit)\b/i,
+  /\bbetaal\s+(?:de|deze)\s+factuur\s+(?:voor|binnen|uiterlijk)\b/i,   // wv1917: "Betaal de factuur vóór 11-11-2026" (Yourhosting)
 ];
 const VOORWAARDE_BETAALD = /\b(wanneer|indien|als|zodra|mocht|niet|tenzij|nadat|voordat|kan|kunt|kunnen|worden|wordt|te|graag|liever|wilt|wil|die|vorige|eerdere|eerder|if|unless|when|can)\b/i;
 // "Reeds betaald: € 0,00" is juist níét betaald (diffreview wv797 natoets #2).
@@ -780,7 +813,11 @@ const NA_NUL = /^\s?:?\s?(?:€|eur)?\s?0[,.]00\b/i;
 // Staat er een openstaand bedrag boven nul, dan is de factuur niet al betaald.
 const OPENSTAAND = /\b(?:nog\s+te\s+betalen|openstaand(?:\s+bedrag)?|amount\s+due|balance\s+due)\s?:?\s?(?:€|eur)?\s?(\d[\d.,]*\d)/gi;
 const VOORWAARDE_ANDER = /\b(wanneer|indien|als|zodra|mocht|niet|tenzij|liever|wilt|wil|kunt|kunnen|kan|aanvragen|if|unless|can)\b/i;
-function stellend(t, patronen, voorwaarde, nietNa) {
+// wv1917: ook een voorwaarde direct ná de treffer maakt hem niet-stellend ("De factuur is voldaan wanneer wij jouw betaling hebben ontvangen").
+const VOORWAARDE_NA = /^\s*,?\s*(?:wanneer|indien|als|zodra|nadat|na\s+ontvangst|pas|once|when|after|upon)\b/i;
+const ZEGT_BETAALD = 'factuur zegt al betaald, niet gevonden in de bank';
+const ZEGT_BETAALD_UBL = 'UBL zegt al betaald, niet gevonden in de bank';
+function stellend(t, patronen, voorwaarde, nietNa, voorwaardeNa) {
   for (const re of patronen) {
     const g = new RegExp(re.source, 'gi'); let m;
     while ((m = g.exec(t))) {
@@ -788,6 +825,7 @@ function stellend(t, patronen, voorwaarde, nietNa) {
       const eindRe = /[.?!\n;]/g; eindRe.lastIndex = m.index + m[0].length;
       const eind = eindRe.exec(t);
       if (nietNa && nietNa.test(t.slice(m.index + m[0].length, m.index + m[0].length + 20))) continue;
+      if (voorwaardeNa && voorwaardeNa.test(t.slice(m.index + m[0].length, m.index + m[0].length + 30))) continue;
       if (!voorwaarde.test(t.slice(begin + 1, m.index)) && !/\b(niet|niets|nooit|geen|not|no|never)\b/i.test(m[0]) && !(eind && eind[0] === '?')) return true;
     }
   }
@@ -798,18 +836,36 @@ function stapBetaalwijze(tekst, velden, ctx, opties) {
   const t = zonderAccenten(schoon(tekst || ''));
   const lev = opties && opties.leverancier;
   let wijze = null, bron = null, reden = null;
-  if (velden.betaalwijze_hint) { wijze = velden.betaalwijze_hint; bron = 'regel'; reden = 'betaalwijze uit de UBL'; }
+  const rg = opties && opties.regel;
+  // wv1917 (diffreview ZOU 6): zegt het stuk zelf stellend iets anders (UBL-incasso of -overmaken, of incassotekst) dan de regel, dan kiest een
+  // mens: een leverancier die op incasso overstapt mag niet ook nog via de batch betaald worden.
+  const rgStuk = rg && rg.betaalwijze ? (velden.betaalwijze_hint && velden.betaalwijze_hint !== 'betaald' ? velden.betaalwijze_hint
+    : t && stellend(t, TEKST_INCASSO, VOORWAARDE_ANDER) ? 'incasso' : null) : null;
+  if (rg && rg.betaalwijze && BETAALWIJZEN.includes(rg.betaalwijze) && rgStuk && rgStuk !== rg.betaalwijze) {
+    wijze = 'onbekend'; bron = 'regel'; reden = 'regel voor afzender ' + rg.patroon + ' zegt ' + rg.betaalwijze + ', het stuk zegt ' + rgStuk + ': kies met de hand';
+  } else if (rg && rg.betaalwijze && BETAALWIJZEN.includes(rg.betaalwijze)) { wijze = rg.betaalwijze; bron = 'regel'; reden = 'regel voor afzender ' + rg.patroon; }
+  else if (velden.betaalwijze_hint === 'betaald') {
+    // wv1917 (diffreview ZOU 8): ook een UBL die "betaald" aangeeft (betaalcode kaart/online, of te betalen 0) is geen bankbewijs
+    if (lev && ['incasso', 'betaald'].includes(lev.standaard_betaalwijze)) { wijze = lev.standaard_betaalwijze; bron = 'leverancier'; reden = 'standaard van de leverancier; UBL zegt al betaald'; }
+    else { wijze = 'zelf'; bron = 'regel'; reden = ZEGT_BETAALD_UBL; }
+  }
+  else if (velden.betaalwijze_hint) { wijze = velden.betaalwijze_hint; bron = 'regel'; reden = 'betaalwijze uit de UBL'; }
   else if (t) {
     let open = false, om; OPENSTAAND.lastIndex = 0;
     while ((om = OPENSTAAND.exec(t))) { const c = bedragNaarCenten(om[1]); if (c != null && c > 0) open = true; }
-    const B = !open && stellend(t, TEKST_BETAALD, VOORWAARDE_BETAALD, NA_NUL), I = stellend(t, TEKST_INCASSO, VOORWAARDE_ANDER), Z = stellend(t, TEKST_ZELF, VOORWAARDE_ANDER);
+    // wv1917 (David 28-10: "Ook is hij nog niet betaald, het systeem zegt van wel"): "al betaald" op het stuk is geen bewijs. Zonder
+    // bankmatch wordt het zelf betalen met die opmerking; de bankcontrole koppelt een echte betaling later (betaald gezien).
+    const B = !open && stellend(t, TEKST_BETAALD, VOORWAARDE_BETAALD, NA_NUL, VOORWAARDE_NA), I = stellend(t, TEKST_INCASSO, VOORWAARDE_ANDER), Z = stellend(t, TEKST_ZELF, VOORWAARDE_ANDER);
     const kandidaten = [B && 'betaald', I && 'incasso', Z && 'zelf'].filter(Boolean);
-    if (kandidaten.length > 1) {
+    if (B && !I && !Z) {
+      // een standaard die een mens bij deze leverancier vastlegde (incasso, of betaald bij bijv. creditcard) gaat voor; anders zelf betalen
+      if (lev && ['incasso', 'betaald'].includes(lev.standaard_betaalwijze)) { wijze = lev.standaard_betaalwijze; bron = 'leverancier'; reden = 'standaard van de leverancier; factuur zegt al betaald'; }
+      else { wijze = 'zelf'; bron = 'regel'; reden = ZEGT_BETAALD; }
+    } else if (kandidaten.length > 1) {
       // Tegenstrijdige tekst: de leveranciersstandaard beslist als die een van de kandidaten is, anders kiest een mens.
       if (lev && kandidaten.includes(lev.standaard_betaalwijze)) { wijze = lev.standaard_betaalwijze; bron = 'leverancier'; reden = 'tekst tegenstrijdig (' + kandidaten.join('/') + '); standaard van de leverancier'; }
       else { wijze = 'onbekend'; bron = 'regel'; reden = 'tekst tegenstrijdig (' + kandidaten.join('/') + '): kies met de hand'; }
-    } else if (B) { wijze = 'betaald'; bron = 'regel'; reden = 'tekst: al betaald'; }
-    else if (I) { wijze = 'incasso'; bron = 'regel'; reden = 'tekst: wordt geïncasseerd'; }
+    } else if (I) { wijze = 'incasso'; bron = 'regel'; reden = 'tekst: wordt geïncasseerd'; }
     else if (Z) { wijze = 'zelf'; bron = 'regel'; reden = 'tekst: zelf overmaken'; }
   }
   if (!wijze && lev && lev.standaard_betaalwijze && lev.standaard_betaalwijze !== 'onbekend') { wijze = lev.standaard_betaalwijze; bron = 'leverancier'; reden = 'standaard van de leverancier'; }
@@ -937,7 +993,7 @@ function nagebeld(f, wie, wanneer) {
 // model_kandidaat staat per document (B4, PDF via Claude): een mail met twee facturen krijgt per factuur zijn eigen kandidaat. Eén kenmerk
 // van patiëntgegevens ergens in het bericht, of één onderdeel dat niet lokaal gelezen is (scan zonder OCR-tekst, UBL met een ingebedde PDF
 // zonder tekst), schakelt alle kandidaten van het bericht uit (B2/B3, fail-closed).
-// ctx:    { vandaag, entiteiten, leveranciers, tekstankers, geenFactuur, bekendeSha256, bestaandeFacturen, ibanHistorie }
+// ctx:    { vandaag, entiteiten, leveranciers, tekstankers, geenFactuur, bekendeSha256, bestaandeFacturen, ibanHistorie, afzenderRegels (wv1917) }
 // uit:    { documenten: [{ sha256, uitkomst, factuur }], facturen: [ … ], signalen: [ … ] } — zonder tekst.
 // B2/B3: mag een modelkandidaat in dit bericht meetellen? → null (ja) of de reden waarom niet. Kijkt naar ALLE onderdelen.
 function modelPoort(documenten) {
@@ -996,7 +1052,9 @@ function beslisBericht(invoer, ctx) {
     const v = sv.velden; besluiten.push(...sv.besluiten);
     const modelZonder = sv.model_zonder_steun.slice();
     if (g.pdf && g.ubl) redenen.push('PDF en UBL uit hetzelfde bericht: één factuur, velden uit de UBL');
-    const hl = herkenLeverancier(v, bericht, ctx);
+    const rg = regelVoorAfzender(bericht, ctx);
+    const rgLev = rg && ((ctx && ctx.leveranciers) || []).find((x) => x.id === rg.leverancier_id);
+    const hl = rgLev ? { leverancier: rgLev, via: 'regel voor afzender ' + rg.patroon } : herkenLeverancier(v, bericht, ctx);
     const lev = hl.leverancier;
     besluiten.push(besluit('leverancier', 'leverancier', lev ? lev.id : null, lev ? 'leverancier' : 'regel', lev ? 'herkend via ' + hl.via : 'onbekende leverancier'));
     if (v.iban == null) { v.iban = kiesBetaalIban(v, lev, ctx); if (v.iban) besluiten.push(besluit('velden', 'iban', v.iban, 'regel', g.ubl ? 'uit PDF (ontbrak in UBL)' : 'uit PDF-tekst')); }
@@ -1015,7 +1073,7 @@ function beslisBericht(invoer, ctx) {
     };
     const di = stapDubbelInhoud(basis, ctx);
     besluiten.push(...di.besluiten);
-    const se = stapEntiteit(v, scan ? '' : tekst, ctx, { leverancier: lev, model_kandidaat: mk, patientkenmerk: pk.kenmerk, steun_tekst: steunTekst });
+    const se = stapEntiteit(v, scan ? '' : tekst, ctx, { leverancier: lev, model_kandidaat: mk, patientkenmerk: pk.kenmerk, steun_tekst: steunTekst, regel: rgLev ? rg : null });
     besluiten.push(...se.besluiten);
     let status = 'te_beoordelen';
     if (di.dubbel) { status = 'dubbel'; redenen.unshift('Zelfde leverancier, nummer en bedrag als een bestaande factuur'); signalen.push({ soort: 'dubbele_factuur', factuur_document: hoofd.sha256, van: di.van }); }
@@ -1024,7 +1082,7 @@ function beslisBericht(invoer, ctx) {
       besluiten.push(...gf.besluiten);
       if (gf.geen) { status = 'geen_factuur'; redenen.unshift('Geen factuur: ' + gf.besluiten[0].toelichting); }
     }
-    const sb = stapBetaalwijze(scan ? '' : tekst, v, ctx, { leverancier: lev });
+    const sb = stapBetaalwijze(scan ? '' : tekst, v, ctx, { leverancier: lev, regel: rgLev ? rg : null });
     besluiten.push(...sb.besluiten);
     const f = Object.assign(basis, { entiteit: se.entiteit, betaalwijze: sb.betaalwijze, status });
     const va = valideer(f, ctx, { leverancier: lev });
@@ -1271,7 +1329,7 @@ module.exports = {
   leesXml, leesUbl, leesPdfTekst,
   // besliskader per stap (§ 4.5)
   stapDubbelBestand, stapDubbelInhoud, factuurSleutel, stapSoort, groepeerBericht, stapPatientkenmerk, stapVelden, herkenLeverancier, compactNaam, naamVerwant, ibanNaamPast, VERZAMEL_RE,
-  stapEntiteit, stapGeenFactuur, stapBetaalwijze, valideer, ibanPoort, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
+  stapEntiteit, stapGeenFactuur, stapBetaalwijze, regelVoorAfzender, adresVanAfzender, ZEGT_BETAALD, ZEGT_BETAALD_UBL, valideer, ibanPoort, magBevestigen, nagebeld, beslisBericht, besluit, BESLUIT_BRONNEN, lokaleSteun, modelPoort, bevestigBlokkades,
   // leren
   leerUitBevestiging,
   // overgangen (§ 4.4)
