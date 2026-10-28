@@ -411,6 +411,97 @@ function toetsEersteBytes(kop, naam, mime) {
   return soort.magie.some((m) => kop.length >= m.length && kop.subarray(0, m.length).equals(m)) ? null : 'soort_klopt_niet';
 }
 
+/*
+ * Spiegel naar Second Brain 2.0 (wv1832, fase 3a; ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 3 intake, nachtketen en
+ * schrijvers (ontwerp 28-10-2026).md" § 3.1–3.3, koppelingstabel na de Fable-review). De pod blijft het werkregister en de bewaarplek
+ * van de bytes; Supabase (secondbrain.blob/source_record/_revision/_occurrence via public.sb2_intake_registreer) krijgt per stuk alleen
+ * hashes, groottes, mime, sleutels, tijden, toegangscontext en status. Nooit titel, onderwerp, bestandsnaam, afzender, vaultpad of tekst;
+ * chat-id's (telefoonnummers) gehasht. Hieronder de zuivere hulpfuncties; de ronde zelf staat in maak() (spiegel).
+ */
+const SPIEGEL_MAX = 200;                 // stukken per aanroep (grens van de RPC)
+const SPIEGEL_TIJDELIJK_MAX = 20;        // botsingen met een gelijktijdige ronde: daarna eindstand niet_spiegelbaar
+const ROUTE_VAST = { 'scanner:scansnap': 'scansnap', 'whatsapp:gambia': 'whatsapp.gm' };
+function routeVan(bron) { return ROUTE_VAST[bron] || String(bron).replace(/:/g, '.'); }
+function hash16(s) { return sha256(Buffer.from(String(s), 'utf8')).slice(0, 16); }
+// sleutel boven de grens → sha256 (hex), zoals de RPC; de echte waarde blijft in intake.sqlite
+function sleutelMax(s, max) { const t = String(s).trim(); return t.length > max ? sha256(Buffer.from(t, 'utf8')) : t; }
+const CHAT_RE = /[0-9]{5,22}(?:-[0-9]{5,12})?@(?:g\.us|c\.us|lid|s\.whatsapp\.net)/g;
+// Intake-sleutel zonder telefoonnummer of chat-id: WhatsApp-id's binnen de sleutel gehasht; Signal/Teams: het gesprek-id vóór de laatste '/'.
+function zonderChatId(profiel, bronId) {
+  const p = String(profiel).split('@')[0], b = String(bronId);
+  if (p === 'signal-dump' || p === 'teams-dump') { const i = b.lastIndexOf('/'); return i > 0 ? hash16(b.slice(0, i)) + b.slice(i) : hash16(b); }
+  return b.replace(CHAT_RE, (m) => hash16(m));
+}
+// Proefstukken (sleutels of meta met .invalid, de verzonnen nummers 3160000000… van de omzettingsproeven) gaan nooit naar Supabase.
+const PROEF_RE = /\.invalid\b|(?:^|[^0-9])316?0{7,}[0-9]{0,3}@/i;
+function isProefstuk(s) { return PROEF_RE.test(String(s.bron_id || '')) || PROEF_RE.test(String(s.meta || '')); }
+const PS_VAN_STATUS = { open: 'received', onvolledig: 'received', mislukt: 'received', ontvangen: 'registered', geschreven: 'registered',
+  wacht: 'registered', wacht_marker: 'quarantaine', vastgehouden: 'quarantaine' };
+function dagNl(iso) { const t = Date.parse(iso); return isNaN(t) ? null : new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam' }).format(new Date(t)); }
+
+// Canonieke mailkern (Fable-review wv1790 #2): de hoofdtekst zonder kopregels, witruimte genormaliseerd, zodat dezelfde mail in twee
+// postvakken (andere Received/Delivered-To/labels) dezelfde versie is. text/plain-delen; zonder die de html-delen als platte tekst.
+// Bijlagen (Content-Disposition: attachment) en doorgestuurde mails (message/rfc822) tellen niet mee. → Buffer (utf-8) of null.
+function mimeKoppen(kop) {
+  const uit = {};
+  for (const r of kop.replace(/\r?\n[ \t]+/g, ' ').split(/\r?\n/)) {
+    const i = r.indexOf(':');
+    if (i > 0) { const k = r.slice(0, i).trim().toLowerCase(); if (!(k in uit)) uit[k] = r.slice(i + 1).trim(); }
+  }
+  return uit;
+}
+function kopParam(w, naam) { const m = new RegExp('(?:^|;)\\s*' + naam + '\\s*=\\s*(?:"([^"]*)"|([^;\\s]+))', 'i').exec(String(w || '')); return m ? (m[1] != null ? m[1] : m[2]) : null; }
+function decodeerDeel(buf, cte, charset) {
+  let b = buf;
+  const c = String(cte || '').trim().toLowerCase();
+  if (c === 'base64') b = Buffer.from(buf.toString('latin1').replace(/[^A-Za-z0-9+/=]/g, ''), 'base64');
+  else if (c === 'quoted-printable') b = Buffer.from(buf.toString('latin1').replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g, (m, h) => String.fromCharCode(parseInt(h, 16))), 'latin1');
+  try { return new TextDecoder(String(charset || 'utf-8').trim().toLowerCase()).decode(b); } catch (e) { return b.toString('utf8'); }
+}
+function splitsKop(buf) {
+  const s = buf.toString('latin1');
+  const m = /\r?\n\r?\n/.exec(s);
+  return m ? { kop: mimeKoppen(s.slice(0, m.index)), lijf: buf.subarray(m.index + m[0].length) } : { kop: mimeKoppen(s), lijf: Buffer.alloc(0) };
+}
+function mailTeksten(buf, diepte, uit) {
+  const { kop, lijf } = splitsKop(buf);
+  const ct = kop['content-type'] || 'text/plain';
+  const soort = ct.split(';')[0].trim().toLowerCase();
+  if (soort.indexOf('multipart/') === 0) {
+    const grens = kopParam(ct, 'boundary');
+    if (!grens || diepte > 8) return uit;
+    const delen = lijf.toString('latin1').split('--' + grens);
+    for (let i = 1; i < delen.length; i++) {
+      if (delen[i].indexOf('--') === 0) break;                 // sluitgrens
+      mailTeksten(Buffer.from(delen[i].replace(/^[ \t]*\r?\n/, ''), 'latin1'), diepte + 1, uit);
+    }
+    return uit;
+  }
+  if (String(kop['content-disposition'] || '').split(';')[0].trim().toLowerCase() === 'attachment') return uit;
+  if (soort === 'text/plain' || soort === 'text/html') uit.push({ soort, tekst: decodeerDeel(lijf, kop['content-transfer-encoding'], kopParam(ct, 'charset')) });
+  return uit;
+}
+function htmlNaarTekst(h) {
+  return String(h).replace(/<(script|style|head)\b[\s\S]*?<\/\1\s*>/gi, ' ').replace(/<br\s*\/?>|<\/(p|div|tr|li|h[1-6])\s*>/gi, '\n').replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d{1,7});/g, (m, n) => (Number(n) > 0 && Number(n) <= 0x10ffff ? String.fromCodePoint(Number(n)) : ' ')).replace(/&amp;/gi, '&');
+}
+function mailKern(buf, mime) {
+  const km = kaleMime(mime);
+  const teksten = km === 'message/rfc822' ? mailTeksten(buf, 0, []) : [{ soort: km === 'text/html' ? 'text/html' : 'text/plain', tekst: buf.toString('utf8') }];
+  const plat = teksten.filter((t) => t.soort === 'text/plain' && t.tekst.trim());
+  const gekozen = plat.length ? plat.map((t) => t.tekst) : teksten.filter((t) => t.soort === 'text/html').map((t) => htmlNaarTekst(t.tekst));
+  const k = gekozen.join('\n').normalize('NFC').replace(/\s+/g, ' ').trim();
+  return k ? Buffer.from(k, 'utf8') : null;
+}
+// Bronsleutel van een mail: RFC Message-ID (meta, anders uit het .eml) zonder <>; terugval gmail:<id> / outlook:<m.id>.
+function mailSleutel(profiel, bronId, meta, eml) {
+  let mid = typeof meta.message_id === 'string' ? meta.message_id : typeof meta.internet_message_id === 'string' ? meta.internet_message_id : '';
+  if (!mid.trim() && eml) mid = splitsKop(eml).kop['message-id'] || '';
+  mid = mid.trim().replace(/^<+|>+$/g, '').trim();
+  return mid || (String(profiel).indexOf('outlook') === 0 ? 'outlook:' : 'gmail:') + bronId;
+}
+
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS blob (sha256 TEXT PRIMARY KEY, grootte INTEGER NOT NULL, mime TEXT, eerst_gezien TEXT NOT NULL,
@@ -431,6 +522,8 @@ CREATE INDEX IF NOT EXISTS aanlevering_tijd ON aanlevering (tijd);
 CREATE TABLE IF NOT EXISTS overgang (id INTEGER PRIMARY KEY, stuk_id TEXT NOT NULL, deel TEXT NOT NULL, stand TEXT NOT NULL, pad TEXT,
   geschreven_sha TEXT, drive_gezien_sha TEXT, uitkomst TEXT, tijd TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS spoor (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL, soort TEXT NOT NULL, sha256 TEXT, stuk_id TEXT, bron TEXT);
+CREATE TABLE IF NOT EXISTS spiegel (stuk_id TEXT PRIMARY KEY, stand TEXT NOT NULL, reden TEXT, ps TEXT, kern TEXT, op TEXT NOT NULL,
+  pogingen INTEGER NOT NULL DEFAULT 0, ids TEXT);
 `;
 
 /*
@@ -438,7 +531,9 @@ CREATE TABLE IF NOT EXISTS spoor (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL, so
  * o = { dir (/opt/data/intake), vault, profielenDir, filterPad (bisync-filter.txt), primair() → bool, vv (vault-veilig: lees/schrijf),
  *       stuur(res, status, obj, kop?), fout(label, e), nu() → ms, pdftekst(pad) → Promise<string|null>, nachtgrendel() → bool,
  *       meld?(hangers) → true als de box-rij geschreven is (hangers = [{ stuk_id, profiel, bron, status, sinds, pogingen }], geen inhoud),
- *       vrijeBytes(dir) → number | null, marker (patientpoort: { beoordeel, MIN_TEKST, VERSIE }), grenzen? ({ perUur, bytesPerDag }: alleen de toets) }
+ *       vrijeBytes(dir) → number | null, marker (patientpoort: { beoordeel, MIN_TEKST, VERSIE }), grenzen? ({ perUur, bytesPerDag }: alleen de toets),
+ *       onderhoudAan?() → bool (wv1832 R1: de onderhoudsstand van de vault, /opt/data/onderhoudsstand.json; aan = niet in de vault schrijven),
+ *       sbRpc?(fn, body) → Promise<json> (public-RPC in Supabase; alleen de spiegel), versie?() → claudebot-commit (run.versie) }
  */
 function maak(o) {
   const dir = o.dir;
@@ -446,6 +541,7 @@ function maak(o) {
   const BLOB = path.join(dir, 'blob'), TMP = path.join(dir, 'tmp'), SCHADUW = path.join(dir, 'schaduw');
   const UIT = path.join(dir, 'uit'), ONDERHOUD = path.join(dir, 'onderhoud');
   const SLEUTELS = path.join(dir, 'sleutels.json'), MARKER = path.join(dir, 'marker.json'), MELD_STEMPEL = path.join(dir, 'hangers-gemeld');
+  const SPIEGEL = path.join(dir, 'spiegel.json');
   for (const d of [dir, BLOB, TMP, SCHADUW]) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
   const profielen = laadProfielen(o.profielenDir);
   const soorten = laadSoortenlijst(o.filterPad);
@@ -543,6 +639,11 @@ function maak(o) {
     return { stand: 'tellen', bronnen: null };
   }
   function houdtVast(bron) { const m = markerStand(); return m.stand === 'vasthouden' && (!m.bronnen || m.bronnen.includes(bron)); }
+  // Onderhoud = het eigen bestand <dir>/onderhoud óf de onderhoudsstand van de vault (wv1832 R1; onleesbaar telt daar als aan).
+  function onderhoudNu() {
+    if (fs.existsSync(ONDERHOUD)) return true;
+    try { return !!(o.onderhoudAan && o.onderhoudAan()); } catch (e) { if (o.fout) o.fout('intake-onderhoud', e); return true; }
+  }
 
   function log(r) {
     try {
@@ -603,7 +704,7 @@ function maak(o) {
     const env = { bron: stukRij.bron, meta: JSON.parse(stukRij.meta || '{}') };
     const delen = q.delen.all(stukRij.stuk_id).filter((d) => d.rol === profiel.archief.schrijf_rol);
     const om = stukRij.stand === 'om';
-    if (om && (fs.existsSync(ONDERHOUD) || (o.nachtgrendel && o.nachtgrendel()))) {
+    if (om && (onderhoudNu() || (o.nachtgrendel && o.nachtgrendel()))) {
       q.status.run('wacht', stukRij.stuk_id);
       return { vault: 'wacht', reden: 'onderhoud' };
     }
@@ -1077,6 +1178,155 @@ function maak(o) {
   }
 
   /*
+   * Spiegel (wv1832, fase 3a). Schakelaar <dir>/spiegel.json {"aan": true} (standaard uit; opt.forceer = één ronde met de hand).
+   * Kandidaten: complete stukken waarover de marker oordeelde, niet in stand dubbel (schaduw) en nog niet gespiegeld, of gespiegeld met
+   * een andere verwerkingsstatus dan nu (wacht → geschreven blijft registered; vastgehouden wordt quarantaine). Per stuk de bronnen
+   * volgens de koppelingstabel (§ 3.2): mail = één bron op de Message-ID met de canonieke kern als versie (eigen blob op de pod) en elke
+   * bijlage als bestand dat aan de ontvangst van de mail hangt; dumps op hun Intake-sleutel zonder chat-id met de periode als
+   * valid_from/to; contacten één bron met versies; media en scans als bestand op sha256. Nooit de representatie van een mail.
+   * Eindstand per stuk in tabel spiegel: gespiegeld (met de id's), niet_spiegelbaar (reden: proefstuk, geen_hoofdtekst, blob_ontbreekt,
+   * geweigerd:<reden van de RPC>, …), of opnieuw (botsing; volgende ronde). Faalt de aanroep zelf, dan blijft alles staan (volgende ronde).
+   * Onderhoud (R1) en een lopende ronde: niets. → tellingen, nooit inhoud.
+   */
+  function spiegelStand() { try { const j = JSON.parse(fs.readFileSync(SPIEGEL, 'utf8')); return { aan: !!(j && j.aan === true) }; } catch (e) { return { aan: false }; } }
+  let spiegelLaatst = null, spiegelBezig = false;
+  const spiegelZet = db.prepare(`INSERT INTO spiegel (stuk_id, stand, reden, ps, kern, op, pogingen, ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (stuk_id) DO UPDATE SET stand = excluded.stand, reden = excluded.reden, ps = excluded.ps, kern = coalesce(excluded.kern, spiegel.kern),
+    op = excluded.op, pogingen = excluded.pogingen, ids = excluded.ids`);
+  function spiegelBronnen(s) {
+    const profiel = profielen.get(s.profiel);
+    if (!profiel) return { niet: 'profiel_onbekend' };
+    if (isProefstuk(s)) return { niet: 'proefstuk' };
+    const ps = PS_VAN_STATUS[s.status];
+    if (!ps) return { niet: 'status_onbekend' };
+    const soort = s.profiel.split('@')[0];
+    const delen = q.delen.all(s.stuk_id).filter((d) => d.binnen);
+    const heeft = (d) => { const b = q.blob.get(d.sha256); return !!b && !b.weg && blobAanwezig(d.sha256); };
+    let meta = {};
+    try { meta = JSON.parse(s.meta || '{}') || {}; } catch (e) { /* leeg */ }
+    const basis = { intake_route: routeVan(s.bron), received_at: s.ontvangen || null, access_context: s.access_context || '', processing_status: ps };
+    const bestand = (d, sleutel, binnen) => Object.assign({ origin_system: 'bestand', external_id: d.sha256, sha256: d.sha256, size_bytes: d.grootte,
+      mime_type: kaleMime(d.mime), occurrence_key: sleutelMax(sleutel, 300) }, basis, binnen == null ? {} : { binnen });
+    if (soort === 'mail' || soort === 'outlook-mail') {
+      const hoofd = delen.find((d) => d.rol === 'hoofdtekst') || delen.find((d) => d.rol === 'origineel');
+      const bijlagen = delen.filter((d) => d.rol === 'bijlage');
+      if ((hoofd && !heeft(hoofd)) || bijlagen.some((d) => !heeft(d))) return { niet: 'blob_ontbreekt' };
+      const bytes = hoofd ? fs.readFileSync(blobPad(hoofd.sha256)) : null;
+      const kern = hoofd ? mailKern(bytes, hoofd.mime) : null;
+      if (!kern) {
+        // zonder hoofdtekst geen mailbron (§ 3.2); de bijlagen zijn wel eigen bestanden (bv. de Outlook-bijlage als eigen stuk, wv1717)
+        if (!bijlagen.length) return { niet: 'geen_hoofdtekst' };
+        return { bronnen: bijlagen.map((d) => bestand(d, s.bron_id + '#' + d.deel)), reden: 'zonder_mailkern' };
+      }
+      const ksha = sha256(kern);
+      const bronnen = [Object.assign({ origin_system: 'mail', external_id: sleutelMax(mailSleutel(s.profiel, s.bron_id, meta, kaleMime(hoofd.mime) === 'message/rfc822' ? bytes : null), 250),
+        sha256: ksha, size_bytes: kern.length, mime_type: 'text/plain', occurrence_key: sleutelMax(s.bron_id, 300) }, basis)];
+      for (const d of bijlagen) bronnen.push(bestand(d, s.bron_id + '#' + d.deel, 0));
+      return { bronnen, kern: { buf: kern, sha: ksha, van: hoofd.sha256 } };
+    }
+    if (soort === 'whatsapp-dump' || soort === 'whatsapp-gambia-week' || soort === 'signal-dump' || soort === 'teams-dump' || soort === 'contacten-export') {
+      const hoofd = delen.find((d) => d.rol === 'hoofdtekst') || delen.find((d) => d.rol === 'representatie');   // de dump of export zelf
+      if (!hoofd) return { niet: 'geen_onderdeel' };
+      if (!heeft(hoofd)) return { niet: 'blob_ontbreekt' };
+      const contacten = soort === 'contacten-export';
+      const sleutel = contacten ? 'contacten' : zonderChatId(s.profiel, s.bron_id);
+      const per = isObj(meta.periode) ? meta.periode : null;
+      const b = Object.assign({ origin_system: contacten ? 'contacten' : soort.split('-')[0], external_id: sleutelMax(sleutel, 250), sha256: hoofd.sha256,
+        size_bytes: hoofd.grootte, mime_type: kaleMime(hoofd.mime), occurrence_key: sleutelMax(sleutel, 300) }, basis);
+      if (per && dagNl(per.van) && dagNl(per.tot)) { b.valid_from = dagNl(per.van); b.valid_to = dagNl(per.tot); }
+      if (profiel.herzienbaar) b.version_label = String(s.versie);
+      return { bronnen: [b] };
+    }
+    if (soort === 'whatsapp-media' || soort === 'scansnap') {
+      const d = delen.find((x) => x.rol === 'bijlage' || x.rol === 'origineel');
+      if (!d) return { niet: 'geen_onderdeel' };
+      if (!heeft(d)) return { niet: 'blob_ontbreekt' };
+      return { bronnen: [bestand(d, soort === 'scansnap' ? s.bron_id : zonderChatId(s.profiel, s.bron_id))] };
+    }
+    return { niet: 'profiel_zonder_koppeling' };
+  }
+  // De kern als eigen blob op de pod (opslag 'kern', nooit offsite; bewaartermijn van het origineel als dat er een heeft).
+  function bewaarKern(k) {
+    bewaarBuffer(k.buf, k.sha);
+    const van = q.blob.get(k.van);
+    tx(function () {
+      db.prepare("INSERT OR IGNORE INTO blob (sha256, grootte, mime, eerst_gezien, opslag) VALUES (?, ?, 'text/plain', ?, 'kern')").run(k.sha, k.buf.length, nuIso(nu()));
+      q.blobTerug.run(k.sha);
+      if (van && van.bewaar_tot) db.prepare('UPDATE blob SET bewaar_tot = ? WHERE sha256 = ? AND opslag = ? AND (bewaar_tot IS NULL OR bewaar_tot < ?)').run(van.bewaar_tot, k.sha, 'kern', van.bewaar_tot);
+    });
+  }
+  async function spiegel(opt) {
+    opt = opt || {};
+    if (!opt.forceer && !spiegelStand().aan) return { aan: false };
+    if (spiegelBezig) return { bezig: true };
+    if (onderhoudNu()) return { wacht: 'onderhoud' };
+    if (typeof o.sbRpc !== 'function') return { fout: 'geen_rpc' };
+    spiegelBezig = true;
+    const t0 = nuIso(nu());
+    const uit = { kandidaten: 0, verstuurd: 0, gespiegeld: 0, niet_spiegelbaar: 0, opnieuw: 0 };
+    try {
+      const rijen = db.prepare(`SELECT s.*, g.stand g_stand, g.ps g_ps, g.pogingen g_pogingen FROM stuk s LEFT JOIN spiegel g ON g.stuk_id = s.stuk_id
+        WHERE coalesce(s.stand, '') <> 'dubbel' AND s.status IN ('ontvangen', 'geschreven', 'wacht', 'mislukt', 'wacht_marker', 'vastgehouden') AND s.marker_op IS NOT NULL
+          AND (g.stuk_id IS NULL OR g.stand = 'opnieuw' OR (g.stand = 'gespiegeld' AND g.ps IS NOT (CASE WHEN s.status IN ('mislukt') THEN 'received'
+            WHEN s.status IN ('wacht_marker', 'vastgehouden') THEN 'quarantaine' ELSE 'registered' END)))
+        ORDER BY s.aangemaakt LIMIT ?`).all(Math.min(SPIEGEL_MAX, opt.max || SPIEGEL_MAX));
+      uit.kandidaten = rijen.length;
+      const stukken = [], per = new Map();
+      for (const s of rijen) {
+        let b;
+        try { b = spiegelBronnen(s); } catch (e) { if (o.fout) o.fout('intake-spiegel', e); b = { niet: 'fout_op_de_pod' }; }
+        if (b.niet) { spiegelZet.run(s.stuk_id, 'niet_spiegelbaar', b.niet, null, null, t0, s.g_pogingen || 0, null); uit.niet_spiegelbaar++; continue; }
+        if (b.kern) bewaarKern(b.kern);
+        stukken.push({ ref: s.stuk_id, bronnen: b.bronnen });
+        per.set(s.stuk_id, { s, b });
+      }
+      if (!stukken.length) return Object.assign(uit, { aan: true });
+      uit.verstuurd = stukken.length;
+      let r;
+      try { r = await o.sbRpc('sb2_intake_registreer', { p: { versie: (o.versie && o.versie()) || '', stukken } }); }
+      catch (e) { if (o.fout) o.fout('intake-spiegel', e); uit.fout = 'rpc'; return uit; }
+      if (!r || !Array.isArray(r.stukken)) { uit.fout = 'antwoord'; return uit; }
+      tx(function () {
+        for (const x of r.stukken) {
+          const p = per.get(x && x.ref);
+          if (!p) continue;
+          const ps = p.b.bronnen[0].processing_status, kern = p.b.kern ? p.b.kern.sha : null;
+          if (x.ok === true && Array.isArray(x.bronnen) && x.bronnen.length === p.b.bronnen.length) {
+            const ids = x.bronnen.map((y, i) => ({ route: p.b.bronnen[i].intake_route, origin: p.b.bronnen[i].origin_system, bijlage: p.b.bronnen[i].binnen != null,
+              record: y.record, revisie: y.revisie, ontvangst: y.ontvangst }));
+            spiegelZet.run(p.s.stuk_id, 'gespiegeld', p.b.reden || null, ps, kern, t0, 0, JSON.stringify(ids)); uit.gespiegeld++;
+          } else if (x.ok !== true && /^tijdelijk:/.test(String(x.reden || '')) && (p.s.g_pogingen || 0) + 1 < SPIEGEL_TIJDELIJK_MAX) {
+            spiegelZet.run(p.s.stuk_id, 'opnieuw', String(x.reden).slice(0, 120), null, kern, t0, (p.s.g_pogingen || 0) + 1, null); uit.opnieuw++;
+          } else {
+            spiegelZet.run(p.s.stuk_id, 'niet_spiegelbaar', ('geweigerd:' + String(x.reden || 'onbekend')).slice(0, 200), null, kern, t0, (p.s.g_pogingen || 0) + 1, null); uit.niet_spiegelbaar++;
+          }
+        }
+      });
+      if (r.run_id != null) uit.run_id = r.run_id;
+      return Object.assign(uit, { aan: true });
+    } finally {
+      spiegelBezig = false;
+      spiegelLaatst = Object.assign({ op: t0 }, uit);
+    }
+  }
+  // Telling voor de nameting (pod = Supabase): stukken per profiel en stand; ontvangsten per route|systeem|hoofd/bijlage (zoals sb2_intake_stand).
+  function spiegelTelling() {
+    const stukken = {}, per = {};
+    for (const r of db.prepare('SELECT s.profiel, g.stand, g.ids FROM spiegel g JOIN stuk s ON s.stuk_id = g.stuk_id').all()) {
+      const p = stukken[r.profiel] = stukken[r.profiel] || {};
+      p[r.stand] = (p[r.stand] || 0) + 1;
+      if (r.stand !== 'gespiegeld' || !r.ids) continue;
+      for (const x of JSON.parse(r.ids)) { const k = x.route + '|' + x.origin + '|' + (x.bijlage ? 'bijlage' : 'hoofd'); (per[k] = per[k] || new Set()).add(x.ontvangst); }
+    }
+    return { per_profiel: stukken, per_route: Object.fromEntries(Object.entries(per).map(([k, v]) => [k, v.size])) };
+  }
+  function spiegelInfo() {
+    let stand = null;
+    try { stand = Object.fromEntries(db.prepare('SELECT stand, count(*) n FROM spiegel GROUP BY stand').all().map((r) => [r.stand, r.n])); } catch (e) { /* db dicht */ }
+    return { aan: spiegelStand().aan, stand, laatste: spiegelLaatst };
+  }
+
+  /*
    * Hangers (wv1303): een stuk dat na de herhaalronde nog > 1 uur op 'wacht' staat (tijdens onderhoud of nachtgrendel > 6 uur), of
    * 'mislukt' is, ziet de aanleverende workflow niet meer (die kreeg 202). Eén box-rij via o.meld met stuk-id, profiel, bron en status,
    * nooit inhoud; per stuk één keer (kolom gemeld; een gemeld wacht-stuk dat mislukt wordt, nog één keer), hooguit één rij per zes uur. 'sinds' = compleet_op (dan ging het naar wacht), anders
@@ -1084,7 +1334,7 @@ function maak(o) {
    */
   function meldHangers(t) {
     if (typeof o.meld !== 'function') return 0;
-    const pauze = fs.existsSync(ONDERHOUD) || !!(o.nachtgrendel && o.nachtgrendel());
+    const pauze = onderhoudNu() || !!(o.nachtgrendel && o.nachtgrendel());
     const rijen = db.prepare(`SELECT stuk_id, profiel, bron, status, pogingen, coalesce(compleet_op, aangemaakt) sinds FROM stuk WHERE gemeld IS NULL
       AND (status = 'mislukt' OR (status = 'wacht' AND coalesce(compleet_op, aangemaakt) < ?)) ORDER BY aangemaakt LIMIT ${MELD_MAX}`).all(nuIso(t - (pauze ? HANG_PAUZE_MS : HANG_MS)));
     if (!rijen.length) return 0;
@@ -1158,12 +1408,13 @@ function maak(o) {
       blobs = db.prepare('SELECT count(*) n, coalesce(sum(grootte), 0) bytes, sum(offsite) offsite FROM blob WHERE weg IS NULL').get();
     } catch (e) { /* db dicht */ }
     return { profielen: Array.from(profielen.keys()), sleutels: s.staat === 'ingericht' ? s.map.size : s.staat + (s.reden ? ': ' + s.reden : ''),
-      uit: fs.existsSync(UIT), onderhoud: fs.existsSync(ONDERHOUD), marker: markerStand().stand, stukken, blobs: blobs ? { aantal: blobs.n, bytes: blobs.bytes, offsite: blobs.offsite || 0 } : null };
+      uit: fs.existsSync(UIT), onderhoud: onderhoudNu(), marker: markerStand().stand, stukken, blobs: blobs ? { aantal: blobs.n, bytes: blobs.bytes, offsite: blobs.offsite || 0 } : null,
+      spiegel: spiegelInfo() };
   }
 
   function sluit() { try { db.close(); } catch (e) { /* al dicht */ } }
 
-  return { isPad, verwerk, ronde, telling, info, sluit, markeer, leverIntern, blobVan, bewaarNa, _db: db, _profielen: profielen, _soorten: soorten };
+  return { isPad, verwerk, ronde, telling, info, sluit, markeer, leverIntern, blobVan, bewaarNa, spiegel, spiegelTelling, _db: db, _profielen: profielen, _soorten: soorten };
 }
 
 /*
@@ -1177,4 +1428,5 @@ if (require.main === module && process.argv[2] === 'offsite-lijst') {
   db.close();
 }
 
-module.exports = { maak, toetsEnvelop, naampoort, laadProfielen, laadSoortenlijst, toetsEersteBytes, doelMap, LEESLUIK, PROTOCOL };
+module.exports = { maak, toetsEnvelop, naampoort, laadProfielen, laadSoortenlijst, toetsEersteBytes, doelMap, LEESLUIK, PROTOCOL,
+  mailKern, mailSleutel, zonderChatId, isProefstuk, routeVan };

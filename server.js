@@ -7457,12 +7457,12 @@ function appBusLees() {
   appStaat.bus = { pad: pad, mtime: st.mtimeMs, data: data };
   return data;
 }
-async function appSbRpc(fn, body) {
+async function appSbRpc(fn, body, ms) {
   const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, ''), key = process.env.SUPABASE_SERVICE_ROLE || '';
   if (!url || !key) throw new Error('supabase-omgeving ontbreekt');
   const r = await fetch(url + '/rest/v1/rpc/' + fn, { method: 'POST',
     headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
-    signal: AbortSignal.timeout(8000) });
+    signal: AbortSignal.timeout(ms || 8000) });
   if (!r.ok) throw new Error('rpc ' + fn + ' http ' + r.status);
   return r.json();
 }
@@ -15178,7 +15178,11 @@ const intake = (function () {
       primair: function () { return rolPrimair(); }, vv: VV(), stuur: intakeStuur,
       fout: logError, pdftekst: intakePdfTekst, nachtgrendel: function () { return ovisAms().uur === 1; }, meld: intakeMeldHangers,
       vrijeBytes: function (d) { try { const st = fs.statfsSync(d); return st.bavail * st.bsize; } catch (e) { return null; } },
-      marker: require(path.join(__dirname, 'intake', 'patientpoort.js')) });
+      marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
+      // wv1832 (SB2 fase 3a): R1 onderhoudsstand van de vault; spiegel naar secondbrain via public.sb2_intake_registreer (schakelaar intake/spiegel.json)
+      onderhoudAan: function () { return onderhoud.stand().aan === true; },
+      sbRpc: function (fn, body) { return appSbRpc(fn, body, 60000); },
+      versie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || ''; } });
   } catch (e) { logError('intake', e); return null; }
 })();
 function intakeIsPad(req) { const p = reqPath(req); return p === '/intake' || p.indexOf('/intake/') === 0; }
@@ -15278,6 +15282,8 @@ function intakeRouterInfo() { const r = intakeRouterMod; if (!r) return { aan: !
 async function intakeTik() {
   if (!intake || !rolPrimair()) return;
   try { await intake.ronde(); } catch (e) { logError('intake-ronde', e); }
+  // wv1832: spiegel naar Second Brain 2.0 na de ontvangstlaag (alleen met intake/spiegel.json {"aan": true}; tellingen, geen inhoud)
+  try { const s = await intake.spiegel(); if (s && (s.verstuurd || s.niet_spiegelbaar || s.fout)) schrijfLog(nu() + ' intake-spiegel ' + velden({ kandidaten: s.kandidaten || 0, gespiegeld: s.gespiegeld || 0, niet_spiegelbaar: s.niet_spiegelbaar || 0, opnieuw: s.opnieuw || 0, fout: s.fout || '' })); } catch (e) { logError('intake-spiegel', e); }
   const ir = intakeRouterStand() ? intakeRouterHaal() : null;
   if (ir) { try { const u = await ir.ronde(); if (u && (u.verwerkt || u.fout)) schrijfLog(nu() + ' intake-router ' + velden({ verwerkt: u.verwerkt || 0, vastgehouden: u.vastgehouden || 0, fout: u.fout || 0 })); } catch (e) { logError('intake-router', e); } }
   try { intakeDagTelling(); } catch (e) { logError('intake-telling', e); }
