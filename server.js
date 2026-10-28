@@ -13124,7 +13124,7 @@ async function berichtNieuw(res, d) {
     ag = appAgendaUitBericht(d.agenda, Date.now());
     if (typeof ag === 'string') return berichtStuur(res, 400, { ok: false, fout: ag });
   }
-  const tekst = typeof appOpenKnip === 'function' ? appOpenKnip(d.tekst.replace(/\r\n?/g, '\n')) : d.tekst.replace(/\r\n?/g, '\n');   // wv1712: een bericht stuurt nooit de weergave
+  let tekst = typeof appOpenKnip === 'function' ? appOpenKnip(d.tekst.replace(/\r\n?/g, '\n')) : d.tekst.replace(/\r\n?/g, '\n');   // wv1712: een bericht stuurt nooit de weergave
   if (!tekst.trim()) return berichtStuur(res, 400, { ok: false, fout: 'geen tekst' });
   const idx = berichtIndex(), nu = Date.now();
   const sl = d.sleutel ? appSha('bericht:' + d.sleutel) : null;
@@ -13144,7 +13144,20 @@ async function berichtNieuw(res, d) {
   // knoppen:false (schaduwfase, terugval 2): de vraag wél vastleggen, maar met naar_telegram, zodat de app "Beantwoord in Telegram"
   // toont en /app/knop weigert (Fable-review wv263 #8).
   // wv315: bij een agendaknop geen vraagregistratie, ook niet als de tekst een VRAAG AAN DAVID-regel heeft (de knop is ✅/❌)
-  const vraag = ag ? null : appVraagVan(kanaal, tekst);
+  let vraag = ag ? null : appVraagVan(kanaal, tekst);
+  const agentJob = d.agent_job ? String(d.agent_job) : undefined;
+  let bronJob;   // wv1018: de /run die deze vraag schreef (ideeënmotor, droomronde …), voor de koppeling met de kaart die die run zette
+  if (vraag && !agentJob) { try { bronJob = berichtBronJob(vraag.tekst, nu) || undefined; } catch (e) { logError('bericht-bronjob', e); } }
+  // wv1820: zette dezelfde klus al een besluitkaart voor deze vraag, dan geen tweede knoppenset; de tekst blijft, met één zin erbij
+  let opKaart = null;
+  if (vraag && (agentJob || bronJob)) {
+    try { opKaart = await berichtVraagKaartLees(vraag.tekst, [agentJob || bronJob]); } catch (e) { logError('bericht-vraag-kaart', e); }
+    if (opKaart) {
+      const zin = berichtKaartZin(opKaart);
+      tekst = tekst.replace(/^[^\S\n]*[*_]*VRAAG AAN DAVID:[*_]*[^\S\n]*.+$/m, function (m) { return m + '\n' + zin; });
+      vraag = null;
+    }
+  }
   const vsl = vraag ? id + ':' + vraag.hash : null;
   const soort = meldSoort(kanaal, bron, klasse, !!vraag, !!ag, d.soort), seintje = meldSeintje(kanaal, soort);   // wv804 (ontwerp § 1)
   if (vraag) {
@@ -13159,9 +13172,6 @@ async function berichtNieuw(res, d) {
     agk[id].knoppen[ag.soort] = { nonce: ag.nonce, verloopt: ag.verloopt, stand: 'open', sinds: null, pagina: null, uitkomst: null };
     if (!appAgendaKnoppenBewaar()) { delete agk[id]; return berichtStuur(res, 500, { ok: false, fout: 'agendaknop niet op te slaan', terugval: true }); }
   }
-  const agentJob = d.agent_job ? String(d.agent_job) : undefined;
-  let bronJob;   // wv1018: de /run die deze vraag schreef (ideeënmotor, droomronde …), voor de koppeling met de kaart die die run zette
-  if (vraag && !agentJob) { try { bronJob = berichtBronJob(vraag.tekst, nu) || undefined; } catch (e) { logError('bericht-bronjob', e); } }
   const goed = await appLogSchrijf(kanaal, { t: t, job_id: id, soort: 'socev', bron: bron, klasse: klasse, tekst: '', antwoord: tekst, ok: true,
     vraag_hash: vraag ? vraag.hash : undefined, agent_job: agentJob, bron_job: bronJob, bestanden: [], meld: soort });   // wv804: meld = soort (fase 4 c)
   if (!goed) {
@@ -13176,9 +13186,9 @@ async function berichtNieuw(res, d) {
   // wv452 (Fable KAN 3): het actielijstje van 07:05 zegt "de knoppen staan in Voor jou"; de rijen staan dan al open (n8n markeert ze vóór
   // dit bericht), dus het geheugen van Vandaag (3 min) weg, anders toont Ververs nog "nog niet verstuurd" zonder knoppen
   if (bron === 'actielijst' && appStaat.vandaag) appStaat.vandaag.data = null;
-  res._log = { bericht: id, kanaal: kanaal, bron: bron, klasse: klasse, soort: soort, agenda: ag ? ag.soort : undefined };
+  res._log = { bericht: id, kanaal: kanaal, bron: bron, klasse: klasse, soort: soort, agenda: ag ? ag.soort : undefined, op_kaart: opKaart ? opKaart.sleutel : undefined };
   berichtStuur(res, 200, { ok: true, id: id, vraag: !!vraag && d.knoppen === true, push: { gewenst: gewenst, gestart: plan.direct }, uitgesteld: plan.uitgesteld, app_actief: berichtAppActief(),
-    agenda: ag ? true : undefined, soort: soort, seintje: seintje });
+    agenda: ag ? true : undefined, soort: soort, seintje: seintje, op_kaart: opKaart ? opKaart.sleutel : undefined });
   if (plan.direct && plan.gebundeld) setTimeout(function () { berichtBundelAf(kanaal); }, 0);   // Fable wv292 #3: met de wachtende mee
   else if (plan.direct) setTimeout(function () { berichtPushNu(kanaal, [id]).catch(function (e) { logError('bericht-push', e); }); }, 0);
 }
@@ -13203,6 +13213,51 @@ function berichtBronJob(zin, nu, lijst) {
     if (out && berichtNorm(out).indexOf(z) >= 0) raak.push(id);
   });
   return raak.length === 1 ? raak[0] : null;
+}
+
+// ── wv1820: één vraag, één plek (David 28-10 07:58: "De vraag stond er twee keer in, een andere vraag ook") ──
+// Een agentrapport of /run met een VRAAG AAN DAVID-regel krijgt geen knoppen als dezelfde klus al een besluitkaart in Voor jou zette
+// voor dezelfde vraag. Zelfde klus = ouder_job van een rij in herkomst.wv (mk_voor_jou_vraag_jobs) of herkomst.beurt = agent_job (of
+// bron_job); dezelfde vraag = de woordtoets van wv1018 (>= 2 gedeelde inhoudswoorden en >= 1/3 van de kleinste set). Anders dan wv1018
+// telt de tijd niet: een in de stille uren vastgehouden rapport komt na de kaart, soms na Davids antwoord, binnen (28-10: kaart Ja
+// 06:25, rapport 07:02 bezorgd met knoppen). Een doe-kaart neemt nooit een vraag over (Fable wv926 #6). Puur: getoetst in 23.
+function berichtVraagOpKaart(zin, klusJobs, kaarten, kaartJobs) {
+  const klus = new Set((klusJobs || []).map(String).filter(function (j) { return APP_JOB_RE.test(j); }));
+  const vw = appVjAfleidWoorden(zin);
+  if (!klus.size || !vw.size) return null;
+  let best = null, bestN = 0;
+  (kaarten || []).forEach(function (p) {
+    if (!p || p.soort !== 'besluit' || !Number.isInteger(p.id)) return;
+    const js = ((kaartJobs && kaartJobs[p.id]) || []).map(String);
+    if (p.herkomst && typeof p.herkomst === 'object' && p.herkomst.beurt) js.push(String(p.herkomst.beurt));
+    if (!js.some(function (j) { return klus.has(j); })) return;
+    const kw = appVjAfleidWoorden(String(p.titel || '') + ' ' + String(p.waarom || ''));
+    let n = 0;
+    vw.forEach(function (w) { if (kw.has(w)) n++; });
+    if (n < 2 || n * 3 < Math.min(kw.size, vw.size)) return;
+    if (n > bestN) { best = p; bestN = n; }
+  });
+  return best;
+}
+// Vers uit de databank (een agent zet zijn kaart vaak vlak voor zijn rapport; de caches zijn tot een minuut oud). Hooguit 3 s: n8n
+// wacht 8 s op /bericht en valt daarna terug op Telegram. Niet te lezen of te laat = null: dan zoals vóór wv1820 (wel knoppen).
+const BERICHT_KAART_MS = 3000;
+async function berichtVraagKaartLees(zin, klusJobs) {
+  let tm;
+  const te = new Promise(function (_, nee) { tm = setTimeout(function () { nee(new Error('voor_jou niet binnen ' + BERICHT_KAART_MS + ' ms')); }, BERICHT_KAART_MS); });
+  try {
+    const [l, j] = await Promise.race([Promise.all([appSbRpc('mk_voor_jou_lijst', { p_alles: false }), appSbRpc('mk_voor_jou_vraag_jobs', {})]), te]);
+    if (!l || !Array.isArray(l.punten)) throw new Error('voor_jou zonder punten');
+    return berichtVraagOpKaart(zin, klusJobs, l.punten, (j && j.kaarten && typeof j.kaarten === 'object') ? j.kaarten : {});
+  } finally { clearTimeout(tm); }
+}
+// De zin onder de vraagregel: beantwoord (knop op de kaart of de eigen vraag van de kaart), nog open, of anders dicht.
+function berichtKaartZin(p) {
+  let b = null;
+  try { b = appVjBeantwoordKort(p, appVragen(), null); } catch (e) { b = null; }
+  if (b && b.keuze) return '(al beantwoord op de kaart: ' + b.keuze.charAt(0).toUpperCase() + b.keuze.slice(1) + ')';
+  if (p.status === 'open' || p.status === 'later') return '(deze vraag staat als kaart in Voor jou; antwoord daar)';
+  return '(al afgehandeld op de kaart in Voor jou)';
 }
 
 // wv895: een bericht van de pod zelf (manager-ronde op afroep), via precies dezelfde weg als POST /bericht: een kleine stand-in voor res

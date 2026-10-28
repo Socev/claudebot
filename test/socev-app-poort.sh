@@ -413,7 +413,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart, appVjBron, appVjVoorwaardeMeet, appVjVoorwaardeRonde };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { berichtVraagOpKaart, handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart, appVjBron, appVjVoorwaardeMeet, appVjVoorwaardeRonde };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -5456,6 +5456,64 @@ async function bewijs(o) {
           && ink('machinekamer', { antwoord: '🤖 Agentrapport — x\n\nVRAAG AAN DAVID: geen.\nVRAAG AAN DAVID: Mag ik?' }) === false, '');
         const sp1035 = H.appSpreektekst('Klaar.\n\n**VRAAG AAN DAVID:** geen.'), sp1035b = H.appSpreektekst('Klaar.\n\nVRAAG AAN DAVID: Zal ik verder?');
         toets('23 wv1035: Voorlezen slaat "VRAAG AAN DAVID: geen." over, een echte vraag niet', !/vraag/i.test(sp1035) && /Mijn vraag aan je: Zal ik verder\?/.test(sp1035b), JSON.stringify([sp1035, sp1035b]));
+      }
+      // ── wv1820: één vraag, één plek — nagebootste ochtend (toetsdata verzonnen) ──
+      {
+        const AJ = 'a1820a1820a18201', AJ2 = 'a1820a1820a18202', AJ3 = 'a1820a1820a18203';
+        const vjOud = sbStaat.vj, wvOud = sbStaat.wvItems, uur = 3600000;
+        const kaart = (x) => Object.assign({ waar: 'overal', prive: false, soort: 'besluit', status: 'open', aangemaakt: new Date(Date.now() - 4 * uur).toISOString(), herkomst: {} }, x);
+        sbStaat.wvItems = [{ id: 9101, status: 'geblokkeerd', geblokkeerd_door: 'David: besluit', ouder_job: AJ }];
+        sbStaat.vj = [
+          kaart({ id: 9001, sleutel: 'wv9101', titel: 'Proefagenda — mag de tijdlijn ook de titels bewaren?', waarom: 'De proeftijdlijn bewaart nu alleen dag en tijd.', herkomst: { wv: [9101], auto: 'wv' } }),
+          kaart({ id: 9002, sleutel: 'wv9102', titel: 'Proefserver — mag ik de nachtsync repareren?', waarom: 'De proefserver haalt geen nieuwe versie meer op.', status: 'gedaan', gesloten_door: 'david',
+            gesloten_op: new Date(Date.now() - uur / 2).toISOString(), bewijs: 'app 28-10 06:25: David drukte Ja op de kaart (vraag-id 1820abcd)', herkomst: { beurt: AJ2 } }),
+          kaart({ id: 9003, sleutel: 'wv9103', titel: 'Proefmap — mag ik de oude proefbestanden opruimen?', waarom: 'De proefmap staat vol oude proefbestanden.', status: 'vervallen', gesloten_door: 'agent',
+            gesloten_op: new Date(Date.now() - uur).toISOString(), herkomst: { beurt: AJ3 } }),
+          kaart({ id: 9004, sleutel: 'wv9104', soort: 'doen', titel: 'Proefkastje — opnieuw inloggen op het proefkastje', waarom: 'Het proefkastje is uitgelogd.', herkomst: { beurt: AJ3 } }) ];
+        H.appStaat.vjCache = null;
+        const logVan = (id) => fs.readFileSync(path.join(LOGDIR, 'machinekamer.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((x) => x.job_id === id) || {};
+        const vrVan = (id) => Object.keys(JSON.parse(fs.readFileSync(path.join(DATA, 'vragen.json'), 'utf8'))).filter((k) => k.startsWith(id + ':'));
+        const rap = (aj, vraagZin, x) => bq('/bericht', B(Object.assign({ tekst: '🤖 Agentrapport — proef\n\nGedaan.\n\nVRAAG AAN DAVID: ' + vraagZin + '\nWaarom: zie de kaart.\n\nVerder niets.', knoppen: true, agent_job: aj, soort: undefined }, x || {})));
+        // (1) rapport direct na de kaart (kaart open): geen knoppenset, één zin onder de vraagregel
+        let r1820 = await rap(AJ, 'Mag de proeftijdlijn ook de titels van je proefagenda bewaren?');
+        let l1820 = logVan(r1820.j.id);
+        toets('23 wv1820: agentrapport met VRAAG + open besluitkaart van dezelfde klus (via de rij) -> geen knoppen, geen vraag in vragen.json, op_kaart',
+          r1820.status === 200 && r1820.j.vraag === false && r1820.j.op_kaart === 'wv9101' && !l1820.vraag_hash && vrVan(r1820.j.id).length === 0, JSON.stringify([r1820.j, l1820.vraag_hash]));
+        toets('23 wv1820: de rapporttekst blijft staan, met de zin direct onder de vraagregel',
+          /VRAAG AAN DAVID: Mag de proeftijdlijn ook de titels van je proefagenda bewaren\?\n\(deze vraag staat als kaart in Voor jou; antwoord daar\)\nWaarom: zie de kaart\.\n\nVerder niets\.$/.test(l1820.antwoord || ''), l1820.antwoord);
+        // (2) vastgehouden rapport (stille uren), na Davids Ja op de kaart bezorgd
+        r1820 = await rap(AJ2, 'Mag ik de nachtsync van de proefserver repareren?');
+        l1820 = logVan(r1820.j.id);
+        toets('23 wv1820: vastgehouden rapport na een beantwoorde kaart (herkomst.beurt) -> geen knoppen, "(al beantwoord op de kaart: Ja)"',
+          r1820.status === 200 && r1820.j.vraag === false && !l1820.vraag_hash && /\n\(al beantwoord op de kaart: Ja\)\n/.test(l1820.antwoord || ''), JSON.stringify([r1820.j, l1820.antwoord]));
+        // (3) kaart vervallen: ook geen tweede antwoordplek
+        r1820 = await rap(AJ3, 'Mag ik de oude proefbestanden uit de proefmap opruimen?');
+        l1820 = logVan(r1820.j.id);
+        toets('23 wv1820: kaart vervallen -> geen knoppen, "(al afgehandeld op de kaart in Voor jou)"', r1820.j.vraag === false && /\(al afgehandeld op de kaart in Voor jou\)/.test(l1820.antwoord || ''), l1820.antwoord);
+        // (4) tegenproeven: andere vraag van dezelfde klus, doe-kaart, andere klus, geen agent_job -> gewoon knoppen
+        const wel = [];
+        wel.push(await rap(AJ, 'Zal ik het weekrooster van de schoonmaak omzetten naar dinsdag?'));
+        wel.push(await rap(AJ3, 'Mag ik opnieuw inloggen op het proefkastje?'));
+        wel.push(await rap('a1820a1820a18209', 'Mag de proeftijdlijn ook de titels van je proefagenda bewaren?'));
+        wel.push(await rap(undefined, 'Mag de proeftijdlijn ook de titels van je proefagenda bewaren?'));
+        toets('23 wv1820: andere vraag van dezelfde klus, doe-kaart, andere klus of geen klus -> wel knoppen (vraag geregistreerd, tekst ongewijzigd)',
+          wel.every((x) => x.status === 200 && x.j.vraag === true && !x.j.op_kaart && vrVan(x.j.id).length === 1 && !/\((deze vraag staat|al beantwoord|al afgehandeld)/.test(logVan(x.j.id).antwoord || '')), JSON.stringify(wel.map((x) => x.j)));
+        // (5) databank kapot -> zoals vóór wv1820 (knoppen), niet vastgelopen
+        sbStaat.vjKapot = true;
+        const t1820 = Date.now();
+        r1820 = await rap(AJ, 'Mag de proeftijdlijn ook de titels van je proefagenda bewaren?');
+        sbStaat.vjKapot = false;
+        toets('23 wv1820: Voor jou niet te lezen -> wel knoppen (oude gedrag), snel', r1820.status === 200 && r1820.j.vraag === true && Date.now() - t1820 < 3500, JSON.stringify(r1820.j));
+        // (6) puur: klus via bron_job (droomronde), beste van twee kaarten, lege woorden
+        const k6 = [{ id: 1, soort: 'besluit', titel: 'Proefserver — nachtsync repareren?', waarom: '', herkomst: { beurt: 'b1820b1820b18201' } },
+          { id: 2, soort: 'besluit', titel: 'Proefserver nachtsync proefversie repareren ophalen?', waarom: '', herkomst: {} }];
+        toets('23 wv1820: berichtVraagOpKaart: klus via herkomst.beurt of kaartJobs; meeste gedeelde woorden wint; geen klus of geen woorden -> null',
+          (H.berichtVraagOpKaart('Mag ik de nachtsync van de proefserver repareren?', ['b1820b1820b18201'], k6, {}) || {}).id === 1
+          && (H.berichtVraagOpKaart('Mag ik de nachtsync van de proefserver repareren om de proefversie op te halen?', ['b1820b1820b18201'], k6, { 2: ['b1820b1820b18201'] }) || {}).id === 2
+          && H.berichtVraagOpKaart('Mag ik de nachtsync van de proefserver repareren?', [], k6, {}) === null
+          && H.berichtVraagOpKaart('Mag ik?', ['b1820b1820b18201'], k6, {}) === null
+          && H.berichtVraagOpKaart('Mag ik de nachtsync repareren?', ['geen-job'], k6, { 1: ['geen-job'] }) === null, '');
+        sbStaat.vj = vjOud; sbStaat.wvItems = wvOud; H.appStaat.vjCache = null;
       }
       toets('23 /health appInfo noemt berichten', H.appInfo().berichten && typeof H.appInfo().berichten.laatste_48u === 'number', JSON.stringify(H.appInfo().berichten));
 
