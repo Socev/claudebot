@@ -3,6 +3,7 @@
 # ontwerplijnen § 7). Toetst: elke zichtbare knoop heeft een regel; privépersonen nooit; vaste plek alleen organisaties aan de zakelijke
 # kant en zonder facturen of deadlines; geen rekeningnummer (blok weg, IBAN gemaskeerd, iban-veld niet mee); frontmatter weg; HR-deadlines
 # niet mee; facturen op naam/alias en knoop_id, zonder patiëntkenmerk; medewerker alleen stamregel; uitrol.sh, Dockerfile en CI.
+# wv1771: contactgegevens uit Google alleen bij een persoon met een ACTIEVE Google-koppeling, nooit voor een medewerker of op een vaste plek.
 # Alle namen en nummers hieronder zijn verzonnen (openbare repo).
 # Gebruik: bash test/brain-entiteiten.sh
 set -u
@@ -45,9 +46,20 @@ const handvatten = [
   { knoop: 'org:voorbeeld-energie', soort: 'mail', waarde: 'oud@voorbeeld-energie.nl', status: 'vervallen' },
   { knoop: 'org:kapot', soort: 'kenmerkpatroon', waarde: 'NL00TEST0123456789', status: 'voorgesteld' },
   { knoop: 'per:piet-verzonnen', soort: 'mail', waarde: 'piet@verzonnen.nl', status: 'actief' },
+  { knoop: 'per:piet-verzonnen', soort: 'google', waarde: 'people/c111', waarde_norm: 'people/c111', status: 'actief' },
+  { knoop: 'per:notaris-verzonnen', soort: 'google', waarde: 'people/c222', waarde_norm: 'people/c222', status: 'actief' },
+  { knoop: 'per:notaris-verzonnen', soort: 'telefoon', waarde: '0600000001', waarde_norm: '0600000001', status: 'voorgesteld' },
 ];
+const contacten = [
+  { r: 'people/c111', mail: ['piet@verzonnen.nl'], tel: ['+31600000009'] },
+  { r: 'people/c222', mail: ['Notaris@Verzonnen.nl', 'notaris@verzonnen.nl', 'geen-adres', 'x@verzonnen.nl?bcc=y@verzonnen.nl'], tel: ['+31 6 0000 0001', '+220 700 0000', '12'] },
+];
+let googleVraag = [], googleFout = false;
 let rpcAanroepen = 0, rpcFout = false;
-const rpc = async (fn, body) => { rpcAanroepen++; if (rpcFout) throw new Error('weg'); if (fn !== 'ovis_register_lees') throw new Error('onverwacht ' + fn); return { knopen, handvatten, contact: [] }; };
+const rpc = async (fn, body) => {
+  if (fn === 'ovis_personen_lees') { googleVraag.push(body.p_resource); if (googleFout) throw new Error('weg'); return { entity: [], contacten: contacten.filter((c) => body.p_resource.includes(c.r)) }; }
+  rpcAanroepen++; if (rpcFout) throw new Error('weg'); if (fn !== 'ovis_register_lees') throw new Error('onverwacht ' + fn); return { knopen, handvatten, contact: [] };
+};
 
 // facturen
 const fpad = path.join(tmp, 'facturen.sqlite');
@@ -102,6 +114,25 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('16 privépersoon 404, ook op de telefoon', (await T.detail('per:jan-verzonnen', false)).status === 404);
   const m = await T.detail('per:piet-verzonnen', false);
   toets('17 medewerker: alleen stamregel — geen pagina, opmerking, kenmerken, KvK of facturen', m.status === 200 && m.j.tekst === null && !/Contract en verzuim|ziek|contract tot|piet@|99999999/.test(JSON.stringify(m.j)) && m.j.weet.facturen === null && m.j.weet.handvatten.length === 0, m.j);
+  toets('17c medewerker: geen Google-gegevens en geen Google-vraag', m.j.weet.contact === null && !googleVraag.some((x) => x.includes('people/c111')) && !/0600000009/.test(JSON.stringify(m.j)), googleVraag);
+  const n = await T.detail('per:notaris-verzonnen', false);
+  toets('17d persoon met actieve Google-koppeling: mailadressen en telefoons uit Google (genormaliseerd, uniek, ongeldig eruit)', n.status === 200 && n.j.weet.contact &&
+    n.j.weet.contact.bron === 'Google' && JSON.stringify(n.j.weet.contact.mailadressen) === '["notaris@verzonnen.nl"]' &&
+    JSON.stringify(n.j.weet.contact.telefoons) === '["0600000001","002207000000"]' && JSON.stringify(googleVraag) === '[["people/c222"]]', n.j.weet.contact);
+  toets('17e organisatie: geen contact uit Google', d.j.weet.contact === null && e.j.weet.contact === null);
+  const h0 = handvatten.find((h) => h.soort === 'google' && h.knoop === 'per:notaris-verzonnen');
+  h0.status = 'voorgesteld'; T.vergeet();
+  toets('17f Google-koppeling die nog op Davids Ja wacht: geen contactgegevens', (await T.detail('per:notaris-verzonnen', false)).j.weet.contact === null);
+  h0.status = 'actief'; T.vergeet(); googleFout = true;
+  const nf = await T.detail('per:notaris-verzonnen', false);
+  toets('17g Google niet te lezen: melding, rest van het detail blijft', nf.status === 200 && nf.j.weet.contact && nf.j.weet.contact.fout && !nf.j.weet.contact.telefoons && nf.j.tekst !== null, nf.j.weet.contact);
+  googleFout = false; h0.waarde_norm = 'people/c333'; T.vergeet();
+  const nw = await T.detail('per:notaris-verzonnen', false);
+  toets('17h gekoppeld contact bestaat niet meer: melding, geen gegevens van een ander contact', nw.j.weet.contact && /bestaat niet meer/.test(nw.j.weet.contact.fout) && !/0600000001/.test(JSON.stringify(nw.j.weet.contact)), nw.j.weet.contact);
+  h0.waarde_norm = 'people/c222'; T.vergeet();
+  const vn = await T.detail('per:notaris-verzonnen', true);
+  toets('17i vaste plek: persoon 404 (dus ook geen Google-gegevens)', vn.status === 404 && !JSON.stringify(vn.j).includes('0600000001'));
+  toets('17j telNl', B.telNl('+31 (0)6-1234 5678') === '0612345678' && B.telNl('0031 6 1234 5678') === '0612345678' && B.telNl('+220 712 3456') === '002207123456');
   const k = await T.detail('org:kapot', false);
   toets('17b kenmerkpatroon met een rekeningnummer: gemaskeerd', !/NL00TEST/.test(JSON.stringify((await T.detail('org:kapot', false)).j)));
   toets('18 pagina buiten de vault: niet gelezen', k.status === 200 && k.j.tekst === null && k.j.knoop.pagina_pad === null);

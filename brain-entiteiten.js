@@ -9,6 +9,9 @@
 //     geaccepteerde rekeningnummers, wv1360) en elk IBAN-achtig stuk tekst op de pagina van een derde wordt gemaskeerd;
 //   - geen HR, gezin of gezondheid in Wat OVIS weet: deadlines met personeelswoorden (hr) gaan niet mee;
 //   - vaste plek (praktijk-pc): alleen organisaties aan de zakelijke kant (geen 20_Prive, geen PRIVE, geen personen) en zonder facturen.
+// wv1771 (OVIS plek 7 fase B): bij een persoon met een ACTIEVE Google-koppeling (handvat google, na Davids Ja) de mailadressen en
+// telefoonnummers uit dat Google-contact (Google is de bron voor contactgegevens; RPC public.ovis_personen_lees). Nooit voor een
+// medewerker (stamregel), nooit op een vaste plek, nooit adressen, notities of andere velden uit Google.
 const path = require('path');
 const crypto = require('crypto');
 
@@ -17,6 +20,14 @@ const PAGINA_RE = /^(10_Zakelijk|20_Prive)\/(?:[^/\0]+\/)*[^/\0]+\.md$/;
 const IBAN_IN_TEKST = /\b[A-Z]{2}[0-9]{2}(?:[\s.\-\u00a0]?[A-Z0-9]{4}){2,7}(?:[\s.\-\u00a0]?[A-Z0-9]{1,4})?\b/gi;   // diffreview ZOU 6: ook kleine letters, punt, streep
 const BLOK_RE = /<!-- ovis:blok begin[^>]*-->[\s\S]*?<!-- ovis:blok eind -->\n?/g;
 const MAX_TEKST = 60000;
+const GOOGLE_RE = /^people\/c[0-9]{1,30}$/;
+// "+31 6 1234 5678" → "0612345678"; buitenland "+220 …" → "00220…" (zelfde normaalvorm als het register)
+function telNl(w) {
+  let s = String(w == null ? '' : w).split('(0)').join('').replace(/[^0-9+]/g, '');
+  if (s.charAt(0) === '+') s = '00' + s.slice(1);
+  if (s.indexOf('0031') === 0) s = '0' + s.slice(4);
+  return s;
+}
 
 // rol → groep in het filter (ontwerplijnen § 7: eigen · leverancier · instantie · praktijk · persoon)
 const GROEP = { eigen: 'eigen', leverancier: 'leverancier', instantie: 'instantie', bank: 'instantie', verzekeraar: 'instantie',
@@ -139,6 +150,22 @@ function maak(o) {
     }) };
   }
 
+  // wv1771: contactgegevens uit Google voor een persoon met een actieve Google-koppeling → null (geen koppeling) of { bron, mailadressen,
+  // telefoons } of { bron, fout }. Alleen mail en telefoon, begrensd; het contact moet precies de gekoppelde sleutel hebben.
+  async function googleVan(k, reg) {
+    const g = (reg.handvatten[k.id] || []).find(function (h) { return h.soort === 'google' && h.status === 'actief' && GOOGLE_RE.test(String(h.waarde_norm || h.waarde || '')); });
+    if (!g) return null;
+    const sl = String(g.waarde_norm || g.waarde);
+    let r;
+    try { r = await rpc('ovis_personen_lees', { p_resource: [sl] }); } catch (e) { return { bron: 'Google', fout: 'Het Google-contact is nu niet te lezen.' }; }
+    const c = r && Array.isArray(r.contacten) ? r.contacten.find(function (x) { return x && x.r === sl; }) : null;
+    if (!c) return { bron: 'Google', fout: 'Het gekoppelde Google-contact bestaat niet meer.' };
+    const uniek = function (a) { return Array.from(new Set(a)); };
+    return { bron: 'Google',
+      mailadressen: uniek((Array.isArray(c.mail) ? c.mail : []).map(function (x) { return String(x).trim().toLowerCase(); }).filter(function (x) { return /^[^@\s?&"<>]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(x) && x.length <= 120; })).slice(0, 10),
+      telefoons: uniek((Array.isArray(c.tel) ? c.tel : []).map(telNl).filter(function (x) { return /^0[0-9]{9,15}$/.test(x); })).slice(0, 10) };
+  }
+
   function deadlinesVan(k) {
     if (!isEigen(k) || priveKant(k)) return null;   // diffreview MOET 1: privé (gezin, familie) nooit in Wat OVIS weet
     let d;
@@ -183,6 +210,7 @@ function maak(o) {
       kvk: stam ? null : (k.kvk || null), agb: eigen ? (k.agb || null) : null,
       facturen: vast || stam ? null : facturenVan(k, reg),
       deadlines: vast || stam ? null : deadlinesVan(k),
+      contact: vast || stam || !isPersoon(k) ? null : await googleVan(k, reg),   // wv1771
       stukken: null,   // komt met OVIS Intake (stap 2); nu nog geen logboek per partij
       register: { concept: !!k.concept, compilatie: k.compilatienummer || null, gecompileerd_op: k.gecompileerd_op || null } };
     return { status: 200, j: { ok: true, vaste_plek: !!vast,
@@ -195,4 +223,4 @@ function maak(o) {
   return { lijst: lijst, detail: detail, vergeet: function () { cache = null; } };
 }
 
-module.exports = { maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, maskeerIban: maskeerIban, zichtbaar: zichtbaar, groepVan: groepVan, nooit: nooit };
+module.exports = { telNl: telNl, maak: maak, sleutelVan: sleutelVan, paginaTekst: paginaTekst, maskeerIban: maskeerIban, zichtbaar: zichtbaar, groepVan: groepVan, nooit: nooit };
