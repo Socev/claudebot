@@ -491,7 +491,7 @@ test('regels van David (wv1408): regel gaat vóór de standaard, nooit voor een 
 
 test('server.js (wv1408): router-app alleen met schakelaar, schrijven alleen primair', () => {
   const srv = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.match(srv, /route === 'GET \/app\/intake\/router' \|\| route === 'POST \/app\/intake\/regel' \|\| route === 'POST \/app\/intake\/toets'\) return typeof appIntakeRouter/);
+  assert.match(srv, /route === 'GET \/app\/intake\/router' \|\| route === 'POST \/app\/intake\/regel' \|\| route === 'POST \/app\/intake\/toets' \|\| route === 'POST \/app\/intake\/keuze' \|\| route === 'POST \/app\/intake\/stuk'\) return typeof appIntakeRouter/);
   const f = srv.slice(srv.indexOf('async function appIntakeRouter'), srv.indexOf('function intakeRouterInfo()'));
   assert.match(f, /intakeRouterStand\(\) \? intakeRouterHaal\(\) : null/);
   assert.match(f, /if \(!rolPrimair\(\)\) return appWeiger\(res, 503/);

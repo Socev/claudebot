@@ -272,7 +272,8 @@ const DEEL_SLEUTELS = new Set(['deel', 'rol', 'naam', 'mime', 'grootte', 'sha256
  * Volgorde binnen deze toets: vorm van de kern, profiel bekend, sleutel mag profiel en bron (403), meta, vrij, onderdelen, naampoort,
  * overgang. Een fout geeft precies één reden zonder inhoud (veldnamen wel: die staan in het profiel).
  */
-function toetsEnvelop(env, profielen, sleutel, soorten) {
+// opties.live (wv1916): de router schrijft voor deze bron de vault; een representatie is dan niet meer nodig (alleen_overgang telt niet)
+function toetsEnvelop(env, profielen, sleutel, soorten, opties) {
   const weiger = (status, reden) => ({ ok: false, status, reden });
   if (!isObj(env)) return weiger(400, 'envelop_geen_object');
   for (const k of Object.keys(env)) if (!ENV_SLEUTELS.has(k)) return weiger(400, 'veld_onbekend:' + k.slice(0, 40));
@@ -353,7 +354,7 @@ function toetsEnvelop(env, profielen, sleutel, soorten) {
   if (totaal > Math.min(STUK_MAX, (profiel.stuk_max_mb || 60) * MB)) return weiger(413, 'te_groot:stuk');
   for (const [rol, r] of Object.entries(profiel.onderdelen)) {
     const n = perRol[rol] || 0;
-    if (n < r.min && !(r.alleen_overgang && !env.overgang)) return weiger(400, 'te_weinig:' + rol);
+    if (n < r.min && !(r.alleen_overgang && (!env.overgang || (opties && opties.live)))) return weiger(400, 'te_weinig:' + rol);
     if (n > r.max) return weiger(400, 'te_veel:' + rol);
   }
   for (let i = 0; i < vrij.length; i++) {
@@ -436,7 +437,9 @@ function zonderChatId(profiel, bronId) {
 const PROEF_RE = /\.invalid\b|(?:^|[^0-9])316?0{7,}[0-9]{0,3}@/i;
 function isProefstuk(s) { return PROEF_RE.test(String(s.bron_id || '')) || PROEF_RE.test(String(s.meta || '')); }
 const PS_VAN_STATUS = { open: 'received', onvolledig: 'received', mislukt: 'received', ontvangen: 'registered', geschreven: 'registered',
-  wacht: 'registered', wacht_marker: 'quarantaine', vastgehouden: 'quarantaine' };
+  wacht: 'registered', wacht_marker: 'quarantaine', vastgehouden: 'quarantaine', router: 'registered' };
+// wv1916: een stuk van een live bron (status router) dat de marker tegenhield, is quarantaine (zoals vastgehouden)
+function psVan(s) { return s.status === 'router' && s.marker_patient !== 'geen' ? 'quarantaine' : PS_VAN_STATUS[s.status]; }
 function dagNl(iso) { const t = Date.parse(iso); return isNaN(t) ? null : new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam' }).format(new Date(t)); }
 
 // Canonieke mailkern (Fable-review wv1790 #2): de hoofdtekst zonder kopregels, witruimte genormaliseerd, zodat dezelfde mail in twee
@@ -641,6 +644,8 @@ function maak(o) {
     return { stand: 'tellen', bronnen: null };
   }
   function houdtVast(bron) { const m = markerStand(); return m.stand === 'vasthouden' && (!m.bronnen || m.bronnen.includes(bron)); }
+  // wv1916 (OVIS Intake stap 3): voor een live bron schrijft de router (intake-router.js, kennislens) de vault; deze laag dan niets meer
+  function liveBron(bron) { try { return !!(o.liveBron && o.liveBron(String(bron)) === true); } catch (e) { return false; } }
   // Onderhoud = het eigen bestand <dir>/onderhoud óf de onderhoudsstand van de vault (wv1832 R1; een onleesbaar standbestand telt in
   // onderhoud.js als aan; ontbreekt onderhoud.js in de release, dan uit, zoals voor de rest van de pod). Een fout in de lezer = aan.
   function onderhoudNu() {
@@ -700,6 +705,7 @@ function maak(o) {
     const profiel = profielen.get(stukRij.profiel);
     if (!profiel || !stukRij.stand || !profiel.archief) return { vault: 'geen' };
     if (stukRij.status === 'vastgehouden') return { vault: 'vastgehouden' };
+    if (liveBron(stukRij.bron)) { q.status.run('router', stukRij.stuk_id); return { vault: 'router' }; }   // wv1916: de router beslist en schrijft
     if (stukRij.stand === 'om' && houdtVast(stukRij.bron) && !metMarker && stukRij.marker_patient !== 'geen') {   // Fable wv1282 #2
       q.status.run('wacht_marker', stukRij.stuk_id);
       return { vault: 'wacht', reden: 'marker' };
@@ -973,7 +979,7 @@ function maak(o) {
     try { body = await leesBody(req, BODY_MAX); } catch (e) { return weiger(e && e.code === 'TE_GROOT' ? 413 : 400, e && e.code === 'TE_GROOT' ? 'te_groot:envelop' : 'body'); }
     let env;
     try { env = JSON.parse(body.toString('utf8')); } catch (e) { return weiger(400, 'geen_json'); }
-    const t = toetsEnvelop(env, profielen, sleutel, soorten);
+    const t = toetsEnvelop(env, profielen, sleutel, soorten, { live: isObj(env) && typeof env.bron === 'string' && liveBron(env.bron) });
     if (!t.ok) return weiger(t.status, t.reden);
     const { profiel, delen, vrij, meta } = t;
     if (profiel.alleen_intern === true && sleutel.intern !== true) return weiger(403, 'profiel_alleen_intern');   // wv1343: nooit via een routesleutel
@@ -1202,7 +1208,7 @@ function maak(o) {
     const profiel = profielen.get(s.profiel);
     if (!profiel) return { niet: 'profiel_onbekend' };
     if (isProefstuk(s)) return { niet: 'proefstuk' };
-    const ps = PS_VAN_STATUS[s.status];
+    const ps = psVan(s);
     if (!ps) return { niet: 'status_onbekend' };
     const soort = s.profiel.split('@')[0];
     const delen = q.delen.all(s.stuk_id).filter((d) => d.binnen);
@@ -1271,9 +1277,9 @@ function maak(o) {
     const uit = { kandidaten: 0, verstuurd: 0, gespiegeld: 0, niet_spiegelbaar: 0, opnieuw: 0 };
     try {
       const rijen = db.prepare(`SELECT s.*, g.stand g_stand, g.ps g_ps, g.pogingen g_pogingen, g.bronnen g_bronnen FROM stuk s LEFT JOIN spiegel g ON g.stuk_id = s.stuk_id
-        WHERE coalesce(s.stand, '') <> 'dubbel' AND s.status IN ('ontvangen', 'geschreven', 'wacht', 'mislukt', 'wacht_marker', 'vastgehouden') AND s.marker_op IS NOT NULL
+        WHERE coalesce(s.stand, '') <> 'dubbel' AND s.status IN ('ontvangen', 'geschreven', 'wacht', 'mislukt', 'wacht_marker', 'vastgehouden', 'router') AND s.marker_op IS NOT NULL
           AND (g.stuk_id IS NULL OR g.stand = 'opnieuw' OR (g.stand = 'gespiegeld' AND g.pogingen < ${SPIEGEL_TIJDELIJK_MAX} AND g.ps IS NOT (CASE WHEN s.status IN ('mislukt') THEN 'received'
-            WHEN s.status IN ('wacht_marker', 'vastgehouden') THEN 'quarantaine' ELSE 'registered' END)))
+            WHEN s.status IN ('wacht_marker', 'vastgehouden') OR (s.status = 'router' AND s.marker_patient <> 'geen') THEN 'quarantaine' ELSE 'registered' END)))
         ORDER BY s.aangemaakt LIMIT ?`).all(Math.min(spiegelGrootte, opt.max || SPIEGEL_MAX));
       uit.kandidaten = rijen.length;
       const stukken = [], per = new Map();
@@ -1281,7 +1287,7 @@ function maak(o) {
         let b;
         if (s.g_stand === 'gespiegeld' && s.g_bronnen) {
           // alleen een statuswissel: dezelfde bronnen met de nieuwe status, zonder de bytes opnieuw te lezen (die kunnen na de bewaartermijn weg zijn)
-          b = { bronnen: JSON.parse(s.g_bronnen).map((x) => Object.assign({}, x, { processing_status: PS_VAN_STATUS[s.status] })), status: true };
+          b = { bronnen: JSON.parse(s.g_bronnen).map((x) => Object.assign({}, x, { processing_status: psVan(s) })), status: true };
         } else {
           try { b = spiegelBronnen(s); } catch (e) { if (o.fout) o.fout('intake-spiegel', e); b = { niet: 'fout_op_de_pod' }; }
         }

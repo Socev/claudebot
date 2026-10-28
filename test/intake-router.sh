@@ -14,4 +14,4 @@ if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypt
   echo "ROOD  CI-poort: intake-router.js laadt een module buiten fs, path, crypto en node:sqlite"; exit 1
 fi
 echo "GROEN CI-poort: intake-router.js alleen lokaal"
-node --no-warnings --test --test-reporter=spec test/intake-router.test.js
+node --no-warnings --test --test-reporter=spec test/intake-router.test.js && node --no-warnings --test --test-reporter=spec test/intake-router-live.test.js
