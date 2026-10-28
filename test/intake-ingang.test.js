@@ -1052,7 +1052,10 @@ test('wv1916: live bron — geen representatie nodig, de ontvangstlaag schrijft 
     const pdf = Buffer.from('%PDF-1.4 proef TEKST:Factuur proef zonder iets bijzonders, verzonnen voor de toets van OVIS Intake.');
     const env = (bron, id) => ({ protocol: 'ovis-intake/1', profiel: 'mail@1', bron, bron_id: id, ontvangen: nuOff,
       meta: { gmail_id: id, message_id: '<live-' + id + '@voorbeeld.nl>', thread_id: id, van: 'iemand@voorbeeld.nl', aan: ['d.schaap@voorbeeld.nl'], onderwerp: 'Proef live', labels: ['INBOX'] },
-      onderdelen: [bdeel('b1', 'bijlage', 'Factuur proef.pdf', pdf, 'application/pdf')], overgang: { stand: 'om' } });
+      onderdelen: [tdeel('h1', 'hoofdtekst', 'mail.txt', 'Beste David, zie de bijlage (verzonnen).', 'text/plain'), bdeel('b1', 'bijlage', 'Factuur proef.pdf', pdf, 'application/pdf')], overgang: { stand: 'om' } });
+    // Opus-review MOET 1: live zonder origineel en zonder hoofdtekst → weigering (anders zonder mailtekst in de Second Brain)
+    const zonder = env('gmail:david', '19a2b3c4d5e6f8ff'); zonder.onderdelen = zonder.onderdelen.filter((d) => d.rol !== 'hoofdtekst');
+    const zw = await post(o, K.mail, zonder); assert.strictEqual(zw.status, 400); assert.strictEqual(zw.j.reden, 'te_weinig:origineel');
     // niet-live bron zonder representatie: weigering (zoals voorheen)
     const nee = await post(o, K.mail, env('gmail:groenhouten', '19a2b3c4d5e6f800'));
     assert.strictEqual(nee.status, 400); assert.strictEqual(nee.j.reden, 'te_weinig:representatie');
@@ -1069,9 +1072,25 @@ test('wv1916: live bron — geen representatie nodig, de ontvangstlaag schrijft 
     const d = await post(o, K.mail, env('gmail:david', '19a2b3c4d5e6f801'));
     assert.strictEqual(d.j.uitkomst, 'dubbel'); assert.deepStrictEqual(d.j.ontbreekt || [], []);
     // een live bron die tóch representaties stuurt (n8n teruggezet, pod nog live): ook dan schrijft deze laag niets
-    const e2 = env('gmail:david', '19a2b3c4d5e6f802'); e2.onderdelen = [tdeel('r1', 'representatie', '2026-10-24_Proef__0123456789.md', '---\nentiteit: tolgaarde\n---\n\ntekst\n', 'text/markdown', { entiteit: 'tolgaarde', categorie: 'Proef', documentbron: 'mail' })];
+    const e2 = env('gmail:david', '19a2b3c4d5e6f802'); e2.onderdelen = [tdeel('h1', 'hoofdtekst', 'mail.txt', 'tekst (verzonnen)', 'text/plain'), tdeel('r1', 'representatie', '2026-10-24_Proef__0123456789.md', '---\nentiteit: tolgaarde\n---\n\ntekst\n', 'text/markdown', { entiteit: 'tolgaarde', categorie: 'Proef', documentbron: 'mail' })];
     const r2 = await post(o, K.mail, e2);
     assert.strictEqual(r2.j.vault, 'router', JSON.stringify(r2.j));
     assert.ok(!fs.existsSync(path.join(o.vault, '10_Zakelijk/Tolgaarde/raw_input/2026-10-24_Proef__0123456789.md')));
+  } finally { await o.sluit(); }
+});
+
+test('wv1916 Opus-review MOET 2: een stuk dat vóór het aanzetten op wacht stond, gaat bij de herhaalronde de oude weg (geen router)', async () => {
+  let aan = false;
+  const o = await omgeving({ liveBron: () => aan });
+  try {
+    fs.writeFileSync(path.join(o.dir, 'onderhoud'), '');
+    const g = gevallen()[0];
+    const r = await post(o, g.sleutel, g.env());
+    let laatste = r; for (const [d, b, m] of (g.put || [])) laatste = await put(o, g.sleutel, r.j.stuk_id, d, b, m);
+    assert.strictEqual(laatste.j.vault, 'wacht');
+    aan = true; fs.rmSync(path.join(o.dir, 'onderhoud'));
+    await o.ing.ronde();
+    assert.strictEqual(o.ing._db.prepare('SELECT status FROM stuk WHERE stuk_id = ?').get(r.j.stuk_id).status, 'geschreven');
+    for (const p of g.verwacht) assert.ok(fs.existsSync(path.join(o.vault, p)), p);
   } finally { await o.sluit(); }
 });

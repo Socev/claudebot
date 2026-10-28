@@ -37,7 +37,7 @@ function omgeving(extra) {
   const zet = function (x) {
     const id = 'stk_20261028_' + String(++n).padStart(8, '0');
     db.prepare('INSERT INTO stuk (stuk_id, bron, bron_id, profiel, status, aangemaakt, compleet_op, meta, marker_patient, marker_soorten, marker_versie, marker_op) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(id, x.bron || 'gmail:david', 'b' + n, x.profiel || 'mail@1', 'router', x.op || '2026-10-28T19:5' + n + ':00Z', x.op || '2026-10-28T19:5' + n + ':00Z', JSON.stringify(x.meta || {}), x.marker || 'geen', JSON.stringify(x.soorten || []), 'patientpoort-2.0', '2026-10-28T19:59:00Z');
+      .run(id, x.bron || 'gmail:david', 'b' + n, x.profiel || 'mail@1', x.status || 'router', x.op || '2026-10-28T19:5' + n + ':00Z', x.op || '2026-10-28T19:5' + n + ':00Z', JSON.stringify(x.meta || {}), x.marker || 'geen', JSON.stringify(x.soorten || []), 'patientpoort-2.0', '2026-10-28T19:59:00Z');
     (x.delen || []).forEach(function (d, i) {
       const b = Buffer.from(d.bytes);
       const sha = crypto.createHash('sha256').update(b).digest('hex');
@@ -187,7 +187,7 @@ test('live: geen Jev-uitslag → wachten (niets in het logboek); na 24 u twijfel
   let uit = true;
   const E = omgeving({ jev: async function () { if (uit) return null; return { gemeten: true, injectie_kans: 0 }; } });
   const id = E.zet({ meta: { van: 'anne@voorbeeld.example', onderwerp: 'Overleg', aan: ['david@voorbeeld.example'] }, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Overleg', GEWOON) }] });
-  const sch = E.zet({ bron: 'gmail:groenhouten', meta: { van: 'anne@voorbeeld.example', onderwerp: 'Overleg', aan: ['dokter@voorbeeld.example'] }, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Overleg', GEWOON) }] });
+  const sch = E.zet({ bron: 'gmail:groenhouten', status: 'geschreven', meta: { van: 'anne@voorbeeld.example', onderwerp: 'Overleg', aan: ['dokter@voorbeeld.example'] }, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Overleg', GEWOON) }] });
   await E.r.ronde();
   assert.equal(E.db.prepare('SELECT count(*) n FROM router_stuk WHERE stuk_id = ?').get(id).n, 0);
   assert.equal(E.db.prepare('SELECT status FROM router_stuk WHERE stuk_id = ?').get(sch).status, 'beoordeeld');   // schaduw zoals stap 2
@@ -260,4 +260,54 @@ test('server.js (wv1916): live per bron, Jev via de webhook met eigen sleutel, v
   const f = srv.slice(srv.indexOf('async function appIntakeRouter'), srv.indexOf('function intakeRouterInfo()'));
   assert.match(f, /route === 'POST \/app\/intake\/keuze'\) \{\n\s+if \(!rolPrimair\(\)\) return appWeiger\(res, 503/);
   assert.match(f, /route === 'POST \/app\/intake\/stuk'\) \{ res\._app\.stil = true;/);
+});
+
+test('Opus-review wv1916: live per stuk (status router), verwerken na keuze opnieuw, blijvende fout → twijfel, hangers, stuk binnen 64 kB', async () => {
+  // MOET 2: een stuk dat niet als 'router' binnenkwam, gaat de schaduwweg, ook als de schakelaar nu aan staat
+  const E = omgeving();
+  const oud = E.zet({ status: 'geschreven', meta: { van: 'anne@voorbeeld.example', onderwerp: 'Oud', aan: ['david@voorbeeld.example'] }, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Oud', GEWOON) }] });
+  await E.r.ronde();
+  assert.equal(E.db.prepare('SELECT count(*) n FROM live_stuk WHERE stuk_id = ?').get(oud).n, 0); assert.equal(E.tel.jev.length, 0); assert.deepEqual(E.bestanden(), []);
+  E.r.sluit();
+  // ZOU 4: 'gewoon verwerken' terwijl Jev nog niets geeft → 202; de volgende ronde (na de pauze) verwerkt het alsnog
+  let jevUit = true;
+  const F = omgeving({ jev: async (x) => (jevUit ? null : { ref: x.ref, gemeten: true, injectie_kans: 0.01 }) });
+  const v = F.zet({ marker: 'gemarkeerd', soorten: ['brieftaal'], meta: { van: 'poli@voorbeeld.example', onderwerp: 'Verslag', aan: ['david@voorbeeld.example'] }, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('poli@voorbeeld.example', 'Verslag', PATIENT_TEKST) }] });
+  await F.r.ronde();
+  const k = await F.r.appKeuze({ stuk_id: v, keuze: 'verwerken' }, 'app:proef');
+  assert.equal(k.status, 202); assert.match(k.j.uitleg, /elke ronde opnieuw/);
+  jevUit = false; F.klok.t += 16 * 60000;
+  await F.r.ronde();
+  assert.equal(F.db.prepare('SELECT staat FROM live_stuk WHERE stuk_id = ?').get(v).staat, 'klaar'); assert.equal(F.bestanden().length, 1);
+  // ZOU 7: het hele stuk blijft onder 64 kB JSON, ook met veel niet-ASCII
+  const groot = F.zet({ meta: { van: 'a@voorbeeld.example', onderwerp: 'Groot', aan: [] }, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('a@voorbeeld.example', 'Groot', 'ë€ '.repeat(30000)) }] });
+  await F.r.ronde();
+  const st = await F.r.appStuk({ stuk_id: groot });
+  assert.equal(st.status, 200); assert.ok(Buffer.byteLength(JSON.stringify(st.j)) < 60 * 1024, String(Buffer.byteLength(JSON.stringify(st.j)))); assert.equal(st.j.stuk.ingekort, true);
+  F.r.sluit();
+  // ZOU 6: blijvende schrijffout → na 5 pogingen twijfel bij David, geen eindeloze herhaling
+  const G = omgeving({ naamOk: () => false });
+  const g = G.zet({ meta: { van: 'anne@voorbeeld.example', onderwerp: 'Overleg', aan: ['david@voorbeeld.example'] }, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Overleg', GEWOON) }] });
+  for (let i = 0; i < 6; i++) await G.r.ronde();
+  assert.equal(G.db.prepare('SELECT staat FROM live_stuk WHERE stuk_id = ?').get(g).staat, 'twijfel');
+  assert.equal(G.db.prepare("SELECT status FROM bestemming WHERE stuk_id = ?").get(g).status, 'schaduw');
+  assert.equal(G.tel.melding.length, 1);
+  G.r.sluit();
+  // ZOU 3: een live stuk dat na 26 u nog geen uitkomst heeft → één melding per dag
+  const H = omgeving({ jev: async () => null });
+  H.zet({ meta: { van: 'anne@voorbeeld.example', onderwerp: 'Overleg', aan: [] }, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: 'kapot' }] });
+  H.db.prepare("UPDATE stuk SET compleet_op = '2026-10-27T10:00:00Z', aangemaakt = '2026-10-27T10:00:00Z'").run();
+  // laat de router het niet zien: geen marker_op
+  H.db.prepare("UPDATE stuk SET marker_op = NULL").run();
+  await H.r.ronde(); await H.r.ronde();
+  assert.equal(H.tel.melding.filter((t) => /na 26 uur nog geen uitkomst/.test(t)).length, 1);
+  H.r.sluit();
+});
+
+test('Opus-review wv1916: kop met Plaud-bron, niet-geplaatste bijlage en Jev-dekking', () => {
+  const t = K.kennisInhoud({ stuk_id: 'stk_20261028_00000009', bron: 'gmail:david', profiel: 'mail@1', onderwerp: 'Opname', soort: 'correspondentie', soort_kracht: 'redelijk',
+    entiteit: 'TG', entiteit_kracht: 'redelijk', documentbron: 'plaud', jev: { overgeslagen: 500 }, delen: [{ rol: 'origineel', tekst: 'x' }],
+    bijlagen: [{ naam: 'a.pdf', bestand: 'x__a.pdf' }, { naam: 'b.exe', bestand: null, reden: 'soort niet toegestaan in de vault' }] });
+  assert.match(t, /\ndocumentbron: "plaud"\n/); assert.match(t, /bijlagen:\n  - "x__a.pdf"\nbijlagen_niet_geplaatst:\n  - "b\.exe \(soort niet toegestaan in de vault; staat in OVIS Intake\)"/);
+  assert.match(t, /las alleen de eerste 24\.000 tekens/);
 });

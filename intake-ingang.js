@@ -352,6 +352,9 @@ function toetsEnvelop(env, profielen, sleutel, soorten, opties) {
     perRol[d.rol] = (perRol[d.rol] || 0) + 1;
   }
   if (totaal > Math.min(STUK_MAX, (profiel.stuk_max_mb || 60) * MB)) return weiger(413, 'te_groot:stuk');
+  // wv1916 (Opus-review MOET 1): een live mail zonder het origineel en zonder hoofdtekst zou zonder mailtekst in de Second Brain komen → weigeren
+  // (de aanleverende route houdt de mail dan vast en meldt het)
+  if (opties && opties.live && profiel.onderdelen.origineel && profiel.onderdelen.hoofdtekst && !(perRol.origineel || perRol.hoofdtekst)) return weiger(400, 'te_weinig:origineel');
   for (const [rol, r] of Object.entries(profiel.onderdelen)) {
     const n = perRol[rol] || 0;
     if (n < r.min && !(r.alleen_overgang && (!env.overgang || (opties && opties.live)))) return weiger(400, 'te_weinig:' + rol);
@@ -701,11 +704,13 @@ function maak(o) {
    * Overgangsschrijver (§ 2.2 punt 7, § 5). → { vault: 'geschreven'|'schaduw'|'wacht'|'geen'|'vastgehouden', pad?, reden? }.
    * Pad = profielmap (uit het profiel) + naam (overgang.bestandsnaam of de naam van het onderdeel, al door naampoort en naamvorm).
    */
-  function schrijfOvergang(stukRij, metMarker) {
+  function schrijfOvergang(stukRij, metMarker, eerste) {
     const profiel = profielen.get(stukRij.profiel);
     if (!profiel || !stukRij.stand || !profiel.archief) return { vault: 'geen' };
     if (stukRij.status === 'vastgehouden') return { vault: 'vastgehouden' };
-    if (liveBron(stukRij.bron)) { q.status.run('router', stukRij.stuk_id); return { vault: 'router' }; }   // wv1916: de router beslist en schrijft
+    // wv1916: de router beslist en schrijft. Alleen als het stuk nu voor het eerst compleet is (Opus-review MOET 2): een stuk dat al op 'wacht' stond
+    // of al geschreven is, blijft in de oude weg (anders dubbel of stil weg); status 'router' is daarna het kenmerk, niet de schakelaar
+    if (eerste === true && liveBron(stukRij.bron)) { q.status.run('router', stukRij.stuk_id); return { vault: 'router' }; }
     if (stukRij.stand === 'om' && houdtVast(stukRij.bron) && !metMarker && stukRij.marker_patient !== 'geen') {   // Fable wv1282 #2
       q.status.run('wacht_marker', stukRij.stuk_id);
       return { vault: 'wacht', reden: 'marker' };
@@ -847,7 +852,7 @@ function maak(o) {
     const r = q.compleet.run(nuIso(nu()), stukId);
     let s = q.stuk.get(stukId);
     let v = { vault: 'geen' };
-    if (r.changes || s.status === 'wacht') v = schrijfOvergang(s, false);
+    if (r.changes || s.status === 'wacht') v = schrijfOvergang(s, false, !!r.changes);
     else if (s.stand === 'om' && s.status === 'geschreven' && profielen.get(s.profiel)) v = Object.assign({ vault: 'geschreven' }, padBijDubbel(s, profielen.get(s.profiel)));   // Opus-review wv1286 K2
     s = q.stuk.get(stukId);
     setImmediate(function () { markeer(stukId).catch(function (e) { if (o.fout) o.fout('intake-marker', e); }); });

@@ -15340,7 +15340,8 @@ function intakeRouterStand() { try { const j = JSON.parse(fs.readFileSync(path.j
 // Live: de ontvangstlaag schrijft niets meer (antwoord vault "router"); de router beslist (marker → Jev → regel → vangnet → standaard) en
 // schrijft de kennislens. Jev via de n8n-webhook AI - Injectielabel (pod) (sleutel /opt/data/.socev-geheim/intake-jev.key, n8n kent alleen de
 // sha256); vangnet = de indeling van de Mail Processor op de pod (Sonnet, harvesterClaude), alleen ná marker en Jev. Terugrol per bron: live uit.
-function intakeLiveBron(b) { const j = intakeRouterStand(); return !!(j && j.live && typeof j.live === 'object' && j.live[String(b)] === true && fs.existsSync(path.join(__dirname, 'intake-router.js'))); }
+// Live alleen als de router echt geladen is (Opus-review wv1916 ZOU 3): anders blijft een stuk op 'router' liggen zonder dat iemand het oppakt
+function intakeLiveBron(b) { const j = intakeRouterStand(); return !!(j && j.live && typeof j.live === 'object' && j.live[String(b)] === true && intakeRouterHaal()); }
 const INTAKE_JEV_WF = process.env.INTAKE_JEV_WF || '';
 const INTAKE_JEV_SLEUTEL_PAD = process.env.INTAKE_JEV_SLEUTEL_PAD || '/opt/data/.socev-geheim/intake-jev.key';
 function intakeJevSleutel() { try { const k = fs.readFileSync(INTAKE_JEV_SLEUTEL_PAD, 'utf8').trim(); return /^[0-9a-f]{64}$/.test(k) ? k : ''; } catch (e) { return ''; } }
