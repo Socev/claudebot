@@ -495,8 +495,8 @@ function regelVoorwaarden(v) {
       uit[k] = String(x);
     } else return { ok: false, reden: 'onbekend veld ' + String(k).slice(0, 30) };
   }
-  // 'afzender_zeker' alleen is geen voorwaarde
-  if (!Object.keys(uit).filter(function (k) { return k !== 'afzender_zeker'; }).length) return { ok: false, reden: 'vul minstens één voorwaarde in' };
+  // 'afzender_zeker' zonder 'afzender' is een eigen voorwaarde: de afzender is herkend met minstens die zekerheid (Fable wv1408 #7)
+  if (!Object.keys(uit).length) return { ok: false, reden: 'vul minstens één voorwaarde in' };
   return { ok: true, v: uit };
 }
 function regelVergelijk(waarde, c) {
@@ -505,8 +505,9 @@ function regelVergelijk(waarde, c) {
 }
 // m = { bron, van_adres, van_domein, onderwerp, soort, afzender, afzender_naam, afzender_kracht, entiteit, bijlagen: [{ naam, mime }] }
 function regelPast(v, m) {
-  const ks = Object.keys(v || {}).filter(function (k) { return k !== 'afzender_zeker'; });
+  const ks = Object.keys(v || {});
   if (!ks.length) return false;
+  const zeker = NIVEAU[v.afzender_zeker || 'redelijk'];
   for (const k of ks) {
     const c = v[k];
     if (k === 'bron' && m.bron !== c) return false;
@@ -515,8 +516,9 @@ function regelPast(v, m) {
     if (k === 'van_adres' && !regelVergelijk(m.van_adres, c)) return false;
     if (k === 'van_domein' && !(regelVergelijk(m.van_domein, c) || (c.op === 'is' && String(m.van_domein || '').toLowerCase().endsWith('.' + String(c.w).toLowerCase())))) return false;
     if (k === 'onderwerp' && !regelVergelijk(m.onderwerp, c)) return false;
+    if (k === 'afzender_zeker' && (!m.afzender || NIVEAU[m.afzender_kracht] == null || NIVEAU[m.afzender_kracht] < zeker)) return false;
     if (k === 'afzender') {
-      if (!m.afzender || NIVEAU[m.afzender_kracht] == null || NIVEAU[m.afzender_kracht] < NIVEAU[v.afzender_zeker || 'redelijk']) return false;
+      if (!m.afzender || NIVEAU[m.afzender_kracht] == null || NIVEAU[m.afzender_kracht] < zeker) return false;
       if (!(regelVergelijk(m.afzender, c) || regelVergelijk(m.afzender_naam, c))) return false;
     }
     if (k === 'bijlagenaam' && !(m.bijlagen || []).some(function (b) { return regelVergelijk(b.naam, c); })) return false;
@@ -883,12 +885,13 @@ function maak(o) {
       const s = stukBasis(row); const meta = s ? (safeJson(s.meta) || {}) : {};
       const delen = s ? db.prepare('SELECT deel, rol, naam, mime FROM onderdeel WHERE stuk_id = ? ORDER BY deel').all(s.stuk_id) : [];
       const m = s ? kenmerkenStuk(s, meta, delen, sam, r) : null;
-      const nu2 = m ? herbereken(sam, m, actief) : null;
+      // zonder register geen namen: een regel op de afzendernaam zou stil niet passen → dan niets herberekenen (Fable wv1408 #10)
+      const nu2 = m && r ? herbereken(sam, m, actief) : null;
       return Object.assign(basis, { onderwerp: m ? m.onderwerp.slice(0, 200) : '', van: m ? m.van_adres : '', van_naam: typeof meta.van_naam === 'string' ? meta.van_naam.slice(0, 80) : '',
         bijlagen: m ? m.bijlagen.map(function (b) { return String(b.naam).slice(0, 120); }).slice(0, 10) : [],
         soort: sam.soort || null, soort_kracht: sam.soort_kracht || null, afzender: sam.afzender || null, afzender_naam: naamVan(r, sam.afzender), afzender_kracht: sam.afzender_kracht || null,
         entiteit: sam.entiteit || null, entiteit_kracht: sam.entiteit_kracht || null, label_route: sam.label_route || [], dkim: sam.dkim || null,
-        toen: lensNamen(sam.bestemmingen), toen_regel: sam.regel || null, twijfel: !!sam.twijfel,
+        toen: lensNamen(sam.bestemmingen), toen_doel: sam.bestemmingen && sam.bestemmingen[0] ? sam.bestemmingen[0].doel || null : null, toen_regel: sam.regel || null, twijfel: !!sam.twijfel,
         nu: nu2 ? lensNamen(nu2.bestemmingen) : null, nu_doel: nu2 && nu2.bestemmingen[0] ? nu2.bestemmingen[0].doel : null, nu_regel: nu2 && nu2.regel ? nu2.regel.id : null });
     });
     const entiteiten = r ? Array.from(r.ent.values()).filter(function (e) { return e.eigen && KNOOP_RE.test(String(e.k || '')); }).map(function (e) { return { id: e.k, naam: e.naam || e.k }; }).sort(function (a, b) { return a.naam.localeCompare(b.naam); })
@@ -896,7 +899,7 @@ function maak(o) {
     const bronnen = db.prepare("SELECT DISTINCT s.bron FROM router_stuk r JOIN stuk s ON s.stuk_id = r.stuk_id WHERE r.status <> 'buiten_router'").all().map(function (x) { return x.bron; }).filter(function (b) { return BRON_RE.test(b); });
     return { ok: true, aan: true, schaduw: true, regelversie: REGELVERSIE, info: info(), venster_dagen: VENSTER_DAGEN,
       week: telling(nuIso(nu() - 7 * DAG), nuIso(nu() + 60000)), register: !!r,
-      regels: regels.map(function (y) { return Object.assign(y, { treffers: treffers.get(y.id) || 0 }); }),
+      regels: regels.map(function (y) { return Object.assign(y, { treffers: r ? treffers.get(y.id) || 0 : null }); }),
       wijzigingen: db.prepare('SELECT tijd, wat, sleutel, door FROM regel_wijziging ORDER BY id DESC LIMIT 20').all(),
       stukken, entiteiten, bronnen: Array.from(new Set(bronnen.concat(['gmail:david', 'gmail:groenhouten', 'outlook:tolgaarde', 'scanner:scansnap']))).sort(),
       lenzen: REGEL_LENZEN };
@@ -908,6 +911,7 @@ function maak(o) {
     const lens = REGEL_LENZEN.indexOf(String(d.lens)) >= 0 ? String(d.lens) : 'kennis';
     const ent = d.entiteit && KNOOP_RE.test(String(d.entiteit)) ? String(d.entiteit) : null;
     const r = await regVoorApp();
+    if (!r) return { status: 503, j: { ok: false, fout: 'het register (Second Brain) is even niet bereikbaar; probeer het zo nog eens' } };
     const eigenId = Number(d.id) || 0;
     const alle = regelsActief();
     const anderen = alle.filter(function (y) { return y.id !== eigenId; });
@@ -931,7 +935,7 @@ function maak(o) {
   function wijzig(wat, sleutel, oud, nieuw, door) {
     db.prepare('INSERT INTO regel_wijziging (tijd, wat, sleutel, oud, nieuw, door) VALUES (?, ?, ?, ?, ?, ?)').run(iso(), wat, String(sleutel), oud == null ? null : JSON.stringify(oud), nieuw == null ? null : JSON.stringify(nieuw), door || null);
   }
-  function appRegel(d, door) {
+  async function appRegel(d, door) {
     d = isObj(d) ? d : {};
     const actie = String(d.actie || '');
     if (actie === 'nieuw' || actie === 'wijzig') {
@@ -941,6 +945,13 @@ function maak(o) {
       if (REGEL_LENZEN.indexOf(lens) < 0) return { status: 400, j: { ok: false, fout: 'bestemming onbekend' } };
       const ent = d.entiteit ? String(d.entiteit) : null;
       if (ent && !KNOOP_RE.test(ent)) return { status: 400, j: { ok: false, fout: 'entiteit onbekend' } };
+      // een entiteit (doel of voorwaarde) moet een eigen entiteit uit het register zijn (Fable wv1408 #8)
+      if (ent || v.v.entiteit) {
+        const r = await regVoorApp();
+        if (!r) return { status: 503, j: { ok: false, fout: 'het register (Second Brain) is even niet bereikbaar; probeer het zo nog eens' } };
+        const eigen = new Set(Array.from(r.ent.values()).filter(function (e) { return e.eigen; }).map(function (e) { return e.k; }));
+        if ((ent && !eigen.has(ent)) || (v.v.entiteit && !eigen.has(v.v.entiteit))) return { status: 400, j: { ok: false, fout: 'entiteit onbekend' } };
+      }
       const naam = String(d.naam == null ? '' : d.naam).trim().slice(0, 80) || 'regel';
       let uit;
       tx(function () {

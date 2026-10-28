@@ -408,7 +408,7 @@ test('schaduw PDF-lezer (wv1431): alleen een beoordeeld stuk gaat door (pad + lo
 
 test('regels van David (wv1408): vorm, afzender alleen bij genoeg zekerheid, geen regex', () => {
   assert.equal(K.regelVoorwaarden({}).ok, false);
-  assert.equal(K.regelVoorwaarden({ afzender_zeker: 'hoog' }).ok, false);   // zekerheid alleen is geen voorwaarde
+  assert.equal(K.regelVoorwaarden({ afzender_zeker: 'hoog' }).ok, true);    // zekerheid alleen = afzender herkend met minstens die zekerheid
   assert.match(K.regelVoorwaarden({ onderwerp: { op: 'regex', w: 'a.*b' } }).reden, /bevat of is/);
   assert.match(K.regelVoorwaarden({ raar: 'x' }).reden, /onbekend veld/);
   assert.equal(K.regelVoorwaarden({ soort: 'bewijsstuk', entiteit: 'GH', bron: 'gmail:david' }).ok, true);
@@ -421,6 +421,10 @@ test('regels van David (wv1408): vorm, afzender alleen bij genoeg zekerheid, gee
   assert.equal(K.regelPast({ van_domein: { op: 'is', w: 'energie.example' } }, m), false);
   assert.equal(K.regelPast({ bijlage: 'pdf', soort: 'bewijsstuk' }, m), true);
   assert.equal(K.regelPast({ bijlage: 'niet' }, m), false);
+  // Fable wv1408 #7: zekerheid naast een andere voorwaarde telt mee
+  assert.equal(K.regelPast({ soort: 'bewijsstuk', afzender_zeker: 'hoog' }, m), false);
+  assert.equal(K.regelPast({ soort: 'bewijsstuk', afzender_zeker: 'zwak' }, m), true);
+  assert.equal(K.regelPast({ soort: 'bewijsstuk', afzender_zeker: 'zwak' }, Object.assign({}, m, { afzender: null, afzender_kracht: 'geen' })), false);
   for (const f of [K.regelPast, K.regelVoorwaarden]) assert.ok(!/RegExp|\.match\(|\.test\(c|new Function/.test(f.toString()), 'regels maken geen RegExp uit invoer');
 });
 
@@ -433,12 +437,15 @@ test('regels van David (wv1408): regel gaat vóór de standaard, nooit voor een 
     delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: 'From: info@nieuwsbrief.example\r\nSubject: Nieuwsbrief oktober\r\nContent-Type: text/plain\r\n\r\nBeste lezer, hierbij de nieuwsbrief van oktober met veel nieuws over van alles en nog wat.' }] });
   const r = R.maak(Object.assign({ dir: L.dir }, stubs()));
   // twee regels vóór de ronde: nieuwsbrief → nergens; "Verslag" → facturen (mag het vastgehouden stuk nooit raken)
-  let u = r.appRegel({ actie: 'nieuw', naam: 'Nieuwsbrief', voorwaarden: { van_domein: { op: 'is', w: 'nieuwsbrief.example' } }, lens: 'geen' }, 'app:proef');
+  let u = await r.appRegel({ actie: 'nieuw', naam: 'Nieuwsbrief', voorwaarden: { van_domein: { op: 'is', w: 'nieuwsbrief.example' } }, lens: 'geen' }, 'app:proef');
   assert.equal(u.status, 200); const r1 = u.j.id;
-  u = r.appRegel({ actie: 'nieuw', naam: 'Verslag', voorwaarden: { onderwerp: { op: 'bevat', w: 'verslag' } }, lens: 'facturen' }, 'app:proef');
+  u = await r.appRegel({ actie: 'nieuw', naam: 'Verslag', voorwaarden: { onderwerp: { op: 'bevat', w: 'verslag' } }, lens: 'facturen' }, 'app:proef');
   assert.equal(u.status, 200);
-  assert.equal(r.appRegel({ actie: 'nieuw', naam: 'x', voorwaarden: { soort: 'keten' }, lens: 'weg' }, 'app').status, 400);
-  assert.equal(r.appRegel({ actie: 'nieuw', naam: 'x', voorwaarden: {}, lens: 'kennis' }, 'app').status, 400);
+  assert.equal((await r.appRegel({ actie: 'nieuw', naam: 'x', voorwaarden: { soort: 'keten' }, lens: 'weg' }, 'app')).status, 400);
+  assert.equal((await r.appRegel({ actie: 'nieuw', naam: 'x', voorwaarden: {}, lens: 'kennis' }, 'app')).status, 400);
+  // Fable wv1408 #8: entiteit moet een eigen entiteit uit het register zijn
+  assert.equal((await r.appRegel({ actie: 'nieuw', naam: 'x', voorwaarden: { soort: 'keten' }, lens: 'kennis', entiteit: 'XYZ' }, 'app')).status, 400);
+  assert.equal((await r.appRegel({ actie: 'nieuw', naam: 'x', voorwaarden: { entiteit: 'XYZ' }, lens: 'kennis' }, 'app')).status, 400);
   assert.equal((await r.ronde()).verwerkt, 3);
   const sam = (id) => JSON.parse(L.db.prepare('SELECT samenvatting FROM router_stuk WHERE stuk_id = ?').get(id).samenvatting);
   assert.equal(sam(nb).regel, 'R' + r1 + '@1');
@@ -456,6 +463,12 @@ test('regels van David (wv1408): regel gaat vóór de standaard, nooit voor een 
   const onb = o.stukken.find((x) => x.stuk_id === nb);
   assert.equal(onb.onderwerp, 'Nieuwsbrief oktober'); assert.equal(onb.van, 'info@nieuwsbrief.example'); assert.deepEqual(onb.nu, ['geen']); assert.equal(onb.nu_regel, r1);
   assert.equal(o.regels.find((x) => x.id === r1).treffers, 1);
+  // Fable wv1408 #10: register weg → niets herberekenen, geen treffers, Toets 503
+  const r0 = R.maak(Object.assign({ dir: L.dir }, stubs({ handvatten: async function () { throw new Error('handvatten: weg'); } })));
+  const o0 = await r0.appOverzicht(50);
+  assert.equal(o0.register, false); assert.equal(o0.stukken.find((x) => x.stuk_id === nb).nu, null); assert.equal(o0.regels[0].treffers, null);
+  assert.equal((await r0.appToets({ voorwaarden: { soort: 'bewijsstuk' } })).status, 503);
+  r0.sluit();
   assert.ok(o.entiteiten.some((e) => e.id === 'TG'));
   // Toets: een nieuwe regel die al door een eerdere gevangen wordt, en een die echt iets verandert
   let t = await r.appToets({ voorwaarden: { onderwerp: { op: 'bevat', w: 'nieuwsbrief' } }, lens: 'kennis', entiteit: 'PRIVE' });
@@ -464,13 +477,13 @@ test('regels van David (wv1408): regel gaat vóór de standaard, nooit voor een 
   assert.equal(t.j.treffers, 1); assert.deepEqual(t.j.voorbeelden[0].nu, ['facturen']); assert.deepEqual(t.j.voorbeelden[0].nieuw, ['kennis']); assert.equal(t.j.voorbeelden[0].doel, 'GH'); assert.equal(t.j.anders, 1);
   assert.equal((await r.appToets({ voorwaarden: {} })).status, 400);
   // aan/uit, volgorde, weg — met spoor
-  assert.equal(r.appRegel({ actie: 'aanuit', id: r1, actief: false }, 'app:proef').status, 200);
+  assert.equal((await r.appRegel({ actie: 'aanuit', id: r1, actief: false }, 'app:proef')).status, 200);
   assert.deepEqual((await r.appOverzicht(50)).stukken.find((x) => x.stuk_id === nb).nu, ['kennis?']);   // zonder regel: standaard (geen entiteit → twijfel)
-  assert.equal(r.appRegel({ actie: 'neer', id: r1 }, 'app:proef').status, 200);
+  assert.equal((await r.appRegel({ actie: 'neer', id: r1 }, 'app:proef')).status, 200);
   assert.equal(r.regels()[1].id, r1);
-  assert.equal(r.appRegel({ actie: 'weg', id: r1 }, 'app:proef').status, 200);
+  assert.equal((await r.appRegel({ actie: 'weg', id: r1 }, 'app:proef')).status, 200);
   assert.equal(r.regels().length, 1);
-  assert.equal(r.appRegel({ actie: 'weg', id: r1 }, 'app:proef').status, 404);
+  assert.equal((await r.appRegel({ actie: 'weg', id: r1 }, 'app:proef')).status, 404);
   const w = L.db.prepare('SELECT wat, door FROM regel_wijziging ORDER BY id').all().map((x) => x.wat);
   assert.deepEqual(w, ['regel', 'regel', 'regel_aanuit', 'regel_volgorde', 'regel_weg']);
   r.sluit();

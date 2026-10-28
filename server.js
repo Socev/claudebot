@@ -15361,7 +15361,7 @@ async function appIntakeRouter(req, res, a, s, d, route) {
     if (route === 'POST /app/intake/toets') r = await ir.appToets(d || {});
     else {
       if (!rolPrimair()) return appWeiger(res, 503, 'niet de actieve kant', 'intake-regel niet primair');
-      r = ir.appRegel(d || {}, 'app:' + String(appStudioCtx(a, s).apparaat || '').slice(0, 40));
+      r = await ir.appRegel(d || {}, 'app:' + String(appStudioCtx(a, s).apparaat || '').slice(0, 40));
       if (r.status === 200) res._app.reden = 'intake-regel ' + String(d && d.actie || '').slice(0, 10) + ' ' + String(r.j && r.j.id || '');
     }
   } catch (e) { logError('app-intake-router', e); return appWeiger(res, 500, 'Intake: interne fout', 'intake-router fout'); }
