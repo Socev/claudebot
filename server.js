@@ -3739,6 +3739,7 @@ function handleRequest(req, res) {
       syncthing: typeof syncthingInfo === 'function' ? syncthingInfo() : { aan: false },   // wv1277: Syncthing (schakelaar, poort, map, apparaten, filtertoets; geen inhoud of sleutel)
       zoek_snel: typeof zoekSnelInfo === 'function' ? zoekSnelInfo() : { aan: false },   // wv1252: Zoek snel (module, schakelaar, laatste uitkomst en duur; geen inhoud)
       secondbrain: secondbrainInfo(),
+      omzet: omzetInfo(),   // wv1854: Download als… (pandoc/chromium aanwezig, huisstijlen, bezig/wachtend, tellers; geen inhoud)
       docs_delen: docsDelenInfo(),   // wv1382: OVIS Docs › Delen (aan? host, aantal delingen; geen links)   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
@@ -4854,6 +4855,7 @@ const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften', 'mediat
 function appPriveDicht(a, id) { return !!(a && a.soort === 'vast') && APP_PRIVE_MODULES.indexOf(id) >= 0; }
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
+const APP_OMZET_MAX_BODY = 3 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping
 const APP_CODE_MS = 10 * 60 * 1000;
 const APP_CODE_POGINGEN = 5;
 const APP_CODE_INTERVAL_MS = 60 * 1000;
@@ -4959,7 +4961,7 @@ const APP_LOCATIE_CACHE_MS = 30 * 1000;
 // Schrijvende routes vallen ONDER het slot, tenzij ze hier staan (nieuwe POST-routes zijn dus vanzelf dicht; Fable § 8i K8).
 // gezien zetten is geen invoer (wv137; ook meldingen/gezien, die op een dicht vast apparaat 423 gaf)
 // wv446 (Fable #1): meldingen/af is omkeerbaar en geen invoer naar Socev, net als gezien
-const APP_SLOT_VRIJ = new Set(['POST /app/docs/intrekken', 'POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
+const APP_SLOT_VRIJ = new Set(['POST /app/omzet', 'POST /app/docs/intrekken', 'POST /app/rij/terug', 'POST /app/uitslag', 'POST /app/push/opzeggen', 'POST /app/gezien', 'POST /app/meldingen/gezien', 'POST /app/meldingen/af', 'POST /app/bericht/getikt', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = lezen   // wv350: zoeken = lezen   // wv263: getikt = gezien
 // Apparaatbeheer kan nooit vanaf een apparaat met een vaste plek, ook niet met een open slot (Fable § 8c #13; review wv134 M1:
 // anders kon een werk-pc de Pixel intrekken). Uitzondering: zichzelf intrekken.
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
@@ -5128,7 +5130,8 @@ async function appAccessOk(req, cfg) {
   return null;
 }
 
-function appBody(req, cb) {
+function appBody(req, cb, max) {
+  max = max || APP_MAX_BODY;   // wv1854: Download als… (POST /app/omzet) neemt een grotere tekst aan (APP_OMZET_MAX_BODY)
   if (req.method !== 'POST') return cb(null, {}, '-');
   const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   if (ct !== 'application/json') { req.resume(); return cb('soort'); }
@@ -5136,7 +5139,7 @@ function appBody(req, cb) {
   req.on('data', function (c) {
     if (klaar) return;
     n += c.length;
-    if (n > APP_MAX_BODY) { klaar = true; delen.length = 0; req.destroy(); return cb('groot'); }
+    if (n > max) { klaar = true; delen.length = 0; req.destroy(); return cb('groot'); }
     delen.push(c);
   });
   req.on('error', function () { if (!klaar) { klaar = true; cb('lezen'); } });
@@ -12073,7 +12076,8 @@ function handleApp(req, res) {
     const upload = req.method === 'POST' && p.indexOf('/app/upload/') === 0;
     const ruw = upload || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
-    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb); })(function (fout, d, lichaam) {
+    (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : APP_MAX_BODY); })(function (fout, d, lichaam) {
+      if (fout === 'groot' && p === '/app/omzet') return appWeiger(res, 413, 'de tekst is te groot om om te zetten (hooguit 2 MB)', 'body groot');   // wv1854
       if (fout) return appWeiger(res, 400, 'ongeldig verzoek', 'body ' + fout);
       let reg;
       try { reg = appRegister(); } catch (e) { logError('app-register', e); return appWeiger(res, 503, 'apparaatregister onleesbaar; vraag de machinekamer', 'register kapot'); }
@@ -12211,6 +12215,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/ideeen' || /^GET \/app\/ideeen\/(plaatje\/[1-9][0-9]{0,11}\/[0-2]|proefplaatje\/k\d{2,3}\/[0-2]|kaart\/[1-9][0-9]{0,11})$/.test(route) || route === 'POST /app/ideeen/gezien' ||
           route === 'POST /app/ideeen/naar-ideeenbus' || /^POST \/app\/ideeen\/kaart\/[ka]\d{2,3}\/(deel|niet)$/.test(route))   // wv942: AIX lezen, Deel/Niet per kaart of antwoord
           return typeof appIdeeen === 'function' ? appIdeeen(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'ideeen');   // wv761: App AIX (was Ideeën van buitenaf)
+        if (route === 'GET /app/omzet' || route === 'POST /app/omzet') return typeof appOmzet === 'function' ? appOmzet(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'omzet');   // wv1854: Download als…
         if (route === 'GET /app/docs/gedeeld' || route.indexOf('POST /app/docs/') === 0) return typeof appDocs === 'function' ? appDocs(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'docs');   // wv1382: OVIS Docs › Delen
         if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
@@ -16709,6 +16714,36 @@ async function appDocs(req, res, a, s, d, route) {
   return appStuur(res, r.status, r.j);
 }
 // ── einde docs delen ──
+
+// ── Download als… (wv1854; bouwplan vault 01_Ontwikkeling/Download als - bouwplan (28-10-2026).md) ──
+// WAAROM. David 28-10-2026: "Als ik in onze Markdown-Viewer een knop "Download als..." krijg en dan kiezen voor PDF, PDF met huisstijl, Word,
+// Xlsx - als voorbeelden, dan is dat al super." De app (Lezer en Docs) stuurt de tekst die David al in beeld heeft; omzet.js maakt er een PDF
+// (Chromium, JS uit, netwerk dicht), Word (pandoc) of Excel (eigen schrijver) van. Het bestand gaat terug naar zijn eigen apparaat, net als
+// Download; niets wordt bewaard. In APP_SLOT_VRIJ: op een vaste plek staat de tekst al in beeld (hij kwam via een open slot binnen) en de
+// app biedt het origineel (.md) daar ook zonder pod aan. Audit: formaat, soort, huisstijl, grootte, ms en het aantal geblokkeerde verzoeken.
+const omzetter = (function () {
+  const p = path.join(__dirname, 'omzet.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p).maak({ fout: logError }); } catch (e) { logError('omzet', e); return null; }
+})();
+function omzetInfo() {
+  if (!omzetter) return { aan: false };
+  try { return omzetter.health(); } catch (e) { return { aan: true, fout: true }; }
+}
+async function appOmzet(req, res, a, d, route) {
+  if (!omzetter) return appWeiger(res, 404, 'Download als… zit niet in deze versie van de pod', 'omzet ontbreekt');
+  if (route === 'GET /app/omzet') { res._app.stil = true; return appStuur(res, 200, { ok: true, huisstijlen: omzetter.stijlen() }); }
+  if (!appTeller('omzet', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens omzet');
+  let r;
+  try { r = await omzetter.omzet(d || {}); }
+  catch (e) { logError('app-omzet', e); return appWeiger(res, 500, 'fout op de pod', 'omzet uitzondering'); }
+  const au = r.audit || {};
+  res._app.reden = ('omzet ' + [au.formaat, au.soort, au.huisstijl].filter(Boolean).join(' ') + (au.in_kb ? ' ' + au.in_kb + 'kB' : '') +
+    (au.uit_kb ? '→' + au.uit_kb + 'kB' : '') + (au.ms !== undefined ? ' ' + au.ms + 'ms' : '') + (au.pogingen !== undefined ? ' geblokkeerd=' + au.pogingen : '') +
+    (r.status !== 200 ? ' (' + r.status + ')' : '')).slice(0, 160);
+  return appStuur(res, r.status, r.j);
+}
+// ── einde download als ──
 
 // ── Syncthing (wv1277, 25-10-2026) ─────────────────────────────────────────────────────────────────────────────────────────
 // run.sh start en bewaakt Syncthing (vault ↔ Synology thuis, laptop, werk-pc) en schrijft /opt/data/syncthing/status.json; hier

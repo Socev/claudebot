@@ -634,6 +634,13 @@ jobs:
           docker run --rm -v "$PWD":/src:ro --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} \
             /src/test/bisync-filter.sh /app/bisync-filter.txt /app/run.sh
 
+      # WAAROM (wv1854, 28-10-2026). Download als… (omzet.js) zet tekst om met pandoc en de headless Chromium uit het image (JS uit,
+      # netwerk dicht, één tegelijk). Die zijn er alleen in het image in dezelfde versie als op de pod; daarom draait test/omzet.sh hier,
+      # als claude (zoals server.js).
+      - name: "Rooktest - Download als (wv1854, omzet.js)"
+        run: |
+          docker run --rm -v "$PWD":/src:ro --user claude --entrypoint bash ghcr.io/socev/claudebot:${{ github.run_number }} /src/test/omzet.sh
+
       # WAAROM (wv1308, 26-10-2026). bisync met Drive gaat uit via het schakelbestand /opt/data/bisync.json (ontwerp OVIS Intake
       # § 11.4 stap 0). Een ontbrekend of kapot bestand, {"aan": false} of de onderhoudsstand van de vault mag nooit een ronde,
       # zelfherstel-resync of eerste koppeling geven; de stand wordt ook onder de vault-grendel gelezen. Deze stap draait het
