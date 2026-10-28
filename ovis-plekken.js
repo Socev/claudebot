@@ -1,6 +1,6 @@
 'use strict';
-// ovis-plekken.js — OVIS-koppelregels plek 9–12 (wv1013, 28-10-2026; architectuur "OVIS - architectuur (Intake, Brain, Socev)" § 4
-// rijen 9–12; ontwerp /opt/data/mk-scripts/wv1013/ontwerp.md).
+// ovis-plekken.js — OVIS-koppelregels plek 9–12 (wv1013, 28-10-2026) en 13–14 gezondheid (wv1774); architectuur "OVIS - architectuur
+// (Intake, Brain, Socev)" § 4 rijen 9–14; ontwerp /opt/data/mk-scripts/wv1013/ontwerp.md en wv1774/ontwerp.md.
 //
 // WAAROM. David 23-10: "Deze aanpassing moet voor alles ontwikkeld en uitgerold … een route naar volwassenheid." Elke opslagplek krijgt
 // één bron per veld, een zichtbare koppeling en een Bibliothecaris die een verschil ziet voordat het schade doet. Deze module doet de
@@ -10,9 +10,12 @@
 //  10  Woordenlijst ⇄ entiteitenregister — het register (secondbrain.knoop) is bron; het blok Entiteiten is weergave (Data Manager, zo).
 //  11  Deadlines.md — de pagina is bron; de Bibliothecaris ziet ongeldige en dode regels en wat verlopen is zonder afhandeling.
 //  12  90_Cijfermeester ⇄ supabase zorgdata — de databank (bronnen/producten) noemt het bestand; het bestand moet er zijn en andersom.
+//  13  D1 knie ⇄ 20_Prive/Gezondheid — de knie-app is bron; een pagina verwijst alleen; de verwijzing moet een rij vinden.
+//  14  health-pod ⇄ 20_Prive/Gezondheid — idem, via hp.py; een actuele pagina mag geen vervangen (append-only) rij noemen.
 // Alles alleen lezen, behalve het blok op bronnenregister.md (alleen in de nacht, onder de grendel, met de regels van de motor).
 // Niet gemeten is niet opgelost: een plek die niet te lezen is, laat haar bevindingen open (zoals plek 4–6).
-// Geen sleutels in dit bestand: de aanroeper geeft d1(batch), r2() en sbRpc mee (server.js en ovis-run.js, elk met hun eigen omgeving).
+// Geen sleutels in dit bestand: de aanroeper geeft d1(batch), r2(), kn(batch), hp(pad) en sbRpc mee (server.js en ovis-run.js, elk met
+// hun eigen omgeving).
 const crypto = require('crypto');
 const path = require('path');
 const R = require('./ovis-register.js');
@@ -29,8 +32,8 @@ const DL_KLAAR_RE = /\b(AFGEHANDELD|LOSGELATEN|VERVALLEN|GEDAAN|AFGEROND|GESLOTE
 const CM_MAP = '90_Cijfermeester';
 const CM_MAPPEN = ['10_Verwerkt', '20_Producten'];
 const CM_BIBLIOTHEEK = '90_Cijfermeester/Bibliotheek.md';
-const REST_BEVINDING_RE = /^BB\d-(r2|wl|dl|cm)-/;
-const PLEK_VAN = { r2: 'r2', wl: 'wl', dl: 'dl', cm: 'cm' };
+const REST_BEVINDING_RE = /^BB\d-(r2|wl|dl|cm|kn|hp)-/;   // wv1774: + kn (D1 knie), hp (health-pod)
+const PLEK_VAN = { r2: 'r2', wl: 'wl', dl: 'dl', cm: 'cm', kn: 'kn', hp: 'hp' };
 
 function h6(s) { return crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 6); }
 function schoon(s, n) { return R.schoon(String(s == null ? '' : s).replace(/\s+/g, ' ').trim(), n || 200); }   // met het sleutelfilter van de motor
@@ -266,6 +269,171 @@ function leesBibliotheek(tekst) {
   return Number.isInteger(b) && Number.isInteger(p) ? { bronnen: b, producten: p } : null;
 }
 
+// ── plek 13–14: gezondheid (wv1774; architectuur § 2.4 en § 4 rijen 13–14) ──
+// D1 knie en de health-pod zijn de bron; een pagina in 20_Prive/Gezondheid verwijst alleen (`cloudflare:d1-knie/<tabel>#<id>`,
+// `olares:health-pod/<tabel>#<id>`, in ovis.db of in de tekst). Geen gegenereerd blok, geen waarden buiten de bron: de lezers vragen
+// alleen sleutels op (D1: alleen de sleutelkolom; health-pod: id en vervangt_id). In bevinding, box en databank alleen de tabel, een
+// korte hash en de map; een paginanaam kan medisch zijn, dus het volle pad en de verwijzing staan alleen in de machinekamer-uitvoer (paden).
+const GZ_MAP = '20_Prive/Gezondheid';
+const GZ_DIEPTE = 3;
+const GZ_REF_RE = /\b(cloudflare:d1-knie|olares:health-pod)(?:\/([A-Za-z0-9_-]+))?(?:#([^\s`'"<>()[\]{},|]+))?/g;
+// sleutel per tabel; andere tabellen (push_*, snooze, instellingen …) zijn machinestaat en niet te koppelen
+const KN_TABELLEN = { mijlpalen: 'id', fases: 'id', compex: 'id', medicatie: 'id', dagen: 'datum', dagplan: 'datum', rondes: 'datum/slot' };
+const KN_ID_RE = { id: /^[A-Za-z0-9_-]{1,64}$/, datum: /^\d{4}-\d{2}-\d{2}$/, 'datum/slot': /^\d{4}-\d{2}-\d{2}\/[A-Za-z0-9_:-]{1,32}$/ };
+// health-pod: alleen vaste GET-paden (de aanroeper toetst ze ook met HP_PAD_RE); lijsten met historie, zodat vervangen rijen zichtbaar zijn
+const HP_LIJSTEN = ['diagnoses', 'gebeurtenissen', 'medicatie', 'kenmerken', 'bronnen'];
+const HP_LIMIET = 1000;
+const HP_PAD_RE = /^\/(?:(?:diagnoses|gebeurtenissen|medicatie|kenmerken|bronnen)\?historie=true&limiet=1000|rapporten\/\d{1,9}|metingen\/soorten)$/;
+const GZ_ACTUEEL_RE = /^\s*(actueel|actief)\b/i;
+
+function gzPagina(pad, tekst) {
+  const fm = R.frontmatter(tekst);
+  const status = fm.fout ? '' : String(fm.velden.status == null ? '' : fm.velden.status);
+  const refs = new Set(); let m; GZ_REF_RE.lastIndex = 0;
+  while ((m = GZ_REF_RE.exec(String(tekst))) !== null) refs.add(m[0].replace(/[.:;]+$/, ''));
+  return { pad: pad, actueel: GZ_ACTUEEL_RE.test(status), refs: Array.from(refs).sort().map(function (r) {
+    const x = /^(cloudflare:d1-knie|olares:health-pod)(?:\/([A-Za-z0-9_-]+))?(?:#(.+))?$/.exec(r);
+    return { ref: r, plek: x[1] === 'cloudflare:d1-knie' ? 'kn' : 'hp', tabel: x[2] || null, id: x[3] == null ? null : x[3] };
+  }) };
+}
+// alle pagina's onder 20_Prive/Gezondheid (hooguit 3 mappen diep, geen . of _); een map of pagina die niet te lezen is = niet gemeten
+function gzLees(ctx, lees) {
+  const paginas = [];
+  function loop(rel, diepte) {
+    const l = ctx.lijst(rel);
+    l.slice().sort(function (a, b) { return a.naam.localeCompare(b.naam); }).forEach(function (x) {
+      if (x.naam.startsWith('.') || x.naam.startsWith('_')) return;
+      const r = rel + '/' + x.naam;
+      if (x.map && diepte < GZ_DIEPTE) loop(r, diepte + 1);
+      else if (x.bestand && /\.md$/i.test(x.naam)) {
+        const t = lees(r);
+        if (t === null) throw new Error('een gezondheidspagina is niet te lezen');
+        paginas.push(gzPagina(r, t));
+      }
+    });
+  }
+  try { loop(GZ_MAP, 1); } catch (e) { return { fout: /niet te lezen/.test(e.message) ? e.message : GZ_MAP + ' niet te lezen' }; }
+  return { paginas: paginas };
+}
+function gzBev(bev, paden, check, plek, p, r, soort, samenvatting, detail, ernst) {
+  const sleutel = plek + '-' + h6(p.pad + '|' + r.ref) + '-' + soort;
+  if (paden) paden[check + '-' + sleutel] = p.pad + ' → ' + r.ref;
+  bev(check, sleutel, samenvatting, GZ_MAP + '/… (pagina ' + h6(p.pad) + '): ' + detail + ' Pagina en verwijzing staan in de droge uitvoer (`ovis-run.js bibliothecaris --afroep --droog`, paden).', ernst);
+}
+// plek 13: io.kn(batch) = D1 knie, alleen SELECT. Eerst de tabellen (bereikbaarheid), dan per tabel alleen de genoemde sleutels.
+async function knMeting(io, paginas) {
+  try {
+    if (!io || typeof io.kn !== 'function') return { fout: 'geen lezer voor D1 knie' };
+    const t = await io.kn([{ sql: "select name from sqlite_master where type = 'table'", params: [] }]);
+    const tabellen = new Set((t && t[0] && Array.isArray(t[0].results) ? t[0].results : []).map(function (x) { return String(x.name); }));
+    if (!tabellen.size) return { fout: 'D1 knie leeg of niet te lezen' };
+    const vraag = {};
+    paginas.forEach(function (p) { p.refs.forEach(function (r) {
+      if (r.plek !== 'kn' || !r.tabel || r.id == null || !KN_TABELLEN[r.tabel] || !tabellen.has(r.tabel) || !KN_ID_RE[KN_TABELLEN[r.tabel]].test(r.id)) return;
+      (vraag[r.tabel] = vraag[r.tabel] || new Set()).add(r.id);
+    }); });
+    const gevonden = {};
+    for (const tab of Object.keys(vraag).sort()) {
+      const ids = Array.from(vraag[tab]); gevonden[tab] = new Set();
+      const kol = KN_TABELLEN[tab] === 'datum/slot' ? "datum || '/' || slot" : KN_TABELLEN[tab];
+      for (let i = 0; i < ids.length; i += 50) {
+        const deel = ids.slice(i, i + 50);
+        const r = await io.kn([{ sql: 'select ' + kol + ' as k from ' + tab + ' where ' + kol + ' in (' + deel.map(function () { return '?'; }).join(', ') + ')', params: deel }]);
+        if (!r || !r[0] || !Array.isArray(r[0].results)) return { fout: 'D1 knie: ' + tab + ' niet te lezen' };
+        r[0].results.forEach(function (x) { gevonden[tab].add(String(x.k)); });
+      }
+    }
+    return { tabellen: tabellen, gevonden: gevonden };
+  } catch (e) { return { fout: String(e && e.message || e).slice(0, 120) }; }
+}
+function knChecks(m, paginas, bev, tel, paden) {
+  tel.kn_paginas = 0; tel.kn_verwijzingen = 0; tel.kn_tabellen = m.tabellen.size;
+  paginas.forEach(function (p) {
+    const eigen = p.refs.filter(function (r) { return r.plek === 'kn'; });
+    if (eigen.length) tel.kn_paginas++;
+    eigen.forEach(function (r) {
+      tel.kn_verwijzingen++;
+      if (!r.tabel) { if (r.id != null) gzBev(bev, paden, 'BB6', 'kn', p, r, 'vorm', 'gezondheidspagina: verwijzing naar de knie-app zonder tabel', 'een verwijzing cloudflare:d1-knie#… noemt geen tabel. Voorstel: cloudflare:d1-knie/<tabel>#<sleutel> (machinekamer).'); return; }
+      const t = schoon(r.tabel, 30);
+      if (!KN_TABELLEN[r.tabel]) { gzBev(bev, paden, 'BB6', 'kn', p, r, 'vorm', 'gezondheidspagina verwijst naar een knie-tabel die niet te koppelen is (' + t + ')', 'cloudflare:d1-knie/' + t + ' is geen koppelbare tabel (wel: ' + Object.keys(KN_TABELLEN).join(', ') + '). Voorstel: de verwijzing goedzetten of weghalen (machinekamer).'); return; }
+      if (!m.tabellen.has(r.tabel)) { gzBev(bev, paden, 'BB1', 'kn', p, r, 'geen-tabel', 'gezondheidspagina verwijst naar een knie-tabel die er niet (meer) is (' + t + ')', 'D1 knie heeft geen tabel ' + t + '. Voorstel: nagaan of de knie-app een migratie kreeg; de verwijzing bijwerken (machinekamer).'); return; }
+      if (r.id == null) return;   // verwijzing naar de tabel als geheel: bestaat
+      if (!KN_ID_RE[KN_TABELLEN[r.tabel]].test(r.id)) { gzBev(bev, paden, 'BB6', 'kn', p, r, 'vorm', 'gezondheidspagina: knie-verwijzing met een sleutel in de verkeerde vorm (' + t + ')', 'cloudflare:d1-knie/' + t + '#… moet de sleutel ' + KN_TABELLEN[r.tabel] + ' hebben. Voorstel: de verwijzing goedzetten (machinekamer).'); return; }
+      if (!(m.gevonden[r.tabel] && m.gevonden[r.tabel].has(r.id))) gzBev(bev, paden, 'BB1', 'kn', p, r, 'geen-rij', 'gezondheidspagina verwijst naar een rij in de knie-app die niet bestaat (' + t + ')', 'de verwijzing cloudflare:d1-knie/' + t + '#… vindt geen rij in D1 knie. Voorstel: de verwijzing goedzetten of weghalen (machinekamer); de knie-app blijft de bron.');
+    });
+  });
+}
+// io.hp(pad) → { j } of { weigert: <http> }; gooit als de health-pod niet bereikbaar is. Uitslag van hp.py omzetten: zie hpUitslag.
+function hpUitslag(r) {
+  if (r && r.code === 0) {
+    let j; try { j = JSON.parse(r.stdout); } catch (e) { throw new Error('health-pod: geen JSON'); }
+    if (j && typeof j === 'object' && j._INGEKORT) throw new Error('health-pod: antwoord ingekort');
+    return { j: j };
+  }
+  const m = r && r.code === 3 && /^POD WEIGERT: HTTP (\d{3})\b/.exec(String(r.stdout || ''));
+  if (m) return { weigert: Number(m[1]) };
+  throw new Error(r && r.signaal ? 'health-pod: tijdgrens' : 'health-pod niet bereikbaar (exit ' + (r ? r.code : '?') + ')');
+}
+async function hpMeting(io, paginas) {
+  try {
+    if (!io || typeof io.hp !== 'function') return { fout: 'geen lezer voor de health-pod' };
+    const nodig = new Set(), rapporten = new Set();
+    paginas.forEach(function (p) { p.refs.forEach(function (r) {
+      if (r.plek !== 'hp' || !r.tabel) return;
+      if (HP_LIJSTEN.indexOf(r.tabel) >= 0 || r.tabel === 'metingen') nodig.add(r.tabel);
+      if (r.tabel === 'rapporten' && r.id != null && /^\d{1,9}$/.test(r.id)) rapporten.add(r.id);
+    }); });
+    const uit = { lijst: {}, soorten: null, rapporten: {} };
+    for (const tab of Array.from(nodig).sort()) {
+      if (tab === 'metingen') {
+        const s = await io.hp('/metingen/soorten');
+        if (!s.j || !Array.isArray(s.j.rijen)) return { fout: 'health-pod: meetsoorten niet te lezen' };
+        uit.soorten = new Set(s.j.rijen.map(function (x) { return String(x.soort); }));
+        continue;
+      }
+      const a = await io.hp('/' + tab + '?historie=true&limiet=' + HP_LIMIET);
+      if (!a.j || !Array.isArray(a.j.rijen)) return { fout: 'health-pod: ' + tab + ' niet te lezen' };
+      // een halve lijst is geen meting: dan zou elke ontbrekende rij als "bestaat niet" tellen
+      if (a.j.rijen.length >= HP_LIMIET || (Number.isInteger(a.j.aantal) && a.j.aantal !== a.j.rijen.length)) return { fout: 'health-pod: ' + tab + ' niet volledig' };
+      const ids = new Set(), vervangen = new Set();
+      a.j.rijen.forEach(function (x) { ids.add(String(x.id)); if (x.vervangt_id != null) vervangen.add(String(x.vervangt_id)); });
+      uit.lijst[tab] = { ids: ids, vervangen: vervangen };
+    }
+    for (const id of Array.from(rapporten).sort()) {
+      const a = await io.hp('/rapporten/' + id);
+      if (a.weigert === 404) uit.rapporten[id] = false;
+      else if (a.j && String(a.j.id) === id) uit.rapporten[id] = true;
+      else return { fout: 'health-pod: rapport niet te lezen' };
+    }
+    return uit;
+  } catch (e) { return { fout: String(e && e.message || e).slice(0, 120) }; }
+}
+function hpChecks(m, paginas, bev, tel, paden) {
+  tel.hp_paginas = 0; tel.hp_verwijzingen = 0;
+  paginas.forEach(function (p) {
+    const eigen = p.refs.filter(function (r) { return r.plek === 'hp'; });
+    if (eigen.length) tel.hp_paginas++;
+    eigen.forEach(function (r) {
+      tel.hp_verwijzingen++;
+      if (!r.tabel) { if (r.id != null) gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina: verwijzing naar de health-pod zonder tabel', 'een verwijzing olares:health-pod#… noemt geen tabel. Voorstel: olares:health-pod/<tabel>#<id> (machinekamer).'); return; }
+      const t = schoon(r.tabel, 30);
+      const lijst = HP_LIJSTEN.indexOf(r.tabel) >= 0;
+      if (!lijst && r.tabel !== 'rapporten' && r.tabel !== 'metingen') { gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina verwijst naar een health-pod-tabel die niet te toetsen is (' + t + ')', 'olares:health-pod/' + t + ' is niet te toetsen (wel: ' + HP_LIJSTEN.concat(['rapporten', 'metingen#<soort>']).join(', ') + '). Voorstel: de verwijzing goedzetten of weghalen (machinekamer).'); return; }
+      if (r.id == null) return;
+      if (r.tabel === 'metingen') {   // een meting is niet per id op te vragen; de pagina noemt de reeks (soort)
+        if (!/^[a-z0-9_]{1,40}$/.test(r.id)) { gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina: verwijzing naar een meting in de verkeerde vorm', 'olares:health-pod/metingen#… noemt een meetsoort (bijv. #gewicht), geen meting-id. Voorstel: de verwijzing goedzetten (machinekamer).'); return; }
+        if (!m.soorten.has(r.id)) gzBev(bev, paden, 'BB1', 'hp', p, r, 'geen-soort', 'gezondheidspagina verwijst naar een meetsoort die de health-pod niet kent', 'olares:health-pod/metingen#… is geen meetsoort in de health-pod. Voorstel: de verwijzing goedzetten of weghalen (machinekamer).');
+        return;
+      }
+      if (!/^\d{1,9}$/.test(r.id)) { gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina: health-pod-verwijzing zonder geldig id (' + t + ')', 'olares:health-pod/' + t + '#… moet een rijnummer hebben. Voorstel: de verwijzing goedzetten (machinekamer).'); return; }
+      const bestaat = lijst ? m.lijst[r.tabel].ids.has(r.id) : m.rapporten[r.id] === true;
+      if (!bestaat) { gzBev(bev, paden, 'BB1', 'hp', p, r, 'geen-rij', 'gezondheidspagina verwijst naar een rij in de health-pod die niet bestaat (' + t + ')', 'de verwijzing olares:health-pod/' + t + '#… vindt geen rij. Voorstel: de verwijzing goedzetten of weghalen (machinekamer); de health-pod blijft de bron.'); return; }
+      // append-only: een nieuwere rij vervangt deze; een pagina met status actueel noemt dan een verouderde rij als actueel
+      if (lijst && p.actueel && m.lijst[r.tabel].vervangen.has(r.id)) gzBev(bev, paden, 'BB6', 'hp', p, r, 'vervangen', 'actuele gezondheidspagina noemt een health-pod-rij die vervangen is (' + t + ')', 'de pagina heeft status actueel, maar de health-pod heeft een nieuwere rij die olares:health-pod/' + t + '#… vervangt. Voorstel: de verwijzing naar de nieuwe rij zetten (machinekamer); de health-pod blijft de bron, geen waarde op de pagina overnemen.');
+    });
+  });
+}
+
 // ── de ronde: elke plek los; een fout in de ene raakt de andere niet ──
 // ctx: { vault, lees(volPad) → tekst (gooit als weg), lijst(rel) → [{ naam, map, bestand }], bestaat(rel), knopen, nu, io: { d1, r2, sbRpc } }
 async function bibliothecaris(ctx) {
@@ -312,6 +480,20 @@ async function bibliothecaris(ctx) {
     const dr = cmChecks(m, bestanden, leesBibliotheek(lees(CM_BIBLIOTHEEK)), bev, tel, ctx.bestaat);
     if (dr && dr.deels) return dr;
   });
+  // wv1774: plek 13–14 — de pagina's één keer lezen; niet te lezen = beide niet gemeten (hun open bevindingen blijven open)
+  const gz = typeof ctx.lijst === 'function' ? gzLees(ctx, lees) : { fout: 'geen maplezer' };
+  await plek('kn', async function (bev) {
+    if (gz.fout) return gz;
+    const m = await knMeting(io, gz.paginas);
+    if (m.fout) return m;
+    knChecks(m, gz.paginas, bev, tel, paden);
+  });
+  await plek('hp', async function (bev) {
+    if (gz.fout) return gz;
+    const m = await hpMeting(io, gz.paginas);
+    if (m.fout) return m;
+    hpChecks(m, gz.paginas, bev, tel, paden);
+  });
   return { plekken: plekken, tel: tel, bevindingen: bevindingen, paden: paden };
 }
 // Een open bevinding van een plek die nu niet gemeten is, blijft open (niet gemeten ≠ opgelost).
@@ -329,6 +511,9 @@ function zin(rest) {
     z('wl', 'Woordenlijst', function () { return t.wl_regels + ' entiteitregels' + (t.wl_verouderd ? ', ' + t.wl_verouderd + ' achter op het register (zondag bij)' : '') + ', ' + p.wl.verschil + ' verschil(len)'; }),
     z('dl', 'Deadlines', function () { return t.dl_rijen + ' rijen, ' + t.dl_verlopen + ' verlopen zonder afhandeling, ' + p.dl.verschil + ' verschil(len)'; }),
     z('cm', 'Cijfer-Meester', function () { return t.cm_bestanden + ' bestanden, ' + t.cm_bronnen + ' bronnen, ' + t.cm_producten + ' producten, ' + p.cm.verschil + ' verschil(len)'; }),
+    // wv1774: alleen aantallen (gezondheid)
+    z('kn', 'Knie-app', function () { return t.kn_verwijzingen + ' verwijzing(en) op ' + t.kn_paginas + ' pagina(\'s), ' + p.kn.verschil + ' verschil(len)'; }),
+    z('hp', 'Health-pod', function () { return t.hp_verwijzingen + ' verwijzing(en) op ' + t.hp_paginas + ' pagina(\'s), ' + p.hp.verschil + ' verschil(len)'; }),
   ].join('; ');
 }
 
@@ -363,4 +548,5 @@ async function nacht(o) {
 module.exports = { bibliothecaris: bibliothecaris, nacht: nacht, magOplossen: magOplossen, zin: zin, r2Lijst: r2Lijst, r2bMeting: r2bMeting, r2bChecks: r2bChecks,
   r2bBlokTekst: r2bBlokTekst, leesR2bPagina: leesR2bPagina, leesWoordenlijst: leesWoordenlijst, wlChecks: wlChecks, leesDeadlines: leesDeadlines, dlChecks: dlChecks,
   cmMeting: cmMeting, cmChecks: cmChecks, cmPatroon: cmPatroon, leesBibliotheek: leesBibliotheek, amsDatum: amsDatum,
-  REST_BEVINDING_RE: REST_BEVINDING_RE, R2B_PAD: R2B_PAD, R2B_SQL: R2B_SQL, WL_PAD: WL_PAD, DL_PAD: DL_PAD };
+  gzPagina: gzPagina, gzLees: gzLees, knMeting: knMeting, knChecks: knChecks, hpUitslag: hpUitslag, hpMeting: hpMeting, hpChecks: hpChecks,
+  REST_BEVINDING_RE: REST_BEVINDING_RE, HP_PAD_RE: HP_PAD_RE, KN_TABELLEN: KN_TABELLEN, GZ_MAP: GZ_MAP, R2B_PAD: R2B_PAD, R2B_SQL: R2B_SQL, WL_PAD: WL_PAD, DL_PAD: DL_PAD };

@@ -1064,8 +1064,8 @@ const REK_RE = /^(20_Prive\/Financien\/Rekeningen|10_Zakelijk\/POT_POH_GGZ)\/Rek
 const REK_PRIVE_MAP = '20_Prive/Financien/Rekeningen', BANKREGELS_PAD = '20_Prive/Financien/Bankregels.md', FINANCIEN_MAP = '20_Prive/Financien';
 const BANK_VERW_RE = /pod:bank-transacties\/(transactie|regel)#(\d{1,9})\b/g;
 const BANK_BEVINDING_RE = /^BB\d-bank-/;
-// wv1013: plek 9–12 staan in ovis-plekken.js (laat geladen: die module gebruikt de blokfuncties van deze)
-const REST_BEVINDING_RE = /^BB\d-(r2|wl|dl|cm)-/;
+// wv1013: plek 9–12 staan in ovis-plekken.js (laat geladen: die module gebruikt de blokfuncties van deze); wv1774: ook 13–14 (kn, hp)
+const REST_BEVINDING_RE = /^BB\d-(r2|wl|dl|cm|kn|hp)-/;
 function plekken() { return require('./ovis-plekken.js'); }
 function restMag(rest, id) { try { return plekken().magOplossen(rest, id); } catch (e) { return false; } }
 const BANK_DOOD_MS = 400 * 86400000;   // Fable #9: een regel voor een jaarpost raakt maar één keer per jaar
@@ -1874,7 +1874,7 @@ function kaartBiblio(reg, o) {
   const kandidaten = (reg.bevindingen || []).filter(function (b) {
     if (!/^BB[1235678]$/.test(b.check_id) || (b.check_id === 'BB3' && b.ernst === 'serious')) return false;
     if (VJ_BEVINDING_RE.test(b.bevinding_id)) return false;   // wv1009: plek 5 is machinestaat; de Voor jou-ronde en de machinekamer handelen het af
-    if (REST_BEVINDING_RE.test(b.bevinding_id)) return false;   // wv1013: plek 9–12 zijn registers en weergaven; de machinekamer zet ze recht (box)
+    if (REST_BEVINDING_RE.test(b.bevinding_id)) return false;   // wv1013: plek 9–12 zijn registers en weergaven; de machinekamer zet ze recht (box); wv1774: 13–14 idem
     if (b.check_id === 'BB3' && !/-handvatten$/.test(b.bevinding_id) && !/^BB3-bank-/.test(b.bevinding_id) && !/^BB3-fin-/.test(b.bevinding_id)) return false;   // naam/agb/intrekking: eigen kritiek-kaart; wv981: pot-cc wacht op fase 2; wv1010: bank wel
     return !geh.open.has('structuur_state#' + b.bevinding_id) && !geh.rust.has('structuur_state#' + b.bevinding_id + '#');
   }).slice(0, KAART_STAPPEN);
@@ -2332,7 +2332,7 @@ function maak(o) {
     const bankZin = r.bank.gemeten ? '; bankrekeningen: ' + r.tel.bank + ' gemeten, ' + r.tel.bank_verschil + ' verschil(len)' : '; bankrekeningen niet gemeten (' + schoon(r.bank.reden || '?', 80) + ')';
     const finZin = r.fin.gemeten ? '; D1 fin: ' + r.tel.fin + ' entiteit(en), ' + r.tel.fin_mdw + ' medewerker(s), ' + r.tel.fin_kern + ' kerncijferpagina(\'s) gemeten, ' + r.tel.fin_verschil + ' verschil(len)' : '; D1 fin niet gemeten (' + schoon(r.fin.reden || '?', 80) + ')';
     r.tel.vj = r.vj.gemeten ? r.vj.bevindingen.length : 'niet gemeten';
-    let restZin = '; plek 9–12 niet gemeten (' + schoon(rest.fout || '?', 60) + ')';
+    let restZin = '; plek 9–14 niet gemeten (' + schoon(rest.fout || '?', 60) + ')';
     try { if (!rest.fout) restZin = plekken().zin(rest); } catch (e) { /* zin blijft "niet gemeten" */ }
     // diffreview #7: wat de Voor jou-ronde om 07:15 zelf rechtzet, hoort niet in de box (nieuw_box/nieuwe zonder die bevindingen)
     const metActie = new Set(r.vj.metActie || []), nieuweBox = nieuw.filter(function (x) { return !metActie.has(x.bevinding_id); });
@@ -2385,7 +2385,7 @@ function boxRij(b, tijd) {
     '- gemeten: ' + b.zin + '. Nieuw: ' + b.nieuwe.slice(0, 6).map(function (x) { return x.check_id + ' ' + k(x.samenvatting); }).join('; ') + (b.nieuwe.length > 6 ? '; …' : '') + '\n' +
     '- gevolg als er niets gebeurt: de router (stap 2) herkent op een register dat niet gelijk is aan de pagina\'s; kritieke verschillen (rekening, contact) blijven staan.\n' +
     '- voorstel: per bevinding in secondbrain.structuur_state (BB…); de voorstelkaart voor David komt met vervolgrij A. Kritiek (ernst serious) dezelfde dag nalopen.\n' +
-    (b.nieuwe.some(function (x) { return REST_BEVINDING_RE.test(x.bevinding_id); }) ? '- plek 9–12 (BB…-r2/wl/dl/cm-…: R2-bronnen, Woordenlijst, Deadlines, Cijfer-Meester): machinekamerwerk volgens het voorstel per bevinding; geen kaart aan David. Paden: `ovis-run.js bibliothecaris --afroep --droog`.\n' : '') +
+    (b.nieuwe.some(function (x) { return REST_BEVINDING_RE.test(x.bevinding_id); }) ? '- plek 9–14 (BB…-r2/wl/dl/cm/kn/hp-…: R2-bronnen, Woordenlijst, Deadlines, Cijfer-Meester, knie-app, health-pod): machinekamerwerk volgens het voorstel per bevinding; geen kaart aan David. Paden: `ovis-run.js bibliothecaris --afroep --droog`.\n' : '') +
     (b.nieuwe.some(function (x) { return VJ_BEVINDING_RE.test(x.bevinding_id); }) ? '- plek 5 (Voor jou ⇄ Open vragen, BB…-vj-…): wat zeker is zet de Voor jou-ronde (07:15/17:15) recht met `voor-jou.py koppel --schrijf`; de rest is machinekamerwerk (geen kaart aan David).\n' : '');
 }
 

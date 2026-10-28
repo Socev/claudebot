@@ -15173,6 +15173,26 @@ const OVIS_MOD = (function () {
   const p = path.join(__dirname, 'ovis-register.js');
   try { return fs.existsSync(p) && fs.existsSync(path.join(__dirname, 'ovis-run.js')) ? require(p) : null; } catch (e) { logError('ovis', e); return null; }
 })();
+// wv1774: plek 13 (D1 knie) en 14 (health-pod), alleen lezen. D1 knie: dezelfde Cloudflare-sleutel als D1 fin, alleen SELECT. De
+// health-pod alleen via de bestaande lezer hp.py (die leest zelf de leessleutel; architectuur § 2.4), alleen de vaste GET-paden van
+// ovis-plekken.js (HP_PAD_RE); de uitvoer blijft in dit proces, de Bibliothecaris houdt er alleen sleutels uit over.
+const APP_KNIE_DB = process.env.APP_KNIE_DB || 'a5fe9515-a341-4f7a-a319-f49803f569b5';   // D1 `knie` (knie-app, wrangler.toml)
+async function ovisKnieD1(batch) {
+  if (!Array.isArray(batch) || batch.some(function (q) { return !smalSqlLezend(q && q.sql); })) throw new Error('alleen lezen');
+  const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + APP_CF_ACCOUNT + '/d1/database/' + APP_KNIE_DB + '/query', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ batch: batch }), signal: AbortSignal.timeout(30000) });
+  const j = await r.json().catch(function () { return null; });
+  if (!r.ok || !j || j.success !== true || !Array.isArray(j.result) || j.result.length !== batch.length || !j.result.every(function (x) { return x && x.success !== false; })) throw new Error('D1 knie http ' + r.status);
+  return j.result.map(function (x) { return { results: Array.isArray(x.results) ? x.results : [] }; });
+}
+const OVIS_HP_ENV = ['HOME', 'PATH', 'TZ', 'LANG', 'LC_ALL'];
+async function ovisHp(pad) {
+  const P = require('./ovis-plekken.js');
+  if (!P.HP_PAD_RE || !P.HP_PAD_RE.test(String(pad))) throw new Error('health-pod: pad niet toegestaan');
+  const env = {}; OVIS_HP_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
+  return P.hpUitslag(await smalKind('python3', ['-I', path.join(VAULT, '.claude', 'skills', 'health-pod', 'hp.py'), 'GET', String(pad)], '', 60000, env));
+}
 const ovis = (function () {
   if (!OVIS_MOD) return null;
   try {
@@ -15189,9 +15209,11 @@ const ovis = (function () {
       // wv1012: plek 8 (D1 fin: entiteit, medewerker, kerncijfers) — dezelfde D1-lezer, alleen SELECT
       fin: { d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); } },
       // wv1013: plek 9 (R2 fin-bronnen ⇄ D1 fin.bron) — D1 alleen SELECT, R2 alleen de objectlijst; plek 10–12 lezen vault en Supabase (sbRpc)
-      rest: process.env.CLOUDFLARE_API_TOKEN && fs.existsSync(path.join(__dirname, 'ovis-plekken.js')) ? {
+      // wv1774: plek 13 (kn: D1 knie, alleen SELECT) met dezelfde sleutel; plek 14 (hp: health-pod via hp.py) ook zonder Cloudflare-sleutel
+      rest: fs.existsSync(path.join(__dirname, 'ovis-plekken.js')) ? Object.assign({ hp: ovisHp }, process.env.CLOUDFLARE_API_TOKEN ? {
         d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); },
-        r2: function () { return require('./ovis-plekken.js').r2Lijst(fetch, process.env.CLOUDFLARE_API_TOKEN, APP_CF_ACCOUNT, 'fin-bronnen'); } } : null });
+        r2: function () { return require('./ovis-plekken.js').r2Lijst(fetch, process.env.CLOUDFLARE_API_TOKEN, APP_CF_ACCOUNT, 'fin-bronnen'); },
+        kn: ovisKnieD1 } : {}) : null });
   } catch (e) { logError('ovis', e); return null; }
 })();
 const ovisLoopt = { nu: null, sinds: 0 };
