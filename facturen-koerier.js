@@ -15,6 +15,9 @@
  * SCHADUW PDF-lezer (wv1431): na de transactie van een bericht of upload geeft de koerier de stukken (bytes, vluchtige tekst) en de uitkomst
  * van de kern door aan io.pdfSchaduw (server.js → pdf-lezer.js, K1: via io, zoals pdftotext). Die bepaalt zelf of het bericht naar Claude
  * mag (patiëntregel fail-closed) en logt alleen velden en verschilvlaggen. Niets in de app verandert; een fout daar raakt de ronde niet.
+ * LIVE PDF-lezer (wv1921): staat Facturen live in pdf-lezer.json, dan leest Claude elke PDF VÓÓR de transactie (io.pdfLive, zelfde
+ * patiëntregel); per document gaan model_kandidaat en de lokale tekst (ook OCR) als controle mee de kern in, en vallen daarna weg. Geen
+ * antwoord, dicht of het rondebudget op: de kern leest zoals voorheen alleen de tekstregels.
  *
  * NIET ONDERHANDELBAAR. Niets gaat naar buiten zonder dat een mens Bevestigen klikte (alleen opdrachten uit de wachtrij, na verstuur_na).
  * Vóór elke verzending de consistentiecontrole (bytes opnieuw → sha256, bijlagen en vingerafdruk opnieuw uit de verse rijen, niet prive,
@@ -393,10 +396,26 @@ function schaduwPdf(fdb, io, berichtId, bericht, documenten, ruw, facturen, over
   } catch (e) { /* schaduw: nooit de ronde raken */ }
 }
 
+// Vóór de transactie (wv1921). docs: [{ sha256, naam, mime, tekst?, ubl_xml?, patientkenmerk_koerier }], ruw: Map sha256 → bytes. Zet per
+// document model_kandidaat en ocr_tekst (vluchtig; de koerier wist ze na de transactie). → aantal gelezen documenten.
+async function pdfLive(io, bericht, docs, ruw, overgeslagen, o) {
+  if (typeof io.pdfLive !== 'function' || !docs.some((d) => d.tekst != null || d.mime === 'application/pdf')) return 0;
+  if (o && typeof o.klok === 'function' && o.klok() - o.start > GRENS.rondeMs) return 0;   // rondebudget op: deze keer de tekstregels
+  let r = null;
+  try {
+    r = await io.pdfLive({ soort: 'facturen', bericht: bericht || null, overgeslagen: Number.isInteger(overgeslagen) ? overgeslagen : null,
+      documenten: docs.map((d) => ({ sha256: d.sha256, naam: d.naam, mime: d.mime, ubl_xml: d.ubl_xml, bytes: ruw.get(d.sha256) || null, patientkenmerk_koerier: !!d.patientkenmerk_koerier })) });
+  } catch (e) { r = null; }
+  if (!r || !r.open || !r.perDoc) return 0;
+  let n = 0;
+  for (const d of docs) { const x = r.perDoc[d.sha256]; if (x && x.kandidaat) { d.model_kandidaat = x.kandidaat; d.ocr_tekst = typeof x.ocr_tekst === 'string' ? x.ocr_tekst : null; n++; } }
+  return n;
+}
+
 // ───────────────────────────── te_lezen-uploads ─────────────────────────────
 
 async function leesUploads(fdb, pdf, o) {
-  const tel = { gelezen: 0, facturen: 0, fout: 0 };
+  const tel = { gelezen: 0, facturen: 0, fout: 0, claude: 0 };
   // een upload die drie keer faalt, wordt overgeslagen en telt niet mee in de 20 (anders houden kapotte PDF's elke nieuwere tegen; diffreview wv855 #6)
   const pogingen = json(D.metaLees(fdb, 'koerier_upload_fout'), {}) || {};
   const opgegeven = Object.keys(pogingen).filter((k) => pogingen[k] >= 3 && /^[0-9a-f]{16}$/.test(k));
@@ -410,8 +429,11 @@ async function leesUploads(fdb, pdf, o) {
       const t = await pdf(bytes);
       if (!t.ok) throw Object.assign(new Error('pdftotext'), { code: t.fout });
       const docs = [{ sha256: d.sha256, naam: d.naam, mime: d.mime || 'application/pdf', bytes: d.bytes, tekst: t.tekst, tekstlaag: t.tekstlaag }];
+      const ruw = new Map([[d.sha256, bytes]]);
+      tel.claude = (tel.claude || 0) + await pdfLive(o.io || {}, null, docs, ruw, 0, o);
       const v = F.verwerkBericht(fdb, { bericht: null, documenten: docs }, { wie: o.wie, nu: o.klok(), geupload_door: d.geupload_door });
-      schaduwPdf(fdb, o.io || {}, null, null, docs, new Map([[d.sha256, bytes]]), v.facturen, 0);
+      schaduwPdf(fdb, o.io || {}, null, null, docs, ruw, v.facturen, 0);
+      for (const x of docs) { x.tekst = null; x.ocr_tekst = null; x.model_kandidaat = null; }
       tel.gelezen++; tel.facturen += v.facturen.length;
       delete pogingen[d.id];
     } catch (e) { tel.fout++; pogingen[d.id] = (pogingen[d.id] || 0) + 1; }
@@ -441,7 +463,7 @@ function hartslag(fdb, soort, naam, o, r) {
  * de oorspronkelijke afzender uit de mailtekst (die tekst wordt nergens bewaard). Dan bericht + stukken + besliskader in één transactie.
  */
 async function leesPostvak(fdb, bron, io, pdf, o) {
-  const tel = { berichten_gezien: 0, nieuw: 0, bijlagen: 0, te_groot: 0, fout: 0, facturen: 0 };
+  const tel = { berichten_gezien: 0, nieuw: 0, bijlagen: 0, te_groot: 0, fout: 0, facturen: 0, claude: 0 };
   const fouten = [], nietGelezen = [];
   const query = D.metaLees(fdb, 'koerier_query') || 'to:d.schaap+facturen@gmail.com has:attachment';
   const eigen = (json(D.metaLees(fdb, 'koerier_eigen_adressen'), null) || ['d.schaap@gmail.com', 'dokterschaap@gmail.com']).map((x) => String(x).toLowerCase());
@@ -513,6 +535,7 @@ async function leesBericht(fdb, bron, io, pdf, m, eigen, o, tel, nietGelezen) {
   // stukken eerst naar schijf (atomair, idempotent), dan in één transactie bericht + besliskader
   const ruw = new Map();
   for (const d of documenten) { const st = D.stukSchrijf(fdb, d._bytes); d.sha256 = st.sha256; ruw.set(d.sha256, d._bytes); delete d._bytes; }
+  if (documenten.length) tel.claude = (tel.claude || 0) + await pdfLive(io, { afzender, onderwerp: m.onderwerp }, documenten, ruw, totaalBijlagen - documenten.length, o);
   let n = 0, nieuwId = null, vf = null;
   D.transactie(fdb, function () {
     if (fdb.db.prepare('SELECT 1 FROM bericht WHERE bron = ? AND message_id = ?').get(bron.id, m.id)) return;
@@ -525,7 +548,7 @@ async function leesBericht(fdb, bron, io, pdf, m, eigen, o, tel, nietGelezen) {
     n = v.facturen.length; vf = v.facturen;
   });
   if (vf) schaduwPdf(fdb, io, nieuwId, { afzender, onderwerp: m.onderwerp }, documenten, ruw, vf, totaalBijlagen - documenten.length);
-  for (const d of documenten) { d.tekst = null; d.ubl_xml = null; }   // vluchtig: weg (de schaduw houdt zijn eigen verwijzing tot hij klaar is)
+  for (const d of documenten) { d.tekst = null; d.ubl_xml = null; d.ocr_tekst = null; d.model_kandidaat = null; }   // vluchtig: weg (de schaduw houdt zijn eigen verwijzing tot hij klaar is)
   ruw.clear();
   return n;
 }

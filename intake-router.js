@@ -25,6 +25,10 @@
  * SCHADUW PDF-lezer (wv1431): een stuk dat de router 'beoordeeld' had (marker geen, alles lokaal gelezen) gaat met zijn PDF-onderdelen
  *   (pad + de lokale tekst als controle) naar o.pdfSchaduw (pdf-lezer.js via server.js), ná de transactie. De router blijft op zijn eigen
  *   lokale tekst beslissen (I3: de letterlijk-toets sluit modeluitvoer uit); een vastgehouden stuk gaat nooit mee.
+ * LIVE PDF-lezer (wv1921): bij het schrijven van het kennisbestand vraagt de router per PDF-onderdeel o.pdfLees(pad) (pdf-lezer.js: eigen
+ *   lezing per pagina + beide patiëntregels, dan Claude) en zet hij Claude's markdown in plaats van de pdftotext-tekst; lukt dat niet, dan
+ *   blijft de lokale tekst. Alleen voor een stuk zonder marker, niet na Davids 'toch verwerken' en alleen met een Jev-uitslag onder de drempel.
+ *   De beslissingen (soort, afzender, entiteit, regels) blijven op de lokale tekst.
  * VORM. Alleen fs, path, crypto en node:sqlite (CI-poort, zie test/intake-router.sh). Processen (pdftotext, tesseract, unzip), Supabase
  * en de kaarten komen van server.js via maak({...}). De zuivere kern (K) is los te gebruiken (herhaling over het archief, toets a).
  */
@@ -647,7 +651,7 @@ function kennisInhoud(x) {
   for (const d of x.delen || []) {
     const t = String(d.tekst || '').slice(0, KENNIS_TEKST_MAX);
     if (d.rol === 'origineel' && x.profiel === 'mail@1' || d.rol === 'hoofdtekst' || d.rol === 'representatie') lijf.push('## Mailtekst', '', t.trim(), '');
-    else lijf.push('## ' + (d.rol === 'bijlage' ? 'Bijlage' : 'Document') + ': ' + String(d.naam || '').replace(/[\r\n]/g, ' '), '', t.trim(), '');
+    else lijf.push('## ' + (d.rol === 'bijlage' ? 'Bijlage' : 'Document') + ': ' + String(d.naam || '').replace(/[\r\n]/g, ' '), '', ...(d.door === 'claude' ? ['_(tekst uit de PDF gelezen door Claude)_', ''] : []), t.trim(), '');
     if (String(d.tekst || '').length > KENNIS_TEKST_MAX) lijf.push('_(ingekort; het volledige stuk staat in OVIS Intake)_', '');
   }
   return kop.join('\n') + '\n' + lijf.join('\n');
@@ -1011,7 +1015,16 @@ function maak(o) {
       catch (e) { if (e && (e.code === 'ENAAM' || e.code === 'EBEZET')) { bijNamen.push({ naam: d.naam, bestand: null, reden: e.code === 'ENAAM' ? 'soort niet toegestaan in de vault' : 'naam bezet' }); continue; } throw e; }
       uit.push(w); bijNamen.push({ naam: d.naam, bestand: path.basename(w.pad) });
     }
-    const tekstDelen = lt.delen.filter(function (d) { return d.rol !== 'representatie' || lt.lijf; }).map(function (d) { return { rol: d.rol, naam: d.naam, tekst: d.tekst }; });
+    const tekstDelen = lt.delen.filter(function (d) { return d.rol !== 'representatie' || lt.lijf; }).map(function (d) { return { deel: d.deel, rol: d.rol, naam: d.naam, tekst: d.tekst }; });
+    if (o.pdfLees && sam.marker === 'geen' && !sam.na_keuze && sam.jev === 'onder') {
+      for (const d of tekstDelen) {
+        const od = delen.find(function (x) { return x.deel === d.deel; });
+        if (!od || String(od.mime || '').toLowerCase() !== 'application/pdf') continue;
+        let r = null;
+        try { r = await o.pdfLees(blobPad(od.sha256)); } catch (e) { r = null; }
+        if (r && r.ok && zonderWit(r.markdown) >= TEKST_MIN) { d.tekst = r.markdown; d.door = 'claude'; }
+      }
+    }
     const inhoud = Buffer.from(kennisInhoud({ stuk_id: s.stuk_id, bron: s.bron, profiel: s.profiel, onderwerp, van: adresVan(meta.van || ''), van_naam: meta.van_naam || '', ontvangen,
       soort: sam.soort, soort_kracht: sam.soort_kracht, afzender: sam.afzender, afzender_naam: naamVan(r, sam.afzender), afzender_kracht: sam.afzender_kracht,
       entiteit: b.doel, entiteit_kracht: b.reden === 'david' ? 'david' : sam.entiteit_kracht, entiteit_bewijs: b.reden === 'david' ? 'keuze van David' : sam.entiteit_bewijs, regel: sam.regel,

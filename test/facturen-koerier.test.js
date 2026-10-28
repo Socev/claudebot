@@ -628,3 +628,39 @@ test('schaduw PDF-lezer (wv1431): na de transactie stukken + kern-uitkomst naar 
   assert.equal(gezien3.length, 1);
   assert.equal(gezien3[0].overgeslagen, 1);
 });
+
+test('live PDF-lezer (wv1921): vóór de transactie per document een kandidaat van Claude; de factuur krijgt de naam van de afzender; geen antwoord = tekstregels', async () => {
+  const t = opzet(), g = nepGmail();
+  assert.equal(t.fdb.db.prepare("UPDATE bron SET actief = 1 WHERE soort = 'verzamelpostvak'").run().changes, 1);
+  const pdf = Z.pdf(['Factuur', 'Factuurnummer: LIVE-0001', 'Factuurdatum: 20-10-2026', 'Totaal incl. btw: EUR 45,82', 'Hosting Voorbeeld B.V.']);
+  g.mails.push({ id: 'live0000000000001', thread_id: 'l', van: 'noreply@hosting-voorbeeld.invalid', aan: 'd.schaap+facturen@gmail.com', onderwerp: 'Factuur LIVE-0001', labels: ['INBOX'],
+    datum: '2026-10-22T08:00:00.000Z', datum_lokaal: '2026-10-22T10:00:00+02:00', dag_lokaal: '2026-10-22' });
+  g.bijlagen.live0000000000001 = [{ naam: 'live.pdf', mime: 'application/pdf', bytes: pdf }];
+  const jobs = [];
+  let inTransactie = null;
+  const pdfLive = async (job) => {
+    inTransactie = t.fdb.db.isTransaction; jobs.push(job);
+    const d = job.documenten[0];
+    return { open: true, perDoc: { [d.sha256]: { kandidaat: { live: true, soort_stuk: 'factuur', factuurnummer: 'LIVE-0001', bedrag_incl: '45.82', leverancier_naam: 'Hosting Voorbeeld B.V.' }, ocr_tekst: 'Totaal incl. btw: EUR 45,82 Hosting Voorbeeld B.V.' } } };
+  };
+  const u = await t.ronde(g, NU + MIN, { pdfLive });
+  assert.equal(u.postvak.ok, true, JSON.stringify(u.postvak));
+  assert.equal(u.postvak.aantallen.claude, 1);
+  assert.equal(inTransactie, false, 'Claude vóór de transactie, niet erin');
+  assert.equal(jobs[0].overgeslagen, 0);
+  assert.ok(Buffer.isBuffer(jobs[0].documenten[0].bytes));
+  assert.equal(jobs[0].bericht.afzender, 'noreply@hosting-voorbeeld.invalid');
+  const f = t.fdb.db.prepare("SELECT * FROM factuur WHERE nummer = 'LIVE-0001'").get();
+  assert.equal(f.leverancier_naam, 'Hosting Voorbeeld B.V.');
+  assert.equal(f.incl, 4582);
+  assert.ok(t.n("SELECT count(*) AS n FROM besluit WHERE factuur = '" + f.id + "' AND bron = 'model' AND veld = 'leverancier_naam'") === 1);
+  // pdfLive gooit of geeft niets: de ronde gaat door op de tekstregels
+  g.mails.push({ id: 'live0000000000002', thread_id: 'm', van: 'noreply@hosting-voorbeeld.invalid', aan: 'd.schaap+facturen@gmail.com', onderwerp: 'Factuur LIVE-0002', labels: ['INBOX'],
+    datum: '2026-10-22T09:00:00.000Z', datum_lokaal: '2026-10-22T11:00:00+02:00', dag_lokaal: '2026-10-22' });
+  g.bijlagen.live0000000000002 = [{ naam: 'live2.pdf', mime: 'application/pdf', bytes: Z.pdf(['Factuur', 'Factuurnummer: LIVE-0002', 'Totaal incl. btw: EUR 10,00']) }];
+  const u2 = await t.ronde(g, NU + 10 * MIN, { pdfLive: async () => { throw new Error('api weg'); } });
+  assert.equal(u2.postvak.ok, true);
+  const f2 = t.fdb.db.prepare("SELECT * FROM factuur WHERE nummer = 'LIVE-0002'").get();
+  assert.equal(f2.leverancier_naam, null);
+  assert.equal(f2.incl, 1000);
+});

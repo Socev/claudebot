@@ -15044,7 +15044,7 @@ async function facturenVerzender(v) {
   }
   throw vooraf('verzender-webhook niet gevonden');
 }
-function facturenIo() { return { luik: appAgendaApi, luikBytes: facturenLuikBytes, verzender: facturenVerzender, pdfSchaduw: pdfSchaduw }; }   // wv1431: schaduw PDF-lezer
+function facturenIo() { return { luik: appAgendaApi, luikBytes: facturenLuikBytes, verzender: facturenVerzender, pdfSchaduw: pdfSchaduw, pdfLive: pdfLive }; }   // wv1431: schaduw PDF-lezer; wv1921: live
 function facturenKoerierInfo(fdb) {
   if (!facturenKoerier) return { aan: false };
   let k = null;
@@ -15458,6 +15458,7 @@ function intakeRouterHaal() {
       pdfBbox: function (pad) { return intakeProces('pdftotext', ['-q', '-bbox', '-l', '20', '-enc', 'UTF-8', pad, '-'], { ms: 30000 }); },
       paginas: async function (pad) { const t = await intakeProces('pdfinfo', [pad], { ms: 15000 }); const m = t && /^Pages:\s+(\d+)/m.exec(t); return m ? Number(m[1]) : null; },
       ocr: intakeOcr, docx: intakeDocx, pdfSchaduw: pdfSchaduw,   // wv1431: schaduw PDF-lezer (alleen beoordeelde stukken)
+      pdfLees: pdfLeesIntake,   // wv1921: PDF-lezer live (markdown in het kennisbestand; lokale tekst als terugval)
       handvatten: function () { return appSbRpc('ovis_intake_handvatten', {}); },
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
       // live (wv1916)
@@ -15614,7 +15615,8 @@ if (mailman && SERVER_ECHT) { setInterval(function () { mailmanTik(); }, 10 * 60
 // pdf-lezer.js leest een PDF met Claude (Messages API, één aanroep per stuk: velden + entiteit, voor Intake ook markdown). In deze stap
 // alleen IN DE SCHADUW naast de Facturen-koerier (io.pdfSchaduw) en de Intake-router (o.pdfSchaduw): velden, sha256 en verschilvlaggen naar
 // PDF_LEZER_DIR/schaduw.jsonl, verbruik zonder tekst naar verbruik.jsonl; in de app verandert niets. Schakelaar PDF_LEZER_DIR/pdf-lezer.json
-// ({"aan": true, "schaduw": true}; ontbreekt hij: uit). Ontbreekt pdf-lezer.js (terugrol), dan niets en pdf_lezer.aan=false in /health.
+// ({"aan": true, "schaduw": true}; ontbreekt hij: uit). Sinds wv1921 live per aanroeper: "live": {"facturen": true, "intake": true}; terug
+// naar de oude lezer = die aanroeper op false (binnen een minuut, zonder herstart). Ontbreekt pdf-lezer.js (terugrol), dan niets en pdf_lezer.aan=false in /health.
 // SLEUTEL (review B1): kluisnaam anthropic_api_key_pdf, NIET op de witte lijst (dus nooit in process.env of bij een kind). De pod leest hem op
 // het moment van gebruik via de Management-API (zelfde route als bankSleutels), 10 min in het geheugen (ontbreekt hij: 2 min), en geeft hem
 // alleen als expliciete apiKey aan de SDK. SDK: @anthropic-ai/sdk uit het image, anders uit de brug PDF_LEZER_DIR/vendor (tot het image
@@ -15690,11 +15692,21 @@ function pdfEntiteiten() {
       let al = []; try { al = JSON.parse(e.aliassen || '[]') || []; } catch (x) { al = []; }
       return { sleutel: e.sleutel, naam: e.naam, naam_kort: e.naam_kort, kvk: e.kvk || null, aliassen: Array.isArray(al) ? al : [] };
     });
+    // wv1921: de tekstankers (oude namen, bijv. van de eenmanszaak) ook in de leesopdracht, zodat Claude de geadresseerde herkent
+    if (fdb) for (const a of fdb.db.prepare('SELECT tekst, entiteit FROM tekstanker WHERE actief = 1').all()) { const e = l.find(function (x) { return x.sleutel === a.entiteit; }); if (e && e.aliassen.indexOf(a.tekst) < 0) e.aliassen.push(a.tekst); }
   } catch (e) { logError('pdf-lezer-entiteiten', e); }
   pdfEntCache = { op: Date.now(), l };
   return l;
 }
 function pdfSchaduw(job) { if (!pdfLezer || !rolPrimair()) return false; job.entiteiten = pdfEntiteiten(); return pdfLezer.schaduw(job); }
+// wv1921: live per aanroeper (pdf-lezer.json "live"). Facturen vóór de transactie van de koerier; Intake bij het schrijven van het kennisbestand.
+// Uit, geen module of niet primair → null / { ok:false }: de aanroeper leest lokaal zoals voorheen.
+async function pdfLive(job) { if (!pdfLezer || !rolPrimair() || !pdfLezer.isLive('facturen')) return null; job.entiteiten = pdfEntiteiten(); return pdfLezer.liveFacturen(job); }
+async function pdfLeesIntake(pad) {
+  if (!pdfLezer || !rolPrimair() || !pdfLezer.isLive('intake')) return { ok: false, terugval: 'uit' };
+  let bytes; try { bytes = fs.readFileSync(pad); } catch (e) { return { ok: false, terugval: 'niet_te_lezen' }; }
+  return pdfLezer.leesIntake(bytes, { entiteiten: pdfEntiteiten() });
+}
 function pdfLezerInfo() { if (!pdfLezer) return { aan: false, module: false }; try { return pdfLezer.health(); } catch (e) { return { fout: true }; } }
 let pdfBatchOp = 0;
 async function pdfBatchTik() {

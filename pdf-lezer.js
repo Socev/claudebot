@@ -23,6 +23,13 @@
  * per uur. Werkelijk verbruik met het model UIT HET ANTWOORD (een server-side fallback kan een ander model gebruiken) naar verbruik.jsonl,
  * zonder tekst. Na een herstart telt de lezer maand en dag opnieuw op uit dat bestand. De spend limit in de Console blijft de harde rem.
  *
+ * LIVE (wv1921, 28-10-2026; David: "We zouden Claude gebruiken - veel betrouwbaarder"). Per aanroeper aan in pdf-lezer.json
+ * ({"live": {"facturen": true, "intake": true}}; ontbreekt of false: oude lezer). Facturen: liveFacturen(job) draait vóór de transactie van
+ * de koerier dezelfde patiëntregel als de schaduw en geeft per PDF een modelkandidaat (velden, afzender, geadresseerde) plus de lokale tekst
+ * (ook OCR) als controle; de kern neemt Claude's velden voor de tekstregels, bedragen en IBAN alleen met lokale steun. Intake: leesIntake(bytes)
+ * geeft de markdown voor het kennisbestand. Een live aanroeper krijgt geen schaduw meer. Terugval (uit, grens, fout, sleutel weg, patiëntregel
+ * dicht): de oude lezer, zonder melding aan de aanroeper.
+ *
  * VORM. Alleen crypto, fs en path; de SDK, de kluis, pdftotext/pdfinfo/OCR, de patiëntpoort en de kern komen via maak({...}) van server.js
  * (CI-poort: test/pdf-lezer.sh). Toetsen met een nep-API op 127.0.0.1 en verzonnen stukken (de repo is openbaar).
  */
@@ -30,7 +37,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const VERSIE = 'pdf-lezer-1.0';
+const VERSIE = 'pdf-lezer-1.1';   // 1.1 (wv1921): live per aanroeper (Facturen: velden vóór de kern; Intake: markdown in raw_input)
 const API = 'https://api.anthropic.com';
 const BETA_FALLBACK = 'server-side-fallback-2026-07-01';
 const OCR_MAX = 10;           // pagina's die de lokale OCR leest (beeld of te weinig tekst); meer = deels gelezen = dicht
@@ -59,6 +66,7 @@ const STANDAARD = {
   wachtrij_max: 20,           // schaduwtaken in het geheugen
   wachtrij_bytes: 100 * 1024 * 1024,
   batch_max: 50,
+  live: {},                   // wv1921: per aanroeper live ({ facturen: true, intake: true }); de rest leest lokaal
 };
 const KNOOP = { tolgaarde: 'TG', groenhouten: 'GH', hagro: 'HAGRO', pot: 'POT', holding: 'HOLD', praktijkhouders_bv: 'PHBV', sel: 'SEL', dbh: 'DBH', ghawa: 'GHAWA', prive: 'PRIVE' };
 
@@ -234,6 +242,15 @@ function ingebedde(xml) {
 function ingebeddePdfs(xml) { return ingebedde(xml).pdfs; }
 function ublTekst(xml) { return String(xml || '').replace(/<(?:[\w.-]+:)?EmbeddedDocumentBinaryObject\b[\s\S]*?<\/(?:[\w.-]+:)?EmbeddedDocumentBinaryObject>/g, ' ').replace(/<[^>]+>/g, '\n').replace(/\n{2,}/g, '\n'); }
 
+// Claude-antwoord (na leegNaarNull) → modelkandidaat voor facturen-kern (per document, B4). Betaalwijze gaat bewust niet mee: "al betaald"
+// zonder bankmatch is geen bewijs (wv1917); de kern beslist daar zelf over op de lokale tekst.
+function kandidaat(r) {
+  const f = (r && r.factuur) || {}, a = (r && r.afzender) || {}, g = (r && r.geadresseerde) || {};
+  return { live: true, soort_stuk: r && r.soort_stuk || null, factuurnummer: f.nummer, factuurdatum: f.datum, vervaldatum: f.vervaldatum, kenmerk: f.kenmerk,
+    valuta: f.valuta, bedrag_excl: f.bedrag_excl, btw: f.btw, bedrag_incl: f.bedrag_incl, iban: f.iban_begunstigde,
+    leverancier_naam: a.naam, leverancier_kvk: a.kvk, leverancier_btw: a.btw, entiteit_hint: g.entiteit, leesbaarheid: r && r.leesbaarheid || null };
+}
+
 // ─────────────────────────── de lezer ───────────────────────────
 
 function maak(o) {
@@ -255,7 +272,7 @@ function maak(o) {
     let j = {};
     try { j = JSON.parse(fs.readFileSync(INSTELLING, 'utf8')) || {}; } catch (e) { j = {}; }
     const r = Object.assign({}, STANDAARD);
-    for (const k of Object.keys(STANDAARD)) if (j[k] !== undefined && typeof j[k] === typeof STANDAARD[k]) r[k] = j[k];
+    for (const k of Object.keys(STANDAARD)) if (j[k] !== undefined && typeof j[k] === typeof STANDAARD[k] && Array.isArray(j[k]) === Array.isArray(STANDAARD[k]) && j[k] !== null) r[k] = j[k];
     instCache = r; instOp = nu();
     return r;
   }
@@ -504,7 +521,7 @@ function maak(o) {
   function bytesVan(job) { return (job.documenten || []).reduce(function (n, d) { return n + (Buffer.isBuffer(d.bytes) ? d.bytes.length : 0) + String(d.tekst || '').length + String(d.ubl_xml || '').length; }, 0) + (job.delen || []).reduce(function (n, d) { return n + String(d.tekst || '').length; }, 0); }
   function schaduw(job) {
     const i = inst();
-    if (!i.aan || !i.schaduw || !isObj(job)) return false;
+    if (!i.aan || !i.schaduw || !isObj(job) || isLive(job.soort)) return false;
     sch.ontvangen++;
     const b = bytesVan(job);
     if (wacht.length >= i.wachtrij_max || wachtBytes + b > i.wachtrij_bytes) { sch.vol++; return false; }
@@ -577,6 +594,43 @@ function maak(o) {
       schrijfRegel(SCHADUW, regel);
     }
     sch.laatste = new Date(nu()).toISOString();
+  }
+
+  // ── live (wv1921) ──
+  function isLive(aanroeper) { const i = inst(); return !!(i.aan && isObj(i.live) && i.live[aanroeper] === true); }
+  const lv = { facturen: { berichten: 0, gesloten: 0, gelezen: 0, terugval: 0 }, intake: { gelezen: 0, gesloten: 0, terugval: 0 } };
+  /*
+   * Facturen live: één bericht (zelfde vorm als de schaduwjob: overgeslagen, bericht, documenten [{ sha256, naam, mime, bytes, ubl_xml?,
+   * patientkenmerk_koerier }]) vóór de transactie. → { open, reden?, perDoc: { sha256: { kandidaat, ocr_tekst } } }. Nooit een throw.
+   */
+  async function liveFacturen(job) {
+    if (!isLive('facturen') || !isObj(job)) return { open: false, reden: 'uit', perDoc: {} };
+    lv.facturen.berichten++;
+    let poort;
+    try { poort = await poortFacturen(job); } catch (e) { fout('pdf-lezer-live', e); poort = { open: false, reden: 'fout' }; }
+    if (!poort.open) { lv.facturen.gesloten++; verbruik({ aanroeper: 'facturen', terugval: 'patientregel_' + kort(poort.reden, 30), usd: 0 }); return { open: false, reden: poort.reden, perDoc: {} }; }
+    const perDoc = {};
+    for (const d of job.documenten || []) {
+      const ld = poort.perDoc[d.sha256];
+      if (!ld) continue;   // UBL: gestructureerd, gaat niet naar Claude
+      const r = await lees(d.bytes, { aanroeper: 'facturen', entiteiten: job.entiteiten || [], lokaleTekst: ld.tekst, paginas: ld.paginas });
+      if (!r.ok) { lv.facturen.terugval++; continue; }
+      lv.facturen.gelezen++;
+      perDoc[d.sha256] = { kandidaat: kandidaat(r.r), ocr_tekst: ld.tekst, controle: r.controle.vlaggen };
+    }
+    return { open: true, perDoc };
+  }
+  // Intake live: één PDF. Zelfde lezing per pagina + beide patiëntregels als de schaduw. → { ok, markdown, entiteit, samenvatting } of { ok:false, terugval }.
+  async function leesIntake(bytes, o2) {
+    if (!isLive('intake')) return { ok: false, terugval: 'uit' };
+    if (!Buffer.isBuffer(bytes) || bytes.subarray(0, 5).toString('latin1') !== '%PDF-') return terug('intake', 'geen_pdf');
+    const l = await lokaalLezen(bytes);
+    const pd = l.ok ? patientDicht([l.tekst], { scan: l.ocr_paginas > 0 }) : { reden: l.reden };
+    if (pd) { lv.intake.gesloten++; return terug('intake', 'patientregel_' + kort(pd.reden, 30)); }
+    const r = await lees(bytes, { aanroeper: 'intake', entiteiten: (o2 && o2.entiteiten) || [], lokaleTekst: l.tekst, paginas: l.paginas });
+    if (!r.ok) { lv.intake.terugval++; return r; }
+    lv.intake.gelezen++;
+    return { ok: true, markdown: String(r.r.markdown || ''), samenvatting: r.r.samenvatting || null, entiteit: r.r.geadresseerde.entiteit || null, controle: r.controle.vlaggen };
   }
 
   // ── Batches (halve prijs, resultaat binnen 24 uur) ──
@@ -669,12 +723,13 @@ function maak(o) {
     return { aan: i.aan, schaduw: i.schaduw, versie: VERSIE, model: i.model, effort: i.effort, sleutel: tel.sleutel, sdk: tel.sdk || (o.sdk ? 'nog_niet_geladen' : 'ontbreekt'),
       vandaag_usd: rond(tel.dag_usd), maand_usd: rond(tel.maand_usd), gereserveerd_usd: rond(tel.gereserveerd), grens_maand_usd: i.grens_maand_usd, grens_dag_usd: i.grens_dag_usd,
       aanroepen_vandaag: tel.aanroepen_dag, aanroepen_maand: tel.aanroepen_maand, terugvallen_maand: tel.terugval_maand, terugval_redenen: tel.terugval_redenen, vlaggen_maand: tel.vlaggen_maand,
+      live: Object.keys(isObj(i.live) ? i.live : {}).filter(function (k) { return i.aan && i.live[k] === true; }), live_stand: lv,
       laatste: tel.laatste, schaduw_stand: Object.assign({ wachtrij: wacht.length }, sch), batch: { wachtrij: batchWacht.length, open: leesBatches().length } };
   }
   // Voor de toets: wachten tot de schaduwrij leeg is.
   async function leeg() { while (bezig || wacht.length) await new Promise(function (r) { setTimeout(r, 5); }); }
 
-  return { lees, schaduw, poortFacturen, lokaalLezen, batchWachtrij, batchTik, bijBatch, health, leeg, _inst: inst };
+  return { lees, schaduw, poortFacturen, lokaalLezen, liveFacturen, leesIntake, isLive, batchWachtrij, batchTik, bijBatch, health, leeg, _inst: inst };
 }
 
-module.exports = { maak, leegNaarNull, VERSIE, PRIJZEN, STANDAARD, OCR_MAX, KNOOP, schema, systeemTekst, controle, vergelijk, kostenUsage, kostenAntwoord, maxTokens, ingebedde, ingebeddePdfs, ublTekst, sha256 };
+module.exports = { maak, kandidaat, leegNaarNull, VERSIE, PRIJZEN, STANDAARD, OCR_MAX, KNOOP, schema, systeemTekst, controle, vergelijk, kostenUsage, kostenAntwoord, maxTokens, ingebedde, ingebeddePdfs, ublTekst, sha256 };

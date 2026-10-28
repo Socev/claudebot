@@ -393,6 +393,43 @@ test('batches: indienen zonder fallbacks, reservering tegen batchprijs, ophalen 
   api.sluit();
 });
 
+test('live (wv1921): standaard uit; per aanroeper aan; Facturen geeft een kandidaat per PDF en geen schaduw meer; Intake geeft markdown; patiëntregel blijft dicht', { skip: !KLASSE && 'SDK niet beschikbaar' }, async () => {
+  const api = await nepApi();
+  const uit = lezer(api);
+  assert.equal(uit.isLive('facturen'), false);
+  assert.deepEqual(await uit.liveFacturen({ overgeslagen: 0, documenten: [] }), { open: false, reden: 'uit', perDoc: {} });
+  assert.equal((await uit.leesIntake(nepPdf(FACTUUR))).terugval, 'uit');
+  assert.equal(lezer(api, null, { live: null }).isLive('facturen'), false, 'null telt niet als instelling');
+  const l = lezer(api, null, { live: { facturen: true, intake: true } });
+  assert.equal(l.isLive('facturen'), true);
+  const b = nepPdf(FACTUUR), sha = 'a'.repeat(64);
+  const r = await l.liveFacturen({ overgeslagen: 0, bericht: { afzender: 'factuur@leverancier-a.test' }, entiteiten: ENT, documenten: [{ sha256: sha, naam: 'f.pdf', mime: 'application/pdf', bytes: b }] });
+  assert.equal(r.open, true);
+  const k = r.perDoc[sha].kandidaat;
+  assert.equal(k.live, true);
+  assert.equal(k.leverancier_naam, 'Leverancier A B.V.');
+  assert.equal(k.factuurnummer, 'VB-2026-0412');
+  assert.equal(k.bedrag_incl, '1428.50');
+  assert.equal(k.entiteit_hint, 'tolgaarde');
+  assert.ok(!('betaalwijze' in k), 'betaalwijze van Claude gaat niet mee (wv1917)');
+  assert.match(r.perDoc[sha].ocr_tekst, /Zwaluwstaartvlinder/);
+  // een live aanroeper krijgt geen schaduw meer
+  assert.equal(l.schaduw({ soort: 'facturen', overgeslagen: 0, documenten: [] }), false);
+  // patiëntregel: een kenmerk sluit het bericht, geen aanroep
+  const voor = api.verzoeken.length;
+  const d = await l.liveFacturen({ overgeslagen: 0, entiteiten: ENT, documenten: [{ sha256: sha, naam: 'f.pdf', mime: 'application/pdf', bytes: b, patientkenmerk_koerier: true }] });
+  assert.equal(d.open, false);
+  assert.deepEqual(d.perDoc, {});
+  assert.equal(api.verzoeken.length, voor);
+  // Intake: markdown
+  api.antwoord = () => ({ json: Object.assign({}, ANTWOORD, { markdown: '# Factuur VB-2026-0412\n\nLeverancier A B.V. — totaal € 1.428,50, merkwoord Zwaluwstaartvlinder', categorie_voorstel: 'facturen', samenvatting: 'Factuur.' }) });
+  const m = await l.leesIntake(b, { entiteiten: ENT });
+  assert.equal(m.ok, true);
+  assert.match(m.markdown, /^# Factuur VB-2026-0412/);
+  assert.deepEqual(l.health().live.sort(), ['facturen', 'intake']);
+  api.sluit();
+});
+
 test('server.js: sleutel via de Management-API (niet uit de omgeving), alleen op de primaire kant, /health, koerier en router; kastje krijgt geen Anthropic-sleutel', () => {
   const s = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8');
   const blok = s.slice(s.indexOf('// ── PDF-lezer via de Claude-API (wv1431'), s.indexOf('async function pdfBatchTik()'));
@@ -401,7 +438,11 @@ test('server.js: sleutel via de Management-API (niet uit de omgeving), alleen op
   assert.ok(!/process\.env\.ANTHROPIC/.test(blok), 'geen ANTHROPIC_* uit de omgeving');
   assert.match(blok, /function pdfSchaduw\(job\) \{ if \(!pdfLezer \|\| !rolPrimair\(\)\) return false;/);
   assert.match(s, /pdf_lezer: pdfLezerInfo\(\)/);
-  assert.match(s, /function facturenIo\(\) \{ return \{[^}]*pdfSchaduw: pdfSchaduw \}; \}/);
+  assert.match(s, /function facturenIo\(\) \{ return \{[^}]*pdfSchaduw: pdfSchaduw, pdfLive: pdfLive \}; \}/);
+  // wv1921: live alleen op de primaire kant en alleen als die aanroeper live staat
+  assert.match(blok, /async function pdfLive\(job\) \{ if \(!pdfLezer \|\| !rolPrimair\(\) \|\| !pdfLezer\.isLive\('facturen'\)\) return null;/);
+  assert.match(blok, /if \(!pdfLezer \|\| !rolPrimair\(\) \|\| !pdfLezer\.isLive\('intake'\)\) return \{ ok: false, terugval: 'uit' \};/);
+  assert.match(s, /pdfLees: pdfLeesIntake,/);
   assert.match(s, /ocr: intakeOcr, docx: intakeDocx, pdfSchaduw: pdfSchaduw,/);
   assert.ok(!/ANTHROPIC_API_KEY_AUTO/.test(s), 'geen doorgifte meer aan het kastje-kind');
   const u = fs.readFileSync(path.resolve(__dirname, '..', 'uitrol.sh'), 'utf8');

@@ -927,6 +927,43 @@ test('I2: entiteitsstem van het model weegt 3 met naam of KvK op het stuk, ander
   assert.equal(tg.entiteit, 'tolgaarde');
 });
 
+test('wv1921 live: Claude is de bron (nummer, datum, naam van de afzender), een bedrag alleen met lokale steun, IBAN alleen met lokale steun; UBL wint; patiëntkenmerk = geen model', () => {
+  const BERICHT_KAAL = { message_id: 'm9', afzender: 'noreply@hosting.example', onderwerp: 'Fwd: Factuur 99' };
+  const ctx = ctxBasis({ leveranciers: [] });
+  // tekstregels lezen een ander nummer dan Claude; Claude wint, met de oude waarde in het besluit
+  const t = pdfA({ nummer: 'VB-2026-0412' });
+  const mk = { live: true, soort_stuk: 'factuur', factuurnummer: 'VB-2026-0413', factuurdatum: '2026-10-13', vervaldatum: '2026-11-12', bedrag_incl: '1428.50', leverancier_naam: 'Hosting Voorbeeld B.V.', leverancier_kvk: '99100001' };
+  const f = K.beslisBericht({ bericht: BERICHT_KAAL, documenten: [doc(t, { model_kandidaat: mk })] }, ctx).facturen[0];
+  assert.equal(f.nummer, 'VB-2026-0413');
+  assert.equal(f.factuurdatum, '2026-10-13');
+  assert.equal(f.leverancier_naam, 'Hosting Voorbeeld B.V.', 'naam van de afzender op het stuk, ook bij een kaal noreply-adres');
+  assert.equal(f.leverancier_kvk, '99100001', 'KvK met lokale steun');
+  assert.ok(f.besluiten.some((b) => b.bron === 'model' && b.veld === 'nummer' && /tekstregels lazen VB-2026-0412/.test(b.toelichting)));
+  assert.deepEqual(f.model_zonder_steun, []);
+  // zonder Claude: geen naam (kaal adres)
+  assert.equal(K.beslisBericht({ bericht: BERICHT_KAAL, documenten: [doc(t)] }, ctx).facturen[0].leverancier_naam, null);
+  // een bedrag dat niet in de lokale tekst staat, komt niet in het voorstel
+  const g = K.beslisBericht({ bericht: BERICHT_KAAL, documenten: [doc(t, { model_kandidaat: Object.assign({}, mk, { bedrag_incl: '9999.99', bedrag_excl: '1180.58' }) })] }, ctx).facturen[0];
+  assert.equal(g.incl, 142850, 'tekstregels aangehouden');
+  assert.ok(g.redenen.some((x) => /Claude las incl 9999,99, maar dat staat niet in de lokale tekst/.test(x)));
+  assert.deepEqual(g.model_zonder_steun, [], 'geen blokkade die na opslag vergeten wordt: het bedrag komt er gewoon niet in');
+  // IBAN: regex wint; model-IBAN zonder lokale steun niet overgenomen
+  const zonderIban = pdfA({ betaalzin: 'Betaling volgens afspraak.' });
+  const h = K.beslisBericht({ bericht: BERICHT_KAAL, documenten: [doc(zonderIban, { model_kandidaat: Object.assign({}, mk, { iban: IBAN.B }) })] }, ctx).facturen[0];
+  assert.equal(h.iban, null);
+  assert.ok(h.redenen.some((x) => /Claude las een IBAN dat niet in de lokale tekst staat/.test(x)));
+  const i = K.beslisBericht({ bericht: BERICHT_KAAL, documenten: [doc(t, { model_kandidaat: Object.assign({}, mk, { iban: IBAN.B }) })] }, ctx).facturen[0];
+  assert.equal(i.iban, IBAN.A, 'regex-IBAN wint (I1)');
+  // UBL wint van Claude
+  const u = K.beslisBericht({ bericht: BERICHT_KAAL, documenten: [ublDoc(ubl({ nummer: 'UBL-77' })), doc(t, { model_kandidaat: mk })] }, ctx).facturen[0];
+  assert.equal(u.nummer, 'UBL-77');
+  assert.notEqual(u.leverancier_naam, 'Hosting Voorbeeld B.V.');
+  // patiëntkenmerk in het bericht: geen model
+  const p = K.beslisBericht({ bericht: BERICHT_KAAL, documenten: [doc(t, { model_kandidaat: mk, patientkenmerk_koerier: true })] }, ctx).facturen[0];
+  assert.equal(p.nummer, 'VB-2026-0412');
+  assert.equal(p.leverancier_naam, null);
+});
+
 // ───────────────────────────── wv1917: regel per afzender, "al betaald" alleen op bewijs ─────────────────────────────
 
 test('wv1917 betaalwijze: "voldaan wanneer wij uw betaling ontvangen" is geen claim; een echte claim wordt zelf betalen, behalve bij een menselijke standaard', () => {

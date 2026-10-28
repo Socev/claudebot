@@ -657,8 +657,42 @@ function stapVelden(groep, ctx, opties) {
   // Modelkandidaat (Claude, één per document; B4) vult alleen lege velden. Het IBAN niet hier: kiesBetaalIban kiest eerst uit de regex (I1),
   // pas daarna mag het model-IBAN (beslisBericht). Een bedrag zonder lokale steun komt in model_zonder_steun: dat blokkeert Bevestigen (I1).
   const mk = opties && opties.model_kandidaat;
-  const zonder = [];
-  if (mk && !(opties && opties.patientkenmerk)) {
+  const zonder = [], opmerkingen = [];
+  // wv1921 (PDF-lezer live): Claude is de bron voor wat de UBL niet geeft; de tekstregels hierboven zijn terugval. Nummer, datums, kenmerk,
+  // valuta, soort en de naam van de afzender neemt hij over; een bedrag alleen als het ook in de lokale tekst (pdftotext/OCR) staat, anders
+  // blijft de regelwaarde (of leeg) met een opmerking. Zo komt een bedrag dat alleen Claude las nooit in een voorstel (I1, zonder dat het na
+  // opslag een blokkade moet onthouden). Het IBAN loopt via beslisBericht (regex eerst, model alleen met lokale steun).
+  if (mk && mk.live && !(opties && opties.patientkenmerk)) {
+    const st = opties.steun_tekst;
+    const zet = (v, w) => { const oud = uit[v]; uit[v] = w; besluiten.push(besluit('velden', v, w, 'model', 'gelezen door Claude' + (oud != null && oud !== w ? ' (tekstregels lazen ' + oud + ')' : ''))); };
+    const tekst = (x) => (x == null ? '' : String(x).replace(/\s+/g, ' ').trim());
+    if (!ubl && (mk.soort_stuk === 'factuur' || mk.soort_stuk === 'creditnota') && uit.soort !== mk.soort_stuk) zet('soort', mk.soort_stuk);
+    for (const [v, k, ok] of [['nummer', 'factuurnummer', (x) => x.length <= 100], ['factuurdatum', 'factuurdatum', isIsoDatum], ['vervaldatum', 'vervaldatum', isIsoDatum],
+      ['kenmerk', 'kenmerk', (x) => x.length <= 100], ['valuta', 'valuta', (x) => /^[A-Z]{3}$/.test(x)]]) {
+      if ((ubl && ubl[v] != null) || (v === 'valuta' && ubl)) continue;
+      const w = tekst(mk[k]);
+      if (w && ok(w) && uit[v] !== w) zet(v, w);
+    }
+    const credit = uit.soort === 'creditnota';
+    for (const [v, k] of [['excl', 'bedrag_excl'], ['btw', 'btw'], ['incl', 'bedrag_incl']]) {
+      if ((ubl && ubl[v] != null) || mk[k] == null) continue;
+      let c = decimaalNaarCenten(String(mk[k]));
+      if (c == null) continue;
+      c = credit ? -Math.abs(c) : Math.abs(c);
+      if (uit[v] === c) continue;
+      if (lokaleSteun(v, c, st)) zet(v, c);
+      else opmerkingen.push('Claude las ' + v + ' ' + (c / 100).toFixed(2).replace('.', ',') + ', maar dat staat niet in de lokale tekst: ' + (uit[v] == null ? 'leeg gelaten' : 'tekstregels aangehouden') + ', nakijken');
+    }
+    if (mk.iban != null) uit.model_iban = ibanNorm(mk.iban);
+    if (!ubl) {
+      const n = tekst(mk.leverancier_naam).slice(0, 200);
+      if (n.length >= 2 && n !== uit.leverancier_naam) { uit.leverancier_naam = n; besluiten.push(besluit('velden', 'leverancier_naam', n, 'model', 'afzender op het stuk, gelezen door Claude')); }
+      const kvk = String(mk.leverancier_kvk || '').replace(/\D/g, '');
+      if (!uit.leverancier_kvk && kvk.length === 8 && !eigenKvks(ctx).has(kvk) && lokaleSteun('kvk', kvk, st)) uit.leverancier_kvk = kvk;
+      const btw = String(mk.leverancier_btw || '').replace(/[\s.]/g, '').toUpperCase();
+      if (!uit.leverancier_btw && /^[A-Z]{2}[0-9A-Z]{8,12}$/.test(btw) && lokaleSteun('nummer', btw, st)) uit.leverancier_btw = btw;
+    }
+  } else if (mk && !(opties && opties.patientkenmerk)) {
     const kaart = { nummer: 'factuurnummer', factuurdatum: 'factuurdatum', vervaldatum: 'vervaldatum', kenmerk: 'kenmerk', valuta: 'valuta' };
     for (const v of Object.keys(kaart)) if (uit[v] == null && mk[kaart[v]] != null) { uit[v] = String(mk[kaart[v]]); besluiten.push(besluit('velden', v, uit[v], 'model', 'modelkandidaat (deterministisch leeg)')); }
     for (const [v, k] of [['excl', 'bedrag_excl'], ['btw', 'btw'], ['incl', 'bedrag_incl']]) {
@@ -676,7 +710,7 @@ function stapVelden(groep, ctx, opties) {
   }
   if (!uit.soort) uit.soort = 'factuur';
   if (!uit.valuta) uit.valuta = 'EUR';
-  return { velden: uit, besluiten, model_zonder_steun: zonder };
+  return { velden: uit, besluiten, model_zonder_steun: zonder, opmerkingen };
 }
 
 // Betaal-IBAN: een vreemd (niet-eigen) IBAN dat de leverancier nog niet kent gaat voor, want dat moet nagebeld worden ("rekeningnummer
@@ -1047,9 +1081,10 @@ function beslisBericht(invoer, ctx) {
     const steunTekst = [g.pdf && g.pdf.tekst, g.pdf && g.pdf.ocr_tekst, g.ubl && g.ubl.ubl._tekst].filter(Boolean).join('\n');
     if (pk.kenmerk) redenen.push('Kenmerk van patiëntgegevens: alleen de eigenaar ziet deze factuur, geen taalmodel');
     const scan = !!(g.pdf && g.pdf.soort === 'scan' && !g.ubl);
-    if (scan) redenen.push('Scan zonder tekstlaag: velden met de hand invullen');
+    if (scan) redenen.push(mk && mk.live ? 'Scan: velden gelezen door Claude, de lokale OCR is de controle' : 'Scan zonder tekstlaag: velden met de hand invullen');
     const sv = stapVelden(g, ctx, { bericht, model_kandidaat: mk, patientkenmerk: pk.kenmerk, steun_tekst: steunTekst });
     const v = sv.velden; besluiten.push(...sv.besluiten);
+    redenen.push(...(sv.opmerkingen || []));
     const modelZonder = sv.model_zonder_steun.slice();
     if (g.pdf && g.ubl) redenen.push('PDF en UBL uit hetzelfde bericht: één factuur, velden uit de UBL');
     const rg = regelVoorAfzender(bericht, ctx);
@@ -1059,7 +1094,9 @@ function beslisBericht(invoer, ctx) {
     besluiten.push(besluit('leverancier', 'leverancier', lev ? lev.id : null, lev ? 'leverancier' : 'regel', lev ? 'herkend via ' + hl.via : 'onbekende leverancier'));
     if (v.iban == null) { v.iban = kiesBetaalIban(v, lev, ctx); if (v.iban) besluiten.push(besluit('velden', 'iban', v.iban, 'regel', g.ubl ? 'uit PDF (ontbrak in UBL)' : 'uit PDF-tekst')); }
     // I1: het model-IBAN alleen als de regex niets vond; het gaat door de IBAN-poort zoals elk IBAN (nieuw = nabellen).
-    if (v.iban == null && v.model_iban && !pk.kenmerk) {
+    // wv1921: live alleen met lokale steun (een IBAN dat alleen Claude las komt niet in het voorstel)
+    if (v.iban == null && v.model_iban && !pk.kenmerk && mk && mk.live && !lokaleSteun('iban', v.model_iban, steunTekst)) redenen.push('Claude las een IBAN dat niet in de lokale tekst staat: niet overgenomen, nakijken');
+    else if (v.iban == null && v.model_iban && !pk.kenmerk) {
       v.iban = v.model_iban;
       const steun = lokaleSteun('iban', v.iban, steunTekst);
       if (!steun) modelZonder.push('iban');

@@ -311,3 +311,35 @@ test('Opus-review wv1916: kop met Plaud-bron, niet-geplaatste bijlage en Jev-dek
   assert.match(t, /\ndocumentbron: "plaud"\n/); assert.match(t, /bijlagen:\n  - "x__a.pdf"\nbijlagen_niet_geplaatst:\n  - "b\.exe \(soort niet toegestaan in de vault; staat in OVIS Intake\)"/);
   assert.match(t, /las alleen de eerste 24\.000 tekens/);
 });
+
+test('live PDF-lezer (wv1921): kennisbestand met Claude-markdown voor een PDF-bijlage; lukt het niet, dan de lokale tekst; vastgehouden stuk nooit', async () => {
+  const gevraagd = [];
+  const E = omgeving({ pdfLees: async function (pad) { gevraagd.push(pad); return { ok: true, markdown: '# Rooster week 45\n\n| dag | wie |\n|---|---|\n| dinsdag | overleg huisartsen (verzonnen) |' }; } });
+  E.zet({ meta: { van: 'anne@voorbeeld.example', van_naam: 'Anne Proef', onderwerp: 'Re: Overleg roosters', aan: ['david@voorbeeld.example'], verzonden: '2026-10-28T18:30:00Z' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Re: Overleg roosters', GEWOON) },
+      { deel: 'b1', rol: 'bijlage', naam: 'Rooster week 45.pdf', mime: 'application/pdf', bytes: '%PDF-1.4 rooster' }] });
+  await E.r.ronde();
+  assert.equal(gevraagd.length, 1, 'alleen de PDF, niet de mail');
+  const t = fs.readFileSync(path.join(E.vault, E.bestanden().find((f) => /\.md$/.test(f))), 'utf8');
+  assert.match(t, /## Bijlage: Rooster week 45\.pdf\n\n_\(tekst uit de PDF gelezen door Claude\)_\n\n# Rooster week 45\n\n\| dag \| wie \|/);
+  assert.match(t, /## Mailtekst\n\nBeste David/);
+  E.r.sluit();
+  // terugval: geen markdown → de lokale tekst
+  const F = omgeving({ pdfLees: async function () { return { ok: false, terugval: 'grens_dag' }; } });
+  F.zet({ meta: { van: 'anne@voorbeeld.example', van_naam: 'Anne Proef', onderwerp: 'Re: Overleg roosters', aan: ['david@voorbeeld.example'], verzonden: '2026-10-28T18:30:00Z' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('anne@voorbeeld.example', 'Re: Overleg roosters', GEWOON) },
+      { deel: 'b1', rol: 'bijlage', naam: 'Rooster week 45.pdf', mime: 'application/pdf', bytes: '%PDF-1.4 rooster' }] });
+  await F.r.ronde();
+  const t2 = fs.readFileSync(path.join(F.vault, F.bestanden().find((f) => /\.md$/.test(f))), 'utf8');
+  assert.ok(!/gelezen door Claude/.test(t2));
+  assert.match(t2, /## Bijlage: Rooster week 45\.pdf\n\nRooster week 45 dinsdag/);
+  F.r.sluit();
+  // vastgehouden (marker) → geen aanroep
+  const vast = [];
+  const G = omgeving({ pdfLees: async function (p) { vast.push(p); return { ok: true, markdown: 'x'.repeat(100) }; } });
+  G.zet({ marker: 'gemarkeerd', soorten: ['bsn'], meta: { van: 'poli@voorbeeld.example', onderwerp: 'Brief' },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('poli@voorbeeld.example', 'Brief', PATIENT_TEKST) }, { deel: 'b1', rol: 'bijlage', naam: 'brief.pdf', mime: 'application/pdf', bytes: '%PDF-1.4 rooster' }] });
+  await G.r.ronde();
+  assert.equal(vast.length, 0);
+  G.r.sluit();
+});
