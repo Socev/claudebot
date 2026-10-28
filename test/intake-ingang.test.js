@@ -939,20 +939,26 @@ test('wv1832: spiegel — schakelaar, koppeling per profiel, geen inhoud, idempo
     await o.ing.spiegel();
     assert.strictEqual(aanroepen.length, 3); assert.deepStrictEqual(aanroepen[2].body.p.stukken.map((s) => s.ref), [ids.m1]);
     assert.strictEqual(aanroepen[2].body.p.stukken[0].bronnen[0].processing_status, 'quarantaine'); assert.strictEqual(stand('m1').ps, 'quarantaine');
-    // botsing → opnieuw; weigering → niet_spiegelbaar met reden
-    o.ing._db.prepare("UPDATE stuk SET status = 'geschreven' WHERE stuk_id IN (?, ?)").run(ids.m1, ids.m2);
-    o.ing._db.prepare("UPDATE stuk SET status = 'mislukt' WHERE stuk_id = ?").run(ids.m2);
-    antwoord = (b) => ({ run_id: null, stukken: b.p.stukken.map((s) => ({ ref: s.ref, ok: false, reden: s.ref === ids.m1 ? 'tijdelijk:23505' : 'sha256 ongeldig' })) });
+    // nieuw stuk: botsing → opnieuw, weigering → niet_spiegelbaar met reden; statuswissel geweigerd → blijft gespiegeld met de oude status
+    const tm = g[6].env(); tm.bron_id = '19:proeftwee@thread.v2/1761333120001'; tm.meta.conversation_id = '19:proeftwee@thread.v2'; ids.teams = (await post(o, K.teams, tm)).j.stuk_id;
+    const gm = g[3].env(); ids.gambia = (await post(o, K.gambia, gm)).j.stuk_id;
+    await o.ing.ronde();
+    o.ing._db.prepare("UPDATE stuk SET status = 'geschreven' WHERE stuk_id = ?").run(ids.m1);
+    antwoord = (b) => ({ run_id: null, stukken: b.p.stukken.map((s) => ({ ref: s.ref, ok: false, reden: s.ref === ids.teams ? 'tijdelijk:23505' : 'sha256 ongeldig' })) });
     await o.ing.spiegel();
-    assert.strictEqual(stand('m1').stand, 'opnieuw'); assert.strictEqual(stand('m2').stand, 'niet_spiegelbaar'); assert.strictEqual(stand('m2').reden, 'geweigerd:sha256 ongeldig');
+    assert.strictEqual(stand('teams').stand, 'opnieuw'); assert.strictEqual(stand('gambia').stand, 'niet_spiegelbaar'); assert.strictEqual(stand('gambia').reden, 'geweigerd:sha256 ongeldig');
+    assert.deepStrictEqual([stand('m1').stand, stand('m1').ps, stand('m1').reden], ['gespiegeld', 'quarantaine', 'status:sha256 ongeldig']);
     antwoord = null;
-    await o.ing.spiegel(); assert.strictEqual(stand('m1').stand, 'gespiegeld');
+    await o.ing.spiegel();
+    assert.strictEqual(stand('teams').stand, 'gespiegeld'); assert.deepStrictEqual([stand('m1').ps, stand('m1').pogingen], ['registered', 0]);
+    assert.strictEqual(stand('gambia').stand, 'niet_spiegelbaar');
     // telling (pod-kant van de nameting) en info zonder inhoud
     const t = o.ing.spiegelTelling();
     assert.strictEqual(t.per_route['gmail.david|bestand|bijlage'], 1); assert.strictEqual(t.per_route['whatsapp.nl|whatsapp|hoofd'], 1);
-    assert.strictEqual(t.per_profiel['mail@1'].gespiegeld, 1); assert.strictEqual(t.per_profiel['mail@1'].niet_spiegelbaar, 1);
+    assert.strictEqual(t.per_route['teams|teams|hoofd'], 1); assert.strictEqual(t.per_route['whatsapp.gm|whatsapp|hoofd'], undefined);
+    assert.strictEqual(t.per_profiel['mail@1'].gespiegeld, 2);
     const info = o.ing.info().spiegel;
-    assert.strictEqual(info.aan, true); assert.strictEqual(info.stand.gespiegeld, 3);
+    assert.strictEqual(info.aan, true); assert.strictEqual(info.stand.gespiegeld, 5);
     assert.ok(JSON.stringify(info).indexOf('Negeer') < 0);
   } finally { await o.sluit(); }
 });
@@ -973,5 +979,68 @@ test('wv1832 R1: onderhoudsstand van de vault (niet het eigen bestand) houdt de 
     // een kapotte lezer telt als aan (liever wachten)
     const o2 = await omgeving({ onderhoudAan: () => { throw new Error('onleesbaar'); } });
     try { assert.strictEqual((await post(o2, s.sleutel, s.env())).status, 202); } finally { await o2.sluit(); }
+  } finally { await o.sluit(); }
+});
+
+test('wv1832 Fable-review: Outlook-bijlage zonder mailkern, contacten in twee versies, haperingen opnieuw, statuswissel zonder bytes, batch halveert', async () => {
+  const aanroepen = [];
+  let antwoord = null, id = 0;
+  const rpc = async (fn, body) => {
+    aanroepen.push(JSON.parse(JSON.stringify(body.p)));
+    if (antwoord) return antwoord(body);
+    return { run_id: 1, stukken: body.p.stukken.map((s) => ({ ref: s.ref, ok: true, bronnen: s.bronnen.map(() => ({ record: ++id, revisie: id, ontvangst: id })) })) };
+  };
+  const o = await omgeving({ sbRpc: rpc });
+  try {
+    fs.writeFileSync(path.join(o.dir, 'spiegel.json'), '{"aan": true}');
+    // Outlook-bijlage als eigen stuk (wv1717): geen hoofdtekst, wel een bestand
+    const pdf = PDF('rooster van de praktijk in december');
+    const ol = { protocol: 'ovis-intake/1', profiel: 'outlook-mail@1', bron: 'outlook:tolgaarde', bron_id: '<proef-0002@voorbeeld.nl>#bijlage-' + sha(pdf).slice(0, 16), ontvangen: nuOff,
+      meta: { onderwerp: 'Bijlage: Rooster december.pdf', classificatie: 'zakelijk', filterversie: 'proef', entiteit: 'tolgaarde', internet_message_id: '<proef-0002@voorbeeld.nl>' },
+      onderdelen: [tdeel('r1', 'representatie', naam.outlook('2026-10-27', '21:07', 'bijlage-Rooster-december'), '---\n---\n\nrooster\n'), bdeel('b1', 'bijlage', 'Rooster december.pdf', pdf, 'application/pdf')],
+      overgang: { stand: 'om' } };
+    const r = await post(o, K.outlook, ol); await put(o, K.outlook, r.j.stuk_id, 'b1', pdf, 'application/pdf');
+    // contacten: twee exports = twee versies van één bron
+    const c = gevallen()[7];
+    const c1 = await post(o, c.sleutel, c.env());
+    const e2 = c.env(); e2.onderdelen = [tdeel('r1', 'representatie', 'Contacten.md', '# Contacten (compacte zoeklijst)\n\n- **Proef Een**\n- **Proef Drie**\n')];
+    const c2 = await post(o, c.sleutel, e2); assert.strictEqual(c2.j.uitkomst, 'herzien');
+    await o.ing.ronde();
+    await o.ing.spiegel();
+    const per = Object.fromEntries(aanroepen[0].stukken.map((s) => [s.ref, s.bronnen]));
+    const b = per[r.j.stuk_id];
+    assert.strictEqual(b.length, 1); assert.deepStrictEqual([b[0].origin_system, b[0].external_id, b[0].binnen], ['bestand', sha(pdf), undefined]);
+    assert.strictEqual(o.ing._db.prepare('SELECT reden FROM spiegel WHERE stuk_id = ?').get(r.j.stuk_id).reden, 'zonder_mailkern');
+    const v1 = per[c1.j.stuk_id][0], v2 = per[c2.j.stuk_id][0];
+    assert.deepStrictEqual([v1.origin_system, v1.external_id, v1.version_label, v2.external_id, v2.version_label], ['contacten', 'contacten', '1', 'contacten', '2']);
+    assert.notStrictEqual(v1.sha256, v2.sha256); assert.strictEqual(v1.access_context, 'strikt_prive');
+    // statuswissel na de bewaartermijn (blob weg): dezelfde bronnen met de nieuwe status, geen blob_ontbreekt, stand blijft gespiegeld
+    const bsha = sha(pdf);
+    fs.unlinkSync(path.join(o.dir, 'blob', bsha.slice(0, 2), bsha)); o.ing._db.prepare("UPDATE blob SET weg = '2026-10-28T00:00:00Z' WHERE sha256 = ?").run(bsha);
+    o.ing._db.prepare("UPDATE stuk SET status = 'vastgehouden' WHERE stuk_id = ?").run(r.j.stuk_id);
+    await o.ing.spiegel();
+    assert.deepStrictEqual(aanroepen[1].stukken.map((s) => [s.ref, s.bronnen[0].processing_status, s.bronnen[0].sha256]), [[r.j.stuk_id, 'quarantaine', bsha]]);
+    let rij = o.ing._db.prepare('SELECT * FROM spiegel WHERE stuk_id = ?').get(r.j.stuk_id);
+    assert.deepStrictEqual([rij.stand, rij.ps], ['gespiegeld', 'quarantaine']); assert.ok(JSON.parse(rij.ids).length === 1);
+    // statuswissel geweigerd: stand blijft gespiegeld (de rijen in Supabase bestaan), oude status, ids blijven
+    o.ing._db.prepare("UPDATE stuk SET status = 'geschreven' WHERE stuk_id = ?").run(r.j.stuk_id);
+    antwoord = (bd) => ({ stukken: bd.p.stukken.map((s) => ({ ref: s.ref, ok: false, reden: 'processing_status niet voor Intake' })) });
+    await o.ing.spiegel();
+    rij = o.ing._db.prepare('SELECT * FROM spiegel WHERE stuk_id = ?').get(r.j.stuk_id);
+    assert.deepStrictEqual([rij.stand, rij.ps, rij.pogingen], ['gespiegeld', 'quarantaine', 1]); assert.ok(rij.ids); assert.match(rij.reden, /^status:/);
+    antwoord = null;
+    // hapering op de pod (profiel even weg): opnieuw, geen eindstand
+    const wa = gevallen()[2]; const rw = await post(o, wa.sleutel, wa.env()); await o.ing.ronde();
+    const prof = o.ing._profielen.get('whatsapp-dump@1'); o.ing._profielen.delete('whatsapp-dump@1');
+    await o.ing.spiegel();
+    assert.deepStrictEqual(Object.values(o.ing._db.prepare('SELECT stand, reden FROM spiegel WHERE stuk_id = ?').get(rw.j.stuk_id)), ['opnieuw', 'profiel_onbekend']);
+    o.ing._profielen.set('whatsapp-dump@1', prof);
+    // batch halveert na een mislukte aanroep, en groeit weer na een geslaagde
+    antwoord = () => { throw new Error('time-out'); };
+    assert.strictEqual((await o.ing.spiegel()).fout, 'rpc'); assert.strictEqual(o.ing.info().spiegel.batch, 100);
+    antwoord = null;
+    await o.ing.spiegel();
+    assert.strictEqual(o.ing._db.prepare('SELECT stand FROM spiegel WHERE stuk_id = ?').get(rw.j.stuk_id).stand, 'gespiegeld');
+    assert.strictEqual(o.ing.info().spiegel.batch, 200);
   } finally { await o.sluit(); }
 });

@@ -523,7 +523,7 @@ CREATE TABLE IF NOT EXISTS overgang (id INTEGER PRIMARY KEY, stuk_id TEXT NOT NU
   geschreven_sha TEXT, drive_gezien_sha TEXT, uitkomst TEXT, tijd TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS spoor (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL, soort TEXT NOT NULL, sha256 TEXT, stuk_id TEXT, bron TEXT);
 CREATE TABLE IF NOT EXISTS spiegel (stuk_id TEXT PRIMARY KEY, stand TEXT NOT NULL, reden TEXT, ps TEXT, kern TEXT, op TEXT NOT NULL,
-  pogingen INTEGER NOT NULL DEFAULT 0, ids TEXT);
+  pogingen INTEGER NOT NULL DEFAULT 0, ids TEXT, bronnen TEXT);
 `;
 
 /*
@@ -552,6 +552,8 @@ function maak(o) {
   db.exec(SCHEMA);
   // wv1303: gemeld = tijdstip van de box-rij over dit hangende stuk (per stuk één keer)
   if (!db.prepare('PRAGMA table_info(stuk)').all().some((k) => k.name === 'gemeld')) db.exec('ALTER TABLE stuk ADD COLUMN gemeld TEXT');
+  // wv1832: de verstuurde bronnen (alleen hashes, sleutels, tijden) zodat een statuswissel later geen bytes meer nodig heeft (Fable-review ZOU 3)
+  if (!db.prepare('PRAGMA table_info(spiegel)').all().some((k) => k.name === 'bronnen')) db.exec('ALTER TABLE spiegel ADD COLUMN bronnen TEXT');
   const tellers = {};            // sleutel-id → { uur: [t], dag: { d, bytes } }
   const perUur = (o.grenzen && o.grenzen.perUur) || PER_UUR, perDag = (o.grenzen && o.grenzen.bytesPerDag) || BYTES_PER_DAG;
   let sleutelCache = null;
@@ -639,7 +641,8 @@ function maak(o) {
     return { stand: 'tellen', bronnen: null };
   }
   function houdtVast(bron) { const m = markerStand(); return m.stand === 'vasthouden' && (!m.bronnen || m.bronnen.includes(bron)); }
-  // Onderhoud = het eigen bestand <dir>/onderhoud óf de onderhoudsstand van de vault (wv1832 R1; onleesbaar telt daar als aan).
+  // Onderhoud = het eigen bestand <dir>/onderhoud óf de onderhoudsstand van de vault (wv1832 R1; een onleesbaar standbestand telt in
+  // onderhoud.js als aan; ontbreekt onderhoud.js in de release, dan uit, zoals voor de rest van de pod). Een fout in de lezer = aan.
   function onderhoudNu() {
     if (fs.existsSync(ONDERHOUD)) return true;
     try { return !!(o.onderhoudAan && o.onderhoudAan()); } catch (e) { if (o.fout) o.fout('intake-onderhoud', e); return true; }
@@ -1189,10 +1192,12 @@ function maak(o) {
    * Onderhoud (R1) en een lopende ronde: niets. → tellingen, nooit inhoud.
    */
   function spiegelStand() { try { const j = JSON.parse(fs.readFileSync(SPIEGEL, 'utf8')); return { aan: !!(j && j.aan === true) }; } catch (e) { return { aan: false }; } }
-  let spiegelLaatst = null, spiegelBezig = false;
-  const spiegelZet = db.prepare(`INSERT INTO spiegel (stuk_id, stand, reden, ps, kern, op, pogingen, ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  // Batchgrootte: na een mislukte aanroep (bv. time-out van PostgREST) de helft (minimaal 25), na een geslaagde weer verdubbelen (Fable ZOU 1).
+  let spiegelLaatst = null, spiegelBezig = false, spiegelGrootte = SPIEGEL_MAX;
+  const SPIEGEL_POD_TIJDELIJK = new Set(['fout_op_de_pod', 'profiel_onbekend']);   // haperingen op de pod: opnieuw, geen eindstand (Fable ZOU 2)
+  const spiegelZet = db.prepare(`INSERT INTO spiegel (stuk_id, stand, reden, ps, kern, op, pogingen, ids, bronnen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (stuk_id) DO UPDATE SET stand = excluded.stand, reden = excluded.reden, ps = excluded.ps, kern = coalesce(excluded.kern, spiegel.kern),
-    op = excluded.op, pogingen = excluded.pogingen, ids = excluded.ids`);
+    op = excluded.op, pogingen = excluded.pogingen, ids = coalesce(excluded.ids, spiegel.ids), bronnen = coalesce(excluded.bronnen, spiegel.bronnen)`);
   function spiegelBronnen(s) {
     const profiel = profielen.get(s.profiel);
     if (!profiel) return { niet: 'profiel_onbekend' };
@@ -1265,17 +1270,25 @@ function maak(o) {
     const t0 = nuIso(nu());
     const uit = { kandidaten: 0, verstuurd: 0, gespiegeld: 0, niet_spiegelbaar: 0, opnieuw: 0 };
     try {
-      const rijen = db.prepare(`SELECT s.*, g.stand g_stand, g.ps g_ps, g.pogingen g_pogingen FROM stuk s LEFT JOIN spiegel g ON g.stuk_id = s.stuk_id
+      const rijen = db.prepare(`SELECT s.*, g.stand g_stand, g.ps g_ps, g.pogingen g_pogingen, g.bronnen g_bronnen FROM stuk s LEFT JOIN spiegel g ON g.stuk_id = s.stuk_id
         WHERE coalesce(s.stand, '') <> 'dubbel' AND s.status IN ('ontvangen', 'geschreven', 'wacht', 'mislukt', 'wacht_marker', 'vastgehouden') AND s.marker_op IS NOT NULL
-          AND (g.stuk_id IS NULL OR g.stand = 'opnieuw' OR (g.stand = 'gespiegeld' AND g.ps IS NOT (CASE WHEN s.status IN ('mislukt') THEN 'received'
+          AND (g.stuk_id IS NULL OR g.stand = 'opnieuw' OR (g.stand = 'gespiegeld' AND g.pogingen < ${SPIEGEL_TIJDELIJK_MAX} AND g.ps IS NOT (CASE WHEN s.status IN ('mislukt') THEN 'received'
             WHEN s.status IN ('wacht_marker', 'vastgehouden') THEN 'quarantaine' ELSE 'registered' END)))
-        ORDER BY s.aangemaakt LIMIT ?`).all(Math.min(SPIEGEL_MAX, opt.max || SPIEGEL_MAX));
+        ORDER BY s.aangemaakt LIMIT ?`).all(Math.min(spiegelGrootte, opt.max || SPIEGEL_MAX));
       uit.kandidaten = rijen.length;
       const stukken = [], per = new Map();
       for (const s of rijen) {
         let b;
-        try { b = spiegelBronnen(s); } catch (e) { if (o.fout) o.fout('intake-spiegel', e); b = { niet: 'fout_op_de_pod' }; }
-        if (b.niet) { spiegelZet.run(s.stuk_id, 'niet_spiegelbaar', b.niet, null, null, t0, s.g_pogingen || 0, null); uit.niet_spiegelbaar++; continue; }
+        if (s.g_stand === 'gespiegeld' && s.g_bronnen) {
+          // alleen een statuswissel: dezelfde bronnen met de nieuwe status, zonder de bytes opnieuw te lezen (die kunnen na de bewaartermijn weg zijn)
+          b = { bronnen: JSON.parse(s.g_bronnen).map((x) => Object.assign({}, x, { processing_status: PS_VAN_STATUS[s.status] })), status: true };
+        } else {
+          try { b = spiegelBronnen(s); } catch (e) { if (o.fout) o.fout('intake-spiegel', e); b = { niet: 'fout_op_de_pod' }; }
+        }
+        if (b.niet && SPIEGEL_POD_TIJDELIJK.has(b.niet) && (s.g_pogingen || 0) + 1 < SPIEGEL_TIJDELIJK_MAX) {
+          spiegelZet.run(s.stuk_id, 'opnieuw', b.niet, null, null, t0, (s.g_pogingen || 0) + 1, null, null); uit.opnieuw++; continue;
+        }
+        if (b.niet) { spiegelZet.run(s.stuk_id, 'niet_spiegelbaar', b.niet, null, null, t0, s.g_pogingen || 0, null, null); uit.niet_spiegelbaar++; continue; }
         if (b.kern) bewaarKern(b.kern);
         stukken.push({ ref: s.stuk_id, bronnen: b.bronnen });
         per.set(s.stuk_id, { s, b });
@@ -1284,21 +1297,25 @@ function maak(o) {
       uit.verstuurd = stukken.length;
       let r;
       try { r = await o.sbRpc('sb2_intake_registreer', { p: { versie: (o.versie && o.versie()) || '', stukken } }); }
-      catch (e) { if (o.fout) o.fout('intake-spiegel', e); uit.fout = 'rpc'; return uit; }
+      catch (e) { if (o.fout) o.fout('intake-spiegel', e); uit.fout = 'rpc'; spiegelGrootte = Math.max(25, Math.floor(spiegelGrootte / 2)); return uit; }
       if (!r || !Array.isArray(r.stukken)) { uit.fout = 'antwoord'; return uit; }
+      spiegelGrootte = Math.min(SPIEGEL_MAX, spiegelGrootte * 2);
       tx(function () {
         for (const x of r.stukken) {
           const p = per.get(x && x.ref);
           if (!p) continue;
-          const ps = p.b.bronnen[0].processing_status, kern = p.b.kern ? p.b.kern.sha : null;
+          const ps = p.b.bronnen[0].processing_status, kern = p.b.kern ? p.b.kern.sha : null, pog = (p.s.g_pogingen || 0) + 1;
           if (x.ok === true && Array.isArray(x.bronnen) && x.bronnen.length === p.b.bronnen.length) {
             const ids = x.bronnen.map((y, i) => ({ route: p.b.bronnen[i].intake_route, origin: p.b.bronnen[i].origin_system, bijlage: p.b.bronnen[i].binnen != null,
               record: y.record, revisie: y.revisie, ontvangst: y.ontvangst }));
-            spiegelZet.run(p.s.stuk_id, 'gespiegeld', p.b.reden || null, ps, kern, t0, 0, JSON.stringify(ids)); uit.gespiegeld++;
-          } else if (x.ok !== true && /^tijdelijk:/.test(String(x.reden || '')) && (p.s.g_pogingen || 0) + 1 < SPIEGEL_TIJDELIJK_MAX) {
-            spiegelZet.run(p.s.stuk_id, 'opnieuw', String(x.reden).slice(0, 120), null, kern, t0, (p.s.g_pogingen || 0) + 1, null); uit.opnieuw++;
+            spiegelZet.run(p.s.stuk_id, 'gespiegeld', p.b.reden || null, ps, kern, t0, 0, JSON.stringify(ids), JSON.stringify(p.b.bronnen)); uit.gespiegeld++;
+          } else if (p.b.status) {
+            // statuswissel geweigerd: de rijen in Supabase blijven; stand gespiegeld met de oude status, hooguit 20 pogingen (Fable ZOU 3)
+            spiegelZet.run(p.s.stuk_id, 'gespiegeld', ('status:' + String(x.reden || 'onbekend')).slice(0, 200), p.s.g_ps, null, t0, pog, null, null); uit.opnieuw++;
+          } else if (x.ok !== true && /^tijdelijk:/.test(String(x.reden || '')) && pog < SPIEGEL_TIJDELIJK_MAX) {
+            spiegelZet.run(p.s.stuk_id, 'opnieuw', String(x.reden).slice(0, 120), null, kern, t0, pog, null, null); uit.opnieuw++;
           } else {
-            spiegelZet.run(p.s.stuk_id, 'niet_spiegelbaar', ('geweigerd:' + String(x.reden || 'onbekend')).slice(0, 200), null, kern, t0, (p.s.g_pogingen || 0) + 1, null); uit.niet_spiegelbaar++;
+            spiegelZet.run(p.s.stuk_id, 'niet_spiegelbaar', ('geweigerd:' + String(x.reden || 'onbekend')).slice(0, 200), null, kern, t0, pog, null, null); uit.niet_spiegelbaar++;
           }
         }
       });
@@ -1323,7 +1340,7 @@ function maak(o) {
   function spiegelInfo() {
     let stand = null;
     try { stand = Object.fromEntries(db.prepare('SELECT stand, count(*) n FROM spiegel GROUP BY stand').all().map((r) => [r.stand, r.n])); } catch (e) { /* db dicht */ }
-    return { aan: spiegelStand().aan, stand, laatste: spiegelLaatst };
+    return { aan: spiegelStand().aan, stand, batch: spiegelGrootte, laatste: spiegelLaatst };
   }
 
   /*
