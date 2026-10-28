@@ -4,7 +4,7 @@
 # dubbel veld), vingerafdruk ongevoelig voor het blok en updated: (maar niet voor updated: in de tekst), half blok = fout, validatie (vaste
 # plek, bestandsnaam, publiek domein, iban op een organisatie, ongeldige regex, IBAN/BSN in contact of alias), rpcInvoer, compileer tegen een
 # nep-databank (alleen gewijzigde pagina's; tweede pagina met hetzelfde id telt niet; nacht zonder grendel schrijft geen blok; blok
-# idempotent; pagina die tijdens de ronde verandert krijgt geen blok), Bibliothecaris BB1-BB7 met vaste gegevens (en BB5 niet bij
+# idempotent; pagina die tijdens de ronde verandert krijgt geen blok), Bibliothecaris BB1-BB8 met vaste gegevens (en BB5 niet bij
 # niet-dezelfde-als), opgelost/BB7-spoor blijft, afroep stempelt niet, droog schrijft niets, boxRij zonder contactwaarden.
 # wv981 (blok 8): plek 4 POT-factuuradres — vergelijking stampagina ⇄ POT-app/dossier/open nota, BB1/BB2/BB5, niet gemeten ≠ opgelost, kaart.
 # wv1010 (blok 10): plek 6 bank — rekeningpagina ⇄ bank (entiteit, hoofdrekening), Bankregels, blokken, niet gemeten ≠ opgelost, privacy, lezer.

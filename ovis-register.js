@@ -8,7 +8,7 @@
 // nog hetzelfde in de gekoppelde markdown staan." De entiteitpagina (Entiteit - <code>.md, later Relaties/<naam>.md) is de bron; deze
 // module leest de frontmatter, valideert en schrijft via public.ovis_pagina_zet (alles of niets per pagina). De databank beslist wat
 // actief wordt: een handvat of contactveld van een pagina is altijd 'voorgesteld' tot Davids Ja; naam/iban/agb van een bestaande knoop
-// en het intrekken van een actief handvat komen terug als voorstel. De Bibliothecaris vergelijkt pagina's en databank (BB1–BB7) en
+// en het intrekken van een actief handvat komen terug als voorstel. De Bibliothecaris vergelijkt pagina's en databank (BB1–BB8) en
 // lost niets stil op.
 //
 // Drie lagen (ontwerplijnen § 4.4): dit is de logica. Geen netwerk en geen sleutels in dit bestand: sbRpc, lezen en schrijven worden

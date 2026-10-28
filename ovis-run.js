@@ -7,7 +7,7 @@
 //   node ovis-run.js dag|afroep            compileren: alleen pagina's waarvan de vingerafdruk afwijkt; alleen de databank
 //   node ovis-run.js nacht [--buiten-venster]   alles compileren + gegenereerd blok in de pagina's; alleen 01:00-02:00 (Amsterdam) en
 //                                          alleen als de grendel al vastgehouden wordt (anders weigert hij)
-//   node ovis-run.js bibliothecaris [--afroep]  BB1-BB7; --afroep: geen hartslagstempel (en de aanroeper geen box-rij)
+//   node ovis-run.js bibliothecaris [--afroep]  BB1-BB8; --afroep: geen hartslagstempel (en de aanroeper geen box-rij)
 //   node ovis-run.js export <register.json>     knopen uit de databank in register.json (sleutels/vertaling blijven); alleen bij verschil
 //   node ovis-run.js voorjou [--schrijf]   wv1009 plek 5: Voor jou ⇄ Open vragen aan David vergelijken (zelfde regels als de Bibliothecaris);
 //                                          --schrijf (Voor jou-ronde, voor-jou.py koppel --schrijf): wat zeker is in het register zetten

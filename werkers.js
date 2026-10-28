@@ -88,7 +88,7 @@ const POD = [
   { id: 'agents', naam: 'Achtergrondagents', soort: 'agent', trigger: 'tikker', rooster: 'de werkvoorraad-tikker (elke 2 min) en /agent op afroep',
     model: 'per opdracht', hartslag: [], uitkomst: 'Agent-rapport (machinekamer of hoofd); lijst in Agents', bron: 'server.js /agent, agent_jobs.json' },
   { id: 'bibliothecaris', naam: 'Bibliothecaris', soort: 'manager', module: 'intake', trigger: 'pod-tijdklok', rooster: 'elke nacht 02:30',
-    model: 'geen', hartslag: ['bibliothecaris'], uitkomst: 'box-rij bij nieuwe bevindingen (BB1–BB7)', manager: 'bibliothecaris', bron: 'ovis-run.js bibliothecaris' },
+    model: 'geen', hartslag: ['bibliothecaris'], uitkomst: 'box-rij bij nieuwe bevindingen (BB1–BB8)', manager: 'bibliothecaris', bron: 'ovis-run.js bibliothecaris' },
   { id: 'ovis-compiler', naam: 'OVIS-compiler', soort: 'routine', module: 'intake', trigger: 'pod-tijdklok', rooster: 'elke 5 min (databank), nacht 01:00 (pagina\'s)',
     model: 'geen', hartslag: [], uitkomst: 'secondbrain.knoop + gegenereerd blok in de entiteitpagina\'s', bron: 'ovis-register.js compileer' },
   { id: 'sb2-linter', naam: 'SB2 frontmatter-linter', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke nacht 02:00–02:29',

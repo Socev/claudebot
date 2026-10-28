@@ -125,7 +125,7 @@ function r2bChecks(m, pagina, bev, tel) {
     if (!perSleutel[o.key]) bev('BB2', 'r2-' + h6(o.key) + '-geen-rij', 'bestand in R2 fin-bronnen zonder bronrij in de datahub', 'R2 fin-bronnen/' + schoon(o.key, 160) + ' staat in geen enkele rij van D1 fin.bron. Voorstel: de rij alsnog laden (intake.py) of het object weghalen na Davids Ja.');
   });
   if (pagina.fouten.length) { tel.r2_half = true; bev('BB6', 'r2-pagina', 'bronnenregister van de datahub niet te koppelen: ' + pagina.fouten[0], R2B_PAD + ': ' + pagina.fouten.join('; ') + '. Voorstel: frontmatter herstellen (ovis.db met ' + R2B_SLEUTELS.join(' en ') + ').'); }
-  else if (R.blokHandwerk(pagina.tekst)) bev('BB6', 'r2-blok', 'in het gegenereerde blok van het bronnenregister is met de hand iets veranderd', R2B_PAD + ': de tekst binnen het OVIS-blok is niet meer wat de compiler schreef; hij overschrijft het niet. Voorstel: wat erin getypt is naar D1 (opmerking/gecontroleerd), daarna het blok laten vernieuwen.');
+  else if (R.blokHandwerk(pagina.tekst)) bev('BB8', 'r2-blok', 'in het gegenereerde blok van het bronnenregister is met de hand iets veranderd', R2B_PAD + ': de tekst binnen het OVIS-blok is niet meer wat de compiler schreef; hij overschrijft het niet. Voorstel: wat erin getypt is naar D1 (opmerking/gecontroleerd), daarna het blok laten vernieuwen.');
   else if (R.huidigBlok(pagina.tekst) !== r2bBlokTekst(m.bron)) tel.r2_verouderd = 1;   // BB4: alleen telling; de nacht vernieuwt
 }
 

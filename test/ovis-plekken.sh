@@ -49,7 +49,7 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
   toets('9 ovis.db mist de D1-sleutel → BB6-r2-pagina', ids(v.b).join() === 'BB6-r2-pagina', v.b);
   v = verzamel(); tel = {};
   P.r2bChecks({ bron: BRON, r2: R2 }, P.leesR2bPagina(PAG(blok.replace('Jaarrekening 2024 GH', 'Jaarrekening 2024 GH (met de hand)'))), v.bev, tel);
-  toets('9 handwerk in het blok → BB6-r2-blok (BB8 neemt de databank nog niet aan)', ids(v.b).join() === 'BB6-r2-blok', v.b);
+  toets('9 handwerk in het blok → BB8-r2-blok (wv1805: de databank neemt BB8 aan sinds 28-10)', ids(v.b).join() === 'BB8-r2-blok' && P.REST_BEVINDING_RE.test('BB8-r2-blok'), v.b);
   v = verzamel(); tel = {};
   P.r2bChecks({ bron: BRON, r2: R2 }, P.leesR2bPagina(null), v.bev, tel);
   toets('9 pagina weg → BB6-r2-pagina', ids(v.b).join() === 'BB6-r2-pagina', v.b);
@@ -183,7 +183,7 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     const sbRpc = async (fn, body) => {
       if (fn === 'ovis_register_lees') return JSON.parse(JSON.stringify(db));
       if (fn === 'ovis_zorgdata_paden') { if (cm instanceof Error) throw cm; return cm; }
-      if (fn === 'ovis_bibliothecaris_zet') { body.p_rijen.forEach((r) => { if (!/^BB[1-7]-/.test(r.bevinding_id) || (r.check_id && !/^BB[1-7]$/.test(r.check_id)) || (r.ernst && ['good', 'warning', 'serious', 'critical'].indexOf(r.ernst) < 0)) throw new Error('ovis_bibliothecaris_zet: alleen BB-bevindingen (' + r.bevinding_id + ', ' + r.ernst + ')'); });
+      if (fn === 'ovis_bibliothecaris_zet') { body.p_rijen.forEach((r) => { if (!/^BB[1-8]-/.test(r.bevinding_id) || (r.check_id && !/^BB[1-8]$/.test(r.check_id)) || (r.ernst && ['good', 'warning', 'serious', 'critical'].indexOf(r.ernst) < 0)) throw new Error('ovis_bibliothecaris_zet: alleen BB-bevindingen (' + r.bevinding_id + ', ' + r.ernst + ')'); });
         body.p_rijen.forEach((r) => { const b = db.bevindingen.find((x) => x.bevinding_id === r.bevinding_id); if (b) Object.assign(b, r); else db.bevindingen.push(Object.assign({}, r)); }); db.bevindingen = db.bevindingen.filter((x) => x.status !== 'opgelost'); return { ok: true }; }
       if (fn === 'mk_hartslag_stempel') return [{}];
       throw new Error('onbekende rpc ' + fn);
@@ -224,6 +224,14 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
       fs.writeFileSync(path.join(v, '90_Cijfermeester/Bibliotheek.md'), '---\nbronnen: 1\nproducten: 1\n---\n');
       await m.bibliothecaris({ afroep: true });
       toets('haak: Bibliotheek weer gelijk → opgelost', open().indexOf('BB4-cm-bibliotheek') < 0, open());
+      // wv1805: handwerk in het R2-blok gaat als BB8 door de databank (mock = ^BB[1-8], zoals sinds 28-10)
+      const r2was = fs.readFileSync(path.join(v, P.R2B_PAD), 'utf8');
+      fs.writeFileSync(path.join(v, P.R2B_PAD), r2was.replace('Jaarrekening 2024 GH', 'Jaarrekening 2024 GH (met de hand)'));
+      b = await m.bibliothecaris({ afroep: true });
+      const r2blok = open().indexOf('BB8-r2-blok') >= 0 && db.bevindingen.find((x) => x.bevinding_id === 'BB8-r2-blok').check_id === 'BB8';
+      fs.writeFileSync(path.join(v, P.R2B_PAD), r2was);
+      b = await m.bibliothecaris({ afroep: true });
+      toets('haak: handwerk in het R2-blok → BB8-r2-blok open via ovis_bibliothecaris_zet; blok weer gelijk → opgelost', r2blok && open().indexOf('BB8-r2-blok') < 0, open());
     }
     toets('haak: geen kaart aan David voor plek 9–12 (wel open rest-bevindingen)', db.bevindingen.some((x) => P.REST_BEVINDING_RE.test(x.bevinding_id)) && !R.kaartBiblio({ knopen: db.knopen, bevindingen: db.bevindingen.filter((x) => P.REST_BEVINDING_RE.test(x.bevinding_id)).map((x) => Object.assign({ status: 'open' }, x)), kaarten: [], log: [] }, { nu: Date.parse('2026-10-28T01:30:00Z') }).kaart);
     const box = R.boxRij({ zin: 'z', nieuw: 1, nieuw_box: 1, nieuwe: [{ bevinding_id: 'BB2-r2-abc-geen-rij', check_id: 'BB2', samenvatting: 's' }] }, '2026-10-28 02:31');
@@ -309,7 +317,7 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     const sbRpc = async (fn, body) => {
       if (fn === 'ovis_register_lees') return JSON.parse(JSON.stringify(db));
       if (fn === 'ovis_zorgdata_paden') throw new Error('rpc http 404');
-      if (fn === 'ovis_bibliothecaris_zet') { body.p_rijen.forEach((r) => { if (!/^BB[1-7]-/.test(r.bevinding_id) || (r.check_id && !/^BB[1-7]$/.test(r.check_id)) || (r.ernst && ['good', 'warning', 'serious', 'critical'].indexOf(r.ernst) < 0)) throw new Error('ovis_bibliothecaris_zet: alleen BB-bevindingen (' + r.bevinding_id + ', ' + r.ernst + ')'); });
+      if (fn === 'ovis_bibliothecaris_zet') { body.p_rijen.forEach((r) => { if (!/^BB[1-8]-/.test(r.bevinding_id) || (r.check_id && !/^BB[1-8]$/.test(r.check_id)) || (r.ernst && ['good', 'warning', 'serious', 'critical'].indexOf(r.ernst) < 0)) throw new Error('ovis_bibliothecaris_zet: alleen BB-bevindingen (' + r.bevinding_id + ', ' + r.ernst + ')'); });
         body.p_rijen.forEach((r) => { const b = db.bevindingen.find((x) => x.bevinding_id === r.bevinding_id); if (b) Object.assign(b, r); else db.bevindingen.push(Object.assign({}, r)); }); db.bevindingen = db.bevindingen.filter((x) => x.status !== 'opgelost'); return { ok: true }; }
       if (fn === 'mk_hartslag_stempel') return [{}];
       throw new Error('onbekende rpc ' + fn);

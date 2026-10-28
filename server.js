@@ -15446,7 +15446,7 @@ async function appHarvester(req, res, a, d, route) {
 // ── einde harvester ──
 
 // ── OVIS-register (wv979, 24-10-2026; ontwerp + Fable-review vooraf: mk-scripts/wv979/ontwerp.md; bouwplan OVIS Intake § 4) ──
-// Logica in ovis-register.js (compiler vault → secondbrain.knoop, Bibliothecaris BB1–BB7), opdrachtregel ovis-run.js. Hier alleen de
+// Logica in ovis-register.js (compiler vault → secondbrain.knoop, Bibliothecaris BB1–BB8), opdrachtregel ovis-run.js. Hier alleen de
 // koppeling: de pod-tijdklok (elke 5 min, alleen de echte pod met rol primair, Fable wv979 #6):
 //   - buiten 01:00–02:00: pagina's waarvan de vingerafdruk afwijkt → alleen de databank, nooit terug in de pagina;
 //   - 01:00–01:59 de nachtronde als kind onder `flock -F -w 300 <vault.lock>` (de bisync-grendel; gewijzigde pagina's compileren + het
