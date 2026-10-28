@@ -325,6 +325,10 @@ jobs:
       - name: "onderhoud (wv1271, onderhoudsstand vault)"
         if: ${{ !cancelled() }}
         run: bash test/onderhoud.sh
+      # Nachtketen (wv1868, SB2 fase 3d): volgorde, stempels, herstart (ook echt met SIGKILL), onderhoudsstand, n8n-klaar, R6, keten-blok in een vm.
+      - name: "nachtketen (wv1868, nachtorkestrator)"
+        if: ${{ !cancelled() }}
+        run: bash test/nachtketen.sh
       # Bandjes (wv739/wv743): register lezen/schrijven, routes, Studio-koppeling (nep-Piper), naKlaar, /smal, box-rij, server.js-blok in een vm.
       - name: "bandjes (wv743, mini-app Bandjes)"
         if: ${{ !cancelled() }}

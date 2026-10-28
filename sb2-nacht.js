@@ -26,6 +26,8 @@
  * - Staat in <staatMap>/staat.json (map 0700, bestand 0600): laatste datum, uitkomst per stap, verschil-aantallen.
  * - Tweede, losse klok in dit bestand: maakVeeg (wv1311), de opruimronde socev-run --veeg om 03:50–04:49; zie onderaan.
  * - Derde, algemene klok: maakDagRonde (wv1385), één socev-run-klus per datum in een venster (OVIS Calendar-feeds 06:35–07:34).
+ * - wv1868 (SB2 fase 3d): met de vlag van de nachtketen aan (nachtketen.js) roept de keten deze klokken aan zonder venster: tik met
+ *   ctx.keten (linter + manifest) en doe() (veeg, dagrondes); dezelfde objecten en dezelfde stempels, zodat de vlag niets dubbel draait.
  */
 const fs = require('fs');
 const path = require('path');
@@ -39,12 +41,14 @@ const TMP = /^manifest-\d{8}-nacht\.jsonl\.gz\.tmp-\d+$/;
 const VENSTER = { uur: 2, totMin: 30 };
 
 // Kind zonder shell; { code, uit, ms }. De tijdslimiet van socev-run (--max-min) gaat voor; dit is het vangnet daarachter.
-function kindProces(env, args, limiet) {
+// opSpawn(pid) (wv1868, optioneel): de nachtketen zet pid + starttijd in zijn stempel, zodat een herstart een levende wees herkent.
+function kindProces(env, args, limiet, opSpawn) {
   return new Promise(function (resolve) {
     const t0 = Date.now();
     let uit = '', klaar = false, k;
     try { k = spawn(args[0], args.slice(1), { env: env, stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch (e) { return resolve({ code: 127, uit: '', ms: 0, fout: String(e && e.message || e).slice(0, 120) }); }
+    if (typeof opSpawn === 'function' && k.pid) { try { opSpawn(k.pid); } catch (e) {} }
     let hard = null;
     const tijd = setTimeout(function () {
       try { k.kill('SIGTERM'); } catch (e) {}
@@ -56,6 +60,22 @@ function kindProces(env, args, limiet) {
     k.on('error', function (e) { if (klaar) return; klaar = true; stop(); resolve({ code: 127, uit: '', ms: Date.now() - t0, fout: String(e && e.message || e).slice(0, 120) }); });
     k.on('exit', function (code, sig) { if (klaar) return; klaar = true; stop(); resolve({ code: code === null ? 128 + (sig === 'SIGKILL' ? 9 : 15) : code, uit: uit, ms: Date.now() - t0 }); });
   });
+}
+// wv1868 (R6): kleine staat op schijf voor de dagrondes en de veeg (datum + laatste uitkomst), atomair, map 0700, bestand 0600.
+// Zonder bestand (pad null) blijft alles in het geheugen, zoals vóór wv1868.
+function schijfStaat(pad) {
+  return {
+    lees: function () { if (!pad) return {}; try { const s = JSON.parse(fs.readFileSync(pad, 'utf8')); return s && typeof s === 'object' ? s : {}; } catch (e) { return {}; } },
+    schrijf: function (s) {
+      if (!pad) return;
+      try {
+        fs.mkdirSync(path.dirname(pad), { recursive: true, mode: 0o700 });
+        const tmp = pad + '.' + crypto.randomBytes(4).toString('hex') + '.nieuw';
+        fs.writeFileSync(tmp, JSON.stringify(s), { mode: 0o600, flag: 'wx' });
+        fs.renameSync(tmp, pad);
+      } catch (e) { /* staat niet te schrijven: de klok werkt verder uit het geheugen */ }
+    }
+  };
 }
 function laatsteJson(uit) { try { return JSON.parse(String(uit).trim().split('\n').pop()); } catch (e) { return null; } }
 
@@ -84,7 +104,8 @@ function maak(o) {
     fs.renameSync(tmp, staatPad());
   }
 
-  function kind(args, limiet) { return kindProces(env, args, limiet); }
+  let opSpawnNu = null;
+  function kind(args, limiet) { return kindProces(env, args, limiet, opSpawnNu); }
 
   function nachtManifesten() {
     let namen = [];
@@ -101,16 +122,22 @@ function maak(o) {
   }
 
   // ctx: { ams: {datum, uur, min}, onderhoud: bool of functie (per stap opnieuw gelezen), ovisNacht: bool }. Geeft null (niets te doen), { overgeslagen } of de uitkomst.
+  // wv1868: ctx.keten = de nachtketen roept aan (geen venster, geen OVIS-toets: de keten ordent zelf). Dan geldt "gedaan" alleen bij een
+  // geslaagde ronde van vandaag zonder bezig-stempel ({ al_gedaan, ok }); een ronde die op bezig bleef staan (herstart) of mislukte, draait
+  // opnieuw (Opus-review MOET 4; manifest heeft de al_aanwezig-toets). ctx.opSpawn gaat door naar de kindprocessen.
   async function tik(ctx) {
     const a = ctx.ams;
-    if (a.uur !== VENSTER.uur || a.min >= VENSTER.totMin) return null;
+    const keten = !!ctx.keten;
+    if (!keten && (a.uur !== VENSTER.uur || a.min >= VENSTER.totMin)) return null;
     if (loopt) return null;
     const s = lees();
-    if (s.datum === a.datum) return null;
+    if (keten) { if (s.datum === a.datum && !s.bezig && s.laatste && s.laatste.datum === a.datum && s.laatste.ok) return { datum: a.datum, al_gedaan: true, ok: true }; }
+    else if (s.datum === a.datum) return null;
     const inOnderhoud = typeof ctx.onderhoud === 'function' ? ctx.onderhoud : function () { return !!ctx.onderhoud; };
     if (inOnderhoud()) return { overgeslagen: 'onderhoud' };
-    if (ctx.ovisNacht) return { overgeslagen: 'ovis-nacht' };
+    if (!keten && ctx.ovisNacht) return { overgeslagen: 'ovis-nacht' };
     loopt = true;
+    opSpawnNu = typeof ctx.opSpawn === 'function' ? ctx.opSpawn : null;
     try {
       const dag = a.datum.replace(/-/g, '');
       const u = { datum: a.datum, t: new Date().toISOString() };
@@ -168,7 +195,7 @@ function maak(o) {
       delete s2.bezig;
       schrijf(Object.assign(s2, { datum: a.datum, laatste: u }, ijk === null ? {} : { ijk_bestanden: ijk }));
       return u;
-    } finally { loopt = false; }
+    } finally { loopt = false; opSpawnNu = null; }
   }
 
   function info() {
@@ -184,8 +211,8 @@ function maak(o) {
 // bericht via socev-run) en houdt de logs op 30 dagen. Zonder deze ronde ziet het vangnet een gestorven run pas bij de volgende run van
 // hetzelfde script. Eén poging per datum, 03:50–04:49 Nederlandse tijd (na de nachtconsolidatie en de correspondentie-wachter; het venster
 // bestaat ook in de wisselnachten). Zelf ook via socev-run, met hartslag socev-run-veeg (drempelrij machinekamer.hartslag, 36 u). Een
-// levend proces wordt nooit opgeveegd (pid + starttijd + boot-id); de eigen run van deze ronde dus ook niet. Datum alleen in het geheugen:
-// een herstart in het venster geeft hooguit een tweede ronde (en veegt dan de eerste, onderbroken ronde terecht op: één box-rij). Niet
+// levend proces wordt nooit opgeveegd (pid + starttijd + boot-id); de eigen run van deze ronde dus ook niet. Datum sinds wv1868 (R6) op
+// schijf (o.staatBestand): een herstart in het venster geeft geen tweede ronde meer; doe() is de ingang voor de nachtketen. Niet
 // afhankelijk van de onderhoudsstand: de ronde zelf leest alleen logs; alleen een opgeveegde run schrijft (via socev-run) één box-rij,
 // buiten de vault-grendel, zoals elke mislukte socev-run. Alleen de logs van de pod-uid (1001); runs als socev worden niet opgeveegd.
 const VEEG = { van: [3, 50], tot: [4, 50] };   // [uur, min), Europe/Amsterdam
@@ -198,32 +225,48 @@ function maakVeeg(o) {
   const env = o.env || process.env;
   const maxMin = o.maxMin || 5;
   const marge = o.margeMs === undefined ? 90000 : o.margeMs;
-  let datum = null, loopt = false, laatste = null;
+  // wv1868 (R6): o.staatBestand = datum en laatste uitkomst op schijf; een herstart in het venster geeft dan geen tweede ronde meer
+  const st = schijfStaat(o.staatBestand || null);
+  const bewaard = st.lees();
+  let datum = typeof bewaard.datum === 'string' ? bewaard.datum : null, loopt = false, laatste = bewaard.laatste || null;
+  async function ronde(a, opSpawn) {
+    loopt = true;
+    datum = a.datum;
+    st.schrijf({ datum: datum, laatste: laatste });
+    try {
+      const t = new Date().toISOString();
+      const k = await kindProces(env, [run, '--naam', 'socev-run-veeg', '--hartslag', 'socev-run-veeg', '--max-min', String(maxMin), '--', run, '--veeg'],
+        maxMin * 60000 + marge, opSpawn);
+      const j = laatsteJson(k.uit);
+      laatste = { datum: a.datum, t: t, exit: k.code, ms: k.ms, opgeveegd: j && typeof j.opgeveegd === 'number' ? j.opgeveegd : null };
+      st.schrijf({ datum: datum, laatste: laatste });
+      return laatste;
+    } finally { loopt = false; }
+  }
   // ctx: { ams: {datum, uur, min} }. Geeft null (niets te doen) of { datum, t, exit, ms, opgeveegd }.
   async function tik(ctx) {
     const a = ctx.ams;
     if (!inVeegVenster(a) || loopt || datum === a.datum) return null;
-    loopt = true;
-    datum = a.datum;
-    try {
-      const t = new Date().toISOString();
-      const k = await kindProces(env, [run, '--naam', 'socev-run-veeg', '--hartslag', 'socev-run-veeg', '--max-min', String(maxMin), '--', run, '--veeg'],
-        maxMin * 60000 + marge);
-      const j = laatsteJson(k.uit);
-      laatste = { datum: a.datum, t: t, exit: k.code, ms: k.ms, opgeveegd: j && typeof j.opgeveegd === 'number' ? j.opgeveegd : null };
-      return laatste;
-    } finally { loopt = false; }
+    return ronde(a, null);
+  }
+  // wv1868: ingang voor de nachtketen, zonder venster. Gedaan = een ronde van vandaag met een uitkomst (exit 0); een ronde die door een
+  // herstart geen uitkomst kreeg of mislukte, draait opnieuw. { al_gedaan } | { bezig } | de uitkomst.
+  async function doe(ctx) {
+    const a = ctx.ams;
+    if (loopt) return { bezig: true };
+    if (laatste && laatste.datum === a.datum && laatste.exit === 0) return Object.assign({ al_gedaan: true }, laatste);
+    return ronde(a, ctx.opSpawn);
   }
   function info() { return { aan: true, loopt: loopt, laatste: laatste }; }
-  return { tik: tik, info: info };
+  return { tik: tik, doe: doe, info: info };
 }
 
 // ── Dagronde: één socev-run-klus per datum binnen een venster (wv1385, OVIS Calendar) ──
 // WAAROM. Dezelfde vorm als maakVeeg, maar met naam, venster en commando als instelling, zodat een volgende dagelijkse klus uit
 // socev-scripts geen eigen klokcode nodig heeft. Eerste gebruik: kalender_feed.py (ververst de externe kalenders van OVIS Calendar,
 // 06:35–07:34; ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 2 datamodel (ontwerp 26-10-2026).md" § 8). Altijd via socev-run
-// (mislukt = één box-rij + één bericht; hartslag alleen bij geslaagd, met een eigen drempelrij in machinekamer.hartslag). Datum alleen
-// in het geheugen: een herstart in het venster geeft hooguit een tweede ronde; de klus zelf moet daarom idempotent zijn. Niet
+// (mislukt = één box-rij + één bericht; hartslag alleen bij geslaagd, met een eigen drempelrij in machinekamer.hartslag). Datum sinds
+// wv1868 (R6) op schijf (o.staatBestand, herstartvast); de klus moet idempotent blijven (de nachtketen herhaalt een onderbroken ronde). Niet
 // afhankelijk van de onderhoudsstand: de klus schrijft niet in de vault. info() geeft alleen datum, tijd, exitcode en duur.
 // wv1788: ctx.mag (optioneel) = function; geeft hij false (onderhoudsstand, OVIS-nachtronde), dan geen ronde en blijft de datum open,
 // zodat een latere tik binnen het venster het opnieuw probeert. o.pogingen (standaard 1): zoveel rondes per datum zolang de vorige
@@ -242,25 +285,41 @@ function maakDagRonde(o) {
   const marge = o.margeMs === undefined ? 90000 : o.margeMs;
   const voor = ['--naam', o.naam].concat(o.hartslag ? ['--hartslag', o.hartslag] : []).concat(['--max-min', String(maxMin), '--']);
   const pogingen = Math.max(1, Math.min(5, o.pogingen || 1));
-  let datum = null, loopt = false, laatste = null, gedaan = 0;
+  // wv1868 (R6): o.staatBestand = datum, aantal rondes en laatste uitkomst op schijf (herstartvast)
+  const st = schijfStaat(o.staatBestand || null);
+  const bewaard = st.lees();
+  let datum = typeof bewaard.datum === 'string' ? bewaard.datum : null, loopt = false, laatste = bewaard.laatste || null,
+    gedaan = Number.isInteger(bewaard.gedaan) ? bewaard.gedaan : 0;
+  async function ronde(a, opSpawn) {
+    loopt = true;
+    if (datum !== a.datum) { datum = a.datum; gedaan = 0; }
+    gedaan++;
+    st.schrijf({ datum: datum, gedaan: gedaan, laatste: laatste });
+    try {
+      const t = new Date().toISOString();
+      const k = await kindProces(env, [run].concat(voor, o.argv), maxMin * 60000 + marge, opSpawn);
+      laatste = { datum: a.datum, t: t, exit: k.code, ms: k.ms };
+      st.schrijf({ datum: datum, gedaan: gedaan, laatste: laatste });
+      return laatste;
+    } finally { loopt = false; }
+  }
   // ctx: { ams: {datum, uur, min} }. Geeft null (niets te doen) of { datum, t, exit, ms }.
   async function tik(ctx) {
     const a = ctx.ams;
     if (!inDagVenster(o.venster, a) || loopt) return null;
     if (datum === a.datum && (gedaan >= pogingen || (laatste && laatste.datum === a.datum && laatste.exit === 0))) return null;
     if (typeof ctx.mag === 'function' && !ctx.mag()) return null;
-    loopt = true;
-    if (datum !== a.datum) { datum = a.datum; gedaan = 0; }
-    gedaan++;
-    try {
-      const t = new Date().toISOString();
-      const k = await kindProces(env, [run].concat(voor, o.argv), maxMin * 60000 + marge);
-      laatste = { datum: a.datum, t: t, exit: k.code, ms: k.ms };
-      return laatste;
-    } finally { loopt = false; }
+    return ronde(a, null);
+  }
+  // wv1868: ingang voor de nachtketen, zonder venster en zonder pogingengrens (die houdt de keten bij). { al_gedaan } | { bezig } | uitkomst.
+  async function doe(ctx) {
+    const a = ctx.ams;
+    if (loopt) return { bezig: true };
+    if (laatste && laatste.datum === a.datum && laatste.exit === 0) return Object.assign({ al_gedaan: true }, laatste);
+    return ronde(a, ctx.opSpawn);
   }
   function info() { return { aan: true, loopt: loopt, laatste: laatste }; }
-  return { tik: tik, info: info };
+  return { tik: tik, doe: doe, info: info };
 }
 
 module.exports = { maak: maak, maakVeeg: maakVeeg, inVeegVenster: inVeegVenster, maakDagRonde: maakDagRonde, inDagVenster: inDagVenster,

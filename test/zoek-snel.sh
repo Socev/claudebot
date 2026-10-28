@@ -691,7 +691,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     /argv: argv, pogingen: 2 \}\)/.test(src) &&
     /sb2ZoekKlok\('sb2-zoekindex', \{ van: \[5, 5\], tot: \[6, 0\] \}, 10,\n\s+\['python3', '-I', SB2_SRC \+ '\/zoekindex\.py', 'bouw', '--vault', VAULT, '--db', '\/opt\/data\/scripts-staat\/sb2-zoekindex\/index\.sqlite', '--grendel', OVIS_LOCK\]\)/.test(src) &&
     /naam: naam, hartslag: naam/.test(src) && /mag: function \(\) \{ return !onderhoud\.stand\(\)\.aan && ovisLoopt\.nu !== 'nacht'; \}/.test(src) &&
-    /if \(!SERVER_ECHT \|\| !rolPrimair\(\)\) return;\n  const ctx = \{ ams: ovisAms\(\), mag:/.test(src) && /sb2_zoek: typeof sb2ZoekKlokInfo === 'function'/.test(src));
+    /if \(!SERVER_ECHT \|\| !rolPrimair\(\)\) return;\n(  if \(nachtketenActief\(\)\) return;[^\n]*\n)?  const ctx = \{ ams: ovisAms\(\), mag:/.test(src) && /sb2_zoek: typeof sb2ZoekKlokInfo === 'function'/.test(src));
 
   // ── 7. harvesterClaude met een nep-claude (prompt via stdin, geen tools, time-out per aanroep) ──
   const hc = /\nasync function harvesterClaude\(systeem, prompt, schema, o\) \{[\s\S]*?\n\}\n/.exec(src);

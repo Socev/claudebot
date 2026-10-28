@@ -3744,6 +3744,7 @@ function handleRequest(req, res) {
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
       sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },
+      nachtketen: typeof nachtketenInfo === 'function' ? nachtketenInfo() : { aan: false },   // wv1868: nachtorkestrator (vlag, stap, lopend 0/1 voor uitrol.sh, stand per stap; geen inhoud)
       sb2_zoek: typeof sb2ZoekKlokInfo === 'function' ? sb2ZoekKlokInfo() : { aan: false },   // wv1788: nachtklussen feitenlijst + tekstindex (datum, exit, duur)   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
       scripts_veeg: typeof scriptsVeegInfo === 'function' ? scriptsVeegInfo() : { aan: false },   // wv1311: opruimronde socev-run --veeg (exit, aantal opgeveegd; geen namen)
       ovis_kalender: typeof ovisKalenderInfo === 'function' ? ovisKalenderInfo() : { aan: false },   // wv1385: OVIS Calendar-feeds (datum, exit, duur; geen namen of URL's)
@@ -15692,14 +15693,17 @@ function ovisAms() {
   return { datum: p.year + '-' + p.month + '-' + p.day, uur: Number(p.hour), min: Number(p.minute), klok: p.year + '-' + p.month + '-' + p.day + ' ' + p.hour + ':' + p.minute };
 }
 // De nachtronde als kind onder de grendel: { ok, j } met j de JSON-regel van ovis-run.js
-function ovisNachtKind() {
+// wv1868: opt.buitenVenster (de nachtketen mag na een pauze ook na 01:59) en opt.opSpawn (pid in de ketenstempel)
+function ovisNachtKind(opt) {
+  opt = opt || {};
   return new Promise(function (resolve) {
     let uit = '', klaar = false;
     const env = Object.assign({}, process.env, { VAULT_DIR: VAULT, OVIS_LOCK: OVIS_LOCK });
     let k;
     // -F: flock forkt niet, dus de time-out raakt node zelf (diffreview #3)
-    try { k = spawn('flock', ['-F', '-w', '300', OVIS_LOCK, process.execPath, path.join(__dirname, 'ovis-run.js'), 'nacht'], { env: env, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    try { k = spawn('flock', ['-F', '-w', '300', OVIS_LOCK, process.execPath, path.join(__dirname, 'ovis-run.js'), 'nacht'].concat(opt.buitenVenster ? ['--buiten-venster'] : []), { env: env, stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch (e) { return resolve({ ok: false, j: { fout: 'start: ' + String(e && e.message || e).slice(0, 120) } }); }
+    if (typeof opt.opSpawn === 'function' && k.pid) { try { opt.opSpawn(k.pid); } catch (e) {} }
     const tijd = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, OVIS_NACHT_MAX_MS);
     k.stdout.on('data', function (d) { if (uit.length < 200000) uit += d; });
     k.stderr.on('data', function () {});
@@ -15751,6 +15755,33 @@ async function ovisFinKaarten(b) {
   if (uit.gezet || uit.dicht || uit.fouten) schrijfLog(nu() + ' ovis-fin-kaart ' + velden(uit));
   return uit;
 }
+// De nachtronde (OVIS-compiler + gegenereerde blokken) en de Bibliothecaris als losse functies (wv1868): ovisTik en de nachtketen
+// gebruiken dezelfde code en dezelfde stempels (nacht_datum, biblio_datum), zodat de vlag van de keten in beide richtingen niets dubbel draait.
+async function ovisNachtRonde(t, opt) {
+  const r = await ovisNachtKind(opt);
+  const nacht = { t: new Date().toISOString(), ok: r.ok, paginas: r.j.paginas, gestuurd: r.j.gestuurd, blokken: r.j.blokken, fouten: Array.isArray(r.j.fouten) ? r.j.fouten.length : (r.j.fout ? 1 : 0) };
+  if (r.ok) ovisStaatZet({ nacht: nacht, nacht_datum: t.datum });
+  else { ovisStaatZet({ nacht: nacht }); logError('ovis-nacht', new Error(String(r.j.fout || (r.j.fouten || []).map(function (f) { return f.fout; }).join('; ')).slice(0, 200))); }
+  return { ok: r.ok, nacht: nacht };
+}
+async function ovisBiblioRonde(t, s) {
+  let b;
+  try { b = await ovis.bibliothecaris({}); }
+  catch (e) {
+    logError('ovis-bibliothecaris', e);
+    const fout = { biblio: { t: new Date().toISOString(), uitkomst: 'fout', zin: String(e && e.message || e).slice(0, 160) } };
+    if (s.biblio_fout_datum !== t.datum) { fout.biblio_fout_datum = t.datum; ovisBoxRij(OVIS_MOD.boxRijFout(String(e && e.message || e), t.klok)); }
+    ovisStaatZet(fout);
+    return { ok: false, zin: fout.biblio.zin };
+  }
+  ovisStaatZet({ biblio_datum: t.datum, biblio: { t: new Date().toISOString(), uitkomst: b.uitkomst, zin: b.zin, open: b.open, nieuw: b.nieuw, opgelost: b.opgelost, per_check: b.per_check, tel: b.tel } });
+  if ((b.nieuw_box != null ? b.nieuw_box : b.nieuw) > 0) ovisBoxRij(OVIS_MOD.boxRij(b, t.klok));   // wv1009: wat de Voor jou-ronde zelf rechtzet niet in de box
+  ovisLoopt.nu = 'kaarten';
+  try { await ovisKaartenZet(['kritiek', 'bundel', 'biblio', 'feit']); } catch (e) { logError('ovis-kaarten', e); }   // wv1253; wv1789: + feitkaart
+  try { const pk = await ovisPotKaarten(b); if (pk) ovisStaatZet({ pot_kaarten: Object.assign({ t: new Date().toISOString() }, pk) }); } catch (e) { logError('ovis-pot-kaart', e); }   // wv981
+  try { const fk = await ovisFinKaarten(b); if (fk) ovisStaatZet({ fin_kaarten: Object.assign({ t: new Date().toISOString() }, fk) }); } catch (e) { logError('ovis-fin-kaart', e); }   // wv1012
+  return { ok: true, open: b.open, nieuw: b.nieuw };
+}
 async function ovisTik() {
   if (!ovis || !SERVER_ECHT || !rolPrimair()) return;
   if (onderhoud.stand().aan) return;   // wv1271 (Fable MOET 3): geen compileer/Bibliothecaris op een half verhuisde boom; na uit haalt de volgende tik het in
@@ -15758,32 +15789,17 @@ async function ovisTik() {
   const t = ovisAms(), s = ovisStaatLees();
   ovisLoopt.nu = 'tik'; ovisLoopt.sinds = Date.now();
   try {
+    // wv1868: met de nachtketen aan doen de keten-stappen ovis-nacht en bibliothecaris dit werk; om 01:xx blijft de dag-compilatie stil (zoals altijd)
+    const keten = nachtketenActief();
     if (t.uur === 1) {
-      if (s.nacht_datum === t.datum) return;
+      if (keten || s.nacht_datum === t.datum) return;
       ovisLoopt.nu = 'nacht';
-      const r = await ovisNachtKind();
-      const nacht = { t: new Date().toISOString(), ok: r.ok, paginas: r.j.paginas, gestuurd: r.j.gestuurd, blokken: r.j.blokken, fouten: Array.isArray(r.j.fouten) ? r.j.fouten.length : (r.j.fout ? 1 : 0) };
-      if (r.ok) ovisStaatZet({ nacht: nacht, nacht_datum: t.datum });
-      else { ovisStaatZet({ nacht: nacht }); logError('ovis-nacht', new Error(String(r.j.fout || (r.j.fouten || []).map(function (f) { return f.fout; }).join('; ')).slice(0, 200))); }
+      await ovisNachtRonde(t, {});
       return;
     }
-    if (t.uur >= 2 && t.uur < 6 && (t.uur > 2 || t.min >= 30) && s.biblio_datum !== t.datum) {
+    if (!keten && t.uur >= 2 && t.uur < 6 && (t.uur > 2 || t.min >= 30) && s.biblio_datum !== t.datum) {
       ovisLoopt.nu = 'bibliothecaris';
-      let b;
-      try { b = await ovis.bibliothecaris({}); }
-      catch (e) {
-        logError('ovis-bibliothecaris', e);
-        const fout = { biblio: { t: new Date().toISOString(), uitkomst: 'fout', zin: String(e && e.message || e).slice(0, 160) } };
-        if (s.biblio_fout_datum !== t.datum) { fout.biblio_fout_datum = t.datum; ovisBoxRij(OVIS_MOD.boxRijFout(String(e && e.message || e), t.klok)); }
-        ovisStaatZet(fout);
-        return;
-      }
-      ovisStaatZet({ biblio_datum: t.datum, biblio: { t: new Date().toISOString(), uitkomst: b.uitkomst, zin: b.zin, open: b.open, nieuw: b.nieuw, opgelost: b.opgelost, per_check: b.per_check, tel: b.tel } });
-      if ((b.nieuw_box != null ? b.nieuw_box : b.nieuw) > 0) ovisBoxRij(OVIS_MOD.boxRij(b, t.klok));   // wv1009: wat de Voor jou-ronde zelf rechtzet niet in de box
-      ovisLoopt.nu = 'kaarten';
-      try { await ovisKaartenZet(['kritiek', 'bundel', 'biblio', 'feit']); } catch (e) { logError('ovis-kaarten', e); }   // wv1253; wv1789: + feitkaart
-      try { const pk = await ovisPotKaarten(b); if (pk) ovisStaatZet({ pot_kaarten: Object.assign({ t: new Date().toISOString() }, pk) }); } catch (e) { logError('ovis-pot-kaart', e); }   // wv981
-      try { const fk = await ovisFinKaarten(b); if (fk) ovisStaatZet({ fin_kaarten: Object.assign({ t: new Date().toISOString() }, fk) }); } catch (e) { logError('ovis-fin-kaart', e); }   // wv1012
+      await ovisBiblioRonde(t, s);
       return;
     }
     // overdag én na de Bibliothecaris (diffreview #4): alleen de databank
@@ -15798,6 +15814,17 @@ async function ovisTik() {
   finally { ovisLoopt.nu = null; }
 }
 if (ovis && SERVER_ECHT) { setTimeout(function () { ovisTik(); }, 90000).unref(); setInterval(function () { ovisTik(); }, OVIS_TIK_MS).unref(); }
+// ── wv1868: vlag van de nachtketen en de klokstaat op schijf (R6) — vóór de klokken, die ze bij het laden al gebruiken ──
+// Vlag: <NACHTKETEN_DIR>/aan.json {"aan": true} (standaard uit; env NACHTKETEN=uit wint). Aan = de nachtketen (onderaan de klokken) doet de
+// nachtklussen in volgorde en de losse vensterklokken hieronder doen niets; uit = alles zoals vóór wv1868. Elke tik leest het bestand opnieuw.
+const NACHTKETEN_DIR = serverPad('nachtketen', process.env.NACHTKETEN_DIR, '/opt/data/scripts-staat/nachtketen', serverProefDeel('nachtketen'));
+const KLOKKEN_DIR = serverPad('klokken', process.env.KLOKKEN_DIR, '/opt/data/scripts-staat/klokken', serverProefDeel('klokken'));
+function nachtketenAan() {
+  if (process.env.NACHTKETEN === 'uit') return false;
+  try { const j = JSON.parse(fs.readFileSync(path.join(NACHTKETEN_DIR, 'aan.json'), 'utf8')); return !!(j && j.aan === true); } catch (e) { return false; }
+}
+// vlag aan én de keten geladen (nachtketen.js in deze release): alleen dan zwijgen de oude klokken
+function nachtketenActief() { if (!nachtketenAan()) return false; try { return !!nachtketen; } catch (e) { return false; } }   // try: vóór het laden van de keten (TDZ)
 // ── SB2 nachtelijke linter + manifest (wv1321, Second Brain 2.0 fase 1a; bouwplan § 7.1 punt 6 en § 7.1a) ──
 // Logica en waarom in sb2-nacht.js. Hier alleen de klok: elke 5 min (echte pod, rol primair), werk alleen 02:00–02:29 en eenmaal per
 // datum; niet tijdens de onderhoudsstand (per stap gelezen) en niet zolang de OVIS-nachtronde loopt. Via socev-run onder de vault-grendel.
@@ -15815,6 +15842,7 @@ const sb2Nacht = (function () {
 function sb2NachtInfo() { if (!sb2Nacht) return { aan: false }; try { return sb2Nacht.info(); } catch (e) { return { fout: true }; } }
 async function sb2NachtTik() {
   if (!sb2Nacht || !SERVER_ECHT || !rolPrimair()) return;
+  if (nachtketenActief()) return;   // wv1868: de nachtketen doet dit
   try {
     const u = await sb2Nacht.tik({ ams: ovisAms(), onderhoud: function () { return !!onderhoud.stand().aan; }, ovisNacht: ovisLoopt.nu === 'nacht' });
     if (u && u.datum) schrijfLog(nu() + ' sb2-nacht ' + velden({ ok: u.ok ? 1 : 0, linter: u.linter.exit, manifest: u.manifest.exit === null ? 'al' : u.manifest.exit, verschil: u.verschil && typeof u.verschil.totaal === 'number' ? u.verschil.totaal : '-', opgeruimd: u.opgeruimd || 0 }));
@@ -15828,12 +15856,13 @@ const scriptsVeeg = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     const m = require(p);
-    return typeof m.maakVeeg === 'function' ? m.maakVeeg({ socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env }) : null;
+    return typeof m.maakVeeg === 'function' ? m.maakVeeg({ socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env, staatBestand: path.join(KLOKKEN_DIR, 'socev-run-veeg.json') }) : null;
   } catch (e) { logError('scripts-veeg', e); return null; }
 })();
 function scriptsVeegInfo() { if (!scriptsVeeg) return { aan: false }; try { return scriptsVeeg.info(); } catch (e) { return { fout: true }; } }
 async function scriptsVeegTik() {
   if (!scriptsVeeg || !SERVER_ECHT || !rolPrimair()) return;
+  if (nachtketenActief()) return;   // wv1868: de nachtketen doet dit
   try {
     const u = await scriptsVeeg.tik({ ams: ovisAms() });
     if (u) schrijfLog(nu() + ' scripts-veeg ' + velden({ exit: u.exit, opgeveegd: u.opgeveegd === null ? '-' : u.opgeveegd, ms: u.ms }));
@@ -15847,7 +15876,7 @@ const ovisKalender = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     const m = require(p);
-    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'ovis-kalender', hartslag: 'ovis-kalender', maxMin: 5,
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'ovis-kalender', hartslag: 'ovis-kalender', staatBestand: path.join(KLOKKEN_DIR, 'ovis-kalender.json'), maxMin: 5,
       venster: { van: [6, 35], tot: [7, 35] }, socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env,
       argv: ['python3', '-I', '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2/kalender_feed.py'] }) : null;
   } catch (e) { logError('ovis-kalender', e); return null; }
@@ -15855,6 +15884,7 @@ const ovisKalender = (function () {
 function ovisKalenderInfo() { if (!ovisKalender) return { aan: false }; try { return ovisKalender.info(); } catch (e) { return { fout: true }; } }
 async function ovisKalenderTik() {
   if (!ovisKalender || !SERVER_ECHT || !rolPrimair()) return;
+  if (nachtketenActief()) return;   // wv1868: de nachtketen doet dit
   try {
     const u = await ovisKalender.tik({ ams: ovisAms() });
     if (u) schrijfLog(nu() + ' ovis-kalender ' + velden({ exit: u.exit, ms: u.ms }));
@@ -15869,7 +15899,7 @@ const ovisAgenda = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     const m = require(p);
-    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'ovis-agenda', hartslag: 'ovis-agenda', maxMin: 5,
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'ovis-agenda', hartslag: 'ovis-agenda', staatBestand: path.join(KLOKKEN_DIR, 'ovis-agenda.json'), maxMin: 5,
       venster: { van: [3, 30], tot: [4, 0] }, socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env,
       argv: ['python3', '-I', '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2/kalender_spiegel.py'] }) : null;
   } catch (e) { logError('ovis-agenda', e); return null; }
@@ -15877,6 +15907,7 @@ const ovisAgenda = (function () {
 function ovisAgendaInfo() { if (!ovisAgenda) return { aan: false }; try { return ovisAgenda.info(); } catch (e) { return { fout: true }; } }
 async function ovisAgendaTik() {
   if (!ovisAgenda || !SERVER_ECHT || !rolPrimair()) return;
+  if (nachtketenActief()) return;   // wv1868: de nachtketen doet dit
   try {
     const u = await ovisAgenda.tik({ ams: ovisAms() });
     if (u) schrijfLog(nu() + ' ovis-agenda ' + velden({ exit: u.exit, ms: u.ms }));
@@ -15892,7 +15923,7 @@ const ovisDeadlines = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     const m = require(p);
-    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'ovis-deadlines', hartslag: 'ovis-deadlines', maxMin: 3,
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'ovis-deadlines', hartslag: 'ovis-deadlines', staatBestand: path.join(KLOKKEN_DIR, 'ovis-deadlines.json'), maxMin: 3,
       venster: { van: [3, 45], tot: [4, 0] }, socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env,
       argv: ['python3', '-I', '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2/kalender_deadlines.py'] }) : null;
   } catch (e) { logError('ovis-deadlines', e); return null; }
@@ -15900,6 +15931,7 @@ const ovisDeadlines = (function () {
 function ovisDeadlinesInfo() { if (!ovisDeadlines) return { aan: false }; try { return ovisDeadlines.info(); } catch (e) { return { fout: true }; } }
 async function ovisDeadlinesTik() {
   if (!ovisDeadlines || !SERVER_ECHT || !rolPrimair()) return;
+  if (nachtketenActief()) return;   // wv1868: de nachtketen doet dit
   try {
     const u = await ovisDeadlines.tik({ ams: ovisAms() });
     if (u) schrijfLog(nu() + ' ovis-deadlines ' + velden({ exit: u.exit, ms: u.ms }));
@@ -15921,7 +15953,7 @@ function sb2ZoekKlok(naam, venster, maxMin, argv) {
   if (!fs.existsSync(p)) return null;
   try {
     const m = require(p);
-    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: naam, hartslag: naam, maxMin: maxMin, venster: venster,
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: naam, hartslag: naam, maxMin: maxMin, venster: venster, staatBestand: path.join(KLOKKEN_DIR, naam + '.json'),
       socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: Object.assign({}, process.env, { VAULT_DIR: VAULT }), argv: argv, pogingen: 2 }) : null;
   } catch (e) { logError(naam, e); return null; }
 }
@@ -15941,6 +15973,7 @@ function sb2ZoekKlokInfo() {
 }
 async function sb2ZoekKlokTik() {
   if (!SERVER_ECHT || !rolPrimair()) return;
+  if (nachtketenActief()) return;   // wv1868: de nachtketen doet dit
   const ctx = { ams: ovisAms(), mag: function () { return !onderhoud.stand().aan && ovisLoopt.nu !== 'nacht'; } };
   for (const [naam, k] of [['sb2-feitenlijst', sb2Feitenlijst], ['sb2-zoekindex', sb2Zoekindex], ['sb2-zoekleer', sb2Zoekleer]]) {
     if (!k) continue;
@@ -15951,6 +15984,127 @@ async function sb2ZoekKlokTik() {
   }
 }
 if ((sb2Feitenlijst || sb2Zoekindex || sb2Zoekleer) && SERVER_ECHT) { setInterval(function () { sb2ZoekKlokTik(); }, 5 * 60000).unref(); }
+// ── Nachtketen (wv1868, SB2 fase 3d; ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 3 intake, nachtketen en schrijvers (ontwerp
+// 28-10-2026).md" § 4; logica en waarom in nachtketen.js) ──
+// Elke minuut (echte pod, rol primair, vlag aan). Stappen in volgorde; elke stap gebruikt hetzelfde object en dezelfde stempel als zijn oude
+// klok (Opus-review MOET 6), zodat de vlag in beide richtingen niets dubbel draait. Geen nieuwe stap zolang een uitrol op stilte wacht
+// (MOET 5) of de onderhoudsstand aan is. /health.nachtketen.lopend telt in uitrol.sh mee. Ontbreekt nachtketen.js: geen keten en de oude
+// klokken lopen gewoon (nachtketenActief).
+const NACHT_N8N = {
+  nachtconsolidatie: { id: 'lKcF3Oxt8WVeELPJ', naam: 'nachtconsolidatie', vanaf: [3, 0] },
+  rawInput: { id: 'vNsdkyTQIaGhU0Fj', naam: 'raw_input', vanaf: [5, 0] },
+  teams: { id: 'vmFrhWxNc7KrpdIL', naam: 'teams', vanaf: [5, 30] },
+  whatsapp: { id: 'agntIie8d9mqOlm6', naam: 'whatsapp-consolidatie', vanaf: [5, 45] }
+};
+const NACHTRIJ_CHAT = '40687';   // het kanaal waarin n8n de nachtbeurten achter elkaar zet (§ 2.2)
+function nachtAmsVan(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return null;
+  const p = {};
+  new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Amsterdam', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    .formatToParts(d).forEach(function (x) { p[x.type] = x.value; });
+  return { datum: p.year + '-' + p.month + '-' + p.day, uur: Number(p.hour), min: Number(p.minute) };
+}
+function nachtrijPodBezig() {
+  for (const id in jobs) { const j = jobs[id]; if (j && !j.agent && String(j.chat_id) === NACHTRIJ_CHAT && (j.status === 'pending' || j.status === 'running')) return true; }
+  return Object.keys(appWeesVast).some(function (id) { return String(appWeesVast[id]).indexOf(NACHTRIJ_CHAT) >= 0; });
+}
+const NK_MOD = (function () { const p = path.join(__dirname, 'nachtketen.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('nachtketen', e); return null; } })();
+// voorwaarde: n8n-schrijvers klaar, of na het vangnet toch (met onvolledig als dat zo is afgesproken)
+function nachtN8nVoorwaarde(lijst, vangnet, onvolledig) {
+  return async function (ctx) {
+    const a = ctx.ams, voorbij = a.uur * 60 + a.min >= vangnet[0] * 60 + vangnet[1];
+    let r;
+    try { r = await NK_MOD.n8nKlaar(lijst, appN8n, a, nachtAmsVan, nachtrijPodBezig); } catch (e) { r = { klaar: false, reden: String(e && e.message || e).slice(0, 80) }; }
+    if (r.klaar) return { ga: true, notitie: r.notitie || null };
+    if (!voorbij) return { wacht: r.reden };
+    return onvolledig ? { ga: true, onvolledig: 'vangnet ' + vangnet.join(':') + ' (' + r.reden + ')' } : { ga: true, notitie: 'vangnet ' + vangnet.join(':') + ' (' + r.reden + ')' };
+  };
+}
+function nachtDagStap(k) {   // dagronde/veeg via doe(): { al_gedaan } | { bezig } | { exit }
+  return async function (ctx) {
+    if (!k || typeof k.doe !== 'function') return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+    const u = await k.doe({ ams: ctx.ams, opSpawn: ctx.opSpawn });
+    if (u && u.bezig) return { wacht: 'loopt al' };
+    if (u && u.al_gedaan) return { ok: true, al_gedaan: true };
+    return u && u.exit === 0 ? { ok: true, detail: { ms: u.ms } } : { ok: false, reden: 'exit ' + (u ? u.exit : '?'), detail: { ms: u && u.ms } };
+  };
+}
+function nachtOvisVrij() { return !(ovisLoopt.nu && Date.now() - ovisLoopt.sinds < OVIS_NACHT_MAX_MS + 60000); }
+const nachtketen = (function () {
+  if (!NK_MOD) return null;
+  try {
+    const st = [
+      { naam: 'ovis-nacht', start_na: [1, 0], limiet_min: 20, pogingen: 3, doe: async function (ctx) {
+        if (!ovis) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        const t = ovisAms(), s = ovisStaatLees();
+        if (s.nacht_datum === ctx.datum) return { ok: true, al_gedaan: true };
+        if (!nachtOvisVrij()) return { wacht: 'ovis ' + ovisLoopt.nu };
+        ovisLoopt.nu = 'nacht'; ovisLoopt.sinds = Date.now();
+        try {
+          const r = await ovisNachtRonde({ datum: ctx.datum, klok: t.klok }, { buitenVenster: true, opSpawn: ctx.opSpawn });
+          return r.ok ? { ok: true, detail: { paginas: r.nacht.paginas, blokken: r.nacht.blokken } } : { ok: false, reden: 'ovis-nacht mislukt', meld: true, detail: { fouten: r.nacht.fouten } };
+        } finally { ovisLoopt.nu = null; }
+      } },
+      { naam: 'sb2-linter-manifest', na: ['ovis-nacht'], limiet_min: 35, pogingen: 2, meldtZelf: true, doe: async function (ctx) {
+        if (!sb2Nacht) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        const u = await sb2Nacht.tik({ ams: ctx.ams, keten: true, onderhoud: function () { return !!onderhoud.stand().aan; }, opSpawn: ctx.opSpawn });
+        if (!u) return { wacht: 'loopt al' };
+        if (u.overgeslagen) return { wacht: u.overgeslagen };
+        if (u.al_gedaan) return { ok: true, al_gedaan: true };
+        return u.ok ? { ok: true, detail: { linter: u.linter.exit, manifest: u.manifest.exit === null ? 'al' : u.manifest.exit, verschil: u.verschil && u.verschil.totaal } }
+          : { ok: false, reden: 'linter ' + u.linter.exit + ' manifest ' + u.manifest.exit + (u.opruimen ? ' (opruimen overgeslagen)' : '') };
+      } },
+      { naam: 'bibliothecaris', start_na: [2, 30], na: ['sb2-linter-manifest'], limiet_min: 15, pogingen: 2, inProces: true, meldtZelf: true, doe: async function (ctx) {
+        if (!ovis) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        const t = ovisAms(), s = ovisStaatLees();
+        if (s.biblio_datum === ctx.datum) return { ok: true, al_gedaan: true };
+        if (!nachtOvisVrij()) return { wacht: 'ovis ' + ovisLoopt.nu };
+        ovisLoopt.nu = 'bibliothecaris'; ovisLoopt.sinds = Date.now();
+        try {
+          const r = await ovisBiblioRonde({ datum: ctx.datum, klok: t.klok }, s);
+          return r.ok ? { ok: true, detail: { open: r.open, nieuw: r.nieuw } } : { ok: false, reden: 'bibliothecaris: ' + String(r.zin || '').slice(0, 80) };
+        } finally { ovisLoopt.nu = null; }
+      } },
+      { naam: 'ovis-agenda', start_na: [3, 30], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisAgenda) },
+      { naam: 'ovis-deadlines', start_na: [3, 45], na: ['ovis-agenda'], limiet_min: 5, pogingen: 2, meldtZelf: true,
+        voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.nachtconsolidatie], [3, 55], false), doe: nachtDagStap(ovisDeadlines) },
+      { naam: 'secondbrain-kaart', start_na: [3, 50], limiet_min: 5, pogingen: 2, inProces: true, doe: async function (ctx) {
+        if (!secondbrain) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        const d = ctx.datum.split('-').map(Number);   // zelfde datumvorm als de oude 03:50-klok (J-M-D zonder voorloopnul)
+        return { ok: true, al_gedaan: !secondbrain.nacht(d[0] + '-' + d[1] + '-' + d[2]) || undefined };
+      } },
+      { naam: 'veeg', start_na: [3, 50], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(scriptsVeeg) },
+      { naam: 'sb2-feitenlijst', start_na: [5, 0], na: ['bibliothecaris'], limiet_min: 7, pogingen: 2, meldtZelf: true,
+        voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.rawInput, NACHT_N8N.teams, NACHT_N8N.whatsapp], [6, 40], true), doe: nachtDagStap(sb2Feitenlijst) },
+      { naam: 'sb2-zoekindex', na: ['sb2-feitenlijst'], limiet_min: 15, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekindex) },
+      { naam: 'sb2-zoekleer', na: ['sb2-zoekindex'], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekleer) },
+      { naam: 'ovis-kalender', start_na: [6, 35], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisKalender) }
+    ];
+    return NK_MOD.maak({ staatMap: NACHTKETEN_DIR, stappen: st, ams: ovisAms, einde: [7, 40],
+      onderhoud: function () { return !!onderhoud.stand().aan; },
+      magStarten: function () { return !uitrolWacht().wacht; },
+      log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError,
+      hartslag: function (sam) { return appSbRpc('mk_hartslag_stempel', { p_component: 'sb2_nachtketen', p_gemeten_rijen: sam.klaar, p_bevindingen: sam.onvolledig ? 1 : 0 }); },
+      boxRij: function (sam) {
+        const t = ovisAms();
+        const wat = sam.meld.map(function (f) { return f.naam + ' (' + f.reden + ')'; }).concat(sam.onvolledig ? ['zoeken onvolledig: ' + sam.onvolledig] : []).join('; ');
+        ovisBoxRij('\n## [nachtketen] ' + t.klok + ' — nachtketen ' + sam.datum + ': ' + (sam.meld.length ? sam.meld.length + ' stap(pen) fout' : 'zoeken onvolledig') + ' (automatisch, wv1868)\n- status: open\n- van: pod (nachtketen)\n' +
+          '- gemeten: ' + wat.slice(0, 600) + '. Stand per stap in /opt/data/scripts-staat/nachtketen/' + sam.datum + '.json en /health.nachtketen.\n' +
+          '- gevolg als er niets gebeurt: ' + (sam.onvolledig ? 'de zoekindex van vannacht mist misschien pagina\'s van de late n8n-schrijvers; morgennacht opnieuw.' : 'de genoemde klus liep vannacht niet af; morgennacht opnieuw.') + '\n' +
+          '- voorstel: oorzaak in het podlog (regels nachtketen) en de n8n-runs nalopen; vlag uit (aan.json) zet de oude klokken terug.\n');
+      } });
+  } catch (e) { logError('nachtketen', e); return null; }
+})();
+function nachtketenInfo() {
+  if (!nachtketen) return { aan: false, module: false };
+  try { return Object.assign(nachtketen.info(), { aan: nachtketenAan() }); } catch (e) { return { fout: true }; }
+}
+async function nachtketenTik() {
+  if (!nachtketen || !SERVER_ECHT || !rolPrimair() || !nachtketenAan()) return;
+  try { await nachtketen.tik(); } catch (e) { logError('nachtketen-tik', e); }
+}
+if (nachtketen && SERVER_ECHT) { setInterval(function () { nachtketenTik(); }, 60000).unref(); }
 // managers.js soort script: Nu draaien (geen stempel, geen box-rij; het rapport gaat via managers.js naar de machinekamer)
 function ovisStartScript(m) {
   if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');
@@ -16697,7 +16851,7 @@ function secondbrainInfo() {
 if (secondbrain) setInterval(function () {
   try {
     const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' }));
-    if (d.getHours() === 3 && d.getMinutes() >= 50) secondbrain.nacht(d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate());
+    if (d.getHours() === 3 && d.getMinutes() >= 50 && !nachtketenActief()) secondbrain.nacht(d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate());
   } catch (e) { logError('secondbrain-nacht', e); }
 }, 5 * 60000).unref();
 async function appSecondBrain(req, res, a, d, route) {
