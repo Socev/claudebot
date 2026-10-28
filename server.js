@@ -4252,11 +4252,22 @@ function spGelijk(a, b) {
   const x = Buffer.from(String(a)), y = Buffer.from(String(b));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
+// Socev-blauw + OVIS-favicon voor spPagina en bankPagina (wv1373, Design Manager DS5/DS10): huisstijl inline vóór de eigen CSS,
+// favicon als data:-URI (vandaar img-src data: in de CSP; verder laadt de pagina niets). Ontbreekt de module, dan de kale pagina met
+// een leeg icoon (data:,). De <link rel="icon"> staat letterlijk in elke paginakop: zo ziet de Design Manager (DS10) hem.
+const huisstijlPod = (function () { try { return require('./huisstijl-pod.js'); } catch (e) { logError('huisstijl-pod', e); return { HUISSTIJL: '', POD_FAVICON: '' }; } })();
+const POD_FAVICON = huisstijlPod.POD_FAVICON || 'data:,';
+// Zonder module (Opus-review wv1373 ZOU 1): de --sb-tokens op systeemkleuren, zodat velden, knoppen en tekst leesbaar blijven.
+const POD_STIJL_NOOD = ':root{color-scheme:light dark;--sb-font:system-ui,sans-serif;--sb-mono:monospace;--sb-achter:Canvas;--sb-vlak:Canvas;' +
+  '--sb-vlak-2:ButtonFace;--sb-rand:GrayText;--sb-rand-veld:CanvasText;--sb-tekst:CanvasText;--sb-zacht:GrayText;--sb-accent:Highlight;' +
+  '--sb-blauw-vul:ButtonFace;--sb-op-blauw:ButtonText;--sb-ok-tekst:CanvasText;--sb-wacht-tekst:CanvasText;--sb-fout-tekst:CanvasText}' +
+  'button{border:1px solid ButtonText}';
+function podStijl() { return '<style>' + (huisstijlPod.HUISSTIJL || POD_STIJL_NOOD) + '</style>'; }
 function spKoppen(extra) {
   return Object.assign({
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-store, max-age=0', 'Pragma': 'no-cache', 'Expires': '0',
-    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin',
   }, extra || {});
 }
@@ -4427,19 +4438,21 @@ function spVoor(datum) {
 
 function spPagina(titel, inhoud) {
   return '<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<meta name="robots" content="noindex"><title>' + spEsc(titel) + '</title><style>' +
-    'body{font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#f6f7f9;color:#1d2330}' +
+    '<meta name="robots" content="noindex"><title>' + spEsc(titel) + '</title>' +
+    '<link rel="icon" type="image/png" sizes="32x32" href="' + POD_FAVICON + '">' + podStijl() + '<style>' +
+    'html{background:var(--sb-achter)}body{font:15px/1.45 var(--sb-font);margin:0;background:var(--sb-achter);color:var(--sb-tekst)}' +
     'main{max-width:1200px;margin:0 auto;padding:20px}h1{font-size:22px}h2{font-size:18px;margin-top:28px}' +
-    'table{border-collapse:collapse;width:100%;background:#fff}th,td{border-bottom:1px solid #e3e6ec;padding:6px 8px;text-align:left;vertical-align:top}' +
-    'th{background:#eef1f5;font-weight:600}code{font-size:13px}.klein{color:#5b6475;font-size:13px}' +
-    '.laat{color:#b00020;font-weight:600}.bijna{color:#a55a00;font-weight:600}.ok{color:#11752f;font-weight:600}.fout{color:#b00020;font-weight:600}' +
-    'input[type=password],input[type=text]{width:100%;box-sizing:border-box;padding:6px;border:1px solid #c5cbd6;border-radius:4px;font:inherit}' +
-    'button{padding:8px 16px;font:inherit;border:0;border-radius:4px;background:#1d4ed8;color:#fff;cursor:pointer}button.licht{background:#e3e6ec;color:#1d2330}' +
-    '.balk{position:sticky;bottom:0;background:#fff;border-top:1px solid #c5cbd6;padding:10px 0;margin-top:16px}' +
-    '.blok{background:#fff;border:1px solid #e3e6ec;border-radius:6px;padding:14px;margin:12px 0}' +
-    ':focus-visible{outline:3px solid #1d4ed8;outline-offset:2px}' +
-    '@media(max-width:800px){td,th{display:block}tr{display:block;border-bottom:2px solid #c5cbd6}th{display:none}}' +
-    '</style></head><body><main>' + inhoud + '</main></body></html>';
+    'table{border-collapse:collapse;width:100%;background:var(--sb-vlak)}th,td{border-bottom:1px solid var(--sb-rand);padding:6px 8px;text-align:left;vertical-align:top}' +
+    'th{background:var(--sb-vlak-2);font-weight:600}code{font-size:13px;font-family:var(--sb-mono)}.klein{color:var(--sb-zacht);font-size:13px}' +
+    '.laat{color:var(--sb-fout-tekst);font-weight:600}.bijna{color:var(--sb-wacht-tekst);font-weight:600}.ok{color:var(--sb-ok-tekst);font-weight:600}.fout{color:var(--sb-fout-tekst);font-weight:600}' +
+    'input[type=password],input[type=text]{width:100%;box-sizing:border-box;padding:6px;border:1px solid var(--sb-rand-veld);border-radius:4px;font:inherit;color:inherit;background:var(--sb-vlak)}' +
+    'button{padding:8px 16px;font:inherit;border:0;border-radius:4px;background:var(--sb-blauw-vul);color:var(--sb-op-blauw);cursor:pointer}' +
+    'button.licht{background:var(--sb-vlak-2);color:var(--sb-tekst);border:1px solid var(--sb-rand-veld)}' +
+    '.balk{position:sticky;bottom:0;background:var(--sb-vlak);border-top:1px solid var(--sb-rand-veld);padding:10px 0;margin-top:16px}' +
+    '.blok{background:var(--sb-vlak);border:1px solid var(--sb-rand);border-radius:6px;padding:14px;margin:12px 0}' +
+    ':focus-visible{outline:3px solid var(--sb-accent);outline-offset:2px}' +
+    '@media(max-width:800px){td,th{display:block}tr{display:block;border-bottom:2px solid var(--sb-rand-veld)}th{display:none}}' +
+    '</style></head><body class="sb"><main>' + inhoud + '</main></body></html>';
 }
 
 function spStuur(res, status, html, koppen) { res.writeHead(status, spKoppen(koppen)); res.end(html); }
@@ -18057,11 +18070,11 @@ async function bankSmal(d) {
 
 function bankPagina(res, status, kop, tekst) {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, max-age=0',
-    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex, nofollow' });
   res.end('<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + kop + '</title>' +
-    '<style>body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#fcfcfb;color:#111;max-width:34em;margin:4em auto;padding:0 1.2em;line-height:1.5}</style>' +
-    '</head><body><h1 style="font-size:1.4em">' + kop + '</h1><p>' + tekst + '</p></body></html>');
+    '<link rel="icon" type="image/png" sizes="32x32" href="' + POD_FAVICON + '">' + podStijl() + '<style>html{background:var(--sb-achter)}body{font-family:var(--sb-font);background:var(--sb-achter);color:var(--sb-tekst);max-width:34em;margin:4em auto;padding:0 1.2em;line-height:1.5}</style>' +
+    '</head><body class="sb"><h1 style="font-size:1.4em">' + kop + '</h1><p>' + tekst + '</p></body></html>');
 }
 // Staat deze state (sha256) open in stand.json? Zonder treffer geen kluisopvraag en geen kindproces (Fable wv680 #1).
 function bankStateOpen(state) {

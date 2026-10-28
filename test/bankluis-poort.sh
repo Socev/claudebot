@@ -43,6 +43,7 @@ const api = http.createServer(function (req, res) {
 const src = fs.readFileSync('server.js', 'utf8');
 const a = src.indexOf('// ── wv680: bankluis'), b = src.indexOf('// ── einde bankluis ──');
 const k1 = src.indexOf('function smalKind('), k2 = src.indexOf('async function smalSbRpc(');
+const k3 = src.indexOf('const huisstijlPod = '), k4 = src.indexOf('function spKoppen(');   // wv1373: huisstijlPod, POD_FAVICON en podStijl voor bankPagina
 const SECRET = 's'.repeat(40);
 const logs = [];
 let kluisAanroepen = 0;
@@ -61,7 +62,7 @@ api.listen(0, '127.0.0.1', async function () {
     reqPath: (req) => (req.url || '').split('?')[0], rolPoort: (res, verder) => verder(),
     rol: { eerste: true }, rolPrimair: () => g.__primair !== false, rolEerste: Promise.resolve(), ROL_START_WACHT_MS: 50 };
   const ctx = vm.createContext(g);
-  vm.runInContext(src.slice(k1, k2) + '\n' + src.slice(a, b) + '\n;globalThis.__h = { bankSmal, bankTerug, bankIsPad, bankEnv };', ctx, { filename: 'server.js#bank' });
+  vm.runInContext(src.slice(k1, k2) + '\n' + src.slice(k3, k4) + '\n' + src.slice(a, b) + '\n;globalThis.__h = { bankSmal, bankTerug, bankIsPad, bankEnv };', ctx, { filename: 'server.js#bank' });
   const h = ctx.__h;
   const nepRes = () => { const r = { status: 0, koppen: {}, body: '', _log: {}, headersSent: false,
     writeHead(s, k) { this.status = s; this.koppen = k || {}; this.headersSent = true; }, end(t) { this.body = String(t || ''); this.klaar && this.klaar(); } };
@@ -109,6 +110,9 @@ api.listen(0, '127.0.0.1', async function () {
     toets('onbekende state: 404', res.status === 404, res.status);
     res = await terug('/bank/terug?code=goed&state=' + state);
     toets('bekende state: 200 Gekoppeld, geen gegevens in de pagina', res.status === 200 && /Gekoppeld/.test(res.body) && res.body.indexOf('NL00') < 0 && res.body.indexOf('sess-') < 0, res.body);
+    toets('pagina in Socev-blauw met OVIS-favicon (wv1373)', res.body.indexOf('--sb-vlak:') > 0 && res.body.indexOf('<body class="sb">') > 0 &&
+      /<link rel="icon" type="image\/png" sizes="32x32" href="data:image\/png;base64,[A-Za-z0-9+\/=]+">/.test(res.body) &&
+      /(^|; )img-src data:(;|$)/.test(res.koppen['Content-Security-Policy']) && !logs.some(x => /huisstijl-pod/.test(x)), logs);
     toets('pagina: no-store, no-referrer, strenge CSP', res.koppen['Cache-Control'].indexOf('no-store') === 0 && res.koppen['Referrer-Policy'] === 'no-referrer' && /default-src 'none'/.test(res.koppen['Content-Security-Policy']), res.koppen);
     res = await terug('/bank/terug?code=goed&state=' + state);
     toets('dezelfde state tweede keer: 404', res.status === 404 && M.sessies === 1, [res.status, M.sessies]);

@@ -76,9 +76,20 @@ const ctx = {
   process: { env }, fetch: nepFetch, VAULT: path.join(werk, 'vault'),
   reqPath: function (req) { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); },
   logError: function (w, e) { logregels.push(w + ' ' + (e && e.name)); },
+  require: function (m) { if (m !== './huisstijl-pod.js') throw new Error('onverwachte require ' + m); return require(path.resolve(m)); },   // wv1373
 };
 vm.createContext(ctx);
 vm.runInContext(src.slice(a, b) + '\nthis.sleutelportaal = sleutelportaal; this.sleutelportaalIsPad = sleutelportaalIsPad; this.spStaat = spStaat; this.spSchoon = spSchoon;', ctx);
+
+// wv1373 (Opus-review ZOU 1, KAN 6): zonder huisstijl-pod.js een leesbare noodstijl en een leeg icoon; module in de release
+const ctxNood = vm.createContext(Object.assign({}, ctx, { require: function () { throw new Error('module weg (proef)'); }, logError: function () {} }));
+vm.runInContext(src.slice(a, b) + '\nthis.spPagina = spPagina;', ctxNood);
+const nood = ctxNood.spPagina('Proef', '<p>x</p>');
+toets('zonder module: noodstijl op systeemkleuren + leeg icoon', /--sb-rand-veld:CanvasText/.test(nood) && nood.includes('href="data:,"') && !nood.includes('--sb-vlak: light-dark'));
+toets('huisstijl-pod.js in RELEASE_OPTIONEEL en Dockerfile', /RELEASE_OPTIONEEL="[^"]*\bhuisstijl-pod\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&
+  /COPY huisstijl-pod\.js \/app\/release-bootstrap\/huisstijl-pod\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
+const H = require(path.resolve('huisstijl-pod.js'));
+toets('module: CSS zonder </, url( of @import', !Object.values(H.BESTANDEN).some(c => /<\/|url\(|@import/i.test(c)) && /^data:image\/png;base64,/.test(H.POD_FAVICON));
 
 const server = http.createServer(function (req, res) { if (ctx.sleutelportaalIsPad(req)) return ctx.sleutelportaal(req, res); res.writeHead(404); res.end(); });
 server.listen(0, '127.0.0.1', async function () {
@@ -100,6 +111,10 @@ server.listen(0, '127.0.0.1', async function () {
     toets('inlogpagina 200', r.status === 200 && r.tekst.includes('Stuur code'));
     toets('no-store', /no-store/.test(r.koppen['cache-control'] || ''));
     toets('CSP zonder script', /default-src 'none'/.test(r.koppen['content-security-policy'] || '') && !/<script/i.test(r.tekst));
+    // wv1373 (Design Manager DS5/DS10): Socev-blauw inline + OVIS-favicon als data:-URI; de CSP staat alleen data:-beelden toe
+    toets('huisstijl inline en body.sb', r.tekst.includes('--sb-vlak:') && r.tekst.includes('<body class="sb">') && !logregels.some(x => /huisstijl-pod/.test(x)));
+    toets('favicon data:-URI', /<link rel="icon" type="image\/png" sizes="32x32" href="data:image\/png;base64,[A-Za-z0-9+\/=]+">/.test(r.tekst));
+    toets('CSP img-src alleen data:', /(^|; )img-src data:(;|$)/.test(r.koppen['content-security-policy'] || '') && !/https?:/.test(r.koppen['content-security-policy'] || ''));
     toets('frame DENY', r.koppen['x-frame-options'] === 'DENY');
     toets('referrer same-origin', r.koppen['referrer-policy'] === 'same-origin');
     r = await vraag('GET', '/sleutels/iets'); toets('GET subpad 405', r.status === 405);
