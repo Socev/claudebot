@@ -225,6 +225,8 @@ function maakVeeg(o) {
 // (mislukt = één box-rij + één bericht; hartslag alleen bij geslaagd, met een eigen drempelrij in machinekamer.hartslag). Datum alleen
 // in het geheugen: een herstart in het venster geeft hooguit een tweede ronde; de klus zelf moet daarom idempotent zijn. Niet
 // afhankelijk van de onderhoudsstand: de klus schrijft niet in de vault. info() geeft alleen datum, tijd, exitcode en duur.
+// wv1788: ctx.mag (optioneel) = function; geeft hij false (onderhoudsstand, OVIS-nachtronde), dan geen ronde en blijft de datum open,
+// zodat een latere tik binnen het venster het opnieuw probeert.
 function inDagVenster(v, a) {
   const m = a.uur * 60 + a.min;
   return m >= v.van[0] * 60 + v.van[1] && m < v.tot[0] * 60 + v.tot[1];
@@ -243,6 +245,7 @@ function maakDagRonde(o) {
   async function tik(ctx) {
     const a = ctx.ams;
     if (!inDagVenster(o.venster, a) || loopt || datum === a.datum) return null;
+    if (typeof ctx.mag === 'function' && !ctx.mag()) return null;
     loopt = true;
     datum = a.datum;
     try {

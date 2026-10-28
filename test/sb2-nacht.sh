@@ -229,6 +229,13 @@ echo '{"ok": true}'; exit 0
   toets('dagronde mislukt: exit 1, geen crash', u && u.exit === 1, u);
   u = await dag({ hartslag: null }).tik({ ams: ams('2026-10-30', 6, 50) });
   toets('dagronde zonder hartslag: geen --hartslag', dAanroep().pop() === '--naam ovis-kalender --max-min 3 -- python3 -I /pad/kalender_feed.py');
+  // wv1788: ctx.mag false (onderhoudsstand, OVIS-nachtronde) = geen ronde, datum blijft open; daarna wel
+  g = dag({ naam: 'sb2-zoekindex', hartslag: 'sb2-zoekindex' });
+  const voorMag = dAanroep().length;
+  toets('dagronde mag=false: niets, datum blijft open', await g.tik({ ams: ams('2026-11-02', 6, 40), mag: () => false }) === null && dAanroep().length === voorMag);
+  u = await g.tik({ ams: ams('2026-11-02', 6, 45), mag: () => true });
+  toets('dagronde mag=true daarna: wel, één keer', u && u.datum === '2026-11-02' && dAanroep().length === voorMag + 1 && /^--naam sb2-zoekindex --hartslag sb2-zoekindex /.test(dAanroep().pop()) &&
+    await g.tik({ ams: ams('2026-11-02', 6, 50), mag: () => true }) === null);
   let w1 = false; try { N.maakDagRonde({ naam: 'Fout Naam', venster: V, argv: ['x'] }); } catch (e) { w1 = true; }
   let w2 = false; try { N.maakDagRonde({ naam: 'ok', venster: V, argv: [] }); } catch (e) { w2 = true; }
   toets('dagronde: ongeldige naam of leeg commando geweigerd', w1 && w2);

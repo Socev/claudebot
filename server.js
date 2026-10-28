@@ -3742,7 +3742,8 @@ function handleRequest(req, res) {
       docs_delen: docsDelenInfo(),   // wv1382: OVIS Docs › Delen (aan? host, aantal delingen; geen links)   // wv832: App Second Brain (secondbrain.js in deze release? knopen, lijnen, laatste bouw; geen inhoud)
       mk_tekst: mkTekstHealth(),   // wv1001: mk-runs zonder vaulttekst, eigen geheugen in orde?, drift van de grondwet-kopie (geen inhoud)
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
-      sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
+      sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },
+      sb2_zoek: typeof sb2ZoekKlokInfo === 'function' ? sb2ZoekKlokInfo() : { aan: false },   // wv1788: nachtklussen feitenlijst + tekstindex (datum, exit, duur)   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
       scripts_veeg: typeof scriptsVeegInfo === 'function' ? scriptsVeegInfo() : { aan: false },   // wv1311: opruimronde socev-run --veeg (exit, aantal opgeveegd; geen namen)
       ovis_kalender: typeof ovisKalenderInfo === 'function' ? ovisKalenderInfo() : { aan: false },   // wv1385: OVIS Calendar-feeds (datum, exit, duur; geen namen of URL's)
       ovis_agenda: typeof ovisAgendaInfo === 'function' ? ovisAgendaInfo() : { aan: false },   // wv1411: OVIS Calendar Google-spiegel (datum, exit, duur; geen titels)
@@ -15509,6 +15510,44 @@ async function ovisDeadlinesTik() {
   } catch (e) { logError('ovis-deadlines-tik', e); }
 }
 if (ovisDeadlines && SERVER_ECHT) { setInterval(function () { ovisDeadlinesTik(); }, 5 * 60000).unref(); }
+// ── Zoek snel laag 1 en 2 bijhouden (wv1788; waarom in zoek-snel.js, feitenlijst.py en zoekindex.py) ──
+// Elke 5 min (echte pod, rol primair), eenmaal per datum, via socev-run met hartslag (drempelrij machinekamer.hartslag, 48 u):
+// - sb2-feitenlijst 05:00–05:29: feitenlijst.py --laad --gelijktrekken (vault → secondbrain.identifier, daarna register → feitenlijst);
+// - sb2-zoekindex 05:05–05:59: zoekindex.py bouw onder de vault-grendel (gedeeld), atomair vervangen.
+// Venster: ná alles wat 's nachts vaultpagina's schrijft (OVIS-nachtronde 01:00–01:59, linter 02:00–02:29, Bibliothecaris 02:30,
+// nachtconsolidatie 03:00, wachters 03:40–04:45) en vóór Davids dag (07:00), zodat de eerste vragen van de ochtend de pagina's van vannacht
+// zien; geen overlap met de klussen van 03:30–04:00. Niet tijdens de onderhoudsstand en niet zolang de OVIS-nachtronde loopt: dan
+// geen ronde (de datum blijft open, de volgende tik binnen het venster probeert opnieuw). De index ouder dan 48 u = Zoek snel slaat laag 2 over.
+function sb2ZoekKlok(naam, venster, maxMin, argv) {
+  const p = path.join(__dirname, 'sb2-nacht.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: naam, hartslag: naam, maxMin: maxMin, venster: venster,
+      socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: Object.assign({}, process.env, { VAULT_DIR: VAULT }), argv: argv }) : null;
+  } catch (e) { logError(naam, e); return null; }
+}
+const SB2_SRC = '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2';
+const sb2Feitenlijst = sb2ZoekKlok('sb2-feitenlijst', { van: [5, 0], tot: [5, 30] }, 5,
+  ['python3', '-I', SB2_SRC + '/feitenlijst.py', '--vault', VAULT, '--laad', '--gelijktrekken']);
+const sb2Zoekindex = sb2ZoekKlok('sb2-zoekindex', { van: [5, 5], tot: [6, 0] }, 10,
+  ['python3', '-I', SB2_SRC + '/zoekindex.py', 'bouw', '--vault', VAULT, '--db', '/opt/data/scripts-staat/sb2-zoekindex/index.sqlite', '--grendel', OVIS_LOCK]);
+function sb2ZoekKlokInfo() {
+  const een = function (k) { if (!k) return { aan: false }; try { return k.info(); } catch (e) { return { fout: true }; } };
+  return { feitenlijst: een(sb2Feitenlijst), zoekindex: een(sb2Zoekindex) };
+}
+async function sb2ZoekKlokTik() {
+  if (!SERVER_ECHT || !rolPrimair()) return;
+  const ctx = { ams: ovisAms(), mag: function () { return !onderhoud.stand().aan && ovisLoopt.nu !== 'nacht'; } };
+  for (const [naam, k] of [['sb2-feitenlijst', sb2Feitenlijst], ['sb2-zoekindex', sb2Zoekindex]]) {
+    if (!k) continue;
+    try {
+      const u = await k.tik(ctx);
+      if (u) schrijfLog(nu() + ' ' + naam + ' ' + velden({ exit: u.exit, ms: u.ms }));
+    } catch (e) { logError(naam + '-tik', e); }
+  }
+}
+if ((sb2Feitenlijst || sb2Zoekindex) && SERVER_ECHT) { setInterval(function () { sb2ZoekKlokTik(); }, 5 * 60000).unref(); }
 // managers.js soort script: Nu draaien (geen stempel, geen box-rij; het rapport gaat via managers.js naar de machinekamer)
 function ovisStartScript(m) {
   if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');
@@ -16709,6 +16748,64 @@ function doorgeefKnop(sleutel, jobId, hash, zin, tDruk) {
 //   nachtreset van 03:00; tekst door appEenRegel: geen haken of markeringen uit een vaultpagina in Socevs sessie, Fable #2 en #8).
 // - api.log ziet alleen uitkomst en duur, nooit vraag of antwoord.
 // Ontbreekt zoek-snel.js in de release (terugrol), dan 404 op de route en zoek_snel.aan=false in /health.
+// wv1788 (drie lagen, waarom in zoek-snel.js): laag 1 = RPC public.sb_zoek_identifier (service_role, time-out 1,5 s); laag 2 = de tekstindex
+// van socev-scripts (python3 -I zoekindex.py zoek, index in scripts-staat/sb2-zoekindex, 's nachts gebouwd door de klok sb2-zoekindex). Na
+// het antwoord één rij secondbrain.query_run via public.sb_query_run_zet (fire-and-forget; een fout breekt het antwoord nooit): de vraagtekst
+// alleen als de patiëntmarker (intake/patientpoort.js) niets ziet, altijd vraag_sha = sha256(zout ‖ vraag) met een eigen zout op de pod
+// (scripts-staat/sb2-zoek/zout, eenmalig 32 willekeurige bytes, 0600; geen kluissleutel). Buiten de echte pod alleen via env (toetsen).
+const ZOEK_SNEL_INDEX_DB = process.env.ZOEK_SNEL_INDEX_DB || (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT ? '/opt/data/scripts-staat/sb2-zoekindex/index.sqlite' : null);
+const ZOEK_SNEL_INDEX_SCRIPT = process.env.ZOEK_SNEL_INDEX_SCRIPT || '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2/zoekindex.py';
+const ZOEK_SNEL_ZOUT = process.env.ZOEK_SNEL_ZOUT || (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT ? '/opt/data/scripts-staat/sb2-zoek/zout' : null);
+const ZOEK_SNEL_RPC_MS = 1500;
+async function zoekSnelRpc(fn, body, ms) {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, ''), key = process.env.SUPABASE_SERVICE_ROLE || '';
+  if (!url || !key) throw new Error('supabase-omgeving ontbreekt');
+  const r = await fetch(url + '/rest/v1/rpc/' + fn, { method: 'POST',
+    headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+    signal: AbortSignal.timeout(ms) });
+  if (!r.ok) { await r.text().catch(function () {}); throw new Error('rpc ' + fn + ' http ' + r.status); }
+  return r.json();
+}
+// Het zout: eenmalig aangemaakt (O_EXCL, 0600, map 0700); daarna alleen gelezen. Onleesbaar of te kort = geen query_run (nooit een kale sha).
+function zoekSnelZout() {
+  if (!ZOEK_SNEL_ZOUT) return null;
+  try {
+    const b = fs.readFileSync(ZOEK_SNEL_ZOUT);
+    return b.length >= 32 ? b : null;
+  } catch (e) {
+    if (e.code !== 'ENOENT') { logError('zoek-snel-zout', e); return null; }
+  }
+  try {
+    fs.mkdirSync(path.dirname(ZOEK_SNEL_ZOUT), { recursive: true, mode: 0o700 });
+    const fd = fs.openSync(ZOEK_SNEL_ZOUT, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+    try { fs.writeSync(fd, require('crypto').randomBytes(32)); } finally { fs.closeSync(fd); }
+    const b = fs.readFileSync(ZOEK_SNEL_ZOUT);
+    return b.length >= 32 ? b : null;
+  } catch (e) { logError('zoek-snel-zout', e); return null; }
+}
+let zoekSnelMarker;
+function zoekSnelPatientVrij(vraag) {
+  try {
+    if (zoekSnelMarker === undefined) zoekSnelMarker = require(path.join(__dirname, 'intake', 'patientpoort.js'));
+    const b = zoekSnelMarker.beoordeel({ teksten: [vraag] }, { eigen: zoekSnelMarker.maakEigen(null, {}) });
+    return !!b && Array.isArray(b.soorten) && b.soorten.length === 0;
+  } catch (e) { logError('zoek-snel-marker', e); zoekSnelMarker = null; return false; }
+}
+function zoekSnelQueryRun(r) {
+  try {
+    if (!zoekSnel || typeof zoekSnel.queryRunVan !== 'function') return;
+    const zout = zoekSnelZout();
+    if (!zout) return;
+    const sha = require('crypto').createHash('sha256').update(zout).update(Buffer.from(String(r.vraag || ''), 'utf8')).digest('hex');
+    const p = zoekSnel.queryRunVan(r, { sha: sha, metVraag: zoekSnelPatientVrij(String(r.vraag || '')) });
+    if (!p) return;
+    zoekSnelRpc('sb_query_run_zet', { p: p }, 8000).catch(function (e) { logError('zoek-snel-query-run', e); });
+  } catch (e) { logError('zoek-snel-query-run', e); }
+}
+function zoekSnelIndexLeeftijdU() {
+  if (!ZOEK_SNEL_INDEX_DB) return null;
+  try { return Math.floor((Date.now() - fs.statSync(ZOEK_SNEL_INDEX_DB).mtimeMs) / 3600000); } catch (e) { return null; }
+}
 const ZOEK_SNEL_SCHAKELAAR = process.env.ZOEK_SNEL_SCHAKELAAR || '/opt/data/zoek-snel.json';
 const ZOEK_SNEL_REGELS = path.join(APP_DATA, 'zoek-snel-regels.json');
 const ZOEK_SNEL_PER_UUR = 60, ZOEK_SNEL_HERHAAL_MS = 10 * 60000, ZOEK_SNEL_REGELS_MAX = 5, ZOEK_SNEL_MODEL_MS = 20000, ZOEK_SNEL_MAX = 200;   // wv1289: 12 → 20 s (blokcontext: een lijstvraag kost Sonnet gemeten 5–11 s)
@@ -16716,8 +16813,15 @@ const zoekSnel = (function () {
   const p = path.join(__dirname, 'zoek-snel.js');
   if (!fs.existsSync(p)) return null;
   try {
-    return require(p).maak({ vault: VAULT, fout: logError, bsnMasker: function (t) { return appBsnMasker(t); },
-      claude: function (systeem, prompt, schema) { return harvesterClaude(systeem, prompt, schema, { timeoutMs: ZOEK_SNEL_MODEL_MS }); } });
+    const m = require(p);
+    const z = m.maak({ vault: VAULT, fout: logError, bsnMasker: function (t) { return appBsnMasker(t); },
+      claude: function (systeem, prompt, schema) { return harvesterClaude(systeem, prompt, schema, { timeoutMs: ZOEK_SNEL_MODEL_MS }); },
+      feiten: process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE
+        ? function (vraag, vast) { return zoekSnelRpc('sb_zoek_identifier', { p_vraag: vraag, p_max: 20, p_vast: !!vast }, ZOEK_SNEL_RPC_MS); } : null,
+      index: ZOEK_SNEL_INDEX_DB ? { cmd: process.env.ZOEK_SNEL_INDEX_CMD || 'python3', args: process.env.ZOEK_SNEL_INDEX_CMD ? [ZOEK_SNEL_INDEX_SCRIPT] : ['-I', ZOEK_SNEL_INDEX_SCRIPT],
+        db: ZOEK_SNEL_INDEX_DB } : null });
+    z.queryRunVan = m.queryRunVan;
+    return z;
   } catch (e) { logError('zoek-snel', e); return null; }
 })();
 function zoekSnelAan() {
@@ -16725,7 +16829,25 @@ function zoekSnelAan() {
 }
 function zoekSnelInfo() {
   const l = appStaat.zoekSnelLaatst || null;
-  return { aan: !!zoekSnel && zoekSnelAan(), module: !!zoekSnel, schakelaar: zoekSnelAan(), laatste: l ? { t: l.t, uitkomst: l.uitkomst, ms: l.ms } : null };
+  return { aan: !!zoekSnel && zoekSnelAan(), module: !!zoekSnel, schakelaar: zoekSnelAan(), laatste: l ? { t: l.t, uitkomst: l.uitkomst, ms: l.ms, laag: l.laag || null } : null,
+    index_leeftijd_u: zoekSnelIndexLeeftijdU() };   // wv1788: laag van de laatste vraag en leeftijd van de tekstindex (geen inhoud)
+}
+// wv1788: per laag alleen getallen, booleans en korte standen (geen soorten-, reden- of inhoudstekst) voor het app-log.
+function zoekSnelLagenTelling(l) {
+  if (!l || typeof l !== 'object') return undefined;
+  const uit = {};
+  Object.keys(l).forEach(function (k) {
+    const v = l[k];
+    if (!v || typeof v !== 'object') return;
+    const t = {};
+    Object.keys(v).forEach(function (x) {
+      const w = v[x];
+      if (typeof w === 'number' || typeof w === 'boolean') t[x] = w;
+      else if (x === 'stand' && typeof w === 'string') t[x] = w.slice(0, 12);
+    });
+    uit[k] = t;
+  });
+  return uit;
 }
 // Tekst voor de geschiedenis van het gesprek (de app toont daar markdown): het feit, de waarden en de bron.
 function zoekSnelTekst(r) {
@@ -16778,14 +16900,17 @@ async function zoekSnelVoer(a, id, vraag) {
   if (!r) r = { soort: 'fout', vraag: vraag, tekst: '', waarden: [], bronnen: [], gelezen_als: [], melding: 'Zoek snel lukte nu niet.', reden: 'uitzondering', ms: {} };
   const ms = Date.now() - t0;
   const v = r.verbruik || {};
-  appStaat.zoekSnelLaatst = { t: new Date().toISOString(), uitkomst: r.soort, ms: ms };
+  appStaat.zoekSnelLaatst = { t: new Date().toISOString(), uitkomst: r.soort, ms: ms, laag: r.laag || null };
   const gelogd = await appLogSchrijf('hoofd', { t: new Date().toISOString(), getypt: new Date(t0).toISOString(), job_id: id, soort: 'zoek', apparaat: a.id, tekst: vraag,
     antwoord: zoekSnelTekst(r), ok: r.soort !== 'fout', fout: r.soort === 'fout' ? String(r.reden || 'fout').slice(0, 200) : undefined, bestanden: [],
     zoek: { uitkomst: r.soort, reden: r.reden || undefined, ms: ms, zoek_ms: r.ms.zoek, model_ms: r.ms.model, account: v.account, kosten: v.kosten, tokens_uit: v.uit,
       bronnen: (r.bronnen || []).map(function (b) { return b.pad; }), weggelaten: r.weggelaten || undefined, natoets_mis: r.natoets_mis || undefined, vast: a.soort === 'vast' || undefined,
-      dekking: r.dekking || undefined } });   // wv1289: alleen tellingen (pagina's/regels, grens), geen inhoud
+      dekking: r.dekking || undefined, laag: r.laag || undefined, feiten_ms: r.ms.feiten, index_ms: r.ms.index,
+      lagen: zoekSnelLagenTelling(r.lagen) } });   // wv1289: alleen tellingen (pagina's/regels, grens), geen inhoud; wv1788: per laag idem
   zoekSnelRegelZet(r);
-  return { status: 200, j: { ok: true, job_id: id, soort: r.soort, tekst: r.tekst, waarden: r.waarden, weggelaten: r.weggelaten || 0,
+  zoekSnelQueryRun(r);   // wv1788: antwoordcontract, na het antwoord; nooit blokkerend
+  return { status: 200, j: { ok: true, job_id: id, soort: r.soort, tekst: r.tekst, waarden: r.waarden, weggelaten: r.weggelaten || 0, laag: r.laag || null,
+    dekking_regel: r.dekking_regel || null,
     bronnen: (r.bronnen || []).map(function (b) { return { pad: b.pad, naam: b.naam, updated: b.updated || null }; }), gelezen_als: r.gelezen_als || [],
     melding: r.melding || null, ms: ms, gelogd: gelogd } };
 }
