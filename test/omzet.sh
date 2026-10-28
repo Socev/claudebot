@@ -202,6 +202,10 @@ const HTML = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proef</tit
   toets('server.js: POST /app/omzet in APP_SLOT_VRIJ, grotere body alleen voor die route, 413 bij te groot',
     /const APP_SLOT_VRIJ = new Set\(\['POST \/app\/omzet'/.test(srv) && /p === '\/app\/omzet' \? APP_OMZET_MAX_BODY : APP_MAX_BODY/.test(srv) && /fout === 'groot' && p === '\/app\/omzet'\) return appWeiger\(res, 413/.test(srv));
   toets('server.js: route, teller, /health.omzet', /route === 'POST \/app\/omzet'\) return typeof appOmzet/.test(srv) && /appTeller\('omzet', 120, 3600000\)/.test(srv) && /omzet: omzetInfo\(\)/.test(srv));
+  // 28-10: appTeller('omzet') gaf TypeError (geen tellers.omzet) → elke POST 500; de teller moet een nieuwe soort zelf aanmaken
+  const tel = srv.slice(srv.indexOf('function appTeller('), srv.indexOf('function appCookieKop('));
+  const telF = new Function('appStaat', tel + '; return appTeller;')({ tellers: {} });
+  toets('server.js: appTeller maakt een onbekende soort zelf aan (geen TypeError)', (function () { try { return telF('nieuw', 2, 1000) === true && telF('nieuw', 2, 1000) === true && telF('nieuw', 2, 1000) === false; } catch (e) { return false; } })());
   toets('server.js: audit zonder inhoud (alleen audit-velden in de reden)', !/res\._app\.reden = [^\n]*(d\.tekst|d\.naam)/.test(srv.slice(srv.indexOf('async function appOmzet'), srv.indexOf('// ── einde download als'))));
   const uit = fs.readFileSync('uitrol.sh', 'utf8'), dock = fs.readFileSync('Dockerfile', 'utf8');
   toets('uitrol.sh en Dockerfile: omzet.js, omzet-huisstijl.js, xlsx-schrijver.js', ['omzet.js', 'omzet-huisstijl.js', 'xlsx-schrijver.js'].every((b) => new RegExp('RELEASE_OPTIONEEL="[^"]*\\b' + b.replace('.', '\\.') + '\\b').test(uit)) &&

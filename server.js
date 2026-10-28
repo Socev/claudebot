@@ -5059,7 +5059,7 @@ function appAudit(o, voorAuth) {
 
 function appTeller(soort, max, venster) {
   const nu = Date.now();
-  const l = appStaat.tellers[soort] = appStaat.tellers[soort].filter(function (t) { return nu - t < venster; });
+  const l = appStaat.tellers[soort] = (appStaat.tellers[soort] || []).filter(function (t) { return nu - t < venster; });
   if (l.length >= max) return false;
   l.push(nu); return true;
 }
