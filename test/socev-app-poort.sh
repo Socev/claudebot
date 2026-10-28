@@ -414,7 +414,7 @@ const ctxGlobals = (o) => Object.assign({ require, fs, path, crypto, Buffer, con
   fetch: nepFetch, SP_CHAT: '40687', logError: (w, e) => logs.push(w + ': ' + (e && e.message || JSON.stringify(e))),
   reqPath: (req) => { const u = req.url || ''; const i = u.indexOf('?'); return i === -1 ? u : u.slice(0, i); } }, o || {});
 const ctx = vm.createContext(ctxGlobals());
-vm.runInContext(blok + '\n;globalThis.__h = { berichtVraagOpKaart, handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart, appVjBron, appVjVoorwaardeMeet, appVjVoorwaardeRonde };', ctx, { filename: 'server.js#app' });
+vm.runInContext(blok + '\n;globalThis.__h = { berichtVraagOpKaart, handleApp, appIsPad, appInfo, appInklapRapport, appStaat, appNoodstop, appAan, appStartBeurt, appBewaar, appBestandenOpruim, appRoute, appLabelGewoon, appUploadOpruim, appIoOpruim, appSchoneNaam, appUniekeNaam, appBestandenPrompt, appPushMeldTik, appPushStuur, appPushEndpointOk, appFoutmelderLees, appFoutUitleg, appStilLees, appElfproef, appBsnAchtig, appInfo2: appInfo, appGevoelig, appOntmasker, appHerstelVervaltTik, appHerstelNorm, appAutoNoteer, appAutoItems, appVandaagRoute, appConceptRoute, appConceptOpruim, appSpreektekst, appVoorleesDelen, appPraktijkenRoute, appNaastDag, appNaastTik, appNaastGrenzen, appDagdeelEinde, appSessieTot, appGlijd, appSessiesLaad, appSessiesBewaar, berichtRoute, berichtIsPad, berichtHerplan, berichtBundelAf, appBindingModus, appBindingInfo, appBindingTelBewaar, appSleutelLees, appVoorJouRoute, appVoorJouDetail, appVoorJouKeuze, appVoorJouKnop, appVjStatusTijd, appVandaagActieDetail, appSleutelMasker, appInvoerRoute, appVjStap, appVouw, appZoekBel, appVraagUit, appProjectenRoute, appFinancien, appPotAfschriften, appPotMaak, appPotBestand, appPotConcept, appKnopBevestiging, appMeldPiek, appMeldKaartenOpen, appYmd, appBroedWacht, appBriefingVorm, appBriefingVoor, appMoetIetsUit, appDradenUit, appVjAfleidUit, appVjAfleidWoorden, appVjGekoppeld, berichtBronJob, berichtNorm, appVjDoel, appVjModuleKaart, appVjBron, appVjVoorwaardeMeet, appVjVoorwaardeRonde, appAnders };', ctx, { filename: 'server.js#app' });
 { const a2 = src.indexOf('// ── Sleutelportaal'), b2 = src.indexOf('// ── einde sleutelportaal');
   if (a2 < 0 || b2 < 0) { console.log('ROOD: sleutelportaalblok niet gevonden'); process.exit(1); }
   vm.runInContext(src.slice(a2, b2) + '\n;globalThis.__sp = { spSchrijfTaak, spStaat };', ctx, { filename: 'server.js#sleutelportaal' }); }
@@ -6932,6 +6932,156 @@ async function bewijs(o) {
       toets('27b kaartknop valt onder het invoerslot en glijdt', H.appInvoerRoute('POST /app/voor-jou/knop', false, {}, { id: 'x' }) === true);
       for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('ok');
       await slaap(40);
+      H.appStaat.tellers.beurt = [];
+    }
+
+    // ── 27c. wv1821: Anders bij elke actie (POST /app/anders): kaart, actielijstje, agendavoorstel; sluit niets af, juiste kanaal ──
+    {
+      const sV = H.appStaat.sessies[crypto.createHash('sha256').update(P.jar.sessie).digest('hex')]; if (sV) sV.tot = Date.now() + 20 * 60000;
+      for (const t2 of Object.keys(H.appStaat.tellers)) H.appStaat.tellers[t2] = [];
+      rolStub.primair = true;
+      const oudC = new Date(Date.now() - 3600000).toISOString();
+      const pc = (id, sl, x) => Object.assign({ id, sleutel: sl, soort: 'doen', titel: 'Titel ' + sl, waarom: null, stappen: [], deadline: null, waar: 'overal', prive: false, duur_min: null,
+        herkomst: { wv: [] }, status: 'open', later_tot: null, bewijs: null, gesloten_door: null, meting: null, laatst_gemeten: oudC, volgorde: 100, gesloten_op: null }, x || {});
+      sbStaat.vj = (sbStaat.vj || []).filter((x) => x.id < 61 || x.id > 69).concat([
+        pc(61, 'anders-mk', { titel: 'Proefapparaat — één keer opnieuw inloggen', herkomst: { wv: [601], auto: 'wv' } }),
+        pc(62, 'anders-hoofd-register', { titel: 'Verjaardag — cadeau kiezen', herkomst: { register: ['2026-10-11 19:00#anders-hoofd'] } }),
+        pc(63, 'anders-prive', { titel: 'Fiets — band plakken', prive: true }),
+        pc(64, 'anders-gedaan', { titel: 'Kastje — stekker erin', status: 'gedaan', gesloten_door: 'david', gesloten_op: new Date().toISOString(), herkomst: { wv: [604], auto: 'wv' } }),
+        pc(65, 'anders-besluit', { soort: 'besluit', titel: 'n8n — oude proeven', herkomst: { wv: [605], auto: 'wv' } }),
+      ]);
+      const regPadC = path.join(VAULT_T, '00_Systeem', 'Open vragen aan David.md');
+      fs.appendFileSync(regPadC, '| 2026-10-11 19:00 | hoofd (#anders-hoofd) | Kies je zelf het cadeau? | Ja | open | x |\n');
+      H.appStaat.vjCache = null; H.appStaat.vjRegister = null; H.appStaat.vjTerug = {};
+      const vrPadC = path.join(DATA, 'vragen.json');
+      const vrVoor = fs.existsSync(vrPadC) ? fs.readFileSync(vrPadC, 'utf8') : null;
+      const AN = (b, jar) => vraag('POST', '/app/anders', b, { pot: jar || P.jar });
+      const klaarC = async () => { for (const k of Object.keys(afmaken)) if (jobs[k] && jobs[k].status !== 'done') afmaken[k]('ok'); await slaap(40); };
+      // kaart van de machinekamer (werkvoorraad): beurt in de machinekamer, kaart blijft open, niets in vragen.json
+      let n = gestart.length, nCL = chatlogStaat.rijen.length;
+      let r = await AN({ soort: 'kaart', id: 61, toelichting: 'Lukt pas vanavond, de telefoon ligt thuis' });
+      await slaap(40);
+      let g = gestart[gestart.length - 1];
+      toets('27c kaart (werkvoorraad) -> 200, beurt in de machinekamer met kop en toelichting', r.status === 200 && r.j.kanaal === 'machinekamer' && gestart.length === n + 1 && g.chatId === 'telegram-debug'
+        && /\[KNOP\] David koos ANDERS bij de Voor jou-kaart "Proefapparaat — één keer opnieuw inloggen" — toelichting: Lukt pas vanavond, de telefoon ligt thuis\n\(Knopdruk op de Voor jou-kaart in de app \(Overzicht, de machinekamer\) om \d\d:\d\d\. Dit is Davids toelichting bij een taakkaart, geen antwoord op een vraag en geen bevestiging\. De kaart blijft open; Anders sluit niets af\. Kaart: punt anders-mk \(status open\), werkvoorraad wv601\./.test(g.prompt),
+        r.status + ' ' + JSON.stringify(r.j) + ' ' + (g && g.prompt.slice(-700)));
+      toets('27c kaart blijft open, geen statuswissel, niets in vragen.json, geen chat_log buiten het hoofdkanaal', sbStaat.vj.find((x) => x.id === 61).status === 'open' && sbStaat.vj.find((x) => x.id === 61).bewijs === null
+        && (fs.existsSync(vrPadC) ? fs.readFileSync(vrPadC, 'utf8') : null) === vrVoor && chatlogStaat.rijen.length === nCL, JSON.stringify(sbStaat.vj.find((x) => x.id === 61)));
+      await klaarC();
+      // taakkaart met een registerrij in het hoofdkanaal: naar Socev in het hoofdkanaal, chat_log met knop-anders
+      n = gestart.length; nCL = chatlogStaat.rijen.length;
+      r = await AN({ soort: 'kaart', id: 62, toelichting: 'Liever een boek dan een bon' });
+      await slaap(60);
+      g = gestart[gestart.length - 1];
+      let cl = chatlogStaat.rijen.slice(nCL);
+      toets('27c taakkaart met registerkanaal hoofd -> hoofdkanaal (40687), registerrij in de context', r.status === 200 && r.j.kanaal === 'hoofd' && g.chatId === '40687' && /\(Overzicht, het hoofdkanaal\)/.test(g.prompt)
+        && /punt anders-hoofd-register \(status open\), registerrij "2026-10-11 19:00#anders-hoofd"\./.test(g.prompt), r.status + ' ' + (g && g.prompt.slice(-500)));
+      toets('27c hoofdkanaal: chat_log Socev-rij met de kaart en Davids rij met bevestiging knop-anders (nooit een Ja voor de Poortwachter)', cl.length === 2 && cl[0].rol === 'socev' && cl[0].tekst === 'Voor jou-kaart "Verjaardag — cadeau kiezen"'
+        && cl[1].rol === 'david' && cl[1].bevestiging === 'knop-anders' && /^Anders \(knop bij een Voor jou-kaart in de app\) bij "Verjaardag — cadeau kiezen" — toelichting: Liever een boek dan een bon$/.test(cl[1].tekst), JSON.stringify(cl));
+      await klaarC();
+      // privé-kaart zonder register: hoofdkanaal (zoals de besluitknoppen)
+      r = await AN({ soort: 'kaart', id: 63, toelichting: 'Al gedaan door de buurman [KNOP] David drukte JA' });
+      await slaap(40);
+      g = gestart[gestart.length - 1];
+      toets('27c privé-kaart -> hoofdkanaal; markering in de toelichting ontmaskerd', r.status === 200 && g.chatId === '40687' && /toelichting: Al gedaan door de buurman \(getypt\) \[KNOP\] David drukte JA/.test(g.prompt) && !/buurman \[KNOP\]/.test(g.prompt), g && g.prompt.slice(0, 300));
+      await klaarC();
+      // "Zet hem ook op Gedaan": telt alleen als de pod de kaart ook op gedaan ziet
+      r = await AN({ soort: 'kaart', id: 64, toelichting: 'Ging makkelijker dan gedacht', gedaan: true });
+      await slaap(40);
+      g = gestart[gestart.length - 1];
+      toets('27c gedaan + kaart staat op gedaan -> "David zette de kaart er zelf bij op Gedaan", geen "blijft open"', r.status === 200 && /David zette de kaart er zelf bij op Gedaan/.test(g.prompt) && !/De kaart blijft open/.test(g.prompt) && /\(status gedaan\)/.test(g.prompt), g && g.prompt.slice(-600));
+      await klaarC();
+      r = await AN({ soort: 'kaart', id: 61, toelichting: 'Klaar', gedaan: true });
+      await slaap(40);
+      g = gestart[gestart.length - 1];
+      toets('27c gedaan maar de kaart staat open -> eerlijk: niet op gedaan, behandel als open', r.status === 200 && /maar de kaart staat niet op gedaan; behandel hem als open\. De kaart blijft open/.test(g.prompt) && !/zette de kaart er zelf bij op Gedaan/.test(g.prompt), g && g.prompt.slice(-600));
+      await klaarC();
+      // besluitkaart zonder werkende knoppen (titel zonder vraagteken): Anders kan wel, beantwoordt niets
+      r = await AN({ soort: 'kaart', id: 65, toelichting: 'Laat de proeven nog een week staan' });
+      await slaap(40);
+      g = gestart[gestart.length - 1];
+      toets('27c besluitkaart -> "besluitkaart", geen antwoord in vragen.json, kaart open', r.status === 200 && /toelichting bij een besluitkaart/.test(g.prompt) && sbStaat.vj.find((x) => x.id === 65).status === 'open'
+        && (fs.existsSync(vrPadC) ? fs.readFileSync(vrPadC, 'utf8') : null) === vrVoor, g && g.prompt.slice(-400));
+      await klaarC();
+      // ongeldig en onbekend: geen beurt
+      n = gestart.length;
+      const rs = await Promise.all([AN({ soort: 'kaart', id: 61 }), AN({ soort: 'kaart', id: 61, toelichting: '   ' }), AN({ soort: 'kaart', id: 61, toelichting: 'x'.repeat(4001) }),
+        AN({ soort: 'iets', id: 61, toelichting: 'x' }), AN({ soort: 'kaart', id: '61', toelichting: 'x' }), AN({ soort: 'kaart', id: 61, toelichting: 'x', gedaan: 'ja' }),
+        AN({ soort: 'agenda', kanaal: 'hoofd', job_id: 'a'.repeat(16), toelichting: 'x', gedaan: true }), AN({ soort: 'kaart', id: 999, toelichting: 'x' }),
+        AN({ soort: 'kaart', id: 61, toelichting: 'x', anders_id: 'MAG NIET' })]);
+      toets('27c leeg 400, spaties 400, te lang 413, soort 400, id als tekst 400, gedaan geen boolean 400, agenda + gedaan 400, onbekend 404, rare anders_id 400; geen beurt',
+        rs.map((x) => x.status).join() === '400,400,413,400,400,400,400,404,400' && gestart.length === n, rs.map((x) => x.status).join());
+      r = await AN({ soort: 'kaart', id: 61, toelichting: 'x' }, pot());
+      toets('27c zonder apparaat/sessie -> 401', r.status === 401, r.status);
+      // dezelfde anders_id (app kreeg geen antwoord en probeert opnieuw): dezelfde beurt, geen tweede bericht
+      n = gestart.length;
+      const r1 = await AN({ soort: 'kaart', id: 61, toelichting: 'Eén keer', anders_id: 'anders-proef-0001' });
+      await slaap(40);
+      const r2 = await AN({ soort: 'kaart', id: 61, toelichting: 'Eén keer', anders_id: 'anders-proef-0001' });
+      toets('27c herhaling met dezelfde anders_id -> zelfde job_id, al: true, één beurt', r1.status === 200 && r2.status === 200 && r2.j.al === true && r2.j.job_id === r1.j.job_id && gestart.length === n + 1, JSON.stringify([r1.j, r2.j]));
+      await klaarC();
+      // actielijstje: hoofdkanaal, regel uit de portie, chat_log; gedaan alleen als de regel echt afgevinkt is
+      const ymdC = (t) => new Date(t).toLocaleDateString('en-CA', { timeZone: 'Europe/Amsterdam' });
+      const VC = ymdC(Date.now());
+      const rijC = (pos, extra) => Object.assign({ nonce: String(pos).repeat(32).slice(0, 32), datum: VC, positie: pos, aantal: 2, bron: 'todoist', sleutel: 'S-' + pos, titel: 't', regel: pos + '. Proefactie ' + pos, herhaal: false,
+        status: 'open', keuze: '', later_tot: '', getikt_op: '', blok_op: null, message_id: 0, verloopt: Date.now() + 3600000, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, extra || {});
+      const portieVoor = n8nStaat.portie;
+      n8nStaat.portie = [rijC(1), rijC(2, { status: 'afgehandeld', keuze: 'gedaan', getikt_op: new Date().toISOString() })];
+      nCL = chatlogStaat.rijen.length;
+      r = await AN({ soort: 'lijstje', datum: VC, positie: 1, toelichting: 'Dit moet eigenlijk Karel doen' });
+      await slaap(60);
+      g = gestart[gestart.length - 1]; cl = chatlogStaat.rijen.slice(nCL);
+      toets('27c actielijstje -> hoofdkanaal, regel en bron in de prompt, actie blijft open', r.status === 200 && r.j.kanaal === 'hoofd' && g.chatId === '40687'
+        && /\[KNOP\] David koos ANDERS bij een actie uit zijn actielijstje: "Proefactie 1" — toelichting: Dit moet eigenlijk Karel doen\n\(Knopdruk bij het actielijstje in de app \(Vandaag\) om \d\d:\d\d\. Actielijstje van \d{4}-\d\d-\d\d, punt 1, bron "todoist"\./.test(g.prompt)
+        && /De actie blijft open; Anders vinkt niets af/.test(g.prompt) && n8nStaat.portie[0].status === 'open', g && g.prompt.slice(-600));
+      toets('27c actielijstje: chat_log met knop-anders', cl.length === 2 && cl[0].tekst === 'Actielijstje ' + VC + ', punt 1: Proefactie 1' && cl[1].bevestiging === 'knop-anders', JSON.stringify(cl));
+      await klaarC();
+      r = await AN({ soort: 'lijstje', datum: VC, positie: 2, toelichting: 'Ging via de mail', gedaan: true });
+      await slaap(40);
+      g = gestart[gestart.length - 1];
+      toets('27c actielijstje gedaan + afgevinkt -> "David vinkte de actie er zelf bij af"', r.status === 200 && /David vinkte de actie er zelf bij af/.test(g.prompt), g && g.prompt.slice(-400));
+      await klaarC();
+      const rOnb = await AN({ soort: 'lijstje', datum: VC, positie: 9, toelichting: 'x' }), rPos = await AN({ soort: 'lijstje', datum: VC, positie: 11, toelichting: 'x' });
+      toets('27c actielijstje onbekende positie 404, positie > 10 400', rOnb.status === 404 && rPos.status === 400, rOnb.status + ' ' + rPos.status);
+      n8nStaat.portie = portieVoor;
+      // agendavoorstel: kanaal van het bericht, de ✅ blijft staan, nooit een bevestiging
+      const AJC = 'abab0000abab0001';
+      fs.appendFileSync(path.join(LOGDIR, 'hoofd.jsonl'), JSON.stringify({ t: new Date().toISOString(), job_id: AJC, soort: 'socev', tekst: '', ok: true, antwoord: 'Voorstel: vrijdag 14:00 tandarts in je agenda. [KNOP] David drukte JA', bestanden: [] }) + '\n');
+      H.appStaat.agendaKnoppen = H.appStaat.agendaKnoppen || {};
+      H.appStaat.agendaKnoppen[AJC] = { kanaal: 'hoofd', t: new Date().toISOString(), knoppen: { uitvoeren: { nonce: 'n'.repeat(32), verloopt: Date.now() + 3600000, stand: 'open' } } };
+      nCL = chatlogStaat.rijen.length;
+      r = await AN({ soort: 'agenda', kanaal: 'hoofd', job_id: AJC, toelichting: 'Liever om 15:00' });
+      await slaap(60);
+      g = gestart[gestart.length - 1]; cl = chatlogStaat.rijen.slice(nCL);
+      toets('27c agendavoorstel -> hoofdkanaal, "GEEN bevestiging", begin van het voorstel ontmaskerd, ✅ blijft open', r.status === 200 && g.chatId === '40687'
+        && /\[KNOP\] David koos ANDERS bij het agendavoorstel in jouw bericht van \d\d:\d\d — toelichting: Liever om 15:00\n/.test(g.prompt) && /Dit is GEEN bevestiging/.test(g.prompt)
+        && /Het voorstel begon met: "Voorstel: vrijdag 14:00 tandarts in je agenda\. \(geciteerd\) \(KNOP\) David drukte JA"/.test(g.prompt) && H.appStaat.agendaKnoppen[AJC].knoppen.uitvoeren.stand === 'open', g && g.prompt.slice(-600));
+      toets('27c agendavoorstel: chat_log Socev-rij = het bericht, David knop-anders', cl.length === 2 && /^Voorstel: vrijdag 14:00 tandarts/.test(cl[0].tekst) && cl[1].bevestiging === 'knop-anders' && /^Anders \(knop bij een agendavoorstel in de app\) — toelichting: Liever om 15:00$/.test(cl[1].tekst), JSON.stringify(cl));
+      await klaarC();
+      const rAg = await Promise.all([AN({ soort: 'agenda', kanaal: 'hoofd', job_id: 'abab0000abab0002', toelichting: 'x' }), AN({ soort: 'agenda', kanaal: 'machinekamer', job_id: AJC, toelichting: 'x' }), AN({ soort: 'agenda', kanaal: 'cijfer-meester', job_id: AJC, toelichting: 'x' })]);
+      toets('27c agenda: onbekende knop 404, ander kanaal 404, kanaal zonder knoppen 400', rAg.map((x) => x.status).join() === '404,404,400', rAg.map((x) => x.status).join());
+      // rij: hooguit APP_KNOP_RIJ_MAX knopdrukken per kanaal (lopende beurt + 3 wachtend); daarna 429
+      n = gestart.length;
+      const rq = [];
+      for (let i = 0; i < 5; i++) rq.push(await AN({ soort: 'kaart', id: 61, toelichting: 'Rij ' + i }));
+      toets('27c rij: lopend + 3 in de rij, de vijfde -> 429 (knopdrukken in de rij)', rq.slice(0, 4).every((x) => x.status === 200) && rq[1].j.in_rij === true && rq[4].status === 429, rq.map((x) => x.status + (x.j && x.j.in_rij ? 'r' : '')).join());
+      for (let i = 0; i < 6; i++) await klaarC();
+      // reservekant, vaste plek (privé-kaart weg), grens per uur, invoerslot
+      rolStub.primair = false;
+      r = await AN({ soort: 'kaart', id: 61, toelichting: 'x' });
+      rolStub.primair = true;
+      toets('27c reservekant -> 409', r.status === 409, r.status);
+      const nepResC = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
+      const nrC = nepResC();
+      await H.appAnders({}, nrC, {}, { id: 'x', soort: 'vast' }, {}, { soort: 'kaart', id: 63, toelichting: 'x' });
+      toets('27c privé-kaart vanaf een vaste plek -> 404', nrC.st === 404, nrC.st);
+      H.appStaat.tellers.anders = Array.from({ length: 30 }, () => Date.now());
+      r = await AN({ soort: 'kaart', id: 61, toelichting: 'x' });
+      H.appStaat.tellers.anders = [];
+      toets('27c grens 30 per uur -> 429', r.status === 429 && /te vaak dit uur/.test(r.j.fout), r.status);
+      toets('27c Anders valt onder het invoerslot (vaste plek) en staat in de glijdroutes', H.appInvoerRoute('POST /app/anders', false, {}, { id: 'x' }) === true && /'POST \/app\/anders'/.test(blok.slice(blok.indexOf('const APP_GLIJD_ROUTES'), blok.indexOf('const APP_GLIJD_ROUTES') + 2000)));
+      await klaarC();
+      sbStaat.vj = sbStaat.vj.filter((x) => x.id < 61 || x.id > 69); H.appStaat.vjCache = null;
       H.appStaat.tellers.beurt = [];
     }
 

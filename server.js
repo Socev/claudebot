@@ -4867,7 +4867,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
   'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
-  'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt
+  'POST /app/reactie', 'POST /app/agenda', 'POST /app/anders', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt   // wv1821: Anders bij een actie is David die schrijft
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
 APP_GLIJD_ROUTES.add('POST /app/managers/ronde');   // wv895: Nu draaien = David die werkt
@@ -9737,6 +9737,7 @@ async function appVjRegisterVraag(p) {
     // Fable wv335 #2: ook kanaal en status uit het (ongefilterde) register door de sleuteltoets
     const kanaal = appKort(appSleutelMasker(String(r.kanaal).replace(/\s*\(.*$/, '')), 40), stand = appKort(appSleutelMasker(appVjOpmaakWeg(appSleutelMasker(String(r.status).split(/[;—(]/)[0]))), 60);
     uit.herkomst.push({ soort: 'vraag', tekst: 'Vraag van ' + tijd + (kanaal ? ' (' + kanaal + ')' : '') + (stand ? ' — ' + stand : '') });
+    if (uit.kanaalRuw === undefined) uit.kanaalRuw = String(r.kanaal || '');   // wv1821: kanaal van de eerste registerrij, ook bij een taakkaart (Anders)
     if (p.soort === 'besluit' && !uit.vraag) {
       const open = /^(open|deels|wacht|uitgesteld)/i.test(r.status);
       const tm = appVjStatusTijd(r.status);
@@ -10170,6 +10171,145 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
       bijVerval: pot && !pot.reden ? function () { potVzIntrekken(pot.v); } : undefined });
   await knopRes;
   if (res._app) res._app.reden = 'voor-jou knop #' + id + ' ' + (res._app.reden || '');
+}
+
+// ── wv1821 (David 28-10: "Doe meteen ELKE actie altijd ook met een 'anders' knop"): POST /app/anders ──
+// Davids toelichting bij een actie die geen vraag is: een Voor jou-kaart (taak, proef, of besluit zonder werkende knoppen), een regel
+// uit het actielijstje of een agendavoorstel. Body {soort: kaart|lijstje|agenda, id | datum+positie | kanaal+job_id, toelichting,
+// gedaan?, anders_id?}. De pod zoekt de context zelf op (de app stuurt geen kaarttekst) en start een beurt bij wie de kaart zette:
+// kaart = kanaal van de kaart (registerrij, anders appVjKanaal: privé = hoofdkanaal, de rest machinekamer), actielijstje = hoofdkanaal,
+// agendavoorstel = het kanaal van dat bericht. Anders sluit niets af en beantwoordt geen vraag: geen rij in vragen.json, geen
+// statuswissel. gedaan = David vinkte "Zet hem ook op Gedaan" aan; de app deed dan eerst de gewone Gedaan-route, en de pod noemt het
+// alleen als hij de kaart/regel ook echt op gedaan ziet. Hoofdkanaal: chat_log zoals een knopdruk, met bevestiging knop-anders (de
+// Poortwachter leest er nooit een Ja in). Rij, noodstop en verval zoals appKnop (soort knop, hooguit APP_KNOP_RIJ_MAX per kanaal).
+const APP_ANDERS_PER_UUR = 30;
+const APP_ANDERS_HERHAAL_MS = 10 * 60 * 1000;   // dezelfde anders_id binnen 10 min (netwerk weg na het versturen) = dezelfde beurt
+appStaat.tellers.anders = appStaat.tellers.anders || [];
+const APP_ANDERS_KANAALNAAM = { hoofd: 'het hoofdkanaal', machinekamer: 'de machinekamer' };
+// Kanaal van een kaart: registerkanaal van de eerste registerrij (ook bij een taakkaart), anders de regel van de besluitknoppen
+function appAndersKaartKanaal(p, rv, gekRij) {
+  const k = rv && !rv.vraag && typeof rv.kanaalRuw === 'string' ? rv.kanaalRuw.trim().toLowerCase() : '';
+  if (/^(debug|machinekamer|box)/.test(k)) return 'machinekamer';
+  if (/^(hoofd|socev|auto)/.test(k)) return 'hoofd';
+  return appVjKanaal(p, rv, gekRij);
+}
+// Het bericht met het agendavoorstel: uit het geheugen (net klaar) of uit het app-log
+async function appAndersBericht(kanaal, jobId) {
+  const j = jobs[jobId];
+  if (j && j.app && j.app.kanaal === kanaal && j.status === 'done') { const o = appUitvoer(j); if (String(o || '').trim()) return String(o); }
+  try {
+    const l = (await appLogLees(kanaal)).filter(function (x) { return x.job_id === jobId; }).pop();
+    if (l && String(l.antwoord || '').trim()) return String(l.antwoord);
+  } catch (e) { if (!(e && e.code === 'ENOENT')) logError('app-anders', e); }
+  return null;
+}
+async function appAnders(req, res, reg, a, s, d) {
+  const soort = String(d.soort || '');
+  if (['kaart', 'lijstje', 'agenda'].indexOf(soort) < 0) return appWeiger(res, 400, 'ongeldige knop', 'anders soort');
+  const toel = String(d.toelichting == null ? '' : d.toelichting).replace(/\r\n?/g, '\n').trim();
+  if (!toel) return appWeiger(res, 400, 'typ je toelichting', 'anders leeg');
+  if (toel.length > 4000) return appWeiger(res, 413, 'toelichting te lang', 'anders te lang');
+  if (d.gedaan !== undefined && d.gedaan !== null && typeof d.gedaan !== 'boolean') return appWeiger(res, 400, 'ongeldige knop', 'anders gedaan');
+  if (d.gedaan === true && soort === 'agenda') return appWeiger(res, 400, 'een agendavoorstel kent geen Gedaan', 'anders gedaan agenda');
+  const aid = d.anders_id === undefined || d.anders_id === null ? '' : String(d.anders_id);
+  if (aid && !/^[a-z0-9-]{8,64}$/.test(aid)) return appWeiger(res, 400, 'ongeldige knop', 'anders_id');
+  // herhaling van hetzelfde verzoek (app kreeg geen antwoord): dezelfde beurt terug, geen tweede bericht
+  const nu0 = Date.now();
+  appStaat.andersIds = appStaat.andersIds || {};
+  Object.keys(appStaat.andersIds).forEach(function (k) { if (nu0 - appStaat.andersIds[k].t > APP_ANDERS_HERHAAL_MS) delete appStaat.andersIds[k]; });
+  const ah = aid ? appSha(a.id + ':' + aid) : null;
+  if (ah && appStaat.andersIds[ah]) {
+    const x = appStaat.andersIds[ah];
+    if (x.job) { res._app.reden = 'anders herhaling ' + x.job; return appStuur(res, 200, { ok: true, job_id: x.job, kanaal: x.kanaal, al: true, in_rij: false }); }
+    return appWeiger(res, 409, 'dit wordt al verstuurd; even geduld', 'anders herhaling bezig');
+  }
+  if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later opnieuw', 'rol passief');
+  if (!appTeller('anders', APP_ANDERS_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + APP_ANDERS_PER_UUR + ')', 'grens anders');
+  const tijd = appKlok();
+  const t = appOntmasker(toel);
+  let kanaal, kop, ctx, socevRij, davidRij, gedaanWaar = false, reden;
+  if (soort === 'kaart') {
+    const id = d.id;
+    if (!Number.isInteger(id) || id < 1 || id > 999999999) return appWeiger(res, 400, 'ongeldige knop', 'anders kaart id');
+    let punten;
+    try { appStaat.vjCache = null; punten = await appVjPunten(); } catch (e) { logError('app-voor-jou', e); return appWeiger(res, 503, 'de lijst is nu niet te lezen; probeer het zo opnieuw', 'voor-jou lezen'); }
+    const p = appVjVoorApparaat(punten, a).find(function (x) { return x.id === id; });
+    if (!p) return appWeiger(res, 404, 'dit punt staat niet (meer) in je lijst; ververs', 'anders kaart ' + id + ' weg');
+    const rv = await appVjRegisterVraag(p);
+    let gekRij = null;
+    if (p.soort === 'besluit') {
+      try { const gek = appVjGekoppeld(p, (await appVjAfgeleid(punten, Date.now())).map); gekRij = gek ? appVragen()[gek] || null : null; } catch (e) { gekRij = null; }
+    }
+    kanaal = appAndersKaartKanaal(p, rv, gekRij);
+    gedaanWaar = d.gedaan === true && p.status === 'gedaan';
+    const h = p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
+    const wv = (Array.isArray(h.wv) ? h.wv : []).filter(function (x) { return Number.isInteger(Number(x)); }).slice(0, 6).map(function (x) { return 'wv' + Number(x); });
+    const reg = (Array.isArray(h.register) ? h.register : []).map(String).filter(function (x) { return x.length <= 80; }).slice(0, 1);
+    const titel = appOntmasker(appVjOpmaakWeg(p.titel), 'kaart');
+    kop = '[KNOP] David koos ANDERS bij de Voor jou-kaart ' + JSON.stringify(titel) + ' — toelichting: ' + t;
+    ctx = '(Knopdruk op de Voor jou-kaart in de app (Overzicht, ' + APP_ANDERS_KANAALNAAM[kanaal] + ') om ' + tijd + '. Dit is Davids toelichting bij een ' + (p.soort === 'besluit' ? 'besluitkaart' : p.soort === 'proef' ? 'proefkaart' : 'taakkaart') +
+      ', geen antwoord op een vraag en geen bevestiging. ' +
+      (gedaanWaar ? 'David zette de kaart er zelf bij op Gedaan (de gewone knop, net vóór deze toelichting); laat hem dicht tenzij de toelichting iets anders zegt. '
+        : (d.gedaan === true ? 'David vinkte "Zet hem ook op Gedaan" aan, maar de kaart staat niet op gedaan; behandel hem als open. ' : '') + 'De kaart blijft open; Anders sluit niets af. ') +
+      'Kaart: punt ' + appOntmasker(String(p.sleutel || ''), 'kaart') + ' (status ' + (gedaanWaar ? 'gedaan' : String(p.status || '?')) + ')' + (rv.vraag ? ', registerrij ' + JSON.stringify(appOntmasker(rv.vraag.regSleutel, 'kaart')) : reg.length ? ', registerrij ' + JSON.stringify(appOntmasker(reg[0], 'kaart')) : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') + '. ' +
+      'Lees de toelichting als Davids woorden bij precies deze kaart en handel ernaar: past hij de opdracht aan, neem dat mee (een werkvoorraadrij die op deze kaart wacht krijgt de toelichting erbij); ' +
+      'zegt hij dat iets af of niet meer nodig is, zet de kaart dan zelf goed. Antwoord David kort in dit gesprek.)';
+    socevRij = 'Voor jou-kaart ' + JSON.stringify(titel);
+    davidRij = 'Anders (knop bij een Voor jou-kaart in de app' + (gedaanWaar ? ', kaart op Gedaan gezet' : '') + ') bij ' + JSON.stringify(titel) + ' — toelichting: ' + t;
+    reden = 'anders kaart #' + id + ' -> ' + kanaal + (gedaanWaar ? ' (gedaan)' : '');
+  } else if (soort === 'lijstje') {
+    const datum = String(d.datum || ''), positie = typeof d.positie === 'number' ? d.positie : NaN;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(datum) || !Number.isInteger(positie) || positie < 1 || positie > 10) return appWeiger(res, 400, 'ongeldige knop', 'anders lijstje velden');
+    let rijen;
+    try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-anders', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen; probeer het zo opnieuw', 'anders lijstje lezen'); }
+    const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
+    if (!rij) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'anders lijstje onbekend');
+    kanaal = 'hoofd';
+    gedaanWaar = d.gedaan === true && rij.keuze === 'gedaan';
+    const regel = appOntmasker(appKort(appSleutelMasker(String(rij.regel || rij.titel || '').replace(/^\d+\.\s*/, '')), 220), 'lijstje');
+    const bron = appOntmasker(appKort(String(rij.bron || ''), 30), 'lijstje');
+    kop = '[KNOP] David koos ANDERS bij een actie uit zijn actielijstje: ' + JSON.stringify(regel) + ' — toelichting: ' + t;
+    ctx = '(Knopdruk bij het actielijstje in de app (Vandaag) om ' + tijd + '. Actielijstje van ' + datum + ', punt ' + positie + (bron ? ', bron ' + JSON.stringify(bron) : '') + '. ' +
+      'Dit is Davids toelichting bij die actie, geen antwoord op een vraag en geen bevestiging. ' +
+      (gedaanWaar ? 'David vinkte de actie er zelf bij af (✅ Gedaan, net vóór deze toelichting). '
+        : (d.gedaan === true ? 'David vinkte "Zet hem ook op Gedaan" aan, maar de actie staat niet op gedaan; behandel hem als open. ' : '') + 'De actie blijft open; Anders vinkt niets af. ') +
+      'Werk de bron bij naar wat David zegt (Todoist-taak, actiepunt of toezegging; via de gewone weg, niets naar buiten) en antwoord David kort in dit gesprek.)';
+    socevRij = 'Actielijstje ' + datum + ', punt ' + positie + ': ' + regel;
+    davidRij = 'Anders (knop bij het actielijstje in de app' + (gedaanWaar ? ', actie afgevinkt' : '') + ') bij ' + JSON.stringify(regel) + ' — toelichting: ' + t;
+    reden = 'anders lijstje ' + datum + '#' + positie + (gedaanWaar ? ' (gedaan)' : '');
+  } else {
+    kanaal = String(d.kanaal || '');
+    const id = String(d.job_id || '');
+    if (!Object.hasOwn(APP_KNOP_KANALEN, kanaal) || !APP_JOB_RE.test(id)) return appWeiger(res, 400, 'ongeldige knop', 'anders agenda velden');
+    const e = appAgendaKnoppen()[id];
+    if (!e || e.kanaal !== kanaal || !appAgendaKnop(id, 'uitvoeren')) return appWeiger(res, 404, 'deze knop ken ik niet (meer)', 'anders agenda onbekend');
+    const bericht = await appAndersBericht(kanaal, id);
+    kop = '[KNOP] David koos ANDERS bij het agendavoorstel in jouw bericht van ' + appTijdKort(Date.parse(e.t) || Date.now()) + ' — toelichting: ' + t;
+    ctx = '(Knopdruk bij het agendavoorstel in de app om ' + tijd + (bericht ? '. Het voorstel begon met: "' + appEenRegel(bericht, 300) + '"' : '. Het bericht met het voorstel is niet meer leesbaar') + '. ' +
+      'Dit is GEEN bevestiging: de ✅ onder dat voorstel blijft staan en er verandert niets in de agenda. Pas het voorstel aan naar wat David zegt en leg het opnieuw voor met een agendaknop, of laat het vallen als hij dat zegt.)';
+    socevRij = bericht || '(agendavoorstel)';
+    davidRij = 'Anders (knop bij een agendavoorstel in de app) — toelichting: ' + t;
+    reden = 'anders agenda ' + id + ' -> ' + kanaal;
+  }
+  if (!(await appMagBeurt(res, kanaal, true))) return;
+  if (ah && appStaat.andersIds[ah]) return appWeiger(res, 409, 'dit wordt al verstuurd; even geduld', 'anders herhaling bezig');   // tweede kwam tijdens het lezen
+  const promptTekst = kop + '\n' + ctx + (res._app.bsnWeg ? '\n' + APP_BSN_SYS : '');
+  const chatId = APP_KANALEN[kanaal];
+  const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
+  const drukT = Date.now();
+  // chat_log pas bij de start (zoals appKnop, wv405): Davids laatste rij is dan deze toelichting, met knop-anders
+  const bijStart = function () {
+    const nu = Math.max(Date.now(), (appStaat.chatlogLaatsteTs || 0) + 2);
+    const wacht = nu - drukT > APP_KNOP_WACHT_MELD_MS ? '\n(Deze toelichting stond tot ' + appKlok() + ' in de rij omdat Socev nog bezig was.)' : '';
+    return appChatLogVoor(kanaal, [{ rol: 'socev', tekst: socevRij, ts: nu - 1 }, { rol: 'david', ts: nu, bevestiging: 'knop-anders', tekst: davidRij }])
+      .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); });
+  };
+  if (ah) appStaat.andersIds[ah] = { t: Date.now(), job: null, kanaal: kanaal };
+  const st = appStartBeurt(a, kanaal, promptTekst, { soort: 'knop', bijStart: bijStart, tekst: '✎ Anders: ' + toel + ' — bij ' + (soort === 'kaart' ? 'de kaart ' : soort === 'lijstje' ? 'de actie ' : 'het agendavoorstel ') + (soort === 'agenda' ? '' : socevRij.replace(/^(Voor jou-kaart |Actielijstje [^:]*: )/, '')) });
+  if (!st.job_id) { if (ah) delete appStaat.andersIds[ah]; return appStartFout(res, st); }
+  if (ah) appStaat.andersIds[ah].job = st.job_id;
+  res._app.reden = reden + ' -> ' + st.job_id + (inRij ? ' (in de rij)' : '');
+  appStuur(res, 200, { ok: true, job_id: st.job_id, kanaal: kanaal, in_rij: inRij });
 }
 
 // ── Details bij het actielijstje (wv335; bouwplan Voor jou § 2, § 4.4): GET /app/vandaag/actie/<datum>/<positie> ──
@@ -11970,6 +12110,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/voor-jou/') === 0) return appVoorJouDetail(req, res, a, route.slice('GET /app/voor-jou/'.length));
         if (route === 'POST /app/voor-jou/keuze') return appVoorJouKeuze(req, res, a, d);
         if (route === 'POST /app/voor-jou/knop') return appVoorJouKnop(req, res, reg, a, s, d);   // wv404
+        if (route === 'POST /app/anders') return appAnders(req, res, reg, a, s, d);   // wv1821
         if (route.indexOf('GET /app/vandaag/actie/') === 0) return appVandaagActieDetail(req, res, a, route.slice('GET /app/vandaag/actie/'.length));
         if (route === 'GET /app/sleutels') return appSleutels(req, res, a);
         if (route === 'POST /app/sleutels/vervang') return appSleutelVervang(req, res, reg, a, s, d);
