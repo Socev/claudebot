@@ -4859,6 +4859,7 @@ const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften', 'mediat
 // APP_BEHEER_ROUTES, een gevoelige Ja telt niet (knop-ja-vers-vast, AIX, POT-verzending, OVIS-adres). Eén schakelaar: true = het oude
 // afschermen (terugrol). Ontwerp: vault 01_Ontwikkeling/Vaste plek - alles open (ontwerp 28-10-2026).md
 const APP_VAST_AFSCHERMEN = false;
+const APP_VAST_SLOT_GET = new Set(['GET /app/financien', 'GET /app/gezondheid', 'GET /app/gezondheid/genoom', 'GET /app/pot-afschriften', 'GET /app/mediatheek']);
 function appAfscherm(a) {
   return APP_VAST_AFSCHERMEN && !!(a && a.soort === 'vast');
 }
@@ -4982,7 +4983,8 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
   'POST /app/agenda',      // wv315 (zie hieronder)
   'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus',
-  'POST /app/docs/delen']);    // wv1382: een pagina naar buiten zetten alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk; review #10). Intrekken staat in APP_SLOT_VRIJ: dat maakt alleen dichter    // wv833: boekhoud-/afschriftadres en verzendmodus alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk)
+  'POST /app/docs/delen',
+  'POST /app/werkers/schakel']);   // wv1901 (Opus-review ZOU 4): een werker uit- of aanzetten raakt n8n zoals modellen; nooit vanaf een vaste plek    // wv1382: een pagina naar buiten zetten alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk; review #10). Intrekken staat in APP_SLOT_VRIJ: dat maakt alleen dichter    // wv833: boekhoud-/afschriftadres en verzendmodus alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk)
 // wv315: agenda-✅/↩️ alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot (§ 4.13)
 // wv464 (David 12-10: "Jij mag mij nooit blokkeren … Die haal je desnoods later maar uit mijn text!"): op een vaste plek gaat
 // een bericht met een BSN-achtig getal gewoon door; het getal wordt vóór opslag en doorsturen vervangen (§ 4.11).
@@ -6141,10 +6143,13 @@ async function appSlot(a) {
 function appInvoerRoute(route, upload, d, a) {
   if (upload || route.indexOf('GET /app/bestand/') === 0 || route.indexOf('GET /app/facturen/document/') === 0) return true;   // wv833: facturen-stuk inzien = als downloaden
   if (route === 'GET /app/secondbrain') return true;   // wv832: de kaart (bestandsnamen) op een vaste plek alleen met open slot (Fable diffreview K7)
+  // wv1901 (Opus-review MOET 2, ZOU 7): de privé-Apps staan sinds wv1901 ook op een vaste plek open; lezen en downloaden daar alleen met
+  // open slot (David is er, of zette het vanaf zijn telefoon open), zoals de Second Brain-kaart hierboven
+  if (APP_VAST_SLOT_GET.has(route) || route.indexOf('GET /app/pot-afschriften/bestand/') === 0 || route.indexOf('GET /app/mediatheek/bestand/') === 0) return true;
   if (route.indexOf('POST ') !== 0 || APP_SLOT_VRIJ.has(route)) return false;
   if (route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id) return false;
   if (route === 'POST /app/concept' && !String(d.tekst == null ? '' : d.tekst).trim()) return false;   // wv159: concept wissen mag altijd
-  if (route === 'POST /app/vast' && d.actie === 'los') return false;   // wv1051 (Fable diff #3): losmaken in het menu is geen invoer; vastzetten weigert de route op een vaste plek zelf
+  if (route === 'POST /app/vast' && d.actie === 'los') return false;   // wv1051 (Fable diff #3): losmaken in het menu is geen invoer; vastzetten wel (onder het slot)
   if (/^POST \/app\/studio\/stop\/[a-f0-9]{16}$/.test(route)) return false;   // wv707 (Fable #8): stoppen is geen invoer
   return true;
 }
@@ -6159,7 +6164,8 @@ function appElfproef(c) {
 // Zonder treffer komt de tekst ongewijzigd terug; met treffer genormaliseerd zoals appOntmasker (onzichtbare opmaaktekens weg,
 // NFKC), anders zou "111\u00ad222333" of vol-breedte "１１１…" langs het masker glippen en daarna toch als 111222333 in de beurt
 // staan (Fable-diffreview wv464 #1).
-function appBsnMasker(t, vervang) {
+// wv1901: behoud = Set van cijferreeksen (9 cijfers) die blijven staan (Docs-bewaren op een vaste plek: wat er al stond).
+function appBsnMasker(t, vervang, behoud) {
   const org = String(t == null ? '' : t), n = org.replace(/\p{Cf}/gu, '').normalize('NFKC');
   // Horizontale spaties zoals NBSP/smalle spatie/tab (komen mee bij plakken uit HIS of PDF) eerst gewoon maken (review wv134 K4);
   // teken voor teken, dus de posities in `tekst` gelden ook in `n`. Een regeleinde blijft een harde grens (twee BSN's onder
@@ -6167,8 +6173,20 @@ function appBsnMasker(t, vervang) {
   const re = /(?<!\d)(?<!\d[ .,/-])\d(?:[ .,/-]?\d){8}(?![ .,/-]?\d)/g;
   const tekst = n.replace(/[^\S\r\n]/g, ' ');
   let m, uit = '', vanaf = 0, raak = false;
-  while ((m = re.exec(tekst))) if (appElfproef(m[0].replace(/\D/g, ''))) { uit += n.slice(vanaf, m.index) + (vervang === undefined ? APP_BSN_MASKER : vervang); vanaf = m.index + m[0].length; raak = true; }
+  while ((m = re.exec(tekst))) {
+    const c = m[0].replace(/\D/g, '');
+    if (appElfproef(c) && !(behoud && behoud.has(c))) { uit += n.slice(vanaf, m.index) + (vervang === undefined ? APP_BSN_MASKER : vervang); vanaf = m.index + m[0].length; raak = true; }
+  }
   return raak ? uit + n.slice(vanaf) : org;
+}
+// wv1901: de BSN-achtige getallen (alleen cijfers) in een tekst, met dezelfde normalisatie en herkenning als appBsnMasker
+function appBsnGetallen(t) {
+  const n = String(t == null ? '' : t).replace(/\p{Cf}/gu, '').normalize('NFKC').replace(/[^\S\r\n]/g, ' ');
+  const re = /(?<!\d)(?<!\d[ .,/-])\d(?:[ .,/-]?\d){8}(?![ .,/-]?\d)/g;
+  const uit = new Set();
+  let m;
+  while ((m = re.exec(n))) { const c = m[0].replace(/\D/g, ''); if (appElfproef(c)) uit.add(c); }
+  return uit;
 }
 function appBsnAchtig(t) {
   const s = String(t || '');
@@ -10493,8 +10511,7 @@ async function appVandaagActieDetail(req, res, a, rest) {
 // NZa-indexatie, normpraktijk, landelijke POH-GGZ-uitgaven). Vaste SELECT's zonder invoer van de app; alleen werkelijke cijfers
 // (versie `jaarrekening`, nooit modeluitkomsten), alleen totalen (maat IS NULL: geen winstdeel per maat), alleen geaggregeerde
 // aantallen (geen patiëntgegevens). Elk cijfer draagt zijn bron (titel uit `bron`, of de zorgdata-bron met status); wat berekend
-// is, zegt dat. 30 min in het geheugen van de pod, niets op schijf; stil in het auditlog. Op een apparaat met een vaste plek
-// (werk-pc) niets: bedrijfscijfers alleen op de telefoon en meereizende apparaten.
+// is, zegt dat. 30 min in het geheugen van de pod, niets op schijf; stil in het auditlog. Sinds 8-10 (David) ook op een vaste plek.
 const APP_PRAKTIJKEN_CACHE_MS = 30 * 60 * 1000;
 const APP_FIN_DB = process.env.APP_FIN_DB || 'ffcb09ad-fc50-4c83-aa7b-ad6409b44e03';   // D1 `fin` (skill fin-datahub)
 const APP_CF_ACCOUNT = process.env.CF_ACCOUNT_ID || '23df9b0607bb70f6d7f15a63ec843d6d';   // = LESSEN_CF_ACCOUNT (buiten dit blok)
@@ -10762,8 +10779,8 @@ async function appPraktijkenRoute(req, res, a) {
 
 // ── App Financiën (wv771; bouwplan idee 16 § 11): privégeld, alleen lezen ──
 // Eén route zonder parameters. Het bankkind (bank-lezer.js app-financien, lokaal: geen kluis, geen bankopvraag) bouwt het antwoord veld
-// voor veld op (financien-app.js); hier alleen doorgeven. Niet op een apparaat met een vaste plek (privégeld niet op de spreekkamer-pc):
-// dan 200 met vaste_plek en een zin, zoals Praktijken/Voor jou (Fable wv771 #15). Wél een auditregel per keer openen (route, apparaat,
+// voor veld op (financien-app.js); hier alleen doorgeven. Op een vaste plek alleen als die afschermt (APP_VAST_AFSCHERMEN, sinds wv1901
+// uit) 200 met vaste_plek en een zin (Fable wv771 #15); anders onder het invoerslot (APP_VAST_SLOT_GET). Wél een auditregel per keer openen (route, apparaat,
 // status; geen inhoud): één verzoek geeft het hele privé-overzicht (Fable #14). 60 s in het geheugen tegen Ververs-spam en als terugval
 // als de database even bezet is (bankronde); niets op schijf. Grens 20 s (Fable #13).
 const APP_FIN_CACHE_MS = 60000, APP_FIN_MAX_MS = 20000, APP_FIN_TERUGVAL_MS = 30 * 60000;
@@ -12133,7 +12150,7 @@ function handleApp(req, res) {
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en het
         // BSN-masker (§ 4.11; wv464: maskeren, nooit weigeren). Daarna verder met slotKlaar = true (apparaat en sessie opnieuw gecontroleerd).
         if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
-          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/sleutels/weg' ? 'sleutels weggooien' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
+          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/sleutels/weg' ? 'sleutels weggooien' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : route === 'POST /app/werkers/schakel' ? 'een werker aan- of uitzetten' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
@@ -12565,7 +12582,7 @@ async function appSleutelLijst() {
   return { sleutels: uit, fouten: fouten };
 }
 async function appSleutels(req, res, a) {
-  // Fable-review wv157 K5: een werk-pc krijgt geen inventaris van sleutelnamen (het portaal eiste daarvoor de Telegram-code)
+  // Fable-review wv157 K5: een werk-pc kreeg geen inventaris van sleutelnamen; sinds wv1901 alleen nog als de vaste plek afschermt
   // wv1901: de lijst (namen, nooit waarden) ook op een vaste plek; vast blijft het echte soort (vervangen en weggooien zijn beheer)
   if (appAfscherm(a)) return appStuur(res, 200, { ok: true, sleutels: [], fouten: [], vast: true, primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
   const l = await appSleutelLijst();
@@ -16459,6 +16476,8 @@ async function appWerkers(req, res, a) {
     const hs = typeof ringkaartRijen === 'function' ? await ringkaartRijen() : null;
     const sk = await werkersSchakelaars(false);   // wv1733
     uit = WERKERS_MOD.stand({ workflows: wf, hartslag: hs, schakelaars: sk, vast: appAfscherm(a) });   // wv1901
+    // wv1901: alles zichtbaar, maar schakelen is beheer (APP_BEHEER_ROUTES): op een vaste plek geen knoppen
+    if (a && a.soort === 'vast') Object.keys(uit.groepen || {}).forEach(function (g) { (uit.groepen[g] || []).forEach(function (k) { k.kan = []; }); });
     const c = uit.check;
     werkersLaatst = { t: new Date().toISOString(), n8n_actief: c.n8n_actief, ontbreekt: c.ontbreekt ? c.ontbreekt.length : null,
       niet_actief: c.niet_actief ? c.niet_actief.length : null, hartslag_zonder_werker: c.hartslag_zonder_werker ? c.hartslag_zonder_werker.length : null };
@@ -16508,7 +16527,7 @@ async function werkerAanzetten(w, sk) {
 }
 async function appWerkerSchakel(req, res, a, s, d) {
   if (!WERKERS_MOD || typeof WERKERS_MOD.schakelKeuze !== 'function') return appWeiger(res, 404, 'De schakelaar zit niet in deze versie van de pod', 'schakel ontbreekt');
-  if (appAfscherm(a)) return appWeiger(res, 403, 'niet op een vaste plek', 'schakel vaste plek');   // wv1901: verder onder het invoerslot
+  if (a && a.soort === 'vast') return appWeiger(res, 403, 'niet op een vaste plek', 'schakel vaste plek');   // ook APP_BEHEER_ROUTES (wv1901)
   const id = String(d.id == null ? '' : d.id).slice(0, 80), actie = String(d.actie == null ? '' : d.actie);
   const w = Object.prototype.hasOwnProperty.call(WERKERS_MOD.PER_ID, id) ? WERKERS_MOD.PER_ID[id] : null;
   const rijen = await werkersSchakelaars(true);
@@ -16673,8 +16692,8 @@ async function appBrainEntiteiten(req, res, a, route) {
 // (.md, bron_soort: mediatheek) naast elk bestand in 20_Prive; 20_Prive/Mediatheek.md is de kaft (volgorde en uitleg). Logica en
 // padcontrole in mediatheek.js (alleen bestanden uit `bestanden:` van een geldige beschrijving, in dezelfde map, onder 20_Prive, vaste
 // extensies, realpath, geen symlink of hardlink, ≤ 20 MB; een kapotte beschrijving = "te herstellen", de rest blijft). Hier: GET /app/mediatheek (lijst, stil bij 200) en GET /app/mediatheek/bestand/<id> (base64 in JSON, zoals
-// /app/bestand: de app speelt het af als blob, dus geen Range nodig, ook niet in Safari). Privé-module: op een apparaat met een vaste plek
-// dicht. Ontbreekt mediatheek.js in de release (terugrol), dan 404 en /health.mediatheek.aan=false.
+// /app/bestand: de app speelt het af als blob, dus geen Range nodig, ook niet in Safari). Privé-module: op een vaste plek onder het
+// invoerslot (wv1901; dicht alleen als APP_VAST_AFSCHERMEN aan staat). Ontbreekt mediatheek.js in de release (terugrol), dan 404 en /health.mediatheek.aan=false.
 const MEDIATHEEK_MOD = (function () { const p = path.join(__dirname, 'mediatheek.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('mediatheek', e); return null; } })();
 const mediatheek = (function () { try { return MEDIATHEEK_MOD ? MEDIATHEEK_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, fout: logError }) : null; } catch (e) { logError('mediatheek', e); return null; } })();
 let mediatheekBezig = 0;
@@ -16912,6 +16931,15 @@ async function appSecondBrain(req, res, a, d, route) {
   if (!appTeller('secondbrain', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 600)', 'grens secondbrain');
   if (route === 'POST /app/secondbrain/zoek' && d && d.betekenis && !appTeller('secondbrain-betekenis', 60, 3600000))
     return appWeiger(res, 429, 'zoeken op betekenis te vaak dit uur (max 60); het gewone zoeken werkt nog', 'grens secondbrain-betekenis');
+  // wv1901 (Opus-review MOET 1): Docs bewaren mag sinds wv1901 ook vanaf een vaste plek (onder het invoerslot). Een BSN-achtig getal
+  // dat in de huidige versie van de pagina nog niet stond, wordt daar gemaskeerd (wv464: maskeren, nooit weigeren); wat er al stond
+  // (bijv. Davids eigen BSN op een privépagina) blijft staan. Is de huidige versie niet te lezen, dan wordt elk BSN-achtig getal gemaskeerd.
+  if (route === 'POST /app/secondbrain/bewaar' && a && a.soort === 'vast' && d && typeof d.md === 'string' && appBsnAchtig(d.md)) {
+    let oud = null;
+    try { oud = typeof secondbrain.bron === 'function' ? secondbrain.bron(String(d.pad || ''), { vast: false }) : null; } catch (e) { oud = null; }
+    const m = appBsnMasker(d.md, undefined, appBsnGetallen(oud ? oud.tekst : ''));
+    if (m !== d.md) { d.md = m; res._app.bsnWeg = true; }
+  }
   let r;
   try { r = await secondbrain.app(route, d || {}, { vast: appAfscherm(a) }); }   // wv1901
   catch (e) { logError('app-secondbrain', e); return appWeiger(res, 500, 'fout op de pod', 'secondbrain uitzondering'); }

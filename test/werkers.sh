@@ -156,7 +156,7 @@ toets('7m server: route, vingerafdruk pas na de keuzeregels, één per schakelin
   /if \(k\.vers\) s\.vers_tot = 0/.test(s) && !/\/archive|DELETE', '\/workflows/.test(s.slice(s.indexOf('wv1733 (OVIS M4b): schakelaar per werker'), s.indexOf('werkersPauzeTik(); }, 2'))));
 toets('7n server: aanzetten alleen als de gepubliceerde versie gelijk is', /wf\.versionId !== sk\.versie/.test(s) && /p_versie: String\(wf\.activeVersionId\)/.test(s));
 toets('7o server: rij eerst, mislukt deactiveren = rij weg', /mk_schakelaar_zet[\s\S]{0,900}\/deactivate'\); \}\s*catch[\s\S]{0,900}mk_schakelaar_wis/.test(s));
-toets('7p server: vaste plek alleen geweigerd als die afschermt (wv1901; verder onder het invoerslot)', /appWerkerSchakel[\s\S]{0,300}if \(appAfscherm\(a\)\) return appWeiger\(res, 403/.test(s));
+toets('7p server: vaste plek geweigerd (wv1901: ook in APP_BEHEER_ROUTES; op een vaste plek geen knoppen)', /appWerkerSchakel[\s\S]{0,300}if \(a && a\.soort === 'vast'\) return appWeiger\(res, 403/.test(s) && /'POST \/app\/werkers\/schakel'\]\);/.test(s) && /if \(a && a\.soort === 'vast'\) Object\.keys\(uit\.groepen \|\| \{\}\)\.forEach\(function \(g\) \{ \(uit\.groepen\[g\] \|\| \[\]\)\.forEach\(function \(k\) \{ k\.kan = \[\]; \}\); \}\);/.test(s));
 
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');
 process.exit(fouten ? 1 : 0);
