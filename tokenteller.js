@@ -133,8 +133,10 @@ function maak(opt) {
       return { soort: soort, naam: soortNaam(soort), groep: groepVan(soort), eur: rond(eur, 2), usd: rond(getal(r.usd), 2),
         tokens: getal(r.tokens), calls: getal(r.calls), aandeel: totEur && eur != null ? rond(eur / totEur, 4) : null };
     }).sort(function (a, b) { return (b.eur || 0) - (a.eur || 0); });
-    // Agents van Socev zijn niet te meten (map van de socev-gebruiker niet leesbaar): altijd tonen als "niet gemeten", nooit als 0
-    if (!soorten.some(function (r) { return r.soort === 'socev-agent'; }))
+    // Agents van Socev: sinds wv1803 leest de meting de sessies van de socev-gebruiker via de loper (socev_gemeten in de samenvatting).
+    // Zonder die vlag (oudere samenvatting, loper nooit bereikt) blijven ze "niet gemeten", nooit 0; met de vlag en zonder rij was het 0.
+    const socevGemeten = s.socev_gemeten === true;
+    if (!socevGemeten && !soorten.some(function (r) { return r.soort === 'socev-agent'; }))
       soorten.push({ soort: 'socev-agent', naam: SOORT_NAAM['socev-agent'], groep: 'overig', eur: null, usd: null, tokens: null, calls: null, aandeel: null, niet_gemeten: true });
     const perDag = (Array.isArray(s.per_dag_soort) ? s.per_dag_soort : []).slice(0, DAGEN_MAX).filter(function (r) { return r && DATUM.test(String(r.datum)); }).map(function (r) {
       const delen = {};
@@ -163,8 +165,8 @@ function maak(opt) {
       groepen: GROEPEN.map(function (g) { return { id: g.id, naam: g.naam }; }),
       soorten: soorten, per_dag: perDag, duurste: duurste, signalen: signalen,
       dagen: dagenMetKlussen(), tank: o && o.tank ? o.tank : null,
-      bron: 'tokenboekhouding', niet_gemeten: ['Agents en andere runs van Socev zelf (zijn sessiemap is voor de meting niet leesbaar)',
-        'Cowork-cloudsessies, modelaanroepen vanuit n8n en lokale modellen op Olares'],
+      bron: 'tokenboekhouding', niet_gemeten: (socevGemeten ? [] : ['Agents en andere runs van Socev zelf (zijn sessiemap is voor de meting niet leesbaar)'])
+        .concat(['Cowork-cloudsessies, modelaanroepen vanuit n8n en lokale modellen op Olares']),
     };
   }
 

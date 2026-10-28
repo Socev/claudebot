@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Toetst tokenteller.js (wv1742, App TokenCounter; vervolg wv1247) en de koppeling in server.js. Toetst: per soort (gesorteerd, aandeel,
-# "Agents van Socev" als niet gemeten, nooit als 0), per dag in vaste groepen (overig vangt de rest, oplopend op datum), top 10, signalen
+# "Agents van Socev" als niet gemeten, nooit als 0; sinds wv1803 niet meer met socev_gemeten), per dag in vaste groepen (overig vangt de rest, oplopend op datum), top 10, signalen
 # in vaste volgorde met uitleg, geen titel of sessie-id in het antwoord, vaste plek zonder kluslabels en gespreksonderdelen, dag met
 # klussen (duurste eerst, optelling per soort, kapotte regel geteld, ongeldige datum = null, ontbrekende dag = leeg), symlink en te
 # groot bestand niet gelezen, tankUit; in server.js: dispatch, 404 zonder module, teller, stil bij 200, /health, RELEASE_OPTIONEEL, CI.
@@ -63,6 +63,18 @@ toets('1d oud blijft zijn eigen soort (geen onbekend)', s.soorten.some(function 
 const sa = s.soorten.find(function (r) { return r.soort === 'socev-agent'; });
 toets('1e Agents van Socev: niet gemeten, geen 0', sa && sa.niet_gemeten === true && sa.eur === null, sa);
 toets('1f totaal eur en tokens', s.totaal.eur === 100 && s.totaal.tokens === 1005000, s.totaal);
+toets('1g zonder socev_gemeten: bronregel niet gemeten noemt Socev', /Socev zelf/.test((s.niet_gemeten || [])[0] || ''), s.niet_gemeten);
+// wv1803: met socev_gemeten geen "niet gemeten" meer; zonder rij is het dan echt 0 (geen rij), met rij gewoon de soort
+sam.socev_gemeten = true;
+fs.writeFileSync(path.join(M, 'samenvatting.json'), JSON.stringify(sam));
+const sG = T.maak({ vault: V, vv: VV }).stand({ vast: false });
+toets('1h socev_gemeten zonder rij: geen niet-gemeten-rij, geen Socev in niet_gemeten', !sG.soorten.some(function (r) { return r.niet_gemeten; }) && !/Socev/.test(JSON.stringify(sG.niet_gemeten)) && sG.niet_gemeten.length === 1, { so: sG.soorten, ng: sG.niet_gemeten });
+sam.per_soort.push({ soort: 'socev-agent', naam: 'Agents van Socev', calls: 3, tokens: 30, usd: 2.5, eur: 2 });
+fs.writeFileSync(path.join(M, 'samenvatting.json'), JSON.stringify(sam));
+const sR = T.maak({ vault: V, vv: VV }).stand({ vast: false }).soorten.filter(function (r) { return r.soort === 'socev-agent'; });
+toets('1i socev_gemeten met rij: één rij met bedrag', sR.length === 1 && sR[0].eur === 2 && !sR[0].niet_gemeten, sR);
+sam.per_soort.pop(); delete sam.socev_gemeten;
+fs.writeFileSync(path.join(M, 'samenvatting.json'), JSON.stringify(sam));
 // 2 per dag
 toets('2a per dag oplopend, kapotte datum weg', s.per_dag.length === 2 && s.per_dag[0].datum === '2030-01-01', s.per_dag);
 toets('2b vaste groepen, rest in overig', s.per_dag[1].delen.agents === 30 && s.per_dag[1].delen.routines === 10 && s.per_dag[1].delen.overig === 1.5 && s.per_dag[1].eur === 41.5, s.per_dag[1]);
