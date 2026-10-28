@@ -153,7 +153,7 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
   }
 
   // ── plek 12 ──
-  { const best = ['10_Verwerkt/A - 2024 - x.pdf', '10_Verwerkt/V 2013 - g.csv', '10_Verwerkt/V 2014 - g.csv', '10_Verwerkt/los.pdf', '20_Producten/p.html'];
+  { const best = ['10_Verwerkt/A - 2024 - x.pdf', '10_Verwerkt/V 2013 - g.csv', '10_Verwerkt/V 2014 - g.csv', '10_Verwerkt/los.pdf', '20_Producten/p.html'].map((x) => '90_Cijfermeester/' + x);
     const m = { bronnen: [{ id: 1, bestandspad: '10_Verwerkt/A - 2024 - x.pdf', in_bibliotheek: true }, { id: 2, bestandspad: '10_Verwerkt/V <jaar> - g.csv (14 jaargangen)', in_bibliotheek: true },
       { id: 3, bestandspad: null, in_bibliotheek: false }, { id: 4, bestandspad: '10_Verwerkt/weg.pdf', in_bibliotheek: true }],
       producten: [{ id: 1, bestandspad: '20_Producten/p.html' }, { id: 2, bestandspad: 'Overzicht.md' }] };
@@ -168,6 +168,48 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     toets('12 cmMeting via de smalle RPC', mm.bronnen.length === 4 && mm.producten.length === 2, mm);
     mm = await P.cmMeting({ sbRpc: async () => { throw new Error('rpc http 404'); } });
     toets('12 cmMeting: RPC weg → fout', /404/.test(mm.fout || ''), mm);
+    // wv1877 (SB2 fase 5 V0): mengsel van oude (onder 90_Cijfermeester/) en nieuwe (vanaf de vaultwortel) paden
+    const best2 = ['90_Cijfermeester/10_Verwerkt/oud.pdf', '90_Cijfermeester/10_Verwerkt/nieuwvorm.pdf', '90_Cijfermeester/10_Verwerkt/W 2020 - t.csv', '90_Cijfermeester/10_Verwerkt/W 2021 - t.csv',
+      '40_Kennisbronnen/Uitgever A/Bronnen/Uitgever A - 2027 - lijst.pdf', '40_Kennisbronnen/Statistiek_Extern/Bureau B/Bronnen/B 2025 - t.csv', '40_Kennisbronnen/Statistiek_Extern/Bureau B/Bronnen/B 2026 - t.csv',
+      '90_Cijfermeester/Werkboeken/Werkboek - proef.xlsx', '40_Kennisbronnen/Uitgever A/Bronnen/zonder-rij.pdf'];
+    const m2 = { bronnen: [{ id: 11, bestandspad: '10_Verwerkt/oud.pdf' }, { id: 12, bestandspad: '90_Cijfermeester/10_Verwerkt/nieuwvorm.pdf' },
+      { id: 13, bestandspad: '10_Verwerkt/W <jaar> - t.csv (2 jaargangen)' }, { id: 14, bestandspad: '40_Kennisbronnen/Uitgever A/Bronnen/Uitgever A - 2027 - lijst.pdf' },
+      { id: 15, bestandspad: '40_Kennisbronnen/Statistiek_Extern/Bureau B/Bronnen/B <jaar> - t.csv' }, { id: 16, bestandspad: '90_Cijfermeester/Werkboeken/Werkboek - proef.xlsx' },
+      { id: 17, bestandspad: '/etc/passwd' }, { id: 18, bestandspad: '40_Kennisbronnen/../20_Prive/x.md' }, { id: 19, bestandspad: '40_Kennisbronnen/<map>/Bronnen/x.pdf' },
+      { id: 20, bestandspad: 'C:\\Users\\x.pdf' }, { id: 21, bestandspad: '40_Kennisbronnen/Uitgever A/Bronnen/weg.pdf' }],
+      producten: [{ id: 5, bestandspad: '90_Cijfermeester/Overzicht.md' }, { id: 6, bestandspad: 'Overzicht.md' }] };
+    const v4 = verzamel(), t4 = {};
+    const gezocht = [];
+    P.cmChecks(m2, best2, null, v4.bev, t4, (r) => { gezocht.push(r); return r === '90_Cijfermeester/Overzicht.md'; });
+    const h = (x) => require('crypto').createHash('sha256').update(x).digest('hex').slice(0, 6);
+    toets('12 mengsel: oude en nieuwe vorm, patroon in beide mappen, Werkboeken; BB1 alleen ongeldig (17–19, 20) en weg (21); BB2 alleen zonder-rij',
+      ids(v4.b).join() === ['BB1-cm-b17-geen-bestand', 'BB1-cm-b18-geen-bestand', 'BB1-cm-b19-geen-bestand', 'BB1-cm-b20-geen-bestand', 'BB1-cm-b21-geen-bestand',
+        'BB2-cm-' + h('40_Kennisbronnen/Uitgever A/Bronnen/zonder-rij.pdf') + '-geen-rij'].sort().join(), v4.b);
+    toets('12 mengsel: bestaat() alleen met vaultwortelpaden, nooit voor een ongeldig pad', gezocht.every((r) => /^(90_Cijfermeester|40_Kennisbronnen)\//.test(r) && r.indexOf('..') < 0), gezocht);
+    toets('12 BB2-id van een 90_Cijfermeester-bestand = id van vóór V0 (open bevinding blijft dezelfde)', (function () { const v5 = verzamel(); P.cmChecks({ bronnen: [], producten: [] }, ['90_Cijfermeester/10_Verwerkt/los.pdf'], null, v5.bev, {}, null); return ids(v5.b).join() === 'BB2-cm-' + h('10_Verwerkt/los.pdf') + '-geen-rij'; })());
+    toets('12 bronnotitie (type: bron) herkend, gewone notitie niet', P.cmBronNotitie('---\ntitel: x\ntype: bron\n---\ntekst') && !P.cmBronNotitie('---\ntype: brondocument\n---\n') && !P.cmBronNotitie('type: bron\n'));
+    { const boom = { '90_Cijfermeester/10_Verwerkt': [['a.pdf', 'b'], ['_register.md', 'b'], ['.x', 'b']], '90_Cijfermeester/20_Producten': [['p.html', 'b']],
+        '40_Kennisbronnen': [['index.md', 'b'], ['NZa', 'm'], ['Statistiek_Extern', 'm']], '40_Kennisbronnen/NZa': [['index.md', 'b'], ['Bronnen', 'm'], ['Vergelijkingen', 'm']],
+        '40_Kennisbronnen/NZa/Bronnen': [['N - 2026 - r.pdf', 'b'], ['N - 2026 - r (bronnotitie).md', 'b'], ['eigen.md', 'b']], '40_Kennisbronnen/NZa/Vergelijkingen': [['v.md', 'b']],
+        '40_Kennisbronnen/Statistiek_Extern': [['S', 'm']], '40_Kennisbronnen/Statistiek_Extern/S': [['Bronnen', 'm']], '40_Kennisbronnen/Statistiek_Extern/S/Bronnen': [['s.csv', 'b']] };
+      const lijst = (rel) => { if (!boom[rel]) { const e = new Error('ENOENT ' + rel); e.code = 'ENOENT'; throw e; } return boom[rel].map(([n, t]) => ({ naam: n, map: t === 'm', bestand: t === 'b' })); };
+      const lees = (rel) => /bronnotitie/.test(rel) ? '---\ntype: bron\n---\n' : '---\ntype: notitie\n---\n';
+      const bs = P.cmBestanden(lijst, lees);
+      toets('12 cmBestanden: 10_Verwerkt + 20_Producten, Werkboeken mag ontbreken, alleen Bronnen-mappen onder 40_Kennisbronnen (ook dieper), bronnotitie niet',
+        JSON.stringify((bs.bestanden || []).slice().sort()) === JSON.stringify(['40_Kennisbronnen/NZa/Bronnen/N - 2026 - r.pdf', '40_Kennisbronnen/NZa/Bronnen/eigen.md', '40_Kennisbronnen/Statistiek_Extern/S/Bronnen/s.csv', '90_Cijfermeester/10_Verwerkt/a.pdf', '90_Cijfermeester/20_Producten/p.html']), bs);
+      const zonder = Object.assign({}, boom); Object.keys(zonder).forEach((k) => { if (k.indexOf('40_') === 0) delete zonder[k]; });
+      const lijst2 = (rel) => { if (!zonder[rel]) { const e = new Error('x'); e.code = 'ENOENT'; throw e; } return lijst(rel); };
+      toets('12 cmBestanden: geen 40_Kennisbronnen = alleen 90_Cijfermeester (proefvault)', ((P.cmBestanden(lijst2, lees).bestanden) || []).length === 2);
+      const lijst3 = (rel) => { if (rel === '40_Kennisbronnen/NZa/Bronnen') { const e = new Error('EACCES'); e.code = 'EACCES'; throw e; } return lijst(rel); };
+      toets('12 cmBestanden: onleesbare map onder 40_Kennisbronnen = niet gemeten', /niet te lezen/.test(P.cmBestanden(lijst3, lees).fout || ''));
+      const lijst4 = (rel) => { if (rel === '90_Cijfermeester/20_Producten') { const e = new Error('x'); e.code = 'ENOENT'; throw e; } return lijst(rel); };
+      toets('12 cmBestanden: onleesbare .md in Bronnen = niet gemeten (review ZOU 3)', /niet te lezen/.test(P.cmBestanden(lijst, (rel) => /eigen\.md$/.test(rel) ? null : lees(rel)).fout || ''));
+      const diep = {}; let r = '40_Kennisbronnen'; diep['90_Cijfermeester/10_Verwerkt'] = []; diep['90_Cijfermeester/20_Producten'] = [];
+      for (let i = 0; i < 8; i++) { diep[r] = [['m' + i, 'm']]; r += '/m' + i; } diep[r] = [['x.pdf', 'b']];
+      const lijst5 = (rel) => { if (!diep[rel]) { const e = new Error('x'); e.code = 'ENOENT'; throw e; } return diep[rel].map(([n, t]) => ({ naam: n, map: t === 'm', bestand: t === 'b' })); };
+      toets('12 cmBestanden: te diepe map = niet gemeten, niet stil overslaan (review ZOU 4)', /te diep/.test(P.cmBestanden(lijst5, lees).fout || ''));
+      toets('12 cmBestanden: 20_Producten weg = niet gemeten (zoals vóór V0)', /20_Producten niet te lezen/.test(P.cmBestanden(lijst4, lees).fout || ''));
+    }
     toets('12 Bibliotheek-frontmatter gelezen', JSON.stringify(P.leesBibliotheek('---\nbronnen: 95\nproducten: 15\n---\n')) === '{"bronnen":95,"producten":15}');
   }
 
@@ -177,9 +219,10 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     zet(P.R2B_PAD, PAG(P.r2bBlokTekst(BRON)));
     zet(P.WL_PAD, WL(['- KPN [knoop:org:kpn] — [[x]]'], '2026-10-25', '- Oud [knoop:GONE] — weg'));
     zet(P.DL_PAD, DL(['| 2026-11-30 | TG | x | — | 1 | — |']));
-    zet('90_Cijfermeester/10_Verwerkt/a.pdf', 'x'); zet('90_Cijfermeester/20_Producten/p.html', 'x'); zet('90_Cijfermeester/Bibliotheek.md', '---\nbronnen: 1\nproducten: 1\n---\n');
+    zet('90_Cijfermeester/10_Verwerkt/a.pdf', 'x'); zet('90_Cijfermeester/20_Producten/p.html', 'x'); zet('90_Cijfermeester/Bibliotheek.md', '---\nbronnen: 2\nproducten: 1\n---\n');
+    zet('40_Kennisbronnen/index.md', 'x'); zet('40_Kennisbronnen/NZa/Bronnen/k.pdf', 'x'); zet('40_Kennisbronnen/NZa/Bronnen/k (bronnotitie).md', '---\ntype: bron\n---\n');   // wv1877
     const db = { knopen: [{ id: 'org:kpn', soort: 'organisatie', naam: 'KPN', aliassen: [], vault_pagina: 'x.md', concept: true }], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [], kaarten: [] };
-    let cm = { bronnen: [{ id: 1, bestandspad: '10_Verwerkt/a.pdf', in_bibliotheek: true }], producten: [{ id: 1, bestandspad: '20_Producten/p.html' }] };
+    let cm = { bronnen: [{ id: 1, bestandspad: '10_Verwerkt/a.pdf', in_bibliotheek: true }, { id: 2, bestandspad: '40_Kennisbronnen/NZa/Bronnen/k.pdf', in_bibliotheek: true }], producten: [{ id: 1, bestandspad: '90_Cijfermeester/20_Producten/p.html' }] };
     const sbRpc = async (fn, body) => {
       if (fn === 'ovis_register_lees') return JSON.parse(JSON.stringify(db));
       if (fn === 'ovis_zorgdata_paden') { if (cm instanceof Error) throw cm; return cm; }
@@ -192,7 +235,7 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     const m = R.maak({ vault: v, sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: () => {}, nu: () => Date.parse('2026-10-28T01:30:00Z'), get rest() { return rest; } });
     let b = await m.bibliothecaris({ afroep: true });
     const open = () => db.bevindingen.filter((x) => P.REST_BEVINDING_RE.test(x.bevinding_id)).map((x) => x.bevinding_id).sort();
-    toets('haak: plek 9–12 gemeten, alleen de dode [knoop:] als bevinding, zin noemt alle vier', open().length === 1 && /^BB1-wl-knoop-/.test(open()[0]) && /R2-bronnen: 2 bestanden/.test(b.zin) && /Woordenlijst: 1 entiteitregels/.test(b.zin) && /Deadlines: 1 rijen/.test(b.zin) && /Cijfer-Meester: 2 bestanden/.test(b.zin), [open(), b.zin]);
+    toets('haak: plek 9–12 gemeten, alleen de dode [knoop:] als bevinding, zin noemt alle vier', open().length === 1 && /^BB1-wl-knoop-/.test(open()[0]) && /R2-bronnen: 2 bestanden/.test(b.zin) && /Woordenlijst: 1 entiteitregels/.test(b.zin) && /Deadlines: 1 rijen/.test(b.zin) && /Cijfer-Meester: 3 bestanden/.test(b.zin), [open(), b.zin]);
     toets('haak: plekstand in de uitkomst', b.rest && b.rest.plekken.r2.gemeten && b.rest.plekken.cm.gemeten, b.rest);
     rest = { d1: async () => [{ results: BRON }], r2: async () => R2.concat([{ key: 'los.pdf', size: 1 }]) };
     b = await m.bibliothecaris({ afroep: true });
@@ -214,14 +257,14 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
       fs.writeFileSync(path.join(v, P.DL_PAD), was);
       b = await m.bibliothecaris({ afroep: true });
       toets('haak: tabel weer heel → beide opgelost', open().indexOf('BB6-dl-verlopen') < 0 && open().indexOf('BB6-dl-pagina') < 0, open());
-      cm = { bronnen: [{ id: 1, bestandspad: '10_Verwerkt/a.pdf', in_bibliotheek: true }], producten: [{ id: 1, bestandspad: '20_Producten/p.html' }] };
+      cm = { bronnen: [{ id: 1, bestandspad: '10_Verwerkt/a.pdf', in_bibliotheek: true }, { id: 2, bestandspad: '40_Kennisbronnen/NZa/Bronnen/k.pdf', in_bibliotheek: true }], producten: [{ id: 1, bestandspad: '90_Cijfermeester/20_Producten/p.html' }] };
       fs.writeFileSync(path.join(v, '90_Cijfermeester/Bibliotheek.md'), '---\nbronnen: 7\nproducten: 1\n---\n');
       await m.bibliothecaris({ afroep: true });
       const bib = open().indexOf('BB4-cm-bibliotheek') >= 0;
       fs.unlinkSync(path.join(v, '90_Cijfermeester/Bibliotheek.md'));
       await m.bibliothecaris({ afroep: true });
       toets('haak: Bibliotheek.md weg → BB4-cm-bibliotheek blijft open (niet gemeten)', bib && open().indexOf('BB4-cm-bibliotheek') >= 0, open());
-      fs.writeFileSync(path.join(v, '90_Cijfermeester/Bibliotheek.md'), '---\nbronnen: 1\nproducten: 1\n---\n');
+      fs.writeFileSync(path.join(v, '90_Cijfermeester/Bibliotheek.md'), '---\nbronnen: 2\nproducten: 1\n---\n');
       await m.bibliothecaris({ afroep: true });
       toets('haak: Bibliotheek weer gelijk → opgelost', open().indexOf('BB4-cm-bibliotheek') < 0, open());
       // wv1805: handwerk in het R2-blok gaat als BB8 door de databank (mock = ^BB[1-8], zoals sinds 28-10)

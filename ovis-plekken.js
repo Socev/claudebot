@@ -9,7 +9,8 @@
 //   9  R2 fin-bronnen ⇄ D1 fin.bron ⇄ bronnenregister.md — R2 en D1 zijn bron; het register is een gegenereerd blok (nacht).
 //  10  Woordenlijst ⇄ entiteitenregister — het register (secondbrain.knoop) is bron; het blok Entiteiten is weergave (Data Manager, zo).
 //  11  Deadlines.md — de pagina is bron; de Bibliothecaris ziet ongeldige en dode regels en wat verlopen is zonder afhandeling.
-//  12  90_Cijfermeester ⇄ supabase zorgdata — de databank (bronnen/producten) noemt het bestand; het bestand moet er zijn en andersom.
+//  12  90_Cijfermeester + 40_Kennisbronnen ⇄ supabase zorgdata — de databank (bronnen/producten) noemt het bestand; het bestand moet er
+//      zijn en andersom. wv1877 (SB2 fase 5 V0): bestandspad vanaf de vaultwortel of, de oude vorm, onder 90_Cijfermeester/.
 //  13  D1 knie ⇄ 20_Prive/Gezondheid — de knie-app is bron; een pagina verwijst alleen; de verwijzing moet een rij vinden.
 //  14  health-pod ⇄ 20_Prive/Gezondheid — idem, via hp.py; een actuele pagina mag geen vervangen (append-only) rij noemen.
 // Alles alleen lezen, behalve het blok op bronnenregister.md (alleen in de nacht, onder de grendel, met de regels van de motor).
@@ -30,7 +31,11 @@ const DL_PAD = '00_Systeem/Deadlines.md';
 const DL_VERLOPEN_DAGEN = 14;
 const DL_KLAAR_RE = /\b(AFGEHANDELD|LOSGELATEN|VERVALLEN|GEDAAN|AFGEROND|GESLOTEN|INGEDIEND|VERSTUURD|BETAALD|GETEKEND|BESLOTEN|ACHTERHAALD|VERLOPEN)\b/i;
 const CM_MAP = '90_Cijfermeester';
-const CM_MAPPEN = ['10_Verwerkt', '20_Producten'];
+const CM_MAPPEN = ['10_Verwerkt', '20_Producten'];   // moeten er zijn (anders niet gemeten)
+const CM_MAPPEN_LOS = ['Werkboeken'];                 // wv1877: mag ontbreken (komt in fase 5 V2)
+const KB_MAP = '40_Kennisbronnen';                    // wv1877: alleen bestanden in een map Bronnen (op elke diepte) tellen
+const CM_WORTEL_RE = /^(90_Cijfermeester|40_Kennisbronnen)\//;
+const CM_DIEPTE = 6, CM_MAX = 5000;
 const CM_BIBLIOTHEEK = '90_Cijfermeester/Bibliotheek.md';
 const REST_BEVINDING_RE = /^BB\d-(r2|wl|dl|cm|kn|hp)-/;   // wv1774: + kn (D1 knie), hp (health-pod)
 const PLEK_VAN = { r2: 'r2', wl: 'wl', dl: 'dl', cm: 'cm', kn: 'kn', hp: 'hp' };
@@ -228,29 +233,77 @@ async function cmMeting(io) {
     return { bronnen: j.bronnen, producten: j.producten };
   } catch (e) { return { fout: String(e && e.message || e).slice(0, 120) }; }
 }
+// wv1877: bestandspad in twee vormen — begint het met 90_Cijfermeester/ of 40_Kennisbronnen/, dan vanaf de vaultwortel; anders (de vorm
+// tot fase 5 V0) onder 90_Cijfermeester/. Uitkomst altijd vanaf de vaultwortel. Absoluut, een '..'-stuk, een backslash of een <jaar> in
+// een mapdeel (patroon alleen binnen één map) = ongeldig: telt nooit als bestand.
 // "10_Verwerkt/X <jaar> - y.csv (14 jaargangen)" → patroon; anders het pad zelf
 function cmPatroon(p) {
   const s = String(p).replace(/\s+\([^()]*\)\s*$/, '').trim();
-  if (s.indexOf('<') < 0) return { pad: s };
-  return { re: new RegExp('^' + s.split(/<[^<>]+>/).map(function (x) { return x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }).join('[^/]+') + '$'), pad: s };
+  if (!s || s[0] === '/' || /\\/.test(s) || /^[A-Za-z]:/.test(s) || /(^|\/)\.\.(\/|$)/.test(s)) return { ongeldig: true, pad: s };
+  const vol = CM_WORTEL_RE.test(s) ? s : CM_MAP + '/' + s;
+  if (vol.indexOf('<') < 0) return { pad: vol };
+  if (vol.slice(0, vol.lastIndexOf('/')).indexOf('<') >= 0) return { ongeldig: true, pad: vol };
+  return { re: new RegExp('^' + vol.split(/<[^<>]+>/).map(function (x) { return x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }).join('[^/]+') + '$'), pad: vol };
+}
+// een notitie met type: bron (bronnotitie naast een pdf) is geen bronbestand
+function cmBronNotitie(t) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(String(t || ''));
+  return !!m && /^type:\s*["']?bron["']?\s*$/m.test(m[1]);
+}
+// Bestanden die een rij moeten hebben, vanaf de vaultwortel: 90_Cijfermeester/{10_Verwerkt,20_Producten,Werkboeken} en elke map Bronnen
+// onder 40_Kennisbronnen. lijst(rel) → [{ naam, map, bestand }]; lees(rel) → tekst of null. Ontbrekende 40_Kennisbronnen of Werkboeken = leeg.
+function cmBestanden(lijst, lees) {
+  const uit = [];
+  let fout = null;
+  function neem(rel, x) {
+    if (!x.bestand || x.naam.startsWith('.') || x.naam.startsWith('_')) return;
+    const b = rel + '/' + x.naam;
+    if (/\.md$/i.test(x.naam)) {
+      const t = lees(b);
+      if (t === null) { fout = fout || b + ' niet te lezen'; return; }   // review ZOU 3: onleesbare notitie = niet gemeten, geen valse BB2
+      if (cmBronNotitie(t)) return;
+    }
+    uit.push(b);
+  }
+  function weg(e) { return e && e.code === 'ENOENT'; }
+  for (const map of CM_MAPPEN.concat(CM_MAPPEN_LOS)) {
+    const rel = CM_MAP + '/' + map;
+    let l; try { l = lijst(rel); } catch (e) { if (CM_MAPPEN_LOS.indexOf(map) >= 0 && weg(e)) continue; return { fout: rel + ' niet te lezen' }; }
+    l.forEach(function (x) { neem(rel, x); });
+    if (fout) return { fout: fout };
+  }
+  (function loop(rel, diepte, inBronnen) {
+    if (fout) return;
+    let l; try { l = lijst(rel); } catch (e) { if (!(rel === KB_MAP && weg(e))) fout = rel + ' niet te lezen'; return; }
+    l.forEach(function (x) {
+      if (fout || x.naam.startsWith('.')) return;
+      if (x.map && diepte >= CM_DIEPTE) fout = rel + '/' + x.naam + ' te diep (meer dan ' + CM_DIEPTE + ' mappen)';   // review ZOU 4: niet stil overslaan
+      else if (x.map) loop(rel + '/' + x.naam, diepte + 1, inBronnen || x.naam === 'Bronnen');   // alleen de mapnaam Bronnen (hoofdletter) telt
+      else if (inBronnen) neem(rel, x);
+      if (uit.length > CM_MAX) fout = KB_MAP + ': meer dan ' + CM_MAX + ' bestanden';
+    });
+  })(KB_MAP, 0, false);
+  return fout ? { fout: fout } : { bestanden: uit };
 }
 function cmChecks(m, bestanden, bibliotheek, bev, tel, bestaat) {
   tel.cm_bronnen = m.bronnen.length; tel.cm_producten = m.producten.length; tel.cm_bestanden = bestanden.length; tel.cm_verouderd = 0;
   const gedekt = new Set(), alle = new Set(bestanden);
   function toets(soort, r) {
     if (!r.bestandspad) return;
-    const p = cmPatroon(r.bestandspad);
-    // een pad buiten 10_Verwerkt/20_Producten (bv. in de hoofdmap) telt als het bestand bestaat; BB2 kijkt alleen in die twee mappen
-    const treffers = p.re ? bestanden.filter(function (b) { return p.re.test(b); }) : alle.has(p.pad) || (bestaat && p.pad.indexOf('..') < 0 && bestaat(CM_MAP + '/' + p.pad)) ? [p.pad] : [];
+    const p = cmPatroon(r.bestandspad), wie = 'zorgdata.' + (soort === 'b' ? 'bronnen' : 'producten') + ' #' + r.id;
+    // een pad buiten de bestandsmappen (bv. in de hoofdmap van 90_Cijfermeester) telt als het bestand bestaat; BB2 kijkt alleen in die mappen
+    const treffers = p.ongeldig ? [] : p.re ? bestanden.filter(function (b) { return p.re.test(b); }) : alle.has(p.pad) || (bestaat && bestaat(p.pad)) ? [p.pad] : [];
     treffers.forEach(function (b) { gedekt.add(b); });
     if (!treffers.length) bev('BB1', 'cm-' + soort + r.id + '-geen-bestand', 'Cijfer-Meester: ' + (soort === 'b' ? 'bron' : 'product') + ' #' + r.id + ' verwijst naar een bestand dat er niet is',
-      'zorgdata.' + (soort === 'b' ? 'bronnen' : 'producten') + ' #' + r.id + ' noemt ' + schoon(p.pad, 160) + ' (onder ' + CM_MAP + '/), maar dat bestand bestaat niet. Voorstel: bestandspad in de databank gelijkzetten aan de echte naam (machinekamer), of het bestand terugzetten.');
+      p.ongeldig ? wie + ' noemt een ongeldig pad (' + schoon(p.pad, 160) + '): absoluut, met .., of een patroon over meer dan één map. Voorstel: bestandspad in de databank goedzetten (machinekamer).'
+        : wie + ' noemt ' + schoon(r.bestandspad, 160) + ' (gezocht als ' + schoon(p.pad, 160) + '), maar dat bestand bestaat niet. Voorstel: bestandspad in de databank gelijkzetten aan de echte naam (machinekamer), of het bestand terugzetten.');
   }
   m.bronnen.forEach(function (r) { toets('b', r); });
   m.producten.forEach(function (r) { toets('p', r); });
   bestanden.forEach(function (b) {
     if (gedekt.has(b)) return;
-    bev('BB2', 'cm-' + h6(b) + '-geen-rij', 'Cijfer-Meester: bestand zonder rij in zorgdata', CM_MAP + '/' + schoon(b, 160) + ' staat in geen rij van zorgdata.bronnen of .producten. Voorstel: de Cijfer-Meester registreert het (bron of product), of het gaat naar het archief.');
+    // id op de oude (90_Cijfermeester-relatieve) vorm, zodat een open bevinding van vóór V0 dezelfde blijft
+    bev('BB2', 'cm-' + h6(b.indexOf(CM_MAP + '/') === 0 ? b.slice(CM_MAP.length + 1) : b) + '-geen-rij', 'Cijfer-Meester: bestand zonder rij in zorgdata', schoon(b, 160) + ' staat in geen rij van zorgdata.bronnen of .producten. Voorstel: de Cijfer-Meester registreert het (bron of product), of het gaat naar het archief.');
   });
   if (bibliotheek === null) return { deels: ['BB4-cm-bibliotheek'] };
   if (bibliotheek) {
@@ -480,14 +533,12 @@ async function bibliothecaris(ctx) {
     return dlChecks(leesDeadlines(t), vandaag, ctx.bestaat, bev, tel, paden);
   });
   await plek('cm', async function (bev) {
-    const bestanden = [];   // eerst de mappen: geen 90_Cijfermeester (proefvault, uitwijk) = niet gemeten, zonder databankvraag
-    for (const map of CM_MAPPEN) {
-      let l; try { l = ctx.lijst(CM_MAP + '/' + map); } catch (e) { return { fout: CM_MAP + '/' + map + ' niet te lezen' }; }
-      l.forEach(function (x) { if (x.bestand && !x.naam.startsWith('.') && !x.naam.startsWith('_')) bestanden.push(map + '/' + x.naam); });
-    }
+    // eerst de mappen: geen 90_Cijfermeester (proefvault, uitwijk) = niet gemeten, zonder databankvraag
+    const bs = cmBestanden(ctx.lijst, lees);
+    if (bs.fout) return bs;
     const m = await cmMeting(io);
     if (m.fout) return m;
-    const dr = cmChecks(m, bestanden, leesBibliotheek(lees(CM_BIBLIOTHEEK)), bev, tel, ctx.bestaat);
+    const dr = cmChecks(m, bs.bestanden, leesBibliotheek(lees(CM_BIBLIOTHEEK)), bev, tel, ctx.bestaat);
     if (dr && dr.deels) return dr;
   });
   // wv1774: plek 13–14 — de pagina's één keer lezen; niet te lezen = beide niet gemeten (hun open bevindingen blijven open)
@@ -557,6 +608,6 @@ async function nacht(o) {
 
 module.exports = { bibliothecaris: bibliothecaris, nacht: nacht, magOplossen: magOplossen, zin: zin, r2Lijst: r2Lijst, r2bMeting: r2bMeting, r2bChecks: r2bChecks,
   r2bBlokTekst: r2bBlokTekst, leesR2bPagina: leesR2bPagina, leesWoordenlijst: leesWoordenlijst, wlChecks: wlChecks, leesDeadlines: leesDeadlines, dlChecks: dlChecks,
-  cmMeting: cmMeting, cmChecks: cmChecks, cmPatroon: cmPatroon, leesBibliotheek: leesBibliotheek, amsDatum: amsDatum,
+  cmMeting: cmMeting, cmChecks: cmChecks, cmPatroon: cmPatroon, cmBestanden: cmBestanden, cmBronNotitie: cmBronNotitie, leesBibliotheek: leesBibliotheek, amsDatum: amsDatum,
   gzPagina: gzPagina, gzLees: gzLees, knMeting: knMeting, knChecks: knChecks, hpUitslag: hpUitslag, hpMeting: hpMeting, hpChecks: hpChecks,
   REST_BEVINDING_RE: REST_BEVINDING_RE, HP_PAD_RE: HP_PAD_RE, KN_TABELLEN: KN_TABELLEN, GZ_MAP: GZ_MAP, R2B_PAD: R2B_PAD, R2B_SQL: R2B_SQL, WL_PAD: WL_PAD, DL_PAD: DL_PAD };
