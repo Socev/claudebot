@@ -3761,6 +3761,7 @@ function handleRequest(req, res) {
       facturen: facturenInfo(),   // wv824: Facturen-app opslag (facturen-db.js in deze release?, schema van de database; geen inhoud)
       facturen_ingang: facturenIngangInfo(),   // wv856: smalle ingang /fac (ingericht?, uit?; geen inhoud, geen gebruikers)
       intake: intakeInfo(),
+      mailman: typeof mailmanInfo === 'function' ? mailmanInfo() : { aan: false },   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
@@ -12206,6 +12207,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/mediatheek' || /^GET \/app\/mediatheek\/bestand\/[a-f0-9]{16}$/.test(route)) return typeof appMediatheek === 'function' ? appMediatheek(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mediatheek');   // wv1269: App Mediatheek (alleen lezen)
         if (route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
+        if (route === 'GET /app/mailman' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/brain/entiteiten' || route.indexOf('GET /app/brain/entiteit/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
@@ -15296,6 +15298,89 @@ async function intakeTik() {
 }
 if (intake && SERVER_ECHT) { setTimeout(function () { intakeTik(); }, 120000).unref(); setInterval(function () { intakeTik(); }, 5 * 60000).unref(); }
 
+// ── OVIS MailMan: de mailrouter vóór OVIS Intake, in de schaduw (wv1856, 28-10-2026; bouwplan vault "01_Ontwikkeling/OVIS MailMan -
+// mailrouter vóór OVIS Intake (bouwplan 27-10-2026).md" § O.2–O.10) ──
+// mailman.js beslist per binnengekomen Gmail-mail (Altijd in → Filter Weg → Filter In → Jev) naar welke stroom hij gaat en welke labels
+// hij zou krijgen; n8n "AI - MailMan" leest Gmail en roept Jev aan. In deze stap zet niemand iets in Gmail. Hier alleen de koppeling:
+// /mailman/{start,nieuw,stap1,stap2,gedaan} (n8n: Bearer uit MAILMAN_DIR/sleutels.json of het pod-geheim in de body; alleen de primaire
+// kant), GET /app/mailman en POST /app/mailman/* na de app-poort, /health.mailman, en één keer per dag opruimen (namen na 14 dagen weg)
+// met hooguit één box-rij als er iets mis is. Intake-draden: alleen-lezen op intake.sqlite (bron + meta.thread_id).
+// Ontbreekt mailman.js in de release (terugrol), dan 404 en mailman.aan=false in /health.
+const MAILMAN_DIR = serverPad('mailman', process.env.MAILMAN_DIR, '/opt/data/mailman', serverProefDeel('mailman'));
+const MAILMAN_BODY_MAX = 8 * 1024 * 1024;
+let mailmanIntakeDb = null;
+function mailmanIntakeDraden(postvak, draden) {
+  const uit = new Set();
+  if (!draden.length) return uit;
+  if (!mailmanIntakeDb) {
+    const f = path.join(INTAKE_DIR, 'intake.sqlite');
+    if (!fs.existsSync(f)) return uit;
+    const { DatabaseSync } = require('node:sqlite');
+    mailmanIntakeDb = new DatabaseSync(f, { readOnly: true });
+    mailmanIntakeDb.exec('PRAGMA busy_timeout = 3000;');
+  }
+  const q = mailmanIntakeDb.prepare("SELECT 1 FROM stuk WHERE bron = ? AND json_extract(meta, '$.thread_id') = ? LIMIT 1");
+  for (const t of draden.slice(0, 500)) if (q.get(String(postvak), String(t))) uit.add(t);
+  return uit;
+}
+const mailman = (function () {
+  const p = path.join(__dirname, 'mailman.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ dir: MAILMAN_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
+      eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
+      intakeDraden: mailmanIntakeDraden, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk });
+  } catch (e) { logError('mailman', e); return null; }
+})();
+function mailmanIsPad(req) { const p = reqPath(req); return p === '/mailman' || p.indexOf('/mailman/') === 0; }
+function mailmanStuur(res, status, obj) {
+  try { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(obj)); } catch (e) { logError('mailman-stuur', e); }
+}
+function mailmanRoute(req, res) {
+  if (!mailman) { req.resume(); return mailmanStuur(res, 404, { ok: false, fout: 'onbekend' }); }
+  if (req.method !== 'POST') { req.resume(); return mailmanStuur(res, 404, { ok: false, fout: 'onbekend' }); }
+  if (!rolPrimair()) { req.resume(); return mailmanStuur(res, 503, { ok: false, fout: 'niet de actieve kant' }); }
+  const delen = []; let n = 0, te = false;
+  req.on('data', function (c) { if (te) return; n += c.length; if (n > MAILMAN_BODY_MAX) { te = true; return; } delen.push(c); });
+  req.on('error', function () {});
+  req.on('end', function () {
+    if (te) return mailmanStuur(res, 413, { ok: false, fout: 'te groot' });
+    let d = null;
+    try { d = JSON.parse(Buffer.concat(delen).toString('utf8') || '{}'); } catch (e) { d = null; }
+    if (!d || typeof d !== 'object') return mailmanStuur(res, 400, { ok: false, fout: 'geen json' });
+    if (!mailman.sleutelOk(req, d)) return mailmanStuur(res, 401, { ok: false, fout: 'sleutel' });
+    delete d.secret;
+    let r;
+    try { r = mailman.n8n('POST ' + reqPath(req), d); } catch (e) { logError('mailman', e); return mailmanStuur(res, 500, { ok: false, fout: 'intern' }); }
+    res._log = Object.assign(res._log || {}, { mailman: reqPath(req).slice(9) });
+    mailmanStuur(res, r.status, r.j);
+  });
+}
+async function appMailman(req, res, a, s, d, route) {
+  if (!mailman) return appWeiger(res, 404, 'MailMan zit niet in deze versie van de pod', 'mailman ontbreekt');
+  if (route === 'GET /app/mailman') res._app.stil = true;
+  let r;
+  try { r = mailman.app(route, d || {}, appStudioCtx(a, s)); } catch (e) { logError('mailman-app', e); return appWeiger(res, 500, 'MailMan: interne fout', 'mailman fout'); }
+  if (r.status !== 200) res._app.reden = 'mailman: ' + String(r.j && r.j.fout || '').slice(0, 60);
+  else if (route !== 'GET /app/mailman') res._app.reden = 'mailman ' + route.slice('POST /app/mailman/'.length) + ' ' + String(d && (d.actie || d.stand || d.sleutel || d.stroom) || '').slice(0, 20);
+  return appStuur(res, r.status, r.j);
+}
+function mailmanInfo() { if (!mailman) return { aan: false }; try { return Object.assign({ aan: true }, mailman.info()); } catch (e) { return { aan: true, fout: true }; } }
+let mailmanDag = '';
+function mailmanTik() {
+  if (!mailman || !rolPrimair()) return;
+  const t = ovisAms();
+  if (t.uur < 7 || mailmanDag === t.datum) return;
+  mailmanDag = t.datum;
+  try { mailman.opruim(); } catch (e) { logError('mailman-opruim', e); }
+  let z = [];
+  try { z = mailman.zorgen(); } catch (e) { logError('mailman-zorgen', e); }
+  if (!z.length) return;
+  ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS MailMan: rondes lopen niet (schaduw)\n- status: open\n- van: pod:mailman — bevinding_id mailman-ronde-' + t.datum +
+    '\n- wat ik zag: ' + z.join('; ') + '\n- voorstel: n8n "AI - MailMan" nalopen (actief? fouten in de schedule-run?) en /health mailman; rondes in mailman.sqlite (tabel ronde)\n');
+}
+if (mailman && SERVER_ECHT) { setInterval(function () { mailmanTik(); }, 10 * 60000).unref(); }
+
 // ── PDF-lezer via de Claude-API (wv1431, 27-10-2026; bouwplan vault "01_Ontwikkeling/PDF-verwerking via Claude (bouwplan 27-10-2026).md") ──
 // pdf-lezer.js leest een PDF met Claude (Messages API, één aanroep per stuk: velden + entiteit, voor Intake ook markdown). In deze stap
 // alleen IN DE SCHADUW naast de Facturen-koerier (io.pdfSchaduw) en de Intake-router (o.pdfSchaduw): velden, sha256 en verschilvlaggen naar
@@ -17497,6 +17582,7 @@ const server = http.createServer(function (req, res) {
       if (intake) return intake.verwerk(req, res);
       req.resume(); res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); return res.end('{"ok":false,"uitkomst":"geweigerd","reden":"onbekend"}');
     }
+    if (mailmanIsPad(req)) return mailmanRoute(req, res);   // wv1856: OVIS MailMan (n8n; eigen sleutel of pod-geheim), nooit door naar handleRequest
     if (telIsPad(req)) return handleTel(req, res);   // wv264: spraak via de telefoon (Tasker)
     if (berichtIsPad(req)) return berichtRoute(req, res);   // wv263: bericht aan David (intern, API_SECRET)
     if (bankIsPad(req)) return bankTerug(req, res);   // wv680: terugkeer van de bank na koppelen (bank.socev.dev)
