@@ -6499,7 +6499,13 @@ function appStartBeurt(a, kanaal, promptTekst, meta) {
       });
     });
   });
-  if (meta.upload) { try { fs.rmSync(meta.upload.dir, { recursive: true, force: true }); } catch (e) { logError('app-upload-weg', e); } }
+  // Alleen een eigen klaarstaande map onder APP_UPLOAD_DIR opruimen, nooit een bronopslag. Bij de scankaart (kopie: true) is
+  // meta.upload.dir de Intake-blobmap <aa>/ met ook andere originelen; die wissen kostte 26-10 zeven scans en twee mails (wv1409).
+  if (meta.upload && meta.upload.kopie !== true) {
+    const rel = path.relative(APP_UPLOAD_DIR, String(meta.upload.dir || ''));
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) { try { fs.rmSync(meta.upload.dir, { recursive: true, force: true }); } catch (e) { logError('app-upload-weg', e); } }
+    else logError('app-upload-weg', new Error('uploadmap buiten APP_UPLOAD_DIR, niet opgeruimd'));
+  }
   return { job_id: jobId };
 }
 function appStartFout(res, st) {
