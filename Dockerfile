@@ -156,6 +156,8 @@ COPY facturen.js /app/release-bootstrap/facturen.js
 COPY facturen-koerier.js /app/release-bootstrap/facturen-koerier.js
 COPY facturen-ingang.js /app/release-bootstrap/facturen-ingang.js
 COPY facturen-validatie.js /app/release-bootstrap/facturen-validatie.js
+COPY fin-toewijzing.js /app/release-bootstrap/fin-toewijzing.js
+COPY fin-reconcile.js /app/release-bootstrap/fin-reconcile.js
 COPY bewaker.js /app/release-bootstrap/bewaker.js
 COPY studio.js /app/release-bootstrap/studio.js
 COPY bandjes.js /app/release-bootstrap/bandjes.js

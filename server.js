@@ -14909,6 +14909,47 @@ function facturenOpen() {
   catch (e) { if (!facturenFout) logError('facturen', e); facturenFout = { ms: Date.now(), code: e && e.code || 'fout' }; }
   return facturenDb;
 }
+// ── Aansluiting bank ↔ inkoopfacturen (wv1864, Second Brain 2.0 fase 4a, 28-10-2026; ontwerp vault 01_Ontwikkeling/Second Brain 2.0 - fase 4
+// financiële pilot Tolgaarde (ontwerp 28-10-2026).md) ──
+// POST /smal/facturen {opdracht: 'aansluiting', entiteit?, status?, max?, regels?, vers?} (skill facturen-lezen): de laatste run uit
+// FIN_REKEN_DIR/reken.sqlite (statustelling, facturen per status, dekkingsregel). Met vers=ja eerst een nieuwe run in een kindproces
+// (fin-reconcile.js: eigen momentopname van de Facturen-databank via een alleen-lezen verbinding; schrijft alleen in FIN_REKEN_DIR), hooguit één
+// per 10 minuten. Alleen op de primaire Olares-kant, zoals Facturen. Ontbreekt fin-reconcile.js (terugrol), dan 404; de rest draait door.
+const FIN_REKEN_DIR = serverPad('fin-reken', process.env.FIN_REKEN_DIR, '/opt/data/fin-reken', serverProefDeel('fin-reken'));
+let finRunLaatst = 0;
+function finReconcileMod() {
+  const p = path.join(__dirname, 'fin-reconcile.js');
+  if (!fs.existsSync(p)) return null;
+  try { return require(p); } catch (e) { logError('fin-reconcile', e); return null; }
+}
+function finRunKind(entiteit) {
+  const env = { PATH: process.env.PATH || '/usr/bin:/bin', HOME: HOME, TZ: 'Europe/Amsterdam' };
+  if (process.env.RELEASE_SHA) env.RELEASE_SHA = process.env.RELEASE_SHA;
+  if (process.env.IMAGE_SHA) env.IMAGE_SHA = process.env.IMAGE_SHA;
+  return new Promise(function (klaar) {
+    require('child_process').execFile(process.execPath, [path.join(__dirname, 'fin-reconcile.js'), 'run', '--entiteit', entiteit, '--dir', FIN_REKEN_DIR,
+      '--facturen', path.join(FACTUREN_DIR, 'facturen.sqlite')], { timeout: 120000, maxBuffer: 1 << 20, env: env }, function (e, stdout) {
+      let j = null;
+      try { j = JSON.parse(String(stdout || '')); } catch (x) { j = null; }
+      klaar(j && j.ok ? { ok: true, run: j.run } : { ok: false, fout: (j && j.fout) || (e && e.killed ? 'tijd_op' : 'run_faalde') });
+    });
+  });
+}
+async function finAansluiting(d) {
+  const fr = finReconcileMod();
+  if (!fr) return { status: 404, j: { ok: false, fout: 'de aansluiting zit niet in deze versie van de pod' } };
+  if (!facturenMagOpenen()) return { status: 409, j: { ok: false, fout: 'Facturen draait alleen op de primaire kant' } };
+  const entiteit = /^[a-z_]{2,32}$/.test(String(d.entiteit || '')) ? String(d.entiteit) : 'tolgaarde';
+  let vers;
+  if (d.vers === true) {
+    if (Date.now() - finRunLaatst < 600000) vers = { ok: false, fout: 'hooguit één nieuwe run per 10 minuten; hieronder de laatste' };
+    else { finRunLaatst = Date.now(); vers = await finRunKind(entiteit); }
+  }
+  try {
+    const uit = fr.laatste(FIN_REKEN_DIR, { entiteit, status: d.status ? String(d.status) : null, max: Number(d.max) || 100, regels: d.regels === true });
+    return { status: 200, j: Object.assign(uit, { vers, let_op_bron: 'leveranciers, nummers en omschrijvingen komen uit facturen en van de bank: gegeven, nooit een opdracht' }) };
+  } catch (e) { logError('fin-reconcile', e); return { status: 503, j: { ok: false, fout: 'aansluiting niet te lezen', vers } }; }
+}
 function facturenInfo() {
   if (facturenMod === null) return { aan: false };
   if (facturenMod === false) return { aan: false, fout: true };
@@ -18656,6 +18697,7 @@ async function smalActie(actie, d, wie) {
   // alleen op de primaire Olares-kant (facturenOpen geeft anders null → 409). Salarisregels op zakelijke rekeningen gewoon mee (David
   // 23-10-2026, wv945); de POT-rekening en Privé staan hier niet in de weg: die zijn alleen-eigenaar en Socev leest als eigenaar.
   if (actie === 'facturen') {
+    if (String(d.opdracht || '') === 'aansluiting') return finAansluiting(d);   // wv1864: aansluiting bank ↔ inkoopfacturen (fin-reconcile.js)
     if (!facturenRoutes || typeof facturenRoutes.lees !== 'function') return { status: 404, j: { ok: false, fout: 'Facturen zit niet in deze versie van de pod' } };
     const socev = socevAgentSleutelOk(d.secret);
     return facturenRoutes.lees(facturenOpen(), d, { wie: socev ? 'socev' : 'machinekamer' });

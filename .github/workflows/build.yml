@@ -277,6 +277,7 @@ jobs:
           t test/facturen-routes.sh   # wv833: routes — rollen, Bevestigen/Terugdraaien/Nagebeld, uploads, bankluis, signalen
           t test/facturen-kaart.sh   # wv1705: OVIS M3a — verzamelkaart Facturen in Overzicht (dagsleutel, dicht bij 0, Davids keuze blijft), module + doel bij de schrijvers
           t test/facturen-validatie.sh   # wv944: bankhistorie (startdatum, droogloop, bron, personeel, FV2-archief) en validatie (profielen, betaling, controles, zoeken)
+          t test/fin-reconcile.sh   # wv1864: SB2 fase 4a — aansluiting bank ↔ inkoopfacturen: proef 3 (dubbele transacties) en 6 (dekking per dag), kern puur
           t test/abn-historie.sh   # wv1329: ABN-historie (PDF-afschriften) in de bankluis — afdekken wat de bank gaf, saldo, POT-afschrift, niet naar de datahub
           command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils) || echo "::warning::pdftotext niet te installeren"   # de koerier roept /usr/bin/pdftotext echt aan
           t test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads
