@@ -16194,6 +16194,32 @@ const sb2Zoekindex = sb2ZoekKlok('sb2-zoekindex', { van: [5, 5], tot: [6, 0] }, 
 // vault (box): zelf onder de vault-grendel (gedeeld) en niet in de onderhoudsstand (exit 3 = onvolledig, nog één poging). Schakelaar SB2_ZOEKLEER=uit.
 const sb2Zoekleer = process.env.SB2_ZOEKLEER === 'uit' ? null : sb2ZoekKlok('sb2-zoekleer', { van: [6, 0], tot: [7, 0] }, 5,
   ['python3', '-I', SB2_SRC + '/zoekleer.py', '--vault', VAULT, '--index', '/opt/data/scripts-staat/sb2-zoekindex/index.sqlite', '--grendel', OVIS_LOCK]);
+// wv1430: nachtronde steekwoorden (socev-scripts sw.py nacht; vault "01_Ontwikkeling/Second Brain 2.0 - steekwoordenlijst en vaste links
+// (bouwplan 27-10-2026).md" § 6–7). Intakestap: elk nieuw of gewijzigd stuk (aan zijn inhoud, wie het ook schreef) laat Sonnet op steekwoorden
+// lezen; daarna lijst, telling → linkronde → telling onder de vault-grendel (exclusief; het script neemt hem zelf, niet tijdens de
+// onderhoudsstand: exit 3 = onvolledig, de keten probeert het na 10 min nog één keer), query_run en alleen bij ≠ 0 één box-rij.
+// Alleen als keten-stap (geen eigen klok; het venster 00:00–00:00 doet niets) en alleen met de schakelaar
+// scripts-staat/sb2-steekwoorden/nacht-aan.json {"aan": true} (van claude, gewoon bestand); zonder schakelaar slaat de keten hem stil over.
+// Geen hartslag: de keten-stempel en de query_run per nacht zijn het spoor; een mislukte ronde meldt socev-run zelf.
+const SB2_SW_SCHAKELAAR = '/opt/data/scripts-staat/sb2-steekwoorden/nacht-aan.json';
+function sb2SteekwoordenAan() {
+  try {
+    const st = fs.lstatSync(SB2_SW_SCHAKELAAR);
+    if (!st.isFile() || (process.getuid && st.uid !== process.getuid())) return false;
+    return JSON.parse(fs.readFileSync(SB2_SW_SCHAKELAAR, 'utf8')).aan === true;
+  } catch (e) { return false; }
+}
+const sb2Steekwoorden = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'sb2-steekwoorden', maxMin: 25, venster: { van: [0, 0], tot: [0, 0] },
+      staatBestand: path.join(KLOKKEN_DIR, 'sb2-steekwoorden.json'), socevRun: '/opt/data/scripts/huidig/bin/socev-run',
+      env: Object.assign({}, process.env, { VAULT_DIR: VAULT }),
+      argv: ['python3', '-I', SB2_SRC + '/sw.py', 'nacht', '--vault', VAULT, '--grendel', OVIS_LOCK], pogingen: 2 }) : null;
+  } catch (e) { logError('sb2-steekwoorden', e); return null; }
+})();
 function sb2ZoekKlokInfo() {
   const een = function (k) { if (!k) return { aan: false }; try { return k.info(); } catch (e) { return { fout: true }; } };
   return { feitenlijst: een(sb2Feitenlijst), zoekindex: een(sb2Zoekindex), zoekleer: een(sb2Zoekleer) };
@@ -16306,7 +16332,14 @@ const nachtketen = (function () {
         voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.rawInput, NACHT_N8N.teams, NACHT_N8N.whatsapp], [6, 40], true), doe: nachtDagStap(sb2Feitenlijst) },
       { naam: 'sb2-zoekindex', na: ['sb2-feitenlijst'], limiet_min: 15, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekindex) },
       { naam: 'sb2-zoekleer', na: ['sb2-zoekindex'], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(sb2Zoekleer) },
-      { naam: 'ovis-kalender', start_na: [6, 35], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisKalender) }
+      { naam: 'ovis-kalender', start_na: [6, 35], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisKalender) },
+      // wv1430: ná de n8n-schrijvers (nachtconsolidatie, raw_input, Teams, WhatsApp) en ná zoeken; achter ovis-kalender zodat die voorgaat
+      { naam: 'sb2-steekwoorden', start_na: [5, 0], na: ['ovis-deadlines', 'sb2-zoekleer'], limiet_min: 30, pogingen: 2, meldtZelf: true,
+        voorwaarde: nachtN8nVoorwaarde([NACHT_N8N.nachtconsolidatie, NACHT_N8N.rawInput, NACHT_N8N.teams, NACHT_N8N.whatsapp], [6, 40], false),
+        doe: async function (ctx) {
+          if (!sb2SteekwoordenAan()) return { ok: true, al_gedaan: true, detail: { schakelaar: 'uit' } };
+          return nachtDagStap(sb2Steekwoorden)(ctx);
+        } }
     ];
     return NK_MOD.maak({ staatMap: NACHTKETEN_DIR, stappen: st, ams: ovisAms, einde: [7, 40],
       onderhoud: function () { return !!onderhoud.stand().aan; },
