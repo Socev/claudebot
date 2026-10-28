@@ -226,7 +226,8 @@ function maakVeeg(o) {
 // in het geheugen: een herstart in het venster geeft hooguit een tweede ronde; de klus zelf moet daarom idempotent zijn. Niet
 // afhankelijk van de onderhoudsstand: de klus schrijft niet in de vault. info() geeft alleen datum, tijd, exitcode en duur.
 // wv1788: ctx.mag (optioneel) = function; geeft hij false (onderhoudsstand, OVIS-nachtronde), dan geen ronde en blijft de datum open,
-// zodat een latere tik binnen het venster het opnieuw probeert.
+// zodat een latere tik binnen het venster het opnieuw probeert. o.pogingen (standaard 1): zoveel rondes per datum zolang de vorige
+// mislukte (exit ≠ 0); socev-run meldt elke mislukte ronde zelf.
 function inDagVenster(v, a) {
   const m = a.uur * 60 + a.min;
   return m >= v.van[0] * 60 + v.van[1] && m < v.tot[0] * 60 + v.tot[1];
@@ -240,14 +241,17 @@ function maakDagRonde(o) {
   const maxMin = o.maxMin || 5;
   const marge = o.margeMs === undefined ? 90000 : o.margeMs;
   const voor = ['--naam', o.naam].concat(o.hartslag ? ['--hartslag', o.hartslag] : []).concat(['--max-min', String(maxMin), '--']);
-  let datum = null, loopt = false, laatste = null;
+  const pogingen = Math.max(1, Math.min(5, o.pogingen || 1));
+  let datum = null, loopt = false, laatste = null, gedaan = 0;
   // ctx: { ams: {datum, uur, min} }. Geeft null (niets te doen) of { datum, t, exit, ms }.
   async function tik(ctx) {
     const a = ctx.ams;
-    if (!inDagVenster(o.venster, a) || loopt || datum === a.datum) return null;
+    if (!inDagVenster(o.venster, a) || loopt) return null;
+    if (datum === a.datum && (gedaan >= pogingen || (laatste && laatste.datum === a.datum && laatste.exit === 0))) return null;
     if (typeof ctx.mag === 'function' && !ctx.mag()) return null;
     loopt = true;
-    datum = a.datum;
+    if (datum !== a.datum) { datum = a.datum; gedaan = 0; }
+    gedaan++;
     try {
       const t = new Date().toISOString();
       const k = await kindProces(env, [run].concat(voor, o.argv), maxMin * 60000 + marge);

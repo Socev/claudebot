@@ -236,6 +236,14 @@ echo '{"ok": true}'; exit 0
   u = await g.tik({ ams: ams('2026-11-02', 6, 45), mag: () => true });
   toets('dagronde mag=true daarna: wel, één keer', u && u.datum === '2026-11-02' && dAanroep().length === voorMag + 1 && /^--naam sb2-zoekindex --hartslag sb2-zoekindex /.test(dAanroep().pop()) &&
     await g.tik({ ams: ams('2026-11-02', 6, 50), mag: () => true }) === null);
+  // wv1788: pogingen 2 = na een mislukte ronde nog één binnen het venster; na een geslaagde niet meer
+  g = dag({ naam: 'sb2-feitenlijst', hartslag: 'sb2-feitenlijst', pogingen: 2, env: Object.assign({}, env, { NEP_DAG_FOUT: '1' }) });
+  const voorP = dAanroep().length;
+  const p1 = await g.tik({ ams: ams('2026-11-03', 6, 40) }), p2 = await g.tik({ ams: ams('2026-11-03', 6, 45) }), p3 = await g.tik({ ams: ams('2026-11-03', 6, 50) });
+  toets('dagronde pogingen 2: mislukt, nog één keer, dan niet meer', p1 && p1.exit === 1 && p2 && p2.exit === 1 && p3 === null && dAanroep().length === voorP + 2);
+  g = dag({ naam: 'sb2-feitenlijst', hartslag: 'sb2-feitenlijst', pogingen: 2 });
+  const q1 = await g.tik({ ams: ams('2026-11-04', 6, 40) }), q2 = await g.tik({ ams: ams('2026-11-04', 6, 45) });
+  toets('dagronde pogingen 2: geslaagd = geen tweede ronde', q1 && q1.exit === 0 && q2 === null);
   let w1 = false; try { N.maakDagRonde({ naam: 'Fout Naam', venster: V, argv: ['x'] }); } catch (e) { w1 = true; }
   let w2 = false; try { N.maakDagRonde({ naam: 'ok', venster: V, argv: [] }); } catch (e) { w2 = true; }
   toets('dagronde: ongeldige naam of leeg commando geweigerd', w1 && w2);

@@ -265,7 +265,9 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   zet('10_Zakelijk/Tolgaarde/Auto - Proefmini.md', ['---', 'updated: 2026-10-20', '---', '# Proefmini', '', '| Kenteken | ZZ-999-Z |', '| Vorige | QQ-11-QQ (verkocht) |', ''].join('\n'));
   zet('20_Prive/Auto - Proefprive.md', '# Proefprive\n| Kenteken | PR-77-IV |\n');
   const rij = (x) => Object.assign({ entiteit: 'Huisartsenpraktijk Tolgaarde', code: 'TG', eigen: true, soort: 'kenteken', status: 'voorgesteld', score: 1,
-    pagina: '10_Zakelijk/Tolgaarde/Auto - Proefmini.md', geldig_tot: null, einde: null, label: 'Proefmini' }, x);
+    pagina: '10_Zakelijk/Tolgaarde/Auto - Proefmini.md', regel: 6, geldig_tot: null, einde: null, label: 'Proefmini', raak: 1 }, x);
+  const lijn = (pad, n) => fs.readFileSync(path.join(VAULT, pad), 'utf8').split(/\r?\n/)[n - 1];
+  const deel = (pad, kop, nrs) => ({ pad: pad, kop: kop, van: nrs[0], tekst: nrs.map((n) => n + ': ' + lijn(pad, n).trim()).join('\n') });
   let feitenVan = null, feitenN = 0;
   const nepFeiten = async (vraag, vast) => { feitenN++; return feitenVan(vraag, vast); };
   // nep-index: 'db' is een JSON-bestand met het antwoord; het script schrijft zijn argv naast de db
@@ -275,19 +277,19 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   const IXDB = path.join(W, 'index.json');
   const ixArgv = () => { try { return fs.readFileSync(IXDB + '.argv', 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch (e) { return []; } };
   const ixZet = (j) => { fs.writeFileSync(IXDB, JSON.stringify(j)); try { fs.rmSync(IXDB + '.argv'); } catch (e) {} };
-  const vers = () => new Date(Date.now() - 3600000).toISOString();
+  const vers = () => new Date(Date.now() + 1000).toISOString();   // na het schrijven van de proefpagina's (anders 'sindsdien gewijzigd')
   const ixAntw = (delen, dk) => ({ tekst: '', paginas: [...new Set(delen.map((d) => d.pad))], delen: delen, gebouwd_op: vers(),
     dekking: Object.assign({ blokken: delen.length, blokken_mee: delen.length, paginas: new Set(delen.map((d) => d.pad)).size, paginas_mee: new Set(delen.map((d) => d.pad)).size, afgekapt: false }, dk || {}) });
   const z9 = Z.maak({ vault: VAULT, claude: nepClaude, bsnMasker: bsn, fout: () => {}, feiten: nepFeiten, index: { cmd: process.execPath, args: [NEP_IX], db: IXDB } });
-  const l1 = (rijen, x) => () => Object.assign({ totaal: rijen.length, getoond: rijen.length, afgekapt: false, genegeerd: [], soorten: ['kenteken'], feiten_totaal: 300, rijen: rijen }, x || {});
+  const l1 = (rijen, x) => () => Object.assign({ totaal: rijen.length, getoond: rijen.length, afgekapt: false, genegeerd: [], soorten: ['kenteken'], rest_n: 1, feiten_totaal: 300, rijen: rijen }, x || {});
 
   // 9a laag 1 zonder model: huidig eerst, einde onbekend apart, voorgesteld = nog niet bevestigd, waarden als chips, bron = pagina, dekkingsregel
   ixZet(ixAntw([]));
-  feitenVan = l1([rij({}), rij({ waarde: 'QQ-11-QQ', label: 'Vorige', einde: 'onbekend', score: 0.95 })].map((x, i) => i === 0 ? Object.assign(x, { waarde: 'ZZ-999-Z' }) : x));
+  feitenVan = l1([rij({ waarde: 'ZZ-999-Z' }), rij({ waarde: 'QQ-11-QQ', label: 'Vorige', regel: 7, einde: 'onbekend', score: 0.95 })]);
   aanroepen = 0;
   let r9 = await z9.zoek('Kenteken van de proefmini?');
   toets('9a laag 1: antwoord zonder model en zonder tekstindex', r9.soort === 'antwoord' && r9.laag === 'identifier' && aanroepen === 0 && ixArgv().length === 0, r9);
-  toets('9a laag 1: huidig eerst, eerder of onbekend apart, nog niet bevestigd', /^Kenteken: ZZ-999-Z \(TG, Proefmini, nog niet bevestigd\)\. Eerder of onbekend: QQ-11-QQ \(TG, Vorige, einde onbekend, nog niet bevestigd\)\./.test(r9.tekst), r9.tekst);
+  toets('9a laag 1: huidig eerst, eerder of onbekend apart, "nog niet bevestigd" één keer', /^Kenteken: ZZ-999-Z \(TG, Proefmini\)\. Eerder of onbekend: QQ-11-QQ \(TG, Vorige, einde onbekend\)\. Nog niet bevestigd door de Bibliothecaris\./.test(r9.tekst), r9.tekst);
   toets('9a laag 1: chips in volgorde, eerder gemarkeerd; bron = de pagina met bijgewerkt', r9.waarden.length === 2 && r9.waarden[0].waarde === 'ZZ-999-Z' && /\(eerder\)$/.test(r9.waarden[1].label) &&
     r9.bronnen.length === 1 && r9.bronnen[0].pad === '10_Zakelijk/Tolgaarde/Auto - Proefmini.md' && r9.bronnen[0].updated === '2026-10-20', r9);
   toets('9a dekkingsregel in de tekst: "Feitenlijst: 2 feiten (van 300)"', r9.dekking_regel === 'Feitenlijst: 2 feiten (van 300).' && /\(Feitenlijst: 2 feiten \(van 300\)\.\)$/.test(r9.tekst), r9);
@@ -301,17 +303,21 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
 
   // 9b natoets laag 1: één waarde die niet (meer) op de pagina staat = hele laag 1 weg, door naar laag 2 (nooit stil een deel)
   feitenVan = l1([rij({ waarde: 'ZZ-999-Z' }), rij({ waarde: 'VERZONNEN-1' })]);
-  ixZet(ixAntw([{ pad: '10_Zakelijk/Tolgaarde/Auto - Proefmini.md', kop: 'Proefmini', van: 5, tekst: '6: | Kenteken | ZZ-999-Z |' }]));
+  ixZet(ixAntw([deel('10_Zakelijk/Tolgaarde/Auto - Proefmini.md', 'Proefmini', [6])]));
   antwoordVan = (p, s) => ({ ok: true, data: { soort: 'antwoord', tekst: 'Kenteken ZZ-999-Z.', waarden: [{ label: 'Kenteken', waarde: 'ZZ-999-Z' }], bronnen: ['10_Zakelijk/Tolgaarde/Auto - Proefmini.md'] }, verbruik: { kosten: 0.01, uit: 9 } });
   aanroepen = 0;
   r9 = await z9.zoek('Kenteken van de proefmini?');
   toets('9b natoets laag 1 faalt: door naar laag 2 (model), niets van laag 1 getoond', r9.soort === 'antwoord' && r9.laag === 'tekstindex' && aanroepen === 1 &&
     r9.lagen.feitenlijst.reden === 'natoets' && r9.waarden.every((w) => w.waarde !== 'VERZONNEN-1'), r9);
   toets('9b laag 2: zoekindex met --vraag= en zonder --vast; dekkingsregel noemt beide lagen', ixArgv()[0].indexOf('--vraag=Kenteken van de proefmini?') >= 0 && ixArgv()[0].indexOf('--vast') < 0 &&
-    /Feitenlijst: 2 feiten \(van 300\), niet bevestigd op de pagina · tekstindex: 1 van 1 pagina met een treffer bekeken/.test(r9.dekking_regel) && r9.tekst.indexOf(r9.dekking_regel.replace(/\.$/, '')) > 0, r9);
+    /Feitenlijst: 2 feiten \(van 300\), niet bevestigd op de pagina · tekstindex \(bijgewerkt \d+-\d+ \d\d:\d\d\): 1 van 1 pagina met een treffer bekeken/.test(r9.dekking_regel) && r9.tekst.indexOf(r9.dekking_regel.replace(/\.$/, '')) > 0, r9);
   toets('9b laag 2: context in de prompt als ### pad (kop), geen grep (ms.zoek leeg)', /### 10_Zakelijk\/Tolgaarde\/Auto - Proefmini\.md \(Proefmini\)\n6: \| Kenteken \| ZZ-999-Z \|/.test(laatsteprompt.prompt) && r9.ms.zoek === undefined, r9.ms);
   q9 = Z.queryRunVan(r9, { sha: 'b'.repeat(64), metVraag: true });
-  toets('9b query_run: tekstindex, gemist = laag 1 gaf geen antwoord', q9.bron_laag === 'tekstindex' && q9.gemist === true && q9.uitkomst === 'antwoord' && q9.rows_matched === 1, q9);
+  toets('9b query_run: tekstindex; niet gemist (laag 1 had wel feiten)', q9.bron_laag === 'tekstindex' && q9.gemist === false && q9.uitkomst === 'antwoord' && q9.rows_matched === 1, q9);
+  feitenVan = l1([], { soorten: [] });
+  r9 = await z9.zoek('Kenteken van de proefmini?');
+  q9 = Z.queryRunVan(r9, { sha: 'b'.repeat(64), metVraag: true });
+  toets('9b query_run: gemist = laag 1 vond niets en laag 2 gaf het antwoord', r9.laag === 'tekstindex' && q9.gemist === true, q9);
 
   // 9c laag 1 niet zonder model: geen soort, een woord zonder treffer, alleen zwakke score zonder 'mijn', afgekapt
   ixZet(ixAntw([]));
@@ -323,13 +329,13 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     r9 = await z9.zoek('Kenteken van de proefmini?');
     toets('9c laag 1 niet zonder model bij ' + reden, r9.laag !== 'identifier' && r9.lagen.feitenlijst.reden === reden && r9.lagen.feitenlijst.antwoord === false, r9.lagen);
   }
-  feitenVan = l1([rij({ waarde: 'ZZ-999-Z', score: 0.5 }), rij({ waarde: 'PR-77-IV', score: 0.5, pagina: '20_Prive/Auto - Proefprive.md', code: 'PRIVE', label: null })]);
+  feitenVan = l1([rij({ waarde: 'ZZ-999-Z', score: 0.5, raak: 0 }), rij({ waarde: 'PR-77-IV', score: 0.5, pagina: '20_Prive/Auto - Proefprive.md', regel: 2, code: 'PRIVE', label: null, raak: 0 })], { rest_n: 0 });
   r9 = await z9.zoek('Wat zijn mijn kentekens');
   toets('9c "mijn" + soort met alleen eigen entiteiten: laag 1 mag (alle eigen kentekens)', r9.laag === 'identifier' && r9.waarden.length === 2 && /^Kentekens: /.test(r9.tekst), r9);
 
   // 9d vaste plek: een privépagina valt in de natoets van laag 1; laag 2 krijgt --vast en filtert privé/personeel, maskeert IBAN
-  feitenVan = l1([rij({ waarde: 'PR-77-IV', pagina: '20_Prive/Auto - Proefprive.md', code: 'PRIVE' })]);
-  ixZet(ixAntw([{ pad: '10_Zakelijk/Groenhouten/index.md', kop: 'Groenhouten', van: 1, tekst: '1: | IBAN | NL06 ABNA 0126 8194 16 |\n2: Groenhouten btw NL222222222B22' },
+  feitenVan = l1([rij({ waarde: 'PR-77-IV', pagina: '20_Prive/Auto - Proefprive.md', regel: 2, code: 'PRIVE' })]);
+  ixZet(ixAntw([deel('10_Zakelijk/Groenhouten/index.md', 'Groenhouten', [1, 2]),
     { pad: '20_Prive/Auto - Proefprive.md', kop: 'Proefprive', van: 1, tekst: '2: | Kenteken | PR-77-IV |' },
     { pad: '10_Zakelijk/Groenhouten/Medewerkers/Sevilay Baructu-Aydin.md', kop: 'Sev', van: 1, tekst: '7: | BSN | 123456782 |' },
     { pad: '10_Zakelijk/Groenhouten/../../20_Prive/x.md', kop: 'x', van: 1, tekst: '1: lek' }]));
@@ -337,6 +343,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   antwoordVan = (p) => { prompts9.push(p); return { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; };
   aanroepen = 0;
   r9 = await z9.zoek('kenteken proefprive', { vast: true });
+  toets('9d vaste plek: de dekkingsregel zegt "alleen Zakelijk"', /op dit apparaat alleen Zakelijk\.$/.test(r9.dekking_regel), r9.dekking_regel);
   toets('9d vaste plek: laag 1 weg (privépagina), laag 2 met --vast', r9.lagen.feitenlijst.reden === 'natoets' && ixArgv()[0].indexOf('--vast') >= 0, { l: r9.lagen, a: ixArgv() });
   const p9 = prompts9[0] || '';   // de modelvraag van laag 2 (laag 3 volgt na zijn "geen")
   toets('9d vaste plek: geen privé-, personeels- of ..-pagina in de context; IBAN gemaskeerd', /### 10_Zakelijk\/Groenhouten\/index\.md/.test(p9) && !/PR-77-IV|123456782|Sevilay|lek|NL06 ABNA/.test(p9) && /IBAN weggelaten/.test(p9) &&
@@ -365,7 +372,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
 
   // 9f laag 2 "geen" = laag 3 (tweede modelvraag); dekkingsregel bij "geen" en "fout"; afgekapt nooit "niet gevonden"
   feitenVan = l1([], { soorten: [] });
-  ixZet(ixAntw([{ pad: '10_Zakelijk/Tolgaarde/index.md', kop: 'Hub', van: 6, tekst: '7: | Telefoon | 033 - 494 12 34 |' }]));
+  ixZet(ixAntw([deel('10_Zakelijk/Tolgaarde/index.md', 'Hub', [10])]));
   let n9 = 0;
   antwoordVan = (p) => { n9++; return n9 === 1 ? { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }
     : { ok: true, data: { soort: 'antwoord', tekst: 'Het btw-nummer is NL863125190B01.', waarden: [{ label: 'BTW', waarde: 'NL863125190B01' }], bronnen: [B] }, verbruik: { kosten: 0.02, uit: 5 } }; };
@@ -375,7 +382,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   antwoordVan = () => ({ ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } });
   r9 = await z9.zoek('Wat is het btw-nummer van Tolgaarde');
   toets('9f "geen" in alle lagen: melding + dekkingsregel van laag 1 en 2 (de zoektocht staat al in de melding)', r9.soort === 'geen' && /^Niet (gevonden in de|in wat ik bekeek)/.test(r9.melding) &&
-    /Feitenlijst: geen feit \(van 300\) · tekstindex: 1 van 1 pagina met een treffer bekeken\.$/.test(r9.melding) && /volledige zoektocht/.test(r9.dekking_regel), r9);
+    /Feitenlijst: geen feit \(van 300\) · tekstindex \(bijgewerkt [^)]*\): 1 van 1 pagina met een treffer bekeken\.$/.test(r9.melding) && /volledige zoektocht/.test(r9.dekking_regel), r9);
   const metZt = (v) => Object.assign({}, r9, { lagen: Object.assign({}, r9.lagen, { zoektocht: Object.assign({}, r9.lagen.zoektocht, { volledig: v, grens: !v }) }) });
   q9 = Z.queryRunVan(metZt(true), { sha: 'c'.repeat(64), metVraag: true });
   toets('9f query_run "geen" bij volledige zoektocht: uitkomst geen, niet afgekapt', q9.uitkomst === 'geen' && q9.truncated === false && q9.bron_laag === 'volledig', q9);
@@ -389,10 +396,100 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   feitenVan = l1([], { soorten: [] });
   ixZet(ixAntw([]));
   r9 = await z9.zoek('Wat is de kleur van de zeppelinhangar');
-  toets('9f nergens een treffer: "niets gevonden" met de regel, geen model', r9.soort === 'geen' && /^Niets gevonden\./.test(r9.melding) && /tekstindex: geen treffer/.test(r9.melding), r9);
+  toets('9f nergens een treffer: "niets gevonden" met de regel, geen model', r9.soort === 'geen' && /^Niets gevonden\./.test(r9.melding) && /tekstindex \(bijgewerkt [^)]*\): geen treffer/.test(r9.melding), r9);
   toets('9g dekkingRegel: afgekapte feitenlijst noemt hoeveel bekeken', Z.dekkingRegel({ feitenlijst: { stand: 'ok', totaal: 25, getoond: 20, afgekapt: true, feiten_totaal: 300 } }) === 'Feitenlijst: 25 feiten (van 300), 20 bekeken, niet zeker genoeg.');
   toets('9g vastOpen: alleen Zakelijk zonder personeel/financiën/..', Z.vastOpen('10_Zakelijk/Tolgaarde/index.md', SB.isVastDicht) && !Z.vastOpen('20_Prive/x.md', SB.isVastDicht) &&
     !Z.vastOpen('10_Zakelijk/x/Financiën/y.md', SB.isVastDicht) && !Z.vastOpen('10_Zakelijk/x/medewerkers/y.md', SB.isVastDicht) && !Z.vastOpen('10_Zakelijk/../20_Prive/y.md', SB.isVastDicht));
+  antwoordVan = null;
+
+  // ── 9h–9l. Opus-diffreview wv1788 ──
+  // 9h MOET 1: een pagina die ná de indexbouw gewijzigd is, of waarvan een regel niet meer klopt = laag 2 overgeslagen (laag 3 zoekt live)
+  feitenVan = l1([], { soorten: [] });
+  antwoordVan = (p, s) => ({ ok: true, data: { soort: 'antwoord', tekst: 'Het btw-nummer is NL863125190B01.', waarden: [{ label: 'BTW', waarde: 'NL863125190B01' }], bronnen: [B] } });
+  ixZet(Object.assign(ixAntw([deel(B, 'Hub', [8])]), { gebouwd_op: new Date(Date.now() - 2 * 3600000).toISOString() }));
+  const nuS = Date.now() / 1000;
+  fs.utimesSync(path.join(VAULT, B), nuS - 60, nuS - 60);   // na de bouw (2 u geleden) gewijzigd
+  aanroepen = 0;
+  r9 = await z9.zoek('Wat is het btw-nummer van Tolgaarde');
+  toets('9h pagina na de indexbouw gewijzigd: laag 2 overgeslagen, laag 3 live; regel zegt het', r9.soort === 'antwoord' && r9.laag === 'volledig' && r9.lagen.tekstindex.stand === 'verouderd' &&
+    aanroepen === 1 && /tekstindex \(bijgewerkt [^)]*\): 1 pagina sindsdien gewijzigd, overgeslagen/.test(r9.dekking_regel), r9.lagen);
+  const fout8 = deel(B, 'Hub', [8]); fout8.tekst = '8: | BTW-nummer | NL999999999B99 |';
+  ixZet(ixAntw([fout8]));
+  r9 = await z9.zoek('Wat is het btw-nummer van Tolgaarde');
+  toets('9h indexregel klopt niet meer met de pagina: verouderd, oude waarde niet naar het model', r9.lagen.tekstindex.stand === 'verouderd' && r9.laag === 'volledig' &&
+    !/NL999999999B99/.test(laatsteprompt.prompt), r9.lagen.tekstindex);
+  ixZet(ixAntw([Object.assign(deel(B, 'Inloggegevens', [8]), { kop: 'Hub › Inloggegevens' }), deel(B, 'Hub', [7])]));
+  const prompts9h = [];
+  antwoordVan = (p) => { prompts9h.push(p); return { ok: true, data: { soort: 'antwoord', tekst: 'KvK 84185171.', waarden: [{ label: 'KvK', waarde: '84185171' }], bronnen: [B] } }; };
+  r9 = await z9.zoek('kvk van Tolgaarde');
+  toets('9h MOET 4: stuk onder een kop met een sleutelwoord gaat niet mee (geteld als dicht, niet volledig)', r9.laag === 'tekstindex' && r9.lagen.tekstindex.dicht === 1 &&
+    r9.lagen.tekstindex.volledig === false && !/Inloggegevens|NL863125190B01/.test(prompts9h[0]) && /84185171/.test(prompts9h[0]) && /met inloggegevens overgeslagen/.test(r9.dekking_regel), { l: r9.lagen.tekstindex, p: prompts9h[0] });
+
+  // 9i MOET 2: laag 1 eist de waarde op zijn eigen regel; een eindwoord op die regel zonder einde in de feitenlijst = niet zonder model
+  ixZet(ixAntw([]));
+  antwoordVan = () => ({ ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } });
+  feitenVan = l1([rij({ waarde: 'QQ-11-QQ', label: 'Vorige', regel: 7 })]);
+  r9 = await z9.zoek('Kenteken van de proefmini?');
+  toets('9i "(verkocht)" op de regel zonder einde: niet zonder model (einde onduidelijk)', r9.laag !== 'identifier' && r9.lagen.feitenlijst.reden === 'einde onduidelijk', r9.lagen.feitenlijst);
+  feitenVan = l1([rij({ waarde: 'ZZ-999-Z', regel: 4 })]);
+  r9 = await z9.zoek('Kenteken van de proefmini?');
+  toets('9i waarde niet op zijn eigen regel: natoets', r9.laag !== 'identifier' && r9.lagen.feitenlijst.reden === 'natoets', r9.lagen.feitenlijst);
+  feitenVan = l1([rij({ waarde: 'ZZ-999-Z', regel: null })]);
+  r9 = await z9.zoek('Kenteken van de proefmini?');
+  toets('9i zonder regel alleen een bevestigd registerfeit (voorgesteld = natoets)', r9.lagen.feitenlijst.reden === 'natoets', r9.lagen.feitenlijst);
+  feitenVan = l1([rij({ waarde: 'ZZ-999-Z', regel: null, status: 'actief' })]);
+  r9 = await z9.zoek('Kenteken van de proefmini?');
+  toets('9i bevestigd registerfeit zonder regel: laag 1 mag (waarde op de pagina)', r9.laag === 'identifier' && !/nog niet bevestigd|Bibliothecaris/.test(r9.tekst), r9.tekst);
+  zet('10_Zakelijk/Tolgaarde/Lijst.md', '# Lijst\n\n- Telefoon praktijk:\n    033 494 46 00\n- Fax: 033 000 00 00 (oud)\n');
+  feitenVan = l1([rij({ soort: 'telefoon', waarde: '033 494 46 00', pagina: '10_Zakelijk/Tolgaarde/Lijst.md', regel: 3, label: null })], { soorten: ['telefoon'] });
+  r9 = await z9.zoek('telefoonnummer tolgaarde');
+  toets('9i lijstitem met de waarde op de vervolgregel: laag 1 mag', r9.laag === 'identifier' && r9.waarden[0].waarde === '033 494 46 00', r9.lagen);
+  feitenVan = l1([rij({ soort: 'telefoon', waarde: '033 000 00 00', pagina: '10_Zakelijk/Tolgaarde/Lijst.md', regel: 5, label: null })], { soorten: ['telefoon'] });
+  r9 = await z9.zoek('telefoonnummer tolgaarde');
+  toets('9i "(oud)" op de regel: niet zonder model', r9.lagen.feitenlijst.reden === 'einde onduidelijk', r9.lagen.feitenlijst);
+  fs.rmSync(path.join(VAULT, '10_Zakelijk/Tolgaarde/Lijst.md'));
+
+  // 9j ZOU 5: elke getoonde rij moet alle zoekwoorden raken
+  feitenVan = l1([rij({ waarde: 'ZZ-999-Z', raak: 1 })], { rest_n: 2 });
+  r9 = await z9.zoek('kenteken tolgaarde jansen');
+  toets('9j rij raakt niet alle zoekwoorden: niet zonder model', r9.lagen.feitenlijst.reden === 'niet alle woorden', r9.lagen.feitenlijst);
+  feitenVan = l1([rij({ waarde: 'ZZ-999-Z' })], { rest_n: undefined });
+  r9 = await z9.zoek('Kenteken van de proefmini?');
+  toets('9j oude ingang zonder rest_n: niet zonder model', r9.lagen.feitenlijst.reden === 'niet alle woorden', r9.lagen.feitenlijst);
+
+  // 9k versheid laag 1: stempel van de vulling (ontbreekt, te oud, pagina nieuwer, vers)
+  const STEMPEL = path.join(W, 'feitenlijst.gevuld');
+  const z9s = Z.maak({ vault: VAULT, claude: nepClaude, bsnMasker: bsn, fout: () => {}, feiten: nepFeiten, feitenStempel: STEMPEL, index: { cmd: process.execPath, args: [NEP_IX], db: IXDB } });
+  feitenVan = l1([rij({ waarde: 'ZZ-999-Z' })]);
+  r9 = await z9s.zoek('Kenteken van de proefmini?');
+  toets('9k geen stempel: niet zonder model (vulling onbekend)', r9.lagen.feitenlijst.reden === 'vulling onbekend' && /niet vers genoeg/.test(r9.dekking_regel), r9.lagen.feitenlijst);
+  fs.writeFileSync(STEMPEL, 'x');
+  fs.utimesSync(STEMPEL, nuS - 50 * 3600, nuS - 50 * 3600);
+  r9 = await z9s.zoek('Kenteken van de proefmini?');
+  toets('9k stempel ouder dan 48 u: feitenlijst te oud', r9.lagen.feitenlijst.reden === 'feitenlijst te oud', r9.lagen.feitenlijst);
+  fs.utimesSync(STEMPEL, nuS - 3600, nuS - 3600);
+  fs.utimesSync(path.join(VAULT, '10_Zakelijk/Tolgaarde/Auto - Proefmini.md'), nuS - 60, nuS - 60);
+  r9 = await z9s.zoek('Kenteken van de proefmini?');
+  toets('9k bronpagina na de vulling gewijzigd: niet zonder model', r9.lagen.feitenlijst.reden === 'pagina nieuwer' && /pagina sindsdien gewijzigd/.test(r9.dekking_regel), r9.lagen.feitenlijst);
+  fs.utimesSync(path.join(VAULT, '10_Zakelijk/Tolgaarde/Auto - Proefmini.md'), nuS - 7200, nuS - 7200);
+  r9 = await z9s.zoek('Kenteken van de proefmini?');
+  toets('9k verse vulling, pagina ouder: laag 1, regel noemt wanneer bijgewerkt', r9.laag === 'identifier' && /^Feitenlijst \(bijgewerkt \d+-\d+ \d\d:\d\d\): 1 feit/.test(r9.dekking_regel), r9.dekking_regel);
+
+  // 9l MOET 3 / ZOU 7: onbekeken kandidaten = nooit "niet gevonden"; grep zonder zoekmap = fout
+  feitenVan = l1([rij({ waarde: 'ZZ-999-Z' })], { afgekapt: true, totaal: 25 });
+  ixZet(ixAntw([]));
+  antwoordVan = () => ({ ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } });
+  r9 = await z9.zoek('Kenteken van de zeppelinhangar');
+  toets('9l feitenlijst afgekapt, rest "geen": melding "Niet in wat ik bekeek", vraag het Socev; query_run onvolledig', r9.soort === 'geen' && /^Niet in wat ik bekeek\./.test(r9.melding) &&
+    /Vraag het Socev/.test(r9.melding) && !/niet gevonden|niets gevonden/i.test(r9.melding) && Z.queryRunVan(r9, { sha: 'd'.repeat(64) }).uitkomst === 'onvolledig' &&
+    Z.queryRunVan(r9, { sha: 'd'.repeat(64) }).truncated === true, r9.melding);
+  feitenVan = () => { throw new Error('databank weg'); };
+  r9 = await z9.zoek('Wat is de kleur van de zeppelinhangar');
+  toets('9l feitenlijst onbereikbaar, nergens een treffer: niet "niets gevonden"', r9.soort === 'geen' && /^Niet in wat ik bekeek\./.test(r9.melding), r9.melding);
+  const LEEG = fs.mkdtempSync(path.join(W, 'leeg-'));
+  const zLeeg = Z.maak({ vault: LEEG, claude: nepClaude, bsnMasker: bsn, fout: () => {} });
+  r9 = await zLeeg.zoek('Wat is het btw-nummer van Tolgaarde');
+  toets('9l ZOU 7: geen zoekmap te openen = fout, nooit "niets gevonden"', r9.soort === 'fout' && r9.melding === Z.MELDING.fout, r9);
   antwoordVan = null;
 
   // ── 6. server.js-koppeling (vm, nagebootste omgeving) ──
@@ -521,9 +618,9 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelInfo, zoekSnel, zoekSnelZout };', ctx10, { filename: 'server.js#zoek-snel-10' });
   const S10 = ctx10.__z;
   const roep10 = async (d) => { const res = st(); await S10.appZoekSnel({}, res, A, d); await new Promise((k) => setTimeout(k, 30)); return res; };
-  rpcVan = async (fn) => fn === 'sb_query_run_zet' ? 7 : { totaal: 1, getoond: 1, afgekapt: false, genegeerd: [], soorten: ['kenteken'], feiten_totaal: 300,
+  rpcVan = async (fn) => fn === 'sb_query_run_zet' ? 7 : { totaal: 1, getoond: 1, afgekapt: false, genegeerd: [], soorten: ['kenteken'], rest_n: 1, feiten_totaal: 300,
     rijen: [rij({ waarde: 'ZZ-999-Z' })] };
-  modelN = 0;
+  modelN = 0; modelVan = null;
   res = await roep10({ tekst: 'Kenteken van de proefmini?', zoek_id: id('a1') });
   const rpcF = rpcLog.find((x) => x.fn === 'sb_zoek_identifier'), rpcQ = rpcLog.filter((x) => x.fn === 'sb_query_run_zet');
   toets('10 laag 1 via de RPC (service_role, p_max 20, p_vast, met time-out): antwoord zonder model', res.status === 200 && res.j.soort === 'antwoord' && res.j.laag === 'identifier' && modelN === 0 &&
@@ -540,6 +637,21 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   const q10 = rpcLog.filter((x) => x.fn === 'sb_query_run_zet');
   toets('10 patiëntmarker ziet iets: query_run zonder vraag, termen en bronnen; zout ongewijzigd', q10.length === 1 && !('vraag' in q10[0].body.p) && !('termen' in q10[0].body.p) &&
     !('evidence_refs' in q10[0].body.p) && fs.readFileSync(ZOUT).toString('hex') === zoutVoor, q10);
+  // ZOU 6: aanspreekvorm of patiëntwoord = geen vraagtekst
+  rpcLog.length = 0;
+  res = await roep10({ tekst: 'telefoonnummer mw. Proefstra', zoek_id: id('a4') });
+  const q10b = rpcLog.filter((x) => x.fn === 'sb_query_run_zet');
+  toets('10 aanspreekvorm (mw.) in de vraag: query_run zonder vraagtekst', q10b.length === 1 && !('vraag' in q10b[0].body.p), q10b);
+  // KAN 9: een te kort zout = geen query_run (nooit een kale of zwakke sha)
+  fs.writeFileSync(ZOUT, 'kort');
+  rpcLog.length = 0;
+  res = await roep10({ tekst: 'kvk van Tolgaarde', zoek_id: id('a5') });
+  toets('10 zout te kort: antwoord komt, geen query_run', res.status === 200 && rpcLog.filter((x) => x.fn === 'sb_query_run_zet').length === 0, rpcLog.map((x) => x.fn));
+  fs.rmSync(ZOUT);
+  rpcLog.length = 0;
+  res = await roep10({ tekst: 'kvk van Tolgaarde', zoek_id: id('a6') });
+  toets('10 zout weg: opnieuw aangemaakt (32 bytes, 0600), geen tijdelijk bestand achtergelaten', fs.statSync(ZOUT).size === 32 && (fs.statSync(ZOUT).mode & 0o777) === 0o600 &&
+    fs.readdirSync(path.dirname(ZOUT)).length === 1 && rpcLog.filter((x) => x.fn === 'sb_query_run_zet').length === 1, fs.readdirSync(path.dirname(ZOUT)));
   rpcVan = async (fn) => { if (fn === 'sb_query_run_zet') throw new Error('databank weg'); return { totaal: 0, getoond: 0, afgekapt: false, genegeerd: [], soorten: [], feiten_totaal: 300, rijen: [] }; };
   modelVan = () => ({ ok: true, data: { soort: 'antwoord', tekst: 'Het btw-nummer is NL863125190B01.', waarden: [{ label: 'BTW', waarde: 'NL863125190B01' }], bronnen: [B] } });
   res = await roep10({ tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('a3') });
@@ -553,7 +665,8 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   modelVan = null; rpcVan = null;
   // nachtklokken (bron): venster, socev-run met hartslag, onderhoudsstand en OVIS-nachtronde, /health
   toets('10 nachtklokken: sb2-feitenlijst 05:00–05:30 (--laad --gelijktrekken) en sb2-zoekindex 05:05–06:00 (bouw onder de grendel), hartslag = naam',
-    /sb2ZoekKlok\('sb2-feitenlijst', \{ van: \[5, 0\], tot: \[5, 30\] \}, 5,\n\s+\['python3', '-I', SB2_SRC \+ '\/feitenlijst\.py', '--vault', VAULT, '--laad', '--gelijktrekken'\]\)/.test(src) &&
+    /sb2ZoekKlok\('sb2-feitenlijst', \{ van: \[5, 0\], tot: \[5, 30\] \}, 5,\n\s+\['python3', '-I', SB2_SRC \+ '\/feitenlijst\.py', '--vault', VAULT, '--laad', '--gelijktrekken', '--stempel', '\/opt\/data\/scripts-staat\/sb2-zoek\/feitenlijst\.gevuld'\]\)/.test(src) &&
+    /argv: argv, pogingen: 2 \}\)/.test(src) &&
     /sb2ZoekKlok\('sb2-zoekindex', \{ van: \[5, 5\], tot: \[6, 0\] \}, 10,\n\s+\['python3', '-I', SB2_SRC \+ '\/zoekindex\.py', 'bouw', '--vault', VAULT, '--db', '\/opt\/data\/scripts-staat\/sb2-zoekindex\/index\.sqlite', '--grendel', OVIS_LOCK\]\)/.test(src) &&
     /naam: naam, hartslag: naam/.test(src) && /mag: function \(\) \{ return !onderhoud\.stand\(\)\.aan && ovisLoopt\.nu !== 'nacht'; \}/.test(src) &&
     /if \(!SERVER_ECHT \|\| !rolPrimair\(\)\) return;\n  const ctx = \{ ams: ovisAms\(\), mag:/.test(src) && /sb2_zoek: typeof sb2ZoekKlokInfo === 'function'/.test(src));

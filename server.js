@@ -15517,19 +15517,21 @@ if (ovisDeadlines && SERVER_ECHT) { setInterval(function () { ovisDeadlinesTik()
 // Venster: ná alles wat 's nachts vaultpagina's schrijft (OVIS-nachtronde 01:00–01:59, linter 02:00–02:29, Bibliothecaris 02:30,
 // nachtconsolidatie 03:00, wachters 03:40–04:45) en vóór Davids dag (07:00), zodat de eerste vragen van de ochtend de pagina's van vannacht
 // zien; geen overlap met de klussen van 03:30–04:00. Niet tijdens de onderhoudsstand en niet zolang de OVIS-nachtronde loopt: dan
-// geen ronde (de datum blijft open, de volgende tik binnen het venster probeert opnieuw). De index ouder dan 48 u = Zoek snel slaat laag 2 over.
+// geen ronde (de datum blijft open, de volgende tik binnen het venster probeert opnieuw). Mislukt een ronde, dan nog één poging binnen het
+// venster (pogingen 2). De feitenlijst-klus vervangt na een geslaagde vulling scripts-staat/sb2-zoek/feitenlijst.gevuld: zonder verse stempel
+// (of als de bronpagina nieuwer is) antwoordt laag 1 niet zonder model; een index ouder dan 48 u = Zoek snel slaat laag 2 over.
 function sb2ZoekKlok(naam, venster, maxMin, argv) {
   const p = path.join(__dirname, 'sb2-nacht.js');
   if (!fs.existsSync(p)) return null;
   try {
     const m = require(p);
     return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: naam, hartslag: naam, maxMin: maxMin, venster: venster,
-      socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: Object.assign({}, process.env, { VAULT_DIR: VAULT }), argv: argv }) : null;
+      socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: Object.assign({}, process.env, { VAULT_DIR: VAULT }), argv: argv, pogingen: 2 }) : null;
   } catch (e) { logError(naam, e); return null; }
 }
 const SB2_SRC = '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2';
 const sb2Feitenlijst = sb2ZoekKlok('sb2-feitenlijst', { van: [5, 0], tot: [5, 30] }, 5,
-  ['python3', '-I', SB2_SRC + '/feitenlijst.py', '--vault', VAULT, '--laad', '--gelijktrekken']);
+  ['python3', '-I', SB2_SRC + '/feitenlijst.py', '--vault', VAULT, '--laad', '--gelijktrekken', '--stempel', '/opt/data/scripts-staat/sb2-zoek/feitenlijst.gevuld']);
 const sb2Zoekindex = sb2ZoekKlok('sb2-zoekindex', { van: [5, 5], tot: [6, 0] }, 10,
   ['python3', '-I', SB2_SRC + '/zoekindex.py', 'bouw', '--vault', VAULT, '--db', '/opt/data/scripts-staat/sb2-zoekindex/index.sqlite', '--grendel', OVIS_LOCK]);
 function sb2ZoekKlokInfo() {
@@ -16756,6 +16758,7 @@ function doorgeefKnop(sleutel, jobId, hash, zin, tDruk) {
 const ZOEK_SNEL_INDEX_DB = process.env.ZOEK_SNEL_INDEX_DB || (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT ? '/opt/data/scripts-staat/sb2-zoekindex/index.sqlite' : null);
 const ZOEK_SNEL_INDEX_SCRIPT = process.env.ZOEK_SNEL_INDEX_SCRIPT || '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2/zoekindex.py';
 const ZOEK_SNEL_ZOUT = process.env.ZOEK_SNEL_ZOUT || (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT ? '/opt/data/scripts-staat/sb2-zoek/zout' : null);
+const ZOEK_SNEL_STEMPEL = process.env.ZOEK_SNEL_STEMPEL || (typeof SERVER_ECHT !== 'undefined' && SERVER_ECHT ? '/opt/data/scripts-staat/sb2-zoek/feitenlijst.gevuld' : null);
 const ZOEK_SNEL_RPC_MS = 1500;
 async function zoekSnelRpc(fn, body, ms) {
   const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, ''), key = process.env.SUPABASE_SERVICE_ROLE || '';
@@ -16766,25 +16769,31 @@ async function zoekSnelRpc(fn, body, ms) {
   if (!r.ok) { await r.text().catch(function () {}); throw new Error('rpc ' + fn + ' http ' + r.status); }
   return r.json();
 }
-// Het zout: eenmalig aangemaakt (O_EXCL, 0600, map 0700); daarna alleen gelezen. Onleesbaar of te kort = geen query_run (nooit een kale sha).
+// Het zout: eenmalig aangemaakt (eerst een eigen tijdelijk bestand 0600 vol schrijven, dan link naar de vaste naam: nooit een half zout;
+// diffreview KAN 9), map 0700; daarna alleen gelezen. Onleesbaar of te kort = geen query_run (nooit een kale sha) en één logregel.
 function zoekSnelZout() {
   if (!ZOEK_SNEL_ZOUT) return null;
-  try {
+  const lees = function () {
     const b = fs.readFileSync(ZOEK_SNEL_ZOUT);
-    return b.length >= 32 ? b : null;
-  } catch (e) {
-    if (e.code !== 'ENOENT') { logError('zoek-snel-zout', e); return null; }
-  }
+    if (b.length < 32) { logError('zoek-snel-zout', new Error('zout te kort (' + b.length + ' bytes)')); return null; }
+    return b;
+  };
+  try { return lees(); } catch (e) { if (e.code !== 'ENOENT') { logError('zoek-snel-zout', e); return null; } }
+  const tmp = ZOEK_SNEL_ZOUT + '.' + process.pid + '.' + require('crypto').randomBytes(4).toString('hex');
   try {
     fs.mkdirSync(path.dirname(ZOEK_SNEL_ZOUT), { recursive: true, mode: 0o700 });
-    const fd = fs.openSync(ZOEK_SNEL_ZOUT, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-    try { fs.writeSync(fd, require('crypto').randomBytes(32)); } finally { fs.closeSync(fd); }
-    const b = fs.readFileSync(ZOEK_SNEL_ZOUT);
-    return b.length >= 32 ? b : null;
+    const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+    try { fs.writeSync(fd, require('crypto').randomBytes(32)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    try { fs.linkSync(tmp, ZOEK_SNEL_ZOUT); } catch (e) { if (e.code !== 'EEXIST') throw e; }   // EEXIST: een ander was eerst; dat zout geldt
+    return lees();
   } catch (e) { logError('zoek-snel-zout', e); return null; }
+  finally { try { fs.unlinkSync(tmp); } catch (e) {} }
 }
 let zoekSnelMarker;
+// Aanspreekvorm of patiëntwoord in de vraag = alleen de sha (de marker ziet een naam zonder datum of medisch woord niet; diffreview ZOU 6)
+const ZOEK_SNEL_PERSOON = /(^|[^\p{L}])(mw|mevr|mevrouw|dhr|de heer|meneer|mr|patiënt(e|en)?|patient(e|en)?|pati[eë]nt|cliënt(e|en)?|client(e|en)?|pt)([^\p{L}]|$)/iu;
 function zoekSnelPatientVrij(vraag) {
+  if (ZOEK_SNEL_PERSOON.test(vraag)) return false;
   try {
     if (zoekSnelMarker === undefined) zoekSnelMarker = require(path.join(__dirname, 'intake', 'patientpoort.js'));
     const b = zoekSnelMarker.beoordeel({ teksten: [vraag] }, { eigen: zoekSnelMarker.maakEigen(null, {}) });
@@ -16819,7 +16828,8 @@ const zoekSnel = (function () {
       feiten: process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE
         ? function (vraag, vast) { return zoekSnelRpc('sb_zoek_identifier', { p_vraag: vraag, p_max: 20, p_vast: !!vast }, ZOEK_SNEL_RPC_MS); } : null,
       index: ZOEK_SNEL_INDEX_DB ? { cmd: process.env.ZOEK_SNEL_INDEX_CMD || 'python3', args: process.env.ZOEK_SNEL_INDEX_CMD ? [ZOEK_SNEL_INDEX_SCRIPT] : ['-I', ZOEK_SNEL_INDEX_SCRIPT],
-        db: ZOEK_SNEL_INDEX_DB } : null });
+        db: ZOEK_SNEL_INDEX_DB } : null,
+      feitenStempel: ZOEK_SNEL_STEMPEL });
     z.queryRunVan = m.queryRunVan;
     return z;
   } catch (e) { logError('zoek-snel', e); return null; }
