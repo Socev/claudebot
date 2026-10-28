@@ -4859,7 +4859,6 @@ const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften', 'mediat
 // APP_BEHEER_ROUTES, een gevoelige Ja telt niet (knop-ja-vers-vast, AIX, POT-verzending, OVIS-adres). Eén schakelaar: true = het oude
 // afschermen (terugrol). Ontwerp: vault 01_Ontwikkeling/Vaste plek - alles open (ontwerp 28-10-2026).md
 const APP_VAST_AFSCHERMEN = false;
-const APP_VAST_SLOT_GET = new Set(['GET /app/financien', 'GET /app/gezondheid', 'GET /app/gezondheid/genoom', 'GET /app/pot-afschriften', 'GET /app/mediatheek']);
 function appAfscherm(a) {
   return APP_VAST_AFSCHERMEN && !!(a && a.soort === 'vast');
 }
@@ -6143,9 +6142,9 @@ async function appSlot(a) {
 function appInvoerRoute(route, upload, d, a) {
   if (upload || route.indexOf('GET /app/bestand/') === 0 || route.indexOf('GET /app/facturen/document/') === 0) return true;   // wv833: facturen-stuk inzien = als downloaden
   if (route === 'GET /app/secondbrain') return true;   // wv832: de kaart (bestandsnamen) op een vaste plek alleen met open slot (Fable diffreview K7)
-  // wv1901 (Opus-review MOET 2, ZOU 7): de privé-Apps staan sinds wv1901 ook op een vaste plek open; lezen en downloaden daar alleen met
-  // open slot (David is er, of zette het vanaf zijn telefoon open), zoals de Second Brain-kaart hierboven
-  if (APP_VAST_SLOT_GET.has(route) || route.indexOf('GET /app/pot-afschriften/bestand/') === 0 || route.indexOf('GET /app/mediatheek/bestand/') === 0) return true;
+  // wv1901 (Opus-review MOET 2): de privé-Apps staan sinds wv1901 ook op een vaste plek open; hun downloads vallen daar onder het slot,
+  // zoals elke download hierboven. Lezen niet (David 28-10: niets ongevraagd afschermen; een leesslot is een optie in het ontwerp).
+  if (route.indexOf('GET /app/pot-afschriften/bestand/') === 0 || route.indexOf('GET /app/mediatheek/bestand/') === 0) return true;
   if (route.indexOf('POST ') !== 0 || APP_SLOT_VRIJ.has(route)) return false;
   if (route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id) return false;
   if (route === 'POST /app/concept' && !String(d.tekst == null ? '' : d.tekst).trim()) return false;   // wv159: concept wissen mag altijd
@@ -6164,8 +6163,7 @@ function appElfproef(c) {
 // Zonder treffer komt de tekst ongewijzigd terug; met treffer genormaliseerd zoals appOntmasker (onzichtbare opmaaktekens weg,
 // NFKC), anders zou "111\u00ad222333" of vol-breedte "１１１…" langs het masker glippen en daarna toch als 111222333 in de beurt
 // staan (Fable-diffreview wv464 #1).
-// wv1901: behoud = Set van cijferreeksen (9 cijfers) die blijven staan (Docs-bewaren op een vaste plek: wat er al stond).
-function appBsnMasker(t, vervang, behoud) {
+function appBsnMasker(t, vervang) {
   const org = String(t == null ? '' : t), n = org.replace(/\p{Cf}/gu, '').normalize('NFKC');
   // Horizontale spaties zoals NBSP/smalle spatie/tab (komen mee bij plakken uit HIS of PDF) eerst gewoon maken (review wv134 K4);
   // teken voor teken, dus de posities in `tekst` gelden ook in `n`. Een regeleinde blijft een harde grens (twee BSN's onder
@@ -6173,20 +6171,8 @@ function appBsnMasker(t, vervang, behoud) {
   const re = /(?<!\d)(?<!\d[ .,/-])\d(?:[ .,/-]?\d){8}(?![ .,/-]?\d)/g;
   const tekst = n.replace(/[^\S\r\n]/g, ' ');
   let m, uit = '', vanaf = 0, raak = false;
-  while ((m = re.exec(tekst))) {
-    const c = m[0].replace(/\D/g, '');
-    if (appElfproef(c) && !(behoud && behoud.has(c))) { uit += n.slice(vanaf, m.index) + (vervang === undefined ? APP_BSN_MASKER : vervang); vanaf = m.index + m[0].length; raak = true; }
-  }
+  while ((m = re.exec(tekst))) if (appElfproef(m[0].replace(/\D/g, ''))) { uit += n.slice(vanaf, m.index) + (vervang === undefined ? APP_BSN_MASKER : vervang); vanaf = m.index + m[0].length; raak = true; }
   return raak ? uit + n.slice(vanaf) : org;
-}
-// wv1901: de BSN-achtige getallen (alleen cijfers) in een tekst, met dezelfde normalisatie en herkenning als appBsnMasker
-function appBsnGetallen(t) {
-  const n = String(t == null ? '' : t).replace(/\p{Cf}/gu, '').normalize('NFKC').replace(/[^\S\r\n]/g, ' ');
-  const re = /(?<!\d)(?<!\d[ .,/-])\d(?:[ .,/-]?\d){8}(?![ .,/-]?\d)/g;
-  const uit = new Set();
-  let m;
-  while ((m = re.exec(n))) { const c = m[0].replace(/\D/g, ''); if (appElfproef(c)) uit.add(c); }
-  return uit;
 }
 function appBsnAchtig(t) {
   const s = String(t || '');
@@ -10780,7 +10766,7 @@ async function appPraktijkenRoute(req, res, a) {
 // ── App Financiën (wv771; bouwplan idee 16 § 11): privégeld, alleen lezen ──
 // Eén route zonder parameters. Het bankkind (bank-lezer.js app-financien, lokaal: geen kluis, geen bankopvraag) bouwt het antwoord veld
 // voor veld op (financien-app.js); hier alleen doorgeven. Op een vaste plek alleen als die afschermt (APP_VAST_AFSCHERMEN, sinds wv1901
-// uit) 200 met vaste_plek en een zin (Fable wv771 #15); anders onder het invoerslot (APP_VAST_SLOT_GET). Wél een auditregel per keer openen (route, apparaat,
+// uit) 200 met vaste_plek en een zin (Fable wv771 #15); anders zoals overal. Wél een auditregel per keer openen (route, apparaat,
 // status; geen inhoud): één verzoek geeft het hele privé-overzicht (Fable #14). 60 s in het geheugen tegen Ververs-spam en als terugval
 // als de database even bezet is (bankronde); niets op schijf. Grens 20 s (Fable #13).
 const APP_FIN_CACHE_MS = 60000, APP_FIN_MAX_MS = 20000, APP_FIN_TERUGVAL_MS = 30 * 60000;
@@ -16692,8 +16678,8 @@ async function appBrainEntiteiten(req, res, a, route) {
 // (.md, bron_soort: mediatheek) naast elk bestand in 20_Prive; 20_Prive/Mediatheek.md is de kaft (volgorde en uitleg). Logica en
 // padcontrole in mediatheek.js (alleen bestanden uit `bestanden:` van een geldige beschrijving, in dezelfde map, onder 20_Prive, vaste
 // extensies, realpath, geen symlink of hardlink, ≤ 20 MB; een kapotte beschrijving = "te herstellen", de rest blijft). Hier: GET /app/mediatheek (lijst, stil bij 200) en GET /app/mediatheek/bestand/<id> (base64 in JSON, zoals
-// /app/bestand: de app speelt het af als blob, dus geen Range nodig, ook niet in Safari). Privé-module: op een vaste plek onder het
-// invoerslot (wv1901; dicht alleen als APP_VAST_AFSCHERMEN aan staat). Ontbreekt mediatheek.js in de release (terugrol), dan 404 en /health.mediatheek.aan=false.
+// /app/bestand: de app speelt het af als blob, dus geen Range nodig, ook niet in Safari). Privé-module: op een vaste plek open, het bestand
+// onder het invoerslot (wv1901; dicht alleen als APP_VAST_AFSCHERMEN aan staat). Ontbreekt mediatheek.js in de release (terugrol), dan 404 en /health.mediatheek.aan=false.
 const MEDIATHEEK_MOD = (function () { const p = path.join(__dirname, 'mediatheek.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('mediatheek', e); return null; } })();
 const mediatheek = (function () { try { return MEDIATHEEK_MOD ? MEDIATHEEK_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, fout: logError }) : null; } catch (e) { logError('mediatheek', e); return null; } })();
 let mediatheekBezig = 0;
@@ -16931,15 +16917,6 @@ async function appSecondBrain(req, res, a, d, route) {
   if (!appTeller('secondbrain', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 600)', 'grens secondbrain');
   if (route === 'POST /app/secondbrain/zoek' && d && d.betekenis && !appTeller('secondbrain-betekenis', 60, 3600000))
     return appWeiger(res, 429, 'zoeken op betekenis te vaak dit uur (max 60); het gewone zoeken werkt nog', 'grens secondbrain-betekenis');
-  // wv1901 (Opus-review MOET 1): Docs bewaren mag sinds wv1901 ook vanaf een vaste plek (onder het invoerslot). Een BSN-achtig getal
-  // dat in de huidige versie van de pagina nog niet stond, wordt daar gemaskeerd (wv464: maskeren, nooit weigeren); wat er al stond
-  // (bijv. Davids eigen BSN op een privépagina) blijft staan. Is de huidige versie niet te lezen, dan wordt elk BSN-achtig getal gemaskeerd.
-  if (route === 'POST /app/secondbrain/bewaar' && a && a.soort === 'vast' && d && typeof d.md === 'string' && appBsnAchtig(d.md)) {
-    let oud = null;
-    try { oud = typeof secondbrain.bron === 'function' ? secondbrain.bron(String(d.pad || ''), { vast: false }) : null; } catch (e) { oud = null; }
-    const m = appBsnMasker(d.md, undefined, appBsnGetallen(oud ? oud.tekst : ''));
-    if (m !== d.md) { d.md = m; res._app.bsnWeg = true; }
-  }
   let r;
   try { r = await secondbrain.app(route, d || {}, { vast: appAfscherm(a) }); }   // wv1901
   catch (e) { logError('app-secondbrain', e); return appWeiger(res, 500, 'fout op de pod', 'secondbrain uitzondering'); }
