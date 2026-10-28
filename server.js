@@ -3746,6 +3746,7 @@ function handleRequest(req, res) {
       scripts_veeg: typeof scriptsVeegInfo === 'function' ? scriptsVeegInfo() : { aan: false },   // wv1311: opruimronde socev-run --veeg (exit, aantal opgeveegd; geen namen)
       ovis_kalender: typeof ovisKalenderInfo === 'function' ? ovisKalenderInfo() : { aan: false },   // wv1385: OVIS Calendar-feeds (datum, exit, duur; geen namen of URL's)
       ovis_agenda: typeof ovisAgendaInfo === 'function' ? ovisAgendaInfo() : { aan: false },   // wv1411: OVIS Calendar Google-spiegel (datum, exit, duur; geen titels)
+      ovis_deadlines: typeof ovisDeadlinesInfo === 'function' ? ovisDeadlinesInfo() : { aan: false },   // wv1412: deadline-register → tijdlijn + momentopname (datum, exit, duur)
       ovis: typeof ovisInfo === 'function' ? ovisInfo() : { aan: false },   // wv979: OVIS-register (laatste dag-, nacht- en Bibliothecarisronde; aantallen, geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
@@ -15400,6 +15401,29 @@ async function ovisAgendaTik() {
   } catch (e) { logError('ovis-agenda-tik', e); }
 }
 if (ovisAgenda && SERVER_ECHT) { setInterval(function () { ovisAgendaTik(); }, 5 * 60000).unref(); }
+// ── OVIS Calendar: het deadline-register op de tijdlijn + momentopname voor de agenda-wachter (wv1412; waarom in kalender_deadlines.py) ──
+// Elke 5 min (echte pod, rol primair); werk alleen 03:45–03:59 en eenmaal per datum: na de nachtconsolidatie (03:00, schrijft
+// Deadlines.md) en vóór de agenda-wachter (04:00, leest de momentopname). Via socev-run met hartslag ovis-deadlines (36 u).
+// Leest de vault alleen (geen onderhoudsstand nodig); schrijft de databank en scripts-staat/ovis-tijdlijn/tijdlijn.json.
+const ovisDeadlines = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'ovis-deadlines', hartslag: 'ovis-deadlines', maxMin: 3,
+      venster: { van: [3, 45], tot: [4, 0] }, socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env,
+      argv: ['python3', '-I', '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2/kalender_deadlines.py'] }) : null;
+  } catch (e) { logError('ovis-deadlines', e); return null; }
+})();
+function ovisDeadlinesInfo() { if (!ovisDeadlines) return { aan: false }; try { return ovisDeadlines.info(); } catch (e) { return { fout: true }; } }
+async function ovisDeadlinesTik() {
+  if (!ovisDeadlines || !SERVER_ECHT || !rolPrimair()) return;
+  try {
+    const u = await ovisDeadlines.tik({ ams: ovisAms() });
+    if (u) schrijfLog(nu() + ' ovis-deadlines ' + velden({ exit: u.exit, ms: u.ms }));
+  } catch (e) { logError('ovis-deadlines-tik', e); }
+}
+if (ovisDeadlines && SERVER_ECHT) { setInterval(function () { ovisDeadlinesTik(); }, 5 * 60000).unref(); }
 // managers.js soort script: Nu draaien (geen stempel, geen box-rij; het rapport gaat via managers.js naar de machinekamer)
 function ovisStartScript(m) {
   if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');

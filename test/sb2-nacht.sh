@@ -243,6 +243,12 @@ echo '{"ok": true}'; exit 0
     /if \(!ovisAgenda \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s) && /venster: \{ van: \[3, 30\], tot: \[4, 0\] \}/.test(s)
     && /naam: 'ovis-agenda', hartslag: 'ovis-agenda'/.test(s) && /ovis_agenda: typeof ovisAgendaInfo === 'function'/.test(s)
     && /kalender_spiegel\.py'\] \}/.test(s) && /setInterval\(function \(\) \{ ovisAgendaTik\(\); \}, 5 \* 60000\)/.test(s));
+  toets('server.js: deadline-klok (wv1412) alleen echt + primair, 03:45–04:00, via socev-run met hartslag, /health ovis_deadlines',
+    /if \(!ovisDeadlines \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s) && /venster: \{ van: \[3, 45\], tot: \[4, 0\] \}/.test(s)
+    && /naam: 'ovis-deadlines', hartslag: 'ovis-deadlines'/.test(s) && /ovis_deadlines: typeof ovisDeadlinesInfo === 'function'/.test(s)
+    && /socev_sb2\/kalender_deadlines\.py'/.test(s) && /setInterval\(function \(\) \{ ovisDeadlinesTik\(\); \}, 5 \* 60000\)/.test(s));
+  toets('dagronde: venster 03:45–04:00 kent 03:59 wel en 04:00 niet', N.inDagVenster({ van: [3, 45], tot: [4, 0] }, { uur: 3, min: 59 })
+    && !N.inDagVenster({ van: [3, 45], tot: [4, 0] }, { uur: 4, min: 0 }) && !N.inDagVenster({ van: [3, 45], tot: [4, 0] }, { uur: 3, min: 44 }));
   toets('server.js: tik alleen echt + primair, onderhoud en OVIS-nacht doorgegeven', /if \(!sb2Nacht \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s)
     && /onderhoud: function \(\) \{ return !!onderhoud\.stand\(\)\.aan; \}, ovisNacht: ovisLoopt\.nu === 'nacht'/.test(s)
     && /vault: VAULT, grendel: OVIS_LOCK/.test(s));
