@@ -906,14 +906,17 @@ function maak(opt) {
       r.lagen = lagen; r.termen = termen;
       if (verbruik) r.verbruik = verbruik;
       // dekkingsregel: in de tekst van een antwoord, of achter de melding (die de zoektocht al beschrijft) — alleen als laag 1 of 2 meedeed,
-      // anders blijft alles zoals vóór wv1788
+      // anders blijft alles zoals vóór wv1788. wv1818: r.los = dezelfde uitslag met de geplakte regel apart (tekst, melding, dekking_regel),
+      // voor een app die hem zelf onder het antwoord zet (toon_dekking), zodat "Kopieer alles" alleen het antwoord neemt
       const metLagen = !!(lagen.feitenlijst || lagen.tekstindex);
       r.dekking_regel = dekkingRegel(lagen, true) || undefined;
       if (r.dekking_regel && vast) r.dekking_regel = r.dekking_regel.replace(/\.$/, '') + ' · op dit apparaat alleen Zakelijk.';
       if (metLagen && r.dekking_regel) {
         if (soort === 'antwoord') {
           const meer = r.laag === 'identifier' ? !!lagen.feitenlijst.afgekapt : r.laag === 'tekstindex' ? !lagen.tekstindex.volledig : !(lagen.zoektocht && lagen.zoektocht.volledig);
-          r.tekst = (r.tekst_kaal + ' (' + r.dekking_regel.replace(/\.$/, '') + (meer ? '; er kan meer staan' : '') + '.)').slice(0, 900);
+          const regel = r.dekking_regel.replace(/\.$/, '') + (meer ? '; er kan meer staan' : '');
+          r.tekst = (r.tekst_kaal + ' (' + regel + '.)').slice(0, 900);
+          r.los = { tekst: r.tekst_kaal, melding: r.melding, dekking_regel: regel + '.' };
         } else {
           // MOET 3 (diffreview): bleef er iets onbekeken (afgekapt, kandidaten zonder antwoord, een laag die niet kon), dan begint "geen"
           // nooit met "niet gevonden"
@@ -924,9 +927,10 @@ function maak(opt) {
           }
           const rest = dekkingRegel(lagen, !lagen.zoektocht);
           r.melding = (m + (rest ? ' ' + rest : '')).trim();
+          r.los = { tekst: r.tekst, melding: m.trim() || null, dekking_regel: rest || null };
         }
-      }
-      delete r.tekst_kaal;
+      } else if (soort === 'antwoord' && x && x.regel_los) r.los = { tekst: r.tekst_kaal, melding: r.melding, dekking_regel: x.regel_los };
+      delete r.tekst_kaal; delete r.regel_los;
       return r;
     };
     if (!vraag) return uit('geen', { reden: 'leeg', melding: MELDING.leeg });
@@ -994,8 +998,9 @@ function maak(opt) {
     // na de natoets: is niet alles bekeken (grens, of pagina's buiten de band van de beste treffers; review #5), dan zegt het antwoord dat er
     // meer kan staan (de app toont tekst; kopiëren neemt hem mee). Met lagen 1/2 doet uit() dat via de dekkingsregel.
     const metLagen = !!(lagen.feitenlijst || lagen.tekstindex);
-    const tekstUit = !metLagen && !dk.volledig ? (m.tekst + ' (' + dekkingZin(dk).replace(/\.$/, '') + '; er kan meer staan.)').slice(0, 600) : m.tekst;
-    return uit('antwoord', Object.assign(basis, { tekst: tekstUit, tekst_kaal: m.tekst, waarden: m.waarden, weggelaten: m.weggelaten, bronnen: m.bronnen, melding: null }));
+    const regelLos = !metLagen && !dk.volledig ? dekkingZin(dk).replace(/\.$/, '') + '; er kan meer staan.' : null;
+    const tekstUit = regelLos ? (m.tekst + ' (' + regelLos.replace(/\.$/, '') + '.)').slice(0, 600) : m.tekst;
+    return uit('antwoord', Object.assign(basis, { tekst: tekstUit, tekst_kaal: m.tekst, regel_los: regelLos, waarden: m.waarden, weggelaten: m.weggelaten, bronnen: m.bronnen, melding: null }));
   }
 
   return { zoek: zoek, groepen: groepen, context: context, grep: grep, laag1: laag1, indexZoek: indexZoek };

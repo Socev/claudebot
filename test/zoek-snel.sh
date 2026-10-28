@@ -208,6 +208,8 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     { label: 'Subaru', waarde: 'TD-RG-01' }, { label: 'Privé', waarde: 'GJL-11-J' }], bronnen: ['10_Zakelijk/Tolgaarde/Auto\'s.md', '20_Prive/Auto.md'] });
   r8 = await z.zoek('kentekens');
   toets('8 antwoord na een geraakte grens: zegt dat er meer kan staan, waarden blijven', r8.soort === 'antwoord' && r8.waarden.length === 4 && /\(Ik bekeek .*; er kan meer staan\.\)$/.test(r8.tekst), r8);
+  toets('8 wv1818 los: tekst zonder de dekkingszin, die staat apart in los.dekking_regel', r8.los && r8.tekst.indexOf(r8.los.tekst + ' (') === 0 &&
+    !/er kan meer staan/.test(r8.los.tekst) && /^Ik bekeek .*; er kan meer staan\.$/.test(r8.los.dekking_regel), r8.los);
   fs.rmSync(path.join(VAULT, '10_Zakelijk/Groenhouten/Reus.md'));
   fs.rmSync(path.join(VAULT, '10_Zakelijk/Tolgaarde/Parkeren.md'));
   r8 = await z.zoek('kentekens');
@@ -293,6 +295,8 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   toets('9a laag 1: chips in volgorde, eerder gemarkeerd; bron = de pagina met bijgewerkt', r9.waarden.length === 2 && r9.waarden[0].waarde === 'ZZ-999-Z' && /\(eerder\)$/.test(r9.waarden[1].label) &&
     r9.bronnen.length === 1 && r9.bronnen[0].pad === '10_Zakelijk/Tolgaarde/Auto - Proefmini.md' && r9.bronnen[0].updated === '2026-10-20', r9);
   toets('9a dekkingsregel in de tekst: "Feitenlijst: 2 feiten (van 300)"', r9.dekking_regel === 'Feitenlijst: 2 feiten (van 300).' && /\(Feitenlijst: 2 feiten \(van 300\)\.\)$/.test(r9.tekst), r9);
+  toets('9a wv1818 los: tekst zonder regel, regel apart, samen precies de oude tekst', r9.los && r9.los.dekking_regel === r9.dekking_regel &&
+    r9.los.tekst + ' (' + r9.los.dekking_regel.replace(/\.$/, '') + '.)' === r9.tekst && r9.los.tekst.indexOf('Feitenlijst') < 0, r9.los);
   let q9 = Z.queryRunVan(r9, { sha: 'a'.repeat(64), metVraag: true });
   toets('9a query_run: identifier, 2/2, antwoord, niet gemist, met vraag, termen en bron', q9.bron_laag === 'identifier' && q9.rows_matched === 2 && q9.rows_returned === 2 && q9.uitkomst === 'antwoord' &&
     q9.gemist === false && q9.truncated === false && q9.vraag === 'Kenteken van de proefmini?' && q9.termen.length >= 1 && q9.evidence_refs[0].pad === '10_Zakelijk/Tolgaarde/Auto - Proefmini.md' && q9.kanaal === 'zoek_snel', q9);
@@ -383,6 +387,8 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   r9 = await z9.zoek('Wat is het btw-nummer van Tolgaarde');
   toets('9f "geen" in alle lagen: melding + dekkingsregel van laag 1 en 2 (de zoektocht staat al in de melding)', r9.soort === 'geen' && /^Niet (gevonden in de|in wat ik bekeek)/.test(r9.melding) &&
     /Feitenlijst: geen feit \(van 300\) · tekstindex \(bijgewerkt [^)]*\): 1 van 1 pagina met een treffer bekeken\.$/.test(r9.melding) && /volledige zoektocht/.test(r9.dekking_regel), r9);
+  toets('9f wv1818 los: melding zonder regel, regel = wat anders achter de melding stond (zonder de zoektocht)', r9.los && r9.los.melding + ' ' + r9.los.dekking_regel === r9.melding &&
+    r9.los.melding.indexOf('Feitenlijst') < 0 && !/volledige zoektocht/.test(r9.los.dekking_regel), r9.los);
   const metZt = (v) => Object.assign({}, r9, { lagen: Object.assign({}, r9.lagen, { zoektocht: Object.assign({}, r9.lagen.zoektocht, { volledig: v, grens: !v }) }) });
   q9 = Z.queryRunVan(metZt(true), { sha: 'c'.repeat(64), metVraag: true });
   toets('9f query_run "geen" bij volledige zoektocht: uitkomst geen, niet afgekapt', q9.uitkomst === 'geen' && q9.truncated === false && q9.bron_laag === 'volledig', q9);
@@ -626,6 +632,22 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   toets('10 laag 1 via de RPC (service_role, p_max 20, p_vast, met time-out): antwoord zonder model', res.status === 200 && res.j.soort === 'antwoord' && res.j.laag === 'identifier' && modelN === 0 &&
     rpcF && rpcF.key === 'nep-rol' && rpcF.sig && rpcF.body.p_max === 20 && rpcF.body.p_vast === false && rpcF.body.p_vraag === 'Kenteken van de proefmini?', { j: res.j, rpcF });
   toets('10 antwoord heeft dekking_regel en laag', /^Feitenlijst: 1 feit \(van 300\)\.$/.test(res.j.dekking_regel) && /\(Feitenlijst: 1 feit/.test(res.j.tekst), res.j);
+  // wv1818: een app die de regel zelf apart toont (toon_dekking: true) krijgt de tekst zonder regel; het app-log houdt hem
+  res = await roep10({ tekst: 'Kenteken van de proefmini?', zoek_id: id('b1'), toon_dekking: true });
+  const lb1 = log10.find((x) => x.o.job_id === id('b1'));
+  toets('10 wv1818 toon_dekking: tekst zonder regel, dekking_regel apart, app-log houdt de regel', res.status === 200 && res.j.soort === 'antwoord' &&
+    res.j.dekking_regel === 'Feitenlijst: 1 feit (van 300).' && res.j.tekst.indexOf('Feitenlijst') < 0 && /ZZ-999-Z/.test(res.j.tekst) && lb1 && /\(Feitenlijst: 1 feit/.test(lb1.o.antwoord), { j: res.j, log: lb1 && lb1.o.antwoord });
+  res = await roep10({ tekst: 'Kenteken van de proefmini?', zoek_id: id('b2'), toon_dekking: 'true' });
+  toets('10 wv1818 toon_dekking alleen bij true (geen tekst "true"): oude vorm', /\(Feitenlijst: 1 feit/.test(res.j.tekst), res.j);
+  rpcVan = async (fn) => fn === 'sb_query_run_zet' ? 7 : { totaal: 0, getoond: 0, afgekapt: false, genegeerd: [], soorten: [], feiten_totaal: 300, rijen: [] };
+  modelVan = () => ({ ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } });
+  res = await roep10({ tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('b3'), toon_dekking: true });
+  const res0 = await roep10({ tekst: 'Wat is het btw-nummer van Tolgaarde', zoek_id: id('b4') });
+  toets('10 wv1818 toon_dekking bij "geen": melding zonder regel, regel apart; zonder toon_dekking ongewijzigd', res.j.soort === 'geen' && res.j.melding.indexOf('Feitenlijst') < 0 &&
+    /^Feitenlijst: geen feit/.test(res.j.dekking_regel) && res0.j.melding === res.j.melding + ' ' + res.j.dekking_regel && /volledige zoektocht/.test(res0.j.dekking_regel), { j: res.j, j0: res0.j });
+  modelVan = null;
+  rpcVan = async (fn) => fn === 'sb_query_run_zet' ? 7 : { totaal: 1, getoond: 1, afgekapt: false, genegeerd: [], soorten: ['kenteken'], rest_n: 1, feiten_totaal: 300,
+    rijen: [rij({ waarde: 'ZZ-999-Z' })] };
   toets('10 query_run na het antwoord: één rij, kanaal zoek_snel, sha van 64 hex, vraag erbij (marker zag niets)', rpcQ.length === 1 && rpcQ[0].body.p.kanaal === 'zoek_snel' &&
     /^[0-9a-f]{64}$/.test(rpcQ[0].body.p.vraag_sha) && rpcQ[0].body.p.vraag === 'Kenteken van de proefmini?' && rpcQ[0].body.p.bron_laag === 'identifier', rpcQ);
   const zs = fs.statSync(ZOUT), zm = fs.statSync(path.dirname(ZOUT));

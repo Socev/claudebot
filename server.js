@@ -17146,7 +17146,7 @@ function zoekSnelStaart() {
       (x.bron ? ' (bron ' + x.bron + ')' : '') + '. Dat staat ook in de geschiedenis van dit gesprek.]';
   }).join('');
 }
-async function zoekSnelVoer(a, id, vraag) {
+async function zoekSnelVoer(a, id, vraag, toonDekking) {
   const t0 = Date.now();
   let r;
   try { r = await zoekSnel.zoek(vraag, { vast: a.soort === 'vast' }); }
@@ -17163,10 +17163,13 @@ async function zoekSnelVoer(a, id, vraag) {
       lagen: zoekSnelLagenTelling(r.lagen) } });   // wv1289: alleen tellingen (pagina's/regels, grens), geen inhoud; wv1788: per laag idem
   zoekSnelRegelZet(r);
   zoekSnelQueryRun(r);   // wv1788: antwoordcontract, na het antwoord; nooit blokkerend
-  return { status: 200, j: { ok: true, job_id: id, soort: r.soort, tekst: r.tekst, waarden: r.waarden, weggelaten: r.weggelaten || 0, laag: r.laag || null,
-    dekking_regel: r.dekking_regel || null,
+  // wv1818: een app die de dekkingsregel zelf apart toont (toon_dekking) krijgt tekst en melding zonder die regel ("Kopieer alles" neemt hem dan
+  // niet mee); de oude app en het app-log hierboven houden hem in de tekst. dekking_regel is dan precies wat anders geplakt was (of null).
+  const los = toonDekking ? (r.los || { tekst: r.tekst, melding: r.melding, dekking_regel: null }) : null;
+  return { status: 200, j: { ok: true, job_id: id, soort: r.soort, tekst: los ? los.tekst : r.tekst, waarden: r.waarden, weggelaten: r.weggelaten || 0, laag: r.laag || null,
+    dekking_regel: (los ? los.dekking_regel : r.dekking_regel) || null,
     bronnen: (r.bronnen || []).map(function (b) { return { pad: b.pad, naam: b.naam, updated: b.updated || null }; }), gelezen_als: r.gelezen_als || [],
-    melding: r.melding || null, ms: ms, gelogd: gelogd } };
+    melding: (los ? los.melding : r.melding) || null, ms: ms, gelogd: gelogd } };
 }
 async function appZoekSnel(req, res, a, d) {
   if (!zoekSnel) return appWeiger(res, 404, 'Zoek snel zit niet in deze versie van de pod', 'zoek-snel ontbreekt');
@@ -17197,7 +17200,7 @@ async function appZoekSnel(req, res, a, d) {
   if (st.bezig[a.id] || st.ids[id]) return appWeiger(res, 429, 'er loopt al een zoekvraag; even geduld', 'zoek-snel bezig');   // tweede kwam tijdens de rolcheck
   if (!appTeller('zoek-snel', ZOEK_SNEL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max ' + ZOEK_SNEL_PER_UUR + ')', 'grens zoek-snel');
   st.bezig[a.id] = true;
-  const p = zoekSnelVoer(a, id, vraag).catch(function (e) { logError('zoek-snel', e); return { status: 500, j: { ok: false, fout: 'fout op de pod' } }; });
+  const p = zoekSnelVoer(a, id, vraag, d.toon_dekking === true).catch(function (e) { logError('zoek-snel', e); return { status: 500, j: { ok: false, fout: 'fout op de pod' } }; });
   st.ids[id] = { t: nu, apparaat: a.id, p: p };
   let r;
   try { r = await p; } finally { delete st.bezig[a.id]; }
