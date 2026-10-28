@@ -17,8 +17,8 @@ let klok = Date.parse('2026-11-02T09:00:00Z');
 function nieuweKamer(extra) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mailman-'));
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ postvakken: {
-    'gmail:david': { naam: 'Privé', factuur_alias: ALIAS, stand: 'schaduw' },
-    'gmail:groenhouten': { naam: 'Doktersmaten', factuur_alias: 'facturen@praktijk.invalid', stand: 'schaduw', jev: false, tekst: false },
+    'gmail:david': { naam: 'Privé', factuur_alias: ALIAS, stand: 'schaduw', jev: true, tekst: true },
+    'gmail:groenhouten': { naam: 'Doktersmaten', factuur_alias: 'facturen@praktijk.invalid', stand: 'schaduw', jev: true, tekst: true },   // review B1 #2: de code houdt dit toch uit
   }, todo_nooit: ['doctolib'] }), { mode: 0o600 });
   const fouten = [];
   const mm = MM.maak(Object.assign({ dir, nu: function () { return klok; }, fout: function (w, e) { fouten.push(w + ': ' + e.message); },
@@ -135,6 +135,62 @@ test('#1 doktersmaten: geen Jev, geen tekst, geen onderwerp in het logboek; fact
   assert.equal(rij(mm, g.id).stroom, 'twijfel');
   assert.equal(rij(mm, g.id).reden, 'jev_uit');
   assert.equal(rij(mm, g.id).onderwerp, null);
+  // review B1 #2/#6/#18: ook met jev/tekst aan in config.json geen Jev, geen tekst, geen afzender/aan, geen labels
+  assert.equal(rij(mm, g.id).afzender, null); assert.equal(rij(mm, g.id).aan, null); assert.equal(rij(mm, g.id).afzender_domein, 'voorbeeld.invalid');
+  assert.deepEqual(JSON.parse(rij(mm, f.id).labels_plan), []);
+  assert.equal(mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === 'gmail:groenhouten'; }).jev, false);
+});
+
+test('Standaard zonder config: geen Jev en geen tekst (review B1 #2)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mailman-'));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ postvakken: { 'gmail:proef': { naam: 'Proef' } } }));
+  const mm = MM.maak({ dir, nu: function () { return klok; }, marker: poort });
+  const p = mm.app('GET /app/mailman', {}).j.postvakken[0];
+  assert.equal(p.jev, false); assert.equal(p.tekst, false);
+});
+
+test('Labellijst ontbrak (ruwe Label_-id): geen besluit, geen Jev; de mail komt terug (review B1 #3)', () => {
+  const { mm } = nieuweKamer();
+  const m = mail({ labels: ['INBOX', 'Label_272'] });
+  const u = draai(mm, 'gmail:david', [m], { jev: function () { return jevAntwoord({}); } });
+  assert.equal(u.s1.j.jev.length, 0); assert.equal(u.s1.j.telling.labels_onbekend, 1);
+  assert.equal(rij(mm, m.id), undefined);
+});
+
+test('Geen draad-sneeuwbal: een twijfelmail trekt latere meldingen in de draad niet vóór Filter Weg (review B1 #5)', () => {
+  const { mm } = nieuweKamer();
+  mm.app('POST /app/mailman/regel', { actie: 'nieuw', postvak: 'gmail:david', stap: 'weg', naam: 'ci', voorwaarden: { van_adres: { op: 'is', w: 'noreply@ci.invalid' } } });
+  const eerste = mail();
+  draai(mm, 'gmail:david', [eerste], { jev: function () { return jevAntwoord({ mens: 0.1, waarde: 1.33 }); } });
+  assert.equal(rij(mm, eerste.id).stroom, 'twijfel');
+  const ci = mail({ threadId: eerste.threadId, van: 'CI <noreply@ci.invalid>' });
+  draai(mm, 'gmail:david', [ci], { jev: function () { return jevAntwoord({}); } });
+  assert.equal(rij(mm, ci.id).stap, 'weg'); assert.equal(rij(mm, ci.id).stroom, 'info');
+});
+
+test('Marker, zorgmail en verzonden mail: alleen het domein in het logboek (review B1 #6)', () => {
+  const { mm } = nieuweKamer();
+  const z = mail({ labels: ['ZORGMAIL'], onderwerp: 'Iets met een naam' }), v = mail({ labels: ['SENT'], aan: 'ontvanger@elders.invalid' });
+  draai(mm, 'gmail:david', [z, v], { jev: function () { return jevAntwoord({}); } });
+  for (const m of [z, v]) { const x = rij(mm, m.id); assert.equal(x.afzender, null); assert.equal(x.onderwerp, null); assert.equal(x.aan, null); assert.equal(x.van_naam, null); }
+});
+
+test('Harde grens op een schaalvraag geldt genormaliseerd (review B1 #7)', () => {
+  const v = MM.START_VRAGEN.map(function (x) { return Object.assign({ actief: true }, x); });
+  v.find(function (x) { return x.sleutel === 'waarde'; }).rol = 'hard_in';
+  v.find(function (x) { return x.sleutel === 'waarde'; }).grens = 0.9;
+  const kaal = { bijlagen: [] }, dr = { in: 0.55, uit: 0.3 };
+  assert.equal(K.besluitJev(v, { factuur: 0, systeem: 0, mens: 0, waarde: 2.0, actie: 0, aan_ai: 0, injectie: 0 }, kaal, dr).reden, 'score');
+  assert.equal(K.besluitJev(v, { factuur: 0, systeem: 0, mens: 0, waarde: 2.9, actie: 0, aan_ai: 0, injectie: 0 }, kaal, dr).reden, 'hard_waarde');
+});
+
+test('Gmail-varianten: punten in de alias en +label op een eigen adres (review B1 #15)', () => {
+  const { mm } = nieuweKamer({ eigenAdressen: function () { return ['ik.zelf@gmail.com']; } });
+  const a = mail({ aan: ALIAS.toUpperCase() }), e = mail({ van: 'Ik <ikzelf+iets@googlemail.com>' });
+  draai(mm, 'gmail:david', [a, e], { jev: function () { return jevAntwoord({}); } });
+  assert.equal(rij(mm, a.id).reden, 'factuur_alias');
+  assert.equal(rij(mm, e.id).reden, 'eigen adres');
+  assert.equal(K.besluitRegels(K.normaliseer(mail({ aan: 'i.emand+facturen@gmail.com' })), { factuur_alias: 'iemand+facturen@gmail.com', altijd: {} }).reden, 'factuur_alias');
 });
 
 test('#2 Altijd in op draad: gevolgde draad, Intake-draad en eerdere MailMan-draad → Intake zonder label', () => {
@@ -341,8 +397,13 @@ test('#14 labels per bericht: twee berichten in één draad kunnen verschillen',
 });
 
 test('#15 regex alleen na de statische vormtoets', () => {
-  for (const slecht of ['(a+)+$', '(a|aa)*', '([a-z]+)*x', '(x)\\1', '(?<n>a)\\k<n>', 'a'.repeat(201), '((ab)*)+', '(', '[']) assert.equal(K.veiligeRegex(slecht).ok, false, slecht);
-  for (const goed of ['^\\[[a-z/]+\\] run failed', 'factuur|nota', '(nieuwsbrief) oktober', '\\d{4}-\\d{2}', '(abc)?x']) assert.equal(K.veiligeRegex(goed).ok, true, goed);
+  for (const slecht of ['(a+)+$', '(a|aa)*', '([a-z]+)*x', '(x)\\1', '(?<n>a)\\k<n>', 'a'.repeat(201), '((ab)*)+', '(', '[',
+    '.*.*.*.*!$', '\\s*\\s*\\s*\\s*x', '(a+)?(a+)?(a+)?(a+)?(a+)?b', 'a?a?a?aaa', 'x{1,50}y{1,50}z{1,50}']) assert.equal(K.veiligeRegex(slecht).ok, false, slecht);
+  for (const goed of ['^\\[[a-z/]+\\] run failed', 'factuur|nota', '(nieuwsbrief) oktober', '\\d{4}-\\d{2}', '(abc)?x', 'https?://.*', '(?:re|fw): .+?factuur']) assert.equal(K.veiligeRegex(goed).ok, true, goed);
+  // het ergste dat nog mag (twee herhalingen) op de langste invoer blijft snel
+  const t0 = Date.now();
+  for (const pat of ['.*.*!$', '\\s*\\s*x', '(ab)?a+b', '.+.+$x']) { const v = { onderwerp: { op: 'regex', w: pat } }; assert.equal(K.veiligeRegex(pat).ok, true, pat); K.regelPast(v, K.normaliseer(mail({ onderwerp: 'a'.repeat(998) }))); K.regelPast(v, K.normaliseer(mail({ onderwerp: ' '.repeat(998) }))); }
+  assert.ok(Date.now() - t0 < 1000, 'regex te traag: ' + (Date.now() - t0) + ' ms');
   const { mm } = nieuweKamer();
   const r = mm.app('POST /app/mailman/regel', { actie: 'nieuw', postvak: 'gmail:david', stap: 'weg', naam: 'x', voorwaarden: { onderwerp: { op: 'regex', w: '(a+)+$' } } });
   assert.equal(r.status, 400); assert.ok(r.j.fout.includes('herhaal'));

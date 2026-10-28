@@ -15340,6 +15340,10 @@ function mailmanRoute(req, res) {
   if (!mailman) { req.resume(); return mailmanStuur(res, 404, { ok: false, fout: 'onbekend' }); }
   if (req.method !== 'POST') { req.resume(); return mailmanStuur(res, 404, { ok: false, fout: 'onbekend' }); }
   if (!rolPrimair()) { req.resume(); return mailmanStuur(res, 503, { ok: false, fout: 'niet de actieve kant' }); }
+  // Een Bearer-kop wordt getoetst vóór er één byte van de body gelezen is; zonder kop volgt het pod-geheim in de body (review B1 #11)
+  const kop = String(req.headers.authorization || '');
+  const bearer = kop ? mailman.sleutelOk(req, null) : false;
+  if (kop && !bearer) { req.resume(); return mailmanStuur(res, 401, { ok: false, fout: 'sleutel' }); }
   const delen = []; let n = 0, te = false;
   req.on('data', function (c) { if (te) return; n += c.length; if (n > MAILMAN_BODY_MAX) { te = true; return; } delen.push(c); });
   req.on('error', function () {});
@@ -15348,7 +15352,7 @@ function mailmanRoute(req, res) {
     let d = null;
     try { d = JSON.parse(Buffer.concat(delen).toString('utf8') || '{}'); } catch (e) { d = null; }
     if (!d || typeof d !== 'object') return mailmanStuur(res, 400, { ok: false, fout: 'geen json' });
-    if (!mailman.sleutelOk(req, d)) return mailmanStuur(res, 401, { ok: false, fout: 'sleutel' });
+    if (!bearer && !berichtGeheimOk(d)) return mailmanStuur(res, 401, { ok: false, fout: 'sleutel' });
     delete d.secret;
     let r;
     try { r = mailman.n8n('POST ' + reqPath(req), d); } catch (e) { logError('mailman', e); return mailmanStuur(res, 500, { ok: false, fout: 'intern' }); }
@@ -15367,6 +15371,15 @@ async function appMailman(req, res, a, s, d, route) {
 }
 function mailmanInfo() { if (!mailman) return { aan: false }; try { return Object.assign({ aan: true }, mailman.info()); } catch (e) { return { aan: true, fout: true }; } }
 let mailmanDag = '';
+// Dezelfde zorg komt niet elke dag terug in de box (grondwet 10): alleen bij een andere set postvakken met zorgen, of na 7 dagen
+function mailmanZorgNieuw(z) {
+  const f = path.join(MAILMAN_DIR, 'zorgen-gemeld'), sleutel = z.map(function (x) { return x.replace(/\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/g, '').replace(/\d+ rondes/g, 'n rondes'); }).sort().join('|');
+  let oud = {};
+  try { oud = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { oud = {}; }
+  if (oud.sleutel === sleutel && Date.now() - Number(oud.op || 0) < 7 * 86400000) return false;
+  try { fs.writeFileSync(f, JSON.stringify({ sleutel: sleutel, op: Date.now() }), { mode: 0o600 }); } catch (e) { logError('mailman-zorgen', e); }
+  return true;
+}
 function mailmanTik() {
   if (!mailman || !rolPrimair()) return;
   const t = ovisAms();
@@ -15375,7 +15388,7 @@ function mailmanTik() {
   try { mailman.opruim(); } catch (e) { logError('mailman-opruim', e); }
   let z = [];
   try { z = mailman.zorgen(); } catch (e) { logError('mailman-zorgen', e); }
-  if (!z.length) return;
+  if (!z.length || !mailmanZorgNieuw(z)) return;
   ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS MailMan: rondes lopen niet (schaduw)\n- status: open\n- van: pod:mailman — bevinding_id mailman-ronde-' + t.datum +
     '\n- wat ik zag: ' + z.join('; ') + '\n- voorstel: n8n "AI - MailMan" nalopen (actief? fouten in de schedule-run?) en /health mailman; rondes in mailman.sqlite (tabel ronde)\n');
 }

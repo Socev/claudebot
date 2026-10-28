@@ -16,10 +16,13 @@
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
  * tekens) → stap 0–3 + patiëntpoort, en de Jev-aanvragen · /mailman/stap2 (de Jev-antwoorden) → besluit · /mailman/gedaan.
  *
- * GRENZEN (O.10). Patiëntpoort-2.0 en ZORGMAIL/zorgdomeinen vóór Jev: zo'n mail gaat nooit naar Jev en zijn onderwerp komt niet in het
- * logboek. Doktersmaten: alleen metadata, geen Jev. Mailtekst komt nooit in het logboek of op schijf. Afzender, aan en onderwerp blijven
- * 14 dagen, daarna alleen het domein. Regex van David: alleen na de statische vormtoets (veiligeRegex), want een tijdslimiet kan niet
- * binnen deze CI-poort.
+ * GRENZEN (O.10). Patiëntpoort-2.0 en ZORGMAIL/zorgdomeinen vóór Jev: zo'n mail gaat nooit naar Jev en van zo'n mail staat alleen het
+ * domein in het logboek. Doktersmaten (GEDEELD): vast in de code geen tekst, geen Jev, geen labels en alleen het domein, ook als
+ * config.json iets anders zegt. Mailtekst komt nooit in het logboek of op schijf. Afzender, aan en onderwerp van gewone privémail blijven
+ * 14 dagen, daarna alleen het domein (secure_delete). Een mail met onopgeloste label-id's krijgt geen besluit (labellijst ontbrak).
+ * Regex van David: alleen na de statische vormtoets (veiligeRegex), want een tijdslimiet kan niet binnen deze CI-poort.
+ * REVIEW (Opus, schone subagent, 28-10, GO-MET-WIJZIGINGEN): MOET 1–3, ZOU 5–7 en OPM 9–15, 17–18 verwerkt; MOET 4 (datakaart) buiten de
+ * code; zie bouwplan § Log (wv1856).
  * VORM. Alleen fs, path, crypto en node:sqlite (CI-poort, zie test/mailman.sh). Patiëntpoort, Intake-draden en eigen adressen komen van
  * server.js via maak({...}). De zuivere kern (K) is los te toetsen en herhaalbaar over het logboek.
  */
@@ -31,6 +34,9 @@ const VERSIE = 'mailman-1.0';
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live: B5
+// Gedeelde postvakken (doktersmaten, gedeeld met de praktijk): in fase 1 nooit Jev, nooit tekst, geen labels, alleen het domein in het
+// logboek — vast in de code, niet via config.json (review B1 #2, O.10). Pas in B7, na Davids eigen besluit.
+const GEDEELD = new Set(['gmail:groenhouten']);
 // De enige labels die MailMan ooit mag zetten of weghalen (O.10). In deze bouwstap alleen gepland, nooit gezet.
 const LABELS = ['V', 'TODO', 'CONCEPT', 'FACTUUR', 'INFO', 'AI/MailMan'];
 const BUITEN_LABELS = ['SENT', 'DRAFT', 'CHAT', 'SPAM', 'TRASH'];
@@ -39,6 +45,8 @@ const MARKERINGS_LABELS = ['_AI_', 'AI/SecondBrain/Unprocessed'];
 const ZORG_LABEL = 'ZORGMAIL';
 const ZORG_DOMEINEN = ['zorgmail.nl', 'zorgdomein.nl', 'vecozo.nl', 'ksyos.nl', 'lsp.nl', 'medmij.nl', 'zorgmail.net'];
 const TEKST_MAX = 4000;
+// Davids vaste uitzonderingen (O.7, review #11): Doctolib-groepsoproepjes, opvang en vervoer van de kinderen, kerkelijke schoolvieringen
+const TODO_NOOIT = ['doctolib', 'opvang', 'vervoer', 'kerkdienst', 'viering'];
 const NIEUW_MAX = 120;                 // id's per postvak per ronde; de rest de volgende ronde (venster blijft dan open)
 const MAILS_MAX = 150;
 const JEV_WACHT_MS = 24 * 3600 * 1000;
@@ -69,6 +77,17 @@ function naamVan(s) {
   const i = t.indexOf('<');
   return (i > 0 ? t.slice(0, i) : '').replace(/^[\s"']+|[\s"']+$/g, '').slice(0, 200);
 }
+// Gmail negeert punten in het lokale deel (en googlemail = gmail); zonderPlus haalt ook het +label weg (eigen adressen, niet de alias)
+function gmailKern(a, zonderPlus) {
+  a = String(a || '').toLowerCase().trim();
+  const i = a.lastIndexOf('@');
+  if (i < 1) return a;
+  let u = a.slice(0, i), d = a.slice(i + 1);
+  if (d === 'googlemail.com') d = 'gmail.com';
+  if (zonderPlus) u = u.split('+')[0];
+  if (d === 'gmail.com') u = u.replace(/\./g, '');
+  return u + '@' + d;
+}
 function domeinVan(adres) { const i = String(adres || '').lastIndexOf('@'); return i > 0 ? String(adres).slice(i + 1).toLowerCase() : ''; }
 function adressenVan(s) {
   const uit = [];
@@ -79,9 +98,11 @@ function adressenVan(s) {
 }
 
 /*
- * Statische vormtoets voor een regex van David (O.4): lengte ≤ 200, compileerbaar, geen terugverwijzingen, en geen herhaalde groep
- * waarin zelf een herhaling of een keuze (|) staat — de vormen die catastrofaal terugzoeken geven ((a+)+, (a|a)*). Alleen 'i'.
- * → { ok, re | reden }. Dit is de enige plek waar een RegExp uit invoer gemaakt wordt (CI-poort).
+ * Statische vormtoets voor een regex van David (O.4): lengte ≤ 200, compileerbaar, geen terugverwijzingen, geen herhaalde groep waarin
+ * zelf een herhaling of een keuze (|) staat ((a+)+, (a|a)*), en hooguit REGEX_HERHALINGEN variabele herhalingen (?, *, +, {n,m}) in het
+ * hele patroon (review B1 #1: .*.*.*.*x en (a+)?(a+)?…b liepen minuten). Met twee herhalingen en invoer ≤ REGEX_INVOER tekens blijft het
+ * terugzoeken hooguit kwadratisch-tot-kubisch in milliseconden. Alleen 'i'. → { ok, re | reden }.
+ * Dit is de enige plek waar een RegExp uit invoer gemaakt wordt (CI-poort).
  */
 function veiligeRegex(bron) {
   const s = String(bron == null ? '' : bron);
@@ -89,12 +110,20 @@ function veiligeRegex(bron) {
   if (s.length > 200) return { ok: false, reden: 'langer dan 200 tekens' };
   if (/\\[1-9]|\\k</.test(s)) return { ok: false, reden: 'terugverwijzing' };
   const stapel = [];
-  let inKlasse = false;
+  let inKlasse = false, herh = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (c === '\\') { i++; continue; }
     if (inKlasse) { if (c === ']') inKlasse = false; continue; }
     if (c === '[') { inKlasse = true; continue; }
+    if (c === '(' && s[i + 1] === '?') {   // (?: (?= (?! (?<= (?<! (?<naam>: de ? is hier geen herhaling
+      stapel.push({ zwaar: false }); i += 2; continue;
+    }
+    if (c === '*' || c === '+' || c === '?' || (c === '{' && /^\{\d+,\d*\}/.test(s.slice(i)) && !/^\{(\d+),\1\}/.test(s.slice(i)))) {
+      const vorige = s[i - 1];
+      if (c === '?' && (vorige === '*' || vorige === '+' || vorige === '?' || vorige === '}')) continue;   // lui-teken, geen nieuwe herhaling
+      if (++herh > REGEX_HERHALINGEN) return { ok: false, reden: 'te veel herhalingen (hooguit ' + REGEX_HERHALINGEN + ' van ?, *, + of {n,m})' };
+    }
     if (c === '(') { stapel.push({ zwaar: false }); continue; }
     if (c === ')') {
       const g = stapel.pop();
@@ -135,6 +164,7 @@ function toetsVoorwaarden(v) {
 }
 
 const REGEX_CACHE = new Map();
+const REGEX_HERHALINGEN = 2, REGEX_INVOER = 300;
 function vergelijk(waarde, c) {
   const a = String(waarde || '').toLowerCase(), w = String(c.w || '').toLowerCase();
   if (c.op === 'is') return a === w;
@@ -142,7 +172,7 @@ function vergelijk(waarde, c) {
   if (c.op === 'regex') {
     let r = REGEX_CACHE.get(c.w);
     if (!r) { r = veiligeRegex(c.w); if (REGEX_CACHE.size > 500) REGEX_CACHE.clear(); REGEX_CACHE.set(c.w, r); }
-    return r.ok ? r.re.test(String(waarde || '').slice(0, 1000)) : false;
+    return r.ok ? r.re.test(String(waarde || '').slice(0, REGEX_INVOER)) : false;
   }
   return false;
 }
@@ -204,8 +234,10 @@ function besluitRegels(m, instel) {
   const alt = instel.altijd || {};
   if (m.labels.some(function (l) { return BUITEN_LABELS.includes(l); })) return { stap: 'buiten', stroom: null, reden: 'verzonden/concept/spam' };
   const gemarkeerd = m.labels.some(function (l) { return MARKERINGS_LABELS.includes(l); });
-  if ((instel.eigen || []).includes(m.van_adres) && !gemarkeerd) return { stap: 'buiten', stroom: null, reden: 'eigen adres' };
-  if (alt.factuur_alias !== false && instel.factuur_alias && m.aan.includes(String(instel.factuur_alias).toLowerCase())) return { stap: 'altijd', stroom: 'factuur', reden: 'factuur_alias' };
+  const eigen = (instel.eigen || []).map(function (a) { return gmailKern(a, true); });
+  if (eigen.includes(gmailKern(m.van_adres, true)) && !gemarkeerd) return { stap: 'buiten', stroom: null, reden: 'eigen adres' };
+  const alias = instel.factuur_alias ? gmailKern(instel.factuur_alias, false) : '';
+  if (alt.factuur_alias !== false && alias && m.aan.some(function (a) { return gmailKern(a, false) === alias; })) return { stap: 'altijd', stroom: 'factuur', reden: 'factuur_alias' };
   if (alt.ai_label !== false && gemarkeerd) return { stap: 'altijd', stroom: 'intake', reden: 'markering' };
   if (alt.draad !== false && instel.draadBekend) return { stap: 'altijd', stroom: 'intake', reden: 'draad' };
   const regels = (instel.regels || []).filter(function (r) { return r.actief; }).sort(function (a, b) { return a.volgorde - b.volgorde || a.id - b.id; });
@@ -257,20 +289,21 @@ function leesJev(antwoord, vragen) {
 function genormd(v, x) { return v.soort === 'score' ? (v.criteria.length > 1 ? x / (v.criteria.length - 1) : 0) : x; }
 
 /*
- * Jev-stap (O.5). vragen met rol/grens/gewicht/extra; ruw = de antwoorden; drempels {in, uit}.
+ * Jev-stap (O.5). vragen met rol/grens/gewicht/extra; ruw = de antwoorden; drempels {in, uit}. De grens van een harde vraag geldt op de
+ * genormaliseerde waarde (0–1, ook voor een schaal; review B1 #7); 'tenzij' (max) op de ruwe schaal van die vraag (waarde ≤ 1 van 0–3).
  * Volgorde: hard in (factuur vóór alles, met de bijlage-eis) → hard uit (met 'tenzij') → gewogen score.
  * → { stroom, score, reden }
  */
 function besluitJev(vragen, ruw, m, drempels) {
   const actief = vragen.filter(function (v) { return v.actief && Object.prototype.hasOwnProperty.call(ruw, v.sleutel); });
   for (const v of actief) {
-    if (v.rol !== 'hard_in' || ruw[v.sleutel] < v.grens) continue;
+    if (v.rol !== 'hard_in' || genormd(v, ruw[v.sleutel]) < v.grens) continue;
     const stroom = STROMEN.includes(v.extra && v.extra.stroom) ? v.extra.stroom : 'intake';
     if (v.extra && v.extra.bijlage === 'pdf_xml' && !m.bijlagen.some(isPdfOfXml)) return { stroom: 'twijfel', score: null, reden: v.sleutel + '_zonder_bijlage' };
     return { stroom, score: null, reden: 'hard_' + v.sleutel };
   }
   for (const v of actief) {
-    if (v.rol !== 'hard_uit' || ruw[v.sleutel] < v.grens) continue;
+    if (v.rol !== 'hard_uit' || genormd(v, ruw[v.sleutel]) < v.grens) continue;
     const t = v.extra && v.extra.tenzij;
     if (isObj(t) && Object.prototype.hasOwnProperty.call(ruw, t.sleutel) && ruw[t.sleutel] > Number(t.max)) continue;
     return { stroom: 'info', score: null, reden: 'hard_uit_' + v.sleutel };
@@ -294,6 +327,7 @@ function botsing(stap, ruw) {
 }
 // Geplande labels (O.6/O.7). Alleen plan; in deze bouwstap zet niemand ze.
 function labelPlan(stroom, ruw, m, instel) {
+  if (instel.gedeeld) return [];
   const s = instel.stromen || {};
   const uit = [];
   const naar = stroom === 'twijfel' ? (instel.twijfel_naar || 'intake') : stroom;
@@ -381,7 +415,7 @@ function maak(o) {
   const { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync(path.join(dir, 'mailman.sqlite'));
   try { fs.chmodSync(path.join(dir, 'mailman.sqlite'), 0o600); } catch (e) { /* bestaat */ }
-  db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
+  db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;');   // gewiste namen niet in vrije pagina's (review B1 #12)
   db.exec(SCHEMA);
   function tx(f) {
     db.exec('BEGIN IMMEDIATE');
@@ -402,7 +436,7 @@ function maak(o) {
         const p = pv[id];
         const stand = STANDEN_KIESBAAR.includes(p.stand) ? p.stand : 'schaduw';
         db.prepare(`INSERT INTO postvak (id, naam, stand, jev, tekst, drempel_in, drempel_uit, twijfel_naar, altijd, bijgewerkt) VALUES (?, ?, ?, ?, ?, 0.55, 0.30, 'intake', ?, ?)`)
-          .run(id, tekst(p.naam, 40) || id, stand, p.jev === false ? 0 : 1, p.tekst === false ? 0 : 1,
+          .run(id, tekst(p.naam, 40) || id, stand, p.jev === true && !GEDEELD.has(id) ? 1 : 0, p.tekst === true && !GEDEELD.has(id) ? 1 : 0,
             JSON.stringify({ factuur_alias: true, ai_label: true, draad: true }), iso());
       }
       if (!db.prepare("SELECT 1 FROM jev_vraag WHERE postvak = '*'").get()) {
@@ -419,7 +453,8 @@ function maak(o) {
     const p = db.prepare('SELECT * FROM postvak WHERE id = ?').get(String(id));
     if (!p) return null;
     let alt = {}; try { alt = JSON.parse(p.altijd); } catch (e) { alt = {}; }
-    return Object.assign({}, p, { jev: !!p.jev, tekst: !!p.tekst, altijd: alt });
+    const g = GEDEELD.has(p.id);
+    return Object.assign({}, p, { jev: !!p.jev && !g, tekst: !!p.tekst && !g, gedeeld: g, altijd: alt });
   }
   function postvakken() { return db.prepare('SELECT id FROM postvak ORDER BY id').all().map(function (r) { return postvak(r.id); }); }
   function regels(pv, metWeg) {
@@ -440,7 +475,7 @@ function maak(o) {
     let eigen = [];
     try { eigen = (o.eigenAdressen ? o.eigenAdressen() : []).map(function (a) { return String(a).toLowerCase(); }); } catch (e) { eigen = []; }
     return { factuur_alias: typeof pc.factuur_alias === 'string' ? pc.factuur_alias.toLowerCase() : '', eigen, altijd: p.altijd, regels: regels(p.id),
-      stromen: stromen(), twijfel_naar: p.twijfel_naar, todo_nooit: Array.isArray(c.todo_nooit) ? c.todo_nooit.map(String).slice(0, 50) : ['doctolib'] };
+      stromen: stromen(), twijfel_naar: p.twijfel_naar, todo_nooit: Array.isArray(c.todo_nooit) ? c.todo_nooit.map(String).slice(0, 50) : TODO_NOOIT, gedeeld: p.gedeeld };
   }
 
   // ── n8n-kant ──
@@ -479,7 +514,7 @@ function maak(o) {
   function nieuw(d) {
     const r = rondeVan(d);
     if (!r) return { status: 409, j: { ok: false, fout: 'ronde onbekend of verlopen' } };
-    const ids = (Array.isArray(d.ids) ? d.ids : []).map(String).filter(function (x) { return ID_RE.test(x); });
+    const ids = Array.from(new Set((Array.isArray(d.ids) ? d.ids : []).map(String).filter(function (x) { return ID_RE.test(x); })));
     const t = iso();
     sluitOudeWachters(r.postvak);
     const st = db.prepare('SELECT status FROM besluit WHERE postvak = ? AND gmail_id = ?');
@@ -491,8 +526,16 @@ function maak(o) {
   }
   function sluitOudeWachters(pv) {
     const grens = new Date(nu() - JEV_WACHT_MS).toISOString();
-    db.prepare(`UPDATE besluit SET status = 'klaar', besloten = ?, stroom = COALESCE(stroom, 'twijfel'), reden = CASE WHEN stroom IS NULL THEN 'jev_geen_antwoord' ELSE reden END
-      WHERE postvak = ? AND status = 'wacht_jev' AND aangemaakt < ?`).run(iso(), pv, grens);
+    const rijen = db.prepare("SELECT * FROM besluit WHERE postvak = ? AND status = 'wacht_jev' AND aangemaakt < ?").all(pv, grens);
+    if (!rijen.length) return;
+    const instel = instelVan(postvak(pv));
+    tx(function () {
+      for (const b of rijen) {
+        const stroom = b.stroom || 'twijfel';
+        db.prepare("UPDATE besluit SET status = 'klaar', besloten = ?, stroom = ?, reden = ?, labels_plan = ? WHERE id = ?")
+          .run(iso(), stroom, b.stroom ? b.reden : 'jev_geen_antwoord', JSON.stringify(labelPlan(stroom, null, mailUitRij(b), instel)), b.id);
+      }
+    });
   }
   /*
    * Stap 0–3 + patiëntpoort. Per mail één besluitrij (stroom null zolang Jev beslist). Jev-aanvragen alleen voor een postvak met jev aan,
@@ -511,12 +554,20 @@ function maak(o) {
     const draden = Array.from(new Set(ms.filter(Boolean).map(function (m) { return m.draad; })));
     let intakeD = new Set();
     try { intakeD = o.intakeDraden ? o.intakeDraden(p.id, draden) : new Set(); } catch (e) { fout('mailman-intake-draden', e); }
-    const eigenDraad = db.prepare("SELECT 1 FROM besluit WHERE postvak = ? AND thread_id = ? AND status = 'klaar' AND (stroom IN ('intake', 'factuur') OR (stroom = 'twijfel' AND ? = 'intake')) LIMIT 1");
+    // eigen eerdere besluiten tellen alleen als ze zelf zeker waren (geen twijfel, niet zelf al via de draad): anders trekt één twijfelmail
+    // elke latere melding in die draad vóór Filter Weg mee (review B1 #5)
+    const eigenDraad = db.prepare("SELECT 1 FROM besluit WHERE postvak = ? AND thread_id = ? AND status = 'klaar' AND stroom IN ('intake', 'factuur') AND COALESCE(reden, '') != 'draad' LIMIT 1");
     const bestaand = db.prepare('SELECT * FROM besluit WHERE postvak = ? AND gmail_id = ?');
-    const jev = [], tel = { mails: 0, ongeldig: 0, buiten: 0, altijd: 0, weg: 0, in: 0, jev: 0, marker: 0, zorg: 0 };
+    const jev = [], tel = { mails: 0, ongeldig: 0, labels_onbekend: 0, dubbel: 0, buiten: 0, altijd: 0, weg: 0, in: 0, jev: 0, marker: 0, zorg: 0 };
+    const gezien = new Set();
     tx(function () {
       ms.forEach(function (m, i) {
         if (!m) { tel.ongeldig++; return; }
+        if (gezien.has(m.id)) { tel.dubbel++; return; }
+        gezien.add(m.id);
+        // Gebruikerslabels als ruwe id (Label_123): de labellijst van n8n ontbrak, dus ZORGMAIL en _AI_ zijn niet te zien. Geen besluit; de
+        // mail komt de volgende ronde terug (review B1 #3).
+        if (m.labels.some(function (l) { return /^Label_\d+$/.test(l); })) { tel.labels_onbekend++; return; }
         tel.mails++;
         const oud = bestaand.get(p.id, m.id);
         if (oud && oud.status === 'klaar') return;
@@ -525,7 +576,7 @@ function maak(o) {
         try { pt = o.marker.beoordeel({ teksten: platte ? [platte] : [], bijlagenamen: m.bijlagen.map(function (b) { return b.naam; }), onderwerp: m.onderwerp, afzender: m.van_adres }); }
         catch (e) { pt = { tegenhouden: true, soorten: ['poort_fout'] }; fout('mailman-poort', e); }
         const zorg = zorgmail(m);
-        const instel = Object.assign({}, instel0, { draadBekend: gevolgd.has(m.draad) || intakeD.has(m.draad) || !!eigenDraad.get(p.id, m.draad, p.twijfel_naar) });
+        const instel = Object.assign({}, instel0, { draadBekend: gevolgd.has(m.draad) || intakeD.has(m.draad) || !!eigenDraad.get(p.id, m.draad) });
         const b = besluitRegels(m, instel);
         tel[b.stap === 'jev' ? 'jev' : b.stap]++;
         if (pt.tegenhouden) tel.marker++;
@@ -537,8 +588,11 @@ function maak(o) {
         else if (b.stap === 'jev' && !magJev) { stroom = 'twijfel'; reden = pt.tegenhouden ? 'marker' : (zorg ? 'zorgmail' : 'jev_uit'); }
         if (magJev) status = 'wacht_jev';
         const plan = status === 'klaar' && stroom ? labelPlan(stroom, null, m, instel) : null;
-        const rij = [p.id, m.id, m.draad, m.ontvangen, m.van_adres, m.van_naam || null, m.van_domein, JSON.stringify(m.aan.slice(0, 20)),
-          pt.tegenhouden || !p.tekst ? null : m.onderwerp, m.tab, m.afmeld ? 1 : 0, JSON.stringify(m.bijlagen.map(bijlageSoort)),
+        // Afzender, naam, ontvangers en onderwerp alleen bij een gewone binnengekomen mail in een eigen postvak; bij een marker, zorgmail, het
+        // gedeelde postvak of verzonden mail alleen het domein (review B1 #6, grondwet 3)
+        const namen = !pt.tegenhouden && !zorg && !p.gedeeld && b.stap !== 'buiten';
+        const rij = [p.id, m.id, m.draad, m.ontvangen, namen ? m.van_adres : null, namen ? (m.van_naam || null) : null, m.van_domein, namen ? JSON.stringify(m.aan.slice(0, 20)) : null,
+          namen ? m.onderwerp : null, m.tab, m.afmeld ? 1 : 0, JSON.stringify(m.bijlagen.map(bijlageSoort)),
           JSON.stringify(m.labels.slice(0, 40)), b.stap === 'jev' && magJev ? 'jev' : b.stap, reden, b.regel_id || null, b.regel_versie || null, stroom,
           pt.tegenhouden ? 1 : 0, pt.tegenhouden ? pt.soorten.join(',') : (zorg ? 'zorgmail' : null), plan ? JSON.stringify(plan) : null, p.stand, status, VERSIE, iso(), status === 'klaar' ? iso() : null];
         if (oud) {
@@ -759,7 +813,10 @@ function maak(o) {
         db.prepare('UPDATE regel SET weg = 1, actief = 0, bijgewerkt = ? WHERE id = ?').run(iso(), oud.id);
         wijzig('regel_weg', oud.id, oud, null, door);
       } else if (actie === 'op' || actie === 'neer') {
-        const buur = db.prepare('SELECT * FROM regel WHERE stap = ? AND weg = 0 AND volgorde ' + (actie === 'op' ? '< ? ORDER BY volgorde DESC' : '> ? ORDER BY volgorde') + ' LIMIT 1').get(oud.stap, oud.volgorde);
+        // buur binnen wat David in deze lijst ziet: hetzelfde postvak of 'beide' (een regel voor beide ruilt met elke buur)
+        const pvw = oud.postvak === '*' ? '' : ' AND postvak IN (?, \'*\')';
+        const arg = oud.postvak === '*' ? [oud.stap, oud.volgorde] : [oud.stap, oud.postvak, oud.volgorde];
+        const buur = db.prepare('SELECT * FROM regel WHERE stap = ? AND weg = 0' + pvw + ' AND volgorde ' + (actie === 'op' ? '< ? ORDER BY volgorde DESC' : '> ? ORDER BY volgorde') + ' LIMIT 1').get(...arg);
         if (buur) {
           db.prepare('UPDATE regel SET volgorde = ? WHERE id = ?').run(buur.volgorde, oud.id);
           db.prepare('UPDATE regel SET volgorde = ? WHERE id = ?').run(oud.volgorde, buur.id);
