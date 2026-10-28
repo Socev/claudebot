@@ -97,6 +97,8 @@ const POD = [
     model: 'geen', hartslag: ['socev-run-veeg'], uitkomst: 'opgeruimde runs', bron: 'sb2-nacht.js → socev-run --veeg' },
   { id: 'ovis-kalender', naam: 'OVIS Calendar (externe kalenders)', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke dag 06:35–07:34',
     model: 'geen', hartslag: ['ovis-kalender'], uitkomst: 'kalenderfeeds in de databank', bron: 'sb2-nacht.js → kalender_feed.py' },
+  { id: 'ovis-agenda', naam: 'OVIS Calendar (spiegel Google-agenda\'s)', soort: 'routine', trigger: 'pod-tijdklok', rooster: 'elke dag 03:30–03:59',
+    model: 'geen', hartslag: ['ovis-agenda'], uitkomst: 'agenda\'s alleen-lezen in de tijdlijn', bron: 'sb2-nacht.js → kalender_spiegel.py' },
   { id: 'offsite', naam: 'Offsite-back-ups (podstaat, health-pod, Supabase)', soort: 'routine', trigger: 'pod', rooster: 'elke nacht, eerste wekkertik na middernacht / 02:40 / 03:00',
     model: 'geen', hartslag: ['podstaat_offsite', 'healthpod_offsite', 'supabase_offsite'], uitkomst: 'versleuteld op Drive', uitzetbaar: false, bron: 'bin/vault-offsite.sh' },
   { id: 'vault-r2', naam: 'Vault naar R2', soort: 'routine', trigger: 'pod', rooster: 'elke nacht',

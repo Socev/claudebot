@@ -239,6 +239,10 @@ echo '{"ok": true}'; exit 0
     /if \(!ovisKalender \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s) && /venster: \{ van: \[6, 35\], tot: \[7, 35\] \}/.test(s)
     && /naam: 'ovis-kalender', hartslag: 'ovis-kalender'/.test(s) && /ovis_kalender: typeof ovisKalenderInfo === 'function'/.test(s)
     && /setInterval\(function \(\) \{ ovisKalenderTik\(\); \}, 5 \* 60000\)/.test(s));
+  toets('server.js: Google-spiegel-klok alleen echt + primair, 03:30–04:00, via socev-run met hartslag, /health ovis_agenda',
+    /if \(!ovisAgenda \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s) && /venster: \{ van: \[3, 30\], tot: \[4, 0\] \}/.test(s)
+    && /naam: 'ovis-agenda', hartslag: 'ovis-agenda'/.test(s) && /ovis_agenda: typeof ovisAgendaInfo === 'function'/.test(s)
+    && /kalender_spiegel\.py'\] \}/.test(s) && /setInterval\(function \(\) \{ ovisAgendaTik\(\); \}, 5 \* 60000\)/.test(s));
   toets('server.js: tik alleen echt + primair, onderhoud en OVIS-nacht doorgegeven', /if \(!sb2Nacht \|\| !SERVER_ECHT \|\| !rolPrimair\(\)\) return;/.test(s)
     && /onderhoud: function \(\) \{ return !!onderhoud\.stand\(\)\.aan; \}, ovisNacht: ovisLoopt\.nu === 'nacht'/.test(s)
     && /vault: VAULT, grendel: OVIS_LOCK/.test(s));

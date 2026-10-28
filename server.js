@@ -3745,6 +3745,7 @@ function handleRequest(req, res) {
       sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
       scripts_veeg: typeof scriptsVeegInfo === 'function' ? scriptsVeegInfo() : { aan: false },   // wv1311: opruimronde socev-run --veeg (exit, aantal opgeveegd; geen namen)
       ovis_kalender: typeof ovisKalenderInfo === 'function' ? ovisKalenderInfo() : { aan: false },   // wv1385: OVIS Calendar-feeds (datum, exit, duur; geen namen of URL's)
+      ovis_agenda: typeof ovisAgendaInfo === 'function' ? ovisAgendaInfo() : { aan: false },   // wv1411: OVIS Calendar Google-spiegel (datum, exit, duur; geen titels)
       ovis: typeof ovisInfo === 'function' ? ovisInfo() : { aan: false },   // wv979: OVIS-register (laatste dag-, nacht- en Bibliothecarisronde; aantallen, geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
@@ -15377,6 +15378,28 @@ async function ovisKalenderTik() {
   } catch (e) { logError('ovis-kalender-tik', e); }
 }
 if (ovisKalender && SERVER_ECHT) { setInterval(function () { ovisKalenderTik(); }, 5 * 60000).unref(); }
+// ── OVIS Calendar: alleen-lezen spiegel van Davids Google-agenda's (wv1411; waarom en grenzen in kalender_spiegel.py) ──
+// Elke 5 min (echte pod, rol primair); werk alleen 03:30–03:59 (vóór de agenda-wachter van 04:00) en eenmaal per datum; via socev-run
+// met hartslag ovis-agenda (36 u). Het script roept alleen actie 'agenda' van de lees-route aan (n8n AI - Agenda-Wachter API).
+const ovisAgenda = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'ovis-agenda', hartslag: 'ovis-agenda', maxMin: 5,
+      venster: { van: [3, 30], tot: [4, 0] }, socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env,
+      argv: ['python3', '-I', '/opt/data/scripts/huidig/packages/sb2/src/socev_sb2/kalender_spiegel.py'] }) : null;
+  } catch (e) { logError('ovis-agenda', e); return null; }
+})();
+function ovisAgendaInfo() { if (!ovisAgenda) return { aan: false }; try { return ovisAgenda.info(); } catch (e) { return { fout: true }; } }
+async function ovisAgendaTik() {
+  if (!ovisAgenda || !SERVER_ECHT || !rolPrimair()) return;
+  try {
+    const u = await ovisAgenda.tik({ ams: ovisAms() });
+    if (u) schrijfLog(nu() + ' ovis-agenda ' + velden({ exit: u.exit, ms: u.ms }));
+  } catch (e) { logError('ovis-agenda-tik', e); }
+}
+if (ovisAgenda && SERVER_ECHT) { setInterval(function () { ovisAgendaTik(); }, 5 * 60000).unref(); }
 // managers.js soort script: Nu draaien (geen stempel, geen box-rij; het rapport gaat via managers.js naar de machinekamer)
 function ovisStartScript(m) {
   if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');
