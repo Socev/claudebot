@@ -10,9 +10,10 @@
 const fs = require('fs');
 const path = require('path');
 
-const MAX_BYTES = 4 * 1024 * 1024;   // samenvatting ± 27 kB, een klussendag ± 100 kB: dit is ruim, maar geen geheugenbom
+const SAM_MAX = 2 * 1024 * 1024, KLUS_MAX = 1024 * 1024;   // gemeten 28-10: samenvatting 27 kB, grootste klussendag ± 100 kB
+const REGELS_MAX = 2000;   // klussen per dagbestand die we lezen (gemeten maximum 231; Opus-review #2)
 const BUF_MS = 60 * 1000;
-const DAG_MAX = 300;   // klussen per dag in het antwoord (gemeten 28-10: hooguit 172)
+const DAG_MAX = 300, SOORTEN_MAX = 50, DAGEN_MAX = 120, MAPNAMEN_MAX = 5000;   // klussen per dag in het antwoord (gemeten 28-10: hooguit 172)
 const DATUM = /^\d{4}-\d{2}-\d{2}$/;
 const KLUS_BESTAND = /^(\d{4}-\d{2}-\d{2})-pod\.jsonl$/;
 
@@ -47,9 +48,14 @@ function rond(n, d) { if (n == null) return null; const f = Math.pow(10, d == nu
 function tekst(v, max) { return v == null ? null : String(v).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max || 80); }
 function wvVan(v) { const s = String(v || ''); return /^wv\d{1,6}$/.test(s) ? s : null; }
 function soortVan(v) { const s = String(v || ''); return /^[\p{L}\p{N} ().-]{1,40}$/u.test(s) ? s : 'onbekend'; }
-function signalenVan(l) { return (Array.isArray(l) ? l : []).filter(function (s) { return SIGNAAL_UITLEG[s]; }); }
+const heeft = function (o, k) { return typeof k === 'string' && Object.prototype.hasOwnProperty.call(o, k); };
+function signalenVan(l) { return (Array.isArray(l) ? l : []).filter(function (s) { return heeft(SIGNAAL_UITLEG, s); }).slice(0, 4); }
+function soortNaam(soort) { return heeft(SOORT_NAAM, soort) ? SOORT_NAAM[soort] : soort; }
+// Vrije tekst uit het bestand alleen in een smalle vorm (Opus-review #5: geen eigen zinnen van een vervangen bestand in de app)
+function onderdeelVan(v) { const s = String(v == null ? '' : v); return /^[\p{L}\p{N} ()._:-]{1,60}$/u.test(s) ? s : null; }
+function modelVan(v) { const s = String(v == null ? '' : v); return /^[a-z0-9.-]{1,40}$/i.test(s) ? s : null; }
 // Kluslabel: alleen het deel na "machinekamer:" (dat is wat de bouwer koos); het woord zelf is ruis in de lijst
-function labelVan(v) { const s = tekst(v, 120); return s ? s.replace(/^machinekamer:\s*/, '').trim() || null : null; }
+function labelVan(v) { const s = typeof v === 'string' ? tekst(v, 120) : null; return s ? s.replace(/^machinekamer:\s*/, '').trim() || null : null; }
 
 function maak(opt) {
   const vault = opt.vault, VV = opt.vv;
@@ -57,12 +63,12 @@ function maak(opt) {
   const klussenMap = path.join(map, 'klussen');
   if (!VV || typeof VV.lees !== 'function') throw new Error('tokenteller: vault-veilig ontbreekt');
   // Leest een json(l)-bestand uit de Tokens-map via vault-veilig; null als het er niet is. Te groot = fout (geen inlezen).
-  function leesBestand(p) {
+  // De grens telt op de geopende descriptor in vault-veilig (Opus-review #1); de lstat hier is alleen "er niet" of "geen bestand".
+  function leesBestand(p, max) {
     let st;
     try { st = fs.lstatSync(p); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
     if (!st.isFile()) throw new Error('geen gewoon bestand');
-    if (st.size > MAX_BYTES) throw new Error('bestand te groot');
-    return VV.lees(p, 'utf8');
+    return VV.lees(p, 'utf8', { max: max });
   }
   let buf = null;   // { t, mtime, j }
   function samenvatting() {
@@ -70,19 +76,27 @@ function maak(opt) {
     let m = null;
     try { m = fs.lstatSync(p).mtimeMs; } catch (e) { m = null; }
     if (buf && buf.mtime === m && Date.now() - buf.t < BUF_MS) return buf.j;
-    const t = leesBestand(p);
+    const t = leesBestand(p, SAM_MAX);
     const j = t == null ? null : JSON.parse(t);
     buf = { t: Date.now(), mtime: m, j: j };
     return j;
   }
+  let dagenBuf = null;   // { t, l }: de map lezen hooguit eens per minuut, en hooguit MAPNAMEN_MAX namen (Opus-review #6)
   function dagenMetKlussen() {
-    let namen;
+    if (dagenBuf && Date.now() - dagenBuf.t < BUF_MS) return dagenBuf.l;
+    const namen = [];
+    let d = null;
     try {
       const st = fs.lstatSync(klussenMap);
-      if (!st.isDirectory()) return [];
-      namen = fs.readdirSync(klussenMap);
-    } catch (e) { return []; }
-    return namen.map(function (n) { const m = KLUS_BESTAND.exec(n); return m ? m[1] : null; }).filter(Boolean).sort().reverse().slice(0, 120);
+      if (st.isDirectory()) {
+        d = fs.opendirSync(klussenMap);
+        for (let e = d.readSync(); e && namen.length < MAPNAMEN_MAX; e = d.readSync()) namen.push(e.name);
+      }
+    } catch (e) { /* geen map: geen dagen */ }
+    finally { if (d) { try { d.closeSync(); } catch (e) { /* al dicht */ } } }
+    const l = namen.map(function (n) { const m = KLUS_BESTAND.exec(n); return m ? m[1] : null; }).filter(Boolean).sort().reverse().slice(0, DAGEN_MAX);
+    dagenBuf = { t: Date.now(), l: l };
+    return l;
   }
   const koers = function (s) { const k = getal(s && s.dollars_per_euro); return k && k > 0.5 && k < 3 ? k : null; };
 
@@ -93,14 +107,14 @@ function maak(opt) {
     const gesprek = /^gesprek-/.test(soort);
     return {
       datum: DATUM.test(String(k.datum || '')) ? String(k.datum) : null,
-      soort: soort, soort_naam: SOORT_NAAM[soort] || soort, groep: groepVan(soort),
-      onderdeel: vast && gesprek ? null : tekst(k.onderdeel, 60),
+      soort: soort, soort_naam: soortNaam(soort), groep: groepVan(soort),
+      onderdeel: vast && gesprek ? null : onderdeelVan(k.onderdeel),
       wv: wvVan(k.wv), label: vast || gesprek ? null : labelVan(k.klus_label),
-      model: tekst(k.model, 40), account: k.account === 1 || k.account === 2 ? k.account : null,
+      model: modelVan(k.model), account: k.account === 1 || k.account === 2 ? k.account : null,
       begin: typeof k.begin === 'string' && !isNaN(Date.parse(k.begin)) ? new Date(k.begin).toISOString() : null,
       duur_min: getal(k.duur_min), calls: getal(k.calls), startcontext: getal(k.startcontext), eindcontext: getal(k.eindcontext),
       tokens: getal(k.tokens) != null ? getal(k.tokens) : getal(k.totaal_invoer) != null ? getal(k.totaal_invoer) + (getal(k.uitvoer) || 0) : null,
-      usd: rond(usd, 2), eur: rond(eur, 2), afgebroken: k.afgebroken === true, signalen: signalenVan(k.signalen),
+      usd: rond(usd, 2), eur: rond(eur, 2), eur_ruw: eur, afgebroken: k.afgebroken === true, signalen: signalenVan(k.signalen),
     };
   }
 
@@ -114,26 +128,28 @@ function maak(opt) {
     const dpe = koers(s);
     const tot = s.totaal || {};
     const totEur = getal(tot.eur);
-    const soorten = (Array.isArray(s.per_soort) ? s.per_soort : []).map(function (r) {
-      const soort = soortVan(r.soort), eur = getal(r.eur);
-      return { soort: soort, naam: SOORT_NAAM[soort] || tekst(r.naam, 60) || soort, groep: groepVan(soort), eur: rond(eur, 2), usd: rond(getal(r.usd), 2),
+    const soorten = (Array.isArray(s.per_soort) ? s.per_soort : []).slice(0, SOORTEN_MAX).map(function (r) {
+      const soort = soortVan(r && r.soort), eur = getal(r && r.eur);
+      return { soort: soort, naam: soortNaam(soort), groep: groepVan(soort), eur: rond(eur, 2), usd: rond(getal(r.usd), 2),
         tokens: getal(r.tokens), calls: getal(r.calls), aandeel: totEur && eur != null ? rond(eur / totEur, 4) : null };
     }).sort(function (a, b) { return (b.eur || 0) - (a.eur || 0); });
     // Agents van Socev zijn niet te meten (map van de socev-gebruiker niet leesbaar): altijd tonen als "niet gemeten", nooit als 0
     if (!soorten.some(function (r) { return r.soort === 'socev-agent'; }))
       soorten.push({ soort: 'socev-agent', naam: SOORT_NAAM['socev-agent'], groep: 'overig', eur: null, usd: null, tokens: null, calls: null, aandeel: null, niet_gemeten: true });
-    const perDag = (Array.isArray(s.per_dag_soort) ? s.per_dag_soort : []).filter(function (r) { return r && DATUM.test(String(r.datum)); }).map(function (r) {
+    const perDag = (Array.isArray(s.per_dag_soort) ? s.per_dag_soort : []).slice(0, DAGEN_MAX).filter(function (r) { return r && DATUM.test(String(r.datum)); }).map(function (r) {
       const delen = {};
       GROEPEN.forEach(function (g) { delen[g.id] = 0; });
-      Object.keys(r.soorten || {}).forEach(function (k) { const v = getal(r.soorten[k]); if (v != null) delen[groepVan(k)] += v; });
+      const rs = r.soorten && typeof r.soorten === 'object' ? r.soorten : {};
+      Object.keys(rs).slice(0, SOORTEN_MAX).forEach(function (k) { const v = getal(rs[k]); if (v != null) delen[groepVan(k)] += v; });
       let som = 0;
       Object.keys(delen).forEach(function (k) { delen[k] = rond(delen[k], 2); som += delen[k]; });
       return { datum: String(r.datum), eur: rond(som, 2), delen: delen };
     }).sort(function (a, b) { return a.datum < b.datum ? -1 : 1; });
-    const duurste = (Array.isArray(s.duurste_klussen) ? s.duurste_klussen : []).slice(0, 10).map(function (k) { return klusUit(k, vast, dpe); });
+    const duurste = (Array.isArray(s.duurste_klussen) ? s.duurste_klussen : []).slice(0, 10).filter(function (k) { return k && typeof k === 'object'; })
+      .map(function (k) { const x = klusUit(k, vast, dpe); delete x.eur_ruw; return x; });
     const sig = s.signalen || {};
     const signalen = SIGNAAL_VOLGORDE.map(function (n) {
-      const r = sig[n] || {};
+      const r = heeft(sig, n) && sig[n] ? sig[n] : {};
       return { naam: n, uitleg: SIGNAAL_UITLEG[n], klussen: getal(r.klussen) || 0, eur: rond(getal(r.eur) || 0, 2),
         aandeel: totEur && getal(r.eur) != null ? rond(getal(r.eur) / totEur, 4) : null };
     });
@@ -159,25 +175,32 @@ function maak(opt) {
     let dpe = null;
     try { dpe = koers(samenvatting()); } catch (e) { dpe = null; }
     let t;
-    try { t = leesBestand(path.join(klussenMap, datum + '-pod.jsonl')); }
+    try { t = leesBestand(path.join(klussenMap, datum + '-pod.jsonl'), KLUS_MAX); }
     catch (e) { return { ok: true, datum: datum, fout: 'De klussen van deze dag zijn nu niet te lezen.', klussen: [], soorten: [], aantal: 0 }; }
     if (t == null) return { ok: true, datum: datum, leeg: true, klussen: [], soorten: [], aantal: 0 };
     const alle = [];
-    let kapot = 0;
+    let kapot = 0, regels = 0, teVeel = 0;
     String(t).split('\n').forEach(function (r) {
       if (!r.trim()) return;
-      try { const j = JSON.parse(r); if (j && typeof j === 'object') alle.push(klusUit(j, vast, dpe)); else kapot++; } catch (e) { kapot++; }
+      if (++regels > REGELS_MAX) { teVeel++; return; }
+      try { const j = JSON.parse(r); if (j && typeof j === 'object' && !Array.isArray(j)) alle.push(klusUit(j, vast, dpe)); else kapot++; } catch (e) { kapot++; }
     });
-    alle.sort(function (a, b) { return (b.usd || 0) - (a.usd || 0); });
-    const per = {};
+    // duurste eerst op dezelfde maat als de optelling (euro; zonder koers de dollar), ongerond opgeteld (Opus-review #8)
+    const maat = function (k) { return k.eur_ruw != null ? k.eur_ruw : (k.usd || 0); };
+    alle.sort(function (a, b) { return maat(b) - maat(a); });
+    const per = Object.create(null);   // Opus-review #3: een soort als "constructor" raakt het prototype niet
+    let eurSom = 0, eurOnbekend = false;
     alle.forEach(function (k) {
       const p = per[k.soort] || (per[k.soort] = { soort: k.soort, naam: k.soort_naam, groep: k.groep, klussen: 0, eur: 0, usd: 0 });
-      p.klussen++; p.eur += k.eur || 0; p.usd += k.usd || 0;
+      p.klussen++; p.usd += k.usd || 0;
+      if (k.eur_ruw == null) { if (k.usd) eurOnbekend = true; } else { p.eur += k.eur_ruw; eurSom += k.eur_ruw; }
     });
-    const soorten = Object.keys(per).map(function (k) { const p = per[k]; p.eur = rond(p.eur, 2); p.usd = rond(p.usd, 2); return p; })
-      .sort(function (a, b) { return b.eur - a.eur; });
-    return { ok: true, datum: datum, vaste_plek: vast, aantal: alle.length, kapot: kapot,
-      eur: rond(alle.reduce(function (n, k) { return n + (k.eur || 0); }, 0), 2),
+    // zonder koers geen euro's verzinnen (Opus-review #7): eur null, de dollar staat er wel
+    const soorten = Object.keys(per).map(function (k) { const p = per[k]; p.eur = eurOnbekend ? null : rond(p.eur, 2); p.usd = rond(p.usd, 2); return p; })
+      .sort(function (a, b) { return eurOnbekend ? b.usd - a.usd : b.eur - a.eur; });
+    alle.forEach(function (k) { delete k.eur_ruw; });
+    return { ok: true, datum: datum, vaste_plek: vast, aantal: alle.length + teVeel, kapot: kapot, te_veel_regels: teVeel,
+      eur: eurOnbekend ? null : rond(eurSom, 2),
       soorten: soorten, klussen: alle.slice(0, DAG_MAX), afgekapt: alle.length > DAG_MAX ? alle.length - DAG_MAX : 0, bron: 'tokenboekhouding' };
   }
   return { stand: stand, dag: dag };

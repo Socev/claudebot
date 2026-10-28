@@ -15654,13 +15654,19 @@ const TOKENTELLER_MOD = (function () { const p = path.join(__dirname, 'tokentell
 const tokenteller = (function () { try { return TOKENTELLER_MOD ? TOKENTELLER_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, vv: VV() }) : null; } catch (e) { logError('tokenteller', e); return null; } })();
 const TOKENTELLER_TANK_MS = 60000;
 let tokentellerTankBuf = null;   // { t, tank } of null
-async function tokentellerTank() {
-  if (tokentellerTankBuf && Date.now() - tokentellerTankBuf.t < TOKENTELLER_TANK_MS) return tokentellerTankBuf.tank;
-  let tank = null;
-  try { tank = TOKENTELLER_MOD.tankUit(await appSbRpc('mk_app_verbruik', {})); }
-  catch (e) { logError('app-tokens', e); tokentellerTankBuf = { t: Date.now() - TOKENTELLER_TANK_MS + 15000, tank: null }; return null; }   // fout: 15 s niet opnieuw
-  tokentellerTankBuf = { t: Date.now(), tank: tank };
-  return tank;
+let tokentellerTankBezig = null;   // de lopende lezing: gelijktijdige verzoeken delen hem (Opus-review wv1742 #9)
+function tokentellerTank() {
+  if (tokentellerTankBuf && Date.now() - tokentellerTankBuf.t < TOKENTELLER_TANK_MS) return Promise.resolve(tokentellerTankBuf.tank);
+  if (tokentellerTankBezig) return tokentellerTankBezig;
+  tokentellerTankBezig = (async function () {
+    try {
+      const tank = TOKENTELLER_MOD.tankUit(await appSbRpc('mk_app_verbruik', {}));
+      tokentellerTankBuf = { t: Date.now(), tank: tank };
+      return tank;
+    } catch (e) { logError('app-tokens', e); tokentellerTankBuf = { t: Date.now() - TOKENTELLER_TANK_MS + 15000, tank: null }; return null; }   // fout: 15 s niet opnieuw
+    finally { tokentellerTankBezig = null; }
+  })();
+  return tokentellerTankBezig;
 }
 async function appTokens(req, res, a, route) {
   if (!tokenteller) return appWeiger(res, 404, 'De TokenCounter zit niet in deze versie van de pod', 'tokenteller ontbreekt');

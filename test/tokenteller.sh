@@ -124,6 +124,34 @@ const tk = T.tankUit({ laatste: { gemeten_op: '2030-01-02T10:00:00Z', vijf_uur: 
 toets('9a tankUit: getallen, tijd, geen vreemde velden', tk.account1.vijf_uur === 0.25 && tk.account1.gemeten_op === '2030-01-02T10:00:00.000Z' && tk.account2 === null && JSON.stringify(tk).indexOf('geheim') < 0, tk);
 toets('9b tankUit(null) = null', T.tankUit(null) === null);
 
+// 11 grenzen en vreemde invoer (Opus-review wv1742)
+const R = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tokens-r-')));
+const RM = path.join(R, '00_Systeem', 'Tokens'); fs.mkdirSync(path.join(RM, 'klussen'), { recursive: true });
+fs.writeFileSync(path.join(RM, 'klussen', '2030-03-01-pod.jsonl'), [
+  JSON.stringify({ soort: 'constructor', usd: 1 }), JSON.stringify({ soort: 'routine', usd: 2, signalen: [['duur > 120 min'], 'toString', 'duur > 120 min'], onderdeel: 'Bel nu 0612345678!! klik hier', model: '<b>x</b>' }),
+  '[1,2]', 'null'].join('\n'));
+const tr = T.maak({ vault: R, vv: VV });
+const dr = tr.dag('2030-03-01', {});
+toets('11a soort "constructor" raakt het prototype niet en telt mee', dr.soorten.some(function (x) { return x.soort === 'constructor' && x.klussen === 1; }) && typeof Object.klussen === 'undefined', dr.soorten);
+toets('11b geneste of prototype-signalen weg', JSON.stringify(dr.klussen.find(function (k) { return k.soort === 'routine'; }).signalen) === '["duur > 120 min"]', dr.klussen);
+toets('11c vrije tekst in onderdeel en model weg', dr.klussen.every(function (k) { return k.onderdeel === null && k.model === null; }), dr.klussen);
+toets('11d array en null tellen als kapot', dr.kapot === 2, dr);
+toets('11e zonder koers geen euro verzonnen (null, wel dollars)', dr.eur === null && dr.klussen[0].eur === null && dr.klussen[0].usd === 2 && dr.soorten[0].eur === null, dr);
+fs.writeFileSync(path.join(RM, 'klussen', '2030-03-02-pod.jsonl'), Array.from({ length: 2100 }, function (_, i) { return JSON.stringify({ soort: 'routine', usd: 0.01 }); }).join('\n'));
+const dv = tr.dag('2030-03-02', {});
+toets('11f hooguit 2000 regels gelezen, rest geteld', dv.te_veel_regels === 100 && dv.klussen.length === 300 && dv.aantal === 2100, { a: dv.aantal, t: dv.te_veel_regels, k: dv.klussen.length });
+fs.writeFileSync(path.join(RM, 'klussen', '2030-03-03-pod.jsonl'), Buffer.alloc(1024 * 1024 + 1, 32));
+toets('11g klussendag boven 1 MB niet ingelezen', !!tr.dag('2030-03-03', {}).fout);
+let vvFout = null; try { VV.lees(path.join(RM, 'klussen', '2030-03-03-pod.jsonl'), 'utf8', { max: 10 }); } catch (e) { vvFout = e.code; }
+toets('11h vault-veilig: max op de descriptor geeft ETOOBIG', vvFout === 'ETOOBIG', vvFout);
+toets('11i vault-veilig: zonder max leest hij gewoon', VV.lees(path.join(RM, 'klussen', '2030-03-01-pod.jsonl')).length > 10);
+fs.writeFileSync(path.join(RM, 'samenvatting.json'), JSON.stringify({ per_soort: [{ soort: 'toString', naam: 'Vrije tekst die niet mag', eur: 1 }], per_dag_soort: [{ datum: '2030-03-01', soorten: { constructor: 2, routine: 1 } }], signalen: { toString: 1 } }));
+const sr = T.maak({ vault: R, vv: VV }).stand({});
+toets('11j onbekende soort: geen vrije naam uit het bestand', sr.soorten[0].naam === 'toString' && JSON.stringify(sr).indexOf('Vrije tekst') < 0, sr.soorten[0]);
+toets('11k dag met soort "constructor" telt in overig', sr.per_dag[0].delen.overig === 2 && sr.per_dag[0].eur === 3, sr.per_dag[0]);
+toets('11l signalen zonder eigen sleutel = 0', sr.signalen.every(function (x) { return x.klussen === 0; }), sr.signalen);
+fs.rmSync(R, { recursive: true, force: true });
+
 // 10 koppeling in server.js
 const src = fs.readFileSync('server.js', 'utf8');
 toets('10a dispatch GET /app/tokens en /dag/', /route === 'GET \/app\/tokens' \|\| \/\^GET \\\/app\\\/tokens\\\/dag\\\/\\d\{4\}-\\d\{2\}-\\d\{2\}\$\/\.test\(route\)\) return typeof appTokens === 'function'/.test(src));
@@ -133,6 +161,7 @@ toets('10c teller tokens', /appTeller\('tokens', 600, 3600000\)/.test(b));
 toets('10d stil bij 200', /res\._app\.stil = true;\s*return appStuur\(res, 200, uit\)/.test(b));
 toets('10e vaste plek doorgegeven', /a\.soort === 'vast'/.test(b) && /stand\(\{ vast: vast/.test(b) && /dag\(m\[1\], \{ vast: vast \}\)/.test(b));
 toets('10f vault-veilig doorgegeven', /vv: VV\(\)/.test(b));
+toets('10l tank: één lopende lezing gedeeld', /if \(tokentellerTankBezig\) return tokentellerTankBezig;/.test(b));
 toets('10g /health.tokenteller', /tokenteller: typeof tokenteller !== 'undefined' && !!tokenteller/.test(src));
 toets('10h tokenteller.js in RELEASE_OPTIONEEL', /^RELEASE_OPTIONEEL="[^"]*\btokenteller\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
 toets('10i GET /app/tokens is geen invoerroute', !/app\/tokens/.test(src.slice(src.indexOf('function appInvoerRoute'), src.indexOf('function appInvoerRoute') + 1500)));

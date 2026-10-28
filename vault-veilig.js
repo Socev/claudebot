@@ -67,10 +67,13 @@ function statGewoon(p) {
   try { const st = fs.lstatSync(p); return st.isFile() ? st : null; } catch (e) { return null; }
 }
 
-function leesIn(m, enc) {
+function leesIn(m, enc, max) {
   const fd = fs.openSync(m.binnen(m.naam), C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
   try {
-    if (!fs.fstatSync(fd).isFile()) throw fout('geen gewoon bestand: ' + m.naam, 'ENOTREG');
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw fout('geen gewoon bestand: ' + m.naam, 'ENOTREG');
+    // wv1742 (Opus-review #1): grens op de geopende descriptor, niet op een eerdere lstat (die kan socev ertussen omwisselen)
+    if (max != null && st.size > max) throw fout('bestand te groot: ' + m.naam, 'ETOOBIG');
     return fs.readFileSync(fd, enc);
   } finally { fs.closeSync(fd); }
 }
@@ -108,8 +111,9 @@ function schrijfIn(m, inhoud, o) {
   return true;
 }
 
-function lees(pad, codering) {
-  return metMap(pad, function (m) { return leesIn(m, codering === undefined ? 'utf8' : codering); });
+// o.max (bytes): groter bestand = fout ETOOBIG, zonder in te lezen
+function lees(pad, codering, o) {
+  return metMap(pad, function (m) { return leesIn(m, codering === undefined ? 'utf8' : codering, o && o.max != null ? o.max : null); });
 }
 
 // Schrijf inhoud naar pad via een eigen tijdelijk bestand + rename. o.modus overschrijft de modus; o.alsGelijk(st) mag vlak
