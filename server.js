@@ -3749,6 +3749,7 @@ function handleRequest(req, res) {
       ovis_deadlines: typeof ovisDeadlinesInfo === 'function' ? ovisDeadlinesInfo() : { aan: false },   // wv1412: deadline-register → tijdlijn + momentopname (datum, exit, duur)
       ovis: typeof ovisInfo === 'function' ? ovisInfo() : { aan: false },   // wv979: OVIS-register (laatste dag-, nacht- en Bibliothecarisronde; aantallen, geen inhoud)
       managers: typeof managersInfo === 'function' ? managersInfo() : { aan: false },   // wv895: App Managers (managers.js in deze release? welke loopt; geen inhoud)
+      tokenteller: typeof tokenteller !== 'undefined' && !!tokenteller,   // wv1742: tokenteller.js in deze release (GET /app/tokens)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
       werkers: typeof werkersInfo === 'function' ? werkersInfo() : { aan: false },   // wv1707 (OVIS M4a): Ploeg-register (aantal werkers, laatste n8n-lezing, check-aantallen; geen namen)
       mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },   // wv1269: App Mediatheek (aantallen, geen inhoud)
@@ -11953,6 +11954,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/facturen' || route.indexOf(' /app/facturen/') > 0) return typeof appFacturen === 'function' ? appFacturen(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'facturen');   // wv833: App Facturen
         if (route === 'GET /app/vast' || route === 'POST /app/vast') return appVastRoute(req, res, a, d);   // wv1051 (OVIS M1b): vastzetten
         if (route === 'GET /app/mediatheek' || /^GET \/app\/mediatheek\/bestand\/[a-f0-9]{16}$/.test(route)) return typeof appMediatheek === 'function' ? appMediatheek(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mediatheek');   // wv1269: App Mediatheek (alleen lezen)
+        if (route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/brain/entiteiten' || route.indexOf('GET /app/brain/entiteit/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
@@ -15641,6 +15643,43 @@ async function appRingkaart(req, res, a) {
   return appStuur(res, 200, uit);
 }
 // ── einde ringkaart ──
+
+// ── TokenCounter (wv1742, 28-10-2026; vervolg wv1247; David 24-10: "per onderdeel weergeeft waar verbruik in gaat zitten") ──
+// GET /app/tokens: samenvatting van de tokenboekhouding (per soort, per dag in vaste groepen, top 10 duurste klussen, gewoontesignalen)
+// met de tank van beide abonnementen (RPC mk_app_verbruik, zelfde bron als Verbruik & modellen, eigen 60 s buffer).
+// GET /app/tokens/dag/<jjjj-mm-dd>: de klussen van één dag. Alleen lezen; de vaultbestanden via vault-veilig (tokenteller.js), nooit
+// titels of sessie-id's; op een vaste plek ook geen kluslabels. Stil in het auditlog bij 200. Ontbreekt tokenteller.js in de release
+// (terugrol), dan 404 en meldt de app dat hij er over een paar minuten staat.
+const TOKENTELLER_MOD = (function () { const p = path.join(__dirname, 'tokenteller.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('tokenteller', e); return null; } })();
+const tokenteller = (function () { try { return TOKENTELLER_MOD ? TOKENTELLER_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, vv: VV() }) : null; } catch (e) { logError('tokenteller', e); return null; } })();
+const TOKENTELLER_TANK_MS = 60000;
+let tokentellerTankBuf = null;   // { t, tank } of null
+async function tokentellerTank() {
+  if (tokentellerTankBuf && Date.now() - tokentellerTankBuf.t < TOKENTELLER_TANK_MS) return tokentellerTankBuf.tank;
+  let tank = null;
+  try { tank = TOKENTELLER_MOD.tankUit(await appSbRpc('mk_app_verbruik', {})); }
+  catch (e) { logError('app-tokens', e); tokentellerTankBuf = { t: Date.now() - TOKENTELLER_TANK_MS + 15000, tank: null }; return null; }   // fout: 15 s niet opnieuw
+  tokentellerTankBuf = { t: Date.now(), tank: tank };
+  return tank;
+}
+async function appTokens(req, res, a, route) {
+  if (!tokenteller) return appWeiger(res, 404, 'De TokenCounter zit niet in deze versie van de pod', 'tokenteller ontbreekt');
+  appStaat.tellers.tokens = appStaat.tellers.tokens || [];
+  if (!appTeller('tokens', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens tokens');
+  const vast = !!(a && a.soort === 'vast');
+  let uit;
+  try {
+    if (route === 'GET /app/tokens') uit = tokenteller.stand({ vast: vast, tank: await tokentellerTank() });
+    else {
+      const m = /^GET \/app\/tokens\/dag\/(\d{4}-\d{2}-\d{2})$/.exec(route);
+      uit = m ? tokenteller.dag(m[1], { vast: vast }) : null;
+      if (!uit) return appWeiger(res, 404, 'onbekend', 'tokens route');
+    }
+  } catch (e) { logError('app-tokens', e); return appWeiger(res, 500, 'fout op de pod', 'tokens uitzondering'); }
+  res._app.stil = true;
+  return appStuur(res, 200, uit);
+}
+// ── einde tokenteller ──
 
 // ── Ploeg-register (wv1707, OVIS M4a; ontwerplijnen § 6) ──
 // GET /app/werkers: alle agents, wachters, managers en routines uit werkers.js, met het live rooster en aan/uit uit n8n (de actieve
