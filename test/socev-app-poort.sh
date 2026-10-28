@@ -1499,7 +1499,8 @@ async function bewijs(o) {
       toets('9a draden: geen prompt, bron, notitie, geblokkeerd_door of label in de uitvoer', !JSON.stringify(D).includes(KAN) && !/machinekamer:|"label"|"prompt"|"bron"|"notitie"/.test(JSON.stringify(D)), JSON.stringify(D).slice(0, 300));
       const DV = H.appDradenUit(inv({ a: { soort: 'vast' } }));
       const pv = DV.in_de_wacht.find((x) => x.wv === 499);
-      toets('9a draden: op een vaste plek een privé-kaart niet als tabje (niet te openen), geen titel, geen punt', !DV.wacht_op_jou.some((x) => x.wv === 499) && !!pv && pv.reden === 'prive' && pv.punt === null && pv.onderwerp === 'Een privé-punt' && !JSON.stringify(DV).includes('Privé'), JSON.stringify(pv));
+      // wv1901 (David 28-10-2026: "op ALLE pc's toegang tot ALLES"): een vaste plek ziet hetzelfde als meereizend
+      toets('9a wv1901: op een vaste plek dezelfde draden als meereizend (privé-kaart als tabje, met titel en punt)', JSON.stringify(DV) === JSON.stringify(D) && DV.wacht_op_jou.some((x) => x.wv === 499 && x.punt != null) && !pv, JSON.stringify(DV.wacht_op_jou.find((x) => x.wv === 499) || pv));
       // wv1853 (David 28-10: "allemaal niet aan te klikken"): alleen een open kaart of open vraag is "wacht op jou"
       toets('wv1853 draden: elk "wacht op jou" heeft een open kaart (punt) of een open vraag', D.wacht_op_jou.length >= 3 && D.wacht_op_jou.every((x) => x.punt != null || x.vraag != null), JSON.stringify(D.wacht_op_jou.map((x) => [x.wv, x.punt, x.vraag])));
       toets('wv1853 draden: kaart op later → in de wacht tot die dag, niet oranje', per[521] === 'in_de_wacht' && dr(521).reden === 'later' && dr(521).zin === 'op later gezet tot ' + Number(later5.slice(8, 10)) + '-' + Number(later5.slice(5, 7)) && dr(521).punt === null, JSON.stringify(dr(521)));
@@ -1608,13 +1609,13 @@ async function bewijs(o) {
         const w85 = { id: 85, status: 'geblokkeerd', geblokkeerd_door: 'David: app-toets' };
         const prv = [{ id: 902, prive: true, status: 'open', titel: 'Privé-kaart', herkomst: { wv: ['85'] } }, { id: 903, prive: true, status: 'open', titel: 'Tweede privé', herkomst: { wv: [85] } }];
         const pv = H.appBroedWacht(w85, prv, { soort: 'vast' }, vandaagB), pr = H.appBroedWacht(w85, prv, { soort: 'reist' }, vandaagB);
-        toets('9b wv891: privé-kaart op een vaste plek: één regel, stand prive, geen titel en geen punt (Fable #2)', pv.length === 1 && pv[0].stand === 'prive' && pv[0].titel === null && pv[0].punt === null, JSON.stringify(pv));
+        toets('9b wv1901: privé-kaarten op een vaste plek: hetzelfde als meereizend (titels en punten)', JSON.stringify(pv) === JSON.stringify(pr) && pv.length === 2 && pv[0].titel === 'Tweede privé', JSON.stringify(pv));
         toets('9b wv891: meereizend: beide privé-kaarten (wv als tekst telt ook), nieuwste eerst', pr.length === 2 && pr[0].punt === 903 && pr[1].punt === 902 && pr[1].titel === 'Privé-kaart', JSON.stringify(pr));
         const bt = H.appBroedWacht(w85, [{ id: 904, prive: false, status: 'gedaan', titel: 'Al beantwoord', herkomst: { wv: [85] } }], { soort: 'reist' }, vandaagB);
         toets('9b wv891: kaart dicht, rij wacht nog: stand beantwoord zonder punt', bt.length === 1 && bt[0].stand === 'beantwoord' && bt[0].punt === null && bt[0].titel === 'Al beantwoord', JSON.stringify(bt));
         const lt = H.appBroedWacht(w85, [{ id: 905, prive: false, status: 'later', later_tot: '2999-01-01', titel: 'Later', herkomst: { wv: [85] } }], { soort: 'reist' }, vandaagB);
         toets('9b wv891: kaart op later (datum nog niet bereikt) telt als beantwoord/dicht, niet open', lt[0].stand === 'beantwoord', JSON.stringify(lt));
-        toets('9b wv891: vaste plek zonder (leesbare) kaart: geen vrije tekst van de rij (diffreview #3)', H.appBroedWacht(w85, [], { soort: 'vast' }, vandaagB)[0].titel === null && H.appBroedWacht(w85, null, { soort: 'vast' }, vandaagB)[0].titel === null && H.appBroedWacht(w85, [], { soort: 'vast' }, vandaagB)[0].stand === 'geen');
+        toets('9b wv1901: vaste plek zonder (leesbare) kaart: de tekst van de rij, zoals meereizend', JSON.stringify(H.appBroedWacht(w85, [], { soort: 'vast' }, vandaagB)) === JSON.stringify(H.appBroedWacht(w85, [], { soort: 'reist' }, vandaagB)) && JSON.stringify(H.appBroedWacht(w85, null, { soort: 'vast' }, vandaagB)) === JSON.stringify(H.appBroedWacht(w85, null, { soort: 'reist' }, vandaagB)) && H.appBroedWacht(w85, null, { soort: 'vast' }, vandaagB)[0].titel === 'app-toets');
         toets('9b wv891: Voor jou niet leesbaar: stand onbekend met de tekst van de rij', JSON.stringify(H.appBroedWacht(w85, null, { soort: 'reist' }, vandaagB)) === JSON.stringify([{ wv: 85, titel: 'app-toets', punt: null, stand: 'onbekend' }]));
         sbStaat.vjKapot = true; H.appStaat.vjCache = null;
         const rkp = await vraag('GET', '/app/broedstoof', undefined, { pot: P.jar });
@@ -1729,17 +1730,17 @@ async function bewijs(o) {
       toets('9c kop-terugval: vetgedrukte regel met een weekdag; zonder herkenbare kop: kop null', kopZonder.kop === 'Maandag 26 oktober: drukke dag' && kopZonder.regels[0] === 'Tekst van de dag hier.' && H.appBriefingVorm({ job_id: 'x', t: tB, antwoord: 'Zomaar een tekst die lang genoeg is om inhoud te zijn.' }).kop === null, JSON.stringify(kopZonder));
       // vaste plek: alleen de kop (zoals /app/vandaag de Gezin-agenda weglaat; Fable wv891 #5)
       const uitV = H.appBriefingVoor(b, { soort: 'vast' }), uitR = H.appBriefingVoor(b, { soort: 'reist' });
-      toets('9c vaste plek: kop en job_id wel, regels leeg; meereizend alles', uitV && uitV.kop === b.kop && uitV.job_id === 'b0b0b0b0b0b0b0b2' && uitV.regels.length === 0 && uitR.regels.length === 4 && b.regels.length === 4 && H.appBriefingVoor(null, { soort: 'vast' }) === null, JSON.stringify(uitV));
+      toets('9c wv1901: vaste plek: dezelfde briefing als meereizend (kop, job_id en alle regels)', uitV && JSON.stringify(uitV) === JSON.stringify(uitR) && uitV.kop === b.kop && uitV.regels.length === 4 && b.regels.length === 4 && H.appBriefingVoor(null, { soort: 'vast' }) === null, JSON.stringify(uitV));
       // wv594: de hele tekst (Lees in Voor jou) en de gesproken briefing alleen meereizend; zonder bewaard bestand audio null
       toets('9c wv594: meereizend de hele tekst (met de vijfde regel), audio null zonder bestand; geen stem-lijst naar de app', b && typeof b.tekst === 'string' && /Vijfde regel/.test(b.tekst) && b.audio === null && !('stem' in b), JSON.stringify(b && Object.keys(b)));
-      toets('9c wv594: vaste plek zonder tekst en audio', uitV && uitV.tekst === null && uitV.audio === null);
+      toets('9c wv1901: vaste plek ook de hele tekst, audio zoals meereizend', uitV && typeof uitV.tekst === 'string' && uitV.tekst === uitR.tekst && uitV.audio === uitR.audio);
       // wv594 review #3: met een bewaard geluidsbestand bij de 🔊-regel geeft de route audio {job_id, n, naam} (meereizend); vaste plek niet
       H.appStaat.bestandenIndex = { op: Date.now(), items: [{ job_id: 'b0b0b0b0b0b0b0b3', bestanden: [{ naam: 'briefing.txt', n: 1 }, { naam: 'Ochtendbriefing 23 oktober.mp3', n: 2 }] }] };
       H.appStaat.briefing = null;
       r = await vraag('GET', '/app/briefing', undefined, { pot: P.jar });
       const au = r.j.briefing && r.j.briefing.audio;
       toets('9c wv594: gesproken briefing via de route: audio met job_id van de 🔊-regel, bestandsnummer en naam', r.status === 200 && au && au.job_id === 'b0b0b0b0b0b0b0b3' && au.n === 2 && au.naam === 'Ochtendbriefing 23 oktober.mp3', JSON.stringify(r.j.briefing && r.j.briefing.audio));
-      toets('9c wv594: vaste plek ook met bestand zonder audio', H.appBriefingVoor(Object.assign({}, H.appStaat.briefing.b), { soort: 'vast' }).audio === null);
+      toets('9c wv1901: vaste plek met bestand: dezelfde audio als meereizend', !!au && JSON.stringify(H.appBriefingVoor(Object.assign({}, H.appStaat.briefing.b), { soort: 'vast' }).audio) === JSON.stringify(H.appBriefingVoor(Object.assign({}, H.appStaat.briefing.b), { soort: 'reist' }).audio) && H.appBriefingVoor(Object.assign({}, H.appStaat.briefing.b), { soort: 'vast' }).audio.n === 2);
       H.appStaat.bestandenIndex = null; H.appStaat.briefing = null;
       if (hVoor === null) fs.unlinkSync(HP); else fs.writeFileSync(HP, hVoor);
       r = await vraag('GET', '/app/briefing', undefined, { pot: P.jar });
@@ -3548,7 +3549,7 @@ async function bewijs(o) {
       // vaste-plek-apparaat (review #5): geen Gezin/Schapies, geen concepten
       const nep = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
       await H.appVandaagRoute({}, nep, { id: 'x', soort: 'vast' });
-      toets('17 vaste plek: geen Gezin-afspraken en geen concepten, wel werk en acties', nep.st === 200 && nep.b.vaste_plek === true && nep.b.concepten === null && nep.b.agenda && !nep.b.agenda.vandaag.some((x) => /^(Gezin|Schapies)$/.test(x.kalender)) && nep.b.agenda.vandaag.length === 4 && nep.b.acties, JSON.stringify(nep.b && nep.b.agenda));
+      toets('17 wv1901: vaste plek: alles, zoals meereizend (ook Gezin-afspraken en concepten)', nep.st === 200 && nep.b.vaste_plek === false && !!nep.b.concepten && nep.b.agenda && nep.b.agenda.vandaag.some((x) => /^(Gezin|Schapies)$/.test(x.kalender)) && nep.b.agenda.vandaag.length === 6 && nep.b.acties, JSON.stringify(nep.b && nep.b.agenda));
       const nep2 = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
       await H.appVandaagRoute({}, nep2, { id: 'y', soort: 'reist' });
       toets('17 meereizend: alles', nep2.b.vaste_plek === false && nep2.b.concepten && nep2.b.agenda.vandaag.length === 6);
@@ -3930,8 +3931,9 @@ async function bewijs(o) {
       const rl = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
       ap.soort = 'reist'; ap.vaste_plek = null;
       fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regV));
-      toets('18 vaste plek (ook met open slot) -> 403 "sleutels vervangen kan niet …", lijst leeg met vast: true (K5)', r.status === 403 && /sleutels vervangen kan niet vanaf een apparaat met een vaste plek/.test(r.j.fout) && spNep.schrijf.length === nS
-        && rl.status === 200 && rl.j.vast === true && rl.j.sleutels.length === 0, JSON.stringify(r.j) + JSON.stringify(rl.j).slice(0, 200));
+      // wv1901: vervangen blijft beheer (alleen telefoon/meereizend); de lijst met namen (nooit waarden) ziet David ook op een vaste plek
+      toets('18 vaste plek (ook met open slot) -> 403 "sleutels vervangen kan niet …"; wv1901: lijst wel (namen), vast: true', r.status === 403 && /sleutels vervangen kan niet vanaf een apparaat met een vaste plek/.test(r.j.fout) && spNep.schrijf.length === nS
+        && rl.status === 200 && rl.j.vast === true && rl.j.sleutels.length > 0 && !JSON.stringify(rl.j).includes(W1), JSON.stringify(r.j) + JSON.stringify(rl.j).slice(0, 200));
       // Fable-review wv157 M1: waar Socev zelf op draait alleen via het portaal
       spNep.kluis.push({ naam: 'telegram_debug_bot_token', omschrijving: 'x', gewijzigd: '2026-06-09T10:00:00Z', witte_lijst: true, gemaskeerd: '••••', geweigerd: null, w: 'y'.repeat(40) });
       spNep.creds.push({ id: 'N8nApi001', name: 'n8n account', type: 'n8nApi', updatedAt: '2026-06-09T10:00:00.000Z' });
@@ -4253,7 +4255,7 @@ async function bewijs(o) {
       toets('20f tweede keer binnen 60 s uit het geheugen (geen tweede bankkind)', r.status === 200 && nK === 1, nK);
       const nep = { _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } };
       await H.appFinancien({}, nep, { id: 'x', soort: 'vast' });
-      toets('20f vaste plek: 200 met vaste_plek en een zin, geen cijfers, geen bankkind', nep.st === 200 && nep.b.vaste_plek === true && /telefoon/.test(nep.b.melding) && !('deze_maand' in nep.b) && nK === 1, JSON.stringify(nep.b));
+      toets('20f wv1901: vaste plek: dezelfde cijfers als meereizend (uit het geheugen, geen tweede bankkind)', nep.st === 200 && nep.b.vaste_plek === false && !nep.b.melding && nep.b.deze_maand && nep.b.deze_maand.in === 1 && nK === 1, JSON.stringify(nep.b).slice(0, 200));
       vm.runInContext('appFinCache = null', ctx); kAntw = { code: 2, j: { ok: false, fout: 'gebruik: zoek | maand' } };
       r = await vraag('GET', '/app/financien', undefined, { pot: P.jar });
       toets('20f oudere bank-lezer (kent de opdracht niet): 503 "wordt net bijgewerkt"', r.status === 503 && /bijgewerkt/.test(r.j.fout), JSON.stringify(r.j));
@@ -4301,9 +4303,11 @@ async function bewijs(o) {
         !/NL00ABNA|Jansen/.test(JSON.stringify(r.j)) && kArgs[0][0][0] === 'pot-afschrift-maanden' && kArgs[0][1] === 20000, JSON.stringify(r.j).slice(0, 400));
       const nep = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
       let n1 = nep(); await H.appPotAfschriften({}, n1, { id: 'x', soort: 'vast' });
-      let n2 = nep(); await H.appPotMaak({}, n2, { id: 'x', soort: 'vast' }, { maand: '2026-09' });
-      let n3 = nep(); await H.appPotBestand({}, n3, { id: 'x', soort: 'vast' }, '2026-09/pdf');
-      toets('20g vaste plek: overzicht 200 met vaste_plek, maken en downloaden 403, geen bankkind', n1.st === 200 && n1.b.vaste_plek === true && !('maanden' in n1.b) && n2.st === 403 && n3.st === 403 && kArgs.length === 1, JSON.stringify([n1.b, n2.st, n3.st]));
+      // wv1901: ook op een vaste plek; maken, downloaden en concept (vingerafdruk blijft) alleen dicht als de vaste plek afschermt
+      const sv20 = fs.readFileSync('server.js', 'utf8');
+      toets('20g wv1901: vaste plek: overzicht met maanden zoals meereizend; maken/bestand/concept alleen dicht via appAfscherm', n1.st === 200 && n1.b.vaste_plek === false && Array.isArray(n1.b.maanden) && n1.b.maanden.length === 2
+        && /async function appPotMaak\(req, res, a, d\) \{\n  if \(appAfscherm\(a\)\) return appWeiger\(res, 403/.test(sv20) && /async function appPotBestand\(req, res, a, rest\) \{\n  if \(appAfscherm\(a\)\) return appWeiger\(res, 403/.test(sv20)
+        && /async function appPotConcept\(req, res, a, s, d\) \{\n  if \(appAfscherm\(a\)\) return appWeiger\(res, 403/.test(sv20) && /if \(!appVersOk\(a, s\)\) \{ res\._app\.reden = 'pot-concept, niet vers'/.test(sv20), JSON.stringify(n1.b).slice(0, 200));
       kAntw['pot-afschrift-maanden'] = { code: 2, j: { ok: false, fout: 'gebruik: zoek | maand' } };
       r = await vraag('GET', '/app/pot-afschriften', undefined, { pot: P.jar });
       toets('20g oudere bank-lezer: 503 "wordt net bijgewerkt"', r.status === 503 && /bijgewerkt/.test(r.j.fout), JSON.stringify(r.j));
@@ -6245,7 +6249,7 @@ async function bewijs(o) {
       const nepRes = () => ({ _app: {}, writeHead(st) { this.st = st; }, end(b) { this.b = JSON.parse(b); } });
       let nr = nepRes();
       await H.appVoorJouRoute({}, nr, { id: 'x', soort: 'vast' });
-      toets('27 vaste plek: privé-punt niet in de lijst', nr.st === 200 && !nr.b.punten.some((x) => x.id === 9) && nr.b.punten.length === 7 && nr.b.vaste_plek === true, JSON.stringify(nr.b.punten.map((x) => x.id)));
+      toets('27 wv1901: vaste plek: ook het privé-punt in de lijst, zoals meereizend', nr.st === 200 && nr.b.punten.some((x) => x.id === 9) && nr.b.punten.length === 8 && nr.b.vaste_plek === false, JSON.stringify(nr.b.punten.map((x) => x.id)));
       // ── 27 wv1706 (OVIS M3b): module + doel uit herkomst, alleen vaste vormen; vaste plek nooit naar een privé-module ──
       {
         const D = (h, soort) => JSON.stringify(H.appVjDoel({ herkomst: h }, { id: 'x', soort: soort || 'reist' }));
@@ -6255,8 +6259,8 @@ async function bewijs(o) {
           && D({ doel: { scherm: 'facturen', focus: 'naam met spatie' } }) === '{"module":null,"doel":{"scherm":"facturen","focus":null}}'
           && D({ doel: 'facturen' }) === '{"module":null,"doel":null}' && D(null) === '{"module":null,"doel":null}'
           && D({ doel: { scherm: 'facturen', focus: 'stap:' + 'x'.repeat(81) } }) === '{"module":null,"doel":{"scherm":"facturen","focus":null}}', D({ doel: { scherm: 'facturen', focus: 'naam met spatie' } }));
-        toets('27 wv1706 vaste plek: geen doel of module-id van financien of pot-afschriften, wel naar facturen', D({ module: 'financien', doel: { scherm: 'financien', focus: null } }, 'vast') === '{"module":null,"doel":null}'
-          && D({ module: 'pot-afschriften', doel: { scherm: 'pot-afschriften', focus: 'maand:2026-10' } }, 'vast') === '{"module":null,"doel":null}'
+        toets('27 wv1706/wv1901 vaste plek: ook doel en module-id van financien en pot-afschriften, en naar facturen', D({ module: 'financien', doel: { scherm: 'financien', focus: null } }, 'vast') === '{"module":"financien","doel":{"scherm":"financien","focus":null}}'
+          && D({ module: 'pot-afschriften', doel: { scherm: 'pot-afschriften', focus: 'maand:2026-10' } }, 'vast') === '{"module":"pot-afschriften","doel":{"scherm":"pot-afschriften","focus":"maand:2026-10"}}'
           && D({ module: 'financien', doel: { scherm: 'financien', focus: null } }) === '{"module":"financien","doel":{"scherm":"financien","focus":null}}'
           && D({ module: 'facturen', doel: { scherm: 'facturen', focus: 'stap:beoordelen' } }, 'vast') === '{"module":"facturen","doel":{"scherm":"facturen","focus":"stap:beoordelen"}}', D({ module: 'financien', doel: { scherm: 'financien' } }, 'vast'));
         toets('27 wv1706 appVjModuleKaart staat in het app-blok', H.appVjModuleKaart({ herkomst: { module: 'facturen' } }) === true && H.appVjModuleKaart({ herkomst: { module: 'facturen', wv: [5] } }) === false);
@@ -6316,7 +6320,8 @@ async function bewijs(o) {
         // vaste plek: geen hoofdkanaal in Moet iets
         n27 = await route('vast');
         ms = (n27.b.moet_iets || []).map((x) => x.punt);
-        toets('27 wv594 #3: vaste plek: geen hoofdkanaal in moet_iets (ook geen storing), de machinekamervraag wel', n27.st === 200 && !(n27.b.moet_iets || []).some((x) => x.kanaal === 'hoofd') && ms.includes('v:' + JM + ':' + hM), JSON.stringify(ms));
+        const n27r = await route();
+        toets('27 wv1901: vaste plek: moet_iets zoals meereizend (ook het hoofdkanaal), de machinekamervraag erin', n27.st === 200 && JSON.stringify(ms) === JSON.stringify((n27r.b.moet_iets || []).map((x) => x.punt)) && (n27.b.moet_iets || []).some((x) => x.kanaal === 'hoofd') && ms.includes('v:' + JM + ':' + hM), JSON.stringify(ms));
         // cache van appMoetLog: zelfde bestand = geen nieuwe lezing; een nieuwe regel = verse lezing
         const op1 = H.appStaat.moetLog && H.appStaat.moetLog.hoofd && H.appStaat.moetLog.hoofd.op;
         await slaap(5);
@@ -6379,7 +6384,7 @@ async function bewijs(o) {
       toets('27 details: onbekend, 0, tekst, rommel -> 404; een gesloten punt (≤ 7 d) mag wel', st404.join() === '404,404,404,404,200', st404.join());
       nr = nepRes();
       await H.appVoorJouDetail({}, nr, { id: 'x', soort: 'vast' }, '9');
-      toets('27 details privé-punt op een vaste plek -> 404', nr.st === 404, nr.st);
+      toets('27 wv1901: details privé-punt op een vaste plek -> 200', nr.st === 200 && nr.b && nr.b.ok === true, nr.st);
       // keuze
       const nS = () => sbRpc.filter((x) => x.fn === 'mk_voor_jou_status');
       const K = (b) => vraag('POST', '/app/voor-jou/keuze', b, { pot: P.jar });
@@ -6513,8 +6518,10 @@ async function bewijs(o) {
       sbStaat.vjKapot = false; H.appStaat.vjCache = null;
       toets('27 databank weg: keuze 503, lijst 200 met fout in gewone taal, details 503', r.status === 503 && rl.status === 200 && rl.j.fout === 'de lijst is nu niet te lezen' && rl.j.punten.length === 0 && rd.status === 503, [r.status, rl.status, rd.status].join());
       nr = nepRes(); nr._app = {};
+      const bewaar9 = JSON.stringify(sbStaat.vj[8]);
       await H.appVoorJouKeuze({}, nr, { id: 'x', soort: 'vast' }, { id: 9, van: 'open', keuze: 'gedaan' });
-      toets('27 keuze op een privé-punt vanaf een vaste plek -> 404', nr.st === 404 && sbStaat.vj[8].status === 'open', nr.st);
+      toets('27 wv1901: keuze op een privé-punt vanaf een vaste plek -> 200 (zoals meereizend)', nr.st === 200 && sbStaat.vj[8].id === 9 && sbStaat.vj[8].status === 'gedaan', [nr.st, sbStaat.vj[8].status]);
+      sbStaat.vj[8] = JSON.parse(bewaar9); H.appStaat.vjCache = null;   // de rest van 27 rekent met punt 9 open
       toets('27 keuze valt onder het invoerslot (vaste plek)', H.appInvoerRoute('POST /app/voor-jou/keuze', false, {}, { id: 'x' }) === true);
       H.appStaat.tellers.voorjou = Array(60).fill(Date.now());
       r = await K({ id: 5, van: 'open', keuze: 'gedaan' });
@@ -6680,9 +6687,9 @@ async function bewijs(o) {
       n8nStaat.portie.find((x) => x.positie === 9).sleutel = 'shizzle-x';
       const v9 = await dv(9);
       n8nStaat.portie.find((x) => x.positie === 9).sleutel = 'pat-x';
-      toets('27 vaste plek: entiteit 20_Prive telt ook als privé (Fable #8)', v9.b.prive === true && !/Fietsen/.test(JSON.stringify(v9.b)), JSON.stringify(v9.b));
-      toets('27 vaste plek: Todoist Privé, privé-entiteit en het privé-postvak -> prive zonder tekst of link; werk en doktersmaten wel', v6.b.prive === true && v6.b.tekst === null && v6.b.link === null && !/Cadeau/.test(JSON.stringify(v6.b))
-        && v7.b.prive === true && !/Kemo/.test(JSON.stringify(v7.b)) && v5.b.prive === true && !/keuken/.test(JSON.stringify(v5.b)) && v3.b.prive === false && v3.b.onderwerp && v1.b.tekst, JSON.stringify([v6.b, v7.b, v5.b].map((x) => [x.prive, x.tekst, x.onderwerp])));
+      toets('27 wv1901: vaste plek: ook een actie bij 20_Prive volledig', v9.b.prive === false && /Fietsen/.test(JSON.stringify(v9.b)), JSON.stringify(v9.b));
+      toets('27 wv1901: vaste plek: Todoist Privé, privé-entiteit en het privé-postvak volledig, zoals meereizend; werk en doktersmaten ook', v6.b.prive === false && v6.b.tekst === 'Cadeau kopen' && !!v6.b.link
+        && v7.b.prive === false && /Kemo/.test(JSON.stringify(v7.b)) && v5.b.prive === false && /keuken/.test(JSON.stringify(v5.b)) && v3.b.prive === false && v3.b.onderwerp && v1.b.tekst, JSON.stringify([v6.b, v7.b, v5.b].map((x) => [x.prive, x.tekst, x.onderwerp])));
       r = await vraag('GET', '/app/vandaag/actie/' + ymdP + '/5', undefined, { pot: P.jar });
       toets('27 meereizend: privé-postvak wel, met link naar d.schaap@gmail.com', r.j.onderwerp === 'Offerte keuken' && r.j.link === 'https://mail.google.com/mail/?authuser=d.schaap@gmail.com#all/aaaabbbbccccdddd', JSON.stringify(r.j));
       const p404 = [];
@@ -6985,7 +6992,7 @@ async function bewijs(o) {
       sbStaat.vj.push(pk(31, 'kaart-prive-vast', { prive: true, herkomst: { register: ['2026-10-11 16:00'] } })); H.appStaat.vjCache = null;
       let nr = nepRes();
       await H.appVoorJouKnop({}, nr, {}, { id: 'x', soort: 'vast' }, {}, { id: 31, keuze: 'ja', tekst_id: 'abcdef12' });
-      toets('27b privé-kaart vanaf een vaste plek -> 404', nr.st === 404, nr.st);
+      toets('27b wv1901: privé-kaart vanaf een vaste plek is bereikbaar (geen 404; verkeerde tekst-id -> 409 tekst gewijzigd)', nr.st === 409 && !!nr.b && nr.b.tekst_gewijzigd === true, nr.st);
       rolStub.primair = false;
       r = await KN({ id: 31, keuze: 'nee' });
       rolStub.primair = true;
@@ -7186,7 +7193,7 @@ async function bewijs(o) {
       const nrC = nepResC();
       H.appStaat.tellers.anders = [];   // de proeven hierboven tellen mee in de grens van 30 per uur
       await H.appAnders({}, nrC, {}, { id: 'x', soort: 'vast' }, {}, { soort: 'kaart', id: 63, toelichting: 'x' });
-      toets('27c privé-kaart vanaf een vaste plek -> 404', nrC.st === 404, nrC.st);
+      toets('27c wv1901: Anders op een privé-kaart vanaf een vaste plek -> 200 (zoals meereizend)', nrC.st === 200, nrC.st);
       H.appStaat.tellers.anders = Array.from({ length: 30 }, () => Date.now());
       r = await AN({ soort: 'kaart', id: 61, toelichting: 'x' });
       H.appStaat.tellers.anders = [];
@@ -7440,7 +7447,9 @@ async function bewijs(o) {
       const nep = { _app: {}, writeHead(s) { this.st = s; }, end(x) { this.b = JSON.parse(x); } };
       await H.appProjectenRoute({}, nep, { id: 'x', soort: 'vast' });
       const vb = nep.b || {};
-      toets('29 vaste plek: alleen zakelijk, geen personeelszaken (Medewerkers-bron of woord: Roos, Detachering, Jacqueline) en geen privébron (Waarneming), geen lopend', nep.st === 200 && vb.vaste_plek === true && vb.entiteiten.every((e) => !e.prive && e.lopend.length === 0) && !vb.entiteiten.some((e) => /^(PRIVE|OVERIG)$/.test(e.code)) && !/Roos|Detachering|Jacqueline|Waarneming|Cynthia is jarig/.test(JSON.stringify(vb)) && JSON.stringify(j).includes('Detachering van Belinda') && JSON.stringify(j).includes('Waarneming regelen'), JSON.stringify(vb.entiteiten && vb.entiteiten.map((e) => e.code)));
+      const nepR = { _app: {}, writeHead(s) { this.st = s; }, end(x) { this.b = JSON.parse(x); } };
+      await H.appProjectenRoute({}, nepR, { id: 'y', soort: 'reist' });
+      toets('29 wv1901: vaste plek: alles zoals meereizend (ook Privé/Overig, personeelszaken en lopend)', nep.st === 200 && vb.vaste_plek === false && JSON.stringify(vb.entiteiten) === JSON.stringify(nepR.b.entiteiten) && vb.entiteiten.some((e) => /^(PRIVE|OVERIG)$/.test(e.code)) && /Detachering/.test(JSON.stringify(vb)), JSON.stringify(vb.entiteiten && vb.entiteiten.map((e) => e.code)));
       // één bron weg -> regel in fouten; beide weg -> 503 (met auditregel)
       const acBewaar = fs.readFileSync(AC, 'utf8'), dlBewaar = fs.readFileSync(DL, 'utf8');
       fs.unlinkSync(AC); H.appStaat.projecten = null;

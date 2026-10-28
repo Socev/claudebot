@@ -21,7 +21,7 @@
 //   en O_NONBLOCK, /proc/self/fd = het verwachte echte pad (geen tussenmap die intussen een koppeling werd), fstat = zelfde inode,
 //   nlink 1 (geen hardlink naar buiten); hooguit 20 MB (base64 in JSON). De beschrijving en de kaft ook: zelfde leesweg, ≤ 64 kB / 1 MB.
 // Eén fout = één stuk: een beschrijving die niet klopt komt in `te_herstellen` (bestandsnaam + reden in gewone taal), de rest staat er.
-// Alles alleen lezen; de module schrijft niets. Op een apparaat met een vaste plek gaat de App niet open (server.js, privé-module).
+// Alles alleen lezen; de module schrijft niets. Privé-module: op een vaste plek alleen dicht als server.js afschermt (APP_VAST_AFSCHERMEN, sinds wv1901 uit).
 
 const fs = require('fs');
 const path = require('path');

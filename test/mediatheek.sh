@@ -284,9 +284,12 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('5f blokmarkers', hb > 0 && he > hb);
   const gestuurd = [];
   const ctx = vm.createContext({ require, process: { env: { APP_VAULT_DIR: V } }, __dirname: process.cwd(), path, fs, console, VAULT: '/bestaat/niet',
-    logError: () => {}, appTeller: () => true, appPriveDicht: (a, id) => a.soort === 'vast' && id === 'mediatheek',
+    logError: () => {}, appTeller: () => true,
     appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Object, JSON, String });
-  vm.runInContext(src.slice(hb, he) + ';globalThis.__mt = { appMediatheek, mediatheekInfo };', ctx, { filename: 'server.js#mediatheek' });
+  // wv1901: de echte privélijst, schakelaar, appAfscherm en appPriveDicht uit server.js (staan buiten dit blok)
+  const prive = /^const APP_PRIVE_MODULES = [^\n]*\n/m.exec(src)[0] + /^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] +
+    /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0] + /^function appPriveDicht\([^\n]*\n/m.exec(src)[0];
+  vm.runInContext(prive + src.slice(hb, he) + ';globalThis.__mt = { appMediatheek, mediatheekInfo };', ctx, { filename: 'server.js#mediatheek' });
   const r1 = { _app: {} };
   await ctx.__mt.appMediatheek({}, r1, { soort: 'meereizend' }, 'GET /app/mediatheek');
   toets('5g lijst 200, stil, vaste_plek false, APP_VAULT_DIR gebruikt', gestuurd[0].s === 200 && gestuurd[0].j.vaste_plek === false && gestuurd[0].j.onderwerpen.length === 4 && r1._app.stil === true, gestuurd[0].s);
@@ -295,9 +298,9 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('5h bestand 200, reden met id en extensie, geen pad', gestuurd[1].s === 200 && r2._app.reden === 'mediatheek bestand ' + id + ' mp3' && !/Lied|Prive/.test(r2._app.reden), r2._app.reden);
   const r3 = { _app: {} };
   await ctx.__mt.appMediatheek({}, r3, { soort: 'vast' }, 'GET /app/mediatheek');
-  toets('5i vaste plek: lijst zegt waarom, zonder onderwerpen', gestuurd[2].s === 200 && gestuurd[2].j.vaste_plek === true && !gestuurd[2].j.onderwerpen, gestuurd[2]);
+  toets('5i wv1901: vaste plek: dezelfde lijst (David 28-10: op alle pc\'s alles)', gestuurd[2].s === 200 && gestuurd[2].j.vaste_plek === false && gestuurd[2].j.onderwerpen.length === 4, gestuurd[2].s);
   await ctx.__mt.appMediatheek({}, { _app: {} }, { soort: 'vast' }, 'GET /app/mediatheek/bestand/' + id);
-  toets('5j vaste plek: bestand 403', gestuurd[3].s === 403, gestuurd[3]);
+  toets('5j wv1901: vaste plek: bestand 200', gestuurd[3].s === 200, gestuurd[3].s);
   toets('5k info', ctx.__mt.mediatheekInfo().items === 5);
   // review wv1269 ZOU 2: hooguit twee antwoorden tegelijk onderweg; de teller zakt pas bij 'close'
   const EE = require('events');

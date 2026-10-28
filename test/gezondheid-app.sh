@@ -175,7 +175,8 @@ const srv = http.createServer(function (req, res) {
   toets('Dockerfile: gezondheid-app.js in release-bootstrap', /COPY gezondheid-app\.js \/app\/release-bootstrap\/gezondheid-app\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
   const a0 = src.indexOf('let appGezMod;'), b0 = src.indexOf('// ── wv787: POT-afschriften', a0);
   // wv1051 bracht appPriveDicht + APP_PRIVE_MODULES buiten dit blok; de echte regels meenemen (CI 274/275 rood op ReferenceError)
-  const prive = (src.match(/^const APP_PRIVE_MODULES = [^\n]*/m) || [''])[0] + '\n' + (src.match(/^function appPriveDicht\([^\n]*/m) || [''])[0] + '\n';
+  const prive = (src.match(/^const APP_PRIVE_MODULES = [^\n]*/m) || [''])[0] + '\n' + (src.match(/^const APP_VAST_AFSCHERMEN = [^\n]*/m) || [''])[0] + '\n' +
+    (src.match(/^function appAfscherm\(a\) \{[\s\S]*?\n\}/m) || [''])[0] + '\n' + (src.match(/^function appPriveDicht\([^\n]*/m) || [''])[0] + '\n';   // wv1901
   const blok = prive + src.slice(a0, b0) + '\nthis.appGezondheid = appGezondheid; this.gezondheidInfo = gezondheidInfo;';
   let antw = [];
   let nep = { aanroepen: 0, volgende: null };
@@ -186,8 +187,11 @@ const srv = http.createServer(function (req, res) {
   vm.createContext(ctx); vm.runInContext(blok, ctx);
   const res = () => ({ _app: {} });
   let rs = res();
+  // wv1901 (David 28-10: "op ALLE pc's toegang tot ALLES"): ook op een vaste plek de gegevens
+  nep.volgende = { status: 200, j: { ok: true, metingen: [7], fouten: [] } };
   await ctx.appGezondheid({}, rs, { soort: 'vast' }, 'GET /app/gezondheid');
-  toets('vaste plek → 200 vaste_plek, health-pod niet gevraagd', antw[0].st === 200 && antw[0].o.vaste_plek === true && nep.aanroepen === 0 && rs._app.reden === 'gezondheid', antw[0]);
+  toets('wv1901: vaste plek → 200 met de gegevens (zoals meereizend), vaste_plek false', antw[0].st === 200 && antw[0].o.vaste_plek === false && antw[0].o.metingen[0] === 7 && nep.aanroepen === 1 && rs._app.reden === 'gezondheid', antw[0]);
+  vm.runInContext('Object.keys(appGezCache).forEach(function (k) { delete appGezCache[k]; });', ctx); nep.aanroepen = 0;
   antw = []; nep.volgende = { status: 200, j: { ok: true, metingen: [1], fouten: [] } };
   await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid');
   await ctx.appGezondheid({}, res(), { soort: 'mee' }, 'GET /app/gezondheid');

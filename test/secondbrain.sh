@@ -212,7 +212,7 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('9 invoerslot op vaste plek geldt (niet in APP_SLOT_VRIJ)', slotVrij.indexOf('secondbrain') < 0);
   toets('9 audit: reden met domein en h=, niet het pad', /res\._app\.reden = 'secondbrain ' \+ actie \+ \(au\.domein \? ' ' \+ au\.domein : ''\) \+ \(au\.h \? ' h=' \+ au\.h : ''\)/.test(src) && !/res\._app\.reden = [^\n]*d\.pad/.test(src));
   toets('9 GET /app/secondbrain valt op een vaste plek onder het invoerslot', src.indexOf("  if (route === 'GET /app/secondbrain') return true;") > src.indexOf('function appInvoerRoute('));
-  toets('9 vast doorgegeven aan de module', /secondbrain\.app\(route, d \|\| \{\}, \{ vast: a\.soort === 'vast' \}\)/.test(src));
+  toets('9 vast doorgegeven aan de module', /secondbrain\.app\(route, d \|\| \{\}, \{ vast: appAfscherm\(a\) \}\)/.test(src));   // wv1901
   toets('9 /health.secondbrain', /secondbrain: secondbrainInfo\(\),/.test(src));
   toets('9 Financiën verrijkt vóór de cache', /if \(typeof secondbrainFinPagina === 'function'\) secondbrainFinPagina\(d\);[^\n]*\n  appFinCache = /.test(src));
   toets('9 blokmarkers voor de UI-toets', src.indexOf('// ── Second Brain (wv832') > 0 && src.indexOf('// ── einde secondbrain') > src.indexOf('// ── Second Brain (wv832'));
@@ -224,13 +224,15 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const ctx = vm2.createContext({ require, process: { env: { SECONDBRAIN_DIR: path.join(W, 'sd'), CLOUDFLARE_API_TOKEN: 'proef' } }, __dirname: process.cwd(), path, fs, crypto: require('crypto'), console, setInterval: () => ({ unref() {} }),
     VAULT: V, logError: () => {}, appBsnMasker: (t) => t, appPoortGeheim: () => 'proefgeheim', smalCf: async () => ({ status: 200, j: { result: { chunks: [{ item: { key: 'vault/index.md' }, text: 'x', score: 0.5 }] } } }),
     SMAL_CF_BASIS: 'x', SMAL_CF_ACCOUNT: 'y', appTeller: () => true, appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Date, Promise, JSON, String, Number, Array, Object, Math });
-  vm2.runInContext(src.slice(hb, he) + ';globalThis.__sb = { secondbrain, appSecondBrain, secondbrainFinPagina };', ctx, { filename: 'server.js#secondbrain' });
+  // wv1901: de schakelaar en appAfscherm uit server.js (staan buiten dit blok)
+  const afs = /^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0];
+  vm2.runInContext(afs + src.slice(hb, he) + ';globalThis.__sb = { secondbrain, appSecondBrain, secondbrainFinPagina };', ctx, { filename: 'server.js#secondbrain' });
   const res = { _app: {} };
   await ctx.__sb.appSecondBrain({}, res, { soort: 'meereizend' }, { pad: '10_Zakelijk/Tolgaarde/Verzekeringen.md' }, 'POST /app/secondbrain/open');
   toets('9 koppeling: open geeft 200 en reden zonder pad', gestuurd[0] && gestuurd[0].s === 200 && /^secondbrain open Tolgaarde h=[0-9a-f]{16}$/.test(res._app.reden), { g: gestuurd[0] && gestuurd[0].s, r: res._app.reden });
   const res2 = { _app: {} };
   await ctx.__sb.appSecondBrain({}, res2, { soort: 'vast' }, { pad: '20_Prive/Gezondheid/Bloed.md' }, 'POST /app/secondbrain/open');
-  toets('9 koppeling: vaste plek + privé = 404', gestuurd[1] && gestuurd[1].s === 404, gestuurd[1]);
+  toets('9 koppeling wv1901: vaste plek + privé = 200 (David 28-10: op alle pc\'s alles)', gestuurd[1] && gestuurd[1].s === 200, gestuurd[1] && gestuurd[1].s);
   const res3 = { _app: {} };
   await ctx.__sb.appSecondBrain({}, res3, { soort: 'meereizend' }, { q: 'xy', betekenis: true }, 'POST /app/secondbrain/zoek');
   toets('9 koppeling: betekenis leest item.key uit AI Search', gestuurd[2] && gestuurd[2].s === 200 && gestuurd[2].j.treffers.length === 1 && gestuurd[2].j.treffers[0].pad === 'index.md', gestuurd[2]);

@@ -148,7 +148,7 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('21 maskeerIban laat gewone woorden staan', B.maskeerIban('KvK 12345678 en AB12 CDEF') === 'KvK 12345678 en AB12 CDEF');
 
   const srv = fs.readFileSync('server.js', 'utf8');
-  toets('22 server.js: routes en vaste plek uit het apparaat', /route === 'GET \/app\/brain\/entiteiten' \|\| route\.indexOf\('GET \/app\/brain\/entiteit\/'\) === 0/.test(srv) && /B\.detail\(id, vast\)/.test(srv) && /const vast = !!\(a && a\.soort === 'vast'\)/.test(srv));
+  toets('22 server.js: routes en vaste plek uit het apparaat', /route === 'GET \/app\/brain\/entiteiten' \|\| route\.indexOf\('GET \/app\/brain\/entiteit\/'\) === 0/.test(srv) && /B\.detail\(id, vast\)/.test(srv) && /const vast = appAfscherm\(a\);   \/\/ wv1901/.test(srv));   // wv1901: afschermen via de ene schakelaar
   toets('23 uitrol.sh, Dockerfile en CI kennen brain-entiteiten', /RELEASE_OPTIONEEL="[^"]*\bbrain-entiteiten\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&
     /COPY brain-entiteiten\.js \/app\/release-bootstrap\/brain-entiteiten\.js/.test(fs.readFileSync('Dockerfile', 'utf8')) && /test\/brain-entiteiten\.sh/.test(fs.readFileSync('.github/workflows/build.yml', 'utf8')));
   fs.rmSync(tmp, { recursive: true, force: true });

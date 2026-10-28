@@ -347,7 +347,7 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
     SMAL_CF_BASIS: 'https://cf', SMAL_CF_ACCOUNT: 'acc', appTeller: () => true, appVersOk: (a, s) => s.vers === true,
     appWeiger: (res, s, f) => gestuurd.push({ s, f }), appStuur: (res, s, j) => gestuurd.push({ s, j }), Date, Promise, JSON, String, Number, Array, Object, Math, Buffer, Map, Set,
     AbortSignal, encodeURIComponent, fetch: async (url, o) => { fetchLog.push({ url, o }); return { status: 200, json: async () => fetchAntw(url, o) }; } });
-  vm.runInContext(src.slice(hb, he) + '\n' + src.slice(db0, de) + ';globalThis.__dd = { docsDelen, appDocs, docsDelenInfo, docsCf, docsAccess, docsAccessBodyOk };', ctx, { filename: 'server.js#docs' });
+  vm.runInContext((/^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0]) + src.slice(hb, he) + '\n' + src.slice(db0, de) + ';globalThis.__dd = { docsDelen, appDocs, docsDelenInfo, docsCf, docsAccess, docsAccessBodyOk };', ctx, { filename: 'server.js#docs' });
   toets('5 koppeling laadt (docsDelen aan)', !!ctx.__dd.docsDelen && ctx.__dd.docsDelenInfo().aan === true, ctx.__dd.docsDelenInfo());
   let res = { _app: {} };
   await ctx.__dd.appDocs({}, res, { soort: 'meereizend' }, { vers: false }, { pad: '01_Ontwikkeling/Reis.md', soort: 'openbaar', sha: 'a'.repeat(64) }, 'POST /app/docs/delen');
@@ -363,6 +363,15 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
   toets('5 delen met verse vingerafdruk: 200, D1-query naar de juiste databank, vingerafdruk verbruikt', dl.s === 200 && cfAanroep.length === 1 &&
     /^https:\/\/cf\/client\/v4\/accounts\/acc\/d1\/database\/[0-9a-f-]{36}\/query$/.test(cfAanroep[0].url) && /^INSERT INTO deel/.test(cfAanroep[0].body.sql) && sess.vers_tot === 0, { dl, cf: cfAanroep[0] && cfAanroep[0].url });
   toets('5 audit: geen pad en geen link in de reden', res._app.reden.indexOf(dl.j.gedeeld.slug) < 0 && res._app.reden.indexOf('Reis') < 0, res._app.reden);
+  // wv1901 (David 28-10: op alle pc's alles): een vaste plek leest ook een privépagina (stand 200), maar delen blijft beheer
+  res = { _app: {} };
+  const nG = gestuurd.length;
+  await ctx.__dd.appDocs({}, res, { soort: 'vast' }, {}, { pad: '20_Prive/Reis.md' }, 'POST /app/docs/stand');
+  const sv = gestuurd[nG];
+  toets('5 wv1901: vaste plek, privépagina: stand 200 (niet 404), kan_delen false met de vaste-plekreden', sv && sv.s === 200 && sv.j.kan_delen === false && /vaste plek/.test(sv.j.reden), sv);
+  res = { _app: {} };
+  await ctx.__dd.appDocs({}, res, { soort: 'vast' }, {}, { pad: '01_Ontwikkeling/Reis.md' }, 'POST /app/docs/voorbeeld');
+  toets('5 wv1901: vaste plek: voorbeeld (de deelstap) blijft 403', gestuurd[nG + 1] && gestuurd[nG + 1].s === 403 && /vaste plek/.test(gestuurd[nG + 1].j.fout), gestuurd[nG + 1]);
   // wv1383: Access-toestaanlijst in server.js
   const X = ctx.__dd;
   toets('5 Access-koppeling aan met het pod-token, One-time PIN', !!X.docsAccess && X.docsAccess.idp === 'e9e612dc-1f11-4c07-bd74-5929e4704eec' && X.docsDelenInfo().beveiligd_aan === true, X.docsDelenInfo());

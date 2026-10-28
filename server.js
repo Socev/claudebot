@@ -4851,10 +4851,18 @@ const APP_HEROPEND = path.join(APP_DATA, 'koppel-heropend');      // machinekame
 const APP_HERSTEL_VERVALT = path.join(APP_DATA, 'herstel-vervalt'); // machinekamer: herstelcode én telefoon kwijt (bouwplan § 4.4c)
 const APP_SESSIES = path.join(APP_DATA, 'sessies.json');          // wv231: sessies over een herstart (alleen hash, geen token; § 4.4e)
 const APP_VAST = path.join(APP_DATA, 'vast.json');                // wv1051 (OVIS M1b): vastgezette plekken en Apps, alleen id's
-// § 4.3: de ene lijst privé-App-id's (catalogus src/modules.ts). Nooit op een apparaat met een vaste plek: de drie routes hieronder
-// weigeren dan, en vast.json gaat daar zonder deze id's naar de app (geen privé-App in het menu, ook geen lege kopregel).
+// § 4.3: de ene lijst privé-App-id's (catalogus src/modules.ts). Alleen als een vaste plek afschermt (APP_VAST_AFSCHERMEN, sinds wv1901
+// uit): dan weigeren de routes hieronder en gaat vast.json daar zonder deze id's naar de app (geen privé-App in het menu).
 const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften', 'mediatheek'];   // wv1269: Mediatheek (20_Prive)
-function appPriveDicht(a, id) { return !!(a && a.soort === 'vast') && APP_PRIVE_MODULES.indexOf(id) >= 0; }
+// wv1901 (David 28-10-2026 16:51: "ik wil op ALLE pc's toegang tot ALLES"): een vaste plek schermt voor David niets meer af; hij ziet
+// daar hetzelfde als op zijn telefoon. Wat blijft (beveiliging, geen afscherming): invoerslot, sessie, BSN-masker op invoer,
+// APP_BEHEER_ROUTES, een gevoelige Ja telt niet (knop-ja-vers-vast, AIX, POT-verzending, OVIS-adres). Eén schakelaar: true = het oude
+// afschermen (terugrol). Ontwerp: vault 01_Ontwikkeling/Vaste plek - alles open (ontwerp 28-10-2026).md
+const APP_VAST_AFSCHERMEN = false;
+function appAfscherm(a) {
+  return APP_VAST_AFSCHERMEN && !!(a && a.soort === 'vast');
+}
+function appPriveDicht(a, id) { return appAfscherm(a) && APP_PRIVE_MODULES.indexOf(id) >= 0; }
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
 const APP_OMZET_MAX_BODY = 5 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping (\n, \", \uXXXX)
@@ -7482,7 +7490,7 @@ const APP_BROED_WACHT_MAX = 5;
 appStaat.broedZonderKaart = appStaat.broedZonderKaart || new Set();
 const appWachtOpDavid = function (w) { return w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')); };
 function appBroedWacht(w, vj, a, vandaag) {
-  const vast = !!(a && a.soort === 'vast');
+  const vast = appAfscherm(a);   // wv1901
   // diffreview wv891 #3: op een vaste plek geen vrije tekst van de rij (de kaart erachter kan privé zijn); de app zegt dan "Een privé-punt"
   const los = vast ? null : appKort(appVjGewoon(String(w.geblokkeerd_door || '').replace(/^\s*david\s*:?\s*/i, '')), 160) || 'wacht op jou';
   if (!vj) return [{ wv: w.id, titel: los, punt: null, stand: 'onbekend' }];
@@ -7617,14 +7625,14 @@ async function appBriefingRoute(req, res, a) {
       } catch (e) { logError('app-briefing', e); return appStuur(res, 200, { ok: true, briefing: null, fout: 'de briefing is nu niet te lezen' }); }
     }
   }
-  appStuur(res, 200, { ok: true, briefing: appBriefingVoor(b, a), vaste_plek: !!(a && a.soort === 'vast'), fout: null });
+  appStuur(res, 200, { ok: true, briefing: appBriefingVoor(b, a), vaste_plek: appAfscherm(a), fout: null });
 }
 // wv594: tekst (de hele briefing, voor Lees in Voor jou) en audio ({job_id, n, naam} van de gesproken briefing) alleen op een
 // meereizend apparaat; op een vaste plek alleen de kop (Fable wv891 #5).
 function appBriefingVoor(b, a) {
   if (!b) return null;
   const { stem, tekst, ...kaal } = b;
-  if (a && a.soort === 'vast') return Object.assign({}, kaal, { regels: [], tekst: null, audio: null });
+  if (appAfscherm(a)) return Object.assign({}, kaal, { regels: [], tekst: null, audio: null });   // wv1901
   return Object.assign({}, kaal, { tekst: tekst || null, audio: appBriefingAudio(stem) });
 }
 function appBriefingAudio(stem) {
@@ -7990,7 +7998,7 @@ function appDraadReden(w, poort, byId, reg, nu) {
 // hem "wacht op jou"; later = in de wacht tot die dag; gedaan = komt vrij (appVjVrijgeefLater of de ronde); geen kaart = vastgelopen.
 function appDraadKaart(w, vj, a, vandaag, nu) {
   if (!vj) return { stand: 'onbekend' };
-  const vast = !!(a && a.soort === 'vast');
+  const vast = appAfscherm(a);   // wv1901
   const bw = appBroedWacht(w, vj, a, vandaag);
   const open = bw.filter(function (x) { return x.stand === 'open' && x.punt != null; })[0];
   if (open) return { stand: 'open', punt: open.punt };
@@ -9186,7 +9194,7 @@ async function appVandaagRoute(req, res, a) {
   res._app.stil = true;   // de app leest bij openen en op Ververs
   let d;
   try { d = await appVandaag(); } catch (e) { logError('app-vandaag', e); return appWeiger(res, 503, 'je dag is nu niet te lezen', 'vandaag fout'); }
-  const vast = !!(a && a.soort === 'vast');
+  const vast = appAfscherm(a);   // wv1901
   const zonderPrive = function (l) { return l.filter(function (x) { return !APP_AGENDA_PRIVE.test(x.kalender); }); };
   appStuur(res, 200, { ok: true, vandaag: d.vandaag, morgen: d.morgen,
     agenda: d.agenda && vast ? { vandaag: zonderPrive(d.agenda.vandaag), morgen: zonderPrive(d.agenda.morgen) } : d.agenda,
@@ -9372,7 +9380,7 @@ function appVjDoel(p, a) {
   const d = h.doel && typeof h.doel === 'object' && !Array.isArray(h.doel) ? h.doel : null;
   const scherm = d && typeof d.scherm === 'string' && APP_VJ_MODULE_RE.test(d.scherm) ? d.scherm : null;
   const focus = scherm && typeof d.focus === 'string' && APP_VJ_FOCUS_RE.test(d.focus) ? d.focus : null;
-  const vast = !!(a && a.soort === 'vast');
+  const vast = appAfscherm(a);   // wv1901
   const prive = function (id) { return !!id && APP_PRIVE_MODULES.indexOf(id) >= 0; };
   if (vast && (prive(m) || prive(scherm))) return { module: null, doel: null };   // review wv1706 #2: ook het privé-id niet
   return { module: m, doel: scherm ? { scherm: scherm, focus: focus } : null };
@@ -9544,7 +9552,7 @@ function appVjVoorwaardeStart(poging) {
   if (t && t.unref) t.unref();
 }
 if (APP_ECHT) appVjVoorwaardeStart(0);
-function appVjVoorApparaat(punten, a) { const vast = !!(a && a.soort === 'vast'); return punten.filter(function (p) { return !(vast && p.prive === true); }); }
+function appVjVoorApparaat(punten, a) { const vast = appAfscherm(a); return punten.filter(function (p) { return !(vast && p.prive === true); }); }
 function appVjKort(p, vandaag) {
   return { id: p.id, soort: ['doen', 'besluit', 'proef'].indexOf(p.soort) >= 0 ? p.soort : 'doen', titel: appKort(appVjGewoon(p.titel), 120), regel2: appVjRegel2(p, vandaag),
     deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline || '')) ? p.deadline : null, dichtbij: appVjDichtbij(p, vandaag),
@@ -9592,12 +9600,12 @@ async function appVoorJouRoute(req, res, a, kanaal) {
   const lijst = zichtbaar.concat(net, viaKaart).map(function (p) { return Object.assign(appVjKort(p, vandaag), appVjDoel(p, a), { terug_ms: appVjTerugMs(p.id, nu, a.id), beantwoord: appVjBeantwoordKort(p, vr, af.map) }); });   // wv1706: module + doel
   // wv594: Moet iets + gezien door David; een fout hier raakt de kaarten niet (moet_iets null = de app toont alleen de kaarten).
   // wv926 (Fable-diffreview #1): alleen op GET /app/voor-jou/kanaal (sinds wv946 de enige weg van de app); /app/voor-jou blijft zoals main.
-  const basisAntwoord = { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: !!(a && a.soort === 'vast'),
+  const basisAntwoord = { ok: true, punten: lijst, later: later, zichtbaar: 5, meer: Math.max(0, zichtbaar.length - 5), vaste_plek: appAfscherm(a),
     bijgewerkt: new Date(appStaat.vjCache && appStaat.vjCache.op || nu).toISOString(), fout: null };
   if (!kanaal) return appStuur(res, 200, basisAntwoord);
   let moet = null, moetFout = null;
   // review wv594 #1: ontdubbelen tegen ALLE kaarten (ook privé, die een vaste plek niet toont); op een vaste plek geen hoofdkanaal
-  try { moet = (await appMoetIets(punten, nu, af)).filter(function (m) { return !(a && a.soort === 'vast' && m.kanaal === 'hoofd'); }); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
+  try { moet = (await appMoetIets(punten, nu, af)).filter(function (m) { return !(appAfscherm(a) && m.kanaal === 'hoofd'); }); } catch (e) { logError('app-voor-jou', e); moetFout = 'de vragen zijn nu niet te lezen'; }
   const sleutels = [];
   lijst.forEach(function (p) { sleutels.push('k:' + p.id); if (p.deadline && p.deadline < vandaag) sleutels.push('k:' + p.id + ':over'); });
   (moet || []).forEach(function (m) { sleutels.push(m.punt); });
@@ -10423,7 +10431,7 @@ async function appVandaagActieDetail(req, res, a, rest) {
   res._app.stil = true;
   const m = /^(\d{4}-\d{2}-\d{2})\/([1-9]|10)$/.exec(rest);
   if (!m) return appWeiger(res, 404, 'onbekend', 'actie-detail pad');
-  const datum = m[1], positie = Number(m[2]), vast = !!(a && a.soort === 'vast');
+  const datum = m[1], positie = Number(m[2]), vast = appAfscherm(a);   // wv1901
   if (!appTeller('vjdetail', APP_VJ_DETAIL_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur; probeer het straks', 'grens details');
   let rijen;
   try { rijen = await appN8nRijen(APP_PORTIE_TABEL, null, 30); } catch (e) { logError('app-actie-detail', e); return appWeiger(res, 503, 'het actielijstje is nu niet te lezen', 'actie-detail lezen'); }
@@ -10951,7 +10959,7 @@ function potAfMaandUit(res, d) {
   return maand;
 }
 async function appPotMaak(req, res, a, d) {
-  if (a.soort === 'vast') return appWeiger(res, 403, 'POT-afschriften kan niet vanaf een pc met een vaste plek; gebruik je telefoon of laptop', 'pot vast');
+  if (appAfscherm(a)) return appWeiger(res, 403, 'POT-afschriften kan niet vanaf een pc met een vaste plek; gebruik je telefoon of laptop', 'pot vast');
   const maand = potAfMaandUit(res, d); if (!maand) return;
   if (!potAfAan()) return appWeiger(res, 503, 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten', 'pot uit');
   if (potAfBezig) return appWeiger(res, 409, 'er wordt al een afschrift gemaakt; probeer het zo nog eens', 'pot bezig');
@@ -10964,7 +10972,7 @@ async function appPotMaak(req, res, a, d) {
   appStuur(res, 200, { ok: true, afschrift: potAfAntwoord(j) });
 }
 async function appPotBestand(req, res, a, rest) {
-  if (a.soort === 'vast') return appWeiger(res, 403, 'POT-afschriften kan niet vanaf een pc met een vaste plek', 'pot vast');
+  if (appAfscherm(a)) return appWeiger(res, 403, 'POT-afschriften kan niet vanaf een pc met een vaste plek', 'pot vast');
   const m0 = /^(\d{4}-(?:0[1-9]|1[0-2]))\/(mt940|pdf)$/.exec(rest);
   if (!m0) return appWeiger(res, 404, 'onbekend', 'pot bestand pad');
   if (!appTeller('bestand', APP_BESTAND_PER_UUR, 3600000)) return appWeiger(res, 429, 'te veel downloads dit uur (max ' + APP_BESTAND_PER_UUR + ')', 'grens bestand');
@@ -11055,7 +11063,7 @@ function potAfFacTekst(f, sha, modus) {
   return null;
 }
 async function appPotConcept(req, res, a, s, d) {
-  if (a.soort === 'vast') return appWeiger(res, 403, 'een mailconcept klaarzetten kan niet vanaf een pc met een vaste plek; gebruik je telefoon of laptop', 'pot vast');
+  if (appAfscherm(a)) return appWeiger(res, 403, 'een mailconcept klaarzetten kan niet vanaf een pc met een vaste plek; gebruik je telefoon of laptop', 'pot vast');
   const maand = potAfMaandUit(res, d); if (!maand) return;
   if (!potAfAan()) return appWeiger(res, 503, 'POT-afschriften wordt net bijgewerkt; probeer het over een paar minuten', 'pot uit');
   if (potAfBezig) return appWeiger(res, 409, 'er wordt al een afschrift gemaakt; probeer het zo nog eens', 'pot bezig');
@@ -11357,7 +11365,7 @@ async function appProjectenRoute(req, res, a) {
   res._app.stil = true;   // de app leest bij openen en op Ververs
   let d;
   try { d = appProjecten(); } catch (e) { logError('app-projecten', e); return appWeiger(res, 503, 'de projecten zijn nu niet te lezen', 'projecten fout'); }
-  const vast = !!(a && a.soort === 'vast');
+  const vast = appAfscherm(a);   // wv1901
   const per = {};
   APP_PROJ_ENT.forEach(function (e) { per[e.code] = { code: e.code, naam: e.naam, prive: !!e.prive, deadlines: [], later: 0, verlopen: 0, lopend: [] }; });
   const zicht = function (e) { return !(vast && per[e].prive); };
@@ -12558,7 +12566,8 @@ async function appSleutelLijst() {
 }
 async function appSleutels(req, res, a) {
   // Fable-review wv157 K5: een werk-pc krijgt geen inventaris van sleutelnamen (het portaal eiste daarvoor de Telegram-code)
-  if (a.soort === 'vast') return appStuur(res, 200, { ok: true, sleutels: [], fouten: [], vast: true, primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
+  // wv1901: de lijst (namen, nooit waarden) ook op een vaste plek; vast blijft het echte soort (vervangen en weggooien zijn beheer)
+  if (appAfscherm(a)) return appStuur(res, 200, { ok: true, sleutels: [], fouten: [], vast: true, primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
   const l = await appSleutelLijst();
   appStuur(res, 200, { ok: true, sleutels: l.sleutels, fouten: l.fouten, vast: a.soort === 'vast', primair: rolPrimair(), per_uur: APP_SLEUTELS_PER_UUR });
 }
@@ -14731,7 +14740,7 @@ function appVastModule() {
 function appVastRoute(req, res, a, d) {
   const L = appVastModule();
   if (!L) return appWeiger(res, 404, 'onbekend', 'vast ontbreekt');
-  const vp = !!(a && a.soort === 'vast');
+  const vp = appAfscherm(a);   // wv1901: alleen als de vaste plek afschermt een deel van de lijst (en dan niet vastzetten)
   let j = null;
   try { j = appLeesStreng(APP_VAST, null); }
   catch (e) {   // Fable diff #5: kapot = apart zetten (één keer loggen, met de hand te herstellen), dan de standaard
@@ -14804,7 +14813,7 @@ function appOpenNaRun(jobId, j, r) {
 function appOpenVoor(open, beurtApparaat, a, vers) {
   const L = appOpenModule();
   if (!L || !open) return undefined;
-  try { return L.voorApparaat(open, beurtApparaat, a, APP_PRIVE_MODULES, vers) || undefined; } catch (e) { logError('app-open', e); return undefined; }
+  try { return L.voorApparaat(open, beurtApparaat, a, appAfscherm(a) ? APP_PRIVE_MODULES : [], vers) || undefined; } catch (e) { logError('app-open', e); return undefined; }   // wv1901: privé-lijst alleen bij afschermen
 }
 // /app/uitslag: een wissel gaat één keer naar het typende apparaat (Fable diff #7: herladen binnen de 2 min is geen tweede wissel)
 function appOpenUitslag(j, a) {
@@ -16323,7 +16332,7 @@ async function appManagers(req, res, a, d, route) {
     let sb = null, fout = null;
     try { sb = await appSbRpc('mk_managers_stand', { p_managers: MANAGERS_MOD.rpcInvoer() }); }
     catch (e) { logError('app-managers', e); fout = 'bevindingen en hartslag zijn nu niet leesbaar'; }
-    return appStuur(res, 200, { ok: true, managers: managers.stand(sb, { vast: a.soort === 'vast' }), fout: fout, vast: a.soort === 'vast' });
+    return appStuur(res, 200, { ok: true, managers: managers.stand(sb, { vast: appAfscherm(a) }), fout: fout, vast: appAfscherm(a) });   // wv1901
   }
   if (route === 'POST /app/managers/ronde') {
     if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
@@ -16358,7 +16367,7 @@ async function appRingkaart(req, res, a) {
   if (!ringkaart) return appWeiger(res, 404, 'De ringkaart zit niet in deze versie van de pod', 'ringkaart ontbreekt');
   appStaat.tellers.ringkaart = appStaat.tellers.ringkaart || [];
   if (!appTeller('ringkaart', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens ringkaart');
-  const vast = !!(a && a.soort === 'vast');
+  const vast = appAfscherm(a);   // wv1901
   let uit;
   try { uit = ringkaart.stand(await ringkaartRijen(), vast); }
   catch (e) { logError('app-ringkaart', e); return appWeiger(res, 500, 'fout op de pod', 'ringkaart uitzondering'); }
@@ -16395,7 +16404,7 @@ async function appTokens(req, res, a, route) {
   if (!tokenteller) return appWeiger(res, 404, 'De TokenCounter zit niet in deze versie van de pod', 'tokenteller ontbreekt');
   appStaat.tellers.tokens = appStaat.tellers.tokens || [];
   if (!appTeller('tokens', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens tokens');
-  const vast = !!(a && a.soort === 'vast');
+  const vast = appAfscherm(a);   // wv1901
   let uit;
   try {
     if (route === 'GET /app/tokens') uit = tokenteller.stand({ vast: vast, tank: await tokentellerTank() });
@@ -16449,13 +16458,13 @@ async function appWerkers(req, res, a) {
     const wf = await werkersWorkflows();
     const hs = typeof ringkaartRijen === 'function' ? await ringkaartRijen() : null;
     const sk = await werkersSchakelaars(false);   // wv1733
-    uit = WERKERS_MOD.stand({ workflows: wf, hartslag: hs, schakelaars: sk, vast: !!(a && a.soort === 'vast') });
+    uit = WERKERS_MOD.stand({ workflows: wf, hartslag: hs, schakelaars: sk, vast: appAfscherm(a) });   // wv1901
     const c = uit.check;
     werkersLaatst = { t: new Date().toISOString(), n8n_actief: c.n8n_actief, ontbreekt: c.ontbreekt ? c.ontbreekt.length : null,
       niet_actief: c.niet_actief ? c.niet_actief.length : null, hartslag_zonder_werker: c.hartslag_zonder_werker ? c.hartslag_zonder_werker.length : null };
   } catch (e) { logError('app-werkers', e); return appWeiger(res, 500, 'fout op de pod', 'werkers uitzondering'); }
   res._app.stil = true;   // de app ververst zolang de Ploeg in beeld is
-  return appStuur(res, 200, Object.assign({ ok: true, vast: !!(a && a.soort === 'vast') }, uit));
+  return appStuur(res, 200, Object.assign({ ok: true, vast: appAfscherm(a) }, uit));
 }
 function werkersInfo() { return { aan: !!WERKERS_MOD, werkers: WERKERS_MOD ? WERKERS_MOD.WERKERS.length : 0, laatst: werkersLaatst }; }
 // ── wv1733 (OVIS M4b): schakelaar per werker (ontwerplijnen § 6.2) ──
@@ -16499,7 +16508,7 @@ async function werkerAanzetten(w, sk) {
 }
 async function appWerkerSchakel(req, res, a, s, d) {
   if (!WERKERS_MOD || typeof WERKERS_MOD.schakelKeuze !== 'function') return appWeiger(res, 404, 'De schakelaar zit niet in deze versie van de pod', 'schakel ontbreekt');
-  if (a && a.soort === 'vast') return appWeiger(res, 403, 'niet op een vaste plek', 'schakel vaste plek');
+  if (appAfscherm(a)) return appWeiger(res, 403, 'niet op een vaste plek', 'schakel vaste plek');   // wv1901: verder onder het invoerslot
   const id = String(d.id == null ? '' : d.id).slice(0, 80), actie = String(d.actie == null ? '' : d.actie);
   const w = Object.prototype.hasOwnProperty.call(WERKERS_MOD.PER_ID, id) ? WERKERS_MOD.PER_ID[id] : null;
   const rijen = await werkersSchakelaars(true);
@@ -16619,7 +16628,7 @@ async function appIntakeTelling(req, res, a) {
   appStaat.tellers.intake = appStaat.tellers.intake || [];
   if (!appTeller('intake', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens intake');
   let uit;
-  try { uit = await T.telling(!!(a && a.soort === 'vast')); }
+  try { uit = await T.telling(appAfscherm(a)); }   // wv1901
   catch (e) { logError('app-intake', e); return appWeiger(res, 500, 'fout op de pod', 'intake uitzondering'); }
   res._app.stil = true;
   return appStuur(res, 200, uit);
@@ -16647,7 +16656,7 @@ async function appBrainEntiteiten(req, res, a, route) {
   if (!B) return appWeiger(res, 404, 'Entiteiten & Personen zit niet in deze versie van de pod', 'brain-entiteiten ontbreekt');
   appStaat.tellers['brain-entiteiten'] = appStaat.tellers['brain-entiteiten'] || [];
   if (!appTeller('brain-entiteiten', 900, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens brain-entiteiten');
-  const vast = !!(a && a.soort === 'vast');
+  const vast = appAfscherm(a);   // wv1901
   try {
     if (route === 'GET /app/brain/entiteiten') { const uit = await B.lijst(vast); res._app.stil = true; return appStuur(res, 200, uit); }
     const id = route.slice('GET /app/brain/entiteit/'.length);   // sleutel uit de lijst (12 hex; APP_ROUTE_RE laat geen knoop-id door)
@@ -16904,7 +16913,7 @@ async function appSecondBrain(req, res, a, d, route) {
   if (route === 'POST /app/secondbrain/zoek' && d && d.betekenis && !appTeller('secondbrain-betekenis', 60, 3600000))
     return appWeiger(res, 429, 'zoeken op betekenis te vaak dit uur (max 60); het gewone zoeken werkt nog', 'grens secondbrain-betekenis');
   let r;
-  try { r = await secondbrain.app(route, d || {}, { vast: a.soort === 'vast' }); }
+  try { r = await secondbrain.app(route, d || {}, { vast: appAfscherm(a) }); }   // wv1901
   catch (e) { logError('app-secondbrain', e); return appWeiger(res, 500, 'fout op de pod', 'secondbrain uitzondering'); }
   const actie = route === 'GET /app/secondbrain' ? 'kaart' : route.slice('POST /app/secondbrain/'.length);
   const au = r.audit || {};
@@ -16979,7 +16988,9 @@ const docsDelen = (function () {
   if (!fs.existsSync(p) || !secondbrain || typeof secondbrain.bron !== 'function') return null;
   try {
     const S = require(path.join(__dirname, 'secondbrain.js'));
-    return require(p).maak({ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: logError, bron: secondbrain.bron, access: docsAccess,
+    // wv1901: de pagina lezen volgt de schakelaar (ctx.afscherm); ctx.vast blijft het echte soort voor "niet delen vanaf een vaste plek"
+    const bron = function (pad, ctx) { return secondbrain.bron(pad, Object.assign({}, ctx, { vast: !!(ctx && ctx.afscherm) })); };
+    return require(p).maak({ dir: DOCS_DIR, vault: VAULT, host: DOCS_HOST, fout: logError, bron: bron, access: docsAccess,
       masker: S.masker, isVastDicht: S.isVastDicht, isVerborgen: S.isVerborgen, bsnMasker: function (t) { return appBsnMasker(t); },
       lees: function (x) { return VV().lees(x, 'utf8'); },
       hmac: function (x) { return crypto.createHmac('sha256', appPoortGeheim() || 'geen-poortgeheim').update(String(x)).digest('hex').slice(0, 16); },
@@ -17001,7 +17012,7 @@ async function appDocs(req, res, a, s, d, route) {
   if (!appTeller('docs', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens docs');
   if (route === 'POST /app/docs/delen' && !appVersOk(a, s)) { res._app.reden = 'docs delen, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); }
   let r;
-  try { r = await docsDelen.app(route, d || {}, { vast: a.soort === 'vast' }); }
+  try { r = await docsDelen.app(route, d || {}, { vast: a.soort === 'vast', afscherm: appAfscherm(a) }); }   // wv1901: delen blijft beheer
   catch (e) { logError('app-docs', e); return appWeiger(res, 500, 'fout op de pod', 'docs uitzondering'); }
   if (route === 'POST /app/docs/delen' && r.status === 200) s.vers_tot = 0;   // elke deling een eigen vingerafdruk
   const actie = route === 'GET /app/docs/gedeeld' ? 'gedeeld' : route.slice('POST /app/docs/'.length);
@@ -17538,7 +17549,7 @@ function zoekSnelStaart() {
 async function zoekSnelVoer(a, id, vraag, toonDekking) {
   const t0 = Date.now();
   let r;
-  try { r = await zoekSnel.zoek(vraag, { vast: a.soort === 'vast' }); }
+  try { r = await zoekSnel.zoek(vraag, { vast: appAfscherm(a) }); }   // wv1901
   catch (e) { logError('zoek-snel', e); r = null; }
   if (!r) r = { soort: 'fout', vraag: vraag, tekst: '', waarden: [], bronnen: [], gelezen_als: [], melding: 'Zoek snel lukte nu niet.', reden: 'uitzondering', ms: {} };
   const ms = Date.now() - t0;
@@ -17547,7 +17558,7 @@ async function zoekSnelVoer(a, id, vraag, toonDekking) {
   const gelogd = await appLogSchrijf('hoofd', { t: new Date().toISOString(), getypt: new Date(t0).toISOString(), job_id: id, soort: 'zoek', apparaat: a.id, tekst: vraag,
     antwoord: zoekSnelTekst(r), ok: r.soort !== 'fout', fout: r.soort === 'fout' ? String(r.reden || 'fout').slice(0, 200) : undefined, bestanden: [],
     zoek: { uitkomst: r.soort, reden: r.reden || undefined, ms: ms, zoek_ms: r.ms.zoek, model_ms: r.ms.model, account: v.account, kosten: v.kosten, tokens_uit: v.uit,
-      bronnen: (r.bronnen || []).map(function (b) { return b.pad; }), weggelaten: r.weggelaten || undefined, natoets_mis: r.natoets_mis || undefined, vast: a.soort === 'vast' || undefined,
+      bronnen: (r.bronnen || []).map(function (b) { return b.pad; }), weggelaten: r.weggelaten || undefined, natoets_mis: r.natoets_mis || undefined, vast: appAfscherm(a) || undefined,
       dekking: r.dekking || undefined, laag: r.laag || undefined, feiten_ms: r.ms.feiten, index_ms: r.ms.index,
       lagen: zoekSnelLagenTelling(r.lagen) } });   // wv1289: alleen tellingen (pagina's/regels, grens), geen inhoud; wv1788: per laag idem
   zoekSnelRegelZet(r);
@@ -19864,7 +19875,7 @@ function potAfKaartDoen(maand) {
   return { sleutel: 'pot-afschrift-' + maand, soort: 'doen', titel: 'POT — afschrift ' + n + ' naar André (Acta Synergia) sturen', volgorde: 30, deadline: dl,
     waar: 'overal', prive: true, duur_min: 4, herkomst: potAfHerkomst(maand),
     waarom: 'André verwerkt de bankafschriften van de POT. Socev heeft het afschrift van ' + n + ' gemaakt uit de bankkoppeling: een MT940-bestand om in te lezen en een PDF met per regel wat het is. Het mailconcept aan André zet Socev op jouw teken klaar, met beide bestanden eraan; nakijken en versturen doe je zelf.',
-    stappen: ['Open in de app Apps › POT-afschriften (op je telefoon of laptop, niet op de praktijk-pc).', 'Kijk de PDF van ' + n + ' even na (knop PDF).',
+    stappen: ['Open in de app Apps › POT-afschriften.', 'Kijk de PDF van ' + n + ' even na (knop PDF).',
       "Tik op 'Zet mailconcept klaar voor André' en bevestig met je vingerafdruk.",
       'Open het concept in Gmail (Concepten): de MT940 en de PDF hangen er al aan. Kijk het na en verstuur.', 'Klaar? Tik hier op Gedaan.'],
     meting: bankNuKort() + ': Het afschrift van ' + n + ' staat klaar in de app; het mailconcept nog niet.' };

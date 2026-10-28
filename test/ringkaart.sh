@@ -85,7 +85,7 @@ const b = src.slice(src.indexOf('// ── Ringkaart (wv888'), src.indexOf('// �
 toets('5b zonder module 404', /if \(!ringkaart\) return appWeiger\(res, 404/.test(b));
 toets('5c teller ringkaart', /appTeller\('ringkaart', 600, 3600000\)/.test(b));
 toets('5d stil alleen na geslaagd lezen (vlak voor 200)', /res\._app\.stil = true;\s*return appStuur\(res, 200, uit\)/.test(b));
-toets('5e vaste plek uit a.soort', /a\.soort === 'vast'/.test(b));
+toets('5e vaste plek via appAfscherm (wv1901)', /const vast = appAfscherm\(a\)/.test(b));
 toets('5f RPC mk_hartslag_stand met buffer', /appSbRpc\('mk_hartslag_stand'/.test(b) && /RINGKAART_HARTSLAG_MS/.test(b));
 toets('5g /health.ringkaart', /ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart/.test(src));
 toets('5h ringkaart.js in RELEASE_OPTIONEEL', /^RELEASE_OPTIONEEL="[^"]*\bringkaart\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));

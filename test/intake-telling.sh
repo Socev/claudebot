@@ -129,7 +129,7 @@ const goedeRpc = async (fn, body) => { rpcVraag = { fn, body }; return rpcRijen;
   // server.js, uitrol, Dockerfile
   const srv = fs.readFileSync('server.js', 'utf8');
   toets('13 route GET /app/intake in server.js', /route === 'GET \/app\/intake'\) return typeof appIntakeTelling === 'function'/.test(srv));
-  toets('13b vaste plek doorgegeven, stil, grens', /T\.telling\(!!\(a && a\.soort === 'vast'\)\)/.test(srv) && /appTeller\('intake', 600, 3600000\)/.test(srv));
+  toets('13b vaste plek doorgegeven, stil, grens', /T\.telling\(appAfscherm\(a\)\)/.test(srv) && /appTeller\('intake', 600, 3600000\)/.test(srv));
   toets('13c zonder module 404', /intake-telling ontbreekt/.test(srv));
   toets('14 uitrol.sh: intake-telling.js optioneel in de release', /^RELEASE_OPTIONEEL="[^"]*\bintake-telling\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
   toets('15 Dockerfile: intake-telling.js in release-bootstrap', /COPY intake-telling\.js \/app\/release-bootstrap\/intake-telling\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));

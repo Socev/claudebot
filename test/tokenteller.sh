@@ -171,7 +171,7 @@ const b = src.slice(src.indexOf('// ── TokenCounter (wv1742'), src.indexOf('
 toets('10b zonder module 404', /if \(!tokenteller\) return appWeiger\(res, 404/.test(b));
 toets('10c teller tokens', /appTeller\('tokens', 600, 3600000\)/.test(b));
 toets('10d stil bij 200', /res\._app\.stil = true;\s*return appStuur\(res, 200, uit\)/.test(b));
-toets('10e vaste plek doorgegeven', /a\.soort === 'vast'/.test(b) && /stand\(\{ vast: vast/.test(b) && /dag\(m\[1\], \{ vast: vast \}\)/.test(b));
+toets('10e vaste plek doorgegeven (wv1901: via appAfscherm)', /const vast = appAfscherm\(a\)/.test(b) && /stand\(\{ vast: vast/.test(b) && /dag\(m\[1\], \{ vast: vast \}\)/.test(b));
 toets('10f vault-veilig doorgegeven', /vv: VV\(\)/.test(b));
 toets('10l tank: één lopende lezing gedeeld', /if \(tokentellerTankBezig\) return tokentellerTankBezig;/.test(b));
 toets('10g /health.tokenteller', /tokenteller: typeof tokenteller !== 'undefined' && !!tokenteller/.test(src));

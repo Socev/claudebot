@@ -89,14 +89,15 @@ C.appVastRoute({ method: 'POST' }, res(), A, { actie: 'zet', scherm: 'financien'
 toets('14 nog eens vastzetten: 200, niet opnieuw geschreven', antw[0].st === 200 && schrijfTel === n0);
 antw = []; rs = res();
 C.appVastRoute({ method: 'GET' }, rs, P, {});
-toets('15 werk-pc: geen privé-App in de lijst, vaste_plek true', antw[0].o.vast.map((x) => x.scherm).join() === 'facturen,bestanden' && antw[0].o.vaste_plek === true && JSON.stringify(antw[0]).indexOf('financien') < 0, antw[0]);
+// wv1901 (David 28-10: "op ALLE pc's toegang tot ALLES"): de werk-pc ziet dezelfde lijst en mag vastzetten (onder het invoerslot)
+toets('15 wv1901: werk-pc ziet de hele lijst (ook de privé-App), vaste_plek false', antw[0].o.vast.map((x) => x.scherm).join() === 'facturen,bestanden,financien' && antw[0].o.vaste_plek === false, antw[0]);
 antw = []; rs = res();
 C.appVastRoute({ method: 'POST' }, rs, P, { actie: 'zet', scherm: 'praktijken' });
-toets('16 werk-pc zet iets vast → 403, niets geschreven', antw[0].st === 403 && schrijfTel === n0 && rs._app.reden === 'vast zet vanaf vaste plek', antw[0]);
+toets('16 wv1901: werk-pc zet iets vast → 200, geschreven', antw[0].st === 200 && schrijfTel === n0 + 1 && antw[0].o.vast.map((x) => x.scherm).join() === 'facturen,bestanden,financien,praktijken', antw[0]);
 antw = [];
 C.appVastRoute({ method: 'POST' }, res(), P, { actie: 'los', scherm: 'bestanden' });
-toets('17 werk-pc maakt Bestanden los: antwoord zonder privé, de privé-App blijft in de lijst', antw[0].st === 200 && antw[0].o.vast.map((x) => x.scherm).join() === 'facturen' &&
-  JSON.parse(fs.readFileSync(VAST, 'utf8')).vast.map((x) => x.scherm).join() === 'facturen,financien', antw[0]);
+toets('17 werk-pc maakt Bestanden los: antwoord met de privé-App, lijst op schijf gelijk', antw[0].st === 200 && antw[0].o.vast.map((x) => x.scherm).join() === 'facturen,financien,praktijken' &&
+  JSON.parse(fs.readFileSync(VAST, 'utf8')).vast.map((x) => x.scherm).join() === 'facturen,financien,praktijken', antw[0]);
 antw = [];
 C.appVastRoute({ method: 'POST' }, res(), A, { actie: 'zet', scherm: '../../etc' });
 toets('18 ongeldig → 400', antw[0].st === 400);
@@ -108,7 +109,12 @@ const C2 = maakCtx(false);
 antw = [];
 C2.appVastRoute({ method: 'GET' }, res(), A, {});
 toets('20 zonder app-vast.js → 404', antw[0].st === 404);
-toets('21 appPriveDicht: alleen vaste plek × privé-id', C.appPriveDicht(P, 'financien') && C.appPriveDicht(P, 'pot-afschriften') && C.appPriveDicht(P, 'gezondheid') && !C.appPriveDicht(P, 'facturen') && !C.appPriveDicht(A, 'financien') && !C.appPriveDicht(null, 'financien'));
+toets('21 wv1901: appPriveDicht nergens dicht (schakelaar uit), ook niet op een vaste plek', !C.appPriveDicht(P, 'financien') && !C.appPriveDicht(P, 'pot-afschriften') && !C.appPriveDicht(P, 'gezondheid') && !C.appPriveDicht(P, 'mediatheek') && !C.appPriveDicht(A, 'financien') && !C.appPriveDicht(null, 'financien'));
+toets('21b wv1901: met de schakelaar aan (terugrol) weer alleen vaste plek × privé-id', (function () {
+  const c = vm.createContext({});
+  vm.runInContext(src.slice(p0, p1).replace('const APP_VAST_AFSCHERMEN = false;', 'const APP_VAST_AFSCHERMEN = true;') + '\nthis.d = appPriveDicht;', c);
+  return c.d(P, 'financien') && c.d(P, 'mediatheek') && !c.d(P, 'facturen') && !c.d(A, 'financien') && !c.d(null, 'financien');
+})());
 
 // ── bedrading ──
 toets('22 route GET en POST /app/vast in de routetabel', /route === 'GET \/app\/vast' \|\| route === 'POST \/app\/vast'\) return appVastRoute\(req, res, a, d\)/.test(src));

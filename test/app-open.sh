@@ -102,10 +102,10 @@ const ctx = vm.createContext({ require, fs, path, __dirname: process.cwd(), cons
   appStuur: function (res, st, j) { gestuurd.push({ st: st, j: j }); }, appWeiger: function (res, st, f) { gestuurd.push({ st: st, fout: f }); },
   appNietGezien: function () { return false; }, appGezienDoor: function () {}, appVraagVan: function () { return null; },
   appBeantwoord: function () { return null; }, appVraagGevoelig: function () { return true; } });
-vm.runInContext(konst('APP_JOB_RE') + konst('APP_PRIVE_MODULES').replace(/\/\/.*$/, '') +
-  ['appUitvoer', 'appOpenModule', 'appOpenKnip', 'appOpenGemaaktZet', 'appOpenGemaaktVan', 'appOpenNaRun', 'appOpenVoor', 'appOpenUitslag', 'appUitslag', 'appOntmasker'].map(fn).join('\n') +
+vm.runInContext(konst('APP_JOB_RE') + konst('APP_PRIVE_MODULES').replace(/\/\/.*$/, '') + konst('APP_VAST_AFSCHERMEN') +
+  ['appAfscherm', 'appUitvoer', 'appOpenModule', 'appOpenKnip', 'appOpenGemaaktZet', 'appOpenGemaaktVan', 'appOpenNaRun', 'appOpenVoor', 'appOpenUitslag', 'appUitslag', 'appOntmasker'].map(fn).join('\n') +
   '\n' + konst('APP_OPEN_VERS_MS') + konst('APP_OPEN_GEMAAKT_MS') + 'let appOpenMod = null, appOpenGezocht = false;\n' +
-  'this.T = { appUitslag, appOpenNaRun, appOpenKnip, appOpenGemaaktZet, appOntmasker, jobs };', ctx);
+  'this.T = { appUitslag, appOpenNaRun, appOpenKnip, appOpenGemaaktZet, appOntmasker, appOpenVoor, jobs };', ctx);
 const T = ctx.T;
 // beurt in het hoofdgesprek op apparaat A; Socev maakte een voorstel in deze beurt (skill gaf SOCEV_BEURT mee)
 const nu = Date.now();
@@ -174,6 +174,12 @@ toets('16 Dockerfile, uitrol.sh en build.yml kennen app-open.js',
   /COPY app-open\.js \/app\/release-bootstrap\/app-open\.js/.test(fs.readFileSync('Dockerfile', 'utf8')) &&
   /RELEASE_OPTIONEEL="[^"]*\bapp-open\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')) &&
   /bash test\/app-open\.sh/.test(fs.readFileSync('.github/workflows/build.yml', 'utf8')));
+// wv1901 (David 28-10: "op ALLE pc's toegang tot ALLES"): de koppeling geeft de privé-lijst alleen mee als een vaste plek afschermt (uit)
+{
+  const o = T.appOpenVoor({ scherm: 'financien', focus: null, vorm: 'wissel' }, V.id, V, true), m = T.appOpenVoor({ scherm: 'financien', focus: null, vorm: 'wissel' }, A.id, A, true);
+  toets('17a wv1901: vaste plek krijgt ook een privé-App (zoals meereizend)', !!o && o.scherm === 'financien' && o.vorm === 'wissel' && !!m && m.scherm === 'financien', { o: o, m: m });
+  toets('17b wv1901: schakelaar staat uit en appAfscherm is de enige weg naar de privé-lijst', /^const APP_VAST_AFSCHERMEN = false;$/m.test(src) && /appAfscherm\(a\) \? APP_PRIVE_MODULES : \[\]/.test(fn('appOpenVoor')));
+}
 toets('17 geen ROOD-logregels uit de koppeling', !logs.some((l) => /^FOUT/.test(l)), logs.filter((l) => /^FOUT/.test(l)));
 console.log((fouten ? 'ROOD' : 'GROEN') + ': ' + goed + ' groen, ' + fouten + ' rood');
 process.exit(fouten ? 1 : 0);

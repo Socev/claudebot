@@ -113,7 +113,7 @@ toets('6d2 één lezing tegelijk (gedeelde promise), vreemde vorm = fout', /werk
 const wsrc = fs.readFileSync('werkers.js', 'utf8');
 toets('6j CLI schrijft alleen via vault-veilig.js uit de release', /require\(path\.join\(__dirname, 'vault-veilig\.js'\)\)/.test(wsrc) && !/writeFileSync\(tmp/.test(wsrc) && !/mk-scripts\/veilig/.test(wsrc));
 toets('6k CLI: hartslag via mk_hartslag_stand (één definitie)', /from public\.mk_hartslag_stand\(\)/.test(wsrc));
-toets('6e vaste plek en schakelaars doorgegeven', /WERKERS_MOD\.stand\(\{ workflows: wf, hartslag: hs, schakelaars: sk, vast: !!\(a && a\.soort === 'vast'\) \}\)/.test(s));
+toets('6e vaste plek en schakelaars doorgegeven', /WERKERS_MOD\.stand\(\{ workflows: wf, hartslag: hs, schakelaars: sk, vast: appAfscherm\(a\) \}\)/.test(s));   // wv1901
 toets('6f stil in het auditlog', /appWerkers[\s\S]{0,1600}res\._app\.stil = true/.test(s));
 const u = fs.readFileSync('uitrol.sh', 'utf8');
 toets('6g RELEASE_OPTIONEEL', /RELEASE_OPTIONEEL="[^"]*\bwerkers\.js\b/.test(u));
@@ -156,7 +156,7 @@ toets('7m server: route, vingerafdruk pas na de keuzeregels, één per schakelin
   /if \(k\.vers\) s\.vers_tot = 0/.test(s) && !/\/archive|DELETE', '\/workflows/.test(s.slice(s.indexOf('wv1733 (OVIS M4b): schakelaar per werker'), s.indexOf('werkersPauzeTik(); }, 2'))));
 toets('7n server: aanzetten alleen als de gepubliceerde versie gelijk is', /wf\.versionId !== sk\.versie/.test(s) && /p_versie: String\(wf\.activeVersionId\)/.test(s));
 toets('7o server: rij eerst, mislukt deactiveren = rij weg', /mk_schakelaar_zet[\s\S]{0,900}\/deactivate'\); \}\s*catch[\s\S]{0,900}mk_schakelaar_wis/.test(s));
-toets('7p server: vaste plek geweigerd', /appWerkerSchakel[\s\S]{0,300}a\.soort === 'vast'\) return appWeiger\(res, 403/.test(s));
+toets('7p server: vaste plek alleen geweigerd als die afschermt (wv1901; verder onder het invoerslot)', /appWerkerSchakel[\s\S]{0,300}if \(appAfscherm\(a\)\) return appWeiger\(res, 403/.test(s));
 
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');
 process.exit(fouten ? 1 : 0);

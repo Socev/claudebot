@@ -507,6 +507,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
   const slotVrij = /const APP_SLOT_VRIJ = new Set\(\[([^\]]*)\]\)/.exec(src);
   toets('6 niet in APP_SLOT_VRIJ (vaste plek: onder het invoerslot)', slotVrij && slotVrij[1].indexOf('zoek-snel') < 0);
   toets('6 bijStart in het hoofdkanaal geeft de zoekregels mee', /: kanaal === 'hoofd' \? function \(\) \{ return typeof zoekSnelStaart === 'function' \? zoekSnelStaart\(\) : ''; \} : undefined \}\);/.test(src));
+  toets('6 wv1901: vaste plek zoekt de hele vault (schakelaar appAfscherm)', /zoekSnel\.zoek\(vraag, \{ vast: appAfscherm\(a\) \}\)/.test(src) && /^const APP_VAST_AFSCHERMEN = false;$/m.test(src));
   toets('6 nieuw-telling slaat soort zoek over', /if \(x\.soort === 'zoek'\) return;/.test(src));
   toets('6 Antwoord hierop en gesprek-zoeken kennen Zoek snel', /if \(x\.soort === 'zoek'\) return 'Zoek snel';   \/\/ wv1252\n  return 'je antwoord';/.test(src) && /if \(x\.soort === 'zoek'\) return 'Zoek snel';   \/\/ wv1252\n  return null;/.test(src));
   toets('6 uitrol.sh en Dockerfile kennen zoek-snel.js', /RELEASE_OPTIONEEL="[^"]* zoek-snel\.js[ "]/.test(fs.readFileSync('uitrol.sh', 'utf8')) && /COPY zoek-snel\.js \/app\/release-bootstrap\/zoek-snel\.js/.test(fs.readFileSync('Dockerfile', 'utf8')));
@@ -534,7 +535,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     appSchrijfJson: (f, d) => fs.writeFileSync(f, JSON.stringify(d)),
     appEenRegel: eenRegel, appTijdKort: (ms) => new Date(ms).toISOString().slice(11, 16),
     harvesterClaude: async (sys, prompt, schema, o) => { modelN++; if (o.timeoutMs !== 20000) return { ok: false, fout: 'time-out niet 20 s' }; return modelVan ? modelVan(prompt, schema) : { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; } });
-  vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
+  vm.runInContext((/^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0]) + src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelStaart, zoekSnelTot, zoekSnelInfo, zoekSnelAan, zoekSnel };', ctx, { filename: 'server.js#zoek-snel' });
   const S = ctx.__z;
   toets('6 module geladen', !!S.zoekSnel);
   const A = { id: 'pixel', soort: 'mee' }, A2 = { id: 'laptop', soort: 'mee' };
@@ -621,7 +622,7 @@ const SLEUTEL = 'sk-ant-api03-' + 'Q7x9K2m4P8r1T5v3W6y0Z'.repeat(2);
     appSchrijfJson: (f, d) => fs.writeFileSync(f, JSON.stringify(d)),
     appEenRegel: eenRegel, appTijdKort: (ms) => new Date(ms).toISOString().slice(11, 16),
     harvesterClaude: async (sys, prompt, schema, o) => { modelN++; return modelVan ? modelVan(prompt, schema) : { ok: true, data: { soort: 'geen', tekst: '', waarden: [], bronnen: [] } }; } });
-  vm.runInContext(src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelInfo, zoekSnel, zoekSnelZout };', ctx10, { filename: 'server.js#zoek-snel-10' });
+  vm.runInContext((/^const APP_VAST_AFSCHERMEN = [^\n]*\n/m.exec(src)[0] + /^function appAfscherm\(a\) \{[\s\S]*?\n\}\n/m.exec(src)[0]) + src.slice(s1, s2) + '\n;globalThis.__z = { appZoekSnel, zoekSnelInfo, zoekSnel, zoekSnelZout };', ctx10, { filename: 'server.js#zoek-snel-10' });
   const S10 = ctx10.__z;
   const roep10 = async (d) => { const res = st(); await S10.appZoekSnel({}, res, A, d); await new Promise((k) => setTimeout(k, 30)); return res; };
   rpcVan = async (fn) => fn === 'sb_query_run_zet' ? 7 : { totaal: 1, getoond: 1, afgekapt: false, genegeerd: [], soorten: ['kenteken'], rest_n: 1, feiten_totaal: 300,
