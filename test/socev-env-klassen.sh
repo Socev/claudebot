@@ -188,6 +188,15 @@ rpc.listen(0, '127.0.0.1', async function () {
     await run('he', 'telegram-debug');
     const se = await wachtOp('he');
     toets('D machinekamer telegram-debug: wel N8N_API_KEY, N8N_MCP_TOKEN, API_SECRET, SUPABASE_SERVICE_ROLE', se && ['N8N_API_KEY', 'N8N_MCP_TOKEN', 'API_SECRET', 'SUPABASE_SERVICE_ROLE'].every((k) => se.env.includes(k)), se ? lekVan(se).join(',') : 'geen spawn');
+    toets('D telegram-debug: houdt SUPABASE_MCP_TOKEN (MK_ENV_WEG geldt alleen per genoemde sessie)', se && se.env.includes('SUPABASE_MCP_TOKEN'), se ? '' : 'geen spawn');
+    // wv640: n8n-git-backup = volle omgeving min MK_ENV_WEG (geen beheer-PAT), de rest van wat het script nodig heeft blijft.
+    await run('hgb', 'n8n-git-backup');
+    const sgb = await wachtOp('hgb');
+    const gbNodig = ['N8N_API_KEY', 'N8N_MCP_TOKEN', 'API_SECRET', 'SUPABASE_SERVICE_ROLE', 'SUPABASE_URL', 'TELEGRAM_DEBUG_BOT_TOKEN', 'CLOUDFLARE_API_TOKEN'];
+    toets('D n8n-git-backup: geen SUPABASE_MCP_TOKEN, wel N8N_API_KEY/N8N_MCP_TOKEN/API_SECRET/SERVICE_ROLE/SUPABASE_URL en de andere geheimen (poortdekking)',
+      sgb && !sgb.env.includes('SUPABASE_MCP_TOKEN') && gbNodig.every((k) => sgb.env.includes(k)), sgb ? gbNodig.filter((k) => !sgb.env.includes(k)).concat(sgb.env.includes('SUPABASE_MCP_TOKEN') ? ['PAT!'] : []).join(',') : 'geen spawn');
+    const verschil = se && sgb ? se.env.filter((k) => !sgb.env.includes(k)).concat(sgb.env.filter((k) => !se.env.includes(k)).map((k) => '+' + k)) : ['geen spawn'];
+    toets('D n8n-git-backup = omgeving van telegram-debug min precies SUPABASE_MCP_TOKEN (review wv640 #4)', verschil.length === 1 && verschil[0] === 'SUPABASE_MCP_TOKEN', verschil.join(','));
     await run('hdm', 'data-manager');   // wv844: weekronde Data Manager draait als machinekamer
     const sdm = await wachtOp('hdm');
     toets('D data-manager: wel SUPABASE_MCP_TOKEN, N8N_API_KEY, CLOUDFLARE_API_TOKEN', sdm && ['SUPABASE_MCP_TOKEN', 'N8N_API_KEY', 'CLOUDFLARE_API_TOKEN'].every((k) => sdm.env.includes(k)), sdm ? lekVan(sdm).join(',') : 'geen spawn');

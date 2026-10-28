@@ -1012,7 +1012,12 @@ function claudeVerbruik(j) {
 // namen uit de podomgeving. Geldt voor alle drie de breinen (claude, codex, agy).
 function basisOmgeving(opts) {
   const envMag = (opts && opts.gereedschap === 'lezen') ? GEREEDSCHAP_LEZEN_ENV_MAG : (opts && opts.envMag) || null;
-  if (!envMag) return process.env;
+  if (!envMag) {
+    if (!(opts && Array.isArray(opts.envWeg) && opts.envWeg.length)) return process.env;
+    const v = Object.assign({}, process.env);   // wv640: volle omgeving min MK_ENV_WEG van deze sessie
+    opts.envWeg.forEach(function (k) { delete v[k]; });
+    return v;
+  }
   const b = {};
   envMag.forEach(function (k) { if (process.env[k] != null) b[k] = process.env[k]; });
   return b;
@@ -2558,6 +2563,7 @@ async function processJob(jobId, prompt, explicitSession, files, chatId, ws, keu
     runOpts.env = Object.assign({}, runOpts.env || {}, { SOCEV_SESSIE: String(chatId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'onbekend', SOCEV_BEURT: jobId });
     // wv424: buiten de machinekamer geen beheersleutels (zie MK_SESSIES).
     if (!lezen && !runIsMk(chatId, ws)) socevSmalOpts(runOpts, chatId);
+    else if (!lezen && Object.hasOwn(MK_ENV_WEG, String(chatId || ''))) runOpts.envWeg = MK_ENV_WEG[String(chatId)];   // wv640
     // wv1030: beurtpas voor de sessies van SESSIE_ROUTES (vóór loperJobmap: de ACL voor socev gaat er dan mee overheen).
     if (!lezen && !runIsMk(chatId, ws) && Object.hasOwn(SESSIE_ROUTES, String(chatId || '')) && SECRET) {
       fs.writeFileSync(path.join(base, BEURTPAS_BESTAND), beurtpasVoor(jobId, String(chatId)), { mode: 0o600 });
@@ -18381,6 +18387,15 @@ const MK_SESSIES = new Set([
   'dagsamenvatting',                                  // wv589: dagsamenvatting.py (SUPABASE_SERVICE_ROLE) + bericht.py (API_SECRET, N8N_API_KEY, debug-bot)
   'pod-uitrol'
 ]);
+// wv640 (Fable wv554 vraag a, review wv612): per machinekamer-sessie de namen die er níét in komen; volle omgeving min deze lijst.
+// n8n-git-backup.mjs gebruikt de beheer-PAT sinds wv612 niet meer (kluis-hash via public.mk_pod_bootstrap_vinger() met de
+// service role); de geheimenpoort vangt de PAT sindsdien op zijn vorm (sbp_ + 40 hex, patroon supabase-pat), niet meer op de
+// waarde uit de omgeving. Een weglatlijst, geen allowlist: wat de poort aan letterlijke waarden zoekt blijft zo gelijk.
+// Hygiëne, geen grens (review wv640 #3). DEKT NIET: dezelfde uid leest /proc/<server.js>/environ en /tmp/agy-mcp_config.json (PAT
+// letterlijk), en met API_SECRET kan de sessie zelf /run telegram-debug of een machinekamer:-agent met de volle omgeving starten.
+const MK_ENV_WEG = {
+  'n8n-git-backup': ['SUPABASE_MCP_TOKEN']
+};
 const SOCEV_ENV_MAG = AUTO_AGENT_ENV_MAG.concat([
   'N8N_WEBHOOK_SMS',                                  // sms-berichten (versturen gaat langs David)
   'N8N_WEBHOOK_SOCEV_AGENDA',                         // agenda-schrijven: voorstel naar de Poortwachter (Knop (app) heeft sinds wv424 een eigen sleutel)
