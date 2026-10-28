@@ -275,34 +275,40 @@ function leesBibliotheek(tekst) {
 // alleen sleutels op (D1: alleen de sleutelkolom; health-pod: id en vervangt_id). In bevinding, box en databank alleen de tabel, een
 // korte hash en de map; een paginanaam kan medisch zijn, dus het volle pad en de verwijzing staan alleen in de machinekamer-uitvoer (paden).
 const GZ_MAP = '20_Prive/Gezondheid';
-const GZ_DIEPTE = 3;
-const GZ_REF_RE = /\b(cloudflare:d1-knie|olares:health-pod)(?:\/([A-Za-z0-9_-]+))?(?:#([^\s`'"<>()[\]{},|]+))?/g;
+const GZ_DIEPTE = 6;
+const GZ_REF_RE = /(?<![A-Za-z0-9])(cloudflare:d1-knie|olares:health-pod)(?:\/([A-Za-z0-9_-]+))?(?:#([^\s`'"<>()[\]{},|]+))?/g;
 // sleutel per tabel; andere tabellen (push_*, snooze, instellingen …) zijn machinestaat en niet te koppelen
-const KN_TABELLEN = { mijlpalen: 'id', fases: 'id', compex: 'id', medicatie: 'id', dagen: 'datum', dagplan: 'datum', rondes: 'datum/slot' };
+const KN_TABELLEN = Object.assign(Object.create(null), { mijlpalen: 'id', fases: 'id', compex: 'id', medicatie: 'id', dagen: 'datum', dagplan: 'datum', rondes: 'datum/slot' });   // diffreview #7: geen prototype
 const KN_ID_RE = { id: /^[A-Za-z0-9_-]{1,64}$/, datum: /^\d{4}-\d{2}-\d{2}$/, 'datum/slot': /^\d{4}-\d{2}-\d{2}\/[A-Za-z0-9_:-]{1,32}$/ };
 // health-pod: alleen vaste GET-paden (de aanroeper toetst ze ook met HP_PAD_RE); lijsten met historie, zodat vervangen rijen zichtbaar zijn
 const HP_LIJSTEN = ['diagnoses', 'gebeurtenissen', 'medicatie', 'kenmerken', 'bronnen'];
 const HP_LIMIET = 1000;
+const KN_MAX_SLEUTELS = 500, HP_MAX_RAPPORTEN = 25;   // diffreview #3: daarboven niet gemeten (begrensde nachtronde: ± 10 D1-vragen, ± 30 hp.py-aanroepen)
+const HP_ID_RE = /^[1-9]\d{0,8}$/;   // diffreview #5: geen voorloopnul (de API leest 007 als 7)
 const HP_PAD_RE = /^\/(?:(?:diagnoses|gebeurtenissen|medicatie|kenmerken|bronnen)\?historie=true&limiet=1000|rapporten\/\d{1,9}|metingen\/soorten)$/;
 const GZ_ACTUEEL_RE = /^\s*(actueel|actief)\b/i;
 
 function gzPagina(pad, tekst) {
   const fm = R.frontmatter(tekst);
   const status = fm.fout ? '' : String(fm.velden.status == null ? '' : fm.velden.status);
-  const refs = new Set(); let m; GZ_REF_RE.lastIndex = 0;
-  while ((m = GZ_REF_RE.exec(String(tekst))) !== null) refs.add(m[0].replace(/[.:;]+$/, ''));
-  return { pad: pad, actueel: GZ_ACTUEEL_RE.test(status), refs: Array.from(refs).sort().map(function (r) {
-    const x = /^(cloudflare:d1-knie|olares:health-pod)(?:\/([A-Za-z0-9_-]+))?(?:#(.+))?$/.exec(r);
-    return { ref: r, plek: x[1] === 'cloudflare:d1-knie' ? 'kn' : 'hp', tabel: x[2] || null, id: x[3] == null ? null : x[3] };
-  }) };
+  const refs = {}; let m; GZ_REF_RE.lastIndex = 0;
+  while ((m = GZ_REF_RE.exec(String(tekst))) !== null) {
+    // diffreview #1/#6: tabel en id uit de treffer zelf; leestekens en opmaak (**, ~, !, ?) alleen van het eind van het id; leeg id = vorm
+    const plek = m[1] === 'cloudflare:d1-knie' ? 'kn' : 'hp', tabel = m[2] || null;
+    let id = m[3] == null ? null : m[3].replace(/[.:;*~!?]+$/, '');
+    if (id != null && plek === 'hp') id = id.replace(/_+$/, '');
+    const ref = m[1] + (tabel ? '/' + tabel : '') + (id != null ? '#' + id : '');
+    refs[ref] = { ref: ref, plek: plek, tabel: tabel, id: id };
+  }
+  return { pad: pad, actueel: GZ_ACTUEEL_RE.test(status), refs: Object.keys(refs).sort().map(function (k) { return refs[k]; }) };
 }
-// alle pagina's onder 20_Prive/Gezondheid (hooguit 3 mappen diep, geen . of _); een map of pagina die niet te lezen is = niet gemeten
+// alle pagina's onder 20_Prive/Gezondheid (hooguit 6 mappen diep, geen verborgen . -bestanden); een map of pagina die niet te lezen is = niet gemeten
 function gzLees(ctx, lees) {
   const paginas = [];
   function loop(rel, diepte) {
     const l = ctx.lijst(rel);
     l.slice().sort(function (a, b) { return a.naam.localeCompare(b.naam); }).forEach(function (x) {
-      if (x.naam.startsWith('.') || x.naam.startsWith('_')) return;
+      if (x.naam.startsWith('.')) return;   // diffreview #11: ook _-mappen tellen mee (anders "opgelost" zonder meting)
       const r = rel + '/' + x.naam;
       if (x.map && diepte < GZ_DIEPTE) loop(r, diepte + 1);
       else if (x.bestand && /\.md$/i.test(x.naam)) {
@@ -332,6 +338,7 @@ async function knMeting(io, paginas) {
       if (r.plek !== 'kn' || !r.tabel || r.id == null || !KN_TABELLEN[r.tabel] || !tabellen.has(r.tabel) || !KN_ID_RE[KN_TABELLEN[r.tabel]].test(r.id)) return;
       (vraag[r.tabel] = vraag[r.tabel] || new Set()).add(r.id);
     }); });
+    if (Object.keys(vraag).reduce(function (n, k) { return n + vraag[k].size; }, 0) > KN_MAX_SLEUTELS) return { fout: 'te veel verwijzingen naar de knie-app (meer dan ' + KN_MAX_SLEUTELS + ')' };
     const gevonden = {};
     for (const tab of Object.keys(vraag).sort()) {
       const ids = Array.from(vraag[tab]); gevonden[tab] = new Set();
@@ -354,8 +361,8 @@ function knChecks(m, paginas, bev, tel, paden) {
     eigen.forEach(function (r) {
       tel.kn_verwijzingen++;
       if (!r.tabel) { if (r.id != null) gzBev(bev, paden, 'BB6', 'kn', p, r, 'vorm', 'gezondheidspagina: verwijzing naar de knie-app zonder tabel', 'een verwijzing cloudflare:d1-knie#… noemt geen tabel. Voorstel: cloudflare:d1-knie/<tabel>#<sleutel> (machinekamer).'); return; }
-      const t = schoon(r.tabel, 30);
-      if (!KN_TABELLEN[r.tabel]) { gzBev(bev, paden, 'BB6', 'kn', p, r, 'vorm', 'gezondheidspagina verwijst naar een knie-tabel die niet te koppelen is (' + t + ')', 'cloudflare:d1-knie/' + t + ' is geen koppelbare tabel (wel: ' + Object.keys(KN_TABELLEN).join(', ') + '). Voorstel: de verwijzing goedzetten of weghalen (machinekamer).'); return; }
+      if (!KN_TABELLEN[r.tabel]) { const o = 'onbekende tabel ' + h6(r.tabel); gzBev(bev, paden, 'BB6', 'kn', p, r, 'vorm', 'gezondheidspagina verwijst naar een knie-tabel die niet te koppelen is (' + o + ')', 'cloudflare:d1-knie/<' + o + '> is geen koppelbare tabel (wel: ' + Object.keys(KN_TABELLEN).join(', ') + '). Voorstel: de verwijzing goedzetten of weghalen (machinekamer).'); return; }
+      const t = r.tabel;   // vanaf hier op de witte lijst (diffreview #2: een vrije tabelnaam is pagina-inhoud)
       if (!m.tabellen.has(r.tabel)) { gzBev(bev, paden, 'BB1', 'kn', p, r, 'geen-tabel', 'gezondheidspagina verwijst naar een knie-tabel die er niet (meer) is (' + t + ')', 'D1 knie heeft geen tabel ' + t + '. Voorstel: nagaan of de knie-app een migratie kreeg; de verwijzing bijwerken (machinekamer).'); return; }
       if (r.id == null) return;   // verwijzing naar de tabel als geheel: bestaat
       if (!KN_ID_RE[KN_TABELLEN[r.tabel]].test(r.id)) { gzBev(bev, paden, 'BB6', 'kn', p, r, 'vorm', 'gezondheidspagina: knie-verwijzing met een sleutel in de verkeerde vorm (' + t + ')', 'cloudflare:d1-knie/' + t + '#… moet de sleutel ' + KN_TABELLEN[r.tabel] + ' hebben. Voorstel: de verwijzing goedzetten (machinekamer).'); return; }
@@ -364,14 +371,15 @@ function knChecks(m, paginas, bev, tel, paden) {
   });
 }
 // io.hp(pad) → { j } of { weigert: <http> }; gooit als de health-pod niet bereikbaar is. Uitslag van hp.py omzetten: zie hpUitslag.
-function hpUitslag(r) {
+// pad: bij één rapport mag het antwoord ingekort zijn (diffreview #4: een rapport is groot; het id bovenaan blijft staan), een lijst nooit.
+function hpUitslag(r, pad) {
   if (r && r.code === 0) {
     let j; try { j = JSON.parse(r.stdout); } catch (e) { throw new Error('health-pod: geen JSON'); }
-    if (j && typeof j === 'object' && j._INGEKORT) throw new Error('health-pod: antwoord ingekort');
+    if (j && typeof j === 'object' && j._INGEKORT && !/^\/rapporten\/\d+$/.test(String(pad || ''))) throw new Error('health-pod: antwoord ingekort');
     return { j: j };
   }
-  const m = r && r.code === 3 && /^POD WEIGERT: HTTP (\d{3})\b/.exec(String(r.stdout || ''));
-  if (m) return { weigert: Number(m[1]) };
+  const m = r && r.code === 3 && /^POD WEIGERT: HTTP (\d{3})\b(.*)/.exec(String(r.stdout || ''));
+  if (m) return { weigert: Number(m[1]), geen_rapport: /geen rapport met dit id/.test(m[2]) };   // diffreview #9: een ontbrekende route is geen ontbrekend rapport
   throw new Error(r && r.signaal ? 'health-pod: tijdgrens' : 'health-pod niet bereikbaar (exit ' + (r ? r.code : '?') + ')');
 }
 async function hpMeting(io, paginas) {
@@ -381,8 +389,9 @@ async function hpMeting(io, paginas) {
     paginas.forEach(function (p) { p.refs.forEach(function (r) {
       if (r.plek !== 'hp' || !r.tabel) return;
       if (HP_LIJSTEN.indexOf(r.tabel) >= 0 || r.tabel === 'metingen') nodig.add(r.tabel);
-      if (r.tabel === 'rapporten' && r.id != null && /^\d{1,9}$/.test(r.id)) rapporten.add(r.id);
+      if (r.tabel === 'rapporten' && r.id != null && HP_ID_RE.test(r.id)) rapporten.add(r.id);
     }); });
+    if (rapporten.size > HP_MAX_RAPPORTEN) return { fout: 'te veel rapportverwijzingen (meer dan ' + HP_MAX_RAPPORTEN + ')' };
     const uit = { lijst: {}, soorten: null, rapporten: {} };
     for (const tab of Array.from(nodig).sort()) {
       if (tab === 'metingen') {
@@ -393,15 +402,16 @@ async function hpMeting(io, paginas) {
       }
       const a = await io.hp('/' + tab + '?historie=true&limiet=' + HP_LIMIET);
       if (!a.j || !Array.isArray(a.j.rijen)) return { fout: 'health-pod: ' + tab + ' niet te lezen' };
-      // een halve lijst is geen meting: dan zou elke ontbrekende rij als "bestaat niet" tellen
-      if (a.j.rijen.length >= HP_LIMIET || (Number.isInteger(a.j.aantal) && a.j.aantal !== a.j.rijen.length)) return { fout: 'health-pod: ' + tab + ' niet volledig' };
+      // een halve lijst is geen meting: dan zou elke ontbrekende rij als "bestaat niet" tellen (diffreview #8: een oudere pod kapt stil af
+      // zonder limiet terug te geven); een lijst boven 60.000 tekens kort hp.py in → hpUitslag gooit → niet gemeten
+      if (a.j.rijen.length >= HP_LIMIET || a.j.limiet !== HP_LIMIET || (Number.isInteger(a.j.aantal) && a.j.aantal !== a.j.rijen.length)) return { fout: 'health-pod: ' + tab + ' niet volledig' };
       const ids = new Set(), vervangen = new Set();
       a.j.rijen.forEach(function (x) { ids.add(String(x.id)); if (x.vervangt_id != null) vervangen.add(String(x.vervangt_id)); });
       uit.lijst[tab] = { ids: ids, vervangen: vervangen };
     }
     for (const id of Array.from(rapporten).sort()) {
       const a = await io.hp('/rapporten/' + id);
-      if (a.weigert === 404) uit.rapporten[id] = false;
+      if (a.weigert === 404 && a.geen_rapport) uit.rapporten[id] = false;
       else if (a.j && String(a.j.id) === id) uit.rapporten[id] = true;
       else return { fout: 'health-pod: rapport niet te lezen' };
     }
@@ -416,16 +426,16 @@ function hpChecks(m, paginas, bev, tel, paden) {
     eigen.forEach(function (r) {
       tel.hp_verwijzingen++;
       if (!r.tabel) { if (r.id != null) gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina: verwijzing naar de health-pod zonder tabel', 'een verwijzing olares:health-pod#… noemt geen tabel. Voorstel: olares:health-pod/<tabel>#<id> (machinekamer).'); return; }
-      const t = schoon(r.tabel, 30);
       const lijst = HP_LIJSTEN.indexOf(r.tabel) >= 0;
-      if (!lijst && r.tabel !== 'rapporten' && r.tabel !== 'metingen') { gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina verwijst naar een health-pod-tabel die niet te toetsen is (' + t + ')', 'olares:health-pod/' + t + ' is niet te toetsen (wel: ' + HP_LIJSTEN.concat(['rapporten', 'metingen#<soort>']).join(', ') + '). Voorstel: de verwijzing goedzetten of weghalen (machinekamer).'); return; }
+      if (!lijst && r.tabel !== 'rapporten' && r.tabel !== 'metingen') { const o = 'onbekende tabel ' + h6(r.tabel); gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina verwijst naar een health-pod-tabel die niet te toetsen is (' + o + ')', 'olares:health-pod/<' + o + '> is niet te toetsen (wel: ' + HP_LIJSTEN.concat(['rapporten', 'metingen#<soort>']).join(', ') + '). Voorstel: de verwijzing goedzetten of weghalen (machinekamer).'); return; }
+      const t = r.tabel;   // op de witte lijst
       if (r.id == null) return;
       if (r.tabel === 'metingen') {   // een meting is niet per id op te vragen; de pagina noemt de reeks (soort)
-        if (!/^[a-z0-9_]{1,40}$/.test(r.id)) { gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina: verwijzing naar een meting in de verkeerde vorm', 'olares:health-pod/metingen#… noemt een meetsoort (bijv. #gewicht), geen meting-id. Voorstel: de verwijzing goedzetten (machinekamer).'); return; }
+        if (!/^[a-z0-9_]{1,60}$/.test(r.id)) { gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina: verwijzing naar een meting in de verkeerde vorm', 'olares:health-pod/metingen#… noemt een meetsoort (bijv. #gewicht), geen meting-id. Voorstel: de verwijzing goedzetten (machinekamer).'); return; }
         if (!m.soorten.has(r.id)) gzBev(bev, paden, 'BB1', 'hp', p, r, 'geen-soort', 'gezondheidspagina verwijst naar een meetsoort die de health-pod niet kent', 'olares:health-pod/metingen#… is geen meetsoort in de health-pod. Voorstel: de verwijzing goedzetten of weghalen (machinekamer).');
         return;
       }
-      if (!/^\d{1,9}$/.test(r.id)) { gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina: health-pod-verwijzing zonder geldig id (' + t + ')', 'olares:health-pod/' + t + '#… moet een rijnummer hebben. Voorstel: de verwijzing goedzetten (machinekamer).'); return; }
+      if (!HP_ID_RE.test(r.id)) { gzBev(bev, paden, 'BB6', 'hp', p, r, 'vorm', 'gezondheidspagina: health-pod-verwijzing zonder geldig id (' + t + ')', 'olares:health-pod/' + t + '#… moet een rijnummer hebben. Voorstel: de verwijzing goedzetten (machinekamer).'); return; }
       const bestaat = lijst ? m.lijst[r.tabel].ids.has(r.id) : m.rapporten[r.id] === true;
       if (!bestaat) { gzBev(bev, paden, 'BB1', 'hp', p, r, 'geen-rij', 'gezondheidspagina verwijst naar een rij in de health-pod die niet bestaat (' + t + ')', 'de verwijzing olares:health-pod/' + t + '#… vindt geen rij. Voorstel: de verwijzing goedzetten of weghalen (machinekamer); de health-pod blijft de bron.'); return; }
       // append-only: een nieuwere rij vervangt deze; een pagina met status actueel noemt dan een verouderde rij als actueel

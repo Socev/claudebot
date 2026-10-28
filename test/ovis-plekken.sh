@@ -258,16 +258,18 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
       toets('13 knMeting: geen lezer / leeg / fout → niet gemeten', !!(await P.knMeting({}, KP)).fout && !!(await P.knMeting({ kn: async () => [{ results: [] }] }, KP)).fout && /503/.test((await P.knMeting({ kn: async () => { throw new Error('D1 knie http 503'); } }, KP)).fout || ''));
     }
     // plek 14
-    toets('14 hpUitslag: JSON, ingekort gooit, 404 = weigert, onbereikbaar gooit', P.hpUitslag({ code: 0, stdout: '{"a":1}' }).j.a === 1 && P.hpUitslag({ code: 3, stdout: 'POD WEIGERT: HTTP 404 {"detail":"x"}\n' }).weigert === 404
+    toets('14 hpUitslag: JSON, ingekort gooit (behalve één rapport), 404 = weigert, alleen "geen rapport met dit id" telt als geen rapport, onbereikbaar gooit', P.hpUitslag({ code: 0, stdout: '{"a":1}' }).j.a === 1 && P.hpUitslag({ code: 3, stdout: 'POD WEIGERT: HTTP 404 {"detail":"x"}\n' }).weigert === 404
+      && !P.hpUitslag({ code: 3, stdout: 'POD WEIGERT: HTTP 404 {"detail":"Not Found"}\n' }).geen_rapport && P.hpUitslag({ code: 3, stdout: 'POD WEIGERT: HTTP 404 {"detail":"geen rapport met dit id"}\n' }).geen_rapport
+      && P.hpUitslag({ code: 0, stdout: '{"_INGEKORT":{},"id":5}' }, '/rapporten/5').j.id === 5
       && (() => { try { P.hpUitslag({ code: 0, stdout: '{"_INGEKORT":{}}' }); return false; } catch (e) { return /ingekort/.test(e.message); } })() && (() => { try { P.hpUitslag({ code: 2, stdout: 'POD NIET BEREIKBAAR: x' }); return false; } catch (e) { return /niet bereikbaar/.test(e.message); } })());
     const HPG = [P.gzPagina('20_Prive/Gezondheid/Proef - geheimeziekte.md', PG('actueel', ['olares:health-pod/diagnoses#1 olares:health-pod/diagnoses#2 olares:health-pod/diagnoses#99 olares:health-pod/metingen#gewicht olares:health-pod/metingen#nepsoort olares:health-pod/metingen#12345- olares:health-pod/rapporten#5 olares:health-pod/rapporten#6 olares:health-pod/pgs_uitkomst#3 olares:health-pod/diagnoses#abc'])),
       P.gzPagina('20_Prive/Gezondheid/Oud.md', PG('concept', ['olares:health-pod/diagnoses#1']))];
     const gevraagd = [];
     const hp = async (pad) => { gevraagd.push(pad);
-      if (pad === '/diagnoses?historie=true&limiet=1000') return { j: { aantal: 3, rijen: [{ id: 1, vervangt_id: null }, { id: 2, vervangt_id: null }, { id: 3, vervangt_id: 1 }] } };
+      if (pad === '/diagnoses?historie=true&limiet=1000') return { j: { aantal: 3, rijen: [{ id: 1, vervangt_id: null }, { id: 2, vervangt_id: null }, { id: 3, vervangt_id: 1 }], limiet: 1000 } };
       if (pad === '/metingen/soorten') return { j: { aantal: 1, rijen: [{ soort: 'gewicht' }] } };
       if (pad === '/rapporten/5') return { j: { id: 5 } };
-      if (pad === '/rapporten/6') return { weigert: 404 };
+      if (pad === '/rapporten/6') return { weigert: 404, geen_rapport: true };
       throw new Error('onverwacht pad ' + pad); };
     const hm = await P.hpMeting({ hp }, HPG);
     toets('14 hpMeting: alleen vaste paden (HP_PAD_RE), elke lijst één keer, rapport per id', !hm.fout && gevraagd.every((x) => P.HP_PAD_RE.test(x)) && gevraagd.length === 4 && !P.HP_PAD_RE.test('/metingen?soort=gewicht') && !P.HP_PAD_RE.test('/wissen') && !P.HP_PAD_RE.test('/rapporten/5?x=1'), [hm.fout, gevraagd]);
@@ -276,15 +278,33 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     const hc = v.b.map((x) => x.id.replace(/-[0-9a-f]{6}-/, '-…-')).sort();
     toets('14 BB6 vervangen rij op een actuele pagina (niet op een concept), BB1 rij 99, BB1 nepsoort, BB1 rapport 6, BB6 meting-id, BB6 tabel, BB6 geen getal', hc.join() === ['BB1-hp-…-geen-rij', 'BB1-hp-…-geen-soort', 'BB1-hp-…-geen-rij', 'BB6-hp-…-vervangen', 'BB6-hp-…-vorm', 'BB6-hp-…-vorm', 'BB6-hp-…-vorm'].sort().join() && tel.hp_verwijzingen === 11 && tel.hp_paginas === 2, [hc, tel]);
     toets('14 geen paginanaam of waarde in bevindingen; ernst alleen good/warning/serious/critical', v.b.every((x) => !/geheimeziekte|nepsoort|Oud\.md/.test(x.z + x.d) && ['good', 'warning', 'serious', 'critical'].indexOf(x.e) >= 0), v.b);
-    toets('14 hpMeting: halve lijst (aantal ≠ rijen, of op de limiet) = niet gemeten', /niet volledig/.test((await P.hpMeting({ hp: async () => ({ j: { aantal: 4, rijen: [{ id: 1 }] } }) }, [HPG[1]])).fout || '') && /niet volledig/.test((await P.hpMeting({ hp: async () => ({ j: { rijen: Array.from({ length: 1000 }, (_, i) => ({ id: i })) } }) }, [HPG[1]])).fout || ''));
+    toets('14 hpMeting: halve lijst (aantal ≠ rijen, of op de limiet) = niet gemeten', /niet volledig/.test((await P.hpMeting({ hp: async () => ({ j: { aantal: 4, rijen: [{ id: 1 }], limiet: 1000 } }) }, [HPG[1]])).fout || '') && /niet volledig/.test((await P.hpMeting({ hp: async () => ({ j: { aantal: 1, rijen: [{ id: 1 }] } }) }, [HPG[1]])).fout || '') && /niet volledig/.test((await P.hpMeting({ hp: async () => ({ j: { rijen: Array.from({ length: 1000 }, (_, i) => ({ id: i })), limiet: 1000 } }) }, [HPG[1]])).fout || ''));
     toets('14 hpMeting: geen lezer of pod weg → niet gemeten; geen verwijzingen → geen vraag', !!(await P.hpMeting({}, HPG)).fout && /bereikbaar/.test((await P.hpMeting({ hp: async () => { throw new Error('health-pod niet bereikbaar (exit 2)'); } }, HPG)).fout || '') && await (async () => { let n = 0; const r = await P.hpMeting({ hp: async () => { n++; return {}; } }, [P.gzPagina('a.md', PG('actueel', ['olares:health-pod']))]); return !r.fout && n === 0; })());
 
+    // diffreview wv1774: randgevallen
+    { const p = P.gzPagina('a.md', PG('actueel', ['cloudflare:d1-knie/mijlpalen#. en cloudflare:d1-knie#: en **olares:health-pod/diagnoses#3**, olares:health-pod/diagnoses#4! _olares:health-pod/diagnoses#5_ cloudflare:d1-knie/constructor#x cloudflare:d1-knie/kruisband_links#x olares:health-pod/scheur_mediaal#3 olares:health-pod/rapporten#007']));
+      toets('review #1/#6: kale # loopt niet vast (leeg id), opmaak en leestekens horen niet bij het id', p.refs.some((r) => r.ref === 'cloudflare:d1-knie/mijlpalen#' && r.id === '') && p.refs.some((r) => r.ref === 'cloudflare:d1-knie#') && ['3', '4', '5'].every((i) => p.refs.some((r) => r.ref === 'olares:health-pod/diagnoses#' + i)), p.refs.map((r) => r.ref));
+      const v1 = verzamel(); P.knChecks({ tabellen: new Set(['mijlpalen']), gevonden: {} }, [p], v1.bev, {}, {});
+      const v2 = verzamel(); P.hpChecks({ lijst: { diagnoses: { ids: new Set(['3', '4', '5']), vervangen: new Set() } }, rapporten: {} }, [p], v2.bev, {}, {});
+      const alle = v1.b.concat(v2.b);
+      toets('review #2: een vrije tabelnaam staat nooit in samenvatting of detail (alleen een hash)', alle.length > 0 && alle.every((x) => !/kruisband|scheur_mediaal|constructor/.test(x.z + x.d)), alle);
+      toets('review #7: constructor is geen tabel (BB6 vorm, geen BB1)', v1.b.filter((x) => x.check === 'BB1').length === 0 && v1.b.filter((x) => /-vorm$/.test(x.id)).length === 4, v1.b);
+      toets('review #5: rapporten#007 = BB6 vorm, geen vraag aan de pod', v2.b.some((x) => /-vorm$/.test(x.id)) && v2.b.filter((x) => x.check === 'BB1').length === 0, v2.b);
+      let n = 0; const r = await P.hpMeting({ hp: async () => { n++; return { j: { id: 1 } }; } }, [P.gzPagina('b.md', PG('actueel', Array.from({ length: 26 }, (_, i) => 'olares:health-pod/rapporten#' + (i + 1))))]);
+      toets('review #3: meer dan 25 rapportverwijzingen = niet gemeten, zonder aanroep', /te veel/.test(r.fout || '') && n === 0, [r, n]);
+      const k = await P.knMeting({ kn: async (b) => /sqlite_master/.test(b[0].sql) ? [{ results: [{ name: 'mijlpalen' }] }] : [{ results: [] }] }, [P.gzPagina('c.md', PG('actueel', Array.from({ length: 501 }, (_, i) => 'cloudflare:d1-knie/mijlpalen#m' + i)))]);
+      toets('review #3: meer dan 500 knie-sleutels = niet gemeten', /te veel/.test(k.fout || ''), k);
+      const r2 = await P.hpMeting({ hp: async () => ({ weigert: 404, geen_rapport: false }) }, [P.gzPagina('d.md', PG('actueel', ['olares:health-pod/rapporten#9']))]);
+      toets('review #9: 404 zonder "geen rapport" = niet gemeten, geen BB1', !!r2.fout, r2);
+      const lijstje = []; await P.gzLees({ lijst: (rel) => rel === '20_Prive/Gezondheid' ? [{ naam: '_archief', map: true }, { naam: '.x.md', bestand: true }] : rel === '20_Prive/Gezondheid/_archief' ? [{ naam: 'oud.md', bestand: true }] : [] }, (rel) => { lijstje.push(rel); return '# x'; });
+      toets('review #11: _-mappen tellen mee, verborgen .-bestanden niet', lijstje.join() === '20_Prive/Gezondheid/_archief/oud.md', lijstje);
+    }
     // haak: Bibliothecaris met plek 13–14; niet gemeten ≠ opgelost; geen kaart; zin alleen aantallen
     const vg = fs.mkdtempSync(path.join(os.tmpdir(), 'ovisgz-'));
     const zet = (rel, t) => { fs.mkdirSync(path.join(vg, path.dirname(rel)), { recursive: true }); fs.writeFileSync(path.join(vg, rel), t); };
     zet('20_Prive/Gezondheid/index.md', PG('actueel', ['olares:health-pod']));
     zet('20_Prive/Gezondheid/Knie/Proef - geheimeziekte.md', PG('actueel', ['cloudflare:d1-knie/mijlpalen#proefweg', 'olares:health-pod/diagnoses#1']));
-    zet('20_Prive/Gezondheid/_sjabloon.md', PG('actueel', ['cloudflare:d1-knie/mijlpalen#telniet']));
+    zet('20_Prive/Gezondheid/.verborgen.md', PG('actueel', ['cloudflare:d1-knie/mijlpalen#telniet']));
     const db = { knopen: [{ id: 'org:x', soort: 'organisatie', naam: 'X', aliassen: [], vault_pagina: 'x.md', concept: true }], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [], kaarten: [] };
     const sbRpc = async (fn, body) => {
       if (fn === 'ovis_register_lees') return JSON.parse(JSON.stringify(db));
@@ -296,11 +316,11 @@ const PAG = (blok) => ['---', 'type: register', 'vertrouwelijk: true', 'ovis:', 
     };
     let knieRijen = [], hpWeg = false, vervangen = true;
     const rest = { kn: async (b) => /sqlite_master/.test(b[0].sql) ? [{ results: [{ name: 'mijlpalen' }] }] : [{ results: b[0].params.filter((x) => knieRijen.indexOf(x) >= 0).map((k) => ({ k })) }],
-      hp: async (pad) => { if (hpWeg) throw new Error('health-pod niet bereikbaar (exit 2)'); return { j: { aantal: 2, rijen: [{ id: 1, vervangt_id: null }, { id: 2, vervangt_id: vervangen ? 1 : null }] } }; } };
+      hp: async (pad) => { if (hpWeg) throw new Error('health-pod niet bereikbaar (exit 2)'); return { j: { aantal: 2, rijen: [{ id: 1, vervangt_id: null }, { id: 2, vervangt_id: vervangen ? 1 : null }], limiet: 1000 } }; } };
     const m = R.maak({ vault: vg, sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: () => {}, nu: () => Date.parse('2026-10-28T01:30:00Z'), rest });
     const open = () => db.bevindingen.filter((x) => /^BB\d-(kn|hp)-/.test(x.bevinding_id)).map((x) => x.bevinding_id).sort();
     let b = await m.bibliothecaris({ afroep: true });
-    toets('haak 13/14: knie-rij weg (BB1) en vervangen health-pod-rij (BB6) open; _-pagina telt niet; zin noemt beide met aantallen', open().length === 2 && open().some((x) => /^BB1-kn-.*-geen-rij$/.test(x)) && open().some((x) => /^BB6-hp-.*-vervangen$/.test(x)) && /Knie-app: 1 verwijzing\(en\) op 1 pagina\('s\), 1 verschil/.test(b.zin) && /Health-pod: 2 verwijzing\(en\) op 2 pagina\('s\), 1 verschil/.test(b.zin), [open(), b.zin]);
+    toets('haak 13/14: knie-rij weg (BB1) en vervangen health-pod-rij (BB6) open; verborgen .-pagina telt niet; zin noemt beide met aantallen', open().length === 2 && open().some((x) => /^BB1-kn-.*-geen-rij$/.test(x)) && open().some((x) => /^BB6-hp-.*-vervangen$/.test(x)) && /Knie-app: 1 verwijzing\(en\) op 1 pagina\('s\), 1 verschil/.test(b.zin) && /Health-pod: 2 verwijzing\(en\) op 2 pagina\('s\), 1 verschil/.test(b.zin), [open(), b.zin]);
     toets('haak 13/14: niets medisch in databankrijen, zin of tel', db.bevindingen.every((x) => !/geheimeziekte|proefweg|Knie\//.test(JSON.stringify(x))) && !/geheimeziekte|proefweg/.test(b.zin + JSON.stringify(b.tel)), db.bevindingen);
     toets('haak 13/14: paden alleen in de uitkomst voor de machinekamer', Object.values(b.rest.paden).some((x) => /geheimeziekte/.test(x)));
     hpWeg = true; vervangen = false;

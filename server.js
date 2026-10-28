@@ -15191,7 +15191,7 @@ async function ovisHp(pad) {
   const P = require('./ovis-plekken.js');
   if (!P.HP_PAD_RE || !P.HP_PAD_RE.test(String(pad))) throw new Error('health-pod: pad niet toegestaan');
   const env = {}; OVIS_HP_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
-  return P.hpUitslag(await smalKind('python3', ['-I', path.join(VAULT, '.claude', 'skills', 'health-pod', 'hp.py'), 'GET', String(pad)], '', 60000, env));
+  return P.hpUitslag(await smalKind('python3', ['-I', path.join(VAULT, '.claude', 'skills', 'health-pod', 'hp.py'), 'GET', String(pad)], '', 60000, env), String(pad));
 }
 const ovis = (function () {
   if (!OVIS_MOD) return null;

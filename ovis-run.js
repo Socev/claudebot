@@ -128,7 +128,7 @@ function restLezer() {
       require('child_process').execFile('python3', ['-I', bin, 'GET', String(pad)], { env: env, timeout: 60000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024 },
         function (err, stdout) {
           const code = err ? (typeof err.code === 'number' ? err.code : -1) : 0;
-          try { klaar(P.hpUitslag({ code: code, signaal: err && err.signal || undefined, stdout: String(stdout || '') })); } catch (e) { faal(e); }
+          try { klaar(P.hpUitslag({ code: code, signaal: err && err.signal || undefined, stdout: String(stdout || '') }, String(pad))); } catch (e) { faal(e); }
         });
     });
   };
