@@ -4,7 +4,7 @@
 // handvol XML-delen; Node 22 heeft zlib.crc32 en deflateRawSync, dus dit kan zonder nieuwe afhankelijkheid.
 //
 // schrijf([{naam, rijen: [[tekst, …], …]}]) → Buffer. De eerste rij van elk blad is de kopregel (vet, vastgezet).
-// Getallen: alleen wat eenduidig een getal is wordt een getal (NL-notatie 1.234,56 en 12,5; ook 1234.5; € ervoor = valutaopmaak). Al het
+// Getallen: alleen wat eenduidig een getal is wordt een getal (NL-notatie 1.234,56 en 12,5; ook 1234.5, niet 10.30; € ervoor = valutaopmaak). Al het
 // andere blijft tekst, ook nummers met een voorloopnul (telefoon, postcode-achtig) en meer dan 15 cijfers. Formules nooit: dit bestand
 // bevat geen enkel <f>-element; een cel die met = + - @ begint en geen getal is, krijgt bovendien quotePrefix (Excel houdt hem ook na
 // bewerken als tekst).
@@ -32,6 +32,7 @@ function alsGetal(ruw) {
   if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(t)) n = Number(t.replace(/\./g, '').replace(',', '.'));   // 1.234 en 1.234,56
   else if (/^\d+,\d+$/.test(t)) n = Number(t.replace(',', '.'));                                   // 12,5
   else if (/^\d{1,3}(,\d{3})+\.\d+$/.test(t)) n = Number(t.replace(/,/g, ''));                    // 1,234.56
+  else if (/^\d{1,2}\.\d{2}$/.test(t)) return null;                                                // 10.30, 14.00: tijd of versie, geen getal (review ZOU 5)
   else if (/^\d+(\.\d+)?$/.test(t)) n = Number(t);                                                 // 1234 en 3.5
   else if (euro && /^\d{1,3}(\.\d{3})*,-{1,2}$/.test(t)) n = Number(t.replace(/\./g, '').replace(/,-+$/, ''));   // € 25,-
   if (n === null || !Number.isFinite(n)) return null;

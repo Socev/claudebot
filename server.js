@@ -4855,7 +4855,7 @@ const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften', 'mediat
 function appPriveDicht(a, id) { return !!(a && a.soort === 'vast') && APP_PRIVE_MODULES.indexOf(id) >= 0; }
 const APP_VENDOR = path.join(APP_DATA, 'vendor', 'package.json');  // brug tot het image @simplewebauthn/server heeft
 const APP_MAX_BODY = 64 * 1024;
-const APP_OMZET_MAX_BODY = 3 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping
+const APP_OMZET_MAX_BODY = 5 * 1024 * 1024;   // wv1854: tekst ≤ 2 MB (omzet.js telt de bytes en geeft 413) + JSON-ontsnapping (\n, \", \uXXXX)
 const APP_CODE_MS = 10 * 60 * 1000;
 const APP_CODE_POGINGEN = 5;
 const APP_CODE_INTERVAL_MS = 60 * 1000;
@@ -16719,8 +16719,10 @@ async function appDocs(req, res, a, s, d, route) {
 // WAAROM. David 28-10-2026: "Als ik in onze Markdown-Viewer een knop "Download als..." krijg en dan kiezen voor PDF, PDF met huisstijl, Word,
 // Xlsx - als voorbeelden, dan is dat al super." De app (Lezer en Docs) stuurt de tekst die David al in beeld heeft; omzet.js maakt er een PDF
 // (Chromium, JS uit, netwerk dicht), Word (pandoc) of Excel (eigen schrijver) van. Het bestand gaat terug naar zijn eigen apparaat, net als
-// Download; niets wordt bewaard. In APP_SLOT_VRIJ: op een vaste plek staat de tekst al in beeld (hij kwam via een open slot binnen) en de
-// app biedt het origineel (.md) daar ook zonder pod aan. Audit: formaat, soort, huisstijl, grootte, ms en het aantal geblokkeerde verzoeken.
+// Download; niets wordt bewaard. In APP_SLOT_VRIJ (Opus-review 28-10 #3): de uitkomst is alleen een functie van de meegestuurde tekst
+// plus de openbare huisstijl; de route leest niets uit de vault of de bestanden, dus er komt op een vaste plek geen gegeven bij dat de app
+// niet al had (de app biedt het origineel daar ook zonder pod als download aan). Het werk draait in een eigen kindproces met tijd- en
+// geheugengrens (omzet.js). Audit: formaat, soort, huisstijl, grootte, ms, het aantal geblokkeerde verzoeken en een eventuele afbreekreden.
 const omzetter = (function () {
   const p = path.join(__dirname, 'omzet.js');
   if (!fs.existsSync(p)) return null;
@@ -16739,7 +16741,7 @@ async function appOmzet(req, res, a, d, route) {
   catch (e) { logError('app-omzet', e); return appWeiger(res, 500, 'fout op de pod', 'omzet uitzondering'); }
   const au = r.audit || {};
   res._app.reden = ('omzet ' + [au.formaat, au.soort, au.huisstijl].filter(Boolean).join(' ') + (au.in_kb ? ' ' + au.in_kb + 'kB' : '') +
-    (au.uit_kb ? '→' + au.uit_kb + 'kB' : '') + (au.ms !== undefined ? ' ' + au.ms + 'ms' : '') + (au.pogingen !== undefined ? ' geblokkeerd=' + au.pogingen : '') +
+    (au.uit_kb ? '→' + au.uit_kb + 'kB' : '') + (au.ms !== undefined ? ' ' + au.ms + 'ms' : '') + (au.pogingen !== undefined ? ' geblokkeerd=' + au.pogingen : '') + (au.afgebroken ? ' afgebroken=' + au.afgebroken : '') +
     (r.status !== 200 ? ' (' + r.status + ')' : '')).slice(0, 160);
   return appStuur(res, r.status, r.j);
 }

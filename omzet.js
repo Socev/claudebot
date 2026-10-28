@@ -14,6 +14,10 @@
 //   niet-http(s)-links eruit; daarna AST → docx met de reference-doc van de huisstijl.
 // - Excel: dezelfde AST → de tabellen → xlsx-schrijver.js (elke tabel een blad; formules nooit).
 // Alles in een eigen tijdelijke map (0700) die na afloop weg is. In log en audit alleen formaat, soort, huisstijl, grootte, ms, pogingen.
+// Opus-review (28-10, MOET 1 en 2): het werk draait in een eigen kindproces (node omzet.js --werker, eigen heap, kale omgeving zonder de
+// sleutels van server.js), zodat een trage regex of een grote AST de pod niet stillegt. De ouder bewaakt de hele procesboom (kind, pandoc,
+// Chromium): na de harde tijdslimiet of boven MAX_RSS gaat alles met SIGKILL weg. Een PDF met meer dan MAX_PDF_RIJEN tabelregels wordt
+// vooraf geweigerd (Chromium groeide daar gemeten tot ± 12 GB; een OOM schiet de hele pod af).
 //
 // Ook voor Socev zelf (bouwplan § 3.3): node /app/omzet.js <pdf|docx|xlsx> [--huisstijl <sleutel>] [--soort md|html|csv|tekst] <in> <uit>
 const fs = require('fs');
@@ -27,6 +31,10 @@ const MAX_PANDOC_UIT = 150 * 1024 * 1024;   // AST van een grote tekst
 const TIJD_MS = 20 * 1000;
 const WACHT_MAX = 3;
 const WACHT_MS = 30 * 1000;
+const HARD_MS = 5 * 1000;                   // bovenop TIJD_MS: dan haalt de ouder de hele procesboom weg
+const MAX_RSS = 2560 * 1024 * 1024;         // hele procesboom (kind + pandoc + Chromium)
+const KIND_HEAP_MB = 1536;
+const MAX_PDF_RIJEN = 5000;
 const SOORTEN = ['md', 'html', 'csv', 'tekst'];
 const FORMATEN = {
   pdf: { ext: 'pdf', type: 'application/pdf' },
@@ -53,7 +61,7 @@ function voorMd(md, voorbewerk) {
   let s = voorbewerk(md);
   s = s.replace(/!\[\[[^\]\n]*\]\]/g, '');
   s = s.replace(/\[\[([^\[\]\n]+?)\]\]/g, (m, b) => mdEsc(wikiLabel(b)));
-  s = s.replace(/^(\s*>\s*)\[!([\w-]+)\][+-]?[ \t]*(.*)$/gm, (m, p, soort, titel) =>   // callout: titel vet als eigen alinea
+  s = s.replace(/^([ \t]*>[ \t]*)\[!([\w-]+)\][+-]?[ \t]*(.*)$/gm, (m, p, soort, titel) =>   // [ \t], niet \s: \s over regels heen = kwadratisch (review)   // callout: titel vet als eigen alinea
     p + '**' + (titel.trim() || (soort[0].toUpperCase() + soort.slice(1).toLowerCase())) + '**\n' + p.replace(/\s+$/, ''));
   s = s.replace(/==([^=\n]+)==/g, '$1');
   return s;
@@ -247,6 +255,7 @@ function maak(opt) {
       p.on('error', function (e) { stop(e); });
       p.on('close', function (code) {
         if (klaar) return; klaar = true; clearTimeout(t);
+        if (code === 251) return reject(Object.assign(new Error('pandoc: geheugen op'), { groot: true }));   // RTS -M bereikt (review ZOU 6)
         if (code !== 0) return reject(new Error('pandoc stopte met code ' + code));   // stderr niet in de fout: kan tekst bevatten
         resolve(Buffer.concat(uit));
       });
@@ -286,8 +295,20 @@ function maak(opt) {
       const frag = (await pandoc(['-f', 'json', '-t', 'html5'], JSON.stringify(ast), dir, tot)).toString('utf8').replace(/<table>/g, '<table class="csv">');
       return metStijl(pagina(d.basis, '<div class="tabel">' + frag + '</div>'), st);
     }
-    // html: zoals het is (JS staat uit, CSP en het routeslot houden alles buiten); alleen een meta-refresh eruit
-    return String(d.tekst).replace(/<meta[^>]+http-equiv\s*=\s*["']?refresh[^>]*>/gi, '');
+    // html: zoals het is (JS staat uit, CSP en het routeslot houden alles buiten); alleen een meta-refresh eruit en href's die geen
+    // http(s) zijn (file:, smb:, javascript: … zouden als link in de PDF staan; review KAN 7)
+    return String(d.tekst).replace(/<meta[^>]+http-equiv\s*=\s*["']?\s*refresh[^>]*>/gi, '')
+      .replace(/(<[a-z][^>]*?)\s(?:xlink:)?href\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, (m, voor, w) => (/^["']?\s*https?:\/\//i.test(w) ? m : voor));
+  }
+
+  // Chromium met de eigen sandbox (review ZOU 4; gemeten: start in de pod). Lukt dat niet (bv. een container zonder user-namespaces),
+  // dan zonder: JS uit, CSP en het routeslot blijven; health.omzet.sandbox laat zien welke het werd.
+  async function startChromium(exe, rest) {
+    const args = ['--disable-gpu', '--disable-extensions', '--disable-background-networking', '--disable-sync', '--disable-default-apps',
+      '--no-first-run', '--no-default-browser-check', '--mute-audio', '--disable-component-update', '--disable-domain-reliability',
+      '--host-resolver-rules=MAP * ~NOTFOUND'];
+    try { return { browser: await pw().chromium.launch({ executablePath: exe, headless: true, chromiumSandbox: true, timeout: rest(), args: args }), sandbox: true }; }
+    catch (e) { return { browser: await pw().chromium.launch({ executablePath: exe, headless: true, chromiumSandbox: false, timeout: rest(), args: args }), sandbox: false }; }
   }
 
   async function pdf(html, st, tot) {
@@ -295,9 +316,7 @@ function maak(opt) {
     if (!exe) throw new Error('chromium ontbreekt');
     const rest = function () { return Math.max(1, tot - Date.now()); };
     let pogingen = 0;
-    const browser = await pw().chromium.launch({ executablePath: exe, headless: true, timeout: rest(),
-      args: ['--disable-gpu', '--disable-extensions', '--disable-background-networking', '--disable-sync', '--disable-default-apps',
-        '--no-first-run', '--no-default-browser-check', '--mute-audio', '--disable-component-update', '--disable-domain-reliability'] });
+    const { browser, sandbox } = await startChromium(exe, rest);
     let timer;
     try {
       const werk = (async function () {
@@ -320,13 +339,19 @@ function maak(opt) {
       const grens = new Promise(function (res, rej) { timer = setTimeout(function () { rej(Object.assign(new Error('tijd'), { tijd: true })); }, rest()); });
       const buf = await Promise.race([werk, grens]);
       werk.catch(function () {});
-      return { buf: buf, pogingen: pogingen };
+      return { buf: buf, pogingen: pogingen, sandbox: sandbox };
     } finally {
       clearTimeout(timer);
       await Promise.race([browser.close().catch(function () {}), new Promise(function (r) { setTimeout(r, 5000); })]);
     }
   }
 
+  // Witte lijst van AST-knopen (pandoc-types 1.22) voor de docx-stap zonder --sandbox (review KAN 9): alles wat er niet in staat, weigert.
+  const AST_TOEGESTAAN = new Set(['Str', 'Emph', 'Underline', 'Strong', 'Strikeout', 'Superscript', 'Subscript', 'SmallCaps', 'Quoted', 'Cite', 'Code',
+    'Space', 'SoftBreak', 'LineBreak', 'Math', 'Link', 'Note', 'Span', 'Plain', 'Para', 'LineBlock', 'CodeBlock', 'BlockQuote', 'OrderedList', 'BulletList',
+    'DefinitionList', 'Header', 'HorizontalRule', 'Table', 'Div', 'Null', 'AlignLeft', 'AlignRight', 'AlignCenter', 'AlignDefault', 'ColWidth',
+    'ColWidthDefault', 'SingleQuote', 'DoubleQuote', 'DisplayMath', 'InlineMath', 'DefaultStyle', 'Example', 'Decimal', 'LowerRoman', 'UpperRoman',
+    'LowerAlpha', 'UpperAlpha', 'DefaultDelim', 'Period', 'OneParen', 'TwoParens', 'AuthorInText', 'SuppressAuthor', 'NormalCitation']);
   async function docx(d, st, dir, tot) {
     const ast = await astVan(d, dir, tot);
     const eerste = ast.blocks[0];
@@ -336,7 +361,8 @@ function maak(opt) {
     const args = ['-f', 'json', '-t', 'docx', '-o', uit];
     if (b64) { fs.writeFileSync(ref, Buffer.from(b64, 'base64'), { mode: 0o600 }); args.push('--reference-doc', ref); }
     const json = JSON.stringify(ast);
-    if (/"t":"(Image|RawInline|RawBlock)"/.test(json)) throw new Error('AST niet schoon');
+    const re = /"t":"([^"]*)"/g; let m;
+    while ((m = re.exec(json))) if (!AST_TOEGESTAAN.has(m[1])) throw new Error('AST niet schoon (' + m[1].slice(0, 20) + ')');
     await pandoc(args, json, dir, tot, true);
     return fs.readFileSync(uit);
   }
@@ -345,6 +371,15 @@ function maak(opt) {
     const lijst = tabellen(await astVan(d, dir, tot));
     if (!lijst.length) return null;
     return XLSX.schrijf(lijst);
+  }
+
+  // Bovengrens voor het aantal tabelregels (md: regels met een |, html: <tr, csv: regels): daarboven geen PDF (review MOET 2).
+  function tabelRijen(d) {
+    const t = String(d.tekst);
+    if (d.soort === 'html') return (t.match(/<tr[\s>]/gi) || []).length;
+    if (d.soort === 'csv') return (t.match(/\n/g) || []).length + 1;
+    if (d.soort === 'md') return (t.match(/^[^\n]*\|[^\n]*$/gm) || []).length;
+    return 0;
   }
 
   // Invoer controleren; geeft {fout, status} of de schone invoer.
@@ -363,7 +398,87 @@ function maak(opt) {
     let basis = String(d.naam || '').split(/[\\/]/).pop().replace(/\.(md|markdown|txt|csv|html?|json)$/i, '')
       .replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120).trim();
     if (!basis || /^\.+$/.test(basis)) basis = 'document';
-    return { formaat: formaat, soort: soort, tekst: d.tekst, bytes: bytes, huisstijl: hs, basis: basis };
+    const x = { formaat: formaat, soort: soort, tekst: d.tekst, bytes: bytes, huisstijl: hs, basis: basis };
+    if (formaat === 'pdf' && tabelRijen(x) > MAX_PDF_RIJEN)
+      return { status: 413, fout: 'deze tekst heeft meer dan ' + MAX_PDF_RIJEN.toLocaleString('nl-NL') + ' tabelregels; dat wordt als PDF te zwaar. Kies Excel (of Word).' };
+    return x;
+  }
+
+  // Het eigenlijke werk (in het kindproces, of in-proces vanaf de opdrachtregel): → {status?, buf?, fout?, e?, pogingen?, sandbox?}
+  async function intern(d, dir) {
+    const st = d.huisstijl ? STIJLEN[d.huisstijl] : null;
+    const tot = Date.now() + tijdMs;
+    try {
+      if (d.formaat === 'pdf') return Object.assign({}, await pdf(await htmlVoorPdf(d, st, dir, tot), st, tot));
+      if (d.formaat === 'docx') return { buf: await docx(d, st, dir, tot) };
+      const x = await xlsx(d, dir, tot);
+      if (!x) return { status: 422, fout: 'er staat geen tabel in deze tekst' };
+      return { buf: x };
+    } catch (e) {
+      if ((e && e.tijd) || Date.now() >= tot) return { status: 504, fout: 'het omzetten duurde te lang (meer dan ' + Math.round(tijdMs / 1000) + ' s); probeer een kortere tekst' };   // ook een time-out van Playwright zelf
+      if (e && e.groot) return { status: 413, fout: 'de tekst is te groot om om te zetten naar ' + ({ pdf: 'PDF', docx: 'Word', xlsx: 'Excel' })[d.formaat] };
+      return { status: 500, fout: 'omzetten mislukt', e: String(e && e.message || e).split('\n')[0].slice(0, 200) };
+    }
+  }
+
+  // ── kindproces en bewaking ──
+  // Procesboom vanaf pid (via /proc: ppid), want Chromium start in een eigen procesgroep.
+  function boom(pid) {
+    const kinderen = new Map();
+    let lijst = [];
+    try { lijst = fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)); } catch (e) { return [pid]; }
+    for (const x of lijst) {
+      let st;
+      try { st = fs.readFileSync('/proc/' + x + '/stat', 'utf8'); } catch (e) { continue; }
+      const na = st.slice(st.lastIndexOf(')') + 2).split(' ');
+      const ppid = Number(na[1]);
+      if (!kinderen.has(ppid)) kinderen.set(ppid, []);
+      kinderen.get(ppid).push(Number(x));
+    }
+    const uit = [], rij = [pid];
+    while (rij.length && uit.length < 500) { const p = rij.shift(); uit.push(p); (kinderen.get(p) || []).forEach((k) => rij.push(k)); }
+    return uit;
+  }
+  function rss(pids) {
+    let n = 0;
+    for (const p of pids) { try { n += Number(fs.readFileSync('/proc/' + p + '/statm', 'utf8').split(' ')[1]) * 4096; } catch (e) { /* weg */ } }
+    return n;
+  }
+  function doodBoom(pid) {
+    const pids = boom(pid);
+    for (const p of pids.reverse()) { try { process.kill(p, 'SIGKILL'); } catch (e) { /* al weg */ } }
+    return pids.length;
+  }
+
+  function viaKind(d, dir) {
+    return new Promise(function (resolve) {
+      const invoerPad = path.join(dir, 'invoer.json'), uitPad = path.join(dir, 'uit.json');
+      fs.writeFileSync(invoerPad, JSON.stringify({ d: d, opt: { pandoc: opt.pandoc, chromium: opt.chromium, pw: opt.pw, tijdMs: tijdMs, dir: dir } }), { mode: 0o600 });
+      // kale omgeving: geen sleutels van server.js in het kind, pandoc of Chromium; tijdelijke bestanden (ook het Chromium-profiel) in dir
+      const env = { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: dir, TMPDIR: dir, LANG: 'C.UTF-8',
+        PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || '/opt/pw-browsers' };
+      const kind = spawn(process.execPath, ['--max-old-space-size=' + KIND_HEAP_MB, __filename, '--werker', invoerPad, uitPad], { cwd: dir, env: env, stdio: 'ignore' });
+      let klaar = false;
+      const einde = function (r) {
+        if (klaar) return; klaar = true;
+        clearTimeout(hard); clearInterval(wacht);
+        resolve(r);
+      };
+      const hard = setTimeout(function () { doodBoom(kind.pid); einde({ status: 504, fout: 'het omzetten duurde te lang (meer dan ' + Math.round(tijdMs / 1000) + ' s); probeer een kortere tekst', hard: true }); }, opt.hardTotMs || tijdMs + HARD_MS);   // hardTotMs: alleen voor de toets
+      const wacht = setInterval(function () {
+        if (rss(boom(kind.pid)) > (opt.maxRss || MAX_RSS)) { doodBoom(kind.pid); einde({ status: 413, fout: 'deze tekst is te groot om om te zetten (te veel geheugen nodig); kies een kleiner stuk of Excel', geheugen: true }); }
+      }, 200);
+      kind.on('error', function (e) { einde({ status: 500, fout: 'omzetten mislukt', e: 'kind: ' + e.message }); });
+      kind.on('exit', function (code) {
+        if (klaar) return;
+        doodBoom(kind.pid);   // achterblijvers (Chromium in een eigen procesgroep)
+        let r = null;
+        try { r = JSON.parse(fs.readFileSync(uitPad, 'utf8')); } catch (e) { /* geen uitkomst */ }
+        if (!r) return einde({ status: 500, fout: 'omzetten mislukt', e: 'kind stopte met code ' + code + ' zonder uitkomst' });
+        if (r.buf) { try { r.buf = fs.readFileSync(path.join(dir, 'uit.bin')); } catch (e) { return einde({ status: 500, fout: 'omzetten mislukt', e: 'uitvoer onleesbaar' }); } }
+        einde(r);
+      });
+    });
   }
 
   // Eén tegelijk; hooguit WACHT_MAX in de rij, elk hooguit WACHT_MS. Bij het afgeven blijft bezig waar (geen inhaler tussendoor).
@@ -391,40 +506,28 @@ function maak(opt) {
   // → {status, j, audit}
   async function omzet(ruw) {
     const d = invoer(ruw);
-    if (d.fout) return { status: d.status, j: { ok: false, fout: d.fout }, audit: { formaat: String(ruw && ruw.formaat || '').slice(0, 8) } };
+    if (d.fout) return { status: d.status, j: { ok: false, fout: d.fout }, audit: { formaat: String(ruw && ruw.formaat || '').slice(0, 8), status: d.status } };
     const st = d.huisstijl ? STIJLEN[d.huisstijl] : null;
     const audit = { formaat: d.formaat, soort: d.soort, huisstijl: d.huisstijl || '-', in_kb: Math.ceil(d.bytes / 1024) };
     const t0 = Date.now();
     const r = await beurt(async function () {
       staat.gestart++;
-      const tot = Date.now() + tijdMs;
       const dir = fs.mkdtempSync(path.join(TMP, 'omzet-'));   // 0700
-      try {
-        if (d.formaat === 'pdf') {
-          const p = await pdf(await htmlVoorPdf(d, st, dir, tot), st, tot);
-          audit.pogingen = p.pogingen;
-          return { buf: p.buf };
-        }
-        if (d.formaat === 'docx') return { buf: await docx(d, st, dir, tot) };
-        const x = await xlsx(d, dir, tot);
-        if (!x) return { status: 422, fout: 'er staat geen tabel in deze tekst' };
-        return { buf: x };
-      } catch (e) {
-        if (e && e.tijd) return { status: 504, fout: 'het omzetten duurde te lang (meer dan ' + Math.round(tijdMs / 1000) + ' s); probeer een kortere tekst' };
-        if (e && e.groot) return { status: 413, fout: 'de tekst is te groot om om te zetten' };
-        return { status: 500, fout: 'omzetten mislukt', e: e };
-      } finally {
-        try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { fout('omzet-tmp', e); }
-      }
+      try { return opt.inProces ? await intern(d, dir) : await viaKind(d, dir); }
+      finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { fout('omzet-tmp', e); } }
     });
     audit.ms = Date.now() - t0;
+    if (r.pogingen !== undefined) audit.pogingen = r.pogingen;
+    if (r.sandbox !== undefined) staat.sandbox = r.sandbox;
+    if (r.hard) audit.afgebroken = 'tijd';
+    if (r.geheugen) audit.afgebroken = 'geheugen';
     let status = r.status || 200, j;
     if (r.buf && r.buf.length > MAX_UIT) { status = 413; j = { ok: false, fout: 'het bestand wordt te groot (meer dan 25 MB)' }; }
     else if (r.buf) {
       const f = FORMATEN[d.formaat];
       j = { ok: true, naam: d.basis + (d.huisstijl ? ' (' + (st.label || d.huisstijl) + ')' : '') + '.' + f.ext, type: f.type, grootte: r.buf.length, inhoud: r.buf.toString('base64'), ms: audit.ms };
       audit.uit_kb = Math.ceil(r.buf.length / 1024);
-    } else j = { ok: false, fout: r.fout };
+    } else j = { ok: false, fout: r.fout || 'omzetten mislukt' };
     if (r.e) fout('omzet-' + d.formaat, new Error(String(r.e && r.e.message || r.e).split('\n')[0].slice(0, 200)));
     if (status === 200) staat.ok++; else staat.mislukt++;
     staat.laatst = { op: new Date().toISOString(), formaat: d.formaat, status: status, ms: audit.ms };
@@ -433,19 +536,32 @@ function maak(opt) {
   }
 
   function health() {
-    return { aan: true, pandoc: fs.existsSync(PANDOC), chromium: !!chromiumPad(), huisstijlen: Object.keys(STIJLEN).length, bezig: staat.bezig,
+    return { aan: true, pandoc: fs.existsSync(PANDOC), chromium: !!chromiumPad(), sandbox: staat.sandbox, huisstijlen: Object.keys(STIJLEN).length, bezig: staat.bezig,
       wachtend: staat.rij.length, ok: staat.ok, mislukt: staat.mislukt, laatst: staat.laatst };
   }
   function stijlen() { return Object.keys(STIJLEN).map(function (k) { return { id: k, label: STIJLEN[k].label }; }); }
 
-  return { omzet: omzet, health: health, stijlen: stijlen, invoer: invoer, _staat: staat };
+  return { omzet: omzet, intern: intern, health: health, stijlen: stijlen, invoer: invoer, _staat: staat, _boom: boom };
 }
 
 module.exports = { maak: maak, schoon: schoon, tabellen: tabellen, voorMd: voorMd, tekstHtml: tekstHtml, platteTekst: platteTekst,
-  MAX_TEKST: MAX_TEKST, CSP: CSP, kopTemplate: kopTemplate, voetTemplate: voetTemplate };
+  MAX_TEKST: MAX_TEKST, MAX_PDF_RIJEN: MAX_PDF_RIJEN, CSP: CSP, kopTemplate: kopTemplate, voetTemplate: voetTemplate };
 
-// ── opdrachtregel (Socev, bouwplan § 3.3) ──
-if (require.main === module) {
+// ── kindproces: node omzet.js --werker <invoer.json> <uit.json> (alleen door viaKind gestart) ──
+if (require.main === module && process.argv[2] === '--werker') {
+  const [invoerPad, uitPad] = process.argv.slice(3);
+  const x = JSON.parse(fs.readFileSync(invoerPad, 'utf8'));
+  fs.unlinkSync(invoerPad);
+  maak(Object.assign({}, x.opt, { inProces: true })).intern(x.d, x.opt.dir).then(function (r) {
+    const uit = { status: r.status, fout: r.fout, e: r.e, pogingen: r.pogingen, sandbox: r.sandbox, buf: !!r.buf };
+    if (r.buf) fs.writeFileSync(path.join(path.dirname(uitPad), 'uit.bin'), r.buf, { mode: 0o600 });
+    fs.writeFileSync(uitPad, JSON.stringify(uit), { mode: 0o600 });
+    process.exit(0);
+  }, function (e) {
+    fs.writeFileSync(uitPad, JSON.stringify({ status: 500, fout: 'omzetten mislukt', e: String(e && e.message || e).split('\n')[0].slice(0, 200) }), { mode: 0o600 });
+    process.exit(0);
+  });
+} else if (require.main === module) {   // ── opdrachtregel (Socev, bouwplan § 3.3) ──
   const a = process.argv.slice(2);
   const opties = {};
   const los = [];
@@ -457,7 +573,7 @@ if (require.main === module) {
   }
   const ext = path.extname(inPad).toLowerCase();
   const soort = opties.soort || (ext === '.html' || ext === '.htm' ? 'html' : ext === '.csv' ? 'csv' : ext === '.txt' ? 'tekst' : 'md');
-  maak({ fout: function (w, e) { console.error(w + ': ' + (e && e.message)); } })
+  maak({ inProces: true, fout: function (w, e) { console.error(w + ': ' + (e && e.message)); } })
     .omzet({ naam: path.basename(inPad), soort: soort, tekst: fs.readFileSync(inPad, 'utf8'), formaat: formaat, huisstijl: opties.huisstijl })
     .then(function (r) {
       if (r.status !== 200) { console.error('mislukt (' + r.status + '): ' + r.j.fout); process.exit(1); }

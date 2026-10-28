@@ -163,6 +163,35 @@ const HTML = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proef</tit
   toets('wachtrij leeg na afloop', Q._staat.bezig === false && Q._staat.rij.length === 0);
   toets('tijdelijke mappen weg', fs.readdirSync(TMP).length === 0, fs.readdirSync(TMP));
 
+  // ── review 28-10: kindproces, bewaking, grenzen ──
+  let t0 = Date.now();
+  O.voorMd('\n'.repeat(400 * 1024) + '> [!note] x\n', require('./docs-delen.js').voorbewerk);
+  toets('callout-regex lineair: 400 kB lege regels < 300 ms', Date.now() - t0 < 300, Date.now() - t0);
+  r = await M.omzet({ naam: 'Groot.md', soort: 'md', tekst: '| a |\n|---|\n' + '| 1 |\n'.repeat(5001), formaat: 'pdf' });
+  toets('PDF met > 5.000 tabelregels → 413 met advies Excel', r.status === 413 && /Kies Excel/.test(r.j.fout), r.j);
+  r = await M.omzet({ naam: 'Groot.md', soort: 'md', tekst: '| a |\n|---|\n' + '| 1 |\n'.repeat(5001), formaat: 'xlsx' });
+  toets('… als Excel gaat dezelfde tekst wel', r.status === 200, r.j.fout);
+  toets('health: sandbox gemeten (waar of onwaar)', typeof M.health().sandbox === 'boolean', M.health());
+  const G = O.maak({ tmp: TMP, maxRss: 1, pandoc: traag, fout: function () {} });
+  r = await G.omzet({ naam: 'x.md', soort: 'md', tekst: '# x', formaat: 'docx' });
+  toets('geheugenwachter: boven de grens → 413 en afgebroken=geheugen', r.status === 413 && r.audit.afgebroken === 'geheugen', r);
+  const envLog = path.join(W, 'env.log'), envPandoc = path.join(W, 'env-pandoc.sh');
+  fs.writeFileSync(envPandoc, '#!/bin/bash\nenv > ' + JSON.stringify(envLog) + '\nexec /usr/bin/pandoc "$@"\n', { mode: 0o700 });
+  process.env.GEHEIM_PROEF_1854 = 'mag-niet-mee';
+  r = await O.maak({ tmp: TMP, pandoc: envPandoc, fout: function () {} }).omzet({ naam: 'x.md', soort: 'md', tekst: '# x', formaat: 'docx' });
+  const envT = fs.existsSync(envLog) ? fs.readFileSync(envLog, 'utf8') : '';
+  toets('kindproces en pandoc krijgen een kale omgeving (geen sleutels van de server)', r.status === 200 && envT.length > 0 && !/GEHEIM_PROEF_1854/.test(envT) && /TMPDIR=/.test(envT), envT.slice(0, 200));
+  delete process.env.GEHEIM_PROEF_1854;
+  const H = O.maak({ tmp: TMP, pandoc: traag, hardTotMs: 250, fout: function () {} });
+  r = await H.omzet({ naam: 'h.md', soort: 'md', tekst: '# h', formaat: 'docx' });
+  await new Promise((x) => setTimeout(x, 300));
+  const rest = fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).filter((x) => { try { return fs.readFileSync('/proc/' + x + '/cmdline', 'utf8').indexOf(traag) >= 0; } catch (e) { return false; } });
+  toets('harde tijdslimiet: 504 en de hele procesboom (ook pandoc) weg', r.status === 504 && r.audit.afgebroken === 'tijd' && rest.length === 0, { s: r.status, a: r.audit, rest: rest.length });
+  r = await M.omzet({ naam: 'l.html', soort: 'html', tekst: '<p><a href="file:///etc/passwd">lokaal</a> <a href=\'javascript:x\'>js</a> <a href="https://example.org/ok">goed</a></p>', formaat: 'pdf' });
+  const ruwPdf = Buffer.from(r.j.inhoud || '', 'base64').toString('latin1');
+  toets('html → PDF: alleen http(s)-links blijven', r.status === 200 && /\/URI \(https:\/\/example\.org\/ok\)/.test(ruwPdf) && !/file:\/\/|javascript:/.test(ruwPdf));
+  toets('xlsx: 10.30 en 14.00 blijven tekst', X.alsGetal('10.30') === null && X.alsGetal('14.00') === null && X.alsGetal('3.5').getal === 3.5);
+
   // ── opdrachtregel ──
   fs.writeFileSync(path.join(W, 'cli.md'), '# Cli\n\nProef.\n');
   sh('node ' + JSON.stringify(path.resolve('omzet.js')) + ' docx --huisstijl tolgaarde cli.md cli.docx');
