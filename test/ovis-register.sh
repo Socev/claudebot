@@ -116,6 +116,7 @@ function nepDb(start) {
       if (b) Object.assign(b, r); else db.bevindingen.push(Object.assign({}, r)); }); db.bevindingen = db.bevindingen.filter((x) => x.status !== 'opgelost'); return { ok: true }; }
     if (fn === 'mk_hartslag_stempel') return [{ uit_component: body.p_component }];
     if (fn === 'ovis_personen_lees') { if (db.personenFout) throw new Error('weg'); return JSON.parse(JSON.stringify(db.personen || { entity: [], contacten: [] })); }   // wv1011
+    if (fn === 'sb_identifier_te_bevestigen') { if (db.feitenFout) throw new Error('weg'); return JSON.parse(JSON.stringify(db.feiten || [])); }   // wv1789
     throw new Error('onbekende rpc ' + fn);
   } };
 }
@@ -333,7 +334,9 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const fouten_ = [];
     const nepRpc = async function (f, body) { st.rpc.push(f);
       if (f === 'ovis_register_lees') return { knopen: [], handvatten: [], contact: [], vertaling: [], bevindingen: [], log: [] };
-      if (f === 'mk_hartslag_stempel') return [{}]; if (f === 'ovis_bibliothecaris_zet') return { ok: true }; throw new Error('?'); };
+      if (f === 'mk_hartslag_stempel') return [{}]; if (f === 'ovis_bibliothecaris_zet') return { ok: true };
+      if (f === 'sb_identifier_te_bevestigen') return [];   // wv1789: feitkaart (geen feiten)
+      throw new Error('?'); };
     const k = fn(require, path, fs, require('crypto'), nepSpawn, (w, x) => fouten_.push(w + ' ' + (x && x.message)), () => {}, () => 'nu',
       (n, env, echt, proef) => path.join(dir, n), (d) => path.join(dir, d), nepRpc, () => require('./vault-veilig.js'), path.join(dir, 'vault'), true, () => st.primair, process.cwd(), st, { stand: () => ({ aan: !!st.onderhoud }) });
     st.onderhoud = true; await k.ovisTik();
@@ -424,6 +427,43 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
       veel.push(pp); reg.knopen.push({ id: id, soort: 'organisatie', naam: 'Organisatie ' + i, vault_pagina: pp.pad, bron_sha: pp.sha }); reg.handvatten.push({ id: 100 + i, knoop: id, soort: 'domein', waarde: 'o' + i + '.nl', waarde_norm: 'o' + i + '.nl', status: 'voorgesteld', herkomst: { sha: 's' } }); }
     b = R.kaartBundel(reg, P.concat(veel), { nu: NU });
     toets('7 bundel: hooguit 12 organisaties, de waarom noemt de rest', b.kaart.stappen.length === 12 && /Nog 10 organisaties volgen/.test(b.kaart.waarom) && grenzen(b.kaart), [b.kaart.stappen.length, b.kaart.waarom]);
+    // wv1789: feitkaart (voorgestelde feiten uit de vault; verzonnen waarden)
+    const sha = (c) => c.repeat(64);
+    const feit = (id, o) => Object.assign({ id: id, object_id: '00000000-0000-4000-8000-00000000000' + (id % 10), knoop: 'TG', naam: 'Huisartsenpraktijk Tolgaarde B.V.', code: 'TG', eigen: true, soort: 'entiteit',
+      namespace: 'kenteken', value: 'ZZ-0' + id + '-ZZ', value_norm: 'ZZ0' + id + 'ZZ', label: null, valid_to: null, einde: null, pagina: '10_Zakelijk/Tolgaarde/Auto.md', actie: 'activeer', sha: sha('a') }, o || {});
+    const fBasis = () => Object.assign(regBasis(), { feiten: [feit(1, { label: 'Proefbus' }), feit(2, { namespace: 'btw', value: 'NL000000000B01', value_norm: 'NL000000000B01' }),
+      feit(3, { actie: 'vervallen', sha: sha('b') }), feit(4, { code: 'PRIVE', naam: 'Privé', pagina: '20_Prive/Auto.md', valid_to: '2025-03-01' })] });
+    let fk = R.kaartFeiten(fBasis(), { nu: NU });
+    toets('7 feitkaart: sleutel per week, binnen de grenzen, geen pad, sleutelvorm', fk.kaart && fk.kaart.sleutel === 'intake-handvat-feit-2026-44' && R.FEIT_SLEUTEL_RE.test(fk.kaart.sleutel) && grenzen(fk.kaart) && fk.kaart.soort === 'bundel', fk);
+    toets('7 feitkaart: één feit per stap, regels (activeer|vervallen, identifier) met sha', fk.kaart.stappen.length === 4 && fk.kaart.regels.length === 4 && fk.kaart.regels.every((r, i) => r.nr === i + 1 && r.tabel === 'identifier' && /^[0-9a-f]{64}$/.test(r.sha)), fk.kaart.regels);
+    toets('7 feitkaart: tekst met soort, label, einddatum en vervallen', /1\. Huisartsenpraktijk Tolgaarde B\.V\.: kenteken ZZ-01-ZZ \(Proefbus\)/.test(fk.kaart.stappen[0]) && /btw-nummer NL000000000B01/.test(fk.kaart.stappen[1])
+      && /staat niet meer op de pagina — laten vervallen/.test(fk.kaart.stappen[2]) && /tot 1-3-2025/.test(fk.kaart.stappen[3]) && fk.kaart.regels[2].actie === 'vervallen', fk.kaart.stappen);
+    toets('7 feitkaart: titel en privé, niet gevoelig', fk.kaart.titel === '4 feiten uit je aantekeningen — kloppen ze?' && fk.kaart.prive === true && gevoelig(fk.kaart.titel) === null && /laten vervallen/.test(fk.kaart.waarom), [fk.kaart.titel, fk.kaart.waarom]);
+    reg = fBasis(); reg.feiten.push(feit(5, { namespace: 'iban', value: 'NL00TEST0000000000' }), feit(6, { soort: 'persoon' }), feit(7, { sha: 'kort' }));
+    toets('7 feitkaart: nooit IBAN, persoon of feit zonder geldige sha', R.kaartFeiten(reg, { nu: NU }).kaart.regels.every((r) => [5, 6, 7].indexOf(r.id) < 0));
+    reg = fBasis(); reg.kaarten = [{ sleutel: 'intake-handvat-feit-2026-43', soort: 'bundel', status: 'open', regels: [{ nr: 1, tabel: 'identifier', id: '1', sha: sha('a') }] }];
+    toets('7 feitkaart: geen tweede zolang er een open staat', /open/.test(R.kaartFeiten(reg, { nu: NU }).reden));
+    toets('7 feitkaart: een open feitkaart blokkeert de kenmerkenbundel niet', !!R.kaartBundel(reg, P, { nu: NU }).kaart);
+    reg = fBasis(); reg.kaarten = [{ sleutel: 'intake-handvat-2026-43', soort: 'bundel', status: 'open', regels: [{ nr: 1, tabel: 'handvat', id: '1' }] }];
+    toets('7 feitkaart: een open kenmerkenbundel blokkeert de feitkaart niet', !!R.kaartFeiten(reg, { nu: NU }).kaart);
+    reg = fBasis(); reg.kaarten = [{ sleutel: 'intake-handvat-feit-2026-44', soort: 'bundel', status: 'ja', regels: [] }];
+    toets('7 feitkaart: hooguit één per week', /al een feitkaart/.test(R.kaartFeiten(reg, { nu: NU }).reden));
+    reg = fBasis(); reg.kaarten = [{ sleutel: 'intake-handvat-feit-2026-43', soort: 'bundel', status: 'nee', beslist_op: new Date(NU - 5 * 86400000).toISOString(), regels: [{ nr: 1, tabel: 'identifier', id: '1', sha: sha('a') }] }];
+    fk = R.kaartFeiten(reg, { nu: NU });
+    toets('7 feitkaart: Nee = vier weken rust; ander feit (andere sha) wel', !fk.kaart.regels.some((r) => r.id === 1) && fk.kaart.regels.length === 3, fk.kaart.regels);
+    reg.feiten[0].sha = sha('c');
+    toets('7 feitkaart: veranderd feit (nieuwe sha) komt terug', R.kaartFeiten(reg, { nu: NU }).kaart.regels.some((r) => r.id === 1));
+    reg = fBasis(); reg.feiten = []; for (let i = 10; i < 30; i++) reg.feiten.push(feit(i));
+    fk = R.kaartFeiten(reg, { nu: NU });
+    toets('7 feitkaart: hooguit 12 stappen, de waarom noemt de rest', fk.kaart.stappen.length === 12 && /Nog 8 feiten volgen/.test(fk.kaart.waarom) && grenzen(fk.kaart), [fk.kaart.stappen.length, fk.kaart.waarom]);
+    reg = regBasis();
+    toets('7 feitkaart: feiten niet gelezen of leeg = geen kaart', /niet gelezen/.test(R.kaartFeiten(reg, { nu: NU }).reden) && /geen feiten/.test(R.kaartFeiten(Object.assign(regBasis(), { feiten: [] }), { nu: NU }).reden));
+    const pl = R.plan(fBasis(), P, { nu: NU });
+    toets('7 plan: feitkaart naast de bundel', pl.kaarten.some((k) => k.sleutel === 'intake-handvat-feit-2026-44') && pl.kaarten.some((k) => k.sleutel === 'intake-handvat-2026-44'), pl.kaarten.map((k) => k.sleutel));
+    { const nf = nepDb(); nf.db.feitenFout = true; const mf = R.maak({ vault: wegwerpVault({}), sbRpc: nf.sbRpc, lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: () => {}, nu: () => NU });
+      const kf = await mf.kaarten({ soorten: ['bundel', 'feit'], droog: true, vraagId: () => 'abcdef12' });
+      toets('7 kaarten: feiten niet te lezen = fout geteld, geen feitkaart, de rest gaat door', kf.fouten.some((x) => x.sleutel === 'feit') && kf.redenen.feit === 'feiten niet gelezen' && 'bundel' in kf.redenen, kf); }
+    toets('7 uitkomstZin feit: Nee en Anders in eigen woorden', /deze gegevens komen over vier weken/.test(R.uitkomstZin('feit', null, { ok: true, status: 'nee' })) && /de gegevens komen volgende week/.test(R.uitkomstZin('feit', null, { ok: true, status: 'anders', eruit: null })));
     // kritiek
     reg = regBasis(); reg.contact = [{ id: 11, knoop: 'org:gemeente-leusden', veld: 'factuuradres', waarde: 'Postbus 1, 3830 AA Leusden', status: 'actief', intrekking: true, herkomst: { vraag_id: 'aaaaaaaa' } },
       { id: 12, knoop: 'org:gemeente-leusden', veld: 'factuuradres', waarde: 'Postbus 2, 3830 AA Leusden', status: 'voorgesteld', herkomst: { sha: 'z' } },

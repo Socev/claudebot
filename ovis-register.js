@@ -1758,7 +1758,7 @@ function kaartBundel(reg, paginas, o) {
   const geh = kaartGeheugen(reg, nu), anker = ankers(paginas, knopen), wk = isoWeek(nu);
   const sleutel = 'intake-handvat-' + wk.jaar + '-' + String(wk.week).padStart(2, '0');
   if (geh.sleutels.has(sleutel)) return { reden: 'deze week al een bundel' };
-  if ((reg.kaarten || []).some(function (k) { return k.soort === 'bundel' && k.status === 'open'; })) return { reden: 'er staat nog een bundel open' };
+  if ((reg.kaarten || []).some(function (k) { return k.soort === 'bundel' && k.status === 'open' && !FEIT_SLEUTEL_RE.test(k.sleutel); })) return { reden: 'er staat nog een bundel open' };
   const harde = {};
   (reg.handvatten || []).forEach(function (h) { if (HARDE_SOORTEN.indexOf(h.soort) >= 0 && h.status !== 'vervallen') { const s = h.soort + '|' + h.waarde_norm; (harde[s] = harde[s] || new Set()).add(h.knoop); } });
   const per = {};
@@ -1804,6 +1804,54 @@ function kaartBundel(reg, paginas, o) {
   const waarom = 'Hiermee herkent Socev straks wie een mail, factuur of brief stuurde. Een kenmerk telt pas na jouw Ja; anders kan een mail zich als bekende afzender voordoen. '
     + 'Ja: alles hieronder vast. Nee: niets vast (komt over vier weken terug). Anders: typ welke nummers eruit moeten, bijvoorbeeld "zonder 3 en 7"; de rest wordt vast.'
     + (restOrg > 0 ? ' Nog ' + restOrg + (nOrg === ids.length ? (restOrg === 1 ? ' organisatie volgt' : ' organisaties volgen') : (restOrg === 1 ? ' volgt' : ' volgen')) + ' in de komende weken.' : '');
+  return { kaart: { sleutel: sleutel, soort: 'bundel', titel: titel, waarom: kort(waarom, KAART_WAAROM), stappen: stappen, prive: prive, regels: regels } };
+}
+
+// ── Feitkaart (wv1789; ontwerp + Opus-review vooraf: mk-scripts/wv1789/ontwerp.md) ──
+// Voorgestelde feiten uit de vault (kenteken, kvk, btw, zorgmail …; public.sb_identifier_te_bevestigen: alleen organisaties en eigen
+// entiteiten, geen IBAN, geen registerfeit) als één kaart per ISO-week, één feit per stap (Anders "zonder 3" haalt dan precies dat feit
+// eruit; review ZOU 8). Een bevestigd feit dat niet meer op de pagina staat komt als vervallen-regel. Dezelfde databankroute als de
+// kenmerkenbundel (soort bundel, sleutel intake-handvat-feit-JJJJ-WW): ovis_kaart_zet bevriest, ovis_handvat_activeer voert Davids keuze uit.
+const FEIT_SLEUTEL_RE = /^intake-handvat-feit-\d{4}-\d{2}$/;
+const FEIT_WOORD = { kenteken: 'kenteken', kvk: 'KvK', agb: 'AGB-code', btw: 'btw-nummer', zorgmail: 'ZorgMail-adres', edi_adres: 'EDI-adres',
+  lifeline: 'Lifeline-adres', email: 'mailadres', telefoon: 'telefoonnummer', website: 'website', domein: 'website', postadres: 'postadres',
+  bezoekadres: 'bezoekadres', factuuradres: 'factuuradres', klantnummer: 'klantnummer', contractnummer: 'contractnummer' };
+function feitDatum(d) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d || '')); return m ? Number(m[3]) + '-' + Number(m[2]) + '-' + m[1] : null; }
+function kaartFeiten(reg, o) {
+  const nu = o.nu, wk = isoWeek(nu);
+  if (!Array.isArray(reg.feiten)) return { reden: 'feiten niet gelezen' };
+  const geh = kaartGeheugen(reg, nu);
+  const sleutel = 'intake-handvat-feit-' + wk.jaar + '-' + String(wk.week).padStart(2, '0');
+  if (geh.sleutels.has(sleutel)) return { reden: 'deze week al een feitkaart' };
+  if ((reg.kaarten || []).some(function (k) { return k.status === 'open' && FEIT_SLEUTEL_RE.test(k.sleutel); })) return { reden: 'er staat nog een feitkaart open' };
+  const kand = reg.feiten.filter(function (f) {
+    if (!f || (f.actie !== 'activeer' && f.actie !== 'vervallen') || f.namespace === 'iban' || f.soort === 'persoon' || !/^[0-9a-f]{64}$/.test(String(f.sha || ''))) return false;
+    const sl = 'identifier#' + f.id;
+    return !geh.open.has(sl) && !geh.rust.has(sl + '#' + f.sha);
+  });
+  const stappen = [], regels = []; let prive = false;
+  for (const f of kand) {
+    if (stappen.length >= KAART_STAPPEN) break;
+    const nr = stappen.length + 1, woord = FEIT_WOORD[f.namespace] || f.namespace;
+    let tekst = nr + '. ' + kort(f.naam, 50) + ': ' + woord + ' ' + kort(f.value, 80);
+    if (f.actie === 'vervallen') tekst += ' staat niet meer op de pagina — laten vervallen';
+    else {
+      const bij = [];
+      if (f.label && kort(f.label, 50) !== kort(f.value, 50)) bij.push(kort(f.label, 50));
+      if (f.valid_to) bij.push('tot ' + feitDatum(f.valid_to)); else if (f.einde === 'onbekend') bij.push('einde onbekend');
+      if (bij.length) tekst += ' (' + bij.join(', ') + ')';
+    }
+    stappen.push(kort(tekst, 300));
+    regels.push({ nr: nr, actie: f.actie, tabel: 'identifier', id: f.id, object_id: f.object_id, namespace: f.namespace, value_norm: f.value_norm, sha: f.sha });
+    if (f.code === 'PRIVE' || /^20_Prive\//.test(String(f.pagina || ''))) prive = true;
+  }
+  if (!stappen.length) return { reden: 'geen feiten te bevestigen' };
+  const n = stappen.length, rest = kand.length - n, alleenWeg = regels.every(function (r) { return r.actie === 'vervallen'; });
+  const titel = n === 1 ? '1 feit uit je aantekeningen — klopt het?' : n + ' feiten uit je aantekeningen — kloppen ze?';
+  const waarom = (alleenWeg ? 'Deze gegevens bevestigde je eerder, maar ze staan niet meer op hun pagina. ' : 'Zoek snel noemt deze gegevens nu "nog niet bevestigd". ')
+    + 'Ja: alles hieronder klopt' + (regels.some(function (r) { return r.actie === 'vervallen'; }) ? ' (bij "laten vervallen": dat gegeven geldt niet meer)' : '') + '. '
+    + 'Nee: niets verandert (komt over vier weken terug). Anders: typ welke nummers niet kloppen, bijvoorbeeld "zonder 3 en 7"; de rest geldt.'
+    + (rest > 0 ? ' Nog ' + rest + (rest === 1 ? ' feit volgt' : ' feiten volgen') + ' in de komende weken.' : '');
   return { kaart: { sleutel: sleutel, soort: 'bundel', titel: titel, waarom: kort(waarom, KAART_WAAROM), stappen: stappen, prive: prive, regels: regels } };
 }
 
@@ -1937,8 +1985,8 @@ function uitkomstZin(soort, keuze, r, vast) {
     return '\n(OVIS: deze kaart was al beslist (' + r.al + '); de pod heeft niets veranderd. Zeg dat kort.)';
   }
   if (r.ok === false) return '\n(OVIS: NIET vastgezet: ' + kort(r.fout, 120) + '. Zeg David in één zin dat er niets is vastgezet; de punten komen op een volgende kaart terug. Jij zet niets in de databank.)';
-  if (r.status === 'nee') return '\n(OVIS: Nee — de pod heeft niets vastgezet' + (soort === 'bundel' ? '; deze kenmerken komen over vier weken weer op een kaart' : '') + '. Zeg dat kort.)';
-  if (r.status === 'anders' && !r.eruit) return '\n(OVIS: Anders zonder nummers om eruit te halen, of op een kaart met een adres of rekeningnummer — de pod heeft niets vastgezet. ' + (soort === 'bundel' ? 'Vraag David kort wat hij bedoelt; de kenmerken komen volgende week op een nieuwe kaart, waar hij met Anders "zonder 3" kan antwoorden.' : 'Vraag David kort wat hij bedoelt.') + ' Jij kunt niets vastzetten.)';
+  if (r.status === 'nee') return '\n(OVIS: Nee — de pod heeft niets vastgezet' + (soort === 'bundel' ? '; deze kenmerken komen over vier weken weer op een kaart' : soort === 'feit' ? '; deze gegevens komen over vier weken weer op een kaart' : '') + '. Zeg dat kort.)';
+  if (r.status === 'anders' && !r.eruit) return '\n(OVIS: Anders zonder nummers om eruit te halen, of op een kaart met een adres of rekeningnummer — de pod heeft niets vastgezet. ' + (soort === 'bundel' || soort === 'feit' ? 'Vraag David kort wat hij bedoelt; de ' + (soort === 'feit' ? 'gegevens' : 'kenmerken') + ' komen volgende week op een nieuwe kaart, waar hij met Anders "zonder 3" kan antwoorden.' : 'Vraag David kort wat hij bedoelt.') + ' Jij kunt niets vastzetten.)';
   if (soort === 'biblio') return '\n(Bibliothecaris: David gaf ' + (r.eruit ? 'Ja behalve nummer(s) ' + r.eruit.join(', ') : 'Ja') + ' op de voorstellen. Voer ze uit in de machinekamer (bevindingen in secondbrain.structuur_state, prefix BB) en zet de rij in de box bij. Bevestig David in één zin.)';
   const over = (r.overgeslagen || []);
   const vf = over.filter(function (x) { return /vingerafdruk/.test(x.reden); }).length;
@@ -1955,10 +2003,11 @@ function uitkomstZin(soort, keuze, r, vast) {
 
 // Alle kaarten die er nu bij moeten (pure functie): kritiek eerst (meteen), dan de weekbundel, dan de Bibliothecaris
 function plan(reg, paginas, o) {
-  const soorten = o.soorten || ['kritiek', 'bundel', 'biblio'], uit = { kaarten: [], redenen: {} };
+  const soorten = o.soorten || ['kritiek', 'bundel', 'biblio', 'feit'], uit = { kaarten: [], redenen: {} };
   if (soorten.indexOf('kritiek') >= 0) kaartenKritiek(reg, paginas, o).forEach(function (k) { uit.kaarten.push(k); });
   if (soorten.indexOf('bundel') >= 0) { const b = kaartBundel(reg, paginas, o); if (b.kaart) uit.kaarten.push(b.kaart); else uit.redenen.bundel = b.reden; }
   if (soorten.indexOf('biblio') >= 0) { const b = kaartBiblio(reg, o); if (b.kaart) uit.kaarten.push(b.kaart); else uit.redenen.biblio = b.reden; }
+  if (soorten.indexOf('feit') >= 0) { const b = kaartFeiten(reg, o); if (b.kaart) uit.kaarten.push(b.kaart); else uit.redenen.feit = b.reden; }   // wv1789
   return uit;
 }
 
@@ -2350,7 +2399,7 @@ function maak(o) {
   // Een fout bij één kaart stopt de andere niet.
   async function kaarten(opties) {
     opties = opties || {};
-    const soorten = opties.soorten || ['kritiek', 'bundel', 'biblio'], uit = { gezet: [], fouten: [], weg: 0, redenen: {} };
+    const soorten = opties.soorten || ['kritiek', 'bundel', 'biblio', 'feit'], uit = { gezet: [], fouten: [], weg: 0, redenen: {} };
     let reg = await register();
     const t = nu();
     for (const k of (reg.kaarten || []).filter(function (x) { return x.status === 'open' && Date.parse(x.aangemaakt) < t - 3600000; })) {
@@ -2362,6 +2411,10 @@ function maak(o) {
       catch (e) { uit.fouten.push({ sleutel: k.sleutel, fout: 'weg: ' + String(e && e.message || e).slice(0, 120) }); }
     }
     if (uit.weg) reg = await register();
+    if (soorten.indexOf('feit') >= 0) {   // wv1789: voorgestelde feiten uit de vault; fout = geen feitkaart, de rest gaat door
+      try { const f = await o.sbRpc('sb_identifier_te_bevestigen', { p_max: 200 }); reg.feiten = Array.isArray(f) ? f : null; }
+      catch (e) { reg.feiten = null; uit.fouten.push({ sleutel: 'feit', fout: 'feiten lezen: ' + String(e && e.message || e).slice(0, 120) }); }
+    }
     const p = plan(reg, leesAlles(), { nu: t, soorten: soorten });
     uit.redenen = p.redenen;
     for (const k of p.kaarten) {
@@ -2408,5 +2461,5 @@ module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina,
   bankRegelsBlokTekst: bankRegelsBlokTekst, bankKaartZin: bankKaartZin, orgOpNaam: orgOpNaam, BANK_SQL: BANK_SQL, BANK_BEVINDING_RE: BANK_BEVINDING_RE, REST_BEVINDING_RE: REST_BEVINDING_RE, BANKREGELS_PAD: BANKREGELS_PAD,
   finMeting: finMeting, finChecks: finChecks, leesMedewerker: leesMedewerker, leesKern: leesKern, finKernBlokTekst: finKernBlokTekst, finKaartZin: finKaartZin, kaartFin: kaartFin,
   FIN_SQL: FIN_SQL, FIN_BEVINDING_RE: FIN_BEVINDING_RE, finMaand: finMaand,
-  plan: plan, kaartBundel: kaartBundel, kaartenKritiek: kaartenKritiek, kaartBiblio: kaartBiblio, eruitUit: eruitUit, uitkomstZin: uitkomstZin, isoWeek: isoWeek,
+  plan: plan, kaartBundel: kaartBundel, kaartFeiten: kaartFeiten, FEIT_SLEUTEL_RE: FEIT_SLEUTEL_RE, kaartenKritiek: kaartenKritiek, kaartBiblio: kaartBiblio, eruitUit: eruitUit, uitkomstZin: uitkomstZin, isoWeek: isoWeek,
   KAART_SLEUTEL_RE: /^intake-(handvat|kritiek|biblio)-[a-z0-9]+(-[a-z0-9]+)*$/ };

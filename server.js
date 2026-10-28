@@ -15616,7 +15616,7 @@ async function ovisTik() {
       ovisStaatZet({ biblio_datum: t.datum, biblio: { t: new Date().toISOString(), uitkomst: b.uitkomst, zin: b.zin, open: b.open, nieuw: b.nieuw, opgelost: b.opgelost, per_check: b.per_check, tel: b.tel } });
       if ((b.nieuw_box != null ? b.nieuw_box : b.nieuw) > 0) ovisBoxRij(OVIS_MOD.boxRij(b, t.klok));   // wv1009: wat de Voor jou-ronde zelf rechtzet niet in de box
       ovisLoopt.nu = 'kaarten';
-      try { await ovisKaartenZet(['kritiek', 'bundel', 'biblio']); } catch (e) { logError('ovis-kaarten', e); }   // wv1253
+      try { await ovisKaartenZet(['kritiek', 'bundel', 'biblio', 'feit']); } catch (e) { logError('ovis-kaarten', e); }   // wv1253; wv1789: + feitkaart
       try { const pk = await ovisPotKaarten(b); if (pk) ovisStaatZet({ pot_kaarten: Object.assign({ t: new Date().toISOString() }, pk) }); } catch (e) { logError('ovis-pot-kaart', e); }   // wv981
       try { const fk = await ovisFinKaarten(b); if (fk) ovisStaatZet({ fin_kaarten: Object.assign({ t: new Date().toISOString() }, fk) }); } catch (e) { logError('ovis-fin-kaart', e); }   // wv1012
       return;
@@ -15765,14 +15765,19 @@ const sb2Feitenlijst = sb2ZoekKlok('sb2-feitenlijst', { van: [5, 0], tot: [5, 30
   ['python3', '-I', SB2_SRC + '/feitenlijst.py', '--vault', VAULT, '--laad', '--gelijktrekken', '--stempel', '/opt/data/scripts-staat/sb2-zoek/feitenlijst.gevuld']);
 const sb2Zoekindex = sb2ZoekKlok('sb2-zoekindex', { van: [5, 5], tot: [6, 0] }, 10,
   ['python3', '-I', SB2_SRC + '/zoekindex.py', 'bouw', '--vault', VAULT, '--db', '/opt/data/scripts-staat/sb2-zoekindex/index.sqlite', '--grendel', OVIS_LOCK]);
+// wv1789: zelflerende nachtronde v1 (zoekleer.py): deelt de gemiste Zoek snel-vragen in en schrijft één keer per ISO-week één box-rij (alleen als er
+// vragen zijn), daarna query_run.geleerd. 06:00–06:59, ná feitenlijst en tekstindex (de woordkandidaten lezen de index van vannacht). Schrijft in de
+// vault (box): zelf onder de vault-grendel (gedeeld) en niet in de onderhoudsstand (exit 3 = onvolledig, nog één poging). Schakelaar SB2_ZOEKLEER=uit.
+const sb2Zoekleer = process.env.SB2_ZOEKLEER === 'uit' ? null : sb2ZoekKlok('sb2-zoekleer', { van: [6, 0], tot: [7, 0] }, 5,
+  ['python3', '-I', SB2_SRC + '/zoekleer.py', '--vault', VAULT, '--index', '/opt/data/scripts-staat/sb2-zoekindex/index.sqlite', '--grendel', OVIS_LOCK]);
 function sb2ZoekKlokInfo() {
   const een = function (k) { if (!k) return { aan: false }; try { return k.info(); } catch (e) { return { fout: true }; } };
-  return { feitenlijst: een(sb2Feitenlijst), zoekindex: een(sb2Zoekindex) };
+  return { feitenlijst: een(sb2Feitenlijst), zoekindex: een(sb2Zoekindex), zoekleer: een(sb2Zoekleer) };
 }
 async function sb2ZoekKlokTik() {
   if (!SERVER_ECHT || !rolPrimair()) return;
   const ctx = { ams: ovisAms(), mag: function () { return !onderhoud.stand().aan && ovisLoopt.nu !== 'nacht'; } };
-  for (const [naam, k] of [['sb2-feitenlijst', sb2Feitenlijst], ['sb2-zoekindex', sb2Zoekindex]]) {
+  for (const [naam, k] of [['sb2-feitenlijst', sb2Feitenlijst], ['sb2-zoekindex', sb2Zoekindex], ['sb2-zoekleer', sb2Zoekleer]]) {
     if (!k) continue;
     try {
       const u = await k.tik(ctx);
@@ -15780,7 +15785,7 @@ async function sb2ZoekKlokTik() {
     } catch (e) { logError(naam + '-tik', e); }
   }
 }
-if ((sb2Feitenlijst || sb2Zoekindex) && SERVER_ECHT) { setInterval(function () { sb2ZoekKlokTik(); }, 5 * 60000).unref(); }
+if ((sb2Feitenlijst || sb2Zoekindex || sb2Zoekleer) && SERVER_ECHT) { setInterval(function () { sb2ZoekKlokTik(); }, 5 * 60000).unref(); }
 // managers.js soort script: Nu draaien (geen stempel, geen box-rij; het rapport gaat via managers.js naar de machinekamer)
 function ovisStartScript(m) {
   if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');
@@ -15819,7 +15824,8 @@ async function ovisKaartenZet(soorten) {
   if (r.fouten.length) logError('ovis-kaarten', new Error(r.fouten.map(function (x) { return x.sleutel + ': ' + x.fout; }).join('; ').slice(0, 300)));
   // Fable diffreview #4: een druk die nooit in de databank kwam (herstart, drie mislukte pogingen) → David en de box horen het
   (r.verloren || []).forEach(function (sl) {
-    ovisBericht(/^intake-biblio-/.test(sl) ? 'biblio' : 'bundel', sl, 'Een keuze die je op een kaart over herkenningskenmerken gaf, is niet vastgelegd. Er is niets vastgezet; de punten komen op een volgende kaart terug.', 'normaal');
+    const feit = !!(OVIS_MOD.FEIT_SLEUTEL_RE && OVIS_MOD.FEIT_SLEUTEL_RE.test(sl));   // wv1789
+    ovisBericht(/^intake-biblio-/.test(sl) ? 'biblio' : 'bundel', sl, 'Een keuze die je op een kaart over ' + (feit ? 'feiten uit je aantekeningen' : 'herkenningskenmerken') + ' gaf, is niet vastgelegd. Er is niets vastgezet; de punten komen op een volgende kaart terug.', 'normaal');
     const t = ovisAms();
     ovisBoxRij('\n## [ovis] ' + t.klok + ' — Davids druk op ' + sl + ' niet verwerkt (automatisch, wv1253)\n- status: open\n- van: pod (OVIS-kaarten)\n' +
       '- gemeten: de kaart staat dicht (David drukte), maar secondbrain.ovis_kaart bleef open; na 1 uur gesloten als weg.\n' +
@@ -15842,7 +15848,7 @@ function ovisBericht(soort, sleutel, tekst, klasse) {
     .catch(function (e) { logError('ovis-bericht', e); });
 }
 function ovisKnopHaak(p, toelichting) {
-  const o = p.herkomst.ovis, soort = String(o.soort || '');
+  const o = p.herkomst.ovis, soort = OVIS_MOD.FEIT_SLEUTEL_RE && OVIS_MOD.FEIT_SLEUTEL_RE.test(String(p.sleutel || '')) ? 'feit' : String(o.soort || '');   // wv1789: feitkaart = bundel met eigen woorden
   const n = (Array.isArray(o.regels) ? o.regels : []).reduce(function (m, x) { return Math.max(m, Number(x && x.nr) || 0); }, 0);
   let los, uitslag = null, staartZonderUitslag = false;
   const belofte = new Promise(function (r) { los = r; });
