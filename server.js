@@ -10238,20 +10238,25 @@ async function appAnders(req, res, reg, a, s, d) {
     const rv = await appVjRegisterVraag(p);
     let gekRij = null;
     if (p.soort === 'besluit') {
-      try { const gek = appVjGekoppeld(p, (await appVjAfgeleid(punten, Date.now())).map); gekRij = gek ? appVragen()[gek] || null : null; } catch (e) { gekRij = null; }
+      let afg = {};
+      try { afg = (await appVjAfgeleid(punten, Date.now())).map || {}; const gek = appVjGekoppeld(p, afg); gekRij = gek ? appVragen()[gek] || null : null; } catch (e) { gekRij = null; }
+      // Opus-review wv1821 ZOU 3: een besluit waarvan de vraag nog Ja / Nee / Anders heeft, beantwoord je daar (één antwoordplek)
+      const k = appVjKnopStand(p, rv, afg);
+      if (!k.beantwoord && !k.elders && !k.waaromNiet) return appWeiger(res, 409, 'deze vraag beantwoord je met Ja / Nee / Anders onder de vraag', 'anders besluit met knoppen');
     }
     kanaal = appAndersKaartKanaal(p, rv, gekRij);
-    gedaanWaar = d.gedaan === true && p.status === 'gedaan';
+    // Opus-review KAN 5: alleen Davids eigen Gedaan van zojuist (niet een kaart die de ronde eerder sloot)
+    gedaanWaar = d.gedaan === true && p.status === 'gedaan' && p.gesloten_door === 'david' && Date.now() - (Date.parse(p.gesloten_op || '') || 0) < APP_ANDERS_HERHAAL_MS;
     const h = p.herkomst && typeof p.herkomst === 'object' ? p.herkomst : {};
     const wv = (Array.isArray(h.wv) ? h.wv : []).filter(function (x) { return Number.isInteger(Number(x)); }).slice(0, 6).map(function (x) { return 'wv' + Number(x); });
-    const reg = (Array.isArray(h.register) ? h.register : []).map(String).filter(function (x) { return x.length <= 80; }).slice(0, 1);
+    const regSl = (Array.isArray(h.register) ? h.register : []).map(String).filter(function (x) { return x.length <= 80; }).slice(0, 1);
     const titel = appOntmasker(appVjOpmaakWeg(p.titel), 'kaart');
     kop = '[KNOP] David koos ANDERS bij de Voor jou-kaart ' + JSON.stringify(titel) + ' — toelichting: ' + t;
     ctx = '(Knopdruk op de Voor jou-kaart in de app (Overzicht, ' + APP_ANDERS_KANAALNAAM[kanaal] + ') om ' + tijd + '. Dit is Davids toelichting bij een ' + (p.soort === 'besluit' ? 'besluitkaart' : p.soort === 'proef' ? 'proefkaart' : 'taakkaart') +
       ', geen antwoord op een vraag en geen bevestiging. ' +
       (gedaanWaar ? 'David zette de kaart er zelf bij op Gedaan (de gewone knop, net vóór deze toelichting); laat hem dicht tenzij de toelichting iets anders zegt. '
         : (d.gedaan === true ? 'David vinkte "Zet hem ook op Gedaan" aan, maar de kaart staat niet op gedaan; behandel hem als open. ' : '') + 'De kaart blijft open; Anders sluit niets af. ') +
-      'Kaart: punt ' + appOntmasker(String(p.sleutel || ''), 'kaart') + ' (status ' + (gedaanWaar ? 'gedaan' : String(p.status || '?')) + ')' + (rv.vraag ? ', registerrij ' + JSON.stringify(appOntmasker(rv.vraag.regSleutel, 'kaart')) : reg.length ? ', registerrij ' + JSON.stringify(appOntmasker(reg[0], 'kaart')) : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') + '. ' +
+      'Kaart: punt ' + appOntmasker(String(p.sleutel || ''), 'kaart') + ' (status ' + (gedaanWaar ? 'gedaan' : String(p.status || '?')) + ')' + (rv.vraag ? ', registerrij ' + JSON.stringify(appOntmasker(rv.vraag.regSleutel, 'kaart')) : regSl.length ? ', registerrij ' + JSON.stringify(appOntmasker(regSl[0], 'kaart')) : '') + (wv.length ? ', werkvoorraad ' + wv.join(', ') : '') + '. ' +
       'Lees de toelichting als Davids woorden bij precies deze kaart en handel ernaar: past hij de opdracht aan, neem dat mee (een werkvoorraadrij die op deze kaart wacht krijgt de toelichting erbij); ' +
       'zegt hij dat iets af of niet meer nodig is, zet de kaart dan zelf goed. Antwoord David kort in dit gesprek.)';
     socevRij = 'Voor jou-kaart ' + JSON.stringify(titel);
@@ -10265,7 +10270,7 @@ async function appAnders(req, res, reg, a, s, d) {
     const rij = rijen.find(function (r) { return r && r.datum === datum && Number(r.positie) === positie; });
     if (!rij) return appWeiger(res, 404, 'deze actie ken ik niet (meer); ververs je dag', 'anders lijstje onbekend');
     kanaal = 'hoofd';
-    gedaanWaar = d.gedaan === true && rij.keuze === 'gedaan';
+    gedaanWaar = d.gedaan === true && rij.keuze === 'gedaan' && Date.now() - (Date.parse(rij.getikt_op || '') || 0) < APP_ANDERS_HERHAAL_MS;
     const regel = appOntmasker(appKort(appSleutelMasker(String(rij.regel || rij.titel || '').replace(/^\d+\.\s*/, '')), 220), 'lijstje');
     const bron = appOntmasker(appKort(String(rij.bron || ''), 30), 'lijstje');
     kop = '[KNOP] David koos ANDERS bij een actie uit zijn actielijstje: ' + JSON.stringify(regel) + ' — toelichting: ' + t;
@@ -10281,18 +10286,31 @@ async function appAnders(req, res, reg, a, s, d) {
     kanaal = String(d.kanaal || '');
     const id = String(d.job_id || '');
     if (!Object.hasOwn(APP_KNOP_KANALEN, kanaal) || !APP_JOB_RE.test(id)) return appWeiger(res, 400, 'ongeldige knop', 'anders agenda velden');
-    const e = appAgendaKnoppen()[id];
-    if (!e || e.kanaal !== kanaal || !appAgendaKnop(id, 'uitvoeren')) return appWeiger(res, 404, 'deze knop ken ik niet (meer)', 'anders agenda onbekend');
+    const e = appAgendaKnoppen()[id], K = appAgendaKnop(id, 'uitvoeren');
+    if (!e || e.kanaal !== kanaal || !K) return appWeiger(res, 404, 'deze knop ken ik niet (meer)', 'anders agenda onbekend');
+    // Opus-review wv1821 MOET 1: de echte stand van de ✅ (al uitgevoerd, bezig, verlopen of open), niet altijd "blijft staan"
+    const kNu = Date.now();
+    const stand = appAgendaBezig(K, kNu) ? 'De ✅ onder dat voorstel wordt op dit moment uitgevoerd; wacht de uitkomst af voor je iets aanpast.'
+      : K.stand === 'klaar' ? 'De ✅ onder dat voorstel is al afgehandeld' + (K.uitkomst ? ' ("' + appEenRegel(K.uitkomst, 200) + '")' : '') + '; staat de afspraak er al, dan is een wijziging verplaatsen: leg dat voor met een nieuwe agendaknop.'
+      : !(kNu <= Number(K.verloopt) + APP_AGENDA_MARGE_MS) ? 'De ✅ onder dat voorstel is verlopen; er is niets in de agenda gezet. Leg zo nodig een nieuw voorstel met agendaknop voor.'
+      : 'De ✅ onder dat voorstel blijft staan en er verandert niets in de agenda. Pas het voorstel aan naar wat David zegt en leg het opnieuw voor met een agendaknop, of laat het vallen als hij dat zegt.';
     const bericht = await appAndersBericht(kanaal, id);
     kop = '[KNOP] David koos ANDERS bij het agendavoorstel in jouw bericht van ' + appTijdKort(Date.parse(e.t) || Date.now()) + ' — toelichting: ' + t;
     ctx = '(Knopdruk bij het agendavoorstel in de app om ' + tijd + (bericht ? '. Het voorstel begon met: "' + appEenRegel(bericht, 300) + '"' : '. Het bericht met het voorstel is niet meer leesbaar') + '. ' +
-      'Dit is GEEN bevestiging: de ✅ onder dat voorstel blijft staan en er verandert niets in de agenda. Pas het voorstel aan naar wat David zegt en leg het opnieuw voor met een agendaknop, of laat het vallen als hij dat zegt.)';
+      'Dit is GEEN bevestiging. ' + stand + ')';
     socevRij = bericht || '(agendavoorstel)';
     davidRij = 'Anders (knop bij een agendavoorstel in de app) — toelichting: ' + t;
     reden = 'anders agenda ' + id + ' -> ' + kanaal;
   }
   if (!(await appMagBeurt(res, kanaal, true))) return;
-  if (ah && appStaat.andersIds[ah]) return appWeiger(res, 409, 'dit wordt al verstuurd; even geduld', 'anders herhaling bezig');   // tweede kwam tijdens het lezen
+  // wv405-volgorde (Opus-review wv1821 ZOU 2): een getypt bericht dat nog zijn chat_log-rij schrijft, gaat eerst de rij in
+  for (let i = 0; i < 40 && appStaat.startend && appStaat.startend[kanaal] > 0; i++) await new Promise(function (r) { setTimeout(r, 100); });
+  if (appKnopInRij(kanaal) >= APP_KNOP_RIJ_MAX) return appWeiger(res, 429, 'er staan al ' + APP_KNOP_RIJ_MAX + ' knopdrukken in de rij; wacht tot Socev die heeft afgehandeld', 'knop rij vol');
+  if (ah && appStaat.andersIds[ah]) {   // tweede kwam tijdens het lezen (Opus-review KAN 4: staat de beurt er al, dan die)
+    const x = appStaat.andersIds[ah];
+    if (x.job) { res._app.reden = 'anders herhaling ' + x.job; return appStuur(res, 200, { ok: true, job_id: x.job, kanaal: x.kanaal, al: true, in_rij: false }); }
+    return appWeiger(res, 409, 'dit wordt al verstuurd; even geduld', 'anders herhaling bezig');
+  }
   const promptTekst = kop + '\n' + ctx + (res._app.bsnWeg ? '\n' + APP_BSN_SYS : '');
   const chatId = APP_KANALEN[kanaal];
   const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
@@ -10305,7 +10323,8 @@ async function appAnders(req, res, reg, a, s, d) {
       .then(function (gelogd) { return wacht + (gelogd ? '' : APP_CHATLOG_NIET); });
   };
   if (ah) appStaat.andersIds[ah] = { t: Date.now(), job: null, kanaal: kanaal };
-  const st = appStartBeurt(a, kanaal, promptTekst, { soort: 'knop', bijStart: bijStart, tekst: '✎ Anders: ' + toel + ' — bij ' + (soort === 'kaart' ? 'de kaart ' : soort === 'lijstje' ? 'de actie ' : 'het agendavoorstel ') + (soort === 'agenda' ? '' : socevRij.replace(/^(Voor jou-kaart |Actielijstje [^:]*: )/, '')) });
+  const bijVerval = function () { if (ah && appStaat.andersIds && appStaat.andersIds[ah]) delete appStaat.andersIds[ah]; };   // Opus-review KAN 6: vervallen = opnieuw sturen mag
+  const st = appStartBeurt(a, kanaal, promptTekst, { soort: 'knop', bijStart: bijStart, bijVerval: bijVerval, tekst: '✎ Anders: ' + toel + ' — bij ' + (soort === 'kaart' ? 'de kaart ' : soort === 'lijstje' ? 'de actie ' : 'het agendavoorstel ') + (soort === 'agenda' ? '' : socevRij.replace(/^(Voor jou-kaart |Actielijstje [^:]*: )/, '')) });
   if (!st.job_id) { if (ah) delete appStaat.andersIds[ah]; return appStartFout(res, st); }
   if (ah) appStaat.andersIds[ah].job = st.job_id;
   res._app.reden = reden + ' -> ' + st.job_id + (inRij ? ' (in de rij)' : '');
