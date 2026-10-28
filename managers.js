@@ -96,19 +96,27 @@ function prompt(m, door, nu) {
     ' (gebruik deze, niet de podklok). Voer de skill `' + m.skill + '` volledig uit (.claude/skills/' + m.skill + '/SKILL.md), met de regels van de sectie "Op afroep" ' +
     'in die skill: zet bij deze ronde GEEN Voor jou-kaart, GEEN bundel, GEEN rij in Open vragen aan David en GEEN werkvoorraadrij (uitzondering: een kritiek ' +
     'beveiligingslek zoals de skill beschrijft), en GEEN hartslagstempel. Wat David moet beslissen of weten, zet je in je slotregels. ' +
-    'Je laatste antwoord is: hooguit drie korte regels in gewone taal voor David (wat je vond, wat nieuw is sinds de vorige ronde, wat er bij hem of de ' +
+    'Je laatste antwoord is: hooguit drie korte regels in gewone taal voor David, elk hooguit 300 tekens (wat je vond, wat nieuw is sinds de vorige ronde, wat er bij hem of de ' +
     'machinekamer ligt; geen paden, geen ids, geen sleutels, geen markdown), en daarna als allerlaatste regel exact in dit formaat, zonder iets erna: ' + m.slotFormaat;
 }
 
 // Een regel die op een sleutel lijkt, gaat niet mee in het rapport (de skills controleren zelf ook; dit is de vangrail).
 const SLEUTEL_RE = /(sk-[A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|\b[0-9a-f]{40,}\b|\b[A-Za-z0-9+/]{48,}={0,2})/;
+// wv1722: een te lange regel kapt af op een woordgrens met "…", zodat David ziet dat er iets mist (niet midden in een woord of zin stil).
+function kort(s, n) {
+  s = String(s);
+  if (s.length <= n) return s;
+  let knip = s.slice(0, n);
+  if (!/\s/.test(s.charAt(n))) { const w = knip.search(/\s\S*$/); if (w > n / 2) knip = knip.slice(0, w); }
+  return knip.replace(/[\s,;:]+$/, '') + '…';
+}
 function rapportRegels(output, m) {
   const regels = String(output || '').split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
   const laatste = regels.length ? regels[regels.length - 1] : '';
   const goed = m.slotRe.test(laatste);
   const voor = (goed ? regels.slice(0, -1) : regels).slice(-3).map(function (s) {
-    s = s.replace(/^[-*•]\s+/, '').replace(/\*\*|__|`/g, '').slice(0, 300);
-    return SLEUTEL_RE.test(s) ? '(regel weggelaten: leek op een sleutel)' : s;
+    s = s.replace(/^[-*•]\s+/, '').replace(/\*\*|__|`/g, '');
+    return SLEUTEL_RE.test(s) ? '(regel weggelaten: leek op een sleutel)' : kort(s, 300);
   });
   return { goed: goed, regels: voor, telling: goed ? laatste.replace(/^[A-Z-]+ \d{4}-\d{2}-\d{2}:\s*/, '').slice(0, 200) : '' };
 }
@@ -165,7 +173,7 @@ function maak(o) {
   function naRun(m, a, r) {
     const s = lees();
     const x = s.afroepen.find(function (y) { return y.job_id === a.job_id; });
-    const rr = m.soort === 'script' ? { goed: !!(r && r.ok), regels: r && r.zin ? [String(r.zin).slice(0, 300)] : [], telling: r ? (Number(r.open) || 0) + ' open (' + (Number(r.nieuw) || 0) + ' nieuw)' : '' } : rapportRegels(r && r.output, m);
+    const rr = m.soort === 'script' ? { goed: !!(r && r.ok), regels: r && r.zin ? [kort(r.zin, 300)] : [], telling: r ? (Number(r.open) || 0) + ' open (' + (Number(r.nieuw) || 0) + ' nieuw)' : '' } : rapportRegels(r && r.output, m);
     const goed = !!r && r.ok !== false && rr.goed;
     if (x) { x.uitkomst = goed ? 'goed' : 'fout'; x.klaar = nu(); try { schrijf(s); } catch (e) { o.fout('manager-staat', e); } }
     let tekst;
@@ -276,5 +284,5 @@ function maak(o) {
 // Wat de RPC mk_managers_stand per manager nodig heeft (geen vrije invoer: alleen deze vaste lijst).
 function rpcInvoer() { return MANAGERS.map(function (m) { return { id: m.id, hartslag: m.hartslag, patroon: m.patroon }; }); }
 
-module.exports = { maak: maak, MANAGERS: MANAGERS, vraagZin: vraagZin, REDENEN: REDENEN, prompt: prompt, rapportRegels: rapportRegels, volgendeWeekronde: volgendeWeekronde,
+module.exports = { maak: maak, MANAGERS: MANAGERS, vraagZin: vraagZin, REDENEN: REDENEN, prompt: prompt, rapportRegels: rapportRegels, kort: kort, volgendeWeekronde: volgendeWeekronde,
   amsNaarMs: amsNaarMs, rpcInvoer: rpcInvoer, VOOR_WEEKRONDE_MS: VOOR_WEEKRONDE_MS };

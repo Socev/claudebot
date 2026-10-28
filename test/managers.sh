@@ -227,6 +227,16 @@ const wacht = () => new Promise((r) => setImmediate(r));
     const r = M.rapportRegels('Twee dingen gevonden.\nUI-MANAGER 2026-10-23: 8 checks, 1 niet vast te stellen, 2 open (2 nieuw), voorstellen 2, kaart geen, wv geen', u);
     toets('8b UI: slotregel herkend, telling zonder voorvoegsel', r.goed && r.telling.indexOf('8 checks') === 0 && r.regels.length === 1, r);
     toets('8b UI: slot van een andere manager telt niet', !M.rapportRegels('DESIGN-MANAGER 2026-10-23: 9 checks', u).goed);
+    // wv1722: lange regel kapt af op een woordgrens met …, niet midden in een woord of zin stil
+    const lang = ('De vormgeving van het verzonnen proefscherm wijkt op meerdere plekken af van de bouwdoos, ').repeat(5).trim();
+    const rl = M.rapportRegels(lang + '\nUI-MANAGER 2026-10-23: 8 checks, 0 niet vast te stellen, 1 open (1 nieuw), voorstellen 1, kaart geen, wv geen', u).regels[0];
+    const zonder = rl.slice(0, -1);
+    toets('8b wv1722: regel van ' + lang.length + ' tekens → ≤ 301, eindigt op …, geen half woord', lang.length >= 400 && rl.length <= 301 && /…$/.test(rl)
+      && /[\s,;:]/.test(lang.charAt(zonder.length)) && lang.indexOf(zonder) === 0 && !/[\s,;:]$/.test(zonder), rl);
+    toets('8b wv1722: korte regel ongewijzigd, precies 300 ongewijzigd', M.kort('kort', 300) === 'kort' && M.kort('a'.repeat(300), 300) === 'a'.repeat(300));
+    toets('8b wv1722: één lang woord → hard afgekapt met …', M.kort('x'.repeat(400), 300) === 'x'.repeat(300) + '…');
+    toets('8b wv1722: scriptmanager-zin gaat ook door kort()', /r && r\.zin \? \[kort\(r\.zin, 300\)\]/.test(fs.readFileSync('managers.js', 'utf8')));
+    toets('8b wv1722: prompt noemt elk hooguit 300 tekens', /drie korte regels in gewone taal voor David, elk hooguit 300 tekens/.test(p));
     const s2 = fs.readFileSync('server.js', 'utf8');
     toets('8b UI: sessie ui-manager smal met dezelfde sleutels als design-manager, niet in MK_SESSIES',
       /'ui-manager': \['SUPABASE_MCP_TOKEN', 'SUPABASE_SERVICE_ROLE'\]/.test(s2) && !/const MK_SESSIES = new Set\(\[[^\]]*'ui-manager'/.test(s2));
