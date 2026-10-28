@@ -405,3 +405,81 @@ test('schaduw PDF-lezer (wv1431): alleen een beoordeeld stuk gaat door (pad + lo
   assert.equal(u2.verwerkt, 1); assert.equal(u2.fout, 0);
   r2.sluit();
 });
+
+test('regels van David (wv1408): vorm, afzender alleen bij genoeg zekerheid, geen regex', () => {
+  assert.equal(K.regelVoorwaarden({}).ok, false);
+  assert.equal(K.regelVoorwaarden({ afzender_zeker: 'hoog' }).ok, false);   // zekerheid alleen is geen voorwaarde
+  assert.match(K.regelVoorwaarden({ onderwerp: { op: 'regex', w: 'a.*b' } }).reden, /bevat of is/);
+  assert.match(K.regelVoorwaarden({ raar: 'x' }).reden, /onbekend veld/);
+  assert.equal(K.regelVoorwaarden({ soort: 'bewijsstuk', entiteit: 'GH', bron: 'gmail:david' }).ok, true);
+  assert.equal(K.regelVoorwaarden({ entiteit: 'gh; drop' }).ok, false);
+  const m = { bron: 'gmail:david', van_adres: 'x@post.voorbeeld-energie.example', van_domein: 'post.voorbeeld-energie.example', onderwerp: 'Uw nota', soort: 'bewijsstuk',
+    afzender: 'org:voorbeeld-energie', afzender_naam: 'Voorbeeld Energie BV', afzender_kracht: 'zwak', entiteit: 'TG', bijlagen: [{ naam: 'nota.pdf', mime: 'application/pdf' }] };
+  assert.equal(K.regelPast({ afzender: { op: 'bevat', w: 'voorbeeld energie' } }, m), false);          // zwak herkend telt niet
+  assert.equal(K.regelPast({ afzender: { op: 'bevat', w: 'voorbeeld energie' }, afzender_zeker: 'zwak' }, m), true);
+  assert.equal(K.regelPast({ van_domein: { op: 'is', w: 'voorbeeld-energie.example' } }, m), true);   // ook subdomein
+  assert.equal(K.regelPast({ van_domein: { op: 'is', w: 'energie.example' } }, m), false);
+  assert.equal(K.regelPast({ bijlage: 'pdf', soort: 'bewijsstuk' }, m), true);
+  assert.equal(K.regelPast({ bijlage: 'niet' }, m), false);
+  for (const f of [K.regelPast, K.regelVoorwaarden]) assert.ok(!/RegExp|\.match\(|\.test\(c|new Function/.test(f.toString()), 'regels maken geen RegExp uit invoer');
+});
+
+test('regels van David (wv1408): regel gaat vóór de standaard, nooit voor een vastgehouden stuk; App toont geen inhoud van een vastgehouden stuk; Toets', async () => {
+  const L = logboek();
+  const fac = L.zet({ bron: 'scanner:scansnap', profiel: 'scansnap@1', delen: [{ rol: 'origineel', mime: 'application/pdf', bytes: FACTUUR_PDF }] });
+  const gem = L.zet({ bron: 'gmail:david', profiel: 'mail@1', marker: 'gemarkeerd', soorten: ['brieftaal'], meta: { van: 'a@b.example', onderwerp: 'Verslag ZWAARDVIS', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: 'From: a@b.example\r\nSubject: Verslag ZWAARDVIS\r\nContent-Type: text/plain\r\n\r\n' + PATIENT_TEKST }] });
+  const nb = L.zet({ bron: 'gmail:david', profiel: 'mail@1', meta: { van: 'Nieuws <info@nieuwsbrief.example>', onderwerp: 'Nieuwsbrief oktober', aan: ['david@voorbeeld.example'] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: 'From: info@nieuwsbrief.example\r\nSubject: Nieuwsbrief oktober\r\nContent-Type: text/plain\r\n\r\nBeste lezer, hierbij de nieuwsbrief van oktober met veel nieuws over van alles en nog wat.' }] });
+  const r = R.maak(Object.assign({ dir: L.dir }, stubs()));
+  // twee regels vóór de ronde: nieuwsbrief → nergens; "Verslag" → facturen (mag het vastgehouden stuk nooit raken)
+  let u = r.appRegel({ actie: 'nieuw', naam: 'Nieuwsbrief', voorwaarden: { van_domein: { op: 'is', w: 'nieuwsbrief.example' } }, lens: 'geen' }, 'app:proef');
+  assert.equal(u.status, 200); const r1 = u.j.id;
+  u = r.appRegel({ actie: 'nieuw', naam: 'Verslag', voorwaarden: { onderwerp: { op: 'bevat', w: 'verslag' } }, lens: 'facturen' }, 'app:proef');
+  assert.equal(u.status, 200);
+  assert.equal(r.appRegel({ actie: 'nieuw', naam: 'x', voorwaarden: { soort: 'keten' }, lens: 'weg' }, 'app').status, 400);
+  assert.equal(r.appRegel({ actie: 'nieuw', naam: 'x', voorwaarden: {}, lens: 'kennis' }, 'app').status, 400);
+  assert.equal((await r.ronde()).verwerkt, 3);
+  const sam = (id) => JSON.parse(L.db.prepare('SELECT samenvatting FROM router_stuk WHERE stuk_id = ?').get(id).samenvatting);
+  assert.equal(sam(nb).regel, 'R' + r1 + '@1');
+  assert.deepEqual(sam(nb).bestemmingen.map((b) => [b.lens, b.zou_auto]), [['geen', true]]);
+  assert.equal(sam(gem).regel, undefined);
+  assert.equal(L.db.prepare('SELECT status FROM router_stuk WHERE stuk_id = ?').get(gem).status, 'vastgehouden');
+  assert.equal(L.db.prepare('SELECT count(*) n FROM bestemming WHERE stuk_id = ?').get(gem).n, 0);
+  assert.equal(sam(fac).regel, null);   // geen regel past: standaard
+  // App-overzicht
+  const o = await r.appOverzicht(50);
+  const og = o.stukken.find((x) => x.stuk_id === gem);
+  assert.equal(og.status, 'vastgehouden'); assert.ok(og.soorten.includes('brieftaal'));
+  for (const k of ['onderwerp', 'van', 'bijlagen', 'afzender', 'entiteit', 'nu', 'toen']) assert.ok(!(k in og), 'vastgehouden zonder ' + k);
+  assert.ok(!/ZWAARDVIS|a@b\.example|bovengenoemde/.test(JSON.stringify(o)));
+  const onb = o.stukken.find((x) => x.stuk_id === nb);
+  assert.equal(onb.onderwerp, 'Nieuwsbrief oktober'); assert.equal(onb.van, 'info@nieuwsbrief.example'); assert.deepEqual(onb.nu, ['geen']); assert.equal(onb.nu_regel, r1);
+  assert.equal(o.regels.find((x) => x.id === r1).treffers, 1);
+  assert.ok(o.entiteiten.some((e) => e.id === 'TG'));
+  // Toets: een nieuwe regel die al door een eerdere gevangen wordt, en een die echt iets verandert
+  let t = await r.appToets({ voorwaarden: { onderwerp: { op: 'bevat', w: 'nieuwsbrief' } }, lens: 'kennis', entiteit: 'PRIVE' });
+  assert.equal(t.j.treffers, 1); assert.equal(t.j.eerder, 1); assert.equal(t.j.voorbeelden[0].eerder, 'Nieuwsbrief');
+  t = await r.appToets({ voorwaarden: { soort: 'bewijsstuk' }, lens: 'kennis', entiteit: 'GH' });
+  assert.equal(t.j.treffers, 1); assert.deepEqual(t.j.voorbeelden[0].nu, ['facturen']); assert.deepEqual(t.j.voorbeelden[0].nieuw, ['kennis']); assert.equal(t.j.voorbeelden[0].doel, 'GH'); assert.equal(t.j.anders, 1);
+  assert.equal((await r.appToets({ voorwaarden: {} })).status, 400);
+  // aan/uit, volgorde, weg — met spoor
+  assert.equal(r.appRegel({ actie: 'aanuit', id: r1, actief: false }, 'app:proef').status, 200);
+  assert.deepEqual((await r.appOverzicht(50)).stukken.find((x) => x.stuk_id === nb).nu, ['kennis?']);   // zonder regel: standaard (geen entiteit → twijfel)
+  assert.equal(r.appRegel({ actie: 'neer', id: r1 }, 'app:proef').status, 200);
+  assert.equal(r.regels()[1].id, r1);
+  assert.equal(r.appRegel({ actie: 'weg', id: r1 }, 'app:proef').status, 200);
+  assert.equal(r.regels().length, 1);
+  assert.equal(r.appRegel({ actie: 'weg', id: r1 }, 'app:proef').status, 404);
+  const w = L.db.prepare('SELECT wat, door FROM regel_wijziging ORDER BY id').all().map((x) => x.wat);
+  assert.deepEqual(w, ['regel', 'regel', 'regel_aanuit', 'regel_volgorde', 'regel_weg']);
+  r.sluit();
+});
+
+test('server.js (wv1408): router-app alleen met schakelaar, schrijven alleen primair', () => {
+  const srv = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(srv, /route === 'GET \/app\/intake\/router' \|\| route === 'POST \/app\/intake\/regel' \|\| route === 'POST \/app\/intake\/toets'\) return typeof appIntakeRouter/);
+  const f = srv.slice(srv.indexOf('async function appIntakeRouter'), srv.indexOf('function intakeRouterInfo()'));
+  assert.match(f, /intakeRouterStand\(\) \? intakeRouterHaal\(\) : null/);
+  assert.match(f, /if \(!rolPrimair\(\)\) return appWeiger\(res, 503/);
+});

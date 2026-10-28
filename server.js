@@ -12228,6 +12228,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/mailman' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
+        if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels
         if (route === 'GET /app/brain/entiteiten' || route.indexOf('GET /app/brain/entiteit/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
@@ -15347,6 +15348,25 @@ function intakeRouterHaal() {
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; } });
   } catch (e) { logError('intake-router', e); intakeRouterMod = null; }
   return intakeRouterMod;
+}
+// App Intake › Router en Regels (wv1408, stap 3 deel A): wat de router in de schaduw besliste en Davids routeringsregels (bewerken + Toets op het
+// logboek). Privacygrens in intake-router.js (appOverzicht): van een vastgehouden stuk alleen status en soorten kenmerken. Schrijven alleen op de
+// primaire kant. Router uit of module weg (terugrol): 404, de app toont dan alleen de tellingen.
+async function appIntakeRouter(req, res, a, s, d, route) {
+  const ir = intakeRouterStand() ? intakeRouterHaal() : null;
+  if (!ir || typeof ir.appOverzicht !== 'function') return appWeiger(res, 404, 'De Intake-router staat uit of zit niet in deze versie van de pod', 'intake-router uit');
+  let r;
+  try {
+    if (route === 'GET /app/intake/router') { res._app.stil = true; return appStuur(res, 200, await ir.appOverzicht(80)); }
+    if (route === 'POST /app/intake/toets') r = await ir.appToets(d || {});
+    else {
+      if (!rolPrimair()) return appWeiger(res, 503, 'niet de actieve kant', 'intake-regel niet primair');
+      r = ir.appRegel(d || {}, 'app:' + String(appStudioCtx(a, s).apparaat || '').slice(0, 40));
+      if (r.status === 200) res._app.reden = 'intake-regel ' + String(d && d.actie || '').slice(0, 10) + ' ' + String(r.j && r.j.id || '');
+    }
+  } catch (e) { logError('app-intake-router', e); return appWeiger(res, 500, 'Intake: interne fout', 'intake-router fout'); }
+  if (r.status !== 200) res._app.reden = 'intake: ' + String(r.j && r.j.fout || '').slice(0, 60);
+  return appStuur(res, r.status, r.j);
 }
 function intakeRouterInfo() { const r = intakeRouterMod; if (!r) return { aan: !!intakeRouterStand(), module: fs.existsSync(path.join(__dirname, 'intake-router.js')), geladen: false }; try { return Object.assign(r.info(), { aan: !!intakeRouterStand() }); } catch (e) { return { fout: true }; } }
 async function intakeTik() {

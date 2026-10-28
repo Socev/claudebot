@@ -32,7 +32,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const REGELVERSIE = 'router-1.0';
+const REGELVERSIE = 'router-1.1';   // 1.1 (wv1408): Davids routeringsregels gaan vóór de standaard
 const PROFIELEN = new Set(['mail@1', 'outlook-mail@1', 'scansnap@1']);   // de rest (dumps, contacten) gaat zoals nu: buiten de router
 const LEES_MAX = 2 * 1024 * 1024;       // per tekstonderdeel
 const TEKST_MIN = 40;                   // tekens zonder witruimte: daaronder geen tekstlaag (gelijk aan de marker)
@@ -457,7 +457,105 @@ function bestemmingen(s, afz, ent, x) {
   return uit;
 }
 
-const K = { REGELVERSIE, KOP_MAX, orgDomein, adresVan, dkimUitslag, mailLees, bboxRegels, velden, letterlijk, ibanGeldig, soortBepaal, register, afzenderBepaal, entiteitBepaal, bestemmingen, normAlias, LABEL_KNOOP };
+/*
+ * ROUTERINGSREGELS VAN DAVID (wv1408, stap 3 deel A; David 27-10 20:26: "Daar moet duidelijk ingesteld kunnen worden wat waar heen geroute
+ * moet, en moet ik ook regels toe kunnen voegen"). Bron = tabel intake_regel in intake.sqlite (de pod is het brein, zoals mailman.sqlite);
+ * David bewerkt ze in de App (Intake › Regels), elke wijziging met oud en nieuw in regel_wijziging. Volgorde in stap 9: (1) de marker gaat
+ * altijd voor (een vastgehouden stuk komt nooit bij een regel), (2) de eerste actieve regel die past bepaalt de bestemming, (3) anders de
+ * standaard (bestemmingen hierboven). Een regel van David is zijn eigen besluit en telt als zeker genoeg (automatisch), behalve 'vragen'.
+ * Alleen 'bevat' en 'is' (geen regex: de CI-poort van deze module staat geen RegExp uit invoer toe; MailMan doet de regex aan de poort).
+ * Een voorwaarde op de HERKENDE afzender telt alleen als die minstens 'redelijk' herkend is (instelbaar tot 'hoog').
+ */
+const REGEL_LENZEN = ['facturen', 'kennis', 'keten', 'geen', 'vragen'];
+const REGEL_TEKST = ['van_adres', 'van_domein', 'onderwerp', 'afzender', 'bijlagenaam'];
+const REGEL_OPS = ['bevat', 'is'];
+const REGEL_KEUZE = { soort: ['correspondentie', 'bewijsstuk', 'keten', 'notitie', 'geen_post', 'onbekend'], bijlage: ['wel', 'niet', 'pdf'], afzender_zeker: ['hoog', 'redelijk', 'zwak'] };
+const BRON_RE = /^[a-z]{2,20}:[a-z0-9-]{1,30}$/;
+const KNOOP_RE = /^[A-Z][A-Z0-9_-]{0,15}$/;
+function regelVoorwaarden(v) {
+  if (!isObj(v)) return { ok: false, reden: 'voorwaarden ontbreken' };
+  const uit = {};
+  for (const k of Object.keys(v)) {
+    const x = v[k];
+    if (x == null || x === '') continue;
+    if (REGEL_TEKST.indexOf(k) >= 0) {
+      if (!isObj(x)) return { ok: false, reden: k + ': verwacht {op, w}' };
+      const op = String(x.op || 'bevat'), w = String(x.w == null ? '' : x.w).trim().slice(0, 200);
+      if (!w) continue;
+      if (REGEL_OPS.indexOf(op) < 0) return { ok: false, reden: k + ': alleen bevat of is' };
+      uit[k] = { op, w };
+    } else if (k === 'bron') {
+      if (!BRON_RE.test(String(x))) return { ok: false, reden: 'bron: onbekende vorm' };
+      uit[k] = String(x);
+    } else if (k === 'entiteit') {
+      if (!KNOOP_RE.test(String(x))) return { ok: false, reden: 'entiteit: onbekende vorm' };
+      uit[k] = String(x);
+    } else if (REGEL_KEUZE[k]) {
+      if (REGEL_KEUZE[k].indexOf(String(x)) < 0) return { ok: false, reden: k + ': onbekende keuze' };
+      uit[k] = String(x);
+    } else return { ok: false, reden: 'onbekend veld ' + String(k).slice(0, 30) };
+  }
+  // 'afzender_zeker' alleen is geen voorwaarde
+  if (!Object.keys(uit).filter(function (k) { return k !== 'afzender_zeker'; }).length) return { ok: false, reden: 'vul minstens één voorwaarde in' };
+  return { ok: true, v: uit };
+}
+function regelVergelijk(waarde, c) {
+  const a = String(waarde || '').toLowerCase(), w = String(c.w || '').toLowerCase();
+  return c.op === 'is' ? a === w : a.indexOf(w) >= 0;
+}
+// m = { bron, van_adres, van_domein, onderwerp, soort, afzender, afzender_naam, afzender_kracht, entiteit, bijlagen: [{ naam, mime }] }
+function regelPast(v, m) {
+  const ks = Object.keys(v || {}).filter(function (k) { return k !== 'afzender_zeker'; });
+  if (!ks.length) return false;
+  for (const k of ks) {
+    const c = v[k];
+    if (k === 'bron' && m.bron !== c) return false;
+    if (k === 'soort' && m.soort !== c) return false;
+    if (k === 'entiteit' && m.entiteit !== c) return false;
+    if (k === 'van_adres' && !regelVergelijk(m.van_adres, c)) return false;
+    if (k === 'van_domein' && !(regelVergelijk(m.van_domein, c) || (c.op === 'is' && String(m.van_domein || '').toLowerCase().endsWith('.' + String(c.w).toLowerCase())))) return false;
+    if (k === 'onderwerp' && !regelVergelijk(m.onderwerp, c)) return false;
+    if (k === 'afzender') {
+      if (!m.afzender || NIVEAU[m.afzender_kracht] == null || NIVEAU[m.afzender_kracht] < NIVEAU[v.afzender_zeker || 'redelijk']) return false;
+      if (!(regelVergelijk(m.afzender, c) || regelVergelijk(m.afzender_naam, c))) return false;
+    }
+    if (k === 'bijlagenaam' && !(m.bijlagen || []).some(function (b) { return regelVergelijk(b.naam, c); })) return false;
+    if (k === 'bijlage') {
+      const n = (m.bijlagen || []).length, pdf = (m.bijlagen || []).some(function (b) { return String(b.mime || '').toLowerCase() === 'application/pdf' || /\.pdf$/i.test(String(b.naam || '')); });
+      if (c === 'wel' && !n) return false;
+      if (c === 'niet' && n) return false;
+      if (c === 'pdf' && !pdf) return false;
+    }
+  }
+  return true;
+}
+function regelZoek(regels, m) {
+  for (const r of regels) if (r.actief && regelPast(r.voorwaarden, m)) return r;
+  return null;
+}
+// bestemmingen volgens een regel: de lens van de regel, doel = de entiteit van de regel of de herkende; deadlines erbij zoals de standaard
+function regelBestemmingen(r, ent, x) {
+  const doel = r.entiteit || ent.knoop || null;
+  const id = 'R' + r.id + '@' + r.versie;
+  if (r.lens === 'vragen') return [{ lens: 'vragen', doel, zou_auto: false, reden: 'regel_altijd_vragen', regel: id }];
+  const uit = [];
+  // de kennislens heeft een eigen entiteit nodig (raw_input per entiteit): zonder doel blijft het twijfel
+  if (r.lens === 'kennis' && !doel) uit.push({ lens: 'kennis', doel: null, zou_auto: false, reden: 'geen_entiteit', regel: id });
+  else uit.push({ lens: r.lens, doel, zou_auto: true, reden: null, regel: id });
+  if ((r.lens === 'facturen' || r.lens === 'keten') && (x.velden || []).some(function (v) { return v.veld === 'vervaldatum'; })) uit.push({ lens: 'deadlines', doel, zou_auto: true, reden: null, regel: id });
+  return uit;
+}
+// opnieuw rekenen op een opgeslagen samenvatting (Toets en "volgens je regels nu"): regel als die past, anders de standaard
+function herbereken(sam, m, regels) {
+  const ent = { knoop: sam.entiteit || null, kracht: sam.entiteit_kracht || 'geen' };
+  const x = { velden: (sam.velden || []).map(function (v) { return { veld: v }; }), label_entiteit: (sam.label_route || [])[0] || null };
+  const r = regelZoek(regels, m);
+  if (r) return { regel: r, bestemmingen: regelBestemmingen(r, ent, x) };
+  return { regel: null, bestemmingen: bestemmingen({ soort: sam.soort, kracht: sam.soort_kracht }, { kracht: sam.afzender_kracht || 'geen' }, ent, x) };
+}
+
+const K = { REGELVERSIE, KOP_MAX, orgDomein, adresVan, dkimUitslag, mailLees, bboxRegels, velden, letterlijk, ibanGeldig, soortBepaal, register, afzenderBepaal, entiteitBepaal, bestemmingen, normAlias, LABEL_KNOOP,
+  regelVoorwaarden, regelPast, regelZoek, regelBestemmingen, herbereken, REGEL_LENZEN };
 
 // ─────────────────────────── module ───────────────────────────
 
@@ -477,6 +575,10 @@ CREATE TABLE IF NOT EXISTS bestemming (id INTEGER PRIMARY KEY, stuk_id TEXT NOT 
 CREATE TABLE IF NOT EXISTS correctie (id INTEGER PRIMARY KEY, stuk_id TEXT NOT NULL, tijd TEXT NOT NULL, door TEXT NOT NULL, wat TEXT NOT NULL,
   leidt_tot TEXT, leren_mag INTEGER NOT NULL CHECK (leren_mag IN (0,1)),
   CHECK (leren_mag = 1 OR leidt_tot IS NULL));
+CREATE TABLE IF NOT EXISTS intake_regel (id INTEGER PRIMARY KEY, volgorde INTEGER NOT NULL, naam TEXT NOT NULL, voorwaarden TEXT NOT NULL,
+  lens TEXT NOT NULL, entiteit TEXT, actief INTEGER NOT NULL DEFAULT 1, weg INTEGER NOT NULL DEFAULT 0, bron TEXT NOT NULL,
+  aangemaakt TEXT NOT NULL, bijgewerkt TEXT NOT NULL, versie INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS regel_wijziging (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL, wat TEXT NOT NULL, sleutel TEXT NOT NULL, oud TEXT, nieuw TEXT, door TEXT);
 `;
 
 /*
@@ -503,6 +605,23 @@ function maak(o) {
     return reg;
   }
   const blobPad = o.blobPad || function (sha) { return path.join(o.dir, 'blob', sha.slice(0, 2), sha); };
+  const iso = function () { return nuIso(nu()); };
+
+  // ── routeringsregels (wv1408) ──
+  function regelRij(r) {
+    let v = {}; try { v = JSON.parse(r.voorwaarden) || {}; } catch (e) { v = {}; }
+    return { id: r.id, volgorde: r.volgorde, naam: r.naam, voorwaarden: v, lens: r.lens, entiteit: r.entiteit || null, actief: !!r.actief, bron: r.bron, versie: r.versie, bijgewerkt: r.bijgewerkt };
+  }
+  function regelsAlle() { return db.prepare('SELECT * FROM intake_regel WHERE weg = 0 ORDER BY volgorde, id').all().map(regelRij); }
+  function regelsActief() { return regelsAlle().filter(function (r) { return r.actief; }); }
+  function naamVan(r, k) { if (!r || !k) return null; for (const e of r.ent.values()) if (e.k === k) return e.naam || null; return null; }
+  // de kenmerken waarop een regel kan passen; uit het stuk zelf (meta, onderdelen) en de uitkomst van de router
+  function kenmerkenStuk(s, meta, delen, u, r) {
+    const van = adresVan(meta.van || '');
+    return { bron: s.bron, van_adres: van, van_domein: domeinVan(van), onderwerp: typeof meta.onderwerp === 'string' ? meta.onderwerp : '',
+      soort: u.soort || null, afzender: u.afzender || null, afzender_naam: naamVan(r, u.afzender), afzender_kracht: u.afzender_kracht || 'geen', entiteit: u.entiteit || null,
+      bijlagen: delen.filter(function (d) { return d.rol === 'bijlage' || (s.profiel === 'scansnap@1' && d.rol === 'origineel'); }).map(function (d) { return { naam: d.naam, mime: d.mime }; }) };
+  }
 
   function besluit(stukId, versie, stap, uitkomst, kracht, bewijs, door) {
     db.prepare('INSERT INTO besluit (stuk_id, versie, stap, uitkomst, bewijskracht, bewijs, regel, compilatienummer, door, tijd) VALUES (?,?,?,?,?,?,?,?,?,?)')
@@ -630,15 +749,18 @@ function maak(o) {
           const en = entiteitBepaal(r, x, af);
           const labels = Array.from(new Set([].concat(meta.entiteit || [], delen.map(function (d) { const m = safeJson(d.meta); return m && m.entiteit; }).filter(Boolean)))).map(function (l) { return LABEL_KNOOP[l] || null; }).filter(Boolean);
           B('entiteit', en.knoop || 'onbekend', en.kracht, { kenmerken: en.kenmerken, twijfel: en.twijfel || null, label_route: labels });
-          const bs = bestemmingen(so, af, en, { velden: vd.velden, label_entiteit: labels[0] || null });
-          B('bestemming', bs.map(function (b) { return b.lens; }).join(',') || 'geen', null, { bestemmingen: bs });
+          // Davids regels gaan vóór de standaard (wv1408); de marker ging hierboven al voor
+          const mk = kenmerkenStuk(s, meta, delen, { soort: so.soort, afzender: af.knoop || null, afzender_kracht: af.kracht, entiteit: en.knoop || null }, r);
+          const rg = regelZoek(regelsActief(), mk);
+          const bs = rg ? regelBestemmingen(rg, en, { velden: vd.velden }) : bestemmingen(so, af, en, { velden: vd.velden, label_entiteit: labels[0] || null });
+          B('bestemming', bs.map(function (b) { return b.lens; }).join(',') || 'geen', null, { bestemmingen: bs, regel: rg ? 'R' + rg.id + '@' + rg.versie : null });
           const twijfel = bs.some(function (b) { return !b.zou_auto; });
           B('zeker_genoeg', twijfel ? 'twijfel' : 'automatisch', null, { reden: bs.filter(function (b) { return !b.zou_auto; }).map(function (b) { return b.lens + ':' + b.reden; }) });
           status = 'beoordeeld';
           sam = { profiel: s.profiel, bron: s.bron, marker: 'geen', soort: so.soort, soort_sub: so.sub || null, soort_kracht: so.kracht,
             afzender: af.knoop || null, afzender_kracht: af.kracht, afzender_kenmerken: af.kenmerken, aangeleverd_door: af.aangeleverd_door, voorgesteld_spoor: af.voorgesteld_spoor,
             dkim: dkim ? (dkim.uitgelijnd ? 'uitgelijnd' : (dkim.pass ? 'pass' : (dkim.gelezen ? 'geen_pass' : 'geen_uitslag'))) : null,
-            entiteit: en.knoop || null, entiteit_kracht: en.kracht, label_route: labels, bestemmingen: bs, twijfel, velden: vd.velden.map(function (v) { return v.veld; }), kenmerken: vd.kenmerken };
+            entiteit: en.knoop || null, entiteit_kracht: en.kracht, label_route: labels, bestemmingen: bs, twijfel, regel: rg ? 'R' + rg.id + '@' + rg.versie : null, velden: vd.velden.map(function (v) { return v.veld; }), kenmerken: vd.kenmerken };
           sam.label_gelijk = labels.length ? labels.indexOf(en.knoop) >= 0 : null;
           bestem = bs;
           if (o.pdfSchaduw && !lt.deels.length && !lt.onleesbaar.length) {
@@ -721,6 +843,144 @@ function maak(o) {
     return db.prepare('SELECT stuk_id, versie, status, op, samenvatting FROM router_stuk ORDER BY op DESC LIMIT ?').all(Math.min(Math.max(1, n | 0), 500))
       .map(function (r) { const s = safeJson(r.samenvatting) || {}; return Object.assign({ stuk_id: r.stuk_id, versie: r.versie, status: r.status, op: r.op }, s); });
   }
+
+  /*
+   * App (wv1408): GET /app/intake/router, POST /app/intake/regel en /app/intake/toets (server.js, achter de app-poort).
+   * PRIVACYGRENS: van een vastgehouden stuk (marker) of een stuk zonder origineel gaat alleen status, tijd, bron, profiel en welke SOORTEN
+   * kenmerken mee — nooit onderwerp, afzender, bijlagenamen of veldwaarden (bouwplan § 6; de keuze met het hele stuk komt in stap 3).
+   * Van een beoordeeld stuk: onderwerp, afzenderadres en -naam, bijlagenamen en wat de router besliste, zoals de MailMan-App (alleen David).
+   */
+  const DAG = 86400000, VENSTER_DAGEN = 30;
+  function stukBasis(r) { const s = db.prepare('SELECT * FROM stuk WHERE stuk_id = ? AND versie = ?').get(r.stuk_id, r.versie) || db.prepare('SELECT * FROM stuk WHERE stuk_id = ?').get(r.stuk_id); return s || null; }
+  function beoordeeldeVan(vanIso) {
+    const uit = [];
+    for (const r of db.prepare("SELECT stuk_id, versie, op, samenvatting FROM router_stuk WHERE status = 'beoordeeld' AND op >= ? ORDER BY op DESC LIMIT 2000").all(vanIso)) {
+      const s = stukBasis(r); if (!s) continue;
+      const sam = safeJson(r.samenvatting) || {};
+      const meta = safeJson(s.meta) || {};
+      const delen = db.prepare('SELECT deel, rol, naam, mime FROM onderdeel WHERE stuk_id = ? ORDER BY deel').all(s.stuk_id);
+      uit.push({ r, s, sam, meta, delen });
+    }
+    return uit;
+  }
+  function lensNamen(bs) { return (bs || []).map(function (b) { return b.lens + (b.zou_auto ? '' : '?'); }); }
+  async function regVoorApp() { try { return await registerVers(); } catch (e) { return null; } }
+  async function appOverzicht(n) {
+    const r = await regVoorApp();
+    const regels = regelsAlle();
+    const van = nuIso(nu() - VENSTER_DAGEN * DAG);
+    const treffers = new Map();
+    for (const x of beoordeeldeVan(van)) {
+      const m = kenmerkenStuk(x.s, x.meta, x.delen, x.sam, r);
+      const rg = regelZoek(regels.filter(function (y) { return y.actief; }), m);
+      if (rg) treffers.set(rg.id, (treffers.get(rg.id) || 0) + 1);
+    }
+    const actief = regels.filter(function (y) { return y.actief; });
+    const stukken = db.prepare("SELECT stuk_id, versie, status, op, samenvatting FROM router_stuk WHERE status <> 'buiten_router' ORDER BY op DESC LIMIT ?").all(Math.min(Math.max(1, n | 0), 200)).map(function (row) {
+      const sam = safeJson(row.samenvatting) || {};
+      const basis = { stuk_id: row.stuk_id, status: row.status, op: row.op, bron: sam.bron || null, profiel: sam.profiel || null };
+      if (row.status !== 'beoordeeld') return Object.assign(basis, { marker: sam.marker || null, soorten: Array.isArray(sam.soorten) ? sam.soorten : [] });
+      const s = stukBasis(row); const meta = s ? (safeJson(s.meta) || {}) : {};
+      const delen = s ? db.prepare('SELECT deel, rol, naam, mime FROM onderdeel WHERE stuk_id = ? ORDER BY deel').all(s.stuk_id) : [];
+      const m = s ? kenmerkenStuk(s, meta, delen, sam, r) : null;
+      const nu2 = m ? herbereken(sam, m, actief) : null;
+      return Object.assign(basis, { onderwerp: m ? m.onderwerp.slice(0, 200) : '', van: m ? m.van_adres : '', van_naam: typeof meta.van_naam === 'string' ? meta.van_naam.slice(0, 80) : '',
+        bijlagen: m ? m.bijlagen.map(function (b) { return String(b.naam).slice(0, 120); }).slice(0, 10) : [],
+        soort: sam.soort || null, soort_kracht: sam.soort_kracht || null, afzender: sam.afzender || null, afzender_naam: naamVan(r, sam.afzender), afzender_kracht: sam.afzender_kracht || null,
+        entiteit: sam.entiteit || null, entiteit_kracht: sam.entiteit_kracht || null, label_route: sam.label_route || [], dkim: sam.dkim || null,
+        toen: lensNamen(sam.bestemmingen), toen_regel: sam.regel || null, twijfel: !!sam.twijfel,
+        nu: nu2 ? lensNamen(nu2.bestemmingen) : null, nu_doel: nu2 && nu2.bestemmingen[0] ? nu2.bestemmingen[0].doel : null, nu_regel: nu2 && nu2.regel ? nu2.regel.id : null });
+    });
+    const entiteiten = r ? Array.from(r.ent.values()).filter(function (e) { return e.eigen && KNOOP_RE.test(String(e.k || '')); }).map(function (e) { return { id: e.k, naam: e.naam || e.k }; }).sort(function (a, b) { return a.naam.localeCompare(b.naam); })
+      : Object.values(LABEL_KNOOP).map(function (k) { return { id: k, naam: k }; });
+    const bronnen = db.prepare("SELECT DISTINCT s.bron FROM router_stuk r JOIN stuk s ON s.stuk_id = r.stuk_id WHERE r.status <> 'buiten_router'").all().map(function (x) { return x.bron; }).filter(function (b) { return BRON_RE.test(b); });
+    return { ok: true, aan: true, schaduw: true, regelversie: REGELVERSIE, info: info(), venster_dagen: VENSTER_DAGEN,
+      week: telling(nuIso(nu() - 7 * DAG), nuIso(nu() + 60000)), register: !!r,
+      regels: regels.map(function (y) { return Object.assign(y, { treffers: treffers.get(y.id) || 0 }); }),
+      wijzigingen: db.prepare('SELECT tijd, wat, sleutel, door FROM regel_wijziging ORDER BY id DESC LIMIT 20').all(),
+      stukken, entiteiten, bronnen: Array.from(new Set(bronnen.concat(['gmail:david', 'gmail:groenhouten', 'outlook:tolgaarde', 'scanner:scansnap']))).sort(),
+      lenzen: REGEL_LENZEN };
+  }
+  // Toets (David: "nieuwe regel eerst in de schaduw tonen wat hij zou doen"): wat de regel de afgelopen 30 dagen gedaan had, op het logboek
+  async function appToets(d) {
+    const v = regelVoorwaarden(d && d.voorwaarden);
+    if (!v.ok) return { status: 400, j: { ok: false, fout: v.reden } };
+    const lens = REGEL_LENZEN.indexOf(String(d.lens)) >= 0 ? String(d.lens) : 'kennis';
+    const ent = d.entiteit && KNOOP_RE.test(String(d.entiteit)) ? String(d.entiteit) : null;
+    const r = await regVoorApp();
+    const eigenId = Number(d.id) || 0;
+    const alle = regelsActief();
+    const anderen = alle.filter(function (y) { return y.id !== eigenId; });
+    const eigen = eigenId ? regelsAlle().find(function (z) { return z.id === eigenId; }) : null;
+    // een nieuwe regel komt achteraan: elke actieve regel die past, wint; een bestaande houdt zijn plek
+    const ervoor = eigen ? anderen.filter(function (y) { return y.volgorde < eigen.volgorde; }) : anderen;
+    const proef = { id: eigenId || 0, versie: 0, naam: 'proef', voorwaarden: v.v, lens, entiteit: ent, actief: true };
+    const rijen = beoordeeldeVan(nuIso(nu() - VENSTER_DAGEN * DAG));
+    const raak = [];
+    for (const x of rijen) {
+      const m = kenmerkenStuk(x.s, x.meta, x.delen, x.sam, r);
+      if (!regelPast(v.v, m)) continue;
+      const eerder = regelZoek(ervoor, m);
+      const nuB = herbereken(x.sam, m, alle);
+      const nieuw = eerder ? nuB.bestemmingen : regelBestemmingen(proef, { knoop: x.sam.entiteit || null }, { velden: (x.sam.velden || []).map(function (y) { return { veld: y }; }) });
+      raak.push({ stuk_id: x.s.stuk_id, op: x.r.op, onderwerp: m.onderwerp.slice(0, 120), van: m.van_adres, nu: lensNamen(nuB.bestemmingen), nu_doel: nuB.bestemmingen[0] ? nuB.bestemmingen[0].doel : null, nieuw: lensNamen(nieuw), doel: nieuw[0] ? nieuw[0].doel : null, eerder: eerder ? eerder.naam : null });
+    }
+    return { status: 200, j: { ok: true, van: rijen.length, treffers: raak.length, anders: raak.filter(function (x) { return !x.eerder && (x.nu.join() !== x.nieuw.join() || x.nu_doel !== x.doel); }).length,
+      eerder: raak.filter(function (x) { return x.eerder; }).length, voorbeelden: raak.slice(0, 30), dagen: VENSTER_DAGEN } };
+  }
+  function wijzig(wat, sleutel, oud, nieuw, door) {
+    db.prepare('INSERT INTO regel_wijziging (tijd, wat, sleutel, oud, nieuw, door) VALUES (?, ?, ?, ?, ?, ?)').run(iso(), wat, String(sleutel), oud == null ? null : JSON.stringify(oud), nieuw == null ? null : JSON.stringify(nieuw), door || null);
+  }
+  function appRegel(d, door) {
+    d = isObj(d) ? d : {};
+    const actie = String(d.actie || '');
+    if (actie === 'nieuw' || actie === 'wijzig') {
+      const v = regelVoorwaarden(d.voorwaarden);
+      if (!v.ok) return { status: 400, j: { ok: false, fout: v.reden } };
+      const lens = String(d.lens || '');
+      if (REGEL_LENZEN.indexOf(lens) < 0) return { status: 400, j: { ok: false, fout: 'bestemming onbekend' } };
+      const ent = d.entiteit ? String(d.entiteit) : null;
+      if (ent && !KNOOP_RE.test(ent)) return { status: 400, j: { ok: false, fout: 'entiteit onbekend' } };
+      const naam = String(d.naam == null ? '' : d.naam).trim().slice(0, 80) || 'regel';
+      let uit;
+      tx(function () {
+        if (actie === 'nieuw') {
+          const vo = (db.prepare('SELECT max(volgorde) m FROM intake_regel').get().m || 0) + 1;
+          const id = Number(db.prepare('INSERT INTO intake_regel (volgorde, naam, voorwaarden, lens, entiteit, actief, bron, aangemaakt, bijgewerkt, versie) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 1)')
+            .run(vo, naam, JSON.stringify(v.v), lens, ent, 'David', iso(), iso()).lastInsertRowid);
+          wijzig('regel', id, null, { naam, voorwaarden: v.v, lens, entiteit: ent }, door);
+          uit = { status: 200, j: { ok: true, id } };
+          return;
+        }
+        const oud = db.prepare('SELECT * FROM intake_regel WHERE id = ? AND weg = 0').get(Number(d.id));
+        if (!oud) { uit = { status: 404, j: { ok: false, fout: 'regel onbekend' } }; return; }
+        db.prepare('UPDATE intake_regel SET naam = ?, voorwaarden = ?, lens = ?, entiteit = ?, bijgewerkt = ?, versie = versie + 1 WHERE id = ?').run(naam, JSON.stringify(v.v), lens, ent, iso(), oud.id);
+        wijzig('regel', oud.id, regelRij(oud), { naam, voorwaarden: v.v, lens, entiteit: ent }, door);
+        uit = { status: 200, j: { ok: true, id: oud.id } };
+      });
+      return uit;
+    }
+    const oud = db.prepare('SELECT * FROM intake_regel WHERE id = ? AND weg = 0').get(Number(d.id));
+    if (!oud) return { status: 404, j: { ok: false, fout: 'regel onbekend' } };
+    let uit = { status: 200, j: { ok: true, id: oud.id } };
+    tx(function () {
+      if (actie === 'aanuit') {
+        db.prepare('UPDATE intake_regel SET actief = ?, bijgewerkt = ?, versie = versie + 1 WHERE id = ?').run(d.actief ? 1 : 0, iso(), oud.id);
+        wijzig('regel_aanuit', oud.id, { actief: !!oud.actief }, { actief: !!d.actief }, door);
+      } else if (actie === 'weg') {
+        db.prepare('UPDATE intake_regel SET weg = 1, actief = 0, bijgewerkt = ? WHERE id = ?').run(iso(), oud.id);
+        wijzig('regel_weg', oud.id, regelRij(oud), null, door);
+      } else if (actie === 'op' || actie === 'neer') {
+        const buur = db.prepare('SELECT * FROM intake_regel WHERE weg = 0 AND volgorde ' + (actie === 'op' ? '< ? ORDER BY volgorde DESC' : '> ? ORDER BY volgorde') + ' LIMIT 1').get(oud.volgorde);
+        if (buur) {
+          db.prepare('UPDATE intake_regel SET volgorde = ? WHERE id = ?').run(buur.volgorde, oud.id);
+          db.prepare('UPDATE intake_regel SET volgorde = ? WHERE id = ?').run(oud.volgorde, buur.id);
+          wijzig('regel_volgorde', oud.id, { volgorde: oud.volgorde }, { volgorde: buur.volgorde }, door);
+        }
+      } else uit = { status: 400, j: { ok: false, fout: 'onbekende actie' } };
+    });
+    return uit;
+  }
   function info() {
     const n = db.prepare('SELECT status, count(*) n FROM router_stuk GROUP BY status').all();
     const wacht = db.prepare(`SELECT count(*) n FROM stuk s WHERE s.compleet_op IS NOT NULL AND s.marker_op IS NOT NULL AND s.status NOT IN ('open','onvolledig')
@@ -728,7 +988,7 @@ function maak(o) {
     const o2 = {}; for (const r of n) o2[r.status] = r.n;
     return { aan: true, schaduw: true, regelversie: REGELVERSIE, stukken: o2, wacht, overgeslagen: Array.from(mislukt.values()).filter(function (n) { return n >= 3; }).length, laatste: stand.laatste, fouten: stand.fouten, laatste_fout: stand.laatste_fout };
   }
-  return { ronde, verwerkStuk, telling, regel, lijst, info, sluit: function () { db.close(); } };
+  return { ronde, verwerkStuk, telling, regel, lijst, info, appOverzicht, appToets, appRegel, regels: regelsAlle, sluit: function () { db.close(); } };
 }
 function safeJson(s) { try { return JSON.parse(s); } catch (e) { return null; } }
 
