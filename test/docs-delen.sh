@@ -84,6 +84,7 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
   const r1 = D.render('# A\n\n- een\n  vervolg\n- twee\n  - sub\n\n| a | b |\n|---|---|\n| [[x\\|y]] | z<br>q |\n\n%% open tot het eind', 'a.md');
   toets('1 lijst teruggevouwen, sublijst, tabel met \\| in wikilink en <br>, open %% weg', /<li>\s*een vervolg\s*<\/li>/.test(r1.body) && /<ul><li>\s*sub/.test(r1.body) && /<td>y<\/td><td>z<br>q<\/td>/.test(r1.body) && r1.body.indexOf('open tot') < 0, r1.body);
   toets('1 pagina: CSP-vriendelijk (geen script, geen externe bronnen), noindex, licht', !/<script|src=|@import|url\(/i.test(r1.html) && /noindex/.test(r1.html) && /color-scheme:light/.test(r1.html), r1.html.slice(0, 300));
+  toets('1 pagina: OVIS-favicon als data:-URI (DS10, wv1783), gelijk aan huisstijl-pod', (r1.html.match(/<link rel="icon"/g) || []).length === 1 && r1.html.indexOf('href="' + require('./huisstijl-pod.js').POD_FAVICON + '"') > 0 && /^data:image\/png;base64,/.test(require('./huisstijl-pod.js').POD_FAVICON), r1.html.slice(0, 400));
 
   // ── 2. poort ──
   for (const [p, st, waarom] of [['00_Systeem/Systeemoverzicht.md', 403, 'systeem'], ['10_Zakelijk/DBH/Patiëntdossiers/x.md', 403, 'dossier'],

@@ -30,6 +30,8 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+// OVIS-favicon als data:-URI (wv1783, Design Manager DS10): de deelpagina laadt niets (CSP img-src data:); ontbreekt de module, dan geen icoon.
+const POD_FAVICON = (function () { try { return require('./huisstijl-pod.js').POD_FAVICON || ''; } catch (e) { return ''; } })();
 
 const MAX_HTML = 1536 * 1024;      // D1: rij ≤ 2 MB
 const MAX_NAMEN = 25;
@@ -238,7 +240,8 @@ function render(md, bestandsnaam) {
     body = '<h1>' + esc(titel) + '</h1>\n' + body;
   }
   const html = '<!DOCTYPE html>\n<html lang="nl">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
-    '<meta name="robots" content="noindex, nofollow">\n<meta name="referrer" content="no-referrer">\n<title>' + esc(titel) + '</title>\n<style>' + STIJL + '</style>\n' +
+    '<meta name="robots" content="noindex, nofollow">\n<meta name="referrer" content="no-referrer">\n<title>' + esc(titel) + '</title>\n' +
+    (POD_FAVICON ? '<link rel="icon" type="image/png" sizes="32x32" href="' + POD_FAVICON + '">\n' : '') + '<style>' + STIJL + '</style>\n' +
     '</head>\n<body>\n<main class="wrap">\n' + body + '\n</main>\n</body>\n</html>\n';
   const zichtbaar = ontEsc(body.replace(/<br>/g, '\n').replace(/<\/(p|h\d|li|tr|td|th|div|blockquote|pre)>/g, '\n').replace(/<[^>]+>/g, ' ')).replace(/[ \t]+/g, ' ');
   return { titel: titel, body: body, html: html, zichtbaar: zichtbaar, hrefs: hrefs,
