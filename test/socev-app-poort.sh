@@ -352,6 +352,20 @@ async function nepFetch(url, opt) {
       });
       return antw(200, { ok: true, vervallen: uit, overgeslagen: [] });
     }
+    if (fn === 'mk_voor_jou_gedaan_vrijgeven') {   // wv1853: zoals de echte (door David, "tikte Gedaan", geen besluit, rij wacht op David, geen andere open/later kaart)
+      if (sbStaat.vjKapot) return antw(500, { message: 'kapot' });
+      if (!b.p_sleutel) return antw(400, { message: 'sleutel verplicht' });
+      const uit = [];
+      (sbStaat.vj || []).filter((x) => x.sleutel === b.p_sleutel && x.status === 'gedaan' && x.gesloten_door === 'david' && x.soort !== 'besluit' && /^app \d{1,2}-\d{1,2} \d{1,2}:\d{2}: David tikte Gedaan( \(nieuwe versie niet vast te stellen\))?$/.test(x.bewijs || '')).forEach((x) => {
+        ((x.herkomst && x.herkomst.wv) || []).forEach((n) => {
+          const w = (sbStaat.wvItems || []).find((y) => y.id === Number(n));
+          if (!w || w.status !== 'geblokkeerd' || !/^\s*david/i.test(w.geblokkeerd_door || '')) return;
+          if ((sbStaat.vj || []).some((o) => o !== x && ['open', 'later'].includes(o.status) && ((o.herkomst && o.herkomst.wv) || []).map(Number).includes(w.id))) return;
+          w.status = 'open'; w.geblokkeerd_door = null; w.niet_voor = new Date(Date.now() + 15 * 60000).toISOString(); uit.push({ wv: w.id });
+        });
+      });
+      return antw(200, { ok: true, punt: 1, vrij: uit, overgeslagen: [] });
+    }
     if (fn === 'mk_voor_jou_wv_gekoppeld') {   // wv506: alle wv-ids uit alle punten (ook > 7 dagen dicht)
       if (sbStaat.vjKapot || sbStaat.vjWvKapot) return antw(500, { message: 'kapot' });
       return antw(200, { wv: [...new Set((sbStaat.vj || []).flatMap((x) => ((x.herkomst && x.herkomst.wv) || []).map(Number)))], op: new Date().toISOString() });
@@ -1429,7 +1443,13 @@ async function bewijs(o) {
         W({ id: 517, status: 'open', wacht_op: ['item:515'], wacht_item_open: true }),
         W({ id: 518, status: 'open', wacht_op: ['j000000000000pen'] }),
         W({ id: 519, status: 'open', herkomst: 'eigen' }),
-        W({ id: 520, status: 'open', soort: 'nacontrole' }) ];
+        W({ id: 520, status: 'open', soort: 'nacontrole' }),
+        // wv1853: rij op David zonder open kaart: later, al gedaan, geen kaart; later met vandaag als dag = weer open
+        W({ id: 521, status: 'geblokkeerd', geblokkeerd_door: 'David: later' }), W({ id: 522, status: 'geblokkeerd', geblokkeerd_door: 'David: gedaan' }),
+        W({ id: 523, status: 'geblokkeerd', geblokkeerd_door: 'David: zonder kaart' }), W({ id: 524, status: 'geblokkeerd', geblokkeerd_door: 'David: later tot vandaag', aangemaakt: iso(-U) }),
+        // review wv1853: gedaan door de ronde (geen eigen tik), samengevoegd in een open kaart, privé-kaart die al dicht is
+        W({ id: 525, status: 'geblokkeerd', geblokkeerd_door: 'David: door de ronde gedaan' }), W({ id: 526, status: 'geblokkeerd', geblokkeerd_door: 'David: samengevoegd', aangemaakt: iso(-U) }),
+        W({ id: 527, status: 'geblokkeerd', geblokkeerd_door: 'David: privé dicht' }) ];
       const log = [
         { job_id: 'm1', agent_job: 'j000000000000002', t: iso(-2 * M), soort: 'socev', antwoord: 'r' },
         { job_id: 'm2', agent_job: 'j00000000000010a', t: iso(-4 * U), soort: 'socev', antwoord: 'r' },
@@ -1440,7 +1460,16 @@ async function bewijs(o) {
         { job_id: 'm7', agent_job: 'j00000000000514a', t: iso(-5 * M), soort: 'socev', antwoord: 'r' },
         { job_id: 'm8', agent_job: 'jzonderdraad0000', t: iso(-5 * M), soort: 'socev', antwoord: 'r' } ];
       const moet = [{ punt: 'v:m5:aaaa', soort: 'vraag', kanaal: 'machinekamer', job_id: 'm5' }, { punt: 'v:m6:bbbb', soort: 'vraag', kanaal: 'machinekamer', job_id: 'm6' }];
-      const vj = [{ id: 900, status: 'open', titel: 'Kaart van klus 500', soort: 'besluit', herkomst: { wv: [500] } }, { id: 901, status: 'open', prive: true, titel: 'Privé ' + KAN, herkomst: { wv: [499] } }];
+      const later5 = H.appYmd(nuD + 5 * 86400000);
+      const vj = [{ id: 900, status: 'open', titel: 'Kaart van klus 500', soort: 'besluit', herkomst: { wv: [500] } }, { id: 901, status: 'open', prive: true, titel: 'Privé ' + KAN, herkomst: { wv: [499] } },
+        { id: 902, status: 'open', titel: 'Kaart van klus 513', soort: 'besluit', herkomst: { wv: [513] } },
+        { id: 903, status: 'later', later_tot: later5, titel: 'Later', soort: 'doen', herkomst: { wv: [521] } },
+        { id: 904, status: 'gedaan', gesloten_door: 'david', gesloten_op: iso(-10 * M), bewijs: 'app 28-10 11:00: David tikte Gedaan', titel: 'Gedaan', soort: 'doen', herkomst: { wv: [522] } },
+        { id: 906, status: 'gedaan', gesloten_door: 'beheer', gesloten_op: iso(-10 * M), bewijs: 'gemeten', titel: 'Ronde', soort: 'doen', herkomst: { wv: [525] } },
+        { id: 907, sleutel: 'oud-907', status: 'samengevoegd', samengevoegd_in: 'doel-908', titel: 'Opgegaan', soort: 'doen', herkomst: { wv: [526] } },
+        { id: 908, sleutel: 'doel-908', status: 'open', titel: 'Doelkaart', soort: 'doen', herkomst: { wv: [] } },
+        { id: 909, status: 'gedaan', prive: true, gesloten_door: 'beheer', gesloten_op: iso(-10 * M), titel: 'Privé dicht', soort: 'doen', herkomst: { wv: [527] } },
+        { id: 905, status: 'later', later_tot: vandaagD, titel: 'Later vandaag', soort: 'doen', herkomst: { wv: [524] } }];
       const poortOpen = { code: 'niets_startklaar', mag_david: true, mag_eigen: false, dagmax: false, lopend: 2 };
       const inv = (o) => Object.assign({ items, stand: { laatste_poort: poortOpen, laatste_tik: iso(-3 * M) }, reg, log, moet, vj, a: { soort: 'reist' }, nu: nuD }, o || {});
       const D = H.appDradenUit(inv());
@@ -1469,7 +1498,22 @@ async function bewijs(o) {
       toets('9a draden: onbekende code → onbekend, nooit de tekst zelf', vrij.tikker.code === 'onbekend' && !JSON.stringify(vrij).includes(KAN), JSON.stringify(vrij.tikker));
       toets('9a draden: geen prompt, bron, notitie, geblokkeerd_door of label in de uitvoer', !JSON.stringify(D).includes(KAN) && !/machinekamer:|"label"|"prompt"|"bron"|"notitie"/.test(JSON.stringify(D)), JSON.stringify(D).slice(0, 300));
       const DV = H.appDradenUit(inv({ a: { soort: 'vast' } }));
-      toets('9a draden: op een vaste plek geen titel van een privé-kaart, geen punt', DV.wacht_op_jou.find((x) => x.wv === 499).punt === null && DV.wacht_op_jou.find((x) => x.wv === 499).onderwerp === 'Een privé-punt' && !JSON.stringify(DV).includes('Privé'), JSON.stringify(DV.wacht_op_jou));
+      const pv = DV.in_de_wacht.find((x) => x.wv === 499);
+      toets('9a draden: op een vaste plek een privé-kaart niet als tabje (niet te openen), geen titel, geen punt', !DV.wacht_op_jou.some((x) => x.wv === 499) && !!pv && pv.reden === 'prive' && pv.punt === null && pv.onderwerp === 'Een privé-punt' && !JSON.stringify(DV).includes('Privé'), JSON.stringify(pv));
+      // wv1853 (David 28-10: "allemaal niet aan te klikken"): alleen een open kaart of open vraag is "wacht op jou"
+      toets('wv1853 draden: elk "wacht op jou" heeft een open kaart (punt) of een open vraag', D.wacht_op_jou.length >= 3 && D.wacht_op_jou.every((x) => x.punt != null || x.vraag != null), JSON.stringify(D.wacht_op_jou.map((x) => [x.wv, x.punt, x.vraag])));
+      toets('wv1853 draden: kaart op later → in de wacht tot die dag, niet oranje', per[521] === 'in_de_wacht' && dr(521).reden === 'later' && dr(521).zin === 'op later gezet tot ' + Number(later5.slice(8, 10)) + '-' + Number(later5.slice(5, 7)) && dr(521).punt === null, JSON.stringify(dr(521)));
+      toets('wv1853 draden: kaart al op gedaan → in de wacht "je reageerde; de klus gaat zo verder"', per[522] === 'in_de_wacht' && dr(522).reden === 'vrijgave' && /gaat zo verder/.test(dr(522).zin), JSON.stringify(dr(522)));
+      toets('wv1853 review: kaart dicht door de ronde (geen eigen tik) → "de Voor jou-ronde zet de klus verder", niet "gaat zo verder"', per[525] === 'in_de_wacht' && dr(525).reden === 'ronde', JSON.stringify(dr(525)));
+      toets('wv1853 review: kaart samengevoegd in een open kaart → wacht op jou met de doelkaart als punt', per[526] === 'wacht_op_jou' && dr(526).punt === 908, JSON.stringify(dr(526)));
+      const p527 = H.appDradenUit(inv({ a: { soort: 'vast' } })).in_de_wacht.find((x) => x.wv === 527);
+      toets('wv1853 review: vaste plek, privé-kaart al dicht → niet "open Voor jou op je telefoon"', !!p527 && p527.reden === 'ronde', JSON.stringify(p527));
+      toets('wv1853 draden: op David zonder kaart → vastgelopen (machinekamer), niet oranje', per[523] === 'vastgelopen' && dr(523).reden === 'geen_kaart', JSON.stringify(dr(523)));
+      toets('wv1853 draden: later tot vandaag = de kaart staat weer open → wacht op jou met punt', per[524] === 'wacht_op_jou' && dr(524).punt === 905, JSON.stringify(dr(524)));
+      const DZ = H.appDradenUit(inv({ vj: vj.filter((x) => x.id !== 902) }));
+      toets('wv1853 draden: vervolgrij op David zonder open kaart → de klare rij met de open vraag blijft het tabje', lijstVan(DZ)[512] === 'wacht_op_jou' && DZ.wacht_op_jou.find((x) => x.wv === 512).vraag === 'v:m6:bbbb' && lijstVan(DZ)[513] === 'vastgelopen', JSON.stringify(lijstVan(DZ)));
+      const DN = H.appDradenUit(inv({ vj: null, moet: [] }));
+      toets('wv1853 draden: kaarten niet leesbaar → geen oranje zonder kaart; in de wacht "kaarten nu niet te lezen"', DN.wacht_op_jou.length === 0 && DN.in_de_wacht.find((x) => x.wv === 500).reden === 'kaart_onbekend', JSON.stringify(DN.wacht_op_jou));
       const DR = H.appDradenUit(inv({ reg: {} }));
       toets('9a draden: register leeg/onleesbaar → koppeling via job_id, geen fout', JSON.stringify(lijstVan(DR)[511]) === '"wacht_op_jou"' && JSON.stringify(DR.gesloten.find((x) => x.wv === 510).berichten) === '["m4"]', JSON.stringify(DR.gesloten.find((x) => x.wv === 510)));
       toets('9a draden: aantal vóór afkappen', D.aantal.in_de_wacht === D.in_de_wacht.length && D.aantal.gesloten >= 5, JSON.stringify(D.aantal));
@@ -6508,9 +6552,26 @@ async function bewijs(o) {
         toets('wv506 ↩️ binnen de minuut: punt weer open, timer gewist (geen doorzetten), rij erachter blijft op jou wachten', r.status === 200 && rT.status === 200 && sbStaat.vj[sbStaat.vj.length - 3].status === 'open' && w(411).status === 'geblokkeerd'
           && !nD().some((x) => x.b.p_sleutel === 'wv506-terug') && !H.appStaat.vjDoorzet[13], JSON.stringify([rT.status, w(411).status, nD().map((x) => x.b.p_sleutel)]));
         const nD1 = nD().length;
+        const nV = () => sbRpc.filter((x) => x.fn === 'mk_voor_jou_gedaan_vrijgeven');
+        const nV0 = nV().length;
         r = await K({ id: 15, van: 'open', keuze: 'gedaan' });
+        const binnen = { n: nV().length - nV0, st: w(413).status, timer: !!H.appStaat.vjVrijgeef[15] };
         await new Promise((z) => setTimeout(z, 500));
-        toets('wv506 Gedaan: geen doorzetten (dat blijft de beheerronde), rij blijft staan', r.status === 200 && nD().length === nD1 && w(413).status === 'geblokkeerd', JSON.stringify([nD().length - nD1, w(413).status]));
+        toets('wv506 Gedaan: geen vervallen-doorzetten', r.status === 200 && nD().length === nD1, JSON.stringify([nD().length - nD1]));
+        // wv1853: Gedaan geeft de rij erachter na de ↩️-minuut zelf vrij (niet pas bij de ronde van 07:15/17:15)
+        toets('wv1853 Gedaan: binnen de ↩️-minuut nog niets, daarna vrijgeven met de sleutel; rij open met niet_voor ± 15 min', binnen.n === 0 && binnen.st === 'geblokkeerd' && binnen.timer
+          && nV().length === nV0 + 1 && nV()[nV().length - 1].b.p_sleutel === 'wv506-gedaan' && w(413).status === 'open' && Math.abs(Date.parse(w(413).niet_voor) - Date.now() - 15 * 60000) < 60000
+          && /De klus erachter gaat zo verder/.test(r.j.melding || ''), JSON.stringify([binnen, nV().slice(nV0).map((x) => x.b), w(413).status, r.j.melding]));
+        sbStaat.vj.push(pnt(16, 'wv1853-terug', { herkomst: { wv: [414] } }));
+        sbStaat.wvItems.push({ id: 414, label: 'machinekamer:wv1853 414', samenvatting: 'Proef 414', status: 'geblokkeerd', geblokkeerd_door: 'David: proef 414' });
+        H.appStaat.vjCache = null; H.appStaat.wvCache = null;
+        const nV1 = nV().length;
+        r = await K({ id: 16, van: 'open', keuze: 'gedaan' });
+        const rT2 = await K({ id: 16, keuze: 'terug' });
+        await new Promise((z) => setTimeout(z, 500));
+        toets('wv1853 ↩️ na Gedaan: timer gewist, geen vrijgeven, rij blijft op jou wachten', r.status === 200 && rT2.status === 200 && nV().length === nV1 && !H.appStaat.vjVrijgeef[16] && w(414).status === 'geblokkeerd',
+          JSON.stringify([r.status, rT2.status, nV().length - nV1, w(414).status]));
+        sbStaat.vj.splice(sbStaat.vj.findIndex((x) => x.sleutel === 'wv1853-terug'), 1); sbStaat.wvItems.splice(sbStaat.wvItems.findIndex((x) => x.id === 414), 1);
         H.appStaat.vjCache = null; H.appStaat.wvCache = null;
         r = await vraag('GET', '/app/agents', undefined, { pot: P.jar });
         const losIds = (r.j.wacht_op_david_los || []).map((x) => x.wv);

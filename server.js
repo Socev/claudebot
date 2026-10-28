@@ -7923,7 +7923,10 @@ const APP_DRAAD_ZIN = {
   vijf_uur: 'wacht tot het vijf-uursvenster weer ruimte heeft', ruimte: 'wacht op ruimte in je weekbudget',
   dagmax: 'dagmaximum bereikt, morgen weer', volgende_tik: 'start bij de volgende tik', na_lopend: 'start na een lopende klus',
   na_klus: 'start na een andere klus', bundel: 'gaat mee in de bundelronde (08:30, 13:30 of 18:30)', niet_voor: 'wacht op zijn starttijd',
-  afwerk: 'wacht op de lopende afwerkklus', mislukt: 'mislukt', machinekamer: 'wacht op de machinekamer', onbekend: 'wacht op de tikker' };
+  afwerk: 'wacht op de lopende afwerkklus', mislukt: 'mislukt', machinekamer: 'wacht op de machinekamer', onbekend: 'wacht op de tikker',
+  // wv1853: een rij op "David: …" zonder open kaart is geen "wacht op jou"
+  vrijgave: 'je reageerde; de klus gaat zo verder', geen_kaart: 'wacht op jou, maar er staat geen kaart open; de machinekamer ruimt dit op',
+  kaart_onbekend: 'de kaarten zijn nu niet te lezen', ronde: 'je kaart is dicht; de Voor jou-ronde (07:15 of 17:15) zet de klus verder', prive: 'een privé-punt; open Voor jou op je telefoon' };
 const APP_DRAAD_DAG = ['zo', 'ma', 'di', 'wo', 'do', 'vr', 'za'];
 function appDraadKlok(t) {
   const d = new Date(t);
@@ -7977,6 +7980,29 @@ function appDraadReden(w, poort, byId, reg, nu) {
   if (mag === false && APP_DRAAD_RUIMTE[code]) return p.dagmax === true ? { code: 'dagmax', zin: APP_DRAAD_ZIN.dagmax } : { code: 'ruimte', zin: APP_DRAAD_ZIN.ruimte };
   return algemeen();
 }
+// wv1853 (David 28-10: "allemaal niet aan te klikken"): wat de kaart van een rij op "David: …" is. Alleen een open kaart (punt) maakt
+// hem "wacht op jou"; later = in de wacht tot die dag; gedaan = komt vrij (appVjVrijgeefLater of de ronde); geen kaart = vastgelopen.
+function appDraadKaart(w, vj, a, vandaag, nu) {
+  if (!vj) return { stand: 'onbekend' };
+  const vast = !!(a && a.soort === 'vast');
+  const bw = appBroedWacht(w, vj, a, vandaag);
+  const open = bw.filter(function (x) { return x.stand === 'open' && x.punt != null; })[0];
+  if (open) return { stand: 'open', punt: open.punt };
+  const bij = vj.filter(function (p) { return ((p.herkomst && Array.isArray(p.herkomst.wv)) ? p.herkomst.wv : []).some(function (n) { return Number(n) === Number(w.id); }); })
+    .sort(function (x, y) { return y.id - x.id; });
+  // review wv1853 #4: "privé" alleen als die privé-kaart echt open staat (appBroedWacht zegt het ook bij een dichte)
+  if (vast && bij.some(function (p) { return p.prive === true && appVjZichtbaar(p, vandaag); })) return { stand: 'prive' };
+  // review #6: samengevoegd → de open kaart waarin hij opging
+  const doel = bij.filter(function (p) { return p.status === 'samengevoegd' && p.samengevoegd_in; })
+    .map(function (p) { return vj.filter(function (q) { return q.sleutel === p.samengevoegd_in && appVjZichtbaar(q, vandaag); })[0]; }).filter(Boolean)[0];
+  if (doel) return vast && doel.prive === true ? { stand: 'prive' } : { stand: 'open', punt: doel.id };
+  const later = bij.filter(function (p) { return p.status === 'later' && /^\d{4}-\d{2}-\d{2}$/.test(String(p.later_tot || '')); })[0];
+  if (later) return { stand: 'later', tot: later.later_tot };
+  // review #3: "gaat zo verder" alleen na Davids eigen Gedaan-tik van < 1 dag (dat geeft appVjVrijgeefLater vrij); anders de ronde
+  const g = bij[0] && bij[0].status === 'gedaan' ? bij[0] : null;
+  if (g) return { stand: g.gesloten_door === 'david' && /: David tikte Gedaan/.test(String(g.bewijs || '')) && nu - Date.parse(g.gesloten_op || '') < 86400000 ? 'gedaan' : 'ronde' };
+  return { stand: 'geen' };
+}
 // Pure indeling (getoetst in de poorttoets). in: {items, stand, reg, log, moet, vj, a, nu}
 function appDradenUit(inv) {
   const nu = inv.nu, reg = inv.reg || {}, items = Array.isArray(inv.items) ? inv.items : [];
@@ -8010,12 +8036,15 @@ function appDradenUit(inv) {
     if (wv != null && !vraagVan[wv]) vraagVan[wv] = { punt: m.punt, bericht: m.job_id };
   });
   const wachtDavid = function (w) { return w.status === 'geblokkeerd' && /^\s*david/i.test(String(w.geblokkeerd_door || '')); };
-  // Ontdubbelen (review #1): een klare rij met vraag wordt niet 🟠 als een vervolgrij van deze klus al op David wacht
+  const vandaag = appYmd(nu);
+  const kaartVan = {};   // wv1853: per rij op David één keer de kaartstand
+  mk.forEach(function (w) { if (wachtDavid(w)) kaartVan[w.id] = appDraadKaart(w, inv.vj, inv.a, vandaag, nu); });
+  // Ontdubbelen (review #1): een klare rij met vraag wordt niet 🟠 als een vervolgrij van deze klus al op jou wacht met een open kaart
+  // (wv1853: zonder open kaart is de vervolgrij geen tabje, dan blijft de vraag in het rapport het tabje)
   const vervolgWacht = function (w) {
     const js = jobsVan[w.id] || [];
-    return mk.some(function (g) { return wachtDavid(g) && (Number(g.ouder_id) === Number(w.id) || (g.ouder_job && js.indexOf(String(g.ouder_job)) >= 0)); });
+    return mk.some(function (g) { return wachtDavid(g) && kaartVan[g.id].stand === 'open' && (Number(g.ouder_id) === Number(w.id) || (g.ouder_job && js.indexOf(String(g.ouder_job)) >= 0)); });
   };
-  const vandaag = appYmd(nu), vast = !!(inv.a && inv.a.soort === 'vast');
   const t = function (x) { const v = Date.parse(x || ''); return isFinite(v) ? new Date(v).toISOString() : null; };
   const basis = function (w, stand_, reden) {
     const d = { wv: Number(w.id), onderwerp: w.samenvatting ? appKort(String(w.samenvatting), 200) : appLabelGewoon(w.label), stand: stand_,
@@ -8029,12 +8058,14 @@ function appDradenUit(inv) {
     const job = w.job_id ? reg[w.job_id] : null;
     let d;
     if (wachtDavid(w)) {
-      d = basis(w, 'wacht_op_jou', null); d.sinds = d.aangemaakt;
-      const bw = inv.vj ? appBroedWacht(w, inv.vj, inv.a, vandaag) : [];
-      const open = bw.filter(function (x) { return x.stand === 'open' && x.punt != null; })[0];
-      if (open) d.punt = open.punt;
-      if (vast && bw.some(function (x) { return x.stand === 'prive'; })) d.onderwerp = 'Een privé-punt';
-      uit.wacht_op_jou.push(d); return;
+      const k = kaartVan[w.id];
+      if (k.stand === 'open') { d = basis(w, 'wacht_op_jou', null); d.sinds = d.aangemaakt; d.punt = k.punt; uit.wacht_op_jou.push(d); return; }
+      if (k.stand === 'geen') { d = basis(w, 'vastgelopen', { code: 'geen_kaart', zin: APP_DRAAD_ZIN.geen_kaart }); d.sinds = t(w.bijgewerkt); uit.vastgelopen.push(d); return; }
+      const code = k.stand === 'later' ? 'later' : k.stand === 'gedaan' ? 'vrijgave' : k.stand === 'ronde' ? 'ronde' : k.stand === 'prive' ? 'prive' : 'kaart_onbekend';
+      d = basis(w, 'in_de_wacht', { code: code, zin: code === 'later' ? 'op later gezet tot ' + appVjDag(k.tot) : APP_DRAAD_ZIN[code] });
+      if (code === 'prive') d.onderwerp = 'Een privé-punt';
+      d.sinds = code === 'later' ? t(k.tot + 'T07:00:00+01:00') : t(w.bijgewerkt);
+      uit.in_de_wacht.push(d); return;
     }
     if (w.status === 'klaar' && vraagVan[w.id] && !vervolgWacht(w)) {
       d = basis(w, 'wacht_op_jou', null); d.sinds = d.aangemaakt; d.vraag = vraagVan[w.id].punt;
@@ -9406,6 +9437,23 @@ function appVjDoorzetLater(id, sleutel) {
   }, APP_VJ_DOORZET_MS);
   if (t && t.unref) t.unref();
 }
+// wv1853 (David 28-10: "bij een deel staat dat er daardoor iets wacht, maar die melding zelf staat nergens meer"): Gedaan op een
+// doen/proef-kaart geeft de werkvoorraadrij erachter meteen vrij, niet pas bij de Voor jou-ronde (07:15/17:15). Na de ↩️-minuut (zelfde
+// 135 s als wv506); de databank toetst zelf (alleen door David met exact app-bewijs "David tikte Gedaan", ≥ 120 s dicht, rij wacht nog op
+// David, geen andere open/later of nieuwere kaart voor die rij) en zet de rij open met niet_voor nu + 15 min. Register en Todoist blijven
+// bij de ronde; herstart de pod tussendoor, dan geeft de ronde de rij vrij (david_naloop, vangnet).
+appStaat.vjVrijgeef = appStaat.vjVrijgeef || {};
+function appVjVrijgeefLater(id, sleutel) {
+  clearTimeout(appStaat.vjVrijgeef[id]);
+  const t = appStaat.vjVrijgeef[id] = setTimeout(function () {
+    delete appStaat.vjVrijgeef[id];
+    appSbRpc('mk_voor_jou_gedaan_vrijgeven', { p_sleutel: sleutel }).then(function (r) {
+      appStaat.vjWvCache = null; appStaat.wvCache = null;
+      if (!r || r.ok !== true) logError('app-voor-jou', new Error('vrijgeven zonder ok'));
+    }).catch(function (e) { logError('app-voor-jou', e); });
+  }, APP_VJ_DOORZET_MS);
+  if (t && t.unref) t.unref();
+}
 // wv1229 (David 24-10, vraag-id 5e57425b): een kaart met een voorwaarde (kolom voorwaarde, bv. "claudebot herstarten" met
 // {veld: versie, waarde: <sha>}) gaat bij Gedaan pas dicht als deze pod de voorwaarde waar meet. Niet waar: kaart blijft open met
 // "Nog niet gelukt…" (mk_voor_jou_nog_niet bewaart de tik), dus de beheerronde geeft de werkvoorraadrij niet vrij. De opstartronde
@@ -10062,11 +10110,13 @@ async function appVoorJouKeuze(req, res, a, d) {
     if (keuze === 'terug') delete appStaat.vjTerug[id];
     return appStuur(res, 409, { ok: false, fout: 'dit punt is intussen veranderd; ververs de lijst', nu: r && typeof r.nu === 'string' ? r.nu : null });
   }
-  if (keuze === 'terug') { delete appStaat.vjTerug[id]; clearTimeout(appStaat.vjDoorzet[id]); delete appStaat.vjDoorzet[id]; }
+  if (keuze === 'terug') { delete appStaat.vjTerug[id]; clearTimeout(appStaat.vjDoorzet[id]); delete appStaat.vjDoorzet[id]; clearTimeout(appStaat.vjVrijgeef[id]); delete appStaat.vjVrijgeef[id]; }
   else appStaat.vjTerug[id] = { van: van, naar: keuze, later_tot: van === 'later' ? (p.later_tot || null) : null, tot: nu + APP_VJ_TERUG_MS, apparaat: a.id };
   if (keuze === 'vervallen') appVjDoorzetLater(id, p.sleutel);   // wv506: de klus erachter na de ↩️-minuut ook dicht
+  const metKlus = p.soort !== 'besluit' && !!(p.herkomst && Array.isArray(p.herkomst.wv) && p.herkomst.wv.length);   // review wv1853 #5
+  if (keuze === 'gedaan' && metKlus) appVjVrijgeefLater(id, p.sleutel);   // wv1853: de klus erachter na de ↩️-minuut vrij
   Object.keys(appStaat.vjTerug).forEach(function (k) { if (appStaat.vjTerug[k].tot <= nu) delete appStaat.vjTerug[k]; });
-  const melding = keuze === 'gedaan' ? 'Gedaan. Socev kijkt bij de volgende ronde of het ook zo gemeten wordt.'
+  const melding = keuze === 'gedaan' ? (metKlus ? 'Gedaan. De klus erachter gaat zo verder en meet of het gelukt is.' : 'Gedaan. Socev kijkt bij de volgende ronde of het ook zo gemeten wordt.')
     : keuze === 'later' ? 'Op later gezet tot ' + appVjDag(tot) + '.' : keuze === 'vervallen' ? 'Weggehaald: niet meer nodig.' : 'Teruggedraaid.';
   const q = r.punt || {};
   appStuur(res, 200, { ok: true, melding: melding, punt: Object.assign(appVjKort(Object.assign({}, p, { status: q.status || p.status, later_tot: q.later_tot }), vandaag), { terug_ms: appVjTerugMs(id, Date.now(), a.id) }) });
