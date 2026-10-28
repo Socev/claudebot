@@ -656,6 +656,7 @@ function checks(paginas, reg, compileerFouten, pot, bank, personen, fin) {
 // een adres. Alleen lezen: dit raakt de verzender niet, en niets hier maakt een adres actief of bevestigd. Een kant die niet te meten is,
 // is "niet gemeten", nooit een verschil (Fable #1). P9x zijn proefpraktijken en tellen nergens mee.
 const POT_SLEUTEL_RE = /^cloudflare:d1-fin\/praktijk#(P\d{2})$/, POT_PROEF_RE = /^P9\d$/;
+const POT_MAIL_RE = /^[a-z0-9._%+'-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/;   // = pot-verzend ADRES_RE (wv1763)
 const POT_OPEN = ['wacht_op_adres', 'concept', 'auto_gevraagd', 'auto_vrij', 'verzenden', 'onzeker'];
 // Alleen deze twee SELECT's; potMeting weigert alles wat geen SELECT is (Fable #4: het D1-eindpunt kan ook schrijven)
 const POT_SQL = [
@@ -777,6 +778,54 @@ function kaartPot(meting, stand, nuKort) {
       : nieuwe ? 'de adressen zijn veranderd; er staat een nieuwe kaart.' : 'de Bibliothecaris ziet dit verschil niet meer (factuuradres overal gelijk).') });
   });
   return uit;
+}
+
+// ── wv1763: plek 4 fase 2 — het factuuradres voor de POT-verzender uit het register (ontwerp mk-scripts/wv1763/ontwerp.md) ──
+// De verzender leest het adres niet meer van de dossierpagina maar hier: de stampagina zegt welke POT-praktijk(en) zij is
+// (ovis.db cloudflare:d1-fin/praktijk#Pxx; het register kent die koppeling niet), het register zegt welk adres David vastzette
+// (knoop_contact factuuradres, status actief, alleen na zijn Ja met vingerafdruk). Alleen als die twee als verzameling gelijk zijn en er
+// niets wacht (geen voorgesteld adres ernaast, geen ingetrokken vast adres), krijgt de praktijk een adres. Al het andere = geen adres
+// met een reden in gewone taal (de verzender zet de nota dan op wacht_op_adres). Puur; P9x (proef) doet gewoon mee.
+// paginas: leesEntiteiten(); reg: ovis_register_lees → { per: { Pxx: { aan: [..], cc: [], pagina, naam, knoop } }, problemen: { Pxx: reden },
+// onleesbaar: aantal pagina's dat niet te lezen was }
+function potFactuur(paginas, reg) {
+  const knopen = {}; (reg && reg.knopen || []).forEach(function (k) { knopen[k.id] = k; });
+  const claims = {};
+  // een pagina die niet te lezen was kan een claim zijn: dan is "geen stamkaart" niet gemeten (de verzender probeert het later opnieuw)
+  const onleesbaar = (paginas || []).filter(function (p) { return p && p.fouten && p.fouten.some(function (f) { return /^niet te lezen/.test(f); }); }).length;
+  const foutClaim = {};   // Fable wv1763 ZOU 3: een stampagina met een fout die toch een POT-sleutel draagt, verdwijnt niet stil
+  (paginas || []).forEach(function (p) {
+    if (!p) return;
+    const fout = (p.fouten && p.fouten.length) || !p.id;
+    (p.db || []).forEach(function (s) {
+      const m = POT_SLEUTEL_RE.exec(s);
+      if (!m) return;
+      if (fout) { foutClaim[m[1]] = foutClaim[m[1]] || p; return; }
+      if (!(claims[m[1]] || []).some(function (x) { return x.pad === p.pad; })) (claims[m[1]] = claims[m[1]] || []).push(p);
+    });
+  });
+  const per = {}, problemen = {};
+  Object.keys(foutClaim).forEach(function (px) {
+    const p = foutClaim[px];
+    problemen[px] = 'de stamkaart ' + String(p.naam || String(p.pad).split('/').pop().replace(/\.md$/, '')).slice(0, 60) + ' noemt deze praktijk maar heeft een fout (' + schoon((p.fouten || ['geen entiteit_id'])[0], 80) + ')';
+  });
+  Object.keys(claims).sort().forEach(function (px) {
+    const ps = claims[px], p = ps[0], naam = p.naam || p.id;
+    if (foutClaim[px]) return;   // een tweede (kapotte) stampagina noemt dezelfde praktijk: geen adres tot dat rechtgezet is
+    if (ps.length > 1) { problemen[px] = 'twee stamkaarten in de Second Brain noemen deze praktijk (' + ps.map(function (x) { return x.naam || x.id; }).join(' en ') + ')'; return; }
+    const k = knopen[p.id];
+    if (!k || k.vault_pagina !== p.pad || k.actief === false) { problemen[px] = 'de stamkaart van ' + naam + ' staat nog niet (of niet meer) in het register van de Second Brain'; return; }
+    const ct = (reg.contact || []).filter(function (c) { return c.knoop === p.id && c.veld === 'factuuradres' && c.status !== 'vervallen'; });
+    const act = ct.filter(function (c) { return c.status === 'actief' && !c.intrekking; }), vg = ct.filter(function (c) { return c.status === 'voorgesteld'; });
+    const weg = ct.filter(function (c) { return c.status === 'actief' && c.intrekking; });
+    const stam = potAdressen((p.contact || []).filter(function (c) { return c.veld === 'factuuradres'; }).map(function (c) { return c.waarde; }));
+    if (!act.length) { problemen[px] = vg.length ? 'het factuuradres van ' + naam + ' is nog niet vastgezet (kaart in Voor jou, met je vingerafdruk)' : 'op de stamkaart van ' + naam + ' staat geen factuuradres'; return; }
+    if (vg.length || weg.length) { problemen[px] = 'het factuuradres van ' + naam + ' wordt gewijzigd en wacht op je Ja (kaart in Voor jou)'; return; }
+    const vast = potAdressen(act.map(function (c) { return c.waarde; }));
+    if (stam.length !== vast.length || stam.some(function (a) { return vast.indexOf(a) < 0; })) { problemen[px] = 'het factuuradres op de stamkaart van ' + naam + ' is nog niet verwerkt in het register'; return; }
+    per[px] = { aan: stam, cc: [], pagina: p.pad, naam: naam, knoop: p.id };
+  });
+  return { per: per, problemen: problemen, onleesbaar: onleesbaar };
 }
 
 // ── wv1009: koppelregel plek 5 (Voor jou ⇄ Open vragen aan David; architectuur § 4 rij 5; ontwerp mk-scripts/wv1009/ontwerp.md) ──
@@ -1881,7 +1930,18 @@ function kaartenKritiek(reg, paginas, o) {
     CONTACT.forEach(function (veld) {
       const act = ct.filter(function (c) { return c.veld === veld && c.status === 'actief'; }), vg = ct.filter(function (c) { return c.veld === veld && c.status === 'voorgesteld'; });
       const weg = act.filter(function (c) { return c.intrekking; });
-      if (!act.length || (!vg.length && !weg.length)) return;   // eerste gebruik: geen kaart (bouwplan § 4.4 punt 3)
+      // eerste gebruik: geen kaart (bouwplan § 4.4 punt 3), behalve het factuuradres van een POT-praktijk zodra de overgang dat vraagt
+      // (wv1763, Fable wv981 ZOU 8): de verzender gebruikt alleen een vastgezet adres, dus zonder deze kaart gaat er nooit een nota
+      // alleen als elk voorgesteld adres een mailadres is (Fable wv1763 ZOU 4: geen postadres vastzetten dat de verzender toch weigert;
+      // de Bibliothecaris meldt het verschil met de POT-app al als BB3)
+      if (!act.length && veld === 'factuuradres' && vg.length && potEersteMag(p, o.potEerste) && vg.every(function (c) { const a = potAdressen(c.waarde); return a.length && a.every(function (x) { return POT_MAIL_RE.test(x); }); })) {
+        const regels = vg.map(function (c, i) { return { nr: i + 1, actie: 'activeer', tabel: 'contact', id: c.id, knoop: id, veld: veld, waarde: c.waarde, sha: (c.herkomst || {}).sha || '' }; });
+        const pxs = (p.db || []).map(function (s) { const m = POT_SLEUTEL_RE.exec(s); return m ? m[1] : null; }).filter(Boolean);
+        maak(k, p, veld, regels, vg.map(function (c, i) { return (i + 1) + '. ' + kort(c.waarde, 300); }).concat(['Geldt in de POT-app voor ' + pxs.join(', ') + '.']), 'factuuradres voor POT-nota\'s',
+          'Naar dit adres stuurt Socev de POT-nota\'s van ' + kort(k.naam, 60) + ' (SLOEL soms vanzelf). Het staat op de stamkaart in de Second Brain; Socev gebruikt het pas na jouw Ja. Zonder vast adres zet Socev voor deze praktijk geen nota klaar.');
+        return;
+      }
+      if (!act.length || (!vg.length && !weg.length)) return;
       const regels = [], stappen = [];
       let nr = 0;
       act.filter(function (c) { return !c.intrekking; }).slice(0, 4).forEach(function (c) { stappen.push('Blijft: ' + kort(c.waarde, 300)); });
@@ -1908,6 +1968,11 @@ function kaartenKritiek(reg, paginas, o) {
     });
   });
   return uit;
+}
+// wv1763: mag de eerste-gebruikkaart voor het factuuradres van deze stampagina? potEerste 'proef' = alleen een P9x-sleutel, 'alle' = elke POT-sleutel
+function potEersteMag(p, potEerste) {
+  if (potEerste !== 'proef' && potEerste !== 'alle') return false;
+  return (p.db || []).some(function (s) { const m = POT_SLEUTEL_RE.exec(s); return m && (potEerste === 'alle' || POT_PROEF_RE.test(m[1])); });
 }
 function slugKort(id) { return String(id).replace(/^org:/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20).replace(/-+$/, '') || 'x'; }
 
@@ -2023,9 +2088,10 @@ function relatiePagina(x) { return x.bestand && x.naam.endsWith('.md') && x.naam
 function maak(o) {
   const vault = o.vault, nu = o.nu || Date.now, log = o.log || function () {};
   o.lijst = o.lijst || lijstMapVan(vault);
-  function vind() {
+  // strikt (wv1763, Fable ZOU 1): een map onder 10_Zakelijk die niet te lezen is gooit (niet gemeten), in plaats van "geen pagina's"
+  function vind(strikt) {
     const uit = [];
-    function lijstMap(rel) { try { return o.lijst(rel); } catch (e) { return []; } }
+    function lijstMap(rel) { try { return o.lijst(rel); } catch (e) { if (strikt && /^10_Zakelijk(\/|$)/.test(rel)) throw e; return []; } }
     lijstMap('10_Zakelijk').forEach(function (m) {
       if (!m.map || m.naam.startsWith('.')) return;
       if (m.naam === '_Gedeeld') { lijstMap('10_Zakelijk/_Gedeeld/Relaties').forEach(function (x) { if (relatiePagina(x)) uit.push('10_Zakelijk/_Gedeeld/Relaties/' + x.naam); }); return; }
@@ -2074,6 +2140,15 @@ function maak(o) {
       try { t = o.lees(path.join(vault, rel)); } catch (e) { return { pad: rel, fouten: ['niet te lezen (' + String(e && e.code || e && e.message || e).slice(0, 40) + ')'] }; }
       const p = leesPagina(rel, t); p.tekst = t; return p;
     }).concat(leesPersonen());   // wv1011: personen zonder tekst (geen blok, geen BB8 op hun pagina)
+  }
+  // wv1763: alleen de entiteitpagina's (stampagina's), voor de POT-verzender elke paar minuten. Gooit als een map onder 10_Zakelijk niet te
+  // lezen is (vind() slikt dat gewoonlijk in en zou dan "geen pagina's" geven: dat is niet gemeten, geen afwezigheid).
+  function leesEntiteiten() {
+    return vind(true).map(function (rel) {
+      let t;
+      try { t = o.lees(path.join(vault, rel)); } catch (e) { return { pad: rel, fouten: ['niet te lezen (' + String(e && e.code || e && e.message || e).slice(0, 40) + ')'] }; }
+      return leesPagina(rel, t);
+    });
   }
   // wv1010: rekeningpagina's (vaste plekken), de pagina Bankregels en de rest van 20_Prive/Financien (alleen voor verwijzingen en pagina's
   // buiten de plek; tekst alleen bewaard als er iets bank-achtigs in staat)
@@ -2395,7 +2470,8 @@ function maak(o) {
     return uit;
   }
   // wv1253: kaarten in Overzicht. Eerst open kaarten zonder uitkomst opruimen (de databank beslist of dat mag: weg, zonder druk gesloten
-  // na 1 uur, 21 dagen open), dan zetten wat plan() geeft. opties: { soorten: ['kritiek','bundel','biblio'], vraagId(sleutel) → 8 hex, droog }.
+  // na 1 uur, 21 dagen open), dan zetten wat plan() geeft. opties: { soorten: ['kritiek','bundel','biblio'], vraagId(sleutel) → 8 hex, droog,
+  // potEerste: 'proef' | 'alle' (wv1763) }.
   // Een fout bij één kaart stopt de andere niet.
   async function kaarten(opties) {
     opties = opties || {};
@@ -2415,7 +2491,7 @@ function maak(o) {
       try { const f = await o.sbRpc('sb_identifier_te_bevestigen', { p_max: 200 }); reg.feiten = Array.isArray(f) ? f : null; }
       catch (e) { reg.feiten = null; uit.fouten.push({ sleutel: 'feit', fout: 'feiten lezen: ' + String(e && e.message || e).slice(0, 120) }); }
     }
-    const p = plan(reg, leesAlles(), { nu: t, soorten: soorten });
+    const p = plan(reg, leesAlles(), { nu: t, soorten: soorten, potEerste: opties.potEerste });   // wv1763: eerste-gebruikkaart factuuradres POT
     uit.redenen = p.redenen;
     for (const k of p.kaarten) {
       if (opties.droog) { uit.gezet.push(k.sleutel); continue; }
@@ -2427,7 +2503,7 @@ function maak(o) {
     log('ovis-kaarten ' + JSON.stringify({ gezet: uit.gezet, weg: uit.weg, fouten: uit.fouten.length, droog: !!opties.droog }));
     return uit;
   }
-  return { vind: vind, leesAlles: leesAlles, compileer: compileer, bibliothecaris: bibliothecaris, register: register, kaarten: kaarten };
+  return { vind: vind, leesAlles: leesAlles, leesEntiteiten: leesEntiteiten, compileer: compileer, bibliothecaris: bibliothecaris, register: register, kaarten: kaarten };
 }
 
 // Box-rij bij nieuwe bevindingen (de aanroeper schrijft hem met vault-veilig; geen waarden van contactvelden, Fable wv979 #10)
@@ -2455,7 +2531,7 @@ module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina,
   rekeningRegel: rekeningRegel, rekeningenPerDoel: rekeningenPerDoel, mdwBlokTekst: mdwBlokTekst, REK_KOP: REK_KOP,
   zetBlok: zetBlok, huidigBlok: huidigBlok, schoon: schoon, rpcInvoer: rpcInvoer, handvattenVan: handvattenVan, normHandvat: normHandvat, boxRij: boxRij, slug: slug,
   BLOK_BEGIN: BLOK_BEGIN, BLOK_EIND: BLOK_EIND, SCHRIJVERS_OK: SCHRIJVERS_OK,
-  potMeting: potMeting, potChecks: potChecks, kaartPot: kaartPot, POT_SQL: POT_SQL, POT_BEVINDING_RE: POT_BEVINDING_RE,
+  potMeting: potMeting, potChecks: potChecks, kaartPot: kaartPot, potFactuur: potFactuur, potEersteMag: potEersteMag, POT_SQL: POT_SQL, POT_BEVINDING_RE: POT_BEVINDING_RE,
   vjMeting: vjMeting, vjNu: vjNu, vjKoppel: vjKoppel, vjSchrijf: vjSchrijf, vjRegister: vjRegister, vjGenoemd: vjGenoemd, VJ_BEVINDING_RE: VJ_BEVINDING_RE,
   bankLezer: bankLezer, bankMeting: bankMeting, bankChecks: bankChecks, leesRekening: leesRekening, leesBankregels: leesBankregels, bankBlokTekst: bankBlokTekst,
   bankRegelsBlokTekst: bankRegelsBlokTekst, bankKaartZin: bankKaartZin, orgOpNaam: orgOpNaam, BANK_SQL: BANK_SQL, BANK_BEVINDING_RE: BANK_BEVINDING_RE, REST_BEVINDING_RE: REST_BEVINDING_RE, BANKREGELS_PAD: BANKREGELS_PAD,

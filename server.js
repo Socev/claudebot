@@ -15822,7 +15822,8 @@ function ovisKaartHerkomst(p) {
 }
 async function ovisKaartenZet(soorten) {
   if (!ovisKaartenAan()) return null;
-  const r = await ovis.kaarten({ soorten: soorten, vraagId: function (sl) { return appVjFnv('voorjou:' + sl + ':kaart'); } });   // = appVjKaartSleutel zonder registerrij
+  const r = await ovis.kaarten({ soorten: soorten, vraagId: function (sl) { return appVjFnv('voorjou:' + sl + ':kaart'); },   // = appVjKaartSleutel zonder registerrij
+    potEerste: typeof potVzEerste === 'function' ? potVzEerste() : null });   // wv1763: vastzetkaart voor het eerste factuuradres van een POT-praktijk
   if (r.gezet.length || r.weg || r.fouten.length) {
     appStaat.vjCache = null;
     ovisStaatZet({ kaarten: { t: new Date().toISOString(), gezet: r.gezet, weg: r.weg, fouten: r.fouten.length, eerste_fout: r.fouten.length ? String(r.fouten[0].fout).slice(0, 120) : null } });
@@ -19682,9 +19683,32 @@ function potVzProef() {
   try { const l = JSON.parse(fs.readFileSync(path.join(POT_VZ_DIR, 'auto-proef'), 'utf8')); return Array.isArray(l) ? l.filter(function (x) { return /^P9\d$/.test(String(x)); }) : []; }
   catch (e) { return []; }
 }
+// wv1763 (OVIS plek 4 fase 2): waar het factuuradres vandaan komt. <POT_VZ_DIR>/adresbron, eerste woord: dossier (zonder bestand, zoals tot
+// nu: facturen_aan op de dossierpagina), proef (P9x uit het register), kaarten (idem + vastzetkaarten voor alle praktijken), register
+// (alle praktijken uit het register; de dossierpagina wordt niet meer gelezen). Alleen de machinekamer zet dit bestand.
+function potVzAdresbron() {
+  try {
+    const w = fs.readFileSync(path.join(POT_VZ_DIR, 'adresbron'), 'utf8').trim().split(/\s+/)[0];
+    return POT_VZ_MOD && Array.isArray(POT_VZ_MOD.ADRESBRONNEN) && POT_VZ_MOD.ADRESBRONNEN.indexOf(w) >= 0 ? w : 'dossier';
+  } catch (e) { return 'dossier'; }
+}
+// vastzetkaarten voor het eerste factuuradres (ovis-register.js kaartenKritiek): proef → alleen P9x, kaarten/register → alle POT-praktijken
+function potVzEerste() { const b = potVzAdresbron(); return b === 'proef' ? 'proef' : b === 'kaarten' || b === 'register' ? 'alle' : null; }
+// Stampagina's + register → { per, problemen, onleesbaar } (ovis-register.js potFactuur). Eén minuut in het geheugen; een fout wordt niet bewaard.
+let potVzRegCache = null;
+async function potVzRegisterAdressen() {
+  if (typeof ovis === 'undefined' || !ovis || typeof ovis.leesEntiteiten !== 'function' || !OVIS_MOD || typeof OVIS_MOD.potFactuur !== 'function') throw new Error('OVIS-register ontbreekt');
+  if (potVzRegCache && Date.now() - potVzRegCache.t < 60 * 1000) return potVzRegCache.w;
+  const reg = await ovis.register();
+  // Fable wv1763 ZOU 2: een leeg register is niet gemeten (anders "staat niet in het register" voor alle praktijken)
+  if (!reg || !Array.isArray(reg.knopen) || !reg.knopen.length || !Array.isArray(reg.contact)) throw new Error('register leeg of onvolledig');
+  const w = OVIS_MOD.potFactuur(ovis.leesEntiteiten(), reg);
+  potVzRegCache = { t: Date.now(), w: w };
+  return w;
+}
 function potVzInfo() {
   const u = potVz.uitkomst, a = potVz.auto;
-  return { aan: potVzAan(), module: !!POT_VZ_MOD, laatste_tik: potVz.laatste, fouten_op_rij: potVz.fouten_op_rij, laatste_fout: potVz.laatste_fout,
+  return { aan: potVzAan(), module: !!POT_VZ_MOD, adresbron: potVzAdresbron(), laatste_tik: potVz.laatste, fouten_op_rij: potVz.fouten_op_rij, laatste_fout: potVz.laatste_fout,
     laatste: u ? { geclaimd: u.geclaimd, concept: u.concept, wacht_op_adres: u.wacht_op_adres, fout: u.fout, onzeker: u.onzeker, verzonden: u.verzonden, fouten: u.fouten } : null,
     auto: { aan: potVzAutoAan(), proef: potVzProef(), geheim: a.geheim, dag: a.dag, vandaag_verstuurd: a.verstuurd, vandaag_onzeker: a.onzeker, vandaag_concept: a.terug, toetsen_sha: POT_VZ_TOETSEN_SHA.slice(0, 12) } };
 }
@@ -19834,6 +19858,7 @@ const POT_VZ_IO = {
   concept: potVzConcept,
   pdftotext: potVzPdfTekst,
   vault: function () { return potVzVault(); },
+  registerAdressen: function () { return potVzRegisterAdressen(); },   // wv1763
   kaartZet: function (p) { return appSbRpc('mk_voor_jou_zet', { p: p }); },
   kaartLijst: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); return (j && j.punten) || []; },
   kaartDicht: function (sleutel, van, bewijs) { return appSbRpc('mk_voor_jou_status', { p_sleutel: sleutel, p_van: van, p_naar: 'gedaan', p_door: 'agent', p_bewijs: bewijs, p_reden: 'pot-verzend: vanzelf opgelost' }); },
@@ -19862,7 +19887,9 @@ async function potVzTik() {
     try { await potVzStand(auto); } catch (e) { logError('pot-verzend-stand', e); }
     const proef = potVzProef();
     if (proef.length && !auto) { try { if (!(await potVzVerzendGeheim())) proef.length = 0; } catch (e) { proef.length = 0; } }
-    const u = await POT_VZ_MOD.ronde(POT_VZ_IO, { meten: meten, kaarten: kaarten, auto: auto, proef: proef });
+    const adresbron = potVzAdresbron();
+    if (potVz.adresbron !== adresbron) { if (potVz.adresbron) schrijfLog(nu() + ' pot-verzend adresbron ' + velden({ van: potVz.adresbron, naar: adresbron })); potVz.adresbron = adresbron; }   // Fable wv1763 KAN 8
+    const u = await POT_VZ_MOD.ronde(POT_VZ_IO, { meten: meten, kaarten: kaarten, auto: auto, proef: proef, adresbron: adresbron });
     const dagA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
     if (potVz.auto.dag !== dagA) Object.assign(potVz.auto, { dag: dagA, verstuurd: 0, onzeker: 0, terug: 0 });
     potVz.auto.verstuurd += u.auto_verstuurd || 0; potVz.auto.onzeker += u.onzeker_verzonden || 0; potVz.auto.terug += u.auto_terug || 0;
@@ -19876,7 +19903,7 @@ async function potVzTik() {
     if (meten) potVz.laatste_meting = t0;
     if (kaarten && u.fouten.indexOf('kaarten') < 0) potVz.laatste_kaarten = t0;
     if (u.geclaimd || u.concept || u.fout || u.onzeker || u.verzonden || u.opnieuw) schrijfLog(nu() + ' pot-verzend ' + velden({ geclaimd: u.geclaimd, concept: u.concept, adres: u.wacht_op_adres, fout: u.fout, onzeker: u.onzeker, verzonden: u.verzonden, opnieuw: u.opnieuw }));
-    ['luik', 'pdftotext', 'vault', 'kaarten', 'register'].forEach(function (r) { potVz.rij[r] = u.fouten.indexOf(r) >= 0 ? (potVz.rij[r] || 0) + 1 : 0; if (potVz.rij[r] === 5) potVzBox(r, 'stap ' + r + ' faalde 5 tikken op rij'); });
+    ['luik', 'pdftotext', 'vault', 'kaarten', 'register', 'adresregister'].forEach(function (r) { potVz.rij[r] = u.fouten.indexOf(r) >= 0 ? (potVz.rij[r] || 0) + 1 : 0; if (potVz.rij[r] === 5) potVzBox(r, 'stap ' + r + ' faalde 5 tikken op rij'); });
     if (u.fouten.indexOf('dagplafond') >= 0) potVzBox('dagplafond', 'meer dan ' + POT_VZ_MOD.GRENS.perDag + ' concepten vandaag; de rest wacht tot morgen');
   } catch (e) {
     potVz.fouten_op_rij++; potVz.laatste_fout = new Date().toISOString();

@@ -77,6 +77,42 @@ vrijgave = { id: 7, kaart_sleutel: 'pot-vrijgave-7', kaart_tekst_hash: V.kaartHa
   ctx.intrekken(vrijgave);
   await new Promise((x) => setTimeout(x, 10));
   toets('intrekken: ingetrokken_op en rijen terug naar auto_gevraagd zonder vrijgave', d1Log.length === 1 && /ingetrokken_op/.test(d1Log[0][0].sql) && /status='auto_gevraagd', vrijgave_id=null/.test(d1Log[0][1].sql));
+  // ── wv1763: schakelaar adresbron, vastzetkaarten en de registerlezer ──
+  {
+    const bestanden = {};
+    let regRoep = 0, leesRoep = 0, regFout = false;
+    const c = { POT_VZ_MOD: V, POT_VZ_DIR: '/pv', path, Date, Error, Array,
+      fs: { readFileSync: (p) => { if (!(p in bestanden)) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; } return bestanden[p]; } },
+      OVIS_MOD: { potFactuur: (ps, reg) => ({ per: { P90: { aan: ['x@y.test'], cc: [] } }, problemen: {}, onleesbaar: 0, ps: ps.length, reg: reg.n }) },
+      ovis: { register: async () => { regRoep++; if (regFout) throw new Error('weg'); return { n: regRoep, knopen: [{ id: 'a' }], contact: [] }; }, leesEntiteiten: () => { leesRoep++; return [1, 2]; } } };
+    vm.createContext(c);
+    vm.runInContext(['let potVzRegCache = null;', knip('potVzAdresbron'), knip('potVzEerste'), knip('potVzRegisterAdressen')].join('\n') + '\nthis.bron = potVzAdresbron; this.eerste = potVzEerste; this.regAdr = potVzRegisterAdressen; this.leeg = function () { potVzRegCache = null; };', c);
+    const b = (w) => { if (w === null) delete bestanden['/pv/adresbron']; else bestanden['/pv/adresbron'] = w; return [c.bron(), c.eerste()]; };
+    toets('adresbron: zonder bestand dossier en geen vastzetkaarten', JSON.stringify(b(null)) === '["dossier",null]');
+    toets('adresbron: proef → proef/proef; kaarten → kaarten/alle; register (met toelichting) → register/alle; onzin → dossier/null',
+      JSON.stringify(b('proef\n')) === '["proef","proef"]' && JSON.stringify(b('kaarten')) === '["kaarten","alle"]' && JSON.stringify(b('register  # sinds 3-11, Davids Ja')) === '["register","alle"]' && JSON.stringify(b('Register')) === '["dossier",null]');
+    regFout = true; let gooit = false;
+    try { await c.regAdr(); } catch (e) { gooit = true; }
+    toets('registerlezer: register weg → gooit (geen leeg antwoord)', gooit);
+    regFout = false;
+    const w1 = await c.regAdr(), w2 = await c.regAdr();
+    toets('registerlezer: stampagina\'s + register, één minuut bewaard, een fout niet', w1.per.P90 && w1.ps === 2 && w2 === w1 && regRoep === 2 && leesRoep === 1, { w1, regRoep, leesRoep });
+    c.leeg(); const regOud = c.ovis.register; c.ovis.register = async () => ({ knopen: [], contact: [] }); gooit = false;
+    try { await c.regAdr(); } catch (e) { gooit = /leeg/.test(e.message); }
+    toets('registerlezer: leeg register → gooit (niet gemeten), niet "geen stamkaart" voor alles', gooit);
+    c.ovis.register = async () => ({ knopen: [{ id: 'x' }] }); gooit = false;
+    try { await c.regAdr(); } catch (e) { gooit = /onvolledig/.test(e.message); }
+    toets('registerlezer: register zonder contact → gooit', gooit);
+    c.ovis.register = regOud;
+    c.ovis = null; c.leeg(); gooit = false;
+    try { await c.regAdr(); } catch (e) { gooit = /ontbreekt/.test(e.message); }
+    toets('registerlezer: zonder OVIS-module → gooit', gooit);
+    const tik = knip('potVzTik');
+    toets('potVzTik geeft de adresbron mee aan de ronde en logt een wissel', /const adresbron = potVzAdresbron\(\)/.test(tik) && /adresbron: adresbron \}/.test(tik) && /pot-verzend adresbron/.test(tik) && /'adresregister'/.test(tik));
+    toets('POT_VZ_IO heeft registerAdressen', /registerAdressen: function \(\) \{ return potVzRegisterAdressen\(\); \}/.test(src));
+    toets('ovisKaartenZet geeft potEerste mee', /potEerste: typeof potVzEerste === 'function' \? potVzEerste\(\) : null/.test(knip('ovisKaartenZet')));
+    toets('/health pot_verzend toont de adresbron', /adresbron: potVzAdresbron\(\)/.test(knip('potVzInfo')));
+  }
   console.log(`\n${goed} groen, ${fout} rood`);
   process.exit(fout ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -260,6 +260,81 @@ const ronde = (o) => V.ronde(io, o);
   const sj = fs.readFileSync('server.js', 'utf8'); const i = sj.indexOf('async function potVzTik()'); const tik = sj.slice(i, sj.indexOf('\nsetInterval(', i));
   toets('potVzTik overschaduwt nu() niet', i > 0 && !/\b(const|let|var)\s+nu\b/.test(tik) && /schrijfLog\(nu\(\)/.test(tik));
 
+  // 15. wv1763: adresbron (OVIS plek 4 fase 2) — register per schakelaar, nooit terug naar de dossierpagina
+  {
+    db.exec("insert or ignore into praktijk (id, naam, naam_brief, email) values ('P90','PROEF','PROEF Socev','reg@david.example')");
+    naamVan.P90 = 'PROEF Socev';
+    // de dossierpagina noemt een ánder adres voor P90: als dat ooit in een concept belandt, is er teruggevallen
+    paginas = paginas.concat([{ pad: '10_Zakelijk/HAGRO/Praktijken/PROEF.md', tekst: '---\nfin_praktijk: [P90]\nfacturen_aan: oud@dossier.example\n---\n' }]);
+    let regAntw = () => ({ per: {}, problemen: { P90: 'het factuuradres van PROEF Socev is nog niet vastgezet (kaart in Voor jou, met je vingerafdruk)' }, onleesbaar: 0 });
+    io.registerAdressen = async () => regAntw();
+    const terugTien = (id) => db.prepare("update nota_verzending set bijgewerkt_op=strftime('%Y-%m-%dT%H:%M:%SZ','now','-11 minutes') where id=?").run(id);
+    const zonderAdresKaarten = () => kaartZet.filter((p) => /^pot-verzend-adres-/.test(p.sleutel));
+    // a. proef, geen vastgezet adres → wacht_op_adres met de reden van het register; kaart wijst naar de vastzetkaart, niet naar Obsidian
+    const p1 = rij(nota('P90', 10)); const vc = concepten.length, vk = zonderAdresKaarten().length;
+    let u = await V.ronde(io, { adresbron: 'proef' });
+    toets('15 proef: geen vastgezet adres → wacht_op_adres met reden uit het register, geen concept (geen terugval op de dossierpagina)', status(p1.id).status === 'wacht_op_adres' && status(p1.id).opmerking === 'geen_adres' && /nog niet vastgezet/.test(status(p1.id).fout) && concepten.length === vc, { s: status(p1.id), u });
+    const ka = zonderAdresKaarten().slice(vk).pop();
+    toets('15 adreskaart: stap "druk Ja met je vingerafdruk", zeg-tegen-Socev, geen Obsidian/pad', ka && /vingerafdruk/.test(ka.stappen.join(' ')) && /zeg tegen Socev/.test(ka.stappen.join(' ')) && !/Obsidian|facturen_aan|\.md|10_Zakelijk|wv\d/.test(JSON.stringify(ka)) && ka.titel.length <= 90 && ka.waarom.length <= 400, ka);
+    // b. register onbereikbaar → rij terug op wacht, fout adresregister, geen concept en geen kaart
+    regAntw = () => { throw new Error('supabase weg'); };
+    terugTien(p1.id); const vk2 = kaartZet.length;
+    u = await V.ronde(io, { adresbron: 'proef' });
+    toets('15 register onbereikbaar → wacht (opnieuw), fout adresregister, geen concept, geen terugval', status(p1.id).status === 'wacht' && u.fouten.includes('adresregister') && concepten.length === vc, { s: status(p1.id).status, u });
+    u = await V.ronde(io, { adresbron: 'proef', kaarten: true });
+    toets('15 register onbereikbaar → elke minuut opnieuw, zonder adreskaart (ook als de kaarten worden bijgewerkt)', status(p1.id).status === 'wacht' && kaartZet.slice(vk2).every((p) => !/^pot-verzend-adres-/.test(p.sleutel)), kaartZet.slice(vk2).map((p) => p.sleutel));
+    // c. echte praktijk in proef: gewoon van de dossierpagina, ook als het register weg is
+    const e1 = rij(nota('P01', 11));
+    await V.ronde(io, { adresbron: 'proef' });
+    toets('15 proef: echte praktijk P01 nog via de dossierpagina, ook met register weg', status(e1.id).status === 'concept' && concepten[concepten.length - 1].aan === 'pm@kg.example', status(e1.id).status);
+    // d. adres vastgezet → concept aan het registeradres (niet het dossieradres), bron_pagina = stampagina, geen cc
+    regAntw = () => ({ per: { P90: { aan: ['reg@david.example'], cc: [], pagina: '10_Zakelijk/_Gedeeld/Relaties/Proefpraktijk Socev.md', naam: 'Proefpraktijk Socev', knoop: 'org:proef' } }, problemen: {}, onleesbaar: 0 });
+    await V.ronde(io, { adresbron: 'proef' });
+    const c90 = concepten[concepten.length - 1];
+    toets('15 vastgezet adres = POT-app → concept aan het registeradres, bron = stampagina, geen cc', status(p1.id).status === 'concept' && c90.aan === 'reg@david.example' && !('cc' in c90) && /Proefpraktijk Socev/.test(status(p1.id).bron_pagina), { s: status(p1.id).status, c90 });
+    // e. registeradres ≠ POT-app → adres_gewijzigd (Davids "adres klopt" blijft tweede slot)
+    const p2 = rij(nota('P90', 12));
+    regAntw = () => ({ per: { P90: { aan: ['nieuw@david.example'], cc: [], pagina: 'x', naam: 'Proefpraktijk Socev', knoop: 'org:proef' } }, problemen: {}, onleesbaar: 0 });
+    await V.ronde(io, { adresbron: 'proef' });
+    toets('15 registeradres ≠ POT-app → wacht_op_adres adres_gewijzigd', status(p2.id).status === 'wacht_op_adres' && status(p2.id).opmerking === 'adres_gewijzigd' && status(p2.id).aan === 'nieuw@david.example', status(p2.id));
+    // f. register: een postadres of cc in het register = geen adres
+    regAntw = () => ({ per: { P90: { aan: ['postbus', '1'], cc: [], pagina: 'x', naam: 'Proefpraktijk Socev', knoop: 'org:proef' } }, problemen: {}, onleesbaar: 0 });
+    terugTien(p2.id);
+    await V.ronde(io, { adresbron: 'proef' });
+    toets('15 register met een postadres → geen adres (geen mailadres)', status(p2.id).status === 'wacht_op_adres' && status(p2.id).opmerking === 'geen_adres' && /geen \(enkel\) mailadres/.test(status(p2.id).fout), status(p2.id));
+    // g. register: een stampagina niet te lezen en P90 zonder uitslag → niet gemeten (wacht), geen "geen stamkaart"
+    regAntw = () => ({ per: {}, problemen: {}, onleesbaar: 1 });
+    terugTien(p2.id);
+    await V.ronde(io, { adresbron: 'proef' });
+    u = await V.ronde(io, { adresbron: 'proef' });
+    toets('15 stampagina onleesbaar → niet gemeten: wacht, geen wacht_op_adres, fout adresregister (box na 5 tikken)', status(p2.id).status === 'wacht' && u.fouten.includes('adresregister'), { s: status(p2.id), u });
+    // h. register: geen claim en niets onleesbaar → "geen stamkaart"
+    regAntw = () => ({ per: {}, problemen: {}, onleesbaar: 0 });
+    await V.ronde(io, { adresbron: 'proef' });
+    toets('15 geen stampagina die P90 noemt → wacht_op_adres "geen stamkaart"', status(p2.id).status === 'wacht_op_adres' && /geen stamkaart/.test(status(p2.id).fout), status(p2.id));
+    // i. register voor alles: P01 heeft een dossieradres maar geen vastgezet adres → wacht, nooit het dossieradres
+    const e2 = rij(nota('P01', 13)); const vc3 = concepten.length;
+    regAntw = () => ({ per: {}, problemen: { P01: 'het factuuradres van Huisartsenpraktijk Korte Geer is nog niet vastgezet (kaart in Voor jou, met je vingerafdruk)' }, onleesbaar: 0 });
+    let vaultGelezen = 0; const vaultOud = io.vault; io.vault = () => { vaultGelezen++; return vaultOud(); };
+    await V.ronde(io, { adresbron: 'register' });
+    toets('15 register: P01 zonder vastgezet adres → wacht_op_adres, dossierpagina niet gelezen', status(e2.id).status === 'wacht_op_adres' && concepten.length === vc3 && vaultGelezen === 0, { s: status(e2.id).status, vaultGelezen });
+    // i2. register voor alles mét vastgezet adres → concept aan het registeradres; de dossierpagina wordt niet gelezen (Fable KAN 9)
+    regAntw = () => ({ per: { P01: { aan: ['pm@kg.example'], cc: [], pagina: '10_Zakelijk/_Gedeeld/Relaties/Huisartsenpraktijk Korte Geer.md', naam: 'Huisartsenpraktijk Korte Geer', knoop: 'org:kg' } }, problemen: {}, onleesbaar: 0 });
+    terugTien(e2.id);
+    await V.ronde(io, { adresbron: 'register' });
+    toets('15 register: vastgezet adres → concept aan het registeradres, bron = stampagina, dossierpagina niet gelezen', status(e2.id).status === 'concept' && concepten.length === vc3 + 1 && concepten[concepten.length - 1].aan === 'pm@kg.example' && /_Gedeeld\/Relaties/.test(status(e2.id).bron_pagina) && vaultGelezen === 0, { s: status(e2.id), vaultGelezen });
+    io.vault = vaultOud;
+    // KAN 6: adreskaart krijgt een andere sleutel als de rijen via het register lopen
+    const kr1 = V.kaartAdres([{ id: 1, praktijk_id: 'P01', praktijk: 'KG', reden: 'x', opmerking: 'geen_adres', deadline: '2026-11-02' }], 'x', 'dossier'), kr2 = V.kaartAdres([{ id: 1, praktijk_id: 'P01', praktijk: 'KG', reden: 'x', opmerking: 'geen_adres', deadline: '2026-11-02' }], 'x', 'register');
+    toets('15 adreskaart: andere sleutel na een wissel naar het register, vastzetstap alleen dan', kr1.sleutel !== kr2.sleutel && !/vingerafdruk/.test(kr1.stappen.join(' ')) && /vingerafdruk/.test(kr2.stappen.join(' ')), [kr1.sleutel, kr2.sleutel]);
+    // j. onbekende schakelaarwaarde = dossier
+    const ev = await V.adressen(io, 'onzin', { fouten: [] });
+    toets('15 onbekende adresbron = dossier', ev.bron === 'dossier' && ev.bronVan('P90') === 'dossier' && ev.per.P01 && ev.per.P01.aan[0] === 'pm@kg.example', ev.bron);
+    toets('15 bronVan: kaarten = proef (alleen P9x uit het register)', V.bronVan('kaarten', 'P90') === 'register' && V.bronVan('kaarten', 'P01') === 'dossier' && V.bronVan('register', 'P01') === 'register' && V.bronVan('dossier', 'P90') === 'dossier');
+    db.prepare("update nota_verzending set status='geannuleerd' where status in ('wacht','wacht_op_adres')").run();
+    delete io.registerAdressen;
+  }
+
   // kaartgrenzen van de databank (titel ≤ 90, waarom ≤ 400, meting ≤ 300)
   const lang = Array.from({ length: 30 }, (_, i) => ({ id: i, nummer: '2026' + (500 + i), fout: 'de PDF hoort niet bij deze nota (mist nummer, bedrag, praktijknaam)', deadline: '2026-11-02', praktijk: 'Huisartsenpraktijk Korte Geer', reden: 'op de pagina Huisartsenpraktijk Korte Geer staat nog geen factuuradres (veld facturen_aan)', opmerking: 'geen_adres' }));
   const ka = [V.kaartFout(lang, '1-1 07:00'), V.kaartAdres(lang, '1-1 07:00'), V.kaartGepland('SLOEL', '2026-11-02', lang.map((x) => ({ ...x, onderwerp: 'Factuur SLOEL - Correctie doorbelaste huur 2026' })), '1-1 07:00')];

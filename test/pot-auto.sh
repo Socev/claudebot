@@ -308,6 +308,46 @@ async function jaKnop(vid, bevestiging) {
     toets('12:00: daarna concept', ['wacht', 'concept'].includes(st(m1.id).status), st(m1.id).status);
   }
 
+  // ── N. wv1763: adresbron proef — de proefnota gaat alleen met een vastgezet registeradres, nooit naar het dossieradres ──
+  {
+    db.exec("update praktijk set email='reg@david.example' where id='P90'");
+    // de dossierpagina van P90 zegt test@david.example (blok K); het register zegt reg@david.example
+    let regAntw = () => ({ per: {}, problemen: { P90: 'het factuuradres van PROEF Socev is nog niet vastgezet (kaart in Voor jou, met je vingerafdruk)' }, onleesbaar: 0 });
+    io.registerAdressen = async () => regAntw();
+    zetNu('2026-11-06T10:00:00Z');
+    const z1 = autoRij(nota('P90', 2), '2026-11-25', '2026-11-25T06:00:00Z');
+    await ronde({ auto: false, proef: ['P90'], adresbron: 'proef' });
+    toets('N proef zonder vastgezet adres → geen vrijgave, terug naar concept met de reden', !st(z1.id).vrijgave_id && st(z1.id).status === 'wacht' && /nog niet vastgezet/.test(st(z1.id).opmerking), st(z1.id));
+    const z2 = autoRij(nota('P90', 3), '2026-11-25', '2026-11-25T06:00:00Z');
+    regAntw = () => { throw new Error('weg'); };
+    let u = await ronde({ auto: false, proef: ['P90'], adresbron: 'proef' });
+    toets('N register onbereikbaar bij klaarzetten → blijft auto_gevraagd (volgende tik), geen dossieradres', st(z2.id).status === 'auto_gevraagd' && !st(z2.id).vrijgave_id && u.fouten.includes('adresregister'), { s: st(z2.id), f: u.fouten });
+    regAntw = () => ({ per: { P90: { aan: ['reg@david.example'], cc: [], pagina: '10_Zakelijk/_Gedeeld/Relaties/Proefpraktijk Socev.md', naam: 'Proefpraktijk Socev', knoop: 'org:proef' } }, problemen: {}, onleesbaar: 0 });
+    await ronde({ auto: false, proef: ['P90'], adresbron: 'proef' });
+    toets('N vastgezet adres → vrijgave met het registeradres op de kaart', st(z2.id).vrijgave_id && st(z2.id).aan === 'reg@david.example' && kaartRij[`pot-vrijgave-${st(z2.id).vrijgave_id}`].stappen.some((x) => x.includes('reg@david.example')), st(z2.id));
+    await jaKnop(st(z2.id).vrijgave_id);
+    // op de dag: register even weg → niets versturen (tijdelijk), daarna wel; nooit test@david.example
+    zetNu('2026-11-25T08:05:00Z');
+    regAntw = () => { throw new Error('weg'); };
+    const vz = verstuurd.length;
+    u = await ronde({ auto: false, proef: ['P90'], adresbron: 'proef' });
+    toets('N op de dag, register weg → niets verstuurd, blijft auto_vrij', verstuurd.length === vz && st(z2.id).status === 'auto_vrij' && u.fouten.includes('adresregister'), { s: st(z2.id).status, f: u.fouten });
+    regAntw = () => ({ per: { P90: { aan: ['reg@david.example'], cc: [], pagina: 'x', naam: 'Proefpraktijk Socev', knoop: 'org:proef' } }, problemen: {}, onleesbaar: 0 });
+    zetNu('2026-11-25T08:06:00Z');
+    await ronde({ auto: false, proef: ['P90'], adresbron: 'proef' });
+    toets('N register terug → verstuurd aan het registeradres', st(z2.id).status === 'auto_verstuurd' && verstuurd.length === vz + 1 && verstuurd[verstuurd.length - 1].aan === 'reg@david.example', { s: st(z2.id).status, aan: verstuurd.length > vz && verstuurd[verstuurd.length - 1].aan });
+    // vrijgegeven, daarna verandert het vastgezette adres (David wijzigt de stamkaart: nieuw voorgesteld adres wacht) → concept, niet versturen
+    zetNu('2026-11-06T10:00:00Z');
+    const z3 = autoRij(nota('P90', 4), '2026-11-26', '2026-11-26T06:00:00Z');
+    await ronde({ auto: false, proef: ['P90'], adresbron: 'proef' });
+    await jaKnop(st(z3.id).vrijgave_id);
+    regAntw = () => ({ per: {}, problemen: { P90: 'het factuuradres van Proefpraktijk Socev wordt gewijzigd en wacht op je Ja (kaart in Voor jou)' }, onleesbaar: 0 });
+    zetNu('2026-11-26T08:05:00Z'); const vz3 = verstuurd.length;
+    await ronde({ auto: false, proef: ['P90'], adresbron: 'proef' });
+    toets('N adres in wijziging na de vrijgave → niet verstuurd, terug naar concept', verstuurd.length === vz3 && ['wacht', 'concept', 'wacht_op_adres'].includes(st(z3.id).status) && /wordt gewijzigd/.test(String(st(z3.id).opmerking) + ' ' + String(st(z3.id).fout)), st(z3.id));
+    delete io.registerAdressen;
+  }
+
   // ── I. geen auto-rij in de bestaande conceptclaim; kaartgrenzen ──
   const sj = fs.readFileSync('pot-verzend.js', 'utf8');
   const claim = /update nota_verzending set status='bezig'[^`]*`/.exec(sj);

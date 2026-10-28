@@ -10,7 +10,7 @@
  * HOE. Zijn POT-app (werk.socev.dev/pot, Pages Function) zet per nota een rij in D1 `fin.nota_verzending` (status wacht, PDF uit de
  * browser, onderwerp en tekst door de server bepaald, niet_voor = nu of de gekozen dag 07:00). Deze ronde (elke minuut, alleen de
  * primaire pod, schakelaar aan) pakt wachtende rijen op, zoekt de ontvanger op in de Second Brain (frontmatter `fin_praktijk` +
- * `facturen_aan` op de praktijkpagina), controleert de PDF (sha256 + pdftotext: nummer, bedrag en praktijknaam moeten erin staan) en
+ * `facturen_aan` op de praktijkpagina; sinds wv1763 per schakelaar het vastgezette factuuradres uit het OVIS-register), controleert de PDF (sha256 + pdftotext: nummer, bedrag en praktijknaam moeten erin staan) en
  * zet per nota één concept klaar via het bestaande mailluik. Versturen doet David zelf in Gmail; deze module kan dat niet.
  * Toestanden: wacht → bezig → concept → verzonden, of wacht_op_adres / onzeker / fout / concept_weg. Fable-review vooraf (23-10):
  * per nota (niet per ontvanger), klok in D1, bezig > 10 min = onzeker en zelfherstel via Gmail `filename:<nummer>`, voorcontrole vóór
@@ -76,6 +76,41 @@ function ontvangers(paginas) {
   for (const id of Object.keys(problemen)) if (/twee pagina's|onleesbaar/.test(problemen[id])) delete per[id];
   return { per, problemen };
 }
+// wv1763 (OVIS plek 4 fase 2, ontwerp mk-scripts/wv1763/ontwerp.md): het factuuradres komt uit het register van de Second Brain
+// (stampagina + vastgezet adres, ovis-register.js potFactuur) in plaats van facturen_aan op de dossierpagina. Overgang per schakelaar
+// (server.js leest /opt/data/pot-verzend/adresbron): dossier = zoals tot nu; proef en kaarten = proefpraktijken P9x uit het register, de
+// rest nog van de dossierpagina; register = alles uit het register. Een praktijk op het register valt nooit terug op de dossierpagina.
+const ADRESBRONNEN = ['dossier', 'proef', 'kaarten', 'register'];
+const bronVan = (bron, px) => (bron === 'register' || ((bron === 'proef' || bron === 'kaarten') && /^P9\d$/.test(String(px))) ? 'register' : 'dossier');
+// → { bron, per, problemen, onleesbaar(px), bronVan(px) }; gooit nooit (wat niet te lezen is staat in uit.fouten en in onleesbaar)
+async function adressen(io, bron, uit) {
+  bron = ADRESBRONNEN.includes(bron) ? bron : 'dossier';
+  let dos = null, reg = null;
+  if (bron !== 'register') { try { dos = ontvangers(await io.vault()); } catch (e) { uit.fouten.push('vault'); } }
+  if (bron !== 'dossier') {
+    try { reg = typeof io.registerAdressen === 'function' ? await io.registerAdressen() : null; } catch (e) { reg = null; }
+    if (!reg || typeof reg.per !== 'object' || !reg.per || typeof reg.problemen !== 'object' || !reg.problemen) { reg = null; uit.fouten.push('adresregister'); }
+    else if (Number(reg.onleesbaar) > 0) uit.fouten.push('adresregister');   // Fable wv1763 ZOU 5: een onleesbare stampagina telt mee voor de box
+  }
+  const per = {}, problemen = {};
+  for (const [bronObj, soort] of [[dos, 'dossier'], [reg, 'register']]) {
+    if (!bronObj) continue;
+    for (const px of Object.keys(bronObj.per)) {
+      if (bronVan(bron, px) !== soort) continue;
+      const o1 = bronObj.per[px], aan = Array.isArray(o1 && o1.aan) ? o1.aan : [];
+      // register: zelfde mailregel als de dossierpagina (een factuuradres kan elders een postadres zijn)
+      if (soort === 'register' && (!aan.length || aan.some((a) => !ADRES_RE.test(String(a))) || (o1.cc || []).length)) { problemen[px] = `het vastgezette factuuradres van ${o1 && o1.naam || px} is geen (enkel) mailadres`; continue; }
+      per[px] = o1;
+    }
+    for (const px of Object.keys(bronObj.problemen)) if (bronVan(bron, px) === soort) problemen[px] = bronObj.problemen[px];
+  }
+  // register: een praktijk zonder uitslag terwijl er een stampagina niet te lezen was = niet gemeten (opnieuw), geen "geen adres"
+  const regWeg = (px) => !reg || (!reg.per[px] && !reg.problemen[px] && Number(reg.onleesbaar) > 0);
+  return { bron, per, problemen, bronVan: (px) => bronVan(bron, px), onleesbaar: (px) => (bronVan(bron, px) === 'register' ? regWeg(px) : !dos) };
+}
+const geenAdresTekst = (ontv, px, praktijk) => ontv.problemen[px] || (ontv.bronVan(px) === 'register'
+  ? `voor ${praktijk} staat geen stamkaart in de Second Brain die naar deze praktijk verwijst`
+  : `voor ${praktijk} staat geen factuuradres in de Second Brain (veld facturen_aan op de praktijkpagina)`);
 function paginaNaam(pad) { return String(pad || '').split('/').pop().replace(/\.md$/, '').replace(/^index$/, String(pad || '').split('/').slice(-2, -1)[0] || 'index'); }
 
 // ── PDF ──────────────────────────────────────────────────────────────────────
@@ -143,16 +178,20 @@ function kaartGepland(ent, plan, rijen, nuKort) {
       "In de POT-app (tab Nota's) staat binnen een uur 'verzonden'; deze kaart gaat dan vanzelf dicht."],
     meting: `${nuKort}: ${rijen.length} concept${rijen.length > 1 ? 'en staan' : ' staat'} klaar in Gmail.` });
 }
-function kaartAdres(rijen, nuKort) {
+function kaartAdres(rijen, nuKort, bron) {
   const regels = [...new Set(rijen.map((r) => `${r.praktijk}: ${r.reden}`))];
   const bevestig = rijen.some((r) => /^adres_(gewijzigd|nieuw)/.test(r.opmerking || ''));
-  return kaartGrens({ sleutel: 'pot-verzend-adres-' + korteHash(rijen.map((r) => r.id).sort().join(',')), soort: 'doen', volgorde: 22, waar: 'overal', prive: true, duur_min: 5,
+  const viaRegister = rijen.some((r) => bronVan(bron, r.praktijk_id) === 'register');
+  const voorbeeld = rijen[0] && rijen[0].praktijk ? String(rijen[0].praktijk).slice(0, 60) : 'de praktijk';
+  // sleutel ook op de bron (Fable wv1763 KAN 6): na een wissel naar het register komt de kaart met de vastzetstap, niet de oude tekst
+  return kaartGrens({ sleutel: 'pot-verzend-adres-' + korteHash(rijen.map((r) => r.id).sort().join(',') + (viaRegister ? '|register' : '')), soort: 'doen', volgorde: 22, waar: 'overal', prive: true, duur_min: 5,
     deadline: rijen.map((r) => r.deadline).sort()[0],
     titel: `POT-app — factuuradres ${bevestig ? 'bevestigen of ' : ''}aanvullen (${rijen.length} nota${rijen.length > 1 ? "'s" : ''})`,
     herkomst: { handmatig: 'pot-verzend', soort: 'adres', ids: rijen.map((r) => r.id) },
-    waarom: 'Socev zet een nota pas als concept klaar als het factuuradres in de Second Brain staat en het hetzelfde is als het adres dat de POT-app kent. Bij deze nota\'s klopt dat nog niet: ' + regels.join('; ') + '.',
-    stappen: [...(bevestig ? ["Klopt het nieuwe adres? Open de POT-app, tab Nota's, en tik bij de nota op 'adres klopt'."] : []),
-      "Ontbreekt of klopt het adres niet: open in Obsidian de pagina van de praktijk (map Zakelijk › HAGRO › Praktijken, of de hoofdpagina van Groenhouten of Tolgaarde) en zet bij de eigenschappen facturen_aan op het juiste mailadres (fin_praktijk noemt de praktijk in de POT-app).",
+    waarom: 'Socev zet een nota pas als concept klaar als het factuuradres in de Second Brain staat' + (viaRegister ? ' (vastgezet met je vingerafdruk)' : '') + ' en het hetzelfde is als het adres dat de POT-app kent. Bij deze nota\'s klopt dat nog niet: ' + regels.join('; ') + '.',
+    stappen: [...(viaRegister ? ["Staat er in Voor jou een kaart 'factuuradres voor POT-nota's — zo vastzetten?': kijk het adres na en druk Ja met je vingerafdruk."] : []),
+      ...(bevestig ? ["Klopt het nieuwe adres? Open de POT-app, tab Nota's, en tik bij de nota op 'adres klopt'."] : []),
+      `Ontbreekt het adres of klopt het niet: zeg tegen Socev "factuuradres ${voorbeeld} is …". Socev zet het in de Second Brain` + (viaRegister ? '; daarna komt er een kaart om het vast te zetten.' : '.'),
       'Socev kijkt elke tien minuten opnieuw en zet het concept dan vanzelf klaar; deze kaart gaat daarna dicht.'],
     meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s wachten" : ' wacht'} op een factuuradres.` });
 }
@@ -253,7 +292,7 @@ function kaartNietAuto(rijen, nuKort) {
     herkomst: { handmatig: 'pot-verzend', soort: 'nietauto', ids: rijen.map((r) => r.id) },
     waarom: kap("Je koos bij deze nota's \"op die dag zelf versturen\", maar Socev verstuurt ze niet vanzelf: " + rijen.map((r) => `${r.nummer} (${r.reden})`).join('; ') + '. Ze komen op de verzenddag om 07:00 als concept in Gmail; versturen doe je dan zelf.', 400),
     stappen: ["Niets doen: op de verzenddag staat er per nota een concept in Gmail en een kaart om ze te versturen.",
-      "Wil je het toch automatisch: los de reden op (bijvoorbeeld het adres op de praktijkpagina) en zet de nota in de POT-app opnieuw klaar met een reden.",
+      "Wil je het toch automatisch: los de reden op (bijvoorbeeld het factuuradres) en zet de nota in de POT-app opnieuw klaar met een reden.",
       'Deze kaart gaat vanzelf dicht als de nota verstuurd of opnieuw klaargezet is.'],
     meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} niet automatisch.` });
 }
@@ -283,9 +322,9 @@ async function autoControle(io, r, n, ontv) {
   if (!tk || !tk.ok) return { ok: false, tijdelijk: true, reden: 'PDF nog niet te lezen' };
   const hb = pdfHoortBij(tk.tekst, n);
   if (!hb.ok) return { ok: false, reden: 'de PDF hoort niet bij deze nota (mist ' + hb.mist.join(', ') + ')' };
-  if (!ontv) return { ok: false, tijdelijk: true, reden: 'Second Brain niet te lezen' };
+  if (!ontv || ontv.onleesbaar(r.praktijk_id)) return { ok: false, tijdelijk: true, reden: 'Second Brain niet te lezen' };
   const o1 = ontv.per[r.praktijk_id];
-  if (!o1) return { ok: false, reden: 'geen factuuradres in de Second Brain' };
+  if (!o1) return { ok: false, reden: 'geen factuuradres: ' + String(geenAdresTekst(ontv, r.praktijk_id, r.praktijk_id)).slice(0, 160) };
   const aanT = adresTekst(o1.aan), ccT = adresTekst(o1.cc);
   if (!n.email || adresNorm(n.email) !== aanT) return { ok: false, reden: 'het factuuradres is nieuw of anders dan wat de POT-app kent (eerst bevestigen)' };
   return { ok: true, aan: aanT, cc: ccT || null, bron: o1.pagina, pdf: pb.bytes };
@@ -343,14 +382,13 @@ async function autoRonde(io, nuD1, o, uit, zet) {
     const nieuw = (await io.d1([{ sql: `select ${KOL} from nota_verzending where status='auto_gevraagd' and vrijgave_id is null and plan_datum > ? and plan_datum <= ? order by entiteit, plan_datum, nummer limit 40`, params: [vandaag, ymdPlus(vandaag, AUTO.vooraf)] }]))[0].results.filter(magAuto);
     if (nieuw.length) {
       const notaM = await notasVan(io, nieuw);
-      let ontv = null;
-      try { ontv = ontvangers(await io.vault()); } catch (e) { uit.fouten.push('vault'); }
+      const ontv = await adressen(io, o.adresbron, uit);   // wv1763
       const goed = [];
       for (const r of nieuw) {
         const n = notaM[r.nota_id];
         const c = await autoControle(io, r, n, ontv);
         if (c.ok) { goed.push(Object.assign({}, r, { aan: c.aan, cc: c.cc, bron_pagina: c.bron, _n: n })); continue; }
-        if (c.tijdelijk) { uit.fouten.push(/PDF/.test(c.reden) ? 'pdftotext' : 'vault'); continue; }
+        if (c.tijdelijk) { if (/PDF/.test(c.reden)) uit.fouten.push('pdftotext'); continue; }   // Second Brain: al geteld in adressen()
         await terug(r, 'auto_gevraagd', c.reden);
       }
       // per entiteit en dag, in stukken van hooguit 9 (12 stappen op een kaart)
@@ -421,8 +459,7 @@ async function autoRonde(io, nuD1, o, uit, zet) {
         const notaM = await notasVan(io, kand);
         const vids = [...new Set(kand.map((r) => r.vrijgave_id).filter(Boolean))];
         const vrij = vids.length ? Object.fromEntries((await io.d1([{ sql: `select * from nota_vrijgave where id in (${vids.map(() => '?').join(',')})`, params: vids }]))[0].results.map((v) => [v.id, v])) : {};
-        let ontv = null;
-        try { ontv = ontvangers(await io.vault()); } catch (e) { uit.fouten.push('vault'); }
+        const ontv = await adressen(io, o.adresbron, uit);   // wv1763
         for (const r of kand) {
           const dag = (await io.d1([{ sql: "select count(*) as n from nota_verzending where plan_datum=? and status in ('verzenden','auto_verstuurd','onzeker_verzonden')", params: [vandaag] }]))[0].results[0];
           if (Number(dag.n) >= AUTO.perDag) { uit.fouten.push('autoplafond'); break; }
@@ -438,7 +475,7 @@ async function autoRonde(io, nuD1, o, uit, zet) {
             : !n || hashes[r.id] !== notaHash(r, n) ? 'de nota is veranderd sinds je hem vrijgaf' : null;
           if (vReden) { await terug(r, 'auto_vrij', vReden); continue; }
           const c = await autoControle(io, r, n, ontv);
-          if (!c.ok && c.tijdelijk) { uit.fouten.push(/PDF/.test(c.reden) ? 'pdftotext' : 'vault'); continue; }
+          if (!c.ok && c.tijdelijk) { if (/PDF/.test(c.reden)) uit.fouten.push('pdftotext'); continue; }
           if (!c.ok) { await terug(r, 'auto_vrij', c.reden); continue; }
           if (c.aan !== r.aan || (c.cc || '') !== (r.cc || '')) { await terug(r, 'auto_vrij', 'het factuuradres is veranderd sinds je hem vrijgaf'); continue; }
           // reservering, gecommit vóór de aanroep: twee pods (rolwissel) krijgen er hooguit één
@@ -546,7 +583,8 @@ function intrekSql(vid) {
 /*
  * io = { d1(batch:[{sql,params}]) → [{results, changes}], luik(body) → json, concept(body) → { status, j }, pdftotext(bytes) → { ok, tekst },
  *        vault() → [{ pad, tekst }], kaartZet(p), kaartLijst() → [{ sleutel, status }], kaartDicht(sleutel, van, bewijs), register(regel) }
- * o = { meten: bool (verzonden meten), kaarten: bool (kaarten bijwerken, ook zonder wijziging) }
+ *        registerAdressen() → { per, problemen } (wv1763: ovis-register.js potFactuur over stampagina's + register; alleen nodig bij een andere adresbron dan dossier)
+ * o = { meten: bool (verzonden meten), kaarten: bool (kaarten bijwerken, ook zonder wijziging), adresbron: dossier | proef | kaarten | register (wv1763) }
  * → { geclaimd, concept, wacht_op_adres, fout, onzeker, verzonden, opnieuw, fouten: [..] }
  */
 async function ronde(io, o) {
@@ -601,8 +639,7 @@ async function ronde(io, o) {
     const ids = [...new Set(rijen.map((r) => r.nota_id))];
     const notas = (await io.d1([{ sql: `select n.id, n.entiteit, n.nummer, n.praktijk_id, n.status, n.bedrag, n.datum, p.naam, p.naam_brief, p.email from nota n join praktijk p on p.id=n.praktijk_id where n.id in (${ids.map(() => '?').join(',')})`, params: ids }]))[0].results;
     const notaM = Object.fromEntries(notas.map((n) => [n.id, n]));
-    let ontv = null;
-    try { ontv = ontvangers(await io.vault()); } catch (e) { ontv = null; uit.fouten.push('vault'); }
+    const ontv = await adressen(io, o.adresbron, uit);   // wv1763: dossierpagina of register, per praktijk volgens de schakelaar
     for (const r of rijen) {
       const n = notaM[r.nota_id];
       // terug in de wachtrij (alleen na de adrescontrole gebruikt, dus het adres klopte op dat moment)
@@ -616,7 +653,8 @@ async function ronde(io, o) {
       if (!tk || !tk.ok) { await zet(r.id, { status: 'wacht', geclaimd_op: null, opmerking: 'PDF nog niet te lezen; volgende minuut opnieuw' }, 'bezig'); uit.fouten.push('pdftotext'); continue; }
       const hb = pdfHoortBij(tk.tekst, n);
       if (!hb.ok) { await zet(r.id, { status: 'fout', fout: 'de PDF hoort niet bij deze nota (mist ' + hb.mist.join(', ') + ')', pdf_b64: null }, 'bezig'); uit.fout++; gewijzigd = true; continue; }
-      if (!ontv) { await zet(r.id, { status: 'wacht', geclaimd_op: null }, 'bezig'); continue; }
+      // bron niet te lezen: volgende minuut opnieuw, nooit terugvallen op een andere bron (wv1763)
+      if (ontv.onleesbaar(r.praktijk_id)) { await zet(r.id, { status: 'wacht', geclaimd_op: null }, 'bezig'); continue; }
       const o1 = ontv.per[r.praktijk_id];
       const praktijk = n.naam_brief || n.naam || r.praktijk_id;
       const wachtAdres = async (opm, reden, aan) => {
@@ -624,7 +662,7 @@ async function ronde(io, o) {
         await zet(r.id, { status: 'wacht_op_adres', opmerking: opm, fout: reden, aan: aan || null, geclaimd_op: null }, 'bezig');
         uit.wacht_op_adres++; if (!al) gewijzigd = true;
       };
-      if (!o1) { await wachtAdres('geen_adres', ontv.problemen[r.praktijk_id] || `voor ${praktijk} staat geen factuuradres in de Second Brain (veld facturen_aan op de praktijkpagina)`, null); continue; }
+      if (!o1) { await wachtAdres('geen_adres', geenAdresTekst(ontv, r.praktijk_id, praktijk), null); continue; }
       const aanT = adresTekst(o1.aan);
       if (!n.email) { await wachtAdres('adres_nieuw', `nieuw factuuradres voor ${praktijk}: ${aanT}`, aanT); continue; }
       if (adresNorm(n.email) !== aanT) { await wachtAdres('adres_gewijzigd', `het factuuradres van ${praktijk} in de Second Brain (${aanT}) verschilt van wat de POT-app kent (${adresNorm(n.email)})`, aanT); continue; }
@@ -676,16 +714,16 @@ async function ronde(io, o) {
 
   // 6. kaarten (alleen bij een wijziging of op verzoek)
   if (gewijzigd || o.kaarten) {
-    try { await kaarten(io, nuKortVan(nuD1), nuD1); } catch (e) { uit.fouten.push('kaarten'); }
+    try { await kaarten(io, nuKortVan(nuD1), nuD1, o.adresbron); } catch (e) { uit.fouten.push('kaarten'); }
   }
   return uit;
 }
 
 const nuKortVan = (isoUtc) => { const p = new Date(isoUtc).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }); return dm(p) + ' ' + p.slice(11, 16); };
-async function kaarten(io, nuKort, nuD1) {
+async function kaarten(io, nuKort, nuD1, adresbron) {
   const [gepland, adres, fout] = (await io.d1([
     { sql: "select v.id, v.entiteit, v.nummer, v.plan_datum, v.status, v.onderwerp from nota_verzending v where v.plan_datum is not null and v.status in ('concept','verzonden') and v.concept_op >= strftime('%Y-%m-%dT%H:%M:%SZ','now','-30 days') order by v.nummer", params: [] },
-    { sql: "select v.id, v.nummer, v.opmerking, v.fout as reden, coalesce(p.naam_brief, p.naam, v.praktijk_id) as praktijk, coalesce(v.plan_datum, substr(v.niet_voor,1,10)) as deadline from nota_verzending v left join praktijk p on p.id=v.praktijk_id where v.status='wacht_op_adres' order by v.id", params: [] },
+    { sql: "select v.id, v.nummer, v.praktijk_id, v.opmerking, v.fout as reden, coalesce(p.naam_brief, p.naam, v.praktijk_id) as praktijk, coalesce(v.plan_datum, substr(v.niet_voor,1,10)) as deadline from nota_verzending v left join praktijk p on p.id=v.praktijk_id where v.status='wacht_op_adres' order by v.id", params: [] },
     // fout zonder nieuwere poging voor dezelfde nota (een nieuwe druk lost hem op), hooguit 30 dagen oud
     { sql: "select v.id, v.nummer, v.fout, substr(v.bijgewerkt_op,1,10) as deadline from nota_verzending v where v.status='fout' and v.bijgewerkt_op >= strftime('%Y-%m-%dT%H:%M:%SZ','now','-30 days') and not exists (select 1 from nota_verzending w where w.nota_id=v.nota_id and w.id>v.id) order by v.id", params: [] },
   ])).map((x) => x.results);
@@ -714,7 +752,7 @@ async function kaarten(io, nuKort, nuD1) {
     for (const s of Object.keys(stand)) if (s.startsWith(prefix) && open(s) && (!p || s !== p.sleutel)) await io.kaartDicht(s, stand[s], bewijs);
     if (p && !stand[p.sleutel]) await io.kaartZet(p);
   };
-  await bundel('pot-verzend-adres-', adres, kaartAdres, `${nuKort}: de factuuradressen zijn bijgewerkt; zie de nieuwe kaart als er nog iets openstaat.`);
+  await bundel('pot-verzend-adres-', adres, (rr, nk) => kaartAdres(rr, nk, adresbron), `${nuKort}: de factuuradressen zijn bijgewerkt; zie de nieuwe kaart als er nog iets openstaat.`);
   await bundel('pot-verzend-fout-', fout, kaartFout, `${nuKort}: de nota's zijn opnieuw klaargezet of afgehandeld; zie de nieuwe kaart als er nog iets openstaat.`);
   // wv921: niet automatisch (wacht nog op 07:00 van de verzenddag) en onzeker verzonden (na 24 uur niet in Verzonden)
   const [nietAuto, onzeker] = (await io.d1([
@@ -732,5 +770,5 @@ async function kaarten(io, nuKort, nuD1) {
   }
 }
 
-module.exports = { ronde, kaarten, nuKortVan, frontmatter, ontvangers, adresTekst, adresNorm, pdfBytes, pdfHoortBij, zoekInGmail, mailBody, kaartGepland, kaartAdres, kaartFout, GRENS,
+module.exports = { ronde, kaarten, nuKortVan, frontmatter, ontvangers, adressen, ADRESBRONNEN, bronVan, adresTekst, adresNorm, pdfBytes, pdfHoortBij, zoekInGmail, mailBody, kaartGepland, kaartAdres, kaartFout, GRENS,
   AUTO, AUTO_BEVESTIGING, amsterdam, feestdag, werkdag, notaHash, batchHash, kaartHash, kaartVrijgave, kaartVandaag, kaartNietAuto, kaartOnzeker, vrijgaveToets, vrijgaveSql, intrekSql, autoRonde };

@@ -633,6 +633,80 @@ const VERT = [{ bron: 'facturen:entities.key', waarde: 'TOLGAARDE', knoop_ids: [
     const kb = R.kaartBiblio({ knopen: [], kaarten: [], bevindingen: [{ bevinding_id: 'BB2-pot-P04-geen-pagina', check_id: 'BB2', ernst: 'warning', status: 'open' }] }, { nu: Date.parse('2026-10-27T02:31:00Z') });
     toets('8 weekkaart: BB2 van plek 4 in gewone taal', kb.kaart && /POT-praktijk P04 is nog aan geen pagina/.test(kb.kaart.stappen[0]), kb);
   }
+  // ── 8b. wv1763: plek 4 fase 2 — factuuradres voor de verzender uit het register (potFactuur) en de vastzetkaart (eerste gebruik) ──
+  {
+    const org = (slug, adr, pxs, extra) => ['---', 'type: entiteit', 'entiteit_id: org:' + slug, 'soort: praktijk', 'status: concept', 'naam: "Praktijk ' + slug + '"',
+      'aliases: []', 'domeinen: []', 'voor: [SLOEL]', adr ? 'contact:\n  factuuradres: ' + adr : (extra || 'contact: {}'), 'ovis:',
+      '  db: ["supabase:secondbrain/knoop#org:' + slug + '"' + pxs.map((p) => ', "cloudflare:d1-fin/praktijk#' + p + '"').join('') + ']', 'updated: 2026-10-27', '---', '# P', ''].join('\n');
+    const pad = (slug) => '10_Zakelijk/_Gedeeld/Relaties/Praktijk ' + slug + '.md';
+    const pg = (slug, adr, pxs, extra) => R.leesPagina(pad(slug), org(slug, adr, pxs, extra));
+    // register bij precies deze pagina's (bron_sha gelijk: gecompileerd)
+    const regVan = (ps, contact) => ({ knopen: ps.map((p) => ({ id: p.id, soort: 'organisatie', naam: p.naam, vault_pagina: p.pad, concept: true, bron_sha: p.sha })), handvatten: [], contact: contact || [], vertaling: [], bevindingen: [], log: [], kaarten: [] });
+    const ct = (id, knoop, waarde, status, o) => Object.assign({ id: id, knoop: 'org:' + knoop, veld: 'factuuradres', waarde: waarde, status: status, intrekking: false, herkomst: { sha: 's' + id } }, o || {});
+    const basis = () => [pg('a', 'factuur@a.test', ['P01', 'P02', 'P03']), pg('b', 'factuur@b.test', ['P04']), pg('c', null, ['P09'])];
+    let ps = basis(), f = R.potFactuur(ps, regVan(ps, [ct(1, 'a', 'Factuur@A.test', 'actief'), ct(2, 'b', 'factuur@b.test', 'voorgesteld'), ct(3, 'a', 'oud@a.test', 'vervallen')]));
+    toets('8b vastgezet adres (hoofdletters gelijk, vervallen telt niet): P01–P03 krijgen het, geen cc', ['P01', 'P02', 'P03'].every((x) => f.per[x] && f.per[x].aan.join() === 'factuur@a.test' && f.per[x].cc.length === 0 && f.per[x].knoop === 'org:a' && f.per[x].pagina === pad('a')) && f.onleesbaar === 0, f);
+    toets('8b alleen voorgesteld → geen adres, reden "nog niet vastgezet"', !f.per.P04 && /nog niet vastgezet/.test(f.problemen.P04 || ''), f.problemen);
+    toets('8b geen factuuradres op de stamkaart → geen adres', !f.per.P09 && /geen factuuradres/.test(f.problemen.P09 || ''), f.problemen);
+    f = R.potFactuur(ps, regVan(ps, [ct(1, 'a', 'factuur@a.test', 'actief'), ct(4, 'a', 'nieuw@a.test', 'voorgesteld')]));
+    toets('8b nieuw adres wacht naast het vaste → geen adres (wordt gewijzigd)', !f.per.P01 && /wordt gewijzigd/.test(f.problemen.P01 || ''), f.problemen);
+    f = R.potFactuur(ps, regVan(ps, [ct(1, 'a', 'factuur@a.test', 'actief', { intrekking: true })]));
+    toets('8b vast adres van de pagina gehaald (intrekking) → geen adres', !f.per.P01 && /geen factuuradres|wordt gewijzigd/.test(f.problemen.P01 || ''), f.problemen);
+    f = R.potFactuur(ps, regVan(ps, [ct(1, 'a', 'ander@a.test', 'actief')]));
+    toets('8b pagina ≠ vast adres zonder voorstel (nog niet gecompileerd) → geen adres', !f.per.P01 && /nog niet verwerkt/.test(f.problemen.P01 || ''), f.problemen);
+    const twee = [pg('a', 'factuur@a.test', ['P01']), pg('d', 'factuur@a.test', ['P01'])];
+    f = R.potFactuur(twee, regVan(twee, [ct(1, 'a', 'factuur@a.test', 'actief'), ct(2, 'd', 'factuur@a.test', 'actief')]));
+    toets('8b twee stamkaarten noemen P01 → geen adres', !f.per.P01 && /twee stamkaarten/.test(f.problemen.P01 || ''), f.problemen);
+    const rg = regVan(ps, [ct(1, 'a', 'factuur@a.test', 'actief')]); rg.knopen[0].vault_pagina = pad('elders');
+    f = R.potFactuur(ps, rg);
+    toets('8b knoop met een andere vault_pagina → geen adres (niet in het register)', !f.per.P01 && /in het register van de Second Brain/.test(f.problemen.P01 || ''), f.problemen);
+    f = R.potFactuur(ps, regVan([], []));
+    toets('8b knoop niet in het register → geen adres', !f.per.P01 && /in het register van de Second Brain/.test(f.problemen.P01 || ''), f.problemen);
+    const twee2 = [pg('a', 'factuur@a.test, tweede@a.test', ['P01'])];
+    f = R.potFactuur(twee2, regVan(twee2, [ct(1, 'a', 'tweede@a.test', 'actief'), ct(2, 'a', 'factuur@a.test', 'actief')]));
+    toets('8b twee vaste adressen = de verzameling op de pagina, volgorde van de pagina', f.per.P01 && f.per.P01.aan.join() === 'factuur@a.test,tweede@a.test', f);
+    const proef = [pg('p', 'test@x.test', ['P90'])];
+    f = R.potFactuur(proef, regVan(proef, [ct(9, 'p', 'test@x.test', 'actief')]));
+    toets('8b proefpraktijk P90 doet gewoon mee', f.per.P90 && f.per.P90.aan[0] === 'test@x.test', f);
+    f = R.potFactuur(ps.concat([{ pad: pad('kapot'), fouten: ['niet te lezen (EACCES)'] }, { pad: pad('anders'), fouten: ['type is niet entiteit'] }]), regVan(ps, []));
+    toets('8b onleesbare pagina wordt geteld (een gewone paginafout niet)', f.onleesbaar === 1, f.onleesbaar);
+    const kapot = Object.assign(pg('k', 'factuur@k.test', ['P04']), { fouten: ['onbekend contactveld fax'] });
+    f = R.potFactuur(ps.concat([kapot]), regVan(ps, [ct(2, 'b', 'factuur@b.test', 'actief')]));
+    toets('8b stampagina met een fout die P04 noemt → geen adres met die reden, ook al is er een goede stampagina (Fable ZOU 3)', !f.per.P04 && /heeft een fout \(onbekend contactveld fax\)/.test(f.problemen.P04 || ''), f.problemen);
+    f = R.potFactuur([kapot], regVan([], []));
+    toets('8b alleen een kapotte stampagina → reden noemt de fout, niet "geen stamkaart"', /heeft een fout/.test(f.problemen.P04 || ''), f.problemen);
+    // de vastzetkaart (eerste gebruik)
+    const NU8 = Date.parse('2026-10-28T10:00:00Z');
+    const KR = (pss, contact, potEerste, kaarten) => R.kaartenKritiek(Object.assign(regVan(pss, contact), { kaarten: kaarten || [] }), pss, { nu: NU8, potEerste: potEerste });
+    const ctB = [ct(2, 'b', 'factuur@b.test', 'voorgesteld')];
+    toets('8b zonder overgang: geen vastzetkaart (eerste gebruik zoals voorheen)', KR(ps, ctB, undefined).length === 0 && KR(ps, ctB, null).length === 0);
+    toets('8b proef: geen vastzetkaart voor een echte praktijk', KR(ps, ctB, 'proef').length === 0);
+    let kk = KR(ps, ctB, 'alle');
+    const gr = (k) => k.titel.length >= 3 && k.titel.length <= 90 && k.waarom.length <= 400 && k.stappen.length <= 12 && k.sleutel.length <= 61 && R.KAART_SLEUTEL_RE.test(k.sleutel);
+    toets('8b alle: één kritiek-kaart met een activeerregel, vingerafdruk, binnen de grenzen', kk.length === 1 && kk[0].soort === 'kritiek' && kk[0].regels.length === 1 && kk[0].regels[0].actie === 'activeer' && kk[0].regels[0].tabel === 'contact' && kk[0].regels[0].id === 2
+      && /factuuradres voor POT-nota's — zo vastzetten\?$/.test(kk[0].titel) && /vingerafdruk/.test(kk[0].waarom) && /POT-nota's van Praktijk b/.test(kk[0].waarom) && /factuur@b\.test/.test(kk[0].stappen.join(' ')) && gr(kk[0]) && !('sha' in kk[0].regels[0]), kk);
+    toets('8b vastzetkaart noemt de POT-praktijken', /Geldt in de POT-app voor P04\./.test(kk[0].stappen.join(' ')) && /Geldt in de POT-app voor P01, P02, P03\./.test(KR([ps[0]], [ct(1, 'a', 'factuur@a.test', 'voorgesteld')], 'alle')[0].stappen.join(' ')), kk[0].stappen);
+    toets('8b geen vastzetkaart voor een postadres (Fable ZOU 4)', KR([pg('q', '"Postbus 1, 3830 AA Leusden"', ['P06'])], [ct(7, 'q', 'Postbus 1, 3830 AA Leusden', 'voorgesteld')], 'alle').length === 0);
+    toets('8b proef: vastzetkaart voor de proefpraktijk', KR(proef, [ct(9, 'p', 'test@x.test', 'voorgesteld')], 'proef').length === 1);
+    toets('8b alle: geen kaart voor een eerste telefoonnummer of een factuuradres zonder POT-sleutel', KR([pg('t', null, ['P05'], 'contact:\n  telefoon: "033-0000000"')], [{ id: 5, knoop: 'org:t', veld: 'telefoon', waarde: '033-0000000', status: 'voorgesteld', herkomst: { sha: 'x' } }], 'alle').length === 0
+      && KR([pg('g', 'factuur@g.test', [])], [ct(6, 'g', 'factuur@g.test', 'voorgesteld')], 'alle').length === 0);
+    toets('8b alle: Nee op dezelfde kaart = niet opnieuw', KR(ps, ctB, 'alle', [{ sleutel: kk[0].sleutel, soort: 'kritiek', status: 'nee', beslist_op: new Date(NU8 - 86400000).toISOString(), regels: [] }]).length === 0);
+    toets('8b alle: regel al op een open kaart = geen tweede', KR(ps, ctB, 'alle', [{ sleutel: 'intake-kritiek-b-factuuradres-abcdef', soort: 'kritiek', status: 'open', aangemaakt: new Date(NU8).toISOString(), regels: [{ nr: 1, tabel: 'contact', id: '2' }] }]).length === 0);
+    toets('8b alle: al een vast adres en niets nieuws = geen kaart', KR(ps, [ct(2, 'b', 'factuur@b.test', 'actief')], 'alle').length === 0);
+    toets('8b potEersteMag: proef alleen P9x, alle elke POT-sleutel, anders nooit', R.potEersteMag(proef[0], 'proef') && !R.potEersteMag(ps[1], 'proef') && R.potEersteMag(ps[1], 'alle') && !R.potEersteMag(ps[1], 'ja') && !R.potEersteMag(pg('g', 'x@g.test', []), 'alle'));
+    // leesEntiteiten: alleen stampagina's; vault weg = fout, geen lege lijst
+    { const v = wegwerpVault({ [pad('a')]: org('a', 'factuur@a.test', ['P01']), '10_Zakelijk/Tolgaarde/Notulen/x.md': 'niets' });
+      const m = R.maak({ vault: v, sbRpc: async () => ({}), lees: (p) => fs.readFileSync(p, 'utf8'), schrijf: () => {} });
+      const le = m.leesEntiteiten();
+      toets('8b leesEntiteiten: alleen de stampagina, met sleutels', le.length === 1 && le[0].id === 'org:a' && le[0].db.some((x) => /praktijk#P01/.test(x)), le);
+      fs.rmSync(v, { recursive: true, force: true });
+      let gooit = false; try { m.leesEntiteiten(); } catch (e) { gooit = true; }
+      toets('8b leesEntiteiten: vault weg → gooit (niet gemeten), geen lege lijst', gooit);
+      const echt = R.maak({ vault: '/x', sbRpc: async () => ({}), lees: () => '', schrijf: () => {},
+        lijst: (rel) => { if (rel === '10_Zakelijk/_Gedeeld/Relaties') { const e = new Error('EACCES'); e.code = 'EACCES'; throw e; } return rel === '10_Zakelijk' ? [{ naam: '_Gedeeld', map: true, bestand: false }] : []; } });
+      gooit = false; try { echt.leesEntiteiten(); } catch (e) { gooit = true; }
+      toets('8b leesEntiteiten: Relaties niet te lezen → gooit (Fable ZOU 1); vind() voor de compiler blijft stil', gooit && Array.isArray(echt.vind()) && echt.vind().length === 0); }
+  }
   // ── 9. wv1009: plek 5 — Voor jou ⇄ Open vragen aan David ──
   {
     const KOP = ['# Open vragen aan David', '', '## Register', '| Gesteld | Kanaal | Vraag (zelfstandig leesbaar) | Mijn aanname | Status | Bewijs / laatste toets |', '|---|---|---|---|---|---|'];
