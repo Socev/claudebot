@@ -4003,7 +4003,9 @@ function handleRequest(req, res) {
         res.writeHead(r.status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(r.j));
         // wv1033: ook na 409/502 (Fable #9); het verzoek van de nachtimport als werkvoorraadrij laten zetten
-        healthKaartVerzoek().catch(function (e) { logError('health-kaartverzoek', e); });
+        healthKaartVerzoek().catch(function (e) { logError('health-kaartverzoek', e); })
+          // wv1386: daarna (na elkaar: beide nemen de aanvoergrendel) het ClinPGx-seintje
+          .then(function () { return healthPgxSeintje(); }).catch(function (e) { logError('health-pgx-seintje', e); });
       });
     }); });
   }
@@ -18453,6 +18455,30 @@ async function healthKaartVerzoek() {
     }
     return r.code;
   } finally { healthKaartVerzoekBezig = false; }
+}
+// ── wv1386: ClinPGx-seintje. WAAROM. De health-pod haalt elke ± 35 dagen de farmacogenetische richtlijnen op (ClinPGx, taak
+// sync_clinpgx) en zet een rij in /pgx/wijzigingen als een CPIC/DPWG-richtlijn voor de vaste genenlijst inhoudelijk wijzigt of er een
+// nieuwere PharmCAT is (JA David 26-10 21:10, vraag-id 69afb3f4). De health-pod kan zelf niet berichten. HOE. Na elke uurronde, na het
+// kaartverzoek, alleen op de primaire kant en één tegelijk: `python3 -I health-import.py --pgx-seintje` met dezelfde omgeving als het
+// kaartverzoek. Het script kijkt zelf eens per dag (09–20 u), leest alleen GET /pgx/wijzigingen met de leessleutel uit zijn eigen
+// sleutelbestand en zet voor nog niet beoordeelde wijzigingen hooguit één werkvoorraadrij (vaste opdracht, label
+// machinekamer:pgx-wijziging-<hoogste id>). Die rij (Opus) beoordeelt en meldt David alleen bij een inhoudelijke verandering. In de
+// foutlog alleen de exitcode. Ontwerp + review: mk-scripts/wv1380 en wv1386; bouwplan health-pod § 24.
+let healthPgxBezig = false;
+async function healthPgxSeintje() {
+  if (healthPgxBezig || !rolPrimair()) return null;
+  healthPgxBezig = true;
+  try {
+    const env = {};
+    HEALTH_KAARTVERZOEK_ENV.forEach(function (k) { if (process.env[k] != null) env[k] = process.env[k]; });
+    const r = await smalKind('python3', ['-I', HEALTH_OPGAVEN_BIN, '--pgx-seintje'], '', HEALTH_KAARTVERZOEK_MS, env);
+    if (r.code !== 0) {
+      const e = new Error('pgx-seintje');
+      e.code = r.signaal ? 'tijdgrens' : 'exit ' + r.code;
+      logError('health-pgx-seintje', e);
+    }
+    return r.code;
+  } finally { healthPgxBezig = false; }
 }
 function bankRondeStart() {
   if (bankRondeBezig) return { status: 409, j: { ok: false, fout: 'er loopt al een bank-ronde', begin: bankRondeLaatste && bankRondeLaatste.begin } };

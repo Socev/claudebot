@@ -379,6 +379,10 @@ jobs:
       - name: "health-kaartverzoek (wv1033, nachtimport geeft kaartronde door)"
         if: ${{ !cancelled() }}
         run: bash test/health-kaartverzoek.sh
+      # Health-ClinPGx-seintje (wv1386): open richtlijnwijzigingen → hooguit één beoordelingsrij; ná het kaartverzoek, primair, env-allowlist.
+      - name: "health-pgx-seintje (wv1386, ClinPGx-maandronde)"
+        if: ${{ !cancelled() }}
+        run: bash test/health-pgx-seintje.sh
       # Health-opgaven (wv887): Socevs opgaven zonder schrijfsleutel — vast commando, omgeving-allowlist, alleen tellers terug.
       - name: "health-opgaven (wv887, /smal/health-opgaven)"
         if: ${{ !cancelled() }}
