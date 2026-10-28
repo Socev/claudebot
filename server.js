@@ -4487,6 +4487,7 @@ async function spOverzicht(req, res, sessie, uitkomsten) {
   ]);
   // Veldkoppeling ligt in de sessie: de browser stuurt alleen w<n>; wat w<n> betekent bepaalt de server.
   sessie.velden = {}; let n = 0;
+  sessie.weg = {};   // wv1786: welke namen deze pagina mag laten weggooien (de server beslist, niet het formulier)
   sessie.formToken = crypto.randomBytes(16).toString('hex');
   let h = '<h1>Sleutelportaal</h1><p class="klein">Ingelogd; zonder activiteit uitgelogd om ' +
     spEsc(new Date(sessie.tot).toLocaleTimeString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' })) +
@@ -4515,12 +4516,27 @@ async function spOverzicht(req, res, sessie, uitkomsten) {
             ' <span class="klein">vorige van ' + spEsc(spDatum(s.vorige_van)) + '</span>';
         }
       }
+      // wv1786 (Sleutelwissel 2 § C): weggooien = hernoemen naar weg__<datum>__<naam>; definitief weg na 14 dagen. Alleen proef_-rijen
+      // en vorige-kopieën; welke dat zijn zegt de kluis (weg_kan / vorige_weg_kan), een gewone rij kan alleen de machinekamer.
+      if (s.weg_kan) {
+        sessie.weg[s.naam] = true;
+        veld += '<br><button class="licht" name="weg" value="' + spEsc(s.naam) + '" formaction="' + SP_PAD + '/weggooien">Weggooien</button>' +
+          ' <span class="klein">proefrij' + (s.vorige_van ? ', vorige gaat mee' : '') + '</span>';
+      } else if (s.vorige_weg_kan) {
+        sessie.weg[s.naam + '__vorige'] = true;
+        veld += '<br><button class="licht" name="weg" value="' + spEsc(s.naam + '__vorige') + '" formaction="' + SP_PAD + '/weggooien">Vorige weggooien</button>';
+      }
       h += '<tr><td><code>' + spEsc(s.naam) + '</code>' + (s.witte_lijst ? '<br><span class="klein">pod leest hem bij start</span>' : '') + '</td><td>' +
         spEsc(m.waarvoor || s.omschrijving || '') + (m.klasse === undefined ? '<br><span class="klein">niet in het register</span>' : '') + '</td><td>' + spEsc(m.klasse || '') +
         '</td><td>' + spEsc(spDatum(s.gewijzigd)) + '<br><span class="klein">' + spEsc(spDagen(s.gewijzigd)) + '</span></td><td>' + spVoor(m.vervangen_voor) +
         '</td><td><code>' + spEsc(s.gemaskeerd) + '</code>' + (s.vingerafdruk ? '<br><span class="klein">#' + spEsc(s.vingerafdruk) + '</span>' : '') + '</td><td>' + veld + '</td></tr>';
     });
     h += '</table>';
+    const weg = Array.isArray(kluis.weg) ? kluis.weg : [];
+    if (weg.length) {
+      h += '<p class="klein">Weggegooid (gaan 14 dagen na de datum definitief weg; terughalen kan tot dan via de machinekamer): ' +
+        weg.map(function (w) { return '<code>' + spEsc(w.naam) + '</code>'; }).join(', ') + '</p>';
+    }
     const nw = 'w' + (++n), nn = 'w' + (++n);
     sessie.velden[nn] = { plek: 'kluis-nieuw-naam' }; sessie.velden[nw] = { plek: 'kluis-nieuw', naamVeld: nn };
     h += '<div class="blok"><strong>Nieuwe kluissleutel</strong> <span class="klein">(naam: kleine letters, cijfers, underscores; de pod ziet hem pas als de machinekamer hem op de witte lijst zet)</span><br>' +
@@ -4753,6 +4769,17 @@ function sleutelportaal(req, res) {
               .concat(ookIngevuld ? ['LET OP: de nieuwe waarden die je had ingevuld zijn NIET opgeslagen (je koos terugzetten). Vul ze opnieuw in.'] : []) }]);
         }).catch(spFoutNaSchrijven(res));
       }
+      if (p === SP_PAD + '/weggooien') {
+        const naam = String(velden.weg || '');
+        if (!s.weg || !Object.prototype.hasOwnProperty.call(s.weg, naam)) return spOverzicht(req, res, s, [{ naam: naam.slice(0, 80), plek: 'kluis', ok: false, uitkomst: 'mag hier niet weggegooid worden', nazorg: [] }]);
+        const ookIngevuld = Object.keys(s.velden || {}).some(function (w) { return typeof velden[w] === 'string' && velden[w].trim() && s.velden[w].plek !== 'kluis-nieuw-naam'; });
+        return spRpc('sb_sleutelportaal_weg', { p_sessie: s.kenmerk, p_naam: naam, p_vraag: null }).then(function (r) {
+          if (r.ok) spTelegram('Sleutelportaal (sessie ' + s.kenmerk + '): ' + naam + ' weggegooid (' + (r.ook_vorige ? 'met vorige, ' : '') + 'definitief weg na ' + (r.definitief_na || '14 dagen') + '). Niet door jou gedaan? Meld het direct aan de machinekamer.');
+          return spOverzicht(req, res, s, [{ naam: naam, plek: 'kluis', ok: !!r.ok, uitkomst: r.ok ? 'weggegooid' + (r.ook_vorige ? ' (vorige ging mee)' : '') : 'mislukt: ' + (r.reden || 'onbekend'),
+            nazorg: (r.ok ? ['Staat nu als ' + String(r.nieuwe_naam || '') + ' in de kluis; op ' + String(r.definitief_na || '') + ' of later haalt de wekelijkse CISO-ronde hem definitief weg. Terughalen kan tot dan via de machinekamer.'] : [])
+              .concat(ookIngevuld ? ['LET OP: de nieuwe waarden die je had ingevuld zijn NIET opgeslagen (je koos weggooien). Vul ze opnieuw in.'] : []) }]);
+        }).catch(spFoutNaSchrijven(res));
+      }
       if (p === SP_PAD + '/opslaan') return spOpslaan(req, res, s, velden).catch(spFoutNaSchrijven(res));
       return spStuur(res, 404, spPagina('Niet gevonden', '<p>Niet gevonden.</p>'));
     } catch (e) {
@@ -4838,7 +4865,7 @@ const APP_GLIJD_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/beu
   'POST /app/broedstoof/voorrang', 'POST /app/harvester/broedstoof', 'POST /app/harvester/weg', 'POST /app/harvester/terug', 'POST /app/harvester/bron-nieuw',
   'POST /app/harvester/bron-zet', 'POST /app/harvester/bron-weg', 'POST /app/push/abonneer', 'POST /app/push/opzeggen', 'POST /app/push/soorten',
   'POST /app/apparaat/wijzig', 'POST /app/apparaat/open', 'POST /app/herstel/nieuw', 'POST /app/herstel/bevestigd', 'POST /app/modellen',
-  'POST /app/sleutels/vervang', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
+  'POST /app/sleutels/vervang', 'POST /app/sleutels/weg', 'POST /app/concept', 'POST /app/actie', 'POST /app/spraak', 'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',
   'POST /app/reactie', 'POST /app/agenda', 'POST /app/voor-jou/knop', 'POST /app/voor-jou/keuze', 'POST /app/zoek', 'POST /app/aanwezig']);   // wv374: aanwezig = David die in de zichtbare app tikt, scrolt of typt   // wv350: zoeken = David die typt (Fable #5)   // wv335: een keuze in Voor jou is David die werkt   // wv304: een duim is David die leest; wv315: een agendaknop is David die bevestigt   // wv159: concept bewaren gebeurt alleen als David typt (geen poll); wv172: inspreken = David is bezig   // wv404: een kaartknop (Ja/Nee/Anders in Voor jou) is David die antwoordt
 ['POST /app/secondbrain/open', 'POST /app/secondbrain/zoek'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv832: openen of zoeken in Second Brain = David die leest (Fable K11)
 ['POST /app/ideeen/naar-ideeenbus'].forEach(function (r) { APP_GLIJD_ROUTES.add(r); });   // wv761: naar de bus = David die werkt (reageren doet hij sinds wv942 op AIX zelf)
@@ -4937,6 +4964,7 @@ const APP_SLOT_VRIJ = new Set(['POST /app/docs/intrekken', 'POST /app/rij/terug'
 const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/koppel/goedkeur', 'POST /app/koppel/afwijs', 'POST /app/apparaat/wijzig', 'POST /app/apparaat/open',
   'POST /app/modellen',    // wv138: een runtimewissel raakt alle workflows; nooit vanaf een werk-pc
   'POST /app/sleutels/vervang',    // wv157: sleutels alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot
+  'POST /app/sleutels/weg',        // wv1786: weggooien idem
   'POST /app/tel/koppelcode', 'POST /app/tel/ontkoppel',   // wv264: de telefoon (Tasker) koppelen of ontkoppelen
   'POST /app/agenda',      // wv315 (zie hieronder)
   'POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus',
@@ -11874,7 +11902,7 @@ function handleApp(req, res) {
         // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en het
         // BSN-masker (§ 4.11; wv464: maskeren, nooit weigeren). Daarna verder met slotKlaar = true (apparaat en sessie opnieuw gecontroleerd).
         if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
-          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
+          return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/sleutels/weg' ? 'sleutels weggooien' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
@@ -11944,6 +11972,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/vandaag/actie/') === 0) return appVandaagActieDetail(req, res, a, route.slice('GET /app/vandaag/actie/'.length));
         if (route === 'GET /app/sleutels') return appSleutels(req, res, a);
         if (route === 'POST /app/sleutels/vervang') return appSleutelVervang(req, res, reg, a, s, d);
+        if (route === 'POST /app/sleutels/weg') return appSleutelWeg(req, res, reg, a, s, d);   // wv1786
         if (route === 'GET /app/push') return appPushStand(req, res, a);
         if (route === 'POST /app/push/abonneer') return appPushAbonneer(req, res, a, d);
         if (route === 'POST /app/push/opzeggen') return appPushOpzeggen(req, res, a);
@@ -12280,8 +12309,10 @@ async function appSleutelLijst() {
     uit.push({ plek: 'kluis', id: x.naam, naam: x.naam, waarvoor: appSleutelTekst(m.waarvoor || x.omschrijving || '', 200), klasse: appSleutelTekst(m.klasse || '', 4),
       in_register: m.klasse !== undefined, gewijzigd: x.gewijzigd || null, vervangen_voor: appSleutelTekst(m.vervangen_voor || null, 10),
       pod_herstart: !!x.witte_lijst, let_op: appSleutelTekst(m.nazorg || null, 400),
-      kan: !x.geweigerd && !APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam),
-      waarom_niet: x.geweigerd ? appSleutelTekst(x.geweigerd, 120) : APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam) ? APP_SLEUTEL_PORTAAL_TEKST : null });
+      kan: !!(!x.geweigerd && !APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam)),
+      waarom_niet: x.geweigerd ? appSleutelTekst(x.geweigerd, 120) : APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam) ? APP_SLEUTEL_PORTAAL_TEKST : null,
+      // wv1786 (Fable-review #3): de vorige van een sleutel waar Socev zelf op draait alleen via het portaal, net als vervangen
+      weg_kan: x.weg_kan === true, vorige_weg_kan: x.vorige_weg_kan === true && !APP_SLEUTEL_PORTAAL_KLUIS.has(x.naam), vorige_van: typeof x.vorige_van === 'string' ? x.vorige_van : null });
   });
   if (!n8n) fouten.push('n8n');
   else {
@@ -12352,6 +12383,34 @@ async function appSleutelVervang(req, res, reg, a, s, d) {
   // de knop "Vorige terugzetten" bestaat alleen in het portaal
   const nazorg = (u.nazorg || []).map(function (x) { return /Vorige terugzetten/.test(x) ? 'De vorige waarde blijft bewaard; terugzetten kan in het sleutelportaal (/sleutels) of via de machinekamer.' : String(x).slice(0, 400); });
   appStuur(res, 200, { ok: true, naam: t.naam, plek: t.plek, uitkomst: String(u.uitkomst).slice(0, 200), nazorg: nazorg });
+}
+
+// wv1786 (Sleutelwissel 2 § C): POST /app/sleutels/weg { naam } — een proef_-rij of de vorige-kopie van een sleutel weggooien.
+// Weggooien = hernoemen naar weg__<datum>__<naam> in de kluis (sb_sleutelportaal_weg; waarde ongemoeid, definitief weg na 14 dagen via
+// de CISO-ronde). Zelfde poort als vervangen: actieve kant, nooit vanaf een vaste plek (APP_BEHEER_ROUTES), verse vingerafdruk (verbruikt
+// vóór de eerste await), teller sleutels. Welke rij weg mag, zegt de kluis zelf (weg_kan / vorige_weg_kan), niet de browser; een gewone
+// rij kan hier nooit weg (die eist een besluitkaart met Davids Ja; dat doet de machinekamer).
+async function appSleutelWeg(req, res, reg, a, s, d) {
+  const naam = typeof d.naam === 'string' ? d.naam : '';   // geen String(): ['x'] zou dan 'x' worden
+  if (!rolPrimair()) return appWeiger(res, 409, 'deze kant van Socev is nu passief; weggooien kan alleen op de actieve kant', 'niet primair');
+  if (!/^[a-z0-9_]{3,72}$/.test(naam) || /^weg__/.test(naam)) return appWeiger(res, 400, 'onbekende sleutel', 'sleutel weg id');
+  if (!appVersOk(a, s)) { res._app.reden = 'sleutel weg, niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig het weggooien met je vingerafdruk', vers_nodig: true }); }
+  appStaat.tellers.sleutels = appStaat.tellers.sleutels || [];
+  if (!appTeller('sleutels', APP_SLEUTELS_PER_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens sleutels');
+  s.vers_tot = 0;
+  const k = await spRpc('sb_sleutelportaal_overzicht', {});
+  if (!k.ok || !Array.isArray(k.sleutels)) return appWeiger(res, 503, 'de kluis is nu niet te lezen; er is niets gewijzigd', 'sleutel weg kluis lezen');
+  const vorige = /__vorige$/.test(naam), basis = vorige ? naam.slice(0, -'__vorige'.length) : naam;
+  const x = k.sleutels.find(function (y) { return y && y.naam === basis; });
+  if (!x || !(vorige ? x.vorige_weg_kan === true : x.weg_kan === true)) return appWeiger(res, 403, 'deze sleutel kan niet vanuit de app weg; alleen een proefrij of een vorige-kopie', 'sleutel weg niet toegestaan');
+  if (APP_SLEUTEL_PORTAAL_KLUIS.has(basis)) return appWeiger(res, 403, APP_SLEUTEL_PORTAAL_TEKST, 'sleutel weg portaal-only');   // Fable-review wv1786 #3
+  const r = await spRpc('sb_sleutelportaal_weg', { p_sessie: 'app-' + a.id.slice(0, 12), p_naam: naam, p_vraag: null });
+  res._app.reden = ('sleutel weg ' + naam + ': ' + (r.ok ? 'weggegooid' : 'mislukt')).slice(0, 120);
+  appTelegram('Socev-app: kluisrij "' + naam + '" ' + (r.ok ? 'weggegooid' + (r.ook_vorige ? ' (met vorige)' : '') + ', definitief weg na ' + (r.definitief_na || '14 dagen') : 'NIET weggegooid (' + String(r.reden || 'onbekend').slice(0, 80) + ')') +
+    ' vanuit de app ("' + a.naam + '"). Niet jij? /app-noodstop en meld het de machinekamer.');
+  if (!r.ok) return appStuur(res, 422, { ok: false, fout: String(r.reden || 'mislukt').slice(0, 200), naam: naam });
+  appStuur(res, 200, { ok: true, naam: naam, ook_vorige: r.ook_vorige === true, definitief_na: typeof r.definitief_na === 'string' ? r.definitief_na.slice(0, 10) : null,
+    nazorg: ['Definitief weg vanaf ' + (r.definitief_na || 'over 14 dagen') + ' (de wekelijkse CISO-ronde ruimt op). Tot dan kan de machinekamer hem terughalen.'] });
 }
 
 // ── wv172: spraak in en uit (microfoonknop en 'voorlezen' in de app, 8-10-2026) ──

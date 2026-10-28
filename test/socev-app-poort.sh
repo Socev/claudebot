@@ -79,7 +79,7 @@ const pushes = [];
 const ECHT_SP = process.env.ECHT_SLEUTEL === '1';
 const SP_SLEUTEL = ECHT_SP ? '/opt/data/.sleutelportaal/rpc.key' : path.join(W, 'rpc.key');
 if (!ECHT_SP) fs.writeFileSync(SP_SLEUTEL, 'k'.repeat(64));
-const spNep = { kluis: [], schrijf: [], log: [], creds: [], patch: [], test: [], kapot: false, schrijfReden: null };
+const spNep = { kluis: [], schrijf: [], log: [], creds: [], patch: [], test: [], kapot: false, schrijfReden: null, weg: [] };
 const pushStaat = { status: 201 };
 // wv174 (tab Praktijken): D1 `fin` (Cloudflare-API) en zorgdata (RPC zd_reeks) nagebootst, vorm als de echte (gemeten 8-10)
 const finStaat = { sql: [], auth: [], kapot: false, urls: [] };
@@ -290,6 +290,13 @@ async function nepFetch(url, opt) {
       if (spNep.kapot) return antw(500, { message: 'kapot' });
       if (fn === 'sb_sleutelportaal_overzicht') return antw(200, { ok: true, sleutels: spNep.kluis });
       if (fn === 'sb_sleutelportaal_log') { spNep.log.push(b); return antw(200, { ok: true }); }
+      if (fn === 'sb_sleutelportaal_weg') {   // wv1786: nagebootst zoals de kluis (weg_kan / vorige_weg_kan)
+        spNep.weg.push(b);
+        const vorige = /__vorige$/.test(b.p_naam), k = spNep.kluis.find((x) => x.naam === b.p_naam.replace(/__vorige$/, ''));
+        if (!k || !(vorige ? k.vorige_weg_kan : k.weg_kan)) return antw(200, { ok: false, reden: 'nep: mag niet' });
+        if (vorige) { k.vorige_weg_kan = false; k.vorige_van = null; } else spNep.kluis.splice(spNep.kluis.indexOf(k), 1);
+        return antw(200, { ok: true, actie: 'weggegooid', nieuwe_naam: 'weg__20261028__' + b.p_naam, ook_vorige: !vorige && !!k.vorige_van, definitief_na: '2026-11-12' });
+      }
       if (fn === 'sb_sleutelportaal_schrijven') {
         spNep.schrijf.push(b);
         if (spNep.schrijfReden) return antw(200, { ok: false, reden: spNep.schrijfReden.split('$W').join(b.p_waarde) });
@@ -3893,6 +3900,77 @@ async function bewijs(o) {
       await vers(P);
       const rN = await vraag('POST', '/app/sleutels/vervang', { plek: 'n8n', id: 'N8nApi001', waarde: W1 }, { pot: P.jar });
       toets('18 M1 vervangen debug-bot-token / n8n-API -> 403, niets geschreven', r.status === 403 && rN.status === 403 && /sleutelportaal/.test(r.j.fout) && spNep.schrijf.length === nS && spNep.patch.length === 1, JSON.stringify([r.j, rN.j]));
+      // ── 18W. wv1786: weggooien (POST /app/sleutels/weg): alleen proef_-rijen en vorige-kopieën, verse vingerafdruk, de kluis beslist
+      {
+        spNep.kluis.push({ naam: 'proef_weg', omschrijving: 'x', gewijzigd: '2026-10-08T10:00:00Z', witte_lijst: false, gemaskeerd: '••••', geweigerd: null, w: 'z'.repeat(30),
+          weg_kan: true, vorige_weg_kan: true, vorige_van: '2026-10-08T09:00:00Z' });
+        const pe = spNep.kluis.find((x) => x.naam === 'proef_een'); pe.vorige_weg_kan = true; pe.vorige_van = '2026-10-01T09:00:00Z';
+        H.appStaat.tellers.sleutels = [];
+        r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+        const lw = r.j.sleutels || [], xw = lw.find((x) => x.id === 'proef_weg'), xe = lw.find((x) => x.id === 'proef_een'), xb = lw.find((x) => x.id === 'pod_bootstrap_secret');
+        toets('18W lijst: weg_kan / vorige_weg_kan / vorige_van uit de kluis, anders false', xw && xw.weg_kan === true && xw.vorige_weg_kan === true && xw.vorige_van === '2026-10-08T09:00:00Z'
+          && xe && xe.weg_kan === false && xe.vorige_weg_kan === true && xb && xb.weg_kan === false && xb.vorige_weg_kan === false && xb.vorige_van === null, JSON.stringify([xw, xe, xb]));
+        for (const h of Object.keys(H.appStaat.sessies)) H.appStaat.sessies[h].vers_tot = 0;
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg' }, { pot: P.jar });
+        toets('18W zonder verse vingerafdruk -> 403 vers_nodig, geen RPC', r.status === 403 && r.j.vers_nodig === true && spNep.weg.length === 0, JSON.stringify(r.j));
+        await vers(P);
+        const w1 = await vraag('POST', '/app/sleutels/weg', { naam: 'weg__20261001__proef_weg' }, { pot: P.jar });
+        const w2 = await vraag('POST', '/app/sleutels/weg', { naam: 'Proef weg' }, { pot: P.jar });
+        const w3 = await vraag('POST', '/app/sleutels/weg', { naam: ['proef_weg'] }, { pot: P.jar });
+        toets('18W weg__-naam / ongeldige naam / lijst -> 400, geen RPC', w1.status === 400 && w2.status === 400 && w3.status === 400 && spNep.weg.length === 0, [w1.status, w2.status, w3.status].join());
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'pod_bootstrap_secret' }, { pot: P.jar });
+        toets('18W beschermde naam -> 403 "alleen een proefrij of een vorige-kopie", geen RPC', r.status === 403 && /proefrij of een vorige-kopie/.test(r.j.fout) && spNep.weg.length === 0, JSON.stringify(r.j));
+        await vers(P);
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_een' }, { pot: P.jar });
+        toets('18W proef_-rij zonder weg_kan (kluis zegt nee) -> 403, geen RPC', r.status === 403 && spNep.weg.length === 0, JSON.stringify(r.j));
+        await vers(P);
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'pod_bootstrap_secret__vorige' }, { pot: P.jar });
+        toets('18W vorige van een rij zonder vorige_weg_kan -> 403, geen RPC', r.status === 403 && spNep.weg.length === 0, JSON.stringify(r.j));
+        await vers(P);
+        const nTw = telegram.length;
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_een__vorige' }, { pot: P.jar });
+        const rw = spNep.weg[0] || {};
+        toets('18W vorige weggooien -> 200 via sb_sleutelportaal_weg (portaalsleutel, sessie app-<apparaat>, geen vraag-id)', r.status === 200 && r.j.ok === true && r.j.naam === 'proef_een__vorige' && r.j.definitief_na === '2026-11-12'
+          && spNep.weg.length === 1 && rw.p_naam === 'proef_een__vorige' && rw.p_vraag === null && rw.p_sessie === 'app-' + aId.slice(0, 12) && rw.p_sleutel === 'k'.repeat(64), JSON.stringify([r.j, rw]));
+        toets('18W Telegram-regel met naam, apparaat en noodstop', telegram.length === nTw + 1 && /kluisrij "proef_een__vorige" weggegooid, definitief weg na 2026-11-12 vanuit de app/.test(telegram[nTw]) && /\/app-noodstop/.test(telegram[nTw]), telegram[nTw]);
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg' }, { pot: P.jar });
+        toets('18W dezelfde vingerafdruk is verbruikt -> 403 vers_nodig', r.status === 403 && r.j.vers_nodig === true && spNep.weg.length === 1, JSON.stringify(r.j));
+        await vers(P);
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg' }, { pot: P.jar });
+        toets('18W proefrij weggooien -> 200, vorige ging mee', r.status === 200 && r.j.ok === true && r.j.ook_vorige === true && spNep.weg.length === 2 && !spNep.kluis.some((x) => x.naam === 'proef_weg'), JSON.stringify(r.j));
+        spNep.kluis.push({ naam: 'proef_weg2', omschrijving: 'x', gewijzigd: '2026-10-08T10:00:00Z', witte_lijst: false, gemaskeerd: '••••', geweigerd: null, w: 'z'.repeat(30), weg_kan: true, vorige_weg_kan: false, vorige_van: null });
+        rolStub.primair = false; await vers(P);
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg2' }, { pot: P.jar });
+        rolStub.primair = true;
+        toets('18W passieve kant -> 409, geen RPC', r.status === 409 && spNep.weg.length === 2, JSON.stringify(r.j));
+        spNep.kapot = true; await vers(P);
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg2' }, { pot: P.jar });
+        spNep.kapot = false;
+        toets('18W kluis onleesbaar -> 503, niets gewijzigd', r.status === 503 && spNep.weg.length === 2, JSON.stringify(r.j));
+        const regW = JSON.parse(fs.readFileSync(path.join(DATA, 'apparaten.json'), 'utf8'));
+        const apW = regW.apparaten.find((x) => x.id === aId);
+        apW.soort = 'vast'; apW.vaste_plek = 'Thuis';
+        fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regW));
+        sbStaat.loc = { plek: 'Thuis', klasse: 'thuis', ontvangen: Date.now() - 60000 }; H.appStaat.locatie = {};
+        await vers(P);
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg2' }, { pot: P.jar });
+        apW.soort = 'reist'; apW.vaste_plek = null;
+        fs.writeFileSync(path.join(DATA, 'apparaten.json'), JSON.stringify(regW));
+        toets('18W vaste plek -> 403 "sleutels weggooien kan niet …", geen RPC', r.status === 403 && /sleutels weggooien kan niet vanaf een apparaat met een vaste plek/.test(r.j.fout) && spNep.weg.length === 2, JSON.stringify(r.j));
+        H.appStaat.tellers.sleutels = Array(10).fill(Date.now()); await vers(P);
+        r = await vraag('POST', '/app/sleutels/weg', { naam: 'proef_weg2' }, { pot: P.jar });
+        H.appStaat.tellers.sleutels = [];
+        toets('18W grens 10 per uur (gedeeld met vervangen) -> 429', r.status === 429 && spNep.weg.length === 2, r.status);
+        // Fable-review wv1786 #3: de vorige van een sleutel waar Socev zelf op draait alleen via het portaal (ook al zegt de kluis ja)
+        spNep.kluis.push({ naam: 'telegram_bot_token', omschrijving: 'x', gewijzigd: '2026-06-09T10:00:00Z', witte_lijst: true, gemaskeerd: '••••', geweigerd: null, w: 'q'.repeat(40), weg_kan: false, vorige_weg_kan: true, vorige_van: '2026-10-22T09:00:00Z' });
+        r = await vraag('GET', '/app/sleutels', undefined, { pot: P.jar });
+        const tb = (r.j.sleutels || []).find((x) => x.id === 'telegram_bot_token');
+        await vers(P);
+        const rT = await vraag('POST', '/app/sleutels/weg', { naam: 'telegram_bot_token__vorige' }, { pot: P.jar });
+        toets('18W vorige van een portaal-only sleutel: niet in de lijst en 403 "alleen via het sleutelportaal", geen RPC', tb && tb.vorige_weg_kan === false && rT.status === 403 && /sleutelportaal/.test(rT.j.fout) && spNep.weg.length === 2, JSON.stringify([tb, rT.j]));
+        const auditW = fs.readFileSync(path.join(DATA, 'audit.jsonl'), 'utf8');
+        toets('18W auditlog: apparaat + naam + uitkomst', /"route":"\/app\/sleutels\/weg","m":"POST","status":200,"apparaat":"[a-f0-9]{16}","reden":"sleutel weg proef_een__vorige: weggegooid"/.test(auditW), auditW.slice(-400));
+      }
       // de waarden staan nergens: auditlog, app-log, staat, foutlog, Telegram, sleutelportaal_log
       const alles = [];
       const loop = (d) => { for (const f of fs.readdirSync(d)) { const pf = path.join(d, f); const st = fs.lstatSync(pf); if (st.isDirectory()) loop(pf); else if (st.isFile()) alles.push(fs.readFileSync(pf, 'latin1')); } };

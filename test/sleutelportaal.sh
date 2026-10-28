@@ -29,7 +29,9 @@ fs.writeFileSync(path.join(werk, 'vault/00_Systeem/Beveiliging/Sleutelregister -
 // ── nagebootste buitenwereld ──
 const telegram = [], rpcs = [], n8nAanroepen = [];
 let telegramStuk = false;
-const kluisNep = { proef_een: { waarde: 'oud-waarde-proef-een-12345678', vorige: null } };
+const kluisNep = { proef_een: { waarde: 'oud-waarde-proef-een-12345678', vorige: null },
+  proef_drie: { waarde: 'proef-drie-waarde-12345678', vorige: 'proef-drie-vorige-12345678', weg: true } };   // wv1786: weg = weg_kan
+const kluisWeg = [];
 const echteFetch = global.fetch;
 async function nepFetch(url, opt) {
   url = String(url); opt = opt || {};
@@ -42,7 +44,15 @@ async function nepFetch(url, opt) {
     if (body.p_sleutel !== 'a'.repeat(64)) return antw(200, { ok: false, reden: 'portaalsleutel ongeldig' });
     if (fn === 'sb_sleutelportaal_overzicht') return antw(200, { ok: true, sleutels: Object.keys(kluisNep).map(n => ({
       naam: n, omschrijving: '<script>alert(1)</script>', gewijzigd: '2026-08-16T10:00:00Z', witte_lijst: true,
-      gemaskeerd: '••••' + kluisNep[n].waarde.slice(-4), vingerafdruk: 'abcdef', vorige_van: kluisNep[n].vorige ? '2026-10-04T10:00:00Z' : null, geweigerd: null })) });
+      gemaskeerd: '••••' + kluisNep[n].waarde.slice(-4), vingerafdruk: 'abcdef', vorige_van: kluisNep[n].vorige ? '2026-10-04T10:00:00Z' : null, geweigerd: null,
+      weg_kan: !!kluisNep[n].weg, vorige_weg_kan: !!kluisNep[n].vorige })), weg: kluisWeg.map(n => ({ naam: n, weg_op: '2026-10-28' })) });
+    if (fn === 'sb_sleutelportaal_weg') {   // wv1786
+      const vorige = /__vorige$/.test(body.p_naam), basis = body.p_naam.replace(/__vorige$/, ''), k = kluisNep[basis];
+      if (!k || (vorige ? !k.vorige : !k.weg)) return antw(200, { ok: false, reden: 'nep: mag niet' });
+      if (vorige) { k.vorige = null; kluisWeg.push('weg__20261028__' + body.p_naam); return antw(200, { ok: true, actie: 'weggegooid', nieuwe_naam: 'weg__20261028__' + body.p_naam, ook_vorige: false, definitief_na: '2026-11-12' }); }
+      const ook = !!k.vorige; delete kluisNep[basis]; kluisWeg.push('weg__20261028__' + basis);
+      return antw(200, { ok: true, actie: 'weggegooid', nieuwe_naam: 'weg__20261028__' + basis, ook_vorige: ook, definitief_na: '2026-11-12' });
+    }
     if (fn === 'sb_sleutelportaal_schrijven') {
       const k = kluisNep[body.p_naam];
       if (body.p_nieuw) { if (k) return antw(200, { ok: false, reden: 'naam bestaat al' }); kluisNep[body.p_naam] = { waarde: body.p_waarde }; return antw(200, { ok: true, actie: 'aangemaakt' }); }
@@ -208,6 +218,46 @@ server.listen(0, '127.0.0.1', async function () {
     const csrf4 = (x.tekst.match(/name="t" value="([0-9a-f]+)"/) || [])[1], form4 = (x.tekst.match(/name="f" value="([0-9a-f]+)"/) || [])[1];
     x = await vraag('POST', '/sleutels/terugzetten', { t: csrf4, f: form4, terug: 'pod_bootstrap_secret' }, { cookie });
     toets('terugzetten van onbekende/geweigerde naam geweigerd', x.tekst.includes('onbekende sleutel'));
+
+    // wv1786: weggooien (alleen proef_-rijen en vorige-kopieën; de kluis zegt welke)
+    if (!ECHT) {
+      const tok = (t) => [(t.match(/name="t" value="([0-9a-f]+)"/) || [])[1], (t.match(/name="f" value="([0-9a-f]+)"/) || [])[1]];
+      toets('W knop Weggooien bij proef_drie (vorige gaat mee)', x.tekst.includes('name="weg" value="proef_drie" formaction="/sleutels/weggooien">Weggooien</button> <span class="klein">proefrij, vorige gaat mee'));
+      toets('W knop Vorige weggooien bij een rij met vorige', x.tekst.includes('name="weg" value="' + NIEUW + '__vorige" formaction="/sleutels/weggooien">Vorige weggooien'));
+      toets('W geen Weggooien (rij zelf) bij proef_een zonder weg_kan', !x.tekst.includes('value="proef_een" formaction="/sleutels/weggooien"'));
+      let [tW, fW] = tok(x.tekst);
+      const nRpc = rpcs.filter(c => c.fn === 'sb_sleutelportaal_weg').length;
+      x = await vraag('POST', '/sleutels/weggooien', { t: tW, f: fW, weg: 'proef_een' }, { cookie });
+      toets('W naam die niet op de pagina weg mocht -> geweigerd zonder RPC', x.status === 200 && x.tekst.includes('mag hier niet weggegooid worden') && rpcs.filter(c => c.fn === 'sb_sleutelportaal_weg').length === nRpc);
+      [tW, fW] = tok(x.tekst);
+      x = await vraag('POST', '/sleutels/weggooien', { t: tW, f: fW, weg: 'pod_bootstrap_secret' }, { cookie });
+      toets('W beschermde naam -> geweigerd zonder RPC', x.tekst.includes('mag hier niet weggegooid worden') && rpcs.filter(c => c.fn === 'sb_sleutelportaal_weg').length === nRpc);
+      [tW, fW] = tok(x.tekst);
+      const nT = telegram.length;
+      const wIn = (x.tekst.match(/name="(w\d+)" autocomplete="new-password"/) || [])[1];
+      const vW = { t: tW, f: fW, weg: 'proef_drie' }; vW[wIn] = 'iets-ingevuld-weg-123456';
+      x = await vraag('POST', '/sleutels/weggooien', vW, { cookie });
+      const rc = rpcs.filter(c => c.fn === 'sb_sleutelportaal_weg').pop() || { body: {} };
+      toets('W proef_drie weggegooid via sb_sleutelportaal_weg (sessiekenmerk, geen vraag-id)', /proef_drie<\/td><td>kluis<\/td><td class="ok">weggegooid \(vorige ging mee\)/.test(x.tekst)
+        && rc.body.p_naam === 'proef_drie' && rc.body.p_vraag === null && /^[0-9a-f]{8}$/.test(rc.body.p_sessie) && rc.body.p_sleutel === 'a'.repeat(64));
+      toets('W nazorg: definitief-datum en terughalen via machinekamer', x.tekst.includes('weg__20261028__proef_drie') && x.tekst.includes('2026-11-12') && x.tekst.includes('via de machinekamer'));
+      toets('W ingevulde waarden niet opgeslagen: waarschuwing', x.tekst.includes('zijn NIET opgeslagen (je koos weggooien)'));
+      toets('W Telegram-melding weggooien', telegram.length === nT + 1 && /: proef_drie weggegooid \(met vorige, definitief weg na 2026-11-12\)/.test(telegram[nT]));
+      toets('W weggegooide rij weg uit de tabel, wel in de lijst Weggegooid', !x.tekst.includes('aria-label="nieuwe waarde proef_drie"') && /Weggegooid \(gaan 14 dagen na de datum definitief weg[^<]*<code>weg__20261028__proef_drie<\/code>/.test(x.tekst));
+      x = await vraag('POST', '/sleutels/weggooien', vW, { cookie });
+      toets('W formulier eenmalig (409)', x.status === 409);
+      x = await vraag('GET', '/sleutels', null, { cookie });
+      [tW, fW] = tok(x.tekst);
+      x = await vraag('POST', '/sleutels/weggooien', { t: tW, f: fW, weg: NIEUW + '__vorige' }, { cookie });
+      toets('W vorige weggooien', new RegExp(NIEUW + '__vorige</td><td>kluis</td><td class="ok">weggegooid<').test(x.tekst) && (rpcs.filter(c => c.fn === 'sb_sleutelportaal_weg').pop() || { body: {} }).body.p_naam === NIEUW + '__vorige');
+      toets('W daarna geen Vorige weggooien/terugzetten meer bij die rij', !x.tekst.includes('value="' + NIEUW + '__vorige"') && !x.tekst.includes('value="' + NIEUW + '" formaction="/sleutels/terugzetten"'));
+      [tW, fW] = tok(x.tekst);
+      x = await vraag('POST', '/sleutels/weggooien', { t: tW, f: fW, weg: 'proef_drie' }, { origin: 'null', cookie });
+      toets('W origin null 403', x.status === 403);
+      x = await vraag('POST', '/sleutels/weggooien', { t: 'f'.repeat(48), f: fW, weg: 'proef_drie' }, { cookie });
+      toets('W zonder geldige csrf 403', x.status === 403);
+      x = await vraag('GET', '/sleutels', null, { cookie });
+    }
 
     // uitloggen
     const csrf5 = (x.tekst.match(/name="t" value="([0-9a-f]+)"/) || [])[1];
