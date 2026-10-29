@@ -3,7 +3,7 @@
 # uit en netwerk dicht, Word via pandoc met reference-doc, Excel via xlsx-schrijver.js), de grenzen (2 MB → 413, tijdslimiet → 504, één
 # tegelijk met een korte wachtrij → 503), de schoonmaak van de AST (beelden, ruwe HTML, niet-http(s)-links), tijdelijke mappen weg, en de
 # koppeling in server.js/uitrol.sh/Dockerfile. Alle toetsdata verzonnen. Nodig: pandoc, pdftotext, pdfimages, unzip en de headless shell
-# van Chromium uit het image. Gebruik: bash test/omzet.sh
+# van Chromium uit het image. wv1893: ook Word → markdown (soort docx, formaat md) met kwaadaardige .docx en een zip-bom. Gebruik: bash test/omzet.sh
 set -u
 cd "$(dirname "$0")/.." || exit 1
 node --no-warnings - <<'JS'
@@ -196,6 +196,80 @@ const HTML = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proef</tit
   fs.writeFileSync(path.join(W, 'cli.md'), '# Cli\n\nProef.\n');
   sh('node ' + JSON.stringify(path.resolve('omzet.js')) + ' docx --huisstijl tolgaarde cli.md cli.docx');
   toets('opdrachtregel: node omzet.js docx --huisstijl … werkt', /No errors detected/.test(sh('unzip -t cli.docx')));
+
+  // ── wv1893: Word → markdown (soort docx, formaat md; Bewaar als markdown in de Word-weergave) ──
+  // Verzonnen .docx-bestanden: pandoc maakt de basis, python (zipfile) vervangt document.xml/rels voor de kwaadaardige varianten.
+  const basisDocx = path.join(W, 'basis.docx');
+  fs.writeFileSync(path.join(W, 'basis.md'), '# Notulen proefoverleg\n\nAlinea met **vet** en een [link](https://example.org/a).\n\n| Punt | Wie |\n|---|---|\n| Rooster | Assistent |\n');
+  sh('pandoc -f gfm -t docx -o basis.docx basis.md');
+  const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+    'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+  const BEELD = '<w:r><w:drawing><wp:inline><wp:extent cx="952500" cy="952500"/><wp:docPr id="1" name="Beeld" descr="extern beeld"/><a:graphic>' +
+    '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="b.png"/><pic:cNvPicPr/></pic:nvPicPr>' +
+    '<pic:blipFill><a:blip r:link="rIdBeeld"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+  const KWAAD_DOC = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ' + NS + '><w:body>' +
+    '<w:p><w:r><w:t>Gewone alinea voor de proef.</w:t></w:r></w:p>' +
+    '<w:p><w:hyperlink r:id="rIdJs"><w:r><w:t>klik script</w:t></w:r></w:hyperlink></w:p>' +
+    '<w:p><w:hyperlink r:id="rIdFile"><w:r><w:t>klik bestand</w:t></w:r></w:hyperlink></w:p>' +
+    '<w:p>' + BEELD + '</w:p>' +
+    '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> INCLUDEPICTURE "https://example.org/veld.png" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>' +
+    '<w:p><w:r><w:t>Slotzin.</w:t></w:r></w:p></w:body></w:document>';
+  const KWAAD_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rIdJs" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="javascript:alert(1)" TargetMode="External"/>' +
+    '<Relationship Id="rIdFile" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="file:///etc/passwd" TargetMode="External"/>' +
+    '<Relationship Id="rIdBeeld" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="https://example.org/extern.png" TargetMode="External"/>' +
+    '<Relationship Id="rIdStijl" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
+  // zip-bom: één alinea van 300 miljoen tekens (gecomprimeerd ± 300 kB)
+  fs.writeFileSync(path.join(W, 'kwaad-doc.xml'), KWAAD_DOC); fs.writeFileSync(path.join(W, 'kwaad-rels.xml'), KWAAD_RELS);
+  cp.execFileSync('python3', ['-I', '-c', [
+    'import sys, zipfile',
+    'def vervang(bron, doel, delen):',
+    '    s = zipfile.ZipFile(bron); d = zipfile.ZipFile(doel, "w", zipfile.ZIP_DEFLATED)',
+    '    for i in s.infolist():',
+    '        if i.filename in delen: continue',
+    '        d.writestr(i.filename, s.read(i))',
+    '    for n, f in delen.items():',
+    '        if callable(f): f(d, n)',
+    '        else: d.writestr(n, open(f, "rb").read())',
+    '    d.close()',
+    'vervang("basis.docx", "kwaad.docx", {"word/document.xml": "kwaad-doc.xml", "word/_rels/document.xml.rels": "kwaad-rels.xml"})',
+    'def bom(d, n):',
+    '    with d.open(n, "w", force_zip64=True) as f:',
+    '        f.write(b\'<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>\')',
+    '        blok = b"A" * (1 << 20)',
+    '        for _ in range(300): f.write(blok)',
+    '        f.write(b"</w:t></w:r></w:p></w:body></w:document>")',
+    'vervang("basis.docx", "bom.docx", {"word/document.xml": bom})',
+  ].join('\n')], { cwd: W });
+  const b64 = (p) => fs.readFileSync(path.join(W, p)).toString('base64');
+  const mdUit = (r) => Buffer.from(r.j.inhoud || '', 'base64').toString('utf8');
+  r = await M.omzet({ naam: 'Notulen proefoverleg.docx', soort: 'docx', tekst: b64('basis.docx'), formaat: 'md' });
+  let md = mdUit(r);
+  toets('docx → md: 200, naam .md, type markdown', r.status === 200 && r.j.naam === 'Notulen proefoverleg.md' && /^text\/markdown/.test(r.j.type), { s: r.status, j: r.j && r.j.naam });
+  toets('docx → md: kop, vet, link, tabel', /^# Notulen proefoverleg/m.test(md) && /\*\*vet\*\*/.test(md) && /\[link\]\(https:\/\/example\.org\/a\)/.test(md) && /\| Rooster +\| Assistent +\|/.test(md), md.slice(0, 300));
+  r = await M.omzet({ naam: 'kwaad.docx', soort: 'docx', tekst: b64('kwaad.docx'), formaat: 'md' });
+  md = mdUit(r);
+  toets('kwaadaardige docx → md: 200, tekst van de links blijft, geen javascript:/file:, geen beeld-URL of veld-URL', r.status === 200 && /klik script/.test(md) && /klik bestand/.test(md) &&
+    /Slotzin/.test(md) && !/javascript:|file:|extern\.png|veld\.png|!\[/i.test(md), { s: r.status, md: md.slice(0, 400), f: r.j.fout });
+  r = await M.omzet({ naam: 'bom.docx', soort: 'docx', tekst: b64('bom.docx'), formaat: 'md' });
+  toets('zip-bom (300 MB tekst in 300 kB docx) → nette 413 of 504, geen 200', (r.status === 413 || r.status === 504) && r.j.ok === false && typeof r.j.fout === 'string', { s: r.status, j: r.j, a: r.audit });
+  toets('na de zip-bom: geen tijdelijke map achter', fs.readdirSync(TMP).length === 0, fs.readdirSync(TMP));
+  r = await M.omzet({ naam: 'x.docx', soort: 'docx', tekst: Buffer.from('geen zip, gewoon tekst').toString('base64'), formaat: 'md' });
+  toets('geen zip → 400 geen Word-bestand', r.status === 400 && /geen Word-bestand/.test(r.j.fout), r.j);
+  r = await M.omzet({ naam: 'x.docx', soort: 'docx', tekst: 'dit is <geen> base64!', formaat: 'md' });
+  toets('geen base64 → 400', r.status === 400, r.j);
+  r = await M.omzet({ naam: 'x.docx', soort: 'docx', tekst: Buffer.alloc(O.MAX_DOCX + 1, 0x50).toString('base64'), formaat: 'md' });
+  toets('docx boven 3,5 MB → 413', r.status === 413 && /3,5 MB/.test(r.j.fout), r.j);
+  r = await M.omzet({ naam: 'x.docx', soort: 'docx', tekst: b64('basis.docx'), formaat: 'pdf' });
+  const r2 = await M.omzet({ naam: 'x.md', soort: 'md', tekst: '# x', formaat: 'md' });
+  const r3 = await M.omzet({ naam: 'x.docx', soort: 'docx', tekst: b64('basis.docx'), formaat: 'md', huisstijl: 'tolgaarde' });
+  toets('docx alleen naar md, md alleen uit docx, md zonder huisstijl → 400', r.status === 400 && r2.status === 400 && r3.status === 400, [r.j, r2.j, r3.j]);
+  const omzetBron = fs.readFileSync('omzet.js', 'utf8');
+  const mdF = omzetBron.slice(omzetBron.indexOf('async function markdown('), omzetBron.indexOf('async function xlsx('));
+  toets('docx → md: beide pandoc-stappen in de sandbox (geen zonderSandbox), witte lijst toegepast', !/,\s*true\)/.test(mdF) && /alleenToegestaan\(json\)/.test(mdF) && /schoon\(/.test(mdF));
+  toets('opdrachtregel: node omzet.js md <in.docx> <uit.md>', (function () { try { return /\.md \(\d+ bytes/.test(cp.execFileSync(process.execPath, [path.resolve('omzet.js'), 'md', basisDocx, path.join(W, 'cli.md')], { encoding: 'utf8' })) &&
+    /Notulen proefoverleg/.test(fs.readFileSync(path.join(W, 'cli.md'), 'utf8')); } catch (e) { return false; } })());
 
   // ── koppeling ──
   const srv = fs.readFileSync('server.js', 'utf8');

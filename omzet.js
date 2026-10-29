@@ -13,13 +13,17 @@
 // - Word: pandoc (--sandbox, geen lua-filter, geen --extract-media) leest de tekst naar zijn AST; schoon() haalt beelden, ruwe HTML en
 //   niet-http(s)-links eruit; daarna AST → docx met de reference-doc van de huisstijl.
 // - Excel: dezelfde AST → de tabellen → xlsx-schrijver.js (elke tabel een blad; formules nooit).
+// - Markdown uit Word (wv1893, Word-weergave in de Lezer: "Bewaar als markdown"): soort docx, tekst = de .docx in base64 (de app haalt de
+//   afbeeldingen er vooraf uit; hooguit MAX_DOCX). pandoc --sandbox leest docx → AST, schoon() en dezelfde witte lijst als bij Word, dan
+//   AST → gfm (ook --sandbox). Een binnengekomen .docx is onbetrouwbare invoer: alles in hetzelfde kindproces met dezelfde grenzen.
 // Alles in een eigen tijdelijke map (0700) die na afloop weg is. In log en audit alleen formaat, soort, huisstijl, grootte, ms, pogingen.
 // Opus-review (28-10, MOET 1 en 2): het werk draait in een eigen kindproces (node omzet.js --werker, eigen heap, kale omgeving zonder de
 // sleutels van server.js), zodat een trage regex of een grote AST de pod niet stillegt. De ouder bewaakt de hele procesboom (kind, pandoc,
 // Chromium): na de harde tijdslimiet of boven MAX_RSS gaat alles met SIGKILL weg. Een PDF met meer dan MAX_PDF_RIJEN tabelregels wordt
 // vooraf geweigerd (Chromium groeide daar gemeten tot ± 12 GB; een OOM schiet de hele pod af).
 //
-// Ook voor Socev zelf (bouwplan § 3.3): node /app/omzet.js <pdf|docx|xlsx> [--huisstijl <sleutel>] [--soort md|html|csv|tekst] <in> <uit>
+// Ook voor Socev zelf (bouwplan § 3.3): node /app/omzet.js <pdf|docx|xlsx|md> [--huisstijl <sleutel>] [--soort md|html|csv|tekst|docx] <in> <uit>
+// (md alleen uit een .docx)
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -35,12 +39,15 @@ const HARD_MS = 5 * 1000;                   // bovenop TIJD_MS: dan haalt de oud
 const MAX_RSS = 2560 * 1024 * 1024;         // hele procesboom (kind + pandoc + Chromium)
 const KIND_HEAP_MB = 1536;
 const MAX_PDF_RIJEN = 5000;
-const SOORTEN = ['md', 'html', 'csv', 'tekst'];
+const MAX_DOCX = 3.5 * 1024 * 1024;         // wv1893: .docx in bytes (base64 + JSON blijft onder de 5 MB van het doorgeefluik en server.js)
+const SOORTEN = ['md', 'html', 'csv', 'tekst', 'docx'];
 const FORMATEN = {
   pdf: { ext: 'pdf', type: 'application/pdf' },
   docx: { ext: 'docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
   xlsx: { ext: 'xlsx', type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+  md: { ext: 'md', type: 'text/markdown; charset=utf-8' },   // wv1893: alleen uit een .docx
 };
+const FORMAAT_NAAM = { pdf: 'PDF', docx: 'Word', xlsx: 'Excel', md: 'markdown' };
 const PW_STANDAARD = '/usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright-core';
 const DOC_URL = 'http://omzet.invalid/';
 const CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'; frame-src 'none'";
@@ -353,6 +360,10 @@ function maak(opt) {
     'DefinitionList', 'Header', 'HorizontalRule', 'Table', 'Div', 'Null', 'AlignLeft', 'AlignRight', 'AlignCenter', 'AlignDefault', 'ColWidth',
     'ColWidthDefault', 'SingleQuote', 'DoubleQuote', 'DisplayMath', 'InlineMath', 'DefaultStyle', 'Example', 'Decimal', 'LowerRoman', 'UpperRoman',
     'LowerAlpha', 'UpperAlpha', 'DefaultDelim', 'Period', 'OneParen', 'TwoParens', 'AuthorInText', 'SuppressAuthor', 'NormalCitation']);
+  function alleenToegestaan(json) {
+    const re = /"t":"([^"]*)"/g; let m;
+    while ((m = re.exec(json))) if (!AST_TOEGESTAAN.has(m[1])) throw new Error('AST niet schoon (' + m[1].slice(0, 20) + ')');
+  }
   async function docx(d, st, dir, tot) {
     const ast = await astVan(d, dir, tot);
     const eerste = ast.blocks[0];
@@ -362,10 +373,19 @@ function maak(opt) {
     const args = ['-f', 'json', '-t', 'docx', '-o', uit];
     if (b64) { fs.writeFileSync(ref, Buffer.from(b64, 'base64'), { mode: 0o600 }); args.push('--reference-doc', ref); }
     const json = JSON.stringify(ast);
-    const re = /"t":"([^"]*)"/g; let m;
-    while ((m = re.exec(json))) if (!AST_TOEGESTAAN.has(m[1])) throw new Error('AST niet schoon (' + m[1].slice(0, 20) + ')');
+    alleenToegestaan(json);
     await pandoc(args, json, dir, tot, true);
     return fs.readFileSync(uit);
+  }
+
+  // wv1893: .docx → markdown (gfm, geen regelafbreking). Beide stappen in de sandbox; beelden worden hun alt-tekst, alleen http(s)-links.
+  async function markdown(d, dir, tot) {
+    const ruw = await pandoc(['-f', 'docx', '-t', 'json'], Buffer.from(d.tekst, 'base64'), dir, tot);
+    const ast = schoon(JSON.parse(ruw.toString('utf8')));
+    ast.meta = {};
+    const json = JSON.stringify(ast);
+    alleenToegestaan(json);
+    return pandoc(['-f', 'json', '-t', 'gfm', '--wrap=none'], json, dir, tot);
   }
 
   async function xlsx(d, dir, tot) {
@@ -387,16 +407,27 @@ function maak(opt) {
   function invoer(d) {
     d = d || {};
     const formaat = String(d.formaat || '');
-    if (!FORMATEN[formaat]) return { status: 400, fout: 'kies pdf, docx of xlsx' };
+    if (!FORMATEN[formaat]) return { status: 400, fout: 'kies pdf, docx, xlsx of md' };
     const soort = String(d.soort || 'md');
     if (SOORTEN.indexOf(soort) < 0) return { status: 400, fout: 'onbekende soort tekst' };
     if (typeof d.tekst !== 'string') return { status: 400, fout: 'tekst ontbreekt' };
-    const bytes = Buffer.byteLength(d.tekst, 'utf8');
-    if (bytes > MAX_TEKST) return { status: 413, fout: 'de tekst is te groot om om te zetten (' + (bytes / 1048576).toFixed(1) + ' MB; hooguit 2 MB)' };
+    if ((soort === 'docx') !== (formaat === 'md')) return { status: 400, fout: soort === 'docx' ? 'een Word-bestand kan alleen naar markdown' : 'markdown alleen uit een Word-bestand' };
+    let bytes;
+    if (soort === 'docx') {   // wv1893: tekst = de .docx in base64
+      if (d.tekst.length > Math.ceil(MAX_DOCX / 3) * 4 + 4) return { status: 413, fout: 'het Word-bestand is te groot om naar markdown om te zetten (hooguit 3,5 MB zonder afbeeldingen)' };
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(d.tekst)) return { status: 400, fout: 'het Word-bestand komt niet goed door (geen base64)' };
+      const buf = Buffer.from(d.tekst, 'base64');
+      bytes = buf.length;
+      if (bytes > MAX_DOCX) return { status: 413, fout: 'het Word-bestand is te groot om naar markdown om te zetten (hooguit 3,5 MB zonder afbeeldingen)' };
+      if (bytes < 4 || buf.readUInt32LE(0) !== 0x04034b50) return { status: 400, fout: 'dit is geen Word-bestand (.docx)' };
+    } else {
+      bytes = Buffer.byteLength(d.tekst, 'utf8');
+      if (bytes > MAX_TEKST) return { status: 413, fout: 'de tekst is te groot om om te zetten (' + (bytes / 1048576).toFixed(1) + ' MB; hooguit 2 MB)' };
+    }
     const hs = d.huisstijl == null || d.huisstijl === '' || d.huisstijl === 'neutraal' ? '' : String(d.huisstijl);
     if (hs && !Object.prototype.hasOwnProperty.call(STIJLEN, hs)) return { status: 400, fout: 'onbekende huisstijl' };
-    if (hs && formaat === 'xlsx') return { status: 400, fout: 'Excel heeft geen huisstijl' };
-    let basis = String(d.naam || '').split(/[\\/]/).pop().replace(/\.(md|markdown|txt|csv|html?|json)$/i, '')
+    if (hs && (formaat === 'xlsx' || formaat === 'md')) return { status: 400, fout: FORMAAT_NAAM[formaat] + ' heeft geen huisstijl' };
+    let basis = String(d.naam || '').split(/[\\/]/).pop().replace(/\.(md|markdown|txt|csv|html?|json|docx)$/i, '')
       .replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120).trim();
     if (!basis || /^\.+$/.test(basis)) basis = 'document';
     const x = { formaat: formaat, soort: soort, tekst: d.tekst, bytes: bytes, huisstijl: hs, basis: basis };
@@ -412,12 +443,13 @@ function maak(opt) {
     try {
       if (d.formaat === 'pdf') return Object.assign({}, await pdf(await htmlVoorPdf(d, st, dir, tot), st, tot));
       if (d.formaat === 'docx') return { buf: await docx(d, st, dir, tot) };
+      if (d.formaat === 'md') return { buf: await markdown(d, dir, tot) };
       const x = await xlsx(d, dir, tot);
       if (!x) return { status: 422, fout: 'er staat geen tabel in deze tekst' };
       return { buf: x };
     } catch (e) {
       if ((e && e.tijd) || Date.now() >= tot) return { status: 504, fout: 'het omzetten duurde te lang (meer dan ' + Math.round(tijdMs / 1000) + ' s); probeer een kortere tekst' };   // ook een time-out van Playwright zelf
-      if (e && e.groot) return { status: 413, fout: 'de tekst is te groot om om te zetten naar ' + ({ pdf: 'PDF', docx: 'Word', xlsx: 'Excel' })[d.formaat] };
+      if (e && e.groot) return { status: 413, fout: (d.soort === 'docx' ? 'het Word-bestand' : 'de tekst') + ' is te groot om om te zetten naar ' + FORMAAT_NAAM[d.formaat] };
       return { status: 500, fout: 'omzetten mislukt', e: String(e && e.message || e).split('\n')[0].slice(0, 200) };
     }
   }
@@ -546,7 +578,7 @@ function maak(opt) {
 }
 
 module.exports = { maak: maak, schoon: schoon, tabellen: tabellen, voorMd: voorMd, tekstHtml: tekstHtml, platteTekst: platteTekst,
-  MAX_TEKST: MAX_TEKST, MAX_PDF_RIJEN: MAX_PDF_RIJEN, CSP: CSP, kopTemplate: kopTemplate, voetTemplate: voetTemplate };
+  MAX_TEKST: MAX_TEKST, MAX_PDF_RIJEN: MAX_PDF_RIJEN, MAX_DOCX: MAX_DOCX, CSP: CSP, kopTemplate: kopTemplate, voetTemplate: voetTemplate };
 
 // ── kindproces: node omzet.js --werker <invoer.json> <uit.json> (alleen door viaKind gestart) ──
 if (require.main === module && process.argv[2] === '--werker') {
@@ -569,13 +601,13 @@ if (require.main === module && process.argv[2] === '--werker') {
   for (let i = 0; i < a.length; i++) { if (a[i] === '--huisstijl' || a[i] === '--soort') opties[a[i].slice(2)] = a[++i]; else los.push(a[i]); }
   const [formaat, inPad, uitPad] = los;
   if (!FORMATEN[formaat] || !inPad || !uitPad) {
-    console.error('gebruik: node omzet.js <pdf|docx|xlsx> [--huisstijl <' + Object.keys((function () { try { return require('./omzet-huisstijl.js').STIJLEN; } catch (e) { return {}; } })()).join('|') + '>] [--soort md|html|csv|tekst] <in> <uit>');
+    console.error('gebruik: node omzet.js <pdf|docx|xlsx|md> [--huisstijl <' + Object.keys((function () { try { return require('./omzet-huisstijl.js').STIJLEN; } catch (e) { return {}; } })()).join('|') + '>] [--soort md|html|csv|tekst|docx] <in> <uit>   (md alleen uit een .docx)');
     process.exit(2);
   }
   const ext = path.extname(inPad).toLowerCase();
-  const soort = opties.soort || (ext === '.html' || ext === '.htm' ? 'html' : ext === '.csv' ? 'csv' : ext === '.txt' ? 'tekst' : 'md');
+  const soort = opties.soort || (ext === '.html' || ext === '.htm' ? 'html' : ext === '.csv' ? 'csv' : ext === '.txt' ? 'tekst' : ext === '.docx' ? 'docx' : 'md');
   maak({ inProces: true, fout: function (w, e) { console.error(w + ': ' + (e && e.message)); } })
-    .omzet({ naam: path.basename(inPad), soort: soort, tekst: fs.readFileSync(inPad, 'utf8'), formaat: formaat, huisstijl: opties.huisstijl })
+    .omzet({ naam: path.basename(inPad), soort: soort, tekst: fs.readFileSync(inPad, soort === 'docx' ? 'base64' : 'utf8'), formaat: formaat, huisstijl: opties.huisstijl })
     .then(function (r) {
       if (r.status !== 200) { console.error('mislukt (' + r.status + '): ' + r.j.fout); process.exit(1); }
       fs.writeFileSync(uitPad, Buffer.from(r.j.inhoud, 'base64'));
