@@ -254,6 +254,16 @@ const lees = (rel) => { try { return fs.readFileSync(path.join(vault, rel), 'utf
   const pubP = P.maak({ db, vault, vv, rpc: sb.rpc, schakelaar: () => schakel, pauze: () => ++tel > 1 });
   toets('11g pauze halverwege de ronde: stoppen met wacht', (await pubP.ronde()).wacht === 'onderhoud');
 
+  // origineel in de Bronnen-map van een andere (gedeelde) map, zoals de oude skill een cao-bijlage naar _Gedeeld zette
+  const pdf2 = Buffer.from('%PDF-1.4 cao ' + 'y'.repeat(400));
+  fs.mkdirSync(path.join(vault, '10_Zakelijk/_Gedeeld/CAO/Bronnen'), { recursive: true });
+  fs.writeFileSync(path.join(vault, '10_Zakelijk/_Gedeeld/CAO/Bronnen/CAO - tekst.pdf'), pdf2);
+  fs.writeFileSync(path.join(vault, '10_Zakelijk/_Gedeeld/CAO/losse-map-niet-bronnen.pdf'), pdf2);
+  stuk('stk_20261029_0000000c', { ontvangen: '2026-10-29T12:00:00Z', delen: [{ deel: 'b1', rol: 'bijlage', naam: 'cao.pdf', mime: 'application/pdf', bytes: pdf2, pad: '10_Zakelijk/Tolgaarde/raw_input/cao.pdf' }] });
+  await pub.ronde();
+  const nG = lees(TG + '2026-10-29_stk_20261029_0000000c.md') || '';
+  toets('11h origineel teruggevonden in een andere Bronnen-map (niet buiten raw_input/Bronnen)', nG.includes('[[10_Zakelijk/_Gedeeld/CAO/Bronnen/CAO - tekst.pdf]]') && !nG.includes('losse-map-niet-bronnen'), nG.slice(0, 900));
+
   // vindBlok en hashes
   toets('11 vindBlok: twee blokken of geen eind = kapot', P.vindBlok('<!-- ovis:blok begin id="bronregister" -->a<!-- ovis:blok eind -->x<!-- ovis:blok begin id="bronregister" -->', P.REG_BEGIN_RE).kapot === true &&
     P.vindBlok('<!-- ovis:blok begin id="bronregister" -->a', P.REG_BEGIN_RE).kapot === true && P.vindBlok('geen', P.REG_BEGIN_RE) === null);

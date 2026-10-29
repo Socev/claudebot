@@ -40,7 +40,7 @@ const REG_BEGIN_RE = /<!-- ovis:blok begin id="bronregister"[^>]*-->/g;
 const NOTITIE_BEGIN_RE = /<!-- ovis:blok begin id="bronnotitie"[^>]*-->/g;
 const RPC_BATCH = 200;
 const KOP_LEES = 4096;           // zoveel bytes van een .md om ovis_stuk in de frontmatter te vinden
-const DIEPTE = 3;                // mappen onder raw_input/ en Bronnen/ die we doorzoeken naar het origineel
+const DIEPTE = 6;                // mapdiepte onder 10_Zakelijk/, 20_Prive/ en _INBOX/ bij het zoeken naar het origineel
 const NOTITIE_MAX = 1024 * 1024, REGISTER_MAX = 8 * 1024 * 1024;
 
 function sha256(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
@@ -177,19 +177,19 @@ function maak(o) {
     return { lijst: uit, overgeslagen };
   }
 
-  // ── index van de vaultbestanden per entiteit (origineel terugvinden; de oude skill verplaatst en hernoemt) ─────────────────────
+  // ── index van de vaultbestanden (origineel terugvinden; de oude skill verplaatst en hernoemt, soms naar een andere map, bv.
+  // _Gedeeld/CAO_Huisartsenzorg/Bronnen): alle raw_input/- en Bronnen/-mappen van het zakelijke deel (10_Zakelijk) of van 20_Prive, plus _INBOX.
   function bouwIndex(code) {
-    const basis = ENTITEIT_MAP[code];
+    const deel = code === 'PRIVE' ? '20_Prive' : '10_Zakelijk';
     const idx = { stuk: new Map(), maat: new Map() };
-    const wortels = code === 'INBOX' ? ['_INBOX'] : [basis + '/raw_input', basis + '/Bronnen', '_INBOX'];
-    function loop(rel, diepte) {
+    function loop(rel, diepte, telt) {
       let namen;
       try { namen = fs.readdirSync(abs(rel), { withFileTypes: true }); } catch (e) { return; }
       for (const d of namen) {
         if (d.name.startsWith('.')) continue;
         const r = rel + '/' + d.name;
-        if (d.isDirectory()) { if (diepte < DIEPTE && !(code !== 'INBOX' && r === '_INBOX/Bronnen')) loop(r, diepte + 1); continue; }
-        if (!d.isFile()) continue;
+        if (d.isDirectory()) { if (diepte < DIEPTE) loop(r, diepte + 1, telt || d.name === 'raw_input' || d.name === 'Bronnen'); continue; }   // Dirent: een symlink is geen map
+        if (!d.isFile() || !telt) continue;
         if (/\.md$/i.test(d.name)) {
           const kb = leesVeilig(abs(r), KOP_LEES, null);
           if (!kb) continue;
@@ -206,7 +206,7 @@ function maak(o) {
     }
     // een wortel (of een map erboven) die een symlink is, volgen we niet: alleen lezen binnen de vault (review #6)
     let vw; try { vw = fs.realpathSync(o.vault); } catch (e) { return idx; }
-    for (const w of wortels) { try { if (fs.realpathSync(abs(w)) !== path.join(vw, w)) continue; } catch (e) { continue; } loop(w, 0); }
+    for (const w of [deel, '_INBOX']) { try { if (fs.realpathSync(abs(w)) !== path.join(vw, w)) continue; } catch (e) { continue; } loop(w, 0, w === '_INBOX'); }
     idx.shaCache = new Map();
     return idx;
   }
@@ -264,7 +264,7 @@ function maak(o) {
     if (onderwerp) regels.push('| Onderwerp | ' + cel(onderwerp) + ' |');
     if (gemarkeerd) regels.push('| Let op | patiëntmarker: onderwerp en bestandsnamen weggelaten |');
     regels.push('| Ontvangen | ' + cel(klokNl(ontvangen)) + ' |', '| Bron / versie | ' + Number(hoofd.record) + ' / ' + Number(hoofd.revisie) + (versie && versie.version_label ? ' (' + cel(versie.version_label) + ')' : '') + ' |');
-    regels.push('| Origineel | ' + (gevonden.length ? gevonden.map(function (x) { return cel(link(x.pad)); }).join('<br>') : 'niet gevonden in raw_input/, Bronnen/ of _INBOX/') + ' |', '');
+    regels.push('| Origineel | ' + (gevonden.length ? gevonden.map(function (x) { return cel(link(x.pad)); }).join('<br>') : 'niet gevonden in de raw_input/- en Bronnen/-mappen of _INBOX/') + ' |', '');
     regels.push('## Ontvangsten', '', '| ontvangen | route | toegang | bron |', '|---|---|---|---|');
     for (const x of ontvangsten.sort(function (a, b) { return String(a.received_at).localeCompare(String(b.received_at)) || a.occurrence_id - b.occurrence_id; }))
       regels.push('| ' + cel(klokNl(x.received_at)) + ' | ' + cel(x.intake_route) + ' | ' + cel(x.access_context) + ' | ' + x.record + (x.binnen ? ' (bijlage)' : '') + ' |');
@@ -357,8 +357,11 @@ function maak(o) {
       // telling per entiteit (ook buiten de scope: de vergelijking met de oude skill), index alleen waar kandidaten zijn
       const perCode = new Map();
       for (const k of kand.lijst) { if (!perCode.has(k.code)) perCode.set(k.code, []); perCode.get(k.code).push(k); }
+      const indexen = new Map();
       for (const [code, lijst] of perCode) {
-        const idx = bouwIndex(code);
+        const sleutel = code === 'PRIVE' ? 'prive' : 'zakelijk';
+        if (!indexen.has(sleutel)) indexen.set(sleutel, bouwIndex(code));
+        const idx = indexen.get(sleutel);
         const pe = { stukken: lijst.length, in_scope: 0, bronnotities: 0, oud_bronnen: 0, oud_raw_input: 0, gelogd: 0, geblokkeerd: 0, niet_gevonden: 0 };
         let regLog = '';
         const regPad = ENTITEIT_MAP[code] + '/Bronnen/_register.md';
