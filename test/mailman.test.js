@@ -846,6 +846,8 @@ function uitgangToestaan(dir, ids) {
   for (const id of ids) c.uitgang_toegestaan[id] = { ja: '2026-11-02T08:30:00Z', door: 'proef' };
   fs.writeFileSync(f, JSON.stringify(c), { mode: 0o600 });
 }
+function vinkje(mm, stroom, veld) { const r = mm.app('POST /app/mailman/stroom', { stroom, [veld]: true }, ctxVers(true)); assert.equal(r.status, 200, JSON.stringify(r.j)); }
+function perId(acties) { const u = {}; for (const x of acties) u[x.gmail_id] = x; return u; }
 
 test('B6+ vinkjes: gelezen/archief aan alleen na uitgang_toegestaan én verse vingerafdruk; alleen de juiste stromen; uit mag altijd', () => {
   const { mm, dir } = nieuweKamer();
@@ -864,16 +866,31 @@ test('B6+ vinkjes: gelezen/archief aan alleen na uitgang_toegestaan én verse vi
   const c = ctxVers(true);
   assert.equal(mm.app('POST /app/mailman/stroom', { stroom: 'intake', gelezen: true }, c).status, 200);
   assert.equal(c.verbruikt, 1);
-  assert.equal(mm.app('GET /app/mailman', {}).j.stromen.intake.gelezen, true);
+  o = mm.app('GET /app/mailman', {}).j;
+  assert.equal(o.stromen.intake.gelezen, true); assert.ok(o.stromen.intake.gelezen_sinds);
   assert.match(mm._db.prepare("SELECT nieuw FROM wijziging WHERE wat = 'stroom' ORDER BY id DESC LIMIT 1").get().nieuw, /"vingerafdruk":true/);
-  // een ander veld wijzigen terwijl gelezen al aan staat vraagt geen vingerafdruk
-  assert.equal(mm.app('POST /app/mailman/stroom', { stroom: 'intake', label: true }).status, 200);
+  const sinds = o.stromen.intake.gelezen_sinds;
+  klok += 60000;
+  assert.equal(mm.app('POST /app/mailman/stroom', { stroom: 'intake', label: true }).status, 200, 'ander veld: geen vingerafdruk');
+  assert.equal(mm.app('GET /app/mailman', {}).j.stromen.intake.gelezen_sinds, sinds, 'gelezen_sinds blijft');
   assert.equal(mm.app('POST /app/mailman/stroom', { stroom: 'intake', gelezen: false }).status, 200, 'uitzetten zonder vingerafdruk');
-  assert.equal(mm.app('GET /app/mailman', {}).j.stromen.intake.gelezen, false);
+  o = mm.app('GET /app/mailman', {}).j;
+  assert.equal(o.stromen.intake.gelezen, false); assert.equal(o.stromen.intake.gelezen_sinds, null);
+  klok -= 60000;
 });
 
-test('B6+ gelezen: UNREAD eraf bij Intake/Factuur/Twijfel met het vinkje, nooit bij TODO of Info, nooit zonder uitgang_toegestaan', () => {
+test('B6+ gelezen: UNREAD eraf alleen als de mail ergens heen gaat, nooit bij TODO of Info, alleen na het vinkje, ≤ 6 uur, één keer', () => {
   const { mm, dir } = nieuweKamer();
+  toestaan(dir, ['gmail:david']);
+  zetLive(mm);
+  const voor = mail();
+  draai(mm, 'gmail:david', [voor], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 3 }); } });   // besluit vóór het vinkje
+  uitgangToestaan(dir, ['gmail:david']);
+  // zonder vinkje (wel uitgang_toegestaan): nooit eraf
+  assert.ok(labelRonde(mm, [voor.id]).l.j.acties.every(function (x) { return x.eraf.length === 0; }));
+  klok += 1000;
+  for (const s of ['intake', 'factuur', 'twijfel']) vinkje(mm, s, 'gelezen');
+  klok += 1000;
   const ms = [mail(), mail(), mail({ aan: ALIAS }), mail(), mail({ labels: ['INBOX', '_AI_'] })];
   // 0 intake, 1 intake + TODO (mens/actie), 2 factuur (alias), 3 info (systeem), 4 Davids eigen _AI_ (intake, geen AI/MailMan)
   draai(mm, 'gmail:david', ms, { jev: function (a) {
@@ -881,61 +898,74 @@ test('B6+ gelezen: UNREAD eraf bij Intake/Factuur/Twijfel met het vinkje, nooit 
     if (a.gmail_id === ms[3].id) return jevAntwoord({ systeem: 0.99, waarde: 0 });
     return jevAntwoord({ mens: 0.9, waarde: 3 });
   } });
-  toestaan(dir, ['gmail:david']);
-  zetLive(mm);
-  for (const s of ['intake', 'factuur', 'twijfel']) mm._db.prepare('UPDATE stroom SET gelezen = 1 WHERE id = ?').run(s);   // zelfs als de databank het zegt:
-  const ids = ms.map(function (m) { return m.id; });
-  let a = labelRonde(mm, ids).l.j.acties;
-  assert.ok(a.every(function (x) { return x.eraf.length === 0; }), 'zonder uitgang_toegestaan nooit eraf');
-  uitgangToestaan(dir, ['gmail:david']);
+  const ids = ms.map(function (m) { return m.id; }).concat([voor.id]);
   const { r, l } = labelRonde(mm, ids);
-  const per = {};
-  for (const x of l.j.acties) per[x.gmail_id] = x;
+  const per = perId(l.j.acties);
   assert.deepEqual(per[ms[0].id].eraf, ['UNREAD']);
   assert.deepEqual(per[ms[1].id].eraf, [], 'TODO: gelezen-status ongemoeid');
   assert.deepEqual(per[ms[2].id].eraf, ['UNREAD']); assert.deepEqual(per[ms[2].id].erbij, ['FACTUUR']);
   assert.deepEqual(per[ms[3].id].eraf, [], 'Info: nooit gelezen');
   assert.deepEqual(per[ms[4].id], { gmail_id: ms[4].id, erbij: [], eraf: ['UNREAD'] }, 'eigen _AI_: alleen gelezen');
-  for (const x of l.j.acties) for (const e of x.eraf) assert.ok(K.ERAF.includes(e) && e !== 'INBOX', 'bij het besluit nooit INBOX');
-  // gezet: wat n8n werkelijk weghaalde; niets = de grens liet niets over (al gelezen) → af, niet opnieuw
+  assert.deepEqual(per[voor.id].eraf, [], 'besluit van vóór het vinkje: geen terugwerkende kracht');
+  for (const x of l.j.acties) for (const e of x.eraf) assert.ok(e === 'UNREAD', 'bij het besluit nooit INBOX');
+  // één keer: de volgende ronde zonder gezet biedt de labels opnieuw aan, maar zonder eraf; gelezen-alleen komt niet terug
+  const tweede = perId(labelRonde(mm, ids).l.j.acties);
+  assert.deepEqual(tweede[ms[0].id].eraf, []); assert.equal(tweede[ms[4].id], undefined);
+  // gezet: wat n8n werkelijk weghaalde
   const g = mm.n8n('POST /mailman/gezet', { ronde: r.ronde, postvak: 'gmail:david', resultaten: [
     { gmail_id: ms[0].id, erbij: ['AI/MailMan'], eraf: ['UNREAD', 'TRASH'], ok: true },
-    { gmail_id: ms[4].id, erbij: [], eraf: [], niets: true, ok: true },
+    { gmail_id: ms[4].id, erbij: [], eraf: [], ok: false, overgeslagen: true, fout: 'overgeslagen bij de grens' },
     { gmail_id: ms[2].id, erbij: [], eraf: [], ok: true }] });
-  assert.deepEqual(g.j.telling, { ok: 2, fout: 1, gelezen: 1, archief: 0 });
+  assert.deepEqual(g.j.telling, { ok: 1, fout: 1, gelezen: 1, archief: 0 });
   assert.ok(rij(mm, ms[0].id).gelezen_tijd);
-  assert.deepEqual(JSON.parse(rij(mm, ms[4].id).labels_gezet), []); assert.equal(rij(mm, ms[4].id).gelezen_tijd, null);
-  assert.equal(rij(mm, ms[2].id).labels_gezet, null, 'ok zonder iets en zonder niets = fout, blijft open');
-  const daarna = labelRonde(mm, ids).l.j.acties.map(function (x) { return x.gmail_id; });
-  assert.ok(!daarna.includes(ms[0].id) && !daarna.includes(ms[4].id) && daarna.includes(ms[2].id));
+  assert.equal(rij(mm, ms[4].id).labels_gezet, '[]'); assert.equal(rij(mm, ms[4].id).gelezen_tijd, null);
+  assert.equal(rij(mm, ms[2].id).labels_gezet, null, 'ok zonder iets = fout, blijft open');
   assert.equal(mm.info().postvakken.find(function (x) { return x.id === 'gmail:david'; }).gelezen_24u, 1);
-  assert.equal(mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === 'gmail:david'; }).logboek.find(function (x) { return x.onderwerp != null && x.gelezen; }) != null, true);
+  // na 6 uur: geen eraf meer, ook niet voor een vers aangeboden besluit
+  const laat = mail();
+  draai(mm, 'gmail:david', [laat], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 3 }); } });
+  klok += 7 * 3600000;
+  assert.deepEqual(perId(labelRonde(mm, [laat.id]).l.j.acties)[laat.id].eraf, []);
+  klok -= 7 * 3600000;
 });
 
-test('B6+ archief: alleen factuurmail met MailMans FACTUUR-label die in de Facturen-app helemaal verwerkt is; INBOX eraf + FACTUUR/verwerkt', () => {
-  const verwerkt = new Set();
-  const { mm, dir } = nieuweKamer({ factuurVerwerkt: function (ids) { return new Set(ids.filter(function (i) { return verwerkt.has(i); })); } });
-  const f1 = mail({ aan: ALIAS }), f2 = mail({ aan: ALIAS }), f3 = mail({ aan: ALIAS }), info = mail();
-  draai(mm, 'gmail:david', [f1, f2, f3, info], { jev: function () { return jevAntwoord({ systeem: 0.99, waarde: 0 }); } });
+test('B6+ gelezen: niet als de mail nergens heen gaat (label of naar Intake/Facturen uit) — review #1', () => {
+  const { mm, dir } = nieuweKamer();
   toestaan(dir, ['gmail:david']); uitgangToestaan(dir, ['gmail:david']);
   zetLive(mm);
-  const ids = [f1, f2, info].map(function (m) { return m.id; });   // f3 krijgt (nog) geen FACTUUR-label
+  vinkje(mm, 'intake', 'gelezen'); vinkje(mm, 'factuur', 'gelezen');
+  mm.app('POST /app/mailman/stroom', { stroom: 'intake', label: false });
+  mm.app('POST /app/mailman/stroom', { stroom: 'factuur', naar_facturen: false });
+  klok += 1000;
+  const a = mail(), f = mail({ aan: ALIAS }), eigen = mail({ labels: ['INBOX', '_AI_'] });
+  draai(mm, 'gmail:david', [a, f, eigen], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 3 }); } });
+  const per = perId(labelRonde(mm, [a.id, f.id, eigen.id]).l.j.acties);
+  assert.equal(per[a.id], undefined); assert.equal(per[f.id], undefined);
+  assert.deepEqual(per[eigen.id].eraf, ['UNREAD'], 'Davids eigen _AI_ gaat via de Mail Processor toch naar Intake');
+});
+
+test('B6+ archief: alleen factuurmail met MailMans FACTUUR-label, verwerkt, genoeg documenten, geen TODO; INBOX eraf + FACTUUR/verwerkt; pogingen bij het aanbieden', () => {
+  const verwerkt = new Map();
+  const { mm, dir } = nieuweKamer({ factuurVerwerkt: function (ids) { return new Map(ids.filter(function (i) { return verwerkt.has(i); }).map(function (i) { return [i, verwerkt.get(i)]; })); } });
+  const pdf = { naam: 'nota.pdf', mime: 'application/pdf' };
+  const f1 = mail({ aan: ALIAS, bijlagen: [pdf] }), f2 = mail({ aan: ALIAS, bijlagen: [pdf] }), f3 = mail({ aan: ALIAS }), info = mail();
+  const f4 = mail({ aan: ALIAS, bijlagen: [pdf, { naam: 'tweede.pdf', mime: 'application/pdf' }] }), f5 = mail({ aan: ALIAS, labels: ['INBOX', 'TODO'] });
+  draai(mm, 'gmail:david', [f1, f2, f3, info, f4, f5], { jev: function () { return jevAntwoord({ systeem: 0.99, waarde: 0 }); } });
+  toestaan(dir, ['gmail:david']); uitgangToestaan(dir, ['gmail:david']);
+  zetLive(mm);
+  const ids = [f1, f2, info, f4, f5].map(function (m) { return m.id; });   // f3 krijgt (nog) geen FACTUUR-label
   const eerste = labelRonde(mm, ids);
   mm.n8n('POST /mailman/gezet', { ronde: eerste.r.ronde, postvak: 'gmail:david', resultaten: eerste.l.j.acties.map(function (x) { return { gmail_id: x.gmail_id, erbij: x.erbij, eraf: [], ok: true }; }) });
-  verwerkt.add(f1.id); verwerkt.add(f3.id); verwerkt.add(info.id);
-  // vinkje uit: geen archiefactie
-  assert.equal(labelRonde(mm, []).l.j.archief, 0);
-  assert.equal(mm.app('POST /app/mailman/stroom', { stroom: 'factuur', archief: true }, ctxVers(true)).status, 200);
+  verwerkt.set(f1.id, 1); verwerkt.set(f3.id, 1); verwerkt.set(info.id, 1); verwerkt.set(f4.id, 1); verwerkt.set(f5.id, 1);
+  assert.equal(labelRonde(mm, []).l.j.archief, 0, 'vinkje uit');
+  vinkje(mm, 'factuur', 'archief');
   const { r, l } = labelRonde(mm, []);   // archiefacties staan los van de lijst van deze ronde
-  assert.deepEqual(l.j.acties, [{ gmail_id: f1.id, erbij: [K.VERWERKT_LABEL], eraf: ['INBOX'], archief: true }], 'alleen f1: f2 niet verwerkt, f3 zonder FACTUUR, info geen factuur');
-  // mislukt → poging erbij, na vijf keer niet meer aangeboden
-  for (let i = 0; i < 5; i++) {
-    const x = labelRonde(mm, []);
-    assert.equal(x.l.j.acties.length, 1);
-    mm.n8n('POST /mailman/gezet', { ronde: x.r.ronde, postvak: 'gmail:david', resultaten: [{ gmail_id: f1.id, erbij: [K.VERWERKT_LABEL], eraf: ['INBOX'], ok: false }] });
-  }
+  assert.deepEqual(l.j.acties, [{ gmail_id: f1.id, erbij: [K.VERWERKT_LABEL], eraf: ['INBOX'], archief: true }],
+    'alleen f1: f2 niet verwerkt, f3 zonder FACTUUR, info geen factuur, f4 twee pdf maar één document, f5 TODO');
+  assert.equal(rij(mm, f1.id).archief_poging, 1, 'aanbieden telt een poging, ook als n8n niets terugmeldt');
+  for (let i = 0; i < 4; i++) assert.equal(labelRonde(mm, []).l.j.acties.length, 1);
   assert.equal(rij(mm, f1.id).archief_poging, 5);
-  assert.deepEqual(labelRonde(mm, []).l.j.acties, []);
+  assert.deepEqual(labelRonde(mm, []).l.j.acties, [], 'na vijf aanbiedingen niet meer');
   mm._db.prepare('UPDATE besluit SET archief_poging = 0 WHERE gmail_id = ?').run(f1.id);
   const g = mm.n8n('POST /mailman/gezet', { ronde: r.ronde, postvak: 'gmail:david', resultaten: [
     { gmail_id: f1.id, erbij: [K.VERWERKT_LABEL], eraf: ['INBOX'], ok: true },
@@ -944,39 +974,23 @@ test('B6+ archief: alleen factuurmail met MailMans FACTUUR-label die in de Factu
   assert.ok(rij(mm, f1.id).archief_tijd); assert.equal(rij(mm, f3.id).archief_tijd, null);
   assert.deepEqual(JSON.parse(rij(mm, f1.id).labels_gezet), ['FACTUUR'], 'FACTUUR blijft het labelspoor');
   assert.deepEqual(labelRonde(mm, []).l.j.acties, [], 'gearchiveerd: niet opnieuw');
-  // f2 raakt later verwerkt → volgende ronde
-  verwerkt.add(f2.id);
-  assert.deepEqual(labelRonde(mm, []).l.j.acties.map(function (x) { return x.gmail_id; }), [f2.id]);
-  // terug naar schaduw: niets
+  verwerkt.set(f2.id, 1); verwerkt.set(f4.id, 2);   // later verwerkt, en f4 nu met twee documenten
+  assert.deepEqual(labelRonde(mm, []).l.j.acties.map(function (x) { return x.gmail_id; }).sort(), [f2.id, f4.id].sort());
   mm.app('POST /app/mailman/stand', { postvak: 'gmail:david', stand: 'schaduw' });
-  assert.deepEqual(labelRonde(mm, []).l.j.acties, []);
+  assert.deepEqual(labelRonde(mm, []).l.j.acties, [], 'schaduw: niets');
   assert.equal(mm.info().postvakken.find(function (x) { return x.id === 'gmail:david'; }).archief_24u, 1);
 });
 
 test('B6+ archief: zonder Facturen-koppeling of als die faalt geen archiefactie (dicht)', () => {
-  const { mm, dir } = nieuweKamer({ factuurVerwerkt: function () { throw new Error('databank weg'); } });
-  const f = mail({ aan: ALIAS });
-  draai(mm, 'gmail:david', [f]);
-  toestaan(dir, ['gmail:david']); uitgangToestaan(dir, ['gmail:david']);
-  zetLive(mm);
-  const a = labelRonde(mm, [f.id]);
-  mm.n8n('POST /mailman/gezet', { ronde: a.r.ronde, postvak: 'gmail:david', resultaten: [{ gmail_id: f.id, erbij: ['FACTUUR'], ok: true }] });
-  mm.app('POST /app/mailman/stroom', { stroom: 'factuur', archief: true }, ctxVers(true));
-  assert.deepEqual(labelRonde(mm, []).l.j.acties, []);
-});
-
-test('B6+ gelezen-alleen (eigen _AI_): overgeslagen bij de n8n-grens = af zonder gelezen; na 6 uur niet meer aangeboden', () => {
-  const { mm, dir } = nieuweKamer();
-  const a1 = mail({ labels: ['INBOX', '_AI_'] }), a2 = mail({ labels: ['INBOX', '_AI_'] });
-  draai(mm, 'gmail:david', [a1, a2], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 3 }); } });
-  toestaan(dir, ['gmail:david']); uitgangToestaan(dir, ['gmail:david']);
-  zetLive(mm);
-  assert.equal(mm.app('POST /app/mailman/stroom', { stroom: 'intake', gelezen: true }, ctxVers(true)).status, 200);
-  const { r, l } = labelRonde(mm, [a1.id, a2.id]);
-  assert.equal(l.j.acties.length, 2);
-  mm.n8n('POST /mailman/gezet', { ronde: r.ronde, postvak: 'gmail:david', resultaten: [{ gmail_id: a1.id, erbij: [], eraf: [], ok: false, overgeslagen: true, fout: 'overgeslagen bij de grens' }] });
-  assert.equal(rij(mm, a1.id).labels_gezet, '[]'); assert.equal(rij(mm, a1.id).gelezen_tijd, null);
-  klok += 7 * 3600000;
-  assert.deepEqual(labelRonde(mm, [a1.id, a2.id]).l.j.acties, [], 'a2 te oud voor alleen gelezen');
-  klok -= 7 * 3600000;
+  for (const fv of [function () { throw new Error('databank weg'); }, function () { return new Set(['x']); }, undefined]) {
+    const { mm, dir } = nieuweKamer(fv ? { factuurVerwerkt: fv } : {});
+    const f = mail({ aan: ALIAS });
+    draai(mm, 'gmail:david', [f]);
+    toestaan(dir, ['gmail:david']); uitgangToestaan(dir, ['gmail:david']);
+    zetLive(mm);
+    const a = labelRonde(mm, [f.id]);
+    mm.n8n('POST /mailman/gezet', { ronde: a.r.ronde, postvak: 'gmail:david', resultaten: [{ gmail_id: f.id, erbij: ['FACTUUR'], ok: true }] });
+    vinkje(mm, 'factuur', 'archief');
+    assert.deepEqual(labelRonde(mm, []).l.j.acties, []);
+  }
 });

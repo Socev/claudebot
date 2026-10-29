@@ -15578,18 +15578,19 @@ function mailmanIntakeDraden(postvak, draden) {
 }
 // wv1988 (MailMan B6+): welke van deze Gmail-id's zijn in de Facturen-app helemaal verwerkt? = het bericht uit het verzamelpostvak heeft
 // minstens één factuur en ELKE factuur ervan staat op een status die Davids bevestiging vraagt (in_wachtrij, wordt_verstuurd, concept_klaar,
-// verstuurd, prive_archief; CHECK in facturen-db.js: bevestigd_op + bevestigd_door). te_beoordelen, geen_factuur, dubbel en
-// verzending_mislukt houden de mail in de inbox. Alleen lezen; zonder Facturen-databank een lege set (dan archiveert MailMan niets).
+// verstuurd, prive_archief; CHECK in facturen-db.js: bevestigd_op + bevestigd_door, door David of wie in de Facturen-app mag bevestigen).
+// te_beoordelen, geen_factuur, dubbel en verzending_mislukt houden de mail in de inbox. Geeft Map gmail_id → aantal documenten van het
+// bericht (mailman.js vergelijkt dat met de pdf/xml-bijlagen). Alleen lezen; zonder Facturen-databank een lege Map (dan archiveert MailMan niets).
 const MAILMAN_VERWERKT = ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'prive_archief'];
 function mailmanFactuurVerwerkt(ids) {
-  const uit = new Set();
+  const uit = new Map();
   const fdb = facturenOpen();
   if (!fdb || !fdb.db || !Array.isArray(ids) || !ids.length) return uit;
-  const q = fdb.db.prepare("SELECT b.message_id m FROM bericht b JOIN bron r ON r.id = b.bron WHERE r.soort = 'verzamelpostvak' AND b.message_id = ?"
+  const q = fdb.db.prepare("SELECT (SELECT count(*) FROM document d WHERE d.bericht = b.id) n FROM bericht b JOIN bron r ON r.id = b.bron WHERE r.soort = 'verzamelpostvak' AND b.message_id = ?"
     + ' AND EXISTS (SELECT 1 FROM factuur f WHERE f.bericht = b.id OR f.document IN (SELECT d.id FROM document d WHERE d.bericht = b.id))'
     + ' AND NOT EXISTS (SELECT 1 FROM factuur f WHERE (f.bericht = b.id OR f.document IN (SELECT d.id FROM document d WHERE d.bericht = b.id))'
     + ' AND f.status NOT IN (' + MAILMAN_VERWERKT.map(function (x) { return "'" + x + "'"; }).join(',') + ')) LIMIT 1');
-  for (const id of ids.slice(0, 200)) { if (/^[0-9a-f]{12,24}$/.test(String(id)) && q.get(String(id))) uit.add(String(id)); }
+  for (const id of ids.slice(0, 200)) { if (!/^[0-9a-f]{12,24}$/.test(String(id))) continue; const r = q.get(String(id)); if (r) uit.set(String(id), Number(r.n) || 0); }
   return uit;
 }
 const mailman = (function () {

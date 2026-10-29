@@ -70,7 +70,7 @@ const VERWERKT_LABEL = 'FACTUUR/verwerkt';
 const ERAF = ['UNREAD', 'INBOX'];
 const GELEZEN_STROMEN = ['intake', 'factuur', 'twijfel'], ARCHIEF_STROMEN = ['factuur'];
 const ARCHIEF_MS = 60 * 24 * 3600 * 1000, ARCHIEF_MAX = 20, ARCHIEF_POGINGEN = 5;   // factuurmail die binnen 60 dagen verwerkt raakt; 20 per ronde
-const GELEZEN_ALLEEN_MS = 6 * 3600 * 1000;   // een actie met alleen 'gelezen' (Davids eigen _AI_-mail) hooguit 6 uur na het besluit aanbieden
+const GELEZEN_MS = 6 * 3600 * 1000;   // 'gelezen' alleen voor een besluit van hooguit 6 uur oud, genomen nadat het vinkje aan ging, en één keer (review B6+ #2/#4)
 const BUITEN_LABELS = ['SENT', 'DRAFT', 'CHAT', 'SPAM', 'TRASH'];
 const TABS = { CATEGORY_PERSONAL: 'persoonlijk', CATEGORY_UPDATES: 'updates', CATEGORY_PROMOTIONS: 'promoties', CATEGORY_SOCIAL: 'sociaal', CATEGORY_FORUMS: 'forums' };
 const MARKERINGS_LABELS = ['_AI_', 'AI/SecondBrain/Unprocessed'];
@@ -441,7 +441,7 @@ CREATE TABLE IF NOT EXISTS wijziging (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL
 
 /*
  * maak({ dir, fout, marker (patientpoort.js), eigenAdressen(), intakeDraden(postvak, [thread]) → Set, primair(), geheimOk(body), nu(),
- *   factuurVerwerkt([gmail_id]) → Set (wv1988: ids waarvan elke factuur in de Facturen-app door David bevestigd is) })
+ *   factuurVerwerkt([gmail_id]) → Map gmail_id → aantal documenten (wv1988: alleen ids waarvan elke factuur in de Facturen-app bevestigd is) })
  * config.json in dir (0600, op de pod, niet in de repo): { postvakken: { "<id>": { naam, factuur_alias, stand, jev, tekst } }, todo_nooit: [..] }
  */
 function maak(o) {
@@ -461,6 +461,7 @@ function maak(o) {
     ['besluit', 'inhaal INTEGER NOT NULL DEFAULT 0'], ['besluit', 'juist TEXT'], ['ronde', "soort TEXT NOT NULL DEFAULT 'ronde'"], ['ronde', 'grens TEXT'],   // wv1983 inhaal
     ['stroom', 'gelezen INTEGER NOT NULL DEFAULT 0'], ['stroom', 'archief INTEGER NOT NULL DEFAULT 0'], ['besluit', 'gelezen_tijd TEXT'],
     ['besluit', 'archief_tijd TEXT'], ['besluit', 'archief_poging INTEGER NOT NULL DEFAULT 0'], ['ronde', 'gelezen_ok INTEGER NOT NULL DEFAULT 0'],
+    ['besluit', 'gelezen_aangeboden TEXT'], ['stroom', 'gelezen_sinds TEXT'],
     ['ronde', 'archief_ok INTEGER NOT NULL DEFAULT 0']]) {   // wv1988 B6+ uitgangen gelezen/archief
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
@@ -518,7 +519,7 @@ function maak(o) {
   }
   function stromen() {
     const u = {};
-    for (const r of db.prepare('SELECT * FROM stroom').all()) u[r.id] = { naar_intake: !!r.naar_intake, naar_facturen: !!r.naar_facturen, label: !!r.label, gelezen: !!r.gelezen, archief: !!r.archief };
+    for (const r of db.prepare('SELECT * FROM stroom').all()) u[r.id] = { naar_intake: !!r.naar_intake, naar_facturen: !!r.naar_facturen, label: !!r.label, gelezen: !!r.gelezen, archief: !!r.archief, gelezen_sinds: r.gelezen_sinds || null };
     return u;
   }
   function instelVan(p) {
@@ -768,11 +769,14 @@ function maak(o) {
    * Facturen-app / labels), want een wijziging daar moet ook gelden voor besluiten die al genomen zijn; (#2) mail met Davids eigen
    * markering (_AI_, Unprocessed) krijgt geen AI/MailMan: die haalt de Mail Processor al op; (#3/#11) alleen besluiten van mail die hooguit
    * LIVE_INHAAL_MS vóór live_sinds binnenkwam (geen labelregen op oude, al gearchiveerde mail bij het live zetten).
-   * B6+ (wv1988): met uitgang_toegestaan en Davids vinkje 'gelezen' bij de stroom krijgt een nieuw besluit ook eraf ['UNREAD'] (stroom naar
-   * Intake of Factuur; nooit als het plan of de mail TODO had); met het vinkje 'archief' bij Factuur komt er per ronde hooguit ARCHIEF_MAX
-   * archiefacties bij: { erbij: [FACTUUR/verwerkt], eraf: ['INBOX'], archief: true } voor factuurmail met MailMans FACTUUR-label (≤ 60
-   * dagen) waarvan ELKE factuur in de Facturen-app door David bevestigd is (o.factuurVerwerkt). Die staan niet in de lijst van deze ronde;
-   * n8n laat ze alleen door als het nagelezen bericht het FACTUUR-label draagt.
+   * B6+ (wv1988): met uitgang_toegestaan en Davids vinkje 'gelezen' bij de stroom krijgt een besluit ook eraf ['UNREAD'], alleen als de mail
+   * werkelijk ergens heen gaat (AI/MailMan of FACTUUR in het gefilterde plan, of Davids eigen _AI_ naar Intake; review #1), nooit bij TODO
+   * (plan vóór het filter of label), alleen voor een besluit van ≤ 6 uur oud dat genomen is nadat het vinkje aan ging, en één keer
+   * (gelezen_aangeboden; review #2/#4). Met het vinkje 'archief' bij Factuur per ronde hooguit ARCHIEF_MAX archiefacties
+   * { erbij: [FACTUUR/verwerkt], eraf: ['INBOX'], archief: true } voor factuurmail met MailMans FACTUUR-label (≤ 60 dagen, geen TODO;
+   * review #5) waarvan elke factuur in de Facturen-app bevestigd is én waarvan de koerier minstens zoveel documenten heeft als de mail
+   * pdf/xml-bijlagen had (review #6); elke aanbieding telt een poging (review #2), na ARCHIEF_POGINGEN niet meer. Archiefacties staan niet
+   * in de lijst van deze ronde; n8n laat ze alleen door als het nagelezen bericht het FACTUUR-label en geen TODO draagt.
    */
   function labels(d) {
     const r = rondeVan(d, true);
@@ -788,7 +792,8 @@ function maak(o) {
     const st = stromen();
     const vanaf = new Date((p.live_sinds ? Date.parse(p.live_sinds) : nu()) - LIVE_INHAAL_MS).toISOString();
     const uitgang = uitgangMag(p).ok;
-    for (const b of db.prepare("SELECT gmail_id, labels_plan, stroom, reden, labels, COALESCE(besloten, aangemaakt) besloten FROM besluit WHERE postvak = ? AND status = 'klaar' AND inhaal = 0 AND labels_gezet IS NULL AND labels_plan IS NOT NULL AND stap != 'buiten' AND COALESCE(ontvangen, aangemaakt) >= ? ORDER BY COALESCE(ontvangen, aangemaakt), id").all(p.id, vanaf)) {
+    const aangeboden = [], archiefPogingen = [];
+    for (const b of db.prepare("SELECT id, gmail_id, labels_plan, stroom, reden, labels, gelezen_aangeboden, COALESCE(besloten, aangemaakt) besloten FROM besluit WHERE postvak = ? AND status = 'klaar' AND inhaal = 0 AND labels_gezet IS NULL AND labels_plan IS NOT NULL AND stap != 'buiten' AND COALESCE(ontvangen, aangemaakt) >= ? ORDER BY COALESCE(ontvangen, aangemaakt), id").all(p.id, vanaf)) {
       if (!ids.has(b.gmail_id)) continue;
       let plan = [], lab = [];
       try { plan = JSON.parse(b.labels_plan); } catch (e) { plan = []; }
@@ -804,32 +809,46 @@ function maak(o) {
         if (l === 'INFO') return naar === 'info' && sa.label;
         return sa.label;   // TODO (V en CONCEPT plant MailMan in B5 niet)
       })));
-      const eraf = uitgang && sa.gelezen && GELEZEN_STROMEN.includes(b.stroom) && (naar === 'intake' || naar === 'factuur') && !todo ? ['UNREAD'] : [];
-      if (!plan.length && (!eraf.length || Date.parse(b.besloten) < nu() - GELEZEN_ALLEEN_MS)) continue;
+      const gaat = plan.includes('AI/MailMan') || plan.includes('FACTUUR') || (gemarkeerd && naar === 'intake');
+      const vers = Date.parse(b.besloten) >= nu() - GELEZEN_MS && !!sa.gelezen_sinds && String(b.besloten) >= sa.gelezen_sinds && !b.gelezen_aangeboden;
+      const eraf = uitgang && sa.gelezen && vers && gaat && GELEZEN_STROMEN.includes(b.stroom) && !todo ? ['UNREAD'] : [];
+      if (!plan.length && !eraf.length) continue;
       if (plan.includes('AI/MailMan')) { if (ruimte <= 0) { wacht++; continue; } ruimte--; }
       acties.push({ gmail_id: b.gmail_id, erbij: plan, eraf });
+      if (eraf.length) aangeboden.push(b.id);
       if (acties.length >= LABEL_ACTIES_MAX) break;
     }
     let archief = 0;
     if (uitgang && st.factuur && st.factuur.archief && acties.length < LABEL_ACTIES_MAX && typeof o.factuurVerwerkt === 'function') {
-      const kand = db.prepare("SELECT gmail_id FROM besluit WHERE postvak = ? AND inhaal = 0 AND archief_tijd IS NULL AND archief_poging < ? AND instr(labels_gezet, ?) > 0 AND labels_tijd >= ? ORDER BY labels_tijd, id LIMIT 200")
-        .all(p.id, ARCHIEF_POGINGEN, '"FACTUUR"', new Date(nu() - ARCHIEF_MS).toISOString()).map(function (x) { return x.gmail_id; });
-      let klaar = new Set();
-      if (kand.length) { try { const k = o.factuurVerwerkt(kand); klaar = k instanceof Set ? k : new Set(); } catch (e) { fout('mailman-verwerkt', e); } }
-      for (const id of kand) {
-        if (!klaar.has(id)) continue;
+      const kand = db.prepare("SELECT id, gmail_id, bijlagen, labels_plan, labels, labels_gezet FROM besluit WHERE postvak = ? AND inhaal = 0 AND archief_tijd IS NULL AND archief_poging < ? AND instr(labels_gezet, ?) > 0 AND labels_tijd >= ? ORDER BY labels_tijd, id LIMIT 200")
+        .all(p.id, ARCHIEF_POGINGEN, '"FACTUUR"', new Date(nu() - ARCHIEF_MS).toISOString())
+        .filter(function (x) { return ![x.labels_plan, x.labels, x.labels_gezet].some(function (j) { return String(j || '').includes('"TODO"'); }); });
+      let klaar = new Map();
+      if (kand.length) { try { const k = o.factuurVerwerkt(kand.map(function (x) { return x.gmail_id; })); klaar = k instanceof Map ? k : new Map(); } catch (e) { fout('mailman-verwerkt', e); } }
+      for (const x of kand) {
+        const docs = klaar.get(x.gmail_id);
+        if (typeof docs !== 'number') continue;
+        let bij = [];
+        try { bij = JSON.parse(x.bijlagen || '[]'); } catch (e) { bij = null; }
+        if (!Array.isArray(bij) || docs < bij.filter(function (m) { return isPdfOfXml({ naam: '', mime: String(m) }); }).length) continue;
         if (acties.length >= LABEL_ACTIES_MAX || archief >= ARCHIEF_MAX) break;
-        acties.push({ gmail_id: id, erbij: [VERWERKT_LABEL], eraf: ['INBOX'], archief: true });
+        acties.push({ gmail_id: x.gmail_id, erbij: [VERWERKT_LABEL], eraf: ['INBOX'], archief: true });
+        archiefPogingen.push(x.id);
         archief++;
       }
+    }
+    if (aangeboden.length || archiefPogingen.length) {
+      tx(function () {
+        for (const id of aangeboden) db.prepare('UPDATE besluit SET gelezen_aangeboden = ? WHERE id = ?').run(iso(), id);
+        for (const id of archiefPogingen) db.prepare('UPDATE besluit SET archief_poging = archief_poging + 1 WHERE id = ?').run(id);
+      });
     }
     return { status: 200, j: { ok: true, stand: 'live', acties, wachtrij_wacht: wacht, archief } };
   }
   // Wat n8n werkelijk zette (na zijn eigen grens). Alleen labels uit LABELS tellen; een mislukte modify blijft open voor een volgende ronde.
-  // B6+ (wv1988): eraf = wat n8n werkelijk weghaalde (alleen UNREAD/INBOX tellen); niets = de grens liet niets over (al gelezen, TODO) en
-  // het besluit is af; overgeslagen (de n8n-grens liet een actie zonder labels erbij niet door: al gelezen, TODO, niet meer in de inbox of
-  // nalezen mislukt) = ook af, zonder gelezen (dicht). Een archiefactie (erbij FACTUUR/verwerkt) geldt alleen voor een besluit met MailMans FACTUUR-label; mislukt hij,
-  // dan telt archief_poging op (na ARCHIEF_POGINGEN niet meer aangeboden).
+  // B6+ (wv1988): eraf = wat n8n werkelijk weghaalde (alleen UNREAD/INBOX tellen); overgeslagen (de n8n-grens liet een actie zonder labels
+  // erbij niet door: al gelezen, TODO, niet meer in de inbox of nalezen mislukt) = af, zonder gelezen (dicht). Een archiefactie (erbij
+  // FACTUUR/verwerkt) geldt alleen voor een besluit met MailMans FACTUUR-label; de pogingen telt labels() bij het aanbieden.
   function gezet(d) {
     const r = rondeVan(d, true);
     if (!r) return { status: 409, j: { ok: false, fout: 'ronde onbekend of verlopen' } };
@@ -846,13 +865,13 @@ function maak(o) {
         if (erbij.includes(VERWERKT_LABEL)) {
           if (b.archief_tijd || !String(b.labels_gezet || '').includes('"FACTUUR"')) { tel.fout++; continue; }
           if (x.ok === true) { db.prepare('UPDATE besluit SET archief_tijd = ? WHERE id = ?').run(iso(), b.id); tel.ok++; tel.archief++; }
-          else { db.prepare('UPDATE besluit SET archief_poging = archief_poging + 1 WHERE id = ?').run(b.id); tel.fout++; }
+          else tel.fout++;
           continue;
         }
         if (b.labels_gezet != null) continue;   // al afgehandeld
         const gez = erbij.filter(function (l) { return LABELS.includes(l); });
         if (x.ok !== true && x.overgeslagen === true && !erbij.length) { db.prepare("UPDATE besluit SET labels_gezet = '[]', labels_tijd = ? WHERE id = ?").run(iso(), b.id); continue; }
-        if (x.ok === true && (gez.length || af.length || x.niets === true)) {
+        if (x.ok === true && (gez.length || af.length)) {
           db.prepare('UPDATE besluit SET labels_gezet = ?, labels_tijd = ?, gelezen_tijd = ? WHERE id = ?').run(JSON.stringify(gez), iso(), af.includes('UNREAD') ? iso() : null, b.id);
           tel.ok++;
           if (af.includes('UNREAD')) tel.gelezen++;
@@ -1176,8 +1195,10 @@ function maak(o) {
       if (typeof ctx.versVerbruik === 'function') ctx.versVerbruik();
     }
     tx(function () {
-      db.prepare('UPDATE stroom SET naar_intake = ?, naar_facturen = ?, label = ?, gelezen = ?, archief = ? WHERE id = ?')
-        .run(nieuw.naar_intake ? 1 : 0, nieuw.naar_facturen ? 1 : 0, nieuw.label ? 1 : 0, nieuw.gelezen ? 1 : 0, nieuw.archief ? 1 : 0, d.stroom);
+      // gelezen_sinds: alleen besluiten van ná het aanzetten worden gelezen gemarkeerd (geen terugwerkende kracht; review B6+ #4)
+      const sinds = nieuw.gelezen ? (oud.gelezen ? oud.gelezen_sinds || iso() : iso()) : null;
+      db.prepare('UPDATE stroom SET naar_intake = ?, naar_facturen = ?, label = ?, gelezen = ?, archief = ?, gelezen_sinds = ? WHERE id = ?')
+        .run(nieuw.naar_intake ? 1 : 0, nieuw.naar_facturen ? 1 : 0, nieuw.label ? 1 : 0, nieuw.gelezen ? 1 : 0, nieuw.archief ? 1 : 0, sinds, d.stroom);
       wijzig('stroom', d.stroom, oud, verwijd ? Object.assign({ vingerafdruk: true }, nieuw) : nieuw, door);
     });
     return { status: 200, j: { ok: true } };
