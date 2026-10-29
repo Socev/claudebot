@@ -52,6 +52,9 @@
  * aanzetten, ≤ 10 per ronde en ≤ 25 per dag; archiveren (label VERKOOP, INBOX weg) pas ≥ 15 min na verstuurd, alleen zonder Exact-
  * weigering. n8n heeft een eigen tweede grens (D/GH verkoopgrens: vast adres, nagelezen bericht, draad zonder eerder bericht aan dat adres,
  * sha256 van de pdf's gelijk aan wat hier getoetst is). Journaal: tabel verkoop.
+ * wv1998 (David 29-10 21:19: "het moet terug te zien zijn in een aparte tab van de Facturen-app"): de toets bewaart per pdf ook de
+ * bestandsnaam (14 dagen, zoals onderwerp en afzender), het factuurnummer en het bedrag (uit dezelfde tekst; de tekst zelf nooit);
+ * GET /app/mailman/verkoop geeft het journaal met fase en open-teller voor de tab Verkoop (alleen lezen).
  *
  * DE RONDE (n8n, O.2): POST /mailman/start → per postvak de zoekvraag (venster uit de laatste geslaagde ronde) · /mailman/nieuw (alle id's
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
@@ -72,7 +75,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-1.5';
+const VERSIE = 'mailman-1.6';   // wv1998: tab Verkoop (naam/nummer/bedrag, GET /app/mailman/verkoop)
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -328,6 +331,37 @@ function verkoopKandidaat(m, postvakId) {
 }
 // B7-V: ankers in een tekst (pdf-tekstlaag of OCR); de tekst zelf wordt nergens bewaard
 function verkoopAnkers(t) { const s = String(t || ''); return { vacshing: VAC_RE.test(s), shingrix: SHI_RE.test(s) }; }
+// wv1998 (David 29-10, tab Verkoop in de Facturen-app): factuurnummer en bedrag uit dezelfde tekst; alleen deze twee velden komen terug.
+// Vorm gemeten 29-10 op 12 doorgestuurde nota's (alleen vormen, geen tekst): "Factuurnr: VACSHING-123" en "Te betalen € 12,34"; de OCR
+// mist het nummer soms (dan null). Nummer: letters/cijfers/-/. met minstens één cijfer. Bedrag: "te betalen", anders "totaal", anders het
+// enige bedrag dat op de nota staat; in centen, 1 cent tot € 100.000.
+const NR_RE = /factuur(?:[ \t]*(?:nr|nummer|no)\.?[ \t]*[:.]?|[ \t]*:)[ \t]*([A-Za-z0-9][A-Za-z0-9\/.-]{0,30}[A-Za-z0-9])/gi;
+const BEDRAG = '(-?\\d{1,6}(?:[. ]\\d{3})*[.,]\\d{2})(?!\\d)';
+const TE_BETALEN_RE = new RegExp('te[ \\t]+betalen[^\\n\\d€]{0,12}(?:€|EUR)?[ \\t]*' + BEDRAG, 'i');
+const TOTAAL_RE = new RegExp('totaal[^\\n\\d€]{0,20}(?:€|EUR)[ \\t]*' + BEDRAG, 'i');
+const VAC_NR_RE = /VACSH[I1L|]NG[ \t]*-[ \t]*(\d{1,8})(?!\d)/i;
+const EURO_RE = new RegExp('(?:€|EUR)[ \\t]*' + BEDRAG, 'gi');
+function verkoopCenten(x) {
+  const m = /^(-?)([\d. ]+)[.,](\d{2})$/.exec(String(x || '').trim());
+  if (!m) return null;
+  const c = Number(m[2].replace(/[. ]/g, '')) * 100 + Number(m[3]);
+  return Number.isSafeInteger(c) && c > 0 && c <= 10000000 ? (m[1] ? -c : c) : null;
+}
+function verkoopVelden(t) {
+  const s = String(t || '');
+  let nummer = null;
+  for (const m of s.matchAll(NR_RE)) if (/\d/.test(m[1])) { nummer = m[1].toUpperCase().slice(0, 32); break; }
+  // de OCR zet het nummer soms op een andere regel dan "Factuurnr:"; de gordelroosnota's nummeren als VACSHING-<n> (gemeten 29-10)
+  if (!nummer) { const v = VAC_NR_RE.exec(s); if (v) nummer = 'VACSHING-' + v[1]; }
+  let bedrag = null;
+  const tb = TE_BETALEN_RE.exec(s) || TOTAAL_RE.exec(s);
+  if (tb) bedrag = verkoopCenten(tb[1]);
+  if (bedrag == null) {
+    const alle = Array.from(new Set(Array.from(s.matchAll(EURO_RE)).map(function (m) { return verkoopCenten(m[1]); }).filter(function (c) { return c != null; })));
+    if (alle.length === 1) bedrag = alle[0];
+  }
+  return { nummer: nummer, bedrag_cent: bedrag };
+}
 // B7-V: VERKOOP alleen als de mail minstens één pdf heeft en ELKE pdf beide ankers draagt (review wv1997 #2: een tweede pdf zonder ankers,
 // bv. een verwijsbrief, mag nooit mee naar Exact en mag niet stil gearchiveerd worden; zo'n mail blijft bij David). Een overgeslagen of
 // onleesbare pdf telt als 'zonder ankers'.
@@ -462,7 +496,7 @@ function venster(laatsteGeslaagd, nuMs) {
 
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, jevVragen,
   jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
-  authPass, verkoopKandidaat, verkoopAnkers, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL };
+  authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL };
 
 // ─────────────────────────── startset (O.5) ───────────────────────────
 
@@ -1010,7 +1044,8 @@ function maak(o) {
   /*
    * Eén pdf lokaal lezen: tekstlaag (pdftotext), en is die vrijwel leeg (scan) OCR van hooguit 2 pagina's (pdftoppm 200 dpi + tesseract
    * nld+eng), in een eigen map (0700) onder o.verkoopTmp (/dev/shm) die altijd weer gewist wordt. o.proces komt van server.js (spawn);
-   * mailman.js start zelf geen processen (CI-poort). Alleen ankers ja/nee en de bron komen terug; de tekst blijft in deze functie.
+   * mailman.js start zelf geen processen (CI-poort). Alleen ankers ja/nee, de bron en (wv1998) factuurnummer en bedrag komen terug; de tekst
+   * blijft in deze functie.
    */
   async function verkoopLees(buf, tot) {
     if (typeof o.proces !== 'function') return { fout: 'geen lezer' };
@@ -1022,23 +1057,25 @@ function maak(o) {
       fs.writeFileSync(f, buf, { mode: 0o600 });
       const t = await o.proces('pdftotext', ['-q', '-l', '5', '-enc', 'UTF-8', f, '-'], { ms: 30000 });
       const ta = t != null && t.replace(/\s+/g, '').length >= VERKOOP_TEKST_MIN ? verkoopAnkers(t) : null;
-      if (ta && ta.vacshing && ta.shingrix) return { bron: 'tekst', vacshing: true, shingrix: true };
+      const tv = ta ? verkoopVelden(t) : { nummer: null, bedrag_cent: null };
+      if (ta && ta.vacshing && ta.shingrix) return Object.assign({ bron: 'tekst', vacshing: true, shingrix: true }, tv);
       // review wv1997 #12: geen beide ankers in de tekstlaag (of geen tekstlaag): ook OCR (een scan met een slechte tekstlaag of een stempel)
       if (over()) return { bron: 'ocr', fout: 'te traag' };
       const r = await o.proces('pdftoppm', ['-q', '-r', '200', '-scale-to', '2400', '-f', '1', '-l', String(VERKOOP_OCR_PAGINAS), '-png', f, path.join(map, 'p')], { ms: 60000 });
-      if (r == null) return ta ? { bron: 'tekst', vacshing: ta.vacshing, shingrix: ta.shingrix } : { bron: 'ocr', fout: 'pdftoppm' };
+      if (r == null) return ta ? Object.assign({ bron: 'tekst', vacshing: ta.vacshing, shingrix: ta.shingrix }, tv) : { bron: 'ocr', fout: 'pdftoppm' };
       const pngs = fs.readdirSync(map).filter(function (n) { return /^p-\d+\.png$/.test(n); }).sort().slice(0, VERKOOP_OCR_PAGINAS);
-      let vac = !!(ta && ta.vacshing), shi = !!(ta && ta.shingrix), gelezen = 0;
+      let vac = !!(ta && ta.vacshing), shi = !!(ta && ta.shingrix), gelezen = 0, ocr = '';
       for (const n of pngs) {
         if (over()) return { bron: 'ocr', fout: 'te traag' };
         const x = await o.proces('tesseract', [path.join(map, n), 'stdout', '-l', 'nld+eng', '--psm', '3'], { ms: 60000 });
         if (x == null) continue;
-        gelezen++;
+        gelezen++; ocr += x + '\n';
         const a = verkoopAnkers(x);
         vac = vac || a.vacshing; shi = shi || a.shingrix;
       }
-      if (!gelezen) return ta ? { bron: 'tekst', vacshing: ta.vacshing, shingrix: ta.shingrix } : { bron: 'ocr', fout: 'tesseract' };
-      return { bron: 'ocr', vacshing: vac, shingrix: shi };
+      if (!gelezen) return ta ? Object.assign({ bron: 'tekst', vacshing: ta.vacshing, shingrix: ta.shingrix }, tv) : { bron: 'ocr', fout: 'tesseract' };
+      const ov = verkoopVelden(ocr);
+      return { bron: 'ocr', vacshing: vac, shingrix: shi, nummer: ov.nummer || tv.nummer, bedrag_cent: ov.bedrag_cent != null ? ov.bedrag_cent : tv.bedrag_cent };
     } catch (e) {
       return { fout: 'lezen' };
     } finally {
@@ -1048,10 +1085,13 @@ function maak(o) {
   /*
    * POST /mailman/verkoop/toets (via server.js, ná de sleutel): { ronde, postvak, gmail_id, bijlagen: [{ naam, mime, b64 }], fout? } van n8n
    * voor een kandidaat uit stap1. Hooguit 3 pdf's, elk ≤ 8 MB, canonieke base64 (zodat n8n later byte-gelijk kan toetsen via sha256 van
-   * dezelfde base64). Bewaart per pdf alleen sha256 (bytes), sha256_b64, grootte, bron en ankers ja/nee; naam en tekst nooit.
+   * dezelfde base64). Bewaart per pdf alleen sha256 (bytes), sha256_b64, grootte, bron en ankers ja/nee, en sinds wv1998 (tab Verkoop in de
+   * Facturen-app) factuurnummer, bedrag en de bestandsnaam; de naam kan een patiëntnaam zijn en gaat na 14 dagen weg (opruim), de tekst nooit.
    * Eén toets tegelijk (pod: 2 cpu's, /dev/shm 64 MB); bezig = 429 en de kandidaat komt de volgende ronde terug.
    */
   let verkoopBezig = false;
+  // wv1998: bestandsnaam van de bijlage voor de tab Verkoop (≤ 120 tekens, zonder stuurtekens); leeg = null. Weg na 14 dagen (opruim).
+  function verkoopNaam(x) { const s = typeof x === 'string' ? x.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120) : ''; return s || null; }
   async function verkoopToets(d) {
     d = isObj(d) ? d : {};
     const r = rondeVan(d, true);
@@ -1077,13 +1117,15 @@ function maak(o) {
         if (totaal > bij.length || bij.length > VERKOOP_PDF_MAX) pdfs.push({ grootte: null, overgeslagen: 'niet alle pdf\'s getoetst' });
         for (const x of bij.slice(0, VERKOOP_PDF_MAX)) {
           if (!isObj(x) || typeof x.b64 !== 'string' || !x.b64) { melding = 'bijlage zonder inhoud'; continue; }
-          if (x.b64.length > Math.ceil(VERKOOP_PDF_BYTES / 3) * 4) { pdfs.push({ grootte: null, overgeslagen: 'te groot' }); continue; }
+          const naam = verkoopNaam(x.naam);   // wv1998
+          if (x.b64.length > Math.ceil(VERKOOP_PDF_BYTES / 3) * 4) { pdfs.push({ naam, grootte: null, overgeslagen: 'te groot' }); continue; }
           const buf = Buffer.from(x.b64, 'base64');
           if (!buf.length || buf.toString('base64') !== x.b64) { melding = 'bijlage niet in canonieke base64'; continue; }
-          if (buf.length > VERKOOP_PDF_BYTES) { pdfs.push({ grootte: buf.length, overgeslagen: 'te groot' }); continue; }
-          if (buf.subarray(0, 1024).indexOf('%PDF-') < 0) { pdfs.push({ grootte: buf.length, overgeslagen: 'geen pdf' }); continue; }
+          if (buf.length > VERKOOP_PDF_BYTES) { pdfs.push({ naam, grootte: buf.length, overgeslagen: 'te groot' }); continue; }
+          if (buf.subarray(0, 1024).indexOf('%PDF-') < 0) { pdfs.push({ naam, grootte: buf.length, overgeslagen: 'geen pdf' }); continue; }
           const l = await verkoopLees(buf, tot);
-          const rij = { sha256: shaBuf(buf), sha256_b64: sha(x.b64), grootte: buf.length, bron: l.bron || null, vacshing: l.vacshing === true, shingrix: l.shingrix === true };
+          const rij = { naam, sha256: shaBuf(buf), sha256_b64: sha(x.b64), grootte: buf.length, bron: l.bron || null, vacshing: l.vacshing === true, shingrix: l.shingrix === true,
+            nummer: typeof l.nummer === 'string' ? l.nummer : null, bedrag_cent: Number.isSafeInteger(l.bedrag_cent) ? l.bedrag_cent : null };
           if (l.fout) rij.fout = String(l.fout).slice(0, 40);
           pdfs.push(rij);
         }
@@ -1218,8 +1260,10 @@ function maak(o) {
       .map(function (v) {
         let pdfs = []; try { pdfs = JSON.parse(v.pdfs || '[]'); } catch (e) { pdfs = []; }
         return { id: v.id, ontvangen: v.ontvangen, afzender: v.afzender || null, naam: v.van_naam || null, domein: v.van_domein, onderwerp: v.onderwerp, status: v.status,
-          pdfs: pdfs.map(function (x) { return { bron: x.bron || null, vacshing: !!x.vacshing, shingrix: !!x.shingrix, grootte: x.grootte || null, overgeslagen: x.overgeslagen || null, fout: x.fout || null }; }),
-          kandidaat: v.kandidaat_tijd, getoetst: v.toets_tijd, aangeboden: v.aangeboden_tijd, verstuurd: v.verstuurd_tijd, gearchiveerd: v.gearchiveerd_tijd, fout: v.fout };
+          pdfs: pdfs.map(function (x) { return { bron: x.bron || null, vacshing: !!x.vacshing, shingrix: !!x.shingrix, grootte: x.grootte || null, overgeslagen: x.overgeslagen || null, fout: x.fout || null,
+            naam: x.naam || null, nummer: x.nummer || null, bedrag_cent: Number.isSafeInteger(x.bedrag_cent) ? x.bedrag_cent : null }; }),   // wv1998: naam (14 dagen), nummer, bedrag
+          kandidaat: v.kandidaat_tijd, getoetst: v.toets_tijd, aangeboden: v.aangeboden_tijd, verstuurd: v.verstuurd_tijd, gearchiveerd: v.gearchiveerd_tijd, fout: v.fout,
+          bijgewerkt: v.bijgewerkt };
       });
     return { postvak: p.id, kan: m.ok, reden: m.reden, adres: m.ok ? m.adres : null, archief_kan: !!(m.ok && m.label_id), door: !!p.verkoop_door, archief: !!p.verkoop_archief,
       door_sinds: p.verkoop_sinds || null, archief_sinds: p.verkoop_archief_sinds || null,
@@ -1227,6 +1271,28 @@ function maak(o) {
         pdf_mb: VERKOOP_PDF_BYTES / 1048576, ocr_paginas: VERKOOP_OCR_PAGINAS, wacht_uur: VERKOOP_WACHT_MS / 3600000, archief_na_min: VERKOOP_ARCHIEF_NA_MS / 60000 },
       plafond: { ronde: VERKOOP_RONDE_MAX, dag: VERKOOP_DAG_MAX }, label: VERKOOP_LABEL,
       tellers_24u: verkoopTellers(p.id, new Date(nu() - 86400000).toISOString()), journaal };
+  }
+  /*
+   * wv1998 (David 29-10, Anders op de verkoopkaart): GET /app/mailman/verkoop voor de tab Verkoop in de Facturen-app, alleen lezen. Het
+   * journaal van verkoopOverzicht met per nota een fase en of er nog iets moet gebeuren (open): door MailMan (pdf-toets, doorsturen,
+   * archiveren) of door David (onzeker, geweigerd, mislukt; die tellen 14 dagen mee). Herkend terwijl doorsturen uit staat, of binnengekomen
+   * vóór het aanzetten, telt niet: MailMan doet daar niets mee (fase zelf).
+   */
+  function verkoopFase(r, v) {
+    const s = r.status, recent = Date.parse(r.bijgewerkt || '') >= nu() - NAMEN_MS;
+    if (s === 'kandidaat') return { fase: 'wacht_toets', open: true };
+    if (s === 'herkend') return v.door && v.door_sinds && r.ontvangen && r.ontvangen >= v.door_sinds ? { fase: 'wacht_door', open: true } : { fase: 'zelf', open: false };
+    if (s === 'aangeboden') return { fase: 'bezig', open: true };
+    if (s === 'verstuurd') return v.archief && v.archief_kan && Date.parse(r.verstuurd || '') >= nu() - VERKOOP_ARCHIEF_MS ? { fase: 'wacht_archief', open: true } : { fase: 'verstuurd', open: false };
+    if (s === 'onzeker' || s === 'geweigerd' || s === 'mislukt') return { fase: s, open: recent };
+    return { fase: s, open: false };
+  }
+  function verkoopTab() {
+    const v = verkoopOverzicht();
+    if (!v) return { ok: true, verkoop: null, open: 0 };
+    const journaal = v.journaal.map(function (r) { return Object.assign({}, r, verkoopFase(r, v)); });
+    return { ok: true, verkoop: Object.assign({}, v, { journaal }), open: journaal.filter(function (r) { return r.open; }).length,
+      namen_dagen: NAMEN_MS / 86400000 };
   }
   // App: doorsturen/archiveren aan alleen met verkoopMag én een verse vingerafdruk (die hier verbruikt wordt); uit mag altijd.
   // verkoop_sinds: alleen mail die ná het aanzetten binnenkwam wordt doorgestuurd (geen terugwerkende kracht).
@@ -1277,6 +1343,12 @@ function maak(o) {
   function opruim() {
     const grens = new Date(nu() - NAMEN_MS).toISOString();
     db.prepare("UPDATE besluit SET afzender = NULL, van_naam = NULL, aan = NULL, onderwerp = NULL, namen_weg = ? WHERE aangemaakt < ? AND namen_weg IS NULL").run(iso(), grens);
+    // wv1998: de bestandsnamen van verkoopnota's (kunnen een patiëntnaam dragen) na dezelfde 14 dagen weg; nummer en bedrag blijven
+    for (const v of db.prepare("SELECT id, pdfs FROM verkoop WHERE kandidaat_tijd < ? AND pdfs LIKE '%\"naam\":\"%'").all(grens)) {
+      let l; try { l = JSON.parse(v.pdfs); } catch (e) { continue; }
+      if (!Array.isArray(l)) continue;
+      db.prepare('UPDATE verkoop SET pdfs = ? WHERE id = ?').run(JSON.stringify(l.map(function (x) { return isObj(x) ? Object.assign({}, x, { naam: null }) : x; })), v.id);
+    }
   }
 
   // ── tellingen en App ──
@@ -1596,6 +1668,7 @@ function maak(o) {
     d = isObj(d) ? d : {};
     const door = ctx && ctx.apparaat ? 'app:' + String(ctx.apparaat).slice(0, 40) : 'app';
     if (route === 'GET /app/mailman') return { status: 200, j: overzicht() };
+    if (route === 'GET /app/mailman/verkoop') return { status: 200, j: verkoopTab() };   // wv1998: tab Verkoop in de Facturen-app (alleen lezen)
     const schrijft = route !== 'POST /app/mailman/toets';
     if (schrijft && typeof o.primair === 'function' && !o.primair()) return { status: 503, j: { ok: false, fout: 'niet de actieve kant' } };
     if (route === 'POST /app/mailman/toets') return toets(d);

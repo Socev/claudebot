@@ -1103,12 +1103,13 @@ test('B7-V pdf-toets: tekstlaag of OCR, alleen ankers/sha/grootte bewaard, map a
   assert.deepEqual(JSON.parse(b.labels_plan), ['VERKOOP'], 'labelplan alleen VERKOOP');
   assert.equal(v.status, 'herkend');
   const pd = JSON.parse(v.pdfs);
-  assert.deepEqual(Object.keys(pd[0]).sort(), ['bron', 'grootte', 'sha256', 'sha256_b64', 'shingrix', 'vacshing']);
+  assert.deepEqual(Object.keys(pd[0]).sort(), ['bedrag_cent', 'bron', 'grootte', 'naam', 'nummer', 'sha256', 'sha256_b64', 'shingrix', 'vacshing']);
+  assert.equal(pd[0].naam, 'nota.pdf', 'wv1998: bestandsnaam voor de tab Verkoop');
   assert.equal(pd[0].sha256, crypto.createHash('sha256').update(Buffer.from(b64, 'base64')).digest('hex'));
   assert.equal(pd[0].sha256_b64, crypto.createHash('sha256').update(b64).digest('hex'));
   assert.equal(pd[0].bron, 'tekst');
   const alles = JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all()) + JSON.stringify(mm._db.prepare('SELECT * FROM besluit').all());
-  assert.ok(!/Proef Patient|nota\.pdf/.test(alles), 'geen tekst en geen bestandsnaam in de databank');
+  assert.ok(!/Proef Patient/.test(alles), 'geen tekst in de databank');
   u = await t(scan, [{ naam: 'scan.pdf', mime: 'application/octet-stream', b64: nepPdf('SCAN:VACSH1NG ... SH1NGR|X') }]);
   assert.equal(u.j.verkoop, true); assert.equal(JSON.parse(vRij(mm, scan.id).pdfs)[0].bron, 'ocr');
   assert.ok(log.includes('pdftoppm') && log.includes('tesseract'));
@@ -1284,7 +1285,7 @@ test('B7-V pdf-toets met echte gereedschappen: tekstlaag én scan herkend, ander
     assert.equal(spawnSync('gs', ['-q', '-dBATCH', '-dNOPAUSE', '-sDEVICE=' + apparaat, '-r150', '-o', pdf, ps]).status, 0);
     return fs.readFileSync(pdf).toString('base64');
   };
-  const nota = ['PROEFPRAKTIJK NOTA', 'Vaccinatie VACSHING', 'Product SHINGRIX', 'Bedrag 12,34'];
+  const nota = ['PROEFPRAKTIJK NOTA', 'Factuurnr: VACSHING-42', 'Vaccinatie VACSHING', 'Product SHINGRIX', 'Te betalen EUR 12,34'];
   const tekstPdf = maak('tekst', nota, 'pdfwrite'), scanPdf = maak('scan', nota, 'pdfimage24'), anderPdf = maak('ander', ['PROEFLEVERANCIER FACTUUR', 'Kantoorartikelen', 'Bedrag 56,78'], 'pdfimage24');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mailman-vk-tmp-'));
   const { mm } = nieuweKamer({ proces: echtProces, verkoopTmp: tmp });
@@ -1293,6 +1294,8 @@ test('B7-V pdf-toets met echte gereedschappen: tekstlaag én scan herkend, ander
   const t = function (m, b64) { return mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: m.id, bijlagen: [{ b64 }] }); };
   assert.equal((await t(a, tekstPdf)).j.verkoop, true); assert.equal(JSON.parse(vRij(mm, a.id).pdfs)[0].bron, 'tekst');
   assert.equal((await t(b, scanPdf)).j.verkoop, true); assert.equal(JSON.parse(vRij(mm, b.id).pdfs)[0].bron, 'ocr');
+  // wv1998: factuurnummer en bedrag uit tekstlaag én OCR
+  for (const m of [a, b]) { const x = JSON.parse(vRij(mm, m.id).pdfs)[0]; assert.equal(x.nummer, 'VACSHING-42', x.bron); assert.equal(x.bedrag_cent, 1234, x.bron); }
   assert.equal((await t(c, anderPdf)).j.verkoop, false); assert.equal(vRij(mm, c.id).status, 'niet_herkend');
   assert.deepEqual(fs.readdirSync(tmp), []);
   fs.rmSync(werk, { recursive: true, force: true });
@@ -1360,4 +1363,58 @@ test('B7-V review: overgeslagen is stil, onzeker meldt; oude tijdelijke mappen w
   fs.mkdirSync(path.join(tmp, 'iets-anders'));
   MM.maak({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'mailman-')), marker: poort, primair: function () { return true; }, verkoopTmp: tmp });
   assert.deepEqual(fs.readdirSync(tmp), ['iets-anders']);
+});
+
+test('wv1998 velden: factuurnummer en bedrag uit de nota (vormen zoals gemeten), anders null', () => {
+  const V = MM.K.verkoopVelden;
+  assert.deepEqual(V('Factuurnr : VACSH1NG-123\nOmschrijving VACSHING SHINGRIX € 199,00\nTe betalen € 199,00'), { nummer: 'VACSH1NG-123', bedrag_cent: 19900 });
+  assert.deepEqual(V('Factuurnr :\nVACSHING-77 Proef\nTe betalen € 1.234,56'), { nummer: 'VACSHING-77', bedrag_cent: 123456 }, 'nummer op een andere regel');
+  assert.deepEqual(V('Totaal € 45,00'), { nummer: null, bedrag_cent: 4500 });
+  assert.deepEqual(V('€ 12,34 en nog eens € 12,34'), { nummer: null, bedrag_cent: 1234 }, 'het enige bedrag');
+  assert.deepEqual(V('€ 1,00 en € 2,00'), { nummer: null, bedrag_cent: null }, 'twee bedragen zonder "te betalen": geen gok');
+  assert.deepEqual(V('Factuur aan Proef Persoon\nFactuurdatum: 29-10-2026'), { nummer: null, bedrag_cent: null }, 'geen naam of datum als nummer');
+  assert.deepEqual(V('te betalen: EUR 99999999,00'), { nummer: null, bedrag_cent: null }, 'onzinbedrag');
+  assert.deepEqual(V(''), { nummer: null, bedrag_cent: null });
+});
+
+test('wv1998 tab Verkoop: naam, nummer en bedrag in het journaal; naam na 14 dagen weg; fase en open-teller; alleen lezen', async () => {
+  const { mm, dir } = vkKamer();
+  assert.equal(mm.app('GET /app/mailman/verkoop', {}, ctxVers(false)).j.open, 0);
+  const a = vkMail(), b = vkMail(), c = vkMail();
+  const { r } = vkRonde(mm, [a, b, c]);
+  const nota = nepPdf('LAAG:Factuurnr: VACSHING-9 Proef Patient VACSHING SHINGRIX Te betalen € 45,00 en nog wat tekst erbij');
+  assert.equal((await mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: a.id, bijlagen: [{ naam: 'Gordelroos Proef\u0007 Persoon.pdf', mime: 'application/pdf', b64: nota }] })).j.verkoop, true);
+  assert.equal((await mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: b.id, bijlagen: [{ naam: 'x.pdf', b64: nepPdf('LAAG:andere factuur zonder ankers maar met genoeg tekst voor een tekstlaag') }] })).j.verkoop, false);
+  let t = mm.app('GET /app/mailman/verkoop', {}, ctxVers(false));
+  assert.equal(t.status, 200); assert.equal(t.j.ok, true); assert.equal(t.j.namen_dagen, 14);
+  const ra = t.j.verkoop.journaal.find(function (x) { return x.status === 'herkend'; });
+  assert.deepEqual([ra.pdfs[0].naam, ra.pdfs[0].nummer, ra.pdfs[0].bedrag_cent], ['Gordelroos Proef Persoon.pdf', 'VACSHING-9', 4500], 'stuurteken weg');
+  assert.equal(ra.onderwerp, 'gordelroos');
+  assert.ok(!JSON.stringify(t.j).includes('Proef Patient'), 'geen notatekst');
+  const fase = function (id) { const x = mm.app('GET /app/mailman/verkoop', {}, ctxVers(false)).j.verkoop.journaal.find(function (y) { return y.id === vRij(mm, id).id; }); return [x.fase, x.open]; };
+  assert.deepEqual(fase(a.id), ['zelf', false], 'herkend terwijl doorsturen uit staat: telt niet');
+  assert.deepEqual(fase(b.id), ['niet_herkend', false]);
+  assert.deepEqual(fase(c.id), ['wacht_toets', true]);
+  assert.equal(mm.app('GET /app/mailman/verkoop', {}, ctxVers(false)).j.open, 1);
+  // doorsturen aan: een nota die ná het aanzetten binnenkwam wacht op doorsturen; fouten tellen 14 dagen
+  vkToestaan(dir);
+  assert.equal(mm.app('POST /app/mailman/verkoop', { door: true, archief: true }, ctxVers(true)).status, 200);
+  klok += 60000;
+  const nieuw = await vkHerkend(mm, 1);
+  assert.deepEqual(fase(nieuw[0].id), ['wacht_door', true]);
+  mm._db.prepare("UPDATE verkoop SET status = 'verstuurd', verstuurd_tijd = ? WHERE gmail_id = ?").run(new Date(klok).toISOString(), nieuw[0].id);
+  assert.deepEqual(fase(nieuw[0].id), ['wacht_archief', true]);
+  mm._db.prepare("UPDATE verkoop SET status = 'geweigerd', bijgewerkt = ? WHERE gmail_id = ?").run(new Date(klok).toISOString(), nieuw[0].id);
+  assert.deepEqual(fase(nieuw[0].id), ['geweigerd', true]);
+  // na 14 dagen: naam weg (ook uit de databank), nummer en bedrag blijven; de oude fout telt niet meer
+  klok += 15 * 86400000;
+  mm.opruim();
+  const pa = JSON.parse(vRij(mm, a.id).pdfs)[0];
+  assert.equal(pa.naam, null); assert.equal(pa.nummer, 'VACSHING-9'); assert.equal(pa.bedrag_cent, 4500);
+  assert.ok(!JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all()).includes('Gordelroos Proef'));
+  assert.deepEqual(fase(nieuw[0].id), ['geweigerd', false]);
+  // de route schrijft niets
+  const voor = JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all()) + JSON.stringify(mm._db.prepare('SELECT * FROM postvak').all());
+  mm.app('GET /app/mailman/verkoop', {}, ctxVers(false));
+  assert.equal(JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all()) + JSON.stringify(mm._db.prepare('SELECT * FROM postvak').all()), voor);
 });

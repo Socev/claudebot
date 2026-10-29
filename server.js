@@ -12211,7 +12211,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/mediatheek' || /^GET \/app\/mediatheek\/bestand\/[a-f0-9]{16}$/.test(route)) return typeof appMediatheek === 'function' ? appMediatheek(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'mediatheek');   // wv1269: App Mediatheek (alleen lezen)
         if (route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
-        if (route === 'GET /app/mailman' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
+        if (route === 'GET /app/mailman' || route === 'GET /app/mailman/verkoop' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
         if (route === 'GET /app/brain/entiteiten' || route.indexOf('GET /app/brain/entiteit/') === 0 || route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
@@ -15640,11 +15640,11 @@ function mailmanRoute(req, res) {
 }
 async function appMailman(req, res, a, s, d, route) {
   if (!mailman) return appWeiger(res, 404, 'MailMan zit niet in deze versie van de pod', 'mailman ontbreekt');
-  if (route === 'GET /app/mailman') res._app.stil = true;
+  if (route === 'GET /app/mailman' || route === 'GET /app/mailman/verkoop') res._app.stil = true;   // wv1998: ook de tab Verkoop (Facturen)
   let r;
   try { r = mailman.app(route, d || {}, appStudioCtx(a, s)); } catch (e) { logError('mailman-app', e); return appWeiger(res, 500, 'MailMan: interne fout', 'mailman fout'); }
   if (r.status !== 200) res._app.reden = 'mailman: ' + String(r.j && r.j.fout || '').slice(0, 60);
-  else if (route !== 'GET /app/mailman') res._app.reden = 'mailman ' + route.slice('POST /app/mailman/'.length) + ' ' + String(d && (d.actie || d.stand || d.sleutel || d.stroom) || '').slice(0, 20);
+  else if (route.indexOf('POST ') === 0) res._app.reden = 'mailman ' + route.slice('POST /app/mailman/'.length) + ' ' + String(d && (d.actie || d.stand || d.sleutel || d.stroom) || '').slice(0, 20);
   return appStuur(res, r.status, r.j);
 }
 function mailmanInfo() { if (!mailman) return { aan: false }; try { return Object.assign({ aan: true }, mailman.info()); } catch (e) { return { aan: true, fout: true }; } }
