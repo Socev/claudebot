@@ -333,6 +333,8 @@ const dag = (iso) => new Date(iso + 'T12:00:00Z').getUTCDay();
     toets('dicht: klaarzetten SLOEL → 409', r1.s === 409 && r1.j.fout === P.DICHT, r1.j);
     const r2 = await vraag('verzend', { nota_id: id('9990001'), ...pdf() });
     toets('dicht: klaarzetten PROEF-nota mag (natoets)', r2.s === 200 && r2.j.verzending.status === 'wacht' && r2.j.verzending.entiteit === 'PROEF', r2.j);
+    nota({ entiteit: 'PROEF', nummer: '9990002', praktijk_id: 'P01', bedrag: 1 });
+    toets('dicht: PROEF-nota bij een echte praktijk → 409 (review KAN 4: alleen proefpraktijk P9x)', (await vraag('verzend', { nota_id: id('9990002'), ...pdf() })).j.fout === P.DICHT);
     db.prepare("update nota_verzending set status='wacht_op_adres', aan='proef@voorbeeld.test' where id=?").run(r2.j.verzending.id);
     const r3 = await vraag(`verzending/${r2.j.verzending.id}/adres`, { aan: 'proef@voorbeeld.test' });
     toets('dicht: adres van een PROEF-verzending mag', r3.s === 200, r3.j);
@@ -345,9 +347,21 @@ const dag = (iso) => new Date(iso + 'T12:00:00Z').getUTCDay();
   }
   // ── fouten ──
   {
-    const kapot = P.maak({ ...io, schrijf: async () => { throw new Error('D1 http 504: time-out'); } });
-    const r = await kapot.schrijf('patienten', { standen: [{ praktijk_id: 'P01', peildatum: '2029-01-01', aantal: 1 }] });
-    toets('D1-fout bij schrijven → 500 met de fouttekst (geen uitzondering)', r.status === 500 && /504/.test(r.j.fout), r);
+    // Opus-review MOET 2: zonder duidelijke weigering (time-out, netwerk, 5xx) of na een geslaagde batch = onzeker (504), nooit "niets gebeurd"
+    for (const [naam, f] of [['time-out', async () => { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; }], ['netwerk', async () => { throw new TypeError('fetch failed'); }], ['D1 5xx', async () => { throw new Error('D1 http 503: weg'); }]]) {
+      const r = await P.maak({ ...io, schrijf: f }).schrijf('patienten', { standen: [{ praktijk_id: 'P01', peildatum: '2029-01-01', aantal: 1 }] });
+      toets('schrijven ' + naam + ' → 504 onzeker (de App herlaadt, stuurt niet opnieuw)', r.status === 504 && r.j.onzeker === true && /niet zeker of het is opgeslagen/.test(r.j.fout), r);
+    }
+    const weiger = await P.maak({ ...io, schrijf: async () => { throw new Error('D1 http 400: NOT NULL constraint failed: x'); } }).schrijf('patienten', { standen: [{ praktijk_id: 'P01', peildatum: '2029-01-01', aantal: 1 }] });
+    toets('D1 weigert (4xx) → 500 serverfout, zeker niets geschreven (batch = transactie)', weiger.status === 500 && !weiger.j.onzeker, weiger);
+    const terug = await P.maak({ ...io, d1: async (batch) => { if (batch.some((x) => /from nota where id=\?/.test(x.sql)) && schrijfLog.length > n9) throw new Error('D1 http 504: lezen'); return io.d1(batch); } });
+    const n9 = schrijfLog.length;
+    const c9 = id('2026040');
+    db.prepare("update nota set status='concept' where id=?").run(c9);
+    const rt = await terug.schrijf(`nota/${c9}/status`, { status: 'definitief' });
+    toets('na een geslaagde batch faalt het teruglezen → 504 "opgeslagen … ververs" (status staat wel)', rt.status === 504 && /opgeslagen, maar/.test(rt.j.fout) && db.prepare('select status from nota where id=?').get(c9).status === 'definitief', rt);
+    const c0 = await vraag(`verzending/${rijen('2026040')[0].id}/annuleer`);
+    toets('een 409 na een geslaagde conditionele update blijft 409 (geen onzeker)', c0.s === 409 && !c0.j.onzeker, c0.j);
     const zonder = P.maak({ d1: io.d1, schrijvenOpen: () => true });
     toets('zonder io.schrijf → 500, geen schrijfactie', (await zonder.schrijf('patienten', { standen: [{ praktijk_id: 'P01', peildatum: '2029-01-01', aantal: 1 }] })).status === 500);
     toets('zonder schrijvenOpen = dicht', (await P.maak({ d1: io.d1, schrijf: io.schrijf }).schrijf('patienten', {})).j.fout === P.DICHT);

@@ -1034,7 +1034,7 @@ function vzB64(s) {
 async function vzAanvraag(env, b) {
   const id = vNum(b.nota_id, 'nota_id', 1, 1e9);
   const { n, p } = await vzNota(env, id);
-  if (!env.open && n.entiteit !== 'PROEF') throw new Gebruikersfout(DICHT, 409);
+  if (!env.open && !(n.entiteit === 'PROEF' && /^P9\d$/.test(String(n.praktijk_id)))) throw new Gebruikersfout(DICHT, 409);   // review KAN 4: alleen een proefpraktijk
   if (n.status !== 'definitief') throw new Gebruikersfout(`nota ${n.nummer} is ${n.status}; alleen definitieve nota's gaan de deur uit`, 409);
   const bytes = vzB64(b.pdf_b64);
   if (bytes.length > VZ_PDF_MAX_POD) throw new Gebruikersfout('pdf te groot (max. 45 kB)', 413);
@@ -1092,7 +1092,7 @@ async function vzAnnuleer(env, id) {
 async function vzAdres(env, b, id) {
   const r = await vzRij(env, id);
   if (!r) throw new Gebruikersfout('verzending niet gevonden', 404);
-  if (!env.open && r.entiteit !== 'PROEF') throw new Gebruikersfout(DICHT, 409);
+  if (!env.open && !(r.entiteit === 'PROEF' && /^P9\d$/.test(String(r.praktijk_id)))) throw new Gebruikersfout(DICHT, 409);
   if (r.status !== 'wacht_op_adres' || !r.aan) throw new Gebruikersfout('hier is geen adres te bevestigen', 409);
   if (String(b.aan || '').trim().toLowerCase() !== String(r.aan).toLowerCase()) throw new Gebruikersfout('het adres is intussen veranderd; ververs de lijst', 409);
   const res = await env.schrijf(VZ.adresSql(r, isoNu(env)));
@@ -1211,10 +1211,19 @@ function maak(io) {
     const open = typeof io.schrijvenOpen === 'function' && io.schrijvenOpen() === true;
     const b = vraagBundel(io.d1);
     let schrijfacties = 0;
+    // Opus-review wv1933 MOET 2: een schrijfbatch die afbreekt zonder duidelijke weigering van D1 (time-out, netwerk, 5xx), of een fout
+    // ná een geslaagde batch (teruglezen), kan wél vastgelegd zijn. Dan geen gewone 500 ("niets gebeurd") maar 504 "onzeker": de App
+    // herlaadt dan de lijst en stuurt niet opnieuw. Alleen een 4xx van D1 (constraint, SQL) is een zekere weigering (batch = transactie).
+    let fase = 'voor';   // voor | onzeker | geschreven
     const env = { nu: null, open, vraag: b.vraag, schrijf: async (stmts) => {
       if (typeof io.schrijf !== 'function') throw new Error('pot-app: io.schrijf ontbreekt');
       schrijfacties++;
-      const r = await io.schrijf(stmts);
+      let r;
+      try { r = await io.schrijf(stmts); } catch (e) {
+        if (!/^D1 http 4\d\d\b/.test(String(e && e.message))) fase = 'onzeker';
+        throw e;
+      }
+      fase = 'geschreven';
       if (!Array.isArray(r) || r.length !== stmts.length) throw new Error('D1: onverwacht antwoord');
       return r;
     } };
@@ -1236,9 +1245,13 @@ function maak(io) {
       else if (o.route === 'verzending/annuleer') uit = await vzAnnuleer(env, o.id);
       else uit = await vzAdres(env, d, o.id);
     } catch (e) {
+      // een Gebruikersfout is altijd een zeker antwoord (ook na de batch: een conditionele update met 0 rijen = 409)
       if (e instanceof Gebruikersfout) uit = fout(e.message, e.status);
-      else if (/UNIQUE constraint/i.test(String(e && e.message))) uit = fout('nummer al in gebruik (UNIQUE): ' + e.message, 409);
+      else if (fase === 'geschreven') uit = fout('opgeslagen, maar het teruglezen lukte niet (' + String(e && e.message).slice(0, 80) + '); ververs de lijst', 504);
+      else if (fase === 'onzeker') uit = fout('geen antwoord van de databank; niet zeker of het is opgeslagen. Ververs de lijst en kijk voordat je opnieuw drukt', 504);
+      else if (/UNIQUE constraint/i.test(String(e && e.message))) uit = fout('nummer al in gebruik (UNIQUE): ' + e.message, 409);   // D1 REST: HTTP 400, "UNIQUE constraint failed: …" (gemeten 29-10)
       else uit = fout('serverfout: ' + (e && e.message), 500);
+      if (uit.status === 504) uit.j.onzeker = true;
     }
     return { ...uit, rondgangen: b.teller.rondgangen, vragen: b.teller.vragen, schrijfacties, route: o.route, id: o.id };
   }
