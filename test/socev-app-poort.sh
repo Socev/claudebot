@@ -320,6 +320,7 @@ async function nepFetch(url, opt) {
     }
     if (fn === 'mk_voor_jou_lijst') {   // wv335: zoals de echte (open/later + 7 dagen gesloten), volgorde van de tabel
       if (sbStaat.vjKapot) return antw(500, { message: 'kapot' });
+      if (sbStaat.vjKapotN > 0) { sbStaat.vjKapotN--; return antw(500, { message: 'hapering' }); }   // wv2004: korte netwerkhapering
       if (sbStaat.vjTraag) await new Promise((ok) => setTimeout(ok, sbStaat.vjTraag));   // wv1820: trage databank
       return antw(200, { punten: (sbStaat.vj || []).filter((x) => b.p_alles || x.status === 'open' || x.status === 'later' || (x.gesloten_op && Date.now() - Date.parse(x.gesloten_op) < 7 * 86400000)).map((x) => Object.assign({}, x)), op: new Date().toISOString() });
     }
@@ -7209,6 +7210,23 @@ async function bewijs(o) {
       r = await AN({ soort: 'kaart', id: 61, toelichting: 'x' });
       H.appStaat.tellers.anders = [];
       toets('27c grens 30 per uur -> 429', r.status === 429 && /te vaak dit uur/.test(r.j.fout), r.status);
+      // wv2004: een netwerkhapering bij het lezen van de lijst → één herpoging na 1 s; lukt die niet, de laatst gelezen lijst (≤ 10 min); ouder = 503
+      {
+        H.appStaat.tellers.anders = [];
+        H.appStaat.vjCache = null; sbStaat.vjKapotN = 1;
+        const tH = Date.now();
+        let rH = await AN({ soort: 'kaart', id: 61, toelichting: 'Proef na een hapering (wv2004)' });
+        toets('27c wv2004: hapering bij het lezen van de lijst -> één herpoging na 1 s, 200', rH.status === 200 && Date.now() - tH >= 900 && sbStaat.vjKapotN === 0, rH.status + ' ' + JSON.stringify(rH.j));
+        await klaarC();
+        H.appStaat.vjCache = null; sbStaat.vjKapot = true;
+        rH = await AN({ soort: 'kaart', id: 61, toelichting: 'Proef met dode lijst (wv2004)' });
+        toets('27c wv2004: lijst onleesbaar, laatst gelezen lijst < 10 min -> 200', rH.status === 200, rH.status + ' ' + JSON.stringify(rH.j));
+        await klaarC();
+        H.appStaat.vjLaatst.op = Date.now() - 11 * 60000; H.appStaat.vjCache = null;
+        rH = await AN({ soort: 'kaart', id: 61, toelichting: 'Proef met oude lijst (wv2004)' });
+        toets('27c wv2004: lijst onleesbaar en laatst gelezen lijst > 10 min -> 503', rH.status === 503 && /niet te lezen/.test(rH.j.fout), rH.status);
+        sbStaat.vjKapot = false; H.appStaat.vjCache = null; H.appStaat.tellers.anders = [];
+      }
       toets('27c Anders valt onder het invoerslot (vaste plek) en staat in de glijdroutes', H.appInvoerRoute('POST /app/anders', false, {}, { id: 'x' }) === true && /'POST \/app\/anders'/.test(blok.slice(blok.indexOf('const APP_GLIJD_ROUTES'), blok.indexOf('const APP_GLIJD_ROUTES') + 2000)));
       await klaarC();
       sbStaat.vj = sbStaat.vj.filter((x) => x.id < 61 || x.id > 69); H.appStaat.vjCache = null;

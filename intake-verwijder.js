@@ -98,7 +98,7 @@ function maak(o) {
   };
   // tabellen van de router (uitvoering, bestemming, besluit, …) bestaan alleen als de router ooit draaide
   const tabellen = () => new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
-  const STUK_TABELLEN = ['vrij_veld', 'bestemming', 'router_stuk', 'live_stuk', 'uitvoering', 'overgang', 'correctie', 'aanlevering', 'scansnap', 'spiegel', 'besluit', 'onderdeel'];
+  const STUK_TABELLEN = ['vrij_veld', 'bestemming', 'router_stuk', 'live_stuk', 'uitvoering', 'overgang', 'correctie', 'aanlevering', 'scansnap', 'spiegel', 'besluit', 'systeem_post', 'onderdeel'];   // systeem_post: wv2004
   const blobPad = (s) => path.join(BLOB, s.slice(0, 2), s);
   const journaalPad = (id) => path.join(o.staat, id + '.journaal.json');
   function schrijfJson(p, j) {
