@@ -179,7 +179,7 @@ M.mkdir();
   const gs = X.schrijf.slice(s0);
   toets('7 Ja met verse vingerafdruk: k01 als kaart + plaatje, dan a01 als reactie op kaart 2; niets anders', u.geplaatst.map((x) => x.id).join() === 'k01,a01' && gs.length === 3 && gs[0][0] === 'kaart' && gs[1][0] === 'beeld' && gs[1][2] === 'image/png' &&
     gs[2][0] === 'reactie' && gs[2][1] === 2 && u.plaatjes === 1, { u, gs });
-  toets('7 kaartvelden naar AIX: alleen de zeven velden, geen link of bron', Object.keys(gs[0][1]).sort().join() === 'categorie,hoe,oplevert,status,titel,wat,zin', gs[0][1]);
+  toets('7 kaartvelden naar AIX: de zeven velden + uitwerking (leeg), geen link of bron', Object.keys(gs[0][1]).sort().join() === 'categorie,hoe,oplevert,status,titel,uitwerking,wat,zin' && gs[0][1].uitwerking === '', gs[0][1]);
   const catNa = fs.readFileSync(CAT, 'utf8');
   toets('7 de pod zet "gedeeld op" en "aix" zelf in de catalogus (k01 en a01), de rest blijft leeg', /### K01 · [^\n]*\n(?:(?!### )[^\n]*\n)*- gedeeld op: \d{1,2}-\d{1,2}-\d{4}\n- aix: 501/.test(catNa) && /### A01 · [^\n]*\n(?:(?!### )[^\n]*\n)*- gedeeld op: \d{1,2}-\d{1,2}-\d{4}\n- aix: 502/.test(catNa) &&
     /### K02 · [^\n]*\n(?:(?!### )[^\n]*\n)*- gedeeld op:\n- aix:\n/.test(catNa), catNa.slice(0, 900));
@@ -430,6 +430,103 @@ M.mkdir();
     const kg = [I.maak({ vault: VAULT, dir: path.join(W, 'grens3') }).bundelKaart({ kaart: 'aix-deel-x', soort: 'deel', reden: 'liggen', liggen: 99999 }, 99999),
       I.maak({ vault: VAULT, dir: path.join(W, 'grens4') }).bundelKaart({ kaart: 'aix-deel-x', soort: 'deel', reden: 'liggen', liggen: 1, alleen_kaarten: false }, 1)];
     toets('12 liggen-kaart binnen de grenzen; enkelvoud "kwam er één"', kg.every((x) => lengte(x.waarom) <= 400 && lengte(x.titel) <= 90) && /kwam er één niet aan de beurt/.test(kg[1].waarom), kg.map((x) => [lengte(x.waarom), x.waarom]));
+  }
+
+  // ── 13. wv1946: uitwerking in de catalogus (citaatregels) en een al gedeelde kaart bijwerken (PATCH, zelfde kaartnummer) ──
+  {
+    const lengte = (t) => [...String(t || '')].length;
+    const V13 = path.join(W, 'v13'), D13 = path.join(W, 'd13');
+    fs.mkdirSync(path.join(V13, '01_Ontwikkeling'), { recursive: true });
+    const CAT13 = path.join(V13, I.CATALOGUS);
+    const UIT = '## Probleem en waarom\n\nVragen bleven hangen.\n\n### Keuzes en waarom\n\n- knoppen onder de vraag\n- een register\n\n```\nals knop -> antwoord\n```';
+    const kblok = (id, titel, uit, extra) => '### ' + id + ' · ' + titel + '\n- titel: ' + titel + '\n- zin: Een korte zin over dit idee.\n- wat: Doet iets handigs voor de gebruiker.\n- oplevert: Scheelt tijd.\n- hoe: Een script en een knop.\n' +
+      (uit !== undefined ? '- uitwerking:\n' + uit.split('\n').map((r) => (r ? '> ' + r : '>')).join('\n') + '\n' : '') + '- categorie: apps\n- status: in gebruik\n- bron: intern\n- deelbaar: concept\n- gedeeld op: ' + (extra || '') + '\n- aix: ' + (extra ? '77' : '') + '\n';
+    const zetCat = (uit) => fs.writeFileSync(CAT13, '# Catalogus\n\n' + kblok('K01', 'Knoppen onder elke vraag', uit, '24-10-2026') + '\n' + kblok('K02', 'Nieuw idee', undefined) + '\n## Antwoordconcepten\n');
+    zetCat(undefined);
+    const store = { 77: { id: 77, winkel: 'socev', titel: 'Knoppen onder elke vraag', zin: 'Een korte zin over dit idee.', wat: 'Doet iets handigs voor de gebruiker.', oplevert: 'Scheelt tijd.', hoe: 'Een script en een knop.', uitwerking: '', categorie: 'apps', status: 'in gebruik' } };
+    const X13 = { schrijf: [], bewerkFout: null, bewerkLandtNiet: false };
+    const aix13 = Object.assign({}, aix, {
+      kaarten: async () => ({ ok: true, kaarten: Object.values(store).map((k) => Object.assign({}, k, { uitwerking: undefined, uitwerking_tekens: lengte(k.uitwerking) })) }),
+      kaart: async (id) => (store[id] ? { ok: true, kaart: Object.assign({}, store[id], { reacties_lijst: [] }) } : fout(404)),
+      plaatsKaart: async (v) => { X13.schrijf.push(['kaart', v]); const id = 90 + X13.schrijf.length; store[id] = Object.assign({ id, winkel: 'socev' }, v); return { ok: true, id, geplaatst: true }; },
+      bewerkKaart: async (id, v) => { X13.schrijf.push(['bewerk', id, v]); if (X13.bewerkFout === 'weg') { if (!X13.bewerkLandtNiet) Object.assign(store[id], v); return fout(0); } if (X13.bewerkFout) return fout(X13.bewerkFout);
+        if (!store[id]) return fout(404); Object.assign(store[id], v); return { ok: true, id, geplaatst: true }; },
+    });
+    const vj13 = [];
+    const M13 = I.maak({ vault: V13, dir: D13, aix: aix13, klok: () => nu, harvester: H, filter: naamToets, plaatjes: PROEF, claude, voorJou: async (p) => { vj13.push(p); return { sleutel: p.sleutel }; } });
+    M13.mkdir();
+    const h0 = M13.concepten().concepten.find((x) => x.id === 'k01').hash;
+    // journaal zoals na de eerste plaatsing: Deel op 23-10, gedeeld 24-10 als kaart 77; bundel afgehandeld met Ja
+    fs.writeFileSync(path.join(D13, 'journaal.jsonl'), [{ t: '2026-10-23T17:00:00.000Z', soort: 'keuze', id: 'k01', keuze: 'deel', hash: h0 }, { t: '2026-10-24T03:26:00.000Z', soort: 'plaats-begin', id: 'k01', hash: h0, bundel: 'b1' },
+      { t: '2026-10-24T03:26:01.000Z', soort: 'gedeeld', id: 'k01', aix: 77, hash: h0, bundel: 'b1' }].map((x) => JSON.stringify(x)).join('\n') + '\n', { mode: 0o600 });
+    fs.writeFileSync(path.join(D13, 'bundel.json'), JSON.stringify({ kaart: 'b1', soort: 'deel', kaart_gezet: '2026-10-24T01:00:00.000Z', afgehandeld: '2026-10-24T03:26:00.000Z', uitkomst: 'ja' }));
+    let c = M13.concepten();
+    toets('13 zonder uitwerking: gedeelde kaart niet in de concepten, hash gelijk aan die van vóór wv1946', !c.concepten.some((x) => x.id === 'k01') && c.concepten.map((x) => x.id).join() === 'k02', c.concepten.map((x) => x.id));
+    toets('13 CLI-bundel zonder bijwerkwerk: geen bundel', M13.bijwerkBundel().ok === false);
+    zetCat(UIT);
+    const F13 = Filter.leesCatalogus(fs.readFileSync(CAT13, 'utf8'));
+    const k01 = F13.kaarten.find((x) => x.id === 'k01');
+    toets('13 catalogus: uitwerking uit de citaatregels, met kopjes, lijst en codeblok; velden eronder blijven gelezen', k01.uitwerking === UIT && k01.categorie === 'apps' && k01.deelbaar === 'concept' && k01.vormfout.length === 0 && F13.kaarten.length === 2, k01);
+    c = M13.concepten();
+    let x1 = c.concepten.find((x) => x.id === 'k01');
+    toets('13 met uitwerking: k01 terug als bijwerken van kaart 77; de oude Deel telt niet (opnieuw kiezen)', x1 && x1.bijwerken === 77 && x1.keuze === null && x1.gewijzigd === true && x1.uitwerking === UIT && x1.hash !== h0 && x1.kan_delen, x1);
+    toets('13 GET /app/ideeen geeft de uitwerking met regels', (await M13.app('GET /app/ideeen')).j.concepten.find((x) => x.id === 'k01').uitwerking.indexOf('\n### Keuzes') > 0);
+    // vaste toets loopt ook over de uitwerking
+    zetCat(UIT + '\n\nZie ook voorbeeld.nl voor meer.');
+    x1 = M13.concepten().concepten.find((x) => x.id === 'k01');
+    toets('13 vaste toets ook over de uitwerking: hostnaam = niet deelbaar, Deel = 409', !x1.kan_delen && x1.treffers.some((t) => t.soort === 'hostnaam') && (await M13.app('POST /app/ideeen/kaart/k01/deel')).status === 409, x1.treffers);
+    zetCat(UIT + '\n\n' + 'Lange tekst. '.repeat(700));
+    x1 = M13.concepten().concepten.find((x) => x.id === 'k01');
+    toets('13 uitwerking > 8000 tekens = vormfout, niet deelbaar', !x1.kan_delen && x1.vormfout.some((v) => /uitwerking te lang/.test(v)), x1.vormfout);
+    zetCat(UIT);
+    // bundel: alleen via de CLI-functie, kaart via de uurronde
+    const bb = M13.bijwerkBundel();
+    toets('13 bijwerkbundel: soort bijwerk, 1 kaart; tweede keer = er staat al een bundel open', bb.ok && bb.bijwerken === 1 && /^aix-bijwerk-\d{8}-\d{4}$/.test(bb.kaart) && M13.bijwerkBundel().ok === false, bb);
+    let z = await M13.zorgBundelKaart();
+    const kk = vj13[vj13.length - 1] || {};
+    toets('13 bundelkaart: besluit, "1 kaart bijwerken?", binnen de grenzen, stappen in de kaart', z.gezet && kk.soort === 'besluit' && /— 1 kaart bijwerken\?$/.test(kk.titel) && lengte(kk.waarom) <= 400 && kk.stappen.length === 3 && /uitwerking open/.test(kk.stappen[1]), kk);
+    // Ja zonder nieuwe Deel: niets naar AIX
+    let u = await M13.plaatsBundel({ kaart: bb.kaart, bevestiging: I.BEVESTIGING_PLAATSEN, vraagId: 'b13a' });
+    toets('13 Ja zonder nieuwe Deel-keuze: niets bijgewerkt (de Deel van 23-10 telt niet)', u.geplaatst.length === 0 && X13.schrijf.length === 0, u);
+    // nieuwe bundel, nu met Deel
+    nu += 60000;
+    toets('13 Deel op een gedeelde kaart met nieuwe tekst mag (geen 409)', (await M13.app('POST /app/ideeen/kaart/k01/deel')).status === 200);
+    const bb2 = (fs.writeFileSync(path.join(D13, 'bundel.json'), JSON.stringify({ kaart: 'aix-bijwerk-2', soort: 'bijwerk', gemaakt: new Date(nu).toISOString() })), 'aix-bijwerk-2');
+    nu += 60000;
+    u = await M13.plaatsBundel({ kaart: bb2, bevestiging: I.BEVESTIGING_PLAATSEN, vraagId: 'b13b' });
+    const w = X13.schrijf[0] || [];
+    toets('13 Ja met vingerafdruk: PATCH op kaart 77 met uitwerking, geen nieuwe kaart', u.geplaatst.length === 1 && u.geplaatst[0].aix === 77 && u.geplaatst[0].bijgewerkt && X13.schrijf.length === 1 && w[0] === 'bewerk' && w[1] === 77 && w[2].uitwerking === UIT && !('link' in w[2]) && store[77].uitwerking === UIT, { u, w });
+    c = M13.concepten();
+    toets('13 na bijwerken: k01 weg uit de concepten; catalogus houdt aix 77', !c.concepten.some((x) => x.id === 'k01') && /- aix: 77/.test(fs.readFileSync(CAT13, 'utf8')), c.concepten.map((x) => x.id));
+    // AIX weg tijdens het bijwerken: hangt, nakijk vergelijkt de tekst
+    zetCat(UIT + '\n\nNog een alinea.');
+    nu += 60000; await M13.app('POST /app/ideeen/kaart/k01/deel');
+    fs.writeFileSync(path.join(D13, 'bundel.json'), JSON.stringify({ kaart: 'aix-bijwerk-3', soort: 'bijwerk', gemaakt: new Date(nu).toISOString() }));
+    X13.bewerkFout = 'weg'; nu += 60000;
+    u = await M13.plaatsBundel({ kaart: 'aix-bijwerk-3', bevestiging: I.BEVESTIGING_PLAATSEN, vraagId: 'b13c' });
+    toets('13 AIX weg tijdens bijwerken: onzeker, stuk hangt (bezig)', u.fouten.length === 1 && /onzeker/.test(u.fouten[0].reden) && M13.concepten().concepten.find((x) => x.id === 'k01').bezig === true, u);
+    X13.bewerkFout = null;
+    let nk = await M13.nakijk();
+    toets('13 nakijk: nieuwe tekst staat op AIX = gedeeld (bijgewerkt)', nk.ok && nk.uit[0].aix === 77 && !M13.concepten().concepten.some((x) => x.id === 'k01'), nk);
+    zetCat(UIT + '\n\nWeer anders.');
+    nu += 60000; await M13.app('POST /app/ideeen/kaart/k01/deel');
+    fs.writeFileSync(path.join(D13, 'bundel.json'), JSON.stringify({ kaart: 'aix-bijwerk-4', soort: 'bijwerk', gemaakt: new Date(nu).toISOString() }));
+    X13.bewerkFout = 'weg'; X13.bewerkLandtNiet = true; nu += 60000;
+    await M13.plaatsBundel({ kaart: 'aix-bijwerk-4', bevestiging: I.BEVESTIGING_PLAATSEN, vraagId: 'b13d' });
+    X13.bewerkFout = null;
+    nk = await M13.nakijk();
+    x1 = M13.concepten().concepten.find((x) => x.id === 'k01');
+    toets('13 nakijk: oude tekst nog op AIX = niet bijgewerkt (plaats-fout), weer te kiezen', nk.ok && nk.uit[0].aix === null && x1 && x1.bijwerken === 77 && !x1.bezig && /niet bijgewerkt/.test(x1.fout || ''), { nk, x1 });
+    // 404 bij bijwerken = plaats-fout, geen nieuwe kaart
+    nu += 60000; await M13.app('POST /app/ideeen/kaart/k01/deel');
+    fs.writeFileSync(path.join(D13, 'bundel.json'), JSON.stringify({ kaart: 'aix-bijwerk-5', soort: 'bijwerk', gemaakt: new Date(nu).toISOString() }));
+    X13.bewerkFout = 404; nu += 60000;
+    u = await M13.plaatsBundel({ kaart: 'aix-bijwerk-5', bevestiging: I.BEVESTIGING_PLAATSEN, vraagId: 'b13e' });
+    toets('13 AIX 404 op bijwerken: fout, geen nieuwe kaart geplaatst', u.fouten.length === 1 && /AIX 404/.test(u.fouten[0].reden) && !X13.schrijf.some((x) => x[0] === 'kaart'), u);
+    X13.bewerkFout = null;
+    // bundelkaart-grenzen bij grote aantallen
+    const kb = I.maak({ vault: V13, dir: path.join(W, 'g13') }).bundelKaart({ kaart: 'aix-bijwerk-x', soort: 'bijwerk' }, 99999);
+    toets('13 bijwerkkaart binnen de grenzen van Voor jou', lengte(kb.waarom) <= 400 && lengte(kb.titel) <= 90 && kb.stappen.every((x) => lengte(x) <= 300), kb);
   }
 
   fs.rmSync(W, { recursive: true, force: true });

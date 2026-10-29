@@ -96,6 +96,7 @@ function maak(deps) {
       .map(function (r) { return { id: r.id, auteur: r.auteur, mens: r.mens, tekst: r.tekst, op: r.aangemaakt, beantwoord: r.beantwoord, nieuw: r.auteur !== ONS && String(r.aangemaakt) > gezien }; });
     const eigen = k.winkel === ONS;
     return { id: k.id, winkel: k.winkel, groep: eigen ? 'ons' : 'buiten', titel: k.titel, zin: k.zin || '', wat: k.wat || '', oplevert: k.oplevert || '', hoe: k.hoe || '',
+      uitwerking: typeof k.uitwerking === 'string' ? k.uitwerking : null, uitwerking_tekens: typeof k.uitwerking === 'string' ? [...k.uitwerking].length : (k.uitwerking_tekens || 0),   // wv1946: tekst alleen bij één kaart
       categorie: k.categorie, status: k.status, link: k.link || null, gesloten: !!k.gesloten, verborgen: !!k.verborgen, beelden: (k.beelden || []).length,
       reacties_aantal: k.reacties == null ? rs.length : k.reacties, reacties: rs, aangemaakt: k.aangemaakt, gewijzigd: k.gewijzigd,
       nieuw: (!eigen && String(k.gewijzigd) > gezien ? 1 : 0) + rs.filter(function (r) { return r.nieuw; }).length,
@@ -203,6 +204,7 @@ function maak(deps) {
   function kaartHash(k, hk) {
     const pl = (k.plaatjes || []).map(function (n) { const h = hk && Object.hasOwn(hk, n) && hk[n] ? String(hk[n].sha256 || '') : ''; return n + '@' + h; }).join(',');
     const x = k.vorm === 'antwoord' ? ['a', k.kaart_id, k.reactie_id, k.soort, k.tekst] : ['k', k.titel, k.zin, k.wat, k.oplevert, k.hoe, k.categorie, k.status, pl];
+    if (k.vorm !== 'antwoord' && k.uitwerking) x.push('u', k.uitwerking);   // wv1946: alleen met uitwerking; zonder blijft de hash wat hij was
     return crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex').slice(0, 16);
   }
   function journaal() {
@@ -215,7 +217,7 @@ function maak(deps) {
       if (!j || typeof j.id !== 'string') return;
       const x = per[j.id] || (per[j.id] = { keuze: null, keuze_hash: null, gedeeld: null, bezig: null, fout: null });
       if (j.soort === 'keuze') { x.keuze = j.keuze; x.keuze_hash = j.hash; x.keuze_op = j.t; }
-      else if (j.soort === 'plaats-begin') { x.bezig = { t: j.t, bundel: j.bundel, hash: j.hash }; x.fout = null; }
+      else if (j.soort === 'plaats-begin') { x.bezig = { t: j.t, bundel: j.bundel, hash: j.hash, bijwerk: Number.isInteger(j.bijwerk) ? j.bijwerk : null }; x.fout = null; }
       else if (j.soort === 'gedeeld') { x.gedeeld = { aix: j.aix, op: j.t, hash: j.hash }; x.bezig = null; }
       else if (j.soort === 'plaats-fout') { x.fout = { t: j.t, reden: j.reden }; x.bezig = null; }
       else if (j.soort === 'beeld-ok') { x.beelden = (x.beelden || []).concat([j.naam]); }
@@ -229,20 +231,34 @@ function maak(deps) {
   }
   function bundelLees() { const b = leesJson(P.bundel, null); return b && typeof b.kaart === 'string' && /^[a-z0-9][a-z0-9_-]{1,60}$/.test(b.kaart) ? b : null; }
   function treffersVan(k) { return toetser.toets(Filter.kaartTekst(k)); }
+  // wv1946: een al gedeelde kaart waarvan de tekst (bv. een nieuwe uitwerking) sinds het delen veranderde: weer in Klaar om te delen, als
+  // bijwerken van de kaart op AIX (PATCH, zelfde kaartnummer). Geeft het AIX-kaartnummer of null.
+  function bijwerkVan(k, x) {
+    return k.vorm === 'kaart' && x && x.gedeeld && Number.isInteger(x.gedeeld.aix) && x.gedeeld.hash !== k.hash ? x.gedeeld.aix : null;
+  }
+  // Telt een Deel voor dit stuk? Nieuw stuk: een Deel die nog geldt. Bijwerken: alleen een Deel die na het vorige delen gekozen werd
+  // (de Deel van de eerste plaatsing telt niet voor de nieuwe tekst).
+  function deelTelt(k, x) {
+    if (!x || x.keuze !== 'deel') return false;
+    if (!x.gedeeld) return true;
+    return bijwerkVan(k, x) !== null && Date.parse(x.keuze_op) > Date.parse(x.gedeeld.op);
+  }
   // Conceptkaarten en antwoordconcepten voor de tab: deelbaar concept, nog niet gedeeld. Treffers van de vaste toets live.
   function concepten() {
     const c = catalogus();
     const j = journaal();
     const b = bundelLees();
-    const lijst = !c.ok ? [] : c.kaarten.filter(function (k) { return k.deelbaar === 'concept' && !(j[k.id] && j[k.id].gedeeld); }).map(function (k) {
+    const lijst = !c.ok ? [] : c.kaarten.filter(function (k) { return k.deelbaar === 'concept' && (!(j[k.id] && j[k.id].gedeeld) || bijwerkVan(k, j[k.id]) !== null); }).map(function (k) {
       const x = j[k.id] || {};
       const treffers = treffersVan(k);
-      const geldig = x.keuze && x.keuze_hash === k.hash;
+      const bijwerk = bijwerkVan(k, x);
+      const geldig = x.keuze && x.keuze_hash === k.hash && (!bijwerk || Date.parse(x.keuze_op) > Date.parse(x.gedeeld.op));
       const pf = k.vorm === 'kaart' ? (k.plaatjes || []).map(function (n) { const p = plaatjeVoor(n); return p.ok ? null : n + ': ' + p.fout; }).filter(Boolean) : [];
       const basis = { id: k.id, vorm: k.vorm, hash: k.hash, keuze: geldig ? x.keuze : null, gewijzigd: !!(x.keuze && !geldig), treffers: treffers, vormfout: (k.vormfout || []).concat(pf),
         kan_delen: !treffers.length && !(k.vormfout || []).length && !pf.length && !x.bezig, bezig: !!x.bezig, fout: x.fout ? plat(x.fout.reden, 160) : null };
       if (k.vorm === 'antwoord') return Object.assign(basis, { kaart: k.kaart_id, reactie: k.reactie_id, soort: k.soort, tekst: String(k.tekst || '').slice(0, 900), titel: (k.soort === 'tip' ? 'Tip bij kaart ' : 'Antwoord bij kaart ') + k.kaart_id });
       return Object.assign(basis, { titel: plat(k.titel, 120), zin: plat(k.zin, 200), wat: plat(k.wat, 500), oplevert: plat(k.oplevert, 400), hoe: plat(k.hoe, 600),
+        uitwerking: [...String(k.uitwerking || '')].slice(0, Filter.UITWERKING ? Filter.UITWERKING.max : 8000).join(''), bijwerken: bijwerk,
         categorie: k.categorie || '', status: k.status || '', plaatjes: k.plaatjes || [] });
     });
     const aangevinkt = lijst.filter(function (k) { return k.keuze === 'deel' && k.kan_delen; }).length;
@@ -255,7 +271,7 @@ function maak(deps) {
     const k = c.kaarten.find(function (x) { return x.id === id; });
     if (!k || k.deelbaar !== 'concept') return { status: 404, j: { ok: false, fout: 'deze kaart staat niet (meer) klaar om te delen' } };
     const x = journaal()[id] || {};
-    if (x.gedeeld) return { status: 409, j: { ok: false, fout: 'deze kaart is al gedeeld' } };
+    if (x.gedeeld && bijwerkVan(k, x) === null) return { status: 409, j: { ok: false, fout: 'deze kaart is al gedeeld' } };
     if (x.bezig || plaatsBezig) return { status: 409, j: { ok: false, fout: 'Socev plaatst nu; probeer het zo nog eens' } };
     if (wat === 'deel') {
       const t = treffersVan(k);
@@ -309,6 +325,7 @@ function maak(deps) {
   // De Voor jou-kaart van de bundel (soort besluit). Stappen in de kaart zelf; geen paden of verwijzingen.
   function bundelKaart(b, n) {
     if (b.soort === 'deel') return deelKaart(b, n);
+    if (b.soort === 'bijwerk') return bijwerkKaart(b, n);
     const start = b.soort === 'startset';
     const totaal = n;
     if (!start && Number.isInteger(b.nieuw) && b.nieuw > 0) n = b.nieuw;
@@ -324,6 +341,31 @@ function maak(deps) {
       waar: 'overal', prive: false, duur_min: start ? 15 : 5, volgorde: 20,
       herkomst: Object.assign({ handmatig: 'aix-bundel', soort: b.soort || 'week', module: 'ideeen', doel: { scherm: 'ideeen', focus: null } },
         typeof b.register === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}#[^#\s|]{2,60}$/.test(b.register) ? { register: [b.register] } : {}) };   // rij in Open vragen aan David
+  }
+  // wv1946: al gedeelde kaarten met een nieuwe tekst (zoals een uitwerking) in één keer bijwerken; aangemaakt met "node ideeen.js bundel".
+  function bijwerkKaart(b, n) {
+    return { sleutel: b.kaart, soort: 'besluit', titel: 'Socevs winkel op AIX — ' + n + ' kaart' + (n === 1 ? '' : 'en') + ' bijwerken?',
+      waarom: kap(n + (n === 1 ? ' kaart' : ' kaarten') + ' in Socevs winkel op aix.socev.dev ' + (n === 1 ? 'heeft' : 'hebben') + ' een nieuwe tekst: een uitgebreide uitwerking, zodat andere agents het idee kunnen ' +
+        'nabouwen. Op AIX staat nu nog de korte versie. Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen of webadressen. ' +
+        'Bank, gezondheid en beveiliging blijven privé.', 400),
+      stappen: ['Open in de app Apps › AIX, tab Klaar om te delen.', 'Klap per kaart de uitwerking open, lees hem en kies Deel of Niet. Wat je niet aanraakt, gaat niet mee.',
+        'Ja met vingerafdruk (op de telefoon): de pod werkt de kaarten op Deel bij in Socevs winkel op AIX, als Socev. Nee: op AIX verandert niets.'],
+      waar: 'overal', prive: false, duur_min: 20, volgorde: 20, herkomst: { handmatig: 'aix-bundel', soort: 'bijwerk', module: 'ideeen', doel: { scherm: 'ideeen', focus: null } } };
+  }
+  // Machinekamer (CLI bundel): een bijwerkbundel als er geen bundel openstaat en er gedeelde kaarten met een nieuwe tekst klaarliggen. Zet alleen
+  // bundel.json; de kaart in Voor jou zet de uurronde van de pod (zorgBundelKaart). Plaatsen blijft plaatsBundel na Davids Ja met vingerafdruk.
+  function bijwerkBundel() {
+    const b = bundelLees();
+    if (b && !b.afgehandeld) return { ok: false, fout: 'er staat al een bundel open: ' + b.kaart };
+    const c = concepten();
+    if (!c.ok) return { ok: false, fout: c.fout };
+    const n = c.concepten.filter(function (k) { return k.bijwerken; }).length;
+    if (!n) return { ok: false, fout: 'geen gedeelde kaarten met een nieuwe tekst' };
+    const d = new Date(klok()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).replace(/[-: ]/g, '').slice(0, 12);
+    const nb = { kaart: 'aix-bijwerk-' + d.slice(0, 8) + '-' + d.slice(8), soort: 'bijwerk', gemaakt: new Date(klok()).toISOString(), nieuw: n,
+      vorige: b ? { kaart: b.kaart, soort: b.soort || null, afgehandeld: b.afgehandeld || null, uitkomst: b.uitkomst || null, vraag_id: b.vraag_id || null } : null };
+    schrijfJson(P.bundel, nb);
+    return { ok: true, kaart: nb.kaart, bijwerken: n, concepten: c.concepten.length };
   }
   // wv965: de bundel opnieuw aanbieden. 23-10 drukte David Ja op de startset vóór hij iets op Deel zette (hij las Ja als "alle"); er ging niets
   // naar AIX en daarna kwam er geen vraag meer. Nu: staat er na een afgehandelde bundel (Ja of Nee) iets op Deel met een keuze die nieuwer is
@@ -390,7 +432,7 @@ function maak(deps) {
       b.afgehandeld = new Date(klok()).toISOString(); b.uitkomst = 'leeg'; schrijfJson(P.bundel, b);
       return { gezet: false, reden: 'niets meer op Deel' };
     }
-    await deps.voorJou(bundelKaart(b, b.soort === 'deel' ? c.bundel.aangevinkt : c.concepten.length));
+    await deps.voorJou(bundelKaart(b, b.soort === 'deel' ? c.bundel.aangevinkt : b.soort === 'bijwerk' ? c.concepten.filter(function (k) { return k.bijwerken; }).length : c.concepten.length));
     b.kaart_gezet = new Date(klok()).toISOString();
     schrijfJson(P.bundel, b);
     const s = staatLees();
@@ -430,7 +472,7 @@ function maak(deps) {
         uit.fouten.push({ id: '-', reden: c.fout }); return uit;
       }
       const j = journaal();
-      const alle = c.kaarten.filter(function (k) { const x = j[k.id] || {}; return k.deelbaar === 'concept' && x.keuze === 'deel' && !x.gedeeld; })
+      const alle = c.kaarten.filter(function (k) { return k.deelbaar === 'concept' && deelTelt(k, j[k.id]); })
         .sort(function (a, b2) { return (a.vorm === 'kaart' ? 0 : 1) - (b2.vorm === 'kaart' ? 0 : 1) || a.id.localeCompare(b2.id); });   // eerst kaarten, dan antwoorden
       const kandidaten = alle.slice(0, GRENS.bundel_max);
       alle.slice(GRENS.bundel_max).forEach(function (k) { uit.overgeslagen.push({ id: k.id, reden: 'meer dan ' + GRENS.bundel_max + ' in één bundel' }); });
@@ -445,15 +487,21 @@ function maak(deps) {
           const mis = (k.plaatjes || []).map(function (n) { const p = plaatjeVoor(n, String(((c.hk || {})[n] || {}).sha256 || '')); if (p.ok) beelden.push(Object.assign(p, { naam: n })); return p.ok ? null : n; }).filter(Boolean);
           if (mis.length) { uit.overgeslagen.push({ id: k.id, reden: 'plaatje niet uit de proefschermen: ' + mis.join(', ') }); continue; }
         }
-        journaalSchrijf({ soort: 'plaats-begin', id: k.id, hash: k.hash, bundel: b.kaart });
+        const bijwerk = bijwerkVan(k, x);
+        if (bijwerk !== null && !A.bewerkKaart) { uit.overgeslagen.push({ id: k.id, reden: 'bijwerken kan deze versie van de pod niet' }); continue; }
+        journaalSchrijf(Object.assign({ soort: 'plaats-begin', id: k.id, hash: k.hash, bundel: b.kaart }, bijwerk !== null ? { bijwerk: bijwerk } : {}));
         let r;
+        const velden = { titel: k.titel, zin: k.zin, wat: k.wat, oplevert: k.oplevert, hoe: k.hoe, uitwerking: k.uitwerking || '', categorie: k.categorie, status: k.status };
         try {
           r = k.vorm === 'antwoord' ? await A.plaatsReactie(k.kaart_id, k.tekst)
-            : await A.plaatsKaart({ titel: k.titel, zin: k.zin, wat: k.wat, oplevert: k.oplevert, hoe: k.hoe, categorie: k.categorie, status: k.status });
+            : bijwerk !== null ? await A.bewerkKaart(bijwerk, velden)   // wv1946: zelfde kaart op AIX, nieuwe tekst
+            : await A.plaatsKaart(velden);
         } catch (e) { r = { ok: false, status: 0, fout: String(e && e.message || e) }; }
+        if (r.ok && bijwerk !== null && r.id !== bijwerk) r = { ok: false, status: 0, fout: 'AIX gaf een ander kaartnummer terug' };   // dan nakijken
         if (r.ok) {
-          journaalSchrijf({ soort: 'gedeeld', id: k.id, aix: r.id, hash: k.hash, bundel: b.kaart, moderatie: r.wacht_op_moderatie || undefined });
-          uit.geplaatst.push({ id: k.id, aix: r.id, wacht_op_moderatie: r.wacht_op_moderatie || undefined });
+          journaalSchrijf(Object.assign({ soort: 'gedeeld', id: k.id, aix: r.id, hash: k.hash, bundel: b.kaart, moderatie: r.wacht_op_moderatie || undefined }, bijwerk !== null ? { bijgewerkt: true } : {}));
+          uit.geplaatst.push(Object.assign({ id: k.id, aix: r.id, wacht_op_moderatie: r.wacht_op_moderatie || undefined }, bijwerk !== null ? { bijgewerkt: true } : {}));
+          if (bijwerk !== null) continue;   // plaatjes: alleen wat nog ontbreekt, via nakijk (zelfde hash als bij Deel)
           for (const p of beelden) {
             let rb;
             try { rb = await A.plaatsBeeld(r.id, p.bin, p.type); } catch (e) { rb = { ok: false, fout: String(e && e.message || e) }; }
@@ -506,6 +554,17 @@ function maak(deps) {
     for (const id of open) {
       const k = (c.kaarten || []).find(function (x) { return x.id === id; });
       if (!k) { uit.push({ id: id, aix: null, onzeker: 'niet meer in de catalogus' }); continue; }
+      if (k.vorm === 'kaart' && j[id].bezig.bijwerk) {
+        // wv1946: bijwerken halverwege gebleven: staat de nieuwe tekst op AIX, dan gedeeld; staat er nog iets anders, dan niet gelukt
+        const aixId = j[id].bezig.bijwerk;
+        const d = await A.kaart(aixId);
+        if (!d.ok) { if (d.status === 404) { journaalSchrijf({ soort: 'plaats-fout', id: id, reden: 'kaart niet meer op AIX (nagekeken)', bundel: j[id].bezig.bundel }); uit.push({ id: id, aix: null }); } else uit.push({ id: id, aix: null, onzeker: d.fout }); continue; }
+        const vgl = function (t) { return String(t == null ? '' : t).normalize('NFKC').replace(/\s+/g, ' ').trim(); };
+        const zelfde = ['titel', 'zin', 'wat', 'oplevert', 'hoe', 'uitwerking'].every(function (v) { return vgl(d.kaart[v]) === vgl(k[v]); });
+        if (zelfde && j[id].bezig.hash === k.hash) { journaalSchrijf({ soort: 'gedeeld', id: id, aix: aixId, hash: k.hash, bundel: j[id].bezig.bundel, bijgewerkt: true, nagekeken: true }); uit.push({ id: id, aix: aixId }); }
+        else { journaalSchrijf({ soort: 'plaats-fout', id: id, reden: 'niet bijgewerkt op AIX (nagekeken)', bundel: j[id].bezig.bundel }); uit.push({ id: id, aix: null }); }
+        continue;
+      }
       if (k.vorm === 'kaart') {
         const d = ks.kaarten.find(function (x) { return x.winkel === ONS && plat(x.titel, 200) === plat(k.titel, 200); });
         if (d) { journaalSchrijf({ soort: 'gedeeld', id: id, aix: d.id, hash: k.hash, bundel: j[id].bezig.bundel, nagekeken: true }); uit.push({ id: id, aix: d.id }); }
@@ -614,7 +673,7 @@ function maak(deps) {
       if (!c.ok) { uit.fout = c.fout; return uit; }
       const j = journaal();
       const s2 = staatLees();
-      const nieuw = c.kaarten.filter(function (k) { return k.deelbaar === 'concept' && !(j[k.id] && j[k.id].gedeeld) && s2.aangeboden[k.id] !== k.hash; });
+      const nieuw = c.kaarten.filter(function (k) { return k.deelbaar === 'concept' && (!(j[k.id] && j[k.id].gedeeld) || bijwerkVan(k, j[k.id]) !== null) && s2.aangeboden[k.id] !== k.hash; });
       uit.geteld = nieuw.length;
       s2.week_tot = uit.op; s2.week = { op: uit.op, geteld: uit.geteld, concepten: uit.concepten };
       schrijfJson(P.staat, s2);
@@ -706,12 +765,17 @@ function maak(deps) {
       filter: !!toetser, catalogus: cat, plaatsing: p, plaatst: plaatsBezig, week: s.week ? { op: s.week.op, geteld: s.week.geteld } : null };
   }
 
-  return { app, lijst, health, mkdir, naarBus, concepten, bundelVoor, isBundel, bundelNee, zorgBundelKaart, plaatsBundel, nakijk, weekRonde, gezienKaarten, plaatjeVoor, bundelKaart };
+  return { app, lijst, health, mkdir, naarBus, concepten, bundelVoor, isBundel, bundelNee, zorgBundelKaart, plaatsBundel, nakijk, weekRonde, gezienKaarten, plaatjeVoor, bundelKaart, bijwerkBundel };
 }
 
 module.exports = { maak, plat, GRENS, GENRE, BUS_PAD, CATALOGUS, BEVESTIGING_PLAATSEN, CONCEPT_SYSTEEM, AIX_URL, ONS };
 
 // Machinekamer: node ideeen.js nakijk  (Socevs AIX-sleutel zoals de pod, VAULT_DIR en IDEEEN_DIR; schrijft alleen het journaal)
+//              node ideeen.js bundel  (wv1946: bijwerkbundel klaarzetten; schrijft alleen bundel.json, geen netwerk)
+if (require.main === module && process.argv[2] === 'bundel') {
+  const M = maak({ vault: process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', dir: process.env.IDEEEN_DIR || '/opt/data/aix-winkel', aix: null });
+  const u = M.bijwerkBundel(); console.log(JSON.stringify(u)); process.exit(u.ok ? 0 : 1);
+}
 if (require.main === module && process.argv[2] === 'nakijk') {
   const AIXmod = require('./aix.js');
   const M = maak({ vault: process.env.VAULT_DIR || '/opt/data/AI_SecondBrain', dir: process.env.IDEEEN_DIR || '/opt/data/aix-winkel', aix: AIXmod.maak({}) });

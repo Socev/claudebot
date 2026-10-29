@@ -149,6 +149,10 @@ const STATUSSEN = ['bedacht', 'in aanbouw', 'in gebruik', 'gestopt'];
 const CATEGORIEEN = ['apps', 'managers-en-bewaking', 'informatieverwerking', 'geheugen-en-kennis', 'spraak-en-beeld', 'agenda-en-taken', 'koppelingen', 'werkwijze', 'overig'];
 const PLAATJE = /^[a-z0-9][a-z0-9._-]{0,60}\.(png|jpe?g|webp)$/;
 const ANTWOORD = { min: 10, max: 800, soorten: ['antwoord', 'tip'] };
+// wv1946: uitwerking (optioneel, ≤ 8000 tekens zoals de site). In de catalogus: een regel "- uitwerking:" en daaronder de tekst als
+// citaatregels ("> ..."), zodat kopjes en opsommingen in de uitwerking de blokindeling (### K..) en de veldregels niet raken.
+const UITWERKING = { max: 8000 };
+const LATIJN = /^[\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]*$/u;
 function leesCatalogus(md) {
   const kaarten = [], fouten = [];
   const delen = String(md || '').replace(/\r\n?/g, '\n').split(/^### /m).slice(1);
@@ -156,11 +160,19 @@ function leesCatalogus(md) {
     const kop = /^([KA]\d{2,3})\b/.exec(blok);
     if (!kop) return;
     const k = { id: kop[1].toLowerCase(), vorm: kop[1][0] === 'A' ? 'antwoord' : 'kaart' };
-    blok.split('\n').slice(1).forEach(function (r) {
+    const regels = blok.split('\n').slice(1);
+    for (let i = 0; i < regels.length; i++) {
+      const r = regels[i];
+      if (k.vorm === 'kaart' && /^- uitwerking:/.test(r) && !Object.hasOwn(k, 'uitwerking')) {   // eerste wint, zoals bij de andere velden
+        const delen = [r.replace(/^- uitwerking:\s?/, '')];
+        while (i + 1 < regels.length && /^>( |$)/.test(regels[i + 1])) { i++; delen.push(regels[i].replace(/^> ?/, '')); }
+        k.uitwerking = delen.join('\n').normalize('NFKC').replace(/\n{3,}/g, '\n\n').trim();
+        continue;
+      }
       const m = /^- ([a-zé ]+?):\s?(.*)$/.exec(r);
       const veld = m ? m[1].trim().replace(/ /g, '_') : null;
       if (veld && ALLE_VELDEN.indexOf(veld) >= 0 && !Object.hasOwn(k, veld)) k[veld] = m[2].trim();   // Fable wv861 #7: "- id:" overschrijft niets; eerste regel wint
-    });
+    }
     k.deelbaar = String(k.deelbaar || '').toLowerCase();
     const f = [];
     if (k.vorm === 'kaart') {
@@ -170,6 +182,9 @@ function leesCatalogus(md) {
       if (STATUSSEN.indexOf(k.status) < 0) f.push('status onbekend');
       if (CATEGORIEEN.indexOf(k.categorie) < 0) f.push('categorie onbekend');
       if (k.link) f.push('link: Socev zet nooit een link (AIX § 4)');
+      k.uitwerking = k.uitwerking || '';
+      if ([...k.uitwerking].length > UITWERKING.max) f.push('uitwerking te lang (' + [...k.uitwerking].length + '/' + UITWERKING.max + ')');
+      if (!LATIJN.test(k.uitwerking)) f.push('uitwerking: alleen Latijns schrift');
       k.plaatjes = k.plaatje ? k.plaatje.split(/\s*,\s*/).filter(Boolean) : [];
       if (k.plaatjes.length > 3) f.push('hooguit 3 plaatjes');
       if (k.plaatjes.some(function (x) { return !PLAATJE.test(x); })) f.push('plaatje: alleen een bestandsnaam uit de proefschermen (png, jpg, webp)');
@@ -190,9 +205,9 @@ function leesCatalogus(md) {
   return { kaarten: kaarten, fouten: fouten };
 }
 // De tekst die op AIX komt (kaart: alle tekstvelden; antwoord: de reactie)
-const kaartTekst = function (k) { return k.vorm === 'antwoord' ? String(k.tekst || '') : [k.titel, k.zin, k.wat, k.oplevert, k.hoe, k.link || ''].join('\n'); };
+const kaartTekst = function (k) { return k.vorm === 'antwoord' ? String(k.tekst || '') : [k.titel, k.zin, k.wat, k.oplevert, k.hoe, k.link || '', k.uitwerking || ''].join('\n'); };
 
-module.exports = { maak: maak, leesNamen: leesNamen, leesCatalogus: leesCatalogus, kaartTekst: kaartTekst, STATUSSEN: STATUSSEN, VELDEN: VELDEN, DEELBAAR: DEELBAAR, CATEGORIEEN: CATEGORIEEN, PLAATJE: PLAATJE };
+module.exports = { maak: maak, leesNamen: leesNamen, leesCatalogus: leesCatalogus, kaartTekst: kaartTekst, STATUSSEN: STATUSSEN, VELDEN: VELDEN, UITWERKING: UITWERKING, DEELBAAR: DEELBAAR, CATEGORIEEN: CATEGORIEEN, PLAATJE: PLAATJE };
 
 if (require.main === module) {
   const a = process.argv.slice(2);

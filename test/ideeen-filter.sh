@@ -112,7 +112,8 @@ toets('catalogus: zin langer dan 160 = vormfout', F.leesCatalogus(goedeKaart('K0
 const c4 = F.leesCatalogus('## Antwoordconcepten\n\n### A01 · tip\n- kaart: 12\n- reactie: 34\n- soort: antwoord\n- tekst: Dank! Zo werkt het precies.\n- deelbaar: concept\n\n### A02 · fout\n- kaart: nul\n- soort: preek\n- tekst: kort\n- deelbaar: concept\n');
 toets('catalogus: antwoordconcept A01 goed (kaart, reactie, soort, tekst)', c4.kaarten[0].vorm === 'antwoord' && c4.kaarten[0].kaart_id === 12 && c4.kaarten[0].reactie_id === 34 && c4.kaarten[0].vormfout.length === 0, c4.kaarten[0]);
 toets('catalogus: A02 zonder kaart, onbekende soort, te korte tekst = vormfout', ['kaart ontbreekt', 'soort onbekend', 'tekst te kort'].every((x) => c4.kaarten[1].vormfout.includes(x)), c4.kaarten[1].vormfout);
-toets('kaartTekst: kaart = titel, zin, wat, oplevert, hoe, link (geen bron); antwoord = tekst', F.kaartTekst({ vorm: 'kaart', titel: 'a', zin: 'z', wat: 'b', oplevert: 'o', hoe: 'h', bron: 'wv1', link: '' }) === 'a\nz\nb\no\nh\n' &&
+toets('kaartTekst: kaart = titel, zin, wat, oplevert, hoe, link, uitwerking (geen bron); antwoord = tekst', F.kaartTekst({ vorm: 'kaart', titel: 'a', zin: 'z', wat: 'b', oplevert: 'o', hoe: 'h', bron: 'wv1', link: '' }) === 'a\nz\nb\no\nh\n\n' &&
+  F.kaartTekst({ vorm: 'kaart', titel: 'a', zin: 'z', wat: 'b', oplevert: 'o', hoe: 'h', link: '', uitwerking: 'U' }) === 'a\nz\nb\no\nh\n\nU' &&
   F.kaartTekst({ vorm: 'antwoord', tekst: 'Dank', bron: 'x' }) === 'Dank');
 
 console.log('\n' + goed + ' groen, ' + fouten + ' rood');

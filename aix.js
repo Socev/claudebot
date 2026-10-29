@@ -25,7 +25,7 @@ const SLEUTEL_PAD = '/opt/data/aix/sleutel';
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const CATEGORIEEN = ['apps', 'managers-en-bewaking', 'informatieverwerking', 'geheugen-en-kennis', 'spraak-en-beeld', 'agenda-en-taken', 'koppelingen', 'werkwijze', 'overig'];
 const STATUSSEN = ['bedacht', 'in aanbouw', 'in gebruik', 'gestopt'];
-const GRENS = { titel: 70, zin: 160, wat: 400, oplevert: 300, hoe: 500, link: 300, reactie: 800, naam: 30, weergave: 30, reden: 200,
+const GRENS = { titel: 70, zin: 160, wat: 400, oplevert: 300, hoe: 500, uitwerking: 8000, link: 300, reactie: 800, naam: 30, weergave: 30, reden: 200,
   kaarten: 300, reacties: 200, winkels: 200, aanvragen: 200, logboek: 500, beelden: 3, ruw: 400,
   json_bytes: 1536 * 1024, beeld_bytes: 2 * 1024 * 1024, timeout_ms: 20000, per_eigenaar: 3 };
 const NAAM = /^[a-z][a-z0-9-]{2,29}$/;
@@ -45,6 +45,7 @@ const ROUTES = [
   ['GET', new RegExp('^/api/beheer/aanvragen$')],
   ['GET', new RegExp('^/api/beheer/logboek\\?sinds=' + ISO_Q + '$')],
   ['POST', new RegExp('^/api/kaart$')],
+  ['PATCH', new RegExp('^/api/kaart/' + ID + '$')],   // wv1946: alleen eigen kaarten bijwerken (plaatsBundel na Davids Ja)
   ['POST', new RegExp('^/api/kaart/' + ID + '/beeld$')],
   ['POST', new RegExp('^/api/kaart/' + ID + '/reactie$')],
   ['POST', new RegExp('^/api/beheer/aanvraag/[0-9a-f]{32}/(toelaten|afwijzen)$')],
@@ -81,6 +82,9 @@ function kaartSchoon(k) {
     titel: tekst(k.titel, GRENS.titel), zin: tekst(k.zin, GRENS.zin), wat: tekst(k.wat, GRENS.wat, true), oplevert: tekst(k.oplevert, GRENS.oplevert, true),
     hoe: tekst(k.hoe, GRENS.hoe, true), categorie: CATEGORIEEN.indexOf(k.categorie) >= 0 ? k.categorie : 'overig', status: STATUSSEN.indexOf(k.status) >= 0 ? k.status : '',
     link: linkVan(k.link), gesloten: !!k.gesloten, reacties: Number.isInteger(k.reacties) && k.reacties >= 0 ? Math.min(k.reacties, 9999) : null, beelden: beelden });
+  // wv1946: de uitwerking staat alleen in GET kaart; een lijst geeft alleen het aantal tekens
+  if (typeof k.uitwerking === 'string') uit.uitwerking = tekst(k.uitwerking, GRENS.uitwerking, true);
+  if (Number.isInteger(k.uitwerking_tekens) && k.uitwerking_tekens >= 0) uit.uitwerking_tekens = Math.min(k.uitwerking_tekens, GRENS.uitwerking);
   if (typeof k.wacht_op_moderatie === 'string') uit.wacht_op_moderatie = tekst(k.wacht_op_moderatie, GRENS.reden);
   return uit;
 }
@@ -287,9 +291,19 @@ function maak(deps) {
   // ── schrijven (alleen deze; aangeroepen na Davids Ja of door de vaste ronde) ──
   async function plaatsKaart(v) {
     const body = {};
-    ['titel', 'zin', 'wat', 'oplevert', 'hoe', 'categorie', 'status'].forEach(function (k) { if (typeof v[k] === 'string' && v[k]) body[k] = v[k]; });   // nooit een link (§ 4)
+    ['titel', 'zin', 'wat', 'oplevert', 'hoe', 'uitwerking', 'categorie', 'status'].forEach(function (k) { if (typeof v[k] === 'string' && v[k]) body[k] = v[k]; });   // nooit een link (§ 4)
     const r = await verzoek('POST', '/api/kaart', body);
     if (r.status === 201 && r.j && r.j.ok && geheel(r.j.id)) return { ok: true, id: r.j.id, geplaatst: r.j.geplaatst === true, wacht_op_moderatie: r.j.wacht_op_moderatie ? tekst(r.j.wacht_op_moderatie, GRENS.reden) : null };
+    return foutVan(r);
+  }
+  // wv1946: een eigen, al gedeelde kaart bijwerken (alle tekstvelden; uitwerking altijd mee, ook leeg, zodat weghalen ook doorkomt). Nooit een link.
+  async function bewerkKaart(id, v) {
+    if (!geheel(Number(id)) || !v || typeof v !== 'object') return { ok: false, status: 400, fout: 'kaart ongeldig' };
+    const body = {};
+    ['titel', 'zin', 'wat', 'oplevert', 'hoe', 'categorie', 'status'].forEach(function (k) { if (typeof v[k] === 'string' && v[k]) body[k] = v[k]; });
+    body.uitwerking = typeof v.uitwerking === 'string' ? v.uitwerking : '';
+    const r = await verzoek('PATCH', '/api/kaart/' + Number(id), body);
+    if (goed(r) && geheel(r.j.id)) return { ok: true, id: r.j.id, geplaatst: r.j.geplaatst === true, wacht_op_moderatie: r.j.wacht_op_moderatie ? tekst(r.j.wacht_op_moderatie, GRENS.reden) : null };
     return foutVan(r);
   }
   async function plaatsBeeld(id, bin, type) {
@@ -318,7 +332,7 @@ function maak(deps) {
     return { sleutel: !!sleutel(), sleutel_fout: sleutelFout, keyid8: keyid ? keyid.slice(0, 8) : null, laatst_ok: stand.laatst_ok, plat_sinds: stand.plat_sinds,
       laatste_fout: stand.laatste_fout, aanroepen: stand.aanroepen };
   }
-  return { verzoek, koppen, ik, winkels, kaarten, kaart, nieuw, beeld, aanvragen, logboek, plaatsKaart, plaatsBeeld, plaatsReactie, toelaten, afwijzen, schors, info };
+  return { verzoek, koppen, ik, winkels, kaarten, kaart, nieuw, beeld, aanvragen, logboek, plaatsKaart, bewerkKaart, plaatsBeeld, plaatsReactie, toelaten, afwijzen, schors, info };
 }
 
 // ── de uurlijkse goedkeuringsronde (§ 5.3 stap 3–4, § 5.4) — deterministisch, geen model ──

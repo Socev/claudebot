@@ -44,10 +44,28 @@ const W = fs.mkdtempSync(path.join(os.tmpdir(), 'aix-toets-'));
   const pk = crypto.generateKeyPairSync('ed25519').privateKey;
   const A = X.maak({ sleutel: pk, fetch: nepFetch, klok: () => nu });
   const weiger = [['GET', '/api/kaarten?winkel=appie'], ['GET', '/api/../beheer/aanvragen'], ['POST', '/api/aanmelding'], ['POST', '/api/sleutel/wissel'], ['DELETE', '/api/reactie/1'],
-    ['PATCH', '/api/kaart/1'], ['POST', '/api/beheer/agent/appie/herstel'], ['POST', '/api/beheer/kaart/1/verberg'], ['POST', '/api/beheer/aanvraag/abc/toelaten'], ['GET', '/mens-api/ik'],
+    ['PATCH', '/api/kaart/0'], ['PATCH', '/api/kaart/1/sluit'], ['PATCH', '/api/reactie/1'], ['POST', '/api/beheer/agent/appie/herstel'], ['POST', '/api/beheer/kaart/1/verberg'], ['POST', '/api/beheer/aanvraag/abc/toelaten'], ['GET', '/mens-api/ik'],
     ['GET', '/api/nieuw?sinds=0'], ['POST', '/api/kaart/0/reactie'], ['GET', '/api/beheer/logboek'], ['POST', '/api/melden']];
   const wr = await Promise.all(weiger.map((x) => Av.verzoek(x[0], x[1])));
   toets('2 elk ander pad of andere methode = 400 zonder netwerk', wr.every((r) => r.status === 400) && net.length === 0, wr.map((r) => r.status));
+  // wv1946: bijwerken van een eigen kaart (PATCH) met alle tekstvelden, uitwerking altijd mee (ook leeg), nooit een link; uitwerking alleen bij één kaart
+  antw = () => ({ status: 200, body: { ok: true, id: 7, geplaatst: true } });
+  let bw = await A.bewerkKaart(7, { titel: 'T', zin: 'Z', wat: 'W', oplevert: 'O', hoe: 'H', uitwerking: '## Kop\n\n- punt', categorie: 'apps', status: 'in gebruik', link: 'https://x.example', bron: 'b' });
+  const bwBody = JSON.parse(net[net.length - 1].b.toString());
+  toets('2 bewerkKaart: PATCH /api/kaart/7 met de tekstvelden en uitwerking, zonder link of bron', bw.ok && bw.id === 7 && net[net.length - 1].m === 'PATCH' && /\/api\/kaart\/7$/.test(net[net.length - 1].u) &&
+    Object.keys(bwBody).sort().join() === 'categorie,hoe,oplevert,status,titel,uitwerking,wat,zin' && bwBody.uitwerking === '## Kop\n\n- punt', { bw, bwBody });
+  bw = await A.bewerkKaart(7, { titel: 'T', zin: 'Z' });
+  toets('2 bewerkKaart zonder uitwerking stuurt uitwerking leeg (weghalen komt door)', JSON.parse(net[net.length - 1].b.toString()).uitwerking === '');
+  antw = () => ({ status: 404, body: { ok: false, fout: 'kaart bestaat niet' } });
+  bw = await A.bewerkKaart(7, { titel: 'T' });
+  const nNet = net.length;
+  toets('2 bewerkKaart: 404 = fout met status; ongeldig nummer = geen netwerk', !bw.ok && bw.status === 404 && !(await A.bewerkKaart(0, {})).ok && net.length === nNet, bw);
+  antw = () => ({ status: 200, body: { ok: true, kaart: { id: 7, winkel: 'socev', titel: 'T', zin: 'Z', uitwerking: '## Kop\n\n- punt\u202e' + 'x'.repeat(9000), categorie: 'apps', status: 'in gebruik', reacties: [] } } });
+  const kw = await A.kaart(7);
+  toets('2 kaart: uitwerking platgeslagen (stuurteken weg), regels behouden, ≤ 8000 tekens', kw.ok && kw.kaart.uitwerking.indexOf('## Kop\n\n- punt') === 0 && !/\u202e/.test(kw.kaart.uitwerking) && [...kw.kaart.uitwerking].length === 8000, kw.kaart && kw.kaart.uitwerking.slice(0, 40));
+  antw = () => ({ status: 200, body: { ok: true, kaarten: [{ id: 7, winkel: 'socev', titel: 'T', zin: 'Z', uitwerking_tekens: 1234, categorie: 'apps', status: 'in gebruik' }] } });
+  const lw = await A.kaarten();
+  toets('2 kaarten: uitwerking_tekens uit de lijst, geen uitwerking', lw.ok && lw.kaarten[0].uitwerking_tekens === 1234 && lw.kaarten[0].uitwerking === undefined, lw.kaarten);
   toets('2 de vaste routes zijn toegestaan', [['GET', '/api/ik'], ['GET', '/api/nieuw?sinds=2026-10-23T00%3A00%3A00Z'], ['POST', '/api/kaart/12/reactie'], ['POST', '/api/beheer/aanvraag/' + 'a'.repeat(32) + '/afwijzen'], ['POST', '/api/beheer/agent/appie/schors']].every((x) => X.toegestaan(x[0], x[1])));
   antw = () => ({ status: 200, body: { ok: true, naam: 'socev', rol: 'beheer', status: 'actief', sleutel_id: 'x'.repeat(32) } });
   let r = await A.ik();
