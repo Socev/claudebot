@@ -116,6 +116,15 @@ CREATE TABLE IF NOT EXISTS besluit (
   toelichting TEXT CHECK (toelichting IS NULL OR length(toelichting) <= 500)
 );
 CREATE INDEX IF NOT EXISTS besluit_factuur ON besluit (factuur_ref);
+-- Antwoordcontract in Supabase (wv1899, fase 4b): per run de uitslag van public.sb_fin_run_zet (ok = run + query_run staan er).
+CREATE TABLE IF NOT EXISTS supabase_zet (
+  run INTEGER PRIMARY KEY REFERENCES reken_run(id),
+  ok INTEGER NOT NULL CHECK (ok IN (0, 1)),
+  run_id INTEGER, query_run_id INTEGER,
+  fout TEXT CHECK (fout IS NULL OR length(fout) <= 60),
+  pogingen INTEGER NOT NULL DEFAULT 1,
+  op TEXT NOT NULL
+);
 `;
 function openReken(dir) {
   maakMap(dir);
@@ -230,6 +239,7 @@ function dekkingRekening(snap, rekening, van, tot, bankbronDir, peilVan) {
     let bytes;
     try { bytes = fs.readFileSync(p); } catch (e) { info.fout = 'bron_ontbreekt'; continue; }
     if (sha256(bytes) !== b.sha256) { info.fout = 'bron_beschadigd'; continue; }
+    info.grootte = bytes.length;
     let br;
     try { br = bronRegels(bytes, rekening.iban); } catch (e) { info.fout = e instanceof FinFout ? e.code : 'bron_onleesbaar'; continue; }
     info.formaat = br.formaat; info.regels = br.rijen.length;
@@ -450,6 +460,11 @@ function laatste(dir, opties) {
     const uit = { ok: true, run: r.id, gemaakt: r.gestart_op, uitkomst: r.uitkomst, code: r.code, bank_tm: r.bank_tm, dekkingsregel: r.dekkingsregel,
       telling: JSON.parse(r.telling), totalen: r.totalen ? JSON.parse(r.totalen) : null, aannames: JSON.parse(r.aannames), facturen: per,
       afgekapt: db.prepare('SELECT count(*) AS n FROM aansluiting WHERE run = ?' + filter).get(...args).n > fs_.length, snapshot: r.snapshot_sha256.slice(0, 12), regels_versie: r.regels_versie };
+    // antwoordcontract (fase 4b): staat deze run in Supabase? (tabel ontbreekt in een reken.sqlite van vóór wv1899 tot de eerste schrijver)
+    try {
+      const z = db.prepare('SELECT ok, query_run_id, fout FROM supabase_zet WHERE run = ?').get(r.id);
+      uit.antwoordcontract = z ? (z.ok ? { query_run_id: z.query_run_id } : { fout: z.fout }) : { nog_niet: true };
+    } catch (e) { uit.antwoordcontract = { nog_niet: true }; }
     if (o.regels) uit.onverklaard_regels = db.prepare('SELECT boekdatum, bedrag_centen, tegenpartij_naam, omschrijving, reden, factuur_ref FROM onverklaard WHERE run = ? ORDER BY reden, boekdatum, entry_ref LIMIT ?').all(r.id, max);
     return uit;
   } finally { db.close(); }
@@ -500,6 +515,99 @@ function besluit(dir, b, nu) {
   } finally { db.close(); }
 }
 
+// ───────────────────────────── antwoordcontract in Supabase (wv1899, fase 4b) ─────────────────────────────
+
+/*
+ * Ontwerp § 3.2 en § 3.6. Per run één contract voor public.sb_fin_run_zet (migratie 0010 in socev-scripts): scope, dekking, tellingen,
+ * vaste aannamecodes en de sha256 van de momentopname en de bronbestanden. Nooit bedragen, IBAN's, namen of omschrijvingen: de RPC is een
+ * witte lijst per veld en weigert al het andere met een vaste code. Een bronbestand gaat alleen mee als het er nog is en zijn sha256 klopt
+ * (Supabase: blob + source_record 'bank' + source_revision met de periode). Statussen uit het FV2-archief zijn vrije tekst: alleen bekende
+ * codes gaan mee, de rest als archief_overig.
+ */
+const APP_STATUSSEN = ['te_beoordelen', 'geen_factuur', 'dubbel', 'in_wachtrij', 'prive_archief', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'verzending_mislukt'];
+const REGISTREER_POGINGEN = 5;
+function uitgeslotenCode(s) {
+  if (s === 'genegeerd' || s === 'geen_factuur' || s === 'archief_leeg') return s;
+  if (/^app_/.test(s)) return APP_STATUSSEN.includes(s.slice(4)) ? s : 'app_overig';
+  return 'archief_overig';
+}
+function contract(db, r, bankbron) {
+  const scope = JSON.parse(r.scope), tel = JSON.parse(r.telling);
+  const fv2 = db.prepare("SELECT factuurdatum AS d FROM aansluiting WHERE run = ? AND factuur_ref LIKE 'archief:%' AND factuurdatum IS NOT NULL").all(r.id)
+    .map((x) => x.d).filter((d) => K.isIsoDatum(d)).sort();
+  const uitgesloten = {};
+  for (const [k, n] of Object.entries(tel.facturen.uitgesloten || {})) { const c = uitgeslotenCode(k); uitgesloten[c] = (uitgesloten[c] || 0) + Number(n); }
+  const aannames = [...new Set(JSON.parse(r.aannames || '[]').map((a) => (/^uitgesloten_/.test(a) ? 'uitgesloten_' + uitgeslotenCode(a.slice(12)) : a)))];
+  const bronnen = [];
+  let zonder = 0;
+  for (const b of JSON.parse(r.bronnen || '[]')) {
+    if (!b.formaat || !b.van || !b.tot || !/^[0-9a-f]{64}$/.test(String(b.sha256))) { zonder++; continue; }
+    let bytes;
+    try { bytes = fs.readFileSync(path.join(bankbron, b.sha256)); } catch (e) { zonder++; continue; }
+    if (sha256(bytes) !== b.sha256) { zonder++; continue; }
+    bronnen.push({ sha256: b.sha256, grootte: bytes.length, formaat: b.formaat, van: b.van, tot: b.tot });
+  }
+  const per = tel.facturen.per_status;
+  return {
+    pod_run: r.id, sleutel: sha256(canon({ run: r.id, gestart: r.gestart_op, snapshot: r.snapshot_sha256, uitkomst: r.uitkomst_hash })),
+    versie: /^[0-9a-f]{7,40}$/.test(String(r.regels_versie)) ? r.regels_versie : 'onbekend',
+    gestart_op: r.gestart_op, klaar_op: r.klaar_op, uitkomst: r.uitkomst, code: r.code || null,
+    scope: { entiteit: scope.entiteit, rekening_label: scope.rekening_label, periode_van: scope.periode_van || null, periode_tot: scope.periode_tot || null,
+      facturenset: scope.facturenset, dekking_van: scope.dekking_van, dekking_tot: scope.dekking_tot, peil_van: scope.peil_van },
+    coverage: { bank_tm: r.bank_tm || null, laatst_gedekt: r.laatst_gedekt || null, dagen_per_status: tel.dagen,
+      facturen_aanname_van: fv2.length ? fv2[0] : null, facturen_aanname_tot: fv2.length ? fv2[fv2.length - 1] : null },
+    rows_matched: tel.facturen.facturen_in_scope, rows_returned: Object.values(per).reduce((a, b) => a + Number(b), 0),
+    telling: { per_status: per, onverklaard: tel.onverklaard || {}, uitgesloten, storno_paren: tel.storno_paren || 0, bronnen_zonder_bestand: zonder },
+    assumptions: aannames, snapshot: r.snapshot_sha256, bronnen,
+  };
+}
+// Een fout van de aanroep zelf → korte vaste code (nooit de melding: die kan een adres of antwoordtekst dragen)
+function rpcFoutCode(e) { const m = /http (\d{3})/.exec(String(e && e.message || '')); return m ? 'rpc_http_' + m[1] : 'rpc_netwerk'; }
+/*
+ * Zet runs die nog niet in Supabase staan: oudste eerst, hooguit opties.max (3) per keer; een geweigerde run hooguit REGISTREER_POGINGEN keer.
+ * rpc(fn, body) → Promise<json> (server.js: appSbRpc; CLI: rpcVanOmgeving). opties.droog: alleen de contracten teruggeven, niets versturen.
+ * → { gezet, al, fouten: [{ run, fout }], open, contracten? }
+ */
+async function registreer(dir, rpc, opties) {
+  const o = Object.assign({ max: 3, bankbron: path.join(path.dirname(STANDAARD_FACTUREN), 'bankbron'), nu: Date.now(), droog: false }, opties || {});
+  if (!fs.existsSync(path.join(dir, 'reken.sqlite'))) return { gezet: 0, al: 0, fouten: [], open: 0 };
+  const db = openReken(dir);
+  try {
+    const open = db.prepare('SELECT r.* FROM reken_run r LEFT JOIN supabase_zet z ON z.run = r.id WHERE r.klaar_op IS NOT NULL AND r.uitkomst IS NOT NULL AND (z.run IS NULL OR (z.ok = 0 AND z.pogingen < ?)) ORDER BY r.id')
+      .all(REGISTREER_POGINGEN);
+    const uit = { gezet: 0, al: 0, fouten: [], open: open.length };
+    const beurt = open.slice(0, Math.max(1, Math.min(Number(o.max) || 3, 50)));
+    if (o.droog) { uit.contracten = beurt.map((r) => contract(db, r, o.bankbron)); return uit; }
+    const zet = db.prepare('INSERT INTO supabase_zet (run, ok, run_id, query_run_id, fout, pogingen, op) VALUES (?, ?, ?, ?, ?, 1, ?) ON CONFLICT (run) DO UPDATE SET ok = excluded.ok, run_id = excluded.run_id, query_run_id = excluded.query_run_id, fout = excluded.fout, pogingen = supabase_zet.pogingen + 1, op = excluded.op');
+    for (const r of beurt) {
+      let antw = null, fout = null, c = null;
+      try { c = contract(db, r, o.bankbron); } catch (e) { fout = 'contract'; }
+      if (c) { try { antw = await rpc('sb_fin_run_zet', { p: c }); } catch (e) { fout = rpcFoutCode(e); } }
+      const op = new Date(o.nu).toISOString();
+      if (!fout && antw && antw.ok === true && Number.isInteger(antw.run_id) && Number.isInteger(antw.query_run_id)) {
+        zet.run(r.id, 1, antw.run_id, antw.query_run_id, null, op);
+        if (antw.nieuw === false) uit.al++; else uit.gezet++;
+      } else {
+        const f = fout || (antw && typeof antw.fout === 'string' && /^[a-zA-Z0-9_.:]{1,60}$/.test(antw.fout) ? antw.fout : 'antwoord_onbekend');
+        zet.run(r.id, 0, null, null, f, op);
+        uit.fouten.push({ run: r.id, fout: f });
+      }
+    }
+    uit.open = open.length - uit.gezet - uit.al;
+    return uit;
+  } finally { db.close(); }
+}
+function rpcVanOmgeving() {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, ''), key = process.env.SUPABASE_SERVICE_ROLE || '';
+  if (!url || !key) throw new FinFout('geen_supabase', 'SUPABASE_URL en SUPABASE_SERVICE_ROLE ontbreken');
+  return async function (fn, body) {
+    const r = await fetch(url + '/rest/v1/rpc/' + fn, { method: 'POST', headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(8000) });
+    if (!r.ok) throw new Error('rpc ' + fn + ' http ' + r.status);
+    return r.json();
+  };
+}
+
 // ───────────────────────────── CLI ─────────────────────────────
 
 function argsVan(argv) {
@@ -510,29 +618,35 @@ function argsVan(argv) {
   }
   return a;
 }
-function main(argv) {
+// Geeft een Promise; de uitvoer (JSON op stdout) is pas compleet als die klaar is. Supabase alleen met --registreer of het commando registreer.
+async function main(argv) {
   const a = argsVan(argv);
   const dir = a.dir || process.env.FIN_REKEN_DIR || STANDAARD_DIR;
   const nu = Date.now();
   const cmd = a._[0] || 'stand';
+  const facturen = a.facturen || process.env.FIN_FACTUREN || STANDAARD_FACTUREN;
+  const bankbron = a.bankbron || path.join(path.dirname(facturen), 'bankbron');
   let uit;
   if (cmd === 'run') {
-    uit = run({ dir, facturen: a.facturen || process.env.FIN_FACTUREN || STANDAARD_FACTUREN, bankbron: a.bankbron, entiteit: a.entiteit || 'tolgaarde', rekening: a.rekening,
+    uit = run({ dir, facturen, bankbron: a.bankbron, entiteit: a.entiteit || 'tolgaarde', rekening: a.rekening,
       snapshot: a.snapshot, periode: { van: a.van || null, tot: a.tot || null }, nu });
     uit.opruim = opruim(dir, nu);
+    if (a.registreer) uit.supabase = await registreer(dir, rpcVanOmgeving(), { bankbron, nu });
+  } else if (cmd === 'registreer') {
+    uit = await registreer(dir, a.droog ? null : rpcVanOmgeving(), { bankbron, nu, max: a.max, droog: !!a.droog });
   } else if (cmd === 'stand') uit = laatste(dir, { entiteit: a.entiteit || 'tolgaarde', status: a.status, max: a.max, regels: !!a.regels });
   else if (cmd === 'opruim') uit = opruim(dir, nu);
   else if (cmd === 'besluit') uit = besluit(dir, { factuur_ref: a.factuur, entry_refs: String(a['entry-refs'] || '').split(',').filter(Boolean), oordeel: a.oordeel, wie: a.wie, bron: a.bron, toelichting: a.toelichting }, nu);
-  else throw new FinFout('onbekend', 'gebruik: run|stand|opruim|besluit');
+  else throw new FinFout('onbekend', 'gebruik: run|stand|opruim|besluit|registreer');
   process.stdout.write(JSON.stringify(uit, null, 1) + '\n');
 }
 if (require.main === module) {
-  try { main(process.argv.slice(2)); }
-  catch (e) {
+  main(process.argv.slice(2)).catch(function (e) {
     // een onverwachte fout kan bankinhoud in zijn melding dragen: alleen de naam, de stapel alleen met FIN_DEBUG=1 (op de pod, nooit in een rapport)
     if (process.env.FIN_DEBUG === '1') process.stderr.write(String(e && e.stack || e) + '\n');
     process.stdout.write(JSON.stringify({ ok: false, fout: e instanceof FinFout ? e.code : 'fout', uitleg: e instanceof FinFout ? e.uitleg : String(e && e.name || 'fout') }) + '\n'); process.exitCode = 1;
-  }
+  });
 }
 
-module.exports = { FinFout, STANDAARD_DIR, SCHEMA, openReken, momentopname, snapshotPad, bronRegels, keten, gemaaktOp, dekkingRekening, rekeningVan, facturenVan, run, laatste, opruim, besluit, dekkingsregel, main };
+module.exports = { FinFout, STANDAARD_DIR, SCHEMA, openReken, momentopname, snapshotPad, bronRegels, keten, gemaaktOp, dekkingRekening, rekeningVan, facturenVan, run, laatste, opruim, besluit, dekkingsregel,
+  contract, registreer, uitgeslotenCode, main };

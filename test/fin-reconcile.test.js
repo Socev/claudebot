@@ -682,3 +682,103 @@ test('CLI: node fin-reconcile.js run/stand geeft JSON; een onbekend commando gee
   assert.equal(c.status, 1);
   assert.equal(JSON.parse(c.stdout).fout, 'onbekend');
 });
+
+// ───────────────────────────── 4b: antwoordcontract in Supabase (wv1899) ─────────────────────────────
+
+const CONTRACT_SLEUTELS = {
+  top: ['assumptions', 'bronnen', 'code', 'coverage', 'gestart_op', 'klaar_op', 'pod_run', 'rows_matched', 'rows_returned', 'scope', 'sleutel', 'snapshot', 'telling', 'uitkomst', 'versie'],
+  scope: ['dekking_tot', 'dekking_van', 'entiteit', 'facturenset', 'peil_van', 'periode_tot', 'periode_van', 'rekening_label'],
+  coverage: ['bank_tm', 'dagen_per_status', 'facturen_aanname_tot', 'facturen_aanname_van', 'laatst_gedekt'],
+  telling: ['bronnen_zonder_bestand', 'onverklaard', 'per_status', 'storno_paren', 'uitgesloten'],
+  bron: ['formaat', 'grootte', 'sha256', 'tot', 'van'],
+};
+const sleutels = (o) => Object.keys(o).sort();
+// elk getal in het contract is een telling (≤ 5000), behalve pod_run en de bestandsgrootte: geen bedrag past erin
+function getallen(x, pad, uit) {
+  if (typeof x === 'number') uit.push([pad, x]);
+  else if (x && typeof x === 'object') for (const [k, v] of Object.entries(x)) getallen(v, pad + '.' + k, uit);
+  return uit;
+}
+
+test('4b contract: alleen de velden van de witte lijst; geen bedragen, IBAN\'s, namen of omschrijvingen; bronbestanden met sha256, grootte en periode', async () => {
+  const t = opzet();
+  const j = jaar(t);
+  const r = draai(t);
+  const bankbron = path.join(t.fdb.dir, 'bankbron');
+  const d = await FR.registreer(t.rk, null, { bankbron, droog: true, nu: NU });
+  assert.equal(d.open, 1);
+  const c = d.contracten[0];
+  assert.deepEqual(sleutels(c), CONTRACT_SLEUTELS.top);
+  assert.deepEqual(sleutels(c.scope), CONTRACT_SLEUTELS.scope);
+  assert.deepEqual(sleutels(c.coverage), CONTRACT_SLEUTELS.coverage);
+  assert.deepEqual(sleutels(c.telling), CONTRACT_SLEUTELS.telling);
+  for (const b of c.bronnen) {
+    assert.deepEqual(sleutels(b), CONTRACT_SLEUTELS.bron);
+    assert.equal(b.grootte, fs.statSync(path.join(bankbron, b.sha256)).size);
+    assert.ok(b.van <= b.tot && /^abn_/.test(b.formaat));
+  }
+  assert.equal(c.bronnen.length, 12);
+  assert.equal(c.telling.bronnen_zonder_bestand, 0);
+  assert.equal(c.pod_run, r.run);
+  assert.equal(c.rows_matched, 20);
+  assert.equal(c.rows_returned, Object.values(c.telling.per_status).reduce((a, b) => a + b, 0));
+  assert.match(c.scope.rekening_label, /^…\d{4}$/);
+  assert.equal(c.coverage.facturen_aanname_van, j.facturen.map((f) => f.datum).sort()[0]);
+  for (const a of c.assumptions) assert.match(a, /^[a-z0-9_+-]+$/);
+  const tekst = JSON.stringify(c);
+  for (const verboden of [TG, ...Object.values(LEV), 'Leverancier', 'Klant', 'Bank Proef', 'Factuurnummer', 'kosten', 'ontvangst', ...j.facturen.map((f) => fmt(f.incl))])
+    assert.ok(!tekst.includes(verboden), 'contract bevat ' + verboden);
+  for (const [p, n] of getallen(c, '', [])) if (!/\.(pod_run|grootte)$/.test(p)) assert.ok(Number.isInteger(n) && n >= 0 && n <= 5000, p + ' = ' + n);
+  // FV2-status is vrije tekst: alleen bekende codes
+  assert.equal(FR.uitgeslotenCode('archief_Jansen BV'), 'archief_overig');
+  assert.equal(FR.uitgeslotenCode('app_iets_nieuws'), 'app_overig');
+  assert.equal(FR.uitgeslotenCode('app_concept_klaar'), 'app_concept_klaar');
+  assert.equal(FR.uitgeslotenCode('genegeerd'), 'genegeerd');
+});
+
+test('4b registreer: één keer per run (idempotent), vaste foutcode, hooguit 5 pogingen; een ontbrekend bronbestand gaat niet mee', async () => {
+  const t = opzet();
+  jaar(t, { zonderBron: [3] });
+  const r = draai(t);
+  const bankbron = path.join(t.fdb.dir, 'bankbron');
+  const gezien = new Set(), aanroepen = [];
+  const goed = async (fn, body) => { aanroepen.push([fn, body]); const nieuw = !gezien.has(body.p.sleutel); gezien.add(body.p.sleutel); return { ok: true, nieuw, run_id: 11, query_run_id: 22 }; };
+  const a = await FR.registreer(t.rk, goed, { bankbron, nu: NU });
+  assert.deepEqual(a, { gezet: 1, al: 0, fouten: [], open: 0 });
+  assert.equal(aanroepen[0][0], 'sb_fin_run_zet');
+  assert.equal(aanroepen[0][1].p.bronnen.length, 11);
+  assert.equal(aanroepen[0][1].p.telling.bronnen_zonder_bestand, 1);
+  assert.deepEqual(await FR.registreer(t.rk, goed, { bankbron, nu: NU }), { gezet: 0, al: 0, fouten: [], open: 0 });
+  assert.equal(aanroepen.length, 1, 'een geregistreerde run gaat niet nog eens');
+  assert.deepEqual(FR.laatste(t.rk, {}).antwoordcontract, { query_run_id: 22 });
+  // tweede run: Supabase weigert met een vaste code → bijgehouden, na 5 pogingen niet meer vanzelf
+  const r2 = draai(t, { snapshot: r.snapshot });
+  assert.deepEqual(FR.laatste(t.rk, {}).antwoordcontract, { nog_niet: true });
+  let n = 0;
+  const weiger = async () => { n++; return { ok: false, fout: 'scope.entiteit' }; };
+  for (let i = 0; i < 5; i++) assert.deepEqual((await FR.registreer(t.rk, weiger, { bankbron, nu: NU })).fouten, [{ run: r2.run, fout: 'scope.entiteit' }]);
+  assert.equal((await FR.registreer(t.rk, weiger, { bankbron, nu: NU })).open, 0);
+  assert.equal(n, 5);
+  assert.deepEqual(FR.laatste(t.rk, {}).antwoordcontract, { fout: 'scope.entiteit' });
+  // een fout van de aanroep zelf → alleen de HTTP-code; een vreemd antwoord → antwoord_onbekend
+  const r3 = draai(t, { snapshot: r.snapshot });
+  assert.deepEqual((await FR.registreer(t.rk, async () => { throw new Error('rpc sb_fin_run_zet http 400 https://x.invalid geheim'); }, { bankbron, nu: NU })).fouten, [{ run: r3.run, fout: 'rpc_http_400' }]);
+  assert.deepEqual((await FR.registreer(t.rk, async () => { throw new TypeError('fetch failed'); }, { bankbron, nu: NU })).fouten, [{ run: r3.run, fout: 'rpc_netwerk' }]);
+  assert.deepEqual((await FR.registreer(t.rk, async () => ({ ok: false, fout: 'NL91 ABNA 0417 1643 00 / € 1.234,56' }), { bankbron, nu: NU })).fouten, [{ run: r3.run, fout: 'antwoord_onbekend' }]);
+  assert.equal((await FR.registreer(t.rk, goed, { bankbron, nu: NU })).gezet, 1);
+});
+
+test('4b CLI: registreer --droog geeft het contract zonder te versturen; zonder Supabase-omgeving een vaste foutcode', () => {
+  const t = opzet();
+  jaar(t);
+  draai(t);
+  const { spawnSync } = require('child_process');
+  const env = { PATH: process.env.PATH, HOME: t.dir, TZ: 'Europe/Amsterdam' };
+  const a = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'fin-reconcile.js'), 'registreer', '--droog', '--dir', t.rk, '--facturen', t.pad], { env, encoding: 'utf8' });
+  const ja = JSON.parse(a.stdout);
+  assert.equal(ja.contracten.length, 1, a.stdout + a.stderr);
+  assert.equal(ja.contracten[0].bronnen.length, 12);
+  const b = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'fin-reconcile.js'), 'registreer', '--dir', t.rk, '--facturen', t.pad], { env, encoding: 'utf8' });
+  assert.equal(b.status, 1);
+  assert.equal(JSON.parse(b.stdout).fout, 'geen_supabase');
+});

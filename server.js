@@ -14968,6 +14968,12 @@ async function finAansluiting(d) {
   if (d.vers === true) {
     if (Date.now() - finRunLaatst < 600000) vers = { ok: false, fout: 'hooguit één nieuwe run per 10 minuten; hieronder de laatste' };
     else { finRunLaatst = Date.now(); vers = await finRunKind(entiteit); }
+    // wv1899 (fase 4b): elke run ook als antwoordcontract in Supabase (run + query_run, bronbestanden als blob/bron/versie; nooit bedragen,
+    // IBAN's of namen: public.sb_fin_run_zet is een witte lijst). Ook eerder niet gelukte runs (hooguit 3 per keer); een fout raakt het antwoord niet.
+    if (vers && vers.ok) {
+      try { vers.supabase = await fr.registreer(FIN_REKEN_DIR, function (fn, body) { return appSbRpc(fn, body, 8000); }, { bankbron: path.join(FACTUREN_DIR, 'bankbron') }); }
+      catch (e) { logError('fin-reconcile', e); vers.supabase = { fout: 'registratie_faalde' }; }
+    }
   }
   try {
     const uit = fr.laatste(FIN_REKEN_DIR, { entiteit, status: d.status ? String(d.status) : null, max: Number(d.max) || 100, regels: d.regels === true });
