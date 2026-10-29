@@ -4,9 +4,11 @@
 // dezelfde database. bank-lezer.js (opdracht app-financien) roept dit aan; de pod geeft het door aan GET /app/financien.
 //
 // Het antwoord wordt veld voor veld opgebouwd (nooit een bankobject doorgeven; Fable wv771 #9): geen IBAN of rekeningnummer, geen
-// machtiging, geen omschrijving, geen losse posten, geen saldo behalve de dekking van de vaste-lastenrekening. Steun heet "Steun (vast)",
-// een externe rekening "extern", een PayPal-ontvanger of een naam onder "dubbel" alleen als hij in de linkslijst staat (kan een persoon
-// zijn). Een fout in één blok maakt alleen dat blok leeg; de foutmelding is generiek (geen tegenpartij in api.log; Fable #17).
+// machtiging, geen omschrijving, geen losse posten, geen saldo behalve de dekking van de vaste-lastenrekening. Namen wel (wv1957, David
+// 28-10: "Je moet NIETS voor mij afschermen"; dit antwoord gaat alleen naar zijn App): steun met de naam uit het archief, een externe
+// rekening met zijn naam (plus extern: true), een PayPal-ontvanger en een aanbieder onder "dubbel" altijd bij naam, ook als het een
+// persoon is. De briefing (hieronder) gaat via de n8n-tabel ochtend_buffer en Voor jou-kaarten en houdt de oude regels (wv777).
+// Een fout in één blok maakt alleen dat blok leeg; de foutmelding is generiek (geen tegenpartij in api.log; Fable #17).
 // Dit bestand schrijft niets; bank-lezer.js (archiefKlaar) werkt vóór het lezen wel de cache en de indeling bij, zoals bij elke leesopdracht.
 //
 // Opzeglinks (Fable #8): de vault-pagina levert link, soort, bron en datum; de host moet in LINK_HOSTS staan voor dat herkenwoord
@@ -125,7 +127,7 @@ function vasteRekening(a) {
   const l = a.db.prepare('SELECT rek, bron, eigenaar FROM rekeningen').all().filter(function (r) { return r.bron !== 'bunq' && !/^(extern|pot)$/i.test(String(r.eigenaar || '')); });
   return l.length === 1 ? l[0].rek : null;
 }
-function rekNaam(n, extern) { return extern ? 'extern' : (veilig(n, 30) || 'eigen rekening'); }
+function rekNaam(n, extern) { return veilig(n, 30) || (extern ? 'extern' : 'eigen rekening'); }
 
 // ── de blokken ──
 function blokMaand(A, a, m) {
@@ -198,7 +200,8 @@ function linkRij(x, links) { return paraplu(x) ? null : x.paypal_dienst ? (x.pay
 function vergelijkBedrag(x) { return x.ritme === 'termijnen' ? x.bedrag : x.per_maand; }
 function naarPerMaand(x, d) { return x.ritme === 'termijnen' ? d * (x.termijnen || 10) / 12 : d; }
 
-function blokVasteLasten(A, a, nu, links, signalen) {
+// pp (alleen de App, wv1957): dienst → naam van de PayPal-ontvanger, voor een dienst die bank-archief (paypalNaam) niet bij naam noemt
+function blokVasteLasten(A, a, nu, links, signalen, pp) {
   const rek = vasteRekening(a);
   if (!rek) return { geen: 'nog geen gezamenlijke vaste-lastenrekening gekoppeld' };
   const vl = A.vasteLasten(a, { rek: rek });
@@ -210,6 +213,7 @@ function blokVasteLasten(A, a, nu, links, signalen) {
   const reeksJaar = A.reeksenBereken(p.lasten, { ref: refJaar, start: st }).filter(function (x) { return x.actief; });
   const reeksDrie = A.reeksenBereken(p.lasten, { ref: refDrie, start: st }).filter(function (x) { return x.actief; });
   const rijen = A.rijenVan(reeksNu), jaar = A.rijenVan(reeksJaar), drie = A.rijenVan(reeksDrie);
+  if (pp) [rijen, jaar, drie].forEach(function (l) { l.forEach(function (x) { if (x.paypal_dienst && !x.paypal_naam && pp.get(x.paypal_dienst)) x.paypal_naam = pp.get(x.paypal_dienst); }); });
   if (A.paypalStap) A.paypalStap(a, rijen, nu);   // wv779: prijsstap van een PayPal-dienst uit de ontvangstbewijzen
   // wisselende posten alleen vergelijken als het gemiddelde van een jaar geleden zelf al een heel jaar besloeg (Fable #3)
   const jaarVol = !!(start && start <= plusMaanden(refJaar, -12));
@@ -259,7 +263,7 @@ function blokVasteLasten(A, a, nu, links, signalen) {
   });
   return { rekening: veilig(vl.rekening, 30) || 'Vaste lasten', vanaf: vl.vanaf || null, peildatum: vl.peildatum, totaal_per_maand: getal(vl.totaal_per_maand),
     posten: uit.length, rijen: uit,
-    steun: (vl.steun || []).map(function (s) { return { naam: 'Steun (vast)', per_maand: getal(s.per_maand), dag: s.dag | 0 }; }),
+    steun: (vl.steun || []).map(function (s) { return { naam: veilig(s.naam, 30) || 'Steun (vast)', per_maand: getal(s.per_maand), dag: s.dag | 0 }; }),
     vaste_storting: (vl.vaste_storting || []).map(function (s) { return { van: veilig(s.van, 30) || 'eigen rekening', bedrag: getal(s.bedrag), dag: s.dag | 0 }; }) };
 }
 function blokStroom(A, a, m) {
@@ -306,8 +310,9 @@ function signaalEnergie(a, mNu, vanaf, signalen) {
   signalen.push({ soort: 'energie', naam: 'Energie en warmte', toon: pct > 0 ? 'wacht' : 'info',
     zin: 'Energie en warmte ' + venster + ' ' + ms[ms.length - 1].slice(0, 4) + ': ' + eur(nu) + '; dezelfde maanden een jaar eerder ' + eur(oud) + ' (' + (pct > 0 ? '+' : '−') + Math.round(Math.abs(pct) * 100) + '%).' });
 }
-// Dezelfde aanbieder op twee eigen rekeningen (geen betaaldienstverlener, zelfde subcategorie); naam alleen als hij in de linkslijst staat
-function signaalDubbel(A, a, links, signalen) {
+// Dezelfde aanbieder op twee eigen rekeningen (geen betaaldienstverlener, zelfde subcategorie). In de App (vol) altijd bij naam; in de
+// briefing alleen als hij in de linkslijst staat (kan een persoon zijn)
+function signaalDubbel(A, a, links, signalen, vol) {
   const ab = A.abonnementen(a, {}).abonnementen || [];
   const per = new Map();
   ab.forEach(function (b) {
@@ -319,18 +324,18 @@ function signaalDubbel(A, a, links, signalen) {
   per.forEach(function (l, k) {
     const reks = new Set(l.map(function (b) { return b.rekening; }));
     if (reks.size < 2) return;
-    const naam = bekend(l[0].naam, links) ? veilig(l[0].naam, 30) : (veilig(l[0].subcategorie, 30) || 'Een abonnement');
+    const naam = (vol || bekend(l[0].naam, links) ? veilig(l[0].naam, 30) : '') || veilig(l[0].subcategorie, 30) || 'Een abonnement';
     signalen.push({ soort: 'dubbel', naam: naam, toon: 'wacht', post: naam, sleutel: k, link: linkVoor(l[0].naam, links),
       zin: naam + ' loopt op ' + reks.size + ' eigen rekeningen (samen ' + eur(l.reduce(function (s, b) { return s + (b.per_maand || 0); }, 0)) + ' per maand): twee abonnementen of één dubbel?' });
   });
 }
-function blokPaypal(P, a, links, signalen, A) {
-  const d = P.diensten(a);
+// d = P.diensten(a) (één keer gelezen in bereken)
+function blokPaypal(d, links, signalen, A) {
   const act = (d.diensten || []).filter(function (r) { return r.actief; });
-  // naam: bekende dienst of organisatie (A.paypalNaam, wv779), anders alleen als hij in de linkslijst staat (kan een persoon zijn)
+  // naam: bekende dienst of organisatie (A.paypalNaam, wv779), anders de ontvanger zelf, ook een persoon (wv1957)
   const naamVan = function (r) {
     const n = A && A.paypalNaam ? A.paypalNaam(r.dienst, r.naam) : null;
-    return n ? veilig(n, 30) : bekend(r.naam, links) || bekend(r.dienst, links) ? veilig(r.naam, 30) : 'PayPal-dienst';
+    return veilig(n || r.naam, 30) || 'PayPal-dienst';
   };
   (d.diensten || []).forEach(function (r) {
     (r.signalen || []).forEach(function (s) {
@@ -360,14 +365,17 @@ function bereken(A, a, o) {
   uit.deze_maand = blok('maand', function () { return blokMaand(A, a, mNu); });
   uit.vorige_maand = blok('maand', function () { return blokMaand(A, a, maandPlus(mNu, -1)); });
   uit.verloop = blok('verloop', function () { return blokVerloop(A, a, mNu, vanaf); });
-  uit.vaste_lasten = blok('vaste_lasten', function () { return blokVasteLasten(A, a, nu, L.links, signalen); });
+  // PayPal één keer lezen: de diensten voor het PayPal-blok en de ontvangernamen voor de vaste lasten (wv1957)
+  const ppD = o.paypal ? blok('paypal', function () { return o.paypal.diensten(a); }) : null;
+  const ppNamen = new Map(((ppD && ppD.diensten) || []).filter(function (r) { return r.dienst && r.naam; }).map(function (r) { return [r.dienst, r.naam]; }));
+  uit.vaste_lasten = blok('vaste_lasten', function () { return blokVasteLasten(A, a, nu, L.links, signalen, ppNamen); });
   const stroomNu = blok('stroom', function () { return blokStroom(A, a, mNu); });
   const stroomVorig = blok('stroom', function () { return blokStroom(A, a, maandPlus(mNu, -1)); });
   uit.buffer = blok('buffer', function () { return blokBuffer(stroomVorig, stroomNu, signalen); });
   uit.stroom = { deze_maand: stroomNu ? { maand: stroomNu.maand, paren: stroomNu.paren } : null, vorige_maand: stroomVorig ? { maand: stroomVorig.maand, paren: stroomVorig.paren } : null };
   blok('energie', function () { signaalEnergie(a, mNu, vanaf, signalen); });
-  blok('dubbel', function () { signaalDubbel(A, a, L.links, signalen); });
-  uit.paypal = o.paypal ? blok('paypal', function () { return blokPaypal(o.paypal, a, L.links, signalen, A); }) : null;
+  blok('dubbel', function () { signaalDubbel(A, a, L.links, signalen, true); });
+  uit.paypal = ppD ? blok('paypal', function () { return blokPaypal(ppD, L.links, signalen, A); }) : null;
   // één signaal per soort en post (een PayPal-dienst op zijn dienst, wv909: de titel van een onbekende dienst draagt de incassodag, die
   // in de bank en in de ontvangstbewijzen een dag kan verschillen); gedempt wat David al kent (Bewust-tabel)
   const gezien = new Set();

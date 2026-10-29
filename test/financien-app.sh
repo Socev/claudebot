@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Toetst financien-app.js (wv771, App Financiën; bouwplan idee 16 § 11) op een nagebootste transactiedatabase (zelfde soort posten als
 # test/bank-archief.sh, maar met maanden tot en met vandaag): het antwoord is veld voor veld opgebouwd (geen IBAN, machtiging,
-# omschrijving, naam van een persoon of van de externe rekening, geen tabel_md of let_op), steun heet "Steun (vast)", een externe
-# rekening "extern"; signalen alleen gemeten (hypotheek dalend nooit "weg"/"lager", naamwissel gemeente geen "nieuw"/"weg", prijsstap
+# omschrijving, geen losse posten, geen tabel_md of let_op); sinds wv1957 (David 28-10: niets voor hem afschermen) steun en een externe
+# rekening met hun naam, dubbel met de naam van de aanbieder; signalen alleen gemeten (hypotheek dalend nooit "weg"/"lager", naamwissel gemeente geen "nieuw"/"weg", prijsstap
 # meerdere reeksen, PayPal twee keer hetzelfde bedrag = dubbel, weggevallen reeks = navragen, energie dezelfde maanden vorig jaar);
 # volledigheid vanaf de koppeling (bunq telt niet); opzeglinks alleen met host uit de allowlist in de code, https, zonder userinfo of
 # poort, precies één herkenwoord op woordgrens; Bewust-tabel dempt; een kapot blok maakt alleen dat blok leeg; via bank-lezer.js.
@@ -120,13 +120,13 @@ const uit = F.bereken(A, a, { vault: VAULT, paypal: null });
 const tekst = JSON.stringify(uit);
 toets('bereken: geen kapot blok', Array.isArray(uit.fouten) && uit.fouten.length === 0, uit.fouten);
 toets('privacy: geen IBAN, machtiging of incassant-ID in het antwoord', !/NL\d{2}[A-Z]{4}\d{6,}/.test(tekst) && !/Machtiging|Incassant|ZZZ999|43562|ST 1110/.test(tekst), tekst.match(/NL\d{2}[A-Z]{4}\d+|Machtiging|43562/));
-toets('privacy: geen omschrijving, geen persoon, geen naam van de externe rekening', !/Jan Jansen|huur|vaste storting|Periodieke|SCHAAP CJ|Petronella|Albert Heijn|sparen/.test(tekst), tekst.match(/Jan Jansen|Petronella|SCHAAP CJ|Albert Heijn/));
+toets('veld voor veld: geen omschrijving en geen losse posten (Jan Jansen is een losse overboeking, Albert Heijn een losse betaling)', !/Jan Jansen|huur|vaste storting|Periodieke|SCHAAP CJ|Albert Heijn|sparen/.test(tekst), tekst.match(/Jan Jansen|SCHAAP CJ|Albert Heijn/));
 toets('privacy: geen tabel_md, let_op of losse saldo-velden buiten de dekking', !/tabel_md|let_op|saldo_na/.test(tekst), null);
 const sleutels = (o, pad, acc) => { if (o && typeof o === 'object') Object.keys(o).forEach((k) => { acc.add(k); sleutels(o[k], k, acc); }); return acc; };
 const ks = sleutels(uit, '', new Set());
 toets('privacy: geen veld nr, sleutel(s), iban, omschrijving of tegenpartij', !['nr', 'sleutel', 'sleutels', 'iban', 'omschrijving', 'tegenpartij', 'rek', 'machtiging'].some((k) => ks.has(k)), Array.from(ks));
 const vl = uit.vaste_lasten;
-toets('vaste lasten: rekening, totaal en rijen; steun als "Steun (vast)"', vl && vl.posten > 4 && vl.totaal_per_maand > 3000 && vl.steun.length === 1 && vl.steun[0].naam === 'Steun (vast)' && vl.steun[0].per_maand === 350, vl && { posten: vl.posten, steun: vl.steun });
+toets('vaste lasten: rekening, totaal en rijen; steun met de naam van de ontvangende rekening (wv1957)', vl && vl.posten > 4 && vl.totaal_per_maand > 3000 && vl.steun.length === 1 && /Petronella/.test(vl.steun[0].naam) && vl.steun[0].per_maand === 350, vl && { posten: vl.posten, steun: vl.steun });
 const rij = (re) => vl.rijen.find((r) => re.test(r.naam));
 toets('vaste lasten: PayPal als één regel "PayPal" met het aantal onderdelen, zonder link', rij(/^PayPal$/) && rij(/^PayPal$/).onderdelen >= 3 && rij(/^PayPal$/).link === null, rij(/^PayPal$/));
 toets('vaste lasten: opzeglink alleen bij een geldige rij (KPN Mobiel, Univé), Tibber (nep-host) zonder', rij(/KPN - Mobiel/).link && rij(/KPN - Mobiel/).link.host === 'www.kpn.com' && rij(/UNIVE/).link && !rij(/Tibber/).link, [rij(/KPN/), rij(/Tibber/)]);
@@ -138,7 +138,7 @@ toets('signalen: KPN-prijsstap (twee reeksen, tegen drie maanden terug) of duurd
 toets('signalen: PayPal twee keer 4,99 = dubbel, met vraagteken', s('dubbel', /4,99/).length === 1 && /\?$/.test(s('dubbel', /4,99/)[0].zin), sig);
 toets('signalen: weggevallen reeks (Krant) = navragen', s('weg', /Krant/).length === 1 && /^Navragen/.test(s('weg', /Krant/)[0].zin), sig);
 toets('signalen: Netflix op twee eigen rekeningen = dubbel; Buckaroo (betaaldienst) niet', s('dubbel', /streaming|Netflix/i).length === 1 && !sig.some((x) => x.soort === 'dubbel' && /Buckaroo/i.test(x.zin)), sig);
-toets('signalen: dubbel zonder linkregel toont de categorie, niet de naam van de aanbieder', s('dubbel', /streaming/i).length === 1 && !/Netflix/.test(s('dubbel', /streaming/i)[0].zin), s('dubbel', /streaming/i));
+toets('signalen: dubbel zonder linkregel noemt de aanbieder bij naam (wv1957), niet alleen de categorie', s('dubbel', /Netflix/).length === 1 && /^Netflix/.test(s('dubbel', /Netflix/)[0].titel), s('dubbel', /Netflix|streaming/i));
 toets('signalen: Tibber wisselend zonder heel vergelijkingsjaar geen "duurder"', !sig.some((x) => /Tibber/.test(x.titel) && x.soort === 'duurder'), sig);
 toets('signalen: energie dezelfde maanden vorig jaar, met de richting', s('energie', /Energie/).length === 1 && /een jaar eerder .*\(\+7%\)/.test(s('energie', /Energie/)[0].zin), sig.filter((x) => x.soort === 'energie'));
 toets('signalen: eerst fout, dan wacht, dan info', sig.every((x, i) => i === 0 || ({ fout: 0, wacht: 1, info: 2 })[sig[i - 1].toon] <= ({ fout: 0, wacht: 1, info: 2 })[x.toon]), sig.map((x) => x.toon));
@@ -148,7 +148,10 @@ toets('verloop: 24 maanden, lopende maand gemarkeerd, onvolledig vóór de koppe
   v.volledig_vanaf === mnd[0] && v.maanden.filter((m) => m.volledig).every((m) => m.maand >= v.volledig_vanaf) && v.maanden[22].volledig === true, v.maanden.map((m) => [m.maand, m.volledig]));
 toets('verloop: categorieën per maand, gesorteerd op totaal', v.categorieen.length > 0 && v.maanden.some((m) => Object.keys(m.categorieen).length > 0), v.categorieen);
 const st = uit.stroom.vorige_maand;
-toets('stroom: externe rekening heet "extern", eigen rekeningen met hun naam', st && st.paren.some((x) => x.naar === 'extern' && x.extern === true) && st.paren.some((x) => x.naar === 'Spaar'), st);
+toets('stroom: externe rekening met zijn naam en extern: true (wv1957), eigen rekeningen met hun naam', st && st.paren.some((x) => x.naar === 'Rekening Petronella Ontvanger' && x.extern === true) && !st.paren.some((x) => x.naar === 'extern') && st.paren.some((x) => x.naar === 'Spaar'), st);
+// de briefing gaat via de n8n-tabel ochtend_buffer en Voor jou-kaarten (niet alleen naar de App): oude regel blijft (wv1957)
+{ const bF = F.briefing(A, a, { vault: VAULT }), dF = bF.signalen.filter((x) => x.soort === 'dubbel' && /streaming/i.test(x.zin));
+  toets('briefing: dubbel zonder linkregel blijft de categorie, externe rekening en steun niet bij naam', dF.length === 1 && !/Netflix|Petronella/.test(JSON.stringify(bF)), bF.signalen); }
 toets('buffer: drie volledige maanden, lopende maand apart', uit.buffer && uit.buffer.per_maand.length === 3 && uit.buffer.per_maand[2].maand === F.maandPlus(mNu, -1) && uit.buffer.lopend.maand === mNu, uit.buffer);
 toets('deze maand: in en uit als positieve getallen', uit.deze_maand.uit >= 0 && uit.deze_maand.in >= 0 && uit.deze_maand.maand === mNu, uit.deze_maand);
 

@@ -342,11 +342,13 @@ const M = {
       const VA = path.join(W, 'vault4'); fs.mkdirSync(path.join(VA, '20_Prive', 'Financien'), { recursive: true });
       const u = F.bereken(A, a4, { vault: VA, paypal: P });
       const sg = u.signalen, rijenA = (u.vaste_lasten || {}).rijen || [];
-      toets('wv779 App: vaste lasten met de dienst; geen persoon', u.fouten.length === 0 && rijenA.some((r) => r.naam === 'PayPal — Netflix') && rijenA.some((r) => r.naam === 'PayPal — SkyShowtime') && !/piet|voorbeeld/i.test(JSON.stringify(u)), [u.fouten, rijenA.map((r) => r.naam)]);
+      // wv1957 (David 28-10: niets voor hem afschermen): de App noemt ook een persoon als PayPal-ontvanger bij naam
+      toets('wv779/wv1957 App: vaste lasten met de dienst; een persoon bij naam', u.fouten.length === 0 && rijenA.some((r) => r.naam === 'PayPal — Netflix') && rijenA.some((r) => r.naam === 'PayPal — SkyShowtime') && rijenA.filter((r) => r.naam === 'PayPal — Piet Voorbeeld').length === 1 && !rijenA.some((r) => /onbekende dienst/.test(r.naam)), [u.fouten, rijenA.map((r) => r.naam)]);
       toets('wv779 App: dubbel noemt de dienst (Apple 2,99); twee diensten van 4,99 en posten zonder bewijs geven geen dubbel',
         sg.filter((x) => x.soort === 'dubbel').length === 1 && /aan Apple via PayPal/.test(sg.find((x) => x.soort === 'dubbel').zin) && sg.find((x) => x.soort === 'dubbel').titel === 'PayPal — Apple', sg.filter((x) => x.soort === 'dubbel'));
-      toets('wv779 App: PayPal-diensten bij naam (bekende dienst), persoon als PayPal-dienst', u.paypal.diensten.some((d) => d.naam === 'Samsung') && !u.paypal.diensten.some((d) => /Piet/.test(d.naam)), u.paypal.diensten.map((d) => d.naam));
+      toets('wv779/wv1957 App: PayPal-diensten bij naam (bekende dienst), een persoon ook bij naam', u.paypal.diensten.some((d) => d.naam === 'Samsung') && u.paypal.diensten.some((d) => d.naam === 'Piet Voorbeeld') && !u.paypal.diensten.some((d) => d.naam === 'PayPal-dienst'), u.paypal.diensten.map((d) => d.naam));
       const b = F.briefing(A, a4, { vault: VA, peil: vnd });
+      toets('wv1957 briefing (n8n-tabel en Voor jou, niet alleen de App) houdt de oude regel: geen persoon bij naam', !/piet|voorbeeld/i.test(JSON.stringify(b)), b.signalen.map((x) => x.zin));
       toets('wv779 briefing: dubbel per dienst, geen "4,99 via PayPal" en geen "PayPal-betalingen samen"', b.signalen.filter((x) => x.soort === 'dubbel').length === 1 && /Apple/.test(b.signalen.find((x) => x.soort === 'dubbel').zin) && !b.signalen.some((x) => /4,99|samen/.test(x.zin)), b.signalen);
       // verrijk: de abonnementen heten naar de dienst
       A.verrijk(a4);
@@ -387,10 +389,10 @@ const M = {
         toets('wv909 #7: twee onbekende diensten met de incassodag, nooit bij naam', onb.join('|') === 'PayPal — onbekende dienst, rond de 19e|PayPal — onbekende dienst, rond de 5e' && !/piet|klaas|voorbeeld|proef/i.test(JSON.stringify(v6)), onb);
         const VA6 = path.join(W, 'vault6'); fs.mkdirSync(path.join(VA6, '20_Prive', 'Financien'), { recursive: true });
         const u6 = F.bereken(A, a6, { vault: VA6, paypal: P }), rij6 = (u6.vaste_lasten || {}).rijen || [];
-        const nieuw6 = u6.signalen.filter((x) => x.soort === 'nieuw' && /onbekende dienst/.test(x.titel || ''));
-        toets('wv909 #7 App: twee eigen rijen; "nieuw" van bank en bewijzen één keer (op de dienst, niet op de titel); geen persoon',
-          u6.fouten.length === 0 && rij6.filter((r) => /onbekende dienst, rond de/.test(r.naam)).length === 2 && nieuw6.length === 1 && /rond de 19e$/.test(nieuw6[0].titel) &&
-          !/piet|klaas|proef|games|ander bedrijf/i.test(JSON.stringify(u6.vaste_lasten)) && !/piet|klaas|proef/i.test(JSON.stringify(u6.signalen)), [u6.fouten, rij6.map((r) => r.naam), nieuw6]);
+        const nieuw6 = u6.signalen.filter((x) => x.soort === 'nieuw' && /Piet|Klaas|onbekende dienst/.test(x.titel || ''));
+        toets('wv909 #7 / wv1957 App: twee eigen rijen, elk met de naam van de ontvanger; "nieuw" van bank en bewijzen één keer (op de dienst)',
+          u6.fouten.length === 0 && rij6.filter((r) => r.naam === 'PayPal — Piet Voorbeeld' || r.naam === 'PayPal — Klaas Proef').length === 2 && !rij6.some((r) => /onbekende dienst/.test(r.naam)) &&
+          nieuw6.length === 1 && nieuw6[0].titel === 'PayPal — Klaas Proef', [u6.fouten, rij6.map((r) => r.naam), nieuw6]);
         toets('wv909 #5 App: geen dubbelsignaal op de afschrijving met twee bewijzen', !u6.signalen.some((x) => x.soort === 'dubbel'), u6.signalen);
         const b6 = F.briefing(A, a6, { vault: VA6, peil: vnd });
         toets('wv909 briefing: draait zonder fouten, geen persoon', b6.fouten.length === 0 && !/piet|klaas|proef/i.test(JSON.stringify(b6)), b6);
