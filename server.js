@@ -15576,13 +15576,29 @@ function mailmanIntakeDraden(postvak, draden) {
   for (const t of draden.slice(0, 500)) if (q.get(String(postvak), String(t))) uit.add(t);
   return uit;
 }
+// wv1988 (MailMan B6+): welke van deze Gmail-id's zijn in de Facturen-app helemaal verwerkt? = het bericht uit het verzamelpostvak heeft
+// minstens één factuur en ELKE factuur ervan staat op een status die Davids bevestiging vraagt (in_wachtrij, wordt_verstuurd, concept_klaar,
+// verstuurd, prive_archief; CHECK in facturen-db.js: bevestigd_op + bevestigd_door). te_beoordelen, geen_factuur, dubbel en
+// verzending_mislukt houden de mail in de inbox. Alleen lezen; zonder Facturen-databank een lege set (dan archiveert MailMan niets).
+const MAILMAN_VERWERKT = ['in_wachtrij', 'wordt_verstuurd', 'concept_klaar', 'verstuurd', 'prive_archief'];
+function mailmanFactuurVerwerkt(ids) {
+  const uit = new Set();
+  const fdb = facturenOpen();
+  if (!fdb || !fdb.db || !Array.isArray(ids) || !ids.length) return uit;
+  const q = fdb.db.prepare("SELECT b.message_id m FROM bericht b JOIN bron r ON r.id = b.bron WHERE r.soort = 'verzamelpostvak' AND b.message_id = ?"
+    + ' AND EXISTS (SELECT 1 FROM factuur f WHERE f.bericht = b.id OR f.document IN (SELECT d.id FROM document d WHERE d.bericht = b.id))'
+    + ' AND NOT EXISTS (SELECT 1 FROM factuur f WHERE (f.bericht = b.id OR f.document IN (SELECT d.id FROM document d WHERE d.bericht = b.id))'
+    + ' AND f.status NOT IN (' + MAILMAN_VERWERKT.map(function (x) { return "'" + x + "'"; }).join(',') + ')) LIMIT 1');
+  for (const id of ids.slice(0, 200)) { if (/^[0-9a-f]{12,24}$/.test(String(id)) && q.get(String(id))) uit.add(String(id)); }
+  return uit;
+}
 const mailman = (function () {
   const p = path.join(__dirname, 'mailman.js');
   if (!fs.existsSync(p)) return null;
   try {
     return require(p).maak({ dir: MAILMAN_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
-      intakeDraden: mailmanIntakeDraden, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk });
+      intakeDraden: mailmanIntakeDraden, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt });
   } catch (e) { logError('mailman', e); return null; }
 })();
 function mailmanIsPad(req) { const p = reqPath(req); return p === '/mailman' || p.indexOf('/mailman/') === 0; }

@@ -27,6 +27,15 @@
  * toetst daarna zelf op label-ID (tweede grens) en meldt via /mailman/gezet wat er werkelijk gezet is. Terug naar schaduw of uit = de
  * eerstvolgende /mailman/labels geeft niets meer (de pod leest de stand bij elke aanvraag).
  *
+ * UITGANGEN B6+ (wv1988, 29-10-2026; David 29-10 ± 19:30: "Mail die naar facturen is gegaan, moet gemarkeerd als gelezen, maar in de
+ * Inbox blijven; pas als de factuur verwerkt is, moet hij ook gearchiveerd; hij moet dan naar een sub-label onder FACTUUR - 'verwerkt'.
+ * Mail die naar de Intake van OVIS is gegaan, moet voorlopig in de inbox blijven staan - maar als gelezen gemarkeerd worden. Behalve mail
+ * die ook als TODO is gemarkeerd"). Twee uitgangen per stroom, standaard UIT: 'gelezen' (intake, factuur, twijfel: UNREAD weg bij het
+ * besluit, nooit bij TODO, de mail blijft in INBOX) en 'archief' (alleen factuur: zodra ELKE factuur uit die mail in de Facturen-app door
+ * David bevestigd is → INBOX weg + FACTUUR/verwerkt erbij; FACTUUR blijft). Aanzetten alleen als config.json uitgang_toegestaan voor
+ * het postvak noemt (de machinekamer, na Davids Ja op de grondwetkaart wv1988) én met een verse vingerafdruk; uitzetten altijd. MailMan
+ * haalt alleen UNREAD en INBOX weg en zet ze nooit terug (wat David al las, archiveerde of verplaatste blijft zo). Doktersmaten nooit.
+ *
  * DE RONDE (n8n, O.2): POST /mailman/start → per postvak de zoekvraag (venster uit de laatste geslaagde ronde) · /mailman/nieuw (alle id's
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
  * tekens) → stap 0–3 + patiëntpoort, en de Jev-aanvragen · /mailman/stap2 (de Jev-antwoorden) → besluit · /mailman/gedaan.
@@ -46,7 +55,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-1.3';
+const VERSIE = 'mailman-1.4';
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -55,6 +64,13 @@ const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via stand
 const GEDEELD = new Set(['gmail:groenhouten']);
 // De enige labels die MailMan ooit mag zetten of weghalen (O.10). Gezet alleen in stand live, door n8n, na de tweede grens op label-ID.
 const LABELS = ['V', 'TODO', 'CONCEPT', 'FACTUUR', 'INFO', 'AI/MailMan'];
+// B6+ (wv1988): het sublabel na verwerking, en de enige systeemlabels die MailMan ooit weghaalt (nooit zet). Alleen in live, alleen na
+// uitgang_toegestaan (grondwetkaart) en Davids eigen vinkje per stroom.
+const VERWERKT_LABEL = 'FACTUUR/verwerkt';
+const ERAF = ['UNREAD', 'INBOX'];
+const GELEZEN_STROMEN = ['intake', 'factuur', 'twijfel'], ARCHIEF_STROMEN = ['factuur'];
+const ARCHIEF_MS = 60 * 24 * 3600 * 1000, ARCHIEF_MAX = 20, ARCHIEF_POGINGEN = 5;   // factuurmail die binnen 60 dagen verwerkt raakt; 20 per ronde
+const GELEZEN_ALLEEN_MS = 6 * 3600 * 1000;   // een actie met alleen 'gelezen' (Davids eigen _AI_-mail) hooguit 6 uur na het besluit aanbieden
 const BUITEN_LABELS = ['SENT', 'DRAFT', 'CHAT', 'SPAM', 'TRASH'];
 const TABS = { CATEGORY_PERSONAL: 'persoonlijk', CATEGORY_UPDATES: 'updates', CATEGORY_PROMOTIONS: 'promoties', CATEGORY_SOCIAL: 'sociaal', CATEGORY_FORUMS: 'forums' };
 const MARKERINGS_LABELS = ['_AI_', 'AI/SecondBrain/Unprocessed'];
@@ -371,7 +387,7 @@ function venster(laatsteGeslaagd, nuMs) {
 }
 
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, jevVragen,
-  jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN };
+  jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF };
 
 // ─────────────────────────── startset (O.5) ───────────────────────────
 
@@ -424,7 +440,8 @@ CREATE TABLE IF NOT EXISTS wijziging (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL
 // ─────────────────────────── opslag en routes ───────────────────────────
 
 /*
- * maak({ dir, fout, marker (patientpoort.js), eigenAdressen(), intakeDraden(postvak, [thread]) → Set, primair(), geheimOk(body), nu() })
+ * maak({ dir, fout, marker (patientpoort.js), eigenAdressen(), intakeDraden(postvak, [thread]) → Set, primair(), geheimOk(body), nu(),
+ *   factuurVerwerkt([gmail_id]) → Set (wv1988: ids waarvan elke factuur in de Facturen-app door David bevestigd is) })
  * config.json in dir (0600, op de pod, niet in de repo): { postvakken: { "<id>": { naam, factuur_alias, stand, jev, tekst } }, todo_nooit: [..] }
  */
 function maak(o) {
@@ -441,7 +458,10 @@ function maak(o) {
   db.exec(SCHEMA);
   // B5 (wv1973): kolommen voor live; een bestaande databank krijgt ze erbij (ALTER TABLE ADD COLUMN raakt geen rijen)
   for (const [t, k] of [['besluit', 'labels_tijd TEXT'], ['ronde', 'labels_ok INTEGER NOT NULL DEFAULT 0'], ['ronde', 'labels_fout INTEGER NOT NULL DEFAULT 0'], ['postvak', 'live_sinds TEXT'],
-    ['besluit', 'inhaal INTEGER NOT NULL DEFAULT 0'], ['besluit', 'juist TEXT'], ['ronde', "soort TEXT NOT NULL DEFAULT 'ronde'"], ['ronde', 'grens TEXT']]) {   // wv1983 inhaal
+    ['besluit', 'inhaal INTEGER NOT NULL DEFAULT 0'], ['besluit', 'juist TEXT'], ['ronde', "soort TEXT NOT NULL DEFAULT 'ronde'"], ['ronde', 'grens TEXT'],   // wv1983 inhaal
+    ['stroom', 'gelezen INTEGER NOT NULL DEFAULT 0'], ['stroom', 'archief INTEGER NOT NULL DEFAULT 0'], ['besluit', 'gelezen_tijd TEXT'],
+    ['besluit', 'archief_tijd TEXT'], ['besluit', 'archief_poging INTEGER NOT NULL DEFAULT 0'], ['ronde', 'gelezen_ok INTEGER NOT NULL DEFAULT 0'],
+    ['ronde', 'archief_ok INTEGER NOT NULL DEFAULT 0']]) {   // wv1988 B6+ uitgangen gelezen/archief
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
   function tx(f) {
@@ -496,7 +516,11 @@ function maak(o) {
     }
     return Array.from(per.values()).sort(function (a, b) { return a.volgorde - b.volgorde || a.id - b.id; });
   }
-  function stromen() { const u = {}; for (const r of db.prepare('SELECT * FROM stroom').all()) u[r.id] = { naar_intake: !!r.naar_intake, naar_facturen: !!r.naar_facturen, label: !!r.label }; return u; }
+  function stromen() {
+    const u = {};
+    for (const r of db.prepare('SELECT * FROM stroom').all()) u[r.id] = { naar_intake: !!r.naar_intake, naar_facturen: !!r.naar_facturen, label: !!r.label, gelezen: !!r.gelezen, archief: !!r.archief };
+    return u;
+  }
   function instelVan(p) {
     const c = config(), pc = isObj(c.postvakken) && isObj(c.postvakken[p.id]) ? c.postvakken[p.id] : {};
     let eigen = [];
@@ -726,6 +750,15 @@ function maak(o) {
     if (!isObj(t) || typeof t.ja !== 'string' || !t.ja) return { ok: false, reden: 'wacht op je Ja op de grondwetkaart (MailMan mag labels zetten)' };
     return { ok: true, reden: 'Ja ' + t.ja.slice(0, 16) };
   }
+  // B6+ (wv1988): mogen de uitgangen gelezen/archief voor dit postvak aan? Alleen een eigen postvak waarvoor config.json uitgang_toegestaan
+  // zet (de machinekamer, na Davids Ja op de grondwetkaart "MailMan mag ook gelezen markeren en archiveren"). → { ok, reden }
+  function uitgangMag(p) {
+    if (!p) return { ok: false, reden: 'postvak onbekend' };
+    if (p.gedeeld) return { ok: false, reden: 'gedeeld postvak: nooit' };
+    const c = config(), t = isObj(c.uitgang_toegestaan) ? c.uitgang_toegestaan[p.id] : null;
+    if (!isObj(t) || typeof t.ja !== 'string' || !t.ja) return { ok: false, reden: 'wacht op je Ja op de grondwetkaart (gelezen markeren en archiveren)' };
+    return { ok: true, reden: 'Ja ' + t.ja.slice(0, 16) };
+  }
   /*
    * Live (B5, O.6/O.10): welke labels n8n deze ronde mag zetten. Alleen in stand live (gelezen bij deze aanvraag: terug naar schaduw stopt
    * meteen), alleen besluiten van berichten die in de lijst van deze ronde staan (d.ids), alleen labels uit LABELS en nooit _AI_, nooit
@@ -735,6 +768,11 @@ function maak(o) {
    * Facturen-app / labels), want een wijziging daar moet ook gelden voor besluiten die al genomen zijn; (#2) mail met Davids eigen
    * markering (_AI_, Unprocessed) krijgt geen AI/MailMan: die haalt de Mail Processor al op; (#3/#11) alleen besluiten van mail die hooguit
    * LIVE_INHAAL_MS vóór live_sinds binnenkwam (geen labelregen op oude, al gearchiveerde mail bij het live zetten).
+   * B6+ (wv1988): met uitgang_toegestaan en Davids vinkje 'gelezen' bij de stroom krijgt een nieuw besluit ook eraf ['UNREAD'] (stroom naar
+   * Intake of Factuur; nooit als het plan of de mail TODO had); met het vinkje 'archief' bij Factuur komt er per ronde hooguit ARCHIEF_MAX
+   * archiefacties bij: { erbij: [FACTUUR/verwerkt], eraf: ['INBOX'], archief: true } voor factuurmail met MailMans FACTUUR-label (≤ 60
+   * dagen) waarvan ELKE factuur in de Facturen-app door David bevestigd is (o.factuurVerwerkt). Die staan niet in de lijst van deze ronde;
+   * n8n laat ze alleen door als het nagelezen bericht het FACTUUR-label draagt.
    */
   function labels(d) {
     const r = rondeVan(d, true);
@@ -749,7 +787,8 @@ function maak(o) {
     let wacht = 0;
     const st = stromen();
     const vanaf = new Date((p.live_sinds ? Date.parse(p.live_sinds) : nu()) - LIVE_INHAAL_MS).toISOString();
-    for (const b of db.prepare("SELECT gmail_id, labels_plan, stroom, reden, labels FROM besluit WHERE postvak = ? AND status = 'klaar' AND inhaal = 0 AND labels_gezet IS NULL AND labels_plan IS NOT NULL AND stap != 'buiten' AND COALESCE(ontvangen, aangemaakt) >= ? ORDER BY COALESCE(ontvangen, aangemaakt), id").all(p.id, vanaf)) {
+    const uitgang = uitgangMag(p).ok;
+    for (const b of db.prepare("SELECT gmail_id, labels_plan, stroom, reden, labels, COALESCE(besloten, aangemaakt) besloten FROM besluit WHERE postvak = ? AND status = 'klaar' AND inhaal = 0 AND labels_gezet IS NULL AND labels_plan IS NOT NULL AND stap != 'buiten' AND COALESCE(ontvangen, aangemaakt) >= ? ORDER BY COALESCE(ontvangen, aangemaakt), id").all(p.id, vanaf)) {
       if (!ids.has(b.gmail_id)) continue;
       let plan = [], lab = [];
       try { plan = JSON.parse(b.labels_plan); } catch (e) { plan = []; }
@@ -757,6 +796,7 @@ function maak(o) {
       const naar = b.stroom === 'twijfel' ? (p.twijfel_naar === 'info' ? 'info' : 'intake') : b.stroom;
       const sa = st[b.stroom] || { naar_intake: false, naar_facturen: false, label: false };
       const gemarkeerd = b.reden === 'markering' || (Array.isArray(lab) && lab.some(function (l) { return MARKERINGS_LABELS.includes(l); }));
+      const todo = (Array.isArray(plan) && plan.includes('TODO')) || (Array.isArray(lab) && lab.includes('TODO'));   // vóór het filter: Jev zag een vraag aan David
       plan = Array.from(new Set((Array.isArray(plan) ? plan : []).map(String).filter(function (l) {
         if (!LABELS.includes(l)) return false;
         if (l === 'AI/MailMan') return naar === 'intake' && sa.naar_intake && sa.label && !gemarkeerd;
@@ -764,32 +804,61 @@ function maak(o) {
         if (l === 'INFO') return naar === 'info' && sa.label;
         return sa.label;   // TODO (V en CONCEPT plant MailMan in B5 niet)
       })));
-      if (!plan.length) continue;
+      const eraf = uitgang && sa.gelezen && GELEZEN_STROMEN.includes(b.stroom) && (naar === 'intake' || naar === 'factuur') && !todo ? ['UNREAD'] : [];
+      if (!plan.length && (!eraf.length || Date.parse(b.besloten) < nu() - GELEZEN_ALLEEN_MS)) continue;
       if (plan.includes('AI/MailMan')) { if (ruimte <= 0) { wacht++; continue; } ruimte--; }
-      acties.push({ gmail_id: b.gmail_id, erbij: plan, eraf: [] });
+      acties.push({ gmail_id: b.gmail_id, erbij: plan, eraf });
       if (acties.length >= LABEL_ACTIES_MAX) break;
     }
-    return { status: 200, j: { ok: true, stand: 'live', acties, wachtrij_wacht: wacht } };
+    let archief = 0;
+    if (uitgang && st.factuur && st.factuur.archief && acties.length < LABEL_ACTIES_MAX && typeof o.factuurVerwerkt === 'function') {
+      const kand = db.prepare("SELECT gmail_id FROM besluit WHERE postvak = ? AND inhaal = 0 AND archief_tijd IS NULL AND archief_poging < ? AND instr(labels_gezet, ?) > 0 AND labels_tijd >= ? ORDER BY labels_tijd, id LIMIT 200")
+        .all(p.id, ARCHIEF_POGINGEN, '"FACTUUR"', new Date(nu() - ARCHIEF_MS).toISOString()).map(function (x) { return x.gmail_id; });
+      let klaar = new Set();
+      if (kand.length) { try { const k = o.factuurVerwerkt(kand); klaar = k instanceof Set ? k : new Set(); } catch (e) { fout('mailman-verwerkt', e); } }
+      for (const id of kand) {
+        if (!klaar.has(id)) continue;
+        if (acties.length >= LABEL_ACTIES_MAX || archief >= ARCHIEF_MAX) break;
+        acties.push({ gmail_id: id, erbij: [VERWERKT_LABEL], eraf: ['INBOX'], archief: true });
+        archief++;
+      }
+    }
+    return { status: 200, j: { ok: true, stand: 'live', acties, wachtrij_wacht: wacht, archief } };
   }
   // Wat n8n werkelijk zette (na zijn eigen grens). Alleen labels uit LABELS tellen; een mislukte modify blijft open voor een volgende ronde.
+  // B6+ (wv1988): eraf = wat n8n werkelijk weghaalde (alleen UNREAD/INBOX tellen); niets = de grens liet niets over (al gelezen, TODO) en
+  // het besluit is af; overgeslagen (de n8n-grens liet een actie zonder labels erbij niet door: al gelezen, TODO, niet meer in de inbox of
+  // nalezen mislukt) = ook af, zonder gelezen (dicht). Een archiefactie (erbij FACTUUR/verwerkt) geldt alleen voor een besluit met MailMans FACTUUR-label; mislukt hij,
+  // dan telt archief_poging op (na ARCHIEF_POGINGEN niet meer aangeboden).
   function gezet(d) {
     const r = rondeVan(d, true);
     if (!r) return { status: 409, j: { ok: false, fout: 'ronde onbekend of verlopen' } };
     if (r.soort === 'inhaal') return { status: 409, j: { ok: false, fout: 'een inhaalronde zet geen labels' } };   // wv1983
-    const tel = { ok: 0, fout: 0 };
-    const lees = db.prepare('SELECT id FROM besluit WHERE postvak = ? AND gmail_id = ? AND inhaal = 0');
+    const tel = { ok: 0, fout: 0, gelezen: 0, archief: 0 };
+    const lees = db.prepare('SELECT id, labels_gezet, archief_tijd FROM besluit WHERE postvak = ? AND gmail_id = ? AND inhaal = 0');
     tx(function () {
       for (const x of (Array.isArray(d.resultaten) ? d.resultaten : []).slice(0, LABEL_ACTIES_MAX * 2)) {
         if (!isObj(x) || !ID_RE.test(String(x.gmail_id || ''))) continue;
         const b = lees.get(r.postvak, String(x.gmail_id));
         if (!b) continue;
-        const gez = (Array.isArray(x.erbij) ? x.erbij : []).map(String).filter(function (l) { return LABELS.includes(l); });
-        if (x.ok === true && gez.length) {
-          db.prepare('UPDATE besluit SET labels_gezet = ?, labels_tijd = ? WHERE id = ?').run(JSON.stringify(gez), iso(), b.id);
+        const erbij = (Array.isArray(x.erbij) ? x.erbij : []).map(String);
+        const af = Array.from(new Set((Array.isArray(x.eraf) ? x.eraf : []).map(String).filter(function (l) { return ERAF.includes(l); })));
+        if (erbij.includes(VERWERKT_LABEL)) {
+          if (b.archief_tijd || !String(b.labels_gezet || '').includes('"FACTUUR"')) { tel.fout++; continue; }
+          if (x.ok === true) { db.prepare('UPDATE besluit SET archief_tijd = ? WHERE id = ?').run(iso(), b.id); tel.ok++; tel.archief++; }
+          else { db.prepare('UPDATE besluit SET archief_poging = archief_poging + 1 WHERE id = ?').run(b.id); tel.fout++; }
+          continue;
+        }
+        if (b.labels_gezet != null) continue;   // al afgehandeld
+        const gez = erbij.filter(function (l) { return LABELS.includes(l); });
+        if (x.ok !== true && x.overgeslagen === true && !erbij.length) { db.prepare("UPDATE besluit SET labels_gezet = '[]', labels_tijd = ? WHERE id = ?").run(iso(), b.id); continue; }
+        if (x.ok === true && (gez.length || af.length || x.niets === true)) {
+          db.prepare('UPDATE besluit SET labels_gezet = ?, labels_tijd = ?, gelezen_tijd = ? WHERE id = ?').run(JSON.stringify(gez), iso(), af.includes('UNREAD') ? iso() : null, b.id);
           tel.ok++;
+          if (af.includes('UNREAD')) tel.gelezen++;
         } else tel.fout++;
       }
-      db.prepare('UPDATE ronde SET labels_ok = labels_ok + ?, labels_fout = labels_fout + ? WHERE id = ?').run(tel.ok, tel.fout, r.id);
+      db.prepare('UPDATE ronde SET labels_ok = labels_ok + ?, labels_fout = labels_fout + ?, gelezen_ok = gelezen_ok + ?, archief_ok = archief_ok + ? WHERE id = ?').run(tel.ok, tel.fout, tel.gelezen, tel.archief, r.id);
     });
     return { status: 200, j: { ok: true, telling: tel } };
   }
@@ -840,7 +909,7 @@ function maak(o) {
     let plan = []; try { plan = b.labels_plan ? JSON.parse(b.labels_plan) : []; } catch (e) { plan = []; }
     return { id: b.id, tijd: b.aangemaakt, ontvangen: b.ontvangen, afzender: b.afzender, naam: b.van_naam, domein: b.afzender_domein,
       onderwerp: b.onderwerp, marker: !!b.marker, zorg: b.marker_soorten === 'zorgmail', inhaal: !!b.inhaal, juist: b.juist || null, stap: b.stap, reden: b.reden, regel_id: b.regel_id,
-      stroom: b.stroom, status: b.status, score: b.score, jev, botsing: b.botsing, labels: plan, oordeel: b.oordeel, tab: b.tab, bijlagen: (function () { try { return JSON.parse(b.bijlagen || '[]').length; } catch (e) { return 0; } })() };
+      stroom: b.stroom, status: b.status, score: b.score, jev, botsing: b.botsing, labels: plan, gelezen: !!b.gelezen_tijd, gearchiveerd: !!b.archief_tijd, oordeel: b.oordeel, tab: b.tab, bijlagen: (function () { try { return JSON.parse(b.bijlagen || '[]').length; } catch (e) { return 0; } })() };
   }
   // 5 uit Info en 5 uit Intake (en Twijfel), elke dag dezelfde keus (hash op dag + id), alleen besluiten met een afzender
   function steekproef(pv) {
@@ -917,11 +986,15 @@ function maak(o) {
     const n = nu(), vandaag = new Date(dagStart(n)).toISOString(), morgen = new Date(dagStart(n) + 86400000).toISOString(), week = new Date(dagStart(n) - 6 * 86400000).toISOString();
     return {
       ok: true, versie: VERSIE, labels: LABELS, stromen: stromen(), live_kan: postvakken().some(function (p) { return liveMag(p).ok; }),
+      uitgang_kan: postvakken().some(function (p) { return uitgangMag(p).ok; }),   // wv1988 B6+: vinkjes gelezen/archief bruikbaar
       wachtrij_max: WACHTRIJ_MAX, wachtrij_uur: WACHTRIJ_MS / 3600000,
       postvakken: postvakken().map(function (p) {
-        const lm = liveMag(p);
+        const lm = liveMag(p), um = uitgangMag(p), dag = new Date(n - 86400000).toISOString();
         return {
           id: p.id, naam: p.naam, stand: p.stand, live_kan: lm.ok, live_reden: lm.reden, live_sinds: p.live_sinds || null,
+          uitgang_kan: um.ok, uitgang_reden: um.reden,
+          gelezen_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND gelezen_tijd >= ?').get(p.id, dag).n,
+          archief_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND archief_tijd >= ?').get(p.id, dag).n,
           labels_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND labels_tijd >= ?').get(p.id, new Date(n - 86400000).toISOString()).n,
           jev: p.jev, tekst: p.tekst, drempel_in: p.drempel_in, drempel_uit: p.drempel_uit, twijfel_naar: p.twijfel_naar,
           altijd: p.altijd, laatste_ronde: p.laatste_ronde, laatste_geslaagd: p.laatste_geslaagd,
@@ -1086,11 +1159,27 @@ function maak(o) {
     tx(function () { db.prepare('UPDATE postvak SET altijd = ?, bijgewerkt = ? WHERE id = ?').run(JSON.stringify(nieuw), iso(), p.id); wijzig('altijd', p.id, p.altijd, nieuw, door); });
     return { status: 200, j: { ok: true } };
   }
-  function stroomRoute(d, door) {
+  // B6+ (wv1988): gelezen (intake, factuur, twijfel) en archief (factuur) aanzetten alleen met uitgang_toegestaan (grondwetkaart) én een
+  // verse vingerafdruk, die hier verbruikt wordt; uitzetten mag altijd (maakt alleen dichter).
+  function stroomRoute(d, door, ctx) {
     if (!STROMEN.includes(d.stroom)) return { status: 400, j: { ok: false, fout: 'stroom onbekend' } };
     const oud = stromen()[d.stroom];
-    const nieuw = { naar_intake: typeof d.naar_intake === 'boolean' ? d.naar_intake : oud.naar_intake, naar_facturen: typeof d.naar_facturen === 'boolean' ? d.naar_facturen : oud.naar_facturen, label: typeof d.label === 'boolean' ? d.label : oud.label };
-    tx(function () { db.prepare('UPDATE stroom SET naar_intake = ?, naar_facturen = ?, label = ? WHERE id = ?').run(nieuw.naar_intake ? 1 : 0, nieuw.naar_facturen ? 1 : 0, nieuw.label ? 1 : 0, d.stroom); wijzig('stroom', d.stroom, oud, nieuw, door); });
+    const b = function (k) { return typeof d[k] === 'boolean' ? d[k] : oud[k]; };
+    const nieuw = { naar_intake: b('naar_intake'), naar_facturen: b('naar_facturen'), label: b('label'), gelezen: b('gelezen'), archief: b('archief') };
+    if (nieuw.gelezen && !oud.gelezen && !GELEZEN_STROMEN.includes(d.stroom)) return { status: 400, j: { ok: false, fout: 'gelezen markeren alleen bij Intake, Factuur en Twijfel' } };
+    if (nieuw.archief && !oud.archief && !ARCHIEF_STROMEN.includes(d.stroom)) return { status: 400, j: { ok: false, fout: 'archiveren alleen bij Factuur' } };
+    const verwijd = (nieuw.gelezen && !oud.gelezen) || (nieuw.archief && !oud.archief);
+    if (verwijd) {
+      const m = postvakken().map(uitgangMag).find(function (x) { return x.ok; }) || postvakken().map(uitgangMag)[0] || { ok: false, reden: 'geen postvak' };
+      if (!m.ok) return { status: 409, j: { ok: false, fout: 'kan nog niet: ' + m.reden } };
+      if (!ctx || typeof ctx.versOk !== 'function' || !ctx.versOk()) return { status: 403, j: { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true } };
+      if (typeof ctx.versVerbruik === 'function') ctx.versVerbruik();
+    }
+    tx(function () {
+      db.prepare('UPDATE stroom SET naar_intake = ?, naar_facturen = ?, label = ?, gelezen = ?, archief = ? WHERE id = ?')
+        .run(nieuw.naar_intake ? 1 : 0, nieuw.naar_facturen ? 1 : 0, nieuw.label ? 1 : 0, nieuw.gelezen ? 1 : 0, nieuw.archief ? 1 : 0, d.stroom);
+      wijzig('stroom', d.stroom, oud, verwijd ? Object.assign({ vingerafdruk: true }, nieuw) : nieuw, door);
+    });
     return { status: 200, j: { ok: true } };
   }
   // Duim (oordeel goed/fout) en, sinds wv1983, de stroom waar de mail volgens David heen had gemoeten (juist; steekproef voor het bijschaven
@@ -1119,7 +1208,7 @@ function maak(o) {
     if (route === 'POST /app/mailman/jev') return jevRoute(d, door);
     if (route === 'POST /app/mailman/stand') return standRoute(d, door, ctx);
     if (route === 'POST /app/mailman/altijd') return altijdRoute(d, door);
-    if (route === 'POST /app/mailman/stroom') return stroomRoute(d, door);
+    if (route === 'POST /app/mailman/stroom') return stroomRoute(d, door, ctx);
     if (route === 'POST /app/mailman/oordeel') return oordeelRoute(d);
     return { status: 404, j: { ok: false, fout: 'onbekend' } };
   }
@@ -1132,6 +1221,8 @@ function maak(o) {
       const ih = inhaalStand(p.id, false);
       return { id: p.id, stand: p.stand, live_sinds: p.live_sinds || null, jev: p.jev, laatste_ronde: p.laatste_ronde, laatste_geslaagd: p.laatste_geslaagd, wacht_jev: w, besluiten_24u: t.binnen,
         jev_tokens_24u: t.jev_tokens, labels_gezet_24u: l.ok, labels_fout_24u: l.fout,
+        gelezen_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND gelezen_tijd >= ?').get(p.id, dag).n,
+        archief_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND archief_tijd >= ?').get(p.id, dag).n,
         inhaal: { besluiten: ih.besluiten, per_stroom: ih.per_stroom, rondes: ih.rondes, rondes_geslaagd: ih.rondes_geslaagd, laatste: ih.laatste } };   // wv1983: alleen tellingen
     }) };
   }
