@@ -4824,7 +4824,7 @@ function sleutelportaal(req, res) {
 // /app/geschiedenis leest het app-log (/opt/data/app-log: app-beurten, berichten van Socev (wv263) en Telegram-beurten (wv277), asynchroon en fail-open geschreven).
 // Fase 4 (wv134, invoerslot): een apparaat met soort 'vast' en een vaste plek neemt alleen invoer aan (elke POST behalve
 // APP_SLOT_VRIJ, uploads, downloads) als secondbrain.locatie_nu zegt dat David daar is (0-20 min, op 'ontvangen'), of als de
-// goedkeurder het 2 u heeft opengezet; anders 423 met de reden. Een BSN-achtig getal wordt daar gemaskeerd, nooit geweigerd (wv464). Soort en vaste plek
+// goedkeurder het 2 u heeft opengezet; anders 423 met de reden. Een BSN-achtig getal gaat ongewijzigd door (wv464 → wv1931). Soort en vaste plek
 // stelt alleen de goedkeurder in (bij goedkeuren of via /app/apparaat/wijzig); de goedkeurder zelf blijft altijd meereizend.
 // Opslag: APP_DATA (/opt/data/socev-app-data; NIET /opt/data/app, dat zijn de server.js-releases). Geen inhoud in het
 // auditlog. Sessies staan in het geheugen en (sinds wv231) als hash in sessies.json: een herstart kost geen vingerafdruk,
@@ -4992,10 +4992,10 @@ const APP_BEHEER_ROUTES = new Set(['POST /app/apparaat/intrekken', 'POST /app/ko
   'POST /app/docs/delen',
   'POST /app/werkers/schakel']);   // wv1901 (Opus-review ZOU 4): een werker uit- of aanzetten raakt n8n zoals modellen; nooit vanaf een vaste plek    // wv1382: een pagina naar buiten zetten alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk; review #10). Intrekken staat in APP_SLOT_VRIJ: dat maakt alleen dichter    // wv833: boekhoud-/afschriftadres en verzendmodus alleen vanaf de telefoon of een meereizend apparaat (+ verse vingerafdruk)
 // wv315: agenda-✅/↩️ alleen vanaf de telefoon of een meereizend apparaat, ook niet met een open slot (§ 4.13)
-// wv464 (David 12-10: "Jij mag mij nooit blokkeren … Die haal je desnoods later maar uit mijn text!"): op een vaste plek gaat
-// een bericht met een BSN-achtig getal gewoon door; het getal wordt vóór opslag en doorsturen vervangen (§ 4.11).
+// wv1931 (David 28-10: "Als ik een BSN aanlever, dan ga jij niet preventief 'Ik heb het BSN weggelaten' doen"): Davids eigen
+// invoer gaat ongemaskerd door, ook op een vaste plek (wv464 blokkeerde al niet meer, maar verving het getal). APP_BSN_MASKER blijft
+// voor het doorgeefluik (intern, doorgeefSchoon) en de vaste-plekschakelaar van Second Brain/Docs/Zoek snel (wv1901).
 const APP_BSN_MASKER = '[BSN-achtig getal weggelaten]';
-const APP_BSN_SYS = '[Systeem: in Davids invoer stond een BSN-achtig getal (9 cijfers die de elfproef halen); de pod heeft het weggelaten (' + APP_BSN_MASKER + '). Vraag er niet naar; meestal was het een ander nummer.]';
 
 const appStaat = { koppel: null, aanvraag: null, uitdagingen: {}, sessies: {}, tellers: { koppel: [], openen: [], alles: [], beurt: [], voorrang: [], bestand: [], upload: [], 'upload-fac': [], concept: [], reactie: [], harvester: [], 'harvester-bron': [], secondbrain: [], 'secondbrain-betekenis': [], docs: [], managers: [], 'zoek-snel': [], mediatheek: [], 'mediatheek-bestand': [] },
   certs: null, certsFout: 0, certsBezig: null, klok: null, beurtIds: null, logOpgeschoond: {},
@@ -5088,7 +5088,6 @@ function appStuur(res, status, obj, cookies) {
   res.writeHead(status, Object.assign({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-App-Pod': '1' }, appCookieKop(cookies)));
   // wv316: podklok in elk antwoord; de app tekent daarmee (ook na een koude start meteen goed; Fable wv316 #3)
   if (obj && typeof obj === 'object' && !Array.isArray(obj) && obj.nu_ms === undefined) obj = Object.assign({}, obj, { nu_ms: Date.now() });
-  if (res._app && res._app.bsnWeg && status < 300 && obj && typeof obj === 'object' && !Array.isArray(obj)) obj = Object.assign({}, obj, { bsn_weg: true });   // wv464 (Fable #5: alleen als het lukte)
   res.end(JSON.stringify(obj));
 }
 function appWeiger(res, status, fout, reden) {
@@ -6185,22 +6184,6 @@ function appBsnAchtig(t) {
   const s = String(t || '');
   return appBsnMasker(s, '\u0000') !== s;
 }
-// wv464: maskeert tekst, toelichting, naam en de bestandsnaamkop van dit verzoek ter plekke; true als er iets weg is. Ook als het
-// geen tekst is (getal, lijst; review wv134 M3): dan wordt het de gemaskeerde JSON-tekst.
-function appBsnMaskeer(req, d) {
-  let weg = false;
-  ['tekst', 'toelichting', 'naam'].forEach(function (k) {
-    const v = d[k];
-    if (v === undefined || v === null) return;
-    const t = typeof v === 'string' ? v : JSON.stringify(v);
-    if (appBsnAchtig(t)) { d[k] = appBsnMasker(t); weg = true; }
-  });
-  const kop = String(req.headers['x-app-naam'] || '');
-  let naam = kop;
-  try { naam = decodeURIComponent(kop); } catch (e) { /* ongeldige kop: zoals hij is */ }
-  if (kop && appBsnAchtig(naam)) { req.headers['x-app-naam'] = encodeURIComponent(appBsnMasker(naam, 'BSN-weggelaten')); weg = true; }
-  return weg;
-}
 async function appSlotRoute(req, res, a) {
   res._app.stil = true;   // de app vraagt dit elke minuut op een vaste-plek-apparaat
   appStuur(res, 200, Object.assign({ ok: true }, await appSlot(a)));
@@ -6889,7 +6872,7 @@ async function appBeurt(req, res, reg, a, s, d) {
     const kop = antwOp ? appAntwoordOpRegel(antwOp.x) + '\n' : '';
     const staartOp = antwOp && antwOp.gevoeligOpen ? '\n' + APP_ANTWOORD_OP_GEVOELIG : '';
     // review #14: met bijlagen blijft de beurt beginnen met de bundelregel (CLAUDE.md); het citaat komt er dan achter
-    const promptTekst = (upload ? appBestandenPrompt(appOntmasker(tekst), namen) + (kop ? '\n' + kop.replace(/\n$/, '') : '') : kop + appOntmasker(tekst)) + staartOp + (res._app.bsnWeg ? '\n' + APP_BSN_SYS : '') + (gelogd ? '' : APP_CHATLOG_NIET);
+    const promptTekst = (upload ? appBestandenPrompt(appOntmasker(tekst), namen) + (kop ? '\n' + kop.replace(/\n$/, '') : '') : kop + appOntmasker(tekst)) + staartOp + (gelogd ? '' : APP_CHATLOG_NIET);
     // wv628 (review #7): na de laatste await opnieuw tellen, anders komen twee gelijktijdige verzoeken er allebei door
     if (rijAan && appGetyptInRij(kanaal) >= APP_RIJ_GETYPT_MAX) st = { fout: 'rij vol' };
     else {
@@ -7168,7 +7151,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const waarIn = kaart ? 'op de Voor jou-kaart in de app (Overzicht, ' + kanaalNaam + ')' : 'in de app (' + kanaalNaam + ')';
   const tekst = (keuze === 'anders'
     ? '[KNOP] David koos ANDERS op de vraag: ' + JSON.stringify(vz) + ' — toelichting: ' + appOntmasker(toel) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met deze toelichting, tijd en kanaal "app-knop", en handel af.)'
-    : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '') + (res._app.bsnWeg && keuze === 'anders' ? '\n' + APP_BSN_SYS : '');
+    : '[KNOP] David drukte ' + (keuze === 'nee' ? 'NEE' : 'JA') + ' op de vraag: ' + JSON.stringify(vz) + '\n(Knopdruk ' + waarIn + ' om ' + tijd + (gevoeligJa ? ', met verse vingerafdruk bevestigd' : '') + ', vraag-id ' + hash + '. Staat deze vraag in 00_Systeem/Open vragen aan David.md, zet de rij dan op beantwoord met dit antwoord, tijd en kanaal "app-knop", en handel af.)') + (kaart && kaart.context ? '\n' + kaart.context : '');
   const chatId = APP_KANALEN[rij.kanaal];
   // wv405: loopt er al een beurt in dit gesprek (app of Telegram), dan komt deze erachter; de app toont dan "staat in de rij"
   const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
@@ -10392,7 +10375,7 @@ async function appAnders(req, res, reg, a, s, d) {
     if (x.job) { res._app.reden = 'anders herhaling ' + x.job; return appStuur(res, 200, { ok: true, job_id: x.job, kanaal: x.kanaal, al: true, in_rij: false }); }
     return appWeiger(res, 409, 'dit wordt al verstuurd; even geduld', 'anders herhaling bezig');
   }
-  const promptTekst = kop + '\n' + ctx + (res._app.bsnWeg ? '\n' + APP_BSN_SYS : '');
+  const promptTekst = kop + '\n' + ctx;
   const chatId = APP_KANALEN[kanaal];
   const inRij = Object.keys(jobs).some(function (id) { const j = jobs[id]; return !j.agent && j.chat_id === chatId && j.workspace === DEFAULT_WS && (j.status === 'pending' || j.status === 'running'); });
   const drukT = Date.now();
@@ -11422,7 +11405,7 @@ const WK_DOC_ENT = [
 ];
 const WK_DOC_SLA = /^(raw_input|Voltooid|Vervallen|Logboek)$/;
 appStaat.wkDocs = appStaat.wkDocs || {};   // pad -> { mtime, updated, eerste }: alleen opnieuw lezen als de mtime verandert
-function wkTekst(s, n) { return appKort(appSleutelMasker(appBsnMasker(s)), n); }   // vangnet grondwet 3 + secretgrep aan de andere kant
+function wkTekst(s, n) { return appKort(appSleutelMasker(s), n); }   // secretgrep aan de andere kant; geen BSN-masker meer (wv1931)
 // Dicht (ontwerp regel 2): de kop, of een later vet blok dat een zin opent (zelfde criterium als appProjTitel: aan het begin,
 // direct na een statusblok of na een zinseinde), begint met een sluitwoord. Een woord midden in de lopende tekst sluit niets.
 function wkDicht(wat) {
@@ -11570,7 +11553,7 @@ async function wkDocumenten() {
       if (x.info.eerste === null) {
         try { x.info.eerste = wkEersteRegel(wkFrontmatter(wkLeesBegin(path.join(vault, x.pad), 65536)).rest); } catch (err) { x.info.eerste = ''; }
       }
-      const it = { titel: wkTekst(x.pad.slice(x.pad.lastIndexOf('/') + 1).replace(/\.md$/i, ''), 160), pad: appSleutelMasker(appBsnMasker(x.pad)), updated: x.info.updated,
+      const it = { titel: wkTekst(x.pad.slice(x.pad.lastIndexOf('/') + 1).replace(/\.md$/i, ''), 160), pad: appSleutelMasker(x.pad), updated: x.info.updated,
         eerste_regel: wkTekst(x.info.eerste, 140) };
       return it;
     });
@@ -12077,7 +12060,7 @@ function handleApp(req, res) {
       am.n[o.apparaat] = (am.n[o.apparaat] || 0) + 1;
       if (am.n[o.apparaat] > 5) return;
     }
-    appAudit(Object.assign({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden }, o.bsnWeg ? { bsn: 'gemaskeerd' } : {},
+    appAudit(Object.assign({ route: o.route, m: req.method, status: res.statusCode, apparaat: o.apparaat, reden: o.reden },
       o.binding ? { binding: o.binding } : {}, o.bindingExtra && Number.isFinite(o.bindingExtra.klok_s) ? { klok_s: o.bindingExtra.klok_s } : {}), o.voorAuth);
   });
   if (fs.existsSync(APP_UIT)) { req.resume(); return appWeiger(res, 503, 'de app staat uit (noodstop)', 'app-uit'); }
@@ -12140,15 +12123,13 @@ function handleApp(req, res) {
           if (ruw && bu.u === 'ok') res._app.inhoud = inhoud;
         }
         appHerstelVorigeWeg(reg, a);   // wv135
-        // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10) en het
-        // BSN-masker (§ 4.11; wv464: maskeren, nooit weigeren). Daarna verder met slotKlaar = true (apparaat en sessie opnieuw gecontroleerd).
+        // Fase 4 (wv134): op een apparaat met een vaste plek eerst het invoerslot (op de pod, uit het eigen register; § 4.10); sinds
+        // wv1931 geen BSN-masker meer op Davids invoer. Daarna verder met slotKlaar = true (apparaat en sessie opnieuw gecontroleerd).
         if (a.soort === 'vast' && APP_BEHEER_ROUTES.has(route) && !(route === 'POST /app/apparaat/intrekken' && String(d.id || '') === a.id))
           return appWeiger(res, 403, (route === 'POST /app/modellen' ? 'modellen wisselen' : route === 'POST /app/sleutels/vervang' ? 'sleutels vervangen' : route === 'POST /app/sleutels/weg' ? 'sleutels weggooien' : route === 'POST /app/agenda' ? 'een agendaknop bevestigen' : route.indexOf(' /app/facturen/') > 0 ? 'een boekhoudadres of de verzendmodus wijzigen' : route === 'POST /app/docs/delen' ? 'een pagina delen' : route === 'POST /app/werkers/schakel' ? 'een werker aan- of uitzetten' : 'apparaten beheren') + ' kan niet vanaf een apparaat met een vaste plek; gebruik je telefoon', 'beheer vanaf vast');
         if (!slotKlaar && a.soort === 'vast' && appInvoerRoute(route, upload, d, a)) {
           return appSlot(a).then(function (sl) {
             if (!sl.open) { res._app.reden = 'slot dicht: ' + sl.reden.slice(0, 60); return appStuur(res, 423, { ok: false, fout: 'invoer dicht: ' + sl.reden, slot: sl }); }
-            // wv172 (Fable K5): voorlezen stuurt Socevs eigen antwoord terug, geen invoer van David
-            if (route !== 'POST /app/voorlees' && appBsnMaskeer(req, d)) res._app.bsnWeg = true;
             return verder(true);
           });
         }
@@ -14892,11 +14873,6 @@ async function appStudio(req, res, a, s, d, route) {
   let m = /^GET \/app\/studio\/taak\/([a-f0-9]{16})$/.exec(route);
   if (m) { res._app.stil = true; const t = studio.taak(m[1]); return t ? appStuur(res, 200, { ok: true, taak: t }) : appWeiger(res, 404, 'deze taak bestaat niet', 'studio taak'); }
   if (route === 'POST /app/studio/maak') {
-    // wv464: op een vaste plek een BSN-achtig getal in de velden maskeren, nooit weigeren (zelfde regel als bij een bericht)
-    if (a.soort === 'vast' && d.velden && typeof d.velden === 'object') Object.keys(d.velden).forEach(function (k) {
-      const v = d.velden[k];
-      if (typeof v === 'string' && appBsnAchtig(v)) { d.velden[k] = appBsnMasker(v); res._app.bsnWeg = true; }
-    });
     const r = await studio.maak(d, ctx);
     if (r.status === 200) res._app.reden = 'studio maak ' + String(d.flow || '').slice(0, 40) + (r.al ? ' (al)' : '');
     return stuur(r, { taak: r.taak, al: r.al === true });
@@ -15194,10 +15170,7 @@ function bandjesInfo() {
 }
 async function appBandjes(req, res, a, s, d, route) {
   if (!bandjes) return appWeiger(res, 404, 'Bandjes zit niet in deze versie van de pod', 'bandjes ontbreekt');
-  // wv464: op een vaste plek een BSN-achtig getal maskeren, nooit weigeren (zoals Studio). Praktijknummers (10 cijfers) raakt dit niet.
-  if (a.soort === 'vast' && d && typeof d === 'object') ['tekst', 'naam', 'menu', 'wanneer', 'spreektekst', 'uitspraak'].forEach(function (k) {   // wv803: spreektekst, uitspraak
-    if (typeof d[k] === 'string' && appBsnAchtig(d[k])) { d[k] = appBsnMasker(d[k]); res._app.bsnWeg = true; }
-  });
+  // wv1931: geen BSN-masker meer (Davids eigen tekst); de app waarschuwt bij een BSN-achtig getal, want deze tekst gaat de telefoonlijn op
   if (route === 'GET /app/bandjes') res._app.stil = true;
   const r = await bandjes.app(route, d || {}, appStudioCtx(a, s));
   if (r.status !== 200) res._app.reden = 'bandjes: ' + String(r.j && r.j.fout || '').slice(0, 60);
@@ -15869,10 +15842,6 @@ async function appHarvester(req, res, a, d, route) {
     if (!(await appRolOk())) return appWeiger(res, 409, 'Socev draait nu op de reservekant; probeer het later', 'rol passief');
     if (!appTeller('harvester', 60, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 60)', 'grens harvester');
     if (route === 'POST /app/harvester/bron-nieuw' && !appTeller('harvester-bron', 10, 3600000)) return appWeiger(res, 429, 'te vaak een bron toegevoegd dit uur (max 10)', 'grens harvester-bron');
-    // wv464: op een vaste plek een BSN-achtig getal maskeren, nooit weigeren
-    if (a.soort === 'vast' && d && typeof d === 'object') ['naam', 'adres'].forEach(function (k) {
-      if (typeof d[k] === 'string' && appBsnAchtig(d[k])) { d[k] = appBsnMasker(d[k]); res._app.bsnWeg = true; }
-    });
   }
   let r;
   try { r = await harvester.app(route, d || {}); }

@@ -47,9 +47,14 @@ const MAX_BLOK_REGELS = 24, MAX_BLOK = 2048, MAX_BLOK_EERST = 800, MAX_ALINEA_RE
 const GREP_MS = 3000, GREP_MAX_UIT = 4 * 1024 * 1024, GREP_PER_BESTAND = 200;
 const WORTELS = ['10_Zakelijk', '20_Prive'];
 const WORTELS_VAST = ['10_Zakelijk'];
-const NIET_MAP = ['Bronnen', 'raw_input', 'Conversaties', 'Notulen', 'Archief', 'Gezondheid', 'Gesprekken', 'Skills', '_INBOX', 'Vervallen',
+// wv1931 (David 28-10: "Jij schermt af wat ik al heb"): Gezondheid, Gesprekken en Notulen zijn Davids eigen pagina's en horen in de snelle
+// laag. Bronnen, raw_input, Conversaties en Archief blijven erbuiten omdat het ruwe kopieën zijn van wat al op de pagina's staat
+// (snelheid en ruis, geen afscherming); Zoek breder (vault-rag) en Socev doorzoeken ze wel.
+const NIET_MAP = ['Bronnen', 'raw_input', 'Conversaties', 'Archief', 'Skills', '_INBOX', 'Vervallen',
   '.obsidian', '.git', '.trash', 'node_modules'];
-const NIET_MAP_VAST = ['Medewerkers', 'medewerkers', 'Personeel', 'personeel', 'gesprekken', 'Financieel', 'Financien', 'Financiën'];
+// vaste plek met de schakelaar op afschermen (wv1901): zoals isVastDicht in secondbrain.js; Gesprekken nu ook met hoofdletter, want NIET_MAP
+// sluit die map niet meer uit (grep --exclude-dir is hoofdlettergevoelig)
+const NIET_MAP_VAST = ['Medewerkers', 'medewerkers', 'Personeel', 'personeel', 'Gesprekken', 'gesprekken', 'Financieel', 'Financien', 'Financiën'];
 const NIET_BESTAND = ['AGENTS.md', 'CLAUDE.md', 'CLAUDE.local.md', '*.conflict*', '*conflict*.md'];
 const WOORDENLIJST = '00_Systeem/Woordenlijst.md';
 // wv1788: lagen 1 en 2
@@ -257,8 +262,8 @@ const MELDING = {
 // "niet gevonden"; ook zonder treffers zegt de melding welke delen van het Brein doorzocht zijn.
 const WORTEL_NAAM = { '10_Zakelijk': 'Zakelijk', '20_Prive': 'Privé' };
 const BLOK_DICHT = /voorgesteld|wachtwoord|password|passwd|pincode|\bpin\b|token|secret|api[-_ ]?key|sleutel|credential|inloggegevens/i;
-const DOORZOCHT = 'Ik zocht in Zakelijk en Privé, niet in bronnen, notulen, gesprekken, gezondheid, archief en systeempagina\'s.';
-const DOORZOCHT_VAST = 'Ik zocht op dit apparaat alleen in Zakelijk (zonder personeel en financiën), niet in bronnen, notulen, gesprekken en archief.';
+const DOORZOCHT = 'Ik zocht in Zakelijk en Privé (ook notulen, gesprekken en gezondheid), niet in ruwe bronnen, conversaties, archief en systeempagina\'s.';
+const DOORZOCHT_VAST = 'Ik zocht op dit apparaat alleen in Zakelijk (zonder personeel, gesprekken en financiën), niet in ruwe bronnen en archief.';
 const VOLLEDIG = 'Vraag het Socev voor een volledige zoektocht.';
 const pag = function (n) { return n + (n === 1 ? ' pagina' : ' pagina\'s'); };
 function dekkingZin(d) {

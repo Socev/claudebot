@@ -63,10 +63,13 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const k = await sb.app('POST /app/secondbrain/kaart', { alles: true }, {});
   const paden = k.j.knopen.map((x) => x[0]);
   toets('1 kaart: 200 met knopen en lijnen', k.status === 200 && paden.length > 10 && k.j.lijnen.length > 0, k.j);
-  const nooit = ['01_Ontwikkeling/Beveiliging/CISO.md', '00_Systeem/Beveiliging/Sleutelregister.md', '00_Systeem/Tokens/dag.jsonl', 'TempFinData/cf_token.txt', 'Claude outputs/x.pdf', '01_Ontwikkeling/0b-werkmap/a.md',
+  const nooit = ['00_Systeem/Tokens/dag.jsonl',
     '01_Ontwikkeling/script.js', '01_Ontwikkeling/pagina.html', '01_Ontwikkeling/Plan.md.conflict1', '.obsidian/app.json', '.git/HEAD', 'node_modules/x/index.md', '01_Ontwikkeling/link.md'];
-  toets('1 nooit in de kaart (P3: beveiliging, tokens, TempFinData, Claude outputs, 0b-werkmap, code, html, conflictkopie, punt-mappen, node_modules, symlink)',
+  toets('1 nooit in de kaart (onbekende soort, code, html, conflictkopie, punt-mappen, node_modules, symlink)',
     nooit.every((p) => paden.indexOf(p) < 0), nooit.filter((p) => paden.indexOf(p) >= 0));
+  const nuWel = ['00_Systeem/Beveiliging/Sleutelregister.md', 'TempFinData/cf_token.txt', 'Claude outputs/x.pdf', '01_Ontwikkeling/0b-werkmap/a.md'];
+  toets('1 wv1931: Beveiliging, TempFinData, Claude outputs, 0b-werkmap wel in de kaart (geen afscherming naar David)',
+    nuWel.every((p) => paden.indexOf(p) >= 0), nuWel.filter((p) => paden.indexOf(p) < 0));
   toets('1 niets uit een symlink-map', !paden.some((p) => p.indexOf('01_Ontwikkeling/etc') === 0));
   toets('1 wel: md, png, pdf in Bronnen, csv', ['index.md', '01_Ontwikkeling/schema.png', '10_Zakelijk/Tolgaarde/Bronnen/scan.pdf', '20_Prive/Financien/data.csv'].every((p) => paden.indexOf(p) >= 0));
   const dom = (p) => k.j.domeinen[k.j.knopen.find((x) => x[0] === p)[1]].naam;
@@ -109,10 +112,13 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('3 masker: token in de tekst weg, Drive-link blijft', os2.j.md.indexOf(TOKEN) < 0 && /\[sleutel weggelaten\]/.test(os2.j.md) && os2.j.md.indexOf('1AbC2dEf3GhI4jKl5MnO6pQr7StU8vWx') >= 0, os2.j.md);
   const ap = os2.j.eigenschappen.find((e) => e.naam === 'api_key');
   toets('3 frontmatter apart en gemaskeerd', !/^---/.test(os2.j.md) && ap && ap.waarde === '[sleutel weggelaten]' && os2.j.eigenschappen.find((e) => e.naam === 'verwant').waarde.indexOf('[[index]]') >= 0, os2.j.eigenschappen);
-  const slecht = ['../etc/passwd', '/etc/passwd', '01_Ontwikkeling/../index.md', 'index.md\u0000', '', 'TempFinData/cf_token.txt', '00_Systeem/Beveiliging/Sleutelregister.md', '01_Ontwikkeling/link.md', '01_Ontwikkeling/etc/passwd', 'bestaat/niet.md'];
+  const slecht = ['../etc/passwd', '/etc/passwd', '01_Ontwikkeling/../index.md', 'index.md\u0000', '', '01_Ontwikkeling/link.md', '01_Ontwikkeling/etc/passwd', 'bestaat/niet.md'];
   const sl = [];
   for (const p of slecht) sl.push((await sb.app('POST /app/secondbrain/open', { pad: p }, {})).status);
-  toets('3 openen weigert .., absoluut, NUL, leeg, nooit-mappen, symlink, onbekend (404)', sl.every((s) => s === 404), sl);
+  toets('3 openen weigert .., absoluut, NUL, leeg, symlink, onbekend (404)', sl.every((s) => s === 404), sl);
+  const tf = await sb.app('POST /app/secondbrain/bestand', { pad: 'TempFinData/cf_token.txt' }, {});
+  const tfT = tf.j && tf.j.inhoud ? Buffer.from(tf.j.inhoud, 'base64').toString('utf8') : '';
+  toets('3 wv1931: TempFinData opent (200), sleutel gemaskeerd', tf.status === 200 && tfT.indexOf(TOKEN) < 0 && /sleutel weggelaten/.test(tfT), tf.status + ' ' + tfT.slice(0, 120));
   const vastP = [];
   for (const p of ['20_Prive/Gezondheid/Bloed.md', '10_Zakelijk/Tolgaarde/Medewerkers/Jan Jansen.md', '00_Systeem/Meldingen/machinekamer.md', '30_Conversaties/WhatsApp/2026-10-22.md'])
     vastP.push((await sb.app('POST /app/secondbrain/open', { pad: p }, { vast: true })).status);

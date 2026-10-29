@@ -25,7 +25,10 @@ const MAX_MD = 2 * 1024 * 1024;
 const MAX_BESTAND = 20 * 1024 * 1024;
 const MAX_TREFFERS = 40, FRAGMENT = 160, ZOEK_MS = 4000, MAX_Q = 200;
 
-const NOOIT_MAP = ['00_Systeem/Beveiliging', '01_Ontwikkeling/Beveiliging', '00_Systeem/Tokens', '00_Systeem/Vault-RAG', 'TempFinData', 'Claude outputs', '01_Ontwikkeling/0b-werkmap'];
+// wv1931 (David 28-10: "Jij schermt af wat ik al heb"): geen vaultmap meer verborgen voor David. Beveiliging, Tokens, Vault-RAG,
+// TempFinData, Claude outputs en 0b-werkmap zijn zichtbaar; het sleutelmasker (masker) geldt er zoals overal. Punt-mappen en
+// node_modules slaat wandel() zelf over; de lijst blijft voor techniek die er later bij komt.
+const NOOIT_MAP = [];
 const VAST_DICHT_TOP = ['20_Prive', '30_Conversaties'];
 const VAST_DICHT_DEEL = ['medewerkers', 'personeel', 'gesprekken'];
 const VAST_DICHT_PREFIX = ['00_Systeem/Meldingen/', '01_Ontwikkeling/0b-werkmap/'];

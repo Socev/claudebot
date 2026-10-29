@@ -725,7 +725,7 @@ toets('B opgelost: weer open', JSON.stringify(R2.health()) === JSON.stringify({ 
   rs = res();
   await c.appBandjes({}, rs, apparaat, sessie, { praktijk: 'tolgaarde', bandje: 'tg-buiten', tekst: 'Bel 123456782 niet.', versie: tb.versie, tekst_hash: tb.tekst_hash }, 'POST /app/bandjes/tekst');
   o = stuurde.pop();
-  toets('S BSN-achtig getal op een vaste plek: gemaskeerd, niet geweigerd', o.st === 200 && o.j.bandje.tekst === 'Bel [BSN-achtig getal weggelaten] niet.' && rs._app.bsnWeg === true, o);
+  toets('S BSN-achtig getal op een vaste plek: ongewijzigd bewaard, geen masker (wv1931; de app waarschuwt)', o.st === 200 && o.j.bandje.tekst === 'Bel 123456782 niet.' && rs._app.bsnWeg === undefined, o);
   toets('S health via server.js', JSON.stringify(c.bandjesInfo()) === JSON.stringify({ aan: true, dicht_tolgaarde: false, dicht_groenhouten: false }), c.bandjesInfo());
 }
 toets('B geen onverwachte fouten', fouts.filter((f) => !/naKlaar gooit|studio-telefoonversie|studio-normaliseer|studio-sleutel/.test(f)).length === 0, fouts);

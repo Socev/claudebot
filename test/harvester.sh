@@ -370,7 +370,7 @@ let invoer=''; process.stdin.on('data',c=>invoer+=c); process.stdin.on('end',()=
   ctx.__primair = true;
   const rsb = { _app: {} }; const dd = { adres: 'https://x.proef/123456789', naam: 'a 123456789' };
   await S.appHarvester({}, rsb, { soort: 'vast' }, dd, 'POST /app/harvester/bron-nieuw');
-  toets('10 vaste plek: BSN-achtig getal gemaskeerd, niet geweigerd', rsb._app.bsnWeg === true && !/123456789/.test(dd.naam));
+  toets('10 vaste plek: BSN-achtig getal ongewijzigd, niet gemaskeerd (wv1931)', rsb._app.bsnWeg === undefined && dd.naam === 'a 123456789');
   let c = await S.harvesterClaude('SYS', 'PROMPT met brontekst', { type: 'object' });
   if (!fs.existsSync(NEP_LOG)) console.log('nep-claude niet gestart:', JSON.stringify(c));
   const log = JSON.parse(fs.readFileSync(NEP_LOG, 'utf8'));
