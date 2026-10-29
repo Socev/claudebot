@@ -102,6 +102,30 @@ function masker(t, vast, bsnMasker) {
   return s;
 }
 
+// Markeringen van gegenereerde blokken (<!-- sb:generated id="…" content_hash="<64 hex>" begin --> en … eind -->) zijn voor de
+// scripts, niet voor de lezer: zonder dit toonde react-markdown ze als tekst en maakte het masker van de hash "[sleutel weggelaten]"
+// (wv1999). Alleen de markering zelf verdwijnt (een regel met alleen de markering wordt leeg), het blok ertussen blijft; in
+// codeblokken (documentatie) blijft alles staan.
+const SB_MARKERING = /<!--[ \t]*sb:generated\b[^\r\n]{0,400}?-->/g;
+function zonderMarkeringen(t) {
+  const regels = String(t).split(/(\r?\n)/);
+  let hek = null;
+  for (let i = 0; i < regels.length; i += 2) {
+    const r = regels[i];
+    const m = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(r);
+    if (m) {
+      if (!hek) hek = m[1][0];
+      else if (m[1][0] === hek) hek = null;
+      continue;
+    }
+    if (hek || r.indexOf('sb:generated') < 0) continue;
+    const z = r.replace(SB_MARKERING, '');
+    if (z === r) continue;
+    regels[i] = z.trim() ? z : '';   // lege regel i.p.v. weg: anders loopt tekst na het blok lui door in de callout (> …)
+  }
+  return regels.join('');
+}
+
 // ── paden ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 const sleutel = (p) => String(p).normalize('NFC').toLowerCase();
 const extVan = (n) => (/\.([a-z0-9]+)$/i.exec(n) || [])[1] ? (/\.([a-z0-9]+)$/i.exec(n)[1]).toLowerCase() : '';
@@ -398,7 +422,7 @@ function maak(opt) {
     k.bestanden.forEach(function (b) { if (b.l.indexOf(z.i) >= 0 && mag(b, ctx)) terug.push(b.p); });
     terug.sort(function (a, b) { return a.split('/').pop().localeCompare(b.split('/').pop(), 'nl'); });
     return { status: 200, audit: audit(z.b), j: { ok: true, pad: z.b.p, domein: z.b.d, gewijzigd: new Date(z.b.m).toISOString(),
-      grootte: z.b.g, eigenschappen: fm ? eigenschappen(fm, ctx) : [], md: masker(t, ctx.vast, bsnMasker), doelen: doelen, terug: terug.slice(0, 200),
+      grootte: z.b.g, eigenschappen: fm ? eigenschappen(fm, ctx) : [], md: masker(zonderMarkeringen(t), ctx.vast, bsnMasker), doelen: doelen, terug: terug.slice(0, 200),
       terug_n: terug.length } };
   }
 
@@ -757,5 +781,5 @@ function maak(opt) {
     _los: function (doel, bron, md) { return los(doel, bron, md, vers(false)); } };
 }
 
-module.exports = { maak: maak, masker: masker, linksIn: linksIn, domeinVan: domeinVan, isVastDicht: isVastDicht, isVerborgen: isVerborgen,
+module.exports = { maak: maak, masker: masker, zonderMarkeringen: zonderMarkeringen, linksIn: linksIn, domeinVan: domeinVan, isVastDicht: isVastDicht, isVerborgen: isVerborgen,
   DOMEINEN: DOMEINEN, KAART_VERS_MS: KAART_VERS_MS };

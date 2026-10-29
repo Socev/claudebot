@@ -56,6 +56,9 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   zet('10_Zakelijk/Holding/Café notitie.md', '# cafe\n');
 
   zet('01_Ontwikkeling/Beveiliging/CISO.md', '# ciso\n');
+  // wv1999: markering van een gegenereerd blok (64-hex hash) niet tonen; het blok wel, een echte sleutel nog gemaskeerd, codeblok onaangeroerd
+  const HASH = '9f3a' + 'c0d1e2b4'.repeat(7) + '5b6c7d8e'.slice(0, 4);
+  zet('20_Prive/Proef/Proefvriend.md', '# Proefvriend\nTekst met ' + TOKEN + '.\n<!-- sb:generated id="verbonden" content_hash="' + HASH + '" begin -->\n> [!abstract]- Verbonden pagina\'s (2)\n> **20_Prive/Proef** (2): [[20_Prive/Proef/A|A]]\n<!-- sb:generated id="verbonden" eind -->\nNa het blok.\n```\n<!-- sb:generated id="uitleg" eind -->\n```\n');
   const sb = S.maak({ vault: V, dir: D, fout: (w, e) => console.error('fout', w, e && e.message), hmac: (p) => 'h' + Buffer.from(p).toString('hex').slice(0, 15),
     bsnMasker: (t) => String(t).replace(/\b\d{9}\b/g, '[BSN]'),
     betekenis: async (q) => [{ key: 'vault/20_Prive/Gezondheid/Bloed.md', text: 'privé ' + TOKEN }, { key: 'vault/10_Zakelijk/Tolgaarde/Verzekeringen.md', text: 'polis' },
@@ -111,6 +114,13 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   toets('3 backlinks: index en Plan', ov.j.terug.indexOf('index.md') >= 0 && ov.j.terug.indexOf('01_Ontwikkeling/Plan.md') >= 0, ov.j.terug);
   toets('3 audit: domein + hmac, nooit het pad', ov.audit.domein === 'Tolgaarde' && /^h[0-9a-f]+$/.test(ov.audit.h) && JSON.stringify(ov.audit).indexOf('Verzekeringen') < 0, ov.audit);
   toets('3 masker: token in de tekst weg, Drive-link blijft', os2.j.md.indexOf(TOKEN) < 0 && /\[sleutel weggelaten\]/.test(os2.j.md) && os2.j.md.indexOf('1AbC2dEf3GhI4jKl5MnO6pQr7StU8vWx') >= 0, os2.j.md);
+  const pv = await sb.app('POST /app/secondbrain/open', { pad: '20_Prive/Proef/Proefvriend.md' }, {});
+  const pvm = pv.j.md || '';
+  toets('3 wv1999: sb:generated-markering niet in de lezer, blok wel, hash niet als sleutel, echte sleutel nog weg',
+    HASH.length === 64 && pv.status === 200 && pvm.indexOf('content_hash') < 0 && pvm.indexOf(HASH) < 0 && /\n\n> \[!abstract\]- Verbonden/.test(pvm) &&
+    /> \*\*20_Prive\/Proef\*\* \(2\): \[\[20_Prive\/Proef\/A\|A\]\]\n\nNa het blok\./.test(pvm) && pvm.indexOf(TOKEN) < 0 &&
+    (pvm.match(/\[sleutel weggelaten\]/g) || []).length === 1 && pvm.indexOf('```\n<!-- sb:generated id="uitleg" eind -->\n```') >= 0, pvm);
+  toets('3 wv1999: zonder de afscherming zou de hash als sleutel gemaskeerd worden (toets meet echt iets)', S.masker('x ' + HASH + ' y', false).indexOf(HASH) < 0);
   const ap = os2.j.eigenschappen.find((e) => e.naam === 'api_key');
   toets('3 frontmatter apart en gemaskeerd', !/^---/.test(os2.j.md) && ap && ap.waarde === '[sleutel weggelaten]' && os2.j.eigenschappen.find((e) => e.naam === 'verwant').waarde.indexOf('[[index]]') >= 0, os2.j.eigenschappen);
   const slecht = ['../etc/passwd', '/etc/passwd', '01_Ontwikkeling/../index.md', 'index.md\u0000', '', '01_Ontwikkeling/link.md', '01_Ontwikkeling/etc/passwd', 'bestaat/niet.md'];
