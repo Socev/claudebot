@@ -1248,7 +1248,7 @@ function maak(o) {
     for (const b of db.prepare('SELECT stap, stroom, status, marker, botsing, jev_tokens, jev, labels_plan FROM besluit WHERE postvak = ? AND aangemaakt >= ? AND aangemaakt < ? AND inhaal = 0').all(pv, van, tot)) {
       if (b.stap === 'buiten') { rij.buiten++; continue; }
       rij.binnen++;
-      rij[b.stap] = (rij[b.stap] || 0) + 1;
+      if (b.stap !== 'verkoop') rij[b.stap] = (rij[b.stap] || 0) + 1;   // wv1997: stap en stroom heten allebei verkoop; alleen als uitgang tellen
       if (b.status === 'wacht_jev' || b.status === 'wacht_verkoop') rij.wacht++;   // wv1997: ook wachtend op de pdf-toets
       else if (b.stroom && rij[b.stroom] != null) rij[b.stroom]++;
       if (b.marker) rij.marker++;

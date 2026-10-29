@@ -1117,6 +1117,8 @@ test('B7-V pdf-toets: tekstlaag of OCR, alleen ankers/sha/grootte bewaard, map a
   assert.equal(u.j.verkoop, false); assert.equal(vRij(mm, geen.id).fout, 'geen leesbare pdf');
   assert.deepEqual(fs.readdirSync(tmp), [], 'tijdelijke mappen gewist');
   assert.equal((await t(tekst, [{ b64 }])).status, 409, 'al getoetst: geen tweede toets');
+  const tl = mm.telling('gmail:groenhouten', '2000-01-01T00:00:00Z', '2100-01-01T00:00:00Z');
+  assert.equal(tl.verkoop, 2, 'twee verkoopnota\'s, één keer geteld'); assert.equal(tl.binnen, 4);
 });
 
 test('B7-V pdf-toets: mislukt telt, na 3 keer gewone stappen; niet-canonieke base64 geweigerd; 24 uur zonder toets = gewone stappen', async () => {
