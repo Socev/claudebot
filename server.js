@@ -15285,7 +15285,40 @@ const intake = (function () {
   } catch (e) { logError('intake', e); return null; }
 })();
 function intakeIsPad(req) { const p = reqPath(req); return p === '/intake' || p.indexOf('/intake/') === 0; }
-function intakeInfo() { if (!intake) return { aan: false }; try { return Object.assign({ aan: true }, intake.info(), { router: intakeRouterInfo() }); } catch (e) { return { aan: true, fout: true }; } }
+// wv1869 (SB2 fase 3b): publicatieservice — bronnotities in <entiteit>/Bronnen/ en het gegenereerde blok in _register.md via
+// secondbrain.outbox_publication (public.sb2_publicatie_*, sb2_outbox_*); logica en waarom in intake-publicatie.js. Eén ronde per nacht als
+// nachtketen-stap intake-publicatie. Schakelaar intake/publicatie.json {"aan": true, "entiteiten": ["TG"]} (uit of weg = niets).
+function intakePublicatieStand() {
+  try {
+    const st = fs.lstatSync(path.join(INTAKE_DIR, 'publicatie.json'));
+    if (!st.isFile()) return null;
+    const j = JSON.parse(fs.readFileSync(path.join(INTAKE_DIR, 'publicatie.json'), 'utf8'));
+    return j && typeof j === 'object' ? j : null;
+  } catch (e) { return null; }
+}
+const intakePublicatie = (function () {
+  const p = path.join(__dirname, 'intake-publicatie.js');
+  if (!intake || !intake._db || !fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), schakelaar: intakePublicatieStand,
+      rpc: function (fn, body) { return appSbRpc(fn, body, 30000); },
+      pauze: function () { try { return onderhoud.stand().aan === true || ovisAms().uur === 1; } catch (e) { return true; } },
+      versie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || ''; },
+      staatBestand: path.join(INTAKE_DIR, 'publicatie-stand.json'),
+      log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError,
+      meld: function (t) { ovisBoxRij('\n## [log] ' + ovisAms().klok + ' — ' + t + ' (automatisch, wv1869)\n- status: open\n- van: pod (intake-publicatie)\n' +
+        '- gevolg als er niets gebeurt: de bronnotitie of het register op die plek wordt niet meer bijgewerkt.\n' +
+        '- voorstel: verschil nakijken (outbox_publication + besluit handmatige_wijziging); vrijgeven met mk-scripts/wv1869/vrijgeven.py.\n'); } });
+  } catch (e) { logError('intake-publicatie', e); return null; }
+})();
+function intakePublicatieInfo() {
+  const s = intakePublicatieStand();
+  if (!intakePublicatie) return { aan: !!(s && s.aan === true), module: false };
+  const l = intakePublicatie.laatste();
+  return { aan: !!(s && s.aan === true), entiteiten: s && Array.isArray(s.entiteiten) ? s.entiteiten.slice(0, 12) : [],
+    laatste: l ? { op: l.op, in_scope: l.in_scope, geschreven: l.geschreven, gelijk: l.gelijk, afgerond: l.afgerond, geblokkeerd: l.geblokkeerd, fout: l.fout, per_entiteit: l.per_entiteit } : null };
+}
+function intakeInfo() { if (!intake) return { aan: false }; try { return Object.assign({ aan: true }, intake.info(), { router: intakeRouterInfo(), publicatie: intakePublicatieInfo() }); } catch (e) { return { aan: true, fout: true }; } }
 // Dagtelling (ontwerp § 4.3/§ 5.2): één box-rij per dag over gisteren, stil als er niets binnenkwam en niets openstaat.
 function intakeDagTelling() {
   const t = ovisAms();
@@ -16326,6 +16359,15 @@ const nachtketen = (function () {
           const r = await ovisBiblioRonde({ datum: ctx.datum, klok: t.klok }, s);
           return r.ok ? { ok: true, detail: { open: r.open, nieuw: r.nieuw } } : { ok: false, reden: 'bibliothecaris: ' + String(r.zin || '').slice(0, 80) };
         } finally { ovisLoopt.nu = null; }
+      } },
+      // wv1869 (SB2 fase 3b): publicatieservice (bronnotities + register), ná de Bibliothecaris; met de schakelaar uit: al_gedaan
+      { naam: 'intake-publicatie', start_na: [2, 40], na: ['bibliothecaris'], limiet_min: 15, pogingen: 2, inProces: true, doe: async function () {
+        if (!intakePublicatie) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        const r = await intakePublicatie.ronde();
+        if (r.uit) return { ok: true, al_gedaan: true, detail: { schakelaar: 'uit' } };
+        if (r.wacht) return { wacht: r.wacht };
+        const d = { in_scope: r.in_scope, geschreven: r.geschreven, gelijk: r.gelijk, afgerond: r.afgerond, geblokkeerd: r.geblokkeerd, tussendoor: r.tussendoor };
+        return r.fout ? { ok: false, reden: 'publicatie: ' + r.fout + ' fout(en)' + (r.reden ? ' (' + r.reden.slice(0, 60) + ')' : ''), detail: d } : { ok: true, detail: d };
       } },
       { naam: 'ovis-agenda', start_na: [3, 30], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisAgenda) },
       { naam: 'ovis-deadlines', start_na: [3, 45], na: ['ovis-agenda'], limiet_min: 5, pogingen: 2, meldtZelf: true,

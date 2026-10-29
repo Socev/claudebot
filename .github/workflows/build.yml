@@ -335,6 +335,10 @@ jobs:
       - name: "nachtketen (wv1868, nachtorkestrator)"
         if: ${{ !cancelled() }}
         run: bash test/nachtketen.sh
+      # Publicatieservice (wv1869, SB2 fase 3b): bronnotities + register via de outbox (nep-Supabase met de regels van 0012), proef 7 en 8.
+      - name: "intake-publicatie (wv1869, publicatieservice)"
+        if: ${{ !cancelled() }}
+        run: bash test/intake-publicatie.sh
       # Bandjes (wv739/wv743): register lezen/schrijven, routes, Studio-koppeling (nep-Piper), naKlaar, /smal, box-rij, server.js-blok in een vm.
       - name: "bandjes (wv743, mini-app Bandjes)"
         if: ${{ !cancelled() }}
