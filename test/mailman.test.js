@@ -1475,3 +1475,23 @@ test('wv2006: regel uit de verzonden mail — herkomst alleen in het overzicht, 
   assert.equal(mm.app('POST /app/mailman/regel', { actie: 'weg', id }).status, 200);
   assert.equal(mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === 'gmail:david'; }).regels.some(function (x) { return x.id === id; }), false);
 });
+
+test('wv2006 review MOET 1: Davids eigen In-regel gaat altijd vóór een regel uit de verzonden mail; ↑/↓ ruilt alleen binnen de eigen groep', () => {
+  const { mm } = nieuweKamer();
+  const db = mm._db;
+  const vz = Number(db.prepare(`INSERT INTO regel (postvak, stap, volgorde, naam, voorwaarden, stroom, actief, bron, aangemaakt, bijgewerkt, versie)
+    VALUES ('gmail:david', 'in', 1, 'Verzonden: lev.invalid', ?, 'factuur', 1, 'verzonden', '2026-10-30T00:00:00Z', '2026-10-30T00:00:00Z', 1)`)
+    .run(JSON.stringify({ van_domein: { op: 'is', w: 'lev.invalid' }, bijlage: 'pdf' })).lastInsertRowid);
+  const eigen1 = mm.app('POST /app/mailman/regel', { actie: 'nieuw', postvak: 'gmail:david', stap: 'in', naam: 'vraag', voorwaarden: { van_domein: { op: 'is', w: 'lev.invalid' }, onderwerp: { op: 'bevat', w: 'vraag' } }, stroom: 'intake' }).j.id;
+  const eigen2 = mm.app('POST /app/mailman/regel', { actie: 'nieuw', postvak: 'gmail:david', stap: 'in', naam: 'b', voorwaarden: { onderwerp: { op: 'bevat', w: 'zzz' } }, stroom: 'intake' }).j.id;
+  const m = mail({ van: 'Lev <x@lev.invalid>', onderwerp: 'Een vraag over de nota', bijlagen: [{ naam: 'f.pdf', mime: 'application/pdf' }] });
+  draai(mm, 'gmail:david', [m], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 2.5 }); } });
+  assert.equal(rij(mm, m.id).regel_id, eigen1); assert.equal(rij(mm, m.id).stroom, 'intake');
+  // ↑ op Davids eerste regel: geen buur in zijn groep (de verzonden-regel met volgorde 1 telt niet mee); ↓ ruilt met zijn tweede
+  const vo = function (id) { return db.prepare('SELECT volgorde FROM regel WHERE id = ?').get(id).volgorde; };
+  const v1 = vo(eigen1), vvz = vo(vz);
+  assert.equal(mm.app('POST /app/mailman/regel', { actie: 'op', id: eigen1 }).status, 200);
+  assert.equal(vo(eigen1), v1); assert.equal(vo(vz), vvz);
+  assert.equal(mm.app('POST /app/mailman/regel', { actie: 'neer', id: eigen1 }).status, 200);
+  assert.ok(vo(eigen1) > vo(eigen2));
+});

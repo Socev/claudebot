@@ -396,7 +396,9 @@ function besluitRegels(m, instel) {
   if (alt.factuur_alias !== false && alias && m.aan.some(function (a) { return gmailKern(a, false) === alias; })) return { stap: 'altijd', stroom: 'factuur', reden: 'factuur_alias' };
   if (alt.ai_label !== false && gemarkeerd) return { stap: 'altijd', stroom: 'intake', reden: 'markering' };
   if (alt.draad !== false && instel.draadBekend) return { stap: 'altijd', stroom: 'intake', reden: 'draad' };
-  const regels = (instel.regels || []).filter(function (r) { return r.actief; }).sort(function (a, b) { return a.volgorde - b.volgorde || a.id - b.id; });
+  // wv2006 (review MOET 1): regels uit de verzonden mail (bron 'verzonden') komen altijd ná Davids eigen regels, wat de volgorde ook zegt
+  const laat = function (r) { return r.bron === 'verzonden' ? 1 : 0; };
+  const regels = (instel.regels || []).filter(function (r) { return r.actief; }).sort(function (a, b) { return laat(a) - laat(b) || a.volgorde - b.volgorde || a.id - b.id; });
   for (const stap of ['weg', 'in']) {
     for (const r of regels) {
       if (r.stap !== stap || !regelPast(r.voorwaarden, m)) continue;
@@ -1555,7 +1557,7 @@ function maak(o) {
       if (pv !== '*' && !postvak(pv)) return { status: 400, j: { ok: false, fout: 'postvak onbekend' } };
       return tx(function () {
         if (actie === 'nieuw') {
-          const vo = (db.prepare('SELECT max(volgorde) m FROM regel WHERE stap = ?').get(stap).m || 0) + 1;
+          const vo = (db.prepare("SELECT max(volgorde) m FROM regel WHERE stap = ? AND bron != 'verzonden'").get(stap).m || 0) + 1;   // wv2006: verzonden-regels hebben een eigen reeks
           const id = Number(db.prepare(`INSERT INTO regel (postvak, stap, volgorde, naam, voorwaarden, stroom, actief, bron, aangemaakt, bijgewerkt, versie) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1)`)
             .run(pv, stap, vo, naam, JSON.stringify(v.v), stroom, d.bron === 'voorstel' ? 'voorstel' : 'David', iso(), iso()).lastInsertRowid);
           wijzig('regel', id, null, { postvak: pv, stap, naam, voorwaarden: v.v, stroom }, door);
@@ -1581,7 +1583,9 @@ function maak(o) {
         // buur binnen wat David in deze lijst ziet: hetzelfde postvak of 'beide' (een regel voor beide ruilt met elke buur)
         const pvw = oud.postvak === '*' ? '' : ' AND postvak IN (?, \'*\')';
         const arg = oud.postvak === '*' ? [oud.stap, oud.volgorde] : [oud.stap, oud.postvak, oud.volgorde];
-        const buur = db.prepare('SELECT * FROM regel WHERE stap = ? AND weg = 0' + pvw + ' AND volgorde ' + (actie === 'op' ? '< ? ORDER BY volgorde DESC' : '> ? ORDER BY volgorde') + ' LIMIT 1').get(...arg);
+        // wv2006 (review MOET 1): alleen binnen dezelfde groep (gewone regels of regels uit de verzonden mail), die de App apart toont
+        const groep = oud.bron === 'verzonden' ? " AND bron = 'verzonden'" : " AND bron != 'verzonden'";
+        const buur = db.prepare('SELECT * FROM regel WHERE stap = ? AND weg = 0' + groep + pvw + ' AND volgorde ' + (actie === 'op' ? '< ? ORDER BY volgorde DESC' : '> ? ORDER BY volgorde') + ' LIMIT 1').get(...arg);
         if (buur) {
           db.prepare('UPDATE regel SET volgorde = ? WHERE id = ?').run(buur.volgorde, oud.id);
           db.prepare('UPDATE regel SET volgorde = ? WHERE id = ?').run(oud.volgorde, buur.id);
