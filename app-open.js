@@ -18,7 +18,7 @@
 // instellingen en het slot. Een nieuwe module wordt pas stuurbaar als hij hier bijkomt (en in de catalogus).
 const STUURBAAR = ['overzicht', 'intake', 'apps', 'brain',
   'praktijken', 'projecten', 'bandjes', 'financien', 'gezondheid', 'facturen', 'docs', 'bestanden', 'pot-afschriften', 'studio',
-  'broedstoof', 'mediatheek', 'harvester', 'ideeen', 'flock', 'verbruik', 'secondbrain'];
+  'broedstoof', 'mediatheek', 'harvester', 'ideeen', 'flock', 'verbruik', 'secondbrain', 'pot'];   // wv1894: OVIS POT
 // Strikt (de enige vorm die telt): precies zo, op één regel, vooraan de regel, zonder opmaak eromheen.
 const STRIKT_RE = /^\[OPEN scherm=([a-z][a-z0-9-]{1,39})(?: focus=([^\s\]]{1,100}))?\]$/;
 // Ruim (wat er altijd uit gaat): ook met opmaak eromheen, andere hoofdletters of extra spaties. Wordt getoetst op de genormaliseerde

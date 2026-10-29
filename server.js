@@ -3761,7 +3761,8 @@ function handleRequest(req, res) {
       tokenteller: typeof tokenteller !== 'undefined' && !!tokenteller,   // wv1742: tokenteller.js in deze release (GET /app/tokens)
       ringkaart: typeof ringkaart !== 'undefined' && !!ringkaart,   // wv888: ringkaart.js in deze release (GET /app/ringkaart)
       werkers: typeof werkersInfo === 'function' ? werkersInfo() : { aan: false },   // wv1707 (OVIS M4a): Ploeg-register (aantal werkers, laatste n8n-lezing, check-aantallen; geen namen)
-      mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },   // wv1269: App Mediatheek (aantallen, geen inhoud)
+      mediatheek: typeof mediatheekInfo === 'function' ? mediatheekInfo() : { aan: false },
+      pot_app: typeof potAppInfo === 'function' ? potAppInfo() : { aan: false },   // wv1894: OVIS POT (lezen)   // wv1269: App Mediatheek (aantallen, geen inhoud)
       harvester: harvesterInfo(),   // wv820: App Harvester (harvester.js in deze release? bronnen, nieuwe kaarten, laatste ronde; geen inhoud)   // wv743: mini-app Bandjes (bandjes.js in deze release? register per praktijk dicht?; geen inhoud)
       ideeen: typeof ideeenInfo === 'function' ? ideeenInfo() : { aan: false },   // wv761/wv942: App AIX (laatste lezing, catalogus, plaatsing, uur- en weekronde; geen inhoud)
       aix: typeof aixInfo === 'function' ? aixInfo() : { aan: false },   // wv942: aix.js (sleutel bruikbaar?, laatst bereikbaar, plat sinds; nooit de sleutel)
@@ -12242,6 +12243,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/secondbrain' || route.indexOf('POST /app/secondbrain/') === 0) return typeof appSecondBrain === 'function' ? appSecondBrain(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'secondbrain');   // wv832: App Second Brain (alleen lezen)
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
+        if (route.indexOf('GET /app/pot/') === 0) return typeof appPot === 'function' ? appPot(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1894: OVIS POT (P1: lezen)
         if (route === 'GET /app/pot-afschriften') return appPotAfschriften(req, res, a);       // wv787: App POT-afschriften (alleen David, geen vaste plek)
         if (route === 'POST /app/pot-afschriften/maak') return appPotMaak(req, res, a, d);
         if (route === 'POST /app/pot-afschriften/concept') return appPotConcept(req, res, a, s, d);
@@ -16919,6 +16921,33 @@ async function appMediatheek(req, res, a, route) {
   return appStuur(res, r.status, r.j);
 }
 // ── einde mediatheek ──
+
+// ── OVIS POT (wv1894, fase P1: lezen; bouwplan vault "01_Ontwikkeling/OVIS POT - POT POH-GGZ-app in de Socev-app (bouwplan 28-10-2026).md") ──
+// De POT-cyclus (werk.socev.dev/pot) als App in de Socev-app. Logica in pot-app.js (puur: de 10 leesroutes van de Function, letterlijk,
+// met gebundelde D1-vragen); hier alleen GET /app/pot/<pad> (padstukken, zie pot-app.js), de sessie (zoals elke app-route), een
+// auditregel per opvraging (route, status, rondgangen, duur; geen bedragen) en /health.pot_app. D1 `fin` via potDhD1, alleen SELECT.
+// Op een vaste plek gewoon open (David 28-10 16:51: "op ALLE pc's toegang tot ALLES"; wv1901). Schrijven en verzenden: P3/P4.
+// Ontbreekt pot-app.js in de release (terugrol), dan 404 en /health.pot_app.aan=false.
+const POT_APP_MOD = (function () { const p = path.join(__dirname, 'pot-app.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('pot-app', e); return null; } })();
+const potApp = (function () {
+  try {
+    return POT_APP_MOD ? POT_APP_MOD.maak({ d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); } }) : null;
+  } catch (e) { logError('pot-app', e); return null; }
+})();
+function potAppInfo() { return { aan: !!potApp, sleutel: !!process.env.CLOUDFLARE_API_TOKEN }; }
+async function appPot(req, res, a, route) {
+  if (!potApp) return appWeiger(res, 404, 'OVIS POT zit niet in deze versie van de pod', 'pot ontbreekt');
+  if (!process.env.CLOUDFLARE_API_TOKEN) return appWeiger(res, 503, 'de POT-gegevens zijn nu niet te lezen (geen Cloudflare-sleutel op de pod)', 'pot geen sleutel');
+  if (!appTeller('pot', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 600)', 'grens pot');
+  const pad = route.slice('GET /app/pot/'.length);
+  const t0 = Date.now();
+  let r;
+  try { r = await potApp.lees(pad); } catch (e) { logError('app-pot', e); return appWeiger(res, 500, 'fout op de pod', 'pot uitzondering'); }
+  if (r.status >= 500) logError('app-pot', new Error(String(r.j && r.j.fout || r.status)));
+  res._app.reden = 'pot ' + (r.route || 'onbekend') + ' (' + r.status + ', ' + r.rondgangen + ' rondgang' + (r.rondgangen === 1 ? '' : 'en') + ', ' + (Date.now() - t0) + ' ms)';
+  return appStuur(res, r.status, r.j);
+}
+// ── einde OVIS POT ──
 
 // ── Ideeënbeurs → AIX (wv761, wv861; sinds wv942 AIX: bouwplan "01_Ontwikkeling/AIX - Agentic Ideas eXchange (ontwerp 23-10-2026).md" § 5.3–§ 8) ──
 // App AIX (zelfde tegel als "Ideeën van buitenaf"): lezen wat andere agents etaleren, Socevs eigen winkel, en Klaar om te delen (Deel/Niet per

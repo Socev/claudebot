@@ -261,6 +261,7 @@ jobs:
           t test/pot-auto-pod.sh   # wv921: knoproute (alleen knop-ja-vers-kaart, intrekken bij verval), verzendgeheim buiten de Socev-omgeving, noodstop
           t test/verzender-toetsen.sh   # wv921: Toetsen-code van AI - Facturen-verzender (bron pot, eigen geheim, witte lijst, cc, plafond) + hash in het image
           t test/pot-datahub.sh   # wv815: POT-posten naar Davids datahub — koppelen, grens, Davids vorm, toewijzing, grootboek, D1-batch met parameters
+          t test/pot-app.sh   # wv1894: OVIS POT P1 — leesroutes van de POT-app als pod-module (padvorm, bundelen ≤ 2 rondgangen, alleen SELECT, verzonnen gegevens)
           t test/pot-afschrift.sh   # wv787: POT-afschriften — MT940 (contractlezer + mt-940), saldoketen, verrijkte PDF, bank-lezer, maandronde
           exit $rood
       # Facturen-app (wv797–wv833) in een eigen stap die ook draait als een eerdere stap rood is: een rode bankluis-toets mag de Facturen-toetsen
