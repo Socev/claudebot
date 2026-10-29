@@ -770,7 +770,7 @@ test('4b registreer: één keer per run (idempotent), vaste foutcode, hooguit 5 
   assert.equal(zp(), 0);
   assert.deepEqual((await FR.registreer(t.rk, async () => { throw new Error('rpc sb_fin_run_zet http 400 https://x.invalid geheim'); }, { bankbron, nu: NU, max: 1 })).fouten, [{ run: r3.run, fout: 'rpc_http_400' }]);
   assert.deepEqual((await FR.registreer(t.rk, async () => { throw new TypeError('fetch failed'); }, { bankbron, nu: NU, max: 1 })).fouten, [{ run: r3.run, fout: 'rpc_netwerk' }]);
-  assert.deepEqual((await FR.registreer(t.rk, async () => ({ ok: false, fout: 'NL91 ABNA 0417 1643 00 / € 1.234,56' }), { bankbron, nu: NU, max: 1 })).fouten, [{ run: r3.run, fout: 'antwoord_onbekend' }]);
+  assert.deepEqual((await FR.registreer(t.rk, async () => ({ ok: false, fout: 'NL91 ABNA ' + '0417 1643 00 / € 1.234,56' }), { bankbron, nu: NU, max: 1 })).fouten, [{ run: r3.run, fout: 'antwoord_onbekend' }]);
   // run 3 en (na --opnieuw) run 2 gaan nu goed
   assert.equal((await FR.registreer(t.rk, goed, { bankbron, nu: NU })).gezet, 2);
   assert.deepEqual(FR.laatste(t.rk, {}).antwoordcontract, { query_run_id: 22 });
