@@ -321,7 +321,7 @@ const M = {
           zet('Samsung Electronics', 4.99, 11, ym, true);                  // twee diensten van 4,99: geen dubbel
           zet('SkyShowtime Limited', 4.99, 19, ym, true);
           zet('Apple Services', 2.99, 7, ym, true); zet('Apple Services', 2.99, 14, ym, true);   // één dienst twee keer 2,99: wél dubbel
-          zet('Piet Voorbeeld', 6.0, 3, ym, true);                         // een persoon: nooit bij naam
+          zet('Piet Voorbeeld', 6.0, 3, ym, true);                         // een persoon: in de App bij naam (wv1957), in de briefing niet
           zet('-', 3.5, 4, ym, false); zet('-', 3.5, 22, ym, false);       // zonder bewijs, twee per maand
         }
         if (metBewijs) P.bij(a4, bw, []);

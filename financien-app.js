@@ -162,7 +162,8 @@ function isPaypal(x) { return /paypal/i.test(String(x.naam || '')); }
 // De PayPal-paraplu zonder dienst (wv779): de bedragclusters zonder ontvangstbewijs, of alles als de PayPal-laag ontbreekt. Een rij
 // met een dienst (uit de ontvangstbewijzen) is een gewone post: eigen naam, eigen signalen.
 function paraplu(x) { return isPaypal(x) && !x.paypal_dienst; }
-// PayPal-titel; de dienstnaam komt uit bank-archief (paypalNaam: bekende dienst of organisatie, nooit een persoon). Zelfde tekst als
+// PayPal-titel; de dienstnaam komt uit bank-archief (paypalNaam: bekende dienst of organisatie, nooit een persoon), in de App aangevuld
+// met de ontvanger uit de PayPal-laag (ook een persoon; wv1957), in de briefing niet. Zelfde tekst als
 // A.ppTitel; een onbekende dienst met de incassodag ("onbekende dienst, rond de 3e"), zodat twee zulke rijen niet samenvallen (wv909)
 function ppOnbekend(dag) { return 'onbekende dienst' + (dag >= 1 && dag <= 31 ? ', rond de ' + Math.round(dag) + 'e' : ''); }
 function ppTitel(x) {
@@ -367,7 +368,8 @@ function bereken(A, a, o) {
   uit.verloop = blok('verloop', function () { return blokVerloop(A, a, mNu, vanaf); });
   // PayPal één keer lezen: de diensten voor het PayPal-blok en de ontvangernamen voor de vaste lasten (wv1957)
   const ppD = o.paypal ? blok('paypal', function () { return o.paypal.diensten(a); }) : null;
-  const ppNamen = new Map(((ppD && ppD.diensten) || []).filter(function (r) { return r.dienst && r.naam; }).map(function (r) { return [r.dienst, r.naam]; }));
+  // een actieve reeks wint de naam van een oude (Opus-review wv1957 KAN 2: oudere spelling)
+  const ppNamen = new Map(((ppD && ppD.diensten) || []).filter(function (r) { return r.dienst && r.naam; }).sort(function (x, y) { return (x.actief ? 1 : 0) - (y.actief ? 1 : 0); }).map(function (r) { return [r.dienst, r.naam]; }));
   uit.vaste_lasten = blok('vaste_lasten', function () { return blokVasteLasten(A, a, nu, L.links, signalen, ppNamen); });
   const stroomNu = blok('stroom', function () { return blokStroom(A, a, mNu); });
   const stroomVorig = blok('stroom', function () { return blokStroom(A, a, maandPlus(mNu, -1)); });
