@@ -212,12 +212,16 @@ const HTML = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proef</tit
     '<w:p><w:r><w:t>Gewone alinea voor de proef.</w:t></w:r></w:p>' +
     '<w:p><w:hyperlink r:id="rIdJs"><w:r><w:t>klik script</w:t></w:r></w:hyperlink></w:p>' +
     '<w:p><w:hyperlink r:id="rIdFile"><w:r><w:t>klik bestand</w:t></w:r></w:hyperlink></w:p>' +
+    '<w:p><w:hyperlink r:id="rIdHaak"><w:r><w:t>klik haak</w:t></w:r></w:hyperlink></w:p>' +
+    '<w:p><w:hyperlink r:id="rIdHtml"><w:r><w:t>klik html</w:t></w:r></w:hyperlink></w:p>' +
     '<w:p>' + BEELD + '</w:p>' +
     '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> INCLUDEPICTURE "https://example.org/veld.png" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>' +
     '<w:p><w:r><w:t>Slotzin.</w:t></w:r></w:p></w:body></w:document>';
   const KWAAD_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
     '<Relationship Id="rIdJs" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="javascript:alert(1)" TargetMode="External"/>' +
     '<Relationship Id="rIdFile" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="file:///etc/passwd" TargetMode="External"/>' +
+    '<Relationship Id="rIdHaak" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://x.example/)[klik](javascript:alert(document.domain)" TargetMode="External"/>' +
+    '<Relationship Id="rIdHtml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://x.example/&lt;img/src=x/onerror=alert(1)&gt;" TargetMode="External"/>' +
     '<Relationship Id="rIdBeeld" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="https://example.org/extern.png" TargetMode="External"/>' +
     '<Relationship Id="rIdStijl" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
   // zip-bom: één alinea van 300 miljoen tekens (gecomprimeerd ± 300 kB)
@@ -250,8 +254,11 @@ const HTML = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proef</tit
   toets('docx → md: kop, vet, link, tabel', /^# Notulen proefoverleg/m.test(md) && /\*\*vet\*\*/.test(md) && /\[link\]\(https:\/\/example\.org\/a\)/.test(md) && /\| Rooster +\| Assistent +\|/.test(md), md.slice(0, 300));
   r = await M.omzet({ naam: 'kwaad.docx', soort: 'docx', tekst: b64('kwaad.docx'), formaat: 'md' });
   md = mdUit(r);
-  toets('kwaadaardige docx → md: 200, tekst van de links blijft, geen javascript:/file:, geen beeld-URL of veld-URL', r.status === 200 && /klik script/.test(md) && /klik bestand/.test(md) &&
-    /Slotzin/.test(md) && !/javascript:|file:|extern\.png|veld\.png|!\[/i.test(md), { s: r.status, md: md.slice(0, 400), f: r.j.fout });
+  toets('kwaadaardige docx → md: 200, tekst van de links blijft, geen javascript:/file:-link, geen beeld-URL of veld-URL', r.status === 200 && /klik script/.test(md) && /klik bestand/.test(md) &&
+    /Slotzin/.test(md) && !/\]\(\s*<?\s*(javascript|file):/i.test(md) && !/file:|extern\.png|veld\.png|!\[/i.test(md), { s: r.status, md: md.slice(0, 600), f: r.j.fout });
+  // review MOET 1: haakjes/hoekhaken in een http(s)-URL mogen geen tweede link of ruwe HTML in de markdown maken
+  toets('kwaadaardige URL (haakjes, <img …>) → gecodeerd: geen ](javascript:, geen <img', /\[klik haak\]\(https:\/\/x\.example\/%29%5Bklik%5D%28javascript:alert%28document\.domain%29\)/.test(md) &&
+    /\[klik html\]\(https:\/\/x\.example\/%3Cimg/.test(md) && !/<img/i.test(md) && (md.match(/\]\(/g) || []).length === 2, md);
   r = await M.omzet({ naam: 'bom.docx', soort: 'docx', tekst: b64('bom.docx'), formaat: 'md' });
   toets('zip-bom (300 MB tekst in 300 kB docx) → nette 413 of 504, geen 200', (r.status === 413 || r.status === 504) && r.j.ok === false && typeof r.j.fout === 'string', { s: r.status, j: r.j, a: r.audit });
   toets('na de zip-bom: geen tijdelijke map achter', fs.readdirSync(TMP).length === 0, fs.readdirSync(TMP));

@@ -80,6 +80,10 @@ function tekstHtml(t) {
     .map((p) => '<p>' + p.split('\n').map(esc).join('<br>') + '</p>').join('\n');
 }
 
+// wv1893 (Opus-review MOET 1): een URL als https://x/)[klik](javascript:…) komt door de http(s)-toets, en de gfm-schrijver zet de haakjes niet
+// om: in de markdown staat dan een tweede link naar javascript:. Daarom tekens die markdown of HTML kunnen breken percent-coderen.
+const urlVeilig = (u) => u.replace(/[()<>"'`\\\[\]\u0000-\u001f\u007f]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
+
 // ── pandoc-AST ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // Beelden → hun alt-tekst (niets ophalen, ook geen lokaal bestand), links alleen http(s), ruwe HTML weg (behalve <br> → regelafbreking).
 function schoon(x) {
@@ -91,7 +95,7 @@ function schoon(x) {
         if (el.t === 'Link') {
           const url = String(el.c[2] && el.c[2][0] || '');
           if (!/^https?:\/\/[^\s]+$/i.test(url)) { uit.push(...schoon(el.c[1])); continue; }
-          uit.push({ t: 'Link', c: [['', [], []], schoon(el.c[1]), [url, '']] });
+          uit.push({ t: 'Link', c: [['', [], []], schoon(el.c[1]), [urlVeilig(url), '']] });
           continue;
         }
         if (el.t === 'RawInline') { if (el.c[0] === 'html' && /^<br\s*\/?>$/i.test(String(el.c[1]).trim())) uit.push({ t: 'LineBreak' }); continue; }
@@ -577,7 +581,7 @@ function maak(opt) {
   return { omzet: omzet, intern: intern, health: health, stijlen: stijlen, invoer: invoer, _staat: staat, _boom: boom };
 }
 
-module.exports = { maak: maak, schoon: schoon, tabellen: tabellen, voorMd: voorMd, tekstHtml: tekstHtml, platteTekst: platteTekst,
+module.exports = { maak: maak, schoon: schoon, urlVeilig: urlVeilig, tabellen: tabellen, voorMd: voorMd, tekstHtml: tekstHtml, platteTekst: platteTekst,
   MAX_TEKST: MAX_TEKST, MAX_PDF_RIJEN: MAX_PDF_RIJEN, MAX_DOCX: MAX_DOCX, CSP: CSP, kopTemplate: kopTemplate, voetTemplate: voetTemplate };
 
 // ── kindproces: node omzet.js --werker <invoer.json> <uit.json> (alleen door viaKind gestart) ──
