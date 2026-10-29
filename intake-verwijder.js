@@ -367,7 +367,7 @@ function maak(o) {
       j.bestanden = tel; schrijfJson(journaalPad(stukId), j);
     }
     // 6. intake.sqlite
-    if (!j.sqlite) { j.sqlite = schoonDb(j.stukken, j.set, wanneer); j.stap = 'pod'; schrijfJson(journaalPad(stukId), j); }
+    if (!j.dbSchoon) { j.dbSchoon = schoonDb(j.stukken, j.set, wanneer); j.stap = 'pod'; schrijfJson(journaalPad(stukId), j); }
     // 7. tekstindex opnieuw bouwen (bouwt uit de vault)
     if (!j.zoekindex && o.zoekindex) {
       let z;
@@ -399,8 +399,8 @@ function maak(o) {
     j.stap = nul ? 'klaar' : 'na_niet_nul';
     j.klaar = wanneer;
     schrijfJson(journaalPad(stukId), j);
-    return { ok: nul, stuk: stukId, stukken: j.stukken, set_vinger: j.set_vinger, databank: j.databank, bestanden: j.bestanden, sqlite: j.sqlite.tel,
-      wal: j.sqlite.wal, zoekindex: j.zoekindex || null, na, afgeleid: j.afgeleid, journaal: journaalPad(stukId) };
+    return { ok: nul, stuk: stukId, stukken: j.stukken, set_vinger: j.set_vinger, databank: j.databank, bestanden: j.bestanden, sqlite: j.dbSchoon.tel,
+      wal: j.dbSchoon.wal, zoekindex: j.zoekindex || null, na, afgeleid: j.afgeleid, journaal: journaalPad(stukId) };
   }
 
   async function lijst() {
