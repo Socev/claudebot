@@ -9,7 +9,15 @@
 //     entiteit lopen naast elkaar (uitvoer in de vaste volgorde POT, KM, SLOEL). Eén rondgang ≈ 0,2 s (gemeten 28-10); de toets
 //     telt de rondgangen per route (bouwplan: ≤ 1,5 s per route);
 //   - de klok: io.nu() met UTC-getters, zoals de Function op Cloudflare (die draait in UTC).
-// Schrijvende routes (planning, vaststellen, correctie, patiënten, nota-status, verzending) komen in P3/P4; hier geen enkele.
+// Schrijvende routes (wv1933, fase P3 + P4): planning, planning/vaststellen, correctie, patienten, nota/<id>/status (P3) en verzend,
+// verzending/<id>/annuleer, verzending/<id>/adres (P4), letterlijk uit dezelfde Function (zelfde validaties, teksten en JSON). Verschil:
+//   - schrijven gaat via io.schrijf(batch) → [{ results, changes }]: één D1-batch = één transactie (gemeten 29-10-2026 op een
+//     wegwerp-D1: een batch waarvan een latere opdracht faalt laat niets achter, ook niet de eerdere; bouwplan § 3.3 / § Log);
+//   - de klok van een schrijfroute komt uit D1 (strftime('now')), niet van de pod (de podklok liep eerder dagen mis);
+//   - de SQL op nota_verzending (aanvraag, annuleren, adres) staat in pot-verzend.js: één module is eigenaar van die tabel;
+//   - een schrijfroute mag alleen als io.schrijvenOpen() (de overstap, § 3.4: nooit twee schrijvers tegelijk); dicht = 409, behalve
+//     annuleren (maakt alleen dichter) en de verzendroutes voor een PROEF-nota (natoets van de machinekamer);
+//   - de PDF bij klaarzetten hooguit 45 kB (doorgeefluik: JSON ≤ 64 kB); een nota van één pagina is ± 7 kB.
 'use strict';
 
 // Antwoorden zoals de Function ze gaf, maar als { status, j } (server.js stuurt ze met appStuur).
@@ -749,6 +757,363 @@ async function vzPerNota(env, ids) {
   return uit;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Schrijvende routes (wv1933, P3 + P4) — letterlijk uit de Function; env.schrijf(batch) is één D1-transactie (zie de kop).
+// ════════════════════════════════════════════════════════════════════════════
+const VZ = require('./pot-verzend.js');
+const crypto = require('crypto');
+const VZ_PDF_MAX_POD = 45 * 1024;          // bytes; de Function nam 250 kB, het doorgeefluik neemt JSON tot 64 kB (bouwplan § 3.2)
+const VZ_B64_MAX_POD = Math.ceil(VZ_PDF_MAX_POD / 3) * 4;
+function vTekst(x, naam, max = MAX_TEKST, verplicht = false) {
+  if (x === null || x === undefined || String(x).trim() === '') { if (verplicht) throw new Gebruikersfout(`${naam} ontbreekt`); return null; }
+  const s = String(x).trim();
+  if (s.length > max) throw new Gebruikersfout(`${naam} te lang (max. ${max} tekens)`);
+  return s;
+}
+function vDatum(x, naam) {
+  const s = String(x || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || Number.isNaN(Date.parse(s + 'T00:00:00Z')) || new Date(s + 'T00:00:00Z').toISOString().slice(0, 10) !== s) throw new Gebruikersfout(`${naam} ongeldig (JJJJ-MM-DD)`);
+  return s;
+}
+function vNummer(x) { const s = String(x ?? '').trim(); if (!/^\d{7}$/.test(s)) throw new Gebruikersfout('startnummer moet 7 cijfers zijn (JJJJnnn)'); return s; }
+const st = (sql, ...params) => ({ sql, params });
+
+// ── POST planning (concept opslaan) ─────────────────────────────────────────
+function leesPosten(arr) {
+  if (!Array.isArray(arr) || arr.length < 1 || arr.length > 60) throw new Gebruikersfout('posten: 1 tot 60 regels');
+  return arr.map((p, i) => {
+    const per = String(p.per || 'jaar');
+    if (!PER_WAARDEN.includes(per)) throw new Gebruikersfout(`post ${i + 1}: per ongeldig`);
+    const r = { volgorde: i + 1, omschrijving: vTekst(p.omschrijving, `post ${i + 1}: omschrijving`, 200, true), bedrag: vNum(p.bedrag, `post ${i + 1}: bedrag`, -1e7, 1e7), per,
+      aantal: vNum(p.aantal ?? 1, `post ${i + 1}: aantal`, 0, 1000), indexatie_pct: vNum(p.indexatie_pct ?? 0, `post ${i + 1}: indexatie`, -100, 100), opmerking: vTekst(p.opmerking, `post ${i + 1}: opmerking`, 300) };
+    r.jaarbedrag = postJaarbedrag(r);
+    return r;
+  });
+}
+async function planningPost(env, b) {
+  const ent = vEnt(b.entiteit), jaar = vJaar(b.jaar);
+  const marge = vNum(b.marge_pct ?? 0, 'veiligheidsmarge', 0, 100);
+  const termijn = b.termijn === 'maand' ? 'maand' : 'kwartaal';
+  const posten = leesPosten(b.posten);
+  const opmerking = vTekst(b.opmerking, 'opmerking');
+  // wv1933: praktijken, standen, het bestaande plan en de bezette versies in één rondgang (in de Function na elkaar)
+  const planId = b.plan_id != null && b.plan_id !== '' ? vNum(b.plan_id, 'plan_id', 1, 1e9) : null;
+  const [prakt, st0, bestaand0, bezetR] = await Promise.all([praktijken(env), standenKaart(env), planId != null ? q1(env, 'select * from plan where id=?', planId) : null,
+    q(env, 'select versie from plan where entiteit=? and jaar=?', ent, jaar)]);
+  const geldig = new Set(prakt.map((p) => p.id));
+  if (!Array.isArray(b.deelnemers) || !b.deelnemers.length) throw new Gebruikersfout('deelnemers ontbreken');
+  const deeln = []; const gezien = new Set();
+  for (const d of b.deelnemers) { const id = String(d.praktijk_id || ''); if (!geldig.has(id)) throw new Gebruikersfout('onbekende praktijk ' + id); if (gezien.has(id)) continue; gezien.add(id); deeln.push({ praktijk_id: id, actief: d.actief ? 1 : 0 }); }
+  if (!deeln.some((d) => d.actief)) throw new Gebruikersfout('kies minstens één deelnemer');
+  const sl = berekenSleutel(st0.m, deeln.filter((d) => d.actief).map((d) => d.praktijk_id), jaar, 'begroting');
+  const tot = planTotalen(posten, marge);
+  const n = termijnenPerJaar(termijn);
+  let bestaand = null;
+  if (planId != null) {
+    bestaand = bestaand0;
+    if (!bestaand || bestaand.entiteit !== ent || bestaand.jaar !== jaar) throw new Gebruikersfout('plan hoort niet bij deze entiteit/dit jaar', 409);
+  }
+  const stmts = [];
+  let planRef, versie, nieuwe = false;
+  if (bestaand && bestaand.status === 'concept') {
+    versie = bestaand.versie;
+    stmts.push(st('update plan set termijn=?, marge_pct=?, totaal=?, sleutel_toelichting=?, gemaakt_op=?, opmerking=? where id=? and status=?', termijn, marge, tot.totaal, sl.toelichting, vandaagStr(env), opmerking, bestaand.id, 'concept'));
+    stmts.push(st('delete from plan_post where plan_id=?', bestaand.id));
+    stmts.push(st('delete from plan_deelnemer where plan_id=?', bestaand.id));
+    planRef = { sql: '?', p: [bestaand.id] };
+  } else {
+    // nieuw concept (of nieuwe versie naast een vastgesteld/vervallen plan; dat wordt nooit overschreven)
+    nieuwe = true;
+    const gewenst = vTekst(b.versie, 'versie', 60) || `concept-${vandaagStr(env)}`;
+    const bezet = new Set(bezetR.map((r) => r.versie));
+    versie = gewenst; for (let i = 2; bezet.has(versie); i++) versie = `${gewenst}-${i}`;
+    stmts.push(st('insert into plan (entiteit, jaar, versie, status, termijn, marge_pct, totaal, sleutel_toelichting, gemaakt_op, opmerking) values (?,?,?,?,?,?,?,?,?,?)',
+      ent, jaar, versie, 'concept', termijn, marge, tot.totaal, sl.toelichting, vandaagStr(env), opmerking ?? (bestaand ? `nieuwe versie op basis van ${bestaand.versie}` : null)));
+    planRef = { sql: '(select id from plan where entiteit=? and jaar=? and versie=?)', p: [ent, jaar, versie] };
+  }
+  for (const p of posten) stmts.push(st(`insert into plan_post (plan_id, volgorde, omschrijving, bedrag, per, aantal, indexatie_pct, jaarbedrag, opmerking) values (${planRef.sql},?,?,?,?,?,?,?,?)`,
+    ...planRef.p, p.volgorde, p.omschrijving, p.bedrag, p.per, p.aantal, p.indexatie_pct, p.jaarbedrag, p.opmerking));
+  for (const d of deeln) {
+    const s = d.actief ? sl.per[d.praktijk_id] : null;
+    stmts.push(st(`insert into plan_deelnemer (plan_id, praktijk_id, actief, grondslag, aandeel, termijnbedrag) values (${planRef.sql},?,?,?,?,?)`,
+      ...planRef.p, d.praktijk_id, d.actief, s ? s.grondslag : null, s && s.aandeel != null ? s.aandeel : null, s && s.aandeel != null ? heel(s.aandeel * tot.totaal / n) : null));
+  }
+  await env.schrijf(stmts);
+  const plan = (await plannenVan(env, ent, jaar)).find((p) => p.versie === versie);
+  return json({ ok: true, nieuw: nieuwe, plan: { ...plan, uitkomst: planUitkomst(plan, st0.m) }, melding: bestaand && bestaand.status !== 'concept' ? `plan ${bestaand.versie} is ${bestaand.status} en blijft ongewijzigd; opgeslagen als nieuwe versie ${versie}` : null });
+}
+
+// ── POST planning/vaststellen ───────────────────────────────────────────────
+// De REST-batch is atomair (gemeten 29-10), dus dezelfde volgorde als de Function: plan vastgesteld + nota's in één transactie.
+async function vaststellen(env, b) {
+  const planId = vNum(b.plan_id, 'plan_id', 1, 1e9);
+  const plan0 = await q1(env, 'select * from plan where id=?', planId);
+  if (!plan0) throw new Gebruikersfout('plan niet gevonden', 404);
+  if (plan0.status === 'vervallen') throw new Gebruikersfout('dit plan is vervallen; maak eerst een nieuwe versie', 409);
+  const ent = plan0.entiteit, jaar = plan0.jaar;
+  // wv1933: plannen, standen, bestaande voorschotnota's en versienamen in één rondgang
+  const [plannen, st0, bestaand, alleVersies] = await Promise.all([plannenVan(env, ent, jaar), standenKaart(env),
+    q(env, "select praktijk_id, periode from nota where entiteit=? and jaar=? and soort='voorschot' and status<>'vervallen'", ent, jaar),
+    q(env, 'select versie from plan where entiteit=? and jaar=?', ent, jaar)]);
+  const plan = plannen.find((p) => p.id === planId);
+  if (plan.termijn !== 'kwartaal') throw new Gebruikersfout('nota\'s maken kan (nog) alleen per kwartaal');
+  if (!plan.posten.length) throw new Gebruikersfout('plan heeft geen kostenposten');
+  const start = vNummer(b.startnummer);
+  if (!Array.isArray(b.kwartalen)) throw new Gebruikersfout('kwartalen ontbreken');
+  const kwartalen = [...new Set(b.kwartalen.map((k) => vNum(k, 'kwartaal', 1, 4)))].map(Number).filter(Number.isInteger).sort();
+  const datums = {};
+  for (const k of kwartalen) datums[k] = vDatum((b.datums || {})[k] || `${jaar}-${String(3 * k - 2).padStart(2, '0')}-01`, `factuurdatum kwartaal ${k}`);
+  const inplannen = b.inplannen !== false;
+  const uitk = planUitkomst(plan, st0.m);
+  if (uitk.sleutel.status === 'ontbreekt') throw new Gebruikersfout('patiëntstanden ontbreken: ' + (uitk.sleutel.melding || ''), 409);
+  const actief = plan.deelnemers.filter((d) => d.actief).map((d) => d.praktijk_id);
+  const heeft = new Set(bestaand.map((r) => r.praktijk_id + '|' + r.periode));
+  const vandaag = vandaagStr(env);
+  const teMaken = [], overgeslagen = [];
+  let nr = Number(start);
+  for (const k of kwartalen) for (const id of actief) {
+    const periode = `${jaar}-Q${k}`;
+    if (heeft.has(id + '|' + periode)) { overgeslagen.push({ praktijk_id: id, periode }); continue; }
+    const bedrag = uitk.sleutel.per[id].termijnbedrag;
+    const regels = [{ omschrijving: OMSCHRIJVING_VOORSCHOT[ent](jaar, k), bedrag, jaar }];
+    if (inplannen && datums[k] > vandaag) regels.push({ omschrijving: `LET OP: Inplannen op ${datums[k].split('-').reverse().join('-')}`, tekst: true });
+    teMaken.push({ nummer: String(nr++), praktijk_id: id, datum: datums[k], periode, regels, bedrag });
+  }
+  if (teMaken.length) {
+    const nummers = teMaken.map((n) => n.nummer);
+    const [botsing, volgend] = await Promise.all([q(env, `select nummer from nota where entiteit=? and nummer in (${nummers.map(() => '?').join(',')})`, ent, ...nummers), volgendNummer(env, ent, jaar)]);
+    if (botsing.length) throw new Gebruikersfout(`nummer(s) al in gebruik: ${botsing.map((r) => r.nummer).join(', ')} — kies een ander startnummer (volgend vrij: ${volgend})`, 409);
+  }
+  // een conceptnaam krijgt bij vaststellen een versienaam zoals de bestaande (v1-2026-01-20, v2-2026-10-13, …)
+  let versie = plan.versie;
+  if (plan.status === 'concept' && /^concept/i.test(versie)) {
+    const alle = alleVersies.map((r) => r.versie);
+    let nr = alle.filter((v) => /^v\d+-/.test(v)).length + 1;
+    versie = `v${nr}-${vandaag}`; while (alle.includes(versie)) versie = `v${++nr}-${vandaag}`;
+  }
+  const stmts = [
+    st("update plan set status='vervallen' where entiteit=? and jaar=? and status='vastgesteld' and id<>?", ent, jaar, planId),
+    st("update plan set status='vastgesteld', versie=?, vastgesteld_op=coalesce(case when status='vastgesteld' then vastgesteld_op end, ?), totaal=?, sleutel_toelichting=? where id=?",
+      versie, vandaag, uitk.totaal, uitk.sleutel.toelichting || plan.sleutel_toelichting, planId),
+  ];
+  for (const d of plan.deelnemers) {
+    const s = d.actief ? uitk.sleutel.per[d.praktijk_id] : null;
+    stmts.push(st('update plan_deelnemer set grondslag=?, aandeel=?, termijnbedrag=? where plan_id=? and praktijk_id=?', s ? s.grondslag : null, s ? s.aandeel : null, s ? s.termijnbedrag : null, planId, d.praktijk_id));
+  }
+  const nuTijd = nu(env);
+  for (const n of teMaken) stmts.push(st('insert into nota (entiteit, jaar, nummer, praktijk_id, datum, soort, periode, titel, regels, bedrag, status, bron, plan_id, aangemaakt_op, opmerking) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+    ent, jaar, n.nummer, n.praktijk_id, n.datum, 'voorschot', n.periode, NOTA_TITEL[ent], JSON.stringify(n.regels), n.bedrag, 'definitief', 'pagina', planId, nuTijd, `plan ${versie}`));
+  await env.schrijf(stmts);
+  const [notas, verse] = await Promise.all([teMaken.length ? q(env, `select * from nota where entiteit=? and nummer in (${teMaken.map(() => '?').join(',')}) order by nummer`, ent, ...teMaken.map((n) => n.nummer)) : [],
+    plannenVan(env, ent, jaar)]);
+  const verseplan = verse.find((p) => p.id === planId);
+  return json({ ok: true, plan: { ...verseplan, uitkomst: planUitkomst(verseplan, st0.m) }, notas, overgeslagen, totaal_notas: rond(notas.reduce((a, n) => a + n.bedrag, 0)) });
+}
+
+// ── POST correctie ──────────────────────────────────────────────────────────
+const eur0 = (x) => (x < 0 ? '-' : '') + '€' + new Intl.NumberFormat('nl-NL', { maximumFractionDigits: 0 }).format(Math.abs(Math.round(x)));
+const pct2 = (x) => new Intl.NumberFormat('nl-NL', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(x * 100) + '%';
+const getal1 = (x) => new Intl.NumberFormat('nl-NL', { maximumFractionDigits: 1 }).format(x);
+async function correctiePost(env, b) {
+  const p = leesCorrectieParams(b, (k) => (b[k] == null ? null : String(b[k])));
+  const start = vNummer(b.startnummer);
+  const datum = vDatum(b.datum || vandaagStr(env), 'datum');
+  const omschrijving = vTekst(b.omschrijving, 'omschrijving', 200) || (p.modus === 'eindafrekening' ? `Eindafrekening ${p.jaar}` : `Correctie doorbelaste huur Mulderij ${p.jaar} - tot en met kwartaal ${p.totK}`);
+  const toelichting = vTekst(b.toelichting, 'toelichting', 1000);
+  const extraOms = vTekst(b.extra_omschrijving, 'omschrijving extra bedrag', 200);
+  if (!Array.isArray(b.regels) || !b.regels.length || b.regels.length > 20) throw new Gebruikersfout('regels: 1 tot 20 praktijken');
+  const v = await correctieVoorstel(env, p);
+  if (v.melding) throw new Gebruikersfout(v.melding, 409);
+  const rijM = Object.fromEntries(v.rijen.map((r) => [r.praktijk_id, r]));
+  const gezien = new Set();
+  const regels = [];
+  for (const r of b.regels) {
+    const id = String(r.praktijk_id || '');
+    if (!rijM[id]) throw new Gebruikersfout('praktijk hoort niet bij dit voorstel: ' + id);
+    if (gezien.has(id)) continue; gezien.add(id);
+    const bedrag = heel(vNum(r.bedrag, 'bedrag ' + id, -1e6, 1e6));
+    if (Math.abs(bedrag) < 1) continue; // < € 1 wordt overgeslagen
+    regels.push({ id, bedrag, rij: rijM[id] });
+  }
+  if (!regels.length) throw new Gebruikersfout('geen bedragen van € 1 of meer');
+  const nummers = regels.map((_, i) => String(Number(start) + i));
+  const botsing = await q(env, `select nummer from nota where entiteit=? and nummer in (${nummers.map(() => '?').join(',')})`, p.ent, ...nummers);
+  if (botsing.length) throw new Gebruikersfout(`nummer(s) al in gebruik: ${botsing.map((x) => x.nummer).join(', ')} — volgend vrij: ${v.volgend_nummer}`, 409);
+  const soort = p.modus === 'eindafrekening' ? 'eindafrekening' : 'correctie';
+  const periode = p.modus === 'eindafrekening' ? String(p.jaar) : `${p.jaar}-Q1/Q${p.totK}`;
+  const nuTijd = nu(env);
+  const stmts = [];
+  regels.forEach((r, i) => {
+    const R = r.rij;
+    const sub = [];
+    if (p.modus === 'eindafrekening') {
+      sub.push(`uw aandeel in de kosten ${p.jaar}: ${pct2(R.aandeel)} van ${eur0(v.grondslag.jaarlast)} = ${eur0(R.doel)}`);
+      if (R.grondslag != null) sub.push(`verdeelsleutel: gemiddelde patiëntenstand 1-1-${p.jaar} en 1-1-${p.jaar + 1}: ${getal1(R.grondslag)} van ${getal1(v.sleutel.som)}`);
+    } else {
+      sub.push(`juist bedrag t/m kwartaal ${p.totK}: ${pct2(R.aandeel || 0)} van ${eur0(v.grondslag.basis)} = ${eur0(R.doel || 0)}`);
+      if (R.grondslag != null && v.sleutel.som) sub.push(`verdeelsleutel ${p.jaar}: ${v.sleutel.toelichting || 'patiëntenstand'}: ${getal1(R.grondslag)} van ${getal1(v.sleutel.som)}`);
+      if (p.extra) sub.push(`waarvan extra${extraOms ? ' (' + extraOms + ')' : ''}: ${pct2(R.aandeel || 0)} van ${eur0(p.extra)} = ${eur0((R.aandeel || 0) * p.extra)}`);
+    }
+    sub.push(`eerder in rekening gebracht${R.nummers.length ? ' (' + R.nummers.join(', ') + ')' : ''}: ${eur0(R.in_rekening)}`);
+    if (r.bedrag !== R.correctie && R.correctie != null) sub.push(`handmatig aangepast (voorstel ${eur0(R.correctie)})`);
+    const nr = [{ omschrijving, bedrag: r.bedrag, jaar: p.jaar, toelichting: sub.join('\n') }];
+    if (toelichting) nr.push({ omschrijving: /^toelichting/i.test(toelichting) ? toelichting : 'Toelichting: ' + toelichting, tekst: true });
+    stmts.push(st('insert into nota (entiteit, jaar, nummer, praktijk_id, datum, soort, periode, titel, regels, bedrag, status, bron, plan_id, aangemaakt_op, opmerking) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      p.ent, p.jaar, nummers[i], r.id, datum, soort, periode, NOTA_TITEL[p.ent], JSON.stringify(nr), r.bedrag, 'definitief', 'pagina', v.plan ? v.plan.id : null, nuTijd,
+      p.modus === 'eindafrekening' ? `eindafrekening op jaarlast ${v.grondslag.jaarlast}` : `correctie t/m Q${p.totK}${p.extra ? ', extra ' + p.extra : ''}`));
+  });
+  if (p.modus === 'eindafrekening') {
+    const jl = v.grondslag.jaarlast;
+    if (!v.jaarlast_db) stmts.push(st('insert into jaarlast (entiteit, jaar, bedrag, bron, opmerking, ingevoerd_op) values (?,?,?,?,?,?)', p.ent, p.jaar, jl, 'pagina', 'ingevoerd bij eindafrekening', vandaagStr(env)));
+    else if (Math.abs(v.jaarlast_db.bedrag - jl) > 0.004) stmts.push(st('update jaarlast set bedrag=?, bron=?, opmerking=?, ingevoerd_op=? where entiteit=? and jaar=?', jl, 'pagina', `gewijzigd bij eindafrekening (was ${v.jaarlast_db.bedrag}, ${v.jaarlast_db.bron})`, vandaagStr(env), p.ent, p.jaar));
+  }
+  await env.schrijf(stmts);
+  const notas = await q(env, `select * from nota where entiteit=? and nummer in (${nummers.map(() => '?').join(',')}) order by nummer`, p.ent, ...nummers);
+  return json({ ok: true, notas, voorstel: v, totaal_notas: rond(notas.reduce((a, n) => a + n.bedrag, 0)) });
+}
+
+// ── POST patienten (was PUT; body { standen: [...] }: het doorgeefluik en de pod nemen alleen een JSON-object aan) ──
+async function patientenPost(env, body) {
+  const b = Array.isArray(body) ? body : body && body.standen;
+  if (!Array.isArray(b) || !b.length || b.length > 300) throw new Gebruikersfout('verwacht een lijst van 1 tot 300 standen');
+  const geldig = new Set((await praktijken(env)).map((p) => p.id));
+  const opm = `ingevoerd op pagina ${vandaagStr(env)}`;
+  const stmts = b.map((r, i) => {
+    const id = String(r.praktijk_id || '');
+    if (!geldig.has(id)) throw new Gebruikersfout(`regel ${i + 1}: onbekende praktijk`);
+    const pd = String(r.peildatum || '');
+    if (!/^\d{4}-01-01$/.test(pd)) throw new Gebruikersfout(`regel ${i + 1}: peildatum moet JJJJ-01-01 zijn`);
+    vJaar(pd.slice(0, 4), 'peildatum');
+    const aantal = vNum(r.aantal, `regel ${i + 1}: aantal`, 0, 100000);
+    return st("insert into praktijk_patienten (praktijk_id, peildatum, aantal, status, opmerking) values (?,?,?,'handmatig',?) on conflict(praktijk_id, peildatum) do update set aantal=excluded.aantal, status='handmatig', opmerking=excluded.opmerking",
+      id, pd, aantal, opm);
+  });
+  await env.schrijf(stmts);
+  return json({ ok: true, opgeslagen: stmts.length });
+}
+
+// ── POST nota/<id>/status ───────────────────────────────────────────────────
+const STATUS_OVERGANG = { concept: ['definitief', 'vervallen'], definitief: ['vervallen'], vervallen: [] };
+async function notaStatus(env, b, id) {
+  const nieuw = String(b.status || '');
+  const n = await q1(env, 'select id, nummer, status from nota where id=?', id);
+  if (!n) throw new Gebruikersfout('nota niet gevonden', 404);
+  if (!(STATUS_OVERGANG[n.status] || []).includes(nieuw)) throw new Gebruikersfout(`status ${n.status} → ${nieuw} is niet toegestaan (alleen concept → definitief → vervallen)`, 409);
+  const opm = `status ${n.status} → ${nieuw} op ${vandaagStr(env)}`;
+  await env.schrijf([st("update nota set status=?, opmerking=trim(coalesce(opmerking,'') || case when opmerking is null or opmerking='' then '' else '; ' end || ?) where id=? and status=?", nieuw, opm, id, n.status)]);
+  return json({ ok: true, nota: await q1(env, 'select * from nota where id=?', id) });
+}
+
+// ── verzending (P4): klaarzetten, annuleren, adres ──────────────────────────
+// Zelfde controles als de Function (wv911/wv921); de SQL op nota_verzending komt uit pot-verzend.js.
+const isoNu = (env) => new Date(env.nu).toISOString().replace(/\.\d{3}Z$/, 'Z');
+const vzPlus = (ymd, d) => new Date(Date.parse(ymd + 'T12:00:00Z') + d * 864e5).toISOString().slice(0, 10);
+const vzVandaagLokaal = (env) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Amsterdam' }).format(new Date(env.nu));
+// 07:00 Europe/Amsterdam op `datum` als UTC-tijd (zomer +2, winter +1; Intl rekent de wissel).
+function vzZevenUur(datum) {
+  for (const uurUtc of [5, 6]) {
+    const t = new Date(`${datum}T0${uurUtc}:00:00Z`);
+    const lok = new Intl.DateTimeFormat('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', hourCycle: 'h23' }).format(t);
+    if (Number(lok) === 7) return t.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  }
+  throw new Gebruikersfout('kon 07:00 op ' + datum + ' niet bepalen');
+}
+async function vzNota(env, id) {
+  const n = await q1(env, 'select id, entiteit, jaar, nummer, praktijk_id, datum, soort, periode, titel, bedrag, status from nota where id=?', id);
+  if (!n) throw new Gebruikersfout('nota niet gevonden', 404);
+  const p = await q1(env, 'select id, naam, naam_brief, tav, email from praktijk where id=?', n.praktijk_id);
+  return { n, p };
+}
+function vzB64(s) {
+  if (typeof s !== 'string' || !s.length || !/^[A-Za-z0-9+/]+={0,2}$/.test(s)) throw new Gebruikersfout('pdf_b64 ongeldig');
+  if (s.length > VZ_B64_MAX_POD) throw new Gebruikersfout('pdf te groot (max. 45 kB)', 413);
+  const b = Buffer.from(s, 'base64');
+  if (b.toString('base64').replace(/=+$/, '') !== s.replace(/=+$/, '')) throw new Gebruikersfout('pdf_b64 ongeldig');
+  return b;
+}
+async function vzAanvraag(env, b) {
+  const id = vNum(b.nota_id, 'nota_id', 1, 1e9);
+  const { n, p } = await vzNota(env, id);
+  if (!env.open && n.entiteit !== 'PROEF') throw new Gebruikersfout(DICHT, 409);
+  if (n.status !== 'definitief') throw new Gebruikersfout(`nota ${n.nummer} is ${n.status}; alleen definitieve nota's gaan de deur uit`, 409);
+  const bytes = vzB64(b.pdf_b64);
+  if (bytes.length > VZ_PDF_MAX_POD) throw new Gebruikersfout('pdf te groot (max. 45 kB)', 413);
+  if (bytes.slice(0, 5).toString('latin1') !== '%PDF-') throw new Gebruikersfout('pdf_b64 is geen PDF');
+  const sha = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (String(b.pdf_sha256 || '').toLowerCase() !== sha) throw new Gebruikersfout('pdf_sha256 klopt niet met de PDF');
+  const reden = vTekst(b.reden, 'reden', 300);
+  let plan = null, nietVoor = isoNu(env);
+  if (b.auto !== undefined && typeof b.auto !== 'boolean') throw new Gebruikersfout('auto is true of false');
+  const auto = b.auto === true;
+  const vandaag = vzVandaagLokaal(env);
+  if (auto) {
+    // wv921: alleen op een werkdag vanaf morgen (de Ja in Voor jou moet vóór de dag komen), alleen als de pod het nu aankan
+    if (b.plan_datum == null || b.plan_datum === '') throw new Gebruikersfout('kies een datum om op die dag zelf te versturen');
+    const pd = vDatum(b.plan_datum, 'verzenddatum');
+    if (!(pd > vandaag)) throw new Gebruikersfout('zelf versturen kan vanaf morgen (je geeft de nota\'s eerst vrij in Voor jou)');
+    if (pd > vzPlus(vandaag, 45)) throw new Gebruikersfout('zelf versturen kan hooguit 45 dagen vooruit');
+    if (!VZ.werkdag(pd)) throw new Gebruikersfout('op die dag (weekend of feestdag) gaat er niets vanzelf de deur uit; kies een werkdag');
+    const ak = await vzAutoKan(env, n.entiteit);
+    if (!ak.kan) throw new Gebruikersfout(ak.reden, 409);
+  }
+  if (b.plan_datum != null && b.plan_datum !== '') {
+    plan = vDatum(b.plan_datum, 'verzenddatum');
+    if (plan < vandaag) throw new Gebruikersfout('verzenddatum ligt in het verleden');
+    if (plan > `${Number(vandaag.slice(0, 4)) + 1}${vandaag.slice(4)}`) throw new Gebruikersfout('verzenddatum ligt meer dan een jaar vooruit');
+    const zeven = vzZevenUur(plan);
+    if (zeven > nietVoor) nietVoor = zeven; else plan = null;   // vandaag na 07:00 = meteen
+  }
+  const a = VZ.aanvraagActiefSql(n.id);
+  const actief = await q1(env, a.sql, ...a.params);
+  if (actief && !reden) {
+    // dezelfde druk nog eens (netwerk, dubbel tikken): niets nieuws, de bestaande rij terug
+    return json({ ok: true, al: true, verzending: actief, melding: `nota ${n.nummer} staat al klaar (${actief.status}); kies Opnieuw klaarzetten met een reden als je hem nog eens wilt` });
+  }
+  if (actief && !VZ.VZ_OPNIEUW_VAN.includes(actief.status)) throw new Gebruikersfout(`nota ${n.nummer} wordt nu door Socev ${actief.status === 'verzenden' ? 'verstuurd' : 'klaargezet'}; probeer het zo nog eens`, 409);
+  if (reden && reden.length < 5) throw new Gebruikersfout('geef een reden van minstens 5 tekens');
+  if (auto && !plan) throw new Gebruikersfout('zelf versturen kan vanaf morgen');
+  const k = vzKopie(n, p), t = isoNu(env);
+  try {
+    await env.schrijf(VZ.aanvraagSql({ actief, reden, n, k, nietVoor, plan, auto, pdf_b64: b.pdf_b64, sha, bytes: bytes.length, t }));
+  } catch (e) {
+    if (/UNIQUE constraint/i.test(String(e && e.message))) throw new Gebruikersfout(`nota ${n.nummer} is net door iets anders klaargezet; ververs de lijst`, 409);
+    throw e;
+  }
+  // veranderde de oude rij net zelf van status (fout, geannuleerd): de nieuwe rij staat er toch; die geven we terug (Fable diffreview #5)
+  const nw = VZ.aanvraagNieuwSql(n.id);
+  return json({ ok: true, verzending: await q1(env, nw.sql, ...nw.params) });
+}
+async function vzRij(env, id) { const r = VZ.aanvraagRijSql(id); return q1(env, r.sql, ...r.params); }
+async function vzAnnuleer(env, id) {
+  const res = await env.schrijf([VZ.annuleerSql(id, isoNu(env))]);
+  if (!(res[0] && res[0].changes === 1)) throw new Gebruikersfout('deze verzending is al opgepakt of afgerond en kan niet meer geannuleerd worden', 409);
+  return json({ ok: true, verzending: await vzRij(env, id) });
+}
+async function vzAdres(env, b, id) {
+  const r = await vzRij(env, id);
+  if (!r) throw new Gebruikersfout('verzending niet gevonden', 404);
+  if (!env.open && r.entiteit !== 'PROEF') throw new Gebruikersfout(DICHT, 409);
+  if (r.status !== 'wacht_op_adres' || !r.aan) throw new Gebruikersfout('hier is geen adres te bevestigen', 409);
+  if (String(b.aan || '').trim().toLowerCase() !== String(r.aan).toLowerCase()) throw new Gebruikersfout('het adres is intussen veranderd; ververs de lijst', 409);
+  const res = await env.schrijf(VZ.adresSql(r, isoNu(env)));
+  if (!(res[1] && res[1].changes === 1)) throw new Gebruikersfout('deze verzending veranderde net van status; ververs de lijst', 409);
+  return json({ ok: true, verzending: await vzRij(env, id) });
+}
+
+// Tot de overstap (bouwplan § 3.4) schrijft alleen de oude pagina; daarna alleen OVIS POT.
+const DICHT = 'OVIS POT schrijft nog niet: tot de overstap (na de verzending van 2 november) doe je dit op werk.socev.dev/pot';
+// POST /app/pot/<pad> → route
+function ontleedSchrijf(pad) {
+  const p = String(pad == null ? '' : pad);
+  if (['planning', 'planning/vaststellen', 'correctie', 'patienten', 'verzend'].includes(p)) return { route: p, id: null };
+  let m = /^nota\/([1-9]\d{0,8})\/status$/.exec(p);
+  if (m) return { route: 'nota/status', id: Number(m[1]) };
+  m = /^verzending\/([1-9]\d{0,8})\/(annuleer|adres)$/.exec(p);
+  if (m) return { route: 'verzending/' + m[2], id: Number(m[1]) };
+  return null;
+}
+const SCHRIJF_ROUTES = ['planning', 'planning/vaststellen', 'correctie', 'patienten', 'nota/status', 'verzend', 'verzending/annuleer', 'verzending/adres'];
+
 
 // ── D1: vragen bundelen ─────────────────────────────────────────────────────
 // Alles wat in dezelfde tik gevraagd wordt (Promise.all, en de vervolgvragen die daarna samen klaarstaan) gaat in één batch naar
@@ -838,7 +1203,46 @@ function maak(io) {
     }
     return { ...uit, rondgangen: b.teller.rondgangen, vragen: b.teller.vragen, route: o.route };
   }
-  return { lees };
+  // POST /app/pot/<pad> met een JSON-object → { status, j, rondgangen, vragen, schrijfacties, route, id }
+  // io.schrijf(batch) → [{ results, changes }] (één transactie); io.schrijvenOpen() → true na de overstap.
+  async function schrijf(pad, body) {
+    const o = ontleedSchrijf(pad);
+    if (!o) return { ...fout('onbekende route', 404), rondgangen: 0, vragen: 0, schrijfacties: 0, route: null, id: null };
+    const open = typeof io.schrijvenOpen === 'function' && io.schrijvenOpen() === true;
+    const b = vraagBundel(io.d1);
+    let schrijfacties = 0;
+    const env = { nu: null, open, vraag: b.vraag, schrijf: async (stmts) => {
+      if (typeof io.schrijf !== 'function') throw new Error('pot-app: io.schrijf ontbreekt');
+      schrijfacties++;
+      const r = await io.schrijf(stmts);
+      if (!Array.isArray(r) || r.length !== stmts.length) throw new Error('D1: onverwacht antwoord');
+      return r;
+    } };
+    let uit;
+    try {
+      // P3-routes: dicht tot de overstap (geen D1-rondgang); de verzendroutes beslissen per nota (PROEF mag), annuleren mag altijd
+      if (!open && !o.route.startsWith('verzend')) throw new Gebruikersfout(DICHT, 409);
+      const d = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+      // de klok van een schrijfroute komt uit D1 (zie de kop)
+      const t = await q1(env, "select strftime('%Y-%m-%dT%H:%M:%fZ','now') as nu");
+      env.nu = new Date(t && t.nu);
+      if (Number.isNaN(env.nu.getTime())) throw new Error('D1 gaf geen tijd');
+      if (o.route === 'planning') uit = await planningPost(env, d);
+      else if (o.route === 'planning/vaststellen') uit = await vaststellen(env, d);
+      else if (o.route === 'correctie') uit = await correctiePost(env, d);
+      else if (o.route === 'patienten') uit = await patientenPost(env, d);
+      else if (o.route === 'nota/status') uit = await notaStatus(env, d, o.id);
+      else if (o.route === 'verzend') uit = await vzAanvraag(env, d);
+      else if (o.route === 'verzending/annuleer') uit = await vzAnnuleer(env, o.id);
+      else uit = await vzAdres(env, d, o.id);
+    } catch (e) {
+      if (e instanceof Gebruikersfout) uit = fout(e.message, e.status);
+      else if (/UNIQUE constraint/i.test(String(e && e.message))) uit = fout('nummer al in gebruik (UNIQUE): ' + e.message, 409);
+      else uit = fout('serverfout: ' + (e && e.message), 500);
+    }
+    return { ...uit, rondgangen: b.teller.rondgangen, vragen: b.teller.vragen, schrijfacties, route: o.route, id: o.id };
+  }
+  return { lees, schrijf };
 }
 
-module.exports = { maak, ontleed, vraagBundel, ROUTES, ENTITEITEN };
+module.exports = { maak, ontleed, ontleedSchrijf, vraagBundel, ROUTES, SCHRIJF_ROUTES, ENTITEITEN, DICHT };

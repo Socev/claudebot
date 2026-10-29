@@ -6156,6 +6156,7 @@ function appInvoerRoute(route, upload, d, a) {
   if (route === 'POST /app/concept' && !String(d.tekst == null ? '' : d.tekst).trim()) return false;   // wv159: concept wissen mag altijd
   if (route === 'POST /app/vast' && d.actie === 'los') return false;   // wv1051 (Fable diff #3): losmaken in het menu is geen invoer; vastzetten wel (onder het slot)
   if (/^POST \/app\/studio\/stop\/[a-f0-9]{16}$/.test(route)) return false;   // wv707 (Fable #8): stoppen is geen invoer
+  if (/^POST \/app\/pot\/verzending\/[1-9]\d{0,8}\/annuleer$/.test(route)) return false;   // wv1933: een nota-verzending annuleren maakt alleen dichter (bouwplan OVIS POT § 3.4: annuleren mag nooit wegvallen)
   return true;
 }
 // BSN-achtig: precies 9 cijfers (los of met spatie/punt/streepje ertussen) die de elfproef halen. Geen naamfilter (§ 4.11).
@@ -12227,6 +12228,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/financien') return appFinancien(req, res, a);                   // wv771: App Financiën (privé, alleen lezen)
         if (route === 'GET /app/gezondheid' || route === 'GET /app/gezondheid/genoom') return typeof appGezondheid === 'function' ? appGezondheid(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'gezondheid');   // wv937: App Gezondheid (alleen lezen)
         if (route.indexOf('GET /app/pot/') === 0) return typeof appPot === 'function' ? appPot(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1894: OVIS POT (P1: lezen)
+        if (route.indexOf('POST /app/pot/') === 0) return typeof appPotSchrijf === 'function' ? appPotSchrijf(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'pot');   // wv1933: OVIS POT (P3/P4: schrijven en verzending)
         if (route === 'GET /app/pot-afschriften') return appPotAfschriften(req, res, a);       // wv787: App POT-afschriften (alleen David, geen vaste plek)
         if (route === 'POST /app/pot-afschriften/maak') return appPotMaak(req, res, a, d);
         if (route === 'POST /app/pot-afschriften/concept') return appPotConcept(req, res, a, s, d);
@@ -16989,25 +16991,59 @@ async function appMediatheek(req, res, a, route) {
 // De POT-cyclus (werk.socev.dev/pot) als App in de Socev-app. Logica in pot-app.js (puur: de 10 leesroutes van de Function, letterlijk,
 // met gebundelde D1-vragen); hier alleen GET /app/pot/<pad> (padstukken, zie pot-app.js), de sessie (zoals elke app-route), een
 // auditregel per opvraging (route, status, rondgangen, duur; geen bedragen) en /health.pot_app. D1 `fin` via potDhD1, alleen SELECT.
-// Op een vaste plek gewoon open (David 28-10 16:51: "op ALLE pc's toegang tot ALLES"; wv1901). Schrijven en verzenden: P3/P4.
+// Op een vaste plek gewoon open (David 28-10 16:51: "op ALLE pc's toegang tot ALLES"; wv1901).
+// wv1933 (P3 + P4): POST /app/pot/<pad> schrijft (planning, vaststellen, correctie, patiënten, nota-status, klaarzetten, annuleren, adres).
+// Elke schrijfroute is één D1-batch (= één transactie, gemeten 29-10), met 15 s time-out. Op een vaste plek onder het invoerslot
+// (appInvoerRoute); annuleren is daarvan vrij (maakt alleen dichter). Adres bevestigen (wordt praktijk.email, het bevestigde
+// factuuradres uit grondwet 1) alleen vanaf de telefoon of een meereizend apparaat, met een verse vingerafdruk. Tot de overstap
+// (<POT_VZ_DIR>/ovis-pot-schrijft bestaat niet) geven de schrijfroutes 409, behalve annuleren en de verzendroutes voor een PROEF-nota:
+// nooit twee schrijvers tegelijk (bouwplan § 3.3/§ 3.4). GET /app/pot/stand zegt de App of hij schrijft.
 // Ontbreekt pot-app.js in de release (terugrol), dan 404 en /health.pot_app.aan=false.
 const POT_APP_MOD = (function () { const p = path.join(__dirname, 'pot-app.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('pot-app', e); return null; } })();
+function potAppSchrijvenOpen() {
+  try { return fs.existsSync(path.join(POT_VZ_DIR, 'ovis-pot-schrijft')); } catch (e) { return false; }
+}
 const potApp = (function () {
   try {
-    return POT_APP_MOD ? POT_APP_MOD.maak({ d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); } }) : null;
+    return POT_APP_MOD ? POT_APP_MOD.maak({ d1: function (batch) { if (batch.some(function (q) { return !/^\s*select\b/i.test(q.sql); })) return Promise.reject(new Error('alleen lezen')); return potDhD1(batch); },
+      schrijf: function (batch) { return potDhD1(batch, 15000); }, schrijvenOpen: potAppSchrijvenOpen }) : null;
   } catch (e) { logError('pot-app', e); return null; }
 })();
-function potAppInfo() { return { aan: !!potApp, sleutel: !!process.env.CLOUDFLARE_API_TOKEN }; }
+function potAppInfo() { return { aan: !!potApp, sleutel: !!process.env.CLOUDFLARE_API_TOKEN, schrijft: !!potApp && !!POT_APP_MOD.SCHRIJF_ROUTES && potAppSchrijvenOpen() }; }
 async function appPot(req, res, a, route) {
   if (!potApp) return appWeiger(res, 404, 'POT zit niet in deze versie van de pod', 'pot ontbreekt');
   if (!process.env.CLOUDFLARE_API_TOKEN) return appWeiger(res, 503, 'de POT-gegevens zijn nu niet te lezen (geen Cloudflare-sleutel op de pod)', 'pot geen sleutel');
   if (!appTeller('pot', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 600)', 'grens pot');
   const pad = route.slice('GET /app/pot/'.length);
+  if (pad === 'stand') { res._app.reden = 'pot stand'; return appStuur(res, 200, { ok: true, schrijft: potAppSchrijvenOpen(), adres_hier: !(a && a.soort === 'vast') }); }
   const t0 = Date.now();
   let r;
   try { r = await potApp.lees(pad); } catch (e) { logError('app-pot', e); return appWeiger(res, 500, 'fout op de pod', 'pot uitzondering'); }
   if (r.status >= 500) logError('app-pot', new Error(String(r.j && r.j.fout || r.status)));
   res._app.reden = 'pot ' + (r.route || 'onbekend') + ' (' + r.status + ', ' + r.rondgangen + ' rondgang' + (r.rondgangen === 1 ? '' : 'en') + ', ' + (Date.now() - t0) + ' ms)';
+  return appStuur(res, r.status, r.j);
+}
+// POST /app/pot/<pad> (wv1933). Auditregel: route en id (nota, plan of verzending), status, rondgangen, duur; nooit bedragen of adressen.
+async function appPotSchrijf(req, res, a, s, d, route) {
+  if (!potApp || typeof potApp.schrijf !== 'function') return appWeiger(res, 404, 'POT zit niet in deze versie van de pod', 'pot ontbreekt');
+  if (!process.env.CLOUDFLARE_API_TOKEN) return appWeiger(res, 503, 'de POT-gegevens zijn nu niet te schrijven (geen Cloudflare-sleutel op de pod)', 'pot geen sleutel');
+  const pad = route.slice('POST /app/pot/'.length);
+  const o = POT_APP_MOD.ontleedSchrijf(pad);
+  if (!o) return appWeiger(res, 404, 'onbekende route', 'pot onbekend');
+  if (!appTeller('pot-schrijf', 120, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 120)', 'grens pot-schrijf');
+  if (o.route === 'verzending/adres') {
+    // het bevestigde factuuradres (grondwet 1): telefoon of meereizend apparaat, verse vingerafdruk, verbruikt vóór de eerste await
+    if (a.soort === 'vast') return appWeiger(res, 403, 'een factuuradres bevestigen kan niet vanaf een pc met een vaste plek; gebruik je telefoon', 'pot adres vast');
+    if (!appVersOk(a, s)) { res._app.reden = 'pot verzending/adres ' + o.id + ', niet vers'; return appStuur(res, 403, { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true }); }
+    s.vers_tot = 0;
+  }
+  const t0 = Date.now();
+  let r;
+  try { r = await potApp.schrijf(pad, d); } catch (e) { logError('app-pot', e); return appWeiger(res, 500, 'fout op de pod', 'pot uitzondering'); }
+  if (r.status >= 500) logError('app-pot', new Error(String(r.j && r.j.fout || r.status)));
+  const welk = r.j && r.j.plan && r.j.plan.id ? ' plan ' + r.j.plan.id : r.j && r.j.verzending && r.j.verzending.id ? ' verzending ' + r.j.verzending.id : r.j && r.j.nota && r.j.nota.id ? ' nota ' + r.j.nota.id : '';
+  const notas = r.j && Array.isArray(r.j.notas) ? ' nota\'s ' + r.j.notas.map(function (n) { return n.id; }).join(',').slice(0, 80) : '';
+  res._app.reden = 'pot: ' + r.route + (o.id ? ' ' + o.id : '') + (d && d.nota_id ? ' nota ' + String(d.nota_id).slice(0, 12) : '') + welk + notas + ' (' + r.status + ', ' + r.rondgangen + '+' + r.schrijfacties + ' rondgangen, ' + (Date.now() - t0) + ' ms)';
   return appStuur(res, r.status, r.j);
 }
 // ── einde OVIS POT ──
@@ -20294,10 +20330,10 @@ function potDhStaatBij(grootboek, box) {
   fs.renameSync(tmp, POT_DH_STAAT);
 }
 // D1 `fin`, één batch (transactie) met parameters. Foutteksten zonder statement of parameters, cijferreeksen gemaskeerd (Fable wv815 #2).
-async function potDhD1(batch) {
+async function potDhD1(batch, ms) {   // wv1933: ms = eigen time-out (OVIS POT schrijft met 15 s, bouwplan § 3.3); standaard 30 s
   const r = await fetch('https://api.cloudflare.com/client/v4/accounts/' + APP_CF_ACCOUNT + '/d1/database/' + APP_FIN_DB + '/query', {
     method: 'POST', headers: { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ batch: batch }), signal: AbortSignal.timeout(30000) });
+    body: JSON.stringify({ batch: batch }), signal: AbortSignal.timeout(ms || 30000) });
   const j = await r.json().catch(function () { return null; });
   const ok = r.ok && j && j.success === true && Array.isArray(j.result) && j.result.length === batch.length && j.result.every(function (x) { return x && x.success !== false; });   // results alleen bij SELECT nodig (diff I2)
   if (!ok) throw new Error('D1 http ' + r.status + (j && Array.isArray(j.errors) && j.errors[0] ? ': ' + String(j.errors[0].message || '').replace(/\d{6,}/g, '#').slice(0, 120) : ''));
@@ -20604,6 +20640,7 @@ async function potVzTik() {
     if (proef.length && !auto) { try { if (!(await potVzVerzendGeheim())) proef.length = 0; } catch (e) { proef.length = 0; } }
     const adresbron = potVzAdresbron();
     if (potVz.adresbron !== adresbron) { if (potVz.adresbron) schrijfLog(nu() + ' pot-verzend adresbron ' + velden({ van: potVz.adresbron, naar: adresbron })); potVz.adresbron = adresbron; }   // Fable wv1763 KAN 8
+    if (typeof POT_VZ_MOD.zetOvis === 'function') POT_VZ_MOD.zetOvis(typeof potAppSchrijvenOpen === 'function' && potAppSchrijvenOpen());   // wv1933: kaartteksten volgen de overstap
     const u = await POT_VZ_MOD.ronde(POT_VZ_IO, { meten: meten, kaarten: kaarten, auto: auto, proef: proef, adresbron: adresbron });
     const dagA = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
     if (potVz.auto.dag !== dagA) Object.assign(potVz.auto, { dag: dagA, verstuurd: 0, onzeker: 0, terug: 0 });

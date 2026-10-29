@@ -27,6 +27,15 @@ const KOL = 'id, nota_id, entiteit, nummer, praktijk_id, status, niet_voor, plan
 const ADRES_RE = /^[a-z0-9._%+'-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/;
 const ID_RE = /^P\d{2}$/;
 const ENT_NAAM = { SLOEL: 'SLOEL', POT: 'POT', KM: 'KM POH-GGZ', PROEF: 'PROEF' };
+// wv1933: waar David zijn nota's beheert. Tot de overstap de oude POT-app (werk.socev.dev/pot), daarna OVIS POT in de Socev-app; server.js
+// zet dit vóór elke ronde uit de schakelaar <POT_VZ_DIR>/ovis-pot-schrijft (zetOvis). Kaarten krijgen altijd module 'pot' + doel (de App
+// leest ook vóór de overstap, en annuleren kan daar altijd).
+let OVIS = false;
+function zetOvis(aan) { OVIS = aan === true; }
+const app = () => (OVIS ? 'OVIS POT' : 'de POT-app');
+const appNotas = () => (OVIS ? "OVIS POT › Nota's" : "de POT-app (tab Nota's)");
+const appKop = () => (OVIS ? 'OVIS POT' : 'POT-app');
+const potDoel = (ent) => ({ module: 'pot', doel: { scherm: 'pot', focus: 'notas:' + String(ent || 'alle').toLowerCase().replace(/[^a-z]/g, '') } });
 
 // ── ontvangers uit de Second Brain ────────────────────────────────────────────
 // Alleen het eerste frontmatterblok; alleen de drie sleutels; vormen: `k: waarde`, `k: [a, b]`, `k:` + regels `  - a`.
@@ -170,12 +179,12 @@ function kaartGepland(ent, plan, rijen, nuKort) {
   const nrs = rijen.map((r) => r.nummer).sort();
   return kaartGrens({ sleutel: `pot-verzend-${ent.toLowerCase()}-${plan}`, soort: 'doen', volgorde: 25, deadline: plan, waar: 'overal', prive: true, duur_min: 2 + rijen.length,
     titel: `${ENT_NAAM[ent] || ent}-nota's van ${dm(plan)} — versturen`,
-    herkomst: { handmatig: 'pot-verzend', entiteit: ent, plan_datum: plan },
-    waarom: `Je liet in de POT-app ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} klaarzetten voor ${dm(plan)}. Socev heeft vanochtend per nota een concept in Gmail gezet, met de PDF eraan, aan het factuuradres uit de Second Brain. Versturen doe je zelf.`,
+    herkomst: { handmatig: 'pot-verzend', entiteit: ent, plan_datum: plan, ...potDoel(ent) },
+    waarom: `Je liet in ${app()} ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} klaarzetten voor ${dm(plan)}. Socev heeft vanochtend per nota een concept in Gmail gezet, met de PDF eraan, aan het factuuradres uit de Second Brain. Versturen doe je zelf.`,
     stappen: ['Open Gmail op je telefoon of laptop en ga naar Concepten.',
       `Zoek de concepten van ${nrs.length > 1 ? `de nota's ${nrs.join(', ')}` : `nota ${nrs[0]}`} (onderwerp ${rijen[0].onderwerp}).`,
       'Kijk per concept de ontvanger, de tekst en de PDF na en verstuur het.',
-      "In de POT-app (tab Nota's) staat binnen een uur 'verzonden'; deze kaart gaat dan vanzelf dicht."],
+      `In ${appNotas()} staat binnen een uur 'verzonden'; deze kaart gaat dan vanzelf dicht.`],
     meting: `${nuKort}: ${rijen.length} concept${rijen.length > 1 ? 'en staan' : ' staat'} klaar in Gmail.` });
 }
 function kaartAdres(rijen, nuKort, bron) {
@@ -186,11 +195,11 @@ function kaartAdres(rijen, nuKort, bron) {
   // sleutel ook op de bron (Fable wv1763 KAN 6): na een wissel naar het register komt de kaart met de vastzetstap, niet de oude tekst
   return kaartGrens({ sleutel: 'pot-verzend-adres-' + korteHash(rijen.map((r) => r.id).sort().join(',') + (viaRegister ? '|register' : '')), soort: 'doen', volgorde: 22, waar: 'overal', prive: true, duur_min: 5,
     deadline: rijen.map((r) => r.deadline).sort()[0],
-    titel: `POT-app — factuuradres ${bevestig ? 'bevestigen of ' : ''}aanvullen (${rijen.length} nota${rijen.length > 1 ? "'s" : ''})`,
-    herkomst: { handmatig: 'pot-verzend', soort: 'adres', ids: rijen.map((r) => r.id) },
-    waarom: 'Socev zet een nota pas als concept klaar als het factuuradres in de Second Brain staat' + (viaRegister ? ' (vastgezet met je vingerafdruk)' : '') + ' en het hetzelfde is als het adres dat de POT-app kent. Bij deze nota\'s klopt dat nog niet: ' + regels.join('; ') + '.',
+    titel: `${appKop()} — factuuradres ${bevestig ? 'bevestigen of ' : ''}aanvullen (${rijen.length} nota${rijen.length > 1 ? "'s" : ''})`,
+    herkomst: { handmatig: 'pot-verzend', soort: 'adres', ids: rijen.map((r) => r.id), ...potDoel(rijen[0] && rijen[0].entiteit) },
+    waarom: 'Socev zet een nota pas als concept klaar als het factuuradres in de Second Brain staat' + (viaRegister ? ' (vastgezet met je vingerafdruk)' : '') + ' en het hetzelfde is als het adres dat ' + app() + ' kent. Bij deze nota\'s klopt dat nog niet: ' + regels.join('; ') + '.',
     stappen: [...(viaRegister ? ["Staat er in Voor jou een kaart 'factuuradres voor POT-nota's — zo vastzetten?': kijk het adres na en druk Ja met je vingerafdruk."] : []),
-      ...(bevestig ? ["Klopt het nieuwe adres? Open de POT-app, tab Nota's, en tik bij de nota op 'adres klopt'."] : []),
+      ...(bevestig ? [OVIS ? "Klopt het nieuwe adres? Open OVIS POT › Nota's, tik op de nota en dan op 'Adres klopt'." : "Klopt het nieuwe adres? Open de POT-app, tab Nota's, en tik bij de nota op 'adres klopt'."] : []),
       `Ontbreekt het adres of klopt het niet: zeg tegen Socev "factuuradres ${voorbeeld} is …". Socev zet het in de Second Brain` + (viaRegister ? '; daarna komt er een kaart om het vast te zetten.' : '.'),
       'Socev kijkt elke tien minuten opnieuw en zet het concept dan vanzelf klaar; deze kaart gaat daarna dicht.'],
     meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s wachten" : ' wacht'} op een factuuradres.` });
@@ -198,10 +207,10 @@ function kaartAdres(rijen, nuKort, bron) {
 function kaartFout(rijen, nuKort) {
   return kaartGrens({ sleutel: 'pot-verzend-fout-' + korteHash(rijen.map((r) => r.id).sort().join(',')), soort: 'doen', volgorde: 21, waar: 'overal', prive: true, duur_min: 5,
     deadline: rijen.map((r) => r.deadline).sort()[0],
-    titel: `POT-app — ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} niet klaargezet`,
-    herkomst: { handmatig: 'pot-verzend', soort: 'fout', ids: rijen.map((r) => r.id) },
+    titel: `${appKop()} — ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} niet klaargezet`,
+    herkomst: { handmatig: 'pot-verzend', soort: 'fout', ids: rijen.map((r) => r.id), ...potDoel(rijen[0] && rijen[0].entiteit) },
     waarom: 'Socev kon deze nota\'s niet als concept klaarzetten: ' + rijen.map((r) => `${r.nummer} (${r.fout})`).join('; ').slice(0, 600) + '. Er staat voor deze nota\'s dus niets in Gmail, tenzij hieronder anders staat.',
-    stappen: ["Open de POT-app, tab Nota's: bij deze nota's staat 'niet gelukt' (houd je vinger op het label voor de reden).",
+    stappen: [OVIS ? "Open OVIS POT › Nota's: bij deze nota's staat 'niet gelukt' (tik op de nota voor de reden)." : "Open de POT-app, tab Nota's: bij deze nota's staat 'niet gelukt' (houd je vinger op het label voor de reden).",
       "Selecteer ze en tik nog eens op 'Zet klaar voor verzending'. Lukt het weer niet, zeg het dan in de machinekamer.",
       'Deze kaart gaat vanzelf dicht zodra ze opnieuw klaarstaan.'],
     meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} niet klaargezet.` });
@@ -268,42 +277,42 @@ function kaartVrijgave(v, rijen, vandaag) {
   const voor = ymdPlus(v.plan_datum, -1);
   return { sleutel: `pot-vrijgave-${v.id}`, soort: 'besluit', volgorde: 20, waar: 'overal', prive: true, duur_min: 2, deadline: voor >= vandaag ? voor : v.plan_datum,
     titel: titel.length <= 90 ? titel : `Zal ik ${n} ${ent}-nota${n > 1 ? "'s" : ''} op ${dag} om 09:00 versturen?`,
-    herkomst: { handmatig: 'pot-verzend', soort: 'vrijgave', vrijgave_id: v.id, entiteit: v.entiteit, plan_datum: v.plan_datum },
-    waarom: kap(`Je zette deze nota's in de POT-app klaar met "op die dag zelf versturen". Met Ja (vingerafdruk op je telefoon) geef je precies deze vrij: op ${dag} tussen 09:00 en 12:00 gaat per nota één mail van dokterschaap@gmail.com, met jouw tekst en de PDF die je maakte. Totaal ${euro(totaal)}. Nee of niets: die ochtend om 07:00 staan ze als concept klaar.`, 400),
+    herkomst: { handmatig: 'pot-verzend', soort: 'vrijgave', vrijgave_id: v.id, entiteit: v.entiteit, plan_datum: v.plan_datum, ...potDoel(v.entiteit) },
+    waarom: kap(`Je zette deze nota's in ${app()} klaar met "op die dag zelf versturen". Met Ja (vingerafdruk op je telefoon) geef je precies deze vrij: op ${dag} tussen 09:00 en 12:00 gaat per nota één mail van dokterschaap@gmail.com, met jouw tekst en de PDF die je maakte. Totaal ${euro(totaal)}. Nee of niets: die ochtend om 07:00 staan ze als concept klaar.`, 400),
     stappen: [...rijen.map((r) => `${r.nummer} · ${r.praktijk} · ${r.aan}${r.cc ? ` (cc ${r.cc})` : ''} · ${euro(r.bedrag)}`),
       'Een Ja vanaf een vaste plek (praktijk-pc) telt niet: dan worden het concepten.',
       'Verandert er nog iets aan een nota (adres, PDF, tekst, datum), dan gaat die nota als concept en niet vanzelf.',
-      "Stoppen kan tot het verzendmoment: Annuleer bij de nota in de POT-app (tab Nota's)."].slice(0, 12) };
+      `Stoppen kan tot het verzendmoment: Annuleer bij de nota in ${appNotas()}.`].slice(0, 12) };
 }
 function kaartVandaag(v, rijen) {
   const n = rijen.length, ent = ENT_NAAM[v.entiteit] || v.entiteit;
   return kaartGrens({ sleutel: `pot-auto-vandaag-${v.id}`, soort: 'doen', volgorde: 19, waar: 'overal', prive: true, duur_min: 1, deadline: v.plan_datum,
     titel: `Vandaag om 09:00 gaan ${n} ${ent}-nota${n > 1 ? "'s" : ''} vanzelf de deur uit`,
-    herkomst: { handmatig: 'pot-verzend', soort: 'vandaag', vrijgave_id: v.id },
+    herkomst: { handmatig: 'pot-verzend', soort: 'vandaag', vrijgave_id: v.id, ...potDoel(v.entiteit) },
     waarom: `Je gaf ${n > 1 ? `de nota's ${bereik(rijen.map((r) => r.nummer))}` : `nota ${rijen[0].nummer}`} vrij met je vingerafdruk. Socev verstuurt ze tussen 09:00 en 12:00, één mail per nota. Stuur ze niet zelf, anders gaan ze twee keer.`,
     stappen: ['Niets doen: na het versturen staat er één bericht in de app en gaat deze kaart dicht.',
-      "Toch stoppen: open de POT-app, tab Nota's, en tik bij de nota op Annuleer (kan tot hij verstuurd wordt)."] });
+      OVIS ? "Toch stoppen: open OVIS POT › Nota's, tik op de nota en dan op Annuleer (kan tot hij verstuurd wordt)." : "Toch stoppen: open de POT-app, tab Nota's, en tik bij de nota op Annuleer (kan tot hij verstuurd wordt)."] });
 }
 // rijen: [{ nummer, reden, deadline }]
 function kaartNietAuto(rijen, nuKort) {
   return kaartGrens({ sleutel: 'pot-verzend-nietauto-' + korteHash(rijen.map((r) => r.id).sort().join(',')), soort: 'doen', volgorde: 21, waar: 'overal', prive: true, duur_min: 3,
     deadline: rijen.map((r) => r.deadline).sort()[0],
-    titel: `POT-app — ${rijen.length} nota${rijen.length > 1 ? "'s gaan" : ' gaat'} niet vanzelf de deur uit`,
-    herkomst: { handmatig: 'pot-verzend', soort: 'nietauto', ids: rijen.map((r) => r.id) },
+    titel: `${appKop()} — ${rijen.length} nota${rijen.length > 1 ? "'s gaan" : ' gaat'} niet vanzelf de deur uit`,
+    herkomst: { handmatig: 'pot-verzend', soort: 'nietauto', ids: rijen.map((r) => r.id), ...potDoel(rijen[0] && rijen[0].entiteit) },
     waarom: kap("Je koos bij deze nota's \"op die dag zelf versturen\", maar Socev verstuurt ze niet vanzelf: " + rijen.map((r) => `${r.nummer} (${r.reden})`).join('; ') + '. Ze komen op de verzenddag om 07:00 als concept in Gmail; versturen doe je dan zelf.', 400),
     stappen: ["Niets doen: op de verzenddag staat er per nota een concept in Gmail en een kaart om ze te versturen.",
-      "Wil je het toch automatisch: los de reden op (bijvoorbeeld het factuuradres) en zet de nota in de POT-app opnieuw klaar met een reden.",
+      `Wil je het toch automatisch: los de reden op (bijvoorbeeld het factuuradres) en zet de nota in ${app()} opnieuw klaar met een reden.`,
       'Deze kaart gaat vanzelf dicht als de nota verstuurd of opnieuw klaargezet is.'],
     meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} niet automatisch.` });
 }
 function kaartOnzeker(rijen, nuKort) {
   return kaartGrens({ sleutel: 'pot-verzend-onzeker-' + korteHash(rijen.map((r) => r.id).sort().join(',')), soort: 'doen', volgorde: 18, waar: 'overal', prive: true, duur_min: 3,
     deadline: rijen.map((r) => r.deadline).sort()[0],
-    titel: `POT-app — niet zeker of ${rijen.length > 1 ? `${rijen.length} nota's verstuurd zijn` : `nota ${rijen[0].nummer} verstuurd is`}`,
-    herkomst: { handmatig: 'pot-verzend', soort: 'onzeker', ids: rijen.map((r) => r.id) },
+    titel: `${appKop()} — niet zeker of ${rijen.length > 1 ? `${rijen.length} nota's verstuurd zijn` : `nota ${rijen[0].nummer} verstuurd is`}`,
+    herkomst: { handmatig: 'pot-verzend', soort: 'onzeker', ids: rijen.map((r) => r.id), ...potDoel(rijen[0] && rijen[0].entiteit) },
     waarom: kap(`Socev gaf ${rijen.map((r) => r.nummer).join(', ')} aan de verzendroute, maar kreeg geen bevestiging terug en vindt ${rijen.length > 1 ? 'ze' : 'hem'} na 24 uur niet in Gmail › Verzonden. Socev verstuurt ${rijen.length > 1 ? 'ze' : 'hem'} niet opnieuw.`, 400),
     stappen: ['Open Gmail en kijk in Verzonden (en Concepten) of de mail met dit nummer als bijlage er staat.',
-      "Staat hij er niet: zet de nota in de POT-app opnieuw klaar met een reden (dan wordt het een concept) en verstuur hem zelf.",
+      `Staat hij er niet: zet de nota in ${app()} opnieuw klaar met een reden (dan wordt het een concept) en verstuur hem zelf.`,
       'Staat hij er wel: niets doen; deze kaart kun je op gedaan zetten.'],
     meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} zonder bevestiging.` });
 }
@@ -311,7 +320,7 @@ function kaartOnzeker(rijen, nuKort) {
 // Alle controles uit verse rijen (Fable #3/#7): nota nog definitief en dezelfde, PDF ongewijzigd en van deze nota, adres in de Second Brain
 // == praktijk.email == het adres in de rij. Geeft { ok, reden, tijdelijk, aan, cc, bron, pdf } (tijdelijk: volgende tik opnieuw proberen).
 async function autoControle(io, r, n, ontv) {
-  if (!n || n.entiteit !== r.entiteit || n.nummer !== r.nummer || n.praktijk_id !== r.praktijk_id) return { ok: false, reden: 'de nota is in de POT-app niet meer dezelfde' };
+  if (!n || n.entiteit !== r.entiteit || n.nummer !== r.nummer || n.praktijk_id !== r.praktijk_id) return { ok: false, reden: `de nota is in ${app()} niet meer dezelfde` };
   if (n.status !== 'definitief') return { ok: false, reden: `de nota is nu ${n.status}` };
   // SLOEL, of de proefnota (entiteit PROEF bij een proefpraktijk P9x, alleen door de machinekamer in D1 gezet; adres = Davids testalias)
   if (r.entiteit !== 'SLOEL' && !(r.entiteit === 'PROEF' && /^P9\d$/.test(String(r.praktijk_id)))) return { ok: false, reden: 'alleen SLOEL-nota\'s gaan automatisch' };
@@ -326,7 +335,7 @@ async function autoControle(io, r, n, ontv) {
   const o1 = ontv.per[r.praktijk_id];
   if (!o1) return { ok: false, reden: 'geen factuuradres: ' + String(geenAdresTekst(ontv, r.praktijk_id, r.praktijk_id)).slice(0, 160) };
   const aanT = adresTekst(o1.aan), ccT = adresTekst(o1.cc);
-  if (!n.email || adresNorm(n.email) !== aanT) return { ok: false, reden: 'het factuuradres is nieuw of anders dan wat de POT-app kent (eerst bevestigen)' };
+  if (!n.email || adresNorm(n.email) !== aanT) return { ok: false, reden: `het factuuradres is nieuw of anders dan wat ${app()} kent (eerst bevestigen)` };
   return { ok: true, aan: aanT, cc: ccT || null, bron: o1.pagina, pdf: pb.bytes };
 }
 
@@ -545,6 +554,36 @@ async function autoRonde(io, nuD1, o, uit, zet) {
   return gewijzigd;
 }
 
+// ── aanvraagkant (wv1933, OVIS POT P4): de SQL op nota_verzending voor klaarzetten, annuleren en adres bevestigen ───────────
+// Tot de overstap (bouwplan OVIS POT § 3.4) schreef de Function van werk.socev.dev/pot deze rijen; nu de pod (pot-app.js), met precies
+// dezelfde SQL. Deze module blijft eigenaar van de tabel: elke opdracht op nota_verzending staat hier. Tijd `t` komt uit D1 (pot-app.js).
+const VZ_ACTIEF = ['wacht', 'bezig', 'concept', 'verzonden', 'wacht_op_adres', 'onzeker', 'auto_gevraagd', 'auto_vrij', 'verzenden', 'auto_verstuurd', 'onzeker_verzonden', 'verstuurd_door_david'];
+const VZ_OPNIEUW_VAN = ['wacht', 'concept', 'verzonden', 'wacht_op_adres', 'onzeker', 'auto_gevraagd', 'auto_vrij', 'auto_verstuurd', 'onzeker_verzonden', 'verstuurd_door_david'];
+const VZ_ANNULEER_VAN = ['wacht', 'wacht_op_adres', 'auto_gevraagd', 'auto_vrij'];   // wv921: tot de pod hem reserveert (verzenden)
+// Kolommen voor de lijst en de antwoorden (zonder PDF en mailtekst)
+const VZ_KOLOMMEN = 'id, nota_id, entiteit, nummer, praktijk_id, status, niet_voor, plan_datum, onderwerp, van, pdf_naam, pdf_sha256, pdf_bytes, aangevraagd_op, reden, geclaimd_op, pogingen, aan, cc, bron_pagina, concept_id, thread_id, concept_op, verzonden_op, opmerking, fout, bijgewerkt_op, auto, vrijgave_id, message_id';
+const aanvraagRijSql = (id) => ({ sql: `select ${VZ_KOLOMMEN} from nota_verzending where id=?`, params: [id] });
+const aanvraagActiefSql = (notaId) => ({ sql: `select ${VZ_KOLOMMEN} from nota_verzending where nota_id=? and status in (${VZ_ACTIEF.map(() => '?').join(',')})`, params: [notaId, ...VZ_ACTIEF] });
+const aanvraagNieuwSql = (notaId) => ({ sql: `select ${VZ_KOLOMMEN} from nota_verzending where nota_id=? and status in ('wacht','auto_gevraagd') order by id desc limit 1`, params: [notaId] });
+// a = { actief (rij of null), reden, n (nota), k ({ onderwerp, bericht, van, pdf_naam }), nietVoor, plan, auto, pdf_b64, sha, bytes, t } → batch
+function aanvraagSql(a) {
+  const stmts = [];
+  if (a.actief) stmts.push({ sql: "update nota_verzending set status='vervangen', pdf_b64=null, reden=?, bijgewerkt_op=? where id=? and status=?", params: [`vervangen: ${a.reden}`, a.t, a.actief.id, a.actief.status] });
+  stmts.push({ sql: 'insert into nota_verzending (nota_id, entiteit, nummer, praktijk_id, status, niet_voor, plan_datum, onderwerp, bericht, van, pdf_naam, pdf_b64, pdf_sha256, pdf_bytes, aangevraagd_op, reden, bijgewerkt_op, auto) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+    params: [a.n.id, a.n.entiteit, a.n.nummer, a.n.praktijk_id, a.auto ? 'auto_gevraagd' : 'wacht', a.nietVoor, a.plan, a.k.onderwerp, a.k.bericht, a.k.van, a.k.pdf_naam, a.pdf_b64, a.sha, a.bytes, a.t, a.reden ? `opnieuw: ${a.reden}` : null, a.t, a.auto ? 1 : 0] });
+  return stmts;
+}
+function annuleerSql(id, t) {
+  return { sql: `update nota_verzending set status='geannuleerd', pdf_b64=null, bijgewerkt_op=? where id=? and status in (${VZ_ANNULEER_VAN.map(() => '?').join(',')})`, params: [t, id, ...VZ_ANNULEER_VAN] };
+}
+// Het adres komt uit de Second Brain (de pod zette het in `aan`); David bevestigt het in de App. Dan wordt het ook praktijk.email.
+// Het tweede element telt: changes 1 = bevestigd.
+function adresSql(r, t) {
+  return [{ sql: 'update praktijk set email=? where id=?', params: [r.aan, r.praktijk_id] },
+    { sql: "update nota_verzending set status='wacht', niet_voor=case when niet_voor > ? then niet_voor else ? end, opmerking=?, bijgewerkt_op=? where id=? and status='wacht_op_adres' and aan=?",
+      params: [t, t, `adres bevestigd in de app op ${t}`, t, r.id, r.aan] }];
+}
+
 // ── knoproute (server.js appVoorJouKnop/appKnop): toetsen, vastleggen, intrekken ──────────────────────────────
 // p = de verse kaartrij uit Supabase, v = de nota_vrijgave-rij met kaart_sleutel = p.sleutel, vandaag = Amsterdam (uit D1).
 // Geeft null (mag vrijgeven) of een reden in gewone taal. Het anker is de D1-rij; de kaart is het bewijs dat David precies dát zag (Fable #2).
@@ -644,7 +683,7 @@ async function ronde(io, o) {
       const n = notaM[r.nota_id];
       // terug in de wachtrij (alleen na de adrescontrole gebruikt, dus het adres klopte op dat moment)
       const terug = async () => { await zet(r.id, { status: 'wacht', geclaimd_op: null }, 'bezig'); };
-      if (!n || n.entiteit !== r.entiteit || n.nummer !== r.nummer || n.praktijk_id !== r.praktijk_id) { await zet(r.id, { status: 'fout', fout: 'de nota is in de POT-app niet (meer) dezelfde', pdf_b64: null }, 'bezig'); uit.fout++; gewijzigd = true; continue; }
+      if (!n || n.entiteit !== r.entiteit || n.nummer !== r.nummer || n.praktijk_id !== r.praktijk_id) { await zet(r.id, { status: 'fout', fout: `de nota is in ${app()} niet (meer) dezelfde`, pdf_b64: null }, 'bezig'); uit.fout++; gewijzigd = true; continue; }
       if (n.status !== 'definitief') { await zet(r.id, { status: 'fout', fout: `de nota is nu ${n.status}`, pdf_b64: null }, 'bezig'); uit.fout++; gewijzigd = true; continue; }
       const pb = pdfBytes(r);
       if (!pb.ok) { await zet(r.id, { status: 'fout', fout: pb.fout, pdf_b64: null }, 'bezig'); uit.fout++; gewijzigd = true; continue; }
@@ -665,7 +704,7 @@ async function ronde(io, o) {
       if (!o1) { await wachtAdres('geen_adres', geenAdresTekst(ontv, r.praktijk_id, praktijk), null); continue; }
       const aanT = adresTekst(o1.aan);
       if (!n.email) { await wachtAdres('adres_nieuw', `nieuw factuuradres voor ${praktijk}: ${aanT}`, aanT); continue; }
-      if (adresNorm(n.email) !== aanT) { await wachtAdres('adres_gewijzigd', `het factuuradres van ${praktijk} in de Second Brain (${aanT}) verschilt van wat de POT-app kent (${adresNorm(n.email)})`, aanT); continue; }
+      if (adresNorm(n.email) !== aanT) { await wachtAdres('adres_gewijzigd', `het factuuradres van ${praktijk} in de Second Brain (${aanT}) verschilt van wat ${app()} kent (${adresNorm(n.email)})`, aanT); continue; }
       // adres vastleggen vóór de aanroep (bij een crash weet de herstelstap waarnaar te zoeken)
       if (!(await zet(r.id, { aan: aanT, cc: adresTekst(o1.cc) || null, bron_pagina: o1.pagina }, 'bezig'))) continue;
       const rij = Object.assign({}, r, { aan: aanT });
@@ -771,4 +810,5 @@ async function kaarten(io, nuKort, nuD1, adresbron) {
 }
 
 module.exports = { ronde, kaarten, nuKortVan, frontmatter, ontvangers, adressen, ADRESBRONNEN, bronVan, adresTekst, adresNorm, pdfBytes, pdfHoortBij, zoekInGmail, mailBody, kaartGepland, kaartAdres, kaartFout, GRENS,
-  AUTO, AUTO_BEVESTIGING, amsterdam, feestdag, werkdag, notaHash, batchHash, kaartHash, kaartVrijgave, kaartVandaag, kaartNietAuto, kaartOnzeker, vrijgaveToets, vrijgaveSql, intrekSql, autoRonde };
+  AUTO, AUTO_BEVESTIGING, amsterdam, feestdag, werkdag, notaHash, batchHash, kaartHash, kaartVrijgave, kaartVandaag, kaartNietAuto, kaartOnzeker, vrijgaveToets, vrijgaveSql, intrekSql, autoRonde,
+  zetOvis, VZ_ACTIEF, VZ_OPNIEUW_VAN, VZ_ANNULEER_VAN, VZ_KOLOMMEN, aanvraagRijSql, aanvraagActiefSql, aanvraagNieuwSql, aanvraagSql, annuleerSql, adresSql };
