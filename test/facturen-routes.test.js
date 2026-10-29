@@ -1619,3 +1619,53 @@ test('wv1917 diffreview: nagebeld IBAN gaat nooit mee naar een bestaande leveran
   t.fdb.db.prepare("INSERT INTO voorstel (sleutel, transactie, facturen, methode, zekerheid, aangemaakt_op) VALUES ('wv1917-proef', ?, ?, 'iban_bedrag', 0.6, '2026-10-22T10:00:00Z')").run(tx.id, JSON.stringify([f3.id]));
   assert.ok(!KA.onbetaald(t.fdb).some((x) => x.id === f3.id));
 });
+
+// ───────────────────────────── wv2006: voorstellen uit Davids verzonden mail ─────────────────────────────
+
+test('wv2006: voorstellen per afzender doen niets tot David bevestigt; bevestigen maakt een afzender_regel (leverancier op naam), afwijzen niet; alleen de eigenaar', () => {
+  const t = opzet();
+  const bron = t.fdb.db.prepare("SELECT id FROM bron WHERE soort = 'verzamelpostvak'").get().id;
+  D.voegToe(t.fdb, 'tekstanker', { tekst: 'Oude Eenmanszaak Proef', entiteit: 'holding', aangemaakt_door: 'proef', aangemaakt_op: '2026-10-01T00:00:00Z' });
+  const stuur = (afzender, nr) => {
+    const bid = D.nieuwId();
+    D.voegToe(t.fdb, 'bericht', { id: bid, bron, message_id: 'wv2006-' + nr, afzender, onderwerp: 'Factuur ' + nr, ontvangen_op: '2026-10-22T10:00:00Z' });
+    const tekst = ['Factuur', 'Oude Eenmanszaak Proef', 'Factuurnummer ' + nr, 'Factuurdatum 22-10-2026', 'Vervaldatum 05-11-2026', 'Totaal € 45,82'].join('\n');
+    const v = F.verwerkBericht(t.fdb, { bericht: { id: bid, message_id: 'wv2006-' + nr, afzender, onderwerp: 'Factuur ' + nr },
+      documenten: [{ sha256: crypto.createHash('sha256').update(tekst).digest('hex'), naam: nr + '.pdf', mime: 'application/pdf', tekst }] }, { nu: NU, wie: 'koerier' });
+    return t.f('id = ?', [v.facturen[0].id]);
+  };
+  assert.deepEqual(t.call('GET', 'afzender-voorstellen').j.voorstellen, []);
+  const item = (patroon, soort, extra) => Object.assign({ patroon, soort, naam: 'Voorstelproef B.V.', aantal: 4, entiteit: 'tolgaarde', entiteiten: { tolgaarde: 4 }, nogbetalen: 4,
+    betaalwijze: 'zelf', voorbeeld: 'Factuur 1', laatst: '2026-10-01', status: 'voorstel' }, extra || {});
+  D.metaZet(t.fdb, 'afzender_voorstellen', JSON.stringify({ gemeten: '2026-10-30', venster: 'proef', items: [item('voorstelproef.invalid', 'domein'),
+    item('iemand@gmail.com', 'adres', { naam: 'Iemand Proef', entiteit: null, betaalwijze: null }), item('gmail.com', 'domein')] }));
+  // zolang het een voorstel is: het stuk volgt het tekstanker, geen regel
+  assert.equal(stuur('nota@voorstelproef.invalid', 'A').entiteit, 'holding');
+  assert.equal(t.n('SELECT count(*) n FROM afzender_regel'), 0);
+  // praktijkmanager: niets
+  assert.equal(t.call('GET', 'afzender-voorstellen', null, { rol: t.pm() }).status, 403);
+  assert.equal(t.call('POST', 'afzender-voorstel', { patroon: 'voorstelproef.invalid', keuze: 'bevestig' }, { rol: t.pm() }).status, 403);
+  // bevestigen → regel met entiteit en betaalwijze uit het voorstel; het volgende stuk volgt de regel
+  let r = t.call('POST', 'afzender-voorstel', { patroon: 'Voorstelproef.invalid', keuze: 'bevestig' });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(r.j.status, 'bevestigd');
+  const f = stuur('nota@voorstelproef.invalid', 'B');
+  assert.equal(f.entiteit, 'tolgaarde'); assert.equal(f.betaalwijze, 'zelf'); assert.equal(f.leverancier_naam, 'Voorstelproef B.V.');
+  assert.equal(t.call('POST', 'afzender-voorstel', { patroon: 'voorstelproef.invalid', keuze: 'bevestig' }).status, 409, 'niet twee keer');
+  const lijst = t.call('GET', 'afzender-voorstellen').j.voorstellen;
+  assert.deepEqual(lijst.map((x) => [x.patroon, x.status, x.regel && x.regel.entiteit]), [['voorstelproef.invalid', 'bevestigd', 'tolgaarde'], ['iemand@gmail.com', 'voorstel', null], ['gmail.com', 'voorstel', null]]);
+  // aangepast bevestigen: andere entiteit, betaalwijze leeg
+  r = t.call('POST', 'afzender-voorstel', { patroon: 'iemand@gmail.com', keuze: 'bevestig', entiteit: 'pot', betaalwijze: '' });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.deepEqual(Object.assign({}, t.fdb.db.prepare("SELECT soort, entiteit, betaalwijze FROM afzender_regel WHERE patroon = 'iemand@gmail.com'").get()), { soort: 'adres', entiteit: 'pot', betaalwijze: null });
+  // algemene mailaanbieder als domein: nooit; afwijzen en terugzetten; onbekend
+  assert.equal(t.call('POST', 'afzender-voorstel', { patroon: 'gmail.com', keuze: 'bevestig' }).status, 400);
+  assert.equal(t.call('POST', 'afzender-voorstel', { patroon: 'gmail.com', keuze: 'afwijs' }).status, 200);
+  assert.equal(t.call('POST', 'afzender-voorstel', { patroon: 'gmail.com', keuze: 'afwijs' }).status, 409);
+  assert.equal(t.call('POST', 'afzender-voorstel', { patroon: 'gmail.com', keuze: 'terug' }).status, 200);
+  assert.equal(t.call('POST', 'afzender-voorstel', { patroon: 'bestaat.invalid', keuze: 'afwijs' }).status, 404);
+  assert.equal(t.call('POST', 'afzender-voorstel', { patroon: 'gmail.com', keuze: 'zomaar' }).status, 400);
+  assert.equal(t.call('POST', 'afzender-voorstel', { patroon: 'gmail.com', keuze: 'afwijs' }, { primair: false }).status, 409);
+  assert.equal(t.n("SELECT count(*) n FROM afzender_regel"), 2);
+  assert.equal(t.n("SELECT count(*) n FROM audit WHERE object_soort = 'afzender_regel'"), 2);
+});

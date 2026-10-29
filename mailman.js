@@ -56,6 +56,13 @@
  * bestandsnaam (14 dagen, zoals onderwerp en afzender), het factuurnummer en het bedrag (uit dezelfde tekst; de tekst zelf nooit);
  * GET /app/mailman/verkoop geeft het journaal met fase en open-teller voor de tab Verkoop (alleen lezen).
  *
+ * UIT JE VERZONDEN MAIL (wv2006, 30-10-2026; David 29-10 22:47: "jij bent bij uitstek in de positie om alvast heel veel regels te maken, op
+ * basis van wat er al is verzonden! … Ik mail álle facturen in Gmail naar het juiste inkoopadres"). De machinekamer leidde uit Davids
+ * doorsturingen naar de Exact-inkoopadressen (12 maanden) In-regels af met stroom factuur en bron 'verzonden': actief alleen bij ≥ 2
+ * doorsturingen, altijd naar een inkoopadres en ≥ 80 % van de pdf-mails van die afzender doorgestuurd (voorwaarde altijd bijlage pdf);
+ * de rest staat uit als voorstel. Gewone regels in de tabel regel; de herkomst (aantal, doel, voorbeeld-onderwerp, laatst) apart in
+ * regel_herkomst, alleen voor de App (blok "Uit je verzonden mail" in Filter In). De beslissing kijkt nooit naar de herkomst.
+ *
  * DE RONDE (n8n, O.2): POST /mailman/start → per postvak de zoekvraag (venster uit de laatste geslaagde ronde) · /mailman/nieuw (alle id's
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
  * tekens) → stap 0–3 + patiëntpoort, en de Jev-aanvragen · /mailman/stap2 (de Jev-antwoorden) → besluit · /mailman/gedaan.
@@ -75,7 +82,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-1.6';   // wv1998: tab Verkoop (naam/nummer/bedrag, GET /app/mailman/verkoop)
+const VERSIE = 'mailman-1.7';   // wv2006: In-regels uit Davids verzonden mail met herkomst (regel_herkomst)
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -553,6 +560,8 @@ CREATE TABLE IF NOT EXISTS verkoop (id INTEGER PRIMARY KEY, postvak TEXT NOT NUL
   aangeboden_tijd TEXT, verstuurd_tijd TEXT, verstuurd_id TEXT, archief_aangeboden TEXT, archief_pogingen INTEGER NOT NULL DEFAULT 0, gearchiveerd_tijd TEXT,
   fout TEXT, bijgewerkt TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS verkoop_status ON verkoop (postvak, status);
+CREATE TABLE IF NOT EXISTS regel_herkomst (regel_id INTEGER PRIMARY KEY, soort TEXT NOT NULL, aantal INTEGER, doel TEXT, voorbeeld TEXT, laatst TEXT,
+  waarom TEXT, gemeten TEXT NOT NULL);
 `;
 
 // ─────────────────────────── opslag en routes ───────────────────────────
@@ -1480,7 +1489,8 @@ function maak(o) {
           jev: p.jev, tekst: p.tekst, drempel_in: p.drempel_in, drempel_uit: p.drempel_uit, twijfel_naar: p.twijfel_naar,
           altijd: p.altijd, laatste_ronde: p.laatste_ronde, laatste_geslaagd: p.laatste_geslaagd,
           vandaag: telling(p.id, vandaag, morgen), week: telling(p.id, week, morgen),
-          regels: regels(p.id).map(function (r) { return Object.assign(r, { treffers_7d: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND regel_id = ? AND aangemaakt >= ? AND inhaal = 0').get(p.id, r.id, week).n }); }),
+          regels: regels(p.id).map(function (r) { return Object.assign(r, { treffers_7d: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND regel_id = ? AND aangemaakt >= ? AND inhaal = 0').get(p.id, r.id, week).n,
+            herkomst: herkomstVan(r.id) }); }),
           jev_vragen: vragen(p.id),
           logboek: db.prepare('SELECT * FROM besluit WHERE postvak = ? AND inhaal = 0 ORDER BY aangemaakt DESC, id DESC LIMIT 80').all(p.id).map(logRij),
           twijfel: twijfelLijst(p.id), twijfel_open: twijfelOpen(p.id), inhaal: inhaalStand(p.id, true),
@@ -1489,6 +1499,11 @@ function maak(o) {
         };
       }),
     };
+  }
+  // wv2006: waar een regel uit Davids verzonden mail vandaan komt (alleen voor de App; null bij een gewone regel)
+  function herkomstVan(id) {
+    const h = db.prepare('SELECT soort, aantal, doel, voorbeeld, laatst, waarom, gemeten FROM regel_herkomst WHERE regel_id = ?').get(id);
+    return h ? Object.assign({}, h) : null;
   }
   // Toets (O.9): wat had deze regel (of deze Jev-instelling) de afgelopen 14 dagen gedaan, op het logboek
   function toets(d) {

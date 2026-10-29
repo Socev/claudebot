@@ -1453,3 +1453,25 @@ test('wv1998 tab Verkoop: naam, nummer en bedrag in het journaal; naam na 14 dag
   mm.app('GET /app/mailman/verkoop', {}, ctxVers(false));
   assert.equal(JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all()) + JSON.stringify(mm._db.prepare('SELECT * FROM postvak').all()), voor);
 });
+
+test('wv2006: regel uit de verzonden mail — herkomst alleen in het overzicht, beslissing als een gewone In-regel, aan/uit/weg via de App', () => {
+  const { mm } = nieuweKamer();
+  const db = mm._db;
+  const id = Number(db.prepare(`INSERT INTO regel (postvak, stap, volgorde, naam, voorwaarden, stroom, actief, bron, aangemaakt, bijgewerkt, versie)
+    VALUES ('gmail:david', 'in', 50, 'Verzonden: lev.invalid', ?, 'factuur', 1, 'verzonden', '2026-10-30T00:00:00Z', '2026-10-30T00:00:00Z', 1)`)
+    .run(JSON.stringify({ van_adres: { op: 'is', w: 'nota@lev.invalid' }, bijlage: 'pdf' })).lastInsertRowid);
+  db.prepare(`INSERT INTO regel_herkomst (regel_id, soort, aantal, doel, voorbeeld, laatst, waarom, gemeten) VALUES (?, 'verzonden', 7, 'Proef BV', 'Factuur 12', '2026-10-01', '7 van 7 pdf-mails doorgestuurd', '2026-10-30')`).run(id);
+  const p = mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === 'gmail:david'; });
+  const r = p.regels.find(function (x) { return x.id === id; });
+  assert.equal(r.bron, 'verzonden');
+  assert.deepEqual(r.herkomst, { soort: 'verzonden', aantal: 7, doel: 'Proef BV', voorbeeld: 'Factuur 12', laatst: '2026-10-01', waarom: '7 van 7 pdf-mails doorgestuurd', gemeten: '2026-10-30' });
+  assert.equal(p.regels.filter(function (x) { return x.id !== id; }).every(function (x) { return x.herkomst === null; }), true);
+  const m1 = mail({ van: 'Lev <nota@lev.invalid>', bijlagen: [{ naam: 'f.pdf', mime: 'application/pdf' }] });
+  const m2 = mail({ van: 'Lev <nota@lev.invalid>' });   // zonder pdf: regel past niet
+  draai(mm, 'gmail:david', [m1, m2], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 2.5 }); } });
+  assert.equal(rij(mm, m1.id).stroom, 'factuur'); assert.equal(rij(mm, m1.id).regel_id, id);
+  assert.notEqual(rij(mm, m2.id).regel_id, id);
+  assert.equal(mm.app('POST /app/mailman/regel', { actie: 'aanuit', id, actief: false }).status, 200);
+  assert.equal(mm.app('POST /app/mailman/regel', { actie: 'weg', id }).status, 200);
+  assert.equal(mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === 'gmail:david'; }).regels.some(function (x) { return x.id === id; }), false);
+});

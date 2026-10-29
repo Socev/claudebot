@@ -40,11 +40,12 @@ const STAPPEN = { beoordelen: ['te_beoordelen'], wachtrij: ['in_wachtrij', 'word
   dubbel: ['dubbel'], mislukt: ['verzending_mislukt'], verstuurd: ['concept_klaar', 'verstuurd'] };
 // Alle routes (de toets controleert ze tegen APP_ROUTE_RE van server.js en de doorgeef-Function: [a-z0-9/-]{1,64}).
 const ROUTES = {
-  GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'kandidaten/<id>', 'betalen', 'bank', 'uploads', 'leveranciers', 'instellingen', 'validatie', 'regels'],
+  GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'kandidaten/<id>', 'betalen', 'bank', 'uploads', 'leveranciers', 'instellingen', 'validatie', 'regels',
+    'afzender-voorstellen'],
   POST: ['bevestig', 'terugdraaien', 'nagebeld', 'geen-factuur', 'toch-factuur', 'wijzig', 'ingevoerd', 'ingevoerd-ongedaan', 'opnieuw',
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
-    'betaaldatum', 'sepa-batch', 'sepa-bestand', 'regel', 'regel-weg'],
+    'betaaldatum', 'sepa-batch', 'sepa-bestand', 'regel', 'regel-weg', 'afzender-voorstel'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (nooit vanaf een vaste plek) én die hier een verse vingerafdruk vragen.
 const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus'];
@@ -733,6 +734,69 @@ function regelWeg(fdb, r, d, nu) {
     D.audit(fdb, { wie: r.wie, wat: 'regel_weg', object_soort: 'afzender_regel', object_id: String(id), entiteit: oud.entiteit,
       voor: { soort: oud.soort, patroon: oud.patroon, leverancier: oud.leverancier, entiteit: oud.entiteit, betaalwijze: oud.betaalwijze }, wanneer: nuIso(nu) });
     return { weg: id };
+  });
+}
+
+/*
+ * wv2006 (David 29-10-2026 22:47: "Ik mail álle facturen in Gmail naar het juiste inkoopadres, en mail degenen die voor betaling door moeten
+ * naar 'nogbetalen@…'"): voorstellen voor regels per afzender, afgeleid door de machinekamer uit Davids eigen doorsturingen (12 maanden).
+ * Ze staan als JSON in meta 'afzender_voorstellen' { gemeten, venster, items: [{ patroon, soort, naam, aantal, entiteit, entiteiten,
+ * nogbetalen, betaalwijze, voorbeeld, laatst, status }] } en doen NIETS met de stroom tot David er een bevestigt: pas dan wordt het een
+ * gewone afzender_regel (leverancier op naam, zoals Velden verbeteren). Afwijzen = status afgewezen, geen regel. Alleen de eigenaar.
+ */
+const VOORSTEL_SLEUTEL = 'afzender_voorstellen';
+function voorstellenLees(fdb) {
+  let v = null;
+  try { v = JSON.parse(D.metaLees(fdb, VOORSTEL_SLEUTEL) || 'null'); } catch (e) { v = null; }
+  return v && Array.isArray(v.items) ? v : { gemeten: null, venster: null, items: [] };
+}
+function afzenderVoorstellen(fdb, r) {
+  eisEigenaar(r);
+  const v = voorstellenLees(fdb);
+  const bestaand = new Map(fdb.db.prepare('SELECT a.patroon, a.entiteit, a.betaalwijze, l.naam AS leverancier_naam FROM afzender_regel a JOIN leverancier l ON l.id = a.leverancier').all()
+    .map((x) => [x.patroon, x]));
+  return { gemeten: v.gemeten || null, venster: v.venster || null,
+    voorstellen: v.items.map((x) => Object.assign({}, x, { regel: bestaand.get(x.patroon) || null })) };
+}
+function afzenderVoorstel(fdb, r, d, nu) {
+  eisEigenaar(r);
+  const patroon = String(d.patroon || '').toLowerCase();
+  if (!['bevestig', 'afwijs', 'terug'].includes(d.keuze)) weiger(400, 'kies bevestig, afwijs of terug');
+  return D.transactie(fdb, function () {
+    const v = voorstellenLees(fdb);
+    const x = v.items.find((i) => i.patroon === patroon);
+    if (!x) weiger(404, 'voorstel niet gevonden');
+    const wanneer = nuIso(nu);
+    if (d.keuze === 'terug') {
+      if (x.status !== 'afgewezen') weiger(409, 'alleen een afgewezen voorstel kan terug');
+      x.status = 'voorstel'; x.besloten_door = null; x.besloten_op = null;
+    } else if (d.keuze === 'afwijs') {
+      if (x.status !== 'voorstel') weiger(409, 'dit voorstel is al ' + x.status);
+      x.status = 'afgewezen'; x.besloten_door = r.wie; x.besloten_op = wanneer;
+    } else {
+      if (x.status !== 'voorstel') weiger(409, 'dit voorstel is al ' + x.status);
+      if (!['adres', 'domein'].includes(x.soort)) weiger(409, 'voorstel zonder soort');
+      if (x.soort === 'domein' && ALGEMEEN_DOMEIN.test(patroon)) weiger(400, patroon + ' is een algemene mailaanbieder; alleen een adres kan');
+      // David kan entiteit en betaalwijze op de kaart nog aanpassen; leeg = geen
+      const entiteit = d.entiteit !== undefined ? (d.entiteit == null || d.entiteit === '' ? null : String(d.entiteit)) : (x.entiteit || null);
+      if (entiteit) { const e = fdb.db.prepare('SELECT actief FROM entiteit WHERE sleutel = ?').get(entiteit); if (!e) weiger(400, 'onbekende entiteit'); if (e.actief !== 1) weiger(409, 'entiteit staat niet actief'); }
+      const betaalwijze = d.betaalwijze !== undefined ? (d.betaalwijze == null || d.betaalwijze === '' ? null : d.betaalwijze) : (x.betaalwijze || null);
+      if (betaalwijze !== null && !['zelf', 'incasso', 'betaald'].includes(betaalwijze)) weiger(400, 'onbekende betaalwijze');
+      const naam = kort(String(d.naam || x.naam || patroon), 200).trim();
+      const lev = leverancierOpNaam(fdb, naam, r, wanneer);
+      const oud = fdb.db.prepare('SELECT * FROM afzender_regel WHERE patroon = ?').get(patroon);
+      if (oud) fdb.db.prepare('UPDATE afzender_regel SET soort = ?, leverancier = ?, entiteit = ?, betaalwijze = ?, aangemaakt_door = ?, aangemaakt_op = ? WHERE id = ?')
+        .run(x.soort, lev.id, entiteit, betaalwijze, r.wie, wanneer, oud.id);
+      else fdb.db.prepare('INSERT INTO afzender_regel (soort, patroon, leverancier, entiteit, betaalwijze, aangemaakt_door, aangemaakt_op) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(x.soort, patroon, lev.id, entiteit, betaalwijze, r.wie, wanneer);
+      const rij = fdb.db.prepare('SELECT id FROM afzender_regel WHERE patroon = ?').get(patroon);
+      D.audit(fdb, { wie: r.wie, wat: oud ? 'regel_bijwerken' : 'regel_nieuw', object_soort: 'afzender_regel', object_id: String(rij.id), entiteit,
+        voor: oud ? { leverancier: oud.leverancier, entiteit: oud.entiteit, betaalwijze: oud.betaalwijze } : null,
+        na: { soort: x.soort, patroon, leverancier: lev.id, entiteit, betaalwijze, bron: 'voorstel uit verzonden mail' }, wanneer });
+      x.status = 'bevestigd'; x.besloten_door = r.wie; x.besloten_op = wanneer; x.regel_id = rij.id;
+    }
+    D.metaZet(fdb, VOORSTEL_SLEUTEL, JSON.stringify(v));
+    return { patroon, status: x.status, regel_id: x.regel_id || null };
   });
 }
 
@@ -2382,6 +2446,7 @@ function maak(opties) {
         if (rest === 'instellingen') return ok(instellingen(fdb, r));
         if (rest === 'validatie') return ok(validatie(fdb, r, { soort: 'overzicht' }, nu));
         if (rest === 'regels') return ok(regelsLijst(fdb, r));
+        if (rest === 'afzender-voorstellen') return ok(afzenderVoorstellen(fdb, r));
         weiger(404, 'onbekend');
       }
       if (v.methode !== 'POST') weiger(404, 'onbekend');
@@ -2411,6 +2476,7 @@ function maak(opties) {
         case 'leverancier': return ok(leverancierRoute(fdb, r, d, nu));
         case 'regel': return ok(regelRoute(fdb, r, d, nu), 'regel ' + kort(d.soort, 6));
         case 'regel-weg': return ok(regelWeg(fdb, r, d, nu), 'regel weg');
+        case 'afzender-voorstel': return ok(afzenderVoorstel(fdb, r, d, nu), 'afzender-voorstel ' + kort(d.keuze, 10));
         case 'bankluis': eisEigenaar(r); return ok(bankluisRonde(fdb, { nu, pad: v.bankluisPad }), 'bankluis');
         case 'validatie': return ok(validatie(fdb, r, d, nu), 'validatie ' + kort(d.soort, 20));
         case 'instellingen/adres': return ok(adres(fdb, r, d, nu, vo), 'adres ' + kort(d.entiteit, 20));
