@@ -84,6 +84,20 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
   const r1 = D.render('# A\n\n- een\n  vervolg\n- twee\n  - sub\n\n| a | b |\n|---|---|\n| [[x\\|y]] | z<br>q |\n\n%% open tot het eind', 'a.md');
   toets('1 lijst teruggevouwen, sublijst, tabel met \\| in wikilink en <br>, open %% weg', /<li>\s*een vervolg\s*<\/li>/.test(r1.body) && /<ul><li>\s*sub/.test(r1.body) && /<td>y<\/td><td>z<br>q<\/td>/.test(r1.body) && r1.body.indexOf('open tot') < 0, r1.body);
   toets('1 pagina: CSP-vriendelijk (geen script, geen externe bronnen), noindex, licht', !/<script|src=|@import|url\(/i.test(r1.html) && /noindex/.test(r1.html) && /color-scheme:light/.test(r1.html), r1.html.slice(0, 300));
+  // wv1889: render draait bij Delen in het serverproces; elke vreemde regel van 2 MB moet lineair blijven (was kwadratisch/kubisch)
+  const M2 = 2 * 1024 * 1024, herhaal = (p) => p.repeat(Math.ceil(M2 / p.length));
+  const traag = [];
+  for (const [naam, s] of [['[[', herhaal('[[')], ['[', herhaal('[')], ['**', herhaal('**')], ['![', herhaal('![')], ['![[', herhaal('![[')], ['[a](', herhaal('[a](')],
+    ['![a](', herhaal('![a](')], ['[a](u "', herhaal('[a](u "')], ['kop met spaties', '# a' + ' '.repeat(M2) + 'b'], ['kop met hekjes', '# a' + '#'.repeat(M2) + 'b'],
+    ['tabelscheiding', 'a|b\n|-' + ' '.repeat(M2) + 'x'], ['tabelscheiding 2', 'a|b\n-' + ' '.repeat(M2) + '|x']]) {
+    const t0 = Date.now();
+    try { D.render(s, 'x.md'); } catch (e) { traag.push(naam + ': ' + e.message); continue; }
+    if (Date.now() - t0 >= 1000) traag.push(naam + ': ' + (Date.now() - t0) + ' ms');
+  }
+  toets('1 render lineair: 2 MB "[[", "[", "**", beeld, embed, link, kop, tabelscheiding elk < 1 s (wv1889)', traag.length === 0, traag);
+  const r2 = D.render('## Kop ## \n\n- [a](https://example.org/a "t") ![b](x.png) ![[e]] [c]() [d](javascript:x)\n\nx|y\n|:-:| - |\n1|2\n\n * * *\n', 'b.md');
+  toets('1 render na wv1889: kop zonder slothekjes, link met titel, beeld = alt, embed weg, tabel, lijn', /<h2>Kop<\/h2>/.test(r2.body) &&
+    r2.body.indexOf('<a href="https://example.org/a" rel="noopener noreferrer nofollow">a</a> b  [c]() d') > 0 && /<table>/.test(r2.body) && /<hr>/.test(r2.body), r2.body);
   toets('1 pagina: OVIS-favicon als data:-URI (DS10, wv1783), gelijk aan huisstijl-pod', (r1.html.match(/<link rel="icon"/g) || []).length === 1 && r1.html.indexOf('href="' + require('./huisstijl-pod.js').POD_FAVICON + '"') > 0 && /^data:image\/png;base64,/.test(require('./huisstijl-pod.js').POD_FAVICON), r1.html.slice(0, 400));
 
   // ── 2. poort ──

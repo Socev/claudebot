@@ -91,6 +91,36 @@ function vouwLijstitemsTerug(src) {
   return uit.join('\n');
 }
 
+// [label](url "titel"): dezelfde treffers als t.replace(/\[([^\]\n]+)\]\(([^)\s]+)(?:\s+&quot;[^\n]*?&quot;)?\)/g, (m, l, u) => f(l, u)),
+// maar lineair (wv1889; die regex is kwadratisch bij "[[[[…" of "[a](x[a](x…", review wv1854: 128 kB ± 6 s in het serverproces). Een
+// mislukte poging slaat elke [ tot de eerstvolgende ] over (die mislukken net zo) en alle zoekacties lopen alleen vooruit.
+function vervangLinks(t, f) {
+  const vooruit = (re) => {   // eerste treffer vanaf `van` (t.length = geen); hergebruikt zolang die nog voor ons ligt
+    let van0 = -1, hier = -1;
+    return (van) => { if (hier < van || van < van0) { re.lastIndex = van0 = van; const m = re.exec(t); hier = m ? m.index : t.length; } return hier; };
+  };
+  const sluit = vooruit(/[\]\n]/g), urlEind = vooruit(/[)\s]/g), nietWit = vooruit(/\S/g), titelEind = vooruit(/&quot;\)/g), regelEind = vooruit(/\n/g);
+  let uit = '', vanaf = 0, p = t.indexOf('[');
+  while (p >= 0) {
+    const q = sluit(p + 1);
+    if (q >= t.length) break;
+    let s = -1, eind = -1;
+    if (t[q] === ']' && q > p + 1 && t[q + 1] === '(') {
+      s = urlEind(q + 2);
+      if (s > q + 2 && t[s] === ')') eind = s + 1;
+      else if (s > q + 2 && s < t.length) {   // witruimte na het adres: alleen nog goed met een titel &quot;…&quot;)
+        const w = nietWit(s);
+        if (t.startsWith('&quot;', w)) { const k = titelEind(w + 6); if (k < t.length && regelEind(w + 6) >= k) eind = k + 7; }
+      }
+    }
+    if (eind < 0) { p = t.indexOf('[', q + 1); continue; }
+    uit += t.slice(vanaf, p) + f(t.slice(p + 1, q), t.slice(q + 2, s));
+    vanaf = eind;
+    p = t.indexOf('[', eind);
+  }
+  return uit + t.slice(vanaf);
+}
+
 const wikiLabel = (binnen) => {
   const delen = binnen.split(/\\?\|/);
   if (delen.length > 1 && delen.slice(1).join('|').trim()) return delen.slice(1).join('|').trim();
@@ -104,10 +134,12 @@ function maakInline(hrefs) {
     const stuk = [];
     const zet = (html) => { stuk.push(html); return '\u0001' + (stuk.length - 1) + '\u0001'; };
     t = t.replace(/`([^`\n]+)`/g, (m, c) => zet('<code>' + c + '</code>'));
-    t = t.replace(/!\[\[[^\]\n]*\]\]/g, '');                                       // embed: inhoud staat niet online
+    // wv1889: embed en beeld nemen bij een mislukte poging alles tot de eerste ] (en de eerste )) in één slag mee; latere ![ daarbinnen
+    // mislukken net zo. Zo blijft de uitkomst gelijk aan /!\[\[[^\]\n]*\]\]/ en /!\[([^\]\n]*)\]\([^)\n]*\)/, maar lineair.
+    t = t.replace(/!\[\[[^\]\n]*(\]\])?/g, (m, dicht) => dicht ? '' : m);                 // embed: inhoud staat niet online
     t = t.replace(/\[\[([^\[\]\n]+?)\]\]/g, (m, b) => wikiLabel(ontEsc(b)) ? esc(wikiLabel(ontEsc(b))) : '');
-    t = t.replace(/!\[([^\]\n]*)\]\([^)\n]*\)/g, (m, alt) => alt);                 // beeld → alt-tekst
-    t = t.replace(/\[([^\]\n]+)\]\(([^)\s]+)(?:\s+&quot;[^\n]*?&quot;)?\)/g, (m, l, u) => {
+    t = t.replace(/!\[([^\]\n]*)(?:\]\([^)\n]*(\))?)?/g, (m, alt, dicht) => dicht ? alt : m);   // beeld → alt-tekst
+    t = vervangLinks(t, (l, u) => {
       const echt = ontEsc(u).replace(/^<|>$/g, '');
       if (!/^https?:\/\/[^\s]+$/i.test(echt)) return l;
       hrefs.push(echt);
@@ -127,13 +159,38 @@ function maakInline(hrefs) {
   };
 }
 
+// Kop: zelfde uitkomst als /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(r), maar lineair (wv1889; die regex is kubisch bij een lange reeks spaties
+// in de kop: 4 kB ± 4 s). De inhoud is alles na de hekjes en witruimte, min de langste staart van witruimte, hekjes, witruimte; de punt
+// van .*? gaat niet over een regeleinde, dus staat er daarvoor nog een, dan is het geen kop.
+function kopUit(r) {
+  const m = /^(#{1,6})\s+/.exec(r);
+  if (!m) return null;
+  const wit = (c) => /\s/.test(c);
+  let eind = r.length;
+  while (eind > m[0].length && wit(r[eind - 1])) eind--;
+  while (eind > m[0].length && r[eind - 1] === '#') eind--;
+  while (eind > m[0].length && wit(r[eind - 1])) eind--;
+  const inhoud = r.slice(m[0].length, eind);
+  return /[\n\r\u2028\u2029]/.test(inhoud) ? null : [r, m[1], inhoud];
+}
+
+// Scheidingslijn: zelfde als /^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(r), zonder terugloop (wv1889: een regel van 2 MB '*' gaf daar een
+// RangeError). Na hooguit drie tekens witruimte alleen nog dat ene teken en witruimte, en het teken minstens drie keer.
+function isLijn(r) {
+  const m = /^\s{0,3}([-*_])/.exec(r);
+  if (!m) return false;
+  let n = 0;
+  for (let i = m[0].length - 1; i < r.length; i++) { if (r[i] === m[1]) n++; else if (!/\s/.test(r[i])) return false; }
+  return n >= 3;
+}
+
 function markdownNaarHtml(src, inline) {
   const regels = src.split('\n');
   const uit = [];
   let i = 0;
   const lijst = [];   // [{tag, ind}]
   const sluitLijst = (tot) => { while (lijst.length > (tot || 0)) uit.push('</li></' + lijst.pop().tag + '>'); };
-  const isTabelScheiding = (r) => /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/.test(r) && /-/.test(r) && /\|/.test(r);
+  const isTabelScheiding = (r) => /^\s*(?:\|\s*)?:?-+:?\s*(?:\|\s*:?-+:?\s*)*(?:\|\s*)?$/.test(r) && /-/.test(r) && /\|/.test(r);   // wv1889: geen \s*\|?\s* meer (kwadratisch)
   const cellen = (rij) => rij.replace(/\\\|/g, '\u0002').replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.replace(/\u0002/g, '\\|').trim());
   const blokStart = /^(#{1,6}\s|>|```|~~~|\s*([-*+]|\d+[.)])\s)/;
   while (i < regels.length) {
@@ -177,9 +234,9 @@ function markdownNaarHtml(src, inline) {
         body.map((rij) => '<tr>' + rij.map((c) => '<td>' + inline(c) + '</td>').join('') + '</tr>').join('') + '</tbody></table></div>');
       continue;
     }
-    const h = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(r);
+    const h = kopUit(r);
     if (h) { sluitLijst(); uit.push('<h' + h[1].length + '>' + inline(h[2]) + '</h' + h[1].length + '>'); i++; continue; }
-    if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(r)) { sluitLijst(); uit.push('<hr>'); i++; continue; }
+    if (isLijn(r)) { sluitLijst(); uit.push('<hr>'); i++; continue; }
     const li = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(r);
     if (li) {
       const ind = li[1].replace(/\t/g, '    ').length;
