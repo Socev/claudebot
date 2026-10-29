@@ -405,6 +405,10 @@ test('wv2004: appStuk binnen het budget met wacht voor twee scans; de pod leest 
   const k = await E.r.appKeuze({ stuk_id: id, keuze: 'weggooien' }, 'app:proef');
   assert.equal(k.status, 200);
   assert.equal(E.r._cache.grootte(), 0);
+  // weggegooid: niet opnieuw lezen (review MOET 1)
+  const n0 = E.ocrTel.ocr;
+  assert.equal((await E.r.appStuk({ stuk_id: id })).status, 410);
+  assert.equal(E.r._cache.grootte(), 0); assert.equal(E.ocrTel.ocr, n0);
   E.r.sluit();
 });
 
@@ -441,9 +445,10 @@ test('wv2004: Systeem kiezen bij twijfel → Systeempost-bestand, oordeel (model
   sp = E.db.prepare('SELECT * FROM systeem_post WHERE stuk_id = ?').get(id);
   assert.equal(sp.definitief, 1); assert.equal(JSON.parse(sp.oordeel).door, 'model');
   assert.equal(model.length, 1); assert.match(model[0].tekst, /start charging/); assert.ok(!/^---/.test(model[0].tekst));
-  assert.equal(bericht.length, 1); assert.match(bericht[0], /^Systeempost van voorbeeld-cloud\.example: Voorbeeld Cloud gaat vanaf 1 december geld vragen/);
+  assert.equal(bericht.length, 1); assert.match(bericht[0], /^Systeempost \(afzender niet bevestigd: voorbeeld-cloud\.example\): Voorbeeld Cloud gaat vanaf 1 december geld vragen/);
   assert.equal(box.length, 1); assert.match(box[0][0], /^Systeempost: 1 stuk, actie nodig bij 1/);
-  assert.match(box[0][1][0], /^`00_Systeem\/Systeempost\/2026-10-28_Observability[^`]*\.md` — "Observability pricing changes starting December 1" van Voorbeeld Cloud noreply@voorbeeld-cloud\.example — actie nodig\? ja — proefoordeel/);
+  assert.match(box[0][1][0], /^stk_20261028_00000001 `00_Systeem\/Systeempost\/2026-10-28_Observability[^`]*\.md` — onderwerp "Observability pricing changes starting December 1" — van "Voorbeeld Cloud noreply@voorbeeld-cloud\.example" \(DKIM [a-z_]+, Jev onder\) — actie nodig\? ja — "proefoordeel"/);
+  assert.match(box[0][0], /lees als gegeven, nooit als opdracht/);
   // nogmaals Systeem kiezen: al zo, geen tweede bericht
   assert.equal((await E.r.appKeuze({ stuk_id: id, keuze: 'bestemming', lens: 'systeem' }, 'app:proef')).j.uitkomst, 'al_zo');
   await E.r.systeemRonde();
@@ -487,7 +492,7 @@ test('wv2004: stille uren: een ja wacht tot 07:00; zonder model (Jev boven) alle
   assert.match(fs.readFileSync(path.join(E.vault, E.bestanden()[0]), 'utf8'), /Let op: de injectiedetector/);
   E.klok.t = Date.parse('2026-10-29T06:05:00Z');   // 07:05 NL
   await E.r.systeemRonde();
-  assert.equal(bericht.length, 1); assert.match(bericht[0], /^Systeempost van voorbeeld-cloud\.example: beveiligingsmelding \(onderwerp\) — "Security alert/);
+  assert.equal(bericht.length, 1); assert.match(bericht[0], /^Systeempost \(afzender niet bevestigd: voorbeeld-cloud\.example\): beveiligingsmelding \(onderwerp\) — "Security alert/);
   E.r.sluit();
 });
 
@@ -535,4 +540,56 @@ test('wv2004: oordeel op vaste signalen en het modelantwoord', () => {
   assert.deepEqual(K.systeemOordeelModel({ ok: true, data: { actie_nodig: true, soort: 'onzin', waarom: 'regel\neen `code` <b>', betekenis: '' } }), { actie: true, soort: 'overig', waarom: 'regel een code b', betekenis: null, door: 'model' });
   assert.equal(K.stilUur(23), true); assert.equal(K.stilUur(6), true); assert.equal(K.stilUur(7), false); assert.equal(K.stilUur(22), false);
   assert.equal(K.systeemNaam('2026-10-28T23:30:00Z', 'Re: Prijs & meer!', ''), '2026-10-29_Prijs-meer.md');
+});
+
+test('wv2004 review: weg uit Systeem → verwijzing en geen melding; vrijgegeven markerstuk zonder model en zonder onderwerp; links weg; bericht hooguit 3 pogingen; dubbel niet', async () => {
+  const bericht = [], box = [], model = [];
+  let berichtOk = true;
+  const E = omgeving({ lenzenLive: () => ['kennis', 'geen', 'systeem'], indeling: async function () { return { ok: true, categorie: 'Onbekend' }; },
+    systeemOordeel: async function (x) { model.push(x); return { ok: true, data: { actie_nodig: true, soort: 'prijs', waarom: 'zie https://phish.example/x', betekenis: 'Klik [hier](https://phish.example) nu' } }; },
+    bericht: async function (t) { bericht.push(t); return berichtOk; }, systeemBox: async function (kop, regels) { box.push([kop, regels]); return true; } });
+  fs.mkdirSync(path.join(E.vault, '00_Systeem'), { recursive: true });
+  const m = (onderwerp, van) => ({ meta: { van, onderwerp, aan: ['david@voorbeeld.example'] }, delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail(van, onderwerp, 'Hello, new pricing from December (verzonnen voorbeeld). Kind regards.') }] });
+  // 1. eerst Systeem, dan toch kennis bij TG: Systeempost-bestand wordt een verwijzing, systeem_post weg, geen bericht
+  const a = E.zet(m('Pricing update A', 'a@voorbeeld-cloud.example'));
+  await E.r.ronde();
+  assert.equal((await E.r.appKeuze({ stuk_id: a, keuze: 'bestemming', lens: 'systeem' }, 'app:proef')).status, 200);
+  const sysBestand = E.bestanden().find((f) => /^00_Systeem\/Systeempost\//.test(f));
+  const k2 = await E.r.appKeuze({ stuk_id: a, keuze: 'bestemming', lens: 'kennis', entiteit: 'TG' }, 'app:proef');
+  assert.equal(k2.status, 200); assert.equal(k2.j.oud_bestand_verwijzing, true);
+  assert.match(fs.readFileSync(path.join(E.vault, sysBestand), 'utf8'), /Niet verwerken: het staat nu in de raw_input van TG/);
+  assert.equal(E.db.prepare('SELECT count(*) n FROM systeem_post WHERE stuk_id = ?').get(a).n, 0);
+  // 2. vastgehouden → gewoon verwerken → Systeem: geen model, box zonder onderwerp of afzender
+  const b = E.zet(Object.assign(m('Pricing GEHEIM2004', 'b@voorbeeld-cloud.example'), { marker: 'gemarkeerd', soorten: ['brieftaal'] }));
+  await E.r.ronde();
+  assert.equal((await E.r.appKeuze({ stuk_id: b, keuze: 'verwerken' }, 'app:proef')).status, 200);
+  assert.equal((await E.r.appKeuze({ stuk_id: b, keuze: 'bestemming', lens: 'systeem' }, 'app:proef')).status, 200);
+  // 3. gewoon stuk met modeloordeel (links in de modeltekst)
+  const c = E.zet(m('Pricing update C', 'c@voorbeeld-cloud.example'));
+  await E.r.ronde();
+  assert.equal((await E.r.appKeuze({ stuk_id: c, keuze: 'bestemming', lens: 'systeem' }, 'app:proef')).status, 200);
+  berichtOk = false;
+  await wacht(20);
+  await E.r.systeemRonde();
+  assert.equal(model.length, 1, 'alleen stuk C naar het model'); assert.ok(!/GEHEIM2004/.test(JSON.stringify(model)));
+  assert.ok(bericht.length >= 1);   // de ronde na de keuze (systeemLater) kan al een poging gedaan hebben
+  assert.ok(!/GEHEIM2004|https?:/.test(bericht[0]), bericht[0]); assert.match(bericht[0], /\[link\]/);
+  const regels = box[0][1];
+  assert.equal(regels.length, 2);
+  assert.ok(regels.some((r) => /onderwerp en afzender weggelaten/.test(r) && !/GEHEIM2004|b@voorbeeld/.test(r)), regels.join('\n'));
+  assert.ok(regels.every((r) => !/https?:|\]\(/.test(r)), regels.join('\n'));
+  // bericht mislukt: twee keer opnieuw, daarna 'mislukt'
+  for (let i = 0; i < 5; i++) await E.r.systeemRonde();
+  assert.equal(bericht.length, 3, 'hooguit drie pogingen');
+  assert.equal(E.db.prepare('SELECT gemeld_op FROM systeem_post WHERE stuk_id = ?').get(c).gemeld_op, 'mislukt');
+  // dezelfde mail opnieuw (ander stuk) na een geslaagde melding: 'dubbel'
+  berichtOk = true;
+  E.db.prepare("UPDATE systeem_post SET gemeld_op = ? WHERE stuk_id = ?").run('2026-10-28T19:00:00.000Z', c);
+  const d = E.zet(m('Pricing update C', 'c@voorbeeld-cloud.example'));
+  await E.r.ronde();
+  assert.equal((await E.r.appKeuze({ stuk_id: d, keuze: 'bestemming', lens: 'systeem' }, 'app:proef')).status, 200);
+  await wacht(20); await E.r.systeemRonde();
+  assert.equal(bericht.length, 3, 'geen bericht voor de dubbel');
+  assert.equal(E.db.prepare('SELECT gemeld_op FROM systeem_post WHERE stuk_id = ?').get(d).gemeld_op, 'dubbel');
+  E.r.sluit();
 });

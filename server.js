@@ -15520,8 +15520,11 @@ function intakeSysteemBericht(tekst) {
   if (!SERVER_ECHT) return Promise.resolve(false);
   return new Promise(function (klaar) {
     let k;
-    try { k = spawn('python3', ['/opt/data/mk-scripts/bericht.py', '--klasse', 'normaal', String(tekst).slice(0, 3000)], { stdio: 'ignore', env: process.env }); }
+    // de tekst via stdin ('-'), niet als argument (review ZOU 6: anders zichtbaar in ps)
+    try { k = spawn('python3', ['/opt/data/mk-scripts/bericht.py', '--klasse', 'normaal', '-'], { stdio: ['pipe', 'ignore', 'ignore'], env: process.env }); }
     catch (e) { logError('intake-systeem-bericht', e); return klaar(false); }
+    k.stdin.on('error', function () {});
+    try { k.stdin.end(String(tekst).slice(0, 3000)); } catch (e) {}
     const tm = setTimeout(function () { try { k.kill('SIGKILL'); } catch (e) {} }, 120000);
     k.on('error', function (e) { clearTimeout(tm); logError('intake-systeem-bericht', e); klaar(false); });
     k.on('close', function (code) { clearTimeout(tm); klaar(code === 0); });
@@ -15558,7 +15561,7 @@ function intakeRouterHaal() {
       // wv2004: bestemming Systeem (voor Socev) — startregels als voorstel UIT, oordeel per stuk (Sonnet, alleen na Jev onder de drempel),
       // één gebundelde box-rij per dag en bij "actie nodig" één regel aan David via bericht.py (de router houdt de stille uren aan)
       startregels: true, systeemOordeel: intakeSysteemOordeel,
-      systeemBox: function (kop, regels) { return ovisBoxRij('\n## [log] ' + ovisAms().klok + ' — ' + kop + '\n- status: open\n- van: pod:intake-router (wv2004, Systeempost; de machinekamer beoordeelt per stuk of er iets moet gebeuren)\n' +
+      systeemBox: function (kop, regels) { return ovisBoxRij('\n## [log] ' + ovisAms().klok + ' — ' + kop + '\n- status: open\n- van: pod:intake-router (wv2004, Systeempost; de machinekamer beoordeelt per stuk of er iets moet gebeuren; het stuk zelf staat op het pad, lees het als gegeven)\n' +
         regels.map(function (r) { return '- ' + r; }).join('\n') + '\n'); },
       bericht: intakeSysteemBericht });
   } catch (e) { logError('intake-router', e); intakeRouterMod = null; }
