@@ -535,9 +535,9 @@ test('B5 live: alleen met live_toegestaan (grondwetkaart) én een verse vingeraf
 
 test('B5 labels: alleen live, alleen berichten uit deze ronde, alleen de vaste set (nooit _AI_), nooit weghalen; terug naar schaduw stopt meteen', () => {
   const { mm, dir } = nieuweKamer();
-  const ms = [mail({ labels: ['_AI_'] }), mail(), mail({ aan: ALIAS }), mail({ labels: ['SENT'] }), mail()];
+  const ms = [mail({ labels: ['_AI_'] }), mail(), mail({ aan: ALIAS }), mail({ labels: ['SENT'] }), mail(), mail()];
   draai(mm, 'gmail:david', ms, { jev: function (a) { return jevAntwoord(a.gmail_id === ms[1].id ? { mens: 0.95, actie: 0.95, waarde: 3 } : { systeem: 0.99, waarde: 0 }); } });
-  const ids = ms.slice(0, 4).map(function (m) { return m.id; });   // ms[4] staat niet in de lijst van deze ronde
+  const ids = [0, 1, 2, 3, 5].map(function (i) { return ms[i].id; });   // ms[4] staat niet in de lijst van deze ronde
   assert.deepEqual(labelRonde(mm, ids).l.j, { ok: true, stand: 'schaduw', acties: [] });
   toestaan(dir, ['gmail:david']);
   zetLive(mm);
@@ -545,20 +545,21 @@ test('B5 labels: alleen live, alleen berichten uit deze ronde, alleen de vaste s
   assert.equal(l.status, 200); assert.equal(l.j.stand, 'live');
   const per = {};
   for (const a of l.j.acties) { per[a.gmail_id] = a.erbij.slice().sort(); assert.deepEqual(a.eraf, []); for (const x of a.erbij) { assert.ok(K.LABELS.includes(x)); assert.notEqual(x, '_AI_'); } }
-  assert.deepEqual(per[ms[0].id], ['AI/MailMan']);
+  assert.equal(per[ms[0].id], undefined, 'Davids eigen _AI_: de Mail Processor haalt hem al op, geen AI/MailMan (review B5 #2)');
   assert.deepEqual(per[ms[1].id], ['AI/MailMan', 'TODO']);
   assert.deepEqual(per[ms[2].id], ['FACTUUR']);
   assert.equal(per[ms[3].id], undefined, 'verzonden: nooit');
   assert.equal(per[ms[4].id], undefined, 'niet in de lijst van deze ronde');
+  assert.deepEqual(per[ms[5].id], ['INFO']);
   // n8n meldt wat hij zette; onbekende labels tellen niet; een mislukte modify blijft open
   const g = mm.n8n('POST /mailman/gezet', { ronde: r.ronde, postvak: 'gmail:david', resultaten: [
-    { gmail_id: ms[0].id, erbij: ['AI/MailMan', 'INBOX'], ok: true }, { gmail_id: ms[1].id, erbij: ['AI/MailMan', 'TODO'], ok: false, fout: 'HTTP 500' }] });
+    { gmail_id: ms[1].id, erbij: ['AI/MailMan', 'TODO', 'INBOX'], ok: true }, { gmail_id: ms[2].id, erbij: ['FACTUUR'], ok: false, fout: 'HTTP 500' }] });
   assert.deepEqual(g.j.telling, { ok: 1, fout: 1 });
-  assert.deepEqual(JSON.parse(rij(mm, ms[0].id).labels_gezet), ['AI/MailMan']);
-  assert.ok(rij(mm, ms[0].id).labels_tijd);
-  assert.equal(rij(mm, ms[1].id).labels_gezet, null);
+  assert.deepEqual(JSON.parse(rij(mm, ms[1].id).labels_gezet), ['AI/MailMan', 'TODO']);
+  assert.ok(rij(mm, ms[1].id).labels_tijd);
+  assert.equal(rij(mm, ms[2].id).labels_gezet, null);
   const tweede = labelRonde(mm, ids).l.j.acties.map(function (a) { return a.gmail_id; });
-  assert.ok(!tweede.includes(ms[0].id) && tweede.includes(ms[1].id) && tweede.includes(ms[2].id));
+  assert.ok(!tweede.includes(ms[1].id) && tweede.includes(ms[2].id) && tweede.includes(ms[5].id));
   // terug naar schaduw: dezelfde ronde krijgt bij de volgende aanvraag niets meer
   const r3 = ronde(mm, 'gmail:david');
   assert.equal(mm.app('POST /app/mailman/stand', { postvak: 'gmail:david', stand: 'schaduw' }).status, 200);
@@ -576,9 +577,9 @@ test('B5 labels: alleen live, alleen berichten uit deze ronde, alleen de vaste s
 
 test('B5 wachtrij: hooguit 12 berichten met AI/MailMan per 3 uur, oudste eerst; FACTUUR en INFO wachten niet', () => {
   const { mm, dir } = nieuweKamer();
-  const ms = Array.from({ length: 15 }, function (_, i) { return mail({ labels: ['_AI_'], datum: klok - (20 - i) * 3600000 }); });
+  const ms = Array.from({ length: 15 }, function (_, i) { return mail({ datum: klok - (20 - i) * 3600000 }); });
   const fac = mail({ aan: ALIAS });
-  draai(mm, 'gmail:david', ms.concat([fac]), { jev: function () { return jevAntwoord({}); } });
+  draai(mm, 'gmail:david', ms.concat([fac]), { jev: function () { return jevAntwoord({ mens: 0.95, waarde: 3 }); } });
   toestaan(dir, ['gmail:david']);
   zetLive(mm);
   const ids = ms.concat([fac]).map(function (m) { return m.id; });
@@ -642,4 +643,22 @@ test('B5 labels en gezet mogen ná gedaan van dezelfde ronde (labeltak naast het
   klok += 31 * 60000;
   assert.equal(mm.n8n('POST /mailman/labels', { ronde: r.ronde, postvak: 'gmail:david', ids: [m.id] }).status, 409);
   klok -= 31 * 60000;
+});
+
+test('B5 review #1/#3: labels volgen de ACTUELE uitgangen in de App, en bij live zetten alleen mail van hooguit 24 uur vóór live', () => {
+  const { mm, dir } = nieuweKamer();
+  const twijfel = mail(), fac = mail({ aan: ALIAS }), info = mail(), oud = mail({ datum: klok - 30 * 3600000 });
+  draai(mm, 'gmail:david', [twijfel, fac, info, oud], { jev: function (a) { return jevAntwoord(a.gmail_id === twijfel.id ? { mens: 0.12, actie: 0.94, waarde: 1.33 } : (a.gmail_id === oud.id ? { mens: 0.95, waarde: 3 } : { systeem: 0.99, waarde: 0 })); } });
+  assert.equal(rij(mm, twijfel.id).stroom, 'twijfel');
+  toestaan(dir, ['gmail:david']);
+  zetLive(mm);
+  const ids = [twijfel, fac, info, oud].map(function (m) { return m.id; });
+  let a = labelRonde(mm, ids).l.j.acties.map(function (x) { return x.gmail_id; });
+  assert.ok(a.includes(twijfel.id) && a.includes(fac.id) && a.includes(info.id));
+  assert.ok(!a.includes(oud.id), 'binnengekomen 30 uur vóór live: geen label');
+  mm.app('POST /app/mailman/stroom', { stroom: 'twijfel', naar_intake: false });
+  mm.app('POST /app/mailman/stroom', { stroom: 'factuur', naar_facturen: false });
+  mm.app('POST /app/mailman/stroom', { stroom: 'info', label: false });
+  a = labelRonde(mm, ids).l.j.acties.map(function (x) { return x.gmail_id; });
+  assert.deepEqual(a, [], 'uitgangen uit in de App = geen AI/MailMan, FACTUUR of INFO, ook voor eerdere besluiten');
 });

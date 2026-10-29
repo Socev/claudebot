@@ -62,6 +62,7 @@ const VENSTER_MIN = 2, VENSTER_MAX = 14;
 const RONDE_MS = 30 * 60 * 1000;
 const WACHTRIJ_MAX = 12, WACHTRIJ_MS = 3 * 3600 * 1000;   // AI/MailMan: hooguit 12 berichten per 3 uur (Mail Processor: elke 3 uur één run)
 const LABEL_ACTIES_MAX = 40;                               // berichten met labels per ronde; de rest de volgende ronde
+const LIVE_INHAAL_MS = 24 * 3600 * 1000;                   // bij live zetten: alleen mail die hooguit 24 uur vóór live_sinds binnenkwam (review B5 #3)
 const ID_RE = /^[0-9a-f]{12,24}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const SLEUTEL_KOP_RE = /^Bearer ([0-9a-f]{64})$/;
@@ -679,6 +680,10 @@ function maak(o) {
    * meteen), alleen besluiten van berichten die in de lijst van deze ronde staan (d.ids), alleen labels uit LABELS en nooit _AI_, nooit
    * weghalen. Het wachtrijlabel AI/MailMan hooguit WACHTRIJ_MAX berichten per WACHTRIJ_MS (gezet, geteld uit labels_tijd); een bericht dat
    * daarop wacht krijgt deze ronde helemaal niets (ook niet TODO) en komt de volgende ronde terug. Oudste bericht eerst.
+   * Review B5: (#1) het opgeslagen plan wordt hier opnieuw gefilterd op de ACTUELE uitgangen in de App (stroom: naar Intake / naar
+   * Facturen-app / labels), want een wijziging daar moet ook gelden voor besluiten die al genomen zijn; (#2) mail met Davids eigen
+   * markering (_AI_, Unprocessed) krijgt geen AI/MailMan: die haalt de Mail Processor al op; (#3/#11) alleen besluiten van mail die hooguit
+   * LIVE_INHAAL_MS vóór live_sinds binnenkwam (geen labelregen op oude, al gearchiveerde mail bij het live zetten).
    */
   function labels(d) {
     const r = rondeVan(d, true);
@@ -690,11 +695,23 @@ function maak(o) {
     let ruimte = WACHTRIJ_MAX - db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND labels_tijd >= ? AND instr(labels_gezet, ?) > 0").get(p.id, sinds, '"AI/MailMan"').n;
     const acties = [];
     let wacht = 0;
-    for (const b of db.prepare("SELECT gmail_id, labels_plan FROM besluit WHERE postvak = ? AND status = 'klaar' AND labels_gezet IS NULL AND labels_plan IS NOT NULL AND stap != 'buiten' ORDER BY COALESCE(ontvangen, aangemaakt), id").all(p.id)) {
+    const st = stromen();
+    const vanaf = new Date((p.live_sinds ? Date.parse(p.live_sinds) : nu()) - LIVE_INHAAL_MS).toISOString();
+    for (const b of db.prepare("SELECT gmail_id, labels_plan, stroom, reden, labels FROM besluit WHERE postvak = ? AND status = 'klaar' AND labels_gezet IS NULL AND labels_plan IS NOT NULL AND stap != 'buiten' AND COALESCE(ontvangen, aangemaakt) >= ? ORDER BY COALESCE(ontvangen, aangemaakt), id").all(p.id, vanaf)) {
       if (!ids.has(b.gmail_id)) continue;
-      let plan = [];
+      let plan = [], lab = [];
       try { plan = JSON.parse(b.labels_plan); } catch (e) { plan = []; }
-      plan = Array.from(new Set((Array.isArray(plan) ? plan : []).map(String).filter(function (l) { return LABELS.includes(l); })));
+      try { lab = JSON.parse(b.labels || '[]'); } catch (e) { lab = []; }
+      const naar = b.stroom === 'twijfel' ? (p.twijfel_naar === 'info' ? 'info' : 'intake') : b.stroom;
+      const sa = st[b.stroom] || { naar_intake: false, naar_facturen: false, label: false };
+      const gemarkeerd = b.reden === 'markering' || (Array.isArray(lab) && lab.some(function (l) { return MARKERINGS_LABELS.includes(l); }));
+      plan = Array.from(new Set((Array.isArray(plan) ? plan : []).map(String).filter(function (l) {
+        if (!LABELS.includes(l)) return false;
+        if (l === 'AI/MailMan') return naar === 'intake' && sa.naar_intake && sa.label && !gemarkeerd;
+        if (l === 'FACTUUR') return naar === 'factuur' && sa.naar_facturen && sa.label;
+        if (l === 'INFO') return naar === 'info' && sa.label;
+        return sa.label;   // TODO (V en CONCEPT plant MailMan in B5 niet)
+      })));
       if (!plan.length) continue;
       if (plan.includes('AI/MailMan')) { if (ruimte <= 0) { wacht++; continue; } ruimte--; }
       acties.push({ gmail_id: b.gmail_id, erbij: plan, eraf: [] });
