@@ -190,6 +190,9 @@ const app = P.maak(io);
   toets('met 0,2 s per rondgang: overzicht ≤ 1,5 s (' + ms + ' ms)', traag.status === 200 && ms <= 1500);
   vertraging = 0;
   toets('de databank is door pot-app niet gewijzigd', db.prepare('select total_changes() as n').get().n === tellingNa0 && tellingNa0 === tellingVoor + 1);
+  // wv1939: zonder plek in de uitrollijst kwam pot-app.js niet in de release (/health.pot_app.aan=false, 404 op /app/pot)
+  toets('uitrol.sh: pot-app.js optioneel in de release', /^RELEASE_OPTIONEEL="[^"]*\bpot-app\.js\b/m.test(fs.readFileSync('uitrol.sh', 'utf8')));
+  toets('Dockerfile: pot-app.js in release-bootstrap', /^COPY pot-app\.js \/app\/release-bootstrap\/pot-app\.js$/m.test(fs.readFileSync('Dockerfile', 'utf8')));
 
   console.log(`\npot-app: ${goed} groen, ${fouten} rood`);
   process.exit(fouten ? 1 : 0);
