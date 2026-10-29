@@ -169,6 +169,7 @@ function leesCatalogus(md) {
         k.uitwerking = delen.join('\n').normalize('NFKC').replace(/\n{3,}/g, '\n\n').trim();
         continue;
       }
+      if (k.vorm === 'kaart' && /^>/.test(r)) k.losCitaat = true;   // review: een echt lege regel brak de uitwerking af; de rest niet stil laten vallen
       const m = /^- ([a-zé ]+?):\s?(.*)$/.exec(r);
       const veld = m ? m[1].trim().replace(/ /g, '_') : null;
       if (veld && ALLE_VELDEN.indexOf(veld) >= 0 && !Object.hasOwn(k, veld)) k[veld] = m[2].trim();   // Fable wv861 #7: "- id:" overschrijft niets; eerste regel wint
@@ -185,6 +186,7 @@ function leesCatalogus(md) {
       k.uitwerking = k.uitwerking || '';
       if ([...k.uitwerking].length > UITWERKING.max) f.push('uitwerking te lang (' + [...k.uitwerking].length + '/' + UITWERKING.max + ')');
       if (!LATIJN.test(k.uitwerking)) f.push('uitwerking: alleen Latijns schrift');
+      if (k.losCitaat) f.push('uitwerking: losse citaatregel (lege regel in de uitwerking zonder ">")');
       k.plaatjes = k.plaatje ? k.plaatje.split(/\s*,\s*/).filter(Boolean) : [];
       if (k.plaatjes.length > 3) f.push('hooguit 3 plaatjes');
       if (k.plaatjes.some(function (x) { return !PLAATJE.test(x); })) f.push('plaatje: alleen een bestandsnaam uit de proefschermen (png, jpg, webp)');

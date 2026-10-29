@@ -55,7 +55,8 @@ const W = fs.mkdtempSync(path.join(os.tmpdir(), 'aix-toets-'));
   toets('2 bewerkKaart: PATCH /api/kaart/7 met de tekstvelden en uitwerking, zonder link of bron', bw.ok && bw.id === 7 && net[net.length - 1].m === 'PATCH' && /\/api\/kaart\/7$/.test(net[net.length - 1].u) &&
     Object.keys(bwBody).sort().join() === 'categorie,hoe,oplevert,status,titel,uitwerking,wat,zin' && bwBody.uitwerking === '## Kop\n\n- punt', { bw, bwBody });
   bw = await A.bewerkKaart(7, { titel: 'T', zin: 'Z' });
-  toets('2 bewerkKaart zonder uitwerking stuurt uitwerking leeg (weghalen komt door)', JSON.parse(net[net.length - 1].b.toString()).uitwerking === '');
+  const bwLeeg = JSON.parse(net[net.length - 1].b.toString());
+  toets('2 bewerkKaart zonder uitwerking, wat, oplevert, hoe: die gaan leeg mee (weghalen komt door)', ['uitwerking', 'wat', 'oplevert', 'hoe'].every((v) => bwLeeg[v] === ''), bwLeeg);
   antw = () => ({ status: 404, body: { ok: false, fout: 'kaart bestaat niet' } });
   bw = await A.bewerkKaart(7, { titel: 'T' });
   const nNet = net.length;

@@ -478,6 +478,9 @@ M.mkdir();
     zetCat(UIT + '\n\n' + 'Lange tekst. '.repeat(700));
     x1 = M13.concepten().concepten.find((x) => x.id === 'k01');
     toets('13 uitwerking > 8000 tekens = vormfout, niet deelbaar', !x1.kan_delen && x1.vormfout.some((v) => /uitwerking te lang/.test(v)), x1.vormfout);
+    fs.writeFileSync(CAT13, fs.readFileSync(CAT13, 'utf8').replace('> - een register\n', '> - een register\n\n> verdwaald\n'));
+    x1 = M13.concepten().concepten.find((x) => x.id === 'k01');
+    toets('13 echte lege regel in de uitwerking = vormfout (losse citaatregel), niet stil afgekapt', !x1.kan_delen && x1.vormfout.some((v) => /losse citaatregel/.test(v)), x1.vormfout);
     zetCat(UIT);
     // bundel: alleen via de CLI-functie, kaart via de uurronde
     const bb = M13.bijwerkBundel();

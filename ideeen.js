@@ -349,7 +349,7 @@ function maak(deps) {
         'nabouwen. Op AIX staat nu nog de korte versie. Elk stuk ging door de vaste toets: geen namen, praktijken, bedragen, adressen of webadressen. ' +
         'Bank, gezondheid en beveiliging blijven privé.', 400),
       stappen: ['Open in de app Apps › AIX, tab Klaar om te delen.', 'Klap per kaart de uitwerking open, lees hem en kies Deel of Niet. Wat je niet aanraakt, gaat niet mee.',
-        'Ja met vingerafdruk (op de telefoon): de pod werkt de kaarten op Deel bij in Socevs winkel op AIX, als Socev. Nee: op AIX verandert niets.'],
+        'Ja met vingerafdruk (op de telefoon): de pod zet wat op Deel staat op AIX (bijwerken, of nieuw als het er nog niet stond), als Socev. Nee: op AIX verandert niets.'],
       waar: 'overal', prive: false, duur_min: 20, volgorde: 20, herkomst: { handmatig: 'aix-bundel', soort: 'bijwerk', module: 'ideeen', doel: { scherm: 'ideeen', focus: null } } };
   }
   // Machinekamer (CLI bundel): een bijwerkbundel als er geen bundel openstaat en er gedeelde kaarten met een nieuwe tekst klaarliggen. Zet alleen
@@ -560,7 +560,7 @@ function maak(deps) {
         const d = await A.kaart(aixId);
         if (!d.ok) { if (d.status === 404) { journaalSchrijf({ soort: 'plaats-fout', id: id, reden: 'kaart niet meer op AIX (nagekeken)', bundel: j[id].bezig.bundel }); uit.push({ id: id, aix: null }); } else uit.push({ id: id, aix: null, onzeker: d.fout }); continue; }
         const vgl = function (t) { return String(t == null ? '' : t).normalize('NFKC').replace(/\s+/g, ' ').trim(); };
-        const zelfde = ['titel', 'zin', 'wat', 'oplevert', 'hoe', 'uitwerking'].every(function (v) { return vgl(d.kaart[v]) === vgl(k[v]); });
+        const zelfde = ['titel', 'zin', 'wat', 'oplevert', 'hoe', 'uitwerking', 'categorie', 'status'].every(function (v) { return vgl(d.kaart[v]) === vgl(k[v]); });
         if (zelfde && j[id].bezig.hash === k.hash) { journaalSchrijf({ soort: 'gedeeld', id: id, aix: aixId, hash: k.hash, bundel: j[id].bezig.bundel, bijgewerkt: true, nagekeken: true }); uit.push({ id: id, aix: aixId }); }
         else { journaalSchrijf({ soort: 'plaats-fout', id: id, reden: 'niet bijgewerkt op AIX (nagekeken)', bundel: j[id].bezig.bundel }); uit.push({ id: id, aix: null }); }
         continue;

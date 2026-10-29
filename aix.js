@@ -300,8 +300,8 @@ function maak(deps) {
   async function bewerkKaart(id, v) {
     if (!geheel(Number(id)) || !v || typeof v !== 'object') return { ok: false, status: 400, fout: 'kaart ongeldig' };
     const body = {};
-    ['titel', 'zin', 'wat', 'oplevert', 'hoe', 'categorie', 'status'].forEach(function (k) { if (typeof v[k] === 'string' && v[k]) body[k] = v[k]; });
-    body.uitwerking = typeof v.uitwerking === 'string' ? v.uitwerking : '';
+    ['titel', 'zin', 'categorie', 'status'].forEach(function (k) { if (typeof v[k] === 'string' && v[k]) body[k] = v[k]; });
+    ['wat', 'oplevert', 'hoe', 'uitwerking'].forEach(function (k) { body[k] = typeof v[k] === 'string' ? v[k] : ''; });   // review: leeg gemaakt = ook op AIX leeg
     const r = await verzoek('PATCH', '/api/kaart/' + Number(id), body);
     if (goed(r) && geheel(r.j.id)) return { ok: true, id: r.j.id, geplaatst: r.j.geplaatst === true, wacht_op_moderatie: r.j.wacht_op_moderatie ? tekst(r.j.wacht_op_moderatie, GRENS.reden) : null };
     return foutVan(r);
