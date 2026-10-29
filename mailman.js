@@ -93,7 +93,8 @@ const BUITEN_LABELS = ['SENT', 'DRAFT', 'CHAT', 'SPAM', 'TRASH'];
 const VERKOOP_POSTVAK = 'gmail:groenhouten';
 const VERKOOP_DOMEINEN = ['hapleusden.nl', 'hpgroenhouten.nl'];
 const VERKOOP_STROOM = 'verkoop', VERKOOP_LABEL = 'VERKOOP';
-const VERKOOP_STATUS = ['kandidaat', 'herkend', 'niet_herkend', 'aangeboden', 'verstuurd', 'gearchiveerd', 'al_doorgestuurd', 'geweigerd', 'mislukt'];
+const VERKOOP_STATUS = ['kandidaat', 'herkend', 'niet_herkend', 'aangeboden', 'verstuurd', 'gearchiveerd', 'al_doorgestuurd', 'overgeslagen', 'onzeker', 'geweigerd', 'mislukt'];
+const VERKOOP_HANG_MS = 48 * 3600 * 1000, VERKOOP_TOETS_DEADLINE_MS = 240 * 1000;   // review wv1997 #5/#13
 const VERKOOP_WACHT_MS = 24 * 3600 * 1000, VERKOOP_TOETS_POGINGEN = 3;
 const VERKOOP_RONDE_MAX = 10, VERKOOP_DAG_MAX = 25;                     // doorsturen per ronde / per 24 uur (gemeten piek ± 16 per twee weken)
 const VERKOOP_ARCHIEF_NA_MS = 15 * 60 * 1000, VERKOOP_ARCHIEF_MS = 30 * 24 * 3600 * 1000, VERKOOP_ARCHIEF_POGINGEN = 5;
@@ -289,7 +290,7 @@ function normaliseer(x) {
   return { id, draad, van_adres: adresVan(van), van_naam: naamVan(van), van_domein: domeinVan(adresVan(van)), aan: Array.from(new Set(aan)),
     onderwerp: tekst(x.onderwerp, 998), labels, tab, afmeld: x.afmeld === true, bijlagen,
     ontvangen: Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null,
-    auth: tekst(x.auth, 2000), ct: tekst(x.ct, 100).toLowerCase() };   // B7-V: bovenste Authentication-Results en Content-Type (alleen doktersmaten)
+    auth: tekst(x.auth, 2000), ct: tekst(x.ct, 100).toLowerCase(), groep: x.groep === true };   // B7-V: bovenste Authentication-Results en Content-Type (alleen doktersmaten)
 }
 
 /*
@@ -320,12 +321,20 @@ function verkoopKandidaat(m, postvakId) {
   if (m.labels.some(function (l) { return BUITEN_LABELS.includes(l); })) return { ok: false, reden: 'verzonden/concept' };
   if (!m.bijlagen.length && !/^multipart\/(mixed|related)/.test(m.ct || '')) return { ok: false, reden: 'geen bijlage' };
   if (!authPass(m.auth, m.van_domein)) return { ok: false, reden: 'afzendercontrole' };
+  // review wv1997 #8: via een Google-groep (List-Id/X-Original-Sender/X-Google-Group-Id) kan een buitenstaander met het domein ondertekend
+  // binnenkomen; gemeten 29-10: administratie@ is zo'n groep (4 van 77), de rest niet. Groepsmail is nooit een kandidaat.
+  if (m.groep) return { ok: false, reden: 'groepsmail' };
   return { ok: true, reden: 'kandidaat' };
 }
 // B7-V: ankers in een tekst (pdf-tekstlaag of OCR); de tekst zelf wordt nergens bewaard
 function verkoopAnkers(t) { const s = String(t || ''); return { vacshing: VAC_RE.test(s), shingrix: SHI_RE.test(s) }; }
-// B7-V: VERKOOP alleen bij minstens één pdf met beide ankers
-function verkoopOordeel(pdfs) { return (Array.isArray(pdfs) ? pdfs : []).some(function (x) { return x && x.vacshing === true && x.shingrix === true; }); }
+// B7-V: VERKOOP alleen als de mail minstens één pdf heeft en ELKE pdf beide ankers draagt (review wv1997 #2: een tweede pdf zonder ankers,
+// bv. een verwijsbrief, mag nooit mee naar Exact en mag niet stil gearchiveerd worden; zo'n mail blijft bij David). Een overgeslagen of
+// onleesbare pdf telt als 'zonder ankers'.
+function verkoopOordeel(pdfs) {
+  const l = Array.isArray(pdfs) ? pdfs : [];
+  return l.length > 0 && l.every(function (x) { return x && !x.fout && !x.overgeslagen && x.vacshing === true && x.shingrix === true; });
+}
 
 /*
  * Stap 0–3 (O.3), zonder Jev. instel = { factuur_alias, eigen: [adressen], altijd: {factuur_alias, ai_label, draad, praktijk_factuur},
@@ -769,6 +778,8 @@ function maak(o) {
             .run(p.id, m.id, m.draad, m.ontvangen, m.van_domein, iso(), iso());
           if (!vk || (vk.status === 'kandidaat' && vk.toets_pogingen < VERKOOP_TOETS_POGINGEN && nu() - Date.parse(vk.kandidaat_tijd) < VERKOOP_WACHT_MS)) {
             status = 'wacht_verkoop'; verkoop.push(m.id); tel.verkoop++;
+          } else if (vk.status === 'kandidaat') {   // review wv1997 #14: verlopen tussen nieuw en stap1 → gewone stappen, journaal niet laten hangen
+            db.prepare("UPDATE verkoop SET status = 'niet_herkend', fout = ?, bijgewerkt = ? WHERE id = ?").run('geen pdf-toets binnen 24 uur', iso(), vk.id);
           }
         }
         const plan = status === 'klaar' && stroom ? labelPlan(stroom, null, m, instel) : null;
@@ -986,35 +997,47 @@ function maak(o) {
     if (!isObj(t) || typeof t.ja !== 'string' || !t.ja) return { ok: false, reden: 'wacht op je Ja op de kaart (verkoopfacturen doorsturen en archiveren)' };
     const a = String(t.adres || '').trim().toLowerCase();
     if (a.length > 254 || !ADRES_RE.test(a)) return { ok: false, reden: 'geen geldig verkoopadres in de toestemming' };
-    return { ok: true, adres: a, reden: 'Ja ' + t.ja.slice(0, 16) };
+    // review wv1997 #7: archiveren pas als het label VERKOOP bestaat en zijn ID vastligt (config.json label_id; n8n kent hetzelfde ID)
+    const lid = typeof t.label_id === 'string' && /^Label_\d{1,12}$/.test(t.label_id) ? t.label_id : null;
+    return { ok: true, adres: a, label_id: lid, reden: 'Ja ' + t.ja.slice(0, 16) };
   }
   function shaBuf(b) { return crypto.createHash('sha256').update(b).digest('hex'); }
+  // review wv1997 #6: na een herstart midden in een toets blijven pdf en png's (naam, vaccinatie) anders in /dev/shm staan
+  (function verkoopTmpOpruimen() {
+    const t = o.verkoopTmp || '/dev/shm';
+    try { for (const n of fs.readdirSync(t)) if (/^mailman-verkoop-[0-9a-f]{16}$/.test(n)) fs.rmSync(path.join(t, n), { recursive: true, force: true }); } catch (e) { /* geen map */ }
+  })();
   /*
    * Eén pdf lokaal lezen: tekstlaag (pdftotext), en is die vrijwel leeg (scan) OCR van hooguit 2 pagina's (pdftoppm 200 dpi + tesseract
    * nld+eng), in een eigen map (0700) onder o.verkoopTmp (/dev/shm) die altijd weer gewist wordt. o.proces komt van server.js (spawn);
    * mailman.js start zelf geen processen (CI-poort). Alleen ankers ja/nee en de bron komen terug; de tekst blijft in deze functie.
    */
-  async function verkoopLees(buf) {
+  async function verkoopLees(buf, tot) {
     if (typeof o.proces !== 'function') return { fout: 'geen lezer' };
+    const over = function () { return nu() > tot; };
     const map = path.join(o.verkoopTmp || '/dev/shm', 'mailman-verkoop-' + crypto.randomBytes(8).toString('hex'));
     try {
       fs.mkdirSync(map, { mode: 0o700 });
       const f = path.join(map, 'stuk.pdf');
       fs.writeFileSync(f, buf, { mode: 0o600 });
       const t = await o.proces('pdftotext', ['-q', '-l', '5', '-enc', 'UTF-8', f, '-'], { ms: 30000 });
-      if (t != null && t.replace(/\s+/g, '').length >= VERKOOP_TEKST_MIN) { const a = verkoopAnkers(t); return { bron: 'tekst', vacshing: a.vacshing, shingrix: a.shingrix }; }
-      const r = await o.proces('pdftoppm', ['-q', '-r', '200', '-f', '1', '-l', String(VERKOOP_OCR_PAGINAS), '-png', f, path.join(map, 'p')], { ms: 120000 });
-      if (r == null) return { bron: 'ocr', fout: 'pdftoppm' };
+      const ta = t != null && t.replace(/\s+/g, '').length >= VERKOOP_TEKST_MIN ? verkoopAnkers(t) : null;
+      if (ta && ta.vacshing && ta.shingrix) return { bron: 'tekst', vacshing: true, shingrix: true };
+      // review wv1997 #12: geen beide ankers in de tekstlaag (of geen tekstlaag): ook OCR (een scan met een slechte tekstlaag of een stempel)
+      if (over()) return { bron: 'ocr', fout: 'te traag' };
+      const r = await o.proces('pdftoppm', ['-q', '-r', '200', '-scale-to', '2400', '-f', '1', '-l', String(VERKOOP_OCR_PAGINAS), '-png', f, path.join(map, 'p')], { ms: 60000 });
+      if (r == null) return ta ? { bron: 'tekst', vacshing: ta.vacshing, shingrix: ta.shingrix } : { bron: 'ocr', fout: 'pdftoppm' };
       const pngs = fs.readdirSync(map).filter(function (n) { return /^p-\d+\.png$/.test(n); }).sort().slice(0, VERKOOP_OCR_PAGINAS);
-      let vac = false, shi = false, gelezen = 0;
+      let vac = !!(ta && ta.vacshing), shi = !!(ta && ta.shingrix), gelezen = 0;
       for (const n of pngs) {
-        const x = await o.proces('tesseract', [path.join(map, n), 'stdout', '-l', 'nld+eng', '--psm', '3'], { ms: 120000 });
+        if (over()) return { bron: 'ocr', fout: 'te traag' };
+        const x = await o.proces('tesseract', [path.join(map, n), 'stdout', '-l', 'nld+eng', '--psm', '3'], { ms: 60000 });
         if (x == null) continue;
         gelezen++;
         const a = verkoopAnkers(x);
         vac = vac || a.vacshing; shi = shi || a.shingrix;
       }
-      if (!gelezen) return { bron: 'ocr', fout: 'tesseract' };
+      if (!gelezen) return ta ? { bron: 'tekst', vacshing: ta.vacshing, shingrix: ta.shingrix } : { bron: 'ocr', fout: 'tesseract' };
       return { bron: 'ocr', vacshing: vac, shingrix: shi };
     } catch (e) {
       return { fout: 'lezen' };
@@ -1044,18 +1067,22 @@ function maak(o) {
     if (!wacht()) return { status: 409, j: { ok: false, fout: 'geen wachtende kandidaat' } };
     if (verkoopBezig) return { status: 429, j: { ok: false, fout: 'bezig' } };
     verkoopBezig = true;
-    const pdfs = [];
+    const pdfs = [], tot = nu() + VERKOOP_TOETS_DEADLINE_MS;
     let melding = typeof d.fout === 'string' && d.fout ? tekst(d.fout, 120) : null;
+    const bij = Array.isArray(d.bijlagen) ? d.bijlagen : [];
+    // review wv1997 #2: n8n telt alle pdf-delen van de mail; zijn er meer dan de toets kreeg (> 3, of > 8 MB), dan is niet alles getoetst
+    const totaal = Number.isInteger(d.pdf_totaal) ? d.pdf_totaal : bij.length;
     try {
       if (!melding) {
-        for (const x of (Array.isArray(d.bijlagen) ? d.bijlagen : []).slice(0, VERKOOP_PDF_MAX)) {
+        if (totaal > bij.length || bij.length > VERKOOP_PDF_MAX) pdfs.push({ grootte: null, overgeslagen: 'niet alle pdf\'s getoetst' });
+        for (const x of bij.slice(0, VERKOOP_PDF_MAX)) {
           if (!isObj(x) || typeof x.b64 !== 'string' || !x.b64) { melding = 'bijlage zonder inhoud'; continue; }
           if (x.b64.length > Math.ceil(VERKOOP_PDF_BYTES / 3) * 4) { pdfs.push({ grootte: null, overgeslagen: 'te groot' }); continue; }
           const buf = Buffer.from(x.b64, 'base64');
           if (!buf.length || buf.toString('base64') !== x.b64) { melding = 'bijlage niet in canonieke base64'; continue; }
           if (buf.length > VERKOOP_PDF_BYTES) { pdfs.push({ grootte: buf.length, overgeslagen: 'te groot' }); continue; }
           if (buf.subarray(0, 1024).indexOf('%PDF-') < 0) { pdfs.push({ grootte: buf.length, overgeslagen: 'geen pdf' }); continue; }
-          const l = await verkoopLees(buf);
+          const l = await verkoopLees(buf, tot);
           const rij = { sha256: shaBuf(buf), sha256_b64: sha(x.b64), grootte: buf.length, bron: l.bron || null, vacshing: l.vacshing === true, shingrix: l.shingrix === true };
           if (l.fout) rij.fout = String(l.fout).slice(0, 40);
           pdfs.push(rij);
@@ -1063,7 +1090,7 @@ function maak(o) {
       }
     } finally { verkoopBezig = false; }
     const gelezen = pdfs.filter(function (x) { return x.sha256 && !x.fout; });
-    const verk = verkoopOordeel(gelezen);
+    const verk = verkoopOordeel(pdfs);
     const mislukt = !verk && (!!melding || pdfs.some(function (x) { return x.fout; }));
     const instel = instelVan(postvak(r.postvak));
     return tx(function () {
@@ -1083,7 +1110,7 @@ function maak(o) {
         return { status: 200, j: { ok: true, verkoop: false, opnieuw: n < VERKOOP_TOETS_POGINGEN } };
       }
       db.prepare('UPDATE verkoop SET pdfs = ?, toets_tijd = ?, toets_pogingen = toets_pogingen + 1, bijgewerkt = ? WHERE id = ?').run(pj, iso(), iso(), w.v.id);
-      verkoopGewoon(w.b, instel, gelezen.length ? 'geen VACSHING én SHINGRIX' : 'geen leesbare pdf');
+      verkoopGewoon(w.b, instel, !gelezen.length ? 'geen leesbare pdf' : (gelezen.some(function (x) { return x.vacshing && x.shingrix; }) ? 'ook een pdf zonder VACSHING én SHINGRIX (blijft bij jou)' : 'geen VACSHING én SHINGRIX'));
       return { status: 200, j: { ok: true, verkoop: false } };
     });
   }
@@ -1101,6 +1128,9 @@ function maak(o) {
     if (!p || p.stand === 'uit' || !m.ok || (!p.verkoop_door && !p.verkoop_archief)) return { status: 200, j: { ok: true, acties: [], dicht: m.ok ? 'schakelaars uit' : m.reden } };
     const ids = new Set((Array.isArray(d.ids) ? d.ids : []).map(String).filter(function (x) { return ID_RE.test(x); }));
     const acties = [], door = [], arch = [];
+    // review wv1997 #5: een aangeboden nota zonder terugmelding van n8n na 48 uur wordt mislukt (één melding), niet elke dag opnieuw
+    db.prepare("UPDATE verkoop SET status = 'mislukt', fout = 'geen terugmelding van n8n (kijk in Verzonden of hij weg is)', bijgewerkt = ? WHERE postvak = ? AND status = 'aangeboden' AND aangeboden_tijd < ?")
+      .run(iso(), p.id, new Date(nu() - VERKOOP_HANG_MS).toISOString());
     if (p.verkoop_door && p.verkoop_sinds) {
       const dag = db.prepare('SELECT count(*) n FROM verkoop WHERE postvak = ? AND aangeboden_tijd >= ?').get(p.id, new Date(nu() - 86400000).toISOString()).n;
       let ruimte = Math.min(VERKOOP_RONDE_MAX, VERKOOP_DAG_MAX - dag);
@@ -1114,11 +1144,11 @@ function maak(o) {
         door.push(v.id); ruimte--;
       }
     }
-    if (p.verkoop_archief) {
+    if (p.verkoop_archief && m.label_id) {
       const tot = new Date(nu() - VERKOOP_ARCHIEF_NA_MS).toISOString(), van = new Date(nu() - VERKOOP_ARCHIEF_MS).toISOString();
       for (const v of db.prepare("SELECT * FROM verkoop WHERE postvak = ? AND status = 'verstuurd' AND verstuurd_tijd <= ? AND verstuurd_tijd >= ? AND archief_pogingen < ? ORDER BY verstuurd_tijd, id LIMIT ?")
         .all(p.id, tot, van, VERKOOP_ARCHIEF_POGINGEN, VERKOOP_RONDE_MAX)) {
-        acties.push({ soort: 'archief', gmail_id: v.gmail_id, thread_id: v.thread_id, adres: m.adres, verstuurd: v.verstuurd_tijd });
+        acties.push({ soort: 'archief', gmail_id: v.gmail_id, thread_id: v.thread_id, adres: m.adres, verstuurd: v.verstuurd_tijd, label_id: m.label_id });
         arch.push(v.id);
       }
     }
@@ -1140,7 +1170,7 @@ function maak(o) {
     const r = rondeVan(d, true);
     if (!r) return { status: 409, j: { ok: false, fout: 'ronde onbekend of verlopen' } };
     if (r.postvak !== VERKOOP_POSTVAK || r.soort === 'inhaal') return { status: 400, j: { ok: false, fout: 'alleen Doktersmaten' } };
-    const tel = { verstuurd: 0, al_doorgestuurd: 0, mislukt: 0, gearchiveerd: 0, geweigerd: 0, later: 0, genegeerd: 0 };
+    const tel = { verstuurd: 0, al_doorgestuurd: 0, overgeslagen: 0, onzeker: 0, mislukt: 0, gearchiveerd: 0, geweigerd: 0, later: 0, genegeerd: 0 };
     const lees = db.prepare('SELECT * FROM verkoop WHERE postvak = ? AND gmail_id = ?');
     const zet = function (v, status, velden) {
       const k = Object.keys(velden || {});
@@ -1155,12 +1185,18 @@ function maak(o) {
           if (!v || v.status !== 'aangeboden') { tel.genegeerd++; continue; }
           if (u === 'verstuurd' && ID_RE.test(String(x.verstuurd_id || ''))) { zet(v, 'verstuurd', { verstuurd_tijd: iso(), verstuurd_id: String(x.verstuurd_id), fout: null }); tel.verstuurd++; }
           else if (u === 'al_doorgestuurd') { zet(v, 'al_doorgestuurd', { fout: null }); tel.al_doorgestuurd++; }
+          // review wv1997 #5: de mail is intussen door iemand afgehandeld of klopt niet meer (niet meer in de inbox, afzender, bijlage
+          // gewijzigd): stil overslaan, geen melding; #10: time-out of 5xx van Gmail = misschien wel verstuurd (David kijkt in Verzonden)
+          else if (u === 'overgeslagen') { zet(v, 'overgeslagen', { fout: f || 'overgeslagen' }); tel.overgeslagen++; }
+          else if (u === 'onzeker') { zet(v, 'onzeker', { fout: f || 'Gmail gaf geen duidelijk antwoord; kijk in Verzonden' }); tel.onzeker++; }
           else { zet(v, 'mislukt', { fout: f || 'doorsturen mislukt' }); tel.mislukt++; }
         } else if (x.soort === 'archief') {
           if (!v || v.status !== 'verstuurd') { tel.genegeerd++; continue; }
           if (u === 'gearchiveerd') { zet(v, 'gearchiveerd', { gearchiveerd_tijd: iso(), fout: null }); tel.gearchiveerd++; }
           else if (u === 'geweigerd') { zet(v, 'geweigerd', { fout: 'Exact meldde: niet afgeleverd' }); tel.geweigerd++; }
-          else { zet(v, 'verstuurd', { fout: f || 'archiveren later' }); tel.later++; }
+          else if (u === 'geen_label') {   // review wv1997 #7: label VERKOOP ontbreekt of wijkt af in n8n: geen poging verbruiken
+            db.prepare('UPDATE verkoop SET archief_pogingen = max(0, archief_pogingen - 1), fout = ?, bijgewerkt = ? WHERE id = ?').run('label VERKOOP ontbreekt of wijkt af', iso(), v.id); tel.later++;
+          } else { zet(v, 'verstuurd', { fout: f || 'archiveren later' }); tel.later++; }
         } else tel.genegeerd++;
       }
     });
@@ -1185,7 +1221,7 @@ function maak(o) {
           pdfs: pdfs.map(function (x) { return { bron: x.bron || null, vacshing: !!x.vacshing, shingrix: !!x.shingrix, grootte: x.grootte || null, overgeslagen: x.overgeslagen || null, fout: x.fout || null }; }),
           kandidaat: v.kandidaat_tijd, getoetst: v.toets_tijd, aangeboden: v.aangeboden_tijd, verstuurd: v.verstuurd_tijd, gearchiveerd: v.gearchiveerd_tijd, fout: v.fout };
       });
-    return { postvak: p.id, kan: m.ok, reden: m.reden, adres: m.ok ? m.adres : null, door: !!p.verkoop_door, archief: !!p.verkoop_archief,
+    return { postvak: p.id, kan: m.ok, reden: m.reden, adres: m.ok ? m.adres : null, archief_kan: !!(m.ok && m.label_id), door: !!p.verkoop_door, archief: !!p.verkoop_archief,
       door_sinds: p.verkoop_sinds || null, archief_sinds: p.verkoop_archief_sinds || null,
       regel: { domeinen: VERKOOP_DOMEINEN, ankers: ['VACSHING', 'SHINGRIX'], afzendercontrole: 'Gmail: dmarc of dkim geslaagd voor dat domein', pdf_max: VERKOOP_PDF_MAX,
         pdf_mb: VERKOOP_PDF_BYTES / 1048576, ocr_paginas: VERKOOP_OCR_PAGINAS, wacht_uur: VERKOOP_WACHT_MS / 3600000, archief_na_min: VERKOOP_ARCHIEF_NA_MS / 60000 },
@@ -1203,6 +1239,7 @@ function maak(o) {
     if (verwijd) {
       const m = verkoopMag(p);
       if (!m.ok) return { status: 409, j: { ok: false, fout: 'kan nog niet: ' + m.reden } };
+      if (nieuw.archief && !oud.archief && !m.label_id) return { status: 409, j: { ok: false, fout: 'kan nog niet: het label VERKOOP bestaat nog niet in Doktersmaten' } };
       if (!ctx || typeof ctx.versOk !== 'function' || !ctx.versOk()) return { status: 403, j: { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true } };
       if (typeof ctx.versVerbruik === 'function') ctx.versVerbruik();
     }
@@ -1601,16 +1638,20 @@ function maak(o) {
       if (p.id === VERKOOP_POSTVAK) {
         // wv1997 B7-V: een geweigerde of mislukte verkoopnota, of een aangeboden nota zonder terugmelding na een uur (David ziet hem in de App)
         const dag = new Date(n - 86400000).toISOString();
-        const vt = db.prepare("SELECT sum(status = 'geweigerd') g, sum(status = 'mislukt') m FROM verkoop WHERE postvak = ? AND bijgewerkt >= ?").get(p.id, dag);
+        const vt = db.prepare("SELECT sum(status = 'geweigerd') g, sum(status = 'mislukt') m, sum(status = 'onzeker') o, sum(status = 'verstuurd' AND archief_pogingen >= ?) a FROM verkoop WHERE postvak = ? AND bijgewerkt >= ?")
+          .get(VERKOOP_ARCHIEF_POGINGEN, p.id, dag);
         if (vt.g) uit.push(p.id + ': ' + vt.g + ' verkoopnota door Exact geweigerd (niet gearchiveerd)');
         if (vt.m) uit.push(p.id + ': ' + vt.m + ' verkoopnota niet doorgestuurd (mislukt)');
-        const hang = db.prepare("SELECT count(*) c FROM verkoop WHERE postvak = ? AND status = 'aangeboden' AND aangeboden_tijd < ?").get(p.id, new Date(n - 3600000).toISOString()).c;
+        if (vt.o) uit.push(p.id + ': ' + vt.o + ' verkoopnota onzeker verstuurd (Gmail gaf geen duidelijk antwoord)');
+        if (vt.a) uit.push(p.id + ': ' + vt.a + ' verkoopnota na 5 pogingen niet gearchiveerd');
+        const hang = db.prepare("SELECT count(*) c FROM verkoop WHERE postvak = ? AND status = 'aangeboden' AND aangeboden_tijd < ? AND aangeboden_tijd >= ?")
+          .get(p.id, new Date(n - 3600000).toISOString(), new Date(n - VERKOOP_HANG_MS).toISOString()).c;
         if (hang) uit.push(p.id + ': ' + hang + ' verkoopnota aangeboden zonder terugmelding van n8n');
       }
     }
     return uit;
   }
-  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, verkoopToets, _db: db };
+  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
 }
 
 function isPad(p) { return p === '/mailman' || String(p).indexOf('/mailman/') === 0; }

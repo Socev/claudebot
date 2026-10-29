@@ -15620,6 +15620,8 @@ function mailmanRoute(req, res) {
   const bearer = kop ? mailman.sleutelOk(req, null) : false;
   if (kop && !bearer) { req.resume(); return mailmanStuur(res, 401, { ok: false, fout: 'sleutel' }); }
   const toets = reqPath(req) === '/mailman/verkoop/toets', max = toets ? MAILMAN_TOETS_MAX : MAILMAN_BODY_MAX;
+  // review wv1997 #3: loopt er al een pdf-toets, dan een tweede groot lichaam niet eerst inlezen (geheugen; één toets tegelijk)
+  if (toets && typeof mailman.verkoopBezig === 'function' && mailman.verkoopBezig()) { req.resume(); return mailmanStuur(res, 429, { ok: false, fout: 'bezig' }); }
   const delen = []; let n = 0, te = false;
   req.on('data', function (c) { if (te) return; n += c.length; if (n > max) { te = true; delen.length = 0; return; } delen.push(c); });
   req.on('error', function () {});

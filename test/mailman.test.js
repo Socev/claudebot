@@ -1002,9 +1002,9 @@ function vkMail(o) {
   return mail(Object.assign({ van: 'Praktijk Proef <proef@hapleusden.nl>', aan: 'facturen@praktijk.invalid', onderwerp: 'gordelroos', labels: ['INBOX'],
     bijlagen: [{ naam: '', mime: 'onbekend' }], tekst: '', auth: AR_OK, ct: 'multipart/mixed; boundary="x"', datum: klok }, o || {}));
 }
-function vkToestaan(dir, adres) {
+function vkToestaan(dir, adres, labelId) {
   const f = path.join(dir, 'config.json'), c = JSON.parse(fs.readFileSync(f, 'utf8'));
-  if (adres === null) delete c.verkoop_toegestaan; else c.verkoop_toegestaan = { 'gmail:groenhouten': { adres: adres || VK_ADRES, ja: '2026-11-02T08:30:00Z', door: 'proef', vraag: 'proef' } };
+  if (adres === null) delete c.verkoop_toegestaan; else c.verkoop_toegestaan = { 'gmail:groenhouten': { adres: adres || VK_ADRES, ja: '2026-11-02T08:30:00Z', door: 'proef', vraag: 'proef', label_id: labelId === undefined ? 'Label_99' : labelId } };
   fs.writeFileSync(f, JSON.stringify(c), { mode: 0o600 });
 }
 // nep-lezer: pdftotext geeft de 'tekstlaag' uit de pdf (na de kop), pdftoppm maakt één png, tesseract geeft de 'ocr'-tekst
@@ -1067,7 +1067,10 @@ test('B7-V ankers: beide nodig, OCR-tolerant (I/1/l/|), hoofdletterongevoelig', 
   assert.deepEqual(K.verkoopAnkers('VACSHNG SHINGRX'), { vacshing: false, shingrix: false });
   assert.deepEqual(K.verkoopAnkers('alleen SHINGRIX'), { vacshing: false, shingrix: true });
   assert.equal(K.verkoopOordeel([{ vacshing: true, shingrix: false }, { vacshing: false, shingrix: true }]), false, 'verdeeld over twee pdfs telt niet');
-  assert.equal(K.verkoopOordeel([{ vacshing: true, shingrix: false }, { vacshing: true, shingrix: true }]), true);
+  assert.equal(K.verkoopOordeel([{ vacshing: true, shingrix: false }, { vacshing: true, shingrix: true }]), false, 'review #2: een tweede pdf zonder ankers gaat nooit mee');
+  assert.equal(K.verkoopOordeel([{ vacshing: true, shingrix: true }, { vacshing: true, shingrix: true }]), true, 'twee nota\'s');
+  assert.equal(K.verkoopOordeel([{ vacshing: true, shingrix: true }, { overgeslagen: 'te groot' }]), false);
+  assert.equal(K.verkoopOordeel([]), false);
 });
 
 test('B7-V stap1: kandidaat wacht op de pdf-toets (vóór Altijd in); geen kandidaat = gewone stappen; privé nooit', () => {
@@ -1221,7 +1224,7 @@ test('B7-V gedaan en archief: verstuurd → na 15 min archief, geweigerd blijft 
     { gmail_id: ids[2], soort: 'door', uitkomst: 'al_doorgestuurd' },
     { gmail_id: ids[3], soort: 'door', uitkomst: 'mislukt', fout: 'HTTP 500' },
     { gmail_id: ids[3], soort: 'door', uitkomst: 'verstuurd', verstuurd_id: 'aaaabbbbccccffff' }] });
-  assert.deepEqual(g.j.telling, { verstuurd: 2, al_doorgestuurd: 1, mislukt: 1, gearchiveerd: 0, geweigerd: 0, later: 0, genegeerd: 1 });
+  assert.deepEqual(g.j.telling, { verstuurd: 2, al_doorgestuurd: 1, overgeslagen: 0, onzeker: 0, mislukt: 1, gearchiveerd: 0, geweigerd: 0, later: 0, genegeerd: 1 });
   assert.deepEqual(vkActies(mm, ids).a.j.acties, [], 'archief pas na 15 minuten; mislukt/al_doorgestuurd nooit opnieuw');
   klok += 16 * 60000;
   const ar = vkActies(mm, []);
@@ -1293,4 +1296,68 @@ test('B7-V pdf-toets met echte gereedschappen: tekstlaag én scan herkend, ander
   assert.equal((await t(c, anderPdf)).j.verkoop, false); assert.equal(vRij(mm, c.id).status, 'niet_herkend');
   assert.deepEqual(fs.readdirSync(tmp), []);
   fs.rmSync(werk, { recursive: true, force: true });
+});
+
+test('B7-V review: groepsmail nooit kandidaat; gemengde pdf\'s of niet alles getoetst = bij David; OCR ook bij een tekstlaag zonder ankers', async () => {
+  assert.equal(K.verkoopKandidaat(K.normaliseer(vkMail({ groep: true })), 'gmail:groenhouten').reden, 'groepsmail');
+  const { mm, log } = vkKamer();
+  const gemengd = vkMail(), teveel = vkMail(), laag = vkMail();
+  const { r } = vkRonde(mm, [gemengd, teveel, laag]);
+  const t = function (m, bijlagen, extra) { return mm.verkoopToets(Object.assign({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: m.id, bijlagen }, extra || {})); };
+  let u = await t(gemengd, [{ b64: nepPdf('SCAN:VACSHING SHINGRIX') }, { b64: nepPdf('SCAN:Verwijsbrief proef') }]);
+  assert.equal(u.j.verkoop, false); assert.equal(vRij(mm, gemengd.id).status, 'niet_herkend'); assert.match(vRij(mm, gemengd.id).fout, /blijft bij jou/);
+  u = await t(teveel, [{ b64: nepPdf('SCAN:VACSHING SHINGRIX') }], { pdf_totaal: 4 });
+  assert.equal(u.j.verkoop, false, 'een vierde pdf die niet getoetst is');
+  log.length = 0;
+  u = await t(laag, [{ b64: nepPdf('LAAG:een tekstlaag van een scanner zonder de woorden, lang genoeg om te tellen als tekst\nSCAN:VACSH1NG SH1NGR1X') }]);
+  assert.equal(u.j.verkoop, true, 'OCR vond ze alsnog'); assert.ok(log.includes('tesseract'));
+  assert.equal(typeof mm.verkoopBezig(), 'boolean'); assert.equal(mm.verkoopBezig(), false);
+});
+
+test('B7-V review: archiveren pas met label-ID in de toestemming; ontbrekend label kost geen poging; aangeboden > 48 u wordt mislukt (één melding)', async () => {
+  const { mm, dir } = vkKamer();
+  vkToestaan(dir, VK_ADRES, null);
+  assert.equal(mm.app('POST /app/mailman/verkoop', { archief: true }, ctxVers(true)).status, 409, 'zonder label-ID geen archiveren');
+  assert.equal(mm.app('POST /app/mailman/verkoop', { door: true }, ctxVers(true)).status, 200);
+  assert.equal(mm.app('GET /app/mailman', {}, {}).j.verkoop.archief_kan, false);
+  klok += 60000;
+  const [a, b] = await vkHerkend(mm, 2);
+  const x = vkActies(mm, [a.id, b.id]);
+  mm.n8n('POST /mailman/verkoop/gedaan', { ronde: x.r.ronde, postvak: 'gmail:groenhouten', resultaten: [{ gmail_id: a.id, soort: 'door', uitkomst: 'verstuurd', verstuurd_id: 'aaaabbbbccccdddd' }] });
+  vkToestaan(dir, VK_ADRES);
+  assert.equal(mm.app('POST /app/mailman/verkoop', { archief: true }, ctxVers(true)).status, 200);
+  klok += 16 * 60000;
+  for (let i = 0; i < 8; i++) {
+    const y = vkActies(mm, []);
+    assert.equal(y.a.j.acties.length, 1); assert.equal(y.a.j.acties[0].label_id, 'Label_99');
+    mm.n8n('POST /mailman/verkoop/gedaan', { ronde: y.r.ronde, postvak: 'gmail:groenhouten', resultaten: [{ gmail_id: a.id, soort: 'archief', uitkomst: 'geen_label' }] });
+  }
+  assert.equal(vRij(mm, a.id).archief_pogingen, 0, 'geen_label verbruikt geen poging');
+  // b staat op aangeboden zonder terugmelding: na 1 u een melding, na 48 u mislukt (en de melding over hangen stopt)
+  klok += 2 * 3600 * 1000;
+  assert.match(mm.zorgen().join('|'), /aangeboden zonder terugmelding/);
+  klok += 47 * 3600 * 1000;
+  vkActies(mm, []);
+  assert.equal(vRij(mm, b.id).status, 'mislukt'); assert.match(vRij(mm, b.id).fout, /Verzonden/);
+  assert.ok(!/aangeboden zonder terugmelding/.test(mm.zorgen().join('|')));
+  assert.match(mm.zorgen().join('|'), /mislukt/);
+});
+
+test('B7-V review: overgeslagen is stil, onzeker meldt; oude tijdelijke mappen worden bij de start gewist', async () => {
+  const { mm, dir, tmp } = vkKamer();
+  vkToestaan(dir);
+  mm.app('POST /app/mailman/verkoop', { door: true }, ctxVers(true));
+  klok += 60000;
+  const [a, b] = await vkHerkend(mm, 2);
+  const x = vkActies(mm, [a.id, b.id]);
+  const g = mm.n8n('POST /mailman/verkoop/gedaan', { ronde: x.r.ronde, postvak: 'gmail:groenhouten', resultaten: [
+    { gmail_id: a.id, soort: 'door', uitkomst: 'overgeslagen', fout: 'niet meer in de inbox' }, { gmail_id: b.id, soort: 'door', uitkomst: 'onzeker', fout: 'HTTP 503' }] });
+  assert.equal(g.j.telling.overgeslagen, 1); assert.equal(g.j.telling.onzeker, 1);
+  assert.equal(vRij(mm, a.id).status, 'overgeslagen'); assert.equal(vRij(mm, b.id).status, 'onzeker');
+  const z = mm.zorgen().join('|');
+  assert.ok(!/overgeslagen/.test(z)); assert.match(z, /onzeker/);
+  fs.mkdirSync(path.join(tmp, 'mailman-verkoop-0123456789abcdef')); fs.writeFileSync(path.join(tmp, 'mailman-verkoop-0123456789abcdef', 'stuk.pdf'), 'x');
+  fs.mkdirSync(path.join(tmp, 'iets-anders'));
+  MM.maak({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'mailman-')), marker: poort, primair: function () { return true; }, verkoopTmp: tmp });
+  assert.deepEqual(fs.readdirSync(tmp), ['iets-anders']);
 });
