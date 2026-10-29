@@ -23,6 +23,7 @@
  * geboortedatum en de afzender staat op de lijst eigen zorgverleners), en er staat geen enkel ander BSN, geen andere
  * geboortedatum en geen andere naam + oude datum in. Waarden staan als HMAC-SHA256 met een sleutel op de pod (sha256 van een
  * BSN is in seconden terug te rekenen, Fable #10). Zijn naam alleen telt nooit: die staat als huisarts op elke patiëntbrief.
+ * Nooit bij een onleesbaar deel, OCR/scan of arts-aan-arts-taal (wv1920). De intake-router geeft de afzender alleen mee als DKIM uitgelijnd is. De lijst maakt de machinekamer (mk-scripts/wv1920/maak-poort-eigen.py).
  */
 const crypto = require('crypto');
 const fs = require('fs');
@@ -132,9 +133,10 @@ function personen(delen, eigen, nu) {
 }
 
 /**
- * beoordeel({ teksten: [..], bijlagenamen: [..], onderwerp, afzender, leesbaar: bool, scan: bool }, { eigen, nu }) →
+ * beoordeel({ teksten: [..], bijlagenamen: [..], onderwerp, afzender, leesbaar: bool, scan: bool, ocr: bool }, { eigen, nu }) →
  *   { tegenhouden, soorten: [..], regel, eigen_uitzondering, versie }
- * `leesbaar: false` = een bijlage zonder tekstlaag waarvan ook OCR niets gaf. `scan: true` = (deels) uit OCR.
+ * `leesbaar: false` = een bijlage zonder tekstlaag waarvan ook OCR niets gaf. `scan: true` = (deels) uit OCR. `ocr: true` = een deel
+ * kwam uit OCR (alleen: geen eigen-post-uitzondering; de drempels van regel 8 blijven die van digitale tekst).
  */
 function beoordeel(stuk, opties) {
   const eigen = (opties && opties.eigen) || laadEigen();
@@ -181,8 +183,14 @@ function beoordeel(stuk, opties) {
   else if (enkel && (stuk.scan ? s.has('medisch_3') : (s.has('medisch_4') && lengte <= BRIEF_MAX))) regel = 8;
 
   let eigenUitz = false;
-  if (regel && regel !== 6) {
-    const domein = String(stuk.afzender || '').toLowerCase().split('@').pop();
+  // wv1920 (Fable-review): nooit bij een deel zonder leesbare tekst of uit OCR/scan (een tweede persoon kan onleesbaar of verhaspeld zijn),
+  // en nooit bij arts-aan-arts-taal ("bovengenoemde patiënt", "uw patiënt", "geachte collega", "collegiale groet"): die staat niet in
+  // Davids eigen post, wel in een specialistenbrief over een patiënt die toevallig dezelfde geboortedatum heeft.
+  const collega = [...med].some((x) => x === 'geachte collega' || /^collegiale /.test(x));
+  if (regel && !s.has('onleesbaar') && !stuk.scan && !stuk.ocr && !s.has('brieftaal') && !s.has('uw_patient') && !collega) {
+    // afzender als kaal adres of "Naam <adres>"; alles anders (twee adressen, geen @) = geen domein
+    const af = String(stuk.afzender || '').trim().toLowerCase(), hoek = /^[^<>@]*<([^<>\s]+)>$/.exec(af), adres = hoek ? hoek[1] : af;
+    const domein = /^[^@\s<>,;]+@([^@\s<>,;]+)$/.test(adres) ? adres.split('@')[1] : '';
     const eigenAnker = p.eigen_bsn > 0 || (p.eigen_geb > 0 && domein && eigen.zorgverleners.has(domein));
     if (eigenAnker && p.vreemd_bsn === 0 && p.vreemd_geb === 0 && p.vreemd_persoon_datum === 0) { eigenUitz = true; regel = null; }
   }

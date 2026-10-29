@@ -2085,6 +2085,117 @@ function lijstMapVan(vault) {
 }
 // wv1253: index.md in een Relaties-map is de inhoudsopgave, geen entiteitpagina
 function relatiePagina(x) { return x.bestand && x.naam.endsWith('.md') && x.naam.toLowerCase() !== 'index.md'; }
+// ── Vaste mailadressen als voorgesteld kenmerk (wv1920, OVIS Intake § 12.5 punt 2) ──
+// De nachtronde (ovis-run.js nacht, onder de vault-grendel, vóór het compileren) zet een mailadres van een terugkerende afzender op de
+// pagina van zijn organisatie (frontmatter mailadressen + een zaad-regel). Alleen als: ≥ 2 mails van dat adres in het intake-logboek met
+// DKIM uitgelijnd, de router herkende in elk beoordeeld stuk van dat adres dezelfde organisatie (minstens redelijk, nooit een ander of
+// onbekend), het adres staat op een domein van die pagina (of een subdomein ervan; een gedeeld moederdomein met twee organisaties valt al af
+// op "één organisatie"), en het staat nog nergens als kenmerk (ook niet vervallen). Een vastgehouden
+// stuk telt nooit mee (de router beoordeelt het niet). Het kenmerk is daarna 'voorgesteld' tot Davids Ja op de weekbundel; actief geeft
+// het de router afzender hoog (mailadres + DKIM). Alleen lezen uit intake.sqlite; schrijven alleen de pagina, via vault-veilig.
+const MAIL_VOORSTEL = { min_stukken: 2, min_dkim: 2, max_per_nacht: 10 };
+const MAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
+function intakeLezer(pad) {
+  return { rijen: function () {
+    if (!fs.existsSync(pad)) throw new Error('intake-logboek ontbreekt');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(pad, { readOnly: true });
+    try {
+      db.exec('PRAGMA busy_timeout = 5000'); db.exec('PRAGMA query_only = 1');
+      const st = {};
+      db.prepare("SELECT stuk_id, meta, ontvangen FROM stuk WHERE profiel = 'mail@1'").all().forEach(function (r) {
+        let m = {}; try { m = JSON.parse(r.meta) || {}; } catch (e) { m = {}; }
+        st[r.stuk_id] = { stuk_id: r.stuk_id, van: typeof m.van === 'string' ? m.van : '', ontvangen: r.ontvangen || '', dkim: null, afzender: null, kracht: null };
+      });
+      // laatste besluit per stuk en stap (een herbeoordeling vervangt het vorige)
+      db.prepare("SELECT stuk_id, stap, uitkomst, bewijskracht FROM besluit WHERE stap IN ('dkim', 'afzender') ORDER BY id").all().forEach(function (b) {
+        const s = st[b.stuk_id]; if (!s) return;
+        if (b.stap === 'dkim') s.dkim = b.uitkomst; else { s.afzender = b.uitkomst; s.kracht = b.bewijskracht; }
+      });
+      return Object.keys(st).map(function (k) { return st[k]; });
+    } finally { db.close(); }
+  } };
+}
+function mailMaand(iso) { const m = /^(\d{4})-(\d{2})/.exec(String(iso || '')); return m ? ['', 'jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'][Number(m[2])] + ' ' + m[1] : null; }
+// rijen (intakeLezer) + register + pagina's → { voorstellen: [{ pad, knoop, adres, n, dkim, zaad }], tel }. Puur.
+function mailPlan(rijen, reg, paginas, opties) {
+  opties = opties || {};
+  const eigen = new Set((opties.eigenAdressen || []).map(function (a) { return String(a).trim().toLowerCase(); }));
+  const knopen = {}; (reg.knopen || []).forEach(function (k) { knopen[k.id] = k; });
+  const anker = ankers(paginas.filter(function (p) { return !p.persoon; }), knopen);
+  const bekend = new Set();
+  (reg.handvatten || []).forEach(function (h) { if (h.soort === 'mail') bekend.add(String(h.waarde_norm || '').toLowerCase()); });   // ook vervallen: niet opnieuw voorstellen
+  paginas.forEach(function (p) { (p.mailadressen || []).forEach(function (a) { bekend.add(String(a).toLowerCase()); }); });
+  const per = {};
+  rijen.forEach(function (r) {
+    const hoek = /<([^<>\s]+)>\s*$/.exec(String(r.van || ''));   // "Naam <adres>" → adres
+    const a = (hoek ? hoek[1] : String(r.van || '')).trim().toLowerCase();
+    if (!MAIL_RE.test(a) || eigen.has(a)) return;
+    const x = per[a] = per[a] || { n: 0, dkim: 0, knopen: {}, anders: 0, data: [] };
+    x.n++; if (r.dkim === 'uitgelijnd') x.dkim++;
+    if (r.ontvangen) x.data.push(String(r.ontvangen));
+    if (r.afzender == null) return;   // niet beoordeeld (vastgehouden, buiten de router): telt niet voor de organisatie
+    if (r.afzender !== 'onbekend' && (r.kracht === 'hoog' || r.kracht === 'redelijk')) x.knopen[r.afzender] = (x.knopen[r.afzender] || 0) + 1;
+    else x.anders++;
+  });
+  const tel = { adressen: Object.keys(per).length, genoeg: 0, voorstellen: 0, reden: {} };
+  const reden = function (w) { tel.reden[w] = (tel.reden[w] || 0) + 1; };
+  const uit = [];
+  Object.keys(per).sort().forEach(function (a) {
+    const x = per[a];
+    if (x.n < MAIL_VOORSTEL.min_stukken || x.dkim < MAIL_VOORSTEL.min_dkim) return reden('te_weinig');
+    tel.genoeg++;
+    const ids = Object.keys(x.knopen);
+    if (ids.length !== 1 || x.anders) return reden(ids.length ? 'niet_eenduidig' : 'geen_organisatie');
+    const k = knopen[ids[0]], p = anker[ids[0]];
+    if (!k || k.soort === 'persoon' || k.id === 'PRIVE' || /^per:/.test(String(k.id))) return reden('geen_organisatie');
+    if (!p) return reden('pagina_niet_bij');
+    const dom = a.split('@')[1];
+    if (!(p.domeinen || []).some(function (d) { return dom === d || dom.slice(-(d.length + 1)) === '.' + d; })) return reden('niet_eigen_domein');
+    if (bekend.has(a)) return reden('al_kenmerk');
+    const data = x.data.sort(), van = mailMaand(data[0]), tot = mailMaand(data[data.length - 1]);
+    uit.push({ pad: p.pad, knoop: k.id, adres: a, n: x.n, dkim: x.dkim,
+      zaad: 'mail ' + a + ': ' + x.dkim + ' mails met kloppende DKIM' + (van ? ' (' + (van === tot ? van : van + '–' + tot) + ')' : '') });
+  });
+  uit.sort(function (a, b) { return b.dkim - a.dkim || (a.adres < b.adres ? -1 : 1); });
+  const mee = uit.slice(0, MAIL_VOORSTEL.max_per_nacht);
+  tel.voorstellen = mee.length; if (uit.length > mee.length) tel.reden.later = uit.length - mee.length;
+  return { voorstellen: mee, tel: tel };
+}
+// Zet adres + zaad-regel in de frontmatter (alleen als inline-lijst of afwezig); → { tekst } of { fout }. Toetst met leesPagina dat er
+// verder niets veranderde: dezelfde velden, alleen mailadressen +1 en zaad +1.
+function metMailadres(rel, tekst, adres, zaad) {
+  const crlf = /\r\n/.test(tekst), t = String(tekst).replace(/\r\n?/g, '\n');
+  const oud = leesPagina(rel, t);
+  if (oud.fouten.length) return { fout: 'pagina niet geldig: ' + oud.fouten[0] };
+  if (oud.mailadressen.indexOf(adres) >= 0) return { fout: 'staat er al' };
+  const fm = frontmatter(t), r = fm.regels.slice();
+  function zet(veld, waarde, naVelden) {
+    const i = r.findIndex(function (x, j) { return j > 0 && j < fm.eind && new RegExp('^' + veld + ':').test(x); });
+    if (i >= 0) {
+      const m = /^[A-Za-z_]+:\s*(\[.*\])\s*$/.exec(r[i]);
+      if (!m) return 'veld ' + veld + ' is geen inline-lijst';
+      const l = waardeVan(m[1]).concat([waarde]);
+      r[i] = veld + ': [' + l.map(function (w) { return JSON.stringify(String(w)); }).join(', ') + ']';
+      return null;
+    }
+    let na = -1;
+    naVelden.forEach(function (v) { const j = r.findIndex(function (x, jj) { return jj > 0 && jj < fm.eind && new RegExp('^' + v + ':').test(x); }); if (j > na) na = j; });
+    if (na < 0) return 'geen plek voor ' + veld;
+    r.splice(na + 1, 0, veld + ': [' + JSON.stringify(String(waarde)) + ']'); fm.eind++;
+    return null;
+  }
+  const f1 = zet('mailadressen', adres, ['domeinen', 'aliases', 'aliassen', 'naam']);
+  if (f1) return { fout: f1 };
+  const f2 = zet('zaad', zaad, ['voor', 'mailadressen']);
+  if (f2) return { fout: f2 };
+  const nieuw = r.join('\n'), q = leesPagina(rel, nieuw);
+  if (q.fouten.length) return { fout: 'na het schrijven niet geldig: ' + q.fouten[0] };
+  const kern = function (p, zonderAdres) { const c = Object.assign({}, p); delete c.sha; c.mailadressen = p.mailadressen.filter(function (x) { return x !== zonderAdres; }); c.zaad = p.zaad.filter(function (x) { return x !== zaad; }); return JSON.stringify(c); };
+  if (q.mailadressen.indexOf(adres) < 0 || q.zaad.indexOf(zaad) < 0 || kern(q, adres) !== kern(oud, adres)) return { fout: 'na het schrijven veranderde er meer dan het adres' };
+  return { tekst: crlf ? nieuw.replace(/\n/g, '\r\n') : nieuw };
+}
+
 function maak(o) {
   const vault = o.vault, nu = o.nu || Date.now, log = o.log || function () {};
   o.lijst = o.lijst || lijstMapVan(vault);
@@ -2503,7 +2614,26 @@ function maak(o) {
     log('ovis-kaarten ' + JSON.stringify({ gezet: uit.gezet, weg: uit.weg, fouten: uit.fouten.length, droog: !!opties.droog }));
     return uit;
   }
-  return { vind: vind, leesAlles: leesAlles, leesEntiteiten: leesEntiteiten, compileer: compileer, bibliothecaris: bibliothecaris, register: register, kaarten: kaarten };
+  // wv1920: vaste mailadressen als voorgesteld kenmerk op de pagina (vóór het compileren in de nachtronde). opties: { droog, grendel }.
+  // Schrijven alleen met grendel (de aanroeper bewijst dat) en via o.wijzig (vault-veilig, compare-and-set). Uitvoer zonder adressen.
+  async function mailVoorstellen(opties) {
+    opties = opties || {};
+    if (!o.intake || typeof o.intake.rijen !== 'function') return { gemeten: false, reden: 'geen intake-lezer' };
+    let rijen;
+    try { rijen = o.intake.rijen(); } catch (e) { return { gemeten: false, reden: String(e && e.message || e).slice(0, 80) }; }
+    const reg = await register(), paginas = leesAlles();
+    const pl = mailPlan(rijen, reg, paginas, { eigenAdressen: typeof o.eigenAdressen === 'function' ? o.eigenAdressen() : [] });
+    const uit = { gemeten: true, tel: pl.tel, geschreven: 0, fouten: [] };
+    if (opties.droog || !opties.grendel || typeof o.wijzig !== 'function') { uit.droog = true; return uit; }
+    for (const v of pl.voorstellen) {
+      let fout = null;
+      const gelukt = o.wijzig(path.join(vault, v.pad), function (t) { const y = metMailadres(v.pad, t, v.adres, v.zaad); if (y.fout) { fout = y.fout; return null; } return y.tekst; });
+      if (gelukt && !fout) uit.geschreven++; else uit.fouten.push({ knoop: v.knoop, fout: fout || 'niet geschreven (pagina veranderde steeds)' });
+    }
+    log('ovis-mailvoorstel ' + JSON.stringify({ voorstellen: pl.voorstellen.length, geschreven: uit.geschreven, fouten: uit.fouten.length }));
+    return uit;
+  }
+  return { vind: vind, leesAlles: leesAlles, leesEntiteiten: leesEntiteiten, compileer: compileer, bibliothecaris: bibliothecaris, register: register, kaarten: kaarten, mailVoorstellen: mailVoorstellen };
 }
 
 // Box-rij bij nieuwe bevindingen (de aanroeper schrijft hem met vault-veilig; geen waarden van contactvelden, Fable wv979 #10)
@@ -2533,6 +2663,7 @@ module.exports = { maak: maak, boxRijFout: boxRijFout, leesPagina: leesPagina,
   BLOK_BEGIN: BLOK_BEGIN, BLOK_EIND: BLOK_EIND, SCHRIJVERS_OK: SCHRIJVERS_OK,
   potMeting: potMeting, potChecks: potChecks, kaartPot: kaartPot, potFactuur: potFactuur, potEersteMag: potEersteMag, POT_SQL: POT_SQL, POT_BEVINDING_RE: POT_BEVINDING_RE,
   vjMeting: vjMeting, vjNu: vjNu, vjKoppel: vjKoppel, vjSchrijf: vjSchrijf, vjRegister: vjRegister, vjGenoemd: vjGenoemd, VJ_BEVINDING_RE: VJ_BEVINDING_RE,
+  intakeLezer: intakeLezer, mailPlan: mailPlan, metMailadres: metMailadres, MAIL_VOORSTEL: MAIL_VOORSTEL,
   bankLezer: bankLezer, bankMeting: bankMeting, bankChecks: bankChecks, leesRekening: leesRekening, leesBankregels: leesBankregels, bankBlokTekst: bankBlokTekst,
   bankRegelsBlokTekst: bankRegelsBlokTekst, bankKaartZin: bankKaartZin, orgOpNaam: orgOpNaam, BANK_SQL: BANK_SQL, BANK_BEVINDING_RE: BANK_BEVINDING_RE, REST_BEVINDING_RE: REST_BEVINDING_RE, BANKREGELS_PAD: BANKREGELS_PAD,
   finMeting: finMeting, finChecks: finChecks, leesMedewerker: leesMedewerker, leesKern: leesKern, finKernBlokTekst: finKernBlokTekst, finKaartZin: finKaartZin, kaartFin: kaartFin,

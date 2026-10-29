@@ -860,8 +860,13 @@ function maak(o) {
         let eigen = null;
         if (o.marker) {
           const vrij = db.prepare('SELECT omschrijving, waarde FROM vrij_veld WHERE stuk_id = ?').all(s.stuk_id).map(function (v) { return v.omschrijving + ': ' + (v.waarde || ''); });
-          eigen = o.marker.beoordeel({ teksten: lt.delen.map(function (d) { return d.tekst; }).concat(vrij), bijlagenamen: namen, onderwerp, afzender: vanAdres,
-            leesbaar: lt.onleesbaar.length || lt.deels.length ? false : undefined, scan: s.profiel === 'scansnap@1' }, {});
+          // wv1920 (Fable-review): de afzender telt voor de eigen-post-uitzondering alleen met DKIM uitgelijnd (From is te vervalsen);
+          // een deel uit OCR sluit de uitzondering uit
+          const arM = lt.mail && lt.mail.ar.length ? lt.mail.ar : (meta.authentication_results ? [meta.authentication_results] : []);
+          const dkimM = s.profiel === 'mail@1' ? dkimUitslag(arM, vanAdres, { authserv: 'mx.google.com' }) : null;
+          eigen = o.marker.beoordeel({ teksten: lt.delen.map(function (d) { return d.tekst; }).concat(vrij), bijlagenamen: namen, onderwerp,
+            afzender: dkimM && dkimM.uitgelijnd ? vanAdres : '', leesbaar: lt.onleesbaar.length || lt.deels.length ? false : undefined,
+            scan: s.profiel === 'scansnap@1', ocr: !!lt.ocr }, {});
         }
         const routerMarker = !eigen ? 'niet_gedraaid' : (!eigen.tegenhouden ? 'geen' : (eigen.regel === 6 ? 'niet_te_lezen' : 'gemarkeerd'));
         // De router scherpt alleen aan, nooit versoepelen (Fable wv980 #1): zei de ontvangstlaag 'niet_te_lezen' of 'gemarkeerd', dan blijft dat

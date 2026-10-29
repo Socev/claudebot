@@ -275,6 +275,28 @@ test('mail: doorgestuurd door David, DKIM uit het origineel, label van de route 
   r.sluit();
 });
 
+test('wv1920 (Fable-review): de poort krijgt de afzender alleen met DKIM uitgelijnd, en hoort of er OCR in het spel is', async () => {
+  const L = logboek();
+  const mail = (ar) => [ar, 'From: Kliniek <info@kliniek.example>', 'Subject: uw afspraak', 'Content-Type: text/plain; charset=utf-8', '', 'Tot ziens op de afspraak.'].filter(Boolean).join('\r\n');
+  const met = L.zet({ bron: 'gmail:david', profiel: 'mail@1', meta: { van: 'info@kliniek.example', onderwerp: 'uw afspraak', aan: [] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('Authentication-Results: mx.google.com; dkim=pass header.d=kliniek.example') }] });
+  const zonder = L.zet({ bron: 'gmail:david', profiel: 'mail@1', meta: { van: 'info@kliniek.example', onderwerp: 'uw afspraak 2', aan: [] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('Authentication-Results: mx.google.com; dkim=fail header.d=kliniek.example') }] });
+  const foto = L.zet({ bron: 'gmail:david', profiel: 'mail@1', meta: { van: 'info@kliniek.example', onderwerp: 'foto', aan: [] },
+    delen: [{ rol: 'origineel', mime: 'message/rfc822', bytes: mail('Authentication-Results: mx.google.com; dkim=pass header.d=kliniek.example') }, { rol: 'bijlage', mime: 'image/png', bytes: 'nep-png-2' }] });
+  const gezien = [];
+  const spion = { beoordeel: function (st, op) { gezien.push({ onderwerp: st.onderwerp, afzender: st.afzender, ocr: st.ocr }); return poort.beoordeel(st, op); }, MIN_TEKST: poort.MIN_TEKST, VERSIE: poort.VERSIE };
+  const r = R.maak(Object.assign({ dir: L.dir }, stubs({ marker: spion, ocr: async function (p, mime, werk) { fs.writeFileSync(path.join(werk, 'p-1.png'), 'x'); return 'Een gewone foto van de wachtkamer, verder niets bijzonders te zien.'; } })));
+  await r.ronde();
+  const v = (o) => gezien.find((g) => g.onderwerp === o);
+  assert.equal(v('uw afspraak').afzender, 'info@kliniek.example');
+  assert.equal(v('uw afspraak 2').afzender, '');
+  assert.equal(v('uw afspraak').ocr, false);
+  assert.equal(v('foto').ocr, true);
+  assert.ok(met && zonder && foto);
+  r.sluit();
+});
+
 test('kaartcode: één twijfel- en markerkaart per dag binnen de kaartgrenzen; de nieuwste sluit de oudere', async () => {
   const k = R.kaartenVoorDag({ datum: '2026-10-27', twijfel: 4, marker: 1, focus_twijfel: 'stk_20261027_00000001' });
   assert.equal(k.length, 2);

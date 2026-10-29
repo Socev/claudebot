@@ -318,6 +318,10 @@ jobs:
       - name: "ovis-register (wv979, compiler + Bibliothecaris)"
         if: ${{ !cancelled() }}
         run: bash test/ovis-register.sh
+      # wv1920 (OVIS Intake 3e): uitzonderingslijst eigen post in de patiëntpoort + vaste mailadressen als voorgesteld kenmerk tot de weekbundel.
+      - name: "ovis-mailvoorstel (wv1920, eigen post + mailadressen)"
+        if: ${{ !cancelled() }}
+        run: bash test/ovis-mailvoorstel.sh
       # Datumdetector-route (wv1275, SB2 fase 2): POST /datums met een nep-detector — realpath per aanroep, kaal milieu, grenzen,
       # schaduwlog zonder tekst/geboortedatum (0700/0600, geen symlink, 30 dagen), koppeling in server.js en uitrol.sh.
       - name: "datums (wv1275, POST /datums)"

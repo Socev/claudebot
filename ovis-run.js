@@ -175,7 +175,7 @@ function grendelVast() {
 }
 
 (async function () {
-  if (['dag', 'afroep', 'nacht', 'bibliothecaris', 'export', 'voorjou', 'zegel'].indexOf(modus) < 0) stop(2, { ok: false, fout: 'gebruik: dag|afroep|nacht|bibliothecaris|export <pad>|voorjou [--schrijf]|zegel <pad>' });
+  if (['dag', 'afroep', 'nacht', 'bibliothecaris', 'export', 'voorjou', 'zegel', 'mailvoorstel'].indexOf(modus) < 0) stop(2, { ok: false, fout: 'gebruik: dag|afroep|nacht|bibliothecaris|export <pad>|voorjou [--schrijf]|zegel <pad>|mailvoorstel' });
   if (modus === 'zegel') {   // wv1011: geen databank nodig; alleen claude kan de zegelsleutel lezen; schrijven alleen onder de vault-grendel
     const rel = String(arg[1] || '');
     if (!/^10_Zakelijk\/[^\0]+\.md$/.test(rel) || rel.split('/').indexOf('..') >= 0 || rel.indexOf('\\') >= 0) stop(2, { ok: false, fout: 'zegel: pad onder 10_Zakelijk/ naar een .md' });
@@ -198,16 +198,28 @@ function grendelVast() {
     schrijf: function (p, t) { VV.schrijf(p, t); }, log: function () {}, rekeningen: rekeningen, pot: potLezer(), vj: vjLezer,
     bank: R.bankLezer(path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite')),   // wv1010: plek 6, alleen lezen
     fin: finD1() ? { d1: finD1() } : null,   // wv1012: plek 8, alleen lezen
-    rest: restLezer() });   // wv1013: plek 9, alleen lezen; wv1774: plek 13–14
+    rest: restLezer(),   // wv1013: plek 9, alleen lezen; wv1774: plek 13–14
+    // wv1920: vaste mailadressen uit het intake-logboek (alleen lezen) als voorgesteld kenmerk op de pagina; schrijven via vault-veilig
+    intake: R.intakeLezer(path.join(process.env.INTAKE_DIR || '/opt/data/intake', 'intake.sqlite')),
+    eigenAdressen: function () { try { return JSON.parse(fs.readFileSync(path.join(process.env.INTAKE_DIR || '/opt/data/intake', 'router.json'), 'utf8')).eigen_adressen || []; } catch (e) { return []; } },
+    wijzig: function (p, f) { return VV.wijzig(p, f); } });
   try {
     if (modus === 'nacht') {
       if (arg.indexOf('--buiten-venster') < 0 && uurAmsterdam() !== 1) stop(1, { ok: false, fout: 'nachtronde alleen 01:00-02:00 (Amsterdam); --buiten-venster om af te wijken' });
       if (!grendelVast()) stop(1, { ok: false, fout: 'grendel ' + LOCK + ' niet vastgehouden: start met flock -w 300 ' + LOCK + ' node ovis-run.js nacht' });
+      // wv1920: eerst de mailvoorstellen op de pagina's, dan compileren (dan staan ze vannacht al als voorgesteld in het register)
+      let mv;
+      try { mv = await reg.mailVoorstellen({ droog: droog, grendel: true }); } catch (e) { mv = { gemeten: false, reden: String(e && e.message || e).slice(0, 80) }; }
       const c = await reg.compileer('nacht', { droog: droog, grendel: true });
+      c.mail_voorstellen = mv;
       if (fs.realpathSync(VAULT) === fs.realpathSync(ECHTE_VAULT) && fs.existsSync(REGISTER_JSON)) {   // wv1013: plek 10
         try { c.register_json = await exporteer(reg, REGISTER_JSON, droog, { nacht: true }); } catch (e) { c.register_json = { fout: String(e && e.message || e).slice(0, 120) }; c.fouten.push({ pad: 'register.json', fout: c.register_json.fout }); }
       }
       stop(0, Object.assign({ ok: true }, c));
+    }
+    if (modus === 'mailvoorstel') {   // wv1920: machinekamer; zonder --droog alleen onder de grendel
+      if (!droog && !grendelVast()) stop(1, { ok: false, fout: 'mailvoorstel: alleen onder de vault-grendel (flock -w 300 ' + LOCK + ' node ovis-run.js mailvoorstel) of met --droog' });
+      stop(0, Object.assign({ ok: true }, await reg.mailVoorstellen({ droog: droog, grendel: !droog })));
     }
     if (modus === 'dag' || modus === 'afroep') stop(0, Object.assign({ ok: true }, await reg.compileer(modus, { droog: droog })));
     if (modus === 'bibliothecaris') {

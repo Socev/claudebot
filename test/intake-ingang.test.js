@@ -525,7 +525,8 @@ test('marker: patientpoort-2.0 op de 23 toetsgevallen', () => {
   const G = [
     ['patientbrief digitaal', { teksten: [BRIEF], bijlagenamen: ['scan-digitaal.pdf'] }, geen, true],
     ['patientbrief scan', { teksten: [BRIEF], bijlagenamen: ['scan-scan.pdf'], scan: true }, geen, true],
-    ['patientbrief scan met eigen lijst', { teksten: [BRIEF], scan: true }, eigen, false],
+    // wv1920 (Fable-review): ook met het eigen BSN vast — een scan en arts-aan-arts-taal ("geachte collega", "uw patiente") sluiten de uitzondering uit
+    ['patientbrief scan met eigen lijst', { teksten: [BRIEF], scan: true }, eigen, true],
     ['patientbrief scan eigen + vreemd BSN', { teksten: [BRIEF + '\nBSN partner: 123456782'], scan: true }, eigen, true],
     ['factuur scan', { teksten: [FACTUUR], bijlagenamen: ['factuur-scan.pdf'], scan: true }, geen, false],
     ['lege scan', { teksten: [''], bijlagenamen: ['leeg-scan.pdf'], leesbaar: false, scan: true }, geen, true],
