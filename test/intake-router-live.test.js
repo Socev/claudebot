@@ -142,7 +142,12 @@ test('live: vastgehouden stuk → 0 Jev-, 0 modelaanroepen en 0 vaultbestanden; 
   assert.equal(E.tel.jev.length, 1); assert.equal(E.tel.indeling.length, 1);
   assert.equal(E.bestanden().length, 1);
   assert.deepEqual(E.db.prepare('SELECT leren_mag FROM correctie ORDER BY id').all().map((c) => c.leren_mag), [0, 0]);
-  assert.deepEqual(E.r.werkstroomTel(), { twijfel: 0, vastgehouden: 0, binnen: 0, verwerkt: 2 });   // wv2002: bewaard + verwerkt = af
+  // wv2002: bewaard + verwerkt = af, maar Gmail telt in MailMan (review ZOU 5: anders één mail twee keer); een praktijkstuk telt wel
+  assert.deepEqual(E.r.werkstroomTel(), { twijfel: 0, vastgehouden: 0, binnen: 0, verwerkt: 0 });
+  E.db.prepare("UPDATE live_stuk SET bron = 'outlook:tolgaarde' WHERE stuk_id = ?").run(gem);
+  assert.equal(E.r.werkstroomTel().verwerkt, 1);
+  assert.deepEqual((await E.r.appWerkstroom('verwerkt', 50)).stukken.map((x) => x.stuk_id), [gem]);
+  E.db.prepare("UPDATE live_stuk SET bron = 'gmail:david' WHERE stuk_id = ?").run(gem);
   assert.equal((await E.r.appWerkstroom('wacht', 50)).stukken.length, 0);
   assert.equal(E.db.prepare("SELECT door FROM besluit WHERE stuk_id = ? AND stap = 'marker_keuze'").get(gem2).door, 'david');
   // niets wacht meer → de markerkaart gaat dicht

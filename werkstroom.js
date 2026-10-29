@@ -67,16 +67,17 @@ function maak(o) {
       wilMm ? bron('mailman', function () {
         const pvs = mm().werkstroomTel().map(function (p) { return p.id; }).filter(function (id) { return pvVan(id) && !(af && id === PRIVE); });
         if (!pvs.length) return { rijen: [], postvakken: [] };
-        const uit = { rijen: [], postvakken: [] };
+        const uit = { rijen: [], postvakken: [], afgekapt: false };
         for (const id of pvs) {   // per postvak (werkstroomLijst kent één of alle); hooguit twee postvakken
           const x = mm().werkstroomLijst(stap === 'besluit' ? 'binnen' : stap, id);
           if (!x) continue;
           uit.rijen = uit.rijen.concat(x.rijen);
+          uit.afgekapt = uit.afgekapt || !!x.afgekapt;
           uit.postvakken = uit.postvakken.concat(x.postvakken);
         }
         return uit;
       }) : null,
-      wilIk ? bron('intake', function () { return ir().appWerkstroom(stap === 'intake' ? 'wacht' : stap, MAX); }) : null,
+      wilIk ? bron('intake', function () { return ir().appWerkstroom(stap === 'intake' ? 'wacht' : stap, MAX + 1); }) : null,
       stap === 'facturen' && !pvSleutel ? bron('facturen', function () { return fac('/app/facturen/lijst/beoordelen', opt); }) : null,
     ]);
     let regels = [];
@@ -84,14 +85,15 @@ function maak(o) {
     if (m && m.fout) fouten.push('mailman');
     else if (m) regels = regels.concat(m.rijen.map(function (r) { return { sleutel: 'mm-' + r.id, bron: 'mailman', postvak: r.postvak, tijd: r.ontvangen || r.tijd, mm: r }; }));
     if (i && i.fout) fouten.push('intake');
-    else if (i) regels = regels.concat(i.stukken.filter(function (s) { return pvVan(s.bron) && !(af && s.bron === PRIVE); })
+    else if (i) regels = regels.concat(i.stukken.slice(0, MAX).filter(function (s) { return pvVan(s.bron) && !(af && s.bron === PRIVE); })
       .map(function (s) { return { sleutel: 'ik-' + s.stuk_id, bron: 'intake', postvak: s.bron, tijd: s.op, stuk: s }; }));
     if (f && f.fout) fouten.push('facturen');
     else if (f) regels = regels.concat((f.facturen || []).map(function (x) { return { sleutel: 'fac-' + x.id, bron: 'facturen', postvak: null, tijd: x.aangemaakt_op || null, factuur: x }; }));
     // wachtende stappen: oudste eerst (ontwerp § 4.2); overzichtsstappen: nieuwste eerst
     const oudsteEerst = stap === 'twijfel' || stap === 'intake' || stap === 'facturen';
     regels.sort(function (a, b) { const x = String(a.tijd || ''), y = String(b.tijd || ''); return oudsteEerst ? (x < y ? -1 : x > y ? 1 : 0) : (x < y ? 1 : x > y ? -1 : 0); });
-    const afgekapt = regels.length > MAX;
+    // afgekapt: een bron gaf meer dan 200 (per bron gevraagd met LIMIT 201), of samen meer dan 200 (review wv2002 KAN 7)
+    const afgekapt = regels.length > MAX || !!(m && !m.fout && m.afgekapt) || !!(i && !i.fout && i.stukken.length > MAX);
     return { ok: true, stap, postvak: pvSleutel || null, regels: regels.slice(0, MAX), afgekapt,
       mailman: m && !m.fout ? { postvakken: m.postvakken } : undefined,
       intake: i && !i.fout ? { live: i.live, entiteiten: i.entiteiten } : undefined,

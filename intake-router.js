@@ -1329,15 +1329,15 @@ function maak(o) {
   }
   /*
    * Werkstroom (wv2002, ontwerp 29-10-2026 § 6): alleen lezen, goedkope bronnen. wacht = wat op David wacht (live twijfel en vastgehouden,
-   * oudste eerst); verwerkt = live stukken die de laatste 7 dagen af kwamen; binnen = stukken van de laatste 48 uur die niet via Gmail
-   * kwamen (Gmail staat al in MailMan). Zelfde vorm en privacygrens als het Router-overzicht (stukVoorApp); geen herberekening, geen
+   * oudste eerst); verwerkt = live stukken die de laatste 7 dagen af kwamen; binnen = stukken van de laatste 48 uur. Binnen en verwerkt
+   * zonder Gmail: die mail staat al in MailMan (review wv2002 ZOU 5: anders één mail twee keer). Zelfde vorm en privacygrens als het Router-overzicht (stukVoorApp); geen herberekening, geen
    * 30-dagenscan. max ≤ 200.
    */
   async function appWerkstroom(soort, max) {
-    const n = Math.min(Math.max(1, max | 0), 200);
+    const n = Math.min(Math.max(1, max | 0), 201);   // 201: de werkstroom ziet zo of er meer dan 200 zijn
     let rijen;
     if (soort === 'wacht') rijen = db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM live_stuk l JOIN router_stuk r ON r.stuk_id = l.stuk_id AND r.versie = l.versie WHERE l.staat IN ('twijfel','vastgehouden') ORDER BY l.sinds, l.stuk_id LIMIT ?").all(n);
-    else if (soort === 'verwerkt') rijen = db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM live_stuk l JOIN router_stuk r ON r.stuk_id = l.stuk_id AND r.versie = l.versie WHERE l.staat IN ('automatisch','klaar','bewaard','weg') AND l.sinds >= ? ORDER BY l.sinds DESC, l.stuk_id LIMIT ?").all(nuIso(nu() - 7 * DAG), n);
+    else if (soort === 'verwerkt') rijen = db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM live_stuk l JOIN router_stuk r ON r.stuk_id = l.stuk_id AND r.versie = l.versie WHERE l.staat IN ('automatisch','klaar','bewaard','weg') AND l.sinds >= ? AND l.bron NOT LIKE 'gmail:%' ORDER BY l.sinds DESC, l.stuk_id LIMIT ?").all(nuIso(nu() - 7 * DAG), n);
     else if (soort === 'binnen') rijen = db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM router_stuk r JOIN stuk s ON s.stuk_id = r.stuk_id AND s.versie = r.versie WHERE r.status <> 'buiten_router' AND r.op >= ? AND s.bron NOT LIKE 'gmail:%' ORDER BY r.op DESC LIMIT ?").all(nuIso(nu() - 2 * DAG), n);
     else return null;
     const r = await regVoorApp();
@@ -1352,7 +1352,7 @@ function maak(o) {
     const w = wachtOpDavid();
     return { twijfel: w.twijfel.length, vastgehouden: w.vastgehouden.length,
       binnen: db.prepare("SELECT count(*) n FROM router_stuk r JOIN stuk s ON s.stuk_id = r.stuk_id AND s.versie = r.versie WHERE r.status <> 'buiten_router' AND r.op >= ? AND s.bron NOT LIKE 'gmail:%'").get(nuIso(nu() - 2 * DAG)).n,
-      verwerkt: db.prepare("SELECT count(*) n FROM live_stuk WHERE staat IN ('automatisch','klaar','bewaard','weg') AND sinds >= ?").get(nuIso(nu() - 7 * DAG)).n };
+      verwerkt: db.prepare("SELECT count(*) n FROM live_stuk WHERE staat IN ('automatisch','klaar','bewaard','weg') AND sinds >= ? AND bron NOT LIKE 'gmail:%'").get(nuIso(nu() - 7 * DAG)).n };
   }
   async function appOverzicht(n) {
     const r = await regVoorApp();

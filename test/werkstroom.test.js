@@ -149,5 +149,9 @@ test('paden: alleen kleine letters en bekende stappen; hooguit 200 regels', asyn
   assert.equal((await w.app('GET /app/werkstroom/lijst/onbekend', {})).status, 404);
   const l = await w.app('GET /app/werkstroom/lijst/binnen', {});
   assert.equal(l.status, 200); assert.equal(l.j.regels.length, 200); assert.equal(l.j.afgekapt, true);
+  // per postvak gefilterd: de bron zelf meldt dat er meer zijn (LIMIT 201), ook al blijven er precies 200 over (review KAN 7)
+  const pvL = await w.app('GET /app/werkstroom/lijst/binnen/gmail-david', {});
+  assert.equal(pvL.j.regels.length, 200); assert.equal(pvL.j.afgekapt, true);
+  assert.equal((await w.app('GET /app/werkstroom/lijst/binnen/gmail-groenhouten', {})).j.afgekapt, false);
   assert.equal(W.sleutelVan('gmail:david'), 'gmail-david'); assert.equal(W.sleutelVan('scanner:scansnap'), 'scanner-scansnap');
 });
