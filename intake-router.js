@@ -1491,12 +1491,12 @@ function kaartenVoorDag(x) {
   const herkomst = function (focus) { return { module: 'intake', handmatig: 'intake', doel: { scherm: 'intake', focus: focus ? 'stuk:' + focus : null } }; };
   if (x.twijfel > 0) uit.push({ sleutel: 'intake-twijfel-' + x.datum, soort: 'doen', waar: 'overal', prive: true, duur_min: Math.min(30, 2 + x.twijfel), volgorde: 30,
     titel: (x.twijfel === 1 ? '1 stuk' : x.twijfel + ' stukken') + ' in Intake — kies de bestemming',
-    waarom: 'OVIS Intake wist bij ' + (x.twijfel === 1 ? 'dit stuk' : 'deze stukken') + ' niet zeker van wie het is of waar het heen moet. Zonder jouw keuze blijft het in Intake staan en gaat het nergens heen.',
+    waarom: 'Intake wist bij ' + (x.twijfel === 1 ? 'dit stuk' : 'deze stukken') + ' niet zeker van wie het is of waar het heen moet. Zonder jouw keuze blijft het in Intake staan en gaat het nergens heen.',
     stappen: ['Open in de Socev-app Intake; de stukken die op je wachten staan bovenaan.', 'Kies per stuk de bestemming, of zeg van wie het is.', 'Klaar als er niets meer op je wacht; deze kaart gaat dan vanzelf dicht.'],
     herkomst: herkomst(x.focus_twijfel) });
   if (x.marker > 0) uit.push({ sleutel: 'intake-marker-' + x.datum, soort: 'doen', waar: 'overal', prive: true, duur_min: Math.min(30, 2 + x.marker), volgorde: 20,
     titel: (x.marker === 1 ? '1 stuk' : x.marker + ' stukken') + ' met mogelijk patiëntgegevens — kies wat ermee gebeurt',
-    waarom: 'OVIS Intake zag kenmerken die op patiëntgegevens kunnen wijzen en hield ' + (x.marker === 1 ? 'het stuk' : 'de stukken') + ' vast: niet naar een model en niet de Second Brain in. Alleen bewaren betekent 90 dagen, daarna weg.',
+    waarom: 'Intake zag kenmerken die op patiëntgegevens kunnen wijzen en hield ' + (x.marker === 1 ? 'het stuk' : 'de stukken') + ' vast: niet naar een model en niet de Second Brain in. Alleen bewaren betekent 90 dagen, daarna weg.',
     stappen: ['Open in de Socev-app Intake; de vastgehouden stukken staan bovenaan, je ziet ze volledig.', 'Kies per stuk: gewoon verwerken, alleen bewaren of weggooien.', 'Klaar als er niets meer vastgehouden wacht; deze kaart gaat dan vanzelf dicht.'],
     herkomst: herkomst(x.focus_marker) });
   return uit;

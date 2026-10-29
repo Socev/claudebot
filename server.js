@@ -16966,7 +16966,7 @@ const potApp = (function () {
 })();
 function potAppInfo() { return { aan: !!potApp, sleutel: !!process.env.CLOUDFLARE_API_TOKEN }; }
 async function appPot(req, res, a, route) {
-  if (!potApp) return appWeiger(res, 404, 'OVIS POT zit niet in deze versie van de pod', 'pot ontbreekt');
+  if (!potApp) return appWeiger(res, 404, 'POT zit niet in deze versie van de pod', 'pot ontbreekt');
   if (!process.env.CLOUDFLARE_API_TOKEN) return appWeiger(res, 503, 'de POT-gegevens zijn nu niet te lezen (geen Cloudflare-sleutel op de pod)', 'pot geen sleutel');
   if (!appTeller('pot', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur (max 600)', 'grens pot');
   const pad = route.slice('GET /app/pot/'.length);
