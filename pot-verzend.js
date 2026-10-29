@@ -199,7 +199,7 @@ function kaartAdres(rijen, nuKort, bron) {
     herkomst: { handmatig: 'pot-verzend', soort: 'adres', ids: rijen.map((r) => r.id), ...potDoel(rijen[0] && rijen[0].entiteit) },
     waarom: 'Socev zet een nota pas als concept klaar als het factuuradres in de Second Brain staat' + (viaRegister ? ' (vastgezet met je vingerafdruk)' : '') + ' en het hetzelfde is als het adres dat ' + app() + ' kent. Bij deze nota\'s klopt dat nog niet: ' + regels.join('; ') + '.',
     stappen: [...(viaRegister ? ["Staat er in Voor jou een kaart 'factuuradres voor POT-nota's — zo vastzetten?': kijk het adres na en druk Ja met je vingerafdruk."] : []),
-      ...(bevestig ? [OVIS ? "Klopt het nieuwe adres? Open OVIS POT › Nota's, tik op de nota en dan op 'Adres klopt'." : "Klopt het nieuwe adres? Open de POT-app, tab Nota's, en tik bij de nota op 'adres klopt'."] : []),
+      ...(bevestig ? [OVIS ? "Klopt het nieuwe adres? Open OVIS POT › Nota's en tik bij de nota op 'Adres klopt' (op je telefoon, met je vingerafdruk)." : "Klopt het nieuwe adres? Open de POT-app, tab Nota's, en tik bij de nota op 'adres klopt'."] : []),
       `Ontbreekt het adres of klopt het niet: zeg tegen Socev "factuuradres ${voorbeeld} is …". Socev zet het in de Second Brain` + (viaRegister ? '; daarna komt er een kaart om het vast te zetten.' : '.'),
       'Socev kijkt elke tien minuten opnieuw en zet het concept dan vanzelf klaar; deze kaart gaat daarna dicht.'],
     meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s wachten" : ' wacht'} op een factuuradres.` });
@@ -210,7 +210,7 @@ function kaartFout(rijen, nuKort) {
     titel: `${appKop()} — ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} niet klaargezet`,
     herkomst: { handmatig: 'pot-verzend', soort: 'fout', ids: rijen.map((r) => r.id), ...potDoel(rijen[0] && rijen[0].entiteit) },
     waarom: 'Socev kon deze nota\'s niet als concept klaarzetten: ' + rijen.map((r) => `${r.nummer} (${r.fout})`).join('; ').slice(0, 600) + '. Er staat voor deze nota\'s dus niets in Gmail, tenzij hieronder anders staat.',
-    stappen: [OVIS ? "Open OVIS POT › Nota's: bij deze nota's staat 'niet gelukt' (tik op de nota voor de reden)." : "Open de POT-app, tab Nota's: bij deze nota's staat 'niet gelukt' (houd je vinger op het label voor de reden).",
+    stappen: [OVIS ? "Open OVIS POT › Nota's: bij deze nota's staat 'niet gelukt', met de reden eronder." : "Open de POT-app, tab Nota's: bij deze nota's staat 'niet gelukt' (houd je vinger op het label voor de reden).",
       "Selecteer ze en tik nog eens op 'Zet klaar voor verzending'. Lukt het weer niet, zeg het dan in de machinekamer.",
       'Deze kaart gaat vanzelf dicht zodra ze opnieuw klaarstaan.'],
     meting: `${nuKort}: ${rijen.length} nota${rijen.length > 1 ? "'s" : ''} niet klaargezet.` });
@@ -291,7 +291,7 @@ function kaartVandaag(v, rijen) {
     herkomst: { handmatig: 'pot-verzend', soort: 'vandaag', vrijgave_id: v.id, ...potDoel(v.entiteit) },
     waarom: `Je gaf ${n > 1 ? `de nota's ${bereik(rijen.map((r) => r.nummer))}` : `nota ${rijen[0].nummer}`} vrij met je vingerafdruk. Socev verstuurt ze tussen 09:00 en 12:00, één mail per nota. Stuur ze niet zelf, anders gaan ze twee keer.`,
     stappen: ['Niets doen: na het versturen staat er één bericht in de app en gaat deze kaart dicht.',
-      OVIS ? "Toch stoppen: open OVIS POT › Nota's, tik op de nota en dan op Annuleer (kan tot hij verstuurd wordt)." : "Toch stoppen: open de POT-app, tab Nota's, en tik bij de nota op Annuleer (kan tot hij verstuurd wordt)."] });
+      OVIS ? "Toch stoppen: open OVIS POT › Nota's en tik bij de nota op Annuleer (kan tot hij verstuurd wordt)." : "Toch stoppen: open de POT-app, tab Nota's, en tik bij de nota op Annuleer (kan tot hij verstuurd wordt)."] });
 }
 // rijen: [{ nummer, reden, deadline }]
 function kaartNietAuto(rijen, nuKort) {
