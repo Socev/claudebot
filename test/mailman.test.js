@@ -999,7 +999,7 @@ test('B6+ archief: zonder Facturen-koppeling of als die faalt geen archiefactie 
 const VK_ADRES = 'voorbeeld@example.invalid';
 const AR_OK = 'mx.google.com;\r\n       dkim=pass header.i=@hapleusden.nl header.s=google header.b=abcdefgh;\r\n       spf=pass (google.com: domain of x@hapleusden.nl designates 192.0.2.1 as permitted sender) smtp.mailfrom=x@hapleusden.nl;\r\n       dmarc=pass (p=none sp=none dis=none) header.from=hapleusden.nl';
 function vkMail(o) {
-  return mail(Object.assign({ van: 'Praktijk Proef <info@hapleusden.nl>', aan: 'facturen@praktijk.invalid', onderwerp: 'gordelroos', labels: ['INBOX'],
+  return mail(Object.assign({ van: 'Praktijk Proef <proef@hapleusden.nl>', aan: 'facturen@praktijk.invalid', onderwerp: 'gordelroos', labels: ['INBOX'],
     bijlagen: [{ naam: '', mime: 'onbekend' }], tekst: '', auth: AR_OK, ct: 'multipart/mixed; boundary="x"', datum: klok }, o || {}));
 }
 function vkToestaan(dir, adres) {
@@ -1051,8 +1051,8 @@ test('B7-V kandidaat: domein precies, bijlage, niet verzonden, afzendercontrole;
   assert.equal(K.verkoopKandidaat(n({ van: 'a@hpgroenhouten.nl', auth: 'mx.google.com; dmarc=pass header.from=hpgroenhouten.nl' }), 'gmail:groenhouten').ok, true, 'tweede domein');
   assert.equal(K.verkoopKandidaat(n(), 'gmail:david').ok, false, 'privépostvak nooit');
   assert.equal(K.verkoopKandidaat(n({ van: 'info@ander.invalid' }), 'gmail:groenhouten').reden, 'domein');
-  assert.equal(K.verkoopKandidaat(n({ van: 'info@post.hapleusden.nl' }), 'gmail:groenhouten').reden, 'domein', 'subdomein telt niet');
-  assert.equal(K.verkoopKandidaat(n({ van: 'info@hapleusden.nl.ander.invalid' }), 'gmail:groenhouten').reden, 'domein');
+  assert.equal(K.verkoopKandidaat(n({ van: 'proef@post.hapleusden.nl' }), 'gmail:groenhouten').reden, 'domein', 'subdomein telt niet');
+  assert.equal(K.verkoopKandidaat(n({ van: 'proef@hapleusden.nl.ander.invalid' }), 'gmail:groenhouten').reden, 'domein');
   assert.equal(K.verkoopKandidaat(n({ labels: ['SENT'] }), 'gmail:groenhouten').reden, 'verzonden/concept');
   assert.equal(K.verkoopKandidaat(n({ labels: ['DRAFT'] }), 'gmail:groenhouten').reden, 'verzonden/concept');
   assert.equal(K.verkoopKandidaat(n({ bijlagen: [], ct: 'multipart/alternative' }), 'gmail:groenhouten').reden, 'geen bijlage');
