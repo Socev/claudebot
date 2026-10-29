@@ -760,12 +760,27 @@ test('4b registreer: één keer per run (idempotent), vaste foutcode, hooguit 5 
   assert.equal((await FR.registreer(t.rk, weiger, { bankbron, nu: NU })).open, 0);
   assert.equal(n, 5);
   assert.deepEqual(FR.laatste(t.rk, {}).antwoordcontract, { fout: 'scope.entiteit' });
-  // een fout van de aanroep zelf → alleen de HTTP-code; een vreemd antwoord → antwoord_onbekend
+  // --opnieuw zet de pogingen terug; daarna gaat hij weer mee
+  assert.equal((await FR.registreer(t.rk, weiger, { bankbron, nu: NU, opnieuw: true })).fouten.length, 1);
+  assert.equal(n, 6);
+  // een fout van de aanroep zelf → alleen de HTTP-code, telt niet als poging (RPC nog niet of niet meer aanwezig); een vreemd antwoord → antwoord_onbekend
   const r3 = draai(t, { snapshot: r.snapshot });
-  assert.deepEqual((await FR.registreer(t.rk, async () => { throw new Error('rpc sb_fin_run_zet http 400 https://x.invalid geheim'); }, { bankbron, nu: NU })).fouten, [{ run: r3.run, fout: 'rpc_http_400' }]);
-  assert.deepEqual((await FR.registreer(t.rk, async () => { throw new TypeError('fetch failed'); }, { bankbron, nu: NU })).fouten, [{ run: r3.run, fout: 'rpc_netwerk' }]);
-  assert.deepEqual((await FR.registreer(t.rk, async () => ({ ok: false, fout: 'NL91 ABNA 0417 1643 00 / € 1.234,56' }), { bankbron, nu: NU })).fouten, [{ run: r3.run, fout: 'antwoord_onbekend' }]);
-  assert.equal((await FR.registreer(t.rk, goed, { bankbron, nu: NU })).gezet, 1);
+  for (let i = 0; i < 7; i++) assert.deepEqual((await FR.registreer(t.rk, async () => { throw new Error('rpc sb_fin_run_zet http 404'); }, { bankbron, nu: NU, max: 1 })).fouten, [{ run: r3.run, fout: 'rpc_http_404' }]);
+  const zp = () => new DatabaseSync(path.join(t.rk, 'reken.sqlite'), { readOnly: true }).prepare('SELECT pogingen FROM supabase_zet WHERE run = ?').get(r3.run).pogingen;
+  assert.equal(zp(), 0);
+  assert.deepEqual((await FR.registreer(t.rk, async () => { throw new Error('rpc sb_fin_run_zet http 400 https://x.invalid geheim'); }, { bankbron, nu: NU, max: 1 })).fouten, [{ run: r3.run, fout: 'rpc_http_400' }]);
+  assert.deepEqual((await FR.registreer(t.rk, async () => { throw new TypeError('fetch failed'); }, { bankbron, nu: NU, max: 1 })).fouten, [{ run: r3.run, fout: 'rpc_netwerk' }]);
+  assert.deepEqual((await FR.registreer(t.rk, async () => ({ ok: false, fout: 'NL91 ABNA 0417 1643 00 / € 1.234,56' }), { bankbron, nu: NU, max: 1 })).fouten, [{ run: r3.run, fout: 'antwoord_onbekend' }]);
+  // run 3 en (na --opnieuw) run 2 gaan nu goed
+  assert.equal((await FR.registreer(t.rk, goed, { bankbron, nu: NU })).gezet, 2);
+  assert.deepEqual(FR.laatste(t.rk, {}).antwoordcontract, { query_run_id: 22 });
+  // nieuwste eerst: met max 1 gaat de run van zojuist mee, niet een oudere die nog openstaat
+  const r4 = draai(t, { snapshot: r.snapshot });
+  const r5 = draai(t, { snapshot: r.snapshot });
+  aanroepen.length = 0;
+  await FR.registreer(t.rk, goed, { bankbron, nu: NU, max: 1 });
+  assert.deepEqual(aanroepen.map((x) => x[1].p.pod_run), [r5.run]);
+  assert.ok(r4.run < r5.run);
 });
 
 test('4b CLI: registreer --droog geeft het contract zonder te versturen; zonder Supabase-omgeving een vaste foutcode', () => {

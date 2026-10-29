@@ -564,32 +564,36 @@ function contract(db, r, bankbron) {
 // Een fout van de aanroep zelf → korte vaste code (nooit de melding: die kan een adres of antwoordtekst dragen)
 function rpcFoutCode(e) { const m = /http (\d{3})/.exec(String(e && e.message || '')); return m ? 'rpc_http_' + m[1] : 'rpc_netwerk'; }
 /*
- * Zet runs die nog niet in Supabase staan: oudste eerst, hooguit opties.max (3) per keer; een geweigerde run hooguit REGISTREER_POGINGEN keer.
+ * Zet runs die nog niet in Supabase staan: nieuwste eerst (de run van zojuist gaat altijd mee), hooguit opties.max (3) per keer. Een geweigerd
+ * contract (vaste code van de RPC) telt als poging, hooguit REGISTREER_POGINGEN; een tijdelijke fout (netwerk, HTTP, schrijffout in Supabase:
+ * RPC nog niet of niet meer aanwezig) niet (diffreview wv1899 ZOU 5). opties.opnieuw: de pogingen van geweigerde runs eerst op 0.
  * rpc(fn, body) → Promise<json> (server.js: appSbRpc; CLI: rpcVanOmgeving). opties.droog: alleen de contracten teruggeven, niets versturen.
  * → { gezet, al, fouten: [{ run, fout }], open, contracten? }
  */
+const tijdelijk = (f) => /^(rpc_|schrijffout:)/.test(f);
 async function registreer(dir, rpc, opties) {
   const o = Object.assign({ max: 3, bankbron: path.join(path.dirname(STANDAARD_FACTUREN), 'bankbron'), nu: Date.now(), droog: false }, opties || {});
   if (!fs.existsSync(path.join(dir, 'reken.sqlite'))) return { gezet: 0, al: 0, fouten: [], open: 0 };
   const db = openReken(dir);
   try {
-    const open = db.prepare('SELECT r.* FROM reken_run r LEFT JOIN supabase_zet z ON z.run = r.id WHERE r.klaar_op IS NOT NULL AND r.uitkomst IS NOT NULL AND (z.run IS NULL OR (z.ok = 0 AND z.pogingen < ?)) ORDER BY r.id')
+    if (o.opnieuw && !o.droog) db.prepare('UPDATE supabase_zet SET pogingen = 0 WHERE ok = 0').run();
+    const open = db.prepare('SELECT r.* FROM reken_run r LEFT JOIN supabase_zet z ON z.run = r.id WHERE r.klaar_op IS NOT NULL AND r.uitkomst IS NOT NULL AND (z.run IS NULL OR (z.ok = 0 AND z.pogingen < ?)) ORDER BY r.id DESC')
       .all(REGISTREER_POGINGEN);
     const uit = { gezet: 0, al: 0, fouten: [], open: open.length };
     const beurt = open.slice(0, Math.max(1, Math.min(Number(o.max) || 3, 50)));
     if (o.droog) { uit.contracten = beurt.map((r) => contract(db, r, o.bankbron)); return uit; }
-    const zet = db.prepare('INSERT INTO supabase_zet (run, ok, run_id, query_run_id, fout, pogingen, op) VALUES (?, ?, ?, ?, ?, 1, ?) ON CONFLICT (run) DO UPDATE SET ok = excluded.ok, run_id = excluded.run_id, query_run_id = excluded.query_run_id, fout = excluded.fout, pogingen = supabase_zet.pogingen + 1, op = excluded.op');
+    const zet = db.prepare('INSERT INTO supabase_zet (run, ok, run_id, query_run_id, fout, pogingen, op) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (run) DO UPDATE SET ok = excluded.ok, run_id = excluded.run_id, query_run_id = excluded.query_run_id, fout = excluded.fout, pogingen = supabase_zet.pogingen + excluded.pogingen, op = excluded.op');
     for (const r of beurt) {
       let antw = null, fout = null, c = null;
       try { c = contract(db, r, o.bankbron); } catch (e) { fout = 'contract'; }
       if (c) { try { antw = await rpc('sb_fin_run_zet', { p: c }); } catch (e) { fout = rpcFoutCode(e); } }
       const op = new Date(o.nu).toISOString();
       if (!fout && antw && antw.ok === true && Number.isInteger(antw.run_id) && Number.isInteger(antw.query_run_id)) {
-        zet.run(r.id, 1, antw.run_id, antw.query_run_id, null, op);
+        zet.run(r.id, 1, antw.run_id, antw.query_run_id, null, 0, op);
         if (antw.nieuw === false) uit.al++; else uit.gezet++;
       } else {
         const f = fout || (antw && typeof antw.fout === 'string' && /^[a-zA-Z0-9_.:]{1,60}$/.test(antw.fout) ? antw.fout : 'antwoord_onbekend');
-        zet.run(r.id, 0, null, null, f, op);
+        zet.run(r.id, 0, null, null, f, tijdelijk(f) ? 0 : 1, op);
         uit.fouten.push({ run: r.id, fout: f });
       }
     }
@@ -628,12 +632,13 @@ async function main(argv) {
   const bankbron = a.bankbron || path.join(path.dirname(facturen), 'bankbron');
   let uit;
   if (cmd === 'run') {
+    const rpc = a.registreer ? rpcVanOmgeving() : null;   // zonder omgeving meteen weigeren, niet na de run (diffreview KAN)
     uit = run({ dir, facturen, bankbron: a.bankbron, entiteit: a.entiteit || 'tolgaarde', rekening: a.rekening,
       snapshot: a.snapshot, periode: { van: a.van || null, tot: a.tot || null }, nu });
     uit.opruim = opruim(dir, nu);
-    if (a.registreer) uit.supabase = await registreer(dir, rpcVanOmgeving(), { bankbron, nu });
+    if (rpc) uit.supabase = await registreer(dir, rpc, { bankbron, nu });
   } else if (cmd === 'registreer') {
-    uit = await registreer(dir, a.droog ? null : rpcVanOmgeving(), { bankbron, nu, max: a.max, droog: !!a.droog });
+    uit = await registreer(dir, a.droog ? null : rpcVanOmgeving(), { bankbron, nu, max: a.max, droog: !!a.droog, opnieuw: !!a.opnieuw });
   } else if (cmd === 'stand') uit = laatste(dir, { entiteit: a.entiteit || 'tolgaarde', status: a.status, max: a.max, regels: !!a.regels });
   else if (cmd === 'opruim') uit = opruim(dir, nu);
   else if (cmd === 'besluit') uit = besluit(dir, { factuur_ref: a.factuur, entry_refs: String(a['entry-refs'] || '').split(',').filter(Boolean), oordeel: a.oordeel, wie: a.wie, bron: a.bron, toelichting: a.toelichting }, nu);
