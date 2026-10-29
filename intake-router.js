@@ -1307,6 +1307,53 @@ function maak(o) {
   }
   function lensNamen(bs) { return (bs || []).map(function (b) { return b.lens + (b.zou_auto ? '' : '?'); }); }
   async function regVoorApp() { try { return await registerVers(); } catch (e) { return null; } }
+  // Eén stuk zoals de App het krijgt (wv2002: gedeeld door het Router-overzicht en de Werkstroom). PRIVACYGRENS: niet beoordeeld (vastgehouden,
+  // origineel ontbreekt) = alleen status, tijd, bron, profiel en soorten kenmerken. actief = de actieve regels voor "met je regels nu" (null: niet herberekenen).
+  function stukVoorApp(row, r, actief) {
+    const sam = safeJson(row.samenvatting) || {};
+    const ls = db.prepare('SELECT staat, keuze FROM live_stuk WHERE stuk_id = ?').get(row.stuk_id);
+    const basis = { stuk_id: row.stuk_id, status: row.status, op: row.op, bron: sam.bron || null, profiel: sam.profiel || null,
+      live: ls ? { staat: ls.staat, keuze: ls.keuze || null, uitgevoerd: db.prepare("SELECT lens, doel, pad FROM uitvoering WHERE stuk_id = ? AND pad LIKE '%.md' ORDER BY id DESC LIMIT 1").get(row.stuk_id) || null } : null };
+    if (row.status !== 'beoordeeld') return Object.assign(basis, { marker: sam.marker || null, soorten: Array.isArray(sam.soorten) ? sam.soorten : [] });
+    const s = stukBasis(row); const meta = s ? (safeJson(s.meta) || {}) : {};
+    const delen = s ? db.prepare('SELECT deel, rol, naam, mime FROM onderdeel WHERE stuk_id = ? ORDER BY deel').all(s.stuk_id) : [];
+    const m = s ? kenmerkenStuk(s, meta, delen, sam, r) : null;
+    // zonder register geen namen: een regel op de afzendernaam zou stil niet passen → dan niets herberekenen (Fable wv1408 #10)
+    const nu2 = m && r && actief ? herbereken(sam, m, actief) : null;
+    return Object.assign(basis, { onderwerp: m ? m.onderwerp.slice(0, 200) : '', van: m ? m.van_adres : '', van_naam: typeof meta.van_naam === 'string' ? meta.van_naam.slice(0, 80) : '',
+      bijlagen: m ? m.bijlagen.map(function (b) { return String(b.naam).slice(0, 120); }).slice(0, 10) : [],
+      soort: sam.soort || null, soort_kracht: sam.soort_kracht || null, afzender: sam.afzender || null, afzender_naam: naamVan(r, sam.afzender), afzender_kracht: sam.afzender_kracht || null,
+      entiteit: sam.entiteit || null, entiteit_kracht: sam.entiteit_kracht || null, label_route: sam.label_route || [], dkim: sam.dkim || null,
+      toen: lensNamen(sam.bestemmingen), toen_doel: sam.bestemmingen && sam.bestemmingen[0] ? sam.bestemmingen[0].doel || null : null, toen_regel: sam.regel || null, twijfel: !!sam.twijfel,
+      nu: nu2 ? lensNamen(nu2.bestemmingen) : null, nu_doel: nu2 && nu2.bestemmingen[0] ? nu2.bestemmingen[0].doel : null, nu_regel: nu2 && nu2.regel ? nu2.regel.id : null });
+  }
+  /*
+   * Werkstroom (wv2002, ontwerp 29-10-2026 § 6): alleen lezen, goedkope bronnen. wacht = wat op David wacht (live twijfel en vastgehouden,
+   * oudste eerst); verwerkt = live stukken die de laatste 7 dagen af kwamen; binnen = stukken van de laatste 48 uur die niet via Gmail
+   * kwamen (Gmail staat al in MailMan). Zelfde vorm en privacygrens als het Router-overzicht (stukVoorApp); geen herberekening, geen
+   * 30-dagenscan. max ≤ 200.
+   */
+  async function appWerkstroom(soort, max) {
+    const n = Math.min(Math.max(1, max | 0), 200);
+    let rijen;
+    if (soort === 'wacht') rijen = db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM live_stuk l JOIN router_stuk r ON r.stuk_id = l.stuk_id AND r.versie = l.versie WHERE l.staat IN ('twijfel','vastgehouden') ORDER BY l.sinds, l.stuk_id LIMIT ?").all(n);
+    else if (soort === 'verwerkt') rijen = db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM live_stuk l JOIN router_stuk r ON r.stuk_id = l.stuk_id AND r.versie = l.versie WHERE l.staat IN ('automatisch','klaar','bewaard','weg') AND l.sinds >= ? ORDER BY l.sinds DESC, l.stuk_id LIMIT ?").all(nuIso(nu() - 7 * DAG), n);
+    else if (soort === 'binnen') rijen = db.prepare("SELECT r.stuk_id, r.versie, r.status, r.op, r.samenvatting FROM router_stuk r JOIN stuk s ON s.stuk_id = r.stuk_id AND s.versie = r.versie WHERE r.status <> 'buiten_router' AND r.op >= ? AND s.bron NOT LIKE 'gmail:%' ORDER BY r.op DESC LIMIT ?").all(nuIso(nu() - 2 * DAG), n);
+    else return null;
+    const r = await regVoorApp();
+    const entiteiten = r ? Array.from(r.ent.values()).filter(function (e) { return e.eigen && KNOOP_RE.test(String(e.k || '')); }).map(function (e) { return { id: e.k, naam: e.naam || e.k }; }).sort(function (a, b) { return a.naam.localeCompare(b.naam); })
+      : Object.values(LABEL_KNOOP).map(function (k) { return { id: k, naam: k }; });
+    const lv = liveStand();
+    return { stukken: rijen.map(function (row) { return stukVoorApp(row, r, null); }), entiteiten,
+      live: { bronnen: Object.keys(lv).filter(function (b) { return lv[b] === true; }), lenzen: lenzenLive(), kennis_entiteiten: Object.keys(KENNIS_MAP) } };
+  }
+  // Tellingen voor de Werkstroom: alleen aantallen (wacht op David, en wat er de laatste 48 uur buiten Gmail binnenkwam en 7 dagen af kwam)
+  function werkstroomTel() {
+    const w = wachtOpDavid();
+    return { twijfel: w.twijfel.length, vastgehouden: w.vastgehouden.length,
+      binnen: db.prepare("SELECT count(*) n FROM router_stuk r JOIN stuk s ON s.stuk_id = r.stuk_id AND s.versie = r.versie WHERE r.status <> 'buiten_router' AND r.op >= ? AND s.bron NOT LIKE 'gmail:%'").get(nuIso(nu() - 2 * DAG)).n,
+      verwerkt: db.prepare("SELECT count(*) n FROM live_stuk WHERE staat IN ('automatisch','klaar','bewaard','weg') AND sinds >= ?").get(nuIso(nu() - 7 * DAG)).n };
+  }
   async function appOverzicht(n) {
     const r = await regVoorApp();
     const regels = regelsAlle();
@@ -1318,24 +1365,8 @@ function maak(o) {
       if (rg) treffers.set(rg.id, (treffers.get(rg.id) || 0) + 1);
     }
     const actief = regels.filter(function (y) { return y.actief; });
-    const stukken = db.prepare("SELECT stuk_id, versie, status, op, samenvatting FROM router_stuk WHERE status <> 'buiten_router' ORDER BY op DESC LIMIT ?").all(Math.min(Math.max(1, n | 0), 200)).map(function (row) {
-      const sam = safeJson(row.samenvatting) || {};
-      const ls = db.prepare('SELECT staat, keuze FROM live_stuk WHERE stuk_id = ?').get(row.stuk_id);
-      const basis = { stuk_id: row.stuk_id, status: row.status, op: row.op, bron: sam.bron || null, profiel: sam.profiel || null,
-        live: ls ? { staat: ls.staat, keuze: ls.keuze || null, uitgevoerd: db.prepare("SELECT lens, doel, pad FROM uitvoering WHERE stuk_id = ? AND pad LIKE '%.md' ORDER BY id DESC LIMIT 1").get(row.stuk_id) || null } : null };
-      if (row.status !== 'beoordeeld') return Object.assign(basis, { marker: sam.marker || null, soorten: Array.isArray(sam.soorten) ? sam.soorten : [] });
-      const s = stukBasis(row); const meta = s ? (safeJson(s.meta) || {}) : {};
-      const delen = s ? db.prepare('SELECT deel, rol, naam, mime FROM onderdeel WHERE stuk_id = ? ORDER BY deel').all(s.stuk_id) : [];
-      const m = s ? kenmerkenStuk(s, meta, delen, sam, r) : null;
-      // zonder register geen namen: een regel op de afzendernaam zou stil niet passen → dan niets herberekenen (Fable wv1408 #10)
-      const nu2 = m && r ? herbereken(sam, m, actief) : null;
-      return Object.assign(basis, { onderwerp: m ? m.onderwerp.slice(0, 200) : '', van: m ? m.van_adres : '', van_naam: typeof meta.van_naam === 'string' ? meta.van_naam.slice(0, 80) : '',
-        bijlagen: m ? m.bijlagen.map(function (b) { return String(b.naam).slice(0, 120); }).slice(0, 10) : [],
-        soort: sam.soort || null, soort_kracht: sam.soort_kracht || null, afzender: sam.afzender || null, afzender_naam: naamVan(r, sam.afzender), afzender_kracht: sam.afzender_kracht || null,
-        entiteit: sam.entiteit || null, entiteit_kracht: sam.entiteit_kracht || null, label_route: sam.label_route || [], dkim: sam.dkim || null,
-        toen: lensNamen(sam.bestemmingen), toen_doel: sam.bestemmingen && sam.bestemmingen[0] ? sam.bestemmingen[0].doel || null : null, toen_regel: sam.regel || null, twijfel: !!sam.twijfel,
-        nu: nu2 ? lensNamen(nu2.bestemmingen) : null, nu_doel: nu2 && nu2.bestemmingen[0] ? nu2.bestemmingen[0].doel : null, nu_regel: nu2 && nu2.regel ? nu2.regel.id : null });
-    });
+    const stukken = db.prepare("SELECT stuk_id, versie, status, op, samenvatting FROM router_stuk WHERE status <> 'buiten_router' ORDER BY op DESC LIMIT ?").all(Math.min(Math.max(1, n | 0), 200))
+      .map(function (row) { return stukVoorApp(row, r, actief); });
     const entiteiten = r ? Array.from(r.ent.values()).filter(function (e) { return e.eigen && KNOOP_RE.test(String(e.k || '')); }).map(function (e) { return { id: e.k, naam: e.naam || e.k }; }).sort(function (a, b) { return a.naam.localeCompare(b.naam); })
       : Object.values(LABEL_KNOOP).map(function (k) { return { id: k, naam: k }; });
     const bronnen = db.prepare("SELECT DISTINCT s.bron FROM router_stuk r JOIN stuk s ON s.stuk_id = r.stuk_id WHERE r.status <> 'buiten_router'").all().map(function (x) { return x.bron; }).filter(function (b) { return BRON_RE.test(b); });
@@ -1476,7 +1507,7 @@ function maak(o) {
     const live = Object.keys(lv).filter(function (b) { return lv[b] === true; });
     return { aan: true, schaduw: !live.length, live: live, lenzen_live: lenzenLive(), live_stukken: ls, aangeboden, regelversie: REGELVERSIE, stukken: o2, wacht, overgeslagen: Array.from(mislukt.values()).filter(function (n) { return n >= 3; }).length, laatste: stand.laatste, fouten: stand.fouten, laatste_fout: stand.laatste_fout };
   }
-  return { ronde, verwerkStuk, telling, regel, lijst, info, appOverzicht, appToets, appRegel, appKeuze, appStuk, voerUit, uitvoerRonde, kaartenRonde, wachtOpDavid, verbeteringen, regels: regelsAlle, sluit: function () { db.close(); } };
+  return { ronde, verwerkStuk, telling, regel, lijst, info, appOverzicht, appWerkstroom, werkstroomTel, appToets, appRegel, appKeuze, appStuk, voerUit, uitvoerRonde, kaartenRonde, wachtOpDavid, verbeteringen, regels: regelsAlle, sluit: function () { db.close(); } };
 }
 function safeJson(s) { try { return JSON.parse(s); } catch (e) { return null; } }
 

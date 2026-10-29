@@ -1680,6 +1680,35 @@ function maak(o) {
     });
     return { status: 200, j: { ok: true } };
   }
+  /*
+   * Werkstroom (wv2002, ontwerp 29-10-2026 § 6): alleen lezen, dezelfde velden als het logboek (logRij), hooguit 200 regels.
+   * tel → per postvak: twijfel open (14 d), besluiten laatste 48 uur, doorgezet (Intake/Factuur) of beoordeeld laatste 7 dagen.
+   * lijst(soort, postvak) → twijfel (open, oudste eerst) · binnen (48 u, nieuwste eerst) · verwerkt (7 d: naar Intake of Factuur, of
+   * door David beoordeeld). postvak null = alle postvakken.
+   */
+  const WS_MAX = 200;
+  function werkstroomTel() {
+    const n = nu(), d2 = new Date(n - 2 * 86400000).toISOString(), d7 = new Date(n - 7 * 86400000).toISOString();
+    return postvakken().map(function (p) {
+      return { id: p.id, naam: p.naam, stand: p.stand, twijfel_open: twijfelOpen(p.id),
+        binnen: db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND inhaal = 0 AND COALESCE(ontvangen, aangemaakt) >= ?").get(p.id, d2).n,
+        verwerkt: db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND inhaal = 0 AND aangemaakt >= ? AND status = 'klaar' AND (stroom IN ('intake','factuur') OR juist IS NOT NULL)").get(p.id, d7).n };
+    });
+  }
+  function werkstroomLijst(soort, pv) {
+    const pvs = postvakken().map(function (p) { return p.id; }).filter(function (id) { return !pv || id === pv; });
+    if (!pvs.length) return null;
+    const in_ = 'postvak IN (' + pvs.map(function () { return '?'; }).join(',') + ')';
+    let rijen;
+    if (soort === 'twijfel') rijen = db.prepare("SELECT * FROM besluit WHERE " + in_ + " AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? AND juist IS NULL ORDER BY COALESCE(ontvangen, aangemaakt), id LIMIT ?").all(...pvs, new Date(nu() - NAMEN_MS).toISOString(), WS_MAX);
+    else if (soort === 'binnen') rijen = db.prepare("SELECT * FROM besluit WHERE " + in_ + " AND inhaal = 0 AND COALESCE(ontvangen, aangemaakt) >= ? ORDER BY COALESCE(ontvangen, aangemaakt) DESC, id DESC LIMIT ?").all(...pvs, new Date(nu() - 2 * 86400000).toISOString(), WS_MAX);
+    else if (soort === 'verwerkt') rijen = db.prepare("SELECT * FROM besluit WHERE " + in_ + " AND inhaal = 0 AND aangemaakt >= ? AND status = 'klaar' AND (stroom IN ('intake','factuur') OR juist IS NOT NULL) ORDER BY aangemaakt DESC, id DESC LIMIT ?").all(...pvs, new Date(nu() - 7 * 86400000).toISOString(), WS_MAX);
+    else return null;
+    return { rijen: rijen.map(function (b) { return Object.assign(logRij(b), { postvak: b.postvak }); }),
+      postvakken: postvakken().filter(function (p) { return pvs.indexOf(p.id) >= 0; }).map(function (p) {
+        return { id: p.id, naam: p.naam, drempel_in: p.drempel_in, drempel_uit: p.drempel_uit, twijfel_naar: p.twijfel_naar, regels: regels(p.id).map(function (r) { return { id: r.id, naam: r.naam }; }) };
+      }) };
+  }
   function app(route, d, ctx) {
     d = isObj(d) ? d : {};
     const door = ctx && ctx.apparaat ? 'app:' + String(ctx.apparaat).slice(0, 40) : 'app';
@@ -1740,7 +1769,7 @@ function maak(o) {
     }
     return uit;
   }
-  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
+  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, werkstroomTel, werkstroomLijst, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
 }
 
 function isPad(p) { return p === '/mailman' || String(p).indexOf('/mailman/') === 0; }

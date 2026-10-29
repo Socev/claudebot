@@ -120,6 +120,15 @@ test('live: vastgehouden stuk → 0 Jev-, 0 modelaanroepen en 0 vaultbestanden; 
   const x = ov.stukken.find((s) => s.stuk_id === gem);
   assert.equal(x.live.staat, 'vastgehouden'); assert.equal(x.onderwerp, undefined); assert.ok(x.soorten.includes('brieftaal'));
   assert.equal(ov.live.wacht_vastgehouden, 2); assert.deepEqual(ov.live.bronnen, ['gmail:david']);
+  // wv2002 Werkstroom: wacht = dezelfde privacygrens (geen onderwerp of afzender), oudste eerst; binnen slaat Gmail over (staat in MailMan)
+  const ws = await E.r.appWerkstroom('wacht', 50);
+  assert.deepEqual(ws.stukken.map((s) => s.stuk_id).sort(), [gem, gem2].sort());
+  for (const s of ws.stukken) { assert.equal(s.onderwerp, undefined); assert.equal(s.van, undefined); assert.equal(s.bijlagen, undefined); assert.ok(s.soorten.includes('brieftaal')); }
+  assert.ok(!/Verslag|poli@/.test(JSON.stringify(ws)));
+  assert.deepEqual(ws.live.kennis_entiteiten, ov.live.kennis_entiteiten);
+  assert.deepEqual(E.r.werkstroomTel(), { twijfel: 0, vastgehouden: 2, binnen: 0, verwerkt: 0 });
+  assert.deepEqual((await E.r.appWerkstroom('binnen', 50)).stukken, []);
+  assert.equal(await E.r.appWerkstroom('iets', 50), null);
   // het hele stuk: alleen op verzoek
   const st = await E.r.appStuk({ stuk_id: gem });
   assert.equal(st.status, 200); assert.match(st.j.stuk.delen[0].tekst, /ZWAARDVIS/);
@@ -133,6 +142,8 @@ test('live: vastgehouden stuk → 0 Jev-, 0 modelaanroepen en 0 vaultbestanden; 
   assert.equal(E.tel.jev.length, 1); assert.equal(E.tel.indeling.length, 1);
   assert.equal(E.bestanden().length, 1);
   assert.deepEqual(E.db.prepare('SELECT leren_mag FROM correctie ORDER BY id').all().map((c) => c.leren_mag), [0, 0]);
+  assert.deepEqual(E.r.werkstroomTel(), { twijfel: 0, vastgehouden: 0, binnen: 0, verwerkt: 2 });   // wv2002: bewaard + verwerkt = af
+  assert.equal((await E.r.appWerkstroom('wacht', 50)).stukken.length, 0);
   assert.equal(E.db.prepare("SELECT door FROM besluit WHERE stuk_id = ? AND stap = 'marker_keuze'").get(gem2).door, 'david');
   // niets wacht meer → de markerkaart gaat dicht
   await E.r.ronde();

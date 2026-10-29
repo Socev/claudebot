@@ -376,7 +376,7 @@ test('upload: eigen map per gebruiker, overname via /fac/facturen/upload; een re
 test('noodstop (app-uit of ingang/uit) → 503; onbekende paden en methoden 404', async () => {
   const t = await opzet();
   try {
-    for (const p of ['/fac', '/fac/', '/fac/app/beurt', '/fac/../app/status', '/fac/WIE', '/fac/facturen/%2e%2e', '/fac/x', '/fac/facturenx', '/fac/upload/kort/1']) {
+    for (const p of ['/fac', '/fac/', '/fac/app/beurt', '/fac/../app/status', '/fac/WIE', '/fac/facturen/%2e%2e', '/fac/x', '/fac/facturenx', '/fac/upload/kort/1', '/fac/werkstroom', '/fac/werkstroom/lijst/twijfel', '/fac/app/werkstroom']) {   // wv2002: de Werkstroom nooit via /fac
       const r = await t.vraag('GET', p);
       assert.equal(r.status, 404, p);
     }

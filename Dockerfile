@@ -176,6 +176,7 @@ COPY huisstijl-pod.js /app/release-bootstrap/huisstijl-pod.js
 COPY werkers.js /app/release-bootstrap/werkers.js
 COPY intake-router.js /app/release-bootstrap/intake-router.js
 COPY mailman.js /app/release-bootstrap/mailman.js
+COPY werkstroom.js /app/release-bootstrap/werkstroom.js
 COPY ideeen.js /app/release-bootstrap/ideeen.js
 COPY ideeen-filter.js /app/release-bootstrap/ideeen-filter.js
 COPY aix.js /app/release-bootstrap/aix.js

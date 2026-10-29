@@ -12212,6 +12212,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/tokens' || /^GET \/app\/tokens\/dag\/\d{4}-\d{2}-\d{2}$/.test(route)) return typeof appTokens === 'function' ? appTokens(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'tokens');   // wv1742: TokenCounter (alleen lezen)
         if (route === 'GET /app/ringkaart') return typeof appRingkaart === 'function' ? appRingkaart(req, res, a) : appWeiger(res, 404, 'onbekend', 'ringkaart');   // wv888: ringkaart (alleen lezen)
         if (route === 'GET /app/mailman' || route === 'GET /app/mailman/verkoop' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
+        if (route === 'GET /app/werkstroom' || route.indexOf('GET /app/werkstroom/') === 0) return typeof appWerkstroom === 'function' ? appWerkstroom(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'werkstroom');   // wv2002: Werkstroom (alleen lezen)
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
         if (route === 'GET /app/brain/entiteiten' || route.indexOf('GET /app/brain/entiteit/') === 0 || route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
@@ -16926,6 +16927,33 @@ async function appIntakeTelling(req, res, a) {
   return appStuur(res, 200, uit);
 }
 // ── einde Intake-plek ──
+
+// ── Werkstroom (wv2002; ontwerp vault "01_Ontwikkeling/Werkstroom - één lichte werkplek voor MailMan, Intake en Facturen (ontwerp 29-10-2026).md") ──
+// GET /app/werkstroom (tellers per stap) en GET /app/werkstroom/lijst/<stap>[/<postvak>] (hooguit 200 regels): alleen lezen, uit MailMan,
+// de Intake-router en Facturen (werkstroom.js). Alleen achter de app-poort (David); de praktijkmanager-ingang /fac kent deze route niet.
+// Geen nieuwe opslag. Ontbreekt werkstroom.js in de release (terugrol), dan 404 en toont het venster "komt eraan".
+const WERKSTROOM_MOD = (function () { const p = path.join(__dirname, 'werkstroom.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('werkstroom', e); return null; } })();
+const werkstroom = WERKSTROOM_MOD ? WERKSTROOM_MOD.maak({ fout: logError,
+  mailman: function () { return mailman; },
+  intake: function () { return intakeRouterStand() ? intakeRouterHaal() : null; },
+  facturen: function (pad, opt) {
+    if (!facturenRoutes) return null;
+    const fdb = facturenOpen();
+    const rol = facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'david (' + String(opt.wie || '').slice(0, 60) + ')' });
+    return facturenRoutes.app(fdb, { methode: 'GET', pad: pad, d: {}, rol: rol, primair: rolPrimair() });
+  } }) : null;
+async function appWerkstroom(req, res, a, route) {
+  if (!werkstroom) return appWeiger(res, 404, 'De Werkstroom zit niet in deze versie van de pod', 'werkstroom ontbreekt');
+  appStaat.tellers.werkstroom = appStaat.tellers.werkstroom || [];
+  if (!appTeller('werkstroom', 900, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens werkstroom');
+  let r;
+  try { r = await werkstroom.app(route, { afscherm: appAfscherm(a), wie: a.naam || a.id }); }   // wv1901
+  catch (e) { logError('app-werkstroom', e); return appWeiger(res, 500, 'fout op de pod', 'werkstroom uitzondering'); }
+  if (r.status === 200) res._app.stil = true;
+  else res._app.reden = 'werkstroom: ' + String(r.j && r.j.fout || '').slice(0, 60);
+  return appStuur(res, r.status, r.j);
+}
+// ── einde Werkstroom ──
 
 // ── Brain › Entiteiten & Personen (wv1734, OVIS M5; ontwerplijnen § 7) ──
 // GET /app/brain/entiteiten: lijst uit het OVIS-register (RPC ovis_register_lees) plus de privépersonen uit 20_Prive (wv1930);

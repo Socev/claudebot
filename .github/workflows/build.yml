@@ -388,6 +388,9 @@ jobs:
       - name: "mailman (wv1856, OVIS MailMan: mailrouter vóór Intake, in de schaduw)"
         if: ${{ !cancelled() }}
         run: bash test/mailman.sh
+      - name: "werkstroom (wv2002, Werkstroom: leesroute over MailMan, Intake en Facturen)"
+        if: ${{ !cancelled() }}
+        run: bash test/werkstroom.sh
       # PDF-lezer via de Claude-API (wv1431): CI-poort (alleen crypto/fs/path), de echte SDK tegen een nep-API (sleutel en basis expliciet,
       # fallbacks + beta-kop, effort, structured output, cache_control), terugvallen, grens met reservering en herstart, patiëntregel
       # fail-closed (kenmerk, OCR, ingebedde PDF), schaduw zonder tekst, batches; koppeling in server.js en uitrol.sh.
