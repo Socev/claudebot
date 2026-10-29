@@ -15,7 +15,9 @@
  * <dir>/reken.sqlite (map 700, bestand 600): reken_run, dekking, aansluiting, onverklaard, besluit. Bedragen en tegenpartijen blijven hier op
  * de pod. Twee keer rekenen op dezelfde momentopname geeft byte-gelijke uitkomsttabellen (uitkomst_hash, zonder run-id en tijden).
  *
- * Terugrol: map <dir> weg (de Facturen-app merkt niets). CLI: tools/fin-reconcile.js (of node fin-reconcile.js run|stand|besluit|opruim).
+ * Terugrol: map <dir> weg (de Facturen-app merkt niets). CLI: tools/fin-reconcile.js (of node fin-reconcile.js run|stand|besluit|opruim|droog).
+ * droog (SB2 fase 6a, wv1962): dezelfde berekening op een bestaand facturenbestand, zonder schrijven en zonder klok (referentie voor de
+ * herstelproef; nachtketen-stap sb2-herstelreferentie).
  */
 const fs = require('fs');
 const path = require('path');
@@ -341,6 +343,50 @@ function regelsVersie() {
  * opties = { dir, facturen (pad), bankbron (map), entiteit, rekening (laatste cijfers), snapshot (bestaande sha256; anders een nieuwe),
  *   periode: { van, tot } (factuurdatum), nu (ms) } → samenvatting (zonder bedragen van derden) + run-id.
  */
+/*
+ * De berekening zelf (zonder schrijven): momentopname (open, alleen lezen) + opties → alle uitkomstrijen en hashes. Gedeeld door run()
+ * (die schrijft het weg in reken.sqlite) en droog() (die schrijft niets; SB2 fase 6a, wv1962). besluitenReken = de besluiten uit
+ * reken.sqlite (droog: geen).
+ */
+function reken(sdb, o, snapSha, besluitenReken) {
+  const rekening = rekeningVan(sdb, o.entiteit, o.rekening);
+  const label = eind4(rekening.iban);
+  const fv = facturenVan(sdb, o.entiteit, o.periode || {});
+  const datums = fv.lijst.map((f) => f.factuurdatum).filter((d) => d && K.isIsoDatum(d)).sort();
+  // het einde van de dekkingstabel volgt uit de momentopname zelf (laatste boekdag of uploaddag), niet uit de klok: dezelfde momentopname
+  // geeft een dag later dezelfde tabellen (review wv1864 KAN 10); dagen erna zijn per definitie niet gedekt
+  const eindDb = sdb.prepare("SELECT max(d) AS d FROM (SELECT max(boekdatum) AS d FROM bank_transactie WHERE rekening = ? UNION ALL SELECT max(substr(geupload_op, 1, 10)) FROM bank_bestand)").get(rekening.id).d;
+  const vandaag = eindDb && K.isIsoDatum(eindDb) && eindDb < dagAmsterdam(o.nu) ? eindDb : dagAmsterdam(o.nu);
+  const scope = { entiteit: o.entiteit, rekening_label: label, periode_van: (o.periode || {}).van || null, periode_tot: (o.periode || {}).tot || null,
+    facturenset: 'fv2_archief_beslist+facturen_vanaf_verstuurd', dekking_van: datums.length ? K.plusDagen(datums[0], -T.VENSTER_VOOR) : K.plusDagen(vandaag, -365), dekking_tot: vandaag };
+  scope.peil_van = datums.length ? K.plusDagen(datums[0], -T.VOORUIT_ZONDER_SLEUTEL) : scope.dekking_van;
+  const dek = dekkingRekening(sdb, rekening, scope.dekking_van, scope.dekking_tot, o.bankbron, scope.peil_van);
+  const transacties = sdb.prepare('SELECT entry_ref, boekdatum, bedrag_centen, tegenpartij_iban, tegenpartij_naam, omschrijving, kenmerk, categorie FROM bank_transactie WHERE rekening = ? AND verwijderd_op IS NULL').all(rekening.id)
+    .map((t) => Object.assign({}, t, { bedrag_centen: Number(t.bedrag_centen) }));
+  const ks = sdb.prepare('SELECT k.factuur, k.bron, k.methode, k.volledig, t.entry_ref FROM koppeling k JOIN bank_transactie t ON t.id = k.transactie WHERE t.rekening = ? AND t.verwijderd_op IS NULL ORDER BY k.id').all(rekening.id);
+  const koppelingen = ks.map((k) => ({ entry_ref: k.entry_ref, factuur_ref: 'factuur:' + k.factuur, methode: k.methode }));
+  const besluiten = ks.filter((k) => k.bron === 'mens' && k.methode !== 'sepa_terug').map((k) => ({ factuur_ref: 'factuur:' + k.factuur, entry_refs: [k.entry_ref], oordeel: 'ja', bron: 'koppeling' }))
+    .concat(besluitenReken);
+  const fv2 = fv.lijst.filter((f) => f.herkomst === 'fv2' && f.factuurdatum && K.isIsoDatum(f.factuurdatum)).map((f) => f.factuurdatum).sort();
+  const aanname = fv2.length ? { van: K.plusDagen(fv2[0], T.VENSTER_VOOR), tot: fv2[fv2.length - 1], fv2_van: fv2[0], fv2_tot: fv2[fv2.length - 1] } : {};
+  const uitk = T.sluitAan({ facturen: fv.lijst, transacties, besluiten, koppelingen, dekking: dek, aanname, scope: { van: scope.dekking_van, tot: scope.dekking_tot } });
+  const aannames = ['venster_-45_+120_met_sleutel_-7_+120_zonder', 'reeds_voldaan_niet_getoetst', 'andere_eigen_rekening_niet_bekeken', 'facturenset_fv2_aanname_compleet']
+    .concat(Object.keys(fv.uitgesloten).sort().map((s) => 'uitgesloten_' + s)).concat(uitk.aannames);
+  const vinger = sha256(canon({ snap: snapSha, bronnen: dek.bronnen.map((b) => b.sha256), besluiten, scope, regels: regelsHash() }));
+  const fByRef = new Map(fv.lijst.map((f) => [f.ref, f]));
+  const txByRef = new Map(transacties.map((t) => [t.entry_ref, t]));
+  const rijD = dek.dagen.map((x) => [label, x.dag, x.status, x.reden, x.db_regels, x.db_som_centen]);
+  const rijA = uitk.regels.map((r) => { const f = fByRef.get(r.ref); return [r.ref, f.leverancier || null, f.nummer || null, f.factuurdatum || null, f.vervaldatum || null, r.status, r.reden, r.laag,
+    r.factuurbedrag_centen, r.betaald_centen, r.rest_centen, r.betaaldatum, canon(r.entry_refs), canon(r.kandidaat_refs)]; });
+  const rijO = uitk.onverklaard.map((x) => { const t = txByRef.get(x.entry_ref); return [x.entry_ref, x.boekdatum, x.bedrag_centen, t.tegenpartij_naam || null, t.omschrijving ? String(t.omschrijving).slice(0, 80) : null, x.reden, x.factuur_ref]; });
+  const uitkomstHash = sha256(canon({ dekking: rijD, aansluiting: rijA, onverklaard: rijO }));
+  const tellingFact = { facturen_in_scope: fv.lijst.length, uitgesloten: fv.uitgesloten, per_status: uitk.telling };
+  const dagTelling = {};
+  for (const s of T.DAG_STATUSSEN) dagTelling[s] = 0;
+  for (const x of dek.dagen) dagTelling[x.status]++;
+  return { label, scope, dek, fv, aanname, uitk, aannames, vinger, rijD, rijA, rijO, uitkomstHash, tellingFact, dagTelling };
+}
+
 function run(opties) {
   const o = Object.assign({ dir: STANDAARD_DIR, facturen: STANDAARD_FACTUREN, entiteit: 'tolgaarde', periode: {} }, opties || {});
   if (!Number.isFinite(o.nu)) throw new FinFout('geen_tijd', 'nu ontbreekt');
@@ -351,41 +397,8 @@ function run(opties) {
   const rdb = openReken(o.dir);
   const gestart = new Date(o.nu).toISOString();
   try {
-    const rekening = rekeningVan(sdb, o.entiteit, o.rekening);
-    const label = eind4(rekening.iban);
-    const fv = facturenVan(sdb, o.entiteit, o.periode || {});
-    const datums = fv.lijst.map((f) => f.factuurdatum).filter((d) => d && K.isIsoDatum(d)).sort();
-    // het einde van de dekkingstabel volgt uit de momentopname zelf (laatste boekdag of uploaddag), niet uit de klok: dezelfde momentopname
-    // geeft een dag later dezelfde tabellen (review wv1864 KAN 10); dagen erna zijn per definitie niet gedekt
-    const eindDb = sdb.prepare("SELECT max(d) AS d FROM (SELECT max(boekdatum) AS d FROM bank_transactie WHERE rekening = ? UNION ALL SELECT max(substr(geupload_op, 1, 10)) FROM bank_bestand)").get(rekening.id).d;
-    const vandaag = eindDb && K.isIsoDatum(eindDb) && eindDb < dagAmsterdam(o.nu) ? eindDb : dagAmsterdam(o.nu);
-    const scope = { entiteit: o.entiteit, rekening_label: label, periode_van: (o.periode || {}).van || null, periode_tot: (o.periode || {}).tot || null,
-      facturenset: 'fv2_archief_beslist+facturen_vanaf_verstuurd', dekking_van: datums.length ? K.plusDagen(datums[0], -T.VENSTER_VOOR) : K.plusDagen(vandaag, -365), dekking_tot: vandaag };
-    scope.peil_van = datums.length ? K.plusDagen(datums[0], -T.VOORUIT_ZONDER_SLEUTEL) : scope.dekking_van;
-    const dek = dekkingRekening(sdb, rekening, scope.dekking_van, scope.dekking_tot, o.bankbron, scope.peil_van);
-    const transacties = sdb.prepare('SELECT entry_ref, boekdatum, bedrag_centen, tegenpartij_iban, tegenpartij_naam, omschrijving, kenmerk, categorie FROM bank_transactie WHERE rekening = ? AND verwijderd_op IS NULL').all(rekening.id)
-      .map((t) => Object.assign({}, t, { bedrag_centen: Number(t.bedrag_centen) }));
-    const ks = sdb.prepare('SELECT k.factuur, k.bron, k.methode, k.volledig, t.entry_ref FROM koppeling k JOIN bank_transactie t ON t.id = k.transactie WHERE t.rekening = ? AND t.verwijderd_op IS NULL ORDER BY k.id').all(rekening.id);
-    const koppelingen = ks.map((k) => ({ entry_ref: k.entry_ref, factuur_ref: 'factuur:' + k.factuur, methode: k.methode }));
-    const besluiten = ks.filter((k) => k.bron === 'mens' && k.methode !== 'sepa_terug').map((k) => ({ factuur_ref: 'factuur:' + k.factuur, entry_refs: [k.entry_ref], oordeel: 'ja', bron: 'koppeling' }))
-      .concat(rdb.prepare('SELECT factuur_ref, entry_refs, oordeel FROM besluit ORDER BY id').all().map((b) => ({ factuur_ref: b.factuur_ref, entry_refs: JSON.parse(b.entry_refs), oordeel: b.oordeel, bron: 'besluit' })));
-    const fv2 = fv.lijst.filter((f) => f.herkomst === 'fv2' && f.factuurdatum && K.isIsoDatum(f.factuurdatum)).map((f) => f.factuurdatum).sort();
-    const aanname = fv2.length ? { van: K.plusDagen(fv2[0], T.VENSTER_VOOR), tot: fv2[fv2.length - 1], fv2_van: fv2[0], fv2_tot: fv2[fv2.length - 1] } : {};
-    const uitk = T.sluitAan({ facturen: fv.lijst, transacties, besluiten, koppelingen, dekking: dek, aanname, scope: { van: scope.dekking_van, tot: scope.dekking_tot } });
-    const aannames = ['venster_-45_+120_met_sleutel_-7_+120_zonder', 'reeds_voldaan_niet_getoetst', 'andere_eigen_rekening_niet_bekeken', 'facturenset_fv2_aanname_compleet']
-      .concat(Object.keys(fv.uitgesloten).sort().map((s) => 'uitgesloten_' + s)).concat(uitk.aannames);
-    const vinger = sha256(canon({ snap: snap.sha256, bronnen: dek.bronnen.map((b) => b.sha256), besluiten, scope, regels: regelsHash() }));
-    const fByRef = new Map(fv.lijst.map((f) => [f.ref, f]));
-    const txByRef = new Map(transacties.map((t) => [t.entry_ref, t]));
-    const rijD = dek.dagen.map((x) => [label, x.dag, x.status, x.reden, x.db_regels, x.db_som_centen]);
-    const rijA = uitk.regels.map((r) => { const f = fByRef.get(r.ref); return [r.ref, f.leverancier || null, f.nummer || null, f.factuurdatum || null, f.vervaldatum || null, r.status, r.reden, r.laag,
-      r.factuurbedrag_centen, r.betaald_centen, r.rest_centen, r.betaaldatum, canon(r.entry_refs), canon(r.kandidaat_refs)]; });
-    const rijO = uitk.onverklaard.map((x) => { const t = txByRef.get(x.entry_ref); return [x.entry_ref, x.boekdatum, x.bedrag_centen, t.tegenpartij_naam || null, t.omschrijving ? String(t.omschrijving).slice(0, 80) : null, x.reden, x.factuur_ref]; });
-    const uitkomstHash = sha256(canon({ dekking: rijD, aansluiting: rijA, onverklaard: rijO }));
-    const tellingFact = { facturen_in_scope: fv.lijst.length, uitgesloten: fv.uitgesloten, per_status: uitk.telling };
-    const dagTelling = {};
-    for (const s of T.DAG_STATUSSEN) dagTelling[s] = 0;
-    for (const x of dek.dagen) dagTelling[x.status]++;
+    const besluitenReken = rdb.prepare('SELECT factuur_ref, entry_refs, oordeel FROM besluit ORDER BY id').all().map((b) => ({ factuur_ref: b.factuur_ref, entry_refs: JSON.parse(b.entry_refs), oordeel: b.oordeel, bron: 'besluit' }));
+    const { label, scope, dek, fv, aanname, uitk, aannames, vinger, rijD, rijA, rijO, uitkomstHash, tellingFact, dagTelling } = reken(sdb, o, snap.sha256, besluitenReken);
     const regel = dekkingsregel({ label, dek, scope, fv, aanname, telling: uitk.telling, gemaakt: tijdAmsterdam(o.nu) });
     let id;
     rdb.exec('BEGIN IMMEDIATE');
@@ -406,6 +419,27 @@ function run(opties) {
     return { ok: true, run: id, snapshot: snap.sha256, uitkomst: uitk.uitkomst, code: uitk.code, bank_tm: dek.bank_tm, laatst_gedekt: dek.laatst_gedekt, telling: uitk.telling,
       dagen: dagTelling, onverklaard: telOnverklaard(uitk.onverklaard), totalen_gevuld: !!uitk.totalen, uitkomst_hash: uitkomstHash, dekkingsregel: regel };
   } finally { sdb.close(); rdb.close(); }
+}
+
+/*
+ * Droge, deterministische modus (SB2 fase 6a, wv1962): rekent op een BESTAAND facturenbestand (de dump uit de podstaat-bundel, al een
+ * VACUUM INTO-kopie) zonder momentopname-kopie, zonder reken.sqlite (dus ook zonder de besluiten daaruit), zonder schrijven en zonder
+ * klok: `nu` komt van buiten (het podstaat-stempel). Zelfde invoer + zelfde code (regels_hash) = zelfde invoer_hash en uitkomst_hash;
+ * de herstelproef op de R230 rekent zo na op de teruggezette bundel. Uitvoer zonder bedragen, namen of omschrijvingen.
+ */
+function droog(opties) {
+  const o = Object.assign({ entiteit: 'tolgaarde', periode: {} }, opties || {});
+  if (!Number.isFinite(o.nu)) throw new FinFout('geen_tijd', 'nu ontbreekt (droog rekent nooit op de klok)');
+  if (!o.facturen || !fs.existsSync(o.facturen)) throw new FinFout('geen_facturen', 'facturenbestand niet gevonden');
+  if (!o.bankbron || !fs.existsSync(o.bankbron)) throw new FinFout('geen_bankbron', 'bankbronmap niet gevonden');
+  const snapSha = sha256(fs.readFileSync(o.facturen));
+  const DB = sqlite();
+  const sdb = new DB(o.facturen, { readOnly: true });
+  try {
+    const r = reken(sdb, o, snapSha, []);
+    return { ok: true, modus: 'droog', snapshot: snapSha, invoer_hash: r.vinger, uitkomst_hash: r.uitkomstHash, regels_hash: regelsHash(),
+      rekening_label: r.label, dekking_tot: r.scope.dekking_tot, uitkomst: r.uitk.uitkomst, code: r.uitk.code, telling: r.uitk.telling, dagen: r.dagTelling };
+  } finally { sdb.close(); }
 }
 function telOnverklaard(l) { const t = {}; for (const x of l) t[x.reden] = (t[x.reden] || 0) + 1; return t; }
 
@@ -637,12 +671,16 @@ async function main(argv) {
       snapshot: a.snapshot, periode: { van: a.van || null, tot: a.tot || null }, nu });
     uit.opruim = opruim(dir, nu);
     if (rpc) uit.supabase = await registreer(dir, rpc, { bankbron, nu });
+  } else if (cmd === 'droog') {
+    // nu: ISO-tijd of epoch-ms van buiten (het podstaat-stempel); de klok van deze machine telt niet
+    const n = /^\d+$/.test(String(a.nu || '')) ? Number(a.nu) : Date.parse(String(a.nu || ''));
+    uit = droog({ facturen: a.facturen, bankbron: a.bankbron, entiteit: a.entiteit || 'tolgaarde', rekening: a.rekening, nu: n });
   } else if (cmd === 'registreer') {
     uit = await registreer(dir, a.droog ? null : rpcVanOmgeving(), { bankbron, nu, max: a.max, droog: !!a.droog, opnieuw: !!a.opnieuw });
   } else if (cmd === 'stand') uit = laatste(dir, { entiteit: a.entiteit || 'tolgaarde', status: a.status, max: a.max, regels: !!a.regels });
   else if (cmd === 'opruim') uit = opruim(dir, nu);
   else if (cmd === 'besluit') uit = besluit(dir, { factuur_ref: a.factuur, entry_refs: String(a['entry-refs'] || '').split(',').filter(Boolean), oordeel: a.oordeel, wie: a.wie, bron: a.bron, toelichting: a.toelichting }, nu);
-  else throw new FinFout('onbekend', 'gebruik: run|stand|opruim|besluit|registreer');
+  else throw new FinFout('onbekend', 'gebruik: run|stand|opruim|besluit|registreer|droog');
   process.stdout.write(JSON.stringify(uit, null, 1) + '\n');
 }
 if (require.main === module) {
@@ -653,5 +691,5 @@ if (require.main === module) {
   });
 }
 
-module.exports = { FinFout, STANDAARD_DIR, SCHEMA, openReken, momentopname, snapshotPad, bronRegels, keten, gemaaktOp, dekkingRekening, rekeningVan, facturenVan, run, laatste, opruim, besluit, dekkingsregel,
+module.exports = { FinFout, STANDAARD_DIR, SCHEMA, openReken, momentopname, snapshotPad, bronRegels, keten, gemaaktOp, dekkingRekening, rekeningVan, facturenVan, run, droog, laatste, opruim, besluit, dekkingsregel,
   contract, registreer, uitgeslotenCode, main };

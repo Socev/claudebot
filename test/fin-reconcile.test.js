@@ -797,3 +797,38 @@ test('4b CLI: registreer --droog geeft het contract zonder te versturen; zonder 
   assert.equal(b.status, 1);
   assert.equal(JSON.parse(b.stdout).fout, 'geen_supabase');
 });
+
+test('6a droog (wv1962): zelfde invoer_hash en uitkomst_hash als run op dezelfde momentopname, twee keer gelijk, schrijft niets, nooit zonder nu', () => {
+  const t = opzet();
+  zetFactuur(t, { nummer: 'A-2026-0101', datum: '2026-03-01', verval: '2026-03-15', incl: 25000, iban: LEV.A });
+  zetFactuur(t, { nummer: null, datum: '2026-03-01', verval: '2026-03-15', incl: 30000, iban: LEV.B, lev: 'Leverancier B B.V.' });
+  halfjaar(t, [['2026-03-10', -25000, ov(LEV.A, 'Leverancier A B.V.', 'Factuurnummer A-2026-0101')], ['2026-03-12', -30000, ov(LEV.B, 'Leverancier B B.V.', 'betaling')]]);
+  const r = draai(t);
+  const snap = path.join(t.rk, 'snapshot', r.snapshot + '.sqlite');
+  const bankbron = path.join(path.dirname(t.pad), 'bankbron');
+  const voor = fs.readdirSync(t.rk).sort().join(','), snapMtime = fs.statSync(snap).mtimeMs, bronVoor = fs.readdirSync(bankbron).sort().join(',');
+  const d1 = FR.droog({ facturen: snap, bankbron, entiteit: 'tolgaarde', nu: NU });
+  const d2 = FR.droog({ facturen: snap, bankbron, entiteit: 'tolgaarde', nu: NU });
+  assert.equal(d1.modus, 'droog');
+  assert.equal(d1.snapshot, r.snapshot);
+  assert.equal(d1.uitkomst_hash, r.uitkomst_hash);
+  assert.equal(d1.invoer_hash, lees(t, r.run).run.invoer_vingerafdruk);
+  assert.deepEqual(d2, d1);
+  assert.equal(fs.readdirSync(t.rk).sort().join(','), voor);                 // geen nieuwe run, snapshot of journal
+  assert.equal(fs.statSync(snap).mtimeMs, snapMtime);
+  assert.equal(fs.readdirSync(bankbron).sort().join(','), bronVoor);
+  assert.ok(!JSON.stringify(d1).includes('Leverancier'));                    // geen namen in de uitvoer
+  // een ander 'nu' ná de laatste boekdag verandert niets (het einde volgt uit de momentopname); geen nu = weigeren
+  assert.equal(FR.droog({ facturen: snap, bankbron, entiteit: 'tolgaarde', nu: NU + 86400000 }).uitkomst_hash, d1.uitkomst_hash);
+  assert.throws(() => FR.droog({ facturen: snap, bankbron, entiteit: 'tolgaarde' }), /geen_tijd|nu ontbreekt/);
+  // een andere bank (één bronbestand weg) geeft een andere invoer_hash: de proef kan rood worden
+  const kopie = fs.mkdtempSync(path.join(os.tmpdir(), 'fin-droog-')); WEG.push(kopie);
+  const eerste = fs.readdirSync(bankbron).sort()[0];
+  for (const f of fs.readdirSync(bankbron)) if (f !== eerste) fs.copyFileSync(path.join(bankbron, f), path.join(kopie, f));
+  assert.notEqual(FR.droog({ facturen: snap, bankbron: kopie, entiteit: 'tolgaarde', nu: NU }).uitkomst_hash, d1.uitkomst_hash);
+  // CLI: droog geeft JSON en schrijft niets
+  const cli = require('child_process').spawnSync(process.execPath, [path.join(ROOT, 'tools', 'fin-reconcile.js'), 'droog', '--facturen', snap, '--bankbron', bankbron, '--nu', new Date(NU).toISOString()], { encoding: 'utf8' });
+  const u = JSON.parse(cli.stdout);
+  assert.equal(u.uitkomst_hash, d1.uitkomst_hash);
+  assert.equal(fs.readdirSync(t.rk).sort().join(','), voor);
+});

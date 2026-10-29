@@ -8,6 +8,7 @@
  *   node tools/fin-reconcile.js stand [--status open] [--max N] [--regels]
  *   node tools/fin-reconcile.js besluit --factuur archief:<id> --entry-refs <ref,ref> --oordeel ja|nee --wie david --bron "<vraag in Open vragen>"
  *   node tools/fin-reconcile.js opruim
+ *   node tools/fin-reconcile.js droog --facturen <dump.sqlite> --bankbron <map> --nu <ISO|epoch-ms> [--entiteit] [--rekening]   (SB2 6a, wv1962: rekent, schrijft niets)
  *   node tools/fin-reconcile.js registreer [--droog] [--max N] [--opnieuw]   (antwoordcontract naar Supabase, wv1899; env SUPABASE_URL/SUPABASE_SERVICE_ROLE)
  *   (run --registreer doet hetzelfde direct na de run)
  * Leest de Facturen-databank alleen via een eigen momentopname; schrijft alleen in --dir. Uitvoer: JSON op stdout.

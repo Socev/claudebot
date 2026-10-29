@@ -16251,6 +16251,18 @@ async function sb2ZoekKlokTik() {
   }
 }
 if ((sb2Feitenlijst || sb2Zoekindex || sb2Zoekleer) && SERVER_ECHT) { setInterval(function () { sb2ZoekKlokTik(); }, 5 * 60000).unref(); }
+// wv1962 (SB2 fase 6a): referentie voor de herstelproef — droge finance.reconcile op de facturendump uit de podstaat-bundel van vannacht
+// (logica en waarom in herstelreferentie.js). Uitvoer alleen hashes/codes in scripts-staat/sb2-herstelproef/referentie/.
+const SB2_HERSTELREF_DIR = serverPad('sb2_herstelref', process.env.SB2_HERSTELREF_DIR, '/opt/data/scripts-staat/sb2-herstelproef/referentie', serverProefDeel('sb2-herstelref'));
+const herstelReferentie = (function () {
+  const p = path.join(__dirname, 'herstelreferentie.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ refMap: SB2_HERSTELREF_DIR, remote: 'vaultcrypt', rclone: 'rclone', node: process.execPath,
+      finCli: path.join(__dirname, 'tools', 'fin-reconcile.js'), bankbron: path.join(FACTUREN_DIR, 'bankbron'), tmpRoot: '/dev/shm',
+      regelsVersie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || null; } });
+  } catch (e) { logError('herstelreferentie', e); return null; }
+})();
 // ── Nachtketen (wv1868, SB2 fase 3d; ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 3 intake, nachtketen en schrijvers (ontwerp
 // 28-10-2026).md" § 4; logica en waarom in nachtketen.js) ──
 // Elke minuut (echte pod, rol primair, vlag aan). Stappen in volgorde; elke stap gebruikt hetzelfde object en dezelfde stempel als zijn oude
@@ -16341,6 +16353,11 @@ const nachtketen = (function () {
         if (r.wacht) return { wacht: r.wacht };
         const d = { in_scope: r.in_scope, geschreven: r.geschreven, gelijk: r.gelijk, afgerond: r.afgerond, geblokkeerd: r.geblokkeerd, tussendoor: r.tussendoor };
         return r.fout ? { ok: false, reden: 'publicatie: ' + r.fout + ' fout(en)' + (r.reden ? ' (' + r.reden.slice(0, 60) + ')' : ''), detail: d } : { ok: true, detail: d };
+      } },
+      // wv1962 (SB2 fase 6a): na podstaat (± 00:30) en ná de 01:xx-nachtgrendel; in-process, zelf begrensd (rclone 3 min, reconcile 5 min)
+      { naam: 'sb2-herstelreferentie', start_na: [2, 5], limiet_min: 10, pogingen: 2, inProces: true, doe: async function (ctx) {
+        if (!herstelReferentie) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        return herstelReferentie.ronde(ctx);
       } },
       { naam: 'ovis-agenda', start_na: [3, 30], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisAgenda) },
       { naam: 'ovis-deadlines', start_na: [3, 45], na: ['ovis-agenda'], limiet_min: 5, pogingen: 2, meldtZelf: true,
