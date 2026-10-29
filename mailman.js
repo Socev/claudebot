@@ -23,10 +23,11 @@
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
  * tekens) → stap 0–3 + patiëntpoort, en de Jev-aanvragen · /mailman/stap2 (de Jev-antwoorden) → besluit · /mailman/gedaan.
  *
- * GRENZEN (O.10). Patiëntpoort-2.0 en ZORGMAIL/zorgdomeinen vóór Jev: zo'n mail gaat nooit naar Jev en van zo'n mail staat alleen het
- * domein in het logboek. Doktersmaten (GEDEELD): vast in de code geen tekst, geen Jev, geen labels en alleen het domein, ook als
- * config.json iets anders zegt. Mailtekst komt nooit in het logboek of op schijf. Afzender, aan en onderwerp van gewone privémail blijven
- * 14 dagen, daarna alleen het domein (secure_delete). Een mail met onopgeloste label-id's krijgt geen besluit (labellijst ontbrak).
+ * GRENZEN (O.10). Patiëntpoort-2.0 en ZORGMAIL/zorgdomeinen vóór Jev: zo'n mail gaat nooit naar Jev. Doktersmaten (GEDEELD): vast in de
+ * code geen tekst, geen Jev en geen labels, ook als config.json iets anders zegt. Mailtekst komt nooit in het logboek of op schijf.
+ * Afzender, naam, aan en onderwerp staan bij ELKE mail in het logboek (alle postvakken, ook marker, zorgmail en verzonden): het logboek is
+ * alleen voor David, en David wordt nooit gefilterd (David 29-10-2026 16:06: "Onderwerp moet NOOIT gefilterd."; wv1980). Na 14 dagen
+ * blijft van elke mail alleen het domein (secure_delete). Een mail met onopgeloste label-id's krijgt geen besluit (labellijst ontbrak).
  * Regex van David: alleen na de statische vormtoets (veiligeRegex), want een tijdslimiet kan niet binnen deze CI-poort.
  * REVIEW (Opus, schone subagent, 28-10, GO-MET-WIJZIGINGEN): MOET 1–3, ZOU 5–7 en OPM 9–15, 17–18 verwerkt; MOET 4 (datakaart) buiten de
  * code; zie bouwplan § Log (wv1856).
@@ -37,12 +38,12 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-1.1';
+const VERSIE = 'mailman-1.2';
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
-// Gedeelde postvakken (doktersmaten, gedeeld met de praktijk): in fase 1 nooit Jev, nooit tekst, geen labels, alleen het domein in het
-// logboek — vast in de code, niet via config.json (review B1 #2, O.10). Pas in B7, na Davids eigen besluit.
+// Gedeelde postvakken (doktersmaten, gedeeld met de praktijk): in fase 1 nooit Jev, nooit tekst, geen labels — vast in de code, niet via
+// config.json (review B1 #2, O.10). Pas in B7, na Davids eigen besluit. Afzender en onderwerp staan wel in het logboek (wv1980).
 const GEDEELD = new Set(['gmail:groenhouten']);
 // De enige labels die MailMan ooit mag zetten of weghalen (O.10). Gezet alleen in stand live, door n8n, na de tweede grens op label-ID.
 const LABELS = ['V', 'TODO', 'CONCEPT', 'FACTUUR', 'INFO', 'AI/MailMan'];
@@ -605,11 +606,11 @@ function maak(o) {
         else if (b.stap === 'jev' && !magJev) { stroom = 'twijfel'; reden = pt.tegenhouden ? 'marker' : (zorg ? 'zorgmail' : 'jev_uit'); }
         if (magJev) status = 'wacht_jev';
         const plan = status === 'klaar' && stroom ? labelPlan(stroom, null, m, instel) : null;
-        // Afzender, naam, ontvangers en onderwerp alleen bij een gewone binnengekomen mail in een eigen postvak; bij een marker, zorgmail, het
-        // gedeelde postvak of verzonden mail alleen het domein (review B1 #6, grondwet 3)
-        const namen = !pt.tegenhouden && !zorg && !p.gedeeld && b.stap !== 'buiten';
-        const rij = [p.id, m.id, m.draad, m.ontvangen, namen ? m.van_adres : null, namen ? (m.van_naam || null) : null, m.van_domein, namen ? JSON.stringify(m.aan.slice(0, 20)) : null,
-          namen ? m.onderwerp : null, m.tab, m.afmeld ? 1 : 0, JSON.stringify(m.bijlagen.map(bijlageSoort)),
+        // Afzender, naam, ontvangers en onderwerp altijd, ook bij een marker, zorgmail, het gedeelde postvak en verzonden mail: het logboek
+        // is alleen voor David en David wordt nooit gefilterd (David 29-10-2026, wv1980; vervangt review B1 #6). Naar derden (Jev) gaat
+        // zo'n mail nog steeds niet (magJev hierboven).
+        const rij = [p.id, m.id, m.draad, m.ontvangen, m.van_adres || null, m.van_naam || null, m.van_domein, JSON.stringify(m.aan.slice(0, 20)),
+          m.onderwerp, m.tab, m.afmeld ? 1 : 0, JSON.stringify(m.bijlagen.map(bijlageSoort)),
           JSON.stringify(m.labels.slice(0, 40)), b.stap === 'jev' && magJev ? 'jev' : b.stap, reden, b.regel_id || null, b.regel_versie || null, stroom,
           pt.tegenhouden ? 1 : 0, pt.tegenhouden ? pt.soorten.join(',') : (zorg ? 'zorgmail' : null), plan ? JSON.stringify(plan) : null, p.stand, status, VERSIE, iso(), status === 'klaar' ? iso() : null];
         if (oud) {
@@ -785,7 +786,7 @@ function maak(o) {
     let jev = null; try { jev = b.jev ? JSON.parse(b.jev) : null; } catch (e) { jev = null; }
     let plan = []; try { plan = b.labels_plan ? JSON.parse(b.labels_plan) : []; } catch (e) { plan = []; }
     return { id: b.id, tijd: b.aangemaakt, ontvangen: b.ontvangen, afzender: b.afzender, naam: b.van_naam, domein: b.afzender_domein,
-      onderwerp: b.marker ? null : b.onderwerp, marker: !!b.marker, zorg: b.marker_soorten === 'zorgmail', stap: b.stap, reden: b.reden, regel_id: b.regel_id,
+      onderwerp: b.onderwerp, marker: !!b.marker, zorg: b.marker_soorten === 'zorgmail', stap: b.stap, reden: b.reden, regel_id: b.regel_id,
       stroom: b.stroom, status: b.status, score: b.score, jev, botsing: b.botsing, labels: plan, oordeel: b.oordeel, tab: b.tab, bijlagen: (function () { try { return JSON.parse(b.bijlagen || '[]').length; } catch (e) { return 0; } })() };
   }
   // 5 uit Info en 5 uit Intake (en Twijfel), elke dag dezelfde keus (hash op dag + id), alleen besluiten met een afzender
@@ -861,7 +862,8 @@ function maak(o) {
     if (d.soort === 'regel') {
       const v = toetsVoorwaarden(d.voorwaarden);
       if (!v.ok) return { status: 400, j: { ok: false, fout: v.reden } };
-      const raak = rijen.filter(function (b) { return !b.marker && regelPast(v.v, mailUitRij(b)); });
+      // rijen van vóór wv1980 zonder afzender (marker, zorgmail, doktersmaten) tellen niet: daar valt niets op te toetsen
+      const raak = rijen.filter(function (b) { return (b.afzender != null || !b.marker) && regelPast(v.v, mailUitRij(b)); });
       return { status: 200, j: { ok: true, treffers: raak.length, van: rijen.length, per_stroom: raak.reduce(function (a, b) { a[b.stroom || 'wacht'] = (a[b.stroom || 'wacht'] || 0) + 1; return a; }, {}), voorbeelden: raak.slice(0, 30).map(logRij) } };
     }
     if (d.soort === 'jev') {

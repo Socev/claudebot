@@ -99,7 +99,7 @@ test('Jev-stap: de tien proefmails van O.1 geven de stroom uit het ontwerp (O.5)
   assert.equal(rij(mm, mails[0].id).jev_tokens, 900);
 });
 
-test('#1 patiëntpoort vóór Jev: gemarkeerde mail niet naar Jev, onderwerp niet in het logboek', () => {
+test('#1 patiëntpoort vóór Jev: gemarkeerde mail niet naar Jev; onderwerp wel in het logboek (wv1980)', () => {
   const { mm } = nieuweKamer();
   const pat = mail({ onderwerp: 'Betreft: mw. Proef', tekst: 'Geachte collega, bovengenoemde patiënt zagen wij op de polikliniek. Geboortedatum: 01-02-1950. Diagnose en behandelplan volgen.' });
   const gewoon = mail({ onderwerp: 'Vraag over het overleg' });
@@ -107,7 +107,7 @@ test('#1 patiëntpoort vóór Jev: gemarkeerde mail niet naar Jev, onderwerp nie
   assert.deepEqual(u.s1.j.jev.map(function (a) { return a.gmail_id; }), [gewoon.id]);
   const b = rij(mm, pat.id);
   assert.equal(b.marker, 1);
-  assert.equal(b.onderwerp, null);
+  assert.equal(b.onderwerp, 'Betreft: mw. Proef');   // David 29-10: het logboek is voor David, onderwerp nooit filteren
   assert.ok(String(b.marker_soorten).includes('brieftaal'));
   assert.equal(b.stroom, 'twijfel');      // geen regel: naar Intake (standaard), waar de marker hem vasthoudt
   assert.equal(b.jev, null);
@@ -123,7 +123,7 @@ test('#1 ZORGMAIL-label en zorgdomeinen gaan nooit naar Jev', () => {
   assert.equal(rij(mm, b.id).reden, 'zorgmail');
 });
 
-test('#1 doktersmaten: geen Jev, geen tekst, geen onderwerp in het logboek; factuuradres → Factuur (schaduw)', () => {
+test('#1 doktersmaten: geen Jev, geen tekst, wel afzender en onderwerp in het logboek (wv1980); factuuradres → Factuur (schaduw)', () => {
   const { mm } = nieuweKamer();
   const r = ronde(mm, 'gmail:groenhouten');
   assert.equal(r.metadata_alleen, true);
@@ -134,9 +134,12 @@ test('#1 doktersmaten: geen Jev, geen tekst, geen onderwerp in het logboek; fact
   assert.equal(rij(mm, f.id).stroom, 'factuur');
   assert.equal(rij(mm, g.id).stroom, 'twijfel');
   assert.equal(rij(mm, g.id).reden, 'jev_uit');
-  assert.equal(rij(mm, g.id).onderwerp, null);
-  // review B1 #2/#6/#18: ook met jev/tekst aan in config.json geen Jev, geen tekst, geen afzender/aan, geen labels
-  assert.equal(rij(mm, g.id).afzender, null); assert.equal(rij(mm, g.id).aan, null); assert.equal(rij(mm, g.id).afzender_domein, 'voorbeeld.invalid');
+  assert.equal(rij(mm, g.id).onderwerp, 'Rooster');
+  // review B1 #2/#18: ook met jev/tekst aan in config.json geen Jev, geen tekst, geen labels; afzender en aan wel (wv1980, vervangt #6)
+  assert.equal(rij(mm, g.id).afzender, 'info@voorbeeld.invalid'); assert.equal(rij(mm, g.id).van_naam, 'Voorbeeld');
+  assert.deepEqual(JSON.parse(rij(mm, g.id).aan), ['ontvanger@voorbeeld.invalid']); assert.equal(rij(mm, g.id).afzender_domein, 'voorbeeld.invalid');
+  const lg = mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === 'gmail:groenhouten'; }).logboek.find(function (x) { return x.id === rij(mm, g.id).id; });
+  assert.equal(lg.onderwerp, 'Rooster'); assert.equal(lg.afzender, 'info@voorbeeld.invalid');
   assert.deepEqual(JSON.parse(rij(mm, f.id).labels_plan), []);
   assert.equal(mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === 'gmail:groenhouten'; }).jev, false);
 });
@@ -168,11 +171,20 @@ test('Geen draad-sneeuwbal: een twijfelmail trekt latere meldingen in de draad n
   assert.equal(rij(mm, ci.id).stap, 'weg'); assert.equal(rij(mm, ci.id).stroom, 'info');
 });
 
-test('Marker, zorgmail en verzonden mail: alleen het domein in het logboek (review B1 #6)', () => {
+test('Marker, zorgmail en verzonden mail: afzender, aan en onderwerp in het logboek; geen Jev (wv1980, vervangt review B1 #6)', () => {
   const { mm } = nieuweKamer();
-  const z = mail({ labels: ['ZORGMAIL'], onderwerp: 'Iets met een naam' }), v = mail({ labels: ['SENT'], aan: 'ontvanger@elders.invalid' });
-  draai(mm, 'gmail:david', [z, v], { jev: function () { return jevAntwoord({}); } });
-  for (const m of [z, v]) { const x = rij(mm, m.id); assert.equal(x.afzender, null); assert.equal(x.onderwerp, null); assert.equal(x.aan, null); assert.equal(x.van_naam, null); }
+  const z = mail({ labels: ['ZORGMAIL'], onderwerp: 'Iets met een naam' }), v = mail({ labels: ['SENT'], aan: 'ontvanger@elders.invalid', onderwerp: 'Verzonden' });
+  const zd = mail({ van: 'Bericht <noreply@post.zorgmail.nl>', onderwerp: 'Zorgdomein' });
+  const pat = mail({ onderwerp: 'Betreft: mw. Proef', tekst: 'Geachte collega, bovengenoemde patiënt zagen wij op de polikliniek. Geboortedatum: 01-02-1950. Diagnose en behandelplan volgen.' });
+  const u = draai(mm, 'gmail:david', [z, v, zd, pat], { jev: function () { return jevAntwoord({}); } });
+  assert.equal(u.s1.j.jev.length, 0, 'marker, zorgmail en verzonden gaan nooit naar Jev');
+  for (const [m, o] of [[z, 'Iets met een naam'], [v, 'Verzonden'], [zd, 'Zorgdomein'], [pat, 'Betreft: mw. Proef']]) {
+    const x = rij(mm, m.id); assert.equal(x.onderwerp, o); assert.ok(x.afzender); assert.ok(x.van_naam); assert.ok(JSON.parse(x.aan).length > 0); assert.equal(x.jev, null);
+  }
+  assert.deepEqual(JSON.parse(rij(mm, v.id).aan), ['ontvanger@elders.invalid']);
+  // ook in de App (logboekrij) staat het onderwerp bij een marker
+  const lijst = mm.app('POST /app/mailman/toets', { soort: 'regel', postvak: 'gmail:david', voorwaarden: { onderwerp: { op: 'bevat', w: 'mw. Proef' } } });
+  assert.equal(lijst.j.treffers, 1); assert.equal(lijst.j.voorbeelden[0].onderwerp, 'Betreft: mw. Proef'); assert.equal(lijst.j.voorbeelden[0].marker, true);
 });
 
 test('Harde grens op een schaalvraag geldt genormaliseerd (review B1 #7)', () => {
