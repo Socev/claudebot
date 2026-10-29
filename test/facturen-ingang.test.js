@@ -391,6 +391,19 @@ test('noodstop (app-uit of ingang/uit) → 503; onbekende paden en methoden 404'
   } finally { await sluit(t); }
 });
 
+// wv1998 (werkstroom-ontwerp § 7, review MOET 2): de verkooprijen van MailMan (gordelroosnota's met patiëntnaam) nooit via de ingang van
+// de praktijkmanager — /app/mailman/verkoop zit buiten /fac/facturen/*, en ook een gok binnen facturen geeft niets
+test('wv1998: verkooprijen (MailMan) niet bereikbaar via /fac', async () => {
+  const t = await opzet();
+  try {
+    for (const p of ['/fac/mailman/verkoop', '/fac/app/mailman/verkoop', '/fac/mailman', '/fac/facturen/verkoop', '/fac/facturen/mailman/verkoop']) {
+      const r = await t.vraag('GET', p);
+      assert.ok(r.status === 404, p + ' ' + r.status);
+      assert.ok(!/journaal|VACSHING|gordelroos/i.test(JSON.stringify(r.j || r.body || '')), p);
+    }
+  } finally { await sluit(t); }
+});
+
 test('audit: route, status, gebruiker-id; nooit een e-mail of JWT; bestand 0600', async () => {
   const t = await opzet();
   try {
