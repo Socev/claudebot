@@ -3,7 +3,8 @@
 # en de koppeling in server.js. Toetst: kaart (domeinen, nooit-mappen, conflictkopie, symlink, extensies, verborgen, vaste plek), linkoplossing
 # (exact pad, naam, hoofdletters/NFC, zelfde map, dubbelzinnig, #kop, |tekst, \| in tabel, embed, md-link met %20, codeblok genegeerd),
 # backlinks, openen (masker, frontmatter, .., absoluut, NUL, niet in kaart, vast + privé/personeel, symlink na de bouw, te groot), bestand
-# (alleen niet-md, tekst gemaskeerd, twee tegelijk), zoeken (naam, tekst, accenten, verborgen, vast, fragment gemaskeerd, betekenis gefilterd),
+# (alleen niet-md, tekst gemaskeerd, twee tegelijk), zoeken (naam, tekst, accenten, verborgen, vast, fragment gemaskeerd, betekenis gefilterd;
+# wv1940 zoekfilter soorten: codes, soort én plek, afgekapt per soort, teller, vault eerst),
 # kaart.json 0600 buiten de vault, koppeltabel Financiën, en server.js (dispatch, grenzen, glijdroutes, invoerslot, audit zonder pad, /health,
 # verrijking Financiën, uitrol-lijst, Dockerfile). Raakt de echte vault niet. Gebruik: bash test/secondbrain.sh
 set -u
@@ -176,6 +177,54 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
     zb.j.treffers[0].fragment.indexOf(TOKEN) < 0, zb.j.treffers);
   const zbv = await sb.app('POST /app/secondbrain/zoek', { q: 'polis', betekenis: true }, { vast: true });
   toets('5 betekenis op vast: geen privé', zbv.j.treffers.map((t) => t.pad).join() === '10_Zakelijk/Tolgaarde/Verzekeringen.md', zbv.j.treffers);
+
+  // ── 5b. zoekfilter soorten (wv1940): vaste codes, soort én plek, afgekapt per soort, teller, betekenis, vaste plek ──
+  {
+    const V2 = path.join(W, 'vault2');
+    const zet2 = (p, t) => { fs.mkdirSync(path.dirname(path.join(V2, p)), { recursive: true }); fs.writeFileSync(path.join(V2, p), t); };
+    for (let i = 0; i < 45; i++) zet2('Rapporten/rapport-' + i + '.pdf', '%PDF');
+    zet2('Rapporten/rapport overzicht.md', '# overzicht\nkwartaal\n');
+    zet2('Rapporten/rapport cijfers.xlsx', 'x'); zet2('Rapporten/rapport tabel.csv', 'a;b\n');
+    zet2('Rapporten/rapport foto.jpg', 'x'); zet2('Rapporten/rapport memo.mp3', 'x');
+    zet2('Pagina.md', '# pagina\nhet rapport in tekst\n'); zet2('Notitie.txt', 'rapport in een tekstbestand\n');
+    zet2('10_Zakelijk/Tolgaarde/Bronnen/rapport bron.pdf', '%PDF');
+    zet2('10_Zakelijk/Tolgaarde/Bronnen/notitie.md', '# bron\nrapport en kwartaal\n');
+    zet2('20_Prive/rapport prive.pdf', '%PDF');
+    zet2('30_Conversaties/WhatsApp/2026-10-28.md', '# dump\nrapport besproken, kwartaal\n');
+    const oud = new Date(Date.now() - 86400000);
+    fs.utimesSync(path.join(V2, 'Rapporten/rapport overzicht.md'), oud, oud);   // de vault-pagina is ouder en moet toch eerst
+    const sb2 = S.maak({ vault: V2, dir: path.join(W, 'staat2'), hmac: (p) => 'h' + p.length,
+      betekenis: async () => ['Pagina.md', '10_Zakelijk/Tolgaarde/Bronnen/notitie.md', 'Rapporten/rapport-1.pdf', '30_Conversaties/WhatsApp/2026-10-28.md'].map((k) => ({ key: 'vault/' + k, text: 'x' })) });
+    const z = async (q, soorten, ctx, extra) => (await sb2.app('POST /app/secondbrain/zoek', Object.assign({ q: q, soorten: soorten }, extra || {}), ctx || {}));
+    const pd = (r) => (r.j.treffers || []).map((t) => t.pad);
+    const p1 = await z('rapport', ['paginas']);
+    toets('5b paginas: alleen md en tekst, ook uit Bronnen en gesprekken, niet afgekapt', pd(p1).length === 5 && pd(p1).every((p) => /\.(md|txt)$/.test(p)) && pd(p1).indexOf('Notitie.txt') >= 0 &&
+      pd(p1).some((p) => /Bronnen/.test(p)) && pd(p1).some((p) => /^30_/.test(p)) && p1.j.afgekapt === false, p1.j);
+    const p2 = await z('rapport', ['pdf']);
+    toets('5b pdf: 40 treffers, alleen pdf, afgekapt, teller 47 (ook Bronnen en privé)', pd(p2).length === 40 && pd(p2).every((p) => /\.pdf$/.test(p)) && p2.j.afgekapt === true &&
+      p2.j.tel && p2.j.tel.pdf === 47 && p2.j.tel.office === 2 && p2.j.tel.media === 2 && !pd(p2).some((p) => /Bronnen/.test(p)), p2.j);
+    const p3 = await z('rapport', ['pdf', 'bronnen']);
+    toets('5b pdf + bronnen: alleen de pdf in Bronnen, teller binnen de plek', pd(p3).join() === '10_Zakelijk/Tolgaarde/Bronnen/rapport bron.pdf' && p3.j.tel.pdf === 1 && p3.j.tel.office === 0, p3.j);
+    const p4 = await z('rapport', ['office']), p5 = await z('rapport', ['media']);
+    toets('5b office = Word/Excel en csv, media = foto en audio', pd(p4).sort().join() === 'Rapporten/rapport cijfers.xlsx,Rapporten/rapport tabel.csv' &&
+      pd(p5).sort().join() === 'Rapporten/rapport foto.jpg,Rapporten/rapport memo.mp3', [pd(p4), pd(p5)]);
+    const p6 = await z('rapport', ['gesprekken']), p7 = await z('rapport', ['vault', 'paginas']);
+    toets('5b gesprekken alleen 30_Conversaties; vault zonder Bronnen en gesprekken', pd(p6).join() === '30_Conversaties/WhatsApp/2026-10-28.md' &&
+      pd(p7).sort().join() === 'Notitie.txt,Pagina.md,Rapporten/rapport overzicht.md', [pd(p6), pd(p7)]);
+    const p8 = await z('kwartaal', []);
+    toets('5b geen keuze = alles, de vault zelf eerst (ook als die ouder is)', pd(p8).length === 3 && pd(p8)[0] === 'Rapporten/rapport overzicht.md', pd(p8));
+    const fout = [['video'], 'pdf', [1], ['pdf', 'PDF'], { pdf: true }];
+    const st = [];
+    for (const f of fout) st.push((await z('rapport', f)).status);
+    toets('5b onbekende of verkeerde code: 400', st.every((x) => x === 400), st);
+    const p9 = await z('rapport', ['pdf'], { vast: true });
+    toets('5b vaste plek: geen privé en geen Bronnen, teller ook niet', !pd(p9).some((p) => /^20_|Bronnen/.test(p)) && p9.j.tel.pdf === 45, p9.j.tel);
+    const pb = await z('rapport', ['paginas', 'vault'], {}, { betekenis: true });
+    const pb2 = await z('rapport', ['pdf'], {}, { betekenis: true });
+    toets('5b betekenis: zelfde filter op het pad van de treffers', pd(pb).join() === 'Pagina.md' && pd(pb2).join() === 'Rapporten/rapport-1.pdf', [pd(pb), pd(pb2)]);
+    const p10 = await sb2.app('POST /app/secondbrain/zoek', { q: 'kwartaal' }, {});
+    toets('5b zonder soorten: oud gedrag (geen Bronnen of gesprekken, geen teller)', pd(p10).join() === 'Rapporten/rapport overzicht.md' && p10.j.tel === undefined, p10.j);
+  }
 
   // ── 6. Financiën-koppeltabel ──
   toets('6 koppel: "Centraal Beheer" (zonder B.V., andere hoofdletters) → pagina', sb.koppelNaam('CENTRAAL BEHEER') === '10_Zakelijk/Tolgaarde/Verzekeringen.md' && sb.koppelNaam('Weg') === null && sb.koppelNaam('Iets anders') === null);

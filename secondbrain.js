@@ -299,7 +299,6 @@ function maak(opt) {
   // Mag dit bestand op dit apparaat (P2) en in deze weergave (P4)? Op een vaste plek is verborgen ook dicht: in Bronnen-mappen staan
   // sollicitatietranscripten en arbeidsovereenkomsten (Fable diffreview M2), en "alles" doet daar niets.
   const mag = function (b, ctx) { return !(ctx.vast && (b.x || b.v)); };
-  const inLijst = function (b, ctx, alles) { return mag(b, ctx) && (alles || !b.v); };
 
   function kaartVoor(ctx, alles) {
     const k = vers(false);
@@ -582,10 +581,36 @@ function maak(opt) {
     return (van > 0 || ruimVan > 0 ? '… ' : '') + f + (f.length >= FRAGMENT ? ' …' : '');
   }
 
+  // wv1940 (David 29-10: "vinkjes boven … 'PDF', 'Media' — dat maakt zoeken makkelijker"): soorten = vaste codes in twee groepen. Binnen een
+  // groep of, tussen de groepen en: soort van het bestand én waar het staat; een lege groep = alles in die groep, geen enkele code = alles.
+  // Zonder het veld soorten het oude gedrag (alles = ook Bronnen en gesprekken), voor een app van vóór wv1940. Filteren gebeurt hier vóór
+  // de limiet, zodat de 40 treffers (afgekapt) per gekozen soort gelden. PDF, Word & Excel en media zoekt de pod alleen op de naam.
+  const ZOEK_SOORT = ['paginas', 'pdf', 'office', 'media'], ZOEK_PLEK = ['vault', 'bronnen', 'gesprekken'];
+  const soortCode = function (b) {
+    if (b.s === 'md') return 'paginas';
+    if (b.s === 'tekst') return extVan(b.p) === 'csv' ? 'office' : 'paginas';
+    if (b.s === 'pdf' || b.s === 'office') return b.s;
+    return 'media';   // beeld, audio
+  };
+  const plekCode = function (b) { return b.p.split('/')[0] === '30_Conversaties' ? 'gesprekken' : b.v ? 'bronnen' : 'vault'; };
+  function zoekKeuze(d) {
+    if (!d || d.soorten === undefined || d.soorten === null) return null;
+    const s = d.soorten;
+    if (!Array.isArray(s) || s.length > ZOEK_SOORT.length + ZOEK_PLEK.length || s.some(function (c) { return ZOEK_SOORT.indexOf(c) < 0 && ZOEK_PLEK.indexOf(c) < 0; }))
+      return { fout: true };
+    return { soort: new Set(s.filter(function (c) { return ZOEK_SOORT.indexOf(c) >= 0; })), plek: new Set(s.filter(function (c) { return ZOEK_PLEK.indexOf(c) >= 0; })) };
+  }
+
   async function zoek(d, ctx) {
     const q = String(d && d.q || '').trim().slice(0, MAX_Q);
     if (q.length < 2) return { status: 400, j: { ok: false, fout: 'typ minstens twee tekens' } };
+    const keuze = zoekKeuze(d);
+    if (keuze && keuze.fout) return { status: 400, j: { ok: false, fout: 'onbekende soort in het zoekfilter' } };
     const alles = !!(d && d.alles);
+    const plekGoed = function (b) { return mag(b, ctx) && (keuze ? !keuze.plek.size || keuze.plek.has(plekCode(b)) : alles || !b.v); };
+    const past = function (b) { return plekGoed(b) && (!keuze || !keuze.soort.size || keuze.soort.has(soortCode(b))); };
+    // de vault zelf eerst, dan Bronnen en gesprekken (die zoeken nu standaard mee; zonder voorrang verdringen de dagdumps de pagina's)
+    const rang = function (b) { return b.v ? 1 : 0; };
     const k = vers(false);
     if (!k) return { status: 503, j: { ok: false, fout: 'de kaart is nu niet te bouwen' } };
     if (d && d.betekenis) {
@@ -599,7 +624,7 @@ function maak(opt) {
         const i = k.perPad.get(sleutel(key));
         if (i === undefined || gezien.has(i)) continue;   // stale index of buiten de kaart (Fable K11)
         const b = k.bestanden[i];
-        if (!inLijst(b, ctx, alles)) continue;
+        if (!past(b)) continue;   // wv1940: zelfde filter als de tekstzoek
         gezien.add(i);
         uit.push({ pad: b.p, waar: 'betekenis', fragment: masker(String(c.text || ''), ctx.vast, bsnMasker).replace(/\s+/g, ' ').trim().slice(0, FRAGMENT) });
         if (uit.length >= MAX_TREFFERS) break;
@@ -613,16 +638,24 @@ function maak(opt) {
       const opNaam = [], opTekst = [];
       const t0 = Date.now();
       let afgekapt = false;
-      const lijst = k.bestanden.filter(function (b) { return inLijst(b, ctx, alles); });
-      for (const b of lijst) {
-        const p = plat(b.p);
-        if (woorden.every(function (w) { return p.indexOf(w) >= 0; })) opNaam.push({ b: b, pad: b.p, waar: 'naam', fragment: '' });
+      const lijst = k.bestanden.filter(past);
+      const naamPast = function (b) { const p = plat(b.p); return woorden.every(function (w) { return p.indexOf(w) >= 0; }); };
+      for (const b of lijst) if (naamPast(b)) opNaam.push({ b: b, pad: b.p, waar: 'naam', fragment: '' });
+      // wv1940: teller per soort die alleen op naam zoekt (dus exact en goedkoop), binnen de gekozen plekken
+      let tel;
+      if (keuze) {
+        tel = { pdf: 0, office: 0, media: 0 };
+        for (const b of k.bestanden) {
+          const c = soortCode(b);
+          if (c !== 'paginas' && plekGoed(b) && naamPast(b)) tel[c]++;
+        }
       }
       const opNaamSet = new Set(opNaam.map(function (x) { return x.pad; }));
       const tekstLijst = lijst.filter(function (b) { return (b.s === 'md' || b.s === 'tekst') && b.g <= MAX_MD && !opNaamSet.has(b.p); })
-        .sort(function (a, b) { return b.m - a.m; });
+        .sort(function (a, b) { return rang(a) - rang(b) || b.m - a.m; });
+      const naamVoor = [opNaam.filter(function (x) { return rang(x.b) === 0; }).length, opNaam.length];   // naamtreffers die vóór deze rang staan
       for (const b of tekstLijst) {
-        if (opTekst.length + opNaam.length >= MAX_TREFFERS) { afgekapt = true; break; }
+        if (opTekst.length + naamVoor[rang(b)] >= MAX_TREFFERS) { afgekapt = true; break; }
         if (Date.now() - t0 > ZOEK_MS) { afgekapt = true; break; }
         let t;
         try { t = fs.readFileSync(path.join(VAULT, b.p), 'utf8'); } catch (e) { continue; }
@@ -639,11 +672,15 @@ function maak(opt) {
           if (!woorden.every(function (w) { return vlak.indexOf(w) >= 0; })) continue;
           pos = vlak.indexOf(eerste);
         }
-        opTekst.push({ pad: b.p, waar: 'tekst', fragment: fragment(t, Math.min(pos, t.length), ctx) });
+        opTekst.push({ pad: b.p, waar: 'tekst', fragment: fragment(t, Math.min(pos, t.length), ctx), r: rang(b) });
       }
-      opNaam.sort(function (a, b) { return b.b.m - a.b.m; });
-      const treffers = opNaam.slice(0, MAX_TREFFERS).map(function (x) { return { pad: x.pad, waar: 'naam', fragment: '' }; }).concat(opTekst).slice(0, MAX_TREFFERS);
-      return { status: 200, j: { ok: true, q: q, treffers: treffers, afgekapt: afgekapt || opNaam.length > MAX_TREFFERS, ms: Date.now() - t0 } };
+      opNaam.sort(function (a, b) { return rang(a.b) - rang(b.b) || b.b.m - a.b.m; });
+      const treffers = opNaam.slice(0, MAX_TREFFERS).map(function (x) { return { pad: x.pad, waar: 'naam', fragment: '', r: rang(x.b) }; }).concat(opTekst)
+        .sort(function (a, b) { return a.r - b.r; }).slice(0, MAX_TREFFERS)
+        .map(function (x) { return { pad: x.pad, waar: x.waar, fragment: x.fragment }; });
+      const j = { ok: true, q: q, treffers: treffers, afgekapt: afgekapt || opNaam.length > MAX_TREFFERS, ms: Date.now() - t0 };
+      if (tel) j.tel = tel;
+      return { status: 200, j: j };
     } finally { zoekBezig = false; }
   }
 
