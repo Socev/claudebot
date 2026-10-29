@@ -1212,7 +1212,7 @@ function maak(o) {
     try {
       fs.mkdirSync(QUAR, { recursive: true, mode: 0o700 });
       for (const n of fs.readdirSync(QUAR)) fs.rmSync(path.join(QUAR, n), { recursive: true, force: true });   // quarantaine leeg na een crash
-      const rijen = db.prepare(`SELECT s.stuk_id FROM stuk s WHERE s.compleet_op IS NOT NULL AND s.marker_op IS NOT NULL AND s.status NOT IN ('open','onvolledig')
+      const rijen = db.prepare(`SELECT s.stuk_id FROM stuk s WHERE s.compleet_op IS NOT NULL AND s.marker_op IS NOT NULL AND s.status NOT IN ('open','onvolledig','verwijderd')
         AND NOT EXISTS (SELECT 1 FROM router_stuk r WHERE r.stuk_id = s.stuk_id AND r.versie = s.versie) ORDER BY s.aangemaakt LIMIT ?`).all(PER_RONDE * 5)
         .filter(function (r) { return (mislukt.get(r.stuk_id) || 0) < 3 && !(pauze.has(r.stuk_id) && nu() - pauze.get(r.stuk_id) < JEV_PAUZE_MS); }).slice(0, PER_RONDE);
       for (const r of rijen) {
@@ -1467,7 +1467,7 @@ function maak(o) {
   }
   function info() {
     const n = db.prepare('SELECT status, count(*) n FROM router_stuk GROUP BY status').all();
-    const wacht = db.prepare(`SELECT count(*) n FROM stuk s WHERE s.compleet_op IS NOT NULL AND s.marker_op IS NOT NULL AND s.status NOT IN ('open','onvolledig')
+    const wacht = db.prepare(`SELECT count(*) n FROM stuk s WHERE s.compleet_op IS NOT NULL AND s.marker_op IS NOT NULL AND s.status NOT IN ('open','onvolledig','verwijderd')
       AND NOT EXISTS (SELECT 1 FROM router_stuk r WHERE r.stuk_id = s.stuk_id AND r.versie = s.versie)`).get().n;
     const o2 = {}; for (const r of n) o2[r.status] = r.n;
     const lv = liveStand();

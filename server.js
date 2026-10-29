@@ -7169,7 +7169,7 @@ async function appKnop(req, res, reg, a, s, d, kaart) {
   const bijStart = function () {
     appKnopRijZet(sleutel, jobId2, function (x) { x.antwoord.gestart = true; });
     let kaartStaart = null;   // wv1253: een kaart-haak kan een staart voor de prompt teruggeven (belofte van tekst), bv. de uitkomst van OVIS
-    if (kaart && kaart.bijStart) { try { kaartStaart = kaart.bijStart(keuze); } catch (e) { logError('app-voor-jou', e); } }   // wv404: kaart op beantwoord
+    if (kaart && kaart.bijStart) { try { kaartStaart = kaart.bijStart(keuze, gevoeligJa); } catch (e) { logError('app-voor-jou', e); } }   // wv404: kaart op beantwoord (wv1964: + of de Ja een verse vingerafdruk had)
     else appVjSluitGekoppeld(sleutel, keuze);   // wv1018 (Fable diffreview #1): een antwoord in het gesprek sluit ook de gekoppelde kaart
     // Fable-diffreview wv405 #1: het antwoord van de vorige beurt kan in dezelfde milliseconde in chat_log zijn gezet; dan zou
     // de Poortwachter de druk aan dát antwoord koppelen. Altijd ná de laatst geschreven rij.
@@ -10178,9 +10178,11 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
     'De kaart gaat vanzelf op beantwoord. Wacht een werkvoorraadrij op dit antwoord, geef hem vrij of zet hem bij volgens het antwoord. ' +
     'Een agendawijziging uit deze druk blijft oranje bij de Poortwachter (✅ in de app onder het volledige voorstel).)';
   const bericht = 'Voor jou-kaart ' + JSON.stringify(titel) + ':\n' + tekst + (voorstel ? '\nMijn voorstel: ' + voorstel : '');   // chat_log-rij van Socev (hoofdkanaal)
-  const bijStart = function (kz) {
+  // wv1964 (SB2 fase 6d): een gevoelige Ja (verse vingerafdruk, appKnop) staat zo in het bewijs; de verwijderroute in de databank eist dat
+  const bijStart = function (kz, gevoeligJa) {
     const nu = Date.now();
-    const bewijs = 'app ' + appVjDag(appYmd(nu)) + ' ' + appKlok(new Date(nu).toISOString()) + ': David drukte ' + (kz === 'ja' ? 'Ja' : kz === 'nee' ? 'Nee' : 'Anders') + ' op de kaart (vraag-id ' + hash + ')';
+    const bewijs = 'app ' + appVjDag(appYmd(nu)) + ' ' + appKlok(new Date(nu).toISOString()) + ': David drukte ' + (kz === 'ja' ? 'Ja' : kz === 'nee' ? 'Nee' : 'Anders') + ' op de kaart (vraag-id ' + hash + ')' +
+      (kz === 'ja' && gevoeligJa === true ? ', met verse vingerafdruk' : '');
     appSbRpc('mk_voor_jou_status', { p_sleutel: p.sleutel, p_van: p.status, p_naar: 'gedaan', p_door: 'david', p_bewijs: bewijs, p_later_tot: null })
       .then(function (r) { appStaat.vjCache = null; if (!r || r.ok !== true) logError('app-voor-jou', new Error('kaart ' + p.sleutel + ' niet op beantwoord: ' + (r && r.nu))); })
       .catch(function (e) { appStaat.vjCache = null; logError('app-voor-jou', e); });
@@ -10214,7 +10216,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
     const ssCtx = context + ss.context, ssStart = bijStart;
     const knopSs = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
       { tekst: tekst, bericht: bericht, context: ssCtx, gevoelig: k.gevoelig, upload: ss.upload || undefined,
-        bijStart: function (kz) { try { ss.bijStart(); } catch (e) { logError('scansnap-knop', e); } return ssStart(kz); },
+        bijStart: function (kz, g) { try { ss.bijStart(); } catch (e) { logError('scansnap-knop', e); } return ssStart(kz, g); },
         bijVerval: function () { try { ss.bijVerval(); } catch (e) { logError('scansnap-knop', e); } } });
     await knopSs;
     if (res._app) res._app.reden = 'voor-jou knop #' + id + ' scansnap ' + (res._app.reden || '');
@@ -10223,7 +10225,7 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   // wv921, wv861 en wv1253 sluiten elkaar uit (pot-vrijgave-N, de sleutel in bundel.json, intake-…); de haak van de een of de ander
   const knopRes = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
     { tekst: tekst, bericht: bericht, context: pot ? ctx : ov ? context + ov.context : ctxIb, gevoelig: k.gevoelig || (!pot && !!ib),
-      bijStart: ov ? function (kz) { bijStart(kz); return ov.staart(a); } : bijStart,
+      bijStart: ov ? function (kz, g) { bijStart(kz, g); return ov.staart(a); } : bijStart,
       naStart: ov ? ov.naStart : pot && !pot.reden ? function (kz, gevoeligJa, ap, bevestiging, vraagId) { potVzVrijgeven(pot.v, kz, gevoeligJa, ap, bevestiging, vraagId); }
         : !pot && ib && !ib.afgehandeld ? function (kz, gevoeligJa, ap, bevestiging, vraagId) {
           if (kz === 'nee') { try { ideeen.bundelNee(ib.kaart); } catch (e) { logError('ideeen-plaats', e); } return; }
@@ -15254,10 +15256,23 @@ const intake = (function () {
       sbRpc: function (fn, body) { return appSbRpc(fn, body, 60000); },
       versie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || ''; },
       // wv1916: live bron (router.json live) → de router schrijft de vault, deze laag antwoordt vault "router"
-      liveBron: function (b) { return intakeLiveBron(b); } });
+      liveBron: function (b) { return intakeLiveBron(b); },
+      // wv1964 (SB2 fase 6d): poort bij binnenkomst weigerde inhoud met een tombstone → één box-rij per dag (alleen bron en sha-begin, nooit inhoud)
+      meldTombstone: function (x) { intakeMeldTombstone(x); } });
   } catch (e) { logError('intake', e); return null; }
 })();
 function intakeIsPad(req) { const p = reqPath(req); return p === '/intake' || p.indexOf('/intake/') === 0; }
+function intakeMeldTombstone(x) {
+  const t = ovisAms(), stempel = path.join(INTAKE_DIR, 'tombstone-gemeld');
+  let laatst = '';
+  try { laatst = fs.readFileSync(stempel, 'utf8').trim(); } catch (e) {}
+  if (laatst === t.datum) return;
+  try { fs.writeFileSync(stempel, t.datum, { mode: 0o600 }); } catch (e) { logError('intake-tombstone', e); return; }
+  ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS Intake weigerde verwijderde inhoud (tombstone) (automatisch, wv1964)\n- status: open\n- van: pod:intake\n' +
+    '- wat ik zag: ' + String(x && x.bron || '?').slice(0, 40) + (x && x.sha && x.sha.length ? ', sha ' + x.sha.join(', ') + '…' : '') + (x && x.stuk_id ? ', zelfde bron als verwijderd stuk ' + x.stuk_id : '') +
+    ' — niet opgeslagen. Hooguit één rij per dag; meer in intake.sqlite › spoor (soort tombstone_geweigerd).\n' +
+    '- voorstel: niets als dit een herhaalde aanlevering is; kwam het terug uit een teruggezette kopie, dan herstelproef/handhaven nalopen.\n');
+}
 // wv1869 (SB2 fase 3b): publicatieservice — bronnotities in <entiteit>/Bronnen/ en het gegenereerde blok in _register.md via
 // secondbrain.outbox_publication (public.sb2_publicatie_*, sb2_outbox_*); logica en waarom in intake-publicatie.js. Eén ronde per nacht als
 // nachtketen-stap intake-publicatie. Schakelaar intake/publicatie.json {"aan": true, "entiteiten": ["TG"]} (uit of weg = niets).

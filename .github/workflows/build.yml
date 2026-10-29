@@ -340,6 +340,10 @@ jobs:
       - name: "intake-publicatie (wv1869, publicatieservice)"
         if: ${{ !cancelled() }}
         run: bash test/intake-publicatie.sh
+      # Verwijderroute (wv1964, SB2 fase 6d, proef 11a pod-kant): plan, kaart zonder inhoud, alles weg, tombstones, poort bij binnenkomst.
+      - name: "intake-verwijder (wv1964, verwijderroute + tombstones)"
+        if: ${{ !cancelled() }}
+        run: bash test/intake-verwijder.sh
       # Bandjes (wv739/wv743): register lezen/schrijven, routes, Studio-koppeling (nep-Piper), naKlaar, /smal, box-rij, server.js-blok in een vm.
       - name: "bandjes (wv743, mini-app Bandjes)"
         if: ${{ !cancelled() }}

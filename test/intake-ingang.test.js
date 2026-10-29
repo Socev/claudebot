@@ -1095,3 +1095,154 @@ test('wv1916 Opus-review MOET 2: een stuk dat vóór het aanzetten op wacht ston
     for (const p of g.verwacht) assert.ok(fs.existsSync(path.join(o.vault, p)), p);
   } finally { await o.sluit(); }
 });
+
+test('wv1964: verwijderroute (proef 11a, pod) — plan, kaart zonder inhoud, poort van de databank, alles weg, tombstones, poort bij binnenkomst', async () => {
+  const V = require(path.join(ROOT, 'intake-verwijder.js'));
+  let id = 0;
+  const spiegelRpc = async (fn, body) => ({ run_id: 1, stukken: body.p.stukken.map((s) => ({ ref: s.ref, ok: true, bronnen: s.bronnen.map(() => ({ record: ++id, revisie: id, ontvangst: id })) })) });
+  const meldingen = [];
+  const o = await omgeving({ sbRpc: spiegelRpc, versie: () => 'abc1234', meldTombstone: (x) => meldingen.push(x) });
+  try {
+    const pdf = PDF('verzonnen bijlage voor de verwijderproef');
+    const mailEnv = (bron, gid, postvak) => ({ protocol: 'ovis-intake/1', profiel: 'mail@1', bron, bron_id: gid, ontvangen: nuOff,
+      meta: { gmail_id: gid, message_id: '<CAProefVerwijder1@mail.voorbeeld.nl>', thread_id: gid, van: 'afzender@voorbeeld.nl', aan: ['d.schaap@voorbeeld.nl'],
+        onderwerp: 'Proefonderwerp Geheimpje', labels: ['INBOX'] },
+      onderdelen: [tdeel('o1', 'origineel', 'bericht.eml', EML(postvak, LIJF).toString('utf8'), 'message/rfc822'), bdeel('b1', 'bijlage', 'Proefbijlage Geheimpje.pdf', pdf, 'application/pdf'),
+        tdeel('r1', 'representatie', naam.mail('2026-10-24', 'Overleg', '', gid, 'mail'), '---\ndatum: 2026-10-24\nentiteit: tolgaarde\n---\n\nmailtekst Geheimpje\n', 'text/markdown', { entiteit: 'tolgaarde', categorie: 'Overleg', documentbron: 'mail' })],
+      overgang: { stand: 'om' } });
+    const ids = {};
+    for (const [k, bron, gid, pv] of [['m1', 'gmail:david', '19a2b3c4d5e6f7a1', 'david'], ['m2', 'gmail:groenhouten', '19a2b3c4d5e6f7a2', 'groenhouten']]) {
+      const r = await post(o, K.mail, mailEnv(bron, gid, pv)); assert.strictEqual(r.status, 201, JSON.stringify(r.j));
+      if (!r.j.compleet) { const p = await put(o, K.mail, r.j.stuk_id, 'b1', pdf, 'application/pdf'); assert.strictEqual(p.j.compleet, true, JSON.stringify(p.j)); }
+      ids[k] = r.j.stuk_id;
+    }
+    const g = gevallen();
+    const media = g[4].env(); media.bron_id = 'false_2207000009@c.us_3EB0BBBB99'; media.meta.chat_id = '2207000009@c.us'; media.overgang.bestandsnaam = media.overgang.bestandsnaam.replace('.pdf', ' v.pdf');
+    media.onderdelen = [bdeel('b1', 'bijlage', 'zelfde.pdf', pdf, 'application/pdf')];
+    ids.media = (await post(o, K.wa, media)).j.stuk_id;                    // dezelfde pdf via WhatsApp
+    ids.ander = (await post(o, K.signal, g[5].env())).j.stuk_id;           // los stuk dat moet blijven
+    await o.ing.ronde();
+    fs.writeFileSync(path.join(o.dir, 'spiegel.json'), '{"aan": true}');
+    await o.ing.spiegel();
+    const db = o.ing._db;
+    const kern = db.prepare('SELECT kern FROM spiegel WHERE stuk_id = ?').get(ids.m1).kern;
+    assert.match(kern, /^[0-9a-f]{64}$/);
+    // bronnotitie (zoals de publicatieservice) en een afgeleide pagina die het stuk noemt
+    fs.mkdirSync(path.join(o.vault, '10_Zakelijk/Tolgaarde/Bronnen'), { recursive: true });
+    const notitie = '10_Zakelijk/Tolgaarde/Bronnen/2026-10-25_' + ids.m1 + '.md';
+    fs.writeFileSync(path.join(o.vault, notitie), '---\ntype: bron\novis_stuk: ' + ids.m1 + '\n---\n\nProefonderwerp Geheimpje\n');
+    fs.writeFileSync(path.join(o.vault, '10_Zakelijk/Tolgaarde/Kennis.md'), '# Kennis\nzie [[' + notitie.replace(/\.md$/, '') + ']] (' + ids.m1 + ')\n');
+    fs.mkdirSync(path.join(o.vault, '00_Systeem/Verwijderregister'), { recursive: true });
+    fs.writeFileSync(path.join(o.vault, '00_Systeem/Verwijderregister/index.md'), '# Verwijderregister\n\n| datum | wat | reden | akkoord | kopie |\n|---|---|---|---|---|\n');
+    // routertabellen (o.a. besluit, alleen-toevoegen) zoals op de pod, met een besluitregel die inhoud draagt
+    db.exec(/const SCHEMA = `([\s\S]*?)`;/.exec(fs.readFileSync(path.join(ROOT, 'intake-router.js'), 'utf8'))[1]);
+    db.prepare("INSERT INTO besluit (stuk_id, versie, stap, uitkomst, bewijs, regel, door, tijd) VALUES (?, 1, 'lens', 'x', 'Geheimpje', 'r', 'proef', ?)").run(ids.m1, '2026-10-25T00:00:00Z');
+    assert.throws(() => db.prepare('DELETE FROM besluit').run(), /append-only/);
+    const voorPaden = db.prepare('SELECT pad FROM overgang WHERE stuk_id IN (?, ?, ?)').all(ids.m1, ids.m2, ids.media).map((r) => r.pad);
+    assert.ok(voorPaden.length >= 3 && voorPaden.every((p) => fs.existsSync(path.join(o.vault, p))), 'originelen in de vault');
+    const aanroepen = [];
+    let dbAntwoord = (fn, body) => fn === 'sb_bron_verwijder_plan' ? { ok: true, set_vinger: V.setVinger(body.p.sha256), telling: { blob: 3, source_occurrence: 4, bron_niet_proef: 3 }, al_tombstone: 0, al_verwijderd: null }
+      : fn === 'sb_bron_verwijder' ? { ok: false, reden: 'geen kaart' } : fn === 'sb_bron_verwijder_klaar' ? { ok: true } : { aantal: 0 };
+    const staat = path.join(o.basis, 'staat');
+    const R = V.maak({ dir: o.dir, vault: o.vault, db, vv: VV, staat, extraMappen: [path.join(o.dir, 'schaduw')], nu: () => o.klok.t,
+      rpc: async (fn, body) => { aanroepen.push({ fn, body: JSON.parse(JSON.stringify(body)) }); return dbAntwoord(fn, body); } });
+
+    // plan: m1 + m2 (zelfde kern) + media (zelfde pdf); --zonder pdf → media blijft buiten
+    const p = await R.plan(ids.m1);
+    assert.strictEqual(p.ok, true, JSON.stringify(p));
+    assert.deepStrictEqual(p.stukken.map((s) => s.stuk_id).sort(), [ids.m1, ids.m2, ids.media].sort());
+    assert.ok(p.set.includes(kern) && p.set.includes(sha(pdf)));
+    assert.strictEqual(p.set_vinger, V.setVinger(p.set)); assert.strictEqual(p.code, p.set_vinger.slice(0, 12));
+    assert.ok(p.paden.some((t) => t.rel === notitie && t.waarom === 'bronnotitie'));
+    assert.deepStrictEqual(p.afgeleid, ['10_Zakelijk/Tolgaarde/Kennis.md']);
+    const k = JSON.stringify(p.kaart);
+    assert.match(p.kaart.titel, /verwijderen\?$/); assert.strictEqual(p.kaart.soort, 'besluit');
+    assert.ok(p.kaart.stappen.some((s) => s.indexOf(p.code) >= 0));
+    for (const verboden of ['Geheimpje', 'afzender@', 'raw_input', '.md', 'stk_', p.set_vinger]) assert.ok(k.indexOf(verboden) < 0, 'kaart lekt: ' + verboden);
+    assert.ok(p.kaart.stappen.every((s) => s.length <= 400) && p.kaart.waarom.length <= 400 && p.kaart.titel.length <= 90);
+    const pz = await R.plan(ids.m1, { zonder: [sha(pdf)] });
+    assert.deepStrictEqual(pz.stukken.map((s) => s.stuk_id).sort(), [ids.m1, ids.m2].sort()); assert.ok(!pz.set.includes(sha(pdf)));
+
+    // zonder vraag-id, met --proef op echte stukken, en bij een weigering van de databank: niets geraakt
+    assert.strictEqual((await R.voerUit(ids.m1, {})).ok, false);
+    assert.match((await R.voerUit(ids.m1, { proef: true })).reden, /alleen voor verzonnen proefstukken/);
+    const w = await R.voerUit(ids.m1, { vraag: 'c14a0001', code: p.code });
+    assert.strictEqual(w.ok, false); assert.match(w.reden, /databank weigerde/);
+    assert.ok(p.set.every((s) => fs.existsSync(path.join(o.dir, 'blob', s.slice(0, 2), s))), 'na een weigering staan de blobs er nog');
+    assert.ok(voorPaden.every((x) => fs.existsSync(path.join(o.vault, x))), 'na een weigering staat alles er nog');
+    assert.strictEqual(db.prepare('SELECT status FROM stuk WHERE stuk_id = ?').get(ids.m1).status !== 'verwijderd', true);
+    assert.ok(!fs.existsSync(path.join(o.dir, 'tombstones.json')));
+    assert.match((await R.voerUit(ids.m1, { vraag: 'c14a0001', code: '000000000000' })).reden, /set veranderde/);
+
+    // met Ja: alles weg
+    dbAntwoord = (fn, body) => fn === 'sb_bron_verwijder' ? { ok: true, verwijdering_id: 7, telling_voor: { blob: 3, source_occurrence: 4 }, telling_na: {} }
+      : fn === 'sb_bron_verwijder_plan' ? { ok: true, set_vinger: V.setVinger(body.p.sha256), telling: { blob: 3 } } : { ok: true };
+    const u = await R.voerUit(ids.m1, { vraag: 'c14a0001', code: p.code });
+    assert.strictEqual(u.ok, true, JSON.stringify(u.na));
+    const v = aanroepen.filter((a) => a.fn === 'sb_bron_verwijder').pop().body.p;
+    assert.deepStrictEqual([v.sha256, v.stuk, v.reden, v.vraag], [p.set, ids.m1, 'PII_grondwet_3', 'c14a0001']);
+    assert.ok(aanroepen.some((a) => a.fn === 'sb_bron_verwijder_klaar' && a.body.p_id === 7));
+    assert.ok(!JSON.stringify(aanroepen).includes('Geheimpje') && !JSON.stringify(aanroepen).includes('raw_input'), 'naar de databank alleen hashes en ids');
+    for (const s of p.set) assert.ok(!fs.existsSync(path.join(o.dir, 'blob', s.slice(0, 2), s)), 'blob weg ' + s);
+    for (const x of voorPaden.concat([notitie])) assert.ok(!fs.existsSync(path.join(o.vault, x)), 'vault weg ' + x);
+    assert.ok(fs.existsSync(path.join(o.vault, '10_Zakelijk/Tolgaarde/Kennis.md')), 'afgeleide pagina alleen gemeld');
+    for (const sid of [ids.m1, ids.m2, ids.media]) {
+      const s = db.prepare('SELECT * FROM stuk WHERE stuk_id = ?').get(sid);
+      assert.deepStrictEqual([s.status, s.meta, s.bestandsnaam], ['verwijderd', '{}', null]); assert.match(s.bron_id, /^verwijderd:[0-9a-f]{64}$/);
+      for (const t of ['onderdeel', 'overgang', 'spiegel', 'vrij_veld', 'besluit', 'aanlevering', 'router_stuk']) assert.strictEqual(db.prepare('SELECT count(*) n FROM ' + t + ' WHERE stuk_id = ?').get(sid).n, 0, t);
+    }
+    assert.strictEqual(db.prepare('SELECT count(*) n FROM blob WHERE sha256 IN (' + p.set.map(() => '?').join(',') + ')').get(...p.set).n, 0);
+    assert.strictEqual(db.prepare("SELECT count(*) n FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'besluit'").get().n, 2, 'alleen-toevoegen-triggers terug');
+    db.prepare("INSERT INTO besluit (stuk_id, versie, stap, uitkomst, bewijs, regel, door, tijd) VALUES ('stk_20261025_00000000', 1, 'lens', 'x', 'b', 'r', 'proef', 't')").run();
+    assert.throws(() => db.prepare('DELETE FROM besluit').run(), /append-only/, 'trigger werkt weer');
+    assert.strictEqual(db.prepare("SELECT status FROM stuk WHERE stuk_id = ?").get(ids.ander).status !== 'verwijderd', true, 'los stuk blijft');
+    const cache = JSON.parse(fs.readFileSync(path.join(o.dir, 'tombstones.json'), 'utf8'));
+    assert.ok(p.set.every((s) => cache.sha256.includes(s)));
+    const tv = fs.readFileSync(path.join(o.vault, '00_Systeem/Verwijderregister/tombstones.md'), 'utf8');
+    assert.ok(p.set.every((s) => tv.includes(s)) && !tv.includes('Geheimpje'));
+    const reg = fs.readFileSync(path.join(o.vault, '00_Systeem/Verwijderregister/index.md'), 'utf8');
+    assert.ok(reg.includes('stuk ' + ids.m1) && reg.includes('vraag-id c14a0001') && !reg.includes('raw_input') && !reg.includes('Geheimpje'));
+    assert.strictEqual((await R.voerUit(ids.m1, { vraag: 'c14a0001' })).al_klaar, true, 'tweede keer: journaal klaar');
+
+    // poort bij binnenkomst: dezelfde mail, dezelfde bron met andere bytes, de pdf via een nieuw bericht → geweigerd, geen stuk
+    const n0 = db.prepare('SELECT count(*) n FROM stuk').get().n;
+    let r = await post(o, K.mail, mailEnv('gmail:david', '19a2b3c4d5e6f7a1', 'david'));
+    assert.deepStrictEqual([r.status, r.j.uitkomst], [200, 'geweigerd_tombstone']);
+    // alle bytes anders (eml, pdf, leesversie): alleen bron+bron_id is gelijk
+    const anders = mailEnv('gmail:david', '19a2b3c4d5e6f7a1', 'david');
+    anders.onderdelen = [tdeel('o1', 'origineel', 'bericht.eml', EML('david', 'Andere tekst').toString('utf8'), 'message/rfc822'),
+      bdeel('b1', 'bijlage', 'Andere.pdf', PDF('andere bijlage'), 'application/pdf'), tdeel('r1', 'representatie', anders.onderdelen[2].naam, '---\ndatum: 2026-10-24\nentiteit: tolgaarde\n---\n\nandere tekst\n', 'text/markdown', anders.onderdelen[2].meta)];
+    assert.ok(!anders.onderdelen.some((d) => p.set.includes(d.sha256)), 'geen gedeelde sha');
+    r = await post(o, K.mail, anders); assert.strictEqual(r.j.uitkomst, 'geweigerd_tombstone', 'zelfde bron+bron_id van een verwijderd stuk: ' + JSON.stringify(r.j));
+    const m3 = g[4].env(); m3.bron_id = 'false_2207000010@c.us_3EB0CCCC10'; m3.meta.chat_id = '2207000010@c.us'; m3.onderdelen = [bdeel('b1', 'bijlage', 'weer.pdf', pdf, 'application/pdf')];
+    m3.overgang.bestandsnaam = m3.overgang.bestandsnaam.replace('.pdf', ' w.pdf');
+    r = await post(o, K.wa, m3); assert.strictEqual(r.j.uitkomst, 'geweigerd_tombstone');
+    assert.strictEqual(db.prepare('SELECT count(*) n FROM stuk').get().n, n0, 'geen nieuw stuk');
+    assert.ok(meldingen.length >= 3 && meldingen.every((x) => !JSON.stringify(x).includes('Geheimpje')));
+    assert.ok(db.prepare("SELECT count(*) n FROM spoor WHERE soort = 'tombstone_geweigerd'").get().n >= 3);
+    // de vaultlijst alleen (pod-cache weg, zoals na een teruggezette pod) houdt het ook tegen
+    fs.renameSync(path.join(o.dir, 'tombstones.json'), path.join(o.dir, 'tombstones.bewaar'));
+    r = await post(o, K.wa, Object.assign(m3, { bron_id: 'false_2207000011@c.us_3EB0CCCC11' })); assert.strictEqual(r.j.uitkomst, 'geweigerd_tombstone', 'vaultlijst');
+    // kapotte cache = dicht (503), niet open
+    fs.writeFileSync(path.join(o.dir, 'tombstones.json'), '{kapot');
+    r = await post(o, K.wa, Object.assign(m3, { bron_id: 'false_2207000012@c.us_3EB0CCCC12' })); assert.deepStrictEqual([r.status, r.j.reden], [503, 'tombstones_onleesbaar']);
+    fs.renameSync(path.join(o.dir, 'tombstones.bewaar'), path.join(o.dir, 'tombstones.json'));
+    // de rest van de ingang werkt: een nieuw, ander stuk komt binnen
+    const nieuw = g[5].env(); nieuw.bron_id = 'groupProefId999=/1761285600000-1761333120000';
+    r = await post(o, K.signal, nieuw); assert.strictEqual(r.status, 201, JSON.stringify(r.j));
+    // spiegel en router pakken een verwijderd stuk niet meer op
+    await o.ing.ronde(); const sp = await o.ing.spiegel();
+    assert.strictEqual(db.prepare('SELECT count(*) n FROM spiegel WHERE stuk_id IN (?, ?, ?)').get(ids.m1, ids.m2, ids.media).n, 0, JSON.stringify(sp));
+
+    // proefroute: alleen een verzonnen proefstuk (niet gespiegeld → databank overgeslagen)
+    const pr = g[4]; const rp = await post(o, pr.sleutel, Object.assign(pr.env(), { bron_id: 'false_31600000001@c.us_3EB0PROEF0001' }));
+    if (!rp.j.compleet && rp.j.stuk_id) await put(o, pr.sleutel, rp.j.stuk_id, 'b1', pr.put[0][1], 'application/pdf');
+    dbAntwoord = (fn, body) => fn === 'sb_bron_verwijder_plan' ? { ok: true, set_vinger: V.setVinger(body.p.sha256), telling: { blob: 0, source_occurrence: 0, bron_niet_proef: 0 } } : { ok: false, reden: 'mag niet aangeroepen worden' };
+    const up = await R.voerUit(rp.j.stuk_id, { proef: true });
+    assert.strictEqual(up.ok, true, JSON.stringify(up)); assert.deepStrictEqual(up.databank, { niet_gespiegeld: true });
+    assert.ok(!aanroepen.some((a) => a.fn === 'sb_bron_verwijder' && a.body.p.reden === 'proef'));
+    assert.match(fs.readFileSync(path.join(o.vault, '00_Systeem/Verwijderregister/index.md'), 'utf8'), /\| proef \| proef \(verzonnen stuk/);
+    // nachtvenster
+    assert.ok(V.buitenNachtvenster(Date.parse('2026-10-29T23:50:00Z')) && !V.buitenNachtvenster(Date.parse('2026-10-29T10:00:00Z')));
+  } finally { await o.sluit(); }
+});

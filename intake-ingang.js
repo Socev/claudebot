@@ -124,6 +124,20 @@ function kaleMime(m) { return String(m || '').split(';')[0].trim().toLowerCase()
 function extVan(naam) { const m = /\.([A-Za-z0-9]{1,10})$/.exec(String(naam || '')); return m ? m[1].toLowerCase() : ''; }
 function isObj(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
 function sha256(b) { return crypto.createHash('sha256').update(b).digest('hex'); }
+
+// wv1964 (SB2 fase 6d): tombstones = sha256's van inhoud die via de verwijderroute (intake-verwijder.js, na Davids knop) weg is en
+// er nooit meer in mag. Twee lijsten, samen gelezen: de cache van de pod (TOMB_CACHE, alleen claude) en de vaultlijst (TOMB_VAULT), zodat
+// een teruggezette pod of databank zijn tombstone niet mist. Alleen hashes, nooit inhoud.
+const TOMB_CACHE = 'tombstones.json';
+const TOMB_VAULT = '00_Systeem/Verwijderregister/tombstones.md';
+function tombstonesUitTekst(t) {
+  const uit = new Set();
+  const re = /^[\s>*|-]*([0-9a-f]{64})(?![0-9a-f])/gm;
+  let m;
+  while ((m = re.exec(String(t || ''))) !== null) uit.add(m[1]);
+  return uit;
+}
+function verwijderdId(bronId) { return 'verwijderd:' + sha256(String(bronId)); }
 function nuIso(ms) { return new Date(ms).toISOString(); }
 
 /*
@@ -593,6 +607,29 @@ function maak(o) {
     try { const r = f(); db.exec('COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch (x) { /* al dicht */ } throw e; }
   }
   function blobPad(sha) { return path.join(BLOB, sha.slice(0, 2), sha); }
+  // wv1964: de tombstonelijst (cache ∪ vaultlijst), herlezen als een van beide wijzigt. Cache onleesbaar of kapot = gooien (de ingang
+  // antwoordt dan 503: dicht, niet open); de vaultlijst onleesbaar = alleen de cache (socev kan de vault wijzigen, niet de cache).
+  let tsGeheugen = { sleutel: null, set: new Set() };
+  function tombstoneSet() {
+    const pc = path.join(dir, TOMB_CACHE), pv = o.vault ? path.join(o.vault, TOMB_VAULT) : null;
+    let stC = null, stV = null;
+    try { stC = fs.lstatSync(pc); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    try { if (pv) stV = fs.statSync(pv); } catch (e) { stV = null; }
+    const sl = (stC ? stC.mtimeMs + ':' + stC.size + ':' + stC.ino : '-') + '|' + (stV ? stV.mtimeMs + ':' + stV.size : '-');
+    if (tsGeheugen.sleutel === sl) return tsGeheugen.set;
+    const set = new Set();
+    if (stC) {
+      if (!stC.isFile()) throw new Error('tombstones.json is geen gewoon bestand');
+      const j = JSON.parse(fs.readFileSync(pc, 'utf8'));
+      if (!j || !Array.isArray(j.sha256)) throw new Error('tombstones.json heeft geen sha256-lijst');
+      for (const x of j.sha256) { if (!HEX64.test(String(x))) throw new Error('tombstones.json: ongeldige sha'); set.add(x); }
+    }
+    if (stV) {
+      try { for (const x of tombstonesUitTekst(o.vv.lees(pv, null))) set.add(x); } catch (e) { if (o.fout) o.fout('intake-tombstones-vault', e); }
+    }
+    tsGeheugen = { sleutel: sl, set };
+    return set;
+  }
   function blobAanwezig(sha) { try { return fs.statSync(blobPad(sha)).isFile(); } catch (e) { return false; } }
   function padVan(req) { const u = String(req.url || ''); const i = u.indexOf('?'); return i < 0 ? u : u.slice(0, i); }
   function isPad(req) { const p = padVan(req); return p === '/intake' || p.indexOf('/intake/') === 0; }
@@ -988,6 +1025,21 @@ function maak(o) {
     if (!t.ok) return weiger(t.status, t.reden);
     const { profiel, delen, vrij, meta } = t;
     if (profiel.alleen_intern === true && sleutel.intern !== true) return weiger(403, 'profiel_alleen_intern');   // wv1343: nooit via een routesleutel
+    // wv1964 (SB2 fase 6d): poort bij binnenkomst — inhoud met een tombstone, of een bron+bron_id van een verwijderd stuk, komt er niet meer
+    // in: geen stuk, geen bytes. 200 (geen eindeloze herhaling in n8n), spoorregel met alleen de sha, één melding per sha per dag (o.meldTombstone).
+    let ts;
+    try { ts = tombstoneSet(); } catch (e) { if (o.fout) o.fout('intake-tombstones', e); return weiger(503, 'tombstones_onleesbaar', { 'Retry-After': '600' }); }
+    const tsRaak = [...new Set(delen.filter((d) => ts.has(d.sha256)).map((d) => d.sha256))];
+    const wegStuk = q.stukOp.get(env.bron, verwijderdId(env.bron_id));
+    if (tsRaak.length || wegStuk) {
+      tx(function () {
+        for (const x of tsRaak) q.spoor.run(nuIso(nu()), 'tombstone_geweigerd', x, null, env.bron);
+        if (!tsRaak.length) q.spoor.run(nuIso(nu()), 'tombstone_geweigerd', null, wegStuk.stuk_id, env.bron);
+      });
+      if (o.meldTombstone) { try { o.meldTombstone({ bron: env.bron, sha: tsRaak.map((x) => x.slice(0, 12)), stuk_id: wegStuk ? wegStuk.stuk_id : null }); } catch (e) { if (o.fout) o.fout('intake-tombstones', e); } }
+      spoor.reden = 'tombstone';
+      return antwoord(200, { ok: true, uitkomst: 'geweigerd_tombstone' });
+    }
     spoor.bron = env.bron;
     const a = isObj(env.aanlevering) ? env.aanlevering : {};
     spoor.wf = a.workflow; spoor.ex = a.execution; spoor.kn = a.knoop;
@@ -1281,6 +1333,8 @@ function maak(o) {
     const t0 = nuIso(nu());
     const uit = { kandidaten: 0, verstuurd: 0, gespiegeld: 0, niet_spiegelbaar: 0, opnieuw: 0 };
     try {
+      let ts;
+      try { ts = tombstoneSet(); } catch (e) { if (o.fout) o.fout('intake-tombstones', e); uit.fout = 'tombstones'; return uit; }
       const rijen = db.prepare(`SELECT s.*, g.stand g_stand, g.ps g_ps, g.pogingen g_pogingen, g.bronnen g_bronnen FROM stuk s LEFT JOIN spiegel g ON g.stuk_id = s.stuk_id
         WHERE coalesce(s.stand, '') <> 'dubbel' AND s.status IN ('ontvangen', 'geschreven', 'wacht', 'mislukt', 'wacht_marker', 'vastgehouden', 'router') AND s.marker_op IS NOT NULL
           AND (g.stuk_id IS NULL OR g.stand = 'opnieuw' OR (g.stand = 'gespiegeld' AND g.pogingen < ${SPIEGEL_TIJDELIJK_MAX} AND g.ps IS NOT (CASE WHEN s.status IN ('mislukt') THEN 'received'
@@ -1299,6 +1353,8 @@ function maak(o) {
         if (b.niet && SPIEGEL_POD_TIJDELIJK.has(b.niet) && (s.g_pogingen || 0) + 1 < SPIEGEL_TIJDELIJK_MAX) {
           spiegelZet.run(s.stuk_id, 'opnieuw', b.niet, null, null, t0, (s.g_pogingen || 0) + 1, null, null); uit.opnieuw++; continue;
         }
+        // wv1964: de kern-sha bestaat pas hier; zelfde poort als bij binnenkomst (de databank-trigger is het tweede slot)
+        if (!b.niet && ((b.kern && ts.has(b.kern.sha)) || (b.bronnen || []).some((x) => ts.has(x.sha256)))) b = { niet: 'tombstone' };
         if (b.niet) { spiegelZet.run(s.stuk_id, 'niet_spiegelbaar', b.niet, null, null, t0, s.g_pogingen || 0, null, null); uit.niet_spiegelbaar++; continue; }
         if (b.kern) bewaarKern(b.kern);
         stukken.push({ ref: s.stuk_id, bronnen: b.bronnen });
@@ -1395,7 +1451,7 @@ function maak(o) {
       const r = schrijfOvergang(s, false);
       if (r.vault === 'geschreven' || r.vault === 'schaduw') uit.herschreven++; else uit.wacht++;
     }
-    for (const s of db.prepare("SELECT stuk_id FROM stuk WHERE marker_op IS NULL AND status NOT IN ('open', 'onvolledig') ORDER BY aangemaakt LIMIT 50").all()) {
+    for (const s of db.prepare("SELECT stuk_id FROM stuk WHERE marker_op IS NULL AND status NOT IN ('open', 'onvolledig', 'verwijderd') ORDER BY aangemaakt LIMIT 50").all()) {
       try { const m = await markeer(s.stuk_id); if (m && m !== 'geen') uit.gemarkeerd++; } catch (e) { if (o.fout) o.fout('intake-marker', e); }
     }
     uit.gemeld = meldHangers(t);
@@ -1457,4 +1513,4 @@ if (require.main === module && process.argv[2] === 'offsite-lijst') {
 }
 
 module.exports = { maak, toetsEnvelop, naampoort, laadProfielen, laadSoortenlijst, toetsEersteBytes, doelMap, LEESLUIK, PROTOCOL,
-  mailKern, mailSleutel, zonderChatId, isProefstuk, routeVan };
+  mailKern, mailSleutel, zonderChatId, isProefstuk, routeVan, tombstonesUitTekst, verwijderdId, TOMB_CACHE, TOMB_VAULT };
