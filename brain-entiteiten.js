@@ -10,8 +10,10 @@
 // pagina; Wat OVIS weet ook aan de privékant. Wat blijft: het sleutelmasker (grondwet 2) op alle tekst, en de schakelaar voor een vaste
 // plek (APP_VAST_AFSCHERMEN, wv1901): staat die aan, dan op dat apparaat alleen organisaties aan de zakelijke kant, rekeningnummers van
 // derden gemaskeerd, zonder facturen, deadlines en Dossier.
-// wv1771 (OVIS plek 7 fase B): bij een persoon met een ACTIEVE Google-koppeling de mailadressen en telefoonnummers uit dat Google-contact
-// (RPC public.ovis_personen_lees; die levert geen adres of verjaardag, gemeten 29-10).
+// wv1771 (OVIS plek 7 fase B): bij een persoon met een Google-koppeling de mailadressen en telefoonnummers uit dat Google-contact
+// (RPC public.ovis_personen_lees). wv1948 (stap C, E6): ook adressen en verjaardag (migratie knoop/0006), en ook bij een koppeling die nog
+// op Davids Ja wacht — met voorgesteld: true, zodat de app het zo labelt. Dat is tonen aan David, geen kenmerk: de mailrouter gebruikt
+// de koppeling pas na zijn Ja.
 const path = require('path');
 const crypto = require('crypto');
 
@@ -221,18 +223,28 @@ function maak(o) {
     }) };
   }
 
-  // wv1771: contactgegevens uit Google voor een persoon met een actieve Google-koppeling → null (geen koppeling) of { bron, mailadressen,
-  // telefoons } of { bron, fout }. Alleen mail en telefoon, begrensd; het contact moet precies de gekoppelde sleutel hebben.
+  // wv1771: contactgegevens uit Google voor een persoon met een Google-koppeling → null (geen koppeling) of { bron, voorgesteld, mailadressen,
+  // telefoons, adressen, verjaardag, naam } of { bron, voorgesteld, fout }. Begrensd; het contact moet precies de gekoppelde sleutel hebben.
+  // wv1948: een actieve koppeling gaat voor; anders de (enige) voorgestelde. Twee voorgestelde koppelingen = niet tonen (welke klopt?).
   async function googleVan(k, reg) {
-    const g = (reg.handvatten[k.id] || []).find(function (h) { return h.soort === 'google' && h.status === 'actief' && GOOGLE_RE.test(String(h.waarde_norm || h.waarde || '')); });
+    const gs = (reg.handvatten[k.id] || []).filter(function (h) { return h.soort === 'google' && GOOGLE_RE.test(String(h.waarde_norm || h.waarde || '')); });
+    const act = gs.filter(function (h) { return h.status === 'actief'; }), vg = gs.filter(function (h) { return h.status === 'voorgesteld'; });
+    const g = act.length ? act[0] : vg.length === 1 ? vg[0] : null;
     if (!g) return null;
+    const voorgesteld = g.status !== 'actief';
     const sl = String(g.waarde_norm || g.waarde);
     let r;
-    try { r = await rpc('ovis_personen_lees', { p_resource: [sl] }); } catch (e) { return { bron: 'Google', fout: 'Het Google-contact is nu niet te lezen.' }; }
+    try { r = await rpc('ovis_personen_lees', { p_resource: [sl] }); } catch (e) { return { bron: 'Google', voorgesteld: voorgesteld, fout: 'Het Google-contact is nu niet te lezen.' }; }
     const c = r && Array.isArray(r.contacten) ? r.contacten.find(function (x) { return x && x.r === sl; }) : null;
-    if (!c) return { bron: 'Google', fout: 'Het gekoppelde Google-contact bestaat niet meer.' };
+    if (!c) return { bron: 'Google', voorgesteld: voorgesteld, fout: 'Het gekoppelde Google-contact bestaat niet meer.' };
     const uniek = function (a) { return Array.from(new Set(a)); };
-    return { bron: 'Google',
+    const kortTekst = function (x, n) { return typeof x === 'string' ? x.replace(/\s+/g, ' ').trim().slice(0, n) : ''; };
+    return { bron: 'Google', voorgesteld: voorgesteld,
+      naam: masker(kortTekst(c.naam, 120)) || null,   // wv1948 review ZOU 5: welk contact (vooral bij een voorgestelde koppeling)
+      // wv1948 (E6): adres (label + één regel) en verjaardag; een oudere RPC zonder die velden geeft [] en null
+      adressen: (Array.isArray(c.adres) ? c.adres : []).filter(function (a) { return a && typeof a === 'object' && kortTekst(a.tekst, 200); }).slice(0, 5)
+        .map(function (a) { return { label: masker(kortTekst(a.label, 40)) || null, tekst: masker(kortTekst(a.tekst, 200)) }; }),
+      verjaardag: typeof c.verjaardag === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(c.verjaardag) ? c.verjaardag : null,
       mailadressen: uniek((Array.isArray(c.mail) ? c.mail : []).map(function (x) { return String(x).trim().toLowerCase(); }).filter(function (x) { return /^[^@\s?&"<>]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(x) && x.length <= 120; })).slice(0, 10),
       telefoons: uniek((Array.isArray(c.tel) ? c.tel : []).map(telNl).filter(function (x) { return /^0[0-9]{9,15}$/.test(x); })).slice(0, 10) };
   }

@@ -6,7 +6,8 @@
 # Bronnen op naam of alias, nieuwste eerst); IBAN onverkort en het gegenereerde blok op de pagina; Wat OVIS weet ook voor PRIVE; het
 # sleutelmasker blijft; met de vaste-plekschakelaar aan alleen organisaties aan de zakelijke kant, IBAN van derden gemaskeerd, zonder
 # facturen, deadlines of Dossier; facturen op naam/alias en knoop_id, zonder patiëntkenmerk; uitrol.sh, Dockerfile en CI.
-# wv1771: contactgegevens uit Google alleen bij een persoon met een ACTIEVE Google-koppeling, niet op een vaste plek.
+# wv1771: contactgegevens uit Google bij een persoon met een Google-koppeling, niet op een vaste plek. wv1948: ook een voorgestelde
+# koppeling (gelabeld voorgesteld), plus adressen en verjaardag.
 # Alle namen en nummers hieronder zijn verzonnen (openbare repo).
 # Gebruik: bash test/brain-entiteiten.sh
 set -u
@@ -79,7 +80,9 @@ const handvatten = [
 ];
 const contacten = [
   { r: 'people/c111', mail: ['piet@verzonnen.nl'], tel: ['+31600000009'] },
-  { r: 'people/c222', mail: ['Notaris@Verzonnen.nl', 'notaris@verzonnen.nl', 'geen-adres', 'x@verzonnen.nl?bcc=y@verzonnen.nl'], tel: ['+31 6 0000 0001', '+220 700 0000', '12'] },
+  { r: 'people/c222', mail: ['Notaris@Verzonnen.nl', 'notaris@verzonnen.nl', 'geen-adres', 'x@verzonnen.nl?bcc=y@verzonnen.nl'], tel: ['+31 6 0000 0001', '+220 700 0000', '12'],
+    naam: 'Notaris Verzonnen', adres: [{ label: 'werk', tekst: 'Proefstraat  1,\n9999 ZZ Nergensdorp' }, { label: null, tekst: '' }, 'kapot', { label: 'thuis', tekst: 'sk-' + 'a'.repeat(40) }], verjaardag: '1970-01-02' },
+  { r: 'people/c444', mail: ['tweede@verzonnen.nl'], tel: [], adres: [], verjaardag: '2 januari' },
 ];
 let googleVraag = [], googleFout = false;
 let rpcAanroepen = 0, rpcFout = false;
@@ -192,8 +195,20 @@ const T = B.maak({ rpc, vault, lees: (p) => fs.readFileSync(p, 'utf8'), facturen
   toets('19b organisatie: geen contact uit Google', d.j.weet.contact === null && e.j.weet.contact === null);
   const h0 = handvatten.find((h) => h.soort === 'google' && h.knoop === 'per:notaris-verzonnen');
   h0.status = 'voorgesteld'; T.vergeet();
-  toets('19c Google-koppeling die nog op Davids Ja wacht: geen contactgegevens', (await T.detail('per:notaris-verzonnen', false)).j.weet.contact === null);
-  h0.status = 'actief'; T.vergeet(); googleFout = true;
+  // wv1948: een koppeling die nog op Davids Ja wacht toont het contact wél, gelabeld (tonen aan David, geen kenmerk)
+  const nv = (await T.detail('per:notaris-verzonnen', false)).j.weet.contact;
+  toets('19c Google-koppeling die nog op Davids Ja wacht: contactgegevens met voorgesteld', nv && nv.voorgesteld === true && JSON.stringify(nv.mailadressen) === '["notaris@verzonnen.nl"]', nv);
+  handvatten.push({ knoop: 'per:notaris-verzonnen', soort: 'google', waarde: 'people/c444', waarde_norm: 'people/c444', status: 'voorgesteld' }); T.vergeet();
+  toets('19g twee voorgestelde Google-koppelingen: niets tonen', (await T.detail('per:notaris-verzonnen', false)).j.weet.contact === null);
+  h0.status = 'actief'; T.vergeet();
+  const na = (await T.detail('per:notaris-verzonnen', false)).j.weet.contact;
+  toets('19h actieve koppeling gaat voor een voorgestelde', na && na.voorgesteld === false && JSON.stringify(na.mailadressen) === '["notaris@verzonnen.nl"]', na);
+  toets('19i adressen (label + één regel, lege en kapotte eruit, sleutelmasker), verjaardag en contactnaam', JSON.stringify(na.adressen.map((a) => a.label)) === '["werk","thuis"]' &&
+    na.adressen[0].tekst === 'Proefstraat 1, 9999 ZZ Nergensdorp' && !/sk-a{20}/.test(JSON.stringify(na.adressen)) && na.verjaardag === '1970-01-02' && na.naam === 'Notaris Verzonnen', na.adressen);
+  handvatten.pop(); h0.status = 'voorgesteld'; handvatten.push({ knoop: 'per:notaris-verzonnen', soort: 'google', waarde: 'people/c444', waarde_norm: 'people/c444', status: 'actief' }); T.vergeet();
+  const nj = (await T.detail('per:notaris-verzonnen', false)).j.weet.contact;
+  toets('19j verjaardag in een andere vorm: null; geen adres: lege lijst', nj && nj.verjaardag === null && Array.isArray(nj.adressen) && nj.adressen.length === 0 && nj.naam === null && JSON.stringify(nj.mailadressen) === '["tweede@verzonnen.nl"]', nj);
+  handvatten.pop(); h0.status = 'actief'; T.vergeet(); googleFout = true;
   const nf = await T.detail('per:notaris-verzonnen', false);
   toets('19d Google niet te lezen: melding, rest van het detail blijft', nf.status === 200 && nf.j.weet.contact && nf.j.weet.contact.fout && !nf.j.weet.contact.telefoons && nf.j.tekst !== null, nf.j.weet.contact);
   googleFout = false; h0.waarde_norm = 'people/c333'; T.vergeet();
