@@ -4862,7 +4862,7 @@ const APP_VAST = path.join(APP_DATA, 'vast.json');                // wv1051 (OVI
 // uit): dan weigeren de routes hieronder en gaat vast.json daar zonder deze id's naar de app (geen privé-App in het menu).
 const APP_PRIVE_MODULES = ['financien', 'gezondheid', 'pot-afschriften', 'mediatheek'];   // wv1269: Mediatheek (20_Prive)
 // wv1901 (David 28-10-2026 16:51: "ik wil op ALLE pc's toegang tot ALLES"): een vaste plek schermt voor David niets meer af; hij ziet
-// daar hetzelfde als op zijn telefoon. Wat blijft (beveiliging, geen afscherming): invoerslot, sessie, BSN-masker op invoer,
+// daar hetzelfde als op zijn telefoon. Wat blijft (beveiliging, geen afscherming): invoerslot, sessie (BSN-masker op invoer weg sinds wv1931),
 // APP_BEHEER_ROUTES, een gevoelige Ja telt niet (knop-ja-vers-vast, AIX, POT-verzending, OVIS-adres). Eén schakelaar: true = het oude
 // afschermen (terugrol). Ontwerp: vault 01_Ontwikkeling/Vaste plek - alles open (ontwerp 28-10-2026).md
 const APP_VAST_AFSCHERMEN = false;
@@ -11405,7 +11405,7 @@ const WK_DOC_ENT = [
 ];
 const WK_DOC_SLA = /^(raw_input|Voltooid|Vervallen|Logboek)$/;
 appStaat.wkDocs = appStaat.wkDocs || {};   // pad -> { mtime, updated, eerste }: alleen opnieuw lezen als de mtime verandert
-function wkTekst(s, n) { return appKort(appSleutelMasker(s), n); }   // secretgrep aan de andere kant; geen BSN-masker meer (wv1931)
+function wkTekst(s, n) { return appKort(appSleutelMasker(appBsnMasker(s)), n); }   // vangnet grondwet 3 + secretgrep aan de andere kant; webroute naar werk.socev.dev, niet Davids app (wv1931-review ZOU 5: blijft)
 // Dicht (ontwerp regel 2): de kop, of een later vet blok dat een zin opent (zelfde criterium als appProjTitel: aan het begin,
 // direct na een statusblok of na een zinseinde), begint met een sluitwoord. Een woord midden in de lopende tekst sluit niets.
 function wkDicht(wat) {
@@ -11553,7 +11553,7 @@ async function wkDocumenten() {
       if (x.info.eerste === null) {
         try { x.info.eerste = wkEersteRegel(wkFrontmatter(wkLeesBegin(path.join(vault, x.pad), 65536)).rest); } catch (err) { x.info.eerste = ''; }
       }
-      const it = { titel: wkTekst(x.pad.slice(x.pad.lastIndexOf('/') + 1).replace(/\.md$/i, ''), 160), pad: appSleutelMasker(x.pad), updated: x.info.updated,
+      const it = { titel: wkTekst(x.pad.slice(x.pad.lastIndexOf('/') + 1).replace(/\.md$/i, ''), 160), pad: appSleutelMasker(appBsnMasker(x.pad)), updated: x.info.updated,
         eerste_regel: wkTekst(x.info.eerste, 140) };
       return it;
     });

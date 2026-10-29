@@ -36,7 +36,7 @@ const pak = function (re, naam) { const m = re.exec(src); if (!m) { toets('gevon
   const jobs = {};
   const env = Object.assign({}, process.env, { DOORGEEF_SCHAKELAAR: SCH, DOORGEEF_STAAT: STAAT, DOORGEEF_BLOK: BLOK });
   const ctx = vm.createContext({ require, console, process: Object.assign({}, process, { env }), Buffer, setTimeout, clearTimeout, Promise, Date, JSON, crypto, fs, path,
-    jobs, appStaat: {}, APP_VRAAG_GELDIG_MS: 72 * 3600000, APP_KNOP_RIJ_MAX: 3, APP_KNOP_WACHT_MELD_MS: 30000, APP_CHATLOG_NIET: '', APP_BSN_SYS: '', APP_BSN_MASKER: '[BSN-achtig getal weggelaten]',
+    jobs, appStaat: {}, APP_VRAAG_GELDIG_MS: 72 * 3600000, APP_KNOP_RIJ_MAX: 3, APP_KNOP_WACHT_MELD_MS: 30000, APP_CHATLOG_NIET: '', APP_BSN_MASKER: '[BSN-achtig getal weggelaten]',
     APP_KANALEN: { hoofd: 'c-hoofd', machinekamer: 'c-mk' }, MK_TEKST: { GRONDWET: 'GRONDWET-KERN v1 — vaste kopie' },
     logError: function () {}, schrijfLog: function () {}, nu: function () { return 'T'; }, velden: function (o) { return JSON.stringify(o); },
     appVragen: function () { return JSON.parse(JSON.stringify(vragen)); }, appVragenSchrijf: function (v) { vragen = JSON.parse(JSON.stringify(v)); },

@@ -108,7 +108,7 @@ const bsnMasker = (t) => String(t).replace(/(?<!\d)\d(?:[ .-]?\d){8}(?![ .-]?\d)
     toets('2 nooit te delen: ' + waarom + ' (' + st + ')', r.status === st && r.j.kan_niet === true, r);
   }
   const bev = await app('voorbeeld', { pad: '01_Ontwikkeling/Beveiliging/Plan.md' });
-  toets('2 Beveiliging staat niet eens in de kaart (404)', bev.status === 404, bev);
+  toets('2 Beveiliging: sinds wv1931 zichtbaar voor David, maar nooit te delen (403 kan_niet)', bev.status === 403 && bev.j.kan_niet === true, bev);
   for (const [p, re, waarom] of [['01_Ontwikkeling/Sleutel.md', /sleutel/, 'sleutel'], ['01_Ontwikkeling/Sleutel-in-link.md', /sleutel/, 'sleutel in een linkadres'],
     ['01_Ontwikkeling/Iban.md', /IBAN/, 'IBAN'], ['01_Ontwikkeling/Bsn.md', /BSN/, 'BSN']]) {
     const r = await app('voorbeeld', { pad: p });

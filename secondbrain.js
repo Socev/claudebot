@@ -31,7 +31,9 @@ const MAX_TREFFERS = 40, FRAGMENT = 160, ZOEK_MS = 4000, MAX_Q = 200;
 const NOOIT_MAP = [];
 const VAST_DICHT_TOP = ['20_Prive', '30_Conversaties'];
 const VAST_DICHT_DEEL = ['medewerkers', 'personeel', 'gesprekken'];
-const VAST_DICHT_PREFIX = ['00_Systeem/Meldingen/', '01_Ontwikkeling/0b-werkmap/'];
+// wv1931 (Opus-review MOET 1): wat NOOIT_MAP vroeger verborg, blijft dicht als de vaste-plekschakelaar (wv1901) weer afschermt
+const VAST_DICHT_PREFIX = ['00_Systeem/Meldingen/', '01_Ontwikkeling/0b-werkmap/', '00_Systeem/Beveiliging/', '01_Ontwikkeling/Beveiliging/',
+  '00_Systeem/Tokens/', '00_Systeem/Vault-RAG/', 'TempFinData/', 'Claude outputs/'];
 const VERBORGEN_DEEL = ['bronnen', 'raw_input', '_inbox'];
 const VERBORGEN_TOP = ['30_Conversaties'];
 

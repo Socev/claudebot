@@ -120,9 +120,14 @@ function toets(naam, ok, extra) { if (ok) goed++; else fouten++; console.log((ok
   const tfT = tf.j && tf.j.inhoud ? Buffer.from(tf.j.inhoud, 'base64').toString('utf8') : '';
   toets('3 wv1931: TempFinData opent (200), sleutel gemaskeerd', tf.status === 200 && tfT.indexOf(TOKEN) < 0 && /sleutel weggelaten/.test(tfT), tf.status + ' ' + tfT.slice(0, 120));
   const vastP = [];
-  for (const p of ['20_Prive/Gezondheid/Bloed.md', '10_Zakelijk/Tolgaarde/Medewerkers/Jan Jansen.md', '00_Systeem/Meldingen/machinekamer.md', '30_Conversaties/WhatsApp/2026-10-22.md'])
+  for (const p of ['20_Prive/Gezondheid/Bloed.md', '10_Zakelijk/Tolgaarde/Medewerkers/Jan Jansen.md', '00_Systeem/Meldingen/machinekamer.md', '30_Conversaties/WhatsApp/2026-10-22.md',
+    '00_Systeem/Beveiliging/Sleutelregister.md'])   // wv1931-review MOET 1: vroeger NOOIT_MAP, nu vast-dicht
     vastP.push((await sb.app('POST /app/secondbrain/open', { pad: p }, { vast: true })).status);
   toets('3 vaste plek: privé, personeel, box, gesprekken dicht (404)', vastP.every((s) => s === 404), vastP);
+  const vastB = [];
+  for (const p of ['TempFinData/cf_token.txt', 'Claude outputs/x.pdf']) vastB.push((await sb.app('POST /app/secondbrain/bestand', { pad: p }, { vast: true })).status);
+  const telB = (await sb.app('POST /app/secondbrain/bestand', { pad: 'Claude outputs/x.pdf' }, {})).status;
+  toets('3 wv1931: TempFinData en Claude outputs op een afschermende vaste plek dicht (404), elders open', vastB.every((s) => s === 404) && telB === 200, vastB.concat([telB]));
   const ovv = await sb.app('POST /app/secondbrain/open', { pad: '01_Ontwikkeling/Plan.md' }, { vast: true });
   toets('3 vaste plek: link naar David Schaap (HAGRO + Gambia) wordt één kandidaat (Gambia valt weg)', ovv.j.doelen['david schaap'] && ovv.j.doelen['david schaap'].p === '10_Zakelijk/HAGRO/David Schaap.md', ovv.j.doelen['david schaap']);
   const ovb = await sb.app('POST /app/secondbrain/open', { pad: '10_Zakelijk/Tolgaarde/Verzekeringen.md' }, { vast: true });
