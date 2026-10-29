@@ -9,6 +9,14 @@
  * stappen (Altijd in → Filter Weg → Filter In → Jev) naar welke stroom hij gaat (intake, factuur, info, twijfel). De pod is het brein
  * (regels, besluit, logboek, App); n8n ("AI - MailMan") zijn de handen (Gmail lezen, Jev aanroepen).
  *
+ * INHAAL (wv1983, 29-10-2026; David: "kan hij 1x gedraaid worden op alle huidige mail in de inbox, die nog niet verwerkt is? Dat geeft
+ * inzicht in wat er nog bijgeschaafd moet."). Eenmalige ronde-soort 'inhaal' (POST /mailman/inhaal) over mail in de inbox zonder besluit,
+ * ALLEEN ter beoordeling, ook als het postvak live is: het besluit krijgt inhaal = 1 en stand schaduw; het labelplan wordt berekend maar
+ * nooit uitgegeven (/mailman/labels geeft voor een inhaalronde niets en slaat inhaalbesluiten altijd over; /mailman/gezet weigert), en een
+ * inhaalbesluit maakt een draad niet "bekend" voor Altijd in. Alleen mail die binnenkwam vóór de inhaalgrens (twee dagen terug, bij live
+ * ook vóór live_sinds − 24 uur): de gewone rondes houden hun eigen mail. Eigen tellers: rondes met soort 'inhaal' schuiven het venster
+ * niet op en tellen niet in zorgen(); inhaalbesluiten tellen niet in de stroombalk, live-criteria en steekproef.
+ *
  * SCHADUW. In stand schaduw zet MailMan NIETS in Gmail: de besluiten en geplande labels staan alleen in het logboek.
  * LIVE (B5, wv1973, 29-10-2026; David 29-10 15:07: "Ik wil MailMan op live kunnen zetten: zorgen dat er wat doorstroomt naar Intake"). Alleen
  * David zet een postvak live, met de knop in de App en een verse vingerafdruk (POST /app/mailman/stand), en pas als config.json
@@ -38,7 +46,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-1.2';
+const VERSIE = 'mailman-1.3';
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -64,6 +72,7 @@ const RONDE_MS = 30 * 60 * 1000;
 const WACHTRIJ_MAX = 12, WACHTRIJ_MS = 3 * 3600 * 1000;   // AI/MailMan: hooguit 12 berichten per 3 uur (Mail Processor: elke 3 uur één run)
 const LABEL_ACTIES_MAX = 40;                               // berichten met labels per ronde; de rest de volgende ronde
 const LIVE_INHAAL_MS = 24 * 3600 * 1000;                   // bij live zetten: alleen mail die hooguit 24 uur vóór live_sinds binnenkwam (review B5 #3)
+const INHAAL_LOG = 300, TWIJFEL_LIJST = 150;               // wv1983: inhaalbesluiten en de Twijfel-lijst in de App
 const ID_RE = /^[0-9a-f]{12,24}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const SLEUTEL_KOP_RE = /^Bearer ([0-9a-f]{64})$/;
@@ -429,7 +438,8 @@ function maak(o) {
   db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;');   // gewiste namen niet in vrije pagina's (review B1 #12)
   db.exec(SCHEMA);
   // B5 (wv1973): kolommen voor live; een bestaande databank krijgt ze erbij (ALTER TABLE ADD COLUMN raakt geen rijen)
-  for (const [t, k] of [['besluit', 'labels_tijd TEXT'], ['ronde', 'labels_ok INTEGER NOT NULL DEFAULT 0'], ['ronde', 'labels_fout INTEGER NOT NULL DEFAULT 0'], ['postvak', 'live_sinds TEXT']]) {
+  for (const [t, k] of [['besluit', 'labels_tijd TEXT'], ['ronde', 'labels_ok INTEGER NOT NULL DEFAULT 0'], ['ronde', 'labels_fout INTEGER NOT NULL DEFAULT 0'], ['postvak', 'live_sinds TEXT'],
+    ['besluit', 'inhaal INTEGER NOT NULL DEFAULT 0'], ['besluit', 'juist TEXT'], ['ronde', "soort TEXT NOT NULL DEFAULT 'ronde'"], ['ronde', 'grens TEXT']]) {   // wv1983 inhaal
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
   function tx(f) {
@@ -513,12 +523,31 @@ function maak(o) {
     for (const p of postvakken()) {
       if (p.stand === 'uit') continue;
       const id = 'r' + t.replace(/\D/g, '').slice(0, 14) + '-' + crypto.randomBytes(3).toString('hex');
-      db.prepare('INSERT INTO ronde (id, start, postvak) VALUES (?, ?, ?)').run(id, t, p.id);
+      db.prepare("INSERT INTO ronde (id, start, postvak, soort) VALUES (?, ?, ?, 'ronde')").run(id, t, p.id);
       const n = venster(p.laatste_geslaagd, nu());
       uit.push({ postvak: p.id, ronde: id, stand: p.stand, metadata_alleen: !p.tekst, q: 'newer_than:' + n + 'd -in:spam -in:trash -in:chats' });
     }
     db.prepare('DELETE FROM ronde WHERE start < ?').run(new Date(nu() - 30 * 86400000).toISOString());
     return { status: 200, j: { ok: true, versie: VERSIE, postvakken: uit } };
+  }
+  /*
+   * wv1983 inhaal: één brok van de eenmalige inhaalronde over de inbox. De zoekvraag neemt alleen mail die vóór de grens binnenkwam
+   * (before: in epochseconden); stap1 toetst dat nog eens op de ontvangsttijd. Postvak uit = niets.
+   */
+  function inhaalGrens(p) {
+    let g = nu() - VENSTER_MIN * 86400000;
+    if (p.stand === 'live' || p.live_sinds) { const l = Date.parse(p.live_sinds || ''); g = Math.min(g, (Number.isFinite(l) ? l : nu()) - LIVE_INHAAL_MS); }
+    return g;
+  }
+  function inhaalStart(d) {
+    const p = postvak(String(d && d.postvak || 'gmail:david'));
+    if (!p) return { status: 400, j: { ok: false, fout: 'postvak onbekend' } };
+    if (p.stand === 'uit') return { status: 409, j: { ok: false, fout: 'postvak staat uit' } };
+    const t = iso(), g = inhaalGrens(p);
+    const id = 'i' + t.replace(/\D/g, '').slice(0, 14) + '-' + crypto.randomBytes(3).toString('hex');
+    db.prepare("INSERT INTO ronde (id, start, postvak, soort, grens) VALUES (?, ?, ?, 'inhaal', ?)").run(id, t, p.id, new Date(g).toISOString());
+    return { status: 200, j: { ok: true, versie: VERSIE, postvakken: [{ postvak: p.id, ronde: id, stand: 'inhaal', metadata_alleen: !p.tekst,
+      grens: new Date(g).toISOString(), q: 'in:inbox -in:spam -in:trash -in:chats before:' + Math.floor(g / 1000) }] } };
   }
   // ookAf: labels en gezet mogen ook na /mailman/gedaan van dezelfde ronde (n8n draait de labeltak naast het afronden), binnen RONDE_MS
   function rondeVan(d, ookAf) {
@@ -533,11 +562,13 @@ function maak(o) {
     const ids = Array.from(new Set((Array.isArray(d.ids) ? d.ids : []).map(String).filter(function (x) { return ID_RE.test(x); })));
     const t = iso();
     sluitOudeWachters(r.postvak);
-    const st = db.prepare('SELECT status FROM besluit WHERE postvak = ? AND gmail_id = ?');
-    const open = ids.filter(function (id) { const b = st.get(r.postvak, id); return !b || b.status === 'wacht_jev'; });
+    const st = db.prepare('SELECT status, inhaal FROM besluit WHERE postvak = ? AND gmail_id = ?');
+    // wv1983: een gewone ronde laat een wachtend inhaalbesluit liggen, een inhaalronde neemt alleen mail zonder besluit (of haar eigen wachters)
+    const inh = r.soort === 'inhaal' ? 1 : 0;
+    const open = ids.filter(function (id) { const b = st.get(r.postvak, id); return !b || (b.status === 'wacht_jev' && b.inhaal === inh); });
     const terug = open.slice(0, NIEUW_MAX);
     db.prepare('UPDATE ronde SET lijst = ?, nieuw = ?, volledig = ?, afgekapt = ? WHERE id = ?').run(ids.length, terug.length, d.volledig === true ? 1 : 0, open.length > terug.length ? 1 : 0, r.id);
-    db.prepare('UPDATE postvak SET laatste_ronde = ? WHERE id = ?').run(t, r.postvak);
+    if (!inh) db.prepare('UPDATE postvak SET laatste_ronde = ? WHERE id = ?').run(t, r.postvak);
     return { status: 200, j: { ok: true, nieuw: terug, afgekapt: open.length > terug.length } };
   }
   function sluitOudeWachters(pv) {
@@ -572,9 +603,11 @@ function maak(o) {
     try { intakeD = o.intakeDraden ? o.intakeDraden(p.id, draden) : new Set(); } catch (e) { fout('mailman-intake-draden', e); }
     // eigen eerdere besluiten tellen alleen als ze zelf zeker waren (geen twijfel, niet zelf al via de draad): anders trekt één twijfelmail
     // elke latere melding in die draad vóór Filter Weg mee (review B1 #5)
-    const eigenDraad = db.prepare("SELECT 1 FROM besluit WHERE postvak = ? AND thread_id = ? AND status = 'klaar' AND stroom IN ('intake', 'factuur') AND COALESCE(reden, '') != 'draad' LIMIT 1");
+    // wv1983: een inhaalbesluit ging nergens heen, dus maakt het een draad niet bekend
+    const eigenDraad = db.prepare("SELECT 1 FROM besluit WHERE postvak = ? AND thread_id = ? AND status = 'klaar' AND stroom IN ('intake', 'factuur') AND COALESCE(reden, '') != 'draad' AND inhaal = 0 LIMIT 1");
+    const inhaal = r.soort === 'inhaal', grensMs = inhaal ? Date.parse(r.grens || '') : NaN;
     const bestaand = db.prepare('SELECT * FROM besluit WHERE postvak = ? AND gmail_id = ?');
-    const jev = [], tel = { mails: 0, ongeldig: 0, labels_onbekend: 0, dubbel: 0, buiten: 0, altijd: 0, weg: 0, in: 0, jev: 0, marker: 0, zorg: 0 };
+    const jev = [], tel = { mails: 0, ongeldig: 0, labels_onbekend: 0, dubbel: 0, buiten: 0, altijd: 0, weg: 0, in: 0, jev: 0, marker: 0, zorg: 0, al_besloten: 0, te_nieuw: 0 };
     const gezien = new Set();
     tx(function () {
       ms.forEach(function (m, i) {
@@ -586,7 +619,12 @@ function maak(o) {
         if (m.labels.some(function (l) { return /^Label_\d+$/.test(l); })) { tel.labels_onbekend++; return; }
         tel.mails++;
         const oud = bestaand.get(p.id, m.id);
-        if (oud && oud.status === 'klaar') return;
+        if (inhaal) {
+          // inhaal: nooit een besluit van een gewone ronde overschrijven, en alleen mail van vóór de grens (anders hoort hij bij de gewone rondes)
+          if (oud && !(oud.inhaal === 1 && oud.status === 'wacht_jev')) { tel.al_besloten++; return; }
+          const ont = Date.parse(m.ontvangen || '');
+          if (!Number.isFinite(grensMs) || !Number.isFinite(ont) || ont >= grensMs) { tel.te_nieuw++; return; }
+        } else if (oud && (oud.status === 'klaar' || oud.inhaal === 1)) return;
         const platte = p.tekst ? tekst(mails[i].tekst, TEKST_MAX * 2) : '';
         let pt = { tegenhouden: false, soorten: [] };
         // MailMan leest geen bijlagen (alleen de namen); Jev krijgt dus nooit bijlage-inhoud. Wel: met een ongelezen bijlage geen eigen-post-
@@ -612,15 +650,15 @@ function maak(o) {
         const rij = [p.id, m.id, m.draad, m.ontvangen, m.van_adres || null, m.van_naam || null, m.van_domein, JSON.stringify(m.aan.slice(0, 20)),
           m.onderwerp, m.tab, m.afmeld ? 1 : 0, JSON.stringify(m.bijlagen.map(bijlageSoort)),
           JSON.stringify(m.labels.slice(0, 40)), b.stap === 'jev' && magJev ? 'jev' : b.stap, reden, b.regel_id || null, b.regel_versie || null, stroom,
-          pt.tegenhouden ? 1 : 0, pt.tegenhouden ? pt.soorten.join(',') : (zorg ? 'zorgmail' : null), plan ? JSON.stringify(plan) : null, p.stand, status, VERSIE, iso(), status === 'klaar' ? iso() : null];
+          pt.tegenhouden ? 1 : 0, pt.tegenhouden ? pt.soorten.join(',') : (zorg ? 'zorgmail' : null), plan ? JSON.stringify(plan) : null, inhaal ? 'schaduw' : p.stand, status, VERSIE, iso(), status === 'klaar' ? iso() : null];
         if (oud) {
           db.prepare(`UPDATE besluit SET thread_id = ?, ontvangen = ?, afzender = ?, van_naam = ?, afzender_domein = ?, aan = ?, onderwerp = ?, tab = ?, afmeld = ?, bijlagen = ?,
             labels = ?, stap = ?, reden = ?, regel_id = ?, regel_versie = ?, stroom = ?, marker = ?, marker_soorten = ?, labels_plan = ?, stand = ?, status = ?, versie = ?, besloten = ?
             WHERE id = ?`).run(...rij.slice(2, 24), rij[25], oud.id);
         } else {
           db.prepare(`INSERT INTO besluit (postvak, gmail_id, thread_id, ontvangen, afzender, van_naam, afzender_domein, aan, onderwerp, tab, afmeld, bijlagen, labels,
-            stap, reden, regel_id, regel_versie, stroom, marker, marker_soorten, labels_plan, stand, status, versie, aangemaakt, besloten)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(...rij);
+            stap, reden, regel_id, regel_versie, stroom, marker, marker_soorten, labels_plan, stand, status, versie, aangemaakt, besloten, inhaal)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(...rij, inhaal ? 1 : 0);
         }
         if (magJev) jev.push({ gmail_id: m.id, body: { model: 'typesafe/jev', input: { state: jevState(m, platte), questions: q } } });
       });
@@ -633,12 +671,12 @@ function maak(o) {
     const p = postvak(r.postvak);
     const vr = vragen(p.id);
     const instel = instelVan(p);
-    const lees = db.prepare("SELECT * FROM besluit WHERE postvak = ? AND gmail_id = ? AND status = 'wacht_jev'");
+    const lees = db.prepare("SELECT * FROM besluit WHERE postvak = ? AND gmail_id = ? AND status = 'wacht_jev' AND inhaal = ?");   // wv1983: elke soort zijn eigen wachters
     const tel = { antwoorden: 0, besloten: 0, fout: 0, tokens: 0 };
     tx(function () {
       for (const a of (Array.isArray(d.antwoorden) ? d.antwoorden : []).slice(0, MAILS_MAX)) {
         if (!isObj(a) || !ID_RE.test(String(a.gmail_id || ''))) continue;
-        const b = lees.get(p.id, String(a.gmail_id));
+        const b = lees.get(p.id, String(a.gmail_id), r.soort === 'inhaal' ? 1 : 0);
         if (!b) continue;
         tel.antwoorden++;
         const j = a.antwoord ? leesJev(a.antwoord, vr) : null;
@@ -664,6 +702,11 @@ function maak(o) {
     const ok = r.volledig === 1 && r.afgekapt === 0 && !f && r.jev_fout === 0;
     const t = iso();
     db.prepare('UPDATE ronde SET eind = ?, fout = ?, geslaagd = ? WHERE id = ?').run(t, f, ok ? 1 : 0, r.id);
+    if (r.soort === 'inhaal') {
+      // wv1983: een inhaalronde schuift het venster niet op; klaar = de hele lijst gezien, niets meer open en geen inhaalbesluit dat op Jev wacht
+      const wacht = db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND inhaal = 1 AND status = 'wacht_jev'").get(r.postvak).n;
+      return { status: 200, j: { ok: true, geslaagd: ok, inhaal: true, klaar: ok && r.nieuw === 0 && wacht === 0, wacht_jev: wacht } };
+    }
     if (ok) db.prepare('UPDATE postvak SET laatste_geslaagd = ? WHERE id = ?').run(r.start, r.postvak);
     return { status: 200, j: { ok: true, geslaagd: ok } };
   }
@@ -689,6 +732,7 @@ function maak(o) {
   function labels(d) {
     const r = rondeVan(d, true);
     if (!r) return { status: 409, j: { ok: false, fout: 'ronde onbekend of verlopen' } };
+    if (r.soort === 'inhaal') return { status: 200, j: { ok: true, stand: 'inhaal', acties: [] } };   // wv1983: de inhaal zet nooit labels
     const p = postvak(r.postvak);
     if (p.stand !== 'live' || !liveMag(p).ok) return { status: 200, j: { ok: true, stand: p.stand, acties: [] } };
     const ids = new Set((Array.isArray(d.ids) ? d.ids : []).map(String).filter(function (x) { return ID_RE.test(x); }));
@@ -698,7 +742,7 @@ function maak(o) {
     let wacht = 0;
     const st = stromen();
     const vanaf = new Date((p.live_sinds ? Date.parse(p.live_sinds) : nu()) - LIVE_INHAAL_MS).toISOString();
-    for (const b of db.prepare("SELECT gmail_id, labels_plan, stroom, reden, labels FROM besluit WHERE postvak = ? AND status = 'klaar' AND labels_gezet IS NULL AND labels_plan IS NOT NULL AND stap != 'buiten' AND COALESCE(ontvangen, aangemaakt) >= ? ORDER BY COALESCE(ontvangen, aangemaakt), id").all(p.id, vanaf)) {
+    for (const b of db.prepare("SELECT gmail_id, labels_plan, stroom, reden, labels FROM besluit WHERE postvak = ? AND status = 'klaar' AND inhaal = 0 AND labels_gezet IS NULL AND labels_plan IS NOT NULL AND stap != 'buiten' AND COALESCE(ontvangen, aangemaakt) >= ? ORDER BY COALESCE(ontvangen, aangemaakt), id").all(p.id, vanaf)) {
       if (!ids.has(b.gmail_id)) continue;
       let plan = [], lab = [];
       try { plan = JSON.parse(b.labels_plan); } catch (e) { plan = []; }
@@ -724,8 +768,9 @@ function maak(o) {
   function gezet(d) {
     const r = rondeVan(d, true);
     if (!r) return { status: 409, j: { ok: false, fout: 'ronde onbekend of verlopen' } };
+    if (r.soort === 'inhaal') return { status: 409, j: { ok: false, fout: 'een inhaalronde zet geen labels' } };   // wv1983
     const tel = { ok: 0, fout: 0 };
-    const lees = db.prepare('SELECT id FROM besluit WHERE postvak = ? AND gmail_id = ?');
+    const lees = db.prepare('SELECT id FROM besluit WHERE postvak = ? AND gmail_id = ? AND inhaal = 0');
     tx(function () {
       for (const x of (Array.isArray(d.resultaten) ? d.resultaten : []).slice(0, LABEL_ACTIES_MAX * 2)) {
         if (!isObj(x) || !ID_RE.test(String(x.gmail_id || ''))) continue;
@@ -743,6 +788,7 @@ function maak(o) {
   }
   function n8n(route, d) {
     if (route === 'POST /mailman/start') return start();
+    if (route === 'POST /mailman/inhaal') return inhaalStart(d);
     if (route === 'POST /mailman/labels') return labels(d);
     if (route === 'POST /mailman/gezet') return gezet(d);
     if (route === 'POST /mailman/nieuw') return nieuw(d);
@@ -768,7 +814,7 @@ function maak(o) {
   // ── tellingen en App ──
   function telling(pv, van, tot) {
     const rij = { binnen: 0, buiten: 0, altijd: 0, weg: 0, in: 0, jev: 0, intake: 0, factuur: 0, info: 0, twijfel: 0, wacht: 0, marker: 0, botsing: 0, jev_aanroepen: 0, jev_tokens: 0, todo: 0 };
-    for (const b of db.prepare('SELECT stap, stroom, status, marker, botsing, jev_tokens, jev, labels_plan FROM besluit WHERE postvak = ? AND aangemaakt >= ? AND aangemaakt < ?').all(pv, van, tot)) {
+    for (const b of db.prepare('SELECT stap, stroom, status, marker, botsing, jev_tokens, jev, labels_plan FROM besluit WHERE postvak = ? AND aangemaakt >= ? AND aangemaakt < ? AND inhaal = 0').all(pv, van, tot)) {
       if (b.stap === 'buiten') { rij.buiten++; continue; }
       rij.binnen++;
       rij[b.stap] = (rij[b.stap] || 0) + 1;
@@ -786,7 +832,7 @@ function maak(o) {
     let jev = null; try { jev = b.jev ? JSON.parse(b.jev) : null; } catch (e) { jev = null; }
     let plan = []; try { plan = b.labels_plan ? JSON.parse(b.labels_plan) : []; } catch (e) { plan = []; }
     return { id: b.id, tijd: b.aangemaakt, ontvangen: b.ontvangen, afzender: b.afzender, naam: b.van_naam, domein: b.afzender_domein,
-      onderwerp: b.onderwerp, marker: !!b.marker, zorg: b.marker_soorten === 'zorgmail', stap: b.stap, reden: b.reden, regel_id: b.regel_id,
+      onderwerp: b.onderwerp, marker: !!b.marker, zorg: b.marker_soorten === 'zorgmail', inhaal: !!b.inhaal, juist: b.juist || null, stap: b.stap, reden: b.reden, regel_id: b.regel_id,
       stroom: b.stroom, status: b.status, score: b.score, jev, botsing: b.botsing, labels: plan, oordeel: b.oordeel, tab: b.tab, bijlagen: (function () { try { return JSON.parse(b.bijlagen || '[]').length; } catch (e) { return 0; } })() };
   }
   // 5 uit Info en 5 uit Intake (en Twijfel), elke dag dezelfde keus (hash op dag + id), alleen besluiten met een afzender
@@ -794,7 +840,7 @@ function maak(o) {
     const dag = new Date(nu()).toISOString().slice(0, 10);
     const van = new Date(nu() - 7 * 86400000).toISOString();
     const kies = function (where) {
-      return db.prepare("SELECT * FROM besluit WHERE postvak = ? AND status = 'klaar' AND aangemaakt >= ? AND afzender IS NOT NULL AND " + where).all(pv, van)
+      return db.prepare("SELECT * FROM besluit WHERE postvak = ? AND status = 'klaar' AND inhaal = 0 AND aangemaakt >= ? AND afzender IS NOT NULL AND " + where).all(pv, van)
         .map(function (b) { return { b, k: sha(dag + '|' + b.id) }; }).sort(function (x, y) { return x.k < y.k ? -1 : 1; }).slice(0, 5).map(function (x) { return logRij(x.b); });
     };
     return { info: kies("stroom = 'info'"), intake: kies("stroom IN ('intake', 'twijfel')") };
@@ -810,7 +856,7 @@ function maak(o) {
   function liveCriteria(pv) {
     const p = postvak(pv);
     const van = new Date(nu() - 7 * 86400000).toISOString();
-    const rijen = db.prepare("SELECT jev, stroom, reden, oordeel, aangemaakt FROM besluit WHERE postvak = ? AND status = 'klaar' AND stap != 'buiten' AND aangemaakt >= ?").all(pv, van);
+    const rijen = db.prepare("SELECT jev, stroom, reden, oordeel, aangemaakt FROM besluit WHERE postvak = ? AND status = 'klaar' AND stap != 'buiten' AND inhaal = 0 AND aangemaakt >= ?").all(pv, van);
     let facInfo = 0, mensInfo = 0, intake = 0, wachtrij = 0, factuur = 0, info = 0, fout = 0, goed = 0, jev = 0, eerste = null;
     const naarIntake = function (s) { return s === 'intake' || (s === 'twijfel' && (!p || p.twijfel_naar !== 'info')); };
     for (const b of rijen) {
@@ -831,6 +877,30 @@ function maak(o) {
       intake_per_dag: pd(intake), wachtrij_per_dag: pd(wachtrij), factuur_per_dag: pd(factuur), info_per_dag: pd(info), oordeel_fout: fout, oordeel_goed: goed,
       voldaan: facInfo === 0 && mensInfo <= 2 && rijen.length > 0 };
   }
+  // wv1983 (David 29-10: "als openingspagina wil ik liever alle 'Twijfel' alleen maar zien"): Twijfel van de laatste 14 dagen (gewone
+  // rondes én inhaal), nieuwste mail bovenaan; wat David al beoordeelde (juist) staat erbij, de App zet het onderaan.
+  function twijfelLijst(pv) {
+    return db.prepare("SELECT * FROM besluit WHERE postvak = ? AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? ORDER BY COALESCE(ontvangen, aangemaakt) DESC, id DESC LIMIT ?")
+      .all(pv, new Date(nu() - NAMEN_MS).toISOString(), TWIJFEL_LIJST).map(logRij);
+  }
+  // wv1983: de eigen telling van de inhaal (los van de stroombalk): per stroom, de vijf grootste twijfelbronnen (domein), rondes en tokens
+  function inhaalStand(pv, metLog) {
+    const per = { intake: 0, factuur: 0, info: 0, twijfel: 0, wacht: 0, buiten: 0 };
+    let n = 0, tok = 0, jev = 0;
+    for (const b of db.prepare('SELECT stap, stroom, status, jev, jev_tokens FROM besluit WHERE postvak = ? AND inhaal = 1').all(pv)) {
+      n++;
+      if (b.stap === 'buiten') per.buiten++;
+      else if (b.status === 'wacht_jev') per.wacht++;
+      else if (b.stroom && per[b.stroom] != null) per[b.stroom]++;
+      if (b.jev) { jev++; tok += b.jev_tokens || 0; }
+    }
+    const bronnen = db.prepare("SELECT afzender_domein domein, count(*) n FROM besluit WHERE postvak = ? AND inhaal = 1 AND status = 'klaar' AND stroom = 'twijfel' GROUP BY afzender_domein ORDER BY n DESC, domein LIMIT 5").all(pv)
+      .map(function (x) { return { domein: x.domein || '(onbekend)', n: x.n }; });
+    const ro = db.prepare("SELECT count(*) n, sum(CASE WHEN geslaagd = 1 THEN 1 ELSE 0 END) ok, max(start) laatste FROM ronde WHERE postvak = ? AND soort = 'inhaal'").get(pv);
+    const uit = { besluiten: n, per_stroom: per, twijfel_bronnen: bronnen, jev_aanroepen: jev, jev_tokens: tok, rondes: ro.n || 0, rondes_geslaagd: ro.ok || 0, laatste: ro.laatste || null };
+    if (metLog) uit.log = db.prepare('SELECT * FROM besluit WHERE postvak = ? AND inhaal = 1 ORDER BY COALESCE(ontvangen, aangemaakt) DESC, id DESC LIMIT ?').all(pv, INHAAL_LOG).map(logRij);
+    return uit;
+  }
   function overzicht() {
     const n = nu(), vandaag = new Date(dagStart(n)).toISOString(), morgen = new Date(dagStart(n) + 86400000).toISOString(), week = new Date(dagStart(n) - 6 * 86400000).toISOString();
     return {
@@ -846,7 +916,8 @@ function maak(o) {
           vandaag: telling(p.id, vandaag, morgen), week: telling(p.id, week, morgen),
           regels: regels(p.id).map(function (r) { return Object.assign(r, { treffers_7d: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND regel_id = ? AND aangemaakt >= ?').get(p.id, r.id, week).n }); }),
           jev_vragen: vragen(p.id),
-          logboek: db.prepare('SELECT * FROM besluit WHERE postvak = ? ORDER BY aangemaakt DESC, id DESC LIMIT 80').all(p.id).map(logRij),
+          logboek: db.prepare('SELECT * FROM besluit WHERE postvak = ? AND inhaal = 0 ORDER BY aangemaakt DESC, id DESC LIMIT 80').all(p.id).map(logRij),
+          twijfel: twijfelLijst(p.id), inhaal: inhaalStand(p.id, true),
           botsingen: db.prepare('SELECT * FROM besluit WHERE postvak = ? AND botsing IS NOT NULL AND aangemaakt >= ? ORDER BY aangemaakt DESC LIMIT 30').all(p.id, week).map(logRij),
           steekproef: steekproef(p.id), verdeling: verdeling(p.id), live_criteria: liveCriteria(p.id),
         };
@@ -1010,11 +1081,19 @@ function maak(o) {
     tx(function () { db.prepare('UPDATE stroom SET naar_intake = ?, naar_facturen = ?, label = ? WHERE id = ?').run(nieuw.naar_intake ? 1 : 0, nieuw.naar_facturen ? 1 : 0, nieuw.label ? 1 : 0, d.stroom); wijzig('stroom', d.stroom, oud, nieuw, door); });
     return { status: 200, j: { ok: true } };
   }
+  // Duim (oordeel goed/fout) en, sinds wv1983, de stroom waar de mail volgens David heen had gemoeten (juist; steekproef voor het bijschaven
+  // van regels). Elk veld alleen als het meekomt; juist null = weer open.
   function oordeelRoute(d) {
     const b = db.prepare('SELECT id FROM besluit WHERE id = ?').get(Number(d.id));
     if (!b) return { status: 404, j: { ok: false, fout: 'besluit onbekend' } };
-    if (!['goed', 'fout', null].includes(d.oordeel == null ? null : d.oordeel)) return { status: 400, j: { ok: false, fout: 'oordeel goed of fout' } };
-    db.prepare('UPDATE besluit SET oordeel = ? WHERE id = ?').run(d.oordeel || null, b.id);
+    const metO = Object.prototype.hasOwnProperty.call(d, 'oordeel'), metJ = Object.prototype.hasOwnProperty.call(d, 'juist');
+    if (!metO && !metJ) return { status: 400, j: { ok: false, fout: 'oordeel of juist ontbreekt' } };
+    if (metO && !['goed', 'fout', null].includes(d.oordeel == null ? null : d.oordeel)) return { status: 400, j: { ok: false, fout: 'oordeel goed of fout' } };
+    if (metJ && !(d.juist == null || ['intake', 'factuur', 'info'].includes(d.juist))) return { status: 400, j: { ok: false, fout: 'juist: intake, factuur of info' } };
+    tx(function () {
+      if (metO) db.prepare('UPDATE besluit SET oordeel = ? WHERE id = ?').run(d.oordeel || null, b.id);
+      if (metJ) db.prepare('UPDATE besluit SET juist = ? WHERE id = ?').run(d.juist || null, b.id);
+    });
     return { status: 200, j: { ok: true } };
   }
   function app(route, d, ctx) {
@@ -1035,11 +1114,13 @@ function maak(o) {
   function info() {
     const n = nu(), dag = new Date(n - 86400000).toISOString();
     return { versie: VERSIE, postvakken: postvakken().map(function (p) {
-      const w = db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND status = 'wacht_jev'").get(p.id).n;
+      const w = db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND status = 'wacht_jev' AND inhaal = 0").get(p.id).n;
       const t = telling(p.id, dag, new Date(n + 1000).toISOString());
       const l = db.prepare('SELECT COALESCE(sum(labels_ok), 0) ok, COALESCE(sum(labels_fout), 0) fout FROM ronde WHERE postvak = ? AND start >= ?').get(p.id, dag);
+      const ih = inhaalStand(p.id, false);
       return { id: p.id, stand: p.stand, live_sinds: p.live_sinds || null, jev: p.jev, laatste_ronde: p.laatste_ronde, laatste_geslaagd: p.laatste_geslaagd, wacht_jev: w, besluiten_24u: t.binnen,
-        jev_tokens_24u: t.jev_tokens, labels_gezet_24u: l.ok, labels_fout_24u: l.fout };
+        jev_tokens_24u: t.jev_tokens, labels_gezet_24u: l.ok, labels_fout_24u: l.fout,
+        inhaal: { besluiten: ih.besluiten, per_stroom: ih.per_stroom, rondes: ih.rondes, rondes_geslaagd: ih.rondes_geslaagd, laatste: ih.laatste } };   // wv1983: alleen tellingen
     }) };
   }
   // Voor de box (hooguit één per dag, server.js): alleen als er iets mis is
@@ -1048,7 +1129,7 @@ function maak(o) {
     for (const p of postvakken()) {
       if (p.stand === 'uit') continue;
       if (!p.laatste_geslaagd || n - Date.parse(p.laatste_geslaagd) > 6 * 3600000) uit.push(p.id + ': geen geslaagde ronde sinds ' + (p.laatste_geslaagd ? p.laatste_geslaagd.slice(0, 16).replace('T', ' ') + ' UTC' : 'de start'));
-      const f = db.prepare("SELECT count(*) n FROM ronde WHERE postvak = ? AND start >= ? AND (geslaagd = 0 OR eind IS NULL)").get(p.id, new Date(n - 86400000).toISOString()).n;
+      const f = db.prepare("SELECT count(*) n FROM ronde WHERE postvak = ? AND soort = 'ronde' AND start >= ? AND (geslaagd = 0 OR eind IS NULL)").get(p.id, new Date(n - 86400000).toISOString()).n;
       if (f >= 10) uit.push(p.id + ': ' + f + ' rondes zonder succes in 24 u');
       if (p.stand === 'live') {
         const lf = db.prepare('SELECT COALESCE(sum(labels_fout), 0) n FROM ronde WHERE postvak = ? AND start >= ?').get(p.id, new Date(n - 86400000).toISOString()).n;
