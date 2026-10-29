@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Toetst financien-vault.js (wv1337, App Financiën: tabbladen Hypotheek, Belasting en Holding; bouwplan Privé-financiën § 13) op een
 # nagebootste vault in de vorm van de echte pagina's en json's van 26/27-10-2026 (alles verzonnen: bedragen, IBAN, lening-, polis- en
-# BSN-nummers; deze repo is openbaar, Opus-review wv1337 #1): veld voor veld opgebouwd, geen IBAN/leningnummer/BSN/polisnummer in het
-# antwoord, nieuwste json op datum en Excel-velden op vorm (niet op één datum), tabellen op kolomkop (ook met \| in een wikilink), RC-posten zonder de woninglening alleen als de rest optelt, doorlopende opsommingsregels, een
+# BSN-nummers; deze repo is openbaar, Opus-review wv1337 #1): veld voor veld opgebouwd; sinds wv1949 blijven IBAN, lening- en
+# polisnummer staan (het antwoord is alleen voor David: "Jij schermt af wat ik al heb"), met het nummer per leningdeel en per polis; nieuwste json op datum en Excel-velden op vorm (niet op één datum), tabellen op kolomkop (ook met \| in een wikilink), RC-posten zonder de woninglening alleen als de rest optelt, doorlopende opsommingsregels, een
 # kapotte bron maakt alleen dat blok leeg; registratie in uitrol.sh, Dockerfile en CI; de route in server.js geeft de drie velden door.
 # Raakt de pod en de echte vault niet. Gebruik: bash test/financien-vault.sh
 set -u
@@ -113,13 +113,13 @@ schrijf(BESLUIT, besluit('10.100,50'));
 let r = F.lees(V);
 const s = JSON.stringify(r);
 toets('alle drie de blokken, geen fouten', r.fouten.length === 0 && r.hypotheek && r.belasting && r.dga, r.fouten);
-const lek = new RegExp([IBAN, IBAN2, LENING, LENING2, LDEEL, POLIS, POLIS2, BSN, 'LENINGDEEL'].map((x) => x.replace(/\./g, '\\.')).join('|'), 'g');
-toets('geen IBAN, leningnummer, polisnummer of BSN in het antwoord', !lek.test(s), s.match(lek));
-toets('geen transacties, meta of schuldenaar doorgegeven', !/X TEST|transacties|schuldenaar|tegenrekening|rekeningen/.test(s));
+toets('wv1949: geen masker meer in het antwoord ([rekening]/[nummer])', !/\[rekening\]|\[nummer\]/.test(s), s.match(/.{40}\[(rekening|nummer)\].{20}/g));
+toets('veld voor veld: geen transacties, meta of schuldenaar uit de json (de App toont ze niet)', !/X TEST|transacties|schuldenaar|tegenrekening|rekeningen/.test(s) && !s.includes(IBAN2) && !s.includes(BSN));
 // hypotheek
 const h = r.hypotheek;
 toets('hypotheek: nieuwste json (26-10, niet 1-9), bankstand en maandbetaling', h.bank.restschuld === 150000.5 && h.bank.maandbetaling === 1000.25 && h.bron.bank_op === '2026-10-26' && /26-10/.test(h.bron.data), h.bank);
-toets('hypotheek: bron noemt de schermafdruk (Nederlandse datum) zonder leningnummer', /ABN AMRO-app \(schermafdruk 26-10-2026\)/.test(h.bron.bank) && !/12\.34/.test(h.bron.bank), h.bron.bank);
+toets('hypotheek: bron noemt de schermafdruk (Nederlandse datum)', /ABN AMRO-app \(schermafdruk 26-10-2026\)/.test(h.bron.bank), h.bron.bank);
+toets('wv1949 hypotheek: leningdeelnummer per deel zoals in de Excel (zonder het woord LENINGDEEL)', h.delen.every((x) => x.nummer === LDEEL), h.delen.map((x) => x.nummer));
 const d1 = h.delen[0];
 toets('hypotheek: deel 201 = Hypo1 Huis, verschil bank − Excel, Excel gelijk op 1-9, Excel-datum mee', d1.deel === '201' && d1.model === 'Hypo1' && d1.doel === 'Huis' && d1.verschil === 400.3 && d1.excel_gelijk_op === '2026-09-01' && d1.restschuld_excel === 99600.2 && h.bron.excel_op === '2026-10-01', d1);
 toets('hypotheek: rente Excel uit het veld met maand in de naam, rentevast met bronzin', h.delen[1].rente_excel === 3.33 && /Excel/.test(h.bron.rentevast), [h.delen[1].rente_excel, h.bron.rentevast]);
@@ -127,8 +127,8 @@ toets('hypotheek: einde looptijd uit de paginatabel (ook "ca. medio 2053 (model)
 toets('hypotheek: eerste renteherziening = vroegste rentevaste datum (Hypo8, juni 2028)', h.eerste_renteherziening && h.eerste_renteherziening.datum === '2028-06-01' && h.eerste_renteherziening.deel === '209', h.eerste_renteherziening);
 toets('hypotheek: Excel-totaal met zijn datum', h.excel.restschuld === 149500.1 && h.excel.restschuld_op === '2026-10-01' && h.excel.maandlast_totaalkolom === 800, h.excel);
 toets('hypotheek: verloop alleen 1 januari uit TOTAAL, null overgeslagen', JSON.stringify(h.verloop) === JSON.stringify([{ jaar: 2015, restschuld: 300000 }, { jaar: 2016, restschuld: 290000 }]), h.verloop);
-toets('hypotheek: bevinding met IBAN en leningnummer gemaskeerd', h.bevindingen[1].includes('[rekening]') && h.bevindingen[1].includes('[nummer]'), h.bevindingen);
-toets('hypotheek: ORV zonder polisnummer, kapitaal en premie als getal, status zonder **', h.orv.length === 2 && h.orv[0].kapitaal_start === 400000 && h.orv[0].premie_mnd === 11.11 && h.orv[1].status === 'verlopen' && !('polis' in h.orv[0]), h.orv);
+toets('wv1949 hypotheek: bevinding met IBAN en leningnummer onverkort', h.bevindingen[1] === 'Rekening ' + IBAN + ' en lening ' + LENING2 + ' in een bevinding', h.bevindingen);
+toets('hypotheek: ORV met polisnummer (wv1949), kapitaal en premie als getal, status zonder **', h.orv.length === 2 && h.orv[0].polis === POLIS && h.orv[1].polis === POLIS2 && h.orv[0].kapitaal_start === 400000 && h.orv[0].premie_mnd === 11.11 && h.orv[1].status === 'verlopen' && h.orv[0].status === 'actief; polis ' + POLIS, h.orv);
 toets('hypotheek: woninglening Holding erbij (contract + jaarrekeningstanden)', h.holding && h.holding.hoofdsom === 20000 && h.holding.termijn === 100.5 && h.holding.jaarrekening.length === 3 && h.holding.jaarrekening[2].stand === 19000, h.holding);
 // een nieuwere aanlevering met een andere Excel-datum: velden op vorm, niet op 1-10-2026
 const H2 = JSON.parse(JSON.stringify(HYPO)); H2.leningdelen.forEach((x) => { x.excel_restschuld_2027_01_01 = 1234.5; delete x.excel_restschuld_2026_10_01; }); H2.excel_som_delen_2027_01_01 = 2469; delete H2.excel_som_delen_2026_10_01; H2.bron_bank = 'screenshot 5-1-2027';
@@ -148,9 +148,9 @@ toets('belasting: eigen woning (– = leeg, eerste getal, 1.100.000 blijft een b
 // dga
 const g = r.dga;
 toets('holding: planning met wikilink-naam (\\| in de cel) en klaar bij "uitgevoerd"', g.planning.length === 2 && g.planning[0].klaar === true && g.planning[1].klaar === false && /Deadlines, sein 1-12/.test(g.planning[1].actie) && g.planning[1].wanneer === '01-12-2026', g.planning);
-toets('holding: IBAN in een planningsregel gemaskeerd', /\[rekening\]/.test(g.planning[0].actie), g.planning[0].actie);
+toets('wv1949 holding: IBAN in een planningsregel onverkort', g.planning[0].actie.includes('(' + IBAN + ')'), g.planning[0].actie);
 toets('holding: RC-posten zonder woninglening als de rest optelt tot het totaal', g.rc.telt_op === true && g.rc.totaal === 10100.5 && g.rc.posten.length === 2 && !g.rc.posten.some((p) => /woninglening/i.test(p.post)), g.rc);
-toets('holding: reconstructie (alleen Holding, met datum) en contract (rentevrij onder 17.500, getekend als datum)', g.rc.reconstructie.bedrag === 20000 && g.rc.reconstructie.alleen === 'Holding' && g.rc.reconstructie.op === '2026-10-26' && /\[rekening\]/.test(g.rc.reconstructie.basis) && g.rc_contract.rentevrij_onder === 17500 && g.rc_contract.getekend === '2023-10-01', [g.rc, g.rc_contract]);
+toets('holding: reconstructie (alleen Holding, met datum) en contract (rentevrij onder 17.500, getekend als datum)', g.rc.reconstructie.bedrag === 20000 && g.rc.reconstructie.alleen === 'Holding' && g.rc.reconstructie.op === '2026-10-26' && g.rc.reconstructie.basis.endsWith('rekening ' + IBAN) && g.rc_contract.rentevrij_onder === 17500 && g.rc_contract.getekend === '2023-10-01', [g.rc, g.rc_contract]);
 toets('holding: dividend veld voor veld (getallen), punten ter bevestiging met doorlopende regel', g.dividend[0].netto_betaald === 45000 && g.dividend[0].verschil === 6000 && !('tegenrekening' in g.dividend[0]) && g.bevestigen.length === 2 && /€ 20\.000 en het interim-dividend/.test(g.bevestigen[1]), [g.dividend, g.bevestigen]);
 toets('holding: besluitstatus uit de frontmatter, data als concept', /vastgesteld door David/.test(g.bron.besluit) && g.bron.data_status === 'concept', g.bron);
 // "niet uitgevoerd" / "deels betaald" zijn niet klaar
@@ -177,11 +177,12 @@ toets('pagina zonder aangiftetabellen: belasting in fouten (geen lege tabel als 
 toets('lege vault: drie fouten, geen uitzondering', JSON.stringify(F.lees(path.join(W, 'niets')).fouten) === '["hypotheek","belasting","dga"]');
 
 // ── hulpjes ──
-const NG = [['€ 12.345,67', 12345.67], ['−1.234', -1234], ['+€ 2.000', 2000], ['1,23%', 1.23], ['–', null], ['– (in aanbouw)', null], ['–4.321', -4321], ['ca. € 1.900/mnd', 1900], ['-6.789', -6789], ['4.20%', 4.2], ['2.468', 2468], ['1.100.000', 1100000]];
+const NG = [['1234567', null], ['123.456.789', null], ['1234.567.890.123', null], ['polis 12345678: € 11,11', 11.11], ['NL00 TEST 0123 4567 89 € 5,50', 5.5], ['€ 12.345,67', 12345.67], ['−1.234', -1234], ['+€ 2.000', 2000], ['1,23%', 1.23], ['–', null], ['– (in aanbouw)', null], ['–4.321', -4321], ['ca. € 1.900/mnd', 1900], ['-6.789', -6789], ['4.20%', 4.2], ['2.468', 2468], ['1.100.000', 1100000]];
 const ngFout = NG.filter((x) => F.nlGetal(x[0]) !== x[1]).map((x) => [x[0], F.nlGetal(x[0])]);
-toets('nlGetal (ook en-dash als min vóór een cijfer, decimale punt)', ngFout.length === 0, ngFout);
+toets('nlGetal (ook en-dash als min vóór een cijfer, decimale punt; een rekening-, lening- of polisnummer is geen bedrag)', ngFout.length === 0, ngFout);
 const sc = F.schoon('€ 1.234.567 en ' + LENING2 + ' en 1.234,50 en NL00 TEST 0123 4567 89 en ' + BSN + ' en polis ' + POLIS);
-toets('schoon: bedragen blijven, nummers weg', sc === '€ 1.234.567 en [nummer] en 1.234,50 en [rekening] en [nummer] en polis [nummer]', sc);
+toets('wv1949 schoon: bedragen en nummers blijven (IBAN, lening, BSN, polis), opmaak en wikilink weg', sc === '€ 1.234.567 en ' + LENING2 + ' en 1.234,50 en NL00 TEST 0123 4567 89 en ' + BSN + ' en polis ' + POLIS &&
+  F.schoon('**[[A/B/Polis C.md]]** ' + IBAN) === 'Polis C ' + IBAN, sc);
 
 // ── registratie ──
 toets('uitrol.sh: financien-vault.js optioneel in de release', /RELEASE_OPTIONEEL="[^"]*\bfinancien-vault\.js\b/.test(fs.readFileSync('uitrol.sh', 'utf8')));

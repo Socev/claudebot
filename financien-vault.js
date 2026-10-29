@@ -18,9 +18,12 @@
 //   Holding    — de besluitpagina "Afbouw rekening-courant en herstel woninglening" (planning, standen van de boekhouder, punten ter
 //                bevestiging) en de DGA-json "Holding - <datum> - DGA-reconstructie data.json" (contracten, dividenden, reconstructie).
 //
-// WAT ER NIET IN HET ANTWOORD STAAT: IBAN, rekening-, lening- of polisnummer, BSN, transacties, omschrijvingen, tegenpartijen. Het antwoord
-// wordt veld voor veld opgebouwd; elke tekst uit de vault gaat door schoon() (wikilinks naar hun naam, opmaak weg, IBAN en lange
-// nummerreeksen gemaskeerd). Een kapotte of verplaatste bron maakt alleen dat blok leeg (fouten: ["hypotheek"] e.d.).
+// HET ANTWOORD GAAT ALLEEN NAAR DAVID (GET /app/financien, zijn eigen App). Het wordt veld voor veld opgebouwd (geen transacties of
+// tegenpartijen uit de json's: de App toont ze niet); elke tekst uit de vault gaat door schoon() (wikilinks naar hun naam, opmaak weg).
+// Nummers blijven staan zoals David ze aanleverde: IBAN's, lening- en polisnummers (wv1949, David 28-10-2026: "Je moet NIETS voor mij
+// afschermen … Jij schermt af wat ik al heb"; tot wv1949 maskeerde schoon() ze als [rekening]/[nummer]). Per leningdeel het nummer uit
+// zijn Excel, per ORV het polisnummer. Gaat dit ooit naar iemand anders dan David, dan hoort het masker terug.
+// Een kapotte of verplaatste bron maakt alleen dat blok leeg (fouten: ["hypotheek"] e.d.).
 // Schrijft niets. Geen netwerk.
 'use strict';
 const fs = require('fs'), path = require('path');
@@ -33,21 +36,23 @@ const D_DGA = path.join('10_Zakelijk', 'Holding', 'Bronnen'), RE_DGA = /^Holding
 const MAX_MD = 400000, MAX_JSON = 5 * 1024 * 1024;
 
 // ── tekst ──
-// IBAN, lange cijferreeksen (BSN, rekening) en gepunte nummers (12.34.56.789, 123.456.789) maskeren; bedragen (1.234,50) blijven
+// wikilinks naar hun naam, opmaak en stuurtekens weg; nummers (IBAN, lening-, polisnummer) blijven (wv1949: het antwoord is alleen voor David)
 function schoon(s, n) {
   let t = String(s == null ? '' : s).normalize('NFC');
   t = t.replace(/\\\|/g, '|').replace(/\[\[([^\]|]*)\|([^\]]*)\]\]/g, '$2').replace(/\[\[([^\]]*)\]\]/g, function (m, p) { return p.split('/').pop().replace(/\.(md|pdf)$/i, ''); });
   t = t.replace(/\*\*|__|`/g, '').replace(/(^|\s)\*([^*]+)\*/g, '$1$2').replace(/<[^>]*>/g, ' ');
-  t = t.replace(/\b[A-Z]{2}\d{2}\s?[A-Z]{4}(\s?\d){7,}\b/g, '[rekening]');
-  // een bedrag tot € 99 miljoen (1.234.567) blijft; 123.456.789 en 1234.567.890.123 zijn lening- of rekeningnummers
-  t = t.replace(/\b\d{1,4}(\.\d{2,3}){2,}\b/g, function (m) { return /^\d{1,2}\.\d{3}\.\d{3}$/.test(m) ? m : '[nummer]'; });
-  t = t.replace(/\b\d{7,}\b/g, '[nummer]');   // BSN, polis- en klantnummers (bedragen hebben punten)
   t = t.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
   return n && t.length > n ? t.slice(0, n - 1).trim() + '…' : t;
 }
-// eerste getal in een cel: "€ 12.345,67" → 12345.67, "−1.234" → -1234, "1,23%" → 1.23, "4.20%" → 4.2, "–" → null (leeg), "–1.234" → -1234
+// eerste getal in een cel: "€ 12.345,67" → 12345.67, "−1.234" → -1234, "1,23%" → 1.23, "4.20%" → 4.2, "–" → null (leeg), "–1.234" → -1234.
+// Alleen om het bedrag te vinden slaat het IBAN's, gepunte nummers (123.456.789, 1234.567.890.123; 1.234.567 is een bedrag) en reeksen van
+// 7+ cijfers over: "polis 12345678: € 11,11" → 11.11 (wv1949 Opus-review MOET 1; tot wv1949 deed het masker in schoon() dat)
+function geenNummer(t) {
+  return t.replace(/\b[A-Z]{2}\d{2}\s?[A-Z]{4}(\s?\d){7,}\b/g, ' ').replace(/\b\d{1,4}(\.\d{2,3}){2,}\b/g, function (m) { return /^\d{1,2}\.\d{3}\.\d{3}$/.test(m) ? m : ' '; })
+    .replace(/\b\d{7,}\b/g, ' ');
+}
 function nlGetal(s) {
-  const t = schoon(s).replace(/\s+/g, ' ');
+  const t = geenNummer(schoon(s)).replace(/\s+/g, ' ');
   const m = /(^|[^\d.,])([+\-−–]?)\s*(?:€\s*)?(\d{1,3}(?:\.\d{3})+(?!\d)|\d+\.\d{1,2}(?![\d.])|\d+)(?:,(\d+))?/.exec(t);
   if (!m) return null;
   const decimaal = /^\d+\.\d{1,2}$/.test(m[3]) && !m[4];
@@ -167,6 +172,7 @@ function hypotheek(vault) {
     const bank = getal(d.bank_restschuld), x10 = xv ? getal(d[xv.sleutel]) : null;
     return {
       deel: /^\d{1,4}$/.test(String(d.bank_leningdeel)) ? String(d.bank_leningdeel) : null,
+      nummer: schoon(String(d.excel_leningdeelnummer || '').replace(/^\s*leningdeel\s*/i, ''), 40) || null,   // wv1949: zoals in zijn Excel ("1234.567.890.???" = deels onbekend)
       model: model, doel: schoon(label.replace(/^Hypo\d\s*-\s*/i, ''), 40) || null, soort: schoon(d.bank_soort, 20) || null,
       hoofdsom: getal(d.excel_hoofdsom), start: datumIso(d.excel_startmaand), rente_bank: getal(d.bank_rente_pct), rente_excel: getal(eersteVeld(d, /^excel_rente_pct/)),
       rentevast_tm: datumIso(d.rentevast_tm_excel_groen), einde: model ? einde[model] || null : null,
@@ -181,9 +187,9 @@ function hypotheek(vault) {
   const tot = j.volledige_excel_reeksen && j.volledige_excel_reeksen.TOTAAL && Array.isArray(j.volledige_excel_reeksen.TOTAAL.rows) ? j.volledige_excel_reeksen.TOTAAL.rows : [];
   const verloop = tot.filter(function (r) { return r && /^\d{4}-01-01$/.test(String(r.datum)) && getal(r.restschuld) != null; })
     .map(function (r) { return { jaar: Number(String(r.datum).slice(0, 4)), restschuld: Math.round(r.restschuld) }; }).slice(0, 60);
-  // ORV-polissen (pagina): verzekeraar, kapitaal, looptijd, premie, status; geen polisnummer
+  // ORV-polissen (pagina): polisnummer (wv1949), verzekeraar, kapitaal, looptijd, premie, status
   const orv = (tabel(ts, ['verzekeraar', 'kapitaal start', 'einde polis', 'status']) || []).slice(0, 10).map(function (r) {
-    return { verzekeraar: schoon(r.verzekeraar, 40) || null, verzekerde_nemer: schoon(r.nemer, 20) || null, kapitaal_start: nlGetal(r['kapitaal start']),
+    return { polis: schoon(r.polis, 30) || null, verzekeraar: schoon(r.verzekeraar, 40) || null, verzekerde_nemer: schoon(r.nemer, 20) || null, kapitaal_start: nlGetal(r['kapitaal start']),
       ingang: datumIso(r.ingang), einde: datumIso(r['einde polis']), premie_mnd: nlGetal(r.premie), status: schoon(r.status, 60) || null };
   });
   return {

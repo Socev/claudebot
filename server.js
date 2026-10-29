@@ -10762,7 +10762,7 @@ async function appPraktijkenRoute(req, res, a) {
 const APP_FIN_CACHE_MS = 60000, APP_FIN_MAX_MS = 20000, APP_FIN_TERUGVAL_MS = 30 * 60000;
 let appFinCache = null;   // { op, d }
 // wv1337 (bouwplan Privé-financiën § 13): de tabbladen Hypotheek, Belasting en Holding lezen uit de vault (financien-vault.js: pagina's en
-// de aangeleverde json's, elk getal met zijn bron; geen IBAN, lening-, polis- of BSN-nummer). Zelfde route, dus dezelfde poort (sessie, niet
+// de aangeleverde json's, elk getal met zijn bron; sinds wv1949 met IBAN, lening- en polisnummer: alleen voor David). Zelfde route, dus dezelfde poort (sessie, niet
 // op een vaste plek, auditregel). Los van het bankdeel (Opus-review wv1337 #5): eigen 60 s geheugen, en een kapot vaultblok zet het
 // geheugen en de terugval van de bank niet uit. Een kapot blok komt in fouten en geeft één regel zonder detail in api.log (hooguit één per
 // minuut). Lui geladen: het app-blok draait in de poort- en UI-toets in een vm zonder __dirname; ontbreekt het bestand (oudere release), dan
