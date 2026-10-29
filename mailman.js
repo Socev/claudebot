@@ -72,7 +72,9 @@ const RONDE_MS = 30 * 60 * 1000;
 const WACHTRIJ_MAX = 12, WACHTRIJ_MS = 3 * 3600 * 1000;   // AI/MailMan: hooguit 12 berichten per 3 uur (Mail Processor: elke 3 uur één run)
 const LABEL_ACTIES_MAX = 40;                               // berichten met labels per ronde; de rest de volgende ronde
 const LIVE_INHAAL_MS = 24 * 3600 * 1000;                   // bij live zetten: alleen mail die hooguit 24 uur vóór live_sinds binnenkwam (review B5 #3)
-const INHAAL_LOG = 300, TWIJFEL_LIJST = 150;               // wv1983: inhaalbesluiten en de Twijfel-lijst in de App
+const INHAAL_LOG = 300, TWIJFEL_LIJST = 150, TWIJFEL_BEOORDEELD = 50;   // wv1983: inhaalbesluiten en de Twijfel-lijst in de App
+const INHAAL_PLAFOND = 1500;                               // wv1983: meer inhaalbesluiten dan dit alleen na een eigen ja van David (opdracht)
+const INHAAL_RUST_MS = 12 * 3600 * 1000;                   // wv1983: na een inhaalronde die "klaar" meldde weigert /mailman/inhaal 12 uur (wegwerp stopt vanzelf)
 const ID_RE = /^[0-9a-f]{12,24}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const SLEUTEL_KOP_RE = /^Bearer ([0-9a-f]{64})$/;
@@ -543,6 +545,11 @@ function maak(o) {
     const p = postvak(String(d && d.postvak || 'gmail:david'));
     if (!p) return { status: 400, j: { ok: false, fout: 'postvak onbekend' } };
     if (p.stand === 'uit') return { status: 409, j: { ok: false, fout: 'postvak staat uit' } };
+    // review wv1983: niet eindeloos doorlopen (klaar = de vorige brok zag de hele lijst, niets open, geen wachter) en een plafond op Jev
+    const klaar = db.prepare("SELECT max(eind) t FROM ronde WHERE postvak = ? AND soort = 'inhaal' AND geslaagd = 1 AND nieuw = 0").get(p.id).t;
+    const wacht = db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND inhaal = 1 AND status = 'wacht_jev'").get(p.id).n;
+    if (klaar && !wacht && nu() - Date.parse(klaar) < INHAAL_RUST_MS) return { status: 409, j: { ok: false, fout: 'inhaal is klaar', klaar: true } };
+    if (db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND inhaal = 1').get(p.id).n >= INHAAL_PLAFOND) return { status: 409, j: { ok: false, fout: 'plafond van ' + INHAAL_PLAFOND + ' inhaalbesluiten bereikt' } };
     const t = iso(), g = inhaalGrens(p);
     const id = 'i' + t.replace(/\D/g, '').slice(0, 14) + '-' + crypto.randomBytes(3).toString('hex');
     db.prepare("INSERT INTO ronde (id, start, postvak, soort, grens) VALUES (?, ?, ?, 'inhaal', ?)").run(id, t, p.id, new Date(g).toISOString());
@@ -847,7 +854,7 @@ function maak(o) {
   }
   function verdeling(pv) {
     const bak = new Array(10).fill(0);
-    for (const b of db.prepare("SELECT score FROM besluit WHERE postvak = ? AND score IS NOT NULL AND aangemaakt >= ?").all(pv, new Date(nu() - NAMEN_MS).toISOString())) bak[Math.min(9, Math.max(0, Math.floor(b.score * 10)))]++;
+    for (const b of db.prepare("SELECT score FROM besluit WHERE postvak = ? AND score IS NOT NULL AND inhaal = 0 AND aangemaakt >= ?").all(pv, new Date(nu() - NAMEN_MS).toISOString())) bak[Math.min(9, Math.max(0, Math.floor(b.score * 10)))]++;
     return bak;
   }
   // Live-criteria van O.9 als feitelijke stand (B5): over de laatste 7 dagen, per dag gedeeld door de dagen waarover echt besluiten zijn
@@ -879,9 +886,14 @@ function maak(o) {
   }
   // wv1983 (David 29-10: "als openingspagina wil ik liever alle 'Twijfel' alleen maar zien"): Twijfel van de laatste 14 dagen (gewone
   // rondes én inhaal), nieuwste mail bovenaan; wat David al beoordeelde (juist) staat erbij, de App zet het onderaan.
+  // Review wv1983: eerst de nog niet beoordeelde (eigen limiet), dan hooguit 50 beoordeelde; het totaal open apart (twijfelOpen).
   function twijfelLijst(pv) {
-    return db.prepare("SELECT * FROM besluit WHERE postvak = ? AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? ORDER BY COALESCE(ontvangen, aangemaakt) DESC, id DESC LIMIT ?")
-      .all(pv, new Date(nu() - NAMEN_MS).toISOString(), TWIJFEL_LIJST).map(logRij);
+    const q = "SELECT * FROM besluit WHERE postvak = ? AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? AND juist IS {X} NULL ORDER BY COALESCE(ontvangen, aangemaakt) DESC, id DESC LIMIT ?";
+    const van = new Date(nu() - NAMEN_MS).toISOString();
+    return db.prepare(q.replace('{X}', '')).all(pv, van, TWIJFEL_LIJST).concat(db.prepare(q.replace('{X}', 'NOT')).all(pv, van, TWIJFEL_BEOORDEELD)).map(logRij);
+  }
+  function twijfelOpen(pv) {
+    return db.prepare("SELECT count(*) n FROM besluit WHERE postvak = ? AND status = 'klaar' AND stroom = 'twijfel' AND aangemaakt >= ? AND juist IS NULL").get(pv, new Date(nu() - NAMEN_MS).toISOString()).n;
   }
   // wv1983: de eigen telling van de inhaal (los van de stroombalk): per stroom, de vijf grootste twijfelbronnen (domein), rondes en tokens
   function inhaalStand(pv, metLog) {
@@ -914,11 +926,11 @@ function maak(o) {
           jev: p.jev, tekst: p.tekst, drempel_in: p.drempel_in, drempel_uit: p.drempel_uit, twijfel_naar: p.twijfel_naar,
           altijd: p.altijd, laatste_ronde: p.laatste_ronde, laatste_geslaagd: p.laatste_geslaagd,
           vandaag: telling(p.id, vandaag, morgen), week: telling(p.id, week, morgen),
-          regels: regels(p.id).map(function (r) { return Object.assign(r, { treffers_7d: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND regel_id = ? AND aangemaakt >= ?').get(p.id, r.id, week).n }); }),
+          regels: regels(p.id).map(function (r) { return Object.assign(r, { treffers_7d: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND regel_id = ? AND aangemaakt >= ? AND inhaal = 0').get(p.id, r.id, week).n }); }),
           jev_vragen: vragen(p.id),
           logboek: db.prepare('SELECT * FROM besluit WHERE postvak = ? AND inhaal = 0 ORDER BY aangemaakt DESC, id DESC LIMIT 80').all(p.id).map(logRij),
-          twijfel: twijfelLijst(p.id), inhaal: inhaalStand(p.id, true),
-          botsingen: db.prepare('SELECT * FROM besluit WHERE postvak = ? AND botsing IS NOT NULL AND aangemaakt >= ? ORDER BY aangemaakt DESC LIMIT 30').all(p.id, week).map(logRij),
+          twijfel: twijfelLijst(p.id), twijfel_open: twijfelOpen(p.id), inhaal: inhaalStand(p.id, true),
+          botsingen: db.prepare('SELECT * FROM besluit WHERE postvak = ? AND botsing IS NOT NULL AND inhaal = 0 AND aangemaakt >= ? ORDER BY aangemaakt DESC LIMIT 30').all(p.id, week).map(logRij),
           steekproef: steekproef(p.id), verdeling: verdeling(p.id), live_criteria: liveCriteria(p.id),
         };
       }),

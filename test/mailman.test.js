@@ -743,6 +743,21 @@ test('wv1983 inhaal: alleen mail zonder besluit van vóór de grens; schaduw + i
   // tweede brok over dezelfde lijst (zoals Gmail hem geeft: zonder de verse mail): niets meer open, klaar
   const y = inhaal(mm, [fac, mens, school, live1]);
   assert.deepEqual(y.n.j.nieuw, []); assert.equal(y.g.j.klaar, true);
+  // daarna weigert /mailman/inhaal 12 uur (de wegwerp-workflow stopt vanzelf); verdeling en regeltreffers tellen alleen gewone besluiten
+  const z = mm.n8n('POST /mailman/inhaal', { postvak: 'gmail:david' });
+  assert.equal(z.status, 409); assert.equal(z.j.klaar, true);
+  klok += 13 * 3600000;
+  assert.equal(mm.n8n('POST /mailman/inhaal', { postvak: 'gmail:david' }).status, 200);
+  klok -= 13 * 3600000;
+  assert.equal(p.verdeling.reduce(function (a, b) { return a + b; }, 0), 1);
+});
+
+test('wv1983 inhaal: plafond van 1.500 inhaalbesluiten', () => {
+  const { mm } = nieuweKamer();
+  const ins = mm._db.prepare("INSERT INTO besluit (postvak, gmail_id, thread_id, stap, stand, status, versie, aangemaakt, inhaal) VALUES ('gmail:david', ?, 'aaaaaaaaaaaa', 'jev', 'schaduw', 'klaar', 'x', ?, 1)");
+  for (let i = 0; i < 1500; i++) ins.run('f' + String(i).padStart(15, '0'), new Date(klok).toISOString());
+  const r = mm.n8n('POST /mailman/inhaal', { postvak: 'gmail:david' });
+  assert.equal(r.status, 409); assert.match(r.j.fout, /plafond/);
 });
 
 test('wv1983 inhaal maakt een draad niet bekend; gewone rondes en inhaal laten elkaars Jev-wachters liggen', () => {
@@ -788,7 +803,13 @@ test('wv1983 Twijfel-lijst (gewoon én inhaal, nieuwste bovenaan) en "had naar �
   let p = mm.app('GET /app/mailman', {}).j.postvakken.find(function (q) { return q.id === 'gmail:david'; });
   assert.deepEqual(p.twijfel.map(function (r) { return [r.id, r.inhaal]; }), [[rij(mm, t1.id).id, false], [rij(mm, t2.id).id, true]]);
   assert.equal(p.twijfel[0].reden, 'score'); assert.equal(typeof p.twijfel[0].score, 'number'); assert.equal(p.twijfel[0].juist, null);
+  assert.equal(p.twijfel_open, 2);
   const id = rij(mm, t2.id).id;
+  assert.equal(mm.app('POST /app/mailman/oordeel', { id: rij(mm, t1.id).id, juist: 'intake' }).status, 200);
+  p = mm.app('GET /app/mailman', {}).j.postvakken.find(function (q) { return q.id === 'gmail:david'; });
+  assert.deepEqual(p.twijfel.map(function (r) { return r.id; }), [id, rij(mm, t1.id).id], 'nog niet beoordeeld eerst, ook als hij ouder is');
+  assert.equal(p.twijfel_open, 1);
+  mm.app('POST /app/mailman/oordeel', { id: rij(mm, t1.id).id, juist: null });
   assert.equal(mm.app('POST /app/mailman/oordeel', { id, juist: 'info' }).status, 200);
   assert.equal(rij(mm, t2.id).juist, 'info'); assert.equal(rij(mm, t2.id).oordeel, null, 'juist laat de duim staan');
   assert.equal(mm.app('POST /app/mailman/oordeel', { id, juist: 'twijfel' }).status, 400);
