@@ -12230,7 +12230,7 @@ function handleApp(req, res) {
         if (route === 'GET /app/mailman' || route.indexOf('POST /app/mailman/') === 0) return typeof appMailman === 'function' ? appMailman(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'mailman');   // wv1856: OVIS MailMan
         if (route === 'GET /app/intake') return typeof appIntakeTelling === 'function' ? appIntakeTelling(req, res, a) : appWeiger(res, 404, 'onbekend', 'intake');   // wv1244 (OVIS M1d): Intake-plek, alleen tellingen
         if (route === 'GET /app/intake/router' || route === 'POST /app/intake/regel' || route === 'POST /app/intake/toets' || route === 'POST /app/intake/keuze' || route === 'POST /app/intake/stuk') return typeof appIntakeRouter === 'function' ? appIntakeRouter(req, res, a, s, d, route) : appWeiger(res, 404, 'onbekend', 'intake-router');   // wv1408: schaduw + routeringsregels; wv1916: keuze + het hele stuk
-        if (route === 'GET /app/brain/entiteiten' || route.indexOf('GET /app/brain/entiteit/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
+        if (route === 'GET /app/brain/entiteiten' || route.indexOf('GET /app/brain/entiteit/') === 0 || route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) return typeof appBrainEntiteiten === 'function' ? appBrainEntiteiten(req, res, a, route) : appWeiger(res, 404, 'onbekend', 'brain');   // wv1734 (OVIS M5): Brain › Entiteiten & Personen, lezen
         if (route === 'GET /app/managers' || route === 'POST /app/managers/ronde') return typeof appManagers === 'function' ? appManagers(req, res, a, d, route) : appWeiger(res, 404, 'onbekend', 'managers');   // wv895: App Managers
         if (route === 'GET /app/werkers') return typeof appWerkers === 'function' ? appWerkers(req, res, a) : appWeiger(res, 404, 'onbekend', 'werkers');   // wv1707 (OVIS M4a): Ploeg-register (alleen lezen)
         if (route === 'POST /app/werkers/schakel') return typeof appWerkerSchakel === 'function' ? appWerkerSchakel(req, res, a, s, d) : appWeiger(res, 404, 'onbekend', 'schakel');   // wv1733 (OVIS M4b): schakelaar per werker
@@ -16853,17 +16853,21 @@ async function appIntakeTelling(req, res, a) {
 // ── einde Intake-plek ──
 
 // ── Brain › Entiteiten & Personen (wv1734, OVIS M5; ontwerplijnen § 7) ──
-// GET /app/brain/entiteiten: lijst uit het OVIS-register (RPC ovis_register_lees); GET /app/brain/entiteit/<sleutel, 12 hex uit de lijst>: de stampagina
-// (zonder frontmatter en zonder het gegenereerde blok met rekeningnummers) en Wat OVIS weet (kenmerken, facturen, deadlines). Alleen lezen.
-// Privacygrens en vaste plek in brain-entiteiten.js. Ontbreekt brain-entiteiten.js in de release (terugrol), dan 404 en toont de app
+// GET /app/brain/entiteiten: lijst uit het OVIS-register (RPC ovis_register_lees) plus de privépersonen uit 20_Prive (wv1930);
+// GET /app/brain/entiteiten/zoek/<woorden>: de stamboom op naam (wv1930); GET /app/brain/entiteit/<sleutel, 12 hex uit de lijst>: de hele
+// pagina (zonder frontmatter, met het sleutelmasker), Wat OVIS weet (kenmerken, facturen, deadlines) en bij een persoon het Dossier. Alleen
+// lezen. wv1930: geen afscherming naar David (bouwplan 29-10-2026); de vaste-plekschakelaar (wv1901) in brain-entiteiten.js. Ontbreekt brain-entiteiten.js in de release (terugrol), dan 404 en toont de app
 // "komt eraan".
 const BRAIN_ENT_MOD = (function () { const p = path.join(__dirname, 'brain-entiteiten.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('brain-entiteiten', e); return null; } })();
 let brainEnt = null;
+const SB_MASKER = (function () { try { return require(path.join(__dirname, 'secondbrain.js')).masker; } catch (e) { return null; } })();
 function brainEntMaak() {
   if (brainEnt || !BRAIN_ENT_MOD) return brainEnt;
   try {
     brainEnt = BRAIN_ENT_MOD.maak({ vault: process.env.APP_VAULT_DIR || VAULT, lees: function (p) { return VV().lees(p, 'utf8'); },
       facturenPad: path.join(FACTUREN_DIR, 'facturen.sqlite'), deadlines: function () { return appProjecten().deadlines; },
+      masker: function (t) { return appSleutelMasker(SB_MASKER ? SB_MASKER(t, false) : t); },   // wv1930: het sleutelmasker blijft op alle tekst (ook de naamregels van Second Brain; review ZOU 2)
+      kaart: function () { const k = secondbrain && secondbrain.vers(false); return k && Array.isArray(k.bestanden) ? k.bestanden : null; },   // wv1930: privépersonen en Dossier
       rpc: (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE) ? appSbRpc : null });
   } catch (e) { logError('brain-entiteiten', e); }
   return brainEnt;
@@ -16876,6 +16880,11 @@ async function appBrainEntiteiten(req, res, a, route) {
   const vast = appAfscherm(a);   // wv1901
   try {
     if (route === 'GET /app/brain/entiteiten') { const uit = await B.lijst(vast); res._app.stil = true; return appStuur(res, 200, uit); }
+    if (route.indexOf('GET /app/brain/entiteiten/zoek/') === 0) {   // wv1930: stamboom alleen via zoeken
+      const q = route.slice('GET /app/brain/entiteiten/zoek/'.length);
+      if (!/^[a-z0-9-]{2,40}$/.test(q) || typeof B.zoek !== 'function') return appWeiger(res, 400, 'geen geldige zoekterm', 'brain-entiteiten zoek');
+      const uit = await B.zoek(q, vast); res._app.stil = true; return appStuur(res, 200, uit);
+    }
     const id = route.slice('GET /app/brain/entiteit/'.length);   // sleutel uit de lijst (12 hex; APP_ROUTE_RE laat geen knoop-id door)
     if (!/^[0-9a-f]{12}$/.test(id)) return appWeiger(res, 400, 'geen geldige sleutel', 'brain-entiteit sleutel');
     const r = await B.detail(id, vast);
