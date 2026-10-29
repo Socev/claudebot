@@ -332,14 +332,14 @@ function verkoopKandidaat(m, postvakId) {
 // B7-V: ankers in een tekst (pdf-tekstlaag of OCR); de tekst zelf wordt nergens bewaard
 function verkoopAnkers(t) { const s = String(t || ''); return { vacshing: VAC_RE.test(s), shingrix: SHI_RE.test(s) }; }
 // wv1998 (David 29-10, tab Verkoop in de Facturen-app): factuurnummer en bedrag uit dezelfde tekst; alleen deze twee velden komen terug.
-// Vorm gemeten 29-10 op 12 doorgestuurde nota's (alleen vormen, geen tekst): "Factuurnr: VACSHING-123" en "Te betalen € 12,34"; de OCR
-// mist het nummer soms (dan null). Nummer: letters/cijfers/-/. met minstens één cijfer. Bedrag: "te betalen", anders "totaal", anders het
-// enige bedrag dat op de nota staat; in centen, 1 cent tot € 100.000.
-const NR_RE = /factuur(?:[ \t]*(?:nr|nummer|no)\.?[ \t]*[:.]?|[ \t]*:)[ \t]*([A-Za-z0-9][A-Za-z0-9\/.-]{0,30}[A-Za-z0-9])/gi;
-const BEDRAG = '(-?\\d{1,6}(?:[. ]\\d{3})*[.,]\\d{2})(?!\\d)';
-const TE_BETALEN_RE = new RegExp('te[ \\t]+betalen[^\\n\\d€]{0,12}(?:€|EUR)?[ \\t]*' + BEDRAG, 'i');
-const TOTAAL_RE = new RegExp('totaal[^\\n\\d€]{0,20}(?:€|EUR)[ \\t]*' + BEDRAG, 'i');
-const VAC_NR_RE = /VACSH[I1L|]NG[ \t]*-[ \t]*(\d{1,8})(?!\d)/i;
+// Vorm gemeten 29-10 op 15 doorgestuurde gordelroosnota's (mk-scripts/wv1998/meet6–7.py, alleen vormen, geen tekst): "Factuurnr: VACSHING-123"
+// en "Te betalen € 12,34". Nummer (review wv1998 MOET 1): ALLEEN die vorm, genormaliseerd naar VACSHING-<n>; al het andere null — zo kan een
+// datum of een verminkte naam nooit als nummer blijven staan. Bedrag: "te betalen" met €/EUR, anders het laatste "totaal" (incl. gaat voor;
+// niet subtotaal), anders het enige bedrag op de nota; in centen, 1 cent tot € 100.000; een datum (30.10.2026) is nooit een bedrag.
+const VAC_NR_RE = /(?<![A-Za-z0-9])VACSH[I1L|]NG[ \t]?-[ \t]?(\d{1,8})(?![\d.,\/-])/i;
+const BEDRAG = '(-?\\d{1,6}(?:[. ]\\d{3})*[.,]\\d{2})(?![.,]?\\d)';
+const TE_BETALEN_RE = new RegExp('te[ \\t]+betalen[^\\n\\d€]{0,12}(?:€|EUR)[ \\t]*' + BEDRAG, 'i');
+const TOTAAL_RE = new RegExp('(?<![a-z])totaal([^\\n\\d€]{0,20})(?:€|EUR)[ \\t]*' + BEDRAG, 'gi');
 const EURO_RE = new RegExp('(?:€|EUR)[ \\t]*' + BEDRAG, 'gi');
 function verkoopCenten(x) {
   const m = /^(-?)([\d. ]+)[.,](\d{2})$/.exec(String(x || '').trim());
@@ -349,13 +349,17 @@ function verkoopCenten(x) {
 }
 function verkoopVelden(t) {
   const s = String(t || '');
-  let nummer = null;
-  for (const m of s.matchAll(NR_RE)) if (/\d/.test(m[1])) { nummer = m[1].toUpperCase().slice(0, 32); break; }
-  // de OCR zet het nummer soms op een andere regel dan "Factuurnr:"; de gordelroosnota's nummeren als VACSHING-<n> (gemeten 29-10)
-  if (!nummer) { const v = VAC_NR_RE.exec(s); if (v) nummer = 'VACSHING-' + v[1]; }
+  const v = VAC_NR_RE.exec(s);
+  const nummer = v ? 'VACSHING-' + v[1] : null;
   let bedrag = null;
-  const tb = TE_BETALEN_RE.exec(s) || TOTAAL_RE.exec(s);
+  const tb = TE_BETALEN_RE.exec(s);
   if (tb) bedrag = verkoopCenten(tb[1]);
+  if (bedrag == null) {
+    const tot = Array.from(s.matchAll(TOTAAL_RE));
+    const incl = tot.filter(function (m) { return /incl/i.test(m[1]); });
+    const kies = (incl.length ? incl : tot.filter(function (m) { return !/excl/i.test(m[1]); }))[incl.length ? 0 : tot.length - 1];
+    if (kies) bedrag = verkoopCenten(kies[2]);
+  }
   if (bedrag == null) {
     const alle = Array.from(new Set(Array.from(s.matchAll(EURO_RE)).map(function (m) { return verkoopCenten(m[1]); }).filter(function (c) { return c != null; })));
     if (alle.length === 1) bedrag = alle[0];
@@ -1138,7 +1142,8 @@ function maak(o) {
     return tx(function () {
       const w = wacht();
       if (!w) return { status: 409, j: { ok: false, fout: 'geen wachtende kandidaat' } };
-      const pj = JSON.stringify(pdfs);
+      // review wv1998 #6: de bestandsnaam (kan een patiëntnaam zijn) alleen bij een herkende verkoopnota; anders weg vóór het opslaan
+      const pj = JSON.stringify(verk ? pdfs : pdfs.map(function (x) { return Object.assign({}, x, { naam: null }); }));
       if (verk) {
         db.prepare("UPDATE besluit SET stap = 'verkoop', stroom = ?, reden = 'ankers', status = 'klaar', besloten = ?, labels_plan = ? WHERE id = ?")
           .run(VERKOOP_STROOM, iso(), JSON.stringify(labelPlan(VERKOOP_STROOM, null, null, instel)), w.b.id);
@@ -1263,7 +1268,7 @@ function maak(o) {
           pdfs: pdfs.map(function (x) { return { bron: x.bron || null, vacshing: !!x.vacshing, shingrix: !!x.shingrix, grootte: x.grootte || null, overgeslagen: x.overgeslagen || null, fout: x.fout || null,
             naam: x.naam || null, nummer: x.nummer || null, bedrag_cent: Number.isSafeInteger(x.bedrag_cent) ? x.bedrag_cent : null }; }),   // wv1998: naam (14 dagen), nummer, bedrag
           kandidaat: v.kandidaat_tijd, getoetst: v.toets_tijd, aangeboden: v.aangeboden_tijd, verstuurd: v.verstuurd_tijd, gearchiveerd: v.gearchiveerd_tijd, fout: v.fout,
-          bijgewerkt: v.bijgewerkt };
+          bijgewerkt: v.bijgewerkt, archief_pogingen: v.archief_pogingen };
       });
     return { postvak: p.id, kan: m.ok, reden: m.reden, adres: m.ok ? m.adres : null, archief_kan: !!(m.ok && m.label_id), door: !!p.verkoop_door, archief: !!p.verkoop_archief,
       door_sinds: p.verkoop_sinds || null, archief_sinds: p.verkoop_archief_sinds || null,
@@ -1275,24 +1280,35 @@ function maak(o) {
   /*
    * wv1998 (David 29-10, Anders op de verkoopkaart): GET /app/mailman/verkoop voor de tab Verkoop in de Facturen-app, alleen lezen. Het
    * journaal van verkoopOverzicht met per nota een fase en of er nog iets moet gebeuren (open): door MailMan (pdf-toets, doorsturen,
-   * archiveren) of door David (onzeker, geweigerd, mislukt; die tellen 14 dagen mee). Herkend terwijl doorsturen uit staat, of binnengekomen
-   * vóór het aanzetten, telt niet: MailMan doet daar niets mee (fase zelf).
+   * archiveren — alleen zolang MailMan hem echt nog oppakt: stand niet uit, toestemming, binnen het zoekvenster, < 5 archiefpogingen) of
+   * door David (zelf doorsturen: doorsturen uit, van vóór het aanzetten of blijft liggen; onzeker, geweigerd, mislukt, archief mislukt);
+   * wat bij David ligt telt 14 dagen mee (review wv1998 #4/#7).
    */
-  function verkoopFase(r, v) {
-    const s = r.status, recent = Date.parse(r.bijgewerkt || '') >= nu() - NAMEN_MS;
-    if (s === 'kandidaat') return { fase: 'wacht_toets', open: true };
-    if (s === 'herkend') return v.door && v.door_sinds && r.ontvangen && r.ontvangen >= v.door_sinds ? { fase: 'wacht_door', open: true } : { fase: 'zelf', open: false };
-    if (s === 'aangeboden') return { fase: 'bezig', open: true };
-    if (s === 'verstuurd') return v.archief && v.archief_kan && Date.parse(r.verstuurd || '') >= nu() - VERKOOP_ARCHIEF_MS ? { fase: 'wacht_archief', open: true } : { fase: 'verstuurd', open: false };
-    if (s === 'onzeker' || s === 'geweigerd' || s === 'mislukt') return { fase: s, open: recent };
+  function verkoopFase(r, v, stand) {
+    const n = nu(), s = r.status, recent = function (iso) { return Date.parse(iso || '') >= n - NAMEN_MS; };
+    // review wv1998 #4: alleen "wacht op MailMan" als MailMan hem ook echt nog oppakt; anders een fase voor David (14 dagen open)
+    const loopt = stand !== 'uit' && v.kan;
+    if (s === 'kandidaat') return Date.parse(r.kandidaat || '') >= n - VERKOOP_WACHT_MS - 3600000 && stand !== 'uit' ? { fase: 'wacht_toets', open: true } : { fase: 'niet_getoetst', open: false };
+    if (s === 'herkend') {
+      if (loopt && v.door && v.door_sinds && r.ontvangen && r.ontvangen >= v.door_sinds && Date.parse(r.ontvangen) >= n - VENSTER_MIN * 86400000) return { fase: 'wacht_door', open: true };
+      if (v.door && v.door_sinds && r.ontvangen && r.ontvangen >= v.door_sinds) return { fase: 'blijft', open: recent(r.ontvangen) };
+      return { fase: 'zelf', open: recent(r.ontvangen) };
+    }
+    if (s === 'aangeboden') return Date.parse(r.aangeboden || '') >= n - VERKOOP_HANG_MS ? { fase: 'bezig', open: true } : { fase: 'onzeker', open: recent(r.aangeboden) };
+    if (s === 'verstuurd') {
+      if ((r.archief_pogingen || 0) >= VERKOOP_ARCHIEF_POGINGEN) return { fase: 'archief_mislukt', open: recent(r.bijgewerkt) };
+      return loopt && v.archief && v.archief_kan && Date.parse(r.verstuurd || '') >= n - VERKOOP_ARCHIEF_MS ? { fase: 'wacht_archief', open: true } : { fase: 'verstuurd', open: false };
+    }
+    if (s === 'onzeker' || s === 'geweigerd' || s === 'mislukt') return { fase: s, open: recent(r.bijgewerkt) };
     return { fase: s, open: false };
   }
   function verkoopTab() {
     const v = verkoopOverzicht();
     if (!v) return { ok: true, verkoop: null, open: 0 };
-    const journaal = v.journaal.map(function (r) { return Object.assign({}, r, verkoopFase(r, v)); });
+    const p = postvak(VERKOOP_POSTVAK), stand = p ? p.stand : 'uit';
+    const journaal = v.journaal.map(function (r) { return Object.assign({}, r, verkoopFase(r, v, stand)); });
     return { ok: true, verkoop: Object.assign({}, v, { journaal }), open: journaal.filter(function (r) { return r.open; }).length,
-      namen_dagen: NAMEN_MS / 86400000 };
+      namen_dagen: NAMEN_MS / 86400000, stand };
   }
   // App: doorsturen/archiveren aan alleen met verkoopMag én een verse vingerafdruk (die hier verbruikt wordt); uit mag altijd.
   // verkoop_sinds: alleen mail die ná het aanzetten binnenkwam wordt doorgestuurd (geen terugwerkende kracht).
@@ -1345,8 +1361,8 @@ function maak(o) {
     db.prepare("UPDATE besluit SET afzender = NULL, van_naam = NULL, aan = NULL, onderwerp = NULL, namen_weg = ? WHERE aangemaakt < ? AND namen_weg IS NULL").run(iso(), grens);
     // wv1998: de bestandsnamen van verkoopnota's (kunnen een patiëntnaam dragen) na dezelfde 14 dagen weg; nummer en bedrag blijven
     for (const v of db.prepare("SELECT id, pdfs FROM verkoop WHERE kandidaat_tijd < ? AND pdfs LIKE '%\"naam\":\"%'").all(grens)) {
-      let l; try { l = JSON.parse(v.pdfs); } catch (e) { continue; }
-      if (!Array.isArray(l)) continue;
+      let l; try { l = JSON.parse(v.pdfs); } catch (e) { l = null; }
+      if (!Array.isArray(l)) { db.prepare("UPDATE verkoop SET pdfs = '[]' WHERE id = ?").run(v.id); continue; }   // review wv1998 #5: nooit stil laten staan
       db.prepare('UPDATE verkoop SET pdfs = ? WHERE id = ?').run(JSON.stringify(l.map(function (x) { return isObj(x) ? Object.assign({}, x, { naam: null }) : x; })), v.id);
     }
   }

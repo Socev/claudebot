@@ -1367,12 +1367,20 @@ test('B7-V review: overgeslagen is stil, onzeker meldt; oude tijdelijke mappen w
 
 test('wv1998 velden: factuurnummer en bedrag uit de nota (vormen zoals gemeten), anders null', () => {
   const V = MM.K.verkoopVelden;
-  assert.deepEqual(V('Factuurnr : VACSH1NG-123\nOmschrijving VACSHING SHINGRIX € 199,00\nTe betalen € 199,00'), { nummer: 'VACSH1NG-123', bedrag_cent: 19900 });
+  assert.deepEqual(V('Factuurnr : VACSH1NG-123\nOmschrijving VACSHING SHINGRIX € 199,00\nTe betalen € 199,00'), { nummer: 'VACSHING-123', bedrag_cent: 19900 }, 'genormaliseerd');
+  // review wv1998 MOET 1: alleen de gemeten vorm VACSHING-<n>; nooit een datum of een (verminkte) naam als nummer
+  for (const t of ['Factuurnr: 01-02-1950', 'Factuur nr. 12.05.1950', '5mit Factuurnr: 5mit', 'Factuur: 202610290001', 'VACSHING-12.5', 'XVACSHING-12']) assert.equal(V(t).nummer, null, t);
+  assert.equal(V('Factuur: 29-10-2026 VACSHING-5').nummer, 'VACSHING-5', 'de datum ervoor telt niet');
+  // review wv1998 ZOU 2/3: een datum is geen bedrag; subtotaal en excl. tellen niet
+  assert.equal(V('Te betalen vóór 30.10.2026\nTotaal € 45,00').bedrag_cent, 4500);
+  assert.equal(V('Subtotaal € 41,28\nBTW € 3,72\nTotaal € 45,00').bedrag_cent, 4500);
+  assert.equal(V('Totaal excl. btw € 41,28\nTotaal incl. btw € 45,00').bedrag_cent, 4500);
   assert.deepEqual(V('Factuurnr :\nVACSHING-77 Proef\nTe betalen € 1.234,56'), { nummer: 'VACSHING-77', bedrag_cent: 123456 }, 'nummer op een andere regel');
   assert.deepEqual(V('Totaal € 45,00'), { nummer: null, bedrag_cent: 4500 });
   assert.deepEqual(V('€ 12,34 en nog eens € 12,34'), { nummer: null, bedrag_cent: 1234 }, 'het enige bedrag');
   assert.deepEqual(V('€ 1,00 en € 2,00'), { nummer: null, bedrag_cent: null }, 'twee bedragen zonder "te betalen": geen gok');
   assert.deepEqual(V('Factuur aan Proef Persoon\nFactuurdatum: 29-10-2026'), { nummer: null, bedrag_cent: null }, 'geen naam of datum als nummer');
+  assert.deepEqual(V('te betalen: 45,00'), { nummer: null, bedrag_cent: null }, 'te betalen zonder € of EUR: geen bedrag');
   assert.deepEqual(V('te betalen: EUR 99999999,00'), { nummer: null, bedrag_cent: null }, 'onzinbedrag');
   assert.deepEqual(V(''), { nummer: null, bedrag_cent: null });
 });
@@ -1382,37 +1390,64 @@ test('wv1998 tab Verkoop: naam, nummer en bedrag in het journaal; naam na 14 dag
   assert.equal(mm.app('GET /app/mailman/verkoop', {}, ctxVers(false)).j.open, 0);
   const a = vkMail(), b = vkMail(), c = vkMail();
   const { r } = vkRonde(mm, [a, b, c]);
-  const nota = nepPdf('LAAG:Factuurnr: VACSHING-9 Proef Patient VACSHING SHINGRIX Te betalen € 45,00 en nog wat tekst erbij');
+  const nota = nepPdf('LAAG:Factuurnr: VACSHING-9 Proef Patient VACSHING SHINGRIX Te betalen EUR 45,00 en nog wat tekst erbij');   // de nep-lezer leest latin1: EUR i.p.v. €
   assert.equal((await mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: a.id, bijlagen: [{ naam: 'Gordelroos Proef\u0007 Persoon.pdf', mime: 'application/pdf', b64: nota }] })).j.verkoop, true);
-  assert.equal((await mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: b.id, bijlagen: [{ naam: 'x.pdf', b64: nepPdf('LAAG:andere factuur zonder ankers maar met genoeg tekst voor een tekstlaag') }] })).j.verkoop, false);
+  assert.equal((await mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: b.id, bijlagen: [{ naam: 'Verwijzing Proef Persoon.pdf', b64: nepPdf('LAAG:andere factuur zonder ankers maar met genoeg tekst voor een tekstlaag') }] })).j.verkoop, false);
+  assert.equal(JSON.parse(vRij(mm, b.id).pdfs)[0].naam, null, 'review #6: naam alleen bij een herkende verkoopnota');
   let t = mm.app('GET /app/mailman/verkoop', {}, ctxVers(false));
   assert.equal(t.status, 200); assert.equal(t.j.ok, true); assert.equal(t.j.namen_dagen, 14);
   const ra = t.j.verkoop.journaal.find(function (x) { return x.status === 'herkend'; });
   assert.deepEqual([ra.pdfs[0].naam, ra.pdfs[0].nummer, ra.pdfs[0].bedrag_cent], ['Gordelroos Proef Persoon.pdf', 'VACSHING-9', 4500], 'stuurteken weg');
   assert.equal(ra.onderwerp, 'gordelroos');
   assert.ok(!JSON.stringify(t.j).includes('Proef Patient'), 'geen notatekst');
+  assert.ok(!JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all()).includes('Verwijzing Proef'), 'geen naam van niet-herkende mail in de databank');
   const fase = function (id) { const x = mm.app('GET /app/mailman/verkoop', {}, ctxVers(false)).j.verkoop.journaal.find(function (y) { return y.id === vRij(mm, id).id; }); return [x.fase, x.open]; };
-  assert.deepEqual(fase(a.id), ['zelf', false], 'herkend terwijl doorsturen uit staat: telt niet');
+  assert.deepEqual(fase(a.id), ['zelf', true], 'herkend terwijl doorsturen uit staat: David stuurt hem zelf door (telt 14 dagen)');
   assert.deepEqual(fase(b.id), ['niet_herkend', false]);
   assert.deepEqual(fase(c.id), ['wacht_toets', true]);
-  assert.equal(mm.app('GET /app/mailman/verkoop', {}, ctxVers(false)).j.open, 1);
-  // doorsturen aan: een nota die ná het aanzetten binnenkwam wacht op doorsturen; fouten tellen 14 dagen
+  assert.equal(mm.app('GET /app/mailman/verkoop', {}, ctxVers(false)).j.open, 2);
+  // doorsturen + archiveren aan: een nota die ná het aanzetten binnenkwam wacht op doorsturen
   vkToestaan(dir);
+  klok += 60000;   // aanzetten ná de eerste nota (die blijft 'zelf')
   assert.equal(mm.app('POST /app/mailman/verkoop', { door: true, archief: true }, ctxVers(true)).status, 200);
   klok += 60000;
-  const nieuw = await vkHerkend(mm, 1);
-  assert.deepEqual(fase(nieuw[0].id), ['wacht_door', true]);
-  mm._db.prepare("UPDATE verkoop SET status = 'verstuurd', verstuurd_tijd = ? WHERE gmail_id = ?").run(new Date(klok).toISOString(), nieuw[0].id);
-  assert.deepEqual(fase(nieuw[0].id), ['wacht_archief', true]);
-  mm._db.prepare("UPDATE verkoop SET status = 'geweigerd', bijgewerkt = ? WHERE gmail_id = ?").run(new Date(klok).toISOString(), nieuw[0].id);
-  assert.deepEqual(fase(nieuw[0].id), ['geweigerd', true]);
-  // na 14 dagen: naam weg (ook uit de databank), nummer en bedrag blijven; de oude fout telt niet meer
+  const nieuw = await vkHerkend(mm, 1), nid = nieuw[0].id;
+  assert.deepEqual(fase(a.id), ['zelf', true], 'van vóór het aanzetten');
+  assert.deepEqual(fase(nid), ['wacht_door', true]);
+  // review #4: stand uit of toestemming weg → MailMan pakt hem niet op; ouder dan het zoekvenster → blijft liggen (bij David)
+  mm._db.prepare("UPDATE postvak SET stand = 'uit' WHERE id = 'gmail:groenhouten'").run();
+  assert.deepEqual(fase(nid), ['blijft', true]); assert.deepEqual(fase(c.id), ['niet_getoetst', false], 'kandidaat met stand uit');
+  mm._db.prepare("UPDATE postvak SET stand = 'schaduw' WHERE id = 'gmail:groenhouten'").run();
+  vkToestaan(dir, null);
+  assert.deepEqual(fase(nid), ['blijft', true], 'zonder toestemming');
+  vkToestaan(dir);
+  klok += 3 * 86400000;
+  assert.deepEqual(fase(nid), ['blijft', true], 'buiten het zoekvenster van de ronde');
+  assert.deepEqual(fase(c.id), ['niet_getoetst', false], 'kandidaat ouder dan 25 uur');
+  // aangeboden zonder terugmelding > 48 u: onzeker (ook als er geen ronde meer loopt)
+  mm._db.prepare("UPDATE verkoop SET status = 'aangeboden', aangeboden_tijd = ? WHERE gmail_id = ?").run(new Date(klok - 49 * 3600000).toISOString(), nid);
+  assert.deepEqual(fase(nid), ['onzeker', true]);
+  mm._db.prepare("UPDATE verkoop SET aangeboden_tijd = ? WHERE gmail_id = ?").run(new Date(klok - 3600000).toISOString(), nid);
+  assert.deepEqual(fase(nid), ['bezig', true]);
+  // verstuurd: wacht op archiveren; na 5 pogingen archief mislukt (bij David)
+  mm._db.prepare("UPDATE verkoop SET status = 'verstuurd', verstuurd_tijd = ?, bijgewerkt = ? WHERE gmail_id = ?").run(new Date(klok).toISOString(), new Date(klok).toISOString(), nid);
+  assert.deepEqual(fase(nid), ['wacht_archief', true]);
+  mm._db.prepare('UPDATE verkoop SET archief_pogingen = 5 WHERE gmail_id = ?').run(nid);
+  assert.deepEqual(fase(nid), ['archief_mislukt', true]);
+  mm._db.prepare("UPDATE verkoop SET status = 'geweigerd', bijgewerkt = ? WHERE gmail_id = ?").run(new Date(klok).toISOString(), nid);
+  assert.deepEqual(fase(nid), ['geweigerd', true]);
+  mm._db.prepare("UPDATE verkoop SET status = 'gearchiveerd', gearchiveerd_tijd = ? WHERE gmail_id = ?").run(new Date(klok).toISOString(), nid);
+  assert.deepEqual(fase(nid), ['gearchiveerd', false]);
+  mm._db.prepare("UPDATE verkoop SET status = 'geweigerd' WHERE gmail_id = ?").run(nid);
+  // na 14 dagen: naam weg (ook uit de databank), nummer en bedrag blijven; wat bij David lag telt niet meer; kapotte JSON wordt niet stil overgeslagen
+  mm._db.prepare("UPDATE verkoop SET pdfs = '{kapot' WHERE gmail_id = ?").run(c.id);
+  mm._db.prepare("UPDATE verkoop SET pdfs = ? WHERE gmail_id = ?").run('[{"naam":"Kapot Proef.pdf"', b.id);
   klok += 15 * 86400000;
   mm.opruim();
   const pa = JSON.parse(vRij(mm, a.id).pdfs)[0];
   assert.equal(pa.naam, null); assert.equal(pa.nummer, 'VACSHING-9'); assert.equal(pa.bedrag_cent, 4500);
-  assert.ok(!JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all()).includes('Gordelroos Proef'));
-  assert.deepEqual(fase(nieuw[0].id), ['geweigerd', false]);
+  assert.ok(!/Gordelroos Proef|Kapot Proef/.test(JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all())), 'review #5: ook kapotte JSON gewist');
+  assert.deepEqual(fase(nid), ['geweigerd', false]); assert.deepEqual(fase(a.id), ['zelf', false]);
   // de route schrijft niets
   const voor = JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all()) + JSON.stringify(mm._db.prepare('SELECT * FROM postvak').all());
   mm.app('GET /app/mailman/verkoop', {}, ctxVers(false));
