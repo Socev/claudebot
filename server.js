@@ -15302,9 +15302,13 @@ const intakePublicatie = (function () {
   try {
     return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), schakelaar: intakePublicatieStand,
       rpc: function (fn, body) { return appSbRpc(fn, body, 30000); },
-      pauze: function () { try { return onderhoud.stand().aan === true || ovisAms().uur === 1; } catch (e) { return true; } },
+      // onderhoudsstand, nachtgrendel (01:xx) of de vault-grendel bezet (bisync, vault-tar, OVIS-nacht): wachten; vóór elk stuk getoetst
+      pauze: function () {
+        try { if (onderhoud.stand().aan === true || ovisAms().uur === 1) return true; } catch (e) { return true; }
+        try { return require('child_process').spawnSync('flock', ['-n', ONDERHOUD_LOCK, 'true'], { timeout: 2000 }).status !== 0; } catch (e) { return true; }
+      },
       versie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || ''; },
-      staatBestand: path.join(INTAKE_DIR, 'publicatie-stand.json'),
+      staatBestand: path.join(INTAKE_DIR, 'publicatie-stand.json'), slot: path.join(INTAKE_DIR, 'publicatie.lock'),
       log: function (r) { schrijfLog(nu() + ' ' + r); }, fout: logError,
       meld: function (t) { ovisBoxRij('\n## [log] ' + ovisAms().klok + ' — ' + t + ' (automatisch, wv1869)\n- status: open\n- van: pod (intake-publicatie)\n' +
         '- gevolg als er niets gebeurt: de bronnotitie of het register op die plek wordt niet meer bijgewerkt.\n' +

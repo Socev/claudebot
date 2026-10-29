@@ -19,7 +19,8 @@
  * secondbrain.outbox_publication. Wat iemand ná het blok van een bronnotitie zet (het voetblok van de steekwoorden) blijft staan.
  *
  * Privacy: doel_pad is neutraal (de RPC weigert iets anders); naar Supabase gaan alleen paden, hashes, ids en tellingen. In de vault
- * staat het onderwerp van een mail (uit de mailkop, code) behalve bij een stuk met de patiëntmarker; daar ook geen bestandsnamen.
+ * staat het onderwerp van een mail (uit de mailkop, code) behalve bij een stuk met de patiëntmarker; daar ook geen namen van onderdelen
+ * (het vaultpad van het origineel staat er wel: dat bestand staat al zo in de vault).
  *
  * VORM. Alleen fs, path en crypto. Database, vault-veilig, RPC, klok en schakelaar komen binnen via maak(o), zodat
  * test/intake-publicatie.sh het met een nep-Supabase (zelfde regels als 0012) en een wegwerpvault kan draaien.
@@ -55,6 +56,18 @@ function klokNl(iso) {
 }
 function grootte(n) { n = Number(n) || 0; return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' kB' : n + ' B'; }
 function link(pad) { return '[[' + String(pad).replace(/\.md$/, '') + ']]'; }
+// Lezen zonder een symlink te volgen en zonder op een fifo te blijven hangen (Opus-review wv1869 #6): O_NOFOLLOW | O_NONBLOCK, dan fstat
+// (gewoon bestand, grootte) en lezen via de descriptor. n = hooguit zoveel bytes (kop); max = groter bestand → null.
+function leesVeilig(p, n, max) {
+  let fd;
+  try { fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); } catch (e) { return null; }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || (max != null && st.size > max)) return null;
+    if (n != null) { const b = Buffer.alloc(Math.min(n, st.size)); const k = fs.readSync(fd, b, 0, b.length, 0); return b.slice(0, k); }
+    return fs.readFileSync(fd);
+  } catch (e) { return null; } finally { fs.closeSync(fd); }
+}
 
 // vaultpad dat Intake of de router schreef → entiteitcode (raw_input van een entiteit, 20_Prive/raw_input of _INBOX), anders null
 function entiteitVanPad(pad) {
@@ -104,8 +117,25 @@ function registerHash(tekst) {
  * o = { db (intake.sqlite, node:sqlite; alleen lezen), vault (absoluut), vv ({ lees, schrijf } van vault-veilig), rpc(fn, body) → Promise<json>,
  *       schakelaar() → { aan, entiteiten: [codes] } | null, pauze() → bool (onderhoudsstand of nachtgrendel), nu?() → ms,
  *       versie?() → claudebot-commit, log?(regel), fout?(label, e), meld?(tekst) (box-rij bij geblokkeerd), staatBestand? (laatste ronde,
- *       alleen tellingen), naRename?(pad) (alleen de proef: crash na de rename) }
+ *       alleen tellingen), slot? (pad van het slotbestand: één ronde tegelijk, ook tussen de pod en mk-scripts/wv1869/hand.js),
+ *       naRename?(pad) (alleen de proef: crash na de rename) }
  */
+// Slot over processen heen (Opus-review wv1869 #2): O_EXCL-bestand met pid; een slot van een dood proces wordt opgeruimd.
+function neemSlot(p) {
+  for (let i = 0; i < 2; i++) {
+    try { const fd = fs.openSync(p, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600); fs.writeSync(fd, String(process.pid)); fs.closeSync(fd); return true; }
+    catch (e) {
+      if (!e || e.code !== 'EEXIST') return false;
+      let pid = null; try { pid = Number(String(fs.readFileSync(p, 'utf8')).trim()); } catch (x) { pid = null; }
+      let leeft = false; if (Number.isInteger(pid) && pid > 1) { try { process.kill(pid, 0); leeft = true; } catch (x) { leeft = !!(x && x.code === 'EPERM'); } }
+      if (leeft) return false;
+      try { fs.unlinkSync(p); } catch (x) { return false; }
+    }
+  }
+  return false;
+}
+function laatSlot(p) { try { if (Number(String(fs.readFileSync(p, 'utf8')).trim()) === process.pid) fs.unlinkSync(p); } catch (e) { /* weg */ } }
+
 function maak(o) {
   const db = o.db;
   const nu = o.nu || Date.now;
@@ -161,8 +191,9 @@ function maak(o) {
         if (d.isDirectory()) { if (diepte < DIEPTE && !(code !== 'INBOX' && r === '_INBOX/Bronnen')) loop(r, diepte + 1); continue; }
         if (!d.isFile()) continue;
         if (/\.md$/i.test(d.name)) {
-          let kop = '';
-          try { const fd = fs.openSync(abs(r), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); try { const b = Buffer.alloc(KOP_LEES); const n = fs.readSync(fd, b, 0, KOP_LEES, 0); kop = b.slice(0, n).toString('utf8'); } finally { fs.closeSync(fd); } } catch (e) { continue; }
+          const kb = leesVeilig(abs(r), KOP_LEES, null);
+          if (!kb) continue;
+          const kop = kb.toString('utf8');
           if (!kop.startsWith('---')) continue;
           const m = /^ovis_stuk:\s*"?(stk_[0-9]{8}_[0-9a-f]{8})"?\s*$/m.exec(kop.slice(0, kop.indexOf('\n---', 3) > 0 ? kop.indexOf('\n---', 3) : kop.length));
           if (m && !/^ovis_bronnotitie:/m.test(kop)) { if (!idx.stuk.has(m[1])) idx.stuk.set(m[1], []); idx.stuk.get(m[1]).push(r); }
@@ -173,14 +204,16 @@ function maak(o) {
         }
       }
     }
-    for (const w of wortels) loop(w, 0);
+    // een wortel (of een map erboven) die een symlink is, volgen we niet: alleen lezen binnen de vault (review #6)
+    let vw; try { vw = fs.realpathSync(o.vault); } catch (e) { return idx; }
+    for (const w of wortels) { try { if (fs.realpathSync(abs(w)) !== path.join(vw, w)) continue; } catch (e) { continue; } loop(w, 0); }
     idx.shaCache = new Map();
     return idx;
   }
   function shaVan(idx, rel) {
     if (idx.shaCache.has(rel)) return idx.shaCache.get(rel);
-    let h = null;
-    try { const st = fs.lstatSync(abs(rel)); if (st.isFile() && st.size <= 60 * 1048576) h = sha256(fs.readFileSync(abs(rel))); } catch (e) { h = null; }
+    const b = leesVeilig(abs(rel), null, 60 * 1048576);
+    const h = b ? sha256(b) : null;
     idx.shaCache.set(rel, h);
     return h;
   }
@@ -201,7 +234,7 @@ function maak(o) {
       if (d.rol === 'origineel' && /^mail/.test(k.r.profiel)) continue;   // het .eml komt niet in de vault
       for (const rel of idx.maat.get(Number(d.grootte)) || []) if (shaVan(idx, rel) === d.sha256) voeg(d.deel, rel);
     }
-    return uit;
+    return uit.sort(function (a, b) { return a.pad < b.pad ? -1 : a.pad > b.pad ? 1 : 0; });
   }
 
   // ── inhoud ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -276,6 +309,8 @@ function maak(o) {
     if (besluit === 'blokkeer') { t.geblokkeerd++; t.nieuw_geblokkeerd.push(z.outbox_id); return 'blokkeer'; }
     if (besluit !== 'schrijf') { t.overig++; return String(besluit); }
     if (z.nieuwe_inhoud_hash && z.nieuwe_inhoud_hash !== doel.hash) { t.overig++; return 'andere_hash'; }   // hoort niet; volgende ronde opnieuw
+    // een kapot blok (twee begin-markers, geen eind) overschrijven we nooit, ook niet na vrijgeven: eerst met de hand herstellen (review #4)
+    if (g.kapot) { t.kapot++; return 'kapot'; }
     const tekst = doel.nieuw(oud);
     const ok = o.vv.schrijf(abs(doel.pad), tekst, { alsGelijk: function (nu2) {
       if (!st) return !nu2;
@@ -283,7 +318,7 @@ function maak(o) {
     } });
     if (!ok) { t.tussendoor++; return 'tussendoor'; }   // iemand schreef intussen: rij blijft bezig, volgende ronde opnieuw
     if (o.naRename) o.naRename(doel.pad);
-    const k = await rpc('sb2_outbox_klaar', { p_outbox_id: z.outbox_id });
+    const k = await rpc('sb2_outbox_klaar', { p_outbox_id: z.outbox_id, p_hash: doel.hash });
     if (k !== 'klaar') throw new Error('sb2_outbox_klaar: ' + String(k).slice(0, 40));
     t.geschreven++;
     return 'geschreven';
@@ -297,9 +332,12 @@ function maak(o) {
     if (!s || s.aan !== true) return { uit: true };
     if (o.pauze && o.pauze()) return { wacht: 'onderhoud' };
     if (bezig) return { wacht: 'loopt al' };
+    if (o.slot && !neemSlot(o.slot)) return { wacht: 'andere ronde' };
     bezig = true;
     const start = nu();
-    const t = { kandidaten: 0, in_scope: 0, geschreven: 0, gelijk: 0, afgerond: 0, geblokkeerd: 0, tussendoor: 0, overig: 0, fout: 0, blokkades: [], nieuw_geblokkeerd: [], per_entiteit: {} };
+    const t = { kandidaten: 0, in_scope: 0, geschreven: 0, gelijk: 0, afgerond: 0, geblokkeerd: 0, tussendoor: 0, kapot: 0, geweigerd: 0, overig: 0, fout: 0, blokkades: [], nieuw_geblokkeerd: [], per_entiteit: {} };
+    // een blijvende weigering van de databank (http 400: poort, onbekende versie) telt apart, zodat één stuk niet elke nacht de stap rood maakt (review #9)
+    function fouteStap(e) { if (/http 400\b/.test(String(e && e.message || ''))) t.geweigerd++; else t.fout++; fout('intake-publicatie', e); }
     try {
       const codes = (Array.isArray(s.entiteiten) ? s.entiteiten : []).filter(function (c) { return ENTITEIT_MAP[c]; });
       const kand = kandidaten(codes);
@@ -328,6 +366,7 @@ function maak(o) {
         const regRijen = [];
         const bronnenMap = !!(function () { try { return fs.lstatSync(abs(ENTITEIT_MAP[code] + '/Bronnen')).isDirectory(); } catch (e) { return false; } })();
         for (const k of lijst) {
+          if (k.scope && o.pauze && o.pauze()) { t.wacht = 'onderhoud'; break; }   // onderhoudsstand of grendel halverwege: stoppen (review #3)
           const gevonden = vindOrigineel(k, idx);
           if (gevonden.some(function (x) { return x.waar === 'Bronnen'; })) pe.oud_bronnen++;
           else if (gevonden.some(function (x) { return x.waar === 'raw_input' || x.waar === '_INBOX'; })) pe.oud_raw_input++;
@@ -339,16 +378,21 @@ function maak(o) {
           const datum = dagNl(k.r.ontvangen || k.r.aangemaakt);
           if (!datum) { t.overig++; continue; }
           const pad = ENTITEIT_MAP[code] + '/Bronnen/' + datum + '_' + k.r.stuk_id + '.md';
-          let n;
-          try { n = notitie(k, ont, gevonden); } catch (e) { t.fout++; fout('intake-publicatie', e); continue; }
-          try {
+          let n = null;
+          try { n = notitie(k, ont, gevonden); } catch (e) { t.fout++; fout('intake-publicatie', e); }
+          if (n) try {
             const u = await publiceer({ pad, blok: 'bronnotitie', revs: n.revs, hash: n.hash, max: NOTITIE_MAX,
               gevonden: notitieHash, nieuw: function (oud) { const h = oud == null ? null : notitieHash(oud); return n.kop + n.blok + (h && h.staart != null ? h.staart : '\n'); } }, open, t);
             if (u === 'geblokkeerd' || u === 'blokkeer') pe.geblokkeerd++;
-          } catch (e) { t.fout++; fout('intake-publicatie', e); }
-          if (statVault(pad)) { pe.bronnotities++; regRijen.push({ pad, ontvangen: n.ontvangen, routes: n.routes, record: n.record, revisie: n.revisie }); }
+          } catch (e) { fouteStap(e); }
+          if (statVault(pad)) {   // een bestaande notitie staat altijd in het register, ook als deze ronde voor dat stuk faalde (review #8)
+            pe.bronnotities++;
+            const hoofd = k.ids.find(function (x) { return !x.bijlage; }) || k.ids[0];
+            regRijen.push(n ? { pad, ontvangen: n.ontvangen, routes: n.routes, record: n.record, revisie: n.revisie }
+              : { pad, ontvangen: k.r.ontvangen || k.r.aangemaakt, routes: [], record: Number(hoofd.record), revisie: Number(hoofd.revisie) });
+          }
         }
-        if (regRijen.length && bronnenMap) {
+        if (regRijen.length && bronnenMap && !t.wacht) {
           const blok = registerBlok(regRijen);
           try {
             await publiceer({ pad: regPad, blok: 'bronregister', revs: null, hash: sha256(blok), max: REGISTER_MAX, gevonden: registerHash,
@@ -358,27 +402,28 @@ function maak(o) {
                 if (b && !b.kapot) return oud.slice(0, b.begin) + blok + oud.slice(b.eind);
                 return oud.replace(/\n*$/, '\n\n') + blok + '\n';
               } }, open, t);
-          } catch (e) { t.fout++; fout('intake-publicatie', e); }
+          } catch (e) { fouteStap(e); }
         }
         t.per_entiteit[code] = pe;
+        if (t.wacht) break;
       }
       if (t.nieuw_geblokkeerd.length && o.meld) {
         try { o.meld('publicatieservice: ' + t.nieuw_geblokkeerd.length + ' blok(ken) met de hand gewijzigd (outbox ' + t.nieuw_geblokkeerd.slice(0, 10).join(', ') + '); niets geschreven op die plek'); } catch (e) { fout('intake-publicatie', e); }
       }
-      if (t.geschreven || t.afgerond || t.nieuw_geblokkeerd.length || t.fout) {
+      if (t.geschreven || t.afgerond || t.nieuw_geblokkeerd.length || t.fout || t.geweigerd) {
         try {
           await rpc('sb2_publicatie_run', { p: { versie: (o.versie && o.versie()) || '', details: { kandidaten: t.kandidaten, in_scope: t.in_scope, geschreven: t.geschreven,
-            gelijk: t.gelijk, afgerond: t.afgerond, geblokkeerd: t.geblokkeerd, tussendoor: t.tussendoor, fout: t.fout } } });
+            gelijk: t.gelijk, afgerond: t.afgerond, geblokkeerd: t.geblokkeerd, tussendoor: t.tussendoor, kapot: t.kapot, geweigerd: t.geweigerd, fout: t.fout } } });
         } catch (e) { fout('intake-publicatie', e); }
       }
     } catch (e) {
       t.fout++; t.reden = String(e && e.message || e).slice(0, 120); fout('intake-publicatie', e);
-    } finally { bezig = false; }
+    } finally { bezig = false; if (o.slot) laatSlot(o.slot); }
     t.ms = nu() - start;
     t.op = new Date(nu()).toISOString();
     laatsteRonde = Object.assign({}, t, { blokkades: t.blokkades.length, nieuw_geblokkeerd: t.nieuw_geblokkeerd.length });
     if (o.staatBestand) { try { const tmp = o.staatBestand + '.' + process.pid + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(laatsteRonde), { mode: 0o600 }); fs.renameSync(tmp, o.staatBestand); } catch (e) { fout('intake-publicatie', e); } }
-    log('intake-publicatie kandidaten=' + t.kandidaten + ' in_scope=' + t.in_scope + ' geschreven=' + t.geschreven + ' gelijk=' + t.gelijk + ' afgerond=' + t.afgerond + ' geblokkeerd=' + t.geblokkeerd + ' tussendoor=' + t.tussendoor + ' fout=' + t.fout + ' ms=' + t.ms);
+    log('intake-publicatie kandidaten=' + t.kandidaten + ' in_scope=' + t.in_scope + ' geschreven=' + t.geschreven + ' gelijk=' + t.gelijk + ' afgerond=' + t.afgerond + ' geblokkeerd=' + t.geblokkeerd + ' tussendoor=' + t.tussendoor + ' kapot=' + t.kapot + ' geweigerd=' + t.geweigerd + ' fout=' + t.fout + (t.wacht ? ' wacht=' + t.wacht : '') + ' ms=' + t.ms);
     return t;
   }
   function laatste() { return laatsteRonde; }

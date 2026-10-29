@@ -50,7 +50,7 @@ function nepSb() {
       if (g === o.verwachte_vorige_hash) { o.status = 'bezig'; return 'schrijf'; }
       S.besluiten.push({ outbox_id: o.outbox_id }); o.status = 'geblokkeerd_handmatig'; return 'blokkeer';
     },
-    sb2_outbox_klaar({ p_outbox_id }) { const o = S.rows.find((r) => r.outbox_id === p_outbox_id); if (o.status === 'bezig') klaar(o); return o.status; },
+    sb2_outbox_klaar({ p_outbox_id, p_hash }) { const o = S.rows.find((r) => r.outbox_id === p_outbox_id); if (o.nieuwe_inhoud_hash !== p_hash) return 'andere_hash:' + o.status; if (o.status === 'bezig') klaar(o); return o.status; },
     sb2_publicatie_open() { return S.rows.filter((r) => OPEN.includes(r.status)).map((r) => Object.assign({}, r)); },
     sb2_bron_ontvangsten({ p_record_ids }) {
       if (p_record_ids.length > 200) throw new Error('te veel');
@@ -216,6 +216,43 @@ const lees = (rel) => { try { return fs.readFileSync(path.join(vault, rel), 'utf
     /^---\ntype: bronnenregister\nentiteit_id: HOLD\n/.test(lees('10_Zakelijk/Holding/Bronnen/_register.md') || ''), r11);
   toets('10b stand op schijf zonder namen of paden', (function () { const t = fs.readFileSync(path.join(tmp, 'stand.json'), 'utf8'); return !/Factuur|Rooster|Proefnaam|10_Zakelijk|stk_/.test(t) && JSON.parse(t).per_entiteit.TG; })());
   toets('10c nooit iets buiten Bronnen/ geschreven', sb.rows.every((r) => /\/Bronnen\//.test(r.doel_pad)) && lees('10_Zakelijk/Tolgaarde/raw_input/2026-10-29_rooster.md') === mailB);
+
+  // kapot register (twee blokken): blokkeer; ook na vrijgeven met overschrijven nooit schrijven (review #4)
+  const rk = sb.rows.find((r) => r.blok_id === 'bronregister' && /Tolgaarde/.test(r.doel_pad) && r.status === 'geblokkeerd_handmatig');
+  rk.status = 'vervallen';
+  const kapotReg = lees(TG + '_register.md') + '\n<!-- ovis:blok begin id="bronregister" content_hash="0" -->\nkopie\n';
+  fs.writeFileSync(regPad, kapotReg);
+  const kapotHash = P.registerHash(kapotReg).hash;
+  sb.rows.push({ outbox_id: sb.rows.length + 1, doel_pad: TG + '_register.md', blok_id: 'bronregister', verwachte_vorige_hash: null, nieuwe_inhoud_hash: kapotHash, status: 'klaar' });   // = vrijgeven --overschrijven
+  stuk('stk_20261029_0000000b', { ontvangen: '2026-10-29T11:00:00Z', delen: [{ deel: 'tekst', rol: 'hoofdtekst', naam: 't.md', mime: 'text/markdown', bytes: Buffer.from('H'), pad: '10_Zakelijk/Tolgaarde/raw_input/h.md' }] });
+  const r12 = await pub.ronde();
+  toets('11c kapot register na overschrijven: nooit schrijven (kapot geteld), bestand onveranderd', r12.kapot === 1 && lees(TG + '_register.md') === kapotReg, r12);
+  fs.writeFileSync(regPad, LOG);   // met de hand hersteld tot het log zonder blok (daarna vrijgeven --weg)
+
+  // symlink als wortel en fifo: niet volgen, niet blijven hangen (review #6)
+  const buiten = path.join(tmp, 'buiten'); fs.mkdirSync(buiten);
+  fs.writeFileSync(path.join(buiten, 'geheim.md'), '---\novis_stuk: stk_20261028_0000000c\n---\n');
+  fs.rmSync(path.join(vault, '10_Zakelijk/Holding/raw_input'), { recursive: true, force: true });
+  fs.symlinkSync(buiten, path.join(vault, '10_Zakelijk/Holding/raw_input'));
+  require('child_process').execFileSync('mkfifo', [path.join(vault, '10_Zakelijk/Tolgaarde/Bronnen/vast.md')]);
+  require('child_process').execFileSync('mkfifo', [path.join(vault, '10_Zakelijk/Tolgaarde/Bronnen/vast.pdf')]);
+  const t0 = Date.now();
+  const r13 = await pub.ronde();
+  const nC = lees('10_Zakelijk/Holding/Bronnen/2026-10-28_stk_20261028_0000000c.md');
+  toets('11d fifo in Bronnen: geen hapering; symlink-wortel niet gevolgd (origineel niet via de link)', Date.now() - t0 < 5000 && r13.fout === 0 && !/buiten|geheim/.test(nC), { r13, ms: Date.now() - t0 });
+
+  // twee rondes tegelijk: de tweede wacht (slot over processen heen, review #2)
+  const slot = path.join(tmp, 'publicatie.lock');
+  const pubS = P.maak({ db, vault, vv, rpc: sb.rpc, schakelaar: () => schakel, slot });
+  fs.writeFileSync(slot, String(process.pid));
+  toets('11e slot van een levend proces: wacht', (await pubS.ronde()).wacht === 'andere ronde');
+  fs.writeFileSync(slot, '999999');
+  const r14 = await pubS.ronde();
+  toets('11f slot van een dood proces: opgeruimd, ronde loopt, slot daarna weg', !r14.wacht && r14.fout === 0 && !fs.existsSync(slot), r14);
+  // onderhoud halverwege: stoppen
+  let tel = 0;
+  const pubP = P.maak({ db, vault, vv, rpc: sb.rpc, schakelaar: () => schakel, pauze: () => ++tel > 1 });
+  toets('11g pauze halverwege de ronde: stoppen met wacht', (await pubP.ronde()).wacht === 'onderhoud');
 
   // vindBlok en hashes
   toets('11 vindBlok: twee blokken of geen eind = kapot', P.vindBlok('<!-- ovis:blok begin id="bronregister" -->a<!-- ovis:blok eind -->x<!-- ovis:blok begin id="bronregister" -->', P.REG_BEGIN_RE).kapot === true &&
