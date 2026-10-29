@@ -994,3 +994,301 @@ test('B6+ archief: zonder Facturen-koppeling of als die faalt geen archiefactie 
     assert.deepEqual(labelRonde(mm, []).l.j.acties, []);
   }
 });
+
+// ── B7-V verkoopfacturen in doktersmaten (wv1997). Alle toetsdata verzonnen: geen echte nota, naam of het echte verkoopadres. ──
+const VK_ADRES = 'voorbeeld@example.invalid';
+const AR_OK = 'mx.google.com;\r\n       dkim=pass header.i=@hapleusden.nl header.s=google header.b=abcdefgh;\r\n       spf=pass (google.com: domain of x@hapleusden.nl designates 192.0.2.1 as permitted sender) smtp.mailfrom=x@hapleusden.nl;\r\n       dmarc=pass (p=none sp=none dis=none) header.from=hapleusden.nl';
+function vkMail(o) {
+  return mail(Object.assign({ van: 'Praktijk Proef <info@hapleusden.nl>', aan: 'facturen@praktijk.invalid', onderwerp: 'gordelroos', labels: ['INBOX'],
+    bijlagen: [{ naam: '', mime: 'onbekend' }], tekst: '', auth: AR_OK, ct: 'multipart/mixed; boundary="x"', datum: klok }, o || {}));
+}
+function vkToestaan(dir, adres) {
+  const f = path.join(dir, 'config.json'), c = JSON.parse(fs.readFileSync(f, 'utf8'));
+  if (adres === null) delete c.verkoop_toegestaan; else c.verkoop_toegestaan = { 'gmail:groenhouten': { adres: adres || VK_ADRES, ja: '2026-11-02T08:30:00Z', door: 'proef', vraag: 'proef' } };
+  fs.writeFileSync(f, JSON.stringify(c), { mode: 0o600 });
+}
+// nep-lezer: pdftotext geeft de 'tekstlaag' uit de pdf (na de kop), pdftoppm maakt één png, tesseract geeft de 'ocr'-tekst
+function nepProces(log) {
+  return async function (cmd, args) {
+    log && log.push(cmd);
+    const f = args.find(function (a) { return /stuk\.pdf$/.test(a); });
+    if (cmd === 'pdftotext') { const t = fs.readFileSync(f, 'latin1'); return /LAAG:([^\n]*)/.test(t) ? /LAAG:([^\n]*)/.exec(t)[1] : ''; }
+    if (cmd === 'pdftoppm') { const uit = args[args.length - 1]; const t = fs.readFileSync(f, 'latin1'); if (/KAPOT/.test(t)) return null; fs.writeFileSync(uit + '-1.png', /SCAN:([^\n]*)/.test(t) ? /SCAN:([^\n]*)/.exec(t)[1] : ''); return ''; }
+    if (cmd === 'tesseract') return fs.readFileSync(args[0], 'utf8');
+    return null;
+  };
+}
+function nepPdf(s) { return Buffer.from('%PDF-1.4\n' + s + '\n%%EOF\n').toString('base64'); }
+function vkKamer(extra) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mailman-vk-tmp-'));
+  const log = [];
+  const k = nieuweKamer(Object.assign({ proces: nepProces(log), verkoopTmp: tmp }, extra || {}));
+  return Object.assign(k, { tmp, log });
+}
+function vkRonde(mm, mails, ids) {
+  const r = ronde(mm, 'gmail:groenhouten');
+  const n = mm.n8n('POST /mailman/nieuw', { ronde: r.ronde, postvak: 'gmail:groenhouten', ids: ids || mails.map(function (m) { return m.id; }), volledig: true });
+  const s1 = mm.n8n('POST /mailman/stap1', { ronde: r.ronde, postvak: 'gmail:groenhouten', mails: mails.filter(function (m) { return n.j.nieuw.includes(m.id); }) });
+  return { r, n, s1 };
+}
+function vRij(mm, id) { return mm._db.prepare('SELECT * FROM verkoop WHERE gmail_id = ?').get(id); }
+
+test('B7-V afzendercontrole: alleen Gmails eigen kop met dmarc/dkim pass voor precies het afzenderdomein', () => {
+  assert.equal(K.authPass(AR_OK, 'hapleusden.nl'), true);
+  assert.equal(K.authPass('mx.google.com; dkim=pass header.i=@hapleusden.nl header.s=google', 'hapleusden.nl'), true, 'dkim alleen');
+  assert.equal(K.authPass('mx.google.com; dmarc=pass (p=none) header.from=hapleusden.nl', 'hapleusden.nl'), true, 'dmarc alleen');
+  assert.equal(K.authPass(AR_OK, 'hpgroenhouten.nl'), false, 'ander domein');
+  assert.equal(K.authPass(AR_OK.replace('mx.google.com', 'mx.nep.invalid'), 'hapleusden.nl'), false, 'niet van Gmail');
+  assert.equal(K.authPass('mx.google.com; dkim=pass header.i=@sub.hapleusden.nl; dmarc=pass header.from=sub.hapleusden.nl', 'hapleusden.nl'), false, 'subdomein');
+  assert.equal(K.authPass('mx.google.com; dkim=fail header.i=@hapleusden.nl; dmarc=fail header.from=hapleusden.nl', 'hapleusden.nl'), false, 'fail');
+  assert.equal(K.authPass('mx.google.com; spf=pass (header.from=hapleusden.nl dmarc=pass) smtp.mailfrom=x@hapleusden.nl', 'hapleusden.nl'), false, 'alleen in commentaar');
+  assert.equal(K.authPass('', 'hapleusden.nl'), false);
+});
+
+test('B7-V kandidaat: domein precies, bijlage, niet verzonden, afzendercontrole; alleen doktersmaten', () => {
+  const n = function (o) { return K.normaliseer(vkMail(o)); };
+  assert.equal(K.verkoopKandidaat(n(), 'gmail:groenhouten').ok, true);
+  assert.equal(K.verkoopKandidaat(n({ van: 'a@hpgroenhouten.nl', auth: 'mx.google.com; dmarc=pass header.from=hpgroenhouten.nl' }), 'gmail:groenhouten').ok, true, 'tweede domein');
+  assert.equal(K.verkoopKandidaat(n(), 'gmail:david').ok, false, 'privépostvak nooit');
+  assert.equal(K.verkoopKandidaat(n({ van: 'info@ander.invalid' }), 'gmail:groenhouten').reden, 'domein');
+  assert.equal(K.verkoopKandidaat(n({ van: 'info@post.hapleusden.nl' }), 'gmail:groenhouten').reden, 'domein', 'subdomein telt niet');
+  assert.equal(K.verkoopKandidaat(n({ van: 'info@hapleusden.nl.ander.invalid' }), 'gmail:groenhouten').reden, 'domein');
+  assert.equal(K.verkoopKandidaat(n({ labels: ['SENT'] }), 'gmail:groenhouten').reden, 'verzonden/concept');
+  assert.equal(K.verkoopKandidaat(n({ labels: ['DRAFT'] }), 'gmail:groenhouten').reden, 'verzonden/concept');
+  assert.equal(K.verkoopKandidaat(n({ bijlagen: [], ct: 'multipart/alternative' }), 'gmail:groenhouten').reden, 'geen bijlage');
+  assert.equal(K.verkoopKandidaat(n({ bijlagen: [], ct: 'multipart/related; x' }), 'gmail:groenhouten').ok, true);
+  assert.equal(K.verkoopKandidaat(n({ auth: '' }), 'gmail:groenhouten').reden, 'afzendercontrole');
+});
+
+test('B7-V ankers: beide nodig, OCR-tolerant (I/1/l/|), hoofdletterongevoelig', () => {
+  assert.deepEqual(K.verkoopAnkers('xx VACSHING yy SHINGRIX'), { vacshing: true, shingrix: true });
+  assert.deepEqual(K.verkoopAnkers('VACSH1NG SH1NGR|X'), { vacshing: true, shingrix: true });
+  assert.deepEqual(K.verkoopAnkers('vacshlng shlngrlx'), { vacshing: true, shingrix: true });
+  assert.deepEqual(K.verkoopAnkers('VACSHNG SHINGRX'), { vacshing: false, shingrix: false });
+  assert.deepEqual(K.verkoopAnkers('alleen SHINGRIX'), { vacshing: false, shingrix: true });
+  assert.equal(K.verkoopOordeel([{ vacshing: true, shingrix: false }, { vacshing: false, shingrix: true }]), false, 'verdeeld over twee pdfs telt niet');
+  assert.equal(K.verkoopOordeel([{ vacshing: true, shingrix: false }, { vacshing: true, shingrix: true }]), true);
+});
+
+test('B7-V stap1: kandidaat wacht op de pdf-toets (vóór Altijd in); geen kandidaat = gewone stappen; privé nooit', () => {
+  const { mm } = vkKamer();
+  const k = vkMail(), ander = vkMail({ van: 'info@ander.invalid' }), verz = vkMail({ labels: ['SENT'] }), geenAuth = vkMail({ auth: '' });
+  const { s1 } = vkRonde(mm, [k, ander, verz, geenAuth]);
+  assert.deepEqual(s1.j.verkoop, [k.id]);
+  assert.equal(rij(mm, k.id).status, 'wacht_verkoop');
+  assert.equal(rij(mm, k.id).stroom, 'factuur', 'het regelbesluit (Altijd in 1d) blijft als gewone stappen staan');
+  assert.equal(vRij(mm, k.id).status, 'kandidaat');
+  for (const m of [ander, geenAuth]) assert.equal(rij(mm, m.id).status, 'klaar');
+  assert.equal(vRij(mm, ander.id), undefined);
+  const p = draai(mm, 'gmail:david', [vkMail()], { jev: function () { return jevAntwoord({}); } });
+  assert.deepEqual(p.s1.j.verkoop, [], 'privé: geen verkoop');
+  // de volgende ronde komt de wachtende kandidaat terug in nieuw
+  const r2 = vkRonde(mm, [k]);
+  assert.deepEqual(r2.n.j.nieuw, [k.id]); assert.deepEqual(r2.s1.j.verkoop, [k.id]);
+});
+
+test('B7-V pdf-toets: tekstlaag of OCR, alleen ankers/sha/grootte bewaard, map altijd weg', async () => {
+  const { mm, tmp, log } = vkKamer();
+  const tekst = vkMail(), scan = vkMail(), een = vkMail(), geen = vkMail();
+  const { r } = vkRonde(mm, [tekst, scan, een, geen]);
+  const t = function (m, bijlagen, fout) { return mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: m.id, bijlagen, fout }); };
+  const b64 = nepPdf('LAAG:Verzonnen Proef Patient VACSHING SHINGRIX en nog genoeg tekst om als tekstlaag te tellen');
+  let u = await t(tekst, [{ naam: 'nota.pdf', mime: 'application/pdf', b64 }]);
+  assert.deepEqual(u.j, { ok: true, verkoop: true, pdfs: 1 });
+  const b = rij(mm, tekst.id), v = vRij(mm, tekst.id);
+  assert.equal(b.stap, 'verkoop'); assert.equal(b.stroom, 'verkoop'); assert.equal(b.reden, 'ankers'); assert.equal(b.status, 'klaar');
+  assert.deepEqual(JSON.parse(b.labels_plan), ['VERKOOP'], 'labelplan alleen VERKOOP');
+  assert.equal(v.status, 'herkend');
+  const pd = JSON.parse(v.pdfs);
+  assert.deepEqual(Object.keys(pd[0]).sort(), ['bron', 'grootte', 'sha256', 'sha256_b64', 'shingrix', 'vacshing']);
+  assert.equal(pd[0].sha256, crypto.createHash('sha256').update(Buffer.from(b64, 'base64')).digest('hex'));
+  assert.equal(pd[0].sha256_b64, crypto.createHash('sha256').update(b64).digest('hex'));
+  assert.equal(pd[0].bron, 'tekst');
+  const alles = JSON.stringify(mm._db.prepare('SELECT * FROM verkoop').all()) + JSON.stringify(mm._db.prepare('SELECT * FROM besluit').all());
+  assert.ok(!/Proef Patient|nota\.pdf/.test(alles), 'geen tekst en geen bestandsnaam in de databank');
+  u = await t(scan, [{ naam: 'scan.pdf', mime: 'application/octet-stream', b64: nepPdf('SCAN:VACSH1NG ... SH1NGR|X') }]);
+  assert.equal(u.j.verkoop, true); assert.equal(JSON.parse(vRij(mm, scan.id).pdfs)[0].bron, 'ocr');
+  assert.ok(log.includes('pdftoppm') && log.includes('tesseract'));
+  u = await t(een, [{ naam: 'a.pdf', b64: nepPdf('SCAN:alleen SHINGRIX') }]);
+  assert.equal(u.j.verkoop, false);
+  assert.equal(rij(mm, een.id).status, 'klaar'); assert.equal(rij(mm, een.id).stroom, 'factuur', 'één anker: gewone stappen (Altijd in 1d)');
+  assert.equal(vRij(mm, een.id).status, 'niet_herkend');
+  u = await t(geen, [{ naam: 'b.txt', b64: Buffer.from('geen pdf').toString('base64') }]);
+  assert.equal(u.j.verkoop, false); assert.equal(vRij(mm, geen.id).fout, 'geen leesbare pdf');
+  assert.deepEqual(fs.readdirSync(tmp), [], 'tijdelijke mappen gewist');
+  assert.equal((await t(tekst, [{ b64 }])).status, 409, 'al getoetst: geen tweede toets');
+});
+
+test('B7-V pdf-toets: mislukt telt, na 3 keer gewone stappen; niet-canonieke base64 geweigerd; 24 uur zonder toets = gewone stappen', async () => {
+  const { mm, tmp } = vkKamer();
+  const a = vkMail(), c = vkMail(), w = vkMail();
+  let { r } = vkRonde(mm, [a, c, w]);
+  for (let i = 1; i <= 3; i++) {
+    const u = await mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: a.id, bijlagen: [{ b64: nepPdf('KAPOT') }] });
+    assert.equal(u.j.opnieuw, i < 3);
+  }
+  assert.equal(rij(mm, a.id).status, 'klaar'); assert.equal(vRij(mm, a.id).status, 'niet_herkend');
+  const nc = await mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: c.id, bijlagen: [{ b64: nepPdf('LAAG:x').replace(/=+$/, '') }] });
+  assert.equal(nc.j.opnieuw, true); assert.match(vRij(mm, c.id).fout, /canonieke/);
+  const f = await mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: c.id, fout: 'bijlage ophalen mislukt' });
+  assert.equal(f.j.opnieuw, true);
+  klok += 25 * 3600 * 1000;
+  vkRonde(mm, [w]);
+  assert.equal(rij(mm, w.id).status, 'klaar'); assert.equal(vRij(mm, w.id).status, 'niet_herkend'); assert.match(vRij(mm, w.id).fout, /24 uur/);
+  assert.deepEqual(fs.readdirSync(tmp), []);
+});
+
+async function vkHerkend(mm, n, extra) {
+  const ms = []; for (let i = 0; i < n; i++) ms.push(vkMail(extra));
+  const { r } = vkRonde(mm, ms);
+  for (const m of ms) assert.equal((await mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: m.id, bijlagen: [{ b64: nepPdf('SCAN:VACSHING SHINGRIX') }] })).j.verkoop, true);
+  return ms;
+}
+function vkActies(mm, ids) {
+  const r = ronde(mm, 'gmail:groenhouten');
+  mm.n8n('POST /mailman/nieuw', { ronde: r.ronde, postvak: 'gmail:groenhouten', ids, volledig: true });
+  return { r, a: mm.n8n('POST /mailman/verkoop/acties', { ronde: r.ronde, postvak: 'gmail:groenhouten', ids }) };
+}
+
+test('B7-V schakelaars: dicht zonder toestemming, aan alleen met vingerafdruk, adres alleen uit config.json, geen terugwerkende kracht', async () => {
+  const { mm, dir } = vkKamer();
+  const oud = await vkHerkend(mm, 1);
+  klok += 60000;
+  // ook als iemand de schakelaar in de databank zet: zonder toestemming geen acties
+  mm._db.prepare("UPDATE postvak SET verkoop_door = 1, verkoop_archief = 1, verkoop_sinds = '2000-01-01T00:00:00Z' WHERE id = 'gmail:groenhouten'").run();
+  assert.deepEqual(vkActies(mm, [oud[0].id]).a.j.acties, []);
+  mm._db.prepare("UPDATE postvak SET verkoop_door = 0, verkoop_archief = 0, verkoop_sinds = NULL WHERE id = 'gmail:groenhouten'").run();
+  assert.equal(mm.app('POST /app/mailman/verkoop', { door: true }, ctxVers(true)).status, 409, 'zonder toestemming kan het niet aan');
+  vkToestaan(dir, 'niet-een-adres');
+  assert.equal(mm.app('POST /app/mailman/verkoop', { door: true }, ctxVers(true)).status, 409, 'ongeldig adres');
+  vkToestaan(dir);
+  assert.equal(mm.app('POST /app/mailman/verkoop', { door: true }, ctxVers(false)).status, 403, 'zonder verse vingerafdruk niet');
+  const ctx = ctxVers(true);
+  assert.equal(mm.app('POST /app/mailman/verkoop', { door: true }, ctx).status, 200); assert.equal(ctx.verbruikt, 1);
+  klok += 60000;
+  const nieuw = await vkHerkend(mm, 1);
+  const ids = [oud[0].id, nieuw[0].id];
+  const { a } = vkActies(mm, ids);
+  assert.deepEqual(a.j.acties.map(function (x) { return x.gmail_id; }), [nieuw[0].id], 'mail van vóór het aanzetten niet');
+  assert.equal(a.j.acties[0].adres, VK_ADRES); assert.equal(a.j.acties[0].soort, 'door');
+  assert.equal(a.j.acties[0].sha256_b64.length, 1);
+  assert.equal(vRij(mm, nieuw[0].id).status, 'aangeboden');
+  assert.deepEqual(vkActies(mm, ids).a.j.acties, [], 'hooguit één keer aangeboden');
+  const ov = mm.app('GET /app/mailman', {}, {}).j.verkoop;
+  assert.equal(ov.kan, true); assert.equal(ov.adres, VK_ADRES); assert.equal(ov.door, true); assert.equal(ov.archief, false);
+  assert.equal(ov.journaal.length, 2);
+  vkToestaan(dir, null);
+  const n3 = await vkHerkend(mm, 1);
+  assert.deepEqual(vkActies(mm, [n3[0].id]).a.j.acties, [], 'toestemming ingetrokken: dicht');
+  vkToestaan(dir, 'ander@example.invalid');
+  const v = vkActies(mm, [n3[0].id]).a.j.acties;
+  assert.equal(v[0].adres, 'ander@example.invalid', 'het adres volgt alleen config.json');
+  assert.equal(mm.app('POST /app/mailman/verkoop', { door: false }, ctxVers(false)).status, 200, 'uitzetten mag altijd');
+  const n4 = await vkHerkend(mm, 1);
+  assert.deepEqual(vkActies(mm, [n4[0].id]).a.j.acties, []);
+});
+
+test('B7-V plafonds en lijst: ≤ 10 per ronde, ≤ 25 per dag, alleen id\'s uit de lijst van deze ronde', async () => {
+  const { mm, dir } = vkKamer();
+  vkToestaan(dir);
+  mm.app('POST /app/mailman/verkoop', { door: true }, ctxVers(true));
+  klok += 60000;
+  const ms = await vkHerkend(mm, 30);
+  const ids = ms.map(function (m) { return m.id; });
+  assert.deepEqual(vkActies(mm, ids.slice(0, 2)).a.j.acties.length, 2, 'alleen uit de lijst');
+  assert.equal(vkActies(mm, ids).a.j.acties.length, 10);
+  assert.equal(vkActies(mm, ids).a.j.acties.length, 10);
+  assert.equal(vkActies(mm, ids).a.j.acties.length, 3, 'dagplafond 25');
+  assert.equal(vkActies(mm, ids).a.j.acties.length, 0);
+  klok += 24 * 3600 * 1000 + 1000;
+  assert.equal(vkActies(mm, ids).a.j.acties.length, 5, 'na een dag de rest');
+});
+
+test('B7-V gedaan en archief: verstuurd → na 15 min archief, geweigerd blijft staan, al_doorgestuurd en mislukt nooit opnieuw', async () => {
+  const { mm, dir } = vkKamer();
+  vkToestaan(dir);
+  mm.app('POST /app/mailman/verkoop', { door: true, archief: true }, ctxVers(true));
+  klok += 60000;
+  const ms = await vkHerkend(mm, 4);
+  const ids = ms.map(function (m) { return m.id; });
+  const { r, a } = vkActies(mm, ids);
+  assert.equal(a.j.acties.length, 4);
+  const g = mm.n8n('POST /mailman/verkoop/gedaan', { ronde: r.ronde, postvak: 'gmail:groenhouten', resultaten: [
+    { gmail_id: ids[0], soort: 'door', uitkomst: 'verstuurd', verstuurd_id: 'aaaabbbbccccdddd' },
+    { gmail_id: ids[1], soort: 'door', uitkomst: 'verstuurd', verstuurd_id: 'aaaabbbbcccceeee' },
+    { gmail_id: ids[2], soort: 'door', uitkomst: 'al_doorgestuurd' },
+    { gmail_id: ids[3], soort: 'door', uitkomst: 'mislukt', fout: 'HTTP 500' },
+    { gmail_id: ids[3], soort: 'door', uitkomst: 'verstuurd', verstuurd_id: 'aaaabbbbccccffff' }] });
+  assert.deepEqual(g.j.telling, { verstuurd: 2, al_doorgestuurd: 1, mislukt: 1, gearchiveerd: 0, geweigerd: 0, later: 0, genegeerd: 1 });
+  assert.deepEqual(vkActies(mm, ids).a.j.acties, [], 'archief pas na 15 minuten; mislukt/al_doorgestuurd nooit opnieuw');
+  klok += 16 * 60000;
+  const ar = vkActies(mm, []);
+  assert.deepEqual(ar.a.j.acties.map(function (x) { return x.soort + ':' + x.gmail_id; }).sort(), ['archief:' + ids[0], 'archief:' + ids[1]].sort());
+  mm.n8n('POST /mailman/verkoop/gedaan', { ronde: ar.r.ronde, postvak: 'gmail:groenhouten', resultaten: [
+    { gmail_id: ids[0], soort: 'archief', uitkomst: 'gearchiveerd' }, { gmail_id: ids[1], soort: 'archief', uitkomst: 'geweigerd' },
+    { gmail_id: ids[2], soort: 'archief', uitkomst: 'gearchiveerd' }] });
+  assert.equal(vRij(mm, ids[0]).status, 'gearchiveerd'); assert.equal(vRij(mm, ids[1]).status, 'geweigerd'); assert.equal(vRij(mm, ids[2]).status, 'al_doorgestuurd', 'archief alleen na verstuurd');
+  assert.deepEqual(vkActies(mm, ids).a.j.acties, []);
+  const z = mm.zorgen().join(' | ');
+  assert.match(z, /geweigerd/); assert.match(z, /mislukt/);
+  const h = mm.info().postvakken.find(function (x) { return x.id === 'gmail:groenhouten'; }).verkoop;
+  assert.equal(h.verstuurd, 2); assert.equal(h.gearchiveerd, 1); assert.equal(h.geweigerd, 1); assert.equal(h.toegestaan, true);
+  assert.equal(mm.info().postvakken.find(function (x) { return x.id === 'gmail:david'; }).verkoop, undefined);
+});
+
+test('B7-V archief: hooguit 5 keer aangeboden; later = blijft verstuurd; privé en inhaal krijgen nooit verkoopacties', async () => {
+  const { mm, dir } = vkKamer();
+  vkToestaan(dir);
+  mm.app('POST /app/mailman/verkoop', { door: true, archief: true }, ctxVers(true));
+  klok += 60000;
+  const [m] = await vkHerkend(mm, 1);
+  const { r } = vkActies(mm, [m.id]);
+  mm.n8n('POST /mailman/verkoop/gedaan', { ronde: r.ronde, postvak: 'gmail:groenhouten', resultaten: [{ gmail_id: m.id, soort: 'door', uitkomst: 'verstuurd', verstuurd_id: 'aaaabbbbccccdddd' }] });
+  klok += 16 * 60000;
+  for (let i = 0; i < 5; i++) {
+    const x = vkActies(mm, []);
+    assert.equal(x.a.j.acties.length, 1);
+    mm.n8n('POST /mailman/verkoop/gedaan', { ronde: x.r.ronde, postvak: 'gmail:groenhouten', resultaten: [{ gmail_id: m.id, soort: 'archief', uitkomst: 'later', fout: 'label VERKOOP ontbreekt' }] });
+  }
+  assert.equal(vRij(mm, m.id).status, 'verstuurd');
+  assert.deepEqual(vkActies(mm, []).a.j.acties, []);
+  const p = ronde(mm, 'gmail:david');
+  assert.deepEqual(mm.n8n('POST /mailman/verkoop/acties', { ronde: p.ronde, postvak: 'gmail:david', ids: [m.id] }).j.acties, []);
+  assert.equal((await mm.verkoopToets({ ronde: p.ronde, postvak: 'gmail:david', gmail_id: m.id, bijlagen: [] })).status, 400);
+  assert.equal(mm.n8n('POST /mailman/verkoop/toets', {}).status, 404, 'de toets gaat nooit via de gewone n8n-route (ankers niet van buiten)');
+});
+
+// Echte gereedschappen (pdftotext, pdftoppm, tesseract) op verzonnen pdf's die ghostscript hier maakt: een met tekstlaag en een scan
+// zonder tekstlaag (pdfimage24). Overgeslagen als een van de gereedschappen ontbreekt (CI).
+const { spawnSync, spawn } = require('child_process');
+const GEREEDSCHAP = ['gs', 'pdftotext', 'pdftoppm', 'tesseract'].every(function (c) { return spawnSync('sh', ['-c', 'command -v ' + c]).status === 0; });
+function echtProces(cmd, args, o) {
+  return new Promise(function (klaar) {
+    const k = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] }); let uit = '';
+    const tm = setTimeout(function () { k.kill('SIGKILL'); }, (o && o.ms) || 60000);
+    k.stdout.setEncoding('utf8'); k.stdout.on('data', function (c) { uit += c; });
+    k.on('close', function (code) { clearTimeout(tm); klaar(code === 0 ? uit : null); });
+    k.on('error', function () { clearTimeout(tm); klaar(null); });
+  });
+}
+test('B7-V pdf-toets met echte gereedschappen: tekstlaag én scan herkend, andere factuur niet', { skip: !GEREEDSCHAP && 'gs/poppler/tesseract ontbreken' }, async () => {
+  const werk = fs.mkdtempSync(path.join(os.tmpdir(), 'mailman-vk-gs-'));
+  const maak = function (naam, regels, apparaat) {
+    const ps = path.join(werk, naam + '.ps'), pdf = path.join(werk, naam + '.pdf');
+    fs.writeFileSync(ps, '%!PS\n/Helvetica-Bold findfont 28 scalefont setfont\n' + regels.map(function (r, i) { return '72 ' + (700 - i * 50) + ' moveto (' + r + ') show'; }).join('\n') + '\nshowpage\n');
+    assert.equal(spawnSync('gs', ['-q', '-dBATCH', '-dNOPAUSE', '-sDEVICE=' + apparaat, '-r150', '-o', pdf, ps]).status, 0);
+    return fs.readFileSync(pdf).toString('base64');
+  };
+  const nota = ['PROEFPRAKTIJK NOTA', 'Vaccinatie VACSHING', 'Product SHINGRIX', 'Bedrag 12,34'];
+  const tekstPdf = maak('tekst', nota, 'pdfwrite'), scanPdf = maak('scan', nota, 'pdfimage24'), anderPdf = maak('ander', ['PROEFLEVERANCIER FACTUUR', 'Kantoorartikelen', 'Bedrag 56,78'], 'pdfimage24');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mailman-vk-tmp-'));
+  const { mm } = nieuweKamer({ proces: echtProces, verkoopTmp: tmp });
+  const a = vkMail(), b = vkMail(), c = vkMail();
+  const { r } = vkRonde(mm, [a, b, c]);
+  const t = function (m, b64) { return mm.verkoopToets({ ronde: r.ronde, postvak: 'gmail:groenhouten', gmail_id: m.id, bijlagen: [{ b64 }] }); };
+  assert.equal((await t(a, tekstPdf)).j.verkoop, true); assert.equal(JSON.parse(vRij(mm, a.id).pdfs)[0].bron, 'tekst');
+  assert.equal((await t(b, scanPdf)).j.verkoop, true); assert.equal(JSON.parse(vRij(mm, b.id).pdfs)[0].bron, 'ocr');
+  assert.equal((await t(c, anderPdf)).j.verkoop, false); assert.equal(vRij(mm, c.id).status, 'niet_herkend');
+  assert.deepEqual(fs.readdirSync(tmp), []);
+  fs.rmSync(werk, { recursive: true, force: true });
+});

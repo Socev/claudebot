@@ -15559,8 +15559,12 @@ if (intake && SERVER_ECHT) { setTimeout(function () { intakeTik(); }, 120000).un
 // kant), GET /app/mailman en POST /app/mailman/* na de app-poort, /health.mailman, en één keer per dag opruimen (namen na 14 dagen weg)
 // met hooguit één box-rij als er iets mis is. Intake-draden: alleen-lezen op intake.sqlite (bron + meta.thread_id).
 // Ontbreekt mailman.js in de release (terugrol), dan 404 en mailman.aan=false in /health.
+// B7-V (wv1997): /mailman/verkoop/{toets,acties,gedaan} voor de verkoopfacturen in doktersmaten. De toets krijgt de pdf's zelf (≤ 3 × 8 MB als
+// base64; eigen bodygrens MAILMAN_TOETS_MAX) en leest ze lokaal via intakeProces (pdftotext, pdftoppm, tesseract) in /dev/shm; mailman.js
+// bewaart alleen ankers ja/nee, bron, sha256 en grootte. Geen tekst in log of schijf (patiëntnaam + vaccinatie, grondwet 3).
 const MAILMAN_DIR = serverPad('mailman', process.env.MAILMAN_DIR, '/opt/data/mailman', serverProefDeel('mailman'));
 const MAILMAN_BODY_MAX = 8 * 1024 * 1024;
+const MAILMAN_TOETS_MAX = 36 * 1024 * 1024;   // wv1997: 3 pdf's van ≤ 8 MB als base64 + json
 let mailmanIntakeDb = null;
 function mailmanIntakeDraden(postvak, draden) {
   const uit = new Set();
@@ -15599,7 +15603,8 @@ const mailman = (function () {
   try {
     return require(p).maak({ dir: MAILMAN_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
-      intakeDraden: mailmanIntakeDraden, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt });
+      intakeDraden: mailmanIntakeDraden, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt,
+      proces: intakeProces, verkoopTmp: '/dev/shm' });
   } catch (e) { logError('mailman', e); return null; }
 })();
 function mailmanIsPad(req) { const p = reqPath(req); return p === '/mailman' || p.indexOf('/mailman/') === 0; }
@@ -15614,10 +15619,11 @@ function mailmanRoute(req, res) {
   const kop = String(req.headers.authorization || '');
   const bearer = kop ? mailman.sleutelOk(req, null) : false;
   if (kop && !bearer) { req.resume(); return mailmanStuur(res, 401, { ok: false, fout: 'sleutel' }); }
+  const toets = reqPath(req) === '/mailman/verkoop/toets', max = toets ? MAILMAN_TOETS_MAX : MAILMAN_BODY_MAX;
   const delen = []; let n = 0, te = false;
-  req.on('data', function (c) { if (te) return; n += c.length; if (n > MAILMAN_BODY_MAX) { te = true; return; } delen.push(c); });
+  req.on('data', function (c) { if (te) return; n += c.length; if (n > max) { te = true; delen.length = 0; return; } delen.push(c); });
   req.on('error', function () {});
-  req.on('end', function () {
+  req.on('end', async function () {
     if (te) return mailmanStuur(res, 413, { ok: false, fout: 'te groot' });
     let d = null;
     try { d = JSON.parse(Buffer.concat(delen).toString('utf8') || '{}'); } catch (e) { d = null; }
@@ -15625,7 +15631,7 @@ function mailmanRoute(req, res) {
     if (!bearer && !berichtGeheimOk(d)) return mailmanStuur(res, 401, { ok: false, fout: 'sleutel' });
     delete d.secret;
     let r;
-    try { r = mailman.n8n('POST ' + reqPath(req), d); } catch (e) { logError('mailman', e); return mailmanStuur(res, 500, { ok: false, fout: 'intern' }); }
+    try { r = toets ? await mailman.verkoopToets(d) : mailman.n8n('POST ' + reqPath(req), d); } catch (e) { logError('mailman', e); return mailmanStuur(res, 500, { ok: false, fout: 'intern' }); }
     res._log = Object.assign(res._log || {}, { mailman: reqPath(req).slice(9) });
     mailmanStuur(res, r.status, r.j);
   });

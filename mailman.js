@@ -36,6 +36,23 @@
  * het postvak noemt (de machinekamer, na Davids Ja op de grondwetkaart wv1988) én met een verse vingerafdruk; uitzetten altijd. MailMan
  * haalt alleen UNREAD en INBOX weg en zet ze nooit terug (wat David al las, archiveerde of verplaatste blijft zo). Doktersmaten nooit.
  *
+ * VERKOOP (B7-V, wv1997, 29-10-2026; David 29-10 20:24: "er komen véél facturen binnen op de mail die verkoopfactuur zijn … als tekstanker
+ * staat er op de factuur altijd 'VACSHING' en 'SHINGRIX', ook is het afzenderdomein altijd 'hapleusden.nl' of 'hpgroenhouten.nl' … die
+ * facturen er op voorhand al uitfilteren als 'VERKOOP', en die doorzet naar het juiste verkoopadres, en dan archiveert"). Alleen in het
+ * postvak gmail:groenhouten (vast in de code), vóór Altijd in: een KANDIDAAT (afzenderdomein precies een van VERKOOP_DOMEINEN, bericht met
+ * bijlage, niet SENT/DRAFT, en de afzendercontrole van Gmail zelf: de bovenste Authentication-Results van mx.google.com met dmarc=pass of
+ * dkim=pass voor precies dat domein) wacht op de pdf-toets (status wacht_verkoop, zoals een Jev-wachter; na 24 uur of 3 mislukte toetsen
+ * de gewone stappen). De pdf-toets (verkoopToets, aangeroepen door server.js voor POST /mailman/verkoop/toets) leest de pdf's LOKAAL
+ * (tekstlaag, anders OCR ≤ 2 pagina's in een tijdelijke map onder /dev/shm die altijd gewist wordt) en bewaart alleen ankers ja/nee, bron,
+ * sha256 en grootte: de nota bevat naam en vaccinatie van een patiënt (grondwet 3), dus geen tekst in logboek, journaal of log, geen Jev,
+ * niets buiten de pod. VERKOOP = kandidaat + minstens één pdf met VACSHING én SHINGRIX (OCR-tolerant voor I/1/l/|). Uitgangen (elk een
+ * eigen schakelaar per postvak, standaard UIT; aan alleen met config.json verkoop_toegestaan[postvak] {adres, ja} — dat schrijft de
+ * machinekamer na Davids Ja op de kaart — én een verse vingerafdruk; uit altijd): doorsturen naar het ENE adres uit config.json (nooit een
+ * adres uit de mail), per Gmail-id hooguit één keer aangeboden (status aangeboden vóór de uitgifte), alleen mail die binnenkwam ná het
+ * aanzetten, ≤ 10 per ronde en ≤ 25 per dag; archiveren (label VERKOOP, INBOX weg) pas ≥ 15 min na verstuurd, alleen zonder Exact-
+ * weigering. n8n heeft een eigen tweede grens (D/GH verkoopgrens: vast adres, nagelezen bericht, draad zonder eerder bericht aan dat adres,
+ * sha256 van de pdf's gelijk aan wat hier getoetst is). Journaal: tabel verkoop.
+ *
  * DE RONDE (n8n, O.2): POST /mailman/start → per postvak de zoekvraag (venster uit de laatste geslaagde ronde) · /mailman/nieuw (alle id's
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
  * tekens) → stap 0–3 + patiëntpoort, en de Jev-aanvragen · /mailman/stap2 (de Jev-antwoorden) → besluit · /mailman/gedaan.
@@ -55,7 +72,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-1.4';
+const VERSIE = 'mailman-1.5';
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -72,6 +89,17 @@ const GELEZEN_STROMEN = ['intake', 'factuur', 'twijfel'], ARCHIEF_STROMEN = ['fa
 const ARCHIEF_MS = 60 * 24 * 3600 * 1000, ARCHIEF_MAX = 20, ARCHIEF_POGINGEN = 5;   // factuurmail die binnen 60 dagen verwerkt raakt; 20 per ronde
 const GELEZEN_MS = 6 * 3600 * 1000;   // 'gelezen' alleen voor een besluit van hooguit 6 uur oud, genomen nadat het vinkje aan ging, en één keer (review B6+ #2/#4)
 const BUITEN_LABELS = ['SENT', 'DRAFT', 'CHAT', 'SPAM', 'TRASH'];
+// B7-V (wv1997): verkoopfacturen in doktersmaten. Postvak en domeinen vast in de code (niet via config.json); het adres alleen uit config.json.
+const VERKOOP_POSTVAK = 'gmail:groenhouten';
+const VERKOOP_DOMEINEN = ['hapleusden.nl', 'hpgroenhouten.nl'];
+const VERKOOP_STROOM = 'verkoop', VERKOOP_LABEL = 'VERKOOP';
+const VERKOOP_STATUS = ['kandidaat', 'herkend', 'niet_herkend', 'aangeboden', 'verstuurd', 'gearchiveerd', 'al_doorgestuurd', 'geweigerd', 'mislukt'];
+const VERKOOP_WACHT_MS = 24 * 3600 * 1000, VERKOOP_TOETS_POGINGEN = 3;
+const VERKOOP_RONDE_MAX = 10, VERKOOP_DAG_MAX = 25;                     // doorsturen per ronde / per 24 uur (gemeten piek ± 16 per twee weken)
+const VERKOOP_ARCHIEF_NA_MS = 15 * 60 * 1000, VERKOOP_ARCHIEF_MS = 30 * 24 * 3600 * 1000, VERKOOP_ARCHIEF_POGINGEN = 5;
+const VERKOOP_PDF_MAX = 3, VERKOOP_PDF_BYTES = 8 * 1024 * 1024, VERKOOP_OCR_PAGINAS = 2, VERKOOP_TEKST_MIN = 50;
+const VAC_RE = /VACSH[I1L|]NG/i, SHI_RE = /SH[I1L|]NGR[I1L|]X/i;
+const ADRES_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,180}\.[a-z]{2,24}$/;
 const TABS = { CATEGORY_PERSONAL: 'persoonlijk', CATEGORY_UPDATES: 'updates', CATEGORY_PROMOTIONS: 'promoties', CATEGORY_SOCIAL: 'sociaal', CATEGORY_FORUMS: 'forums' };
 const MARKERINGS_LABELS = ['_AI_', 'AI/SecondBrain/Unprocessed'];
 const ZORG_LABEL = 'ZORGMAIL';
@@ -260,8 +288,44 @@ function normaliseer(x) {
   const ms = Number(x.datum);
   return { id, draad, van_adres: adresVan(van), van_naam: naamVan(van), van_domein: domeinVan(adresVan(van)), aan: Array.from(new Set(aan)),
     onderwerp: tekst(x.onderwerp, 998), labels, tab, afmeld: x.afmeld === true, bijlagen,
-    ontvangen: Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null };
+    ontvangen: Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null,
+    auth: tekst(x.auth, 2000), ct: tekst(x.ct, 100).toLowerCase() };   // B7-V: bovenste Authentication-Results en Content-Type (alleen doktersmaten)
 }
+
+/*
+ * B7-V (wv1997) afzendercontrole: de bovenste Authentication-Results-kop (n8n geeft alleen die) moet van Gmail zelf komen (authserv-id
+ * mx.google.com) en dmarc=pass met header.from=<domein> of dkim=pass met header.i=@<domein> / header.d=<domein> noemen, voor PRECIES het
+ * afzenderdomein (geen subdomein). Gemeten 29-10: alle 77 binnengekomen mails met bijlage van de praktijk sinds 1-9 dragen dkim=pass én
+ * dmarc=pass. Ontleed met tekstbewerkingen (geen RegExp uit invoer, CI-poort).
+ */
+function authPass(ar, domein) {
+  const s = String(ar || '').toLowerCase(), d = String(domein || '').toLowerCase();
+  if (!d || !s) return false;
+  const delen = s.split(';').map(function (x) { return x.replace(/\s+/g, ' ').trim(); });
+  if (delen[0] !== 'mx.google.com') return false;
+  for (const c of delen.slice(1)) {
+    const w = c.replace(/\([^()]*\)/g, ' ').split(' ').filter(Boolean);
+    if (!w.length) continue;
+    const props = {};
+    for (const x of w.slice(1)) { const i = x.indexOf('='); if (i > 0) props[x.slice(0, i)] = x.slice(i + 1); }
+    if (w[0] === 'dmarc=pass' && props['header.from'] === d) return true;
+    if (w[0] === 'dkim=pass' && (props['header.i'] === '@' + d || props['header.d'] === d)) return true;
+  }
+  return false;
+}
+// B7-V: kandidaat voor de pdf-toets (alleen doktersmaten, alleen metadata). → { ok, reden }
+function verkoopKandidaat(m, postvakId) {
+  if (postvakId !== VERKOOP_POSTVAK || !m) return { ok: false, reden: 'postvak' };
+  if (!VERKOOP_DOMEINEN.includes(m.van_domein)) return { ok: false, reden: 'domein' };
+  if (m.labels.some(function (l) { return BUITEN_LABELS.includes(l); })) return { ok: false, reden: 'verzonden/concept' };
+  if (!m.bijlagen.length && !/^multipart\/(mixed|related)/.test(m.ct || '')) return { ok: false, reden: 'geen bijlage' };
+  if (!authPass(m.auth, m.van_domein)) return { ok: false, reden: 'afzendercontrole' };
+  return { ok: true, reden: 'kandidaat' };
+}
+// B7-V: ankers in een tekst (pdf-tekstlaag of OCR); de tekst zelf wordt nergens bewaard
+function verkoopAnkers(t) { const s = String(t || ''); return { vacshing: VAC_RE.test(s), shingrix: SHI_RE.test(s) }; }
+// B7-V: VERKOOP alleen bij minstens één pdf met beide ankers
+function verkoopOordeel(pdfs) { return (Array.isArray(pdfs) ? pdfs : []).some(function (x) { return x && x.vacshing === true && x.shingrix === true; }); }
 
 /*
  * Stap 0–3 (O.3), zonder Jev. instel = { factuur_alias, eigen: [adressen], altijd: {factuur_alias, ai_label, draad, praktijk_factuur},
@@ -365,6 +429,7 @@ function botsing(stap, ruw) {
 }
 // Geplande labels (O.6/O.7). Alleen plan; in deze bouwstap zet niemand ze.
 function labelPlan(stroom, ruw, m, instel) {
+  if (stroom === VERKOOP_STROOM) return instel.verkoop ? [VERKOOP_LABEL] : [];   // B7-V: alleen VERKOOP (gezet via de verkooptak, niet via labels())
   if (instel.gedeeld) return [];
   const s = instel.stromen || {};
   const uit = [];
@@ -387,7 +452,8 @@ function venster(laatsteGeslaagd, nuMs) {
 }
 
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, jevVragen,
-  jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF };
+  jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
+  authPass, verkoopKandidaat, verkoopAnkers, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL };
 
 // ─────────────────────────── startset (O.5) ───────────────────────────
 
@@ -435,6 +501,11 @@ CREATE INDEX IF NOT EXISTS besluit_draad ON besluit (postvak, thread_id);
 CREATE TABLE IF NOT EXISTS ronde (id TEXT PRIMARY KEY, start TEXT NOT NULL, eind TEXT, postvak TEXT NOT NULL, lijst INTEGER, nieuw INTEGER,
   volledig INTEGER, afgekapt INTEGER, jev INTEGER NOT NULL DEFAULT 0, jev_fout INTEGER NOT NULL DEFAULT 0, fout TEXT, geslaagd INTEGER);
 CREATE TABLE IF NOT EXISTS wijziging (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL, wat TEXT NOT NULL, sleutel TEXT, oud TEXT, nieuw TEXT, door TEXT);
+CREATE TABLE IF NOT EXISTS verkoop (id INTEGER PRIMARY KEY, postvak TEXT NOT NULL, gmail_id TEXT NOT NULL UNIQUE, thread_id TEXT NOT NULL, ontvangen TEXT,
+  van_domein TEXT, status TEXT NOT NULL, pdfs TEXT, toets_pogingen INTEGER NOT NULL DEFAULT 0, kandidaat_tijd TEXT NOT NULL, toets_tijd TEXT,
+  aangeboden_tijd TEXT, verstuurd_tijd TEXT, verstuurd_id TEXT, archief_aangeboden TEXT, archief_pogingen INTEGER NOT NULL DEFAULT 0, gearchiveerd_tijd TEXT,
+  fout TEXT, bijgewerkt TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS verkoop_status ON verkoop (postvak, status);
 `;
 
 // ─────────────────────────── opslag en routes ───────────────────────────
@@ -462,7 +533,9 @@ function maak(o) {
     ['stroom', 'gelezen INTEGER NOT NULL DEFAULT 0'], ['stroom', 'archief INTEGER NOT NULL DEFAULT 0'], ['besluit', 'gelezen_tijd TEXT'],
     ['besluit', 'archief_tijd TEXT'], ['besluit', 'archief_poging INTEGER NOT NULL DEFAULT 0'], ['ronde', 'gelezen_ok INTEGER NOT NULL DEFAULT 0'],
     ['besluit', 'gelezen_aangeboden TEXT'], ['stroom', 'gelezen_sinds TEXT'],
-    ['ronde', 'archief_ok INTEGER NOT NULL DEFAULT 0']]) {   // wv1988 B6+ uitgangen gelezen/archief
+    ['ronde', 'archief_ok INTEGER NOT NULL DEFAULT 0'],   // wv1988 B6+ uitgangen gelezen/archief
+    ['postvak', 'verkoop_door INTEGER NOT NULL DEFAULT 0'], ['postvak', 'verkoop_archief INTEGER NOT NULL DEFAULT 0'], ['postvak', 'verkoop_sinds TEXT'],
+    ['postvak', 'verkoop_archief_sinds TEXT']]) {   // wv1997 B7-V schakelaars (standaard uit)
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
   function tx(f) {
@@ -527,7 +600,8 @@ function maak(o) {
     let eigen = [];
     try { eigen = (o.eigenAdressen ? o.eigenAdressen() : []).map(function (a) { return String(a).toLowerCase(); }); } catch (e) { eigen = []; }
     return { factuur_alias: typeof pc.factuur_alias === 'string' ? pc.factuur_alias.toLowerCase() : '', eigen, altijd: p.altijd, regels: regels(p.id),
-      stromen: stromen(), twijfel_naar: p.twijfel_naar, todo_nooit: Array.isArray(c.todo_nooit) ? c.todo_nooit.map(String).slice(0, 50) : TODO_NOOIT, gedeeld: p.gedeeld };
+      stromen: stromen(), twijfel_naar: p.twijfel_naar, todo_nooit: Array.isArray(c.todo_nooit) ? c.todo_nooit.map(String).slice(0, 50) : TODO_NOOIT, gedeeld: p.gedeeld,
+      verkoop: p.id === VERKOOP_POSTVAK };
   }
 
   // ── n8n-kant ──
@@ -597,7 +671,7 @@ function maak(o) {
     const st = db.prepare('SELECT status, inhaal FROM besluit WHERE postvak = ? AND gmail_id = ?');
     // wv1983: een gewone ronde laat een wachtend inhaalbesluit liggen, een inhaalronde neemt alleen mail zonder besluit (of haar eigen wachters)
     const inh = r.soort === 'inhaal' ? 1 : 0;
-    const open = ids.filter(function (id) { const b = st.get(r.postvak, id); return !b || (b.status === 'wacht_jev' && b.inhaal === inh); });
+    const open = ids.filter(function (id) { const b = st.get(r.postvak, id); return !b || ((b.status === 'wacht_jev' || b.status === 'wacht_verkoop') && b.inhaal === inh); });   // wv1997: ook wachtend op de pdf-toets
     const terug = open.slice(0, NIEUW_MAX);
     db.prepare('UPDATE ronde SET lijst = ?, nieuw = ?, volledig = ?, afgekapt = ? WHERE id = ?').run(ids.length, terug.length, d.volledig === true ? 1 : 0, open.length > terug.length ? 1 : 0, r.id);
     if (!inh) db.prepare('UPDATE postvak SET laatste_ronde = ? WHERE id = ?').run(t, r.postvak);
@@ -606,7 +680,10 @@ function maak(o) {
   function sluitOudeWachters(pv) {
     const grens = new Date(nu() - JEV_WACHT_MS).toISOString();
     const rijen = db.prepare("SELECT * FROM besluit WHERE postvak = ? AND status = 'wacht_jev' AND aangemaakt < ?").all(pv, grens);
-    if (!rijen.length) return;
+    // B7-V (wv1997): een kandidaat zonder geslaagde pdf-toets binnen 24 uur krijgt de gewone stappen (het opgeslagen regelbesluit)
+    const vk = db.prepare("SELECT b.* FROM besluit b JOIN verkoop v ON v.gmail_id = b.gmail_id AND v.postvak = b.postvak WHERE b.postvak = ? AND b.status = 'wacht_verkoop' AND v.kandidaat_tijd < ?")
+      .all(pv, new Date(nu() - VERKOOP_WACHT_MS).toISOString());
+    if (!rijen.length && !vk.length) return;
     const instel = instelVan(postvak(pv));
     tx(function () {
       for (const b of rijen) {
@@ -614,7 +691,14 @@ function maak(o) {
         db.prepare("UPDATE besluit SET status = 'klaar', besloten = ?, stroom = ?, reden = ?, labels_plan = ? WHERE id = ?")
           .run(iso(), stroom, b.stroom ? b.reden : 'jev_geen_antwoord', JSON.stringify(labelPlan(stroom, null, mailUitRij(b), instel)), b.id);
       }
+      for (const b of vk) verkoopGewoon(b, instel, 'geen pdf-toets binnen 24 uur');
     });
+  }
+  // B7-V: geen VERKOOP → het besluit krijgt de gewone stappen die stap1 al berekende (stap, stroom, reden staan al in de rij)
+  function verkoopGewoon(b, instel, waarom) {
+    db.prepare("UPDATE besluit SET status = 'klaar', besloten = ?, labels_plan = ? WHERE id = ? AND status = 'wacht_verkoop'")
+      .run(iso(), JSON.stringify(labelPlan(b.stroom, null, mailUitRij(b), instel)), b.id);
+    db.prepare("UPDATE verkoop SET status = 'niet_herkend', fout = ?, bijgewerkt = ? WHERE postvak = ? AND gmail_id = ? AND status = 'kandidaat'").run(waarom || null, iso(), b.postvak, b.gmail_id);
   }
   /*
    * Stap 0–3 + patiëntpoort. Per mail één besluitrij (stroom null zolang Jev beslist). Jev-aanvragen alleen voor een postvak met jev aan,
@@ -639,7 +723,8 @@ function maak(o) {
     const eigenDraad = db.prepare("SELECT 1 FROM besluit WHERE postvak = ? AND thread_id = ? AND status = 'klaar' AND stroom IN ('intake', 'factuur') AND COALESCE(reden, '') != 'draad' AND inhaal = 0 LIMIT 1");
     const inhaal = r.soort === 'inhaal', grensMs = inhaal ? Date.parse(r.grens || '') : NaN;
     const bestaand = db.prepare('SELECT * FROM besluit WHERE postvak = ? AND gmail_id = ?');
-    const jev = [], tel = { mails: 0, ongeldig: 0, labels_onbekend: 0, dubbel: 0, buiten: 0, altijd: 0, weg: 0, in: 0, jev: 0, marker: 0, zorg: 0, al_besloten: 0, te_nieuw: 0 };
+    const verkoopRij = db.prepare('SELECT * FROM verkoop WHERE gmail_id = ?');
+    const jev = [], verkoop = [], tel = { mails: 0, ongeldig: 0, labels_onbekend: 0, dubbel: 0, buiten: 0, altijd: 0, weg: 0, in: 0, jev: 0, marker: 0, zorg: 0, al_besloten: 0, te_nieuw: 0, verkoop: 0 };
     const gezien = new Set();
     tx(function () {
       ms.forEach(function (m, i) {
@@ -675,6 +760,17 @@ function maak(o) {
         if (b.stap === 'buiten') stroom = null;
         else if (b.stap === 'jev' && !magJev) { stroom = 'twijfel'; reden = pt.tegenhouden ? 'marker' : (zorg ? 'zorgmail' : 'jev_uit'); }
         if (magJev) status = 'wacht_jev';
+        // B7-V (wv1997): een verkoopkandidaat in doktersmaten wacht op de pdf-toets; het regelbesluit hierboven blijft staan als de gewone
+        // stappen (geen VERKOOP, 24 uur of 3 mislukte toetsen). Een al afgehandelde kandidaat komt hier niet meer (oud klaar).
+        const kand = !inhaal && p.id === VERKOOP_POSTVAK ? verkoopKandidaat(m, p.id) : { ok: false };
+        if (kand.ok) {
+          const vk = verkoopRij.get(m.id);
+          if (!vk) db.prepare("INSERT INTO verkoop (postvak, gmail_id, thread_id, ontvangen, van_domein, status, kandidaat_tijd, bijgewerkt) VALUES (?, ?, ?, ?, ?, 'kandidaat', ?, ?)")
+            .run(p.id, m.id, m.draad, m.ontvangen, m.van_domein, iso(), iso());
+          if (!vk || (vk.status === 'kandidaat' && vk.toets_pogingen < VERKOOP_TOETS_POGINGEN && nu() - Date.parse(vk.kandidaat_tijd) < VERKOOP_WACHT_MS)) {
+            status = 'wacht_verkoop'; verkoop.push(m.id); tel.verkoop++;
+          }
+        }
         const plan = status === 'klaar' && stroom ? labelPlan(stroom, null, m, instel) : null;
         // Afzender, naam, ontvangers en onderwerp altijd, ook bij een marker, zorgmail, het gedeelde postvak en verzonden mail: het logboek
         // is alleen voor David en David wordt nooit gefilterd (David 29-10-2026, wv1980; vervangt review B1 #6). Naar derden (Jev) gaat
@@ -695,7 +791,7 @@ function maak(o) {
         if (magJev) jev.push({ gmail_id: m.id, body: { model: 'typesafe/jev', input: { state: jevState(m, platte), questions: q } } });
       });
     });
-    return { status: 200, j: { ok: true, jev, telling: tel } };
+    return { status: 200, j: { ok: true, jev, verkoop: verkoop.slice(0, MAILS_MAX), telling: tel } };
   }
   function stap2(d) {
     const r = rondeVan(d);
@@ -881,6 +977,244 @@ function maak(o) {
     });
     return { status: 200, j: { ok: true, telling: tel } };
   }
+  // ── B7-V verkoopfacturen (wv1997) ──
+  // Mag doorsturen/archiveren in dit postvak aan? Alleen doktersmaten, alleen als config.json verkoop_toegestaan[postvak] {adres, ja} zet
+  // (de machinekamer, na Davids Ja op de kaart). Het adres komt ALLEEN hier vandaan, nooit uit een mail. → { ok, adres, reden }
+  function verkoopMag(p) {
+    if (!p || p.id !== VERKOOP_POSTVAK) return { ok: false, reden: 'alleen Doktersmaten' };
+    const c = config(), t = isObj(c.verkoop_toegestaan) ? c.verkoop_toegestaan[p.id] : null;
+    if (!isObj(t) || typeof t.ja !== 'string' || !t.ja) return { ok: false, reden: 'wacht op je Ja op de kaart (verkoopfacturen doorsturen en archiveren)' };
+    const a = String(t.adres || '').trim().toLowerCase();
+    if (a.length > 254 || !ADRES_RE.test(a)) return { ok: false, reden: 'geen geldig verkoopadres in de toestemming' };
+    return { ok: true, adres: a, reden: 'Ja ' + t.ja.slice(0, 16) };
+  }
+  function shaBuf(b) { return crypto.createHash('sha256').update(b).digest('hex'); }
+  /*
+   * Eén pdf lokaal lezen: tekstlaag (pdftotext), en is die vrijwel leeg (scan) OCR van hooguit 2 pagina's (pdftoppm 200 dpi + tesseract
+   * nld+eng), in een eigen map (0700) onder o.verkoopTmp (/dev/shm) die altijd weer gewist wordt. o.proces komt van server.js (spawn);
+   * mailman.js start zelf geen processen (CI-poort). Alleen ankers ja/nee en de bron komen terug; de tekst blijft in deze functie.
+   */
+  async function verkoopLees(buf) {
+    if (typeof o.proces !== 'function') return { fout: 'geen lezer' };
+    const map = path.join(o.verkoopTmp || '/dev/shm', 'mailman-verkoop-' + crypto.randomBytes(8).toString('hex'));
+    try {
+      fs.mkdirSync(map, { mode: 0o700 });
+      const f = path.join(map, 'stuk.pdf');
+      fs.writeFileSync(f, buf, { mode: 0o600 });
+      const t = await o.proces('pdftotext', ['-q', '-l', '5', '-enc', 'UTF-8', f, '-'], { ms: 30000 });
+      if (t != null && t.replace(/\s+/g, '').length >= VERKOOP_TEKST_MIN) { const a = verkoopAnkers(t); return { bron: 'tekst', vacshing: a.vacshing, shingrix: a.shingrix }; }
+      const r = await o.proces('pdftoppm', ['-q', '-r', '200', '-f', '1', '-l', String(VERKOOP_OCR_PAGINAS), '-png', f, path.join(map, 'p')], { ms: 120000 });
+      if (r == null) return { bron: 'ocr', fout: 'pdftoppm' };
+      const pngs = fs.readdirSync(map).filter(function (n) { return /^p-\d+\.png$/.test(n); }).sort().slice(0, VERKOOP_OCR_PAGINAS);
+      let vac = false, shi = false, gelezen = 0;
+      for (const n of pngs) {
+        const x = await o.proces('tesseract', [path.join(map, n), 'stdout', '-l', 'nld+eng', '--psm', '3'], { ms: 120000 });
+        if (x == null) continue;
+        gelezen++;
+        const a = verkoopAnkers(x);
+        vac = vac || a.vacshing; shi = shi || a.shingrix;
+      }
+      if (!gelezen) return { bron: 'ocr', fout: 'tesseract' };
+      return { bron: 'ocr', vacshing: vac, shingrix: shi };
+    } catch (e) {
+      return { fout: 'lezen' };
+    } finally {
+      try { fs.rmSync(map, { recursive: true, force: true }); } catch (e) { fout('mailman-verkoop-tmp', e); }
+    }
+  }
+  /*
+   * POST /mailman/verkoop/toets (via server.js, ná de sleutel): { ronde, postvak, gmail_id, bijlagen: [{ naam, mime, b64 }], fout? } van n8n
+   * voor een kandidaat uit stap1. Hooguit 3 pdf's, elk ≤ 8 MB, canonieke base64 (zodat n8n later byte-gelijk kan toetsen via sha256 van
+   * dezelfde base64). Bewaart per pdf alleen sha256 (bytes), sha256_b64, grootte, bron en ankers ja/nee; naam en tekst nooit.
+   * Eén toets tegelijk (pod: 2 cpu's, /dev/shm 64 MB); bezig = 429 en de kandidaat komt de volgende ronde terug.
+   */
+  let verkoopBezig = false;
+  async function verkoopToets(d) {
+    d = isObj(d) ? d : {};
+    const r = rondeVan(d, true);
+    if (!r) return { status: 409, j: { ok: false, fout: 'ronde onbekend of verlopen' } };
+    if (r.postvak !== VERKOOP_POSTVAK || r.soort === 'inhaal') return { status: 400, j: { ok: false, fout: 'alleen Doktersmaten' } };
+    const id = String(d.gmail_id || '');
+    if (!ID_RE.test(id)) return { status: 400, j: { ok: false, fout: 'gmail_id' } };
+    const wacht = function () {
+      const b = db.prepare("SELECT * FROM besluit WHERE postvak = ? AND gmail_id = ? AND status = 'wacht_verkoop'").get(r.postvak, id);
+      const v = db.prepare("SELECT * FROM verkoop WHERE postvak = ? AND gmail_id = ? AND status = 'kandidaat'").get(r.postvak, id);
+      return b && v ? { b, v } : null;
+    };
+    if (!wacht()) return { status: 409, j: { ok: false, fout: 'geen wachtende kandidaat' } };
+    if (verkoopBezig) return { status: 429, j: { ok: false, fout: 'bezig' } };
+    verkoopBezig = true;
+    const pdfs = [];
+    let melding = typeof d.fout === 'string' && d.fout ? tekst(d.fout, 120) : null;
+    try {
+      if (!melding) {
+        for (const x of (Array.isArray(d.bijlagen) ? d.bijlagen : []).slice(0, VERKOOP_PDF_MAX)) {
+          if (!isObj(x) || typeof x.b64 !== 'string' || !x.b64) { melding = 'bijlage zonder inhoud'; continue; }
+          if (x.b64.length > Math.ceil(VERKOOP_PDF_BYTES / 3) * 4) { pdfs.push({ grootte: null, overgeslagen: 'te groot' }); continue; }
+          const buf = Buffer.from(x.b64, 'base64');
+          if (!buf.length || buf.toString('base64') !== x.b64) { melding = 'bijlage niet in canonieke base64'; continue; }
+          if (buf.length > VERKOOP_PDF_BYTES) { pdfs.push({ grootte: buf.length, overgeslagen: 'te groot' }); continue; }
+          if (buf.subarray(0, 1024).indexOf('%PDF-') < 0) { pdfs.push({ grootte: buf.length, overgeslagen: 'geen pdf' }); continue; }
+          const l = await verkoopLees(buf);
+          const rij = { sha256: shaBuf(buf), sha256_b64: sha(x.b64), grootte: buf.length, bron: l.bron || null, vacshing: l.vacshing === true, shingrix: l.shingrix === true };
+          if (l.fout) rij.fout = String(l.fout).slice(0, 40);
+          pdfs.push(rij);
+        }
+      }
+    } finally { verkoopBezig = false; }
+    const gelezen = pdfs.filter(function (x) { return x.sha256 && !x.fout; });
+    const verk = verkoopOordeel(gelezen);
+    const mislukt = !verk && (!!melding || pdfs.some(function (x) { return x.fout; }));
+    const instel = instelVan(postvak(r.postvak));
+    return tx(function () {
+      const w = wacht();
+      if (!w) return { status: 409, j: { ok: false, fout: 'geen wachtende kandidaat' } };
+      const pj = JSON.stringify(pdfs);
+      if (verk) {
+        db.prepare("UPDATE besluit SET stap = 'verkoop', stroom = ?, reden = 'ankers', status = 'klaar', besloten = ?, labels_plan = ? WHERE id = ?")
+          .run(VERKOOP_STROOM, iso(), JSON.stringify(labelPlan(VERKOOP_STROOM, null, null, instel)), w.b.id);
+        db.prepare("UPDATE verkoop SET status = 'herkend', pdfs = ?, toets_tijd = ?, toets_pogingen = toets_pogingen + 1, fout = NULL, bijgewerkt = ? WHERE id = ?").run(pj, iso(), iso(), w.v.id);
+        return { status: 200, j: { ok: true, verkoop: true, pdfs: gelezen.length } };
+      }
+      if (mislukt) {
+        const n = w.v.toets_pogingen + 1;
+        db.prepare('UPDATE verkoop SET toets_pogingen = ?, toets_tijd = ?, fout = ?, bijgewerkt = ? WHERE id = ?').run(n, iso(), melding || 'pdf niet te lezen', iso(), w.v.id);
+        if (n >= VERKOOP_TOETS_POGINGEN) verkoopGewoon(w.b, instel, 'pdf-toets ' + n + ' keer mislukt');
+        return { status: 200, j: { ok: true, verkoop: false, opnieuw: n < VERKOOP_TOETS_POGINGEN } };
+      }
+      db.prepare('UPDATE verkoop SET pdfs = ?, toets_tijd = ?, toets_pogingen = toets_pogingen + 1, bijgewerkt = ? WHERE id = ?').run(pj, iso(), iso(), w.v.id);
+      verkoopGewoon(w.b, instel, gelezen.length ? 'geen VACSHING én SHINGRIX' : 'geen leesbare pdf');
+      return { status: 200, j: { ok: true, verkoop: false } };
+    });
+  }
+  /*
+   * POST /mailman/verkoop/acties { ronde, postvak, ids }: wat n8n deze ronde mag doen. Alleen doktersmaten, alleen met verkoopMag, per
+   * schakelaar. Doorsturen: status herkend → aangeboden (vóór de uitgifte, dus hooguit één keer), alleen mail die binnenkwam ná het
+   * aanzetten (verkoop_sinds) en in de lijst van deze ronde staat, ≤ VERKOOP_RONDE_MAX per ronde en ≤ VERKOOP_DAG_MAX per 24 uur.
+   * Archiveren: alleen wat MailMan zelf verstuurde, ≥ 15 min geleden (Exact weigert binnen een minuut), ≤ 30 dagen, ≤ 5 pogingen.
+   */
+  function verkoopActies(d) {
+    const r = rondeVan(d, true);
+    if (!r) return { status: 409, j: { ok: false, fout: 'ronde onbekend of verlopen' } };
+    if (r.soort === 'inhaal' || r.postvak !== VERKOOP_POSTVAK) return { status: 200, j: { ok: true, acties: [] } };
+    const p = postvak(r.postvak), m = verkoopMag(p);
+    if (!p || p.stand === 'uit' || !m.ok || (!p.verkoop_door && !p.verkoop_archief)) return { status: 200, j: { ok: true, acties: [], dicht: m.ok ? 'schakelaars uit' : m.reden } };
+    const ids = new Set((Array.isArray(d.ids) ? d.ids : []).map(String).filter(function (x) { return ID_RE.test(x); }));
+    const acties = [], door = [], arch = [];
+    if (p.verkoop_door && p.verkoop_sinds) {
+      const dag = db.prepare('SELECT count(*) n FROM verkoop WHERE postvak = ? AND aangeboden_tijd >= ?').get(p.id, new Date(nu() - 86400000).toISOString()).n;
+      let ruimte = Math.min(VERKOOP_RONDE_MAX, VERKOOP_DAG_MAX - dag);
+      for (const v of db.prepare("SELECT * FROM verkoop WHERE postvak = ? AND status = 'herkend' AND ontvangen IS NOT NULL AND ontvangen >= ? ORDER BY ontvangen, id").all(p.id, p.verkoop_sinds)) {
+        if (ruimte <= 0) break;
+        if (!ids.has(v.gmail_id)) continue;
+        let pdfs = [];
+        try { pdfs = JSON.parse(v.pdfs || '[]').filter(function (x) { return x && HEX64.test(String(x.sha256_b64 || '')); }); } catch (e) { pdfs = []; }
+        if (!pdfs.length) continue;
+        acties.push({ soort: 'door', gmail_id: v.gmail_id, thread_id: v.thread_id, adres: m.adres, van_domein: v.van_domein, sha256_b64: pdfs.map(function (x) { return x.sha256_b64; }) });
+        door.push(v.id); ruimte--;
+      }
+    }
+    if (p.verkoop_archief) {
+      const tot = new Date(nu() - VERKOOP_ARCHIEF_NA_MS).toISOString(), van = new Date(nu() - VERKOOP_ARCHIEF_MS).toISOString();
+      for (const v of db.prepare("SELECT * FROM verkoop WHERE postvak = ? AND status = 'verstuurd' AND verstuurd_tijd <= ? AND verstuurd_tijd >= ? AND archief_pogingen < ? ORDER BY verstuurd_tijd, id LIMIT ?")
+        .all(p.id, tot, van, VERKOOP_ARCHIEF_POGINGEN, VERKOOP_RONDE_MAX)) {
+        acties.push({ soort: 'archief', gmail_id: v.gmail_id, thread_id: v.thread_id, adres: m.adres, verstuurd: v.verstuurd_tijd });
+        arch.push(v.id);
+      }
+    }
+    if (door.length || arch.length) {
+      tx(function () {
+        for (const id of door) db.prepare("UPDATE verkoop SET status = 'aangeboden', aangeboden_tijd = ?, bijgewerkt = ? WHERE id = ? AND status = 'herkend'").run(iso(), iso(), id);
+        for (const id of arch) db.prepare('UPDATE verkoop SET archief_pogingen = archief_pogingen + 1, archief_aangeboden = ?, bijgewerkt = ? WHERE id = ?').run(iso(), iso(), id);
+      });
+    }
+    return { status: 200, j: { ok: true, acties } };
+  }
+  /*
+   * POST /mailman/verkoop/gedaan { ronde, postvak, resultaten: [{ gmail_id, soort: door|archief, uitkomst, verstuurd_id?, fout? }] }.
+   * door: alleen op een aangeboden rij → verstuurd (met het Gmail-id van het verstuurde bericht) | al_doorgestuurd | mislukt (nooit opnieuw).
+   * archief: alleen op een verstuurde rij → gearchiveerd | geweigerd (Exact meldde niet afgeleverd: blijft in de inbox) | later (blijft
+   * verstuurd; de pogingen telt verkoopActies).
+   */
+  function verkoopGedaan(d) {
+    const r = rondeVan(d, true);
+    if (!r) return { status: 409, j: { ok: false, fout: 'ronde onbekend of verlopen' } };
+    if (r.postvak !== VERKOOP_POSTVAK || r.soort === 'inhaal') return { status: 400, j: { ok: false, fout: 'alleen Doktersmaten' } };
+    const tel = { verstuurd: 0, al_doorgestuurd: 0, mislukt: 0, gearchiveerd: 0, geweigerd: 0, later: 0, genegeerd: 0 };
+    const lees = db.prepare('SELECT * FROM verkoop WHERE postvak = ? AND gmail_id = ?');
+    const zet = function (v, status, velden) {
+      const k = Object.keys(velden || {});
+      db.prepare('UPDATE verkoop SET status = ?, bijgewerkt = ?' + k.map(function (x) { return ', ' + x + ' = ?'; }).join('') + ' WHERE id = ?').run(status, iso(), ...k.map(function (x) { return velden[x]; }), v.id);
+    };
+    tx(function () {
+      for (const x of (Array.isArray(d.resultaten) ? d.resultaten : []).slice(0, VERKOOP_RONDE_MAX * 4)) {
+        if (!isObj(x) || !ID_RE.test(String(x.gmail_id || ''))) continue;
+        const v = lees.get(r.postvak, String(x.gmail_id));
+        const u = String(x.uitkomst || ''), f = tekst(x.fout, 120) || null;
+        if (x.soort === 'door') {
+          if (!v || v.status !== 'aangeboden') { tel.genegeerd++; continue; }
+          if (u === 'verstuurd' && ID_RE.test(String(x.verstuurd_id || ''))) { zet(v, 'verstuurd', { verstuurd_tijd: iso(), verstuurd_id: String(x.verstuurd_id), fout: null }); tel.verstuurd++; }
+          else if (u === 'al_doorgestuurd') { zet(v, 'al_doorgestuurd', { fout: null }); tel.al_doorgestuurd++; }
+          else { zet(v, 'mislukt', { fout: f || 'doorsturen mislukt' }); tel.mislukt++; }
+        } else if (x.soort === 'archief') {
+          if (!v || v.status !== 'verstuurd') { tel.genegeerd++; continue; }
+          if (u === 'gearchiveerd') { zet(v, 'gearchiveerd', { gearchiveerd_tijd: iso(), fout: null }); tel.gearchiveerd++; }
+          else if (u === 'geweigerd') { zet(v, 'geweigerd', { fout: 'Exact meldde: niet afgeleverd' }); tel.geweigerd++; }
+          else { zet(v, 'verstuurd', { fout: f || 'archiveren later' }); tel.later++; }
+        } else tel.genegeerd++;
+      }
+    });
+    return { status: 200, j: { ok: true, telling: tel } };
+  }
+  function verkoopTellers(pv, sinds) {
+    const t = function (sql) { return db.prepare('SELECT count(*) n FROM verkoop WHERE postvak = ? AND ' + sql).get(pv, sinds).n; };
+    return { kandidaat: t('kandidaat_tijd >= ?'), herkend: t("toets_tijd >= ? AND status NOT IN ('kandidaat', 'niet_herkend')"), niet_herkend: t("bijgewerkt >= ? AND status = 'niet_herkend'"),
+      verstuurd: t('verstuurd_tijd >= ?'), gearchiveerd: t('gearchiveerd_tijd >= ?'), al_doorgestuurd: t("bijgewerkt >= ? AND status = 'al_doorgestuurd'"),
+      geweigerd: t("bijgewerkt >= ? AND status = 'geweigerd'"), mislukt: t("bijgewerkt >= ? AND status = 'mislukt'"),
+      wacht_toets: db.prepare("SELECT count(*) n FROM verkoop WHERE postvak = ? AND status = 'kandidaat'").get(pv).n,
+      wacht_door: db.prepare("SELECT count(*) n FROM verkoop WHERE postvak = ? AND status = 'herkend'").get(pv).n };
+  }
+  function verkoopOverzicht() {
+    const p = postvak(VERKOOP_POSTVAK);
+    if (!p) return null;
+    const m = verkoopMag(p);
+    const journaal = db.prepare('SELECT v.*, b.onderwerp, b.afzender, b.van_naam FROM verkoop v LEFT JOIN besluit b ON b.postvak = v.postvak AND b.gmail_id = v.gmail_id WHERE v.postvak = ? ORDER BY COALESCE(v.ontvangen, v.kandidaat_tijd) DESC, v.id DESC LIMIT 150').all(p.id)
+      .map(function (v) {
+        let pdfs = []; try { pdfs = JSON.parse(v.pdfs || '[]'); } catch (e) { pdfs = []; }
+        return { id: v.id, ontvangen: v.ontvangen, afzender: v.afzender || null, naam: v.van_naam || null, domein: v.van_domein, onderwerp: v.onderwerp, status: v.status,
+          pdfs: pdfs.map(function (x) { return { bron: x.bron || null, vacshing: !!x.vacshing, shingrix: !!x.shingrix, grootte: x.grootte || null, overgeslagen: x.overgeslagen || null, fout: x.fout || null }; }),
+          kandidaat: v.kandidaat_tijd, getoetst: v.toets_tijd, aangeboden: v.aangeboden_tijd, verstuurd: v.verstuurd_tijd, gearchiveerd: v.gearchiveerd_tijd, fout: v.fout };
+      });
+    return { postvak: p.id, kan: m.ok, reden: m.reden, adres: m.ok ? m.adres : null, door: !!p.verkoop_door, archief: !!p.verkoop_archief,
+      door_sinds: p.verkoop_sinds || null, archief_sinds: p.verkoop_archief_sinds || null,
+      regel: { domeinen: VERKOOP_DOMEINEN, ankers: ['VACSHING', 'SHINGRIX'], afzendercontrole: 'Gmail: dmarc of dkim geslaagd voor dat domein', pdf_max: VERKOOP_PDF_MAX,
+        pdf_mb: VERKOOP_PDF_BYTES / 1048576, ocr_paginas: VERKOOP_OCR_PAGINAS, wacht_uur: VERKOOP_WACHT_MS / 3600000, archief_na_min: VERKOOP_ARCHIEF_NA_MS / 60000 },
+      plafond: { ronde: VERKOOP_RONDE_MAX, dag: VERKOOP_DAG_MAX }, label: VERKOOP_LABEL,
+      tellers_24u: verkoopTellers(p.id, new Date(nu() - 86400000).toISOString()), journaal };
+  }
+  // App: doorsturen/archiveren aan alleen met verkoopMag én een verse vingerafdruk (die hier verbruikt wordt); uit mag altijd.
+  // verkoop_sinds: alleen mail die ná het aanzetten binnenkwam wordt doorgestuurd (geen terugwerkende kracht).
+  function verkoopRoute(d, door, ctx) {
+    const p = postvak(VERKOOP_POSTVAK);
+    if (!p) return { status: 400, j: { ok: false, fout: 'postvak onbekend' } };
+    const oud = { door: !!p.verkoop_door, archief: !!p.verkoop_archief };
+    const nieuw = { door: typeof d.door === 'boolean' ? d.door : oud.door, archief: typeof d.archief === 'boolean' ? d.archief : oud.archief };
+    const verwijd = (nieuw.door && !oud.door) || (nieuw.archief && !oud.archief);
+    if (verwijd) {
+      const m = verkoopMag(p);
+      if (!m.ok) return { status: 409, j: { ok: false, fout: 'kan nog niet: ' + m.reden } };
+      if (!ctx || typeof ctx.versOk !== 'function' || !ctx.versOk()) return { status: 403, j: { ok: false, fout: 'bevestig met je vingerafdruk', vers_nodig: true } };
+      if (typeof ctx.versVerbruik === 'function') ctx.versVerbruik();
+    }
+    tx(function () {
+      const ds = nieuw.door ? (oud.door ? p.verkoop_sinds || iso() : iso()) : null;
+      const as = nieuw.archief ? (oud.archief ? p.verkoop_archief_sinds || iso() : iso()) : null;
+      db.prepare('UPDATE postvak SET verkoop_door = ?, verkoop_archief = ?, verkoop_sinds = ?, verkoop_archief_sinds = ?, bijgewerkt = ? WHERE id = ?')
+        .run(nieuw.door ? 1 : 0, nieuw.archief ? 1 : 0, ds, as, iso(), p.id);
+      wijzig('verkoop', p.id, oud, verwijd ? Object.assign({ vingerafdruk: true }, nieuw) : nieuw, door);
+    });
+    return { status: 200, j: { ok: true } };
+  }
   function n8n(route, d) {
     if (route === 'POST /mailman/start') return start();
     if (route === 'POST /mailman/inhaal') return inhaalStart(d);
@@ -890,6 +1224,8 @@ function maak(o) {
     if (route === 'POST /mailman/stap1') return stap1(d);
     if (route === 'POST /mailman/stap2') return stap2(d);
     if (route === 'POST /mailman/gedaan') return gedaan(d);
+    if (route === 'POST /mailman/verkoop/acties') return verkoopActies(d);   // wv1997 B7-V (de toets gaat via verkoopToets, async)
+    if (route === 'POST /mailman/verkoop/gedaan') return verkoopGedaan(d);
     return { status: 404, j: { ok: false, fout: 'onbekend' } };
   }
 
@@ -908,12 +1244,12 @@ function maak(o) {
 
   // ── tellingen en App ──
   function telling(pv, van, tot) {
-    const rij = { binnen: 0, buiten: 0, altijd: 0, weg: 0, in: 0, jev: 0, intake: 0, factuur: 0, info: 0, twijfel: 0, wacht: 0, marker: 0, botsing: 0, jev_aanroepen: 0, jev_tokens: 0, todo: 0 };
+    const rij = { binnen: 0, buiten: 0, altijd: 0, weg: 0, in: 0, jev: 0, intake: 0, factuur: 0, info: 0, twijfel: 0, verkoop: 0, wacht: 0, marker: 0, botsing: 0, jev_aanroepen: 0, jev_tokens: 0, todo: 0 };
     for (const b of db.prepare('SELECT stap, stroom, status, marker, botsing, jev_tokens, jev, labels_plan FROM besluit WHERE postvak = ? AND aangemaakt >= ? AND aangemaakt < ? AND inhaal = 0').all(pv, van, tot)) {
       if (b.stap === 'buiten') { rij.buiten++; continue; }
       rij.binnen++;
       rij[b.stap] = (rij[b.stap] || 0) + 1;
-      if (b.status === 'wacht_jev') rij.wacht++;
+      if (b.status === 'wacht_jev' || b.status === 'wacht_verkoop') rij.wacht++;   // wv1997: ook wachtend op de pdf-toets
       else if (b.stroom && rij[b.stroom] != null) rij[b.stroom]++;
       if (b.marker) rij.marker++;
       if (b.botsing) rij.botsing++;
@@ -1006,6 +1342,7 @@ function maak(o) {
     return {
       ok: true, versie: VERSIE, labels: LABELS, stromen: stromen(), live_kan: postvakken().some(function (p) { return liveMag(p).ok; }),
       uitgang_kan: postvakken().some(function (p) { return uitgangMag(p).ok; }),   // wv1988 B6+: vinkjes gelezen/archief bruikbaar
+      verkoop: verkoopOverzicht(),   // wv1997 B7-V: stroom VERKOOP in Doktersmaten (herkenregel, schakelaars, journaal)
       wachtrij_max: WACHTRIJ_MAX, wachtrij_uur: WACHTRIJ_MS / 3600000,
       postvakken: postvakken().map(function (p) {
         const lm = liveMag(p), um = uitgangMag(p), dag = new Date(n - 86400000).toISOString();
@@ -1231,6 +1568,7 @@ function maak(o) {
     if (route === 'POST /app/mailman/altijd') return altijdRoute(d, door);
     if (route === 'POST /app/mailman/stroom') return stroomRoute(d, door, ctx);
     if (route === 'POST /app/mailman/oordeel') return oordeelRoute(d);
+    if (route === 'POST /app/mailman/verkoop') return verkoopRoute(d, door, ctx);   // wv1997 B7-V
     return { status: 404, j: { ok: false, fout: 'onbekend' } };
   }
   function info() {
@@ -1244,7 +1582,8 @@ function maak(o) {
         jev_tokens_24u: t.jev_tokens, labels_gezet_24u: l.ok, labels_fout_24u: l.fout,
         gelezen_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND gelezen_tijd >= ?').get(p.id, dag).n,
         archief_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND archief_tijd >= ?').get(p.id, dag).n,
-        inhaal: { besluiten: ih.besluiten, per_stroom: ih.per_stroom, rondes: ih.rondes, rondes_geslaagd: ih.rondes_geslaagd, laatste: ih.laatste } };   // wv1983: alleen tellingen
+        inhaal: { besluiten: ih.besluiten, per_stroom: ih.per_stroom, rondes: ih.rondes, rondes_geslaagd: ih.rondes_geslaagd, laatste: ih.laatste },   // wv1983: alleen tellingen
+        verkoop: p.id === VERKOOP_POSTVAK ? Object.assign({ door: !!p.verkoop_door, archief: !!p.verkoop_archief, toegestaan: verkoopMag(p).ok }, verkoopTellers(p.id, dag)) : undefined };   // wv1997: alleen tellingen
     }) };
   }
   // Voor de box (hooguit één per dag, server.js): alleen als er iets mis is
@@ -1259,10 +1598,19 @@ function maak(o) {
         const lf = db.prepare('SELECT COALESCE(sum(labels_fout), 0) n FROM ronde WHERE postvak = ? AND start >= ?').get(p.id, new Date(n - 86400000).toISOString()).n;
         if (lf >= 5) uit.push(p.id + ': ' + lf + ' labels niet gezet in 24 u (live)');
       }
+      if (p.id === VERKOOP_POSTVAK) {
+        // wv1997 B7-V: een geweigerde of mislukte verkoopnota, of een aangeboden nota zonder terugmelding na een uur (David ziet hem in de App)
+        const dag = new Date(n - 86400000).toISOString();
+        const vt = db.prepare("SELECT sum(status = 'geweigerd') g, sum(status = 'mislukt') m FROM verkoop WHERE postvak = ? AND bijgewerkt >= ?").get(p.id, dag);
+        if (vt.g) uit.push(p.id + ': ' + vt.g + ' verkoopnota door Exact geweigerd (niet gearchiveerd)');
+        if (vt.m) uit.push(p.id + ': ' + vt.m + ' verkoopnota niet doorgestuurd (mislukt)');
+        const hang = db.prepare("SELECT count(*) c FROM verkoop WHERE postvak = ? AND status = 'aangeboden' AND aangeboden_tijd < ?").get(p.id, new Date(n - 3600000).toISOString()).c;
+        if (hang) uit.push(p.id + ': ' + hang + ' verkoopnota aangeboden zonder terugmelding van n8n');
+      }
     }
     return uit;
   }
-  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, _db: db };
+  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, verkoopToets, _db: db };
 }
 
 function isPad(p) { return p === '/mailman' || String(p).indexOf('/mailman/') === 0; }

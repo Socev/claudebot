@@ -20,6 +20,8 @@ f=0
 grep -q "mailmanIsPad(req)) return mailmanRoute" server.js || { echo "ROOD  server.js: /mailman/* niet vóór handleRequest"; f=1; }
 grep -q "route.indexOf('POST /app/mailman/') === 0" server.js || { echo "ROOD  server.js: /app/mailman niet in de app-routes"; f=1; }
 grep -q "mailman: typeof mailmanInfo" server.js || { echo "ROOD  server.js: mailman ontbreekt in /health"; f=1; }
+grep -q "r = toets ? await mailman.verkoopToets(d) : mailman.n8n" server.js || { echo "ROOD  server.js: /mailman/verkoop/toets niet via verkoopToets"; f=1; }
+grep -q "proces: intakeProces, verkoopTmp: '/dev/shm'" server.js || { echo "ROOD  server.js: verkoop-lezer niet lokaal in /dev/shm"; f=1; }
 grep -q "if (!rolPrimair()) { req.resume(); return mailmanStuur(res, 503" server.js || { echo "ROOD  server.js: /mailman niet alleen op de primaire kant"; f=1; }
 grep -qE '^RELEASE_OPTIONEEL=".* mailman\.js ' uitrol.sh || { echo "ROOD  uitrol.sh: mailman.js niet in RELEASE_OPTIONEEL"; f=1; }
 grep -q "^COPY mailman.js /app/release-bootstrap/mailman.js" Dockerfile || { echo "ROOD  Dockerfile: mailman.js niet in release-bootstrap"; f=1; }
