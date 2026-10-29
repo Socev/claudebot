@@ -70,8 +70,9 @@ function maak(o) {
     if (fs.existsSync(doel)) return { ok: true, al_gedaan: true };
     if (!/^podstaat-(olares|vps)-\d{4}-\d{2}-\d{2}\.tgz$/.test(String(ref.naam || '')) || !/^[0-9a-f]{64}$/.test(String(ref.sha256 || ''))
         || !Number.isInteger(ref.start)) return { ok: false, reden: 'podstaat-referentie onvolledig' };
-    if (ref.sqlite && ref.sqlite.facturen && ref.sqlite.facturen.bestand !== 'facturen/facturen.sqlite.gz') return { ok: false, reden: 'podstaat-referentie: onverwachte facturennaam' };
-    if (!(ref.sqlite && ref.sqlite.facturen)) return { ok: false, reden: 'facturen ontbreken in de bundel van ' + datum + ' (' + String((ref.stand || {}).facturen || '?').slice(0, 40) + ')' };
+    const fd = (ref['sqlite'] || {}).facturen;   // (geen punt-toegang: de datakaart-poort leest "<x>.sqlite" als bestandsnaam)
+    if (fd && fd.bestand !== 'facturen/facturen.sqlite.gz') return { ok: false, reden: 'podstaat-referentie: onverwachte facturennaam' };
+    if (!fd) return { ok: false, reden: 'facturen ontbreken in de bundel van ' + datum + ' (' + String((ref.stand || {}).facturen || '?').slice(0, 40) + ')' };
     const stage = fs.mkdtempSync(path.join(o.tmpRoot || '/dev/shm', 'sb2-herstelref.'));
     try {
       fs.chmodSync(stage, 0o700);
@@ -81,7 +82,7 @@ function maak(o) {
       fs.writeFileSync(bundel, cat.stdout, { mode: 0o600 });
       const sha = crypto.createHash('sha256').update(cat.stdout).digest('hex');
       if (sha !== ref.sha256) return { ok: false, reden: 'bundel op Drive wijkt af van de referentie (sha ' + sha.slice(0, 12) + ')' };
-      const lid = 'podstaat/' + ref.sqlite.facturen.bestand;
+      const lid = 'podstaat/' + fd.bestand;
       const tar = await uitvoer('tar', ['-xzf', bundel, '-C', stage, lid], { timeout: 60000 });
       fs.unlinkSync(bundel);   // tmpfs is 64 MB: de bundel eerst weg, dan pas uitpakken (review wv1962 ZOU 7)
       const gz = path.join(stage, lid);
