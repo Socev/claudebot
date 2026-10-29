@@ -40,7 +40,7 @@ function schrijfAtomair(p, inhoud) {
 }
 
 /*
- * o = { refMap, remote ('vaultcrypt'), rclone (pad), node (pad), finCli (tools/fin-reconcile.js), bankbron (map), tmpRoot ('/dev/shm'),
+ * o = { refMap, remote ('vaultcrypt'), rclone (pad), node (pad), finCli (tools/fin-reconcile.js), bankbron (map of functie die de map geeft), tmpRoot ('/dev/shm'),
  *       wachtTot ([uur, min], standaard [5, 0]), regelsVersie() }
  */
 function maak(o) {
@@ -90,7 +90,8 @@ function maak(o) {
       const db = path.join(stage, 'facturen.sqlite');
       fs.writeFileSync(db, require('zlib').gunzipSync(fs.readFileSync(gz)), { mode: 0o600 });
       fs.unlinkSync(gz);
-      const r = await uitvoer(o.node || process.execPath, [o.finCli, 'droog', '--facturen', db, '--bankbron', o.bankbron, '--nu', String(ref.start * 1000)],
+      const bankbron = typeof o.bankbron === 'function' ? o.bankbron() : o.bankbron;
+      const r = await uitvoer(o.node || process.execPath, [o.finCli, 'droog', '--facturen', db, '--bankbron', bankbron, '--nu', String(ref.start * 1000)],
         { timeout: 300000, env: Object.assign({}, process.env, { FIN_DEBUG: '' }) });
       let u = null;
       try { u = JSON.parse(r.stdout.toString('utf8')); } catch (e) { u = null; }

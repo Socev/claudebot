@@ -16259,7 +16259,7 @@ const herstelReferentie = (function () {
   if (!fs.existsSync(p)) return null;
   try {
     return require(p).maak({ refMap: SB2_HERSTELREF_DIR, remote: 'vaultcrypt', rclone: 'rclone', node: process.execPath,
-      finCli: path.join(__dirname, 'tools', 'fin-reconcile.js'), bankbron: path.join(FACTUREN_DIR, 'bankbron'), tmpRoot: '/dev/shm',
+      finCli: path.join(__dirname, 'tools', 'fin-reconcile.js'), bankbron: function () { return path.join(FACTUREN_DIR, 'bankbron'); }, tmpRoot: '/dev/shm',   // lui: pas bij de ronde (toetsen laden dit blok zonder FACTUREN_DIR)
       regelsVersie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || null; } });
   } catch (e) { logError('herstelreferentie', e); return null; }
 })();
