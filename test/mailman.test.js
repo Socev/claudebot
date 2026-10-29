@@ -490,5 +490,156 @@ test('Jev-state: kop, bijlagenamen en hooguit 4.000 tekens tekst; de tekst komt 
   assert.ok(!alles.includes('woord woord'));
 });
 
-// #6 (koerier-venster en koerier_query), #8 (MailMan-labels uit labelHint van de Mail Processor) en #10 (metadata bij het lezen in
-// Intake) horen bij B5/B6: in deze stap verandert er niets aan de koerier, de Mail Processor of de Intake-router.
+// #6 (koerier-venster): test/facturen-koerier.test.js (koerier_query_label). #8 (MailMan-labels uit labelHint) zit in de Mail Processor
+// (n8n, mk-scripts/wv1973). #10 (metadata bij het lezen in Intake) hoort bij B6.
+
+// ── B5 (wv1973): live zetten, labels, wachtrijgrens ──
+function toestaan(dir, ids) {
+  const f = path.join(dir, 'config.json'), c = JSON.parse(fs.readFileSync(f, 'utf8'));
+  c.live_toegestaan = {};
+  for (const id of ids) c.live_toegestaan[id] = { ja: '2026-11-02T08:00:00Z', door: 'proef' };
+  fs.writeFileSync(f, JSON.stringify(c), { mode: 0o600 });
+}
+function ctxVers(ok) { const c = { verbruikt: 0, versOk: function () { return ok; }, versVerbruik: function () { c.verbruikt++; }, apparaat: 'Proef' }; return c; }
+function zetLive(mm) { const c = ctxVers(true); const r = mm.app('POST /app/mailman/stand', { postvak: 'gmail:david', stand: 'live' }, c); assert.equal(r.status, 200, JSON.stringify(r.j)); assert.equal(c.verbruikt, 1); }
+function labelRonde(mm, ids) {
+  const r = ronde(mm, 'gmail:david');
+  mm.n8n('POST /mailman/nieuw', { ronde: r.ronde, postvak: 'gmail:david', ids, volledig: true });
+  return { r, l: mm.n8n('POST /mailman/labels', { ronde: r.ronde, postvak: 'gmail:david', ids }) };
+}
+
+test('B5 live: alleen met live_toegestaan (grondwetkaart) én een verse vingerafdruk; doktersmaten nooit; terug mag altijd', () => {
+  const { mm, dir } = nieuweKamer();
+  let o = mm.app('GET /app/mailman', {}).j;
+  assert.equal(o.live_kan, false);
+  assert.match(o.postvakken.find(function (x) { return x.id === 'gmail:david'; }).live_reden, /grondwetkaart/);
+  assert.equal(mm.app('POST /app/mailman/stand', { postvak: 'gmail:david', stand: 'live' }, ctxVers(true)).status, 409);
+  toestaan(dir, ['gmail:david', 'gmail:groenhouten']);
+  // zonder of met een oude vingerafdruk: 403 vers_nodig, stand blijft schaduw
+  const zonder = mm.app('POST /app/mailman/stand', { postvak: 'gmail:david', stand: 'live' });
+  assert.equal(zonder.status, 403); assert.equal(zonder.j.vers_nodig, true);
+  assert.equal(mm.app('POST /app/mailman/stand', { postvak: 'gmail:david', stand: 'live' }, ctxVers(false)).status, 403);
+  assert.equal(mm._db.prepare("SELECT stand FROM postvak WHERE id = 'gmail:david'").get().stand, 'schaduw');
+  zetLive(mm);
+  o = mm.app('GET /app/mailman', {}).j;
+  const d = o.postvakken.find(function (x) { return x.id === 'gmail:david'; }), g = o.postvakken.find(function (x) { return x.id === 'gmail:groenhouten'; });
+  assert.equal(d.stand, 'live'); assert.ok(d.live_sinds); assert.equal(d.live_kan, true);
+  assert.equal(g.live_kan, false); assert.match(g.live_reden, /B7/);
+  assert.equal(mm.app('POST /app/mailman/stand', { postvak: 'gmail:groenhouten', stand: 'live' }, ctxVers(true)).status, 409);
+  const w = mm._db.prepare("SELECT * FROM wijziging WHERE wat = 'stand' ORDER BY id DESC LIMIT 1").get();
+  assert.match(w.nieuw, /"live"/); assert.equal(w.door, 'app:Proef');
+  // terug naar schaduw zonder vingerafdruk
+  assert.equal(mm.app('POST /app/mailman/stand', { postvak: 'gmail:david', stand: 'schaduw' }).status, 200);
+  assert.equal(mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === 'gmail:david'; }).live_sinds, null);
+});
+
+test('B5 labels: alleen live, alleen berichten uit deze ronde, alleen de vaste set (nooit _AI_), nooit weghalen; terug naar schaduw stopt meteen', () => {
+  const { mm, dir } = nieuweKamer();
+  const ms = [mail({ labels: ['_AI_'] }), mail(), mail({ aan: ALIAS }), mail({ labels: ['SENT'] }), mail()];
+  draai(mm, 'gmail:david', ms, { jev: function (a) { return jevAntwoord(a.gmail_id === ms[1].id ? { mens: 0.95, actie: 0.95, waarde: 3 } : { systeem: 0.99, waarde: 0 }); } });
+  const ids = ms.slice(0, 4).map(function (m) { return m.id; });   // ms[4] staat niet in de lijst van deze ronde
+  assert.deepEqual(labelRonde(mm, ids).l.j, { ok: true, stand: 'schaduw', acties: [] });
+  toestaan(dir, ['gmail:david']);
+  zetLive(mm);
+  const { r, l } = labelRonde(mm, ids);
+  assert.equal(l.status, 200); assert.equal(l.j.stand, 'live');
+  const per = {};
+  for (const a of l.j.acties) { per[a.gmail_id] = a.erbij.slice().sort(); assert.deepEqual(a.eraf, []); for (const x of a.erbij) { assert.ok(K.LABELS.includes(x)); assert.notEqual(x, '_AI_'); } }
+  assert.deepEqual(per[ms[0].id], ['AI/MailMan']);
+  assert.deepEqual(per[ms[1].id], ['AI/MailMan', 'TODO']);
+  assert.deepEqual(per[ms[2].id], ['FACTUUR']);
+  assert.equal(per[ms[3].id], undefined, 'verzonden: nooit');
+  assert.equal(per[ms[4].id], undefined, 'niet in de lijst van deze ronde');
+  // n8n meldt wat hij zette; onbekende labels tellen niet; een mislukte modify blijft open
+  const g = mm.n8n('POST /mailman/gezet', { ronde: r.ronde, postvak: 'gmail:david', resultaten: [
+    { gmail_id: ms[0].id, erbij: ['AI/MailMan', 'INBOX'], ok: true }, { gmail_id: ms[1].id, erbij: ['AI/MailMan', 'TODO'], ok: false, fout: 'HTTP 500' }] });
+  assert.deepEqual(g.j.telling, { ok: 1, fout: 1 });
+  assert.deepEqual(JSON.parse(rij(mm, ms[0].id).labels_gezet), ['AI/MailMan']);
+  assert.ok(rij(mm, ms[0].id).labels_tijd);
+  assert.equal(rij(mm, ms[1].id).labels_gezet, null);
+  const tweede = labelRonde(mm, ids).l.j.acties.map(function (a) { return a.gmail_id; });
+  assert.ok(!tweede.includes(ms[0].id) && tweede.includes(ms[1].id) && tweede.includes(ms[2].id));
+  // terug naar schaduw: dezelfde ronde krijgt bij de volgende aanvraag niets meer
+  const r3 = ronde(mm, 'gmail:david');
+  assert.equal(mm.app('POST /app/mailman/stand', { postvak: 'gmail:david', stand: 'schaduw' }).status, 200);
+  assert.deepEqual(mm.n8n('POST /mailman/labels', { ronde: r3.ronde, postvak: 'gmail:david', ids }).j.acties, []);
+  // en de ronde zelf geeft de stand mee (n8n toetst die ook)
+  assert.equal(ronde(mm, 'gmail:david').stand, 'schaduw');
+  // doktersmaten: nooit labels, ook niet met live_toegestaan
+  toestaan(dir, ['gmail:david', 'gmail:groenhouten']);
+  mm._db.prepare("UPDATE postvak SET stand = 'live' WHERE id = 'gmail:groenhouten'").run();   // zelfs als de databank het zou zeggen
+  const gm = mail({ aan: 'facturen@praktijk.invalid' });
+  draai(mm, 'gmail:groenhouten', [gm]);
+  const rg = ronde(mm, 'gmail:groenhouten');
+  assert.deepEqual(mm.n8n('POST /mailman/labels', { ronde: rg.ronde, postvak: 'gmail:groenhouten', ids: [gm.id] }).j.acties, []);
+});
+
+test('B5 wachtrij: hooguit 12 berichten met AI/MailMan per 3 uur, oudste eerst; FACTUUR en INFO wachten niet', () => {
+  const { mm, dir } = nieuweKamer();
+  const ms = Array.from({ length: 15 }, function (_, i) { return mail({ labels: ['_AI_'], datum: klok - (20 - i) * 3600000 }); });
+  const fac = mail({ aan: ALIAS });
+  draai(mm, 'gmail:david', ms.concat([fac]), { jev: function () { return jevAntwoord({}); } });
+  toestaan(dir, ['gmail:david']);
+  zetLive(mm);
+  const ids = ms.concat([fac]).map(function (m) { return m.id; });
+  const a = labelRonde(mm, ids);
+  const mmIds = a.l.j.acties.filter(function (x) { return x.erbij.includes('AI/MailMan'); }).map(function (x) { return x.gmail_id; });
+  assert.equal(mmIds.length, 12); assert.equal(a.l.j.wachtrij_wacht, 3);
+  assert.deepEqual(mmIds, ms.slice(0, 12).map(function (m) { return m.id; }), 'oudste eerst');
+  assert.ok(a.l.j.acties.some(function (x) { return x.gmail_id === fac.id; }), 'FACTUUR wacht niet op de wachtrij');
+  mm.n8n('POST /mailman/gezet', { ronde: a.r.ronde, postvak: 'gmail:david', resultaten: a.l.j.acties.map(function (x) { return { gmail_id: x.gmail_id, erbij: x.erbij, ok: true }; }) });
+  assert.equal(labelRonde(mm, ids).l.j.acties.length, 0);
+  klok += 3 * 3600000 + 60000;
+  const c = labelRonde(mm, ids).l.j.acties;
+  assert.deepEqual(c.map(function (x) { return x.gmail_id; }), ms.slice(12).map(function (m) { return m.id; }));
+  klok -= 3 * 3600000 + 60000;
+});
+
+test('B5 live-criteria: per dag over de echte dagen, wachtrij zonder Davids markering, voldaan-vlag', () => {
+  const { mm } = nieuweKamer();
+  const eigen = mail({ labels: ['_AI_'] }), mens = mail(), info = mail(), fac = mail({ aan: ALIAS });
+  draai(mm, 'gmail:david', [eigen, mens, info, fac], { jev: function (x) { return jevAntwoord(x.gmail_id === mens.id ? { mens: 0.95, actie: 0.5, waarde: 3 } : { systeem: 0.99, waarde: 0 }); } });
+  const c = mm.app('GET /app/mailman', {}).j.postvakken.find(function (x) { return x.id === 'gmail:david'; }).live_criteria;
+  assert.equal(c.dagen, 1);   // minder dan een dag aan besluiten telt als één dag
+  assert.equal(c.besluiten, 4);
+  assert.equal(c.intake_per_dag, 2); assert.equal(c.wachtrij_per_dag, 1); assert.equal(c.factuur_per_dag, 1); assert.equal(c.info_per_dag, 1);
+  assert.equal(c.facturen_in_info, 0); assert.equal(c.voldaan, true);
+});
+
+test('B5 patiëntpoort: met een (ongelezen) bijlage geen eigen-post-uitzondering', () => {
+  const gezien = [];
+  const spion = { beoordeel: function (s) { gezien.push(s); return poort.beoordeel(s); } };
+  const { mm } = nieuweKamer({ marker: spion });
+  draai(mm, 'gmail:david', [mail({ bijlagen: [{ naam: 'brief.pdf', mime: 'application/pdf' }] }), mail()], { jev: function () { return jevAntwoord({}); } });
+  assert.deepEqual(gezien.map(function (s) { return s.ocr; }), [true, false]);
+});
+
+test('B5 een databank van mailman-1.0 krijgt de nieuwe kolommen; besluiten blijven', () => {
+  const { mm, dir } = nieuweKamer();
+  const m = mail({ labels: ['_AI_'] });
+  draai(mm, 'gmail:david', [m]);
+  mm._db.exec('ALTER TABLE besluit DROP COLUMN labels_tijd; ALTER TABLE ronde DROP COLUMN labels_ok; ALTER TABLE ronde DROP COLUMN labels_fout; ALTER TABLE postvak DROP COLUMN live_sinds;');
+  mm._db.close();
+  const mm2 = MM.maak({ dir, nu: function () { return klok; }, marker: poort, eigenAdressen: function () { return []; }, intakeDraden: function () { return new Set(); }, primair: function () { return true; } });
+  for (const [t, k] of [['besluit', 'labels_tijd'], ['ronde', 'labels_ok'], ['ronde', 'labels_fout'], ['postvak', 'live_sinds']]) assert.ok(mm2._db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k), t + '.' + k);
+  assert.equal(mm2._db.prepare('SELECT stroom FROM besluit WHERE gmail_id = ?').get(m.id).stroom, 'intake');
+  assert.equal(mm2.info().postvakken.find(function (x) { return x.id === 'gmail:david'; }).labels_gezet_24u, 0);
+});
+
+test('B5 labels en gezet mogen ná gedaan van dezelfde ronde (labeltak naast het afronden), niet na 30 minuten', () => {
+  const { mm, dir } = nieuweKamer();
+  const m = mail({ aan: ALIAS });
+  draai(mm, 'gmail:david', [m], { jev: function () { return jevAntwoord({ factuur: 0.95 }); } });
+  toestaan(dir, ['gmail:david']);
+  zetLive(mm);
+  const r = ronde(mm, 'gmail:david');
+  mm.n8n('POST /mailman/nieuw', { ronde: r.ronde, postvak: 'gmail:david', ids: [m.id], volledig: true });
+  assert.equal(mm.n8n('POST /mailman/gedaan', { ronde: r.ronde, postvak: 'gmail:david' }).j.geslaagd, true);
+  const l = mm.n8n('POST /mailman/labels', { ronde: r.ronde, postvak: 'gmail:david', ids: [m.id] });
+  assert.deepEqual(l.j.acties, [{ gmail_id: m.id, erbij: ['FACTUUR'], eraf: [] }]);
+  assert.equal(mm.n8n('POST /mailman/gezet', { ronde: r.ronde, postvak: 'gmail:david', resultaten: [{ gmail_id: m.id, erbij: ['FACTUUR'], ok: true }] }).j.telling.ok, 1);
+  assert.equal(mm.n8n('POST /mailman/stap1', { ronde: r.ronde, postvak: 'gmail:david', mails: [] }).status, 409, 'de rest van de ronde blijft dicht');
+  klok += 31 * 60000;
+  assert.equal(mm.n8n('POST /mailman/labels', { ronde: r.ronde, postvak: 'gmail:david', ids: [m.id] }).status, 409);
+  klok -= 31 * 60000;
+});

@@ -15536,8 +15536,9 @@ if (intake && SERVER_ECHT) { setTimeout(function () { intakeTik(); }, 120000).un
 // ── OVIS MailMan: de mailrouter vóór OVIS Intake, in de schaduw (wv1856, 28-10-2026; bouwplan vault "01_Ontwikkeling/OVIS MailMan -
 // mailrouter vóór OVIS Intake (bouwplan 27-10-2026).md" § O.2–O.10) ──
 // mailman.js beslist per binnengekomen Gmail-mail (Altijd in → Filter Weg → Filter In → Jev) naar welke stroom hij gaat en welke labels
-// hij zou krijgen; n8n "AI - MailMan" leest Gmail en roept Jev aan. In deze stap zet niemand iets in Gmail. Hier alleen de koppeling:
-// /mailman/{start,nieuw,stap1,stap2,gedaan} (n8n: Bearer uit MAILMAN_DIR/sleutels.json of het pod-geheim in de body; alleen de primaire
+// hij zou krijgen; n8n "AI - MailMan" leest Gmail en roept Jev aan. In stand schaduw zet niemand iets in Gmail; in stand live (B5, wv1973:
+// alleen na Davids knop met verse vingerafdruk en live_toegestaan in config.json) zet n8n de labels die /mailman/labels geeft, na zijn
+// eigen grens op label-ID, en meldt ze via /mailman/gezet. Hier alleen de koppeling: /mailman/{start,nieuw,stap1,stap2,labels,gezet,gedaan} (n8n: Bearer uit MAILMAN_DIR/sleutels.json of het pod-geheim in de body; alleen de primaire
 // kant), GET /app/mailman en POST /app/mailman/* na de app-poort, /health.mailman, en één keer per dag opruimen (namen na 14 dagen weg)
 // met hooguit één box-rij als er iets mis is. Intake-draden: alleen-lezen op intake.sqlite (bron + meta.thread_id).
 // Ontbreekt mailman.js in de release (terugrol), dan 404 en mailman.aan=false in /health.
@@ -15608,7 +15609,7 @@ function mailmanInfo() { if (!mailman) return { aan: false }; try { return Objec
 let mailmanDag = '';
 // Dezelfde zorg komt niet elke dag terug in de box (grondwet 10): alleen bij een andere set postvakken met zorgen, of na 7 dagen
 function mailmanZorgNieuw(z) {
-  const f = path.join(MAILMAN_DIR, 'zorgen-gemeld'), sleutel = z.map(function (x) { return x.replace(/\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/g, '').replace(/\d+ rondes/g, 'n rondes'); }).sort().join('|');
+  const f = path.join(MAILMAN_DIR, 'zorgen-gemeld'), sleutel = z.map(function (x) { return x.replace(/\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/g, '').replace(/\d+ rondes/g, 'n rondes').replace(/\d+ labels/g, 'n labels'); }).sort().join('|');
   let oud = {};
   try { oud = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { oud = {}; }
   if (oud.sleutel === sleutel && Date.now() - Number(oud.op || 0) < 7 * 86400000) return false;
@@ -15624,7 +15625,7 @@ function mailmanTik() {
   let z = [];
   try { z = mailman.zorgen(); } catch (e) { logError('mailman-zorgen', e); }
   if (!z.length || !mailmanZorgNieuw(z)) return;
-  ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS MailMan: rondes lopen niet (schaduw)\n- status: open\n- van: pod:mailman — bevinding_id mailman-ronde-' + t.datum +
+  ovisBoxRij('\n## [log] ' + t.klok + ' — OVIS MailMan: rondes of labels lopen niet\n- status: open\n- van: pod:mailman — bevinding_id mailman-ronde-' + t.datum +
     '\n- wat ik zag: ' + z.join('; ') + '\n- voorstel: n8n "AI - MailMan" nalopen (actief? fouten in de schedule-run?) en /health mailman; rondes in mailman.sqlite (tabel ronde)\n');
 }
 if (mailman && SERVER_ECHT) { setInterval(function () { mailmanTik(); }, 10 * 60000).unref(); }

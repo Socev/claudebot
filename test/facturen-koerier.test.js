@@ -40,6 +40,8 @@ function nepGmail(o) {
         const na = /after:(\d{4})\/(\d{2})\/(\d{2})/.exec(q), voor = /before:(\d{4})\/(\d{2})\/(\d{2})/.exec(q);
         const van = na ? na.slice(1).join('-') : '0000', tot = voor ? voor.slice(1).join('-') : '9999';
         lijst = g.mails.filter((m) => m.labels.includes('INBOX') && m.dag_lokaal >= van && m.dag_lokaal < tot);
+        // wv1973: de label-zoekvraag van MailMan (label:FACTUUR) ziet alleen mail met dat label; de gewone zoekvraag ziet die niet
+        lijst = /label:FACTUUR/.test(q) ? lijst.filter((m) => m.labels.includes('FACTUUR')) : lijst.filter((m) => !m.labels.includes('FACTUUR'));
       }
       // het luik geeft hooguit 25 (paginering doet de koerier door het venster te halveren)
       return { query: q, aantal: Math.min(25, lijst.length), mails: lijst.slice(0, 25).map((m) => Object.assign({}, m)) };
@@ -514,6 +516,32 @@ test('verzamelpostvak: uit → niet gelezen; aan → paginering (venster halvere
   const kr = JSON.parse(D.metaLees(t.fdb, 'koerier_ronde'));
   assert.equal(kr.ok, false);
   assert.match(kr.fout, /lees-luik/);
+});
+
+test('verzamelpostvak + MailMan (wv1973, bouwplan O.6): koerier_query_label kijkt 14 dagen terug, los van het venster van de gewone zoekvraag', async () => {
+  const t = opzet(), g = nepGmail();
+  const lev = t.fdb.db.prepare("SELECT l.id, i.iban FROM leverancier l JOIN leverancier_iban i ON i.leverancier = l.id WHERE l.naam = 'Leverancier A B.V.'").get();
+  const dag = K.plusDagen('2026-10-22', -10);   // ver buiten "laatste geslaagde ronde min 2 dagen", binnen 14 dagen
+  g.mails.push({ id: 'lab0000000000001', thread_id: 'lab0000000000001', van: 'facturen@leverancier-a.invalid', aan: 'iemand@voorbeeld.invalid', onderwerp: 'Uw factuur',
+    labels: ['INBOX', 'FACTUUR'], datum: dag + 'T08:00:00.000Z', datum_lokaal: dag + 'T10:00:00+02:00', dag_lokaal: dag });
+  g.bijlagen.lab0000000000001 = [{ naam: 'factuur-lab.pdf', mime: 'application/pdf', bytes: Z.pdf(['Leverancier A B.V.', 'Factuur', 'Factuurnummer: LAB-1', 'Factuurdatum: 12-10-2026',
+    'Totaal incl. btw: EUR 77,00', 'Huisartsenpraktijk Tolgaarde B.V.', 'IBAN ' + lev.iban]) }];
+  t.fdb.db.prepare("UPDATE bron SET actief = 1 WHERE soort = 'verzamelpostvak'").run();
+  const u0 = await t.ronde(g, NU);
+  assert.equal(u0.postvak.ok, true);
+  assert.equal(t.n("SELECT count(*) AS n FROM bericht WHERE message_id = 'lab0000000000001'"), 0, 'zonder koerier_query_label: niet gezocht');
+  assert.ok(!g.zoek.some((q) => /label:FACTUUR/.test(q)));
+  D.metaZet(t.fdb, 'koerier_query_label', 'label:FACTUUR has:attachment');
+  const u = await t.ronde(g, NU + 70 * MIN);
+  assert.equal(u.postvak.ok, true, JSON.stringify(u.postvak));
+  assert.equal(t.n("SELECT count(*) AS n FROM bericht WHERE message_id = 'lab0000000000001'"), 1);
+  const q = g.zoek.filter((x) => /label:FACTUUR/.test(x));
+  assert.ok(q.length >= 1);
+  assert.match(q[0], new RegExp('after:' + K.plusDagen('2026-10-22', -15).replace(/-/g, '/')));
+  // volgende ronde: niets dubbel
+  const u2 = await t.ronde(g, NU + 130 * MIN);
+  assert.equal(u2.postvak.aantallen.nieuw, 0);
+  assert.equal(t.n("SELECT count(*) AS n FROM bericht WHERE message_id = 'lab0000000000001'"), 1);
 });
 
 test('back-up: de eerste ronde na 02:00 (Nederlandse tijd) op een dag zonder back-up; daarna die dag niet meer', async () => {

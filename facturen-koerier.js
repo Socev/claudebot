@@ -473,14 +473,22 @@ async function leesPostvak(fdb, bron, io, pdf, o) {
   if (laatst) { const l = plusDagen(dagAmsterdam(Date.parse(laatst)), -2); if (l > van) van = l; }
   const mails = new Map();
   let afgekapt = false;
-  async function venster(a, b, diepte) {
-    const lijst = await zoek(io, query + ' after:' + gmailDag(a) + ' before:' + gmailDag(b));
+  async function venster(q, a, b, diepte) {
+    const lijst = await zoek(io, q + ' after:' + gmailDag(a) + ' before:' + gmailDag(b));
     const dagen = K.dagenTussen(a, b);
-    if (lijst.length >= 25 && dagen > 1 && diepte < 8) { const m = plusDagen(a, Math.floor(dagen / 2)); await venster(a, m, diepte + 1); await venster(m, b, diepte + 1); return; }
+    if (lijst.length >= 25 && dagen > 1 && diepte < 8) { const m = plusDagen(a, Math.floor(dagen / 2)); await venster(q, a, m, diepte + 1); await venster(q, m, b, diepte + 1); return; }
     if (lijst.length >= 25) afgekapt = true;
     for (const m of lijst) if (!mails.has(m.id)) mails.set(m.id, m);
   }
-  try { await venster(plusDagen(van, -1), plusDagen(vandaag, 1), 0); }
+  // wv1973 (OVIS MailMan B5, bouwplan O.6): MailMan zet het label FACTUUR soms later dan de ontvangst (Jev-wacht, inhaalslag, live zetten),
+  // dus buiten het venster hierboven (laatste ronde min 2 dagen). Een tweede zoekvraag (meta koerier_query_label, bv. 'label:FACTUUR
+  // has:attachment') kijkt altijd GRENS.bronDagen terug; wat al gelezen is valt er hieronder af (bericht.message_id), dezelfde pdf via
+  // +facturen én het label geeft in de app "dubbel" op sha256. Geen meta = als vóór wv1973.
+  const labelQuery = D.metaLees(fdb, 'koerier_query_label');
+  try {
+    await venster(query, plusDagen(van, -1), plusDagen(vandaag, 1), 0);
+    if (labelQuery) await venster(labelQuery, plusDagen(vandaag, -GRENS.bronDagen - 1), plusDagen(vandaag, 1), 0);
+  }
   catch (e) { hartslag(fdb, 'verzamelpostvak', bron.naam, o, { ok: false, aantallen: tel, fouten: [{ wat: 'mail_zoeken', melding: foutSoort(e) }] }); return { ok: false, fout: 'zoeken', aantallen: tel }; }
   if (afgekapt) nietGelezen.push('meer dan 25 mails op één dag');
   const bekend = fdb.db.prepare('SELECT 1 FROM bericht WHERE bron = ? AND message_id = ?');
