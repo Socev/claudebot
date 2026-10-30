@@ -168,7 +168,7 @@ test('september: PayPal per rekening met de betaling erachter, andere PayPal-rek
   assert.match(tekst, /WD-2026-08/, 'factuurnummer uit het archief');
   assert.match(tekst, /USD 38,50/);
   assert.match(tekst, /€ 49,92/, 'subtotaal Tolgaarde = 15,12 + 34,80');
-  assert.match(tekst, /niet te specificeren/);
+  assert.match(tekst, /andere PayPal-rekening/, 'PayPal ingelezen tot 2-10: de post van 25-9 kent deze rekening echt niet');
   assert.match(tekst, /€ 22,32/, 'Groenhouten: andere PayPal-rekening');
   assert.match(tekst, /rekeningoverzicht september 2026/);
   assert.match(tekst, /€ 45,00/);
@@ -204,10 +204,13 @@ test('oktober zonder volledig ICS-overzicht: creditcard "nog niet aangeleverd"; 
   assert.equal(u.j.specificatie.status, 'klaar');
   assert.equal(u.j.specificatie.ics_ontbrak, true);
   assert.equal(t.R.maandspec.concept(t.fdb, t.rol, '2026-10', { nu: nu + 3000, primair: true }).j.code, 'al_klaar');
+  assert.equal(t.R.maandspec.concept(t.fdb, t.rol, '2026-10', { nu: nu + 3000, primair: true, nagekomen: true }).j.code, 'geen_aanvulling', 'creditcard nog niet binnen');
+  assert.equal(t.R.maandspec.concept(t.fdb, t.rol, '2026-10', { nu: nu + 3000, primair: true, nogmaals: true, verwacht: 'mislukt' }).j.code, 'stand_veranderd', 'ronde met een oude stand');
   let plan = t.R.maandspec.plan(t.fdb, nu + 4000, '2026-10');
   assert.equal(plan.vorige.maand, '2026-10');
   assert.equal(plan.vorige.binnen, false);
   assert.equal(plan.vorige.nagekomen_kan, false);
+  assert.equal(plan.vorige.paypal_klaar, false, 'PayPal ingelezen tot 2-10, niet tot in november');
   // David uploadt het volledige overzicht in de app
   const bytes = csv(ICS2);
   const up = t.R.app(t.fdb, { methode: 'POST', pad: '/app/facturen/upload', d: { beurt: 'fac-proef-0001', n: 1 }, rol: t.rol, primair: true, nu: nu + 5000,
@@ -219,6 +222,7 @@ test('oktober zonder volledig ICS-overzicht: creditcard "nog niet aangeleverd"; 
   plan = t.R.maandspec.plan(t.fdb, nu + 6000, '2026-10');
   assert.equal(plan.vorige.binnen, true);
   assert.equal(plan.vorige.nagekomen_kan, true);
+  assert.deepEqual(plan.nagekomen, ['2026-10']);
   assert.equal(plan.kaarten.find((k) => k.maand === '2026-10').binnen, true);
   const c2 = t.R.maandspec.concept(t.fdb, t.rol, '2026-10', { nu: nu + 7000, primair: true, nagekomen: true, aanleiding: 'nagekomen' });
   assert.equal(c2.status, 200, JSON.stringify(c2.j));
@@ -247,6 +251,27 @@ test('ICS-kaart: open vanaf 3 dagen na de incasso zolang het overzicht ontbreekt
   assert.equal(nov.incasso_eerste, null); assert.equal(nov.open_vanaf, null);
   // vanaf: geen kaart voor een maand ervóór
   assert.equal(t.R.maandspec.plan(t.fdb, Date.parse('2026-10-12T08:00:00Z'), '2026-10').kaarten.some((k) => k.maand === '2026-09'), false);
+});
+
+test('PayPal nog niet ingelezen: posten "nog niet gekoppeld", nooit "andere PayPal-rekening"; maand zonder incasso = geen kaartgebruik', () => {
+  const t = opzet();
+  t.fdb.db.prepare("DELETE FROM meta WHERE sleutel = 'paypal_laatste'").run();
+  t.fdb.db.prepare('UPDATE paypal_regel SET bank_transactie = NULL').run();
+  t.fdb.db.prepare('DELETE FROM paypal_regel').run();
+  const nu = Date.parse('2026-10-05T08:00:00Z');
+  const r = t.R.app(t.fdb, { methode: 'POST', pad: '/app/facturen/maand-specificatie', d: { maand: '2026-09' }, rol: t.rol, primair: true, nu });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  const tekst = pdfTekst(Buffer.from(r.j.bestand.inhoud, 'base64'));
+  assert.doesNotMatch(tekst, /andere PayPal-rekening/);
+  assert.match(tekst, /nog niet gekoppeld/);
+  assert.match(tekst, /PayPal bijgewerkt tot\nnog niet ingelezen/);
+  const c = t.R.maandspec.concept(t.fdb, t.rol, '2026-09', { nu, primair: true });
+  assert.match(c.j.bericht, /nog niet gekoppeld; volgt/);
+  assert.doesNotMatch(c.j.bericht, /andere PayPal-rekening/);
+  assert.equal(t.R.maandspec.plan(t.fdb, nu, '2026-08').vorige.paypal_klaar, false);
+  // augustus: geen regels en geen incasso op de bank
+  const ov = t.R.app(t.fdb, { methode: 'GET', pad: '/app/facturen/maand-specificatie', rol: t.rol, primair: true, nu: Date.parse('2026-10-05T08:00:00Z') });
+  assert.deepEqual(ov.j.maanden.find((m) => m.maand === '2026-08').creditcard, [{ kaart: '…0000', status: 'geen', transacties: 0 }]);
 });
 
 test('ICS-upload: alleen de eigenaar, niet als factuur, een kaartnummer weigert het hele bestand', () => {

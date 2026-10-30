@@ -15316,7 +15316,7 @@ function facturenMaandspecBox(fdb, maand, kop, tekst) {
 async function facturenMaandspecConcept(fdb, rol, maand, o) {
   try {
     if (process.env.FACTUREN_MAANDSPEC === 'uit') return { status: 409, j: { ok: false, fout: 'de maandspecificatie staat uit op de pod; download de PDF' } };
-    const v = facturenRoutes.maandspec.concept(fdb, rol, maand, { nu: Date.now(), primair: rolPrimair(), nogmaals: !!o.nogmaals, nagekomen: !!o.nagekomen, aanleiding: o.aanleiding });
+    const v = facturenRoutes.maandspec.concept(fdb, rol, maand, { nu: Date.now(), primair: rolPrimair(), nogmaals: !!o.nogmaals, nagekomen: !!o.nagekomen, verwacht: o.verwacht || null, aanleiding: o.aanleiding });
     if (v.status !== 200) return v;
     if (v.j.klaar === false) return { status: 200, j: { ok: true, specificatie: { status: 'mislukt', reden: v.j.reden } } };
     let uit;
@@ -15357,7 +15357,15 @@ async function facturenMaandspecKaarten(plan) {
       }
       if (p || !k.open_vanaf || plan.vandaag < k.open_vanaf) continue;
       const r = await appSbRpc('mk_voor_jou_zet', { p: facturenRoutes.maandspec.kaart({ sleutel: k.sleutel, laatste4: k.laatste4, maand: k.maand, incasso_eerste: k.incasso_eerste, nuKort: bankNuKort() }) });
-      if (r && r.sleutel) uit.gezet.push(k.sleutel); else uit.fouten++;
+      if (r && r.sleutel) uit.gezet.push(k.sleutel); else { uit.fouten++; continue; }
+      // een oudere open kaart van dezelfde kaart gaat op in de nieuwe: één upload dekt beide maanden (review wv2060 KAN 4)
+      for (const [sl, q] of punten) {
+        if (sl === k.sleutel || sl.indexOf('ics-upload-' + k.laatste4 + '-') !== 0 || sl >= k.sleutel || (q.status !== 'open' && q.status !== 'later')) continue;
+        try {
+          await appSbRpc('mk_voor_jou_status', { p_sleutel: sl, p_van: q.status, p_naar: 'samengevoegd', p_door: 'agent', p_bewijs: null, p_samengevoegd_in: k.sleutel, p_reden: 'facturen-maandspec: nieuwe ICS-kaart' });
+          q.status = 'samengevoegd'; uit.dicht.push(sl);
+        } catch (e) { uit.fouten++; logError('facturen-maandspec-kaart', e); }
+      }
       if (r && r.voor_jou && r.voor_jou.geweigerd) logError('facturen-maandspec-kaart', new Error('veld geweigerd: ' + JSON.stringify(r.voor_jou.geweigerd).slice(0, 120)));
     } catch (e) { uit.fouten++; logError('facturen-maandspec-kaart', e); }
   }
@@ -15398,22 +15406,29 @@ async function facturenMaandspecRonde() {
       finally { facturenMaandspecStaat.kaartBezig = false; }
     }
     const v = plan.vorige, dag = Number(plan.vandaag.slice(8, 10)), st = v.stand;
+    const rol = facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'pod (maandronde)' });
+    // een 409 omdat de stand net veranderde (David drukte, al klaar, bezig) is niets te doen, geen storing (review wv2060 KAN 1)
+    const NIETS = ['bezig', 'al_klaar', 'misschien_al', 'stand_veranderd', 'geen_aanvulling'];
+    const meld = function (maand, c) {
+      if (c.status === 409 && c.j && NIETS.includes(c.j.code)) return { maand: maand, status: c.j.code };
+      const s = c.j && c.j.specificatie ? c.j.specificatie.status : 'fout';
+      if (s !== 'klaar') facturenMaandspecBox(fdb, maand, s === 'onbekend' ? 'concept onbekend' : 'concept niet klaargezet', (c.j && (c.j.fout || (c.j.specificatie && c.j.specificatie.reden))) || s);
+      return { maand: maand, status: s, ics_ontbrak: c.j && c.j.ics_ontbrak || undefined };
+    };
     if (v.maand >= MAANDSPEC_VANAF && dag >= MAANDSPEC_DAG) {
-      const rol = facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'pod (maandronde)' });
-      // eerst als de PayPal-ronde van vandaag slaagde (de posten van de laatste dagen van de maand zijn er dan); uiterlijk de 6e toch
-      const pp = facturenPaypalStaat.laatste;
-      const ppVers = !!(pp && pp.ok && String(pp.op || '').slice(0, 10) === new Date(nuMs).toISOString().slice(0, 10));
-      const opnieuw = st.status === 'mislukt' && dag <= MAANDSPEC_HERHAAL_TOT && String(st.op || '').slice(0, 10) < new Date(nuMs).toISOString().slice(0, 10);
-      let c = null;
-      if ((st.status === 'geen' || opnieuw) && (ppVers || dag >= MAANDSPEC_PAYPAL_UITERLIJK || !facturenPaypal || process.env.FACTUREN_PAYPAL === 'uit')) c = await facturenMaandspecConcept(fdb, rol, v.maand, { aanleiding: 'ronde', nogmaals: opnieuw });
-      else if (v.nagekomen_kan) c = await facturenMaandspecConcept(fdb, rol, v.maand, { aanleiding: 'nagekomen', nagekomen: true });
-      else if (st.status === 'geen') uit.wacht = 'PayPal-ronde van vandaag nog niet geslaagd';
-      if (c) {
-        const s = c.j && c.j.specificatie ? c.j.specificatie.status : 'fout';
-        uit.concept = { maand: v.maand, status: s, ics_ontbrak: c.j && c.j.ics_ontbrak || undefined };
-        if (s !== 'klaar') facturenMaandspecBox(fdb, v.maand, s === 'onbekend' ? 'concept onbekend' : 'concept niet klaargezet', (c.j && (c.j.fout || (c.j.specificatie && c.j.specificatie.reden))) || s);
-      } else if (st.status === 'onbekend') facturenMaandspecBox(fdb, v.maand, 'concept onbekend', 'het mailluik gaf geen bevestiging; misschien staat het concept er toch');
+      // eerst als PayPal tot in deze maand is ingelezen (review wv2060 MOET 1); uiterlijk de 6e toch, dan staan de posten als "nog niet gekoppeld"
+      const klaar = v.paypal_klaar || dag >= MAANDSPEC_PAYPAL_UITERLIJK;
+      // opnieuw na een zeker mislukt eerste concept, één keer per dag tot de 10e (een mislukte aanvulling: box-rij, niet stil opnieuw)
+      const opnieuw = st.status === 'mislukt' && !st.was_nagekomen && dag <= MAANDSPEC_HERHAAL_TOT && String(st.op || '').slice(0, 10) < new Date(nuMs).toISOString().slice(0, 10);
+      if ((st.status === 'geen' || opnieuw) && klaar) {
+        if (!v.paypal_klaar) facturenMaandspecBox(fdb, v.maand, 'PayPal niet bijgewerkt', 'de PayPal-koppeling is niet tot in deze maand ingelezen; het concept ging met PayPal-posten als "nog niet gekoppeld"');
+        uit.concept = meld(v.maand, await facturenMaandspecConcept(fdb, rol, v.maand, { aanleiding: 'ronde', nogmaals: opnieuw, verwacht: opnieuw ? 'mislukt' : 'geen' }));
+      } else if (st.status === 'geen') uit.wacht = 'PayPal nog niet tot in deze maand ingelezen';
+      else if (st.status === 'onbekend') facturenMaandspecBox(fdb, v.maand, 'concept onbekend', 'het mailluik gaf geen bevestiging; misschien staat het concept er toch');
     }
+    // de creditcard kwam na een concept zonder creditcard binnen: één aanvulling (hooguit één per ronde; drie maanden terug)
+    const nm = (plan.nagekomen || []).find(function (m) { return m >= MAANDSPEC_VANAF; });
+    if (nm && !uit.concept) uit.aanvulling = meld(nm, await facturenMaandspecConcept(fdb, rol, nm, { aanleiding: 'nagekomen', nagekomen: true, verwacht: 'klaar' }));
     facturenMaandspecStaat.laatste = Object.assign({ op: new Date(nuMs).toISOString() }, uit);
     return Object.keys(uit).length ? uit : null;
   } finally { facturenMaandspecStaat.bezig = false; }

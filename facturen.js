@@ -1235,7 +1235,10 @@ function msStand(fdb, maand, nu) {
   if (!a) return { status: 'geen' };
   const na = json(a.na, {}) || {};
   if (a.wat === 'maandspec_klaar') return { status: 'klaar', op: a.wanneer, ics_ontbrak: !!na.ics_ontbrak, nagekomen: !!na.nagekomen };
-  if (a.wat === 'maandspec_mislukt') return { status: na.onzeker ? 'onbekend' : 'mislukt', op: a.wanneer, reden: na.reden || null };
+  if (a.wat === 'maandspec_mislukt') {
+    const v = fdb.db.prepare("SELECT na FROM audit WHERE object_soort = 'maandspec' AND object_id = ? AND wat = 'maandspec_aangevraagd' ORDER BY id DESC LIMIT 1").get(maand);
+    return { status: na.onzeker ? 'onbekend' : 'mislukt', op: a.wanneer, reden: na.reden || null, was_nagekomen: !!(v && (json(v.na, {}) || {}).nagekomen) };
+  }
   return { status: nu - Date.parse(a.wanneer) < SPEC_BEZIG_MS ? 'bezig' : 'onbekend', op: a.wanneer };
 }
 function msFactuurNummer(fdb) {
@@ -1262,7 +1265,8 @@ function icsMaand(fdb, kaart, maand) {
   const tot = fdb.db.prepare('SELECT max(periode_tot) AS t FROM kaart_bestand WHERE kaart = ?').get(kaart.id).t || null;
   const som = regels.reduce((s, r) => s + r.bedrag_centen, 0), bankNetto = -b.reduce((s, x) => s + x.bedrag_centen, 0);
   const binnen = later || (regels.length > 0 && b.length > 0 && som === bankNetto);
-  const status = regels.length ? (binnen ? 'sluit' : b.length ? 'niet_aangeleverd' : 'nog_niet_geincasseerd') : later && !b.length ? 'geen' : 'niet_aangeleverd';
+  // geen regels en geen incasso: ICS boekte dit overzicht niets af (review wv2060 ZOU 2), ook als er (nog) geen later overzicht is
+  const status = regels.length ? (binnen ? 'sluit' : b.length ? 'niet_aangeleverd' : 'nog_niet_geincasseerd') : !b.length ? 'geen' : 'niet_aangeleverd';
   return { regels, bank: b, incasso_eerste: b.length ? b[0].datum : null, ingelezen_tot: tot, binnen, status };
 }
 // De invoer voor facturen-maandspec.js opbouw (alleen lezen).
@@ -1354,10 +1358,14 @@ function maandSpecConcept(fdb, r, maand, o) {
     return { klaar: false, reden: e.fout };
   }
   const { s } = m;
+  if (o.nagekomen && s.g.ics_ontbreekt) weiger(409, 'geen aanvulling: de creditcard is nog niet compleet binnen', { code: 'geen_aanvulling' });
   const aan = specAan(fdb, s.g.entiteiten.length === 1 ? s.g.entiteiten[0] : 'tolgaarde');
   return D.transactie(fdb, function () {
     const st = msStand(fdb, maand, nu);
     if (st.status === 'bezig') weiger(409, 'de specificatie wordt al klaargezet; kijk zo in Gmail bij Concepten', { code: 'bezig' });
+    // review wv2060 ZOU 1: de ronde beslist op een stand van even ervoor; is die intussen veranderd (David drukte net), dan niets
+    if (o.verwacht && st.status !== o.verwacht) weiger(409, 'de stand van de maandspecificatie veranderde net', { code: 'stand_veranderd' });
+    if (o.nagekomen && !(st.status === 'klaar' && st.ics_ontbrak && !st.nagekomen)) weiger(409, 'geen aanvulling nodig (er ging geen concept zonder creditcard, of de aanvulling staat er al)', { code: 'geen_aanvulling' });
     if (!o.nogmaals && !o.nagekomen && st.status === 'klaar') weiger(409, 'er staat al een concept met de maandspecificatie in Gmail', { code: 'al_klaar', op: st.op });
     if (!o.nogmaals && st.status === 'onbekend') weiger(409, 'er is al een concept aangevraagd, maar de bevestiging kwam niet terug; kijk eerst in Gmail bij Concepten', { code: 'misschien_al', op: st.op });
     const wanneer = nuIso(nu);
@@ -1366,7 +1374,7 @@ function maandSpecConcept(fdb, r, maand, o) {
       return { klaar: false, reden: 'geen adres van de boekhouder in Facturen' };
     }
     D.audit(fdb, { wie: r.wie, wat: 'maandspec_aangevraagd', object_soort: 'maandspec', object_id: maand, entiteit: s.g.entiteiten.length === 1 ? s.g.entiteiten[0] : null,
-      na: { aanleiding: o.aanleiding || null, sha256: s.sha256, nogmaals: !!o.nogmaals, nagekomen: !!o.nagekomen, ics_ontbrak: s.g.ics_ontbreekt,
+      na: { aanleiding: o.aanleiding || null, aan, sha256: s.sha256, nogmaals: !!o.nogmaals, nagekomen: !!o.nagekomen, ics_ontbrak: s.g.ics_ontbreekt,
         paypal_posten: s.g.paypal ? s.g.paypal.aantal : null, kaartregels: s.g.kaarten.reduce((t, k) => t + k.aantal, 0) }, wanneer });
     return { maand, aan, onderwerp: s.mail.onderwerp, bericht: s.mail.bericht, ics_ontbrak: s.g.ics_ontbreekt,
       bijlage: { naam: s.naam, mime: 'application/pdf', inhoud_base64: s.pdf.toString('base64'), sha256: s.sha256 } };
@@ -1391,21 +1399,33 @@ function maandSpecUitkomst(fdb, r, maand, u, nu) {
  */
 function maandSpecPlan(fdb, nu, vanaf) {
   if (!MS) return null;
-  const vandaag = dagAmsterdam(nu), deze = vandaag.slice(0, 7), vorige = MS.vorigeMaand(deze);
+  const vandaag = dagAmsterdam(nu), deze = vandaag.slice(0, 7), vorige = MS.vorigeMaand(deze), twee = MS.vorigeMaand(vorige), drie = MS.vorigeMaand(twee);
   const kaarten = [];
   const lijst = CC && fdb.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kaart'").get() ? fdb.db.prepare('SELECT * FROM kaart ORDER BY laatste4').all() : [];
-  let vorigeBinnen = true;
-  for (const k of lijst) {
-    for (const m of [vorige, deze]) {
-      if (vanaf && m < vanaf) continue;
+  const binnen = {};   // maand → alle kaarten compleet (of geen kaartgebruik)
+  // review wv2060 ZOU 3: drie maanden terug, zodat een late upload de kaart nog sluit en een aanvulling nog kan
+  for (const m of [drie, twee, vorige, deze]) {
+    if (vanaf && m < vanaf) continue;
+    binnen[m] = true;
+    for (const k of lijst) {
       const x = icsMaand(fdb, k, m);
-      if (m === vorige && !x.binnen && x.status !== 'geen') vorigeBinnen = false;
-      kaarten.push({ sleutel: 'ics-upload-' + k.laatste4 + '-' + m, laatste4: k.laatste4, maand: m, incasso_eerste: x.incasso_eerste, binnen: x.binnen || x.status === 'geen',
+      const ok = x.binnen || x.status === 'geen';
+      if (!ok) binnen[m] = false;
+      kaarten.push({ sleutel: 'ics-upload-' + k.laatste4 + '-' + m, laatste4: k.laatste4, maand: m, incasso_eerste: x.incasso_eerste, binnen: ok,
         open_vanaf: x.incasso_eerste ? K.plusDagen(x.incasso_eerste, MS_KAART_NA_DAGEN) : null });
     }
   }
+  // PayPal ingelezen tot in deze maand (dus de vorige maand compleet)? Zonder PayPal-tabel of -module: niets om op te wachten.
+  let paypalKlaar = true;
+  if (FP && fdb.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'paypal_regel'").get()) {
+    let l = null;
+    try { l = JSON.parse(D.metaLees(fdb, 'paypal_laatste') || 'null'); } catch (e) { l = null; }
+    const t = l ? Date.parse(String(l.ververst || l.op || '')) : NaN;
+    paypalKlaar = Number.isFinite(t) && dagAmsterdam(t) >= deze + '-01';
+  }
   const st = msStand(fdb, vorige, nu);
-  return { vandaag, vorige: { maand: vorige, stand: st, binnen: vorigeBinnen, nagekomen_kan: st.status === 'klaar' && st.ics_ontbrak && !st.nagekomen && vorigeBinnen }, kaarten };
+  const nagekomen = [vorige, twee, drie].filter((m) => (!vanaf || m >= vanaf) && binnen[m]).filter((m) => { const s = msStand(fdb, m, nu); return s.status === 'klaar' && s.ics_ontbrak && !s.nagekomen; });
+  return { vandaag, vorige: { maand: vorige, stand: st, binnen: binnen[vorige] !== false, paypal_klaar: paypalKlaar, nagekomen_kan: nagekomen.includes(vorige) }, nagekomen, kaarten };
 }
 // Voor de bankcontrole: per PmtInf de eigen rekening, uitvoerdatum, totaal en regels (batches van de laatste 400 dagen).
 function sepaVoorControle(fdb, van) {
@@ -2558,10 +2578,13 @@ function isIcsCsv(bytes) {
 // Inlezen voor de kaart (facturen-creditcard.js: hele bestand of niets, idempotent op regel, kaartnummer geweigerd); alleen de eigenaar.
 function verwerkIcs(fdb, r, bytes, naam, nu) {
   eisEigenaar(r);
-  let x;
-  try { x = CC.inlezen(fdb, null, bytes, { wie: r.wie, herkomst: 'app-upload: ' + kort(naam || 'ics.csv', 200), naam: naam || null, nu }); }
-  catch (e) { if (e instanceof CC.KaartFout) weiger(e.code === 'kaartnummer' ? 422 : 415, 'ICS-overzicht geweigerd: ' + kort(e.uitleg, 160), { code: 'creditcard_' + e.code }); throw e; }
-  const k = fdb.db.prepare('SELECT laatste4 FROM kaart LIMIT 1').get();
+  let x, l4 = null;
+  try {
+    // de kaart uit het bestand zelf (laatste 4 van de eerste regel met een kaart; review wv2060 KAN 5: bij een tweede kaart niet weigeren)
+    l4 = (CC.leesIcsCsv(bytes).regels.find((g) => g.laatste4) || {}).laatste4 || null;
+    x = CC.inlezen(fdb, l4, bytes, { wie: r.wie, herkomst: 'app-upload: ' + kort(naam || 'ics.csv', 200), naam: naam || null, nu });
+  } catch (e) { if (e instanceof CC.KaartFout) weiger(e.code === 'kaartnummer' ? 422 : 415, 'ICS-overzicht geweigerd: ' + kort(e.uitleg, 160), { code: 'creditcard_' + e.code }); throw e; }
+  const k = l4 ? { laatste4: l4 } : fdb.db.prepare('SELECT laatste4 FROM kaart LIMIT 1').get();
   return { soort: 'creditcard', al_bekend: !!x.al_bekend, kaart: k ? '…' + k.laatste4 : null, periode: x.periode, regels: x.regels, nieuw: x.nieuw, al_bekend_regels: x.al_bekend_regels };
 }
 function upload(fdb, r, d, nu, o) {

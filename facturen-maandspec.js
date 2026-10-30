@@ -34,7 +34,7 @@ function origineel(valuta, c) {
   return valuta + ' ' + (c < 0 ? '-' : '') + heel + ',' + String(n % 100).padStart(2, '0');
 }
 
-const PP_STATUS = { sluit: null, saldo: 'deels via PayPal-saldo', open: 'nog niet gekoppeld', niet_in_paypal: 'niet te specificeren' };
+const PP_STATUS = { sluit: null, saldo: 'deels via PayPal-saldo', open: 'nog niet gekoppeld', niet_in_paypal: 'andere PayPal-rekening' };
 const ICS_STATUS = ['sluit', 'verschil', 'nog_niet_geincasseerd', 'niet_aangeleverd', 'geen'];
 
 /*
@@ -51,19 +51,23 @@ function opbouw(x) {
   if (!x || !MAAND_RE.test(String(x.maand || ''))) throw new MaandFout('maand ongeldig');
   const paypal = x.paypal == null ? null : { bijgewerkt: isoDag(x.paypal.bijgewerkt) ? x.paypal.bijgewerkt : null, rekeningen: [] };
   if (paypal) {
+    // review wv2060 MOET 1: "andere PayPal-rekening" alleen als de PayPal-gegevens tot na die bankdatum zijn ingelezen; anders is de post
+    // gewoon nog niet gekoppeld (lege of achterlopende PayPal-koppeling). volledig = bijgewerkt tot in de volgende maand.
+    paypal.volledig = !!paypal.bijgewerkt && paypal.bijgewerkt >= volgendeMaand(x.maand) + '-01';
     for (const r of x.paypal.rekeningen || []) {
       const posten = (r.posten || []).map((p) => {
         if (!isoDag(p.datum) || !geheel(p.bank_centen) || !(p.status in PP_STATUS)) throw new MaandFout('PayPal-post ongeldig');
         if (p.datum.slice(0, 7) !== x.maand) throw new MaandFout('PayPal-post buiten de maand');
+        const status = p.status === 'niet_in_paypal' && !(paypal.bijgewerkt && paypal.bijgewerkt >= p.datum) ? 'open' : p.status;
         const wat = [schoon(p.tegenpartij, 100), schoon(p.onderwerp, 160)].filter(Boolean).join(' — ');
-        return { datum: p.datum, bedrag_centen: -p.bank_centen, status: p.status, opmerking: PP_STATUS[p.status],
-          omschrijving: wat || (p.status === 'niet_in_paypal' || p.status === 'open' ? 'PayPal Europe' : 'PayPal-betaling'),
+        return { datum: p.datum, bedrag_centen: -p.bank_centen, status, opmerking: PP_STATUS[status],
+          omschrijving: (p.bank_centen > 0 ? 'Terugstorting: ' : '') + (wat || (status === 'niet_in_paypal' || status === 'open' ? 'PayPal Europe' : 'PayPal-betaling')),
           origineel: geheel(p.bedrag_centen) ? origineel(p.valuta, -p.bedrag_centen) : '', factuur: schoon(p.factuur, 60) || '' };
       }).sort((a, b) => (a.datum < b.datum ? -1 : a.datum > b.datum ? 1 : 0));
       if (!posten.length) continue;
       paypal.rekeningen.push({ entiteit: r.entiteit, entiteit_naam: schoon(r.entiteit_naam, 120) || r.entiteit, rekening_eind: String(r.rekening_eind || '').slice(-4),
         posten, aantal: posten.length, totaal_centen: posten.reduce((s, p) => s + p.bedrag_centen, 0),
-        zonder_spec: posten.filter((p) => p.status === 'niet_in_paypal' || p.status === 'open').length });
+        andere: posten.filter((p) => p.status === 'niet_in_paypal').length, open: posten.filter((p) => p.status === 'open').length });
     }
     paypal.aantal = paypal.rekeningen.reduce((s, r) => s + r.aantal, 0);
     paypal.totaal_centen = paypal.rekeningen.reduce((s, r) => s + r.totaal_centen, 0);
@@ -112,7 +116,7 @@ function mail(g, o) {
   else if (!g.paypal.rekeningen.length) r.push('- PayPal: geen PayPal-posten op de bank in ' + g.maand_naam + '.');
   else for (const rk of g.paypal.rekeningen) {
     r.push('- PayPal op …' + rk.rekening_eind + (g.entiteiten.length > 1 ? ' (' + rk.entiteit_naam + ')' : '') + ': ' + rk.aantal + (rk.aantal === 1 ? ' post' : ' posten') + ', samen ' + eur(rk.totaal_centen) +
-      (rk.zonder_spec ? ' (' + rk.zonder_spec + ' zonder specificatie: komt van een andere PayPal-rekening)' : '') + '.');
+      (rk.andere ? ' (' + rk.andere + ' van een andere PayPal-rekening, zonder specificatie)' : '') + (rk.open ? ' (' + rk.open + ' nog niet gekoppeld; volgt)' : '') + '.');
   }
   for (const k of g.kaarten) {
     if (k.status === 'niet_aangeleverd') r.push('- Creditcard ICS …' + k.laatste4 + ', overzicht ' + g.maand_naam + ': heb ik nog niet aangeleverd; die stuur ik na.');
@@ -165,7 +169,7 @@ function maakPdf(g, o) {
   txt('F2', 13, M, y, 'Specificatie PayPal en creditcard — ' + g.maand_naam); y -= 18;
   txt('F1', 9, M, y, 'Wat er achter de PayPal-posten en de creditcardincasso op de bank zit. Bedragen in euro; + is een uitgave.', false, kCaps); y -= 20;
   const kv = [['Maand', g.maand_naam], ['Gemaakt op', datumNl(isoDag(o.gemaakt_dag) ? o.gemaakt_dag : '')]];
-  if (g.paypal) kv.push(['PayPal bijgewerkt tot', g.paypal.bijgewerkt ? datumNl(g.paypal.bijgewerkt) : 'onbekend']);
+  if (g.paypal) kv.push(['PayPal bijgewerkt tot', g.paypal.bijgewerkt ? datumNl(g.paypal.bijgewerkt) + (g.paypal.volledig ? '' : ' (nog niet de hele maand)') : 'nog niet ingelezen']);
   for (const [k, v] of kv) { txt('F1', 9, M, y, k); txt('F2', 9, M + 120, y, pas('F2', 9, v, BREED - 120)); y -= 13; }
   y -= 12;
   const kopRegel = () => {
@@ -210,7 +214,8 @@ function maakPdf(g, o) {
     blok(kop, rk.aantal + (rk.aantal === 1 ? ' post' : ' posten') + ' · ' + eur(rk.totaal_centen), rk.posten,
       (p) => [dagKort(p.datum), p.omschrijving + (p.opmerking ? ' (' + p.opmerking + ')' : ''), p.origineel, p.factuur, eur(p.bedrag_centen)], kop + ' (vervolg)');
     subtotaal('Subtotaal = de PayPal-posten op …' + rk.rekening_eind + ' in ' + g.maand_naam, rk.totaal_centen);
-    if (rk.zonder_spec) noot(rk.zonder_spec + (rk.zonder_spec === 1 ? ' post' : ' posten') + ' zonder specificatie: die nummers kent deze PayPal-rekening niet (een andere PayPal-rekening of een verificatiebedrag).');
+    if (rk.andere) noot(rk.andere + (rk.andere === 1 ? ' post' : ' posten') + ' zonder specificatie: die nummers kent deze PayPal-rekening niet (een andere PayPal-rekening of een verificatiebedrag).');
+    if (rk.open) noot(rk.open + (rk.open === 1 ? ' post is' : ' posten zijn') + ' nog niet aan een PayPal-betaling gekoppeld' + (g.paypal.bijgewerkt ? ' (PayPal ingelezen tot ' + datumNl(g.paypal.bijgewerkt) + ')' : ' (PayPal nog niet ingelezen)') + '.', kTitel);
     y -= 10;
   }
   y -= 6;
