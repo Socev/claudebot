@@ -66,15 +66,25 @@ function grenzen(vandaag) {
  * de eerstvolgende werkdag). Anders de vervaldatum; valt die niet op een werkdag, dan de werkdag ervóór (nooit te laat), nooit vóór vroegst.
  * → { datum, bron: 'gekozen'|'gekozen_voorbij'|'vervaldatum'|'werkdag_ervoor'|'eerstvolgende_werkdag', te_ver: bool }
  */
+// Belastingdienst herkennen: vaste ontvangrekening of de naam van de leverancier. BD_MARGE = bankwerkdagen vóór de vervaldatum.
+const BD_IBAN = new Set(['NL86INGB0002445588']);
+const BD_MARGE = 3;
+function isBelastingdienst(f) {
+  const iban = String((f && f.iban) || '').replace(/\s+/g, '').toUpperCase();
+  return BD_IBAN.has(iban) || /belastingdienst/i.test(String((f && (f.leverancier_naam || f.naam)) || ''));
+}
 function uitvoerVoor(f, vandaag) {
   const g = grenzen(vandaag);
   let datum, bron;
   if (isIso(f.betaal_op)) {
     if (f.betaal_op < g.vroegst) { datum = g.vroegst; bron = 'gekozen_voorbij'; } else { datum = f.betaal_op; bron = 'gekozen'; }
-  } else if (isIso(f.vervaldatum)) {
-    const w = werkdagTot(f.vervaldatum);
-    if (w < g.vroegst) { datum = g.vroegst; bron = 'eerstvolgende_werkdag'; } else { datum = w; bron = w === f.vervaldatum ? 'vervaldatum' : 'werkdag_ervoor'; }
-  } else { datum = g.vroegst; bron = 'eerstvolgende_werkdag'; }
+  } else if (isBelastingdienst(f) && isIso(f.vervaldatum)) {
+    // David 30-10-2026: alleen de Belastingdienst standaard laat, met BD_MARGE bankwerkdagen marge vóór de vervaldatum (boete bij te laat;
+    // onvoldoende saldo of een feestdag mag het niet doen mislukken).
+    let w = werkdagTot(f.vervaldatum);
+    for (let i = 0; i < BD_MARGE; i++) w = werkdagTot(plus(w, -1));
+    if (w < g.vroegst) { datum = g.vroegst; bron = 'eerstvolgende_werkdag'; } else { datum = w; bron = 'belastingdienst_marge'; }
+  } else { datum = g.vroegst; bron = 'eerstvolgende_werkdag'; }   // David 30-10-2026: standaard de dag van de batch, niet de uiterste betaaldatum
   return { datum, bron, te_ver: datum > g.uiterst };
 }
 // Een zelf gekozen datum: → null (goed) of een reden in gewone taal.
@@ -220,6 +230,7 @@ function nieuwMsgId(vandaag, hex8) {
   return 'SOCEV-' + vandaag.replace(/-/g, '') + '-' + hex8;
 }
 module.exports = {
+  isBelastingdienst, BD_MARGE,
   FORMAAT, NS, MAX_VOORUIT, MAX_REGELS, EER, BIC, isWerkdag, werkdagVanaf, werkdagTot, pasen, grenzen, uitvoerVoor, datumFout, isEer, bicVoor,
   kenmerkOk, rfOk, tekst, id, omschrijving, bedrag, blokken, xml, inhoudSleutel, sha256, nieuwMsgId,
 };
