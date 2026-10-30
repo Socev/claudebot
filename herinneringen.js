@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS ramble (ramble_id TEXT PRIMARY KEY, dag TEXT NOT NULL
   gemeld TEXT, proef INTEGER NOT NULL DEFAULT 0);
 CREATE UNIQUE INDEX IF NOT EXISTS ramble_kaart ON ramble (kaart);
 CREATE TABLE IF NOT EXISTS ramble_stuk (ramble_id TEXT NOT NULL, n INTEGER NOT NULL, sha256 TEXT NOT NULL, grootte INTEGER NOT NULL,
-  seconden REAL NOT NULL, binnen TEXT NOT NULL, tekst TEXT, pogingen INTEGER NOT NULL DEFAULT 0, poging_op TEXT, PRIMARY KEY (ramble_id, n));
+  seconden REAL NOT NULL, binnen TEXT NOT NULL, uitgeschreven TEXT, pogingen INTEGER NOT NULL DEFAULT 0, poging_op TEXT, PRIMARY KEY (ramble_id, n));
 CREATE TABLE IF NOT EXISTS ramble_dag (dag TEXT PRIMARY KEY, seconden REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS ramble_spoor (id INTEGER PRIMARY KEY, tijd TEXT NOT NULL, ramble_id TEXT, n INTEGER, soort TEXT NOT NULL);
 `;
@@ -130,7 +130,7 @@ function maak(o) {
   for (const d of [DIR, STAGING, AUDIO]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); try { fs.chmodSync(d, 0o700); } catch (e) { /* niet van ons */ } }
   const rcBin = o.rclone || 'rclone', remote = o.remote || 'vaultcrypt:herinneringen-audio';
   const fout = (l, e) => { if (o.fout) o.fout(l, e); };
-  let bezig = false, laatst = null, offsiteLaatst = null, offsiteOp = 0, plafondDag = '';
+  let bezig = false, laatst = null, offsiteLaatst = null, offsiteOp = 0, plafondDag = '', dienstPauzeTot = 0;
 
   const q = {
     rij: db.prepare('SELECT * FROM ramble WHERE ramble_id = ?'),
@@ -144,7 +144,9 @@ function maak(o) {
     stuk: db.prepare('SELECT * FROM ramble_stuk WHERE ramble_id = ? AND n = ?'),
     stukken: db.prepare('SELECT * FROM ramble_stuk WHERE ramble_id = ? ORDER BY n'),
     stukNieuw: db.prepare('INSERT INTO ramble_stuk (ramble_id, n, sha256, grootte, seconden, binnen) VALUES (?, ?, ?, ?, ?, ?)'),
-    tekst: db.prepare('UPDATE ramble_stuk SET tekst = ?, pogingen = pogingen + 1, poging_op = ? WHERE ramble_id = ? AND n = ?'),
+    // de tekst zelf staat NOOIT in de databank (intake.sqlite gaat elke nacht in de podstaat-bundel; Opus-review wv1969 MOET 1), alleen in
+    // audio/<id>/<n>.txt (0600), naast de WAV; die map gaat niet in de bundel en het offsite-patroon neemt alleen .wav en manifest.txt
+    tekst: db.prepare('UPDATE ramble_stuk SET uitgeschreven = ?, pogingen = pogingen + 1, poging_op = ? WHERE ramble_id = ? AND n = ?'),
     poging: db.prepare('UPDATE ramble_stuk SET pogingen = pogingen + 1, poging_op = ? WHERE ramble_id = ? AND n = ?'),
     spoor: db.prepare('INSERT INTO ramble_spoor (tijd, ramble_id, n, soort) VALUES (?, ?, ?, ?)'),
     dag: db.prepare('SELECT seconden FROM ramble_dag WHERE dag = ?'),
@@ -161,6 +163,13 @@ function maak(o) {
   };
   function tx(f) { db.exec('BEGIN IMMEDIATE'); try { const r = f(); db.exec('COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch (x) { /* al weg */ } throw e; } }
   function aan() { return !fs.existsSync(UIT); }
+  const spoorDag = new Map();
+  function spoorEens(id, soort) {
+    const k = id + '|' + soort, dag = amsDelen(nu()).datum;
+    if (spoorDag.get(k) === dag) return;
+    spoorDag.set(k, dag);
+    spoor(id, null, soort);
+  }
   function spoor(id, n, soort) { try { q.spoor.run(iso(nu()), id, n == null ? null : n, soort); } catch (e) { fout('ramble-spoor', e); } }
   function stagingMap(id) { return path.join(STAGING, id); }
   function audioMap(id) { return path.join(AUDIO, id); }
@@ -177,10 +186,13 @@ function maak(o) {
     try { fs.writeFileSync(fd, buf); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(tmp, path.join(map, naam));
   }
+  // Nummers die de pod nog verwacht. Een null in het manifest = de app verloor dat stuk zelf (bv. niet te bewaren op de telefoon); dan
+  // wacht de pod er niet op en wordt de opname 'onvolledig' met dat gat zichtbaar (Opus-review ZOU 4).
   function ontbreekt(r) {
     const binnen = new Set(q.stukken.all(r.ramble_id).map((s) => s.n));
+    const ml = manifestLijst(r) || [];
     const uit = [];
-    for (let n = 1; n <= (r.aantal || 0); n++) if (!binnen.has(n)) uit.push(n);
+    for (let n = 1; n <= (r.aantal || 0); n++) if (!binnen.has(n) && ml[n - 1] !== null) uit.push(n);
     return uit;
   }
   function manifestLijst(r) { try { const l = JSON.parse(r.manifest || 'null'); return Array.isArray(l) ? l : null; } catch (e) { return null; } }
@@ -198,15 +210,24 @@ function maak(o) {
     const r = q.rij.get(id);
     if (!r || (r.status !== 'wacht' && r.status !== 'staging')) return false;
     const stukken = q.stukken.all(id);
-    if (onvolledig && !r.aantal) return false;
+    if (!r.aantal) return false;
+    const onv = onvolledig || stukken.length < r.aantal;
+    const duur = stukken.reduce((t, s) => t + s.seconden, 0);
+    // na een crash tussen het hernoemen en de databankregel (Opus-review KAN 6): staging weg, archief met manifest er wel → alleen de regel
+    if (!fs.existsSync(stagingMap(id)) && fs.existsSync(path.join(audioMap(id), 'manifest.txt'))) {
+      const mt0 = fs.readFileSync(path.join(audioMap(id), 'manifest.txt'));
+      q.archief.run(iso(nu()), sha256(mt0), Math.round(duur * 10) / 10, onv ? 1 : 0, id);
+      spoor(id, null, 'archief_hersteld');
+      return true;
+    }
     const mt = manifestTekst(r, stukken);
     const vinger = sha256(mt);
-    const duur = stukken.reduce((t, s) => t + s.seconden, 0);
+    fs.mkdirSync(stagingMap(id), { recursive: true, mode: 0o700 });
     schrijfAtomair(stagingMap(id), 'manifest.txt', mt);
     if (fs.existsSync(audioMap(id))) throw new Error('archiefmap bestaat al');
     fs.renameSync(stagingMap(id), audioMap(id));
-    q.archief.run(iso(nu()), vinger, Math.round(duur * 10) / 10, onvolledig ? 1 : 0, id);
-    spoor(id, null, onvolledig ? 'onvolledig' : 'compleet');
+    q.archief.run(iso(nu()), vinger, Math.round(duur * 10) / 10, onv ? 1 : 0, id);
+    spoor(id, null, onv ? 'onvolledig' : 'compleet');
     return true;
   }
 
@@ -225,6 +246,7 @@ function maak(o) {
     let r = q.rij.get(id);
     const oud = r ? q.stuk.get(id, n) : null;
     if (oud) {
+      if (r.status === 'weggegooid') return { status: 409, body: { ok: false, fout: 'deze opname is weggegooid', conflict: true } };
       if (oud.sha256 === sha) { q.laatst.run(t, id); return { status: 200, body: { ok: true, n, sha256: sha, dubbel: true, compleet: r.status !== 'staging' && r.status !== 'wacht' } }; }
       spoor(id, n, 'conflict');
       return { status: 409, body: { ok: false, fout: 'stuk ' + n + ' is al binnen met andere inhoud', conflict: true } };
@@ -232,7 +254,7 @@ function maak(o) {
     if (r && r.status !== 'staging' && r.status !== 'wacht') { spoor(id, n, 'na_afsluiten'); return { status: 409, body: { ok: false, fout: 'deze opname is al afgesloten', conflict: true } }; }
     if (r && r.aantal && n > r.aantal) { spoor(id, n, 'buiten_manifest'); return { status: 409, body: { ok: false, fout: 'stuk ' + n + ' valt buiten de opname (' + r.aantal + ' stukken)', conflict: true } }; }
     const ml = r ? manifestLijst(r) : null;
-    if (ml && ml[n - 1] !== sha) { spoor(id, n, 'wijkt_af_van_manifest'); return { status: 409, body: { ok: false, fout: 'stuk ' + n + ' wijkt af van het manifest', conflict: true } }; }
+    if (ml && ml[n - 1] !== null && ml[n - 1] !== sha) { spoor(id, n, 'wijkt_af_van_manifest'); return { status: 409, body: { ok: false, fout: 'stuk ' + n + ' wijkt af van het manifest', conflict: true } }; }
     if (!r) {
       const dag = amsDelen(nu()).datum;
       if (q.perDag.get(dag).n >= PER_DAG) return { status: 429, body: { ok: false, fout: 'vandaag al ' + PER_DAG + ' herinneringen ingesproken; morgen weer' } };
@@ -260,7 +282,7 @@ function maak(o) {
     d = d && typeof d === 'object' ? d : {};
     const aantal = d.aantal, lijst = d.sha256;
     if (!Number.isInteger(aantal) || aantal < 1 || aantal > STUKKEN_MAX) return { status: 400, body: { ok: false, fout: 'ongeldig aantal stukken' } };
-    if (!Array.isArray(lijst) || lijst.length !== aantal || !lijst.every((s) => typeof s === 'string' && SHA_RE.test(s))) return { status: 400, body: { ok: false, fout: 'ongeldig manifest' } };
+    if (!Array.isArray(lijst) || lijst.length !== aantal || !lijst.every((s) => s === null || (typeof s === 'string' && SHA_RE.test(s))) || !lijst.some((s) => s !== null)) return { status: 400, body: { ok: false, fout: 'ongeldig manifest' } };
     const op = typeof d.opgenomen_op === 'string' && !isNaN(Date.parse(d.opgenomen_op)) && /^\d{4}-\d{2}-\d{2}T/.test(d.opgenomen_op) ? new Date(Date.parse(d.opgenomen_op)).toISOString() : null;
     if (!op) return { status: 400, body: { ok: false, fout: 'opnametijd ontbreekt' } };
     const verteller = d.verteller == null || d.verteller === '' ? 'David' : String(d.verteller).trim();
@@ -269,7 +291,7 @@ function maak(o) {
     let r = q.rij.get(id);
     if (r && r.manifest) {
       if (r.manifest !== manifest) { spoor(id, null, 'ander_manifest'); return { status: 409, body: { ok: false, fout: 'deze opname heeft al een ander manifest', conflict: true } }; }
-    } else if (r && r.status !== 'staging') return { status: 409, body: { ok: false, fout: 'deze opname is al afgesloten', conflict: true } };
+    } else if (r && r.status !== 'staging') return { status: 409, body: { ok: false, fout: r.status === 'weggegooid' ? 'deze opname is weggegooid' : 'deze opname is al afgesloten', conflict: true } };
     if (!r) {
       const dag = amsDelen(nu()).datum;
       if (q.perDag.get(dag).n >= PER_DAG) return { status: 429, body: { ok: false, fout: 'vandaag al ' + PER_DAG + ' herinneringen ingesproken; morgen weer' } };
@@ -280,7 +302,7 @@ function maak(o) {
       const stukken = q.stukken.all(id);
       const buiten = stukken.filter((s) => s.n > aantal).map((s) => s.n);
       if (buiten.length) { spoor(id, null, 'buiten_manifest'); return { status: 409, body: { ok: false, fout: 'stuk ' + buiten.join(', ') + ' valt buiten het manifest', conflict: true } }; }
-      const anders = stukken.filter((s) => s.sha256 !== lijst[s.n - 1]).map((s) => s.n);
+      const anders = stukken.filter((s) => lijst[s.n - 1] !== null && s.sha256 !== lijst[s.n - 1]).map((s) => s.n);
       if (anders.length) { spoor(id, null, 'wijkt_af_van_manifest'); return { status: 409, body: { ok: false, fout: 'stuk ' + anders.join(', ') + ' wijkt af van het manifest', conflict: true } }; }
       q.manifest.run(aantal, manifest, op, verteller, t, id);
       r = q.rij.get(id);
@@ -297,20 +319,42 @@ function maak(o) {
     if (!ID_RE.test(String(id))) return { status: 400, body: { ok: false, fout: 'ongeldige opname' } };
     const r = q.rij.get(id);
     if (!r) return { status: 200, body: { ok: true, bekend: false, stukken: [] } };
-    return { status: 200, body: { ok: true, bekend: true, compleet: r.status !== 'staging' && r.status !== 'wacht', stukken: q.stukken.all(id).map((s) => ({ n: s.n, sha256: s.sha256 })) } };
+    return { status: 200, body: { ok: true, bekend: true, weggegooid: r.status === 'weggegooid' || undefined, compleet: r.status !== 'staging' && r.status !== 'wacht' && r.status !== 'weggegooid',
+      stukken: q.stukken.all(id).map((s) => ({ n: s.n, sha256: s.sha256 })) } };
+  }
+
+  // Weggooien vanuit de app (David drukt Weggooien tijdens of na de opname): alleen zolang hij niet afgesloten is. Staging weg, regel blijft
+  // als 'weggegooid' (zodat een late upload niet opnieuw begint).
+  function weg(id) {
+    if (!ID_RE.test(String(id))) return { status: 400, body: { ok: false, fout: 'ongeldige opname' } };
+    const r = q.rij.get(id);
+    if (!r) {
+      const t = iso(nu());
+      q.nieuw.run(id, amsDelen(nu()).datum, t, t, null, 0);
+      q.status.run('weggegooid', id);
+      return { status: 200, body: { ok: true, weggegooid: true } };
+    }
+    if (r.status === 'weggegooid') return { status: 200, body: { ok: true, weggegooid: true, al: true } };
+    if (r.status !== 'staging' && r.status !== 'wacht') return { status: 409, body: { ok: false, fout: 'deze opname is al afgesloten; wissen gaat via de machinekamer', conflict: true } };
+    try { fs.rmSync(stagingMap(id), { recursive: true, force: true }); } catch (e) { fout('ramble-weg', e); return { status: 503, body: { ok: false, fout: 'wissen lukte nu niet' } }; }
+    q.status.run('weggegooid', id);
+    spoor(id, null, 'weggegooid');
+    return { status: 200, body: { ok: true, weggegooid: true } };
   }
 
   // ── tik ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   function opruimen(uit) {
     const grens = iso(nu() - OUD_MS);
+    // Zonder "klaar" na 7 dagen: NIET wissen (de telefoon wiste elk stuk al na de bevestiging; dit is de enige kopie), maar als onvolledig
+    // bewaren met aantal = hoogste stuknummer. Weggooien gaat alleen via de app (weg). Afwijking van ontwerp § 3.1 na Opus-review ZOU 4.
     for (const r of q.perStatus.all('staging')) {
       if (r.laatst >= grens) continue;
-      try { fs.rmSync(stagingMap(r.ramble_id), { recursive: true, force: true }); } catch (e) { fout('ramble-opruimen', e); continue; }
-      q.status.run('opgeruimd', r.ramble_id);
-      spoor(r.ramble_id, null, 'opgeruimd');
-      uit.opgeruimd = (uit.opgeruimd || 0) + 1;
-      box('opname zonder afronding opgeruimd', ['gemeten: opname ' + r.ramble_id + ' kreeg na 7 dagen geen "klaar" van de app (' + q.stukken.all(r.ramble_id).length + ' stukken); de stukken op de pod zijn weg.',
-        'voorstel: niets, tenzij David een opname mist; dan in de app nakijken of er nog een wachtrij op de telefoon staat.']);
+      const st = q.stukken.all(r.ramble_id);
+      if (!st.length) { try { fs.rmSync(stagingMap(r.ramble_id), { recursive: true, force: true }); } catch (e) { /* leeg */ } q.status.run('opgeruimd', r.ramble_id); continue; }
+      db.prepare('UPDATE ramble SET aantal = ?, opgenomen_op = coalesce(opgenomen_op, aangemaakt) WHERE ramble_id = ?').run(Math.max.apply(null, st.map((x) => x.n)), r.ramble_id);
+      try { if (naarArchief(r.ramble_id, true)) uit.onvolledig = (uit.onvolledig || 0) + 1; } catch (e) { fout('ramble-onvolledig', e); continue; }
+      box('opname zonder afronding als onvolledig bewaard', ['gemeten: opname ' + r.ramble_id + ' kreeg na 7 dagen geen "klaar" van de app (' + st.length + ' stukken); hij gaat als onvolledige opname door (uitschrijven, marker, notitie).',
+        'voorstel: niets, tenzij David hem niet wilde; dan wissen via de machinekamer.']);
     }
     for (const r of q.perStatus.all('wacht')) {
       if (r.laatst >= grens) continue;
@@ -318,13 +362,29 @@ function maak(o) {
     }
   }
 
+  function dienstFout(e) {
+    const m = String(e && e.message || '');
+    return !!e && (e.name === 'TimeoutError' || e.name === 'AbortError' || e instanceof TypeError || /^Whisper (5\d\d|401|403|408|429)\b/.test(m) || !/^Whisper \d{3}\b/.test(m));
+  }
+  let dienstGemeld = '';
+  function meldDienst() {
+    // één box-rij per dag, alleen als er al minstens 6 uur een opname op uitschrijven wacht
+    const dag = amsDelen(nu()).datum;
+    if (dienstGemeld === dag) return;
+    const oud = db.prepare("SELECT min(archief_op) t FROM ramble WHERE status = 'archief'").get();
+    if (!oud || !oud.t || nu() - Date.parse(oud.t) < 6 * 3600000) return;
+    dienstGemeld = dag;
+    box('uitschrijven hapert', ['gemeten: Whisper (Cloudflare Workers AI) geeft al een tijd een storing; ' + db.prepare("SELECT count(*) n FROM ramble WHERE status = 'archief'").get().n + ' opname(s) wachten op uitschrijven (niets verloren, de audio staat in het archief).',
+      'voorstel: CLOUDFLARE_AI_TOKEN_AUTO en het Workers AI-tegoed nalopen (ook de microfoonknop in de app gebruikt die dienst).']);
+  }
   function dagSeconden(dag) { const x = q.dag.get(dag); return x ? x.seconden : 0; }
 
   async function uitschrijven(uit, start) {
     if (!o.whisper || (o.kanUitschrijven && !o.kanUitschrijven())) return;
     for (const r of q.perStatus.all('archief')) {
       for (const s of q.stukken.all(r.ramble_id)) {
-        if (s.tekst != null || s.pogingen >= POGINGEN) continue;
+        if (s.uitgeschreven != null || s.pogingen >= POGINGEN) continue;
+        if (nu() < dienstPauzeTot) return;
         if (s.poging_op && nu() - Date.parse(s.poging_op) < POGING_PAUZE_MS) continue;
         if (nu() - start > TIK_MAX_MS) return;
         const dag = amsDelen(nu()).datum;
@@ -338,13 +398,17 @@ function maak(o) {
         if (sha256(wav) !== s.sha256) { q.poging.run(iso(nu()), r.ramble_id, s.n); spoor(r.ramble_id, s.n, 'sha_archief_wijkt_af'); continue; }
         try {
           const tekst = schoonTekst(await o.whisper(wav));
-          q.tekst.run(tekst, iso(nu()), r.ramble_id, s.n);
+          schrijfAtomair(audioMap(r.ramble_id), s.n + '.txt', Buffer.from(tekst, 'utf8'));
+          q.tekst.run(iso(nu()), iso(nu()), r.ramble_id, s.n);
           q.dagBij.run(dag, s.seconden);
           uit.uitgeschreven = (uit.uitgeschreven || 0) + 1;
         } catch (e) {
-          q.poging.run(iso(nu()), r.ramble_id, s.n);
           uit.whisper_fout = (uit.whisper_fout || 0) + 1;
           fout('ramble-whisper', e);
+          // ZOU 3 (Opus-review): een storing van de dienst (5xx, 401/403/429, time-out, geen netwerk) telt niet als poging voor dit stuk;
+          // dan wacht alles 10 minuten (niets verloren, geen blijvende gaten). Alleen een fout van dit ene stuk telt mee (3 pogingen).
+          if (dienstFout(e)) { dienstPauzeTot = nu() + POGING_PAUZE_MS; meldDienst(); return; }
+          q.poging.run(iso(nu()), r.ramble_id, s.n);
         }
       }
       if (r.wacht_plafond) q.wachtPlafond.run(null, r.ramble_id);
@@ -352,8 +416,12 @@ function maak(o) {
   }
 
   // Transcript: één regel per stuk "[mm:ss] tekst"; een stuk dat ontbreekt of niet lukte als "[mm:ss–mm:ss niet uitgeschreven]".
+  function stukTekst(id, s) {
+    if (s.uitgeschreven == null) return null;
+    try { return fs.readFileSync(path.join(audioMap(id), s.n + '.txt'), 'utf8'); } catch (e) { return null; }
+  }
   function transcript(r, stukken) {
-    const per = new Map(stukken.map((s) => [s.n, s]));
+    const per = new Map(stukken.map((s) => [s.n, Object.assign({}, s, { tekst: stukTekst(r.ramble_id, s) })]));
     const regels = [];
     let t = 0;
     for (let n = 1; n <= r.aantal; n++) {
@@ -370,11 +438,12 @@ function maak(o) {
   async function naarIntake(uit) {
     for (const r of q.perStatus.all('archief')) {
       const stukken = q.stukken.all(r.ramble_id);
-      if (stukken.some((s) => s.tekst == null && s.pogingen < POGINGEN)) continue;   // nog bezig
+      if (stukken.some((s) => s.uitgeschreven == null && s.pogingen < POGINGEN)) continue;   // nog bezig
+      if (stukken.some((s) => s.uitgeschreven != null && stukTekst(r.ramble_id, s) == null)) { spoorEens(r.ramble_id, 'tekstbestand_weg'); continue; }
       const tr = Buffer.from(transcript(r, stukken), 'utf8');
       let mt;
       try { mt = fs.readFileSync(path.join(audioMap(r.ramble_id), 'manifest.txt')); } catch (e) { fout('ramble-manifest', e); continue; }
-      if (sha256(mt) !== r.vingerafdruk) { spoor(r.ramble_id, null, 'manifest_wijkt_af'); fout('ramble-manifest', new Error('vingerafdruk wijkt af')); continue; }
+      if (sha256(mt) !== r.vingerafdruk) { spoorEens(r.ramble_id, 'manifest_wijkt_af'); continue; }
       const meta = { manifest_sha256: r.vingerafdruk, duur_s: Math.round(r.duur_s || 0), verteller: r.verteller || 'David', route: r.route || 'app',
         opgenomen_op: r.opgenomen_op || r.aangemaakt, stukken: r.aantal, onvolledig: !!r.onvolledig };
       if (r.proef) meta.proef = 'proefopname.invalid';
@@ -384,9 +453,10 @@ function maak(o) {
         aanlevering: { workflow: 'pod:herinneringen', knoop: 'herinneringen.js' } };
       let res;
       try { res = await o.intake.leverIntern('ramble', env, { t1: tr, m1: mt }); } catch (e) { fout('ramble-intake', e); uit.intake_fout = (uit.intake_fout || 0) + 1; continue; }
+      if (res && res.ok && Array.isArray(res.ontbreekt) && res.ontbreekt.length) res = { ok: false, reden: 'onderdelen_ontbreken' };   // Opus-review ZOU 2
       if (!res || !res.ok || !res.stuk_id) {
         uit.intake_fout = (uit.intake_fout || 0) + 1;
-        spoor(r.ramble_id, null, 'intake_' + String(res && res.reden || 'fout').slice(0, 40));
+        spoorEens(r.ramble_id, 'intake_' + String(res && res.reden || 'fout').slice(0, 40));
         continue;
       }
       q.intake.run(res.stuk_id, r.ramble_id);
@@ -448,7 +518,10 @@ function maak(o) {
   async function markerEnNotitie(uit) {
     for (const r of q.perStatus.all('intake')) {
       let s = stukRij(r.stuk_id);
-      if (!s) { spoor(r.ramble_id, null, 'stuk_weg'); continue; }
+      if (!s) { spoorEens(r.ramble_id, 'stuk_weg'); continue; }
+      // de marker pas als beide onderdelen echt binnen zijn (anders oordeelt hij over een half stuk; Opus-review ZOU 2)
+      const mist = db.prepare('SELECT count(*) n FROM onderdeel WHERE stuk_id = ? AND binnen IS NULL').get(r.stuk_id).n;
+      if (mist) { spoorEens(r.ramble_id, 'onderdeel_ontbreekt'); continue; }
       if (!s.marker_patient) { try { await o.intake.markeer(r.stuk_id); } catch (e) { fout('ramble-marker', e); } s = stukRij(r.stuk_id); }
       if (!s || !s.marker_patient) continue;   // volgende tik
       if (r.marker !== s.marker_patient) q.marker.run(s.marker_patient, r.ramble_id);
@@ -456,7 +529,7 @@ function maak(o) {
         let n;
         try { n = schrijfNotitie(q.rij.get(r.ramble_id)); } catch (e) { fout('ramble-notitie', e); uit.notitie_fout = (uit.notitie_fout || 0) + 1; continue; }
         if (n.wacht) { uit.wacht = n.wacht; continue; }
-        if (n.fout) { spoor(r.ramble_id, null, n.fout); uit.notitie_fout = (uit.notitie_fout || 0) + 1; continue; }
+        if (n.fout) { spoorEens(r.ramble_id, n.fout); uit.notitie_fout = (uit.notitie_fout || 0) + 1; continue; }
         q.notitie.run(n.pad, iso(nu()), r.ramble_id);
         try { if (!r.proef && o.intake.vrijgeven) o.intake.vrijgeven(r.stuk_id); } catch (e) { fout('ramble-vrijgeven', e); }
         uit.notities = (uit.notities || 0) + 1;
@@ -474,7 +547,7 @@ function maak(o) {
       let n;
       try { n = schrijfNotitie(r); } catch (e) { fout('ramble-notitie', e); uit.notitie_fout = (uit.notitie_fout || 0) + 1; continue; }
       if (n.wacht) { uit.wacht = n.wacht; continue; }
-      if (n.fout) { spoor(r.ramble_id, null, n.fout); continue; }
+      if (n.fout) { spoorEens(r.ramble_id, n.fout); continue; }
       q.notitie.run(n.pad, iso(nu()), r.ramble_id);
       try { if (!r.proef && o.intake.vrijgeven) o.intake.vrijgeven(r.stuk_id); } catch (e) { fout('ramble-vrijgeven', e); }
       uit.notities = (uit.notities || 0) + 1;
@@ -585,16 +658,17 @@ function maak(o) {
 
   function info() {
     let per = null, vandaag = 0, open = 0;
-    try { per = Object.fromEntries(db.prepare('SELECT status, count(*) n FROM ramble GROUP BY status').all().map((x) => [x.status, x.n])); } catch (e) { /* dicht */ }
+    // notitie en vastgehouden samen als 'afgerond' (hoeveel opnames een markertreffer hadden hoort niet in /health; Opus-review KAN 12)
+    try { per = {}; for (const x of db.prepare('SELECT status, count(*) n FROM ramble GROUP BY status').all()) { const k = x.status === 'notitie' || x.status === 'vastgehouden' ? 'afgerond' : x.status; per[k] = (per[k] || 0) + x.n; } } catch (e) { /* dicht */ }
     try { vandaag = Math.round(dagSeconden(amsDelen(nu()).datum) / 60); } catch (e) { /* dicht */ }
-    try { open = db.prepare("SELECT count(*) n FROM ramble_stuk s JOIN ramble r ON r.ramble_id = s.ramble_id WHERE r.status = 'archief' AND s.tekst IS NULL AND s.pogingen < ?").get(POGINGEN).n; } catch (e) { /* dicht */ }
+    try { open = db.prepare("SELECT count(*) n FROM ramble_stuk s JOIN ramble r ON r.ramble_id = s.ramble_id WHERE r.status = 'archief' AND s.uitgeschreven IS NULL AND s.pogingen < ?").get(POGINGEN).n; } catch (e) { /* dicht */ }
     let offsiteOpen = null;
     try { offsiteOpen = db.prepare("SELECT count(*) n FROM ramble WHERE offsite_ok = 1 AND proef = 0 AND status = 'notitie' AND offsite_op IS NULL").get().n; } catch (e) { /* dicht */ }
     return { aan: aan(), bezig, per_status: per, uit_te_schrijven: open, vandaag_min: vandaag, plafond_min: PLAFOND_S / 60,
       wacht_plafond: plafondDag === amsDelen(nu()).datum, laatst, offsite: { open: offsiteOpen, laatst: offsiteLaatst, remote: remote.split(':')[0] + ':…' } };
   }
 
-  return { ontvangStuk, ontvangKlaar, stand, tik, knop, info, offsiteLijst, _db: db, _transcript: transcript, _notitieTekst: notitieTekst, _kaartVoor: kaartVoor };
+  return { ontvangStuk, ontvangKlaar, stand, weg, tik, knop, info, offsiteLijst, _db: db, _transcript: transcript, _notitieTekst: notitieTekst, _kaartVoor: kaartVoor };
 }
 
 /*

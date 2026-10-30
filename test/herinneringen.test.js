@@ -42,7 +42,7 @@ function omgeving(opt) {
   const tekstVoor = new Map(), whisperLog = [], kaarten = [], box = [], lijst = {};
   const staat = { onderhoud: false, nacht: false, whisperFout: new Set() };
   const h = H.maak({ dir: hdir, intake: ing, vault, vv: VV, nu: () => klok.t, fout: opt.fout || (() => {}),
-    whisper: async (b) => { const s = sha(b); whisperLog.push(s); if (staat.whisperFout.has(s)) throw new Error('Whisper 500'); return tekstVoor.get(s) || ''; },
+    whisper: async (b) => { const s = sha(b); whisperLog.push(s); if (staat.dienstStoring) throw new Error('Whisper 503'); if (staat.whisperFout.has(s)) throw new Error('Whisper 400'); return tekstVoor.get(s) || ''; },
     kanUitschrijven: () => true, onderhoudAan: () => staat.onderhoud, nachtgrendel: () => staat.nacht, primair: () => true,
     kaartZet: async (p) => { kaarten.push(p); lijst[p.sleutel] = 'open'; return { sleutel: p.sleutel }; }, kaartLijst: async () => lijst,
     box: (t) => box.push(t), rclone: path.join(ROOT, 'test', 'nep-rclone-kopie.js'), remote: remote, offsiteAan: () => true });
@@ -95,6 +95,12 @@ test('3 stukken door elkaar + dubbel + conflict (409) + klaar te vroeg → 1 not
     assert.strictEqual(o.ing._db.prepare("SELECT count(*) n FROM stuk WHERE profiel = 'ramble@1'").get().n, 1);
     assert.strictEqual(o.whisperLog.length, 3);
     assert.ok(!o.box.some((x) => /Proefdorp|camping/.test(x)), 'geen inhoud in de box');
+    // MOET 1 (review): geen transcripttekst in intake.sqlite (gaat elke nacht in de podstaat-bundel); wel in audio/<id>/<n>.txt (0600)
+    o.ing._db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    const dbBytes = Buffer.concat(fs.readdirSync(o.idir).filter((f) => /^intake\.sqlite/.test(f)).map((f) => fs.readFileSync(path.join(o.idir, f))));
+    assert.ok(!dbBytes.includes('Proefdorp') && !dbBytes.includes('kaartspelletjes'), 'tekst niet in de databank');
+    assert.strictEqual(fs.readFileSync(path.join(o.hdir, 'audio', ID1, '1.txt'), 'utf8'), VERHAAL[0]);
+    assert.strictEqual(fs.statSync(path.join(o.hdir, 'audio', ID1, '1.txt')).mode & 0o777, 0o600);
   } finally { o.sluit(); }
 });
 
@@ -113,7 +119,7 @@ test('afgebroken upload laat niets achter; volledige stroom geeft buffer + hash'
   const x = await p3; assert.ok(x.buf.equals(b)); assert.strictEqual(x.hash.digest('hex'), sha(b));
 });
 
-test('gat: met manifest na 7 dagen onvolledig, gaten zichtbaar; zonder klaar na 7 dagen opgeruimd (box zonder inhoud)', async () => {
+test('gat: met manifest na 7 dagen onvolledig, gaten zichtbaar; zonder klaar na 7 dagen ook onvolledig bewaard (niet gewist; box zonder inhoud)', async () => {
   const o = omgeving();
   try {
     const b = ['Eerste stuk van een verzonnen verhaal.', 'Tweede stuk komt nooit aan.', 'Derde stuk over de verzonnen boomhut.'].map((t, i) => o.stuk(ID1, i + 1, t));
@@ -124,11 +130,12 @@ test('gat: met manifest na 7 dagen onvolledig, gaten zichtbaar; zonder klaar na 
     let t = await o.h.tik(); assert.ok(!t.onvolledig && !t.opgeruimd, 'na 6 dagen nog niets');
     o.klok.t += 2 * 86400000;
     t = await o.h.tik();
-    assert.strictEqual(t.onvolledig, 1); assert.strictEqual(t.opgeruimd, 1); assert.strictEqual(t.notities, 1);
-    assert.ok(!fs.existsSync(path.join(o.hdir, 'staging', ID2)));
-    const tekst = fs.readFileSync(path.join(o.vault, H.NOTITIE_MAP, o.notities()[0]), 'utf8');
+    assert.strictEqual(t.onvolledig, 2); assert.ok(!t.opgeruimd); assert.strictEqual(t.notities, 2);
+    assert.ok(!fs.existsSync(path.join(o.hdir, 'staging', ID2)) && fs.existsSync(path.join(o.hdir, 'audio', ID2, '1.wav')), 'zonder klaar: bewaard, niet gewist');
+    const r1 = o.ing._db.prepare('SELECT stuk_id FROM ramble WHERE ramble_id = ?').get(ID1);
+    const tekst = fs.readFileSync(path.join(o.vault, H.NOTITIE_MAP, o.notities().find((n) => n.includes(r1.stuk_id))), 'utf8');
     assert.match(tekst, /\nonvolledig: true\n/); assert.match(tekst, /\[00:02–01:02 ontbreekt\]/); assert.match(tekst, /\[01:02\] Derde stuk/);
-    assert.strictEqual(o.box.length, 1); assert.match(o.box[0], /opgeruimd/); assert.ok(!/verzonnen/.test(o.box[0]), 'geen inhoud in de box-rij');
+    assert.strictEqual(o.box.length, 1); assert.match(o.box[0], /onvolledig bewaard/); assert.ok(!/verzonnen|Losse/.test(o.box[0]), 'geen inhoud in de box-rij');
     const mt = fs.readFileSync(path.join(o.hdir, 'audio', ID1, 'manifest.txt'), 'utf8');
     assert.match(mt, /\n2 ontbreekt\n/);
   } finally { o.sluit(); }
@@ -192,13 +199,18 @@ test('offsite: alleen toevoegen naar de (nep-)remote, cryptcheck, daarna niet op
   } finally { o.sluit(); }
 });
 
-test('uitschrijven: 3 pogingen met pauze, daarna gat zichtbaar; plafond 120 min per dag wacht tot de volgende dag', async () => {
+test('uitschrijven: dienststoring telt niet als poging; 3 pogingen bij een fout van het stuk, daarna gat zichtbaar; plafond 120 min per dag', async () => {
   const o = omgeving();
   try {
     const a = [o.stuk(ID1, 1, 'Verzonnen zin een.'), o.stuk(ID1, 2, 'Verzonnen zin twee.')];
     o.staat.whisperFout.add(sha(a[1]));
     o.h.ontvangStuk(ID1, 1, a[0]); o.h.ontvangStuk(ID1, 2, a[1]); o.h.ontvangKlaar(ID1, manifest(a));
-    let t = await o.h.tik(); assert.strictEqual(t.whisper_fout, 1); assert.ok(!t.intake);
+    o.staat.dienstStoring = true;
+    let t = await o.h.tik(); assert.strictEqual(t.whisper_fout, 1);
+    for (let i = 0; i < 5; i++) { o.klok.t += 11 * 60000; await o.h.tik(); }
+    assert.ok(o.ing._db.prepare('SELECT max(pogingen) m FROM ramble_stuk WHERE ramble_id = ?').get(ID1).m === 0, 'storing van de dienst telt niet als poging');
+    o.staat.dienstStoring = false; o.klok.t += 11 * 60000;
+    t = await o.h.tik(); assert.strictEqual(t.whisper_fout, 1); assert.ok(!t.intake);
     t = await o.h.tik(); assert.ok(!t.whisper_fout, 'pauze tussen pogingen');
     o.klok.t += 11 * 60000; t = await o.h.tik(); assert.strictEqual(t.whisper_fout, 1);
     o.klok.t += 11 * 60000; t = await o.h.tik(); assert.strictEqual(t.whisper_fout, 1); assert.strictEqual(t.intake, 1);
@@ -239,6 +251,30 @@ test('onderhoud en nachtgrendel: notitie wacht; grenzen (6 per dag, 2,5 MB, stuk
   } finally { o.sluit(); }
 });
 
+test('null in het manifest = stuk op de telefoon verloren: opname onvolledig met gat; weggooien vóór afsluiten', async () => {
+  const o = omgeving();
+  try {
+    const a = [o.stuk(ID1, 1, 'Verzonnen zin een.'), o.stuk(ID1, 2, 'Verloren stuk.'), o.stuk(ID1, 3, 'Verzonnen zin drie.')];
+    o.h.ontvangStuk(ID1, 1, a[0]); o.h.ontvangStuk(ID1, 3, a[2]);
+    const m = manifest(a); m.sha256[1] = null;
+    const u = o.h.ontvangKlaar(ID1, m); assert.strictEqual(u.status, 200); assert.strictEqual(u.body.compleet, true);
+    assert.strictEqual(o.h.ontvangKlaar(ID2, { aantal: 1, sha256: [null], opgenomen_op: '2026-10-30T08:00:00Z' }).status, 400, 'alleen null = ongeldig');
+    const t = await o.h.tik(); assert.strictEqual(t.notities, 1);
+    const tekst = fs.readFileSync(path.join(o.vault, H.NOTITIE_MAP, o.notities()[0]), 'utf8');
+    assert.match(tekst, /\nonvolledig: true\n/); assert.match(tekst, /\[00:02–01:02 ontbreekt\]/);
+    // weggooien
+    o.h.ontvangStuk(ID2, 1, o.stuk(ID2, 1, 'Weg ermee.'));
+    assert.strictEqual(o.h.weg(ID2).status, 200);
+    assert.ok(!fs.existsSync(path.join(o.hdir, 'staging', ID2)));
+    assert.strictEqual(o.h.ontvangStuk(ID2, 1, wav(1, 'nog eens')).status, 409, 'na weggooien geen nieuw begin');
+    assert.strictEqual(o.h.ontvangKlaar(ID2, { aantal: 1, sha256: ['a'.repeat(64)], opgenomen_op: '2026-10-30T08:00:00Z' }).status, 409);
+    assert.strictEqual(o.h.stand(ID2).body.compleet, false);
+    assert.strictEqual(o.h.weg(ID1).status, 409, 'afgesloten opname niet via de app weg');
+    o.klok.t += 8 * 86400000; await o.h.tik();
+    assert.strictEqual(o.ing._db.prepare('SELECT status FROM ramble WHERE ramble_id = ?').get(ID2).status, 'weggegooid');
+  } finally { o.sluit(); }
+});
+
 test('spiegel: ramble = één bron op de opname (origin ramble, versie = vingerafdruk, strikt_prive, route app.ramble), geen tekst', async () => {
   const o = omgeving();
   try {
@@ -271,4 +307,24 @@ test('publicatieservice en router laten ramble@1 liggen; oude raw_input-skill ra
   const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
   assert.match(srv, /const s = a \? appSessie\(req, a, false\) : null;[\s\S]*route\.indexOf\('POST \/app\/ramble\/'\) === 0 \|\| route\.indexOf\('GET \/app\/ramble\/'\) === 0\) return appRamble/, 'ramble-route pas na de sessiecontrole');
   assert.match(srv, /const ruw = upload \|\| rambleStuk \|\|/, 'stuk is een ruwe route (getekende inhoudshash)');
+});
+
+test('crash tussen hernoemen en databankregel: de volgende ronde zet alleen de regel (KAN 6)', async () => {
+  const o = omgeving();
+  try {
+    const a = [o.stuk(ID1, 1, 'Verzonnen zin na een crash.'), o.stuk(ID1, 2, 'Tweede verzonnen zin.')];
+    o.h.ontvangStuk(ID1, 1, a[0]); o.h.ontvangKlaar(ID1, manifest(a));
+    // nabootsen: stuk 2 is binnen, manifest geschreven en de map verhuisd, maar de pod stierf vóór de databankregel
+    const st = path.join(o.hdir, 'staging', ID1);
+    fs.writeFileSync(path.join(st, '2.wav'), a[1]);
+    o.ing._db.prepare('INSERT INTO ramble_stuk (ramble_id, n, sha256, grootte, seconden, binnen) VALUES (?, 2, ?, ?, 2, ?)').run(ID1, sha(a[1]), a[1].length, new Date(o.klok.t).toISOString());
+    fs.writeFileSync(path.join(st, 'manifest.txt'), 'ovis-ramble-manifest/1\nramble_id: ' + ID1 + '\nstukken: 2\n1 ' + sha(a[0]) + ' ' + a[0].length + '\n2 ' + sha(a[1]) + ' ' + a[1].length + '\n');
+    fs.renameSync(st, path.join(o.hdir, 'audio', ID1));
+    assert.strictEqual(o.ing._db.prepare('SELECT status FROM ramble WHERE ramble_id = ?').get(ID1).status, 'wacht');
+    const u = o.h.ontvangKlaar(ID1, manifest(a));
+    assert.strictEqual(u.status, 200, JSON.stringify(u));
+    const t = await o.h.tik();
+    assert.strictEqual(t.notities, 1);
+    assert.strictEqual(o.ing._db.prepare("SELECT count(*) n FROM ramble_spoor WHERE soort = 'archief_hersteld'").get().n, 1);
+  } finally { o.sluit(); }
 });

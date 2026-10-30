@@ -9983,6 +9983,8 @@ function appVjKnopStand(p, rv, afgeleid) {
   if (gev === null) { try { if (typeof ideeen !== 'undefined' && ideeen && ideeen.isBundel && ideeen.isBundel(p.sleutel)) gev = 'versturen'; } catch (e) {} }
   // wv1253: OVIS-kaart met een rekeningnummer of adres waarnaar verstuurd wordt (de databank eist zelf een verse vingerafdruk per regel)
   if (gev === null && typeof ovisKaartHerkomst === 'function' && ovisKaartHerkomst(p) && p.herkomst.ovis.gevoelig === true) gev = 'geld';
+  // wv1969 (Opus-review KAN 9): doorlaten van een herinnering met markertreffer is onomkeerbaar (vault, Syncthing, offsite): Ja met vingerafdruk
+  if (gev === null && /^herinnering-[0-9a-f]{10}$/.test(String(p.sleutel || '')) && typeof herinneringen !== 'undefined' && herinneringen) gev = 'versturen';
   // gekoppeld en bruikbaar: de druk loopt via die vraag (ook de knoppen onder het oorspronkelijke bericht tonen dan beantwoord)
   const gekBruik = !!(gekRij && !appNaarTelegramNu(gekRij) && Date.now() - Date.parse(gekRij.t || 0) <= APP_VRAAG_GELDIG_MS);
   // wv1018 (Fable diffreview #2): appKnop eist een vingerafdruk zodra de chatvraag gevoelig is (rij zonder gevoelig: false); zeg het de app vooraf
@@ -12715,6 +12717,7 @@ async function appWhisper(wav) {
 // inhoudshash X-App-Inhoud), daarna 'klaar' met het manifest (JSON). Logica, grenzen en waarom in herinneringen.js; hier alleen de poort:
 //   POST /app/ramble/<ramble_id>/<n>   ruwe WAV → { ok, n, sha256, dubbel?, compleet } | 409 conflict
 //   POST /app/ramble/<ramble_id>/klaar { aantal, sha256: [...], opgenomen_op, verteller? } → 200 compleet | 202 { ontbreekt } | 409
+//   POST /app/ramble/<ramble_id>/weg   David gooit een nog niet afgesloten opname weg (staging weg; anders 409)
 //   GET  /app/ramble/<ramble_id>       → welke stukken de pod heeft (hervatten na een herstart van de app)
 // Valt onder sessie, apparaatsleutel en (vaste plek) het invoerslot zoals elke POST; een stuk verlengt de sessie. Nooit tekst in het auditlog.
 const APP_RAMBLE_STUK_RE = /^\/app\/ramble\/r[0-9]{8}-[0-9a-f]{16}\/[1-9][0-9]?$/;
@@ -12724,11 +12727,13 @@ function appRamble(req, res, a, route, d) {
   if (!herinneringen) return weg(404, 'herinneringen inspreken staat niet in deze versie van de pod', 'ramble: geen module');
   const st = /^POST \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})\/([1-9][0-9]?)$/.exec(route);
   const kl = /^POST \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})\/klaar$/.exec(route);
+  const wg = /^POST \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})\/weg$/.exec(route);
   const ga = /^GET \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})$/.exec(route);
   const antw = function (id, wat, u) { res._app.reden = 'ramble ' + id + ' ' + wat + ' ' + u.status; return appStuur(res, u.status, u.body); };
   try {
     if (ga) return antw(ga[1], 'stand', herinneringen.stand(ga[1]));
     if (kl) return antw(kl[1], 'klaar', herinneringen.ontvangKlaar(kl[1], d, { apparaat: a.id }));
+    if (wg) return antw(wg[1], 'weg', herinneringen.weg(wg[1]));
     if (!st) return weg(404, 'onbekend', 'ramble pad');
   } catch (e) { logError('ramble', e); return weg(503, 'de pod kon de opname nu niet opslaan; de app probeert het opnieuw', 'ramble fout'); }
   const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
@@ -15905,9 +15910,20 @@ const herinneringen = (function () {
   } catch (e) { logError('herinneringen', e); return null; }
 })();
 function herinneringenInfo() { if (!herinneringen) return { module: false }; try { return Object.assign({ module: true }, herinneringen.info()); } catch (e) { return { fout: true }; } }
+let herinneringenFoutLog = 0;
 async function herinneringenTik() {
   if (!herinneringen) return;
-  try { const u = await herinneringen.tik(); if (u && (u.uitgeschreven || u.intake || u.notities || u.kaarten || u.opgeruimd || u.onvolledig || u.offsite || u.fout || u.whisper_fout || u.intake_fout || u.notitie_fout)) schrijfLog(nu() + ' ramble ' + velden({ uitgeschreven: u.uitgeschreven || 0, intake: u.intake || 0, notities: u.notities || 0, kaarten: u.kaarten || 0, opgeruimd: u.opgeruimd || 0, onvolledig: u.onvolledig || 0, offsite: u.offsite || 0, fout: (u.fout || 0) + (u.whisper_fout || 0) + (u.intake_fout || 0) + (u.notitie_fout || 0) })); }
+  try {
+    const u = await herinneringen.tik();
+    if (!u) return;
+    const f = (u.fout || 0) + (u.whisper_fout || 0) + (u.intake_fout || 0) + (u.notitie_fout || 0);
+    const iets = u.uitgeschreven || u.intake || u.notities || u.kaarten || u.onvolledig || u.offsite;
+    // alleen fouten: hooguit één logregel per uur (een vastgelopen opname schreef anders elke minuut; Opus-review KAN 10)
+    if (iets || (f && Date.now() - herinneringenFoutLog > 3600000)) {
+      if (!iets) herinneringenFoutLog = Date.now();
+      schrijfLog(nu() + ' ramble ' + velden({ uitgeschreven: u.uitgeschreven || 0, intake: u.intake || 0, notities: u.notities || 0, kaarten: u.kaarten || 0, onvolledig: u.onvolledig || 0, offsite: u.offsite || 0, fout: f }));
+    }
+  }
   catch (e) { logError('herinneringen-tik', e); }
 }
 if (herinneringen && SERVER_ECHT) { setTimeout(function () { herinneringenTik(); }, 90000).unref(); setInterval(function () { herinneringenTik(); }, 60000).unref(); }

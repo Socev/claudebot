@@ -622,7 +622,8 @@ test('telling en info: alleen aantallen, nooit inhoud of sleutels', async () => 
     const t = o.ing.telling('2026-10-24T00:00:00Z', '2026-10-27T00:00:00Z');
     assert.strictEqual(t.per_bron.signal.aanleveringen, 2); assert.strictEqual(t.per_bron.signal.dubbel, 1);
     const i = o.ing.info();
-    assert.strictEqual(i.sleutels, 9); assert.strictEqual(i.profielen.length, 10);   // wv1969: + ramble@1 assert.strictEqual(i.marker, 'tellen');
+    assert.strictEqual(i.sleutels, 9); assert.strictEqual(i.profielen.length, 10);   // wv1969: + ramble@1
+    assert.strictEqual(i.marker, 'tellen');
     const alles = JSON.stringify(t) + JSON.stringify(i);
     for (const k of Object.values(K)) assert.ok(!alles.includes(k) && !alles.includes(sha(k)));
     assert.ok(!alles.includes('Proefgroep'));
