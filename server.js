@@ -16572,12 +16572,13 @@ const nachtketen = (function () {
         const d = { in_scope: r.in_scope, geschreven: r.geschreven, gelijk: r.gelijk, afgerond: r.afgerond, geblokkeerd: r.geblokkeerd, tussendoor: r.tussendoor };
         return r.fout ? { ok: false, reden: 'publicatie: ' + r.fout + ' fout(en)' + (r.reden ? ' (' + r.reden.slice(0, 60) + ')' : ''), detail: d } : { ok: true, detail: d };
       } },
-      // wv1962 (SB2 fase 6a): na podstaat (± 00:30) en ná de 01:xx-nachtgrendel; in-process, zelf begrensd (rclone 3 min, reconcile 5 min)
-      // wv1963 (SB2 fase 6c): proefloper ná de publicatie (L3 leest de stand van vannacht); met de schakelaar uit: al_gedaan
-      { naam: 'sb2-proefloper', start_na: [2, 45], na: ['intake-publicatie'], limiet_min: 7, pogingen: 2, meldtZelf: false, doe: async function (ctx) {
+      // wv1963 (SB2 fase 6c): proefloper ná de publicatie (L3 leest de stand van vannacht); met de schakelaar uit: al_gedaan. meldtZelf:
+      // een mislukte ronde meldt socev-run zelf (box + bericht), rood per proef schrijft het script (review wv1963 ZOU 1)
+      { naam: 'sb2-proefloper', start_na: [2, 45], na: ['intake-publicatie'], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: async function (ctx) {
         if (!sb2ProefloperAan()) return { ok: true, al_gedaan: true, detail: { schakelaar: 'uit' } };
         return nachtDagStap(sb2Proefloper)(ctx);
       } },
+      // wv1962 (SB2 fase 6a): na podstaat (± 00:30) en ná de 01:xx-nachtgrendel; in-process, zelf begrensd (rclone 3 min, reconcile 5 min)
       { naam: 'sb2-herstelreferentie', start_na: [2, 5], limiet_min: 10, pogingen: 2, inProces: true, doe: async function (ctx) {
         if (!herstelReferentie) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return herstelReferentie.ronde(ctx);
