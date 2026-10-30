@@ -4500,6 +4500,15 @@ async function spOverzicht(req, res, sessie, uitkomsten) {
     // Enter in een veld neemt de eerste knop van het formulier: dat moet opslaan zijn, niet 'Vorige terugzetten'.
     '<button style="position:absolute;left:-9999px" tabindex="-1" aria-hidden="true">Alles opslaan</button>';
 
+  // 30-10-2026 (David: "het is zoeken naar het invoerveld"): nieuwe kluissleutel bovenaan, vóór de lange lijsten, met een eigen opslaanknop.
+  if (kluis.ok) {
+    const nw = 'w' + (++n), nn = 'w' + (++n);
+    sessie.velden[nn] = { plek: 'kluis-nieuw-naam' }; sessie.velden[nw] = { plek: 'kluis-nieuw', naamVeld: nn };
+    h += '<div class="blok"><strong>Nieuwe kluissleutel</strong> <span class="klein">(naam: kleine letters, cijfers, underscores; de pod ziet hem pas als de machinekamer hem op de witte lijst zet)</span><br>' +
+      '<input type="text" name="' + nn + '" placeholder="naam_van_sleutel" pattern="[a-z0-9_]{3,64}" autocomplete="off" spellcheck="false" style="max-width:24em"> ' +
+      '<input type="password" name="' + nw + '" autocomplete="new-password" spellcheck="false" placeholder="waarde" style="max-width:32em"> ' +
+      '<button>Opslaan</button></div>';
+  }
   h += '<h2>Supabase-kluis</h2>';
   if (!kluis.ok) h += '<p class="fout">Kluis niet te lezen: ' + spEsc(kluis.reden || 'onbekend') + '</p>';
   else {
@@ -4537,11 +4546,6 @@ async function spOverzicht(req, res, sessie, uitkomsten) {
       h += '<p class="klein">Weggegooid (gaan 14 dagen na de datum definitief weg; terughalen kan tot dan via de machinekamer): ' +
         weg.map(function (w) { return '<code>' + spEsc(w.naam) + '</code>'; }).join(', ') + '</p>';
     }
-    const nw = 'w' + (++n), nn = 'w' + (++n);
-    sessie.velden[nn] = { plek: 'kluis-nieuw-naam' }; sessie.velden[nw] = { plek: 'kluis-nieuw', naamVeld: nn };
-    h += '<div class="blok"><strong>Nieuwe kluissleutel</strong> <span class="klein">(naam: kleine letters, cijfers, underscores; de pod ziet hem pas als de machinekamer hem op de witte lijst zet)</span><br>' +
-      '<input type="text" name="' + nn + '" placeholder="naam_van_sleutel" pattern="[a-z0-9_]{3,64}" autocomplete="off" spellcheck="false" style="max-width:24em"> ' +
-      '<input type="password" name="' + nw + '" autocomplete="new-password" spellcheck="false" placeholder="waarde" style="max-width:32em"></div>';
   }
 
   h += '<h2>n8n-credentials</h2>';
