@@ -1495,3 +1495,93 @@ test('wv2006 review MOET 1: Davids eigen In-regel gaat altijd vóór een regel u
   assert.equal(mm.app('POST /app/mailman/regel', { actie: 'neer', id: eigen1 }).status, 200);
   assert.ok(vo(eigen1) > vo(eigen2));
 });
+
+// ── wv2029: een nieuwe regel direct op de pijplijn (Twijfel open + wachtend op Jev) en de bron voor het voorbeeld rechts ──
+test('wv2029 pijplijn: telling vooraf = toepassen; Twijfel open krijgt de keuze, wachtend op Jev volgt de regel; verwerkt, al gekozen en een eerdere regel blijven', () => {
+  const { mm } = nieuweKamer();
+  const SCHOOL = { factuur: 0.02, mens: 0.12, actie: 0.94, systeem: 0.04, waarde: 1.33 };   // → Twijfel (score)
+  const KRANT = 'Weekkrant <post@krant.invalid>';
+  const t1 = mail({ van: KRANT, onderwerp: 'Weekbrief 12' }), t2 = mail({ van: KRANT, onderwerp: 'Weekbrief 13' });
+  const t3 = mail({ van: KRANT, onderwerp: 'Weekbrief 14' });                    // David koos al
+  const t4 = mail({ van: 'Ander <x@ander.invalid>', onderwerp: 'Weekbrief 12' });   // past niet
+  const t5 = mail({ van: KRANT, onderwerp: 'Advertentie weekbrief' });            // een eerdere (Weg-)regel pakt hem eerst
+  const k1 = mail({ van: KRANT, onderwerp: 'Systeembericht' });                   // al verwerkt (Info)
+  draai(mm, 'gmail:david', [t1, t2, t3, t4, t5, k1], { jev: function (a) { return jevAntwoord(a.gmail_id === k1.id ? { systeem: 0.99, waarde: 0 } : SCHOOL); } });
+  const w1 = mail({ van: KRANT, onderwerp: 'Weekbrief 15' });
+  draai(mm, 'gmail:david', [w1], { jev: function () { return undefined; } });
+  const d1 = mail({ van: KRANT, onderwerp: 'Weekbrief 12' });
+  draai(mm, 'gmail:groenhouten', [d1]);
+  for (const m of [t1, t2, t3, t4, t5]) assert.equal(rij(mm, m.id).stroom, 'twijfel', m.onderwerp);
+  assert.equal(rij(mm, k1.id).stroom, 'info'); assert.equal(rij(mm, w1.id).status, 'wacht_jev'); assert.equal(rij(mm, d1.id).stroom, 'twijfel');
+  assert.equal(mm.app('POST /app/mailman/oordeel', { id: rij(mm, t3.id).id, juist: 'intake' }).status, 200);
+  assert.equal(mm.app('POST /app/mailman/regel', { actie: 'nieuw', postvak: 'gmail:david', stap: 'weg', naam: 'adv', voorwaarden: { onderwerp: { op: 'bevat', w: 'Advertentie' } } }).status, 200);
+  const vw = { van_domein: { op: 'is', w: 'krant.invalid' } };
+  const tel = function (pv) { return mm.app('POST /app/mailman/toets', { soort: 'pijplijn', postvak: pv, stap: 'in', stroom: 'factuur', voorwaarden: vw }); };
+  let t = tel('gmail:david');
+  assert.equal(t.status, 200, JSON.stringify(t.j));
+  assert.deepEqual([t.j.twijfel, t.j.wacht, t.j.totaal, t.j.naar], [2, 1, 3, 'factuur']);
+  assert.deepEqual(t.j.voorbeelden.map(function (r) { return r.id; }).sort(), [t1, t2, w1].map(function (m) { return rij(mm, m.id).id; }).sort());
+  assert.equal(tel('*').j.twijfel, 3, 'een regel voor beide postvakken raakt ook Doktersmaten');
+  assert.equal(mm.app('POST /app/mailman/toets', { soort: 'pijplijn', postvak: 'gmail:david', stap: 'in', stroom: 'info', voorwaarden: vw }).status, 400);
+  assert.equal(mm.app('POST /app/mailman/toets', { soort: 'pijplijn', postvak: 'gmail:nergens', stap: 'weg', voorwaarden: vw }).status, 400);
+  assert.equal(mm.app('POST /app/mailman/toets', { soort: 'pijplijn', postvak: 'gmail:david', stap: 'weg', voorwaarden: {} }).status, 400);
+  // zonder vinkje: de regel geldt alleen voor nieuwe mail
+  const zonder = mm.app('POST /app/mailman/regel', { actie: 'nieuw', postvak: 'gmail:david', stap: 'in', naam: 'zz', voorwaarden: { onderwerp: { op: 'is', w: 'Weekbrief 13' } }, stroom: 'intake' });
+  assert.equal(zonder.status, 200); assert.equal(zonder.j.pijplijn, undefined); assert.equal(rij(mm, t2.id).juist, null);
+  mm.app('POST /app/mailman/regel', { actie: 'weg', id: zonder.j.id });
+  const r = mm.app('POST /app/mailman/regel', { actie: 'nieuw', postvak: 'gmail:david', stap: 'in', naam: 'Weekkrant', voorwaarden: vw, stroom: 'factuur', pijplijn: true });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.deepEqual(r.j.pijplijn, { twijfel: 2, wacht: 1, totaal: 3, naar: 'factuur' });
+  for (const m of [t1, t2]) { const b = rij(mm, m.id); assert.deepEqual([b.juist, b.juist_regel, b.stroom, b.stap], ['factuur', r.j.id, 'twijfel', 'jev'], 'het besluit zelf blijft'); assert.ok(b.juist_tijd); }
+  assert.deepEqual([rij(mm, t3.id).juist, rij(mm, t3.id).juist_regel], ['intake', null], 'Davids eigen keuze blijft');
+  assert.equal(rij(mm, t4.id).juist, null); assert.equal(rij(mm, t5.id).juist, null, 'de Weg-regel gaat vóór');
+  assert.deepEqual([rij(mm, k1.id).stroom, rij(mm, k1.id).juist], ['info', null], 'verwerkte post nooit opnieuw');
+  assert.equal(rij(mm, d1.id).juist, null, 'regel alleen voor Privé raakt Doktersmaten niet');
+  const w = rij(mm, w1.id);
+  assert.deepEqual([w.status, w.stap, w.stroom, w.regel_id, w.reden], ['wacht_jev', 'in', 'factuur', r.j.id, 'regel']);
+  const wz = mm._db.prepare("SELECT * FROM wijziging WHERE wat = 'regel_pijplijn'").get();
+  assert.equal(JSON.parse(wz.nieuw).twijfel.length, 2); assert.equal(Number(wz.sleutel), r.j.id);
+  assert.equal(tel('gmail:david').j.totaal, 0, 'nog eens: niets meer te doen');
+  // Jev antwoordt alsnog: de stroom van de regel blijft, het plan volgt de regel (FACTUUR), de Jev-meting komt erbij
+  draai(mm, 'gmail:david', [w1], { jev: function () { return jevAntwoord(SCHOOL); } });
+  const w2 = rij(mm, w1.id);
+  assert.deepEqual([w2.status, w2.stroom, w2.reden], ['klaar', 'factuur', 'regel']); assert.deepEqual(JSON.parse(w2.labels_plan), ['FACTUUR']); assert.ok(w2.jev);
+  // Werkstroom en logboek: uit Twijfel, juist_regel in de rij; Davids eigen keuze daarna wist de regel-herkomst
+  const lijst = mm.werkstroomLijst('twijfel', 'gmail:david').rijen.map(function (x) { return x.id; });
+  assert.ok(!lijst.includes(rij(mm, t1.id).id)); assert.ok(lijst.includes(rij(mm, t4.id).id));
+  const lr = mm.app('GET /app/mailman', {}).j.postvakken.find(function (q) { return q.id === 'gmail:david'; }).twijfel.find(function (x) { return x.id === rij(mm, t1.id).id; });
+  assert.equal(lr.juist_regel, r.j.id);
+  mm.app('POST /app/mailman/oordeel', { id: rij(mm, t1.id).id, juist: 'info' });
+  assert.deepEqual([rij(mm, t1.id).juist, rij(mm, t1.id).juist_regel], ['info', null]);
+  mm.app('POST /app/mailman/oordeel', { id: rij(mm, t1.id).id, juist: null });
+  assert.deepEqual([rij(mm, t1.id).juist, rij(mm, t1.id).juist_tijd], [null, null]);
+});
+
+test('wv2029 pijplijn: Overig (Filter Weg) geeft de keuze Info; een regel voor beide postvakken; niet op de reservekant', () => {
+  const { mm } = nieuweKamer();
+  const SCHOOL = { factuur: 0.02, mens: 0.12, actie: 0.94, systeem: 0.04, waarde: 1.33 };
+  const a = mail({ van: 'Club <nieuws@club.invalid>' });
+  draai(mm, 'gmail:david', [a], { jev: function () { return jevAntwoord(SCHOOL); } });
+  const b = mail({ van: 'Club <nieuws@club.invalid>' });
+  draai(mm, 'gmail:groenhouten', [b]);
+  const r = mm.app('POST /app/mailman/regel', { actie: 'nieuw', postvak: '*', stap: 'weg', naam: 'Club', voorwaarden: { van_adres: { op: 'is', w: 'nieuws@club.invalid' } }, pijplijn: true });
+  assert.deepEqual(r.j.pijplijn, { twijfel: 2, wacht: 0, totaal: 2, naar: 'info' });
+  assert.equal(rij(mm, a.id).juist, 'info'); assert.equal(rij(mm, b.id).juist, 'info');
+  const { mm: res } = nieuweKamer({ primair: function () { return false; } });
+  assert.equal(res.app('POST /app/mailman/regel', { actie: 'nieuw', postvak: '*', stap: 'weg', naam: 'x', voorwaarden: { van_adres: { op: 'is', w: 'a@b.invalid' } }, pijplijn: true }).status, 503);
+  assert.equal(res.app('POST /app/mailman/toets', { soort: 'pijplijn', postvak: '*', stap: 'weg', voorwaarden: { van_adres: { op: 'is', w: 'a@b.invalid' } } }).status, 200, 'tellen mag ook op de reservekant');
+});
+
+test('wv2029 voorbeeld rechts: mailBron geeft alleen Gmail-id, postvak en bijlagesoorten; niet na 14 dagen en niet voor verzonden mail', () => {
+  const { mm } = nieuweKamer();
+  const m = mail({ bijlagen: [{ naam: 'geheim-naam.pdf', mime: 'application/pdf' }] });
+  const v = mail({ labels: ['SENT'] });
+  draai(mm, 'gmail:david', [m, v], { jev: function () { return jevAntwoord({ mens: 0.9, waarde: 2.5 }); } });
+  const b = mm.mailBron(rij(mm, m.id).id);
+  assert.deepEqual(b, { id: rij(mm, m.id).id, postvak: 'gmail:david', gmail_id: m.id, gedeeld: false, bijlagen: ['application/pdf'] });
+  assert.ok(!JSON.stringify(b).includes('geheim-naam'));
+  assert.equal(mm.mailBron(rij(mm, v.id).id), null, 'verzonden of concept: nooit');
+  assert.equal(mm.mailBron(999999), null); assert.equal(mm.mailBron('x'), null);
+  klok += 15 * DAG; mm.opruim(); klok -= 15 * DAG;
+  assert.equal(mm.mailBron(rij(mm, m.id).id), null, 'na 14 dagen weg');
+});

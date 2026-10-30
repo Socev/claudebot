@@ -15829,12 +15829,35 @@ function mailmanRoute(req, res) {
 }
 async function appMailman(req, res, a, s, d, route) {
   if (!mailman) return appWeiger(res, 404, 'MailMan zit niet in deze versie van de pod', 'mailman ontbreekt');
+  if (route === 'POST /app/mailman/mail') return appMailmanMail(res, a, d || {});   // wv2029: voorbeeld rechts in de Werkstroom
   if (route === 'GET /app/mailman' || route === 'GET /app/mailman/verkoop') res._app.stil = true;   // wv1998: ook de tab Verkoop (Facturen)
   let r;
   try { r = mailman.app(route, d || {}, appStudioCtx(a, s)); } catch (e) { logError('mailman-app', e); return appWeiger(res, 500, 'MailMan: interne fout', 'mailman fout'); }
   if (r.status !== 200) res._app.reden = 'mailman: ' + String(r.j && r.j.fout || '').slice(0, 60);
   else if (route.indexOf('POST ') === 0) res._app.reden = 'mailman ' + route.slice('POST /app/mailman/'.length) + ' ' + String(d && (d.actie || d.stand || d.sleutel || d.stroom) || '').slice(0, 20);
   return appStuur(res, r.status, r.j);
+}
+// wv2029 (David 30-10: "Ik wil sowieso de mail rechts als voorbeeld bij verwerken, en ook als we een regel aanmaken obv die mail"): één mail
+// van een MailMan-besluit lezen via het bestaande lees-luik (mail_lezen van AI - Agenda-Wachter API; Doktersmaten met account dm), alleen
+// op Davids tik. Kop en platte tekst (≤ 12.000 tekens, zoals het luik hem geeft) gaan alleen naar de App: niets op schijf, niets in het
+// log (alleen "mailman mail"), geen bijlagen openen (alleen de soorten uit het logboek). Afgeschermd apparaat: geen privépost.
+const MAILMAN_MAIL_UUR = 240;
+async function appMailmanMail(res, a, d) {
+  let b = null;
+  try { b = typeof mailman.mailBron === 'function' ? mailman.mailBron(d.id) : null; } catch (e) { logError('mailman-mail', e); }
+  if (!b) return appWeiger(res, 404, 'Deze mail is niet (meer) te lezen', 'mailman mail onbekend');
+  if (appAfscherm(a) && b.postvak === 'gmail:david') return appWeiger(res, 403, 'Privépost is op dit apparaat afgeschermd', 'mailman mail afgeschermd');
+  appStaat.tellers['mailman-mail'] = appStaat.tellers['mailman-mail'] || [];
+  if (!appTeller('mailman-mail', MAILMAN_MAIL_UUR, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens mailman mail');
+  let vol;
+  try { vol = await appAgendaApi(Object.assign({ actie: 'mail_lezen', id: b.gmail_id }, b.postvak === 'gmail:groenhouten' ? { account: 'dm' } : {})); }
+  catch (e) { logError('mailman-mail', e); return appWeiger(res, 502, 'Gmail is even niet bereikbaar; probeer het zo nog eens', 'mailman mail luik'); }
+  if (!vol || typeof vol !== 'object' || vol.fout || (vol.id && String(vol.id) !== b.gmail_id)) return appWeiger(res, 502, 'Gmail gaf deze mail niet', 'mailman mail leeg');
+  const t = typeof vol.tekst === 'string' ? vol.tekst : '';
+  const str = function (x, n) { return typeof x === 'string' ? x.slice(0, n) : ''; };
+  res._app.reden = 'mailman mail';
+  return appStuur(res, 200, { ok: true, mail: { id: b.id, van: str(vol.van, 400), aan: str(vol.aan, 1000), onderwerp: str(vol.onderwerp, 500),
+    datum: str(vol.datum_lokaal || vol.datum, 40), tekst: t.slice(0, 12000), afgekapt: t.length >= 12000, bijlagen: b.bijlagen, postvak: b.postvak } });
 }
 function mailmanInfo() { if (!mailman) return { aan: false }; try { return Object.assign({ aan: true }, mailman.info()); } catch (e) { return { aan: true, fout: true }; } }
 let mailmanDag = '';

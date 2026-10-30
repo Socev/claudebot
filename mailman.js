@@ -63,6 +63,12 @@
  * de rest staat uit als voorstel. Gewone regels in de tabel regel; de herkomst (aantal, doel, voorbeeld-onderwerp, laatst) apart in
  * regel_herkomst, alleen voor de App (blok "Uit je verzonden mail" in Filter In). De beslissing kijkt nooit naar de herkomst.
  *
+ * WERKPLEK (wv2029, 30-10-2026; David 14:25 "Als ik nu een nieuwe regel maak, wil ik 'Pas toe op alle mails in de pijplijn'"). Een nieuwe
+ * regel met pijplijn: true geldt meteen voor wat nog niet af is (pijplijnRaak/pijplijnToepassen, zie daar): Twijfel open krijgt de keuze
+ * (juist + juist_regel), een besluit dat op Jev wacht krijgt de regel als besluit. De telling vooraf is POST /app/mailman/toets soort
+ * pijplijn. Geen Gmail-schrijfactie: labels volgen alleen via de gewone ronde. mailBron(id) geeft server.js het Gmail-id voor het voorbeeld
+ * rechts (lees-luik; MailMan bewaart nog steeds geen tekst). In de App heet Filter Weg sinds wv2029 "Overig" (stroom blijft info).
+ *
  * DE RONDE (n8n, O.2): POST /mailman/start → per postvak de zoekvraag (venster uit de laatste geslaagde ronde) · /mailman/nieuw (alle id's
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
  * tekens) → stap 0–3 + patiëntpoort, en de Jev-aanvragen · /mailman/stap2 (de Jev-antwoorden) → besluit · /mailman/gedaan.
@@ -82,7 +88,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-1.7';   // wv2006: In-regels uit Davids verzonden mail met herkomst (regel_herkomst)
+const VERSIE = 'mailman-1.8';   // wv2029: nieuwe regel direct op de pijplijn (Twijfel open + wachtend op Jev), voorbeeld rechts
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -396,17 +402,22 @@ function besluitRegels(m, instel) {
   if (alt.factuur_alias !== false && alias && m.aan.some(function (a) { return gmailKern(a, false) === alias; })) return { stap: 'altijd', stroom: 'factuur', reden: 'factuur_alias' };
   if (alt.ai_label !== false && gemarkeerd) return { stap: 'altijd', stroom: 'intake', reden: 'markering' };
   if (alt.draad !== false && instel.draadBekend) return { stap: 'altijd', stroom: 'intake', reden: 'draad' };
-  // wv2006 (review MOET 1): regels uit de verzonden mail (bron 'verzonden') komen altijd ná Davids eigen regels, wat de volgorde ook zegt
-  const laat = function (r) { return r.bron === 'verzonden' ? 1 : 0; };
-  const regels = (instel.regels || []).filter(function (r) { return r.actief; }).sort(function (a, b) { return laat(a) - laat(b) || a.volgorde - b.volgorde || a.id - b.id; });
-  for (const stap of ['weg', 'in']) {
-    for (const r of regels) {
-      if (r.stap !== stap || !regelPast(r.voorwaarden, m)) continue;
-      return { stap, stroom: stap === 'weg' ? 'info' : (STROMEN.includes(r.stroom) ? r.stroom : 'intake'), regel_id: r.id, regel_versie: r.versie, reden: 'regel' };
-    }
-  }
+  const r = eersteRegel(instel.regels, m);
+  if (r) return { stap: r.stap, stroom: regelStroom(r), regel_id: r.id, regel_versie: r.versie, reden: 'regel' };
   return { stap: 'jev', stroom: null, reden: 'jev' };
 }
+// De eerste actieve regel die past: Filter Weg vóór Filter In, binnen een stap Davids eigen regels in hun volgorde en (wv2006, review
+// MOET 1) regels uit de verzonden mail (bron 'verzonden') altijd daarna, wat de volgorde ook zegt. Ook voor de pijplijn (wv2029).
+function eersteRegel(regels, m) {
+  const laat = function (r) { return r.bron === 'verzonden' ? 1 : 0; };
+  const rs = (regels || []).filter(function (r) { return r.actief; }).sort(function (a, b) { return laat(a) - laat(b) || a.volgorde - b.volgorde || a.id - b.id; });
+  for (const stap of ['weg', 'in']) {
+    for (const r of rs) if (r.stap === stap && regelPast(r.voorwaarden, m)) return r;
+  }
+  return null;
+}
+// Waar een regel heen stuurt: Filter Weg (in de App sinds wv2029 "Overig") = info, Filter In = de stroom van de regel
+function regelStroom(r) { return r.stap === 'weg' ? 'info' : (STROMEN.includes(r.stroom) ? r.stroom : 'intake'); }
 
 // Jev-vragen → het questions-object van typesafe/jev (schaal = lijst, O.1)
 function jevVragen(vragen) {
@@ -507,7 +518,7 @@ function venster(laatsteGeslaagd, nuMs) {
   return Math.max(VENSTER_MIN, Math.min(VENSTER_MAX, Number.isFinite(d) ? d : VENSTER_MAX));
 }
 
-const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, jevVragen,
+const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, eersteRegel, regelStroom, jevVragen,
   jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
   authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL };
 
@@ -593,7 +604,8 @@ function maak(o) {
     ['besluit', 'gelezen_aangeboden TEXT'], ['stroom', 'gelezen_sinds TEXT'],
     ['ronde', 'archief_ok INTEGER NOT NULL DEFAULT 0'],   // wv1988 B6+ uitgangen gelezen/archief
     ['postvak', 'verkoop_door INTEGER NOT NULL DEFAULT 0'], ['postvak', 'verkoop_archief INTEGER NOT NULL DEFAULT 0'], ['postvak', 'verkoop_sinds TEXT'],
-    ['postvak', 'verkoop_archief_sinds TEXT']]) {   // wv1997 B7-V schakelaars (standaard uit)
+    ['postvak', 'verkoop_archief_sinds TEXT'],   // wv1997 B7-V schakelaars (standaard uit)
+    ['besluit', 'juist_regel INTEGER'], ['besluit', 'juist_tijd TEXT']]) {   // wv2029: Twijfel-keuze via een regel op de pijplijn (en wanneer)
     if (!db.prepare('SELECT 1 FROM pragma_table_info(?) WHERE name = ?').get(t, k.split(' ')[0])) db.exec('ALTER TABLE ' + t + ' ADD COLUMN ' + k);
   }
   function tx(f) {
@@ -1399,7 +1411,7 @@ function maak(o) {
     let jev = null; try { jev = b.jev ? JSON.parse(b.jev) : null; } catch (e) { jev = null; }
     let plan = []; try { plan = b.labels_plan ? JSON.parse(b.labels_plan) : []; } catch (e) { plan = []; }
     return { id: b.id, tijd: b.aangemaakt, ontvangen: b.ontvangen, afzender: b.afzender, naam: b.van_naam, domein: b.afzender_domein,
-      onderwerp: b.onderwerp, marker: !!b.marker, zorg: b.marker_soorten === 'zorgmail', inhaal: !!b.inhaal, juist: b.juist || null, stap: b.stap, reden: b.reden, regel_id: b.regel_id,
+      onderwerp: b.onderwerp, marker: !!b.marker, zorg: b.marker_soorten === 'zorgmail', inhaal: !!b.inhaal, juist: b.juist || null, juist_regel: b.juist_regel || null, stap: b.stap, reden: b.reden, regel_id: b.regel_id,
       stroom: b.stroom, status: b.status, score: b.score, jev, botsing: b.botsing, labels: plan, gelezen: !!b.gelezen_tijd, gearchiveerd: !!b.archief_tijd, oordeel: b.oordeel, tab: b.tab, bijlagen: (function () { try { return JSON.parse(b.bijlagen || '[]').length; } catch (e) { return 0; } })() };
   }
   // 5 uit Info en 5 uit Intake (en Twijfel), elke dag dezelfde keus (hash op dag + id), alleen besluiten met een afzender
@@ -1507,8 +1519,65 @@ function maak(o) {
     const h = db.prepare('SELECT soort, aantal, doel, voorbeeld, laatst, waarom, gemeten FROM regel_herkomst WHERE regel_id = ?').get(id);
     return h ? Object.assign({}, h) : null;
   }
+  /*
+   * Pijplijn (wv2029; David 30-10: "Als ik nu een nieuwe regel maak, wil ik 'Pas toe op alle mails in de pijplijn' - zodat als er nog 12
+   * van dezelfde soort in Twijfel staan, deze direct opgepikt worden"). Een nieuwe regel kan direct gelden voor mail die nog niet af is:
+   *  - Twijfel open (14 dagen, nog geen keuze van David): krijgt dezelfde uitkomst als Davids eigen keuze in de Werkstroom (juist = de stroom
+   *    van de regel, juist_regel = de regel). Het besluit zelf, de labels en Gmail blijven zoals ze zijn: wat MailMan al deed (in live het
+   *    wachtrijlabel via "twijfel naar") wordt niet overgedaan.
+   *  - Wachtend op Jev (stap jev, status wacht_jev): de regel beslist zoals stap1 had gedaan als de regel er al was (stap, stroom, regel_id);
+   *    het besluit blijft wachten op Jev voor de meetgegevens (TODO, botsing) en stap2/sluitOudeWachters maken het af met de stroom van de
+   *    regel. Labels komen dan pas, zoals altijd, bij /mailman/labels in een gewone ronde.
+   * Alleen als deze regel de EERSTE passende regel is (Filter Weg vóór Filter In, Davids regels in volgorde, verzonden-regels daarna): een
+   * mail die een andere regel eerder zou pakken, blijft liggen. Nooit verwerkte post (status klaar buiten Twijfel), nooit verkoop, nooit
+   * een rij zonder afzender (marker van vóór wv1980). De telling vooraf (toets soort pijplijn) gebruikt dezelfde functie.
+   */
+  function kandidaat(d) {
+    const stap = String(d.stap || '');
+    if (!['weg', 'in'].includes(stap)) return { fout: 'stap weg of in' };
+    const stroom = stap === 'in' ? String(d.stroom || 'intake') : null;
+    if (stap === 'in' && !['intake', 'factuur'].includes(stroom)) return { fout: 'stroom intake of factuur' };
+    const pv = String(d.postvak || '');
+    if (pv !== '*' && !postvak(pv)) return { fout: 'postvak onbekend' };
+    const vo = (db.prepare("SELECT max(volgorde) m FROM regel WHERE stap = ? AND bron != 'verzonden'").get(stap).m || 0) + 1;   // zoals regelRoute nieuw
+    return { r: { id: -1, postvak: pv, stap, stroom, volgorde: vo, bron: 'David', actief: true, versie: 1 } };
+  }
+  function pijplijnRaak(r) {
+    const uit = { twijfel: [], wacht: [] };
+    const van = new Date(nu() - NAMEN_MS).toISOString();
+    for (const p of postvakken()) {
+      if (r.postvak !== '*' && r.postvak !== p.id) continue;
+      const rs = regels(p.id).filter(function (x) { return x.id !== r.id; }).concat([r]);
+      const past = function (b) { if (b.afzender == null && b.marker) return false; const e = eersteRegel(rs, mailUitRij(b)); return !!e && e.id === r.id; };
+      for (const b of db.prepare("SELECT * FROM besluit WHERE postvak = ? AND status = 'klaar' AND stroom = 'twijfel' AND juist IS NULL AND aangemaakt >= ? AND namen_weg IS NULL ORDER BY COALESCE(ontvangen, aangemaakt), id").all(p.id, van))
+        if (past(b)) uit.twijfel.push(b);
+      for (const b of db.prepare("SELECT * FROM besluit WHERE postvak = ? AND status = 'wacht_jev' AND stap = 'jev' AND namen_weg IS NULL ORDER BY COALESCE(ontvangen, aangemaakt), id").all(p.id))
+        if (past(b)) uit.wacht.push(b);
+    }
+    return uit;
+  }
+  function toetsPijplijn(d) {
+    const v = toetsVoorwaarden(d.voorwaarden);
+    if (!v.ok) return { status: 400, j: { ok: false, fout: v.reden } };
+    const k = kandidaat(d);
+    if (k.fout) return { status: 400, j: { ok: false, fout: k.fout } };
+    const raak = pijplijnRaak(Object.assign(k.r, { voorwaarden: v.v }));
+    return { status: 200, j: { ok: true, twijfel: raak.twijfel.length, wacht: raak.wacht.length, totaal: raak.twijfel.length + raak.wacht.length,
+      naar: regelStroom(k.r), voorbeelden: raak.twijfel.concat(raak.wacht).slice(0, 20).map(logRij) } };
+  }
+  // Binnen de transactie van regelRoute (nieuw): r = de zojuist opgeslagen regel
+  function pijplijnToepassen(r, door) {
+    const raak = pijplijnRaak(r), naar = regelStroom(r), t = iso();
+    let twijfel = 0, wacht = 0;
+    for (const b of raak.twijfel) twijfel += Number(db.prepare('UPDATE besluit SET juist = ?, juist_regel = ?, juist_tijd = ? WHERE id = ? AND juist IS NULL').run(naar, r.id, t, b.id).changes);
+    for (const b of raak.wacht) wacht += Number(db.prepare("UPDATE besluit SET stap = ?, stroom = ?, regel_id = ?, regel_versie = ?, reden = 'regel' WHERE id = ? AND status = 'wacht_jev' AND stap = 'jev'")
+      .run(r.stap, naar, r.id, r.versie || 1, b.id).changes);
+    wijzig('regel_pijplijn', r.id, null, { naar, twijfel: raak.twijfel.map(function (b) { return b.id; }), wacht: raak.wacht.map(function (b) { return b.id; }) }, door);
+    return { twijfel, wacht, totaal: twijfel + wacht, naar };
+  }
   // Toets (O.9): wat had deze regel (of deze Jev-instelling) de afgelopen 14 dagen gedaan, op het logboek
   function toets(d) {
+    if (d && d.soort === 'pijplijn') return toetsPijplijn(d);
     const p = postvak(d && d.postvak);
     if (!p) return { status: 400, j: { ok: false, fout: 'postvak onbekend' } };
     const van = new Date(nu() - NAMEN_MS).toISOString();
@@ -1561,7 +1630,9 @@ function maak(o) {
           const id = Number(db.prepare(`INSERT INTO regel (postvak, stap, volgorde, naam, voorwaarden, stroom, actief, bron, aangemaakt, bijgewerkt, versie) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1)`)
             .run(pv, stap, vo, naam, JSON.stringify(v.v), stroom, d.bron === 'voorstel' ? 'voorstel' : 'David', iso(), iso()).lastInsertRowid);
           wijzig('regel', id, null, { postvak: pv, stap, naam, voorwaarden: v.v, stroom }, door);
-          return { status: 200, j: { ok: true, id } };
+          // wv2029: "Pas toe op alle mails in de pijplijn" (alleen bij een nieuwe regel, in dezelfde transactie)
+          const pl = d.pijplijn === true ? pijplijnToepassen({ id, postvak: pv, stap, volgorde: vo, naam, voorwaarden: v.v, stroom, actief: true, bron: d.bron === 'voorstel' ? 'voorstel' : 'David', versie: 1 }, door) : undefined;
+          return { status: 200, j: { ok: true, id, pijplijn: pl } };
         }
         const oud = db.prepare('SELECT * FROM regel WHERE id = ? AND weg = 0').get(Number(d.id));
         if (!oud) return { status: 404, j: { ok: false, fout: 'regel onbekend' } };
@@ -1695,7 +1766,7 @@ function maak(o) {
     if (metJ && !(d.juist == null || ['intake', 'factuur', 'info'].includes(d.juist))) return { status: 400, j: { ok: false, fout: 'juist: intake, factuur of info' } };
     tx(function () {
       if (metO) db.prepare('UPDATE besluit SET oordeel = ? WHERE id = ?').run(d.oordeel || null, b.id);
-      if (metJ) db.prepare('UPDATE besluit SET juist = ? WHERE id = ?').run(d.juist || null, b.id);
+      if (metJ) db.prepare('UPDATE besluit SET juist = ?, juist_regel = NULL, juist_tijd = ? WHERE id = ?').run(d.juist || null, d.juist ? iso() : null, b.id);   // wv2029: Davids eigen keuze
     });
     return { status: 200, j: { ok: true } };
   }
@@ -1728,6 +1799,14 @@ function maak(o) {
       postvakken: postvakken().filter(function (p) { return pvs.indexOf(p.id) >= 0; }).map(function (p) {
         return { id: p.id, naam: p.naam, drempel_in: p.drempel_in, drempel_uit: p.drempel_uit, twijfel_naar: p.twijfel_naar, regels: regels(p.id).map(function (r) { return { id: r.id, naam: r.naam }; }) };
       }) };
+  }
+  // wv2029 voorbeeld rechts: welke Gmail-mail hoort bij dit besluit (server.js leest hem via het lees-luik; MailMan bewaart geen tekst).
+  // Alleen zolang de namen er nog zijn (14 dagen) en nooit voor verzonden mail of concepten (stap buiten).
+  function mailBron(id) {
+    const b = db.prepare('SELECT id, postvak, gmail_id, bijlagen, stap FROM besluit WHERE id = ? AND namen_weg IS NULL').get(Number(id));
+    if (!b || b.stap === 'buiten' || !ID_RE.test(String(b.gmail_id))) return null;
+    let bij = []; try { bij = JSON.parse(b.bijlagen || '[]'); } catch (e) { bij = []; }
+    return { id: b.id, postvak: b.postvak, gmail_id: b.gmail_id, gedeeld: GEDEELD.has(b.postvak), bijlagen: Array.isArray(bij) ? bij.map(String).slice(0, 20) : [] };
   }
   function app(route, d, ctx) {
     d = isObj(d) ? d : {};
@@ -1789,7 +1868,7 @@ function maak(o) {
     }
     return uit;
   }
-  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, werkstroomTel, werkstroomLijst, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
+  return { n8n, app, sleutelOk, info, zorgen, opruim, telling, werkstroomTel, werkstroomLijst, mailBron, verkoopToets, verkoopBezig: function () { return verkoopBezig; }, _db: db };
 }
 
 function isPad(p) { return p === '/mailman' || String(p).indexOf('/mailman/') === 0; }

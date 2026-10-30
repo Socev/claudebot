@@ -12,13 +12,17 @@ fi
 if echo "$C" | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|path|crypto|node:sqlite)'\)$"; then
   echo "ROOD  CI-poort: mailman.js laadt een module buiten fs, path, crypto en node:sqlite"; exit 1
 fi
-if [ "$(echo "$C" | grep -c 'new RegExp(')" != "1" ] || ! echo "$C" | grep -q "return { ok: true, re: new RegExp(s, 'i') }"; then
+# vaste patronen uit letterlijke tekst (wv1998: const X_RE = new RegExp('…' + BEDRAG, …)) tellen niet als invoer (wv2029: poort was rood)
+R=$(echo "$C" | grep 'new RegExp(' | grep -vE "^const [A-Z_]+_RE = new RegExp\('[^']*' \+ BEDRAG, '[gi]+'\);$")
+if [ "$(echo "$R" | grep -c 'new RegExp(')" != "1" ] || ! echo "$R" | grep -q "return { ok: true, re: new RegExp(s, 'i') }"; then
   echo "ROOD  CI-poort: een RegExp uit invoer buiten veiligeRegex"; exit 1
 fi
 echo "GROEN CI-poort: mailman.js alleen lokaal, regex alleen na de vormtoets"
 f=0
 grep -q "mailmanIsPad(req)) return mailmanRoute" server.js || { echo "ROOD  server.js: /mailman/* niet vóór handleRequest"; f=1; }
 grep -q "route.indexOf('POST /app/mailman/') === 0" server.js || { echo "ROOD  server.js: /app/mailman niet in de app-routes"; f=1; }
+grep -q "if (route === 'POST /app/mailman/mail') return appMailmanMail(res, a, d || {});" server.js || { echo "ROOD  server.js: voorbeeld rechts (wv2029) niet gekoppeld"; f=1; }
+grep -q "if (appAfscherm(a) && b.postvak === 'gmail:david') return appWeiger(res, 403" server.js || { echo "ROOD  server.js: voorbeeld rechts toont privépost op een afgeschermd apparaat"; f=1; }
 grep -q "mailman: typeof mailmanInfo" server.js || { echo "ROOD  server.js: mailman ontbreekt in /health"; f=1; }
 grep -q "r = toets ? await mailman.verkoopToets(d) : mailman.n8n" server.js || { echo "ROOD  server.js: /mailman/verkoop/toets niet via verkoopToets"; f=1; }
 grep -q "proces: intakeProces, verkoopTmp: '/dev/shm'" server.js || { echo "ROOD  server.js: verkoop-lezer niet lokaal in /dev/shm"; f=1; }
