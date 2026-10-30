@@ -1329,7 +1329,14 @@ test('wv1405 twee rekeningen bij één entiteit; ABN-afschrift met PREF koppelt 
   assert.equal(sepaDownload(t, abn.id, [l]).r.status, 200);
   const sig = (nu) => { F.bankcontroleToepassen(t.fdb, nu); return t.n("SELECT count(*) AS n FROM signaal WHERE soort = 'ingevoerd_niet_gezien' AND EXISTS (SELECT 1 FROM json_each(facturen) j WHERE j.value = ?)", [l]); };
   assert.equal(sig(Date.parse('2026-11-20T10:00:00Z')), 0, 'vóór de uitvoerdatum');
-  assert.equal(sig(Date.parse('2026-12-31T10:00:00Z')), 1, 'ruim 5 werkdagen ná de uitvoerdatum');
+  // wv2057: niet meer op de kalender maar op de bank: zonder bankgegevens van ná de termijn geen signaal; na een upload t/m 30-12 wel
+  assert.equal(sig(Date.parse('2026-12-31T10:00:00Z')), 0, 'bank nog niet voorbij de termijn');
+  const bv = t.call('GET', 'betalen', null, { nu: Date.parse('2026-12-31T10:00:00Z') }).j.ingevoerd_niet_gezien.find((x) => x.id === l).bank;
+  assert.deepEqual([bv.verwacht, bv.termijn_tot, bv.stand], ['2026-12-21', '2026-12-23', 'bank_achter']);
+  t.zetKlaar('beurt-sepa4', 1, 'export.tab', tabRij('0000000031', '20261230', '12,34', 'Rente') + '\n');
+  assert.equal(t.call('POST', 'upload', { beurt: 'beurt-sepa4', n: 1, soort: 'auto' }, { nu: Date.parse('2026-12-31T10:00:00Z') }).status, 200);
+  assert.equal(sig(Date.parse('2026-12-31T11:00:00Z')), 1, 'de bank is voorbij de termijn en de betaling staat er niet');
+  assert.equal(t.call('GET', 'betalen', null, { nu: Date.parse('2026-12-31T11:00:00Z') }).j.ingevoerd_niet_gezien.find((x) => x.id === l).bank.stand, 'niet_gezien');
 });
 
 // wv1415: een batchregel die de bank terugboekt (vorm gemeten 27-10 in de ABN-export, batch van 12-8-2026; alle waarden hier verzonnen)
@@ -1963,4 +1970,66 @@ test('wv2036 mailStappen: batch → in_sepa, bankmatch → is_betaald, incasso g
   t.fdb.db.prepare("UPDATE factuur SET betaalspoor = 'betaald_gezien' WHERE id = ?").run(e);
   assert.equal(stappen()[m5.mid], undefined);
   assert.ok(F.mailStappen(t.fdb).every((x) => /^[0-9a-f]{12,24}$/.test(x.gmail_id) && ['in_sepa', 'is_betaald'].includes(x.stap)));
+});
+
+// wv2057 (David 30-10-2026: "Jij kan dan attenderen: '29-10 zou zus-en-zo betaald worden, ik zie het niet terug op de bank!'"). Alle waarden verzonnen.
+test('wv2057 failsafe: batch van drie met één ontbrekende betaling → precies één bericht, nooit twee keer; afwijkend bedrag → bericht; zelf betaald → gekoppeld; signaal vanzelf dicht', () => {
+  const t = opzet();
+  const b = bankOpzet(t);
+  const abn = sepaRek(t, 'tolgaarde').find((k) => k.rekening === '…' + b.tg.slice(-4));
+  const ids = [teBetalenFactuur(t), teBetalenFactuur(t), teBetalenFactuur(t)];
+  const { r } = sepaDownload(t, abn.id, ids);
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  const reg = new Map(t.fdb.db.prepare('SELECT factuur, centen, iban, uitvoerdatum FROM sepa_regel WHERE batch = ?').all(r.j.batch).map((x) => [x.factuur, x]));
+  assert.equal(reg.get(ids[0]).uitvoerdatum, '2026-10-22');
+  const euro = (c) => (c / 100).toFixed(2).replace('.', ',');
+  const e2e = (x, dat, centen) => tabRij('0000000031', dat, '-' + euro(centen || x.centen), '/TRTP/SEPA OVERBOEKING/IBAN/' + x.iban + '/BIC/TESTNL2A/NAME/Proef/REMI/x/EREF/' + x.factuur);
+  const upload = (beurt, regels, nu) => { t.zetKlaar(beurt, 1, 'export.tab', regels.join('\n') + '\n'); const u = t.call('POST', 'upload', { beurt, n: 1, soort: 'auto' }, { nu }); assert.equal(u.status, 200, JSON.stringify(u.j)); };
+  // do 22-10 uitgevoerd; 1 en 3 staan op de bank, 2 niet; de export loopt t/m ma 26-10 (termijn: 2 bankwerkdagen)
+  const N1 = Date.parse('2026-10-26T12:00:00Z');
+  upload('wv2057-1', [e2e(reg.get(ids[0]), '20261022'), e2e(reg.get(ids[2]), '20261022'), tabRij('0000000031', '20261026', '12,34', 'Rente')], N1);
+  assert.deepEqual(ids.map((id) => t.f('id = ?', [id]).betaalspoor), ['betaald_gezien', 'ingevoerd', 'betaald_gezien']);
+  const open = t.fdb.db.prepare("SELECT facturen FROM signaal WHERE soort = 'ingevoerd_niet_gezien' AND status = 'open'").all().map((x) => JSON.parse(x.facturen)[0]);
+  assert.deepEqual(open.filter((id) => ids.includes(id)), [ids[1]], 'uit de batch alleen de ontbrekende');
+  // het zaad heeft ook een losse betaling die op 19-10 is ingevoerd; de bank van Tolgaarde loopt nu t/m 26-10, dus die staat er terecht ook in
+  assert.equal(open.length, 2);
+  const m = F.betaalMeldingen(t.fdb, N1);
+  assert.equal(m.aantal, 2);
+  const f2 = t.f('id = ?', [ids[1]]);
+  const zin = '22-10 zou ' + f2.leverancier_naam + ' ' + B.eurTekst(f2.incl) + ' betaald worden (Tolgaarde, factuur ' + f2.nummer + '), ik zie het niet op de bank.';
+  assert.equal(m.tekst.split(zin).length, 2, m.tekst);
+  assert.match(m.tekst, /^Bankcontrole: dit zie ik niet goed terug op de bank\./);
+  assert.doesNotMatch(m.tekst, /NL\d\d/, 'geen rekeningnummers');
+  assert.equal(F.betaalMeldingGemeld(t.fdb, m, N1), 2);
+  assert.equal(F.betaalMeldingen(t.fdb, N1 + 3600000), null, 'nooit twee keer hetzelfde bericht');
+  F.bankcontroleToepassen(t.fdb, N1 + 7200000);
+  assert.equal(F.betaalMeldingen(t.fdb, N1 + 7200000), null, 'ook niet na nog een bankcontrole');
+  // 2 komt alsnog, maar met een ander bedrag (EndToEndId = factuur-id): voorstel "bedrag wijkt af" en één nieuw bericht
+  const N2 = Date.parse('2026-10-28T12:00:00Z');
+  upload('wv2057-2', [e2e(reg.get(ids[1]), '20261027', reg.get(ids[1]).centen - 1000)], N2);
+  assert.equal(t.f('id = ?', [ids[1]]).betaalspoor, 'ingevoerd', 'niet automatisch');
+  const m2 = F.betaalMeldingen(t.fdb, N2);
+  assert.equal(m2.aantal, 1);
+  assert.match(m2.tekst, /^Op 27-10 ging € .+ voor factuur .+ \(.+\): het bedrag wijkt af\./);
+  F.betaalMeldingGemeld(t.fdb, m2, N2);
+  assert.equal(F.betaalMeldingen(t.fdb, N2), null);
+  // David bevestigt het voorstel (toch deze betaling): het signaal "niet gezien" gaat bij de volgende controle vanzelf dicht
+  const vs = t.fdb.db.prepare("SELECT id FROM voorstel WHERE status = 'open' AND facturen LIKE ?").get('%' + ids[1] + '%');
+  assert.equal(t.call('POST', 'voorstel', { id: vs.id, keuze: 'bevestig' }, { nu: N2 }).status, 200);
+  F.bankcontroleToepassen(t.fdb, N2 + 60000);
+  const sig = t.fdb.db.prepare("SELECT status, afhandeling, wie FROM signaal WHERE soort = 'ingevoerd_niet_gezien' AND facturen LIKE ?").get('%' + ids[1] + '%');
+  assert.deepEqual([sig.status, sig.afhandeling, sig.wie], ['afgehandeld', 'vanzelf_gezien', 'bankcontrole']);
+  assert.match(t.call('GET', 'bank', null, { nu: N2 }).j.geleerd_regels.map((x) => x.tekst).join(' '), /alsnog op de bank/);
+  // zelf betaald buiten de app (leverancier zonder bekende rekening), naar het IBAN op de factuur met het factuurnummer: automatisch gekoppeld
+  const ib = Z.maakIban('NL', 'TEST', '0955500001');
+  const z = teBetalenFactuur(t, { velden: { leverancier: null, leverancier_naam: 'Hovenier Proef', iban: ib, ibans_betaal: [ib] } });
+  const fz = t.f('id = ?', [z]);
+  upload('wv2057-3', [tabRij('0000000031', '20261028', '-' + euro(fz.incl), '/TRTP/SEPA OVERBOEKING/IBAN/' + ib + '/BIC/TESTNL2A/NAME/Hovenier Proef/REMI/' + fz.nummer + '/EREF/NOTPROVIDED')], N2 + 120000);
+  assert.equal(t.f('id = ?', [z]).betaalspoor, 'betaald_gezien');
+  assert.deepEqual({ ...t.fdb.db.prepare('SELECT bron, methode FROM koppeling WHERE factuur = ?').get(z) }, { bron: 'auto', methode: 'kenmerk' });
+  // de lijst in Betalen: zonder ingevoerde betalingen leeg; een nieuwe ingevoerde betaling staat er met de stand van de bank
+  const h = teBetalenFactuur(t);
+  assert.equal(t.call('POST', 'ingevoerd', { id: h }, { nu: N2 }).status, 200);
+  const rij = t.call('GET', 'betalen', null, { nu: N2 }).j.ingevoerd_niet_gezien.find((x) => x.id === h);
+  assert.deepEqual([rij.bank.verwacht, rij.bank.termijn_tot, rij.bank.bijgewerkt_tot, rij.bank.stand], ['2026-10-28', '2026-10-30', '2026-10-28', 'wacht']);
 });

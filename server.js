@@ -3957,7 +3957,7 @@ function handleRequest(req, res) {
       const nu = Date.now();
       const p = facturenKoerier ? facturenKoerier.ronde(fdb, facturenIo(), { nu: nu })
         : Promise.resolve(facturenRoutes.backupNodig(fdb, nu) ? facturenRoutes.ronde(fdb, { nu: nu }) : { ok: true, koerier: false });
-      p.then(function (j) { stuur(j && j.ok ? 200 : 500, j); })
+      p.then(function (j) { stuur(j && j.ok ? 200 : 500, j); if (j && j.ok) facturenBetaalMelding(fdb); })
         .catch(function (e) { logError('facturen-ronde', e); stuur(500, { ok: false, fout: 'facturen-ronde faalde in de pod' }); })
         .finally(function () { if (facturenRondeBezig === mijn) facturenRondeBezig = null; if (typeof facturenKaartPlan === 'function') facturenKaartPlan(0); });   // wv1705
     }); });
@@ -13125,13 +13125,14 @@ const BERICHT_BRONNEN = new Set(['agentrapport', 'pot-verzend', 'ovis', 'proef',
   'droomronde-wachter',   // wv390: Wachter melden van de droomronde (wv299). Bewust NIET 'echt-alarm' (Werkvoorraad-tikker, wv358): dat alarm
                           // meldt juist een pod in een wegwerpmap, waar /bericht 200 geeft in lege data; het blijft op Telegram (§ 4.6).
   'bank-ronde',           // wv685: één regel in het hoofdkanaal als een banktoestemming verlopen is (AI - Bank-ronde)
+  'facturen-bank',        // wv2057: failsafe na het inschieten (betaling niet op de bank, bedrag wijkt af); hoofdkanaal, soort dag
   'doorgeefluik',         // wv1267: regel in de machinekamer als David een opdracht via Socev op de werklijst zette
   'manager',              // wv895: rapport van een manager-ronde op afroep (machinekamer; soort antwoord als David of Socev hem startte)
   'dagsamenvatting']);    // wv589: dagsamenvatting "Gebeurd" 07:15 (idee 13 § 4.6): machinekamer, geen MELD_SOORT-regel = archief, geen seintje
 // wv804 (één meldingenkanaal § 4.1, ontwerp § 1): soort per bericht. Bron -> standaardsoort; elke andere bron (ook een nieuwe
 // zonder regel) is archief. Alleen vraag (hoofd), antwoord en dag geven een seintje; archief staat in de app, zonder zoem.
 const MELD_SOORTEN = { vraag: true, antwoord: true, dag: true, archief: true };
-const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag' };
+const MELD_SOORT = { 'agentrapport-david': 'antwoord', briefing: 'dag', dienstwaarschuwer: 'dag', 'stiltewachter-david': 'dag', 'facturen-bank': 'dag' };
 // Volgorde: stil blijft stil; een geregistreerde vraag of agendaknop is een vraag; dan het veld soort van de bron; dan de
 // tussenregel hoofd + dringend -> dag (tot Foutmelder/Agenda-Wachter/Stiltewachter het veld zetten); dan de tabel.
 // wv804 Fable M5 (deels): dringend in de machinekamer blijft archief (geen seintje); n8n/bericht.py houden de 15-min-kopie.
@@ -15067,6 +15068,29 @@ const facturenKoerier = (function () {
 })();
 const FACTUREN_VERZENDER_WF = process.env.FACTUREN_VERZENDER_WF || 'MiWuPjabqip7dCNo';   // AI - Facturen-verzender
 let facturenRondeBezig = null;   // { op } van de lopende ronde
+/*
+ * wv2057 (David 30-10-2026: "Jij kan dan attenderen: 'Hej, 29-10 zou zus-en-zo betaald worden, ik zie het niet terug op de bank!'"). Na elke
+ * geslaagde facturen-ronde (elk uur; de bankcontrole liep al bij de upload of de bankluis-ronde) één bericht in de app met wat nieuw is:
+ * betalingen die niet op de bank staan terwijl de bank van die rekening al voorbij de termijn is, en betalingen met ons kenmerk maar een
+ * ander bedrag (facturen.betaalMeldingen). Nooit tussen 23:00 en 07:00 (dan bij de ronde van 07:05). Pas als het bericht bezorgd is, gaat
+ * het op gemeld; mislukt het, dan de volgende ronde opnieuw (de sleutel houdt een dubbele binnen 24 uur tegen). Hooguit één tegelijk.
+ */
+let facturenBetaalBezig = false;
+async function facturenBetaalMelding(fdb) {
+  if (facturenBetaalBezig || !fdb || !facturenRoutes || typeof facturenRoutes.betaalMeldingen !== 'function') return;
+  const u = berichtUur();
+  if (u >= 23 || u < 7) return;
+  facturenBetaalBezig = true;
+  try {
+    const m = facturenRoutes.betaalMeldingen(fdb, Date.now());
+    if (!m || !m.tekst) return;
+    const r = await berichtIntern({ kanaal: 'hoofd', bron: 'facturen-bank', klasse: 'normaal', tekst: m.tekst,
+      sleutel: 'facturen-bank-' + crypto.createHash('sha256').update(String(m.sleutel)).digest('hex').slice(0, 24) });
+    if (r && r.status === 200 && r.j && r.j.ok) facturenRoutes.betaalMeldingGemeld(fdb, m, Date.now());
+    else logError('facturen-betaalmelding', new Error('bericht niet bezorgd (' + (r && r.status) + ')'));
+  } catch (e) { logError('facturen-betaalmelding', e); }
+  finally { facturenBetaalBezig = false; }
+}
 async function facturenLuikBytes(body) {
   const geheim = process.env.N8N_WEBHOOK_AGENDA_API;
   if (!geheim) throw new Error('lees-luik niet ingericht');

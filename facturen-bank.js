@@ -644,6 +644,16 @@ function tegenpartijGeborgd(tx, f, ctx) {
   if (tegen && levIbans(l).has(tegen)) return true;
   return !!(tx.is_incasso && tx.incassant_id && (l.incassant_ids || []).includes(tx.incassant_id) && (!tegen || !levIbans(l).size));
 }
+// wv2057 (David 30-10-2026: "jij koppelt achteraf de banktransacties zelf aan de facturen"): een factuur die David zelf betaalt (in de app
+// ingevoerd, of nog te betalen en buiten de app betaald) mag ook zonder bekende leveranciersrekening automatisch gekoppeld worden als de
+// betaling precies dat stuk is: naar het rekeningnummer óp de factuur, met het factuurnummer of betalingskenmerk in de omschrijving en
+// precies het bedrag (methode kenmerk, één factuur). Dat is wat David overtikte of kopieerde; de koppeling legt alleen vast wat er al
+// gebeurde. Een rekening wordt hierdoor nooit bekend (dat blijft Nagebeld) en het fraudesignaal onbekend IBAN blijft zoals het was.
+function eigenBetaling(tx, f, k) {
+  if (!k || k.methode !== 'kenmerk' || k.facturen.length !== 1 || k.verzamel || !f || !['ingevoerd', 'te_betalen'].includes(f.betaalspoor)) return false;
+  const tegen = ibanNorm(tx.tegenpartij_iban);
+  return !!(tegen && ibanNorm(f.iban) === tegen && teBetalen(f) > 0 && teBetalen(f) === -tx.bedrag_centen && noemtFactuur(referentieStukken(tx), f));
+}
 // Stukken van de omschrijving en het kenmerk, elk genormaliseerd (alleen letters en cijfers). Een factuurnummer moet een heel stuk zijn
 // (geen deel van een langer getal); een lang betalingskenmerk (≥ 12) mag ook met spaties ertussen staan.
 function referentieStukken(tx) {
@@ -847,6 +857,13 @@ function bandTekst(d) {
 }
 // Eén zin bij een signaal voor de kaart in de App (nu alleen afwijkend_bedrag; andere soorten: null). s = signaal met details en bedrag_centen.
 function signaalUitleg(s) {
+  // wv2057: waarom "niet gezien" (de bank van die rekening is al verder dan de termijn)
+  if (s && s.soort === 'ingevoerd_niet_gezien') {
+    const d = s.details || {};
+    if (!d.verwacht) return null;
+    return 'Zou op ' + dagNL(d.verwacht) + ' betaald worden' + (d.batch ? ' (SEPA-batch)' : '') + '; de bank van deze rekening is bijgewerkt t/m ' + dagNL(d.dekking) +
+      ' en daar staat hij niet in.';
+  }
   if (!s || s.soort !== 'afwijkend_bedrag') return null;
   const d = s.details || {};
   return bandTekst(d).replace(/^g/, 'G') + ', nu ' + eurTekst(Math.abs(Number(s.bedrag_centen) || 0)) + (d.datum ? ' op ' + dagNL(d.datum) : '') + '.' +
@@ -1034,6 +1051,50 @@ function werkdagenTussen(a, b) {
   for (let i = 1; i <= n; i++) { const dag = new Date(Date.UTC(+a.slice(0, 4), +a.slice(5, 7) - 1, +a.slice(8, 10) + i)).getUTCDay(); if (dag !== 0 && dag !== 6) w++; }
   return w;
 }
+// De n-de werkdag (ma–vr) ná d.
+function plusWerkdagen(d, n) {
+  let x = d;
+  for (let w = 0; w < n;) { x = plusDagen(x, 1); const dag = new Date(x + 'T00:00:00Z').getUTCDay(); if (dag !== 0 && dag !== 6) w++; }
+  return x;
+}
+
+/*
+ * wv2057 (David 30-10-2026: "Jij kan dan attenderen: 'Hej, 29-10 zou zus-en-zo betaald worden, ik zie het niet terug op de bank!'"). De
+ * failsafe na het inschieten: een betaling die David invoerde (los of in een SEPA-batch) moet binnen BETAAL_TERMIJN bankwerkdagen na de
+ * verwachte datum op de bank staan. Of de bank dat al kan laten zien, meten we per rekening: de laatste boekdatum die binnen is
+ * (gemeten 30-10: de zakelijke ABN-rekeningen komen alleen binnen als David een TAB-export uploadt, de POT twee keer per dag via de
+ * bankluis, ING en Triodos los). Een latere boeking op dezelfde rekening = de bank is voorbij die dag; geen latere boeking = we weten
+ * het nog niet (stand bank_achter, nooit "niet gezien"). Alleen een rekening van de entiteit met controle 1 telt.
+ *   dekking: Map(ibanNorm → laatste boekdatum); sepa: batches (zie bankcontrole); rekeningen: [{ iban, entiteit, controle }].
+ * → null (niet ingevoerd of geen datum) of { verwacht, termijn_tot, iban (rekening van de batch, anders null), dekking, batch, stand }
+ *   stand: 'wacht' (nog binnen de termijn), 'niet_gezien' (de bank is voorbij de termijn en de betaling staat er niet),
+ *          'bank_achter' (de termijn is voorbij maar de bank van die rekening is nog niet zo ver bijgewerkt).
+ */
+const BETAAL_TERMIJN = 2;
+function betaalVerwachting(f, o) {
+  if (!f || f.betaalspoor !== 'ingevoerd' || !f.ingevoerd_op || !isIsoDatum(String(f.ingevoerd_op).slice(0, 10))) return null;
+  const ing = String(f.ingevoerd_op).slice(0, 10);
+  const verwacht = isIsoDatum(f.uitvoer_op) && f.uitvoer_op > ing ? f.uitvoer_op : ing;
+  const dek = (o && o.dekking) || new Map();
+  // de batch waarin hij nu loopt: de laatste met deze factuur en de uitvoerdatum van de factuur
+  let batch = null;
+  if (isIsoDatum(f.uitvoer_op)) for (const p of (o && o.sepa) || []) if (p.datum === f.uitvoer_op && (p.regels || []).some((x) => x.factuur === f.id)) batch = p;
+  let iban = null, tot = null;
+  if (batch) { iban = ibanNorm(batch.eigen_iban); tot = dek.get(iban) || null; }
+  else for (const r of (o && o.rekeningen) || []) {
+    if (r.entiteit !== f.entiteit || controleVan(r) !== 1) continue;
+    const d = dek.get(ibanNorm(r.iban));
+    if (d && (!tot || d > tot)) tot = d;
+  }
+  const termijn_tot = plusWerkdagen(verwacht, BETAAL_TERMIJN);
+  const stand = tot && tot >= termijn_tot ? 'niet_gezien' : o && isIsoDatum(o.vandaag) && o.vandaag > termijn_tot ? 'bank_achter' : 'wacht';
+  return { verwacht, termijn_tot, iban, dekking: tot, batch: batch ? batch.pmtinf_id : null, batch_regels: batch ? batch.regels.length : 0, stand };
+}
+function dekkingVan(transacties) {
+  const m = new Map();
+  for (const t of transacties || []) { const i = ibanNorm(t.eigen_iban); if (i && isIsoDatum(t.boekdatum) && (!m.has(i) || t.boekdatum > m.get(i))) m.set(i, t.boekdatum); }
+  return m;
+}
 
 // Mogelijk dubbel geüpload: zelfde rekening + datum + bedrag + tegenpartij, andere entry_ref, uit verschillende bestanden.
 function dubbelGeupload(transacties) {
@@ -1152,6 +1213,22 @@ function bankcontrole(inv) {
         if (bekend([x.factuur]) && voldaan(fMap.get(x.factuur)) && !(betaald.get(x.factuur) || []).some((k) => k.tx === tx.id)) return { dubbel: [x.factuur], pmtinf_id: p.pmtinf_id };
       }
     }
+    // wv2057 (David: "bedrag op de bank wijkt af van de factuur"): de bank noemt ons eigen kenmerk (EndToEndId = factuur-id, of het
+    // batch-id), maar het bedrag is anders dan in de batch. Nooit automatisch: een voorstel met het verschil (reden 'bedrag wijkt af'),
+    // waar de betaalmelding over gaat. Een batch-id telt alleen als geen regel van die batch dit bedrag of deze EndToEndId heeft (een
+    // bank die per regel boekt met het batch-id erbij is geen afwijking van de hele batch).
+    for (const p of opRek) for (const x of p.regels) if (ken && ken === x.factuur && bedrag > 0 && bedrag !== x.centen && open([x.factuur])) {
+      const k = kandidaat('sepa_e2e', [fMap.get(x.factuur)], 0.6, tx, { pmtinf_id: p.pmtinf_id, verschil_centen: teBetalen(fMap.get(x.factuur)) - bedrag, reden: 'bedrag wijkt af' });
+      k.ter_bevestiging = true;
+      return k;
+    }
+    for (const p of opRek) {
+      const ids = p.regels.map((x) => x.factuur);
+      if (!(bedrag > 0) || bedrag === p.centen || !noemtBatchId(bank, p.pmtinf_id) || p.regels.some((x) => x.factuur === ken || x.centen === bedrag) || !open(ids)) continue;
+      const k = kandidaat('sepa_batch', ids.map((id) => fMap.get(id)), 0.6, tx, { pmtinf_id: p.pmtinf_id, verschil_centen: p.centen - bedrag, reden: 'bedrag wijkt af' });
+      k.ter_bevestiging = true;
+      return k;
+    }
     if (tx.tegenpartij_iban || opRek.some((p) => noemtBatchId(bank, p.pmtinf_id))) return null;
     const kan = opRek.filter((p) => p.regels.length > 1 && bedrag === p.centen && isIsoDatum(p.datum) && dagenTussen(p.datum, tx.boekdatum) >= -3 &&
       dagenTussen(p.datum, tx.boekdatum) <= 10 && open(p.regels.map((x) => x.factuur)));
@@ -1247,7 +1324,7 @@ function bankcontrole(inv) {
     const kand = matchTransactie(tx, (fPerEnt.get(tx.entiteit) || []).filter((f) => !voldaan(f)), ctx);
     const k = kand[0];
     if (!k || k.ter_bevestiging) return;
-    if (!k.facturen.every((fid) => fMap.has(fid) && tegenpartijGeborgd(tx, fMap.get(fid), ctx))) return;
+    if (!k.facturen.every((fid) => fMap.has(fid) && (tegenpartijGeborgd(tx, fMap.get(fid), ctx) || eigenBetaling(tx, fMap.get(fid), k)))) return;
     if (kand[1] && kand[1].zekerheid >= k.zekerheid - 0.05 && kand[1].facturen.join() !== k.facturen.join()) return;
     const eigenaar = eigenaarVan(tx, k.facturen);
     for (const fid of k.facturen) {
@@ -1388,6 +1465,7 @@ function bankcontrole(inv) {
   // signalen per factuur — alleen voor entiteiten waarvan de app een bank ziet (rekening met controle 1); Privé-regels worden niet
   // opgeslagen, dus daar zou elk signaal vals zijn (diffreview wv798 #12)
   const zichtbaar = new Set((ctx.rekeningen || []).filter((r) => controleVan(r) === 1).map((r) => r.entiteit));
+  const dekking = dekkingVan(txs);   // wv2057: per eigen rekening de laatste boekdatum die binnen is
   const gekoppeld = (f) => netto(f.id).length > 0 || voorgesteld.has(f.id);
   for (const f of facturen) {
     if (NIET_OPEN.includes(f.status) || gekoppeld(f) || f.entiteit === 'prive' || !zichtbaar.has(f.entiteit)) continue;
@@ -1406,10 +1484,17 @@ function bankcontrole(inv) {
     if (terug.length) { const tb = plusDagen(txMap.get(terug[terug.length - 1]).boekdatum, 14); if (!verval || tb > verval) verval = tb; }
     if (f.betaalspoor === 'incasso_verwacht' && verval && dagenTussen(verval, vandaag) > 14) signalen.push(maakSignaal('incasso_niet_gezien', basis));
     else if (f.betaalspoor === 'te_betalen' && verval && vandaag > verval) signalen.push(maakSignaal('te_betalen_niet_betaald', basis));
-    // wv1405: een betaling die in een batch met een latere uitvoerdatum staat, telt pas vanaf die datum (anders een vals signaal per regel)
-    else if (f.betaalspoor === 'ingevoerd' && f.ingevoerd_op && isIsoDatum(String(f.ingevoerd_op).slice(0, 10))) {
-      const ing = String(f.ingevoerd_op).slice(0, 10), start = isIsoDatum(f.uitvoer_op) && f.uitvoer_op > ing ? f.uitvoer_op : ing;
-      if (start <= vandaag && werkdagenTussen(start, vandaag) > 5) signalen.push(maakSignaal('ingevoerd_niet_gezien', basis));
+    // wv1405: een betaling die in een batch met een latere uitvoerdatum staat, telt pas vanaf die datum (anders een vals signaal per regel).
+    // wv2057: niet meer "> 5 werkdagen na vandaag" maar op de bank zelf: de rekening is bijgewerkt tot ná de termijn (2 bankwerkdagen) en de
+    // betaling staat er niet. Zonder verse bankgegevens geen signaal (de lijst in Betalen zegt dan "bank nog niet zo ver"). De datum hoort in
+    // de sleutel: na Ongedaan en opnieuw invoeren is het een nieuwe gebeurtenis (grondwet 10 telt per gebeurtenis).
+    else if (f.betaalspoor === 'ingevoerd') {
+      const v = betaalVerwachting(f, { dekking, sepa, rekeningen: ctx.rekeningen, vandaag });
+      if (v && v.stand === 'niet_gezien' && v.verwacht <= vandaag) {
+        signalen.push(maakSignaal('ingevoerd_niet_gezien', Object.assign({}, basis, { datum: v.verwacht,
+          sleutel_extra: [basis.sleutel_extra, 'v=' + v.verwacht].filter(Boolean).join(';'),
+          details: { nummer: f.nummer || null, verwacht: v.verwacht, termijn_tot: v.termijn_tot, dekking: v.dekking, batch: v.batch, batch_regels: v.batch_regels } })));
+      }
     }
   }
   for (const f of facturen) {
@@ -1477,6 +1562,35 @@ function bankcontrole(inv) {
   return uit;
 }
 
+/*
+ * wv2057: het bericht aan David in gewone taal (David 30-10-2026: "Hej, 29-10 zou zus-en-zo betaald worden, ik zie het niet terug op de bank!").
+ * items (facturen.betaalMeldingen): { soort: 'niet_gezien', verwacht, batch, batch_regels, centen, leverancier, entiteit, nummer } of
+ * { soort: 'afwijkend', boekdatum, betaald, centen, leverancier, entiteit, nummer, aantal }. Een SEPA-batch waarvan alle regels ontbreken
+ * wordt één zin ("is hij wel ingeladen?"). Platte tekst, geen opmaak; geen rekeningnummers. vandaag: het jaartal valt weg als het dit jaar is.
+ */
+function betaalMeldingTekst(items, vandaag) {
+  const dag = (d) => (isIsoDatum(d) ? Number(d.slice(8, 10)) + '-' + Number(d.slice(5, 7)) + (vandaag && d.slice(0, 4) === String(vandaag).slice(0, 4) ? '' : '-' + d.slice(0, 4)) : '?');
+  const wie = (x) => x.leverancier || 'een factuur zonder leveranciersnaam';
+  const zinnen = [];
+  const perBatch = new Map();
+  for (const x of items || []) if (x.soort === 'niet_gezien' && x.batch && x.batch_regels > 1) { if (!perBatch.has(x.batch)) perBatch.set(x.batch, []); perBatch.get(x.batch).push(x); }
+  const heleBatch = new Set([...perBatch].filter(([, l]) => l.length >= l[0].batch_regels).map(([b]) => b));
+  for (const b of heleBatch) {
+    const l = perBatch.get(b), som = l.reduce((t, x) => t + (Number(x.centen) || 0), 0);
+    zinnen.push('De SEPA-batch van ' + dag(l[0].verwacht) + ' van ' + l[0].entiteit + ' (' + l.length + ' betalingen, samen ' + eurTekst(som) + ') zie ik helemaal niet op de bank. Is hij wel ingeladen en ondertekend?');
+  }
+  for (const x of items || []) {
+    if (x.soort === 'niet_gezien' && !(x.batch && heleBatch.has(x.batch)))
+      zinnen.push(dag(x.verwacht) + ' zou ' + wie(x) + ' ' + eurTekst(x.centen) + ' betaald worden (' + x.entiteit + (x.nummer ? ', factuur ' + x.nummer : '') + '), ik zie het niet op de bank.');
+    else if (x.soort === 'afwijkend')
+      zinnen.push('Op ' + dag(x.boekdatum) + ' ging ' + eurTekst(x.betaald) + ' naar ' + (x.leverancier || 'de leverancier') + (x.aantal > 1 ? ' voor ' + x.aantal + ' facturen van samen ' : x.nummer ? ' voor factuur ' + x.nummer + ' van ' : ', de factuur is ') +
+        eurTekst(x.centen) + ' (' + x.entiteit + '): het bedrag wijkt af.');
+  }
+  if (!zinnen.length) return '';
+  return (zinnen.length > 1 ? 'Bankcontrole: dit zie ik niet goed terug op de bank.\n\n' + zinnen.join('\n\n') : zinnen[0]) +
+    '\n\nKijk het na in Facturen, tab Bankcontrole: koppel de betaling als hij er wel is, of pas de betaling in je bank aan.';
+}
+
 // ───────────────────────────── uitleg in gewone taal (wv1317) ─────────────────────────────
 
 /*
@@ -1524,7 +1638,7 @@ function voorstelUitleg(v, tx, facturen, alternatieven, patroon) {
     case 'subset': waarom.push('één betaling voor ' + facturen.length + ' facturen van deze leverancier; ' + (verschil ? verschilTekst(verschil) : 'samen precies het bedrag') +
       (facturen.some(credit) ? ' (een creditnota is verrekend)' : '')); break;
     case 'valuta': waarom.push('factuur in vreemde valuta; omgerekend bedrag binnen 3 %'); break;
-    case 'sepa_batch': case 'sepa_e2e': waarom.push('de bank noemt het kenmerk van een batch die je met de Facturen-app maakte, en het bedrag klopt precies'); break;
+    case 'sepa_batch': case 'sepa_e2e': waarom.push('de bank noemt het kenmerk van een batch die je met de Facturen-app maakte' + (verschil ? ', maar het ' + verschilTekst(verschil) : ', en het bedrag klopt precies')); break;
     case 'sepa_bedrag': waarom.push('één afschrijving voor ' + facturen.length + ' betalingen uit een batch van de Facturen-app; ' + (verschil ? verschilTekst(verschil) : 'samen precies het bedrag')); break;
     default: break;
   }
@@ -1555,6 +1669,7 @@ const AFHANDELING_TEKST = {
   historie_voor_start: (n) => n + (n === 1 ? ' afschrijving' : ' afschrijvingen') + ' van vóór de start van de App zonder factuur: genegeerd (oude historie).',
   transactie_verwijderd: (n) => n + (n === 1 ? ' melding verviel' : ' meldingen vervielen') + ': de bankregel was dubbel binnengekomen en is weggehaald.',
   vals_signaal: (n) => n + (n === 1 ? ' melding was' : ' meldingen waren') + ' vals alarm en is gesloten.',   // wv2047
+  vanzelf_gezien: (n) => n + (n === 1 ? ' betaling kwam' : ' betalingen kwamen') + ' alsnog op de bank; de melding is vanzelf gesloten.',   // wv2057
 };
 function leerRegel(g) {
   const n = Number(g.aantal) || 1;
@@ -1610,6 +1725,7 @@ module.exports = {
   pyStr, mkRef, kenEntryRefsToe, refBasis, saldoControle, normBedrag, herkenFormaat, csvRijen, leesIng, leesTriodos, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
   // controle
   uitzonderingVoor, uitzonderingPast, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
+  plusWerkdagen, betaalVerwachting, dekkingVan, eigenBetaling, BETAAL_TERMIJN, betaalMeldingTekst, eurTekst,
   // signalen
   maakSignaal, signaalSleutel, afhandelSignaal, terugvraagTekst, bandTekst, signaalUitleg,
   // uitleg (wv1317)

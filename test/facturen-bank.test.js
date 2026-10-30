@@ -585,7 +585,7 @@ test('zelf betaald én geïncasseerd → signaal dubbel betaald; terugvraagtekst
   assert.deepEqual(soorten(controle({ transacties: [i1, i2], facturen: [f2] })), ['geen_factuur']);
 });
 
-test('incasso niet gezien (> 14 dagen na vervaldatum), te betalen niet betaald, ingevoerd niet gezien (> 5 werkdagen)', () => {
+test('incasso niet gezien (> 14 dagen na vervaldatum), te betalen niet betaald, ingevoerd niet gezien (bank voorbij 2 werkdagen; wv2057)', () => {
   const fx = [
     fac({ id: 'i1', leverancier: 'lc', nummer: 'C-20', incl: 5000, betaalwijze: 'incasso', betaalspoor: 'incasso_verwacht', factuurdatum: '2026-09-01', vervaldatum: '2026-09-20' }),
     fac({ id: 'i2', leverancier: 'lc', nummer: 'C-21', incl: 5100, betaalwijze: 'incasso', betaalspoor: 'incasso_verwacht', factuurdatum: '2026-10-01', vervaldatum: '2026-10-15' }),
@@ -595,8 +595,12 @@ test('incasso niet gezien (> 14 dagen na vervaldatum), te betalen niet betaald, 
     fac({ id: 'g2', leverancier: 'lb', nummer: 'B-61', incl: 8100, betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-16T09:00:00Z', factuurdatum: '2026-10-01', vervaldatum: '2026-10-30' }),
     fac({ id: 'x1', leverancier: 'lb', nummer: 'B-62', incl: 100, betaalspoor: 'te_betalen', status: 'geen_factuur', vervaldatum: '2026-01-01' }),
   ];
-  const r = controle({ transacties: [], facturen: fx });
+  // wv2057: de bank van Tolgaarde is bijgewerkt t/m 19-10 (een bijschrijving): g1 (13-10, termijn t/m 15-10) is niet gezien; g2 (16-10,
+  // termijn t/m 20-10) nog niet te beoordelen
+  const bij = tx({ boekdatum: '2026-10-19', bedrag_centen: 12345, tegenpartij_iban: LEV.ZV, tegenpartij_naam: 'Zorgverzekeraar' });
+  const r = controle({ transacties: [bij], facturen: fx });
   assert.deepEqual(r.signalen.map((s) => [s.soort, s.facturen[0]]).sort(), [['incasso_niet_gezien', 'i1'], ['ingevoerd_niet_gezien', 'g1'], ['te_betalen_niet_betaald', 'p1']]);
+  assert.deepEqual(soorten(controle({ transacties: [], facturen: fx })), ['incasso_niet_gezien', 'te_betalen_niet_betaald'], 'zonder bankgegevens geen "niet gezien"');
   assert.equal(B.werkdagenTussen('2026-10-13', '2026-10-22'), 7);
   assert.equal(B.werkdagenTussen('2026-10-16', '2026-10-22'), 4);
   const s = r.signalen.find((x) => x.soort === 'incasso_niet_gezien');
@@ -1232,4 +1236,92 @@ test('wv1415 diffreview: terugboeking + handbetaling in één upload → betaald
   const ft = Object.assign({}, f, { betaalspoor: 'te_betalen', uitvoer_op: null });
   assert.deepEqual(sig('2026-10-15', ft), []);
   assert.deepEqual(sig('2026-10-17', ft), ['te_betalen_niet_betaald']);
+});
+
+// ═════════════════════════════ wv2057: failsafe na het inschieten (alle waarden verzonnen) ═════════════════════════════
+
+test('wv2057 betaalVerwachting: verwacht = uitvoerdatum of invoerdag; stand op de bank van die rekening (wacht / niet_gezien / bank_achter)', () => {
+  assert.equal(B.plusWerkdagen('2026-10-29', 2), '2026-11-02', 'do + 2 werkdagen = ma');
+  const f = fac({ id: 'v1', betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-28T10:00:00Z', uitvoer_op: '2026-10-29', incl: 1000 });
+  const sepa = [{ pmtinf_id: 'P-1', eigen_iban: ABN_TG, entiteit: 'tolgaarde', datum: '2026-10-29', centen: 1000, regels: [{ factuur: 'v1', centen: 1000 }] }];
+  const dek = (d) => new Map([[ABN_TG, d]]);
+  const v = (d, vandaag) => B.betaalVerwachting(f, { dekking: dek(d), sepa, rekeningen: REKENINGEN, vandaag });
+  assert.deepEqual([v('2026-10-30', '2026-10-30').stand, v('2026-10-30', '2026-10-30').verwacht, v('2026-10-30', '2026-10-30').batch], ['wacht', '2026-10-29', 'P-1']);
+  assert.equal(v('2026-11-02', '2026-11-02').stand, 'niet_gezien');
+  assert.equal(v('2026-10-30', '2026-11-04').stand, 'bank_achter', 'termijn voorbij, bank nog niet zo ver');
+  // los ingevoerd (geen batch): de rekeningen van de entiteit
+  const los = fac({ id: 'v2', betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-29T10:00:00Z', incl: 500 });
+  assert.equal(B.betaalVerwachting(los, { dekking: dek('2026-11-03'), sepa, rekeningen: REKENINGEN, vandaag: '2026-11-03' }).stand, 'niet_gezien');
+  assert.equal(B.betaalVerwachting(Object.assign({}, los, { betaalspoor: 'te_betalen' }), { dekking: dek('2026-11-03'), sepa, rekeningen: REKENINGEN }), null);
+});
+
+test('wv2057 verzonnen batch van drie, één betaling ontbreekt op de bank → precies één signaal; batch helemaal weg → signaal per regel met het batch-id', () => {
+  const fx = ['b1', 'b2', 'b3'].map((id, i) => fac({ id, leverancier: 'l' + 'abf'[i], nummer: 'N-' + id, incl: 1000 * (i + 1), iban: [LEV.A, LEV.B, LEV.F][i],
+    betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-29T09:00:00Z', uitvoer_op: '2026-10-29', factuurdatum: '2026-10-20', vervaldatum: '2026-11-20' }));
+  const p = { pmtinf_id: 'SOCEV-P-29', eigen_iban: ABN_TG, entiteit: 'tolgaarde', datum: '2026-10-29', centen: 6000, regels: fx.map((f) => ({ factuur: f.id, centen: f.incl, iban: f.iban })) };
+  // ABN boekt per regel met de EndToEndId (factuur-id) als kenmerk; b2 ontbreekt; de bank is bijgewerkt t/m 3-11 (een latere bijschrijving)
+  const t1 = tx({ boekdatum: '2026-10-29', bedrag_centen: -1000, tegenpartij_iban: LEV.A, kenmerk: 'b1', omschrijving: 'N-b1' });
+  const t3 = tx({ boekdatum: '2026-10-29', bedrag_centen: -3000, tegenpartij_iban: LEV.F, kenmerk: 'b3', omschrijving: 'N-b3' });
+  const laat = tx({ boekdatum: '2026-11-03', bedrag_centen: 50000, tegenpartij_iban: LEV.ZV, tegenpartij_naam: 'Zorgverzekeraar' });
+  const r = controle({ vandaag: '2026-11-03', transacties: [t1, t3, laat], facturen: fx, sepa: [p] });
+  assert.deepEqual(r.koppelingen.map((k) => [k.factuur, k.methode]).sort(), [['b1', 'sepa_e2e'], ['b3', 'sepa_e2e']]);
+  const niet = r.signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien');
+  assert.deepEqual(niet.map((s) => s.facturen[0]), ['b2']);
+  assert.deepEqual([niet[0].details.verwacht, niet[0].details.dekking, niet[0].details.batch, niet[0].details.batch_regels], ['2026-10-29', '2026-11-03', 'SOCEV-P-29', 3]);
+  assert.match(B.signaalUitleg(niet[0]), /29-10-2026.*t\/m 3-11-2026/);
+  // nog een ronde met het bestaande signaal: niets nieuws (grondwet 10)
+  assert.equal(controle({ vandaag: '2026-11-04', transacties: [t1, t3, laat], facturen: fx, sepa: [p], bestaandeSignalen: r.signalen }).signalen.length, 0);
+  // de hele batch niet op de bank: drie signalen, elk met het batch-id (de melding voegt ze samen)
+  const weg = controle({ vandaag: '2026-11-03', transacties: [laat], facturen: fx, sepa: [p] }).signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien');
+  assert.deepEqual(weg.map((s) => s.facturen[0]).sort(), ['b1', 'b2', 'b3']);
+  assert.ok(weg.every((s) => s.details.batch === 'SOCEV-P-29'));
+  // bank nog niet voorbij de termijn (t/m 30-10): geen signaal
+  const vroeg = tx({ boekdatum: '2026-10-30', bedrag_centen: 50000, tegenpartij_iban: LEV.ZV, tegenpartij_naam: 'Zorgverzekeraar' });
+  assert.equal(controle({ vandaag: '2026-11-05', transacties: [vroeg], facturen: fx, sepa: [p] }).signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 0);
+  // na Ongedaan en opnieuw invoeren met een andere datum: een nieuwe sleutel
+  const opnieuw = fx.map((f) => Object.assign({}, f, { ingevoerd_op: '2026-11-04T09:00:00Z', uitvoer_op: null }));
+  const later = tx({ boekdatum: '2026-11-09', bedrag_centen: 50000, tegenpartij_iban: LEV.ZV, tegenpartij_naam: 'Zorgverzekeraar' });
+  const r2 = controle({ vandaag: '2026-11-09', transacties: [later], facturen: opnieuw, sepa: [], bestaandeSignalen: weg });
+  assert.equal(r2.signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 3);
+});
+
+test('wv2057 zelf betaald (ingevoerd of buiten de app) naar het IBAN op de factuur, met factuurnummer en exact bedrag → automatisch gekoppeld, ook zonder bekende leveranciersrekening', () => {
+  const ONB = maakIban('NL', 'TEST', '0000000901');
+  const fi = fac({ id: 'h1', leverancier: 'ld', nummer: 'HB-2026-77', incl: 48300, iban: ONB, betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-30T15:00:00Z',
+    factuurdatum: '2026-10-28', vervaldatum: '2026-11-09' });
+  const ft = fac({ id: 'h2', nummer: 'TB-55', incl: 2605, iban: ONB, betaalspoor: 'te_betalen', factuurdatum: '2026-10-29', vervaldatum: '2026-11-12' });
+  const ti = tx({ boekdatum: '2026-10-31', bedrag_centen: -48300, tegenpartij_iban: ONB, tegenpartij_naam: 'Hovenier', omschrijving: 'Factuur HB-2026-77' });
+  const tt = tx({ boekdatum: '2026-10-31', bedrag_centen: -2605, tegenpartij_iban: ONB, tegenpartij_naam: 'Hovenier', omschrijving: 'TB-55' });
+  const r = controle({ vandaag: '2026-11-01', transacties: [ti, tt], facturen: [fi, ft] });
+  assert.deepEqual(r.koppelingen.map((k) => [k.transactie, k.factuur, k.methode]).sort(), [[ti.id, 'h1', 'kenmerk'], [tt.id, 'h2', 'kenmerk']].sort());
+  assert.deepEqual(r.betaalspoor.map((b) => [b.factuur, b.van, b.naar]).sort(), [['h1', 'ingevoerd', 'betaald_gezien'], ['h2', 'te_betalen', 'betaald_gezien']]);
+  // zonder factuurnummer in de omschrijving: alleen een voorstel; ander IBAN dan op de factuur: ook
+  const zonder = tx({ boekdatum: '2026-10-31', bedrag_centen: -48300, tegenpartij_iban: ONB, tegenpartij_naam: 'Hovenier', omschrijving: 'tuin' });
+  const r2 = controle({ vandaag: '2026-11-01', transacties: [zonder], facturen: [fi] });
+  assert.equal(r2.koppelingen.length, 0);
+  assert.deepEqual(r2.voorstellen.map((v) => v.facturen[0]), ['h1']);
+  const ander = tx({ boekdatum: '2026-10-31', bedrag_centen: -48300, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Hovenier', omschrijving: 'HB-2026-77' });
+  assert.equal(controle({ vandaag: '2026-11-01', transacties: [ander], facturen: [fi] }).koppelingen.length, 0);
+});
+
+test('wv2057 de bank noemt ons kenmerk maar het bedrag wijkt af → voorstel "bedrag wijkt af" met het verschil, geen "niet gezien" ernaast', () => {
+  const f = fac({ id: 'a7', leverancier: 'la', nummer: 'A-700', incl: 852221, iban: LEV.A, betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-27T09:00:00Z', uitvoer_op: '2026-10-27',
+    factuurdatum: '2026-10-20', vervaldatum: '2026-11-01' });
+  const p = { pmtinf_id: 'SOCEV-P-27', eigen_iban: ABN_TG, entiteit: 'tolgaarde', datum: '2026-10-27', centen: 852221, regels: [{ factuur: 'a7', centen: 852221, iban: LEV.A }] };
+  const t = tx({ boekdatum: '2026-10-27', bedrag_centen: -85222, tegenpartij_iban: LEV.A, kenmerk: 'a7', omschrijving: 'A-700' });
+  const laat = tx({ boekdatum: '2026-11-03', bedrag_centen: 50000, tegenpartij_iban: LEV.ZV, tegenpartij_naam: 'Zorgverzekeraar' });
+  const r = controle({ vandaag: '2026-11-03', transacties: [t, laat], facturen: [f], sepa: [p] });
+  assert.equal(r.koppelingen.length, 0);
+  assert.equal(r.voorstellen.length, 1);
+  assert.deepEqual([r.voorstellen[0].methode, r.voorstellen[0].reden, r.voorstellen[0].verschil_centen, r.voorstellen[0].facturen], ['sepa_e2e', 'bedrag wijkt af', 852221 - 85222, ['a7']]);
+  assert.equal(r.signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 0);
+  const u = B.voorstelUitleg({ methode: 'sepa_e2e', zekerheid: 0.6 }, t, [f], [], null);
+  assert.match(u.waarom[0], /maar het bedrag € 7\.669,99 lager dan de factuur/);
+  // batch van twee als één post met het batch-id, totaal anders: voorstel voor de hele batch
+  const g = fac({ id: 'a8', leverancier: 'lb', nummer: 'B-800', incl: 1000, iban: LEV.B, betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-27T09:00:00Z', uitvoer_op: '2026-10-27',
+    factuurdatum: '2026-10-20', vervaldatum: '2026-11-01' });
+  const p2 = { pmtinf_id: 'SOCEV-P-28', eigen_iban: ABN_TG, entiteit: 'tolgaarde', datum: '2026-10-27', centen: 853221, regels: [{ factuur: 'a7', centen: 852221 }, { factuur: 'a8', centen: 1000 }] };
+  const tb = tx({ boekdatum: '2026-10-27', bedrag_centen: -86222, kenmerk: 'SOCEV-P-28', omschrijving: '/TRTP/SEPA Batch/PREF/SOCEV-P-28/NRTX/2' });
+  const r3 = controle({ vandaag: '2026-11-03', transacties: [tb, laat], facturen: [f, g], sepa: [p2] });
+  assert.deepEqual(r3.voorstellen.map((v) => [v.methode, v.reden, v.verschil_centen, v.facturen.slice().sort()]), [['sepa_batch', 'bedrag wijkt af', 853221 - 86222, ['a7', 'a8']]]);
 });
