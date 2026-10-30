@@ -1523,8 +1523,10 @@ function maak(o) {
    * Pijplijn (wv2029; David 30-10: "Als ik nu een nieuwe regel maak, wil ik 'Pas toe op alle mails in de pijplijn' - zodat als er nog 12
    * van dezelfde soort in Twijfel staan, deze direct opgepikt worden"). Een nieuwe regel kan direct gelden voor mail die nog niet af is:
    *  - Twijfel open (14 dagen, nog geen keuze van David): krijgt dezelfde uitkomst als Davids eigen keuze in de Werkstroom (juist = de stroom
-   *    van de regel, juist_regel = de regel). Het besluit zelf, de labels en Gmail blijven zoals ze zijn: wat MailMan al deed (in live het
-   *    wachtrijlabel via "twijfel naar") wordt niet overgedaan.
+   *    van de regel, juist_regel = de regel). Had MailMan voor die mail nog niets in Gmail gezet (labels_gezet leeg, geen inhaal), dan
+   *    krijgt ook het besluit de regel (stap, stroom, regel_id, labels_plan), zodat een latere labelronde in live de regel volgt en niet
+   *    alsnog "twijfel naar" (review wv2029 ZOU 1). Wat MailMan al deed (in live het wachtrijlabel via "twijfel naar") wordt niet overgedaan:
+   *    die telt als al_door (review ZOU 2: de App zegt dat die mail blijft waar hij is).
    *  - Wachtend op Jev (stap jev, status wacht_jev): de regel beslist zoals stap1 had gedaan als de regel er al was (stap, stroom, regel_id);
    *    het besluit blijft wachten op Jev voor de meetgegevens (TODO, botsing) en stap2/sluitOudeWachters maken het af met de stroom van de
    *    regel. Labels komen dan pas, zoals altijd, bij /mailman/labels in een gewone ronde.
@@ -1563,17 +1565,29 @@ function maak(o) {
     if (k.fout) return { status: 400, j: { ok: false, fout: k.fout } };
     const raak = pijplijnRaak(Object.assign(k.r, { voorwaarden: v.v }));
     return { status: 200, j: { ok: true, twijfel: raak.twijfel.length, wacht: raak.wacht.length, totaal: raak.twijfel.length + raak.wacht.length,
-      naar: regelStroom(k.r), voorbeelden: raak.twijfel.concat(raak.wacht).slice(0, 20).map(logRij) } };
+      naar: regelStroom(k.r), al_door: raak.twijfel.filter(alDoor).length, voorbeelden: raak.twijfel.concat(raak.wacht).slice(0, 20).map(logRij) } };
   }
+  // al door: MailMan zette voor deze Twijfel-mail al labels (in live: wachtrijlabel via "twijfel naar"); de mail blijft waar hij is
+  function alDoor(b) { return b.labels_gezet != null && b.labels_gezet !== '[]'; }
   // Binnen de transactie van regelRoute (nieuw): r = de zojuist opgeslagen regel
   function pijplijnToepassen(r, door) {
     const raak = pijplijnRaak(r), naar = regelStroom(r), t = iso();
-    let twijfel = 0, wacht = 0;
-    for (const b of raak.twijfel) twijfel += Number(db.prepare('UPDATE besluit SET juist = ?, juist_regel = ?, juist_tijd = ? WHERE id = ? AND juist IS NULL').run(naar, r.id, t, b.id).changes);
+    let twijfel = 0, wacht = 0, omgezet = 0;
+    const instel = {};
+    for (const b of raak.twijfel) {
+      const n = Number(db.prepare('UPDATE besluit SET juist = ?, juist_regel = ?, juist_tijd = ? WHERE id = ? AND juist IS NULL').run(naar, r.id, t, b.id).changes);
+      twijfel += n;
+      if (!n || b.inhaal || b.labels_gezet != null) continue;
+      instel[b.postvak] = instel[b.postvak] || instelVan(postvak(b.postvak));
+      let ruw = null; try { ruw = b.jev ? JSON.parse(b.jev) : null; } catch (e) { ruw = null; }
+      omgezet += Number(db.prepare("UPDATE besluit SET stap = ?, stroom = ?, regel_id = ?, regel_versie = ?, reden = 'regel', labels_plan = ? WHERE id = ? AND labels_gezet IS NULL AND status = 'klaar'")
+        .run(r.stap, naar, r.id, r.versie || 1, JSON.stringify(labelPlan(naar, ruw, mailUitRij(b), instel[b.postvak])), b.id).changes);
+    }
     for (const b of raak.wacht) wacht += Number(db.prepare("UPDATE besluit SET stap = ?, stroom = ?, regel_id = ?, regel_versie = ?, reden = 'regel' WHERE id = ? AND status = 'wacht_jev' AND stap = 'jev'")
       .run(r.stap, naar, r.id, r.versie || 1, b.id).changes);
-    wijzig('regel_pijplijn', r.id, null, { naar, twijfel: raak.twijfel.map(function (b) { return b.id; }), wacht: raak.wacht.map(function (b) { return b.id; }) }, door);
-    return { twijfel, wacht, totaal: twijfel + wacht, naar };
+    const alD = raak.twijfel.filter(alDoor).length;
+    wijzig('regel_pijplijn', r.id, null, { naar, twijfel: raak.twijfel.map(function (b) { return b.id; }), wacht: raak.wacht.map(function (b) { return b.id; }), omgezet, al_door: alD }, door);
+    return { twijfel, wacht, totaal: twijfel + wacht, naar, al_door: alD };
   }
   // Toets (O.9): wat had deze regel (of deze Jev-instelling) de afgelopen 14 dagen gedaan, op het logboek
   function toets(d) {

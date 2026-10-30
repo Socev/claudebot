@@ -15852,7 +15852,8 @@ async function appMailmanMail(res, a, d) {
   let vol;
   try { vol = await appAgendaApi(Object.assign({ actie: 'mail_lezen', id: b.gmail_id }, b.postvak === 'gmail:groenhouten' ? { account: 'dm' } : {})); }
   catch (e) { logError('mailman-mail', e); return appWeiger(res, 502, 'Gmail is even niet bereikbaar; probeer het zo nog eens', 'mailman mail luik'); }
-  if (!vol || typeof vol !== 'object' || vol.fout || (vol.id && String(vol.id) !== b.gmail_id)) return appWeiger(res, 502, 'Gmail gaf deze mail niet', 'mailman mail leeg');
+  // review wv2029 KAN 2: een antwoord zonder (of met een ander) id, of met fout/melding (Forbidden-vorm), is geen mail
+  if (!vol || typeof vol !== 'object' || vol.fout || vol.melding || String(vol.id || '') !== b.gmail_id) return appWeiger(res, 502, 'Gmail gaf deze mail niet', 'mailman mail leeg');
   const t = typeof vol.tekst === 'string' ? vol.tekst : '';
   const str = function (x, n) { return typeof x === 'string' ? x.slice(0, n) : ''; };
   res._app.reden = 'mailman mail';
