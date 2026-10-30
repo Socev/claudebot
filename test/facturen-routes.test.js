@@ -1669,3 +1669,212 @@ test('wv2006: voorstellen per afzender doen niets tot David bevestigt; bevestige
   assert.equal(t.n("SELECT count(*) n FROM afzender_regel"), 2);
   assert.equal(t.n("SELECT count(*) n FROM audit WHERE object_soort = 'afzender_regel'"), 2);
 });
+
+// ───────────────────────────── wv2025: specificatie per batch voor de boekhouder ─────────────────────────────
+
+const SP = require(path.join(ROOT, 'facturen-specificatie.js'));
+// alle tekst uit de PDF (hex-strings in WinAnsi, zoals facturen-specificatie.js ze schrijft)
+function pdfTekst(buf) {
+  const s = buf.toString('latin1');
+  const uit = [];
+  for (const m of s.matchAll(/<([0-9A-F]+)> Tj/g)) {
+    const b = Buffer.from(m[1], 'hex');
+    uit.push([...b].map((c) => (c === 0x80 ? '€' : c === 0x85 ? '…' : String.fromCharCode(c))).join(''));
+  }
+  return uit.join('\n');
+}
+// verzonnen batch: 3 facturen, 2 uitvoerdatums (30-10 en 5-11)
+function specBatch(t) {
+  const a = teBetalenFactuur(t, { incl: 12100 });
+  const b = teBetalenFactuur(t, { incl: 4250, velden: { vervaldatum: '2026-11-01' } });   // zondag → vrijdag 30-10
+  const c = teBetalenFactuur(t, { incl: 99999 });
+  const [rek] = sepaRek(t, 'tolgaarde');
+  const { r } = sepaDownload(t, rek.id, [a, b, c], []);
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  return { a, b, c, batch: r.j.batch, msg_id: r.j.msg_id, rek };
+}
+
+test('wv2025 specificatie: PDF per uitvoerdatum met subtotaal en alle factuurnummers; geen IBAN van een leverancier; download met spoor', () => {
+  const t = opzet();
+  const x = specBatch(t);
+  const nr = (id) => t.f('id = ?', [id]).nummer;
+  const sp = t.call('POST', 'sepa-specificatie', { batch: x.batch });
+  assert.equal(sp.status, 200, JSON.stringify(sp.j));
+  assert.equal(sp.j.bestand.type, 'application/pdf');
+  assert.equal(sp.j.bestand.codering, 'base64');
+  assert.match(sp.j.bestand.naam, /^Specificatie SEPA-batch Tolgaarde 2026-10-22 [0-9a-f]{8}\.pdf$/);
+  const pdf = Buffer.from(sp.j.bestand.inhoud, 'base64');
+  assert.equal(pdf.slice(0, 5).toString(), '%PDF-');
+  assert.equal(crypto.createHash('sha256').update(pdf).digest('hex'), sp.j.bestand.sha256);
+  const tekst = pdfTekst(pdf);
+  for (const id of [x.a, x.b, x.c]) assert.ok(tekst.includes(nr(id)), 'factuurnummer ' + nr(id));
+  assert.match(tekst, /Uitvoerdatum vrijdag 30 oktober 2026/);
+  assert.match(tekst, /Uitvoerdatum donderdag 5 november 2026/);
+  assert.match(tekst, /Subtotaal 30 oktober 2026\n€ 42,50/);
+  assert.match(tekst, /Subtotaal 5 november 2026\n€ 1\.120,99/);   // 121,00 + 999,99
+  assert.match(tekst, /Totaal batch \(3 facturen\)\n€ 1\.163,49/);
+  assert.ok(tekst.includes(x.msg_id), 'batchkenmerk');
+  assert.ok(tekst.includes('…' + x.rek.rekening.slice(-4)), 'eigen rekening alleen de laatste vier');
+  // nooit een IBAN (van de leverancier of de eigen rekening voluit), geen btw-bedrag
+  const ibans = t.fdb.db.prepare('SELECT iban FROM sepa_regel UNION SELECT dbtr_iban FROM sepa_batch').all().map((r) => r.iban);
+  for (const i of ibans) assert.ok(!tekst.includes(i) && !pdf.toString('latin1').includes(i), 'geen IBAN voluit');
+  assert.doesNotMatch(tekst, /\bbtw\b.*€|excl/i);
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'sepa_specificatie_download' AND object_id = ?", [x.batch]), 1);
+  assert.equal(sp.j.specificatie.status, 'geen');
+  // alleen de eigenaar via de app; onbekende batch 404; passieve kant 409
+  assert.equal(t.call('POST', 'sepa-specificatie', { batch: x.batch }, { rol: F.rolVoor(t.fdb, { ingang: 'machinekamer' }) }).status, 403);
+  assert.equal(t.call('POST', 'sepa-specificatie', { batch: '0123456789abcdef' }).status, 404);
+  assert.equal(t.call('POST', 'sepa-specificatie', { batch: x.batch }, { primair: false }).status, 409);
+  // de batch zelf is niet geraakt
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_batch'), 1);
+  assert.equal(t.n("SELECT count(*) AS n FROM sepa_regel r JOIN factuur f ON f.id = r.factuur WHERE r.batch = ? AND f.betaalspoor = 'ingevoerd'", [x.batch]), 3);
+});
+
+test('wv2025 specificatie: concept (gemockt luik) — ontvanger, mailtekst, spoor klaar/mislukt/onbekend, niet dubbel; de batch blijft altijd staan', () => {
+  const t = opzet();
+  const x = specBatch(t);
+  const sp = t.routes.specificatie;
+  const o = (extra) => Object.assign({ nu: NU + 1000, primair: true, aanleiding: 'batch' }, extra || {});
+  assert.equal(sp.concept(t.fdb, t.eig, x.batch, o({ primair: false })).status, 409, 'alleen primair');
+  const c = sp.concept(t.fdb, t.eig, x.batch, o());
+  assert.equal(c.status, 200, JSON.stringify(c.j));
+  // Tolgaarde heeft geen eigen afschriftadres: het ene afschriftadres dat Facturen kent (de boekhouder)
+  assert.equal(c.j.aan, 'afschrift-pot@acta.invalid');
+  assert.match(c.j.onderwerp, /^Specificatie SEPA-batch Tolgaarde \(2 uitvoerdatums, € 1\.163,49\)$/);
+  assert.match(c.j.bericht, /^Ha pa,/);
+  assert.match(c.j.bericht, /Uitvoerdatum vrijdag 30 oktober 2026: € 42,50 \(1 factuur\)/);
+  assert.match(c.j.bericht, /Uitvoerdatum donderdag 5 november 2026: € 1\.120,99 \(2 facturen\)/);
+  for (const id of [x.a, x.b, x.c]) assert.ok(c.j.bericht.includes(t.f('id = ?', [id]).nummer));
+  assert.match(c.j.bericht, /Groet,\nDavid$/);
+  assert.equal(Buffer.from(c.j.bijlage.inhoud_base64, 'base64').slice(0, 5).toString(), '%PDF-');
+  assert.equal(c.j.bijlage.mime, 'application/pdf');
+  // tijdens het klaarzetten: geen tweede
+  const stand = () => t.call('GET', 'betalen').j.sepa.batches.find((b) => b.id === x.batch).specificatie;
+  assert.equal(stand().status, 'bezig');
+  assert.equal(sp.concept(t.fdb, t.eig, x.batch, o()).j.code, 'bezig');
+  // faalpad: het luik weigerde → mislukt, batch en facturen ongemoeid; daarna opnieuw mag zonder nogmaals
+  assert.equal(sp.uitkomst(t.fdb, t.eig, x.batch, { ok: false, reden: 'het mailluik weigerde het concept' }, o()).j.specificatie.status, 'mislukt');
+  assert.deepEqual([stand().status, stand().reden], ['mislukt', 'het mailluik weigerde het concept']);
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_batch'), 1);
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_regel WHERE batch = ?', [x.batch]), 3);
+  assert.equal(t.n("SELECT count(*) AS n FROM sepa_regel r JOIN factuur f ON f.id = r.factuur WHERE r.batch = ? AND f.betaalspoor = 'ingevoerd'", [x.batch]), 3);
+  assert.equal(sp.concept(t.fdb, t.eig, x.batch, o({ nu: NU + 2000, aanleiding: 'knop' })).status, 200);
+  // geslaagd → klaar; nog een keer alleen met nogmaals
+  assert.equal(sp.uitkomst(t.fdb, t.eig, x.batch, { ok: true, concept_id: 'r-proef-1' }, o({ nu: NU + 3000 })).j.specificatie.status, 'klaar');
+  const dubbel = sp.concept(t.fdb, t.eig, x.batch, o({ nu: NU + 4000 }));
+  assert.deepEqual([dubbel.status, dubbel.j.code], [409, 'al_klaar']);
+  assert.equal(sp.concept(t.fdb, t.eig, x.batch, o({ nu: NU + 5000, nogmaals: true })).status, 200);
+  // geen bevestiging (time-out): onbekend, opnieuw alleen met nogmaals
+  sp.uitkomst(t.fdb, t.eig, x.batch, { ok: false, onzeker: true, reden: 'geen bevestiging' }, o({ nu: NU + 6000 }));
+  assert.equal(stand().status, 'onbekend');
+  assert.equal(sp.concept(t.fdb, t.eig, x.batch, o({ nu: NU + 7000 })).j.code, 'misschien_al');
+  // aangevraagd zonder uitkomst: na drie minuten ook onbekend
+  assert.equal(sp.concept(t.fdb, t.eig, x.batch, o({ nu: NU + 8000, nogmaals: true })).status, 200);
+  assert.equal(t.call('GET', 'betalen', null, { nu: NU + 8000 + 4 * 60000 }).j.sepa.batches[0].specificatie.status, 'onbekend');
+  // het spoor staat in de audit, zonder adres of tekst
+  const spoor = t.fdb.db.prepare("SELECT wat, na FROM audit WHERE object_soort = 'sepa_batch' AND wat LIKE 'sepa_specificatie%'").all();
+  assert.equal(spoor.length, 7);
+  assert.doesNotMatch(JSON.stringify(spoor), /acta\.invalid|Ha pa|%PDF/);
+  // geen ontvanger: mislukt met reden, geen concept
+  t.fdb.db.prepare('UPDATE entiteit SET afschrift_doel = NULL').run();
+  const y = specBatch(t);
+  const g = sp.concept(t.fdb, t.eig, y.batch, o());
+  assert.deepEqual([g.status, g.j.klaar, g.j.aan], [200, false, undefined]);
+  assert.equal(t.call('GET', 'betalen').j.sepa.batches.find((b) => b.id === y.batch).specificatie.status, 'mislukt');
+});
+
+test('wv2025 specificatie: module — telt na tegen de batch, lange batch over meer pagina\'s, mail zonder regels boven 20', () => {
+  const batch = { id: '0123456789abcdef', msg_id: 'SOCEV-20261030-abcdef12', wanneer: '2026-10-30T11:00:00.000Z', entiteit: 'holding', entiteit_naam: 'Proef Holding B.V.',
+    entiteit_kort: 'Holding', rekening_eind: '4321', aantal: 2, totaal_centen: 300 };
+  const regels = [{ positie: 1, uitvoerdatum: '2026-11-02', leverancier: 'Proef A', nummer: 'A-1', centen: 100 }, { positie: 2, uitvoerdatum: '2026-11-02', leverancier: 'Proef B', nummer: null, centen: 200 }];
+  const s = SP.maak(batch, regels, { gemaakt: '2026-10-30T11:00:00.000Z' });
+  assert.equal(s.g.blokken.length, 1);
+  assert.match(s.mail.onderwerp, /\(uitvoer 2 november 2026, € 3,00\)$/);
+  assert.match(pdfTekst(s.pdf), /zonder nummer/);
+  assert.throws(() => SP.maak(Object.assign({}, batch, { totaal_centen: 301 }), regels), SP.SpecFout);
+  assert.throws(() => SP.maak(Object.assign({}, batch, { aantal: 3 }), regels), SP.SpecFout);
+  assert.throws(() => SP.maak(batch, []), SP.SpecFout);
+  // met een huisstijl: briefhoofd in de PDF
+  const st = SP.maak(batch, regels, { stijl: { naam: 'Proef B.V.', caps: 'PROEFPRAKTIJK', briefnaam: 'Proef', ondertitel: 'Een, twee, drie.', kleuren: { titel: '2C2C2C', accent: 'E2232A' } } });
+  assert.match(pdfTekst(st.pdf), /PROEFPRAKTIJK\nProef\nEen, twee, drie\./);
+  // 60 regels over drie datums: meer pagina's, alle nummers erin, mail zonder de regels
+  const veel = [];
+  for (let i = 1; i <= 60; i++) veel.push({ positie: i, uitvoerdatum: ['2026-11-02', '2026-11-03', '2026-11-04'][i % 3], leverancier: 'Leverancier ' + i, nummer: 'N-' + i, centen: 1000 + i });
+  const lang = SP.maak(Object.assign({}, batch, { aantal: 60, totaal_centen: veel.reduce((a, r) => a + r.centen, 0) }), veel);
+  const tx = pdfTekst(lang.pdf);
+  for (let i = 1; i <= 60; i++) assert.ok(tx.includes('N-' + i + '\n'), 'N-' + i);
+  assert.match(tx, /pagina 1 van [2-9]/);
+  assert.match(lang.pdf.toString('latin1'), /\/Count [2-9] /);
+  assert.doesNotMatch(lang.mail.bericht, /N-1\b/);
+  assert.match(lang.mail.bericht, /De facturen per afschrijving staan in de PDF\./);
+  assert.equal(SP.eur(123456789), '€ 1.234.567,89');
+  assert.equal(SP.datumNl('2026-10-30', true), 'vrijdag 30 oktober 2026');
+});
+
+test('wv2025 server.js: na een batch het concept op de achtergrond (luik gemockt); faalt het luik, dan blijft de batch staan', async () => {
+  const vm = require('vm');
+  const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  const van = src.indexOf('// ── wv2025: specificatie per SEPA-batch'), tot = src.indexOf('// Na de bank-ronde: bankluis-rekeningen', van);
+  assert.ok(van > 0 && tot > van, 'blok gevonden');
+  // de koppeling in appFacturen: na een geslaagde sepa-batch met bestand, en de knop concept: true
+  assert.match(src, /pad === '\/app\/facturen\/sepa-batch' && r\.status === 200 && r\.j && r\.j\.batch && r\.j\.bestand\) r\.j\.specificatie = facturenSpecNaBatch\(fdb, rol, r\.j\.batch\)/);
+  assert.match(src, /pad === '\/app\/facturen\/sepa-specificatie' && d && d\.concept === true/);
+  const t = opzet();
+  const routes = F.maak({ fout: () => {} });
+  const draai = (fetchNep, env) => {
+    const fouten = [], aanroepen = [];
+    const ctx = { require, path, __dirname: ROOT, process: { env: Object.assign({ N8N_WEBHOOK_MAILCONCEPT: 'proefgeheim' }, env || {}) }, Date, Buffer, JSON, String, Error, Object,
+      AbortSignal, facturenRoutes: routes, rolPrimair: () => true, POT_AF_MAILWF: 'proefWf', logError: (w, e) => fouten.push(w + ': ' + (e && e.message)),
+      appWebhookUrl: async () => 'https://n8n.voorbeeld.invalid/webhook/proef',
+      fetch: async (url, o) => { aanroepen.push(JSON.parse(o.body)); return fetchNep(); } };
+    vm.createContext(ctx);
+    const r = vm.runInContext(src.slice(van, tot) + ';({ facturenSpecNaBatch, facturenSpecConcept, facturenHuisstijl })', ctx);
+    return { r, fouten, aanroepen };
+  };
+  const antwoord = (status, j) => ({ status, ok: status >= 200 && status < 300, json: async () => j, arrayBuffer: async () => new ArrayBuffer(0) });
+  const stand = (b) => t.call('GET', 'betalen', null, { nu: Date.now() }).j.sepa.batches.find((x) => x.id === b).specificatie;
+  const wacht = async (b, niet) => { for (let i = 0; i < 50 && stand(b).status === niet; i++) await new Promise((z) => setTimeout(z, 10)); };
+  // gelukt: concept met één PDF-bijlage aan de boekhouder; het antwoord van de batch wachtte niet
+  const x = specBatch(t);
+  const ok = draai(() => antwoord(200, { ok: true, concept_id: 'r-proef', thread_id: 't', bijlagen: 1 }));
+  assert.deepEqual(JSON.parse(JSON.stringify(ok.r.facturenSpecNaBatch(t.fdb, t.eig, x.batch))), { status: 'bezig' });
+  await wacht(x.batch, 'bezig');
+  assert.equal(stand(x.batch).status, 'klaar');
+  assert.equal(ok.aanroepen.length, 1);
+  const body = ok.aanroepen[0];
+  assert.deepEqual([body.secret, body.aan, body.bijlagen.length, body.bijlagen[0].mime], ['proefgeheim', 'afschrift-pot@acta.invalid', 1, 'application/pdf']);
+  assert.match(body.bijlagen[0].naam, /^Specificatie SEPA-batch Tolgaarde .*\.pdf$/);
+  assert.equal(Buffer.from(body.bijlagen[0].inhoud_base64, 'base64').slice(0, 5).toString(), '%PDF-');
+  assert.match(body.onderwerp, /^Specificatie SEPA-batch Tolgaarde/);
+  assert.deepEqual(ok.fouten, []);
+  // huisstijl van de entiteit (omzet-huisstijl.js)
+  assert.equal(ok.r.facturenHuisstijl('tolgaarde').briefnaam, 'Tolgaarde');
+  assert.equal(ok.r.facturenHuisstijl('praktijkhouders_bv').naam, 'Praktijkhouders B.V.');
+  assert.equal(ok.r.facturenHuisstijl('bestaat_niet'), null);
+  // het luik weigert (400): mislukt, zeker geen concept; de batch en de facturen blijven staan
+  const y = specBatch(t);
+  const nee = draai(() => antwoord(400, { ok: false, fout: 'bijlage' }));
+  nee.r.facturenSpecNaBatch(t.fdb, t.eig, y.batch);
+  await wacht(y.batch, 'bezig');
+  assert.deepEqual([stand(y.batch).status, stand(y.batch).reden], ['mislukt', 'het mailluik weigerde het concept']);
+  assert.equal(t.n('SELECT count(*) AS n FROM sepa_batch WHERE id = ?', [y.batch]), 1);
+  assert.equal(t.n("SELECT count(*) AS n FROM sepa_regel r JOIN factuur f ON f.id = r.factuur WHERE r.batch = ? AND f.betaalspoor = 'ingevoerd'", [y.batch]), 3);
+  // knop "Concept opnieuw" na een mislukt concept: nu wel
+  const weer = await ok.r.facturenSpecConcept(t.fdb, t.eig, y.batch, { aanleiding: 'knop' });
+  assert.deepEqual([weer.status, weer.j.specificatie.status], [200, 'klaar']);
+  // time-out: onbekend (misschien toch een concept), opnieuw alleen met nogmaals
+  const z = specBatch(t);
+  const traag = draai(() => { throw new Error('The operation was aborted due to timeout'); });
+  const tr = await traag.r.facturenSpecConcept(t.fdb, t.eig, z.batch, { aanleiding: 'batch' });
+  assert.equal(tr.j.specificatie.status, 'onbekend');
+  assert.equal((await ok.r.facturenSpecConcept(t.fdb, t.eig, z.batch, { aanleiding: 'knop' })).j.code, 'misschien_al');
+  assert.equal((await ok.r.facturenSpecConcept(t.fdb, t.eig, z.batch, { aanleiding: 'knop', nogmaals: true })).j.specificatie.status, 'klaar');
+  // geen mailluik op de pod: mislukt; FACTUREN_SPECIFICATIE=uit: niets
+  const w = specBatch(t);
+  const zonder = draai(() => antwoord(200, {}), { N8N_WEBHOOK_MAILCONCEPT: '' });
+  assert.equal((await zonder.r.facturenSpecConcept(t.fdb, t.eig, w.batch, { aanleiding: 'batch' })).j.specificatie.status, 'mislukt');
+  assert.equal(zonder.aanroepen.length, 0);
+  const uit = draai(() => antwoord(200, {}), { FACTUREN_SPECIFICATIE: 'uit' });
+  assert.deepEqual(JSON.parse(JSON.stringify(uit.r.facturenSpecNaBatch(t.fdb, t.eig, w.batch))), { status: 'uit' });
+  assert.equal(uit.aanroepen.length, 0);
+});

@@ -15048,7 +15048,7 @@ function facturenInfo() {
 const facturenRoutes = (function () {
   const p = path.join(__dirname, 'facturen.js');
   if (!facturenMod || !fs.existsSync(p)) return null;
-  try { return require(p).maak({ fout: logError }); } catch (e) { logError('facturen', e); return null; }
+  try { return require(p).maak({ fout: logError, huisstijl: facturenHuisstijl }); } catch (e) { logError('facturen', e); return null; }
 })();
 const FACTUREN_BANKLUIS = path.join(process.env.BANK_DIR || '/opt/data/bank', 'transacties.sqlite');
 // ── Facturen-app, koerier (wv855, F4, 23-10-2026; bouwplan § 4.4 en § 4.5) ──
@@ -15122,13 +15122,93 @@ async function appFacturen(req, res, a, s, d, route) {
   const fdb = facturenOpen();
   const rol = facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'david (' + String(a.naam || a.id).slice(0, 60) + ')' });
   const pad = route.slice(route.indexOf(' ') + 1);
+  // wv2025: knop "Concept opnieuw" bij een batch (de download van de PDF loopt gewoon via facturen.js)
+  if (req.method === 'POST' && pad === '/app/facturen/sepa-specificatie' && d && d.concept === true) {
+    const x = await facturenSpecConcept(fdb, rol, d.batch, { aanleiding: 'knop', nogmaals: d.nogmaals === true });
+    res._app.reden = 'facturen specificatie-concept ' + (x.j && x.j.specificatie ? x.j.specificatie.status : x.status);
+    return appStuur(res, x.status, x.j);
+  }
   const r = facturenRoutes.app(fdb, { methode: req.method, pad: pad, d: d || {}, rol: rol, primair: rolPrimair(),
     versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; },
     uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS });
   if (req.method === 'GET' && pad.indexOf('/app/facturen/document/') !== 0 && r.status === 200) res._app.stil = true;
   if (req.method !== 'GET' && r.status === 200) facturenKaartPlan(3000);   // wv1705: verzamelkaart bijwerken (bevestigen, terugdraaien, upload)
+  // wv2025: na een nieuwe batch (bestand gemaakt) het concept met de specificatie op de achtergrond; het antwoord wacht er niet op
+  if (req.method === 'POST' && pad === '/app/facturen/sepa-batch' && r.status === 200 && r.j && r.j.batch && r.j.bestand) r.j.specificatie = facturenSpecNaBatch(fdb, rol, r.j.batch);
   res._app.reden = 'facturen ' + (r.reden || pad.slice('/app/facturen'.length) || '/');
   return appStuur(res, r.status, r.j);
+}
+// ── wv2025: specificatie per SEPA-batch voor de boekhouder (David 30-10-2026; bouwplan "Facturen-app - SEPA-batch" § Log) ──
+// André ziet een batch in Exact als één afschrijving per uitvoerdatum. Na elke nieuwe batch zet de pod op de achtergrond een Gmail-concept aan
+// hem klaar met de PDF-specificatie (facturen.js specificatie.concept → mailluik AI - Mailconcept naar Gmail, JSON met één bijlage →
+// specificatie.uitkomst; het spoor staat in de audit van Facturen). David verstuurt zelf. Het antwoord met het batchbestand wacht nooit op het
+// concept en de batch blijft altijd staan; mislukt het, dan staat bij de batch "specificatie niet klaargezet" met de PDF als download en de
+// knop "Concept opnieuw" (POST sepa-specificatie {batch, concept: true, nogmaals?}). Uitzetten: FACTUREN_SPECIFICATIE=uit (dan alleen de download).
+const FAC_SPEC_MAX_MS = 30000;
+let facSpecStijlen;   // omzet-huisstijl.js (briefhoofd en kleuren per entiteit), lui geladen; null = sober
+function facturenHuisstijl(sleutel) {
+  if (facSpecStijlen === undefined) { try { facSpecStijlen = require(path.join(__dirname, 'omzet-huisstijl.js')).STIJLEN || null; } catch (e) { facSpecStijlen = null; } }
+  const v = facSpecStijlen && facSpecStijlen[sleutel === 'praktijkhouders_bv' ? 'praktijkhouders' : sleutel];
+  if (!v) return null;
+  const bh = v.briefhoofd || {};
+  return { naam: v.naam, caps: bh.caps || '', briefnaam: bh.naam || v.naam, ondertitel: bh.ondertitel || '', kleuren: v.kleuren || {} };
+}
+function facturenSpecNaBatch(fdb, rol, batch) {
+  if (process.env.FACTUREN_SPECIFICATIE === 'uit') return { status: 'uit' };
+  facturenSpecConcept(fdb, rol, batch, { aanleiding: 'batch' }).catch(function (e) { logError('facturen-specificatie', e); });
+  return { status: 'bezig' };
+}
+// → { status, j } voor de app; gooit nooit. Een zeker mislukt concept (luik weigerde, niet ingericht) = "mislukt"; een time-out of verbroken
+// verbinding kan toch een concept hebben gemaakt = "mislukt, onzeker" (de app laat dan eerst in Gmail kijken; opnieuw alleen met nogmaals).
+async function facturenSpecConcept(fdb, rol, batch, o) {
+  try {
+    if (process.env.FACTUREN_SPECIFICATIE === 'uit') return { status: 409, j: { ok: false, fout: 'het concept met de specificatie staat uit op de pod; download de PDF' } };
+    const v = facturenRoutes.specificatie.concept(fdb, rol, batch, { nu: Date.now(), primair: rolPrimair(), nogmaals: !!o.nogmaals, aanleiding: o.aanleiding });
+    if (v.status !== 200) return v;
+    if (v.j.klaar === false) return { status: 200, j: { ok: true, specificatie: { status: 'mislukt', reden: v.j.reden } } };
+    let uit;
+    try {
+      const antw = await facturenSpecMailluik(v.j);
+      uit = { ok: true, concept_id: antw.concept_id };
+    } catch (e) {
+      logError('facturen-specificatie', new Error(String(e && e.message || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)));
+      uit = e && e.zeker ? { ok: false, reden: e.reden || 'het mailluik nam het concept niet aan' }
+        : { ok: false, onzeker: true, reden: 'geen bevestiging van het mailluik; misschien staat het concept er toch' };
+    }
+    const u = facturenRoutes.specificatie.uitkomst(fdb, rol, batch, uit, { nu: Date.now(), primair: rolPrimair() });
+    if (u.status !== 200) logError('facturen-specificatie', new Error('spoor niet gezet: ' + String(u.j && u.j.fout || u.status).slice(0, 80)));
+    return { status: 200, j: { ok: true, specificatie: u.j && u.j.specificatie ? u.j.specificatie : { status: uit.ok ? 'klaar' : uit.onzeker ? 'onbekend' : 'mislukt', reden: uit.reden } } };
+  } catch (e) {
+    logError('facturen-specificatie', e);
+    return { status: 500, j: { ok: false, fout: 'fout op de pod' } };
+  }
+}
+// Het mailluik (zelfde webhook en grenzen als appPotConcept; skill mailconcept-aanmaken § Bijlagen): JSON met één PDF. → het antwoord, of een
+// fout met zeker = true als er zeker géén concept is (400, 502 van het luik zelf, of de aanroep kwam er niet).
+async function facturenSpecMailluik(c) {
+  const zeker = function (m, reden) { const e = new Error(m); e.zeker = true; e.reden = reden; return e; };
+  const geheim = process.env.N8N_WEBHOOK_MAILCONCEPT;
+  if (!geheim) throw zeker('mailluik niet ingericht', 'het mailluik is op de pod niet ingericht');
+  const body = JSON.stringify({ secret: geheim, aan: c.aan, onderwerp: String(c.onderwerp || '').slice(0, 150), bericht: String(c.bericht || '').slice(0, 6000),
+    bijlagen: [{ naam: c.bijlage.naam, mime: c.bijlage.mime, inhoud_base64: c.bijlage.inhoud_base64 }] });
+  for (let poging = 0; poging < 2; poging++) {
+    let url;
+    try { url = await appWebhookUrl(POT_AF_MAILWF, null, 'potMailUrl', poging > 0); } catch (e) { throw zeker('mailluik-webhook niet gevonden', 'het mailluik is niet te vinden'); }
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body, signal: AbortSignal.timeout(FAC_SPEC_MAX_MS) });
+    if (r.status === 404 && poging === 0) { try { await r.arrayBuffer(); } catch (e) {} continue; }
+    if (r.status === 400) throw zeker('mailconcept http 400', 'het mailluik weigerde het concept');
+    if (r.status === 502) {
+      let jf = null; try { jf = await r.json(); } catch (e) { jf = null; }
+      if (jf && jf.ok === false && typeof jf.fout === 'string') throw zeker('mailconcept http 502', 'Gmail weigerde het concept');
+      throw new Error('mailconcept http 502');
+    }
+    if (!r.ok) throw new Error('mailconcept http ' + r.status);
+    const antw = await r.json();
+    if (!antw || antw.ok !== true || typeof antw.concept_id !== 'string') throw new Error('mailconcept zonder concept_id');
+    if (antw.bijlagen !== 1) throw new Error('mailconcept zonder de bijlage');
+    return antw;
+  }
+  throw zeker('mailluik-webhook niet gevonden', 'het mailluik is niet te vinden');
 }
 // Na de bank-ronde: bankluis-rekeningen van Facturen read-only inlezen + bankcontrole (alleen aantallen terug; zonder bankluis-rekening niets).
 function facturenNaBankRonde() {

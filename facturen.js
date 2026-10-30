@@ -27,6 +27,7 @@ const B = require('./facturen-bank.js');
 const V = require('./facturen-validatie.js');
 const D = require('./facturen-db.js');
 const S = require('./facturen-sepa.js');
+const SP = require('./facturen-specificatie.js');
 
 const ID_RE = /^[0-9a-f]{16}$/;
 const BEURT_RE = /^[a-z0-9-]{8,64}$/;
@@ -45,7 +46,7 @@ const ROUTES = {
   POST: ['bevestig', 'terugdraaien', 'nagebeld', 'geen-factuur', 'toch-factuur', 'wijzig', 'ingevoerd', 'ingevoerd-ongedaan', 'opnieuw',
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
-    'betaaldatum', 'sepa-batch', 'sepa-bestand', 'regel', 'regel-weg', 'afzender-voorstel'],
+    'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (nooit vanaf een vaste plek) én die hier een verse vingerafdruk vragen.
 const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus'];
@@ -969,7 +970,7 @@ function sepaOverzicht(fdb, nu) {
     '(SELECT min(uitvoerdatum) FROM sepa_regel r WHERE r.batch = b.id) AS van, (SELECT max(uitvoerdatum) FROM sepa_regel r WHERE r.batch = b.id) AS tot FROM sepa_batch b ' +
     'WHERE b.wanneer >= ? ORDER BY b.wanneer DESC LIMIT 10').all(nuIso(nu - 60 * 86400000)).map((b) => ({ id: b.id, msg_id: b.msg_id, entiteit: b.entiteit, rekening: eind4(b.dbtr_iban),
     aantal: b.aantal, totaal_centen: b.totaal_centen, wanneer: b.wanneer, van: b.van, tot: b.tot, nog_ingevoerd: b.nog,
-    opnieuw_kan: nu - Date.parse(b.wanneer) <= SEPA_OPNIEUW_DAGEN * 86400000 && b.nog === b.aantal }));
+    opnieuw_kan: nu - Date.parse(b.wanneer) <= SEPA_OPNIEUW_DAGEN * 86400000 && b.nog === b.aantal, specificatie: specStand(fdb, b.id, nu) }));
   return { formaat: S.FORMAAT, vroegst: g.vroegst, uiterst: g.uiterst, rekeningen: rek, batches };
 }
 // POST betaaldatum { id, datum | null }: de uitvoerdatum voor de batch (null = terug naar de standaard). Alleen de eigenaar (review wv1405 #11).
@@ -1090,6 +1091,97 @@ function sepaBestand(fdb, r, d, nu, o) {
   return D.transactie(fdb, function () {
     D.audit(fdb, { wie: r.wie, wat: 'sepa_bestand_opnieuw', object_soort: 'sepa_batch', object_id: b.id, entiteit: b.entiteit, na: { msg_id: b.msg_id, sha256: sha }, wanneer: nuIso(nu) });
     return { batch: b.id, msg_id: b.msg_id, bestand: { naam: sepaBestandNaam(e, b.wanneer.slice(0, 10), b.msg_id), type: 'application/xml', inhoud: x.tekst, sha256: sha } };
+  });
+}
+// ─────────────────────── specificatie per batch voor de boekhouder (wv2025) ───────────────────────
+
+/*
+ * wv2025 (David 30-10-2026: "Als we een batch-betaling doen, ziet hij dit als 1 bedrag in Exact Online ... graag een mail met omschrijving
+ * welke facturen er in die batch zitten"). Per batch een PDF-specificatie (facturen-specificatie.js: per uitvoerdatum = per afschrijving
+ * leverancier, factuurnummer, bedrag en subtotaal; geen btw, geen IBAN van een leverancier) en een Gmail-concept aan de boekhouder. Alleen
+ * lezen uit sepa_batch/sepa_regel/factuur (sepa_batch is onveranderlijk); het spoor (aangevraagd, klaar, mislukt, download) staat in de audit
+ * (object_soort sepa_batch). Hier geen netwerk: server.js zet het concept klaar via het mailluik en meldt de uitkomst terug. Ontvanger: het
+ * afschriftadres van de entiteit, anders het ene afschriftadres dat Facturen kent (de boekhouder); geen of meer dan één = geen concept.
+ */
+const SPEC_BEZIG_MS = 3 * 60000;   // aangevraagd zonder uitkomst: zo lang "wordt klaargezet", daarna "onbekend: kijk in Gmail"
+const SPEC_WAT = ['sepa_specificatie_aangevraagd', 'sepa_specificatie_klaar', 'sepa_specificatie_mislukt'];
+function specStand(fdb, id, nu) {
+  const a = fdb.db.prepare("SELECT wat, na, wanneer FROM audit WHERE object_soort = 'sepa_batch' AND object_id = ? AND wat IN ('" + SPEC_WAT.join("', '") + "') ORDER BY id DESC LIMIT 1").get(id);
+  if (!a) return { status: 'geen' };
+  if (a.wat === 'sepa_specificatie_klaar') return { status: 'klaar', op: a.wanneer };
+  const na = json(a.na, {}) || {};
+  // onzeker = het luik gaf geen bevestiging (time-out, verbroken): misschien staat het concept er toch, dus als "onbekend"
+  if (a.wat === 'sepa_specificatie_mislukt') return { status: na.onzeker ? 'onbekend' : 'mislukt', op: a.wanneer, reden: na.reden || null };
+  return { status: nu - Date.parse(a.wanneer) < SPEC_BEZIG_MS ? 'bezig' : 'onbekend', op: a.wanneer };
+}
+function specAan(fdb, entiteit) {
+  const e = fdb.db.prepare('SELECT afschrift_doel FROM entiteit WHERE sleutel = ?').get(entiteit);
+  if (e && e.afschrift_doel) return e.afschrift_doel;
+  const alle = fdb.db.prepare("SELECT DISTINCT afschrift_doel AS a FROM entiteit WHERE afschrift_doel IS NOT NULL AND actief = 1 AND sleutel <> 'prive'").all();
+  return alle.length === 1 ? alle[0].a : null;
+}
+// → { b (sepa_batch + entiteitnaam), s (facturen-specificatie.js maak: g, pdf, sha256, naam, mail) }
+function specMaak(fdb, id, nu, stijlVoor) {
+  const b = fdb.db.prepare('SELECT b.*, e.naam AS e_naam, e.naam_kort AS e_kort FROM sepa_batch b JOIN entiteit e ON e.sleutel = b.entiteit WHERE b.id = ?').get(id);
+  if (!b) weiger(404, 'batch niet gevonden');
+  const regels = fdb.db.prepare('SELECT r.positie, r.uitvoerdatum, r.centen, r.naam AS sepa_naam, f.nummer, f.leverancier_naam, l.naam AS lev_naam FROM sepa_regel r ' +
+    'JOIN factuur f ON f.id = r.factuur LEFT JOIN leverancier l ON l.id = f.leverancier WHERE r.batch = ? ORDER BY r.positie').all(b.id)
+    .map((x) => ({ positie: x.positie, uitvoerdatum: x.uitvoerdatum, centen: x.centen, nummer: x.nummer, leverancier: x.lev_naam || x.leverancier_naam || x.sepa_naam }));
+  let stijl = null;
+  try { stijl = typeof stijlVoor === 'function' ? stijlVoor(b.entiteit) || null : null; } catch (e) { stijl = null; }   // geen huisstijl = sober
+  try {
+    return { b, s: SP.maak({ id: b.id, msg_id: b.msg_id, wanneer: b.wanneer, entiteit: b.entiteit, entiteit_naam: b.e_naam, entiteit_kort: b.e_kort || b.e_naam,
+      rekening_eind: String(b.dbtr_iban).slice(-4), aantal: b.aantal, totaal_centen: b.totaal_centen }, regels, { stijl, gemaakt: nuIso(nu) }) };
+  } catch (e) { if (e instanceof SP.SpecFout) weiger(409, 'de specificatie klopt niet met de batch (' + e.message + ')'); throw e; }
+}
+// POST sepa-specificatie { batch }: de PDF als download (ook voor oudere batches; base64). Het concept zet server.js klaar (specificatieConcept).
+function sepaSpecificatie(fdb, r, d, nu, stijlVoor) {
+  eisEigenaar(r);
+  if (r.ingang !== 'app') weiger(403, 'een batch maakt David in zijn eigen app');
+  const id = vraagId(d, 'batch');
+  const { b, s } = specMaak(fdb, id, nu, stijlVoor);
+  return D.transactie(fdb, function () {
+    D.audit(fdb, { wie: r.wie, wat: 'sepa_specificatie_download', object_soort: 'sepa_batch', object_id: b.id, entiteit: b.entiteit, na: { sha256: s.sha256 }, wanneer: nuIso(nu) });
+    return { batch: b.id, bestand: { naam: s.naam, type: 'application/pdf', codering: 'base64', inhoud: s.pdf.toString('base64'), sha256: s.sha256 }, specificatie: specStand(fdb, b.id, nu) };
+  });
+}
+/*
+ * Voor server.js: het concept voorbereiden. o = { nu, nogmaals, aanleiding: 'batch' | 'knop' }. Niet twee keer tegelijk (bezig), niet nog eens
+ * als er al een staat of misschien al staat, tenzij nogmaals. Geen ontvanger: spoor "mislukt" en { klaar: false, reden }. Anders spoor
+ * "aangevraagd" en { aan, onderwerp, bericht, bijlage: { naam, mime, inhoud_base64, sha256 } } (alleen voor de pod, nooit naar de app).
+ */
+function specificatieConcept(fdb, r, id, o) {
+  eisEigenaar(r);
+  if (r.ingang !== 'app') weiger(403, 'een batch maakt David in zijn eigen app');
+  id = vraagId({ batch: id }, 'batch');
+  const nu = o.nu;
+  const { b, s } = specMaak(fdb, id, nu, o.stijlVoor);
+  const aan = specAan(fdb, b.entiteit);
+  return D.transactie(fdb, function () {
+    const st = specStand(fdb, b.id, nu);
+    if (st.status === 'bezig') weiger(409, 'de specificatie wordt al klaargezet; kijk zo in Gmail bij Concepten', { code: 'bezig' });
+    if (!o.nogmaals && st.status === 'klaar') weiger(409, 'er staat al een concept met de specificatie in Gmail', { code: 'al_klaar', op: st.op });
+    if (!o.nogmaals && st.status === 'onbekend') weiger(409, 'er is al een concept aangevraagd, maar de bevestiging kwam niet terug; kijk eerst in Gmail bij Concepten', { code: 'misschien_al', op: st.op });
+    const wanneer = nuIso(nu);
+    if (!aan) {
+      D.audit(fdb, { wie: r.wie, wat: 'sepa_specificatie_mislukt', object_soort: 'sepa_batch', object_id: b.id, entiteit: b.entiteit,
+        na: { aanleiding: o.aanleiding || null, reden: 'geen adres van de boekhouder in Facturen' }, wanneer });
+      return { klaar: false, reden: 'geen adres van de boekhouder in Facturen' };
+    }
+    D.audit(fdb, { wie: r.wie, wat: 'sepa_specificatie_aangevraagd', object_soort: 'sepa_batch', object_id: b.id, entiteit: b.entiteit,
+      na: { aanleiding: o.aanleiding || null, sha256: s.sha256, nogmaals: !!o.nogmaals }, wanneer });
+    return { batch: b.id, aan, onderwerp: s.mail.onderwerp, bericht: s.mail.bericht, bijlage: { naam: s.naam, mime: 'application/pdf', inhoud_base64: s.pdf.toString('base64'), sha256: s.sha256 } };
+  });
+}
+// Voor server.js: de uitkomst van het mailluik. u = { ok, concept_id?, reden? } → het spoor + de stand.
+function specificatieUitkomst(fdb, r, id, u, nu) {
+  id = vraagId({ batch: id }, 'batch');
+  const b = fdb.db.prepare('SELECT id, entiteit FROM sepa_batch WHERE id = ?').get(id);
+  if (!b) weiger(404, 'batch niet gevonden');
+  return D.transactie(fdb, function () {
+    D.audit(fdb, { wie: r.wie, wat: u.ok ? 'sepa_specificatie_klaar' : 'sepa_specificatie_mislukt', object_soort: 'sepa_batch', object_id: b.id, entiteit: b.entiteit,
+      na: u.ok ? { concept_id: kort(u.concept_id, 60) } : Object.assign({ reden: kort(u.reden || 'het mailluik nam het concept niet aan', 160) }, u.onzeker ? { onzeker: true } : {}), wanneer: nuIso(nu) });
+    return { specificatie: specStand(fdb, b.id, nu) };
   });
 }
 // Voor de bankcontrole: per PmtInf de eigen rekening, uitvoerdatum, totaal en regels (batches van de laatste 400 dagen).
@@ -2419,6 +2511,7 @@ function maak(opties) {
   opties = opties || {};
   const docPerUur = Number.isInteger(opties.docPerUur) && opties.docPerUur > 0 ? opties.docPerUur : DOC_PER_UUR;
   const docTeller = [];
+  const stijlVoor = typeof opties.huisstijl === 'function' ? opties.huisstijl : null;   // wv2025: briefhoofd van de entiteit (server.js, omzet-huisstijl.js)
   const teller = () => { const n = Date.now(); while (docTeller.length && n - docTeller[0] >= 3600000) docTeller.shift(); if (docTeller.length >= docPerUur) return false; docTeller.push(n); return true; };
   function app(fdb, v) {
     const nu = Number.isFinite(v.nu) ? v.nu : Date.now();
@@ -2468,6 +2561,7 @@ function maak(opties) {
         case 'betaaldatum': return ok(betaaldatum(fdb, r, d, nu));
         case 'sepa-batch': { const j = sepaBatch(fdb, r, d, nu, vo); return ok(j, 'sepa-batch ' + (j.voorbeeld ? 'voorbeeld ' : '') + (j.aantal != null ? j.aantal : j.overzicht ? j.overzicht.aantal : '')); }
         case 'sepa-bestand': return ok(sepaBestand(fdb, r, d, nu, vo), 'sepa-bestand opnieuw');
+        case 'sepa-specificatie': return ok(sepaSpecificatie(fdb, r, d, nu, stijlVoor), 'sepa-specificatie');
         case 'signaal': return ok(signaalRoute(fdb, r, d, nu), 'signaal ' + kort(d.knop, 30));
         case 'voorstel': return ok(voorstelRoute(fdb, r, d, nu));
         case 'feit': return ok(feitRoute(fdb, r, d, nu, vo), 'feit ' + kort(d.keuze, 10));
@@ -2493,7 +2587,18 @@ function maak(opties) {
     try { return ok(Object.assign(afschriftKlaarzetten(fdb, r, invoer, o || {}), { verzendmodus: D.metaLees(fdb, 'verzendmodus') }), 'afschrift ' + kort(invoer && invoer.periode, 7)); }
     catch (e) { return alsFout(e, opties.fout); }
   };
-  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
+  // wv2025: het concept met de specificatie (server.js doet het mailluik); alleen op de primaire kant, met dezelfde foutvertaling als de routes
+  const specificatie = {
+    concept: (fdb, r, id, o) => {
+      try { if (!fdb || (o && o.primair) !== true) weiger(409, 'Facturen draait alleen op de primaire kant'); return ok(specificatieConcept(fdb, r, id, Object.assign({ stijlVoor }, o)), 'specificatie concept'); }
+      catch (e) { return alsFout(e, opties.fout); }
+    },
+    uitkomst: (fdb, r, id, u, o) => {
+      try { if (!fdb || (o && o.primair) !== true) weiger(409, 'Facturen draait alleen op de primaire kant'); return ok(specificatieUitkomst(fdb, r, id, u || {}, o.nu), 'specificatie ' + (u && u.ok ? 'klaar' : 'mislukt')); }
+      catch (e) { return alsFout(e, opties.fout); }
+    },
+  };
+  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }
 function ok(j, reden) { return { status: 200, j: Object.assign({ ok: true }, j), reden: reden || null }; }
 // Fouten naar een status. Triggers van facturen-db.js geven vaste teksten ("opdracht_prive: …"): die mogen door. Een CHECK of UNIQUE noemt
