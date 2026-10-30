@@ -1370,12 +1370,15 @@ test('wv2057 diffreview: zelf koppelen nooit op een niet nagebeld of afwijkend I
 test('wv2061 oranjePatroon en categorieVoorstel: IBAN, naam, pin (filiaalnummer weg), bank zelf; voorstel alleen waar zeker geen factuur bij hoort', () => {
   const p = (o) => B.oranjePatroon(Object.assign({ transactietype: 'ABN:SEPA OVERBOEKING', omschrijving: '' }, o));
   assert.equal(p({ tegenpartij_iban: 'nl86 ingb 0002 4455 88', tegenpartij_naam: 'X' }).sleutel, 'iban:NL86INGB0002445588');
-  assert.equal(p({ tegenpartij_naam: 'Proef B.V.' }).sleutel, 'naam:proef');
+  assert.equal(p({ tegenpartij_naam: 'Proef B.V.' }), null, 'naam zonder IBAN: geen regel (review MOET 2)');
   const pin = p({ transactietype: 'ABN:BEA, Betaalpas', omschrijving: 'BEA, Betaalpas Albert Heijn 1875,PAS075 NR:CT9, 23.10.26' });
-  assert.deepEqual(pin.patroon, { transactietype: 'BEA', omschrijving: 'Albert Heijn' });
+  assert.deepEqual(pin.patroon, { transactietype: 'BEA,', omschrijving: 'Albert Heijn' });
+  assert.equal(p({ transactietype: 'ABN:BEA, Betaalpas', omschrijving: 'BEA, Betaalpas Bas,PAS1' }), null, 'te korte winkelnaam (review ZOU 7)');
   assert.equal(p({ transactietype: 'ABN:BEA, Google Pay Bras 73,PAS075 N', omschrijving: 'BEA, Google Pay Bras 73,PAS075 NR:1' }).naam, 'Bras 73');
   const bank = p({ transactietype: 'ABN:ABN AMRO Bank N.V.', omschrijving: 'ABN AMRO Bank N.V. De specificatie vindt u' });
   assert.equal(bank.soort, 'bank');
+  const bankRegel = Object.assign({ richting: 'af', categorie: 'bankkosten' }, bank.patroon);
+  assert.ok(!B.uitzonderingPast(bankRegel, { bedrag_centen: -2500000, eigen_iban: 'NL01', transactietype: 'ABN:ABN AMRO Bank N.V.', omschrijving: 'ABN AMRO Bank N.V. Aflossing lening' }), 'geen aflossing (review ZOU 6)');
   assert.equal(p({ transactietype: 'ABN:iets', omschrijving: 'geen tegenpartij' }), null);
   // het patroon past op de eigen afschrijving (zelfde vorm als een uitzondering)
   for (const [x, tx] of [[pin, { transactietype: 'ABN:BEA, Betaalpas', omschrijving: 'BEA, Betaalpas Albert Heijn 2001,PAS075' }], [bank, { transactietype: 'ABN:ABN AMRO Bank N.V.', omschrijving: 'ABN AMRO Bank N.V. kosten' }]])

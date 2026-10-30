@@ -578,24 +578,27 @@ function uitzonderingVoor(tx, ctx) {
  * wv2061 (David 30-10-2026 22:50: de oranje balk "te bekijken" zegt hem niets; per regel kiezen "bekende uitzondering" of "hoort bij
  * factuur X", en die keuze moet een regel worden zodat hij niet terugkomt). oranjePatroon: waarop een uitzondering voor deze afschrijving
  * kan passen (zelfde vorm als een rij in `uitzondering`, uitzonderingPast slikt hem) en de groepssleutel voor de lijst per tegenpartij.
- * Volgorde: IBAN van de tegenpartij, anders de naam; zonder tegenpartij een pinbetaling (winkelnaam uit de omschrijving) of de kosten van
- * ABN AMRO zelf. Anders null: daar kan geen regel op (alleen een factuur koppelen of uploaden).
+ * Volgorde: IBAN van de tegenpartij; zonder tegenpartij een pinbetaling (winkelnaam uit de omschrijving, ≥ 5 tekens) of de kosten van
+ * ABN AMRO zelf (tot € 250). Anders null: daar kan geen regel op (alleen een factuur koppelen of uploaden). Review wv2061 MOET 2: een naam
+ * zonder IBAN wordt nooit een regel (uitzonderingPast zoekt een naam als stukje tekst, ook bij afschrijvingen mét een ander IBAN).
  */
+const ORANJE_BANK_MAX = 25000;   // review wv2061 ZOU 6: bankkosten tot € 250, geen aflossing of rente van een lening
 const PIN_RE = /^BEA,\s*(?:Betaalpas|Google Pay|Apple Pay|Garmin Pay|Fitbit Pay)\s+(.+?)(?:,PAS\d+|\s+NR:|,|$)/i;
 function oranjePatroon(tx) {
   const iban = ibanNorm(tx.tegenpartij_iban), naam = String(tx.tegenpartij_naam || '').trim();
   if (iban) return { sleutel: 'iban:' + iban, soort: 'tegenpartij', naam: naam || iban, patroon: { tegenpartij: iban } };
-  if (normNaam(naam)) return { sleutel: 'naam:' + normNaam(naam), soort: 'tegenpartij', naam, patroon: { tegenpartij: naam.slice(0, 200) } };
+  if (normNaam(naam)) return null;
   const om = String(tx.omschrijving || ''), tt = String(tx.transactietype || '');
-  const pin = /\bBEA\b/.test(tt) ? PIN_RE.exec(om) : null;
-  if (pin && normNaam(pin[1]).length >= 3) {
+  const pin = /\bBEA,/.test(tt) ? PIN_RE.exec(om) : null;
+  if (pin && normNaam(pin[1]).length >= 5) {
     // filiaalnummer weg ("Albert Heijn 1875" → elke Albert Heijn), alleen als er genoeg naam overblijft ("Bras 73" blijft heel)
     const heel = pin[1].trim().slice(0, 80), kaal = heel.replace(/\s+\d+$/, '');
     const winkel = kaal !== heel && normNaam(kaal).length >= 6 ? kaal : heel;
-    return { sleutel: 'pin:' + normNaam(winkel), soort: 'pin', naam: winkel, patroon: { transactietype: 'BEA', omschrijving: winkel } };
+    return { sleutel: 'pin:' + normNaam(winkel), soort: 'pin', naam: winkel, patroon: { transactietype: 'BEA,', omschrijving: winkel } };
   }
   if (/ABN AMRO Bank N\.?V\.?$/i.test(tt) && /^ABN AMRO Bank N\.?V\.?/i.test(om)) {
-    return { sleutel: 'bank:abn', soort: 'bank', naam: 'ABN AMRO (de bank zelf)', patroon: { transactietype: 'ABN AMRO Bank', omschrijving: 'ABN AMRO Bank' } };
+    return { sleutel: 'bank:abn', soort: 'bank', naam: 'ABN AMRO (de bank zelf)',
+      patroon: { transactietype: 'ABN AMRO Bank', omschrijving: 'ABN AMRO Bank', bedrag_centen: 0, tolerantie_centen: ORANJE_BANK_MAX } };
   }
   return null;
 }

@@ -441,7 +441,7 @@ function bank(fdb, r, nu) {
   }
   // wv2061: regels uit "te bekijken" (bank-keuze), per categorie; zonder signaal verschenen ze anders nergens
   if (isEig(r)) for (const g of fdb.db.prepare("SELECT categorie, count(DISTINCT coalesce(tegenpartij, '') || '|' || coalesce(omschrijving, '')) AS n FROM uitzondering " +
-    "WHERE toelichting = 'uit de bankcontrole (te bekijken)' AND substr(aangemaakt_op, 1, 7) = ? GROUP BY categorie").all(maand)) {
+    "WHERE toelichting = 'uit de bankcontrole (te bekijken)' AND actief = 1 AND substr(aangemaakt_op, 1, 7) = ? GROUP BY categorie").all(maand)) {
     geleerd_regels.push({ tekst: g.n + (g.n === 1 ? ' tegenpartij' : ' tegenpartijen') + ' voortaan als ' + g.categorie.replace(/_/g, ' ') + ' (geen factuur nodig); komt niet meer bij te bekijken.',
       aantal: g.n, soort: 'uitzondering_regel', entiteit: null });
   }
@@ -458,8 +458,13 @@ function t2(a, b) { return JSON.stringify([a || null, b]); }
  * voorstel: een bekende uitzondering met categorie (facturen-bank.categorieVoorstel; Davids eerdere keuze op hetzelfde patroon gaat voor)
  * of een open factuur van dezelfde entiteit als kandidaat (IBAN van de factuur eerst, dan het bedrag dat het dichtst bij ligt). Te bekijken
  * = zoals de weekbalk van bank(): afschrijving vanaf de startdatum (hooguit 56 dagen terug), geen categorie, geen koppeling.
+ * Review wv2061: een regel maakt alleen de eigenaar (ZOU 8); niet bij een open fraudesignaal (ZOU 9); kwamen er van die rekening eerder
+ * facturen binnen (app of FV2-archief), dan een waarschuwing en alleen met een uitdrukkelijk "toch" (MOET 1: anders koppelt een later
+ * geüploade factuur nooit en ziet niemand een dubbele betaling).
  */
-const ORANJE_GROEPEN_MAX = 60, ORANJE_KANDIDATEN = 5;
+const ORANJE_GROEPEN_MAX = 60, ORANJE_KANDIDATEN = 5, ORANJE_REGEL_TEKST = 'uit de bankcontrole (te bekijken)';
+const OPEN_FACTUUR_SQL = "f.soort = 'factuur' AND f.status NOT IN ('geen_factuur','dubbel') AND coalesce(f.incl, 0) > 0 " +
+  "AND (f.betaalspoor IS NULL OR f.betaalspoor IN ('te_betalen','ingevoerd','incasso_verwacht'))";
 function oranjeTx(fdb, r, nu) {
   const vandaag = dagAmsterdam(nu), start = startdatumVan(fdb), van56 = K.plusDagen(vandaag, -56);
   const van = start && start > van56 ? start : van56;
@@ -467,19 +472,25 @@ function oranjeTx(fdb, r, nu) {
   return fdb.db.prepare('SELECT t.* FROM bank_transactie t WHERE t.verwijderd_op IS NULL AND t.bedrag_centen < 0 AND t.boekdatum >= ? AND t.categorie IS NULL ' +
     'AND NOT EXISTS (SELECT 1 FROM koppeling k WHERE k.transactie = t.id) AND ' + tf + ' ORDER BY t.boekdatum, t.id').all(van, ...tp);
 }
-function eerdereKeuze(fdb, p) {
+function eerdereKeuze(fdb, r, p) {
   if (!p) return null;
   const x = p.patroon;
   const u = fdb.db.prepare('SELECT categorie FROM uitzondering WHERE actief = 1 AND coalesce(tegenpartij, \'\') = ? AND coalesce(omschrijving, \'\') = ? AND coalesce(transactietype, \'\') = ? ' +
-    'ORDER BY aangemaakt_op DESC LIMIT 1').get(x.tegenpartij || '', x.omschrijving || '', x.transactietype || '');
+    (isEig(r) ? '' : 'AND alleen_eigenaar = 0 ') + 'ORDER BY aangemaakt_op DESC LIMIT 1').get(x.tegenpartij || '', x.omschrijving || '', x.transactietype || '');
   return u ? u.categorie : null;
 }
+// facturen (app en FV2-archief) op het IBAN van de tegenpartij
+function facturenEerder(fdb, iban) {
+  if (!iban) return 0;
+  return Number(fdb.db.prepare("SELECT (SELECT count(*) FROM factuur WHERE iban = ?1 AND status <> 'geen_factuur') + (SELECT count(*) FROM factuur_archief WHERE iban = ?1) AS n").get(iban).n);
+}
+const fraudeOpen = (fdb, txId) => !!fdb.db.prepare("SELECT 1 FROM signaal s WHERE s.status = 'open' AND s.soort = 'onbekend_iban' AND EXISTS (SELECT 1 FROM json_each(s.transacties) j WHERE j.value = ?)").get(txId);
 function bankOranje(fdb, r, week, nu) {
   const [ff, fp] = factuurFilter(r, 'f');
-  const open = fdb.db.prepare("SELECT f.* FROM factuur f WHERE f.entiteit = ? AND f.soort = 'factuur' AND f.status NOT IN ('geen_factuur','dubbel') AND coalesce(f.incl, 0) > 0 " +
-    "AND (f.betaalspoor IS NULL OR f.betaalspoor IN ('te_betalen','ingevoerd','incasso_verwacht')) AND " + ff + ' ORDER BY f.factuurdatum DESC LIMIT 300');
+  const open = fdb.db.prepare('SELECT f.* FROM factuur f WHERE f.entiteit = ? AND ' + OPEN_FACTUUR_SQL + ' AND ' + ff + ' ORDER BY f.factuurdatum DESC LIMIT 300');
   const netto = fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j');
   const levNaam = fdb.db.prepare('SELECT naam FROM leverancier WHERE id = ?');
+  const vOpen = fdb.db.prepare("SELECT 1 FROM voorstel WHERE transactie = ? AND status = 'open'");
   const perEnt = new Map();
   const openVan = (ent) => {
     if (!perEnt.has(ent)) perEnt.set(ent, open.all(ent, ...fp).filter((f) => netto.get(f.id).j !== 1));
@@ -491,25 +502,30 @@ function bankOranje(fdb, r, week, nu) {
     const p = B.oranjePatroon(t), sl = p ? p.sleutel : 'los:' + t.id;
     let g = groepen.get(sl);
     if (!g) {
-      const eerder = eerdereKeuze(fdb, p);
-      g = { sleutel: sl, soort: p ? p.soort : 'los', naam: p ? p.naam : (t.tegenpartij_naam || kort(t.omschrijving, 60) || 'Onbekende tegenpartij'), regel_kan: !!p,
+      const eerder = eerdereKeuze(fdb, r, p);
+      g = { sleutel: sl, soort: p ? p.soort : 'los', naam: p ? p.naam : (t.tegenpartij_naam || kort(t.omschrijving, 60) || 'Onbekende tegenpartij'), regel_kan: !!p && isEig(r),
+        geen_regel: !p ? 'Bij deze afschrijving is geen rekeningnummer of vaste omschrijving om een regel op te maken.' : !isEig(r) ? 'Een regel maakt alleen David.' : null,
+        facturen_eerder: p && p.patroon.tegenpartij ? facturenEerder(fdb, p.patroon.tegenpartij) : 0,
         voorstel: B.categorieVoorstel(t, p, eerder), aantal: 0, totaal_centen: 0, entiteiten: [], transacties: [] };
       groepen.set(sl, g);
     }
     const kand = openVan(t.entiteit).map((f) => ({ f, iban: !!t.tegenpartij_iban && K.ibanNorm(f.iban) === K.ibanNorm(t.tegenpartij_iban), d: Math.abs(f.incl + t.bedrag_centen) }))
       .sort((a, b) => (a.iban !== b.iban ? (a.iban ? -1 : 1) : a.d - b.d)).slice(0, ORANJE_KANDIDATEN)
       .map((k) => { const l = k.f.leverancier ? levNaam.get(k.f.leverancier) : null; return Object.assign(factuurKort(k.f, l ? l.naam : null), { zelfde_iban: k.iban, verschil_centen: k.d }); });
+    const fraude = fraudeOpen(fdb, t.id);
+    if (fraude && g.regel_kan) { g.regel_kan = false; g.geen_regel = 'Er staat een fraudesignaal open (betaald aan een rekeningnummer dat niet bij de leverancier hoort); zoek dat eerst uit bij Signalen.'; }
     g.aantal++; g.totaal_centen += t.bedrag_centen;
     if (!g.entiteiten.includes(t.entiteit)) g.entiteiten.push(t.entiteit);
-    g.transacties.push(Object.assign(txKort(t), { kandidaten: kand }));
+    g.transacties.push(Object.assign(txKort(t), { kandidaten: kand, voorstel_open: !!vOpen.get(t.id), fraude }));
   }
   const lijst = [...groepen.values()].sort((a, b) => b.aantal - a.aantal || a.totaal_centen - b.totaal_centen);
   return { week, aantal: lijst.reduce((s, g) => s + g.aantal, 0), afgekapt: lijst.length > ORANJE_GROEPEN_MAX, groepen: lijst.slice(0, ORANJE_GROEPEN_MAX) };
 }
-// Davids keuze op een groep wordt een regel: { keuze: 'uitzondering', transacties, categorie } maakt per eigen rekening één uitzondering op
-// het patroon van die tegenpartij (de pod leidt het patroon zelf af, nooit uit de vraag), zet elke nog te bekijken afschrijving op die rekening
-// die erop past meteen op die categorie (de volgende bankcontrole doet hetzelfde) en sluit hun open signaal "afschrijving zonder factuur".
-// { keuze: 'factuur', transactie, factuur } koppelt (koppelIntern) en sluit dat signaal. Alles of niets in één transactie.
+// Davids keuze op een groep wordt een regel: { keuze: 'uitzondering', transacties, categorie [, toch] } maakt per eigen rekening één uitzondering
+// op het patroon van die tegenpartij (de pod leidt het patroon zelf af, nooit uit de vraag), zet elke nog te bekijken afschrijving op die rekening
+// die erop past meteen op die categorie (de volgende bankcontrole doet hetzelfde, ook over de historie van 400 dagen), sluit hun open signaal
+// "afschrijving zonder factuur" en hun open koppelvoorstel. { keuze: 'ongedaan', regels } zet zo'n regel uit en de afschrijvingen terug.
+// { keuze: 'factuur', transactie, factuur [, volledig] } koppelt (koppelIntern) en sluit dat signaal. Alles of niets in één transactie.
 const ORANJE_KEUZE_MAX = 100;
 function bankKeuze(fdb, r, d, nu) {
   const keuze = d.keuze;
@@ -520,14 +536,21 @@ function bankKeuze(fdb, r, d, nu) {
       if (!magTransactie(r, t)) weiger(404, 'bankregel niet gevonden');
       if (!(t.bedrag_centen < 0)) weiger(400, 'alleen een afschrijving');
       if (t.categorie) weiger(409, 'deze afschrijving staat al als uitzondering; ververs de lijst');
-      const k = koppelIntern(fdb, r, txId, fId, true, nu);
-      const f = fdb.db.prepare('SELECT nummer FROM factuur WHERE id = ?').get(fId);
-      const les = 'Afschrijving aan ' + String(t.tegenpartij_naam || 'de tegenpartij').slice(0, 80) + ' hoort bij factuur ' + String((f && f.nummer) || '').slice(0, 40) + '; met de hand gekoppeld.';
+      // review wv2061 MOET 3: niet naast een koppeling die intussen ontstond, en alleen een factuur die nog open is
+      if (fdb.db.prepare('SELECT 1 FROM koppeling WHERE transactie = ?').get(t.id)) weiger(409, 'deze afschrijving is intussen al gekoppeld; ververs de lijst');
+      const [ff, fp] = factuurFilter(r, 'f');
+      const f = fdb.db.prepare('SELECT f.id, f.nummer FROM factuur f WHERE f.id = ? AND ' + OPEN_FACTUUR_SQL + ' AND ' + ff).get(fId, ...fp);
+      if (!f) weiger(409, 'die factuur staat niet meer open; ververs de lijst');
+      if (fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j').get(f.id).j === 1) weiger(409, 'die factuur is intussen al betaald gezien; ververs de lijst');
+      const k = koppelIntern(fdb, r, txId, fId, d.volledig !== false, nu);
+      const les = 'Afschrijving aan ' + String(t.tegenpartij_naam || 'de tegenpartij').slice(0, 80) + ' hoort bij factuur ' + String(f.nummer || '').slice(0, 40) + '; met de hand gekoppeld.';
       const dicht = oranjeSignalenDicht(fdb, r, [t.id], 'factuur_gekoppeld', les, nuIso(nu));
       return Object.assign({ les, signalen_dicht: dicht }, k);
     });
   }
-  if (keuze !== 'uitzondering') weiger(400, 'keuze is uitzondering of factuur');
+  if (keuze === 'ongedaan') return oranjeOngedaan(fdb, r, d, nu);
+  if (keuze !== 'uitzondering') weiger(400, 'keuze is uitzondering, ongedaan of factuur');
+  eisEigenaar(r);
   if (!B.CATEGORIEEN.includes(d.categorie)) weiger(400, 'onbekende categorie');
   const ids = Array.isArray(d.transacties) ? [...new Set(d.transacties.map(String))] : [];
   if (!ids.length || ids.length > ORANJE_KEUZE_MAX || !ids.every((x) => ID_RE.test(x))) weiger(400, 'transacties: 1 tot ' + ORANJE_KEUZE_MAX + ' id\'s');
@@ -538,8 +561,11 @@ function bankKeuze(fdb, r, d, nu) {
     const gekoppeld = fdb.db.prepare('SELECT 1 FROM koppeling WHERE transactie = ?');
     if (tx.some((t) => !(t.bedrag_centen < 0) || t.categorie || gekoppeld.get(t.id))) weiger(409, 'een van deze afschrijvingen is intussen al bekeken; ververs de lijst');
     const p = B.oranjePatroon(tx[0]);
-    if (!p) weiger(409, 'bij deze afschrijving staat geen tegenpartij om een regel op te maken; kies een factuur of upload hem');
+    if (!p) weiger(409, 'bij deze afschrijving staat geen rekeningnummer of vaste omschrijving om een regel op te maken; kies een factuur of upload hem');
     if (tx.some((t) => { const q = B.oranjePatroon(t); return !q || q.sleutel !== p.sleutel; })) weiger(400, 'deze afschrijvingen horen niet bij dezelfde tegenpartij');
+    if (tx.some((t) => fraudeOpen(fdb, t.id))) weiger(409, 'er staat een fraudesignaal open bij deze afschrijving; zoek dat eerst uit');
+    const eerder = p.patroon.tegenpartij ? facturenEerder(fdb, p.patroon.tegenpartij) : 0;
+    if (eerder && d.toch !== true) weiger(409, 'van deze rekening kwamen eerder facturen binnen; kies de factuur, of kies uitdrukkelijk "toch een uitzondering"');
     const perRek = new Map();
     for (const t of tx) perRek.set(t.eigen_iban, (perRek.get(t.eigen_iban) || false) || !!t.alleen_eigenaar);
     const regels = [];
@@ -547,22 +573,49 @@ function bankKeuze(fdb, r, d, nu) {
     const kandidaten = fdb.db.prepare('SELECT t.* FROM bank_transactie t WHERE t.eigen_iban = ? AND t.verwijderd_op IS NULL AND t.categorie IS NULL AND t.bedrag_centen < 0 AND t.boekdatum >= ? ' +
       'AND NOT EXISTS (SELECT 1 FROM koppeling k WHERE k.transactie = t.id)');
     const zet = fdb.db.prepare('UPDATE bank_transactie SET categorie = ?, uitzondering = ? WHERE id = ? AND categorie IS NULL');
-    const geraakt = [];
+    const geraakt = new Set();
     for (const [rek, alleenEig] of perRek) {
       const id = D.nieuwId();
       const u = { id, richting: 'af', rekening: rek, tegenpartij: p.patroon.tegenpartij || null, omschrijving: p.patroon.omschrijving || null,
-        transactietype: p.patroon.transactietype || null, categorie: d.categorie, toelichting: 'uit de bankcontrole (te bekijken)', alleen_eigenaar: alleenEig ? 1 : 0,
-        aangemaakt_door: r.wie, aangemaakt_op: wanneer };
+        transactietype: p.patroon.transactietype || null, bedrag_centen: p.patroon.bedrag_centen === undefined ? null : p.patroon.bedrag_centen,
+        tolerantie_centen: p.patroon.tolerantie_centen === undefined ? null : p.patroon.tolerantie_centen, categorie: d.categorie, toelichting: ORANJE_REGEL_TEKST,
+        alleen_eigenaar: alleenEig ? 1 : 0, aangemaakt_door: r.wie, aangemaakt_op: wanneer };
       D.voegToe(fdb, 'uitzondering', u);
-      // alleen wat deze rol mag zien; de rest (bv. een POT-regel bij de praktijkmanager) zet de volgende bankcontrole
-      for (const t of kandidaten.all(rek, K.plusDagen(vandaag, -BANK_DAGEN))) if (magTransactie(r, t) && B.uitzonderingPast(u, t)) { gezet += zet.run(d.categorie, id, t.id).changes; geraakt.push(t.id); }
+      for (const t of kandidaten.all(rek, K.plusDagen(vandaag, -BANK_DAGEN))) if (B.uitzonderingPast(u, t) && !fraudeOpen(fdb, t.id)) { gezet += zet.run(d.categorie, id, t.id).changes; geraakt.add(t.id); }
       D.audit(fdb, { wie: r.wie, wat: 'uitzondering_maken', object_soort: 'uitzondering', object_id: id, entiteit: tx.find((t) => t.eigen_iban === rek).entiteit,
-        na: { categorie: d.categorie, bron: 'bankcontrole_te_bekijken', soort: p.soort }, wanneer });
+        na: { categorie: d.categorie, bron: 'bankcontrole_te_bekijken', soort: p.soort, toch: eerder ? true : undefined }, wanneer });
       regels.push(id);
     }
+    // review wv2061 KAN 13: een regel die niet eens op de gekozen afschrijvingen past, is fout → alles terug
+    if (tx.some((t) => !geraakt.has(t.id))) weiger(409, 'de regel past niet op deze afschrijvingen; er is niets vastgelegd');
+    // review wv2061 ZOU 9: open koppelvoorstellen van deze afschrijvingen dicht (anders kreeg een afschrijving straks categorie én koppeling)
+    const vDicht = fdb.db.prepare("UPDATE voorstel SET status = 'afgewezen', afgehandeld_door = ?, afgehandeld_op = ? WHERE status = 'open' AND transactie = ?");
+    let voorstellen = 0;
+    for (const id of geraakt) voorstellen += vDicht.run(r.wie, wanneer, id).changes;
     const les = B.SIGNALEN.geen_factuur.knoppen.is_uitzondering.les({ naam: p.naam }, { categorie: d.categorie });
-    const dicht = oranjeSignalenDicht(fdb, r, geraakt, 'is_uitzondering', les, wanneer);
-    return { les, regels: regels.length, afschrijvingen: gezet, signalen_dicht: dicht };
+    const dicht = oranjeSignalenDicht(fdb, r, [...geraakt], 'is_uitzondering', les, wanneer);
+    return { les, regels: regels.length, regel_ids: regels, afschrijvingen: gezet, signalen_dicht: dicht, voorstellen_dicht: voorstellen };
+  });
+}
+// review wv2061 ZOU 5: een regel uit "te bekijken" terugdraaien = regel uit en zijn afschrijvingen weer zonder categorie (komen terug bij te
+// bekijken). Gesloten signalen en afgewezen voorstellen blijven dicht. Alleen regels die deze route maakte; alleen de eigenaar.
+function oranjeOngedaan(fdb, r, d, nu) {
+  eisEigenaar(r);
+  const ids = Array.isArray(d.regels) ? [...new Set(d.regels.map(String))] : [];
+  if (!ids.length || ids.length > 20 || !ids.every((x) => ID_RE.test(x))) weiger(400, 'regels: 1 tot 20 id\'s');
+  return D.transactie(fdb, function () {
+    const wanneer = nuIso(nu);
+    let terug = 0;
+    for (const id of ids) {
+      const u = fdb.db.prepare('SELECT * FROM uitzondering WHERE id = ?').get(id);
+      if (!u || u.toelichting !== ORANJE_REGEL_TEKST) weiger(404, 'regel niet gevonden');
+      if (!u.actief) weiger(409, 'deze regel staat al uit');
+      fdb.db.prepare('UPDATE uitzondering SET actief = 0 WHERE id = ?').run(id);
+      const n = fdb.db.prepare('UPDATE bank_transactie SET categorie = NULL, uitzondering = NULL WHERE uitzondering = ?').run(id).changes;
+      terug += n;
+      D.audit(fdb, { wie: r.wie, wat: 'uitzondering_ongedaan', object_soort: 'uitzondering', object_id: id, na: { afschrijvingen: n }, wanneer });
+    }
+    return { les: 'Ongedaan: de regel staat uit en ' + terug + (terug === 1 ? ' afschrijving staat' : ' afschrijvingen staan') + ' weer bij te bekijken.', afschrijvingen: terug };
   });
 }
 // Open signaal "afschrijving zonder factuur" van deze bankregels dicht (zoals de knop in de signalenlijst), met les en auditrij.

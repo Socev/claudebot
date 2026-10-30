@@ -2058,10 +2058,10 @@ test('wv2057 failsafe: batch van drie met één ontbrekende betaling → precies
 
 test('wv2061 te bekijken: per week per tegenpartij met voorstel; uitzondering → regel per rekening, ook andere weken, signaal dicht; volgende bankcontrole houdt hem weg; factuur kiezen koppelt', () => {
   const t = opzet();
-  const sjabloon = (ent) => t.fdb.db.prepare('SELECT * FROM bank_transactie WHERE entiteit = ? AND formaat <> \'bankluis\' LIMIT 1').get(ent);
+  const sjabloon = (ent) => t.fdb.db.prepare('SELECT * FROM bank_transactie WHERE entiteit = ? LIMIT 1').get(ent);
   const nieuw = (ent, o) => {
     const b = sjabloon(ent), id = D.nieuwId();
-    D.voegToe(t.fdb, 'bank_transactie', Object.assign({}, b, { id, entry_ref: 'wv2061:' + id, categorie: null, uitzondering: null, kenmerk: null, is_incasso: 0, incassant_id: null,
+    D.voegToe(t.fdb, 'bank_transactie', Object.assign({}, b, { id, entry_ref: 'wv2061:' + id, bankluis_sleutel: b.bankluis_sleutel ? 'wv2061-' + id : null, categorie: null, uitzondering: null, kenmerk: null, is_incasso: 0, incassant_id: null,
       machtiging: null, tegenpartij_iban: null, tegenpartij_naam: null, transactietype: 'ABN:SEPA OVERBOEKING', omschrijving: null }, o));
     return id;
   };
@@ -2072,6 +2072,10 @@ test('wv2061 te bekijken: per week per tegenpartij met voorstel; uitzondering �
   const oud = nieuw('tolgaarde', { boekdatum: '2026-10-13', bedrag_centen: -22300, tegenpartij_naam: 'Belastingdienst', tegenpartij_iban: BD, omschrijving: 'VPB 2026' });
   const pin = nieuw('tolgaarde', { boekdatum: '2026-10-20', bedrag_centen: -1802, transactietype: 'ABN:BEA, Betaalpas', omschrijving: 'BEA, Betaalpas Albert Heijn 1875,PAS075 NR:CT1, 20.10.26/10:04 HOOGLAND' });
   const los = nieuw('tolgaarde', { boekdatum: '2026-10-21', bedrag_centen: -999, transactietype: 'ABN:onbekend', omschrijving: 'iets zonder tegenpartij' });
+  const alleenNaam = nieuw('tolgaarde', { boekdatum: '2026-10-21', bedrag_centen: -1500, tegenpartij_naam: 'NS Reizigers', omschrijving: 'kaartje' });
+  const bankGroot = nieuw('tolgaarde', { boekdatum: '2026-10-21', bedrag_centen: -2500000, transactietype: 'ABN:ABN AMRO Bank N.V.', omschrijving: 'ABN AMRO Bank N.V. Aflossing lening' });
+  const bankKlein = nieuw('tolgaarde', { boekdatum: '2026-10-20', bedrag_centen: -5533, transactietype: 'ABN:ABN AMRO Bank N.V.', omschrijving: 'ABN AMRO Bank N.V. De specificatie vindt u' });
+  const potTx = nieuw('pot', { boekdatum: '2026-10-20', bedrag_centen: -269370, tegenpartij_naam: 'Proef Medewerker', tegenpartij_iban: 'NL20TEST0000000123', omschrijving: 'periode 10', transactietype: 'BANKLUIS:SEPA Overboeking' });
   const wk = (w) => t.call('GET', 'bank').j.weken.find((x) => x.week === w) || { te_bekijken: 0 };
   const voor43 = wk('2026-W43').te_bekijken, voor42 = wk('2026-W42').te_bekijken;
   assert.ok(voor43 >= 5 && voor42 >= 1, JSON.stringify([voor43, voor42]));
@@ -2091,6 +2095,9 @@ test('wv2061 te bekijken: per week per tegenpartij met voorstel; uitzondering �
   const gl = g1.j.groepen.find((g) => g.transacties.some((x) => x.id === los));
   assert.equal(gl.regel_kan, false);
   assert.equal(gl.voorstel, null);
+  assert.ok(gl.geen_regel);
+  assert.equal(g1.j.groepen.find((g) => g.transacties.some((x) => x.id === alleenNaam)).regel_kan, false, 'naam zonder IBAN: geen regel');
+  assert.equal(g1.j.groepen.find((g) => g.soort === 'pin').regel_kan, true);
   assert.equal(t.call('GET', 'bank/oranje/2026-W43').status, 404, 'alleen kleine letters (doorgeefluik)');
 
   // weigeringen: verschillende tegenpartijen, zonder tegenpartij, onbekende categorie
@@ -2120,6 +2127,22 @@ test('wv2061 te bekijken: per week per tegenpartij met voorstel; uitzondering �
   assert.ok(!t.call('GET', 'bank/oranje/2026-w43').j.groepen.some((g) => g.sleutel === 'iban:' + BD), 'groep weg');
   assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [a], categorie: 'belasting' }).status, 409, 'al bekeken');
   assert.ok(t.call('GET', 'bank').j.geleerd_regels.some((g) => /voortaan als belasting/.test(g.tekst)), 'bij wat we leerden');
+  // bankkosten: de regel heeft een plafond (€ 250), de aflossing van € 25.000 blijft te bekijken (review ZOU 6); de groep bevat beide, dus eerst alleen de kleine
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [bankKlein, bankGroot], categorie: 'bankkosten' }).status, 409, 'regel past niet op de grote → niets vastgelegd');
+  assert.equal(t.fdb.db.prepare('SELECT categorie FROM bank_transactie WHERE id = ?').get(bankKlein).categorie, null, 'alles terug');
+  const kb = t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [bankKlein], categorie: 'bankkosten' });
+  assert.equal(kb.status, 200, JSON.stringify(kb.j));
+  assert.equal(t.fdb.db.prepare('SELECT categorie FROM bank_transactie WHERE id = ?').get(bankGroot).categorie, null);
+  // ongedaan: regel uit, afschrijving weer te bekijken; tweede keer 409; alleen regels uit deze route
+  const og = t.call('POST', 'bank-keuze', { keuze: 'ongedaan', regels: kb.j.regel_ids });
+  assert.equal(og.status, 200, JSON.stringify(og.j));
+  assert.equal(og.j.afschrijvingen, 1);
+  assert.equal(t.fdb.db.prepare('SELECT categorie FROM bank_transactie WHERE id = ?').get(bankKlein).categorie, null);
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'ongedaan', regels: kb.j.regel_ids }).status, 409);
+  const zaadRegel = t.fdb.db.prepare("SELECT id FROM uitzondering WHERE toelichting = 'proef' LIMIT 1").get().id;
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'ongedaan', regels: [zaadRegel] }).status, 404);
+  D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.equal(t.fdb.db.prepare('SELECT categorie FROM bank_transactie WHERE id = ?').get(bankKlein).categorie, null, 'uitgezette regel geldt niet meer');
 
   // de volgende bankcontrole: een nieuwe afschrijving aan dezelfde tegenpartij is meteen een bekende uitzondering, geen signaal
   const e = nieuw('tolgaarde', { boekdatum: '2026-10-08', bedrag_centen: -15000, tegenpartij_naam: 'Belastingdienst', tegenpartij_iban: BD, omschrijving: 'KJH-23-J' });
@@ -2151,12 +2174,38 @@ test('wv2061 te bekijken: per week per tegenpartij met voorstel; uitzondering �
   assert.equal(t.fdb.db.prepare('SELECT afhandeling FROM signaal WHERE id = ?').get(s2).afhandeling, 'factuur_gekoppeld');
   assert.ok(!t.call('GET', 'bank/oranje/2026-w43').j.groepen.some((g) => g.transacties.some((x) => x.id === f2)));
   assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [f2], categorie: 'overig' }).status, 409, 'gekoppeld = al bekeken');
+  // review MOET 3: een tweede koppeling op dezelfde afschrijving of op een al betaalde factuur → 409
+  const f3 = nieuw('tolgaarde', { boekdatum: '2026-10-21', bedrag_centen: -50000, tegenpartij_naam: 'Leverancier', tegenpartij_iban: fiban, omschrijving: 'tweede' });
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'factuur', transactie: f3, factuur: fid }).status, 409, 'factuur staat niet meer open (betaald gezien)');
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'factuur', transactie: f2, factuur: teBetalenFactuur(t) }).status, 409, 'afschrijving al gekoppeld');
+  // review MOET 1: van deze rekening kwamen eerder facturen → waarschuwing; uitzondering alleen met toch
+  const g4 = t.call('GET', 'bank/oranje/2026-w43').j.groepen.find((g) => g.transacties.some((x) => x.id === f3));
+  assert.ok(g4.facturen_eerder >= 1, JSON.stringify(g4));
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [f3], categorie: 'overig' }).status, 409, 'zonder toch');
+  // review ZOU 9: een open koppelvoorstel gaat mee dicht
+  t.fdb.db.prepare("INSERT INTO voorstel (sleutel, transactie, facturen, methode, zekerheid, details, aangemaakt_op) VALUES (?, ?, ?, 'bedrag', 0.5, '{}', ?)").run('wv2061|' + f3, f3, JSON.stringify([fid]), new Date(NU).toISOString());
+  assert.equal(t.call('GET', 'bank/oranje/2026-w43').j.groepen.flatMap((g) => g.transacties).find((x) => x.id === f3).voorstel_open, true);
+  const kt = t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [f3], categorie: 'overig', toch: true });
+  assert.equal(kt.status, 200, JSON.stringify(kt.j));
+  assert.equal(kt.j.voorstellen_dicht, 1);
+  assert.equal(t.fdb.db.prepare("SELECT status FROM voorstel WHERE transactie = ?").get(f3).status, 'afgewezen');
+  // review ZOU 9: open fraudesignaal → geen regel
+  const fr = nieuw('tolgaarde', { boekdatum: '2026-10-21', bedrag_centen: -7700, tegenpartij_naam: 'Leverancier X', tegenpartij_iban: 'NL55TEST0000000555', omschrijving: 'x' });
+  t.fdb.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, entiteit, transacties, details, aangemaakt_op) VALUES (?, ?, 'onbekend_iban', 'Onbekend IBAN', 'tolgaarde', ?, '{}', ?)")
+    .run(D.nieuwId(), 'onbekend_iban:wv2061|' + fr, JSON.stringify([fr]), new Date(NU).toISOString());
+  const gfr = t.call('GET', 'bank/oranje/2026-w43').j.groepen.find((g) => g.transacties.some((x) => x.id === fr));
+  assert.equal(gfr.regel_kan, false);
+  assert.match(gfr.geen_regel, /fraude/);
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [fr], categorie: 'overig' }).status, 409);
 
   // praktijkmanager: ziet de POT niet en kan geen POT-regel maken
   const pm = t.pm();
   const pmG = t.call('GET', 'bank/oranje/2026-w43', null, { rol: pm });
   assert.equal(pmG.status, 200);
   assert.ok(pmG.j.groepen.every((g) => g.entiteiten.every((x) => pm.entiteiten.includes(x))), JSON.stringify(pmG.j.groepen.map((g) => g.entiteiten)));
-  const potTx = t.fdb.db.prepare("SELECT id FROM bank_transactie WHERE entiteit = 'pot' LIMIT 1").get();
-  if (potTx) assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [potTx.id], categorie: 'loon' }, { rol: pm }).status, 404);
+  assert.ok(t.call('GET', 'bank/oranje/2026-w43').j.groepen.some((g) => g.transacties.some((x) => x.id === potTx)), 'eigenaar ziet de POT-regel');
+  assert.ok(!pmG.j.groepen.some((g) => g.transacties.some((x) => x.id === potTx)), 'praktijkmanager niet');
+  assert.ok(pmG.j.groepen.every((g) => !g.regel_kan && g.geen_regel), 'praktijkmanager maakt geen regel');
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [potTx], categorie: 'loon' }, { rol: pm }).status, 403);
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'factuur', transactie: potTx, factuur: fid }, { rol: pm }).status, 404);
 });
