@@ -61,18 +61,21 @@ function grenzen(vandaag) {
   if (!isIso(vandaag)) throw new Error('sepa: vandaag ontbreekt');
   return { vroegst: werkdagVanaf(vandaag), uiterst: plus(vandaag, MAX_VOORUIT) };
 }
-/*
- * De uitvoerdatum die in het bestand komt. Zelf gekozen (betaal_op) wint, maar nooit vóór `vroegst` (een gekozen datum die voorbij is, wordt
- * de eerstvolgende werkdag). Anders de vervaldatum; valt die niet op een werkdag, dan de werkdag ervóór (nooit te laat), nooit vóór vroegst.
- * → { datum, bron: 'gekozen'|'gekozen_voorbij'|'vervaldatum'|'werkdag_ervoor'|'eerstvolgende_werkdag', te_ver: bool }
- */
-// Belastingdienst herkennen: vaste ontvangrekening of de naam van de leverancier. BD_MARGE = bankwerkdagen vóór de vervaldatum.
+// Belastingdienst herkennen: vaste ontvangrekening, de naam op de factuur of (lev_naam) de naam van de gekoppelde leverancier.
+// BD_MARGE = bankwerkdagen vóór de vervaldatum.
 const BD_IBAN = new Set(['NL86INGB0002445588']);
 const BD_MARGE = 3;
 function isBelastingdienst(f) {
-  const iban = String((f && f.iban) || '').replace(/\s+/g, '').toUpperCase();
-  return BD_IBAN.has(iban) || /belastingdienst/i.test(String((f && (f.leverancier_naam || f.naam)) || ''));
+  if (!f) return false;
+  const iban = String(f.iban || '').replace(/\s+/g, '').toUpperCase();
+  return BD_IBAN.has(iban) || /belastingdienst/i.test([f.leverancier_naam, f.lev_naam].filter(Boolean).join(' '));
 }
+/*
+ * De uitvoerdatum die in het bestand komt. Zelf gekozen (betaal_op) wint, maar nooit vóór `vroegst` (een gekozen datum die voorbij is, wordt
+ * de eerstvolgende werkdag). Anders `vroegst`: de dag van de batch, of de eerstvolgende bankwerkdag (David 30-10-2026). Alleen de
+ * Belastingdienst gaat standaard laat: BD_MARGE bankwerkdagen vóór de vervaldatum, nooit vóór vroegst.
+ * → { datum, bron: 'gekozen'|'gekozen_voorbij'|'belastingdienst_marge'|'eerstvolgende_werkdag', te_ver: bool }
+ */
 function uitvoerVoor(f, vandaag) {
   const g = grenzen(vandaag);
   let datum, bron;

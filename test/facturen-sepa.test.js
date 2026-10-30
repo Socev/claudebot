@@ -41,7 +41,7 @@ test('TARGET2-werkdagen: weekend, Nieuwjaar, Goede Vrijdag en Paasmaandag (2027:
   assert.equal(S.werkdagTot('2027-03-29'), '2027-03-25');
 });
 
-test('uitvoerdatum: vervaldatum; in het weekend de werkdag ervóór; nooit vóór vandaag; zelf gekozen wint; voorbij → eerstvolgende werkdag; te ver', () => {
+test('uitvoerdatum: standaard de dag van de batch; Belastingdienst 3 werkdagen vóór de vervaldatum; nooit vóór vandaag; zelf gekozen wint; voorbij → eerstvolgende werkdag; te ver', () => {
   const v = '2026-10-27';   // dinsdag
   assert.deepEqual(S.grenzen(v), { vroegst: '2026-10-27', uiterst: '2027-10-26' });
   assert.equal(S.grenzen('2026-10-31').vroegst, '2026-11-02', 'zaterdag → maandag');
@@ -49,6 +49,8 @@ test('uitvoerdatum: vervaldatum; in het weekend de werkdag ervóór; nooit vóó
   assert.deepEqual(S.uitvoerVoor({ vervaldatum: '2026-11-01' }, v), { datum: '2026-10-27', bron: 'eerstvolgende_werkdag', te_ver: false });
   assert.deepEqual(S.uitvoerVoor({ vervaldatum: '2026-11-05', leverancier_naam: 'Belastingdienst' }, v), { datum: '2026-11-02', bron: 'belastingdienst_marge', te_ver: false }, 'BD: 3 werkdagen vóór do 5-11 = ma 2-11');
   assert.deepEqual(S.uitvoerVoor({ vervaldatum: '2026-11-01', iban: 'NL86 INGB 0002 4455 88' }, v), { datum: '2026-10-27', bron: 'belastingdienst_marge', te_ver: false }, 'BD op IBAN; zondag → vr 30-10, dan 3 werkdagen terug');
+  assert.deepEqual(S.uitvoerVoor({ vervaldatum: '2026-11-05', leverancier_naam: 'Belastingd. Utrecht', lev_naam: 'Belastingdienst' }, v).bron, 'belastingdienst_marge', 'naam van de gekoppelde leverancier');
+  assert.equal(S.isBelastingdienst({ leverancier_naam: 'Proef B.V.', iban: 'NL91ABNA0417164300' }), false);
   assert.deepEqual(S.uitvoerVoor({ vervaldatum: '2026-10-28', leverancier_naam: 'Belastingdienst' }, v), { datum: '2026-10-27', bron: 'eerstvolgende_werkdag', te_ver: false }, 'BD: marge valt voorbij → vandaag');
   assert.deepEqual(S.uitvoerVoor({ vervaldatum: '2026-10-01' }, v), { datum: '2026-10-27', bron: 'eerstvolgende_werkdag', te_ver: false }, 'verlopen');
   assert.deepEqual(S.uitvoerVoor({ vervaldatum: '2026-11-01' }, '2026-10-31'), { datum: '2026-11-02', bron: 'eerstvolgende_werkdag', te_ver: false }, 'vrijdag ligt al achter ons');

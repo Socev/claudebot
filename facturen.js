@@ -921,7 +921,7 @@ function sepaEerder(fdb, id) {
  * uitvoer, eerder }. rek = de gekozen rekening (of null: dan alleen de factuur zelf beoordelen, voor de betaallijst).
  */
 function sepaBeoordeel(fdb, f, lev, ctx, vandaag, rek) {
-  const uitvoer = S.uitvoerVoor(f, vandaag);
+  const uitvoer = S.uitvoerVoor(Object.assign({}, f, { lev_naam: lev ? lev.naam : null }), vandaag);   // lev_naam: Belastingdienst herkennen
   const eerder = sepaEerder(fdb, f.id);
   const uit = { reden: null, waarschuwingen: [], uitvoer, eerder };
   const nee = (r) => { uit.reden = r; return uit; };
@@ -983,12 +983,13 @@ function betaaldatum(fdb, r, d, nu) {
   return D.transactie(fdb, function () {
     const f = factuurOf404(fdb, r, id);
     if (!BETAAL_STATUS.includes(f.status) || f.betaalspoor !== 'te_betalen') weiger(409, 'alleen voor een factuur die nog betaald moet worden');
-    if ((f.betaal_op || null) === datum) return { betaal_op: datum, uitvoer: S.uitvoerVoor(f, vandaag) };
+    const lev = leverancierKern(fdb, f.leverancier_id), fl = Object.assign({}, f, { lev_naam: lev ? lev.naam : null });
+    if ((f.betaal_op || null) === datum) return { betaal_op: datum, uitvoer: S.uitvoerVoor(fl, vandaag) };
     const wanneer = nuIso(nu);
     const u = fdb.db.prepare("UPDATE factuur SET betaal_op = ?, bijgewerkt_op = ?, versie = versie + 1 WHERE id = ? AND betaalspoor = 'te_betalen'").run(datum, wanneer, f.id);
     if (u.changes !== 1) weiger(409, 'de factuur is intussen gewijzigd');
     D.audit(fdb, { wie: r.wie, wat: 'betaaldatum', object_soort: 'factuur', object_id: f.id, entiteit: f.entiteit, voor: { betaal_op: f.betaal_op || null }, na: { betaal_op: datum }, wanneer });
-    return { betaal_op: datum, uitvoer: S.uitvoerVoor(Object.assign({}, f, { betaal_op: datum }), vandaag) };
+    return { betaal_op: datum, uitvoer: S.uitvoerVoor(Object.assign(fl, { betaal_op: datum }), vandaag) };
   });
 }
 function sepaSamenstellen(fdb, r, d, nu) {
