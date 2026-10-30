@@ -25,6 +25,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const cp = require('child_process');
 
 const C = fs.constants;
 const TMP_ACHTER = '.vv.tmp';
@@ -135,11 +136,23 @@ function voegToe(pad, tekst, o) {
   });
 }
 
+// Grendel op de map, dezelfde als vault_veilig.wijzig (flock op de mapdescriptor; SB2 fase 3e R3, wv1944). Node kent geen
+// flock: een kind (util-linux flock) krijgt onze mapdescriptor als fd 3 en zet de flock op die gedeelde open file description.
+// Die blijft na het einde van het kind vast zolang wij de descriptor openhouden; metMap sluit hem = grendel los. Gemeten
+// zonder grendel: een JS- en een Python-schrijver die allebei vlak voor de rename toetsen, verloren af en toe elkaars rij
+// (test/box-schrijvers.sh). Lukt het niet binnen s seconden (of ontbreekt flock), dan zonder grendel verder, zoals vroeger.
+function grendel(m, s) {
+  const r = cp.spawnSync('flock', ['-w', String(s), '-E', '75', '3'], { stdio: ['ignore', 'ignore', 'ignore', m.dfd], timeout: (s + 5) * 1000 });
+  return !r.error && r.status === 0;
+}
+
 // Lees, laat functie(tekst) de nieuwe tekst geven (null/undefined = niets doen) en schrijf die weg als het bestand intussen
 // niet veranderde (zelfde inode, grootte en mtime); anders tot drie keer opnieuw. Geeft true als er geschreven is.
+// o.grendel (seconden, bv. 10): eerst de mapgrendel van vault_veilig.wijzig nemen (box-schrijvers, wv1944).
 function wijzig(pad, functie, o) {
   o = o || {};
   return metMap(pad, function (m) {
+    if (o.grendel) grendel(m, o.grendel);
     for (let poging = 0; poging < 3; poging++) {
       const voor = statGewoon(m.binnen(m.naam));
       const nieuw = functie(leesIn(m, 'utf8'));

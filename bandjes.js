@@ -731,9 +731,6 @@ function routes(deps) {
   }
   function schrijfBoxRij(l, soort, gemeten) {
     try {
-      const t = VV.lees(deps.boxPad);
-      const anker = eersteRij(t);   // eerste echte rij, niet een kop in een codeblok erboven
-      if (anker < 0) return false;
       const tijd = new Date(klok()).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
       const pagina = PRAKTIJKEN[l.praktijk].pad;
       const rij = '\n## [direct] ' + tijd + ' — Bandjes ' + PRAKTIJKEN[l.praktijk].naam + ': ' + (soort === 'teruggezet' ? 'bewaarde tekst teruggezet door de synchronisatie'
@@ -744,7 +741,12 @@ function routes(deps) {
         '- voorstel: ' + (soort === 'teruggezet' ? 'de laatst bewaarde tekst en velden staan in `' + path.join(deps.dir, 'journaal.jsonl') + '`; zet ze terug in `' + pagina + '` met een versie ≥ die uit het journaal (of hoog de versie met 1 op als de pagina zo goed is; bij "eerdere tekst van vN" of "in centrale" staan de versies al gelijk: dan versie ophogen of de tekst/het veld in centrale rechtzetten). Daarna gaat de mini-app vanzelf weer open.'
           : soort === 'conflict' ? 'vergelijk de conflictkopie met `' + pagina + '`, neem wat ontbreekt over en verwijder de kopie; daarna gaat de mini-app vanzelf weer open.'
           : 'dubbel of verkeerd id in `' + pagina + '` rechtzetten (ids zijn onveranderlijk; hernoem de dubbele).') + '\n';
-      VV.schrijf(deps.boxPad, t.slice(0, anker) + rij + t.slice(anker));   // wv900: modus van het origineel, eigen tmp met O_EXCL, geen link volgen
+      // wv900: modus van het origineel, eigen tmp met O_EXCL, geen link volgen; wv1944 R3: wijzig onder de mapgrendel
+      const ok = VV.wijzig(deps.boxPad, function (t) {
+        const anker = eersteRij(t);   // eerste echte rij, niet een kop in een codeblok erboven
+        return anker < 0 ? null : t.slice(0, anker) + rij + t.slice(anker);
+      }, { grendel: 5 });   // wv1944 R3: eerst de mapgrendel van vault_veilig.wijzig
+      if (!ok) return false;
       log('bandjes box-rij praktijk=' + l.praktijk + ' soort=' + soort);
       return true;
     } catch (e) { fout('bandjes-box', e); return false; }

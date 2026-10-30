@@ -677,6 +677,15 @@ BACKUP_DIR="${BACKUP_DIR:-/opt/data/backups}"
 BACKUP_LOG="$BIN/backup.log"
 BACKUP_MARKER="$BIN/laatste-vault-snapshot"
 BACKUP_MAX_LOG=$((5 * 1024 * 1024))
+# Grendel begrensd (SB2 fase 3e R2, wv1944): de onderhoudsstand (onderhoud.js) houdt dezelfde grendel vast, soms een uur. Een
+# flock zonder -w wachtte dan eindeloos en zette deze bewakingslus stil (api-/sync-herstart, Syncthing-bewaking). Nu hooguit
+# VAULT_TAR_WACHT s wachten; lukt het niet, dan deze keer geen tar (exit GRENDEL_BEZET, nooit een tar-code) en pas na
+# VAULT_TAR_HERPOGING s een nieuwe poging. Offsite uploadt alleen een tar van vandaag met stempel; tot die er is, blijft de
+# vorige offsite-kopie de laatste.
+VAULT_TAR_WACHT="${VAULT_TAR_WACHT:-900}"
+VAULT_TAR_HERPOGING="${VAULT_TAR_HERPOGING:-3600}"
+VAULT_TAR_POGING="$BIN/laatste-vault-snapshot-grendel"
+GRENDEL_BEZET=75
 
 blog(){
   # Rotatie in het schrijfpad, zoals api.log: eerst toetsen, dan schrijven.
@@ -709,9 +718,14 @@ vault_snapshot(){
 
   blog "start snapshot -> $doel (vault ${vaultkb}K, vrij ${vrijkb}K)"
 
-  # Zelfde grendel als de synclus: nooit tarren tijdens een ronde.
-  flock "$VAULT_LOCK" tar -czf "$doel" -C "$(dirname "$VAULT")" "$(basename "$VAULT")" 2>>"$BACKUP_LOG"
+  # Zelfde grendel als de synclus: nooit tarren tijdens een ronde. Begrensd wachten (R2): bij een bezette grendel draait tar niet,
+  # er ontstaat dus geen (half) bestand.
+  flock -w "$VAULT_TAR_WACHT" -E "$GRENDEL_BEZET" "$VAULT_LOCK" tar -czf "$doel" -C "$(dirname "$VAULT")" "$(basename "$VAULT")" 2>>"$BACKUP_LOG"
   rc=$?
+  if [ "$rc" -eq "$GRENDEL_BEZET" ]; then
+    blog "overgeslagen: vault-grendel na ${VAULT_TAR_WACHT}s nog bezet (onderhoudsstand of syncronde) - nieuwe poging over ${VAULT_TAR_HERPOGING}s; offsite houdt tot dan de vorige kopie"
+    return "$GRENDEL_BEZET"
+  fi
   # tar geeft 1 bij "file changed as we read it". Dat is bij een levende vault
   # normaal en geen reden om de backup weg te gooien; 2 en hoger wel.
   if [ "$rc" -ge 2 ]; then
@@ -769,7 +783,15 @@ vault_snapshot_indien_nodig(){
   vandaag="$(date '+%Y-%m-%d')"
   gedaan="$(cat "$BACKUP_MARKER" 2>/dev/null || echo '')"
   [ "$gedaan" = "$vandaag" ] && return 0
-  vault_snapshot || blog "snapshot van $vandaag niet gelukt - morgen opnieuw"
+  # Na een bezette grendel (R2) niet elke 30 s opnieuw 15 min wachten: eerst VAULT_TAR_HERPOGING s rust.
+  local vorige nu rc
+  nu="$(date +%s)"; vorige="$(cat "$VAULT_TAR_POGING" 2>/dev/null || echo 0)"
+  case "$vorige" in (*[!0-9]*|'') vorige=0 ;; esac
+  [ $(( nu - vorige )) -lt "$VAULT_TAR_HERPOGING" ] && return 0
+  vault_snapshot; rc=$?
+  if [ "$rc" -eq "$GRENDEL_BEZET" ]; then date +%s > "$VAULT_TAR_POGING"
+  elif [ "$rc" -ne 0 ]; then blog "snapshot van $vandaag niet gelukt - morgen opnieuw"
+  fi
   return 0
 }
 

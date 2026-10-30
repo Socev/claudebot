@@ -159,10 +159,6 @@ function mkTekstBox(soort, reden) {
   if (mkTekstBoxDag[soort] === dag) return;
   mkTekstBoxDag[soort] = dag;
   try {
-    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
-    const t = VV().lees(pad);
-    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
-    if (!eerste) return;
     const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
     const mod = soort === 'module';
     const rij = '\n## [direct] ' + tijd + ' — machinekamer-runs ' + (mod ? 'zonder vaste instructie en zonder geheugen: mk-tekst.js ontbreekt' : 'zonder eigen geheugen') +
@@ -172,7 +168,7 @@ function mkTekstBox(soort, reden) {
         'zonder geheugen (autoMemoryEnabled false; nooit met het gedeelde)') + '; /health.mk_tekst toont de stand.\n' +
       '- voorstel: ' + (mod ? 'mk-tekst.js staat niet in deze release: claudebot-src main bijwerken en pushen, dan uitrol (RELEASE_OPTIONEEL in uitrol.sh).' :
         '`node /opt/data/app/current/mk-tekst.js toets` en de reden nagaan (ACL, eigenaar, symlink in ' + MK_GEHEUGEN + '); herstel met `setfacl -bR` + `chmod -R go-rwx`, alleen als claude het zelf schreef.') + '\n';
-    VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));   // wv900: eigen tmp met O_EXCL, geen link volgen
+    ovisBoxRij(rij);   // wv1944 R3: via ovisBoxRij (mapgrendel + hercontrole), zoals de andere box-schrijvers
   } catch (e) { logError('mk-tekst-box', e); }
 }
 if (!MK_TEKST && SERVER_ECHT) schrijfLog(JSON.stringify({ t: new Date().toISOString(), soort: 'mk-tekst-ontbreekt' }));
@@ -226,10 +222,6 @@ function managersPoortBox(chatId, p) {
   if (managersPoortBoxDag[chatId] === dag) return;
   managersPoortBoxDag[chatId] = dag;
   try {
-    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
-    const t = fs.readFileSync(pad, 'utf8');
-    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
-    if (!eerste) return;
     const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
     const kort = function (x) { return String(x).replace(/[\r\n`]/g, ' ').replace(/\/opt\/data\/AI_SecondBrain\//g, '').slice(0, 200); };
     const rij = '\n## [direct] ' + tijd + ' — managerronde ' + chatId + ' niet gestart: voorpoort niet groen (automatisch, wv904)\n' +
@@ -239,9 +231,7 @@ function managersPoortBox(chatId, p) {
       '- voorstel: gewijzigd door de machinekamer zelf? Dan controleren en herzegelen: `node /opt/data/app/current/managers-poort.js zegel ' + chatId +
       ' --door "<wvNNN: wat>"`. Niet door ons gewijzigd, of ACL/eigenaar/symlink: niet herzegelen, eerst uitzoeken wie schreef (git/ctime, ' +
       'bin/socev-rechten.log) — mogelijk een misleid Socev-gesprek.\n';
-    const tmp = path.join(path.dirname(pad), '.machinekamer.md.poort-' + crypto.randomBytes(4).toString('hex') + '.tmp');
-    fs.writeFileSync(tmp, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
-    fs.renameSync(tmp, pad);
+    ovisBoxRij(rij);   // wv1944 R3: via ovisBoxRij (mapgrendel + hercontrole), zoals de andere box-schrijvers (was readFileSync + vaste-map-tmp + rename)
   } catch (e) { logError('managers-poort-box', e); }
 }
 
@@ -1205,10 +1195,6 @@ function loperStoring(code) {
 function loperHersteld() { loperStaat.storing_sinds = null; loperStaat.david_gemeld = false; }
 function loperBoxRij(code) {
   try {
-    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
-    const t = VV().lees(pad);
-    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
-    if (!eerste) return;
     const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
     const rij = '\n## [direct] ' + tijd + ' — socev-loper onbereikbaar: smalle beurten falen dicht (' + code + ', automatisch)\n' +
       '- status: open\n- van: pod server.js (wv715, loper-klant; hooguit 1×/dag)\n' +
@@ -1216,7 +1202,7 @@ function loperBoxRij(code) {
       '- gevolg als er niets gebeurt: elke beurt in de stand (' + JSON.stringify(loperStand()).slice(0, 160) + ') faalt; na 10 min krijgt David één regel.\n' +
       '- voorstel: `ls -l /run/socev-loper/`, loper-ping met `node /opt/data/claudebot-src/test/loper-klant.js /run/socev-loper/loper.sock \'{"op":"ping"}\'`; ' +
       'komt hij niet terug: stand terugzetten (`/opt/data/bin/socev-loper.json` → {"sessies":[]}) of SOCEV_LOPER=uit + uitrol, en de herstartlus in het image nagaan (bouwplan sleutelscheiding § 7).\n';
-    VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));   // wv900: eigen tmp met O_EXCL, geen link volgen
+    ovisBoxRij(rij);   // wv1944 R3: via ovisBoxRij (mapgrendel + hercontrole), zoals de andere box-schrijvers
   } catch (e) { logError('loper-box', e); }
 }
 function loperPing() {
@@ -16058,7 +16044,7 @@ function ovisBoxRij(tekst) {   // → true als de rij in de box staat (wv1303: d
     return VV().wijzig(path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), function (t) {
       const eerste = /\n## \[[a-z]{2,16}\] \d{4}-\d{2}-\d{2}/.exec(t);
       return eerste ? t.slice(0, eerste.index) + tekst + t.slice(eerste.index) : null;
-    });
+    }, { grendel: 5 });   // wv1944 R3: eerst de mapgrendel van vault_veilig.wijzig (hooguit 5 s), dan pas lezen
   } catch (e) { logError('ovis-box', e); return false; }
 }
 // wv981: Voor jou-kaart bij een kritiek verschil in het POT-factuuradres (plek 4), alleen na een nachtronde waarin de POT-kant gemeten is;
@@ -16838,7 +16824,7 @@ function werkerBoxRij(kop, regels) {
       const eerste = /\n## \[[a-z]{2,16}\] \d{4}-\d{2}-\d{2}/.exec(t);
       const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
       return eerste ? t.slice(0, eerste.index) + '\n## [log] ' + tijd + ' — ' + kop + '\n' + regels.map(function (r) { return '- ' + r; }).join('\n') + '\n' + t.slice(eerste.index) : null;
-    });
+    }, { grendel: 5 });   // wv1944 R3: eerst de mapgrendel van vault_veilig.wijzig (hooguit 5 s), dan pas lezen
   } catch (e) { logError('werkers-box', e); return false; }
 }
 const werkerKlok = function (iso) { return new Date(iso).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' }); };
