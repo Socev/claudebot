@@ -109,6 +109,11 @@ test('vraag: poort en geheim houden tegen vóór het netwerk; gewone vraag telt 
   assert.strictEqual((await t.h.vraag({ afnemer: 'proef', instructies: PATIENT, invoer: 'x' })).status, 'poort');
   assert.strictEqual((await t.h.vraag({ afnemer: 'proef', invoer: 'Mijn sleutel is sk-proj-' + 'b'.repeat(40) })).status, 'geheim');
   assert.strictEqual((await t.h.vraag({ afnemer: 'proef', model: 'gpt-onbekend', invoer: 'Zeg pong.' })).status, 'model');
+  // poort zonder uitslag of met een fout = dicht
+  const t3 = nieuw(n.url, { aan: true }, { poort: function () { return null; } });
+  assert.strictEqual((await t3.h.vraag({ afnemer: 'proef', invoer: 'x' })).status, 'poort'); t3.h.sluit();
+  const t4 = nieuw(n.url, { aan: true }, { poort: function () { throw new Error('stuk'); } });
+  assert.strictEqual((await t4.h.vraag({ afnemer: 'proef', invoer: 'x' })).status, 'poort'); t4.h.sluit();
   assert.strictEqual((await t.h.vraag({ afnemer: 'Fout Naam', invoer: 'x' })).status, 'afnemer');
   assert.strictEqual(n.verzoeken.length, 0);
   const r = await t.h.vraag({ afnemer: 'proef', instructies: 'Antwoord kort.', invoer: 'Zeg pong.', max_uit: 100, effort: 'low' });

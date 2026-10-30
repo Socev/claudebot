@@ -9,7 +9,8 @@
  *
  * STROOM per aanroep (vraag) en per batch (batchIndienen):
  *  1. schakelaar (openai.json "aan"), model uit de vaste prijstabel (onbekend model = weigeren; nooit gokken wat iets kost);
- *  2. poort: elke tekst eerst door de patiëntpoort (patientpoort-2.0, fail-closed: fout = dicht) en door een geheimenfilter (sleutels,
+ *  2. poort: elke tekst eerst door de patiëntpoort (patientpoort-2.0, tegenhouden zoals bij pdf-lezer en MailMan; fout of geen uitslag = dicht)
+ *     en door een geheimenfilter (sleutels,
  *     tokens, wachtwoordregels). Raak = niet naar OpenAI, één rij met status poort/geheim, nooit de tekst;
  *  3. zachte grens: maandtotaal (sinds reset_dag, Nederlandse tijd) + open reserveringen + schatting van deze aanroep (invoer ≈ tekens/3,
  *     uitvoer = max_uit, ongecachet) > grens → weigeren (status grens). Grens = grens_usd, of grens_pct × tegoed_usd (standaard 80 %);
@@ -199,7 +200,7 @@ function maak(o) {
     if (t.some(geheimIn)) return 'geheim';
     try {
       const b = o.poort(t);
-      if (!b || !Array.isArray(b.soorten) || b.soorten.length) return 'poort';
+      if (!b || b.tegenhouden !== false) return 'poort';   // zelfde beslisregel als pdf-lezer en MailMan; geen uitslag = dicht
     } catch (e) { fout('openai-poort', e); return 'poort'; }
     return null;
   }
