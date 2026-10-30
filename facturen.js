@@ -371,7 +371,8 @@ function betalen(fdb, r, nu) {
     if (f.betaalspoor === 'ingevoerd') {
       if (!verw) verw = { dekking: bankDekking(fdb), actief: bankActief(fdb, vandaag), sepa: sepaVoorControle(fdb, nuIso(Date.parse(K.plusDagen(vandaag, -BANK_DAGEN) + 'T00:00:00Z'))),
         rekeningen: fdb.db.prepare('SELECT iban, entiteit, controle FROM rekening').all(), vandaag };
-      const v = B.betaalVerwachting(f, verw);
+      // alleen voor een entiteit waarvan de app een bank ziet (Privé en POT zonder bankluis: geen stand, dan zou "upload een export" misleiden)
+      const v = verw.rekeningen.some((k) => k.entiteit === f.entiteit && k.controle === 1) ? B.betaalVerwachting(f, verw) : null;
       if (v) rij.bank = { verwacht: v.verwacht, termijn_tot: v.termijn_tot, bijgewerkt_tot: v.dekking, stand: v.stand };
       // diffreview KAN 8: staat er een betaling met ons kenmerk maar een ander bedrag (open voorstel), dan zegt de lijst dat, niet "niet gezien"
       if (rij.bank && fdb.db.prepare("SELECT 1 FROM voorstel v WHERE v.status = 'open' AND json_extract(v.details, '$.reden') IN ('bedrag wijkt af','kenmerk klopt, bedrag niet') " +
