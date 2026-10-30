@@ -15038,7 +15038,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo() } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo() } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -15231,6 +15231,90 @@ function facturenNaBankRonde() {
   const r = facturenRoutes.bankluisRonde(fdb, { nu: Date.now(), pad: FACTUREN_BANKLUIS });
   if (!r.rekeningen) return null;
   return { ok: r.ok, nieuw: r.nieuw, vervangen: r.vervangen, signalen: r.controle ? r.controle.signalen : undefined, fouten: (r.fouten || []).length || undefined };
+}
+// ── wv2056: PayPal zakelijk als bron in Facturen (David 30-10-2026 22:50, Ja op "lezen met een sleutel die technisch ook kan terugbetalen?") ──
+// Na de bank-ronde (na facturenNaBankRonde, zodat de bankposten van vandaag er al zijn): de transacties van de zakelijke PayPal-rekening
+// ophalen (paypal-zakelijk-lezer.js: alleen POST /v1/oauth2/token en GET /v1/reporting/transactions, witte lijst in padToets) en in Facturen
+// opslaan + koppelen (facturen-paypal.js, migratie 14). Eerste ronde: alles wat PayPal geeft (3 jaar); daarna de laatste 10 dagen. De sleutel
+// staat NIET in process.env (die erft elke claude-sessie): op het moment van gebruik uit de kluis via de Management-API (zelfde route als
+// bankSleutels), 10 min in het geheugen, nooit in een log of antwoord. Draagt het token ooit een uitbetaalrecht (payouts), dan stopt de ronde
+// vóór de transactielijst en komt er hooguit één box-rij per dag. Uitzetten: FACTUREN_PAYPAL=uit. /health.facturen.paypal = laatste uitkomst.
+const facturenPaypal = (function () {
+  const a = path.join(__dirname, 'facturen-paypal.js'), b = path.join(__dirname, 'paypal-zakelijk-lezer.js');
+  if (!facturenMod || !fs.existsSync(a) || !fs.existsSync(b)) return null;
+  try { return { FP: require(a), L: require(b) }; } catch (e) { logError('facturen-paypal', e); return null; }
+})();
+const facturenPaypalStaat = { bezig: false, laatste: null, sleutel: null, boxDag: null };
+async function paypalZakelijkSleutels() {
+  const c = facturenPaypalStaat.sleutel;
+  if (c && Date.now() < c.tot) return c.w;
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) return null;
+  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
+    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-facturen-paypal/1' },
+    body: JSON.stringify({ query: "select name, decrypted_secret as w from vault.decrypted_secrets where name in ('paypal_zakelijk_client_id', 'paypal_zakelijk_secret')" }),
+    signal: AbortSignal.timeout(20000) });
+  if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
+  const rijen = await r.json();
+  const w = { id: '', geheim: '' };
+  (Array.isArray(rijen) ? rijen : []).forEach(function (x) {
+    if (x && x.name === 'paypal_zakelijk_client_id') w.id = String(x.w || '').trim();
+    if (x && x.name === 'paypal_zakelijk_secret') w.geheim = String(x.w || '').trim();
+  });
+  if (w.id && w.geheim) facturenPaypalStaat.sleutel = { w: w, tot: Date.now() + 10 * 60 * 1000 };
+  return w;
+}
+function facturenPaypalInfo() { return facturenPaypal ? (facturenPaypalStaat.laatste || { aan: process.env.FACTUREN_PAYPAL !== 'uit' }) : undefined; }
+function facturenPaypalBox(kop, tekst) {
+  const dag = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' });
+  if (facturenPaypalStaat.boxDag === dag) return;
+  facturenPaypalStaat.boxDag = dag;
+  try {
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const t = VV().lees(pad);
+    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
+    if (!eerste) return;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const rij = '\n## [direct] ' + tijd + ' — PayPal zakelijk in Facturen: ' + kop + ' #cc-paypal-zakelijk (pod, automatisch)\n' +
+      '- status: open\n- van: pod facturenPaypalRonde (server.js, na de bank-ronde; hooguit 1× per dag)\n' +
+      '- gemeten: ' + String(tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: Facturen krijgt geen nieuwe PayPal-regels; de "PayPal Europe"-posten op de bank blijven zonder betaling erachter.\n' +
+      '- voorstel: `node tools/facturen-paypal.js rechten` (scopes en app_id, nooit sleutel of token) en de kluisnamen paypal_zakelijk_client_id/secret nagaan; bij een uitbetaalrecht niets lezen en David een besluitkaart geven. Uitzetten: FACTUREN_PAYPAL=uit.\n';
+    VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
+  } catch (e) { logError('facturen-paypal-box', e); }
+}
+async function facturenPaypalRonde() {
+  if (!facturenPaypal || !facturenRoutes || process.env.FACTUREN_PAYPAL === 'uit' || !facturenMagOpenen()) return null;
+  if (facturenPaypalStaat.bezig) return { ok: false, fout: 'er loopt al een PayPal-ronde' };
+  const fdb = facturenOpen();
+  if (!fdb) return null;
+  facturenPaypalStaat.bezig = true;
+  const nuMs = Date.now();
+  let uit;
+  try {
+    let s = null;
+    try { s = await paypalZakelijkSleutels(); } catch (e) { logError('facturen-paypal-kluis', e); uit = { ok: false, fout: 'kluis nu niet bereikbaar' }; }
+    if (!uit && !s) uit = { ok: false, fout: 'kluistoegang ontbreekt op de pod' };
+    if (!uit && !(s.id && s.geheim)) uit = { ok: false, fout: 'geen PayPal-sleutel in de kluis' };
+    if (!uit) {
+      try {
+        const lezing = await facturenPaypal.L.transacties(s, facturenPaypal.FP.rondeVan(fdb, nuMs), nuMs, { nu: nuMs });
+        const v = facturenPaypal.FP.verwerk(fdb, lezing, { wie: 'pod', nu: nuMs });
+        uit = { ok: true, vensters: lezing.vensters, gelezen: v.opslaan.gelezen, nieuw: v.opslaan.nieuw, gewijzigd: v.opslaan.gewijzigd, onleesbaar: v.opslaan.onleesbaar || undefined,
+          bank_nieuw: v.koppeling.bank_nieuw, bank_open: v.koppeling.bank_open, bank_bedrag_anders: v.koppeling.bank_bedrag_anders || undefined,
+          leverancier_nieuw: v.koppeling.leverancier_nieuw, factuur_nieuw: v.koppeling.factuur_nieuw };
+      } catch (e) {
+        const code = e && e.code ? String(e.code) : 'fout';
+        uit = { ok: false, fout: String(e && e.uitleg || 'PayPal-ronde faalde in de pod').slice(0, 160), code: code };
+        if (code === 'scope_uitbetalen' || code === 'account' || code === 'scope') facturenPaypalBox(code === 'scope_uitbetalen' ? 'sleutel kan uitbetalen, ronde gestopt' : 'ronde gestopt (' + code + ')', uit.fout);
+        else logError('facturen-paypal', new Error(uit.fout));
+      }
+    }
+  } finally { facturenPaypalStaat.bezig = false; }
+  facturenPaypalStaat.laatste = Object.assign({ op: new Date(nuMs).toISOString() }, uit);
+  schrijfLog(nu() + ' facturen-paypal ' + velden({ ok: uit.ok, nieuw: uit.nieuw, gewijzigd: uit.gewijzigd, bank_nieuw: uit.bank_nieuw, code: uit.code }));
+  return uit;
 }
 // ── wv1705 (OVIS M3a): verzamelkaart Facturen in Overzicht ──
 // facturen-kaart.js (puur) beslist; hier alleen de I/O. Eén kaart per dag "Facturen — N facturen beoordelen" (sleutel facturen-JJJJ-MM-DD,
@@ -20127,6 +20211,11 @@ async function bankRonde() {
     const fr = facturenNaBankRonde();
     if (fr) uit.facturen = fr;
   } catch (e) { logError('facturen-bankluis', e); uit.facturen = { fout: 'facturen-bankluis faalde in de pod' }; }
+  // wv2056: daarna de zakelijke PayPal-rekening (alleen de transactielijst lezen); alleen aantallen naar n8n, een fout raakt de ronde niet
+  if (uit.ok) try {
+    const pp = await facturenPaypalRonde();
+    if (pp) uit.facturen_paypal = pp;
+  } catch (e) { logError('facturen-paypal', e); uit.facturen_paypal = { ok: false, fout: 'paypal-ronde faalde in de pod' }; }
   // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
   (r.box || []).forEach(function (m) {
     const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')

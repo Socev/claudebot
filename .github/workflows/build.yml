@@ -85,6 +85,20 @@ jobs:
           fi
           echo "paypal-bewijs.js: alleen lokaal."
 
+      # paypal-zakelijk-lezer.js (wv2056): de sleutel van PayPal zakelijk kan technisch ook terugbetalen en innen (PayPal laat "Accept
+      # payments" niet uitzetten). Davids Ja (30-10-2026) geldt alleen als de pod niets anders aanroept dan POST /v1/oauth2/token en GET
+      # /v1/reporting/transactions: één fetch, altijd achter padToets, geen module, geen ander PayPal-pad. facturen-paypal.js blijft lokaal.
+      - name: paypal-zakelijk-lezer.js mag alleen token + transactielijst
+        if: ${{ !cancelled() }}
+        run: |
+          C=$(grep -vE '^\s*(\*|//)' paypal-zakelijk-lezer.js)
+          if [ "$(echo "$C" | grep -cE "\bfetch\s*\(")" != "1" ] || ! echo "$C" | grep -qE "const url = padToets\(methode, padQuery\);"; then echo "::error::fetch buiten roep() of zonder padToets"; exit 1; fi
+          if echo "$C" | grep -nE "require\(|process\.|child_process|import\("; then echo "::error::paypal-zakelijk-lezer.js laadt een module of leest process"; exit 1; fi
+          if echo "$C" | grep -oE "['\"\`]/v[0-9]/[^'\"\`]*['\"\`]" | sort -u | grep -vxE "'/v1/oauth2/token'|'/v1/reporting/transactions'"; then echo "::error::paypal-zakelijk-lezer.js kent een ander PayPal-pad"; exit 1; fi
+          F=$(grep -vE '^\s*(\*|//)' facturen-paypal.js)
+          if echo "$F" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|\bfetch\s*\(|process\.binding|import\(|paypal\.com"; then echo "::error::facturen-paypal.js laadt netwerk"; exit 1; fi
+          echo "paypal-zakelijk-lezer.js: alleen token + transactielijst; facturen-paypal.js: lokaal."
+
       # pot-afschrift.js en mt940-lezer.js (wv787): de afschriftmaker van de POT-rekening is puur (invoer erin, MT940 + PDF eruit). Geen
       # bestand-, netwerk- of procesmodule en geen fetch: bestanden schrijft bank-lezer.js, versturen doet niemand (een concept maakt server.js).
       - name: pot-afschrift.js en mt940-lezer.js moeten puur blijven
@@ -190,7 +204,7 @@ jobs:
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\("; then
             echo "::error::facturen.js laadt een netwerk- of procesmodule; de routes moeten lokaal blijven"; exit 1
           fi
-          if grep -vE '^\s*(\*|//)' facturen.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js|\./facturen-db\.js|\./facturen-validatie\.js|\./facturen-sepa\.js|\./facturen-specificatie\.js|\./facturen-creditcard\.js)'\)$"; then
+          if grep -vE '^\s*(\*|//)' facturen.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js|\./facturen-db\.js|\./facturen-validatie\.js|\./facturen-sepa\.js|\./facturen-specificatie\.js|\./facturen-creditcard\.js|\./facturen-paypal\.js)'\)$"; then
             echo "::error::facturen.js laadt een module buiten fs, node:sqlite en de Facturen-buren"; exit 1
           fi
           echo "facturen.js: alleen lokaal."
@@ -288,6 +302,7 @@ jobs:
           t test/herstelreferentie.sh   # wv1962: SB2 fase 6a — nachtketen-stap referentie (droge reconcile op de facturendump uit de podstaat-bundel)
           t test/uitwijk-cred.sh   # wv2041: nachtketen-stap uitwijk-cred (versleutelde n8n-credentials naar de R230; nep-olares-eigen/ssh/API)
           t test/facturen-creditcard.sh   # wv2043: creditcard (ICS) — lezer + kaartnummerpoort, sleutels, idempotent, herkenning, incasso, aansluiting op de cent, leesroute
+          t test/facturen-paypal.sh   # wv2056: PayPal zakelijk — witte lijst (alleen token + transactielijst), idempotent, koppelen op de cent, aansluiting, leesroute
           t test/abn-historie.sh   # wv1329: ABN-historie (PDF-afschriften) in de bankluis — afdekken wat de bank gaf, saldo, POT-afschrift, niet naar de datahub
           command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils) || echo "::warning::pdftotext niet te installeren"   # de koerier roept /usr/bin/pdftotext echt aan
           t test/facturen-koerier.sh   # wv855: koerier — wachtrij, consistentiecontrole, idempotentie (antwoord verloren → één concept), postvak, uploads

@@ -159,6 +159,8 @@ COPY facturen-ingang.js /app/release-bootstrap/facturen-ingang.js
 COPY facturen-validatie.js /app/release-bootstrap/facturen-validatie.js
 COPY fin-toewijzing.js /app/release-bootstrap/fin-toewijzing.js
 COPY facturen-creditcard.js /app/release-bootstrap/facturen-creditcard.js
+COPY facturen-paypal.js /app/release-bootstrap/facturen-paypal.js
+COPY paypal-zakelijk-lezer.js /app/release-bootstrap/paypal-zakelijk-lezer.js
 COPY fin-reconcile.js /app/release-bootstrap/fin-reconcile.js
 COPY bewaker.js /app/release-bootstrap/bewaker.js
 COPY studio.js /app/release-bootstrap/studio.js

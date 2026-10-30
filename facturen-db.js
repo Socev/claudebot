@@ -933,6 +933,66 @@ CREATE TRIGGER IF NOT EXISTS kaart_incasso_vast BEFORE UPDATE ON kaart_incasso
 BEGIN SELECT RAISE(ABORT, 'kaart_incasso_vast: weghalen en opnieuw koppelen, niet wijzigen'); END;
 `;
 
+/*
+ * wv2056 (David 30-10-2026, Ja op "PayPal zakelijk — lezen met een sleutel die technisch ook kan terugbetalen?"): de zakelijke PayPal-rekening
+ * als bron naast de bank. Op de zakelijke rekening staan alleen losse "PayPal Europe"-posten ("<bankreferentie>/PAYPAL"); welke betaling
+ * erachter zit, staat hier. paypal_regel = één transactie uit PayPal Transaction Search (GET /v1/reporting/transactions), sleutel = het
+ * transaction_id van PayPal. bedrag_centen met het teken van PayPal (- = van het PayPal-saldo af, + = erbij), in de valuta van de regel.
+ * event_code is de PayPal-code (T0003/T0006 betaling, T0200 omwisseling, T0300 opwaardering van de bank, T0403 terugstorting naar de bank,
+ * T0700 opwaardering van een kaart, T1107 terugbetaling ontvangen). ref = paypal_reference_id (de betaling waar een omwisseling, opwaardering
+ * of terugbetaling bij hoort); bank_ref = het nummer dat de bank in de omschrijving zet (T03/T04). PayPal kan de status nog wijzigen
+ * (P → S, V): de ruwe velden worden dan bijgewerkt (auditrij), het id nooit. tegenpartij, onderwerp en factuurnummer zijn tekst van derden
+ * (gegeven, begrensd en geschoond, zonder mailadressen); geen mailadres, telefoon of adres van derden. bank_transactie koppelt een
+ * opwaardering of terugstorting aan precies één post op de bank (zelfde bedrag op de cent); leverancier/factuur alleen op een betaling.
+ * LET OP terugrol: een release van vóór wv2056 opent deze database niet meer (schema_nieuwer); lichtste terugrol is
+ * `DELETE FROM schema_migratie WHERE versie = 14` (de oude code kent de tabel niet en hindert hem niet). Herhaalbaar (IF NOT EXISTS).
+ */
+const M14 = `
+CREATE TABLE IF NOT EXISTS paypal_regel (
+  id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 8 AND 30 AND id NOT GLOB '*[^A-Z0-9]*'),
+  account TEXT NOT NULL CHECK (length(account) BETWEEN 5 AND 30 AND account NOT GLOB '*[^A-Z0-9]*'),
+  event_code TEXT NOT NULL CHECK (event_code GLOB 'T[0-9][0-9][0-9][0-9]'),
+  status TEXT NOT NULL CHECK (status IN ('S','P','V','F','D')),
+  tijdstip TEXT NOT NULL CHECK (tijdstip GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]Z'),
+  datum TEXT NOT NULL ${DATUM('datum')},
+  bedrag_centen INTEGER NOT NULL,
+  valuta TEXT NOT NULL CHECK (length(valuta) = 3 AND valuta NOT GLOB '*[^A-Z]*'),
+  kosten_centen INTEGER,
+  saldo_na_centen INTEGER,
+  ref TEXT CHECK (ref IS NULL OR (length(ref) BETWEEN 4 AND 40 AND ref NOT GLOB '*[^A-Z0-9-]*')),
+  ref_soort TEXT CHECK (ref_soort IS NULL OR ref_soort IN ('ODR','TXN','SUB','PAP')),
+  bank_ref TEXT CHECK (bank_ref IS NULL OR (length(bank_ref) BETWEEN 4 AND 30 AND bank_ref NOT GLOB '*[^A-Z0-9]*')),
+  tegenpartij TEXT CHECK (tegenpartij IS NULL OR length(tegenpartij) <= 100),
+  land TEXT CHECK (land IS NULL OR (length(land) = 2 AND land NOT GLOB '*[^A-Z]*')),
+  onderwerp TEXT CHECK (onderwerp IS NULL OR length(onderwerp) <= 200),
+  factuurnummer TEXT CHECK (factuurnummer IS NULL OR length(factuurnummer) <= 64),
+  bijgewerkt_paypal TEXT,
+  bank_transactie TEXT REFERENCES bank_transactie(id),
+  leverancier TEXT REFERENCES leverancier(id),
+  factuur TEXT REFERENCES factuur(id),
+  factuur_archief TEXT REFERENCES factuur_archief(id),
+  koppeling_op TEXT,
+  aangemaakt_op TEXT NOT NULL, bijgewerkt_op TEXT,
+  CHECK (bank_transactie IS NULL OR bank_ref IS NOT NULL),
+  CHECK ((leverancier IS NULL AND factuur IS NULL AND factuur_archief IS NULL) OR (event_code GLOB 'T00[0-9][0-9]' AND bedrag_centen < 0))
+);
+CREATE INDEX IF NOT EXISTS paypal_regel_datum ON paypal_regel (datum);
+CREATE INDEX IF NOT EXISTS paypal_regel_ref ON paypal_regel (ref);
+CREATE INDEX IF NOT EXISTS paypal_regel_leverancier ON paypal_regel (leverancier);
+CREATE UNIQUE INDEX IF NOT EXISTS paypal_regel_bank ON paypal_regel (bank_transactie) WHERE bank_transactie IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS paypal_regel_factuur ON paypal_regel (factuur) WHERE factuur IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS paypal_regel_archief ON paypal_regel (factuur_archief) WHERE factuur_archief IS NOT NULL;
+-- een PayPal-post op de bank is nooit privé, en het bedrag moet op de cent kloppen (opwaardering + = afschrijving -, terugstorting - = bijschrijving +)
+CREATE TRIGGER IF NOT EXISTS paypal_regel_bank_ins BEFORE INSERT ON paypal_regel
+WHEN NEW.bank_transactie IS NOT NULL AND NOT EXISTS (SELECT 1 FROM bank_transactie t WHERE t.id = NEW.bank_transactie AND t.entiteit <> 'prive' AND t.bedrag_centen = -NEW.bedrag_centen AND NEW.valuta = 'EUR')
+BEGIN SELECT RAISE(ABORT, 'paypal_regel_bank: bankpost past niet (bedrag, valuta of privé)'); END;
+CREATE TRIGGER IF NOT EXISTS paypal_regel_bank_upd BEFORE UPDATE OF bank_transactie, bedrag_centen, valuta ON paypal_regel
+WHEN NEW.bank_transactie IS NOT NULL AND NOT EXISTS (SELECT 1 FROM bank_transactie t WHERE t.id = NEW.bank_transactie AND t.entiteit <> 'prive' AND t.bedrag_centen = -NEW.bedrag_centen AND NEW.valuta = 'EUR')
+BEGIN SELECT RAISE(ABORT, 'paypal_regel_bank: bankpost past niet (bedrag, valuta of privé)'); END;
+CREATE TRIGGER IF NOT EXISTS paypal_regel_id_vast BEFORE UPDATE OF id, account, aangemaakt_op ON paypal_regel
+BEGIN SELECT RAISE(ABORT, 'paypal_regel_vast: id, account en aanmaakmoment veranderen niet'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -946,12 +1006,13 @@ const MIGRATIES = [
   { versie: 11, naam: "signaal: soort 'afwijkend_bedrag' (wv1326)", fn: (db) => M11(db) },
   { versie: 12, naam: 'regels per afzender: afzender_regel (wv1917)', sql: M12 },
   { versie: 13, naam: 'creditcard (ICS) als bron: kaart, kaart_bestand, kaart_regel, kaart_incasso (wv2043)', sql: M13 },
+  { versie: 14, naam: 'PayPal zakelijk als bron: paypal_regel (wv2056)', sql: M14 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
   'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel',
-  'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso'];
+  'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso', 'paypal_regel'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 

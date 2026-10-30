@@ -31,6 +31,9 @@ const SP = require('./facturen-specificatie.js');
 // wv2043: creditcard (ICS) als bron; ontbreekt het bestand in een release, dan alleen geen opdracht creditcard (de rest van Facturen blijft)
 let CC = null;
 try { CC = require('./facturen-creditcard.js'); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND' && /facturen-creditcard/.test(e.message))) throw e; CC = null; }
+// wv2056: PayPal zakelijk als bron; ontbreekt het bestand in een release, dan alleen geen opdracht paypal
+let FP = null;
+try { FP = require('./facturen-paypal.js'); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND' && /facturen-paypal/.test(e.message))) throw e; FP = null; }
 
 const ID_RE = /^[0-9a-f]{16}$/;
 const BEURT_RE = /^[a-z0-9-]{8,64}$/;
@@ -2100,8 +2103,13 @@ function lees(fdb, d, opties) {
       if (!CC) weiger(404, 'creditcard zit niet in deze versie van de pod');
       try { return { status: 200, j: Object.assign({ ok: true }, CC.lees(fdb, d)) }; } catch (e) { if (e instanceof CC.KaartFout) weiger(400, e.uitleg); throw e; }
     }
+    if (String(d && d.opdracht || '') === 'paypal') {
+      // wv2056: betalingen van de zakelijke PayPal-rekening en de aansluiting op de "PayPal Europe"-posten; alleen lezen
+      if (!FP) weiger(404, 'paypal zit niet in deze versie van de pod');
+      try { return { status: 200, j: Object.assign({ ok: true }, FP.lees(fdb, d)) }; } catch (e) { if (e instanceof FP.PaypalFout) weiger(400, e.uitleg); throw e; }
+    }
     const op = LEES_OPDRACHTEN[String(d && d.opdracht || '')];
-    if (!op) weiger(400, 'opdracht is zoek, hoe, factuur, controles of creditcard');
+    if (!op) weiger(400, 'opdracht is zoek, hoe, factuur, controles, creditcard of paypal');
     const r = { soort: 'eigenaar', wie: kort(opties.wie || 'socev', 40), entiteiten: null, ingang: 'smal' };
     const nu = Number.isFinite(opties.nu) ? opties.nu : Date.now();
     const uit = validatie(fdb, r, Object.assign({}, d, { soort: op, max: Math.min(Number(d && d.max) || 50, 200) }), nu);
