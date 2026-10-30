@@ -33,7 +33,8 @@ const path = require('path');
 const VERSIE = 'openai-hulp-1.0';
 // Prijzen per miljoen tokens (developers.openai.com/api/docs/pricing, gelezen 30-10-2026, tabellen Standard en Batch). cache_schrijven = de
 // "12h write"-kolom (de hoogste; de API gaf 30-10 prompt_cache_retention 24h), alleen bij modellen die schrijfkosten rekenen. Modellen zonder
-// eigen rij hier worden geweigerd. Lange context (> 272k invoer) bij gpt-5.4/5.5 kost meer: die weigert de hulp (LANG_MAX).
+// eigen rij hier worden geweigerd. Lange context (> 272k invoer) bij gpt-5.4/5.5 (lang: true) kost meer: de hulp weigert dat vooraf (LANG_MAX)
+// en rekent het achteraf dubbel met de vlag prijs_onbekend.
 const PRIJS_DATUM = '2026-10-30';
 const PRIJZEN = {
   'gpt-6-astra': { in: 10, cache: 1, schrijf: 25, uit: 50, b_in: 5, b_cache: 0.5, b_schrijf: 12.5, b_uit: 25 },
@@ -42,8 +43,8 @@ const PRIJZEN = {
   'gpt-5.6-sol': { in: 4, cache: 0.4, schrijf: 10, uit: 20, b_in: 2, b_cache: 0.2, b_schrijf: 5, b_uit: 10 },
   'gpt-5.6-terra': { in: 2, cache: 0.2, schrijf: 5, uit: 12, b_in: 1, b_cache: 0.1, b_schrijf: 2.5, b_uit: 6 },
   'gpt-5.6-luna': { in: 0.20, cache: 0.02, schrijf: 0.5, uit: 1.2, b_in: 0.10, b_cache: 0.01, b_schrijf: 0.25, b_uit: 0.6 },
-  'gpt-5.5': { in: 5, cache: 0.5, uit: 30, b_in: 2.5, b_cache: 0.25, b_uit: 15 },
-  'gpt-5.4': { in: 2.5, cache: 0.25, uit: 15, b_in: 1.25, b_cache: 0.13, b_uit: 7.5 },
+  'gpt-5.5': { in: 5, cache: 0.5, uit: 30, b_in: 2.5, b_cache: 0.25, b_uit: 15, lang: true },
+  'gpt-5.4': { in: 2.5, cache: 0.25, uit: 15, b_in: 1.25, b_cache: 0.13, b_uit: 7.5, lang: true },
   'gpt-5.4-mini': { in: 0.75, cache: 0.075, uit: 4.5, b_in: 0.375, b_cache: 0.0375, b_uit: 2.25 },
   'gpt-5.4-nano': { in: 0.20, cache: 0.02, uit: 1.25, b_in: 0.10, b_cache: 0.01, b_uit: 0.625 },
   'gpt-5-mini': { in: 0.25, cache: 0.025, uit: 2, b_in: 0.125, b_cache: 0.0125, b_uit: 1 },
@@ -104,8 +105,10 @@ function kosten(model, u, batch) {
   const p = k ? PRIJZEN[k] : PRIJZEN['gpt-6-astra'];
   const pin = batch ? p.b_in : p.in, pc = batch ? p.b_cache : p.cache, puit = batch ? p.b_uit : p.uit;
   const ps = (batch ? p.b_schrijf : p.schrijf) || pin;
-  const usd = ((inT - cache) * pin + cache * pc + schrijf * ps + uitT * puit) / 1e6;
-  return { usd: rond(usd), in: inT, cache: cache, schrijf: schrijf, uit: uitT, redeneer: red, prijs_onbekend: !k };
+  // Lange context (> 272k invoer) heeft een eigen, hoger tarief dat de tabel niet kent: dubbel rekenen en vlaggen (review wv2055 KAN 1)
+  const lang = p.lang && inT > LANG_MAX ? 2 : 1;
+  const usd = lang * ((inT - cache) * pin + cache * pc + schrijf * ps + uitT * puit) / 1e6;
+  return { usd: rond(usd), in: inT, cache: cache, schrijf: schrijf, uit: uitT, redeneer: red, prijs_onbekend: !k || lang > 1 };
 }
 function schatting(model, tekens, maxUit, batch) {
   const p = PRIJZEN[model];
@@ -119,6 +122,13 @@ function periodeVan(ms, resetDag) {
   const dag = Number(d.slice(8, 10)), r = Math.min(28, Math.max(1, Math.floor(Number(resetDag) || 1)));
   if (dag < r) { m -= 1; if (m < 1) { m = 12; j -= 1; } }
   return j + '-' + String(m).padStart(2, '0') + '-' + String(r).padStart(2, '0');
+}
+// 'JJJJ-MM-DD' (00:00 Nederlandse tijd) → ISO-tijdstip in UTC, om op t te kunnen tellen (review wv2055 KAN 2: reset_dag wijzigen mag de
+// telling niet op 0 zetten)
+function startIso(dag) {
+  const g = Date.UTC(Number(dag.slice(0, 4)), Number(dag.slice(5, 7)) - 1, Number(dag.slice(8, 10)));
+  const l = new Date(g).toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).replace(' ', 'T') + 'Z';
+  return new Date(g - (Date.parse(l) - g)).toISOString();
 }
 // Tekst uit een Responses-antwoord: alle output_text-delen achter elkaar.
 function tekstVan(r) {
@@ -174,20 +184,19 @@ function maak(o) {
     instBuf = { t: nu(), i: i };
     return i;
   }
-  const tel = { gereserveerd: 0, uur: [], sleutel: 'nog_niet_gevraagd' };
+  const tel = { gereserveerd: 0, uur: [], sleutel: 'nog_niet_gevraagd', tik_bezig: false };
   function maandUsd(periode) {
-    const r = db.prepare('SELECT COALESCE(SUM(usd), 0) AS u FROM aanroep WHERE periode = ?').get(periode);
+    const r = db.prepare('SELECT COALESCE(SUM(usd), 0) AS u FROM aanroep WHERE t >= ?').get(startIso(periode));
     const b = db.prepare("SELECT COALESCE(SUM(reserve_usd), 0) AS u FROM batch WHERE klaar = 0").get();
     return { usd: rond(r.u), open_batch: rond(b.u) };
   }
-  function rij(r) {
-    try {
+  function rijRuw(r) {
       db.prepare(`INSERT INTO aanroep (t, periode, afnemer, model, batch, invoer, cache_lees, cache_schrijf, uitvoer, redeneer, usd, prijs_datum,
         prijs_onbekend, status, fout, ref, ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(new Date(nu()).toISOString(),
         periodeVan(nu(), inst().reset_dag), r.afnemer, r.model || null, r.batch ? 1 : 0, r.in || 0, r.cache || 0, r.schrijf || 0, r.uit || 0,
         r.redeneer || 0, r.usd || 0, PRIJS_DATUM, r.prijs_onbekend ? 1 : 0, r.status, kort(r.fout, 120), kort(r.ref, 80), r.ms == null ? null : r.ms);
-    } catch (e) { fout('openai-rij', e); }
   }
+  function rij(r) { try { rijRuw(r); } catch (e) { fout('openai-rij', e); } }
   async function sleutel() {
     let k = null;
     try { k = await o.sleutel(); } catch (e) { tel.sleutel = 'kluis_fout'; fout('openai-sleutel', e); return null; }
@@ -195,9 +204,21 @@ function maak(o) {
     return k || null;
   }
   // Poort: patiëntpoort (fail-closed) + geheimenfilter. → null (vrij) of 'poort' / 'geheim'
+  // Exacte waarden van de pod-geheimen (server.js geeft ze via o.geheimen; review wv2055 KAN 4): vorm-herkenning ziet hex/base64 niet
+  function podGeheimen() {
+    try { return (o.geheimen ? o.geheimen() : []).filter(function (w) { return typeof w === 'string' && w.length >= 16; }); } catch (e) { return []; }
+  }
+  function maskeerAlles(t) {
+    const m = maskeer(t);
+    let n = m.n, uit = m.tekst;
+    for (const w of podGeheimen()) while (uit.indexOf(w) >= 0) { uit = uit.split(w).join('[geheim-gemaskeerd]'); n++; }
+    return { tekst: uit, n: n };
+  }
   function poort(teksten) {
     const t = teksten.filter(function (x) { return typeof x === 'string' && x; });
     if (t.some(geheimIn)) return 'geheim';
+    const pg = podGeheimen();
+    if (t.some(function (x) { return pg.some(function (w) { return x.indexOf(w) >= 0; }); })) return 'geheim';
     try {
       const b = o.poort(t);
       if (!b || b.tegenhouden !== false) return 'poort';   // zelfde beslisregel als pdf-lezer en MailMan; geen uitslag = dicht
@@ -233,11 +254,12 @@ function maak(o) {
     if (typeof v.invoer !== 'string' || !v.invoer) return { ok: false, status: 'invoer' };
     let instr = typeof v.instructies === 'string' ? v.instructies : '';
     let gemaskeerd = 0;
-    if (v.maskeer === true) { const a = maskeer(instr), b = maskeer(v.invoer); instr = a.tekst; v = Object.assign({}, v, { invoer: b.tekst }); gemaskeerd = a.n + b.n; }
+    if (v.maskeer === true) { const a = maskeerAlles(instr), b = maskeerAlles(v.invoer); instr = a.tekst; v = Object.assign({}, v, { invoer: b.tekst }); gemaskeerd = a.n + b.n; }
     const tekens = instr.length + v.invoer.length;
     if (tekens > i.max_tekens || Math.ceil(tekens / 3) > LANG_MAX) return weiger(afnemer, model, 'te_groot');
     const maxUit = Math.min(i.max_uit, Math.max(16, Math.floor(Number(v.max_uit) || 4000)));
-    const p = poort([instr, v.invoer]);
+    if (v.schema != null && !isObj(v.schema)) return { ok: false, status: 'schema' };
+    const p = poort([instr, v.invoer].concat(isObj(v.schema) ? [JSON.stringify(v.schema)] : []));   // review wv2055 MOET 3: ook het schema
     if (p) return weiger(afnemer, model, p);
     const t0 = nu();
     tel.uur = tel.uur.filter(function (x) { return t0 - x < 3600000; });
@@ -245,14 +267,18 @@ function maak(o) {
     const sch = schatting(model, tekens, maxUit, false);
     const m = maandUsd(periodeVan(t0, i.reset_dag));
     if (m.usd + m.open_batch + tel.gereserveerd + sch > i.grens) return weiger(afnemer, model, 'grens');
+    // Reserveren meteen na de controle, zonder await ertussen (review wv2055 MOET 2); vrijgeven in finally
+    tel.uur.push(t0); tel.gereserveerd += sch;
+    let verstuurd = false;
+    try {
     const sl = await sleutel();
     if (!sl) return weiger(afnemer, model, 'geen_sleutel');
-    tel.uur.push(t0); tel.gereserveerd += sch;
     const body = { model: model, input: v.invoer, max_output_tokens: maxUit, store: false };
     if (instr) body.instructions = instr;
     if (['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].indexOf(v.effort) >= 0) body.reasoning = { effort: v.effort };
     if (isObj(v.schema)) body.text = { format: { type: 'json_schema', name: 'antwoord', strict: true, schema: v.schema } };
     try {
+      verstuurd = true;
       const r = await api('POST', '/v1/responses', body, sl, Math.min(600000, Number(v.ms) || i.ms));
       const k = kosten(r && r.model || model, r && r.usage, false);
       const tekst = tekstVan(r);
@@ -264,9 +290,14 @@ function maak(o) {
       return uit;
     } catch (e) {
       const st = e.status ? 'api_' + e.status : 'fout';
-      rij({ afnemer: afnemer, model: model, status: st, fout: e.soort || kort(e.name, 40), ms: nu() - t0 });
+      // Time-out, verbroken verbinding of 5xx nadat het verzoek weg was: OpenAI kan het toch rekenen en met store:false is het niet terug te
+      // vinden → de schatting boeken, gevlagd als geschat (review wv2055 ZOU 2). Een 4xx rekent OpenAI niet.
+      const geschat = verstuurd && (!e.status || e.status >= 500);
+      rij({ afnemer: afnemer, model: model, status: st, fout: (geschat ? 'geschat; ' : '') + (e.soort || kort(e.name, 40)), ms: nu() - t0,
+        usd: geschat ? sch : 0, prijs_onbekend: geschat });
       if (e.status === 401 || e.status === 403) tel.sleutel = 'geweigerd';
       return { ok: false, status: st, soort: e.soort || null };
+    }
     } finally { tel.gereserveerd = Math.max(0, rond(tel.gereserveerd - sch)); }
   }
 
@@ -295,7 +326,7 @@ function maak(o) {
       if (!id || ids.has(id) || typeof x.invoer !== 'string' || !x.invoer) return { ok: false, status: 'verzoek' };
       ids.add(id);
       const tekens = instr.length + x.invoer.length;
-      if (tekens > i.max_tekens || Math.ceil(tekens / 3) > LANG_MAX || poort([x.invoer])) { geweigerd.push(id); continue; }
+      if (tekens > i.max_tekens || Math.ceil(tekens / 3) > LANG_MAX || poort([instr, x.invoer])) { geweigerd.push(id); continue; }
       const body = { model: model, input: x.invoer, max_output_tokens: maxUit, store: false };
       if (instr) body.instructions = instr;
       if (['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].indexOf(b.effort) >= 0) body.reasoning = { effort: b.effort };
@@ -307,10 +338,12 @@ function maak(o) {
     sch = rond(sch);
     const m = maandUsd(periodeVan(nu(), i.reset_dag));
     if (m.usd + m.open_batch + tel.gereserveerd + sch > i.grens) return weiger(afnemer, model, 'grens', { batch: 1 });
-    const sl = await sleutel();
-    if (!sl) return weiger(afnemer, model, 'geen_sleutel', { batch: 1 });
-    let bestand = null;
+    // Reserveren meteen na de controle (review wv2055 MOET 2); na de INSERT telt de batchrij zelf (open_batch), dus vrijgeven in finally
+    tel.gereserveerd += sch;
+    let bestand = null, btId = null, sl = null;
     try {
+      sl = await sleutel();
+      if (!sl) return weiger(afnemer, model, 'geen_sleutel', { batch: 1 });
       const grens = '----socev' + crypto.randomBytes(12).toString('hex');
       const body = Buffer.concat([Buffer.from('--' + grens + '\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nbatch\r\n--' + grens +
         '\r\nContent-Disposition: form-data; name="file"; filename="socev.jsonl"\r\nContent-Type: application/jsonl\r\n\r\n'),
@@ -325,6 +358,7 @@ function maak(o) {
       bestand = f.id;
       const bt = await api('POST', '/v1/batches', { input_file_id: f.id, endpoint: '/v1/responses', completion_window: '24h' }, sl, 60000);
       if (!bt || !bt.id) throw new Error('batch zonder id');
+      btId = String(bt.id);
       db.prepare('INSERT INTO batch (id, afnemer, model, aantal, geweigerd, ingediend, status, reserve_usd, invoer_bestand) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(kort(bt.id, 80), afnemer, model, regels.length, geweigerd.length, new Date(nu()).toISOString(), kort(bt.status || 'validating', 30), sch, f.id);
       log('batch ' + kort(bt.id, 80) + ' afnemer=' + afnemer + ' model=' + model + ' n=' + regels.length + ' reserve=' + sch);
@@ -332,13 +366,22 @@ function maak(o) {
     } catch (e) {
       const st = e.status ? 'api_' + e.status : 'fout';
       rij({ afnemer: afnemer, model: model, batch: 1, status: st, fout: e.soort || kort(e.name, 40) });
+      // Batch wel aangemaakt maar niet vastgelegd: annuleren, anders draait hij ongeteld (review wv2055 KAN 5)
+      if (btId) api('POST', '/v1/batches/' + encodeURIComponent(btId) + '/cancel', {}, sl, 30000).catch(function (x) { fout('openai-batch-annuleer', x); });
       if (bestand) api('DELETE', '/v1/files/' + encodeURIComponent(bestand), null, sl, 30000).catch(function () {});
       return { ok: false, status: st };
-    }
+    } finally { tel.gereserveerd = Math.max(0, rond(tel.gereserveerd - sch)); }
   }
 
-  // Open batches nalopen (server.js: elke 10 min). Klaar → antwoorden naar <dir>/batch/<id>.jsonl, verbruik per regel, bestanden bij OpenAI weg.
+  // Open batches nalopen (server.js: elke 10 min). Klaar → eerst alles ophalen, dan in één transactie de verbruiksrijen, het antwoordbestand
+  // (<dir>/batch/<id>.jsonl, 0600) en klaar=1; pas daarna de bestanden bij OpenAI wissen. Mislukt iets, dan blijft de batch open en telt
+  // niets dubbel (review wv2055 MOET 1). Eén tik tegelijk (vlag tik_bezig).
   async function batchTik() {
+    if (tel.tik_bezig) return { bezig: true };
+    tel.tik_bezig = true;
+    try { return await batchTikBinnen(); } finally { tel.tik_bezig = false; }
+  }
+  async function batchTikBinnen() {
     const open = db.prepare('SELECT * FROM batch WHERE klaar = 0 ORDER BY ingediend').all();
     if (!open.length) return { open: 0 };
     const sl = await sleutel();
@@ -349,33 +392,40 @@ function maak(o) {
         const s = await api('GET', '/v1/batches/' + encodeURIComponent(b.id), null, sl, 30000);
         const st = kort(s && s.status, 30) || 'onbekend';
         if (['completed', 'failed', 'expired', 'cancelled'].indexOf(st) < 0) { db.prepare('UPDATE batch SET status = ? WHERE id = ?').run(st, b.id); continue; }
-        let usd = 0, klaar = 0, mislukt = 0;
-        const uitRegels = [];
+        const teksten = [], wis = [];
         for (const veld of ['output_file_id', 'error_file_id']) {
           const fid = s && s[veld];
           if (!fid) continue;
           const t = await api('GET', '/v1/files/' + encodeURIComponent(fid) + '/content', null, sl, 300000);
-          for (const r of String(typeof t === 'string' ? t : JSON.stringify(t)).split('\n')) {
-            if (!r.trim()) continue;
-            let j; try { j = JSON.parse(r); } catch (e) { mislukt++; continue; }
-            const resp = j && j.response, lijf = resp && resp.body;
-            if (resp && resp.status_code === 200 && isObj(lijf)) {
-              const k = kosten(lijf.model || b.model, lijf.usage, true);
-              usd += k.usd; klaar++;
-              rij(Object.assign({ afnemer: b.afnemer, model: kort(lijf.model || b.model, 60), batch: 1, status: lijf.status === 'incomplete' ? 'onvolledig' : 'ok', ref: b.id }, k));
-              uitRegels.push(JSON.stringify({ id: kort(j.custom_id, 64), ok: true, tekst: tekstVan(lijf), onvolledig: lijf.status === 'incomplete' }));
-            } else {
-              mislukt++;
-              uitRegels.push(JSON.stringify({ id: kort(j && j.custom_id, 64), ok: false, status: resp && resp.status_code || null }));
-            }
+          teksten.push(typeof t === 'string' ? t : JSON.stringify(t));
+          wis.push(fid);
+        }
+        const rijen = [], uitRegels = [];
+        let usd = 0, mislukt = 0;
+        for (const r of teksten.join('\n').split('\n')) {
+          if (!r.trim()) continue;
+          let j; try { j = JSON.parse(r); } catch (e) { mislukt++; continue; }
+          const resp = j && j.response, lijf = resp && resp.body;
+          if (resp && resp.status_code === 200 && isObj(lijf)) {
+            const k = kosten(lijf.model || b.model, lijf.usage, true);
+            usd += k.usd;
+            rijen.push(Object.assign({ afnemer: b.afnemer, model: kort(lijf.model || b.model, 60), batch: 1, status: lijf.status === 'incomplete' ? 'onvolledig' : 'ok', ref: b.id }, k));
+            uitRegels.push(JSON.stringify({ id: kort(j.custom_id, 64), ok: true, tekst: tekstVan(lijf), onvolledig: lijf.status === 'incomplete' }));
+          } else {
+            mislukt++;
+            uitRegels.push(JSON.stringify({ id: kort(j && j.custom_id, 64), ok: false, status: resp && resp.status_code || null }));
           }
-          api('DELETE', '/v1/files/' + encodeURIComponent(fid), null, sl, 30000).catch(function () {});
         }
         const pad = path.join(BATCHMAP, b.id.replace(/[^A-Za-z0-9_-]/g, '') + '.jsonl');
-        fs.writeFileSync(pad, uitRegels.join('\n') + (uitRegels.length ? '\n' : ''), { mode: 0o600 });
-        if (b.invoer_bestand) api('DELETE', '/v1/files/' + encodeURIComponent(b.invoer_bestand), null, sl, 30000).catch(function () {});
-        db.prepare('UPDATE batch SET status = ?, klaar = 1, afgerond = ?, usd = ?, mislukt = ? WHERE id = ?').run(st, new Date(nu()).toISOString(), rond(usd), mislukt, b.id);
-        log('batch ' + b.id + ' ' + st + ' klaar=' + klaar + ' mislukt=' + mislukt + ' usd=' + rond(usd));
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          for (const r of rijen) rijRuw(r);
+          fs.writeFileSync(pad, uitRegels.join('\n') + (uitRegels.length ? '\n' : ''), { mode: 0o600 });
+          db.prepare('UPDATE batch SET status = ?, klaar = 1, afgerond = ?, usd = ?, mislukt = ? WHERE id = ? AND klaar = 0').run(st, new Date(nu()).toISOString(), rond(usd), mislukt, b.id);
+          db.exec('COMMIT');
+        } catch (e) { try { db.exec('ROLLBACK'); } catch (x) {} throw e; }
+        for (const fid of wis.concat(b.invoer_bestand ? [b.invoer_bestand] : [])) api('DELETE', '/v1/files/' + encodeURIComponent(fid), null, sl, 30000).catch(function () {});
+        log('batch ' + b.id + ' ' + st + ' klaar=' + rijen.length + ' mislukt=' + mislukt + ' usd=' + rond(usd));
         u.klaar++;
       } catch (e) { u.fout++; fout('openai-batch', e); }
     }

@@ -16049,6 +16049,16 @@ async function openaiSleutel() {
   openaiSleutelCache = { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 };
   return openaiSleutelCache.w;
 }
+// Exacte waarden van de pod-geheimen in de omgeving (plus de OpenAI-sleutel zelf als hij in het geheugen staat): een tekst die er één bevat
+// gaat niet naar OpenAI, of wordt gemaskeerd (review wv2055 KAN 4). Alleen namen die naar een geheim klinken, waarden ≥ 16 tekens.
+const OPENAI_GEHEIM_NAAM = /(SECRET|TOKEN|(^|_)KEY($|_)|API_KEY|PASSWORD|WACHTWOORD|SLEUTEL|SERVICE_ROLE|(^|_)PAT($|_)|COOKIE)/i;   // niet PATH
+function openaiPodGeheimen() {
+  const uit = [];
+  for (const k of Object.keys(process.env)) if (OPENAI_GEHEIM_NAAM.test(k) && typeof process.env[k] === 'string' && process.env[k].length >= 16) uit.push(process.env[k]);
+  if (openaiSleutelCache && openaiSleutelCache.w) uit.push(openaiSleutelCache.w);
+  if (SECRET && SECRET.length >= 16) uit.push(SECRET);
+  return uit;
+}
 let openaiPoortMod;
 function openaiPoort(teksten) {
   if (openaiPoortMod === undefined) openaiPoortMod = require(path.join(__dirname, 'intake', 'patientpoort.js'));
@@ -16060,6 +16070,7 @@ const openaiHulp = (function () {
   try {
     fs.mkdirSync(OPENAI_DIR, { recursive: true, mode: 0o700 });
     return require(p).maak({ dir: OPENAI_DIR, sleutel: openaiSleutel, poort: openaiPoort, api: SERVER_ECHT ? null : process.env.OPENAI_TOETS_API,
+      geheimen: openaiPodGeheimen,
       log: function (r) { schrijfLog(nu() + ' openai ' + r); }, fout: logError });
   } catch (e) { logError('openai-hulp', e); return null; }
 })();
@@ -16073,7 +16084,7 @@ function openaiIsPad(req) { const p = reqPath(req); return p === '/openai/vraag'
 function openaiRoute(req, res) {
   const p = reqPath(req);
   if (req.method !== 'POST') { req.resume(); return berichtStuur(res, 405, { ok: false, fout: 'alleen POST' }); }
-  berichtBody(req, p === '/openai/batch' ? 40 * 1024 * 1024 : 4 * 1024 * 1024, function (fout, d) {
+  berichtBody(req, p === '/openai/batch' ? 16 * 1024 * 1024 : 4 * 1024 * 1024, function (fout, d) {   // 16 MB: de poort draait synchroon (± 156 ms/MB; review KAN 3)
     if (fout === 'afgebroken') return;
     if (fout === 'te-groot') return berichtStuur(res, 413, { ok: false, fout: 'verzoek te groot' });
     if (fout || !d) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige json' });

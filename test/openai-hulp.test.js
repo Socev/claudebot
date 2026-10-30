@@ -146,7 +146,7 @@ test('gestructureerde uitvoer: schema mee, json terug', async function () {
 test('zachte grens: 80 % van het tegoed, met de schatting van deze aanroep', async function () {
   const n = await nepApi(); const t = nieuw(n.url, { aan: true, tegoed_usd: 10 });
   assert.strictEqual(t.h.stand().grens_usd, 8);
-  n.antwoord = { id: 'r', status: 'completed', model: 'gpt-5.5', output: [], usage: { input_tokens: 1e6, output_tokens: 1e5 } };   // $5 + $3
+  n.antwoord = { id: 'r', status: 'completed', model: 'gpt-5.5', output: [], usage: { input_tokens: 1e5, output_tokens: 25e4 } };   // $0,50 + $7,50
   assert.strictEqual((await t.h.vraag({ afnemer: 'proef', model: 'gpt-5.5', invoer: 'x' })).ok, true);
   assert.strictEqual(t.h.stand().maand_usd, 8);
   assert.strictEqual((await t.h.vraag({ afnemer: 'proef', model: 'gpt-5-nano', invoer: 'x' })).status, 'grens');
@@ -196,6 +196,80 @@ test('batch: poort per verzoek, indienen, reservering telt mee, ophalen tegen ba
   assert.strictEqual(fs.statSync(pad).mode & 0o777, 0o600);
   await new Promise(function (ok) { setTimeout(ok, 100); });
   assert.ok(n.gewist.indexOf('/v1/files/file-out') >= 0 && n.gewist.indexOf('/v1/files/file-in0') >= 0);
+  n.srv.close(); t.h.sluit();
+});
+
+test('review MOET 1: batch-afronding atomair; mislukt foutbestand = niets geteld, volgende tik telt één keer; één tik tegelijk', async function () {
+  const n = await nepApi(); const t = nieuw(n.url, { aan: true, tegoed_usd: 100 });
+  assert.strictEqual((await t.h.batchIndienen({ afnemer: 'proef', model: 'gpt-5-nano', verzoeken: [{ id: 'a', invoer: 'x' }, { id: 'b', invoer: 'y' }] })).ok, true);
+  n.batches.batch_1.status = 'completed'; n.batches.batch_1.output_file_id = 'file-out'; n.batches.batch_1.error_file_id = 'file-stuk';   // 404 bij ophalen
+  const u1 = await t.h.batchTik();
+  assert.strictEqual(u1.fout, 1); assert.strictEqual(t.h.stand().maand_usd, 0); assert.ok(t.h.stand().open_batch_usd > 0);
+  assert.ok(n.gewist.length === 0, 'niets gewist zolang de batch niet klaar is');
+  delete n.batches.batch_1.error_file_id;
+  const [u2, u3] = await Promise.all([t.h.batchTik(), t.h.batchTik()]);
+  assert.deepStrictEqual(u3, { bezig: true }); assert.strictEqual(u2.klaar, 1);
+  assert.strictEqual(t.h.stand().maand_usd, 0.45); assert.strictEqual(t.h.stand().open_batch_usd, 0);
+  assert.deepStrictEqual(await t.h.batchTik(), { open: 0 });
+  assert.strictEqual(t.h.stand().maand_usd, 0.45);
+  n.srv.close(); t.h.sluit();
+});
+
+test('review MOET 2: gelijktijdige vragen reserveren vóór de eerste await', async function () {
+  const n = await nepApi();
+  let los; const wacht = new Promise(function (ok) { los = ok; });
+  const t = nieuw(n.url, { aan: true, grens_usd: 0.05 }, { sleutel: async function () { await wacht; return 'nep-sleutel-123'; } });
+  const a = t.h.vraag({ afnemer: 'proef', model: 'gpt-5.4-mini', invoer: 'x', max_uit: 8000 });   // schatting ± $0,036
+  const b = t.h.vraag({ afnemer: 'proef', model: 'gpt-5.4-mini', invoer: 'x', max_uit: 8000 });
+  los();
+  const r = await Promise.all([a, b]);
+  assert.deepStrictEqual(r.map(function (x) { return x.ok ? 'ok' : x.status; }).sort(), ['grens', 'ok']);
+  assert.strictEqual(t.h.health().gereserveerd_usd, 0);
+  n.srv.close(); t.h.sluit();
+});
+
+test('review MOET 3 en ZOU 1: schema en batchinstructies + verzoek samen door de poort', async function () {
+  const n = await nepApi(); const t = nieuw(n.url, { aan: true });
+  const sch = { type: 'object', description: PATIENT, properties: { a: { type: 'string' } }, required: ['a'], additionalProperties: false };
+  assert.strictEqual((await t.h.vraag({ afnemer: 'proef', invoer: 'x', schema: sch })).status, 'poort');
+  assert.strictEqual((await t.h.vraag({ afnemer: 'proef', invoer: 'x', schema: 'tekst' })).status, 'schema');
+  let gezien = null;
+  const t2 = nieuw(n.url, { aan: true }, { poort: function (tk) { gezien = tk; return { tegenhouden: false, soorten: [] }; } });
+  await t2.h.batchIndienen({ afnemer: 'proef', model: 'gpt-5-nano', instructies: 'INSTR', verzoeken: [{ id: 'a', invoer: 'VERZOEK' }] });
+  assert.deepStrictEqual(gezien, ['INSTR', 'VERZOEK']);
+  assert.strictEqual(n.verzoeken.length, 2);   // alleen de batch van t2 (upload + aanmaken)
+  n.srv.close(); t.h.sluit(); t2.h.sluit();
+});
+
+test('review ZOU 2: time-out na versturen boekt de schatting (geschat); 4xx boekt niets', async function () {
+  const traag = http.createServer(function () { /* antwoordt nooit */ });
+  await new Promise(function (ok) { traag.listen(0, '127.0.0.1', ok); });
+  const t = nieuw('http://127.0.0.1:' + traag.address().port, { aan: true });
+  const r = await t.h.vraag({ afnemer: 'proef', model: 'gpt-5-nano', invoer: 'x', max_uit: 1000, ms: 200 });
+  assert.strictEqual(r.status, 'fout');
+  assert.strictEqual(t.h.stand().maand_usd, H._intern.schatting('gpt-5-nano', 1, 1000, false));
+  traag.closeAllConnections(); traag.close(); t.h.sluit();
+  const n = await nepApi(); n.status = 400; const t2 = nieuw(n.url, { aan: true });
+  await t2.h.vraag({ afnemer: 'proef', invoer: 'x' });
+  assert.strictEqual(t2.h.stand().maand_usd, 0);
+  n.srv.close(); t2.h.sluit();
+});
+
+test('review KAN 1/2/4: lange context gevlagd en dubbel; resetdag wijzigen houdt de telling; exacte pod-geheimen', async function () {
+  const k = H._intern.kosten('gpt-5.5', { input_tokens: 300000, output_tokens: 0 }, false);
+  assert.strictEqual(k.prijs_onbekend, true); assert.strictEqual(k.usd, 2 * 0.3 * 5);
+  const n = await nepApi();
+  const t = nieuw(n.url, { aan: true }, { geheimen: function () { return ['abcdef0123456789abcdef0123456789']; } });
+  assert.ok((await t.h.vraag({ afnemer: 'proef', invoer: 'x' })).ok);
+  const voor = t.h.stand().maand_usd;
+  fs.writeFileSync(path.join(t.dir, 'openai.json'), JSON.stringify({ aan: true, reset_dag: 2 }));
+  const t3 = nieuw(n.url, null, {}); t3.h.sluit();   // (alleen om een tweede module te laten zien dat de inst per minuut herleest)
+  assert.strictEqual(t.h.stand().maand_usd, voor);
+  assert.strictEqual((await t.h.vraag({ afnemer: 'proef', invoer: 'hex abcdef0123456789abcdef0123456789 erin' })).status, 'geheim');
+  const m = await t.h.vraag({ afnemer: 'proef', invoer: 'hex abcdef0123456789abcdef0123456789 erin', maskeer: true });
+  assert.strictEqual(m.ok, true); assert.strictEqual(m.gemaskeerd, 1);
+  assert.ok(n.verzoeken[n.verzoeken.length - 1].body.indexOf('abcdef0123456789abcdef') < 0);
+  assert.strictEqual(H._intern.periodeVan(Date.parse('2026-10-30T12:00:00Z'), 1), '2026-10-01');
   n.srv.close(); t.h.sluit();
 });
 
