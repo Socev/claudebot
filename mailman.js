@@ -169,6 +169,8 @@ const AANBOD_EIGEN_MS = 3600 * 1000;               // aangeboden maar (nog) niet
 const VANGNET_MS = 3 * 24 * 3600 * 1000;           // Twijfel zonder keuze: na 3 dagen INTAKE erbij (TWIJFEL blijft)
 const ROUTE_POGINGEN = 3;                          // wachtrijlabel weg zonder bewijs in Intake: hooguit 3 keer opnieuw in de wachtrij
 const DRAAD_BIJLAGE_MAX = 3, OVERSTAP_MAX = 40, OVERSTAP_POGINGEN = 3;
+const AANBOD_POGINGEN = 5;                         // keuze/vangnet/route/intrek/opruim: hooguit 5 keer mislukt aangeboden (review B8a KAN 9)
+const WEG_VERDACHT = 10;                           // een volledige lijst die > 10 én > de helft van de bekende labels mist = verdacht, telt als afgekapt (review B8a ZOU 7)
 const DRAAD_BIJLAGE_SOORTEN = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/msword'];
 
 function isObj(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
@@ -1096,6 +1098,15 @@ function maak(o) {
     let lab = []; try { lab = JSON.parse(b.labels || '[]'); } catch (e) { lab = []; }
     return b.reden === 'markering' || (Array.isArray(lab) && lab.some(function (l) { return MARKERINGS_LABELS.includes(l); }));
   }
+  // review B8a MOET 2: verzonden mail en concepten nooit routeren of labelen, ook als n8n ze toch in een lijst zet (grens in pod én n8n)
+  function buitenRij(b) {
+    let lab = []; try { lab = JSON.parse(b.labels || '[]'); } catch (e) { lab = []; }
+    return b.stap === 'buiten' || (Array.isArray(lab) && lab.some(function (l) { return l === 'SENT' || l === 'DRAFT'; }));
+  }
+  // review B8a KAN 9: een actie die steeds mislukt (of nooit teruggemeld wordt) niet eindeloos opnieuw aanbieden
+  function teVaak(pv, id, soort) {
+    return db.prepare("SELECT count(*) n FROM aanbod WHERE postvak = ? AND gmail_id = ? AND soort = ? AND (uitkomst = 'fout' OR (uitkomst IS NULL AND tijd < ?))").get(pv, id, soort, new Date(nu() - AANBOD_EIGEN_MS).toISOString()).n >= AANBOD_POGINGEN;
+  }
   function vlagRij(b) {
     const x = [b.labels_plan, b.labels, b.labels_gezet].map(function (j) { return String(j || ''); }).join(' ');
     return x.includes('"TODO"') || x.includes('"ACTIE_DS"');
@@ -1141,7 +1152,7 @@ function maak(o) {
     const p = postvak(r.postvak), set = l2Live(p);
     if (!set) return { status: 200, j: { ok: true, actief: false } };
     l2Start(p);
-    const pv = p.id, tel = { labels: 0, afgekapt: 0, onbekend: 0, david_erbij: 0, david_eraf: 0, routes_nieuw: 0, ingetrokken: 0, terug_gepland: 0, verwerkt: 0, correcties: 0 };
+    const pv = p.id, tel = { labels: 0, afgekapt: 0, onbekend: 0, verdacht: 0, verzonden: 0, keuze_gmail: 0, david_erbij: 0, david_eraf: 0, routes_nieuw: 0, ingetrokken: 0, terug_gepland: 0, verwerkt: 0, correcties: 0 };
     const lijst = {};
     for (const x of (Array.isArray(d.labels) ? d.labels : []).slice(0, 20)) {
       if (!isObj(x)) continue;
@@ -1151,6 +1162,7 @@ function maak(o) {
       if (x.volledig !== true || !ber || ber.length > L2_LIJST_MAX || lijst[naam]) { tel.afgekapt++; continue; }
       const m = new Map();
       if (!ber.every(function (y) { if (!isObj(y) || !ID_RE.test(String(y.gmail_id || ''))) return false; m.set(String(y.gmail_id), ID_RE.test(String(y.thread_id || '')) ? String(y.thread_id) : null); return true; })) { tel.afgekapt++; continue; }
+      for (const id of Array.from(m.keys())) { const b = besluitVan(p.id, id); if (b && buitenRij(b)) { m.delete(id); tel.verzonden++; } }   // review B8a MOET 2
       lijst[naam] = m; tel.labels++;
     }
     const instel = instelVan(p);
@@ -1158,25 +1170,34 @@ function maak(o) {
     tx(function () {
       for (const naam of Object.keys(lijst)) {
         const S = lijst[naam];
+        // weg alleen beoordelen voor mail met een bekende ontvangsttijd binnen het venster
+        const bekend = db.prepare('SELECT * FROM label_staat WHERE postvak = ? AND label = ? AND weg IS NULL AND gezet IS NOT NULL').all(pv, naam)
+          .filter(function (st) { const b = besluitVan(pv, st.gmail_id), ont = b ? Date.parse(b.ontvangen || b.aangemaakt) : NaN; return Number.isFinite(ont) && ont >= venster; });
+        const weg = bekend.filter(function (st) { return !S.has(st.gmail_id); });
+        if (weg.length > WEG_VERDACHT && weg.length * 2 > bekend.length) { tel.verdacht++; delete lijst[naam]; continue; }   // review B8a ZOU 7
         const basis = !db.prepare('SELECT 1 FROM labelbasis WHERE postvak = ? AND label = ?').get(pv, naam);
         for (const [id, th] of S) {
           const st = lsGet(pv, id, naam);
           if (st && !st.weg) { db.prepare('UPDATE label_staat SET gezien = ?, gezet = COALESCE(gezet, ?) WHERE id = ?').run(iso(), iso(), st.id); continue; }
           const eigen = aanbodEigen(pv, id, naam, 'erbij');
-          const bron = eigen ? (eigen === 'keuze' ? 'keuze' : 'mailman') : (basis ? 'voor' : 'david');
+          // review B8a ZOU 7: een label dat terugkomt houdt zijn oude bron (tenzij MailMan het zelf weghaalde: dan zette David het terug)
+          const oud = st && st.bron !== 'david' && st.weg_door !== 'mailman' ? st.bron : null;
+          const bron = eigen ? (eigen === 'keuze' ? 'keuze' : 'mailman') : (oud || (basis ? 'voor' : 'david'));
           lsZet(pv, id, th, naam, bron);
           if (bron !== 'david') continue;
           tel.david_erbij++;
           if (!L2_CATEGORIE.includes(naam)) continue;
           const b = besluitVan(pv, id), plan = b ? plan2Rij(b, instel) : { hoofd: null, labels: [] };
+          // review B8a ZOU 4: een categorie die David in Gmail op Twijfel zet is zijn keuze (Werkstroom dicht, TWIJFEL eraf via de keuze-tak)
+          if (b && b.stroom === 'twijfel' && !b.juist && naam !== 'TWIJFEL') {
+            db.prepare('UPDATE besluit SET juist = ?, juist_regel = NULL, juist_tijd = ? WHERE id = ? AND juist IS NULL').run(naam === 'INTAKE' ? 'intake' : (naam === 'FACTUUR' ? 'factuur' : 'info'), iso(), b.id);
+            tel.keuze_gmail++;
+          }
           if (plan.labels.includes(naam)) continue;   // David zette terug wat MailMan voorstelde: geen les
           tel.correcties += Number(db.prepare('INSERT OR IGNORE INTO correctie (postvak, gmail_id, afzender_domein, van, naar, tijd) VALUES (?, ?, ?, ?, ?, ?)')
             .run(pv, id, b ? b.afzender_domein || null : null, plan.hoofd, naam, iso()).changes);
         }
-        for (const st of db.prepare('SELECT * FROM label_staat WHERE postvak = ? AND label = ? AND weg IS NULL AND gezet IS NOT NULL').all(pv, naam)) {
-          if (S.has(st.gmail_id)) continue;
-          const b = besluitVan(pv, st.gmail_id), ont = b ? Date.parse(b.ontvangen || b.aangemaakt) : NaN;
-          if (!Number.isFinite(ont) || ont < venster) continue;
+        for (const st of weg) {
           const door = aanbodEigen(pv, st.gmail_id, naam, 'eraf') ? 'mailman' : (naam === WACHTRIJ ? 'elders' : 'david');
           lsWeg(pv, st.gmail_id, naam, door);
           if (door === 'david') tel.david_eraf++;
@@ -1254,7 +1275,7 @@ function maak(o) {
       - db.prepare("SELECT count(*) n FROM aanbod WHERE postvak = ? AND uitkomst IS NULL AND tijd >= ? AND instr(erbij, ?) > 0").get(pv, new Date(nu() - AANBOD_EIGEN_MS).toISOString(), '"' + WACHTRIJ + '"').n;
     const acties = new Map(), aanbod = [], gelezenAangeboden = [], archiefPogingen = [], af = [];
     let wacht = 0;
-    const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, overstap: 0, archief: 0 };
+    const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, opruim: 0, overstap: 0, archief: 0 };
     const vol = function () { return acties.size >= LABEL_ACTIES_MAX; };
     const mag = function (id, l, na) { return !!set.ids[l] && !lsHeeft(pv, id, l) && !lsDavidWeg(pv, id, l, na); };
     const voeg = function (id, soort, erbij, eraf) {
@@ -1273,7 +1294,7 @@ function maak(o) {
       const plan = plan2Rij(b, instel), eff = stroomEffectief(b), gem = gemarkeerdRij(b);
       let lab = []; try { lab = JSON.parse(b.labels || '[]'); } catch (e) { lab = []; }
       const erbij = plan.labels.filter(function (l) { return mag(b.gmail_id, l) && !(Array.isArray(lab) && lab.includes(l)); });
-      const naarIntake = (erbij.includes('INTAKE') || lsHeeft(pv, b.gmail_id, 'INTAKE')) && intakeMag && !gem && !routeGet(pv, b.gmail_id);
+      const naarIntake = (erbij.includes('INTAKE') || lsHeeft(pv, b.gmail_id, 'INTAKE')) && intakeMag && !gem && !routeGet(pv, b.gmail_id) && !inIntake(pv, [b.gmail_id]).size;
       const wr = naarIntake && wachtrijErbij(erbij);
       const sa = st[eff] || {};
       const bt = b.besloten || b.aangemaakt;
@@ -1287,13 +1308,15 @@ function maak(o) {
     // keuze (Twijfel die al een label had; zonder label nam de besluit-tak de keuze al mee)
     for (const b of db.prepare("SELECT * FROM besluit WHERE postvak = ? AND inhaal = 0 AND status = 'klaar' AND stroom = 'twijfel' AND juist IN ('intake', 'factuur', 'info') AND labels_gezet IS NOT NULL AND keuze_tijd IS NULL AND namen_weg IS NULL ORDER BY juist_tijd, id LIMIT 200").all(pv)) {
       if (vol()) break;
+      if (buitenRij(b) || teVaak(pv, b.gmail_id, 'keuze')) continue;
       const rt = routeGet(pv, b.gmail_id);
       if (b.juist_regel && rt && rt.status === 'verwerkt') { af.push({ k: 'keuze', id: b.id }); continue; }   // juist_regel alleen voor post die nog niet verwerkt is
       const l = L2_HOOFD[b.juist], erbij = [], eraf = [];
       const anders = L2_CATEGORIE.some(function (c) { return c !== 'OVERIG' && c !== 'TWIJFEL' && lsHeeft(pv, b.gmail_id, c); });
       if (!(l === 'OVERIG' && anders) && mag(b.gmail_id, l, b.juist_tijd)) erbij.push(l);
       if (lsHeeft(pv, b.gmail_id, 'TWIJFEL')) eraf.push('TWIJFEL');
-      if (l === 'INTAKE' && erbij.length && intakeMag && !gemarkeerdRij(b) && (!rt || rt.status !== 'verwerkt')) wachtrijErbij(erbij);
+      // review B8a ZOU 6: wat al in Intake staat krijgt geen wachtrijlabel (de route wordt dan meteen verwerkt)
+      if (l === 'INTAKE' && erbij.length && intakeMag && !gemarkeerdRij(b) && (!rt || rt.status !== 'verwerkt') && !inIntake(pv, [b.gmail_id]).size) wachtrijErbij(erbij);
       if (!erbij.length && !eraf.length) { af.push({ k: 'keuze', id: b.id }); continue; }
       voeg(b.gmail_id, 'keuze', erbij, eraf);
     }
@@ -1303,9 +1326,10 @@ function maak(o) {
       if (vol()) break;
       // INTAKE staat al, David haalde het weg, of David koos zelf in Gmail een categorie (dat is ook een keuze)
       const koos = db.prepare("SELECT 1 FROM label_staat WHERE postvak = ? AND gmail_id = ? AND bron = 'david' AND weg IS NULL AND label IN ('" + L2_CATEGORIE.filter(function (c) { return c !== 'TWIJFEL'; }).join("', '") + "') LIMIT 1").get(pv, b.gmail_id);
-      if (!mag(b.gmail_id, 'INTAKE') || koos) { af.push({ k: 'vangnet', id: b.id }); continue; }
+      if (!mag(b.gmail_id, 'INTAKE') || koos || buitenRij(b)) { af.push({ k: 'vangnet', id: b.id }); continue; }
+      if (teVaak(pv, b.gmail_id, 'vangnet')) continue;
       const erbij = ['INTAKE'];
-      if (intakeMag && !gemarkeerdRij(b) && !routeGet(pv, b.gmail_id)) wachtrijErbij(erbij);
+      if (intakeMag && !gemarkeerdRij(b) && !routeGet(pv, b.gmail_id) && !inIntake(pv, [b.gmail_id]).size) wachtrijErbij(erbij);
       voeg(b.gmail_id, 'vangnet', erbij, []);
     }
     // route: gepland → wachtrij (oudste eerst)
@@ -1313,7 +1337,7 @@ function maak(o) {
       for (const rt of db.prepare("SELECT * FROM route WHERE postvak = ? AND status = 'gepland' AND pogingen < ? ORDER BY aangemaakt, id LIMIT 200").all(pv, ROUTE_POGINGEN)) {
         if (vol() || acties.has(rt.gmail_id)) continue;
         const b = besluitVan(pv, rt.gmail_id);
-        if ((b && gemarkeerdRij(b)) || !lsHeeft(pv, rt.gmail_id, 'INTAKE') || lsHeeft(pv, rt.gmail_id, WACHTRIJ)) continue;
+        if ((b && (gemarkeerdRij(b) || buitenRij(b))) || !lsHeeft(pv, rt.gmail_id, 'INTAKE') || lsHeeft(pv, rt.gmail_id, WACHTRIJ) || teVaak(pv, rt.gmail_id, 'route')) continue;
         if (ruimte <= 0) { wacht++; continue; }
         ruimte--;
         voeg(rt.gmail_id, 'route', [WACHTRIJ], []);
@@ -1322,21 +1346,29 @@ function maak(o) {
     // intrekken
     for (const rt of db.prepare("SELECT r.gmail_id FROM route r JOIN label_staat s ON s.postvak = r.postvak AND s.gmail_id = r.gmail_id AND s.label = ? WHERE r.postvak = ? AND r.status = 'ingetrokken' AND s.weg IS NULL AND s.gezet IS NOT NULL AND s.bron IN ('mailman', 'keuze') LIMIT 100").all(WACHTRIJ, pv)) {
       if (vol()) break;
-      voeg(rt.gmail_id, 'intrek', [], [WACHTRIJ]);
+      if (!teVaak(pv, rt.gmail_id, 'intrek')) voeg(rt.gmail_id, 'intrek', [], [WACHTRIJ]);
+    }
+    // opruim: David koos in Gmail een andere categorie op mail die MailMan OVERIG gaf → OVERIG eraf (ontwerp § B8.2; review B8a ZOU 4)
+    for (const x of db.prepare("SELECT o.gmail_id FROM label_staat o WHERE o.postvak = ? AND o.label = 'OVERIG' AND o.weg IS NULL AND o.gezet IS NOT NULL AND o.bron IN ('mailman', 'voor') AND EXISTS (SELECT 1 FROM label_staat c WHERE c.postvak = o.postvak AND c.gmail_id = o.gmail_id AND c.bron = 'david' AND c.weg IS NULL AND c.label IN ('" + L2_CATEGORIE.filter(function (c) { return c !== 'OVERIG'; }).join("', '") + "')) LIMIT 100").all(pv)) {
+      if (vol()) break;
+      if (!teVaak(pv, x.gmail_id, 'opruim')) voeg(x.gmail_id, 'opruim', [], ['OVERIG']);
     }
     // overstap (eenmalig)
     let overstapOpen = 0;
     if (!p.overstap_klaar) {
-      const kand = db.prepare("SELECT * FROM besluit WHERE postvak = ? AND inhaal = 0 AND status = 'klaar' AND stap != 'buiten' AND overstap_tijd IS NULL AND overstap_poging < ? AND (labels_gezet IS NOT NULL OR (stroom = 'twijfel' AND juist IS NULL AND namen_weg IS NULL AND COALESCE(ontvangen, aangemaakt) < ?)) ORDER BY id LIMIT 300")
-        .all(pv, OVERSTAP_POGINGEN, vanaf);
+      // alleen mail die MailMan sinds live labelde (review B8a MOET 1: geen labels op mail van vóór live − 24 uur, B5 review #3)
+      const kand = db.prepare("SELECT * FROM besluit WHERE postvak = ? AND inhaal = 0 AND status = 'klaar' AND stap != 'buiten' AND overstap_tijd IS NULL AND overstap_poging < ? AND labels_gezet IS NOT NULL ORDER BY id LIMIT 300")
+        .all(pv, OVERSTAP_POGINGEN);
       overstapOpen = kand.length;
       let n = 0;
       for (const b of kand) {
         if (acties.has(b.gmail_id)) continue;
         let lab = []; try { lab = JSON.parse(b.labels_gezet || '[]'); } catch (e) { lab = []; }
         const ruw = ruwVan(b), erbij = [], eraf = [];
-        if (lab.includes(WACHTRIJ) && mag(b.gmail_id, 'INTAKE')) erbij.push('INTAKE');
-        if (lab.includes('TODO') && ruw && ruw.mens >= 0.8) { if (mag(b.gmail_id, 'ACTIE_DS')) erbij.push('ACTIE_DS'); if (lsHeeft(pv, b.gmail_id, 'TODO')) eraf.push('TODO'); }
+        // review B8a ZOU 6: wie David al naar Info/Factuur verwees krijgt geen INTAKE; KAN 11: alleen MailMans eigen TODO eraf
+        if (lab.includes(WACHTRIJ) && (!b.juist || b.juist === 'intake') && mag(b.gmail_id, 'INTAKE')) erbij.push('INTAKE');
+        const todo = lsGet(pv, b.gmail_id, 'TODO');
+        if (lab.includes('TODO') && ruw && ruw.mens >= 0.8) { if (mag(b.gmail_id, 'ACTIE_DS')) erbij.push('ACTIE_DS'); if (todo && !todo.weg && todo.gezet && todo.bron === 'mailman') eraf.push('TODO'); }
         if (b.stroom === 'twijfel' && !b.juist && !lab.includes(WACHTRIJ) && mag(b.gmail_id, 'TWIJFEL')) erbij.push('TWIJFEL');
         if (!erbij.length && !eraf.length) { db.prepare('UPDATE besluit SET overstap_tijd = ? WHERE id = ?').run(iso(), b.id); overstapOpen--; continue; }
         if (n >= OVERSTAP_MAX || vol()) continue;
@@ -2321,7 +2353,7 @@ function maak(o) {
   // Duim (oordeel goed/fout) en, sinds wv1983, de stroom waar de mail volgens David heen had gemoeten (juist; steekproef voor het bijschaven
   // van regels). Elk veld alleen als het meekomt; juist null = weer open.
   function oordeelRoute(d) {
-    const b = db.prepare('SELECT id, postvak, gmail_id, juist, keuze_tijd FROM besluit WHERE id = ?').get(Number(d.id));
+    const b = db.prepare('SELECT id, postvak, gmail_id, juist, keuze_tijd, stroom FROM besluit WHERE id = ?').get(Number(d.id));
     if (!b) return { status: 404, j: { ok: false, fout: 'besluit onbekend' } };
     const metO = Object.prototype.hasOwnProperty.call(d, 'oordeel'), metJ = Object.prototype.hasOwnProperty.call(d, 'juist');
     if (!metO && !metJ) return { status: 400, j: { ok: false, fout: 'oordeel of juist ontbreekt' } };
@@ -2329,9 +2361,15 @@ function maak(o) {
     if (metJ && !(d.juist == null || ['intake', 'factuur', 'info'].includes(d.juist))) return { status: 400, j: { ok: false, fout: 'juist: intake, factuur of info' } };
     // wv2033 B8 (review ontwerp #3): met labelset2 kan de keuze alleen terug of anders zolang het label van de keuze nog niet in Gmail staat;
     // MailMan haalt nooit INTAKE of FACTUUR weg
-    if (metJ && b.juist && (d.juist || null) !== b.juist && l2(postvak(b.postvak))) {
-      const l = L2_HOOFD[b.juist];
-      if (b.keuze_tijd || lsHeeft(b.postvak, b.gmail_id, l) || aanbodEigen(b.postvak, b.gmail_id, l, 'erbij')) return { status: 409, j: { ok: false, fout: 'het label ' + l + ' staat al in Gmail; haal het label zelf weg in Gmail', label_staat: true } };
+    // Alleen voor Twijfel (review B8a ZOU 3: een steekproef-oordeel op gewone mail verandert geen labels en blijft vrij)
+    if (metJ && b.stroom === 'twijfel' && l2(postvak(b.postvak))) {
+      if (b.juist && (d.juist || null) !== b.juist) {
+        const l = L2_HOOFD[b.juist];
+        if (b.keuze_tijd || lsHeeft(b.postvak, b.gmail_id, l) || aanbodEigen(b.postvak, b.gmail_id, l, 'erbij')) return { status: 409, j: { ok: false, fout: 'het label ' + l + ' staat al in Gmail; haal het label zelf weg in Gmail', label_staat: true } };
+      }
+      // review B8a ZOU 5: na het vangnet (of Davids eigen label) staat INTAKE/FACTUUR al; "Info" kan die niet meer terugdraaien
+      const al = ['INTAKE', 'FACTUUR'].filter(function (l) { return lsHeeft(b.postvak, b.gmail_id, l); });
+      if (d.juist === 'info' && al.length) return { status: 409, j: { ok: false, fout: al.join(' en ') + ' staat al in Gmail (dus ook in ' + (al[0] === 'INTAKE' ? 'Intake' : 'Facturen') + '); haal het label zelf weg in Gmail als dat niet de bedoeling is', label_staat: true } };
     }
     tx(function () {
       if (metO) db.prepare('UPDATE besluit SET oordeel = ? WHERE id = ?').run(d.oordeel || null, b.id);

@@ -1644,12 +1644,14 @@ function nepGmail() {
       o = o || {};
       return Object.keys(IDS2).map(function (naam) {
         return { naam, id: o.ander && o.ander[naam] ? o.ander[naam] : IDS2[naam], volledig: o.afgekapt !== naam,
-          berichten: Array.from(ber.entries()).filter(function (e) { return !e[1].sent && e[1].labels.has(naam); }).map(function (e) { return { gmail_id: e[0], thread_id: e[1].thread }; }) };
+          berichten: Array.from(ber.entries()).filter(function (e) { return (o.metVerzonden || !e[1].sent) && !(o.leeg && naam !== 'AI/MailMan') && e[1].labels.has(naam); }).map(function (e) { return { gmail_id: e[0], thread_id: e[1].thread }; }) };
       });
     },
+    fout: false,
     pas: function (acties) {
       return acties.map(function (a) {
         const x = ber.get(a.gmail_id);
+        if (g.fout) return { gmail_id: a.gmail_id, ok: false, fout: 'HTTP 500' };
         if (!x || x.sent) return { gmail_id: a.gmail_id, ok: false, overgeslagen: true };
         for (const l of a.erbij) if (!['UNREAD', 'INBOX'].includes(l)) x.labels.add(l);
         for (const l of a.eraf) x.labels.delete(l);
@@ -1783,7 +1785,9 @@ test('B8 handmatig INTAKE → één route, nogmaals → geen tweede; eruit in de
   assert.equal(route(mm, m.id).status, 'wachtrij');
   assert.equal(correcties(mm).length, 1); assert.equal(correcties(mm)[0].van, 'OVERIG'); assert.equal(correcties(mm)[0].naar, 'INTAKE');
   const b = l2Ronde(mm, gm, [m.id]);
-  assert.deepEqual(b.l.j.acties, []); assert.equal(routes(mm), 1, 'nogmaals: geen tweede route');
+  assert.deepEqual(b.l.j.acties.map(function (x) { return [x.soort, x.erbij, x.eraf]; }), [['opruim', [], ['OVERIG']]], 'David koos een categorie: MailMans OVERIG eraf');
+  assert.ok(!gm.heeft(m.id, 'OVERIG'));
+  assert.deepEqual(l2Ronde(mm, gm, [m.id]).l.j.acties, []); assert.equal(routes(mm), 1, 'nogmaals: geen tweede route');
   // David haalt INTAKE weg terwijl de route in de wachtrij staat → ingetrokken, MailMan haalt zijn wachtrijlabel weg
   gm.weg(m.id, 'INTAKE');
   const c = l2Ronde(mm, gm, [m.id]);
@@ -2051,4 +2055,84 @@ test('B8 labelset2 weg (terugrol): labels() valt meteen terug op 1.8; een ronde 
   assert.deepEqual(JSON.parse(rij(mm, ms[0].id).labels_gezet), ['OVERIG']);
   const x = l2Ronde(mm, gm, [ms[1].id]);
   assert.deepEqual(x.l.j.acties.map(function (a) { return a.erbij; }), [['INFO']]);
+});
+
+test('B8 review: oude Twijfel van vóór live krijgt bij de overstap geen label (MOET 1); verzonden mail in een lijst nooit gerouteerd (MOET 2)', () => {
+  const { mm, dir, gm } = b8Kamer();
+  const oud = mail({ datum: klok - 4 * 86400000 });
+  draai(mm, 'gmail:david', [oud], { jev: function () { return jevAntwoord({ mens: 0.5, waarde: 1.5, actie: 0.1 }); } });
+  assert.equal(rij(mm, oud.id).stroom, 'twijfel');
+  const th = hexId(), m = mail({ threadId: th }), eigen = mail({ threadId: th, datum: klok - 600000, labels: ['SENT'], van: 'Ik <ik@eigen.invalid>' });
+  draai(mm, 'gmail:david', [m, eigen], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  gm.voeg(oud); gm.voeg(m); gm.voeg(eigen, true);
+  const ids = [oud.id, m.id, eigen.id];
+  const a = l2Ronde(mm, gm, ids);
+  assert.ok(!a.l.j.acties.some(function (x) { return x.gmail_id === oud.id; }), 'mail van vóór live − 24 u: geen labels');
+  gm.draadLabel(th, 'INTAKE');
+  const b = l2Ronde(mm, gm, ids, { metVerzonden: true });   // n8n liet -in:sent vallen: de pod houdt het zelf tegen
+  assert.equal(b.s.j.telling.verzonden, 1);
+  assert.equal(route(mm, eigen.id), undefined); assert.ok(route(mm, m.id));
+  assert.equal(lsRij(mm, eigen.id, 'INTAKE'), undefined);
+});
+
+test('B8 review: INTAKE in Gmail op Twijfel = Davids keuze (TWIJFEL eraf, Werkstroom dicht); na het vangnet kan "Info" niet meer; steekproef op gewone mail blijft vrij', () => {
+  const { mm, dir, gm } = b8Kamer();
+  const ms = [mail(), mail(), mail()];
+  const jev = [{ mens: 0.5, waarde: 1.5, actie: 0.1 }, { mens: 0.5, waarde: 1.5, actie: 0.1 }, JEV_INTAKE];
+  draai(mm, 'gmail:david', ms, { jev: function (a) { return jevAntwoord(jev[ms.findIndex(function (m) { return m.id === a.gmail_id; })]); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  ms.forEach(function (m) { gm.voeg(m); });
+  const ids = ms.map(function (m) { return m.id; });
+  l2Ronde(mm, gm, ids);
+  gm.zet(ms[0].id, 'INTAKE');
+  const a = l2Ronde(mm, gm, ids);
+  assert.equal(a.s.j.telling.keuze_gmail, 1); assert.equal(rij(mm, ms[0].id).juist, 'intake');
+  assert.deepEqual(perId(a.l.j.acties)[ms[0].id].eraf, ['TWIJFEL']);
+  assert.ok(!gm.heeft(ms[0].id, 'TWIJFEL'));
+  assert.equal(mm.werkstroomTel().find(function (p) { return p.id === 'gmail:david'; }).twijfel_open, 1);
+  // vangnet op ms[1], daarna "Info" in de Werkstroom → 409 met uitleg
+  const t0 = klok;
+  try {
+    klok += 3 * 86400000 + 60000;
+    l2Ronde(mm, gm, ids);
+    assert.ok(gm.heeft(ms[1].id, 'INTAKE'));
+    const r = mm.app('POST /app/mailman/oordeel', { id: rij(mm, ms[1].id).id, juist: 'info' });
+    assert.equal(r.status, 409); assert.match(r.j.fout, /INTAKE staat al in Gmail/);
+    assert.equal(mm.app('POST /app/mailman/oordeel', { id: rij(mm, ms[1].id).id, juist: 'factuur' }).status, 200, 'FACTUUR erbij mag wel');
+  } finally { klok = t0; }
+  // steekproef op een gewone Intake-mail: heen en terug zonder 409
+  assert.equal(mm.app('POST /app/mailman/oordeel', { id: rij(mm, ms[2].id).id, juist: 'info' }).status, 200);
+  assert.equal(mm.app('POST /app/mailman/oordeel', { id: rij(mm, ms[2].id).id, juist: null }).status, 200);
+});
+
+test('B8 review: keuze Intake op mail die al in Intake staat krijgt geen wachtrijlabel (ZOU 6); lege "volledige" lijst = verdacht (ZOU 7); mislukte actie hooguit 5 keer (KAN 9)', () => {
+  const { mm, dir, gm, intake } = b8Kamer();
+  const ms = Array.from({ length: 14 }, function () { return mail(); });
+  draai(mm, 'gmail:david', ms, { jev: function () { return jevAntwoord({ mens: 0.5, waarde: 1.5, actie: 0.1 }); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  ms.forEach(function (m) { gm.voeg(m); });
+  const ids = ms.map(function (m) { return m.id; });
+  l2Ronde(mm, gm, ids);
+  l2Ronde(mm, gm, ids);   // 14 × TWIJFEL (WACHTRIJ_MAX speelt niet: Twijfel krijgt geen wachtrij)
+  assert.ok(ms.every(function (m) { return gm.heeft(m.id, 'TWIJFEL'); }));
+  intake.add(ms[0].id);
+  mm.app('POST /app/mailman/oordeel', { id: rij(mm, ms[0].id).id, juist: 'intake' });
+  const a = perId(l2Ronde(mm, gm, ids).l.j.acties)[ms[0].id];
+  assert.deepEqual([a.erbij, a.eraf], [['INTAKE'], ['TWIJFEL']]);
+  assert.equal(route(mm, ms[0].id).status, 'verwerkt');
+  // een lege maar "volledige" TWIJFEL-lijst (13 bekend) verandert niets; de normale lijst daarna ook niet
+  const v = l2Ronde(mm, gm, ids, { leeg: true });
+  assert.ok(v.s.j.telling.verdacht >= 1);
+  assert.ok(ms.slice(1).every(function (m) { return lsRij(mm, m.id, 'TWIJFEL').weg == null; }), 'TWIJFEL-lijst als afgekapt behandeld');
+  assert.equal(lsRij(mm, ms[0].id, 'INTAKE').weg_door, 'david', 'één label kwijt is niet verdacht (grens > 10 én > de helft)');
+  const w = l2Ronde(mm, gm, ids);
+  assert.equal(w.s.j.telling.david_erbij, 0, 'een label dat terugkomt houdt zijn oude bron'); assert.equal(lsRij(mm, ms[0].id, 'INTAKE').bron, 'keuze');
+  assert.equal(lsRij(mm, ms[1].id, 'TWIJFEL').bron, 'mailman');
+  // Gmail weigert steeds: de keuze wordt hooguit 5 keer aangeboden
+  mm.app('POST /app/mailman/oordeel', { id: rij(mm, ms[1].id).id, juist: 'factuur' });
+  gm.fout = true;
+  let n = 0;
+  for (let i = 0; i < 8; i++) n += l2Ronde(mm, gm, ids).l.j.acties.filter(function (x) { return x.gmail_id === ms[1].id; }).length;
+  assert.equal(n, 5);
 });
