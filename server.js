@@ -16982,7 +16982,7 @@ async function appIntakeTelling(req, res, a) {
 // ── einde Intake-plek ──
 
 // ── Werkstroom (wv2002; ontwerp vault "01_Ontwikkeling/Werkstroom - één lichte werkplek voor MailMan, Intake en Facturen (ontwerp 29-10-2026).md") ──
-// GET /app/werkstroom (tellers per stap) en GET /app/werkstroom/lijst/<stap>[/<postvak>] (hooguit 200 regels): alleen lezen, uit MailMan,
+// GET /app/werkstroom (tellers per stap) en GET /app/werkstroom/lijst/<stap>[/<postvak>] (hooguit 200 regels): alleen lezen, uit MailMan (ook Verkoop, wv2008),
 // de Intake-router en Facturen (werkstroom.js). Alleen achter de app-poort (David); de praktijkmanager-ingang /fac kent deze route niet.
 // Geen nieuwe opslag. Ontbreekt werkstroom.js in de release (terugrol), dan 404 en toont het venster "komt eraan".
 const WERKSTROOM_MOD = (function () { const p = path.join(__dirname, 'werkstroom.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('werkstroom', e); return null; } })();

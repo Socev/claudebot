@@ -155,3 +155,78 @@ test('paden: alleen kleine letters en bekende stappen; hooguit 200 regels', asyn
   assert.equal((await w.app('GET /app/werkstroom/lijst/binnen/gmail-groenhouten', {})).j.afgekapt, false);
   assert.equal(W.sleutelVan('gmail:david'), 'gmail-david'); assert.equal(W.sleutelVan('scanner:scansnap'), 'scanner-scansnap');
 });
+
+// wv2008 (W4): stap Verkoop uit het journaal van wv1998 (GET /app/mailman/verkoop). Alleen fase/open/status/tijden/ankers/nummer/bedrag/fout.
+function vulVerkoop(mm) {
+  const zet = (gid, status, o) => {
+    mm._db.prepare(`INSERT INTO besluit (postvak, gmail_id, thread_id, ontvangen, afzender, van_naam, afzender_domein, onderwerp, stap, reden, stroom, stand, status, versie, aangemaakt, inhaal)
+      VALUES ('gmail:groenhouten', ?, 'draad', ?, 'nota@verkoper.invalid', 'GEHEIM-NAAM', 'verkoper.invalid', 'GEHEIM-ONDERWERP', 'verkoop', 'verkoop', 'verkoop', 'schaduw', 'klaar', 'x', ?, 0)`).run(gid, o.tijd, o.tijd);
+    mm._db.prepare(`INSERT INTO verkoop (postvak, gmail_id, thread_id, ontvangen, van_domein, status, pdfs, kandidaat_tijd, toets_tijd, verstuurd_tijd, gearchiveerd_tijd, fout, bijgewerkt)
+      VALUES ('gmail:groenhouten', ?, 'draad', ?, 'verkoper.invalid', ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(gid, o.tijd, status, JSON.stringify(o.pdfs || [{ bron: 'ocr', vacshing: true, shingrix: true, naam: 'GEHEIM-BESTAND.pdf', nummer: 'VF-0001', bedrag_cent: 12345 }]),
+        o.tijd, o.toets || null, o.verstuurd || null, o.gearchiveerd || null, o.fout || null, o.bij || o.tijd);
+  };
+  zet('v00000000000001', 'mislukt', { tijd: iso(30), toets: iso(29), fout: 'doorsturen mislukt' });                 // bij David
+  zet('v00000000000002', 'gearchiveerd', { tijd: iso(50), toets: iso(49), verstuurd: iso(48), gearchiveerd: iso(47) }); // af
+  zet('v00000000000003', 'kandidaat', { tijd: iso(1), pdfs: [] });                                                    // MailMan toetst nog
+  zet('v00000000000004', 'niet_herkend', { tijd: iso(5), toets: iso(4), pdfs: [{ bron: 'tekst', vacshing: false, shingrix: false }] }); // gewone factuur: niet in de stap
+  zet('v00000000000005', 'onzeker', { tijd: iso(60), toets: iso(59), fout: 'Gmail gaf geen duidelijk antwoord; kijk in Verzonden' }); // bij David, ouder
+}
+
+test('verkoop: teller = open bij David (MailMan-werk apart), lijst zonder onderwerp/afzender/naam/bestandsnaam, bij David oudste eerst', async () => {
+  const { mm, zet } = mailman();
+  vulMailman(zet);
+  vulVerkoop(mm);
+  const { w, fouten } = maak({ mailman: () => mm, intake: () => intake(), facturen: facturen() });
+  const t = await w.tellers({});
+  assert.deepEqual(t.tellers.verkoop, { wacht: 2, bezig: 1, totaal: 4 });
+  assert.equal(t.stappen.indexOf('verkoop'), t.stappen.indexOf('facturen') + 1);
+  assert.equal(t.stappen.indexOf('verwerkt'), t.stappen.indexOf('verkoop') + 1);
+  const l = await w.lijst('verkoop', null, {});
+  assert.deepEqual(l.regels.map((r) => r.verkoop.fase), ['onzeker', 'mislukt', 'wacht_toets', 'gearchiveerd']);
+  assert.ok(l.regels.every((r) => r.bron === 'verkoop' && r.sleutel.startsWith('vk-') && r.postvak === 'gmail:groenhouten'));
+  const m = l.regels[1].verkoop;
+  assert.equal(m.bij_david, true); assert.equal(m.fout, 'doorsturen mislukt'); assert.equal(m.ankers, true);
+  assert.deepEqual(m.pdfs, [{ vacshing: true, shingrix: true, overgeslagen: false, nummer: 'VF-0001', bedrag_cent: 12345 }]);
+  assert.equal(l.regels[3].verkoop.gearchiveerd, iso(47));
+  assert.deepEqual(Object.keys(m).sort(), ['aangeboden', 'ankers', 'archief_pogingen', 'bij_david', 'bijgewerkt', 'fase', 'fout', 'gearchiveerd', 'getoetst', 'id', 'kandidaat',
+    'ontvangen', 'open', 'pdfs', 'status', 'verstuurd']);
+  assert.deepEqual(l.verkoop, { stand: 'schaduw', door: false, archief: false });
+  const alles = JSON.stringify(l) + JSON.stringify(t);
+  for (const x of ['GEHEIM', 'nota@verkoper', 'verkoper.invalid']) assert.ok(!alles.includes(x), x);
+  for (const x of ['"naam"', '"onderwerp"', '"afzender"', '"domein"']) assert.ok(!JSON.stringify(l.regels).includes(x), x);   // (postvakken in de tellers hebben wel een naam)
+  // postvakfilter: alleen Doktersmaten heeft verkoop
+  assert.deepEqual((await w.lijst('verkoop', 'gmail-david', {})).regels, []);
+  assert.equal((await w.lijst('verkoop', 'gmail-groenhouten', {})).regels.length, 4);
+  // andere stappen roepen de verkoopbron niet aan
+  assert.equal((await w.lijst('twijfel', null, {})).verkoop, undefined);
+  assert.deepEqual(fouten, []);
+});
+
+test('verkoop kapot → alleen die stap "niet te lezen", de rest blijft; geen interne fouttekst; geen Doktersmaten = lege stap', async () => {
+  const { mm, zet } = mailman();
+  vulMailman(zet);
+  vulVerkoop(mm);
+  const kapot = Object.assign(Object.create(mm), { app: () => { throw new Error('verkoop-databank-kapot'); } });
+  const x = maak({ mailman: () => kapot, intake: () => intake(), facturen: facturen() });
+  const t = await x.w.tellers({});
+  assert.deepEqual(t.tellers.verkoop, { fout: true });
+  assert.equal(t.tellers.twijfel.wacht, 3); assert.equal(t.tellers.intake.wacht, 2); assert.equal(t.tellers.facturen.wacht, 4);
+  const l = await x.w.lijst('verkoop', null, {});
+  assert.deepEqual(l.regels, []); assert.deepEqual(l.fouten, ['verkoop']); assert.equal(l.verkoop, undefined);
+  assert.ok(!JSON.stringify([t, l]).includes('kapot'));
+  assert.equal(x.fouten.length, 2);
+  // route geeft geen 200 → ook "niet te lezen"
+  const n500 = Object.assign(Object.create(mm), { app: () => ({ status: 500, j: { ok: false } }) });
+  assert.deepEqual((await maak({ mailman: () => n500, intake: () => intake(), facturen: facturen() }).w.tellers({})).tellers.verkoop, { fout: true });
+  // geen postvak Doktersmaten (verkoop null): lege stap, geen fout
+  const leeg = Object.assign(Object.create(mm), { app: () => ({ status: 200, j: { ok: true, verkoop: null, open: 0 } }) });
+  const y = maak({ mailman: () => leeg, intake: () => intake(), facturen: facturen() });
+  assert.deepEqual((await y.w.tellers({})).tellers.verkoop, { wacht: 0, bezig: 0, totaal: 0 });
+  assert.deepEqual((await y.w.lijst('verkoop', null, {})).regels, []);
+  // te traag: tijdgrens
+  const traag = Object.assign(Object.create(mm), { app: () => new Promise(() => {}) });
+  const t0 = Date.now();
+  const z = await maak({ mailman: () => traag, intake: () => intake(), facturen: facturen(), tijdMs: 150 }).w.lijst('verkoop', null, {});
+  assert.ok(Date.now() - t0 < 2000); assert.deepEqual(z.fouten, ['verkoop']);
+});
