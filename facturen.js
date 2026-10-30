@@ -1130,9 +1130,10 @@ function specMaak(fdb, id, nu, stijlVoor) {
   let stijl = null;
   try { stijl = typeof stijlVoor === 'function' ? stijlVoor(b.entiteit) || null : null; } catch (e) { stijl = null; }   // geen huisstijl = sober
   try {
-    return { b, s: SP.maak({ id: b.id, msg_id: b.msg_id, wanneer: b.wanneer, entiteit: b.entiteit, entiteit_naam: b.e_naam, entiteit_kort: b.e_kort || b.e_naam,
-      rekening_eind: String(b.dbtr_iban).slice(-4), aantal: b.aantal, totaal_centen: b.totaal_centen }, regels, { stijl, gemaakt: nuIso(nu) }) };
-  } catch (e) { if (e instanceof SP.SpecFout) weiger(409, 'de specificatie klopt niet met de batch (' + e.message + ')'); throw e; }
+    return { b, s: SP.maak({ id: b.id, msg_id: b.msg_id, wanneer: b.wanneer, dag: dagAmsterdam(Date.parse(b.wanneer)), entiteit: b.entiteit, entiteit_naam: b.e_naam,
+      entiteit_kort: b.e_kort || b.e_naam, rekening_eind: String(b.dbtr_iban).slice(-4), aantal: b.aantal, totaal_centen: b.totaal_centen }, regels,
+    { stijl, gemaakt: nuIso(nu), gemaakt_dag: dagAmsterdam(nu) }) };
+  } catch (e) { if (e instanceof SP.SpecFout) weiger(409, 'de specificatie klopt niet met de batch (' + e.message + ')', { code: 'spec_klopt_niet' }); throw e; }
 }
 // POST sepa-specificatie { batch }: de PDF als download (ook voor oudere batches; base64). Het concept zet server.js klaar (specificatieConcept).
 function sepaSpecificatie(fdb, r, d, nu, stijlVoor) {
@@ -1155,7 +1156,17 @@ function specificatieConcept(fdb, r, id, o) {
   if (r.ingang !== 'app') weiger(403, 'een batch maakt David in zijn eigen app');
   id = vraagId({ batch: id }, 'batch');
   const nu = o.nu;
-  const { b, s } = specMaak(fdb, id, nu, o.stijlVoor);
+  let m;
+  try { m = specMaak(fdb, id, nu, o.stijlVoor); }
+  catch (e) {
+    // review wv2025 ZOU 1: een specificatie die niet klopt met de batch wordt een zichtbaar "niet klaargezet", geen stille weigering
+    if (!(e instanceof RouteFout) || !e.extra || e.extra.code !== 'spec_klopt_niet') throw e;
+    const bb = fdb.db.prepare('SELECT id, entiteit FROM sepa_batch WHERE id = ?').get(id);
+    D.transactie(fdb, () => D.audit(fdb, { wie: r.wie, wat: 'sepa_specificatie_mislukt', object_soort: 'sepa_batch', object_id: bb.id, entiteit: bb.entiteit,
+      na: { aanleiding: o.aanleiding || null, reden: 'de specificatie klopt niet met de batch' }, wanneer: nuIso(nu) }));
+    return { klaar: false, reden: 'de specificatie klopt niet met de batch' };
+  }
+  const { b, s } = m;
   const aan = specAan(fdb, b.entiteit);
   return D.transactie(fdb, function () {
     const st = specStand(fdb, b.id, nu);

@@ -15164,7 +15164,14 @@ async function facturenSpecConcept(fdb, rol, batch, o) {
   try {
     if (process.env.FACTUREN_SPECIFICATIE === 'uit') return { status: 409, j: { ok: false, fout: 'het concept met de specificatie staat uit op de pod; download de PDF' } };
     const v = facturenRoutes.specificatie.concept(fdb, rol, batch, { nu: Date.now(), primair: rolPrimair(), nogmaals: !!o.nogmaals, aanleiding: o.aanleiding });
-    if (v.status !== 200) return v;
+    if (v.status !== 200) {
+      // review wv2025 ZOU 1: na een batch mag een weigering (database bezet, …) niet stil verdwijnen: logregel + zo mogelijk spoor "mislukt"
+      if (o.aanleiding === 'batch') {
+        logError('facturen-specificatie', new Error('concept na batch niet voorbereid: ' + v.status + ' ' + String(v.j && (v.j.code || v.j.fout) || '').slice(0, 80)));
+        if (!(v.j && ['bezig', 'al_klaar', 'misschien_al'].includes(v.j.code))) facturenRoutes.specificatie.uitkomst(fdb, rol, batch, { ok: false, reden: 'kon niet voorbereid worden (' + String(v.j && v.j.fout || v.status).slice(0, 80) + ')' }, { nu: Date.now(), primair: rolPrimair() });
+      }
+      return v;
+    }
     if (v.j.klaar === false) return { status: 200, j: { ok: true, specificatie: { status: 'mislukt', reden: v.j.reden } } };
     let uit;
     try {
@@ -15197,6 +15204,7 @@ async function facturenSpecMailluik(c) {
     const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: body, signal: AbortSignal.timeout(FAC_SPEC_MAX_MS) });
     if (r.status === 404 && poging === 0) { try { await r.arrayBuffer(); } catch (e) {} continue; }
     if (r.status === 400) throw zeker('mailconcept http 400', 'het mailluik weigerde het concept');
+    if (r.status === 401 || r.status === 403) throw zeker('mailconcept http ' + r.status, 'het mailluik weigerde de sleutel van de pod');
     if (r.status === 502) {
       let jf = null; try { jf = await r.json(); } catch (e) { jf = null; }
       if (jf && jf.ok === false && typeof jf.fout === 'string') throw zeker('mailconcept http 502', 'Gmail weigerde het concept');

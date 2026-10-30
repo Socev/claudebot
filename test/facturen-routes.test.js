@@ -1878,3 +1878,25 @@ test('wv2025 server.js: na een batch het concept op de achtergrond (luik gemockt
   assert.deepEqual(JSON.parse(JSON.stringify(uit.r.facturenSpecNaBatch(t.fdb, t.eig, w.batch))), { status: 'uit' });
   assert.equal(uit.aanroepen.length, 0);
 });
+
+test('wv2025 review: klopt de specificatie niet met de batch, dan "mislukt" (zichtbaar); Amsterdamse datum; PDF-titel alleen ASCII; WinAnsi-tekens', () => {
+  const t = opzet();
+  const x = specBatch(t);
+  t.fdb.db.exec('DROP TRIGGER sepa_batch_vast');   // alleen in de wegwerpdatabase: een batch die niet meer klopt nabootsen
+  t.fdb.db.prepare('UPDATE sepa_batch SET totaal_centen = totaal_centen + 1 WHERE id = ?').run(x.batch);
+  const c = t.routes.specificatie.concept(t.fdb, t.eig, x.batch, { nu: NU + 1000, primair: true, aanleiding: 'batch' });
+  assert.deepEqual([c.status, c.j.klaar, c.j.reden], [200, false, 'de specificatie klopt niet met de batch']);
+  assert.equal(t.call('GET', 'betalen').j.sepa.batches[0].specificatie.status, 'mislukt');
+  assert.equal(t.call('POST', 'sepa-specificatie', { batch: x.batch }).status, 409);
+  // batch van 23:30 UTC op 31-10 = 1 november in Amsterdam (wintertijd)
+  const b = { id: '0123456789abcdef', msg_id: 'SOCEV-20261101-abcdef12', wanneer: '2026-10-31T23:30:00.000Z', dag: '2026-11-01', entiteit: 'holding', entiteit_naam: 'Proef Ł Œuvre B.V.',
+    entiteit_kort: 'Holding', rekening_eind: '4321', aantal: 1, totaal_centen: 100 };
+  const s = SP.maak(b, [{ positie: 1, uitvoerdatum: '2026-11-02', leverancier: 'Šumava ‰ Œ', nummer: 'X-1', centen: 100 }], { gemaakt: '2026-10-31T23:30:00.000Z', gemaakt_dag: '2026-11-01' });
+  assert.match(s.naam, / 2026-11-01 abcdef12\.pdf$/);
+  const tx = pdfTekst(s.pdf);
+  assert.match(tx, /1 november 2026/);
+  assert.doesNotMatch(tx, /31 oktober/);
+  assert.match(s.pdf.toString('latin1'), /\/Title \(Specificatie SEPA-batch Holding SOCEV-20261101-abcdef12\) \/Producer \(Socev\) \/CreationDate \(D:20261031233000Z\)/);
+  assert.ok(s.pdf.toString('latin1').includes('<8A756D617661208920'), 'Š en ‰ in WinAnsi');
+  assert.doesNotMatch(tx, /\?/);
+});

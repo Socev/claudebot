@@ -36,7 +36,7 @@ function schoon(s, max) {
 }
 
 /*
- * opbouw(batch, regels) → de specificatie. batch = { id, msg_id, wanneer (ISO), entiteit, entiteit_naam, entiteit_kort, rekening_eind,
+ * opbouw(batch, regels) → de specificatie. batch = { id, msg_id, wanneer (ISO), dag (Amsterdamse datum van wanneer), entiteit, entiteit_naam, entiteit_kort, rekening_eind,
  * aantal, totaal_centen }; regels = [{ positie, uitvoerdatum, leverancier, nummer, centen }]. Telt na: aantal en totaal moeten met de batch
  * kloppen (anders SpecFout: liever geen specificatie dan een verkeerde).
  */
@@ -54,7 +54,7 @@ function opbouw(batch, regels) {
   const aantal = blokken.reduce((s, b) => s + b.aantal, 0), totaal = blokken.reduce((s, b) => s + b.totaal_centen, 0);
   if (aantal !== batch.aantal || totaal !== batch.totaal_centen) throw new SpecFout('aantal of totaal klopt niet met de batch');
   return {
-    batch: batch.id, msg_id: String(batch.msg_id), wanneer: String(batch.wanneer), entiteit: batch.entiteit,
+    batch: batch.id, msg_id: String(batch.msg_id), wanneer: String(batch.wanneer), dag: isoDag(batch.dag) ? batch.dag : String(batch.wanneer).slice(0, 10), entiteit: batch.entiteit,
     entiteit_naam: schoon(batch.entiteit_naam, 120) || batch.entiteit, entiteit_kort: schoon(batch.entiteit_kort, 40) || schoon(batch.entiteit_naam, 40) || batch.entiteit,
     rekening_eind: String(batch.rekening_eind || ''), aantal, totaal_centen: totaal, blokken,
   };
@@ -78,7 +78,7 @@ function mail(g) {
   return { onderwerp: onderwerp.slice(0, 150), bericht: r.join('\n') };
 }
 function bestandsnaam(g) {
-  return ('Specificatie SEPA-batch ' + g.entiteit_kort + ' ' + String(g.wanneer).slice(0, 10) + ' ' + g.msg_id.slice(-8)).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim() + '.pdf';
+  return ('Specificatie SEPA-batch ' + g.entiteit_kort + ' ' + g.dag + ' ' + g.msg_id.slice(-8)).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim() + '.pdf';
 }
 
 // ── PDF (eigen kleine schrijver zoals pot-afschrift.js: PDF 1.4, Helvetica/WinAnsi, A4 staand) ──
@@ -91,16 +91,20 @@ const BR = {
     975, 722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 333, 278, 333, 584, 556,
     333, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584],
 };
-const WIN = { '€': 0x80, '‚': 0x82, '„': 0x84, '…': 0x85, '‘': 0x91, '’': 0x92, '“': 0x93, '”': 0x94, '•': 0x95, '–': 0x96, '—': 0x97, '™': 0x99 };
-const WIN_BREEDTE = { '€': 556, '…': 1000, '–': 556, '—': 1000, '‘': 222, '’': 222, '“': 333, '”': 333, '•': 350 };
+const WIN = { '€': 0x80, '‚': 0x82, 'ƒ': 0x83, '„': 0x84, '…': 0x85, '†': 0x86, '‡': 0x87, 'ˆ': 0x88, '‰': 0x89, 'Š': 0x8a, '‹': 0x8b, 'Œ': 0x8c, 'Ž': 0x8e,
+  '‘': 0x91, '’': 0x92, '“': 0x93, '”': 0x94, '•': 0x95, '–': 0x96, '—': 0x97, '˜': 0x98, '™': 0x99, 'š': 0x9a, '›': 0x9b, 'œ': 0x9c, 'ž': 0x9e, 'Ÿ': 0x9f };
+// breedtes (Helvetica-AFM) van de tekens buiten ASCII die geen gewone letter met accent zijn
+const WIN_BREEDTE = { '€': 556, '‚': 222, 'ƒ': 556, '„': 333, '…': 1000, '†': 556, '‡': 556, 'ˆ': 333, '‰': 1000, '‹': 333, 'Œ': 1000, '‘': 222, '’': 222, '“': 333,
+  '”': 333, '•': 350, '–': 556, '—': 1000, '˜': 333, '™': 1000, '›': 333, 'œ': 944, '·': 278, '«': 556, '»': 556, '°': 400, '×': 584, '§': 556, '©': 737, '®': 737,
+  'ß': 611, 'Æ': 1000, 'æ': 889, 'Ø': 778, 'ø': 611, 'Ð': 722, 'ð': 556, 'Þ': 667, 'þ': 556 };
 function zonderAccent(ch) { const b = ch.normalize('NFD').replace(/[̀-ͯ]/g, ''); return b.length === 1 && b.codePointAt(0) >= 0x20 && b.codePointAt(0) <= 0x7e ? b : null; }
 function winTeken(ch) {
   const k = ch.codePointAt(0);
   if (k >= 0x20 && k <= 0x7e) return k;
   if (k >= 0xa0 && k <= 0xff) return k;
   if (WIN[ch]) return WIN[ch];
-  const b = zonderAccent(ch);
-  return b ? b.codePointAt(0) : 0x3f;
+  const b = zonderAccent(ch);   // ł, ő, č … → l, o, c
+  return b ? b.codePointAt(0) : ch === 'ł' ? 0x6c : ch === 'Ł' ? 0x4c : 0x3f;
 }
 function tekenBreedte(f, ch) {
   const k = ch.codePointAt(0);
@@ -125,7 +129,8 @@ function kleur(h, standaard) {
 }
 
 /*
- * maakPdf(g, o) → Buffer. o = { stijl: { naam, caps, ondertitel, kleuren: { titel, caps, lijn, accent } } | null (sober), gemaakt: ISO }.
+ * maakPdf(g, o) → Buffer. o = { stijl: { naam, caps, briefnaam, ondertitel, kleuren: { titel, caps, lijn, accent } } | null (sober), gemaakt: ISO (UTC),
+ * gemaakt_dag: Amsterdamse datum }.
  * Briefhoofd van de entiteit (tekst en kleuren uit omzet-huisstijl.js, zonder logo), de kop van de batch, per uitvoerdatum een blok met de
  * regels (leverancier, factuurnummer, bedrag) en het subtotaal (= de afschrijving op de bank), onderaan het totaal.
  */
@@ -159,7 +164,7 @@ function maakPdf(g, o) {
   y -= 6; lijn(y, kAccent, 1.2); y -= 26;
   txt('F2', 13, M, y, 'Specificatie SEPA-batch'); y -= 18;
   txt('F1', 9, M, y, 'Per uitvoerdatum één afschrijving op de bank; hieronder welke facturen daarin zitten.', false, kCaps); y -= 20;
-  const kv = [['Entiteit', g.entiteit_naam], ['Van rekening', '…' + g.rekening_eind], ['Batchkenmerk', g.msg_id], ['Aangemaakt op', datumNl(g.wanneer.slice(0, 10))],
+  const kv = [['Entiteit', g.entiteit_naam], ['Van rekening', '…' + g.rekening_eind], ['Batchkenmerk', g.msg_id], ['Aangemaakt op', datumNl(g.dag)],
     ['Aantal betalingen', String(g.aantal)], ['Totaal', eur(g.totaal_centen)]];
   for (const [k, v] of kv) { txt('F1', 9, M, y, k); txt('F2', 9, M + 110, y, pas('F2', 9, v, W - 2 * M - 110)); y -= 13; }
   y -= 10;
@@ -197,7 +202,7 @@ function maakPdf(g, o) {
   txt('F2', 10, W - M - 4, y - 4, eur(g.totaal_centen), true);
   // voet op elke pagina
   const voet = ['Bedragen zijn de totaalbedragen van de facturen, zonder btw-uitsplitsing. Rekeningnummers van leveranciers staan niet in deze specificatie.',
-    'Gemaakt door Socev op ' + datumNl(String(o.gemaakt || g.wanneer).slice(0, 10)) + ' uit de SEPA-batch van de Facturen-app.'];
+    'Gemaakt door Socev op ' + datumNl(isoDag(o.gemaakt_dag) ? o.gemaakt_dag : g.dag) + ' uit de SEPA-batch van de Facturen-app.'];
   paginas.forEach((p, pi) => {
     o2 = p;
     lijn(M + 20, kLijn, 0.4);
@@ -209,12 +214,13 @@ function maakPdf(g, o) {
   // objecten: 1 catalogus, 2 pagina's, 3 F1, 4 F2, 5 info, dan per pagina (pagina, inhoud)
   const obj = [];
   const kids = streams.map((_, pi) => (6 + pi * 2) + ' 0 R').join(' ');
-  const pdfDatum = String(o.gemaakt || g.wanneer).replace(/[-:T]/g, '').slice(0, 14);
+  const pdfDatum = String(o.gemaakt || g.wanneer).replace(/[-:T]/g, '').slice(0, 14) + 'Z';   // ISO in UTC
+  const asciiTitel = ('Specificatie SEPA-batch ' + g.entiteit_kort + ' ' + g.msg_id).normalize('NFD').replace(/[^\x20-\x7e]/g, '').replace(/[()\\]/g, '');
   obj.push(Buffer.from('<< /Type /Catalog /Pages 2 0 R >>', 'latin1'));
   obj.push(Buffer.from('<< /Type /Pages /Kids [' + kids + '] /Count ' + streams.length + ' >>', 'latin1'));
   obj.push(Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>', 'latin1'));
   obj.push(Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>', 'latin1'));
-  obj.push(Buffer.from('<< /Title ' + hex('Specificatie SEPA-batch ' + g.entiteit_kort + ' ' + g.msg_id) + ' /Producer (Socev) /CreationDate (D:' + pdfDatum + ') >>', 'latin1'));
+  obj.push(Buffer.from('<< /Title (' + asciiTitel + ') /Producer (Socev) /CreationDate (D:' + pdfDatum + ') >>', 'latin1'));   // documentinfo: geen WinAnsi
   streams.forEach((s, pi) => {
     obj.push(Buffer.from('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + W + ' ' + H + '] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ' + (7 + pi * 2) + ' 0 R >>', 'latin1'));
     obj.push(Buffer.concat([Buffer.from('<< /Length ' + s.length + ' >>\nstream\n', 'latin1'), s, Buffer.from('endstream', 'latin1')]));
