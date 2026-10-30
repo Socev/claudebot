@@ -3737,6 +3737,7 @@ function handleRequest(req, res) {
       managers_poort: MANAGERS_POORT ? MANAGERS_POORT.stand() : { aan: false },   // wv904: voorpoort per manager (laatste toets, groen?, eerste afwijking; geen inhoud)
       sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },
       nachtketen: typeof nachtketenInfo === 'function' ? nachtketenInfo() : { aan: false },   // wv1868: nachtorkestrator (vlag, stap, lopend 0/1 voor uitrol.sh, stand per stap; geen inhoud)
+      sb2_proeven: typeof sb2ProevenInfo === 'function' ? sb2ProevenInfo() : { aan: false },   // wv1963: proefloper (status per proef groen/rood/wacht, lagen; geen inhoud)
       sb2_zoek: typeof sb2ZoekKlokInfo === 'function' ? sb2ZoekKlokInfo() : { aan: false },   // wv1788: nachtklussen feitenlijst + tekstindex (datum, exit, duur)   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
       scripts_veeg: typeof scriptsVeegInfo === 'function' ? scriptsVeegInfo() : { aan: false },   // wv1311: opruimronde socev-run --veeg (exit, aantal opgeveegd; geen namen)
       ovis_kalender: typeof ovisKalenderInfo === 'function' ? ovisKalenderInfo() : { aan: false },   // wv1385: OVIS Calendar-feeds (datum, exit, duur; geen namen of URL's)
@@ -16413,6 +16414,43 @@ const sb2Steekwoorden = (function () {
       argv: ['python3', '-I', SB2_SRC + '/sw.py', 'nacht', '--vault', VAULT, '--grendel', OVIS_LOCK], pogingen: 2 }) : null;
   } catch (e) { logError('sb2-steekwoorden', e); return null; }
 })();
+// wv1963 (SB2 fase 6c): proefloper — de twaalf acceptatieproeven uit de blauwdruk elke nacht opnieuw (L1 CI van main lezen, L2 uit de
+// laatste herstelproef, L3 live invarianten alleen lezend; waarom en lagen in socev-scripts proefloper.py). Alleen als keten-stap ná
+// intake-publicatie en alleen met de schakelaar scripts-staat/sb2-proefloper/aan.json {"aan": true} (van claude, gewoon bestand); zonder
+// schakelaar slaat de keten hem stil over. Het script stempelt zelf de hartslag sb2_proefloper en schrijft rood als box-rij per (proef,
+// oorzaak); laatste.json → /health.sb2_proeven (alleen statussen per proef, geen inhoud).
+const SB2_PL_DIR = '/opt/data/scripts-staat/sb2-proefloper';
+function sb2ProefloperAan() {
+  try {
+    const p = path.join(SB2_PL_DIR, 'aan.json');
+    const st = fs.lstatSync(p);
+    if (!st.isFile() || (process.getuid && st.uid !== process.getuid())) return false;
+    return JSON.parse(fs.readFileSync(p, 'utf8')).aan === true;
+  } catch (e) { return false; }
+}
+const sb2Proefloper = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakDagRonde === 'function' ? m.maakDagRonde({ naam: 'sb2-proefloper', maxMin: 5, venster: { van: [0, 0], tot: [0, 0] },
+      staatBestand: path.join(KLOKKEN_DIR, 'sb2-proefloper.json'), socevRun: '/opt/data/scripts/huidig/bin/socev-run',
+      env: Object.assign({}, process.env, { VAULT_DIR: VAULT }),
+      argv: ['python3', '-I', SB2_SRC + '/proefloper.py', 'ronde'], pogingen: 2 }) : null;
+  } catch (e) { logError('sb2-proefloper', e); return null; }
+})();
+function sb2ProevenInfo() {
+  const uit = { aan: sb2ProefloperAan(), module: !!sb2Proefloper };
+  try { if (sb2Proefloper) uit.laatste_ronde = sb2Proefloper.info().laatste; } catch (e) { /* geen stand */ }
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(SB2_PL_DIR, 'laatste.json'), 'utf8'));
+    const per = {};
+    for (const k of Object.keys(j.per_proef || {})) per[k] = String((j.per_proef[k] || {}).status || '?');
+    Object.assign(uit, { dag: j.dag || null, per_proef: per, extra: j.extra || {}, rood: Array.isArray(j.rood) ? j.rood : [],
+      groen: j.groen, wacht: j.wacht, alle_twaalf_groen: j.alle_twaalf_groen === true, l2_dag: j.l2_dag || null, l3_ok: j.l3_ok === true });
+  } catch (e) { uit.dag = null; }
+  return uit;
+}
 function sb2ZoekKlokInfo() {
   const een = function (k) { if (!k) return { aan: false }; try { return k.info(); } catch (e) { return { fout: true }; } };
   return { feitenlijst: een(sb2Feitenlijst), zoekindex: een(sb2Zoekindex), zoekleer: een(sb2Zoekleer) };
@@ -16535,6 +16573,11 @@ const nachtketen = (function () {
         return r.fout ? { ok: false, reden: 'publicatie: ' + r.fout + ' fout(en)' + (r.reden ? ' (' + r.reden.slice(0, 60) + ')' : ''), detail: d } : { ok: true, detail: d };
       } },
       // wv1962 (SB2 fase 6a): na podstaat (± 00:30) en ná de 01:xx-nachtgrendel; in-process, zelf begrensd (rclone 3 min, reconcile 5 min)
+      // wv1963 (SB2 fase 6c): proefloper ná de publicatie (L3 leest de stand van vannacht); met de schakelaar uit: al_gedaan
+      { naam: 'sb2-proefloper', start_na: [2, 45], na: ['intake-publicatie'], limiet_min: 7, pogingen: 2, meldtZelf: false, doe: async function (ctx) {
+        if (!sb2ProefloperAan()) return { ok: true, al_gedaan: true, detail: { schakelaar: 'uit' } };
+        return nachtDagStap(sb2Proefloper)(ctx);
+      } },
       { naam: 'sb2-herstelreferentie', start_na: [2, 5], limiet_min: 10, pogingen: 2, inProces: true, doe: async function (ctx) {
         if (!herstelReferentie) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return herstelReferentie.ronde(ctx);
