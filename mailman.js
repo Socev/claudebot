@@ -78,6 +78,14 @@
  * (besluit, keuze, vangnet, route, intrek, overstap, archief); gezet2() verwerkt de terugmelding. Twijfel routeert niet meer meteen: David
  * kiest (Werkstroom of Gmail), anders na 3 dagen INTAKE erbij. Terug = labelset2 weg (mk-scripts/wv2033/terugrol.js somt open werk op).
  *
+ * STATUSLABELS (wv2036, Davids Ja 30-10-2026 16:30 op de grondwetkaart, vraag-id 6c20b36e; David 18:02: "ze hebben nog niet /In_SEPA gekregen
+ * toen ze in sepa gingen, en ook niet /Betaald"). Factuurmail schuift in Gmail door de factuurreeks FACTUUR → FACTUUR/verwerkt (archief, B6+)
+ * → FACTUUR/In_SEPA (elke factuur van de mail in een SEPA-batch of als betaald ingevoerd) → FACTUUR/Is_betaald (betaling op de bank gezien;
+ * incasso meteen); telkens gaan de eerdere stappen eraf (één factuurstap tegelijk, lichtgrijs). De stand komt uit de Facturen-app
+ * (o.factuurStap, alleen lezen); labels2() biedt soort 'factuurstap' aan, alleen vooruit, ook voor oudere en gearchiveerde mail (inhalen), en
+ * pas als het archiveren van die mail gedaan is (n8n archiveert alleen met FACTUUR erop). Alleen met config.json statuslabels[postvak].ja
+ * naast labelset2; nooit doktersmaten. Een mislukte zet komt terug (≤ STAP_POGINGEN), de stand staat in /health (mailman.factuurstap).
+ *
  * DE RONDE (n8n, O.2): POST /mailman/start → per postvak de zoekvraag (venster uit de laatste geslaagde ronde) · /mailman/nieuw (alle id's
  * van de lijst, gepagineerd + volledig ja/nee) → de id's zonder besluit · /mailman/stap1 (kop, labels, bijlagen, privé ook tekst ≤ 4.000
  * tekens) → stap 0–3 + patiëntpoort, en de Jev-aanvragen · /mailman/stap2 (de Jev-antwoorden) → besluit · /mailman/gedaan.
@@ -97,7 +105,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const VERSIE = 'mailman-2.0';   // wv2033 (B8a): labels als routering achter de schakelaar labelset2; zonder die schakelaar gedrag als mailman-1.8
+const VERSIE = 'mailman-2.1';   // wv2036: statuslabels (factuurstap) achter statuslabels; wv2033 (B8a): labels als routering achter labelset2
 const STROMEN = ['intake', 'factuur', 'info', 'twijfel'];
 const STANDEN = ['uit', 'schaduw', 'live'];
 const STANDEN_KIESBAAR = ['uit', 'schaduw'];            // live alleen via standRoute: verse vingerafdruk + live_toegestaan (B5)
@@ -167,6 +175,11 @@ const L2_LIJST_MAX = 5000;                         // berichten per labellijst; 
 const L2_VENSTER_MS = 13 * 24 * 3600 * 1000;       // n8n vraagt newer_than:14d; weg alleen beoordelen voor mail die zeker in de lijst had gestaan
 const AANBOD_EIGEN_MS = 3600 * 1000;               // aangeboden maar (nog) niet teruggemeld: tot 1 uur telt het als MailMans eigen actie
 const VANGNET_MS = 3 * 24 * 3600 * 1000;           // Twijfel zonder keuze: na 3 dagen INTAKE erbij (TWIJFEL blijft)
+// wv2036 statuslabels: de factuurstappen na FACTUUR/verwerkt, hun rang (alleen vooruit) en wat er per stap af mag (eerdere stappen uit de reeks)
+const STAP_LABEL = { in_sepa: 'FACTUUR/In_SEPA', is_betaald: 'FACTUUR/Is_betaald' };
+const STAP_RANG = { in_sepa: 1, is_betaald: 2 };
+const STAP_ERAF = { in_sepa: ['FACTUUR', VERWERKT_LABEL], is_betaald: ['FACTUUR', VERWERKT_LABEL, STAP_LABEL.in_sepa] };
+const STAP_POGINGEN = 5, STAP_MAX = 20;            // per mail per stap / aanbiedingen per ronde
 const ROUTE_POGINGEN = 3;                          // wachtrijlabel weg zonder bewijs in Intake: hooguit 3 keer opnieuw in de wachtrij
 const DRAAD_BIJLAGE_MAX = 3, OVERSTAP_MAX = 40, OVERSTAP_POGINGEN = 3;
 const AANBOD_POGINGEN = 5;                         // keuze/vangnet/route/intrek/opruim: hooguit 5 keer mislukt aangeboden (review B8a KAN 9)
@@ -606,7 +619,7 @@ function venster(laatsteGeslaagd, nuMs) {
 
 const K = { adresVan, naamVan, domeinVan, adressenVan, veiligeRegex, toetsVoorwaarden, regelPast, normaliseer, besluitRegels, eersteRegel, regelStroom, jevVragen,
   jevState, leesJev, besluitJev, botsing, labelPlan, zorgmail, venster, isPdfOfXml, LABELS, STROMEN, VERWERKT_LABEL, ERAF,
-  labelset2Lees, toetsRegelLabels, labelPlan2, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF,
+  labelset2Lees, toetsRegelLabels, labelPlan2, L2_VAST, L2_OPTIONEEL, L2_REGEL, L2_ERAF, STAP_LABEL, STAP_ERAF, STAP_POGINGEN,
   authPass, verkoopKandidaat, verkoopAnkers, verkoopVelden, verkoopCenten, verkoopOordeel, VERKOOP_DOMEINEN, VERKOOP_POSTVAK, VERKOOP_LABEL };
 
 // ─────────────────────────── startset (O.5) ───────────────────────────
@@ -675,13 +688,16 @@ CREATE TABLE IF NOT EXISTS aanbod (id INTEGER PRIMARY KEY, postvak TEXT NOT NULL
   erbij TEXT NOT NULL, eraf TEXT NOT NULL, tijd TEXT NOT NULL, uitkomst TEXT);
 CREATE INDEX IF NOT EXISTS aanbod_bericht ON aanbod (postvak, gmail_id, tijd);
 CREATE TABLE IF NOT EXISTS labelbasis (postvak TEXT NOT NULL, label TEXT NOT NULL, tijd TEXT NOT NULL, PRIMARY KEY (postvak, label));
+CREATE TABLE IF NOT EXISTS factuurstap (postvak TEXT NOT NULL, gmail_id TEXT NOT NULL, stap TEXT, stap_tijd TEXT, doel TEXT, pogingen INTEGER NOT NULL DEFAULT 0,
+  poging_tijd TEXT, PRIMARY KEY (postvak, gmail_id));
 `;
 
 // ─────────────────────────── opslag en routes ───────────────────────────
 
 /*
  * maak({ dir, fout, marker (patientpoort.js), eigenAdressen(), intakeDraden(postvak, [thread]) → Set, primair(), geheimOk(body), nu(),
- *   factuurVerwerkt([gmail_id]) → Map gmail_id → aantal documenten (wv1988: alleen ids waarvan elke factuur in de Facturen-app bevestigd is) })
+ *   factuurVerwerkt([gmail_id]) → Map gmail_id → aantal documenten (wv1988: alleen ids waarvan elke factuur in de Facturen-app bevestigd is),
+ *   factuurStap(postvak) → [{ gmail_id, stap: 'in_sepa' | 'is_betaald' }] (wv2036: factuurstap per bericht uit het verzamelpostvak) })
  * config.json in dir (0600, op de pod, niet in de repo): { postvakken: { "<id>": { naam, factuur_alias, stand, jev, tekst } }, todo_nooit: [..] }
  */
 function maak(o) {
@@ -1043,6 +1059,17 @@ function maak(o) {
     if (!isObj(t) || typeof t.ja !== 'string' || !t.ja) return { ok: false, reden: 'wacht op je Ja op de grondwetkaart (gelezen markeren en archiveren)' };
     return { ok: true, reden: 'Ja ' + t.ja.slice(0, 16) };
   }
+  // wv2036: mogen de statuslabels (factuurstap) in dit postvak? Alleen een eigen postvak waarvoor config.json statuslabels[postvak].ja zet (de
+  // machinekamer, na Davids Ja op de grondwetkaart statuslabels) én labelset 2 live staat (de stappen lopen mee in labels2/gezet2). → { ok, reden }
+  function stapMag(p) {
+    if (!p) return { ok: false, reden: 'postvak onbekend' };
+    if (p.gedeeld) return { ok: false, reden: 'gedeeld postvak: nooit' };
+    const c = config(), t = isObj(c.statuslabels) ? c.statuslabels[p.id] : null;
+    if (!isObj(t) || typeof t.ja !== 'string' || !t.ja) return { ok: false, reden: 'wacht op je Ja op de grondwetkaart (statuslabels)' };
+    if (!l2Live(p)) return { ok: false, reden: 'labelset 2 staat niet live' };
+    return { ok: true, reden: 'Ja ' + t.ja.slice(0, 16) };
+  }
+  function stapGet(pv, id) { return db.prepare('SELECT * FROM factuurstap WHERE postvak = ? AND gmail_id = ?').get(pv, id); }
 
   // ─────────── B8 labelset 2 (wv2033): labels als routering ───────────
   /*
@@ -1262,6 +1289,9 @@ function maak(o) {
    *  intrek   — route ingetrokken terwijl MailMans AI/MailMan nog staat: AI/MailMan eraf.
    *  overstap — eenmalig, ≤ 40 per ronde: wie AI/MailMan kreeg → INTAKE; TODO met mens ≥ 0,8 → ACTIE_DS erbij + TODO eraf; open Twijfel → TWIJFEL.
    *  archief  — B6+ ongewijzigd (FACTUUR/verwerkt erbij, INBOX eraf), nooit bij TODO of ACTIE_DS.
+   *  factuurstap — wv2036 (alleen met statuslabels): de factuurstap uit de Facturen-app erbij (FACTUUR/In_SEPA of FACTUUR/Is_betaald), de
+   *             eerdere stappen uit de reeks eraf; alleen vooruit, ≤ STAP_MAX per ronde, ≤ STAP_POGINGEN per stap, niet zolang het archiveren
+   *             van die mail nog loopt.
    * MailMan zet nooit een label terug dat David weghaalde, nooit AI/MailMan op Davids eigen _AI_-mail, en haalt alleen TWIJFEL, OVERIG
    * (alleen bij een keuze), AI/MailMan (intrekken) en UNREAD/INBOX weg; TODO alleen bij de overstap.
    */
@@ -1275,7 +1305,7 @@ function maak(o) {
       - db.prepare("SELECT count(*) n FROM aanbod WHERE postvak = ? AND uitkomst IS NULL AND tijd >= ? AND instr(erbij, ?) > 0").get(pv, new Date(nu() - AANBOD_EIGEN_MS).toISOString(), '"' + WACHTRIJ + '"').n;
     const acties = new Map(), aanbod = [], gelezenAangeboden = [], archiefPogingen = [], af = [];
     let wacht = 0;
-    const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, opruim: 0, overstap: 0, archief: 0 };
+    const tel = { besluit: 0, keuze: 0, vangnet: 0, route: 0, intrek: 0, opruim: 0, overstap: 0, archief: 0, factuurstap: 0 };
     const vol = function () { return acties.size >= LABEL_ACTIES_MAX; };
     const mag = function (id, l, na) { return !!set.ids[l] && !lsHeeft(pv, id, l) && !lsDavidWeg(pv, id, l, na); };
     const voeg = function (id, soort, erbij, eraf) {
@@ -1378,6 +1408,7 @@ function maak(o) {
     }
     // archief (B6+), nooit bij TODO of ACTIE_DS
     let archief = 0;
+    const archiefOpen = new Set();   // wv2036: mail die nog gearchiveerd wordt; de factuurstap wacht daarop (n8n archiveert alleen met FACTUUR erop)
     if (uitgang && st.factuur && st.factuur.archief && !vol() && typeof o.factuurVerwerkt === 'function') {
       const kand = db.prepare("SELECT id, gmail_id, bijlagen, labels_plan, labels, labels_gezet FROM besluit WHERE postvak = ? AND inhaal = 0 AND archief_tijd IS NULL AND archief_poging < ? AND instr(labels_gezet, ?) > 0 AND labels_tijd >= ? ORDER BY labels_tijd, id LIMIT 200")
         .all(pv, ARCHIEF_POGINGEN, '"FACTUUR"', new Date(nu() - ARCHIEF_MS).toISOString())
@@ -1390,8 +1421,28 @@ function maak(o) {
         let bij = [];
         try { bij = JSON.parse(x.bijlagen || '[]'); } catch (e) { bij = null; }
         if (!Array.isArray(bij) || docs < bij.filter(function (m) { return isPdfOfXml({ naam: '', mime: String(m) }); }).length) continue;
-        if (vol() || archief >= ARCHIEF_MAX) break;
+        archiefOpen.add(x.gmail_id);
+        if (vol() || archief >= ARCHIEF_MAX) continue;
         if (voeg(x.gmail_id, 'archief', [VERWERKT_LABEL], ['INBOX'])) { acties.get(x.gmail_id).archief = true; archiefPogingen.push(x.id); archief++; }
+      }
+    }
+    // factuurstap (wv2036): alleen vooruit; ook oudere en gearchiveerde mail (de Facturen-app noemt elk bericht uit het verzamelpostvak)
+    const stapPogingen = [];
+    if (stapMag(p).ok && typeof o.factuurStap === 'function' && !vol()) {
+      let lijst = [];
+      try { const x = o.factuurStap(pv); lijst = Array.isArray(x) ? x : []; } catch (e) { fout('mailman-factuurstap', e); }
+      let n = 0;
+      for (const x of lijst) {
+        if (vol() || n >= STAP_MAX) break;
+        if (!isObj(x) || !ID_RE.test(String(x.gmail_id || '')) || !Object.prototype.hasOwnProperty.call(STAP_RANG, x.stap)) continue;
+        const id = String(x.gmail_id), st = stapGet(pv, id);
+        if (acties.has(id) || archiefOpen.has(id)) continue;
+        if (st && st.stap && STAP_RANG[st.stap] >= STAP_RANG[x.stap]) continue;   // staat al (of verder): nooit een tweede wijziging, nooit terug
+        // opgegeven na STAP_POGINGEN (telling in /health); daarna één nieuwe poging per dag (review ZOU 5: een Gmail-storing brandt niets op)
+        if (st && st.doel === x.stap && st.pogingen >= STAP_POGINGEN && st.poging_tijd && Date.parse(st.poging_tijd) > nu() - 86400000) continue;
+        const b = besluitVan(pv, id);
+        if (b && buitenRij(b)) continue;
+        if (voeg(id, 'factuurstap', [STAP_LABEL[x.stap]], STAP_ERAF[x.stap].slice())) { stapPogingen.push({ id, doel: x.stap }); n++; }
       }
     }
     tx(function () {
@@ -1399,6 +1450,11 @@ function maak(o) {
       for (const a of aanbod) db.prepare('INSERT INTO aanbod (postvak, ronde, gmail_id, soort, erbij, eraf, tijd) VALUES (?, ?, ?, ?, ?, ?, ?)').run(pv, r.id, a.id, a.soort, JSON.stringify(a.erbij), JSON.stringify(a.eraf), t);
       for (const id of gelezenAangeboden) db.prepare('UPDATE besluit SET gelezen_aangeboden = ? WHERE id = ?').run(t, id);
       for (const id of archiefPogingen) db.prepare('UPDATE besluit SET archief_poging = archief_poging + 1 WHERE id = ?').run(id);
+      for (const x of stapPogingen) {   // een poging telt bij het aanbieden (ook als n8n niets terugmeldt); een nieuwe stap begint weer bij 1
+        db.prepare(`INSERT INTO factuurstap (postvak, gmail_id, doel, pogingen, poging_tijd) VALUES (?, ?, ?, 1, ?)
+          ON CONFLICT (postvak, gmail_id) DO UPDATE SET pogingen = CASE WHEN factuurstap.doel = excluded.doel THEN factuurstap.pogingen + 1 ELSE 1 END,
+          doel = excluded.doel, poging_tijd = excluded.poging_tijd`).run(pv, x.id, x.doel, t);
+      }
       for (const x of af) {
         if (x.k === 'besluit') db.prepare("UPDATE besluit SET labels_gezet = '[]', labels_tijd = ? WHERE id = ? AND labels_gezet IS NULL").run(t, x.id);
         else db.prepare('UPDATE besluit SET ' + (x.k === 'keuze' ? 'keuze_tijd' : 'vangnet_tijd') + ' = ? WHERE id = ?').run(t, x.id);
@@ -1412,7 +1468,7 @@ function maak(o) {
    * is af; de toestand komt de volgende ronde opnieuw uit label_staat (behalve gelezen: dicht, één keer).
    */
   function gezet2(r, d) {
-    const pv = r.postvak, tel = { ok: 0, fout: 0, gelezen: 0, archief: 0 };
+    const pv = r.postvak, tel = { ok: 0, fout: 0, gelezen: 0, archief: 0 }, telStap = { gezet: 0, fout: 0, overgeslagen: 0 };
     tx(function () {
       for (const x of (Array.isArray(d.resultaten) ? d.resultaten : []).slice(0, LABEL_ACTIES_MAX * 2)) {
         if (!isObj(x) || !ID_RE.test(String(x.gmail_id || ''))) continue;
@@ -1426,12 +1482,26 @@ function maak(o) {
           const erbij = ae.filter(function (l) { return erbijN.includes(l); }), eraf = aw.filter(function (l) { return erafN.includes(l); });
           if (x.ok !== true) {
             db.prepare('UPDATE aanbod SET uitkomst = ? WHERE id = ?').run(x.overgeslagen === true ? 'overgeslagen' : 'fout', a.id);
+            // review wv2036 ZOU 2: een factuurstap die de grens overslaat (prullenbak, verzonden, al verder) is geen labelfout
+            if (a.soort === 'factuurstap') { if (x.overgeslagen === true) telStap.overgeslagen++; else { telStap.fout++; tel.fout++; } continue; }
             if (x.overgeslagen === true && a.soort === 'besluit' && b && !ae.length) db.prepare("UPDATE besluit SET labels_gezet = '[]', labels_tijd = ? WHERE id = ? AND labels_gezet IS NULL").run(iso(), b.id);
             else tel.fout++;
             continue;
           }
           db.prepare("UPDATE aanbod SET uitkomst = 'ok' WHERE id = ?").run(a.id);
           tel.ok++;
+          if (a.soort === 'factuurstap') {
+            // wv2036: de stap staat pas vast als Gmail het label van de stap terugmeldt; FACTUUR eraf = MailMans eigen actie (geen 'David haalde het weg')
+            const doel = Object.keys(STAP_LABEL).find(function (k) { return ae.length === 1 && ae[0] === STAP_LABEL[k]; });
+            if (doel && erbij.includes(STAP_LABEL[doel])) {
+              db.prepare(`INSERT INTO factuurstap (postvak, gmail_id, stap, stap_tijd, doel, pogingen, poging_tijd) VALUES (?, ?, ?, ?, ?, 0, ?)
+                ON CONFLICT (postvak, gmail_id) DO UPDATE SET stap = CASE WHEN factuurstap.stap IS NULL OR factuurstap.stap = 'in_sepa' THEN excluded.stap ELSE factuurstap.stap END,
+                stap_tijd = CASE WHEN factuurstap.stap IS NULL OR factuurstap.stap = 'in_sepa' THEN excluded.stap_tijd ELSE factuurstap.stap_tijd END`).run(pv, id, doel, iso(), doel, iso());
+              telStap.gezet++;
+            } else telStap.fout++;
+            lsWeg(pv, id, 'FACTUUR', 'mailman');   // review KAN 7: na een stap staat FACTUUR nooit meer (ook als hij al weg was)
+            continue;
+          }
           if (a.soort === 'archief') {
             if (b && !b.archief_tijd && erbij.includes(VERWERKT_LABEL)) { db.prepare('UPDATE besluit SET archief_tijd = ? WHERE id = ?').run(iso(), b.id); tel.archief++; }
             continue;
@@ -1456,7 +1526,7 @@ function maak(o) {
       }
       db.prepare('UPDATE ronde SET labels_ok = labels_ok + ?, labels_fout = labels_fout + ?, gelezen_ok = gelezen_ok + ?, archief_ok = archief_ok + ? WHERE id = ?').run(tel.ok, tel.fout, tel.gelezen, tel.archief, r.id);
     });
-    return { status: 200, j: { ok: true, labelset: 2, telling: tel } };
+    return { status: 200, j: { ok: true, labelset: 2, telling: tel, factuurstap: telStap } };
   }
   /*
    * Live (B5, O.6/O.10): welke labels n8n deze ronde mag zetten. Alleen in stand live (gelezen bij deze aanvraag: terug naar schaduw stopt
@@ -2447,10 +2517,20 @@ function maak(o) {
         archief_24u: db.prepare('SELECT count(*) n FROM besluit WHERE postvak = ? AND archief_tijd >= ?').get(p.id, dag).n,
         inhaal: { besluiten: ih.besluiten, per_stroom: ih.per_stroom, rondes: ih.rondes, rondes_geslaagd: ih.rondes_geslaagd, laatste: ih.laatste },   // wv1983: alleen tellingen
         labelset: !!l2Live(p),   // wv2033 B8
+        factuurstap: p.gedeeld ? undefined : stapStand(p, dag),   // wv2036 statuslabels: alleen tellingen
         routes_24u: db.prepare('SELECT count(*) n FROM route WHERE postvak = ? AND aangemaakt >= ?').get(p.id, dag).n,
         correcties_24u: db.prepare('SELECT count(*) n FROM correctie WHERE postvak = ? AND tijd >= ?').get(p.id, dag).n,
         verkoop: p.id === VERKOOP_POSTVAK ? Object.assign({ door: !!p.verkoop_door, archief: !!p.verkoop_archief, toegestaan: verkoopMag(p).ok }, verkoopTellers(p.id, dag)) : undefined };   // wv1997: alleen tellingen
     }) };
+  }
+  // wv2036: stand van de statuslabels per postvak. open = stap gevraagd en nog niet in Gmail (komt terug), opgegeven = na STAP_POGINGEN niet gelukt
+  function stapStand(p, dag) {
+    const NIET = "(stap IS NULL OR (stap = 'in_sepa' AND doel = 'is_betaald'))";
+    const s = db.prepare(`SELECT COALESCE(sum(stap = 'in_sepa'), 0) in_sepa, COALESCE(sum(stap = 'is_betaald'), 0) is_betaald, COALESCE(sum(stap_tijd >= ?), 0) gezet_24u,
+      COALESCE(sum(doel IS NOT NULL AND ${NIET} AND pogingen < ?), 0) open, COALESCE(sum(doel IS NOT NULL AND ${NIET} AND pogingen >= ?), 0) opgegeven FROM factuurstap WHERE postvak = ?`)
+      .get(dag, STAP_POGINGEN, STAP_POGINGEN, p.id);
+    const u = db.prepare("SELECT COALESCE(sum(uitkomst = 'fout'), 0) f, COALESCE(sum(uitkomst = 'overgeslagen'), 0) o FROM aanbod WHERE postvak = ? AND soort = 'factuurstap' AND tijd >= ?").get(p.id, dag);
+    return { aan: stapMag(p).ok, in_sepa: s.in_sepa, is_betaald: s.is_betaald, gezet_24u: s.gezet_24u, open: s.open, opgegeven: s.opgegeven, fout_24u: u.f, overgeslagen_24u: u.o };
   }
   // Voor de box (hooguit één per dag, server.js): alleen als er iets mis is
   function zorgen() {
@@ -2463,6 +2543,12 @@ function maak(o) {
       if (l2Live(p)) {   // wv2033 B8: mail die niet in Intake komt (wachtrijlabel 3× weg zonder bewijs)
         const v = db.prepare("SELECT count(*) n FROM route WHERE postvak = ? AND status = 'gepland' AND pogingen >= ? AND bijgewerkt >= ?").get(p.id, ROUTE_POGINGEN, new Date(n - 86400000).toISOString()).n;
         if (v) uit.push(p.id + ': ' + v + ' mail met INTAKE komt niet in Intake (wachtrijlabel ' + ROUTE_POGINGEN + ' keer weg zonder bewijs)');
+      }
+      if (!p.gedeeld) {   // wv2036: factuurmail die na STAP_POGINGEN echte Gmail-fouten geen statuslabel kreeg (één keer; overgeslagen telt niet)
+        const og = db.prepare("SELECT count(*) n FROM factuurstap s WHERE s.postvak = ? AND s.doel IS NOT NULL AND (s.stap IS NULL OR (s.stap = 'in_sepa' AND s.doel = 'is_betaald')) AND s.pogingen = ? AND s.poging_tijd >= ? "
+          + "AND (SELECT a.uitkomst FROM aanbod a WHERE a.postvak = s.postvak AND a.gmail_id = s.gmail_id AND a.soort = 'factuurstap' ORDER BY a.id DESC LIMIT 1) = 'fout'")
+          .get(p.id, STAP_POGINGEN, new Date(n - 86400000).toISOString()).n;
+        if (og) uit.push(p.id + ': ' + og + ' factuurmail kreeg na ' + STAP_POGINGEN + ' pogingen geen statuslabel (In_SEPA/Is_betaald)');
       }
       if (p.stand === 'live') {
         const lf = db.prepare('SELECT COALESCE(sum(labels_fout), 0) n FROM ronde WHERE postvak = ? AND start >= ?').get(p.id, new Date(n - 86400000).toISOString()).n;

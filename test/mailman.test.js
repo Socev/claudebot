@@ -2136,3 +2136,104 @@ test('B8 review: keuze Intake op mail die al in Intake staat krijgt geen wachtri
   for (let i = 0; i < 8; i++) n += l2Ronde(mm, gm, ids).l.j.acties.filter(function (x) { return x.gmail_id === ms[1].id; }).length;
   assert.equal(n, 5);
 });
+
+// ── wv2036 statuslabels: factuurstap FACTUUR → FACTUUR/In_SEPA → FACTUUR/Is_betaald (achter config.json statuslabels) ──
+function stapToestaan(dir) {
+  const f = path.join(dir, 'config.json'), c = JSON.parse(fs.readFileSync(f, 'utf8'));
+  c.statuslabels = { 'gmail:david': { ja: '2026-11-02T09:00:00Z' }, 'gmail:groenhouten': { ja: 'x' } };
+  fs.writeFileSync(f, JSON.stringify(c), { mode: 0o600 });
+}
+function factuurLabels(gm, id) { return Array.from(gm.ber.get(id).labels).filter(function (l) { return l.indexOf('FACTUUR') === 0; }).sort(); }
+function stapActies(x) { return x.l.j.acties.filter(function (a) { return a.soort === 'factuurstap'; }); }
+
+test('wv2036 factuurstap: alleen met statuslabels; In_SEPA haalt FACTUUR en FACTUUR/verwerkt weg, Is_betaald ook In_SEPA; incasso meteen; idempotent; nooit terug', () => {
+  const stap = new Map(), gevraagd = [];
+  const { mm, dir } = nieuweKamer({ factuurStap: function (pv) { gevraagd.push(pv); return Array.from(stap, function (e) { return { gmail_id: e[0], stap: e[1] }; }).concat([{ gmail_id: 'geen-hex', stap: 'is_betaald' }, { gmail_id: hexId(), stap: 'onzin' }]); } });
+  const gm = nepGmail();
+  const f1 = mail(), f2 = mail(), f3 = mail();
+  draai(mm, 'gmail:david', [f1, f2, f3], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir);
+  [f1, f2, f3].forEach(function (m) { gm.voeg(m); });
+  gm.zet(f1.id, 'FACTUUR'); gm.zet(f1.id, 'FACTUUR/verwerkt'); gm.zet(f2.id, 'FACTUUR'); gm.zet(f3.id, 'FACTUUR');   // f1 al gearchiveerd (B6+)
+  const ids = [f1.id, f2.id, f3.id];
+  l2Ronde(mm, gm, ids);
+  stap.set(f1.id, 'in_sepa'); stap.set(f2.id, 'is_betaald');   // f2: incasso gezien (of batch al afgeschreven) → meteen Is_betaald
+  const zonder = l2Ronde(mm, gm, ids);
+  assert.deepEqual(stapActies(zonder), [], 'zonder statuslabels niets');
+  assert.equal(mm.info().postvakken.find(function (p) { return p.id === 'gmail:david'; }).factuurstap.aan, false);
+  stapToestaan(dir);
+  const x = l2Ronde(mm, gm, ids);
+  const per = perId(stapActies(x));
+  assert.deepEqual(Object.keys(per).sort(), [f1.id, f2.id].sort(), 'f3 heeft geen stap; ongeldige regels uit de Facturen-app vallen weg');
+  assert.deepEqual([per[f1.id].erbij, per[f1.id].eraf], [['FACTUUR/In_SEPA'], ['FACTUUR', 'FACTUUR/verwerkt']]);
+  assert.deepEqual([per[f2.id].erbij, per[f2.id].eraf], [['FACTUUR/Is_betaald'], ['FACTUUR', 'FACTUUR/verwerkt', 'FACTUUR/In_SEPA']]);
+  assert.equal(x.l.j.telling.factuurstap, 2);
+  assert.deepEqual(factuurLabels(gm, f1.id), ['FACTUUR/In_SEPA']);
+  assert.deepEqual(factuurLabels(gm, f2.id), ['FACTUUR/Is_betaald']);
+  assert.deepEqual(factuurLabels(gm, f3.id), ['FACTUUR']);
+  assert.deepEqual(x.g.j.factuurstap, { gezet: 2, fout: 0, overgeslagen: 0 });
+  assert.equal(lsRij(mm, f1.id, 'FACTUUR').weg_door, 'mailman', 'FACTUUR eraf is MailMans eigen actie');
+  assert.ok(gevraagd.every(function (pv) { return pv === 'gmail:david'; }));
+  // dubbele aanroep: geen tweede wijziging, en de labellijst daarna ziet geen 'David haalde FACTUUR weg'
+  const y = l2Ronde(mm, gm, ids);
+  assert.deepEqual(stapActies(y), []);
+  assert.equal(y.s.j.telling.david_eraf, 0);
+  // de bank ziet f1 → Is_betaald, In_SEPA eraf
+  stap.set(f1.id, 'is_betaald');
+  const z = l2Ronde(mm, gm, ids);
+  assert.deepEqual(stapActies(z).map(function (a) { return [a.gmail_id, a.erbij, a.eraf]; }), [[f1.id, ['FACTUUR/Is_betaald'], ['FACTUUR', 'FACTUUR/verwerkt', 'FACTUUR/In_SEPA']]]);
+  assert.deepEqual(factuurLabels(gm, f1.id), ['FACTUUR/Is_betaald']);
+  // terug in de Facturen-app (ongedaan, teruggeboekt): het label gaat nooit terug
+  stap.set(f1.id, 'in_sepa'); stap.set(f2.id, 'in_sepa');
+  assert.deepEqual(stapActies(l2Ronde(mm, gm, ids)), []);
+  const h = mm.info().postvakken.find(function (p) { return p.id === 'gmail:david'; }).factuurstap;
+  assert.deepEqual(h, { aan: true, in_sepa: 0, is_betaald: 2, gezet_24u: 2, open: 0, opgegeven: 0, fout_24u: 0, overgeslagen_24u: 0 });
+  assert.equal(mm.info().postvakken.find(function (p) { return p.id === 'gmail:groenhouten'; }).factuurstap, undefined, 'doktersmaten nooit');
+});
+
+test('wv2036 factuurstap wacht op het archiveren (n8n archiveert alleen met FACTUUR erop); mislukt → terug, hooguit 5 keer, dan in /health en de box', () => {
+  const stap = new Map(), verwerkt = new Map();
+  const { mm, dir } = nieuweKamer({ factuurStap: function () { return Array.from(stap, function (e) { return { gmail_id: e[0], stap: e[1] }; }); },
+    factuurVerwerkt: function (ids) { return new Map(ids.filter(function (i) { return verwerkt.has(i); }).map(function (i) { return [i, verwerkt.get(i)]; })); } });
+  const gm = nepGmail();
+  const f = mail({ aan: ALIAS, bijlagen: [{ naam: 'f.pdf', mime: 'application/pdf' }] }), g = mail();
+  draai(mm, 'gmail:david', [f, g], { jev: function () { return jevAntwoord(JEV_INFO); } });
+  toestaan(dir, ['gmail:david']); zetLive(mm); l2Toestaan(dir); uitgangToestaan(dir, ['gmail:david']); vinkje(mm, 'factuur', 'archief'); stapToestaan(dir);
+  gm.voeg(f); gm.voeg(g); gm.zet(g.id, 'FACTUUR');
+  const ids = [f.id, g.id];
+  l2Ronde(mm, gm, ids);
+  assert.deepEqual(factuurLabels(gm, f.id), ['FACTUUR'], 'MailMan zette FACTUUR');
+  verwerkt.set(f.id, 1); stap.set(f.id, 'in_sepa');
+  const a = l2Ronde(mm, gm, ids);
+  assert.deepEqual(a.l.j.acties.filter(function (x) { return x.gmail_id === f.id; }).map(function (x) { return x.soort; }), ['archief'], 'eerst archiveren, nog geen stap');
+  assert.ok(rij(mm, f.id).archief_tijd);
+  const b = l2Ronde(mm, gm, ids);
+  assert.deepEqual(stapActies(b).map(function (x) { return [x.gmail_id, x.erbij]; }), [[f.id, ['FACTUUR/In_SEPA']]]);
+  assert.deepEqual(factuurLabels(gm, f.id), ['FACTUUR/In_SEPA']);
+  // Gmail weigert steeds: g wordt hooguit 5 keer aangeboden, daarna opgegeven (telling + één box-regel)
+  stap.set(g.id, 'is_betaald');
+  gm.fout = true;
+  let n = 0;
+  for (let i = 0; i < 8; i++) n += stapActies(l2Ronde(mm, gm, ids)).filter(function (x) { return x.gmail_id === g.id; }).length;
+  assert.equal(n, K.STAP_POGINGEN);
+  const h = mm.info().postvakken.find(function (p) { return p.id === 'gmail:david'; }).factuurstap;
+  assert.deepEqual([h.opgegeven, h.open, h.in_sepa, h.fout_24u], [1, 0, 1, 5]);
+  assert.ok(mm.zorgen().some(function (z) { return /1 factuurmail kreeg na 5 pogingen geen statuslabel/.test(z); }));
+  assert.deepEqual(factuurLabels(gm, g.id), ['FACTUUR'], 'bleef staan');
+  // na een dag één nieuwe poging (review ZOU 5); Gmail werkt weer → Is_betaald; geen tweede box-regel
+  klok += 25 * 3600000;
+  gm.fout = false;
+  const c = l2Ronde(mm, gm, ids);
+  assert.deepEqual(stapActies(c).map(function (x) { return x.gmail_id; }), [g.id]);
+  assert.deepEqual(factuurLabels(gm, g.id), ['FACTUUR/Is_betaald']);
+  assert.ok(!mm.zorgen().some(function (z) { return /statuslabel/.test(z); }));
+  // overgeslagen bij de grens (prullenbak, verzonden, al verder) is geen labelfout en geen box-regel
+  const h2 = mail(); gm.voeg(h2, true); stap.set(h2.id, 'in_sepa');
+  let fouten = 0;
+  for (let i = 0; i < 6; i++) fouten += l2Ronde(mm, gm, ids).g.j.telling.fout;
+  assert.equal(fouten, 0);
+  const h3 = mm.info().postvakken.find(function (p) { return p.id === 'gmail:david'; }).factuurstap;
+  assert.deepEqual([h3.opgegeven, h3.overgeslagen_24u], [1, 5]);
+  assert.ok(!mm.zorgen().some(function (z) { return /statuslabel/.test(z); }), 'overgeslagen geeft geen box-regel');
+  klok -= 25 * 3600000;
+});

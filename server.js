@@ -15806,13 +15806,22 @@ function mailmanFactuurVerwerkt(ids) {
   for (const id of ids.slice(0, 200)) { if (!/^[0-9a-f]{12,24}$/.test(String(id))) continue; const r = q.get(String(id)); if (r) uit.set(String(id), Number(r.n) || 0); }
   return uit;
 }
+// wv2036 (statuslabels, Davids Ja 30-10-2026 16:30): de factuurstap per Gmail-bericht uit het verzamelpostvak (Davids privé-Gmail), voor
+// het doorschuiven van FACTUUR → FACTUUR/In_SEPA → FACTUUR/Is_betaald (facturen.js mailStappen, alleen lezen). Alleen gmail:david; zonder
+// Facturen-databank een lege lijst (dan schuift MailMan niets).
+function mailmanFactuurStap(postvak) {
+  if (postvak !== 'gmail:david') return [];
+  const fdb = facturenOpen();
+  if (!fdb || !fdb.db) return [];
+  return require(path.join(__dirname, 'facturen.js')).mailStappen(fdb);
+}
 const mailman = (function () {
   const p = path.join(__dirname, 'mailman.js');
   if (!fs.existsSync(p)) return null;
   try {
     return require(p).maak({ dir: MAILMAN_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
-      intakeDraden: mailmanIntakeDraden, intakeBerichten: mailmanIntakeBerichten, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt,
+      intakeDraden: mailmanIntakeDraden, intakeBerichten: mailmanIntakeBerichten, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt, factuurStap: mailmanFactuurStap,
       proces: intakeProces, verkoopTmp: '/dev/shm' });
   } catch (e) { logError('mailman', e); return null; }
 })();

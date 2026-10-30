@@ -1909,3 +1909,58 @@ test('wv2025 review: klopt de specificatie niet met de batch, dan "mislukt" (zic
   assert.ok(s.pdf.toString('latin1').includes('<8A756D617661208920'), 'Š en ‰ in WinAnsi');
   assert.doesNotMatch(tx, /\?/);
 });
+
+// wv2036 statuslabels: de factuurstap per Gmail-bericht uit het verzamelpostvak (voor MailMan). Alles verzonnen.
+test('wv2036 mailStappen: batch → in_sepa, bankmatch → is_betaald, incasso gezien → is_betaald, al betaald → in_sepa; laagste stap per bericht; alleen het verzamelpostvak', () => {
+  const t = opzet();
+  const b = bankOpzet(t);
+  const abn = sepaRek(t, 'tolgaarde').find((k) => k.rekening === '…' + b.tg.slice(-4));
+  const pv = t.fdb.db.prepare("SELECT id FROM bron WHERE soort = 'verzamelpostvak'").get().id, up = t.fdb.db.prepare("SELECT id FROM bron WHERE soort = 'upload'").get().id;
+  let n = 0;
+  const bericht = (bron) => { n++; const id = D.nieuwId(), mid = crypto.createHash('sha1').update('wv2036-' + n).digest('hex').slice(0, 16);
+    D.voegToe(t.fdb, 'bericht', { id, bron, message_id: mid, afzender: 'facturen@leverancier.invalid', onderwerp: 'Factuur', ontvangen_op: new Date(NU - n * 60000).toISOString() }); return { id, mid }; };
+  const koppel = (fid, ber) => t.fdb.db.prepare('UPDATE factuur SET bericht = ? WHERE id = ?').run(ber.id, fid);
+  const stappen = () => Object.fromEntries(F.mailStappen(t.fdb).map((x) => [x.gmail_id, x.stap]));
+  const m1 = bericht(pv), m2 = bericht(pv), m3 = bericht(pv), m4 = bericht(pv), m5 = bericht(up);
+  const a = teBetalenFactuur(t), a2 = teBetalenFactuur(t), c = teBetalenFactuur(t), d = teBetalenFactuur(t), e = teBetalenFactuur(t);
+  koppel(a, m1); koppel(a2, m2); koppel(c, m3); koppel(d, m4); koppel(e, m5);
+  assert.deepEqual(stappen(), {}, 'te betalen: nog geen stap');
+  // SEPA-batch → in_sepa (ook voor een tweede factuur in hetzelfde bericht pas als die ook in de batch zit)
+  const e2 = teBetalenFactuur(t); koppel(e2, m2);
+  const { r } = sepaDownload(t, abn.id, [a, a2]);
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.deepEqual(stappen(), { [m1.mid]: 'in_sepa' }, 'm2 heeft nog een te betalen factuur: laagste stap telt');
+  assert.equal(sepaDownload(t, abn.id, [e2]).r.status, 200);
+  assert.deepEqual(stappen(), { [m1.mid]: 'in_sepa', [m2.mid]: 'in_sepa' });
+  // bankmatch (losse betaling op EndToEndId) → is_betaald; geen tweede regel voor hetzelfde bericht
+  const fa = t.f('id = ?', [a]);
+  t.zetKlaar('beurt-wv2036', 1, 'export.tab', tabRij('0000000031', '20261105', '-' + (fa.incl / 100).toFixed(2).replace('.', ','),
+    '/TRTP/SEPA OVERBOEKING/IBAN/' + fa.iban + '/BIC/TESTNL2A/NAME/Proef/REMI/' + fa.nummer + '/EREF/' + a) + '\n');
+  assert.equal(t.call('POST', 'upload', { beurt: 'beurt-wv2036', n: 1, soort: 'auto' }, { nu: Date.parse('2026-11-07T10:00:00Z') }).status, 200);
+  assert.equal(t.f('id = ?', [a]).betaalspoor, 'betaald_gezien');
+  assert.deepEqual(stappen(), { [m1.mid]: 'is_betaald', [m2.mid]: 'in_sepa' });
+  assert.equal(F.mailStappen(t.fdb).filter((x) => x.gmail_id === m1.mid).length, 1);
+  // incasso: verwacht = nog geen stap; gezien (bankmatch) = meteen is_betaald (zonder In_SEPA)
+  t.fdb.db.prepare("UPDATE factuur SET betaalwijze = 'incasso', betaalspoor = 'incasso_verwacht' WHERE id = ?").run(c);
+  assert.equal(stappen()[m3.mid], undefined);
+  t.fdb.db.prepare("UPDATE factuur SET betaalspoor = 'betaald_gezien', betaald_gezien_op = '2026-11-05' WHERE id = ? AND betaalspoor = 'incasso_verwacht'").run(c);
+  assert.equal(stappen()[m3.mid], 'is_betaald');
+  // bevestigd als al betaald → in_sepa; een creditnota (niets te betalen) krijgt geen stap tot de bank hem ziet; geen_factuur telt niet mee
+  t.fdb.db.prepare("UPDATE factuur SET betaalwijze = 'betaald', betaalspoor = 'betaald_vooraf' WHERE id = ?").run(d);
+  assert.equal(stappen()[m4.mid], 'in_sepa');
+  t.fdb.db.prepare("UPDATE factuur SET soort = 'creditnota' WHERE id = ?").run(d);
+  assert.equal(stappen()[m4.mid], undefined);
+  // review MOET 1: een factuur die (nog of weer) niet bevestigd is, of waarvan de verzending mislukte, houdt de mail op FACTUUR (het archiveren gaat voor)
+  t.fdb.db.prepare("UPDATE factuur SET status = 'verzending_mislukt' WHERE id = ?").run(a);
+  assert.equal(stappen()[m1.mid], undefined);
+  t.fdb.db.prepare("UPDATE factuur SET status = 'verstuurd' WHERE id = ?").run(a);
+  assert.equal(stappen()[m1.mid], 'is_betaald');
+  // review ZOU 6: een creditnota naast een betaalde factuur houdt de mail niet tegen
+  const cn = teBetalenFactuur(t); koppel(cn, m3);
+  t.fdb.db.prepare("UPDATE factuur SET soort = 'creditnota', incl = -500, excl = -413, btw = -87, betaalspoor = 'betaald_vooraf', betaalwijze = 'betaald' WHERE id = ?").run(cn);
+  assert.equal(stappen()[m3.mid], 'is_betaald');
+  // upload-bron is geen Gmail-bericht; een niet-hex message_id ook niet
+  t.fdb.db.prepare("UPDATE factuur SET betaalspoor = 'betaald_gezien' WHERE id = ?").run(e);
+  assert.equal(stappen()[m5.mid], undefined);
+  assert.ok(F.mailStappen(t.fdb).every((x) => /^[0-9a-f]{12,24}$/.test(x.gmail_id) && ['in_sepa', 'is_betaald'].includes(x.stap)));
+});

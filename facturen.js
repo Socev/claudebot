@@ -2638,4 +2638,28 @@ function alsFout(e, log) {
   return { status: 500, j: { ok: false, fout: 'fout op de pod' }, reden: 'uitzondering' };
 }
 
-module.exports = { maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };
+/*
+ * wv2036 (statuslabels, Davids Ja 30-10-2026 16:30): de factuurstap per Gmail-bericht uit het verzamelpostvak (Davids privé-Gmail), voor
+ * MailMan, die het label doorschuift FACTUUR → FACTUUR/In_SEPA → FACTUUR/Is_betaald. Per bericht telt de laagste stap van zijn facturen;
+ * geen_factuur, dubbel en creditnota's tellen niet mee (review wv2036 ZOU 6: een creditnota is 'niets te betalen' en zou de mail anders
+ * tegenhouden). Een factuur telt pas als hij bevestigd is (status in_wachtrij, wordt_verstuurd, concept_klaar, verstuurd of prive_archief,
+ * zoals MailMans archiefregel; review MOET 1: anders kan de stap FACTUUR weghalen vóór het archiveren). Dan: betaald_gezien (bankmatch, ook een
+ * gezien incasso) = is_betaald; ingevoerd (SEPA-batch of 'ingevoerd in bank') of betaald_vooraf (bevestigd als al betaald) = in_sepa; al het
+ * andere (te betalen, incasso verwacht) = nog geen stap. Alleen berichten met een stap. UNION ALL over factuur.bericht en document.bericht
+ * (review ZOU 4: geen gecorreleerde subquery per factuur). Alleen lezen. → [{ gmail_id, stap }]
+ */
+const STAP_STATUS = "('in_wachtrij','wordt_verstuurd','concept_klaar','verstuurd','prive_archief')";
+function mailStappen(fdb, max) {
+  const RANG = `CASE WHEN f.status NOT IN ${STAP_STATUS} THEN 0 WHEN f.betaalspoor = 'betaald_gezien' THEN 2 WHEN f.betaalspoor IN ('ingevoerd','betaald_vooraf') THEN 1 ELSE 0 END`;
+  const ECHT = "f.status NOT IN ('geen_factuur','dubbel') AND f.soort = 'factuur' AND COALESCE(f.incl, 0) >= 0";
+  return fdb.db.prepare(`SELECT b.message_id AS gmail_id, min(x.rang) AS rang FROM (
+      SELECT f.bericht AS ber, ${RANG} AS rang FROM factuur f WHERE f.bericht IS NOT NULL AND ${ECHT}
+      UNION ALL
+      SELECT d.bericht AS ber, ${RANG} AS rang FROM factuur f JOIN document d ON d.id = f.document WHERE d.bericht IS NOT NULL AND ${ECHT}
+    ) x JOIN bericht b ON b.id = x.ber JOIN bron r ON r.id = b.bron
+    WHERE r.soort = 'verzamelpostvak' GROUP BY b.id HAVING min(x.rang) >= 1 ORDER BY b.ontvangen_op DESC LIMIT ?`).all(max || 2000)
+    .filter((x) => /^[0-9a-f]{12,24}$/.test(String(x.gmail_id)))
+    .map((x) => ({ gmail_id: String(x.gmail_id), stap: Number(x.rang) >= 2 ? 'is_betaald' : 'in_sepa' }));
+}
+
+module.exports = { mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };
