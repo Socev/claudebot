@@ -615,10 +615,20 @@ function leverancierBijTx(tx, ctx) {
   if (tx.incassant_id) { const l = lijst.find((x) => (x.incassant_ids || []).includes(tx.incassant_id)); if (l) return { leverancier: l, via: 'incassant' }; }
   const n = normNaam(tx.tegenpartij_naam);
   if (n.length >= 4) {
-    // eerst exact; anders een deel van de naam, maar alleen als precies één leverancier past (anders wint de eerste in de lijst)
-    const exact = lijst.filter((x) => normNaam(x.naam) === n);
-    const deel = exact.length ? exact : lijst.filter((x) => { const m = normNaam(x.naam); return m.length >= 6 && n.length >= 6 && (n.indexOf(m) >= 0 || m.indexOf(n) >= 0); });
-    if (deel.length === 1) return { leverancier: deel[0], via: 'naam' };
+    // eerst exact; anders een deel van de naam, maar alleen als precies één leverancier past (anders wint de eerste in de lijst).
+    // wv2047: het ingesloten deel moet minstens twee woorden zijn ("huisartsenzorg" uit "CV Huisartsenzorg" past anders op "NAK
+    // Huisartsenzorg"), en een deel-treffer krijgt deel: true — die geeft nooit een onbekend-IBAN-signaal. "X via Mollie" telt als de
+    // exacte naam X (de begunstigde staat vóór "via"; wv1360-toets: zo'n nieuwe rekening moet wél het signaal geven).
+    const voorVia = n.split(' via ')[0];
+    let exact = lijst.filter((x) => normNaam(x.naam) === n);
+    if (!exact.length && voorVia !== n && voorVia.length >= 4) exact = lijst.filter((x) => normNaam(x.naam) === voorVia);
+    const tweeWoorden = (s) => s.indexOf(' ') > 0;
+    const deel = exact.length ? exact : lijst.filter((x) => {
+      const m = normNaam(x.naam);
+      if (m.length < 6 || n.length < 6) return false;
+      return (n.indexOf(m) >= 0 && tweeWoorden(m)) || (m.indexOf(n) >= 0 && tweeWoorden(n));
+    });
+    if (deel.length === 1) return exact.length ? { leverancier: deel[0], via: 'naam' } : { leverancier: deel[0], via: 'naam', deel: true };
   }
   return null;
 }
@@ -1297,11 +1307,12 @@ function bankcontrole(inv) {
     const tegen = ibanNorm(tx.tegenpartij_iban);
     const basis = { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lt ? lt.leverancier.naam : tx.tegenpartij_naam,
       tegenpartij_iban: tx.tegenpartij_iban, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar, leverancier: lt ? lt.leverancier.id : null };
-    // betaald aan onbekend IBAN: de tegenpartij is een bekende leverancier (incassant of naam), het IBAN niet. Vóór de uitzonderingen,
+    // betaald aan onbekend IBAN: de tegenpartij is een bekende leverancier (incassant of exacte naam), het IBAN niet. wv2047: nooit op een
+    // deel van de naam (NAK Huisartsenzorg ≠ CV Huisartsenzorg). Vóór de uitzonderingen,
     // zodat een uitzondering op naam het fraudesignaal nooit uitzet (diffreview wv798 #13). wv1360: niet als die rekening al eerder als
     // betaaldienst of derdengeldenrekening betaald werd ("X via Mollie", PayPal, Amazon Payments …), of bij een incasso van zo'n dienst:
     // dat rekeningnummer is niet van X (archieftoets: anders ± 8 loze meldingen per maand).
-    if (richtingVan(tx) === 'af' && tegen && lt && lt.via !== 'iban' && levIbans(lt.leverancier).size && !eigenIbanMap(ctx).has(tegen)
+    if (richtingVan(tx) === 'af' && tegen && lt && lt.via !== 'iban' && !lt.deel && levIbans(lt.leverancier).size && !eigenIbanMap(ctx).has(tegen)
       && !isVerzamel(tx, tegen)) {
       signalen.push(maakSignaal('onbekend_iban', Object.assign({}, basis, { details: { via: lt.via } })));
     }

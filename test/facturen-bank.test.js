@@ -879,6 +879,28 @@ test('#9 alleen_eigenaar ook op uitzonderingen en op koppelingen/voorstellen met
   assert.equal(r.koppelingen[0].alleen_eigenaar, true);
 });
 
+test('wv2047: een deel van de naam geeft nooit een onbekend-IBAN-signaal; een deel van één woord is geen koppeling', () => {
+  const levs = LEVS.concat([{ id: 'hz', naam: 'CV Huisartsenzorg', ibans: [maakIban('NL', 'TEST', '0000000599')], incassant_ids: [] },
+    { id: 'kz', naam: 'Proef Kraamzorg Midden B.V.', ibans: [maakIban('NL', 'TEST', '0000000598')], incassant_ids: [] }]);
+  // "CV Huisartsenzorg" → "huisartsenzorg" (één woord): "ABC Huisartsenzorg" is een andere partij, geen koppeling en geen signaal
+  const abc = tx({ boekdatum: '2026-10-30', bedrag_centen: -151200, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'ABC Huisartsenzorg' });
+  assert.equal(B.leverancierBijTx(abc, { leveranciers: levs }), null);
+  assert.equal(B.leverancierBijTx(tx({ tegenpartij_naam: 'ABC Huisartsenzorg via Mollie' }), { leveranciers: levs }), null);
+  assert.ok(!soorten(controle({ transacties: [abc], facturen: [], leveranciers: levs })).includes('onbekend_iban'));
+  // exacte naam (rechtsvorm telt niet mee) blijft een koppeling en geeft het signaal wél
+  const zelf = tx({ boekdatum: '2026-10-30', bedrag_centen: -151200, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Huisartsenzorg C.V.' });
+  assert.deepEqual(B.leverancierBijTx(zelf, { leveranciers: levs }), { leverancier: levs.find((l) => l.id === 'hz'), via: 'naam' });
+  assert.ok(soorten(controle({ transacties: [zelf], facturen: [], leveranciers: levs })).includes('onbekend_iban'));
+  // een deel van meer woorden koppelt nog (voor voorstellen), maar geeft geen fraudesignaal
+  const deel = tx({ boekdatum: '2026-10-30', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Proef Kraamzorg Midden Noord' });
+  const lt = B.leverancierBijTx(deel, { leveranciers: levs });
+  assert.equal(lt.leverancier.id, 'kz'); assert.equal(lt.via, 'naam'); assert.equal(lt.deel, true);
+  assert.ok(!soorten(controle({ transacties: [deel], facturen: [], leveranciers: levs })).includes('onbekend_iban'));
+  // omgekeerd (de post is een deel van de leveranciersnaam): ook één woord telt niet
+  const kort = tx({ boekdatum: '2026-10-30', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Kraamzorg' });
+  assert.equal(B.leverancierBijTx(kort, { leveranciers: levs }), null);
+});
+
 test('#10 MT940 met een lange reeks spaties: lineair (geen ReDoS)', () => {
   const t0 = Date.now();
   B.leesBankbestand(':20:X\n:25:' + MT_IBAN + '\n:60F:C261230EUR1,00\n:61:' + ' '.repeat(400000) + 'x\n:62F:C261231EUR1,00\n-', { rekeningen: REKENINGEN });
