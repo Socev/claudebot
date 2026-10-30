@@ -122,7 +122,7 @@ jobs:
       - name: facturen-kern.js en facturen-bank.js moeten puur blijven
         if: ${{ !cancelled() }}
         run: |
-          for f in facturen-kern.js facturen-bank.js facturen-validatie.js facturen-sepa.js facturen-specificatie.js; do
+          for f in facturen-kern.js facturen-bank.js facturen-validatie.js facturen-sepa.js facturen-specificatie.js facturen-maandspec.js; do
             C=$(grep -vE '^\s*(\*|//)' "$f")
             if echo "$C" | grep -nE "require\([\`'\"](node:)?(fs(/promises)?|os|http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.|import\("; then
               echo "::error::$f laadt een bestand-, netwerk- of procesmodule; de kern moet puur blijven"; exit 1
@@ -149,7 +149,12 @@ jobs:
           if grep -vE '^\s*(\*|//)' facturen-specificatie.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('crypto'\)$"; then
             echo "::error::facturen-specificatie.js laadt een module buiten crypto"; exit 1
           fi
-          echo "facturen-kern.js, facturen-bank.js, facturen-validatie.js, facturen-sepa.js en facturen-specificatie.js: puur."
+          # facturen-maandspec.js (wv2060): PDF, mailtekst en Voor jou-kaart van de maandspecificatie PayPal en creditcard; alleen crypto en de
+          # PDF-bouwstenen van facturen-specificatie.js. Versturen doet hij niet: server.js zet een Gmail-concept klaar, David verstuurt.
+          if grep -vE '^\s*(\*|//)' facturen-maandspec.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(crypto|\./facturen-specificatie\.js)'\)$"; then
+            echo "::error::facturen-maandspec.js laadt een module buiten crypto en facturen-specificatie.js"; exit 1
+          fi
+          echo "facturen-kern.js, facturen-bank.js, facturen-validatie.js, facturen-sepa.js, facturen-specificatie.js en facturen-maandspec.js: puur."
 
       # pot-datahub.js (wv815): POT-posten naar Davids datahub. Puur: geen bestand-, netwerk- of procesmodule, geen fetch en geen klok
       # (vandaag komt van server.js); alleen crypto en mt940-lezer.js. Schrijven in D1 doet server.js, altijd met parameters.
@@ -207,7 +212,7 @@ jobs:
           if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\("; then
             echo "::error::facturen.js laadt een netwerk- of procesmodule; de routes moeten lokaal blijven"; exit 1
           fi
-          if grep -vE '^\s*(\*|//)' facturen.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js|\./facturen-db\.js|\./facturen-validatie\.js|\./facturen-sepa\.js|\./facturen-specificatie\.js|\./facturen-creditcard\.js|\./facturen-paypal\.js)'\)$"; then
+          if grep -vE '^\s*(\*|//)' facturen.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js|\./facturen-db\.js|\./facturen-validatie\.js|\./facturen-sepa\.js|\./facturen-specificatie\.js|\./facturen-creditcard\.js|\./facturen-paypal\.js|\./facturen-maandspec\.js)'\)$"; then
             echo "::error::facturen.js laadt een module buiten fs, node:sqlite en de Facturen-buren"; exit 1
           fi
           echo "facturen.js: alleen lokaal."

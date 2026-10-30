@@ -210,12 +210,20 @@ function maakPdf(g, o) {
     txt('F1', 6.5, M, M + 2, pas('F1', 6.5, voet[1], W - 2 * M - 60), false, kCaps);
     txt('F1', 7, W - M, M + 10, 'pagina ' + (pi + 1) + ' van ' + paginas.length, true);
   });
+  const asciiTitel = ('Specificatie SEPA-batch ' + g.entiteit_kort + ' ' + g.msg_id).normalize('NFD').replace(/[^\x20-\x7e]/g, '').replace(/[()\\]/g, '');
+  return pdfBestand(paginas, { titel: asciiTitel, gemaakt: o.gemaakt || g.wanneer, W, H });
+}
+
+// De pagina's (lijsten met PDF-opdrachten) → het PDF-bestand: catalogus, pagina's, Helvetica en Helvetica-Bold (WinAnsi), documentinfo.
+// Ook voor facturen-maandspec.js (wv2060). o = { titel (ASCII), gemaakt (ISO, UTC), W, H }.
+function pdfBestand(paginas, o) {
+  const W = o.W || 595.28, H = o.H || 841.89;
   const streams = paginas.map((p) => Buffer.from(p.join('\n') + '\n', 'latin1'));
   // objecten: 1 catalogus, 2 pagina's, 3 F1, 4 F2, 5 info, dan per pagina (pagina, inhoud)
   const obj = [];
   const kids = streams.map((_, pi) => (6 + pi * 2) + ' 0 R').join(' ');
-  const pdfDatum = String(o.gemaakt || g.wanneer).replace(/[-:T]/g, '').slice(0, 14) + 'Z';   // ISO in UTC
-  const asciiTitel = ('Specificatie SEPA-batch ' + g.entiteit_kort + ' ' + g.msg_id).normalize('NFD').replace(/[^\x20-\x7e]/g, '').replace(/[()\\]/g, '');
+  const pdfDatum = String(o.gemaakt || '').replace(/[-:T]/g, '').slice(0, 14) + 'Z';   // ISO in UTC
+  const asciiTitel = String(o.titel || '').normalize('NFD').replace(/[^\x20-\x7e]/g, '').replace(/[()\\]/g, '');
   obj.push(Buffer.from('<< /Type /Catalog /Pages 2 0 R >>', 'latin1'));
   obj.push(Buffer.from('<< /Type /Pages /Kids [' + kids + '] /Count ' + streams.length + ' >>', 'latin1'));
   obj.push(Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>', 'latin1'));
@@ -245,4 +253,6 @@ function maak(batch, regels, o) {
   return { g, pdf, sha256: crypto.createHash('sha256').update(pdf).digest('hex'), naam: bestandsnaam(g), mail: mail(g) };
 }
 
-module.exports = { maak, opbouw, mail, maakPdf, bestandsnaam, datumNl, eur, SpecFout, MAIL_REGELS };
+module.exports = { maak, opbouw, mail, maakPdf, bestandsnaam, datumNl, eur, SpecFout, MAIL_REGELS,
+  // wv2060: de PDF-bouwstenen voor facturen-maandspec.js
+  pdf: { breedte, pas, hex, getal, kleur, schoon, isoDag, pdfBestand } };

@@ -3963,6 +3963,23 @@ function handleRequest(req, res) {
     }); });
   }
 
+  // ── wv2060: maandspecificatie PayPal en creditcard opnieuw of eerder maken (machinekamer; body-secret zoals /facturen-ronde). Invoer
+  // { maand: 'JJJJ-MM', nogmaals?, nagekomen? }. Zet alleen een Gmail-concept aan André klaar (David verstuurt). Antwoord: alleen de stand.
+  if (req.method === 'POST' && req.url === '/facturen/maandspecificatie') {
+    return rolPoort(res, function () { readBody(req, function (d) {
+      if (!d) { res.writeHead(400); return res.end('bad json'); }
+      if (!SECRET || typeof d.secret !== 'string' || Buffer.byteLength(d.secret) !== Buffer.byteLength(SECRET) ||
+          !crypto.timingSafeEqual(Buffer.from(d.secret), Buffer.from(SECRET))) { res.writeHead(401); return res.end('unauthorized'); }
+      const stuur = function (st, j) { reqLogExtra(res, { maandspec: j && j.specificatie ? j.specificatie.status : 'fout' }); res.writeHead(st, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(j)); };
+      if (!facturenRoutes || !facturenRoutes.maandspec || !facturenRoutes.maandspec.aan) return stuur(404, { ok: false, fout: 'de maandspecificatie zit niet in deze versie van de pod' });
+      const fdb = facturenOpen();
+      if (!fdb) return stuur(409, { ok: false, fout: 'Facturen draait alleen op de primaire Olares-kant' });
+      const rol = facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'machinekamer' });
+      facturenMaandspecConcept(fdb, rol, String(d.maand || ''), { aanleiding: 'machinekamer', nogmaals: d.nogmaals === true, nagekomen: d.nagekomen === true })
+        .then(function (x) { stuur(x.status, x.j); });
+    }); });
+  }
+
   // ── wv1275: datumdetector (SB2 fase 2). Body-secret zoals /run; geen rolPoort: alleen rekenen (en het schaduwlog), dus op beide
   // kanten. Uitkomst = socev-datum uit de scripts-release van dat moment (datums.js). 404 als de module niet in de release zit.
   if (req.method === 'POST' && reqPath(req) === '/datums') {
@@ -15039,7 +15056,7 @@ function facturenInfo() {
   const routes = !!facturenRoutes;
   try {
     const f = facturenOpen();
-    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo() } : { aan: false, opslag: true, routes: false });
+    if (f) return Object.assign(facturenMod.health(f), routes ? { routes: true, koerier: facturenKoerierInfo(f), kaart: facturenKaartInfo(), paypal: facturenPaypalInfo(), maandspec: facturenMaandspecInfo() } : { aan: false, opslag: true, routes: false });
     return Object.assign({ aan: true, schema: null, passief: !facturenMagOpenen(), fout: facturenFout ? facturenFout.code : undefined }, routes ? { routes: true } : { aan: false, opslag: true, routes: false });
   } catch (e) { return { aan: routes, fout: true }; }
 }
@@ -15162,6 +15179,13 @@ async function appFacturen(req, res, a, s, d, route) {
     res._app.reden = 'facturen specificatie-concept ' + (x.j && x.j.specificatie ? x.j.specificatie.status : x.status);
     return appStuur(res, x.status, x.j);
   }
+  // wv2060: knop "Concept klaarzetten" bij de maandspecificatie (de download van de PDF loopt gewoon via facturen.js)
+  if (req.method === 'POST' && pad === '/app/facturen/maand-specificatie' && d && d.concept === true) {
+    if (!facturenRoutes.maandspec) return appWeiger(res, 404, 'de maandspecificatie zit niet in deze versie van de pod', 'maandspec ontbreekt');
+    const x = await facturenMaandspecConcept(fdb, rol, d.maand, { aanleiding: 'knop', nogmaals: d.nogmaals === true });
+    res._app.reden = 'facturen maandspec-concept ' + (x.j && x.j.specificatie ? x.j.specificatie.status : x.status);
+    return appStuur(res, x.status, x.j);
+  }
   const r = facturenRoutes.app(fdb, { methode: req.method, pad: pad, d: d || {}, rol: rol, primair: rolPrimair(),
     versOk: function () { return appVersOk(a, s); }, versVerbruik: function () { s.vers_tot = 0; },
     uploadNeem: function (b, n) { return facturenUploadNeem(a, b, n); }, bankluisPad: FACTUREN_BANKLUIS });
@@ -15169,6 +15193,8 @@ async function appFacturen(req, res, a, s, d, route) {
   if (req.method !== 'GET' && r.status === 200) facturenKaartPlan(3000);   // wv1705: verzamelkaart bijwerken (bevestigen, terugdraaien, upload)
   // wv2025: na een nieuwe batch (bestand gemaakt) het concept met de specificatie op de achtergrond; het antwoord wacht er niet op
   if (req.method === 'POST' && pad === '/app/facturen/sepa-batch' && r.status === 200 && r.j && r.j.batch && r.j.bestand) r.j.specificatie = facturenSpecNaBatch(fdb, rol, r.j.batch);
+  // wv2060: na een ICS-overzicht in Uploads de kaart "ICS — transacties uploaden" bijwerken (dicht als het overzicht nu binnen is)
+  if (req.method === 'POST' && pad === '/app/facturen/upload' && r.status === 200 && r.j && r.j.soort === 'creditcard') facturenMaandspecKaartPlan(1500);
   res._app.reden = 'facturen ' + (r.reden || pad.slice('/app/facturen'.length) || '/');
   return appStuur(res, r.status, r.j);
 }
@@ -15251,6 +15277,146 @@ async function facturenSpecMailluik(c) {
     return antw;
   }
   throw zeker('mailluik-webhook niet gevonden', 'het mailluik is niet te vinden');
+}
+// ── wv2060: maandspecificatie PayPal en creditcard voor de boekhouder (David 30-10-2026 ± 23:15; bouwplan Facturen-app (App) § Log) ──
+// André ziet in Exact per PayPal-betaling alleen "PayPal Europe" en per maand één ICS-incasso. Na de bank-ronde (na de PayPal-ronde):
+// (1) per creditcard de Voor jou-kaart "ICS — transacties van <maand> uploaden" vanaf 3 dagen na de ICS-incasso, zolang het overzicht van
+// die maand niet in Facturen staat; dicht (door agent, met bewijs) zodra het binnen is (ook kort na een upload in de app). (2) Vanaf de 3e
+// het Gmail-concept aan André met de PDF van de vorige maand (facturen.js maandspec.concept → hetzelfde mailluik als de SEPA-specificatie
+// → maandspec.uitkomst; spoor in de audit van Facturen). Zonder creditcard gaat het concept toch, met "nog niet aangeleverd"; komt het
+// overzicht later binnen, dan één aanvulling. David verstuurt altijd zelf (grondwet 1). Eerst de maand FACTUREN_MAANDSPEC_VANAF (2026-10);
+// eerdere maanden via de knop in de app of POST /facturen/maandspecificatie (API-geheim, machinekamer). Uitzetten: FACTUREN_MAANDSPEC=uit.
+const MAANDSPEC_VANAF = /^\d{4}-\d{2}$/.test(String(process.env.FACTUREN_MAANDSPEC_VANAF || '')) ? process.env.FACTUREN_MAANDSPEC_VANAF : '2026-10';
+const MAANDSPEC_DAG = 3, MAANDSPEC_PAYPAL_UITERLIJK = 6, MAANDSPEC_HERHAAL_TOT = 10;
+const facturenMaandspecStaat = { bezig: false, kaartBezig: false, kaartTimer: null, laatste: null };
+function facturenMaandspecAan() { return !!(facturenRoutes && facturenRoutes.maandspec && facturenRoutes.maandspec.aan && SERVER_ECHT && rolPrimair() && process.env.FACTUREN_MAANDSPEC !== 'uit'); }
+function facturenMaandspecInfo() { try { return facturenRoutes && facturenRoutes.maandspec ? Object.assign({ aan: facturenMaandspecAan(), vanaf: MAANDSPEC_VANAF }, facturenMaandspecStaat.laatste || {}) : undefined; } catch (e) { return undefined; } }
+// Eén box-rij per maand en reden (onthouden in de meta van Facturen, zodat een herstart niet nog eens meldt; grondwet 10).
+function facturenMaandspecBox(fdb, maand, kop, tekst) {
+  try {
+    let gemeld = {};
+    try { gemeld = JSON.parse(facturenMod.metaLees(fdb, 'maandspec_box') || '{}') || {}; } catch (e) { gemeld = {}; }
+    if (gemeld[maand] === kop) return;
+    gemeld[maand] = kop;
+    facturenMod.metaZet(fdb, 'maandspec_box', JSON.stringify(Object.fromEntries(Object.entries(gemeld).slice(-12))));
+    const pad = path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md');
+    const t = VV().lees(pad);
+    const eerste = /\n## \[[a-z]{2,10}\] \d{4}-\d{2}-\d{2}/.exec(t);
+    if (!eerste) return;
+    const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
+    const rij = '\n## [direct] ' + tijd + ' — Maandspecificatie ' + maand + ': ' + kop + ' #maandspec-andre (pod, automatisch)\n' +
+      '- status: open\n- van: pod facturenMaandspecRonde (server.js, na de bank-ronde)\n' +
+      '- gemeten: ' + String(tekst || '').replace(/[\r\n]+/g, ' ').slice(0, 200) + '\n' +
+      '- gevolg als er niets gebeurt: André krijgt geen specificatie van PayPal en creditcard voor ' + maand + '.\n' +
+      '- voorstel: eerst in Gmail bij Concepten kijken (bij "onbekend" staat hij er misschien al); dan POST /facturen/maandspecificatie {maand, nogmaals: true} of de knop in Apps › Facturen › Uploads.\n';
+    VV().schrijf(pad, t.slice(0, eerste.index) + rij + t.slice(eerste.index));
+  } catch (e) { logError('facturen-maandspec-box', e); }
+}
+// → { status, j } (gooit nooit). Zelfde patroon als facturenSpecConcept: voorbereiden (spoor aangevraagd) → mailluik → uitkomst (spoor).
+async function facturenMaandspecConcept(fdb, rol, maand, o) {
+  try {
+    if (process.env.FACTUREN_MAANDSPEC === 'uit') return { status: 409, j: { ok: false, fout: 'de maandspecificatie staat uit op de pod; download de PDF' } };
+    const v = facturenRoutes.maandspec.concept(fdb, rol, maand, { nu: Date.now(), primair: rolPrimair(), nogmaals: !!o.nogmaals, nagekomen: !!o.nagekomen, aanleiding: o.aanleiding });
+    if (v.status !== 200) return v;
+    if (v.j.klaar === false) return { status: 200, j: { ok: true, specificatie: { status: 'mislukt', reden: v.j.reden } } };
+    let uit;
+    try {
+      const antw = await facturenSpecMailluik(v.j);
+      uit = { ok: true, concept_id: antw.concept_id };
+    } catch (e) {
+      logError('facturen-maandspec', new Error(String(e && e.message || e).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)));
+      uit = e && e.zeker ? { ok: false, reden: e.reden || 'het mailluik nam het concept niet aan' }
+        : { ok: false, onzeker: true, reden: 'geen bevestiging van het mailluik; misschien staat het concept er toch' };
+    }
+    const u = facturenRoutes.maandspec.uitkomst(fdb, rol, maand, uit, { nu: Date.now(), primair: rolPrimair() });
+    if (u.status !== 200) logError('facturen-maandspec', new Error('spoor niet gezet: ' + String(u.j && u.j.fout || u.status).slice(0, 80)));
+    schrijfLog(nu() + ' facturen-maandspec ' + velden({ maand: maand, aanleiding: o.aanleiding, ok: uit.ok, onzeker: uit.onzeker, ics_ontbrak: v.j.ics_ontbrak }));
+    return { status: 200, j: { ok: true, ics_ontbrak: v.j.ics_ontbrak, specificatie: u.j && u.j.specificatie ? u.j.specificatie : { status: uit.ok ? 'klaar' : uit.onzeker ? 'onbekend' : 'mislukt', reden: uit.reden } } };
+  } catch (e) {
+    logError('facturen-maandspec', e);
+    return { status: 500, j: { ok: false, fout: 'fout op de pod' } };
+  }
+}
+// De ICS-kaarten bijwerken: zetten waar de incasso ≥ 3 dagen oud is en het overzicht ontbreekt (alleen als er nog geen kaart met die sleutel
+// is: een kaart die David parkeerde of dichtzette, blijft zoals hij is), dichtzetten waar het overzicht binnen is.
+async function facturenMaandspecKaarten(plan) {
+  const uit = { gezet: [], dicht: [], fouten: 0 };
+  if (!plan || !plan.kaarten.length) return uit;
+  const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true });
+  const punten = new Map(((j && j.punten) || []).filter(function (p) { return /^ics-upload-/.test(String(p.sleutel || '')); }).map(function (p) { return [p.sleutel, p]; }));
+  for (const k of plan.kaarten) {
+    const p = punten.get(k.sleutel);
+    try {
+      if (k.binnen) {
+        if (p && (p.status === 'open' || p.status === 'later')) {
+          await appSbRpc('mk_voor_jou_status', { p_sleutel: k.sleutel, p_van: p.status, p_naar: 'gedaan', p_door: 'agent',
+            p_bewijs: bankNuKort() + ': het ICS-overzicht van ' + facturenRoutes.maandspec.naam(k.maand) + ' staat in Facturen.', p_samengevoegd_in: null, p_reden: 'facturen-maandspec: overzicht binnen' });
+          uit.dicht.push(k.sleutel);
+        }
+        continue;
+      }
+      if (p || !k.open_vanaf || plan.vandaag < k.open_vanaf) continue;
+      const r = await appSbRpc('mk_voor_jou_zet', { p: facturenRoutes.maandspec.kaart({ sleutel: k.sleutel, laatste4: k.laatste4, maand: k.maand, incasso_eerste: k.incasso_eerste, nuKort: bankNuKort() }) });
+      if (r && r.sleutel) uit.gezet.push(k.sleutel); else uit.fouten++;
+      if (r && r.voor_jou && r.voor_jou.geweigerd) logError('facturen-maandspec-kaart', new Error('veld geweigerd: ' + JSON.stringify(r.voor_jou.geweigerd).slice(0, 120)));
+    } catch (e) { uit.fouten++; logError('facturen-maandspec-kaart', e); }
+  }
+  if (uit.gezet.length || uit.dicht.length) appStaat.vjCache = null;
+  return uit;
+}
+// Kort na een ICS-upload in de app: alleen de kaarten (een upload maakt nooit een concept).
+function facturenMaandspecKaartPlan(ms) {
+  if (!facturenMaandspecAan() || facturenMaandspecStaat.kaartTimer) return;
+  facturenMaandspecStaat.kaartTimer = setTimeout(function () {
+    facturenMaandspecStaat.kaartTimer = null;
+    if (facturenMaandspecStaat.kaartBezig) return;
+    const fdb = facturenOpen();
+    if (!fdb) return;
+    facturenMaandspecStaat.kaartBezig = true;
+    facturenMaandspecKaarten(facturenRoutes.maandspec.plan(fdb, Date.now(), MAANDSPEC_VANAF))
+      .then(function (k) { if (k.gezet.length || k.dicht.length) schrijfLog(nu() + ' facturen-maandspec ' + velden({ kaart_gezet: k.gezet.length, kaart_dicht: k.dicht.length })); })
+      .catch(function (e) { logError('facturen-maandspec-kaart', e); })
+      .finally(function () { facturenMaandspecStaat.kaartBezig = false; });
+  }, ms || 0);
+}
+// Na de bank-ronde (en na de PayPal-ronde). → alleen maand en uitkomst (naar n8n), of null als er niets te doen was.
+async function facturenMaandspecRonde() {
+  if (!facturenMaandspecAan()) return null;
+  if (facturenMaandspecStaat.bezig) return { ok: false, fout: 'er loopt al een maandspec-ronde' };
+  const fdb = facturenOpen();
+  if (!fdb) return null;
+  facturenMaandspecStaat.bezig = true;
+  try {
+    const nuMs = Date.now();
+    const plan = facturenRoutes.maandspec.plan(fdb, nuMs, MAANDSPEC_VANAF);
+    if (!plan) return null;
+    const uit = {};
+    if (!facturenMaandspecStaat.kaartBezig) {
+      facturenMaandspecStaat.kaartBezig = true;
+      try { const k = await facturenMaandspecKaarten(plan); if (k.gezet.length || k.dicht.length || k.fouten) uit.kaarten = { gezet: k.gezet.length, dicht: k.dicht.length, fouten: k.fouten || undefined }; }
+      catch (e) { logError('facturen-maandspec-kaart', e); uit.kaarten = { fout: 'kaartstap faalde' }; }
+      finally { facturenMaandspecStaat.kaartBezig = false; }
+    }
+    const v = plan.vorige, dag = Number(plan.vandaag.slice(8, 10)), st = v.stand;
+    if (v.maand >= MAANDSPEC_VANAF && dag >= MAANDSPEC_DAG) {
+      const rol = facturenRoutes.rolVoor(fdb, { ingang: 'app', wie: 'pod (maandronde)' });
+      // eerst als de PayPal-ronde van vandaag slaagde (de posten van de laatste dagen van de maand zijn er dan); uiterlijk de 6e toch
+      const pp = facturenPaypalStaat.laatste;
+      const ppVers = !!(pp && pp.ok && String(pp.op || '').slice(0, 10) === new Date(nuMs).toISOString().slice(0, 10));
+      const opnieuw = st.status === 'mislukt' && dag <= MAANDSPEC_HERHAAL_TOT && String(st.op || '').slice(0, 10) < new Date(nuMs).toISOString().slice(0, 10);
+      let c = null;
+      if ((st.status === 'geen' || opnieuw) && (ppVers || dag >= MAANDSPEC_PAYPAL_UITERLIJK || !facturenPaypal || process.env.FACTUREN_PAYPAL === 'uit')) c = await facturenMaandspecConcept(fdb, rol, v.maand, { aanleiding: 'ronde', nogmaals: opnieuw });
+      else if (v.nagekomen_kan) c = await facturenMaandspecConcept(fdb, rol, v.maand, { aanleiding: 'nagekomen', nagekomen: true });
+      else if (st.status === 'geen') uit.wacht = 'PayPal-ronde van vandaag nog niet geslaagd';
+      if (c) {
+        const s = c.j && c.j.specificatie ? c.j.specificatie.status : 'fout';
+        uit.concept = { maand: v.maand, status: s, ics_ontbrak: c.j && c.j.ics_ontbrak || undefined };
+        if (s !== 'klaar') facturenMaandspecBox(fdb, v.maand, s === 'onbekend' ? 'concept onbekend' : 'concept niet klaargezet', (c.j && (c.j.fout || (c.j.specificatie && c.j.specificatie.reden))) || s);
+      } else if (st.status === 'onbekend') facturenMaandspecBox(fdb, v.maand, 'concept onbekend', 'het mailluik gaf geen bevestiging; misschien staat het concept er toch');
+    }
+    facturenMaandspecStaat.laatste = Object.assign({ op: new Date(nuMs).toISOString() }, uit);
+    return Object.keys(uit).length ? uit : null;
+  } finally { facturenMaandspecStaat.bezig = false; }
 }
 // Na de bank-ronde: bankluis-rekeningen van Facturen read-only inlezen + bankcontrole (alleen aantallen terug; zonder bankluis-rekening niets).
 function facturenNaBankRonde() {
@@ -20248,6 +20414,11 @@ async function bankRonde() {
     const pp = await facturenPaypalRonde();
     if (pp) uit.facturen_paypal = pp;
   } catch (e) { logError('facturen-paypal', e); uit.facturen_paypal = { ok: false, fout: 'paypal-ronde faalde in de pod' }; }
+  // wv2060: daarna de maandspecificatie voor André (ICS-kaart; vanaf de 3e het concept van de vorige maand); alleen maand en uitkomst naar n8n
+  if (uit.ok) try {
+    const ms = await facturenMaandspecRonde();
+    if (ms) uit.facturen_maandspec = ms;
+  } catch (e) { logError('facturen-maandspec', e); uit.facturen_maandspec = { ok: false, fout: 'maandspec-ronde faalde in de pod' }; }
   // box-melding ná de kaartstap, met wat die deed (Fable wv685 #9)
   (r.box || []).forEach(function (m) {
     const kaart = uit.kaarten ? (uit.kaarten.gezet.length ? 'de ronde zette Voor jou-kaart ' + uit.kaarten.gezet.join(', ') + (m.reden === 'toestemming' ? ' en een regel voor het hoofdkanaal' : '')

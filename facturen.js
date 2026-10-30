@@ -34,6 +34,9 @@ try { CC = require('./facturen-creditcard.js'); } catch (e) { if (!(e && e.code 
 // wv2056: PayPal zakelijk als bron; ontbreekt het bestand in een release, dan alleen geen opdracht paypal
 let FP = null;
 try { FP = require('./facturen-paypal.js'); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND' && /facturen-paypal/.test(e.message))) throw e; FP = null; }
+// wv2060: maandspecificatie PayPal en creditcard; ontbreekt het bestand in een release, dan alleen geen maandspecificatie
+let MS = null;
+try { MS = require('./facturen-maandspec.js'); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND' && /facturen-maandspec/.test(e.message))) throw e; MS = null; }
 
 const ID_RE = /^[0-9a-f]{16}$/;
 const BEURT_RE = /^[a-z0-9-]{8,64}$/;
@@ -48,11 +51,11 @@ const STAPPEN = { beoordelen: ['te_beoordelen'], wachtrij: ['in_wachtrij', 'word
 // Alle routes (de toets controleert ze tegen APP_ROUTE_RE van server.js en de doorgeef-Function: [a-z0-9/-]{1,64}).
 const ROUTES = {
   GET: ['', 'lijst/<stap>', 'factuur/<id>', 'document/<id>', 'kandidaten/<id>', 'betalen', 'bank', 'uploads', 'leveranciers', 'instellingen', 'validatie', 'regels',
-    'afzender-voorstellen'],
+    'afzender-voorstellen', 'maand-specificatie'],
   POST: ['bevestig', 'terugdraaien', 'nagebeld', 'geen-factuur', 'toch-factuur', 'wijzig', 'ingevoerd', 'ingevoerd-ongedaan', 'opnieuw',
     'terug-naar-beoordelen', 'signaal', 'voorstel', 'feit', 'koppel', 'upload', 'leverancier', 'bankluis', 'validatie',
     'instellingen/adres', 'instellingen/modus', 'instellingen/verzendmoment', 'instellingen/rekening', 'instellingen/uitzondering',
-    'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel'],
+    'betaaldatum', 'sepa-batch', 'sepa-bestand', 'sepa-specificatie', 'regel', 'regel-weg', 'afzender-voorstel', 'maand-specificatie'],
 };
 // Routes die server.js in APP_BEHEER_ROUTES zet (nooit vanaf een vaste plek) én die hier een verse vingerafdruk vragen.
 const BEHEER = ['POST /app/facturen/instellingen/adres', 'POST /app/facturen/instellingen/modus'];
@@ -1214,6 +1217,196 @@ function specificatieUitkomst(fdb, r, id, u, nu) {
     return { specificatie: specStand(fdb, b.id, nu) };
   });
 }
+// ─────────────────────── maandspecificatie PayPal en creditcard voor de boekhouder (wv2060) ───────────────────────
+
+/*
+ * wv2060 (David 30-10-2026 ± 23:15: "de zakelijke paypalbetalingen gespecificeerd op 1 PDF ... elke maand, en hij wilt ook de creditcard
+ * afschrijvingen. Fijn als jij me herinnert die uploads te doen naar jou"). Per maand één PDF (facturen-maandspec.js): de PayPal-posten op de
+ * bank met de betaling erachter, en per kaart het ICS-rekeningoverzicht van die maand. Alleen lezen uit paypal_regel, kaart_regel,
+ * kaart_incasso, bank_transactie en factuur(_archief); het spoor (aangevraagd, klaar, mislukt, download) staat in de audit (object_soort
+ * maandspec, object_id JJJJ-MM). Hier geen netwerk: server.js zet het concept klaar via het mailluik (zoals de SEPA-specificatie), houdt de
+ * maandronde en de Voor jou-kaart "ICS — transacties uploaden" bij. Een ICS-overzicht kan David in de app uploaden (Uploads; zie upload()).
+ */
+const MS_WAT = ['maandspec_aangevraagd', 'maandspec_klaar', 'maandspec_mislukt'];
+const MS_KAART_NA_DAGEN = 3;   // de herinnering om te uploaden: zoveel dagen na de ICS-incasso van het overzicht
+function msMaandOk(m) { if (!MS || !MS.MAAND_RE.test(String(m || ''))) weiger(400, 'maand ontbreekt of is ongeldig (JJJJ-MM)'); return String(m); }
+function msStand(fdb, maand, nu) {
+  const a = fdb.db.prepare("SELECT wat, na, wanneer FROM audit WHERE object_soort = 'maandspec' AND object_id = ? AND wat IN ('" + MS_WAT.join("', '") + "') ORDER BY id DESC LIMIT 1").get(maand);
+  if (!a) return { status: 'geen' };
+  const na = json(a.na, {}) || {};
+  if (a.wat === 'maandspec_klaar') return { status: 'klaar', op: a.wanneer, ics_ontbrak: !!na.ics_ontbrak, nagekomen: !!na.nagekomen };
+  if (a.wat === 'maandspec_mislukt') return { status: na.onzeker ? 'onbekend' : 'mislukt', op: a.wanneer, reden: na.reden || null };
+  return { status: nu - Date.parse(a.wanneer) < SPEC_BEZIG_MS ? 'bezig' : 'onbekend', op: a.wanneer };
+}
+function msFactuurNummer(fdb) {
+  const f = fdb.db.prepare('SELECT nummer FROM factuur WHERE id = ?'), a = fdb.db.prepare('SELECT nummer FROM factuur_archief WHERE id = ?');
+  // id = factuur, arch = factuur_archief (PayPal geeft één id dat in een van beide staat: beide gelijk)
+  return (id, arch) => { const x = (id && f.get(id)) || (arch && a.get(arch)) || null; return x && x.nummer ? x.nummer : (id || arch ? 'gekoppeld' : ''); };
+}
+/*
+ * Het ICS-rekeningoverzicht `maand` van een kaart. → { regels, bank: [{ id, datum, bedrag_centen }], incasso_eerste, ingelezen_tot, binnen,
+ * status }. bank = de incassoregels op de rekening van de kaart voor dit overzicht (kaart_incasso, plus wat de omschrijving zelf zegt, zodat
+ * een nieuwe bankpost ook zonder koppelronde meetelt). binnen = het overzicht staat compleet in Facturen: er zijn al regels van een later
+ * overzicht (ICS sloot dit overzicht), of de transacties zijn gelijk aan de incasso op de cent.
+ */
+function icsMaand(fdb, kaart, maand) {
+  const regels = fdb.db.prepare("SELECT transactiedatum, omschrijving, handelaar, valuta_orig, bedrag_orig_centen, bedrag_centen, factuur, factuur_archief FROM kaart_regel WHERE kaart = ? AND soort = 'transactie' AND overzicht = ? ORDER BY transactiedatum, id").all(kaart.id, maand);
+  const bank = new Map();
+  for (const t of fdb.db.prepare('SELECT t.id, t.boekdatum, t.bedrag_centen FROM kaart_incasso k JOIN bank_transactie t ON t.id = k.transactie WHERE k.kaart = ? AND k.overzicht = ? AND t.verwijderd_op IS NULL').all(kaart.id, maand)) bank.set(t.id, t);
+  for (const t of fdb.db.prepare('SELECT id, boekdatum, bedrag_centen, omschrijving FROM bank_transactie WHERE rekening = ? AND verwijderd_op IS NULL AND instr(omschrijving, ?) > 0 AND boekdatum >= ?')
+    .all(kaart.rekening, 'ICS-klantnummer ' + kaart.klantnummer, MS.vorigeMaand(maand) + '-01')) {
+    if (!bank.has(t.id) && !fdb.db.prepare('SELECT 1 FROM kaart_incasso WHERE transactie = ?').get(t.id) && CC.incassoOverzicht(t.omschrijving, kaart.klantnummer) === maand) bank.set(t.id, t);
+  }
+  const b = [...bank.values()].map((t) => ({ id: t.id, datum: t.boekdatum, bedrag_centen: t.bedrag_centen })).sort((x, y) => (x.datum < y.datum ? -1 : x.datum > y.datum ? 1 : 0));
+  const later = !!fdb.db.prepare("SELECT 1 FROM kaart_regel WHERE kaart = ? AND soort <> 'autorisatie' AND overzicht > ? LIMIT 1").get(kaart.id, maand);
+  const tot = fdb.db.prepare('SELECT max(periode_tot) AS t FROM kaart_bestand WHERE kaart = ?').get(kaart.id).t || null;
+  const som = regels.reduce((s, r) => s + r.bedrag_centen, 0), bankNetto = -b.reduce((s, x) => s + x.bedrag_centen, 0);
+  const binnen = later || (regels.length > 0 && b.length > 0 && som === bankNetto);
+  const status = regels.length ? (binnen ? 'sluit' : b.length ? 'niet_aangeleverd' : 'nog_niet_geincasseerd') : later && !b.length ? 'geen' : 'niet_aangeleverd';
+  return { regels, bank: b, incasso_eerste: b.length ? b[0].datum : null, ingelezen_tot: tot, binnen, status };
+}
+// De invoer voor facturen-maandspec.js opbouw (alleen lezen).
+function msGegevens(fdb, maand) {
+  const nummer = msFactuurNummer(fdb);
+  const entNaam = new Map(fdb.db.prepare('SELECT sleutel, naam FROM entiteit').all().map((e) => [e.sleutel, e.naam]));
+  let paypal = null;
+  if (FP && fdb.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'paypal_regel'").get()) {
+    let laatste = null;
+    try { laatste = JSON.parse(D.metaLees(fdb, 'paypal_laatste') || 'null'); } catch (e) { laatste = null; }
+    const bijgewerkt = laatste ? String(laatste.ververst || laatste.op || '') : '';
+    const posten = FP.aansluiting(fdb, { maand }).posten;
+    const rek = fdb.db.prepare('SELECT t.rekening, r.iban FROM bank_transactie t JOIN rekening r ON r.id = t.rekening WHERE t.id = ?');
+    const per = new Map();
+    for (const p of posten) {
+      const rk = rek.get(p.bank) || {};
+      const k = p.entiteit + '|' + (rk.rekening || '');
+      if (!per.has(k)) per.set(k, { entiteit: p.entiteit, entiteit_naam: entNaam.get(p.entiteit) || p.entiteit, rekening_eind: String(rk.iban || '').slice(-4), posten: [] });
+      const w = p.betaling || null;
+      const fac = w && w.factuur ? nummer(w.factuur, w.factuur) : '';
+      per.get(k).posten.push({ datum: p.boekdatum, bank_centen: p.bank_centen, status: p.status, tegenpartij: w ? w.tegenpartij || w.leverancier : null, onderwerp: w ? w.onderwerp : null,
+        valuta: w ? w.valuta : null, bedrag_centen: w ? w.bedrag_centen : null, factuur: fac });
+    }
+    paypal = { bijgewerkt: /^\d{4}-\d{2}-\d{2}T/.test(bijgewerkt) ? dagAmsterdam(Date.parse(bijgewerkt)) : null, rekeningen: [...per.values()] };
+  }
+  const kaarten = [];
+  const ics = {};
+  if (CC && fdb.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kaart'").get()) {
+    for (const k of fdb.db.prepare('SELECT k.*, r.iban FROM kaart k JOIN rekening r ON r.id = k.rekening ORDER BY k.laatste4').all()) {
+      const m = icsMaand(fdb, k, maand);
+      ics[k.laatste4] = m;
+      kaarten.push({ laatste4: k.laatste4, entiteit: k.entiteit, entiteit_naam: entNaam.get(k.entiteit) || k.entiteit, rekening_eind: String(k.iban).slice(-4), status: m.status,
+        ingelezen_tot: m.ingelezen_tot, bank: m.bank, regels: m.status === 'niet_aangeleverd' ? [] : m.regels.map((r) => ({ datum: r.transactiedatum, omschrijving: r.omschrijving,
+          valuta: r.valuta_orig, bedrag_orig_centen: r.bedrag_orig_centen, bedrag_centen: r.bedrag_centen, factuur: nummer(r.factuur, r.factuur_archief) })) });
+    }
+  }
+  return { x: { maand, paypal, kaarten }, ics };
+}
+function msMaak(fdb, maand, nu, stijlVoor, o) {
+  const { x, ics } = msGegevens(fdb, maand);
+  let g0;
+  try { g0 = MS.opbouw(x); } catch (e) { if (e instanceof MS.MaandFout) weiger(409, 'de specificatie is niet te maken (' + e.message + ')', { code: 'spec_klopt_niet' }); throw e; }
+  let stijl = null;
+  try { stijl = g0.entiteiten.length === 1 && typeof stijlVoor === 'function' ? stijlVoor(g0.entiteiten[0]) || null : null; } catch (e) { stijl = null; }
+  const s = MS.maak(x, { stijl, gemaakt: nuIso(nu), gemaakt_dag: dagAmsterdam(nu), nagekomen: !!(o && o.nagekomen) });
+  return { s, ics };
+}
+// GET maand-specificatie: de laatste zes maanden met de stand (spoor, PayPal-posten, creditcard binnen of niet).
+function maandSpecOverzicht(fdb, r, nu) {
+  eisEigenaar(r);
+  if (!MS) weiger(404, 'de maandspecificatie zit niet in deze versie van de pod');
+  let m = MS.vorigeMaand(dagAmsterdam(nu).slice(0, 7));
+  const maanden = [];
+  for (let i = 0; i < 6; i++, m = MS.vorigeMaand(m)) {
+    const { x } = msGegevens(fdb, m);
+    maanden.push({ maand: m, naam: MS.maandNaam(m), specificatie: msStand(fdb, m, nu),
+      paypal_posten: x.paypal ? x.paypal.rekeningen.reduce((s, k) => s + k.posten.length, 0) : null,
+      creditcard: x.kaarten.map((k) => ({ kaart: '…' + k.laatste4, status: k.status, transacties: k.regels.length })) });
+  }
+  return { maanden, aan: specAan(fdb, 'tolgaarde') ? true : false };
+}
+// POST maand-specificatie { maand }: de PDF als download (base64). Het concept zet server.js klaar (maandspec.concept, d.concept = true).
+function maandSpecificatie(fdb, r, d, nu, stijlVoor) {
+  eisEigenaar(r);
+  if (r.ingang !== 'app') weiger(403, 'de maandspecificatie maakt David in zijn eigen app');
+  if (!MS) weiger(404, 'de maandspecificatie zit niet in deze versie van de pod');
+  const maand = msMaandOk(d.maand);
+  const { s } = msMaak(fdb, maand, nu, stijlVoor);
+  return D.transactie(fdb, function () {
+    D.audit(fdb, { wie: r.wie, wat: 'maandspec_download', object_soort: 'maandspec', object_id: maand, entiteit: s.g.entiteiten.length === 1 ? s.g.entiteiten[0] : null, na: { sha256: s.sha256 }, wanneer: nuIso(nu) });
+    return { maand, bestand: { naam: s.naam, type: 'application/pdf', codering: 'base64', inhoud: s.pdf.toString('base64'), sha256: s.sha256 }, specificatie: msStand(fdb, maand, nu) };
+  });
+}
+/*
+ * Voor server.js: het concept voorbereiden. o = { nu, nogmaals, nagekomen, aanleiding: 'ronde' | 'knop' | 'machinekamer' }. Zelfde regels
+ * als de SEPA-specificatie: niet twee keer tegelijk, niet nog eens als er al een (misschien) staat, tenzij nogmaals of nagekomen (de
+ * creditcard kwam na het eerste concept binnen). → { klaar: false, reden } of { maand, aan, onderwerp, bericht, bijlage } (alleen voor de pod).
+ */
+function maandSpecConcept(fdb, r, maand, o) {
+  eisEigenaar(r);
+  if (!MS) weiger(404, 'de maandspecificatie zit niet in deze versie van de pod');
+  maand = msMaandOk(maand);
+  const nu = o.nu;
+  let m;
+  try { m = msMaak(fdb, maand, nu, o.stijlVoor, { nagekomen: o.nagekomen }); }
+  catch (e) {
+    if (!(e instanceof RouteFout) || !e.extra || e.extra.code !== 'spec_klopt_niet') throw e;
+    D.transactie(fdb, () => D.audit(fdb, { wie: r.wie, wat: 'maandspec_mislukt', object_soort: 'maandspec', object_id: maand, na: { aanleiding: o.aanleiding || null, reden: e.fout }, wanneer: nuIso(nu) }));
+    return { klaar: false, reden: e.fout };
+  }
+  const { s } = m;
+  const aan = specAan(fdb, s.g.entiteiten.length === 1 ? s.g.entiteiten[0] : 'tolgaarde');
+  return D.transactie(fdb, function () {
+    const st = msStand(fdb, maand, nu);
+    if (st.status === 'bezig') weiger(409, 'de specificatie wordt al klaargezet; kijk zo in Gmail bij Concepten', { code: 'bezig' });
+    if (!o.nogmaals && !o.nagekomen && st.status === 'klaar') weiger(409, 'er staat al een concept met de maandspecificatie in Gmail', { code: 'al_klaar', op: st.op });
+    if (!o.nogmaals && st.status === 'onbekend') weiger(409, 'er is al een concept aangevraagd, maar de bevestiging kwam niet terug; kijk eerst in Gmail bij Concepten', { code: 'misschien_al', op: st.op });
+    const wanneer = nuIso(nu);
+    if (!aan) {
+      D.audit(fdb, { wie: r.wie, wat: 'maandspec_mislukt', object_soort: 'maandspec', object_id: maand, na: { aanleiding: o.aanleiding || null, reden: 'geen adres van de boekhouder in Facturen' }, wanneer });
+      return { klaar: false, reden: 'geen adres van de boekhouder in Facturen' };
+    }
+    D.audit(fdb, { wie: r.wie, wat: 'maandspec_aangevraagd', object_soort: 'maandspec', object_id: maand, entiteit: s.g.entiteiten.length === 1 ? s.g.entiteiten[0] : null,
+      na: { aanleiding: o.aanleiding || null, sha256: s.sha256, nogmaals: !!o.nogmaals, nagekomen: !!o.nagekomen, ics_ontbrak: s.g.ics_ontbreekt,
+        paypal_posten: s.g.paypal ? s.g.paypal.aantal : null, kaartregels: s.g.kaarten.reduce((t, k) => t + k.aantal, 0) }, wanneer });
+    return { maand, aan, onderwerp: s.mail.onderwerp, bericht: s.mail.bericht, ics_ontbrak: s.g.ics_ontbreekt,
+      bijlage: { naam: s.naam, mime: 'application/pdf', inhoud_base64: s.pdf.toString('base64'), sha256: s.sha256 } };
+  });
+}
+// Voor server.js: de uitkomst van het mailluik → het spoor (bij klaar: of de creditcard ontbrak, uit de aanvraag) + de stand.
+function maandSpecUitkomst(fdb, r, maand, u, nu) {
+  maand = msMaandOk(maand);
+  return D.transactie(fdb, function () {
+    const a = fdb.db.prepare("SELECT na FROM audit WHERE object_soort = 'maandspec' AND object_id = ? AND wat = 'maandspec_aangevraagd' ORDER BY id DESC LIMIT 1").get(maand);
+    const aanv = a ? json(a.na, {}) || {} : {};
+    D.audit(fdb, { wie: r.wie, wat: u.ok ? 'maandspec_klaar' : 'maandspec_mislukt', object_soort: 'maandspec', object_id: maand,
+      na: u.ok ? { concept_id: kort(u.concept_id, 60), ics_ontbrak: !!aanv.ics_ontbrak, nagekomen: !!aanv.nagekomen }
+        : Object.assign({ reden: kort(u.reden || 'het mailluik nam het concept niet aan', 160) }, u.onzeker ? { onzeker: true } : {}), wanneer: nuIso(nu) });
+    return { specificatie: msStand(fdb, maand, nu) };
+  });
+}
+/*
+ * Voor de maandronde van server.js (alleen lezen). vanaf = de eerste maand die de ronde zelf maakt. → { vorige: { maand, stand, binnen
+ * (creditcard van die maand compleet), nagekomen_kan }, kaarten: [{ sleutel, laatste4, maand, incasso_eerste, binnen, open_vanaf }] }.
+ * De herinnering hoort bij het overzicht van deze maand (incasso in deze maand) en bij de vorige maand zolang die nog niet binnen is.
+ */
+function maandSpecPlan(fdb, nu, vanaf) {
+  if (!MS) return null;
+  const vandaag = dagAmsterdam(nu), deze = vandaag.slice(0, 7), vorige = MS.vorigeMaand(deze);
+  const kaarten = [];
+  const lijst = CC && fdb.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kaart'").get() ? fdb.db.prepare('SELECT * FROM kaart ORDER BY laatste4').all() : [];
+  let vorigeBinnen = true;
+  for (const k of lijst) {
+    for (const m of [vorige, deze]) {
+      if (vanaf && m < vanaf) continue;
+      const x = icsMaand(fdb, k, m);
+      if (m === vorige && !x.binnen && x.status !== 'geen') vorigeBinnen = false;
+      kaarten.push({ sleutel: 'ics-upload-' + k.laatste4 + '-' + m, laatste4: k.laatste4, maand: m, incasso_eerste: x.incasso_eerste, binnen: x.binnen || x.status === 'geen',
+        open_vanaf: x.incasso_eerste ? K.plusDagen(x.incasso_eerste, MS_KAART_NA_DAGEN) : null });
+    }
+  }
+  const st = msStand(fdb, vorige, nu);
+  return { vandaag, vorige: { maand: vorige, stand: st, binnen: vorigeBinnen, nagekomen_kan: st.status === 'klaar' && st.ics_ontbrak && !st.nagekomen && vorigeBinnen }, kaarten };
+}
 // Voor de bankcontrole: per PmtInf de eigen rekening, uitvoerdatum, totaal en regels (batches van de laatste 400 dagen).
 function sepaVoorControle(fdb, van) {
   const per = new Map();
@@ -2357,6 +2550,20 @@ function verwerkBericht(fdb, invoer, o) {
     return { documenten: uit.documenten.map((d) => ({ sha256: d.sha256, uitkomst: d.uitkomst })), facturen };
   });
 }
+// wv2060: een ICS-transactieoverzicht (CSV) herkennen aan de eerste drie kolomkoppen (de lezer toetst daarna de hele kop).
+function isIcsCsv(bytes) {
+  const eerste = bytes.subarray(0, 2048).toString('utf8').replace(/^\uFEFF/, '').split(/\r?\n/)[0] || '';
+  return eerste.replace(/"/g, '').split(';').slice(0, 3).join(';') === CC.ICS_KOPPEN.slice(0, 3).join(';');
+}
+// Inlezen voor de kaart (facturen-creditcard.js: hele bestand of niets, idempotent op regel, kaartnummer geweigerd); alleen de eigenaar.
+function verwerkIcs(fdb, r, bytes, naam, nu) {
+  eisEigenaar(r);
+  let x;
+  try { x = CC.inlezen(fdb, null, bytes, { wie: r.wie, herkomst: 'app-upload: ' + kort(naam || 'ics.csv', 200), naam: naam || null, nu }); }
+  catch (e) { if (e instanceof CC.KaartFout) weiger(e.code === 'kaartnummer' ? 422 : 415, 'ICS-overzicht geweigerd: ' + kort(e.uitleg, 160), { code: 'creditcard_' + e.code }); throw e; }
+  const k = fdb.db.prepare('SELECT laatste4 FROM kaart LIMIT 1').get();
+  return { soort: 'creditcard', al_bekend: !!x.al_bekend, kaart: k ? '…' + k.laatste4 : null, periode: x.periode, regels: x.regels, nieuw: x.nieuw, al_bekend_regels: x.al_bekend_regels };
+}
 function upload(fdb, r, d, nu, o) {
   const beurt = String(d.beurt || ''), n = Number(d.n), soort = d.soort === undefined ? 'auto' : d.soort;
   if (!BEURT_RE.test(beurt) || !Number.isInteger(n) || n < 1 || n > 10) weiger(400, 'beurt en n ontbreken of zijn ongeldig');
@@ -2368,6 +2575,10 @@ function upload(fdb, r, d, nu, o) {
     const bytes = Buffer.isBuffer(st.bytes) ? st.bytes : Buffer.from(st.bytes);
     if (!bytes.length) weiger(400, 'leeg bestand');
     if (bytes.length > D.MAX_STUK) weiger(413, 'bestand groter dan 20 MB');
+    if (CC && isIcsCsv(bytes)) {   // wv2060: het ICS-overzicht van de creditcard (CSV) hoort bij de kaart, niet bij de bank of de stukken
+      if (soort === 'factuur') weiger(415, 'geen PDF, UBL of afbeelding');
+      return verwerkIcs(fdb, r, bytes, st.naam, nu);
+    }
     const herkend = soortVan(bytes, st.naam || '');
     if (soort === 'bank' && herkend !== 'bank') weiger(415, 'dit is geen bankexport (MT940, TAB of CSV)');
     if (soort === 'factuur' && herkend === 'bank') weiger(415, 'geen PDF, UBL of afbeelding');
@@ -2714,6 +2925,7 @@ function maak(opties) {
         if (rest === 'validatie') return ok(validatie(fdb, r, { soort: 'overzicht' }, nu));
         if (rest === 'regels') return ok(regelsLijst(fdb, r));
         if (rest === 'afzender-voorstellen') return ok(afzenderVoorstellen(fdb, r));
+        if (rest === 'maand-specificatie') return ok(maandSpecOverzicht(fdb, r, nu));   // wv2060
         weiger(404, 'onbekend');
       }
       if (v.methode !== 'POST') weiger(404, 'onbekend');
@@ -2736,6 +2948,7 @@ function maak(opties) {
         case 'sepa-batch': { const j = sepaBatch(fdb, r, d, nu, vo); return ok(j, 'sepa-batch ' + (j.voorbeeld ? 'voorbeeld ' : '') + (j.aantal != null ? j.aantal : j.overzicht ? j.overzicht.aantal : '')); }
         case 'sepa-bestand': return ok(sepaBestand(fdb, r, d, nu, vo), 'sepa-bestand opnieuw');
         case 'sepa-specificatie': return ok(sepaSpecificatie(fdb, r, d, nu, stijlVoor), 'sepa-specificatie');
+        case 'maand-specificatie': return ok(maandSpecificatie(fdb, r, d, nu, stijlVoor), 'maand-specificatie ' + kort(d.maand, 7));   // wv2060
         case 'signaal': return ok(signaalRoute(fdb, r, d, nu), 'signaal ' + kort(d.knop, 30));
         case 'voorstel': return ok(voorstelRoute(fdb, r, d, nu));
         case 'feit': return ok(feitRoute(fdb, r, d, nu, vo), 'feit ' + kort(d.keuze, 10));
@@ -2772,7 +2985,22 @@ function maak(opties) {
       catch (e) { return alsFout(e, opties.fout); }
     },
   };
-  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
+  // wv2060: de maandspecificatie PayPal en creditcard (server.js doet het mailluik, de maandronde en de Voor jou-kaart)
+  const maandspec = {
+    concept: (fdb, r, maand, o) => {
+      try { if (!fdb || (o && o.primair) !== true) weiger(409, 'Facturen draait alleen op de primaire kant'); return ok(maandSpecConcept(fdb, r, maand, Object.assign({ stijlVoor }, o)), 'maandspec concept ' + kort(maand, 7)); }
+      catch (e) { return alsFout(e, opties.fout); }
+    },
+    uitkomst: (fdb, r, maand, u, o) => {
+      try { if (!fdb || (o && o.primair) !== true) weiger(409, 'Facturen draait alleen op de primaire kant'); return ok(maandSpecUitkomst(fdb, r, maand, u || {}, o.nu), 'maandspec ' + (u && u.ok ? 'klaar' : 'mislukt')); }
+      catch (e) { return alsFout(e, opties.fout); }
+    },
+    plan: (fdb, nu, vanaf) => { try { return fdb ? maandSpecPlan(fdb, nu, vanaf) : null; } catch (e) { if (typeof opties.fout === 'function') opties.fout('facturen-maandspec', e); return null; } },
+    naam: (m) => (MS ? MS.maandNaam(m) : String(m)),
+    kaart: (x) => MS.kaartIcs(x),
+    aan: !!MS,
+  };
+  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, maandspec, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }
 function ok(j, reden) { return { status: 200, j: Object.assign({ ok: true }, j), reden: reden || null }; }
 // Fouten naar een status. Triggers van facturen-db.js geven vaste teksten ("opdracht_prive: …"): die mogen door. Een CHECK of UNIQUE noemt

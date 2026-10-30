@@ -12,7 +12,7 @@ C=$(grep -vE '^\s*(\*|//)' facturen.js)
 if echo "$C" | grep -nE "require\([\`'\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|undici)[\`'\"]\)|\bfetch\s*\(|process\.(binding|dlopen)|import\("; then
   echo "ROOD  CI-poort: facturen.js laadt een netwerk- of procesmodule"; exit 1
 fi
-if grep -vE '^\s*(\*|//)' facturen.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js|\./facturen-db\.js|\./facturen-validatie\.js|\./facturen-sepa\.js|\./facturen-specificatie\.js|\./facturen-creditcard\.js|\./facturen-paypal\.js)'\)$"; then
+if grep -vE '^\s*(\*|//)' facturen.js | grep -oE "require\([^)]*\)" | grep -vE "^require\('(fs|node:sqlite|\./facturen-kern\.js|\./facturen-bank\.js|\./facturen-db\.js|\./facturen-validatie\.js|\./facturen-sepa\.js|\./facturen-specificatie\.js|\./facturen-creditcard\.js|\./facturen-paypal\.js|\./facturen-maandspec\.js)'\)$"; then
   echo "ROOD  CI-poort: facturen.js laadt een module buiten fs, node:sqlite en de Facturen-buren"; exit 1
 fi
 echo "GROEN CI-poort: facturen.js alleen lokaal"
