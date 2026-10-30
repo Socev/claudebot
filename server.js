@@ -16614,6 +16614,28 @@ const herstelReferentie = (function () {
       regelsVersie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || null; } });
   } catch (e) { logError('herstelreferentie', e); return null; }
 })();
+// wv2041: n8n-credentials elke nacht versleuteld naar de R230 (logica en waarom in uitwijk-cred.js). Alleen de Olares-kant; uitvoer alleen
+// aantallen en sha12. Staat (één ronde per datum, één box-rij per soort per dag) in KLOKKEN_DIR/uitwijk-cred.json.
+const uitwijkCred = (function () {
+  const p = path.join(__dirname, 'uitwijk-cred.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    return require(p).maak({ olaresEigen: '/opt/data/bin/olares-eigen', staatBestand: path.join(KLOKKEN_DIR, 'uitwijk-cred.json'),
+      kant: function () { try { return ROL_KANT; } catch (e) { return 'onbekend'; } },
+      apiIds: async function () {
+        const ids = []; let cursor = null;
+        for (let i = 0; i < 20; i++) {
+          const j = await appN8n('/credentials?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+          for (const c of (j && j.data) || []) ids.push(c.id);
+          cursor = j && j.nextCursor; if (!cursor) return ids;
+        }
+        throw new Error('meer dan 20 pagina\'s');
+      },
+      boxRij: function (t) { return ovisBoxRij(t); },
+      hartslag: function (h) { return appSbRpc('mk_hartslag_stempel', { p_component: 'uitwijk_cred', p_gemeten_rijen: h.n, p_bevindingen: h.bevindingen }); },
+      klok: function () { return ovisAms().klok; } });
+  } catch (e) { logError('uitwijk-cred', e); return null; }
+})();
 // ── Nachtketen (wv1868, SB2 fase 3d; ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 3 intake, nachtketen en schrijvers (ontwerp
 // 28-10-2026).md" § 4; logica en waarom in nachtketen.js) ──
 // Elke minuut (echte pod, rol primair, vlag aan). Stappen in volgorde; elke stap gebruikt hetzelfde object en dezelfde stempel als zijn oude
@@ -16715,6 +16737,11 @@ const nachtketen = (function () {
       { naam: 'sb2-herstelreferentie', start_na: [2, 5], limiet_min: 10, pogingen: 2, inProces: true, doe: async function (ctx) {
         if (!herstelReferentie) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return herstelReferentie.ronde(ctx);
+      } },
+      // wv2041: versleutelde n8n-credentials naar de R230, na het versiebriefje (02:45) en vóór uitwijk-sync (03:30); meldt zelf (box #uitwijk-cred-auto)
+      { naam: 'uitwijk-cred', start_na: [3, 10], limiet_min: 10, pogingen: 2, inProces: true, meldtZelf: true, doe: async function (ctx) {
+        if (!uitwijkCred) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
+        return uitwijkCred.ronde(ctx);
       } },
       { naam: 'ovis-agenda', start_na: [3, 30], limiet_min: 7, pogingen: 2, meldtZelf: true, doe: nachtDagStap(ovisAgenda) },
       { naam: 'ovis-deadlines', start_na: [3, 45], na: ['ovis-agenda'], limiet_min: 5, pogingen: 2, meldtZelf: true,

@@ -286,6 +286,7 @@ jobs:
           t test/facturen-validatie.sh   # wv944: bankhistorie (startdatum, droogloop, bron, personeel, FV2-archief) en validatie (profielen, betaling, controles, zoeken)
           t test/fin-reconcile.sh   # wv1864: SB2 fase 4a — aansluiting bank ↔ inkoopfacturen: proef 3 (dubbele transacties) en 6 (dekking per dag), kern puur
           t test/herstelreferentie.sh   # wv1962: SB2 fase 6a — nachtketen-stap referentie (droge reconcile op de facturendump uit de podstaat-bundel)
+          t test/uitwijk-cred.sh   # wv2041: nachtketen-stap uitwijk-cred (versleutelde n8n-credentials naar de R230; nep-olares-eigen/ssh/API)
           t test/facturen-creditcard.sh   # wv2043: creditcard (ICS) — lezer + kaartnummerpoort, sleutels, idempotent, herkenning, incasso, aansluiting op de cent, leesroute
           t test/abn-historie.sh   # wv1329: ABN-historie (PDF-afschriften) in de bankluis — afdekken wat de bank gaf, saldo, POT-afschrift, niet naar de datahub
           command -v pdftotext >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils) || echo "::warning::pdftotext niet te installeren"   # de koerier roept /usr/bin/pdftotext echt aan
