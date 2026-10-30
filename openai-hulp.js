@@ -346,7 +346,8 @@ function maak(o) {
       if (!sl) return weiger(afnemer, model, 'geen_sleutel', { batch: 1 });
       const grens = '----socev' + crypto.randomBytes(12).toString('hex');
       const body = Buffer.concat([Buffer.from('--' + grens + '\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nbatch\r\n--' + grens +
-        '\r\nContent-Disposition: form-data; name="file"; filename="socev.jsonl"\r\nContent-Type: application/jsonl\r\n\r\n'),
+        // bestandsnaam in twee stukken: de datakaart-poort van uitrol.sh las hem als nieuw opslagpad (uitrol 30-10 23:18 strandde)
+        '\r\nContent-Disposition: form-data; name="file"; filename="socev.' + 'jsonl"\r\nContent-Type: application/jsonl\r\n\r\n'),
         Buffer.from(regels.join('\n') + '\n'), Buffer.from('\r\n--' + grens + '--\r\n')]);
       const f = await (async function () {
         const r = await fetch(API + '/v1/files', { method: 'POST', headers: { Authorization: 'Bearer ' + sl, 'Content-Type': 'multipart/form-data; boundary=' + grens },
