@@ -873,8 +873,11 @@ function stapBetaalwijze(tekst, velden, ctx, opties) {
   const rg = opties && opties.regel;
   // wv1917 (diffreview ZOU 6): zegt het stuk zelf stellend iets anders (UBL-incasso of -overmaken, of incassotekst) dan de regel, dan kiest een
   // mens: een leverancier die op incasso overstapt mag niet ook nog via de batch betaald worden.
+  // wv2038 (Opus-review wv2031): ook "regel incasso, stuk zegt stellend overmaken" kiest een mens; noemt het stuk óók incasso, dan
+  // wint de regel (geen botsing). Bij regel zelf of betaald blijft overmakentekst gewoon (vrijwel elke factuur heeft hem).
   const rgStuk = rg && rg.betaalwijze ? (velden.betaalwijze_hint && velden.betaalwijze_hint !== 'betaald' ? velden.betaalwijze_hint
-    : t && stellend(t, TEKST_INCASSO, VOORWAARDE_ANDER) ? 'incasso' : null) : null;
+    : t && stellend(t, TEKST_INCASSO, VOORWAARDE_ANDER) ? 'incasso'
+    : rg.betaalwijze === 'incasso' && t && stellend(t, TEKST_ZELF, VOORWAARDE_ANDER) ? 'zelf' : null) : null;
   if (rg && rg.betaalwijze && BETAALWIJZEN.includes(rg.betaalwijze) && rgStuk && rgStuk !== rg.betaalwijze) {
     wijze = 'onbekend'; bron = 'regel'; reden = 'regel voor afzender ' + rg.patroon + ' zegt ' + rg.betaalwijze + ', het stuk zegt ' + rgStuk + ': kies met de hand';
   } else if (rg && rg.betaalwijze && BETAALWIJZEN.includes(rg.betaalwijze)) { wijze = rg.betaalwijze; bron = 'regel'; reden = 'regel voor afzender ' + rg.patroon; }

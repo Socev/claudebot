@@ -1027,6 +1027,17 @@ test('wv1917 diffreview: regel botst met het stuk → een mens kiest (betaalwijz
   assert.equal(b.betaalwijze, 'onbekend'); assert.match(b.reden, /regel voor afzender x\.nl zegt zelf, het stuk zegt incasso/);
   assert.equal(K.stapBetaalwijze('', { betaalwijze_hint: 'incasso' }, {}, { regel: rg }).betaalwijze, 'onbekend');
   assert.equal(K.stapBetaalwijze('Gelieve binnen 14 dagen over te maken.', {}, {}, { regel: rg }).betaalwijze, 'zelf', 'geen botsing');
+  // wv2038: regel incasso, stuk zegt stellend overmaken (tekst of UBL) → een mens kiest; noemt het stuk ook incasso, dan wint de regel
+  const ri = { patroon: 'y.nl', betaalwijze: 'incasso', entiteit: 'tolgaarde' };
+  const z = K.stapBetaalwijze('Gelieve het bedrag binnen 14 dagen over te maken op NL00TEST0123456789.', {}, {}, { regel: ri });
+  assert.equal(z.betaalwijze, 'onbekend'); assert.match(z.reden, /regel voor afzender y\.nl zegt incasso, het stuk zegt zelf/);
+  assert.equal(K.stapBetaalwijze('Betaal de factuur vóór 11-11-2026.', {}, {}, { regel: ri }).betaalwijze, 'onbekend');
+  assert.equal(K.stapBetaalwijze('', { betaalwijze_hint: 'zelf' }, {}, { regel: ri }).betaalwijze, 'onbekend', 'UBL overmaken');
+  assert.deepEqual(pick(K.stapBetaalwijze('Het bedrag wordt automatisch geïncasseerd. Gelieve binnen 14 dagen over te maken.', {}, {}, { regel: ri })), ['incasso', 'regel voor afzender y.nl']);
+  assert.deepEqual(pick(K.stapBetaalwijze('Het bedrag wordt omstreeks 5 november afgeschreven.', {}, {}, { regel: ri })), ['incasso', 'regel voor afzender y.nl']);
+  assert.deepEqual(pick(K.stapBetaalwijze('', { betaalwijze_hint: 'incasso' }, {}, { regel: ri })), ['incasso', 'regel voor afzender y.nl']);
+  assert.equal(K.stapBetaalwijze('Wilt u liever overmaken op NL00TEST0123456789? Vraag het ons.', {}, {}, { regel: ri }).betaalwijze, 'incasso', 'voorwaardelijk overmaken botst niet');
+  assert.equal(K.stapBetaalwijze('Gelieve binnen 14 dagen over te maken.', {}, {}, { regel: { patroon: 'z.nl', betaalwijze: 'betaald' } }).betaalwijze, 'betaald', 'regel betaald: overmakentekst botst niet');
   assert.deepEqual(pick(K.stapBetaalwijze('', { betaalwijze_hint: 'betaald' }, {}, {})), ['zelf', K.ZEGT_BETAALD_UBL]);
   assert.equal(K.stapBetaalwijze('', { betaalwijze_hint: 'betaald' }, {}, { leverancier: { standaard_betaalwijze: 'betaald' } }).betaalwijze, 'betaald');
   const ents = [{ sleutel: 'holding', naam: 'Holding BV', naam_kort: 'Holding', kvk: '11112222', aliassen: [], actief: true },
