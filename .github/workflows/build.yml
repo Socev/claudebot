@@ -97,6 +97,9 @@ jobs:
           if echo "$C" | grep -oE "['\"\`]/v[0-9]/[^'\"\`]*['\"\`]" | sort -u | grep -vxE "'/v1/oauth2/token'|'/v1/reporting/transactions'"; then echo "::error::paypal-zakelijk-lezer.js kent een ander PayPal-pad"; exit 1; fi
           F=$(grep -vE '^\s*(\*|//)' facturen-paypal.js)
           if echo "$F" | grep -nE "require\(['\"](node:)?(http|https|net|tls|dgram|dns|child_process|worker_threads|undici)['\"]\)|\bfetch\s*\(|process\.binding|import\(|paypal\.com"; then echo "::error::facturen-paypal.js laadt netwerk"; exit 1; fi
+          # geen ander bestand (tests uitgezonderd) noemt de PayPal-API: alleen de lezer mag haar aanroepen (review wv2056 ZOU 2). Een grep-poort
+          # vangt vergissingen, geen opzet; de sleutel staat in de kluis en is leesbaar voor wie het kluistoken heeft (Sleutelregister).
+          if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' '*.sh' | grep -vE '^(test/|paypal-zakelijk-lezer\.js$)' | xargs grep -nE "api(-m)?(\.sandbox)?\.paypal\.com|/v[12]/(oauth2|reporting|payments|checkout|billing|vault)/" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then echo "::error::een ander bestand dan paypal-zakelijk-lezer.js noemt de PayPal-API"; exit 1; fi
           echo "paypal-zakelijk-lezer.js: alleen token + transactielijst; facturen-paypal.js: lokaal."
 
       # pot-afschrift.js en mt940-lezer.js (wv787): de afschriftmaker van de POT-rekening is puur (invoer erin, MT940 + PDF eruit). Geen

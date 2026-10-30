@@ -165,6 +165,11 @@ test('regelUit: vaste velden, teken, valuta, datum in Amsterdam; geen mailadres,
   assert.equal(P.tijdIso('2026-09-16T16:21:53+0000'), '2026-09-16T16:21:53Z');
   assert.equal(P.bankRefUit('1045870519507/PAYP AL'), '1045870519507'); assert.equal(P.bankRefUit('PP.9848.PP/YYR1036419394432'), null);
   assert.equal(P.schoonTekst('kaart 4111 1111 1111 1111 x', 100), 'kaart … x');
+  // review ZOU 3 / KAN 4/8: telefoon en IBAN weg, knippen op tekens, bankreferentie ook midden in een omschrijving
+  assert.equal(P.schoonTekst('bel 06-12345678 of +31 6 1234 5678, rek NL91ABNA0417164300', 100), 'bel … of …, rek …');
+  assert.equal(P.schoonTekst('ab😀cd', 3), 'ab😀');
+  assert.equal(P.bankRefUit('/TRTP/iDEAL/REMI/1053106847233/PAYPAL'), '1053106847233');
+  assert.equal(P.bankRefUit('Overboeking 1053106847233/PAYPAL'), '1053106847233');
 });
 
 // ───────────────────────────── lezer met stub ─────────────────────────────
@@ -263,8 +268,20 @@ test('koppelen en aansluiting: bankpost = PayPal-regel op de cent; USD via omwis
   assert.equal(r('PROEF0000000003C').leverancier, t.ids.pb);
   assert.equal(r('PROEF0000000011L').factuur_archief, null, 'de factuur is al bezet');
   assert.equal(r('PROEF0000000002B').leverancier, null, 'leverancier alleen op de betaling');
+  // review ZOU 1: de bankluis vervangt een gekoppelde post (verwijderd_op + opvolger met hetzelfde nummer en bedrag) → koppeling verhuist
+  t.fdb.db.prepare("UPDATE bank_transactie SET verwijderd_op = '2026-10-30T10:00:00Z', verwijderd_door = 'toets' WHERE id = ?").run(t.ids.b1);
+  const opv = 'e' + '9'.repeat(15);
+  t.fdb.db.prepare("INSERT INTO bank_transactie (id, bestand, rekening, entiteit, eigen_iban, boekdatum, bedrag_centen, tegenpartij_naam, omschrijving, is_incasso, entry_ref, formaat, aangemaakt_op) SELECT ?, bestand, rekening, entiteit, eigen_iban, boekdatum, bedrag_centen, tegenpartij_naam, omschrijving, is_incasso, 'refopv', formaat, aangemaakt_op FROM bank_transactie WHERE id = ?").run(opv, t.ids.b1);
+  const k2 = P.koppel(t.fdb, { wie: 'toets', nu: NU });
+  assert.equal(k2.bank_los, 1); assert.equal(k2.bank_nieuw, 1); assert.equal(r('PROEF0000000002B').bank_transactie, opv);
+  assert.equal(P.aansluiting(t.fdb).posten.find((x) => x.bank === opv).status, 'sluit');
   const s = P.stand(t.fdb);
   assert.equal(s.regels, DETAILS.length); assert.equal(s.aansluiting['tolgaarde:sluit'].posten, 4); assert.equal(s.laatste_ronde.nieuw, DETAILS.length);
+});
+
+test('creditcard-koppeling ziet facturen die al aan PayPal hangen als bezet (review KAN 7)', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'facturen-creditcard.js'), 'utf8');
+  assert.match(src, /UNION SELECT factuur FROM paypal_regel WHERE factuur IS NOT NULL UNION SELECT factuur_archief FROM paypal_regel/);
 });
 
 test('leesroute opdracht paypal (facturen.js) en betalingen', () => {

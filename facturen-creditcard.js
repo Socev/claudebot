@@ -382,7 +382,10 @@ function koppel(fdb, kaartId, opties) {
       uit.incasso_nieuw++;
     }
     const open = fdb.db.prepare("SELECT * FROM kaart_regel WHERE kaart = ? AND soort = 'transactie' AND (leverancier IS NULL OR (factuur IS NULL AND factuur_archief IS NULL))").all(kaart.id);
-    const bezet = new Set(fdb.db.prepare('SELECT factuur AS f FROM kaart_regel WHERE factuur IS NOT NULL UNION SELECT factuur_archief FROM kaart_regel WHERE factuur_archief IS NOT NULL').all().map((x) => x.f));
+    // wv2056: ook facturen die al aan een PayPal-betaling hangen (tabel bestaat vanaf migratie 14)
+    const metPaypal = fdb.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'paypal_regel'").get()
+      ? ' UNION SELECT factuur FROM paypal_regel WHERE factuur IS NOT NULL UNION SELECT factuur_archief FROM paypal_regel WHERE factuur_archief IS NOT NULL' : '';
+    const bezet = new Set(fdb.db.prepare('SELECT factuur AS f FROM kaart_regel WHERE factuur IS NOT NULL UNION SELECT factuur_archief FROM kaart_regel WHERE factuur_archief IS NOT NULL' + metPaypal).all().map((x) => x.f));
     const upd = fdb.db.prepare('UPDATE kaart_regel SET leverancier = ?, factuur = ?, factuur_archief = ?, koppeling_op = ? WHERE id = ?');
     for (const r of open) {
       let lev = r.leverancier;

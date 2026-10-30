@@ -46,11 +46,15 @@ function tijdIso(s) {
 }
 function amsDatum(iso) { return new Date(iso).toLocaleDateString('sv-SE', { timeZone: 'Europe/Amsterdam' }); }
 // Tekst van derden: geschoond, één regel, zonder mailadressen en zonder reeksen van 13+ cijfers, begrensd.
+// Ook telefoonnummers en IBAN's (review wv2056 ZOU 3); knippen op tekens, niet op UTF-16-halfjes (KAN 4: anders is de opgeslagen tekst nooit
+// gelijk aan de nieuwe en ziet elke ronde een wijziging).
 function schoonTekst(s, max) {
   if (s == null) return null;
-  const t = K.schoon(String(s)).replace(/[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+/g, '…').replace(/\d(?:[ .-]?\d){12,}/g, '…')
-    .replace(/\s+/g, ' ').trim().slice(0, max);
-  return t || null;
+  const t = K.schoon(String(s)).replace(/[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+/g, '…').replace(/\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b/g, '…')
+    .replace(/(?:\+|\b00)\d[\d ().-]{7,}\d/g, '…').replace(/\b0\d(?:[ -]?\d){8}\b/g, '…').replace(/\d(?:[ .-]?\d){12,}/g, '…')
+    .replace(/\s+/g, ' ').trim();
+  const u = Array.from(t).slice(0, max).join('');
+  return u || null;
 }
 function geldBedrag(o) { return o && typeof o === 'object' ? { c: centen(o.value), v: /^[A-Z]{3}$/.test(String(o.currency_code || '')) ? o.currency_code : null } : { c: null, v: null }; }
 function naamVan(pi) {
@@ -95,7 +99,11 @@ function regelUit(d, account) {
 
 // Het nummer dat de bank vóór "/PAYPAL" zet ("1053106847233/PAYPAL", ook afgebroken "…/PAYP AL"). → nummer of null.
 function bankRefUit(omschrijving) {
-  const m = /^([A-Z0-9]{4,30})\/PAYPAL/.exec(String(omschrijving || '').replace(/\s+/g, '').toUpperCase());
+  const t = String(omschrijving || '').toUpperCase();
+  // eerst met woordgrens (ook midden in een omschrijving, review KAN 8; alleen "PAYP AL" en spaties rond / ingeklapt), anders vooraan met alle
+  // spaties weg (MT940 breekt soms ook het nummer af)
+  const m = /(?:^|[^A-Z0-9.])([A-Z0-9]{4,30})\/PAYPAL/.exec(t.replace(/P\s*A\s*Y\s*P\s*A\s*L/g, 'PAYPAL').replace(/\s*\/\s*/g, '/'))
+    || /^([A-Z0-9]{4,30})\/PAYPAL/.exec(t.replace(/\s+/g, ''));
   return m ? m[1] : null;
 }
 
@@ -200,8 +208,10 @@ function koppel(fdb, opties) {
   const o = opties || {};
   const nu = Number.isFinite(o.nu) ? o.nu : Date.now();
   const wanneer = nuIso(nu);
-  const uit = { bank_nieuw: 0, bank_open: 0, bank_bedrag_anders: 0, bank_meer: 0, leverancier_nieuw: 0, factuur_nieuw: 0, droog: !!o.droog };
+  const uit = { bank_los: 0, bank_nieuw: 0, bank_open: 0, bank_bedrag_anders: 0, bank_meer: 0, leverancier_nieuw: 0, factuur_nieuw: 0, droog: !!o.droog };
   const werk = () => {
+    // een post die de bankluis verving (verwijderd_op gezet) laat zijn koppeling los; de opvolger wordt hieronder opnieuw gezocht (review ZOU 1)
+    if (!o.droog) uit.bank_los = fdb.db.prepare('UPDATE paypal_regel SET bank_transactie = NULL, koppeling_op = ? WHERE bank_transactie IN (SELECT id FROM bank_transactie WHERE verwijderd_op IS NOT NULL)').run(wanneer).changes;
     const bezetBank = new Set(fdb.db.prepare('SELECT bank_transactie AS b FROM paypal_regel WHERE bank_transactie IS NOT NULL').all().map((x) => x.b));
     const perRef = new Map();
     for (const t of bankPosten(fdb)) {
@@ -251,7 +261,7 @@ function koppel(fdb, opties) {
       }
       if (!o.droog && (lev !== r.leverancier || fac !== r.factuur || arch !== r.factuur_archief)) upd.run(lev, fac, arch, wanneer, r.id);
     }
-    if (!o.droog && (uit.bank_nieuw || uit.leverancier_nieuw || uit.factuur_nieuw)) {
+    if (!o.droog && (uit.bank_los || uit.bank_nieuw || uit.leverancier_nieuw || uit.factuur_nieuw)) {
       D.audit(fdb, { wie: o.wie || 'pod', wat: 'paypal_koppelen', object_soort: 'paypal_regel', object_id: null, na: uit, wanneer });
     }
   };

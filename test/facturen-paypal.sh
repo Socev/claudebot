@@ -21,5 +21,9 @@ if echo "$L" | grep -nE "require\(|process\.|child_process|import\(" ; then echo
 if echo "$L" | grep -oE "['\"\`]/v[0-9]/[^'\"\`]*['\"\`]" | sort -u | grep -vxE "'/v1/oauth2/token'|'/v1/reporting/transactions'"; then
   echo "paypal-zakelijk-lezer.js kent een ander PayPal-pad"; exit 1
 fi
+# geen ander bestand (tests uitgezonderd) noemt de PayPal-API (review wv2056 ZOU 2)
+if git ls-files '*.js' '*.mjs' '*.cjs' '*.py' '*.sh' | grep -vE '^(test/|paypal-zakelijk-lezer\.js$)' | xargs grep -nE "api(-m)?(\.sandbox)?\.paypal\.com|/v[12]/(oauth2|reporting|payments|checkout|billing|vault)/" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)'; then
+  echo "een ander bestand dan paypal-zakelijk-lezer.js noemt de PayPal-API"; exit 1
+fi
 echo "facturen-paypal.js: alleen lokaal; paypal-zakelijk-lezer.js: alleen token + transactielijst."
 node --no-warnings --test --test-reporter=spec test/facturen-paypal.test.js

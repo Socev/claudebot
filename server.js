@@ -15244,7 +15244,7 @@ const facturenPaypal = (function () {
   if (!facturenMod || !fs.existsSync(a) || !fs.existsSync(b)) return null;
   try { return { FP: require(a), L: require(b) }; } catch (e) { logError('facturen-paypal', e); return null; }
 })();
-const facturenPaypalStaat = { bezig: false, laatste: null, sleutel: null, boxDag: null };
+const facturenPaypalStaat = { bezig: false, laatste: null, sleutel: null, boxDag: null, mislukt: 0 };
 async function paypalZakelijkSleutels() {
   const c = facturenPaypalStaat.sleutel;
   if (c && Date.now() < c.tot) return c.w;
@@ -15311,8 +15311,11 @@ async function facturenPaypalRonde() {
         else logError('facturen-paypal', new Error(uit.fout));
       }
     }
-  } finally { facturenPaypalStaat.bezig = false; }
-  facturenPaypalStaat.laatste = Object.assign({ op: new Date(nuMs).toISOString() }, uit);
+  } finally { facturenPaypalStaat.bezig = false; facturenPaypalStaat.sleutel = null; }   // review KAN 9: de sleutel niet langer dan de ronde bewaren
+  // review KAN 5: drie mislukte rondes op rij (ingetrokken sleutel, 429, storing) = één box-rij per dag; een geslaagde ronde zet de teller terug
+  facturenPaypalStaat.mislukt = uit.ok ? 0 : facturenPaypalStaat.mislukt + 1;
+  if (!uit.ok && facturenPaypalStaat.mislukt >= 3) facturenPaypalBox('drie rondes op rij mislukt', uit.fout);
+  facturenPaypalStaat.laatste = Object.assign({ op: new Date(nuMs).toISOString(), mislukt_op_rij: facturenPaypalStaat.mislukt || undefined }, uit);
   schrijfLog(nu() + ' facturen-paypal ' + velden({ ok: uit.ok, nieuw: uit.nieuw, gewijzigd: uit.gewijzigd, bank_nieuw: uit.bank_nieuw, code: uit.code }));
   return uit;
 }

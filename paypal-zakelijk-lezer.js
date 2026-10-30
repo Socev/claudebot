@@ -100,7 +100,7 @@ function vensters(vanMs, totMs) {
 
 /*
  * Alle transacties tussen van en tot (ms; van wordt opgehoogd tot de grens van PayPal). sleutels = { id, geheim }. opties = { nu, eisLeesrecht,
- * timeoutMs, weigerUitbetalen (standaard aan) }. → { account, app_id, uitbetalen, ververst, vensters, paginas, details: [ruwe transaction_details] }. Gooit bij elke andere
+ * timeoutMs }. Een sleutel met uitbetaalrecht leest niets (geen uitzondering mogelijk). → { account, app_id, uitbetalen, ververst, vensters, paginas, details: [ruwe transaction_details] }. Gooit bij elke andere
  * status dan 200 (niets half: de beller slaat dan niets op).
  */
 async function transacties(sleutels, van, tot, opties) {
@@ -110,7 +110,7 @@ async function transacties(sleutels, van, tot, opties) {
   const t = await token(ctx);
   if (!t.leesrecht) throw new PaypalLezerFout('scope', 'de PayPal-sleutel mist Transaction Search (reporting/search/read)');
   // Davids Ja (30-10-2026) gold voor een sleutel zonder uitbetaalrecht; komt dat erbij, dan niets lezen (de beller meldt het)
-  if (o.weigerUitbetalen !== false && t.uitbetalen) throw new PaypalLezerFout('scope_uitbetalen', 'de PayPal-sleutel kan uitbetalen (payouts): ronde gestopt');
+  if (t.uitbetalen) throw new PaypalLezerFout('scope_uitbetalen', 'de PayPal-sleutel kan uitbetalen (payouts): ronde gestopt');
   ctx.token = t.token;
   const start = Math.max(van, vroegste(nu)), eind = Math.min(tot, nu);
   const uit = { account: null, app_id: t.app_id, uitbetalen: t.uitbetalen, ververst: null, vensters: 0, paginas: 0, details: [] };
@@ -135,4 +135,5 @@ async function transacties(sleutels, van, tot, opties) {
   return uit;
 }
 
-module.exports = { PaypalLezerFout, BASIS, TOKEN_PAD, TRANSACTIE_PAD, padToets, token, rechten, transacties, vensters, vroegste, isoSec };
+// token() zelf wordt niet geëxporteerd (review wv2056 ZOU 2): geen andere module krijgt een bearer-token in handen.
+module.exports = { PaypalLezerFout, BASIS, TOKEN_PAD, TRANSACTIE_PAD, padToets, rechten, transacties, vensters, vroegste, isoSec };
