@@ -373,6 +373,9 @@ function betalen(fdb, r, nu) {
         rekeningen: fdb.db.prepare('SELECT iban, entiteit, controle FROM rekening').all(), vandaag };
       const v = B.betaalVerwachting(f, verw);
       if (v) rij.bank = { verwacht: v.verwacht, termijn_tot: v.termijn_tot, bijgewerkt_tot: v.dekking, stand: v.stand };
+      // diffreview KAN 8: staat er een betaling met ons kenmerk maar een ander bedrag (open voorstel), dan zegt de lijst dat, niet "niet gezien"
+      if (rij.bank && fdb.db.prepare("SELECT 1 FROM voorstel v WHERE v.status = 'open' AND json_extract(v.details, '$.reden') IN ('bedrag wijkt af','kenmerk klopt, bedrag niet') " +
+        'AND EXISTS (SELECT 1 FROM json_each(v.facturen) j WHERE j.value = ?)').get(f.id)) rij.bank.stand = 'afwijkend';
     }
     // een factuur met een openstaande IBAN-blokkade staat er niet op (ontwerp v2 § 3), met een verwijzing naar Beoordelen
     if (K.isCreditnota(f)) continue;   // een creditnota hoort nooit op de betaallijst (wv855; staat er een oude op te_betalen, dan niet tonen)
@@ -1633,12 +1636,18 @@ function bankcontroleToepassen(fdb, nu) {
   // wv2057: een factuursignaal (niet gezien / niet betaald / incasso niet gezien) waarvan de betaling alsnog binnenkwam en gekoppeld is, gaat
   // vanzelf dicht (afhandeling vanzelf_gezien, auditrij); anders bleef "ingevoerd, niet gezien" open staan naast een betaalde factuur.
   const netto = fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j');
+  // Ook: "ingevoerd, niet gezien" van een factuur die niet meer op ingevoerd staat (Ongedaan, teruggeboekt) vervalt (afhandeling
+  // niet_meer_ingevoerd); opnieuw invoeren is dan een nieuwe gebeurtenis met een eigen signaal (diffreview ZOU 4).
+  const spoor = fdb.db.prepare('SELECT betaalspoor FROM factuur WHERE id = ?');
   for (const s of fdb.db.prepare("SELECT id, facturen, entiteit, soort FROM signaal WHERE status = 'open' AND soort IN ('ingevoerd_niet_gezien','te_betalen_niet_betaald','incasso_niet_gezien')").all()) {
     const fids = json(s.facturen, []) || [];
-    if (!fids.length || !fids.every((id) => netto.get(id).j === 1)) continue;
-    if (!fdb.db.prepare("UPDATE signaal SET status = 'afgehandeld', afhandeling = 'vanzelf_gezien', wie = 'bankcontrole', wanneer = ? WHERE id = ? AND status = 'open'").run(wanneer, s.id).changes) continue;
-    tel.vanzelf_gezien = (tel.vanzelf_gezien || 0) + 1;
-    D.audit(fdb, { wie: 'bankcontrole', wat: 'signaal_vanzelf_gezien', object_soort: 'signaal', object_id: s.id, entiteit: s.entiteit || null, voor: { status: 'open' },
+    if (!fids.length) continue;
+    const af = fids.every((id) => netto.get(id).j === 1) ? 'vanzelf_gezien'
+      : s.soort === 'ingevoerd_niet_gezien' && fids.every((id) => { const x = spoor.get(id); return !x || (x.betaalspoor !== 'ingevoerd' && x.betaalspoor !== 'betaald_gezien'); }) ? 'niet_meer_ingevoerd' : null;
+    if (!af) continue;
+    if (!fdb.db.prepare("UPDATE signaal SET status = 'afgehandeld', afhandeling = ?, wie = 'bankcontrole', wanneer = ? WHERE id = ? AND status = 'open'").run(af, wanneer, s.id).changes) continue;
+    tel[af] = (tel[af] || 0) + 1;
+    D.audit(fdb, { wie: 'bankcontrole', wat: 'signaal_' + af, object_soort: 'signaal', object_id: s.id, entiteit: s.entiteit || null, voor: { status: 'open' },
       na: { status: 'afgehandeld', soort: s.soort }, wanneer });
   }
   return tel;
@@ -1666,7 +1675,7 @@ function bankDekking(fdb) {
  * Alleen wat de afgelopen BETAALMELDING_DAGEN speelde (geen oude historie bij de eerste ronde). Puur lezen; gemeld zetten doet
  * betaalMeldingGemeld nadat het bericht bezorgd is. → null of { tekst, sleutels, sleutel (alle sleutels samen; server.js hasht hem voor de dubbelcontrole van /bericht), aantal }.
  */
-const BETAALMELDING_SLEUTEL = 'betaalmelding_gemeld', BETAALMELDING_DAGEN = 45, BETAALMELDING_BEWAAR = 400;
+const BETAALMELDING_SLEUTEL = 'betaalmelding_gemeld', BETAALMELDING_DAGEN = 45, BETAALMELDING_BEWAAR = 400, BETAAL_ACHTER_WERKDAGEN = 5;
 function betaalMeldingGemeldLees(fdb) { const g = json(D.metaLees(fdb, BETAALMELDING_SLEUTEL), {}); return g && typeof g === 'object' && !Array.isArray(g) ? g : {}; }
 function betaalMeldingen(fdb, nu) {
   const vandaag = dagAmsterdam(nu), van = K.plusDagen(vandaag, -BETAALMELDING_DAGEN);
@@ -1682,23 +1691,47 @@ function betaalMeldingen(fdb, nu) {
     items.push({ sleutel: 'sig:' + s.sleutel, soort: 'niet_gezien', factuur: f.id, verwacht: d.verwacht, dekking: d.dekking || null, batch: d.batch || null,
       batch_regels: Number(d.batch_regels) || 0, centen: f.incl, leverancier: levNaam(f), entiteit: entNaam.get(f.entiteit) || f.entiteit, nummer: f.nummer || null });
   }
-  for (const v of fdb.db.prepare("SELECT v.*, t.boekdatum, t.bedrag_centen, t.entiteit AS t_ent FROM voorstel v JOIN bank_transactie t ON t.id = v.transactie " +
+  const levIban = fdb.db.prepare('SELECT 1 FROM leverancier_iban WHERE leverancier = ? AND iban = ?');
+  for (const v of fdb.db.prepare("SELECT v.*, t.boekdatum, t.bedrag_centen, t.tegenpartij_naam, t.tegenpartij_iban FROM voorstel v JOIN bank_transactie t ON t.id = v.transactie " +
     "WHERE v.status = 'open' AND t.verwijderd_op IS NULL AND t.bedrag_centen < 0 AND t.boekdatum >= ? ORDER BY v.id").all(van)) {
     const det = json(v.details, {}) || {};
     if (gemeld['vs:' + v.sleutel] || !['bedrag wijkt af', 'kenmerk klopt, bedrag niet'].includes(det.reden)) continue;
     const fs = (json(v.facturen, []) || []).map((id) => fq.get(id)).filter(Boolean);
     if (!fs.length || !fs.some((f) => ['ingevoerd', 'te_betalen'].includes(f.betaalspoor))) continue;
+    // diffreview ZOU 6: een factuurnummer alleen bewijst niet dat het geld naar deze leverancier ging (nummers komen bij meer leveranciers
+    // voor); 'kenmerk klopt, bedrag niet' alleen melden als de rekening van de post die van de factuur is of bij de leverancier hoort
+    const tegen = K.ibanNorm(v.tegenpartij_iban);
+    if (det.reden !== 'bedrag wijkt af' && !(tegen && fs.some((f) => K.ibanNorm(f.iban) === tegen || (f.leverancier && levIban.get(f.leverancier, tegen))))) continue;
     const som = fs.reduce((x, f) => x + (Number(f.incl) || 0), 0);
     if (som === -v.bedrag_centen) continue;
     items.push({ sleutel: 'vs:' + v.sleutel, soort: 'afwijkend', facturen: fs.map((f) => f.id), boekdatum: v.boekdatum, betaald: -v.bedrag_centen, centen: som,
+      tegenpartij: v.tegenpartij_naam ? String(v.tegenpartij_naam).slice(0, 80) : null,
       leverancier: levNaam(fs[0]), entiteit: entNaam.get(fs[0].entiteit) || fs[0].entiteit, nummer: fs.length === 1 ? fs[0].nummer || null : null, aantal: fs.length });
+  }
+  // diffreview ZOU 7: loopt de bank van een rekening een week na de termijn nog achter, dan kan de failsafe niets zien. Eén keer per betaling
+  // melden dat hij niet te controleren is (per entiteit samengevoegd), met de vraag een nieuwe export te uploaden.
+  const st = BETAAL_STATUS.map(() => '?').join(',');
+  const inv = fdb.db.prepare("SELECT * FROM factuur WHERE betaalspoor = 'ingevoerd' AND entiteit <> 'prive' AND status IN (" + st + ')').all(...BETAAL_STATUS);
+  if (inv.length) {
+    const verw = { dekking: bankDekking(fdb), sepa: sepaVoorControle(fdb, nuIso(Date.parse(K.plusDagen(vandaag, -BANK_DAGEN) + 'T00:00:00Z'))),
+      rekeningen: fdb.db.prepare('SELECT iban, entiteit, controle FROM rekening').all(), vandaag };
+    const zichtbaar = new Set(verw.rekeningen.filter((r) => r.controle === 1).map((r) => r.entiteit));
+    for (const f of inv) {
+      if (!zichtbaar.has(f.entiteit)) continue;
+      const v = B.betaalVerwachting(f, verw);
+      if (!v || v.stand !== 'bank_achter' || v.verwacht < van || B.werkdagenTussen(v.termijn_tot, vandaag) < BETAAL_ACHTER_WERKDAGEN) continue;
+      const k = 'achter:' + f.id + '|' + v.verwacht;
+      if (gemeld[k]) continue;
+      items.push({ sleutel: k, soort: 'achter', factuur: f.id, verwacht: v.verwacht, dekking: v.dekking, centen: f.incl, entiteit: entNaam.get(f.entiteit) || f.entiteit });
+    }
   }
   if (!items.length) return null;
   const tekst = B.betaalMeldingTekst(items, vandaag);
   const sleutels = items.map((x) => x.sleutel);
   return { tekst, sleutels, aantal: items.length, sleutel: sleutels.slice().sort().join('|') };   // server.js maakt er een hash van (geen crypto hier: CI-poort)
 }
-// Na een bezorgd bericht: de sleutels als gemeld vastleggen (en wat ouder is dan BETAALMELDING_BEWAAR dagen opruimen).
+// Vóór het versturen: de sleutels als gemeld vastleggen (diffreview ZOU 5: liever één keer gemist dan twee keer gemeld; server.js zet ze
+// terug met betaalMeldingTerug als de pod het bericht duidelijk weigerde). Wat ouder is dan BETAALMELDING_BEWAAR dagen gaat eruit.
 function betaalMeldingGemeld(fdb, m, nu) {
   if (!m || !Array.isArray(m.sleutels) || !m.sleutels.length) return 0;
   const vandaag = dagAmsterdam(nu), grens = K.plusDagen(vandaag, -BETAALMELDING_BEWAAR);
@@ -1709,6 +1742,16 @@ function betaalMeldingGemeld(fdb, m, nu) {
     D.metaZet(fdb, BETAALMELDING_SLEUTEL, JSON.stringify(g));
     D.audit(fdb, { wie: 'bankcontrole', wat: 'betaalmelding', object_soort: 'meta', object_id: BETAALMELDING_SLEUTEL, na: { aantal: m.sleutels.length }, wanneer: nuIso(nu) });
     return m.sleutels.length;
+  });
+}
+function betaalMeldingTerug(fdb, m) {
+  if (!m || !Array.isArray(m.sleutels) || !m.sleutels.length) return 0;
+  return D.transactie(fdb, function () {
+    const g = betaalMeldingGemeldLees(fdb);
+    let n = 0;
+    for (const k of m.sleutels) if (g[k]) { delete g[k]; n++; }
+    D.metaZet(fdb, BETAALMELDING_SLEUTEL, JSON.stringify(g));
+    return n;
   });
 }
 /*
@@ -2713,7 +2756,7 @@ function maak(opties) {
       catch (e) { return alsFout(e, opties.fout); }
     },
   };
-  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, betaalMeldingen, betaalMeldingGemeld, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
+  return { app, ronde, bankluisRonde, verwerkBericht, rolVoor, afschrift, specificatie, betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, ROUTES, BEHEER, lees: (fdb, d, o) => lees(fdb, d, Object.assign({ fout: opties.fout }, o || {})) };
 }
 function ok(j, reden) { return { status: 200, j: Object.assign({ ok: true }, j), reden: reden || null }; }
 // Fouten naar een status. Triggers van facturen-db.js geven vaste teksten ("opdracht_prive: …"): die mogen door. Een CHECK of UNIQUE noemt
@@ -2757,4 +2800,4 @@ function mailStappen(fdb, max) {
     .map((x) => ({ gmail_id: String(x.gmail_id), stap: Number(x.rang) >= 2 ? 'is_betaald' : 'in_sepa' }));
 }
 
-module.exports = { betaalMeldingen, betaalMeldingGemeld, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };
+module.exports = { betaalMeldingen, betaalMeldingGemeld, betaalMeldingTerug, bankDekking, mailStappen, maak, rolVoor, verwerkBericht, bankluisRonde, bankcontroleToepassen, verwerkBankbestand, archiefInvoeren, validatie, lees, startdatumVan, ronde, backupNodig, afschriftKlaarzetten, bijlagenVan, ROUTES, BEHEER, PREFIX, STAPPEN, RouteFout, soortVan, isoWeek };

@@ -2009,8 +2009,16 @@ test('wv2057 failsafe: batch van drie met één ontbrekende betaling → precies
   upload('wv2057-2', [e2e(reg.get(ids[1]), '20261027', reg.get(ids[1]).centen - 1000)], N2);
   assert.equal(t.f('id = ?', [ids[1]]).betaalspoor, 'ingevoerd', 'niet automatisch');
   const m2 = F.betaalMeldingen(t.fdb, N2);
-  assert.equal(m2.aantal, 1);
-  assert.match(m2.tekst, /^Op 27-10 ging € .+ voor factuur .+ \(.+\): het bedrag wijkt af\./);
+  // ook de betalingen van het zaad op rekeningen waarvan de bank een week na de termijn nog achterloopt (POT, SLOEL, Groenhouten): één keer
+  assert.deepEqual([m2.sleutels.filter((k) => k.indexOf('vs:') === 0).length, m2.sleutels.filter((k) => k.indexOf('achter:') === 0).length], [1, 3]);
+  assert.match(m2.tekst, /Een betaling van SLOEL van € .+ kan ik niet controleren: er zijn geen recente bankgegevens\. Upload een nieuwe bankexport in Facturen\./);
+  // een geweigerd bericht: terugzetten, de volgende ronde opnieuw (diffreview ZOU 5)
+  F.betaalMeldingGemeld(t.fdb, m2, N2);
+  assert.equal(F.betaalMeldingen(t.fdb, N2), null);
+  assert.equal(F.betaalMeldingTerug(t.fdb, m2), 4);
+  assert.equal(F.betaalMeldingen(t.fdb, N2).aantal, 4);
+  assert.match(m2.tekst, /\nOp 27-10 ging € .+ naar Proef voor factuur .+, maar die factuur is € .+ \(Tolgaarde\)\. Het bedrag wijkt af\./);
+  assert.equal(t.call('GET', 'betalen', null, { nu: N2 }).j.ingevoerd_niet_gezien.find((x) => x.id === ids[1]).bank.stand, 'afwijkend');
   F.betaalMeldingGemeld(t.fdb, m2, N2);
   assert.equal(F.betaalMeldingen(t.fdb, N2), null);
   // David bevestigt het voorstel (toch deze betaling): het signaal "niet gezien" gaat bij de volgende controle vanzelf dicht
@@ -2031,5 +2039,12 @@ test('wv2057 failsafe: batch van drie met één ontbrekende betaling → precies
   const h = teBetalenFactuur(t);
   assert.equal(t.call('POST', 'ingevoerd', { id: h }, { nu: N2 }).status, 200);
   const rij = t.call('GET', 'betalen', null, { nu: N2 }).j.ingevoerd_niet_gezien.find((x) => x.id === h);
-  assert.deepEqual([rij.bank.verwacht, rij.bank.termijn_tot, rij.bank.bijgewerkt_tot, rij.bank.stand], ['2026-10-28', '2026-10-30', '2026-10-28', 'wacht']);
+  assert.deepEqual([rij.bank.verwacht, rij.bank.termijn_tot, rij.bank.bijgewerkt_tot, rij.bank.stand], ['2026-11-05', '2026-11-09', '2026-10-21', 'wacht'], 'los ingevoerd: de vervaldatum; de minst bijgewerkte actieve rekening');
+  // Ongedaan na een signaal "niet gezien": dat signaal vervalt bij de volgende controle (opnieuw invoeren is een nieuwe gebeurtenis)
+  const zaadSig = t.fdb.db.prepare("SELECT id, facturen FROM signaal WHERE soort = 'ingevoerd_niet_gezien' AND status = 'open' AND details IS NOT NULL").all()
+    .map((x) => JSON.parse(x.facturen)[0]).find((id) => t.f('id = ?', [id]).betaalspoor === 'ingevoerd' && !t.f('id = ?', [id]).uitvoer_op);
+  assert.ok(zaadSig, 'een open signaal op een losse invoer');
+  assert.equal(t.call('POST', 'ingevoerd-ongedaan', { id: zaadSig }, { nu: N2 }).status, 200);
+  F.bankcontroleToepassen(t.fdb, N2 + 180000);
+  assert.equal(t.fdb.db.prepare("SELECT afhandeling FROM signaal WHERE soort = 'ingevoerd_niet_gezien' AND facturen LIKE ?").get('%' + zaadSig + '%').afhandeling, 'niet_meer_ingevoerd');
 });

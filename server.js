@@ -15072,8 +15072,9 @@ let facturenRondeBezig = null;   // { op } van de lopende ronde
  * wv2057 (David 30-10-2026: "Jij kan dan attenderen: 'Hej, 29-10 zou zus-en-zo betaald worden, ik zie het niet terug op de bank!'"). Na elke
  * geslaagde facturen-ronde (elk uur; de bankcontrole liep al bij de upload of de bankluis-ronde) één bericht in de app met wat nieuw is:
  * betalingen die niet op de bank staan terwijl de bank van die rekening al voorbij de termijn is, en betalingen met ons kenmerk maar een
- * ander bedrag (facturen.betaalMeldingen). Nooit tussen 23:00 en 07:00 (dan bij de ronde van 07:05). Pas als het bericht bezorgd is, gaat
- * het op gemeld; mislukt het, dan de volgende ronde opnieuw (de sleutel houdt een dubbele binnen 24 uur tegen). Hooguit één tegelijk.
+ * ander bedrag, en betalingen die niet te controleren zijn omdat de bank van die rekening te ver achterloopt (facturen.betaalMeldingen).
+ * Nooit tussen 23:00 en 07:00 (dan bij de ronde van 07:05). Eerst gemeld, dan versturen; bij een weigering terug en de volgende ronde
+ * opnieuw (de sleutel houdt een dubbele binnen 24 uur tegen). Hooguit één tegelijk.
  */
 let facturenBetaalBezig = false;
 async function facturenBetaalMelding(fdb) {
@@ -15084,10 +15085,14 @@ async function facturenBetaalMelding(fdb) {
   try {
     const m = facturenRoutes.betaalMeldingen(fdb, Date.now());
     if (!m || !m.tekst) return;
+    // diffreview wv2057 ZOU 5: eerst als gemeld vastleggen, dan versturen; alleen een duidelijke weigering (4xx/5xx of ok:false) zet het terug.
+    // Een time-out (status 0) blijft gemeld: berichtNieuw kan het dan nog bezorgen, en twee keer melden is erger dan een gemiste (grondwet 10).
+    facturenRoutes.betaalMeldingGemeld(fdb, m, Date.now());
     const r = await berichtIntern({ kanaal: 'hoofd', bron: 'facturen-bank', klasse: 'normaal', tekst: m.tekst,
       sleutel: 'facturen-bank-' + crypto.createHash('sha256').update(String(m.sleutel)).digest('hex').slice(0, 24) });
-    if (r && r.status === 200 && r.j && r.j.ok) facturenRoutes.betaalMeldingGemeld(fdb, m, Date.now());
-    else logError('facturen-betaalmelding', new Error('bericht niet bezorgd (' + (r && r.status) + ')'));
+    if (r && r.status === 200 && r.j && r.j.ok) return;
+    if (r && r.status !== 0) { try { facturenRoutes.betaalMeldingTerug(fdb, m); } catch (e) { logError('facturen-betaalmelding-terug', e); } }
+    logError('facturen-betaalmelding', new Error('bericht niet bezorgd (' + (r && r.status) + ')'));
   } catch (e) { logError('facturen-betaalmelding', e); }
   finally { facturenBetaalBezig = false; }
 }

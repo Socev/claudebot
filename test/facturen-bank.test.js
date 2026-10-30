@@ -591,7 +591,7 @@ test('incasso niet gezien (> 14 dagen na vervaldatum), te betalen niet betaald, 
     fac({ id: 'i2', leverancier: 'lc', nummer: 'C-21', incl: 5100, betaalwijze: 'incasso', betaalspoor: 'incasso_verwacht', factuurdatum: '2026-10-01', vervaldatum: '2026-10-15' }),
     fac({ id: 'p1', leverancier: 'la', nummer: 'A-50', incl: 7000, betaalspoor: 'te_betalen', factuurdatum: '2026-09-15', vervaldatum: '2026-10-15' }),
     fac({ id: 'p2', leverancier: 'la', nummer: 'A-51', incl: 7100, betaalspoor: 'te_betalen', factuurdatum: '2026-10-15', vervaldatum: '2026-11-14' }),
-    fac({ id: 'g1', leverancier: 'lb', nummer: 'B-60', incl: 8000, betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-13T09:00:00Z', factuurdatum: '2026-10-01', vervaldatum: '2026-10-30' }),
+    fac({ id: 'g1', leverancier: 'lb', nummer: 'B-60', incl: 8000, betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-13T09:00:00Z', factuurdatum: '2026-10-01', vervaldatum: '2026-10-12' }),
     fac({ id: 'g2', leverancier: 'lb', nummer: 'B-61', incl: 8100, betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-16T09:00:00Z', factuurdatum: '2026-10-01', vervaldatum: '2026-10-30' }),
     fac({ id: 'x1', leverancier: 'lb', nummer: 'B-62', incl: 100, betaalspoor: 'te_betalen', status: 'geen_factuur', vervaldatum: '2026-01-01' }),
   ];
@@ -1279,10 +1279,14 @@ test('wv2057 verzonnen batch van drie, één betaling ontbreekt op de bank → p
   const vroeg = tx({ boekdatum: '2026-10-30', bedrag_centen: 50000, tegenpartij_iban: LEV.ZV, tegenpartij_naam: 'Zorgverzekeraar' });
   assert.equal(controle({ vandaag: '2026-11-05', transacties: [vroeg], facturen: fx, sepa: [p] }).signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 0);
   // na Ongedaan en opnieuw invoeren met een andere datum: een nieuwe sleutel
-  const opnieuw = fx.map((f) => Object.assign({}, f, { ingevoerd_op: '2026-11-04T09:00:00Z', uitvoer_op: null }));
+  const opnieuw = fx.map((f) => Object.assign({}, f, { ingevoerd_op: '2026-11-04T09:00:00Z', uitvoer_op: null, vervaldatum: '2026-11-01' }));
   const later = tx({ boekdatum: '2026-11-09', bedrag_centen: 50000, tegenpartij_iban: LEV.ZV, tegenpartij_naam: 'Zorgverzekeraar' });
-  const r2 = controle({ vandaag: '2026-11-09', transacties: [later], facturen: opnieuw, sepa: [], bestaandeSignalen: weg });
+  // (de oude signalen gingen bij Ongedaan dicht: facturen.bankcontroleToepassen sluit "niet gezien" van een factuur die niet meer ingevoerd is)
+  const dicht = weg.map((x) => Object.assign({}, x, { status: 'afgehandeld' }));
+  const r2 = controle({ vandaag: '2026-11-09', transacties: [later], facturen: opnieuw, sepa: [], bestaandeSignalen: dicht });
   assert.equal(r2.signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 3);
+  // diffreview ZOU 4: staat het oude nog open, dan geen tweede ernaast
+  assert.equal(controle({ vandaag: '2026-11-09', transacties: [later], facturen: opnieuw, sepa: [], bestaandeSignalen: weg }).signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 0);
 });
 
 test('wv2057 zelf betaald (ingevoerd of buiten de app) naar het IBAN op de factuur, met factuurnummer en exact bedrag → automatisch gekoppeld, ook zonder bekende leveranciersrekening', () => {
@@ -1324,4 +1328,34 @@ test('wv2057 de bank noemt ons kenmerk maar het bedrag wijkt af → voorstel "be
   const tb = tx({ boekdatum: '2026-10-27', bedrag_centen: -86222, kenmerk: 'SOCEV-P-28', omschrijving: '/TRTP/SEPA Batch/PREF/SOCEV-P-28/NRTX/2' });
   const r3 = controle({ vandaag: '2026-11-03', transacties: [tb, laat], facturen: [f, g], sepa: [p2] });
   assert.deepEqual(r3.voorstellen.map((v) => [v.methode, v.reden, v.verschil_centen, v.facturen.slice().sort()]), [['sepa_batch', 'bedrag wijkt af', 853221 - 86222, ['a7', 'a8']]]);
+});
+
+test('wv2057 diffreview: zelf koppelen nooit op een niet nagebeld of afwijkend IBAN (fraudesignaal blijft); los ingevoerd telt vanaf de betaal- of vervaldatum; twee rekeningen: de minst bijgewerkte', () => {
+  // MOET 1: bekende leverancier A (rekening LEV.A); vervalste factuur met IBAN VREEMD, buiten de app betaald met het factuurnummer
+  const vals = fac({ id: 'fr1', leverancier: 'la', nummer: 'A-2026-501', incl: 77700, iban: LEV.VREEMD, iban_nieuw: 1, betaalspoor: 'te_betalen', factuurdatum: '2026-10-20', vervaldatum: '2026-11-03' });
+  const t = tx({ boekdatum: '2026-10-21', bedrag_centen: -77700, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Leverancier A B.V.', omschrijving: 'A-2026-501' });
+  const r = controle({ transacties: [t], facturen: [vals] });
+  assert.equal(r.koppelingen.length, 0);
+  assert.ok(soorten(r).includes('onbekend_iban'), JSON.stringify(soorten(r)));
+  // ook als de vlag (verouderd) ontbreekt: de leverancier heeft andere rekeningen
+  assert.equal(controle({ transacties: [t], facturen: [Object.assign({}, vals, { iban_nieuw: 0 })] }).koppelingen.length, 0);
+  // nagebeld IBAN op een factuur zonder bekende leverancier: wel
+  const ok = fac({ id: 'fr2', nummer: 'Z-2026-9', incl: 1234, iban: LEV.VREEMD, iban_nieuw: 1, nagebeld_op: '2026-10-20T10:00:00Z', nagebeld_ibans: JSON.stringify([LEV.VREEMD]),
+    betaalspoor: 'te_betalen', factuurdatum: '2026-10-20', vervaldatum: '2026-11-03' });
+  const t2 = tx({ boekdatum: '2026-10-21', bedrag_centen: -1234, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Z', omschrijving: 'Z-2026-9' });
+  assert.equal(controle({ transacties: [t2], facturen: [ok] }).koppelingen.length, 1);
+  assert.equal(controle({ transacties: [t2], facturen: [Object.assign({}, ok, { nagebeld_op: null })] }).koppelingen.length, 0);
+  // ZOU 3: los ingevoerd op 29-10 met vervaldatum 20-11 → verwacht 20-11; met een gekozen betaaldatum die
+  const los = fac({ id: 'lv', betaalspoor: 'ingevoerd', ingevoerd_op: '2026-10-29T09:00:00Z', vervaldatum: '2026-11-20', incl: 500 });
+  const dek = new Map([[ABN_TG, '2026-11-05']]);
+  assert.deepEqual([B.betaalVerwachting(los, { dekking: dek, rekeningen: REKENINGEN, vandaag: '2026-11-05' }).verwacht, B.betaalVerwachting(los, { dekking: dek, rekeningen: REKENINGEN, vandaag: '2026-11-05' }).stand], ['2026-11-20', 'wacht']);
+  assert.equal(B.betaalVerwachting(Object.assign({}, los, { betaal_op: '2026-11-02' }), { dekking: dek, rekeningen: REKENINGEN }).verwacht, '2026-11-02');
+  assert.equal(B.betaalVerwachting(Object.assign({}, los, { vervaldatum: '2027-01-20' }), { dekking: dek, rekeningen: REKENINGEN }).verwacht, '2026-10-29', 'vervaldatum ver weg: de invoerdag');
+  // KAN 11: invoer om 00:30 Nederlandse tijd hoort bij die dag
+  assert.equal(B.betaalVerwachting(Object.assign({}, los, { ingevoerd_op: '2026-10-29T23:30:00Z', vervaldatum: null }), { dekking: dek, rekeningen: REKENINGEN }).verwacht, '2026-10-30');
+  // ZOU 2: twee actieve rekeningen bij één entiteit, één nog niet zo ver → niet "niet gezien"; een slapende rekening telt niet mee
+  const TWEE = REKENINGEN.concat([{ iban: LEV.ZV, entiteit: 'tolgaarde', bank_formaat: 'abn_tab', controle: 1 }]);
+  const kort = Object.assign({}, los, { vervaldatum: null });
+  assert.equal(B.betaalVerwachting(kort, { dekking: new Map([[ABN_TG, '2026-11-05'], [LEV.ZV, '2026-10-30']]), rekeningen: TWEE, vandaag: '2026-11-05' }).stand, 'bank_achter');
+  assert.equal(B.betaalVerwachting(kort, { dekking: new Map([[ABN_TG, '2026-11-05'], [LEV.ZV, '2026-05-01']]), rekeningen: TWEE, vandaag: '2026-11-05' }).stand, 'niet_gezien');
 });
