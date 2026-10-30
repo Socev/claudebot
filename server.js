@@ -15744,7 +15744,7 @@ if (intake && SERVER_ECHT) { setTimeout(function () { intakeTik(); }, 120000).un
 // mailman.js beslist per binnengekomen Gmail-mail (Altijd in → Filter Weg → Filter In → Jev) naar welke stroom hij gaat en welke labels
 // hij zou krijgen; n8n "AI - MailMan" leest Gmail en roept Jev aan. In stand schaduw zet niemand iets in Gmail; in stand live (B5, wv1973:
 // alleen na Davids knop met verse vingerafdruk en live_toegestaan in config.json) zet n8n de labels die /mailman/labels geeft, na zijn
-// eigen grens op label-ID, en meldt ze via /mailman/gezet. Hier alleen de koppeling: /mailman/{start,nieuw,stap1,stap2,labels,gezet,gedaan} (n8n: Bearer uit MAILMAN_DIR/sleutels.json of het pod-geheim in de body; alleen de primaire
+// eigen grens op label-ID, en meldt ze via /mailman/gezet. Hier alleen de koppeling: /mailman/{start,nieuw,stap1,stap2,labelstaat,labels,gezet,gedaan} (n8n: Bearer uit MAILMAN_DIR/sleutels.json of het pod-geheim in de body; alleen de primaire
 // kant), GET /app/mailman en POST /app/mailman/* na de app-poort, /health.mailman, en één keer per dag opruimen (namen na 14 dagen weg)
 // met hooguit één box-rij als er iets mis is. Intake-draden: alleen-lezen op intake.sqlite (bron + meta.thread_id).
 // Ontbreekt mailman.js in de release (terugrol), dan 404 en mailman.aan=false in /health.
@@ -15755,18 +15755,34 @@ const MAILMAN_DIR = serverPad('mailman', process.env.MAILMAN_DIR, '/opt/data/mai
 const MAILMAN_BODY_MAX = 8 * 1024 * 1024;
 const MAILMAN_TOETS_MAX = 36 * 1024 * 1024;   // wv1997: 3 pdf's van ≤ 8 MB als base64 + json
 let mailmanIntakeDb = null;
-function mailmanIntakeDraden(postvak, draden) {
-  const uit = new Set();
-  if (!draden.length) return uit;
+function mailmanIntakeOpen() {
   if (!mailmanIntakeDb) {
     const f = path.join(INTAKE_DIR, 'intake.sqlite');
-    if (!fs.existsSync(f)) return uit;
+    if (!fs.existsSync(f)) return null;
     const { DatabaseSync } = require('node:sqlite');
     mailmanIntakeDb = new DatabaseSync(f, { readOnly: true });
     mailmanIntakeDb.exec('PRAGMA busy_timeout = 3000;');
   }
-  const q = mailmanIntakeDb.prepare("SELECT 1 FROM stuk WHERE bron = ? AND json_extract(meta, '$.thread_id') = ? LIMIT 1");
+  return mailmanIntakeDb;
+}
+function mailmanIntakeDraden(postvak, draden) {
+  const uit = new Set();
+  if (!draden.length) return uit;
+  const idb = mailmanIntakeOpen();
+  if (!idb) return uit;
+  const q = idb.prepare("SELECT 1 FROM stuk WHERE bron = ? AND json_extract(meta, '$.thread_id') = ? LIMIT 1");
   for (const t of draden.slice(0, 500)) if (q.get(String(postvak), String(t))) uit.add(t);
+  return uit;
+}
+// wv2033 (MailMan B8): welke van deze Gmail-id's staan in Intake (stuk.bron_id = Gmail-id)? = het bewijs dat een route verwerkt is.
+// Alleen lezen; zonder intake.sqlite een lege Set (dan blijft een route open).
+function mailmanIntakeBerichten(postvak, ids) {
+  const uit = new Set();
+  if (!Array.isArray(ids) || !ids.length) return uit;
+  const idb = mailmanIntakeOpen();
+  if (!idb) return uit;
+  const q = idb.prepare('SELECT 1 FROM stuk WHERE bron = ? AND bron_id = ? LIMIT 1');
+  for (const id of ids.slice(0, 500)) if (q.get(String(postvak), String(id))) uit.add(String(id));
   return uit;
 }
 // wv1988 (MailMan B6+): welke van deze Gmail-id's zijn in de Facturen-app helemaal verwerkt? = het bericht uit het verzamelpostvak heeft
@@ -15792,7 +15808,7 @@ const mailman = (function () {
   try {
     return require(p).maak({ dir: MAILMAN_DIR, fout: logError, marker: require(path.join(__dirname, 'intake', 'patientpoort.js')),
       eigenAdressen: function () { const j = intakeRouterStand(); return j && Array.isArray(j.eigen_adressen) ? j.eigen_adressen : []; },
-      intakeDraden: mailmanIntakeDraden, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt,
+      intakeDraden: mailmanIntakeDraden, intakeBerichten: mailmanIntakeBerichten, primair: function () { return rolPrimair(); }, geheimOk: berichtGeheimOk, factuurVerwerkt: mailmanFactuurVerwerkt,
       proces: intakeProces, verkoopTmp: '/dev/shm' });
   } catch (e) { logError('mailman', e); return null; }
 })();
