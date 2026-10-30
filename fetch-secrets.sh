@@ -301,6 +301,13 @@ process.stdin.on("end", () => {
         log "GEWEIGERD: $NAAM zou de omgevingsvariabele \$$ENVNAAM zetten (ANTHROPIC_* nooit uit de kluis) - overgeslagen"
         continue ;;
     esac
+    # wv2055: idem OPENAI_* (OPENAI_API_KEY/OPENAI_BASE_URL zouden de Codex-CLI van het ChatGPT-abonnement naar het API-tegoed of een andere
+    # server zetten). De OpenAI-sleutel (openai_api_key) leest server.js alleen via de Management-API.
+    case "$ENVNAAM" in
+      OPENAI_*)
+        log "GEWEIGERD: $NAAM zou de omgevingsvariabele \$$ENVNAAM zetten (OPENAI_* nooit uit de kluis) - overgeslagen"
+        continue ;;
+    esac
     WAARDE="$(printf '%s' "$B64" | base64 -d 2>/dev/null)"
     if [ -z "$WAARDE" ]; then
       # Een lege waarde is meestal een geheim dat wel is aangemaakt maar nog niet

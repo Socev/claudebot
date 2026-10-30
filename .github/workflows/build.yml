@@ -409,6 +409,11 @@ jobs:
       - name: "pdf-lezer (wv1431, PDF's lezen via de Claude-API, schaduw)"
         if: ${{ !cancelled() }}
         run: bash test/pdf-lezer.sh
+      # OpenAI-hulp (wv2055): poort (patiëntpoort + geheimen) vóór het netwerk, zachte grens, kostenteller zonder tekst, batch tegen een
+      # nep-API op 127.0.0.1; koppeling in server.js (route alleen met API_SECRET, /health, /app/tokens).
+      - name: "openai-hulp (wv2055, OpenAI-tegoed met eigen kostenteller)"
+        if: ${{ !cancelled() }}
+        run: bash test/openai-hulp.sh
       - name: "zoek-snel (wv1252, Zoek snel achter het OVIS-logo)"
         if: ${{ !cancelled() }}
         run: bash test/zoek-snel.sh

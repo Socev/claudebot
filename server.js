@@ -3758,6 +3758,7 @@ function handleRequest(req, res) {
       facturen_ingang: facturenIngangInfo(),   // wv856: smalle ingang /fac (ingericht?, uit?; geen inhoud, geen gebruikers)
       intake: intakeInfo(),
       mailman: typeof mailmanInfo === 'function' ? mailmanInfo() : { aan: false },   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
+      openai: typeof openaiInfo === 'function' ? openaiInfo() : { aan: false },   // wv2055: OpenAI-hulp (maandtotaal, grens, tegoed, per status, sleutel aanwezig?; nooit de sleutel, geen tekst)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
       ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
@@ -16018,6 +16019,84 @@ async function pdfBatchTik() {
   try { const u = await pdfLezer.batchTik(); if (u && (u.opgehaald || u.ingediend || u.fout)) schrijfLog(nu() + ' pdf-lezer batch ' + velden(u)); } catch (e) { logError('pdf-lezer-batch', e); }
 }
 
+// ── OpenAI-hulp (wv2055, 30-10-2026; Davids Ja 30-10 22:09, vraag-id afd66b6a; box-rij #openai-tegoed) ──
+// openai-hulp.js: één gedeelde OpenAI-aanroep met patiëntpoort + geheimenfilter, kostenteller per aanroep (OPENAI_DIR/openai.sqlite, tabel
+// aanroep en batch; nooit tekst) en een eigen zachte maandgrens (OPENAI_DIR/openai.json: aan, tegoed_usd, grens_pct of grens_usd, reset_dag;
+// inst() herleest per minuut). Ontbreekt openai.json of staat aan niet op true: elke aanroep geweigerd (status uit).
+// SLEUTEL: kluisnaam openai_api_key, NIET op de witte lijst (een OPENAI_API_KEY in de omgeving zou de Codex-CLI naar het API-tegoed zetten);
+// gelezen via de Management-API zoals pdfSleutel, 10 min in het geheugen (ontbreekt hij: 2 min), alleen als Authorization-kop in de module.
+// Routes (alleen API_SECRET = machinekamer; body {secret, ...}, alleen op de primaire kant):
+//   POST /openai/vraag        {afnemer, model?, instructies?, invoer, max_uit?, effort?, schema?} → {ok, tekst, json?, model, usd, onvolledig}
+//   POST /openai/batch        {afnemer, model?, instructies?, max_uit?, effort?, verzoeken:[{id, invoer}]} → {ok, id, aantal, geweigerd}
+//   POST /openai/batch/stand  {id} → stand, en de antwoorden zodra hij klaar is
+// /health.openai en de regel "OpenAI deze maand" in GET /app/tokens (veld openai) tonen alleen bedragen, aantallen en tijden.
+const OPENAI_DIR = serverPad('openai', process.env.OPENAI_DIR, '/opt/data/openai', serverProefDeel('openai'));
+const OPENAI_SLEUTEL_NAAM = 'openai_api_key';
+let openaiSleutelCache = null;   // { w, tot }; alleen in het geheugen
+async function openaiSleutel() {
+  if (process.env.OPENAI_TOETS_SLEUTEL && !SERVER_ECHT) return process.env.OPENAI_TOETS_SLEUTEL;   // alleen de toets (nep-API op 127.0.0.1)
+  if (openaiSleutelCache && Date.now() < openaiSleutelCache.tot) return openaiSleutelCache.w;
+  const m = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec(String(process.env.SUPABASE_URL || ''));
+  const pat = process.env.SUPABASE_MCP_TOKEN;
+  if (!m || !pat) return null;
+  const r = await fetch('https://api.supabase.com/v1/projects/' + m[1] + '/database/query', { method: 'POST',
+    headers: { Authorization: 'Bearer ' + pat, 'Content-Type': 'application/json', 'User-Agent': 'socev-openai-hulp/1' },
+    body: JSON.stringify({ query: "select decrypted_secret as w from vault.decrypted_secrets where name = '" + OPENAI_SLEUTEL_NAAM + "'" }),
+    signal: AbortSignal.timeout(20000) });
+  if (!r.ok) { await r.text().catch(function () {}); throw new Error('kluis gaf HTTP ' + r.status); }
+  const rijen = await r.json();
+  const w = Array.isArray(rijen) && rijen[0] && typeof rijen[0].w === 'string' ? rijen[0].w.trim() : '';
+  openaiSleutelCache = { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 };
+  return openaiSleutelCache.w;
+}
+let openaiPoortMod;
+function openaiPoort(teksten) {
+  if (openaiPoortMod === undefined) openaiPoortMod = require(path.join(__dirname, 'intake', 'patientpoort.js'));
+  return openaiPoortMod.beoordeel({ teksten: teksten }, { eigen: openaiPoortMod.maakEigen(null, {}) });
+}
+const openaiHulp = (function () {
+  const p = path.join(__dirname, 'openai-hulp.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    fs.mkdirSync(OPENAI_DIR, { recursive: true, mode: 0o700 });
+    return require(p).maak({ dir: OPENAI_DIR, sleutel: openaiSleutel, poort: openaiPoort, api: SERVER_ECHT ? null : process.env.OPENAI_TOETS_API,
+      log: function (r) { schrijfLog(nu() + ' openai ' + r); }, fout: logError });
+  } catch (e) { logError('openai-hulp', e); return null; }
+})();
+function openaiInfo() { if (!openaiHulp) return { aan: false, module: false }; try { return openaiHulp.health(); } catch (e) { return { fout: true }; } }
+function openaiAppRegel() {
+  if (!openaiHulp) return null;
+  try { const s = openaiHulp.stand(); return { maand_usd: s.maand_usd, open_batch_usd: s.open_batch_usd, tegoed_usd: s.tegoed_usd, grens_usd: s.grens_usd, periode_start: s.periode_start, aan: s.aan }; }
+  catch (e) { logError('openai-app', e); return null; }
+}
+function openaiIsPad(req) { const p = reqPath(req); return p === '/openai/vraag' || p === '/openai/batch' || p === '/openai/batch/stand'; }
+function openaiRoute(req, res) {
+  const p = reqPath(req);
+  if (req.method !== 'POST') { req.resume(); return berichtStuur(res, 405, { ok: false, fout: 'alleen POST' }); }
+  berichtBody(req, p === '/openai/batch' ? 40 * 1024 * 1024 : 4 * 1024 * 1024, function (fout, d) {
+    if (fout === 'afgebroken') return;
+    if (fout === 'te-groot') return berichtStuur(res, 413, { ok: false, fout: 'verzoek te groot' });
+    if (fout || !d) return berichtStuur(res, 400, { ok: false, fout: 'ongeldige json' });
+    if (!berichtGeheimOk(d)) return berichtStuur(res, 401, { ok: false, fout: 'niet toegestaan' });
+    if (!openaiHulp) return berichtStuur(res, 404, { ok: false, fout: 'openai-hulp zit niet in deze versie van de pod' });
+    if (!rolPrimair()) return berichtStuur(res, 409, { ok: false, fout: 'passief' });
+    delete d.secret;
+    (async function () {
+      if (p === '/openai/vraag') { const r = await openaiHulp.vraag(d); return berichtStuur(res, 200, r); }
+      if (p === '/openai/batch') { const r = await openaiHulp.batchIndienen(d); return berichtStuur(res, 200, r); }
+      const s = openaiHulp.batchStand(d.id);
+      return berichtStuur(res, s ? 200 : 404, s ? Object.assign({ ok: true }, s) : { ok: false, fout: 'onbekende batch' });
+    })().catch(function (e) { logError('openai-route', e); berichtStuur(res, 500, { ok: false, fout: 'fout op de pod' }); });
+  });
+}
+let openaiBatchOp = 0;
+async function openaiBatchTik() {
+  if (!openaiHulp || !rolPrimair() || Date.now() - openaiBatchOp < 9 * 60000) return;
+  openaiBatchOp = Date.now();
+  try { await openaiHulp.batchTik(); } catch (e) { logError('openai-batch', e); }
+}
+if (openaiHulp && SERVER_ECHT) setInterval(function () { openaiBatchTik(); }, 10 * 60000).unref();
+
 // ── ScanSnap → OVIS Intake (wv1343, 26-10-2026; bouwplan vault "01_Ontwikkeling/OVIS Intake - ScanSnap-scans (bouwplan 26-10-2026).md") ──
 // Elk kwartier (echte pod, primaire kant, schakelaar INTAKE_DIR/scansnap.json {"aan": true}): nieuwe scans uit gdrive:ScanSnap via rclone
 // intern in de Intake-kern (profiel scansnap@1, alleen op de pod), in Drive verplaatst naar ScanSnap/_opgehaald, per scan een Voor jou-kaart.
@@ -17098,7 +17177,7 @@ async function appTokens(req, res, a, route) {
   const vast = appAfscherm(a);   // wv1901
   let uit;
   try {
-    if (route === 'GET /app/tokens') uit = tokenteller.stand({ vast: vast, tank: await tokentellerTank() });
+    if (route === 'GET /app/tokens') { uit = tokenteller.stand({ vast: vast, tank: await tokentellerTank() }); if (uit && typeof openaiAppRegel === 'function') uit.openai = openaiAppRegel(); }   // wv2055: regel OpenAI deze maand
     else {
       const m = /^GET \/app\/tokens\/dag\/(\d{4}-\d{2}-\d{2})$/.exec(route);
       uit = m ? tokenteller.dag(m[1], { vast: vast }) : null;
@@ -18596,6 +18675,7 @@ const server = http.createServer(function (req, res) {
     }
     if (mailmanIsPad(req)) return mailmanRoute(req, res);   // wv1856: OVIS MailMan (n8n; eigen sleutel of pod-geheim), nooit door naar handleRequest
     if (telIsPad(req)) return handleTel(req, res);   // wv264: spraak via de telefoon (Tasker)
+    if (openaiIsPad(req)) return openaiRoute(req, res);   // wv2055: OpenAI-hulp (intern, API_SECRET)
     if (berichtIsPad(req)) return berichtRoute(req, res);   // wv263: bericht aan David (intern, API_SECRET)
     if (bankIsPad(req)) return bankTerug(req, res);   // wv680: terugkeer van de bank na koppelen (bank.socev.dev)
     handleRequest(req, res);

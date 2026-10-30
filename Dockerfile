@@ -187,6 +187,7 @@ COPY mediatheek.js /app/release-bootstrap/mediatheek.js
 COPY ovis-register.js /app/release-bootstrap/ovis-register.js
 COPY ovis-plekken.js /app/release-bootstrap/ovis-plekken.js
 COPY pdf-lezer.js /app/release-bootstrap/pdf-lezer.js
+COPY openai-hulp.js /app/release-bootstrap/openai-hulp.js
 COPY facturen-kaart.js /app/release-bootstrap/facturen-kaart.js
 COPY omzet.js omzet-huisstijl.js xlsx-schrijver.js /app/release-bootstrap/
 
