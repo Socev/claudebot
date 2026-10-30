@@ -899,6 +899,24 @@ test('wv2047: een deel van de naam geeft nooit een onbekend-IBAN-signaal; een de
   // omgekeerd (de post is een deel van de leveranciersnaam): ook één woord telt niet
   const kort = tx({ boekdatum: '2026-10-30', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Kraamzorg' });
   assert.equal(B.leverancierBijTx(kort, { leveranciers: levs }), null);
+  // "X via Y" / "X by Y" = exacte naam X: een nieuwe rekening geeft wél het signaal
+  for (const nm of ['CV Huisartsenzorg via Iets', 'Huisartsenzorg by Buckaroo']) {
+    const t = tx({ boekdatum: '2026-10-30', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: nm });
+    assert.equal(B.leverancierBijTx(t, { leveranciers: levs }).deel, undefined, nm);
+    assert.ok(soorten(controle({ transacties: [t], facturen: [], leveranciers: levs, verzamelTel: { [LEV.VREEMD]: 1 } })).includes('onbekend_iban'), nm);
+  }
+  // alleen hele woorden: "A Smit" is geen deel van "HA Smit Waarneming"
+  assert.equal(B.leverancierBijTx(tx({ tegenpartij_naam: 'A Smit' }), { leveranciers: [{ id: 'hs', naam: 'HA Smit Waarneming', ibans: [] }] }), null);
+  // een deel-koppeling zet geen leverancier of leveranciersnaam op een ander signaal (geen factuur)
+  const oud = tx({ boekdatum: '2026-09-01', bedrag_centen: -5000, tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Proef Kraamzorg Midden Noord' });
+  const gf = controle({ transacties: [oud], facturen: [], leveranciers: levs }).signalen.filter((x) => x.soort === 'geen_factuur');
+  assert.equal(gf.length, 1); assert.equal(gf[0].leverancier, null); assert.equal(gf[0].naam, 'Proef Kraamzorg Midden Noord');
+  // een deel-koppeling levert nog wel een incassovoorstel (ter bevestiging, niet geborgd)
+  const fk = fac({ id: 'kz1', leverancier: 'kz', nummer: 'KZ-1', incl: 5000, betaalwijze: 'incasso', betaalspoor: 'incasso_verwacht', factuurdatum: '2026-10-20', vervaldatum: '2026-10-30' });
+  const inc = tx({ boekdatum: '2026-10-30', bedrag_centen: -5000, is_incasso: true, incassant_id: 'NL00ZZZTEST0000000999', tegenpartij_iban: LEV.VREEMD, tegenpartij_naam: 'Proef Kraamzorg Midden Noord' });
+  const ri = controle({ transacties: [inc], facturen: [fk], leveranciers: levs });
+  assert.equal(ri.koppelingen.length, 0); assert.equal(ri.voorstellen.length, 1); assert.equal(ri.voorstellen[0].tegenpartij_geborgd, false);
+  assert.ok(!soorten(ri).includes('onbekend_iban'));
 });
 
 test('#10 MT940 met een lange reeks spaties: lineair (geen ReDoS)', () => {

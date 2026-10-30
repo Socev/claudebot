@@ -617,16 +617,18 @@ function leverancierBijTx(tx, ctx) {
   if (n.length >= 4) {
     // eerst exact; anders een deel van de naam, maar alleen als precies één leverancier past (anders wint de eerste in de lijst).
     // wv2047: het ingesloten deel moet minstens twee woorden zijn ("huisartsenzorg" uit "CV Huisartsenzorg" past anders op "NAK
-    // Huisartsenzorg"), en een deel-treffer krijgt deel: true — die geeft nooit een onbekend-IBAN-signaal. "X via Mollie" telt als de
-    // exacte naam X (de begunstigde staat vóór "via"; wv1360-toets: zo'n nieuwe rekening moet wél het signaal geven).
-    const voorVia = n.split(' via ')[0];
+    // Huisartsenzorg"), alleen op hele woorden, en een deel-treffer krijgt deel: true — die geeft nooit een onbekend-IBAN-signaal en
+    // draagt geen leverancier op een signaal. "X via Mollie" / "X by Buckaroo" telt als de exacte naam X (de begunstigde staat ervóór;
+    // wv1360-toets: zo'n nieuwe rekening moet wél het signaal geven).
+    const voorVia = n.split(/ (?:via|by) /)[0];
     let exact = lijst.filter((x) => normNaam(x.naam) === n);
     if (!exact.length && voorVia !== n && voorVia.length >= 4) exact = lijst.filter((x) => normNaam(x.naam) === voorVia);
     const tweeWoorden = (s) => s.indexOf(' ') > 0;
+    const binnen = (klein, groot) => (' ' + groot + ' ').indexOf(' ' + klein + ' ') >= 0;
     const deel = exact.length ? exact : lijst.filter((x) => {
       const m = normNaam(x.naam);
       if (m.length < 6 || n.length < 6) return false;
-      return (n.indexOf(m) >= 0 && tweeWoorden(m)) || (m.indexOf(n) >= 0 && tweeWoorden(n));
+      return (tweeWoorden(m) && binnen(m, n)) || (tweeWoorden(n) && binnen(n, m));
     });
     if (deel.length === 1) return exact.length ? { leverancier: deel[0], via: 'naam' } : { leverancier: deel[0], via: 'naam', deel: true };
   }
@@ -1305,8 +1307,9 @@ function bankcontrole(inv) {
     if (txFacturen.has(tx.id) || overslaan.has(tx.id) || sepaAf.has(tx.id)) continue;
     const lt = leverancierBijTx(tx, ctx);
     const tegen = ibanNorm(tx.tegenpartij_iban);
-    const basis = { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lt ? lt.leverancier.naam : tx.tegenpartij_naam,
-      tegenpartij_iban: tx.tegenpartij_iban, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar, leverancier: lt ? lt.leverancier.id : null };
+    const lv = lt && !lt.deel ? lt : null;   // wv2047: een deel van de naam zet geen leverancier op een signaal
+    const basis = { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lv ? lv.leverancier.naam : tx.tegenpartij_naam,
+      tegenpartij_iban: tx.tegenpartij_iban, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar, leverancier: lv ? lv.leverancier.id : null };
     // betaald aan onbekend IBAN: de tegenpartij is een bekende leverancier (incassant of exacte naam), het IBAN niet. wv2047: nooit op een
     // deel van de naam (NAK Huisartsenzorg ≠ CV Huisartsenzorg). Vóór de uitzonderingen,
     // zodat een uitzondering op naam het fraudesignaal nooit uitzet (diffreview wv798 #13). wv1360: niet als die rekening al eerder als
@@ -1330,7 +1333,7 @@ function bankcontrole(inv) {
       });
       const dubbel = al.find((f) => {
         const l = levVan(f.leverancier, ctx);
-        const zelfdeLev = !!(l && ((lt && lt.leverancier.id === l.id) || (tegen && levIbans(l).has(tegen))));
+        const zelfdeLev = !!(l && ((lv && lv.leverancier.id === l.id) || (tegen && levIbans(l).has(tegen))));
         if (!zelfdeLev) return false;   // een factuurnummer alleen is niet genoeg: "1001" komt bij veel leveranciers voor (diffreview wv798 #1)
         if (noemtFactuur(ref, f)) return true;
         const eerdere = (betaald.get(f.id) || []).map((k) => txMap.get(k.tx)).filter(Boolean);
@@ -1445,10 +1448,10 @@ function bankcontrole(inv) {
     // een uitzondering die deze ronde pas de categorie zet (creditcard, eigen rekening): geen signaal (diffreview wv1326 MOET 1)
     const uz = uitzonderingVoor(tx, ctx);
     if (uz && AFWIJKEND_NIET.includes(uz.categorie)) continue;
-    const lt = leverancierBijTx(tx, ctx);
+    const lt = leverancierBijTx(tx, ctx), lv = lt && !lt.deel ? lt : null;
     const tp = crypto.createHash('sha1').update(String(a.tegenpartij || ''), 'utf8').digest('hex').slice(0, 16);
-    signalen.push(maakSignaal('afwijkend_bedrag', { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lt ? lt.leverancier.naam : tx.tegenpartij_naam,
-      leverancier: lt ? lt.leverancier.id : null, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar || !!a.alleen_eigenaar,
+    signalen.push(maakSignaal('afwijkend_bedrag', { transacties: [tx.id], eigen_iban: tx.eigen_iban, entiteit: tx.entiteit, naam: lv ? lv.leverancier.naam : tx.tegenpartij_naam,
+      leverancier: lv ? lv.leverancier.id : null, bedrag_centen: tx.bedrag_centen, datum: tx.boekdatum, alleen_eigenaar: !!tx.alleen_eigenaar || !!a.alleen_eigenaar,
       sleutel_vast: tx.entiteit + '|' + tp + '|' + tx.boekdatum.slice(0, 7),
       details: { laag_centen: p.laag_centen, hoog_centen: p.hoog_centen, mediaan_centen: p.mediaan_centen, frequentie: p.frequentie, aantal: p.aantal, sinds: p.sinds,
         drempel_centen: a.drempel_centen } }));
@@ -1551,6 +1554,7 @@ const FREQ_TEKST = { week: 'per week', twee_weken: 'per twee weken', maand: 'per
 const AFHANDELING_TEKST = {
   historie_voor_start: (n) => n + (n === 1 ? ' afschrijving' : ' afschrijvingen') + ' van vóór de start van de App zonder factuur: genegeerd (oude historie).',
   transactie_verwijderd: (n) => n + (n === 1 ? ' melding verviel' : ' meldingen vervielen') + ': de bankregel was dubbel binnengekomen en is weggehaald.',
+  vals_signaal: (n) => n + (n === 1 ? ' melding was' : ' meldingen waren') + ' vals alarm en is gesloten.',   // wv2047
 };
 function leerRegel(g) {
   const n = Number(g.aantal) || 1;
