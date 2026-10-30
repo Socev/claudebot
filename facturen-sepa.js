@@ -62,18 +62,19 @@ function grenzen(vandaag) {
   return { vroegst: werkdagVanaf(vandaag), uiterst: plus(vandaag, MAX_VOORUIT) };
 }
 // Belastingdienst herkennen: vaste ontvangrekening, de naam op de factuur of (lev_naam) de naam van de gekoppelde leverancier.
-// BD_MARGE = bankwerkdagen vóór de vervaldatum.
+// BD_MARGE = bankwerkdagen vóór de vervaldatum; ligt die datum meer dan BD_HORIZON dagen vooruit (bv. een verkeerd gelezen jaartal), dan
+// gewoon de dag van de batch: te vroeg betalen kost geen boete, een jaar te laat wel (Opus-review 30-10 ZOU 1).
 const BD_IBAN = new Set(['NL86INGB0002445588']);
-const BD_MARGE = 3;
+const BD_MARGE = 3, BD_HORIZON = 90;
 function isBelastingdienst(f) {
   if (!f) return false;
   const iban = String(f.iban || '').replace(/\s+/g, '').toUpperCase();
-  return BD_IBAN.has(iban) || /belastingdienst/i.test([f.leverancier_naam, f.lev_naam].filter(Boolean).join(' '));
+  return BD_IBAN.has(iban) || /belasting\s*dienst/i.test([f.leverancier_naam, f.lev_naam].filter(Boolean).join(' '));
 }
 /*
  * De uitvoerdatum die in het bestand komt. Zelf gekozen (betaal_op) wint, maar nooit vóór `vroegst` (een gekozen datum die voorbij is, wordt
  * de eerstvolgende werkdag). Anders `vroegst`: de dag van de batch, of de eerstvolgende bankwerkdag (David 30-10-2026). Alleen de
- * Belastingdienst gaat standaard laat: BD_MARGE bankwerkdagen vóór de vervaldatum, nooit vóór vroegst.
+ * Belastingdienst gaat standaard laat: BD_MARGE bankwerkdagen vóór de vervaldatum, nooit vóór vroegst en hooguit BD_HORIZON dagen vooruit.
  * → { datum, bron: 'gekozen'|'gekozen_voorbij'|'belastingdienst_marge'|'eerstvolgende_werkdag', te_ver: bool }
  */
 function uitvoerVoor(f, vandaag) {
@@ -86,7 +87,7 @@ function uitvoerVoor(f, vandaag) {
     // onvoldoende saldo of een feestdag mag het niet doen mislukken).
     let w = werkdagTot(f.vervaldatum);
     for (let i = 0; i < BD_MARGE; i++) w = werkdagTot(plus(w, -1));
-    if (w < g.vroegst) { datum = g.vroegst; bron = 'eerstvolgende_werkdag'; } else { datum = w; bron = 'belastingdienst_marge'; }
+    if (w < g.vroegst || w > plus(vandaag, BD_HORIZON)) { datum = g.vroegst; bron = 'eerstvolgende_werkdag'; } else { datum = w; bron = 'belastingdienst_marge'; }
   } else { datum = g.vroegst; bron = 'eerstvolgende_werkdag'; }   // David 30-10-2026: standaard de dag van de batch, niet de uiterste betaaldatum
   return { datum, bron, te_ver: datum > g.uiterst };
 }
@@ -233,7 +234,7 @@ function nieuwMsgId(vandaag, hex8) {
   return 'SOCEV-' + vandaag.replace(/-/g, '') + '-' + hex8;
 }
 module.exports = {
-  isBelastingdienst, BD_MARGE,
+  isBelastingdienst, BD_MARGE, BD_HORIZON,
   FORMAAT, NS, MAX_VOORUIT, MAX_REGELS, EER, BIC, isWerkdag, werkdagVanaf, werkdagTot, pasen, grenzen, uitvoerVoor, datumFout, isEer, bicVoor,
   kenmerkOk, rfOk, tekst, id, omschrijving, bedrag, blokken, xml, inhoudSleutel, sha256, nieuwMsgId,
 };

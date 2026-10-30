@@ -57,7 +57,9 @@ test('uitvoerdatum: standaard de dag van de batch; Belastingdienst 3 werkdagen v
   assert.deepEqual(S.uitvoerVoor({}, v), { datum: '2026-10-27', bron: 'eerstvolgende_werkdag', te_ver: false });
   assert.deepEqual(S.uitvoerVoor({ vervaldatum: '2026-11-05', betaal_op: '2026-12-15' }, v), { datum: '2026-12-15', bron: 'gekozen', te_ver: false });
   assert.deepEqual(S.uitvoerVoor({ vervaldatum: '2026-11-05', betaal_op: '2026-10-20' }, v), { datum: '2026-10-27', bron: 'gekozen_voorbij', te_ver: false });
-  assert.equal(S.uitvoerVoor({ vervaldatum: '2062-10-27', leverancier_naam: 'Belastingdienst' }, v).te_ver, true, 'OCR-fout in het jaartal (BD)');
+  assert.deepEqual(S.uitvoerVoor({ vervaldatum: '2027-10-28', leverancier_naam: 'Belastingdienst' }, v), { datum: '2026-10-27', bron: 'eerstvolgende_werkdag', te_ver: false }, 'BD: verkeerd jaartal (> 90 dagen) → gewoon vandaag');
+  assert.equal(S.uitvoerVoor({ vervaldatum: '2027-01-20', leverancier_naam: 'Belasting dienst' }, v).datum, '2027-01-15', 'BD binnen 90 dagen; naam met spatie');
+  assert.equal(S.uitvoerVoor({ betaal_op: '2062-10-27' }, v).te_ver, true, 'te ver (alleen nog bij een datum die buiten de route om is gezet)');
 });
 
 test('zelf gekozen datum: werkdag, niet voorbij, hooguit 364 dagen vooruit', () => {

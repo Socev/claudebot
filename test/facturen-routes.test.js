@@ -1130,7 +1130,7 @@ test('wv1405 SEPA: weigeringen (creditnota, IBAN niet nagebeld, valuta, buiten d
   const nieuwIban = Z.maakIban('NL', 'TEST', '0912345678');
   const blok = teBetalenFactuur(t, { velden: { iban: nieuwIban, ibans_betaal: [nieuwIban], iban_nieuw: 1, ibans_onbekend: [nieuwIban] } });
   const gb = teBetalenFactuur(t, { velden: { iban: 'GB33BUKB20201555555555' } });   // het voorbeeld-IBAN uit de documentatie
-  const ver = teBetalenFactuur(t, { velden: { vervaldatum: '2062-10-01', leverancier_naam: 'Belastingdienst' } });   // alleen de Belastingdienst volgt de vervaldatum
+  const ver = teBetalenFactuur(t, { velden: { betaal_op: '2062-10-02' } });   // buiten de route om gezet (de route weigert > 364 dagen)
   const gekop = teBetalenFactuur(t);
   const tx = t.fdb.db.prepare("SELECT id FROM bank_transactie WHERE entiteit = 'tolgaarde' AND bedrag_centen < 0 ORDER BY id LIMIT 1").get();
   t.fdb.db.prepare("INSERT INTO koppeling (transactie, factuur, bron, methode, zekerheid, alleen_eigenaar, wie, wanneer) VALUES (?, ?, 'mens', 'handmatig', 1, 0, 'proef', ?)").run(tx.id, gekop, new Date(NU).toISOString());
@@ -1252,6 +1252,13 @@ test('wv1405 betaaldatum: werkdag, niet voorbij, hooguit 364 dagen; leeg = stand
   assert.deepEqual([rij().uitvoer, rij().uitvoer_bron], ['2026-10-22', 'eerstvolgende_werkdag']);
   assert.equal(t.call('POST', 'ingevoerd', { id: a }).status, 200);
   assert.equal(t.call('POST', 'betaaldatum', { id: a, datum: '2026-12-15' }).status, 409, 'niet voor een ingevoerde factuur');
+  // David 30-10-2026: de Belastingdienst herkend aan de gekoppelde leverancier (andere naam op de scan): 3 werkdagen vóór do 5-11 = ma 2-11
+  const bd = teBetalenFactuur(t, { velden: { leverancier_naam: 'Centrale administratie (scan)' } });
+  t.fdb.db.prepare("UPDATE leverancier SET naam = 'Belastingdienst' WHERE id = (SELECT leverancier FROM factuur WHERE id = ?)").run(bd);
+  const rbd = t.call('GET', 'betalen').j.te_betalen.find((x) => x.id === bd);
+  assert.deepEqual([rbd.uitvoer, rbd.uitvoer_bron], ['2026-11-02', 'belastingdienst_marge']);
+  assert.equal(t.call('POST', 'betaaldatum', { id: bd, datum: '2026-10-23' }).j.uitvoer.bron, 'gekozen');
+  assert.deepEqual(t.call('POST', 'betaaldatum', { id: bd, datum: null }).j.uitvoer, { datum: '2026-11-02', bron: 'belastingdienst_marge', te_ver: false }, 'terug naar standaard via de route');
 });
 
 test('wv1405 twee rekeningen bij één entiteit; ABN-afschrift met PREF koppelt de hele batch; zonder kenmerk alleen een voorstel; losse betaling op EndToEndId; signaal pas vanaf de uitvoerdatum', () => {
