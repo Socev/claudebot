@@ -75,6 +75,12 @@ function isObj(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
 function kort(s, n) { return s == null ? null : String(s).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, n); }
 function rond(x) { return Math.round(x * 1e6) / 1e6; }
 function geheimIn(t) { return GEHEIM.some(function (r) { return r.test(t); }); }
+// maskeer: true (bijv. een diff met verzonnen toetssleutels) → elk geheim-vormig stuk wordt '[geheim-gemaskeerd]' in plaats van weigeren
+function maskeer(t) {
+  let n = 0, uit = String(t);
+  for (const r of GEHEIM) uit = uit.replace(new RegExp(r.source, r.flags.indexOf('g') >= 0 ? r.flags : r.flags + 'g'), function () { n++; return '[geheim-gemaskeerd]'; });
+  return { tekst: uit, n: n };
+}
 // Model uit het antwoord ("gpt-5.4-mini-2026-03-17") → rij in de tabel; eerst exact, dan zonder datumstaart.
 function prijsSleutel(model) {
   const m = String(model || '');
@@ -210,7 +216,8 @@ function maak(o) {
   function weiger(afnemer, model, status, extra) { rij(Object.assign({ afnemer: afnemer, model: model, status: status }, extra || {})); return { ok: false, status: status }; }
 
   /*
-   * Eén synchrone vraag. v: { afnemer, model?, instructies?, invoer, max_uit?, effort?, schema? (JSON-schema voor gestructureerde uitvoer) }
+   * Eén synchrone vraag. v: { afnemer, model?, instructies?, invoer, max_uit?, effort?, schema? (JSON-schema voor gestructureerde uitvoer),
+ *   maskeer? (true: geheim-vormige stukken vervangen in plaats van weigeren; de patiëntpoort weigert altijd) }
    * → { ok: true, tekst, json?, model, usd, onvolledig, ms } of { ok: false, status } (uit, afnemer, model, invoer, te_groot, poort, geheim,
    *   grens, uurgrens, geen_sleutel, api_<code>, fout).
    */
@@ -223,7 +230,9 @@ function maak(o) {
     if (!i.aan) return weiger(afnemer, model, 'uit');
     if (!PRIJZEN[model]) return weiger(afnemer, kort(model, 40), 'model');
     if (typeof v.invoer !== 'string' || !v.invoer) return { ok: false, status: 'invoer' };
-    const instr = typeof v.instructies === 'string' ? v.instructies : '';
+    let instr = typeof v.instructies === 'string' ? v.instructies : '';
+    let gemaskeerd = 0;
+    if (v.maskeer === true) { const a = maskeer(instr), b = maskeer(v.invoer); instr = a.tekst; v = Object.assign({}, v, { invoer: b.tekst }); gemaskeerd = a.n + b.n; }
     const tekens = instr.length + v.invoer.length;
     if (tekens > i.max_tekens || Math.ceil(tekens / 3) > LANG_MAX) return weiger(afnemer, model, 'te_groot');
     const maxUit = Math.min(i.max_uit, Math.max(16, Math.floor(Number(v.max_uit) || 4000)));
@@ -249,6 +258,7 @@ function maak(o) {
       const onvolledig = !!(r && r.status === 'incomplete');
       rij(Object.assign({ afnemer: afnemer, model: kort(r && r.model || model, 60), status: onvolledig ? 'onvolledig' : 'ok', ref: r && r.id, ms: nu() - t0 }, k));
       const uit = { ok: true, tekst: tekst, model: kort(r && r.model || model, 60), usd: k.usd, onvolledig: onvolledig, ms: nu() - t0 };
+      if (gemaskeerd) uit.gemaskeerd = gemaskeerd;
       if (isObj(v.schema)) { try { uit.json = JSON.parse(tekst); } catch (e) { uit.json = null; } }
       return uit;
     } catch (e) {
@@ -402,4 +412,4 @@ function maak(o) {
   return { vraag, batchIndienen, batchTik, batchStand, stand, health, sluit };
 }
 
-module.exports = { maak, VERSIE, PRIJZEN, PRIJS_DATUM, _intern: { kosten, schatting, periodeVan, tekstVan, geheimIn, prijsSleutel } };
+module.exports = { maak, VERSIE, PRIJZEN, PRIJS_DATUM, _intern: { kosten, schatting, periodeVan, tekstVan, geheimIn, maskeer, prijsSleutel } };

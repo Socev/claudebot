@@ -83,6 +83,17 @@ test('geheimenfilter', function () {
   assert.ok(!H._intern.geheimIn('Een gewone zin over facturen van oktober.'));
 });
 
+test('maskeer: geheim-vormige stukken vervangen, gewone tekst blijft', async function () {
+  const m = H._intern.maskeer('a sk-proj-' + 'c'.repeat(40) + ' b\nwachtwoord: Geheim123!\nc');
+  assert.strictEqual(m.n, 2); assert.ok(!H._intern.geheimIn(m.tekst)); assert.ok(m.tekst.indexOf('a [geheim-gemaskeerd] b') === 0);
+  const n = await nepApi(); const t = nieuw(n.url, { aan: true });
+  assert.strictEqual((await t.h.vraag({ afnemer: 'review', invoer: 'diff met wachtwoord: Geheim123!' })).status, 'geheim');
+  const r = await t.h.vraag({ afnemer: 'review', invoer: 'diff met wachtwoord: Geheim123!', maskeer: true });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.gemaskeerd, 1);
+  assert.ok(n.verzoeken[0].body.indexOf('Geheim123') < 0);
+  assert.strictEqual((await t.h.vraag({ afnemer: 'review', invoer: PATIENT, maskeer: true })).status, 'poort');
+  n.srv.close(); t.h.sluit();
+});
 test('uit (geen openai.json): geweigerd, geen aanroep, wel een rij', async function () {
   const n = await nepApi(); const t = nieuw(n.url, null);
   const r = await t.h.vraag({ afnemer: 'proef', invoer: 'Zeg pong.' });
