@@ -852,12 +852,14 @@ CREATE INDEX IF NOT EXISTS afzender_regel_leverancier ON afzender_regel (leveran
  * Nooit een volledig kaartnummer: alleen de laatste 4 (CHECK); de lezer weigert een bestand met een lange cijferreeks.
  * LET OP terugrol: een release van vóór wv2043 opent deze database niet meer (schema_nieuwer); lichtste terugrol is
  * `DELETE FROM schema_migratie WHERE versie = 13` (de oude code kent de vier tabellen niet en hindert ze niet). Herhaalbaar (IF NOT EXISTS).
+ * LET OP bij een latere migratie: kaart_regel en kaart_incasso verwijzen naar leverancier, factuur, factuur_archief en bank_transactie; een
+ * herbouw van zo'n tabel (DROP + CREATE) met foreign_keys aan loopt hierop vast (diffreview wv2043 KAN 11).
  */
 const M13 = `
 CREATE TABLE IF NOT EXISTS kaart (
   id TEXT PRIMARY KEY ${ID('id')},
   uitgever TEXT NOT NULL CHECK (uitgever IN ('ICS')),
-  klantnummer TEXT NOT NULL UNIQUE CHECK (length(klantnummer) BETWEEN 4 AND 20 AND klantnummer NOT GLOB '*[^0-9]*'),
+  klantnummer TEXT NOT NULL UNIQUE CHECK (length(klantnummer) BETWEEN 4 AND 12 AND klantnummer NOT GLOB '*[^0-9]*'),
   laatste4 TEXT NOT NULL CHECK (length(laatste4) = 4 AND laatste4 NOT GLOB '*[^0-9]*'),
   entiteit TEXT NOT NULL REFERENCES entiteit(sleutel) CHECK (entiteit <> 'prive'),
   rekening TEXT NOT NULL REFERENCES rekening(id),

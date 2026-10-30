@@ -106,6 +106,8 @@ test('lezer weigert het hele bestand: kop, kaartnummer, lange cijferreeks, debet
   fout([Object.assign(r.slice(), { 3: '4111111111111111' })], 'kaartnummer');
   fout([Object.assign(r.slice(), { 3: '12340000' })], 'kaartnummer');
   fout([Object.assign(r.slice(), { 2: 'WOLKDIENST 4111 1111 1111 1111 USA' })], 'kaartnummer');
+  assert.equal(C.leesIcsCsv(csv([Object.assign(r.slice(), { 2: 'WEBWINKEL ORDER 123-1234567-1234567 USA' })])).regels.length, 1, 'ordernummer zonder Luhn houdt niets tegen');
+  fout([Object.assign(r.slice(), { 2: 'WEBWINKEL 4111-1111-1111-1111 USA' })], 'kaartnummer');
   fout([Object.assign(r.slice(), { 5: '-10,00' })], 'regel');
   fout([Object.assign(r.slice(), { 0: '2026-01-02' })], 'regel');
   fout([Object.assign(r.slice(), { 5: '10.00' })], 'regel');
@@ -129,13 +131,19 @@ test('handelaar en leverancier: eerste woord, alias, land beslist, onzeker = gee
   assert.equal(C.handelaar('CLAUDE.AI SUBSCRIPTION SAN FRANCISCO USA', 'transactie'), 'ANTHROPIC');
   assert.equal(C.handelaar('JAARBIJDRAGE CARD', 'transactie'), 'ICS');
   assert.equal(C.handelaar('HER-INCASSO', 'betaling'), 'ICS');
-  const K = require(path.join(ROOT, 'facturen-kern.js'));
-  const L = ['Proefbureau Ireland Limited', 'Proefbureau, PBC', 'Een Twee Drie', 'Ab Cdefgh'].map((naam, i) => ({ id: 'l' + i, naam, genormaliseerd: K.normNaam(naam) }));
-  assert.equal(C.zoekLeverancier('PROEFBUREAU', 'IRL', L).leverancier.id, 'l0');
-  assert.equal(C.zoekLeverancier('PROEFBUREAU', 'USA', L).leverancier.id, 'l1');
-  assert.equal(C.zoekLeverancier('PROEFBUREAU', 'FRA', L).leverancier, null, 'twee kandidaten zonder beslissend land');
-  assert.equal(C.zoekLeverancier('ABCDEFGH.IO', 'USA', L).leverancier.id, 'l3', 'aaneen geschreven');
-  assert.equal(C.zoekLeverancier('EEN', 'NLD', L).leverancier, null, 'kort woord alleen telt niet');
+  const L = ['Proefbureau Ireland Limited', 'Proefbureau, PBC', 'Een Twee Drie', 'Abcd Efghij', 'Bakkerij Proefmans', 'Van der Proef', 'Wolk Dienst EMEA', 'Anthropic, PBC']
+    .map((naam, i) => ({ id: 'l' + i, naam }));
+  const z = (oms, land) => { const r = { omschrijving: oms, land, handelaar: C.handelaar(oms, 'transactie') }; return C.zoekLeverancier(r, L).leverancier; };
+  assert.equal(z('PROEFBUREAU* ABONNEMENT DUBLIN 4 IRL', 'IRL').id, 'l0');
+  assert.equal(z('PROEFBUREAU SAN FRANCISCO USA', 'USA').id, 'l1');
+  assert.equal(z('PROEFBUREAU PARIS FRA', 'FRA'), null, 'twee kandidaten zonder beslissend land');
+  assert.equal(z('ABCDEFGHIJ.IO NEW YORK USA', 'USA').id, 'l3', 'aaneen geschreven (≥ 8)');
+  assert.equal(z('WOLK*DIENST 7R4KW8 CC WOLK.COM IRL', 'IRL').id, 'l6', 'kern zonder afdeling (EMEA)');
+  assert.equal(z('CLAUDE.AI SUBSCRIPTION SAN FRANCISCO USA', 'USA').id, 'l7', 'alias');
+  // diffreview MOET 1: een los algemeen eerste woord of een tussenvoegsel is geen leverancier
+  assert.equal(z('BAKKERIJ JANSEN UTRECHT NLD', 'NLD'), null);
+  assert.equal(z('VAN DER VALK HOTEL UTRECHT NLD', 'NLD'), null);
+  assert.equal(z('EEN WINKEL NLD', 'NLD'), null, 'kort woord alleen telt niet');
 });
 
 // ───────────────────────────── database ─────────────────────────────
@@ -159,8 +167,9 @@ test('inlezen: idempotent, bron bewaard, koppelen, aansluiting op de cent, tweed
   // tweede bestand: dezelfde regels vanaf februari + één nieuwe in mei (andere sha256)
   const tweede = csv(BASIS.slice(6).concat([['01-05-2026', '02-05-2026', 'WOLKDIENST SAN FRANCISCO USA', '****0000', 'D', '3,00', 'USD', '3,30', 'Transaction', '202605']]));
   const u2 = C.inlezen(t.fdb, '0000', tweede, { wie: 'toets', nu: NU });
-  assert.equal(u2.al_bekend, false); assert.equal(u2.nieuw, 1); assert.equal(u2.al_bekend_regels, BASIS.length - 6);
-  assert.equal(t.fdb.db.prepare('SELECT count(*) AS n FROM kaart_regel').get().n, BASIS.length + 1, '0 dubbel');
+  // nieuw: de regel van mei + de autorisatie (hoort bij het bestand waarin hij staat, diffreview ZOU 2)
+  assert.equal(u2.al_bekend, false); assert.equal(u2.nieuw, 2); assert.equal(u2.al_bekend_regels, BASIS.length - 6 - 1);
+  assert.equal(t.fdb.db.prepare("SELECT count(*) AS n FROM kaart_regel WHERE soort <> 'autorisatie'").get().n, BASIS.length - 1 + 1, '0 dubbel');
   // aansluiting
   const a = Object.fromEntries(C.aansluitingDb(t.fdb, C.kaartVan(t.fdb, '0000')).map((x) => [x.overzicht, x]));
   assert.equal(a['2025-12'].status, 'buiten_bestand');
@@ -191,8 +200,10 @@ test('de database bewaakt: ruwe velden vast, incasso op de rekening van de kaart
   const ander = t.fdb.db.prepare('SELECT id FROM bank_transactie WHERE rekening = ?').get(t.ids.ander).id;
   assert.throws(() => t.fdb.db.prepare("INSERT INTO kaart_incasso (transactie, kaart, overzicht, methode, wie, wanneer) VALUES (?, ?, '2026-02', 'omschrijving', 'toets', 'x')").run(ander, k.id), /kaart_incasso_rekening/);
   assert.throws(() => t.fdb.db.prepare("UPDATE kaart_incasso SET overzicht = '2026-01'").run(), /kaart_incasso_vast/);
-  assert.throws(() => C.kaartZet(t.fdb, { klantnummer: '123', laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU }), /CHECK/);
-  assert.throws(() => C.kaartZet(t.fdb, { klantnummer: '99990000002', laatste4: '4111111111111111', rekening: TG.slice(-4), wie: 'toets', nu: NU }), /CHECK/);
+  assert.throws(() => C.kaartZet(t.fdb, { klantnummer: '123', laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU }), (e) => e.code === 'klantnummer');
+  assert.throws(() => C.kaartZet(t.fdb, { klantnummer: '99990000002', laatste4: '4111111111111111', rekening: TG.slice(-4), wie: 'toets', nu: NU }), (e) => e.code === 'laatste4');
+  assert.throws(() => C.kaartZet(t.fdb, { klantnummer: '4111111111111111', laatste4: '0000', rekening: TG.slice(-4), wie: 'toets', nu: NU }), (e) => e.code === 'klantnummer');
+  assert.throws(() => t.fdb.db.prepare("INSERT INTO kaart (id, uitgever, klantnummer, laatste4, entiteit, rekening, aangemaakt_door, aangemaakt_op) VALUES ('ffffffffffff0001', 'ICS', '4111111111111111', '0000', 'tolgaarde', ?, 'toets', 'x')").run(t.ids.rek), /CHECK/);
   assert.throws(() => C.inlezen(t.fdb, '0000', csv([Object.assign(BASIS[0].slice(), { 3: '****9999' })]), { wie: 'toets', nu: NU }), (e) => e.code === 'andere_kaart');
   assert.throws(() => C.kaartZet(t.fdb, { klantnummer: '99990000003', laatste4: '1111', rekening: 'zzzz', wie: 'toets', nu: NU }), (e) => e.code === 'rekening');
   D.sluit(t.fdb);
@@ -206,13 +217,16 @@ test('betaalwijze per leverancier: creditcard = betaald alleen zonder bankbetali
   const k = C.kaartVan(t.fdb, '0000');
   const v = Object.fromEntries(C.betaalwijze(t.fdb, k, { nu: NU }).map((x) => [x.leverancier, x]));
   assert.equal(v[t.ids.wolk].voorstel, 'betaald');
-  assert.equal(v[t.ids.pbIe].voorstel, 'betaald');
+  assert.equal(v[t.ids.pbIe].voorstel, 'eenmalig', 'één kaartregel: niet vanzelf');
   assert.equal(v[t.ids.pbUs].voorstel, 'andere_standaard');
   assert.equal(v[t.ids.win].voorstel, 'wisselend'); assert.equal(v[t.ids.win].bank_365, 1);
   C.betaalwijze(t.fdb, k, { nu: NU, zet: true, wie: 'toets' });
   const sb = (id) => t.fdb.db.prepare('SELECT standaard_betaalwijze AS s FROM leverancier WHERE id = ?').get(id).s;
   assert.equal(sb(t.ids.wolk), 'betaald'); assert.equal(sb(t.ids.pbUs), 'incasso'); assert.equal(sb(t.ids.win), null);
-  assert.equal(t.fdb.db.prepare("SELECT count(*) AS n FROM audit WHERE wat = 'leverancier_bijwerken' AND wie = 'toets'").get().n, 2);
+  assert.equal(sb(t.ids.pbIe), null, 'eenmalig blijft zonder --leverancier');
+  assert.equal(t.fdb.db.prepare("SELECT count(*) AS n FROM audit WHERE wat = 'leverancier_bijwerken' AND wie = 'toets'").get().n, 1);
+  C.betaalwijze(t.fdb, k, { nu: NU, zet: true, wie: 'toets', leveranciers: [t.ids.pbIe, t.ids.win] });
+  assert.equal(sb(t.ids.pbIe), 'betaald', 'met --leverancier ook eenmalig'); assert.equal(sb(t.ids.win), null, 'wisselend nooit');
   assert.equal(C.betaalwijze(t.fdb, k, { nu: NU }).find((x) => x.leverancier === t.ids.wolk).voorstel, 'staat_al');
   D.sluit(t.fdb);
 });
@@ -235,6 +249,8 @@ test('leesroute (Socev): opdracht creditcard via facturen.js, zonder klantnummer
   assert.equal(alle.regels.filter((x) => x.soort === 'autorisatie').length, 1);
   C.inlezen(t.fdb, '0000', csv(BASIS.slice(0, 2)).subarray(0), { wie: 'toets', nu: NU + 1000 });   // zelfde sha? nee: ander bestand zonder autorisatie
   assert.equal(F.lees(t.fdb, { opdracht: 'creditcard', weergave: 'regels' }, { wie: 'socev', nu: NU }).j.regels.filter((x) => x.soort === 'autorisatie').length, 0, 'oude autorisatie verdwijnt');
+  C.inlezen(t.fdb, '0000', csv(BASIS.slice(13)), { wie: 'toets', nu: NU + 2000 });   // de autorisatie staat nog open in het nieuwste bestand (diffreview ZOU 2)
+  assert.equal(F.lees(t.fdb, { opdracht: 'creditcard', weergave: 'regels' }, { wie: 'socev', nu: NU }).j.regels.filter((x) => x.soort === 'autorisatie').length, 1, 'open autorisatie blijft zichtbaar');
   const l = F.lees(t.fdb, { opdracht: 'creditcard', weergave: 'leveranciers' }, { wie: 'socev', nu: NU }).j;
   assert.ok(l.leveranciers.some((x) => x.naam === 'Wolkdienst'));
   assert.equal(F.lees(t.fdb, { opdracht: 'creditcard', kaart: '9999' }, { wie: 'socev', nu: NU }).status, 400);

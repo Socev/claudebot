@@ -34,7 +34,22 @@ const ICS_KOPPEN = ['Transactiedatum', 'Boekingsdatum', 'Omschrijving', 'Naam Ca
   'Merchant categorie', 'Land', 'Valuta', 'Bedrag in oorspronkelijke valuta', 'Type transactie', 'WalletProvider', 'Merchant categorie code',
   'Maand/jaar rekeningoverzicht'];
 const SOORT = { Transaction: 'transactie', Payment: 'betaling', Authorization: 'autorisatie' };
-const LANG_GETAL = /\d{13,}/;   // een kaartnummer (13–19 cijfers), ook als het ergens anders in een veld staat
+// een kaartnummer: een reeks van 13–19 cijfers die de Luhn-controle haalt, ook als hij ergens anders in een veld staat (losse spaties,
+// punten of streepjes tussen de cijfers tellen niet); een ordernummer zonder geldige Luhn-som houdt het bestand niet tegen (diffreview KAN 8)
+function luhn(s) {
+  let som = 0;
+  for (let i = 0; i < s.length; i++) { let c = Number(s[s.length - 1 - i]); if (i % 2) { c *= 2; if (c > 9) c -= 9; } som += c; }
+  return som % 10 === 0;
+}
+function bevatKaartnummer(v) {
+  // een reeks cijfers, eventueel in groepjes met één spatie, punt of streepje ertussen ("4111 1111 1111 1111"); als geheel getoetst
+  const re = /\d(?:[ .-]?\d){12,}/g; let m;
+  while ((m = re.exec(String(v || '')))) {
+    const d = m[0].replace(/\D/g, '');
+    if (d.length <= 19 && luhn(d)) return true;
+  }
+  return false;
+}
 const MAANDEN = { jan: 1, feb: 2, mrt: 3, maa: 3, apr: 4, mei: 5, jun: 6, jul: 7, aug: 8, sep: 9, okt: 10, nov: 11, dec: 12 };
 
 // Eén regel ;-gescheiden met "…" (verdubbelde " binnen aanhalingstekens).
@@ -91,7 +106,7 @@ function leesIcsCsv(bytes) {
     const v = splitsRegel(regels[i]);
     const nr = i + 1;
     if (!v || v.length !== ICS_KOPPEN.length) throw new KaartFout('regel', 'regel ' + nr + ': aantal kolommen klopt niet', { regel: nr });
-    if (v.some((x) => LANG_GETAL.test(x.replace(/[\s.-]/g, '')))) throw new KaartFout('kaartnummer', 'regel ' + nr + ': een lange cijferreeks (kaartnummer?): bestand geweigerd', { regel: nr });
+    if (v.some(bevatKaartnummer)) throw new KaartFout('kaartnummer', 'regel ' + nr + ': een kaartnummer (13–19 cijfers, Luhn): bestand geweigerd', { regel: nr });
     const kaart = v[4].trim();
     if (kaart !== '' && !/^\*{4,12}\d{4}$/.test(kaart)) throw new KaartFout('kaartnummer', 'regel ' + nr + ': kaartnummer niet gemaskeerd', { regel: nr });
     const soort = SOORT[v[11].trim()];
@@ -118,6 +133,7 @@ function leesIcsCsv(bytes) {
       soort, transactiedatum: td, boekdatum: bd, omschrijving: oms, bedrag_centen: bedrag, valuta_orig: valuta, bedrag_orig_centen: orig,
       merchant_categorie: v[7].trim().slice(0, 100) || null, mcc: /^\d{4}$/.test(mcc) ? mcc : null, land: /^[A-Z]{2,3}$/.test(land) ? land : null,
       overzicht: soort === 'autorisatie' ? null : overzicht, laatste4: kaart ? kaart.slice(-4) : null,
+      ruw: v[2].trim(),   // alleen voor de sleutel: niet afhankelijk van K.schoon (diffreview KAN 6); wordt niet bewaard
     });
   }
   const datums = uit.map((r) => r.transactiedatum).sort();
@@ -131,10 +147,12 @@ function leesIcsCsv(bytes) {
  * € 5 bij dezelfde winkel op dezelfde dag zijn twee regels). Een later overzicht dat dezelfde dagen bevat, geeft dezelfde sleutels zolang
  * het alle regels van die dag bevat (ICS exporteert per hele dag).
  */
-function sleutels(kaartId, regels) {
+function sleutels(kaartId, regels, bestandSha) {
   const tel = new Map();
   return regels.map((r) => {
-    const basis = [kaartId, r.soort, r.transactiedatum, r.boekdatum || '', r.omschrijving, r.bedrag_centen, r.valuta_orig || '', r.bedrag_orig_centen == null ? '' : r.bedrag_orig_centen,
+    // een autorisatie hoort bij het bestand waarin hij staat (diffreview ZOU 2): staat hij in een nieuwer bestand nog open, dan is hij daar
+    // een eigen regel en blijft hij zichtbaar; de leesroute toont alleen de autorisaties van het nieuwste bestand
+    const basis = [kaartId, r.soort === 'autorisatie' ? 'autorisatie@' + (bestandSha || '') : r.soort, r.transactiedatum, r.boekdatum || '', r.ruw != null ? r.ruw : r.omschrijving, r.bedrag_centen, r.valuta_orig || '', r.bedrag_orig_centen == null ? '' : r.bedrag_orig_centen,
       r.overzicht || '', r.laatste4 || ''].join('|');
     const n = (tel.get(basis) || 0) + 1;
     tel.set(basis, n);
@@ -160,27 +178,35 @@ function handelaar(omschrijving, soort) {
 }
 
 const LAND_WOORD = { IRL: 'ireland', GBR: 'uk', NLD: 'nederland', DEU: 'deutschland', USA: null };
-function eersteWoord(s) { return K.normNaam(s).split(' ').filter(Boolean)[0] || ''; }
+// woorden die niets zeggen over wie het is (rechtsvorm, land, afdeling); het eerste woord van een naam blijft altijd staan
+const STOP = new Set(['pbc', 'limited', 'ltd', 'inc', 'llc', 'corp', 'corporation', 'co', 'company', 'ireland', 'operations', 'emea', 'pte', 'sas', 'ab', 'gmbh',
+  'bv', 'nv', 'sa', 'sarl', 'srl', 'plc', 'lp', 'holding', 'holdings', 'group', 'international', 'nederland', 'netherlands', 'europe', 'eu', 'uk', 'usa', 'oy', 'aps', 'spa']);
+function kernNaam(naam) {
+  const w = K.normNaam(naam).split(' ').filter(Boolean);
+  return w.filter((x, i) => i === 0 || !STOP.has(x)).join(' ');
+}
 /*
- * Leverancier bij een handelaar. Kandidaten: het eerste woord van de handelaar (≥ 4 tekens, zonder leestekens) is het eerste woord van de
- * leverancier, of de handelaar aaneen ("ELEVENLABS.IO" → elevenlabsio) begint met de eerste twee woorden aaneen (≥ 6 tekens: eleven labs).
- * Meer dan één leverancier: het land beslist (IRL → de naam met "ireland"); blijft het meer dan één, dan geen (onzeker is geen koppeling).
- * leveranciers = [{ id, naam, genormaliseerd }]. → { leverancier, via } of { leverancier: null, kandidaten }.
+ * Leverancier bij een kaartregel (diffreview wv2043 MOET 1: een los eerste woord is te zwak, "BAKKERIJ …" of "VAN DER VALK" vond een andere
+ * leverancier). De kern van de leveranciersnaam (zonder rechtsvorm, land of afdeling: "Anthropic Ireland, Limited" → anthropic, "Google Cloud
+ * EMEA" → google cloud) moet in zijn geheel vooraan in de omschrijving staan, als hele woorden (≥ 4 tekens aaneen), of aaneengeschreven
+ * (≥ 8 tekens: "ELEVENLABS.IO" → eleven labs). Meer dan één leverancier: het land beslist (IRL → de naam met "ireland"; USA → de naam zonder
+ * land); blijft het meer dan één, dan geen (onzeker is geen koppeling). r = { omschrijving, handelaar, land }; leveranciers = [{ id, naam }].
+ * → { leverancier, via } of { leverancier: null, kandidaten }.
  */
-function zoekLeverancier(hand, land, leveranciers) {
-  const h = K.normNaam(hand), w = h.split(' ').filter(Boolean);
-  if (!w.length) return { leverancier: null, kandidaten: [] };
-  const eerste = w[0].replace(/[^a-z0-9]/g, ''), aaneen = h.replace(/ /g, '');
+function zoekLeverancier(r, leveranciers) {
+  let tekst = K.normNaam(r.omschrijving);
+  const h = K.normNaam(r.handelaar);
+  if (h && !(tekst + ' ').startsWith(h + ' ')) tekst = h + ' ' + tekst;   // alias (CLAUDE.AI → anthropic)
+  const compact = tekst.replace(/ /g, '');
   const kand = [];
   for (const l of leveranciers || []) {
-    const g = String(l.genormaliseerd || K.normNaam(l.naam)).split(' ').filter(Boolean);
-    if (!g.length) continue;
-    const een = g[0], twee = g.slice(0, 2).join('');
-    if ((eerste.length >= 4 && een === eerste) || (g.length >= 2 && twee.length >= 6 && aaneen.startsWith(twee))) kand.push(l);
+    const kern = kernNaam(l.naam), c = kern.replace(/ /g, '');
+    if (!kern) continue;
+    if ((c.length >= 4 && (tekst + ' ').startsWith(kern + ' ')) || (c.length >= 8 && compact.startsWith(c))) kand.push(l);
   }
   if (kand.length === 1) return { leverancier: kand[0], via: 'naam' };
   if (kand.length > 1) {
-    const woord = land ? LAND_WOORD[land] : undefined;
+    const woord = r.land ? LAND_WOORD[r.land] : undefined;
     const metLand = woord ? kand.filter((l) => K.normNaam(l.naam).split(' ').includes(woord)) : [];
     if (metLand.length === 1) return { leverancier: metLand[0], via: 'naam+land' };
     const landen = Object.values(LAND_WOORD).filter(Boolean);
@@ -197,7 +223,7 @@ function zoekLeverancier(hand, land, leveranciers) {
  */
 function zoekFactuur(r, levId, facturen) {
   if (r.soort !== 'transactie' || !(r.bedrag_centen > 0)) return null;
-  const woord = eersteWoord(r.handelaar).replace(/[^a-z0-9]/g, '');
+  const woord = K.normNaam(r.handelaar).split(' ')[0] || '';
   const kand = (facturen || []).filter((f) => {
     if (!f.factuurdatum || f.incl == null) return false;
     const d = K.dagenTussen(f.factuurdatum, r.transactiedatum);
@@ -207,7 +233,7 @@ function zoekFactuur(r, levId, facturen) {
       : (f.valuta === r.valuta_orig && f.incl === r.bedrag_orig_centen);
     if (!bedrag) return false;
     if (levId && f.leverancier === levId) return true;
-    return woord.length >= 4 && K.compactNaam(f.leverancier_naam || '').indexOf(woord) >= 0;
+    return woord.length >= 4 && K.normNaam(f.leverancier_naam || '').split(' ').includes(woord);   // hele woorden (diffreview KAN 7)
   });
   return kand.length === 1 ? kand[0] : null;
 }
@@ -270,6 +296,8 @@ function kaartVan(fdb, wie) {
 }
 // Een kaart vastleggen (machinekamer). invoer = { klantnummer, laatste4, rekening (id of laatste 4 van het IBAN), naam?, wie, nu }.
 function kaartZet(fdb, o) {
+  if (!/^\d{4,12}$/.test(String(o.klantnummer || ''))) throw new KaartFout('klantnummer', 'klantnummer: 4–12 cijfers (een kaartnummer hoort hier nooit)');
+  if (!/^\d{4}$/.test(String(o.laatste4 || ''))) throw new KaartFout('laatste4', 'laatste4: precies 4 cijfers');
   const rek = fdb.db.prepare('SELECT id, entiteit, iban FROM rekening').all().filter((r) => r.id === o.rekening || r.iban.slice(-4) === String(o.rekening || ''));
   if (rek.length !== 1) throw new KaartFout('rekening', 'rekening niet (eenduidig) gevonden');
   return D.transactie(fdb, () => {
@@ -295,8 +323,8 @@ function inlezen(fdb, kaartWie, bytes, opties) {
   const g = leesIcsCsv(bytes);
   const anders = g.regels.filter((r) => r.laatste4 && r.laatste4 !== kaart.laatste4).length;
   if (anders) throw new KaartFout('andere_kaart', anders + ' regel(s) van een andere kaart dan …' + kaart.laatste4 + ': bestand geweigerd');
-  const regels = sleutels(kaart.id, g.regels);
   const sha = D.sha256(bytes);
+  const regels = sleutels(kaart.id, g.regels, sha);
   const bekend = fdb.db.prepare('SELECT 1 FROM kaart_regel WHERE sleutel = ?');
   const nieuw = regels.filter((r) => !bekend.get(r.sleutel));
   const uit = { droog: !!o.droog, periode: g.periode, aantallen: g.aantallen, regels: regels.length, nieuw: nieuw.length, al_bekend_regels: regels.length - nieuw.length };
@@ -316,7 +344,7 @@ function inlezen(fdb, kaartWie, bytes, opties) {
         aangemaakt_op: wanneer });
     }
     D.audit(fdb, { wie: o.wie, wat: 'kaart_inlezen', object_soort: 'kaart_bestand', object_id: id, entiteit: kaart.entiteit,
-      na: { regels: regels.length, nieuw: nieuw.length, periode: g.periode, aantallen: g.aantallen, bron_bewaard: true }, wanneer });
+      na: { regels: regels.length, nieuw: nieuw.length, periode: g.periode, aantallen: g.aantallen, bron_bewaard: !!(bron && bron.sha256 === sha) }, wanneer });
   });
   const koppeling = koppel(fdb, kaart.id, { nu, wie: o.wie });
   return Object.assign(uit, { al_bekend: false, bestand: id, koppeling });
@@ -334,7 +362,7 @@ function koppel(fdb, kaartId, opties) {
   const kaart = fdb.db.prepare('SELECT * FROM kaart WHERE id = ?').get(kaartId);
   if (!kaart) throw new KaartFout('kaart_onbekend', 'kaart niet gevonden');
   const uit = { incasso_nieuw: 0, incasso_onbekend: 0, leverancier_nieuw: 0, factuur_nieuw: 0 };
-  const levs = fdb.db.prepare('SELECT id, naam, genormaliseerd FROM leverancier').all();
+  const levs = fdb.db.prepare('SELECT id, naam FROM leverancier').all();
   const facturen = fdb.db.prepare("SELECT id, 'factuur' AS bron, leverancier, leverancier_naam, factuurdatum, incl, valuta FROM factuur WHERE soort = 'factuur'").all()
     .concat(fdb.db.prepare("SELECT id, 'archief' AS bron, NULL AS leverancier, leverancier_naam, factuurdatum, incl, valuta FROM factuur_archief").all());
   D.transactie(fdb, () => {
@@ -358,7 +386,7 @@ function koppel(fdb, kaartId, opties) {
     const upd = fdb.db.prepare('UPDATE kaart_regel SET leverancier = ?, factuur = ?, factuur_archief = ?, koppeling_op = ? WHERE id = ?');
     for (const r of open) {
       let lev = r.leverancier;
-      if (!lev) { const z = zoekLeverancier(r.handelaar, r.land, levs); if (z.leverancier) { lev = z.leverancier.id; uit.leverancier_nieuw++; } }
+      if (!lev) { const z = zoekLeverancier(r, levs); if (z.leverancier) { lev = z.leverancier.id; uit.leverancier_nieuw++; } }
       let fac = r.factuur, arch = r.factuur_archief;
       if (!fac && !arch) {
         const f = zoekFactuur(r, lev, facturen.filter((x) => !bezet.has(x.id)));
@@ -391,7 +419,8 @@ function aansluitingDb(fdb, kaart) {
  * Betaalwijze per leverancier (voor de regels van wv2031: "altijd creditcard = niets te betalen"). Per leverancier met kaartregels: aantal en
  * totaal op de kaart, afschrijvingen op de zakelijke rekeningen in de laatste 365 dagen met een verwante naam (ICS zelf niet), en de huidige
  * standaard. voorstel 'betaald' (= in de Facturen-app: al betaald, bijv. creditcard) alleen als er geen bankbetaling is en er nog geen
- * standaard staat; met een bankbetaling 'wisselend'. opties.zet: het voorstel vastleggen (alleen waar standaard leeg is; auditrij).
+ * standaard staat en er ≥ 2 kaartregels zijn; met een bankbetaling 'wisselend', met één regel 'eenmalig', niet te toetsen (korte naam)
+ * 'onzeker'. opties.zet: het voorstel vastleggen (alleen waar standaard leeg is; auditrij); opties.leveranciers: alleen deze ids (ook eenmalig).
  */
 function betaalwijze(fdb, kaart, opties) {
   const o = opties || {};
@@ -401,16 +430,28 @@ function betaalwijze(fdb, kaart, opties) {
   const bank = fdb.db.prepare("SELECT tegenpartij_naam, omschrijving FROM bank_transactie WHERE bedrag_centen < 0 AND boekdatum >= ? AND verwijderd_op IS NULL AND entiteit <> 'prive'").all(vanaf)
     .filter((t) => !isKaartBankregel(t.omschrijving, kaart.klantnummer));
   const uit = per.map((p) => {
-    const eerste = K.normNaam(p.naam).split(' ')[0] || '';
-    const n = eerste.length >= 4 ? bank.filter((t) => K.normNaam(t.tegenpartij_naam || '').split(' ')[0] === eerste).length : 0;
-    const voorstel = p.standaard_betaalwijze ? (p.standaard_betaalwijze === 'betaald' ? 'staat_al' : 'andere_standaard') : (n ? 'wisselend' : 'betaald');
+    // ruim tellen (diffreview MOET 1): hetzelfde eerste woord (≥ 4), de kern vooraan, of verwante namen; liever wisselend dan ten onrechte betaald
+    const eerste = K.normNaam(p.naam).split(' ')[0] || '', kern = kernNaam(p.naam);
+    const toetsbaar = eerste.length >= 4 || kern.replace(/ /g, '').length >= 4;
+    const n = toetsbaar ? bank.filter((t) => {
+      const tp = K.normNaam(t.tegenpartij_naam || '');
+      return (eerste.length >= 4 && tp.split(' ')[0] === eerste) || (kern && (tp + ' ').startsWith(kern + ' ')) || (t.tegenpartij_naam && K.naamVerwant(t.tegenpartij_naam, p.naam));
+    }).length : 0;
+    let voorstel;
+    if (p.standaard_betaalwijze) voorstel = p.standaard_betaalwijze === 'betaald' ? 'staat_al' : 'andere_standaard';
+    else if (!toetsbaar) voorstel = 'onzeker';
+    else if (n) voorstel = 'wisselend';
+    else if (p.n < 2) voorstel = 'eenmalig';
+    else voorstel = 'betaald';
     return { leverancier: p.leverancier, naam: p.naam, kaartregels: p.n, totaal_centen: p.totaal, laatste: p.laatste, bank_365: n, standaard: p.standaard_betaalwijze, voorstel };
   });
   if (o.zet) {
+    // alleen 'betaald' (≥ 2 kaartregels, geen bankbetaling, nog geen standaard); met opties.leveranciers alleen die (en ook 'eenmalig')
+    const alleen = Array.isArray(o.leveranciers) && o.leveranciers.length ? new Set(o.leveranciers) : null;
     const wanneer = nuIso(nu);
     D.transactie(fdb, () => {
       const upd = fdb.db.prepare("UPDATE leverancier SET standaard_betaalwijze = 'betaald', bijgewerkt_op = ? WHERE id = ? AND standaard_betaalwijze IS NULL");
-      for (const x of uit.filter((x) => x.voorstel === 'betaald')) {
+      for (const x of uit.filter((x) => (alleen ? alleen.has(x.leverancier) && ['betaald', 'eenmalig'].includes(x.voorstel) : x.voorstel === 'betaald'))) {
         if (upd.run(wanneer, x.leverancier).changes !== 1) continue;
         x.gezet = true;
         D.audit(fdb, { wie: o.wie, wat: 'leverancier_bijwerken', object_soort: 'leverancier', object_id: x.leverancier, voor: { standaard_betaalwijze: null },
@@ -455,12 +496,13 @@ function lees(fdb, d) {
   if (d.soort && ['transactie', 'betaling', 'autorisatie'].includes(d.soort)) { w.push('r.soort = ?'); p.push(d.soort); }
   else w.push("(r.soort <> 'autorisatie' OR r.bestand = (SELECT id FROM kaart_bestand WHERE kaart = r.kaart ORDER BY geupload_op DESC, id DESC LIMIT 1))");
   let rij = fdb.db.prepare('SELECT r.soort, r.transactiedatum, r.boekdatum, r.omschrijving, r.handelaar, r.bedrag_centen, r.valuta_orig, r.bedrag_orig_centen, r.land, r.merchant_categorie, r.overzicht, ' +
-    'l.naam AS leverancier, r.factuur, r.factuur_archief FROM kaart_regel r LEFT JOIN leverancier l ON l.id = r.leverancier WHERE ' + w.join(' AND ') + ' ORDER BY r.transactiedatum DESC, r.id').all(...p);
+    'l.naam AS leverancier, r.factuur, f.status AS factuur_status, f.betaalwijze AS factuur_betaalwijze, f.betaalspoor AS factuur_betaalspoor, f.entiteit AS factuur_entiteit, r.factuur_archief ' +
+    'FROM kaart_regel r LEFT JOIN leverancier l ON l.id = r.leverancier LEFT JOIN factuur f ON f.id = r.factuur WHERE ' + w.join(' AND ') + ' ORDER BY r.transactiedatum DESC, r.id').all(...p);
   if (d.tekst) { const t = K.normNaam(d.tekst); rij = rij.filter((x) => K.normNaam([x.handelaar, x.leverancier, x.omschrijving].join(' ')).indexOf(t) >= 0); }
   const tr = rij.filter((x) => x.soort === 'transactie');
   return Object.assign(kop, { weergave, aantal: rij.length, totaal_transacties_centen: tr.reduce((s, x) => s + x.bedrag_centen, 0),
     regels: rij.slice(0, max).map((x) => Object.assign(x, { valuta_orig: x.valuta_orig === 'EUR' ? undefined : x.valuta_orig, bedrag_orig_centen: x.valuta_orig === 'EUR' ? undefined : x.bedrag_orig_centen })),
-    uitleg: 'bedrag_centen in euro (+ = uitgave op de kaart, - = tegoed of betaling); autorisatie = nog niet geboekt (telt niet).' });
+    uitleg: 'bedrag_centen in euro (+ = uitgave op de kaart, - = tegoed of betaling); autorisatie = nog niet geboekt (telt niet). Een gekoppelde factuur met betaalwijze zelf of betaalspoor te_betalen is al met de kaart betaald: niet nog eens overmaken.' });
 }
 
 module.exports = {

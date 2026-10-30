@@ -7,7 +7,8 @@
  *   node tools/facturen-creditcard.js inlezen [--droog] [--kaart <laatste 4>] [--herkomst "<tekst>"] <ics.csv>
  *   node tools/facturen-creditcard.js koppel [--kaart …]          bankincasso's, leveranciers en facturen (opnieuw) koppelen
  *   node tools/facturen-creditcard.js stand [--kaart …]           aansluiting per rekeningoverzicht (transacties ↔ incasso op de bank)
- *   node tools/facturen-creditcard.js betaalwijze [--zet] [--kaart …]   per leverancier: creditcard (standaard 'betaald') of wisselend
+ *   node tools/facturen-creditcard.js betaalwijze [--zet [--leverancier <id>[,<id>…]]] [--kaart …]   per leverancier: creditcard (standaard
+ *                'betaald'), wisselend, eenmalig of onzeker; --zet legt 'betaald' vast (met --leverancier alleen die, ook eenmalig)
  *   node tools/facturen-creditcard.js regels [--maand JJJJ-MM] [--tekst …] [--kaart …]
  *
  * Een PDF-overzicht van ICS: eerst overzetten naar dezelfde CSV-kolommen (de lezer weigert alles wat afwijkt), dan inlezen; regels die al
@@ -70,9 +71,9 @@ function hoofd(argv) {
     } finally { D.sluit(fdb); }
   }
   if (cmd === 'betaalwijze') {
-    const zet = vlag('--zet');
+    const zet = vlag('--zet'), lev = waarde('--leverancier');
     const fdb = openGoed(zet);
-    try { return C.betaalwijze(fdb, C.kaartVan(fdb, kaartArg), { zet, wie: WIE, nu: Date.now() }); } finally { D.sluit(fdb); }
+    try { return C.betaalwijze(fdb, C.kaartVan(fdb, kaartArg), { zet, leveranciers: lev ? lev.split(',') : null, wie: WIE, nu: Date.now() }); } finally { D.sluit(fdb); }
   }
   if (cmd === 'regels') {
     const fdb = openGoed(false);

@@ -30,7 +30,7 @@ const S = require('./facturen-sepa.js');
 const SP = require('./facturen-specificatie.js');
 // wv2043: creditcard (ICS) als bron; ontbreekt het bestand in een release, dan alleen geen opdracht creditcard (de rest van Facturen blijft)
 let CC = null;
-try { CC = require('./facturen-creditcard.js'); } catch (e) { CC = null; }
+try { CC = require('./facturen-creditcard.js'); } catch (e) { if (!(e && e.code === 'MODULE_NOT_FOUND' && /facturen-creditcard/.test(e.message))) throw e; CC = null; }
 
 const ID_RE = /^[0-9a-f]{16}$/;
 const BEURT_RE = /^[a-z0-9-]{8,64}$/;
