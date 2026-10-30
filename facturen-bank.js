@@ -574,6 +574,48 @@ function uitzonderingVoor(tx, ctx) {
   return null;
 }
 
+/*
+ * wv2061 (David 30-10-2026 22:50: de oranje balk "te bekijken" zegt hem niets; per regel kiezen "bekende uitzondering" of "hoort bij
+ * factuur X", en die keuze moet een regel worden zodat hij niet terugkomt). oranjePatroon: waarop een uitzondering voor deze afschrijving
+ * kan passen (zelfde vorm als een rij in `uitzondering`, uitzonderingPast slikt hem) en de groepssleutel voor de lijst per tegenpartij.
+ * Volgorde: IBAN van de tegenpartij, anders de naam; zonder tegenpartij een pinbetaling (winkelnaam uit de omschrijving) of de kosten van
+ * ABN AMRO zelf. Anders null: daar kan geen regel op (alleen een factuur koppelen of uploaden).
+ */
+const PIN_RE = /^BEA,\s*(?:Betaalpas|Google Pay|Apple Pay|Garmin Pay|Fitbit Pay)\s+(.+?)(?:,PAS\d+|\s+NR:|,|$)/i;
+function oranjePatroon(tx) {
+  const iban = ibanNorm(tx.tegenpartij_iban), naam = String(tx.tegenpartij_naam || '').trim();
+  if (iban) return { sleutel: 'iban:' + iban, soort: 'tegenpartij', naam: naam || iban, patroon: { tegenpartij: iban } };
+  if (normNaam(naam)) return { sleutel: 'naam:' + normNaam(naam), soort: 'tegenpartij', naam, patroon: { tegenpartij: naam.slice(0, 200) } };
+  const om = String(tx.omschrijving || ''), tt = String(tx.transactietype || '');
+  const pin = /\bBEA\b/.test(tt) ? PIN_RE.exec(om) : null;
+  if (pin && normNaam(pin[1]).length >= 3) {
+    // filiaalnummer weg ("Albert Heijn 1875" → elke Albert Heijn), alleen als er genoeg naam overblijft ("Bras 73" blijft heel)
+    const heel = pin[1].trim().slice(0, 80), kaal = heel.replace(/\s+\d+$/, '');
+    const winkel = kaal !== heel && normNaam(kaal).length >= 6 ? kaal : heel;
+    return { sleutel: 'pin:' + normNaam(winkel), soort: 'pin', naam: winkel, patroon: { transactietype: 'BEA', omschrijving: winkel } };
+  }
+  if (/ABN AMRO Bank N\.?V\.?$/i.test(tt) && /^ABN AMRO Bank N\.?V\.?/i.test(om)) {
+    return { sleutel: 'bank:abn', soort: 'bank', naam: 'ABN AMRO (de bank zelf)', patroon: { transactietype: 'ABN AMRO Bank', omschrijving: 'ABN AMRO Bank' } };
+  }
+  return null;
+}
+// Voorgestelde categorie met één zin waarom, of null (dan kiest David zelf). `eerder` = de categorie van Davids eerdere uitzondering op
+// precies dit patroon (bij een andere rekening); die gaat voor. Alleen stromen waar zeker geen factuur bij hoort; webwinkels, abonnementen
+// en leveranciers krijgen geen voorstel (daar is "kies factuur" of uploaden het antwoord).
+function categorieVoorstel(tx, p, eerder) {
+  if (eerder && CATEGORIEEN.includes(eerder)) return { categorie: eerder, reden: 'Zo koos je het eerder bij deze tegenpartij op een andere rekening.' };
+  const naam = String(tx.tegenpartij_naam || ''), om = String(tx.omschrijving || '');
+  if (/belastingdienst/i.test(naam)) {
+    if (/omzetbelasting|\bbtw\b|\bOB\b/i.test(om)) return { categorie: 'btw', reden: 'Betaling aan de Belastingdienst voor de btw; daar hoort geen factuur bij.' };
+    if (/loonheffing|\bLH\b/i.test(om)) return { categorie: 'loonheffing', reden: 'Loonheffing aan de Belastingdienst; daar hoort geen factuur bij.' };
+    return { categorie: 'belasting', reden: 'De Belastingdienst stuurt een aanslag of termijn, geen factuur.' };
+  }
+  if (/\bsalaris\b/i.test(om)) return { categorie: 'loon', reden: 'De omschrijving noemt salaris; daar hoort geen factuur bij.' };
+  if (p && p.soort === 'bank') return { categorie: 'bankkosten', reden: 'Kosten van de bank zelf; de specificatie staat in de nota van ABN AMRO.' };
+  if (p && p.soort === 'pin') return { categorie: 'overig', reden: 'Pinbetaling: er is hooguit een bon, meestal geen factuur.' };
+  return null;
+}
+
 // ───────────────────────────── matching afschrijving ↔ factuur (§ 4.6) ─────────────────────────────
 
 const AUTO_ZEKERHEID = 0.8, SUBSET_MAX = 20, SUBSET_AUTO_MAX = 8, VALUTA_MARGE = 0.03;
@@ -1776,7 +1818,7 @@ module.exports = {
   // parsers
   pyStr, mkRef, kenEntryRefsToe, refBasis, saldoControle, normBedrag, herkenFormaat, csvRijen, leesIng, leesTriodos, leesAbnTab, leesAbnMt940, abnIncasso, leesBankbestand, normaliseerBankluis,
   // controle
-  uitzonderingVoor, uitzonderingPast, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
+  uitzonderingVoor, uitzonderingPast, oranjePatroon, categorieVoorstel, leverancierBijTx, tegenpartijGeborgd, controleVan, matchTransactie, subsetSom, datumFactor, bankcontrole, dubbelGeupload, werkdagenTussen,
   plusWerkdagen, betaalVerwachting, dekkingVan, eigenBetaling, BETAAL_TERMIJN, betaalMeldingTekst, eurTekst,
   // signalen
   maakSignaal, signaalSleutel, afhandelSignaal, terugvraagTekst, bandTekst, signaalUitleg,

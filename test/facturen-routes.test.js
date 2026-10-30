@@ -62,7 +62,7 @@ test('elke route past in APP_ROUTE_RE van server.js; beheer en invoer staan in d
   assert.ok(m, 'APP_ROUTE_RE gevonden');
   const re = new RegExp(m[1].slice(1, -1));
   for (const methode of ['GET', 'POST']) for (const r of F.ROUTES[methode]) {
-    const pad = '/app/facturen' + (r ? '/' + r.replace('<stap>', 'beoordelen').replace('<id>', '0123456789abcdef') : '');
+    const pad = '/app/facturen' + (r ? '/' + r.replace('<stap>', 'beoordelen').replace('<id>', '0123456789abcdef').replace('<week>', '2026-w44') : '');
     assert.ok(re.test(pad), methode + ' ' + pad);
   }
   for (const stap of Object.keys(F.STAPPEN)) assert.ok(re.test('/app/facturen/lijst/' + stap));
@@ -2052,4 +2052,111 @@ test('wv2057 failsafe: batch van drie met één ontbrekende betaling → precies
     .run(D.nieuwId(), 'ingevoerd_niet_gezien:|' + h + '|v=2026-10-01', JSON.stringify([h]), JSON.stringify({ verwacht: '2026-10-01' }), new Date(N2).toISOString());
   F.bankcontroleToepassen(t.fdb, N2 + 240000);
   assert.equal(t.fdb.db.prepare("SELECT afhandeling FROM signaal WHERE sleutel = ?").get('ingevoerd_niet_gezien:|' + h + '|v=2026-10-01').afhandeling, 'niet_meer_ingevoerd');
+});
+
+// ───────────────────────────── wv2061: het oranje (te bekijken) aanklikbaar ─────────────────────────────
+
+test('wv2061 te bekijken: per week per tegenpartij met voorstel; uitzondering → regel per rekening, ook andere weken, signaal dicht; volgende bankcontrole houdt hem weg; factuur kiezen koppelt', () => {
+  const t = opzet();
+  const sjabloon = (ent) => t.fdb.db.prepare('SELECT * FROM bank_transactie WHERE entiteit = ? AND formaat <> \'bankluis\' LIMIT 1').get(ent);
+  const nieuw = (ent, o) => {
+    const b = sjabloon(ent), id = D.nieuwId();
+    D.voegToe(t.fdb, 'bank_transactie', Object.assign({}, b, { id, entry_ref: 'wv2061:' + id, categorie: null, uitzondering: null, kenmerk: null, is_incasso: 0, incassant_id: null,
+      machtiging: null, tegenpartij_iban: null, tegenpartij_naam: null, transactietype: 'ABN:SEPA OVERBOEKING', omschrijving: null }, o));
+    return id;
+  };
+  const BD = 'NL86INGB0002445588';
+  const a = nieuw('tolgaarde', { boekdatum: '2026-10-20', bedrag_centen: -1252300, tegenpartij_naam: 'BELASTINGDIENST', tegenpartij_iban: BD, omschrijving: 'ISSUER: CUR REF: 1' });
+  const b2 = nieuw('tolgaarde', { boekdatum: '2026-10-21', bedrag_centen: -6700, tegenpartij_naam: 'Belastingdienst', tegenpartij_iban: BD, omschrijving: 'TD-RG-01 MEER INFO', is_incasso: 1 });
+  const c = nieuw('groenhouten', { boekdatum: '2026-10-20', bedrag_centen: -531000, tegenpartij_naam: 'BELASTINGDIENST', tegenpartij_iban: BD, omschrijving: 'ISSUER: CUR REF: 2' });
+  const oud = nieuw('tolgaarde', { boekdatum: '2026-10-13', bedrag_centen: -22300, tegenpartij_naam: 'Belastingdienst', tegenpartij_iban: BD, omschrijving: 'VPB 2026' });
+  const pin = nieuw('tolgaarde', { boekdatum: '2026-10-20', bedrag_centen: -1802, transactietype: 'ABN:BEA, Betaalpas', omschrijving: 'BEA, Betaalpas Albert Heijn 1875,PAS075 NR:CT1, 20.10.26/10:04 HOOGLAND' });
+  const los = nieuw('tolgaarde', { boekdatum: '2026-10-21', bedrag_centen: -999, transactietype: 'ABN:onbekend', omschrijving: 'iets zonder tegenpartij' });
+  const wk = (w) => t.call('GET', 'bank').j.weken.find((x) => x.week === w) || { te_bekijken: 0 };
+  const voor43 = wk('2026-W43').te_bekijken, voor42 = wk('2026-W42').te_bekijken;
+  assert.ok(voor43 >= 5 && voor42 >= 1, JSON.stringify([voor43, voor42]));
+
+  const g1 = t.call('GET', 'bank/oranje/2026-w43');
+  assert.equal(g1.status, 200, JSON.stringify(g1.j));
+  assert.equal(g1.j.aantal, voor43, 'zelfde telling als de weekbalk');
+  const bd = g1.j.groepen.find((g) => g.sleutel === 'iban:' + BD);
+  assert.ok(bd, JSON.stringify(g1.j.groepen.map((g) => g.sleutel)));
+  assert.equal(bd.aantal, 3);
+  assert.deepEqual(bd.entiteiten.sort(), ['groenhouten', 'tolgaarde']);
+  assert.equal(bd.voorstel.categorie, 'belasting');
+  assert.equal(bd.regel_kan, true);
+  const gp = g1.j.groepen.find((g) => g.soort === 'pin');
+  assert.equal(gp.naam, 'Albert Heijn');
+  assert.equal(gp.voorstel.categorie, 'overig');
+  const gl = g1.j.groepen.find((g) => g.transacties.some((x) => x.id === los));
+  assert.equal(gl.regel_kan, false);
+  assert.equal(gl.voorstel, null);
+  assert.equal(t.call('GET', 'bank/oranje/2026-W43').status, 404, 'alleen kleine letters (doorgeefluik)');
+
+  // weigeringen: verschillende tegenpartijen, zonder tegenpartij, onbekende categorie
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [a, pin], categorie: 'belasting' }).status, 400);
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [los], categorie: 'overig' }).status, 409);
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [a], categorie: 'iets' }).status, 400);
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'iets' }).status, 400);
+
+  // een open signaal "afschrijving zonder factuur" op de oude regel gaat mee dicht
+  const sid = D.nieuwId();
+  t.fdb.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, entiteit, transacties, details, aangemaakt_op) VALUES (?, ?, 'geen_factuur', 'Afschrijving zonder factuur', 'tolgaarde', ?, '{}', ?)")
+    .run(sid, 'geen_factuur:wv2061|' + oud, JSON.stringify([oud]), new Date(NU).toISOString());
+  const k = t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [a, b2, c], categorie: 'belasting' });
+  assert.equal(k.status, 200, JSON.stringify(k.j));
+  assert.equal(k.j.regels, 2, 'één regel per eigen rekening');
+  assert.equal(k.j.afschrijvingen, 4, 'ook de afschrijving uit week 42');
+  assert.equal(k.j.signalen_dicht, 1);
+  assert.match(k.j.les, /stroom zonder factuur \(belasting\)/);
+  const regels = t.fdb.db.prepare("SELECT * FROM uitzondering WHERE tegenpartij = ?").all(BD);
+  assert.equal(regels.length, 2);
+  assert.ok(regels.every((u) => u.categorie === 'belasting' && u.richting === 'af' && u.rekening && u.aangemaakt_door === t.eig.wie));
+  for (const id of [a, b2, c, oud]) assert.equal(t.fdb.db.prepare('SELECT categorie FROM bank_transactie WHERE id = ?').get(id).categorie, 'belasting');
+  assert.equal(t.fdb.db.prepare('SELECT afhandeling FROM signaal WHERE id = ?').get(sid).afhandeling, 'is_uitzondering');
+  assert.equal(t.n("SELECT count(*) AS n FROM audit WHERE wat = 'uitzondering_maken' AND na LIKE '%bankcontrole_te_bekijken%'"), 2);
+  assert.equal(wk('2026-W43').te_bekijken, voor43 - 3);
+  assert.equal(wk('2026-W42').te_bekijken, voor42 - 1);
+  assert.ok(!t.call('GET', 'bank/oranje/2026-w43').j.groepen.some((g) => g.sleutel === 'iban:' + BD), 'groep weg');
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [a], categorie: 'belasting' }).status, 409, 'al bekeken');
+  assert.ok(t.call('GET', 'bank').j.geleerd_regels.some((g) => /voortaan als belasting/.test(g.tekst)), 'bij wat we leerden');
+
+  // de volgende bankcontrole: een nieuwe afschrijving aan dezelfde tegenpartij is meteen een bekende uitzondering, geen signaal
+  const e = nieuw('tolgaarde', { boekdatum: '2026-10-08', bedrag_centen: -15000, tegenpartij_naam: 'Belastingdienst', tegenpartij_iban: BD, omschrijving: 'KJH-23-J' });
+  D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  assert.equal(t.fdb.db.prepare('SELECT categorie FROM bank_transactie WHERE id = ?').get(e).categorie, 'belasting');
+  assert.equal(t.n("SELECT count(*) AS n FROM signaal WHERE EXISTS (SELECT 1 FROM json_each(transacties) j WHERE j.value = ?)", [e]), 0, 'geen signaal');
+  // op een andere rekening (hier: kostenmaatschap) geldt de regel niet vanzelf, maar het voorstel noemt Davids eerdere keuze
+  const km = nieuw('kostenmaatschap', { boekdatum: '2026-10-20', bedrag_centen: -2000, tegenpartij_naam: 'Belastingdienst', tegenpartij_iban: BD, omschrijving: 'x' });
+  D.transactie(t.fdb, () => F.bankcontroleToepassen(t.fdb, NU));
+  const g2 = t.call('GET', 'bank/oranje/2026-w43').j.groepen.find((g) => g.sleutel === 'iban:' + BD);
+  assert.deepEqual(g2.transacties.map((x) => x.id), [km]);
+  assert.match(g2.voorstel.reden, /eerder/);
+
+  // factuur kiezen: kandidaat met hetzelfde IBAN bovenaan; koppelen sluit het signaal; daarna niet meer te bekijken
+  const fid = teBetalenFactuur(t, { incl: 50000 });
+  const fiban = t.f('id = ?', [fid]).iban;
+  const f2 = nieuw('tolgaarde', { boekdatum: '2026-10-21', bedrag_centen: -50500, tegenpartij_naam: 'Leverancier', tegenpartij_iban: fiban, omschrijving: 'zonder nummer' });
+  const g3 = t.call('GET', 'bank/oranje/2026-w43').j.groepen.flatMap((g) => g.transacties).find((x) => x.id === f2);
+  assert.equal(g3.kandidaten[0].id, fid, JSON.stringify(g3.kandidaten));
+  assert.equal(g3.kandidaten[0].zelfde_iban, true);
+  const s2 = D.nieuwId();
+  t.fdb.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, entiteit, transacties, details, aangemaakt_op) VALUES (?, ?, 'geen_factuur', 'Afschrijving zonder factuur', 'tolgaarde', ?, '{}', ?)")
+    .run(s2, 'geen_factuur:wv2061|' + f2, JSON.stringify([f2]), new Date(NU).toISOString());
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'factuur', transactie: f2, factuur: teBetalenFactuur(t, { entiteit: 'groenhouten' }) }).status, 409, 'andere entiteit');
+  const kf = t.call('POST', 'bank-keuze', { keuze: 'factuur', transactie: f2, factuur: fid });
+  assert.equal(kf.status, 200, JSON.stringify(kf.j));
+  assert.equal(kf.j.signalen_dicht, 1);
+  assert.equal(t.fdb.db.prepare('SELECT bron, wie FROM koppeling WHERE transactie = ? AND factuur = ?').get(f2, fid).bron, 'mens');
+  assert.equal(t.fdb.db.prepare('SELECT afhandeling FROM signaal WHERE id = ?').get(s2).afhandeling, 'factuur_gekoppeld');
+  assert.ok(!t.call('GET', 'bank/oranje/2026-w43').j.groepen.some((g) => g.transacties.some((x) => x.id === f2)));
+  assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [f2], categorie: 'overig' }).status, 409, 'gekoppeld = al bekeken');
+
+  // praktijkmanager: ziet de POT niet en kan geen POT-regel maken
+  const pm = t.pm();
+  const pmG = t.call('GET', 'bank/oranje/2026-w43', null, { rol: pm });
+  assert.equal(pmG.status, 200);
+  assert.ok(pmG.j.groepen.every((g) => g.entiteiten.every((x) => pm.entiteiten.includes(x))), JSON.stringify(pmG.j.groepen.map((g) => g.entiteiten)));
+  const potTx = t.fdb.db.prepare("SELECT id FROM bank_transactie WHERE entiteit = 'pot' LIMIT 1").get();
+  if (potTx) assert.equal(t.call('POST', 'bank-keuze', { keuze: 'uitzondering', transacties: [potTx.id], categorie: 'loon' }, { rol: pm }).status, 404);
 });

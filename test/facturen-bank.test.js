@@ -1366,3 +1366,28 @@ test('wv2057 diffreview: zelf koppelen nooit op een niet nagebeld of afwijkend I
   assert.equal(B.betaalVerwachting(kort, { dekking: new Map([[ABN_TG, '2026-11-05']]), actief: new Set([ABN_TG, LEV.ZV]), rekeningen: TWEE, vandaag: '2026-11-05' }).stand, 'bank_achter', 'actieve rekening zonder gegevens');
   assert.equal(B.betaalVerwachting(kort, { dekking: new Map([[ABN_TG, '2026-11-05'], [LEV.ZV, '2026-05-01']]), actief: new Set([ABN_TG]), rekeningen: TWEE, vandaag: '2026-11-05' }).stand, 'niet_gezien');
 });
+
+test('wv2061 oranjePatroon en categorieVoorstel: IBAN, naam, pin (filiaalnummer weg), bank zelf; voorstel alleen waar zeker geen factuur bij hoort', () => {
+  const p = (o) => B.oranjePatroon(Object.assign({ transactietype: 'ABN:SEPA OVERBOEKING', omschrijving: '' }, o));
+  assert.equal(p({ tegenpartij_iban: 'nl86 ingb 0002 4455 88', tegenpartij_naam: 'X' }).sleutel, 'iban:NL86INGB0002445588');
+  assert.equal(p({ tegenpartij_naam: 'Proef B.V.' }).sleutel, 'naam:proef');
+  const pin = p({ transactietype: 'ABN:BEA, Betaalpas', omschrijving: 'BEA, Betaalpas Albert Heijn 1875,PAS075 NR:CT9, 23.10.26' });
+  assert.deepEqual(pin.patroon, { transactietype: 'BEA', omschrijving: 'Albert Heijn' });
+  assert.equal(p({ transactietype: 'ABN:BEA, Google Pay Bras 73,PAS075 N', omschrijving: 'BEA, Google Pay Bras 73,PAS075 NR:1' }).naam, 'Bras 73');
+  const bank = p({ transactietype: 'ABN:ABN AMRO Bank N.V.', omschrijving: 'ABN AMRO Bank N.V. De specificatie vindt u' });
+  assert.equal(bank.soort, 'bank');
+  assert.equal(p({ transactietype: 'ABN:iets', omschrijving: 'geen tegenpartij' }), null);
+  // het patroon past op de eigen afschrijving (zelfde vorm als een uitzondering)
+  for (const [x, tx] of [[pin, { transactietype: 'ABN:BEA, Betaalpas', omschrijving: 'BEA, Betaalpas Albert Heijn 2001,PAS075' }], [bank, { transactietype: 'ABN:ABN AMRO Bank N.V.', omschrijving: 'ABN AMRO Bank N.V. kosten' }]])
+    assert.ok(B.uitzonderingPast(Object.assign({ richting: 'af', categorie: 'overig' }, x.patroon), Object.assign({ bedrag_centen: -100, eigen_iban: 'NL01' }, tx)));
+  const v = (o, pp, e) => B.categorieVoorstel(Object.assign({ omschrijving: '' }, o), pp || null, e || null);
+  assert.equal(v({ tegenpartij_naam: 'BELASTINGDIENST', omschrijving: 'omzetbelasting 3e kw' }).categorie, 'btw');
+  assert.equal(v({ tegenpartij_naam: 'Belastingdienst', omschrijving: 'loonheffingen sept' }).categorie, 'loonheffing');
+  assert.equal(v({ tegenpartij_naam: 'Belastingdienst', omschrijving: 'VPB 2026' }).categorie, 'belasting');
+  assert.equal(v({ tegenpartij_naam: 'A. Proef', omschrijving: 'Salaris periode 10' }).categorie, 'loon');
+  assert.equal(v({}, bank).categorie, 'bankkosten');
+  assert.equal(v({}, pin).categorie, 'overig');
+  assert.equal(v({ tegenpartij_naam: 'bol.com' }), null, 'webwinkel: geen voorstel');
+  assert.equal(v({ tegenpartij_naam: 'bol.com' }, null, 'abonnement_zonder_factuur').categorie, 'abonnement_zonder_factuur', 'eerdere keuze gaat voor');
+  assert.equal(v({ tegenpartij_naam: 'bol.com' }, null, 'onzin'), null);
+});
