@@ -681,8 +681,9 @@ BACKUP_MAX_LOG=$((5 * 1024 * 1024))
 # flock zonder -w wachtte dan eindeloos en zette deze bewakingslus stil (api-/sync-herstart, Syncthing-bewaking). Nu hooguit
 # VAULT_TAR_WACHT s wachten; lukt het niet, dan deze keer geen tar (exit GRENDEL_BEZET, nooit een tar-code) en pas na
 # VAULT_TAR_HERPOGING s een nieuwe poging. Offsite uploadt alleen een tar van vandaag met stempel; tot die er is, blijft de
-# vorige offsite-kopie de laatste.
-VAULT_TAR_WACHT="${VAULT_TAR_WACHT:-900}"
+# vorige offsite-kopie de laatste. 300 s i.p.v. de 900 uit het ontwerp (§ 4.4 R2; Opus-review ZOU 1): bisync staat uit, de
+# nachtketen-stappen nemen de grendel zelf ook hooguit 300 s, en de lus staat zo per uur hooguit 5 min stil.
+VAULT_TAR_WACHT="${VAULT_TAR_WACHT:-300}"
 VAULT_TAR_HERPOGING="${VAULT_TAR_HERPOGING:-3600}"
 VAULT_TAR_POGING="$BIN/laatste-vault-snapshot-grendel"
 GRENDEL_BEZET=75
@@ -720,7 +721,9 @@ vault_snapshot(){
 
   # Zelfde grendel als de synclus: nooit tarren tijdens een ronde. Begrensd wachten (R2): bij een bezette grendel draait tar niet,
   # er ontstaat dus geen (half) bestand.
-  flock -w "$VAULT_TAR_WACHT" -E "$GRENDEL_BEZET" "$VAULT_LOCK" tar -czf "$doel" -C "$(dirname "$VAULT")" "$(basename "$VAULT")" 2>>"$BACKUP_LOG"
+  # Op de achtergrond + wait: een SIGTERM (podstop) onderbreekt wait meteen en de trap draait, ook tijdens het wachten (ZOU 1).
+  flock -w "$VAULT_TAR_WACHT" -E "$GRENDEL_BEZET" "$VAULT_LOCK" tar -czf "$doel" -C "$(dirname "$VAULT")" "$(basename "$VAULT")" 2>>"$BACKUP_LOG" &
+  wait $!
   rc=$?
   if [ "$rc" -eq "$GRENDEL_BEZET" ]; then
     blog "overgeslagen: vault-grendel na ${VAULT_TAR_WACHT}s nog bezet (onderhoudsstand of syncronde) - nieuwe poging over ${VAULT_TAR_HERPOGING}s; offsite houdt tot dan de vorige kopie"

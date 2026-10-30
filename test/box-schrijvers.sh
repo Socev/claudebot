@@ -96,6 +96,27 @@ oud_patroon(){ python3 -I "$T/py/oud.py" "$BOX" "$1" "$N"; }
 tel(){ python3 -I "$T/py/tel.py" "$BOX" "$NIET" "$N" "$@"; }
 schoon(){ [ -z "$(ls -A "$T/v/Meldingen" | grep -v '^machinekamer.md$')" ]; }
 
+# 0. Deterministisch: de JS-grendel is de flock van vault_veilig.wijzig (Opus-review KAN 9).
+maak_box
+cat > "$T/g.js" <<'GJS'
+const VV = require(process.argv[2] + "/vault-veilig.js"), cp = require("child_process"), pad = process.argv[3], map = require("path").dirname(pad);
+const vrij = () => cp.spawnSync("flock", ["-n", map, "true"]).status === 0;
+let tijdens = null, gemist = 0;
+const ok = VV.wijzig(pad, t => { tijdens = vrij(); return t + "\nA\n"; }, { grendel: 2, geenGrendel: () => gemist++ });
+console.log(JSON.stringify({ ok, tijdens, na: vrij(), gemist }));
+GJS
+UIT="$(node "$T/g.js" "$HIER" "$BOX")"
+toets 'JS-grendel: tijdens de functie bezet, daarna vrij, schrijft' '[ "$UIT" = "{\"ok\":true,\"tijdens\":false,\"na\":true,\"gemist\":0}" ]'
+python3 -I -c 'import os,fcntl,time,sys;d=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY);fcntl.flock(d,fcntl.LOCK_EX);open(sys.argv[2],"w").write("1");time.sleep(4)' "$T/v/Meldingen" "$T/vast" & PH=$!
+for i in $(seq 1 50); do [ -s "$T/vast" ] && break; sleep 0.1; done
+t0=$(date +%s%N); UIT="$(node "$T/g.js" "$HIER" "$BOX")"; t1=$(date +%s%N); wait $PH
+MS=$(( (t1 - t0) / 1000000 ))
+toets "JS-grendel: Python houdt vast → na ± 2 s ($MS ms) zonder grendel verder, geenGrendel gemeld, toch geschreven" \
+  'echo "$UIT" | grep -q "\"ok\":true" && echo "$UIT" | grep -q "\"gemist\":1" && [ "$MS" -ge 1900 ] && [ "$MS" -le 3500 ]'
+mkdir -p "$T/zonderflock"; for b in node; do ln -sf "$(command -v $b)" "$T/zonderflock/$b"; done
+UIT="$(PATH="$T/zonderflock" node "$T/g.js" "$HIER" "$BOX" 2>/dev/null | head -1)"
+toets 'JS-grendel: zonder flock-programma toch geschreven, geenGrendel gemeld' 'echo "$UIT" | grep -q "\"ok\":true" && echo "$UIT" | grep -q "\"gemist\":1"'
+
 # 1. Twee schrijvers tegelijk (de eis), per paar: geen rij kwijt én geen rij niet geschreven.
 paar(){ # paar <naam> <schrijver1> <merk1> <schrijver2> <merk2>
   maak_box; "$2" "$3" & "$4" "$5" & wait

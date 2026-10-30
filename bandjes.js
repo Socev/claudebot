@@ -745,7 +745,7 @@ function routes(deps) {
       const ok = VV.wijzig(deps.boxPad, function (t) {
         const anker = eersteRij(t);   // eerste echte rij, niet een kop in een codeblok erboven
         return anker < 0 ? null : t.slice(0, anker) + rij + t.slice(anker);
-      }, { grendel: 5 });   // wv1944 R3: eerst de mapgrendel van vault_veilig.wijzig
+      }, { grendel: 5, geenGrendel: function () { fout('bandjes-box-grendel', new Error('mapgrendel niet binnen 5 s: zonder grendel geschreven')); } });   // wv1944 R3: eerst de mapgrendel van vault_veilig.wijzig
       if (!ok) return false;
       log('bandjes box-rij praktijk=' + l.praktijk + ' soort=' + soort);
       return true;

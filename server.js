@@ -16039,12 +16039,13 @@ function ovisNachtKind(opt) {
     });
   });
 }
+function boxGeenGrendel() { logError('box-grendel', new Error('mapgrendel van de box niet binnen 5 s: zonder grendel geschreven (wv1944)')); }
 function ovisBoxRij(tekst) {   // → true als de rij in de box staat (wv1303: de intake-hangers melden alleen dan het stuk als gemeld)
   try {
     return VV().wijzig(path.join(VAULT, '00_Systeem', 'Meldingen', 'machinekamer.md'), function (t) {
       const eerste = /\n## \[[a-z]{2,16}\] \d{4}-\d{2}-\d{2}/.exec(t);
       return eerste ? t.slice(0, eerste.index) + tekst + t.slice(eerste.index) : null;
-    }, { grendel: 5 });   // wv1944 R3: eerst de mapgrendel van vault_veilig.wijzig (hooguit 5 s), dan pas lezen
+    }, { grendel: 5, geenGrendel: boxGeenGrendel });   // wv1944 R3: eerst de mapgrendel van vault_veilig.wijzig (hooguit 5 s), dan pas lezen
   } catch (e) { logError('ovis-box', e); return false; }
 }
 // wv981: Voor jou-kaart bij een kritiek verschil in het POT-factuuradres (plek 4), alleen na een nachtronde waarin de POT-kant gemeten is;
@@ -16824,7 +16825,7 @@ function werkerBoxRij(kop, regels) {
       const eerste = /\n## \[[a-z]{2,16}\] \d{4}-\d{2}-\d{2}/.exec(t);
       const tijd = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Amsterdam' }).slice(0, 16);
       return eerste ? t.slice(0, eerste.index) + '\n## [log] ' + tijd + ' — ' + kop + '\n' + regels.map(function (r) { return '- ' + r; }).join('\n') + '\n' + t.slice(eerste.index) : null;
-    }, { grendel: 5 });   // wv1944 R3: eerst de mapgrendel van vault_veilig.wijzig (hooguit 5 s), dan pas lezen
+    }, { grendel: 5, geenGrendel: boxGeenGrendel });   // wv1944 R3: eerst de mapgrendel van vault_veilig.wijzig (hooguit 5 s), dan pas lezen
   } catch (e) { logError('werkers-box', e); return false; }
 }
 const werkerKlok = function (iso) { return new Date(iso).toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam', hour: '2-digit', minute: '2-digit' }); };

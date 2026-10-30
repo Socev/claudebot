@@ -62,5 +62,15 @@ W=2 draai vault_snapshot; rc=$?
 chmod 755 "$T/vault"; rm -rf "$T/vault"; mv "$T/vault.weg" "$T/vault"
 toets 'andere fout: rc 1 (niet de grendelcode 75), geen herpoging-stempel' '[ $rc -eq 1 ] && [ ! -e "$T/bin/laatste-vault-snapshot-grendel" ]'
 
+# 6. SIGTERM tijdens het wachten op de grendel: de trap draait meteen (tar op de achtergrond + wait; Opus-review ZOU 1).
+rm -f "$T/bin/laatste-vault-snapshot" "$T/bin/laatste-vault-snapshot-grendel"
+( flock "$LOCK" sleep 20 ) & HOUDER=$!; sleep 0.3
+VAULT="$T/vault" BIN="$T/bin" VAULT_LOCK="$LOCK" BACKUP_DIR="$T/backups" VAULT_TAR_WACHT=30 \
+  bash -c 'source "$1"; trap "echo TRAP; exit 0" TERM; vault_snapshot' _ "$T/blok.sh" > "$T/term.uit" 2>&1 & JOB=$!
+sleep 1; t0=$(date +%s); kill -TERM "$JOB"; wait "$JOB"; t1=$(date +%s)
+toets 'SIGTERM tijdens het wachten: trap binnen 2 s' 'grep -q TRAP "$T/term.uit" && [ $((t1-t0)) -le 2 ]'
+pkill -P "$HOUDER" 2>/dev/null; kill "$HOUDER" 2>/dev/null; wait "$HOUDER" 2>/dev/null
+toets 'standaard wachttijd 300 s' 'grep -q "^VAULT_TAR_WACHT=\"\${VAULT_TAR_WACHT:-300}\"" "$T/blok.sh"'
+
 echo "vault-tar-grendel: $OK ok, $FOUT fout"
 [ "$FOUT" -eq 0 ]

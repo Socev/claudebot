@@ -148,11 +148,12 @@ function grendel(m, s) {
 
 // Lees, laat functie(tekst) de nieuwe tekst geven (null/undefined = niets doen) en schrijf die weg als het bestand intussen
 // niet veranderde (zelfde inode, grootte en mtime); anders tot drie keer opnieuw. Geeft true als er geschreven is.
-// o.grendel (seconden, bv. 10): eerst de mapgrendel van vault_veilig.wijzig nemen (box-schrijvers, wv1944).
+// o.grendel (seconden, bv. 5): eerst de mapgrendel van vault_veilig.wijzig nemen (box-schrijvers, wv1944); lukt dat niet,
+// dan o.geenGrendel() (logregel bij de aanroeper) en zonder grendel verder.
 function wijzig(pad, functie, o) {
   o = o || {};
   return metMap(pad, function (m) {
-    if (o.grendel) grendel(m, o.grendel);
+    if (o.grendel && !grendel(m, o.grendel) && typeof o.geenGrendel === 'function') o.geenGrendel();
     for (let poging = 0; poging < 3; poging++) {
       const voor = statGewoon(m.binnen(m.naam));
       const nieuw = functie(leesIn(m, 'utf8'));
