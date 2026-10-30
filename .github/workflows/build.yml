@@ -315,6 +315,11 @@ jobs:
       - name: "scansnap (wv1343, ScanSnap naar OVIS Intake)"
         if: ${{ !cancelled() }}
         run: bash test/scansnap.sh
+      # MemoryLane R1 (wv1969): opname in stukken (dubbel, 409, klaar te vroeg, gat, opruimen, afgebroken upload), uitschrijven met plafond,
+      # Intake ramble@1 zonder audio, marker (kaart zonder inhoud, niet offsite), opnamenotitie met privé-markering, offsite alleen toevoegen.
+      - name: "herinneringen (wv1969, MemoryLane R1)"
+        if: ${{ !cancelled() }}
+        run: bash test/herinneringen.sh
       # OVIS-register (wv979): frontmatter als tekst, vingerafdruk, validatie, compileer tegen een nep-databank, Bibliothecaris BB1-BB8.
       # wv1271: aliases/aliassen, blok met id + content_hash, handwerk niet overschrijven (BB8).
       - name: "ovis-register (wv979, compiler + Bibliothecaris)"

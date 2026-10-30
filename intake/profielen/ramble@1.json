@@ -1,0 +1,81 @@
+{
+ "profiel": "ramble",
+ "versie": 1,
+ "omschrijving": "Het transcript van één ingesproken herinnering (MemoryLane, Socev-app; wv1969). Alleen intern aan te leveren door herinneringen.js na een complete (of na 7 dagen onvolledige) opname. Onderdelen: het letterlijke transcript met tijdcodes (hoofdtekst) en het manifest van de opname (origineel: nummers, sha256 en bytes per WAV-stuk; sha256 hiervan = vingerafdruk van de opname). De audio zelf komt nooit in Intake (alleen /opt/data/herinneringen/audio). Blijft op de pod zonder termijn tot de marker 'geen' geeft of David doorlaat; buiten de router en buiten de publicatieservice.",
+ "bronnen": [
+  "app:ramble"
+ ],
+ "bron_id": {
+  "vorm": "^r[0-9]{8}-[0-9a-f]{16}$",
+  "uitleg": "ramble_id van de app (r<JJJJMMDD>-<16 hex>)"
+ },
+ "herzienbaar": false,
+ "alleen_intern": true,
+ "bewaren": "tot_keuze",
+ "meta": {
+  "manifest_sha256": {
+   "type": "tekst",
+   "vorm": "^[0-9a-f]{64}$",
+   "verplicht": true
+  },
+  "duur_s": {
+   "type": "geheel",
+   "min": 0,
+   "verplicht": true
+  },
+  "verteller": {
+   "type": "tekst",
+   "verplicht": true
+  },
+  "route": {
+   "type": "keuze",
+   "waarden": [
+    "app",
+    "tel"
+   ],
+   "verplicht": true
+  },
+  "opgenomen_op": {
+   "type": "tijd",
+   "verplicht": true
+  },
+  "stukken": {
+   "type": "geheel",
+   "min": 1,
+   "verplicht": true
+  },
+  "onvolledig": {
+   "type": "ja/nee",
+   "verplicht": true
+  },
+  "proef": {
+   "type": "tekst",
+   "verplicht": false
+  }
+ },
+ "onderdelen": {
+  "hoofdtekst": {
+   "min": 1,
+   "max": 1,
+   "mime": [
+    "text/markdown"
+   ],
+   "max_mb": 1
+  },
+  "origineel": {
+   "min": 1,
+   "max": 1,
+   "mime": [
+    "text/plain"
+   ],
+   "max_mb": 1
+  }
+ },
+ "privacy": {
+  "access_context": "strikt_prive"
+ },
+ "origineel": "pod",
+ "lezers": [
+  "herinneringen.js (opnamenotitie in 20_Prive/Herinneringen/Opnames na marker 'geen' of Davids doorlaten)"
+ ]
+}

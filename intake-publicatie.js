@@ -157,6 +157,7 @@ function maak(o) {
     const uit = [], overgeslagen = { entiteit: 0, status: 0, scope: 0 };
     for (const r of rijen) {
       if (!STUK_RE.test(r.stuk_id)) continue;
+      if (/^ramble@/.test(r.profiel)) continue;   // wv1969: herinneringen nooit als bronnotitie (fase R § 3.2)
       const ids = safeJson(r.ids);
       if (!Array.isArray(ids) || !ids.length) continue;
       // map: router (live) eerst, anders het eerste vaultpad dat Intake schreef

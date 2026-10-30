@@ -1178,7 +1178,9 @@ function maak(o) {
    * dezelfde toetsen als POST /intake/stuk + PUT (postStuk/putDeel met een nagemaakt verzoek). De sleutel staat hier vast en komt nooit
    * in sleutels.json; verwerk() kent hem niet (Opus-review wv1343 MOET 3). → { http, uitkomst, ...antwoord } (laatste antwoord).
    */
-  const INTERN = { scansnap: { id: 'intern-scansnap', route: 'scansnap', profielen: ['scansnap@1'], bronnen: ['scanner:scansnap'], lezen: [], intern: true } };
+  const INTERN = { scansnap: { id: 'intern-scansnap', route: 'scansnap', profielen: ['scansnap@1'], bronnen: ['scanner:scansnap'], lezen: [], intern: true },
+    // wv1969 (MemoryLane R1): het transcript van een ingesproken herinnering, alleen vanuit herinneringen.js (de audio komt nooit in Intake)
+    ramble: { id: 'intern-ramble', route: 'ramble', profielen: ['ramble@1'], bronnen: ['app:ramble'], lezen: [], intern: true } };
   function nepReq(method, headers, buf) {
     const h = {};
     const r = { method, url: '/intake/intern', headers, complete: true, resume() {}, on(ev, f) {
@@ -1227,6 +1229,23 @@ function maak(o) {
     const gemeten = sha256(fs.readFileSync(blobPad(d.sha256)));
     if (gemeten !== d.sha256) return null;
     return { sha256: d.sha256, pad: blobPad(d.sha256), grootte: d.grootte, mime: d.mime, naam: d.naam };
+  }
+  // wv1969: bytes van een blob op sha256, opnieuw gemeten op schijf (de opnamenotitie leest zo het transcript). → Buffer of null
+  function blobVanSha(sha) {
+    if (!/^[0-9a-f]{64}$/.test(String(sha)) || !blobAanwezig(sha)) return null;
+    const b = q.blob.get(sha);
+    if (!b || b.weg) return null;
+    const buf = fs.readFileSync(blobPad(sha));
+    return sha256(buf) === sha ? buf : null;
+  }
+  // wv1969: een tot_keuze-stuk na de marker 'geen' of Davids 'doorlaten' (ramble@1): blobs van dit stuk mogen offsite, zonder termijn.
+  function vrijgeven(stukId) {
+    return tx(function () {
+      let n = 0;
+      for (const d of q.delen.all(stukId)) n += db.prepare('UPDATE blob SET offsite = 1, bewaar_tot = NULL WHERE sha256 = ? AND weg IS NULL').run(d.sha256).changes;
+      q.spoor.run(nuIso(nu()), 'vrijgegeven', null, stukId, null);
+      return n;
+    });
   }
   // Bewaartermijn na Davids keuze (wv1343): ms = moment, null = terug naar zonder termijn. Een blob die ook bij een ander stuk hoort,
   // krijgt geen termijn (zelfde toets als markeer; Opus-review wv1343 MOET 5).
@@ -1310,6 +1329,16 @@ function maak(o) {
       if (!d) return { niet: 'geen_onderdeel' };
       if (!heeft(d)) return { niet: 'blob_ontbreekt' };
       return { bronnen: [bestand(d, soort === 'scansnap' ? s.bron_id : zonderChatId(s.profiel, s.bron_id))] };
+    }
+    if (soort === 'ramble') {
+      // wv1969 (fase R § 3.2): de bron is de OPNAME. Versie = vingerafdruk van de opname (sha256 van het manifest, onderdeel 'origineel', een
+      // echte blob op de pod), nooit het transcript: opnieuw uitschrijven maakt geen nieuwe versie. Geen tekst, geen titel, geen naam.
+      const d = delen.find((x) => x.rol === 'origineel');
+      if (!d) return { niet: 'geen_onderdeel' };
+      if (!heeft(d)) return { niet: 'blob_ontbreekt' };
+      if (meta.manifest_sha256 !== d.sha256) return { niet: 'vingerafdruk_wijkt_af' };
+      return { bronnen: [Object.assign({ origin_system: 'ramble', external_id: s.bron_id, sha256: d.sha256, size_bytes: d.grootte, mime_type: 'text/plain',
+        occurrence_key: s.bron_id }, basis)] };
     }
     return { niet: 'profiel_zonder_koppeling' };
   }
@@ -1498,7 +1527,7 @@ function maak(o) {
 
   function sluit() { try { db.close(); } catch (e) { /* al dicht */ } }
 
-  return { isPad, verwerk, ronde, telling, info, sluit, markeer, leverIntern, blobVan, bewaarNa, spiegel, spiegelTelling, _db: db, _profielen: profielen, _soorten: soorten };
+  return { isPad, verwerk, ronde, telling, info, sluit, markeer, leverIntern, blobVan, blobVanSha, vrijgeven, bewaarNa, spiegel, spiegelTelling, _db: db, _profielen: profielen, _soorten: soorten };
 }
 
 /*

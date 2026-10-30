@@ -3757,6 +3757,7 @@ function handleRequest(req, res) {
       intake: intakeInfo(),
       mailman: typeof mailmanInfo === 'function' ? mailmanInfo() : { aan: false },   // wv1856: OVIS MailMan (stand per postvak, laatste ronde, wachtend op Jev, tellingen; geen namen)
       pdf_lezer: pdfLezerInfo(),   // wv1431: PDF-lezer via de Claude-API (schaduw; verbruik vandaag/maand, grens, terugvallen, sleutel aanwezig?; nooit de sleutel, geen inhoud)
+      ramble: herinneringenInfo(),   // wv1969: MemoryLane (opnames per status, uit te schrijven, minuten vandaag/plafond, offsite; geen inhoud)
       scansnap: scansnapInfo(),   // wv1343: ScanSnap → Intake (aan, laatste tik als aantallen, per status; geen namen)   // wv1282: aanleverweg OVIS Intake (profielen, aantal sleutels, stukken per status, blobs; geen inhoud, geen sleutels)
       // wv349: echt=false of een /tmp-pad hieronder in productie = de server draait in een wegwerpmap (zie SERVER_ECHT)
       // Productie toont alleen home/io/jobout (Fable wv349 #4: /health is open); een proef toont alle omgeleide paden.
@@ -10217,6 +10218,20 @@ async function appVoorJouKnop(req, res, reg, a, s, d) {
   // invoermap van de knopbeurt; de keuze telt bij de start en gaat terug als de druk vervalt.
   let ss = null;
   try { ss = !pot && !ib && !ov && typeof scansnap !== 'undefined' && scansnap ? scansnap.knop(p.sleutel, keuze, d.toelichting) : null; } catch (e) { logError('scansnap-knop', e); ss = null; }
+  // wv1969: markerkaart van een herinnering (herinneringen.js, eigen tabel). Ja = doorlaten, Nee = vasthouden; de pod doet het zelf, Socev krijgt
+  // geen tekst. De keuze telt bij de start en gaat terug als de druk vervalt.
+  let hr = null;
+  try { hr = !pot && !ib && !ov && !ss && typeof herinneringen !== 'undefined' && herinneringen ? herinneringen.knop(p.sleutel, keuze) : null; } catch (e) { logError('ramble-knop', e); hr = null; }
+  if (hr) {
+    const hrStart = bijStart;
+    const knopHr = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
+      { tekst: tekst, bericht: bericht, context: context + hr.context, gevoelig: k.gevoelig,
+        bijStart: function (kz, g) { try { hr.bijStart(); } catch (e) { logError('ramble-knop', e); } return hrStart(kz, g); },
+        bijVerval: function () { try { hr.bijVerval(); } catch (e) { logError('ramble-knop', e); } } });
+    await knopHr;
+    if (res._app) res._app.reden = 'voor-jou knop #' + id + ' herinnering ' + (res._app.reden || '');
+    return;
+  }
   if (ss) {
     const ssCtx = context + ss.context, ssStart = bijStart;
     const knopSs = appKnop(req, res, reg, a, s, { job_id: jobId, vraag_hash: hash, keuze: keuze, toelichting: d.toelichting },
@@ -12085,7 +12100,8 @@ function handleApp(req, res) {
     // Upload (wv99): ruwe bytes, geen JSON; de route leest de stroom zelf. Wordt hij eerder geweigerd (geen sessie e.d.), dan
     // de rest van de stroom weggooien zodat de verbinding netjes afloopt.
     const upload = req.method === 'POST' && p.indexOf('/app/upload/') === 0;
-    const ruw = upload || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
+    const rambleStuk = req.method === 'POST' && APP_RAMBLE_STUK_RE.test(p);   // wv1969: MemoryLane, één WAV-stuk van 60 s
+    const ruw = upload || rambleStuk || (req.method === 'POST' && p === '/app/spraak');   // wv172: opname, ook ruwe bytes
     if (ruw) res.on('finish', function () { if (!req.complete) req.resume(); });
     (ruw ? function (cb) { cb(null, {}, null); } : function (cb) { appBody(req, cb, req.method === 'POST' && p === '/app/omzet' ? APP_OMZET_MAX_BODY : APP_MAX_BODY); })(function (fout, d, lichaam) {
       if (fout === 'groot' && p === '/app/omzet') return appWeiger(res, 413, 'de tekst is te groot om om te zetten (hooguit 2 MB)', 'body groot');   // wv1854
@@ -12143,7 +12159,7 @@ function handleApp(req, res) {
         // Verlengen pas als de schrijvende route echt lukte; een ongeldig verzoek telt niet als activiteit (Fable-review wv56 #8).
         // wv159 (Fable K5): een concept dat de app na een mislukte poging opnieuw aanbiedt (herstel) is geen activiteit van David
         // wv488 (Fable 2e ronde #1): aanwezig op een vaste plek verlengt alleen met open invoerslot (zie appAanwezig)
-        if ((APP_GLIJD_ROUTES.has(route) && !(route === 'POST /app/concept' && d.herstel === true) && !(route === 'POST /app/aanwezig' && a.soort === 'vast')) || upload) res.on('finish', function () { if (res.statusCode < 300) appGlijd(s, a); });
+        if ((APP_GLIJD_ROUTES.has(route) && !(route === 'POST /app/concept' && d.herstel === true) && !(route === 'POST /app/aanwezig' && a.soort === 'vast')) || upload || route.indexOf('POST /app/ramble/') === 0) res.on('finish', function () { if (res.statusCode < 300) appGlijd(s, a); });   // wv1969: een lopende herinnering-opname houdt de sessie open
         if (route === 'GET /app/apparaten') return appApparatenLijst(req, res, reg, a);
         if (route === 'POST /app/apparaat/intrekken') return appIntrekken(req, res, reg, a, s, d);
         if (route === 'POST /app/apparaat/wijzig') return appApparaatWijzig(req, res, reg, a, s, d);
@@ -12183,6 +12199,7 @@ function handleApp(req, res) {
         if (route.indexOf('GET /app/concept/') === 0) return appConceptRoute(req, res, a, route.slice('GET /app/concept/'.length));
         if (route === 'POST /app/concept') return appConceptZet(req, res, a, d);
         if (route === 'POST /app/spraak') return appSpraak(req, res, a);   // wv172
+        if (route.indexOf('POST /app/ramble/') === 0 || route.indexOf('GET /app/ramble/') === 0) return appRamble(req, res, a, route, d);   // wv1969
         if (route === 'POST /app/voorlees') return appVoorlees(req, res, a, d);
         if (route === 'GET /app/autokastje') return appAutokastje(req, res);
         if (route === 'GET /app/verbruik') return appVerbruik(req, res);
@@ -12693,6 +12710,43 @@ async function appWhisper(wav) {
   const woorden = t.split(/\s+/).length;
   return (woorden <= 8 && /amara\.org|^ondertitel(ing|d) (door|van)/i.test(t)) || (woorden <= 4 && APP_SPOOK.test(t)) ? '' : t;
 }
+// ── MemoryLane R1 (wv1969, 30-10-2026): herinneringen inspreken. Ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase R rambles en
+// herinneringen (ontwerp 29-10-2026).md" § 3.1. De app stuurt elk stuk van 60 s als ruwe WAV (zelfde vorm als /app/spraak, getekende
+// inhoudshash X-App-Inhoud), daarna 'klaar' met het manifest (JSON). Logica, grenzen en waarom in herinneringen.js; hier alleen de poort:
+//   POST /app/ramble/<ramble_id>/<n>   ruwe WAV → { ok, n, sha256, dubbel?, compleet } | 409 conflict
+//   POST /app/ramble/<ramble_id>/klaar { aantal, sha256: [...], opgenomen_op, verteller? } → 200 compleet | 202 { ontbreekt } | 409
+//   GET  /app/ramble/<ramble_id>       → welke stukken de pod heeft (hervatten na een herstart van de app)
+// Valt onder sessie, apparaatsleutel en (vaste plek) het invoerslot zoals elke POST; een stuk verlengt de sessie. Nooit tekst in het auditlog.
+const APP_RAMBLE_STUK_RE = /^\/app\/ramble\/r[0-9]{8}-[0-9a-f]{16}\/[1-9][0-9]?$/;
+appStaat.tellers.ramble = [];
+function appRamble(req, res, a, route, d) {
+  const weg = function (st, f, r) { req.resume(); return appWeiger(res, st, f, r); };
+  if (!herinneringen) return weg(404, 'herinneringen inspreken staat niet in deze versie van de pod', 'ramble: geen module');
+  const st = /^POST \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})\/([1-9][0-9]?)$/.exec(route);
+  const kl = /^POST \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})\/klaar$/.exec(route);
+  const ga = /^GET \/app\/ramble\/(r[0-9]{8}-[0-9a-f]{16})$/.exec(route);
+  const antw = function (id, wat, u) { res._app.reden = 'ramble ' + id + ' ' + wat + ' ' + u.status; return appStuur(res, u.status, u.body); };
+  try {
+    if (ga) return antw(ga[1], 'stand', herinneringen.stand(ga[1]));
+    if (kl) return antw(kl[1], 'klaar', herinneringen.ontvangKlaar(kl[1], d, { apparaat: a.id }));
+    if (!st) return weg(404, 'onbekend', 'ramble pad');
+  } catch (e) { logError('ramble', e); return weg(503, 'de pod kon de opname nu niet opslaan; de app probeert het opnieuw', 'ramble fout'); }
+  const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (ct !== 'application/octet-stream') return weg(415, 'alleen een opname', 'ramble soort');
+  const lengte = Number(req.headers['content-length']);
+  if (!Number.isInteger(lengte) || lengte <= 44) return weg(400, 'geen opname', 'ramble lengte');
+  if (lengte > HERINNERINGEN_MOD.STUK_MAX_BYTES) return weg(413, 'stuk te groot', 'ramble te groot');
+  if (!appTeller('ramble', 600, 3600000)) return weg(429, 'te veel stukken dit uur', 'grens ramble');
+  return HERINNERINGEN_MOD.leesStuk(req, lengte).then(function (x) {
+    if (x.fout) return appWeiger(res, x.status, x.fout, 'ramble ' + x.fout);
+    if (res._app.inhoud && !appInhoudKlopt(res, x.hash)) return appStuur(res, 401, { ok: false, fout: 'open opnieuw met je vingerafdruk', binding: 'inhoud' });   // wv316
+    let u;
+    try { u = herinneringen.ontvangStuk(st[1], Number(st[2]), x.buf, { apparaat: a.id }); }
+    catch (e) { logError('ramble', e); return appWeiger(res, 503, 'de pod kon het stuk nu niet opslaan; de app probeert het opnieuw', 'ramble fout'); }
+    return antw(st[1], 'stuk ' + st[2], u);
+  });
+}
+
 // POST /app/spraak: ruwe WAV (application/octet-stream) -> { tekst }. Invoer: valt onder het invoerslot (vaste plek).
 function appSpraak(req, res, a) {
   const weg = function (st, f, r) { req.resume(); return appWeiger(res, st, f, r); };
@@ -15832,6 +15886,31 @@ const scansnap = (function () {
       box: function (t) { ovisBoxRij(t); }, fout: logError });
   } catch (e) { logError('scansnap', e); return null; }
 })();
+// ── MemoryLane R1 (wv1969): herinneringen.js — opvang, audio-archief, uitschrijven (appWhisper, plafond 120 min/dag), transcript als
+// Intake-stuk ramble@1, marker, opnamenotitie in 20_Prive/Herinneringen/Opnames en audio-offsite naar vaultcrypt:herinneringen-audio.
+// Elke minuut een tik (echte pod, primaire kant). Uit: bestand <HERINNERINGEN_DIR>/uit (route 503, geen tik). Ontbreekt herinneringen.js
+// (terugrol), dan 404 op /app/ramble/* en ramble.module=false in /health.
+const HERINNERINGEN_DIR = serverPad('herinneringen', process.env.HERINNERINGEN_DIR, '/opt/data/herinneringen', serverProefDeel('herinneringen'));
+const HERINNERINGEN_MOD = (function () { const p = path.join(__dirname, 'herinneringen.js'); try { return fs.existsSync(p) ? require(p) : null; } catch (e) { logError('herinneringen', e); return null; } })();
+const herinneringen = (function () {
+  if (!intake || !HERINNERINGEN_MOD) return null;
+  try {
+    return HERINNERINGEN_MOD.maak({ dir: HERINNERINGEN_DIR, intake: intake, vault: VAULT, vv: VV(),
+      whisper: function (wav) { return appWhisper(wav); }, kanUitschrijven: function () { return !!process.env.CLOUDFLARE_AI_TOKEN_AUTO; },
+      onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
+      primair: function () { return rolPrimair(); }, offsiteAan: function () { return SERVER_ECHT; },
+      kaartZet: async function (p) { const r = await appSbRpc('mk_voor_jou_zet', { p: p }); appStaat.vjCache = null; if (!r || !r.sleutel) throw new Error('Voor jou-kaart niet gezet'); return r; },
+      kaartLijst: async function () { const j = await appSbRpc('mk_voor_jou_lijst', { p_alles: true }); const m = {}; ((j && j.punten) || []).forEach(function (x) { m[x.sleutel] = x.status; }); return m; },
+      box: function (t) { ovisBoxRij(t); }, fout: logError });
+  } catch (e) { logError('herinneringen', e); return null; }
+})();
+function herinneringenInfo() { if (!herinneringen) return { module: false }; try { return Object.assign({ module: true }, herinneringen.info()); } catch (e) { return { fout: true }; } }
+async function herinneringenTik() {
+  if (!herinneringen) return;
+  try { const u = await herinneringen.tik(); if (u && (u.uitgeschreven || u.intake || u.notities || u.kaarten || u.opgeruimd || u.onvolledig || u.offsite || u.fout || u.whisper_fout || u.intake_fout || u.notitie_fout)) schrijfLog(nu() + ' ramble ' + velden({ uitgeschreven: u.uitgeschreven || 0, intake: u.intake || 0, notities: u.notities || 0, kaarten: u.kaarten || 0, opgeruimd: u.opgeruimd || 0, onvolledig: u.onvolledig || 0, offsite: u.offsite || 0, fout: (u.fout || 0) + (u.whisper_fout || 0) + (u.intake_fout || 0) + (u.notitie_fout || 0) })); }
+  catch (e) { logError('herinneringen-tik', e); }
+}
+if (herinneringen && SERVER_ECHT) { setTimeout(function () { herinneringenTik(); }, 90000).unref(); setInterval(function () { herinneringenTik(); }, 60000).unref(); }
 function scansnapInfo() { if (!scansnap) return { aan: false, module: false }; try { return scansnap.info(); } catch (e) { return { fout: true }; } }
 async function scansnapTik() {
   if (!scansnap || !rolPrimair()) return;
