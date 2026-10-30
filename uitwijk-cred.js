@@ -55,6 +55,11 @@ function stderrUitkomst(t) {
   try { const j = JSON.parse(r); return /^[a-z_]{2,20}$/.test(String(j.uitkomst || '')) ? j.uitkomst : null; } catch (e) { return null; }
 }
 
+function stderrVelden(t) {
+  const r = String(t || '').trim().split('\n').pop();
+  try { const v = JSON.parse(r).velden_onbekend; return Array.isArray(v) ? v.filter(function (x) { return /^[A-Za-z0-9_]{1,40}$/.test(String(x)); }).slice(0, 10) : []; } catch (e) { return []; }
+}
+
 // Poort (dubbel met olares-eigen en de R230): { ok, regel, ids, n }. De regel noemt nooit inhoud.
 function poort(buf) {
   if (!buf.length) return { ok: false, regel: 'lege uitvoer' };
@@ -105,7 +110,8 @@ function maak(o) {
     return { j: j };
   }
   async function export_() {
-    const r = await draai(o.olaresEigen, ['n8n-cred-export'], { timeout: 300000, max: MAX_EXPORT + 1 });
+    // 400 s: olares-eigen zelf hooguit 10 s grendel + 60 s pod list + 240 s exec (review wv2041 ZOU 4)
+    const r = await draai(o.olaresEigen, ['n8n-cred-export'], { timeout: 400000, max: MAX_EXPORT + 1 });
     if (r.code !== 0) return { fout: 'export', reden: 'olares-eigen n8n-cred-export: ' + (stderrUitkomst(r.stderr) || 'exit ' + r.code) };
     const p = poort(r.stdout);
     if (!p.ok) return { fout: 'poort', reden: 'export weigert de poort (' + p.regel + ')' };
@@ -114,7 +120,7 @@ function maak(o) {
     const a = new Set(api);
     const gelijk = a.size === p.ids.size && api.length === a.size && [...a].every(function (id) { return p.ids.has(id); });
     if (!gelijk) return { fout: 'telling', reden: 'export ' + p.n + ' ≠ n8n-API ' + api.length + ' (id-set wijkt af)', herkans: true };
-    return { buf: r.stdout, n: p.n, sha: crypto.createHash('sha256').update(r.stdout).digest('hex') };
+    return { buf: r.stdout, n: p.n, sha: crypto.createHash('sha256').update(r.stdout).digest('hex'), velden: stderrVelden(r.stderr) };
   }
   async function poging() {
     let e = await export_();
@@ -123,14 +129,17 @@ function maak(o) {
     const s1 = await stand();
     if (s1.fout) return s1;
     const det = { n: e.n, sha12: e.sha.slice(0, 12), repo12: s1.j.repo_sha.slice(0, 12) };
+    if (e.velden.length) det.velden_onbekend = e.velden;   // n8n-upgrade? zichtbaar in de keten-stand en de staat (review KAN 9)
     if (s1.j.export_sha256 === e.sha && s1.j.ijk_sha256 === e.sha) return { ok: true, detail: Object.assign(det, { uitkomst: 'ongewijzigd' }) };
     const z = await r230('cred-zet ' + e.sha, e.buf, 120000);
     e.buf.fill(0);
-    if (z.code !== 0) return { fout: 'r230-zet', reden: 'cred-zet op de R230 faalde (exit ' + z.code + (z.code === 75 ? ': sync.lock bezet' : z.code === 3 ? ': uitwijk actief' : '') + ')' };
+    if (z.code === 75) return { wacht: 'sync.lock op de R230 bezet' };   // uitwijk-sync loopt: de keten probeert het zo opnieuw, telt niet als poging (ZOU 3)
+    if (z.code !== 0) return { fout: 'r230-zet', reden: 'cred-zet op de R230 faalde (exit ' + z.code + (z.code === 3 ? ': uitwijk actief' : '') + ')' };
+    const dal = /^cred-daling: (\d+) -> (\d+)$/m.exec(z.stdout.toString('utf8'));
     const s2 = await stand();
     if (s2.fout) return s2;
     if (s2.j.export_sha256 !== e.sha || s2.j.ijk_sha256 !== e.sha) return { fout: 'r230-nameting', reden: 'na cred-zet is de stand op de R230 niet gelijk (export ' + String(s2.j.export_sha256).slice(0, 12) + ', ijking ' + String(s2.j.ijk_sha256).slice(0, 12) + ')' };
-    return { ok: true, detail: Object.assign(det, { uitkomst: 'vernieuwd', vorige12: String(s1.j.export_sha256 || '').slice(0, 12) || null }) };
+    return { ok: true, daling: dal ? dal[1] + ' -> ' + dal[2] : null, detail: Object.assign(det, { uitkomst: 'vernieuwd', vorige12: String(s1.j.export_sha256 || '').slice(0, 12) || null }) };
   }
 
   function meld(soort, reden, datum) {
@@ -138,11 +147,15 @@ function maak(o) {
     st.gemeld = st.gemeld || {};
     if (st.gemeld[soort] === datum) return false;   // één rij per soort per dag (grondwet 10)
     const klok = typeof o.klok === 'function' ? o.klok() : '';
-    const ok = o.boxRij('\n## [uitwijk-cred] ' + datum + ' ' + klok + ' — n8n-credentials niet naar de R230: ' + soort + ' (automatisch, wv2041) #uitwijk-cred-auto\n' +
+    const kop = soort === 'daling' ? 'n8n-credentials op de R230 gezet, maar het aantal daalde sterk' : 'n8n-credentials niet naar de R230: ' + soort;
+    const ok = o.boxRij('\n## [uitwijkcred] ' + datum + ' ' + klok + ' — ' + kop + ' (automatisch, wv2041) #uitwijk-cred-auto\n' +
       '- status: open\n- van: pod (nachtketen, stap uitwijk-cred)\n' +
       '- gemeten: ' + String(reden).slice(0, 300) + '.\n' +
-      '- gevolg als er niets gebeurt: de R230 houdt de export van de vorige keer; uitwijk-sync 03:30 meldt dan "credentials-export vernieuwen" als er sindsdien iets wijzigde. Morgennacht opnieuw.\n' +
-      '- voorstel: olares-eigen.log (regel n8n-cred-export), sync.log op de R230 (cred-zet) en /health.nachtketen nalopen; handmatig opnieuw: node uitwijk-cred.js ronde (machinekamer).\n');
+      (soort === 'daling'
+        ? '- gevolg als er niets gebeurt: bewust opgeruimd (zoals 27-10) = niets; anders mist de uitwijk credentials. De vorige versies staan op de R230 als /etc/uitwijk/credentials-export.<stempel>.json (laatste 7).\n' +
+          '- voorstel: n8n-credentials op Olares nalopen; bij een fout de vorige versie op de R230 terugzetten (LEESMIJ uitwijk-vps).\n'
+        : '- gevolg als er niets gebeurt: de R230 houdt de export van de vorige keer; uitwijk-sync 03:30 meldt dan "credentials-export vernieuwen" als er sindsdien iets wijzigde. Morgennacht opnieuw.\n' +
+          '- voorstel: olares-eigen.log (regel n8n-cred-export), sync.log op de R230 (cred-zet) en /health.nachtketen nalopen; handmatig opnieuw: node uitwijk-cred.js ronde (machinekamer).\n'));
     if (ok) { st.gemeld[soort] = datum; schrijfAtomair(o.staatBestand, JSON.stringify(st)); }
     return ok;
   }
@@ -155,10 +168,12 @@ function maak(o) {
     const st = leesJson(o.staatBestand, {});
     if (st.ok_datum === datum && !(ctx && ctx.forceer)) return { ok: true, al_gedaan: true };
     const r = await poging();
+    if (r.wacht) return { wacht: r.wacht };
     if (r.fout) { meld(r.fout, r.reden, datum); return { ok: false, reden: r.fout + ': ' + String(r.reden).slice(0, 120) }; }
     const st2 = leesJson(o.staatBestand, {});
     st2.ok_datum = datum; st2.laatste = Object.assign({ t: new Date().toISOString() }, r.detail);
     schrijfAtomair(o.staatBestand, JSON.stringify(st2));
+    if (r.daling) meld('daling', 'aantal credentials in de export daalde van ' + r.daling + ' (meer dan 20 %); de nieuwe export staat er wel', datum);
     try { await o.hartslag({ n: r.detail.n, bevindingen: 0 }); } catch (e) { /* hartslag mislukt: de 48 u-drempel meldt het */ }
     return { ok: true, detail: r.detail };
   }

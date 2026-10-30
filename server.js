@@ -16739,7 +16739,7 @@ const nachtketen = (function () {
         return herstelReferentie.ronde(ctx);
       } },
       // wv2041: versleutelde n8n-credentials naar de R230, na het versiebriefje (02:45) en vóór uitwijk-sync (03:30); meldt zelf (box #uitwijk-cred-auto)
-      { naam: 'uitwijk-cred', start_na: [3, 10], limiet_min: 10, pogingen: 2, inProces: true, meldtZelf: true, doe: async function (ctx) {
+      { naam: 'uitwijk-cred', start_na: [3, 10], limiet_min: 20, pogingen: 2, inProces: true, meldtZelf: true, doe: async function (ctx) {
         if (!uitwijkCred) return { ok: true, al_gedaan: true, detail: { niet_in_release: true } };
         return uitwijkCred.ronde(ctx);
       } },

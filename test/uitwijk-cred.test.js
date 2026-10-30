@@ -38,7 +38,7 @@ function opzet(o) {
     'if (cmd==="sudo -n /srv/uitwijk/vps/bin/uitwijk-sync cred-stand") { const j={protocol: fs.existsSync(r+"/oud")?undefined:"uitwijk-cred-v1", export_sha256: sha(r+"/export.json"), ijk_sha256: fs.existsSync(r+"/ijk")?fs.readFileSync(r+"/ijk","utf8"):null, repo_sha:"a".repeat(40), uitwijk_actief: fs.existsSync(r+"/actief")}; console.log(JSON.stringify(j)); process.exit(0); }\n' +
     'if ((m=/^sudo -n \\/srv\\/uitwijk\\/vps\\/bin\\/uitwijk-sync cred-zet ([0-9a-f]{64})$/.exec(cmd))) { const b=fs.readFileSync(0); fs.appendFileSync(d+"/zet.log", b.length+"\\n");\n' +
     '  if (fs.existsSync(r+"/zet-faal")) process.exit(Number(fs.readFileSync(r+"/zet-faal","utf8"))||1);\n' +
-    '  if (c.createHash("sha256").update(b).digest("hex")!==m[1]) process.exit(1); fs.writeFileSync(r+"/export.json", b); if (!fs.existsSync(r+"/ijk-faal")) fs.writeFileSync(r+"/ijk", m[1]); process.exit(0); }\n' +
+    '  if (c.createHash("sha256").update(b).digest("hex")!==m[1]) process.exit(1); fs.writeFileSync(r+"/export.json", b); if (!fs.existsSync(r+"/ijk-faal")) fs.writeFileSync(r+"/ijk", m[1]); if (fs.existsSync(r+"/daling")) console.log("cred-zet: 1 credentials\\ncred-daling: 53 -> 1"); process.exit(0); }\n' +
     'process.exit(99);\n', { mode: 0o755 });
   const box = [], hart = [], gewacht = [];
   const api = o.api || IDS.slice();
@@ -146,8 +146,8 @@ test('R230: uitwijk actief, oud protocol, ssh weg, cred-zet 75, nameting ongelij
   assert.match((await o.m.ronde({ datum: DAG })).reden, /^r230-stand: .*protocol/);
   o = opzet(); fs.writeFileSync(o.r230('ssh-faal'), '1');
   assert.match((await o.m.ronde({ datum: DAG })).reden, /^r230-stand: .*exit 255/);
-  o = opzet(); fs.writeFileSync(o.r230('zet-faal'), '75');
-  assert.match((await o.m.ronde({ datum: DAG })).reden, /^r230-zet: .*sync.lock bezet/);
+  o = opzet(); fs.writeFileSync(o.r230('zet-faal'), '3');
+  assert.match((await o.m.ronde({ datum: DAG })).reden, /^r230-zet: .*uitwijk actief/);
   o = opzet(); fs.writeFileSync(o.r230('ijk-faal'), '1');
   assert.match((await o.m.ronde({ datum: DAG })).reden, /^r230-nameting: /);
   assert.equal(o.hart.length, 0);
@@ -182,4 +182,26 @@ test('staat en box schrijven alleen aantallen/sha12', async () => {
   const st = JSON.parse(o.lees('staat.json'));
   assert.deepEqual(Object.keys(st.laatste).sort(), ['n', 'repo12', 'sha12', 't', 'uitkomst', 'vorige12']);
   assert.equal(st.laatste.sha12, crypto.createHash('sha256').update(o.lees('export.json')).digest('hex').slice(0, 12));
+});
+
+test('cred-zet exit 75 (sync.lock bezet): wacht, geen fout, geen box, geen staat', async () => {
+  const o = opzet(); fs.writeFileSync(o.r230('zet-faal'), '75');
+  const r = await o.m.ronde({ datum: DAG });
+  assert.equal(r.wacht, 'sync.lock op de R230 bezet'); assert.equal(r.ok, undefined);
+  assert.equal(o.box.length, 0); assert.equal(o.hart.length, 0); assert.equal(o.lees('staat.json'), '');
+});
+
+test('daling > 20 % op de R230: groen + één box-rij daling, tag zonder streepje', async () => {
+  const o = opzet(); fs.writeFileSync(o.r230('daling'), '1');
+  const r = await o.m.ronde({ datum: DAG });
+  assert.equal(r.ok, true); assert.equal(o.hart.length, 1);
+  assert.equal(o.box.length, 1); assert.match(o.box[0], /^\n## \[uitwijkcred\] /); assert.match(o.box[0], /daalde van 53 -> 1/);
+  geenGeheim(o);
+});
+
+test('onbekende velden uit olares-eigen komen in de detail', async () => {
+  const o = opzet();
+  fs.writeFileSync(path.join(o.d, 'olares-eigen'), '#!/usr/bin/env node\nconst fs=require("fs");process.stdout.write(fs.readFileSync(' + JSON.stringify(path.join(o.d, 'export.json')) + '));process.stderr.write(JSON.stringify({uitkomst:"ok",velden_onbekend:["nieuwVeld","x;y"]})+"\\n");\n', { mode: 0o755 });
+  const r = await o.m.ronde({ datum: DAG });
+  assert.deepEqual(r.detail.velden_onbekend, ['nieuwVeld']);
 });
