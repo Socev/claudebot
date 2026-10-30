@@ -369,7 +369,7 @@ function betalen(fdb, r, nu) {
     if (f.betaalspoor === 'ingevoerd') rij.in_batch = !!f.uitvoer_op;   // ook de praktijkmanager: geen Ongedaan op een batchregel (MOET 2)
     // wv2057: wanneer had hij op de bank moeten staan, en is de bank van die rekening al zo ver? (stand wacht / niet_gezien / bank_achter)
     if (f.betaalspoor === 'ingevoerd') {
-      if (!verw) verw = { dekking: bankDekking(fdb), sepa: sepaVoorControle(fdb, nuIso(Date.parse(K.plusDagen(vandaag, -BANK_DAGEN) + 'T00:00:00Z'))),
+      if (!verw) verw = { dekking: bankDekking(fdb), actief: bankActief(fdb, vandaag), sepa: sepaVoorControle(fdb, nuIso(Date.parse(K.plusDagen(vandaag, -BANK_DAGEN) + 'T00:00:00Z'))),
         rekeningen: fdb.db.prepare('SELECT iban, entiteit, controle FROM rekening').all(), vandaag };
       const v = B.betaalVerwachting(f, verw);
       if (v) rij.bank = { verwacht: v.verwacht, termijn_tot: v.termijn_tot, bijgewerkt_tot: v.dekking, stand: v.stand };
@@ -1638,12 +1638,23 @@ function bankcontroleToepassen(fdb, nu) {
   const netto = fdb.db.prepare('SELECT ' + NETTO_GEKOPPELD + ' AS j');
   // Ook: "ingevoerd, niet gezien" van een factuur die niet meer op ingevoerd staat (Ongedaan, teruggeboekt) vervalt (afhandeling
   // niet_meer_ingevoerd); opnieuw invoeren is dan een nieuwe gebeurtenis met een eigen signaal (diffreview ZOU 4).
-  const spoor = fdb.db.prepare('SELECT betaalspoor FROM factuur WHERE id = ?');
-  for (const s of fdb.db.prepare("SELECT id, facturen, entiteit, soort FROM signaal WHERE status = 'open' AND soort IN ('ingevoerd_niet_gezien','te_betalen_niet_betaald','incasso_niet_gezien')").all()) {
+  const spoor = fdb.db.prepare('SELECT * FROM factuur WHERE id = ?');
+  let verw = null;
+  // natoets ZOU 1: Ongedaan en opnieuw ingevoerd tussen twee controles: de factuur staat weer op ingevoerd, maar met een andere verwachte datum
+  const andereDatum = (s, fids) => {
+    if (s.soort !== 'ingevoerd_niet_gezien' || fids.length !== 1) return false;
+    const f = spoor.get(fids[0]), d = json(s.details, {}) || {};
+    if (!f || f.betaalspoor !== 'ingevoerd' || !d.verwacht) return false;
+    if (!verw) verw = { dekking: bankDekking(fdb), actief: bankActief(fdb, vandaag), sepa: inv.sepa, rekeningen: inv.rekeningen, vandaag };
+    const v = B.betaalVerwachting(f, verw);
+    return !!v && v.verwacht !== d.verwacht;
+  };
+  for (const s of fdb.db.prepare("SELECT id, facturen, entiteit, soort, details FROM signaal WHERE status = 'open' AND soort IN ('ingevoerd_niet_gezien','te_betalen_niet_betaald','incasso_niet_gezien')").all()) {
     const fids = json(s.facturen, []) || [];
     if (!fids.length) continue;
     const af = fids.every((id) => netto.get(id).j === 1) ? 'vanzelf_gezien'
-      : s.soort === 'ingevoerd_niet_gezien' && fids.every((id) => { const x = spoor.get(id); return !x || (x.betaalspoor !== 'ingevoerd' && x.betaalspoor !== 'betaald_gezien'); }) ? 'niet_meer_ingevoerd' : null;
+      : s.soort === 'ingevoerd_niet_gezien' && (fids.every((id) => { const x = spoor.get(id); return !x || (x.betaalspoor !== 'ingevoerd' && x.betaalspoor !== 'betaald_gezien'); }) ||
+        andereDatum(s, fids)) ? 'niet_meer_ingevoerd' : null;
     if (!af) continue;
     if (!fdb.db.prepare("UPDATE signaal SET status = 'afgehandeld', afhandeling = ?, wie = 'bankcontrole', wanneer = ? WHERE id = ? AND status = 'open'").run(af, wanneer, s.id).changes) continue;
     tel[af] = (tel[af] || 0) + 1;
@@ -1657,6 +1668,10 @@ function bankcontroleToepassen(fdb, nu) {
  * wv2057 (David 30-10-2026: "Zo ben jij de failsafe: heb ik de SEPA wel goed ingeladen? Heb ik een foutje gemaakt?"). Per eigen rekening de
  * laatste boekdatum die binnen is (facturen-bank.betaalVerwachting meet daarmee of de bank al voorbij de termijn is).
  */
+function bankActief(fdb, vandaag) {
+  return new Set(fdb.db.prepare('SELECT DISTINCT eigen_iban FROM bank_transactie WHERE verwijderd_op IS NULL AND bedrag_centen < 0 AND boekdatum >= ?')
+    .all(K.plusDagen(vandaag, -BANK_DAGEN)).map((r) => K.ibanNorm(r.eigen_iban)).filter(Boolean));
+}
 function bankDekking(fdb) {
   const m = new Map();
   for (const r of fdb.db.prepare('SELECT eigen_iban, max(boekdatum) AS tot FROM bank_transactie WHERE verwijderd_op IS NULL GROUP BY eigen_iban').all()) {
@@ -1713,7 +1728,7 @@ function betaalMeldingen(fdb, nu) {
   const st = BETAAL_STATUS.map(() => '?').join(',');
   const inv = fdb.db.prepare("SELECT * FROM factuur WHERE betaalspoor = 'ingevoerd' AND entiteit <> 'prive' AND status IN (" + st + ')').all(...BETAAL_STATUS);
   if (inv.length) {
-    const verw = { dekking: bankDekking(fdb), sepa: sepaVoorControle(fdb, nuIso(Date.parse(K.plusDagen(vandaag, -BANK_DAGEN) + 'T00:00:00Z'))),
+    const verw = { dekking: bankDekking(fdb), actief: bankActief(fdb, vandaag), sepa: sepaVoorControle(fdb, nuIso(Date.parse(K.plusDagen(vandaag, -BANK_DAGEN) + 'T00:00:00Z'))),
       rekeningen: fdb.db.prepare('SELECT iban, entiteit, controle FROM rekening').all(), vandaag };
     const zichtbaar = new Set(verw.rekeningen.filter((r) => r.controle === 1).map((r) => r.entiteit));
     for (const f of inv) {

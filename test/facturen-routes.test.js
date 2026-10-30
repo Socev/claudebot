@@ -2047,4 +2047,9 @@ test('wv2057 failsafe: batch van drie met één ontbrekende betaling → precies
   assert.equal(t.call('POST', 'ingevoerd-ongedaan', { id: zaadSig }, { nu: N2 }).status, 200);
   F.bankcontroleToepassen(t.fdb, N2 + 180000);
   assert.equal(t.fdb.db.prepare("SELECT afhandeling FROM signaal WHERE soort = 'ingevoerd_niet_gezien' AND facturen LIKE ?").get('%' + zaadSig + '%').afhandeling, 'niet_meer_ingevoerd');
+  // natoets ZOU 1: Ongedaan en opnieuw ingevoerd tussen twee controles (weer op ingevoerd, andere datum): het oude signaal vervalt ook
+  t.fdb.db.prepare("INSERT INTO signaal (id, sleutel, soort, titel, entiteit, facturen, details, aangemaakt_op) VALUES (?, ?, 'ingevoerd_niet_gezien', 'Ingevoerd, niet gezien', 'tolgaarde', ?, ?, ?)")
+    .run(D.nieuwId(), 'ingevoerd_niet_gezien:|' + h + '|v=2026-10-01', JSON.stringify([h]), JSON.stringify({ verwacht: '2026-10-01' }), new Date(N2).toISOString());
+  F.bankcontroleToepassen(t.fdb, N2 + 240000);
+  assert.equal(t.fdb.db.prepare("SELECT afhandeling FROM signaal WHERE sleutel = ?").get('ingevoerd_niet_gezien:|' + h + '|v=2026-10-01').afhandeling, 'niet_meer_ingevoerd');
 });

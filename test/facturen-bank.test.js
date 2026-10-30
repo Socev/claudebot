@@ -597,7 +597,7 @@ test('incasso niet gezien (> 14 dagen na vervaldatum), te betalen niet betaald, 
   ];
   // wv2057: de bank van Tolgaarde is bijgewerkt t/m 19-10 (een bijschrijving): g1 (13-10, termijn t/m 15-10) is niet gezien; g2 (16-10,
   // termijn t/m 20-10) nog niet te beoordelen
-  const bij = tx({ boekdatum: '2026-10-19', bedrag_centen: 12345, tegenpartij_iban: LEV.ZV, tegenpartij_naam: 'Zorgverzekeraar' });
+  const bij = tx({ boekdatum: '2026-10-19', bedrag_centen: -12345, tegenpartij_iban: LEV.BD, tegenpartij_naam: 'Gemeente' });   // een afschrijving: de rekening is actief
   const r = controle({ transacties: [bij], facturen: fx });
   assert.deepEqual(r.signalen.map((s) => [s.soort, s.facturen[0]]).sort(), [['incasso_niet_gezien', 'i1'], ['ingevoerd_niet_gezien', 'g1'], ['te_betalen_niet_betaald', 'p1']]);
   assert.deepEqual(soorten(controle({ transacties: [], facturen: fx })), ['incasso_niet_gezien', 'te_betalen_niet_betaald'], 'zonder bankgegevens geen "niet gezien"');
@@ -1280,13 +1280,16 @@ test('wv2057 verzonnen batch van drie, één betaling ontbreekt op de bank → p
   assert.equal(controle({ vandaag: '2026-11-05', transacties: [vroeg], facturen: fx, sepa: [p] }).signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 0);
   // na Ongedaan en opnieuw invoeren met een andere datum: een nieuwe sleutel
   const opnieuw = fx.map((f) => Object.assign({}, f, { ingevoerd_op: '2026-11-04T09:00:00Z', uitvoer_op: null, vervaldatum: '2026-11-01' }));
-  const later = tx({ boekdatum: '2026-11-09', bedrag_centen: 50000, tegenpartij_iban: LEV.ZV, tegenpartij_naam: 'Zorgverzekeraar' });
+  const later = tx({ boekdatum: '2026-11-09', bedrag_centen: -5000, tegenpartij_iban: LEV.BD, tegenpartij_naam: 'Gemeente' });
   // (de oude signalen gingen bij Ongedaan dicht: facturen.bankcontroleToepassen sluit "niet gezien" van een factuur die niet meer ingevoerd is)
   const dicht = weg.map((x) => Object.assign({}, x, { status: 'afgehandeld' }));
   const r2 = controle({ vandaag: '2026-11-09', transacties: [later], facturen: opnieuw, sepa: [], bestaandeSignalen: dicht });
   assert.equal(r2.signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 3);
-  // diffreview ZOU 4: staat het oude nog open, dan geen tweede ernaast
-  assert.equal(controle({ vandaag: '2026-11-09', transacties: [later], facturen: opnieuw, sepa: [], bestaandeSignalen: weg }).signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 0);
+  // natoets ZOU 1: staat het oude (met een andere datum) nog open, dan tóch het nieuwe; facturen.js sluit het oude (niet_meer_ingevoerd)
+  assert.equal(controle({ vandaag: '2026-11-09', transacties: [later], facturen: opnieuw, sepa: [], bestaandeSignalen: weg }).signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 3);
+  // een open signaal met de oude sleutel (zonder datum, van vóór wv2057) houdt wel tegen (diffreview ZOU 4)
+  const oud = weg.map((x) => Object.assign({}, x, { sleutel: 'ingevoerd_niet_gezien:|' + x.facturen[0] }));
+  assert.equal(controle({ vandaag: '2026-11-09', transacties: [later], facturen: opnieuw, sepa: [], bestaandeSignalen: oud }).signalen.filter((s) => s.soort === 'ingevoerd_niet_gezien').length, 0);
 });
 
 test('wv2057 zelf betaald (ingevoerd of buiten de app) naar het IBAN op de factuur, met factuurnummer en exact bedrag → automatisch gekoppeld, ook zonder bekende leveranciersrekening', () => {
@@ -1358,4 +1361,8 @@ test('wv2057 diffreview: zelf koppelen nooit op een niet nagebeld of afwijkend I
   const kort = Object.assign({}, los, { vervaldatum: null });
   assert.equal(B.betaalVerwachting(kort, { dekking: new Map([[ABN_TG, '2026-11-05'], [LEV.ZV, '2026-10-30']]), rekeningen: TWEE, vandaag: '2026-11-05' }).stand, 'bank_achter');
   assert.equal(B.betaalVerwachting(kort, { dekking: new Map([[ABN_TG, '2026-11-05'], [LEV.ZV, '2026-05-01']]), rekeningen: TWEE, vandaag: '2026-11-05' }).stand, 'niet_gezien');
+  // natoets ZOU 2: met de lijst van rekeningen met uitgaande betalingen telt een actieve maar oude rekening wél mee (bank_achter)
+  assert.equal(B.betaalVerwachting(kort, { dekking: new Map([[ABN_TG, '2026-11-05'], [LEV.ZV, '2026-05-01']]), actief: new Set([ABN_TG, LEV.ZV]), rekeningen: TWEE, vandaag: '2026-11-05' }).stand, 'bank_achter');
+  assert.equal(B.betaalVerwachting(kort, { dekking: new Map([[ABN_TG, '2026-11-05']]), actief: new Set([ABN_TG, LEV.ZV]), rekeningen: TWEE, vandaag: '2026-11-05' }).stand, 'bank_achter', 'actieve rekening zonder gegevens');
+  assert.equal(B.betaalVerwachting(kort, { dekking: new Map([[ABN_TG, '2026-11-05'], [LEV.ZV, '2026-05-01']]), actief: new Set([ABN_TG]), rekeningen: TWEE, vandaag: '2026-11-05' }).stand, 'niet_gezien');
 });

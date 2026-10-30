@@ -1108,12 +1108,17 @@ function betaalVerwachting(f, o) {
   else {
     // los ingevoerd: van welke rekening weten we niet. Alle actieve rekeningen van de entiteit (boeking in de 60 dagen vóór de verwachte
     // datum) moeten voorbij de termijn zijn; de minst bijgewerkte telt (diffreview ZOU 2: anders vals alarm als de andere rekening verser is)
+    let geenGegevens = false;
     for (const r of (o && o.rekeningen) || []) {
       if (r.entiteit !== f.entiteit || controleVan(r) !== 1) continue;
-      const d = dek.get(ibanNorm(r.iban));
-      if (!d || dagenTussen(d, verwacht) > ACTIEF_DAGEN) continue;
-      if (!tot || d < tot) tot = d;
+      const i = ibanNorm(r.iban), d = dek.get(i);
+      // natoets ZOU 2: actief = uitgaande betalingen in het venster (o.actief); zonder die lijst: een boeking in de 60 dagen ervoor. Een
+      // actieve rekening zonder verse gegevens houdt "niet gezien" tegen (bank_achter), ook als een andere rekening wel vers is.
+      if (o && o.actief ? !o.actief.has(i) : (!d || dagenTussen(d, verwacht) > ACTIEF_DAGEN)) continue;
+      if (!d) { tot = null; geenGegevens = true; continue; }
+      if (!geenGegevens && (!tot || d < tot)) tot = d;
     }
+    if (geenGegevens) tot = null;
   }
   const termijn_tot = plusWerkdagen(verwacht, BETAAL_TERMIJN);
   const stand = tot && tot >= termijn_tot ? 'niet_gezien' : o && isIsoDatum(o.vandaag) && o.vandaag > termijn_tot ? 'bank_achter' : 'wacht';
@@ -1495,6 +1500,7 @@ function bankcontrole(inv) {
   // opgeslagen, dus daar zou elk signaal vals zijn (diffreview wv798 #12)
   const zichtbaar = new Set((ctx.rekeningen || []).filter((r) => controleVan(r) === 1).map((r) => r.entiteit));
   const dekking = dekkingVan(txs);   // wv2057: per eigen rekening de laatste boekdatum die binnen is
+  const actief = new Set(txs.filter((t) => t.bedrag_centen < 0).map((t) => ibanNorm(t.eigen_iban)).filter(Boolean));   // natoets ZOU 2
   const gekoppeld = (f) => netto(f.id).length > 0 || voorgesteld.has(f.id);
   for (const f of facturen) {
     if (NIET_OPEN.includes(f.status) || gekoppeld(f) || f.entiteit === 'prive' || !zichtbaar.has(f.entiteit)) continue;
@@ -1518,10 +1524,11 @@ function bankcontrole(inv) {
     // betaling staat er niet. Zonder verse bankgegevens geen signaal (de lijst in Betalen zegt dan "bank nog niet zo ver"). De datum hoort in
     // de sleutel: na Ongedaan en opnieuw invoeren is het een nieuwe gebeurtenis (grondwet 10 telt per gebeurtenis).
     else if (f.betaalspoor === 'ingevoerd') {
-      const v = betaalVerwachting(f, { dekking, sepa, rekeningen: ctx.rekeningen, vandaag });
+      const v = betaalVerwachting(f, { dekking, actief, sepa, rekeningen: ctx.rekeningen, vandaag });
       // diffreview ZOU 4: staat er voor deze factuur al een open "niet gezien" (ook met een oudere sleutel), dan geen tweede ernaast
       const pre = 'ingevoerd_niet_gezien:|' + f.id;
-      const alOpen = [...bestaandOpen].some((sl) => sl === pre || sl.indexOf(pre + '|') === 0);
+      // natoets ZOU 1: alleen een oude sleutel (zonder datum) houdt tegen; een open signaal met een andere datum sluit facturen.js (niet_meer_ingevoerd)
+      const alOpen = [...bestaandOpen].some((sl) => (sl === pre || sl.indexOf(pre + '|') === 0) && sl.indexOf('v=') < 0);
       if (v && v.stand === 'niet_gezien' && v.verwacht <= vandaag && !alOpen) {
         signalen.push(maakSignaal('ingevoerd_niet_gezien', Object.assign({}, basis, { datum: v.verwacht,
           sleutel_extra: [basis.sleutel_extra, 'v=' + v.verwacht].filter(Boolean).join(';'),
