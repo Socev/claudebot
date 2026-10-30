@@ -3738,6 +3738,7 @@ function handleRequest(req, res) {
       sb2_nacht: typeof sb2NachtInfo === 'function' ? sb2NachtInfo() : { aan: false },
       nachtketen: typeof nachtketenInfo === 'function' ? nachtketenInfo() : { aan: false },   // wv1868: nachtorkestrator (vlag, stap, lopend 0/1 voor uitrol.sh, stand per stap; geen inhoud)
       sb2_proeven: typeof sb2ProevenInfo === 'function' ? sb2ProevenInfo() : { aan: false },   // wv1963: proefloper (status per proef groen/rood/wacht, lagen; geen inhoud)
+      sb2_herstelproef: typeof sb2HerstelproefInfo === 'function' ? sb2HerstelproefInfo() : { aan: false, lopend: 0 },   // wv2016: maandklok herstelproef (schakelaar, lopend 0/1 voor uitrol.sh, maand, laatste exit; geen inhoud)
       sb2_zoek: typeof sb2ZoekKlokInfo === 'function' ? sb2ZoekKlokInfo() : { aan: false },   // wv1788: nachtklussen feitenlijst + tekstindex (datum, exit, duur)   // wv1321: nachtelijke linter + manifest (datum, exitcodes, verschil-aantallen; geen paden)
       scripts_veeg: typeof scriptsVeegInfo === 'function' ? scriptsVeegInfo() : { aan: false },   // wv1311: opruimronde socev-run --veeg (exit, aantal opgeveegd; geen namen)
       ovis_kalender: typeof ovisKalenderInfo === 'function' ? ovisKalenderInfo() : { aan: false },   // wv1385: OVIS Calendar-feeds (datum, exit, duur; geen namen of URL's)
@@ -16629,6 +16630,57 @@ async function nachtketenTik() {
   try { await nachtketen.tik(); } catch (e) { logError('nachtketen-tik', e); }
 }
 if (nachtketen && SERVER_ECHT) { setInterval(function () { nachtketenTik(); }, 60000).unref(); }
+// ── wv2016 (SB2 fase 6b): maandklok van de herstelproef (waarom, moment en proefdag in sb2-nacht.js maakMaandRonde) ──
+// Elke 5 min (echte pod, rol primair, schakelaar aan): vanaf de eerste zondag van de maand 10:00–22:59 (inhalen tot 2 dagen later), één
+// ronde per maand op de kopie van de 1e: socev-run --naam sb2-herstelproef --max-min 30 -- herstelproef.py draai --dag <JJJJ-MM-01> --klok.
+// Zonder --hartslag: het script stempelt sb2_herstelproef zelf (alleen bij groen) en schrijft rood als één box-rij (--klok: dan exit 0, zodat
+// socev-run geen tweede rij + bericht maakt). Niet tijdens de onderhoudsstand, een wachtende uitrol of een lopende nachtketen (die
+// schrijft de reconcile-referentie). /health.sb2_herstelproef.lopend telt in uitrol.sh mee. Schakelaar
+// scripts-staat/sb2-herstelproef/klok.json {"aan": true} (van claude, gewoon bestand; standaard uit). Is socev-run zelf niet te starten,
+// dan meldt niemand anders het: één box-rij (alleen de foutsoort).
+const SB2_HP_DIR = '/opt/data/scripts-staat/sb2-herstelproef';
+function sb2HerstelproefKlokAan() {
+  try {
+    const p = path.join(SB2_HP_DIR, 'klok.json');
+    const st = fs.lstatSync(p);
+    if (!st.isFile() || (process.getuid && st.uid !== process.getuid())) return false;
+    return JSON.parse(fs.readFileSync(p, 'utf8')).aan === true;
+  } catch (e) { return false; }
+}
+const sb2HerstelproefKlok = (function () {
+  const p = path.join(__dirname, 'sb2-nacht.js');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const m = require(p);
+    return typeof m.maakMaandRonde === 'function' ? m.maakMaandRonde({ naam: 'sb2-herstelproef', maxMin: 30, vanUur: 10, totUur: 23, inhaalDagen: 2,
+      staatBestand: path.join(KLOKKEN_DIR, 'sb2-herstelproef.json'), socevRun: '/opt/data/scripts/huidig/bin/socev-run', env: process.env,
+      aan: sb2HerstelproefKlokAan,
+      argv: function (dag) { return ['python3', '-I', SB2_SRC + '/herstelproef.py', 'draai', '--dag', dag, '--klok']; } }) : null;
+  } catch (e) { logError('sb2-herstelproef-klok', e); return null; }
+})();
+function sb2HerstelproefInfo() {
+  if (!sb2HerstelproefKlok) return { aan: false, module: false, lopend: 0 };
+  try { return Object.assign(sb2HerstelproefKlok.info(), { aan: sb2HerstelproefKlokAan() }); } catch (e) { return { fout: true, lopend: 0 }; }
+}
+async function sb2HerstelproefTik() {
+  if (!sb2HerstelproefKlok || !SERVER_ECHT || !rolPrimair()) return;
+  const ctx = { ams: ovisAms(), mag: function () {
+    if (onderhoud.stand().aan || uitrolWacht().wacht) return false;
+    try { return !(nachtketenInfo().lopend > 0); } catch (e) { return true; }
+  } };
+  try {
+    const u = await sb2HerstelproefKlok.tik(ctx);
+    if (!u) return;
+    schrijfLog(nu() + ' sb2-herstelproef ' + velden({ dag: u.dag, exit: u.exit, ms: u.ms }));
+    if (u.fout) {
+      const t = ovisAms();
+      ovisBoxRij('\n## [herstelproef] ' + t.klok + ' — maandklok herstelproef ' + u.dag + ': socev-run niet te starten (automatisch, wv2016)\n- status: open\n- van: pod (sb2-herstelproef-klok)\n' +
+        '- gemeten: exit ' + u.exit + ', ' + String(u.fout).replace(/[^\w .:-]/g, '').slice(0, 80) + '. Deze maand geen nieuwe poging (stand in /health.sb2_herstelproef).\n' +
+        '- voorstel: /opt/data/scripts/huidig/bin/socev-run nakijken en de proef met de hand draaien (herstelproef.py draai --dag ' + u.dag + ').\n');
+    }
+  } catch (e) { logError('sb2-herstelproef-tik', e); }
+}
+if (sb2HerstelproefKlok && SERVER_ECHT) { setInterval(function () { sb2HerstelproefTik(); }, 5 * 60000).unref(); }
 // managers.js soort script: Nu draaien (geen stempel, geen box-rij; het rapport gaat via managers.js naar de machinekamer)
 function ovisStartScript(m) {
   if (!ovis || m.id !== 'bibliothecaris') throw new Error('onbekend script');

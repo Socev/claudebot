@@ -28,6 +28,7 @@
  * - Derde, algemene klok: maakDagRonde (wv1385), één socev-run-klus per datum in een venster (OVIS Calendar-feeds 06:35–07:34).
  * - wv1868 (SB2 fase 3d): met de vlag van de nachtketen aan (nachtketen.js) roept de keten deze klokken aan zonder venster: tik met
  *   ctx.keten (linter + manifest) en doe() (veeg, dagrondes); dezelfde objecten en dezelfde stempels, zodat de vlag niets dubbel draait.
+ * - Vierde: maakMaandRonde (wv2016), één socev-run-klus per maand vanaf de eerste zondag (de SB2-herstelproef); zie onderaan.
  */
 const fs = require('fs');
 const path = require('path');
@@ -322,5 +323,89 @@ function maakDagRonde(o) {
   return { tik: tik, doe: doe, info: info };
 }
 
+// ── wv2016 (SB2 fase 6b): maandklok — de herstelproef (ontwerp vault "01_Ontwikkeling/Second Brain 2.0 - fase 6 herstelproef,
+// proefloper en redeneerteam (ontwerp 29-10-2026).md" § 3.3: maandelijks, eerste zondag 10:00, buiten de nachtketen) ──
+// Moment: vanaf de eerste zondag van de maand, elke dag tussen vanUur en totUur (Amsterdam), tot er deze maand een ronde was;
+// inhalen alleen tot inhaalDagen (2) na die zondag (pod die hele zondag plat: maandag of dinsdag doet hij het alsnog; daarna is het werk
+// voor de machinekamer). Hartslagdrempel sb2_herstelproef 38 dagen = 35 (grootste afstand tussen twee eerste zondagen) + 2 inhaaldagen
+// + de rest van die dag (review wv2016 ZOU 2): een gemiste maand valt dus pas op na de inhaaldagen, nooit vals ervoor. De proefdag is altijd de 1e van de maand: dat is de maandkopie (alleen dan zitten de rijen
+// van secondbrain.contacten in de Supabase-kopie, ontwerp § 3.2 slot) en op de eerste zondag hooguit 6 dagen oud; de referenties
+// blijven 120 dagen. Waarom niet "de eerste zondag na de 1e": de dag van de proef en de dag van de kopie zijn los van elkaar te kiezen
+// (--dag), dus de eerste zondag (1–7) met proefdag = de 1e geeft de maandkopie én houdt het ritme uit het ontwerp.
+// Eén ronde per maand: klaar na elke uitkomst behalve exit 3 (onder --klok: er liep al een proef, bijv. een handproef; nog eens bij de
+// volgende tik). Exit 3 telt niet als poging maar heeft een eigen plafond (maxBezet tikken, standaard 12 = een uur; review wv2016 ZOU 3);
+// hooguit maxPogingen echte starts per maand (ook een herstart midden in een ronde telt). Rood of mislukt melden het script (box) en socev-run
+// (box + bericht bij een andere exit dan 0/3) zelf; deze module schrijft niets in de box. o.aan() = de schakelaar (per tik gelezen).
+function eersteZondag(jaar, maand) { return 1 + (7 - new Date(Date.UTC(jaar, maand - 1, 1)).getUTCDay()) % 7; }
+// ams {datum 'JJJJ-MM-DD', uur} → { maand, dag (de 1e), eerste_zondag, mag, reden }
+function maandMoment(a, o) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(a && a.datum || '');
+  if (!m) return { mag: false, reden: 'datum' };
+  const zon = eersteZondag(Number(m[1]), Number(m[2])), d = Number(m[3]), maand = m[1] + '-' + m[2];
+  const uit = { maand: maand, dag: maand + '-01', eerste_zondag: maand + '-0' + zon };
+  if (d < zon) return Object.assign(uit, { mag: false, reden: 'voor de eerste zondag' });
+  if (d - zon > o.inhaalDagen) return Object.assign(uit, { mag: false, reden: 'inhaaltermijn voorbij' });
+  if (a.uur < o.vanUur || a.uur >= o.totUur) return Object.assign(uit, { mag: false, reden: 'buiten de uren' });
+  return Object.assign(uit, { mag: true });
+}
+function maakMaandRonde(o) {
+  if (!o || !/^[a-z][a-z0-9-]{1,40}$/.test(o.naam || '')) throw new Error('maandronde: ongeldige naam');
+  if (typeof o.argv !== 'function') throw new Error('maandronde: commando ontbreekt');
+  const run = o.socevRun;
+  const env = o.env || process.env;
+  const maxMin = o.maxMin || 30;
+  const marge = o.margeMs === undefined ? 90000 : o.margeMs;
+  const maxPog = Math.max(1, Math.min(5, o.maxPogingen || 3));
+  const maxBezet = Math.max(1, Math.min(48, o.maxBezet || 12));
+  const tijd = { vanUur: o.vanUur === undefined ? 10 : o.vanUur, totUur: o.totUur === undefined ? 23 : o.totUur,
+    inhaalDagen: o.inhaalDagen === undefined ? 2 : o.inhaalDagen };
+  const st = schijfStaat(o.staatBestand || null);
+  let s = st.lees(), loopt = false, sinds = null;
+  async function ronde(dag, maand, opSpawn) {
+    loopt = true; sinds = new Date().toISOString();
+    try {
+      if (maand) {
+        if (s.maand !== maand) s = { maand: maand, pogingen: 0, bezet: 0, klaar: false, laatste: s.laatste || null };
+        s.pogingen = (s.pogingen || 0) + 1;
+        st.schrijf(s);   // eerst de poging vastleggen: een herstart midden in de ronde telt mee (maxPogingen)
+      }
+      const argv = o.argv(dag);
+      if (!Array.isArray(argv) || !argv.length) throw new Error('maandronde: commando ontbreekt');
+      const k = await kindProces(env, [run, '--naam', o.naam, '--max-min', String(maxMin), '--'].concat(argv), maxMin * 60000 + marge, opSpawn);
+      const l = { dag: dag, t: sinds, exit: k.code, ms: k.ms };
+      if (k.fout) l.fout = k.fout;   // socev-run zelf niet te starten: dan meldt niemand anders het (de aanroeper wel)
+      if (maand) {
+        l.maand = maand; s.laatste = l;
+        if (k.code === 3) { s.pogingen--; s.bezet = (s.bezet || 0) + 1; }   // proef liep al: geen echte start
+        s.klaar = k.code !== 3 || s.pogingen >= maxPog || s.bezet >= maxBezet;
+        st.schrijf(s);
+      }
+      return l;
+    } finally { loopt = false; sinds = null; }
+  }
+  // ctx: { ams, mag() (rol, onderhoud, uitrol) }. Geeft null (niets te doen) of { dag, maand, t, exit, ms[, fout] }.
+  async function tik(ctx) {
+    if (loopt) return null;
+    if (typeof o.aan === 'function' && !o.aan()) return null;
+    const m = maandMoment(ctx.ams, tijd);
+    if (!m.mag) return null;
+    if (s.maand === m.maand && (s.klaar || (s.pogingen || 0) >= maxPog || (s.bezet || 0) >= maxBezet)) return null;
+    if (typeof ctx.mag === 'function' && !ctx.mag()) return null;
+    return ronde(m.dag, m.maand, null);
+  }
+  // Handroute: hetzelfde commando voor een gekozen proefdag, buiten het moment en de schakelaar; raakt de maandstaat niet (die is van de
+  // klok). Niet aan een pod-route gekoppeld: de machinekamer roept hem aan met een eigen object (mk-scripts/wv2016/handrun.js).
+  async function doe(ctx) {
+    if (loopt) return { bezig: true };
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ctx && ctx.dag || '')) throw new Error('maandronde: dag ongeldig');
+    return ronde(ctx.dag, null, ctx.opSpawn || null);
+  }
+  function info() {
+    return { loopt: loopt, lopend: loopt ? 1 : 0, sinds: sinds, maand: s.maand || null, klaar: !!s.klaar, pogingen: s.pogingen || 0,
+      bezet: s.bezet || 0, laatste: s.laatste || null };
+  }
+  return { tik: tik, doe: doe, info: info, moment: function (a) { return maandMoment(a, tijd); } };
+}
+
 module.exports = { maak: maak, maakVeeg: maakVeeg, inVeegVenster: inVeegVenster, maakDagRonde: maakDagRonde, inDagVenster: inDagVenster,
-  BEWAAR: BEWAAR, PATROON: PATROON };
+  maakMaandRonde: maakMaandRonde, maandMoment: maandMoment, eersteZondag: eersteZondag, BEWAAR: BEWAAR, PATROON: PATROON };

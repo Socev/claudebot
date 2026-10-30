@@ -194,7 +194,8 @@ fi
 # ── 2b. wachten tot het rustig is (28-9-2026, akkoord David) ─────────────────
 # Een herstart doodt elke lopende beurt en elk resultaat dat n8n nog niet ophaalde: het antwoord
 # verdwijnt dan stil (27-9 22:42). Wacht daarom tot /health lopend.beurten, lopend.onopgehaald
-# en agents.lopend alle drie 0 zijn (wv1868: plus nachtketen.lopend, 1 alleen zolang een nachtstap echt draait; de keten
+# en agents.lopend alle drie 0 zijn (wv2016: plus sb2_herstelproef.lopend, de maandklok van de herstelproef; ± 4 min, plafond 30)
+# (wv1868: plus nachtketen.lopend, 1 alleen zolang een nachtstap echt draait; de keten
 # start zelf niets zolang deze marker staat). Hooguit UITROL_WACHT_MAX seconden (standaard 1800), daarna
 # toch - met een logregel. UITROL_NU=1 slaat het wachten over (noodgeval).
 #
@@ -218,8 +219,8 @@ if [ "${UITROL_NU:-0}" != "1" ]; then
   while :; do
     DRUK="$(curl -s -m 5 "http://127.0.0.1:${PORT:-8080}/health" | python3 -c 'import json,sys
 try:
-  j=json.load(sys.stdin); l=j.get("lopend") or {}; a=j.get("agents") or {}; k=j.get("nachtketen") or {}
-  print(int(l.get("beurten",0))+int(l.get("onopgehaald",0))+int(a.get("lopend",0))+int(k.get("lopend",0)))
+  j=json.load(sys.stdin); l=j.get("lopend") or {}; a=j.get("agents") or {}; k=j.get("nachtketen") or {}; h=j.get("sb2_herstelproef") or {}
+  print(int(l.get("beurten",0))+int(l.get("onopgehaald",0))+int(a.get("lopend",0))+int(k.get("lopend",0))+int(h.get("lopend",0)))
 except Exception: print(0)' 2>/dev/null || echo 0)"
     [ "${DRUK:-0}" = "0" ] && break
     if [ "$GEWACHT" -ge "$WACHT_MAX" ]; then log "LET OP: na ${GEWACHT}s nog ${DRUK} lopend - uitrol gaat toch door"; TOCH=1; break; fi
