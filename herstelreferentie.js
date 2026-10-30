@@ -11,7 +11,7 @@
  * WAT. Eén keer per Nederlandse datum, na podstaat (die schrijft <refMap>/podstaat-<kant>-<dag>.json):
  *   1. bundel via de crypt-remote naar een eigen tmpfs-map (0700), sha256 = referentie, anders fout;
  *   2. podstaat/facturen/facturen.sqlite.gz eruit en uitpakken (ontbreekt = fout: ontbrekend onderdeel is rood);
- *   3. node tools/fin-reconcile.js droog --nu <rondestart van podstaat> (schrijft niets, leest de klok niet);
+ *   3. node fin-reconcile.js droog (de CLI in de release; tools/ gaat niet mee) --nu <rondestart van podstaat> (schrijft niets, leest de klok niet);
  *   4. <refMap>/reconcile-<kant>-<dag>.json (0600): alleen hashes, codes en tellingen; de tmpfs-map gaat altijd weg.
  * Geen podstaat-referentie vóór 05:00: wachten; daarna fout (één box-rij via de keten).
  * Alles wat de pod raakt (rclone, node, klok) komt als functie of pad binnen, zodat test/herstelreferentie.test.js het met nep-gereedschap
@@ -40,7 +40,7 @@ function schrijfAtomair(p, inhoud) {
 }
 
 /*
- * o = { refMap, remote ('vaultcrypt'), rclone (pad), node (pad), finCli (tools/fin-reconcile.js), bankbron (map of functie die de map geeft), tmpRoot ('/dev/shm'),
+ * o = { refMap, remote ('vaultcrypt'), rclone (pad), node (pad), finCli (fin-reconcile.js in de release), bankbron (map of functie die de map geeft), tmpRoot ('/dev/shm'),
  *       wachtTot ([uur, min], standaard [5, 0]), regelsVersie() }
  */
 function maak(o) {

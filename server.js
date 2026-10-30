@@ -16350,13 +16350,14 @@ async function sb2ZoekKlokTik() {
 if ((sb2Feitenlijst || sb2Zoekindex || sb2Zoekleer) && SERVER_ECHT) { setInterval(function () { sb2ZoekKlokTik(); }, 5 * 60000).unref(); }
 // wv1962 (SB2 fase 6a): referentie voor de herstelproef — droge finance.reconcile op de facturendump uit de podstaat-bundel van vannacht
 // (logica en waarom in herstelreferentie.js). Uitvoer alleen hashes/codes in scripts-staat/sb2-herstelproef/referentie/.
+// finCli = fin-reconcile.js zelf (eigen CLI): tools/ zit niet in de release (uitrol.sh), nacht 30-10 faalde de stap daarop (wv1970).
 const SB2_HERSTELREF_DIR = serverPad('sb2_herstelref', process.env.SB2_HERSTELREF_DIR, '/opt/data/scripts-staat/sb2-herstelproef/referentie', serverProefDeel('sb2-herstelref'));
 const herstelReferentie = (function () {
   const p = path.join(__dirname, 'herstelreferentie.js');
   if (!fs.existsSync(p)) return null;
   try {
     return require(p).maak({ refMap: SB2_HERSTELREF_DIR, remote: 'vaultcrypt', rclone: 'rclone', node: process.execPath,
-      finCli: path.join(__dirname, 'tools', 'fin-reconcile.js'), bankbron: function () { return path.join(FACTUREN_DIR, 'bankbron'); }, tmpRoot: '/dev/shm',   // lui: pas bij de ronde (toetsen laden dit blok zonder FACTUREN_DIR)
+      finCli: path.join(__dirname, 'fin-reconcile.js'), bankbron: function () { return path.join(FACTUREN_DIR, 'bankbron'); }, tmpRoot: '/dev/shm',   // lui: pas bij de ronde (toetsen laden dit blok zonder FACTUREN_DIR)
       regelsVersie: function () { return process.env.RELEASE_SHA || process.env.IMAGE_SHA || null; } });
   } catch (e) { logError('herstelreferentie', e); return null; }
 })();
