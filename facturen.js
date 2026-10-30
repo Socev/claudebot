@@ -28,6 +28,9 @@ const V = require('./facturen-validatie.js');
 const D = require('./facturen-db.js');
 const S = require('./facturen-sepa.js');
 const SP = require('./facturen-specificatie.js');
+// wv2043: creditcard (ICS) als bron; ontbreekt het bestand in een release, dan alleen geen opdracht creditcard (de rest van Facturen blijft)
+let CC = null;
+try { CC = require('./facturen-creditcard.js'); } catch (e) { CC = null; }
 
 const ID_RE = /^[0-9a-f]{16}$/;
 const BEURT_RE = /^[a-z0-9-]{8,64}$/;
@@ -2092,8 +2095,13 @@ function lees(fdb, d, opties) {
   opties = opties || {};
   try {
     if (!fdb) weiger(409, 'Facturen draait alleen op de primaire kant');
+    if (String(d && d.opdracht || '') === 'creditcard') {
+      // wv2043: creditcardregels (ICS) en de aansluiting per rekeningoverzicht op de incasso; alleen lezen
+      if (!CC) weiger(404, 'creditcard zit niet in deze versie van de pod');
+      try { return { status: 200, j: Object.assign({ ok: true }, CC.lees(fdb, d)) }; } catch (e) { if (e instanceof CC.KaartFout) weiger(400, e.uitleg); throw e; }
+    }
     const op = LEES_OPDRACHTEN[String(d && d.opdracht || '')];
-    if (!op) weiger(400, 'opdracht is zoek, hoe, factuur of controles');
+    if (!op) weiger(400, 'opdracht is zoek, hoe, factuur, controles of creditcard');
     const r = { soort: 'eigenaar', wie: kort(opties.wie || 'socev', 40), entiteiten: null, ingang: 'smal' };
     const nu = Number.isFinite(opties.nu) ? opties.nu : Date.now();
     const uit = validatie(fdb, r, Object.assign({}, d, { soort: op, max: Math.min(Number(d && d.max) || 50, 200) }), nu);

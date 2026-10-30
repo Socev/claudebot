@@ -839,6 +839,98 @@ CREATE TABLE IF NOT EXISTS afzender_regel (
 CREATE INDEX IF NOT EXISTS afzender_regel_leverancier ON afzender_regel (leverancier);
 `;
 
+/*
+ * wv2043 (David 30-10-2026: "Hier is de transactielijst van ICS, vanaf 01-01-2026"): de creditcard als bron naast de bank. Op de zakelijke
+ * rekening staat per maand alleen één ICS-incasso; welke betalingen erin zitten, staat hier. kaart = één creditcard (uitgever, klantnummer,
+ * laatste 4 cijfers, entiteit, de rekening waar de maandincasso van afgaat); kaart_bestand = één ingelezen overzicht (ruwe bestand in
+ * bankbron/, offsite zoals de bankexports); kaart_regel = één regel van ICS, idempotent op `sleutel` (sha256 van kaart + velden +
+ * volgnummer onder gelijke regels). soort: transactie (telt in het maandoverzicht), betaling (de incasso op het volgende overzicht) of
+ * autorisatie (nog niet geboekt, telt nooit). bedrag_centen in euro zoals ICS het geeft (+ = uitgave op de kaart, - = tegoed of betaling);
+ * vreemde valuta met het oorspronkelijke bedrag (honderdsten). De ruwe velden veranderen nooit (trigger); alleen de koppelvelden (handelaar,
+ * leverancier, factuur, factuur_archief) worden bijgewerkt. kaart_incasso koppelt een regel op de bank (maandincasso of correctieboeking) aan
+ * het overzicht dat hij betaalt, zodat de aansluiting per overzicht één som is (de bank boekt soms incasso + storno + herincasso).
+ * Nooit een volledig kaartnummer: alleen de laatste 4 (CHECK); de lezer weigert een bestand met een lange cijferreeks.
+ * LET OP terugrol: een release van vóór wv2043 opent deze database niet meer (schema_nieuwer); lichtste terugrol is
+ * `DELETE FROM schema_migratie WHERE versie = 13` (de oude code kent de vier tabellen niet en hindert ze niet). Herhaalbaar (IF NOT EXISTS).
+ */
+const M13 = `
+CREATE TABLE IF NOT EXISTS kaart (
+  id TEXT PRIMARY KEY ${ID('id')},
+  uitgever TEXT NOT NULL CHECK (uitgever IN ('ICS')),
+  klantnummer TEXT NOT NULL UNIQUE CHECK (length(klantnummer) BETWEEN 4 AND 20 AND klantnummer NOT GLOB '*[^0-9]*'),
+  laatste4 TEXT NOT NULL CHECK (length(laatste4) = 4 AND laatste4 NOT GLOB '*[^0-9]*'),
+  entiteit TEXT NOT NULL REFERENCES entiteit(sleutel) CHECK (entiteit <> 'prive'),
+  rekening TEXT NOT NULL REFERENCES rekening(id),
+  naam TEXT CHECK (naam IS NULL OR length(naam) <= 100),
+  aangemaakt_door TEXT NOT NULL, aangemaakt_op TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kaart_bestand (
+  id TEXT PRIMARY KEY ${ID('id')},
+  kaart TEXT NOT NULL REFERENCES kaart(id),
+  sha256 TEXT NOT NULL UNIQUE ${SHA('sha256')},
+  formaat TEXT NOT NULL CHECK (formaat IN ('ics_csv')),
+  naam TEXT CHECK (naam IS NULL OR length(naam) <= 255),
+  periode_van TEXT ${DATUM('periode_van')}, periode_tot TEXT ${DATUM('periode_tot')},
+  aantal INTEGER NOT NULL CHECK (aantal >= 0), nieuw INTEGER NOT NULL CHECK (nieuw >= 0),
+  bron_bewaard INTEGER NOT NULL DEFAULT 0 ${BOOL('bron_bewaard')},
+  herkomst TEXT CHECK (herkomst IS NULL OR length(herkomst) <= 300),
+  geupload_door TEXT NOT NULL, geupload_op TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kaart_regel (
+  id TEXT PRIMARY KEY ${ID('id')},
+  kaart TEXT NOT NULL REFERENCES kaart(id),
+  bestand TEXT NOT NULL REFERENCES kaart_bestand(id),
+  sleutel TEXT NOT NULL UNIQUE ${SHA('sleutel')},
+  soort TEXT NOT NULL CHECK (soort IN ('transactie','betaling','autorisatie')),
+  transactiedatum TEXT NOT NULL ${DATUM('transactiedatum')}, boekdatum TEXT ${DATUM('boekdatum')},
+  omschrijving TEXT NOT NULL CHECK (length(omschrijving) BETWEEN 1 AND 200),
+  bedrag_centen INTEGER NOT NULL,
+  valuta_orig TEXT CHECK (valuta_orig IS NULL OR (length(valuta_orig) = 3 AND valuta_orig NOT GLOB '*[^A-Z]*')),
+  bedrag_orig_centen INTEGER,
+  merchant_categorie TEXT CHECK (merchant_categorie IS NULL OR length(merchant_categorie) <= 100),
+  mcc TEXT CHECK (mcc IS NULL OR (length(mcc) = 4 AND mcc NOT GLOB '*[^0-9]*')),
+  land TEXT CHECK (land IS NULL OR (length(land) BETWEEN 2 AND 3 AND land NOT GLOB '*[^A-Z]*')),
+  overzicht TEXT CHECK (overzicht IS NULL OR overzicht GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'),
+  laatste4 TEXT CHECK (laatste4 IS NULL OR (length(laatste4) = 4 AND laatste4 NOT GLOB '*[^0-9]*')),
+  handelaar TEXT CHECK (handelaar IS NULL OR length(handelaar) <= 100),
+  leverancier TEXT REFERENCES leverancier(id),
+  factuur TEXT REFERENCES factuur(id),
+  factuur_archief TEXT REFERENCES factuur_archief(id),
+  koppeling_op TEXT,
+  aangemaakt_op TEXT NOT NULL,
+  CHECK (soort = 'autorisatie' OR overzicht IS NOT NULL),
+  CHECK (soort = 'transactie' OR (factuur IS NULL AND factuur_archief IS NULL AND leverancier IS NULL))
+);
+CREATE INDEX IF NOT EXISTS kaart_regel_overzicht ON kaart_regel (kaart, overzicht);
+CREATE INDEX IF NOT EXISTS kaart_regel_datum ON kaart_regel (transactiedatum);
+CREATE INDEX IF NOT EXISTS kaart_regel_leverancier ON kaart_regel (leverancier);
+CREATE UNIQUE INDEX IF NOT EXISTS kaart_regel_factuur ON kaart_regel (factuur) WHERE factuur IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS kaart_regel_archief ON kaart_regel (factuur_archief) WHERE factuur_archief IS NOT NULL;
+CREATE TABLE IF NOT EXISTS kaart_incasso (
+  transactie TEXT PRIMARY KEY REFERENCES bank_transactie(id),
+  kaart TEXT NOT NULL REFERENCES kaart(id),
+  overzicht TEXT NOT NULL CHECK (overzicht GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'),
+  methode TEXT NOT NULL CHECK (methode IN ('omschrijving','datum')),
+  wie TEXT NOT NULL, wanneer TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS kaart_incasso_overzicht ON kaart_incasso (kaart, overzicht);
+CREATE TRIGGER IF NOT EXISTS kaart_regel_vast BEFORE UPDATE OF kaart, bestand, sleutel, soort, transactiedatum, boekdatum, omschrijving, bedrag_centen,
+  valuta_orig, bedrag_orig_centen, merchant_categorie, mcc, land, overzicht, laatste4, aangemaakt_op ON kaart_regel
+BEGIN SELECT RAISE(ABORT, 'kaart_regel_vast: een regel van de kaartuitgever verandert niet'); END;
+CREATE TRIGGER IF NOT EXISTS kaart_regel_laatste4 BEFORE INSERT ON kaart_regel
+WHEN NEW.laatste4 IS NOT NULL AND NEW.laatste4 IS NOT (SELECT laatste4 FROM kaart WHERE id = NEW.kaart)
+BEGIN SELECT RAISE(ABORT, 'kaart_regel_laatste4: de regel hoort bij een andere kaart'); END;
+CREATE TRIGGER IF NOT EXISTS kaart_bestand_kaart BEFORE INSERT ON kaart_regel
+WHEN NOT EXISTS (SELECT 1 FROM kaart_bestand WHERE id = NEW.bestand AND kaart = NEW.kaart)
+BEGIN SELECT RAISE(ABORT, 'kaart_regel_bestand: het bestand hoort bij een andere kaart'); END;
+-- een incasso hoort bij de rekening van de kaart
+CREATE TRIGGER IF NOT EXISTS kaart_incasso_rekening BEFORE INSERT ON kaart_incasso
+WHEN NOT EXISTS (SELECT 1 FROM bank_transactie t JOIN kaart k ON k.id = NEW.kaart WHERE t.id = NEW.transactie AND t.rekening = k.rekening)
+BEGIN SELECT RAISE(ABORT, 'kaart_incasso_rekening: de bankregel staat niet op de rekening van de kaart'); END;
+CREATE TRIGGER IF NOT EXISTS kaart_incasso_vast BEFORE UPDATE ON kaart_incasso
+BEGIN SELECT RAISE(ABORT, 'kaart_incasso_vast: weghalen en opnieuw koppelen, niet wijzigen'); END;
+`;
+
 const MIGRATIES = [
   { versie: 1, naam: 'tabellen, CHECKs en triggers (ontwerp v2 § 4.4 + App-bouwplan § 4.2)', sql: M1 },
   { versie: 2, naam: 'indexen, één levende opdracht per factuur, instellingen', sql: M2 },
@@ -851,11 +943,13 @@ const MIGRATIES = [
   { versie: 10, naam: "signaal: soort 'teruggeboekt' (wv1415)", fn: (db) => M10(db) },
   { versie: 11, naam: "signaal: soort 'afwijkend_bedrag' (wv1326)", fn: (db) => M11(db) },
   { versie: 12, naam: 'regels per afzender: afzender_regel (wv1917)', sql: M12 },
+  { versie: 13, naam: 'creditcard (ICS) als bron: kaart, kaart_bestand, kaart_regel, kaart_incasso (wv2043)', sql: M13 },
 ];
 const SCHEMA_VERSIE = MIGRATIES[MIGRATIES.length - 1].versie;
 const TABELLEN = ['meta', 'entiteit', 'rekening', 'gebruiker', 'gebruiker_entiteit', 'bron', 'bron_ronde', 'bericht', 'document', 'leverancier',
   'leverancier_iban', 'tekstanker', 'geen_factuur', 'factuur', 'besluit', 'pot_afschrift', 'opdracht', 'bank_bestand', 'uitzondering',
-  'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel'];
+  'bank_transactie', 'koppeling', 'voorstel', 'signaal', 'audit', 'factuur_archief', 'feit', 'sepa_batch', 'sepa_regel', 'afzender_regel',
+  'kaart', 'kaart_bestand', 'kaart_regel', 'kaart_incasso'];
 
 // ───────────────────────────── openen, migreren, transacties ─────────────────────────────
 
