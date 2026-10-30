@@ -1038,6 +1038,15 @@ test('wv1917 diffreview: regel botst met het stuk → een mens kiest (betaalwijz
   assert.deepEqual(pick(K.stapBetaalwijze('', { betaalwijze_hint: 'incasso' }, {}, { regel: ri })), ['incasso', 'regel voor afzender y.nl']);
   assert.equal(K.stapBetaalwijze('Wilt u liever overmaken op NL00TEST0123456789? Vraag het ons.', {}, {}, { regel: ri }).betaalwijze, 'incasso', 'voorwaardelijk overmaken botst niet');
   assert.equal(K.stapBetaalwijze('Gelieve binnen 14 dagen over te maken.', {}, {}, { regel: { patroon: 'z.nl', betaalwijze: 'betaald' } }).betaalwijze, 'betaald', 'regel betaald: overmakentekst botst niet');
+  // review ZOU 1: de overstapzin met komma; ontkenning in de treffer telt hier juist als botsing, een voorwaarde ervoor niet
+  assert.equal(K.stapBetaalwijze('Het bedrag wordt niet meer automatisch afgeschreven, gelieve binnen 14 dagen over te maken op NL00TEST0123456789.', {}, {}, { regel: ri }).betaalwijze, 'onbekend');
+  assert.equal(K.stapBetaalwijze('Er wordt niets afgeschreven; maak het bedrag zelf over.', {}, {}, { regel: ri }).betaalwijze, 'onbekend');
+  assert.equal(K.stapBetaalwijze('Er vindt geen incasso plaats.', {}, {}, { regel: ri }).betaalwijze, 'onbekend');
+  assert.equal(K.stapBetaalwijze('Mocht het bedrag niet worden afgeschreven, neem dan contact op.', {}, {}, { regel: ri }).betaalwijze, 'incasso');
+  assert.equal(K.stapBetaalwijze('Indien er geen incasso plaatsvindt, bel ons.', {}, {}, { regel: ri }).betaalwijze, 'incasso');
+  assert.equal(K.stapBetaalwijze('Gelieve binnen 14 dagen over te maken.', { betaalwijze_hint: 'betaald' }, {}, { regel: ri }).betaalwijze, 'onbekend', 'UBL betaald + overmaken');
+  assert.deepEqual(pick(K.stapBetaalwijze('', {}, {}, { regel: ri })), ['incasso', 'regel voor afzender y.nl'], 'scan of lege tekst');
+  assert.equal(K.stapBetaalwijze('Het bedrag wordt niet meer automatisch afgeschreven.', {}, {}, { regel: rg }).betaalwijze, 'zelf', 'regel zelf: geen botsing');
   assert.deepEqual(pick(K.stapBetaalwijze('', { betaalwijze_hint: 'betaald' }, {}, {})), ['zelf', K.ZEGT_BETAALD_UBL]);
   assert.equal(K.stapBetaalwijze('', { betaalwijze_hint: 'betaald' }, {}, { leverancier: { standaard_betaalwijze: 'betaald' } }).betaalwijze, 'betaald');
   const ents = [{ sleutel: 'holding', naam: 'Holding BV', naam_kort: 'Holding', kvk: '11112222', aliassen: [], actief: true },

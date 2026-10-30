@@ -833,6 +833,12 @@ const TEKST_INCASSO = [
   /\b(?:will\s+be|is)\s+(?:collected|debited)\b|\bdirect\s+debit\b/i,
 ];
 const TEKST_INCASSO_ZWAK = [/\b(?:automatische|sepa)[- ]incasso\b|\bmachtiging\b/i];
+// wv2038 (review ZOU 1): een stuk dat stellend zegt dat er (niet meer) wordt afgeschreven, botst met een incasso-regel. De ontkenning hoort
+// hier bij de treffer, dus stellend() krijgt ontkenningMag.
+const TEKST_GEEN_INCASSO = [
+  /\b(?:wordt|worden|zal|zullen)\s+(?:het\s+bedrag\s+|dit\s+bedrag\s+|deze\s+factuur\s+)?(?:niet\s+meer|niet|niets|nooit)\b[^.\n?;,]{0,40}\b(?:geincasseerd|afgeschreven)\b/i,
+  /\bgeen\s+(?:automatische\s+|sepa[- ])?incasso\s+(?:meer|plaats)\b/i,
+];
 const TEKST_ZELF = [
   /\b(?:gelieve|verzoeken?\s+(?:u|wij\s+u))\b[^\n]{0,80}\b(?:over\s+te\s+maken|te\s+voldoen|te\s+betalen)\b/i,
   /\bovermaken\s+(?:op|naar)\b|\bovermaken\s+o\.v\.v\./i,
@@ -851,7 +857,7 @@ const VOORWAARDE_ANDER = /\b(wanneer|indien|als|zodra|mocht|niet|tenzij|liever|w
 const VOORWAARDE_NA = /^\s*,?\s*(?:wanneer|indien|als|zodra|nadat|na\s+ontvangst|pas|once|when|after|upon)\b/i;
 const ZEGT_BETAALD = 'factuur zegt al betaald, niet gevonden in de bank';
 const ZEGT_BETAALD_UBL = 'UBL zegt al betaald, niet gevonden in de bank';
-function stellend(t, patronen, voorwaarde, nietNa, voorwaardeNa) {
+function stellend(t, patronen, voorwaarde, nietNa, voorwaardeNa, ontkenningMag) {
   for (const re of patronen) {
     const g = new RegExp(re.source, 'gi'); let m;
     while ((m = g.exec(t))) {
@@ -860,7 +866,7 @@ function stellend(t, patronen, voorwaarde, nietNa, voorwaardeNa) {
       const eind = eindRe.exec(t);
       if (nietNa && nietNa.test(t.slice(m.index + m[0].length, m.index + m[0].length + 20))) continue;
       if (voorwaardeNa && voorwaardeNa.test(t.slice(m.index + m[0].length, m.index + m[0].length + 30))) continue;
-      if (!voorwaarde.test(t.slice(begin + 1, m.index)) && !/\b(niet|niets|nooit|geen|not|no|never)\b/i.test(m[0]) && !(eind && eind[0] === '?')) return true;
+      if (!voorwaarde.test(t.slice(begin + 1, m.index)) && (ontkenningMag || !/\b(niet|niets|nooit|geen|not|no|never)\b/i.test(m[0])) && !(eind && eind[0] === '?')) return true;
     }
   }
   return false;
@@ -877,7 +883,7 @@ function stapBetaalwijze(tekst, velden, ctx, opties) {
   // wint de regel (geen botsing). Bij regel zelf of betaald blijft overmakentekst gewoon (vrijwel elke factuur heeft hem).
   const rgStuk = rg && rg.betaalwijze ? (velden.betaalwijze_hint && velden.betaalwijze_hint !== 'betaald' ? velden.betaalwijze_hint
     : t && stellend(t, TEKST_INCASSO, VOORWAARDE_ANDER) ? 'incasso'
-    : rg.betaalwijze === 'incasso' && t && stellend(t, TEKST_ZELF, VOORWAARDE_ANDER) ? 'zelf' : null) : null;
+    : rg.betaalwijze === 'incasso' && t && (stellend(t, TEKST_ZELF, VOORWAARDE_ANDER) || stellend(t, TEKST_GEEN_INCASSO, VOORWAARDE_ANDER, null, null, true)) ? 'zelf' : null) : null;
   if (rg && rg.betaalwijze && BETAALWIJZEN.includes(rg.betaalwijze) && rgStuk && rgStuk !== rg.betaalwijze) {
     wijze = 'onbekend'; bron = 'regel'; reden = 'regel voor afzender ' + rg.patroon + ' zegt ' + rg.betaalwijze + ', het stuk zegt ' + rgStuk + ': kies met de hand';
   } else if (rg && rg.betaalwijze && BETAALWIJZEN.includes(rg.betaalwijze)) { wijze = rg.betaalwijze; bron = 'regel'; reden = 'regel voor afzender ' + rg.patroon; }
