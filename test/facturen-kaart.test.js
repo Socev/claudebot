@@ -137,7 +137,7 @@ test('11 koppeling server.js, release en schrijvers met module', () => {
   assert.match(s, /handmatig: 'geld-briefing', module: 'financien'/);
   assert.strictEqual((s.match(/herkomst: potAfHerkomst\(maand\)/g) || []).length, 3);
   assert.strictEqual((fs.readFileSync('aix.js', 'utf8').match(/handmatig: 'aix-ronde'[^}]*module: 'ideeen'/g) || []).length, 2);
-  assert.strictEqual((fs.readFileSync('ideeen.js', 'utf8').match(/handmatig: 'aix-bundel'[^}]*module: 'ideeen'/g) || []).length, 2);
+  assert.strictEqual((fs.readFileSync('ideeen.js', 'utf8').match(/handmatig: 'aix-bundel'[^}]*module: 'ideeen'/g) || []).length, 3);   // week, bijwerk (wv1946), deel
   assert.match(fs.readFileSync('uitrol.sh', 'utf8'), /^RELEASE_OPTIONEEL="[^"]*\bfacturen-kaart\.js\b/m);
   assert.match(fs.readFileSync('Dockerfile', 'utf8'), /COPY facturen-kaart\.js \/app\/release-bootstrap\/facturen-kaart\.js/);
 });
