@@ -18428,7 +18428,8 @@ function docsDelenInfo() {
 //   POST /app/memorylane/h/<hid>/zicht {kring, aan} · titel {titel} · tekst {tekst, soort} · categorie {categorie, gevoelig} · toon-opname {aan} · toch-delen
 //   POST /app/memorylane/stuk/<sid>/opnemen|afwijzen|bewaren|weggooien · POST /app/memorylane/link/<kring>/aan|uit|vernieuw
 // Naar buiten (zicht aan, link aan, toch delen): verse vingerafdruk en nooit vanaf een vaste plek (zoals Docs › Delen). Dichter maken mag altijd.
-const ML_KLUIS = { memorylane_link_familie: true, memorylane_link_vrienden: true };
+// wv2120: ook immich_api_key (David maakte hem 31-10 in Immich; rechten ruimer dan nodig, de witte lijst in immich.js is de grens)
+const ML_KLUIS = { memorylane_link_familie: true, memorylane_link_vrienden: true, immich_api_key: true };
 const mlKluisCache = new Map();   // naam → { w, tot }; alleen in het geheugen
 async function mlKluis(naam) {
   if (!ML_KLUIS[naam]) return null;
@@ -18447,11 +18448,18 @@ async function mlKluis(naam) {
   mlKluisCache.set(naam, { w: w || null, tot: Date.now() + (w ? 10 : 2) * 60 * 1000 });
   return w || null;
 }
+// wv2120 (David JA 31-10 20:15): Immich op Olares als fotobron voor MemoryLane. Alleen lezen + lege albums aanmaken (witte lijst in immich.js).
+const IMMICH_BASIS = process.env.IMMICH_URL || 'https://immich.primumnonnocere.olares.com';
+const immichMl = (function () {
+  if (!SERVER_ECHT && !process.env.ML_IMMICH_TOETS) return null;
+  try { return require(path.join(__dirname, 'immich.js')).maak({ basis: IMMICH_BASIS, sleutel: function () { return mlKluis('immich_api_key'); } }); }
+  catch (e) { logError('immich', e); return null; }
+})();
 const memorylaneDelen = (function () {
   const p = path.join(__dirname, 'memorylane-delen.js');
   if (!fs.existsSync(p) || !intake || !herinneringen || !HERINNERINGEN_MOD) return null;
   try {
-    return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, host: DOCS_HOST, kluis: mlKluis,
+    return require(p).maak({ db: intake._db, vault: VAULT, vv: VV(), dir: HERINNERINGEN_DIR, host: DOCS_HOST, kluis: mlKluis, immich: immichMl,
       marker: require(path.join(__dirname, 'intake', 'patientpoort.js')), geheimen: function () { try { return openaiPodGeheimen(); } catch (e) { return []; } },
       categorieen: HERINNERINGEN_MOD.CATEGORIEEN, onderhoudAan: function () { return onderhoud.stand().aan === true; }, nachtgrendel: function () { return ovisAms().uur === 1; },
       fout: logError, box: function (t) { ovisBoxRij(t); },
@@ -18473,21 +18481,36 @@ async function memorylaneDelenTik() {
 }
 if (memorylaneDelen && SERVER_ECHT) { setTimeout(function () { memorylaneDelenTik(); }, 120000).unref(); setInterval(function () { memorylaneDelenTik(); }, 60000).unref(); }
 appStaat.tellers.memorylane = [];
+appStaat.tellers['memorylane-foto'] = [];
 async function appMemorylane(req, res, a, s, route, d) {
   if (!memorylaneDelen) return appWeiger(res, 404, 'MemoryLane delen zit niet in deze versie van de pod', 'ml ontbreekt');
-  if (!appTeller('memorylane', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens memorylane');
   const antw = function (wat, u) { res._app.reden = 'memorylane ' + wat + ' ' + u.status; return appStuur(res, u.status, u.body); };
+  let m;
+  // wv2120: één foto uit een gekoppeld Immich-album (k = miniatuur, g = groot voorbeeld) als JSON {mime, data}; eigen teller (een album = veel foto's)
+  if ((m = /^GET \/app\/memorylane\/f\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/(k|g)$/.exec(route))) {
+    if (!appTeller('memorylane-foto', 3000, 3600000)) return appWeiger(res, 429, 'te veel foto\'s dit uur', 'grens memorylane-foto');
+    try { return antw('foto', await memorylaneDelen.foto(m[1], m[2] === 'g' ? 'groot' : 'klein')); }
+    catch (e) { logError('memorylane-foto', e); return appWeiger(res, 503, 'de foto kon nu niet geladen worden', 'ml foto fout'); }
+  }
+  if (!appTeller('memorylane', 600, 3600000)) return appWeiger(res, 429, 'te vaak dit uur', 'grens memorylane');
   const naarBuiten = function (wat) {
     if (a.soort === 'vast') { res._app.reden = 'memorylane ' + wat + ', vaste plek'; appStuur(res, 403, { ok: false, fout: 'delen kan alleen vanaf je telefoon of een meereizend apparaat' }); return false; }
     if (!appVersOk(a, s)) { res._app.reden = 'memorylane ' + wat + ', niet vers'; appStuur(res, 403, { ok: false, fout: 'bevestig het delen met je vingerafdruk', vers_nodig: true }); return false; }
     return true;
   };
   const daarna = function () { setTimeout(function () { memorylaneDelenTik(); }, 0); };
-  let m;
   try {
     if (route === 'GET /app/memorylane/lijst') return antw('lijst', memorylaneDelen.lijst());
     if (route === 'GET /app/memorylane/delen') return antw('delen', memorylaneDelen.delenStand());
     if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})$/.exec(route))) return antw('detail', memorylaneDelen.detail(m[1]));
+    // wv2120: foto's van het gekoppelde album; gevel kiezen; foto's bij de deellinks (aan = naar buiten: verse vingerafdruk); album (opnieuw) maken
+    if ((m = /^GET \/app\/memorylane\/h\/(h[0-9a-f]{16})\/fotos$/.exec(route))) return antw('fotos', await memorylaneDelen.fotos(m[1]));
+    if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(gevel|foto-delen|album)$/.exec(route))) {
+      if (m[2] === 'foto-delen' && d && d.aan === true && !naarBuiten('foto-delen')) return;
+      const u = m[2] === 'gevel' ? await memorylaneDelen.gevel(m[1], d) : m[2] === 'foto-delen' ? await memorylaneDelen.fotoDelen(m[1], d) : await memorylaneDelen.albumMaken(m[1]);
+      if (u.status === 200) daarna();
+      return antw(m[2], u);
+    }
     if ((m = /^POST \/app\/memorylane\/h\/(h[0-9a-f]{16})\/(zicht|titel|tekst|categorie|toon-opname|toch-delen)$/.exec(route))) {
       const hid = m[1], wat = m[2];
       if (wat === 'zicht' && d && d.aan === true && !naarBuiten('zicht')) return;

@@ -21,6 +21,8 @@
  *  - Wachtwoorden: kluis memorylane_link_familie / memorylane_link_vrienden (David zet ze in het sleutelportaal), gelezen via o.kluis op het
  *    moment van gebruik; in D1 alleen PBKDF2-SHA256 (100.000 rondes, het maximum van Workers) met eigen zout.
  *  - Haak wv2118: verhaalVoorDelen(hid) geeft nu null; met een goedgekeurd verhaal toont de deling dat in plaats van de letterlijke opname.
+ *  - Foto's (wv2120): met o.immich koppelt memorylane-fotos.js elke herinnering aan een Immich-album (ml_album). Een gedeelde herinnering
+ *    neemt hooguit 8 miniaturen mee naar D1 ml_foto, alleen als David foto_delen per herinnering aanzette (standaard uit).
  * PRIVACY. Nooit tekst, titels of namen in logs, box, /health of fouten: alleen ids en aantallen.
  * VORM. Alleen fs, path en crypto; D1, kluis, marker, geheimen, vault-veilig, box en ramble-tabel komen via maak({...}).
  */
@@ -109,6 +111,10 @@ function maak(o) {
   for (const d of [DIR, WACHT]) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); try { fs.chmodSync(d, 0o700); } catch (e) { /* niet van ons */ } }
   const host = o.host || HOST;
   const fout = (l, e) => { if (o.fout) o.fout(l, e); };
+  // wv2120: Immich-albums per herinnering (alleen met een Immich-client)
+  // (ontbreekt memorylane-fotos.js in de release, dan zonder foto's: delen werkt door)
+  const F = (function () { if (!o.immich) return null; try { return require('./memorylane-fotos.js').maak({ db, immich: o.immich, nu, fout }); } catch (e) { fout('ml-fotos', e); return null; } })();
+  let fotoTabel = false;
   let laatsteWw = 0, laatsteControle = 0, laatsteOphaal = 0, vuil = new Set(KRINGEN), bezig = false, laatst = null, onleesbaar = 0, d1Fout = false;
 
   const q = {
@@ -332,6 +338,12 @@ function maak(o) {
     if (isGevoelig(h)) return 'gevoelig: nooit zichtbaar';
     return null;
   }
+  // wv2120: herinneringen die een album krijgen. Vanzelf: een reis, of een andere herinnering zodra hij een categorie heeft.
+  function albumKandidaat(h) { return { hid: h.hid, soort: h.soort, ref: h.ref, titel: titelVan(h), auto: h.soort === 'reis' || !!catVan(h).categorie }; }
+  async function fotoSync(dwing) {
+    if (!F) return null;
+    return F.sync(q.hAlle.all().filter((h) => h.status === 'actief').map(albumKandidaat), dwing);
+  }
   function titelVan(h, pagina) { const t = fmVeld(pagina === undefined ? paginaLees(h.hid) : pagina, 'titel'); return t || standaardTitel(h); }
   function wanneerVan(h) {
     if (h.soort === 'reis') { const i = reisInfo(h.ref); return i ? i.periode : ''; }
@@ -412,16 +424,24 @@ function maak(o) {
       const ok = q.okGet.get(h.hid, k);
       if (!(ok && ok.hash === ih) && markerRaak([alle])) { q.blokZet.run(h.hid, k, 'marker', ih); continue; }
       q.blokWeg.run(h.hid, k);
+      item.fotos = F ? F.voorDelen(h.hid) : [];   // wv2120: alleen asset-ids; de miniaturen haalt publiceer() op
       uit.push({ hid: h.hid, item, sort: sorteerSleutel(h) });
     }
     uit.sort((a, b) => (a.sort < b.sort ? 1 : a.sort > b.sort ? -1 : a.hid < b.hid ? -1 : 1));
     return uit.map((x, i) => { const pub = pubVan(k, L.versie, x.hid); const json = JSON.stringify(x.item.stukken);
-      return { pub, volgorde: i, item: x.item, json, hash: sha256(L.versie + '|' + i + '|' + x.item.titel + '|' + x.item.wanneer + '|' + json) }; });
+      return { pub, volgorde: i, item: x.item, json, hash: sha256(L.versie + '|' + i + '|' + x.item.titel + '|' + x.item.wanneer + '|' + json + (x.item.fotos.length ? '|f' + x.item.fotos.join(',') : '')) }; });
   }
 
+  // wv2120: D1-tabel voor de miniaturen (bestaat sinds 31-10 ook in deel/schema.sql; hier voor een D1 die hem nog niet had)
+  async function zorgFotoTabel() {
+    if (!F || fotoTabel) return;
+    await d1('CREATE TABLE IF NOT EXISTS ml_foto (kring TEXT NOT NULL, pub TEXT NOT NULL, nr INTEGER NOT NULL, mime TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (kring, pub, nr))', []);
+    fotoTabel = true;
+  }
   async function publiceer(k, volledig) {
     const L = q.link.get(k);
     if (!L) return 0;
+    await zorgFotoTabel();
     const set = setVoor(k);
     let n = 0;
     if (L.aan && L.ww_vinger) {
@@ -431,15 +451,21 @@ function maak(o) {
         await d1('INSERT INTO ml_item (kring, versie, pub, volgorde, titel, wanneer, stukken) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ' +
           'ON CONFLICT (kring, pub) DO UPDATE SET versie = excluded.versie, volgorde = excluded.volgorde, titel = excluded.titel, wanneer = excluded.wanneer, stukken = excluded.stukken',
         [k, L.versie, x.pub, x.volgorde, x.item.titel, x.item.wanneer, x.json]);
+        // wv2120: foto's (of geen) bij dit item. Lukt Immich niet, dan blijft de hash staan op de oude: de volgende tik probeert het opnieuw;
+        // weghalen hieronder gaat altijd door (ook als Immich weg is).
+        if (F && (x.item.fotos.length || had.has(x.pub))) {
+          try { await F.naarD1(d1, k, x.pub, x.item.fotos); } catch (e) { if (d1Fout) throw e; n++; continue; }
+        }
         q.d1Zet.run(k, x.pub, x.hash); n++;
       }
       const moet = new Set(set.map((x) => x.pub));
       const weg = volledig ? (await d1('SELECT pub, versie FROM ml_item WHERE kring = ?1', [k])).filter((r) => !moet.has(r.pub) || r.versie !== L.versie).map((r) => r.pub)
         : [...had.keys()].filter((p) => !moet.has(p));
-      for (const p of weg) { await d1('DELETE FROM ml_item WHERE kring = ?1 AND pub = ?2', [k, p]); q.d1Weg.run(k, p); n++; }
+      for (const p of weg) { await d1('DELETE FROM ml_item WHERE kring = ?1 AND pub = ?2', [k, p]); if (fotoTabel) await d1('DELETE FROM ml_foto WHERE kring = ?1 AND pub = ?2', [k, p]); q.d1Weg.run(k, p); n++; }
+      if (volledig && fotoTabel) await d1('DELETE FROM ml_foto WHERE kring = ?1 AND pub NOT IN (SELECT pub FROM ml_item WHERE kring = ?1)', [k]);
     } else {
       // link uit of geen wachtwoord: van deze kring staat niets buiten
-      if (volledig || q.d1.all(k).length) { await d1('DELETE FROM ml_item WHERE kring = ?1', [k]); q.d1Leeg.run(k); }
+      if (volledig || q.d1.all(k).length) { await d1('DELETE FROM ml_item WHERE kring = ?1', [k]); if (fotoTabel) await d1('DELETE FROM ml_foto WHERE kring = ?1', [k]); q.d1Leeg.run(k); }
     }
     return n;
   }
@@ -526,6 +552,7 @@ function maak(o) {
     try {
       bijwerken();
       uit.vault = naarVault();
+      if (F) { try { const f = await fotoSync(false); if (f && (f.nieuw || f.overgenomen || f.weg || f.deel)) { uit.albums = f.nieuw + f.overgenomen; vuilAlle(); } } catch (e) { fout('ml-immich', e); } }
       if (!o.d1) return uit;
       d1Fout = false;
       const t = nu();
@@ -554,13 +581,13 @@ function maak(o) {
       categorie: c.categorie, gevoelig: isGevoelig(h), gevoelig_vink: c.gevoeligVink, zicht: { familie: !!h.zicht_familie, vrienden: !!h.zicht_vrienden },
       toon_opname: !!h.toon_opname, niet_deelbaar: nietDeelbaar(h), blok: b ? b.reden : null,
       stukken: st.filter((s) => s.status !== 'weggegooid').length, binnen: st.filter((s) => s.status === 'binnen').length,
-      vastgehouden: st.filter((s) => s.status === 'vastgehouden').length };
+      vastgehouden: st.filter((s) => s.status === 'vastgehouden').length, album: F ? F.kort(h.hid) : null };
   }
   function lijst() {
     bijwerken();
     const alle = q.hAlle.all().filter((h) => h.status !== 'afgewezen').map(kort);
     alle.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
-    return { status: 200, body: { ok: true, herinneringen: alle, categorieen: Object.keys(CAT).map((id) => ({ id, naam: CAT[id].naam, gevoelig: !!CAT[id].gevoelig })),
+    return { status: 200, body: { ok: true, herinneringen: alle, immich: F ? { aan: true, sleutel: F.info().sleutel, fout: F.info().fout } : { aan: false }, categorieen: Object.keys(CAT).map((id) => ({ id, naam: CAT[id].naam, gevoelig: !!CAT[id].gevoelig })),
       nieuw: alle.reduce((n, h) => n + h.binnen + h.vastgehouden, 0) } };
   }
   function vind(hid) { return HID_RE.test(String(hid)) ? q.h.get(hid) : null; }
@@ -653,6 +680,23 @@ function maak(o) {
     naarVault(); vuilAlle();
     return { status: 200, body: { ok: true, status: q.s.get(s.sid).status } };
   }
+  // ── wv2120: foto's (Immich) ──
+  function metAlbum(hid) { const h = vind(hid); return h && h.status !== 'weg' ? h : null; }
+  async function fotos(hid) { if (!F) return { status: 404, body: { ok: false, fout: 'geen Immich' } }; if (!metAlbum(hid)) return { status: 404, body: { ok: false, fout: 'onbekend' } }; return F.fotos(hid); }
+  async function foto(id, maat) { if (!F) return { status: 404, body: { ok: false, fout: 'geen Immich' } }; return F.foto(id, maat); }
+  async function gevel(hid, d) { if (!F || !metAlbum(hid)) return { status: 404, body: { ok: false, fout: 'onbekend' } }; const u = await F.gevel(hid, d); if (u.status === 200) vuilAlle(); return u; }
+  async function fotoDelen(hid, d) {
+    const h = F && metAlbum(hid);
+    if (!h) return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    const u = await F.fotoDelen(hid, d);
+    if (u.status === 200) vuilAlle();
+    return u;
+  }
+  async function albumMaken(hid) {
+    const h = F && metAlbum(hid);
+    if (!h || h.status !== 'actief') return { status: 404, body: { ok: false, fout: 'onbekend' } };
+    return F.albumMaken(albumKandidaat(h));
+  }
   function zorgLink(k) { if (!q.link.get(k)) q.linkNieuw.run(k, b64u(rnd(16)).slice(0, 22)); return q.link.get(k); }
   function delenStand() {
     const links = KRINGEN.map((k) => {
@@ -683,12 +727,13 @@ function maak(o) {
   }
   async function syncLink(k) {
     const L = q.link.get(k);
+    await zorgFotoTabel();
     if (!L.aan) { if (await ophalen()) naarVault(); }   // MOET 2: eerst leeghalen
     await d1('DELETE FROM ml_sessie WHERE kring = ?1 AND versie <> ?2', [k, L.versie]);
     if (!L.aan) {
       await d1('UPDATE ml_link SET aan = 0 WHERE kring = ?1', [k]);
       await d1('DELETE FROM ml_sessie WHERE kring = ?1', [k]);
-      await d1('DELETE FROM ml_item WHERE kring = ?1', [k]); q.d1Leeg.run(k);
+      await d1('DELETE FROM ml_item WHERE kring = ?1', [k]); if (fotoTabel) await d1('DELETE FROM ml_foto WHERE kring = ?1', [k]); q.d1Leeg.run(k);
     }
     await linkNaarD1(k, null);
     if (L.aan) { await sleutelNaarD1(); await wachtwoord(k); }
@@ -698,10 +743,11 @@ function maak(o) {
   }
   function info() {
     const st = Object.fromEntries(q.sTel.all().map((r) => [r.status, r.n]));
-    return { herinneringen: q.hAlle.all().length, stukken: st, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
+    return { herinneringen: q.hAlle.all().length, stukken: st, immich: F ? F.info() : null, links: KRINGEN.map((k) => { const L = q.link.get(k); return { kring: k, aan: !!(L && L.aan), wachtwoord: L ? L.ww_stand || null : null }; }),
       laatst, d1_fout: d1Fout, onleesbaar };
   }
-  return { lijst, detail, zicht, titel, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, _db: db, _setVoor: setVoor,
+  return { lijst, detail, zicht, titel, tekst, categorie, toonOpname, tochDelen, stukBesluit, delenStand, link, tik, info, fotos, foto, gevel, fotoDelen, albumMaken,
+    fotoSync, _db: db, _setVoor: setVoor, _F: F,
     _inbox: inbox, _verhaalVoorDelen: verhaalVoorDelen };
 }
 
